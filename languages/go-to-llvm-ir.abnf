@@ -56,9 +56,24 @@ Deviations and limits: structs behave like references (as if every value were a 
 append mutates in place (write s = append(s, v) as usual), composite literals must not
 appear in if/for/switch headers, map iteration and printing follow the insertion order
 (real Go randomizes resp. sorts), 'var m map[K]V' is not a usable map (create maps with
-a literal or make), arrays are not copied on assignment and a slice expression COPIES
-instead of sharing a backing array, and there are no pointers, method values,
-panic/recover, or the comma-ok type assertion.
+a literal or make), and there are no method values, or the comma-ok type assertion.
+There is one numeric type at runtime, except where a written-out
+conversion makes the type known while the code is emitted: float64(i)/2 is 2.5 and a
+sized unsigned type wraps to its width, so uint8(0xF0) complements to 0x0F. A pointer
+to a plain variable IS modelled (and so is new(T) of a scalar): it is a cell object
+over the variable's scope slot, so *p = v, f(&n) and **pp = v write through and
+p == &n holds. Every other &-form is the identity on the value, since structs, slices
+and maps behave like references already.
+
+An ARRAY is a plain runtime array and a SLICE is a $sl header {a, o, n, c} over one,
+so the two behave as Go says: an array is a VALUE (assigning it copies, deeply), while
+s[1:3] shares the backing array, cap() answers something of its own, s[:2:3] caps the
+capacity and append writes into the shared storage while it fits. The handle runtime's
+js_golen / js_goslice / js_goappend externs only know plain arrays, so len, cap, index,
+slice, append, copy, clear, range and print all go through GENERATED functions that
+reach through the header first (see declSlices). complex128 is a $cx {re, im} class
+instance, and the four arithmetic operators route through a generated dispatch only in
+a program that mentions one.
 
 
 Functions, methods and function literals become IR functions jsf_N(env, args) (methods
@@ -366,8 +381,12 @@ Assign      <~~ push(makeAssign(takeAll())) ~~>
 // Longest first: '&^=' before '&=', and the bare '=' last of all.
 AssignOp    = "&^=" | "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "=" ;
 
+// A leading '*' is a pointer store: '*p = v' writes through p's cell, '**pp = v'
+// through two of them. On a value that is not a pointer cell it stays transparent,
+// which is what a struct pointer needs - those are already references.
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
+            = { "*" <~~ push({star: true}) ~~> } Id <~~ push(up.in) ~~>
+              { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
 
@@ -502,13 +521,15 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
 // Go's two binary levels below the comparisons: '+ - | ^' bind loosest, then
 // '* / % << >> & &^'. The single-character '&' and '|' must not swallow the first
 // half of '&&' / '||', which bind even looser - NotAmp/NotBar reject that.
-AddExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = MulExpr { AddOp <~~ push(up.in) ~~> MulExpr } ;
+AddExpr     <~~ push(goFold(takeAll())) ~~>
+            = MulExpr <~~ push({at: up.pos}) ~~>
+              { SameLine AddOp <~~ push(up.in) ~~> MulExpr <~~ push({at: up.pos}) ~~> } ;
 AddOp       = "+" | "-" | "^" | BarOp ;
 BarOp       = "|" NotBar ;
 
-MulExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = UnaryExpr { MulOp <~~ push(up.in) ~~> UnaryExpr } ;
+MulExpr     <~~ push(goFold(takeAll())) ~~>
+            = UnaryExpr <~~ push({at: up.pos}) ~~>
+              { SameLine MulOp <~~ push(up.in) ~~> UnaryExpr <~~ push({at: up.pos}) ~~> } ;
 MulOp       = "*" | "/" | "%" | "<<" | ">>" | "&^" | AmpOp ;
 AmpOp       = "&" NotAmp ;
 NotAmp = :script(~~
@@ -520,8 +541,8 @@ NotBar = :script(~~
 
 UnaryExpr   = Recv | Neg | Not | Compl | Plus | AddrOf | Deref | PostfixExpr ;
 // ^x: the bitwise complement (Go spells it '^', not '~'). Unary '+' is the identity.
-Compl       <~~ push(makeCompl(pop())) ~~>
-            = "^" UnaryExpr ;
+Compl       <~~ push(makeCompl(takeAll())) ~~>
+            = "^" UnaryExpr <~~ push({at: up.pos}) ~~> ;
 Plus        = "+" UnaryExpr ;
 // <-ch: a channel receive as a value. Accepted, reported not implemented; the
 // operand still evaluates under -warn-unsupported. Tried before Neg so '<-' wins
@@ -536,8 +557,29 @@ Not         <~~ push(makeNot(pop())) ~~>
 // already behave like references, so taking a pointer and following one are no-ops.
 // No tag: the inner UnaryExpr thunk is the whole value. Binary * (multiply) is matched
 // at MulExpr, so unary * only appears in an operand position (a * *p, x := *p).
-AddrOf      = "&" UnaryExpr ;
-Deref       = "*" UnaryExpr ;
+// &x (address of) and *p (dereference). Taking the address of a plain NAME yields a
+// pointer cell that reaches back into the variable's scope slot, which is what makes
+// *p = v, bump(&n) and **pp = v write through to the variable. Every other &-form is
+// still the identity on the value: structs, slices and maps already behave like
+// references, so &Point{1, 2} and &s[i] need no cell. Mirrors go-interpreter.abnf.
+AddrOf      = AddrVar | AddrAny ;
+AddrVar     <~~ push(makeAddrVar(pop())) ~~>
+            = "&" Id <~~ push(up.in) ~~> NotSfxStart ;
+AddrAny     = "&" UnaryExpr ;
+// &name is only the variable form when the name is not the head of a composite
+// literal, a call, a selector or an index. Anchored to the very NEXT byte, so it must
+// be a script rather than a !"literal" lookahead (which would skip the whitespace).
+NotSfxStart = :script(~~
+    (function () {
+        var cc = c.peek(0)
+        if (cc === 123 || cc === 40 || cc === 46 || cc === 91) {
+            return abnf.newToken("\x01address-of-a-suffixed-operand", 0)
+        }
+        return undefined
+    })()
+~~) ;
+Deref       <~~ push(makeDeref(pop())) ~~>
+            = "*" UnaryExpr ;
 
 // p.manhattan(), fmt.Println(...), p.x, s[i], and slice expressions s[lo:hi:max].
 // A slice expression is accepted and reported not implemented; its base and every
@@ -569,16 +611,26 @@ IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
 // Only the single-result form is supported (not the comma-ok v, ok := x.(T)).
 TypeAssertSfx = "." "(" Type ")" ;
 
-Primary     = "(" Expression ")" | FloatLit | HexLit | OctLit | BinLit | DecULit | DqString | RawString | RuneLit
+Primary     = "(" Expression ")" | ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit
+            | BinLit | LegOctLit | DecULit | DqString | RawString | RuneLit
             | IntLit | True | False | Nil | FuncLit | SliceLit
-            | MapLit | MakeMap | MakeChan | AnonStructLit | StructLit | CompLitNI | ConvExpr | Call | VarRef ;
+            | MapLit | MakeMap | MakeSlice | MakeChan | NewCall | AnonStructLit | StructLit
+            | ArrayLit | CompLitNI | ConvExpr | Call | VarRef ;
 
-// []byte(s) / []rune(s): the bracketed conversions. The identifier-spelled ones
-// (string(r), int(x), ...) are ordinary calls and go through Call.
-ConvExpr    <~~ push(makeConv(takeAll())) ~~>
-            = ConvType "(" Expression ")" ;
+// A conversion whose target type is written out: []byte(s), []rune(s) and the
+// PREDECLARED scalar spellings int(x), float64(n), uint8(b), ... The scalar forms
+// would also work as ordinary calls (declConv binds every name in jsmain), but
+// matching them here makes the target type known at EMIT time, which is what gives
+// float64(i)/2 a float division and ^uint8(x) an eight bit complement. A conversion
+// to a user-defined type still goes through Call. Longest spelling first: this is a
+// PEG, so "uint" matching the front of "uint16" would never be retried.
+ConvExpr    <~~ push(makeConv(takeAll(), up.pos)) ~~>
+            = ConvType "(" Expression [ "," ] ")" ;
 ConvType    <~~ push({conv: firstType(up.in)}) ~~>
-            = "[" "]" Type ;
+            = "[" "]" Type | ScalarType KwEnd ;
+ScalarType  = "uintptr" | "float32" | "float64" | "uint16" | "uint32" | "uint64"
+            | "int16" | "int32" | "int64" | "uint8" | "int8" | "byte" | "rune"
+            | "uint" | "int" ;
 
 // nil is the null value (structs, slices, maps and pointers share one). Tried before
 // VarRef so it is not read as an undefined identifier.
@@ -588,13 +640,37 @@ Nil         <~~ push(makeConst(null)) ~~> = "nil" KwEnd ;
 // fraction or an exponent (a plain integer keeps going through IntLit); hex/octal/binary
 // literals and digit-group underscores parse to their integer value; a raw string keeps
 // its bytes verbatim; a rune literal is its first code point (an int).
+// 2i / 2.5i / 1e3i: an IMAGINARY literal, so the value is complex. Tried before every
+// other numeric form - all of them match its digits and would leave the 'i' behind as
+// an identifier. The KwEnd keeps it off the front of a name (2int is not 2i).
+ImagLit     <~~ push(makeImag(parseImag(up.in))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
+              [ "." { "0"..."9" } ] [ ImagExp ] "i" KwEnd :whitespace(Whitespace) ;
+ImagExp     = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
+DotFloatLit <~~ push(makeConst(parseFloat("0" + up.in))) ~~>
+            = "." :whitespace() "0"..."9" { "0"..."9" }
+              [ ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ] :whitespace(Whitespace) ;
+// 0x1p4 / 0x1.8p1: a HEX float. The 'p' exponent is decimal and scales by a power of
+// TWO, and it is mandatory - without it the same text is the hex integer above.
+HexFloatLit <~~ push(makeConst(parseHexFloat(up.in))) ~~>
+            = "0" ( "x" | "X" ) :whitespace() HexDigits [ "." { HexDigit | "_" } ]
+              ( "p" | "P" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } :whitespace(Whitespace) ;
+// 017: the LEGACY octal form, which has no base letter - 017 is 15, not 17. Tried
+// after the 0x/0o/0b forms and before the decimal ones, and it needs at least one
+// octal digit after the 0 so that a plain "0" stays an integer literal.
+LegOctLit   <~~ push(makeConst(parseLegOct(up.in))) ~~>
+            = "0" :whitespace() OctSep { OctSep } :whitespace(Whitespace) ;
+// A named production on purpose: a :command() directly followed by a (group) parses
+// as a Times repetition in this dialect - the Times trap.
+OctSep      = "0"..."7" | "_" ;
 FloatLit    <~~ push(makeConst(parseFloat(up.in))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" }
               ( "." { "0"..."9" } [ ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ]
               | ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ) :whitespace(Whitespace) ;
 HexLit      <~~ push(makeConst(parseRadix(up.in))) ~~>
             = "0" ( "x" | "X" ) :whitespace() HexDigits :whitespace(Whitespace) ;
-HexDigits   = HexDigit { HexDigit | "_" } ;
+// Go allows the digit separator right after the base prefix, too: 0x_FF_f.
+HexDigits   = { "_" } HexDigit { HexDigit | "_" } ;
 HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
 OctLit      <~~ push(makeConst(parseRadix(up.in))) ~~>
             = "0" ( "o" | "O" ) :whitespace() "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
@@ -621,18 +697,87 @@ CompName    = "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id { "." Id } ;
 FuncLit     <~~ push(makeFuncLit(takeAll())) ~~>
             = "func" KwEnd ParamList [ RetTypes ] Block ;
 
-// []int{1, 2, 3}
+// []int{1, 2, 3} and [][]int{{1}, {2, 3}} - a slice literal, whose elements may be
+// bare brace groups built against the element type.
 SliceLit    <~~ push(makeSliceLit(takeAll())) ~~>
-            = "[" "]" Type "{" [ Expression { "," Expression } ] "}" ;
+            = "[" "]" ElemT SeqBody ;
+// [3]int{1, 2, 3}, [...]string{"x", "y"} (length inferred), [5]int{0: 1, 4: 9}
+// (indexed elements) and [2][2]int{{1, 2}, {3, 4}}. An ARRAY, not a slice: it is a
+// value, so assigning it copies.
+ArrayLit    <~~ push(makeArrayLit(takeAll())) ~~>
+            = "[" ( ArrDots | ArrLen ) "]" ElemT SeqBody ;
+ArrDots     <~~ push({alen: null}) ~~> = "..." ;
+ArrLen      <~~ push({alen: pop()}) ~~> = Expression ;
+ElemT       <~~ push({cet: firstType(up.in)}) ~~> = Type ;
+SeqBody     <~~ push({selems: takeAll()}) ~~>
+            = "{" [ SeqElem { "," SeqElem } [ "," ] ] "}" ;
+SeqElem     <~~ push(makeSeqElem(takeAll())) ~~>
+            = [ KeyAhead SeqKey ] SeqVal ;
+SeqKey      <~~ push({ekey: pop()}) ~~> = Expression ":" ;
+SeqVal      = SeqNest | Expression ;
+SeqNest     <~~ push({enest: pop()}) ~~> = SeqBody ;
+// KeyAhead answers "is this composite-literal element keyed?" - is there a ':' before
+// the element's ',' or the closing '}' at bracket depth 0. It decides before anything
+// is pushed, so an unkeyed element leaks nothing.
+KeyAhead = :script(~~
+    (function () {
+        var i = 0
+        var depth = 0
+        var cc = 0
+        while (i < 8192) {
+            cc = c.peek(i)
+            if (cc < 0) { break }
+            if (cc === 34 || cc === 39 || cc === 96) {
+                var q = cc
+                i++
+                while (i < 8192) {
+                    var d = c.peek(i)
+                    if (d < 0 || d === q) { break }
+                    if (d === 92 && q !== 96) { i++ }
+                    i++
+                }
+                i++
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 47) {
+                while (i < 8192 && c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+                continue
+            }
+            if (cc === 40 || cc === 91 || cc === 123) { depth++ }
+            if (cc === 41 || cc === 93 || cc === 125) {
+                if (depth === 0) { break }
+                depth--
+            }
+            if (depth === 0 && cc === 44) { break }
+            if (depth === 0 && cc === 58) { return undefined }
+            i++
+        }
+        return abnf.newToken("\x01unkeyed-element", 0)
+    })()
+~~) ;
+
+// make([]T, n) / make([]T, n, cap): a slice of n zero values with room for cap.
+MakeSlice   <~~ push(makeMakeSlice(takeAll())) ~~>
+            = "make" KwEnd "(" "[" "]" ElemT "," Expression [ "," Expression ] ")" ;
 
 // map[string]int{"a": 1} and make(map[string]int). The value type decides the
 // zero value that a read of a missing key yields.
 MapLit      <~~ push(makeMapLit(takeAll())) ~~>
             = MapTypeZ "{" [ MapEntry { "," MapEntry } ] "}" ;
 MapEntry    <~~ var mv = pop(); push({mk: pop(), mv: mv}) ~~>
-            = Expression ":" Expression ;
+            = Expression ":" MapVal ;
+// A value may be a bare brace group built against the map's VALUE type, as in
+// map[string][]int{"a": {1, 2}}.
+MapVal      = SeqNest | Expression ;
 MakeMap     <~~ push(makeMakeMap(pop())) ~~>
             = "make" KwEnd "(" MapTypeZ ")" ;
+
+// new(T): a zero value of T - a POINTER to it for a scalar type (a fresh one slot
+// cell), the value itself for a struct or slice, which are references already.
+NewCall     <~~ push(makeNew(pop().nty)) ~~>
+            = "new" KwEnd "(" NewType ")" ;
+NewType     <~~ push({nty: firstType(up.in)}) ~~>
+            = Type ;
 
 // make(chan T) / make(chan T, n): a channel. Accepted, reported not implemented; an
 // optional buffer size is parsed and discarded.
@@ -868,14 +1013,108 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (op == "&^" || op == "&^=") {
             return coreEmitBin(b, "&", l, coreEmitBin(b, "^", r, emitNum(b, 0 - 1)))
         }
+        // Only a program that mentions a complex value pays for the probe (see
+        // usesComplex); every other one emits the same single extern call as before.
+        if (usesComplex && cxOps[op] == 1) { return emitCxCall(b, op, l, r) }
         return coreEmitBin(b, op, l, r)
     }
-    // ^x is 'x XOR -1'.
-    function makeCompl(t) {
+    var cxOps = {"+": 1, "-": 1, "*": 1, "/": 1, "+=": 1, "-=": 1, "*=": 1, "/=": 1}
+    // ^x is 'x XOR -1'. On an unsigned operand of known width Go complements WITHIN
+    // that width, so ^uint8(0xF0) is 0x0F and not -241.
+    // items = [operandThunk, {at}].
+    function makeCompl(items) {
+        var t = items[0]
+        var w = uintBits(tyAt(items[1].at))
         return function(b) {
             var r = t(b)
             b = r.b
-            return {b: b, v: emitBin(b, "^", r.v, emitNum(b, 0 - 1))}
+            var v = emitBin(b, "^", r.v, emitNum(b, 0 - 1))
+            if (w > 0) { v = callExt(b, "js_band", [v, emitNum(b, goMaskOf(w))]) }
+            return {b: b, v: v}
+        }
+    }
+
+    // ----- Static Go types on an operand -----
+    // The emitted value model has one numeric type, so nothing at RUNTIME
+    // distinguishes the float 2.0 from the int 2, or a uint8 from an int. What a
+    // written-out conversion does give us is the target type at EMIT time, and that is
+    // enough for the two places where Go's answer differs from the untyped one:
+    // division (float64(i)/2 is 2.5, not 2) and the complement or wrap of a sized
+    // unsigned type (^uint8(0xF0) is 0x0F). The type cannot ride ON the thunk: a thunk
+    // that crosses the tag stack comes back as a FRESH function object under goja, so a
+    // table keyed by function identity finds nothing there while working fine under
+    // -frozen. It is keyed by the END POSITION of the conversion instead (up.pos is a
+    // node's end offset), and the arithmetic levels tag every operand with its own end
+    // position, so an operand that IS a conversion is recognized by an exact position
+    // match. This mirrors go-interpreter.abnf exactly; keep the two in step.
+    var convByPos = {}
+    function regConv(pos, ty) {
+        if (pos == undefined || pos == null) { return }
+        if (!isFloatTy(ty) && uintBits(ty) == 0) { return }
+        convByPos["p" + pos] = ty
+    }
+    // The key is always "p" + a number, so it can never name an Object.prototype
+    // member and a bare read is safe (there is no hasOwn in compile-core).
+    function tyAt(pos) {
+        if (pos == undefined || pos == null) { return null }
+        var t = convByPos["p" + pos]
+        return typeof t == "string" ? t : null
+    }
+    function isFloatTy(ty) { return ty == "float64" || ty == "float32" }
+    function uintBits(ty) {
+        if (ty == "uint8" || ty == "byte") { return 8 }
+        if (ty == "uint16") { return 16 }
+        if (ty == "uint32") { return 32 }
+        return 0
+    }
+    function goMaskOf(w) {
+        if (w == 8) { return 255 }
+        if (w == 16) { return 65535 }
+        return 4294967295
+    }
+    // One binary step under a known static type. Float arithmetic keeps its fraction,
+    // so it must NOT go through emitBin, whose wraps table truncates '- * / %' to an
+    // integer; a sized unsigned type masks the result to its width instead.
+    function emitTypedBin(b, ty, op, l, r) {
+        if (isFloatTy(ty) && typeof binExt[op] == "string") {
+            return callExt(b, binExt[op], [l, r])
+        }
+        var v = emitBin(b, op, l, r)
+        var w = uintBits(ty)
+        if (w > 0) { v = callExt(b, "js_band", [v, emitNum(b, goMaskOf(w))]) }
+        return v
+    }
+    // The two arithmetic levels fold through this instead of the shared foldBinary.
+    // items = [t0, {at}, op1, t1, {at}, ...]: operand k is at 3k, its end position at
+    // 3k + 1. An untyped fold hands the plain list back to the core.
+    function goFold(items) {
+        var ts = [items[0]]
+        var ops = []
+        var ty = tyAt(items[1].at)
+        var i = 2
+        while (i < items.length) {
+            ops.push(items[i])
+            ts.push(items[i + 1])
+            if (ty == null) { ty = tyAt(items[i + 2].at) }
+            i += 3
+        }
+        if (ops.length == 0) { return ts[0] }
+        if (ty == null) {
+            var flat = [ts[0]]
+            for (var j = 0; j < ops.length; j++) { flat.push(ops[j]); flat.push(ts[j + 1]) }
+            return foldBinary(flat)
+        }
+        var fty = ty
+        return function(b) {
+            var r = ts[0](b)
+            b = r.b
+            var v = r.v
+            for (var k = 0; k < ops.length; k++) {
+                var rr = ts[k + 1](b)
+                b = rr.b
+                v = emitTypedBin(b, fty, ops[k], v, rr.v)
+            }
+            return {b: b, v: v}
         }
     }
 
@@ -916,7 +1155,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // emitArgs plus Go's f(xs...): js_gospread flattens the last element in place.
     function emitArgs2(b, args, spread) {
         var ea = emitArgs(b, args)
-        if (spread) { callExt(ea.b, "js_gospread", [ea.v]) }
+        if (spread) {
+            var eb = ea.b
+            var last = callExt(eb, "js_sub", [callExt(eb, "js_golen", [ea.v]), emitNum(eb, 1)])
+            callExt(eb, "js_pyset", [ea.v, last, emitHelper(eb, "$sels", [callExt(eb, "js_map_get", [ea.v, last])])])
+            callExt(eb, "js_gospread", [ea.v])
+        }
         return ea
     }
     // items = [name..., {vararg}?]: the parameter names, and whether the last one
@@ -954,8 +1198,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     var lov = hUndef, hiv = hUndef
                     if (s.lo != null) { var rl = s.lo(b); b = rl.b; lov = rl.v }
                     if (s.hi != null) { var rh = s.hi(b); b = rh.b; hiv = rh.v }
-                    if (s.mx != null) { var rm = s.mx(b); b = rm.b }
-                    cur = callExt(b, "js_goslice", [cur, lov, hiv])
+                    var mxv = hUndef
+                    if (s.mx != null) { var rm = s.mx(b); b = rm.b; mxv = rm.v }
+                    cur = emitHelper(b, "$sslice", [cur, lov, hiv, mxv])
                 } else if (s.kind == "call") {
                     var ec = emitArgs2(b, s.args, s.spread)
                     b = ec.b
@@ -963,7 +1208,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 } else {
                     var ir2 = s.idx(b)
                     b = ir2.b
-                    cur = callExt(b, core.indexExt, [cur, ir2.v])
+                    cur = emitHelper(b, "$sidx", [cur, ir2.v])
                 }
             }
             return {b: b, v: cur}
@@ -973,6 +1218,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var name = items[0]
         var args = items.slice(1)
         var spread = takeSpread(args)
+        // real/imag/complex are only declared in jsmain when the program uses them
+        // (see usesComplex), and a program may reach complex() without ever writing
+        // an imaginary literal.
+        if (name == "complex" || name == "real" || name == "imag") { usesComplex = true }
         return function(b) {
             var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
             var ea = emitArgs2(b, args, spread)
@@ -981,15 +1230,106 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
     }
 
+    // items = [{cet}, {selems}] / [{alen}, {cet}, {selems}]. One builder covers the
+    // slice and the array form: the elements are laid out the same way (positional,
+    // indexed, or a nested brace group built against the element type), and only the
+    // result differs - a slice gets a header over the array, an array IS the array.
+    function makeSeqElem(items) {
+        var e = {ekey: null, eval: null, enest: null}
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { e.eval = it }
+            else if (it.ekey != undefined) { e.ekey = it.ekey }
+            else if (it.enest != undefined) { e.enest = it.enest }
+        }
+        return e
+    }
     function makeSliceLit(items) {
-        return function(b) {
-            var arr = callExt(b, "js_arr_new", [])
-            for (var i = 0; i < items.length; i++) {
-                var r = items[i](b)
-                b = r.b
-                callExt(b, "js_arr_push", [arr, r.v])
+        var cet = items[0].cet
+        var elems = items[1].selems
+        return function(b) { return emitSeqLit(b, "slice", cet, null, elems) }
+    }
+    function makeArrayLit(items) {
+        var alen = items[0].alen
+        var cet = items[1].cet
+        var elems = items[2].selems
+        return function(b) { return emitSeqLit(b, "array", cet, alen, elems) }
+    }
+    // One element value: its expression, or a nested brace group built against the
+    // element type ([][]int{{1}} -> a slice, [][2]int{{1, 2}} -> an array, []P{{1, 2}}
+    // -> a struct).
+    function emitElemVal(b, e, cet) {
+        if (e.enest == null) { return e.eval(b) }
+        var els = e.enest.selems
+        if (cet.length > 0 && cet.charCodeAt(0) == 91) {
+            var isSlice = cet.length > 1 && cet.charCodeAt(1) == 93
+            return emitSeqLit(b, isSlice ? "slice" : "array", elemTy(cet), null, els)
+        }
+        var flds = structFields[cet]
+        if (flds == undefined) { fail("composite literal element of unsupported type " + cet) }
+        var args = []
+        for (var i = 0; i < els.length; i++) {
+            if (els[i].ekey != null) { fail("a keyed nested struct element is not supported") }
+            args.push(els[i].eval)
+        }
+        return emitStructVal(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, cet)]),
+                             flds, structFTypes[cet], args)
+    }
+    // arr[i] = v, growing the array with zero values up to i first (that is what an
+    // indexed element like [5]int{4: 9} needs).
+    function emitSeqPut(b, arr, idx, v, cet) {
+        var gap = callExt(b, "js_sub", [callExt(b, "js_jadd", [idx, emitNum(b, 1)]),
+                                        callExt(b, "js_golen", [arr])])
+        var eb = emitCountLoop(b, gap, function(lb, iV) {
+            callExt(lb, "js_arr_push", [arr, emitZeroDecl(lb, cet)])
+            return lb
+        })
+        callExt(eb, "js_pyset", [arr, idx, v])
+        return eb
+    }
+    function emitSeqLit(b, kind, cet, alenT, elems) {
+        var arr = callExt(b, "js_arr_new", [])
+        var at = emitNum(b, 0)
+        for (var i = 0; i < elems.length; i++) {
+            var e = elems[i]
+            var idx = at
+            if (e.ekey != null) {
+                var rk = e.ekey(b)
+                b = rk.b
+                idx = rk.v
             }
-            return {b: b, v: arr}
+            var rv = emitElemVal(b, e, cet)
+            b = rv.b
+            b = emitSeqPut(b, arr, idx, rv.v, cet)
+            at = callExt(b, "js_jadd", [idx, emitNum(b, 1)])
+        }
+        if (kind == "array" && alenT != null) {
+            var rn = alenT(b)
+            b = rn.b
+            var gap = callExt(b, "js_sub", [rn.v, callExt(b, "js_golen", [arr])])
+            b = emitCountLoop(b, gap, function(lb, iV) {
+                callExt(lb, "js_arr_push", [arr, emitZeroDecl(lb, cet)])
+                return lb
+            })
+        }
+        if (kind == "slice") { return {b: b, v: emitSlOf(b, arr)} }
+        return {b: b, v: arr}
+    }
+    // items = [{cet}, lenThunk, capThunk?]
+    function makeMakeSlice(items) {
+        var cet = items[0].cet
+        var lenT = items[1]
+        var capT = items.length > 2 ? items[2] : null
+        return function(b) {
+            var rl = lenT(b)
+            b = rl.b
+            var cp = rl.v
+            if (capT != null) {
+                var rc = capT(b)
+                b = rc.b
+                cp = rc.v
+            }
+            return {b: b, v: emitHelper(b, "$smake", [rl.v, cp, emitZeroDecl(b, cet)])}
         }
     }
     // items = [{mzero}, {mk, mv}...] -> a map built in source order. The zero value
@@ -1003,7 +1343,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var i = 0; i < entries.length; i++) {
                 var rk = entries[i].mk(b)
                 b = rk.b
-                var rv = entries[i].mv(b)
+                var mv = entries[i].mv
+                var rv = (typeof mv == "function")
+                       ? mv(b)
+                       : emitElemVal(b, {ekey: null, eval: null, enest: mv.enest}, zero)
                 b = rv.b
                 callExt(b, "js_pyset", [mV, rk.v, rv.v])
             }
@@ -1171,7 +1514,628 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         callExt(b, "js_set", [clsV, emitStr(b, prop), arrV])
     }
 
+    // ----- Complex numbers -----
+    // complex128 is a "$cx" class instance {re, im}: the class shape is what makes
+    // js_is_type a safe probe (it answers false for a number instead of aborting) and
+    // what makes js_goeq compare the two parts, so complex(3, 4) == 3+4i holds without
+    // a helper of its own. Only '+ - * /' need one, and only a program that actually
+    // mentions a complex value gets it - usesComplex is set while the tags WALK, which
+    // is finished long before buildMain runs the emit thunks, so a program without
+    // complex numbers emits exactly the IR it did before.
+    var usesComplex = false
+    function emitCxClass(b) { return callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$cxclass")]) }
+    function emitNewCx(b, re, im) {
+        var o = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [o, emitStr(b, "__class"), emitCxClass(b)])
+        callExt(b, "js_set", [o, emitStr(b, "re"), re])
+        callExt(b, "js_set", [o, emitStr(b, "im"), im])
+        return o
+    }
+    function makeImag(v) {
+        usesComplex = true
+        var iv = v
+        return function(b) { return {b: b, v: emitNewCx(b, emitNum(b, 0), emitNum(b, iv))} }
+    }
+    // {b, re, im}: the two parts of a value that may or may not be complex. A plain
+    // number is its own real part with a zero imaginary one.
+    function emitCxParts(b, v) {
+        var rr = emitSelect(b, callExt(b, "js_is_type", [v, emitStr(b, "$cx")]),
+                            function(tb) { return {b: tb, v: callExt(tb, "js_get", [v, emitStr(tb, "re")])} },
+                            function(eb) { return {b: eb, v: v} })
+        var ri = emitSelect(rr.b, callExt(rr.b, "js_is_type", [v, emitStr(rr.b, "$cx")]),
+                            function(tb) { return {b: tb, v: callExt(tb, "js_get", [v, emitStr(tb, "im")])} },
+                            function(eb) { return {b: eb, v: emitNum(eb, 0)} })
+        return {b: ri.b, re: rr.v, im: ri.v}
+    }
+    // The complex form of one operator, emitted into its own block. The parts are
+    // plain numbers, so the arithmetic goes to the externs DIRECTLY: emitBin would
+    // truncate '- * /' to an integer and 0.5 is a legal real part.
+    function emitCxOp(b, op, l, r) {
+        var lp = emitCxParts(b, l)
+        b = lp.b
+        var rp = emitCxParts(b, r)
+        b = rp.b
+        if (op == "+") { return {b: b, v: emitNewCx(b, callExt(b, "js_jadd", [lp.re, rp.re]),
+                                                      callExt(b, "js_jadd", [lp.im, rp.im]))} }
+        if (op == "-") { return {b: b, v: emitNewCx(b, callExt(b, "js_sub", [lp.re, rp.re]),
+                                                      callExt(b, "js_sub", [lp.im, rp.im]))} }
+        if (op == "*") {
+            var ac = callExt(b, "js_mul", [lp.re, rp.re])
+            var bd = callExt(b, "js_mul", [lp.im, rp.im])
+            var ad = callExt(b, "js_mul", [lp.re, rp.im])
+            var bc = callExt(b, "js_mul", [lp.im, rp.re])
+            return {b: b, v: emitNewCx(b, callExt(b, "js_sub", [ac, bd]), callExt(b, "js_jadd", [ad, bc]))}
+        }
+        var den = callExt(b, "js_jadd", [callExt(b, "js_mul", [rp.re, rp.re]),
+                                         callExt(b, "js_mul", [rp.im, rp.im])])
+        var nr = callExt(b, "js_jadd", [callExt(b, "js_mul", [lp.re, rp.re]),
+                                        callExt(b, "js_mul", [lp.im, rp.im])])
+        var ni = callExt(b, "js_sub", [callExt(b, "js_mul", [lp.im, rp.re]),
+                                       callExt(b, "js_mul", [lp.re, rp.im])])
+        return {b: b, v: emitNewCx(b, callExt(b, "js_div", [nr, den]), callExt(b, "js_div", [ni, den]))}
+    }
+    // '+ - * /' with a complex operand on either side. The dispatch lives in a
+    // GENERATED function rather than at the operator site: emitBin returns a value and
+    // cannot move the caller's basic block, so the branch has to happen behind a
+    // js_call. The plain form is emitted inside the ELSE block on purpose - the
+    // externs would have to cope with a complex operand if it ran eagerly.
+    var cxFns = {"+": "$cxadd", "-": "$cxsub", "*": "$cxmul", "/": "$cxdiv",
+                 "+=": "$cxadd", "-=": "$cxsub", "*=": "$cxmul", "/=": "$cxdiv"}
+    function declCxOp(b, name, op) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        var savedScope = curScopeV
+        curF = f
+        var fb = f.NewBlock("entry")
+        curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
+        var l = callExt(fb, "js_arg", [f.Params[1], handle(0)])
+        var r = callExt(fb, "js_arg", [f.Params[1], handle(1)])
+        var isl = callExt(fb, "js_is_type", [l, emitStr(fb, "$cx")])
+        var isr = callExt(fb, "js_is_type", [r, emitStr(fb, "$cx")])
+        var cxPath = function(cb) { return emitCxOp(cb, op, l, r) }
+        var res = emitSelect(fb, isl, cxPath, function(eb) {
+            return emitSelect(eb, isr, cxPath, function(e2) { return {b: e2, v: coreEmitBin(e2, op, l, r)} })
+        })
+        res.b.NewRet(res.v)
+        curF = savedF
+        curScopeV = savedScope
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+        return b
+    }
+    // real(v) / imag(v) / complex(re, im), each a generated function of its own for
+    // the same reason: the complex probe needs blocks.
+    function declCxPart(b, name, prop, dflt) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        var savedScope = curScopeV
+        curF = f
+        var fb = f.NewBlock("entry")
+        curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
+        var v = callExt(fb, "js_arg", [f.Params[1], handle(0)])
+        var pr = prop
+        var dv = dflt
+        var res = emitSelect(fb, callExt(fb, "js_is_type", [v, emitStr(fb, "$cx")]),
+                             function(tb) { return {b: tb, v: callExt(tb, "js_get", [v, emitStr(tb, pr)])} },
+                             function(eb) { return {b: eb, v: (dv == 0 ? emitNum(eb, 0) : v)} })
+        res.b.NewRet(res.v)
+        curF = savedF
+        curScopeV = savedScope
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+        return b
+    }
+    function declCxMake(b) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        var savedScope = curScopeV
+        curF = f
+        var fb = f.NewBlock("entry")
+        curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
+        var re = callExt(fb, "js_arg", [f.Params[1], handle(0)])
+        var im = callExt(fb, "js_arg", [f.Params[1], handle(1)])
+        fb.NewRet(emitNewCx(fb, re, im))
+        curF = savedF
+        curScopeV = savedScope
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "complex"), callExt(b, "js_closure", [handle(idx), curScopeV])])
+        return b
+    }
+    // The whole complex runtime, declared in jsmain only when the program needs it.
+    function declComplex(b) {
+        var cls = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [cls, emitStr(b, "__name"), emitStr(b, "$cx")])
+        var flds = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [flds, emitStr(b, "re")])
+        callExt(b, "js_arr_push", [flds, emitStr(b, "im")])
+        callExt(b, "js_set", [cls, emitStr(b, "__fields"), flds])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$cxclass"), cls])
+        b = declCxOp(b, "$cxadd", "+")
+        b = declCxOp(b, "$cxsub", "-")
+        b = declCxOp(b, "$cxmul", "*")
+        b = declCxOp(b, "$cxdiv", "/")
+        b = declCxPart(b, "real", "re", 1)
+        b = declCxPart(b, "imag", "im", 0)
+        b = declCxMake(b)
+        return b
+    }
+    function emitCxCall(b, op, l, r) {
+        var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, cxFns[op])])
+        var av = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [av, l])
+        callExt(b, "js_arr_push", [av, r])
+        return callExt(b, "js_call", [fV, hUndef, av])
+    }
+
+    // ----- Slices and arrays -----
+    // Mirrors go-interpreter.abnf: a Go SLICE is a header "$sl" class instance
+    // {a, o, n, c} over a backing array (offset, length, capacity) and a Go ARRAY is a
+    // plain js array. That is what gives s[1:3] shared storage, cap() an answer of its
+    // own and s[:2:3] a meaning; and it needs no marker on the array, which the handle
+    // runtime would refuse anyway ("invalid array index").
+    //
+    // The handle runtime's js_golen / js_goslice / js_goappend externs only know plain
+    // arrays, so every slice operation goes through a GENERATED function instead (the
+    // externs stay underneath for the array and string cases). declFn builds one; the
+    // bodies below are the compiler's twin of the interpreter's slice helpers.
+    function declFn(b, name, arity, bodyFn) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        var savedScope = curScopeV
+        curF = f
+        var fb = f.NewBlock("entry")
+        curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
+        var as = []
+        for (var i = 0; i < arity; i++) { as.push(callExt(fb, "js_arg", [f.Params[1], handle(i)])) }
+        var res = bodyFn(fb, as, f)
+        res.b.NewRet(res.v)
+        curF = savedF
+        curScopeV = savedScope
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+        return b
+    }
+    // A call of one of those generated functions. Their names live in the jsmain scope,
+    // so a nested function reaches them through its scope chain.
+    function emitHelper(b, name, argVs) {
+        var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+        var av = callExt(b, "js_arr_new", [])
+        for (var i = 0; i < argVs.length; i++) { callExt(b, "js_arr_push", [av, argVs[i]]) }
+        return callExt(b, "js_call", [fV, hUndef, av])
+    }
+    // for (i = 0; i < n; i++) with the counter in a scope slot rather than a phi - the
+    // same shape makeForClassic emits, and it keeps the loop free of phi placement.
+    function emitCountLoop(b, nV, bodyFn) {
+        var sc = curScopeV
+        var nm = "$i" + loopTmp
+        loopTmp++
+        callExt(b, "js_scope_decl", [sc, emitStr(b, nm), emitNum(b, 0)])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, nm)])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, nV])), bodyB, exitB)
+        var iB = callExt(bodyB, "js_scope_get", [sc, emitStr(bodyB, nm)])
+        var endB = bodyFn(bodyB, iB)
+        var iE = callExt(endB, "js_scope_get", [sc, emitStr(endB, nm)])
+        callExt(endB, "js_scope_set", [sc, emitStr(endB, nm), callExt(endB, "js_jadd", [iE, emitNum(endB, 1)])])
+        endB.NewBr(headB)
+        return exitB
+    }
+    var loopTmp = 0
+    function emitIsSl(b, v) { return callExt(b, "js_is_type", [v, emitStr(b, "$sl")]) }
+    function emitSlHdr(b, a, o, n, c) {
+        var h = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [h, emitStr(b, "__class"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$slclass")])])
+        callExt(b, "js_set", [h, emitStr(b, "a"), a])
+        callExt(b, "js_set", [h, emitStr(b, "o"), o])
+        callExt(b, "js_set", [h, emitStr(b, "n"), n])
+        callExt(b, "js_set", [h, emitStr(b, "c"), c])
+        return h
+    }
+    function slF(b, h, k) { return callExt(b, "js_get", [h, emitStr(b, k)]) }
+    // A fresh backing array wrapped as a slice over the whole of it.
+    function emitSlOf(b, arr) {
+        var n = callExt(b, "js_golen", [arr])
+        return emitSlHdr(b, arr, emitNum(b, 0), n, n)
+    }
+    // The whole slice runtime, declared in jsmain before the program runs.
+    function declSlices(b) {
+        var cls = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [cls, emitStr(b, "__name"), emitStr(b, "$sl")])
+        var sflds = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [sflds, emitStr(b, "a")])
+        callExt(b, "js_arr_push", [sflds, emitStr(b, "o")])
+        callExt(b, "js_arr_push", [sflds, emitStr(b, "n")])
+        callExt(b, "js_arr_push", [sflds, emitStr(b, "c")])
+        callExt(b, "js_set", [cls, emitStr(b, "__fields"), sflds])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$slclass"), cls])
+
+        // len(x) / cap(x): a header answers from its own fields, everything else - an
+        // array, a string, a map, nil - goes to js_golen.
+        b = declFn(b, "len", 1, function(fb, a) {
+            var x = a[0]
+            return emitSelect(fb, emitIsSl(fb, x),
+                              function(tb) { return {b: tb, v: slF(tb, x, "n")} },
+                              function(eb) { return {b: eb, v: callExt(eb, "js_golen", [x])} })
+        })
+        b = declFn(b, "cap", 1, function(fb, a) {
+            var x = a[0]
+            return emitSelect(fb, emitIsSl(fb, x),
+                              function(tb) { return {b: tb, v: slF(tb, x, "c")} },
+                              function(eb) { return {b: eb, v: callExt(eb, "js_golen", [x])} })
+        })
+        // x[i] and x[i] = v, both of which have to reach through a header's offset.
+        b = declFn(b, "$sidx", 2, function(fb, a) {
+            var x = a[0]
+            var i = a[1]
+            return emitSelect(fb, emitIsSl(fb, x),
+                              function(tb) {
+                                  return {b: tb, v: callExt(tb, "js_map_get",
+                                          [slF(tb, x, "a"), callExt(tb, "js_jadd", [slF(tb, x, "o"), i])])}
+                              },
+                              function(eb) { return {b: eb, v: callExt(eb, "js_map_get", [x, i])} })
+        })
+        b = declFn(b, "$sset", 3, function(fb, a) {
+            var x = a[0]
+            var i = a[1]
+            var v = a[2]
+            return emitSelect(fb, emitIsSl(fb, x),
+                              function(tb) {
+                                  callExt(tb, "js_pyset", [slF(tb, x, "a"),
+                                          callExt(tb, "js_jadd", [slF(tb, x, "o"), i]), v])
+                                  return {b: tb, v: v}
+                              },
+                              function(eb) { callExt(eb, "js_pyset", [x, i, v]); return {b: eb, v: v} })
+        })
+        // The elements of a slice as a PLAIN array - what range, the ... spread,
+        // string(bs) and printing want. Anything else passes through untouched.
+        b = declFn(b, "$sels", 1, function(fb, a) {
+            var x = a[0]
+            return emitSelect(fb, emitIsSl(fb, x), function(tb) {
+                var out = callExt(tb, "js_arr_new", [])
+                var base = slF(tb, x, "a")
+                var off = slF(tb, x, "o")
+                var eb2 = emitCountLoop(tb, slF(tb, x, "n"), function(lb, iV) {
+                    callExt(lb, "js_arr_push", [out, callExt(lb, "js_map_get",
+                            [base, callExt(lb, "js_jadd", [off, iV])])])
+                    return lb
+                })
+                return {b: eb2, v: out}
+            }, function(eb) { return {b: eb, v: x} })
+        })
+        // x[lo:hi:mx] - a new header into the SAME backing array. A string slices with
+        // the extern (it is a byte range and copies, exactly as in the interpreter).
+        b = declFn(b, "$sslice", 4, function(fb, a) {
+            var x = a[0]
+            var lo = a[1]
+            var hi = a[2]
+            var mx = a[3]
+            return emitSelect(fb, callExt(fb, "js_seq", [callExt(fb, "js_typeof", [x]), emitStr(fb, "string")]),
+                function(sb) { return {b: sb, v: callExt(sb, "js_goslice", [x, lo, hi])} },
+                function(ab) {
+                    var isSlV = emitIsSl(ab, x)
+                    var pa = emitSelect(ab, isSlV, function(tb) { return {b: tb, v: slF(tb, x, "a")} },
+                                                   function(eb) { return {b: eb, v: x} })
+                    var po = emitSelect(pa.b, isSlV, function(tb) { return {b: tb, v: slF(tb, x, "o")} },
+                                                     function(eb) { return {b: eb, v: emitNum(eb, 0)} })
+                    var pn = emitSelect(po.b, isSlV, function(tb) { return {b: tb, v: slF(tb, x, "n")} },
+                                                     function(eb) { return {b: eb, v: callExt(eb, "js_golen", [x])} })
+                    var pc = emitSelect(pn.b, isSlV, function(tb) { return {b: tb, v: slF(tb, x, "c")} },
+                                                     function(eb) { return {b: eb, v: callExt(eb, "js_golen", [x])} })
+                    var b2 = pc.b
+                    var rlo = emitSelect(b2, callExt(b2, "js_seq", [lo, hUndef]),
+                                         function(tb) { return {b: tb, v: emitNum(tb, 0)} },
+                                         function(eb) { return {b: eb, v: lo} })
+                    var rhi = emitSelect(rlo.b, callExt(rlo.b, "js_seq", [hi, hUndef]),
+                                         function(tb) { return {b: tb, v: pn.v} },
+                                         function(eb) { return {b: eb, v: hi} })
+                    var rmx = emitSelect(rhi.b, callExt(rhi.b, "js_seq", [mx, hUndef]),
+                                         function(tb) { return {b: tb, v: pc.v} },
+                                         function(eb) { return {b: eb, v: mx} })
+                    var b3 = rmx.b
+                    return {b: b3, v: emitSlHdr(b3, pa.v,
+                                                callExt(b3, "js_jadd", [po.v, rlo.v]),
+                                                callExt(b3, "js_sub", [rhi.v, rlo.v]),
+                                                callExt(b3, "js_sub", [rmx.v, rlo.v]))}
+                })
+        })
+        // make([]T, n, cap): cap zero values of the element type, length n over them.
+        b = declFn(b, "$smake", 3, function(fb, a) {
+            var n = a[0]
+            var cp = a[1]
+            var zero = a[2]
+            var arr = callExt(fb, "js_arr_new", [])
+            var eb = emitCountLoop(fb, cp, function(lb, iV) {
+                callExt(lb, "js_arr_push", [arr, zero])
+                return lb
+            })
+            return {b: eb, v: emitSlHdr(eb, arr, emitNum(eb, 0), n, cp)}
+        })
+        // append(s, v...): writes into the backing array when the capacity allows (so
+        // another slice over it sees the new element, like Go) and reallocates when not.
+        b = declFn(b, "append", 0, function(fb, a, f) {
+            var argsV = f.Params[1]
+            var s0 = callExt(fb, "js_arg", [argsV, handle(0)])
+            var add = callExt(fb, "js_sub", [callExt(fb, "js_golen", [argsV]), emitNum(fb, 1)])
+            var isSlV = emitIsSl(fb, s0)
+            // A nil slice starts a new backing array; a plain array is its own backing.
+            var baseR = emitSelect(fb, callExt(fb, "js_not", [s0]),
+                                   function(tb) { return {b: tb, v: callExt(tb, "js_arr_new", [])} },
+                                   function(eb) { return {b: eb, v: s0} })
+            var b2 = baseR.b
+            var ha = emitSelect(b2, isSlV, function(tb) { return {b: tb, v: slF(tb, s0, "a")} },
+                                           function(eb) { return {b: eb, v: baseR.v} })
+            var ho = emitSelect(ha.b, isSlV, function(tb) { return {b: tb, v: slF(tb, s0, "o")} },
+                                             function(eb) { return {b: eb, v: emitNum(eb, 0)} })
+            var hn = emitSelect(ho.b, isSlV, function(tb) { return {b: tb, v: slF(tb, s0, "n")} },
+                                             function(eb) { return {b: eb, v: callExt(eb, "js_golen", [baseR.v])} })
+            var hc = emitSelect(hn.b, isSlV, function(tb) { return {b: tb, v: slF(tb, s0, "c")} },
+                                             function(eb) { return {b: eb, v: callExt(eb, "js_golen", [baseR.v])} })
+            var b3 = hc.b
+            var need = callExt(b3, "js_jadd", [hn.v, add])
+            // {a, o, c} of the array the result writes into, as a three element array.
+            var grown = emitSelect(b3, callExt(b3, "js_gt", [need, hc.v]), function(tb) {
+                var na = callExt(tb, "js_arr_new", [])
+                var eb2 = emitCountLoop(tb, hn.v, function(lb, iV) {
+                    callExt(lb, "js_arr_push", [na, callExt(lb, "js_map_get",
+                            [ha.v, callExt(lb, "js_jadd", [ho.v, iV])])])
+                    return lb
+                })
+                var eb3 = emitCountLoop(eb2, add, function(lb, iV) {
+                    callExt(lb, "js_arr_push", [na, emitNum(lb, 0)])
+                    return lb
+                })
+                var trip = callExt(eb3, "js_arr_new", [])
+                callExt(eb3, "js_arr_push", [trip, na])
+                callExt(eb3, "js_arr_push", [trip, emitNum(eb3, 0)])
+                callExt(eb3, "js_arr_push", [trip, need])
+                return {b: eb3, v: trip}
+            }, function(eb) {
+                var trip = callExt(eb, "js_arr_new", [])
+                callExt(eb, "js_arr_push", [trip, ha.v])
+                callExt(eb, "js_arr_push", [trip, ho.v])
+                callExt(eb, "js_arr_push", [trip, hc.v])
+                return {b: eb, v: trip}
+            })
+            var b4 = grown.b
+            var ra = callExt(b4, "js_map_get", [grown.v, emitNum(b4, 0)])
+            var ro = callExt(b4, "js_map_get", [grown.v, emitNum(b4, 1)])
+            var rc = callExt(b4, "js_map_get", [grown.v, emitNum(b4, 2)])
+            var b5 = emitCountLoop(b4, add, function(lb, iV) {
+                callExt(lb, "js_pyset", [ra, callExt(lb, "js_jadd", [callExt(lb, "js_jadd", [ro, hn.v]), iV]),
+                                         callExt(lb, "js_map_get", [argsV, callExt(lb, "js_jadd", [iV, emitNum(lb, 1)])])])
+                return lb
+            })
+            return {b: b5, v: emitSlHdr(b5, ra, ro, need, rc)}
+        })
+        // copy(dst, src): as many elements as the shorter one holds.
+        b = declFn(b, "copy", 2, function(fb, a) {
+            var d = a[0]
+            var sc2 = a[1]
+            var dn = emitHelper(fb, "len", [d])
+            var sn = emitHelper(fb, "len", [sc2])
+            var nr = emitSelect(fb, callExt(fb, "js_lt", [dn, sn]),
+                                function(tb) { return {b: tb, v: dn} },
+                                function(eb) { return {b: eb, v: sn} })
+            var eb3 = emitCountLoop(nr.b, nr.v, function(lb, iV) {
+                emitHelper(lb, "$sset", [d, iV, emitHelper(lb, "$sidx", [sc2, iV])])
+                return lb
+            })
+            return {b: eb3, v: nr.v}
+        })
+        // clear(m) empties a map; clear(s) zeroes a slice's elements in place.
+        b = declFn(b, "clear", 0, function(fb, a, f) {
+            var argsV = f.Params[1]
+            var x = callExt(fb, "js_arg", [argsV, handle(0)])
+            return emitSelect(fb, emitIsSl(fb, x), function(tb) {
+                var eb2 = emitCountLoop(tb, slF(tb, x, "n"), function(lb, iV) {
+                    emitHelper(lb, "$sset", [x, iV, emitNum(lb, 0)])
+                    return lb
+                })
+                return {b: eb2, v: hUndef}
+            }, function(eb) { callExt(eb, "js_goclear", [argsV]); return {b: eb, v: hUndef} })
+        })
+        // A Go ARRAY is a value: assigning it copies, and the copy is deep because an
+        // element that is itself an array is a value too. A header, map or struct
+        // passes through.
+        b = declFn(b, "$acopy", 1, function(fb, a) {
+            var x = a[0]
+            return emitSelect(fb, callExt(fb, "js_gotypeis", [x, emitStr(fb, "slice")]), function(pb) {
+                var out = callExt(pb, "js_arr_new", [])
+                var eb2 = emitCountLoop(pb, callExt(pb, "js_golen", [x]), function(lb, iV) {
+                    callExt(lb, "js_arr_push", [out, emitHelper(lb, "$acopy",
+                            [callExt(lb, "js_map_get", [x, iV])])])
+                    return lb
+                })
+                return {b: eb2, v: out}
+            }, function(eb) { return {b: eb, v: x} })
+        })
+        // What printing needs: the elements, and the elements of any slice among them.
+        // $sels must NOT do this - a range yields its elements to be written through -
+        // so display gets a recursive variant of its own.
+        b = declFn(b, "$sdisp", 1, function(fb, a) {
+            var x = a[0]
+            // A complex prints as Go spells it, (re+imi), with the sign written out;
+            // js_add is the JS concatenation, not Go's typed '+'.
+            var cxr = emitSelect(fb, callExt(fb, "js_is_type", [x, emitStr(fb, "$cx")]), function(cb) {
+                var re = callExt(cb, "js_get", [x, emitStr(cb, "re")])
+                var im = callExt(cb, "js_get", [x, emitStr(cb, "im")])
+                var neg = callExt(cb, "js_lt", [im, emitNum(cb, 0)])
+                var sg = emitSelect(cb, neg, function(tb) { return {b: tb, v: emitStr(tb, "-")} },
+                                             function(eb) { return {b: eb, v: emitStr(eb, "+")} })
+                var ab = emitSelect(sg.b, neg,
+                                    function(tb) { return {b: tb, v: callExt(tb, "js_sub", [emitNum(tb, 0), im])} },
+                                    function(eb) { return {b: eb, v: im} })
+                var b2 = ab.b
+                var out = callExt(b2, "js_add", [emitStr(b2, "("), re])
+                out = callExt(b2, "js_add", [out, sg.v])
+                out = callExt(b2, "js_add", [out, ab.v])
+                out = callExt(b2, "js_add", [out, emitStr(b2, "i)")])
+                return {b: b2, v: out}
+            }, function(eb) { return {b: eb, v: x} })
+            x = cxr.v
+            fb = cxr.b
+            return emitSelect(fb, emitIsSl(fb, x), function(tb) {
+                var out = callExt(tb, "js_arr_new", [])
+                var base = slF(tb, x, "a")
+                var off = slF(tb, x, "o")
+                var eb2 = emitCountLoop(tb, slF(tb, x, "n"), function(lb, iV) {
+                    callExt(lb, "js_arr_push", [out, emitHelper(lb, "$sdisp",
+                            [callExt(lb, "js_map_get", [base, callExt(lb, "js_jadd", [off, iV])])])])
+                    return lb
+                })
+                return {b: eb2, v: out}
+            }, function(eb) { return {b: eb, v: x} })
+        })
+        // The dynamic type of a slice is the type of its BACKING array, so a type
+        // switch and a type assertion keep seeing "slice" (and "any") through a header.
+        b = declFn(b, "$istype", 2, function(fb, a) {
+            var x = a[0]
+            var t = a[1]
+            var r = emitSelect(fb, emitIsSl(fb, x),
+                               function(tb) { return {b: tb, v: slF(tb, x, "a")} },
+                               function(eb) { return {b: eb, v: x} })
+            return {b: r.b, v: callExt(r.b, "js_gotypeis", [r.v, t])}
+        })
+        return b
+    }
+
+    // fmt.Println / fmt.Print must print a slice's ELEMENTS, not its header object, so
+    // each is a generated function that maps its arguments through $sels first.
+    function declPrint(b, fmtV, name, base) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        var savedScope = curScopeV
+        curF = f
+        var fb = f.NewBlock("entry")
+        curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
+        var argsV = f.Params[1]
+        var eb = emitCountLoop(fb, callExt(fb, "js_golen", [argsV]), function(lb, iV) {
+            callExt(lb, "js_pyset", [argsV, iV,
+                    emitHelper(lb, "$sdisp", [callExt(lb, "js_map_get", [argsV, iV])])])
+            return lb
+        })
+        var pV = callExt(eb, "js_scope_get", [curScopeV, emitStr(eb, base)])
+        eb.NewRet(callExt(eb, "js_call", [pV, hUndef, argsV]))
+        curF = savedF
+        curScopeV = savedScope
+        callExt(b, "js_set", [fmtV, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+        return b
+    }
+
+    // ----- Pointers -----
+    // A pointer to a variable is a CELL: a tiny class instance named "$ptr" carrying
+    // the scope that holds the variable (o) and its name (k). The class shape is what
+    // makes the two probes work - js_is_type answers "$ptr" without aborting on a
+    // number, and js_goeq compares the declared fields, so two cells built for the same
+    // variable (p == &n) compare equal. new(int) gets a fresh one slot scope instead.
+    // This mirrors the interpreter's makePtr/isPtr exactly; keep the two in step.
+    function emitPtrClass(b) { return callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$ptrclass")]) }
+    function emitPtrCell(b, scopeV, nameV) {
+        var o = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [o, emitStr(b, "__class"), emitPtrClass(b)])
+        callExt(b, "js_set", [o, emitStr(b, "o"), scopeV])
+        callExt(b, "js_set", [o, emitStr(b, "k"), nameV])
+        return o
+    }
+    function emitIsPtr(b, v) { return callExt(b, "js_is_type", [v, emitStr(b, "$ptr")]) }
+    // A value-level if/else: both arms are emitted into their own blocks and joined
+    // with a phi, the same shape makeOrAnd uses for the short-circuit operators.
+    function emitSelect(b, condV, thenFn, elseFn) {
+        var thenB = curF.NewBlock("")
+        var elseB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, condV), thenB, elseB)
+        var tr = thenFn(thenB)
+        tr.b.NewBr(mergeB)
+        var er = elseFn(elseB)
+        er.b.NewBr(mergeB)
+        var phi = mergeB.NewPhi([llvm.ir.NewIncoming(tr.v, tr.b), llvm.ir.NewIncoming(er.v, er.b)])
+        return {b: mergeB, v: phi}
+    }
+    function emitCellGet(b, p) {
+        return callExt(b, "js_scope_get", [callExt(b, "js_get", [p, emitStr(b, "o")]),
+                                           callExt(b, "js_get", [p, emitStr(b, "k")])])
+    }
+    function emitCellSet(b, p, v) {
+        callExt(b, "js_scope_set", [callExt(b, "js_get", [p, emitStr(b, "o")]),
+                                    callExt(b, "js_get", [p, emitStr(b, "k")]), v])
+        return b
+    }
+    // *v: read through a cell, and stay the identity on anything else (a struct
+    // pointer is the struct).
+    function emitDerefV(b, v) {
+        return emitSelect(b, emitIsPtr(b, v),
+                          function(tb) { return {b: tb, v: emitCellGet(tb, v)} },
+                          function(eb) { return {b: eb, v: v} })
+    }
+    function makeDeref(t) {
+        return function(b) {
+            var r = t(b)
+            return emitDerefV(r.b, r.v)
+        }
+    }
+    // &name. A value that is ALREADY a reference (a struct, a slice, a map) is its own
+    // pointer, so only a scalar - and a pointer variable, for &p - gets a cell.
+    function makeAddrVar(name) {
+        return function(b) {
+            var cur = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+            var scopeV = curScopeV
+            var mkCell = function(cb) { return {b: cb, v: emitPtrCell(cb, scopeV, emitStr(cb, name))} }
+            return emitSelect(b, emitIsPtr(b, cur), mkCell, function(eb) {
+                var isObj = callExt(eb, "js_seq", [callExt(eb, "js_typeof", [cur]), emitStr(eb, "object")])
+                return emitSelect(eb, isObj, function(tb) { return {b: tb, v: cur} }, mkCell)
+            })
+        }
+    }
+    // new(T): a slice or struct type is its own reference; a SCALAR needs a cell over a
+    // fresh one slot scope, so that *q += 3 has somewhere to write. The type is known
+    // here, so the choice is made at emit time.
+    function isScalarTy(t) {
+        return t.indexOf("int") == 0 || t.indexOf("uint") == 0 || t.indexOf("float") == 0
+            || t.indexOf("byte") == 0 || t.indexOf("rune") == 0
+            || t.indexOf("string") == 0 || t.indexOf("bool") == 0
+    }
+    function makeNew(ty) {
+        var d = ty
+        return function(b) {
+            if (d.length > 0 && d.charCodeAt(0) == 91) { return {b: b, v: callExt(b, "js_arr_new", [])} }
+            if (!isScalarTy(d)) { return {b: b, v: callExt(b, "js_obj_new", [])} }
+            var box = callExt(b, "js_scope_new", [hUndef])
+            callExt(b, "js_scope_decl", [box, emitStr(b, "v"), emitZero(b, d)])
+            return {b: b, v: emitPtrCell(b, box, emitStr(b, "v"))}
+        }
+    }
+    // A target's leading stars are pushed before the name, so the name is the first
+    // string item. Overridden by ASSIGNMENT so both engines agree which one is live.
+    makeTargetRef = function(items) {
+        var i = 0
+        while (i < items.length && typeof items[i] != "string") { i++ }
+        return {name: items[i], path: items.slice(i + 1), stars: i}
+    }
+    // The value of a starred target's base: the variable, dereferenced stars - 1 times.
+    function emitStarBase(b, ref) {
+        var v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+        for (var i = 1; i < ref.stars; i++) {
+            var r = emitDerefV(b, v)
+            b = r.b
+            v = r.v
+        }
+        return {b: b, v: v}
+    }
     function emitRefRead(b, ref) {
+        if (ref.path.length == 0 && ref.stars > 0) {
+            var sb = emitStarBase(b, ref)
+            return emitDerefV(sb.b, sb.v)
+        }
         var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
         for (var i = 0; i < ref.path.length; i++) {
             var s = ref.path[i]
@@ -1180,14 +2144,27 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             } else {
                 var r = s.idx(b)
                 b = r.b
-                o = callExt(b, "js_map_get", [o, r.v])
+                o = emitHelper(b, "$sidx", [o, r.v])
             }
         }
         return {b: b, v: o}
     }
     function emitRefWrite(b, ref, v) {
         if (ref.path.length == 0) {
-            if (ref.name != "_") callExt(b, "js_scope_set", [curScopeV, emitStr(b, ref.name), v])
+            if (ref.stars > 0) {
+                var sb = emitStarBase(b, ref)
+                var nm = ref.name
+                var r = emitSelect(sb.b, emitIsPtr(sb.b, sb.v),
+                                   function(tb) { return {b: emitCellSet(tb, sb.v, v), v: v} },
+                                   function(eb) {
+                                       if (nm != "_") { callExt(eb, "js_scope_set", [curScopeV, emitStr(eb, nm), v]) }
+                                       return {b: eb, v: v}
+                                   })
+                return r.b
+            }
+            if (ref.name != "_") {
+                callExt(b, "js_scope_set", [curScopeV, emitStr(b, ref.name), emitHelper(b, "$acopy", [v])])
+            }
             return b
         }
         var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
@@ -1198,7 +2175,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             } else {
                 var r = s.idx(b)
                 b = r.b
-                o = callExt(b, "js_map_get", [o, r.v])
+                o = emitHelper(b, "$sidx", [o, r.v])
             }
         }
         var last = ref.path[ref.path.length - 1]
@@ -1208,7 +2185,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         var kr = last.idx(b)
         b = kr.b
-        callExt(b, "js_pyset", [o, kr.v, v]) // Polymorphic: slice element or map entry.
+        emitHelper(b, "$sset", [o, kr.v, v]) // Polymorphic: slice/array element or map entry.
         return b
     }
 
@@ -1267,7 +2244,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return function(b) {
             var r = baseT(b)
             b = r.b
-            var okV = callExt(b, "js_gotypeis", [r.v, emitStr(b, ty)])
+            var okV = emitHelper(b, "$istype", [r.v, emitStr(b, ty)])
             if (vName != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, vName), r.v]) }
             if (okName != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, okName), okV]) }
             return b
@@ -1300,7 +2277,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
             for (var n2 = 0; n2 < names.length; n2++) {
                 if (names[n2] != "_") {
-                    callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n2]), vals[n2]])
+                    callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n2]),
+                                                 emitHelper(b, "$acopy", [vals[n2]])])
                 }
             }
             return b
@@ -1356,7 +2334,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 }
                 for (var n = 0; n < sp.names.length; n++) {
                     if (sp.names[n] == "_") { continue }
-                    var v = (n < vals.length) ? vals[n] : emitZeroDecl(b, ty)
+                    var v = (n < vals.length) ? emitHelper(b, "$acopy", [vals[n]]) : emitZeroDecl(b, ty)
                     callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sp.names[n]), v])
                 }
             }
@@ -1399,9 +2377,34 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // The zero value of a DECLARED type, as an emitted handle. (emitZero above is the
     // map-value variant: it never sees a slice type.)
+    // 'var s []T' is an empty SLICE; 'var a [N]T' is an ARRAY that exists with its N
+    // zero elements from the start (arrLen reads the N out of the type text).
     function emitZeroDecl(b, ty) {
-        if (ty.length > 0 && ty.charCodeAt(0) == 91) { return callExt(b, "js_arr_new", []) }
+        if (ty.length > 0 && ty.charCodeAt(0) == 91) {
+            var n = arrLen(ty)
+            if (n < 0) { return emitSlOf(b, callExt(b, "js_arr_new", [])) }
+            var arr = callExt(b, "js_arr_new", [])
+            var el = elemTy(ty)
+            for (var i = 0; i < n; i++) { callExt(b, "js_arr_push", [arr, emitZeroDecl(b, el)]) }
+            return arr
+        }
         return emitZero(b, ty)
+    }
+    // "[3]int" -> 3, "[]int" -> -1 (a slice), "[N]int" with a non-literal N -> -1.
+    function arrLen(t) {
+        var close = t.indexOf("]")
+        if (close < 1) { return 0 - 1 }
+        var n = 0
+        for (var i = 1; i < close; i++) {
+            var cc = t.charCodeAt(i)
+            if (cc < 48 || cc > 57) { return 0 - 1 }
+            n = n * 10 + (cc - 48)
+        }
+        return n
+    }
+    function elemTy(t) {
+        var close = t.indexOf("]")
+        return close < 0 ? t : t.substring(close + 1)
     }
     function makeForClassic(items) {
         var bodyT = items.pop()
@@ -1706,7 +2709,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var k2 = 0; k2 < cases.length; k2++) {
                 if (cases[k2].isDefault) { continue }
                 for (var t = 0; t < cases[k2].types.length; t++) {
-                    var condV = callExt(b, "js_gotypeis", [subjV, emitStr(b, cases[k2].types[t])])
+                    var condV = emitHelper(b, "$istype", [subjV, emitStr(b, cases[k2].types[t])])
                     var nextB = curF.NewBlock("")
                     b.NewCondBr(truthy(b, condV), bodyBs[k2], nextB)
                     b = nextB
@@ -1751,7 +2754,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // js_gorange normalizes a STRING subject into a byte-offset / code-point
             // pair of arrays (Go ranges a string by rune); everything else passes
             // through, so one emitted loop still covers ints, slices and maps.
-            var subjV = callExt(b, "js_gorange", [r.v])
+            var subjV = callExt(b, "js_gorange", [emitHelper(b, "$sels", [r.v])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), subjV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cName), emitNum(b, 0)])
             if (iName != "_") callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), hUndef])
@@ -1973,13 +2976,20 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         return {kind: "slice", lo: lo, hi: hi, mx: mx}
     }
-    // []byte(s) / []rune(s), handed to the same runtime conversion as string(x).
-    function makeConv(items) {
+    // A written-out conversion, handed to the same runtime conversion as string(x).
+    // The target type is recorded against this source position (see regConv), so the
+    // operators over it can pick float or fixed-width integer semantics.
+    function makeConv(items, pos) {
         var to = items[0].conv
         var t = items[1]
+        regConv(pos, to)
+        var isSliceTy = to.length > 1 && to.charCodeAt(0) == 91 && to.charCodeAt(1) == 93
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: callExt(r.b, "js_goconv", [emitStr(r.b, to), r.v])}
+            var eb = r.b
+            var v = callExt(eb, "js_goconv", [emitStr(eb, to), emitHelper(eb, "$sels", [r.v])])
+            if (isSliceTy) { v = emitSlOf(eb, v) }
+            return {b: eb, v: v}
         }
     }
     // The bare type text out of the captured source (it may carry a comment or
@@ -2118,6 +3128,57 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return strRuneAt(u, 0).cp
     }
     // The integer value of a 0x / 0o / 0b literal, ignoring '_' digit separators.
+    // 2i is a decimal literal with the trailing 'i' cut off.
+    function parseImag(s) { return parseFloat(s.substring(0, s.length - 1)) }
+    // 017 (the legacy octal form: no base letter, so parseRadix would read it decimal).
+    function parseLegOct(s) {
+        var v = 0
+        for (var i = 1; i < s.length; i++) {
+            var cc = s.charCodeAt(i)
+            if (cc == 95) { continue }
+            v = v * 8 + (cc - 48)
+        }
+        return v
+    }
+    // 0x1.8p1: hex mantissa with an optional hex fraction, times two to the DECIMAL
+    // exponent after 'p'.
+    function parseHexFloat(s) {
+        var v = 0
+        var scale = 1
+        var seenDot = false
+        var i = 2
+        while (i < s.length) {
+            var cc = s.charCodeAt(i)
+            i++
+            if (cc == 95) { continue }
+            if (cc == 46) { seenDot = true; continue }
+            if (cc == 112 || cc == 80) { break }
+            var d = 0
+            if (cc >= 48 && cc <= 57) { d = cc - 48 }
+            else if (cc >= 97 && cc <= 102) { d = cc - 87 }
+            else if (cc >= 65 && cc <= 70) { d = cc - 55 }
+            if (seenDot) { scale = scale / 16; v = v + d * scale } else { v = v * 16 + d }
+        }
+        var esign = 1
+        if (i < s.length && s.charCodeAt(i) == 43) { i++ }
+        else if (i < s.length && s.charCodeAt(i) == 45) { esign = 0 - 1; i++ }
+        var exp = 0
+        while (i < s.length) {
+            var c2 = s.charCodeAt(i)
+            i++
+            if (c2 < 48 || c2 > 57) { continue }
+            exp = exp * 10 + (c2 - 48)
+        }
+        exp = exp * esign
+        var m = 1
+        var k = 0
+        if (exp >= 0) {
+            for (k = 0; k < exp; k++) { m = m * 2 }
+        } else {
+            for (k = 0; k < 0 - exp; k++) { m = m / 2 }
+        }
+        return v * m
+    }
     function parseRadix(s) {
         var radix = 10
         var start = 0
@@ -2184,10 +3245,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var i = 0; i < params.length; i++) {
             if (variadic && i == params.length - 1) {
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
-                                             callExt(b, "js_gorest", [f.Params[1], handle(i + off)])])
+                                             emitSlOf(b, callExt(b, "js_gorest", [f.Params[1], handle(i + off)]))])
             } else {
+                // An array argument is a VALUE: the parameter gets a copy ($acopy is
+                // the identity on everything else).
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
-                                             callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
+                                             emitHelper(b, "$acopy",
+                                                        [callExt(b, "js_arg", [f.Params[1], handle(i + off)])])])
             }
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$defers"), callExt(b, "js_arr_new", [])])
@@ -2299,14 +3363,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // spellings - int(x), string(r), ... - and for a defined type (type Celsius float64),
     // whose name is exactly the conversion to its underlying type in an expression.
     function declConv(b, name, ty) {
-        funcCount++
-        var cIdx = funcCount
-        var cf = m.NewFunc("jsf_" + cIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
-        var cb = cf.NewBlock("entry")
-        cb.NewRet(cb.NewCall(getExtern("js_goconv", 2),
-                             [emitStr(cb, ty), cb.NewCall(getExtern("js_arg", 2), [cf.Params[1], handle(0)])]))
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), callExt(b, "js_closure", [handle(cIdx), curScopeV])])
-        return b
+        var t = ty
+        var isSliceTy = t.length > 1 && t.charCodeAt(0) == 91 && t.charCodeAt(1) == 93
+        return declFn(b, name, 1, function(fb, a) {
+            // js_goconv only knows plain arrays, so a slice argument hands over its
+            // ELEMENTS (string(bs)) and a slice result is wrapped back into a header.
+            var v = callExt(fb, "js_goconv", [emitStr(fb, t), emitHelper(fb, "$sels", [a[0]])])
+            if (isSliceTy) { v = emitSlOf(fb, v) }
+            return {b: fb, v: v}
+        })
     }
     // A builtin whose extern takes the callee's ARGUMENT ARRAY (plus an optional
     // constant flag), bound in the jsmain scope under `name`.
@@ -2334,22 +3399,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         var fmtV = callExt(b, "js_obj_new", [])
-        callExt(b, "js_set", [fmtV, emitStr(b, "Println"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "println")])])
-        callExt(b, "js_set", [fmtV, emitStr(b, "Print"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "print")])])
+        b = declPrint(b, fmtV, "Println", "println")
+        b = declPrint(b, fmtV, "Print", "print")
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "fmt"), fmtV])
         var osV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [osV, emitStr(b, "Exit"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "os"), osV])
-        // len(x): return x.length; append(s, v): push and return s.
-        funcCount++
-        var lenIdx = funcCount
-        var lf = m.NewFunc("jsf_" + lenIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
-        var lb = lf.NewBlock("entry")
-        var lArg = lb.NewCall(getExtern("js_arg", 2), [lf.Params[1], handle(0)])
-        // js_golen, not js_pylen: len() on a Go string counts BYTES.
-        lb.NewRet(lb.NewCall(getExtern("js_golen", 1), [lArg]))
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "len"), callExt(b, "js_closure", [handle(lenIdx), curScopeV])])
-        // delete(m, k)
+        // len/cap/copy/append/clear come from declSlices (they have to reach through a
+        // slice header); delete(m, k) is still a one-liner.
         funcCount++
         var delIdx = funcCount
         var df = m.NewFunc("jsf_" + delIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -2361,10 +3418,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // append(s, v...), min(...), max(...), clear(x): the variadic builtins get the
         // callee's whole argument array, so one extern covers every arity - and append
         // starts a new slice when its first argument is a nil one (append(m[k], v)).
-        b = declBuiltin(b, "append", "js_goappend", null)
         b = declBuiltin(b, "min", "js_gominmax", 0)
         b = declBuiltin(b, "max", "js_gominmax", 1)
-        b = declBuiltin(b, "clear", "js_goclear", null)
         // panic(v) raises; recover() answers the pending panic of the frame whose
         // deferred functions are running (nil outside one) and stops the unwinding.
         b = declBuiltin(b, "panic", "js_gopanic", null)
@@ -2383,6 +3438,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // imported package resolves its OWN names unqualified; then the package objects are
         // assembled from the exported functions (pkg.Fn, like fmt/os); then the main file's
         // own declarations run.
+        b = declSlices(b)
+        if (usesComplex) { b = declComplex(b) }
+        // The descriptor every pointer cell shares (see emitPtrCell). Declared before
+        // the program runs, so a nested function reaches it through its scope chain.
+        var pcls = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [pcls, emitStr(b, "__name"), emitStr(b, "$ptr")])
+        var pf = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [pf, emitStr(b, "o")])
+        callExt(b, "js_arr_push", [pf, emitStr(b, "k")])
+        callExt(b, "js_set", [pcls, emitStr(b, "__fields"), pf])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$ptrclass"), pcls])
         b = emitImported(b)   // imported files' declarations, each under its own source
         b = buildPackages(b)
         b = makeSeq(items)(b)

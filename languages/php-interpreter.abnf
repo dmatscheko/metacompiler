@@ -230,7 +230,6 @@ TraitVis    <~~ push({tvis: stripWs(up.in)}) ~~>
 TraitAlias  <~~ push({talias: stripWs(up.in)}) ~~> = MemberName ;
 
 // interface / trait / namespace / use-import: accepted structurally and routed to
-// notImplemented (no runtime model for them in this subset).
 // An interface is a named type with (abstract) method signatures: no bodies to run,
 // but instanceof and the implements list need the name to exist at run time.
 TypeDecl    = InterfaceDecl | TraitDecl ;
@@ -251,7 +250,6 @@ NsBody      <~~ push({nsbody: takeAll()}) ~~>
 UseDecl     <~~ push(notImplStmt("use import", up.pos)) ~~>
             = KwUse { Id | "\\" } [ KwAs Id ] Semi ;
 // enum Name : backing-type implements I { case A; ... }: recognized structurally and
-// routed to notImplemented; the body (cases, methods, consts) is balanced-skipped.
 // enum E: string implements I { case A = "a"; const C = 1; methods } - an enum is a
 // class whose cases are SINGLETON instances, published as class constants (which is
 // why E::A works with no extra machinery) and carrying ->name and, for a backed
@@ -266,25 +264,26 @@ SkipSq      = "'" :whitespace() { SkipStrEsc | SkipSqChar } "'" :whitespace(Whit
 SkipStrEsc  = "\\" "\x00"..."\U0010ffff" ;
 SkipDqChar  = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
 SkipSqChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
-// A balanced ( ... ) run (switch/match subject, declare/while directive), parsed and
-// ignored; string literals inside are matched first so their parens never miscount.
-SkipParen   = "(" { SkipDq | SkipSq | SkipParen | SkipPOther } ")" ;
-SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
 // A property declaration 'public $x;' or 'public int $x = e;' is accepted; a type
 // hint and the initializer are dropped (properties are created on first assignment).
 PropDecl    <~~ push({propdecl: makeProp(takeAll())}) ~~>
             = [ AttrGrp ] { PropMod } [ TypeHint ] DollarName [ "=" Expression ] ( ";" | PropHooks ) ;
-// PHP 8.4 property hooks: 'public int $x { get => e; set { ... } }' (and the bodyless
-// 'get;' / 'set;' of an abstract or interface property). There is no hook model here,
-// so the block is parsed - by the real grammar, not a brace skip, so a '{' inside a
-// string cannot miscount - and then DROPPED with a notImplemented note; the property
-// itself stays an ordinary declared property.
-PropHooks   <~~ takeAll(); notImpl("property hooks", up.pos) ~~>
+// PHP 8.4 property hooks: 'public int $x = 1 { get => e; set { ... } }' (and the
+// bodyless 'get;' / 'set;' of an abstract or interface property, which declares a hook
+// without providing one). Each hook becomes an ordinary METHOD on the class -
+// __hget_<prop> / __hset_<prop> - and a read or write of that property dispatches to
+// it. The property itself stays a declared property and IS the backing store: inside
+// its own hook '$this->x' reads and writes that store directly instead of re-entering
+// the hook, which is PHP's rule and the only thing that keeps a backed hook from
+// recursing forever. Mirrors php-to-llvm-ir.abnf member for member.
+PropHooks   <~~ push({hooks: takeAll()}) ~~>
             = "{" { PropHook } "}" ;
-PropHook    = [ AttrGrp ] { PropMod } [ "&" ] HookName ( HookArrow | HookBlock | ";" ) ;
+PropHook    <~~ push(makeHook(takeAll())) ~~>
+            = [ AttrGrp ] { PropMod } [ "&" ] HookName <~~ push({hname: stripWs(up.in)}) ~~>
+              ( HookArrow | HookBlock | ";" ) ;
 HookName    = ( "get" | "set" ) KwEnd ;
-HookArrow   = [ ParamList ] "=>" Expression ";" ;
-HookBlock   = [ ParamList ] Block ;
+HookArrow   <~~ push({harrow: pop()}) ~~> = [ ParamList ] "=>" Expression ";" ;
+HookBlock   <~~ push({hblock: pop().body}) ~~> = [ ParamList ] Block ;
 
 Modifier    = ( "public" | "private" | "protected" | "static" | "final" | "abstract" | "readonly" ) KwEnd ;
 // The modifier text is CAPTURED (as {mod}) rather than dropped: 'static' decides
@@ -302,11 +301,8 @@ Statement   = InlineHtml | ShortEcho | EchoStmt | UnsetStmt | GlobalStmt | Stati
             | Return | Break | Continue | Empty | LabelStmt | ExprStmt ;
 
 // ----- widened statement surface -----
-// switch / do-while / declare / static-locals: recognized structurally and routed to
-// notImplemented (no runtime model here). Braced bodies are balanced-skipped
-// (Switch/Declare) or parsed then dropped (DoWhile) so that a whole real-world file
-// parses; under -warn-unsupported each becomes a no-op. (try/catch/finally and throw
-// below are genuinely modelled, not notImplemented.)
+// switch, do-while, declare, goto and the static locals below are all genuinely
+// modelled, as try/catch/finally and throw are.
 // static $n = 0; inside a function: a variable whose STORAGE outlives the call. The
 // cell is created on the first execution of this very statement and re-bound into
 // every later frame, which is exactly PHP's per-declaration (not per-object) rule.
@@ -356,8 +352,15 @@ FinallyClause <~~ push({finbody: finBody(pop().body)}) ~~>
             = KwFinally Block ;
 Throw       <~~ push(excThrow(pop())) ~~>
             = KwThrow Expression Semi ;
-Declare     <~~ takeAll(); push(notImplStmt("declare", up.pos)) ~~>
-            = KwDeclare SkipParen ( ";" | Block ) ;
+// declare(strict_types=1); / declare(ticks=1) { ... }. None of PHP's three directives
+// changes anything this subset models - there is no type coercion to tighten, no tick
+// handler and no alternate source encoding - so the declaration itself is a no-op and
+// the BRACED form simply runs its body where it stands. The one visible consequence:
+// under strict_types real PHP raises a TypeError for a mismatched argument, and this
+// subset does not check parameter types at all, so it accepts the call instead.
+Declare     <~~ push(makeDeclare(takeAll())) ~~>
+            = KwDeclare "(" DeclDirective { "," DeclDirective } [ "," ] ")" ( Semi | Block ) ;
+DeclDirective <~~ takeAll() ~~> = Id "=" Expression ;
 // const NAME = expr; at file level: a global constant. Unlike a class constant it
 // takes no type, and its initializer is evaluated once, where the declaration stands.
 ConstDecl   <~~ push(makeConstDecl(takeAll())) ~~>
@@ -576,8 +579,8 @@ Clone       <~~ push(makeClone(pop())) ~~>
 // throw is an EXPRESSION since PHP 8 ($x ?? throw new E, fn() => throw new E).
 ThrowExpr   <~~ push(excThrow(pop())) ~~>
             = KwThrow Expression ;
-// $x instanceof Foo : recognized and routed to notImplemented. Tried before the plain
-// unary path; if no 'instanceof' follows, this alternative fails and rolls back, so an
+// $x instanceof Foo : the runtime type test, matching the class itself, every base
+// class and every implemented interface. Tried before the plain unary path; if no 'instanceof' follows, this alternative fails and rolls back, so an
 // ordinary unary keeps its exact original parse (byte-identical).
 InstanceofExpr <~~ push(makeInstanceof(takeAll())) ~~>
             = PostfixExpr KwInstanceof InstRef ;
@@ -697,10 +700,9 @@ AnonArgs    <~~ push({sargs: takeAll()}) ~~>
 
 // fn (params) => expr : an arrow function (auto-capturing, single-expression), and
 // match (subject) { arms }: a match expression. Both recognized and routed to
-// notImplemented (operands/arms are parsed then dropped or balanced-skipped).
 // fn (params) => expr : a single-expression closure that captures the enclosing
-// scope BY VALUE at creation time (changing $m afterwards cannot change what an
-// already-created fn sees), which is why makeArrowFn snapshots the scope chain.
+// variables its body mentions BY VALUE at creation time (changing $m afterwards
+// cannot change what an already-created fn sees), which is what makeArrowFn snapshots.
 ArrowFn     <~~ push(makeArrowFn(takeAll())) ~~>
             = [ AttrGrp ] [ "static" KwEnd ] KwFn [ "&" ] ParamList [ ReturnType ] "=>" ArrowBody ;
 ArrowBody   <~~ push({body: arrowBody(pop())}) ~~>
@@ -789,7 +791,7 @@ Null        <~~ push(makeConst(null)) ~~> = "null" KwEnd ;
 // $name: the dollar sigil is part of the stored key (PHP variables and function
 // names live in separate namespaces). Attaching the capture to the whole
 // production keeps the '$' in up.in.
-DollarName  <~~ push(up.in) ~~>
+DollarName  <~~ push(noteVarName(up.in)) ~~>
             = "$" Id ;
 
 // Double quoted strings interpolate '$var' and '{$expr}'; single quoted are literal.
@@ -1041,7 +1043,10 @@ KwFinally   = "finally" KwEnd ;
 KwThrow     = "throw" KwEnd ;
 KwDeclare   = "declare" KwEnd ;
 KwMatch     = "match" KwEnd ;
-KwFn        = "fn" KwEnd ;
+// The tag fires BEFORE the parameter and body tags (they are further right in the
+// sequence), so it records where this arrow function's variable references start -
+// exactly as in php-to-llvm-ir.abnf, so both engines capture the same set.
+KwFn        <~~ push({vmark: varMark()}) ~~> = "fn" KwEnd ;
 KwClone     = "clone" KwEnd ;
 KwInstanceof = "instanceof" KwEnd ;
 KwIsset     = "isset" KwEnd ;
@@ -1584,7 +1589,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function genPush() { genFlags.push(false) }
     function genPop() { return genFlags.length > 0 ? genFlags.pop() : false }
     function genMark() { if (genFlags.length > 0) { genFlags[genFlags.length - 1] = true } }
-    function newGen(runT) { return {__gen: true, run: runT, arr: null} }
+    function newGen(runT) { return {__gen: true, run: runT, arr: null, pos: 0} }
     function isGen(v) { return v !== null && v !== undefined && typeof v == "object" && v.__gen === true }
     // The collected stream is a PAIR LIST, not a PHP array: a generator may yield the
     // same key twice (every 'yield from' restarts the inner keys at 0), which an
@@ -1592,13 +1597,29 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // only need keys[i] / vals[i].
     function genList(g) {
         if (g.arr == null) {
-            var buf = {keys: [], vals: [], next: 0}
+            var buf = {keys: [], vals: [], next: 0, ret: null}
             genCollect.push(buf)
-            g.run()
+            buf.ret = g.run()
             genCollect.pop()
             g.arr = buf
         }
         return g.arr
+    }
+    // The Generator object's own methods. This engine COLLECTS a generator's stream
+    // rather than suspending its body (it has no coroutine to park), so the cursor
+    // walks the collected pair list: current/key/valid/next/rewind/getReturn all mean
+    // exactly what they do in PHP, and only send() - which has to resume a suspended
+    // body with a value - is beyond the model and says so.
+    function genMethod(g, name, args) {
+        var buf = genList(g)
+        if (name == "current") { return g.pos < buf.vals.length ? buf.vals[g.pos] : null }
+        if (name == "key") { return g.pos < buf.keys.length ? buf.keys[g.pos] : null }
+        if (name == "valid") { return g.pos < buf.vals.length }
+        if (name == "next") { g.pos = g.pos + 1; return null }
+        if (name == "rewind") { return null }
+        if (name == "getReturn") { return buf.ret }
+        if (name == "send") { fail("Generator::send() needs a suspendable body, which this engine does not have") }
+        fail("unknown method '" + name + "' on a Generator")
     }
     // bump is false for a delegated ('yield from') element: the inner keys are passed
     // through as they are and do not move the outer auto-key counter, which is what
@@ -2177,23 +2198,55 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return null
     }
-    function callMethod(o, fn, args) { return fn(o, argsOf(args)) }
+    // hookBacking is the property whose HOOK is running right now: inside it
+    // '$this->x' is the backing store rather than another hook call, which is what
+    // stops a backed hook recursing into itself. Every ordinary method call CLEARS it
+    // again (callMethod), so the exemption covers the hook body itself and nothing it
+    // calls out to - PHP's rule is lexical, and this is how a tree-walking engine
+    // spells the same thing.
+    var hookBacking = ""
+    function callMethod(o, fn, args) {
+        var saved = hookBacking
+        hookBacking = ""
+        var r = anytype
+        r = fn(o, argsOf(args))
+        hookBacking = saved
+        return r
+    }
+    function callHook(o, fn, name, args) {
+        var saved = hookBacking
+        hookBacking = name
+        var r = anytype
+        r = fn(o, argsOf(args))
+        hookBacking = saved
+        return r
+    }
     function phpGetProp(o, name) {
         if (o === null || o === undefined) { fail("property ->" + name + " of null") }
         if (!isObj(o)) { return null }
+        if (name != hookBacking) {
+            var hg = classFind(o.__class, "__hget_" + name)
+            if (hg != null) { return callHook(o, hg, name, []) }
+        }
         var i = dictFind(o.p, name)
-        if (i >= 0) { return o.p.vals[i] }
+        if (i >= 0) { return deref(o.p.vals[i]) }
         var g = classFind(o.__class, "__get")
         if (g != null) { return callMethod(o, g, [name]) }
         return null
     }
     function phpSetProp(o, name, v) {
         if (!isObj(o)) { fail("property write ->" + name + " on a non-object") }
+        if (name != hookBacking) {
+            var hs = classFind(o.__class, "__hset_" + name)
+            if (hs != null) { callHook(o, hs, name, [v]); return }
+        }
         if (dictFind(o.p, name) < 0) {
             var s = classFind(o.__class, "__set")
             if (s != null) { callMethod(o, s, [name, v]); return }
         }
-        dictSet(o.p, name, v)
+        // arrSet, not dictSet: a slot holding a cell is written THROUGH, which is
+        // what makes `$r = &$o->p; $o->p = 5;` visible through $r.
+        arrSet(o.p, name, v)
     }
     function objToString(o) {
         var m = classFind(o.__class, "__toString")
@@ -2217,6 +2270,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (mc != null) { return mc(target, argsOf([name, arrOf(args.pos)])) }
             fail("unknown method '" + name + "' on " + target.__class.__name)
         }
+        if (isGen(target)) { return genMethod(target, name, args) }
         fail("method ->" + name + "() on a non-object")
     }
     foldCallMember = function(items) {
@@ -2594,22 +2648,71 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // globals stay shared, so functions and classes declared later are still found)
     // is what makes an arrow function keep the values it saw at creation.
     function arrowBody(t) { return function() { return {ret: true, v: t()} } }
+    // fn (...) => expr : auto-capture BY VALUE, of exactly the variables the body
+    // mentions (varLog since the 'fn' keyword, minus this function's own parameters).
+    // The snapshot goes into ONE overlay scope on top of the live chain, so a name the
+    // body can read is always shadowed by its captured value while functions, classes
+    // and constants - which carry no '$' sigil and are therefore never in the capture
+    // set - keep resolving live, including ones declared after this point.
+    //
+    // Copying whole SCOPE OBJECTS was the earlier shape and had a silent bug: scopes[0]
+    // was shared rather than copied, so an arrow function created at GLOBAL scope did
+    // not capture by value at all -
+    //     $m = 10; $times = fn($x) => $x * $m; $m = 0; $times(3)
+    // answered 0 where PHP (and php-to-llvm-ir.abnf) answer 30.
+    //
+    // The slot is copied AS IT STANDS, cell and all: a variable some closure holds by
+    // reference has to stay shared, which is what phpCopy of the raw slot preserves.
     function makeArrowFn(items) {
         var d = splitClosure(items)
         var params = d.params
         var body = d.body
-        return function() {
-            var captured = []
-            captured.push(scopes[0])
-            for (var i = 1; i < scopes.length; i++) {
-                var copy = {}
-                var src = scopes[i]
-                var ks = ownKeys(src)
-                for (var j = 0; j < ks.length; j++) { scopePut(copy, ks[j], src[ks[j]]) }
-                captured.push(copy)
-            }
-            return closureBody(params, body, captured)
+        var mark = 0
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].vmark != undefined) { mark = items[i].vmark }
         }
+        var names = []
+        for (var k = 0; k < params.length; k++) { names.push(params[k].name) }
+        var captured = varsSince(mark, names)
+        return function() {
+            var env = {}
+            for (var j = 0; j < captured.length; j++) {
+                scopePut(env, captured[j], phpCopy(rawSlot(captured[j])))
+            }
+            var chain = scopes.slice(0)
+            chain.push(env)
+            return closureBody(params, body, chain)
+        }
+    }
+    // The variable names the source mentions, in parse order, and the mark an arrow
+    // function's 'fn' keyword takes of it. Same mechanism as php-to-llvm-ir.abnf.
+    var varLog = []
+    function noteVarName(n) { varLog.push(n); return n }
+    function varMark() { return varLog.length }
+    function varsSince(mark, exclude) {
+        var out = []
+        for (var i = mark; i < varLog.length; i++) {
+            var n = varLog[i]
+            var skip = false
+            for (var j = 0; j < exclude.length; j++) { if (exclude[j] == n) { skip = true } }
+            for (var k = 0; k < out.length; k++) { if (out[k] == n) { skip = true } }
+            if (!skip) { out.push(n) }
+        }
+        return out
+    }
+    // The raw scope slot of a variable - the CELL itself when it holds one - or null
+    // when the name is not set anywhere. Unlike getVar it neither dereferences nor
+    // aborts on an unknown name, which is what an arrow function's capture needs.
+    function rawSlot(name) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) {
+                var v = anytype
+                v = scopes[i][name]
+                if (v === UNSET) { return null }
+                return v
+            }
+        }
+        return null
     }
     // The frozen engine has no for..in, so scope objects carry their own key list:
     // declVar/scopePut route through scopeKeys, and ownKeys reads it back.
@@ -2746,19 +2849,77 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // A property declaration's items are the captured modifiers ({mod}), the '$name'
     // string and, optionally, the initializer thunk - so they are scanned rather than
     // indexed: 'static' moves the property onto the CLASS instead of the instance.
+    // One property hook, reduced to {hkind, hparam, body}. 'get => e' is a body that
+    // RETURNS e; 'set => e' is a body that stores e in the backing property; a bodyless
+    // 'get;' / 'set;' declares nothing to run and is dropped.
+    function makeHook(items) {
+        var kind = ""
+        var param = null
+        var arrow = null
+        var block = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == null || it == undefined) { continue }
+            if (it.hname != undefined) { kind = it.hname }
+            else if (it.harrow != undefined) { arrow = it.harrow }
+            else if (it.hblock != undefined) { block = it.hblock }
+            else if (it.param != undefined) { param = it.param }
+        }
+        if (arrow == null && block == null) { return {hkind: kind, hempty: true} }
+        return {hkind: kind, hparam: param, harrowT: arrow, hbodyT: block}
+    }
     function makeProp(items) {
         var nm = ""
         var init = null
         var isStatic = false
+        var hooks = []
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "string") { nm = it }
             else if (typeof it == "function") { init = it }
+            else if (it != null && it != undefined && it.hooks != undefined) { hooks = it.hooks }
             else if (it != null && it != undefined && it.mod != undefined) {
                 if (it.mod == "static") { isStatic = true }
             }
         }
-        return {name: nm.substring(1), init: init, isStatic: isStatic}
+        return {name: nm.substring(1), init: init, isStatic: isStatic, hooks: hooks}
+    }
+    // The two hook methods of one declared property, as ordinary method records so
+    // makeMethodClosure builds them exactly like any other method.
+    function hookMethods(prop) {
+        var out = []
+        if (prop.hooks == undefined) { return out }
+        for (var i = 0; i < prop.hooks.length; i++) {
+            var h = prop.hooks[i]
+            if (h.hempty == true) { continue }
+            var isGet = h.hkind == "get"
+            var body = h.hbodyT
+            if (body == null) {
+                body = isGet ? arrowBody(h.harrowT) : hookStoreBody(prop.name, h.harrowT)
+            }
+            var ps = []
+            if (!isGet) {
+                ps.push(h.hparam == null || h.hparam == undefined
+                        ? {name: "$value", byref: false, variadic: false, def: null, promote: false}
+                        : h.hparam)
+            }
+            out.push({name: (isGet ? "__hget_" : "__hset_") + prop.name, params: ps, body: body})
+        }
+        return out
+    }
+    // 'set => e': store e in the backing property, bypassing the hook.
+    function hookStoreBody(propName, valT) {
+        return function() {
+            dictSet(getVar("$this").p, propName, valT())
+            return null
+        }
+    }
+    // The directives are dropped by DeclDirective, so anything left is the braced body.
+    function makeDeclare(items) {
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != null && items[i] != undefined && items[i].body != undefined) { return items[i].body }
+        }
+        return function() { return null }
     }
     // One 'const NAME = expr' item. A constant with no initializer is legal only in
     // an interface signature; it reads as null here.
@@ -2867,8 +3028,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (ref.path.length == 0) { return varCell(refName(ref)) }
         var p = resolveRefPhp(ref)
         if (p.last.append === true) { arrPush(p.obj, null); return arrCell(p.obj, p.obj.__next - 1) }
-        if (p.last.key != undefined) { return null }
+        // An object PROPERTY is a storage location too: the property map is the same
+        // ordered map an array is, so its element cell is the same mechanism.
+        if (p.last.key != undefined) {
+            if (!isObj(p.obj)) { return null }
+            return arrCell(p.obj.p, p.last.key)
+        }
         if (isArr(p.obj)) { return arrCell(p.obj, p.last.idx()) }
+        if (isObj(p.obj)) { return arrCell(p.obj.p, phpStr(p.last.idx())) }
         return null
     }
     // $b = &$a : bind the left name to the right side's cell.
@@ -3212,6 +3379,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         for (var m2 = 0; m2 < p.methods.length; m2++) {
             cls[p.methods[m2].name] = makeMethodClosure(p.methods[m2], cls)
+        }
+        // Property hooks are methods too, named after the property they belong to.
+        for (var hp = 0; hp < props.length; hp++) {
+            var hms = hookMethods(props[hp])
+            for (var hm = 0; hm < hms.length; hm++) {
+                cls[hms[hm].name] = makeMethodClosure(hms[hm], cls)
+            }
         }
         return cls
     }

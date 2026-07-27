@@ -457,6 +457,15 @@ type jsGenerator struct {
 	// The call stacks of the SUSPENDED body, swapped in while it runs.
 	savedThis []interface{}
 	savedNT   []interface{}
+
+	// The last handshake result, kept so the iterator can be INSPECTED without
+	// advancing it - current()/key()/valid() answer from here, and getReturn()
+	// from retValue once the body has returned. autoKey is the running index a
+	// yield without a key of its own gets.
+	lastValue interface{}
+	lastKey   interface{}
+	retValue  interface{}
+	autoKey   float64
 }
 
 // genStep is one handshake result: a yielded value, the return value (done), or a
@@ -506,15 +515,46 @@ func (g *jsGenerator) step(rt *jsrt, sent interface{}) interface{} {
 	}
 	if st.done {
 		g.done = true
+		g.retValue = st.value
+		g.lastValue = jsUndef
+		g.lastKey = jsUndef
+	} else {
+		g.lastValue, g.lastKey = genSplitKV(st.value, g.autoKey)
+		g.autoKey++
 	}
 	res.set("value", st.value)
 	res.set("done", st.done)
 	return res
 }
 
+// genSplitKV unpacks a yielded value into (value, key). A language whose yield
+// carries a key of its own hands over a small record marked __genkv (the PHP
+// grammars do, for `yield $k => $v`); anything else is the value itself, with the
+// running index as its key - which is also what a keyless yield means.
+func genSplitKV(v interface{}, auto float64) (interface{}, interface{}) {
+	if o, ok := v.(*jsObject); ok {
+		if tag, has := o.props["__genkv"]; has && tag == true {
+			return o.props["v"], o.props["k"]
+		}
+	}
+	return v, auto
+}
+
+// prime runs the body up to its first yield when it has not started, so that
+// current() and key() answer without the caller having to step it first - PHP's
+// Generator does exactly this.
+func (g *jsGenerator) prime(rt *jsrt) {
+	if !g.started && !g.done {
+		g.step(rt, jsUndef)
+	}
+}
+
 // finish abandons the body without resuming it (generator.return(v)).
 func (g *jsGenerator) finish(v interface{}) interface{} {
 	g.done = true
+	g.retValue = v
+	g.lastValue = jsUndef
+	g.lastKey = jsUndef
 	res := newJSObject()
 	res.set("value", v)
 	res.set("done", true)
@@ -1697,6 +1737,59 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 		case "return":
 			return jsHostFunc("return", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 				return o.finish(argAt(args, 0))
+			})
+		// The INSPECTION half of the iterator protocol, which JavaScript's
+		// {value, done} record folds into next() but most other languages expose as
+		// members of their own: PHP's Generator (current/key/valid/send/rewind/
+		// getReturn), Python's generator.send, C#'s enumerator. They answer from the
+		// last handshake instead of performing one, so reading a generator twice does
+		// not advance it - and priming on first read is what makes current() work on a
+		// generator nobody has stepped yet.
+		case "current":
+			return jsHostFunc("current", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				o.prime(rt)
+				if o.done {
+					return jsNull
+				}
+				return o.lastValue
+			})
+		case "key":
+			return jsHostFunc("key", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				o.prime(rt)
+				if o.done {
+					return jsNull
+				}
+				return o.lastKey
+			})
+		case "valid":
+			return jsHostFunc("valid", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				o.prime(rt)
+				return !o.done
+			})
+		case "rewind":
+			return jsHostFunc("rewind", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				o.prime(rt)
+				return jsNull
+			})
+		// send(v) resumes the body with v and answers the value it yields NEXT, which
+		// is the shape PHP and Python share; the {value, done} record is next()'s.
+		case "send":
+			return jsHostFunc("send", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				if !o.started {
+					o.step(rt, jsUndef) // a send() to a fresh generator primes it first
+				}
+				o.step(rt, argAt(args, 0))
+				if o.done {
+					return jsNull
+				}
+				return o.lastValue
+			})
+		case "getReturn":
+			return jsHostFunc("getReturn", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				if o.retValue == nil {
+					return jsNull
+				}
+				return o.retValue
 			})
 		}
 		return jsUndef

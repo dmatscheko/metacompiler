@@ -248,8 +248,8 @@ KwInsteadof = "insteadof" KwEnd ;
 // interface I extends J, K { const C = 1; public function m(): T; }
 // An interface becomes a class descriptor with no method bodies: it carries its
 // constants and its parent interfaces, which is exactly what instanceof, a typed
-// catch and 'I::CONST' need. A trait has no runtime model here (its members would
-// have to be flattened into every using class) and stays notImplemented.
+// catch and 'I::CONST' need. A trait is the other half of TypeDecl and IS flattened
+// into every using class - see TraitDecl and UseTrait below.
 TypeDecl    = IfaceDecl | TraitDecl ;
 IfaceDecl   <~~ push(makeIfaceStmt(takeAll())) ~~>
             = [ AttrGrp ] KwInterface Name <~~ push(up.in) ~~> [ KwExtends ImplNames ] "{" { Member } "}" ;
@@ -346,9 +346,8 @@ Label       <~~ push(makeLabelStmt(popLabel())) ~~>
 KwGoto      = "goto" KwEnd ;
 
 // ----- widened statement surface -----
-// declare() is still recognized structurally and routed to notImplemented (its
-// directives change nothing this subset models). switch, do-while and goto below are
-// genuinely compiled, as try/catch/finally and throw already were.
+// declare, switch, do-while, goto and the static locals below are all genuinely
+// compiled, as try/catch/finally and throw already were.
 // static $n = 0; -- a local whose storage SURVIVES the call. The slot is a reference
 // cell in the global scope, created once where the program starts (the initializer is
 // a constant expression, so evaluating it there is not observable), and the statement
@@ -549,10 +548,10 @@ PlainEq     = "=" !"=" !">" ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = TargetHead { ArrowField | TIndex | TAppend } ;
 // A static property (self::$made = ..., C::$made++) and a variable variable
-// ($$name = e, ${expr} = e) are assignable heads too. Neither has a runtime model
-// here, so both are recognized and routed to notImplemented; each pushes the same
-// {var} record a plain variable does, so makeTargetRef is unchanged. The static form
-// must be tried FIRST or PlainHead never sees it.
+// ($$name = e, ${expr} = e) are assignable heads too. A static head carries its base
+// and property name, a variable-variable head the THUNK that computes the name, and
+// every reader below asks refNameV for the name - so one code path serves all three.
+// The static form must be tried FIRST or PlainHead never sees it.
 TargetHead  = StaticHead | PlainHead | VarVarHead ;
 // self::$made = e / C::$made++ : a static property as an assignment target. The head
 // carries the base thunk and the property name; makeAssign and incDec route those to
@@ -674,8 +673,8 @@ NsArrow     <~~ push({ns: true}) ~~> = "?->" ;
 MethodSfx   <~~ push(makeMethodSfx(takeAll())) ~~>
             = Arrow MethodName <~~ push({mname: up.in}) ~~> "(" [ ArgList ] ")" ;
 // $o->$meth(...) / $o->{"add"}(...) / $o->$prop: the member name is computed at run
-// time. There is no dynamic-member dispatch here, so both forms are recognized and
-// routed to notImplemented; each still pushes exactly one chain suffix.
+// time. The name expression is evaluated, coerced with js_phstr and handed to the
+// same dispatch the static spelling uses; each form pushes exactly one chain suffix.
 DynMethodSfx <~~ push(makeDynMethodSfx(takeAll())) ~~>
             = Arrow DynName "(" [ ArgList ] ")" ;
 DynName     <~~ push({dynname: pop()}) ~~> = VarRef | "{" Expression "}" ;
@@ -836,8 +835,9 @@ ArrayLit    <~~ push(makeArray(takeAll())) ~~>
             | KwArray "(" [ ArrayItem { "," ArrayItem } [ "," ] ] ")" ;
 ArrayItem   = SpreadItem | KeyedItem | PlainItem ;
 // [...$a] merges another array in (integer keys renumber, string keys are kept);
-// array(&$a) makes the element a reference, which has no cell in this value model
-// and stays notImplemented. Each item pushes exactly one record.
+// array(&$a) would make the ELEMENT a reference to the named variable, which this
+// lowering does not build (the array holds the value), so it stays notImplemented.
+// Each item pushes exactly one record.
 SpreadItem  <~~ push({spread: pop()}) ~~>
             = "..." Expression ;
 KeyedItem   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
@@ -1260,6 +1260,7 @@ KwInstanceof = "instanceof" KwEnd ;
             return {b: b, v: elemCell(b, p.obj, lastK)}
         }
         if (p.kind == "index") { return {b: b, v: elemCell(b, p.obj, p.key)} }
+        if (p.kind == "field") { return propCell(b, p.obj, p.key) }
         return {b: b, v: hNull}
     }
     // $b = &$a : bind the left name (or element) to the right side's cell.
@@ -2802,24 +2803,25 @@ KwInstanceof = "instanceof" KwEnd ;
         return emitPropGetPlain(b, objV, keyV)
     }
     function emitPropGetPlain(b, objV, keyV) {
-        if (!magicGet) { return {b: b, v: callExt(b, "js_get", [objV, keyV])} }
+        if (!magicGet) { return phDeref(b, callExt(b, "js_get", [objV, keyV])) }
         var haveB = curF.NewBlock("")
         var missB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
         b.NewCondBr(truthy(b, callExt(b, "js_phisset", [objV, keyV])), haveB, missB)
-        var plainV = callExt(haveB, "js_get", [objV, keyV])
-        haveB.NewBr(mergeB)
+        var hp = phDeref(haveB, callExt(haveB, "js_get", [objV, keyV]))
+        var plainV = hp.v
+        hp.b.NewBr(mergeB)
         var hm = emitHasMethod(missB, objV, emitStr(missB, "__get"))
         var magB = curF.NewBlock("")
         var rawB = curF.NewBlock("")
         hm.b.NewCondBr(truthy(hm.b, hm.v), magB, rawB)
         var magV = callExt(magB, "js_mcall", [objV, emitStr(magB, "__get"), argList(magB, [keyV])])
         magB.NewBr(mergeB)
-        var rawV = callExt(rawB, "js_get", [objV, keyV])
-        rawB.NewBr(mergeB)
-        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(plainV, haveB),
+        var rr = phDeref(rawB, callExt(rawB, "js_get", [objV, keyV]))
+        rr.b.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(plainV, hp.b),
                                              llvm.ir.NewIncoming(magV, magB),
-                                             llvm.ir.NewIncoming(rawV, rawB)])}
+                                             llvm.ir.NewIncoming(rr.v, rr.b)])}
     }
     // $o->p = v, with the property's set HOOK in front of it and __set as the fallback.
     function emitPropSet(b, objV, keyV, valV, name) {
@@ -2838,22 +2840,50 @@ KwInstanceof = "instanceof" KwEnd ;
         }
         return emitPropSetPlain(b, objV, keyV, valV)
     }
+    // Writing a property whose slot holds a reference CELL has to write through it.
+    // Emitted only for a program that writes a '&' somewhere; otherwise this is the
+    // single js_set it always was.
+    function emitPropStore(b, objV, keyV, valV) {
+        if (!usesRefs) { callExt(b, "js_set", [objV, keyV, valV]); return b }
+        var raw = callExt(b, "js_get", [objV, keyV])
+        var cellB = curF.NewBlock("")
+        var plainB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(isCellV(b, raw), cellB, plainB)
+        callExt(cellB, "js_set", [raw, emitStr(cellB, "v"), valV])
+        cellB.NewBr(mergeB)
+        callExt(plainB, "js_set", [objV, keyV, valV])
+        plainB.NewBr(mergeB)
+        return mergeB
+    }
+    // The storage cell of an object property, created on demand and REUSED - the same
+    // shape varCell has, so two references to one property share a cell.
+    function propCell(b, objV, keyV) {
+        var raw = callExt(b, "js_get", [objV, keyV])
+        var haveB = curF.NewBlock("")
+        var makeB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(isCellV(b, raw), haveB, makeB)
+        haveB.NewBr(mergeB)
+        var cell = newCell(makeB, raw)
+        callExt(makeB, "js_set", [objV, keyV, cell])
+        makeB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(raw, haveB), llvm.ir.NewIncoming(cell, makeB)])}
+    }
     function emitPropSetPlain(b, objV, keyV, valV) {
-        if (!magicSet) { callExt(b, "js_set", [objV, keyV, valV]); return b }
+        if (!magicSet) { return emitPropStore(b, objV, keyV, valV) }
         var haveB = curF.NewBlock("")
         var missB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
         b.NewCondBr(truthy(b, callExt(b, "js_phisset", [objV, keyV])), haveB, missB)
-        callExt(haveB, "js_set", [objV, keyV, valV])
-        haveB.NewBr(mergeB)
+        emitPropStore(haveB, objV, keyV, valV).NewBr(mergeB)
         var hm = emitHasMethod(missB, objV, emitStr(missB, "__set"))
         var magB = curF.NewBlock("")
         var rawB = curF.NewBlock("")
         hm.b.NewCondBr(truthy(hm.b, hm.v), magB, rawB)
         callExt(magB, "js_mcall", [objV, emitStr(magB, "__set"), argList(magB, [keyV, valV])])
         magB.NewBr(mergeB)
-        callExt(rawB, "js_set", [objV, keyV, valV])
-        rawB.NewBr(mergeB)
+        emitPropStore(rawB, objV, keyV, valV).NewBr(mergeB)
         return mergeB
     }
     // isset($o->p), with __isset as the fallback.
@@ -2878,18 +2908,29 @@ KwInstanceof = "instanceof" KwEnd ;
     // chain does not declare.
     function emitMethodCall(b, objV, nameV, argsV) {
         if (!magicCall) { return {b: b, v: callExt(b, "js_mcall", [objV, nameV, argsV])} }
-        var hm = emitHasMethod(b, objV, nameV)
-        b = hm.b
+        // __call is a fallback for an INSTANCE only. A receiver that is not one - a
+        // generator answering its own protocol, a string, a runtime object - goes
+        // straight to the runtime's dispatch; without this guard a `$gen->next()` in a
+        // program that declares __call anywhere probed the generator for a class chain,
+        // found none and tried to call __call on it.
+        var instB = curF.NewBlock("")
+        var otherB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(emitIsObj(b, objV), instB, otherB)
+        var hm = emitHasMethod(instB, objV, nameV)
         var directB = curF.NewBlock("")
         var magB = curF.NewBlock("")
-        var mergeB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, hm.v), directB, magB)
+        hm.b.NewCondBr(truthy(hm.b, hm.v), directB, magB)
         var dv = callExt(directB, "js_mcall", [objV, nameV, argsV])
         directB.NewBr(mergeB)
         var mv = callExt(magB, "js_mcall", [objV, emitStr(magB, "__call"),
                                             argList(magB, [nameV, phListOf(magB, argsV)])])
         magB.NewBr(mergeB)
-        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(dv, directB), llvm.ir.NewIncoming(mv, magB)])}
+        var ov = callExt(otherB, "js_mcall", [objV, nameV, argsV])
+        otherB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(dv, directB),
+                                             llvm.ir.NewIncoming(mv, magB),
+                                             llvm.ir.NewIncoming(ov, otherB)])}
     }
 
     // ----- isset / empty / unset ------------------------------------------------

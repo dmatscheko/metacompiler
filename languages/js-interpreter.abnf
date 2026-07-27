@@ -86,11 +86,17 @@ The same language is compiled to LLVM IR by js-to-llvm-ir.abnf.") ;
 // line of the file has none in front of it. The start of the source counts as the start of
 // a line, so the form is allowed here instead.
 Program     <~~ pushg(makeSeq(takeAll())) ~~>
-            = [ HtmlCloseAtStart ] { Statement } ;
+            = [ HtmlCloseAtStart ] { TopStatement } ;
 HtmlCloseAtStart = "-->" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 
+// An import or an export is a MODULE ITEM, not a statement: it may only stand at the top
+// level of the file. '{ import a from "b"; }', '{ export {a}; }' and
+// '{ export default 3; }' are syntax errors, not a block containing a declaration, so the
+// two forms live here rather than among the Statement alternatives.
+TopStatement = ImportStmt | ExportStmt | Statement ;
+
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | ImportStmt | ExportStmt | ClassDecl | ClassDeclWidened | TryStmt | Destructure | VarDecl | If | While | Do | ForOf | For | Switch | Return | Break | Continue
+Statement   = Block | ClassDecl | ClassDeclWidened | TryStmt | Destructure | VarDecl | If | While | Do | ForOf | For | Switch | Return | Break | Continue
             | Throw | Debugger | With | AsyncFuncDecl | GenFuncDecl | FuncDecl | Empty | LabeledStmt | ExprStmt ;
 
 // A LABELED statement: 'name: stmt'. The label lets a break or continue name which
@@ -99,8 +105,12 @@ Statement   = Block | ImportStmt | ExportStmt | ClassDecl | ClassDeclWidened | T
 // this wrapper swallows the labeled break of a non-loop statement ('l: { break l }').
 // It sits just before ExprStmt: only a label can put a ':' after a leading identifier,
 // so anything that is not one falls through to the expression form.
+// A LabelledItem is a Statement or a plain function declaration - never a lexical
+// declaration and never the generator or async form, so 'a: let a', 'a: function* a(){}'
+// and 'a: class C {}' are syntax errors. NotDeclHead is exactly that list (see there);
+// the plain 'a: function f(){}' it lets through is the Annex B form, which is legal.
 LabeledStmt <~~ push(makeLabeled(takeAll())) ~~>
-            = LabelDef ":" Statement ;
+            = LabelDef ":" NotDeclHead Statement ;
 LabelDef    <~~ push(up.in); pendingLabel = up.in ~~>
             = NotReserved Id ;
 
@@ -134,7 +144,7 @@ Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
 
 // var, let and const all declare a block scoped variable in the current scope.
-VarDecl     = VarDeclCore [ ";" ] ;
+VarDecl     = VarDeclCore StmtEnd ;
 VarDeclCore <~~ push(makeSeq(takeAll())) ~~>
             = KwVar Declarator { "," Declarator } ;
 // A declarator is a name with an optional initializer, or a destructuring PATTERN with a
@@ -172,23 +182,28 @@ Return      <~~ push(makeReturn(takeAll())) ~~>
             // and its expression, so a newline forces the semicolon. Without the guard,
             // 'if (x) return' + 'log = 1' on the next line parses as 'return (log = 1)',
             // which performs the assignment AND returns it. node says undefined.
-            = KwReturn [ NoLineBreak Expression ] [ ";" ] ;
+            = KwReturn InFunc [ NoLineBreak Expression ] StmtEnd ;
 
 // 'break' / 'continue', with or without a label. The label must be on the SAME line -
 // automatic semicolon insertion ends the statement at the line break - which is what the
 // NoLineBreak guard enforces; without it a bare 'break' followed by the next statement's
 // identifier would swallow that identifier as a label.
 Break       <~~ push(makeBreakStmt(takeAll())) ~~>
-            = KwBreak [ LabelRef ] [ ";" ] ;
+            = KwBreak [ LabelRef ] StmtEnd ;
 
 Continue    <~~ push(makeContinueStmt(takeAll())) ~~>
-            = KwContinue [ LabelRef ] [ ";" ] ;
+            = KwContinue [ LabelRef ] StmtEnd ;
 
 LabelRef    <~~ push({lblref: up.in}) ~~>
             = NoLineBreak NotReserved Id ;
 
+// 'throw' is a RESTRICTED PRODUCTION like 'return', except that its expression is not
+// optional: no line terminator may sit between the keyword and the value, and there is
+// no valued-less form to fall back on, so a line break there is a syntax error outright.
+// The terminator may hide INSIDE a block comment - 'throw /* newline */ e' is as much an
+// error as 'throw' on its own line - which is exactly what NoLineBreak already examines.
 Throw       <~~ push(excThrow(pop())) ~~>
-            = KwThrow Expression [ ";" ] ;
+            = KwThrow NoLineBreak Expression StmtEnd ;
 
 // A function declaration binds the closure in the current scope when it executes.
 FuncDecl    <~~ push(makeFuncDecl(pop(), pop(), pop())) ~~>
@@ -221,8 +236,22 @@ RestPattern <~~ push({rest: true, pat: pop()}) ~~>
 Empty       <~~ push(function() {}) ~~>
             = ";" ;
 
+// An ExpressionStatement carries two restrictions the rest of the grammar cannot see.
+//
+// NotStmtHead is the spec's '[lookahead notin { {, function, async function, class,
+// let [ }]': those spellings always start a DECLARATION, so an expression statement may
+// not begin with one. 'Block', 'FuncDecl' and 'ClassDecl' are tried first and cover the
+// named forms, but the ANONYMOUS ones ('class {}', 'class extends A {}',
+// 'export function () {}') fall through to here and would otherwise parse as a class or
+// function EXPRESSION - which is exactly what the restriction exists to forbid.
+//
+// StmtEnd is automatic semicolon insertion. A missing ';' is only inserted at a line
+// break, before a '}' or at the end of the file - not between two expressions on one
+// line - so 'a b;', 'x' + newline + 'is y', 'break 1;' and '{ get 2 }' are the syntax
+// errors they are supposed to be instead of two statements in a row.
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
-            = NotLetBracket Expression [ ";" ] ;
+            = NotLetBracket NotStmtHead Expression StmtEnd ;
+StmtEnd     = ";" | AsiEnd ;
 
 // Every expression production pushes exactly one thunk: function() -> value.
 // The comma (sequence) operator is ACCEPTED but not lowered. With no comma this level
@@ -296,8 +325,13 @@ SuperAssign <~~ takeAll(); push(notImplExpr("super property assignment", up.pos)
 // 'yield', which sloppy-mode code may do - from being read as a yield expression that
 // then chokes on the '=>'. This is a PEG: once Yield commits there is no way back.
 Yield       <~~ push(makeYield(takeAll())) ~~>
-            = KwYield NotArrow [ YieldStar ] [ AssignExpr ] ;
-YieldStar   <~~ push({ystar: true}) ~~> = "*" ;
+// 'yield' is a restricted production too: a line terminator after it ends the statement,
+// so 'yield' + newline + '*a' is 'yield;' followed by the syntax error '*a' rather than
+// a delegation. And a delegation always HAS an operand - 'yield*' alone is an error -
+// which is why the starred form carries its own mandatory AssignExpr instead of sharing
+// the optional one of the plain form.
+            = KwYield InGen NotArrow ( YieldStar AssignExpr | [ NoLineBreak AssignExpr ] ) ;
+YieldStar   <~~ push({ystar: true}) ~~> = NoLineBreak "*" ;
 
 // An assignable place: a variable, or a member path that may reach through calls
 // but must end in a member: findScope(name)[name] = value.
@@ -416,10 +450,13 @@ Typeof      <~~ push(makeTypeof(pop())) ~~>
 PostfixExpr = IncDec | SuperCall | CallMemberUpdate ;
 CallMemberUpdate <~~ push(makeMaybeUpdate(takeAll(), up.pos)) ~~>
             = CallMember [ UpdateOp ] ;
+// A POSTFIX '++'/'--' is a restricted production: no line terminator may sit between the
+// operand and the operator, so 'a' + newline + '--b' is 'a;' followed by the prefix
+// decrement of b, not 'a--' followed by 'b'.
 UpdateOp    <~~ push({upd: up.in}) ~~>
-            = "++" | "--" ;
+            = NoLineBreak ( "++" | "--" ) ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
-            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+            = Target NoLineBreak ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // super(args) delegates to the parent constructor; super.m(args) invokes the parent's
 // method on 'this'. popName pulls the optional '.m' out, leaving the argument thunks.
@@ -506,7 +543,7 @@ AsyncArrow  <~~ push(makeArrow(takeAll())) ~~>
 // and, like a plain function expression's, not bound.
 AsyncFuncExpr <~~ push(makeGenOrFuncExpr(takeAll())) ~~>
             = KwAsync KwFunction [ GenMark ] [ AsyncExprName ] ParamList Block ;
-AsyncExprName = NotBindName Id ;
+AsyncExprName = NotExprName Id ;
 GenFuncExpr <~~ push(makeGenOrFuncExpr(takeAll())) ~~>
             = KwFunction GenMark [ AsyncExprName ] ParamList Block ;
 // 'var C = class { ... }' - a class as a VALUE, with or without a name. It builds the
@@ -517,17 +554,17 @@ ClassExpr   <~~ push(makeClassValue(takeAll())) ~~>
             = KwClass [ ClassExprName ] [ KwExtends NotReserved Id <~~ push({ext: up.in}) ~~> ]
               "{" { ClassMember } "}" ;
 ClassExprName <~~ push({cname: up.in}) ~~>
-            = NotBindName Id ;
+            = NotExprName Id ;
 // Only 'extends Name' can be lowered (the parent is resolved by name), so a class
 // expression with any other heritage is ACCEPTED and routed to notImplemented - the same
 // split ClassDecl / ClassDeclWidened makes for the declaration form. Tried after
 // ClassExpr, so the lowered shape always wins.
 ClassExprWidened <~~ takeAll(); push(notImplExpr("class heritage expression", up.pos)) ~~>
-            = KwClass [ NotBindName Id ] KwExtends ClassHeritage "{" { ClassMember } "}" ;
+            = KwClass [ NotExprName Id ] KwExtends ClassHeritage "{" { ClassMember } "}" ;
 
 // The optional name of a function expression is accepted but not bound.
 FunctionExpr <~~ push(makeFunctionExpr(pop(), pop())) ~~>
-            = KwFunction [ NotBindName Id ] ParamList Block ;
+            = KwFunction [ NotExprName Id ] ParamList Block ;
 
 // The object literal, with the whole ES2022 property surface: 'key: value', spread
 // ('...o'), computed keys ('[k]: v'), getters and setters, shorthand methods (including
@@ -708,7 +745,7 @@ NotBareThis = :script(~~
 // by the parameter, for-of and assignment forms, so a pattern means the same thing
 // wherever it appears.
 Destructure <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
-            = KwVar DPattern "=" AssignExpr [ ";" ] ;
+            = KwVar DPattern "=" AssignExpr StmtEnd ;
 
 DPattern    = DArrPattern | DObjPattern ;
 
@@ -960,13 +997,17 @@ NotParen    = :script(~~
 // are global once the file is loaded). The path is the last string ModPath pushed (an
 // import clause may push earlier string specs, which jsImport ignores).
 ImportStmt  <~~ push(jsImport(takeAll(), up.pos)) ~~>
-            = KwImport ( ImportClause KwFrom ModPath | ModPath ) [ ";" ] ;
+            = KwImport ( ImportClause KwFrom ModPath | ModPath ) StmtEnd ;
 ImportClause = ImportBinding [ "," ImportTail ] | ImportTail ;
 ImportBinding = NotBindName Id ;
 ImportTail  = ImportNs | ImportNamed ;
 ImportNs    = "*" KwAs NotBindName Id ;
 ImportNamed = "{" [ ImportSpec { "," ImportSpec } [ "," ] ] "}" ;
-ImportSpec  = ( Id | StringLit ) [ KwAs NotBindName Id ] ;
+// Without 'as' the imported name is ALSO the local binding, so it has to be a legal
+// binding name: 'import {function} from "a"' is a syntax error while
+// 'import {function as f} from "a"' is not. The renaming form is therefore tried first -
+// this is a PEG, and the short form would otherwise commit on the bare IdentifierName.
+ImportSpec  = ( Id | StringLit ) KwAs NotBindName Id | NotBindName Id ;
 // A module-path string literal that pushes the raw (unescaped) path text - unlike the
 // general StringLit, which builds a makeConst value thunk. The inner tokens are shared
 // with the string lib (StrEsc / DqPlain / SqPlain).
@@ -974,8 +1015,13 @@ ModPath     = ModDq | ModSq ;
 ModDq       = '"' :whitespace() { StrEsc | DqPlain } <~~ push(unescapeJs(up.in)) ~~> '"' :whitespace(Whitespace) ;
 ModSq       = "'" :whitespace() { StrEsc | SqPlain } <~~ push(unescapeJs(up.in)) ~~> "'" :whitespace(Whitespace) ;
 
+// What may follow 'export' is a closed list: the three specifier forms, 'export default',
+// and a DECLARATION. It is deliberately NOT the whole Statement level - 'export 3;',
+// 'export;' and 'export {a,b} from' would otherwise be read as an export of an expression
+// statement (or of an empty one) with the rest of the line trailing after it.
 ExportStmt  <~~ takeAll(); push(notImplStmt("export statement", up.pos)) ~~>
-            = KwExport ( ExportAll | ExportFrom | ExportNamed | KwDefault AssignExpr | Statement ) [ ";" ] ;
+            = KwExport ( ExportAll | ExportFrom | ExportNamed | KwDefault AssignExpr | ExportDecl ) [ ";" ] ;
+ExportDecl  = ClassDecl | ClassDeclWidened | VarDecl | AsyncFuncDecl | GenFuncDecl | FuncDecl ;
 ExportAll   = "*" [ KwAs Id ] KwFrom StringLit ;
 // 'export { ... } from "mod"' RE-EXPORTS: the names on the left belong to the OTHER
 // module and are not references to anything here, so a reserved word is a perfectly good
@@ -996,7 +1042,7 @@ ExportSpec  = ( NotReserved Id | StringLit ) [ KwAs ( Id | StringLit ) ] ;
 With        <~~ takeAll(); push(notImplStmt("with statement", up.pos)) ~~>
             = KwWith "(" Expression ")" NestedStatement ;
 Debugger    <~~ push(function() {}) ~~>
-            = KwDebugger [ ";" ] ;
+            = KwDebugger StmtEnd ;
 // The async and generator function DECLARATIONS. Both bind a function value under their
 // name; the '*' decides whether calling it runs the body (async) or returns a generator
 // object (generator, and async generator - there being no event loop, an async generator
@@ -1100,8 +1146,12 @@ OctDigit    = "0"..."7" ;
 // first: '019' fails it at the '9' (KwEnd refuses a trailing digit) and falls through.
 LegacyOctLit <~~ push(makeConst(radixVal(up.in, 1, 8))) ~~>
             = "0" :whitespace() OctDigit { OctDigit } NotStrict KwEnd :whitespace(Whitespace) ;
+// A NonOctalDecimalIntegerLiteral may carry a FRACTION ('09.0', '09.5'): the leading zero
+// only decides how the integer part is read. Spelling the fraction out here is what makes
+// '09.x' the syntax error it is - the '.' belongs to the number, so the name after it is
+// a second token on the same line with no operator between them.
 NonOctalDecLit <~~ push(makeConst(parseFloat(up.in))) ~~>
-            = "0" :whitespace() Digit { Digit } NotStrict KwEnd :whitespace(Whitespace) ;
+            = "0" :whitespace() Digit { Digit } [ "." { Digit } ] NotStrict KwEnd :whitespace(Whitespace) ;
 // A decimal BigInt literal ends in 'n'; tried before the plain decimal so the 'n' is
 // not orphaned (a non-BigInt number fails the 'n' and rolls back to DecLit). The value
 // model has one number type, so a BigInt is a boxed number (see makeBigInt): it prints
@@ -1443,10 +1493,203 @@ NotReserved = :script(~~
         return kw ? abnf.newToken("\x01reserved-word", 0) : undefined
     })()
 ~~) ;
+// The one reserved word whose status depends on WHERE it stands: 'yield' is an
+// ordinary identifier in sloppy code and a RESERVED WORD inside a generator, so
+// 'function *g(){ var yield }', 'function *g(yield){}' and 'catch (yield)' are syntax
+// errors while the same lines outside a generator are not.
+//
+// Only BINDING positions are guarded (NotBindName, not NotReserved). A reference is
+// deliberately left alone: test262 files 'function *a(){ b * yield }' and
+// 'function* a(){ ({b = yield}) => 1 }' under early/ - as programs that PARSE and are
+// rejected by a static-semantics rule afterwards - so refusing them here would cost
+// must-parse files to win nothing the binding positions do not already win.
+//
+// The walk is InGen's (see there); it is reached only once the word ahead is literally
+// 'yield', so every other identifier pays nothing for it. Returns the impossible token
+// to FAIL, undefined to succeed.
+NotYieldBind = :script(~~
+    (function() {
+        var y = 0, yc = c.peek(0)
+        while (yc === 32 || yc === 9 || yc === 10 || yc === 13 || yc === 11 || yc === 12) {
+            y = y + 1
+            yc = c.peek(y)
+        }
+        if (yc !== 121 || c.peek(y + 1) !== 105 || c.peek(y + 2) !== 101 || c.peek(y + 3) !== 108
+            || c.peek(y + 4) !== 100) { return undefined }
+        yc = c.peek(y + 5)
+        if ((yc >= 48 && yc <= 57) || (yc >= 65 && yc <= 90) || yc === 95 || yc === 36
+            || (yc >= 97 && yc <= 122)) { return undefined }
+
+        // Re-derived from the source text on every call - see NotStrict for why a guard
+        // may not carry mutable parser state. The walk is capped: beyond 200000 bytes of
+        // prefix it gives up and SUCCEEDS, so a very large file keeps exactly the
+        // behaviour this grammar had before the context was tracked at all.
+        var back = 0
+        while (back < 200000 && c.peek(0 - back - 1) >= 0) { back = back + 1 }
+        if (back >= 200000) { return undefined }
+
+        var gen = 0          // 1 when the code here is inside a generator's params or body
+        var fnDepth = 0      // how many function bodies enclose this position
+        var sgen = []        // gen / fnDepth saved per open bracket, innermost last
+        var sfn = []
+        var pk = []          // per '(': what the body AFTER its ')' inherits (see below)
+        var pendGen = -1     // 0 or 1 once a 'function' (or a '*' method) head was read
+        var pendBody = -3    // -3 none, -2 arrow body (inherits gen), -1 not a function
+                             // body (an if/while/for/switch/catch head, a plain block or
+                             // an object literal), 0/1 a function body with that gen flag
+        var lastWord = ""
+        var word2 = ""       // the word before lastWord: 'set' in a 'set b(...)' head
+        var prevSig = 0
+        var i = 0 - back
+        while (i < 0) {
+            var ch = c.peek(i)
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 11 || ch === 12) { i = i + 1; continue }
+            if (ch === 47 && c.peek(i + 1) === 47) {
+                while (c.peek(i) >= 0 && c.peek(i) !== 10) { i = i + 1 }
+                continue
+            }
+            if (ch === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                while (c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) { i = i + 1 }
+                i = i + 2
+                continue
+            }
+            // A string or a template literal is skipped whole, so the brackets inside it
+            // do not count. (A regular expression literal is NOT recognized - the same
+            // deliberate approximation NotStrict makes.)
+            if (ch === 34 || ch === 39 || ch === 96) {
+                var qq = ch
+                var sj = i + 1
+                while (true) {
+                    var sc = c.peek(sj)
+                    if (sc < 0) { break }
+                    if (sc === 92) { sj = sj + 2; continue }
+                    if (sc === qq) { break }
+                    sj = sj + 1
+                }
+                i = sj + 1
+                prevSig = qq
+                lastWord = ""
+                pendBody = -3
+                continue
+            }
+            if ((ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || ch === 95 || ch === 36) {
+                var w = ""
+                var wn = 0
+                while (true) {
+                    var wc = c.peek(i)
+                    if ((wc >= 97 && wc <= 122) || (wc >= 65 && wc <= 90) || (wc >= 48 && wc <= 57) || wc === 95 || wc === 36) {
+                        if (wn < 10) { w = w + String.fromCharCode(wc) }
+                        wn = wn + 1
+                        i = i + 1
+                    } else { break }
+                }
+                if (wn > 10) { w = "" }
+                if (w === "function") {
+                    var fk = i
+                    while (true) {
+                        var fc = c.peek(fk)
+                        if (fc === 32 || fc === 9 || fc === 10 || fc === 13 || fc === 11 || fc === 12) { fk = fk + 1; continue }
+                        break
+                    }
+                    pendGen = (c.peek(fk) === 42) ? 1 : 0
+                }
+                word2 = lastWord
+                lastWord = w
+                prevSig = 119
+                pendBody = -3
+                continue
+            }
+            // A '*' at the START of a class or object member is a generator METHOD head.
+            if (ch === 42) {
+                if (prevSig === 123 || prevSig === 125 || prevSig === 59 || prevSig === 44
+                    || lastWord === "static" || lastWord === "async") { pendGen = 1 }
+                prevSig = ch
+                lastWord = ""
+                pendBody = -3
+                i = i + 1
+                continue
+            }
+            // '=>' - an arrow body is a function body that INHERITS the generator flag
+            // (yield inside an arrow inside a generator is still a yield expression).
+            // Handled here rather than at the ')' so the single-parameter form
+            // 'x => { ... }', which has no parentheses at all, is covered too.
+            if (ch === 61 && c.peek(i + 1) === 62) {
+                pendBody = -2
+                prevSig = ch
+                lastWord = ""
+                i = i + 2
+                continue
+            }
+            if (ch === 40) {
+                sgen.push(gen)
+                sfn.push(fnDepth)
+                var kind = 0
+                if (pendGen >= 0) { kind = pendGen; gen = pendGen }
+                else if (lastWord === "if" || lastWord === "while" || lastWord === "for"
+                      || lastWord === "switch" || lastWord === "catch" || lastWord === "with") { kind = -1 }
+                else if (word2 === "get" || word2 === "set") { gen = 0 }
+                pk.push(kind)
+                pendGen = -1
+                lastWord = ""
+                prevSig = ch
+                pendBody = -3
+                i = i + 1
+                continue
+            }
+            if (ch === 91) {
+                sgen.push(gen)
+                sfn.push(fnDepth)
+                pk.push(-1)
+                lastWord = ""
+                prevSig = ch
+                pendBody = -3
+                i = i + 1
+                continue
+            }
+            if (ch === 123) {
+                var pb = pendBody
+                sgen.push(gen)
+                sfn.push(fnDepth)
+                pk.push(-1)
+                if (pb === -2) { fnDepth = fnDepth + 1 }
+                else if (pb >= 0) { gen = pb; fnDepth = fnDepth + 1 }
+                pendBody = -3
+                lastWord = ""
+                prevSig = ch
+                i = i + 1
+                continue
+            }
+            if (ch === 41 || ch === 93 || ch === 125) {
+                var kk = -1
+                if (pk.length > 0) { kk = pk.pop() }
+                if (sgen.length > 0) { gen = sgen.pop() }
+                if (sfn.length > 0) { fnDepth = sfn.pop() }
+                pendBody = (ch === 41) ? kk : -3
+                lastWord = ""
+                prevSig = ch
+                i = i + 1
+                continue
+            }
+            lastWord = ""
+            prevSig = ch
+            pendBody = -3
+            i = i + 1
+        }
+            return gen === 1 ? abnf.newToken("\x01yield-in-generator", 0) : undefined
+        return gen === 1 ? abnf.newToken("\x01yield-in-generator", 0) : undefined
+    })()
+~~) ;
+
 // The binding form: 'this' on top of NotReserved. It is split off rather than folded
 // into the list because a REFERENCE to 'this' is genuine here (methods bind it in
 // their scope), while 'var this = 10' is not.
-NotBindName = NotReserved NotThis ;
+NotBindName = NotReserved NotThis NotYieldBind ;
+// The name of a function or class EXPRESSION is bound inside that function, not in
+// the enclosing scope, so it is NOT in the enclosing generator's context:
+// 'function *a(){ var b = function yield(){} }' is legal and test262 files it under
+// pass/. Same guards as NotBindName minus the generator one.
+NotExprName = NotReserved NotThis ;
 NotThis     = :script(~~
     (function() {
         var i = 0, cc = c.peek(0)
@@ -1569,6 +1812,368 @@ NotDeclHead = :script(~~
         return abnf.newToken("\x01declaration", 0)
     })()
 ~~) ;
+// ----- The parse context: in a generator, in a function -----
+//
+// Three static-semantics rules of JavaScript depend on WHERE a construct stands rather
+// than on what it looks like:
+//   * inside a generator, 'yield' is a reserved word - 'function *g(){ var yield }',
+//     'function *g(yield){}' and 'catch (yield)' are all syntax errors;
+//   * outside a generator, 'yield' is an ordinary identifier, so 'yield v' is not a
+//     yield expression but two expressions in a row (which ASI then refuses);
+//   * 'return' may only appear inside a function.
+//
+// All three are answered by ONE walk of the source prefix, which each guard below
+// carries its own copy of - a :script runs in the parser VM and cannot call a helper
+// defined in the grammar's start script, and the three differ only in the final test.
+// The walk is STATELESS for the same reason NotStrict is (see there): the parser
+// backtracks constantly and nothing would undo a flag set by a rolled-back alternative.
+//
+// It tracks a bracket stack. A '(' preceded by a 'function' head (with or without a '*')
+// opens a parameter list, and its ')' hands the generator flag on to the body '{' that
+// follows; a '(' preceded by if/while/for/switch/catch/with opens a control-statement
+// head, whose block is not a function body; anything else - a method head, an arrow's
+// parameter list - is a plain function head. A '=>' marks the body after it as an arrow
+// body, which is a function body that INHERITS the enclosing generator flag.
+//
+// The deliberate approximations, all of which can only misjudge a file that already
+// contains a 'yield' or a top-level-looking 'return':
+//   * a regular expression literal is not recognized, so a bracket inside one can throw
+//     the depth off (the same approximation NotStrict makes);
+//   * the NAME of a generator function expression is read in the enclosing context, so
+//     '(function*yield(){})' is not caught;
+//   * a call followed by a block on the next statement is read as a function head.
+
+// Fails when the position is NOT inside a generator - the guard on the Yield
+// expression, which is what makes 'yield v' at the top level two expressions.
+
+InGen = :script(~~
+    (function() {
+        // Re-derived from the source text on every call - see NotStrict for why a guard
+        // may not carry mutable parser state. The walk is capped: beyond 200000 bytes of
+        // prefix it gives up and SUCCEEDS, so a very large file keeps exactly the
+        // behaviour this grammar had before the context was tracked at all.
+        var back = 0
+        while (back < 200000 && c.peek(0 - back - 1) >= 0) { back = back + 1 }
+        if (back >= 200000) { return undefined }
+
+        var gen = 0          // 1 when the code here is inside a generator's params or body
+        var fnDepth = 0      // how many function bodies enclose this position
+        var sgen = []        // gen / fnDepth saved per open bracket, innermost last
+        var sfn = []
+        var pk = []          // per '(': what the body AFTER its ')' inherits (see below)
+        var pendGen = -1     // 0 or 1 once a 'function' (or a '*' method) head was read
+        var pendBody = -3    // -3 none, -2 arrow body (inherits gen), -1 not a function
+                             // body (an if/while/for/switch/catch head, a plain block or
+                             // an object literal), 0/1 a function body with that gen flag
+        var lastWord = ""
+        var word2 = ""       // the word before lastWord: 'set' in a 'set b(...)' head
+        var prevSig = 0
+        var i = 0 - back
+        while (i < 0) {
+            var ch = c.peek(i)
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 11 || ch === 12) { i = i + 1; continue }
+            if (ch === 47 && c.peek(i + 1) === 47) {
+                while (c.peek(i) >= 0 && c.peek(i) !== 10) { i = i + 1 }
+                continue
+            }
+            if (ch === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                while (c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) { i = i + 1 }
+                i = i + 2
+                continue
+            }
+            // A string or a template literal is skipped whole, so the brackets inside it
+            // do not count. (A regular expression literal is NOT recognized - the same
+            // deliberate approximation NotStrict makes.)
+            if (ch === 34 || ch === 39 || ch === 96) {
+                var qq = ch
+                var sj = i + 1
+                while (true) {
+                    var sc = c.peek(sj)
+                    if (sc < 0) { break }
+                    if (sc === 92) { sj = sj + 2; continue }
+                    if (sc === qq) { break }
+                    sj = sj + 1
+                }
+                i = sj + 1
+                prevSig = qq
+                lastWord = ""
+                pendBody = -3
+                continue
+            }
+            if ((ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || ch === 95 || ch === 36) {
+                var w = ""
+                var wn = 0
+                while (true) {
+                    var wc = c.peek(i)
+                    if ((wc >= 97 && wc <= 122) || (wc >= 65 && wc <= 90) || (wc >= 48 && wc <= 57) || wc === 95 || wc === 36) {
+                        if (wn < 10) { w = w + String.fromCharCode(wc) }
+                        wn = wn + 1
+                        i = i + 1
+                    } else { break }
+                }
+                if (wn > 10) { w = "" }
+                if (w === "function") {
+                    var fk = i
+                    while (true) {
+                        var fc = c.peek(fk)
+                        if (fc === 32 || fc === 9 || fc === 10 || fc === 13 || fc === 11 || fc === 12) { fk = fk + 1; continue }
+                        break
+                    }
+                    pendGen = (c.peek(fk) === 42) ? 1 : 0
+                }
+                word2 = lastWord
+                lastWord = w
+                prevSig = 119
+                pendBody = -3
+                continue
+            }
+            // A '*' at the START of a class or object member is a generator METHOD head.
+            if (ch === 42) {
+                if (prevSig === 123 || prevSig === 125 || prevSig === 59 || prevSig === 44
+                    || lastWord === "static" || lastWord === "async") { pendGen = 1 }
+                prevSig = ch
+                lastWord = ""
+                pendBody = -3
+                i = i + 1
+                continue
+            }
+            // '=>' - an arrow body is a function body that INHERITS the generator flag
+            // (yield inside an arrow inside a generator is still a yield expression).
+            // Handled here rather than at the ')' so the single-parameter form
+            // 'x => { ... }', which has no parentheses at all, is covered too.
+            if (ch === 61 && c.peek(i + 1) === 62) {
+                pendBody = -2
+                prevSig = ch
+                lastWord = ""
+                i = i + 2
+                continue
+            }
+            if (ch === 40) {
+                sgen.push(gen)
+                sfn.push(fnDepth)
+                var kind = 0
+                if (pendGen >= 0) { kind = pendGen; gen = pendGen }
+                else if (lastWord === "if" || lastWord === "while" || lastWord === "for"
+                      || lastWord === "switch" || lastWord === "catch" || lastWord === "with") { kind = -1 }
+                else if (word2 === "get" || word2 === "set") { gen = 0 }
+                pk.push(kind)
+                pendGen = -1
+                lastWord = ""
+                prevSig = ch
+                pendBody = -3
+                i = i + 1
+                continue
+            }
+            if (ch === 91) {
+                sgen.push(gen)
+                sfn.push(fnDepth)
+                pk.push(-1)
+                lastWord = ""
+                prevSig = ch
+                pendBody = -3
+                i = i + 1
+                continue
+            }
+            if (ch === 123) {
+                var pb = pendBody
+                sgen.push(gen)
+                sfn.push(fnDepth)
+                pk.push(-1)
+                if (pb === -2) { fnDepth = fnDepth + 1 }
+                else if (pb >= 0) { gen = pb; fnDepth = fnDepth + 1 }
+                pendBody = -3
+                lastWord = ""
+                prevSig = ch
+                i = i + 1
+                continue
+            }
+            if (ch === 41 || ch === 93 || ch === 125) {
+                var kk = -1
+                if (pk.length > 0) { kk = pk.pop() }
+                if (sgen.length > 0) { gen = sgen.pop() }
+                if (sfn.length > 0) { fnDepth = sfn.pop() }
+                pendBody = (ch === 41) ? kk : -3
+                lastWord = ""
+                prevSig = ch
+                i = i + 1
+                continue
+            }
+            lastWord = ""
+            prevSig = ch
+            pendBody = -3
+            i = i + 1
+        }
+        return gen === 1 ? undefined : abnf.newToken("\x01not-in-generator", 0)
+    })()
+~~) ;
+
+// Fails when the position is not inside any function body - 'return' outside a
+// function is a syntax error, and '{ return; }' at the top level is not a block
+// with a return in it.
+
+InFunc = :script(~~
+    (function() {
+        // Re-derived from the source text on every call - see NotStrict for why a guard
+        // may not carry mutable parser state. The walk is capped: beyond 200000 bytes of
+        // prefix it gives up and SUCCEEDS, so a very large file keeps exactly the
+        // behaviour this grammar had before the context was tracked at all.
+        var back = 0
+        while (back < 200000 && c.peek(0 - back - 1) >= 0) { back = back + 1 }
+        if (back >= 200000) { return undefined }
+
+        var gen = 0          // 1 when the code here is inside a generator's params or body
+        var fnDepth = 0      // how many function bodies enclose this position
+        var sgen = []        // gen / fnDepth saved per open bracket, innermost last
+        var sfn = []
+        var pk = []          // per '(': what the body AFTER its ')' inherits (see below)
+        var pendGen = -1     // 0 or 1 once a 'function' (or a '*' method) head was read
+        var pendBody = -3    // -3 none, -2 arrow body (inherits gen), -1 not a function
+                             // body (an if/while/for/switch/catch head, a plain block or
+                             // an object literal), 0/1 a function body with that gen flag
+        var lastWord = ""
+        var word2 = ""       // the word before lastWord: 'set' in a 'set b(...)' head
+        var prevSig = 0
+        var i = 0 - back
+        while (i < 0) {
+            var ch = c.peek(i)
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 11 || ch === 12) { i = i + 1; continue }
+            if (ch === 47 && c.peek(i + 1) === 47) {
+                while (c.peek(i) >= 0 && c.peek(i) !== 10) { i = i + 1 }
+                continue
+            }
+            if (ch === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                while (c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) { i = i + 1 }
+                i = i + 2
+                continue
+            }
+            // A string or a template literal is skipped whole, so the brackets inside it
+            // do not count. (A regular expression literal is NOT recognized - the same
+            // deliberate approximation NotStrict makes.)
+            if (ch === 34 || ch === 39 || ch === 96) {
+                var qq = ch
+                var sj = i + 1
+                while (true) {
+                    var sc = c.peek(sj)
+                    if (sc < 0) { break }
+                    if (sc === 92) { sj = sj + 2; continue }
+                    if (sc === qq) { break }
+                    sj = sj + 1
+                }
+                i = sj + 1
+                prevSig = qq
+                lastWord = ""
+                pendBody = -3
+                continue
+            }
+            if ((ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || ch === 95 || ch === 36) {
+                var w = ""
+                var wn = 0
+                while (true) {
+                    var wc = c.peek(i)
+                    if ((wc >= 97 && wc <= 122) || (wc >= 65 && wc <= 90) || (wc >= 48 && wc <= 57) || wc === 95 || wc === 36) {
+                        if (wn < 10) { w = w + String.fromCharCode(wc) }
+                        wn = wn + 1
+                        i = i + 1
+                    } else { break }
+                }
+                if (wn > 10) { w = "" }
+                if (w === "function") {
+                    var fk = i
+                    while (true) {
+                        var fc = c.peek(fk)
+                        if (fc === 32 || fc === 9 || fc === 10 || fc === 13 || fc === 11 || fc === 12) { fk = fk + 1; continue }
+                        break
+                    }
+                    pendGen = (c.peek(fk) === 42) ? 1 : 0
+                }
+                word2 = lastWord
+                lastWord = w
+                prevSig = 119
+                pendBody = -3
+                continue
+            }
+            // A '*' at the START of a class or object member is a generator METHOD head.
+            if (ch === 42) {
+                if (prevSig === 123 || prevSig === 125 || prevSig === 59 || prevSig === 44
+                    || lastWord === "static" || lastWord === "async") { pendGen = 1 }
+                prevSig = ch
+                lastWord = ""
+                pendBody = -3
+                i = i + 1
+                continue
+            }
+            // '=>' - an arrow body is a function body that INHERITS the generator flag
+            // (yield inside an arrow inside a generator is still a yield expression).
+            // Handled here rather than at the ')' so the single-parameter form
+            // 'x => { ... }', which has no parentheses at all, is covered too.
+            if (ch === 61 && c.peek(i + 1) === 62) {
+                pendBody = -2
+                prevSig = ch
+                lastWord = ""
+                i = i + 2
+                continue
+            }
+            if (ch === 40) {
+                sgen.push(gen)
+                sfn.push(fnDepth)
+                var kind = 0
+                if (pendGen >= 0) { kind = pendGen; gen = pendGen }
+                else if (lastWord === "if" || lastWord === "while" || lastWord === "for"
+                      || lastWord === "switch" || lastWord === "catch" || lastWord === "with") { kind = -1 }
+                else if (word2 === "get" || word2 === "set") { gen = 0 }
+                pk.push(kind)
+                pendGen = -1
+                lastWord = ""
+                prevSig = ch
+                pendBody = -3
+                i = i + 1
+                continue
+            }
+            if (ch === 91) {
+                sgen.push(gen)
+                sfn.push(fnDepth)
+                pk.push(-1)
+                lastWord = ""
+                prevSig = ch
+                pendBody = -3
+                i = i + 1
+                continue
+            }
+            if (ch === 123) {
+                var pb = pendBody
+                sgen.push(gen)
+                sfn.push(fnDepth)
+                pk.push(-1)
+                if (pb === -2) { fnDepth = fnDepth + 1 }
+                else if (pb >= 0) { gen = pb; fnDepth = fnDepth + 1 }
+                pendBody = -3
+                lastWord = ""
+                prevSig = ch
+                i = i + 1
+                continue
+            }
+            if (ch === 41 || ch === 93 || ch === 125) {
+                var kk = -1
+                if (pk.length > 0) { kk = pk.pop() }
+                if (sgen.length > 0) { gen = sgen.pop() }
+                if (sfn.length > 0) { fnDepth = sfn.pop() }
+                pendBody = (ch === 41) ? kk : -3
+                lastWord = ""
+                prevSig = ch
+                i = i + 1
+                continue
+            }
+            lastWord = ""
+            prevSig = ch
+            pendBody = -3
+            i = i + 1
+        }
+        return fnDepth > 0 ? undefined : abnf.newToken("\x01return-outside-function", 0)
+    })()
+~~) ;
+
 // ----- Strict mode -----
 //
 // A 'use strict' directive turns the legacy octal forms into syntax errors: '01', '08'
@@ -1813,6 +2418,100 @@ NoLineBreak = :script(~~
             break
         }
         return undefined
+    })()
+~~) ;
+
+// Automatic semicolon insertion at the END of an expression statement (see ExprStmt).
+// A semicolon may be inserted only where the offending token is preceded by a line
+// terminator, is a '}', or is the end of the file. Everywhere else the missing ';' is a
+// syntax error - 'a b;' is not two statements.
+//
+// Like NoLineBreak this has to LOOK at what the whitespace rule would skip rather than
+// skip it: a line comment always ends its line, and a block comment counts as a line
+// terminator when it contains one. The non-ASCII space characters are stepped over the
+// way a space is; U+2028/U+2029 end a line. Returns the impossible token to FAIL (no
+// semicolon can be inserted here), undefined to succeed.
+AsiEnd = :script(~~
+    (function() {
+        var i = 0
+        while (true) {
+            var cc = c.peek(i)
+            if (cc < 0) { return undefined }          // end of file
+            if (cc === 125) { return undefined }      // '}' ends the statement list
+            if (cc === 32 || cc === 9 || cc === 11 || cc === 12) { i = i + 1; continue }
+            if (cc === 10 || cc === 13) { return undefined }
+            // The multi-byte code points, read as UTF-8 (c.peek is byte oriented):
+            // U+2028/U+2029 end a line, the rest are spaces.
+            if (cc === 226 && c.peek(i + 1) === 128) {
+                var b3 = c.peek(i + 2)
+                if (b3 === 168 || b3 === 169) { return undefined }
+                if ((b3 >= 128 && b3 <= 138) || b3 === 175) { i = i + 3; continue }
+            }
+            if (cc === 226 && c.peek(i + 1) === 129 && c.peek(i + 2) === 159) { i = i + 3; continue }
+            if (cc === 194 && c.peek(i + 1) === 160) { i = i + 2; continue }
+            if (cc === 225 && c.peek(i + 1) === 154 && c.peek(i + 2) === 128) { i = i + 3; continue }
+            if (cc === 227 && c.peek(i + 1) === 128 && c.peek(i + 2) === 128) { i = i + 3; continue }
+            if (cc === 239 && c.peek(i + 1) === 187 && c.peek(i + 2) === 191) { i = i + 3; continue }
+            if (cc === 47 && c.peek(i + 1) === 47) { return undefined }   // a line comment ends the line
+            // The Annex B '<!--' is a line comment too, and 'a<!--b' is a whole statement.
+            if (cc === 60 && c.peek(i + 1) === 33 && c.peek(i + 2) === 45 && c.peek(i + 3) === 45) { return undefined }
+            if (cc === 47 && c.peek(i + 1) === 42) {
+                var j = i + 2
+                while (true) {
+                    var bc = c.peek(j)
+                    if (bc < 0) { return undefined }
+                    if (bc === 42 && c.peek(j + 1) === 47) { j = j + 2; break }
+                    if (bc === 10 || bc === 13) { return undefined }
+                    if (bc === 226 && c.peek(j + 1) === 128 && (c.peek(j + 2) === 168 || c.peek(j + 2) === 169)) { return undefined }
+                    j = j + 1
+                }
+                i = j
+                continue
+            }
+            break
+        }
+        return abnf.newToken("\x01no-asi", 0)
+    })()
+~~) ;
+
+// The '[lookahead notin { {, function, async function, class, let [ }]' of an
+// ExpressionStatement (see ExprStmt). NotDeclHead is the related guard for a nested
+// single-statement BODY; this one is about the statement list itself, and differs by
+// listing 'function' and 'class' unconditionally - a statement may never START with
+// either - while leaving 'const' and 'let <name>' to the declaration productions that
+// are tried before it. Returns the impossible token to FAIL, undefined to succeed.
+NotStmtHead = :script(~~
+    (function() {
+        var i = 0, cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        var w = ""
+        while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) {
+            w = w + String.fromCharCode(cc)
+            i = i + 1
+            cc = c.peek(i)
+        }
+        // A trailing identifier char means the word merely STARTS with the keyword
+        // ('functional', 'classy', 'asynchronous'), so it is a plain identifier.
+        if (w === "" || (cc >= 48 && cc <= 57) || cc === 95 || cc === 36) { return undefined }
+        if (w === "function" || w === "class") { return abnf.newToken("\x01stmt-head", 0) }
+        if (w !== "async") { return undefined }
+        // 'async' only counts with 'function' behind it on the SAME line: a line break
+        // there makes it an ordinary reference, and 'async () => 1' is an expression.
+        while (cc === 32 || cc === 9 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        var w2 = ""
+        while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) {
+            w2 = w2 + String.fromCharCode(cc)
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (w2 !== "function" || (cc >= 48 && cc <= 57) || cc === 95 || cc === 36) { return undefined }
+        return abnf.newToken("\x01stmt-head", 0)
     })()
 ~~) ;
 

@@ -249,6 +249,17 @@ function s11() {
     check("fn6", $st() + $stf() === 15);
     $imm = (function ($x) { return $x + 1; })(41);
     check("fn7", $imm === 42);
+    check("fn8", s11global() === "30|30"); // fn captures by value at EVERY scope
+}
+$s11m = 10;
+$s11times = fn($x) => $x * $s11m;
+$s11m = 0;
+function s11global() {
+    global $s11times;
+    $m = 10;
+    $local = fn($x) => $x * $m;
+    $m = 0;
+    return $s11times(3) . "|" . $local(3);
 }
 
 // ===== SECTION 12: named arguments and callables =====
@@ -449,9 +460,17 @@ function s19() {
     $dele = "";
     foreach (s19delegate() as $k => $v) { $dele .= $k . $v . ";"; }
     check("gen6", $dele === "z0;a1;b2;"); // yield from forwards the inner KEYS
+    // The Generator object's own cursor. (send() needs a suspendable body and is
+    // deliberately out of scope - see the header.)
+    $it = s19keyed();
+    $seen = $it->current() . $it->key() . ($it->valid() ? "y" : "n");
+    $it->next();
+    $seen .= $it->current() . $it->key();
+    $it->next();
+    check("gen7", $seen === "1ay2b" && !$it->valid() && $it->getReturn() === 7);
 }
 function s19nums() { yield 1; yield 2; yield from [3, 4]; yield 5; }
-function s19keyed() { yield "a" => 1; yield "b" => 2; }
+function s19keyed() { yield "a" => 1; yield "b" => 2; return 7; }
 function s19bounded($limit) { $i = 0; while ($i < $limit) { yield $i; $i++; } }
 function s19delegate() { yield "z" => 0; yield from s19keyed(); }
 
@@ -624,14 +643,22 @@ function s25() {
     $b[0] = 7;
     check("cel2", $p === 7);
     // A by-reference PARAMETER binds any assignable argument, not only a plain
-    // variable: an array element is a storage location too. (A reference to an object
-    // PROPERTY has no cell in either grammar and is deliberately out of scope.)
+    // variable: an array element and an object PROPERTY are storage locations too.
     $arr = [3, 4];
     s25bump($arr[1]);
     $nest = ["k" => [1, 2]];
     s25bump($nest["k"][0]);
     $o = new S25Box();
-    check("cel3", $arr[1] === 8 && $nest["k"][0] === 2 && $o->v === 6);
+    s25bump($o->v);
+    check("cel3", $arr[1] === 8 && $nest["k"][0] === 2 && $o->v === 12);
+    // A reference to a property aliases it in both directions, and a second
+    // reference to the same property shares the one cell.
+    $pr = &$o->v;
+    $pr = 4;
+    $o->v = 7;
+    $pr2 = &$o->v;
+    $pr2 = 1;
+    check("cel4", $pr === 1 && $o->v === 1);
     // 'use ($k)' freezes the VALUE where the closure is created, even when another
     // closure holds the same variable by reference; 'use (&$k)' stays live.
     $k = 1;
@@ -667,6 +694,42 @@ function s25count() { static $n = s25seed(); $n++; return $n; }
 function s25other() { static $n = 100; $n++; return $n; }
 function s25nulled() { static $z = 3; $z = null; return $z === null; }
 
+// ===== SECTION 26: property hooks and declare =====
+// PHP 8.4 property hooks, and the declare() statement. A hook makes a property read
+// or write run code; the property itself stays the backing store, which is what
+// '$this->x' means INSIDE x's own hook (anywhere else it would re-enter the hook).
+function s26() {
+    $t = new S26Temp(20);
+    check("hok1", $t->celsius === 20 && $t->fahrenheit === 68);
+    $t->fahrenheit = 212;
+    check("hok2", $t->celsius === 100 && $t->fahrenheit === 212);
+    $t->celsius = -300;
+    check("hok3", $t->celsius === -273); // the set hook clamps
+    $c = new S26Counted();
+    check("hok4", $c->n === 0 && $c->reads === 1 && $c->n === 0 && $c->reads === 2);
+    check("hok5", $c->plain === "p"); // an unhooked property keeps the plain path
+    check("hok6", s26declared() === 6);
+}
+class S26Temp {
+    public $celsius = 0 { set { $this->celsius = $value < -273 ? -273 : $value; } }
+    public $fahrenheit { get => $this->celsius * 9 / 5 + 32;
+                         set { $this->celsius = ($value - 32) * 5 / 9; } }
+    public function __construct($c) { $this->celsius = $c; }
+}
+class S26Counted {
+    public $reads = 0;
+    public $plain = "p";
+    public $n = 0 { get { $this->reads = $this->reads + 1; return $this->n; } }
+}
+// declare() carries no directive this subset models, and the braced form is an
+// ordinary block. (Under strict_types real PHP raises a TypeError for a mismatched
+// argument; no grammar here checks parameter types, so the call is accepted.)
+declare(ticks=1);
+function s26declared(): int {
+    declare(ticks=1) { $r = 6; }
+    return $r;
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -697,6 +760,7 @@ function main() {
     s23(); // SECTION-CALL 23
     s24(); // SECTION-CALL 24
     s25(); // SECTION-CALL 25
+    s26(); // SECTION-CALL 26
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

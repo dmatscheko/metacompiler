@@ -5,16 +5,21 @@
  *   - compound bitwise and shift assignment (&= |= ^= <<= >>=),
  *   - variadic prototypes ( ..., int printf(const char *, ...) ),
  *   - __attribute__((...)) specifiers.
- * The ones the flat integer machine cannot model are RECOGNISED and routed to
- * notImplemented:
+ * The constructs that used to be merely RECOGNISED are all genuinely lowered now:
  *   - string literals ("..."),
  *   - cast expressions ((int)x, (void)x),
  *   - aggregate / brace / multi-dimensional array initializers ( = { ... } ),
  *   - multi-level pointers (char **argv).
- * A normal run therefore ABORTS cleanly at the first not-implemented construct; a
- * -warn-unsupported run warns for each, places harmless placeholders, and still
- * reaches a clean exit 0. Runs identically on goja and -frozen, and on the interpreter
- * and the compiler. main() returns the number of failed genuine checks (0 = success). */
+ * There is no flat integer machine any more: C has a real type model and a real
+ * numeric tower, so a flagless run reaches a clean exit 0 and a -warn-unsupported
+ * run reports no unsupported construct at all. Runs identically on goja and
+ * -frozen, and on the interpreter and the compiler. main() returns the number of
+ * failed genuine checks (0 = success).
+ *
+ * History: this was a by-design SHOULD-FAIL guard, because a flagless run aborted
+ * at the first not-implemented construct. The full-syntax work implemented all of
+ * them, which removed the guard's premise, so the matrix entry became an ordinary
+ * one. Do not re-arm it. */
 
 #include <stdio.h>
 #include <stdlib.h>

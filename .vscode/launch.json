@@ -1349,7 +1349,7 @@
             "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-features.ts", "-q"]
         },
         {
-            "name": "C recognition SHOULD FAIL",
+            "name": "C recognition (compiler, no flags)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-recognize.c", "-q"]

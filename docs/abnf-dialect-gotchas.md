@@ -483,3 +483,126 @@ END of the continued line (`x := a +` / `b`), and there the `+` still sits on
 `a`'s line. `a +`, `b*`, `len(arr)-` and a parenthesized continuation all keep
 working; only an operator that OPENS a line is refused, which is what Go does.
 Worth two points of Go corpus coverage on its own.
+
+## Give the RARER kind the special shape, not the common one
+
+Go arrays and Go slices were both a plain host array, so nothing at runtime told
+them apart — and the two things that needed telling apart pull in opposite
+directions: an array must be COPIED on assignment, a slice must SHARE its
+backing storage. A marker property is not available (the frozen runtime answers
+`invalid array index goarr` for any non-index key on an array), and a side table
+keyed by array identity grows without bound.
+
+What works is to move only ONE of the two off the plain representation. Making
+the SLICE a header `{a, o, n, c}` leaves `Array.isArray(v)` meaning exactly "v is
+a Go array" — a free discriminator, no marker, no table — and gives `cap`,
+`s[1:3]` sharing, `s[:2:3]` and an append that writes into shared storage all at
+once. Making the array the special one would have cost the same work and bought
+none of the slice semantics.
+
+The cost lands on whoever holds the primitives. In the interpreter it is a
+dozen call sites. In a `-to-llvm-ir` grammar the handle runtime's externs
+(`js_golen`, `js_goslice`, `js_goappend`, `js_gorange`, `js_pyset`, …) only know
+plain arrays, so each operation becomes a GENERATED function that reaches
+through the header and falls back to the extern — `declFn` in `go-to-llvm-ir.abnf`
+builds them. Two shapes make that affordable: `emitSelect` (a value-level
+if/else joined with a phi) and `emitCountLoop`, which keeps its counter in a
+scope slot rather than a phi so the loop needs no phi placement at all.
+
+One trap when the header is a class instance: `js_gotypeis` then reports the
+class name, so a type switch stops seeing `slice` (and `any`). Answer the probe
+from the BACKING array instead of the header and both come back for free.
+
+## `up.in` hands over the matched TOKENS, with the separators removed
+
+A production-level tag's `up.in` is not the source SLICE the production covered:
+it is the concatenation of the tokens it matched. So a declaration specifier run
+spelled `TypeInt = TypeElem { TypeElem }` gives
+
+    long double   ->   "longdouble"
+    unsigned int  ->   "unsignedint"
+
+A reader that recovers the base type by splitting that text on whitespace sees
+one unknown word, matches no keyword, and falls back to plain `int`. Nothing
+fails: the declaration parses, the variable is declared, the program runs.
+
+The failure mode is what makes this worth a section. It presented as **"`double
+x` works but `long double x` does not"** — in BOTH C grammars at once, which
+rules out the usual suspicion of a one-sided emitter bug — and the compiler only
+showed it because an `alloca i32` turned up where an `alloca i64` belonged. The
+interpreter, whose memory holds JS numbers, gave the RIGHT ANSWER for the wrong
+reason: its full-syntax section passed by luck, because the only `long double`
+value the test stores is `1.0L`, and 1.0 truncated to the integer 1 still
+compares equal to 1.0 and still divides to 0.25. A fractional value would have
+been silently wrong.
+
+Two ways out. Scan the run for the keywords themselves rather than for words:
+
+    var baseKws = ["unsigned", "signed", "double", "float", "short", "_Bool",
+                   "char", "void", "long", "int"]     // longest-first where they overlap
+
+or, if the tokens must stay separate, give the sub-rule its own tag and collect
+them: `BaseElem = TypeTok <~~ push(up.in) ~~> | Attr ;` — a single token's
+`up.in` IS its own text. The same trap applies to any `raw`-text test over a
+multi-token run; `isUnsignedTy(raw)` survives only because `indexOf("unsigned")`
+does not care about the missing space.
+
+## Testing a PRODUCT for zero overflows; test the factors
+
+In emitted integer IR (and anywhere else 64-bit arithmetic wraps), the guard
+
+    isZero = (ma * mb) == 0
+
+is not "either factor is zero". `2^52 * 2^52` is `2^104`, which is 0 modulo
+2^64 — so a soft-float multiply that used it returned 0.0 for every product of
+two powers of two, which is exactly the set of values a floating-point test
+suite is built from. `3.0 * 2.0` was 0.0 while `3.0 - 1.0` was fine, which sends
+you looking at the mantissa arithmetic instead of at the zero guard next to it.
+
+Test the factors, and remember that a `NewOr` of two `i1` comparisons is not
+always available — a select chain is:
+
+    az     = ICmp(EQ, ma, 0)
+    isZero = ICmp(EQ, Select(az, 0, mb), 0)      // ma == 0 || mb == 0
+
+
+## A trailing closure and a statement block look identical
+
+`if case .p = E.c(3) { body }` did not parse in either Swift grammar, and the
+error pointed inside the condition. The reason is that `{ body }` is a perfectly
+good TRAILING CLOSURE of `E.c(3)`: `MArgs` ends with `[ TrailArg ]`, the closure
+matches, the `if` then has no block left and the whole statement fails. The same
+shape had been quietly costing the grammar elsewhere — `switch words.count { ... }`
+only worked because `case 1, 2:` is not a valid closure body, so `MethodSfx` failed
+on the closure and fell through to `FieldSfx`. Change one case label and it breaks.
+
+Real parsers resolve this with a FLAG: while reading the condition of an
+`if`/`while`/`switch`/`for`, trailing closures are switched off. A `:script` guard
+cannot carry a flag — guards must be pure functions of (source, position), because a
+rolled-back alternative never undoes a mutation (see "Guards must be PURE" above).
+
+The fix is a zero-width guard that re-derives the flag from the source every time.
+`NoTrailCtx` in `languages/swift-*.abnf`:
+
+1. If the next non-space character is not `{`, answer "allowed" immediately — the
+   question does not arise and the common path stays cheap.
+2. Walk BACKWARDS, tracking bracket depth. On an unmatched `(` or `[` answer
+   "allowed" at once: we are inside a call or a subscript, so
+   `if xs.contains(where: { $0 > 1 }) { ... }` keeps working, and so does
+   `check(runBoth { 30 } cleanup: { 12 })`. Stop at an unmatched `{`, at a `}`,
+   at a `;`, at a newline at depth 0, or at the start of the file — that is the
+   start of the enclosing statement.
+3. Read the first word there, skipping a leading `else` (`} else if x.f() { ... }`).
+   `if`, `while`, `switch`, `for` and `guard` mean the brace ahead is a BODY, so the
+   guard fails and the trailing-closure alternative is declined.
+
+Two details matter. The backward walk must be capped, like every scan in this tree.
+And stopping at a newline is what keeps it cheap — a statement is usually one line —
+while being conservative in the safe direction: a condition split across lines finds
+a non-keyword first word and allows the trailing closure, which is the behaviour
+there was before the guard.
+
+This generalises to any language with trailing closures, or with a brace that can
+open either a block or a literal: Kotlin's `if (c) f { }`, Ruby's `do`/`{` blocks,
+and any grammar where a statement keyword is followed by an expression and then a
+brace.
