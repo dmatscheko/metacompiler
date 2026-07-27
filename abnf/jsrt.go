@@ -918,6 +918,8 @@ func (rt *jsrt) truthy(v interface{}) bool {
 		return t.f != 0
 	case jsJFlo: // Java's boxed double (see jsrtjvm.go).
 		return t.f != 0 && t.f == t.f
+	case jsGInt: // A sized integer (see jsrtint.go); 0 is falsy like any other.
+		return t.v != 0
 	case string:
 		return len(t) > 0
 	case *jsBigInt:
@@ -937,6 +939,11 @@ func (rt *jsrt) toNumber(v interface{}) float64 {
 		return t.f
 	case jsJFlo: // Java's boxed double.
 		return t.f
+	case jsGInt: // A sized integer (see jsrtint.go); a uint64 reads unsigned.
+		if t.u && t.w == 64 {
+			return float64(uint64(t.v))
+		}
+		return float64(t.v)
 	case jsRat:
 		return t.n / t.d
 	case jsCpx:
@@ -1014,6 +1021,8 @@ func (rt *jsrt) toString(v interface{}) string {
 		return phpFloStr(t.f)
 	case jsJFlo: // Each language's own float rendering (see jsrtjvm.go).
 		return jvmFloText(t)
+	case jsGInt: // A sized integer prints its digits, unsigned where it is (jsrtint.go).
+		return giStr(t)
 	case jsRat:
 		return jsNumString(t.n) + "/" + jsNumString(t.d)
 	case jsCpx:
@@ -1069,6 +1078,11 @@ func (rt *jsrt) toGoNatural(v interface{}) interface{} {
 		return phpFloStr(t.f)
 	case jsJFlo: // print/println show the language's own float rendering.
 		return jvmFloText(t)
+	case jsGInt: // print/println show a sized integer's digits (jsrtint.go).
+		if t.u {
+			return giU(t.v, t.w)
+		}
+		return t.v
 	case jsUndefT, jsNullT:
 		return nil
 	case float64:
@@ -1156,6 +1170,14 @@ func (rt *jsrt) strictEq(a, b interface{}) bool {
 	}
 	if bf, isFlo := b.(jsJFlo); isFlo {
 		return jvmNumEq(bf.f, a)
+	}
+	// A sized integer (jsrtint.go) compares by VALUE too, never by identity: a
+	// box and a plain number are the same integer, and int8(1) == 1 holds.
+	if _, isInt := a.(jsGInt); isInt {
+		return giIsNumeric(b) && rt.giEq(a, b)
+	}
+	if _, isInt := b.(jsGInt); isInt {
+		return giIsNumeric(a) && rt.giEq(a, b)
 	}
 	switch at := a.(type) {
 	case jsUndefT:
@@ -1487,6 +1509,8 @@ func (rt *jsrt) typeOf(v interface{}) string {
 	case jsChar:
 		return "char"
 	case jsJFlo: // Java's boxed double is a number like any other.
+		return "number"
+	case jsGInt: // A sized integer is a number like any other (jsrtint.go).
 		return "number"
 	case jsSym:
 		return "symbol"
@@ -7742,6 +7766,39 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			fmt.Fprintln(outWriter, wtf8Clean(out))
 			return 0
+		},
+		// A Lua string is a BYTE string, so lua-to-llvm-ir.abnf (like
+		// lua-interpreter.abnf) holds one host character per byte: every code unit
+		// of a Lua string is 0..255 and # / string.len / string.sub therefore count
+		// and cut in bytes, which is what real Lua does. js_luaout is the one place
+		// that model is undone again - the bytes are decoded as UTF-8 on the way to
+		// the terminal, so a program prints the byte sequence it holds. A byte that
+		// starts no valid sequence is passed through as its own code point, the
+		// closest a UTF-8 terminal can come to the raw byte real Lua would write.
+		// Only the Lua compiler emits this, and only around print.
+		"js_luaout": func(a []uint64) uint64 {
+			units := strUnits(rt.toString(u(a[0])))
+			b := make([]byte, 0, len(units))
+			for _, c := range units {
+				b = append(b, byte(c))
+			}
+			out := make([]rune, 0, len(b))
+			for i := 0; i < len(b); {
+				if b[i] < utf8.RuneSelf {
+					out = append(out, rune(b[i]))
+					i++
+					continue
+				}
+				r, n := utf8.DecodeRune(b[i:])
+				if r == utf8.RuneError && n <= 1 {
+					out = append(out, rune(b[i]))
+					i++
+					continue
+				}
+				out = append(out, r)
+				i += n
+			}
+			return rt.wrapStr(string(out))
 		},
 		// Lua's 64-bit logical shift: value << k / value >> k over the two's
 		// complement 64-bit integer, k >= 64 clears, a negative k reverses the

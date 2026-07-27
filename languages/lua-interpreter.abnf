@@ -420,7 +420,34 @@ LongBracket = :script(~~
             } else { i = i + 1 }
         }
         var s = ""
-        for (var j = off; j < i; j++) { s = s + String.fromCharCode(c.peek(j)) }
+        // c.peek returns BYTES, and a returned token must match the input LITERALLY -
+        // so a byte above 127 cannot be appended as its own code point (it would be
+        // re-encoded as two bytes on the way into Go and the token would no longer
+        // match). Decode UTF-8 by hand instead; [[h<e-acute>llo]] did not parse at all
+        // before this, in either grammar.
+        var j = off
+        while (j < i) {
+            var b0 = c.peek(j)
+            if (b0 < 128) { s = s + String.fromCharCode(b0); j = j + 1; continue }
+            var need = 0
+            var cp = 0
+            if (b0 >= 240) { need = 3; cp = b0 - 240 }
+            else if (b0 >= 224) { need = 2; cp = b0 - 224 }
+            else if (b0 >= 192) { need = 1; cp = b0 - 192 }
+            else { s = s + String.fromCharCode(b0); j = j + 1; continue }
+            var ok = true
+            for (var q = 1; q <= need; q++) {
+                var cb = c.peek(j + q)
+                if (cb < 128 || cb >= 192) { ok = false } else { cp = cp * 64 + (cb - 128) }
+            }
+            if (!ok) { s = s + String.fromCharCode(b0); j = j + 1; continue }
+            if (cp < 65536) { s = s + String.fromCharCode(cp) }
+            else {
+                var uv = cp - 65536
+                s = s + String.fromCharCode(55296 + Math.floor(uv / 1024)) + String.fromCharCode(56320 + (uv % 1024))
+            }
+            j = j + need + 1
+        }
         return abnf.newToken(s, 0)
     })()
 ~~) ;
@@ -564,10 +591,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (1 + lvl < s.length && s.charCodeAt(1 + lvl) === 61) { lvl = lvl + 1 }
         return s.slice(lvl + 2, s.length - (lvl + 2))
     }
+    // A long literal takes no escapes, so its whole body is source text and is UTF-8
+    // encoded into the byte string exactly like the plain runs of a quoted literal.
     function luaLong(s) {
-        if (s.length > 0 && s.charCodeAt(0) === 10) { return s.slice(1) }
-        if (s.length > 1 && s.charCodeAt(0) === 13 && s.charCodeAt(1) === 10) { return s.slice(2) }
-        return s
+        if (s.length > 0 && s.charCodeAt(0) === 10) { return luaUtf8(s.slice(1)) }
+        if (s.length > 1 && s.charCodeAt(0) === 13 && s.charCodeAt(1) === 10) { return luaUtf8(s.slice(2)) }
+        return luaUtf8(s)
     }
 
     // ----- The number model: Lua's integer and float subtypes -----
@@ -679,6 +708,93 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return isFloat ? mkFlt(v) : v
     }
 
+    // ----- Lua strings are BYTE strings -----
+    // A Lua string is a counted sequence of BYTES, not of characters: real Lua answers 6
+    // for #"hello" spelled with an e-acute, and string.sub cuts at byte offsets. The host
+    // string type here is UTF-16, so a Lua string is held with ONE HOST CHARACTER PER
+    // BYTE (every code unit is 0..255). Everything that walks a string then measures and
+    // cuts in bytes for free - #, string.len, string.sub, string.rep and the relational
+    // operators, whose code-unit order IS byte order - and \xNN / \ddd become the single
+    // byte they name instead of a code point.
+    //
+    // Two conversions bound the model. luaUtf8 encodes source text and \u{...} on the way
+    // IN (it is called only from the literal readers), and luaOut decodes on the way OUT
+    // to the terminal, so what a program prints is the byte sequence it holds. Nothing
+    // in between needs to know.
+    function utf8Enc(cp) {
+        if (cp < 128) { return String.fromCharCode(cp) }
+        if (cp < 2048) {
+            return String.fromCharCode(192 + Math.floor(cp / 64)) + String.fromCharCode(128 + cp % 64)
+        }
+        if (cp < 65536) {
+            return String.fromCharCode(224 + Math.floor(cp / 4096))
+                 + String.fromCharCode(128 + Math.floor(cp / 64) % 64)
+                 + String.fromCharCode(128 + cp % 64)
+        }
+        return String.fromCharCode(240 + Math.floor(cp / 262144))
+             + String.fromCharCode(128 + Math.floor(cp / 4096) % 64)
+             + String.fromCharCode(128 + Math.floor(cp / 64) % 64)
+             + String.fromCharCode(128 + cp % 64)
+    }
+    // Host text (UTF-16, surrogate pairs included) to its UTF-8 bytes.
+    function luaUtf8(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c >= 55296 && c < 56320 && i + 1 < s.length) {
+                var lo = s.charCodeAt(i + 1)
+                if (lo >= 56320 && lo < 57344) {
+                    out = out + utf8Enc(65536 + (c - 55296) * 1024 + (lo - 56320))
+                    i = i + 2
+                    continue
+                }
+            }
+            out = out + utf8Enc(c)
+            i = i + 1
+        }
+        return out
+    }
+    // The byte string back to host text for printing. A byte that starts no valid
+    // sequence is passed through as its own code point, which is the closest a UTF-8
+    // terminal can come to the raw byte real Lua would write.
+    function luaOut(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var b = s.charCodeAt(i)
+            if (b < 128) { out = out + String.fromCharCode(b); i = i + 1; continue }
+            var need = 0
+            var cp = 0
+            if (b >= 240 && b < 248) { need = 3; cp = b - 240 }
+            else if (b >= 224) { need = 2; cp = b - 224 }
+            else if (b >= 192) { need = 1; cp = b - 192 }
+            else { out = out + String.fromCharCode(b); i = i + 1; continue }
+            var ok = i + need < s.length
+            var k = 1
+            while (ok && k <= need) {
+                var cb = s.charCodeAt(i + k)
+                if (cb < 128 || cb >= 192) { ok = false } else { cp = cp * 64 + (cb - 128) }
+                k = k + 1
+            }
+            if (!ok) { out = out + String.fromCharCode(b); i = i + 1; continue }
+            out = out + codePointStr(cp)
+            i = i + need + 1
+        }
+        return out
+    }
+
+    function asciiCase(s, up) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var c = s.charCodeAt(i)
+            if (up && c >= 97 && c <= 122) { c = c - 32 }
+            else if (!up && c >= 65 && c <= 90) { c = c + 32 }
+            out = out + String.fromCharCode(c)
+        }
+        return out
+    }
+
     // ----- String escapes -----
     // Lua's own set: the single letters a b f n r t v, a decimal byte of up to three
     // digits, xNN, u{...} (a code point), a real line break (which stands for a newline)
@@ -688,7 +804,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i = 0
         while (i < s.length) {
             var cc = s.charCodeAt(i)
-            if (cc !== 92) { out = out + String.fromCharCode(cc); i = i + 1; continue }
+            // Literal text is UTF-8 encoded into the byte string; the escapes below that
+            // name a BYTE (\xNN, \ddd) are already one host character each.
+            if (cc !== 92) {
+                if (cc < 128) { out = out + String.fromCharCode(cc); i = i + 1; continue }
+                if (cc >= 55296 && cc < 56320 && i + 1 < s.length) {
+                    var lo2 = s.charCodeAt(i + 1)
+                    if (lo2 >= 56320 && lo2 < 57344) {
+                        out = out + utf8Enc(65536 + (cc - 55296) * 1024 + (lo2 - 56320))
+                        i = i + 2
+                        continue
+                    }
+                }
+                out = out + utf8Enc(cc)
+                i = i + 1
+                continue
+            }
             var e = s.charCodeAt(i + 1)
             if (e === 110) { out = out + String.fromCharCode(10); i = i + 2; continue }
             if (e === 116) { out = out + String.fromCharCode(9);  i = i + 2; continue }
@@ -727,7 +858,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (i < s.length && s.charCodeAt(i) === 123) { i = i + 1 }
                 while (i < s.length && hexDigit(s.charCodeAt(i)) >= 0) { uv = uv * 16 + hexDigit(s.charCodeAt(i)); i = i + 1 }
                 if (i < s.length && s.charCodeAt(i) === 125) { i = i + 1 }
-                out = out + codePointStr(uv)
+                // \u{...} names a CODE POINT and Lua writes its UTF-8 encoding.
+                out = out + utf8Enc(uv)
                 continue
             }
             if (e >= 48 && e <= 57) {
@@ -742,7 +874,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 out = out + String.fromCharCode(dv)
                 continue
             }
-            out = out + String.fromCharCode(e)
+            out = out + utf8Enc(e)
             i = i + 2
         }
         return out
@@ -837,6 +969,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function luaIndex(o, k) {
         if (o === undefined || o === null) { fail("attempt to index a nil value") }
+        // Every Lua string shares one metatable whose __index is the string library, so
+        // s:sub(2) / s:len() / ("x").rep work without the library table being named.
+        // Only that lookup is reachable this way: s[1] finds no numeric key and is nil,
+        // exactly as in real Lua.
+        if (typeof o == "string") {
+            var lib = globalScope["string"]
+            var sk = "" + k
+            return hasOwn(lib, sk) ? lib[sk] : undefined
+        }
         if (typeof o != "object" || isFlt(o)) { fail("attempt to index a " + luaType(o) + " value") }
         var kk = luaKey(k)
         return hasOwn(o, kk) ? o[kk] : undefined
@@ -1428,7 +1569,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (i > 0) { out += "\t" }
             out += luaToStr(arguments[i])
         }
-        println(out)
+        // The byte string is decoded back to host text here, at the one place it leaves
+        // the program (see the byte-string note above luaUtf8).
+        println(luaOut(out))
     }
     globalScope["exit"] = function(code) { exit(numOf(code) | 0) }
 
@@ -1518,8 +1661,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // implement exactly the same three steps.
     globalScope["string"] = {
         len: function(s) { return s.length },
-        upper: function(s) { return s.toUpperCase() },
-        lower: function(s) { return s.toLowerCase() },
+        // ASCII only: real Lua case-maps with the C library in the C locale, which leaves
+        // every byte above 127 alone. The host toUpperCase would have mapped the BYTES of
+        // a multi-byte character (the 0xE6 that starts a CJK character is 'ae' to a host
+        // string, and uppercases to 0xC6), corrupting the encoding.
+        upper: function(s) { return asciiCase(s, true) },
+        lower: function(s) { return asciiCase(s, false) },
         sub: function(s, i, j) {
             var str = "" + s
             var len = str.length

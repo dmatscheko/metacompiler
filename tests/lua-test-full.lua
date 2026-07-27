@@ -94,6 +94,12 @@ function s04()
     check("lng2", [==[level two]==], "level two")
     check("lng3", [=[holds ]] safely]=], "holds ]] safely")
     check("lng4", string.len([[a\nb]]), 4) -- no escape processing
+    -- A long literal holding non-ASCII text did not PARSE in either grammar: the
+    -- :script that scans it built its token one c.peek BYTE at a time, and a byte above
+    -- 127 appended as its own code point is re-encoded as two bytes on the way into Go,
+    -- so the token no longer matched the input. It decodes UTF-8 by hand now.
+    check("lng6", [[héllo]], "héllo")
+    check("lng7", #[[héllo]], 6)           -- and a long literal is a BYTE string too
     local ml = [[
 line1
 line2]]                                 -- a first newline is skipped

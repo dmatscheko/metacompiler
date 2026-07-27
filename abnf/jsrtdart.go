@@ -48,6 +48,7 @@ package abnf
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -329,4 +330,73 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 	m["js_dartstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.dartStr(u(a[0]))) }
 	// const e: the canonical value for e.
 	m["js_dartcanon"] = func(a []uint64) uint64 { return w(rt.dartCanon(u(a[0]), consts, 0)) }
+	// `v is T` for Dart's OWN type names. The shared js_is_type knows the JVM
+	// spelling (Int, Double, Boolean, List) and answers false for everything it
+	// does not recognize - so `1 is int`, `1 is num`, `true is bool`, `{1: 2} is
+	// Map` and `{1, 2} is Set` were all FALSE here while dart-interpreter.abnf's
+	// dartIsType answered true for each. This is that function, in Go; user class
+	// names still fall through to the shared walk of the __class chain.
+	m["js_dartis"] = func(a []uint64) uint64 {
+		t, _ := u(a[1]).(string)
+		if rt.dartIsType(u(a[0]), t) {
+			return jsHTrue
+		}
+		return jsHFalse
+	}
+}
+
+// dartIsType is the Go twin of dartIsType in languages/dart-interpreter.abnf. The
+// type ARGUMENTS are handled by the caller (the reified List<int> check lives in the
+// grammar), so only the base name reaches here.
+func (rt *jsrt) dartIsType(v interface{}, t string) bool {
+	if i := strings.IndexByte(t, '<'); i >= 0 {
+		t = t[:i]
+	}
+	opt := false
+	if strings.HasSuffix(t, "?") {
+		t = t[:len(t)-1]
+		opt = true
+	}
+	if isUndefOrNull(v) {
+		return opt || t == "Null"
+	}
+	switch t {
+	case "dynamic", "Object", "var":
+		return true
+	case "int":
+		f, ok := v.(float64)
+		return ok && f == math.Trunc(f)
+	case "double", "num":
+		_, ok := v.(float64)
+		return ok
+	case "String":
+		_, ok := v.(string)
+		return ok
+	case "bool":
+		_, ok := v.(bool)
+		return ok
+	case "List", "Iterable":
+		_, ok := v.(*jsArray)
+		return ok
+	case "Map":
+		// A Map is the shared dict object; a Set is a dict-shaped object carrying
+		// __set, and it is NOT a Map.
+		if o, ok := v.(*jsObject); ok {
+			if _, isSet := o.props["__set"]; isSet {
+				return false
+			}
+		}
+		_, _, ok := dictParts(v)
+		return ok
+	case "Set":
+		o, ok := v.(*jsObject)
+		if !ok {
+			return false
+		}
+		_, isSet := o.props["__set"]
+		return isSet
+	case "Function":
+		return isCallable(v)
+	}
+	return rt.isTypeName(v, t)
 }

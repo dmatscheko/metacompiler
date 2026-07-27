@@ -77,6 +77,20 @@ cd''';
   check("li8", 'A' == "A" && '\x42' == "B" && '\u{1F600}'.length == 2);
   var n = 6;
   check("li9", 'v=$n' == "v=6" && '${n + 1}!' == "7!");
+  // Dart has ONE numeric tower: only ~/ and the bitwise operators truncate. Each of
+  // the six lines below was wrong in exactly one half. The interpreter reached the
+  // shared core.add, whose default truncates the sum with |0, so 0.1 + 0.2 was 0 and
+  // 1.5 + 1.0 was 2; the compiler still wrapped -, *, unary - and ++ to 32 bits, so
+  // 2.5 - 1.0 was 1, -1.5 was -1 and (x = 1.5; x++) was 2.
+  check("nu1", 0.1 + 0.2 == 0.30000000000000004 && 1.5 + 1.0 == 2.5);
+  check("nu2", 2.5 - 1.0 == 1.5 && 2.5 * 2.0 == 5.0);
+  check("nu3", -1.5 == 0.0 - 1.5 && -(0.5 + 1.0) == -1.5);
+  var xf = 1.5; xf++;
+  var yf = 2.5; yf -= 1.0;
+  var zf = 1.5; zf *= 2.0;
+  var wf = 1.5; wf += 1.25;
+  check("nu4", xf == 2.5 && yf == 1.5 && zf == 3.0 && wf == 2.75);
+  check("nu5", 1 / 0 > 1e308 && 7 % 2.5 == 2.0); // / never truncates; % keeps the fraction
 }
 
 // ===== SECTION 03: collection literals =====
@@ -307,6 +321,7 @@ class Kn {
   Kn(this.a, this.b);
   Kn.unit() : this(1, 1); // redirecting generative constructor
   Kn.diag(int v) : a = v, b = v + v; // initializer list
+  Kn.dbl(int v) : this.diag(v * 2); // redirect to a NAMED generative constructor
   Kn.pos(int v) : assert(v >= 0), a = v, b = 0; // assert in the initializer list
   factory Kn.grown(int v) { return v > 100 ? Kn(100, 100) : Kn(v * 2, v); }
   const Kn.fix(this.a, this.b); // const constructor
@@ -317,13 +332,17 @@ void s13() {
   check("ct2", Kn.grown(5).sum() == 15 && Kn.grown(200).a == 100);
   const k1 = Kn.fix(2, 3); // implicit const on the right-hand side
   check("ct3", identical(k1, const Kn.fix(2, 3)) && k1.b == 3); // canonicalized
+  check("ct4", Kn.dbl(2).a == 4 && Kn.dbl(2).b == 8); // : this.named(...) redirect
 }
 
 // ===== SECTION 14: inheritance =====
-class IhBase { final int v; IhBase(this.v); int twice() => v * 2; }
+class IhBase { final int v; IhBase(this.v); IhBase.named(this.v); int twice() => v * 2; }
 class IhKid extends IhBase {
   IhKid(super.v); // super parameter (2.17)
   int twice() => super.twice() + 1; // override + super call
+}
+class IhNamedSup extends IhBase {
+  IhNamedSup(int x) : super.named(x + 1); // : super.named(...) chain
 }
 class IhFake implements IhBase { final int v = 99; int twice() => 5; } // interface only
 abstract class IhAbs { int go(); int go2() => go() * 2; } // abstract member
@@ -335,6 +354,7 @@ void s14() {
   IhBase fb = IhFake();
   check("ih3", fb.twice() == 5 && fb.v == 99);
   check("ih4", IhImp().go2() == 8);
+  check("ih5", IhNamedSup(4).v == 5 && IhNamedSup(4).twice() == 10);
 }
 
 // ===== SECTION 15: mixins and class modifiers =====
@@ -409,6 +429,15 @@ void s18() {
   check("gn2", gnMax(4, 9) == 9 && gnMax<double>(1.5, 0.5) == 1.5);
   Object xs = <int>[1];
   check("gn3", xs is List<int> && <Object>[1] is! List<int>); // reified generics
+  // `is` against Dart's OWN type names. The compiler half used the shared js_is_type,
+  // which knows only the JVM spelling (Int, Double, Boolean) and answers false for
+  // anything it does not recognize - so every one of these was false there while the
+  // interpreter answered true.
+  check("gn4", 1 is int && 1 is num && "x" is String && true is bool);
+  check("gn5", [1] is List && {1: 2} is Map && {1, 2} is Set && (() => 1) is Function);
+  check("gn6", 1 is! String && "x" is! int && (1, 2) is Record);
+  Object? gnNil;
+  check("gn7", gnNil is! int && gnNil is int? && 1 is Object);
   Map<String, List<int>> deep = {"a": [1, 2]};
   check("gn4", deep["a"]![1] == 2);
 }

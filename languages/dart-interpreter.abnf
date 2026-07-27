@@ -1355,6 +1355,21 @@ KwDeferred  = "deferred" KwEnd ;
         if (m < 0) { m = m + (r < 0 ? 0 - r : r) }
         return m
     }
+    // `+` and `+=` reach the shared core.add, whose DEFAULT truncates the sum with |0 -
+    // so 0.1 + 0.2 was 0 and 1.5 + 1.0 was 2 here, while the compiler half (js_jadd)
+    // answered 0.30000000000000004 and 2.5. Only + was affected: - * / % are handled by
+    // the binOp override below and never truncated. This is js_jadd's rule exactly, so
+    // the two halves now agree: a string operand concatenates, two values that are both
+    // int32 add as int32, and anything else adds in floating point.
+    core.add = function(l, r) {
+        if (typeof l == "string" || typeof r == "string") { return l + r }
+        if (typeof l == "number" && typeof r == "number") {
+            var s = l + r
+            if (l === (l | 0) && r === (r | 0)) { return s | 0 }
+            return s
+        }
+        return (l + r) | 0
+    }
     var baseBinOp = binOp
     binOp = function(op, l, r) {
         if (hasUserOp(l) && op != "==" && op != "!=") {

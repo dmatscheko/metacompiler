@@ -74,7 +74,23 @@ check("str-len", string.len("hello"), 5)
 check("str-len-op", #"hello", 5)
 check("str-len-op-var", (function() local s = "abc" return #s end)(), 3)
 check("str-len-empty", string.len(""), 0)
-check("str-len-unicode", string.len("héllo"), 5)
+-- A Lua string is a BYTE string, so its length is its byte count, not its character
+-- count: lua 5.5 answers 6 here, and this line used to assert 5 - the answer both
+-- halves gave while they held UTF-16 text. Both now hold one host character per byte.
+check("str-len-unicode", string.len("héllo"), 6)
+check("str-len-bytes", #"日本", 6)                       -- three bytes per character
+check("str-sub-bytes", string.sub("héllo", 1, 3), "hé") -- sub cuts at BYTE offsets
+check("str-sub-byte-mid", string.sub("日本", 4), "本")
+check("str-esc-byte", "\xc3" == "\195", true)           -- an escape names one byte
+check("str-esc-utf8", #"\u{65e5}", 3)                   -- \u{...} writes UTF-8
+check("str-upper-bytes", string.upper("héllo"), "HéLLO") -- C locale: bytes > 127 unchanged
+-- Every string shares one metatable whose __index is the string library, so the
+-- s:method() form works without naming the library table.
+check("str-meta-len", ("héllo"):len(), 6)
+check("str-meta-sub", ("hello"):sub(-3), "llo")
+check("str-meta-upper", ("ab"):upper() .. ("CD"):lower(), "ABcd")
+check("str-meta-rep", ("ab"):rep(2), "abab")
+check("str-meta-index-nil", ("abc")[1], nil)            -- only the library is reachable
 check("str-escapes", string.len("a\tb") + string.len("x\ny"), 6)
 check("str-single-quote", 'abc', "abc")
 check("str-upper-lower", string.upper("Lua") .. string.lower("Lua"), "LUAlua")

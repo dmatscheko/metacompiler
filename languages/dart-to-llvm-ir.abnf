@@ -1353,6 +1353,13 @@ KwSuper     = "super" KwEnd ;
     wraps["/="] = 0
     wraps["%"] = 0
     wraps["%="] = 0
+    // - and * were still wrapped, so 2.5 - 1.0 was 1 and -1.5 was -1 here while
+    // dart-interpreter.abnf (whose binOp override never truncates) answered 1.5 and
+    // -1.5. Dart has ONE numeric tower: only ~/ and the bitwise operators truncate.
+    wraps["-"] = 0
+    wraps["*"] = 0
+    wraps["-="] = 0
+    wraps["*="] = 0
 
     // % : m = l % r ; if (m < 0) m += r.abs(). Emitted branch free with two selects, so
     // emitBin keeps its (b, op, l, r) -> value shape and every caller (foldBinary,
@@ -1403,10 +1410,17 @@ KwSuper     = "super" KwEnd ;
         return function(b) {
             var r = operand(b)
             b = r.b
-            // js_is_type does not know Dart's Function type; js_typeof does.
-            var v = (tn == "Function")
-                    ? callExt(b, "js_seq", [callExt(b, "js_typeof", [r.v]), emitStr(b, "function")])
-                    : callExt(b, "js_is_type", [r.v, emitStr(b, tn)])
+            // js_dartis answers for DART's type names (int, double, num, bool, Map,
+            // Set, Function, ...) and falls through to the shared class-chain walk for
+            // a user type. The shared js_is_type knows only the JVM spelling and
+            // answered false for every one of them, so `1 is int` was false here while
+            // the interpreter half said true.
+            // The trailing '?' has to survive: baseName strips it, and `null is int?`
+            // is TRUE while `null is int` is false. A '?' inside the type arguments
+            // (List<int?>) is not the type's own, so only a FINAL one counts.
+            var rawT = stripWs(items[2].tname)
+            var probeT = (rawT.length > 0 && rawT.charAt(rawT.length - 1) == "?") ? (tn + "?") : tn
+            var v = callExt(b, "js_dartis", [r.v, emitStr(b, probeT)])
             // `is List<int>`: a list built as a typed literal carries its element type,
             // and one written with a different argument is NOT of this type.
             if (targ != "" && anyTypedColl && (tn == "List" || tn == "Iterable")) {
@@ -2679,7 +2693,19 @@ KwSuper     = "super" KwEnd ;
                     callExt(b, "js_set", [clsV, emitStr(b, "__factory"), cv])
                 } else {
                     callExt(b, "js_set", [clsV, emitStr(b, cn), cv])
-                    callExt(b, "js_set", [clsV, emitStr(b, "__ctor$" + cn), cv])
+                    // The C.name(...) form above makes a FRESH instance and takes its
+                    // arguments from index 0, because it is reached through js_mcall.
+                    // A `: super.name(...)` / `: this.name(...)` chain has the opposite
+                    // convention - the instance already exists and arrives as args[0] -
+                    // so the same constructor is emitted a second time with the unnamed
+                    // one's calling convention and registered under __ctor$name.
+                    if (!ctors[k].factory) {
+                        var cci = emitCtorFunc(cls, ctors[k], false)
+                        callExt(b, "js_set", [clsV, emitStr(b, "__ctor$" + cn),
+                                              callExt(b, "js_closure", [handle(cci), curScopeV])])
+                    } else {
+                        callExt(b, "js_set", [clsV, emitStr(b, "__ctor$" + cn), cv])
+                    }
                 }
             }
             curMethodNames = savedMethodNames
@@ -3181,16 +3207,21 @@ KwSuper     = "super" KwEnd ;
     // -x : a user `operator -()` with no argument when the operand is an instance of a
     // class that declares one (the interpreter keys unary minus under "-" too), else the
     // shared numeric negation.
+    // The shared makeNeg wraps the negation to 32 bits, which made -1.5 answer -1 here
+    // while the interpreter half answered -1.5. Dart's unary minus is plain negation.
     var baseMakeNeg = makeNeg
     makeNeg = function(t) {
-        var inner = baseMakeNeg(t)
+        var inner = function(b) {
+            var ri = t(b)
+            return {b: ri.b, v: callExt(ri.b, "js_neg", [ri.v])}
+        }
         return function(b) {
             if (operatorNames["$-"] == undefined) { return inner(b) }
             var r = t(b)
             b = r.b
             var ov = r.v
             return emitOpDispatch(b, "-", ov, [],
-                                  function(bb) { return {b: bb, v: intWrap(bb, callExt(bb, "js_neg", [ov]))} })
+                                  function(bb) { return {b: bb, v: callExt(bb, "js_neg", [ov])} })
         }
     }
     // ----- patterns (Dart 3) -----
@@ -3856,7 +3887,9 @@ KwSuper     = "super" KwEnd ;
             var nameV = emitStr(b, ref.name)
             var oldV = callExt(b, "js_tonum", [callExt(b, "js_kget", [curScopeV, nameV])])
             oneV = callExt(b, "js_num_i", [handle(1)])
-            var newV = intWrap(b, callExt(b, extName, [oldV, oneV]))
+            // NOT intWrap: Dart's ++ on a double keeps the double (x = 1.5; x++ is
+            // 2.5), and the interpreter half's step never truncated either.
+            var newV = callExt(b, extName, [oldV, oneV])
             callExt(b, "js_kset", [curScopeV, nameV, newV])
             return {b: b, old: oldV, nw: newV, skips: []}
         }
@@ -3871,7 +3904,7 @@ KwSuper     = "super" KwEnd ;
             old2 = callExt(b, "js_tonum", [g.v])
         }
         oneV = callExt(b, "js_num_i", [handle(1)])
-        var new2 = intWrap(b, callExt(b, extName, [old2, oneV]))
+        var new2 = callExt(b, extName, [old2, oneV])
         if (p.field) { b = emitSetterWrite(b, p.obj, ref.path[ref.path.length - 1].key, new2) }
         else { b = emitIndexSet(b, p.obj, p.key, new2) }
         return {b: b, old: old2, nw: new2, skips: nullBs}

@@ -424,7 +424,34 @@ LongBracket = :script(~~
             } else { i = i + 1 }
         }
         var s = ""
-        for (var j = off; j < i; j++) { s = s + String.fromCharCode(c.peek(j)) }
+        // c.peek returns BYTES, and a returned token must match the input LITERALLY -
+        // so a byte above 127 cannot be appended as its own code point (it would be
+        // re-encoded as two bytes on the way into Go and the token would no longer
+        // match). Decode UTF-8 by hand instead; [[h<e-acute>llo]] did not parse at all
+        // before this, in either grammar.
+        var j = off
+        while (j < i) {
+            var b0 = c.peek(j)
+            if (b0 < 128) { s = s + String.fromCharCode(b0); j = j + 1; continue }
+            var need = 0
+            var cp = 0
+            if (b0 >= 240) { need = 3; cp = b0 - 240 }
+            else if (b0 >= 224) { need = 2; cp = b0 - 224 }
+            else if (b0 >= 192) { need = 1; cp = b0 - 192 }
+            else { s = s + String.fromCharCode(b0); j = j + 1; continue }
+            var ok = true
+            for (var q = 1; q <= need; q++) {
+                var cb = c.peek(j + q)
+                if (cb < 128 || cb >= 192) { ok = false } else { cp = cp * 64 + (cb - 128) }
+            }
+            if (!ok) { s = s + String.fromCharCode(b0); j = j + 1; continue }
+            if (cp < 65536) { s = s + String.fromCharCode(cp) }
+            else {
+                var uv = cp - 65536
+                s = s + String.fromCharCode(55296 + Math.floor(uv / 1024)) + String.fromCharCode(56320 + (uv % 1024))
+            }
+            j = j + need + 1
+        }
         return abnf.newToken(s, 0)
     })()
 ~~) ;
@@ -568,10 +595,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (1 + lvl < s.length && s.charCodeAt(1 + lvl) === 61) { lvl = lvl + 1 }
         return s.slice(lvl + 2, s.length - (lvl + 2))
     }
+    // A long literal takes no escapes, so its whole body is source text and is UTF-8
+    // encoded into the byte string exactly like the plain runs of a quoted literal.
     function luaLong(s) {
-        if (s.length > 0 && s.charCodeAt(0) === 10) { return s.slice(1) }
-        if (s.length > 1 && s.charCodeAt(0) === 13 && s.charCodeAt(1) === 10) { return s.slice(2) }
-        return s
+        if (s.length > 0 && s.charCodeAt(0) === 10) { return luaUtf8(s.slice(1)) }
+        if (s.length > 1 && s.charCodeAt(0) === 13 && s.charCodeAt(1) === 10) { return luaUtf8(s.slice(2)) }
+        return luaUtf8(s)
     }
 
     // ----- Numeric literals -----
@@ -681,6 +710,48 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
+    // ----- Lua strings are BYTE strings -----
+    // A Lua string is a counted sequence of BYTES, not of characters: real Lua answers 6
+    // for #"hello" spelled with an e-acute. The runtime string type is UTF-16, so a Lua
+    // string is held with ONE CHARACTER PER BYTE (every code unit is 0..255) and #,
+    // string.len, string.sub, string.rep and the relational operators all measure and cut
+    // in bytes for free. utf8Enc/luaUtf8 encode source text and \u{...} on the way IN;
+    // the js_luaout extern decodes on the way OUT, at print. lua-interpreter.abnf carries
+    // exactly the same pair.
+    function utf8Enc(cp) {
+        if (cp < 128) { return String.fromCharCode(cp) }
+        if (cp < 2048) {
+            return String.fromCharCode(192 + Math.floor(cp / 64)) + String.fromCharCode(128 + cp % 64)
+        }
+        if (cp < 65536) {
+            return String.fromCharCode(224 + Math.floor(cp / 4096))
+                 + String.fromCharCode(128 + Math.floor(cp / 64) % 64)
+                 + String.fromCharCode(128 + cp % 64)
+        }
+        return String.fromCharCode(240 + Math.floor(cp / 262144))
+             + String.fromCharCode(128 + Math.floor(cp / 4096) % 64)
+             + String.fromCharCode(128 + Math.floor(cp / 64) % 64)
+             + String.fromCharCode(128 + cp % 64)
+    }
+    function luaUtf8(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c >= 55296 && c < 56320 && i + 1 < s.length) {
+                var lo = s.charCodeAt(i + 1)
+                if (lo >= 56320 && lo < 57344) {
+                    out = out + utf8Enc(65536 + (c - 55296) * 1024 + (lo - 56320))
+                    i = i + 2
+                    continue
+                }
+            }
+            out = out + utf8Enc(c)
+            i = i + 1
+        }
+        return out
+    }
+
     // ----- String escapes -----
     // Lua's own set: the single letters a b f n r t v, a decimal byte of up to three
     // digits, xNN, u{...} (a code point), a real line break (which stands for a newline)
@@ -690,7 +761,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i = 0
         while (i < s.length) {
             var cc = s.charCodeAt(i)
-            if (cc !== 92) { out = out + String.fromCharCode(cc); i = i + 1; continue }
+            // Literal text is UTF-8 encoded into the byte string; the escapes below that
+            // name a BYTE (\xNN, \ddd) are already one host character each.
+            if (cc !== 92) {
+                if (cc < 128) { out = out + String.fromCharCode(cc); i = i + 1; continue }
+                if (cc >= 55296 && cc < 56320 && i + 1 < s.length) {
+                    var lo2 = s.charCodeAt(i + 1)
+                    if (lo2 >= 56320 && lo2 < 57344) {
+                        out = out + utf8Enc(65536 + (cc - 55296) * 1024 + (lo2 - 56320))
+                        i = i + 2
+                        continue
+                    }
+                }
+                out = out + utf8Enc(cc)
+                i = i + 1
+                continue
+            }
             var e = s.charCodeAt(i + 1)
             if (e === 110) { out = out + String.fromCharCode(10); i = i + 2; continue }
             if (e === 116) { out = out + String.fromCharCode(9);  i = i + 2; continue }
@@ -729,7 +815,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (i < s.length && s.charCodeAt(i) === 123) { i = i + 1 }
                 while (i < s.length && hexDigit(s.charCodeAt(i)) >= 0) { uv = uv * 16 + hexDigit(s.charCodeAt(i)); i = i + 1 }
                 if (i < s.length && s.charCodeAt(i) === 125) { i = i + 1 }
-                out = out + codePointStr(uv)
+                // \u{...} names a CODE POINT and Lua writes its UTF-8 encoding.
+                out = out + utf8Enc(uv)
                 continue
             }
             if (e >= 48 && e <= 57) {
@@ -744,7 +831,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 out = out + String.fromCharCode(dv)
                 continue
             }
-            out = out + String.fromCharCode(e)
+            out = out + utf8Enc(e)
             i = i + 2
         }
         return out
@@ -1050,7 +1137,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             s1B.NewCondBr(rawTruthy(s1B, callExt(s1B, "js_seq", [stv, emitStr(s1B, "boolean")])), sbB, s2B)
             sbB.NewRet(sbB.NewSelect(rawTruthy(sbB, ps[0]), emitStr(sbB, "true"), emitStr(sbB, "false")))
             s2B.NewCondBr(rawTruthy(s2B, callLua(s2B, "lua_isnum", [ps[0]])), smB, s3B)
-            s3B.NewRet(callExt(s3B, "js_pystr", [ps[0]]))
+            // A table and a function have no printable value in Lua (real Lua prints
+            // `table: 0x...`, an address nothing here can reproduce), so they render by
+            // TYPE NAME, which is what lua-interpreter.abnf's luaToStr already did. The
+            // shared js_pystr spelled them "[object Object]" and "[function]" - two
+            // divergences between the halves that no test happened to print.
+            var sgB = curF.NewBlock("")
+            var soB = curF.NewBlock("")
+            var spB = curF.NewBlock("")
+            var sxB = curF.NewBlock("")
+            s3B.NewCondBr(rawTruthy(s3B, callExt(s3B, "js_seq", [stv, emitStr(s3B, "function")])), sgB, soB)
+            sgB.NewRet(emitStr(sgB, "function"))
+            soB.NewCondBr(rawTruthy(soB, callExt(soB, "js_seq", [stv, emitStr(soB, "object")])), spB, sxB)
+            spB.NewRet(emitStr(spB, "table"))
+            sxB.NewRet(callExt(sxB, "js_pystr", [ps[0]]))
             smB.NewCondBr(rawTruthy(smB, callLua(smB, "lua_isint", [ps[0]])), siB, sfB)
             siB.NewRet(callExt(siB, "js_pystr", [ps[0]]))
             // js_luaflt is Lua's float rendering: inf / -inf / nan for the
@@ -1114,7 +1214,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var iV2 = callExt(bodyB, "js_get", [cell, emitStr(bodyB, "i")])
         var elemV = callExt(bodyB, "js_get", [src, iV2])
         if (name == "lua_strall") {
-            callExt(bodyB, "js_arr_push", [outArr, callLua(bodyB, "lua_str", [elemV])])
+            // lua_strall feeds print, and print is where the byte string leaves the
+            // program: js_luaout decodes the bytes back to text. Concatenation uses
+            // lua_str directly and must NOT decode - the result is a Lua string again.
+            callExt(bodyB, "js_arr_push", [outArr, callExt(bodyB, "js_luaout", [callLua(bodyB, "lua_str", [elemV])])])
         } else if (name == "lua_spread") {
             callExt(bodyB, "js_set", [ps[0], callExt(bodyB, "js_add", [ps[1], iV2]), elemV])
         } else {
@@ -1378,7 +1481,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (s.kind == "method") {
             // obj:m(args): look up m on the receiver, then call it with the
             // receiver prepended as the first argument (self).
-            var fn = callExt(b, "js_get", [v, emitStr(b, s.name)])
+            var mr = emitMemberGet(b, v, emitStr(b, s.name))
+            b = mr.b
+            var fn = mr.v
             var margs = callExt(b, "js_arr_new", [])
             callExt(b, "js_arr_push", [margs, v])
             var ma = emitListArr(b, s.args)
@@ -1387,17 +1492,43 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: b, v: callExt(b, "js_call", [fn, hUndef, margs]), call: true}
         }
         if (s.kind == "field") {
-            return {b: b, v: callExt(b, "js_get", [v, emitStr(b, s.name)]), call: false}
+            var fr = emitMemberGet(b, v, emitStr(b, s.name))
+            return {b: fr.b, v: fr.v, call: false}
         }
         var ir = s.idx(b)
         b = ir.b
-        return {b: b, v: callExt(b, "js_get", [v, callLua(b, "lua_cmpv", [callLua(b, "lua_first", [ir.v])])]), call: false}
+        var xr = emitMemberGet(b, v, callLua(b, "lua_cmpv", [callLua(b, "lua_first", [ir.v])]))
+        return {b: xr.b, v: xr.v, call: false}
+    }
+    // Every Lua string shares one metatable whose __index is the string library, so
+    // s:sub(2) / s:len() resolve there instead of aborting on "attempt to index a string
+    // value". The library table is parked in jsmain's scope under the reserved name
+    // 0strlib (an ordinary Lua name cannot begin with a digit, so nothing can shadow it)
+    // and only the string arm of the branch reads it - a table access pays one js_typeof
+    // and one compare.
+    function emitMemberGet(b, v, kV) {
+        var isStr = callExt(b, "js_seq", [callExt(b, "js_typeof", [v]), emitStr(b, "string")])
+        var strB = curF.NewBlock("")
+        var objB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        b.NewCondBr(rawTruthy(b, isStr), strB, objB)
+        var libV = callLua(strB, "lua_getvar", [curScopeV, emitStr(strB, "0strlib")])
+        var sv = callExt(strB, "js_get", [libV, kV])
+        strB.NewBr(joinB)
+        var ov = callExt(objB, "js_get", [v, kV])
+        objB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(sv, strB), llvm.ir.NewIncoming(ov, objB)])}
     }
     // items = [primaryThunk, {kind:"call"|"field"|"index", ...}...].
     foldCallMember = function(items) {
         if (items.length == 1) { return items[0] }
         var primary = items[0]
         var suffixes = items.slice(1)
+        // Any member access can land on a string, and then it resolves through the string
+        // metatable (emitMemberGet), so the library table has to exist.
+        for (var q = 0; q < suffixes.length; q++) {
+            if (suffixes[q].kind != "call") { libNeed.string = true }
+        }
         return function(b) {
             var r = primary(b)
             b = r.b
@@ -1856,14 +1987,57 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function libStrMethod(bb, s, method, argsArr) {
         return callExt(bb, "js_call", [callExt(bb, "js_get", [s, emitStr(bb, method)]), hUndef, argsArr])
     }
-    function libUpper(bb, argsH) {
+    // ASCII only: real Lua case-maps with the C library in the C locale, which leaves
+    // every byte above 127 alone. toUpperCase would have mapped the BYTES of a multi-byte
+    // character (the 0xE6 that starts a CJK character is 'ae' to a host string and
+    // uppercases to 0xC6), corrupting the encoding of the byte string. Written with
+    // indexOf/charAt over two constant alphabets because the emitted runtime has no
+    // String.fromCharCode; lua-interpreter.abnf's asciiCase is the same mapping.
+    var luaLower = "abcdefghijklmnopqrstuvwxyz"
+    var luaUpper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    function libCase(bb, argsH, from, to) {
         var s = libArg(bb, argsH, 0)
-        return {b: bb, v: libStrMethod(bb, s, "toUpperCase", callExt(bb, "js_arr_new", []))}
+        var lenV = callExt(bb, "js_get", [s, emitStr(bb, "length")])
+        var saved = curScopeV
+        curScopeV = callExt(bb, "js_scope_new", [curScopeV])
+        hidCount++
+        var iName = "$ci" + hidCount
+        var aName = "$ca" + hidCount
+        callExt(bb, "js_scope_decl", [curScopeV, emitStr(bb, iName), emitNum(bb, 0)])
+        callExt(bb, "js_scope_decl", [curScopeV, emitStr(bb, aName), emitStr(bb, "")])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var hitB = curF.NewBlock("")
+        var missB = curF.NewBlock("")
+        var stepB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        bb.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+        var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+        var chArgs = callExt(bodyB, "js_arr_new", [])
+        callExt(bodyB, "js_arr_push", [chArgs, iV2])
+        var chV = libStrMethod(bodyB, s, "charAt", chArgs)
+        var ixArgs = callExt(bodyB, "js_arr_new", [])
+        callExt(bodyB, "js_arr_push", [ixArgs, chV])
+        var kV = libStrMethod(bodyB, emitStr(bodyB, from), "indexOf", ixArgs)
+        bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_ge", [kV, emitNum(bodyB, 0)])), hitB, missB)
+        var toArgs = callExt(hitB, "js_arr_new", [])
+        callExt(hitB, "js_arr_push", [toArgs, kV])
+        var mapped = libStrMethod(hitB, emitStr(hitB, to), "charAt", toArgs)
+        hitB.NewBr(stepB)
+        missB.NewBr(stepB)
+        var pick = stepB.NewPhi([llvm.ir.NewIncoming(mapped, hitB), llvm.ir.NewIncoming(chV, missB)])
+        var aV = callExt(stepB, "js_scope_get", [curScopeV, emitStr(stepB, aName)])
+        callExt(stepB, "js_scope_set", [curScopeV, emitStr(stepB, aName), callExt(stepB, "js_add", [aV, pick])])
+        callExt(stepB, "js_scope_set", [curScopeV, emitStr(stepB, iName), callExt(stepB, "js_add", [iV2, emitNum(stepB, 1)])])
+        stepB.NewBr(headB)
+        var outV = callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, aName)])
+        curScopeV = saved
+        return {b: exitB, v: outV}
     }
-    function libLower(bb, argsH) {
-        var s = libArg(bb, argsH, 0)
-        return {b: bb, v: libStrMethod(bb, s, "toLowerCase", callExt(bb, "js_arr_new", []))}
-    }
+    function libUpper(bb, argsH) { return libCase(bb, argsH, luaLower, luaUpper) }
+    function libLower(bb, argsH) { return libCase(bb, argsH, luaUpper, luaLower) }
     // string.sub is NOT JS slice(i-1, j): Lua's negative index is INCLUSIVE and 1-based
     // (-1 is the last character, so it normalises to len+i+1) and both ends clamp into
     // 1..len instead of being reinterpreted. Handing i-1 to slice was wrong by one on
@@ -2034,6 +2208,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = libSet(b, st, "sub", emitLibFunc(libSub))
             b = libSet(b, st, "rep", emitLibFunc(libRep))
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "string"), st])
+            // The same table under a name no Lua program can spell, so the string
+            // metatable lookup cannot be broken by `local string = 1`.
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0strlib"), st])
         }
         if (libNeed.table) {
             var tt = callExt(b, "js_obj_new", [])
