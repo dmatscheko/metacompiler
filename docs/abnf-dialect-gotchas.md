@@ -223,6 +223,14 @@ the token it returns IS matched after whitespace skipping. So a scanner has to
 step over the prefix itself to find its literal, and then return a token
 covering only the literal, without that prefix.
 
+**A scanner whose text BEGINS with whitespace needs `:whitespace()` around it.**
+The corollary of the rule above: PHP's inline-HTML run after `?>` normally
+starts with the newline that ends the tag line, and that newline is *output*.
+Returning it inside the token is correct, but the engine skips whitespace before
+matching the token, so the match starts one character too late and fails. Wrap
+the scan — `HtmlText = :whitespace() HtmlScan :whitespace(Whitespace)` — the way
+`SkipDq` does, and restore the ambient rule at the end of the production.
+
 **Override a shared helper by ASSIGNMENT, not by declaration.** `makeSeq` and
 friends already exist in `languages/lib/interp-core.js`, so a grammar that wants
 its own must write `makeSeq = function (…) {…}`. Writing `function makeSeq(…)`

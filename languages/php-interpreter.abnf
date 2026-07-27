@@ -1,7 +1,10 @@
 :title("PHP (subset) interpreter") ;
 :description("Parses PHP and executes it directly, without generating code.
 
-The file begins with the '<?php' open tag (optionally closed by '?>'). Covered:
+A file starts in HTML MODE: text outside '<?php ... ?>' is literal output, '?>' also
+stands in for a missing ';', the newline right after a close tag is swallowed and
+'<?= e ?>' is shorthand for echo - so a template that interleaves markup with
+foreach/endforeach runs as written. Covered:
 dollar-sigil variables and variable variables, the full assignment set (= += -= *= /=
 %= .= **= &= |= ^= <<= >>= ??=) and reference binding ($b = &$a), all the number
 literal forms (decimal, 0x, 0b, 0o, legacy octal, underscores, floats with an
@@ -62,12 +65,106 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
 NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
-// The whole program: the '<?php' tag, then definitions and statements in order,
-// then an optional '?>' close tag.
+// The whole program. A PHP file starts in HTML mode: everything before the first
+// '<?php' is literal output, '?>' switches back to HTML mode, and the file may
+// alternate any number of times (a file with no '<?php' at all is pure output).
 Program     <~~ runProgram(takeAll()) ~~>
-            = OpenTag { Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | EnumDecl | ConstDecl | TypeDecl | NsDecl | UseDecl | Statement } [ CloseTag ] ;
+            = LeadHtml { TopItem } ;
+// One item of a top level: a declaration or a statement. Factored out because a
+// BRACED namespace body holds exactly the same items (see NsDecl).
+TopItem     = Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | EnumDecl | ConstDecl | TypeDecl | NsDecl | UseDecl | Statement ;
 OpenTag     = "<?php" :whitespace(Whitespace) ;
-CloseTag    = "?>" :whitespace(Whitespace) ;
+// Text before the first open tag. Unlike the '?>' form it keeps a leading newline:
+// only the newline directly after a CLOSE tag is swallowed.
+LeadHtml    <~~ push(makeHtmlOut(pop(), false)) ~~>
+            = HtmlText [ OpenTag ] ;
+// '?>' leaves PHP mode. Everything up to the next '<?php' (or end of file) is echoed
+// verbatim, and the newline immediately after '?>' is swallowed - PHP's own rule, so
+// that a template line does not gain a blank line per tag. It is a STATEMENT, which
+// is what makes the interleaved template form work inside a body:
+//     <?php foreach ($rows as $r): ?><li><?php echo $r; ?></li><?php endforeach; ?>
+// '?>' also stands in for a missing ';' (see Semi), exactly as in PHP.
+InlineHtml  <~~ push(makeHtmlOut(pop(), true)) ~~>
+            = "?>" HtmlText [ OpenTag ] ;
+// The raw run itself. Whitespace skipping is turned OFF around the scan: the leading
+// blanks and newlines of the run are OUTPUT, so they must not be eaten as separators
+// before the token the scanner returns is matched.
+HtmlText    <~~ push(up.in) ~~>
+            = :whitespace() HtmlScan :whitespace(Whitespace) ;
+HtmlScan = :script(~~
+    (function() {
+        // Everything from here to the next opening tag is literal text. '<?php' is
+        // matched case-insensitively (PHP's tag is), and '<?=' is the echo shorthand,
+        // which ShortEcho then parses as an echo statement.
+        var end = 0
+        var steps = 0
+        while (steps < 100000000) {
+            steps = steps + 1
+            var b = c.peek(end)
+            if (b < 0) { break }
+            if (b === 60 && c.peek(end + 1) === 63) {
+                if (c.peek(end + 2) === 61) { break }
+                var p1 = c.peek(end + 2)
+                var h1 = c.peek(end + 3)
+                var p2 = c.peek(end + 4)
+                if ((p1 === 112 || p1 === 80) && (h1 === 104 || h1 === 72) && (p2 === 112 || p2 === 80)) { break }
+            }
+            end = end + 1
+        }
+        // An empty run must SUCCEED matching nothing; returning a zero-length token
+        // would not. undefined is the dialect's "match empty".
+        if (end === 0) { return undefined }
+        // c.peek answers BYTES, so the UTF-8 has to be decoded here or a run holding
+        // any non-ASCII text would never match back against the source.
+        var out = ""
+        var p = 0
+        while (p < end) {
+            var b0 = c.peek(p)
+            if (b0 < 128) { out = out + String.fromCharCode(b0); p = p + 1; continue }
+            if (b0 >= 240) {
+                var cp4 = ((b0 - 240) * 262144) + ((c.peek(p + 1) - 128) * 4096) + ((c.peek(p + 2) - 128) * 64) + (c.peek(p + 3) - 128)
+                var off = cp4 - 65536
+                out = out + String.fromCharCode(55296 + ((off - (off % 1024)) / 1024)) + String.fromCharCode(56320 + (off % 1024))
+                p = p + 4
+                continue
+            }
+            if (b0 >= 224) {
+                out = out + String.fromCharCode(((b0 - 224) * 4096) + ((c.peek(p + 1) - 128) * 64) + (c.peek(p + 2) - 128))
+                p = p + 3
+                continue
+            }
+            if (b0 >= 192) {
+                out = out + String.fromCharCode(((b0 - 192) * 64) + (c.peek(p + 1) - 128))
+                p = p + 2
+                continue
+            }
+            return abnf.newToken("\x01badutf8", 0)
+        }
+        return abnf.newToken(out, 0)
+    })()
+~~) ;
+// '<?= e, e ?>' is shorthand for 'echo e, e;'.
+ShortEcho   <~~ push(makeEcho(takeAll())) ~~>
+            = ShortOpen <~~ push({cmd: "echo"}) ~~> [ Expression { "," Expression } ] [ ";" ] ;
+ShortOpen   = "<?=" :whitespace(Whitespace) ;
+// A statement terminator. PHP lets a close tag stand in for the ';' ("echo 1 ?>"),
+// so every statement that ends in ';' accepts a '?>' AHEAD of it instead - the tag
+// itself is left in place and read as the InlineHtml statement that follows.
+Semi        = ";" | CloseAhead ;
+CloseAhead  = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        var steps = 0
+        while (steps < 100000) {
+            steps = steps + 1
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i); continue }
+            break
+        }
+        if (cc === 63 && c.peek(i + 1) === 62) { return undefined }
+        return abnf.newToken("\x01noclosetag", 0)
+    })()
+~~) ;
 
 // A function definition: function name($a, $b) { ... } with explicit return. An
 // optional parameter type hint and return type are accepted and ignored (dynamic).
@@ -143,10 +240,16 @@ InterfaceDecl <~~ push(makeIfaceStmt(takeAll())) ~~>
 // place in the inheritance chain), so its descriptor just carries its parsed parts.
 TraitDecl   <~~ push(makeTraitStmt(takeAll())) ~~>
             = [ AttrGrp ] KwTrait Name <~~ push(up.in) ~~> "{" { Member } "}" ;
-NsDecl      <~~ push(notImplStmt("namespace", up.pos)) ~~>
-            = KwNamespace { Id | "\\" } ";" ;
+// namespace N; and the BRACED form namespace N { ... } (and the global 'namespace {}').
+// Names are not qualified in this subset, so the declaration itself stays a no-op -
+// but the braced body is a top level of its own and its items are simply run in
+// place, which is what makes a file that wraps everything in 'namespace X { }' work.
+NsDecl      <~~ push(makeNs(takeAll(), up.pos)) ~~>
+            = KwNamespace { Id | "\\" } ( Semi | NsBody ) ;
+NsBody      <~~ push({nsbody: takeAll()}) ~~>
+            = "{" { TopItem } "}" ;
 UseDecl     <~~ push(notImplStmt("use import", up.pos)) ~~>
-            = KwUse { Id | "\\" } [ KwAs Id ] ";" ;
+            = KwUse { Id | "\\" } [ KwAs Id ] Semi ;
 // enum Name : backing-type implements I { case A; ... }: recognized structurally and
 // routed to notImplemented; the body (cases, methods, consts) is balanced-skipped.
 // enum E: string implements I { case A = "a"; const C = 1; methods } - an enum is a
@@ -170,7 +273,19 @@ SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
 // A property declaration 'public $x;' or 'public int $x = e;' is accepted; a type
 // hint and the initializer are dropped (properties are created on first assignment).
 PropDecl    <~~ push({propdecl: makeProp(takeAll())}) ~~>
-            = [ AttrGrp ] { PropMod } [ TypeHint ] DollarName [ "=" Expression ] ";" ;
+            = [ AttrGrp ] { PropMod } [ TypeHint ] DollarName [ "=" Expression ] ( ";" | PropHooks ) ;
+// PHP 8.4 property hooks: 'public int $x { get => e; set { ... } }' (and the bodyless
+// 'get;' / 'set;' of an abstract or interface property). There is no hook model here,
+// so the block is parsed - by the real grammar, not a brace skip, so a '{' inside a
+// string cannot miscount - and then DROPPED with a notImplemented note; the property
+// itself stays an ordinary declared property.
+PropHooks   <~~ takeAll(); notImpl("property hooks", up.pos) ~~>
+            = "{" { PropHook } "}" ;
+PropHook    = [ AttrGrp ] { PropMod } [ "&" ] HookName ( HookArrow | HookBlock | ";" ) ;
+HookName    = ( "get" | "set" ) KwEnd ;
+HookArrow   = [ ParamList ] "=>" Expression ";" ;
+HookBlock   = [ ParamList ] Block ;
+
 Modifier    = ( "public" | "private" | "protected" | "static" | "final" | "abstract" | "readonly" ) KwEnd ;
 // The modifier text is CAPTURED (as {mod}) rather than dropped: 'static' decides
 // whether a property lives on the class or on the instance, and any modifier on a
@@ -182,7 +297,7 @@ Block       <~~ push({body: makeBody(takeAll())}) ~~>
             = "{" { Statement } "}" ;
 
 // Every statement pushes exactly one thunk: function() -> value | signal.
-Statement   = EchoStmt | UnsetStmt | GlobalStmt | StaticVarStmt | Block | If | While | ForEach | For
+Statement   = InlineHtml | ShortEcho | EchoStmt | UnsetStmt | GlobalStmt | StaticVarStmt | Block | If | While | ForEach | For
             | Switch | DoWhile | Try | Throw | Declare | Goto
             | Return | Break | Continue | Empty | LabelStmt | ExprStmt ;
 
@@ -196,7 +311,7 @@ Statement   = EchoStmt | UnsetStmt | GlobalStmt | StaticVarStmt | Block | If | W
 // cell is created on the first execution of this very statement and re-bound into
 // every later frame, which is exactly PHP's per-declaration (not per-object) rule.
 StaticVarStmt <~~ push(makeStaticVars(takeAll())) ~~>
-            = KwStatic DollarName [ PlainEq Expression ] { "," DollarName [ PlainEq Expression ] } ";" ;
+            = KwStatic DollarName [ PlainEq Expression ] { "," DollarName [ PlainEq Expression ] } Semi ;
 // switch: loose (==) comparison, first match wins and execution FALLS THROUGH into
 // the following clauses until a break. 'default' may sit anywhere, and is only taken
 // when no case matched. The clause bodies are plain statement runs, which is why they
@@ -205,7 +320,7 @@ StaticVarStmt <~~ push(makeStaticVars(takeAll())) ~~>
 Switch      <~~ push(makeSwitch(takeAll())) ~~>
             = KwSwitch "(" Expression ")" ( SwitchAlt | SwitchBlock ) ;
 SwitchBlock = "{" [ ";" ] { SwitchClause } "}" ;
-SwitchAlt   = ":" [ ";" ] { SwitchClause } KwEndswitch ";" ;
+SwitchAlt   = ":" [ ";" ] { SwitchClause } KwEndswitch Semi ;
 SwitchClause = CaseClause | DefaultClause ;
 CaseClause  <~~ push({scase: takeAll()}) ~~>
             = KwCase Expression CaseSep { Statement } ;
@@ -213,12 +328,12 @@ DefaultClause <~~ push({sdefault: takeAll()}) ~~>
             = KwDefault CaseSep { Statement } ;
 CaseSep     = ":" !":" | ";" ;
 DoWhile     <~~ push(makeDoWhile(takeAll())) ~~>
-            = KwDo Block KwWhile "(" Expression ")" ";" ;
+            = KwDo Block KwWhile "(" Expression ")" Semi ;
 // goto L; / L: - a jump within one statement sequence (which is all PHP allows: it
 // cannot enter a loop or leave a function). The jump travels as a control signal and
 // is caught by the statement list that owns the label; see makeBody.
 Goto        <~~ push(makeGoto(pop())) ~~>
-            = KwGoto LabelName ";" ;
+            = KwGoto LabelName Semi ;
 LabelStmt   <~~ push(makeLabel(pop())) ~~>
             = LabelName ":" !":" ;
 LabelName   <~~ push(stripWs(up.in)) ~~> = Name ;
@@ -240,36 +355,36 @@ CatchClause <~~ push(phpCatch(takeAll())) ~~>
 FinallyClause <~~ push({finbody: finBody(pop().body)}) ~~>
             = KwFinally Block ;
 Throw       <~~ push(excThrow(pop())) ~~>
-            = KwThrow Expression ";" ;
+            = KwThrow Expression Semi ;
 Declare     <~~ takeAll(); push(notImplStmt("declare", up.pos)) ~~>
             = KwDeclare SkipParen ( ";" | Block ) ;
 // const NAME = expr; at file level: a global constant. Unlike a class constant it
 // takes no type, and its initializer is evaluated once, where the declaration stands.
 ConstDecl   <~~ push(makeConstDecl(takeAll())) ~~>
-            = KwConst ConstItem { "," ConstItem } ";" ;
+            = KwConst ConstItem { "," ConstItem } Semi ;
 CatchType   = CatchName { "|" CatchName } ;
 CatchName   <~~ push({ctype: up.in}) ~~> = ExtName ;
 
 // echo e, e, e;  /  print e;
 EchoStmt    <~~ push(makeEcho(takeAll())) ~~>
-            = KwEcho <~~ push({cmd: up.in}) ~~> [ Expression { "," Expression } ] ";" ;
+            = KwEcho <~~ push({cmd: up.in}) ~~> [ Expression { "," Expression } ] Semi ;
 
 // global $a, $b; -- in this subset function bodies already resolve names through
 // the enclosing (global) scope chain, so 'global' is accepted as a no-op.
 GlobalStmt  <~~ takeAll(); push(makeConstStmt()) ~~>
-            = KwGlobal DollarName { "," DollarName } ";" ;
+            = KwGlobal DollarName { "," DollarName } Semi ;
 
 Empty       <~~ push(makeConstStmt()) ~~>
             = ";" ;
 
 // unset($a, $b): removes the bindings (a later isset($a) is false).
 UnsetStmt   <~~ push(makeUnset(takeAll())) ~~>
-            = KwUnset "(" IsTarget { "," IsTarget } [ "," ] ")" ";" ;
+            = KwUnset "(" IsTarget { "," IsTarget } [ "," ] ")" Semi ;
 IsTarget    <~~ push({istgt: pop()}) ~~>
             = Target ;
 
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
-            = Expression ";" ;
+            = Expression Semi ;
 
 // Both spellings of every compound statement: braces, and PHP's colon/endXXX form.
 // The alternative form is tried FIRST because it is decided by a single ':' - it is
@@ -280,7 +395,7 @@ If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf "(" Expression ")" ( AltIfTail | Block { ElseIf } [ KwElse Block <~~ push({els: pop().body}) ~~> ] ) ;
 ElseIf      <~~ var b = pop(); push({elifCond: pop(), elifBody: b.body}) ~~>
             = KwElseif "(" Expression ")" Block ;
-AltIfTail   = ":" AltBody { AltElseIf } [ KwElse ":" AltBody <~~ push({els: pop().body}) ~~> ] KwEndif ";" ;
+AltIfTail   = ":" AltBody { AltElseIf } [ KwElse ":" AltBody <~~ push({els: pop().body}) ~~> ] KwEndif Semi ;
 AltElseIf   <~~ var b2 = pop(); push({elifCond: pop(), elifBody: b2.body}) ~~>
             = KwElseif "(" Expression ")" ":" AltBody ;
 // A statement run that ends at the enclosing endXXX / else / elseif keyword. It
@@ -290,13 +405,13 @@ AltBody     <~~ push({body: makeBody(takeAll())}) ~~>
 
 While       <~~ push(makeWhile(pop().body, pop())) ~~>
             = KwWhile "(" Expression ")" ( AltWhileBody | Block ) ;
-AltWhileBody = ":" AltBody KwEndwhile ";" ;
+AltWhileBody = ":" AltBody KwEndwhile Semi ;
 
 // for (init; cond; post) { body }. The three clauses are optional and wrapped
 // with a kind marker so the builder can tell them apart on the stack.
 For         <~~ push(makeFor(takeAll())) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" ( AltForBody | Block ) ;
-AltForBody  = ":" AltBody KwEndfor ";" ;
+AltForBody  = ":" AltBody KwEndfor Semi ;
 ForInit     <~~ push({k: "init", t: exprToStmt(pop())}) ~~> = Expression ;
 ForCond     <~~ push({k: "cond", t: pop()}) ~~> = Expression ;
 ForPost     <~~ push({k: "post", t: exprToStmt(pop())}) ~~> = Expression ;
@@ -304,7 +419,7 @@ ForPost     <~~ push({k: "post", t: exprToStmt(pop())}) ~~> = Expression ;
 // foreach ($arr as $v) / foreach ($arr as $k => $v)
 ForEach     <~~ push(makeForeach(takeAll())) ~~>
             = KwForeach "(" Expression KwAs ForeachVars ")" ( AltForeachBody | Block ) ;
-AltForeachBody = ":" AltBody KwEndforeach ";" ;
+AltForeachBody = ":" AltBody KwEndforeach Semi ;
 ForeachVars = DestructPat | ForeachKV ;
 ForeachKV   = ForeachV1 [ "=>" ForeachV2 ] ;
 ForeachV1   = [ FeRef ] DollarName <~~ push({v1: pop()}) ~~> ;
@@ -313,11 +428,11 @@ ForeachV2   = [ FeRef ] DollarName <~~ push({v2: pop()}) ~~> ;
 FeRef       <~~ push({byref: true}) ~~> = "&" ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
-            = KwReturn [ Expression ] ";" ;
+            = KwReturn [ Expression ] Semi ;
 Break       <~~ push(makeBreak(takeAll())) ~~>
-            = KwBreak [ Expression ] ";" ;
+            = KwBreak [ Expression ] Semi ;
 Continue    <~~ push(makeContinue(takeAll())) ~~>
-            = KwContinue [ Expression ] ";" ;
+            = KwContinue [ Expression ] Semi ;
 
 // Every expression pushes exactly one thunk: function() -> value.
 Expression  = YieldExpr | RefAssign | DestructAssign | Assignment | Ternary ;
@@ -617,8 +732,12 @@ IncDyn      <~~ push({incdyn: pop()}) ~~>
 // A bareword constant reference: a global/class constant or magic constant (PHP_EOL,
 // M_PI, __DIR__, __LINE__, ...). No constant model here, so it is routed to
 // notImplemented. Placed last so calls, statics and keywords are matched first.
-ConstRef    <~~ push(makeConstRef(stripWs(up.in))) ~~>
-            = Name ;
+ConstRef    <~~ push(makeConstRef(lastSeg(stripWs(up.in)))) ~~>
+            = QName ;
+// A qualified name: \Foo, Foo\Bar, \Foo\Bar. Names are not qualified in this subset,
+// so only the LAST segment carries meaning - which is also what PHP itself falls back
+// to for an unqualified function or constant that the namespace does not define.
+QName       = [ "\\" ] Name { "\\" MethodName } ;
 
 // Class::CONST / Class::method() / Class::$prop / Class::class, and the three
 // context names self:: (the declaring class), static:: (the class the call was made
@@ -661,7 +780,7 @@ PlainItem   <~~ push({elem: pop()}) ~~>
 
 // f(args): a top-level function or builtin call.
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Name <~~ push(up.in) ~~> "(" [ ArgList ] ")" ;
+            = QName <~~ push(lastSeg(up.in)) ~~> "(" [ ArgList ] ")" ;
 
 VarRef      <~~ push(makeVarRef(pop())) ~~>
             = DollarName ;
@@ -2342,6 +2461,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return null
         }
     }
+    // "Foo\\Bar" -> "Bar": the unqualified tail of a qualified name.
+    function lastSeg(s) {
+        var out = s
+        for (var i = 0; i < s.length; i++) {
+            if (s.charCodeAt(i) == 92) { out = s.substring(i + 1) }
+        }
+        return out
+    }
     function makeConstRef(name) {
         return function() {
             var lo = name.toLowerCase()
@@ -2516,6 +2643,23 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             cls = clsT == null ? resolveClassName(stripWs(name)) : resolveClass(clsT())
             if (cls == undefined || cls == null || cls.__isclass !== true) { fail("new on a non-class") }
             return instantiate(cls, argset)
+        }
+    }
+
+    // ----- inline HTML (text outside <?php ... ?>) -----
+    // The run is echoed verbatim. After a CLOSE tag PHP swallows one immediately
+    // following newline, so that '?>' at the end of a template line does not add a
+    // blank line to the output; text before the FIRST open tag keeps its newlines.
+    function makeHtmlOut(text, afterClose) {
+        var s = text
+        if (afterClose === true && s.length > 0) {
+            if (s.charCodeAt(0) === 10) { s = s.substring(1) }
+            else if (s.charCodeAt(0) === 13 && s.length > 1 && s.charCodeAt(1) === 10) { s = s.substring(2) }
+            else if (s.charCodeAt(0) === 13) { s = s.substring(1) }
+        }
+        return function() {
+            if (s.length > 0) { print(s) }
+            return null
         }
     }
 
@@ -2823,6 +2967,21 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return {name: name, params: params, body: body != null ? body : makeBody([]),
                 isStatic: isStatic, isGen: isGen}
+    }
+    // A braced namespace body: run its items where the declaration stands.
+    function makeNs(items, pos) {
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].nsbody != undefined) {
+                var body = items[i].nsbody
+                return function() {
+                    for (var j = 0; j < body.length; j++) {
+                        if (typeof body[j] == "function") { body[j]() }
+                    }
+                    return null
+                }
+            }
+        }
+        return notImplStmt("namespace", pos)
     }
     function runProgram(items) {
         // A user exception (throw) that escapes the whole program is reported like any
