@@ -4,12 +4,14 @@ Every GENUINELY compiled construct here (module and function docstrings, the
 is / is not identity tests, plain calls and arithmetic) runs and self-checks
 under both a default run and -warn-unsupported.
 
-Every ACCEPT-AND-NOT-IMPLEMENTED construct (class definitions - plain, based and
-decorated; keyword and *starred / **mapping call
-arguments; tuples; set literals and set comprehensions; the ** power operator and
-the | & ^ << >> ~ bit operators; for-loop tuple unpacking) aborts a plain run at
-the first such construct with a clean file:line message; under -warn-unsupported
-they warn and the file runs to exit(fails[0]).
+Everything else here (class definitions - plain, based and decorated; keyword and
+*starred / **mapping call arguments; tuples; set literals and set comprehensions;
+the ** power operator and the | & ^ << >> ~ bit operators; for-loop tuple
+unpacking) USED to be accept-and-not-implemented, so a plain run aborted at the
+first one and this file was a by-design SHOULD-FAIL matrix entry. The full-syntax
+work implemented every one of them, so the file now runs clean with or without
+-warn-unsupported and the entry became an ordinary one. It is still worth running
+both ways: the -warn-unsupported entry proves no construct here warns.
 """
 
 fails = [0]
@@ -102,7 +104,13 @@ table = {"x": 1, "y": 2}
 for key, val in table.items():
     print(key, val)
 
-for (first, second) in pair:
+# The iterable has to yield PAIRS, not scalars: this used to read
+# 'for (first, second) in pair', which CPython rejects with "cannot unpack
+# non-iterable int object" because it iterates 1 and then 2. It only looked
+# fine while the construct was recognized but never executed; once for-loop
+# tuple unpacking was genuinely implemented, the file started failing for a
+# real reason. Iterate a sequence OF pairs instead.
+for (first, second) in [pair, (3, 4)]:
     print(first, second)
 
 

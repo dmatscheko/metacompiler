@@ -69,17 +69,26 @@ Program     <~~ runProgram(takeAll()) ~~>
             = [ NL ] { TopStmt } ;
 // Imports are module level (column 0) and yield no statement, so they are tried
 // at the TopStmt level (before Statement) and push nothing net.
-TopStmt     = SameLevel ( Import | FromImport | Statement ) ;
+TopStmt     = SameLevel ( ImportLine | Statement ) ;
+ImportLine  = ( Import | FromImport ) NL ;
 
 // Module level imports. resolveImport (lib/interp-core.js) checks each module
 // path against core.stdlibImports; an unresolvable one aborts (or, under
 // -warn-imports, warns and continues). An import produces no statement thunk:
 // DottedName pushes the bare path and the resolving tag pops it (net zero).
-Import      = KwImport ImportMod { "," ImportMod } NL ;
+Import      = KwImport ImportMod { "," ImportMod } ;
 ImportMod   <~~ resolveImport(pop(), up.pos) ~~>
             = DottedName [ KwAs Id ] ;
 FromImport  <~~ resolveImport(pop(), up.pos) ~~>
-            = KwFrom DottedName KwImport ( "*" | ImportName { "," ImportName } ) NL ;
+            = KwFrom RelName KwImport ( "*" | ImportParen | ImportName { "," ImportName } ) ;
+// from . import x / from ..pkg import y: the leading dots are the relative package
+// level, which this flat import model has nothing to resolve against, so they are
+// accepted and the name that follows (if any) decides.
+RelName     <~~ push(stripWs(up.in)) ~~>
+            = DotRun Id { "." Id } | DotRun ;
+DotRun      = { "." } ;
+// The parenthesized (and therefore multi-line) form of the name list.
+ImportParen = "(" :whitespace(WhitespaceNL) ImportName { "," ImportName } [ "," ] ")" :whitespace(Whitespace) ;
 ImportName  = Id [ KwAs Id ] ;
 DottedName  <~~ push(stripWs(up.in)) ~~>
             = Id { "." Id } ;
@@ -91,7 +100,9 @@ KwAs        = "as" KwEnd ;
 Statement   = If | While | For | TryStmt | With | Match | Class | Decorated | AsyncDef | AsyncFor | AsyncWith | Def | SmallLine ;
 
 SmallLine   = SmallStmt { ";" SmallStmt } [ ";" ] NL ;
-SmallStmt   = TypeAliasStmt | Return | Break | Continue | Pass | Raise | Assert | Global | Nonlocal | Del | YieldStmt
+// An import may sit inside a function, a try or an if - CPython's own test suite
+// is full of them - so it is a SMALL statement too, not only a module level one.
+SmallStmt   = Import | FromImport | TypeAliasStmt | Return | Break | Continue | Pass | Raise | Assert | Global | Nonlocal | Del | YieldStmt
             | AugAssign | AnnAssign | Assign | ExprSmall ;
 
 // A suite: ':' NEWLINE INDENT statements DEDENT. Every further statement of the
@@ -334,8 +345,9 @@ TypeAliasStmt <~~ push(makeTypeAlias(takeAll())) ~~>
 TypeValue   <~~ push(makeTypeValue(stripWs(up.in))) ~~>
             = DiscardType ;
 
+// `return a, b` returns a TUPLE, so the value is a full expression LIST.
 Return      <~~ push(makeReturn(takeAll())) ~~>
-            = "return" KwEnd [ Expression ] ;
+            = "return" KwEnd [ ExprList ] ;
 Break       <~~ push(makeBreak()) ~~>    = "break" KwEnd ;
 Continue    <~~ push(makeContinue()) ~~> = "continue" KwEnd ;
 Pass        <~~ push(function() {}) ~~>  = "pass" KwEnd ;
@@ -358,15 +370,20 @@ TargetItem  = StarTarget | TupleTarget | Target ;
 StarTarget  <~~ push({startgt: pop()}) ~~>
             = "*" TargetItem ;
 TupleTarget <~~ push(makeTargetList(takeAll())) ~~>
-            = "(" :whitespace(WhitespaceNL) TargetItem { "," TargetItem } [ "," ] ")" :whitespace(Whitespace)
-            | "[" :whitespace(WhitespaceNL) TargetItem { "," TargetItem } [ "," ] "]" :whitespace(Whitespace) ;
+            = "(" :whitespace(WhitespaceNL) [ TargetItem { "," TargetItem } [ "," ] ] ")" :whitespace(Whitespace)
+            | "[" :whitespace(WhitespaceNL) [ TargetItem { "," TargetItem } [ "," ] ] "]" :whitespace(Whitespace) ;
 // A comma-separated value list is a tuple; a single value stays itself.
 ExprList    <~~ push(makeExprList(takeAll())) ~~>
             = StarExpr { "," StarExpr } [ "," <~~ push({tcomma: true}) ~~> ] ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> { TSlice | TIndex | TAttr } ;
+            = Id <~~ push(up.in) ~~> { TSlice | TIndex | TAttr | TCall } ;
+// locals()["x"] = 43: a call may appear on the way to the target, as long as it is
+// not the target itself. Only the no-argument form, which is the shape that occurs.
+TCall       <~~ push({kind: "call"}) ~~>
+            = "(" :whitespace(WhitespaceNL) ")" :whitespace(Whitespace) ;
+// d[1, 1] = v: the subscript is an expression LIST, so a tuple index works.
 TIndex      <~~ push({idx: pop()}) ~~>
-            = "[" :whitespace(WhitespaceNL) Expression "]" :whitespace(Whitespace) ;
+            = "[" :whitespace(WhitespaceNL) ExprList "]" :whitespace(Whitespace) ;
 // A slice target: xs[1:3] = [9], xs[::2] = [7, 8], del xs[::2].
 TSlice      <~~ push(makeSliceSfx(takeAll())) ~~>
             = "[" :whitespace(WhitespaceNL) [ SliceLo ] ":" [ SliceHi ] [ ":" [ SliceStep ] ] "]" :whitespace(Whitespace) ;
@@ -400,7 +417,7 @@ NamedTest   = Expression ;
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "if" KwEnd OrExpr "else" KwEnd Expression ] ;
 Lambda      <~~ push(makeLambda(pop(), makeParamList(takeAll()), up.pos)) ~~>
-            = "lambda" KwEnd [ LamParam { "," LamParam } ] ":" Expression ;
+            = "lambda" KwEnd [ LamParam { "," LamParam } [ "," ] ] ":" Expression ;
 // Lambda parameters take no annotation (the ':' ends the header); defaults
 // and *args work like in def, **kwargs is reported as not implemented.
 LamParam    = LamDblStar | LamStar | LamSlash | LamNamed ;
@@ -455,9 +472,12 @@ Arith       <~~ push(foldBinary(takeAll())) ~~>
 Term        <~~ push(foldBinary(takeAll())) ~~>
             = Factor { ( "*" | "//" | "/" | "%" | "@" ) <~~ push(up.in) ~~> Factor } ;
 
-Factor      = Neg | Invert | Await | Power ;
+Factor      = Neg | Pos | Invert | Await | Power ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" Factor ;
+// Unary plus. It is the identity on every numeric type this model has, so the
+// operand thunk is simply passed through.
+Pos         = "+" Factor ;
 // ~x bitwise-not: accepted, reported as not implemented.
 Invert      <~~ push(makeInvert(pop())) ~~>
             = "~" Factor ;
@@ -529,34 +549,36 @@ Grouped     <~~ push(makeParen(takeAll())) ~~>
 // the members (so membership, len and insertion order come for free) marked __set.
 // ( e for x in it [if c] ): a parenthesized generator expression.
 GenExpParen <~~ push(makeListComp(takeAll())) ~~>
-            = "(" :whitespace(WhitespaceNL) Expression [ "async" KwEnd ] "for" KwEnd CompTarget "in" KwEnd Expression
-              [ CompIf ] ")" :whitespace(Whitespace) ;
+            = "(" :whitespace(WhitespaceNL) Expression CompFor { CompClause } ")" :whitespace(Whitespace) ;
 // list(v * v for v in range(4)): a generator expression as the sole call argument.
 // The value model has no lazy iterator, so it is built eagerly as a list - which
 // behaves the same for every use in this subset (iterate it, or hand it to list()).
 GenExpArg   <~~ push(makeListComp(takeAll())) ~~>
-            = Expression [ "async" KwEnd ] "for" KwEnd CompTarget "in" KwEnd Expression [ CompIf ] ;
+            = Expression CompFor { CompClause } ;
 SetComp     <~~ push(makeSetComp(takeAll())) ~~>
-            = "{" Expression [ "async" KwEnd ] "for" KwEnd CompTarget "in" KwEnd Expression [ CompIf ] "}" ;
+            = "{" :whitespace(WhitespaceNL) Expression CompFor { CompClause } "}" :whitespace(Whitespace) ;
 SetLit      <~~ push(makeSet(takeAll())) ~~>
             = "{" :whitespace(WhitespaceNL) StarExpr { "," StarExpr } [ "," ] "}" :whitespace(Whitespace) ;
 
 // [expr for x in iterable if cond] builds a list; the variable is comprehension local.
 ListComp    <~~ push(makeListComp(takeAll())) ~~>
-            = "[" :whitespace(WhitespaceNL) Expression [ "async" KwEnd ] "for" KwEnd CompTarget "in" KwEnd Expression
-              [ CompIf ] "]" :whitespace(Whitespace) ;
+            = "[" :whitespace(WhitespaceNL) Expression CompFor { CompClause } "]" :whitespace(Whitespace) ;
 // The loop target of a comprehension: one name or a tuple of names.
 CompTarget  <~~ push({cvar: takeAll()}) ~~>
             = "(" CompName { "," CompName } [ "," ] ")" | CompName { "," CompName } ;
 CompName    <~~ push(up.in) ~~> = Id ;
 CompIf      <~~ push({cif: pop()}) ~~>
-            = "if" KwEnd Expression ;
+            = "if" KwEnd OrExpr ;
+// A comprehension is a CHAIN of clauses: one or more `for` clauses, each of which
+// may be followed by any number of `if` clauses ([x for a in xs for x in a if x]).
+CompClause  = CompFor | CompIf ;
+CompFor     <~~ var it = pop(); push({cfor: pop().cvar, citer: it}) ~~>
+            = [ "async" KwEnd ] "for" KwEnd CompTarget "in" KwEnd OrExpr ;
 
 // {k: v for x in iterable if cond} builds a dict; tried before DictLit ('for' after
 // the first entry is what tells them apart) and the variable is comprehension local.
 DictComp    <~~ push(makeDictComp(takeAll())) ~~>
-            = "{" Expression ":" Expression [ "async" KwEnd ] "for" KwEnd CompTarget
-              "in" KwEnd Expression [ CompIf ] "}" ;
+            = "{" :whitespace(WhitespaceNL) Expression ":" Expression CompFor { CompClause } "}" :whitespace(Whitespace) ;
 
 // {k: v, ...}: keys and values are expressions; entries keep their insertion order.
 DictLit     <~~ push(makeDict(takeAll())) ~~>
@@ -760,7 +782,9 @@ SameLevel = :script(~~
 ~~) ;
 
 // Whitespace never includes newlines: they are structure, not noise.
-Whitespace  = { @+" \t" | Comment } ;
+// A backslash before a newline joins the lines - Python allows that anywhere, not
+// only inside brackets, so it belongs in the ordinary whitespace too.
+Whitespace  = { @+" \t" | Comment | LineJoin } ;
 // Inside (), [] and {} a newline is NOT structure - Python joins those lines
 // implicitly - so the bracketed productions switch to this whitespace and switch back
 // on the closing bracket. A backslash at the end of a line joins the next one too.
@@ -894,8 +918,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyEq(a, b) {
         if (a === b) { return true }
         // A boxed number (complex, arbitrary precision integer) compares by VALUE,
-        // so a big that happens to hold 1 equals the ordinary number 1.
-        if (pyBoxed(a) || pyBoxed(b)) { return boxOp("==", a, b).v }
+        // so a big that happens to hold 1 equals the ordinary number 1. Gated on a
+        // typeof test first, like binOp.
+        if (typeof a == "object" || typeof b == "object") {
+            if (pyBoxed(a) || pyBoxed(b)) { return boxOp("==", a, b).v }
+        }
         if (a !== null && a !== undefined && b !== null && b !== undefined
             && typeof a == "object" && typeof b == "object"
             && a.__genalias === true && b.__genalias === true) {
@@ -1109,7 +1136,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v === pyDeleted) { pyRaise(pyMakeExc("NameError", ["name '" + name + "' is not defined"])) }
         return v
     }
-    makeVarRef = function(name) { return function() { return pyReadName(name) } }
+    makeVarRef = function(name) {
+        return function() {
+            var v = anytype
+            v = getVar(name)
+            // One extra identity compare on the hottest path in the interpreter -
+            // deliberately inlined rather than routed through pyReadName.
+            if (v === pyDeleted) { pyRaise(pyMakeExc("NameError", ["name '" + name + "' is not defined"])) }
+            return v
+        }
+    }
 
     function fdiv(a, b) { return Math.floor(a / b) }
     function fmod(a, b) {
@@ -1466,10 +1502,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     binOp = function(op, l, r) {
-        if (pyBoxed(l) || pyBoxed(r)) { return boxOp(op, l, r).v }
-        if (pyUser(l) || pyUser(r)) {
-            var uo = userOp(op, l, r)
-            if (uo != null) return uo.v
+        // Both overload gates - boxed numbers and user classes - sit behind ONE
+        // typeof test, because pyBoxed and pyUser can only ever be true for an
+        // object. An ordinary number therefore pays two comparisons and no call at
+        // all, where it used to pay two calls.
+        if (typeof l == "object" || typeof r == "object") {
+            if (pyBoxed(l) || pyBoxed(r)) { return boxOp(op, l, r).v }
+            if (pyUser(l) || pyUser(r)) {
+                var uo = userOp(op, l, r)
+                if (uo != null) return uo.v
+            }
         }
         if (op == "+") {
             if (Array.isArray(l) && Array.isArray(r)) return l.concat(r)
@@ -2057,19 +2099,34 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             scopePut(scopes[scopes.length - 1], names[i], i < it.length ? it[i] : undefined)
         }
     }
+    // items = [exprT, clause, clause, ...] where a clause is {cfor, citer} or {cif}.
+    // compRun walks the chain recursively, so nested `for`s and interleaved `if`s
+    // work in any order and to any depth.
+    function compClauses(items, from) {
+        var cl = []
+        for (var i = from; i < items.length; i++) { cl.push(items[i]) }
+        return cl
+    }
+    function compRun(cl, i, exprT, out) {
+        if (i >= cl.length) { out.push(exprT()); return }
+        var c = cl[i]
+        if (c.cif != undefined) {
+            if (pytruthy(c.cif())) { compRun(cl, i + 1, exprT, out) }
+            return
+        }
+        var arr = iterToList(c.citer())
+        for (var k = 0; k < arr.length; k++) {
+            bindTarget(c.cfor, arr[k])
+            compRun(cl, i + 1, exprT, out)
+        }
+    }
     function makeListComp(items) {
         var exprT = items[0]
-        var names = items[1].cvar
-        var iterT = items[2]
-        var condT = items.length > 3 ? items[3].cif : null
+        var cl = compClauses(items, 1)
         return function() {
-            var arr = iterToList(iterT())
             var out = []
             scopes.push({})
-            for (var i = 0; i < arr.length; i++) {
-                bindTarget(names, arr[i])
-                if (condT == null || pytruthy(condT())) out.push(exprT())
-            }
+            compRun(cl, 0, exprT, out)
             scopes.pop()
             return out
         }
@@ -2088,18 +2145,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeDictComp(items) {
         var kExprT = items[0]
         var vExprT = items[1]
-        var names = items[2].cvar
-        var iterT = items[3]
-        var condT = items.length > 4 ? items[4].cif : null
+        var cl = compClauses(items, 2)
+        // One thunk yielding the pair, so the shared clause walker applies unchanged.
+        var pairT = function() { return {ckey: kExprT(), cval: vExprT()} }
         return function() {
-            var arr = iterToList(iterT())
-            var d = newDict()
+            var out = []
             scopes.push({})
-            for (var i = 0; i < arr.length; i++) {
-                bindTarget(names, arr[i])
-                if (condT == null || pytruthy(condT())) dictSet(d, kExprT(), vExprT())
-            }
+            compRun(cl, 0, pairT, out)
             scopes.pop()
+            var d = newDict()
+            for (var i = 0; i < out.length; i++) { dictSet(d, out[i].ckey, out[i].cval) }
             return d
         }
     }
@@ -2107,6 +2162,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // One step along a target path: an index ([i]) or an attribute (.name).
     function pathStep(o, step) {
         if (step.tattr == true) { return pyattr(o, step.name) }
+        if (step.kind == "call") { return o() }
         if (step.kind == "slice") {
             return pySliceStep(o, step.lo != null ? step.lo() : undefined,
                                step.hi != null ? step.hi() : undefined,
@@ -2159,7 +2215,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function readRef(ref) {
         if (ref.path.length == 0) { return pyReadName(ref.name) }
         var o = anytype // The last step lands on the element itself.
-        o = pyReadName(ref.name)
+        o = getVar(ref.name)
         for (var i = 0; i < ref.path.length; i++) o = pathStep(o, ref.path[i])
         return o
     }
@@ -3327,7 +3383,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var lifted = false
         for (var i = sc.length - 1; i >= 0; i--) {
             if (ho.call(sc[i], name)) { scopePut(sc[i], name, value); return }
-            if (ho.call(sc[i], "__pyfn")) {
+            // A plain property read, not hasOwn: this runs on every assignment that
+            // is not answered by the innermost scope, and no scope object inherits
+            // __pyfn from anywhere.
+            if (sc[i].__pyfn === true) {
                 if (lifted) { continue }
                 var d = sc[i].__pyd
                 if (d != undefined && d != "") {
@@ -3342,7 +3401,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The innermost function (or class body) frame, or null at module level.
     function pyFnScope() {
         for (var i = scopes.length - 1; i >= 1; i--) {
-            if (objHasOwn.call(scopes[i], "__pyfn")) { return scopes[i] }
+            if (scopes[i].__pyfn === true) { return scopes[i] }
         }
         return null
     }

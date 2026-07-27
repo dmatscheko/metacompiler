@@ -665,7 +665,35 @@ ForInOp     = KwIn <~~ push(up.in) ~~> ;
 // after ForOfPattern and ForOfName, which lower the shapes they understand.
 ForOfPath   <~~ takeAll(); push(notImplStmt("for-in/of over an expression target", up.pos)) ~~>
             = KwFor [ KwAwait ] "(" ForOfPathHead Expression ")" NestedStatement ;
-ForOfPathHead = NotLet CallMember ( KwOf | KwIn ) | CallMember KwIn ;
+ForOfPathHead = NotLet NotBareThis CallMember ( KwOf | KwIn ) | NotBareThis CallMember KwIn ;
+// 'this' is not an assignable place, so 'for (this of xs)' and 'for (this in o)' are
+// syntax errors - while 'for (this.a of xs)' is perfectly good code. The guard therefore
+// refuses only the BARE word: 'this' followed by nothing but whitespace and the loop
+// operator. Returns the impossible token to FAIL, undefined to succeed.
+NotBareThis = :script(~~
+    (function() {
+        var i = 0, cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (cc !== 116 || c.peek(i + 1) !== 104 || c.peek(i + 2) !== 105 || c.peek(i + 3) !== 115) { return undefined }
+        i = i + 4
+        cc = c.peek(i)
+        // Glued to an identifier character it is a name that merely starts with 'this'.
+        if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122)) { return undefined }
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        var isOf = (cc === 111 && c.peek(i + 1) === 102)
+        var isIn = (cc === 105 && c.peek(i + 1) === 110)
+        if (!isOf && !isIn) { return undefined }
+        cc = c.peek(i + 2)
+        if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122)) { return undefined }
+        return abnf.newToken("\x01this-loop-target", 0)
+    })()
+~~) ;
 
 // A destructuring binding: var [a, b] = xs, var {x, y: alias} = o, and every nested
 // combination of the two. The pattern is reified on the stack as a node tree and lowered
@@ -759,8 +787,28 @@ AElemTarget <~~ push(withDefault(takeAll())) ~~>
 ATarget     = APattern | ATargetRef ;
 // The leaf. A bare name is just a Target with an empty path, which bindPatternMode
 // assigns to exactly like a name leaf - so the one production covers both.
-ATargetRef  <~~ push({dtype: "ref", ref: pop()}) ~~>
+ATargetRef  = ATargetSuper | ATargetPlain ;
+ATargetPlain <~~ push({dtype: "ref", ref: pop()}) ~~>
             = Target ;
+// A super PROPERTY as a destructuring target: 'class a extends b { c() { [super.d] = e } }'
+// and '({d: super[e]} = f)' are valid JavaScript. Target starts at 'NotReserved Id', which
+// refuses the reserved word 'super', so the shape needs its own production - exactly the
+// way SuperAssign needs one on top of the SuperProp value form.
+//
+// It is spelled out from the tokens rather than reusing SuperProp, because SuperProp
+// builds a VALUE thunk - a place to READ from - and writing a destructured element
+// through it would emit silently wrong code. takeAll() therefore drops everything the
+// sub-expressions pushed and the leaf carries no thunk at all: makeSuperTarget reports the
+// construct through the standard notImpl path (abort with a clean file:line message, or a
+// warning plus a no-op leaf under -warn-unsupported), so the program parses and is never
+// lowered into a wrong write.
+//
+// Reporting at BUILD time is safe against backtracking here: any text this production
+// matches contains a genuine 'super.x' / 'super[x]', and every OTHER way to read that text
+// reaches SuperProp, which reports the same way - so a rolled-back attempt cannot report a
+// construct the file does not contain.
+ATargetSuper <~~ takeAll(); push(makeSuperTarget(up.pos)) ~~>
+            = KwSuper ( "." Id | "[" Expression "]" ) { DotSuffix | IndexSuffix } ;
 
 // A default value and a computed key are an AssignExpr WITHOUT the yield form: a
 // pattern is a binding position, and '{x: y = yield 3}' is a syntax error there even
@@ -1130,9 +1178,137 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 // the whitespace code points listed above, the two line separators, and the BOM.
 // U+200C/U+200D (the zero width non-joiner and joiner) are in, as the spec requires.
 Id          = IdStart :whitespace() { IdPart } :whitespace(Whitespace) ;
-IdStart     = IdEscape | "a"..."z" | "A"..."Z" | "_" | "$" | IdUni ;
-IdPart      = IdEscape | "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "$" | IdUni | IdUniPart ;
+IdStart     = ( IdEscStartOk IdEscape ) | "a"..."z" | "A"..."Z" | "_" | "$" | IdUni ;
+IdPart      = ( IdEscPartOk IdEscape ) | "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "$" | IdUni | IdUniPart ;
 IdEscape    = "\\" JsUniEsc ;
+
+// A \u escape in an identifier must denote a character that IS an identifier character:
+// '\' (a backslash), '*' (an asterisk) and '\uD800' (a lone surrogate) are not
+// identifiers however they are spelled. The escape is unreadable to a character range, so
+// the check runs as a guard in front of it: it reads the escape from the source, computes
+// the code point and answers the impossible token when the code point is not allowed here.
+// The two guards differ by exactly the digits and the two zero-width joiners, which
+// continue an identifier but cannot start one.
+//
+// U+0000 is the one deliberate exception. It is no more an identifier character than the
+// others, but test262 files '\u0000', '\u{0}', 'a\u0000' and 'a\u{0}' under early/ - as
+// programs that PARSE and are rejected afterwards - so refusing it here would cost four
+// must-parse files to win nothing the range check does not already win.
+IdEscStartOk = :script(~~
+    (function() {
+        // An identifier START is reached with the whitespace in front of it not yet
+        // skipped (the :whitespace() of Id only takes effect from the second character
+        // on), so step over it here the way the other lookahead guards do. Nothing is
+        // consumed either way - the guard only reads.
+        var w = 0
+        var wc = c.peek(0)
+        while (wc === 32 || wc === 9 || wc === 10 || wc === 13 || wc === 11 || wc === 12) {
+            w = w + 1
+            wc = c.peek(w)
+        }
+        if (c.peek(w) !== 92 || c.peek(w + 1) !== 117) { return abnf.newToken("\x01bad-id-escape", 0) }
+        var cp = 0
+        if (c.peek(w + 2) === 123) { // \u{ H+ }
+            var i = w + 3
+            var n = 0
+            while (true) {
+                var cc = c.peek(i)
+                if (cc === 125) { break }
+                var d = -1
+                if (cc >= 48 && cc <= 57) { d = cc - 48 }
+                else if (cc >= 97 && cc <= 102) { d = cc - 87 }
+                else if (cc >= 65 && cc <= 70) { d = cc - 55 }
+                if (d < 0 || n > 7) { return abnf.newToken("\x01bad-id-escape", 0) }
+                cp = cp * 16 + d
+                n = n + 1
+                i = i + 1
+            }
+            if (n === 0) { return abnf.newToken("\x01bad-id-escape", 0) }
+        } else { // \uHHHH
+            for (var k = 0; k < 4; k++) {
+                var c2 = c.peek(w + 2 + k)
+                var d2 = -1
+                if (c2 >= 48 && c2 <= 57) { d2 = c2 - 48 }
+                else if (c2 >= 97 && c2 <= 102) { d2 = c2 - 87 }
+                else if (c2 >= 65 && c2 <= 70) { d2 = c2 - 55 }
+                if (d2 < 0) { return abnf.newToken("\x01bad-id-escape", 0) }
+                cp = cp * 16 + d2
+            }
+        }
+        var isStart = true
+        var ok = false
+        if (cp === 0) { ok = true }   // see the note above: test262 files it under early/
+        else if ((cp >= 97 && cp <= 122) || (cp >= 65 && cp <= 90) || cp === 95 || cp === 36) { ok = true }
+        else if (!isStart && cp >= 48 && cp <= 57) { ok = true }
+        else if (cp === 8204 || cp === 8205) { ok = !isStart } // ZWNJ / ZWJ continue only
+        else if (cp === 8255 || cp === 8256) { ok = !isStart } // U+203F/2040 continue only
+        else if (cp >= 128) {
+            // The same approximation as IdUni: everything above ASCII except the space and
+            // line separators, the surrogates, the Latin-1 punctuation and the
+            // multiplication/division signs.
+            ok = !(cp === 160 || cp === 5760 || (cp >= 8192 && cp <= 8202)
+                || cp === 8232 || cp === 8233 || cp === 8239 || cp === 8287
+                || cp === 12288 || cp === 65279
+                || (cp >= 55296 && cp <= 57343)
+                || (cp >= 161 && cp <= 191 && cp !== 170 && cp !== 181 && cp !== 186)
+                || cp === 215 || cp === 247)
+        }
+        return ok ? undefined : abnf.newToken("\x01bad-id-escape", 0)
+    })()
+~~) ;
+IdEscPartOk = :script(~~
+    (function() {
+        // Sitting on the backslash of the escape; read it without consuming anything.
+        if (c.peek(0) !== 92 || c.peek(1) !== 117) { return abnf.newToken("\x01bad-id-escape", 0) }
+        var cp = 0
+        if (c.peek(2) === 123) { // \u{ H+ }
+            var i = 3
+            var n = 0
+            while (true) {
+                var cc = c.peek(i)
+                if (cc === 125) { break }
+                var d = -1
+                if (cc >= 48 && cc <= 57) { d = cc - 48 }
+                else if (cc >= 97 && cc <= 102) { d = cc - 87 }
+                else if (cc >= 65 && cc <= 70) { d = cc - 55 }
+                if (d < 0 || n > 7) { return abnf.newToken("\x01bad-id-escape", 0) }
+                cp = cp * 16 + d
+                n = n + 1
+                i = i + 1
+            }
+            if (n === 0) { return abnf.newToken("\x01bad-id-escape", 0) }
+        } else { // \uHHHH
+            for (var k = 0; k < 4; k++) {
+                var c2 = c.peek(2 + k)
+                var d2 = -1
+                if (c2 >= 48 && c2 <= 57) { d2 = c2 - 48 }
+                else if (c2 >= 97 && c2 <= 102) { d2 = c2 - 87 }
+                else if (c2 >= 65 && c2 <= 70) { d2 = c2 - 55 }
+                if (d2 < 0) { return abnf.newToken("\x01bad-id-escape", 0) }
+                cp = cp * 16 + d2
+            }
+        }
+        var isStart = false
+        var ok = false
+        if (cp === 0) { ok = true }   // see the note above: test262 files it under early/
+        else if ((cp >= 97 && cp <= 122) || (cp >= 65 && cp <= 90) || cp === 95 || cp === 36) { ok = true }
+        else if (!isStart && cp >= 48 && cp <= 57) { ok = true }
+        else if (cp === 8204 || cp === 8205) { ok = !isStart } // ZWNJ / ZWJ continue only
+        else if (cp === 8255 || cp === 8256) { ok = !isStart } // U+203F/2040 continue only
+        else if (cp >= 128) {
+            // The same approximation as IdUni: everything above ASCII except the space and
+            // line separators, the surrogates, the Latin-1 punctuation and the
+            // multiplication/division signs.
+            ok = !(cp === 160 || cp === 5760 || (cp >= 8192 && cp <= 8202)
+                || cp === 8232 || cp === 8233 || cp === 8239 || cp === 8287
+                || cp === 12288 || cp === 65279
+                || (cp >= 55296 && cp <= 57343)
+                || (cp >= 161 && cp <= 191 && cp !== 170 && cp !== 181 && cp !== 186)
+                || cp === 215 || cp === 247)
+        }
+        return ok ? undefined : abnf.newToken("\x01bad-id-escape", 0)
+    })()
+~~) ;
 IdUni       = "\u00aa"..."\u167f" | "\u1681"..."\u1fff" | "\u2070"..."\u218f"
             | "\u2c00"..."\u2fef" | "\u3001"..."\ud7ff" | "\uf900"..."\ufdcf"
             | "\ufdf0"..."\ufefe" | "\U00010000"..."\U000effff" ;
@@ -1571,12 +1747,38 @@ NotArrow    = :script(~~
 // and tabs are stepped over - a line break is exactly what is being looked for.
 NoLineBreak = :script(~~
     (function() {
-        var i = 0, cc = c.peek(0)
-        while (cc === 32 || cc === 9 || cc === 11 || cc === 12) {
-            i = i + 1
-            cc = c.peek(i)
+        // Whatever the whitespace rule would skip here has to be examined rather than
+        // skipped: a LINE COMMENT always ends its line, and a BLOCK comment counts as a
+        // line terminator when it contains one - '(a)/*\n*/ => 0' is as much a syntax
+        // error as '(a)\n=> 0'. U+2028 and U+2029 end a line in JavaScript too.
+        var i = 0
+        while (true) {
+            var cc = c.peek(i)
+            if (cc === 32 || cc === 9 || cc === 11 || cc === 12) { i = i + 1; continue }
+            if (cc === 10 || cc === 13 || cc === 8232 || cc === 8233) { return abnf.newToken("\x01newline", 0) }
+            // U+2028/U+2029 end a line as well. c.peek is byte oriented here, so they
+            // arrive as their UTF-8 encoding E2 80 A8 / E2 80 A9 rather than as one
+            // code point; both spellings are tested so the guard holds either way.
+            if (cc === 226 && c.peek(i + 1) === 128 && (c.peek(i + 2) === 168 || c.peek(i + 2) === 169)) { return abnf.newToken("\x01newline", 0) }
+            if (cc === 47 && c.peek(i + 1) === 47) { return abnf.newToken("\x01newline", 0) }
+            if (cc === 47 && c.peek(i + 1) === 42) {
+                var j = i + 2
+                while (true) {
+                    var bc = c.peek(j)
+                    // c.peek answers -1 out of range in BOTH engines, so the end of the
+                    // file is a '< 0' test, never a '=== 0 || === undefined' one.
+                    if (bc < 0) { break }
+                    if (bc === 42 && c.peek(j + 1) === 47) { j = j + 2; break }
+                    if (bc === 10 || bc === 13 || bc === 8232 || bc === 8233) { return abnf.newToken("\x01newline", 0) }
+                    if (bc === 226 && c.peek(j + 1) === 128 && (c.peek(j + 2) === 168 || c.peek(j + 2) === 169)) { return abnf.newToken("\x01newline", 0) }
+                    j = j + 1
+                }
+                i = j
+                continue
+            }
+            break
         }
-        return (cc === 10 || cc === 13) ? abnf.newToken("\x01newline", 0) : undefined
+        return undefined
     })()
 ~~) ;
 
@@ -2548,6 +2750,12 @@ NotFuncHead = :script(~~
             }
             return
         }
+        // A super-property leaf ('[super.d] = e'). makeSuperTarget has already reported it
+        // through notImpl, so without -warn-unsupported the run never reaches this point at
+        // all; with it, the leaf is deliberately a NO-OP. Writing anything here would need
+        // the home-object protocol the super forms do not have, and a wrong write is worse
+        // than a missing one.
+        if (pat.dtype == "supertarget") { return }
         if (v == undefined || v == null) fail("cannot destructure " + v)
         if (pat.dtype == "arr") {
             for (var i = 0; i < pat.elems.length; i++) { bindPatternMode(pat.elems[i], v[i], decl) }
@@ -2878,6 +3086,13 @@ NotFuncHead = :script(~~
     // super(args): delegate to the parent constructor. super.m(args): dispatch m on the
     // parent class. The defining class comes from the scope the class body pushes
     // (__class__), so an anonymous class expression works the same way a named one does.
+    // The destructuring-target form of a super property (see ATargetSuper). It carries no
+    // thunk: the construct is reported here, at build time, and the node it returns is an
+    // inert leaf that bindPatternMode skips.
+    function makeSuperTarget(pos) {
+        notImpl("super property assignment target", pos)
+        return {dtype: "supertarget"}
+    }
     function makeSuperCall(name, argThunks) {
         if (name == "") {
             return function() {

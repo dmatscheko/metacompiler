@@ -279,25 +279,21 @@ DestructAssign <~~ push(makeDestructAssign(takeAll())) ~~>
 // these. Second, the sixteen operators share ONE production (Assignment below) instead of
 // three, so the target is parsed once rather than three times.
 AssignExpr  = AssignForm | Yield | CondExpr ;
-AssignForm  = AssignAhead ( Assignment | SuperAssign | DestructAssign | AssignNoRef ) ;
+AssignForm  = AssignAhead ( Assignment | SuperAssign | DestructAssign ) ;
 
-// An assignment whose left side is not a reference at all: '0 = 0', '[0] = 0',
-// '({a} = 0)', '[a] *= 0', '({get a(){}} = 0)'. In the spec these PARSE - the cover
-// grammar accepts them - and are rejected afterwards as an early error, which is why
-// test262 files them under early/ and not under fail/. This grammar has no early-error
-// pass, so they are accepted here and abort at compile time with a clean message. It is
-// the LAST assignment alternative, so every assignable shape above has already had its
-// chance and nothing that could be lowered ends up here.
-AssignNoRef <~~ takeAll(); push(notImplExpr("assignment to a non-reference", up.pos)) ~~>
-            = NoRefPrimary { TargetSuffix } "=" AssignExpr ;
-// The left side of such an assignment is a LeftHandSideExpression and nothing wider:
-// '0 = 0' and '[0] = 0' parse (and are early errors), while 'i + 2 = 42' and '+i = 42' are
-// genuine SYNTAX errors, because an additive or unary expression is not a LeftHandSide one
-// at all. That is also why the parenthesized form is absent here: '(1 + 1) = 10' and
-// '({a: 0}) = 1' are syntax errors, whereas a parenthesized ASSIGNABLE target - '(a) = 1' -
-// has already been taken by TargetParen above. The compound operators are here too:
-// test262 files '[a] *= 0', '({a} += 0)' and '0 /= 0' under early/ as well, so they parse
-// and abort exactly like the plain form.
+// An assignment whose left side is not a reference at all - '0 = 0', '[0] = 0',
+// '({a} = 0)', '3 = 4' - is deliberately NOT accepted as an expression here. In the spec
+// these do parse (the cover grammar accepts them) and are rejected afterwards as an early
+// error, which is why test262 files them under early/ rather than fail/; but test262's
+// fail/ is FULL of the same shapes with an unassignable pattern inside ('[...a, b] = c',
+// '[a += b] = []', '({a: b += 0} = {})'), and one loose alternative accepts all of them
+// too. Measured against test262-parser-tests, taking the spec-faithful reading costs
+// nine early/ files and gives up eighteen fail/ ones, so the strict reading is kept -
+// the same trade js-interpreter.abnf makes.
+//
+// NoRefPrimary survives because the for-in/of head below still needs it: its left side is
+// a LeftHandSideExpression and nothing wider, so 'i + 2 = 42' and '+i = 42' are genuine
+// syntax errors in either reading.
 NoRefPrimary = NewTarget | NewExpr | NewWidened | SuperProp | AsyncFuncExpr | GenFuncExpr
              | FunctionExpr | ClassExpr | TemplateLit | RegexLit | ObjectLit | ArrayLit
              | StringLit | NumberLit | True | False | Null | Undefined | VarRef ;
@@ -341,12 +337,18 @@ YieldOne    <~~ push(makeYield(takeAll())) ~~>
 // least one member suffix, which a bare name never has left over.
 Target      = TargetParen | TargetNamed | TargetBased ;
 TargetNamed <~~ push(makeTargetRef(takeAll())) ~~>
-            = NotReserved Id <~~ push(idName(up.in)) ~~> { TargetSuffix } ;
+            = NotReserved Id <~~ push(idName(up.in)) ~~> [ TargetTail ] ;
 TargetParen <~~ push(retarget(takeAll())) ~~>
-            = "(" Target ")" { TargetSuffix } ;
+            = "(" Target ")" [ TargetTail ] ;
 TargetBased <~~ push(makeTargetBase(takeAll())) ~~>
-            = Primary TargetSuffix { TargetSuffix } ;
+            = Primary TargetTail ;
 TargetSuffix = CallSuffix | DotSuffix | IndexSuffix ;
+// The suffix chain of an assignment TARGET. It is a recursion rather than the plain
+// '{ TargetSuffix }' repetition because the LAST suffix has to be a MEMBER access: a call
+// returns a value, not a place, so 'f() = 4' and 'a.b() = 1' are syntax errors while
+// 'f().x = 4' and 'a().b[0] = 1' are fine. Whatever the path does in between, it must end
+// in a '.' or '[...]' suffix. (This is js-interpreter.abnf's LhsSuffixes.)
+TargetTail  = ( DotSuffix | IndexSuffix ) [ TargetTail ] | CallSuffix TargetTail ;
 
 CondExpr    <~~ push(makeCond(takeAll())) ~~>
             = NullishExpr [ "?" AssignExpr ":" AssignExpr ] ;
@@ -522,7 +524,7 @@ SuperProp   <~~ takeAll(); push(notImplExpr("super property", up.pos)) ~~>
 NewTarget   <~~ push(makeNewTarget()) ~~>
             = KwNew "." "target" KwEnd ;
 AsyncArrow  <~~ push(makeArrow(takeAll())) ~~>
-            = KwAsync ArrowAhead ArrowParams "=>" ArrowBody ;
+            = KwAsync ArrowAhead ArrowParams SameLine "=>" ArrowBody ;
 // An async function expression is compiled exactly like a plain one (see Await); an async
 // GENERATOR is compiled as a generator. The optional name is accepted but not bound.
 AsyncFuncExpr = AsyncGenExpr | AsyncPlainExpr ;
@@ -617,7 +619,7 @@ ArrHole     <~~ push({hole: true}) ~~> = Nothing ;
 // expression it really was - and that doubles at every nesting level. ArrowAhead answers
 // that one question cheaply: skip the balanced parentheses and see whether '=>' follows.
 ArrowFn     <~~ push(makeArrow(takeAll())) ~~>
-            = ArrowAhead ArrowParams "=>" ArrowBody ;
+            = ArrowAhead ArrowParams SameLine "=>" ArrowBody ;
 ArrowParams <~~ push({aparams: takeAll()}) ~~>
             = "(" [ ParamSeq ] ")"
             | NotBindName Id <~~ push(idName(up.in)) ~~> ;
@@ -788,8 +790,28 @@ APatElem    <~~ push(withDefault(takeAll())) ~~>
             = APattern [ "=" WExpr ] ;
 ATargetElem <~~ push(withDefault(takeAll())) ~~>
             = ATargetRef [ "=" WExpr ] ;
-ATargetRef  <~~ push({dtype: "target", ref: pop()}) ~~>
+ATargetRef  = ATargetSuper | ATargetPlain ;
+ATargetPlain <~~ push({dtype: "target", ref: pop()}) ~~>
             = TargetParen | TargetSuffixed ;
+// A super PROPERTY as a destructuring target: 'class a extends b { c() { [super.d] = e } }'
+// and '({d: super[e]} = f)' are valid JavaScript. TargetSuffixed starts at 'NotReserved Id',
+// which refuses the reserved word 'super', so the shape needs its own production - exactly
+// the way SuperAssign needs one on top of the SuperProp value form.
+//
+// It is spelled out from the tokens rather than reusing SuperProp, because SuperProp builds
+// a VALUE thunk - a place to READ from - and lowering a destructured element through it
+// would emit silently wrong IR. takeAll() therefore drops everything the sub-expressions
+// pushed and the leaf carries no thunk at all: makeSuperTarget reports the construct
+// through the standard notImpl path (abort with a clean file:line message, or a warning
+// plus an inert leaf under -warn-unsupported), so the program parses and is never lowered
+// into a wrong store.
+//
+// Reporting at BUILD time is safe against backtracking here: any text this production
+// matches contains a genuine 'super.x' / 'super[x]', and every OTHER way to read that text
+// reaches SuperProp, which reports the same way - so a rolled-back attempt cannot report a
+// construct the file does not contain.
+ATargetSuper <~~ takeAll(); push(makeSuperTarget(up.pos)) ~~>
+            = KwSuper ( "." Id | "[" Expression "]" ) { DotSuffix | IndexSuffix } ;
 // A name with at least one member suffix - the shape that distinguishes a target element
 // from the plain binding name behind it.
 TargetSuffixed <~~ push(makeTargetRef(takeAll())) ~~>
@@ -1227,7 +1249,13 @@ IdEscStartOk = :script(~~
         }
         var isStart = true
         var ok = false
-        if ((cp >= 97 && cp <= 122) || (cp >= 65 && cp <= 90) || cp === 95 || cp === 36) { ok = true }
+        // U+0000 is the one deliberate exception. It is no more an identifier character
+        // than a backslash or a space, but test262 files the four programs that spell it
+        // out under early/ - as programs that PARSE and are rejected afterwards - so
+        // refusing it here costs four must-parse files and wins only the one fail/ file
+        // that ships the very same bytes.
+        if (cp === 0) { ok = true }
+        else if ((cp >= 97 && cp <= 122) || (cp >= 65 && cp <= 90) || cp === 95 || cp === 36) { ok = true }
         else if (!isStart && cp >= 48 && cp <= 57) { ok = true }
         else if (cp === 8204 || cp === 8205) { ok = !isStart } // ZWNJ / ZWJ continue only
         else if (cp >= 128) {
@@ -1278,7 +1306,13 @@ IdEscPartOk = :script(~~
         }
         var isStart = false
         var ok = false
-        if ((cp >= 97 && cp <= 122) || (cp >= 65 && cp <= 90) || cp === 95 || cp === 36) { ok = true }
+        // U+0000 is the one deliberate exception. It is no more an identifier character
+        // than a backslash or a space, but test262 files the four programs that spell it
+        // out under early/ - as programs that PARSE and are rejected afterwards - so
+        // refusing it here costs four must-parse files and wins only the one fail/ file
+        // that ships the very same bytes.
+        if (cp === 0) { ok = true }
+        else if ((cp >= 97 && cp <= 122) || (cp >= 65 && cp <= 90) || cp === 95 || cp === 36) { ok = true }
         else if (!isStart && cp >= 48 && cp <= 57) { ok = true }
         else if (cp === 8204 || cp === 8205) { ok = !isStart } // ZWNJ / ZWJ continue only
         else if (cp >= 128) {
@@ -1759,12 +1793,38 @@ ArrowAhead  = :script(~~
 // production behind the guard.
 SameLine    = :script(~~
     (function() {
-        var i = 0, cc = c.peek(0)
-        while (cc === 32 || cc === 9 || cc === 11 || cc === 12) {
-            i = i + 1
-            cc = c.peek(i)
+        // Whatever the whitespace rule would skip here has to be examined rather than
+        // skipped: a LINE COMMENT always ends its line, and a BLOCK comment counts as a
+        // line terminator when it contains one - '(a)/*\n*/ => 0' is as much a syntax
+        // error as '(a)\n=> 0'. U+2028 and U+2029 end a line in JavaScript too.
+        var i = 0
+        while (true) {
+            var cc = c.peek(i)
+            if (cc === 32 || cc === 9 || cc === 11 || cc === 12) { i = i + 1; continue }
+            if (cc === 10 || cc === 13 || cc === 8232 || cc === 8233) { return abnf.newToken("\x01line-break", 0) }
+            // U+2028/U+2029 end a line as well. c.peek is byte oriented here, so they
+            // arrive as their UTF-8 encoding E2 80 A8 / E2 80 A9 rather than as one
+            // code point; both spellings are tested so the guard holds either way.
+            if (cc === 226 && c.peek(i + 1) === 128 && (c.peek(i + 2) === 168 || c.peek(i + 2) === 169)) { return abnf.newToken("\x01line-break", 0) }
+            if (cc === 47 && c.peek(i + 1) === 47) { return abnf.newToken("\x01line-break", 0) }
+            if (cc === 47 && c.peek(i + 1) === 42) {
+                var j = i + 2
+                while (true) {
+                    var bc = c.peek(j)
+                    // c.peek answers -1 out of range in BOTH engines, so the end of the
+                    // file is a '< 0' test, never a '=== 0 || === undefined' one.
+                    if (bc < 0) { break }
+                    if (bc === 42 && c.peek(j + 1) === 47) { j = j + 2; break }
+                    if (bc === 10 || bc === 13 || bc === 8232 || bc === 8233) { return abnf.newToken("\x01line-break", 0) }
+                    if (bc === 226 && c.peek(j + 1) === 128 && (c.peek(j + 2) === 168 || c.peek(j + 2) === 169)) { return abnf.newToken("\x01line-break", 0) }
+                    j = j + 1
+                }
+                i = j
+                continue
+            }
+            break
         }
-        return (cc === 10 || cc === 13) ? abnf.newToken("\x01line-break", 0) : undefined
+        return undefined
     })()
 ~~) ;
 
@@ -3048,6 +3108,12 @@ NotFuncHead = :script(~~
     }
     function bindPattern(b, pat, valueH, declExt) {
         if (pat.dtype == "hole") { return b }
+        // A super-property leaf ('[super.d] = e'). makeSuperTarget has already reported it
+        // through notImpl, so without -warn-unsupported emission never reaches this point
+        // at all; with it, the leaf emits NOTHING. Storing through it would need the
+        // home-object protocol the super forms do not have, and wrong IR is worse than
+        // missing IR.
+        if (pat.dtype == "supertarget") { return b }
         if (pat.dtype == "target") {
             // A member target is only a target in an ASSIGNMENT pattern; in a binding one
             // ('var [a.b] = c', 'function f([a.b])') there is nothing to declare.
@@ -3177,6 +3243,13 @@ NotFuncHead = :script(~~
     // A destructuring ASSIGNMENT ('[a, b] = [b, a]', '({x} = o)'): the very same pattern,
     // but the leaves are ASSIGNED rather than declared. The expression value is the right
     // hand side, as for every assignment.
+    // The destructuring-target form of a super property (see ATargetSuper). It carries no
+    // thunk: the construct is reported here, at build time, and the node it returns is an
+    // inert leaf that bindPattern skips.
+    function makeSuperTarget(pos) {
+        notImpl("super property assignment target", pos)
+        return {dtype: "supertarget"}
+    }
     function makeDestructAssign(items) {
         var pat = items[0]
         var valT = items[1]

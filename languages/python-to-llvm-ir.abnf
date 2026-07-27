@@ -41,13 +41,14 @@ materialized eagerly.
 
 Values and expressions: int and float literals, single, double and triple quoted strings
 with escapes, f-strings (f'x={a + 1}' renders like str()), True/False/None, the Ellipsis
-'...', lists with negative indexing and slices (s[1:3], s[:2], s[-3:]; no step), tuples
+'...', lists with negative indexing and slices (s[1:3], s[:2], s[-3:], s[::-1]), tuples
 (this subset has ONE sequence type - a tuple is a list that is not written to), dicts
 with insertion order, list and dict comprehensions (the variable does not leak),
 comparison chaining evaluating each operand once, and/or/not with Python truthiness
 (empty containers are falsy) and operand values, in / not in, is / is not, + - * / // %
-with Python semantics (7/2 == 3.5, -7//2 == -4, -7%2 == 1), unary -, and the @ matrix
-operator (which only ever reaches __matmul__).
+with Python semantics (7/2 == 3.5, -7//2 == -4, -7%2 == 1), unary - and ~, the **
+power operator (right associative, and reaching __pow__ / __rpow__ on a user class)
+and the @ matrix operator (which only ever reaches __matmul__).
 
 Numbers: decimal, hexadecimal, octal and binary integer literals, floats with an
 exponent and a leading or trailing dot, '_' digit separators in all of them, and
@@ -69,14 +70,54 @@ Type syntax: annotations are recorded in the enclosing body's __annotations__, P
 list[int] is a generic alias value (one object per written alias, so two of them
 compare equal).
 
-Still missing: sets, the match statement, bytes and raw string literals, the
-hex / octal / named character escapes, implicit adjacent string concatenation,
-f-string format specifiers,
-starred assignment targets (a, *b = ...), dict / set spread in a literal, slice
-steps and slice assignment, and the ** power and bitwise / shift operators.
+Sets are a real value type: the literal and the comprehension deduplicate with
+Python's ==, and the algebra (union, intersection, difference, symmetric
+difference, the subset orderings), membership, len, iteration and rendering all
+work. { } alone stays the empty DICT, as in Python. The | ^ & << >> operators are
+the set algebra on two sets and the 32 bit integer operators on numbers.
 
-Functions become IR functions jsf_N(env, args); Python scoping (assignment creates a
-function local unless the name exists) goes through the js_pyset_var external, negative
+Slices carry a STEP: s[lo:hi:step] reading (s[::-1] is the reversal), as an
+assignment target (a step of 1 splices and may change the length, an extended step
+assigns element by element) and as a del target. A right hand side may be a bare
+tuple, so 'one = 7,' is the one-element tuple.
+
+String literals are a run of ADJACENT pieces, which Python concatenates implicitly,
+each with its own prefix and quote style: r keeps the backslashes, b makes a bytes
+value (a list of byte numbers, so indexing, + and len are the ordinary list
+machinery), u is accepted and ignored, and f makes the piece an f-string. The
+escapes are Python's - the single letter ones, the three digit octal form, the two
+digit hex form, the four and the eight digit Unicode forms, the named character
+form (from a small name table) and a backslash before a newline, which joins the
+lines. len() counts CODE POINTS, so an astral character is one.
+
+f-strings carry the whole 3.12 surface: all four quote styles, the rf / fr prefix
+orders, a nested f-string inside a replacement field, the !r / !s / !a conversions,
+the = debug form that echoes the source text of its expression, and the format mini
+language ([[fill]align][sign][0][width][.precision][type], with a {nested} field
+allowed inside the spec) rendered by js_pyformat.
+
+Assignment takes a full TARGET LIST: a, *b = xs and (h, (i, j)) = t unpack (the
+targets after the starred one are read from the end, so the rest needs no length
+arithmetic), a chain a = b = value writes one value to every head, and the same
+writer binds the loop target, so 'for head, *tail in xs' works. A display may
+spread: [0, *xs], (0, *xs), {0, *s} and {**d, 'k': v}.
+
+The match statement (PEP 634) is genuinely lowered to control flow: literal and
+value patterns, or-patterns, capture / wildcard / as patterns, sequence patterns
+with a starred rest, mapping patterns with **rest, class patterns (positional
+through __match_args__, keyword through attributes, and the builtin type names) and
+case guards. A capture binds an ordinary variable.
+
+Still missing: nothing the full-syntax ratchet (tests/python-test-full.py) covers -
+it parses and passes in full.
+
+Functions become IR functions jsf_N(env, args); Python scoping goes through the
+js_pyset_var external: a def, a lambda, a class body and the module top level are
+BINDING BOUNDARIES (js_pyfnscope), so an assignment binds locally even when an
+enclosing function binds the same name, while global / nonlocal send it to the
+module scope or the enclosing binding. A try, except, with or finally body is its
+own IR closure but NOT a boundary, so what it assigns belongs to the function
+around it. Negative
 indexing and dict entries through js_pyget/js_pyset, dicts through js_dict_new (two
 parallel key/value arrays keep the insertion order), slices through js_pyslice,
 iteration through js_pyiter, len through js_pylen, floor division and modulo through
@@ -128,7 +169,7 @@ KwAs        = "as" KwEnd ;
 
 // Compound statements own their suites; small statements end with a newline.
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = If | While | For | TryStmt | With | Decorated | DefLike | SmallLine ;
+            = If | While | For | TryStmt | With | Match | Decorated | DefLike | SmallLine ;
 
 // class / def / async def push {dname, dstmt}: the NAME is what a decorator
 // chain has to rebind, so the definition carries it. Used undecorated, only the
@@ -141,7 +182,7 @@ DefLike     <~~ push(pop().dstmt) ~~>
 SmallLine   <~~ push(makeSeq(takeAll())) ~~>
             = SmallStmt { ";" SmallStmt } [ ";" ] NL ;
 SmallStmt   = Return | Break | Continue | Pass | Raise | Assert | Global | Nonlocal | Del
-            | TypeAlias | AugAssign | ParallelAssign | AnnAssign | Assign | ExprSmall ;
+            | TypeAlias | AugAssign | AnnAssign | Assign | ExprSmall ;
 
 // PEP 695 'type NAME[params] = TYPE': the alias is a real value, an object whose
 // __name__ is the alias name and whose __value__ is the type it stands for. It is
@@ -158,6 +199,63 @@ TypeAlias   <~~ push(makeTypeAlias(takeAll())) ~~>
 Suite       <~~ push(makeSeq(takeAll())) ~~>
             = ":" ( NL Indent Statement { SameLevel Statement } Dedent | SmallLine ) ;
 
+// match SUBJECT: case PATTERN [if GUARD]: SUITE ... - the structural pattern match
+// of PEP 634. `match` and `case` are soft keywords, so a Match only commits once the
+// `:` NEWLINE INDENT `case` shape is there; anywhere else `match` stays an ordinary
+// name. Every case is tried in source order, and the first whose pattern (and guard)
+// holds runs its suite. A capture writes an ordinary variable, so the bindings a
+// pattern made are still there after the statement, as in Python.
+Match       <~~ push(makeMatch(takeAll())) ~~>
+            = "match" KwEnd ExprList ":" NL Indent CaseClause { SameLevel CaseClause } Dedent ;
+CaseClause  <~~ push(makeCase(takeAll())) ~~>
+            = "case" KwEnd Patterns [ CaseGuard ] Suite ;
+CaseGuard   <~~ push({guard: pop()}) ~~>
+            = "if" KwEnd Expression ;
+// A comma-separated pattern list is a sequence pattern (case 1, 2:); a single
+// pattern with no comma stays itself.
+Patterns    <~~ push(makeSeqPattern(takeAll(), false)) ~~>
+            = OrPattern { "," <~~ push({pcomma: true}) ~~> OrPattern } [ "," <~~ push({pcomma: true}) ~~> ] ;
+OrPattern   <~~ push(makeOrPattern(takeAll())) ~~>
+            = ClosedPattern { "|" ClosedPattern } [ AsPattern ] ;
+AsPattern   = KwAs Id <~~ push({asname: up.in}) ~~> ;
+ClosedPattern = GroupPattern | SeqPatternB | MapPattern | ClassPattern | ValuePattern | LitPattern | StarPattern | WildPattern | CapturePattern ;
+GroupPattern <~~ push(makeSeqPattern(takeAll(), false)) ~~>
+            = "(" :whitespace(WhitespaceNL) [ OrPattern { "," <~~ push({pcomma: true}) ~~> [ OrPattern ] } ] ")" :whitespace(Whitespace) ;
+SeqPatternB <~~ push(makeSeqPattern(takeAll(), true)) ~~>
+            = "[" :whitespace(WhitespaceNL) [ OrPattern { "," OrPattern } [ "," ] ] "]" :whitespace(Whitespace) ;
+MapPattern  <~~ push(makeMapPattern(takeAll())) ~~>
+            = "{" :whitespace(WhitespaceNL) [ MapItem { "," MapItem } [ "," ] ] "}" :whitespace(Whitespace) ;
+MapItem     = MapRest | MapEntry ;
+MapRest     <~~ push({maprest: up.in}) ~~>
+            = "**" Id ;
+MapEntry    <~~ var p2 = pop(); push({mkey: pop(), mpat: p2}) ~~>
+            = Expression ":" OrPattern ;
+ClassPattern <~~ push(makeClassPattern(takeAll())) ~~>
+            = DottedRef "(" :whitespace(WhitespaceNL) [ ClassPatArg { "," ClassPatArg } [ "," ] ] ")" :whitespace(Whitespace) ;
+ClassPatArg = ClassPatKw | ClassPatPos ;
+ClassPatKw  <~~ var p3 = pop(); push({ckey: pop(), cpat: p3}) ~~>
+            = Id <~~ push(up.in) ~~> "=" NotEqSign OrPattern ;
+ClassPatPos <~~ push({cpos: pop()}) ~~>
+            = OrPattern ;
+// A dotted name in a pattern is a VALUE pattern (case K.LIMIT:), a bare name a
+// capture; both need the class-pattern form to be tried first.
+ValuePattern <~~ push(makeValuePattern(pop())) ~~>
+            = DottedRef2 ;
+DottedRef   <~~ push({dname: stripWs(up.in)}) ~~>
+            = Id { "." Id } ;
+DottedRef2  <~~ push(makeDotted(stripWs(up.in))) ~~>
+            = Id "." Id { "." Id } ;
+LitPattern  <~~ push(makeValuePattern(pop())) ~~>
+            = ( StringLit | NegNumLit | PyNum | True | False | None ) ;
+NegNumLit   <~~ push(makeNeg(pop())) ~~>
+            = "-" PyNum ;
+StarPattern <~~ push({pstar: up.in}) ~~>
+            = "*" Id ;
+WildPattern <~~ push({wild: true}) ~~>
+            = "_" KwEnd ;
+CapturePattern <~~ push({capture: up.in}) ~~>
+            = Id ;
+
 If          <~~ push(makeIf(takeAll())) ~~>
             = "if" KwEnd Expression Suite { Elif } [ Else ] ;
 Elif        <~~ push(makeElif(pop(), pop())) ~~>
@@ -168,17 +266,13 @@ Else        <~~ push(makeElse(pop())) ~~>
 While       <~~ push(makeWhile(takeAll())) ~~>
             = "while" KwEnd Expression Suite [ Else ] ;
 
-// for x in ITER: a single name (genuinely compiled). A tuple target
-// (for a, b in ...  /  for (a, b) in ...) is accepted and reported as not
-// implemented (the subset has no tuple unpacking in the loop head).
+// for TARGETS in ITER: the loop target is a full target list, so 'for a, b in ...',
+// 'for (a, b) in ...' and 'for head, *tail in ...' all unpack each element through
+// the same writer as an assignment.
 // A trailing 'else' on a loop runs when the loop ended WITHOUT a break, so it
 // hangs off the natural exit while break jumps past it.
-For         = ForOne | ForTup ;
-ForOne      <~~ push(makeFor(takeAll())) ~~>
-            = [ "async" KwEnd ] "for" KwEnd Id <~~ push({fvar: up.in}) ~~> "in" KwEnd Expression Suite [ Else ] ;
-ForTup      <~~ takeAll(); push(notImplStmt("for-loop tuple unpacking", up.pos)) ~~>
-            = [ "async" KwEnd ] "for" KwEnd ForTargets "in" KwEnd Expression Suite [ Else ] ;
-ForTargets  = "(" Id { "," Id } [ "," ] ")" | Id "," Id { "," Id } [ "," ] ;
+For         <~~ push(makeFor(takeAll())) ~~>
+            = [ "async" KwEnd ] "for" KwEnd TargetList "in" KwEnd Expression Suite [ Else ] ;
 
 Def         <~~ push(makeDef(pop(), pop(), pop(), up.pos)) ~~>
             = "def" KwEnd Id <~~ push(up.in) ~~> [ TypeParams ] ParamList [ "->" DiscardType ] Suite ;
@@ -294,11 +388,6 @@ Del         <~~ push(makeDel(takeAll())) ~~>
 DelTarget   = "(" Target { "," Target } [ "," ] ")" | Target ;
 
 
-// a, b = x, y (and a, b = b, a): all right-hand values are evaluated before any
-// target is written; a single right-hand iterable is unpacked positionally.
-ParallelAssign <~~ push(makeParallelAssign(takeAll())) ~~>
-            = Target "," Target { "," Target } "=" Expression { "," Expression } ;
-
 // name: Type [= value]: the annotation is parsed and ignored; with a value it is a
 // plain assignment, without one it is a no-op declaration.
 AnnAssign   <~~ push(makeAnnAssign(takeAll())) ~~>
@@ -327,13 +416,47 @@ Continue    <~~ push(makeContinue()) ~~> = "continue" KwEnd ;
 Pass        <~~ push(function(b) { return b }) ~~>  = "pass" KwEnd ;
 
 AugAssign   <~~ push(makeAugAssign(takeAll())) ~~>
-            = Target ( "+=" | "-=" | "*=" | "//=" | "/=" | "%=" | "@=" ) <~~ push({op: up.in}) ~~> Expression ;
-Assign      <~~ push(makeAssign(pop(), pop())) ~~>
-            = Target "=" Expression ;
+            = Target ( "+=" | "-=" | "**=" | "*=" | "//=" | "/=" | "%=" | "@="
+                     | "|=" | "&=" | "^=" | "<<=" | ">>=" ) <~~ push({op: up.in}) ~~> ExprList ;
+// a = b = value: every head is a target LIST, so 'a, *b = xs', '(h, (i, j)) = t'
+// and 'xs[1:3] = ys' all go through the same unpacking writer, and a chain of
+// heads writes the one value to each of them, left to right.
+// The right hand side is an expression LIST, which is the bare tuple Python allows
+// without parentheses: 'one = 7,' is the one-element tuple and 'p = 1, 2' the pair.
+Assign      <~~ push(makeAssignStmt(takeAll())) ~~>
+            = AssignHead { AssignHead } ExprList ;
+AssignHead  <~~ push({tlist: pop()}) ~~>
+            = TargetList "=" NotEqSign ;
+// A comma-separated target list unpacks; a single target with no comma stays itself.
+TargetList  <~~ push(makeTargetList(takeAll())) ~~>
+            = TargetItem { "," TargetItem } [ "," ] ;
+TargetItem  = StarTarget | TupleTarget | Target ;
+// *rest in a target list swallows the middle of the sequence.
+StarTarget  <~~ push({startgt: pop()}) ~~>
+            = "*" TargetItem ;
+// A parenthesized or bracketed target list nests: (h, (i, j)) = (1, (2, 3)).
+TupleTarget <~~ push(makeTargetList(takeAll())) ~~>
+            = "(" :whitespace(WhitespaceNL) [ TargetItem { "," TargetItem } [ "," ] ] ")" :whitespace(Whitespace)
+            | "[" :whitespace(WhitespaceNL) [ TargetItem { "," TargetItem } [ "," ] ] "]" :whitespace(Whitespace) ;
+// A comma-separated value list is a tuple; a single value with no comma stays
+// itself, but a trailing comma ('one = 7,') still makes the one-element tuple.
+ExprList    <~~ push(makeExprList(takeAll())) ~~>
+            = Expression { "," Expression } [ "," <~~ push({tcomma: true}) ~~> ] ;
+// A zero-width guard that fails when the very next character is '=', so 'a == b'
+// is never read as an assignment head.
+NotEqSign   = :script(~~
+    (function() {
+        return (c.peek(0) === 61) ? abnf.newToken("\x01eq-follows", 0) : undefined
+    })()
+~~) ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> { TIndex | TAttr } ;
+            = Id <~~ push(up.in) ~~> { TSlice | TIndex | TAttr } ;
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
+// xs[lo:hi:step] as an assignment or del target. Tried before TIndex (the missing
+// ':' makes it fail fast there), like the reading SliceSfx.
+TSlice      <~~ push(makeTSlice(takeAll())) ~~>
+            = "[" [ SliceLo ] ":" [ SliceHi ] [ ":" [ SliceStep ] ] "]" ;
 // obj.attr = ... : an attribute target (self.x = ... in a method). The write goes
 // through js_pysetattr, which honours a __set__ descriptor on the class and the
 // __slots__ declaration.
@@ -397,9 +520,9 @@ Comparison  <~~ push(makeCompare(takeAll())) ~~>
                     | ( "is" KwEnd ) <~~ push("is") ~~> BitExpr
                     | ( "in" KwEnd ) <~~ push("in") ~~> BitExpr } ;
 
-// Bitwise / shift operators ( | ^ & << >> ) sit just above comparison; they are
-// accepted and reported as not implemented (no integer-bit externs in the subset).
-// With no such operator the layer is transparent (returns the single operand).
+// Bitwise / shift operators ( | ^ & << >> ) sit just above comparison. On two
+// sets they are the set algebra, on numbers the 32 bit integer operators; js_pybin
+// decides by the operand shapes. With no such operator the layer is transparent.
 BitExpr     <~~ push(makeBit(takeAll(), up.pos)) ~~>
             = Arith { ( "|" | "^" | "&" | "<<" | ">>" ) <~~ push(up.in) ~~> Arith } ;
 
@@ -414,16 +537,18 @@ Term        <~~ push(foldBinary(takeAll())) ~~>
 Factor      = Neg | Invert | Await | Power ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" Factor ;
-// ~x bitwise-not: accepted, reported as not implemented.
-Invert      <~~ takeAll(); push(notImplExpr("~ operator", up.pos)) ~~>
+// ~x: the bitwise complement of the 32 bit integer value, and __invert__ on an
+// instance of a user class (js_pyunary decides, like unary minus).
+Invert      <~~ push(makeInvert(pop())) ~~>
             = "~" Factor ;
 // await EXPR: there is no event loop here and an async def is compiled as an
 // ordinary function, so awaiting is the identity on its operand - the syntax is
 // recognized and the expression it suspends on is simply evaluated.
 Await       = "await" KwEnd Factor ;
 
-// a ** b exponentiation: accepted, reported as not implemented (no pow extern).
-// With no '**' the layer is transparent (returns the single operand).
+// a ** b exponentiation. It binds TIGHTER than unary minus on its left (-2 ** 2
+// is -4) and its right operand is a Factor, so it is right associative and
+// '2 ** -1' works. With no '**' the layer is transparent.
 Power       <~~ push(makePower(takeAll(), up.pos)) ~~>
             = PostfixExpr [ "**" Factor ] ;
 
@@ -432,9 +557,9 @@ PostfixExpr = CallMember ;
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { CallSfx | MethodSfx | SliceSfx | IndexSfx | AttrSfx } ;
 CallSfx     <~~ push(makeCallSfx(takeAll(), up.pos)) ~~>
-            = "(" [ CallArg { "," CallArg } [ "," ] ] ")" ;
+            = "(" :whitespace(WhitespaceNL) [ CallArg { "," CallArg } [ "," ] ] ")" :whitespace(Whitespace) ;
 MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.pos)) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ CallArg { "," CallArg } [ "," ] ] ")" ;
+            = "." Id <~~ push({mname: up.in}) ~~> "(" :whitespace(WhitespaceNL) [ CallArg { "," CallArg } [ "," ] ] ")" :whitespace(Whitespace) ;
 // obj.attr with no call: js_pygetattr - own attributes first, then the MRO of the
 // class (running a __get__ descriptor found there).
 AttrSfx     <~~ push({kind: "attr", name: pop().aname, pos: up.pos}) ~~>
@@ -458,13 +583,17 @@ CallPos     = Expression ;
 // A slice s[lo:hi] with both ends optional; tried before plain indexing (the
 // missing ':' makes it fail fast there).
 SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
-            = "[" [ SliceLo ] ":" [ SliceHi ] "]" ;
+            = "[" [ SliceLo ] ":" [ SliceHi ] [ ":" [ SliceStep ] ] "]" ;
 SliceLo     <~~ push({slo: pop()}) ~~> = Expression ;
 SliceHi     <~~ push({shi: pop()}) ~~> = Expression ;
+SliceStep   <~~ push({sstep: pop()}) ~~> = Expression ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = EmptyTuple | GenExpParen | Grouped | FString | StringLit | PyNum | EllipsisLit | True | False | None
+// StringLit comes BEFORE the numbers and names: it is a run of adjacent pieces and
+// an f-string is one of them, so an f-string is never matched on its own here (that
+// would leave `f"a{1}" "b"` half-parsed - PEG has no backtracking into a taken match).
+Primary     = EmptyTuple | GenExpParen | Grouped | StringLit | PyNum | EllipsisLit | True | False | None
             | ListComp | ListLit | DictComp | DictLit | SetComp | SetLit | VarRef ;
 
 // --- Python numeric literals ---
@@ -525,22 +654,28 @@ PyJ         = "j" | "J" ;
 // subset has one sequence type, so a tuple is an immutable list that is simply
 // not written to. A single parenthesized expression ( a ) is plain grouping.
 EmptyTuple  <~~ push(makeList([])) ~~>
-            = "(" ")" ;
+            = "(" :whitespace(WhitespaceNL) ")" :whitespace(Whitespace) ;
 // ( expr for x in it [if c] ): a generator expression. It is materialized
 // eagerly here - the sequence is the same, only the laziness is missing.
 GenExpParen <~~ push(makeListComp(takeAll())) ~~>
             = "(" Expression [ "async" KwEnd ] "for" KwEnd Id <~~ push({cvar: up.in}) ~~>
               "in" KwEnd Expression [ CompIf ] ")" ;
 Grouped     <~~ push(makeParen(takeAll(), up.pos)) ~~>
-            = "(" Expression { "," <~~ push({tcomma: true}) ~~> [ Expression ] } ")" ;
+            = "(" :whitespace(WhitespaceNL) ListItem { "," <~~ push({tcomma: true}) ~~> [ ListItem ] } ")" :whitespace(Whitespace) ;
 
-// { e for x in it [if c] } set comprehension and { a, b, ... } set literal: both
-// accepted and reported as not implemented (the subset has no set type). Tried
-// after the dict forms so { k: v } and { k: v for ... } still parse as dicts.
-SetComp     <~~ takeAll(); push(notImplExpr("set comprehension", up.pos)) ~~>
-            = "{" Expression "for" KwEnd Id "in" KwEnd Expression [ "if" KwEnd Expression ] "}" ;
-SetLit      <~~ takeAll(); push(notImplExpr("set literal", up.pos)) ~~>
-            = "{" Expression { "," Expression } [ "," ] "}" ;
+// { e for x in it [if c] } set comprehension and { a, b, ... } set literal: a real
+// set value - the elements are collected into a list and js_pyset_new deduplicates
+// it with Python's ==. Tried after the dict forms so { k: v } and { k: v for ... }
+// still parse as dicts; { } alone stays the empty DICT, as in Python.
+SetComp     <~~ push(makeSetOf(makeListComp(takeAll()))) ~~>
+            = "{" Expression "for" KwEnd Id <~~ push({cvar: up.in}) ~~>
+              "in" KwEnd Expression [ CompIf ] "}" ;
+SetLit      <~~ push(makeSetLit(takeAll())) ~~>
+            = "{" SetItem { "," SetItem } [ "," ] "}" ;
+// A set element, or *iterable spreading its members into the set.
+SetItem     = SetSpread | SetElem ;
+SetSpread   <~~ push({sspread: pop()}) ~~> = "*" Expression ;
+SetElem     <~~ push({selem: pop()}) ~~>   = Expression ;
 
 // [expr for x in iterable if cond] builds a list; the variable is comprehension local.
 ListComp    <~~ push(makeListComp(takeAll())) ~~>
@@ -556,32 +691,91 @@ DictComp    <~~ push(makeDictComp(takeAll())) ~~>
               "in" KwEnd Expression [ CompIf ] "}" ;
 
 // {k: v, ...}: keys and values are expressions; entries keep their insertion order.
+// **mapping spreads another dict in, later entries overwriting earlier ones in
+// place (so the merged dict keeps the FIRST insertion position of a repeated key).
 DictLit     <~~ push(makeDict(takeAll())) ~~>
-            = "{" [ DictEntry { "," DictEntry } ] "}" ;
+            = "{" :whitespace(WhitespaceNL) [ DictItem { "," DictItem } [ "," ] ] "}" :whitespace(Whitespace) ;
+DictItem    = DictSplat | DictEntry ;
+DictSplat   <~~ push({dsplat: pop()}) ~~>
+            = "**" Expression ;
 DictEntry   <~~ var dv = pop(); push({dk: pop(), dv: dv}) ~~>
             = Expression ":" Expression ;
 
-// f-string: literal chunks and {expression} parts; every expression renders like str().
+// An f-string piece. All four quote styles, and the `rf`/`fr` prefix orders; the
+// replacement fields carry the full 3.12 surface - a nested f-string, a conversion
+// (!r / !s / !a), a format spec that may itself contain a {nested} field, and the
+// `=` debug form that echoes the source text of the expression.
 FString     <~~ push(makeFString(takeAll())) ~~>
-            = ( 'f"' | 'F"' ) :whitespace() { FExpr | FChunk } '"' :whitespace(Whitespace) ;
-FExpr       = "{" :whitespace(Whitespace) Expression "}" :whitespace() ;
-FChunk      <~~ push({chunk: unescapeJs(up.in)}) ~~>
-            = FChar { FChar } ;
-FChar       = StrEsc | FPlain ;
-// Everything printable except the quote, the braces and the backslash.
-FPlain      = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7a" | "|" | "\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+            = FPrefix ( FTripleDq | FTripleSq | FDq | FSq ) ;
+FPrefix     = ( "rf" | "rF" | "Rf" | "RF" | "fr" | "fR" | "Fr" | "FR" | "f" | "F" ) :whitespace() ;
+FTripleDq   = '"""' :whitespace() { FExpr | FChunk3D } '"""' :whitespace(Whitespace) ;
+FTripleSq   = "'''" :whitespace() { FExpr | FChunk3S } "'''" :whitespace(Whitespace) ;
+FDq         = '"' :whitespace() { FExpr | FChunkD } '"' :whitespace(Whitespace) ;
+FSq         = "'" :whitespace() { FExpr | FChunkS } "'" :whitespace(Whitespace) ;
+// up.in is the whole `{...}` field, which is what the `=` debug form needs: it echoes
+// the SOURCE TEXT of the expression, whitespace included (f"{x = }" -> "x = 5").
+FExpr       <~~ push(makeFField(takeAll(), up.in)) ~~>
+            = "{" :whitespace(Whitespace) Expression [ FDebug ] [ FConv ] [ FSpec ] "}" :whitespace() ;
+// The `=` debug form. Skipped whitespace never reaches up.in, so the spaces around
+// the `=` are matched as ORDINARY TOKENS (whitespace skipping off for this
+// production only) - that is what makes f"{x = }" echo "x = 5" and not "x=5".
+FDebug      <~~ push({fdebug: true}) ~~>
+            = :whitespace() FDbgSp "=" NotEqSign FDbgSp ;
+FDbgSp      = [ @+" \t" ] ;
+FConv       = "!" ( "r" | "s" | "a" ) <~~ push({fconv: up.in}) ~~> ;
+FSpec       <~~ push({fspec: takeAll()}) ~~>
+            = ":" :whitespace() { FSpecField | FSpecChunk } ;
+FSpecField  = "{" :whitespace(Whitespace) Expression "}" :whitespace() ;
+FSpecChunk  <~~ push({chunk: up.in}) ~~>
+            = FSpecChar { FSpecChar } ;
+FSpecChar   = "\x20"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+FChunkD     <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FCharD { FCharD } ;
+FCharD      = FBrace | StrEsc2 | FPlainD ;
+FChunkS     <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FCharS { FCharS } ;
+FCharS      = FBrace | StrEsc2 | FPlainS ;
+FChunk3D    <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FChar3D { FChar3D } ;
+FChar3D     = FBrace | StrEsc2 | FPlain3D ;
+FChunk3S    <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FChar3S { FChar3S } ;
+FChar3S     = FBrace | StrEsc2 | FPlain3S ;
+// {{ and }} are the escaped braces.
+FBrace      = "{{" | "}}" ;
+FPlainD     = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+FPlainS     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+FPlain3D    = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+FPlain3S    = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 
 ListLit     <~~ push(makeList(takeAll())) ~~>
-            = "[" [ Expression { "," Expression } ] "]" ;
+            = "[" :whitespace(WhitespaceNL) [ ListItem { "," ListItem } [ "," ] ] "]" :whitespace(Whitespace) ;
+// A list element, or *iterable spreading its members into the list.
+ListItem    = ListSpread | Expression ;
+ListSpread  <~~ push({lspread: pop()}) ~~> = "*" Expression ;
 
-// Triple-quoted strings (docstrings, multi-line text) are genuinely compiled as
-// ordinary string constants; they are tried before the single-quoted forms so
-// """...""" is not misread as an empty "" string. The body may span newlines and
-// contain lone or doubled quotes; only three quotes in a row close it.
-StringLit   = TripleDqStr | TripleSqStr | DqString | SqString ;
-TripleDqStr = '"""' :whitespace() { TStrEsc | TdqChar | TdqQ1 | TdqQ2 } <~~ push(makeConst(unescapeJs(up.in))) ~~> '"""' :whitespace(Whitespace) ;
-TripleSqStr = "'''" :whitespace() { TStrEsc | TsqChar | TsqQ1 | TsqQ2 } <~~ push(makeConst(unescapeJs(up.in))) ~~> "'''" :whitespace(Whitespace) ;
-TStrEsc     = "\\" "\x20"..b"\x7e" ;
+// A string literal is a run of ADJACENT pieces - Python concatenates them implicitly
+// ("ab" "cd", f"a{1}" "b") - each with its own prefix and quote style. A piece with
+// an `f` prefix is an f-string (its {expressions} are parsed); every other piece is
+// a constant whose PREFIX decides how it is decoded: `r` keeps the backslashes, `b`
+// makes it a bytes value (a list of byte numbers), `u` is accepted and ignored.
+// Triple-quoted pieces are tried before the single-quoted ones so """...""" is not
+// misread as an empty "" string; their body may span newlines and contain lone or
+// doubled quotes, and only three quotes in a row close it.
+StringLit   <~~ push(makeStrConcat(takeAll())) ~~>
+            = StrPiece { StrPiece } ;
+StrPiece    = FString | TextPiece ;
+TextPiece   <~~ push(makeStrPiece(up.in)) ~~>
+            = [ StrPrefix ] ( TripleDqStr | TripleSqStr | DqStr2 | SqStr2 ) ;
+// The prefix letters, longest first (rb before r), glued to the quote.
+StrPrefix   = ( "rb" | "rB" | "Rb" | "RB" | "br" | "bR" | "Br" | "BR"
+              | "r" | "R" | "b" | "B" | "u" | "U" ) :whitespace() ;
+TripleDqStr = '"""' :whitespace() { TStrEsc | TdqChar | TdqQ1 | TdqQ2 } '"""' :whitespace(Whitespace) ;
+TripleSqStr = "'''" :whitespace() { TStrEsc | TsqChar | TsqQ1 | TsqQ2 } "'''" :whitespace(Whitespace) ;
+// A single-quoted piece. The shared DqString/SqString productions push a cooked
+// value, which the prefix-aware decoder does not want, so these are spelled out.
+DqStr2      = '"' :whitespace() { StrEsc2 | DqChar2 } '"' :whitespace(Whitespace) ;
+SqStr2      = "'" :whitespace() { StrEsc2 | SqChar2 } "'" :whitespace(Whitespace) ;
+StrEsc2     = "\\" "\x00"..."\U0010ffff" ;
+DqChar2     = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SqChar2     = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+TStrEsc     = "\\" "\x00"..."\U0010ffff" ;
 // A non-quote, non-backslash char (newlines and spaces included: the body is raw).
 TdqChar     = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
 TdqQ1       = '"' ( TStrEsc | TdqChar ) ;
@@ -651,7 +845,14 @@ SameLevel = :script(~~
 ~~) ;
 
 // Whitespace never includes newlines: they are structure, not noise.
-Whitespace  = { @+" \t" | Comment } ;
+// A backslash before a newline joins the lines - Python allows that anywhere, not
+// only inside brackets, so it belongs in the ordinary whitespace too.
+Whitespace  = { @+" \t" | Comment | LineJoin } ;
+// Inside (), [] and {} a newline is NOT structure - Python joins those lines
+// implicitly - so the bracketed productions switch to this whitespace and switch
+// back on the closing bracket.
+WhitespaceNL = { @+" \t\r\n" | Comment | LineJoin } ;
+LineJoin    = "\\" "\n" ;
 Comment     = "#" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
@@ -727,8 +928,139 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    // items = [{chunk: text} | expression thunk, ...] -> the f-string value, built by
-    // concatenating the chunks and the str() rendering (js_pystr) of the expressions.
+    // ----- String, bytes and f-string literals -----
+    // Decode a Python string body. `raw` keeps every backslash; otherwise the escapes
+    // are Python's: the single-character ones, the three digit octal form, the two
+    // digit hex form, the four and eight digit Unicode forms, the named character
+    // form (a small table of the names a program is likely to spell out) and a
+    // backslash before a newline, which joins the lines.
+    // The table is keyed with a "$" prefix: a bare name like "constructor" would
+    // otherwise resolve to an inherited Object.prototype member under a host JS
+    // engine and answer for a name the table does not hold.
+    var pyUniNames = {}
+    pyUniNames["$BULLET"] = 8226
+    pyUniNames["$DEGREE SIGN"] = 176
+    pyUniNames["$EURO SIGN"] = 8364
+    pyUniNames["$GREEK SMALL LETTER ALPHA"] = 945
+    pyUniNames["$GREEK SMALL LETTER PI"] = 960
+    pyUniNames["$EM DASH"] = 8212
+    pyUniNames["$SNOWMAN"] = 9731
+    pyUniNames["$NO-BREAK SPACE"] = 160
+    function pyUnescape(text, raw) {
+        if (raw) { return text }
+        var out = ""
+        var i = 0
+        while (i < text.length) {
+            var c1 = text.charAt(i)
+            if (c1 != "\\") { out += c1; i++; continue }
+            var e = text.charAt(i + 1)
+            if (e == "n") { out += "\n"; i += 2; continue }
+            if (e == "t") { out += "\t"; i += 2; continue }
+            if (e == "r") { out += "\r"; i += 2; continue }
+            if (e == "a") { out += String.fromCharCode(7); i += 2; continue }
+            if (e == "b") { out += String.fromCharCode(8); i += 2; continue }
+            if (e == "f") { out += String.fromCharCode(12); i += 2; continue }
+            if (e == "v") { out += String.fromCharCode(11); i += 2; continue }
+            if (e == "\n") { i += 2; continue }
+            if (e == "\\") { out += "\\"; i += 2; continue }
+            if (e == "'") { out += "'"; i += 2; continue }
+            if (e == '"') { out += '"'; i += 2; continue }
+            if (e == "x") { out += String.fromCharCode(hexAt(text, i + 2, 2)); i += 4; continue }
+            if (e == "u") { out += String.fromCharCode(hexAt(text, i + 2, 4)); i += 6; continue }
+            if (e == "U") { out += codePoint(hexAt(text, i + 2, 8)); i += 10; continue }
+            if (e == "N" && text.charAt(i + 2) == "{") {
+                var close = text.indexOf("}", i + 3)
+                if (close > 0) {
+                    var nm = pyUniNames["$" + text.substring(i + 3, close)]
+                    out += (nm != undefined) ? codePoint(nm) : ""
+                    i = close + 1
+                    continue
+                }
+            }
+            if (e >= "0" && e <= "7") {
+                var oct = ""
+                var k = i + 1
+                while (k < text.length && oct.length < 3 && text.charAt(k) >= "0" && text.charAt(k) <= "7") {
+                    oct += text.charAt(k)
+                    k++
+                }
+                out += String.fromCharCode(parseInt(oct, 8))
+                i = k
+                continue
+            }
+            out += "\\"
+            i++
+        }
+        return out
+    }
+    // A code point above the BMP becomes its UTF-16 surrogate pair; the runtime's
+    // len counts code points again, so len of a single astral character is 1.
+    function codePoint(n) {
+        if (n <= 65535) { return String.fromCharCode(n) }
+        var v = n - 65536
+        return String.fromCharCode(55296 + (v >> 10)) + String.fromCharCode(56320 + (v & 1023))
+    }
+    // The source text of one literal piece, prefix and quotes included. Everything is
+    // decided here rather than in the grammar, which keeps it to one rule per quote
+    // style instead of one per prefix/quote combination.
+    function makeStrPiece(text) {
+        var i = 0
+        var raw = false
+        var isb = false
+        while (i < text.length) {
+            var c1 = text.charAt(i)
+            if (c1 == "r" || c1 == "R") { raw = true; i++ }
+            else if (c1 == "b" || c1 == "B") { isb = true; i++ }
+            else if (c1 == "u" || c1 == "U") { i++ }
+            else { break }
+        }
+        var q = 1
+        var head = text.substring(i, i + 3)
+        if (head == '"""' || head == "'''") { q = 3 }
+        var body = text.substring(i + q, text.length - q)
+        var v = pyUnescape(body, raw)
+        if (isb) { return {bytes: v} }
+        return {str: v}
+    }
+    // bytes are modelled as a LIST of byte numbers, so b"AB"[0] is 65, b"a" + b"b"
+    // concatenates and len counts bytes - all through the ordinary list machinery.
+    function makeBytes(v) {
+        var elems = []
+        for (var i = 0; i < v.length; i++) { elems.push(makeConst(v.charCodeAt(i) & 255)) }
+        return makeList(elems)
+    }
+    // Adjacent pieces concatenate (implicit string concatenation). An all-constant
+    // run folds to one constant at compile time; a run holding an f-string becomes a
+    // chain of js_jadd.
+    function makeStrConcat(items) {
+        if (items.length == 1 && items[0].bytes != undefined) { return makeBytes(items[0].bytes) }
+        var allConst = true
+        for (var i = 0; i < items.length; i++) { if (items[i].str == undefined) { allConst = false } }
+        if (allConst) {
+            var lit = ""
+            for (var k = 0; k < items.length; k++) { lit += items[k].str }
+            return makeConst(lit)
+        }
+        return function(b) {
+            var v = emitStr(b, "")
+            for (var j = 0; j < items.length; j++) {
+                var it = items[j]
+                if (it.str != undefined) { v = callExt(b, "js_jadd", [v, emitStr(b, it.str)]) }
+                else if (it.bytes != undefined) {
+                    var rb = makeBytes(it.bytes)(b)
+                    b = rb.b
+                    v = callExt(b, "js_jadd", [v, callExt(b, "js_pystr", [rb.v])])
+                } else {
+                    var r = it(b)
+                    b = r.b
+                    v = callExt(b, "js_jadd", [v, r.v])
+                }
+            }
+            return {b: b, v: v}
+        }
+    }
+    // items = [{chunk: text} | field thunk, ...] -> the f-string value, built by
+    // concatenating the literal chunks and the rendered replacement fields.
     function makeFString(items) {
         return function(b) {
             var v = emitStr(b, "")
@@ -737,13 +1069,80 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (typeof it == "function") {
                     var r = it(b)
                     b = r.b
-                    v = callExt(b, "js_jadd", [v, callExt(b, "js_pystr", [r.v])])
+                    v = callExt(b, "js_jadd", [v, r.v])
                 } else {
-                    v = callExt(b, "js_jadd", [v, emitStr(b, it.chunk)])
+                    v = callExt(b, "js_jadd", [v, emitStr(b, fixBraces(it.chunk))])
                 }
             }
             return {b: b, v: v}
         }
+    }
+    function fixBraces(t) { return t.split("{{").join("{").split("}}").join("}") }
+    // One replacement field: {expr[=][!conv][:spec]}. The `=` debug form prepends the
+    // SOURCE TEXT of the expression (which is why the rule hands its whole span over)
+    // and switches the default conversion to repr. A format spec is rendered by
+    // js_pyformat, which implements the format mini-language on the runtime side
+    // (the value is only known there).
+    function makeFField(items, srcText) {
+        var exprT = null
+        var spec = null
+        var conv = null
+        var debug = false
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { if (exprT == null) { exprT = it } }
+            else if (it.fdebug != undefined) { debug = true }
+            else if (it.fconv != undefined) {
+                conv = stripWs(it.fconv)
+                if (conv.charAt(0) == "!") { conv = conv.substring(1) }
+            }
+            else if (it.fspec != undefined) { spec = it.fspec }
+        }
+        // The debug prefix: everything between `{` and the `=`, then the `=` and the
+        // whitespace that followed it - Python reproduces the spacing exactly.
+        var prefix = ""
+        if (debug) {
+            var eq = srcText.indexOf("=")
+            if (eq > 0) {
+                prefix = srcText.substring(1, eq) + "="
+                var j = eq + 1
+                while (j < srcText.length && (srcText.charAt(j) == " " || srcText.charAt(j) == "\t")) {
+                    prefix += srcText.charAt(j)
+                    j++
+                }
+            }
+        }
+        return function(b) {
+            var r = exprT(b)
+            b = r.b
+            var body = anytype
+            if (spec != null) {
+                var sr = emitSpecText(b, spec)
+                b = sr.b
+                body = callExt(b, "js_pyformat", [r.v, sr.v, emitStr(b, conv == null ? "" : conv)])
+            } else if (conv == "r" || (debug && conv == null)) {
+                body = callExt(b, "js_pyrepr", [r.v])
+            } else {
+                body = callExt(b, "js_pystr", [r.v])
+            }
+            if (prefix != "") { body = callExt(b, "js_jadd", [emitStr(b, prefix), body]) }
+            return {b: b, v: body}
+        }
+    }
+    // The format spec of a field may itself hold {nested} fields (f"{v:>{w}}"), so
+    // it is assembled at run time from its literal chunks and their values.
+    function emitSpecText(b, spec) {
+        var v = emitStr(b, "")
+        for (var i = 0; i < spec.length; i++) {
+            if (typeof spec[i] == "function") {
+                var r = spec[i](b)
+                b = r.b
+                v = callExt(b, "js_jadd", [v, callExt(b, "js_pystr", [r.v])])
+            } else {
+                v = callExt(b, "js_jadd", [v, emitStr(b, spec[i].chunk)])
+            }
+        }
+        return {b: b, v: v}
     }
 
     // Python's == compares lists and dicts BY VALUE (js_pyeq), while 'is' is identity
@@ -848,11 +1247,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 } else if (s.kind == "attr") {
                     cur = callExt(b, "js_pygetattr", [cur, emitStr(b, s.name)])
                 } else if (s.kind == "slice") {
-                    var loV = hUndef
-                    var hiV = hUndef
-                    if (s.lo != null) { var rl = s.lo(b); b = rl.b; loV = rl.v }
-                    if (s.hi != null) { var rh = s.hi(b); b = rh.b; hiV = rh.v }
-                    cur = callExt(b, "js_pyslice", [cur, loV, hiV])
+                    var sb = emitSliceBounds(b, s)
+                    b = sb.b
+                    cur = callExt(b, "js_pyslice3", [cur, sb.lo, sb.hi, sb.step])
                 } else {
                     var ir2 = s.idx(b)
                     b = ir2.b
@@ -863,10 +1260,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
+    // [a, b, *rest]: a *iterable element appends every member of its operand
+    // (js_pyspread), which is what makes [0, *[1, 2]] the three element list.
     function makeList(items) {
         return function(b) {
             var arr = callExt(b, "js_arr_new", [])
             for (var i = 0; i < items.length; i++) {
+                if (items[i].lspread != undefined) {
+                    var rs = items[i].lspread(b)
+                    b = rs.b
+                    callExt(b, "js_pyspread", [arr, rs.v])
+                    continue
+                }
                 var r = items[i](b)
                 b = r.b
                 callExt(b, "js_arr_push", [arr, r.v])
@@ -874,11 +1279,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: b, v: arr}
         }
     }
-    // items = [{dk, dv}...] -> a dict built in source order (js_pyset appends new keys).
+    // items = [{dk, dv} | {dsplat}...] -> a dict built in source order (js_pyset
+    // appends new keys). **mapping merges another dict in with js_pykwspread, which
+    // overwrites a repeated key IN PLACE - so the merged dict keeps the first
+    // insertion position of that key, exactly like Python's.
     function makeDict(items) {
         return function(b) {
             var d = callExt(b, "js_dict_new", [])
             for (var i = 0; i < items.length; i++) {
+                if (items[i].dsplat != undefined) {
+                    var rs = items[i].dsplat(b)
+                    b = rs.b
+                    callExt(b, "js_pykwspread", [d, rs.v])
+                    continue
+                }
                 var rk = items[i].dk(b)
                 b = rk.b
                 var rv = items[i].dv(b)
@@ -888,15 +1302,59 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: b, v: d}
         }
     }
-    // items = [{slo}?, {shi}?] -> a slice suffix descriptor.
+    // { a, b, *rest }: the elements are collected into an ordinary list (a spread
+    // appends every member of its operand) and js_pyset_new turns that into the set.
+    function makeSetLit(items) {
+        return function(b) {
+            var arr = callExt(b, "js_arr_new", [])
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].sspread != undefined) {
+                    var rs = items[i].sspread(b)
+                    b = rs.b
+                    callExt(b, "js_pyset_spread", [arr, rs.v])
+                } else {
+                    var r = items[i].selem(b)
+                    b = r.b
+                    callExt(b, "js_arr_push", [arr, r.v])
+                }
+            }
+            return {b: b, v: callExt(b, "js_pyset_new", [arr])}
+        }
+    }
+    // A set comprehension is the list comprehension plus the deduplicating step.
+    function makeSetOf(listT) {
+        return function(b) {
+            var r = listT(b)
+            return {b: r.b, v: callExt(r.b, "js_pyset_new", [r.v])}
+        }
+    }
+    // items = [{slo}?, {shi}?, {sstep}?] -> a slice suffix descriptor.
     function makeSliceSfx(items) {
         var lo = null
         var hi = null
+        var step = null
         for (var i = 0; i < items.length; i++) {
             if (items[i].slo != undefined) lo = items[i].slo
             if (items[i].shi != undefined) hi = items[i].shi
+            if (items[i].sstep != undefined) step = items[i].sstep
         }
-        return {kind: "slice", lo: lo, hi: hi}
+        return {kind: "slice", lo: lo, hi: hi, step: step}
+    }
+    // The same three bounds as a reading slice, as an assignment / del target step.
+    function makeTSlice(items) {
+        var s = makeSliceSfx(items)
+        return {tslice: true, lo: s.lo, hi: s.hi, step: s.step}
+    }
+    // The three bounds of a slice, each evaluated where it stands; an omitted one is
+    // undefined, which is what js_pyslice3 reads as "the default for this direction".
+    function emitSliceBounds(b, s) {
+        var loV = hUndef
+        var hiV = hUndef
+        var stepV = hUndef
+        if (s.lo != null) { var rl = s.lo(b); b = rl.b; loV = rl.v }
+        if (s.hi != null) { var rh = s.hi(b); b = rh.b; hiV = rh.v }
+        if (s.step != null) { var rs = s.step(b); b = rs.b; stepV = rs.v }
+        return {b: b, lo: loV, hi: hiV, step: stepV}
     }
     // items = [exprT, {cvar}, iterT, {cif}?]. Compiles to an append loop over the
     // normalized iterable (js_pyiter); the variable lives in an own scope (Python 3
@@ -1056,6 +1514,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // (.name, js_get - matching the pyattr read of the interpreter).
     function emitPathStep(b, o, step) {
         if (step.tattr == true) { return {b: b, v: callExt(b, "js_pygetattr", [o, emitStr(b, step.name)])} }
+        if (step.tslice == true) {
+            var sb = emitSliceBounds(b, step)
+            return {b: sb.b, v: callExt(sb.b, "js_pyslice3", [o, sb.lo, sb.hi, sb.step])}
+        }
         var r = step.idx(b)
         return {b: r.b, v: callExt(r.b, "js_pyget", [o, r.v])}
     }
@@ -1082,6 +1544,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var last = ref.path[ref.path.length - 1]
         if (last.tattr == true) {
             callExt(b, "js_pysetattr", [o, emitStr(b, last.name), v])
+            return b
+        }
+        if (last.tslice == true) {
+            var sb = emitSliceBounds(b, last)
+            b = sb.b
+            callExt(b, "js_pysetslice", [o, sb.lo, sb.hi, sb.step, v])
             return b
         }
         var kr = last.idx(b)
@@ -1147,12 +1615,70 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    // Pops reversed: value, target.
-    function makeAssign(valT, ref) {
+    // ----- Target lists and unpacking -----
+    // A target LIST: one target with no star stays itself, several become a tuple
+    // pattern that unpacks the assigned value. A {startgt} entry is the *rest target.
+    function makeTargetList(items) {
+        if (items.length == 1 && items[0].startgt == undefined) { return items[0] }
+        return {tuple: items}
+    }
+    // A comma-separated value list is a TUPLE (a list here - this subset has one
+    // sequence type); a single value with no comma stays itself, but a trailing
+    // comma ('one = 7,') still makes the one-element tuple.
+    function makeExprList(items) {
+        var parts = []
+        var sawComma = items.length > 1
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { parts.push(items[i]) }
+            else if (items[i].tcomma != undefined) { sawComma = true }
+        }
+        if (parts.length == 1 && !sawComma) { return parts[0] }
+        return makeList(parts)
+    }
+    // Write one runtime value through a target: a plain reference (emitRefWrite) or
+    // a nested tuple pattern, which unpacks. The value is normalized with js_pyiter
+    // once per level, so a string, a dict or a tuple unpack like a list.
+    // The elements are read by INDEX (js_pyget wraps a negative one), so the targets
+    // after a *rest are addressed from the END - which is exactly what makes the
+    // length of the rest a runtime question that needs no length arithmetic here.
+    function writeTarget(b, t, v) {
+        if (t.tuple == undefined) { return emitRefWrite(b, t, v) }
+        var items = t.tuple
+        var arr = callExt(b, "js_pyiter", [v])
+        var star = -1
+        for (var i = 0; i < items.length; i++) { if (items[i].startgt != undefined) { star = i } }
+        if (star < 0) {
+            for (var k = 0; k < items.length; k++) {
+                b = writeTarget(b, items[k], callExt(b, "js_pyget", [arr, emitNum(b, k)]))
+            }
+            return b
+        }
+        var after = items.length - star - 1
+        for (var a = 0; a < star; a++) {
+            b = writeTarget(b, items[a], callExt(b, "js_pyget", [arr, emitNum(b, a)]))
+        }
+        // The rest is the slice from the starred position to just before the targets
+        // that follow it; with none following, it runs to the end.
+        var hiV = hUndef
+        if (after > 0) { hiV = emitNum(b, -after) }
+        b = writeTarget(b, items[star].startgt,
+                        callExt(b, "js_pyslice3", [arr, emitNum(b, star), hiV, hUndef]))
+        for (var z = 0; z < after; z++) {
+            b = writeTarget(b, items[star + 1 + z], callExt(b, "js_pyget", [arr, emitNum(b, z - after)]))
+        }
+        return b
+    }
+    // items = [{tlist}..., valueThunk]: the value is evaluated once and written
+    // through every head, left to right ('m = n = 3').
+    function makeAssignStmt(items) {
+        var heads = []
+        var valT = items[items.length - 1]
+        for (var i = 0; i < items.length - 1; i++) { heads.push(items[i].tlist) }
         return function(b) {
             var r = valT(b)
             b = r.b
-            return emitRefWrite(b, ref, r.v)
+            for (var k = 0; k < heads.length; k++) { b = writeTarget(b, heads[k], r.v) }
+            return b
         }
     }
     function makeAugAssign(items) {
@@ -1169,6 +1695,221 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // ----- Statement thunks: function(block) -> block -----
+
+    // ----- match statement (PEP 634) -----
+    // A pattern is lowered to CONTROL FLOW: emitPattern emits the tests for one
+    // pattern into the current block and branches to failB as soon as one of them
+    // says no, so a case is a chain of blocks ending either in its suite or in the
+    // next case. A capture binds with the ordinary js_pyset_var, i.e. eagerly - a
+    // partly matched pattern may leave a binding behind, which PEP 634 allows.
+    function makeCase(items) {
+        var c3 = {pat: items[0], guard: null, body: items[items.length - 1]}
+        for (var i = 1; i < items.length - 1; i++) {
+            if (items[i] != undefined && items[i].guard != undefined) { c3.guard = items[i].guard }
+        }
+        return c3
+    }
+    function makeMatch(items) {
+        var subjT = items[0]
+        var cases = items.slice(1)
+        return function(b) {
+            var r = subjT(b)
+            b = r.b
+            var subj = r.v
+            var endB = curF.NewBlock("")
+            for (var i = 0; i < cases.length; i++) {
+                var failB = curF.NewBlock("")
+                var okB = emitPattern(b, cases[i].pat, subj, failB)
+                if (cases[i].guard != null) {
+                    var g = cases[i].guard(okB)
+                    var gOkB = curF.NewBlock("")
+                    g.b.NewCondBr(truthy(g.b, g.v), gOkB, failB)
+                    okB = gOkB
+                }
+                cases[i].body(okB).NewBr(endB)
+                b = failB
+            }
+            b.NewBr(endB) // No case matched: a match statement is not exhaustive.
+            return endB
+        }
+    }
+    function makeOrPattern(items) {
+        var alts = []
+        var asname = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].asname != undefined) { asname = items[i].asname }
+            else { alts.push(items[i]) }
+        }
+        if (alts.length == 1 && asname == null) { return alts[0] }
+        return {por: alts, asname: asname}
+    }
+    // A bracketed pattern list is ALWAYS a sequence pattern; a parenthesized or
+    // top-level one only when it carries a comma.
+    function makeSeqPattern(items, always) {
+        var parts = []
+        var sawComma = false
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].pcomma != undefined) { sawComma = true }
+            else { parts.push(items[i]) }
+        }
+        if (!always && !sawComma && parts.length == 1) { return parts[0] }
+        return {pseq: parts}
+    }
+    function makeMapPattern(items) {
+        var entries = []
+        var rest = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].maprest != undefined) { rest = stripWs(items[i].maprest).substring(2) }
+            else { entries.push(items[i]) }
+        }
+        return {pmap: entries, prest: rest}
+    }
+    // The class of a class pattern is a NAME (possibly dotted). A builtin type name
+    // is not bound to a class object here (str / int / ... are plain functions), so
+    // it is turned into the runtime's builtin class object instead - which is what
+    // js_pyisinst compares a builtin value against.
+    var pyBuiltinTypes = {}
+    pyBuiltinTypes["$str"] = true
+    pyBuiltinTypes["$int"] = true
+    pyBuiltinTypes["$float"] = true
+    pyBuiltinTypes["$bool"] = true
+    pyBuiltinTypes["$list"] = true
+    pyBuiltinTypes["$tuple"] = true
+    pyBuiltinTypes["$dict"] = true
+    pyBuiltinTypes["$set"] = true
+    pyBuiltinTypes["$bytes"] = true
+    pyBuiltinTypes["$complex"] = true
+    function makeClassPattern(items) {
+        var name = items[0].dname
+        var clsT = makeDotted(name)
+        if (pyBuiltinTypes["$" + name] == true) {
+            clsT = function(b) { return {b: b, v: callExt(b, "js_pybuiltincls", [emitStr(b, name)])} }
+        }
+        var pos = []
+        var kw = []
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].ckey != undefined) { kw.push(items[i]) }
+            else { pos.push(items[i].cpos) }
+        }
+        return {pcls: clsT, ppos: pos, pkw: kw}
+    }
+    function makeValuePattern(t) { return {pval: t} }
+    // A dotted name read: the first part is a variable, the rest attribute reads.
+    function makeDotted(path) {
+        var parts = path.split(".")
+        return function(b) {
+            var v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, parts[0])])
+            for (var i = 1; i < parts.length; i++) {
+                v = callExt(b, "js_pygetattr", [v, emitStr(b, parts[i])])
+            }
+            return {b: b, v: v}
+        }
+    }
+    function emitBind(b, name, v) {
+        if (name == "_") { return b }
+        callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), v])
+        return b
+    }
+    // Branch to failB unless okV is truthy; the returned block is the "matched so
+    // far" one every later test of the same pattern is emitted into.
+    function emitGuardStep(b, okV, failB) {
+        var okB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, okV), okB, failB)
+        return okB
+    }
+    function emitPattern(b, p, v, failB) {
+        if (p.wild != undefined) { return b }
+        if (p.capture != undefined) { return emitBind(b, p.capture, v) }
+        if (p.pval != undefined) {
+            var r = p.pval(b)
+            b = r.b
+            return emitGuardStep(b, callExt(b, "js_pyeq", [r.v, v]), failB)
+        }
+        if (p.por != undefined) {
+            var doneB = curF.NewBlock("")
+            var cur = b
+            for (var i = 0; i < p.por.length; i++) {
+                var nextB = (i + 1 < p.por.length) ? curF.NewBlock("") : failB
+                emitPattern(cur, p.por[i], v, nextB).NewBr(doneB)
+                cur = nextB
+            }
+            if (p.asname != null) { return emitBind(doneB, p.asname, v) }
+            return doneB
+        }
+        if (p.pseq != undefined) { return emitSeqPattern(b, p.pseq, v, failB) }
+        if (p.pmap != undefined) { return emitMapPattern(b, p, v, failB) }
+        if (p.pcls != undefined) { return emitClsPattern(b, p, v, failB) }
+        return emitGuardStep(b, hFalse, failB)
+    }
+    // A sequence pattern matches lists and tuples (one type here), never a string
+    // or a dict. The elements before a *rest are read from the front and those
+    // after it from the BACK (js_pyget wraps a negative index), so the length of
+    // the rest never has to be computed here.
+    function emitSeqPattern(b, parts, v, failB) {
+        var star = -1
+        for (var i = 0; i < parts.length; i++) { if (parts[i].pstar != undefined) { star = i } }
+        var before = (star < 0) ? parts.length : star
+        var after = (star < 0) ? 0 : parts.length - star - 1
+        var okV = callExt(b, "js_pymatchseq", [v, emitNum(b, before), emitNum(b, after),
+                                               (star < 0) ? hFalse : hTrue])
+        b = emitGuardStep(b, okV, failB)
+        for (var a = 0; a < before; a++) {
+            b = emitPattern(b, parts[a], callExt(b, "js_pyget", [v, emitNum(b, a)]), failB)
+        }
+        if (star < 0) { return b }
+        var hiV = hUndef
+        if (after > 0) { hiV = emitNum(b, -after) }
+        b = emitBind(b, stripWs(parts[star].pstar).substring(1),
+                     callExt(b, "js_pyslice3", [v, emitNum(b, star), hiV, hUndef]))
+        for (var z = 0; z < after; z++) {
+            b = emitPattern(b, parts[star + 1 + z], callExt(b, "js_pyget", [v, emitNum(b, z - after)]), failB)
+        }
+        return b
+    }
+    // {"op": o, **extra}: every listed key must be present (js_pymatchmap), its
+    // value is matched against the sub-pattern, and **rest binds a fresh dict of
+    // the entries the pattern did not name.
+    function emitMapPattern(b, p, v, failB) {
+        var keysV = callExt(b, "js_arr_new", [])
+        var keyVals = []
+        for (var i = 0; i < p.pmap.length; i++) {
+            var rk = p.pmap[i].mkey(b)
+            b = rk.b
+            keyVals.push(rk.v)
+            callExt(b, "js_arr_push", [keysV, rk.v])
+        }
+        b = emitGuardStep(b, callExt(b, "js_pymatchmap", [v, keysV]), failB)
+        for (var k = 0; k < p.pmap.length; k++) {
+            b = emitPattern(b, p.pmap[k].mpat, callExt(b, "js_pyget", [v, keyVals[k]]), failB)
+        }
+        if (p.prest != null) {
+            b = emitBind(b, p.prest, callExt(b, "js_pymaprest", [v, keysV]))
+        }
+        return b
+    }
+    // Pt(x=0, y=yy) / Pt(a, b) / str(): the value must be an instance of the class,
+    // then the positional sub-patterns line up with __match_args__ (js_pymatchargs,
+    // which answers undefined when the class cannot provide them) and the keyword
+    // ones with the named attributes.
+    function emitClsPattern(b, p, v, failB) {
+        var rc = p.pcls(b)
+        b = rc.b
+        b = emitGuardStep(b, callExt(b, "js_pyisinst", [v, rc.v]), failB)
+        if (p.ppos.length > 0) {
+            var argsV = callExt(b, "js_pymatchargs", [v, rc.v, emitNum(b, p.ppos.length)])
+            var haveV = callExt(b, "js_sne", [argsV, hUndef])
+            b = emitGuardStep(b, haveV, failB)
+            for (var i = 0; i < p.ppos.length; i++) {
+                b = emitPattern(b, p.ppos[i], callExt(b, "js_pyget", [argsV, emitNum(b, i)]), failB)
+            }
+        }
+        for (var k = 0; k < p.pkw.length; k++) {
+            b = emitPattern(b, p.pkw[k].cpat,
+                            callExt(b, "js_pygetattr", [v, emitStr(b, p.pkw[k].ckey)]), failB)
+        }
+        return b
+    }
+
 
     function makeElif(suite, cond) { return {elifCond: cond, suite: suite} }
     function makeElse(suite) { return {elseSuite: suite} }
@@ -1209,7 +1950,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // (function scoped, survives the loop). A trailing 'else' suite runs when the
     // loop ran out on its own - break jumps past it, which is the whole point.
     function makeFor(items) {
-        var name = items[0].fvar
+        var tgt = items[0]
         var listT = items[1]
         var bodyT = items[2]
         var elseT = null
@@ -1234,11 +1975,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
             var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
             var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
-            callExt(bodyB, "js_pyset_var", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_get", [aV2, iV2])])
+            // The loop target is a full target list, so it goes through the same
+            // writer an assignment uses (which may unpack, and may add blocks).
+            var tb = writeTarget(bodyB, tgt, callExt(bodyB, "js_get", [aV2, iV2]))
             var afterB = exitB
             if (elseT != null) { afterB = curF.NewBlock("") }
             loopStack.push({cont: postB, brk: afterB})
-            bodyT(bodyB).NewBr(postB)
+            bodyT(tb).NewBr(postB)
             loopStack.pop()
             var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
             callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_add", [iV3, emitNum(postB, 1)])])
@@ -1340,6 +2083,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var last = ref.path[ref.path.length - 1]
                 if (last.tattr == true) {
                     callExt(b, "js_pydel_attr", [o, emitStr(b, last.name)])
+                } else if (last.tslice == true) {
+                    var sb = emitSliceBounds(b, last)
+                    b = sb.b
+                    callExt(b, "js_pydelslice", [o, sb.lo, sb.hi, sb.step])
                 } else {
                     var kr = last.idx(b)
                     b = kr.b
@@ -1363,25 +2110,32 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // ----- Widened surface: newly accepted constructs -----
 
-    // a ** b: reported as not implemented; with no '**' the single operand passes
-    // through unchanged (keeping the expression layer transparent).
+    // a ** b: the js_pybin dispatcher answers it (giving a user class its __pow__ /
+    // __rpow__ chance first); with no '**' the single operand passes through
+    // unchanged, keeping the expression layer transparent.
     function makePower(items, pos) {
         if (items.length == 1) { return items[0] }
-        return notImplExpr("** power operator", pos)
+        return foldBinary([items[0], "**", items[1]])
     }
-    // a | b, a & b, a << b, ...: reported as not implemented; with no bit operator
-    // the single operand passes through unchanged.
-    function makeBit(items, pos) {
-        if (items.length == 1) { return items[0] }
-        return notImplExpr("bitwise/shift operator", pos)
+    // ~x: the same unary dispatcher as -x, which runs __invert__ on an instance of
+    // a user class and otherwise complements the 32 bit integer value.
+    function makeInvert(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_pyunary", [emitStr(r.b, "~"), r.v])}
+        }
     }
-    // ( a ): plain grouping. ( a, b, ... ) / ( a, ): a tuple, reported as not
-    // implemented (a comma pushed a {tcomma} marker, so items has more than one).
+    // | ^ & << >>: on two sets these are the set algebra (union, symmetric
+    // difference, intersection), on numbers the 32 bit integer operators; js_pybin
+    // decides by the operand shapes, like every other user visible operator here.
+    function makeBit(items, pos) { return foldBinary(items) }
+    // ( a ): plain grouping. ( a, b, ... ) / ( a, ): a tuple (a comma pushed a
+    // {tcomma} marker, so items has more than one), which may hold a *spread.
     function makeParen(items, pos) {
-        if (items.length == 1) { return items[0] }
+        if (items.length == 1 && typeof items[0] == "function") { return items[0] }
         var elems = []
         for (var i = 0; i < items.length; i++) {
-            if (typeof items[i] == "function") { elems.push(items[i]) }
+            if (typeof items[i] == "function" || items[i].lspread != undefined) { elems.push(items[i]) }
         }
         return makeList(elems)
     }
@@ -1405,35 +2159,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             re.b.NewBr(mergeB)
             var phi = mergeB.NewPhi([llvm.ir.NewIncoming(rt.v, rt.b), llvm.ir.NewIncoming(re.v, re.b)])
             return {b: mergeB, v: phi}
-        }
-    }
-    // a, b = x, y: evaluate every right-hand value first, then write each target;
-    // a single right-hand iterable is unpacked positionally (js_pyget by index).
-    function makeParallelAssign(items) {
-        var targets = []
-        var values = []
-        for (var i = 0; i < items.length; i++) {
-            if (typeof items[i] == "function") { values.push(items[i]) }
-            else { targets.push(items[i]) }
-        }
-        return function(b) {
-            var vals = []
-            if (values.length == 1 && targets.length > 1) {
-                var rr = values[0](b)
-                b = rr.b
-                var arr = callExt(b, "js_pyiter", [rr.v])
-                for (var j = 0; j < targets.length; j++) {
-                    vals.push(callExt(b, "js_pyget", [arr, emitNum(b, j)]))
-                }
-            } else {
-                for (var k = 0; k < values.length; k++) {
-                    var rv = values[k](b)
-                    b = rv.b
-                    vals.push(rv.v)
-                }
-            }
-            for (var m = 0; m < targets.length; m++) { b = emitRefWrite(b, targets[m], vals[m]) }
-            return b
         }
     }
     // name: Type [= value]: the annotation is ignored; assign when a value is given.
@@ -1810,6 +2535,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isCtl) { ctlEnter(idx) }
         var fb = f.NewBlock("entry")
         curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
+        // A def or lambda body is a Python BINDING BOUNDARY: an assignment in it
+        // makes a local, even when an enclosing function binds the same name. A
+        // try/except/with body closure (isCtl) is NOT one - its assignments belong
+        // to the function around it - so only the real functions are marked.
+        if (!isCtl) { callExt(fb, "js_pyfnscope", [curScopeV]) }
         for (var i = 0; i < params.length; i++) {
             var argV = callExt(fb, "js_arg", [f.Params[1], handle(i)])
             if (i < dflts.length && dflts[i] != null) {
@@ -1905,6 +2635,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var cls = callExt(b, "js_pyclass_new", [emitStr(b, name), basesV])
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [saved])
+            // A class body is a namespace of its own: what it binds becomes a
+            // class member and never leaks into the scope around it.
+            callExt(b, "js_pyfnscope", [curScopeV])
             var bodyScope = curScopeV
             b = bodyT(b)
             callExt(b, "js_pyclass_fill", [cls, bodyScope])
@@ -2008,6 +2741,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         curF = f
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        // The module top level is a binding boundary too, so a global name never
+        // reaches past it into the host runtime's own scope.
+        callExt(b, "js_pyfnscope", [curScopeV])
         // print(...): hand the argument array to the Python renderer.
         funcCount++
         var prIdx = funcCount

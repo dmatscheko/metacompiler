@@ -212,6 +212,14 @@ type jsScope struct {
 	tcs    []string // Pinned type class per name, "" = unpinned. See typedDecl.
 	index  map[string]int
 	parent *jsScope
+	// Python scoping (js_pyfnscope / js_pyset_var; nothing else sets these).
+	// pyFn marks a scope that is a BINDING BOUNDARY - a def, a lambda, a class
+	// body or the module top level - so an assignment inside it binds locally
+	// instead of reaching an enclosing function's binding of the same name.
+	// pyDecl records the names a `global` ('g') or `nonlocal` ('n') statement
+	// declared, which is what lets an assignment cross the boundary on purpose.
+	pyFn   bool
+	pyDecl map[string]byte
 }
 
 // jsScopeLinear is where a scope switches from scanning to an index.
@@ -1983,6 +1991,16 @@ func (rt *jsrt) pyString(v interface{}) string {
 		}
 		return out + "]"
 	case *jsObject:
+		if els, ok := pySetElems(t); ok {
+			out := "{"
+			for i, e := range els.elems {
+				if i > 0 {
+					out += ", "
+				}
+				out += rt.pyRepr(e)
+			}
+			return out + "}"
+		}
 		if keys, vals, ok := dictParts(t); ok {
 			out := "{"
 			for i := range keys.elems {
@@ -3663,7 +3681,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return rt.wrapNum(r)
 		},
-		"js_pytruthy": func(a []uint64) uint64 { // Python truthiness: empty lists/dicts are falsy.
+		"js_pytruthy": func(a []uint64) uint64 { // Python truthiness: empty lists/dicts/sets are falsy.
+			if els, ok := pySetElems(u(a[0])); ok {
+				if len(els.elems) > 0 {
+					return 1
+				}
+				return 0
+			}
 			if arr, ok := u(a[0]).(*jsArray); ok {
 				if len(arr.elems) > 0 {
 					return 1
@@ -3844,9 +3868,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					return w(rt.call(m, jsUndef, []interface{}{u(a[0])}))
 				}
 			}
+			if els, ok := pySetElems(u(a[0])); ok {
+				return rt.wrapNum(float64(len(els.elems)))
+			}
 			switch o := u(a[0]).(type) {
 			case string:
-				return rt.wrapNum(float64(rt.strLen(o)))
+				// Python counts CODE POINTS, not UTF-16 code units, so len of a
+				// single astral character (an emoji) is 1 and not 2.
+				return rt.wrapNum(float64(pyStrLen(rt, o)))
 			case *jsArray:
 				return rt.wrapNum(float64(len(o.elems)))
 			}
@@ -3859,6 +3888,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pylist": func(a []uint64) uint64 { // list(x): always a fresh list.
 			if g, ok := u(a[0]).(*jsGenerator); ok {
 				return w(g.drain(rt))
+			}
+			if els, ok := pySetElems(u(a[0])); ok {
+				return w(&jsArray{elems: append([]interface{}{}, els.elems...)})
 			}
 			switch o := u(a[0]).(type) {
 			case *jsArray:
@@ -3879,6 +3911,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pyiter": func(a []uint64) uint64 { // The list a for loop runs over: dicts iterate
 			if g, ok := u(a[0]).(*jsGenerator); ok { // A generator is drained first.
 				return w(g.drain(rt))
+			}
+			if els, ok := pySetElems(u(a[0])); ok { // A set iterates its elements.
+				return w(&jsArray{elems: append([]interface{}{}, els.elems...)})
 			}
 			switch o := u(a[0]).(type) { // their keys, strings their characters.
 			case *jsArray:
@@ -3908,14 +3943,40 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.fail("slicing a %s", rt.typeOf(u(a[0])))
 			return 0
 		},
-		"js_pyset_var": func(a []uint64) uint64 { // Assign in the chain, else declare locally.
+		// Python's assignment rule: the name binds in the innermost BINDING
+		// BOUNDARY scope (the def, lambda, class body or module the assignment
+		// stands in - see jsScope.pyFn), unless a `global` / `nonlocal`
+		// declaration sent it elsewhere. The walk still passes through the
+		// scopes BELOW that boundary, which is what makes an assignment inside
+		// a try/except/with body - each of which is an own IR closure with a
+		// scope of its own - land in the enclosing function, as Python has it.
+		"js_pyset_var": func(a []uint64) uint64 {
 			sc := rt.scopeOf(a[0])
 			name := rt.toString(u(a[1]))
 			for s := sc; s != nil; s = s.parent {
+				if k, ok := s.pyDecl[name]; ok {
+					if k == 'g' {
+						pyModuleScope(s).put(name, u(a[2]))
+						return 0
+					}
+					for t := s.parent; t != nil; t = t.parent {
+						if t.has(name) {
+							t.put(name, u(a[2]))
+							return 0
+						}
+					}
+				}
 				if s.has(name) {
 					s.put(name, u(a[2]))
 					if rt.traced {
 						rt.trVar("write", name, u(a[2]))
+					}
+					return 0
+				}
+				if s.pyFn {
+					s.put(name, u(a[2]))
+					if rt.traced {
+						rt.trVar("decl", name, u(a[2]))
 					}
 					return 0
 				}
@@ -3924,6 +3985,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if rt.traced {
 				rt.trVar("decl", name, u(a[2]))
 			}
+			return 0
+		},
+		// Mark a scope as a Python binding boundary (a def, lambda, class body or
+		// the module top level). Only the Python compiler emits this.
+		"js_pyfnscope": func(a []uint64) uint64 {
+			rt.scopeOf(a[0]).pyFn = true
 			return 0
 		},
 		"js_pyrest": func(a []uint64) uint64 { // *args: the call arguments from index N on, as a list.
@@ -3935,16 +4002,17 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(rest)
 		},
-		"js_pyglobal": func(a []uint64) uint64 { // global NAME: ensure NAME is bound in the root scope.
+		"js_pyglobal": func(a []uint64) uint64 { // global NAME: ensure NAME is bound at module level.
 			sc := rt.scopeOf(a[0])
 			name := rt.toString(u(a[1]))
-			root := sc
-			for root.parent != nil {
-				root = root.parent
-			}
+			root := pyModuleScope(sc)
 			if !root.has(name) {
 				root.put(name, jsUndef)
 			}
+			if sc.pyDecl == nil {
+				sc.pyDecl = map[string]byte{}
+			}
+			sc.pyDecl[name] = 'g' // A later assignment reaches the root, not a local.
 			return 0
 		},
 		"js_pynonlocal": func(a []uint64) uint64 { // nonlocal NAME: an enclosing non-root scope must bind NAME.
@@ -3952,6 +4020,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			name := rt.toString(u(a[1]))
 			for s := sc.parent; s != nil && s.parent != nil; s = s.parent {
 				if s.has(name) {
+					if sc.pyDecl == nil {
+						sc.pyDecl = map[string]byte{}
+					}
+					sc.pyDecl[name] = 'n' // A later assignment reaches that binding.
 					return 0
 				}
 			}
@@ -4200,6 +4272,119 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			dictAppend(keys, vals, rt.toString(u(a[1])), u(a[2]))
 			return 0
 		},
+		// {a, b, c} / {e for x in it}: a real set built from the candidate list the
+		// literal or the comprehension collected, deduplicated with Python's ==.
+		"js_pyset_new": func(a []uint64) uint64 {
+			out := &jsArray{}
+			if src, isArr := u(a[0]).(*jsArray); isArr {
+				for _, e := range src.elems {
+					rt.pySetAdd(out, e)
+				}
+			}
+			return w(newPySet(out))
+		},
+		// Add one element (or, for a '*s' spread, every element of an iterable) to the
+		// candidate list a set literal is being built from.
+		"js_pyset_spread": func(a []uint64) uint64 { // (candidate list, iterable)
+			dst, isArr := u(a[0]).(*jsArray)
+			if !isArr {
+				return 0
+			}
+			if src, ok := pySetElems(u(a[1])); ok {
+				dst.elems = append(dst.elems, src.elems...)
+				return 0
+			}
+			if src, isSrc := u(a[1]).(*jsArray); isSrc {
+				dst.elems = append(dst.elems, src.elems...)
+				return 0
+			}
+			if keys, _, isDict := dictParts(u(a[1])); isDict {
+				dst.elems = append(dst.elems, keys.elems...)
+				return 0
+			}
+			rt.fail("cannot unpack a %s into a set", rt.typeOf(u(a[1])))
+			return 0
+		},
+		// s[lo:hi:step] with a step, on lists and strings. The open ends arrive as
+		// undefined and mean what Python's defaults mean for the DIRECTION of the step,
+		// so xs[::-1] is the reversal.
+		"js_pyslice3": func(a []uint64) uint64 { // (sequence, lo, hi, step)
+			switch o := u(a[0]).(type) {
+			case *jsArray:
+				idx := rt.pySliceIndices(len(o.elems), u(a[1]), u(a[2]), u(a[3]))
+				out := &jsArray{}
+				for _, i := range idx {
+					out.elems = append(out.elems, o.elems[i])
+				}
+				return w(out)
+			case string:
+				idx := rt.pySliceIndices(rt.strLen(o), u(a[1]), u(a[2]), u(a[3]))
+				out := ""
+				for _, i := range idx {
+					out += rt.toString(rt.strAt(o, i))
+				}
+				return rt.wrapStr(out)
+			}
+			rt.fail("slicing a %s", rt.typeOf(u(a[0])))
+			return 0
+		},
+		// xs[lo:hi:step] = values. A step of 1 SPLICES (the replacement may have a
+		// different length, so xs[1:3] = [9] shortens the list); an extended step
+		// assigns element by element and needs exactly as many values as it selects.
+		"js_pysetslice": func(a []uint64) uint64 { // (list, lo, hi, step, values)
+			arr, isArr := u(a[0]).(*jsArray)
+			if !isArr {
+				rt.fail("slice assignment to a %s", rt.typeOf(u(a[0])))
+				return 0
+			}
+			vals := rt.pySeqElems(u(a[4]))
+			if isUndefOrNull(u(a[3])) || rt.toNumber(u(a[3])) == 1 {
+				idx := rt.pySliceIndices(len(arr.elems), u(a[1]), u(a[2]), u(a[3]))
+				lo := len(arr.elems)
+				hi := lo
+				if len(idx) > 0 {
+					lo, hi = idx[0], idx[len(idx)-1]+1
+				} else {
+					lo = rt.pySliceStart(len(arr.elems), u(a[1]))
+					hi = lo
+				}
+				out := append([]interface{}{}, arr.elems[:lo]...)
+				out = append(out, vals...)
+				out = append(out, arr.elems[hi:]...)
+				arr.elems = out
+				return 0
+			}
+			idx := rt.pySliceIndices(len(arr.elems), u(a[1]), u(a[2]), u(a[3]))
+			if len(idx) != len(vals) {
+				rt.fail("attempt to assign sequence of size %d to extended slice of size %d",
+					len(vals), len(idx))
+			}
+			for k, i := range idx {
+				arr.elems[i] = vals[k]
+			}
+			return 0
+		},
+		// del xs[lo:hi:step]: drop every selected element.
+		"js_pydelslice": func(a []uint64) uint64 { // (list, lo, hi, step)
+			arr, isArr := u(a[0]).(*jsArray)
+			if !isArr {
+				rt.fail("deleting a slice of a %s", rt.typeOf(u(a[0])))
+				return 0
+			}
+			idx := rt.pySliceIndices(len(arr.elems), u(a[1]), u(a[2]), u(a[3]))
+			drop := map[int]bool{}
+			for _, i := range idx {
+				drop[i] = true
+			}
+			out := []interface{}{}
+			for i, e := range arr.elems {
+				if !drop[i] {
+					out = append(out, e)
+				}
+			}
+			arr.elems = out
+			return 0
+		},
 		// The type test of an except clause. It is isinstance, PLUS the one thing an
 		// except clause has to answer that isinstance must not: this subset lets a
 		// program raise a value that is no class instance at all (raise "boom"), and
@@ -4261,6 +4446,21 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return boolH(rt.pyContains(l, r) == want)
 			}
+			if v, ok := rt.pySetBin(op, l, r); ok {
+				return w(v)
+			}
+			switch op {
+			case "|":
+				return rt.wrapNum(float64(rt.toInt32(l) | rt.toInt32(r)))
+			case "&":
+				return rt.wrapNum(float64(rt.toInt32(l) & rt.toInt32(r)))
+			case "^":
+				return rt.wrapNum(float64(rt.toInt32(l) ^ rt.toInt32(r)))
+			case "<<":
+				return rt.wrapNum(float64(rt.toInt32(l) << (uint32(rt.toInt32(r)) & 31)))
+			case ">>":
+				return rt.wrapNum(float64(rt.toInt32(l) >> (uint32(rt.toInt32(r)) & 31)))
+			}
 			if isPyComplex(l) || isPyComplex(r) {
 				if v, ok := rt.pyComplexBin(op, l, r); ok {
 					return w(v)
@@ -4271,6 +4471,17 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			switch op {
 			case "+":
+				// Two sequences CONCATENATE in Python ([1] + [2] is [1, 2], and
+				// bytes are a list of byte numbers here), which is not what the
+				// JavaScript + of the shared runtime does with two arrays.
+				if la, ok := l.(*jsArray); ok {
+					if ra, ok2 := r.(*jsArray); ok2 {
+						out := &jsArray{}
+						out.elems = append(out.elems, la.elems...)
+						out.elems = append(out.elems, ra.elems...)
+						return w(out)
+					}
+				}
 				return w(rt.jsAdd(l, r))
 			case "-", "*", "/":
 				return w(rt.pyArith(op[0], l, r))
@@ -4278,6 +4489,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return rt.wrapNum(math.Floor(rt.toNumber(l) / rt.toNumber(r)))
 			case "%":
 				return rt.wrapNum(pyFloorMod(rt.toNumber(l), rt.toNumber(r)))
+			case "**":
+				// Python's exponentiation. Only js_pybin (the Python compilers and
+				// nothing else) ever passes this operator, and a user class already
+				// had its __pow__ / __rpow__ chance above.
+				return rt.wrapNum(math.Pow(rt.toNumber(l), rt.toNumber(r)))
 			case "==":
 				return boolH(rt.pyEqual(l, r))
 			case "!=":
@@ -4443,6 +4659,114 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		"js_pystr": func(a []uint64) uint64 { // str(v) with Python style rendering.
 			return rt.wrapStr(rt.pyString(u(a[0])))
+		},
+		// ----- match statement support (the Python compilers only) -----
+		// The class object of a BUILTIN type name, so `case str():` can ask
+		// isinstance about a value that is not an instance of a user class.
+		"js_pybuiltincls": func(a []uint64) uint64 {
+			return w(rt.pyBuiltinClass(rt.toString(u(a[0]))))
+		},
+		// A sequence pattern matches lists and tuples (one type here), never a
+		// string or a dict: (value, count before the *rest, count after it,
+		// is there a *rest) -> does the shape fit.
+		"js_pymatchseq": func(a []uint64) uint64 {
+			arr, ok := u(a[0]).(*jsArray)
+			if !ok {
+				return boolH(false)
+			}
+			before, after := int(rt.toNumber(u(a[1]))), int(rt.toNumber(u(a[2])))
+			if rt.truthy(u(a[3])) {
+				return boolH(len(arr.elems) >= before+after)
+			}
+			return boolH(len(arr.elems) == before)
+		},
+		// A mapping pattern matches a dict (not a set) that holds every listed key.
+		"js_pymatchmap": func(a []uint64) uint64 {
+			if _, isSet := pySetElems(u(a[0])); isSet {
+				return boolH(false)
+			}
+			keys, _, ok := dictParts(u(a[0]))
+			if !ok {
+				return boolH(false)
+			}
+			want, isArr := u(a[1]).(*jsArray)
+			if !isArr {
+				return boolH(false)
+			}
+			for _, k := range want.elems {
+				if rt.dictFind(keys, k) < 0 {
+					return boolH(false)
+				}
+			}
+			return boolH(true)
+		},
+		// The **rest of a mapping pattern: a fresh dict of every entry whose key the
+		// pattern did not name, in the subject's insertion order.
+		"js_pymaprest": func(a []uint64) uint64 {
+			keys, vals, ok := dictParts(u(a[0]))
+			if !ok {
+				rt.fail("js_pymaprest needs a dict")
+			}
+			want, _ := u(a[1]).(*jsArray)
+			outK, outV := &jsArray{}, &jsArray{}
+			for i, k := range keys.elems {
+				skip := false
+				if want != nil {
+					for _, wk := range want.elems {
+						if rt.pyEqual(wk, k) {
+							skip = true
+						}
+					}
+				}
+				if !skip {
+					dictAppend(outK, outV, k, vals.elems[i])
+				}
+			}
+			return w(&jsObject{props: map[string]interface{}{
+				"__dict": true, "keys": outK, "vals": outV,
+			}})
+		},
+		// The POSITIONAL sub-values of a class pattern: (value, class, count) -> the
+		// n attributes __match_args__ names, or undefined when the class cannot
+		// provide them. A class WITHOUT __match_args__ accepts exactly one
+		// positional pattern and hands the value itself over, which is what makes
+		// `case str(sv):` capture the string.
+		"js_pymatchargs": func(a []uint64) uint64 {
+			n := int(rt.toNumber(u(a[2])))
+			out := &jsArray{}
+			names, hasNames := u(a[1]).(*jsObject)
+			var ma interface{}
+			if hasNames {
+				if m, found := pyLookup(names, "__match_args__"); found {
+					ma = m
+				}
+			}
+			if ma == nil {
+				if n == 1 {
+					out.elems = append(out.elems, u(a[0]))
+					return w(out)
+				}
+				return w(jsUndef)
+			}
+			elems := rt.pySeqElems(ma)
+			if n > len(elems) {
+				return w(jsUndef)
+			}
+			for i := 0; i < n; i++ {
+				out.elems = append(out.elems, rt.pyGetAttr(u(a[0]), rt.toString(elems[i])))
+			}
+			return w(out)
+		},
+		// repr(v) / the !r conversion of an f-string field.
+		"js_pyrepr": func(a []uint64) uint64 {
+			return rt.wrapStr(rt.pyRepr(u(a[0])))
+		},
+		// format(v, spec, conv): the slice of Python's format mini-language an
+		// f-string replacement field writes - [[fill]align][sign][0][width]
+		// [.precision][type]. conv is "", "r", "s" or "a" (the !conversion).
+		// Only the Python grammars ever emit this extern.
+		"js_pyformat": func(a []uint64) uint64 {
+			return rt.wrapStr(rt.pyFormat(u(a[0]), rt.toString(u(a[1])), rt.toString(u(a[2]))))
 		},
 		"js_pyprint": func(a []uint64) uint64 { // print(...) with Python style rendering.
 			args, ok := u(a[0]).(*jsArray)
@@ -4930,6 +5254,21 @@ func runJSModule(m *ir.Module, entry string) *RunResult {
 // decides where Python says it should. Cycles are not expected in this value model and
 // are not guarded against.
 func (rt *jsrt) pyEqual(x, y interface{}) bool {
+	if xs, ok := pySetElems(x); ok {
+		ys, ok2 := pySetElems(y)
+		if !ok2 || len(xs.elems) != len(ys.elems) {
+			return false
+		}
+		for _, e := range xs.elems {
+			if !rt.pySetHas(ys, e) {
+				return false
+			}
+		}
+		return true
+	}
+	if _, ok := pySetElems(y); ok {
+		return false
+	}
 	if xa, ok := x.(*jsArray); ok {
 		ya, ok2 := y.(*jsArray)
 		if !ok2 || len(xa.elems) != len(ya.elems) {
@@ -5026,6 +5365,194 @@ func (rt *jsrt) pyGenericAlias(origin, param interface{}) (interface{}, bool) {
 	a.set("__args__", &jsArray{elems: []interface{}{param}})
 	rt.pyAliases[key] = a
 	return a, true
+}
+
+// pySliceIndices is Python's slice index computation: it answers, in order, the
+// positions a[lo:hi:step] selects of a sequence of n elements. An undefined end
+// means the default for the DIRECTION of the step (the whole sequence forwards,
+// the whole sequence backwards for a negative one), and a negative index counts
+// from the end before the range is clamped.
+func (rt *jsrt) pySliceIndices(n int, loV, hiV, stepV interface{}) []int {
+	step := 1
+	if !isUndefOrNull(stepV) {
+		step = int(rt.toNumber(stepV))
+		if step == 0 {
+			rt.fail("slice step cannot be zero")
+		}
+	}
+	lo, hi := 0, n
+	if step < 0 {
+		lo, hi = n-1, -n-1
+	}
+	if !isUndefOrNull(loV) {
+		lo = rt.pyClampIndex(int(rt.toNumber(loV)), n, step)
+	}
+	if !isUndefOrNull(hiV) {
+		hi = rt.pyClampIndex(int(rt.toNumber(hiV)), n, step)
+	}
+	var out []int
+	for i := lo; (step > 0 && i < hi) || (step < 0 && i > hi); i += step {
+		if i >= 0 && i < n {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// pyClampIndex turns one written slice bound into a position, the way Python does:
+// negative counts from the end, and out of range clamps to the edge the step runs
+// towards.
+func (rt *jsrt) pyClampIndex(i, n, step int) int {
+	if i < 0 {
+		i += n
+		if i < 0 {
+			if step < 0 {
+				return -1
+			}
+			return 0
+		}
+		return i
+	}
+	if i >= n {
+		if step < 0 {
+			return n - 1
+		}
+		return n
+	}
+	return i
+}
+
+// pySliceStart is where an EMPTY step-1 slice splices at: the clamped low bound.
+func (rt *jsrt) pySliceStart(n int, loV interface{}) int {
+	if isUndefOrNull(loV) {
+		return 0
+	}
+	return rt.pyClampIndex(int(rt.toNumber(loV)), n, 1)
+}
+
+// pySeqElems is the element list of anything a slice assignment may take on its
+// right hand side.
+func (rt *jsrt) pySeqElems(v interface{}) []interface{} {
+	if els, ok := pySetElems(v); ok {
+		return append([]interface{}{}, els.elems...)
+	}
+	if arr, ok := v.(*jsArray); ok {
+		return append([]interface{}{}, arr.elems...)
+	}
+	if g, ok := v.(*jsGenerator); ok {
+		return append([]interface{}{}, g.drain(rt).elems...)
+	}
+	if str, ok := v.(string); ok {
+		out := []interface{}{}
+		for i, n := 0, rt.strLen(str); i < n; i++ {
+			out = append(out, rt.strAt(str, i))
+		}
+		return out
+	}
+	rt.fail("cannot assign a %s to a slice", rt.typeOf(v))
+	return nil
+}
+
+// ----- Python sets -----
+// A set is an object carrying the marker "__set" and its elements as a list kept
+// free of duplicates (by Python's ==, so 1 and 1.0 are the same member). No other
+// grammar builds this shape, so every branch reading it is unreachable from the
+// other languages. The list keeps insertion order, which real Python does not
+// promise - but it makes a set render and iterate deterministically, which the
+// byte-identical goja/frozen invariant needs.
+func newPySet(elems *jsArray) *jsObject {
+	o := newJSObject()
+	o.set("__set", true)
+	o.set("elems", elems)
+	return o
+}
+
+func pySetElems(v interface{}) (*jsArray, bool) {
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return nil, false
+	}
+	if _, has := o.props["__set"]; !has {
+		return nil, false
+	}
+	els, isArr := o.props["elems"].(*jsArray)
+	return els, isArr
+}
+
+func (rt *jsrt) pySetHas(els *jsArray, v interface{}) bool {
+	for _, e := range els.elems {
+		if rt.pyEqual(e, v) {
+			return true
+		}
+	}
+	return false
+}
+
+func (rt *jsrt) pySetAdd(els *jsArray, v interface{}) {
+	if !rt.pySetHas(els, v) {
+		els.elems = append(els.elems, v)
+	}
+}
+
+// pySetBin is the set algebra: union, intersection, difference and symmetric
+// difference, plus the subset/superset orderings Python gives < <= > >=. ok is
+// false when the operator is not one of them, so js_pybin falls through.
+func (rt *jsrt) pySetBin(op string, l, r interface{}) (interface{}, bool) {
+	le, lok := pySetElems(l)
+	re, rok := pySetElems(r)
+	if !lok || !rok {
+		return nil, false
+	}
+	out := &jsArray{}
+	switch op {
+	case "|":
+		out.elems = append(out.elems, le.elems...)
+		for _, e := range re.elems {
+			rt.pySetAdd(out, e)
+		}
+		return newPySet(out), true
+	case "&":
+		for _, e := range le.elems {
+			if rt.pySetHas(re, e) {
+				rt.pySetAdd(out, e)
+			}
+		}
+		return newPySet(out), true
+	case "-":
+		for _, e := range le.elems {
+			if !rt.pySetHas(re, e) {
+				rt.pySetAdd(out, e)
+			}
+		}
+		return newPySet(out), true
+	case "^":
+		for _, e := range le.elems {
+			if !rt.pySetHas(re, e) {
+				rt.pySetAdd(out, e)
+			}
+		}
+		for _, e := range re.elems {
+			if !rt.pySetHas(le, e) {
+				rt.pySetAdd(out, e)
+			}
+		}
+		return newPySet(out), true
+	case "<=", "<", ">=", ">":
+		sub, sup := le, re
+		if op == ">=" || op == ">" {
+			sub, sup = re, le
+		}
+		for _, e := range sub.elems {
+			if !rt.pySetHas(sup, e) {
+				return false, true
+			}
+		}
+		if op == "<" || op == ">" {
+			return len(sub.elems) < len(sup.elems), true
+		}
+		return true, true
+	}
+	return nil, false
 }
 
 // ----- Python complex numbers -----
@@ -5487,6 +6014,14 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 		return "float"
 	case *jsArray:
 		return "list"
+	case *jsObject:
+		if _, isSet := pySetElems(t); isSet {
+			return "set"
+		}
+		if _, _, isDict := dictParts(t); isDict {
+			return "dict"
+		}
+		return "object"
 	case *jsClosure, *hostFunc, *boundMethod:
 		return "function"
 	}
@@ -5514,6 +6049,14 @@ func (rt *jsrt) pyBuiltinClass(name string) *jsObject {
 // pyContains is 'x in y' for the builtin containers (the js_pyin logic, reached
 // from js_pybin once no __contains__ answered).
 func (rt *jsrt) pyContains(x, y interface{}) bool {
+	if els, ok := pySetElems(y); ok {
+		for _, e := range els.elems {
+			if rt.pyEqual(e, x) {
+				return true
+			}
+		}
+		return false
+	}
 	switch c := y.(type) {
 	case *jsArray:
 		for _, e := range c.elems {
@@ -5561,13 +6104,13 @@ func (rt *jsrt) pyArith(op byte, l, r interface{}) interface{} {
 // left (resp. on the right) may answer it with.
 var pyBinDunder = map[string]string{
 	"+": "__add__", "-": "__sub__", "*": "__mul__", "/": "__truediv__",
-	"//": "__floordiv__", "%": "__mod__", "@": "__matmul__",
+	"//": "__floordiv__", "%": "__mod__", "@": "__matmul__", "**": "__pow__",
 	"==": "__eq__", "!=": "__ne__", "<": "__lt__", ">": "__gt__",
 	"<=": "__le__", ">=": "__ge__",
 }
 var pyBinReflected = map[string]string{
 	"+": "__radd__", "-": "__rsub__", "*": "__rmul__", "/": "__rtruediv__",
-	"//": "__rfloordiv__", "%": "__rmod__", "@": "__rmatmul__",
+	"//": "__rfloordiv__", "%": "__rmod__", "@": "__rmatmul__", "**": "__rpow__",
 	"==": "__eq__", "!=": "__ne__", "<": "__gt__", ">": "__lt__",
 	"<=": "__ge__", ">=": "__le__",
 }
@@ -5804,4 +6347,133 @@ func (rt *jsrt) pyExcInstance(name string, msg string) interface{} {
 	inst.set("__class", cls)
 	inst.set("args", &jsArray{elems: []interface{}{msg}})
 	return inst
+}
+
+
+// ----- Python's format mini-language (js_pyformat) -----
+// [[fill]align][sign][0][width][.precision][type], which is the slice of it an
+// f-string replacement field in practice writes.
+func pyIsAlign(ch byte) bool { return ch == '<' || ch == '>' || ch == '^' || ch == '=' }
+
+func (rt *jsrt) pyFormat(v interface{}, spec, conv string) string {
+	if spec == "" {
+		if conv == "r" {
+			return rt.pyRepr(v)
+		}
+		return rt.pyString(v)
+	}
+	i := 0
+	fill := " "
+	align := byte(0)
+	if len(spec) > 1 && pyIsAlign(spec[1]) {
+		fill, align, i = spec[0:1], spec[1], 2
+	} else if len(spec) > 0 && pyIsAlign(spec[0]) {
+		align, i = spec[0], 1
+	}
+	sign := byte(0)
+	if i < len(spec) && (spec[i] == '+' || spec[i] == '-' || spec[i] == ' ') {
+		sign, i = spec[i], i+1
+	}
+	if i < len(spec) && spec[i] == '0' && align == 0 {
+		fill, align, i = "0", '=', i+1
+	}
+	width := 0
+	for i < len(spec) && spec[i] >= '0' && spec[i] <= '9' {
+		width, i = width*10+int(spec[i]-'0'), i+1
+	}
+	prec := -1
+	if i < len(spec) && spec[i] == '.' {
+		i++
+		prec = 0
+		for i < len(spec) && spec[i] >= '0' && spec[i] <= '9' {
+			prec, i = prec*10+int(spec[i]-'0'), i+1
+		}
+	}
+	typ := byte(0)
+	if i < len(spec) {
+		typ = spec[i]
+	}
+	body := rt.pyFormatBody(v, typ, prec, sign, conv)
+	pad := width - rt.strLen(body)
+	if pad <= 0 {
+		return body
+	}
+	_, isNum := v.(float64)
+	// A number right-aligns by default, everything else left-aligns.
+	if align == '>' || align == '=' || (align == 0 && isNum) {
+		return strings.Repeat(fill, pad) + body
+	}
+	if align == '^' {
+		left := pad / 2
+		return strings.Repeat(fill, left) + body + strings.Repeat(fill, pad-left)
+	}
+	return body + strings.Repeat(fill, pad)
+}
+
+func (rt *jsrt) pyFormatBody(v interface{}, typ byte, prec int, sign byte, conv string) string {
+	var body string
+	switch typ {
+	case 'f', 'F':
+		p := prec
+		if p < 0 {
+			p = 6
+		}
+		body = strconv.FormatFloat(rt.toNumber(v), 'f', p, 64)
+	case 'd':
+		body = strconv.FormatInt(int64(rt.toInt32(v)), 10)
+	case 'x':
+		body = strconv.FormatInt(int64(rt.toInt32(v)), 16)
+	case 'X':
+		body = strings.ToUpper(strconv.FormatInt(int64(rt.toInt32(v)), 16))
+	case 'b':
+		body = strconv.FormatInt(int64(rt.toInt32(v)), 2)
+	case 'o':
+		body = strconv.FormatInt(int64(rt.toInt32(v)), 8)
+	default:
+		if conv == "r" {
+			body = rt.pyRepr(v)
+		} else {
+			body = rt.pyString(v)
+		}
+	}
+	if sign == '+' {
+		if n, isNum := v.(float64); isNum && n >= 0 {
+			body = "+" + body
+		}
+	}
+	return body
+}
+
+// pyStrLen counts Unicode CODE POINTS: Python's len() of a string, where a
+// surrogate pair is one character. Only the Python grammars ask for this.
+func pyStrLen(rt *jsrt, s string) int {
+	n, unitN := 0, rt.strLen(s)
+	for i := 0; i < unitN; i++ {
+		c := rt.strCodeAt(s, i)
+		if c >= 0xD800 && c <= 0xDBFF && i+1 < unitN {
+			i++
+		}
+		n++
+	}
+	return n
+}
+
+// pyModuleScope is the scope Python's `global` means: the OUTERMOST binding
+// boundary in the chain, which is the module top level (the host runtime's own
+// scope sits above it and is not a Python namespace). Falls back to the true
+// root for a chain that carries no boundary at all.
+func pyModuleScope(s *jsScope) *jsScope {
+	root, mod := s, (*jsScope)(nil)
+	for ; root.parent != nil; root = root.parent {
+		if root.pyFn {
+			mod = root
+		}
+	}
+	if root.pyFn {
+		mod = root
+	}
+	if mod != nil {
+		return mod
+	}
+	return root
 }
