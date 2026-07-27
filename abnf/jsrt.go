@@ -7202,6 +7202,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_getret": func(a []uint64) uint64 {
 			return w(rt.retSlot)
 		},
+		// js_bytelen: the UTF-8 BYTE length of a value's string form. PHP strings
+		// are byte strings, so strlen("h<e-acute>llo") is 6 and not 5, while
+		// js_pylen (code points) and .length (UTF-16 code units) both answer 5.
+		// The host-side byteLen in this file computes the same number for the
+		// emitters; this is its runtime twin.
+		"js_bytelen": func(a []uint64) uint64 {
+			return rt.wrapNum(float64(len(rt.toString(u(a[0])))))
+		},
 	}
 }
 

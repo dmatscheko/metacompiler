@@ -18,7 +18,10 @@ function check($name, $got, $want) {
 // ----- arithmetic and precedence -----
 check("precedence", 1 + 2 * 3, 7);
 check("parens", (1 + 2) * 3, 9);
-check("division", 7 / 2, 3);
+// PHP's / returns a FLOAT unless both operands divide evenly; intdiv() is the
+// truncating one. tests/php-test-full.php states the same in its header.
+check("division", 7 / 2, 3.5);
+check("division-int", intdiv(7, 2), 3);
 check("modulo", 7 % 3, 1);
 check("unary minus", -5 + 2, -3);
 check("nested", 2 * (3 + 4) - 1, 13);

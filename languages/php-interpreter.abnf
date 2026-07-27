@@ -1,28 +1,32 @@
 :title("PHP (subset) interpreter") ;
-:description("Parses a PHP subset and executes it directly, without generating code.
+:description("Parses PHP and executes it directly, without generating code.
 
-The file begins with the '<?php' open tag (optionally closed by '?>'). The subset:
-dollar-sigil variables ($x = e, plus += -= *= /= %= .=), integers, double and single
-quoted strings with '$var' / '{$expr}' interpolation in double quotes, true/false/null,
-arithmetic (+ - * / %, / truncates toward zero) and comparison (== === != !== < > <= >=),
-the '.' string concatenation operator, the boolean operators && || ! and the word forms
-and/or, the ternary cond ? a : b, prefix/postfix ++ and --, if/elseif/else, while,
-for (;;), foreach ($a as $v) and foreach ($a as $k => $v), function name($a, $b){...}
-with return, closures function($x) use ($y) {...} (real closures), class C { public
-function m() {...} } with $this->prop, ->method(), new C(...), indexed arrays [1, 2] and
-array(1, 2) with [] indexing / assignment / $a[] append, associative arrays [k => v]
-with [] get/set, the builtins count/strlen/in_array/array_keys/array_values/array_push/
-abs/max/min, and echo/print.
+The file begins with the '<?php' open tag (optionally closed by '?>'). Covered:
+dollar-sigil variables and variable variables, the full assignment set (= += -= *= /=
+%= .= **= &= |= ^= <<= >>= ??=) and reference binding ($b = &$a), all the number
+literal forms (decimal, 0x, 0b, 0o, legacy octal, underscores, floats with an
+exponent, leading and trailing dot), single and double quoted strings with PHP's
+escape set (including octal, hex and Unicode) and interpolation of '$var',
+'$var[key]', '$var->prop' and '{$expr}', heredocs and nowdocs with terminator-indent
+stripping, arrays as ordered hash maps with spreads, destructuring (nested, keyed
+and with holes), isset/empty/unset, the nullsafe '?->' with argument short-circuit,
+match expressions, closures with 'use' by value and by reference, arrow functions,
+named arguments, variadics, first-class callable syntax, default parameter values,
+by-reference parameters, foreach by value, by key and by reference, if/elseif/else,
+while, do-while, for, foreach, try/catch/finally, throw as a statement and as an
+expression, functions and classes with methods and properties, and echo/print.
 
-Int arithmetic is 32 bit and / truncates toward zero (like the sibling languages here);
-'.' concatenates and coerces its operands to string; == and === both compare structurally
-(the subset never mixes types), && || return booleans (PHP semantics).
+The value model is PHP's own: int and float are distinct (3.0 === 3 is false), a PHP
+array is ONE ordered key/value map (so === compares key order and == does not),
+strings are byte strings (strlen counts UTF-8 bytes), '/' yields an int only when the
+division is exact, '.' concatenates, and ==/===/<=>/< follow the PHP 8 comparison
+rules (0 == \"a\" is false).
 
-Not in the subset (deferred, routed to notImplemented): traits, interfaces, namespaces,
-static/double-colon (::), type declarations, switch, and by-reference use.
+Not covered yet (routed to notImplemented): static and class-constant access (::),
+inheritance and interfaces, traits, enums, generators, switch, goto, the alternative
+control-structure syntax, static local variables and global constants.
 
-The program runs top to bottom; a self checking program ends with exit(failures).
-The same subset with the same semantics is compiled to LLVM IR by php-to-llvm-ir.abnf.") ;
+The program runs top to bottom; a self checking program ends with exit(failures).") ;
 
 
 // --- main rules
@@ -37,7 +41,11 @@ The same subset with the same semantics is compiled to LLVM IR by php-to-llvm-ir
 
 // PHP whitespace: blanks plus '#' and '//' line comments and '/* */' block comments.
 Whitespace  = { @+" \t\r\n" | LineComment | BlockComment } ;
-LineComment = ( "//" | "#" ) :whitespace() { NotNewline } :whitespace(Whitespace) ;
+// '#' starts a line comment, but '#[' opens an ATTRIBUTE - the negative lookahead
+// keeps the attribute out of the comment (without it '#[Foo] $p' swallows the rest
+// of the line, which is how attributes used to "work" by accident).
+LineComment = ( "//" | HashOnly ) :whitespace() { NotNewline } :whitespace(Whitespace) ;
+HashOnly    = "#" !"[" ;
 BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
 NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
@@ -53,76 +61,119 @@ CloseTag    = "?>" :whitespace(Whitespace) ;
 // A function definition: function name($a, $b) { ... } with explicit return. An
 // optional parameter type hint and return type are accepted and ignored (dynamic).
 Def         <~~ push(makeFun(takeAll())) ~~>
-            = KwFunction Name <~~ push(up.in) ~~> ParamList [ ReturnType ] Block ;
+            = [ AttrGrp ] KwFunction [ "&" ] Name <~~ push(up.in); genPush() ~~> ParamList [ ReturnType ] Block ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 // A parameter accepts real-world surface: promotion modifiers (public/readonly...),
 // a type hint, by-reference '&', variadic '...', and a default value. All but the
 // name are accepted and dropped (dynamic, create-on-assign); the default expression
 // is parsed then popped so only {param} reaches makeFun.
-Param       = { Modifier } [ TypeHint ] [ "&" ] [ "..." ] DollarName <~~ push({param: pop()}) ~~> [ ParamDefault ] ;
-ParamDefault <~~ pop() ~~> = "=" Expression ;
+Param       <~~ push({param: makeParam(takeAll())}) ~~>
+            = [ AttrGrp ] { PropMod } [ TypeHint ] [ PByRef ] [ PVariadic ] DollarName [ ParamDefault ] ;
+PByRef      <~~ push({pbyref: true}) ~~> = "&" ;
+PVariadic   <~~ push({pvariadic: true}) ~~> = "..." ;
+ParamDefault <~~ push({pdefault: pop()}) ~~> = PlainEq Expression ;
 TypeHint    = [ "?" ] TypeAtom { ( "|" | "&" ) [ "?" ] TypeAtom } ;
 TypeAtom    = KwArray | [ "\\" ] Id { "\\" Id } ;
 ReturnType  = ":" TypeHint ;
 
 // class C { public function m() {...} } -- method modifiers are accepted and ignored.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = { ClassMod } KwClass Name <~~ push(up.in) ~~> [ KwExtends ExtName ] [ KwImplements ImplList ] "{" { Member } "}" ;
+            = [ AttrGrp ] { ClassMod } KwClass Name <~~ push(up.in) ~~> [ KwExtends ExtBase ] [ KwImplements ImplList ] "{" { Member } "}" ;
+ExtBase     <~~ push({ext: up.in}) ~~> = ExtName ;
 ClassMod    = ( "abstract" | "final" | "readonly" ) KwEnd ;
 ExtName     = [ "\\" ] Id { "\\" Id } ;
-ImplList    = ExtName { "," ExtName } ;
+ImplList    = ImplName { "," ImplName } ;
+ImplName    <~~ push({impl: up.in}) ~~> = ExtName ;
 Member      = MethodDecl | ClassConst | UseTrait | PropDecl ;
 // A method: modifiers and a reference-return '&' are accepted and ignored; an
 // abstract/interface method has no body (';' instead of a block -> empty method).
 MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
-            = { Modifier } KwFunction [ "&" ] MethodName <~~ push(up.in) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
-// Class constants and 'use Trait;' adaptations: recognized and routed to
-// notImplemented (no static/const model). They push a {prop} marker makeClassStmt
-// ignores, exactly like a property declaration.
-ClassConst  <~~ takeAll(); notImpl("class constant", up.pos); push({prop: true}) ~~>
-            = { Modifier } KwConst Id { Id } [ "=" Expression ] { "," Id { Id } [ "=" Expression ] } ";" ;
-UseTrait    <~~ notImpl("trait use", up.pos); push({prop: true}) ~~>
-            = KwUse ImplList ( ";" | SkipBlock ) ;
+            = [ AttrGrp ] { PropMod } KwFunction [ "&" ] MethodName <~~ push(up.in); genPush() ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
+// Class constants: const A = 1, B = 2; with an optional TYPE before the first name
+// (the typed class constants of PHP 8.3). The typed form has to be its own
+// alternative and be tried FIRST - writing it as an optional [ TypeHint ] would let
+// 'const SIZE = 4' consume SIZE as the type and then fail on '=', because a PEG
+// never retries an optional that matched.
+ClassConst  <~~ push({cconsts: takeAll()}) ~~>
+            = [ AttrGrp ] { PropMod } KwConst ( ConstTyped | ConstPlain ) ";" ;
+ConstTyped  = TypeHint ConstItem { "," ConstItem } ;
+ConstPlain  = ConstItem { "," ConstItem } ;
+ConstItem   <~~ push({cconst: makeConstRec(takeAll())}) ~~>
+            = ConstName [ PlainEq Expression ] ;
+ConstName   <~~ push(up.in) ~~> = Id ;
+// use T1, T2; inside a class body - and, optionally, the conflict-resolution block
+// PHP spells with 'insteadof' (which of two traits wins a name) and 'as' (bind a
+// trait method under a second name, and/or change its visibility).
+UseTrait    <~~ push({usetrait: makeUseTrait(takeAll())}) ~~>
+            = KwUse ImplList ( ";" | TraitAdapt ) ;
+TraitAdapt  = "{" { TraitRule } "}" ;
+TraitRule   = TraitInsteadof | TraitAs ;
+TraitInsteadof <~~ push({tinsteadof: takeAll()}) ~~>
+            = TraitRef KwInsteadof ImplList ";" ;
+TraitAs     <~~ push({tas: takeAll()}) ~~>
+            = TraitRef KwAs [ TraitVis ] [ TraitAlias ] ";" ;
+// The qualified form has to come first: 'T::m' starts exactly like the bare 'm'.
+TraitRef    = TraitQual | TraitMeth ;
+TraitQual   = TraitOwner "::" TraitMeth ;
+TraitOwner  <~~ push({towner: stripWs(up.in)}) ~~> = Name ;
+TraitMeth   <~~ push({tmeth: stripWs(up.in)}) ~~> = MemberName ;
+TraitVis    <~~ push({tvis: stripWs(up.in)}) ~~>
+            = ( "public" | "private" | "protected" ) KwEnd ;
+TraitAlias  <~~ push({talias: stripWs(up.in)}) ~~> = MemberName ;
 
 // interface / trait / namespace / use-import: accepted structurally and routed to
 // notImplemented (no runtime model for them in this subset).
-TypeDecl    <~~ push(notImplStmt("interface/trait declaration", up.pos)) ~~>
-            = ( KwInterface | KwTrait ) SkipHead SkipBlock ;
+// An interface is a named type with (abstract) method signatures: no bodies to run,
+// but instanceof and the implements list need the name to exist at run time.
+TypeDecl    = InterfaceDecl | TraitDecl ;
+InterfaceDecl <~~ push(makeIfaceStmt(takeAll())) ~~>
+            = [ AttrGrp ] KwInterface Name <~~ push(up.in) ~~> [ KwExtends ImplList ] "{" { Member } "}" ;
+// A trait is a bag of members to be COPIED into a class (it has no instances and no
+// place in the inheritance chain), so its descriptor just carries its parsed parts.
+TraitDecl   <~~ push(makeTraitStmt(takeAll())) ~~>
+            = [ AttrGrp ] KwTrait Name <~~ push(up.in) ~~> "{" { Member } "}" ;
 NsDecl      <~~ push(notImplStmt("namespace", up.pos)) ~~>
             = KwNamespace { Id | "\\" } ";" ;
 UseDecl     <~~ push(notImplStmt("use import", up.pos)) ~~>
             = KwUse { Id | "\\" } [ KwAs Id ] ";" ;
 // enum Name : backing-type implements I { case A; ... }: recognized structurally and
 // routed to notImplemented; the body (cases, methods, consts) is balanced-skipped.
-EnumDecl    <~~ push(notImplStmt("enum", up.pos)) ~~>
-            = KwEnum Name [ ":" TypeAtom ] [ KwImplements ImplList ] SkipBlock ;
-SkipHead    = { Id | "," | "\\" } ;
-SkipBlock   = "{" { SkipItem } "}" ;
-SkipItem    = SkipDq | SkipSq | SkipBlock | SkipOther ;
+// enum E: string implements I { case A = "a"; const C = 1; methods } - an enum is a
+// class whose cases are SINGLETON instances, published as class constants (which is
+// why E::A works with no extra machinery) and carrying ->name and, for a backed
+// enum, ->value. EnumCase has to precede MethodDecl: both can start at a modifier.
+EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
+            = [ AttrGrp ] KwEnum Name <~~ push(up.in) ~~> [ ":" TypeAtom ] [ KwImplements ImplList ] "{" { EnumMember } "}" ;
+EnumMember  = EnumCase | MethodDecl | ClassConst | UseTrait ;
+EnumCase    <~~ push({ecase: makeConstRec(takeAll())}) ~~>
+            = KwCase ConstName [ PlainEq Expression ] ";" ;
 SkipDq      = '"' :whitespace() { SkipStrEsc | SkipDqChar } '"' :whitespace(Whitespace) ;
 SkipSq      = "'" :whitespace() { SkipStrEsc | SkipSqChar } "'" :whitespace(Whitespace) ;
 SkipStrEsc  = "\\" "\x00"..."\U0010ffff" ;
 SkipDqChar  = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
 SkipSqChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
-SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 // A balanced ( ... ) run (switch/match subject, declare/while directive), parsed and
 // ignored; string literals inside are matched first so their parens never miscount.
 SkipParen   = "(" { SkipDq | SkipSq | SkipParen | SkipPOther } ")" ;
 SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
 // A property declaration 'public $x;' or 'public int $x = e;' is accepted; a type
 // hint and the initializer are dropped (properties are created on first assignment).
-PropDecl    <~~ takeAll(); push({prop: true}) ~~>
-            = { Modifier } [ TypeHint ] DollarName [ "=" Expression ] ";" ;
+PropDecl    <~~ push({propdecl: makeProp(takeAll())}) ~~>
+            = [ AttrGrp ] { PropMod } [ TypeHint ] DollarName [ "=" Expression ] ";" ;
 Modifier    = ( "public" | "private" | "protected" | "static" | "final" | "abstract" | "readonly" ) KwEnd ;
+// The modifier text is CAPTURED (as {mod}) rather than dropped: 'static' decides
+// whether a property lives on the class or on the instance, and any modifier on a
+// constructor parameter makes it a PROMOTED property.
+PropMod     <~~ push({mod: stripWs(up.in)}) ~~> = Modifier ;
 
 // Body of a control structure / function: braces around a statement sequence.
 Block       <~~ push({body: makeBody(takeAll())}) ~~>
             = "{" { Statement } "}" ;
 
 // Every statement pushes exactly one thunk: function() -> value | signal.
-Statement   = EchoStmt | GlobalStmt | StaticVarStmt | Block | If | While | ForEach | For
-            | Switch | DoWhile | Try | Throw | Declare
-            | Return | Break | Continue | Empty | ExprStmt ;
+Statement   = EchoStmt | UnsetStmt | GlobalStmt | StaticVarStmt | Block | If | While | ForEach | For
+            | Switch | DoWhile | Try | Throw | Declare | Goto
+            | Return | Break | Continue | Empty | LabelStmt | ExprStmt ;
 
 // ----- widened statement surface -----
 // switch / do-while / declare / static-locals: recognized structurally and routed to
@@ -130,12 +181,36 @@ Statement   = EchoStmt | GlobalStmt | StaticVarStmt | Block | If | While | ForEa
 // (Switch/Declare) or parsed then dropped (DoWhile) so that a whole real-world file
 // parses; under -warn-unsupported each becomes a no-op. (try/catch/finally and throw
 // below are genuinely modelled, not notImplemented.)
-StaticVarStmt <~~ takeAll(); push(notImplStmt("static local variable", up.pos)) ~~>
-            = KwStatic DollarName [ "=" Expression ] { "," DollarName [ "=" Expression ] } ";" ;
-Switch      <~~ takeAll(); push(notImplStmt("switch", up.pos)) ~~>
-            = KwSwitch SkipParen SkipBlock ;
-DoWhile     <~~ takeAll(); push(notImplStmt("do-while", up.pos)) ~~>
-            = KwDo Block KwWhile SkipParen ";" ;
+// static $n = 0; inside a function: a variable whose STORAGE outlives the call. The
+// cell is created on the first execution of this very statement and re-bound into
+// every later frame, which is exactly PHP's per-declaration (not per-object) rule.
+StaticVarStmt <~~ push(makeStaticVars(takeAll())) ~~>
+            = KwStatic DollarName [ PlainEq Expression ] { "," DollarName [ PlainEq Expression ] } ";" ;
+// switch: loose (==) comparison, first match wins and execution FALLS THROUGH into
+// the following clauses until a break. 'default' may sit anywhere, and is only taken
+// when no case matched. The clause bodies are plain statement runs, which is why they
+// are collected as lists rather than as Blocks - a Block would give each its own
+// scope and would stop the fallthrough.
+Switch      <~~ push(makeSwitch(takeAll())) ~~>
+            = KwSwitch "(" Expression ")" ( SwitchAlt | SwitchBlock ) ;
+SwitchBlock = "{" [ ";" ] { SwitchClause } "}" ;
+SwitchAlt   = ":" [ ";" ] { SwitchClause } KwEndswitch ";" ;
+SwitchClause = CaseClause | DefaultClause ;
+CaseClause  <~~ push({scase: takeAll()}) ~~>
+            = KwCase Expression CaseSep { Statement } ;
+DefaultClause <~~ push({sdefault: takeAll()}) ~~>
+            = KwDefault CaseSep { Statement } ;
+CaseSep     = ":" !":" | ";" ;
+DoWhile     <~~ push(makeDoWhile(takeAll())) ~~>
+            = KwDo Block KwWhile "(" Expression ")" ";" ;
+// goto L; / L: - a jump within one statement sequence (which is all PHP allows: it
+// cannot enter a loop or leave a function). The jump travels as a control signal and
+// is caught by the statement list that owns the label; see makeBody.
+Goto        <~~ push(makeGoto(pop())) ~~>
+            = KwGoto LabelName ";" ;
+LabelStmt   <~~ push(makeLabel(pop())) ~~>
+            = LabelName ":" !":" ;
+LabelName   <~~ push(stripWs(up.in)) ~~> = Name ;
 // try/catch/finally + throw are genuinely modelled (excThrow/excTry, lib/interp-core.js):
 // throw raises a value that unwinds to the nearest catch; catch binds it (the first catch
 // clause wins - the exception type list, including multi-catch A | B, is parsed but not
@@ -145,11 +220,11 @@ DoWhile     <~~ takeAll(); push(notImplStmt("do-while", up.pos)) ~~>
 // through: a normally-completing finally yields null (which excTry ignores), while a
 // return/break/continue OUT OF the finally overrides the try/catch completion and cancels
 // a pending rethrow - the same semantics js_try gives the compiler.
-Try         <~~ push(excTry(takeAll())) ~~>
+Try         <~~ push(excTryTyped(takeAll())) ~~>
             = KwTry TryBody { CatchClause } [ FinallyClause ] ;
 TryBody     <~~ push({trybody: pop().body}) ~~>
             = Block ;
-CatchClause <~~ push(excCatch(takeAll())) ~~>
+CatchClause <~~ push(phpCatch(takeAll())) ~~>
             = KwCatch "(" CatchType [ DollarName ] ")" Block <~~ push(pop().body) ~~> ;
 FinallyClause <~~ push({finbody: finBody(pop().body)}) ~~>
             = KwFinally Block ;
@@ -157,9 +232,12 @@ Throw       <~~ push(excThrow(pop())) ~~>
             = KwThrow Expression ";" ;
 Declare     <~~ takeAll(); push(notImplStmt("declare", up.pos)) ~~>
             = KwDeclare SkipParen ( ";" | Block ) ;
-ConstDecl   <~~ takeAll(); push(notImplStmt("global const", up.pos)) ~~>
-            = KwConst Id { Id } [ "=" Expression ] { "," Id { Id } [ "=" Expression ] } ";" ;
-CatchType   = ExtName { "|" ExtName } ;
+// const NAME = expr; at file level: a global constant. Unlike a class constant it
+// takes no type, and its initializer is evaluated once, where the declaration stands.
+ConstDecl   <~~ push(makeConstDecl(takeAll())) ~~>
+            = KwConst ConstItem { "," ConstItem } ";" ;
+CatchType   = CatchName { "|" CatchName } ;
+CatchName   <~~ push({ctype: up.in}) ~~> = ExtName ;
 
 // echo e, e, e;  /  print e;
 EchoStmt    <~~ push(makeEcho(takeAll())) ~~>
@@ -173,29 +251,55 @@ GlobalStmt  <~~ takeAll(); push(makeConstStmt()) ~~>
 Empty       <~~ push(makeConstStmt()) ~~>
             = ";" ;
 
+// unset($a, $b): removes the bindings (a later isset($a) is false).
+UnsetStmt   <~~ push(makeUnset(takeAll())) ~~>
+            = KwUnset "(" IsTarget { "," IsTarget } [ "," ] ")" ";" ;
+IsTarget    <~~ push({istgt: pop()}) ~~>
+            = Target ;
+
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
             = Expression ";" ;
 
+// Both spellings of every compound statement: braces, and PHP's colon/endXXX form.
+// The alternative form is tried FIRST because it is decided by a single ':' - it is
+// AltBody that then has to be careful: a bare 'endif' would otherwise parse as a
+// constant-reference statement and swallow the terminator, which is why the five
+// endXXX words are reserved in NotKw.
 If          <~~ push(makeIf(takeAll())) ~~>
-            = KwIf "(" Expression ")" Block { ElseIf } [ KwElse Block <~~ push({els: pop().body}) ~~> ] ;
+            = KwIf "(" Expression ")" ( AltIfTail | Block { ElseIf } [ KwElse Block <~~ push({els: pop().body}) ~~> ] ) ;
 ElseIf      <~~ var b = pop(); push({elifCond: pop(), elifBody: b.body}) ~~>
             = KwElseif "(" Expression ")" Block ;
+AltIfTail   = ":" AltBody { AltElseIf } [ KwElse ":" AltBody <~~ push({els: pop().body}) ~~> ] KwEndif ";" ;
+AltElseIf   <~~ var b2 = pop(); push({elifCond: pop(), elifBody: b2.body}) ~~>
+            = KwElseif "(" Expression ")" ":" AltBody ;
+// A statement run that ends at the enclosing endXXX / else / elseif keyword. It
+// pushes the same {body} record a Block does, so every builder is reused unchanged.
+AltBody     <~~ push({body: makeBody(takeAll())}) ~~>
+            = { Statement } ;
 
 While       <~~ push(makeWhile(pop().body, pop())) ~~>
-            = KwWhile "(" Expression ")" Block ;
+            = KwWhile "(" Expression ")" ( AltWhileBody | Block ) ;
+AltWhileBody = ":" AltBody KwEndwhile ";" ;
 
 // for (init; cond; post) { body }. The three clauses are optional and wrapped
 // with a kind marker so the builder can tell them apart on the stack.
 For         <~~ push(makeFor(takeAll())) ~~>
-            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Block ;
+            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" ( AltForBody | Block ) ;
+AltForBody  = ":" AltBody KwEndfor ";" ;
 ForInit     <~~ push({k: "init", t: exprToStmt(pop())}) ~~> = Expression ;
 ForCond     <~~ push({k: "cond", t: pop()}) ~~> = Expression ;
 ForPost     <~~ push({k: "post", t: exprToStmt(pop())}) ~~> = Expression ;
 
 // foreach ($arr as $v) / foreach ($arr as $k => $v)
 ForEach     <~~ push(makeForeach(takeAll())) ~~>
-            = KwForeach "(" Expression KwAs ForeachVars ")" Block ;
-ForeachVars = DollarName <~~ push({v1: pop()}) ~~> [ "=>" DollarName <~~ push({v2: pop()}) ~~> ] ;
+            = KwForeach "(" Expression KwAs ForeachVars ")" ( AltForeachBody | Block ) ;
+AltForeachBody = ":" AltBody KwEndforeach ";" ;
+ForeachVars = DestructPat | ForeachKV ;
+ForeachKV   = ForeachV1 [ "=>" ForeachV2 ] ;
+ForeachV1   = [ FeRef ] DollarName <~~ push({v1: pop()}) ~~> ;
+ForeachV2   = [ FeRef ] DollarName <~~ push({v2: pop()}) ~~> ;
+// 'as &$v' aliases the array ELEMENT, so writing $v writes back into the array.
+FeRef       <~~ push({byref: true}) ~~> = "&" ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] ";" ;
@@ -205,15 +309,47 @@ Continue    <~~ push(makeContinue(takeAll())) ~~>
             = KwContinue [ Expression ] ";" ;
 
 // Every expression pushes exactly one thunk: function() -> value.
-Expression  = DestructAssign | Assignment | Ternary ;
+Expression  = YieldExpr | RefAssign | DestructAssign | Assignment | Ternary ;
+
+// yield / yield $v / yield $k => $v / yield from $iterable. It is an EXPRESSION in
+// PHP, and the presence of one anywhere in a body is what turns that function into a
+// generator - which is why the tag marks the enclosing definition (genMark).
+// 'yield from' must be tried first: 'from' would otherwise parse as a bare constant.
+YieldExpr   <~~ push(makeYield(takeAll())) ~~>
+            = KwYield ( YieldFrom | [ YieldVal [ "=>" YieldVal ] ] ) ;
+YieldFrom   <~~ push({yfrom: pop()}) ~~>
+            = KwFrom Expression ;
+YieldVal    <~~ push({yval: pop()}) ~~>
+            = Ternary ;
+
+// $b = &$a : both names then share ONE storage cell, so a write through either is
+// visible through the other (PHP references, not a copy).
+RefAssign   <~~ push(makeRefAssign(takeAll())) ~~>
+            = Target PlainEq "&" !"&" Target ;
 
 // list($a, $b) = e  /  [$a, $b] = e  -- positional destructuring of an indexed
 // array into a list of assignment targets (tried before a plain expression so a
 // bracketed target list is not mistaken for an array literal).
+// list($a, $b) = e  /  [$a, $b] = e  -- array destructuring. A slot may be EMPTY
+// ([, $second]), KEYED (["y" => $py]) or itself a nested pattern ([[$m, $n], [$o]]),
+// and the same patterns bind a foreach value. Tried before a plain expression so a
+// bracketed target list is not mistaken for an array literal; a real array literal
+// still rolls back here because the '=' never follows.
 DestructAssign <~~ push(makeDestructure(takeAll())) ~~>
-            = DestructLhs "=" !"=" Expression ;
-DestructLhs = KwList "(" DTarget { "," DTarget } ")"
-            | "[" DTarget { "," DTarget } "]" ;
+            = DestructPat PlainEq Expression ;
+DestructPat <~~ push({pat: makePattern(takeAll())}) ~~>
+            = KwList "(" DSlots ")" | "[" DSlots "]" ;
+DSlots      = DSlot { "," DSlot } ;
+// Always pushes exactly one slot record, so an omitted element still occupies its
+// position (that is what makes [, $second] bind the SECOND element).
+DSlot       <~~ push(makeSlot(takeAll())) ~~>
+            = [ DElem ] ;
+DElem       = DKeyed | DPlain ;
+DKeyed      <~~ var v = pop(); push({dkey: pop(), dval: v}) ~~>
+            = Expression "=>" DValue ;
+DPlain      <~~ push({dval: pop()}) ~~>
+            = DValue ;
+DValue      = DestructPat | DTarget ;
 DTarget     <~~ push({dt: pop()}) ~~>
             = Target ;
 
@@ -228,51 +364,100 @@ Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
 
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target AssignOp <~~ push(up.in) ~~> Expression ;
-AssignOp    = "+=" | "-=" | "*=" | "/=" | "%=" | ".=" | ( "=" !"=" ) ;
+// Longest first (ordered choice): '**=' before '*=', '<<=' before '<='. The plain
+// '=' declines '==' (a comparison) and '=>' (an array key), neither of which is an
+// assignment - without the lookaheads it matches their first character and the rest
+// of the sequence then fails somewhere else entirely.
+AssignOp    = "**=" | "<<=" | ">>=" | "??=" | "+=" | "-=" | "*=" | "/=" | "%=" | ".="
+            | "&=" | "|=" | "^=" | PlainEq ;
+PlainEq     = "=" !"=" !">" ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = TargetHead { ArrowField | TIndex | TAppend } ;
-TargetHead  = DollarName <~~ push({var: pop()}) ~~> ;
+// A static property is an assignable head too (self::$made = ..., C::$made++), so it
+// sits alongside a plain variable. It must be tried FIRST: PlainHead would otherwise
+// never see it, but VarVarHead / PlainHead both start at '$' and a bare class name
+// is not a target at all, so the ordering only matters against a later ConstRef.
+TargetHead  = StaticHead | PlainHead | VarVarHead ;
+StaticHead  <~~ push({staticvar: takeAll()}) ~~>
+            = StaticBase "::" StaticProp ;
+PlainHead   = DollarName <~~ push({var: pop()}) ~~> ;
+// $$name = e / ${expr} = e : the variable NAME is computed.
+VarVarHead  <~~ push({varexpr: pop()}) ~~>
+            = "$" ( VarRef | "{" Expression "}" ) ;
 ArrowField  = "->" MethodName <~~ push({key: up.in}) ~~> ;
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
 TAppend     <~~ push({append: true}) ~~>
             = "[" "]" ;
 
+// The binary operator ladder, in PHP's own precedence order (loosest first):
+//   ||  &&  |  ^  &  == != === !== <=>  < <= > >=  .  << >>  + -  * / %  **
+// Note that since PHP 8 the concatenation '.' binds LOOSER than the shifts and the
+// additive operators, which is why it has its own level rather than sitting next
+// to '+'. The single-character bitwise operators decline their doubled forms
+// ('&' !'&'), or 'a && b' parses as 'a & (&b)' - a wrong tree, not an error.
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { OrOp AndExpr } ;
 OrOp        = "||" | ( "or" KwEnd ) ;
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
-            = NotExpr { AndOp NotExpr } ;
+            = BitOrExpr { AndOp BitOrExpr } ;
 AndOp       = "&&" | ( "and" KwEnd ) ;
-NotExpr     = NotOp | EqExpr ;
-NotOp       <~~ push(makeNot(pop())) ~~>
-            = "!" NotExpr ;
-
+BitOrExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = BitXorExpr { SingleBar <~~ push(up.in) ~~> BitXorExpr } ;
+SingleBar   = "|" !"|" ;
+BitXorExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = BitAndExpr { "^" <~~ push(up.in) ~~> BitAndExpr } ;
+BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = EqExpr { SingleAmp <~~ push(up.in) ~~> EqExpr } ;
+SingleAmp   = "&" !"&" ;
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
-            = RelExpr { ( "===" | "!==" | "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+            = RelExpr { ( "===" | "!==" | "==" | "!=" | "<=>" | "<>" ) <~~ push(up.in) ~~> RelExpr } ;
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = AddExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr } ;
+            = ConcatExpr { RelOp <~~ push(up.in) ~~> ConcatExpr } ;
+RelOp       = LeNotSpaceship | ">=" | SingleLt | SingleGt ;
+LeNotSpaceship = "<=" !">" ;
+SingleLt    = "<" !"<" ;
+SingleGt    = ">" !">" ;
+ConcatExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = ShiftExpr { DotOp <~~ push(up.in) ~~> ShiftExpr } ;
+DotOp       = "." !"=" ;
+ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = AddExpr { ( "<<" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = MulExpr { ( "+" | "-" | "." ) <~~ push(up.in) ~~> MulExpr } ;
+            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Cast | Clone | InstanceofExpr | PreIncDec | Neg | Pos | PostfixExpr ;
-// (int)$x / (string)$y / (array)$z ...: a type cast, recognized and routed to
-// notImplemented. The operand is parsed then dropped. A parenthesized group '($x)'
+UnaryExpr   = Cast | Clone | InstanceofExpr | PreIncDec | Neg | Pos | BitNot | NotOp
+            | ThrowExpr | PowExpr ;
+NotOp       <~~ push(makeNot(pop())) ~~>
+            = "!" UnaryExpr ;
+BitNot      <~~ push(makeBitNot(pop())) ~~>
+            = "~" UnaryExpr ;
+// '**' is RIGHT associative (2 ** 3 ** 2 is 512, not 64) and binds tighter than
+// every prefix operator on its left but looser than the one on its right, so its
+// right operand is a full UnaryExpr ('2 ** -1').
+PowExpr     <~~ push(foldPow(takeAll())) ~~>
+            = PostfixExpr [ "**" UnaryExpr ] ;
+// (int)$x / (string)$y / (array)$z ...: a type cast. A parenthesized group '($x)'
 // is not a cast (the inner is not a cast keyword) and falls through to Primary.
-Cast        <~~ takeAll(); push(notImplExpr("type cast", up.pos)) ~~>
-            = "(" CastKw ")" UnaryExpr ;
-CastKw      = ( "int" | "integer" | "bool" | "boolean" | "float" | "double" | "real"
+Cast        <~~ push(makeCast(takeAll())) ~~>
+            = "(" CastKw <~~ push({cast: up.in}) ~~> ")" UnaryExpr ;
+CastKw      = ( "integer" | "int" | "boolean" | "bool" | "float" | "double" | "real"
               | "string" | "array" | "object" | "unset" | "binary" ) KwEnd ;
-Clone       <~~ takeAll(); push(notImplExpr("clone", up.pos)) ~~>
+Clone       <~~ push(makeClone(pop())) ~~>
             = KwClone UnaryExpr ;
+// throw is an EXPRESSION since PHP 8 ($x ?? throw new E, fn() => throw new E).
+ThrowExpr   <~~ push(excThrow(pop())) ~~>
+            = KwThrow Expression ;
 // $x instanceof Foo : recognized and routed to notImplemented. Tried before the plain
 // unary path; if no 'instanceof' follows, this alternative fails and rolls back, so an
 // ordinary unary keeps its exact original parse (byte-identical).
-InstanceofExpr <~~ takeAll(); push(notImplExpr("instanceof", up.pos)) ~~>
+InstanceofExpr <~~ push(makeInstanceof(takeAll())) ~~>
             = PostfixExpr KwInstanceof InstRef ;
-InstRef     = DollarName | ExtName ;
+InstRef     = InstDyn | InstName ;
+InstDyn     <~~ push({idyn: pop()}) ~~> = VarRef ;
+InstName    <~~ push({iname: up.in}) ~~> = ExtName ;
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
 Neg         <~~ push(makeNeg(pop())) ~~>
@@ -285,38 +470,126 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 
 // A primary followed by any mix of ->method(args), ->field, [index], (call), ::static.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | IndexSfx | CallSfx | StaticSfx } ;
-MethodSfx   <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
-            = ( "?->" | "->" ) MethodName <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
-FieldSfx    = ( "?->" | "->" ) MethodName <~~ push({kind: "field", name: up.in}) ~~> ;
+            = Primary { MethodSfx | DynMethodSfx | FieldSfx | DynFieldSfx | IndexSfx | CallSfx | StaticSfx } ;
+// '?->' short circuits: when the receiver is null the WHOLE remaining chain yields
+// null and the arguments are never evaluated, so the two forms cannot share a rule.
+MethodSfx   = NsMethodSfx | PlMethodSfx ;
+PlMethodSfx <~~ push({kind: "mcall", ns: false, name: popName(), args: takeAll()}) ~~>
+            = "->" MemberName <~~ push({mname: up.in}) ~~> "(" [ ArgList ] ")" ;
+NsMethodSfx <~~ push({kind: "mcall", ns: true, name: popName(), args: takeAll()}) ~~>
+            = "?->" MemberName <~~ push({mname: up.in}) ~~> "(" [ ArgList ] ")" ;
+// $o->$meth(...) and $o->{"add"}(...): the method name is computed at run time.
+DynMethodSfx <~~ push({kind: "dmcall", name: popDyn(), args: takeAll()}) ~~>
+            = "->" DynName "(" [ ArgList ] ")" ;
+DynName     <~~ push({dname: pop()}) ~~>
+            = VarRef | "{" Expression "}" ;
+FieldSfx    = NsFieldSfx | PlFieldSfx ;
+PlFieldSfx  = "->" MemberName <~~ push({kind: "field", ns: false, name: up.in}) ~~> ;
+NsFieldSfx  = "?->" MemberName <~~ push({kind: "field", ns: true, name: up.in}) ~~> ;
+DynFieldSfx <~~ push({kind: "dfield", name: pop()}) ~~>
+            = "->" VarRef ;
 IndexSfx    <~~ push({kind: "index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 CallSfx     <~~ push({kind: "call", args: takeAll()}) ~~>
-            = "(" [ Expression { "," Expression } ] ")" ;
-StaticSfx   <~~ push(makeStatic(takeAll(), up.pos)) ~~>
-            = "::" MethodName [ "(" [ Expression { "," Expression } ] ")" ] ;
+            = "(" [ ArgList ] ")" ;
+
+// An argument list: positional, named (h: 5), spread (...$a) or the PHP 8.1
+// first-class callable placeholder (strlen(...)), with an optional trailing comma.
+ArgList     = Arg { "," Arg } [ "," ] ;
+Arg         = NamedArg | SpreadArg | FccArg | LvalArg | PosArg ;
+// An argument that is exactly a variable / element / property is ALSO remembered as
+// an l-value, so a by-reference parameter (function f(&$n)) can bind the caller's
+// storage cell. ArgEnd is the guard that keeps '$a + 1' out of this alternative:
+// only a ',' or ')' may follow, otherwise the argument is an ordinary expression.
+LvalArg     <~~ push(makeLvalArg(pop())) ~~>
+            = Target ArgEnd ;
+ArgEnd      = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        var steps = 0
+        while (steps < 100000) {
+            steps = steps + 1
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i); continue }
+            break
+        }
+        if (cc === 44 || cc === 41) { return undefined }
+        return abnf.newToken("\x01notlval", 0)
+    })()
+~~) ;
+NamedArg    <~~ push({argname: popLabel(), argval: pop()}) ~~>
+            = ArgLabel Expression ;
+ArgLabel    <~~ push({alabel: up.in}) ~~>
+            = Id ":" !":" ;
+SpreadArg   <~~ push({argspread: pop()}) ~~>
+            = "..." Expression ;
+FccArg      <~~ push({fcc: true}) ~~>
+            = "..." ;
+PosArg      <~~ push({argval: pop()}) ~~>
+            = Expression ;
+// '::' as a SUFFIX of a member chain: $obj::CONST, $obj::class, $obj::method().
+// The class is taken from the value on the left (an instance, or a class name in a
+// string), which is why makeStaticSfx receives the current chain value.
+StaticSfx   <~~ push(makeStaticSfx(takeAll())) ~~>
+            = "::" StaticMember [ StaticArgs ] ;
 
 Primary     = "(" Expression ")"
             | NewAnon | NewExpr | ClosureExpr | ArrowFn | Match | ArrayLit
             | IncludeExpr
-            | DqStr | SqStr | IntLit
+            | HeredocLit | DqStr | SqStr | NumLit
             | True | False | Null
-            | VarRef | StaticExpr | Call | ConstRef ;
+            | IssetExpr | EmptyExpr | VarVar | VarRef | StaticExpr | Call | ConstRef ;
+
+// isset()/empty() are language constructs, not calls: isset() must NOT evaluate a
+// missing variable into an error, and empty() applies PHP truthiness.
+IssetExpr   <~~ push(makeIsset(takeAll())) ~~>
+            = KwIsset "(" IsTarget { "," IsTarget } [ "," ] ")" ;
+EmptyExpr   <~~ push(makeEmpty(pop())) ~~>
+            = KwEmpty "(" Expression ")" ;
+// $$name / ${expr}: a variable variable - the NAME is computed at run time.
+VarVar      <~~ push(makeVarVar(pop())) ~~>
+            = "$" ( VarRef | VarVar | "{" Expression "}" ) ;
 
 NewExpr     <~~ push(makeNew(takeAll())) ~~>
-            = KwNew Name <~~ push({cls: up.in}) ~~> [ "(" [ Expression { "," Expression } ] ")" ] ;
-// new class (args) extends B implements I { ... }: an anonymous class, recognized and
-// routed to notImplemented (constructor arguments and body are dropped).
-NewAnon     <~~ takeAll(); push(notImplExpr("anonymous class", up.pos)) ~~>
-            = KwNew KwClass [ "(" [ Expression { "," Expression } ] ")" ] [ KwExtends ExtName ] [ KwImplements ImplList ] SkipBlock ;
+            = KwNew NewTarget [ "(" [ ArgList ] ")" ] ;
+// new C(...) / new $className(...) / new static() - the class may be computed.
+NewTarget   = NewStatic | NewName | NewDyn ;
+// new static() is LATE STATIC BINDING: it creates an instance of the class the call
+// was made through, not of the one the code sits in. 'static' is a reserved word, so
+// it cannot arrive through Name (self and parent can, and makeNew resolves all three
+// through resolveClassName).
+NewStatic   <~~ push({cls: "static"}) ~~> = "static" KwEnd ;
+NewName     <~~ push({cls: up.in}) ~~> = Name ;
+NewDyn      <~~ push({clsdyn: pop()}) ~~> = VarRef ;
+// new class (args) extends B implements I { ... }: an anonymous class. The body is a
+// real class body (Member), not a balanced skip, and the constructor arguments are
+// labelled so makeNewAnon can tell them from the members.
+NewAnon     <~~ push(makeNewAnon(takeAll())) ~~>
+            = KwNew KwClass [ AnonArgs ] [ KwExtends ExtBase ] [ KwImplements ImplList ] "{" { Member } "}" ;
+AnonArgs    <~~ push({sargs: takeAll()}) ~~>
+            = "(" [ ArgList ] ")" ;
 
 // fn (params) => expr : an arrow function (auto-capturing, single-expression), and
 // match (subject) { arms }: a match expression. Both recognized and routed to
 // notImplemented (operands/arms are parsed then dropped or balanced-skipped).
-ArrowFn     <~~ takeAll(); push(notImplExpr("arrow function", up.pos)) ~~>
-            = [ "static" KwEnd ] KwFn ParamList [ ReturnType ] "=>" Expression ;
-Match       <~~ push(notImplExpr("match expression", up.pos)) ~~>
-            = KwMatch SkipParen SkipBlock ;
+// fn (params) => expr : a single-expression closure that captures the enclosing
+// scope BY VALUE at creation time (changing $m afterwards cannot change what an
+// already-created fn sees), which is why makeArrowFn snapshots the scope chain.
+ArrowFn     <~~ push(makeArrowFn(takeAll())) ~~>
+            = [ AttrGrp ] [ "static" KwEnd ] KwFn [ "&" ] ParamList [ ReturnType ] "=>" ArrowBody ;
+ArrowBody   <~~ push({body: arrowBody(pop())}) ~~>
+            = Expression ;
+// match (subject) { c1, c2 => e, default => e } : an EXPRESSION whose arms are
+// compared with === (never with ==), first match wins, default may sit anywhere.
+Match       <~~ push(makeMatch(takeAll())) ~~>
+            = KwMatch "(" Expression ")" "{" [ MatchArm { "," MatchArm } [ "," ] ] "}" ;
+MatchArm    = MatchDefault | MatchCase ;
+MatchDefault <~~ push({marm: {conds: null, body: pop()}}) ~~>
+            = KwDefault "=>" Expression ;
+MatchCase   <~~ push({marm: makeArm(takeAll())}) ~~>
+            = MatchCond { "," MatchCond } "=>" Expression ;
+MatchCond   <~~ push({mcond: pop()}) ~~>
+            = Expression ;
 
 // include / require (and _once): a file-inclusion expression. A single-quoted string
 // literal operand ('geomlib.php') names a project file: its path is resolved and the
@@ -333,27 +606,43 @@ IncDyn      <~~ push({incdyn: pop()}) ~~>
 // A bareword constant reference: a global/class constant or magic constant (PHP_EOL,
 // M_PI, __DIR__, __LINE__, ...). No constant model here, so it is routed to
 // notImplemented. Placed last so calls, statics and keywords are matched first.
-ConstRef    <~~ push(notImplExpr("constant reference", up.pos)) ~~>
+ConstRef    <~~ push(makeConstRef(stripWs(up.in))) ~~>
             = Name ;
 
-// Class::CONST / Class::method() / Class::$prop / static::/self::/parent:: : accepted
-// structurally and routed to notImplemented.
-StaticExpr  <~~ takeAll(); push(notImplExpr("static / :: access", up.pos)) ~~>
-            = ( "static" KwEnd | Name ) "::" ( MethodName | DollarName ) [ "(" [ Expression { "," Expression } ] ")" ] ;
+// Class::CONST / Class::method() / Class::$prop / Class::class, and the three
+// context names self:: (the declaring class), static:: (the class the call was made
+// through - late static binding) and parent:: (the base class, dispatched WITHOUT
+// late static binding). 'static' is a reserved word, so it cannot come through Name.
+StaticExpr  <~~ push(makeStaticExpr(takeAll(), up.pos)) ~~>
+            = StaticBase "::" StaticMember [ StaticArgs ] ;
+StaticBase  <~~ push({sbase: stripWs(up.in)}) ~~>
+            = ( "static" KwEnd | Name ) ;
+StaticMember = StaticProp | StaticName ;
+StaticName  <~~ push({sname: stripWs(up.in)}) ~~> = MemberName ;
+StaticProp  <~~ push({sprop: stripWs(up.in)}) ~~> = DollarName ;
+StaticArgs  <~~ push({sargs: takeAll()}) ~~>
+            = "(" [ ArgList ] ")" ;
 
 // A closure: function($a) use ($b, $c) { ... } (optionally 'static'). The use list is
 // captured lexically (this subset captures the whole defining scope).
 ClosureExpr <~~ push(makeClosure(takeAll())) ~~>
-            = [ "static" KwEnd ] KwFunction ParamList [ UseClause ] [ ReturnType ] Block ;
-UseClause   = KwUse "(" [ UseVar { "," UseVar } ] ")" ;
-UseVar      = DollarName <~~ push({use: pop()}) ~~> ;
+            = [ AttrGrp ] [ "static" KwEnd ] KwFunction <~~ genPush() ~~> [ "&" ] ParamList [ UseClause ] [ ReturnType ] Block ;
+UseClause   = KwUse "(" [ UseVar { "," UseVar } [ "," ] ] ")" ;
+// use ($v) captures the VALUE at creation; use (&$v) shares the variable itself.
+UseVar      = UseRef | UseVal ;
+UseVal      <~~ push({useval: pop()}) ~~> = DollarName ;
+UseRef      <~~ push({useref: pop()}) ~~> = "&" DollarName ;
 
 // [1, 2] / [k => v] / array(1, 2). '=>' entries make an associative array
 // (ordered map); plain entries make an indexed array.
 ArrayLit    <~~ push(makeArray(takeAll())) ~~>
             = "[" [ ArrayItem { "," ArrayItem } [ "," ] ] "]"
             | KwArray "(" [ ArrayItem { "," ArrayItem } [ "," ] ] ")" ;
-ArrayItem   = KeyedItem | PlainItem ;
+ArrayItem   = SpreadItem | KeyedItem | PlainItem ;
+// [...$a, ...$b] : an array unpack. String keys are preserved, integer keys are
+// renumbered (PHP 8.1), which makeArray implements.
+SpreadItem  <~~ push({spread: pop()}) ~~>
+            = "..." Expression ;
 KeyedItem   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
             = Expression "=>" Expression ;
 PlainItem   <~~ push({elem: pop()}) ~~>
@@ -361,7 +650,7 @@ PlainItem   <~~ push({elem: pop()}) ~~>
 
 // f(args): a top-level function or builtin call.
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Name <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
+            = Name <~~ push(up.in) ~~> "(" [ ArgList ] ")" ;
 
 VarRef      <~~ push(makeVarRef(pop())) ~~>
             = DollarName ;
@@ -380,20 +669,164 @@ DqStr       <~~ push(makeTemplate(takeAll())) ~~>
             = '"' :whitespace() { TplBraceExpr | TplVar | TplChunk | TplSpecial } '"' :whitespace(Whitespace) ;
 TplBraceExpr <~~ push({e: pop()}) ~~>
             = "{" :whitespace(Whitespace) Expression "}" ;
-TplVar      <~~ push({e: makeVarRef(up.in)}) ~~>
+// The simple interpolation form: '$name', optionally followed by ONE '[key]' or
+// '->prop' step (PHP's "simple" syntax - anything richer needs the '{$...}' form).
+// The index key is an integer, a BARE word (taken as a string: "$map[key]") or
+// another variable; it is captured as text and classified by makeTplVar.
+TplVar      <~~ push({e: makeTplVar(takeAll())}) ~~>
+            = TplName [ TplIdx | TplProp ] ;
+TplName     <~~ push({tvar: up.in}) ~~>
             = "$" TplId ;
+TplIdx      = "[" TplKey "]" ;
+TplKey      <~~ push({tidx: up.in}) ~~>
+            = TplNum | TplDollar | TplId ;
+TplNum      = [ "-" ] "0"..."9" { "0"..."9" } ;
+TplDollar   = "$" TplId ;
+TplProp     <~~ push({tprop: up.in}) ~~>
+            = "->" TplId ;
 TplId       = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
-TplChunk    <~~ push({s: unescapeJs(up.in)}) ~~>
+TplChunk    <~~ push({s: unescapeDq(up.in)}) ~~>
             = TplC { TplC } ;
 TplC        = TplEsc | TplPlain ;
-TplEsc      = "\\" "\x20"..b"\x7e" ;
-TplPlain    = "\x20"..."\x21" | "\x23" | "\x25"..."\x5b" | "\x5d"..."\x7a" | "\x7c"..."\U0010ffff" | @"\t" ;
+// '\u{...}' has to be recognized as ONE escape: the brace form is tried before the
+// generic backslash escape, otherwise the '{48}' of "\u{48}" is read as a '{expr}'
+// interpolation and the string silently gains two characters.
+TplUniEsc   = "\\" "u" "{" HexDig { HexDig } "}" ;
+// PHP's escape set: an UNKNOWN escape keeps both characters ("\q" is two bytes),
+// which unescapeDq implements; the grammar only has to keep the backslash pair
+// together so a '\"' does not end the string.
+TplEsc      = TplUniEsc | "\\" "\x00"..."\U0010ffff" ;
+TplPlain    = "\x20"..."\x21" | "\x23" | "\x25"..."\x5b" | "\x5d"..."\x7a" | "\x7c"..."\U0010ffff" | @"\t" | @"\n" | @"\r" ;
 TplSpecial  <~~ push({s: up.in}) ~~>
             = "$" | "{" ;
 
-SqStr       = "'" :whitespace() { SqEsc | SqPlain } <~~ push(makeConst(unescapeSq(up.in))) ~~> "'" :whitespace(Whitespace) ;
+// In a single-quoted string only \' and \\ are escapes; every OTHER backslash is a
+// literal backslash ('a\nb' is four bytes), which is what SqBack accepts - after
+// SqEsc, so the two real escapes still win.
+SqStr       = "'" :whitespace() { SqEsc | SqBack | SqPlain } <~~ push(makeConst(unescapeSq(up.in))) ~~> "'" :whitespace(Whitespace) ;
 SqEsc       = "\\" ( "'" | "\\" ) ;
-SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" ;
+SqBack      = "\\" ;
+SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" | @"\n" | @"\r" ;
+
+// PHP number literals. The longer / prefixed forms come FIRST (ordered choice), and
+// PhpFloat leads because '5.' and '1_0.2_5' start exactly like an integer. A leading
+// zero followed by octal digits is the legacy octal form (017 == 15); '0o17' is the
+// PHP 8.1 spelling of the same thing. '_' separators are stripped by the builders.
+NumLit      = PhpFloat | PhpHex | PhpBin | PhpOct | PhpLegOct | PhpInt ;
+PhpFloat    <~~ push(makeConst(mkFlo(phpFloatLit(up.in)))) ~~>
+            = "." :whitespace() "0"..."9" { "0"..."9" | "_" } [ ExpPart ] :whitespace(Whitespace)
+            | "0"..."9" :whitespace() { "0"..."9" | "_" } FloatTail :whitespace(Whitespace) ;
+FloatTail   = "." { "0"..."9" | "_" } [ ExpPart ] | ExpPart ;
+ExpPart     = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
+PhpHex      <~~ push(makeConst(phpRadixLit(up.in, 16))) ~~>
+            = "0" ( "x" | "X" ) :whitespace() HexDig { HexDig | "_" } :whitespace(Whitespace) ;
+HexDig      = "0"..."9" | "a"..."f" | "A"..."F" ;
+PhpBin      <~~ push(makeConst(phpRadixLit(up.in, 2))) ~~>
+            = "0" ( "b" | "B" ) :whitespace() BinDig { BinDig | "_" } :whitespace(Whitespace) ;
+BinDig      = "0" | "1" ;
+PhpOct      <~~ push(makeConst(phpRadixLit(up.in, 8))) ~~>
+            = "0" ( "o" | "O" ) :whitespace() OctDig { OctDig | "_" } :whitespace(Whitespace) ;
+OctDig      = "0"..."7" ;
+PhpLegOct   <~~ push(makeConst(phpLegOctLit(up.in))) ~~>
+            = "0" :whitespace() OctDig { OctDig | "_" } :whitespace(Whitespace) ;
+PhpInt      <~~ push(makeConst(phpIntLit(up.in))) ~~>
+            = "0"..."9" :whitespace() { "0"..."9" | "_" } :whitespace(Whitespace) ;
+
+// A heredoc / nowdoc. The body lives on the lines AFTER the marker, so it cannot be
+// written as ordinary productions: HdScan is a :script lexer that returns the marker
+// line, the body and the terminator line as ONE token, and makeHeredoc splits that
+// text apart again (terminator-indent strip, escapes and interpolation unless the
+// marker was single-quoted). Modelled on the Ruby grammar's heredoc lexer.
+HeredocLit  <~~ push(makeHeredoc(up.in)) ~~>
+            = HdScan :whitespace(Whitespace) ;
+HdScan = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01noheredoc", 0)
+        // Whitespace is not skipped before a script, so step over it here.
+        var i = 0
+        var cc = c.peek(i)
+        var steps = 0
+        while (steps < 100000) {
+            steps = steps + 1
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i); continue }
+            break
+        }
+        var start = i
+        if (c.peek(i) !== 60 || c.peek(i + 1) !== 60 || c.peek(i + 2) !== 60) { return no }
+        i = i + 3
+        var sp = c.peek(i)
+        while (sp === 32 || sp === 9) { i = i + 1; sp = c.peek(i) }
+        var quote = 0
+        var q = c.peek(i)
+        if (q === 39 || q === 34) { quote = q; i = i + 1 }
+        var f = c.peek(i)
+        if (!((f >= 65 && f <= 90) || (f >= 97 && f <= 122) || f === 95)) { return no }
+        var id = ""
+        var ch = f
+        while ((ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch === 95) {
+            id = id + String.fromCharCode(ch)
+            i = i + 1
+            ch = c.peek(i)
+        }
+        if (quote !== 0) {
+            if (c.peek(i) !== quote) { return no }
+            i = i + 1
+        }
+        var j = i
+        var dd = c.peek(j)
+        while (dd === 32 || dd === 9 || dd === 13) { j = j + 1; dd = c.peek(j) }
+        if (dd !== 10) { return no }
+        j = j + 1
+        // Walk whole lines until one is the (possibly indented) terminator marker,
+        // and stop right after the marker itself - PHP allows ';' or ',' to follow.
+        var end = -1
+        var guard = 0
+        while (guard < 1000000) {
+            guard = guard + 1
+            var k = j
+            var b = c.peek(k)
+            if (b === -1) { return no }
+            while (b === 32 || b === 9) { k = k + 1; b = c.peek(k) }
+            var m = 0
+            while (m < id.length && c.peek(k + m) === id.charCodeAt(m)) { m = m + 1 }
+            var after = c.peek(k + m)
+            var idChar = (after >= 48 && after <= 57) || (after >= 65 && after <= 90)
+                      || (after >= 97 && after <= 122) || after === 95
+            if (m === id.length && !idChar) { end = k + m; break }
+            while (b !== 10 && b !== -1) { k = k + 1; b = c.peek(k) }
+            if (b === -1) { return no }
+            j = k + 1
+        }
+        if (end < 0) { return no }
+        // Rebuild the exact source slice as a token; c.peek answers BYTES, so the
+        // UTF-8 has to be decoded here or a non-ASCII body would never match.
+        var out = ""
+        var p = start
+        while (p < end) {
+            var b0 = c.peek(p)
+            if (b0 < 128) { out = out + String.fromCharCode(b0); p = p + 1; continue }
+            if (b0 >= 240) {
+                var cp4 = ((b0 - 240) * 262144) + ((c.peek(p + 1) - 128) * 4096) + ((c.peek(p + 2) - 128) * 64) + (c.peek(p + 3) - 128)
+                var off = cp4 - 65536
+                out = out + String.fromCharCode(55296 + ((off - (off % 1024)) / 1024)) + String.fromCharCode(56320 + (off % 1024))
+                p = p + 4
+                continue
+            }
+            if (b0 >= 224) {
+                out = out + String.fromCharCode(((b0 - 224) * 4096) + ((c.peek(p + 1) - 128) * 64) + (c.peek(p + 2) - 128))
+                p = p + 3
+                continue
+            }
+            if (b0 >= 192) {
+                out = out + String.fromCharCode(((b0 - 192) * 64) + (c.peek(p + 1) - 128))
+                p = p + 2
+                continue
+            }
+            return no
+        }
+        return abnf.newToken(out, 0)
+    })()
+~~) ;
 
 // A Name that is not a reserved word. The negative lookahead runs at PARSE time.
 Name        = NotKw Id ;
@@ -421,7 +854,12 @@ NotKw       = :script(~~
                    "protected", "static", "final", "abstract", "const", "interface",
                    "trait", "namespace", "extends", "implements", "instanceof", "global",
                    "try", "catch", "finally", "throw", "match", "fn", "clone", "enum",
-                   "declare", "include", "include_once", "require", "require_once"]
+                   "declare", "include", "include_once", "require", "require_once",
+                   // The alternative-syntax terminators and 'insteadof' must be
+                   // reserved, or AltBody's statement run parses 'endif' as a
+                   // constant reference and eats the terminator.
+                   "endif", "endwhile", "endfor", "endforeach", "endswitch",
+                   "insteadof", "goto"]
         for (var k = 0; k < kws.length; k++) {
             if (kws[k] === s) { return abnf.newToken("\x01reserved", 0) }
         }
@@ -439,6 +877,16 @@ KwWhile     = "while" KwEnd ;
 KwFor       = "for" KwEnd ;
 KwForeach   = "foreach" KwEnd ;
 KwAs        = "as" KwEnd ;
+KwInsteadof = "insteadof" KwEnd ;
+KwCase      = "case" KwEnd ;
+KwGoto      = "goto" KwEnd ;
+KwYield     = "yield" KwEnd ;
+KwFrom      = "from" KwEnd ;
+KwEndif     = "endif" KwEnd ;
+KwEndwhile  = "endwhile" KwEnd ;
+KwEndfor    = "endfor" KwEnd ;
+KwEndforeach = "endforeach" KwEnd ;
+KwEndswitch = "endswitch" KwEnd ;
 KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwContinue  = "continue" KwEnd ;
@@ -466,6 +914,22 @@ KwMatch     = "match" KwEnd ;
 KwFn        = "fn" KwEnd ;
 KwClone     = "clone" KwEnd ;
 KwInstanceof = "instanceof" KwEnd ;
+KwIsset     = "isset" KwEnd ;
+KwEmpty     = "empty" KwEnd ;
+KwUnset     = "unset" KwEnd ;
+KwDefault   = "default" KwEnd ;
+
+// A member name after '->' or '::' may be any identifier, including a reserved word.
+MemberName  = Id ;
+
+// #[Attr(args), Attr2] : attributes are APPLIED but never read back (reflection is
+// out of scope), so they are recognized and dropped. The body is balance-skipped,
+// which keeps strings with brackets inside from ending it early.
+AttrGrp     = Attr { Attr } ;
+Attr        = "#[" { AttrItem } "]" ;
+AttrItem    = SkipDq | SkipSq | AttrBr | AttrOther ;
+AttrBr      = "[" { AttrItem } "]" ;
+AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x5e"..."\U0010ffff" ;
 
 // ---
 
@@ -477,35 +941,223 @@ KwInstanceof = "instanceof" KwEnd ;
     // defined below and configured on `core`.
     include("lib/interp-core.js")
 
+    // ----- Arguments and the calling convention -------------------------------
+    // Every PHP callable is ONE host function taking a single "argset":
+    //   {pos: [values], named: {"$name": value} | null, tgts: [cellMaker|null]}
+    // which is what lets named arguments, spreads, variadics and by-reference
+    // parameters all be bound in one place (bindParams).
+    function argsOf(list) { return {pos: list, named: null, tgts: [], fcc: false} }
+    // popLabel / popDyn: like popName, they lift ONE marker out of the pushed
+    // values and put everything else back, so a following pop()/takeAll() is intact.
+    function popLabel() {
+        var items = takeAll()
+        var lab = ""
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].alabel != undefined) {
+                lab = items[i].alabel
+                var e = lab.length
+                while (e > 0 && (lab.charAt(e - 1) == ":" || lab.charAt(e - 1) == " " || lab.charAt(e - 1) == "\t")) { e = e - 1 }
+                lab = lab.substring(0, e)
+            } else { push(items[i]) }
+        }
+        return lab
+    }
+    function popDyn() {
+        var items = takeAll()
+        var t = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].dname != undefined) { t = items[i].dname }
+            else { push(items[i]) }
+        }
+        return t
+    }
+    function makeLvalArg(ref) {
+        return {argval: function() { return readTargetVal(ref) }, argtgt: ref}
+    }
+    function evalArgs(args) {
+        var pos = []
+        var named = {}
+        var hasNamed = false
+        var fcc = false
+        var tgts = []
+        var here = scopes
+        for (var i = 0; i < args.length; i++) {
+            var a = args[i]
+            if (a.fcc != undefined) { fcc = true; continue }
+            if (a.argspread != undefined) {
+                var sv = anytype
+                sv = a.argspread()
+                if (isArr(sv)) {
+                    for (var j = 0; j < sv.keys.length; j++) {
+                        if (typeof sv.keys[j] == "number") { pos.push(deref(sv.vals[j])); tgts.push(null) }
+                        else { scopePut(named, "$" + sv.keys[j], deref(sv.vals[j])); hasNamed = true }
+                    }
+                }
+                continue
+            }
+            if (a.argname != undefined) { scopePut(named, "$" + a.argname, a.argval()); hasNamed = true; continue }
+            pos.push(a.argval())
+            tgts.push(a.argtgt == undefined ? null : mkCellMaker(a.argtgt, here))
+        }
+        return {pos: pos, named: hasNamed ? named : null, tgts: tgts, fcc: fcc}
+    }
+    // A by-reference parameter needs the CALLER's cell, but binding happens after
+    // the frame switch - so the maker restores the caller's chain for the lookup.
+    function mkCellMaker(ref, here) {
+        return function() {
+            var saved = scopes
+            scopes = here
+            var cell = targetCell(ref)
+            scopes = saved
+            return cell
+        }
+    }
+    // Binds one call's arguments into the CURRENT (already pushed) frame.
+    function bindParams(params, argset) {
+        var pos = argset.pos
+        var named = argset.named
+        for (var i = 0; i < params.length; i++) {
+            var p = params[i]
+            if (p.variadic === true) {
+                var rest = newArr()
+                for (var j = i; j < pos.length; j++) { arrPush(rest, pos[j]) }
+                declVar(p.name, rest)
+                return
+            }
+            if (p.byref === true && i < argset.tgts.length && argset.tgts[i] != null) {
+                scopePut(scopes[scopes.length - 1], p.name, argset.tgts[i]())
+                continue
+            }
+            var have = false
+            var v = anytype
+            v = null
+            if (i < pos.length) { v = pos[i]; have = true }
+            else if (named != null && hasOwn(named, p.name)) { v = named[p.name]; have = true }
+            if (!have) { v = p.def == null ? null : p.def() }
+            declVar(p.name, phpCopy(v))
+        }
+    }
+
+    // ----- References -------------------------------------------------------
+    // A PHP reference makes two names share ONE storage cell. A scope slot (or an
+    // array element) may therefore hold a CELL instead of a value; every read
+    // dereferences and every write goes through the cell, so $b = &$a, use (&$v),
+    // a by-reference parameter and foreach (... as &$v) are all the same mechanism.
+    // UNSET is the tombstone unset() leaves behind: the frozen engine has no
+    // `delete`, and a plain null would still be "set" as far as isset() is concerned.
+    var UNSET = {__unset: true}
+    function isRef(v) { return v !== null && v !== undefined && typeof v == "object" && v.__refcell === true }
+    function deref(v) { return isRef(v) ? v.v : v }
+    // Replaces the shared reader: every variable read passes through a cell.
+    getVar = function(name) {
+        var sc = scopes
+        var ho = objHasOwn
+        for (var i = sc.length - 1; i >= 0; i--) {
+            if (ho.call(sc[i], name)) {
+                var v = anytype
+                v = sc[i][name]
+                if (v === UNSET) { return null }
+                return isRef(v) ? v.v : v
+            }
+        }
+        if (hasOwn(hostGlobals, name)) { return hostGlobals[name] }
+        fail("unknown name: " + name)
+    }
+    function varExists(name) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) { return scopes[i][name] !== UNSET }
+        }
+        return false
+    }
+    // The storage cell of a variable, creating it (and the variable) on demand.
+    function varCell(name) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) {
+                var cur = anytype
+                cur = scopes[i][name]
+                if (isRef(cur)) { return cur }
+                var cell = {__refcell: true, v: cur === UNSET ? null : cur}
+                scopePut(scopes[i], name, cell)
+                return cell
+            }
+        }
+        var fresh = {__refcell: true, v: null}
+        scopePut(scopes[scopes.length - 1], name, fresh)
+        return fresh
+    }
+    // The storage cell of an array element (foreach by reference, $el = &$a[0]).
+    function arrCell(a, k) {
+        var key = phpKey(k)
+        if (dictFind(a, key) < 0) { arrSet(a, key, null) }
+        var i = dictFind(a, key)
+        var vs = a.vals
+        var cur = anytype
+        cur = vs[i]
+        if (isRef(cur)) { return cur }
+        var cell = {__refcell: true, v: cur}
+        vs[i] = cell
+        a.vals = vs
+        return cell
+    }
+
     // ----- Control signals: return / break / continue travel as marker objects
     // that a body or loop intercepts. -----
     function isSig(r) {
         return r !== null && r !== undefined && typeof r == "object"
-            && (r.ret === true || r.brk === true || r.cont === true)
+            && (r.ret === true || r.brk === true || r.cont === true || r.goto != undefined)
     }
+    // A statement run. It also OWNS the labels declared directly inside it: a goto
+    // signal travelling up from a nested statement is caught here if the label is one
+    // of ours, and the run continues from there. That is exactly PHP's rule - a goto
+    // may leave a block but may never enter one, and never leaves the function.
     function makeBody(items) {
+        var labels = {}
+        var hasLabel = false
+        for (var i = 0; i < items.length; i++) {
+            if (isLabel(items[i])) { rawSet(labels, items[i].__lbl, i); hasLabel = true }
+        }
         return function() {
             var last = anytype     // holds the last statement value of any type
             last = null
-            for (var i = 0; i < items.length; i++) {
+            var i2 = 0
+            while (i2 < items.length) {
+                if (typeof items[i2] != "function") { i2 = i2 + 1; continue }
                 var r = anytype
-                r = items[i]()
-                if (isSig(r)) { return r }
+                r = items[i2]()
+                if (isSig(r)) {
+                    if (hasLabel && r.goto != undefined && hasOwn(labels, r.goto)) { i2 = labels[r.goto]; continue }
+                    return r
+                }
                 last = r
+                i2 = i2 + 1
             }
             return last
         }
     }
+    // 'L:' is not a thunk at all but a MARKER in the statement list, because the
+    // frozen engine cannot carry a property on a closure ("cannot set field on
+    // jsClosure"). Everything that walks a statement list therefore skips
+    // non-callable entries, and makeBody turns them into its label index.
+    function isLabel(t) {
+        return t !== null && t !== undefined && typeof t == "object" && t.__lbl != undefined
+    }
+    function makeLabel(name) { return {__lbl: name} }
+    function makeGoto(name) { return function() { return {goto: name} } }
     function makeConstStmt() { return function() { return null } }
     function makeReturn(items) {
         var t = items.length > 0 ? items[0] : null
         return function() { return {ret: true, v: t != null ? t() : null} }
     }
+    // break N / continue N leave N enclosing loop-or-switch levels. The level rides
+    // along on the signal and every level that intercepts one decrements it, so a
+    // 'break 2' passes straight through the innermost loop.
     makeBreak = function(items) {
-        return function() { return {brk: true} }
+        var t = items.length > 0 ? items[0] : null
+        return function() { return {brk: true, n: t == null ? 1 : trunc(numOf(toNumV(t())))} }
     }
     makeContinue = function(items) {
-        return function() { return {cont: true} }
+        var t2 = items.length > 0 ? items[0] : null
+        return function() { return {cont: true, n: t2 == null ? 1 : trunc(numOf(toNumV(t2())))} }
     }
     // A finally body always runs but never contributes a value: a normal completion
     // yields undefined so excTry (lib/interp-core.js) does not overwrite the try/catch
@@ -514,12 +1166,112 @@ KwInstanceof = "instanceof" KwEnd ;
     // what the compiler's js_try does (it discards the finally closure's return).
     function finBody(t) { return function() { return t() } }
 
-    // ----- PHP truthiness: false, 0, "" and null are falsy (matches js_truthy for
-    // the value kinds this subset uses). -----
+    // ----- The PHP value model -----
+    // null            -> null
+    // bool            -> true / false
+    // int             -> a plain JS number with an integral value
+    // float           -> a BOX {__flo, f}, so that 3.0 and 3 stay distinguishable
+    //                    (PHP's === and match() separate them: 3.0 === 3 is false)
+    // string          -> a JS string; strlen and offsets are BYTE based (byteLen)
+    // array           -> the ordered map {__dict, keys, vals} plus __next, the next
+    //                    auto index. PHP has ONE array type: [1,2,3] is the map
+    //                    0=>1, 1=>2, 2=>3, which is why $a === $b compares keys AND
+    //                    their order while $a == $b ignores the order.
+    // object          -> {__obj, __class, p} with the properties in an ordered map
+    function mkFlo(n) { return {__flo: true, f: n} }
+    function isFlo(v) { return v !== null && v !== undefined && typeof v == "object" && v.__flo === true }
+    function isInt(v) { return typeof v == "number" }
+    function isNum(v) { return typeof v == "number" || isFlo(v) }
+    function numOf(v) { return isFlo(v) ? v.f : v }
+    // trunc toward zero (PHP's (int) cast and intdiv); Math.trunc is not everywhere.
+    function trunc(n) { return n < 0 ? 0 - Math.floor(0 - n) : Math.floor(n) }
+
+    // ----- literal builders (the tags call these) -----
+    function stripUnd(s) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch != "_" && ch != " " && ch != "\t" && ch != "\r" && ch != "\n") { out += ch }
+        }
+        return out
+    }
+    function phpIntLit(t) { return parseInt(stripUnd(t), 10) }
+    function phpFloatLit(t) { return parseFloat(stripUnd(t)) }
+    function phpRadixLit(t, radix) { return parseInt(stripUnd(t).substring(2), radix) }
+    function phpLegOctLit(t) { return parseInt(stripUnd(t), 8) }
+
+    // ----- numeric strings -----
+    // A string is numeric when it is an optionally signed decimal / float, with
+    // leading and trailing whitespace allowed (PHP 8). numStrVal answers the number
+    // (int or float box) or null when the string is not numeric at all.
+    function numStrVal(s) {
+        var i = 0
+        while (i < s.length && (s.charAt(i) == " " || s.charAt(i) == "\t" || s.charAt(i) == "\n" || s.charAt(i) == "\r")) { i++ }
+        var st = i
+        if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) { i++ }
+        var digits = 0
+        while (i < s.length && s.charAt(i) >= "0" && s.charAt(i) <= "9") { i++; digits++ }
+        var isF = false
+        if (i < s.length && s.charAt(i) == ".") {
+            isF = true
+            i++
+            while (i < s.length && s.charAt(i) >= "0" && s.charAt(i) <= "9") { i++; digits++ }
+        }
+        if (digits == 0) { return null }
+        if (i < s.length && (s.charAt(i) == "e" || s.charAt(i) == "E")) {
+            var save = i
+            i++
+            if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) { i++ }
+            var ed = 0
+            while (i < s.length && s.charAt(i) >= "0" && s.charAt(i) <= "9") { i++; ed++ }
+            if (ed == 0) { i = save } else { isF = true }
+        }
+        var en = i
+        while (i < s.length && (s.charAt(i) == " " || s.charAt(i) == "\t" || s.charAt(i) == "\n" || s.charAt(i) == "\r")) { i++ }
+        if (i != s.length) { return null }
+        var txt = s.substring(st, en)
+        return isF ? mkFlo(parseFloat(txt)) : parseInt(txt, 10)
+    }
+    // The arithmetic coercion: everything becomes an int or a float box.
+    function toNumV(v) {
+        if (typeof v == "number") { return v }
+        if (isFlo(v)) { return v }
+        if (v === true) { return 1 }
+        if (v === false || v === null || v === undefined) { return 0 }
+        if (typeof v == "string") {
+            var n = numStrVal(v)
+            if (n != null) { return n }
+            return leadingNum(v)
+        }
+        if (isArr(v)) { fail("unsupported operand type: array used as a number") }
+        return 0
+    }
+    // A non-numeric string still contributes its numeric PREFIX ("12abc" -> 12).
+    function leadingNum(s) {
+        var i = 0
+        if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) { i++ }
+        var d = 0
+        while (i < s.length && s.charAt(i) >= "0" && s.charAt(i) <= "9") { i++; d++ }
+        var isF = false
+        if (i < s.length && s.charAt(i) == ".") {
+            var j = i + 1
+            var fd = 0
+            while (j < s.length && s.charAt(j) >= "0" && s.charAt(j) <= "9") { j++; fd++ }
+            if (fd > 0 || d > 0) { isF = true; i = j; d += fd }
+        }
+        if (d == 0) { return 0 }
+        var txt = s.substring(0, i)
+        return isF ? mkFlo(parseFloat(txt)) : parseInt(txt, 10)
+    }
+
+    // ----- PHP truthiness: false, 0, 0.0, "", "0", [] and null are falsy. -----
     function phptest(v) {
         if (v === null || v === undefined || v === false) { return false }
-        if (v === 0) { return false }
-        if (v === "") { return false }
+        if (v === true) { return true }
+        if (typeof v == "number") { return v !== 0 }
+        if (isFlo(v)) { return v.f !== 0 }
+        if (typeof v == "string") { return v !== "" && v !== "0" }
+        if (isArr(v)) { return v.keys.length > 0 }
         return true
     }
 
@@ -546,9 +1298,15 @@ KwInstanceof = "instanceof" KwEnd ;
     function runLoopBody(bodyT) {
         var r = bodyT()
         if (isSig(r)) {
-            if (r.brk === true) { return {stop: true} }
-            if (r.cont === true) { return {stop: false} }
-            return {stop: true, sig: r}         // a return propagates out
+            if (r.brk === true) {
+                if (r.n != undefined && r.n > 1) { return {stop: true, sig: {brk: true, n: r.n - 1}} }
+                return {stop: true}
+            }
+            if (r.cont === true) {
+                if (r.n != undefined && r.n > 1) { return {stop: true, sig: {cont: true, n: r.n - 1}} }
+                return {stop: false}
+            }
+            return {stop: true, sig: r}         // a return (or a goto) propagates out
         }
         return {stop: false}
     }
@@ -558,6 +1316,63 @@ KwInstanceof = "instanceof" KwEnd ;
                 var s = runLoopBody(bodyT)
                 if (s.sig != undefined) { return s.sig }
                 if (s.stop) { return null }
+            }
+            return null
+        }
+    }
+    // do { body } while (cond) - the body runs before the condition is ever tested.
+    function makeDoWhile(items) {
+        var body = items[0].body
+        var cond = items[1]
+        return function() {
+            var go = true
+            while (go) {
+                var s = runLoopBody(body)
+                if (s.sig != undefined) { return s.sig }
+                if (s.stop) { return null }
+                go = phptest(cond())
+            }
+            return null
+        }
+    }
+    // switch: == comparison, first match wins, then FALL THROUGH into the following
+    // clauses until a break. 'default' is only considered when nothing matched, and
+    // it may stand anywhere among the cases.
+    function makeSwitch(items) {
+        var subj = items[0]
+        var clauses = []
+        for (var i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (it == null || it == undefined) { continue }
+            if (it.scase != undefined) { clauses.push({cond: it.scase[0], body: it.scase.slice(1)}) }
+            else if (it.sdefault != undefined) { clauses.push({cond: null, body: it.sdefault}) }
+        }
+        return function() {
+            var v = anytype
+            v = subj()
+            var start = -1
+            for (var a = 0; a < clauses.length; a++) {
+                if (clauses[a].cond != null && phpLoose(v, clauses[a].cond())) { start = a; break }
+            }
+            if (start < 0) {
+                for (var d = 0; d < clauses.length; d++) { if (clauses[d].cond == null) { start = d; break } }
+            }
+            if (start < 0) { return null }
+            for (var k = start; k < clauses.length; k++) {
+                var b = clauses[k].body
+                for (var s = 0; s < b.length; s++) {
+                    if (typeof b[s] != "function") { continue }
+                    var r = anytype
+                    r = b[s]()
+                    if (isSig(r)) {
+                        // A switch is a break LEVEL, exactly like a loop.
+                        if (r.brk === true) {
+                            if (r.n != undefined && r.n > 1) { return {brk: true, n: r.n - 1} }
+                            return null
+                        }
+                        return r
+                    }
+                }
             }
             return null
         }
@@ -585,40 +1400,123 @@ KwInstanceof = "instanceof" KwEnd ;
             return null
         }
     }
-    // foreach: items = [iterThunk, {v1}, {v2}?, {body}].
+    // foreach: items = [iterThunk, ({v1}, {v2}? | {pat}), {body}].
+    // With 'as $k => $v' the first parsed name is the KEY and the second the value.
+    // 'as &$v' binds the element's storage cell so a write reaches the array.
     function makeForeach(items) {
         var iterT = items[0]
         var keyName = null
         var valName = null
+        var pat = null
+        var byref = false
         var body = null
         for (var i = 1; i < items.length; i++) {
             if (items[i].body != undefined) { body = items[i].body }
+            else if (items[i].pat != undefined) { pat = items[i].pat }
+            else if (items[i].byref != undefined) { byref = true }
             else if (items[i].v1 != undefined) { valName = items[i].v1 }
             else if (items[i].v2 != undefined) { keyName = items[i].v2 }
         }
-        // With 'as $k => $v' the first parsed name is the key and the second the value.
         return function() {
             var it = anytype
             it = iterT()
             var n = phpRangeLen(it)
             for (var i = 0; i < n; i++) {
-                if (keyName != null) { phpSet(valName, phpRangeKey(it, i)); phpSet(keyName, phpRangeVal(it, i)) }
-                else { phpSet(valName, phpRangeVal(it, i)) }
-                var s = runLoopBody(body)
-                if (s.sig != undefined) { return s.sig }
-                if (s.stop) { return null }
+                var k = anytype
+                k = phpRangeKey(it, i)
+                var v = anytype
+                v = phpRangeVal(it, i)
+                if (pat != null) { bindPattern(pat, v) }
+                else if (keyName != null) { phpSet(valName, k); phpSet(keyName, phpCopy(v)) }
+                else if (byref) { scopePut(scopes[scopes.length - 1], valName, arrCell(it, k)) }
+                else { phpSet(valName, phpCopy(v)) }
+                var sg = runLoopBody(body)
+                if (sg.sig != undefined) { return sg.sig }
+                if (sg.stop) { return null }
             }
             return null
         }
     }
-    // Uniform iteration over arrays (key = index) and dicts (key/value pairs).
-    function phpRangeLen(v) {
-        if (isDict(v)) { return v.keys.length }
-        if (v === null || v === undefined) { fail("foreach over null") }
-        return v.length
+    // ----- generators --------------------------------------------------------------
+    // A 'yield' anywhere in a function body makes that function a generator: calling
+    // it does NOT run the body, it hands back a generator object. genFlags is the
+    // walk-time stack of "does the definition I am inside contain a yield", pushed by
+    // the tag on each function header and popped by its builder.
+    //
+    // DELIBERATE DEVIATION, and the honest cost of having no coroutines in this value
+    // model: the body runs to COMPLETION the first time the generator is iterated,
+    // collecting every yielded key/value pair into an array which the iteration then
+    // walks. Creation stays lazy (nothing runs until the first foreach) and every side
+    // effect happens exactly once, in order - what is lost is streaming: an unbounded
+    // generator does not terminate, where real PHP would let the consumer break out.
+    var genFlags = []
+    var genCollect = []
+    function genPush() { genFlags.push(false) }
+    function genPop() { return genFlags.length > 0 ? genFlags.pop() : false }
+    function genMark() { if (genFlags.length > 0) { genFlags[genFlags.length - 1] = true } }
+    function newGen(runT) { return {__gen: true, run: runT, arr: null} }
+    function isGen(v) { return v !== null && v !== undefined && typeof v == "object" && v.__gen === true }
+    // The collected stream is a PAIR LIST, not a PHP array: a generator may yield the
+    // same key twice (every 'yield from' restarts the inner keys at 0), which an
+    // ordered map would silently collapse. Only phpRangeLen/Key/Val read it, and they
+    // only need keys[i] / vals[i].
+    function genList(g) {
+        if (g.arr == null) {
+            var buf = {keys: [], vals: [], next: 0}
+            genCollect.push(buf)
+            g.run()
+            genCollect.pop()
+            g.arr = buf
+        }
+        return g.arr
     }
-    function phpRangeKey(v, i) { if (isDict(v)) { return v.keys[i] } return i }
-    function phpRangeVal(v, i) { if (isDict(v)) { return v.vals[i] } return v[i] }
+    // bump is false for a delegated ('yield from') element: the inner keys are passed
+    // through as they are and do not move the outer auto-key counter, which is what
+    // PHP does too.
+    function genEmit(buf, k, v, bump) {
+        buf.keys.push(k)
+        buf.vals.push(v)
+        if (bump && typeof k == "number" && k >= buf.next) { buf.next = trunc(k) + 1 }
+    }
+    // items = [{yval}?, {yval}?, {yfrom}?]. Two {yval}s mean 'yield $k => $v'.
+    function makeYield(items) {
+        genMark()
+        var vals = []
+        var from = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] == null || items[i] == undefined) { continue }
+            if (items[i].yval != undefined) { vals.push(items[i].yval) }
+            else if (items[i].yfrom != undefined) { from = items[i].yfrom }
+        }
+        var keyT = vals.length > 1 ? vals[0] : null
+        var valT = vals.length > 1 ? vals[1] : (vals.length == 1 ? vals[0] : null)
+        return function() {
+            var buf = genCollect.length > 0 ? genCollect[genCollect.length - 1] : null
+            if (buf == null) { fail("yield outside a generator") }
+            if (from != null) {
+                // 'yield from' DELEGATES: each element of the operand becomes a yield
+                // of this generator, keeping the key the operand gave it.
+                var src = anytype
+                src = from()
+                var n = phpRangeLen(src)
+                for (var j = 0; j < n; j++) { genEmit(buf, phpRangeKey(src, j), phpRangeVal(src, j), false) }
+                return null
+            }
+            if (keyT != null) { genEmit(buf, keyT(), valT == null ? null : valT(), true) }
+            else { genEmit(buf, buf.next, valT == null ? null : valT(), true) }
+            return null
+        }
+    }
+
+    // Uniform iteration over PHP arrays (an ordered key/value map) and generators.
+    function phpRangeLen(v) {
+        if (isGen(v)) { return genList(v).keys.length }
+        if (isArr(v)) { return v.keys.length }
+        if (v === null || v === undefined) { fail("foreach over null") }
+        return 0
+    }
+    function phpRangeKey(v, i) { var a = isGen(v) ? genList(v) : v; return a.keys[i] }
+    function phpRangeVal(v, i) { var a2 = isGen(v) ? genList(v) : v; return deref(a2.vals[i]) }
 
     // ----- ternary / Elvis / null-coalescing -----
     // items: [cond] plain, [cond, {elvis}] Elvis, [cond, then, else] full ternary.
@@ -655,44 +1553,225 @@ KwInstanceof = "instanceof" KwEnd ;
             return v
         }
     }
-    // list($a, $b) = e / [$a, $b] = e : bind targets from the array's positions.
+    // ----- destructuring -----
+    // A pattern is a list of slots; each slot is empty, a target, or a nested
+    // pattern, and may carry an explicit key thunk ("y" => $py). The positional
+    // index only advances for slots WITHOUT a key, exactly like PHP.
+    function makeSlot(items) {
+        if (items.length == 0) { return {empty: true} }
+        var it = items[0]
+        return {empty: false, key: it.dkey == undefined ? null : it.dkey, val: it.dval}
+    }
+    function makePattern(items) {
+        var slots = []
+        for (var i = 0; i < items.length; i++) { slots.push(items[i]) }
+        return {slots: slots}
+    }
+    function bindPattern(pat, value) {
+        var pos = 0
+        for (var i = 0; i < pat.slots.length; i++) {
+            var sl = pat.slots[i]
+            if (sl.empty === true) { pos = pos + 1; continue }
+            var key = anytype
+            if (sl.key != null) { key = sl.key() } else { key = pos; pos = pos + 1 }
+            var v = anytype
+            v = phpIndex(value, key)
+            if (sl.val.pat != undefined) { bindPattern(sl.val.pat, v) }
+            else { writeTargetVal(sl.val.dt, phpCopy(v)) }
+        }
+    }
     function makeDestructure(items) {
-        var targets = []
+        var pat = null
         var valT = null
         for (var i = 0; i < items.length; i++) {
-            if (items[i].dt != undefined) { targets.push(items[i].dt) }
+            if (items[i].pat != undefined) { pat = items[i].pat }
             else { valT = items[i] }
         }
         return function() {
             var arr = anytype
             arr = valT()
-            for (var i = 0; i < targets.length; i++) {
-                writeTargetVal(targets[i], phpIndex(arr, i))
-            }
+            bindPattern(pat, arr)
             return arr
         }
     }
 
-    // ----- values: arrays (indexed) and associative arrays (ordered maps) -----
-    function makeArray(items) {
-        var hasKeys = false
-        for (var i = 0; i < items.length; i++) { if (items[i].hk != undefined) { hasKeys = true } }
+    // ----- isset / empty / unset -----
+    function makeIsset(items) {
+        var refs = []
+        for (var i = 0; i < items.length; i++) { if (items[i].istgt != undefined) { refs.push(items[i].istgt) } }
         return function() {
-            if (!hasKeys) {
-                var out = []
-                for (var j = 0; j < items.length; j++) { out.push(items[j].elem()) }
-                return out
+            for (var i = 0; i < refs.length; i++) { if (!refExists(refs[i])) { return false } }
+            return true
+        }
+    }
+    function refExists(ref) {
+        var nm = refName(ref)
+        if (!varExists(nm)) { return false }
+        var o = anytype
+        o = getVar(nm)
+        for (var i = 0; i < ref.path.length; i++) {
+            if (o === null || o === undefined) { return false }
+            var st = ref.path[i]
+            if (st.append === true) { return false }
+            if (st.key != undefined) {
+                if (isObj(o)) {
+                    var at = dictFind(o.p, st.key)
+                    if (at < 0) {
+                        var mi = classFind(o.__class, "__isset")
+                        if (mi != null && !phptest(mi(o, argsOf([st.key])))) { return false }
+                        if (mi == null) { return false }
+                        o = phpGetProp(o, st.key)
+                    } else { o = deref(o.p.vals[at]) }
+                } else { return false }
+                continue
             }
-            var d = {__dict: true, keys: [], vals: []}
-            var idx = 0
+            var k = anytype
+            k = st.idx()
+            if (isArr(o)) { if (!arrHas(o, k)) { return false } }
+            o = phpIndex(o, k)
+        }
+        return o !== null && o !== undefined
+    }
+    function makeEmpty(t) { return function() { return !phptest(t()) } }
+    function makeUnset(items) {
+        var refs = []
+        for (var i = 0; i < items.length; i++) { if (items[i].istgt != undefined) { refs.push(items[i].istgt) } }
+        return function() {
+            for (var i = 0; i < refs.length; i++) {
+                var ref = refs[i]
+                var nm = refName(ref)
+                if (ref.path.length == 0) {
+                    for (var j = scopes.length - 1; j >= 0; j--) {
+                        if (hasOwn(scopes[j], nm)) { scopePut(scopes[j], nm, UNSET); break }
+                    }
+                    continue
+                }
+                var p = resolveRefPhp(ref)
+                if (p.last.key != undefined) { if (isObj(p.obj)) { arrDel(p.obj.p, p.last.key) } }
+                else if (p.last.append !== true && isArr(p.obj)) { arrDel(p.obj, p.last.idx()) }
+            }
+            return null
+        }
+    }
+    function makeVarVar(t) { return function() { return getVar("$" + phpStr(t())) } }
+
+    // ----- match: === comparison, first arm wins, default may sit anywhere -----
+    function makeArm(items) {
+        var conds = []
+        var body = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].mcond != undefined) { conds.push(items[i].mcond) }
+            else { body = items[i] }
+        }
+        return {conds: conds, body: body}
+    }
+    function makeMatch(items) {
+        var subj = items[0]
+        var arms = []
+        for (var i = 1; i < items.length; i++) { if (items[i].marm != undefined) { arms.push(items[i].marm) } }
+        return function() {
+            var v = anytype
+            v = subj()
+            var dflt = null
+            for (var i = 0; i < arms.length; i++) {
+                if (arms[i].conds == null) { dflt = arms[i]; continue }
+                for (var j = 0; j < arms[i].conds.length; j++) {
+                    if (phpIdentical(v, arms[i].conds[j]())) { return arms[i].body() }
+                }
+            }
+            if (dflt != null) { return dflt.body() }
+            fail("unhandled match case")
+        }
+    }
+
+    // ----- arrays: ONE type, the ordered map ------------------------------------
+    // PHP has no separate list type: [1, 2, 3] IS the map 0=>1, 1=>2, 2=>3, and the
+    // "next" auto index is remembered per array ([5 => "x"] then $m[] = "y" writes
+    // key 6). Keys are normalized the way the engine does it: an integral float, a
+    // bool, null and a canonical decimal string all become int / "" keys, so
+    // $a["7"] and $a[7] are the same slot. The box reuses the shared dict
+    // (isDict/dictFind/dictSet, lib/interp-core.js) and only adds __next.
+    function newArr() { return {__dict: true, keys: [], vals: [], __next: 0} }
+    function isArr(v) { return v !== null && v !== undefined && typeof v == "object" && v.__dict === true }
+    function isCanonInt(s) {
+        if (s.length == 0) { return false }
+        var i = 0
+        if (s.charAt(0) == "-") { if (s.length == 1) { return false }; i = 1 }
+        if (s.charAt(i) == "0" && s.length > i + 1) { return false }
+        for (var j = i; j < s.length; j++) {
+            var ch = s.charAt(j)
+            if (ch < "0" || ch > "9") { return false }
+        }
+        return true
+    }
+    function phpKey(k) {
+        if (typeof k == "number") { return trunc(k) }
+        if (isFlo(k)) { return trunc(k.f) }
+        if (k === true) { return 1 }
+        if (k === false) { return 0 }
+        if (k === null || k === undefined) { return "" }
+        if (typeof k == "string") { return isCanonInt(k) ? parseInt(k, 10) : k }
+        return k
+    }
+    function arrSet(a, k, v) {
+        var key = phpKey(k)
+        var at = dictFind(a, key)
+        if (at >= 0 && isRef(a.vals[at])) { a.vals[at].v = v; return }
+        dictSet(a, key, v)
+        if (typeof key == "number" && key >= a.__next) { a.__next = key + 1 }
+    }
+    function arrPush(a, v) { arrSet(a, a.__next, v) }
+    function arrGet(a, k) {
+        var i = dictFind(a, phpKey(k))
+        if (i < 0) { return null }
+        return deref(a.vals[i])
+    }
+    function arrHas(a, k) { return dictFind(a, phpKey(k)) >= 0 }
+    // Removal without splice (the frozen engine has none): shift the tail down by
+    // one and pop, then drop the position index so it is rebuilt.
+    function arrDel(a, k) {
+        var i = dictFind(a, phpKey(k))
+        if (i < 0) { return }
+        var ks = a.keys
+        var vs = a.vals
+        for (var j = i; j < ks.length - 1; j++) { ks[j] = ks[j + 1]; vs[j] = vs[j + 1] }
+        ks.pop()
+        vs.pop()
+        a.keys = ks
+        a.vals = vs
+        a.__idx = null
+    }
+    function arrCopy(a) {
+        var out = newArr()
+        for (var i = 0; i < a.keys.length; i++) { arrSet(out, a.keys[i], phpCopy(deref(a.vals[i]))) }
+        out.__next = a.__next
+        return out
+    }
+    // PHP assigns arrays BY VALUE and objects by handle, so every assignment /
+    // argument pass of an array hands over a copy (copy-on-assign, not the engine's
+    // lazy copy-on-write - observationally the same for a single-threaded program).
+    function phpCopy(v) { return isArr(v) ? arrCopy(v) : v }
+
+    function makeArray(items) {
+        return function() {
+            var d = newArr()
             for (var k = 0; k < items.length; k++) {
-                if (items[k].hk != undefined) { dictSet(d, items[k].hk(), items[k].hv()) }
-                else { dictSet(d, idx, items[k].elem()); idx = (idx + 1) | 0 }
+                var it = items[k]
+                if (it.hk != undefined) { arrSet(d, it.hk(), phpCopy(it.hv())) }
+                else if (it.spread != undefined) {
+                    var sv = it.spread()
+                    if (isArr(sv)) {
+                        for (var s = 0; s < sv.keys.length; s++) {
+                            if (typeof sv.keys[s] == "number") { arrPush(d, phpCopy(deref(sv.vals[s]))) }
+                            else { arrSet(d, sv.keys[s], phpCopy(deref(sv.vals[s]))) }
+                        }
+                    }
+                }
+                else { arrPush(d, phpCopy(it.elem())) }
             }
             return d
         }
     }
-    // Dictionaries (isDict/dictFind/dictSet) are shared - see lib/interp-core.js.
 
     // ----- string coercion and concatenation (PHP '.') -----
     function phpStr(v) {
@@ -700,8 +1779,16 @@ KwInstanceof = "instanceof" KwEnd ;
         if (v === true) { return "1" }
         if (v === false) { return "" }
         if (typeof v == "string") { return v }
-        if (Array.isArray(v) || isDict(v)) { return "Array" }
+        if (typeof v == "number") { return "" + v }
+        if (isFlo(v)) { return floStr(v.f) }
+        if (isArr(v)) { return "Array" }
+        if (isObj(v)) { return objToString(v) }
         return "" + v
+    }
+    // PHP prints a float without a fractional part as an integer: (string)3.0 == "3".
+    function floStr(n) {
+        if (n === trunc(n) && n < 1000000000000000 && n > -1000000000000000) { return "" + trunc(n) }
+        return "" + n
     }
     function phpConcat(l, r) { return phpStr(l) + phpStr(r) }
 
@@ -729,31 +1816,276 @@ KwInstanceof = "instanceof" KwEnd ;
         }
         return out
     }
+    // The double-quoted / heredoc escape set. PHP keeps an UNKNOWN escape as BOTH
+    // characters ("\q" is a backslash and a q, two bytes), which is why there is no
+    // default branch that drops the backslash.
+    function unescapeDq(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c != 92 || i + 1 >= s.length) { out += String.fromCharCode(c); i++; continue }
+            var e = s.charAt(i + 1)
+            if (e == "n") { out += "\n"; i += 2; continue }
+            if (e == "t") { out += "\t"; i += 2; continue }
+            if (e == "r") { out += "\r"; i += 2; continue }
+            if (e == "v") { out += String.fromCharCode(11); i += 2; continue }
+            if (e == "e") { out += String.fromCharCode(27); i += 2; continue }
+            if (e == "f") { out += String.fromCharCode(12); i += 2; continue }
+            if (e == "\\") { out += "\\"; i += 2; continue }
+            if (e == "$") { out += "$"; i += 2; continue }
+            if (e == "\"") { out += "\""; i += 2; continue }
+            if (e >= "0" && e <= "7") {
+                var v = 0
+                var n = 0
+                var j = i + 1
+                while (n < 3 && j < s.length && s.charAt(j) >= "0" && s.charAt(j) <= "7") {
+                    v = v * 8 + (s.charCodeAt(j) - 48)
+                    j++
+                    n++
+                }
+                out += String.fromCharCode(v % 256)
+                i = j
+                continue
+            }
+            if (e == "x") {
+                var hv = 0
+                var hn = 0
+                var hj = i + 2
+                while (hn < 2 && hj < s.length && isHexCh(s.charAt(hj))) { hv = hv * 16 + hexVal(s.charAt(hj)); hj++; hn++ }
+                if (hn > 0) { out += String.fromCharCode(hv); i = hj; continue }
+            }
+            if (e == "u" && i + 2 < s.length && s.charAt(i + 2) == "{") {
+                var uv = 0
+                var uj = i + 3
+                var un = 0
+                while (uj < s.length && isHexCh(s.charAt(uj))) { uv = uv * 16 + hexVal(s.charAt(uj)); uj++; un++ }
+                if (un > 0 && uj < s.length && s.charAt(uj) == "}") {
+                    out += codePointStr(uv)
+                    i = uj + 1
+                    continue
+                }
+            }
+            out += "\\" + e
+            i += 2
+        }
+        return out
+    }
+    function isHexCh(ch) { return (ch >= "0" && ch <= "9") || (ch >= "a" && ch <= "f") || (ch >= "A" && ch <= "F") }
+    function hexVal(ch) {
+        var cc = ch.charCodeAt(0)
+        if (cc >= 48 && cc <= 57) { return cc - 48 }
+        if (cc >= 97) { return cc - 87 }
+        return cc - 55
+    }
+    function codePointStr(cp) {
+        if (cp < 65536) { return String.fromCharCode(cp) }
+        var off = cp - 65536
+        return String.fromCharCode(55296 + ((off - (off % 1024)) / 1024)) + String.fromCharCode(56320 + (off % 1024))
+    }
+
+    // ----- '$name', '$name[key]' and '$name->prop' inside a double-quoted string ---
+    // The bracket key of the SIMPLE form is a bare word taken as a string
+    // ("$map[key]" reads the "key" entry), an integer, or another variable.
+    function makeTplVar(items) {
+        var name = ""
+        var idx = null
+        var prop = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].tvar != undefined) { name = items[i].tvar }
+            else if (items[i].tidx != undefined) { idx = items[i].tidx }
+            else if (items[i].tprop != undefined) { prop = items[i].tprop }
+        }
+        if (idx != null) {
+            var key = anytype
+            if (idx.charAt(0) == "$") { key = null } else if (isCanonInt(idx)) { key = parseInt(idx, 10) } else { key = idx }
+            var vn = idx
+            return function() {
+                var k = anytype
+                k = (idx.charAt(0) == "$") ? getVar(vn) : key
+                return phpIndex(getVar(name), k)
+            }
+        }
+        if (prop != null) {
+            var pn = prop.substring(2)
+            return function() { return phpGetProp(getVar(name), pn) }
+        }
+        return function() { return getVar(name) }
+    }
+
+    // ----- heredoc / nowdoc -----
+    // HdScan handed over the WHOLE literal as one token: the '<<<MARK' line, the body
+    // lines and the terminator. The terminator's own indentation is removed from every
+    // body line (PHP 7.3+) and the newline in front of the terminator is dropped.
+    function makeHeredoc(text) {
+        var i = 3
+        while (i < text.length && (text.charAt(i) == " " || text.charAt(i) == "\t")) { i++ }
+        var quote = ""
+        if (text.charAt(i) == "'" || text.charAt(i) == "\"") { quote = text.charAt(i) }
+        var nl = -1
+        for (var a = 0; a < text.length; a++) { if (text.charAt(a) == "\n") { nl = a; break } }
+        var rest = nl < 0 ? "" : text.substring(nl + 1)
+        // The scanner stopped right after the terminator marker, so the last line of
+        // `rest` is that terminator: its indentation is the strip width.
+        var lastNl = -1
+        for (var b = rest.length - 1; b >= 0; b--) { if (rest.charAt(b) == "\n") { lastNl = b; break } }
+        var termLine = lastNl < 0 ? rest : rest.substring(lastNl + 1)
+        var indent = 0
+        while (indent < termLine.length && (termLine.charAt(indent) == " " || termLine.charAt(indent) == "\t")) { indent++ }
+        var body = lastNl < 0 ? "" : rest.substring(0, lastNl)
+        if (indent > 0) { body = stripHdIndent(body, indent) }
+        if (quote == "'") { return makeConst(body) }
+        return makeTemplate(hdParts(body))
+    }
+    function nlAt(s, from) {
+        for (var i = from; i < s.length; i++) { if (s.charAt(i) == "\n") { return i } }
+        return -1
+    }
+    function stripHdIndent(body, n) {
+        var out = ""
+        var j = 0
+        while (j <= body.length) {
+            var e = nlAt(body, j)
+            var hasNl = e >= 0
+            if (e < 0) { e = body.length }
+            var take = j + n < e ? j + n : e
+            out += body.substring(take, e)
+            if (hasNl) { out += "\n" } else { break }
+            j = e + 1
+        }
+        return out
+    }
+    // Split an interpolating heredoc body into the {s}/{e} pieces makeTemplate wants.
+    // '{$expr}' is parsed with the grammar itself, from the Expression production -
+    // the same door include/require uses to pull in another file.
+    function hdParts(body) {
+        var parts = []
+        var lit = ""
+        var i = 0
+        while (i < body.length) {
+            var ch = body.charAt(i)
+            if (ch == "\\" && i + 1 < body.length) { lit += ch + body.charAt(i + 1); i += 2; continue }
+            if (ch == "{" && i + 1 < body.length && body.charAt(i + 1) == "$") {
+                var depth = 0
+                var j = i
+                while (j < body.length) {
+                    if (body.charAt(j) == "{") { depth++ }
+                    else if (body.charAt(j) == "}") { depth--; if (depth == 0) { break } }
+                    j++
+                }
+                if (j < body.length) {
+                    if (lit != "") { parts.push({s: unescapeDq(lit)}); lit = "" }
+                    parts.push({e: compileSnippet(body.substring(i + 1, j))})
+                    i = j + 1
+                    continue
+                }
+            }
+            if (ch == "$" && i + 1 < body.length && isNameStart(body.charAt(i + 1))) {
+                var k = i + 1
+                while (k < body.length && isNameChar(body.charAt(k))) { k++ }
+                var expr = body.substring(i, k)
+                // one optional '[key]' or '->prop' step, like the string form
+                if (k < body.length && body.charAt(k) == "[") {
+                    var e2 = k
+                    while (e2 < body.length && body.charAt(e2) != "]") { e2++ }
+                    if (e2 < body.length) {
+                        var inner = body.substring(k + 1, e2)
+                        if (inner.length > 0 && inner.charAt(0) != "$" && !isCanonInt(inner)) { inner = "'" + inner + "'" }
+                        expr = expr + "[" + inner + "]"
+                        k = e2 + 1
+                    }
+                } else if (k + 2 < body.length && body.charAt(k) == "-" && body.charAt(k + 1) == ">" && isNameStart(body.charAt(k + 2))) {
+                    var p2 = k + 2
+                    while (p2 < body.length && isNameChar(body.charAt(p2))) { p2++ }
+                    expr = expr + body.substring(k, p2)
+                    k = p2
+                }
+                if (lit != "") { parts.push({s: unescapeDq(lit)}); lit = "" }
+                parts.push({e: compileSnippet(expr)})
+                i = k
+                continue
+            }
+            lit += ch
+            i++
+        }
+        if (lit != "") { parts.push({s: unescapeDq(lit)}) }
+        return parts
+    }
+    function isNameStart(ch) { return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch == "_" }
+    function isNameChar(ch) { return isNameStart(ch) || (ch >= "0" && ch <= "9") }
+    function compileSnippet(src) {
+        var frag = c.parseFrom(c.agrammar, src, "Expression")
+        return c.compile(frag).stack[0]
+    }
 
     // ----- length / indexing -----
     function phpIndex(o, i) {
-        if (isDict(o)) {
-            var di = dictFind(o, i)
-            return di < 0 ? null : o.vals[di]
-        }
+        if (isArr(o)) { return arrGet(o, i) }
         if (typeof o == "string") {
-            if (i < 0 || i >= o.length) { return null }
-            return o.charAt(i)
+            var n = trunc(numOf(toNumV(i)))
+            if (n < 0) { n = o.length + n }
+            if (n < 0 || n >= o.length) { return "" }
+            return o.charAt(n)
         }
-        if (o === null || o === undefined) { fail("index of null") }
-        if (i < 0 || i >= o.length) { return null }
-        return o[i]
+        if (o === null || o === undefined) { return null }
+        if (isObj(o)) { return phpGetProp(o, phpStr(i)) }
+        return null
+    }
+
+    // ----- objects ---------------------------------------------------------------
+    // An instance is {__obj, __class, p} with its properties in an ordered map, so
+    // they can be ENUMERATED (== between two objects, clone) without for..in - which
+    // the frozen engine does not have. Methods live on the class descriptor and are
+    // looked up along __super.
+    function isObj(v) { return v !== null && v !== undefined && typeof v == "object" && v.__obj === true }
+    function newObj(cls) { return {__obj: true, __class: cls, p: newArr()} }
+    function classFind(cls, name) {
+        var k = cls
+        while (k != undefined && k != null) {
+            if (hasOwn(k, name) && typeof k[name] == "function") { return k[name] }
+            k = k.__super
+        }
+        return null
+    }
+    function callMethod(o, fn, args) { return fn(o, argsOf(args)) }
+    function phpGetProp(o, name) {
+        if (o === null || o === undefined) { fail("property ->" + name + " of null") }
+        if (!isObj(o)) { return null }
+        var i = dictFind(o.p, name)
+        if (i >= 0) { return o.p.vals[i] }
+        var g = classFind(o.__class, "__get")
+        if (g != null) { return callMethod(o, g, [name]) }
+        return null
+    }
+    function phpSetProp(o, name, v) {
+        if (!isObj(o)) { fail("property write ->" + name + " on a non-object") }
+        if (dictFind(o.p, name) < 0) {
+            var s = classFind(o.__class, "__set")
+            if (s != null) { callMethod(o, s, [name, v]); return }
+        }
+        dictSet(o.p, name, v)
+    }
+    function objToString(o) {
+        var m = classFind(o.__class, "__toString")
+        if (m != null) { return phpStr(m(o, argsOf([]))) }
+        fail("object of class " + o.__class.__name + " could not be converted to string")
     }
 
     // ----- method dispatch and member chains -----
     function mcall(target, name, args) {
         if (target === null || target === undefined) { fail("method ->" + name + "() on null") }
-        if (target.__class != undefined) {
-            // Own-property read: a bare [name] resolved inherited Object.prototype
-            // members (toString, valueOf, ...) under a host JS engine.
-            var m = hasOwn(target.__class, name) ? target.__class[name] : undefined
-            if (typeof m != "function") { fail("unknown method '" + name + "' on " + target.__class.__name) }
-            return m.apply(undefined, concat2impl([target], args))
+        if (isObj(target)) {
+            if (args.fcc === true) {
+                var fm = classFind(target.__class, name)
+                if (fm != null) { return function(a2) { return fm(target, a2) } }
+            }
+            var m = classFind(target.__class, name)
+            if (m != null) { return m(target, args) }
+            // A closure stored in a property is callable through ->name() only via
+            // __call in real PHP; the magic method is the documented door.
+            var mc = classFind(target.__class, "__call")
+            if (mc != null) { return mc(target, argsOf([name, arrOf(args.pos)])) }
+            fail("unknown method '" + name + "' on " + target.__class.__name)
         }
         fail("method ->" + name + "() on a non-object")
     }
@@ -766,31 +2098,288 @@ KwInstanceof = "instanceof" KwEnd ;
             cur = primary()
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
-                if (s.kind == "mcall") {
-                    var argv = []
-                    for (var j = 0; j < s.args.length; j++) { argv.push(s.args[j]()) }
-                    cur = mcall(cur, s.name, argv)
-                } else if (s.kind == "field") {
-                    if (cur === null || cur === undefined) { fail("property ->" + s.name + " of null") }
-                    cur = hasOwn(cur, s.name) ? cur[s.name] : null
-                } else if (s.kind == "call") {
-                    var argv2 = []
-                    for (var k = 0; k < s.args.length; k++) { argv2.push(s.args[k]()) }
-                    if (typeof cur != "function") { fail("call of a non-callable value") }
-                    cur = cur.apply(undefined, argv2)
-                } else if (s.kind == "static") {
-                    cur = s.run()
-                } else {
-                    cur = phpIndex(cur, s.idx())
-                }
+                // '?->' on a null receiver short circuits the WHOLE remaining chain,
+                // arguments included - which is why this test sits before evalArgs.
+                if (s.ns === true && (cur === null || cur === undefined)) { return null }
+                if (s.kind == "mcall") { cur = mcall(cur, s.name, evalArgs(s.args)) }
+                else if (s.kind == "dmcall") { cur = mcall(cur, phpStr(s.name()), evalArgs(s.args)) }
+                else if (s.kind == "field") { cur = phpGetProp(cur, s.name) }
+                else if (s.kind == "dfield") { cur = phpGetProp(cur, phpStr(s.name())) }
+                else if (s.kind == "call") { cur = phpInvoke(cur, evalArgs(s.args)) }
+                else if (s.kind == "static") { cur = s.run(cur) }
+                else { cur = phpIndex(cur, s.idx()) }
             }
             return cur
         }
     }
-    // Class C::CONST / C::method(): not implemented in this subset.
-    function makeStatic(items, pos) {
-        notImpl("static / :: access", pos)
-        return {kind: "static", run: function() { return null }}
+    // Calling a value: a closure, a function NAME held in a string (PHP's variable
+    // functions), or an object with __invoke.
+    function phpInvoke(cur, argset) {
+        if (argset.fcc === true) { return asCallable(cur) }
+        if (typeof cur == "function") { return cur(argset) }
+        if (typeof cur == "string") { return callNamed(cur, argset) }
+        if (isObj(cur)) {
+            var m = classFind(cur.__class, "__invoke")
+            if (m != null) { return m(cur, argset) }
+        }
+        fail("call of a non-callable value")
+    }
+    function asCallable(cur) {
+        if (typeof cur == "function") { return cur }
+        var nm = phpStr(cur)
+        return function(argset) { return callNamed(nm, argset) }
+    }
+    function callNamed(name, argset) {
+        if (hasOwn(phpBuiltins, name)) { return phpBuiltins[name].apply(undefined, argset.pos) }
+        var f = getVar(name)
+        if (typeof f != "function") { fail("call of an undefined function: " + name) }
+        return f(argset)
+    }
+    // ----- statics: class constants, static properties and '::' -------------------
+    // A class descriptor carries three more ordered maps beside its methods:
+    //   __constT   the DECLARED constants as {name, init} records. The initializer is
+    //              a thunk because a constant may read another one (const TWICE =
+    //              self::SIZE * 2), so it cannot be evaluated at declaration time.
+    //   __constV   the memoized values: a constant is evaluated once, on first use.
+    //   __statics  the static properties, each in a reference CELL - which is what
+    //              makes a subclass share the storage its parent declared, as PHP
+    //              does, and what lets self::$made = ... be an assignment target.
+    //
+    // self:: and static:: are per-CALL context. They are declared in the call FRAME
+    // rather than in module-level variables, so everything that already snapshots and
+    // restores the scope chain - a call, a closure, and the try-entry snapshot in
+    // lib/interp-core.js - restores them too, with no extra bookkeeping and no way
+    // for an exception to leave them pointing at the wrong class.
+    var SELF_KEY = "\x00self"
+    var STATIC_KEY = "\x00static"
+    // The class a static call was written through, handed to the callee. It is set
+    // immediately before the call and read-and-cleared on entry, so it can never
+    // outlive one dispatch. A parameter would be cleaner, but every method closure is
+    // reached through classFind and called from eight places with two arguments.
+    var pendingStatic = null
+
+    function ctxSelf() { return varExists(SELF_KEY) ? getVar(SELF_KEY) : null }
+    function ctxStatic() { return varExists(STATIC_KEY) ? getVar(STATIC_KEY) : null }
+
+    // The class descriptor a '::' base names. self / static / parent read the running
+    // call's context; anything else is an ordinary class name.
+    function resolveClassName(name) {
+        if (name == "self") {
+            var s = ctxSelf()
+            if (s == null) { fail("cannot use 'self' outside a class") }
+            return s
+        }
+        if (name == "static") {
+            var t = ctxStatic()
+            if (t == null) { fail("cannot use 'static' outside a class") }
+            return t
+        }
+        if (name == "parent") {
+            var p = ctxSelf()
+            if (p == null || p.__super == null || p.__super == undefined) { fail("cannot use 'parent' without a parent class") }
+            return p.__super
+        }
+        var v = anytype
+        v = getVar(name)
+        if (v == null || v == undefined || v.__isclass !== true) { fail("unknown class " + name) }
+        return v
+    }
+    // The class behind a '::' whose base is a VALUE: $obj::CONST, or a class name
+    // held in a string ($cn::make()).
+    function classOfValue(v) {
+        if (isObj(v)) { return v.__class }
+        if (v != null && v != undefined && v.__isclass === true) { return v }
+        if (typeof v == "string") { return resolveClassName(v) }
+        fail(":: on a value that is neither an object nor a class name")
+    }
+    // A constant is looked up along the base chain AND through the implemented
+    // interfaces (an interface constant is visible on every implementor), and is
+    // evaluated on first use with self:: bound to the class that declared it.
+    function constFind(cls, name) {
+        var k = cls
+        while (k != undefined && k != null) {
+            var cv = k.__constV
+            if (cv != undefined && cv != null) {
+                var i = dictFind(cv, name)
+                if (i >= 0) { return {v: cv.vals[i]} }
+            }
+            var t = k.__constT
+            if (t != undefined && t != null) {
+                for (var j = 0; j < t.length; j++) {
+                    if (t[j].name == name) {
+                        var val = anytype
+                        val = constEval(k, t[j])
+                        dictSet(k.__constV, name, val)
+                        return {v: val}
+                    }
+                }
+            }
+            var ifs = k.__ifaces
+            if (ifs != undefined && ifs != null) {
+                for (var q = 0; q < ifs.length; q++) {
+                    if (!varExists(ifs[q])) { continue }
+                    var iv = anytype
+                    iv = getVar(ifs[q])
+                    if (iv != null && iv != undefined && iv.__isclass === true) {
+                        var r = constFind(iv, name)
+                        if (r != null) { return r }
+                    }
+                }
+            }
+            k = k.__super
+        }
+        return null
+    }
+    function constEval(cls, rec) {
+        if (rec.init == null) { return null }
+        var saved = scopes
+        scopes = [globalScope, {}]
+        declVar(SELF_KEY, cls)
+        declVar(STATIC_KEY, cls)
+        var v = anytype
+        v = rec.init()
+        scopes = saved
+        return v
+    }
+    // The CELL of a static property: the first declaration found walking up, so a
+    // subclass reads and writes the same storage as its parent.
+    function staticCell(cls, name) {
+        var k = cls
+        while (k != undefined && k != null) {
+            var st = k.__statics
+            if (st != undefined && st != null) {
+                var i = dictFind(st, name)
+                if (i >= 0) { return st.vals[i] }
+            }
+            k = k.__super
+        }
+        fail("unknown static property " + cls.__name + "::$" + name)
+    }
+
+    // One '::' access, whatever its base was. Exactly one of prop / name is set;
+    // args is non-null when the source wrote a parenthesized argument list.
+    // A FORWARDING base (self / static / parent) hands $this and the current static::
+    // binding on, which is what makes parent::describe() run against this object and
+    // static::who() resolve in the called class.
+    function staticAccess(cls, name, prop, args, baseText) {
+        var forwards = (baseText == "self" || baseText == "static" || baseText == "parent")
+        if (prop != null) {
+            if (args != null) { fail("cannot call a static property") }
+            return deref(staticCell(cls, prop).v)
+        }
+        if (name == "class" && args == null) { return cls.__name }
+        if (args == null) {
+            var cr = constFind(cls, name)
+            if (cr != null) { return cr.v }
+            fail("unknown class constant " + cls.__name + "::" + name)
+        }
+        var argset = evalArgs(args)
+        var m = classFind(cls, name)
+        if (m == null && cls.__isenum === true) {
+            var er = enumStatic(cls, name, argset)
+            if (er != null) { return er.v }
+        }
+        var self = anytype
+        self = (forwards && varExists("$this")) ? getVar("$this") : null
+        var bind = forwards ? ctxStatic() : cls
+        if (bind == null || bind == undefined) { bind = cls }
+        if (argset.fcc === true) {
+            if (m == null) { fail("unknown static method " + cls.__name + "::" + name) }
+            var mm = m
+            var bs = bind
+            var fself = self
+            return function(a2) { pendingStatic = bs; return mm(fself, a2) }
+        }
+        if (m != null) {
+            pendingStatic = bind
+            return m(self, argset)
+        }
+        var cs = classFind(cls, "__callStatic")
+        if (cs != null) {
+            pendingStatic = bind
+            return cs(null, argsOf([name, arrOf(argset.pos)]))
+        }
+        fail("unknown static method " + cls.__name + "::" + name)
+    }
+    // Splits the parsed pieces of a '::' form apart. Shared by the three sites that
+    // parse one: a primary (Class::x), a member-chain suffix ($obj::x) and an
+    // assignment head (self::$x = ...).
+    function splitStatic(items) {
+        var r = {base: null, name: null, prop: null, args: null}
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.sbase != undefined) { r.base = it.sbase }
+            else if (it.sname != undefined) { r.name = it.sname }
+            else if (it.sprop != undefined) { r.prop = it.sprop.substring(1) }
+            else if (it.sargs != undefined) { r.args = it.sargs }
+        }
+        return r
+    }
+    // ----- global constants and magic constants ----------------------------------
+    // Constants live in their own namespace (never in a scope), so a constant and a
+    // variable of the same name are unrelated. Only true/false/null are
+    // case-INsensitive in PHP; every other constant is matched exactly.
+    var phpConsts = {}
+    var FN_KEY = "\x00fn"
+    function makeConstDecl(items) {
+        var recs = []
+        collectConsts(items, recs)
+        return function() {
+            for (var i = 0; i < recs.length; i++) {
+                rawSet(phpConsts, recs[i].name, recs[i].init == null ? null : recs[i].init())
+            }
+            return null
+        }
+    }
+    function makeConstRef(name) {
+        return function() {
+            var lo = name.toLowerCase()
+            if (lo == "true") { return true }
+            if (lo == "false") { return false }
+            if (lo == "null") { return null }
+            if (name == "__FUNCTION__" || name == "__METHOD__") { return varExists(FN_KEY) ? getVar(FN_KEY) : "" }
+            if (name == "__CLASS__") { var s = ctxSelf(); return s == null ? "" : s.__name }
+            if (name == "PHP_EOL") { return "\n" }
+            if (name == "PHP_INT_SIZE") { return 8 }
+            if (hasOwn(phpConsts, name)) { return phpConsts[name] }
+            fail("undefined constant " + name)
+        }
+    }
+    // static $n = 0; - the cells belong to the STATEMENT, so every call re-binds the
+    // same storage into its fresh frame. They are created on first execution rather
+    // than at build time because the initializer is an ordinary expression.
+    function makeStaticVars(items) {
+        var decls = []
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "string") { decls.push({name: items[i], init: null}) }
+            else if (typeof items[i] == "function" && decls.length > 0) { decls[decls.length - 1].init = items[i] }
+        }
+        var cells = null
+        return function() {
+            if (cells == null) {
+                cells = []
+                for (var j = 0; j < decls.length; j++) {
+                    cells.push({__refcell: true, v: decls[j].init == null ? null : decls[j].init()})
+                }
+            }
+            for (var k = 0; k < decls.length; k++) { scopePut(scopes[scopes.length - 1], decls[k].name, cells[k]) }
+            return null
+        }
+    }
+
+    function makeStaticExpr(items, pos) {
+        var p = splitStatic(items)
+        return function() { return staticAccess(resolveClassName(p.base), p.name, p.prop, p.args, p.base) }
+    }
+    function makeStaticSfx(items) {
+        var p = splitStatic(items)
+        return {kind: "static", run: function(cur) {
+            return staticAccess(classOfValue(cur), p.name, p.prop, p.args, "")
+        }}
+    }
+    function makeStaticRef(items) {
+        var p = splitStatic(items)
+        return function() { return staticCell(resolveClassName(p.base), p.prop) }
     }
 
     // include / require: a single-quoted literal path is resolved to a project file
@@ -807,47 +2396,115 @@ KwInstanceof = "instanceof" KwEnd ;
         return notImplExpr("include/require", pos)
     }
 
-    // ----- closures (real, lexical capture over the defining scope) -----
-    function makeClosure(items) {
-        var params = []
-        var body = null
-        for (var i = 0; i < items.length; i++) {
-            if (items[i].body != undefined) { body = items[i].body }
-            else if (items[i].param != undefined) { params.push(items[i].param) }
-            // {use:...} markers are informational: capture is lexical below.
+    // ----- closures ---------------------------------------------------------
+    // function (...) use ($a, &$b) {...}: 'use ($a)' snapshots the VALUE at creation
+    // time, 'use (&$b)' shares the caller's storage cell. The enclosing scope chain
+    // is captured too, so the closure can still see the globals and its own class.
+    function closureBody(params, body, captured, isGen) {
+        return function(argset) {
+            if (isGen === true) { return newGen(runClosureRun(params, body, captured, argset)) }
+            return runClosureRun(params, body, captured, argset)()
         }
+    }
+    // The closure's body as a zero-argument thunk, so a generator closure can defer it.
+    function runClosureRun(params, body, captured, argset) {
+        return function() {
+            var saved = scopes
+            scopes = captured.slice(0)
+            scopes.push({})
+            bindParams(params, argset)
+            var r = anytype
+            r = body()
+            scopes = saved
+            if (isSig(r) && r.ret === true) { return r.v }
+            return null
+        }
+    }
+    function splitClosure(items) {
+        var out = {params: [], body: null, byval: [], byref: []}
+        var ps = out.params
+        var bv = out.byval
+        var br = out.byref
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].body != undefined) { out.body = items[i].body }
+            else if (items[i].param != undefined) { ps.push(items[i].param) }
+            else if (items[i].useval != undefined) { bv.push(items[i].useval) }
+            else if (items[i].useref != undefined) { br.push(items[i].useref) }
+        }
+        out.params = ps
+        out.byval = bv
+        out.byref = br
+        return out
+    }
+    function makeClosure(items) {
+        var isGen = genPop()
+        var d = splitClosure(items)
+        var params = d.params
+        var body = d.body
+        var byval = d.byval
+        var byref = d.byref
         return function() {
             var captured = scopes.slice(0)
-            return function() {
-                var args = arguments
-                var saved = scopes
-                scopes = captured.slice(0)
-                scopes.push({})
-                for (var i = 0; i < params.length; i++) {
-                    declVar(params[i], i < args.length ? args[i] : null)
-                }
-                var r = body()
-                scopes = saved
-                if (isSig(r) && r.ret === true) { return r.v }
-                return null
-            }
+            var env = {}
+            for (var i = 0; i < byval.length; i++) { scopePut(env, byval[i], phpCopy(getVar(byval[i]))) }
+            for (var j = 0; j < byref.length; j++) { scopePut(env, byref[j], varCell(byref[j])) }
+            captured.push(env)
+            return closureBody(params, body, captured, isGen)
         }
+    }
+    // fn (...) => expr : auto-capture BY VALUE. Snapshotting the scope objects (the
+    // globals stay shared, so functions and classes declared later are still found)
+    // is what makes an arrow function keep the values it saw at creation.
+    function arrowBody(t) { return function() { return {ret: true, v: t()} } }
+    function makeArrowFn(items) {
+        var d = splitClosure(items)
+        var params = d.params
+        var body = d.body
+        return function() {
+            var captured = []
+            captured.push(scopes[0])
+            for (var i = 1; i < scopes.length; i++) {
+                var copy = {}
+                var src = scopes[i]
+                var ks = ownKeys(src)
+                for (var j = 0; j < ks.length; j++) { scopePut(copy, ks[j], src[ks[j]]) }
+                captured.push(copy)
+            }
+            return closureBody(params, body, captured)
+        }
+    }
+    // The frozen engine has no for..in, so scope objects carry their own key list:
+    // declVar/scopePut route through scopeKeys, and ownKeys reads it back.
+    function ownKeys(o) {
+        if (!hasOwn(o, "__keys")) { return [] }
+        return o.__keys
+    }
+    scopePut = function(obj, name, value) {
+        if (!objHasOwn.call(obj, name)) {
+            var ks = objHasOwn.call(obj, "__keys") ? obj.__keys : []
+            ks.push(name)
+            obj.__keys = ks
+        }
+        if (name == "__proto__") { rawSet(obj, name, value) } else { obj[name] = value }
     }
 
     // ----- new C(...) -----
+    // A class value: either a name resolved in scope, or an already-resolved class.
+    function resolveClass(v) {
+        if (v != null && v != undefined && v.__isclass === true) { return v }
+        if (isObj(v)) { return v.__class }
+        return getVar(phpStr(v))
+    }
     function makeNew(items) {
         var name = items[0].cls
+        var clsT = items[0].clsdyn == undefined ? null : items[0].clsdyn
         var args = items.slice(1)
         return function() {
-            var argv = []
-            for (var i = 0; i < args.length; i++) { argv.push(args[i]()) }
-            var cls = getVar(name)
-            if (cls == undefined || cls == null || cls.__isclass !== true) { fail("new on a non-class: " + name) }
-            var obj = {__class: cls}
-            if (typeof cls["__construct"] == "function") {
-                cls["__construct"].apply(undefined, concat2impl([obj], argv))
-            }
-            return obj
+            var argset = evalArgs(args)
+            var cls = anytype
+            cls = clsT == null ? resolveClassName(stripWs(name)) : resolveClass(clsT())
+            if (cls == undefined || cls == null || cls.__isclass !== true) { fail("new on a non-class") }
+            return instantiate(cls, argset)
         }
     }
 
@@ -865,34 +2522,99 @@ KwInstanceof = "instanceof" KwEnd ;
     // ----- assignment (locals, ->field, [index], [] append) -----
     makeTargetRef = function(items) {
         var head = items[0]
-        return {name: head.var, path: items.slice(1)}
+        // A static-property head (self::$made) denotes a CELL rather than a name, so
+        // it carries a resolver instead of name/nameT; every reader below tests sref
+        // first.
+        if (head.staticvar != undefined) {
+            return {name: null, nameT: null, sref: makeStaticRef(head.staticvar), path: items.slice(1)}
+        }
+        return {name: head.var == undefined ? null : head.var, nameT: head.varexpr == undefined ? null : head.varexpr,
+                sref: null, path: items.slice(1)}
     }
+    // $$name resolves its name on every use, so it cannot be baked in at build time.
+    function refName(ref) { return ref.nameT == null ? ref.name : "$" + phpStr(ref.nameT()) }
     function phpSet(name, value) {
         for (var i = scopes.length - 1; i >= 0; i--) {
-            if (hasOwn(scopes[i], name)) { scopes[i][name] = value; return }
+            if (hasOwn(scopes[i], name)) {
+                var cur = anytype
+                cur = scopes[i][name]
+                if (isRef(cur)) { cur.v = value; return }
+                scopePut(scopes[i], name, value)
+                return
+            }
         }
-        scopes[scopes.length - 1][name] = value
+        scopePut(scopes[scopes.length - 1], name, value)
     }
+    // Walk the path to the container that the last step writes into, creating the
+    // arrays along the way (PHP auto-vivifies: $a["x"]["y"] = 1 makes both levels).
     function resolveRefPhp(ref) {
         var o = anytype
-        o = getVar(ref.name)
+        var sc = ref.sref == null ? null : ref.sref()
+        o = sc == null ? getVar(refName(ref)) : deref(sc.v)
+        if (ref.path.length > 1 && (o === null || o === undefined)) {
+            o = newArr()
+            if (sc == null) { phpSet(refName(ref), o) } else { sc.v = o }
+        }
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
-            if (s.key != undefined) { o = hasOwn(o, s.key) ? o[s.key] : undefined } else { o = phpIndex(o, s.idx()) }
+            var nxt = anytype
+            var key = anytype
+            key = null
+            if (s.key != undefined) { nxt = phpGetProp(o, s.key) }
+            else if (s.append === true) { nxt = null }
+            else { key = s.idx(); nxt = phpIndex(o, key) }
+            if ((nxt === null || nxt === undefined) && isArr(o)) {
+                nxt = newArr()
+                if (s.append === true) { arrPush(o, nxt) } else { arrSet(o, key, nxt) }
+            }
+            o = nxt
         }
         var last = ref.path[ref.path.length - 1]
         return {obj: o, last: last}
     }
     function storeAt(p, v) {
-        if (p.last.append === true) { p.obj.push(v); return }
-        if (p.last.key != undefined) { p.obj[p.last.key] = v; return }
-        var key = p.last.idx()
-        if (isDict(p.obj)) { dictSet(p.obj, key, v) } else { p.obj[key] = v }
+        if (p.last.append === true) { arrPush(p.obj, v); return }
+        if (p.last.key != undefined) { phpSetProp(p.obj, p.last.key, v); return }
+        var key = anytype
+        key = p.last.idx()
+        if (isArr(p.obj)) { arrSet(p.obj, key, v); return }
+        if (isObj(p.obj)) { phpSetProp(p.obj, phpStr(key), v); return }
+        fail("cannot assign into this value")
     }
     function readAt(p) {
         if (p.last.append === true) { return null }
-        if (p.last.key != undefined) { return hasOwn(p.obj, p.last.key) ? p.obj[p.last.key] : null }
+        if (p.last.key != undefined) { return phpGetProp(p.obj, p.last.key) }
         return phpIndex(p.obj, p.last.idx())
+    }
+    // A property declaration inside a class body: the name without its '$' sigil and
+    // the (optional) default-value thunk, re-run for every instance.
+    // A property declaration's items are the captured modifiers ({mod}), the '$name'
+    // string and, optionally, the initializer thunk - so they are scanned rather than
+    // indexed: 'static' moves the property onto the CLASS instead of the instance.
+    function makeProp(items) {
+        var nm = ""
+        var init = null
+        var isStatic = false
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "string") { nm = it }
+            else if (typeof it == "function") { init = it }
+            else if (it != null && it != undefined && it.mod != undefined) {
+                if (it.mod == "static") { isStatic = true }
+            }
+        }
+        return {name: nm.substring(1), init: init, isStatic: isStatic}
+    }
+    // One 'const NAME = expr' item. A constant with no initializer is legal only in
+    // an interface signature; it reads as null here.
+    function makeConstRec(items) {
+        var nm = ""
+        var init = null
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "string") { nm = stripWs(items[i]) }
+            else if (typeof items[i] == "function") { init = items[i] }
+        }
+        return {name: nm, init: init}
     }
     function makeAssign(items) {
         var ref = items[0]
@@ -900,48 +2622,135 @@ KwInstanceof = "instanceof" KwEnd ;
         var valT = items[2]
         return function() {
             var v = anytype
-            v = valT()
+            v = phpCopy(valT())          // arrays assign BY VALUE
+            if (ref.path.length == 0 && ref.sref != null) {
+                var cell = ref.sref()
+                if (op == "??=") {
+                    if (deref(cell.v) !== null) { return deref(cell.v) }
+                    cell.v = v
+                    return v
+                }
+                if (op != "=") { v = applyPhp(op, deref(cell.v), v) }
+                cell.v = v
+                return v
+            }
+            if (op == "=" && strOffsetSet(ref, v)) { return v }
             if (ref.path.length == 0) {
-                if (op != "=") { v = applyPhp(op, getVar(ref.name), v) }
-                phpSet(ref.name, v)
+                var nm = refName(ref)
+                if (op == "??=") {
+                    if (varExists(nm) && getVar(nm) !== null) { return getVar(nm) }
+                    phpSet(nm, v)
+                    return v
+                }
+                if (op != "=") { v = applyPhp(op, getVar(nm), v) }
+                phpSet(nm, v)
             } else {
                 var p = resolveRefPhp(ref)
+                if (op == "??=") {
+                    var old = readAt(p)
+                    if (old !== null && old !== undefined) { return old }
+                    storeAt(p, v)
+                    return v
+                }
                 if (op != "=") { v = applyPhp(op, readAt(p), v) }
                 storeAt(p, v)
             }
             return v
         }
     }
+    // $s[0] = "H" : a string is mutable through an offset in PHP but immutable in the
+    // host language, so the whole string is rebuilt and stored back over the variable.
+    // Answers false (and does nothing) whenever the target is not a string offset, so
+    // the ordinary array/property path runs unchanged.
+    function strOffsetSet(ref, v) {
+        if (ref.path.length != 1) { return false }
+        var st = ref.path[0]
+        if (st.idx == undefined) { return false }
+        var base = anytype
+        base = readTargetValHead(ref)
+        if (typeof base != "string") { return false }
+        var n = trunc(numOf(toNumV(st.idx())))
+        if (n < 0) { n = base.length + n }
+        if (n < 0) { fail("cannot write to a negative string offset") }
+        var s = base
+        while (s.length < n) { s = s + " " }   // PHP pads a write past the end with spaces
+        var ch = phpStr(v)
+        if (ch.length == 0) { fail("cannot assign an empty string to a string offset") }
+        writeTargetValHead(ref, s.substring(0, n) + ch.charAt(0) + s.substring(n + 1))
+        return true
+    }
+    // The value / storage of a target's HEAD alone, ignoring its path.
+    function readTargetValHead(ref) {
+        if (ref.sref != null) { return deref(ref.sref().v) }
+        return varExists(refName(ref)) ? getVar(refName(ref)) : null
+    }
+    function writeTargetValHead(ref, v) {
+        if (ref.sref != null) { ref.sref().v = v; return }
+        phpSet(refName(ref), v)
+    }
+    // A compound assignment is its binary operator plus a store; the operator text is
+    // the assignment spelling minus the trailing '='.
     function applyPhp(op, a, b) {
-        if (op == "+=") { return (a + b) | 0 }
-        if (op == "-=") { return (a - b) | 0 }
-        if (op == "*=") { return (a * b) | 0 }
-        if (op == "/=") { return (a / b) | 0 }
-        if (op == "%=") { return (a % b) | 0 }
         if (op == ".=") { return phpConcat(a, b) }
+        return binOp(op.substring(0, op.length - 1), a, b)
     }
     // ++ / -- (prefix yields the new value, postfix the old one).
     function readTargetVal(ref) {
-        if (ref.path.length == 0) { return getVar(ref.name) }
+        if (ref.path.length == 0 && ref.sref != null) { return deref(ref.sref().v) }
+        if (ref.path.length == 0) { return getVar(refName(ref)) }
         return readAt(resolveRefPhp(ref))
     }
     function writeTargetVal(ref, v) {
-        if (ref.path.length == 0) { phpSet(ref.name, v); return }
+        if (ref.path.length == 0 && ref.sref != null) { ref.sref().v = v; return }
+        if (ref.path.length == 0) { phpSet(refName(ref), v); return }
         storeAt(resolveRefPhp(ref), v)
+    }
+    // The storage CELL a target denotes: a plain variable, a static property, or an
+    // array element.
+    function targetCell(ref) {
+        if (ref.path.length == 0 && ref.sref != null) { return ref.sref() }
+        if (ref.path.length == 0) { return varCell(refName(ref)) }
+        var p = resolveRefPhp(ref)
+        if (p.last.append === true) { arrPush(p.obj, null); return arrCell(p.obj, p.obj.__next - 1) }
+        if (p.last.key != undefined) { return null }
+        if (isArr(p.obj)) { return arrCell(p.obj, p.last.idx()) }
+        return null
+    }
+    // $b = &$a : bind the left name to the right side's cell.
+    function makeRefAssign(items) {
+        var lhs = items[0]
+        var rhs = items[1]
+        return function() {
+            var cell = targetCell(rhs)
+            if (cell == null) { fail("cannot take a reference to this expression") }
+            if (lhs.path.length == 0) { scopePut(scopes[scopes.length - 1], refName(lhs), cell); return cell.v }
+            var p = resolveRefPhp(lhs)
+            if (p.last.append === true) { arrPush(p.obj, null); p.obj.vals[p.obj.keys.length - 1] = cell }
+            else if (isArr(p.obj)) {
+                var k = phpKey(p.last.idx())
+                if (dictFind(p.obj, k) < 0) { arrSet(p.obj, k, null) }
+                var vs = p.obj.vals
+                vs[dictFind(p.obj, k)] = cell
+                p.obj.vals = vs
+            }
+            return cell.v
+        }
     }
     function makeIncDec(items) {
         var ref = items[0]
-        var delta = (items[1] == "++") ? 1 : -1
+        var op = (items[1] == "++") ? "+" : "-"
         return function() {
-            var n = (readTargetVal(ref) + 0) | 0
-            writeTargetVal(ref, (n + delta) | 0)
+            var n = anytype
+            n = toNumV(readTargetVal(ref))
+            writeTargetVal(ref, phpArith(op, n, 1))
             return n
         }
     }
     function makePreIncDec(ref, op) {
-        var delta = (op == "++") ? 1 : -1
+        var bop = (op == "++") ? "+" : "-"
         return function() {
-            var n = ((readTargetVal(ref) + 0) + delta) | 0
+            var n = anytype
+            n = phpArith(bop, toNumV(readTargetVal(ref)), 1)
             writeTargetVal(ref, n)
             return n
         }
@@ -952,23 +2761,57 @@ KwInstanceof = "instanceof" KwEnd ;
         var name = items[0]
         var args = items.slice(1)
         return function() {
-            var argv = []
-            for (var i = 0; i < args.length; i++) { argv.push(args[i]()) }
-            if (hasOwn(phpBuiltins, name)) { return phpBuiltins[name].apply(undefined, argv) }
-            var f = getVar(name)
-            if (typeof f != "function") { fail("call of an undefined function: " + name) }
-            return f.apply(undefined, argv)
+            var argset = evalArgs(args)
+            // f(...) is the first-class callable form: it yields the function itself.
+            if (argset.fcc === true) {
+                if (hasOwn(phpBuiltins, name)) {
+                    var bf = phpBuiltins[name]
+                    return function(a2) { return bf.apply(undefined, a2.pos) }
+                }
+                return getVar(name)
+            }
+            return callNamed(name, argset)
         }
     }
+    // A parameter record: name, by-reference flag, variadic flag, default thunk.
+    function makeParam(items) {
+        var nm = ""
+        var byref = false
+        var variadic = false
+        var def = null
+        var promote = false
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "string") { nm = it }
+            else if (it == null || it == undefined) { continue }
+            else if (it.pbyref != undefined) { byref = true }
+            else if (it.pvariadic != undefined) { variadic = true }
+            else if (it.pdefault != undefined) { def = it.pdefault }
+            // Any visibility modifier on a parameter is constructor property
+            // PROMOTION (8.0): the parameter also becomes a property of the object.
+            else if (it.mod != undefined) { promote = true }
+        }
+        return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote}
+    }
+    // The name is no longer items[0]: a method may carry captured modifiers in front
+    // of it, so the string is looked for rather than indexed. 'static' is remembered
+    // because a static method must run with no $this.
     function makeFun(items) {
-        var name = items[0]
+        var isGen = genPop()
+        var name = ""
         var params = []
         var body = null
-        for (var i = 1; i < items.length; i++) {
-            if (items[i].body != undefined) { body = items[i].body }
-            else if (items[i].param != undefined) { params.push(items[i].param) }
+        var isStatic = false
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "string") { name = it }
+            else if (it == null || it == undefined) { continue }
+            else if (it.body != undefined) { body = it.body }
+            else if (it.param != undefined) { params.push(it.param) }
+            else if (it.mod != undefined) { if (it.mod == "static") { isStatic = true } }
         }
-        return {name: name, params: params, body: body != null ? body : makeBody([])}
+        return {name: name, params: params, body: body != null ? body : makeBody([]),
+                isStatic: isStatic, isGen: isGen}
     }
     function runProgram(items) {
         // A user exception (throw) that escapes the whole program is reported like any
@@ -977,100 +2820,653 @@ KwInstanceof = "instanceof" KwEnd ;
         // whose main() is called explicitly), so this is where the throw actually
         // propagates. excIsUser lives in lib/interp-core.js.
         try {
-            for (var i = 0; i < items.length; i++) { items[i]() }
+            for (var i = 0; i < items.length; i++) { if (typeof items[i] == "function") { items[i]() } }
         } catch (e) {
             if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
             throw e
         }
     }
-    function invokePhp(fn, self, args) {
+    function invokePhp(fn, self, argset) { return invokePhpCls(fn, self, argset, null, null) }
+    function invokePhpCls(fn, self, argset, defCls, staticCls) {
         var saved = scopes
         scopes = [globalScope, {}]
         if (self !== undefined && self !== null) { declVar("$this", self) }
-        for (var i = 0; i < fn.params.length; i++) {
-            declVar(fn.params[i], i < args.length ? args[i] : null)
+        if (defCls != undefined && defCls != null) {
+            declVar(SELF_KEY, defCls)
+            declVar(STATIC_KEY, staticCls)
         }
-        var r = fn.body()
+        declVar(FN_KEY, fn.name)
+        bindParams(fn.params, argset)
+        // Constructor property promotion: the bound parameter is ALSO written to the
+        // object, after binding, so a default value promotes exactly like a passed one.
+        if (self !== undefined && self !== null && isObj(self)) {
+            for (var pi = 0; pi < fn.params.length; pi++) {
+                var pp = fn.params[pi]
+                if (pp.promote === true) { dictSet(self.p, pp.name.substring(1), getVar(pp.name)) }
+            }
+        }
+        var r = anytype
+        r = fn.body()
         scopes = saved
         if (isSig(r) && r.ret === true) { return r.v }
         return null
     }
+    // Calling a generator function yields a generator OBJECT; the body is deferred.
     function makeFunClosure(fn) {
-        return function() {
-            var args = []
-            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
-            return invokePhp(fn, null, args)
+        return function(argset) {
+            if (fn.isGen === true) { return newGen(function() { return invokePhp(fn, null, argset) }) }
+            return invokePhp(fn, null, argset)
         }
     }
-    function makeMethodClosure(fn) {
-        return function() {
-            var self = arguments[0]
-            var args = []
-            for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
-            return invokePhp(fn, self, args)
+    // A method closure knows the class it was DECLARED in (self::). static:: is the
+    // class the call went through: whatever a '::' site handed over in pendingStatic,
+    // else the receiver's own class (so static:: inside an instance method resolves in
+    // the actual, possibly derived, class), else the declaring class.
+    function makeMethodClosure(fn, defCls) {
+        return function(self, argset) {
+            var st = anytype
+            st = pendingStatic
+            pendingStatic = null
+            if (st == null || st == undefined) {
+                st = (self !== undefined && self !== null && isObj(self)) ? self.__class : defCls
+            }
+            if (fn.isGen === true) {
+                var gst = st
+                return newGen(function() { return invokePhpCls(fn, self, argset, defCls, gst) })
+            }
+            return invokePhpCls(fn, self, argset, defCls, st)
         }
     }
     function makeDefStmt(fn) {
         return function() { declVar(fn.name, makeFunClosure(fn)); return null }
     }
+    // Creating an instance: the declared property defaults are installed first (in
+    // declaration order, walking the base classes first so an override wins), then
+    // the constructor runs.
+    function instantiate(cls, argset) {
+        var obj = newObj(cls)
+        initProps(obj, cls)
+        var ctor = classFind(cls, "__construct")
+        if (ctor != null) { ctor(obj, argset) }
+        return obj
+    }
+    function initProps(obj, cls) {
+        if (cls == undefined || cls == null) { return }
+        initProps(obj, cls.__super)
+        var ps = cls.__props
+        if (ps == undefined || ps == null) { return }
+        for (var i = 0; i < ps.length; i++) {
+            dictSet(obj.p, ps[i].name, ps[i].init == null ? null : phpCopy(ps[i].init()))
+        }
+    }
+    // Collects the constant records out of one ClassConst's items (which also hold the
+    // captured modifiers). Shared by classes and interfaces.
+    function collectConsts(items, out) {
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != null && items[i] != undefined && items[i].cconst != undefined) { out.push(items[i].cconst) }
+        }
+    }
+    // The parsed pieces of a class body, sorted by kind. Split out of makeClassStmt
+    // so an ANONYMOUS class (new class (...) { ... }) can build one the same way,
+    // without a name and without declaring anything.
+    function classParts(items, start) {
+        var p = {methods: [], props: [], statics: [], consts: [], ext: null, ifaces: [], uses: []}
+        for (var i = start; i < items.length; i++) {
+            var it = items[i]
+            if (it == null || it == undefined) { continue }
+            if (it.method != undefined) { p.methods.push(it.method) }
+            else if (it.usetrait != undefined) { p.uses.push(it.usetrait) }
+            else if (it.propdecl != undefined) {
+                if (it.propdecl.isStatic === true) { p.statics.push(it.propdecl) } else { p.props.push(it.propdecl) }
+            }
+            else if (it.cconsts != undefined) { collectConsts(it.cconsts, p.consts) }
+            else if (it.ext != undefined) { p.ext = stripWs(it.ext) }
+            else if (it.impl != undefined) { p.ifaces.push(stripWs(it.impl)) }
+        }
+        return p
+    }
+    // One 'use T1, T2 { ... }' clause: the traits it names, the insteadof exclusions
+    // (loser trait + method name) and the aliases it introduces.
+    function makeUseTrait(items) {
+        var u = {names: [], excl: [], aliases: []}
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == null || it == undefined) { continue }
+            if (it.impl != undefined) { u.names.push(stripWs(it.impl)); continue }
+            if (it.tinsteadof != undefined) {
+                var r = traitRefOf(it.tinsteadof)
+                for (var j = 0; j < it.tinsteadof.length; j++) {
+                    // The ImplList after 'insteadof' names the traits that LOSE.
+                    if (it.tinsteadof[j].impl != undefined) {
+                        u.excl.push({trait: stripWs(it.tinsteadof[j].impl), meth: r.meth})
+                    }
+                }
+                continue
+            }
+            if (it.tas != undefined) {
+                var a = traitRefOf(it.tas)
+                var alias = a.meth
+                for (var k = 0; k < it.tas.length; k++) {
+                    if (it.tas[k].talias != undefined) { alias = it.tas[k].talias }
+                }
+                u.aliases.push({owner: a.owner, meth: a.meth, alias: alias})
+            }
+        }
+        return u
+    }
+    function traitRefOf(items) {
+        var r = {owner: null, meth: null}
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] == null || items[i] == undefined) { continue }
+            if (items[i].towner != undefined) { r.owner = items[i].towner }
+            else if (items[i].tmeth != undefined && r.meth == null) { r.meth = items[i].tmeth }
+        }
+        return r
+    }
+    function traitParts(name) {
+        var t = anytype
+        t = getVar(name)
+        if (t == null || t == undefined || t.__istrait !== true) { fail("unknown trait " + name) }
+        return t.__parts
+    }
+    function traitExcluded(u, tname, mname) {
+        for (var i = 0; i < u.excl.length; i++) {
+            if (u.excl[i].trait == tname && u.excl[i].meth == mname) { return true }
+        }
+        return false
+    }
+    // Collects everything the 'use' clauses of a class body contribute. Members are
+    // returned rather than installed so that the class's OWN members can be applied
+    // afterwards and win, which is PHP's precedence (class over trait over parent).
+    function traitMembers(uses) {
+        var out = {methods: [], props: [], statics: [], consts: []}
+        for (var i = 0; i < uses.length; i++) {
+            var u = uses[i]
+            for (var n = 0; n < u.names.length; n++) {
+                var tp = traitParts(u.names[n])
+                for (var m = 0; m < tp.methods.length; m++) {
+                    if (traitExcluded(u, u.names[n], tp.methods[m].name)) { continue }
+                    out.methods.push(tp.methods[m])
+                }
+                for (var q = 0; q < tp.props.length; q++) { out.props.push(tp.props[q]) }
+                for (var s = 0; s < tp.statics.length; s++) { out.statics.push(tp.statics[s]) }
+                for (var c = 0; c < tp.consts.length; c++) { out.consts.push(tp.consts[c]) }
+            }
+            // An alias binds an EXISTING trait method under a second name; the
+            // original stays reachable unless an insteadof rule removed it.
+            for (var a = 0; a < u.aliases.length; a++) {
+                var src = null
+                for (var n2 = 0; n2 < u.names.length; n2++) {
+                    if (u.aliases[a].owner != null && u.aliases[a].owner != u.names[n2]) { continue }
+                    var tp2 = traitParts(u.names[n2])
+                    for (var m2 = 0; m2 < tp2.methods.length; m2++) {
+                        if (tp2.methods[m2].name == u.aliases[a].meth) { src = tp2.methods[m2] }
+                    }
+                    if (src != null) { break }
+                }
+                if (src == null) { fail("unknown trait method " + u.aliases[a].meth) }
+                out.methods.push({name: u.aliases[a].alias, params: src.params, body: src.body, isStatic: src.isStatic})
+            }
+        }
+        return out
+    }
+    function buildClass(name, p) {
+        var tm = traitMembers(p.uses)
+        var props = []
+        for (var tp2 = 0; tp2 < tm.props.length; tp2++) { props.push(tm.props[tp2]) }
+        for (var op = 0; op < p.props.length; op++) { props.push(p.props[op]) }
+        var consts = []
+        for (var tc = 0; tc < tm.consts.length; tc++) { consts.push(tm.consts[tc]) }
+        for (var oc = 0; oc < p.consts.length; oc++) { consts.push(p.consts[oc]) }
+        var cls = {__isclass: true, __name: name, __super: null, __props: props, __ifaces: p.ifaces,
+                   __constT: consts, __constV: newArr(), __statics: newArr()}
+        if (p.ext != null) {
+            var base = getVar(p.ext)
+            if (base == undefined || base == null || base.__isclass !== true) { fail("unknown base class " + p.ext) }
+            cls.__super = base
+        }
+        for (var ts = 0; ts < tm.statics.length; ts++) {
+            var tv = anytype
+            tv = tm.statics[ts].init == null ? null : phpCopy(tm.statics[ts].init())
+            dictSet(cls.__statics, tm.statics[ts].name, {__refcell: true, v: tv})
+        }
+        for (var tmi = 0; tmi < tm.methods.length; tmi++) {
+            cls[tm.methods[tmi].name] = makeMethodClosure(tm.methods[tmi], cls)
+        }
+        // A static property is created once, here, and lives in a cell so that a
+        // subclass which does not redeclare it shares this very storage.
+        for (var s2 = 0; s2 < p.statics.length; s2++) {
+            var iv = anytype
+            iv = p.statics[s2].init == null ? null : phpCopy(p.statics[s2].init())
+            dictSet(cls.__statics, p.statics[s2].name, {__refcell: true, v: iv})
+        }
+        for (var m2 = 0; m2 < p.methods.length; m2++) {
+            cls[p.methods[m2].name] = makeMethodClosure(p.methods[m2], cls)
+        }
+        return cls
+    }
     function makeClassStmt(items) {
         var name = items[0]
-        var methods = []
+        var p = classParts(items, 1)
+        return function() { declVar(name, buildClass(name, p)); return null }
+    }
+    // An enum: the class is built exactly like any other, then one instance per case
+    // is created and stored as a class constant of that name. The instances ARE the
+    // values, so === between two E::A reads is identity and needs no special rule.
+    function makeEnumStmt(items) {
+        var name = items[0]
+        var cases = []
+        var rest = []
         for (var i = 1; i < items.length; i++) {
-            if (items[i].method != undefined) { methods.push(items[i].method) }
+            if (items[i] != null && items[i] != undefined && items[i].ecase != undefined) { cases.push(items[i].ecase) }
+            else { rest.push(items[i]) }
         }
+        var p = classParts(rest, 0)
         return function() {
-            var cls = {__isclass: true, __name: name}
-            for (var m2 = 0; m2 < methods.length; m2++) {
-                cls[methods[m2].name] = makeMethodClosure(methods[m2])
-            }
+            var cls = buildClass(name, p)
+            cls.__isenum = true
             declVar(name, cls)
+            var all = newArr()
+            for (var c = 0; c < cases.length; c++) {
+                var obj = newObj(cls)
+                dictSet(obj.p, "name", cases[c].name)
+                if (cases[c].init != null) { dictSet(obj.p, "value", cases[c].init()) }
+                dictSet(cls.__constV, cases[c].name, obj)
+                arrPush(all, obj)
+            }
+            cls.__cases = all
             return null
         }
     }
+    // E::cases() / E::from(v) / E::tryFrom(v): implicit statics every enum has. They
+    // are answered here rather than installed as methods so that an enum which
+    // DECLARES one of these names still wins.
+    function enumStatic(cls, name, argset) {
+        var all = cls.__cases
+        if (name == "cases") {
+            var out = newArr()
+            for (var i = 0; i < all.keys.length; i++) { arrPush(out, deref(all.vals[i])) }
+            return {v: out}
+        }
+        if (name == "from" || name == "tryFrom") {
+            var want = argset.pos.length > 0 ? argset.pos[0] : null
+            for (var j = 0; j < all.keys.length; j++) {
+                var cse = anytype
+                cse = deref(all.vals[j])
+                if (phpLoose(phpGetProp(cse, "value"), want)) { return {v: cse} }
+            }
+            if (name == "tryFrom") { return {v: null} }
+            fail("no case of " + cls.__name + " matches " + phpStr(want))
+        }
+        return null
+    }
+    function makeTraitStmt(items) {
+        var name = items[0]
+        var p = classParts(items, 1)
+        return function() {
+            declVar(name, {__isclass: true, __istrait: true, __name: name, __parts: p, __super: null,
+                           __props: [], __ifaces: [], __constT: [], __constV: newArr(), __statics: newArr()})
+            return null
+        }
+    }
+    // new class (args) extends B implements I { ... } : the class descriptor is built
+    // fresh on every evaluation (so each 'new class' really is its own type) and is
+    // never declared, which is exactly what makes it anonymous.
+    function makeNewAnon(items) {
+        var args = []
+        var rest = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != null && items[i] != undefined && items[i].sargs != undefined) { args = items[i].sargs }
+            else { rest.push(items[i]) }
+        }
+        var p = classParts(rest, 0)
+        return function() { return instantiate(buildClass("class@anonymous", p), evalArgs(args)) }
+    }
+    // An interface: a class descriptor with no bodies, so instanceof and the
+    // implements list can resolve it. Extended interfaces land in __ifaces too.
+    function makeIfaceStmt(items) {
+        var name = items[0]
+        var parents = []
+        var consts = []
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].impl != undefined) { parents.push(stripWs(items[i].impl)) }
+            else if (items[i].cconsts != undefined) { collectConsts(items[i].cconsts, consts) }
+        }
+        return function() {
+            declVar(name, {__isclass: true, __isiface: true, __name: name, __super: null,
+                           __props: [], __ifaces: parents,
+                           __constT: consts, __constV: newArr(), __statics: newArr()})
+            return null
+        }
+    }
+    // The runtime type test behind instanceof and a typed catch clause. A name
+    // matches the class itself, any base class, and any implemented interface
+    // (transitively - an interface may extend other interfaces).
+    function classIs(cls, name) {
+        var k = cls
+        while (k != undefined && k != null) {
+            if (k.__name == name) { return true }
+            var ifs = k.__ifaces
+            if (ifs != undefined && ifs != null) {
+                for (var i = 0; i < ifs.length; i++) {
+                    if (ifs[i] == name) { return true }
+                    var iv = varExists(ifs[i]) ? getVar(ifs[i]) : null
+                    if (iv != null && iv.__isclass === true && classIs(iv, name)) { return true }
+                }
+            }
+            k = k.__super
+        }
+        return false
+    }
+    function phpIsA(v, name) {
+        if (!isObj(v)) { return false }
+        return classIs(v.__class, name)
+    }
+    function makeInstanceof(items) {
+        var left = items[0]
+        var nm = items[1].iname == undefined ? null : stripWs(items[1].iname)
+        var dyn = items[1].idyn == undefined ? null : items[1].idyn
+        return function() {
+            var v = anytype
+            v = left()
+            if (nm != null) { return phpIsA(v, nm) }
+            var t = anytype
+            t = dyn()
+            if (isObj(t)) { return phpIsA(v, t.__class.__name) }
+            if (t != null && t != undefined && t.__isclass === true) { return phpIsA(v, t.__name) }
+            return phpIsA(v, phpStr(t))
+        }
+    }
+    // items = [{ctype}..., name?, blockThunk] - the catch variable is optional.
+    function phpCatch(items) {
+        var types = []
+        var nm = undefined
+        var body = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].ctype != undefined) { types.push(stripWs(items[i].ctype)) }
+            else if (typeof items[i] == "string") { nm = items[i] }
+            else { body = items[i] }
+        }
+        return {catchbody: body, catchname: nm, catchtype: types}
+    }
 
     // ----- builtins -----
-    var phpBuiltins = {
-        "count": function(a) { return phpLen(a) },
-        "strlen": function(s) { return s.length },
-        "in_array": function(n, a) { return a.indexOf(n) >= 0 },
-        "array_push": function(a, v) { a.push(v); return a.length },
-        "array_keys": function(d) { return isDict(d) ? d.keys.slice(0) : intRange(d.length) },
-        "array_values": function(d) { return isDict(d) ? d.vals.slice(0) : d.slice(0) },
-        "abs": function(n) { return n < 0 ? (0 - n) | 0 : n | 0 },
-        "max": function(a, b) { return a > b ? a : b },
-        "min": function(a, b) { return a < b ? a : b },
-        "intdiv": function(a, b) { return (a / b) | 0 }
-    }
-    function phpLen(v) {
-        if (isDict(v)) { return v.keys.length }
-        if (v === null || v === undefined) { fail("count() of null") }
-        return v.length
-    }
-    function intRange(n) {
+    function derefAll(list) {
         var out = []
-        for (var i = 0; i < n; i++) { out.push(i) }
+        for (var i = 0; i < list.length; i++) { out.push(deref(list[i])) }
         return out
     }
+    function arrOf(list) {
+        var a = newArr()
+        for (var i = 0; i < list.length; i++) { arrPush(a, list[i]) }
+        return a
+    }
+    var phpBuiltins = {
+        "count": function(a) { return phpLen(a) },
+        // PHP strings are byte strings: strlen("\u{2764}") is 3, not 1.
+        "strlen": function(s) { return byteLen(phpStr(s)) },
+        "in_array": function(n, a) {
+            for (var i = 0; i < a.keys.length; i++) { if (phpLoose(a.vals[i], n)) { return true } }
+            return false
+        },
+        "array_push": function(a, v) { arrPush(a, v); return a.keys.length },
+        "array_keys": function(d) { return arrOf(d.keys) },
+        "array_values": function(d) { return arrOf(derefAll(d.vals)) },
+        "abs": function(n) { var v = toNumV(n); return numOf(v) < 0 ? phpArith("-", 0, v) : v },
+        "max": function(a, b) { return phpCmp(a, b) > 0 ? a : b },
+        "min": function(a, b) { return phpCmp(a, b) < 0 ? a : b },
+        "intdiv": function(a, b) { return trunc(numOf(toNumV(a)) / numOf(toNumV(b))) }
+    }
+    function phpLen(v) {
+        if (isArr(v)) { return v.keys.length }
+        if (typeof v == "string") { return byteLen(v) }
+        if (v === null || v === undefined) { return 0 }
+        return 1
+    }
 
-    hostGlobals["exit"] = function(code) { exit(code === undefined ? 0 : code | 0) }
+    phpBuiltins["exit"] = function(code) { exit(code === undefined ? 0 : trunc(numOf(toNumV(code)))) }
+    phpBuiltins["die"] = phpBuiltins["exit"]
+
+    // ----- comparison: ===, ==, <=> and the relational operators ------------------
+    // === is identity: same type, and for arrays the same keys in the same ORDER.
+    function phpIdentical(l, r) {
+        if (isFlo(l) || isFlo(r)) { return isFlo(l) && isFlo(r) && l.f === r.f }
+        if (isArr(l) || isArr(r)) {
+            if (!(isArr(l) && isArr(r))) { return false }
+            if (l.keys.length != r.keys.length) { return false }
+            for (var i = 0; i < l.keys.length; i++) {
+                if (l.keys[i] !== r.keys[i]) { return false }
+                if (!phpIdentical(deref(l.vals[i]), deref(r.vals[i]))) { return false }
+            }
+            return true
+        }
+        if (l === null || l === undefined) { return r === null || r === undefined }
+        return l === r
+    }
+    // == is PHP 8's loose equality: a bool on either side compares truthiness, null
+    // compares as "empty", two strings compare numerically only when BOTH are
+    // numeric, and a number against a NON-numeric string compares as strings (the
+    // PHP 8 change that made 0 == "a" false).
+    function phpLoose(l, r) {
+        if (l === undefined) { l = null }
+        if (r === undefined) { r = null }
+        if (typeof l == "boolean" || typeof r == "boolean") { return phptest(l) === phptest(r) }
+        if (l === null && r === null) { return true }
+        if (l === null) { return looseNull(r) }
+        if (r === null) { return looseNull(l) }
+        if (isArr(l) || isArr(r)) {
+            if (!(isArr(l) && isArr(r))) { return false }
+            if (l.keys.length != r.keys.length) { return false }
+            for (var i = 0; i < l.keys.length; i++) {
+                var j = dictFind(r, l.keys[i])
+                if (j < 0) { return false }
+                if (!phpLoose(deref(l.vals[i]), deref(r.vals[j]))) { return false }
+            }
+            return true
+        }
+        if (isObj(l) || isObj(r)) {
+            if (!(isObj(l) && isObj(r))) { return false }
+            if (l === r) { return true }
+            if (l.__class !== r.__class) { return false }
+            return phpLoose(l.p, r.p)
+        }
+        if (typeof l == "string" && typeof r == "string") {
+            var nl = numStrVal(l)
+            var nr = numStrVal(r)
+            if (nl != null && nr != null) { return numOf(nl) === numOf(nr) }
+            return l === r
+        }
+        if (typeof l == "string" && isNum(r)) { return strNumLoose(l, r) }
+        if (typeof r == "string" && isNum(l)) { return strNumLoose(r, l) }
+        return numOf(toNumV(l)) === numOf(toNumV(r))
+    }
+    function looseNull(v) {
+        if (typeof v == "string") { return v === "" }
+        if (isArr(v)) { return v.keys.length === 0 }
+        if (isNum(v)) { return numOf(v) === 0 }
+        return false
+    }
+    function strNumLoose(s, n) {
+        var ns = numStrVal(s)
+        if (ns != null) { return numOf(ns) === numOf(n) }
+        return s === phpStr(n)
+    }
+    function cmpNum(a, b) { return a < b ? -1 : (a > b ? 1 : 0) }
+    function cmpStr(a, b) { return a < b ? -1 : (a > b ? 1 : 0) }
+    // The spaceship, and the engine behind < > <= >=.
+    function phpCmp(l, r) {
+        if (l === undefined) { l = null }
+        if (r === undefined) { r = null }
+        if (typeof l == "boolean" || typeof r == "boolean" || l === null || r === null) {
+            return cmpNum(phptest(l) ? 1 : 0, phptest(r) ? 1 : 0)
+        }
+        if (isArr(l) && isArr(r)) {
+            if (l.keys.length != r.keys.length) { return cmpNum(l.keys.length, r.keys.length) }
+            for (var i = 0; i < l.keys.length; i++) {
+                var j = dictFind(r, l.keys[i])
+                if (j < 0) { return 1 }
+                var cv = phpCmp(deref(l.vals[i]), deref(r.vals[j]))
+                if (cv != 0) { return cv }
+            }
+            return 0
+        }
+        if (typeof l == "string" && typeof r == "string") {
+            var nl = numStrVal(l)
+            var nr = numStrVal(r)
+            if (nl != null && nr != null) { return cmpNum(numOf(nl), numOf(nr)) }
+            return cmpStr(l, r)
+        }
+        if (typeof l == "string" && isNum(r)) {
+            var x = numStrVal(l)
+            if (x == null) { return cmpStr(l, phpStr(r)) }
+            return cmpNum(numOf(x), numOf(r))
+        }
+        if (typeof r == "string" && isNum(l)) {
+            var y = numStrVal(r)
+            if (y == null) { return cmpStr(phpStr(l), r) }
+            return cmpNum(numOf(l), numOf(y))
+        }
+        return cmpNum(numOf(toNumV(l)), numOf(toNumV(r)))
+    }
+
+    // ----- arithmetic: int stays int, and any float operand makes the result float --
+    function phpArith(op, l, r) {
+        var a = toNumV(l)
+        var b = toNumV(r)
+        var f = isFlo(a) || isFlo(b)
+        var x = numOf(a)
+        var y = numOf(b)
+        if (op == "+") { return f ? mkFlo(x + y) : x + y }
+        if (op == "-") { return f ? mkFlo(x - y) : x - y }
+        if (op == "*") { return f ? mkFlo(x * y) : x * y }
+        if (op == "/") {
+            if (y === 0) { fail("division by zero") }
+            var q = x / y
+            if (!f && q === trunc(q)) { return q }
+            return mkFlo(q)
+        }
+        if (op == "%") {
+            var iy = trunc(y)
+            if (iy === 0) { fail("modulo by zero") }
+            return trunc(x) % iy
+        }
+        if (op == "**") {
+            var p = Math.pow(x, y)
+            if (!f && y >= 0 && p === trunc(p)) { return p }
+            return mkFlo(p)
+        }
+        fail("unknown arithmetic operator " + op)
+    }
+    function phpBit(op, l, r) {
+        var x = trunc(numOf(toNumV(l))) | 0
+        var y = trunc(numOf(toNumV(r))) | 0
+        if (op == "&") { return x & y }
+        if (op == "|") { return x | y }
+        if (op == "^") { return x ^ y }
+        if (op == "<<") { return x << y }
+        if (op == ">>") { return x >> y }
+        fail("unknown bit operator " + op)
+    }
+
+    // ----- prefix operators, '**' and the type casts -----
+    makeNeg = function(t) { return function() { return phpArith("-", 0, t()) } }
+    makeNot = function(t) { return function() { return !phptest(t()) } }
+    function makeBitNot(t) {
+        return function() { return ~(trunc(numOf(toNumV(t()))) | 0) }
+    }
+    function foldPow(items) {
+        if (items.length == 1) { return items[0] }
+        var base = items[0]
+        var exp = items[1]
+        return function() { return phpArith("**", base(), exp()) }
+    }
+    function makeClone(t) {
+        return function() {
+            var v = anytype
+            v = t()
+            if (!isObj(v)) { return v }
+            var copy = newObj(v.__class)
+            for (var i = 0; i < v.p.keys.length; i++) { dictSet(copy.p, v.p.keys[i], phpCopy(v.p.vals[i])) }
+            var m = classFind(v.__class, "__clone")
+            if (m != null) { callMethod(copy, m, []) }
+            return copy
+        }
+    }
+    // items = [{cast}, operandThunk]
+    function makeCast(items) {
+        var kind = items[0].cast
+        var t = items[1]
+        return function() { return phpCast(kind, t()) }
+    }
+    function phpCast(kind, v) {
+        if (kind == "int" || kind == "integer") { return trunc(numOf(toNumV(v))) }
+        if (kind == "float" || kind == "double" || kind == "real") { return mkFlo(numOf(toNumV(v))) }
+        if (kind == "string" || kind == "binary") { return phpStr(v) }
+        if (kind == "bool" || kind == "boolean") { return phptest(v) }
+        if (kind == "array") {
+            if (isArr(v)) { return v }
+            if (v === null || v === undefined) { return newArr() }
+            if (isObj(v)) { return arrCopy(v.p) }
+            var a = newArr()
+            arrPush(a, v)
+            return a
+        }
+        if (kind == "unset") { return null }
+        return v
+    }
+
+    // A caught value matches a clause when it is an instance of ANY of the listed
+    // types; \Throwable / \Exception also catch the built-in base below.
+    core.excMatches = function(v, types) {
+        for (var i = 0; i < types.length; i++) {
+            if (types[i] == "Throwable") { return true }
+            if (phpIsA(v, types[i])) { return true }
+        }
+        // A value that is not part of the Throwable hierarchy at all cannot be
+        // discriminated by type, so every clause accepts it (the behavior this
+        // grammar had before typed catch, and the only sensible reading of a
+        // program that throws a plain object - which real PHP rejects outright).
+        if (!isObj(v) || !classIs(v.__class, "Throwable")) { return true }
+        return false
+    }
+    // The engine's exception hierarchy, far enough for user classes to extend it.
+    function declBuiltinClass(name, superName) {
+        var sup = superName == null ? null : getVar(superName)
+        var cls = {__isclass: true, __name: name, __super: sup, __props: [], __ifaces: ["Throwable"]}
+        cls["__construct"] = function(self, argset) {
+            dictSet(self.p, "message", argset.pos.length > 0 ? argset.pos[0] : "")
+            dictSet(self.p, "code", argset.pos.length > 1 ? argset.pos[1] : 0)
+            return null
+        }
+        cls["getMessage"] = function(self, argset) { return phpGetProp(self, "message") }
+        cls["getCode"] = function(self, argset) { return phpGetProp(self, "code") }
+        scopePut(globalScope, name, cls)
+    }
+    declBuiltinClass("Exception", null)
+    declBuiltinClass("Error", null)
+    declBuiltinClass("RuntimeException", "Exception")
+    declBuiltinClass("LogicException", "Exception")
+    declBuiltinClass("InvalidArgumentException", "LogicException")
+    declBuiltinClass("TypeError", "Error")
+    declBuiltinClass("ValueError", "Error")
+    declBuiltinClass("DivisionByZeroError", "Error")
 
     // ----- core config -----
     core.lang = "php"
     core.test = phptest
     binOp = function(op, l, r) {
         if (op == ".") { return phpConcat(l, r) }
-        if (op == "+") { return (l + r) | 0 }
-        if (op == "-") { return (l - r) | 0 }
-        if (op == "*") { return (l * r) | 0 }
-        if (op == "/") { return (l / r) | 0 }
-        if (op == "%") { return (l % r) | 0 }
-        if (op == "==" || op == "===") { return l === r }
-        if (op == "!=" || op == "!==") { return l !== r }
-        if (op == "<")  { return l < r }
-        if (op == ">")  { return l > r }
-        if (op == "<=") { return l <= r }
-        if (op == ">=") { return l >= r }
+        if (op == "===") { return phpIdentical(l, r) }
+        if (op == "!==") { return !phpIdentical(l, r) }
+        if (op == "==") { return phpLoose(l, r) }
+        if (op == "!=" || op == "<>") { return !phpLoose(l, r) }
+        if (op == "<=>") { return phpCmp(l, r) }
+        if (op == "<")  { return phpCmp(l, r) < 0 }
+        if (op == ">")  { return phpCmp(l, r) > 0 }
+        if (op == "<=") { return phpCmp(l, r) <= 0 }
+        if (op == ">=") { return phpCmp(l, r) >= 0 }
+        if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") { return phpBit(op, l, r) }
+        return phpArith(op, l, r)
     }
 
     // No importable builtins: PHP's count/strlen/... are always in scope, never imported,

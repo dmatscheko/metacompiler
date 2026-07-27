@@ -286,3 +286,22 @@ Adding `class` to a `Modifier` production (to allow Swift's `class var`) broke
 `ClassDecl` then had nothing left to match. Keep a keyword that also *starts* a
 declaration out of the shared modifier list, and give members their own
 modifier production instead.
+
+## Tagging a sub-rule changes how many items its PARENT pops
+
+A rule that contains an untagged sub-rule is quietly relying on that sub-rule
+pushing nothing. Give the sub-rule a tag later and the parent now finds an extra
+item on the stack: `CatchPat = [ Pattern ] …` began pushing TWO items the moment
+`Pattern` got a tag, so `makeCatch` took a string where it expected the catch
+body. The failure surfaced a long way off, as `TypeError: Value is not an
+object` inside `emitFunc`.
+
+When you tag a rule that other rules already reference, check every reference.
+The cheap fix at a site that must stay item-neutral is a dropping wrapper:
+
+    DropPattern <~~ pop() ~~> = Pattern ;
+
+Related, in the compiler grammars: `Statement` wraps every thunk in `stmtPos`
+for `-trace`/`-cfgraph`. A statement production that pushes a RECORD rather than
+a function must override `stmtPos` to pass non-functions through, or the record
+is wrapped into a function and the feature silently stops working.

@@ -26,8 +26,10 @@ check("arith-precedence", 2 + 3 * 4, 14);
 check("arith-paren", (2 + 3) * 4, 20);
 check("arith-unary-minus", -3 + 5, 2);
 check("arith-chain", 20 - 5 - 3, 12);
-check("arith-div-trunc", 7 / 2, 3);
-check("arith-div-neg", -7 / 2, -3);
+// / is float division in PHP; intdiv() truncates.
+check("arith-div", 7 / 2, 3.5);
+check("arith-div-int", intdiv(7, 2), 3);
+check("arith-div-neg", -7 / 2, -3.5);
 check("arith-mod", 7 % 3, 1);
 check("arith-mod-neg", -7 % 3, -1);
 check("arith-intdiv", intdiv(9, 2), 4);
@@ -42,8 +44,8 @@ $ca -= 2;
 check("compound-minus", $ca, 6);
 $ca *= 4;
 check("compound-times", $ca, 24);
-$ca /= 5;
-check("compound-div-trunc", $ca, 4);
+$ca /= 5;                     // 24 / 5 is 4.8, not 4
+check("compound-div", $ca, 4.8);
 $ca %= 3;
 check("compound-mod", $ca, 1);
 
@@ -113,7 +115,8 @@ check("str-interp", "hello $who!", "hello world!");
 $n7 = 7;
 check("str-interp-num", "n=$n7 mid {$n7} end", "n=7 mid 7 end");
 check("str-escapes", strlen("a\tb") + strlen("x\ny"), 6);
-check("str-unicode-len", strlen("héllo"), 5);
+// strlen counts BYTES: the e-acute is two of them in UTF-8, so 6.
+check("str-unicode-len", strlen("héllo"), 6);
 $build = "a";
 $build .= "b";
 $build .= "c";

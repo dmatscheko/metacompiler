@@ -6,19 +6,28 @@ The subset: top level code that runs in source order (declare before use, no
 hoisting), let/var declarations with an optional type annotation (types are
 parsed and ignored, let is not enforced), functions with LABELLED parameters
 (func greet(name: String, from town: String) -> String, called greet(name: x,
-from: y); the external label is parsed and the last identifier is the bound
-name), struct and class with stored properties, methods and an explicit init
-(self and implicit unqualified property access inside methods, construction
-without new: Counter(start: 10, step: 1)), if/else (braces required), while,
-repeat/while, for-in over the ranges 1...5 (closed) and 1..<5 (half-open) and
-over arrays, break/continue, closures { x in x * 2 } as values with trailing
-closure call syntax (nums.map { x in x * 2 }), the array higher order methods
-map/filter/forEach plus append/contains/count, arrays and dictionaries with
-subscript read/write and .count, string interpolation \\(expr), the
-nil-coalescing operator a ?? b, nil, print(...) and return. Int arithmetic is
-32 bit and / truncates; + concatenates when a side is a String; == compares
-strings by value and objects by identity. A plain enum of bare cases becomes
-named string constants.
+from: y)), default parameter values, variadic parameters, inout parameters,
+@autoclosure, overloading by parameter type, nested functions and nested types,
+single expression bodies with an implicit return, struct and class (and actor)
+with stored properties, methods and an explicit init (self and implicit
+unqualified property access inside methods, construction without new; a struct
+without an init gets the memberwise one), if/else (braces required), while,
+repeat/while, for-in over the ranges 1...5 (closed) and 1..<5 (half-open), over
+arrays and over dictionaries, an optional where clause on a for, labelled loops
+with a labelled break/continue, guard, switch over values, break/continue,
+closures as values with capture lists, the shorthand arguments dollar-zero and
+up and trailing closure call syntax, the array higher order methods map/filter/
+forEach plus append/contains/count/first/last, arrays and dictionaries with
+subscript read/write and .count, tuples (labelled or not, tuple patterns in let
+and in assignment, tuple return types), string interpolation, the nil-coalescing
+operator a ?? b, optional chaining a?.b and a?[i], force unwrap a!, nil,
+print(...) and return. Optional binding in conditions: if let / guard let /
+while let (including the Swift 5.7 shorthand if let x), compound comma
+conditions, if case / guard case patterns, a where clause on a binding, and
+for case PAT in xs. Int arithmetic is 32 bit and / truncates; + concatenates
+when a side is a String; == compares strings by value and objects by identity.
+A plain enum of bare cases becomes named string constants, with or without a
+conformance list.
 
 Functions, methods, init and closures become IR functions jsf_N(env, args)
 (methods and init get the instance prepended and bind both this and self, so
@@ -27,9 +36,24 @@ become descriptor objects with a __ctor (default property initializers) and an
 init closure; construction runs __ctor then init. Method calls dispatch through
 js_mcall, subscript through js_pyget/js_pyset, dictionaries through js_dict_new,
 and ?? compiles to a null test branching around the right side (a phi merges).
-throw calls js_throw and do/catch compiles each body to a js_closure handed to
-js_try (Swift has no finally; the first catch wins, an unbound catch binds `error`).
+A binding condition compiles to a nil test branching to the clause's failure
+block, and a pattern to a chain of such tests. throw calls js_throw and do/catch
+compiles each body to a js_closure handed to js_try (Swift has no finally; the
+first catch wins, an unbound catch binds `error`). defer compiles the rest of
+its block into a js_try whose FINALLY closure is the defer body, so it runs on
+the normal path, on a return and on a throw, and nested defers unwind LIFO.
 The whole program becomes jsmain(env, args) executed in order.
+
+Not in the subset (accepted structurally and reported as not implemented under
+-warn-unsupported, or simply not parsed): floating point (the runtime is 32-bit
+integer only), the numeric and string literal forms beyond plain decimals and a
+double-quoted string with interpolation, protocols, extensions, generics (parsed
+and ignored), enums with raw or associated values, subscript declarations,
+computed properties and property observers, lazy and static members, property
+wrappers, initializer overloading and failable initializers, inheritance beyond
+a parsed superclass name, operator declarations, async/await, as/is casts, typed
+catch discrimination and struct value semantics (structs behave like classes).
+
 Top level self checking programs count failures and end with exit(failures).
 The same language with the same semantics is interpreted directly by
 swift-interpreter.abnf.") ;
@@ -145,7 +169,7 @@ ComputedProp <~~ push(notImplStmt("computed property or property observer", up.p
 // A plain enum of bare cases becomes named string constants.
 EnumDecl    = PlainEnum | ComplexEnum ;
 PlainEnum   <~~ push(makeEnumStmt(takeAll())) ~~>
-            = KwEnum Id <~~ push(up.in) ~~> "{" { SimpleCase } "}" ;
+            = KwEnum Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" TypeList ] "{" { SimpleCase } "}" ;
 SimpleCase  = KwCase Id <~~ push({ecase: up.in}) ~~> { "," Id <~~ push({ecase: up.in}) ~~> } [ ";" ] ;
 ComplexEnum <~~ push(notImplStmt("enum with raw or associated values", up.pos)) ~~>
             = KwEnum Id [ SkipAngle ] [ ":" TypeList ] SkipBlock ;
@@ -264,38 +288,67 @@ CatchLet    = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ "as" KwEnd Type ]
 // catch SomeError / catch .case / catch { }: no `let` binding, so the caught value
 // binds to the implicit name `error` (always pushed, so makeCatch binds it).
 CatchPat    <~~ push("error") ~~>
-            = [ Pattern ] [ KwWhere DiscardExpr ] ;
-Defer       <~~ push(notImplStmt("defer", up.pos)) ~~>
-            = KwDefer SkipBlock ;
+            = [ DropPattern ] [ KwWhere DiscardExpr ] ;
+// The clause's pattern is parsed but not discriminated yet, so its record is
+// dropped and the caught value binds to the implicit `error` either way.
+DropPattern <~~ pop() ~~> = Pattern ;
+// defer { ... }: everything AFTER it in its block is emitted into a js_try whose
+// FINALLY closure is the defer body, so it runs on the normal path, on a return (a
+// control signal that excDispatch re-issues) and on a throw (js_try re-panics after
+// the finally). Nested defers therefore unwind LIFO.
+Defer       <~~ push(makeDefer(pop())) ~~>
+            = KwDefer Block ;
 Throw       <~~ push(makeThrow(pop())) ~~>
             = KwThrow Expression [ ";" ] ;
 Fallthrough <~~ push(notImplStmt("fallthrough", up.pos)) ~~>
             = KwFallthrough [ ";" ] ;
 
 // if / guard / while whose condition uses optional binding (if let x = ...),
-// pattern matching (if case ...) or a compound comma condition: recognized and
-// routed to notImplStmt. Plain boolean conditions fall through to If/Guard/While.
-// The body SkipBlock is optional: when the last binding initializer ends in a
-// method call (let x = it.next()), the trailing { body } is grabbed as a trailing
-// closure by the expression, so no separate body block remains to consume.
-CplxIf      <~~ push(notImplStmt("if with binding or compound condition", up.pos)) ~~>
-            = KwIf CplxCondClause [ SkipBlock ] [ KwElse ElseTail ] ;
-ElseTail    = KwIf AnyCondClause [ SkipBlock ] [ KwElse ElseTail ] | SkipBlock ;
-CplxGuard   <~~ push(notImplStmt("guard with binding or compound condition", up.pos)) ~~>
-            = KwGuard CplxCondClause KwElse SkipBlock ;
-CplxWhile   <~~ push(notImplStmt("while with binding or compound condition", up.pos)) ~~>
-            = KwWhile CplxCondClause [ SkipBlock ] ;
+// pattern matching (if case ...) or a compound comma condition. Plain boolean
+// conditions fall through to If/Guard/While, which stay the cheaper single-test
+// forms; a clause reaches here only when it carries a comma or a binding. Each
+// condition item is emitted in turn and branches to the failure block; the names a
+// binding declares live in a child scope for if/while and, Swift-style, in the
+// ENCLOSING scope for guard (whose else branch is expected to leave that scope).
+CplxIf      <~~ push(makeCondIf(takeAll())) ~~>
+            = KwIf CplxCondClause Block [ KwElse ElseBody ] ;
+CplxGuard   <~~ push(makeCondGuard(takeAll())) ~~>
+            = KwGuard CplxCondClause KwElse Block ;
+CplxWhile   <~~ push(makeCondWhile(takeAll())) ~~>
+            = [ LoopLabel ] KwWhile CplxCondClause Block ;
 // A complex clause requires either a comma (2+ conditions) or a leading binding.
-CplxCondClause = CondItem "," CondItem { "," CondItem } | BindCond { "," CondItem } ;
-AnyCondClause  = CondItem { "," CondItem } ;
-CondItem    = BindCond | DiscardExpr ;
+CplxCondClause <~~ push({conds: takeAll()}) ~~>
+            = CondItem "," CondItem { "," CondItem } | BindCond { "," CondItem } ;
+CondItem    = BindCond | CondExpr ;
+CondExpr    <~~ push({cexpr: pop()}) ~~> = Expression ;
 BindCond    = OptBind | CaseCond ;
-OptBind     = ( "let" | "var" ) KwEnd BindPat [ ":" Type ] [ "=" DiscardExpr ] [ PatWhere ] ;
-CaseCond    = KwCase Pattern "=" DiscardExpr [ PatWhere ] ;
-PatWhere    = KwWhere DiscardExpr ;
-BindPat     = "(" BindPat { "," BindPat } ")" | Wildcard | Id ;
-Pattern     = "(" Pattern { "," Pattern } ")" | ( "let" | "var" ) KwEnd Pattern
-            | Wildcard | [ "." ] Id { "." Id } [ SkipParen ] ;
+// `if let x = e` and the 5.7 shorthand `if let x` (which rebinds x from itself).
+OptBind     <~~ push(makeOptBind(takeAll())) ~~>
+            = ( "let" | "var" ) KwEnd BindPat [ ":" Type ] [ "=" CondInit ] [ PatWhere ] ;
+CaseCond    <~~ push(makeCaseCond(takeAll())) ~~>
+            = KwCase Pattern "=" CondInit [ PatWhere ] ;
+CondInit    <~~ push({cinit: pop()}) ~~> = Expression ;
+PatWhere    <~~ push({cwhere: pop()}) ~~> = KwWhere Expression ;
+BindPat     <~~ push({bnames: takeAll()}) ~~>
+            = "(" BindName { "," BindName } ")" | BindName ;
+BindName    <~~ push(up.in) ~~> = Wildcard | Id ;
+
+// A pattern: `_`, `let x`, `x?` (optional pattern), a tuple of patterns, or an
+// enum case - `.busy`, `Load19.busy`, optionally with a sub-pattern argument list.
+// A bare identifier is a BINDING when it sits under a `let`/`var` and an enum case
+// reference otherwise, so emitMatchCore carries that flag down the tree.
+Pattern     <~~ push(makePattern(takeAll())) ~~>
+            = PatCore { NoSpace "?" <~~ push({popt: 1}) ~~> } ;
+PatCore     = PatLet | PatTuple | PatWild | PatEnum ;
+PatLet      <~~ push({plet: pop()}) ~~> = ( "let" | "var" ) KwEnd Pattern ;
+PatTuple    <~~ push({ptup: takeAll()}) ~~> = "(" Pattern { "," Pattern } ")" ;
+PatWild     <~~ push({pwild: 1}) ~~> = Wildcard ;
+PatEnum     <~~ push(makePatEnum(takeAll())) ~~>
+            = [ "." <~~ push({pdot: 1}) ~~> ] PatPath [ PatArgs ] ;
+PatPath     <~~ push({ppath: stripWs(up.in)}) ~~> = Id { "." Id } ;
+PatArgs     <~~ push({pargs: takeAll()}) ~~> = "(" [ PatArg { "," PatArg } ] ")" ;
+PatArg      = [ PatArgLabel ] Pattern ;
+PatArgLabel = Id ":" ;
 Wildcard    = "_" KwEnd ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
@@ -316,7 +369,7 @@ TupleAssign <~~ push(makeTupleAssign(takeAll())) ~~>
 
 If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf Expression Block [ KwElse ElseBody ] ;
-ElseBody    = Block | If ;
+ElseBody    = Block | CplxIf | If ;
 
 While       <~~ push(makeWhileL(takeAll())) ~~>
             = [ LoopLabel ] KwWhile Expression Block ;
@@ -324,7 +377,12 @@ While       <~~ push(makeWhileL(takeAll())) ~~>
 Repeat      <~~ push(makeRepeat(takeAll())) ~~>
             = [ LoopLabel ] KwRepeat Block KwWhile Expression [ ";" ] ;
 
-For         = ForRange | ForList ;
+// `for case PAT in xs` filters: only the elements the pattern matches run the body
+// (and the pattern's `let` names are bound for that iteration). Tried first - its
+// `case` would otherwise be read as the loop variable's name by ForRange/ForList.
+For         = ForCase | ForRange | ForList ;
+ForCase     <~~ push(makeForCase(takeAll())) ~~>
+            = [ LoopLabel ] KwFor KwCase Pattern KwIn Expression [ ForWhere ] Block ;
 ForRange    <~~ push(makeForRange(takeAll())) ~~>
             = [ LoopLabel ] KwFor ForPat KwIn Expression RangeOp Expression [ ForWhere ] Block ;
 RangeOp     = "..." <~~ push({rop: "..."}) ~~>
@@ -835,6 +893,279 @@ KwContinue  = "continue" KwEnd ;
             return
         }
         if (pat.fname != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pat.fname), v]) }
+    }
+
+    // ----- defer -----
+    // A defer is not a statement thunk but a MARKER in its block's item list; the
+    // block builder below wraps the rest of the block in a js_try with the defer body
+    // as its finally clause. A defer that was never reached - an early return above
+    // it - never runs, exactly like Swift's.
+    function makeDefer(t) { return {isdefer: t} }
+    function swSeqWithDefers(items) {
+        var cut = -1
+        for (var i = 0; i < items.length && cut < 0; i++) {
+            if (typeof items[i] != "function") { cut = i }
+        }
+        if (cut < 0) { return makeSeq(items) }
+        var before = makeSeq(items.slice(0, cut))
+        var deferT = items[cut].isdefer
+        var restT = swSeqWithDefers(items.slice(cut + 1))
+        return function(b) {
+            b = before(b)
+            // The rest of the block is a ctl closure (isCtl), so a return/break/
+            // continue leaving it becomes a signal that excDispatch re-issues here.
+            var bodyClo = callExt(b, "js_closure", [handle(emitFunc([], restT, false, true)), curScopeV])
+            var finClo = callExt(b, "js_closure", [handle(emitFunc([], deferT, false, false)), curScopeV])
+            return excDispatch(b, callExt(b, "js_try", [bodyClo, hUndef, finClo]))
+        }
+    }
+    // Both overridden by ASSIGNMENT (see the include-override trap in the gotchas doc).
+    makeBlockStmt = function(items) {
+        var seq = swSeqWithDefers(items)
+        return function(b) {
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            b = seq(b)
+            curScopeV = saved
+            return b
+        }
+    }
+    // A defer marker is a RECORD, not a thunk, so the source-position wrapper the
+    // Statement rule applies (active only under -trace / -cfgraph) has to pass it
+    // through untouched for the block builder to still recognize it.
+    var coreStmtPos = stmtPos
+    stmtPos = function(t) {
+        if (typeof t != "function") { return t }
+        return coreStmtPos(t)
+    }
+
+    // ----- Patterns and binding conditions -----
+    // A pattern is {opt: n, core: k}: n trailing `?` (an optional pattern, which
+    // fails on nil and matches the unwrapped value) around one core form.
+    function makePattern(items) {
+        var n = 0
+        for (var i = 1; i < items.length; i++) { n++ }
+        return {opt: n, core: items[0]}
+    }
+    // [ "." ] path [ ( subpatterns ) ] - an enum case reference, or (under a `let`)
+    // a plain name to bind.
+    function makePatEnum(items) {
+        var dot = false
+        var path = ""
+        var args = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].pdot != undefined) { dot = true }
+            else if (items[i].ppath != undefined) { path = items[i].ppath }
+            else if (items[i].pargs != undefined) { args = items[i].pargs }
+        }
+        return {pdot: dot, ppath: path, pargs: args}
+    }
+    // A nil / undefined test that branches to failB; returns the block to carry on in.
+    function emitNotNil(b, v, failB) {
+        var okB = curF.NewBlock("")
+        var midB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [v, hNull])), failB, midB)
+        midB.NewCondBr(truthy(midB, callExt(midB, "js_seq", [v, hUndef])), failB, okB)
+        return okB
+    }
+    // Emits the test chain of one pattern. On a match control reaches the returned
+    // block with every `let`/`var` name of the pattern declared in curScopeV; on a
+    // mismatch it branches to failB. binding says a bare identifier names a new
+    // variable rather than an enum case.
+    function emitMatchPat(b, p, v, binding, failB) {
+        if (p.opt > 0) { b = emitNotNil(b, v, failB) }
+        return emitMatchCore(b, p.core, v, binding, failB)
+    }
+    function emitMatchCore(b, k, v, binding, failB) {
+        if (k.pwild != undefined) { return b }
+        if (k.plet != undefined) { return emitMatchPat(b, k.plet, v, true, failB) }
+        if (k.ptup != undefined) {
+            var subs = k.ptup
+            for (var i = 0; i < subs.length; i++) {
+                b = emitMatchPat(b, subs[i], callExt(b, "js_get", [v, emitStr(b, "" + i)]), binding, failB)
+            }
+            return b
+        }
+        var simple = !k.pdot && k.pargs == null && k.ppath.indexOf(".") < 0
+        if (binding && simple) {
+            if (k.ppath != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, k.ppath), v]) }
+            return b
+        }
+        // A plain enum's cases are named string constants, so a case pattern is an
+        // equality test against that constant; `.name` (leading dot) has no type to
+        // resolve against and compares the case NAME directly. A case that carries
+        // associated values has no runtime payload yet, so it never matches.
+        if (k.pargs != null && k.pargs.length > 0) {
+            b.NewBr(failB)
+            return curF.NewBlock("")
+        }
+        var okB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [v, emitStr(b, patCaseName(k))])), okB, failB)
+        return okB
+    }
+    function patCaseName(k) {
+        var path = k.ppath
+        var cut = -1
+        for (var i = 0; i < path.length; i++) { if (path.charAt(i) == ".") { cut = i } }
+        return cut < 0 ? path : path.substring(cut + 1)
+    }
+
+    // A condition list of if/guard/while: {cexpr} tests, {bindNames} optional
+    // bindings and {pat} case patterns, each optionally followed by a where guard.
+    // Every item must pass; anything that fails branches to failB.
+    function emitConds(b, conds, failB) {
+        for (var i = 0; i < conds.length; i++) {
+            var cd = conds[i]
+            if (cd.cexpr != undefined) {
+                var r = cd.cexpr(b)
+                b = r.b
+                var nb = curF.NewBlock("")
+                b.NewCondBr(truthy(b, r.v), nb, failB)
+                b = nb
+            } else if (cd.bindNames != undefined) {
+                var ri = cd.init(b)
+                b = emitNotNil(ri.b, ri.v, failB)
+                var ns = cd.bindNames
+                if (ns.length == 1) {
+                    if (ns[0] != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ns[0]), ri.v]) }
+                } else {
+                    for (var j = 0; j < ns.length; j++) {
+                        if (ns[j] == "_") { continue }
+                        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ns[j]),
+                                                     callExt(b, "js_get", [ri.v, emitStr(b, "" + j)])])
+                    }
+                }
+            } else {
+                var rp = cd.init(b)
+                b = emitMatchPat(rp.b, cd.pat, rp.v, false, failB)
+            }
+            if (cd.whereT != null) {
+                var rw = cd.whereT(b)
+                b = rw.b
+                var nb2 = curF.NewBlock("")
+                b.NewCondBr(truthy(b, rw.v), nb2, failB)
+                b = nb2
+            }
+        }
+        return b
+    }
+    function makeOptBind(items) {
+        var names = items[0].bnames
+        var initT = null
+        var whereT = null
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].cinit != undefined) { initT = items[i].cinit }
+            else if (items[i].cwhere != undefined) { whereT = items[i].cwhere }
+        }
+        // `if let x` (Swift 5.7) rebinds x from the x already in scope.
+        if (initT == null) { initT = makeVarRef(names[0]) }
+        return {bindNames: names, init: initT, whereT: whereT}
+    }
+    function makeCaseCond(items) {
+        var initT = null
+        var whereT = null
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].cinit != undefined) { initT = items[i].cinit }
+            else if (items[i].cwhere != undefined) { whereT = items[i].cwhere }
+        }
+        return {pat: items[0], init: initT, whereT: whereT}
+    }
+    function makeCondIf(items) {
+        var conds = items[0].conds
+        var thenT = items[1]
+        var elseT = items.length > 2 ? items[2] : null
+        return function(b) {
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            var elseB = curF.NewBlock("")
+            var contB = curF.NewBlock("")
+            thenT(emitConds(b, conds, elseB)).NewBr(contB)
+            curScopeV = saved
+            if (elseT != null) { elseT(elseB).NewBr(contB) } else { elseB.NewBr(contB) }
+            return contB
+        }
+    }
+    // guard binds into the scope it stands in (the bindings outlive the statement);
+    // the else block runs only when the clause fails and normally diverges.
+    function makeCondGuard(items) {
+        var conds = items[0].conds
+        var elseT = items[1]
+        return function(b) {
+            var elseB = curF.NewBlock("")
+            var contB = curF.NewBlock("")
+            emitConds(b, conds, elseB).NewBr(contB)
+            elseT(elseB).NewBr(contB)
+            return contB
+        }
+    }
+    function makeCondWhile(items) {
+        var lbl = itemLbl(items)
+        var rest = itemsAfterLbl(items)
+        var conds = rest[0].conds
+        var bodyT = rest[1]
+        return function(b) {
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            var headB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var bodyB = emitConds(headB, conds, exitB)
+            loopStack.push({cont: headB, brk: exitB, lbl: lbl})
+            bodyT(bodyB).NewBr(headB)
+            loopStack.pop()
+            curScopeV = saved
+            return exitB
+        }
+    }
+    // items = [{lbl}?, pattern, listT, {fwhere}?, bodyT] - for case PAT in xs.
+    function makeForCase(items) {
+        var lbl = itemLbl(items)
+        var rest = itemsAfterLbl(items)
+        var pat = rest[0]
+        var listT = rest[1]
+        var k = 2
+        var whereT = null
+        if (rest[k] != undefined && rest[k].fwhere != undefined) { whereT = rest[k].fwhere; k++ }
+        var bodyT = rest[k]
+        return function(b) {
+            hidCount++
+            var iName = "$i" + hidCount
+            var sName = "$s" + hidCount
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            var r = listT(b)
+            b = r.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sName), r.v])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var postB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+            var sV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, sName)])
+            var lenV = callExt(headB, "js_pylen", [sV])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+            var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+            var sV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, sName)])
+            var elV = callExt(bodyB, "js_pyget", [sV2, iV2])
+            var innerB = emitMatchPat(bodyB, pat, elV, false, postB)
+            loopStack.push({cont: postB, brk: exitB, lbl: lbl})
+            if (whereT != null) {
+                var rw = whereT(innerB)
+                var runB = curF.NewBlock("")
+                rw.b.NewCondBr(truthy(rw.b, rw.v), runB, postB)
+                innerB = runB
+            }
+            bodyT(innerB).NewBr(postB)
+            loopStack.pop()
+            var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
+            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName),
+                                            callExt(postB, "js_jadd", [iV3, emitNum(postB, 1)])])
+            postB.NewBr(headB)
+            curScopeV = saved
+            return exitB
+        }
     }
 
     // cond ? a : b -> a diamond with a phi merge (like an if expression).

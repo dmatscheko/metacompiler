@@ -40,7 +40,8 @@ programs are self checking: they return 0 on success.") ;
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
-Program     = { Include | PPLine | StaticAssert | EnumDef | UnionDef | TypedefDecl | GFloatDecl
+Program     = { Include | PPLine | StaticAssert | EnumDef | UnionDef | UnionGDecl | UnionSkip
+              | TypedefDecl | GFloatDecl
               | StructDef | StructGDecl | FuncDef | Proto | GAggDecl | GlobalDecl } ;
 
 // Preprocessor directives other than #include are accepted and skipped (object-like
@@ -63,10 +64,19 @@ Enumerator  <~~ push(makeEnumerator(takeAll())) ~~>
 EnumInit    <~~ push({val: makeEnumVal(takeAll())}) ~~>
             = [ "-" <~~ push("-") ~~> ] Number ;
 
-// union U { ... }; -- accepted structurally, then reported as not implemented (the
-// flat one-word memory has no overlapping layout). The balanced body is skipped.
-UnionDef    <~~ notImpl("union", up.pos) ~~>
-            = KwUnion [ Id ] SkipBlock ";" ;
+// union U { int i; unsigned u; }; -- a union is laid out exactly like a struct whose
+// fields ALL sit at offset 0, with the size (and the byte size behind sizeof) the
+// maximum over the members. Tags live in the same table as the struct tags but under
+// a 'u:' prefixed key, so 'struct X' and 'union X' stay distinct C tag namespaces.
+UnionDef    <~~ defineUnion(takeAll()) ~~>
+            = KwUnion Id <~~ push(uKey(up.in)) ~~> "{" { FieldLine } "}" ";" ;
+// Global union variables, pointers and arrays (zero initialized like all globals).
+UnionGDecl  <~~ defineStructGlobals(takeAll()) ~~>
+            = KwUnion Id <~~ push(uKey(up.in)) ~~> SGDecl { "," SGDecl } ";" ;
+// An ANONYMOUS union at file scope (union { ... };) introduces no tag and no object,
+// so there is nothing to lay out; it is accepted and reported as not implemented.
+UnionSkip   <~~ notImpl("anonymous union", up.pos) ~~>
+            = KwUnion SkipBlock ";" ;
 
 // typedef <anything> Name; -- accepted and reported as not implemented (there is no
 // symbol table, so the introduced name cannot later be used as a type). The whole
@@ -125,7 +135,8 @@ FieldLine   <~~ push(makeFieldLine(takeAll())) ~~>
             = FieldType FDecl { "," FDecl } ";" ;
 FieldType   = TypeInt <~~ push({bty: "int"}) ~~>
             | EnumRef <~~ push({bty: "int"}) ~~>
-            | KwStruct Id <~~ push({bty: up.in}) ~~> ;
+            | KwStruct Id <~~ push({bty: up.in}) ~~>
+            | KwUnion Id <~~ push({bty: uKey(up.in)}) ~~> ;
 FDecl       = [ Stars ] Id <~~ push(up.in) ~~> ;
 
 // A function prototype (int putchar(int c);) is accepted and ignored: the callees
@@ -145,7 +156,8 @@ ParamList   <~~ push(takeAll()) ~~>
             = "(" [ ( Param { "," Param } [ "," "..." ] | "void" KwEnd | "..." ) ] ")" ;
 Param       <~~ push(makeParam(takeAll())) ~~>
             = ParamType [ Stars ] Id <~~ push(up.in) ~~> ;
-ParamType   = TypeInt | EnumRef | KwStruct Id <~~ push({sname: up.in}) ~~> ;
+ParamType   = TypeInt | EnumRef | KwStruct Id <~~ push({sname: up.in}) ~~>
+            | KwUnion Id <~~ push({sname: uKey(up.in)}) ~~> ;
 
 // Globals are declared like locals but registered at build time.
 GlobalDecl  <~~ defineGlobals(takeAll()) ~~>
@@ -170,7 +182,7 @@ SGDecl      <~~ push(makeSDecl(takeAll())) ~~>
 // skipped; takeAll() drops whatever the dimension sizes pushed. GAggDecl is top-level.
 GAggDecl    <~~ takeAll(); notImpl("aggregate initializer", up.pos) ~~>
             = AggBase { PStars } Id AggForm ";" ;
-AggBase     = BaseInt | KwStruct Id ;
+AggBase     = BaseInt | KwStruct Id | KwUnion Id ;
 AggForm     = EmptyArr [ "=" SkipBlock ]
             | ArraySize ArraySize { ArraySize } [ "=" SkipBlock ]
             | ArraySize "=" SkipBlock
@@ -187,14 +199,21 @@ Stars       <~~ push(makeStars(up.in, up.pos)) ~~> = "*" { PtrQual | "*" } ;
 PtrQual     = "const" KwEnd | "volatile" KwEnd | "restrict" KwEnd | "_Atomic" KwEnd ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
+// StructDecl / UnionDecl come BEFORE AggDecl: a 'struct P p = { ... }' brace
+// initializer is genuinely lowered now, and only the shapes those two decline (two or
+// more array dimensions, a braced scalar) still fall through to the AggDecl notImpl.
 Statement   = Block | If | While | Do | For | Switch | Return | Break | Continue
-            | AssertStmt | BoolDecl | LStructDef | StaticDecl | AggDecl | StructDecl | Decl | LFloatDecl
+            | AssertStmt | BoolDecl | LStructDef | LUnionDef | StaticDecl
+            | StructDecl | UnionDecl | AggDecl | Decl | LFloatDecl
             | Goto | PPStmt | Label | Empty | ExprStmt ;
 
 // A struct definition inside a function body. The layout is registered exactly like a
 // top-level one (the tag runs at build time), and the statement itself does nothing.
 LStructDef  <~~ defineStruct(takeAll()); push(function() {}) ~~>
             = KwStruct Id <~~ push(up.in) ~~> "{" { FieldLine } "}" ";" ;
+// The same for a union definition inside a function body.
+LUnionDef   <~~ defineUnion(takeAll()); push(function() {}) ~~>
+            = KwUnion Id <~~ push(uKey(up.in)) ~~> "{" { FieldLine } "}" ";" ;
 
 // A static local: the storage is allocated ONCE and survives across calls, unlike an
 // ordinary local. At the top level 'static' is just a linkage word on a global and is
@@ -254,11 +273,15 @@ LFloatDecl  <~~ push(notImplStmt("floating-point declaration", up.pos)) ~~>
             = KwFloating { SkipBlock | TdChar } ";" ;
 
 // Local struct variables, struct pointers (with optional initializer) and struct arrays.
+// A struct value may carry a brace initializer, with '.field =' designators.
 StructDecl  <~~ push(makeStructDecl(takeAll())) ~~>
             = KwStruct Id <~~ push(up.in) ~~> SDeclarator { "," SDeclarator } ";" ;
+// The same shapes for a union: 'union U u;', 'union U *p = q;', 'union U u = { .f = v };'.
+UnionDecl   <~~ push(makeStructDecl(takeAll())) ~~>
+            = KwUnion Id <~~ push(uKey(up.in)) ~~> SDeclarator { "," SDeclarator } ";" ;
 SDeclarator <~~ push(makeSDecl(takeAll())) ~~>
             = [ Stars ] Id <~~ push(up.in) ~~>
-              [ ArraySize | "=" AssignExpr ] ;
+              [ ArraySize | "=" DInit ] ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -309,9 +332,10 @@ DInit       = BraceInit | AssignExpr ;
 // A brace initializer collects its items; a trailing comma is allowed.
 BraceInit   <~~ push({list: takeAll()}) ~~>
             = "{" [ DItem { "," DItem } [ "," ] ] "}" ;
-DItem       <~~ push(makeDItem(takeAll())) ~~> = [ ArrDesig ] DInit ;
-// The array designator '[2] = value'; the struct form '.f = value' is not yet lowered.
+DItem       <~~ push(makeDItem(takeAll())) ~~> = [ ArrDesig | FldDesig ] DInit ;
+// The array designator '[2] = value' and the struct/union form '.field = value'.
 ArrDesig    <~~ push({at: pop()}) ~~> = "[" Number "]" "=" ;
+FldDesig    = "." Id <~~ push({fld: up.in}) ~~> "=" ;
 
 Empty       <~~ push(function() {}) ~~>
             = ";" ;
@@ -392,10 +416,11 @@ UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Not | BitNot | Sizeof | Ali
 // and only '(int)x' / '(struct P *)p' are taken as casts.
 Cast        <~~ pop(); push(cNIExpr("cast expression", up.pos)) ~~>
             = "(" CastType ")" UnaryExpr ;
-CastType    = ( TypeInt | KwStruct Id | EnumRef ) { PStars } ;
+CastType    = ( TypeInt | KwStruct Id | KwUnion Id | EnumRef ) { PStars } ;
 
-// sizeof(type): a compile-time constant. Scalars are 4 bytes, any pointer 8; a
-// struct value or a sizeof over an expression is reported as not implemented.
+// sizeof(type): a compile-time constant. Scalars are 4 bytes, any pointer 8, a struct
+// the packed sum and a union the maximum over its members; a sizeof over an expression
+// is answered with the size of int (the machine has one integer value type).
 Sizeof      = KwSizeof ( SizeofType | SizeofExpr ) ;
 SizeofType  <~~ push(makeSizeof(takeAll(), up.pos)) ~~>
             = "(" SizeName ")" ;
@@ -411,7 +436,8 @@ SizeName    <~~ push(makeSizeName(takeAll())) ~~>
             = SizeBase { "*" <~~ push("*") ~~> [ PtrQual ] } ;
 SizeBase    = ScalarName
             | EnumRef <~~ push({kind: "int", w: 4}) ~~>
-            | KwStruct Id <~~ push({kind: "struct"}) ~~> ;
+            | KwStruct Id <~~ push({kind: "struct", s: up.in}) ~~>
+            | KwUnion Id <~~ push({kind: "struct", s: uKey(up.in)}) ~~> ;
 // A scalar type name inside sizeof / _Alignof, kept keyword by keyword so the width
 // survives: char and _Bool are 1, short 2, any long (and double) 8, the rest 4.
 ScalarName  <~~ push(makeScalarName(takeAll())) ~~>
@@ -698,11 +724,13 @@ KwDefault   = "default" KwEnd ;
     }
     // sizeof: SizeName items = [{kind}, "*"...] -> {kind, ptr}. makeSizeof turns it
     // into a constant thunk (pointer 8, scalar/enum 4) or a notImpl for a struct value.
-    function makeSizeName(items) { return {kind: items[0].kind, w: items[0].w, ptr: items.length > 1} }
+    function makeSizeName(items) { return {kind: items[0].kind, s: items[0].s, w: items[0].w, ptr: items.length > 1} }
     function makeSizeof(items, pos) {
         var d = items[0]
         if (d.ptr) return function() { return 8 }
-        if (d.kind == "struct") return cNIExpr("sizeof of a struct value", pos)
+        // A struct/union tag: its packed byte size, looked up lazily so that a sizeof
+        // may name a tag defined further down the file.
+        if (d.kind == "struct") { var key = d.s; return function() { return structOf(key).bytes } }
         return function() { return d.w }
     }
 
@@ -715,6 +743,21 @@ KwDefault   = "default" KwEnd ;
     var structs = {}
     function ctSize(ct) { return ct.k == "struct" ? structOf(ct.s).size : 1 }
     function ctStruct(sname) { return {k: "struct", s: sname} }
+    // A union tag lives in the same table as the struct tags, under a 'u:' prefixed
+    // key - C keeps 'struct X' and 'union X' in one tag namespace but as distinct types,
+    // and no C identifier can contain a ':', so the two can never collide.
+    function uKey(name) { return "u:" + name }
+    function tagName(key) {
+        return (key.length > 2 && key.charCodeAt(0) == 117 && key.charCodeAt(1) == 58)
+            ? "union " + key.slice(2) : "struct " + key
+    }
+    // The BYTE size behind sizeof: an int is 4, any pointer 8, an aggregate its own
+    // packed size (the flat memory itself is word addressed - see ctSize).
+    function ctBytes(ct) {
+        if (ct.k == "ptr") return 8
+        if (ct.k == "struct") return structOf(ct.s).bytes
+        return 4
+    }
     // n levels of pointer around a base ct (0 levels yields the base itself).
     function ptrTo(n, base) {
         var ct = base
@@ -723,13 +766,13 @@ KwDefault   = "default" KwEnd ;
     }
     function structOf(sname) {
         var st = hasOwn(structs, sname) ? structs[sname] : undefined
-        if (st == undefined) fail("struct not defined: " + sname)
+        if (st == undefined) fail(tagName(sname) + " not defined")
         return st
     }
     function fieldOf(sname, fname) {
         var fs = structOf(sname).fields
         var f = hasOwn(fs, fname) ? fs[fname] : undefined
-        if (f == undefined) fail("struct " + sname + " has no field " + fname)
+        if (f == undefined) fail(tagName(sname) + " has no field " + fname)
         return f
     }
     // FieldLine items = [{bty}, {ptr}?, name, {ptr}?, name...] -> {fields: [{name, bty,
@@ -745,12 +788,15 @@ KwDefault   = "default" KwEnd ;
         }
         return {fields: fields}
     }
-    // StructDef items = [name, {fields}...]. Nested struct values need a complete
-    // (already defined) struct; pointer fields may point at the struct itself.
-    function defineStruct(items) {
+    // StructDef items = [name, {fields}...]. Nested struct/union values need a complete
+    // (already defined) tag; pointer fields may point at the struct itself.
+    // A UNION lays every member at offset 0 and takes the MAXIMUM size instead of the
+    // sum - that one difference is the whole of the union layout. `order` keeps the
+    // declaration order, which is what a positional brace initializer walks.
+    function defineTag(items, isUnion) {
         var name = items[0]
-        if (hasOwn(structs, name)) fail("struct defined twice: " + name)
-        var st = {size: 0, fields: {}}
+        if (hasOwn(structs, name)) fail(tagName(name) + " defined twice")
+        var st = {size: 0, bytes: 0, fields: {}, order: [], isUnion: isUnion}
         for (var i = 1; i < items.length; i++) {
             var fl = items[i].fields
             for (var j = 0; j < fl.length; j++) {
@@ -759,12 +805,48 @@ KwDefault   = "default" KwEnd ;
                 var base = (f.bty == "int") ? ctInt : ctStruct(f.bty)
                 if (f.star > 0) { ct = ptrTo(f.star, base) }         // May point at any (even later) struct.
                 else { if (f.bty != "int") structOf(f.bty); ct = base }
-                if (hasOwn(st.fields, f.name)) fail("duplicate field " + f.name + " in struct " + name)
-                st.fields[f.name] = {off: st.size, ct: ct}
-                st.size += ctSize(ct)
+                if (hasOwn(st.fields, f.name)) fail("duplicate field " + f.name + " in " + tagName(name))
+                var w = ctSize(ct)
+                var by = ctBytes(ct)
+                st.fields[f.name] = {off: isUnion ? 0 : st.size, ct: ct}
+                st.order.push(f.name)
+                if (isUnion) {
+                    if (w > st.size) st.size = w
+                    if (by > st.bytes) st.bytes = by
+                } else {
+                    st.size += w
+                    st.bytes += by
+                }
             }
         }
         structs[name] = st
+    }
+    function defineStruct(items) { defineTag(items, false) }
+    function defineUnion(items) { defineTag(items, true) }
+    // A struct/union brace initializer -> [{f, t}] with f the FIELD descriptor, in
+    // declaration order. Items are laid on the fields in declaration order; a '.field =' designator jumps to that field
+    // and the following positional items continue after it (C11 6.7.9). A field that
+    // no item reaches keeps the zero the fresh memory already holds.
+    function structInitPlan(key, list, pos) {
+        var st = structOf(key)
+        var out = []
+        var idx = 0
+        for (var i = 0; i < list.length; i++) {
+            var it = list[i]
+            if (it.fld != undefined) {
+                var found = -1
+                for (var k = 0; k < st.order.length; k++) { if (st.order[k] == it.fld) found = k }
+                if (found < 0) fail(tagName(key) + " has no field " + it.fld)
+                idx = found
+            }
+            if (idx >= st.order.length) fail("too many initializers for " + tagName(key))
+            var f = fieldOf(key, st.order[idx])
+            var v = it.v
+            if (typeof v != "function") { notImpl("nested aggregate initializer", pos); v = undefined }
+            if (v != undefined) out.push({f: f, t: v})
+            idx = idx + 1
+        }
+        return out
     }
 
     // All user defined functions by name: {params: [{name, ptr}...], body: thunk}.
@@ -968,9 +1050,13 @@ KwDefault   = "default" KwEnd ;
 
     // ----- Statement thunks -----
 
-    // One brace-initializer item: an optional '[i] =' designator plus its value.
+    // One brace-initializer item: an optional '[i] =' / '.field =' designator plus
+    // its value.
     function makeDItem(items) {
-        if (items.length > 1) return {at: items[0].at, v: items[1]}
+        if (items.length > 1) {
+            if (items[0].fld != undefined) return {fld: items[0].fld, v: items[1]}
+            return {at: items[0].at, v: items[1]}
+        }
         return {v: items[0]}
     }
     // A brace list -> a dense array of value thunks, honouring '[i] =' designators.
@@ -1060,8 +1146,13 @@ KwDefault   = "default" KwEnd ;
         } else if (d.size != undefined) {
             declVar(d.name, alloc(d.size * structOf(sname).size), true, ctStruct(sname))
         } else {
-            if (d.init != undefined) fail("struct initializers are not supported: " + d.name)
-            declVar(d.name, alloc(structOf(sname).size), false, ctStruct(sname))
+            var base = alloc(structOf(sname).size)   // Fresh memory is zeroed.
+            if (d.init != undefined) {
+                if (d.init.list == undefined) fail("a struct or union needs a brace initializer: " + d.name)
+                var plan = structInitPlan(sname, d.init.list, 0)
+                for (var i = 0; i < plan.length; i++) mem[base + plan[i].f.off] = plan[i].t() | 0
+            }
+            declVar(d.name, base, false, ctStruct(sname))
         }
     }
     // StructDecl items = [structName, descriptor...] -> declaration thunk.

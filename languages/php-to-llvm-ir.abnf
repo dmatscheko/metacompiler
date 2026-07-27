@@ -295,7 +295,7 @@ StaticSfx   <~~ push(makeStatic(takeAll(), up.pos)) ~~>
 Primary     = "(" Expression ")"
             | NewAnon | NewExpr | ClosureExpr | ArrowFn | Match | ArrayLit
             | IncludeExpr
-            | DqStr | SqStr | IntLit
+            | DqStr | SqStr | PhpFloat | IntLit
             | True | False | Null
             | VarRef | StaticExpr | Call | ConstRef ;
 
@@ -358,6 +358,18 @@ PlainItem   <~~ push({elem: pop()}) ~~>
 // f(args): a top-level function or builtin call.
 Call        <~~ push(makeCall(takeAll())) ~~>
             = Name <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
+
+// A float literal. It has to be tried BEFORE IntLit, because "3.5" and "1e3" both
+// start exactly like an integer - without it "3.5" parsed as the integer 3, the
+// concatenation operator '.', and the integer 5, and quietly produced the string
+// "35". The leading-dot form ('.5') is PHP's too. Mirrors PhpFloat in the
+// interpreter grammar; the underscore separators PHP 7.4 allows are stripped in
+// phpFloatLit.
+PhpFloat    <~~ push(makeConst(phpFloatLit(up.in))) ~~>
+            = "." :whitespace() "0"..."9" { "0"..."9" | "_" } [ ExpPart ] :whitespace(Whitespace)
+            | "0"..."9" :whitespace() { "0"..."9" | "_" } FloatTail :whitespace(Whitespace) ;
+FloatTail   = "." { "0"..."9" | "_" } [ ExpPart ] | ExpPart ;
+ExpPart     = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
 
 VarRef      <~~ push(makeVarRef(pop())) ~~>
             = DollarName ;
@@ -477,6 +489,19 @@ KwInstanceof = "instanceof" KwEnd ;
     var hidCount = 0
 
     function fail(msg) { println("php compiler error: " + msg); exit(1) }
+
+    // ----- literal builders -----
+    // A float literal's text, with PHP 7.4 underscore separators (and any whitespace
+    // the token carries) stripped before parseFloat. Floats are plain numbers here -
+    // unlike the interpreter, which boxes them so 1.0 !== 1 stays observable.
+    function phpFloatLit(t) {
+        var out = ""
+        for (var i = 0; i < t.length; i++) {
+            var ch = t.charAt(i)
+            if (ch != "_" && ch != " " && ch != "\t" && ch != "\r" && ch != "\n") { out += ch }
+        }
+        return parseFloat(out)
+    }
 
     // ----- string helpers -----
     function unescapeSq(s) {
@@ -779,6 +804,22 @@ KwInstanceof = "instanceof" KwEnd ;
     // ----- concatenation and === / !== on the shared binary fold -----
     binExt["==="] = "js_seq"
     binExt["!=="] = "js_sne"
+    // PHP's "/" is FLOAT division: 7 / 2 is 3.5 and -7 / 2 is -3.5; it yields an int
+    // only when the division comes out even, which plain IEEE division already does.
+    // The C-family default in compile-core.js truncates the quotient to 32 bit
+    // (intWrap), which is intdiv() and not "/", so switch both forms off. (Dart made
+    // exactly this correction for its own "/" vs "~/" pair.)
+    wraps["/"] = 0
+    wraps["/="] = 0
+    // Unary minus for the same reason: the shared makeNeg truncates its result to
+    // 32 bit, which turned the literal -3.5 into -3. PHP integers are 64 bit, so the
+    // truncation is wrong for them too.
+    makeNeg = function(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_neg", [r.v])}
+        }
+    }
     emitBin = function(b, op, l, r) {
         if (op == "." || op == ".=") {
             return callExt(b, "js_jadd", [callExt(b, "js_jadd", [emitStr(b, ""), l]), r])
@@ -1031,7 +1072,9 @@ KwInstanceof = "instanceof" KwEnd ;
     function emitBuiltin(b, name, args) {
         var vs = []
         for (var i = 0; i < args.length; i++) { var r = args[i](b); b = r.b; vs.push(r.v) }
-        if (name == "count" || name == "strlen") { return {b: b, v: callExt(b, "js_pylen", [vs[0]])} }
+        // strlen counts BYTES (PHP strings are byte strings), count() counts elements.
+        if (name == "strlen") { return {b: b, v: callExt(b, "js_bytelen", [vs[0]])} }
+        if (name == "count") { return {b: b, v: callExt(b, "js_pylen", [vs[0]])} }
         if (name == "in_array") { return {b: b, v: callExt(b, "js_mcall", [vs[1], emitStr(b, "contains"), argList(b, [vs[0]])])} }
         if (name == "array_push") { callExt(b, "js_arr_push", [vs[0], vs[1]]); return {b: b, v: callExt(b, "js_pylen", [vs[0]])} }
         if (name == "array_keys") { return {b: b, v: callExt(b, "js_mcall", [vs[0], emitStr(b, "keys"), callExt(b, "js_arr_new", [])])} }
