@@ -1607,12 +1607,35 @@ KwContract  = "contract" KwEnd ;
         }
         return hit
     }
+    // The PRIMITIVE binary operator. Everything but `+` is emitted straight; `+` is
+    // string concatenation as soon as one operand is a String (Kotlin's rule, and
+    // exactly what kotlin-interpreter.abnf's kadd tests), and then both operands are
+    // rendered by js_ktstr first. Without that, the concat falls back on the runtime's
+    // own ToString, which spells a list "1,2" and an instance "[object Object]" where
+    // Kotlin spells them "[1, 2]" and through toString(). The test has to be a RUNTIME
+    // probe because this front end does not type its expressions; it costs two
+    // js_is_type calls and a branch, and only on a `+` written in the source (a loop
+    // increment emits js_jadd directly).
+    function emitPrimBin(b, op, l, r) {
+        if (op != "+" && op != "+=") { return {b: b, v: emitBin(b, op, l, r)} }
+        var strB = curF.NewBlock("")
+        var numB = curF.NewBlock("")
+        var mrgB = curF.NewBlock("")
+        var isStr = b.NewOr(truthy(b, callExt(b, "js_is_type", [l, emitStr(b, "String")])),
+                            truthy(b, callExt(b, "js_is_type", [r, emitStr(b, "String")])))
+        b.NewCondBr(isStr, strB, numB)
+        var sv = callExt(strB, "js_jadd", [callExt(strB, "js_ktstr", [l]), callExt(strB, "js_ktstr", [r])])
+        strB.NewBr(mrgB)
+        var nv = emitBin(numB, op, l, r)
+        numB.NewBr(mrgB)
+        return {b: mrgB, v: mrgB.NewPhi([llvm.ir.NewIncoming(sv, strB), llvm.ir.NewIncoming(nv, numB)])}
+    }
     // Emit `l op r`: the convention method when the left operand is an instance of a
     // class that declares it, the primitive operator otherwise.
     function emitOpBin(b, op, l, r) {
         var mth = opMethodOf[op]
         var cls = (mth != undefined) ? opClasses["$" + mth] : undefined
-        if (cls == undefined) { return {b: b, v: emitBin(b, op, l, r)} }
+        if (cls == undefined) { return emitPrimBin(b, op, l, r) }
         var objB = curF.NewBlock("")
         var primB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
@@ -1622,9 +1645,9 @@ KwContract  = "contract" KwEnd ;
         var ov = callExt(objB, "js_mcall", [l, emitStr(objB, mth), argsV])
         if (op == "!=") { ov = callExt(objB, "js_not", [ov]) }
         objB.NewBr(mergeB)
-        var pv = emitBin(primB, op, l, r)
-        primB.NewBr(mergeB)
-        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(ov, objB), llvm.ir.NewIncoming(pv, primB)])}
+        var pr = emitPrimBin(primB, op, l, r)
+        pr.b.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(ov, objB), llvm.ir.NewIncoming(pr.v, pr.b)])}
     }
     // Every binary operator of the subset goes through the convention check.
     foldBinary = function(items) {
@@ -2314,6 +2337,14 @@ KwContract  = "contract" KwEnd ;
                     }
                     return {b: b, v: callExt(b, "js_call", [efV, hUndef, eargsV])}
                 }
+                // v.toString(): Kotlin's rendering of the value, which is what
+                // println writes. js_ktstr looks a user or synthesized toString up on
+                // the __class chain and calls it first, so an override still wins;
+                // going through js_mcall instead would abort on a list ("unknown list
+                // method 'toString'") and on an instance without one.
+                if (s.name == "toString" && s.args.length == 0) {
+                    return {b: b, v: callExt(b, "js_ktstr", [cur])}
+                }
                 // Int.inv(): the runtime has no method table for numbers, so the bitwise
                 // complement is emitted inline (unless a class declares its own `inv`).
                 if (s.name == "inv" && s.args.length == 0 && classMethodNames["$inv"] != true) {
@@ -2937,6 +2968,9 @@ KwContract  = "contract" KwEnd ;
     }
 
     // items = [{s: chunk} | {e: thunk}...] -> js_jadd fold starting from "".
+    // An interpolated PART is rendered by js_ktstr first: js_jadd's string concat
+    // uses the runtime's own ToString, which spells a list "1,2" and an instance
+    // "[object Object]" where Kotlin spells them "[1, 2]" and through toString().
     function makeTemplate(items) {
         return function(b) {
             var v = emitStr(b, "")
@@ -2946,7 +2980,7 @@ KwContract  = "contract" KwEnd ;
                 else {
                     var r = items[i].e(b)
                     b = r.b
-                    pv = r.v
+                    pv = callExt(r.b, "js_ktstr", [r.v])
                 }
                 v = callExt(b, "js_jadd", [v, pv])
             }
@@ -3692,7 +3726,11 @@ KwContract  = "contract" KwEnd ;
             for (var k = 0; k < props.length; k++) {
                 var lead = (k == 0) ? (props[k] + "=") : (", " + props[k] + "=")
                 v = callExt(bb, "js_jadd", [v, emitStr(bb, lead)])
-                v = callExt(bb, "js_jadd", [v, callExt(bb, "js_get", [thisV, emitStr(bb, props[k])])])
+                // js_ktstr, not the concat's own ToString: a property holding a list
+                // renders "[1, 2]" here, exactly as the interpreter's dataToString
+                // (which folds with kstr2) renders it.
+                v = callExt(bb, "js_jadd", [v, callExt(bb, "js_ktstr",
+                                                       [callExt(bb, "js_get", [thisV, emitStr(bb, props[k])])])])
             }
             bb.NewRet(callExt(bb, "js_jadd", [v, emitStr(bb, ")")]))
             return deadBlock()
@@ -4033,6 +4071,10 @@ KwContract  = "contract" KwEnd ;
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            // The marker kotlin-interpreter.abnf sets on an enum descriptor, so that
+            // js_ktstr can render an entry as its NAME (java.lang.Enum.toString)
+            // instead of the Name@1 an ordinary instance gets.
+            callExt(b, "js_set", [clsV, emitStr(b, "__isenum"), hTrue])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             b = emitSuperLinks(b, clsV, hdr.supers, own)
             var ctorIdx = emitCtor(hdr.cparams, parts.inits, hdr.supers)
@@ -4233,6 +4275,14 @@ KwContract  = "contract" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "min"), callExt(b, "js_get", [mathV, emitStr(b, "min")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "exitProcess"),
                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
+        // println / print: Kotlin's OWN rendering, not the shared println host
+        // function (which hands the raw runtime value to Go's %v and printed <nil>
+        // for null, [1 2] for a list and a map of pointer addresses - or a stack
+        // overflow - for an instance). js_ktprint / js_ktwrite each RETURN the host
+        // function, so ::println and list.forEach(::println) keep working and no
+        // other language's println changes. See abnf/jsrtkotlin.go.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "println"), callExt(b, "js_ktprint", [])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"), callExt(b, "js_ktwrite", [])])
         b = emitImported(b)   // imported files' items, each under its own source (call-graph file attribution)
         b = makeSeq(items)(b)
         // The entry point defaults to main(), but the -main flag (c.mainName) can override

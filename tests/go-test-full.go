@@ -716,7 +716,182 @@ func s23() {
 	check("flt23", sum == 1.0 && fs23(sum) == "1")
 }
 
+// ===== SECTION 24: fmt's value rendering =====
+// What fmt.Println actually writes for each kind of value. Every expected string
+// below was taken from `go run` (go 1.26.5) before it was written down. The
+// section exists because the COMPILER half used to hand the raw runtime value to
+// Go's %v - so a map printed as map[__dict:true keys:[a] vals:[1] zero:0] and a
+// struct as its class descriptor - and because both halves printed a map in
+// INSERTION order where fmt sorts the keys, and neither half honoured
+// fmt.Stringer. The assertions go through fmt.Sprint / fmt.Sprintf so they
+// compare strings.
+//
+// Three renderings are deliberately NOT asserted here, because both halves
+// knowingly differ from go (they agree with each other, which is what
+// ./test.sh --cross measures):
+//
+//	&P{1}           go: &{1}     here: {1}    - a struct value IS a reference in
+//	                                            this model, so a struct and a
+//	                                            pointer to it are one value
+//	&n (n an int)   go: 0xc00...  here: &5    - an address is not reproducible
+//	var m map[K]V   go: map[]     here: <nil> - a nil map is the null value here
+type stringer24 struct{ n int }
+
+func (s stringer24) String() string { return "S<" + fmt.Sprint(s.n) + ">" }
+
+type pt24 struct {
+	x int
+	y int
+}
+
+type nest24 struct {
+	a int
+	b pt24
+}
+
+func s24() {
+	// nil, the scalars and a rune (which is an integer, so it prints as one).
+	var e error = nil
+	var np *pt24 = nil
+	check("fmt1", fmt.Sprint(e) == "<nil>" && fmt.Sprint(np) == "<nil>")
+	check("fmt2", fmt.Sprint(true) == "true" && fmt.Sprint(false) == "false")
+	check("fmt3", fmt.Sprint(42) == "42" && fmt.Sprint(-7) == "-7")
+	check("fmt4", fmt.Sprint("hi") == "hi" && fmt.Sprint('a') == "97")
+	// A SLICE and an ARRAY print the same way - space separated, no commas - and a
+	// slice shows only its own window, not the whole backing array.
+	sl := []int{1, 2, 3, 4}
+	ar := [3]int{7, 8, 9}
+	check("fmt5", fmt.Sprint(sl) == "[1 2 3 4]" && fmt.Sprint(ar) == "[7 8 9]")
+	check("fmt6", fmt.Sprint(sl[1:3]) == "[2 3]" && fmt.Sprint(sl[:0]) == "[]")
+	var nilsl []int
+	check("fmt7", fmt.Sprint(nilsl) == "[]" && fmt.Sprint([]string{"a", "b"}) == "[a b]")
+	// A map prints map[k:v ...] with the keys SORTED (fmt has done that since Go
+	// 1.12), numerically for a numeric key type and bytewise for a string one.
+	ms := map[string]int{"c": 3, "a": 1, "b": 2}
+	check("fmt8", fmt.Sprint(ms) == "map[a:1 b:2 c:3]")
+	mi := map[int]string{33: "x", 2: "b", 10: "j"}
+	check("fmt9", fmt.Sprint(mi) == "map[2:b 10:j 33:x]")
+	check("fmt10", fmt.Sprint(map[string]int{}) == "map[]")
+	// A struct is its field values in declaration order, braced.
+	check("fmt11", fmt.Sprint(pt24{1, 2}) == "{1 2}")
+	check("fmt12", fmt.Sprint(nest24{1, pt24{2, 3}}) == "{1 {2 3}}")
+	check("fmt13", fmt.Sprint([]pt24{{1, 2}, {3, 4}}) == "[{1 2} {3 4}]")
+	check("fmt14", fmt.Sprint(map[string]pt24{"k": {9, 8}}) == "map[k:{9 8}]")
+	// fmt.Stringer wins over the memberwise form, at every nesting depth.
+	check("fmt15", fmt.Sprint(stringer24{3}) == "S<3>")
+	check("fmt16", fmt.Sprint([]stringer24{{1}, {2}}) == "[S<1> S<2>]")
+	// Println separates every pair of operands; Print (and Sprint) only two
+	// operands NEITHER of which is a string.
+	check("fmt17", fmt.Sprint(1, 2) == "1 2" && fmt.Sprint(1, "a", 2) == "1a2")
+	check("fmt18", fmt.Sprint("a", "b") == "ab" && fmt.Sprint() == "")
+	// The format verbs both halves implement.
+	check("fmt19", fmt.Sprintf("%v|%d|%s|%t", ms, 5, "z", true) == "map[a:1 b:2 c:3]|5|z|true")
+	check("fmt20", fmt.Sprintf("%v %v", pt24{1, 2}, sl) == "{1 2} [1 2 3 4]")
+	check("fmt21", fmt.Sprintf("%q %q", "a\"b", 'a') == "\"a\\\"b\" 'a'")
+	check("fmt22", fmt.Sprintf("%c%c%%", 65, 0x4e2d) == "A中%")
+	check("fmt23", fmt.Sprintf("%s|%v", stringer24{4}, stringer24{5}) == "S<4>|S<5>")
+	check("fmt24", fmt.Sprintf("no verbs") == "no verbs" && fmt.Sprintf("%d", -3) == "-3")
+	// A float64 renders through the same path, boxed value and all.
+	half := 1.0 / 2.0
+	check("fmt25", fmt.Sprint(half) == "0.5" && fmt.Sprint([]float64{1.5, 2}) == "[1.5 2]")
+	check("fmt26", fmt.Sprintf("%v %v", half, pt24{}) == "0.5 {0 0}")
+	// The two BUILTINS. Real Go writes both to stderr and formats a pointer or a
+	// slice as an address; here they write to stdout and render the value, which
+	// is what makes them reproducible. Only their EXISTENCE can be asserted - the
+	// interpreter half used to abort with "unknown name: println" right here.
+	println("s24: builtin println", 1, true)
+	print("s24: builtin print", 2, "\n")
+}
+
 // ===== END SECTIONS =====
+
+// ===== SECTION 25: sized integers =====
+// Go's integer types have a WIDTH and a signedness, and both survive into the
+// next operation: 127 + 1 is -128 at int8 and 128 at int. Everything here is
+// written through VARIABLES on purpose - Go folds untyped CONSTANT expressions
+// at arbitrary precision, so `check("x", int8(127)+1 == -128)` would not
+// compile and `var x = 1 << 62` is a constant, not the runtime shift.
+func s25() {
+	var i8 int8 = 127
+	i8++
+	check("int1", i8 == -128)
+	var u8 uint8 = 255
+	u8++
+	check("int2", u8 == 0)
+	var i16 int16 = 32767
+	i16++
+	check("int3", i16 == -32768)
+	var u16 uint16 = 65535
+	u16++
+	check("int4", u16 == 0)
+	var i32 int32 = 2147483647
+	i32++
+	check("int5", i32 == -2147483648)
+	var u32 uint32 = 4294967295
+	u32++
+	check("int6", u32 == 0)
+
+	// 64 bits of precision: a double carries 53, so these are the values a
+	// number-based value model cannot hold.
+	var i64 int64 = 9223372036854775807
+	check("int7", fmt.Sprint(i64) == "9223372036854775807")
+	j := i64
+	j++
+	check("int8", j == -9223372036854775808)
+	check("int9", fmt.Sprint(j) == "-9223372036854775808")
+	var u64 uint64 = 18446744073709551615
+	check("int10", fmt.Sprint(u64) == "18446744073709551615")
+	k := u64
+	k++
+	check("int11", k == 0)
+
+	// Shifts run at the full width, not at 32 bits.
+	one := 1
+	check("int12", fmt.Sprint(one<<62) == "4611686018427387904")
+	check("int13", fmt.Sprint(one<<63) == "-9223372036854775808")
+	var s8 uint8 = 1
+	check("int14", s8<<9 == 0)
+
+	// A product that leaves the exactly representable range.
+	big := int64(1000000007)
+	check("int15", fmt.Sprint(big*big) == "1000000014000000049")
+
+	// Unsigned comparison and unsigned shift are not the signed ones.
+	var um uint64 = 18446744073709551615
+	check("int16", um > 0)
+	check("int17", fmt.Sprint(um>>1) == "9223372036854775807")
+	var neg int32 = -8
+	check("int18", neg>>1 == -4)
+	check("int19", fmt.Sprint(uint32(4294967288)>>1) == "2147483644")
+
+	// Truncated division and remainder take the dividend's sign.
+	n := -7
+	d := 2
+	check("int20", n/d == -3)
+	check("int21", n%d == -1)
+
+	// Conversions wrap; ^x complements within the operand's own width.
+	c1 := 300
+	c2 := -1
+	check("int22", int8(c1) == 44)
+	check("int23", uint8(c2) == 255)
+	check("int24", fmt.Sprint(^one) == "-2")
+	var m8 uint8 = 0xF0
+	check("int25", ^m8 == 0x0F)
+	var x8 int8 = -128
+	check("int26", -x8 == -128)
+
+	// A sized value keeps its width through arithmetic and through a struct
+	// field, and float64() of a 64 bit integer is the float, not the integer.
+	var w8 int8 = 100
+	check("int27", w8*2 == -56)
+	check("int28", fmt.Sprint(float64(i64)) == "9.223372036854776e+18")
+	var arr [4]int
+	var idx uint8 = 2
+	arr[idx] = 9
+	check("int29", arr[2] == 9)
+	check("int30", fmt.Sprintf("%d %v", i8, u8) == "-128 0")
+}
 
 func main() {
 	s01() // SECTION-CALL 01
@@ -742,6 +917,8 @@ func main() {
 	s21() // SECTION-CALL 21
 	s22() // SECTION-CALL 22
 	s23() // SECTION-CALL 23
+	s24() // SECTION-CALL 24
+	s25() // SECTION-CALL 25
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

@@ -673,6 +673,81 @@ b";                                                   // verbatim keeps the newl
             Program.Check("flt25", "ab".Length == 2 && "\u00e9".Length == 1 && "😀".Length == 2);
         }
 
+        // ===== SECTION 24: object.ToString and the string conversion =====
+        // Everything a value turns into text through: Console.WriteLine, '+',
+        // an interpolation hole and an explicit .ToString(). No C# compiler is
+        // available on this machine, so every value below is SPEC-CITED, not
+        // executed:
+        //   - "True" / "False" is System.Boolean.ToString(), documented to return
+        //     Boolean.TrueString / Boolean.FalseString. A .NET BCL contract, not
+        //     an ECMA-334 rule. The LITERALS stay 'true' / 'false'; only the
+        //     string conversion is capitalised. Both grammars used to write
+        //     JavaScript's "true", consistently, so the cross-half differ could
+        //     never see it.
+        //   - a null operand of '+' contributes the EMPTY string (ECMA-334 12.4.7;
+        //     String.Concat calls ToString only on a non-null argument).
+        //   - an array and an instance render through System.Object.ToString(),
+        //     which answers GetType().ToString() - the fully qualified type name,
+        //     and for an array the element type's name plus "[]" (ECMA-334 8.2.3
+        //     lists ToString among the members every type inherits from object).
+        //     The bare name is asserted here because this runtime models neither
+        //     namespaces nor nested-type qualification; the element type is
+        //     inferred from the elements for the same reason.
+        //   - a user ToString() override wins everywhere, because
+        //     System.Object.ToString is virtual.
+        class S24Box { public int X; }
+
+        class S24Named
+        {
+            public override string ToString() { return "NAMED"; }
+        }
+
+        class S24Base
+        {
+            public override string ToString() { return "BASE"; }
+        }
+
+        class S24Derived : S24Base { }
+
+        static void S24()
+        {
+            Program.Check("str01", true.ToString() == "True" && false.ToString() == "False");
+            Program.Check("str02", ("t=" + true) == "t=True" && ("f=" + false) == "f=False");
+            Program.Check("str03", $"{true}" == "True" && $"{false}" == "False");
+            // The literals themselves are unaffected by the capitalised rendering.
+            bool flag = true;
+            Program.Check("str04", flag && !false && ("" + flag) == "True");
+            // A null reference contributes the empty string.
+            string nul = null;
+            Program.Check("str05", ("x" + nul) == "x" && ("x" + null) == "x");
+            Program.Check("str06", $"[{nul}]" == "[]");
+            // An array renders as its type name, not as its elements.
+            int[] ints = new int[] { 1, 2, 3 };
+            Program.Check("str07", ints.ToString() == "System.Int32[]");
+            Program.Check("str08", ("a=" + ints) == "a=System.Int32[]");
+            string[] strs = new string[] { "a", "b" };
+            Program.Check("str09", strs.ToString() == "System.String[]");
+            double[] dbls = new double[] { 0.5, 1.5 };
+            Program.Check("str10", dbls.ToString() == "System.Double[]");
+            bool[] bools = new bool[] { true };
+            Program.Check("str11", bools.ToString() == "System.Boolean[]");
+            // An instance renders as its type name.
+            S24Box box = new S24Box();
+            Program.Check("str12", box.ToString() == "S24Box" && ("b=" + box) == "b=S24Box");
+            Program.Check("str13", $"{box}" == "S24Box");
+            // A user override wins over the type name, and is inherited.
+            S24Named named = new S24Named();
+            Program.Check("str14", named.ToString() == "NAMED" && ("n=" + named) == "n=NAMED");
+            Program.Check("str15", $"{named}" == "NAMED");
+            S24Derived derived = new S24Derived();
+            Program.Check("str16", derived.ToString() == "BASE" && ("d=" + derived) == "d=BASE");
+            // ToString on the other primitives is unchanged by all of the above.
+            // Parenthesized: '42.ToString()' is a lexical error in C# ('42.' starts
+            // a real literal), so the integer receiver has to be bracketed.
+            Program.Check("str17", (42).ToString() == "42" && (0.5).ToString() == "0.5");
+            Program.Check("str18", 'x'.ToString() == "x" && "s".ToString() == "s");
+        }
+
         // ===== END SECTIONS =====
 
         static int Main()
@@ -700,6 +775,7 @@ b";                                                   // verbatim keeps the newl
             Program.S21(); // SECTION-CALL 21
             Program.S22(); // SECTION-CALL 22
             Program.S23(); // SECTION-CALL 23
+            Program.S24(); // SECTION-CALL 24
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

@@ -613,7 +613,7 @@ TypeAssertSfx = "." "(" Type ")" ;
 
 Primary     = "(" Expression ")" | ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit
             | BinLit | LegOctLit | DecULit | DqString | RawString | RuneLit
-            | IntLit | True | False | Nil | FuncLit | SliceLit
+            | GoDecLit | True | False | Nil | FuncLit | SliceLit
             | MapLit | MakeMap | MakeSlice | MakeChan | NewCall | AnonStructLit | StructLit
             | ArrayLit | CompLitNI | ConvExpr | Call | VarRef ;
 
@@ -658,7 +658,7 @@ HexFloatLit <~~ push(makeFloConst(parseHexFloat(up.in))) ~~>
 // 017: the LEGACY octal form, which has no base letter - 017 is 15, not 17. Tried
 // after the 0x/0o/0b forms and before the decimal ones, and it needs at least one
 // octal digit after the 0 so that a plain "0" stays an integer literal.
-LegOctLit   <~~ push(makeConst(parseLegOct(up.in))) ~~>
+LegOctLit   <~~ push(goIntLitLegOct(up.in)) ~~>
             = "0" :whitespace() OctSep { OctSep } :whitespace(Whitespace) ;
 // A named production on purpose: a :command() directly followed by a (group) parses
 // as a Times repetition in this dialect - the Times trap.
@@ -667,19 +667,26 @@ FloatLit    <~~ push(makeFloConst(parseFloat(up.in))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" }
               ( "." { "0"..."9" } [ ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ]
               | ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ) :whitespace(Whitespace) ;
-HexLit      <~~ push(makeConst(parseRadix(up.in))) ~~>
+HexLit      <~~ push(goIntLit(up.in)) ~~>
             = "0" ( "x" | "X" ) :whitespace() HexDigits :whitespace(Whitespace) ;
 // Go allows the digit separator right after the base prefix, too: 0x_FF_f.
 HexDigits   = { "_" } HexDigit { HexDigit | "_" } ;
 HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
-OctLit      <~~ push(makeConst(parseRadix(up.in))) ~~>
+OctLit      <~~ push(goIntLit(up.in)) ~~>
             = "0" ( "o" | "O" ) :whitespace() "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
-BinLit      <~~ push(makeConst(parseRadix(up.in))) ~~>
+BinLit      <~~ push(goIntLit(up.in)) ~~>
             = "0" ( "b" | "B" ) :whitespace() BinDigits :whitespace(Whitespace) ;
 BinDigits   = BinDigit { BinDigit | "_" } ;
 BinDigit    = "0" | "1" ;
-DecULit     <~~ push(makeConst(parseRadix(up.in))) ~~>
+DecULit     <~~ push(goIntLit(up.in)) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } "_" { "0"..."9" | "_" } :whitespace(Whitespace) ;
+// A plain decimal integer. The shared IntLit reads it with parseInt, which is a
+// DOUBLE: 9223372036854775807 comes back as 9223372036854776000 and
+// 18446744073709551615 as 18446744073709552000. Both are ordinary Go literals, so
+// the value is read exactly instead (parseRadix answers a sized-integer box when
+// the digits do not fit a double).
+GoDecLit    <~~ push(goIntLit(up.in)) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
 RawString   = "`" :whitespace() { "\x00"..."\x5f" | "\x61"..."\U0010ffff" } <~~ push(makeConst(up.in)) ~~> "`" :whitespace(Whitespace) ;
 RuneLit     = "'" :whitespace() { StrEsc | SqPlain } <~~ push(makeConst(runeVal(up.in))) ~~> "'" :whitespace(Whitespace) ;
 
@@ -989,6 +996,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // The bitwise and shift externals already exist in the handle runtime; wiring them
     // into binExt puts them on the ordinary emitBin path. js_shl/js_shr are 32 bit,
     // which is what Go's shift results are used for here.
+    // These five used to be the handle runtime's 32 BIT operators (js_goshl masks
+    // its count to 5 bits, js_band works on int32), so 1 << 62 was 0 and
+    // 1000000007 * 1000000007 was -371520512. Every integer operator now goes
+    // through the sized-integer box instead - js_giarith in abnf/jsrtint.go, which
+    // evaluates at the result type's width and wraps to it. See the invariant
+    // there; go-interpreter.abnf implements the identical rules with szArith.
     binExt["<<"] = "js_goshl"
     binExt[">>"] = "js_goshr"
     binExt["&"] = "js_band"
@@ -1018,10 +1031,33 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (usesComplex && cxOps[op] == 1) { return emitCxCall(b, op, l, r) }
         return emitBinNum(b, op, l, r)
     }
-    // The primitive (non-complex) binary step: the float-aware arithmetic externs,
-    // then the shared core. Used by emitBin AND by the complex dispatch's fallback
-    // arm, which must not fall back to the truncating core path.
+    // ----- Sized integers: the emitted operator set -----
+    // Every arithmetic, bitwise, shift and ordered-comparison operator goes to the
+    // sized-integer externs of abnf/jsrtint.go. Before, they went to the handle
+    // runtime's 32-bit ones (js_band, js_goshl) or to js_jf*/intWrap, which
+    // truncated to int32 - so 1 << 62 was 0, 1000000007 * 1000000007 was
+    // -371520512, int64max printed 9.223372036854776e+18 and nothing on a value
+    // said it was a uint8. js_giarith evaluates at the RESULT TYPE's width and
+    // wraps to it, and hands a float64 operand straight on to the float path, so
+    // the js_gflo box keeps working exactly as it did.
+    //
+    // giBase maps a compound assignment to its operator; '+' has its own extern
+    // because Go's '+' also concatenates strings.
+    var giBase = {"+": "+", "-": "-", "*": "*", "/": "/", "%": "%",
+                  "&": "&", "|": "|", "^": "^", "&^": "&^", "<<": "<<", ">>": ">>",
+                  "+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%",
+                  "&=": "&", "|=": "|", "^=": "^", "&^=": "&^", "<<=": "<<", ">>=": ">>"}
+    var giRel = {"<": "js_gilt", "<=": "js_gile", ">": "js_gigt", ">=": "js_gige"}
+    // The primitive (non-complex) binary step. Used by emitBin AND by the complex
+    // dispatch's fallback arm, which must not fall back to the truncating core path.
     function emitBinNum(b, op, l, r) {
+        var base = giBase[op]
+        if (typeof base == "string") {
+            if (base == "+") { return callExt(b, "js_giadd", [l, r]) }
+            return callExt(b, "js_giarith", [emitStr(b, base), l, r])
+        }
+        var rel = giRel[op]
+        if (typeof rel == "string") { return callExt(b, rel, [l, r]) }
         var fe = floExt[op]
         if (typeof fe == "string") { return callExt(b, fe, [l, r]) }
         return coreEmitBin(b, op, l, r)
@@ -1050,7 +1086,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     makeNeg = function(t) {
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: callExt(r.b, "js_jfneg", [r.v])}
+            return {b: r.b, v: callExt(r.b, "js_gineg", [r.v])}
         }
     }
     function makeCompl(items) {
@@ -1092,6 +1128,83 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return typeof t == "string" ? t : null
     }
     function isFloatTy(ty) { return ty == "float64" || ty == "float32" }
+    // goIntTy answers {w, u} for a sized integer type name and null for anything
+    // else. `int`, `int64` and `rune` are the plain path: only a type that is not a
+    // signed 64 bit integer needs a box, which is what keeps the box rare (see the
+    // invariant in abnf/jsrtint.go). The twin of goIntTy in go-interpreter.abnf.
+    function goIntTy(ty) {
+        if (ty == "int" || ty == "int64") { return {w: 64, u: false} }
+        if (ty == "int8") { return {w: 8, u: false} }
+        if (ty == "int16") { return {w: 16, u: false} }
+        if (ty == "int32" || ty == "rune") { return {w: 32, u: false} }
+        if (ty == "uint8" || ty == "byte") { return {w: 8, u: true} }
+        if (ty == "uint16") { return {w: 16, u: true} }
+        if (ty == "uint32") { return {w: 32, u: true} }
+        if (ty == "uint" || ty == "uint64" || ty == "uintptr") { return {w: 64, u: true} }
+        return null
+    }
+    // goTyWord is the leading type WORD of a captured type text, which may carry
+    // trailing whitespace, a comment or a following name.
+    function goTyWord(t) {
+        var i = 0
+        while (i < t.length) {
+            var cc = t.charCodeAt(i)
+            var ok = (cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) || (cc >= 48 && cc <= 57) || cc == 95
+            if (!ok) { break }
+            i++
+        }
+        return t.substring(0, i)
+    }
+    // emitAdoptTy applies a DECLARED type to an emitted value: a float64 slot boxes
+    // its initializer, and a sized integer slot converts to its width - which is
+    // what puts the width on the value and makes the i8++ that follows wrap.
+    function emitAdoptTy(b, ty, v) {
+        if (isFloatTy(ty)) { return callExt(b, "js_gflo", [v]) }
+        var it = goIntTy(goTyWord(ty))
+        if (it != null) { return emitGiConv(b, v, it) }
+        return v
+    }
+    function emitGiConv(b, v, it) {
+        return callExt(b, "js_giconv", [v, emitNum(b, it.w), it.u ? hTrue : hFalse])
+    }
+    // A decimal / hex / octal / binary integer literal. Below 2^53 it is an
+    // ordinary emitNum constant; at or above it the DIGITS are emitted instead and
+    // js_gilit reads them exactly, because emitNum would already have rounded
+    // 9223372036854775807 to 9223372036854776000 on the way into the module.
+    function goIntLit(text) {
+        var radix = 10
+        var start = 0
+        if (text.length >= 2 && text.charAt(0) == "0") {
+            var p = text.charAt(1)
+            if (p == "x" || p == "X") { radix = 16; start = 2 }
+            else if (p == "o" || p == "O") { radix = 8; start = 2 }
+            else if (p == "b" || p == "B") { radix = 2; start = 2 }
+        }
+        return goIntLitAt(text, radix, start)
+    }
+    function goIntLitLegOct(text) { return goIntLitAt(text, 8, 1) }
+    function goIntLitAt(text, radix, start) {
+        var digits = ""
+        var v = 0
+        for (var i = start; i < text.length; i++) {
+            var cc = text.charCodeAt(i)
+            if (cc == 95) { continue }
+            var d = 0
+            if (cc >= 48 && cc <= 57) { d = cc - 48 }
+            else if (cc >= 97 && cc <= 102) { d = cc - 87 }
+            else if (cc >= 65 && cc <= 70) { d = cc - 55 }
+            v = v * radix + d
+            digits = digits + text.charAt(i)
+        }
+        // Strictly BELOW 2^53: at the bound and above, the double `v` accumulated
+        // here is itself already rounded, so it cannot be trusted to decide.
+        if (v < 9007199254740992) { return makeConst(v) }
+        var rx = radix
+        var dg = digits
+        return function(b) {
+            return {b: b, v: callExt(b, "js_gilit", [emitStr(b, dg), emitNum(b, rx), emitNum(b, 64), hFalse])}
+        }
+    }
     function uintBits(ty) {
         if (ty == "uint8" || ty == "byte") { return 8 }
         if (ty == "uint16") { return 16 }
@@ -1993,43 +2106,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 return {b: eb2, v: out}
             }, function(eb) { return {b: eb, v: x} })
         })
-        // What printing needs: the elements, and the elements of any slice among them.
-        // $sels must NOT do this - a range yields its elements to be written through -
-        // so display gets a recursive variant of its own.
-        b = declFn(b, "$sdisp", 1, function(fb, a) {
-            var x = a[0]
-            // A complex prints as Go spells it, (re+imi), with the sign written out;
-            // js_add is the JS concatenation, not Go's typed '+'.
-            var cxr = emitSelect(fb, callExt(fb, "js_is_type", [x, emitStr(fb, "$cx")]), function(cb) {
-                var re = callExt(cb, "js_get", [x, emitStr(cb, "re")])
-                var im = callExt(cb, "js_get", [x, emitStr(cb, "im")])
-                var neg = callExt(cb, "js_lt", [im, emitNum(cb, 0)])
-                var sg = emitSelect(cb, neg, function(tb) { return {b: tb, v: emitStr(tb, "-")} },
-                                             function(eb) { return {b: eb, v: emitStr(eb, "+")} })
-                var ab = emitSelect(sg.b, neg,
-                                    function(tb) { return {b: tb, v: callExt(tb, "js_sub", [emitNum(tb, 0), im])} },
-                                    function(eb) { return {b: eb, v: im} })
-                var b2 = ab.b
-                var out = callExt(b2, "js_add", [emitStr(b2, "("), re])
-                out = callExt(b2, "js_add", [out, sg.v])
-                out = callExt(b2, "js_add", [out, ab.v])
-                out = callExt(b2, "js_add", [out, emitStr(b2, "i)")])
-                return {b: b2, v: out}
-            }, function(eb) { return {b: eb, v: x} })
-            x = cxr.v
-            fb = cxr.b
-            return emitSelect(fb, emitIsSl(fb, x), function(tb) {
-                var out = callExt(tb, "js_arr_new", [])
-                var base = slF(tb, x, "a")
-                var off = slF(tb, x, "o")
-                var eb2 = emitCountLoop(tb, slF(tb, x, "n"), function(lb, iV) {
-                    callExt(lb, "js_arr_push", [out, emitHelper(lb, "$sdisp",
-                            [callExt(lb, "js_map_get", [base, callExt(lb, "js_jadd", [off, iV])])])])
-                    return lb
-                })
-                return {b: eb2, v: out}
-            }, function(eb) { return {b: eb, v: x} })
-        })
         // The dynamic type of a slice is the type of its BACKING array, so a type
         // switch and a type assertion keep seeing "slice" (and "any") through a header.
         b = declFn(b, "$istype", 2, function(fb, a) {
@@ -2043,28 +2119,35 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return b
     }
 
-    // fmt.Println / fmt.Print must print a slice's ELEMENTS, not its header object, so
-    // each is a generated function that maps its arguments through $sels first.
-    function declPrint(b, fmtV, name, base) {
+    // fmt.Println / Print / Sprint / Printf / Sprintf and the two BUILTINS
+    // println / print. Each is a one-line generated function that hands the
+    // callee's whole argument array to one of the three Go rendering externs in
+    // abnf/jsrtgolang.go, together with the mode that selects Go's spacing rule:
+    //
+    //     0 fmt.Println      space between every pair,      newline
+    //     1 fmt.Print/Sprint space between two non-strings, no newline
+    //     2 builtin println  space between every pair,      newline
+    //     3 builtin print    no space at all,               no newline
+    //     4 Printf/Sprintf   args[0] is the format,         no newline
+    //
+    // Binding them to the shared `println` host function instead - which is what
+    // this did before - reached Go's own %v with the RAW runtime value, so a map
+    // printed as map[__dict:true keys:[a] ...] and a struct as its class
+    // descriptor. The extern is the twin of the interpreter's gstr; see
+    // "recurring shape 1" in docs/abnf-dialect-gotchas.md.
+    //
+    // `target` is the object the name is set on (the fmt package object), or null
+    // for a builtin, which is DECLARED in the jsmain scope and so shadows the host
+    // function of the same name for the compiled program only.
+    function declPrint(b, target, name, ext, mode) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
-        var savedF = curF
-        var savedScope = curScopeV
-        curF = f
         var fb = f.NewBlock("entry")
-        curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
-        var argsV = f.Params[1]
-        var eb = emitCountLoop(fb, callExt(fb, "js_golen", [argsV]), function(lb, iV) {
-            callExt(lb, "js_pyset", [argsV, iV,
-                    emitHelper(lb, "$sdisp", [callExt(lb, "js_map_get", [argsV, iV])])])
-            return lb
-        })
-        var pV = callExt(eb, "js_scope_get", [curScopeV, emitStr(eb, base)])
-        eb.NewRet(callExt(eb, "js_call", [pV, hUndef, argsV]))
-        curF = savedF
-        curScopeV = savedScope
-        callExt(b, "js_set", [fmtV, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+        fb.NewRet(callExt(fb, ext, [f.Params[1], emitNum(fb, mode)]))
+        var cl = callExt(b, "js_closure", [handle(idx), curScopeV])
+        if (target == null) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), cl]) }
+        else { callExt(b, "js_set", [target, emitStr(b, name), cl]) }
         return b
     }
 
@@ -2329,7 +2412,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return function(b) {
             var rr = emitRefRead(b, ref)
             b = rr.b
-            return emitRefWrite(b, ref, callExt(b, "js_jfstep", [rr.v, emitNum(b, step)]))
+            // js_giadd steps at the slot's OWN width: `var i8 int8 = 127; i8++`
+            // is -128, and int64max++ is -9223372036854775808. js_jfstep wrapped
+            // to 32 bits, so both answered 128 and -1.
+            return emitRefWrite(b, ref, callExt(b, "js_giadd", [rr.v, emitNum(b, step)]))
         }
     }
 
@@ -2411,7 +2497,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var n = 0; n < names.length; n++) {
                 // A float64/float32 declaration CONVERTS its initializer, so
                 // `var d float64 = 1` holds a float64 and d/2 is 0.5, not 0.
-                var dv = isFloatTy(ty) ? callExt(b, "js_gflo", [vals[n]]) : vals[n]
+                var dv = emitAdoptTy(b, ty, vals[n])
                 if (names[n] != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n]), dv]) }
             }
             return b
@@ -3029,7 +3115,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return function(b) {
             var r = t(b)
             var eb = r.b
-            var v = callExt(eb, "js_goconv", [emitStr(eb, to), emitHelper(eb, "$sels", [r.v])])
+            // A sized integer conversion goes to js_giconv, which WRAPS to the
+            // target width and leaves the width on the value; js_goconv answers a
+            // plain number and could not carry it.
+            var itc = goIntTy(to)
+            // js_gival unwraps a sized integer to its plain number and passes
+            // everything else through, so js_goconv - which only knows plain
+            // numbers, arrays and strings - keeps working for string(rune(65)).
+            var v = (itc != null) ? emitGiConv(eb, r.v, itc)
+                                  : callExt(eb, "js_goconv", [emitStr(eb, to),
+                                            callExt(eb, "js_gival", [emitHelper(eb, "$sels", [r.v])])])
             if (isSliceTy) { v = emitSlOf(eb, v) }
             return {b: eb, v: v}
         }
@@ -3407,10 +3502,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function declConv(b, name, ty) {
         var t = ty
         var isSliceTy = t.length > 1 && t.charCodeAt(0) == 91 && t.charCodeAt(1) == 93
+        var itc = goIntTy(t)
         return declFn(b, name, 1, function(fb, a) {
+            // A sized integer type converts through js_giconv, which wraps to the
+            // target width and leaves that width ON the value - js_goconv answers
+            // a plain number and could not carry it.
+            if (itc != null) { return {b: fb, v: emitGiConv(fb, a[0], itc)} }
             // js_goconv only knows plain arrays, so a slice argument hands over its
-            // ELEMENTS (string(bs)) and a slice result is wrapped back into a header.
-            var v = callExt(fb, "js_goconv", [emitStr(fb, t), emitHelper(fb, "$sels", [a[0]])])
+            // ELEMENTS (string(bs)) and a slice result is wrapped back into a header;
+            // js_gival unwraps a sized integer to its plain number and passes
+            // everything else through, so string(rune(65)) still answers "A".
+            var v = callExt(fb, "js_goconv", [emitStr(fb, t),
+                            callExt(fb, "js_gival", [emitHelper(fb, "$sels", [a[0]])])])
             if (isSliceTy) { v = emitSlOf(fb, v) }
             return {b: fb, v: v}
         })
@@ -3441,10 +3544,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         var fmtV = callExt(b, "js_obj_new", [])
-        b = declPrint(b, fmtV, "Println", "println")
-        b = declPrint(b, fmtV, "Print", "print")
-        b = declPrint(b, fmtV, "Sprint", "sprint")
+        b = declPrint(b, fmtV, "Println", "js_goprint", 0)
+        b = declPrint(b, fmtV, "Print", "js_gowrite", 1)
+        b = declPrint(b, fmtV, "Sprint", "js_gostr", 1)
+        b = declPrint(b, fmtV, "Printf", "js_goprint", 4)
+        b = declPrint(b, fmtV, "Sprintf", "js_gostr", 4)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "fmt"), fmtV])
+        // Go's two BUILTINS. They are not fmt: println separates every pair and ends
+        // with a newline, print separates nothing and ends with none. Real Go writes
+        // both to STDERR and prints a pointer or a slice as an ADDRESS; this runtime
+        // writes to stdout and renders the value, which is the reproducible answer
+        // (and what this half already did before, through the host println).
+        b = declPrint(b, null, "println", "js_goprint", 2)
+        b = declPrint(b, null, "print", "js_gowrite", 3)
         var osV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [osV, emitStr(b, "Exit"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "os"), osV])

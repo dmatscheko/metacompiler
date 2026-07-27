@@ -66,6 +66,7 @@ class Main {
         S21.run(); // SECTION-CALL 21
         S22.run(); // SECTION-CALL 22
         S23.run(); // SECTION-CALL 23
+        S24.run(); // SECTION-CALL 24
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -746,6 +747,61 @@ class S23 {
         // A float literal and an f/d suffix are doubles here too.
         float f = 3;
         Main.check("flt28", f / 2 == 1.5 && 1.5f + 1.5F == 3.0f && 2.5d * 2 == 5.0D);
+    }
+}
+
+// ===== SECTION 24: value rendering (toString / println) =====
+// What a value RENDERS as: the string `+` builds and the text println writes.
+// Checked against `java` (JDK 24) before it was written down. The identity hash
+// after the '@' is deliberately NOT asserted - real java prints
+// System.identityHashCode, which differs between two runs of the SAME program,
+// so only the class-name prefix is reproducible. The section exists because the
+// compiler half used to hand the raw runtime value to Go's formatter (<nil> for
+// null, [1 2 3] for an array, a pointer-bearing map dump for an instance) while
+// the interpreter half fell through to JavaScript's ToString ("1,2,3",
+// "Box@obj"), and neither printed what java prints.
+class S24 {
+    static class Box { int x; }
+    static class Shown { public String toString() { return "NAMED"; } }
+    record Pt(int x, int y) {}
+    enum Col { RED, BLUE }
+
+    static String s(Object o) { return "" + o; }
+    static void run() {
+        // A null reference renders as "null", alone and inside a concatenation.
+        String ns = null;
+        Object no = null;
+        Main.check("ren1", S24.s(no).equals("null") && ("s=" + ns).equals("s=null"));
+        // An array renders as its class name, '@' and an identity hash. The
+        // ELEMENT TYPE is part of that class name.
+        int[] ia = {1, 2, 3};
+        double[] da = {1.5};
+        boolean[] za = {true};
+        String[] sa = {"p", "q"};
+        String ir = S24.s(ia);
+        Main.check("ren2", ir.substring(0, 3).equals("[I@") && ir.length() > 3);
+        Main.check("ren3", S24.s(da).substring(0, 3).equals("[D@"));
+        Main.check("ren4", S24.s(za).substring(0, 3).equals("[Z@"));
+        Main.check("ren5", S24.s(sa).substring(0, 20).equals("[Ljava.lang.String;@"));
+        // The same array renders identically twice; two arrays do not collide.
+        int[] ib = {1, 2, 3};
+        Main.check("ren6", S24.s(ia).equals(ir) && !S24.s(ib).equals(ir));
+        // An instance renders as its BINARY class name - a nested type is spelled
+        // Outer$Inner, the way Class#getName does - then '@' and the hash.
+        Box b = new Box();
+        String br = S24.s(b);
+        Main.check("ren7", br.substring(0, 8).equals("S24$Box@") && br.indexOf("@") == 7);
+        Main.check("ren8", S24.s(b).equals(br) && !S24.s(new Box()).equals(br));
+        // A user toString() wins over all of it, wherever the value is rendered.
+        Shown n = new Shown();
+        Main.check("ren9", S24.s(n).equals("NAMED") && ("<" + n + ">").equals("<NAMED>"));
+        Main.check("ren10", n.toString().equals("NAMED"));
+        // The two GENERATED ones: a record's canonical form (which uses the simple
+        // name, not the binary one) and an enum constant's name.
+        Main.check("ren11", S24.s(new Pt(1, 2)).equals("Pt[x=1, y=2]"));
+        Main.check("ren12", S24.s(Col.RED).equals("RED") && Col.BLUE.toString().equals("BLUE"));
+        // Everything that already rendered correctly still does.
+        Main.check("ren13", S24.s(true).equals("true") && ("" + 'x').equals("x") && S24.s(1.5).equals("1.5"));
     }
 }
 

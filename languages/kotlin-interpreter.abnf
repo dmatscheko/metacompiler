@@ -1938,8 +1938,11 @@ NotMemberKw = :script(~~
         }
         return undefined
     }
-    hostGlobals["println"] = function(x) { println(kstr(x)) }
-    hostGlobals["print"] = function(x) { print(kstr(x)) }
+    // println() with NO argument writes just the line terminator; only println(Unit)
+    // writes "kotlin.Unit". The two cases are the same `undefined` once the argument
+    // is bound, so the arity has to be read off arguments (as listOf below does).
+    hostGlobals["println"] = function() { println(arguments.length == 0 ? "" : kstr(arguments[0])) }
+    hostGlobals["print"] = function() { print(arguments.length == 0 ? "" : kstr(arguments[0])) }
     hostGlobals["exitProcess"] = function(code) { exit(code | 0) }
     hostGlobals["abs"] = function(v) { return v < 0 ? -v | 0 : v | 0 }
     hostGlobals["max"] = function(a, b) { return a > b ? a : b }
@@ -2271,20 +2274,64 @@ NotMemberKw = :script(~~
         return null
     }
 
+    // The text of a value: what println writes, what "$v" interpolates and what
+    // v.toString() answers. The Go twin for the compiled half is ktpRender in
+    // abnf/jsrtkotlin.go and the two MUST stay in step - ./test.sh --cross diffs them.
+    // Verified against java 24 (there is no kotlinc here, and Kotlin/JVM's Int, Double
+    // and String ARE java.lang.*, so println IS System.out.println).
     function kstr(v) {
         if (v === undefined) return "kotlin.Unit"
         if (v === null) return "null"
         if (kIsChar(v)) return kChStr(v)
         if (kIsFlo(v)) return kFloStr(v.__flo)
+        // A range renders as the list of its elements. Real Kotlin prints an IntRange
+        // as "1..3", but the COMPILED half has no first-class range value at all (a
+        // range is materialised into a list at the point of use), so this is the only
+        // answer the two halves can share; the divergence is deliberate.
+        if (isRange(v)) { return kstr(rangeList(v)) }
+        // A list (and an array, which this value model cannot tell apart from a list)
+        // renders as java.util.AbstractCollection.toString does: "[1, 2]", elements
+        // separated by a comma and a space, a String element unquoted. Falling through
+        // to JavaScript's Array.prototype.toString spelled it "1,2".
+        if (Array.isArray(v)) {
+            var out = "["
+            for (var ai = 0; ai < v.length; ai++) {
+                if (ai > 0) { out += ", " }
+                out += kstr(v[ai])
+            }
+            return out + "]"
+        }
+        // A class descriptor printed on its own is its name.
+        if (typeof v == "object" && v.__isclass === true) { return v.__name }
         // A user object renders through its toString(): the data-class generated one
         // (Pt13(x=1, y=2)), an explicit override, or the Kotlin default Name@hash shape.
         if (typeof v == "object" && v.__class != undefined && v.__class != null) {
             var ts = clsFind(v.__class, "toString")
             if (typeof ts == "function") { return ts.apply(undefined, [v]) }
+            // An enum entry prints its NAME (java.lang.Enum.toString), not Name@1.
+            if (clsIsEnum(v.__class) && typeof v.name == "string") { return v.name }
             var g = dataMember(v, "toString", [], {pos: [], named: null})
             if (g != null) { return g.v }
         }
+        // A Regex renders as its pattern and a MatchResult as the matched text (their
+        // own toString); neither carries a __class, so both used to fall through to
+        // JavaScript's "[object Object]".
+        if (typeof v == "object") {
+            var rx = krxMethod(v, "toString", [])
+            if (rx != null) { return kstr2(rx.v) }
+        }
         return "" + v
+    }
+    // Whether a descriptor belongs to an enum class - an entry WITH A BODY is an
+    // anonymous subclass, so the __super chain has to be walked.
+    function clsIsEnum(cls) {
+        var c = anytype
+        c = cls
+        for (var ei = 0; c != undefined && c != null && ei < 32; ei++) {
+            if (c.__isenum === true) { return true }
+            c = c.__super
+        }
+        return false
     }
 
     // ----- Extension functions: dispatch by name, the receiver becomes `this` -----
@@ -2463,6 +2510,13 @@ NotMemberKw = :script(~~
             if (target.__companion != undefined) { return mcall(target.__companion, name, args, spec) }
             fail("unknown member '" + name + "' on " + target.__name)
         }
+        // v.toString() is the rendering of the value, which is what println writes -
+        // kstr consults a user or generated toString first, so an override still wins.
+        // The primitive receivers above answer it themselves (identically); this reaches
+        // a list, a range and a class instance, where the list case used to fail
+        // outright ("unknown list method: toString") and an enum entry answered E@1.
+        // The compiled half emits js_ktstr at the same point (see foldCallMember).
+        if (name == "toString" && args.length == 0) { return kstr(target) }
         // A range answers contains without materialising, and every other list method
         // (map/filter/sumOf/forEach/count/any/...) on its element sequence.
         var tgt = anytype

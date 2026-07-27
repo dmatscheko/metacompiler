@@ -795,7 +795,9 @@ KwSync      = "synchronized" KwEnd ;
     // The host names a program can see. System and Math are built here.
     hostGlobals["System"] = {
         out: {
-            println: function(x) { println(jstr(x)) },
+            // println() with no argument writes just the line terminator; without
+            // the arity test the missing parameter rendered as "null".
+            println: function(x) { println(arguments.length == 0 ? "" : jstr(x)) },
             print: function(x) { print(jstr(x)) }
         },
         exit: function(code) { exit(code | 0) }
@@ -1010,14 +1012,107 @@ KwSync      = "synchronized" KwEnd ;
         return jUnescape(out)
     }
 
-    // Java's toString for the printable subset.
-    function jstr(v) {
+    // ----- Value rendering: String.valueOf, what println writes, what + concatenates -----
+    // The identity hash after the `@`. Real java prints System.identityHashCode,
+    // which is address-derived and differs between two runs of the SAME program, so
+    // nothing can assert the digits; what matters is that one object renders the
+    // same way twice and that the run is reproducible. So: the k-th distinct object
+    // rendered gets 0x1a2b3c00+k, in hex - and abnf/jsrtjava.go's jvpHash does the
+    // identical thing, so the two halves agree object for object.
+    //
+    // The table is a pair of parallel arrays scanned by identity rather than a
+    // property on the value, because a Java array is a plain script array here and
+    // carries no properties.
+    var jHashObjs = []
+    var jHashIds = []
+    var jHashN = 0
+    // Number.prototype.toString(16) exists under goja and NOT in the frozen engine,
+    // where it fails with "call of a non function value" - so the digits are built
+    // by hand.
+    function jHex(n) {
+        var digits = "0123456789abcdef"
+        var x = n | 0
+        var out = ""
+        while (x > 0) {
+            out = digits.charAt(x % 16) + out
+            x = (x - (x % 16)) / 16
+        }
+        if (out == "") { out = "0" }
+        return out
+    }
+    function jIdHash(v) {
+        for (var i = 0; i < jHashObjs.length; i++) {
+            if (jHashObjs[i] === v) { return jHashIds[i] }
+        }
+        jHashN = jHashN + 1
+        var h = jHex(0x1a2b3c00 + jHashN)
+        jHashObjs.push(v)
+        jHashIds.push(h)
+        return h
+    }
+    // An array renders as its CLASS NAME - "[I@1a2b3c01" - and the element type is
+    // part of that name. This value model does not carry the declared type, so it is
+    // inferred from the elements: all-int -> [I, all-double -> [D, all-String ->
+    // [Ljava.lang.String;, all-boolean -> [Z, all-char -> [C, and empty or mixed ->
+    // [Ljava.lang.Object;. A deliberate simplification, shared with the compiler
+    // half: `Object[] o = {1, 2}` therefore renders as [I@... and a nested int[][]
+    // as [Ljava.lang.Object;@... where real java writes [[I@...
+    function jElemTag(e) {
+        if (e === undefined || e === null) return ""
+        var t = typeof e
+        if (t == "boolean") return "[Z"
+        if (t == "string") return "[Ljava.lang.String;"
+        if (t == "number") return "[I"
+        if (t == "object") {
+            if (e.__flo !== undefined) return "[D"
+            if (e.__char !== undefined) return "[C"
+        }
+        return ""
+    }
+    function jArrayTag(a) {
+        var tag = ""
+        for (var i = 0; i < a.length; i++) {
+            var t = jElemTag(a[i])
+            if (t == "" || (tag != "" && t != tag)) { return "[Ljava.lang.Object;" }
+            tag = t
+        }
+        if (tag == "") { return "[Ljava.lang.Object;" }
+        return tag
+    }
+    function jClassBin(cls) {
+        if (cls.__bname != undefined && cls.__bname != "") { return cls.__bname }
+        return cls.__name
+    }
+    // Java's toString for the printable subset. The depth is only a guard against a
+    // toString that renders an object graph with a back-reference.
+    function jstr(v) { return jstrD(v, 0) }
+    function jstrD(v, depth) {
         if (v === undefined || v === null) return "null"
+        if (depth > 32) return "..."
+        if (Array.isArray(v)) { return jArrayTag(v) + "@" + jIdHash(v) }
         if (typeof v == "object") {
             if (v.__flo !== undefined) return jFloStr(v.__flo)
             if (v.__char !== undefined) return String.fromCharCode(v.__char)
             if (v.__isclass) return "class " + v.__name
-            if (v.__class != undefined) return v.__class.__name + "@obj"
+            if (v.__class != undefined) {
+                // A user toString() wins over every built-in rendering, as in Java.
+                var ts = jFindMember(v.__class, "toString")
+                if (typeof ts == "function") { return jstrD(ts.apply(undefined, [v]), depth + 1) }
+                // An enum constant prints its name (java.lang.Enum#toString) and a
+                // record its canonical form P[x=1, y=2] (java.lang.Record) - with
+                // the SIMPLE name, which is what the generated toString uses.
+                if (v.__ename !== undefined) { return v.__ename }
+                var comps = v.__class.__record
+                if (comps != undefined && comps != null) {
+                    var out = ""
+                    for (var k = 0; k < comps.length; k++) {
+                        if (k > 0) { out = out + ", " }
+                        out = out + comps[k] + "=" + jstrD(v[comps[k]], depth + 1)
+                    }
+                    return v.__class.__name + "[" + out + "]"
+                }
+                return jClassBin(v.__class) + "@" + jIdHash(v)
+            }
             return "" + v
         }
         return "" + v
@@ -2056,7 +2151,7 @@ KwSync      = "synchronized" KwEnd ;
     // interface, enum, nested/local/anonymous declarations - they differ only in
     // which members they hand in and in the extra pieces bolted on afterwards.
     function buildClassFrom(name, members, recordParams) {
-        var cls = {__isclass: true, __name: name}
+        var cls = {__isclass: true, __name: name, __bname: jBinOf(name)}
         var fields = []
         var ctors = []
         var compact = null
@@ -2497,14 +2592,32 @@ KwSync      = "synchronized" KwEnd ;
     // interrupts its enclosing one, so the name is a STACK - without that, the
     // outer class' later methods would search from the nested class' superclass.
     var jClassStack = []
+    // The BINARY name of each declared type - "Main", "Main$Box", "Main$Box$Deep" -
+    // which is what java.lang.Class#getName answers and therefore what an instance
+    // renders as (Main$Box@1a2b3c01). It is derived from the same nesting the class
+    // stack already tracks and stored on the descriptor as __bname; the compiler
+    // half does the identical bookkeeping (jBinOf in java-to-llvm-ir.abnf).
+    var jBinStack = []
+    var jCurBin = ""
+    var jBinName = {}
     function jEnterClass(n) {
         jClassStack.push(curClassName)
+        jBinStack.push(jCurBin)
+        jCurBin = (jCurBin == "") ? n : jCurBin + "$" + n
+        jBinName["$" + n] = jCurBin
         curClassName = n
+    }
+    // A descriptor built without a declaration walk (a built-in exception, an
+    // anonymous class body) keeps the name it was created with.
+    function jBinOf(n) {
+        var b = jBinName["$" + n]
+        return (b == undefined) ? n : b
     }
     // Leaves the class body: restores the enclosing name and, for a NESTED type,
     // additionally registers it under its qualified name.
     function jExitClass(name, cls) {
         var outer = jClassStack.pop()
+        jCurBin = jBinStack.pop()
         curClassName = outer
         if (outer != "" && outer != undefined && cls != undefined && cls != null) {
             globalScope[outer + "." + name] = cls

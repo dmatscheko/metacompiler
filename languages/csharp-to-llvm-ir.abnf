@@ -1170,6 +1170,15 @@ KwLet       = "let" KwEnd ;
         // 3, 1.0 / 3.0 was 0 and Infinity / NaN did not exist. The js_jf* externs answer
         // a double whenever one operand is one and keep the old int32 wrap otherwise -
         // this is what csharp-interpreter.abnf's {__flo} box does.
+        // The string CONVERSION of an operand of '+'. js_csadd on its own renders a
+        // bool as JavaScript's "true"/"false" (C# writes "True"/"False"), an array
+        // as its elements and a class instance as [object Object]. js_csstr
+        // converts exactly those three shapes - and honours a user ToString()
+        // override - and passes every other value through UNCHANGED, so two ints
+        // still add as ints and a boxed double still adds as a double.
+        if (op == "+" || op == "+=") {
+            return callExt(b, "js_csadd", [callExt(b, "js_csstr", [l]), callExt(b, "js_csstr", [r])])
+        }
         if (op == "-" || op == "-=") return callExt(b, "js_jfsub", [l, r])
         if (op == "*" || op == "*=") return callExt(b, "js_jfmul", [l, r])
         if (op == "/" || op == "/=") return callExt(b, "js_jfdiv", [l, r])
@@ -2928,7 +2937,10 @@ KwLet       = "let" KwEnd ;
                     var r = items[i].e(b)
                     b = r.b
                     // The rendered text, so alignment and format work on the glyphs.
-                    pv = callExt(b, "js_jadd", [emitStr(b, ""), r.v])
+                    // js_csstr + js_csadd, not js_jadd: an interpolation hole is a
+                    // string conversion, so a bool renders "True", a null renders
+                    // "" (js_jadd wrote Java's "null") and a user ToString() wins.
+                    pv = callExt(b, "js_csadd", [emitStr(b, ""), callExt(b, "js_csstr", [r.v])])
                     var fmt = items[i].fmt
                     if (fmt != undefined && fmt.length > 1 && (fmt.charAt(0) == "D" || fmt.charAt(0) == "d")) {
                         var rf = emitPadLoop(b, pv, parseInt(fmt.substring(1)), "0", true)
@@ -3073,7 +3085,14 @@ KwLet       = "let" KwEnd ;
                         cur = callExt(b, "js_supercall", [hclsV, cur, emitStr(b, s.name), ha.v])
                         continue
                     }
-                    if (s.name == "GetEnumerator" || s.name == "MoveNext") {
+                    if (s.name == "ToString" && sfxArgs[i].length == 0) {
+                        // object.ToString() is virtual and every type has it, so it
+                        // must work on a bool, an int, a double and an array too -
+                        // js_mcall aborts on all four. js_csstr renders them and
+                        // lets a user override win; js_csadd turns whatever comes
+                        // back into the string (C#'s null rule included).
+                        cur = callExt(b, "js_csadd", [emitStr(b, ""), callExt(b, "js_csstr", [cur])])
+                    } else if (s.name == "GetEnumerator" || s.name == "MoveNext") {
                         var eae = emitArgs(b, sfxArgs[i])
                         b = eae.b
                         var ere = anytype
@@ -4433,10 +4452,13 @@ KwLet       = "let" KwEnd ;
         curF = f
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
-        // Console.WriteLine / Console.Write from the host globals.
-        var consoleV = callExt(b, "js_obj_new", [])
-        callExt(b, "js_set", [consoleV, emitStr(b, "WriteLine"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "println")])])
-        callExt(b, "js_set", [consoleV, emitStr(b, "Write"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "print")])])
+        // Console.WriteLine / Console.Write. NOT the shared println / print host
+        // globals: those hand the raw runtime value to Go's %v, which printed
+        // <nil> for null, [1 2 3] for an array and a map dump (with a Go POINTER
+        // address in it) for a class instance. js_csconsole builds the object with
+        // C#'s own value rendering - the twin of csStr in csharp-interpreter.abnf.
+        // See abnf/jsrtcsharp.go.
+        var consoleV = callExt(b, "js_csconsole", [])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Console"), consoleV])
         b = emitValEqDecl(b)
         b = emitImported(b)

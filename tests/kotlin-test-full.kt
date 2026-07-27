@@ -640,6 +640,67 @@ fun sec24() {
     check("flt25", xs[0] + xs[1] == 2.0 && s24(xs[0] * 2) == "1.0")
 }
 
+// ===== SECTION 25: value rendering =====
+// What println / toString() / a string template make of a value. Every answer
+// below was checked against the equivalent Java program run on `java` (JDK 24):
+// Kotlin/JVM's String, Int and Double ARE java.lang.*, println IS
+// System.out.println, a List renders through java.util.AbstractCollection.toString
+// and an enum entry through java.lang.Enum.toString, so Java is the oracle here
+// (no kotlinc available). The section exists because both grammars leaked their
+// HOST's rendering instead: the interpreter printed a list through JavaScript's
+// Array.prototype.toString ("1,2") and the compiler handed the raw runtime value
+// to Go's %v ("<nil>" for null, "[1 2]" for a list, a map of pointer addresses for
+// an instance - and an infinite recursion for an enum entry).
+// Not asserted here, because this value model cannot reproduce it: an Array
+// renders like a List, where real Kotlin prints "[Ljava.lang.Integer;@1b6d3586"
+// (arrayOf and listOf build the same value here), and a class without a toString
+// gets a FIXED synthetic hash, so only the "Name@" prefix is checked below.
+// The two data classes below deliberately name their properties x and y, like
+// every other data class in this file: the compiler grammar registers the
+// named-argument slots of the generated copy() under the METHOD name alone, so a
+// data class whose property names differ silently breaks .copy(y = 9) in an
+// earlier section. That limitation is orthogonal to rendering and pre-existing.
+data class Pair25(val x: Int, val y: String)
+data class Holder25(val x: List<Int>, val y: Int)
+class Plain25(val x: Int)
+class Custom25 { override fun toString(): String = "custom!" }
+enum class Suit25 { HEART, SPADE }
+fun sec25() {
+    // A null reference is "null" everywhere it is rendered.
+    val s: String? = null
+    check("ren1", "$s" == "null" && "" + s == "null")
+    // A list: square brackets, ", " between the elements, no quotes on a String.
+    val xs = listOf(1, 2)
+    check("ren2", xs.toString() == "[1, 2]" && "$xs" == "[1, 2]")
+    check("ren3", "" + xs == "[1, 2]")
+    check("ren4", listOf("x", "y").toString() == "[x, y]")
+    check("ren5", listOf<Int>().toString() == "[]")
+    check("ren6", listOf(1, null).toString() == "[1, null]")
+    check("ren7", listOf(listOf(1), listOf(2, 3)).toString() == "[[1], [2, 3]]")
+    check("ren8", listOf('a', 'b').toString() == "[a, b]")
+    check("ren9", listOf(1.5, 2.0).toString() == "[1.5, 2.0]")
+    // A data class renders through its SYNTHESIZED toString, and its properties
+    // render the same way a top-level value does.
+    val p = Pair25(1, "q")
+    check("ren10", p.toString() == "Pair25(x=1, y=q)" && "$p" == "Pair25(x=1, y=q)")
+    check("ren11", Holder25(listOf(1, 2), 3).toString() == "Holder25(x=[1, 2], y=3)")
+    check("ren12", listOf(Pair25(1, "a")).toString() == "[Pair25(x=1, y=a)]")
+    // An explicit toString() wins over every built-in rendering.
+    check("ren13", Custom25().toString() == "custom!" && "${Custom25()}" == "custom!")
+    // A class without one renders as Name@<hash>; the hash itself is the JVM's
+    // identity hash, which differs between runs, so only its shape is asserted.
+    val plain = Plain25(5)
+    check("ren14", plain.toString().indexOf("Plain25@") == 0 && plain.toString().indexOf("@") == 7)
+    check("ren15", "$plain" == plain.toString())
+    // An enum entry renders as its name.
+    check("ren16", Suit25.HEART.toString() == "HEART" && "${Suit25.SPADE}" == "SPADE")
+    check("ren17", "" + Suit25.HEART == "HEART" && Suit25.HEART.name == "HEART")
+    check("ren18", listOf(Suit25.HEART, Suit25.SPADE).toString() == "[HEART, SPADE]")
+    // The primitives keep the rendering they already had.
+    check("ren19", true.toString() == "true" && 42.toString() == "42" && 1.5.toString() == "1.5")
+    check("ren20", 'c'.toString() == "c" && "s".toString() == "s")
+}
+
 // ===== END SECTIONS =====
 
 fun main() {
@@ -667,6 +728,7 @@ fun main() {
     s22() // SECTION-CALL 22
     s23() // SECTION-CALL 23
     sec24() // SECTION-CALL 24
+    sec25() // SECTION-CALL 25
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

@@ -1179,6 +1179,11 @@ KwYield     = "yield" KwEnd ;
     // externs (makeAssign hands the raw operator to emitBin).
     var coreEmitBin = emitBin
     emitBin = function(b, op, l, r) {
+        // '+' is js_jadd plus Java's VALUE RENDERING on the string-concat side:
+        // js_jadd stringifies through the shared toString, so "" + arr was "1,2,3"
+        // and "" + obj was "[object Object]" where java writes [I@... / Main$Box@...
+        // (see abnf/jsrtjava.go). Arithmetic is unchanged.
+        if (op == "+" || op == "+=") return callExt(b, "js_jvadd", [l, r])
         if (op == "&" || op == "&=") return callExt(b, "js_jband", [l, r])
         if (op == "|" || op == "|=") return callExt(b, "js_jbor", [l, r])
         if (op == "^" || op == "^=") return callExt(b, "js_jbxor", [l, r])
@@ -2194,12 +2199,31 @@ KwYield     = "yield" KwEnd ;
     // a STACK - without that, the outer type's later members would resolve against
     // the nested one. Every type declaration enters it, not just ClassDecl.
     var jClassStack = []
+    // The BINARY name of each declared type - "Main", "Main$Box", "Main$Box$Deep" -
+    // which is what java.lang.Class#getName answers and therefore what an instance
+    // renders as (Main$Box@1a2b3c01). It is derived from the same nesting the class
+    // stack already tracks, recorded per simple name at declaration time and stored
+    // on the descriptor as __bname (see jstr in java-interpreter.abnf, which does
+    // exactly this, and jvpClassName in abnf/jsrtjava.go, which reads it).
+    var jBinStack = []
+    var jCurBin = ""
+    var jBinName = {}
     function jEnterClass(n) {
         jClassStack.push(curClassName)
+        jBinStack.push(jCurBin)
+        jCurBin = (jCurBin == "") ? n : jCurBin + "$" + n
+        jBinName["$" + n] = jCurBin
         curClassName = n
     }
     function jExitClass() {
         curClassName = jClassStack.pop()
+        jCurBin = jBinStack.pop()
+    }
+    // A descriptor built without a declaration walk (an enum constant's body class)
+    // keeps the name it was synthesized with.
+    function jBinOf(n) {
+        var b = jBinName["$" + n]
+        return (b == undefined) ? n : b
     }
     // "Outer", "Nested" -> "Nested": nested types are hoisted under their simple name.
     function jLastSeg(parts) { return parts[parts.length - 1] }
@@ -2392,6 +2416,16 @@ KwYield     = "yield" KwEnd ;
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            // The binary name an instance renders with, and - for a record - the
+            // component names its canonical toString walks (P[x=1, y=2]).
+            callExt(b, "js_set", [clsV, emitStr(b, "__bname"), emitStr(b, jBinOf(name))])
+            if (recordParams != undefined) {
+                var compsV = callExt(b, "js_arr_new", [])
+                for (var rp = 0; rp < recordParams.length; rp++) {
+                    callExt(b, "js_arr_push", [compsV, emitStr(b, recordParams[rp])])
+                }
+                callExt(b, "js_set", [clsV, emitStr(b, "__record"), compsV])
+            }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             var fields = []
             var ctors = []
@@ -2730,6 +2764,14 @@ KwYield     = "yield" KwEnd ;
             if (consts[s].body == null) { subs.push(null); continue }
             subs.push(buildClassStmt(name + "$" + consts[s].name, [{ext: name}].concat(consts[s].body), undefined))
         }
+        // java.lang.Enum#toString answers the constant's name unless the enum
+        // overrides it. java-interpreter.abnf installs the same default the same way
+        // (`if (!hasOwn(cls, "toString")) { cls.toString = jEnumName }`), and without
+        // it RED.toString() failed to dispatch here while the interpreter answered.
+        var enumHasToString = false
+        for (var t = 0; t < members.length; t++) {
+            if (members[t].kind == "method" && members[t].name == "toString") { enumHasToString = true }
+        }
         var clsStmt = buildClassStmt(name, members, undefined)
         lastTypeName = name
         return function(b) {
@@ -2739,6 +2781,10 @@ KwYield     = "yield" KwEnd ;
             for (var h = 0; h < kinds.length; h++) {
                 callExt(b, "js_set", [clsV, emitStr(b, kinds[h]),
                                       callExt(b, "js_closure", [handle(emitEnumHelper(kinds[h], name)), curScopeV])])
+            }
+            if (!enumHasToString) {
+                callExt(b, "js_set", [clsV, emitStr(b, "toString"),
+                                      callExt(b, "js_closure", [handle(emitEnumHelper("name", name)), curScopeV])])
             }
             var valsV = callExt(b, "js_arr_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__values"), valsV])
@@ -2949,8 +2995,25 @@ KwYield     = "yield" KwEnd ;
         // System.out.println / System.out.print / System.exit from the host globals.
         var sysV = callExt(b, "js_obj_new", [])
         var outV = callExt(b, "js_obj_new", [])
-        callExt(b, "js_set", [outV, emitStr(b, "println"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "println")])])
-        callExt(b, "js_set", [outV, emitStr(b, "print"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "print")])])
+        // println/print are NOT the shared host functions: those hand the raw
+        // runtime value to Go's %v, which prints <nil> for null, [1 2 3] for an
+        // array and a pointer-bearing map dump for an instance (and overflows the
+        // stack on an enum constant, whose descriptor points back at it). Each is a
+        // one-line closure over js_jvprint / js_jvwrite, which render the way java
+        // does - see abnf/jsrtjava.go. The whole ARGUMENT ARRAY is passed, so the
+        // no-argument println() stays distinguishable from println(null).
+        var jvPrintlnF = emitFunc([], function(bb) {
+            callExt(bb, "js_jvprint", [curF.Params[1]])
+            bb.NewRet(hUndef)
+            return deadBlock()
+        }, false, null)
+        var jvPrintF = emitFunc([], function(bb) {
+            callExt(bb, "js_jvwrite", [curF.Params[1]])
+            bb.NewRet(hUndef)
+            return deadBlock()
+        }, false, null)
+        callExt(b, "js_set", [outV, emitStr(b, "println"), callExt(b, "js_closure", [handle(jvPrintlnF), curScopeV])])
+        callExt(b, "js_set", [outV, emitStr(b, "print"), callExt(b, "js_closure", [handle(jvPrintF), curScopeV])])
         callExt(b, "js_set", [sysV, emitStr(b, "out"), outV])
         callExt(b, "js_set", [sysV, emitStr(b, "exit"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "System"), sysV])

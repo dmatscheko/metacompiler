@@ -593,7 +593,7 @@ TypeAssertSfx = "." "(" Type ")" ;
 
 Primary     = "(" Expression ")" | ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit
             | BinLit | LegOctLit | DecULit | DqString | RawString | RuneLit
-            | IntLit | True | False | Nil | FuncLit | MakeCall | NewCall | ConvExpr
+            | GoDecLit | True | False | Nil | FuncLit | MakeCall | NewCall | ConvExpr
             | CompositeLit | Call | Iota | VarRef ;
 
 // ----- Composite literals -----
@@ -709,6 +709,13 @@ BinDigits   = BinDigit { BinDigit | "_" } ;
 BinDigit    = "0" | "1" ;
 DecULit     <~~ push(makeConst(parseRadix(up.in))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } "_" { "0"..."9" | "_" } :whitespace(Whitespace) ;
+// A plain decimal integer. The shared IntLit reads it with parseInt, which is a
+// DOUBLE: 9223372036854775807 comes back as 9223372036854776000 and
+// 18446744073709551615 as 18446744073709552000. Both are ordinary Go literals, so
+// the value is read exactly instead (parseRadix answers a sized-integer box when
+// the digits do not fit a double).
+GoDecLit    <~~ push(makeConst(parseRadix(up.in))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
 RawString   = "`" :whitespace() { "\x00"..."\x5f" | "\x61"..."\U0010ffff" } <~~ push(makeConst(up.in)) ~~> "`" :whitespace(Whitespace) ;
 RuneLit     = "'" :whitespace() { StrEsc | SqPlain } <~~ push(makeConst(runeVal(up.in))) ~~> "'" :whitespace(Whitespace) ;
 
@@ -952,7 +959,24 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return v !== undefined && v !== null && typeof v == "object" && v.__dict === true
     }
     function newMap(zero) { return {__dict: true, keys: [], vals: [], zero: zero} }
-    function mapFind(m, k) { return m.keys.indexOf(k) } // indexOf compares with ===, like the scan it replaces.
+    // indexOf compares with ===, like the scan it replaces. A SIZED INTEGER key is
+    // a box, and two boxes holding the same value are different objects, so a
+    // program that uses one falls back to a value-comparing scan. The flag is set
+    // the first time such a box is built, so a program with no sized types pays
+    // nothing - the same shape as the usesComplex probe.
+    var goSeenSized = false
+    function mapFind(m, k) {
+        if (szIs(k)) { goSeenSized = true }
+        if (!goSeenSized) { return m.keys.indexOf(k) }
+        var i = m.keys.indexOf(k)
+        if (i >= 0) { return i }
+        if (!szIs(k) && typeof k != "number") { return 0 - 1 }
+        for (var j = 0; j < m.keys.length; j++) {
+            var kk = m.keys[j]
+            if ((szIs(kk) || szIs(k)) && (szIs(kk) || typeof kk == "number") && szEq(kk, k)) { return j }
+        }
+        return 0 - 1
+    }
     function mapGet(m, k) {
         var i = mapFind(m, k)
         return i >= 0 ? m.vals[i] : m.zero
@@ -1004,7 +1028,39 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 prevStr = isStr
             }
             return out
+        },
+        // fmt.Printf / fmt.Sprintf. The verb subset is %v %d %s %t %q %c and %%;
+        // see gFormat below, whose twin is gopFormat in abnf/jsrtgolang.go.
+        Printf: function() {
+            var a = []
+            for (var i = 1; i < arguments.length; i++) { a.push(arguments[i]) }
+            print(gFormat(gstr(arguments[0]), a))
+        },
+        Sprintf: function() {
+            var a2 = []
+            for (var j = 1; j < arguments.length; j++) { a2.push(arguments[j]) }
+            return gFormat(gstr(arguments[0]), a2)
         }
+    }
+    // Go's two BUILTINS, which are NOT fmt: println separates every pair of operands
+    // and ends with a newline, print separates nothing and ends with none. This half
+    // used to have neither, so `println(x)` died with "unknown name: println" for a
+    // program the compiled half ran (docs/abnf-dialect-gotchas.md, recurring shape 5).
+    // Real Go writes both to STDERR and prints a pointer or a slice as an ADDRESS;
+    // both halves here write to stdout and render the value, which is the
+    // reproducible answer and what the compiled half already did.
+    hostGlobals["println"] = function() {
+        var out = ""
+        for (var i = 0; i < arguments.length; i++) {
+            if (i > 0) out += " "
+            out += gstr(arguments[i])
+        }
+        println(out)
+    }
+    hostGlobals["print"] = function() {
+        var out = ""
+        for (var i = 0; i < arguments.length; i++) { out += gstr(arguments[i]) }
+        print(out)
     }
     hostGlobals["os"] = { Exit: function(code) { exit(code | 0) } }
     // len(string) counts BYTES in Go, not runes and not UTF-16 code units:
@@ -1097,6 +1153,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (isPtr(v)) { return "&" + gstr(ptrGet(v)) }
         if (isCx(v)) { return cxStr(v) }
         if (isFlo(v)) { return gFloStr(v.__flo) }
+        // A sized integer prints its digits, unsigned where it is unsigned - so a
+        // uint64 above 2^63 is 18446744073709551615 and not -1.
+        if (szIs(v)) { return szStr(v) }
         if (isSl(v)) { return gstr(slElems(v)) }
         if (Array.isArray(v)) {
             var out = "["
@@ -1107,14 +1166,30 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return out + "]"
         }
         if (isMap(v)) {
+            // fmt prints a map with its keys SORTED (go 1.12 and later); the value
+            // model keeps insertion order, so the order is computed here.
+            var ord = gKeyOrder(v.keys)
             var outm = "map["
-            for (var j = 0; j < v.keys.length; j++) {
+            for (var j = 0; j < ord.length; j++) {
                 if (j > 0) outm += " "
-                outm += gstr(v.keys[j]) + ":" + gstr(v.vals[j])
+                outm += gstr(v.keys[ord[j]]) + ":" + gstr(v.vals[ord[j]])
             }
-            return outm + "]" // Insertion order (real Go sorts the keys here).
+            return outm + "]"
         }
         if (typeof v == "object" && v.__class != undefined) {
+            // fmt.Stringer: a String() method on the type wins over the memberwise
+            // form, exactly as it does in Go. Only a method on the type ITSELF is
+            // found (not one promoted from an embedded struct), and Go's method-set
+            // rule is not modelled, so a pointer-receiver String() is used for the
+            // value form too. The depth guard keeps a String() that prints its own
+            // receiver from recursing forever.
+            if (typeof v.__class["String"] == "function" && gStrDepth < 32) {
+                gStrDepth = gStrDepth + 1
+                var sv = anytype
+                sv = v.__class["String"](v)
+                gStrDepth = gStrDepth - 1
+                return gstr(sv)
+            }
             var out2 = "{"
             var fs = v.__class.__fields
             for (var k = 0; k < fs.length; k++) {
@@ -1124,6 +1199,97 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return out2 + "}"
         }
         return "" + v
+    }
+    var gStrDepth = 0
+    // ----- fmt's format verbs -----
+    // %v %d %s %t %q %c and %% only. Width, precision, flags (%-5d, %.2f) and the
+    // remaining verbs (%f %g %e %x %o %b %p %T %U) are NOT implemented: an unhandled
+    // verb renders as %!<verb>(<value>) and a missing operand as %!<verb>(MISSING),
+    // which is close to but not identical with Go's own error text, and a surplus
+    // operand is ignored where Go appends %!(EXTRA ...). abnf/jsrtgolang.go implements
+    // exactly the same subset for the compiled half; keep the two in step.
+    function gFormat(f, args) {
+        var out = ""
+        var next = 0
+        for (var i = 0; i < f.length; i++) {
+            var ch = f.charAt(i)
+            if (ch != "%" || i + 1 >= f.length) { out += ch; continue }
+            i = i + 1
+            var verb = f.charAt(i)
+            if (verb == "%") { out += "%"; continue }
+            if (next >= args.length) { out += "%!" + verb + "(MISSING)"; continue }
+            var a = args[next]
+            next = next + 1
+            out += gVerb(verb, a)
+        }
+        return out
+    }
+    function gVerb(verb, a) {
+        if (verb == "v" || verb == "s") { return gstr(a) }
+        // %d on a SIZED integer has to go through szStr, not through a double: a
+        // uint64 above 2^63 prints unsigned, and a 64 bit value above 2^53 has no
+        // exact double to render from.
+        if (verb == "d") { if (szIs(a)) { return szStr(a) }; var n = gNumF(a); return "" + (n - (n % 1)) }
+        if (verb == "t") { return a === true ? "true" : "false" }
+        if (verb == "c") { return fromCodePoint(szNum(gNumF(a))) }
+        if (verb == "q") {
+            if (typeof a == "string") { return '"' + gQuoteBody(a, 34) + '"' }
+            return "'" + gQuoteBody(fromCodePoint(szNum(gNumF(a))), 39) + "'"
+        }
+        return "%!" + verb + "(" + gstr(a) + ")"
+    }
+    // The escapes strconv.Quote spells with a letter, plus the backslash and whichever
+    // delimiter is in force (Quote escapes only the double quote, QuoteRune only the
+    // single one - `delim` is that character's code). A control character Go would
+    // write as \x.. or \u.... is left verbatim here - the one deliberate gap, shared
+    // with gopQuoteBody in abnf/jsrtgolang.go.
+    function gQuoteBody(s, delim) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var c = s.charCodeAt(i)
+            if (c == 92) { out += "\\\\" }
+            else if (c == delim) { out += "\\" + s.charAt(i) }
+            else if (c == 10) { out += "\\n" }
+            else if (c == 9) { out += "\\t" }
+            else if (c == 13) { out += "\\r" }
+            else if (c == 7) { out += "\\a" }
+            else if (c == 8) { out += "\\b" }
+            else if (c == 12) { out += "\\f" }
+            else if (c == 11) { out += "\\v" }
+            else { out += s.charAt(i) }
+        }
+        return out
+    }
+    // The indices of a map's keys in fmt's print order: numerically for a numeric key
+    // type, bytewise for a string key, false before true for a bool. A Go map has ONE
+    // key type, so the kind of the keys decides. Insertion sort - the frozen engine has
+    // no Array.sort - and the twin of gopKeyOrder in abnf/jsrtgolang.go.
+    function gKeyOrder(keys) {
+        var ord = []
+        var num = []
+        var txt = []
+        var numeric = keys.length > 0
+        for (var i = 0; i < keys.length; i++) {
+            ord.push(i)
+            var k = keys[i]
+            if (typeof k == "number" || isFlo(k)) { num.push(gNumF(k)); txt.push("") }
+            else if (typeof k == "boolean") { numeric = false; num.push(0); txt.push(k ? "1" : "0") }
+            else { numeric = false; num.push(0); txt.push("" + k) }
+        }
+        for (var s = 1; s < ord.length; s++) {
+            var j2 = s
+            while (j2 > 0 && gKeyLess(numeric, num, txt, ord[j2], ord[j2 - 1])) {
+                var t = ord[j2]
+                ord[j2] = ord[j2 - 1]
+                ord[j2 - 1] = t
+                j2 = j2 - 1
+            }
+        }
+        return ord
+    }
+    function gKeyLess(numeric, num, txt, a, b) {
+        if (numeric) { return num[a] < num[b] }
+        return txt[a] < txt[b]
     }
 
     // ----- Postfix suffixes: (args), [lo:hi:max] -----
@@ -1273,16 +1439,22 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return x.length
     }
     // Indexing that works on a slice header, an array, a map and a string alike.
+    // An INDEX may be a sized integer (`var i uint8 = 2; a[i]`), and a box is not a
+    // usable property key, so every index is read as a plain number first. A MAP
+    // key is left alone: it keeps whatever type it has, and mapFind compares by
+    // value.
     function goIndex(o, i) {
-        if (isSl(o)) { return slGet(o, i) }
         if (isMap(o)) { return mapGet(o, i) }
-        if (typeof o == "string") { return utf8Bytes(o)[i] }
-        return hasOwn(o, i) ? o[i] : undefined
+        var ix = szIs(i) ? szNum(i) : i
+        if (isSl(o)) { return slGet(o, ix) }
+        if (typeof o == "string") { return utf8Bytes(o)[ix] }
+        return hasOwn(o, ix) ? o[ix] : undefined
     }
     function goSetAt(o, i, v) {
-        if (isSl(o)) { slSet(o, i, v); return }
         if (isMap(o)) { mapSet(o, i, v); return }
-        o[i] = v
+        var ix = szIs(i) ? szNum(i) : i
+        if (isSl(o)) { slSet(o, ix, v); return }
+        o[ix] = v
     }
     // Go copies an ARRAY on assignment and on the way into a parameter (it is a value,
     // not a reference), and the copy is deep: an element that is itself an array is a
@@ -1362,11 +1534,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
 
     // ----- Conversions -----
-    // The named-type conversions (int(x), string(b), []byte(s), ...). Our value model
-    // has one numeric type, so the integer conversions truncate and the sized ones
-    // also mask; string(int) is the rune spelling, string([]byte) joins the bytes.
+    // The named-type conversions (int(x), string(b), []byte(s), ...). An integer
+    // conversion truncates toward zero and WRAPS to the target width, and the
+    // result carries that width (see the sized-integer box in lib/interp-core.js),
+    // so int8(300) is 44 and the 44 still knows it is an int8. string(int) is the
+    // rune spelling, string([]byte) joins the bytes.
     function goConvert(to, v) {
         if (to == "string") {
+            if (szIs(v)) { return fromCodePoint(szNum(v)) }
             if (typeof v == "number") { return fromCodePoint(v) }
             if (isSl(v) || Array.isArray(v)) {
                 var els = isSl(v) ? slElems(v) : v
@@ -1390,15 +1565,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (to == "bool") { return v ? true : false }
         // float64(x) BOXES: the result is a float64 whatever x was, which is what
         // makes float64(7)/2 == 3.5.
-        if (to == "float64" || to == "float32") { return gFlo(gNumF(v) * 1) }
-        if (isFlo(v)) { return goConvert(to, v.__flo) }
-        if (to == "uint8" || to == "byte") { return gtrunc(v) & 255 }
-        if (to == "uint16") { return gtrunc(v) & 65535 }
-        if (to == "uint32") { return gtrunc(v) >>> 0 }
-        if (to == "int8") { return (gtrunc(v) << 24) >> 24 }
-        if (to == "int16") { return (gtrunc(v) << 16) >> 16 }
-        if (to == "int32" || to == "rune") { return gtrunc(v) | 0 }
-        if (to.indexOf("int") == 0 || to.indexOf("uint") == 0) { return gtrunc(v) }
+        if (to == "float64" || to == "float32") { return gFlo(szNum(gNumF(v)) * 1) }
+        if (isFlo(v)) { return goConvert(to, gtrunc(v.__flo)) }
+        var it = goIntTy(to)
+        if (it != null) { return szConv(v, it.w, it.u) }
         return v
     }
     function fromCodePoint(cp) {
@@ -1423,39 +1593,35 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
 
     // ----- Operators Go has and the shared core does not -----
-    // Go ints are 64 bit; JS numbers carry 53 bits exactly, which covers everything
-    // the shift and mask forms below need (1 << 40 and friends). Shifts are therefore
-    // multiplication/division by a power of two rather than the 32-bit << and >>, and
-    // the bitwise ops fall back to the 32-bit host operators, which is exact for the
-    // value range they are used on.
+    // Go's integer types have a WIDTH and a signedness, and 64 bits is more than a
+    // JS number carries: the shifts used to be multiplication by a power of two and
+    // gave up at 53 bits (1 << 62 was 0), the bitwise operators fell through to the
+    // host's 32-bit ones (1000000007 * 1000000007 was -371520512) and nothing on a
+    // value said whether it was a uint8. All of that is now the sized-integer box -
+    // szArith / szCmp / szConv in lib/interp-core.js, the exact twin of the jsGInt
+    // box the compiled half uses (abnf/jsrtint.go). See the invariant there: a
+    // plain number is a signed 64 bit integer inside 2^53, everything else is boxed.
     function gtrunc(v) { return v < 0 ? Math.ceil(v) : Math.floor(v) }
-    function gpow2(n) {
-        var v = 1
-        for (var i = 0; i < n; i++) { v = v * 2 }
-        return v
-    }
-    function gshl(l, r) { return r >= 53 ? 0 : l * gpow2(r) }
-    function gshr(l, r) { return r >= 53 ? (l < 0 ? -1 : 0) : gtrunc(l / gpow2(r)) }
-    binOps["<<"] = function(l, r) { return gshl(l, r) }
-    binOps[">>"] = function(l, r) { return gshr(l, r) }
-    binOps["&"]  = function(l, r) { return l & r }
-    binOps["|"]  = function(l, r) { return l | r }
-    binOps["^"]  = function(l, r) { return l ^ r }
-    binOps["&^"] = function(l, r) { return l & ~r }
-    applyOps["&="]  = function(a, b) { return a & b }
-    applyOps["|="]  = function(a, b) { return a | b }
-    applyOps["^="]  = function(a, b) { return a ^ b }
-    applyOps["&^="] = function(a, b) { return a & ~b }
-    applyOps["<<="] = function(a, b) { return gshl(a, b) }
-    applyOps[">>="] = function(a, b) { return gshr(a, b) }
-    // ^x is the bitwise complement. On an unsigned operand of known width Go
-    // complements WITHIN that width, so ^uint8(0xF0) is 0x0F and not -241.
+    binOps["<<"] = function(l, r) { return szArith("<<", l, r) }
+    binOps[">>"] = function(l, r) { return szArith(">>", l, r) }
+    binOps["&"]  = function(l, r) { return szArith("&", l, r) }
+    binOps["|"]  = function(l, r) { return szArith("|", l, r) }
+    binOps["^"]  = function(l, r) { return szArith("^", l, r) }
+    binOps["&^"] = function(l, r) { return szArith("&^", l, r) }
+    applyOps["&="]  = function(a, b) { return szArith("&", a, b) }
+    applyOps["|="]  = function(a, b) { return szArith("|", a, b) }
+    applyOps["^="]  = function(a, b) { return szArith("^", a, b) }
+    applyOps["&^="] = function(a, b) { return szArith("&^", a, b) }
+    applyOps["<<="] = function(a, b) { return szArith("<<", a, b) }
+    applyOps[">>="] = function(a, b) { return szArith(">>", a, b) }
+    // ^x is the bitwise complement, WITHIN the operand's own width - so ^uint8(0xF0)
+    // is 0x0F and not -241, and ^1 on an int is -2. The width used to be recovered
+    // from the position-keyed conversion table; it now rides on the value, which is
+    // what makes it survive through a variable.
     // items = [operandThunk, {at}].
     function makeCompl(items) {
         var t = items[0]
-        var w = uintBits(tyAt(items[1].at))
-        if (w > 0) { return function() { return goMask(~t(), w) } }
-        return function() { return ~t() }
+        return function() { return szNot(t()) }
     }
     function makeFallthrough() { return function() { return {sig: "fallthrough"} } }
 
@@ -1473,12 +1639,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // IS a conversion is recognized by an exact position match. One typed operand types
     // the whole expression, which is what Go does too - an arithmetic expression may
     // not mix a float64 with an int at all.
+    // Only FLOAT types are registered now. The sized integer types used to be here
+    // too, because a uint8's width had nowhere else to live; the box carries it on
+    // the value instead, which reaches everything a position key never could - a
+    // variable's slot, a struct field, a function result. This is exactly what
+    // commit 636e326 did to the float half of this same table.
     var convByPos = {}
-    // Only the types that CHANGE an operator's answer are registered; int/int64/uintptr
-    // and friends behave exactly like the untyped path.
     function regConv(pos, ty) {
         if (pos == undefined || pos == null) { return }
-        if (!isFloatTy(ty) && uintBits(ty) == 0) { return }
+        if (!isFloatTy(ty)) { return }
         convByPos["p" + pos] = ty
     }
     function tyAt(pos) {
@@ -1487,19 +1656,23 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return hasOwn(convByPos, k) ? convByPos[k] : null
     }
     function isFloatTy(ty) { return ty == "float64" || ty == "float32" }
-    function uintBits(ty) {
-        if (ty == "uint8" || ty == "byte") { return 8 }
-        if (ty == "uint16") { return 16 }
-        if (ty == "uint32") { return 32 }
-        return 0
+    // goIntTy answers {w, u} for a sized integer type name and null for anything
+    // else. `int`, `int64`, `rune` and `int32`-in-the-64-bit-sense are the plain
+    // path: only a type that is NOT a signed 64 bit integer needs a box, which is
+    // what keeps the box rare (see the invariant in lib/interp-core.js).
+    function goIntTy(ty) {
+        if (ty == "int" || ty == "int64") { return {w: 64, u: false} }
+        if (ty == "int8") { return {w: 8, u: false} }
+        if (ty == "int16") { return {w: 16, u: false} }
+        if (ty == "int32" || ty == "rune") { return {w: 32, u: false} }
+        if (ty == "uint8" || ty == "byte") { return {w: 8, u: true} }
+        if (ty == "uint16") { return {w: 16, u: true} }
+        if (ty == "uint32") { return {w: 32, u: true} }
+        if (ty == "uint" || ty == "uint64" || ty == "uintptr") { return {w: 64, u: true} }
+        return null
     }
-    function goMask(v, w) {
-        if (w == 8) { return v & 255 }
-        if (w == 16) { return v & 65535 }
-        return v >>> 0
-    }
-    // One binary step under a known static type: float arithmetic keeps its fraction,
-    // a sized unsigned type wraps to its width, everything else is the untyped path.
+    // One binary step under a known static FLOAT type: float arithmetic keeps its
+    // fraction, everything else is the untyped path (where the box now decides).
     function goTypedOp(ty, op, l, r) {
         if (isFloatTy(ty)) {
             var a = gNumF(l)
@@ -1511,10 +1684,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (op == "%") { return gFlo(a % b) }
             return binOp(op, l, r)
         }
-        var v = binOp(op, l, r)
-        var w = uintBits(ty)
-        if (w > 0 && typeof v == "number") { return goMask(v, w) }
-        return v
+        return binOp(op, l, r)
     }
     // The two arithmetic levels fold through this instead of the shared foldBinary.
     // items = [t0, {at}, op1, t1, {at}, op2, t2, {at}, ...]: operand k is at 3k and its
@@ -1661,7 +1831,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             v = t()
             if (isFlo(v)) { return gFlo(gNegF(v.__flo)) }
             if (isCx(v)) { return newCx(gNegF(v.re), gNegF(v.im)) }
-            return (0 - v) | 0
+            // An integer negates at its OWN width, so -int8(-128) is -128 again
+            // (the wrap the hardware does) rather than 128.
+            return szNeg(v)
         }
     }
     hostGlobals["real"] = function(v) { return cxRe(v) }
@@ -1673,28 +1845,38 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     var coreSubOp = binOps["-"]
     var coreMulOp = binOps["*"]
     var coreDivOp = binOps["/"]
-    binOps["+"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxAdd(l, r) : ((isFlo(l) || isFlo(r)) ? gFlo(gNumF(l) + gNumF(r)) : coreAddOp(l, r)) }
-    binOps["-"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxSub(l, r) : ((isFlo(l) || isFlo(r)) ? gFlo(gNumF(l) - gNumF(r)) : coreSubOp(l, r)) }
-    binOps["*"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxMul(l, r) : ((isFlo(l) || isFlo(r)) ? gFlo(gNumF(l) * gNumF(r)) : coreMulOp(l, r)) }
-    binOps["/"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxDiv(l, r) : ((isFlo(l) || isFlo(r)) ? gFlo(gNumF(l) / gNumF(r)) : coreDivOp(l, r)) }
+    // The five arithmetic operators. A complex operand wins, then a float64 box,
+    // and everything else is INTEGER arithmetic at the result type's width - which
+    // is szArith, not the shared core's 32-bit `| 0`. `+` keeps the string case,
+    // since Go concatenates with it.
+    binOps["+"] = function(l, r) {
+        if (isCx(l) || isCx(r)) { return cxAdd(l, r) }
+        if (isFlo(l) || isFlo(r)) { return gFlo(gNumF(l) + gNumF(r)) }
+        if (typeof l == "string" || typeof r == "string") { return coreAddOp(l, r) }
+        return szArith("+", l, r)
+    }
+    binOps["-"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxSub(l, r) : ((isFlo(l) || isFlo(r)) ? gFlo(gNumF(l) - gNumF(r)) : szArith("-", l, r)) }
+    binOps["*"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxMul(l, r) : ((isFlo(l) || isFlo(r)) ? gFlo(gNumF(l) * gNumF(r)) : szArith("*", l, r)) }
+    binOps["/"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxDiv(l, r) : ((isFlo(l) || isFlo(r)) ? gFlo(gNumF(l) / gNumF(r)) : szArith("/", l, r)) }
+    binOps["%"] = function(l, r) { return (isFlo(l) || isFlo(r)) ? gFlo(gNumF(l) % gNumF(r)) : szArith("%", l, r) }
     // The four comparisons unbox a float64 so it can be compared against an untyped
-    // constant (x > 2 with x a float64).
+    // constant (x > 2 with x a float64), and go through szCmp when either side is a
+    // sized integer - an unsigned one has to compare UNSIGNED, so uint64max > 0.
     var coreLtOp = binOps["<"]
     var coreGtOp = binOps[">"]
     var coreLeOp = binOps["<="]
     var coreGeOp = binOps[">="]
-    binOps["<"]  = function(l, r) { return (isFlo(l) || isFlo(r)) ? gNumF(l) < gNumF(r)  : coreLtOp(l, r) }
-    binOps[">"]  = function(l, r) { return (isFlo(l) || isFlo(r)) ? gNumF(l) > gNumF(r)  : coreGtOp(l, r) }
-    binOps["<="] = function(l, r) { return (isFlo(l) || isFlo(r)) ? gNumF(l) <= gNumF(r) : coreLeOp(l, r) }
-    binOps[">="] = function(l, r) { return (isFlo(l) || isFlo(r)) ? gNumF(l) >= gNumF(r) : coreGeOp(l, r) }
+    binOps["<"]  = function(l, r) { if (isFlo(l) || isFlo(r)) { return gNumF(l) < gNumF(r) };  if (szIs(l) || szIs(r)) { return szCmp(l, r) < 0 };  return coreLtOp(l, r) }
+    binOps[">"]  = function(l, r) { if (isFlo(l) || isFlo(r)) { return gNumF(l) > gNumF(r) };  if (szIs(l) || szIs(r)) { return szCmp(l, r) > 0 };  return coreGtOp(l, r) }
+    binOps["<="] = function(l, r) { if (isFlo(l) || isFlo(r)) { return gNumF(l) <= gNumF(r) }; if (szIs(l) || szIs(r)) { return szCmp(l, r) <= 0 }; return coreLeOp(l, r) }
+    binOps[">="] = function(l, r) { if (isFlo(l) || isFlo(r)) { return gNumF(l) >= gNumF(r) }; if (szIs(l) || szIs(r)) { return szCmp(l, r) >= 0 }; return coreGeOp(l, r) }
     // The compound assignments are the same operators (x *= 2 is x = x * 2), so they
-    // resolve through binOps instead of the shared 32 bit applyOps table.
+    // ALL resolve through binOps now instead of the shared 32 bit applyOps table -
+    // which is what makes `n *= n` exact and `u8 += 1` wrap at 8 bits.
     var gCompound = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%"}
     var coreApplyOpG = applyOp
     applyOp = function(op, a, b) {
-        if (hasOwn(gCompound, op) && (isFlo(a) || isFlo(b) || isCx(a) || isCx(b))) {
-            return binOp(gCompound[op], a, b)
-        }
+        if (hasOwn(gCompound, op)) { return binOp(gCompound[op], a, b) }
         return coreApplyOpG(op, a, b)
     }
 
@@ -1704,6 +1886,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // A float64 box compares by VALUE, against another box or against an
         // untyped constant (x == 1 with x a float64).
         if (isFlo(l) || isFlo(r)) { return gNumF(l) === gNumF(r) }
+        // A sized integer compares by VALUE too, against another box or against an
+        // untyped constant (i8 == -128), never by object identity.
+        if (szIs(l) || szIs(r)) { return szEq(l, r) }
         if (l === r) { return true }
         if (l === undefined) { return r === null || r === undefined }
         if (r === undefined) { return l === null }
@@ -2219,7 +2404,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return function() {
             var cur = anytype // The slot may hold a number or a float64 box.
             cur = readRef(ref)
-            assignRef(ref, isFlo(cur) ? gFlo(cur.__flo + d) : ((cur + d) | 0))
+            // A sized slot steps at ITS width: `var i8 int8 = 127; i8++` is -128.
+            assignRef(ref, isFlo(cur) ? gFlo(cur.__flo + d) : szArith("+", cur, d))
         }
     }
 
@@ -2245,6 +2431,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var k = 0; k < n; k++) { a.push(zeroOfType2(el)) }
             return a
         }
+        // A sized zero is a BOX of that width, so `var u8 uint8` followed by u8--
+        // wraps to 255 rather than going to -1. goIntTy wants the bare type word.
+        var itz = goIntTy(goTyWord(t))
+        if (itz != null) { return szConv(0, itz.w, itz.u) }
         if (t.indexOf("int") == 0 || t.indexOf("uint") == 0 || t.indexOf("byte") == 0
             || t.indexOf("rune") == 0 || t.indexOf("float") == 0) { return 0 }
         if (t.indexOf("string") == 0) { return "" }
@@ -2255,10 +2445,28 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // items = [name..., {ty}?, initThunk...]: 'var a, b = 1, 2', 'var i int',
     // 'var q, r int' and the const forms all go through here. With more names than
     // initializers the single initializer is a multi-value call and gets unpacked.
-    // The declared type applied to a value: only the float types change it (the
-    // sized integer types keep the position-keyed conversion mechanism).
+    // goTyWord is the leading TYPE WORD of a captured type text, which may carry
+    // trailing whitespace, a comment or a following name.
+    function goTyWord(t) {
+        var i = 0
+        while (i < t.length) {
+            var cc = t.charCodeAt(i)
+            var ok = (cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) || (cc >= 48 && cc <= 57) || cc == 95
+            if (!ok) { break }
+            i++
+        }
+        return t.substring(0, i)
+    }
+    // The declared type applied to a value. `var d float64 = 1` CONVERTS, and so
+    // does `var i8 int8 = 127` - which is what puts the width on the value and
+    // makes the i8++ that follows answer -128. Before the box, a sized integer
+    // declaration could not do this at all: the width lived in a table keyed by the
+    // source position of a written-out conversion, which a variable's slot never
+    // reaches.
     function gAdoptTy(ty, v) {
         if (isFloatTy(ty) && typeof v == "number") { return gFlo(v) }
+        var it = goIntTy(goTyWord(ty))
+        if (it != null && (typeof v == "number" || szIs(v))) { return szConv(v, it.w, it.u) }
         return v
     }
     function makeVarDecl(items) {
@@ -2904,15 +3112,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // The integer value of a 0x / 0o / 0b literal, ignoring '_' digit separators.
     // 017 (the legacy octal form: no base letter, so parseRadix would read it decimal).
-    function parseLegOct(s) {
-        var v = 0
-        for (var i = 1; i < s.length; i++) {
-            var cc = s.charCodeAt(i)
-            if (cc == 95) { continue }
-            v = v * 8 + (cc - 48)
-        }
-        return v
-    }
+    // Both go through the exact 64 bit reader: 0xFFFFFFFFFFFFFFFF and
+    // 9223372036854775807 are ordinary Go literals and a double cannot hold either
+    // (the decimal one reads back as 9223372036854776000).
+    function parseLegOct(s) { return szNorm(i64FromRadix(s.substring(1), 8), 64, false) }
     // 0x1.8p1: hex mantissa with an optional hex fraction, times two to the DECIMAL
     // exponent after 'p'.
     function parseHexFloat(s) {
@@ -2961,17 +3164,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             else if (p == "o" || p == "O") { radix = 8; start = 2 }
             else if (p == "b" || p == "B") { radix = 2; start = 2 }
         }
-        var v = 0
-        for (var i = start; i < s.length; i++) {
-            var cc = s.charCodeAt(i)
-            if (cc == 95) { continue }
-            var d = 0
-            if (cc >= 48 && cc <= 57) { d = cc - 48 }
-            else if (cc >= 97 && cc <= 102) { d = cc - 87 }
-            else if (cc >= 65 && cc <= 70) { d = cc - 55 }
-            v = v * radix + d
-        }
-        return v
+        return szNorm(i64FromRadix(s.substring(start), radix), 64, false)
     }
     // type Name struct {...} builds a descriptor; type Name interface {...} is
     // accepted (marked with {iface}) and reported not implemented.

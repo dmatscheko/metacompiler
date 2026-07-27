@@ -1239,14 +1239,76 @@ KwLet       = "let" KwEnd ;
         return makeConst(csChar(dec.length > 0 ? dec.charCodeAt(0) : 0))
     }
 
-    // C# to-string for the interpolated / concatenated subset (integers as "5").
-    function csStr(v) {
+    // ----- the C# string CONVERSION -----
+    // Every site that turns a value into text goes through csStr: Console.WriteLine,
+    // '+', an interpolation hole and .ToString(). It is the twin of cspStr in
+    // abnf/jsrtcsharp.go and the two MUST stay in step (./test.sh --cross diffs them).
+    //
+    // There is no dotnet on this machine, so each answer here is SPEC-CITED:
+    //   bool     "True"/"False"   System.Boolean.ToString() returns Boolean.TrueString /
+    //                             Boolean.FalseString (a .NET BCL contract, not an
+    //                             ECMA-334 rule). The LITERALS stay true/false; only the
+    //                             string conversion is capitalised.
+    //   null     ""               ECMA-334 12.4.7 (a null operand of string concatenation
+    //                             contributes the empty string) and Console.WriteLine(object),
+    //                             which writes only the line terminator for a null argument.
+    //   array    "System.Int32[]" System.Object.ToString() answers the fully qualified type
+    //                             name (ECMA-334 8.2.3: every type inherits ToString from
+    //                             object); an array type's name is the element type's plus "[]".
+    //   instance "Box"            System.Object.ToString() answers GetType().ToString().
+    // A user ToString() override wins over all of them, because object.ToString is virtual.
+    //
+    // Deliberate simplifications, both shared with the compiled half:
+    //   - the array ELEMENT type is inferred from the elements (the declared type is not on
+    //     the value); empty or mixed answers System.Object[], and a List<T> - the same plain
+    //     array in this model - renders like an array rather than as
+    //     "System.Collections.Generic.List`1[System.Int32]".
+    //   - an instance prints its BARE declared name; real C# qualifies it with the namespace
+    //     and the enclosing type (Demo.Program+Box), neither of which this runtime models.
+    //     A record prints its type name too, where C# synthesizes "Box { X = 1 }".
+    function csElemName(e) {
+        if (e === true || e === false) return "System.Boolean"
+        if (typeof e == "string") return "System.String"
+        if (csIsChar(e)) return "System.Char"
+        if (csIsFlo(e)) return "System.Double"
+        if (typeof e == "number") return "System.Int32"
+        return ""
+    }
+    function csArrayName(a) {
+        if (a.length == 0) return "System.Object[]"
+        var name = ""
+        for (var i = 0; i < a.length; i++) {
+            var n = csElemName(a[i])
+            if (n == "" || (name != "" && n != name)) { return "System.Object[]" }
+            name = n
+        }
+        return name + "[]"
+    }
+    // The user ToString() of an instance, found along the __class / __super chain (the
+    // same walk mcall0 does). Own-property reads only, so Object.prototype's toString
+    // cannot answer here under a host JS engine.
+    function csFindToStr(v) {
+        for (var c = v.__class; c != undefined; c = c.__super) {
+            if (hasOwn(c, "ToString") && typeof c["ToString"] == "function") { return c["ToString"] }
+        }
+        return undefined
+    }
+    function csStr(v) { return csStrD(v, 0) }
+    function csStrD(v, d) {
+        if (d > 32) return "..."
         if (v === undefined || v === null) return ""
-        if (v === true) return "true"
-        if (v === false) return "false"
+        if (v === true) return "True"
+        if (v === false) return "False"
         if (typeof v == "string") return v
         if (csIsChar(v)) return String.fromCharCode(v.__char)
         if (csIsFlo(v)) return csFloStr(v.__flo)
+        if (Array.isArray(v)) return csArrayName(v)
+        if (typeof v == "object") {
+            var m = csFindToStr(v)
+            if (m != undefined) { return csStrD(m(v), d + 1) }
+            if (v.__isclass === true && typeof v.__name == "string") { return v.__name }
+            if (v.__class != undefined && typeof v.__class.__name == "string") { return v.__class.__name }
+        }
         return "" + v
     }
     function csStr2(v) {
@@ -1478,6 +1540,12 @@ KwLet       = "let" KwEnd ;
         return mcall0(target, name, args)
     }
     function mcall0(target, name, args) {
+        // object.ToString() is virtual and EVERY type has it - a bool, an int, a double,
+        // an array, a string - so it cannot be a per-receiver builtin. csStr is the C#
+        // string conversion; a user override is dispatched normally and wins.
+        if (name == "ToString" && args.length == 0 && !csHasMethod(target, "ToString")) {
+            return csStr(target)
+        }
         if (typeof target == "string") {
             if (name == "Substring") return args.length > 1 ? target.slice(args[0], args[1]) : target.slice(args[0])
             if (name == "IndexOf") return target.indexOf(args[0])
