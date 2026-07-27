@@ -177,8 +177,13 @@ Receiver    <~~ push({recv: takeAll()}) ~~>
 ParamList   <~~ push(makeParams(takeAll())) ~~>
             = "(" [ ParamItem { "," ParamItem } [ "," ] ] ")" ;
 ParamItem   = NamedParam | AnonParam ;
-NamedParam  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ Variadic ] Type ;
-AnonParam   = [ Variadic ] Type ;
+NamedParam  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ Variadic ] PType ;
+AnonParam   = [ Variadic ] PType ;
+// The parameter's declared TYPE TEXT, captured the way FType captures a struct
+// field's. A parameter is an ordinary slot, so `func f(b uint8)` has to put the
+// width on the argument on the way in - without this the b++ inside f stepped at
+// 53 bits.
+PType       <~~ push({pty: firstType(up.in)}) ~~> = Type ;
 // The last parameter may be variadic: it collects the remaining arguments as a slice.
 Variadic    <~~ push({vararg: true}) ~~> = "..." ;
 // f(xs...) spreads a slice into a variadic parameter instead of passing it as one
@@ -1316,12 +1321,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // collects the remaining arguments.
     function makeParams(items) {
         var names = []
+        var ptypes = []
         var variadic = false
+        var pend = 0
         for (var i = 0; i < items.length; i++) {
-            if (typeof items[i] == "string") { names.push(items[i]) }
-            else if (items[i] != undefined && items[i].vararg == true) { variadic = true }
+            if (typeof items[i] == "string") { names.push(items[i]); pend++; continue }
+            if (items[i] != undefined && items[i] != null && items[i].pty != undefined) {
+                // One type closes the group of names in front of it (a, b int).
+                for (var k = 0; k < pend; k++) { ptypes.push(items[i].pty) }
+                pend = 0
+                continue
+            }
+            if (items[i] != undefined && items[i].vararg == true) { variadic = true }
         }
-        return {params: names, variadic: variadic}
+        for (var z = 0; z < pend; z++) { ptypes.push("") }
+        return {params: names, variadic: variadic, ptypes: ptypes}
     }
     // Go's suffix chain: the shared core knows .m(), .field and [i]; the plain call on
     // an arbitrary value is added here. Assigned, not declared - compile-core.js already
@@ -1408,7 +1422,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // element type ([][]int{{1}} -> a slice, [][2]int{{1, 2}} -> an array, []P{{1, 2}}
     // -> a struct).
     function emitElemVal(b, e, cet) {
-        if (e.enest == null) { return e.eval(b) }
+        if (e.enest == null) {
+            // The element type is DECLARED here, so the value adopts its width:
+            // []uint8{255} holds a uint8 255, and the a[0]++ after it is 0.
+            var re = e.eval(b)
+            return {b: re.b, v: emitAdoptTy(re.b, cet, re.v)}
+        }
         var els = e.enest.selems
         if (cet.length > 0 && cet.charCodeAt(0) == 91) {
             var isSlice = cet.length > 1 && cet.charCodeAt(1) == 93
@@ -1461,7 +1480,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 return lb
             })
         }
-        if (kind == "slice") { return {b: b, v: emitSlOf(b, arr)} }
+        if (kind == "slice") { return {b: b, v: emitSlT(b, emitSlOf(b, arr), cet)} }
         return {b: b, v: arr}
     }
     // items = [{cet}, lenThunk, capThunk?]
@@ -1478,7 +1497,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 b = rc.b
                 cp = rc.v
             }
-            return {b: b, v: emitHelper(b, "$smake", [rl.v, cp, emitZeroDecl(b, cet)])}
+            return {b: b, v: emitHelper(b, "$smake", [rl.v, cp, emitZeroDecl(b, cet), emitStr(b, cet)])}
         }
     }
     // items = [{mzero}, {mk, mv}...] -> a map built in source order. The zero value
@@ -1497,7 +1516,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                        ? mv(b)
                        : emitElemVal(b, {ekey: null, eval: null, enest: mv.enest}, zero)
                 b = rv.b
-                callExt(b, "js_pyset", [mV, rk.v, rv.v])
+                // The map's VALUE TYPE is declared here, so the entry adopts its
+                // width: map[string]uint8{"k": 255} holds a uint8.
+                callExt(b, "js_pyset", [mV, rk.v, emitAdoptTy(b, zero, rv.v)])
             }
             return {b: b, v: mV}
         }
@@ -1516,14 +1537,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return {b: b, v: mV}
         }
     }
-    // The zero value of a map's value type ('int', 'string', 'bool'; the captured
-    // type text may carry trailing whitespace, so match the prefix).
-    function emitZero(b, t) {
-        if (t.indexOf("int") == 0) return emitNum(b, 0)
-        if (t.indexOf("string") == 0) return emitStr(b, "")
-        if (t.indexOf("bool") == 0) return hFalse
-        return hNull
-    }
+    function emitZero(b, t) { return emitZeroTy(b, t) }
     // items = [valueName, okName, baseThunk, keyThunk]: v, ok := m[k].
     function makeMapOk(items) {
         var vName = items[0]
@@ -1640,20 +1654,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var name = key
             if (name == null) { name = fields[pos]; pos++ }
             key = null
-            callExt(b, "js_set", [objV, emitStr(b, name), r.v])
+            callExt(b, "js_set", [objV, emitStr(b, name), emitAdoptTy(b, ftypeOfName(fields, ftypes, name), r.v)])
         }
         return {b: b, v: objV}
     }
-    // The zero value of a type, from its type TEXT: 0 for every numeric kind, "" for a
-    // string, false for a bool and nil for everything else (slice, map, pointer, struct).
-    function emitZeroOf(b, t) {
-        if (t == undefined || t == null) { return hNull }
-        if (t.indexOf("float") == 0) { return callExt(b, "js_gflo", [emitNum(b, 0)]) }
-        if (t.indexOf("int") == 0 || t.indexOf("uint") == 0 || t.indexOf("byte") == 0
-            || t.indexOf("rune") == 0) { return emitNum(b, 0) }
-        if (t.indexOf("string") == 0) { return emitStr(b, "") }
-        if (t.indexOf("bool") == 0) { return hFalse }
-        return hNull
+    function emitZeroOf(b, t) { return emitZeroTy(b, t) }
+    // The declared type text of one field of a struct, by field name.
+    function ftypeOfName(fields, ftypes, name) {
+        for (var i = 0; i < fields.length; i++) { if (fields[i] == name) { return ftypes[i] } }
+        return ""
     }
     // A runtime array of strings, set as one property of a struct descriptor.
     function emitNameList(b, clsV, prop, names) {
@@ -1889,6 +1898,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return h
     }
     function slF(b, h, k) { return callExt(b, "js_get", [h, emitStr(b, k)]) }
+    // emitSlT records the ELEMENT TYPE text on a header. Nothing reads it but the
+    // width rule: `var bs []uint8` is empty, so there is no element to take a width
+    // from, and without this an append onto it would land a plain number in it.
+    function emitSlT(b, h, et) {
+        if (et == undefined || et == null || et.length == 0) { return h }
+        callExt(b, "js_set", [h, emitStr(b, "et"), emitStr(b, et)])
+        return h
+    }
     // A fresh backing array wrapped as a slice over the whole of it.
     function emitSlOf(b, arr) {
         var n = callExt(b, "js_golen", [arr])
@@ -1937,11 +1954,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var v = a[2]
             return emitSelect(fb, emitIsSl(fb, x),
                               function(tb) {
-                                  callExt(tb, "js_pyset", [slF(tb, x, "a"),
-                                          callExt(tb, "js_jadd", [slF(tb, x, "o"), i]), v])
+                                  // One extern: js_gisetsl does the offset, the
+                                  // width and the store (see abnf/jsrtgolang.go).
+                                  callExt(tb, "js_gisetsl", [x, i, v])
                                   return {b: tb, v: v}
                               },
-                              function(eb) { callExt(eb, "js_pyset", [x, i, v]); return {b: eb, v: v} })
+                              function(eb) { callExt(eb, "js_gisetat", [x, i, v]); return {b: eb, v: v} })
         })
         // The elements of a slice as a PLAIN array - what range, the ... spread,
         // string(bs) and printing want. Anything else passes through untouched.
@@ -1989,23 +2007,28 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                                          function(tb) { return {b: tb, v: pc.v} },
                                          function(eb) { return {b: eb, v: mx} })
                     var b3 = rmx.b
-                    return {b: b3, v: emitSlHdr(b3, pa.v,
-                                                callExt(b3, "js_jadd", [po.v, rlo.v]),
-                                                callExt(b3, "js_sub", [rhi.v, rlo.v]),
-                                                callExt(b3, "js_sub", [rmx.v, rlo.v]))}
+                    var outH = emitSlHdr(b3, pa.v,
+                                         callExt(b3, "js_jadd", [po.v, rlo.v]),
+                                         callExt(b3, "js_sub", [rhi.v, rlo.v]),
+                                         callExt(b3, "js_sub", [rmx.v, rlo.v]))
+                    callExt(b3, "js_set", [outH, emitStr(b3, "et"), callExt(b3, "js_get", [x, emitStr(b3, "et")])])
+                    return {b: b3, v: outH}
                 })
         })
         // make([]T, n, cap): cap zero values of the element type, length n over them.
-        b = declFn(b, "$smake", 3, function(fb, a) {
+        b = declFn(b, "$smake", 4, function(fb, a) {
             var n = a[0]
             var cp = a[1]
             var zero = a[2]
+            var et = a[3]
             var arr = callExt(fb, "js_arr_new", [])
             var eb = emitCountLoop(fb, cp, function(lb, iV) {
                 callExt(lb, "js_arr_push", [arr, zero])
                 return lb
             })
-            return {b: eb, v: emitSlHdr(eb, arr, emitNum(eb, 0), n, cp)}
+            var outH = emitSlHdr(eb, arr, emitNum(eb, 0), n, cp)
+            callExt(eb, "js_set", [outH, emitStr(eb, "et"), et])
+            return {b: eb, v: outH}
         })
         // append(s, v...): writes into the backing array when the capacity allows (so
         // another slice over it sees the new element, like Go) and reallocates when not.
@@ -2037,8 +2060,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                             [ha.v, callExt(lb, "js_jadd", [ho.v, iV])])])
                     return lb
                 })
-                var eb3 = emitCountLoop(eb2, add, function(lb, iV) {
-                    callExt(lb, "js_arr_push", [na, emitNum(lb, 0)])
+                var etZ = emitSelect(eb2, isSlV, function(tb) { return {b: tb, v: slF(tb, s0, "et")} },
+                                                 function(eb) { return {b: eb, v: hUndef} })
+                var eb3 = emitCountLoop(etZ.b, add, function(lb, iV) {
+                    callExt(lb, "js_arr_push", [na, callExt(lb, "js_giadopt", [etZ.v, emitNum(lb, 0)])])
                     return lb
                 })
                 var trip = callExt(eb3, "js_arr_new", [])
@@ -2057,12 +2082,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var ra = callExt(b4, "js_map_get", [grown.v, emitNum(b4, 0)])
             var ro = callExt(b4, "js_map_get", [grown.v, emitNum(b4, 1)])
             var rc = callExt(b4, "js_map_get", [grown.v, emitNum(b4, 2)])
-            var b5 = emitCountLoop(b4, add, function(lb, iV) {
-                callExt(lb, "js_pyset", [ra, callExt(lb, "js_jadd", [callExt(lb, "js_jadd", [ro, hn.v]), iV]),
-                                         callExt(lb, "js_map_get", [argsV, callExt(lb, "js_jadd", [iV, emitNum(lb, 1)])])])
+            // The element type is not written at an append site, so it comes off the
+            // header: `var bs []uint8` is EMPTY, and an empty slice has no element to
+            // take a width from. js_giadopt is the identity when there is no "et".
+            var etV = emitSelect(b4, isSlV, function(tb) { return {b: tb, v: slF(tb, s0, "et")} },
+                                            function(eb) { return {b: eb, v: hUndef} })
+            var b4b = etV.b
+            var b5 = emitCountLoop(b4b, add, function(lb, iV) {
+                callExt(lb, "js_gisetat", [ra, callExt(lb, "js_jadd", [callExt(lb, "js_jadd", [ro, hn.v]), iV]),
+                                         callExt(lb, "js_giadopt", [etV.v,
+                                             callExt(lb, "js_map_get", [argsV, callExt(lb, "js_jadd", [iV, emitNum(lb, 1)])])])])
                 return lb
             })
-            return {b: b5, v: emitSlHdr(b5, ra, ro, need, rc)}
+            var outH = emitSlHdr(b5, ra, ro, need, rc)
+            callExt(b5, "js_set", [outH, emitStr(b5, "et"), etV.v])
+            return {b: b5, v: outH}
         })
         // copy(dst, src): as many elements as the shorter one holds.
         b = declFn(b, "copy", 2, function(fb, a) {
@@ -2300,7 +2334,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         var last = ref.path[ref.path.length - 1]
         if (last.key != undefined) {
-            callExt(b, "js_set", [o, emitStr(b, last.key), v])
+            // js_gosetfield, not js_set: a struct field has a DECLARED type on the
+            // descriptor, and the value has to adopt its width (s.b = 255 into a
+            // uint8 field, so that the s.b++ after it is 0 and not 256).
+            callExt(b, "js_gosetfield", [o, emitStr(b, last.key), v])
             return b
         }
         var kr = last.idx(b)
@@ -2507,16 +2544,56 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // map-value variant: it never sees a slice type.)
     // 'var s []T' is an empty SLICE; 'var a [N]T' is an ARRAY that exists with its N
     // zero elements from the start (arrLen reads the N out of the type text).
-    function emitZeroDecl(b, ty) {
-        if (ty.length > 0 && ty.charCodeAt(0) == 91) {
-            var n = arrLen(ty)
-            if (n < 0) { return emitSlOf(b, callExt(b, "js_arr_new", [])) }
+    function emitZeroDecl(b, ty) { return emitZeroTy(b, ty) }
+    // emitZeroTy is THE zero value of a type text, and the one place the three
+    // separate versions (a var declaration, a map value type, an unwritten
+    // composite-literal slot) now agree - which is also what makes them agree with
+    // goZeroTy in go-interpreter.abnf. Two things none of the three did:
+    //
+    //   - a SIZED type zeroes to a BOX of that width, so the slot carries the width
+    //     from the moment it exists and a later a[0]++ / s.b++ steps at 8 bits;
+    //   - a NAMED STRUCT type zeroes to a zero INSTANCE. `var s S` used to answer
+    //     nil, so the very next `s.b = 1` was a member assignment on null - the
+    //     crash was not in the assignment, it was the missing zero value.
+    function emitZeroTy(b, t) {
+        if (t == undefined || t == null || t.length == 0) { return hNull }
+        var c0 = t.charCodeAt(0)
+        if (c0 == 42) { return hNull }  // *T: a nil pointer
+        if (c0 == 91) {                 // []T (empty slice) or [N]T (N zero elements)
+            var el = elemTy(t)
+            // "[]T" is a SLICE and starts empty; arrLen answers 0 for it (no digits
+            // between the brackets), which is why the length has to be told apart
+            // from the kind here rather than from arrLen's count alone.
+            if (t.charCodeAt(1) == 93) { return emitSlT(b, emitSlOf(b, callExt(b, "js_arr_new", [])), el) }
+            var n = arrLen(t)
+            if (n < 0) { return emitSlT(b, emitSlOf(b, callExt(b, "js_arr_new", [])), el) }
             var arr = callExt(b, "js_arr_new", [])
-            var el = elemTy(ty)
-            for (var i = 0; i < n; i++) { callExt(b, "js_arr_push", [arr, emitZeroDecl(b, el)]) }
+            for (var i = 0; i < n; i++) { callExt(b, "js_arr_push", [arr, emitZeroTy(b, el)]) }
             return arr
         }
-        return emitZero(b, ty)
+        var wd = goTyWord(t)
+        var it = goIntTy(wd)
+        if (it != null) { return emitGiConv(b, emitNum(b, 0), it) }
+        if (isFloatTy(wd)) { return callExt(b, "js_gflo", [emitNum(b, 0)]) }
+        if (wd == "string") { return emitStr(b, "") }
+        if (wd == "bool") { return hFalse }
+        if (wd == "map" || wd == "chan" || wd == "func" || wd == "interface" || wd == "struct") { return hNull }
+        var flds = structFields[wd]
+        if (flds != undefined && flds != null) {
+            return emitStructZero(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, wd)]),
+                                  flds, structFTypes[wd])
+        }
+        return hNull
+    }
+    // A zero INSTANCE of a struct: every field at the zero of its own declared type,
+    // which is what carries a field's width into an untouched slot.
+    function emitStructZero(b, clsV, fields, ftypes) {
+        var objV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+        for (var z = 0; z < fields.length; z++) {
+            callExt(b, "js_set", [objV, emitStr(b, fields[z]), emitZeroTy(b, ftypes[z])])
+        }
+        return objV
     }
     // "[3]int" -> 3, "[]int" -> -1 (a slice), "[N]int" with a non-literal N -> -1.
     function arrLen(t) {
@@ -3125,7 +3202,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var v = (itc != null) ? emitGiConv(eb, r.v, itc)
                                   : callExt(eb, "js_goconv", [emitStr(eb, to),
                                             callExt(eb, "js_gival", [emitHelper(eb, "$sels", [r.v])])])
-            if (isSliceTy) { v = emitSlOf(eb, v) }
+            // []byte(s) / []rune(s): the header records the element type, so a
+            // later bs[0] += 200 wraps at 8 bits the way Go's byte does.
+            if (isSliceTy) { v = emitSlT(eb, emitSlOf(eb, v), elemTy(to)) }
             return {b: eb, v: v}
         }
     }
@@ -3364,6 +3443,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function emitFunc(plist, body, recvName, rets) {
         var params = plist.params
         var variadic = plist.variadic == true
+        var ptypes = plist.ptypes
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -3380,15 +3460,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             off = 1
         }
         for (var i = 0; i < params.length; i++) {
+            // A parameter is a slot with a DECLARED type, so it adopts it exactly as a
+            // var declaration does: `func f(b uint8)` makes the b inside f a uint8.
+            var pt = (ptypes == undefined || ptypes == null || i >= ptypes.length) ? "" : ptypes[i]
             if (variadic && i == params.length - 1) {
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
-                                             emitSlOf(b, callExt(b, "js_gorest", [f.Params[1], handle(i + off)]))])
+                                             emitSlT(b, emitSlOf(b, callExt(b, "js_gorest", [f.Params[1], handle(i + off)])), pt)])
             } else {
                 // An array argument is a VALUE: the parameter gets a copy ($acopy is
                 // the identity on everything else).
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
-                                             emitHelper(b, "$acopy",
-                                                        [callExt(b, "js_arg", [f.Params[1], handle(i + off)])])])
+                                             emitAdoptTy(b, pt,
+                                                 emitHelper(b, "$acopy",
+                                                        [callExt(b, "js_arg", [f.Params[1], handle(i + off)])]))])
             }
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$defers"), callExt(b, "js_arr_new", [])])
@@ -3514,7 +3598,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // everything else through, so string(rune(65)) still answers "A".
             var v = callExt(fb, "js_goconv", [emitStr(fb, t),
                             callExt(fb, "js_gival", [emitHelper(fb, "$sels", [a[0]])])])
-            if (isSliceTy) { v = emitSlOf(fb, v) }
+            // []byte(s) / []rune(s): the header records the element type, so a later
+            // bs[0] += 200 wraps at 8 bits the way Go's byte does.
+            if (isSliceTy) { v = emitSlT(fb, emitSlOf(fb, v), elemTy(t)) }
             return {b: fb, v: v}
         })
     }

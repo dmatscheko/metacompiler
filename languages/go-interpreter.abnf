@@ -159,8 +159,13 @@ Receiver    <~~ push({recv: takeAll()}) ~~>
 ParamList   <~~ push(makeParams(takeAll())) ~~>
             = "(" [ ParamItem { "," ParamItem } [ "," ] ] ")" ;
 ParamItem   = NamedParam | AnonParam ;
-NamedParam  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ Variadic ] Type ;
-AnonParam   = [ Variadic ] Type ;
+NamedParam  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ Variadic ] PType ;
+AnonParam   = [ Variadic ] PType ;
+// The parameter's declared TYPE TEXT, captured exactly the way FType captures a
+// struct field's. A parameter is an ordinary slot, so `func f(b uint8)` has to put
+// the width on the argument on the way in - without this the b++ inside f stepped
+// at 53 bits.
+PType       <~~ push({pty: firstType(up.in)}) ~~> = Type ;
 Variadic    <~~ push({vararg: true}) ~~> = "..." ;
 // Results: a single type, or a parenthesized list that may name its results
 // (func f(a int) (q, r int)). Named results become zero-valued locals that a bare
@@ -988,12 +993,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // The zero value of a map's value type ('int', 'string', 'bool'; the captured
     // type text may carry trailing whitespace, so match the prefix).
-    function zeroOfType(t) {
-        if (t.indexOf("int") == 0) return 0
-        if (t.indexOf("string") == 0) return ""
-        if (t.indexOf("bool") == 0) return false
-        return null
-    }
+    function zeroOfType(t) { return goZeroTy(t) }
 
     hostGlobals["fmt"] = {
         Println: function() {
@@ -1078,6 +1078,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             else if (Array.isArray(s)) { s = slOf(s) }
             else { fail("append() needs a slice") }
         }
+        // The element type is not written at an append site, so the WIDTH comes from
+        // the box an existing element carries: `[]uint8` was zero-filled or built from
+        // a literal, and every write since kept the width, so any element is the record
+        // of the declared element type.
+        var et = s.et
+        var proto = null
+        for (var q = 0; q < s.n; q++) { if (szIs(s.a[s.o + q])) { proto = s.a[s.o + q]; break } }
         var need = s.n + add
         var a = s.a
         var off = s.o
@@ -1088,17 +1095,23 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (ncap < 4) { ncap = 4 }
             var na = []
             for (var k = 0; k < s.n; k++) { na.push(s.a[s.o + k]) }
-            while (na.length < ncap) { na.push(0) }
+            while (na.length < ncap) { na.push(apAdopt(et, proto, 0)) }
             a = na
             off = 0
             cp = ncap
         }
         for (var i = 1; i < arguments.length; i++) {
             var at = off + s.n + i - 1
-            while (a.length <= at) { a.push(0) }
-            a[at] = arguments[i]
+            while (a.length <= at) { a.push(apAdopt(et, proto, 0)) }
+            a[at] = apAdopt(et, proto, arguments[i])
         }
-        return newSl(a, off, need, cp)
+        return slT(newSl(a, off, need, cp), et)
+    }
+    // The width one appended element takes: the header's declared element type first,
+    // an existing element's box second.
+    function apAdopt(et, proto, v) {
+        if (et != undefined && et != null) { return gAdoptTy(et, v) }
+        return goAdoptLike(proto, v)
     }
     hostGlobals["cap"] = function(x) { return goCap(x) }
     hostGlobals["copy"] = function(dst, src) {
@@ -1374,7 +1387,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var hi = s.hi != null ? s.hi() : h.n
         var cap = (s.mx != null ? s.mx() : h.c) - lo
         if (lo < 0 || hi < lo || hi > h.c) { fail("slice bounds [" + lo + ":" + hi + "] out of range") }
-        return newSl(h.a, h.o + lo, hi - lo, cap)
+        return slT(newSl(h.a, h.o + lo, hi - lo, cap), h.et)
     }
     // Field read: struct fields, and the promoted fields of an embedded struct.
     function goField(o, name) {
@@ -1412,7 +1425,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // which gives the two kinds a free runtime discriminator - Array.isArray(v) is
     // exactly "v is a Go array" - without a marker property, which the frozen runtime
     // refuses to put on an array anyway.
-    function newSl(a, o, n, c) { return {__sl: true, a: a, o: o, n: n, c: c} }
+    function newSl(a, o, n, c) { return {__sl: true, a: a, o: o, n: n, c: c, et: undefined} }
+    // slT records the ELEMENT TYPE text on a header. Nothing reads it but the width
+    // rule: `var bs []uint8` is empty, so there is no element to take a width from,
+    // and without this an append onto it would land a plain number in a uint8 slice.
+    function slT(s, et) { s.et = et; return s }
+    // The element width of a slice at a write: the declared element type when the
+    // header carries one, the box already in the slot otherwise (a plain Go ARRAY has
+    // no header, and its slots were zero-filled from the type text).
+    function slAdopt(s, ix, v) {
+        if (s.et != undefined && s.et != null) { return gAdoptTy(s.et, v) }
+        return goAdoptLike(slGet(s, ix), v)
+    }
     function isSl(v) { return v != undefined && v != null && typeof v == "object" && v.__sl == true }
     // Wraps a FRESH backing array as a slice over the whole of it.
     function slOf(arr) { return newSl(arr, 0, arr.length, arr.length) }
@@ -1450,11 +1474,23 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (typeof o == "string") { return utf8Bytes(o)[ix] }
         return hasOwn(o, ix) ? o[ix] : undefined
     }
+    // Every write into a container or a struct goes through here, which makes it the
+    // one place the DECLARED width of the slot can be reapplied: a struct field takes
+    // it from its descriptor's __ftypes, an element takes it from the box the zero
+    // value left in the slot (see goAdoptLike).
     function goSetAt(o, i, v) {
-        if (isMap(o)) { mapSet(o, i, v); return }
+        if (isMap(o)) { mapSet(o, i, goAdoptLike(o.zero, v)); return }
         var ix = szIs(i) ? szNum(i) : i
-        if (isSl(o)) { slSet(o, ix, v); return }
-        o[ix] = v
+        if (isSl(o)) { slSet(o, ix, slAdopt(o, ix, v)); return }
+        // A nil target is a type whose zero value this grammar cannot build (an
+        // inline `struct { ... }`, see goZeroTy); report it the way the compiler
+        // half's js_set does rather than as a host TypeError.
+        if (o == undefined || o == null) { fail("member assignment '" + ix + "' on null") }
+        if (typeof o == "object" && o.__class != undefined) {
+            o[ix] = gAdoptTy(fieldTypeOf(o.__class, ix), v)
+            return
+        }
+        o[ix] = goAdoptLike(hasOwn(o, ix) ? o[ix] : undefined, v)
     }
     // Go copies an ARRAY on assignment and on the way into a parameter (it is a value,
     // not a reference), and the copy is deep: an element that is itself an array is a
@@ -1560,7 +1596,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 out.push(r.cp)
                 i2 += r.n
             }
-            return slOf(out)
+            return slT(slOf(out), to == "[]byte" ? "byte" : "rune")
         }
         if (to == "bool") { return v ? true : false }
         // float64(x) BOXES: the result is a float64 whatever x was, which is what
@@ -1571,7 +1607,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (it != null) { return szConv(v, it.w, it.u) }
         return v
     }
-    function fromCodePoint(cp) {
+    function fromCodePoint(cpIn) {
+        // A []byte / []rune element is a SIZED box now, and String.fromCharCode wants
+        // a plain number, so unwrap first.
+        var cp = szIs(cpIn) ? szNum(cpIn) : cpIn
         if (cp < 0x10000) { return String.fromCharCode(cp) }
         var x = cp - 0x10000
         return String.fromCharCode(0xd800 + gtrunc(x / 1024)) + String.fromCharCode(0xdc00 + (x % 1024))
@@ -2032,12 +2071,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // it collects the remaining arguments into a slice.
     function makeParams(items) {
         var names = []
+        var ptypes = []
         var variadic = false
+        var pend = 0
         for (var i = 0; i < items.length; i++) {
-            if (typeof items[i] == "string") { names.push(items[i]) }
-            else { variadic = true }
+            if (typeof items[i] == "string") { names.push(items[i]); pend++; continue }
+            if (items[i] != undefined && items[i] != null && items[i].pty != undefined) {
+                // One type closes the group of names in front of it (a, b int).
+                for (var k = 0; k < pend; k++) { ptypes.push(items[i].pty) }
+                pend = 0
+                continue
+            }
+            variadic = true
         }
-        return {params: names, variadic: variadic}
+        for (var z = 0; z < pend; z++) { ptypes.push("") }
+        return {params: names, variadic: variadic, ptypes: ptypes}
     }
 
     // ----- Composite literals, make() and conversions -----
@@ -2078,13 +2126,72 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return {ekey: key, ektext: ktext, enest: v.cnested.celems}
     }
     // The zero value of a type text, used for the untouched slots of [5]int{0: 1}.
-    function zeroOfType2(t) {
-        if (t.indexOf("float") == 0) { return gFlo(0) }
-        if (t.indexOf("int") == 0 || t.indexOf("uint") == 0 || t.indexOf("byte") == 0
-            || t.indexOf("rune") == 0) { return 0 }
-        if (t.indexOf("string") == 0) { return "" }
-        if (t.indexOf("bool") == 0) { return false }
+    function zeroOfType2(t) { return goZeroTy(t) }
+    // goZeroTy is THE zero value of a type text, and the one place all three callers
+    // (a var declaration, a map's value type, an unwritten composite-literal slot)
+    // now agree. Two things it does that the three separate versions did not:
+    //
+    //   - a SIZED type zeroes to a box of that width, so the slot carries the width
+    //     from the moment it exists and `var u8 uint8` / `s.b` / `a[0]` all step at
+    //     8 bits rather than at 53;
+    //   - a NAMED STRUCT type zeroes to a zero INSTANCE. `var s S` used to answer
+    //     null, so the very next `s.b = 1` was a member assignment on null - the
+    //     crash was not in the assignment, it was the missing zero value.
+    //
+    // "[]T" answers an empty slice header (not a plain array), which is both what
+    // len/append/range expect and what the compiler half already did.
+    function goZeroTy(t) {
+        if (t == undefined || t == null || t.length == 0) { return null }
+        var c0 = t.charCodeAt(0)
+        if (c0 == 42) { return null }   // *T: a nil pointer
+        if (c0 == 91) {                 // []T or [N]T
+            var close = t.indexOf("]")
+            if (close < 1) { return null }
+            var el = t.substring(close + 1)
+            if (close == 1) { return slT(newSl([], 0, 0, 0), el) }
+            var n = 0
+            for (var d = 1; d < close; d++) {
+                var cc = t.charCodeAt(d)
+                if (cc < 48 || cc > 57) { n = 0; break }
+                n = n * 10 + (cc - 48)
+            }
+            var a = []
+            for (var k = 0; k < n; k++) { a.push(goZeroTy(el)) }
+            return a
+        }
+        var w = goTyWord(t)
+        var it = goIntTy(w)
+        if (it != null) { return szConv(0, it.w, it.u) }
+        if (isFloatTy(w)) { return gFlo(0) }
+        if (w == "string") { return "" }
+        if (w == "bool") { return false }
+        // A bare `struct` is an INLINE struct type, and its zero value is not
+        // reachable from here: VType captures the type text with the whitespace
+        // already stripped ("struct{aint32buint8}"), so the field list cannot be
+        // read back out of it. Supporting `var w struct{ a int32 }` needs the
+        // grammar to parse that field list the way StructBody does for a named
+        // type - a text parse here measured as unrecoverable, not merely awkward.
+        if (w == "map" || w == "chan" || w == "func" || w == "interface" || w == "struct") { return null }
+        var cls = hasOwn(structs, w) ? structs[w] : undefined
+        if (cls != undefined && cls != null && cls.__isclass == true) { return goZeroStruct(cls) }
         return null
+    }
+    // A zero INSTANCE of a struct descriptor: every field at the zero of its own
+    // declared type, which is what carries a field's width into an untouched slot.
+    function goZeroStruct(cls) {
+        var obj = {__class: cls}
+        var fs = cls.__fields
+        var ft = cls.__ftypes
+        for (var i = 0; i < fs.length; i++) { scopePut(obj, fs[i], goZeroTy(ft != undefined ? ft[i] : "")) }
+        return obj
+    }
+    // goAdoptLike gives `v` the width the slot ALREADY carries. An array element, a
+    // slice element and a map entry have no type text at the write site, but their
+    // zero value was built from one - so the box sitting in the slot is the record of
+    // the declared element type, and every write preserves it.
+    function goAdoptLike(cur, v) {
+        if (szIs(cur) && (typeof v == "number" || szIs(v))) { return szConv(v, cur.w, cur.u) }
+        return v
     }
     // Builds one composite literal value. `desc` is the type descriptor pushed by
     // CompType; `elems` are the {ekey, ektext, eval|enest} records of its body. A
@@ -2110,7 +2217,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var n = desc.clen()
                 while (a.length < n) { a.push(zeroOfType2(desc.cet)) }
             }
-            return desc.ckind == "slice" ? slOf(a) : a
+            return desc.ckind == "slice" ? slT(slOf(a), desc.cet) : a
         }
         // A struct: a named one (its descriptor is a global) or an anonymous one.
         var cls = anytype
@@ -2133,13 +2240,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function fieldTypeOf(cls, name) {
         var fs = cls.__fields
-        for (var i = 0; i < fs.length; i++) { if (fs[i] == name) { return cls.__ftypes[i] } }
+        var ft = cls.__ftypes
+        if (fs == undefined || fs == null || ft == undefined || ft == null) { return "" }
+        for (var i = 0; i < fs.length; i++) { if (fs[i] == name) { return ft[i] } }
         return ""
     }
     // The value of one element: either its expression, or a nested brace group built
     // against the element type text (\[\]P{{1, 2}} -> a P, \[\]\[\]int{{1}} -> a slice).
     function elemValue(e, elemType) {
-        if (e.enest == undefined) { return e.eval() }
+        if (e.enest == undefined) { return gAdoptTy(elemType, e.eval()) }
         return buildLit(descOfTypeText(elemType), e.enest)
     }
     function descOfTypeText(t) {
@@ -2189,13 +2298,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (cp < n) { fail("make: capacity smaller than length") }
             var a = []
             for (var i = 0; i < cp; i++) { a.push(zeroOfType2(ez)) }
-            return newSl(a, 0, n, cp)
+            return slT(newSl(a, 0, n, cp), ez)
         }
     }
     function makeNew(ty) {
         var d = ty
         return function() {
-            if (d.length > 1 && d.charCodeAt(0) == 91 && d.charCodeAt(1) == 93) { return newSl([], 0, 0, 0) }
+            if (d.length > 1 && d.charCodeAt(0) == 91 && d.charCodeAt(1) == 93) { return slT(newSl([], 0, 0, 0), d.substring(2)) }
             var z = zeroOfType2(d)
             // new(int) is a POINTER to a zeroed int, so it needs a cell of its own;
             // new(SomeStruct) is the struct, which is already a reference.
@@ -2247,6 +2356,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function makeFuncLit(items) {
         var params = items[0].params
         var variadic = items[0].variadic
+        var ptypes = items[0].ptypes
         var i = 1
         var rets = []
         if (items[i] != undefined && items[i].rets != undefined) { rets = items[i].rets; i++ }
@@ -2256,7 +2366,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return function() {
                 var args = []
                 for (var a = 0; a < arguments.length; a++) { args.push(arguments[a]) }
-                return invokeBodyG(params, bodyT, undefined, "", args, rets, env, variadic)
+                return invokeBodyG(params, bodyT, undefined, "", args, rets, env, variadic, ptypes)
             }
         }
     }
@@ -2413,35 +2523,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // The zero value a 'var x T' without initializer gets. The captured type text may
     // carry trailing whitespace and comments, so only the leading word is examined.
-    function zeroOfDeclType(ty) {
-        var t = ty
-        if (t.length == 0) { return null }
-        // "[N]T" is an ARRAY: it exists with N zero elements from the start, where
-        // "[]T" is a slice and starts empty.
-        if (t.charCodeAt(0) == 91) {
-            var close = t.indexOf("]")
-            var n = 0
-            for (var d = 1; d < close; d++) {
-                var cc = t.charCodeAt(d)
-                if (cc < 48 || cc > 57) { n = 0; break }
-                n = n * 10 + (cc - 48)
-            }
-            var el = t.substring(close + 1)
-            var a = []
-            for (var k = 0; k < n; k++) { a.push(zeroOfType2(el)) }
-            return a
-        }
-        // A sized zero is a BOX of that width, so `var u8 uint8` followed by u8--
-        // wraps to 255 rather than going to -1. goIntTy wants the bare type word.
-        var itz = goIntTy(goTyWord(t))
-        if (itz != null) { return szConv(0, itz.w, itz.u) }
-        if (t.indexOf("int") == 0 || t.indexOf("uint") == 0 || t.indexOf("byte") == 0
-            || t.indexOf("rune") == 0 || t.indexOf("float") == 0) { return 0 }
-        if (t.indexOf("string") == 0) { return "" }
-        if (t.indexOf("bool") == 0) { return false }
-        if (t.indexOf("map") == 0) { return null }
-        return null
-    }
+    function zeroOfDeclType(ty) { return goZeroTy(ty) }
     // items = [name..., {ty}?, initThunk...]: 'var a, b = 1, 2', 'var i int',
     // 'var q, r int' and the const forms all go through here. With more names than
     // initializers the single initializer is a multi-value call and gets unpacked.
@@ -3217,26 +3299,27 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var plist = items[i + 1]
         var params = plist.params
         var variadic = plist.variadic
+        var ptypes = plist.ptypes
         i += 2
         var rets = []
         if (items[i] != undefined && items[i].rets != undefined) { rets = items[i].rets; i++ }
         var body = items[i]
         if (recv != null) {
             // A method: attached to its struct descriptor after the whole compile.
-            methodTodo.push({recvName: recv, name: name, params: params, body: body, rets: rets, variadic: variadic})
+            methodTodo.push({recvName: recv, name: name, params: params, body: body, rets: rets, variadic: variadic, ptypes: ptypes})
         } else {
-            globalScope[name] = makeFunClosure(params, body, rets, variadic)
+            globalScope[name] = makeFunClosure(params, body, rets, variadic, ptypes)
             // In an imported package, an exported (capitalized) function is ALSO reached
             // through the package object (pkg.Fn), the way fmt.Println is (see importFile).
             if (curPkgName != null && isExported(name)) { pkgExports["$" + curPkgName].push(name) }
         }
     }
     var methodTodo = []
-    function makeFunClosure(params, body, rets, variadic) {
+    function makeFunClosure(params, body, rets, variadic, ptypes) {
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBodyG(params, body, undefined, "", args, rets, null, variadic)
+            return invokeBodyG(params, body, undefined, "", args, rets, null, variadic, ptypes)
         }
     }
     // A shallow copy of a struct value, for a value receiver and for array/struct
@@ -3256,7 +3339,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var self = mm.byPtr ? arguments[0] : goCopy(arguments[0])
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBodyG(mm.params, mm.body, self, mm.recvName, args, mm.rets, null, mm.variadic)
+            return invokeBodyG(mm.params, mm.body, self, mm.recvName, args, mm.rets, null, mm.variadic, mm.ptypes)
         }
     }
 
@@ -3277,7 +3360,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return v
     }
     // env == null: a top-level function (a fresh chain); otherwise a closure's chain.
-    function invokeBodyG(params, body, self, recvName, args, rets, env, variadic) {
+    function invokeBodyG(params, body, self, recvName, args, rets, env, variadic, ptypes) {
         var rl = (rets == undefined || rets == null) ? [] : rets
         var saved = scopes
         scopes = (env == null) ? [globalScope, {}] : env.slice(0)
@@ -3285,8 +3368,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (self != undefined) { declVar(recvName, self) }
         var np = params.length
         for (var i = 0; i < np; i++) {
-            if (variadic && i == np - 1) { declVar(params[i], slOf(args.slice(i))) }
-            else { declVar(params[i], goVal(i < args.length ? args[i] : undefined)) }
+            // A parameter is a slot with a DECLARED type, so it adopts it exactly as a
+            // var declaration does: `func f(b uint8)` makes the b inside f a uint8.
+            var pt = (ptypes == undefined || ptypes == null || i >= ptypes.length) ? "" : ptypes[i]
+            if (variadic && i == np - 1) { declVar(params[i], slT(slOf(args.slice(i)), pt)) }
+            else { declVar(params[i], gAdoptTy(pt, goVal(i < args.length ? args[i] : undefined))) }
         }
         for (var r = 0; r < rl.length; r++) { declVar(rl[r], 0) }
         var frame = []
@@ -3403,7 +3489,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (cls == undefined) fail("method receiver type not found: " + recvType)
         cls["__ptr$" + mm.name] = byPtr
         cls[mm.name] = makeMethodClosure({recvName: recvVar, name: mm.name, params: mm.params,
-                                          body: mm.body, rets: mm.rets, variadic: mm.variadic, byPtr: byPtr})
+                                          body: mm.body, rets: mm.rets, variadic: mm.variadic, byPtr: byPtr,
+                                          ptypes: mm.ptypes})
     }
 
     // The entry point defaults to main(), but the -main flag (c.mainName) can override it:

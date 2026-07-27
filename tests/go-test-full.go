@@ -893,6 +893,138 @@ func s25() {
 	check("int30", fmt.Sprintf("%d %v", i8, u8) == "-128 0")
 }
 
+// ===== SECTION 26: sized integers in declared slots =====
+type sized26 struct {
+	b  uint8
+	i  int8
+	u  uint16
+	n  int
+	xs []uint8
+}
+
+type wide26 struct {
+	a int32
+	b int64
+}
+
+type outer26 struct {
+	in sized26
+	f  float64
+}
+
+func step26(b uint8, i int8) (uint8, int8) {
+	b++
+	i++
+	return b, i
+}
+
+func sum26(vals ...uint8) uint8 {
+	var t uint8
+	for _, v := range vals {
+		t += v
+	}
+	return t
+}
+
+func s26() {
+	// A struct field keeps its DECLARED width: the zero value is already a
+	// uint8, and an assignment into the field converts to it.
+	var s sized26
+	check("slt1", s.b == 0 && s.i == 0 && s.u == 0 && s.n == 0)
+	s.b = 255
+	s.b++
+	check("slt2", s.b == 0)
+	s.i = 127
+	s.i++
+	check("slt3", s.i == -128)
+	s.u = 65535
+	s.u += 2
+	check("slt4", s.u == 1)
+	s.b--
+	check("slt5", s.b == 255)
+	check("slt6", fmt.Sprint(s.b, s.i, s.u) == "255 -128 1")
+
+	// A composite literal writes the field type too, and so does a nested one.
+	t := sized26{b: 255, i: 127}
+	t.b++
+	t.i++
+	check("slt7", t.b == 0 && t.i == -128)
+	o := outer26{in: sized26{b: 200}, f: 1}
+	o.in.b += 100
+	check("slt8", o.in.b == 44)
+
+	// A PARAMETER is a slot with a declared type of its own.
+	rb, ri := step26(255, 127)
+	check("slt9", rb == 0 && ri == -128)
+	check("slt10", sum26(200, 100) == 44)
+
+	// A SLICE element type: literal, make, append and a re-slice all carry it.
+	xs := []uint8{255}
+	xs[0]++
+	check("slt11", xs[0] == 0)
+	ys := make([]uint8, 2)
+	ys[0] = 255
+	ys[0]++
+	check("slt12", ys[0] == 0 && ys[1] == 0)
+	var zs []uint8
+	zs = append(zs, 255)
+	zs[0]++
+	check("slt13", zs[0] == 0 && len(zs) == 1)
+	zs = append(zs, 200, 100)
+	zs[1] += 100
+	check("slt14", zs[1] == 44 && zs[2] == 100)
+	ws := zs[1:]
+	ws[0]++
+	check("slt15", ws[0] == 45 && zs[1] == 45)
+	s.xs = append(s.xs, 255)
+	s.xs[0]++
+	check("slt16", s.xs[0] == 0)
+
+	// An ARRAY element type, including one indexed past a gap.
+	var ar [3]uint8
+	ar[0] = 255
+	ar[0]++
+	check("slt17", ar[0] == 0 && ar[1] == 0)
+	br := [3]int8{2: 127}
+	br[2]++
+	check("slt18", br[2] == -128 && br[0] == 0)
+
+	// A MAP value type, reached through the map's own zero value.
+	m := map[string]int8{}
+	m["a"] = 127
+	m["a"]++
+	check("slt19", m["a"] == -128)
+	m2 := map[string]uint8{"k": 255}
+	m2["k"]++
+	check("slt20", m2["k"] == 0 && m2["missing"] == 0)
+
+	// A wider slot does NOT wrap where a narrow one does, so the width really
+	// travels with the slot and is not a global setting.
+	var wide wide26
+	wide.a = 2147483647
+	wide.a++
+	wide.b = 2147483647
+	wide.b++
+	check("slt21", wide.a == -2147483648 && wide.b == 2147483648)
+
+	// `var s T` of a struct type is a zero VALUE, not nil: writing a field of it
+	// on the very next line used to be an assignment on null.
+	var one sized26
+	one.b = 255
+	check("slt22", one.b == 255 && one.n == 0 && len(one.xs) == 0)
+
+	// A []byte's elements are uint8, so they wrap, and the string round trip
+	// still reads them as bytes.
+	bs := []byte("AB")
+	bs[0] += 200
+	check("slt23", bs[0] == 9 && string(bs[1:]) == "B")
+
+	// float64 and string fields are unaffected by any of this.
+	o.f = 1
+	check("slt24", o.f/2 == 0.5)
+	check("slt25", fmt.Sprintf("%d %v %d", xs[0], ys, m["a"]) == "0 [0 0] -128")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -919,6 +1051,7 @@ func main() {
 	s23() // SECTION-CALL 23
 	s24() // SECTION-CALL 24
 	s25() // SECTION-CALL 25
+	s26() // SECTION-CALL 26
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

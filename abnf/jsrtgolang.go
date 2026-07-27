@@ -412,3 +412,219 @@ func gopQuoteBody(s string, delim byte) string {
 	}
 	return out
 }
+
+// ----- Widths on the SLOTS a Go program declares -----
+//
+// The jsGInt box of jsrtint.go carries a width, but a width only exists where the
+// program wrote a type down, and a `var` declaration is not the only place that
+// happens. Three kinds of slot have a declared type of their own, and a value
+// flowing into one of them has to adopt it or the width is simply lost:
+//
+//	type S struct{ b uint8 }; s.b = 255; s.b++   -> 0    (the field's own type)
+//	a := []uint8{255}; a[0]++                    -> 0    (the element type)
+//	m := map[string]int8{}; m["k"] = 127; m["k"]++ -> -128
+//
+// A struct field's type is on the descriptor (__fields / __ftypes), so
+// js_gosetfield can read it at the write. A container element has no type text at
+// the write site at all - but its ZERO VALUE was built from one, so the box
+// sitting in the slot IS the record of the declared element type, and js_gisetat
+// reapplies it. Both replace a plain js_set / js_pyset at the same site, so the
+// emitted IR keeps one call per store and the change costs nothing where no sized
+// type is involved.
+
+// giTyBits is goIntTy of the two Go grammars, in Go: the width and signedness of
+// the leading TYPE WORD of a type text, and ok=false for anything that is not a
+// sized integer type. Only a type that is NOT a signed 64 bit integer needs a
+// box, but int/int64 answer here too - giNorm drops the box for them.
+func giTyBits(ty string) (uint8, bool, bool) {
+	switch giTyWord(ty) {
+	case "int", "int64":
+		return 64, false, true
+	case "int8":
+		return 8, false, true
+	case "int16":
+		return 16, false, true
+	case "int32", "rune":
+		return 32, false, true
+	case "uint8", "byte":
+		return 8, true, true
+	case "uint16":
+		return 16, true, true
+	case "uint32":
+		return 32, true, true
+	case "uint", "uint64", "uintptr":
+		return 64, true, true
+	}
+	return 0, false, false
+}
+
+// giNumeric is true for the two things a width may be applied to. A string, a
+// struct, nil - anything else - passes a slot untouched.
+func giNumeric(v interface{}) bool {
+	switch v.(type) {
+	case float64, jsGInt:
+		return true
+	}
+	return false
+}
+
+// giAdoptText applies a declared type TEXT to a value. A float64 / float32 slot
+// BOXES (jsJFlo), exactly as a `var d float64 = 1` declaration does - without it
+// a float64 struct field assigned a plain 1 divides as an integer.
+func giAdoptText(rt *jsrt, ty string, v interface{}) interface{} {
+	if !giNumeric(v) {
+		return v
+	}
+	if w := giTyWord(ty); w == "float64" || w == "float32" {
+		return jsJFlo{f: giFloat(rt, v), sty: floGo}
+	}
+	wd, un, ok := giTyBits(ty)
+	if !ok {
+		return v
+	}
+	return giNorm(giVal(rt, v), wd, un)
+}
+
+// giTyWord is the leading TYPE WORD of a type text, which may carry trailing
+// whitespace, a comment or a following name.
+func giTyWord(ty string) string {
+	i := 0
+	for i < len(ty) {
+		c := ty[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_') {
+			break
+		}
+		i++
+	}
+	return ty[:i]
+}
+
+// giAdoptLike applies the width the slot ALREADY carries.
+func giAdoptLike(rt *jsrt, cur, v interface{}) interface{} {
+	g, ok := cur.(jsGInt)
+	if !ok || !giNumeric(v) {
+		return v
+	}
+	return giNorm(giVal(rt, v), g.w, g.u)
+}
+
+// giFieldTy is the declared type text of one field of a struct value, read off
+// its descriptor. "" when the value is not a struct instance or the name is not
+// one of its fields (an embedded promotion, the slice header's own props).
+func giFieldTy(o interface{}, name string) string {
+	obj, ok := o.(*jsObject)
+	if !ok {
+		return ""
+	}
+	cls, ok := obj.props["__class"].(*jsObject)
+	if !ok {
+		return ""
+	}
+	fs, ok := cls.props["__fields"].(*jsArray)
+	if !ok {
+		return ""
+	}
+	ft, ok := cls.props["__ftypes"].(*jsArray)
+	if !ok {
+		return ""
+	}
+	for i, f := range fs.elems {
+		if s, ok := f.(string); ok && s == name && i < len(ft.elems) {
+			if t, ok := ft.elems[i].(string); ok {
+				return t
+			}
+		}
+	}
+	return ""
+}
+
+// giSlotOf is the value a container slot holds right now: a map's entry (or its
+// zero value when the key is absent - which is exactly the boxed zero built from
+// the value type) and an array's element. Never fails: an out of range index or a
+// non-container simply has no width to offer.
+func (rt *jsrt) giSlotOf(x, k interface{}) interface{} {
+	if keys, vals, ok := dictParts(x); ok {
+		if i := rt.dictFind(keys, k); i >= 0 {
+			return vals.elems[i]
+		}
+		if obj, ok := x.(*jsObject); ok {
+			if z, has := obj.props["zero"]; has {
+				return z
+			}
+		}
+		return nil
+	}
+	if arr, ok := x.(*jsArray); ok {
+		i := int(rt.toNumber(k))
+		if i < 0 {
+			i += len(arr.elems)
+		}
+		if i >= 0 && i < len(arr.elems) {
+			return arr.elems[i]
+		}
+	}
+	return nil
+}
+
+func init() {
+	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
+		u := rt.unwrap
+		w := rt.wrap
+		baseSet := m["js_set"]
+		basePyset := m["js_pyset"]
+
+		// (typeText, value): the declared width of a slot whose type IS written at
+		// the site - an append into a []uint8, a parameter binding.
+		m["js_giadopt"] = func(a []uint64) uint64 {
+			ty, ok := u(a[0]).(string)
+			if !ok {
+				return a[1]
+			}
+			return w(giAdoptText(rt, ty, u(a[1])))
+		}
+		// obj.name = v, at the field's declared width. Delegates the store itself.
+		m["js_gosetfield"] = func(a []uint64) uint64 {
+			ty := giFieldTy(u(a[0]), rt.toString(u(a[1])))
+			if ty == "" {
+				return baseSet(a)
+			}
+			return baseSet([]uint64{a[0], a[1], w(giAdoptText(rt, ty, u(a[2])))})
+		}
+		// s[i] = v THROUGH A SLICE HEADER: one extern instead of the three the
+		// emitted IR used (read .a, add .o, js_pyset), so carrying the width here
+		// costs less than the store cost before it. The width is the header's
+		// recorded element type first - an empty []uint8 has no element to take one
+		// from - and the box already in the slot second.
+		m["js_gisetsl"] = func(a []uint64) uint64 {
+			h, ok := u(a[0]).(*jsObject)
+			if !ok {
+				return basePyset(a)
+			}
+			arr, ok := h.props["a"].(*jsArray)
+			if !ok {
+				return basePyset(a)
+			}
+			idx := int(rt.toNumber(h.props["o"])) + int(rt.toNumber(u(a[1])))
+			v := u(a[2])
+			if ty, ok := h.props["et"].(string); ok {
+				v = giAdoptText(rt, ty, v)
+			} else if idx >= 0 && idx < len(arr.elems) {
+				v = giAdoptLike(rt, arr.elems[idx], v)
+			}
+			if idx < 0 || idx >= len(arr.elems) {
+				rt.fail("index %d out of range", idx)
+			}
+			arr.dropIdx()
+			arr.elems[idx] = v
+			return 0
+		}
+		// x[i] = v, at the width the slot already carries. Delegates the store.
+		m["js_gisetat"] = func(a []uint64) uint64 {
+			cur := rt.giSlotOf(u(a[0]), u(a[1]))
+			if cur == nil {
+				return basePyset(a)
+			}
+			return basePyset([]uint64{a[0], a[1], w(giAdoptLike(rt, cur, u(a[2])))})
+		}
+	})
+}
