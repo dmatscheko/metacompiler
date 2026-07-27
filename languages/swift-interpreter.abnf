@@ -555,7 +555,25 @@ Decl        = DeclTuple | DeclPlain ;
 DeclPlain   <~~ push(makeSeq(takeAll())) ~~>
             = ( "let" | "var" ) KwEnd DeclBind { "," DeclBind } [ ";" ] ;
 DeclBind    <~~ push(makeDecl(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ ":" AnnType ] [ "=" Expression ] ;
+            = Id <~~ push(up.in) ~~> [ ":" DeclAnnType ] [ "=" Expression ] ;
+// The declaration's type annotation. It is DISCARDED everywhere except for the two
+// things this front end can act on without a type checker: the element labels of a
+// tuple type (LabelledTupleType), and the WIDTH of an integer type - `var u: UInt8 =
+// 250` has to make 250 a UInt8, because nothing about the value 250 says so and the
+// `u &+ 10` that follows has to wrap at 8 bits. IntAnnType is tried before the
+// general Type; the names are spelled longest-first (PEG first-match: "Int" would
+// otherwise match the front of "Int8") and closed with a KwEnd so a user type called
+// `Int8Box` is not read as `Int8`.
+DeclAnnType = LabelledTupleType | IntAnnType | Type ;
+IntAnnType  <~~ push({itype: up.in}) ~~>
+            = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
+              | "UInt64" | "UInt32" | "UInt16" | "UInt8" | "UInt" ) KwEnd
+              NotTypeSuffix ;
+// `Int?`, `Int!`, `Int.Type`, `Int & P`: the annotation is a COMPOSED type, not the
+// bare integer type, so IntAnnType has to decline it and let the general Type read
+// it. Without this the optional forms consumed only the `Int` and left the `?`
+// standing, which turned into a parse error on the NEXT statement.
+NotTypeSuffix = !"?" !"!" !"." !"&" ;
 // let (a, _, c) = someTuple - a tuple-pattern declaration; _ discards its element.
 DeclTuple   <~~ push(makeDeclTuple(takeAll())) ~~>
             = ( "let" | "var" ) KwEnd TupNames [ ":" Type ] "=" Expression [ ";" ] ;
@@ -886,10 +904,24 @@ Primary     = Paren | MultiStr | RawStr2 | RawStr1 | Template | NumberLit
 // The numeric literal forms, longest/most specific first (PEG first-match): a hex
 // FLOAT before the hex integer that is its prefix, the based forms before the
 // decimal ones (0 would otherwise match and leave xFF behind), and the fractional
-// form before the plain integer. NumHex / NumBin / NumOct / NumDec / NumInt are the
-// shared, opt-in productions of lib/numbers.abnf and carry the `_` digit-group
-// separators with them; only the hex float is Swift/Go specific.
-NumberLit   = HexFloatLit | NumHex | NumBin | NumOct | NumDec | NumInt ;
+// form before the plain integer. Only NumDec (the fractional / exponent form) still
+// comes from lib/numbers.abnf; the INTEGER forms are read here instead, because the
+// shared ones go through parseInt, which is a double: 9223372036854775807 comes back
+// as 9223372036854776000 and 0xFFFFFFFFFFFFFFFF as 18446744073709552000. Both are
+// ordinary Swift literals, so swRadix reads them exactly and answers a sized-integer
+// box when the digits do not fit a double (lib/interp-core.js, the sz* layer).
+NumberLit   = HexFloatLit | SwHexLit | SwBinLit | SwOctLit | NumDec | SwDecLit ;
+SwHexLit    <~~ push(makeConst(swRadix(up.in))) ~~>
+            = "0" ( "x" | "X" ) :whitespace() HexFDig { HexFDig | "_" } :whitespace(Whitespace) ;
+SwBinLit    <~~ push(makeConst(swRadix(up.in))) ~~>
+            = "0" ( "b" | "B" ) :whitespace() SwBinDig { SwBinDig | "_" } :whitespace(Whitespace) ;
+// A named production on purpose: a :command() directly followed by a (group) parses
+// as a Times repetition in this dialect - the Times trap.
+SwBinDig    = "0" | "1" ;
+SwOctLit    <~~ push(makeConst(swRadix(up.in))) ~~>
+            = "0" ( "o" | "O" ) :whitespace() "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
+SwDecLit    <~~ push(makeConst(swRadix(up.in))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } :whitespace(Whitespace) ;
 // 0xFp2 / 0xC.8p0: the mantissa is hexadecimal, the p exponent is DECIMAL and scales
 // by a power of two, and it is mandatory - without it the same text is a hex integer.
 HexFloatLit <~~ push(makeConst(parseHexFloat(up.in))) ~~>
@@ -1242,7 +1274,10 @@ KwContinue  = "continue" KwEnd ;
         var lo = items[0]
         var closed = items[1].rop == "..."
         var hi = items[2]
-        return function() { return {__range: true, lo: lo(), hi: hi(), closed: closed} }
+        // The bounds are read as plain numbers: a range is walked and measured with
+        // ordinary arithmetic, and a sized-integer box (Int32(3), Int.max) would
+        // otherwise arrive here as an object and compare as NaN.
+        return function() { return {__range: true, lo: szNum(lo()), hi: szNum(hi()), closed: closed} }
     }
     function isRange(v) {
         return v !== null && v !== undefined && typeof v == "object" && v.__range === true
@@ -1258,11 +1293,31 @@ KwContinue  = "continue" KwEnd ;
         return out
     }
     function rangeHas(r, v) {
-        if (v < r.lo) { return false }
-        return r.closed ? v <= r.hi : v < r.hi
+        var x = szNum(v)
+        if (x < r.lo) { return false }
+        return r.closed ? x <= r.hi : x < r.hi
     }
 
     // ----- Literals -----
+    // The exact value of an integer literal in any of Swift's four bases, ignoring
+    // the '_' digit-group separators. It reads through the 64 bit pair arithmetic of
+    // lib/interp-core.js rather than through parseInt, because a double cannot hold
+    // 9223372036854775807 or 0xFFFFFFFFFFFFFFFF and both are ordinary Swift
+    // literals; szNorm answers a plain number when the value fits a double exactly
+    // and a sized-integer box otherwise. An unsigned literal above Int.max (only
+    // reachable when it is assigned to a UInt / UInt64) comes back as the signed
+    // pattern with the same bits, which the UInt conversion re-reads unsigned.
+    function swRadix(s) {
+        var radix = 10
+        var start = 0
+        if (s.length >= 2 && s.charAt(0) == "0") {
+            var p = s.charAt(1)
+            if (p == "x" || p == "X") { radix = 16; start = 2 }
+            else if (p == "o" || p == "O") { radix = 8; start = 2 }
+            else if (p == "b" || p == "B") { radix = 2; start = 2 }
+        }
+        return szNorm(i64FromRadix(s.substring(start), radix), 64, false)
+    }
     // 0xC.8p0: a hexadecimal mantissa scaled by a DECIMAL power-of-two exponent.
     // Written out rather than handed to parseFloat, which does not accept the form.
     function parseHexFloat(s) {
@@ -1511,6 +1566,10 @@ KwContinue  = "continue" KwEnd ;
         if (v === true) { return "true" }
         if (v === false) { return "false" }
         if (typeof v == "string") { return nested ? swQuote(v) : v }
+        // A sized-integer box is an object, so it has to be spelled before the
+        // typeof test below - and through szStr, not through a double, or
+        // Int.max would print 9.223372036854776e+18.
+        if (szIs(v)) { return szStr(v) }
         if (typeof v != "object") { return "" + v }
         if (Array.isArray(v)) {
             var out = "["
@@ -1579,11 +1638,119 @@ KwContinue  = "continue" KwEnd ;
     // operation whose operands are both integral answers like Int, and one with a
     // fractional operand answers like Double. (A Double that happens to hold a whole
     // number is therefore treated as an Int - the one place this model shows.)
-    function swWhole(v) { return typeof v == "number" && v === Math.floor(v) }
+    function swWhole(v) { return szIs(v) || (typeof v == "number" && v === Math.floor(v)) }
     function swIntish(l, r) { return swWhole(l) && swWhole(r) }
+    // swD is the plain-number reading of an operand: a sized-integer box becomes its
+    // (possibly rounded) double, everything else passes through unchanged. It is what
+    // the Double side of a mixed operation, an index, a bound or a count needs.
+    function swD(v) { return szIs(v) ? szNum(v) : v }
     function swadd(l, r) {
         if (typeof l == "string" || typeof r == "string") { return swstr(l) + swstr(r) }
-        return swIntish(l, r) ? (l + r) | 0 : l + r
+        return swIntish(l, r) ? szArith("+", l, r) : swD(l) + swD(r)
+    }
+    // Swift's SMART SHIFT: an over-shift answers 0 (or the sign, for a signed >>),
+    // and a NEGATIVE count shifts the other way - `256 >> -2` is 1024, verified
+    // against the real compiler. szArith already gets the over-shift right for
+    // both directions; only the negative count is Swift specific.
+    function swShift(op, l, r) {
+        var n = szNum(r)
+        if (n < 0) { return szArith(op == "<<" ? ">>" : "<<", l, 0 - n) }
+        return szArith(op, l, n)
+    }
+    // ----- The integer types -----
+    // Swift's Int is 64 bit (MemoryLayout<Int>.size is 8 on every platform this
+    // targets), and Int8 ... UInt64 are exactly what they say. All of them ride the
+    // sized-integer box of lib/interp-core.js; a plain JS number keeps meaning a
+    // signed 64 bit value inside +/- 2^53, which is where ordinary programs live.
+    //
+    // DELIBERATE DIVERGENCE, both halves: real Swift TRAPS on signed overflow
+    // (`Int.max + 1` is a runtime crash) and reserves &+ / &- / &* for wrapping.
+    // Here + - * WRAP at the operand's width, exactly like &+ / &- / &*. Detecting
+    // the overflow would cost a check on every arithmetic operator in both engines
+    // and in the emitted IR, and a wrapped answer is the same as the real one for
+    // every program that does not overflow. So the divergence is confined to
+    // programs Swift would have killed, and is documented rather than hidden.
+    //
+    // The width bounds, computed on 64 bit pairs: a signed w holds
+    // -2^(w-1) ... 2^(w-1)-1, an unsigned one 0 ... 2^w-1.
+    function swIntBounds(w, u) {
+        var one = i64Make(0, 1)
+        var zero = i64Make(0, 0)
+        if (u) {
+            var top = w == 64 ? i64Not(zero) : i64Sub(i64Shl(one, w), one)
+            return {mx: szNorm(top, w, true), mn: szNorm(zero, w, true)}
+        }
+        var h = i64Shl(one, w - 1)
+        return {mx: szNorm(i64Sub(h, one), w, false), mn: szNorm(i64Neg(h), w, false)}
+    }
+    // Int("17") / UInt8("300"): the failable string initializer. Swift answers nil
+    // for anything that is not a complete, in-range integer; an out-of-range one is
+    // nil too, which is the one place a conversion does NOT wrap.
+    function swIntFromStr(s, w, u) {
+        var i = 0
+        var neg = false
+        if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) { neg = s.charAt(i) == "-"; i++ }
+        if (i >= s.length) { return null }
+        var acc = i64Make(0, 0)
+        var ten = i64Make(0, 10)
+        for (var k = i; k < s.length; k++) {
+            var cc = s.charCodeAt(k)
+            if (cc < 48 || cc > 57) { return null }
+            acc = i64Add(i64Mul(acc, ten), i64Make(0, cc - 48))
+        }
+        var p = neg ? i64Neg(acc) : acc
+        var v = szNorm(p, w, u)
+        // Range check: the wrapped value has to read back as the digits it came from.
+        if (szStr(v) != swIntCanon(s, neg)) { return null }
+        return v
+    }
+    // The canonical decimal text of a digit run, for the range check above: the sign
+    // and the leading zeros removed, and "-0" spelled "0".
+    function swIntCanon(s, neg) {
+        var d = ""
+        var seen = false
+        for (var k = 0; k < s.length; k++) {
+            var ch = s.charAt(k)
+            if (ch == "+" || ch == "-") { continue }
+            if (ch == "0" && !seen) { continue }
+            seen = true
+            d += ch
+        }
+        if (d == "") { return "0" }
+        return neg ? "-" + d : d
+    }
+    // Int(x) / Int8(x) / UInt64(x): a value conversion at width w. A Double
+    // truncates toward zero; an integer wraps to the width (see the divergence
+    // note above - real Swift traps instead); a String is failable.
+    function swIntConv(x, w, u) {
+        if (typeof x == "string") { return swIntFromStr(x, w, u) }
+        if (szIs(x)) { return szConv(x, w, u) }
+        if (x === true) { return szConv(1, w, u) }
+        if (x === false) { return szConv(0, w, u) }
+        if (x === null || x === undefined) { fail("integer conversion of nil") }
+        if (typeof x != "number") { fail("integer conversion of a non number") }
+        return szConv(x < 0 ? Math.ceil(x) : Math.floor(x), w, u)
+    }
+    // One integer type: a callable descriptor. `__conv` is what makeCall reaches for
+    // when the callee is an object rather than a function, so `Int(x)` works while
+    // `Int.max` stays an ordinary property read.
+    function swIntType(w, u) {
+        var b = swIntBounds(w, u)
+        return {max: b.mx, min: b.mn, bitWidth: w, zero: szConv(0, w, u),
+                __conv: function(x) { return swIntConv(x, w, u) }}
+    }
+    // The declared width of `var u: UInt8 = 250` (swIntWidth is consulted by
+    // makeDecl); the name has to survive the annotation for the value to carry it.
+    function swIntWidthOf(name) {
+        if (name == "Int" || name == "Int64") { return {w: 64, u: false} }
+        if (name == "Int32") { return {w: 32, u: false} }
+        if (name == "Int16") { return {w: 16, u: false} }
+        if (name == "Int8") { return {w: 8, u: false} }
+        if (name == "UInt" || name == "UInt64") { return {w: 64, u: true} }
+        if (name == "UInt32") { return {w: 32, u: true} }
+        if (name == "UInt16") { return {w: 16, u: true} }
+        if (name == "UInt8") { return {w: 8, u: true} }
+        return null
     }
     function swlen(v) {
         if (isDict(v)) { return v.keys.length }
@@ -1595,6 +1762,23 @@ KwContinue  = "continue" KwEnd ;
     function swGetField(o, name) {
         if (name == "count") { return swlen(o) }
         if (o === undefined || o === null) { fail("field ." + name + " of nil") }
+        // A sized-integer box is an object, so its own members have to be answered
+        // before the generic object paths below take it for a struct instance.
+        if (szIs(o)) {
+            if (name == "description") { return szStr(o) }
+            if (name == "bitWidth") { return o.w }
+            if (name == "magnitude") { return szCmp(o, szConv(0, o.w, o.u)) < 0 ? szNeg(o) : o }
+            var it = builtinTable("Int", false)
+            if (it != null && hasOwn(it, name)) { return it[name] }
+            return undefined
+        }
+        // The same three members on a value that stayed a plain number, which is
+        // where every integer inside +/- 2^53 lives.
+        if (typeof o == "number") {
+            if (name == "description") { return szStr(o) }
+            if (name == "bitWidth") { return 64 }
+            if (name == "magnitude") { return o < 0 ? 0 - o : o }
+        }
         if (typeof o == "object" && o.__superref === true) {
             var sbase = superBase()
             var self0 = findThis()
@@ -1626,13 +1810,13 @@ KwContinue  = "continue" KwEnd ;
             return o.vals[di]
         }
         if (typeof o == "string") {
-            var si = i
+            var si = szNum(i)
             if (si < 0) { si += o.length }
             if (si < 0 || si >= o.length) { fail("string index out of range") }
             return o.charAt(si)
         }
         if (o === null || o === undefined) { fail("index of nil") }
-        var ai = i
+        var ai = szNum(i)
         if (ai < 0) { ai += o.length }
         if (ai < 0 || ai >= o.length) { fail("array index out of range") }
         return o[ai]
@@ -2546,6 +2730,14 @@ KwContinue  = "continue" KwEnd ;
                 writeBacks(ea.boxes)
                 return obj
             }
+            // Int(x) / UInt8(x) / ...: the integer types are descriptors rather than
+            // functions, so that Int.max stays an ordinary property read; __conv is
+            // the conversion behind the call form.
+            if (f != undefined && f !== null && typeof f == "object" && typeof f.__conv == "function") {
+                var cv = f.__conv.apply(undefined, argv)
+                writeBacks(ea.boxes)
+                return cv
+            }
             if (typeof f != "function") { fail("call of a non function: " + name) }
             var r = f.apply(undefined, argv)
             writeBacks(ea.boxes)
@@ -2637,13 +2829,25 @@ KwContinue  = "continue" KwEnd ;
 
     // ----- Statement thunks -----
 
-    // items = [name, {tlabels}?, initThunk]
+    // items = [name, {tlabels}? | {itype}?, initThunk]
     function makeDecl(items) {
         var name = items[0]
         var labels = null
         var k = 1
         if (items[k] != undefined && items[k].tlabels != undefined) { labels = items[k].tlabels; k++ }
+        // `var u: UInt8 = 250`: the DECLARED width goes on the value, so the
+        // arithmetic that follows wraps at 8 bits rather than at 64.
+        var iw = null
+        if (items[k] != undefined && items[k].itype != undefined) { iw = swIntWidthOf(items[k].itype); k++ }
         var init = items[k]
+        if (iw != null) {
+            var wI = iw.w
+            var uI = iw.u
+            // No initializer: the name is still declared nil, exactly as an
+            // unannotated one is - the width only rides on a real value.
+            if (init == undefined) { return function() { declVar(name, null) } }
+            return function() { declVar(name, swIntConv(init(), wI, uI)) }
+        }
         // `let v: Int` with no initializer declares the name as nil; the value
         // arrives by a later assignment (Swift's definite-initialization rule is
         // a type-checker job, and this front end does not enforce it).
@@ -3450,7 +3654,7 @@ KwContinue  = "continue" KwEnd ;
         return builtinExt[key]
     }
     function builtinTableFor(v) {
-        if (typeof v == "number") { return builtinTable("Int", false) }
+        if (typeof v == "number" || szIs(v)) { return builtinTable("Int", false) }
         if (typeof v == "string") { return builtinTable("String", false) }
         if (typeof v == "boolean") { return builtinTable("Bool", false) }
         if (Array.isArray(v)) { return builtinTable("Array", false) }
@@ -3655,6 +3859,13 @@ KwContinue  = "continue" KwEnd ;
     function swEqD(l, r, depth) {
         if (depth > 32) { return false }
         if (typeof l == "string" && typeof r == "string") { return swStrEq(l, r) }
+        // A sized-integer box is an object, so it has to be compared BY VALUE here
+        // rather than falling into the identity test below: Int.max &+ 1 == Int.min
+        // is two distinct boxes holding the same 64 bits.
+        if (szIs(l) || szIs(r)) {
+            if (!swWhole(l) || !swWhole(r)) { return false }
+            return szEq(l, r)
+        }
         if (Array.isArray(l) || Array.isArray(r)) {
             if (!Array.isArray(l) || !Array.isArray(r) || l.length != r.length) { return false }
             for (var i = 0; i < l.length; i++) { if (!swEqD(l[i], r[i], depth + 1)) { return false } }
@@ -3723,31 +3934,35 @@ KwContinue  = "continue" KwEnd ;
     // else keeps the identity/value comparison it had.
     swOverloadable("==", function(l, r) { return swEq(l, r) })
     swOverloadable("!=", function(l, r) { return !swEq(l, r) })
-    // The bitwise and overflow operators. Int is 32 bit, so an overflow operator is
-    // the ordinary operation with the truncation Swift's &+ / &- / &* promise.
-    binOps["&"] = function(l, r) { return (l & r) | 0 }
-    binOps["|"] = function(l, r) { return (l | r) | 0 }
-    binOps["^"] = function(l, r) { return (l ^ r) | 0 }
-    binOps["<<"] = function(l, r) { return (l << r) | 0 }
-    binOps[">>"] = function(l, r) { return (l >> r) | 0 }
-    binOps["&+"] = function(l, r) { return (l + r) | 0 }
-    binOps["&-"] = function(l, r) { return (l - r) | 0 }
-    binOps["&*"] = function(l, r) { return (l * r) | 0 }
+    // The bitwise and overflow operators, on the sized-integer box of
+    // lib/interp-core.js (szArith / szCmp / szNot, the exact twin of the jsGInt
+    // layer in abnf/jsrtint.go the compiler half uses). Int is 64 bit here, so an
+    // overflow operator is the ordinary operation wrapped to the operand's width.
+    binOps["&"] = function(l, r) { return szArith("&", l, r) }
+    binOps["|"] = function(l, r) { return szArith("|", l, r) }
+    binOps["^"] = function(l, r) { return szArith("^", l, r) }
+    binOps["<<"] = function(l, r) { return swShift("<<", l, r) }
+    binOps[">>"] = function(l, r) { return swShift(">>", l, r) }
+    binOps["&+"] = function(l, r) { return szArith("+", l, r) }
+    binOps["&-"] = function(l, r) { return szArith("-", l, r) }
+    binOps["&*"] = function(l, r) { return szArith("*", l, r) }
     // ~= is the pattern-match operator: over a range it is containment, elsewhere ==.
     binOps["~="] = function(l, r) { return isRange(l) ? rangeHas(l, r) : swEq(l, r) }
-    function makeBitNot(t) { return function() { return (~t()) | 0 } }
+    function makeBitNot(t) { return function() { return szNot(t()) } }
 
     // The arithmetic operators, Double-aware (see swIntish above). == and != are
     // installed further down, over enum cases and canonical string equality.
     swOverloadable("+", function(l, r) { return swadd(l, r) })
-    swOverloadable("-", function(l, r) { return swIntish(l, r) ? (l - r) | 0 : l - r })
-    swOverloadable("*", function(l, r) { return swIntish(l, r) ? (l * r) | 0 : l * r })
-    swOverloadable("/", function(l, r) { return swIntish(l, r) ? (l / r) | 0 : l / r })
-    swOverloadable("%", function(l, r) { return swIntish(l, r) ? (l % r) | 0 : l % r })
-    swOverloadable("<", function(l, r) { return l < r })
-    swOverloadable(">", function(l, r) { return l > r })
-    swOverloadable("<=", function(l, r) { return l <= r })
-    swOverloadable(">=", function(l, r) { return l >= r })
+    swOverloadable("-", function(l, r) { return swIntish(l, r) ? szArith("-", l, r) : swD(l) - swD(r) })
+    swOverloadable("*", function(l, r) { return swIntish(l, r) ? szArith("*", l, r) : swD(l) * swD(r) })
+    swOverloadable("/", function(l, r) { return swIntish(l, r) ? szArith("/", l, r) : swD(l) / swD(r) })
+    swOverloadable("%", function(l, r) { return swIntish(l, r) ? szArith("%", l, r) : swD(l) % swD(r) })
+    // A box has to be compared through szCmp rather than by <: a UInt64 above 2^63
+    // reads as a NEGATIVE value in the pair, so UInt64.max < 0 would hold.
+    swOverloadable("<", function(l, r) { return (szIs(l) || szIs(r)) ? szCmp(l, r) < 0 : l < r })
+    swOverloadable(">", function(l, r) { return (szIs(l) || szIs(r)) ? szCmp(l, r) > 0 : l > r })
+    swOverloadable("<=", function(l, r) { return (szIs(l) || szIs(r)) ? szCmp(l, r) <= 0 : l <= r })
+    swOverloadable(">=", function(l, r) { return (szIs(l) || szIs(r)) ? szCmp(l, r) >= 0 : l >= r })
     // A compound assignment is lowered to `a = a <op> b`, which is what makes an
     // overloaded operator work through it. A type may still DECLARE `static func +=`
     // - it is accepted - but the + overload is the one that runs.
@@ -3762,11 +3977,19 @@ KwContinue  = "continue" KwEnd ;
             var v = t()
             var f = findOpFn("-", v)
             if (f != null) { return f(undefined, v) }
-            return swWhole(v) ? (0 - v) | 0 : 0 - v
+            return swWhole(v) ? szNeg(v) : 0 - swD(v)
         }
     }
-    // Int.max / Int.min: the bounds of the 32-bit integer this runtime uses.
-    hostGlobals["Int"] = {max: 2147483647, min: 0 - 2147483648}
+    hostGlobals["Int"] = swIntType(64, false)
+    hostGlobals["Int64"] = swIntType(64, false)
+    hostGlobals["Int32"] = swIntType(32, false)
+    hostGlobals["Int16"] = swIntType(16, false)
+    hostGlobals["Int8"] = swIntType(8, false)
+    hostGlobals["UInt"] = swIntType(64, true)
+    hostGlobals["UInt64"] = swIntType(64, true)
+    hostGlobals["UInt32"] = swIntType(32, true)
+    hostGlobals["UInt16"] = swIntType(16, true)
+    hostGlobals["UInt8"] = swIntType(8, true)
 
     core.lang = "swift"
     // `_` is the discard name: `_ = expr` evaluates and throws the value away.

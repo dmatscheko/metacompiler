@@ -556,7 +556,25 @@ Decl        = DeclTuple | DeclPlain ;
 DeclPlain   <~~ push(makeSeq(takeAll())) ~~>
             = ( "let" | "var" ) KwEnd DeclBind { "," DeclBind } [ ";" ] ;
 DeclBind    <~~ push(makeDecl(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ ":" AnnType ] [ "=" Expression ] ;
+            = Id <~~ push(up.in) ~~> [ ":" DeclAnnType ] [ "=" Expression ] ;
+// The declaration's type annotation. It is DISCARDED everywhere except for the two
+// things this front end can act on without a type checker: the element labels of a
+// tuple type (LabelledTupleType), and the WIDTH of an integer type - `var u: UInt8 =
+// 250` has to make 250 a UInt8, because nothing about the value 250 says so and the
+// `u &+ 10` that follows has to wrap at 8 bits. IntAnnType is tried before the
+// general Type; the names are spelled longest-first (PEG first-match: "Int" would
+// otherwise match the front of "Int8") and closed with a KwEnd so a user type called
+// `Int8Box` is not read as `Int8`.
+DeclAnnType = LabelledTupleType | IntAnnType | Type ;
+IntAnnType  <~~ push({itype: up.in}) ~~>
+            = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
+              | "UInt64" | "UInt32" | "UInt16" | "UInt8" | "UInt" ) KwEnd
+              NotTypeSuffix ;
+// `Int?`, `Int!`, `Int.Type`, `Int & P`: the annotation is a COMPOSED type, not the
+// bare integer type, so IntAnnType has to decline it and let the general Type read
+// it. Without this the optional forms consumed only the `Int` and left the `?`
+// standing, which turned into a parse error on the NEXT statement.
+NotTypeSuffix = !"?" !"!" !"." !"&" ;
 // let (a, _, c) = someTuple - a tuple-pattern declaration; _ discards its element.
 DeclTuple   <~~ push(makeDeclTuple(takeAll())) ~~>
             = ( "let" | "var" ) KwEnd TupNames [ ":" Type ] "=" Expression [ ";" ] ;
@@ -878,10 +896,24 @@ Primary     = Paren | MultiStr | RawStr2 | RawStr1 | Template | NumberLit
 // The numeric literal forms, longest/most specific first (PEG first-match): a hex
 // FLOAT before the hex integer that is its prefix, the based forms before the
 // decimal ones (0 would otherwise match and leave xFF behind), and the fractional
-// form before the plain integer. NumHex / NumBin / NumOct / NumDec / NumInt are the
-// shared, opt-in productions of lib/numbers.abnf and carry the `_` digit-group
-// separators with them; only the hex float is Swift/Go specific.
-NumberLit   = HexFloatLit | NumHex | NumBin | NumOct | NumDec | NumInt ;
+// form before the plain integer. Only NumDec (the fractional / exponent form) still
+// comes from lib/numbers.abnf; the INTEGER forms are read here instead, because the
+// shared ones go through parseInt, which is a double: 9223372036854775807 comes back
+// as 9223372036854776000 and 0xFFFFFFFFFFFFFFFF as 18446744073709552000. Both are
+// ordinary Swift literals, so swIntLit emits the DIGITS and js_gilit reads them
+// exactly whenever the value has left the range a double holds.
+NumberLit   = HexFloatLit | SwHexLit | SwBinLit | SwOctLit | NumDec | SwDecLit ;
+SwHexLit    <~~ push(swIntLit(up.in)) ~~>
+            = "0" ( "x" | "X" ) :whitespace() HexFDig { HexFDig | "_" } :whitespace(Whitespace) ;
+SwBinLit    <~~ push(swIntLit(up.in)) ~~>
+            = "0" ( "b" | "B" ) :whitespace() SwBinDig { SwBinDig | "_" } :whitespace(Whitespace) ;
+// A named production on purpose: a :command() directly followed by a (group) parses
+// as a Times repetition in this dialect - the Times trap.
+SwBinDig    = "0" | "1" ;
+SwOctLit    <~~ push(swIntLit(up.in)) ~~>
+            = "0" ( "o" | "O" ) :whitespace() "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
+SwDecLit    <~~ push(swIntLit(up.in)) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } :whitespace(Whitespace) ;
 // 0xFp2 / 0xC.8p0: the mantissa is hexadecimal, the p exponent is DECIMAL and scales
 // by a power of two, and it is mandatory - without it the same text is a hex integer.
 HexFloatLit <~~ push(makeConst(parseHexFloat(up.in))) ~~>
@@ -1378,6 +1410,82 @@ KwContinue  = "continue" KwEnd ;
     }
 
     // ----- Literals -----
+    // An integer literal in any of Swift's four bases, ignoring the '_' digit-group
+    // separators. Below 2^53 it is an ordinary emitNum constant; at or above it the
+    // DIGITS are emitted instead and js_gilit (abnf/jsrtint.go) reads them exactly,
+    // because emitNum would already have rounded 9223372036854775807 to
+    // 9223372036854776000 on the way into the module.
+    function swIntLit(text) {
+        var radix = 10
+        var start = 0
+        if (text.length >= 2 && text.charAt(0) == "0") {
+            var p = text.charAt(1)
+            if (p == "x" || p == "X") { radix = 16; start = 2 }
+            else if (p == "o" || p == "O") { radix = 8; start = 2 }
+            else if (p == "b" || p == "B") { radix = 2; start = 2 }
+        }
+        var digits = ""
+        var v = 0
+        for (var i = start; i < text.length; i++) {
+            var cc = text.charCodeAt(i)
+            if (cc == 95) { continue }
+            var d = 0
+            if (cc >= 48 && cc <= 57) { d = cc - 48 }
+            else if (cc >= 97 && cc <= 102) { d = cc - 87 }
+            else if (cc >= 65 && cc <= 70) { d = cc - 55 }
+            v = v * radix + d
+            digits = digits + text.charAt(i)
+        }
+        // Strictly BELOW 2^53: at the bound and above, the double `v` accumulated
+        // here is itself already rounded, so it cannot be trusted to decide.
+        if (v < 9007199254740992) { return makeConst(v) }
+        var rx = radix
+        var dg = digits
+        return function(b) {
+            return {b: b, v: callExt(b, "js_gilit", [emitStr(b, dg), emitNum(b, rx), emitNum(b, 64), hFalse])}
+        }
+    }
+    // ----- The integer types -----
+    // The declared width of a type NAME, or null when the name is not an integer
+    // type. The twin of swIntWidthOf in swift-interpreter.abnf.
+    var swIntTypeNames = ["Int", "Int64", "Int32", "Int16", "Int8",
+                          "UInt", "UInt64", "UInt32", "UInt16", "UInt8"]
+    function swIntWidthOf(name) {
+        if (name == "Int" || name == "Int64") { return {w: 64, u: false} }
+        if (name == "Int32") { return {w: 32, u: false} }
+        if (name == "Int16") { return {w: 16, u: false} }
+        if (name == "Int8") { return {w: 8, u: false} }
+        if (name == "UInt" || name == "UInt64") { return {w: 64, u: true} }
+        if (name == "UInt32") { return {w: 32, u: true} }
+        if (name == "UInt16") { return {w: 16, u: true} }
+        if (name == "UInt8") { return {w: 8, u: true} }
+        return null
+    }
+    // The bounds, spelled as DIGITS: Int64.max and UInt64.max cannot travel through
+    // emitNum, which would round them to 9223372036854776000 and
+    // 18446744073709552000 on the way into the module.
+    function swBoundDigits(w, u, isMax) {
+        if (u) {
+            if (!isMax) { return "0" }
+            if (w == 64) { return "18446744073709551615" }
+            if (w == 32) { return "4294967295" }
+            if (w == 16) { return "65535" }
+            return "255"
+        }
+        if (w == 64) { return isMax ? "9223372036854775807" : "-9223372036854775808" }
+        if (w == 32) { return isMax ? "2147483647" : "-2147483648" }
+        if (w == 16) { return isMax ? "32767" : "-32768" }
+        return isMax ? "127" : "-128"
+    }
+    function swEmitBound(b, w, u, isMax) {
+        return callExt(b, "js_gilit", [emitStr(b, swBoundDigits(w, u, isMax)),
+                                       emitNum(b, 10), emitNum(b, w), u ? hTrue : hFalse])
+    }
+    // Int(x) / UInt8(x) / ...: js_swintconv wraps to the width (and is FAILABLE for
+    // a String source, where Swift answers nil).
+    function swEmitConv(b, v, it) {
+        return callExt(b, "js_swintconv", [v, emitNum(b, it.w), it.u ? hTrue : hFalse])
+    }
     // 0xC.8p0: a hexadecimal mantissa scaled by a DECIMAL power-of-two exponent.
     // Written out rather than handed to parseFloat, which does not accept the form.
     function parseHexFloat(s) {
@@ -2108,7 +2216,10 @@ KwContinue  = "continue" KwEnd ;
             var args = callExt(callB, "js_arr_new", [])
             callExt(callB, "js_arr_push", [args, ps[0]])
             callB.NewRet(callExt(callB, "js_call", [g, hUndef, args]))
-            plainB.NewRet(callExt(plainB, "js_get", [ps[0], ps[1]]))
+            // js_swget, not js_get: the fallback arm also serves a SIZED INTEGER
+            // receiver, which answers .description / .bitWidth / .magnitude for
+            // itself. It falls through to js_get for everything else.
+            plainB.NewRet(callExt(plainB, "js_swget", [ps[0], ps[1]]))
         })
     }
     function rtSetProp() {
@@ -2702,6 +2813,13 @@ KwContinue  = "continue" KwEnd ;
             return callExt(b, "js_call", [callExt(b, "js_get", [tbl, emitStr(b, "__get_" + name)]), hUndef, ta])
         }
         if (isComputedName(name)) { return b.NewCall(rtGetProp(), [cur, emitStr(b, name)]) }
+        // The three members a sized integer answers for itself. js_swget falls
+        // straight through to js_get for every other receiver, and only these three
+        // names emit it, so a program that never reads one emits the IR it did
+        // before. (swGetField in swift-interpreter.abnf is the twin.)
+        if (name == "description" || name == "bitWidth" || name == "magnitude") {
+            return callExt(b, "js_swget", [cur, emitStr(b, name)])
+        }
         return callExt(b, "js_get", [cur, emitStr(b, name)])
     }
     function emitIndexRead(b, cur, idxV) {
@@ -3068,6 +3186,17 @@ KwContinue  = "continue" KwEnd ;
                 return {b: b, v: hUndef}
             }
         }
+        // Int(x) / Int8(x) / UInt64(x): the integer types are descriptors, not
+        // functions (so Int.max stays an ordinary property read), and the call form
+        // is resolved here at walk time. A user type of the same name still wins.
+        var swIt = swIntWidthOf(name)
+        if (swIt != null && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
+            return function(b) {
+                var ec = emitArgRecs(b, args)
+                b = ec.b
+                return {b: b, v: swEmitConv(b, callExt(b, "js_pyget", [ec.v, emitNum(b, 0)]), swIt)}
+            }
+        }
         return function(b) {
             // E(rawValue: r): the failable initializer every raw-value enum gets free.
             if (enumNames[name] == 1) {
@@ -3214,12 +3343,14 @@ KwContinue  = "continue" KwEnd ;
     }
 
     // -x: a `static prefix func -` on the operand's type wins over the negation.
-    var coreMakeNeg = makeNeg
     makeNeg = function(t) {
         return function(b) {
             var r = t(b)
             b = r.b
-            if (!hasOpOverload) { return coreMakeNeg(function(bb) { return {b: bb, v: r.v} })(b) }
+            // js_swneg, not the shared js_neg + intWrap: an integer negates at its
+            // own WIDTH (so -Int8(-128) wraps back to -128) and Int is 64 bit here,
+            // where the shared path truncated every result to int32.
+            if (!hasOpOverload) { return {b: b, v: callExt(b, "js_swneg", [r.v])} }
             var f = b.NewCall(rtFindM(), [r.v, emitStr(b, "-")])
             var userB = curF.NewBlock("")
             var plainB = curF.NewBlock("")
@@ -3229,7 +3360,7 @@ KwContinue  = "continue" KwEnd ;
             callExt(userB, "js_arr_push", [args, r.v])
             var uv = callExt(userB, "js_call", [f, hUndef, args])
             userB.NewBr(joinB)
-            var pv = intWrap(plainB, callExt(plainB, "js_neg", [r.v]))
+            var pv = callExt(plainB, "js_swneg", [r.v])
             plainB.NewBr(joinB)
             return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(uv, userB), llvm.ir.NewIncoming(pv, plainB)])}
         }
@@ -3237,19 +3368,34 @@ KwContinue  = "continue" KwEnd ;
     function makeBitNot(t) {
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: intWrap(r.b, callExt(r.b, "js_bxor", [r.v, emitNum(r.b, 0 - 1)]))}
+            // js_swnot complements at the operand's own WIDTH: ~UInt8(0) is 255,
+            // where `x XOR -1` truncated to int32 answered -1.
+            return {b: r.b, v: callExt(r.b, "js_swnot", [r.v])}
         }
     }
 
     // ----- Statement thunks: function(block) -> block -----
 
-    // items = [name, {tlabels}?, initThunk]
+    // items = [name, {tlabels}? | {itype}?, initThunk]
     function makeDecl(items) {
         var name = items[0]
         var labels = null
         var k = 1
         if (items[k] != undefined && items[k].tlabels != undefined) { labels = items[k].tlabels; k++ }
+        // `var u: UInt8 = 250`: the DECLARED width goes on the value, so the
+        // arithmetic that follows wraps at 8 bits rather than at 64.
+        var iw = null
+        if (items[k] != undefined && items[k].itype != undefined) { iw = swIntWidthOf(items[k].itype); k++ }
         var init = items[k]
+        if (iw != null && init != undefined) {
+            var itI = iw
+            return function(b) {
+                var ri = init(b)
+                b = ri.b
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), swEmitConv(b, ri.v, itI)])
+                return b
+            }
+        }
         // `let v: Int` with no initializer declares the name as nil; the value
         // arrives by a later assignment (Swift's definite-initialization rule is
         // a type-checker job, and this front end does not enforce it).
@@ -4702,11 +4848,20 @@ KwContinue  = "continue" KwEnd ;
         var printlnV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "println")])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"), printlnV])
         // abs/max/min from Math; exit is already in the base scope.
-        // Int.max / Int.min: the bounds of the 32-bit integer this runtime uses.
-        var intV = callExt(b, "js_obj_new", [])
-        callExt(b, "js_set", [intV, emitStr(b, "max"), emitNum(b, 2147483647)])
-        callExt(b, "js_set", [intV, emitStr(b, "min"), emitNum(b, 0 - 2147483648)])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Int"), intV])
+        // The integer TYPES: Int is 64 bit (MemoryLayout<Int>.size is 8) and
+        // Int8 ... UInt64 are exactly what they say. Each is a descriptor carrying
+        // .max / .min / .bitWidth / .zero; the CALL form Int(x) is resolved at walk
+        // time in makeCall, so the descriptor never has to be callable.
+        for (var ti = 0; ti < swIntTypeNames.length; ti++) {
+            var tn = swIntTypeNames[ti]
+            var it = swIntWidthOf(tn)
+            var intV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [intV, emitStr(b, "max"), swEmitBound(b, it.w, it.u, true)])
+            callExt(b, "js_set", [intV, emitStr(b, "min"), swEmitBound(b, it.w, it.u, false)])
+            callExt(b, "js_set", [intV, emitStr(b, "bitWidth"), emitNum(b, it.w)])
+            callExt(b, "js_set", [intV, emitStr(b, "zero"), swEmitConv(b, emitNum(b, 0), it)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tn), intV])
+        }
         var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "max"), callExt(b, "js_get", [mathV, emitStr(b, "max")])])
@@ -4723,6 +4878,36 @@ KwContinue  = "continue" KwEnd ;
     // reached in a program that declares an enum or writes a leading-dot case, so a
     // program that does neither emits exactly the IR it did before.
     var coreEmitBin = emitBin
+    // ----- Sized integers: the emitted operator set -----
+    // Every arithmetic, bitwise, shift and ordered-comparison operator goes to the
+    // js_sw* externs of abnf/jsrtswift.go, which route two INTEGRAL operands into
+    // the sized-integer layer of abnf/jsrtint.go (evaluate at the result type's
+    // width, wrap to it) and leave a fractional Double, a String or an Array on the
+    // shared operator they had. Before this, they went to the handle runtime's
+    // 32-bit ones (js_band, js_shl) or to js_mul followed by the shared intWrap, so
+    // Int was 32 bit: 1 << 62 was 1073741824, Int.max was 2147483647 and nothing on
+    // a value said it was a UInt8. swift-interpreter.abnf implements the identical
+    // rules with szArith / szCmp; ./test.sh --cross diffs the two.
+    //
+    // swBase maps an operator (and its compound-assignment form) to the arithmetic
+    // name js_swarith takes. &+ / &- / &* are the same operators as + / - / *,
+    // because this runtime WRAPS rather than trapping - see the divergence note in
+    // abnf/jsrtswift.go.
+    var swBase = {"+": "+", "-": "-", "*": "*", "/": "/", "%": "%",
+                  "&": "&", "|": "|", "^": "^", "&+": "+", "&-": "-", "&*": "*",
+                  "+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%",
+                  "&=": "&", "|=": "|", "^=": "^"}
+    var swShiftOp = {"<<": "<<", ">>": ">>", "<<=": "<<", ">>=": ">>"}
+    var swRel = {"<": "js_swlt", "<=": "js_swle", ">": "js_swgt", ">=": "js_swge"}
+    function emitSwBin(b, op, l, r) {
+        var base = swBase[op]
+        if (typeof base == "string") { return callExt(b, "js_swarith", [emitStr(b, base), l, r]) }
+        var sh = swShiftOp[op]
+        if (typeof sh == "string") { return callExt(b, "js_swshift", [emitStr(b, sh), l, r]) }
+        var rel = swRel[op]
+        if (typeof rel == "string") { return callExt(b, rel, [l, r]) }
+        return coreEmitBin(b, op, l, r)
+    }
     emitBin = function(b, op, l, r) {
         if (op == "==" || op == "!=") {
             var eqPlain = function(bb, ll, rr) {
@@ -4740,10 +4925,7 @@ KwContinue  = "continue" KwEnd ;
         if (op == "~=") { return b.NewCall(rtRangeHas(), [l, r]) }
         var plain = function(bb, ll, rr) {
             if (ll == undefined) { ll = l; rr = r }
-            if (hasFloat && wraps[op] == 1 && op != "&+" && op != "&-" && op != "&*") {
-                return bb.NewCall(rtIntWrap(), [callExt(bb, binExt[op], [ll, rr]), ll, rr])
-            }
-            return coreEmitBin(bb, op, ll, rr)
+            return emitSwBin(bb, op, ll, rr)
         }
         // A compound assignment is lowered to `a = a <op> b`, which is what makes an
         // overloaded operator work through it. A type may still DECLARE `static func

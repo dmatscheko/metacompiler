@@ -40,6 +40,8 @@ package abnf
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 )
 
@@ -89,7 +91,225 @@ func init() {
 		// IDENTITY, so `[1, 2] == [1, 2]` was always false in the compiler; in
 		// Swift all three are value types and compare element by element.
 		m["js_sweq"] = func(a []uint64) uint64 { return boolH(rt.swEqual(u(a[0]), u(a[1]))) }
+
+		// ----- Swift's arithmetic (see the "Integers" note below) -----
+		w := rt.wrap
+		// One binary arithmetic or bitwise operator: (op, left, right). Two
+		// INTEGRAL operands go to the sized-integer layer of jsrtint.go, which
+		// evaluates at the result type's width and wraps to it; anything else
+		// (a fractional Double, a String, an Array) keeps the double / shared
+		// operator it had, because this value model has no float box and tells
+		// Int from Double by the operands. swift-interpreter.abnf implements the
+		// identical rule with szArith, and ./test.sh --cross diffs the two.
+		m["js_swarith"] = func(a []uint64) uint64 {
+			op, l, r := rt.toString(u(a[0])), u(a[1]), u(a[2])
+			if swIsWhole(l) && swIsWhole(r) {
+				return w(rt.giArith(op, l, r))
+			}
+			if op == "+" {
+				return w(rt.jsAdd(l, r))
+			}
+			x, y := swNum(rt, l), swNum(rt, r)
+			switch op {
+			case "-":
+				return rt.wrapNum(x - y)
+			case "*":
+				return rt.wrapNum(x * y)
+			case "/":
+				return rt.wrapNum(x / y)
+			case "%":
+				return rt.wrapNum(math.Mod(x, y))
+			}
+			return w(rt.giArith(op, l, r))
+		}
+		// Swift's SMART SHIFT: an over-shift answers 0 (or the sign, for a
+		// signed >>) and a NEGATIVE count shifts the other way - `256 >> -2` is
+		// 1024, verified against swift 6. giArith already gets the over-shift
+		// right; only the negative count is Swift specific.
+		m["js_swshift"] = func(a []uint64) uint64 {
+			op, l, r := rt.toString(u(a[0])), u(a[1]), u(a[2])
+			n := giVal(rt, r)
+			if n < 0 {
+				if op == "<<" {
+					op = ">>"
+				} else {
+					op = "<<"
+				}
+				n = -n
+			}
+			return w(rt.giArith(op, l, giNorm(n, 64, false)))
+		}
+		// -x and ~x, both at the operand's own width. A fractional Double keeps
+		// the floating point negation.
+		m["js_swneg"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if !swIsWhole(v) {
+				return rt.wrapNum(-swNum(rt, v))
+			}
+			wd, un := giWidthOf(v, v)
+			return w(giNorm(-giVal(rt, v), wd, un))
+		}
+		m["js_swnot"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			wd, un := giWidthOf(v, v)
+			return w(giNorm(^giVal(rt, v), wd, un))
+		}
+		// Int(x) / Int8(x) / UInt64(x): (value, bits, unsigned). A String source
+		// is FAILABLE - Swift answers nil for anything that is not a complete,
+		// in-range integer - and is the one conversion that does not wrap.
+		m["js_swintconv"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			bits := uint8(jsToInt(rt.toNumber(u(a[1]))))
+			uns := rt.truthy(u(a[2]))
+			if s, ok := v.(string); ok {
+				r, ok2 := swIntFromStr(s, bits, uns)
+				if !ok2 {
+					return jsHNull
+				}
+				return w(r)
+			}
+			if isNullish(v) {
+				rt.fail("integer conversion of nil")
+			}
+			return w(rt.giConv(v, bits, uns))
+		}
+		// The four ordered comparisons. A box has to go through giCmp rather than
+		// the shared jsCompare, because a UInt64 above 2^63 reads as a NEGATIVE
+		// int64 there, so UInt64.max < 0 would hold.
+		rel := func(name string, want func(int) bool) {
+			m[name] = func(a []uint64) uint64 {
+				l, r := u(a[0]), u(a[1])
+				if giIsInt(l) || giIsInt(r) {
+					if giIsIntegral(l) && giIsIntegral(r) {
+						return boolH(want(rt.giCmp(l, r)))
+					}
+				}
+				return boolH(want(rt.jsCompare(l, r)))
+			}
+		}
+		// The members a sized integer answers for itself. Everything else falls
+		// straight through to the runtime's own js_get, so this is only ever a
+		// type switch in front of the read the grammar already emitted.
+		baseGet := m["js_get"]
+		m["js_swget"] = func(a []uint64) uint64 {
+			if b, ok := u(a[0]).(jsGInt); ok {
+				switch rt.toString(u(a[1])) {
+				case "description":
+					return rt.wrapStr(giStr(b))
+				case "bitWidth":
+					return rt.wrapNum(float64(b.w))
+				case "magnitude":
+					if !b.u && b.v < 0 {
+						return w(giNorm(-b.v, b.w, b.u))
+					}
+					return a[0]
+				}
+			}
+			// The same three on a value that stayed a plain number, which is
+			// where every integer inside +/- 2^53 lives.
+			if f, ok := u(a[0]).(float64); ok {
+				switch rt.toString(u(a[1])) {
+				case "description":
+					return rt.wrapStr(rt.swDesc(f))
+				case "bitWidth":
+					return rt.wrapNum(64)
+				case "magnitude":
+					return rt.wrapNum(math.Abs(f))
+				}
+			}
+			return baseGet(a)
+		}
+		rel("js_swlt", func(c int) bool { return c < 0 })
+		rel("js_swle", func(c int) bool { return c <= 0 })
+		rel("js_swgt", func(c int) bool { return c > 0 })
+		rel("js_swge", func(c int) bool { return c >= 0 })
 	})
+}
+
+// ----------------------------------------------------------------------------
+// Integers
+//
+// Swift's Int is 64 bit and Int8 ... UInt64 are exactly what they say, so both
+// Swift halves ride the sized-integer box of jsrtint.go / the sz* layer of
+// languages/lib/interp-core.js. What is Swift specific is the SELECTION rule:
+// this value model has one number type, and an operation is integer arithmetic
+// exactly when both operands are integral - a Double that happens to hold a
+// whole number is therefore treated as an Int, the one place the model shows.
+//
+// DELIBERATE DIVERGENCE, both halves: real Swift TRAPS on signed overflow
+// (`Int.max + 1` is a runtime crash) and reserves &+ / &- / &* for wrapping.
+// Here + - * WRAP at the operand's width, exactly like &+ / &- / &*. The
+// divergence is confined to programs Swift would have killed outright, and is
+// documented rather than hidden.
+
+// swIsWhole is the interpreter's swWhole: a sized-integer box, or a Double whose
+// value is a whole number.
+func swIsWhole(v interface{}) bool {
+	switch t := v.(type) {
+	case jsGInt:
+		return true
+	case float64:
+		return !math.IsNaN(t) && !math.IsInf(t, 0) && t == math.Trunc(t)
+	}
+	return false
+}
+
+// swNum is the plain-number reading of an operand, for the Double side of a
+// mixed operation.
+func swNum(rt *jsrt, v interface{}) float64 { return giFloat(rt, v) }
+
+// swIntFromStr is Int("17") / UInt8("300"): the failable string initializer. It
+// reports false for anything that is not a complete, in-range decimal integer.
+func swIntFromStr(s string, w uint8, u bool) (interface{}, bool) {
+	i, neg := 0, false
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		neg = s[i] == '-'
+		i++
+	}
+	if i >= len(s) {
+		return nil, false
+	}
+	var acc uint64
+	for k := i; k < len(s); k++ {
+		c := s[k]
+		if c < '0' || c > '9' {
+			return nil, false
+		}
+		d := uint64(c - '0')
+		if acc > (1<<64-1-d)/10 {
+			return nil, false // beyond 64 bits: out of range for every width
+		}
+		acc = acc*10 + d
+	}
+	v := int64(acc)
+	if neg {
+		v = -v
+	}
+	// The range check: the truncated value has to read back as what came in.
+	out := giNorm(v, w, u)
+	var back string
+	if b, ok := out.(jsGInt); ok {
+		back = giStr(b)
+	} else {
+		back = strconv.FormatInt(int64(out.(float64)), 10)
+	}
+	if back != swIntCanon(s, neg) {
+		return nil, false
+	}
+	return out, true
+}
+
+// swIntCanon is the canonical decimal text of a digit run - the sign and the
+// leading zeros removed - for the range check above.
+func swIntCanon(s string, neg bool) string {
+	d := strings.TrimLeft(strings.TrimLeft(s, "+-"), "0")
+	if d == "" {
+		return "0"
+	}
+	if neg {
+		return "-" + d
+	}
+	return d
 }
 
 // ----------------------------------------------------------------------------
@@ -119,6 +339,10 @@ func (rt *jsrt) swRender(v interface{}, nested bool, depth int) string {
 	switch t := v.(type) {
 	case jsNullT, jsUndefT:
 		return "nil"
+	case jsGInt:
+		// A sized integer prints as its DECIMAL text, not through a double:
+		// Int.max would otherwise render as 9.223372036854776e+18.
+		return giStr(t)
 	case string:
 		if nested {
 			return swQuote(t)
@@ -310,6 +534,12 @@ func (rt *jsrt) swEqualDepth(l, r interface{}, depth int) bool {
 	}
 	if isNullish(l) || isNullish(r) {
 		return isNullish(l) && isNullish(r)
+	}
+	// A sized-integer box is a value of its own, so two integers have to be
+	// compared BY VALUE here rather than falling through to strictEq, which
+	// would call a box and a plain number different.
+	if giIsInt(l) || giIsInt(r) {
+		return rt.giEq(l, r)
 	}
 	if la, ok := l.(*jsArray); ok {
 		ra, ok := r.(*jsArray)

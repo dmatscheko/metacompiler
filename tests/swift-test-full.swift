@@ -792,6 +792,64 @@ func s23() {
     // Swift prints Optional(3) - there is no Optional box in this value model.
 }
 
+// ===== SECTION 24: sized integers =====
+// Swift's Int is 64 bit and Int8 ... UInt64 are exactly what they say. Every
+// assertion below was run through the real `swift` 6.1.2 first and matches its
+// output; the file as a whole is a valid Swift program, so it can be re-checked
+// with `swift tests/swift-test-full.swift` at any time.
+//
+// NOT asserted, and deliberately: real Swift TRAPS on signed overflow, so
+// `Int.max + 1` is a runtime crash there and wraps here (see the divergence note
+// in abnf/jsrtswift.go). Only the &+ / &- / &* forms, which wrap in real Swift
+// too, are asserted.
+func s24() {
+    // Int is 64 bit on every platform this targets.
+    check("int1", Int.max == 9223372036854775807 && Int.min == -9223372036854775808)
+    check("int2", Int64.max == 9223372036854775807 && Int64.min == -9223372036854775808)
+    check("int3", UInt64.max == 18446744073709551615 && UInt64.min == 0)
+    check("int4", Int32.max == 2147483647 && Int32.min == -2147483648 && UInt32.max == 4294967295)
+    check("int5", Int16.max == 32767 && Int16.min == -32768 && UInt16.max == 65535)
+    check("int6", Int8.max == 127 && Int8.min == -128 && UInt8.max == 255)
+    // A shift that used to fall off a 32 bit int.
+    check("int7", 1 << 62 == 4611686018427387904 && 1 << 63 == Int.min)
+    // The wrapping operators, at 64 bits and at 8.
+    check("int8", Int.max &+ 1 == Int.min && Int.min &- 1 == Int.max && Int.max &* 2 == -2)
+    check("int9", UInt8(200) &+ UInt8(100) == 44 && Int8(100) &* 2 == -56)
+    // Truncating division; the remainder takes the DIVIDEND's sign.
+    check("int10", -7 / 2 == -3 && 7 / -2 == -3 && -7 % 2 == -1 && 7 % -2 == 1)
+    // Swift's smart shift: over-shift is 0 (sign fill for a signed >>), and a
+    // NEGATIVE count shifts the other way.
+    let neg = -2
+    check("int11", 1 << 64 == 0 && Int.max >> 63 == 0 && (-1) >> 1 == -1)
+    check("int12", 1 << neg == 0 && 256 >> neg == 1024)
+    // Unsigned comparison and unsigned division above 2^63.
+    check("int13", UInt64.max > 0 && UInt64.max / 3 == 6148914691236517205 && UInt64.max % 7 == 1)
+    // ~ complements at the operand's own width.
+    check("int14", ~0 == -1 && ~Int8(0) == -1 && ~UInt8(0) == 255)
+    check("int15", Int8(-1) << 1 == -2 && Int8(-128) >> 1 == -64)
+    // A declared width survives into the next operation.
+    var u: UInt8 = 250
+    u = u &+ 10
+    var w: Int32 = 2147483647
+    w = w &+ 1
+    check("int16", u == 4 && w == -2147483648)
+    // The literal forms all read exactly.
+    check("int17", 0x7FFF_FFFF_FFFF_FFFF == Int.max && 0b1010 == 10 && 0o777 == 511)
+    check("int18", 9223372036854775807 == Int.max && -9223372036854775808 == Int.min)
+    // Conversions: truncating from a Double, wrapping between widths, failable
+    // from a String.
+    check("int19", Int(3.9) == 3 && Int(-3.9) == -3)
+    check("int20", Int(truncatingIfNeeded: UInt64.max) == -1 && UInt(bitPattern: -1) == UInt64.max)
+    check("int21", Int("17") == 17 && Int("abc") == nil && Int8("300") == nil && Int("-9223372036854775808") == Int.min)
+    check("int22", Int.max.description == "9223372036854775807" && "\(UInt64.max)" == "18446744073709551615")
+    check("int23", Int32(300) == 300 && Int8(truncatingIfNeeded: 300) == 44)
+    // A 64 bit product that a double cannot hold exactly.
+    check("int24", 1000000007 * 1000000007 == 1000000014000000049)
+    // The integer members, on a box and on a plain number alike.
+    check("int25", Int.max.bitWidth == 64 && Int8.max.bitWidth == 8 && UInt8.max.bitWidth == 8)
+    check("int26", (-5).magnitude == 5 && Int8(-100).magnitude == 100 && 7.description == "7")
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -818,6 +876,7 @@ func main() {
     s21() // SECTION-CALL 21
     s22() // SECTION-CALL 22
     s23() // SECTION-CALL 23
+    s24() // SECTION-CALL 24
     print("full: \(checks) checks, \(fails) failures")
 }
 
