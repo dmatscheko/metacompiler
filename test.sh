@@ -33,6 +33,15 @@
 #                             the goal is full language support, and this is the
 #                             progress report. Informational: always exits 0.
 #                             Combine with --filter to probe one language.
+#   ./test.sh --cross         run the THIRD test group: diff each language's two
+#                             halves against each other. The default matrix runs
+#                             every entry twice (goja and -frozen) and demands
+#                             byte-identical output - but that compares each
+#                             engine against ITSELF and is blind to the
+#                             interpreter and the compiler of one language giving
+#                             different answers. This group is the check for
+#                             that. Informational: always exits 0.
+#                             Combine with --filter to probe one language.
 #   ./test.sh -h, --help      show this header
 #
 # Requires: go (to build the compiler). awk and, if present, timeout/gtimeout/perl
@@ -42,7 +51,7 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT" || exit 2
 
-FILTER=""; VERBOSE=0; LIST=0; TIMEOUT=120; FULL=0
+FILTER=""; VERBOSE=0; LIST=0; TIMEOUT=120; FULL=0; CROSS=0
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -55,7 +64,8 @@ while [ $# -gt 0 ]; do
         -t|--timeout) TIMEOUT="${2:-120}"; shift ;;
         --timeout=*)  TIMEOUT="${1#*=}" ;;
         --full)       FULL=1 ;;
-        -h|--help)    sed -n '2,39p' "$0"; exit 0 ;;
+        --cross)      CROSS=1 ;;
+        -h|--help)    sed -n '2,48p' "$0"; exit 0 ;;
         *) echo "test.sh: unknown option '$1' (try --help)" >&2; exit 2 ;;
     esac
     shift
@@ -259,6 +269,136 @@ if [ "$FULL" -eq 1 ]; then
     echo " still needs; the default matrix is unaffected by these files)"
     if [ -z "$REPORTS" ]; then echo; echo "nothing matched the filter"; exit 0; fi
     for r in $REPORTS; do echo; cat "$r"; done
+    exit 0
+fi
+
+# ----------------------------------------------------------------------------
+# The third test group: cross-half agreement (./test.sh --cross).
+#
+# The default matrix runs every entry twice, goja and -frozen, and demands
+# byte-identical stdout. That is a strong invariant and it is blind to one whole
+# class of defect: the INTERPRETER grammar and the COMPILER grammar of the same
+# language giving DIFFERENT answers for the same program. Both halves are
+# self-consistent across both script hosts, both report FULL, and the matrix is
+# green while nil.to_s is "" in one and "null" in the other. Nothing flags that.
+#
+# So run every test program through both halves of its language and diff. A
+# difference is not automatically a bug - the real language decides which half
+# is right, and this group cannot know that - so it reports rather than judges,
+# and always exits 0. Its job is to make an invisible class visible.
+#
+# cross_strip removes a -to-llvm-ir grammar's emitted module, leaving just the
+# program's own output. -q prints the module AND the output for a compiler (the
+# module is its default output, not noise), and -qq is not a uniform substitute:
+# a grammar running through the JS runtime still prints program output under it,
+# one running through llvm.Run does not. So strip by structure: drop everything
+# up to and including the last line that is "}" or begins with @ / declare /
+# define. On interpreter output nothing matches and the text passes through.
+# It also drops the harness's own trailers, which name the half that ran and so
+# differ by construction ("ruby interpreter: program finished" vs "ruby compiler:
+# jsmain() returned 0"), and blank padding. What survives is the program's own
+# output plus any warning text - and a warning present in one half and not the
+# other IS a real finding, because it means the halves implement different
+# subsets, so those are deliberately kept.
+cross_strip() {
+    awk 'BEGIN { n = 0 } { l[n++] = $0 }
+         END { last = -1
+               for (i = 0; i < n; i++)
+                   if (l[i] == "}" || l[i] ~ /^declare / || l[i] ~ /^@/ || l[i] ~ /^define /) last = i
+               for (i = last + 1; i < n; i++) print l[i] }' \
+    | grep -Ev '^[a-z#+-]+ (interpreter|compiler): |^  ==> Fail$|^[a-z#+-]+ (interpreter|compiler) error: ' \
+    | grep -Ev '^(js runtime error: |jsmain\(\) returned )' \
+    | grep -Ev '^[a-z0-9-]+: (exit status|main\(\) returned|program value is) [0-9-]+$' \
+    | grep -Ev '^--- Executed with the built-in IR interpreter, output:$' \
+    | awk 'NF { blank = 0; for (i = 1; i <= held; i++) print ""; held = 0; print; seen = 1; next }
+           seen { held++ }'
+}
+
+# cross_one diffs the two halves of one language on one program, writing its
+# verdict to $4.
+cross_one() {
+    local L="$1" P="$2" R="$3"
+    local gi="languages/$L-interpreter.abnf" gc="languages/$L-to-llvm-ir.abnf"
+    local oi oc ri rc
+
+    oi="$(RUN "$BIN" "$gi" "$P" -q -warn-unsupported -warn-imports 2>&1 | cross_strip)"; ri=$?
+    oc="$(RUN "$BIN" "$gc" "$P" -q -warn-unsupported -warn-imports 2>&1 | cross_strip)"; rc=$?
+
+    if [ "$oi" = "$oc" ]; then
+        printf 'agree\n' > "$R"; return
+    fi
+    # Both halves refusing the program is agreement, not divergence: a construct
+    # neither implements is a gap the ratchet already measures, not a wrong
+    # answer. Only report when at least one half produced real output.
+    if [ -z "$oi" ] && [ -z "$oc" ]; then printf 'agree\n' > "$R"; return; fi
+    printf '%s\n' "$oi" > "$R.i"; printf '%s\n' "$oc" > "$R.c"
+    local d kind
+    d="$(diff "$R.i" "$R.c" 2>/dev/null)"
+    # Separate a warning-only difference from a real one. Under
+    # -warn-unsupported the two halves can warn at different points for the same
+    # construct - which is worth seeing, but it is NOT the two of them computing
+    # different answers, and reporting both the same way makes the important
+    # kind easy to misread. (It misread once during development: a warning-only
+    # row looked like the compiler implementing ||= that the interpreter
+    # lacked, when in fact both refuse it identically.)
+    if printf '%s\n' "$d" | grep -E '^[<>]' | grep -qvE '^[<>] *(warning:|$)'; then
+        kind="DIFFER"
+    else
+        kind="differ (warnings only)"
+    fi
+    { printf '%s  %s  %s\n' "$kind" "$L" "$P"
+      printf '%s\n' "$d" | head -12 | sed 's/^/          /'
+    } > "$R"
+    rm -f "$R.i" "$R.c"
+}
+
+if [ "$CROSS" -eq 1 ]; then
+    PAIRS=""
+    for gi in languages/*-interpreter.abnf; do
+        [ -f "$gi" ] || continue
+        L="$(basename "$gi" -interpreter.abnf)"
+        [ -f "languages/$L-to-llvm-ir.abnf" ] || continue
+        for P in tests/"$L"-test-*; do
+            [ -f "$P" ] || continue
+            case "$P" in *-test-full.*) continue ;; esac   # the ratchet's own group
+            hay="$L $P"
+            if [ -n "$FILTER" ] && ! printf '%s' "$hay" | grep -qiF -- "$FILTER"; then continue; fi
+            PAIRS="$PAIRS $L|$P"
+        done
+    done
+    if [ -z "$PAIRS" ]; then echo "test.sh --cross: nothing matched"; exit 0; fi
+    if [ "$LIST" -eq 1 ]; then printf '%s\n' $PAIRS | tr '|' ' '; exit 0; fi
+
+    SEM="$RESDIR/xsem"; mkfifo "$SEM"; exec 5<>"$SEM"; rm -f "$SEM"
+    i=0; while [ "$i" -lt "$JOBS" ]; do printf '.' >&5; i=$((i + 1)); done
+
+    n=0; XREPORTS=""
+    for pair in $PAIRS; do
+        L="${pair%%|*}"; P="${pair#*|}"
+        n=$((n + 1)); r="$RESDIR/x.$(printf '%04d' "$n")"
+        XREPORTS="$XREPORTS $r"
+        IFS= read -r -n 1 -u 5 _t
+        { cross_one "$L" "$P" "$r"; printf '.' >&5; printf '.' >&2; } &
+    done
+    wait
+    echo
+    echo "cross-half agreement - the interpreter and the compiler of each language,"
+    echo "run on the same program and diffed. The matrix cannot see this class:"
+    echo "it compares each engine against ITSELF, never the two halves."
+    echo
+    nd=0; nw=0
+    for r in $XREPORTS; do
+        [ -f "$r" ] || continue
+        if [ "$(head -1 "$r")" = "agree" ]; then continue; fi
+        case "$(head -1 "$r")" in "DIFFER "*) nd=$((nd + 1)) ;; *) nw=$((nw + 1)) ;; esac
+        cat "$r"
+    done
+    echo
+    printf '%d programs compared, %d divergent, %d differing only in warnings\n' "$n" "$nd" "$nw"
+    echo
+    echo "  A divergence is not automatically a bug - the real language decides which"
+    echo "  half is right. Settle each against the real toolchain, then fix the wrong"
+    echo "  half and pin it with a ratchet assertion."
     exit 0
 fi
 
