@@ -49,13 +49,31 @@ comparison chaining evaluating each operand once, and/or/not with Python truthin
 with Python semantics (7/2 == 3.5, -7//2 == -4, -7%2 == 1), unary -, and the @ matrix
 operator (which only ever reaches __matmul__).
 
-Still missing: sets, the match statement, hexadecimal / octal / binary / underscored /
-imaginary number literals, bytes and raw string literals, f-string format specifiers,
-starred assignment targets (a, *b = ...), slice steps and slice assignment, the ** power
-and the bitwise / shift operators, PEP 695 type aliases, except* and ExceptionGroup, and
-bare 'raise' re-raise / 'raise X from e' cause chaining. An except clause matches
-everything: the exception TYPE is parsed and dropped, and only the first handler of a
-try statement is kept.
+Numbers: decimal, hexadecimal, octal and binary integer literals, floats with an
+exponent and a leading or trailing dot, '_' digit separators in all of them, and
+imaginary literals - complex arithmetic (+ - * /, equality, .real / .imag) is real.
+An integer literal too large for a double becomes an ARBITRARY PRECISION integer
+(js_bigint, backed by Go's math/big), so 10**28-sized arithmetic is exact here; the
+interpreter grammar, which has only doubles, cannot do that - the one place where
+the compiled path reaches further than the interpreted one.
+
+Exceptions: every except clause of a try statement is kept and its TYPE decides,
+through isinstance, so a tuple of classes and a user hierarchy both work; an untyped
+'except:' catches everything and an unmatched value is re-raised (after this
+statement's finally ran). A bare 'raise' re-raises the active exception, 'raise X
+from e' records e as X.__cause__, and 'except* T as g' (PEP 654) runs every clause
+whose type matches part of an ExceptionGroup, each with its own sub-group.
+
+Type syntax: annotations are recorded in the enclosing body's __annotations__, PEP
+695 'type NAME = TYPE' binds an alias object with __name__ and __value__, and
+list[int] is a generic alias value (one object per written alias, so two of them
+compare equal).
+
+Still missing: sets, the match statement, bytes and raw string literals, the
+hex / octal / named character escapes, implicit adjacent string concatenation,
+f-string format specifiers,
+starred assignment targets (a, *b = ...), dict / set spread in a literal, slice
+steps and slice assignment, and the ** power and bitwise / shift operators.
 
 Functions become IR functions jsf_N(env, args); Python scoping (assignment creates a
 function local unless the name exists) goes through the js_pyset_var external, negative
@@ -123,7 +141,14 @@ DefLike     <~~ push(pop().dstmt) ~~>
 SmallLine   <~~ push(makeSeq(takeAll())) ~~>
             = SmallStmt { ";" SmallStmt } [ ";" ] NL ;
 SmallStmt   = Return | Break | Continue | Pass | Raise | Assert | Global | Nonlocal | Del
-            | AugAssign | ParallelAssign | AnnAssign | Assign | ExprSmall ;
+            | TypeAlias | AugAssign | ParallelAssign | AnnAssign | Assign | ExprSmall ;
+
+// PEP 695 'type NAME[params] = TYPE': the alias is a real value, an object whose
+// __name__ is the alias name and whose __value__ is the type it stands for. It is
+// tried before the expression statement, and 'type' stays the builtin function
+// everywhere else - only 'type' followed by a NAME is the alias statement.
+TypeAlias   <~~ push(makeTypeAlias(takeAll())) ~~>
+            = "type" KwEnd Id <~~ push({tname: up.in}) ~~> [ TypeParams ] "=" Expression ;
 
 // A suite: ':' NEWLINE INDENT statements DEDENT. Every further statement of the
 // suite starts at the same level; the first one defined the level via Indent.
@@ -208,24 +233,33 @@ AsyncDef    <~~ push(makeDef(pop(), pop(), pop(), up.pos)) ~~>
             = "async" KwEnd "def" KwEnd Id <~~ push(up.in) ~~> [ TypeParams ] ParamList
               [ "->" DiscardType ] Suite ;
 
-// try/except/else/finally: accepted; under -warn-unsupported the try body (and a
-// finally body) run, so calls inside them stay visible. There is no exception
-// model, so the except/else handlers are parsed and dropped.
+// try/except/else/finally: genuinely implemented. EVERY except clause is kept and
+// its exception TYPE decides (isinstance, so a tuple of classes works); an untyped
+// 'except:' catches everything. An unmatched value is re-raised, so it reaches the
+// enclosing try - after this statement's finally ran.
 TryStmt     <~~ push(makeTry(takeAll(), up.pos)) ~~>
             = "try" KwEnd TryBody ( ExceptClause { ExceptClause } [ TryElse ] [ TryFinally ] | TryFinally ) ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Suite ;
+// 'except* T as g' (PEP 654) parses too: every matching clause runs, each with the
+// sub-ExceptionGroup of the leaves its type accepted (see emitStarHandlers).
 ExceptClause <~~ push(makeExcept(takeAll())) ~~>
-            = SameLevel "except" KwEnd [ DiscardExpr [ KwAs Id <~~ push(up.in) ~~> ] ] Suite ;
+            = SameLevel "except" KwEnd [ "*" <~~ push({estar: true}) ~~> ]
+              [ ExcType [ KwAs Id <~~ push(up.in) ~~> ] ] Suite ;
+ExcType     <~~ push({etype: pop()}) ~~>
+            = Expression ;
 TryElse     <~~ push({elsebody: pop()}) ~~>
             = SameLevel "else" KwEnd Suite ;
 TryFinally  <~~ push({finalbody: pop()}) ~~>
             = SameLevel "finally" KwEnd Suite ;
 
-// raise EXPR: genuinely implemented (js_throw, recovered by the enclosing
-// js_try). A bare re-raise and the 'from CAUSE' chaining parse but are dropped.
+// raise EXPR [from CAUSE]: genuinely implemented (js_throw, recovered by the
+// enclosing js_try). A bare 'raise' inside an except body re-raises the active
+// exception; 'from CAUSE' stores the cause as the raised value's __cause__.
 Raise       <~~ push(makeRaise(takeAll(), up.pos)) ~~>
-            = "raise" KwEnd [ Expression [ KwFrom Expression ] ] ;
+            = "raise" KwEnd [ Expression [ RaiseFrom ] ] ;
+RaiseFrom   <~~ push({rcause: pop()}) ~~>
+            = KwFrom Expression ;
 
 // with EXPR [as TARGET]: the real context-manager protocol - __enter__ before the
 // body, __exit__ after it (and on the exception path, where a truthy answer
@@ -268,7 +302,11 @@ ParallelAssign <~~ push(makeParallelAssign(takeAll())) ~~>
 // name: Type [= value]: the annotation is parsed and ignored; with a value it is a
 // plain assignment, without one it is a no-op declaration.
 AnnAssign   <~~ push(makeAnnAssign(takeAll())) ~~>
-            = Target ":" DiscardType [ "=" Expression ] ;
+            = Target ":" AnnType [ "=" Expression ] ;
+// The annotation of an annotated assignment, kept as its source text: it is what
+// the enclosing class or module body records in __annotations__ (js_pyannot).
+AnnType     <~~ push({atype: stripWs(up.in)}) ~~>
+            = DiscardType ;
 
 // A type annotation, parsed and ignored: dotted names, [..]-subscripts (commas
 // allowed), | unions, the '...' of tuple[int, ...] and the STRING form
@@ -426,8 +464,62 @@ SliceHi     <~~ push({shi: pop()}) ~~> = Expression ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = EmptyTuple | GenExpParen | Grouped | FString | StringLit | DecLit | EllipsisLit | True | False | None
+Primary     = EmptyTuple | GenExpParen | Grouped | FString | StringLit | PyNum | EllipsisLit | True | False | None
             | ListComp | ListLit | DictComp | DictLit | SetComp | SetLit | VarRef ;
+
+// --- Python numeric literals ---
+// PEG ordered choice: the IMAGINARY forms first (they are a real literal plus a
+// 'j'), then the prefixed radix forms, then float before int - the plain integer,
+// which every other form starts with, has to come last or it would win by being
+// tried first and leave the rest of the literal behind. Every form accepts '_'
+// separators between digits (Python also allows one right after the 0x/0o/0b
+// prefix), and the :whitespace() pair keeps the skip off INSIDE a literal, so
+// '1 . 5' is not a float.
+PyNum       = PyImagDot | PyImagNum | PyHex | PyBin | PyOct | PyFloatDot | PyFloatNum | PyInt ;
+
+PyHex       <~~ push(makeIntLit(up.in, 16)) ~~>
+            = "0" ( "x" | "X" ) :whitespace() PyHexDigs :whitespace(Whitespace) ;
+PyBin       <~~ push(makeIntLit(up.in, 2)) ~~>
+            = "0" ( "b" | "B" ) :whitespace() PyBinDigs :whitespace(Whitespace) ;
+PyOct       <~~ push(makeIntLit(up.in, 8)) ~~>
+            = "0" ( "o" | "O" ) :whitespace() PyOctDigs :whitespace(Whitespace) ;
+// A named production per digit run: a :command() directly followed by a (group)
+// would parse as a Times repetition in this dialect (the Times trap).
+PyHexDigs   = PySeps PyHexDig PyMoreHex ;
+PyMoreHex   = { PyHexDig | "_" } ;
+PyHexDig    = "0"..."9" | "a"..."f" | "A"..."F" ;
+PyBinDigs   = PySeps PyBinDig PyMoreBin ;
+PyMoreBin   = { PyBinDig | "_" } ;
+PyBinDig    = "0" | "1" ;
+PyOctDigs   = PySeps PyOctDig PyMoreOct ;
+PyMoreOct   = { PyOctDig | "_" } ;
+PyOctDig    = "0"..."7" ;
+PySeps      = { "_" } ;
+
+// .5 / 5. / 1_0.2_5 / 1e3 / 2.5e-2: a float needs a '.' or an exponent, which is
+// what keeps PyInt from being shadowed.
+PyFloatDot  <~~ push(makeFloatLit(up.in)) ~~>
+            = "." :whitespace() PyDigits PyExpOpt :whitespace(Whitespace) ;
+PyFloatNum  <~~ push(makeFloatLit(up.in)) ~~>
+            = "0"..."9" :whitespace() PyFloatRest :whitespace(Whitespace) ;
+PyFloatRest = PyDigitsOpt ( "." PyDigitsOpt PyExpOpt | PyExp ) ;
+PyExpOpt    = [ PyExp ] ;
+PyExp       = ( "e" | "E" ) PySign PyDigits ;
+PySign      = [ "+" | "-" ] ;
+PyDigits    = "0"..."9" PyDigitsOpt ;
+PyDigitsOpt = { "0"..."9" | "_" } ;
+
+PyInt       <~~ push(makeIntLit(up.in, 10)) ~~>
+            = "0"..."9" :whitespace() PyDigitsOpt :whitespace(Whitespace) ;
+
+// 1j / 2.5j: an imaginary literal. Tried first, or the real part alone would win
+// and leave the 'j' behind as a stray identifier.
+PyImagDot   <~~ push(makeImagLit(up.in)) ~~>
+            = "." :whitespace() PyDigits PyExpOpt PyJ :whitespace(Whitespace) ;
+PyImagNum   <~~ push(makeImagLit(up.in)) ~~>
+            = "0"..."9" :whitespace() PyDigitsOpt PyFrac PyExpOpt PyJ :whitespace(Whitespace) ;
+PyFrac      = [ "." PyDigitsOpt ] ;
+PyJ         = "j" | "J" ;
 
 // ( ) empty tuple and ( a, b, ... ) / ( a, ) tuples build a list value: this
 // subset has one sequence type, so a tuple is an immutable list that is simply
@@ -582,6 +674,40 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // a def with a yield anywhere in it becomes a generator function.
     var sawYield = false
     var genClosure = false
+
+    // ----- Numeric literals -----
+    // numText strips the whitespace the literal rule's trailing skip picked up and
+    // the '_' digit separators Python allows.
+    function numText(t) { return stripWs(t).split("_").join("") }
+    // An integer literal. A decimal one whose value does not fit a double EXACTLY
+    // becomes a real arbitrary precision integer: js_bigint is backed by Go's
+    // math/big, so 10000000000000000000000000001 - 10000000000000000000000000000
+    // is 1 here. (The interpreter grammar has only doubles and cannot do this - the
+    // one place where the compiled path is strictly more capable.)
+    function makeIntLit(t, radix) {
+        var txt = numText(t)
+        if (radix != 10) {
+            var digits = txt.substring(2)
+            return makeConst(parseInt(digits, radix))
+        }
+        var v = parseInt(txt, 10)
+        if (v > 9007199254740992 || v < -9007199254740992) {
+            return function(b) { return {b: b, v: callExt(b, "js_bigint", [emitStr(b, txt)])} }
+        }
+        return makeConst(v)
+    }
+    function makeFloatLit(t) { return makeConst(parseFloat(numText(t))) }
+    // 1j / 2.5j: an imaginary literal is the complex number (0, x). js_pycomplex
+    // builds the value the complex arithmetic in js_pybin and the .real / .imag
+    // reads understand.
+    function makeImagLit(t) {
+        var txt = numText(t)
+        var im = parseFloat(txt.substring(0, txt.length - 1))
+        return function(b) {
+            return {b: b, v: callExt(b, "js_pycomplex", [emitNum(b, 0), emitNum(b, im)])}
+        }
+    }
+
     // Python truthiness for branches.
     // ----- Expression thunks: function(block) -> {b, v} -----
 
@@ -1311,14 +1437,44 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     // name: Type [= value]: the annotation is ignored; assign when a value is given.
+    // NAME: TYPE [= VALUE]. The annotation is recorded in the enclosing body's
+    // __annotations__ (js_pyannot; in a class body that dict becomes a class member
+    // like every other name the body binds), and the value, when there is one, is
+    // assigned exactly like a plain assignment.
     function makeAnnAssign(items) {
         var ref = items[0]
-        if (items.length < 2) { return function(b) { return b } }
-        var valT = items[1]
+        var ann = null
+        var valT = null
+        for (var i = 1; i < items.length; i++) {
+            if (typeof items[i] == "function") { valT = items[i] }
+            else if (items[i].atype != undefined) { ann = items[i].atype }
+        }
         return function(b) {
+            if (ann != null && ref.path.length == 0) {
+                callExt(b, "js_pyannot", [curScopeV, emitStr(b, ref.name), emitStr(b, ann)])
+            }
+            if (valT == null) { return b }
             var r = valT(b)
             b = r.b
             return emitRefWrite(b, ref, r.v)
+        }
+    }
+    // type NAME = TYPE (PEP 695): the alias object carries __name__ (a class object
+    // answers that from its name) and __value__.
+    function makeTypeAlias(items) {
+        var name = anytype
+        var valT = anytype
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { valT = items[i] }
+            else if (items[i].tname != undefined) { name = items[i].tname }
+        }
+        return function(b) {
+            var alias = callExt(b, "js_pyclass_new", [emitStr(b, name), callExt(b, "js_arr_new", [])])
+            var r = valT(b)
+            b = r.b
+            callExt(b, "js_set", [alias, emitStr(b, "__value__"), r.v])
+            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), alias])
+            return b
         }
     }
     // assert COND [, MSG]: a false condition calls exit(1) at runtime.
@@ -1338,24 +1494,125 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return okB
         }
     }
-    // items = [name, suiteThunk] or [suiteThunk] (except with no `as` binding).
+    // One except clause. The items arrive in source order and are told apart by
+    // their shape: {estar} for 'except*', {etype} for the exception type
+    // expression, a plain string for the 'as NAME' binding and the suite thunk
+    // (the only function) for the body. Wrapped in {excl} so makeTry can find the
+    // clauses among the try/else/finally parts.
     function makeExcept(items) {
-        if (items.length > 1) { return {handler: items[1], hname: items[0]} }
-        return {handler: items[0], hname: undefined}
+        var cl = {handler: undefined, hname: undefined, htype: undefined, hstar: false}
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { cl.handler = it }
+            else if (typeof it == "string") { cl.hname = it }
+            else if (it.estar != undefined) { cl.hstar = true }
+            else if (it.etype != undefined) { cl.htype = it.etype }
+        }
+        return {excl: cl}
     }
-    // try/except/else/finally: the try body and the first except handler compile to ctl
-    // closures handed to js_try (raise -> js_throw is recovered, the handler binds the
-    // value via its parameter); the else clause is appended to the try body so it runs
+    // handlerDepth is > 0 exactly while an except body is being EMITTED, which is
+    // what tells a bare 'raise' that there is an active exception to re-raise (it
+    // lives in the catch closure's scope as __caught).
+    var handlerDepth = 0
+    // The body of the ONE catch closure js_try takes: it dispatches over every
+    // except clause of the statement in source order. A clause with a type runs
+    // only when js_pyisinst accepts the caught value (a tuple of classes works,
+    // isinstance takes one); an untyped clause catches everything and ends the
+    // chain; if nothing matches, the value is re-raised, so the enclosing try -
+    // and any finally of this one - still see it.
+    function makeHandlerBody(clauses) {
+        return function(b) {
+            var caught = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__caught")])
+            var endB = curF.NewBlock("")
+            var anyStar = false
+            for (var s = 0; s < clauses.length; s++) { if (clauses[s].hstar) { anyStar = true } }
+            if (anyStar) { return emitStarHandlers(b, caught, clauses, endB) }
+            var cur = b
+            var open = true
+            for (var i = 0; i < clauses.length; i++) {
+                if (!open) { break }
+                var cl = clauses[i]
+                var bodyB = cur
+                if (cl.htype != undefined) {
+                    var rt = cl.htype(cur)
+                    cur = rt.b
+                    var okV = callExt(cur, "js_pyexcmatch", [caught, rt.v])
+                    var hitB = curF.NewBlock("")
+                    var missB = curF.NewBlock("")
+                    cur.NewCondBr(truthy(cur, okV), hitB, missB)
+                    bodyB = hitB
+                    cur = missB
+                } else {
+                    open = false
+                }
+                if (cl.hname != undefined) {
+                    callExt(bodyB, "js_scope_decl", [curScopeV, emitStr(bodyB, cl.hname), caught])
+                }
+                handlerDepth++
+                var outB = cl.handler(bodyB)
+                handlerDepth--
+                outB.NewBr(endB)
+            }
+            if (open) {
+                callExt(cur, "js_throw", [caught])
+                cur.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
+            }
+            return endB
+        }
+    }
+    // except* CLAUSES (PEP 654): the caught value is an ExceptionGroup, and EVERY
+    // clause whose type matches part of it runs - with its own sub-group bound.
+    // js_pyexcsplit does the splitting on the host side: it answers a fresh group
+    // (built from the ExceptionGroup class handed to it) over the matching leaves,
+    // or undefined when nothing in the group matches. Nothing matched at all means
+    // the value is re-raised, so a non-group value still reaches the outer try.
+    function emitStarHandlers(b, caught, clauses, endB) {
+        var grpCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "ExceptionGroup")])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "__ehit"), hFalse])
+        var cur = b
+        for (var i = 0; i < clauses.length; i++) {
+            var cl = clauses[i]
+            var subV = hUndef
+            if (cl.htype != undefined) {
+                var rt = cl.htype(cur)
+                cur = rt.b
+                subV = callExt(cur, "js_pyexcsplit", [caught, rt.v, grpCls])
+            } else {
+                subV = caught
+            }
+            var hitB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            cur.NewCondBr(truthy(cur, callExt(cur, "js_seq", [subV, hUndef])), missB, hitB)
+            callExt(hitB, "js_scope_decl", [curScopeV, emitStr(hitB, "__ehit"), hTrue])
+            if (cl.hname != undefined) {
+                callExt(hitB, "js_scope_decl", [curScopeV, emitStr(hitB, cl.hname), subV])
+            }
+            handlerDepth++
+            var outB = cl.handler(hitB)
+            handlerDepth--
+            outB.NewBr(missB)
+            cur = missB
+        }
+        var hitAny = callExt(cur, "js_scope_get", [curScopeV, emitStr(cur, "__ehit")])
+        var reB = curF.NewBlock("")
+        cur.NewCondBr(truthy(cur, hitAny), endB, reB)
+        callExt(reB, "js_throw", [caught])
+        reB.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
+        return endB
+    }
+    // try/except/else/finally: the try body and ONE dispatching catch closure (see
+    // makeHandlerBody - it holds every except clause of the statement) are handed to
+    // js_try; raise -> js_throw is recovered and the caught value arrives as the
+    // closure's parameter. The else clause is appended to the try body so it runs
     // only when the body completes without a raise (an exception in an else clause is
     // then caught by the except - a rare deviation). A return/break/continue leaving the
     // try or except becomes a control signal that excDispatch re-issues here.
     function makeTry(items, pos) {
-        var tryT = anytype, handlerT = anytype, hname = anytype, elseT = anytype, finallyT = anytype
+        var tryT = anytype, elseT = anytype, finallyT = anytype
+        var clauses = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].trybody != undefined) { tryT = items[i].trybody }
-            else if (items[i].handler != undefined) {
-                if (handlerT == undefined) { handlerT = items[i].handler; hname = items[i].hname }
-            }
+            else if (items[i].excl != undefined) { clauses.push(items[i].excl) }
             else if (items[i].elsebody != undefined) { elseT = items[i].elsebody }
             else if (items[i].finalbody != undefined) { finallyT = items[i].finalbody }
         }
@@ -1366,9 +1623,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function(b) {
             var tryClo = callExt(b, "js_closure", [handle(emitClosure([], bodyT, true)), curScopeV])
             var catchClo = hUndef
-            if (handlerT != undefined) {
-                var cn = (hname != undefined) ? hname : "__caught"
-                catchClo = callExt(b, "js_closure", [handle(emitClosure([cn], handlerT, true)), curScopeV])
+            if (clauses.length > 0) {
+                catchClo = callExt(b, "js_closure",
+                                   [handle(emitClosure(["__caught"], makeHandlerBody(clauses), true)), curScopeV])
             }
             var finClo = hUndef
             if (finallyT != undefined) {
@@ -1378,16 +1635,29 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return excDispatch(b, ctl)
         }
     }
-    // raise EXPR: evaluate the value and raise it with js_throw; a bare raise re-raise
-    // is approximated by raising undefined, and the `from` cause is ignored.
+    // raise EXPR [from CAUSE]: evaluate the value, attach the cause as __cause__ and
+    // raise it with js_throw. A BARE raise inside an except body re-raises the active
+    // exception (the __caught binding of the enclosing catch closure).
     function makeRaise(items, pos) {
-        var t = items.length > 0 ? items[0] : null
+        var t = null
+        var causeT = null
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { t = items[i] }
+            else if (items[i].rcause != undefined) { causeT = items[i].rcause }
+        }
         return function(b) {
             var v = hUndef
             if (t != null) {
                 var r = t(b)
                 b = r.b
                 v = r.v
+                if (causeT != null) {
+                    var rc = causeT(b)
+                    b = rc.b
+                    callExt(b, "js_pysetattr", [v, emitStr(b, "__cause__"), rc.v])
+                }
+            } else if (handlerDepth > 0) {
+                v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__caught")])
             }
             callExt(b, "js_throw", [v])
             b.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.

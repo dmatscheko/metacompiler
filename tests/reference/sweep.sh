@@ -241,6 +241,18 @@ expectations_for() {
             # is a static-semantics rule, not a grammar rule); fail/ must not.
             awk -v d="$dir" '{ print ($0 ~ d "/fail/" ? "reject|" : "parse|") $0 }' "$all"
             return ;;
+        typescript)
+            # The conformance suite has no per-file error baseline, but it does
+            # segregate its deliberately-malformed inputs by DIRECTORY, and those
+            # are syntax errors rather than semantic ones: parser/ErrorRecovery
+            # ('return {' unterminated at top level, '().toString()'),
+            # parser/SkippedTokens, and decorators/invalid ('@dec type T = ...',
+            # which the TS grammar itself refuses). Demanding that we parse them
+            # was wrong - refusing them is the correct behaviour, so they carry
+            # the hard 'reject' expectation and we are scored on refusing them.
+            awk '{ print ($0 ~ /\/(ErrorRecovery|SkippedTokens)\// || $0 ~ /\/decorators\/invalid\// \
+                          ? "reject|" : "parse|") $0 }' "$all"
+            return ;;
         go)
             # The first line of every golang/go test/ file is its directive;
             # "// errorcheck" means the compiler must reject the file.
@@ -250,7 +262,31 @@ expectations_for() {
         swift)  grep -rl 'expected-error' "$dir" --include="*.$ext" 2>/dev/null | sort > "$neg" ;;
         dart)   grep -rl -e '\[analyzer\]' -e '\[cfe\]' "$dir" --include="*.$ext" 2>/dev/null | sort > "$neg" ;;
         java)   grep -rl '@compile/fail' "$dir" --include="*.$ext" 2>/dev/null | sort > "$neg" ;;
-        kotlin) grep -i -e '_ERR' -e 'Recovery' "$all" > "$neg" || true ;;
+        kotlin)
+            # Kotlin ships the EXPECTED PSI TREE next to every input, as a .txt
+            # companion, and that is the exact signal: a PsiErrorElement in the
+            # tree is the Kotlin parser itself recording a SYNTAX error, so the
+            # file must not parse. Anything else must parse.
+            #
+            # This is deliberately NOT keyed on the '// COMPILATION_ERRORS'
+            # marker, which was tried first and is wrong: of the 450 files
+            # carrying it, 174 have a perfectly clean PSI tree - their errors
+            # are SEMANTIC (type errors, unresolved references), which a
+            # syntax-only front end is required to parse. Keying on the marker
+            # excused us from 174 files we ought to handle.
+            #
+            # Because the signal is exact, kotlin gets the HARD 'reject'
+            # expectation (like test262's fail/), not the informational
+            # 'reject?': we are scored on actually refusing these.
+            while IFS= read -r f; do
+                t="${f%.$ext}.txt"
+                if [ -f "$t" ] && grep -q 'PsiErrorElement' "$t"; then
+                    printf 'reject|%s\n' "$f"
+                else
+                    printf 'parse|%s\n' "$f"
+                fi
+            done < "$all"
+            return ;;
     esac
 
     if [ -s "$neg" ]; then

@@ -72,8 +72,9 @@ The same language with the same semantics is interpreted directly by kotlin-inte
 
 // --- main rules
 
-// Shared token productions (languages/lib).
-:include("lib/cstyle-comments.abnf") ;
+// Shared token productions (languages/lib). lib/cstyle-comments.abnf is NOT
+// included: Kotlin's whitespace set is wider than C's, so the same four rules
+// are spelled out below with the extra separators. Everything else is shared.
 :include("lib/ident.abnf") ;
 :include("lib/numbers.abnf") ;
 :include("lib/bools.abnf") ;
@@ -81,8 +82,26 @@ The same language with the same semantics is interpreted directly by kotlin-inte
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
+// Kotlin's whitespace, a local copy of lib/cstyle-comments.abnf with a wider
+// blank set. Besides space, tab, CR and LF the Kotlin lexer also separates
+// tokens with the vertical tab (x0b), the form feed / page break (x0c) and the
+// three Unicode line separators NEL (x85), LINE SEPARATOR (x2028) and PARAGRAPH
+// SEPARATOR (x2029) - the lexer/kotlin/whitespaceCharacters corpus tests exist
+// exactly for those. They stay Kotlin-local: adding them to the shared fragment
+// would make C, Java and a dozen other grammars over-accept, since in those
+// languages a raw x2028 between two tokens is an error.
+// A line comment still ends at a LINE FEED only, which is what the Kotlin lexer
+// does too, so NotNewline is unchanged.
+Whitespace  = { @+" \t\r\n\x0b\x0c\u0085\u2028\u2029" | Comment } ;
+Comment     = LineComment | BlockComment ;
+LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
+NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
+
 Program     <~~ buildMain(takeAll()) ~~>
-            = { Annotation } [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ push(makeFunStmt(pop())) ~~> | ExtFun | UnsupFun | ClassDecl | ExtProp | TopAccProp | UnsupAccessor | TopProp ) } ;
+            = { Annotation } [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ push(makeFunStmt(pop())) ~~> | ExtFun | UnsupFun | ClassDecl | ExtProp | TopAccProp | UnsupAccessor | TopProp ) } { Annotation } ;
 
 // Modifiers and annotations before a declaration are parsed and ignored (they do
 // not change what we lower). Annotations accept ALL forms: an argument list
@@ -130,6 +149,11 @@ Annotation  = "@" [ AnnTarget ":" ] ( AnnSet | AnnEntry ) ;
 AnnTarget   = ( "field" | "property" | "setparam" | "set" | "get" | "receiver" | "param"
               | "delegate" | "file" | "all" ) KwEnd ;
 AnnSet      = "[" { AnnEntry } "]" ;
+// An annotation in STATEMENT position. Identical to Annotation except that its
+// argument list is given up when a single `=` follows it, which is what tells
+// `@Ann(var first) = x` (a destructuring declaration annotated with a bare @Ann)
+// from `@Ann("") (var first) = x` (@Ann WITH arguments, then the pattern).
+StmtAnn     = "@" [ AnnTarget ":" ] ( AnnSet | KId { "." KId } [ SkipParen NotAssign ] ) ;
 AnnEntry    = KId { "." KId } [ SkipParen ] ;
 
 // package / import headers. The package name is parsed and ignored. Each import
@@ -220,12 +244,20 @@ CollLit     <~~ push(makeCollLit(takeAll())) ~~>
 
 // class Counter(val start: Int, var step: Int) { var value = start; fun next() ... }
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = [ DataMod <~~ push({dmod: up.in}) ~~> KwEnd ] KwClass KId <~~ push(up.in) ~~> [ SkipAngle ] [ PrimaryCtorKw ] [ CtorParams ] [ ":" Supers ] [ WhereClause ] [ "{" { Member } "}" ] ;
+            = [ DataMod <~~ push({dmod: up.in}) ~~> KwEnd ] KwClass KId <~~ push(up.in) ~~> [ SkipAngle ] ( CtorModsOnly CtorParams | [ PrimaryCtorKw ] [ CtorParams ] ) [ ":" Supers ] [ WhereClause ] [ "{" { Member } "}" ] ;
 // The primary constructor may be written out - class Foo constructor(x: Int) - with its
 // own visibility and annotations (class A private @Inject constructor(...)). The keyword
 // and its modifiers carry no meaning the subset models, so they are parsed and dropped;
 // the parameter list that follows is the ordinary primary constructor.
 PrimaryCtorKw = [ Modifiers ] KwConstructor ;
+// `class foo private () : Bar` - the modifiers of a primary constructor written
+// WITHOUT the `constructor` keyword. Kotlin's own parser accepts that shape (the psi
+// corpus keeps it under declarations/ConstructorModifiers) but ONLY when a parameter
+// list really follows: `open class AB private { ... }` is the error "Expecting
+// 'constructor' keyword". So every use pairs CtorModsOnly with a MANDATORY parameter
+// list - dropping that pairing costs two corpus files we correctly reject today.
+// Spelled as one-or-more so it can never match the empty string.
+CtorModsOnly = ( Modifier | Annotation ) { Modifier | Annotation } ;
 
 // The supertype list of a REAL (lowered) type declaration. Unlike the tag-less
 // SuperList used by the skipped forms, this one pushes what the emitter needs:
@@ -332,7 +364,7 @@ LazyInit    <~~ push(makeLazyInit(pop())) ~~>
 // tail (C?.() -> C: the nullable receiver of a lambda type) and after the whole type.
 // A trailing `& Type` run is Kotlin's definitely-non-null type (T & Any); like every
 // other type detail it is erased.
-Type        = { TypeAnno } [ "suspend" KwEnd ] ( "(" [ FnTypeParam { "," FnTypeParam } [ "," ] ] ")" [ "?" NotColon ] [ "->" Type | RecvFnTail ]
+Type        = { TypeAnno | "suspend" KwEnd | ContextClause } ( "(" [ FnTypeParam { "," FnTypeParam } [ "," ] ] ")" [ "?" NotColon ] [ "->" Type | RecvFnTail ]
             | KId [ SkipAngle ] { "." KId [ SkipAngle ] } [ "?" NotColon ] [ RecvFnTail ] ) [ "?" NotColon ] { "&" Type } ;
 // A function-type parameter: an optional name (Kotlin allows named function-type
 // parameters, onRun: (root: Boolean) -> Unit) then the type. Also serves the
@@ -342,17 +374,26 @@ FnTypeParam = [ KId ":" ] Type ;
 // type, e.g. @Composable RowScope.() -> Unit). The receiver type is the dotted name;
 // this consumes the `.(params) -> Ret`. Parsed and ignored like any type.
 RecvFnTail  = "." "(" [ FnTypeParam { "," FnTypeParam } [ "," ] ] ")" "->" Type ;
-// A type annotation: an argument list is consumed only when a `->` does NOT follow,
-// so `@Composable () -> Unit` leaves the `()` for the function type (NotArrow rolls
-// the parens back), while `@Tag("x") Foo` keeps them as the annotation's arguments.
-TypeAnno    = "@" KId { "." KId } [ SkipParen NotArrow ] ;
+// A type annotation. Three details, each one a corpus cluster:
+//   * a use-site target is allowed here too (@receiver:A R.() -> T).
+//   * the annotation-array form @[A B C] is a type annotation like any other.
+//   * the argument list must be ADJACENT to the name. Kotlin distinguishes
+//     `@Foo(x)` (annotation WITH an argument list) from `@Foo (x)` (a bare
+//     annotation on the parenthesized type `(x)`) by exactly that space, which
+//     is why the psi corpus keeps the two under annotation/withParentheses and
+//     annotation/withoutParentheses. Whitespace is therefore switched off
+//     around the optional argument list - and switched back on unconditionally
+//     afterwards, so a rolled-back alternative never leaks the setting.
+//     The NotArrow guard stays on top of that: `@Composable() -> Unit` leaves
+//     the `()` to the function type.
+TypeAnno    = "@" [ AnnTarget ":" ] ( AnnSet | KId { "." KId } :whitespace() [ SkipParen NotArrow ] :whitespace(Whitespace) ) ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 // A statement may carry a label (loop@ ...); the label is parsed and ignored, so the
 // labelled statement still lowers. Labelled jumps (break@l / continue@l / return@l)
 // route to notImpl (the target label cannot be resolved in the subset).
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = { Annotation } ( ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
+            = { StmtAnn } ( ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
             | Labeled | PlainStmt ) ;
 PlainStmt   = Block | LocalFun | Destructure | DelegateDecl | Decl | If | While | Do | For | TryStmt | Throw | Empty | ExprStmt ;
 Labeled     <~~ push(makeLabeled(takeAll(), up.pos)) ~~>
@@ -442,7 +483,37 @@ ForList     <~~ push(makeForList(pop(), pop(), pop())) ~~>
 ForDestruct <~~ push(makeForDestruct(takeAll(), up.pos)) ~~>
             = KwFor "(" DTuple KwIn Expression ")" Statement ;
 DTuple      <~~ push({dnames: takeAll()}) ~~>
-            = "(" DName { "," DName } [ "," ] ")" ;   // Each DName pushes {dn}.
+            = DPat ;
+
+// The destructuring PATTERN, shared by the declaration, the for-loop and the lambda
+// parameter list. Kotlin's name-based destructuring proposal widens the classic
+// `(a, b)` into two bracketings that mean DIFFERENT things:
+//   (a, b)              parenthesized - POSITION based, the classic componentN form
+//   (val a, var b)      parenthesized with per-entry val/var - NAME based: each entry
+//                       reads the property of its own name, so order does not matter
+//   (val b = second)    ... optionally RENAMING: `b` is the new name, `second` the
+//                       property that is read (the short form drops the val/var)
+//   [a, b] / [val a]    bracketed - always POSITION based, whatever the entries say
+// Both bracketings take a trailing comma and per-entry annotations and types.
+// Each entry pushes {dn, dprop}: dprop is "" for a positional entry and the property
+// name for a name-based one, which is all the lowering below needs.
+DPat        = "(" DEntryN { "," DEntryN } [ "," ] ")"
+            | "[" DEntryP { "," DEntryP } [ "," ] "]" ;
+// The leading pattern of a declaration written WITHOUT an outer val/var
+// (`(val a, val b) = x`, `[val a] = x`). The parenthesized form must open with a
+// val/var entry - otherwise `(a) = x`, which is not a Kotlin declaration at all,
+// would be read as one.
+DPatLead    = "(" DEntryD { "," DEntryN } [ "," ] ")"
+            | "[" DEntryP { "," DEntryP } [ "," ] "]" ;
+DEntryN     <~~ push(makeDEntry(takeAll(), true)) ~~>
+            = { Annotation } [ DValVar ] DEntName [ ":" Type ] [ "=" DEntProp ] ;
+DEntryD     <~~ push(makeDEntry(takeAll(), true)) ~~>
+            = { Annotation } DValVar DEntName [ ":" Type ] [ "=" DEntProp ] ;
+DEntryP     <~~ push(makeDEntry(takeAll(), false)) ~~>
+            = { Annotation } [ DValVar ] DEntName [ ":" Type ] [ "=" DEntProp ] ;
+DValVar     = ( "val" | "var" ) KwEnd <~~ push({dk: "kw", ds: ""}) ~~> ;
+DEntName    = KId <~~ push({dk: "name", ds: up.in}) ~~> ;
+DEntProp    = KId <~~ push({dk: "prop", ds: up.in}) ~~> ;
 
 // `return` inside a lambda argument returns from the ENCLOSING FUNCTION, not from the
 // lambda (Kotlin's non-local return, which its inline higher-order functions rely on:
@@ -640,6 +711,23 @@ NotColon    = :script(~~
         var cc = c.peek(i)
         while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i++; cc = c.peek(i) }
         return (cc === 58) ? abnf.newToken("\x01colon-follows", 0) : undefined
+    })()
+~~) ;
+
+// A zero-width guard that fails when the next non-whitespace token is a single `=`
+// (`==` and `=>` do not count). It separates an annotation's ARGUMENT list from a
+// parenthesized destructuring pattern that merely follows the annotation: in
+// `@Ann(var first) = x` the parens are the pattern, in `@Ann("") (var first) = x`
+// they are the arguments. Trying the argument list first and rejecting it when an
+// `=` follows resolves the two exactly the way the Kotlin parser does.
+NotAssign   = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i++; cc = c.peek(i) }
+        if (cc !== 61) { return undefined }
+        var nx = c.peek(i + 1)
+        return (nx === 61 || nx === 62) ? undefined : abnf.newToken("\x01assign-follows", 0)
     })()
 ~~) ;
 
@@ -863,9 +951,8 @@ LambdaParams <~~ push({lparams: takeAll()}) ~~>
 // (like a val destructuring declaration): the names bind to undefined and makeLambda
 // warns once, so the lambda still parses and lowers under -warn-unsupported.
 LParam      = DestructLParam | KId <~~ push(up.in) ~~> [ ":" Type ] ;
-DestructLParam <~~ push({destruct: takeAll(), pos: up.pos}) ~~>   // Each DName pushes {dn}.
-            = "(" DName { "," DName } [ "," ] ")" [ ":" Type ] ;
-DName       = KId <~~ push({dn: up.in}) ~~> [ ":" Type ] ;
+DestructLParam <~~ push({destruct: takeAll(), pos: up.pos}) ~~>   // Each entry pushes {dn, dprop}.
+            = DPat [ ":" Type ] ;
 
 // f(a, b): a top level function, a builtin, or a class constructor. A trailing lambda
 // becomes the last argument (Kotlin): after a parenthesized list - f(a) { ... } - or on
@@ -1043,7 +1130,13 @@ UnsupType   = Interface | ObjectDecl | EnumClass | AnnotationClass | TypeAlias ;
 // puts the interface on its __super chain, so the runtime's memberCall finds the
 // default methods and js_is_type answers `x is Interface`. The body is optional (a
 // marker interface); a body outside the member subset falls back to InterfaceSkip.
-Interface   = InterfaceReal | InterfaceSkip ;
+Interface   = InterfaceCtor | InterfaceReal | InterfaceSkip ;
+// interface I(val a: Int): an interface may not have a primary constructor either,
+// and again Kotlin parses the list before rejecting it. Tried FIRST, because the
+// bodiless InterfaceReal would otherwise match `interface I` and strand the `(`.
+InterfaceCtor <~~ push(notImplStmt("interface", up.pos)) ~~>
+            = [ KwFun ] KwInterface KId [ SkipAngle ] [ PrimaryCtorKw | CtorModsOnly ] CtorParamsSkip
+              [ ":" SuperList ] [ SkipBlock ] ;
 // `fun interface` is a functional (SAM) interface. The `fun` only constrains how many
 // abstract members the interface may have, which changes nothing here, so it is parsed
 // and dropped and the declaration lowers like any other interface.
@@ -1056,9 +1149,15 @@ InterfaceSkip <~~ push(notImplStmt("interface", up.pos)) ~~>
 // name and dispatched through js_mcall). A body outside the subset (e.g. a char
 // literal), or no body at all (a bodiless object), falls back to ObjectSkip
 // (notImplemented), so the widened surface still parses.
-ObjectDecl  = ObjectReal | ObjectNoBody | ObjectSkip ;
+ObjectDecl  = ObjectCtor | ObjectReal | ObjectNoBody | ObjectSkip ;
 ObjectReal  <~~ push(makeObjectStmt(takeAll())) ~~>
             = KwObject KId <~~ push(up.in) ~~> [ ":" Supers ] "{" { Member } "}" ;
+// object Foo(a: Int) / object Foo private (): an object declaration may not HAVE a
+// primary constructor, but that is a semantic rule - Kotlin parses the parameter list
+// and then reports the error, and the psi corpus expects it parsed. The list is
+// skipped, and the declaration falls to the notImplemented object path below.
+ObjectCtor  <~~ push(notImplStmt("object declaration", up.pos)) ~~>
+            = KwObject KId [ SkipAngle ] [ PrimaryCtorKw | CtorModsOnly ] CtorParamsSkip [ ":" SuperList ] [ SkipBlock ] ;
 // A BODILESS object declaration (object Zero : Expr) is a genuine singleton too - the
 // common shape of a sealed hierarchy's "no payload" case. The !"{" lookahead keeps it
 // from stealing an object whose body does not parse; that one still falls to ObjectSkip.
@@ -1164,8 +1263,13 @@ UnsupAccessor <~~ push(notImplStmt("property accessor", up.pos)) ~~>
 // convention - component1() for the first name, component2() for the second - which is
 // what a data class synthesizes and what any class can declare by hand. A name of `_`
 // discards its component and its componentN() is not called, as in Kotlin.
-Destructure <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
-            = ( "val" | "var" ) KwEnd "(" DName { "," DName } [ "," ] ")" [ ":" Type ] "=" Expression [ ";" ] ;
+Destructure = DestructKw | DestructPat ;
+DestructKw  <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
+            = ( "val" | "var" ) KwEnd DPat [ ":" Type ] "=" Expression [ ";" ] ;
+// The keyword-less form, where the entries carry their own val/var: (val a, var b) = x
+// and [val a, val b] = x. See DPatLead for why the parenthesized case demands one.
+DestructPat <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
+            = DPatLead [ ":" Type ] "=" Expression [ ";" ] ;
 
 // Kotlin's identifiers, INCLUDING the backtick-quoted form: `top level`, `class`,
 // `is`. Any character but a backtick and a line break may appear between the quotes,
@@ -2160,15 +2264,16 @@ KwContract  = "contract" KwEnd ;
                 var slot = "$d" + pi
                 argNames.push(slot)
                 var dnames = []
-                for (var dd = 0; dd < p.destruct.length; dd++) { dnames.push(p.destruct[dd].dn) }
-                destructs.push({slot: slot, names: dnames})
+                var dprops = []
+                for (var dd = 0; dd < p.destruct.length; dd++) { dnames.push(p.destruct[dd].dn); dprops.push(p.destruct[dd].dprop) }
+                destructs.push({slot: slot, names: dnames, props: dprops})
             }
         }
         var body = items.slice(start)
         var bodyStmt = function(b) {
             for (var di = 0; di < destructs.length; di++) {
                 b = emitComponents(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, destructs[di].slot)]),
-                                   destructs[di].names)
+                                   destructs[di].names, destructs[di].props)
             }
             var v = hUndef
             for (var k = 0; k < body.length; k++) {
@@ -2247,22 +2352,51 @@ KwContract  = "contract" KwEnd ;
                                  llvm.ir.NewIncoming(hUndef, elseB)])
         return {b: mergeB, v: phi}
     }
-    function emitComponents(b, srcV, names) {
+    // The entries of one destructuring pattern. `props[k]` is "" for a POSITION based
+    // entry - that one reads componentN, exactly as before - and the property name for a
+    // NAME based entry, which reads that property off the value instead. A name of `_`
+    // discards its entry and its componentN() is not called, as in Kotlin.
+    function emitComponents(b, srcV, names, props) {
         for (var k = 0; k < names.length; k++) {
             if (names[k] == "_") { continue }
+            if (props[k] != "") {
+                var pv = callExt(b, "js_get", [srcV, emitStr(b, props[k])])
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[k]), pv])
+                continue
+            }
             var r = emitComponent(b, srcV, k)
             b = r.b
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[k]), r.v])
         }
         return b
     }
+    // One destructuring entry, built from what its rule pushed: an optional val/var
+    // marker, the bound NAME and an optional `= property`. Parenthesized patterns are
+    // name based as soon as an entry declares itself (val/var) or renames (= prop);
+    // a bracketed pattern and the classic `val (a, b)` stay position based.
+    function makeDEntry(items, named) {
+        var nm = ""
+        var pr = ""
+        var kw = false
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.dk == "kw") { kw = true }
+            else if (it.dk == "name") { nm = it.ds }
+            else { pr = it.ds }
+        }
+        if (!named) { return {dn: nm, dprop: ""} }
+        if (pr != "") { return {dn: nm, dprop: pr} }
+        if (kw) { return {dn: nm, dprop: nm} }
+        return {dn: nm, dprop: ""}
+    }
     function makeDestructure(items, pos) {
         var names = []
-        for (var i = 0; i < items.length - 1; i++) { names.push(items[i].dn) }
+        var props = []
+        for (var i = 0; i < items.length - 1; i++) { names.push(items[i].dn); props.push(items[i].dprop) }
         var init = items[items.length - 1]
         return function(b) {
             var r = init(b)
-            return emitComponents(r.b, r.v, names)
+            return emitComponents(r.b, r.v, names, props)
         }
     }
     // An anonymous function expression: the same lowering as a named local function
@@ -2870,7 +3004,8 @@ KwContract  = "contract" KwEnd ;
     // iterates zero times, exactly as in the interpreter.
     function makeForDestruct(items, pos) {
         var names = []
-        for (var n0 = 0; n0 < items[0].dnames.length; n0++) { names.push(items[0].dnames[n0].dn) }
+        var props = []
+        for (var n0 = 0; n0 < items[0].dnames.length; n0++) { names.push(items[0].dnames[n0].dn); props.push(items[0].dnames[n0].dprop) }
         var collT = items[1]
         var bodyT = items[2]
         return function(b) {
@@ -2897,7 +3032,7 @@ KwContract  = "contract" KwEnd ;
             // from the element's componentN() calls.
             var iVb = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
             var aVb = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
-            bodyB = emitComponents(bodyB, callExt(bodyB, "js_get", [aVb, iVb]), names)
+            bodyB = emitComponents(bodyB, callExt(bodyB, "js_get", [aVb, iVb]), names, props)
             loopStack.push({cont: postB, brk: exitB, label: lbl})
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()

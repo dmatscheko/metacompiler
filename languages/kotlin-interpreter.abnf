@@ -84,8 +84,24 @@ The entry point is fun main(); self checking programs end with exitProcess(failu
 // quoted form is accepted everywhere a name may appear.
 KId         = IdBacktick | Id ;
 
+// Whitespace and comments. These are spelled out here instead of including
+// lib/cstyle-comments.abnf because Kotlin's whitespace set is not C's: the form feed
+// (0x0c) is whitespace in Kotlin, and the lexer's own test data proves it (testData/
+// lexer/kotlin/whitespaceCharacters/pageBreak lexes it into WHITE_SPACE). The same
+// test data also proves which characters are NOT whitespace, so they stay out: the
+// vertical tab (0x0b), the next line (0x85) and the line/paragraph separators
+// (0x2028/0x2029) all lex to BAD_CHARACTER, i.e. Kotlin rejects those files. The lib
+// file is shared with ~15 other grammars, where a form feed is equally harmless but
+// the rest would be wrong, so the divergence lives here rather than there.
+Whitespace  = { @+" \t\r\n\x0c" | Comment } ;
+Comment     = LineComment | BlockComment ;
+LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
+NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
+
 // Shared token productions (languages/lib).
-:include("lib/cstyle-comments.abnf") ;
 :include("lib/ident.abnf") ;
 :include("lib/numbers.abnf") ;
 :include("lib/bools.abnf") ;
@@ -99,14 +115,20 @@ KId         = IdBacktick | Id ;
 Program     = { Annotation } [ Package ] { Import } { TopDecl } ;
 // One top-level declaration. Factored out of Program so a `package name { ... }` block
 // (the pre-1.0 package syntax that the PSI corpus still carries) can hold the same set.
-TopDecl     = [ Modifiers ] ( Package | Import | Interface | ObjectDecl | EnumClass | AnnotationClass | TypeAlias | ClassDecl | FunDecl <~~ registerFun(pop()) ~~> | ExtFun | ExtProp | UnsupFun | PropAccessor | TopProp | TopBareProp ) ;
+TopDecl     = [ Modifiers ] ( Package | Import | Interface | ObjectDecl | EnumClass | AnnotationClass | TypeAlias | ClassDecl | FunDecl <~~ registerFun(pop()) ~~> | ExtFun | ExtProp | UnsupFun | PropAccessor | TopVisProp | TopProp | TopBareProp ) ;
 
 // Modifiers/annotations before a declaration are parsed and ignored. Annotations
 // accept ALL forms: an argument list @Suppress("Unused"), qualified names @a.b.C,
 // use-site targets @field:A / @get:A / @file:A, and annotation arrays @[A B C(x)].
 // Body-shaping modifiers (enum/annotation/companion) are not consumed - those
 // declaration forms route to notImplemented instead.
-Modifiers   = { Modifier | Annotation | ContextClause } ;
+Modifiers   = { Modifier | CompanionMod | Annotation | ContextClause } ;
+// `companion fun String.f() {}` / `companion val Foo.p get() = 1` (the CompanionBlocks
+// / CompanionExtensions proposal the PSI corpus carries): `companion` acts as a plain
+// declaration modifier there. It is NOT noted like the other modifiers - nothing reads
+// it - and the NotObjectKw guard keeps it away from `companion object`, which is a
+// declaration FORM with its own production rather than a modified one.
+CompanionMod = "companion" KwEnd NotColon NotBrace NotObjectKw ;
 // A context-receiver / context-parameter list, `context(Logger, Tx) fun f() { ... }`.
 // Parsed and dropped like any other declaration modifier. The `(` is required, so an
 // ordinary identifier named `context` is never mistaken for the keyword.
@@ -157,11 +179,19 @@ QualName    <~~ push(stripWs(up.in)) ~~> = KId { "." KId } [ "." "*" ] ;
 // A top level val/var: its declaration thunk runs right away (into the global scope).
 TopProp     <~~ var t = pop(); t() ~~>
             = DelegateDecl | Decl ;
+// The same, but with a visibility-only accessor after it - `var x = 0` / `private set`
+// at file scope. PropAccessor above covers the forms with a BODY accessor; this one
+// requires at least one PropVis, so a plain `val x = 1` still reaches TopProp. PropVis
+// carries no tag, so the declaration it builds is exactly the one Decl would build.
+TopVisProp  <~~ var t = pop(); t() ~~>
+            = VisDecl ;
+VisDecl     <~~ push(makeDecl(takeAll())) ~~>
+            = ( "val" | "var" ) KwEnd { Annotation } KId <~~ push(up.in) ~~> [ ":" DeclType ] "=" Expression PropVis { Accessor | PropVis } [ ";" ] ;
 
 // The generic parameter names are remembered while the body walks, so an `x is T`
 // inside can be resolved against the call site's type arguments (reified).
 FunDecl     <~~ push(makeFun(takeAll())); retLblPop() ~~>
-            = KwFun <~~ tpBegin() ~~> { TypeAnno } [ TypeParams ] { TypeAnno } KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] FunBody ;
+            = KwFun <~~ tpBegin() ~~> { TypeAnno } [ TypeParams ] { TypeAnno } KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
 // An experimental `contract [ ... ]` clause on a function or an accessor. It states
 // what the function guarantees about its arguments; nothing in it affects execution,
 // so the bracketed body is skipped whole.
@@ -181,7 +211,7 @@ ExprBody    <~~ push(makeExprBody(pop())) ~~>
 // dispatch is by NAME, so an extension must not reuse a builtin or class method name
 // (those always win; see extResolves). The tag-less RecvSeg pushes nothing.
 ExtFun      <~~ registerExtFun(takeAll()); retLblPop() ~~>
-            = KwFun { TypeAnno } [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] FunBody ;
+            = KwFun { TypeAnno } [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
 RecvSeg     = KId [ SkipAngle ] [ "?" ] "." | "(" Type ")" [ "?" ] "." ;
 
 // A function declaration outside the executable subset: a BODILESS extension or
@@ -256,9 +286,9 @@ Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | Nest
 // members of both. Being a member, it is only in scope where an instance of the
 // declaring class is the enclosing receiver, which is exactly how mcall resolves it.
 MemberExtFun <~~ push({memberExt: takeAll()}); retLblPop() ~~>
-            = KwFun { TypeAnno } [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] FunBody ;
+            = KwFun { TypeAnno } [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
 MemberExtProp <~~ push({memberExtProp: takeAll()}) ~~>
-            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in) ~~> [ ":" Type ] Accessor { Accessor | PropVis } ;
+            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in) ~~> [ ":" Type ] [ WhereClause ] Accessor { Accessor | PropVis } ;
 // A nested type declaration. GENUINE: the nested class/interface/object is built and
 // attached to the enclosing descriptor under its own name, so Outer.Nested() and
 // Outer.Companion-style qualified access work. An `inner` class additionally captures
@@ -277,7 +307,7 @@ MemberSkip  <~~ takeAll(); takeMods(); notImpl("class member", up.pos) ~~>
 MemberTypeAlias <~~ takeAll() ~~>
             = TypeAlias ;
 AbstractFun <~~ takeAll() ~~>
-            = KwFun { TypeAnno } [ SkipAngle ] { TypeAnno } KId [ SkipAngle ] SkipParen [ ":" Type ] [ WhereClause ] [ ContractClause ] [ ";" ] ;
+            = KwFun { TypeAnno } [ SkipAngle ] { TypeAnno } KId [ SkipAngle ] SkipParen [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] [ ";" ] ;
 // A property member. The initializer is optional: a bodiless property (abstract
 // val/var, lateinit var, an interface property) has no `= init` and gets a null field,
 // so an implicit `name = ...` in a method still resolves to this.name.
@@ -299,7 +329,7 @@ Accessor    = [ Modifiers ] ( Getter | Setter ) [ ";" ] ;
 Getter      <~~ push({getter: pop()}) ~~>
             = KwGet [ "(" ")" ] [ ":" Type ] [ ContractClause ] FunBody ;
 Setter      <~~ var b = pop(); push({setter: b, sparam: pop()}) ~~>
-            = KwSet [ "(" [ KId <~~ push(up.in) ~~> [ ":" Type ] ] [ "," ] ")" ] [ ":" Type ] FunBody ;
+            = KwSet [ "(" [ KId <~~ push(up.in) ~~> [ ":" Type ] ] [ "," ] ")" ] [ ":" Type ] [ ContractClause ] FunBody ;
 // A delegated property (val/var x [: T] by <delegate>). The `by lazy { init }` form
 // is GENUINE (see LazyProp): the initializer is run once and its value becomes a
 // plain field, so reads use the ordinary member machinery. Every OTHER delegate -
@@ -340,8 +370,13 @@ LazyInit    <~~ push({pinit: makeLazyInit(pop())}) ~~>
 // accepted and dropped - KwEnd stops it from eating a `suspend`-prefixed type name.
 // A parenthesized type may equally carry a receiver function tail - (@A C).() -> C,
 // (suspend () -> Unit).() -> Unit - and any type may be an INTERSECTION, T & Any.
-Type        = { TypeAnno } [ ContextClause ] [ "suspend" KwEnd ] { TypeAnno } ( "(" [ FnTypeParam ] { "," [ FnTypeParam ] } ")" [ "->" Type | RecvFnTail ]
-            | KId [ SkipAngle ] { "." KId [ SkipAngle ] } [ RecvFnTail ] ) [ "?" NotColon ] [ "&" Type ] ;
+// The receiver of a receiver function type may itself be NULLABLE - RS?.(P) -> Unit,
+// (@A C)?.() -> C - so the `?` is offered before the tail as well as after the whole
+// type; NullRecvFnTail is tried first because the plain tail would leave the `?`
+// stranded and the trailing `[ "?" NotColon ]` only covers a type that ENDS there.
+Type        = { TypeAnno } [ ContextClause ] [ "suspend" KwEnd ] { TypeAnno } ( "(" [ FnTypeParam ] { "," [ FnTypeParam ] } ")" [ "->" Type | NullRecvFnTail | RecvFnTail ]
+            | KId [ SkipAngle ] { "." KId [ SkipAngle ] } [ NullRecvFnTail | RecvFnTail ] ) [ "?" NotColon ] [ "&" Type ] ;
+NullRecvFnTail = "?" RecvFnTail ;
 // A function-type parameter: an optional name (Kotlin allows named function-type
 // parameters, onRun: (root: Boolean) -> Unit) then the type. Also serves the
 // grouped-type case (a bare type with no name, in parentheses without a following ->).
@@ -353,7 +388,19 @@ RecvFnTail  = "." "(" [ FnTypeParam ] { "," [ FnTypeParam ] } ")" "->" Type ;
 // A type annotation: an argument list is consumed only when a `->` does NOT follow,
 // so `@Composable () -> Unit` leaves the `()` for the function type (NotArrow rolls
 // the parens back), while `@Tag("x") Foo` keeps them as the annotation's arguments.
-TypeAnno    = "@" [ AnnTarget ":" ] ( AnnSet | KId { "." KId } [ SkipParen NotArrow ] ) ;
+// The NoSpaceParen guard settles the other ambiguity, `@Foo (X)`: in TYPE position a
+// parenthesis is the annotation's argument list only when it touches the name. Kotlin
+// reads `@Bar(10) T` as an annotation with arguments but `@Foo (() -> Unit)` as a
+// bare annotation on a PARENTHESIZED type - its own PSI dump for the second form has
+// a CONSTRUCTOR_CALLEE with no VALUE_ARGUMENT_LIST and leaves the LPAR to the type.
+TypeAnno    = "@" [ AnnTarget ":" ] ( AnnSet | KId { "." KId } [ NoSpaceParen SkipParen NotArrow ] ) ;
+// A zero-width guard that fails unless the very next character is `(` - i.e. unless
+// the parenthesis touches what came before it, with no whitespace in between.
+NoSpaceParen = :script(~~
+    (function() {
+        return (c.peek(0) === 40) ? undefined : abnf.newToken("\x01space-before-paren", 0)
+    })()
+~~) ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 // A statement may carry a label (loop@ ...); the label is parsed and ignored, so the
@@ -379,7 +426,7 @@ LocalFun    <~~ push(makeLocalFunStmt(pop())) ~~>
 // same dispatch-by-name registration a top-level extension gets, performed when the
 // declaration statement runs.
 LocalExtFun <~~ push(makeLocalExtFun(takeAll())); retLblPop() ~~>
-            = KwFun { TypeAnno } [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] FunBody ;
+            = KwFun { TypeAnno } [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
 
 // try/catch/finally and throw are implemented (excThrow/excTryTyped, languages/lib):
 // throw raises the value, catch binds it (the first clause whose declared type accepts
@@ -555,7 +602,7 @@ InOp        = "!" KwIn <~~ push({inop: "!in"}) ~~> | KwIn <~~ push({inop: "in"})
 // not implemented. The suffix is optional, so plain expressions are unaffected.
 // `as` / `is` bind TIGHTER than the elvis operator (Kotlin's precedence), so the
 // type-op level sits below Elvis: `num as? Int ?: 0` is `(num as? Int) ?: 0`.
-TypeOp      <~~ push(applyTypeOp(takeAll())) ~~> = InfixExpr [ IsSfx | AsSfx ] ;
+TypeOp      <~~ push(applyTypeOp(takeAll())) ~~> = InfixExpr { IsSfx | AsSfx } ;
 // A postfix `is T` needs two guards, both defending the `when`-arm boundary where a
 // bare `is T` leads the NEXT arm. SameLine: the `is` must sit on the operand's line, so
 // an arm value never reaches across the newline to swallow the next arm's leading
@@ -625,6 +672,26 @@ NotColon    = :script(~~
         var cc = c.peek(i)
         while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i++; cc = c.peek(i) }
         return (cc === 58) ? abnf.newToken("\x01colon-follows", 0) : undefined
+    })()
+~~) ;
+
+// A zero-width guard that fails when the next non-whitespace token is the keyword
+// `object` - it keeps the `companion` MODIFIER (companion fun / companion val) from
+// consuming the `companion` of a `companion object` declaration.
+NotObjectKw = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i++; cc = c.peek(i) }
+        var w = "object"
+        var k = 0
+        while (k < 6) {
+            if (c.peek(i + k) !== w.charCodeAt(k)) { return undefined }
+            k++
+        }
+        var n = c.peek(i + 6)
+        var isWord = (n >= 48 && n <= 57) || (n >= 65 && n <= 90) || (n >= 97 && n <= 122) || n === 95
+        return isWord ? undefined : abnf.newToken("\x01object-follows", 0)
     })()
 ~~) ;
 
@@ -887,7 +954,11 @@ TplChunk    <~~ push({s: unescapeJs(up.in)}) ~~>
             = TplChar { TplChar } ;
 TplChar     = TplEsc | TplPlain ;
 TplEsc      = "\\" "\x20"..b"\x7e" ;
-TplPlain    = "\x20"..."\x21" | "\x23"..."\x23" | "\x25"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+// The tab, the vertical tab and the form feed are the control characters a Kotlin
+// string may carry literally (the lexer's whitespaceCharacters test data lexes all
+// three into REGULAR_STRING_PART); a bare newline or carriage return is not - it ends
+// the literal, which is why they stay out of the set.
+TplPlain    = "\x20"..."\x21" | "\x23"..."\x23" | "\x25"..."\x5b" | "\x5d"..."\x7e" | @"\t\x0b\x0c" | "\x7f"..."\U0010ffff" ;
 
 // A collection literal, [1, 2]. Kotlin allows it only as an annotation argument (the
 // spelling of an array constant); it is lowered to a list, which is how this subset
@@ -918,7 +989,10 @@ SkipChChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 
 // A balanced < ... > run (generic parameters / arguments), parsed and ignored.
-SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
+// A `->` inside the run is matched as ONE token before the item alternative gets to
+// see its `-`, so a function type among the arguments - HashMap<String, () -> Unit>,
+// <T3 : (Int) -> Int> - does not have its arrow's `>` mistaken for the closing angle.
+SkipAngle   = "<" { SkipAngle | "->" | SkipAngleItem } ">" ;
 SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
 
 // A balanced ( ... ) run (used to skip an anonymous function's parameter list, which
@@ -973,7 +1047,7 @@ CharLit     <~~ push(makeConst(kChar(kCharCode(up.in)))) ~~>
             = "'" :whitespace() CharBody "'" :whitespace(Whitespace) ;
 CharBody    = "\\" ( "u" NumHexDig NumHexDig NumHexDig NumHexDig | CharEsc ) | CharPlain ;
 CharEsc     = "n" | "t" | "r" | "b" | "'" | '"' | "\\" | "$" | "0" ;
-CharPlain   = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+CharPlain   = "\x09" | "\x0b"..."\x0c" | "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 
 // A triple-quoted raw string: content up to the closing """ (internal runs of one
 // or two quotes are allowed), kept verbatim - no escape processing - with genuine
@@ -1046,12 +1120,30 @@ InterfaceSkip <~~ takeAll(); takeMods(); notImpl("interface", up.pos); push({nna
 // object Name [: Supertypes] { ... } is a real singleton: the member body is built
 // once (properties initialized, methods reachable through the name) and bound to the
 // name. The body is optional - `object Zero14 : Expr14` is a bare singleton.
-ObjectDecl  = ObjectReal | ObjectSkip ;
+// ObjectExotic comes FIRST because ObjectReal would otherwise succeed on the bare
+// `object Foo` prefix of `object Foo<T, R>(x: Int)` and strand the rest: an ordered
+// choice never re-enters an alternative that already matched, so the wider shape has
+// to be offered before the narrow one rather than after it.
+ObjectDecl  = ObjectExotic | ObjectReal | ObjectSkip ;
 ObjectReal  <~~ buildObject(takeAll()) ~~>
             = KwObject <~~ push({mods: takeMods()}) ~~> KId <~~ push(up.in); curClassPush(up.in) ~~>
               [ ":" SuperList ] [ "{" { Member } "}" ] ;
+// An object header carrying type parameters and/or a constructor - shapes Kotlin's
+// PARSER builds (and its recovery corpus records without an error element) even though
+// the language forbids them on an object. At least one of the two must be present, so
+// an ordinary `object Foo` still reaches ObjectReal.
+ObjectExotic <~~ takeAll(); takeMods(); notImpl("object declaration", up.pos); push({nname: "", nval: null, inner: false}) ~~>
+            = KwObject KId ( SkipAngle [ { Annotation | Modifier } SkipParen ]
+                           | { Annotation | Modifier } SkipParen )
+              [ ":" SuperList ] [ WhereClause ] [ SkipBlock ] ;
+// The skip form is deliberately as wide as Kotlin's PARSER, not as narrow as its rules:
+// an object may not have type parameters, a constructor or a where clause, but the
+// parser still BUILDS that tree and reports the violation later (the PSI recovery
+// corpus records `object Foo<T, R> private (x: Int) : Bar` with no error element in
+// it). Accepting the shape here is what lets such a file parse and be reported as not
+// implemented rather than failing at the first `<`.
 ObjectSkip  <~~ takeAll(); takeMods(); notImpl("object declaration", up.pos); push({nname: "", nval: null, inner: false}) ~~>
-            = KwObject KId [ ":" SuperList ] [ SkipBlock ] ;
+            = KwObject KId [ SkipAngle ] [ { Annotation | Modifier } SkipParen ] [ ":" SuperList ] [ WhereClause ] [ SkipBlock ] ;
 // enum class Dir(val dx: Int) { N(0), E(1); fun ... }: GENUINE. Each entry is a
 // singleton instance of the enum class, constructed in declaration order with its
 // argument list, carrying the synthetic `name` and `ordinal` properties and reachable
@@ -1121,7 +1213,7 @@ CtorDelegate <~~ push({delegArgs: takeAll()}) ~~>
 // this also keeps an extension DELEGATED property (val Int.x: T by store()) out - it
 // falls through to the delegated-property forms instead of being half-consumed here.
 ExtProp     <~~ registerExtProp(takeAll()) ~~>
-            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in) ~~> [ ":" Type ] Accessor { Accessor | PropVis } ;
+            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in) ~~> [ ":" Type ] [ WhereClause ] Accessor { Accessor | PropVis } ;
 // A top-level COMPUTED property (val x: T get() = ...) with no receiver: the same
 // machinery as a class property, bound as a global whose reads run the getter.
 PropAccessor <~~ registerTopProp(takeAll()) ~~>
@@ -1142,10 +1234,14 @@ DestructAssign <~~ push(makeDestructure(takeAll())) ~~>
 // expect declaration, or a header split across files). It still binds its name, to
 // null, so later references resolve; an extension receiver is dropped as everywhere.
 TopBareProp <~~ registerBareProp(takeAll()) ~~>
-            = ( "val" | "var" ) KwEnd [ SkipAngle ] { Annotation } [ RecvSeg { RecvSeg } ] KId <~~ push(up.in) ~~> [ SkipAngle ] [ ":" Type ] [ ";" ] ;
+            = ( "val" | "var" ) KwEnd [ SkipAngle ] { Annotation } [ RecvSeg { RecvSeg } ] KId <~~ push(up.in) ~~> [ SkipAngle ] [ ":" Type ] [ "=" DiscardExpr ] [ ";" ] ;
 
 KwLazy      = "lazy" KwEnd ;
-KwInterface = "interface" KwEnd ;
+// `fun interface Runnable { ... }` - a SAM interface. The `fun` only marks the
+// single-abstract-method constraint, which nothing here checks, so it is accepted and
+// dropped. A `fun` that is NOT followed by `interface` simply fails this rule and the
+// declaration falls through to the function forms.
+KwInterface = [ KwFun ] "interface" KwEnd ;
 KwObject    = "object" KwEnd ;
 KwEnum      = "enum" KwEnd ;
 KwAnnotation = "annotation" KwEnd ;
@@ -1575,15 +1671,25 @@ NotMemberKw = :script(~~
             return v
         }
     }
-    function applyTypeOp(items) {
-        if (items.length == 1) { return items[0] }
-        var operand = items[0]
-        var m = items[1]
+    // One `as T` / `is T` suffix applied to the operand under it. Factored out of
+    // applyTypeOp so the fold below never builds a closure over a loop variable.
+    function typeOpStep(operand, m) {
         if (m.asType) {
             if (!m.safe) { return operand } // x as T: identity (untyped values)
             return function() { var v = operand(); return kIsType(v, m.tname) ? v : null }
         }
         return makeIsCheck(operand, m)
+    }
+    // The suffixes CHAIN - `x as T is U` is a cast whose result is then type-tested -
+    // so they are folded left to right rather than read as a single optional suffix.
+    function applyTypeOp(items) {
+        var operand = items[0]
+        var i = 1
+        while (i < items.length) {
+            operand = typeOpStep(operand, items[i])
+            i = i + 1
+        }
+        return operand
     }
 
     // ----- Scopes with implicit property fallback (Kotlin style) -----

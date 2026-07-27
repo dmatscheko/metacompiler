@@ -1,57 +1,43 @@
 :title("Python (subset) interpreter") ;
-:description("Parses Python 3.12 - with significant indentation - and executes it
-directly, without generating code. The goal is the whole practical language, and
-tests/python-test-full.py is the ratchet that measures it: every section of that
-file parses and passes, under goja and under -frozen alike.
+:description("Parses a Python subset - with significant indentation - and executes it
+directly, without generating code.
 
-Blocks are recognized with real INDENT/DEDENT handling: :script() rules keep an
+The blocks are recognized with real INDENT/DEDENT handling: :script() rules keep an
 indentation stack on the persistent parser stack, a suite is ':' NEWLINE INDENT
-statements DEDENT, and every statement checks that it starts at the level of its
-block. Comments (#) and blank lines are skipped by the newline rule. Indentation
-must use spaces (no tabs).
+statements DEDENT, and every statement checks that it starts at the level of its block.
+Comments (#) and blank lines are skipped by the newline rule. Indentation must use
+spaces (no tabs).
 
-The language: def (positional, keyword, default, *args, **kwargs, positional-only
-and keyword-only parameters), lambda, nested defs and lexical closures (a function
-captures the scope chain live at its definition), decorators including stacked ones,
-factories and arbitrary expressions, classes with inheritance, dunder methods,
-operator overloading, descriptors and the exception hierarchy, generators and
-comprehensions of every kind (list, set, dict and generator expressions), the match
-statement with its full pattern surface, try/except/else/finally, except*, raise,
-with, assert, del, global and nonlocal, augmented and annotated assignment, chained
-comparisons, conditional expressions, walrus, unpacking and starred targets, async
-SYNTAX, type hint syntax (erased), and imports.
+The language: def functions (top level, with positional parameters), if/elif/else,
+while, for x in <list, dict (its keys), string (its chars) or range(a[,b])>,
+break/continue/pass/return, assignment and
++= -= *= /= (assignment creates a variable in the current function if none exists in
+scope - there is no 'global' keyword; use a mutable list like fails = [0] for counters),
+lists with negative indexing, element assignment, .append()/.pop(), dicts with
+insertion order ({'a': 1}, d[k] get/set, in tests keys, len(), .keys()/.values()/
+.get(k[, default]), the counts[w] = counts.get(w, 0) + 1 idiom), the list() builtin (a fresh list from any iterable), slicing of lists
+and strings (s[1:3], s[:2], s[-3:]; no step), list comprehensions
+([x * x for x in xs if x % 2 == 0]; the variable does not leak), len(), in / not in
+membership tests on lists, strings and dicts, f-strings (f'x={a + 1}' renders like
+str()), print() with
+Python style rendering (True/None/[1, 2]/{'a': 1}), True/False/None, and/or/not with
+Python
+truthiness (empty lists and dicts are falsy) and operand values, comparisons (no
+chaining),
++ - * % with float semantics, / as true division (7/2 == 3.5), // as floor division
+(-7//2 == -4), % as floor modulo (-7%2 == 1), unary -, int and float literals, and
+single or double quoted strings with escapes.
 
-Values: int, float, complex (a boxed real/imag pair) and arbitrary precision
-integers (a boxed sign and decimal limb array, entered only when a literal or a
-result leaves the exact range of a double, and left again as soon as one fits),
-bool, None, Ellipsis, str, bytes, list, tuple (modelled as a list), dict and set.
-Numeric literals cover the 0x / 0o / 0b prefixes, underscore separators, leading
-and trailing dot floats, exponents and the imaginary j suffix. String literals
-cover every prefix (r, b, u and the rf/br orders), all four quote styles, adjacent
-piece concatenation and the full 3.12 f-string surface: nesting, conversions,
-format specs with nested fields, and the = debug form.
+Lambdas, nested defs and lexical closures are supported (a function captures the
+scope chain live at its definition, like compiled closures capture their env).
 
-Scoping is Python's, not a chain search: a plain assignment inside a function or a
-class body binds a LOCAL even when the module already has that name, and global /
-nonlocal are the only way out (see pySet).
+Not in the subset: classes, tuples,
+comparison chaining, slice assignment and slice steps, dict comprehensions,
+for-else, imports, and
+list/dict equality by value (== compares them by identity).
 
-Known deviations, all deliberate:
-  - Generators run by REPLAY. There are no coroutines in the value model, so every
-    step re-runs the body from the top, feeds the yields that already happened the
-    values they were sent, and stops at the next one. A pure generator behaves
-    exactly right; one with side effects repeats them. Same model as
-    languages/js-interpreter.abnf.
-  - A tuple is a list, so it is mutable and compares equal to a list.
-  - A complex whose imaginary part is zero is an ordinary number, and int / float
-    are one numeric type, so type() cannot tell 1 from 1.0 or from 1+0j.
-  - An imported module binds its names flat, without a module object, so the
-    from-import style is the one that works.
-  - async functions are defined and inspected, never awaited: there is no event
-    loop.
-
-There is no main() requirement: the file runs top to bottom, and a main() is called
-afterwards when one is defined. Self checking programs end with exit(fails[0]) or
-return the failure count from main().") ;
+There is no main(): the file simply runs top to bottom. Self checking programs end
+with exit(fails[0]).") ;
 
 
 // --- main rules
@@ -146,9 +132,9 @@ DottedRef   <~~ push(makeVarRef(stripWs(up.in))) ~~>
 DottedRef2  <~~ push(makeDotted(stripWs(up.in))) ~~>
             = Id "." Id { "." Id } ;
 LitPattern  <~~ push(makeValuePattern(pop())) ~~>
-            = ( StringLit | NegNumLit | PyNumLit | True | False | None ) ;
+            = ( StringLit | NegNumLit | DecLit | True | False | None ) ;
 NegNumLit   <~~ push(makeNeg(pop())) ~~>
-            = "-" PyNumLit ;
+            = "-" DecLit ;
 StarPattern <~~ push({pstar: up.in}) ~~>
             = "*" Id ;
 WildPattern <~~ push({wild: true}) ~~>
@@ -506,10 +492,7 @@ SliceStep   <~~ push({sstep: pop()}) ~~> = Expression ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" :whitespace(WhitespaceNL) ExprList "]" :whitespace(Whitespace) ;
 
-// StringLit comes BEFORE FString: a StringLit is a run of adjacent pieces and an
-// f-string is one of them, so trying FString first would match only the first piece
-// and leave `f"a{1}" "b"` half-parsed (PEG has no backtracking into a taken match).
-Primary     = EmptyTuple | GenExpParen | Grouped | StringLit | Ellipsis | PyNumLit | True | False | None
+Primary     = EmptyTuple | GenExpParen | Grouped | FString | StringLit | Ellipsis | DecLit | True | False | None
             | ListComp | ListLit | DictComp | DictLit | SetComp | SetLit | VarRef ;
 
 // ( ) empty tuple and ( a, b, ... ) / ( a, ) tuples are accepted and reported as
@@ -583,12 +566,7 @@ FSq         = "'" :whitespace() { FExpr | FChunkS } "'" :whitespace(Whitespace) 
 // the SOURCE TEXT of the expression, whitespace included (f"{x = }" -> "x = 5").
 FExpr       <~~ push(makeFField(takeAll(), up.in)) ~~>
             = "{" :whitespace(Whitespace) Expression [ FDebug ] [ FConv ] [ FSpec ] "}" :whitespace() ;
-// The `=` debug form. Skipped whitespace never reaches up.in, so the spaces around
-// the `=` are matched as ORDINARY TOKENS (whitespace skipping off for this
-// production only) - that is what makes f"{x = }" echo "x = 5" and not "x=5".
-FDebug      <~~ push({fdebug: true}) ~~>
-            = :whitespace() FDbgSp "=" NotEqSign FDbgSp ;
-FDbgSp      = [ @+" \t" ] ;
+FDebug      <~~ push({fdebug: true}) ~~> = "=" NotEqSign ;
 FConv       = "!" ( "r" | "s" | "a" ) <~~ push({fconv: up.in}) ~~> ;
 FSpec       <~~ push({fspec: takeAll()}) ~~>
             = ":" :whitespace() { FSpecField | FSpecChunk } ;
@@ -657,52 +635,6 @@ False       <~~ push(makeConst(false)) ~~>     = "False" KwEnd ;
 None        <~~ push(makeConst(undefined)) ~~> = "None" KwEnd ;
 // The Ellipsis literal. It is a singleton object, so `x is ...` compares by identity.
 Ellipsis    <~~ push(makeConst(pyEllipsis)) ~~> = "..." ;
-
-// ----- Numeric literals -----
-// The full Python 3.12 set, most specific first (PEG ordered choice): the 0x / 0o /
-// 0b prefixed integers, then an imaginary literal (its `j` suffix follows the same
-// magnitude as a real one), then reals. `_` separators are allowed between digits -
-// and, as CPython also accepts, right after the base prefix - and are stripped
-// before the value is read. A real is an integer, or a float with a fraction
-// (leading digits optional: `.5`; trailing digits optional: `5.`), or an exponent
-// form. Whitespace skipping is off from the second character on, so `0 x1`, `1 . 5`
-// and `1 j` are not literals. An integer too large for a double becomes a boxed
-// arbitrary precision integer (see bigFromDec); everything else is a plain number.
-PyNumLit    = PyHexLit | PyBinLit | PyOctLit | PyImagLit | PyRealLit ;
-PyHexLit    <~~ push(makeConst(parseInt(pyDigits(up.in).substring(2), 16))) ~~>
-            = "0" :whitespace() PyXCh PyUndRun PyHexDig PyHexRest :whitespace(Whitespace) ;
-PyBinLit    <~~ push(makeConst(parseInt(pyDigits(up.in).substring(2), 2))) ~~>
-            = "0" :whitespace() PyBCh PyUndRun PyBinDig PyBinRest :whitespace(Whitespace) ;
-PyOctLit    <~~ push(makeConst(parseInt(pyDigits(up.in).substring(2), 8))) ~~>
-            = "0" :whitespace() PyOCh PyUndRun PyOctDig PyOctRest :whitespace(Whitespace) ;
-PyImagLit   <~~ push(makeConst(pyImag(pyDigits(up.in)))) ~~>
-            = PyDig :whitespace() PyDigRest PyMagOpt PyJCh :whitespace(Whitespace)
-            | "." :whitespace() PyDig PyDigRest PyExpOpt PyJCh :whitespace(Whitespace) ;
-PyRealLit   <~~ push(makeConst(pyReal(pyDigits(up.in)))) ~~>
-            = PyDig :whitespace() PyDigRest PyMagOpt :whitespace(Whitespace)
-            | "." :whitespace() PyDig PyDigRest PyExpOpt :whitespace(Whitespace) ;
-PyXCh       = "x" | "X" ;
-PyBCh       = "b" | "B" ;
-PyOCh       = "o" | "O" ;
-PyJCh       = "j" | "J" ;
-PyECh       = "e" | "E" ;
-PyUndRun    = { "_" } ;
-PyDig       = "0"..."9" ;
-PyHexDig    = "0"..."9" | "a"..."f" | "A"..."F" ;
-PyBinDig    = "0" | "1" ;
-PyOctDig    = "0"..."7" ;
-PyDigRest   = { PyDig | "_" } ;
-PyHexRest   = { PyHexDig | "_" } ;
-PyBinRest   = { PyBinDig | "_" } ;
-PyOctRest   = { PyOctDig | "_" } ;
-// What may follow the leading digits: a fraction (with an optional exponent) or a
-// bare exponent. Absent for a plain integer.
-PyMagOpt    = [ PyMagTail ] ;
-PyMagTail   = PyFrac PyExpOpt | PyExp ;
-PyFrac      = "." PyDigRest ;
-PyExpOpt    = [ PyExp ] ;
-PyExp       = PyECh PySignOpt PyDig PyDigRest ;
-PySignOpt   = [ "+" | "-" ] ;
 
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
@@ -893,9 +825,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // may override it with __eq__.
     function pyEq(a, b) {
         if (a === b) { return true }
-        // A boxed number (complex, arbitrary precision integer) compares by VALUE,
-        // so a big that happens to hold 1 equals the ordinary number 1.
-        if (pyBoxed(a) || pyBoxed(b)) { return boxOp("==", a, b).v }
         if (a !== null && a !== undefined && b !== null && b !== undefined
             && typeof a == "object" && typeof b == "object"
             && a.__genalias === true && b.__genalias === true) {
@@ -936,7 +865,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v === undefined || v === null) return "None"
         if (v === true) return "True"
         if (v === false) return "False"
-        if (pyBoxed(v)) { return isCplx(v) ? cplxStr(v) : bigStr(v) }
         if (Array.isArray(v)) {
             var out = "["
             for (var i = 0; i < v.length; i++) {
@@ -1095,21 +1023,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var f = clsFind(v.__class, "__neg__")
                 if (f != null) { return f(v) }
             }
-            if (pyBoxed(v)) { return boxOp("-", 0, v).v }
             return -v
         }
     }
     makeNot = function(t) { return function() { return !pytruthy(t()) } }
-    // Reading a name that `del` removed is Python's UnboundLocalError/NameError,
-    // and it must be RAISABLE (the program may catch it), so the sentinel check
-    // lives here rather than in the shared getVar.
-    function pyReadName(name) {
-        var v = anytype
-        v = getVar(name)
-        if (v === pyDeleted) { pyRaise(pyMakeExc("NameError", ["name '" + name + "' is not defined"])) }
-        return v
-    }
-    makeVarRef = function(name) { return function() { return pyReadName(name) } }
 
     function fdiv(a, b) { return Math.floor(a / b) }
     function fmod(a, b) {
@@ -1168,305 +1085,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return null
     }
-
-    // ----- Boxed numbers: complex and arbitrary precision integers -----
-    // Python has two numeric kinds a double cannot hold: complex, and integers of
-    // unbounded size. Both are modelled as small OBJECTS - {__cplx, real, imag} and
-    // {__int, sign, limbs} - and every entry point into them is gated on pyBoxed(),
-    // one `typeof v == "object"` test that an ordinary number fails on its first
-    // comparison. Just as important, a boxed result that fits an ordinary number is
-    // UNBOXED again (pyCplx / bigOut), so a box never spreads through a program: the
-    // common path stays plain JS numbers end to end.
-    function pyBoxed(v) {
-        if (v === null || v === undefined || typeof v != "object") { return false }
-        return v.__cplx === true || v.__int === true
-    }
-    // --- complex ---
-    // The fields are named `real` and `imag` on purpose: pyattr already answers an
-    // own property, so (2 + 3j).real needs no special case there.
-    function pyCplx(re, im) {
-        if (im === 0) { return re }
-        return {__cplx: true, real: re, imag: im}
-    }
-    function isCplx(v) { return v !== null && v !== undefined && typeof v == "object" && v.__cplx === true }
-    function cRe(v) { if (isCplx(v)) { return v.real } ; return bigIsBig(v) ? bigToNum(v) : v }
-    function cIm(v) { if (isCplx(v)) { return v.imag } ; return 0 }
-    function cplxOp(op, l, r) {
-        var ar = cRe(l)
-        var ai = cIm(l)
-        var br = cRe(r)
-        var bi = cIm(r)
-        if (op == "+") { return pyCplx(ar + br, ai + bi) }
-        if (op == "-") { return pyCplx(ar - br, ai - bi) }
-        if (op == "*") { return pyCplx(ar * br - ai * bi, ar * bi + ai * br) }
-        if (op == "/") {
-            var d = br * br + bi * bi
-            return pyCplx((ar * br + ai * bi) / d, (ai * br - ar * bi) / d)
-        }
-        if (op == "**") {
-            // Only the small non negative integer powers a program actually writes.
-            var n = br
-            if (bi !== 0 || n < 0 || Math.floor(n) != n) { fail("unsupported complex power") }
-            var acc = anytype
-            acc = 1
-            for (var i = 0; i < n; i++) { acc = cplxOp("*", acc, l) }
-            return acc
-        }
-        if (op == "==") { return ar === br && ai === bi }
-        if (op == "!=") { return !(ar === br && ai === bi) }
-        if (op == "is") { return l === r }
-        if (op == "is not") { return l !== r }
-        fail("unsupported operand type for " + op + ": complex")
-    }
-    function cplxStr(v) {
-        var mag = (v.imag < 0) ? -v.imag : v.imag
-        var im = (v.imag < 0 ? "-" : "") + pstr(mag) + "j"
-        if (v.real === 0) { return im }
-        return "(" + pstr(v.real) + (v.imag < 0 ? "" : "+") + im + ")"
-    }
-    // --- arbitrary precision integers ---
-    // Sign and magnitude, the magnitude a little endian array of base 1e7 DECIMAL
-    // limbs: a limb product stays below 1e14, well inside the exact range of a
-    // double, and printing is a plain zero padded join. 9007199254740992 is 2^53,
-    // the largest integer a double still counts exactly.
-    var bigBase = 10000000
-    var bigMaxNum = 9007199254740992
-    function bigIsBig(v) { return v !== null && v !== undefined && typeof v == "object" && v.__int === true }
-    // magTrim drops the leading zero limbs into a FRESH array (frozen MetaJS has no
-    // splice and no assignable .length).
-    function magTrim(a) {
-        var n = a.length
-        while (n > 0 && a[n - 1] === 0) { n = n - 1 }
-        var out = []
-        for (var i = 0; i < n; i++) { out.push(a[i]) }
-        return out
-    }
-    function bigOb(sign, limbs) {
-        var t = magTrim(limbs)
-        return {__int: true, sign: (t.length == 0) ? 1 : sign, limbs: t}
-    }
-    function bigIsZero(a) { return a.limbs.length == 0 }
-    // The only exit: a value small enough for a double leaves the boxed world.
-    function bigOut(a) {
-        var n = a.limbs.length
-        if (n == 0) { return 0 }
-        if (n <= 3) {
-            var v = 0
-            for (var i = n - 1; i >= 0; i = i - 1) { v = v * bigBase + a.limbs[i] }
-            if (v <= bigMaxNum) { return (a.sign < 0) ? -v : v }
-        }
-        return a
-    }
-    function bigFromNum(x) {
-        var s = 1
-        var v = x
-        if (v < 0) { s = -1 ; v = -v }
-        var ls = []
-        while (v > 0) { ls.push(v % bigBase) ; v = Math.floor(v / bigBase) }
-        return bigOb(s, ls)
-    }
-    // The literal path: a decimal digit string, already stripped of its separators.
-    function bigFromDec(txt) {
-        var s = txt
-        var sign = 1
-        if (s.charAt(0) == "-") { sign = -1 ; s = s.substring(1) }
-        var ls = []
-        var end = s.length
-        while (end > 0) {
-            var st = end - 7
-            if (st < 0) { st = 0 }
-            ls.push(parseInt(s.substring(st, end), 10))
-            end = st
-        }
-        return bigOb(sign, ls)
-    }
-    function bigStr(a) {
-        if (a.limbs.length == 0) { return "0" }
-        var out = ""
-        for (var i = a.limbs.length - 1; i >= 0; i = i - 1) {
-            var p = "" + a.limbs[i]
-            if (i < a.limbs.length - 1) { while (p.length < 7) { p = "0" + p } }
-            out += p
-        }
-        return (a.sign < 0) ? ("-" + out) : out
-    }
-    function bigToNum(v) { return bigIsBig(v) ? parseFloat(bigStr(v)) : v }
-    // bigOf lifts an operand into the boxed world, or answers null when it cannot
-    // (a float, a string, a list) - the caller then falls back to double arithmetic.
-    function bigOf(v) {
-        if (bigIsBig(v)) { return v }
-        if (typeof v == "number" && Math.floor(v) == v && v <= bigMaxNum && v >= -bigMaxNum) { return bigFromNum(v) }
-        if (v === true) { return bigFromNum(1) }
-        if (v === false) { return bigFromNum(0) }
-        return null
-    }
-    function magCmp(a, b) {
-        if (a.length != b.length) { return (a.length > b.length) ? 1 : -1 }
-        for (var i = a.length - 1; i >= 0; i = i - 1) {
-            if (a[i] != b[i]) { return (a[i] > b[i]) ? 1 : -1 }
-        }
-        return 0
-    }
-    function magAdd(a, b) {
-        var out = []
-        var carry = 0
-        var n = (a.length > b.length) ? a.length : b.length
-        for (var i = 0; i < n; i++) {
-            var s = carry + ((i < a.length) ? a[i] : 0) + ((i < b.length) ? b[i] : 0)
-            if (s >= bigBase) { s = s - bigBase ; carry = 1 } else { carry = 0 }
-            out.push(s)
-        }
-        if (carry > 0) { out.push(carry) }
-        return out
-    }
-    // magSub expects a >= b.
-    function magSub(a, b) {
-        var out = []
-        var borrow = 0
-        for (var i = 0; i < a.length; i++) {
-            var s = a[i] - borrow - ((i < b.length) ? b[i] : 0)
-            if (s < 0) { s = s + bigBase ; borrow = 1 } else { borrow = 0 }
-            out.push(s)
-        }
-        return out
-    }
-    function magMul(a, b) {
-        var out = []
-        var i
-        for (i = 0; i < a.length + b.length; i++) { out.push(0) }
-        for (i = 0; i < a.length; i++) {
-            var carry = 0
-            for (var j = 0; j < b.length; j++) {
-                var cur = out[i + j] + a[i] * b[j] + carry
-                out[i + j] = cur % bigBase
-                carry = Math.floor(cur / bigBase)
-            }
-            var k = i + b.length
-            while (carry > 0) {
-                var c2 = out[k] + carry
-                out[k] = c2 % bigBase
-                carry = Math.floor(c2 / bigBase)
-                k = k + 1
-            }
-        }
-        return magTrim(out)
-    }
-    function magMulSmall(a, m) {
-        var out = []
-        var carry = 0
-        for (var i = 0; i < a.length; i++) {
-            var cur = a[i] * m + carry
-            out.push(cur % bigBase)
-            carry = Math.floor(cur / bigBase)
-        }
-        while (carry > 0) { out.push(carry % bigBase) ; carry = Math.floor(carry / bigBase) }
-        return magTrim(out)
-    }
-    // Schoolbook long division, one quotient limb at a time; the limb itself is found
-    // by binary search over 0..base-1, which needs only magMulSmall and magCmp.
-    function magDivMod(a, b) {
-        var q = []
-        var i
-        for (i = 0; i < a.length; i++) { q.push(0) }
-        var rem = []
-        for (i = a.length - 1; i >= 0; i = i - 1) {
-            var nr = [a[i]]
-            for (var t = 0; t < rem.length; t++) { nr.push(rem[t]) }
-            rem = magTrim(nr)
-            var lo = 0
-            var hi = bigBase - 1
-            while (lo < hi) {
-                var mid = Math.floor((lo + hi + 1) / 2)
-                if (magCmp(magMulSmall(b, mid), rem) <= 0) { lo = mid } else { hi = mid - 1 }
-            }
-            q[i] = lo
-            if (lo > 0) { rem = magTrim(magSub(rem, magMulSmall(b, lo))) }
-        }
-        return {q: magTrim(q), r: rem}
-    }
-    function bigAdd(a, b) {
-        if (a.sign == b.sign) { return bigOb(a.sign, magAdd(a.limbs, b.limbs)) }
-        var c = magCmp(a.limbs, b.limbs)
-        if (c == 0) { return bigOb(1, []) }
-        if (c > 0) { return bigOb(a.sign, magSub(a.limbs, b.limbs)) }
-        return bigOb(b.sign, magSub(b.limbs, a.limbs))
-    }
-    function bigNeg(a) { return bigOb(-a.sign, a.limbs) }
-    function bigCmp(a, b) {
-        if (bigIsZero(a) && bigIsZero(b)) { return 0 }
-        if (a.sign != b.sign) { return (a.sign > b.sign) ? 1 : -1 }
-        var c = magCmp(a.limbs, b.limbs)
-        return (a.sign < 0) ? -c : c
-    }
-    // Python floors: the quotient rounds towards minus infinity and the remainder
-    // takes the sign of the DIVISOR, so a truncating division is corrected by one.
-    function bigDivMod(a, b) {
-        if (bigIsZero(b)) { fail("ZeroDivisionError: integer division or modulo by zero") }
-        var dm = magDivMod(a.limbs, b.limbs)
-        var qs = (a.sign == b.sign) ? 1 : -1
-        var q = bigOb(qs, dm.q)
-        var r = bigOb(a.sign, dm.r)
-        if (!bigIsZero(r) && r.sign != b.sign) {
-            q = bigAdd(q, bigOb(-1, [1]))
-            r = bigAdd(r, b)
-        }
-        return {q: q, r: r}
-    }
-    function bigPow(a, n) {
-        var acc = bigOb(1, [1])
-        for (var i = 0; i < n; i++) { acc = bigOb(acc.sign * a.sign, magMul(acc.limbs, a.limbs)) }
-        return acc
-    }
-    // The one dispatch binOp needs. It answers a wrapper so a caller can tell a real
-    // false apart from "not mine", and it never recurses into itself: every fallback
-    // hands binOp plain numbers.
-    function boxOp(op, l, r) {
-        if (isCplx(l) || isCplx(r)) { return {v: cplxOp(op, l, r)} }
-        var a = bigOf(l)
-        var b = bigOf(r)
-        if (a == null || b == null) { return {v: binOp(op, bigToNum(l), bigToNum(r))} }
-        if (op == "+") { return {v: bigOut(bigAdd(a, b))} }
-        if (op == "-") { return {v: bigOut(bigAdd(a, bigNeg(b)))} }
-        if (op == "*") { return {v: bigOut(bigOb(a.sign * b.sign, magMul(a.limbs, b.limbs)))} }
-        if (op == "//") { return {v: bigOut(bigDivMod(a, b).q)} }
-        if (op == "%") { return {v: bigOut(bigDivMod(a, b).r)} }
-        if (op == "/") { return {v: bigToNum(l) / bigToNum(r)} }
-        if (op == "**") {
-            var e = bigToNum(r)
-            if (e < 0 || e > 4096) { return {v: Math.pow(bigToNum(l), e)} }
-            return {v: bigOut(bigPow(a, e))}
-        }
-        var c = bigCmp(a, b)
-        if (op == "==") { return {v: c == 0} }
-        if (op == "!=") { return {v: c != 0} }
-        if (op == "<")  { return {v: c < 0} }
-        if (op == ">")  { return {v: c > 0} }
-        if (op == "<=") { return {v: c <= 0} }
-        if (op == ">=") { return {v: c >= 0} }
-        if (op == "is") { return {v: (l === r) || (bigIsBig(l) && bigIsBig(r) && c == 0)} }
-        if (op == "is not") { return {v: !((l === r) || (bigIsBig(l) && bigIsBig(r) && c == 0))} }
-        return {v: binOp(op, bigToNum(l), bigToNum(r))}
-    }
-    // The literal builders the grammar calls.
-    function pyDigits(txt) { return txt.split("_").join("") }
-    function pyReal(txt) {
-        if (pyIsBigText(txt)) { return bigOut(bigFromDec(txt)) }
-        return parseFloat(txt)
-    }
-    function pyImag(txt) { return pyCplx(0, parseFloat(txt.substring(0, txt.length - 1))) }
-    // An integer literal is boxed only when it cannot be a double exactly: 16 digits
-    // is the first length that can exceed 2^53.
-    function pyIsBigText(txt) {
-        if (txt.length < 16) { return false }
-        for (var i = 0; i < txt.length; i++) {
-            var ch = txt.charAt(i)
-            if (ch < "0" || ch > "9") { return false }
-        }
-        return parseFloat(txt) > bigMaxNum
-    }
-
     binOp = function(op, l, r) {
-        if (pyBoxed(l) || pyBoxed(r)) { return boxOp(op, l, r).v }
         if (pyUser(l) || pyUser(r)) {
             var uo = userOp(op, l, r)
             if (uo != null) return uo.v
@@ -1751,26 +1370,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return body + strRepeat(fill, pad)
     }
     function isAlign(ch) { return ch == "<" || ch == ">" || ch == "^" || ch == "=" }
-    // Fixed-point rendering, spelled out because frozen MetaJS has no Number.toFixed:
-    // scale, round once, then split the integer and the (zero padded) fraction.
-    function pyFixed(v, p) {
-        var neg = v < 0
-        var x = neg ? -v : v
-        var f = 1
-        for (var i = 0; i < p; i++) { f = f * 10 }
-        var t = Math.round(x * f)
-        var ip = Math.floor(t / f)
-        var s = "" + ip
-        if (p > 0) {
-            var fs = "" + (t - ip * f)
-            while (fs.length < p) { fs = "0" + fs }
-            s = s + "." + fs
-        }
-        return (neg && t > 0) ? ("-" + s) : s
-    }
     function pyFormatBody(v, typ, prec, sign, conv) {
         var body = anytype
-        if (typ == "f" || typ == "F") { body = pyFixed(v, prec < 0 ? 6 : prec) }
+        if (typ == "f" || typ == "F") { body = (prec < 0 ? v.toFixed(6) : v.toFixed(prec)) }
         else if (typ == "d") { body = "" + (v | 0) }
         else if (typ == "x") { body = (v | 0).toString(16) }
         else if (typ == "X") { body = (v | 0).toString(16).toUpperCase() }
@@ -1906,7 +1508,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var valT = items[1]
         return function() {
             noteBound(name)
-            pySet(name, {__alias: true, __name__: name, __value__: valT()})
+            setVar(name, {__alias: true, __name__: name, __value__: valT()})
         }
     }
     // The value of a type expression: a subscripted builtin becomes a generic alias,
@@ -2115,7 +1717,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return pyget(o, step.idx())
     }
     function assignRef(ref, v) {
-        if (ref.path.length == 0) { pySet(ref.name, v); return }
+        if (ref.path.length == 0) { setVar(ref.name, v); return }
         var o = anytype // The containers along the path may be of mixed types.
         o = getVar(ref.name)
         for (var i = 0; i < ref.path.length - 1; i++) o = pathStep(o, ref.path[i])
@@ -2157,9 +1759,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         o[idx] = v
     }
     function readRef(ref) {
-        if (ref.path.length == 0) { return pyReadName(ref.name) }
+        if (ref.path.length == 0) return getVar(ref.name)
         var o = anytype // The last step lands on the element itself.
-        o = pyReadName(ref.name)
+        o = getVar(ref.name)
         for (var i = 0; i < ref.path.length; i++) o = pathStep(o, ref.path[i])
         return o
     }
@@ -2220,16 +1822,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function() {
             var v = anytype
             v = valT()
-            pySet(name, v)
+            setVar(name, v)
             return v
         }
     }
     // del: remove the binding, the attribute or the element(s).
-    // Frozen MetaJS has no `delete`, so a removed NAME or ATTRIBUTE is overwritten
-    // with the pyDeleted sentinel instead. Every read path that could hand it back
-    // (makeVarRef below, pyattr) turns it into the NameError / AttributeError that
-    // Python raises there anyway, and a later assignment simply rebinds it.
-    var pyDeleted = {__deleted: true}
     function makeDel(items) {
         return function() {
             for (var i = 0; i < items.length; i++) { delTarget(items[i]) }
@@ -2238,7 +1835,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function delTarget(ref) {
         if (ref.path.length == 0) {
             for (var s2 = scopes.length - 1; s2 >= 0; s2--) {
-                if (hasOwn(scopes[s2], ref.name)) { scopePut(scopes[s2], ref.name, pyDeleted); return }
+                if (hasOwn(scopes[s2], ref.name)) { delete scopes[s2][ref.name]; return }
             }
             fail("NameError: " + ref.name)
         }
@@ -2246,7 +1843,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         o = getVar(ref.name)
         for (var i = 0; i < ref.path.length - 1; i++) { o = pathStep(o, ref.path[i]) }
         var last = ref.path[ref.path.length - 1]
-        if (last.tattr == true) { scopePut(o, last.name, pyDeleted); return }
+        if (last.tattr == true) { delete o[last.name]; return }
         if (last.kind == "slice") {
             var ix = sliceIdx(o.length, last.lo != null ? last.lo() : undefined,
                               last.hi != null ? last.hi() : undefined,
@@ -2712,7 +2309,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // The class body binds into a RECORDING namespace scope: core.setMiss
             // appends every new name to __nskeys, because the value model has no
             // key enumeration (MetaJS has no for..in).
-            var ns = {__nskeys: [], __pyfn: true, __pyd: ""}
+            var ns = {__nskeys: []}
             scopes.push(ns)
             bodyT()
             scopes.pop()
@@ -2727,7 +2324,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
             }
             cls.__annotations__ = ann
-            pySet(name, cls)
+            setVar(name, cls)
             noteBound(name)
         }
     }
@@ -2776,12 +2373,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function pyattr(o, name) {
         if (o === null || o === undefined) { fail("AttributeError: '" + name + "' of None") }
-        // Every Python number carries .real / .imag; a complex answers them from its
-        // own fields further down, an ordinary number is its own real part.
-        if (typeof o == "number") {
-            if (name == "real") { return o }
-            if (name == "imag") { return 0 }
-        }
         if (typeof o == "object" && o.__isclass == true) {
             if (name == "__name__") { return o.__name }
             var cv = clsFind(o, name)
@@ -2798,10 +2389,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             fail("AttributeError: type object '" + o.__name + "' has no attribute '" + name + "'")
         }
-        if (typeof o == "object" && hasOwn(o, name)) {
-            if (o[name] === pyDeleted) { fail("AttributeError: '" + name + "'") }
-            return o[name]
-        }
+        if (typeof o == "object" && hasOwn(o, name)) { return o[name] }
         if (pyUser(o)) {
             if (name == "__dict__") { return instDict(o) }
             if (name == "__class__") { return o.__class }
@@ -2860,7 +2448,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 d = decos[k]()
                 v = pyCall(d, [v], null)
             }
-            pySet(name, v)
+            setVar(name, v)
         }
     }
     // The name a def/class statement just bound: Def and Class record it here as they
@@ -2938,10 +2526,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var binds = {names: [], vals: []}
                 if (patMatch(cases[i].pat, v, binds)) {
                     if (cases[i].guard != null) {
-                        for (var g = 0; g < binds.names.length; g++) { pySet(binds.names[g], binds.vals[g]) }
+                        for (var g = 0; g < binds.names.length; g++) { setVar(binds.names[g], binds.vals[g]) }
                         if (!pytruthy(cases[i].guard())) { continue }
                     }
-                    for (var k = 0; k < binds.names.length; k++) { pySet(binds.names[k], binds.vals[k]) }
+                    for (var k = 0; k < binds.names.length; k++) { setVar(binds.names[k], binds.vals[k]) }
                     return cases[i].body()
                 }
             }
@@ -3165,9 +2753,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // def time, which is where Python's shared-mutable-default behaviour comes from -
     // and the leftovers go to *args and **kwargs.
     function callScopes(defScopes, plist, dflts, args, named) {
-        // __pyfn marks this frame as a FUNCTION boundary and __pyd carries the
-        // global/nonlocal declarations of the body - see pySet.
-        var fscope = {__pyfn: true, __pyd: ""}
+        var fscope = {}
         var slots = plist.slots
         var used = null
         var ai = 0
@@ -3236,7 +2822,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return (r != undefined && r.isRet) ? r.v : undefined
             }
             fnNameSet(fn, name)
-            pySet(name, fn)
+            setVar(name, fn)
         }
     }
 
@@ -3249,7 +2835,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (!hasOwn(globalScope, n) && !hasOwn(hostGlobals, n)) {
                     scopePut(globalScope, n, undefined)
                 }
-                pyDeclare("g", n)
             }
         }
     }
@@ -3263,7 +2848,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (hasOwn(scopes[s], names[i])) { found = true; break }
                 }
                 if (!found) { fail("no binding for nonlocal " + names[i]) }
-                pyDeclare("n", names[i])
             }
         }
     }
@@ -3308,49 +2892,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // An unknown name RAISES NameError (catchable) instead of aborting, so the
     // UnboundLocalError a `del` leaves behind can be caught like in Python. Returning
     // null lets getVar go on to the host builtins.
-    // Python binds by SCOPE, not by search: a plain assignment inside a function
-    // (or a class body) writes a LOCAL, even when an outer scope - typically the
-    // module - already has that name. The shared setVar walks the whole chain and
-    // would hit the outer binding, so every binding site in this grammar goes
-    // through pySet instead: it walks outward only until the innermost function
-    // boundary (the __pyfn frame that callScopes builds), which lets the block
-    // scopes of if/for/while/except stay transparent the way Python needs, and
-    // stops there. `global x` / `nonlocal x` record themselves on that frame as
-    // "g:x;" / "n:x;" and are the only way past it.
-    function pySet(name, value) {
-        if (name == core.blank) { return }
-        var sc = scopes
-        var ho = objHasOwn
-        // `nonlocal x` names a binding in SOME enclosing function, not necessarily
-        // the next one out (makeNonlocal already checked that one exists), so it
-        // lifts every function boundary on the way, not just the first.
-        var lifted = false
-        for (var i = sc.length - 1; i >= 0; i--) {
-            if (ho.call(sc[i], name)) { scopePut(sc[i], name, value); return }
-            if (ho.call(sc[i], "__pyfn")) {
-                if (lifted) { continue }
-                var d = sc[i].__pyd
-                if (d != undefined && d != "") {
-                    if (d.indexOf("g:" + name + ";") >= 0) { scopePut(globalScope, name, value); return }
-                    if (d.indexOf("n:" + name + ";") >= 0) { lifted = true; continue }
-                }
-                break
-            }
-        }
-        core.setMiss(name, value)
-    }
-    // The innermost function (or class body) frame, or null at module level.
-    function pyFnScope() {
-        for (var i = scopes.length - 1; i >= 1; i--) {
-            if (objHasOwn.call(scopes[i], "__pyfn")) { return scopes[i] }
-        }
-        return null
-    }
-    function pyDeclare(kind, name) {
-        var fs = pyFnScope()
-        if (fs != null) { fs.__pyd = fs.__pyd + kind + ":" + name + ";" }
-    }
-
     core.varMiss = function(name) {
         if (hasOwn(hostGlobals, name)) { return null }
         pyRaise(pyMakeExc("NameError", ["name '" + name + "' is not defined"]))

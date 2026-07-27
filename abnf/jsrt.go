@@ -368,6 +368,9 @@ type jsrt struct {
 	pyFuncNames map[interface{}]string
 	pySigs      map[interface{}]*pySig
 	pyEllipsis  *jsObject
+	// pyAliases memoizes the list[int]-style generic aliases, so the same written
+	// alias is the same value every time (see pyGenericAlias).
+	pyAliases map[string]*jsObject
 
 	// curGen is the generator whose body is currently running, so js_yield knows
 	// which one to suspend. Only one goroutine ever runs (the handshake below is
@@ -3711,6 +3714,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return rt.wrapStr(rt.strAt(o, idx))
 			}
+			// list[int] / dict[str, int]: subscripting a TYPE (a class object or a
+			// builtin like list) is a generic alias, not an indexing. One object per
+			// (origin, parameter) pair, so 'list[int] == list[int]' holds.
+			if v, ok := rt.pyGenericAlias(u(a[0]), u(a[1])); ok {
+				return w(v)
+			}
 			rt.fail("indexing a %s", rt.typeOf(u(a[0])))
 			return 0
 		},
@@ -4163,6 +4172,73 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pyisinst": func(a []uint64) uint64 {
 			return boolH(rt.pyIsInstance(u(a[0]), u(a[1])))
 		},
+		// A complex number: (real, imaginary) -> the {__cplx, real, imag} value the
+		// complex arithmetic in js_pybin / js_pyunary and the .real / .imag attribute
+		// reads understand. Only the Python compiler grammar builds this shape.
+		"js_pycomplex": func(a []uint64) uint64 {
+			return w(newPyComplex(rt.toNumber(u(a[0])), rt.toNumber(u(a[1]))))
+		},
+		// x: T in a class or module body records the annotation. __annotations__ is
+		// created in THIS scope on first use (js_scope_decl writes the own scope, so a
+		// class body gets its own dict rather than adding to the module's) and the
+		// annotation is kept as its source text - enough for 'name in __annotations__'
+		// without an evaluated type object.
+		"js_pyannot": func(a []uint64) uint64 { // (scope, name, annotation text)
+			sc := rt.scopeOf(a[0])
+			var keys, vals *jsArray
+			if i := sc.find("__annotations__"); i >= 0 {
+				if k, v, ok := dictParts(sc.vals[i]); ok {
+					keys, vals = k, v
+				}
+			}
+			if keys == nil {
+				keys, vals = &jsArray{}, &jsArray{}
+				sc.put("__annotations__", &jsObject{props: map[string]interface{}{
+					"__dict": true, "keys": keys, "vals": vals,
+				}})
+			}
+			dictAppend(keys, vals, rt.toString(u(a[1])), u(a[2]))
+			return 0
+		},
+		// The type test of an except clause. It is isinstance, PLUS the one thing an
+		// except clause has to answer that isinstance must not: this subset lets a
+		// program raise a value that is no class instance at all (raise "boom"), and
+		// only the ROOT type - Exception / BaseException - catches such a value.
+		"js_pyexcmatch": func(a []uint64) uint64 {
+			v, typ := u(a[0]), u(a[1])
+			if rt.pyIsInstance(v, typ) {
+				return boolH(true)
+			}
+			if _, _, isInst := pyInstance(v); isInst {
+				return boolH(false)
+			}
+			return boolH(pyRootExcType(typ))
+		},
+		// PEP 654 'except* T' dispatch: (ExceptionGroup instance, type, ExceptionGroup
+		// class) -> a FRESH group over the leaves of the first that the type accepts,
+		// or undefined when the value is not a group or nothing in it matches. Only the
+		// Python grammars ever build the {__class, args, exceptions} shape it reads.
+		"js_pyexcsplit": func(a []uint64) uint64 {
+			grp, typ, cls := u(a[0]), u(a[1]), u(a[2])
+			leaves, msg, isGroup := rt.pyExcGroupLeaves(grp)
+			if !isGroup {
+				return jsHUndefined
+			}
+			matched := []interface{}{}
+			for _, e := range leaves {
+				if rt.pyIsInstance(e, typ) {
+					matched = append(matched, e)
+				}
+			}
+			if len(matched) == 0 {
+				return jsHUndefined
+			}
+			sub := newJSObject()
+			sub.set("__class", cls)
+			sub.set("args", &jsArray{elems: []interface{}{msg, &jsArray{elems: matched}}})
+			sub.set("exceptions", &jsArray{elems: matched})
+			return w(sub)
+		},
 		// Every user visible binary operator of the Python compiler goes through
 		// here so an instance of a user class can answer it with a dunder
 		// (__add__, __lt__, __eq__, __contains__, ...). Everything that is not
@@ -4184,6 +4260,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					}
 				}
 				return boolH(rt.pyContains(l, r) == want)
+			}
+			if isPyComplex(l) || isPyComplex(r) {
+				if v, ok := rt.pyComplexBin(op, l, r); ok {
+					return w(v)
+				}
 			}
 			if v, ok := rt.pyDunderBin(op, l, r); ok {
 				return w(v)
@@ -4349,6 +4430,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			if op == "~" {
 				return rt.wrapNum(float64(^rt.toInt32(v)))
+			}
+			if re, im, ok := pyComplexParts(v); ok {
+				return w(newPyComplex(-re, -im))
 			}
 			if rt.hasBigInt {
 				if bi, ok := v.(*jsBigInt); ok {
@@ -4871,7 +4955,143 @@ func (rt *jsrt) pyEqual(x, y interface{}) bool {
 		}
 		return true
 	}
+	// Python compares an int to a float BY VALUE, and an arbitrary precision int
+	// (a literal too large for a double, see js_bigint) is still an int.
+	if bx, ok := x.(*jsBigInt); ok {
+		if by, ok2 := y.(*jsBigInt); ok2 {
+			return bx.v.Cmp(by.v) == 0
+		}
+		if fy, ok2 := y.(float64); ok2 {
+			return bigEqFloat(bx.v, fy)
+		}
+	}
+	if by, ok := y.(*jsBigInt); ok {
+		if fx, ok2 := x.(float64); ok2 {
+			return bigEqFloat(by.v, fx)
+		}
+	}
+	if re, im, ok := pyComplexParts(x); ok {
+		if re2, im2, ok2 := pyComplexParts(y); ok2 {
+			return re == re2 && im == im2
+		}
+		return im == 0 && re == rt.toNumber(y)
+	}
+	if re, im, ok := pyComplexParts(y); ok {
+		return im == 0 && re == rt.toNumber(x)
+	}
 	return rt.strictEq(x, y)
+}
+
+// bigEqFloat is an arbitrary precision int against a double, by value: only an
+// integral, finite double can equal one.
+func bigEqFloat(b *big.Int, f float64) bool {
+	if f != math.Trunc(f) || math.IsInf(f, 0) || f != f {
+		return false
+	}
+	fi, _ := big.NewFloat(f).Int(nil)
+	return b.Cmp(fi) == 0
+}
+
+// pyGenericAlias answers the memoized list[int]-style alias of a type object (a
+// class, or a builtin such as list bound to a closure). It is keyed by the origin
+// and the rendered parameter, so the same written alias is the same value twice -
+// which is what lets a PEP 695 'type X = list[int]' be compared for equality.
+func (rt *jsrt) pyGenericAlias(origin, param interface{}) (interface{}, bool) {
+	switch origin.(type) {
+	case *jsObject, *jsClosure, *hostFunc, *boundMethod:
+	default:
+		return nil, false
+	}
+	if _, _, isDict := dictParts(origin); isDict {
+		return nil, false
+	}
+	if rt.pyAliases == nil {
+		rt.pyAliases = map[string]*jsObject{}
+	}
+	name := rt.pyString(origin)
+	if o, isObj := origin.(*jsObject); isObj {
+		if n, has := o.props["__name"]; has {
+			name = rt.toString(n)
+		}
+	} else if n, has := rt.pyFuncNames[origin]; has {
+		name = n
+	}
+	key := name + "[" + rt.pyString(param) + "]"
+	if a, has := rt.pyAliases[key]; has {
+		return a, true
+	}
+	a := newJSObject()
+	a.set("__name", key)
+	a.set("__origin__", origin)
+	a.set("__args__", &jsArray{elems: []interface{}{param}})
+	rt.pyAliases[key] = a
+	return a, true
+}
+
+// ----- Python complex numbers -----
+// A complex is an ordinary object carrying the marker "__cplx" and the two
+// components under the names Python reads them by, so obj.real / obj.imag need no
+// special case in the attribute path. No other grammar builds this shape, so every
+// branch below is unreachable from the other languages.
+func newPyComplex(re, im float64) *jsObject {
+	o := newJSObject()
+	o.set("__cplx", true)
+	o.set("real", re)
+	o.set("imag", im)
+	return o
+}
+
+// pyComplexParts answers the components of a complex value, and treats a plain
+// number as the complex (n, 0) so mixed arithmetic needs no second code path.
+func pyComplexParts(v interface{}) (re float64, im float64, ok bool) {
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return 0, 0, false
+	}
+	if _, has := o.props["__cplx"]; !has {
+		return 0, 0, false
+	}
+	re, _ = o.props["real"].(float64)
+	im, _ = o.props["imag"].(float64)
+	return re, im, true
+}
+
+func isPyComplex(v interface{}) bool {
+	_, _, ok := pyComplexParts(v)
+	return ok
+}
+
+// pyComplexBin is + - * / == != on complex numbers, with a real operand promoted.
+// ok is false for an operator complex numbers do not have (Python has no ordering
+// on them either), which lets js_pybin fall through to its usual error.
+func (rt *jsrt) pyComplexBin(op string, l, r interface{}) (interface{}, bool) {
+	lr, li, lok := pyComplexParts(l)
+	if !lok {
+		lr, li = rt.toNumber(l), 0
+	}
+	rr, ri, rok := pyComplexParts(r)
+	if !rok {
+		rr, ri = rt.toNumber(r), 0
+	}
+	switch op {
+	case "+":
+		return newPyComplex(lr+rr, li+ri), true
+	case "-":
+		return newPyComplex(lr-rr, li-ri), true
+	case "*":
+		return newPyComplex(lr*rr-li*ri, lr*ri+li*rr), true
+	case "/":
+		d := rr*rr + ri*ri
+		if d == 0 {
+			return nil, false
+		}
+		return newPyComplex((lr*rr+li*ri)/d, (li*rr-lr*ri)/d), true
+	case "==":
+		return lr == rr && li == ri, true
+	case "!=":
+		return lr != rr || li != ri, true
+	}
+	return nil, false
 }
 
 // ----------------------------------------------------------------------------
@@ -5127,13 +5347,8 @@ func pySlotAllows(rt *jsrt, slots interface{}, name string) bool {
 // pyAttrError builds the AttributeError instance a rejected __slots__ write
 // raises, in the shape the except clauses match ({__class:{__name}, args}).
 func (rt *jsrt) pyAttrError(cls *jsObject, name string) interface{} {
-	ec := newJSObject()
-	ec.set("__name", "AttributeError")
-	inst := newJSObject()
-	inst.set("__class", ec)
-	inst.set("args", &jsArray{elems: []interface{}{
-		"'" + rt.toString(cls.props["__name"]) + "' object has no attribute '" + name + "'"}})
-	return inst
+	return rt.pyExcInstance("AttributeError",
+		"'"+rt.toString(cls.props["__name"])+"' object has no attribute '"+name+"'")
 }
 
 // pyMethodCall is obj.name(args) with Python's binding rule: an instance
@@ -5505,9 +5720,86 @@ var pyDeleted interface{} = pyDeletedT{}
 // pyExcInstance builds a builtin exception instance - the {__class:{__name},
 // args} shape the except clauses match - for a runtime error the program is
 // meant to be able to catch.
+// pyRootExcType reports whether the except clause's type is the root of the
+// exception hierarchy - the only one that catches a raised non-instance value.
+// A tuple of types (written as a list here) counts when any element is a root.
+func pyRootExcType(target interface{}) bool {
+	if arr, ok := target.(*jsArray); ok {
+		for _, e := range arr.elems {
+			if pyRootExcType(e) {
+				return true
+			}
+		}
+		return false
+	}
+	o, ok := target.(*jsObject)
+	if !ok {
+		return false
+	}
+	n, has := o.props["__name"]
+	if !has {
+		return false
+	}
+	name, _ := n.(string)
+	return name == "Exception" || name == "BaseException"
+}
+
+// pyExcGroupLeaves flattens an ExceptionGroup instance into its leaf exceptions and
+// answers its message alongside. ok is false for anything that is not an instance of
+// a class called ExceptionGroup, which is what makes 'except*' fall through to a
+// re-raise on an ordinary exception. The nested exceptions live in "exceptions" when
+// the group was split, and otherwise in args[1] - where ExceptionGroup(msg, [errs])
+// puts them through the inherited Exception.__init__.
+func (rt *jsrt) pyExcGroupLeaves(v interface{}) (leaves []interface{}, msg interface{}, ok bool) {
+	o, cls, isInst := pyInstance(v)
+	if !isInst {
+		return nil, nil, false
+	}
+	isGroup := false
+	for _, k := range pyMRO(cls) {
+		if n, has := k.props["__name"]; has && rt.toString(n) == "ExceptionGroup" {
+			isGroup = true
+			break
+		}
+	}
+	if !isGroup {
+		return nil, nil, false
+	}
+	if ar, isArr := o.props["args"].(*jsArray); isArr && len(ar.elems) > 0 {
+		msg = ar.elems[0]
+	}
+	src, has := o.props["exceptions"]
+	if !has {
+		if ar, isArr := o.props["args"].(*jsArray); isArr && len(ar.elems) > 1 {
+			src = ar.elems[1]
+		}
+	}
+	arr, isArr := src.(*jsArray)
+	if !isArr {
+		return nil, msg, true
+	}
+	for _, e := range arr.elems {
+		if sub, _, isSub := rt.pyExcGroupLeaves(e); isSub {
+			leaves = append(leaves, sub...)
+		} else {
+			leaves = append(leaves, e)
+		}
+	}
+	return leaves, msg, true
+}
+
 func (rt *jsrt) pyExcInstance(name string, msg string) interface{} {
-	cls := newJSObject()
-	cls.set("__name", name)
+	// The class the runtime raises with is a stable per-name object that derives
+	// from a class called Exception, so pyIsInstance's name walk answers
+	// `except Exception` (and `except <ThatName>`) for a StopIteration /
+	// UnboundLocalError / AttributeError the RUNTIME raised, exactly like for one
+	// the program raised through the module's own class objects.
+	cls := rt.pyBuiltinClass(name)
+	if name != "Exception" {
+		if _, has := cls.props["__super"]; !has {
+			cls.set("__super", rt.pyBuiltinClass("Exception"))
+		}
+	}
 	inst := newJSObject()
 	inst.set("__class", cls)
 	inst.set("args", &jsArray{elems: []interface{}{msg}})
