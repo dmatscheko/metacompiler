@@ -920,6 +920,8 @@ func (rt *jsrt) truthy(v interface{}) bool {
 		return t.f != 0 && t.f == t.f
 	case jsGInt: // A sized integer (see jsrtint.go); 0 is falsy like any other.
 		return t.v != 0
+	case jsDartFlo: // Dart's boxed double (see jsrtdart.go).
+		return t.f != 0 && t.f == t.f
 	case string:
 		return len(t) > 0
 	case *jsBigInt:
@@ -944,6 +946,8 @@ func (rt *jsrt) toNumber(v interface{}) float64 {
 			return float64(uint64(t.v))
 		}
 		return float64(t.v)
+	case jsDartFlo: // Dart's boxed double.
+		return t.f
 	case jsRat:
 		return t.n / t.d
 	case jsCpx:
@@ -1023,6 +1027,8 @@ func (rt *jsrt) toString(v interface{}) string {
 		return jvmFloText(t)
 	case jsGInt: // A sized integer prints its digits, unsigned where it is (jsrtint.go).
 		return giStr(t)
+	case jsDartFlo: // Dart's double keeps its point: 1.0, not 1 (jsrtdart.go).
+		return dartFloStr(t.f)
 	case jsRat:
 		return jsNumString(t.n) + "/" + jsNumString(t.d)
 	case jsCpx:
@@ -1083,6 +1089,8 @@ func (rt *jsrt) toGoNatural(v interface{}) interface{} {
 			return giU(t.v, t.w)
 		}
 		return t.v
+	case jsDartFlo: // print/println show Dart's double rendering (jsrtdart.go).
+		return dartFloStr(t.f)
 	case jsUndefT, jsNullT:
 		return nil
 	case float64:
@@ -1178,6 +1186,14 @@ func (rt *jsrt) strictEq(a, b interface{}) bool {
 	}
 	if _, isInt := b.(jsGInt); isInt {
 		return giIsNumeric(a) && rt.giEq(a, b)
+	}
+	// Dart's boxed double (jsrtdart.go) compares by VALUE too: 1 == 1.0 holds there
+	// and two boxes of the same number must not differ just because they are objects.
+	if af, isFlo := a.(jsDartFlo); isFlo {
+		return dartIsNum(b) && af.f == rt.toNumber(b)
+	}
+	if bf, isFlo := b.(jsDartFlo); isFlo {
+		return dartIsNum(a) && bf.f == rt.toNumber(a)
 	}
 	switch at := a.(type) {
 	case jsUndefT:
@@ -1511,6 +1527,8 @@ func (rt *jsrt) typeOf(v interface{}) string {
 	case jsJFlo: // Java's boxed double is a number like any other.
 		return "number"
 	case jsGInt: // A sized integer is a number like any other (jsrtint.go).
+		return "number"
+	case jsDartFlo: // Dart's boxed double is a number like any other (jsrtdart.go).
 		return "number"
 	case jsSym:
 		return "symbol"
@@ -4998,6 +5016,62 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			rt.fail("unknown super method '%s'", name)
 			return jsHUndefined
+		},
+		// 'super.x' as a VALUE and as an assignment target. Both start the lookup AT
+		// the given class (the caller resolved the superclass of the DEFINING class,
+		// exactly as js_supercall does) and walk __super from there, so a subclass
+		// override never shadows what super.x means. A getter/setter found on the way
+		// is invoked with the receiver, which is why 'this' travels separately.
+		"js_supget": func(a []uint64) uint64 { // (super class, this, key) -> value
+			name := rt.toString(u(a[2]))
+			for cls := u(a[0]); cls != nil; {
+				clsObj, ok := cls.(*jsObject)
+				if !ok {
+					break
+				}
+				if v, found := clsObj.props[name]; found {
+					if acc, isAcc := v.(*jsAccessor); isAcc {
+						if acc.get == nil {
+							return jsHUndefined
+						}
+						return w(rt.call(acc.get, u(a[1]), nil))
+					}
+					return w(v)
+				}
+				cls = clsObj.props["__super"]
+			}
+			// Nothing on the class chain is UNDEFINED, and deliberately not a read of
+			// the receiver: node prints NaN for 'super.zz += 4' after 'super.zz = 3'
+			// (the store lands on the receiver, the read does not see it), so falling
+			// back to the own property would be a divergence from the real language.
+			return jsHUndefined
+		},
+		"js_supset": func(a []uint64) uint64 { // (super class, this, key, value)
+			name := rt.toString(u(a[2]))
+			for cls := u(a[0]); cls != nil; {
+				clsObj, ok := cls.(*jsObject)
+				if !ok {
+					break
+				}
+				if v, found := clsObj.props[name]; found {
+					if acc, isAcc := v.(*jsAccessor); isAcc {
+						if acc.set != nil {
+							rt.call(acc.set, u(a[1]), []interface{}{u(a[3])})
+						}
+						return 0
+					}
+					break
+				}
+				cls = clsObj.props["__super"]
+			}
+			// No setter on the super chain: 'super.x = v' performs an ordinary
+			// [[Set]] whose RECEIVER is 'this', so the own property lands there.
+			if o, ok := u(a[1]).(*jsObject); ok {
+				o.set(name, u(a[3]))
+				return 0
+			}
+			rt.setMember(u(a[1]), u(a[2]), u(a[3]))
+			return 0
 		},
 		"js_arg": func(a []uint64) uint64 { // (args array, index) -> value
 			arr := u(a[0]).(*jsArray)

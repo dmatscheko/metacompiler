@@ -31,7 +31,15 @@ var core = {
     framePush: null,    // Called on function entry (Go: open a defer frame).
     framePop: null,     // Called after the body, before locals are dropped (Go: run defers).
     varMiss: null,      // Name not in any scope: return {v: value} or null (Kotlin: this properties).
-    setMiss: null       // Assignment target not in any scope: handle it and return true (Kotlin).
+    setMiss: null,      // Assignment target not in any scope: handle it and return true (Kotlin).
+    // Map-key identity, for a language whose numbers are BOXED. dictKeyId below can
+    // only index a value whose === is string equality, and dictFind confirms a hit
+    // with ===, so two boxes holding the same number are two different keys. A
+    // language that boxes (Dart: {__flo} for a double, {__sz} for a 64-bit int, and
+    // 1 == 1.0 so they must key alike) sets these two; every other language leaves
+    // them null and gets exactly the code path it had before.
+    keyId: null,        // (k) -> a string id, or null to fall through to dictKeyId.
+    keyEq: null         // (a, b) -> whether two keys are the same key, when a !== b.
 }
 
 // ----- Shared interpreter state -----
@@ -133,15 +141,29 @@ function excCatch(items) {
     if (items.length > 1) { return {catchbody: items[1], catchname: items[0]} }
     return {catchbody: items[0], catchname: undefined}
 }
+// The same clause with a BINDER instead of a name, for a language whose catch parameter
+// may be a destructuring pattern ('catch ([a, ...b])' in JavaScript). The grammar passes
+// a function of the thrown value rather than a pattern node, so interp-core needs no
+// knowledge of any grammar's pattern machinery; excTry calls it in the freshly pushed
+// catch scope, exactly where declVar would have run.
+// items = [binderFunction, blockThunk].
+function excCatchBind(items) {
+    return {catchbody: items[1], catchname: undefined, catchbind: items[0]}
+}
 // items = [{trybody}, {catchbody,catchname}*, {finbody}?]. The first catch clause wins
 // (exception types cannot be discriminated without runtime types), finally always runs
 // and its own control-flow signal overrides.
 function excTry(items) {
     var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
+    var catchBind = anytype // A destructuring catch parameter (see excCatchBind).
     for (var i = 0; i < items.length; i++) {
         if (items[i].trybody != undefined) { tryT = items[i].trybody }
         else if (items[i].catchbody != undefined) {
-            if (catchT == undefined) { catchT = items[i].catchbody; catchName = items[i].catchname }
+            if (catchT == undefined) {
+                catchT = items[i].catchbody
+                catchName = items[i].catchname
+                if (hasOwn(items[i], "catchbind")) { catchBind = items[i].catchbind }
+            }
         }
         else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
     }
@@ -154,7 +176,8 @@ function excTry(items) {
             scopes = savedChain.slice()
             if (excIsUser(e) && catchT != undefined) {
                 scopes.push({})
-                if (catchName != undefined) { declVar(catchName, e.v) }
+                if (catchBind != undefined) { catchBind(e.v) }
+                else if (catchName != undefined) { declVar(catchName, e.v) }
                 box.sig = catchT()
                 scopes.pop()
             } else {
@@ -565,6 +588,10 @@ function isDict(v) { return v !== null && v !== undefined && typeof v == "object
 // dictKeyId is that representation: the type prefix keeps 1 and "1" apart, and
 // keys whose === is not string equality (objects, NaN) stay out.
 function dictKeyId(k) {
+    if (core.keyId != null) {
+        var ck = core.keyId(k)
+        if (ck != null) { return ck }
+    }
     var t = typeof k
     if (t == "string") { return "s" + k }
     if (t == "number") { return (k !== k) ? null : "n" + k }
@@ -583,19 +610,26 @@ function dictIndex(d) {
     d.__idx = ix
     return ix
 }
+// dictKeyEq is the confirmation step: === unless the language declared a key
+// equality of its own (core.keyEq), which only a boxed-number language needs.
+function dictKeyEq(a, b) {
+    if (a === b) { return true }
+    if (core.keyEq != null) { return core.keyEq(a, b) }
+    return false
+}
 function dictFind(d, k) {
     var id = dictKeyId(k)
     var ix = dictIndex(d)
     if (id != null && hasOwn(ix.m, id)) {
         var i = ix.m[id]
-        if (d.keys[i] === k) { return i }
+        if (dictKeyEq(d.keys[i], k)) { return i }
         d.__idx = null                                  // An entry changed in place.
         ix = dictIndex(d)
-        if (hasOwn(ix.m, id) && d.keys[ix.m[id]] === k) { return ix.m[id] }
+        if (hasOwn(ix.m, id) && dictKeyEq(d.keys[ix.m[id]], k)) { return ix.m[id] }
         return -1
     }
     if (id != null && ix.all) { return -1 }
-    for (var j = 0; j < d.keys.length; j++) { if (d.keys[j] === k) { return j } }
+    for (var j = 0; j < d.keys.length; j++) { if (dictKeyEq(d.keys[j], k)) { return j } }
     return -1
 }
 function dictSet(d, k, v) {

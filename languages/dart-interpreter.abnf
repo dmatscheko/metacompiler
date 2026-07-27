@@ -1013,9 +1013,24 @@ PosRecField <~~ push({rname: "", t: pop()}) ~~> = AssignExpr ;
 // integer. All three accept '_' digit separators (Dart 3.6). The longest/prefixed forms
 // come first because this is a PEG.
 // A double may start with the point: `.5`. It comes first so the plain forms never see it.
-NumLit      = NumLeadDot | NumHex | NumDec | NumInt ;
-NumLeadDot  <~~ push(makeConst(parseFloat("0" + stripWs(up.in)))) ~~>
+// Dart's `int` and `double` are DIFFERENT types, so a literal has to say which one it
+// is: a form with a point or an exponent builds the {__flo} double box, and a plain or
+// hex digit run builds an int through the shared 64-bit pair layer (szNorm/i64FromStr in
+// lib/interp-core.js), which is exact for 9223372036854775807 where parseInt is not.
+// The shared NumHex/NumDec/NumInt of lib/numbers.abnf push plain parseInt/parseFloat
+// values, so Dart uses its own three; NumHexDig and NumExp are still the shared ones.
+NumLit      = NumLeadDot | DartHexLit | DartDecLit | DartIntLit ;
+NumLeadDot  <~~ push(makeConst(dFlo(parseFloat("0" + dNoUnd(up.in))))) ~~>
             = "." :whitespace() "0"..."9" { "0"..."9" | "_" } :whitespace(Whitespace) ;
+// i64FromRadix / i64FromStr SKIP every character that is not a digit of the base, so
+// the "0x" prefix, the '_' separators and the trailing whitespace need no stripping.
+DartHexLit  <~~ push(makeConst(szNorm(i64FromRadix(up.in, 16), 64, false))) ~~>
+            = "0" ( "x" | "X" ) :whitespace() NumHexDig { NumHexDig | "_" } :whitespace(Whitespace) ;
+DartDecLit  <~~ push(makeConst(dFlo(parseFloat(dNoUnd(up.in))))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
+              ( "." "0"..."9" { "0"..."9" | "_" } [ NumExp ] | NumExp ) :whitespace(Whitespace) ;
+DartIntLit  <~~ push(makeConst(szNorm(i64FromStr(up.in), 64, false))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } :whitespace(Whitespace) ;
 
 // A collection literal with an explicit type argument: <int>[...], <K,V>{...}. The type
 // argument is erased and the list/map/set is built as usual.
@@ -1265,6 +1280,10 @@ KwDeferred  = "deferred" KwEnd ;
         if (v === false) { return "false" }
         if (typeof v == "string") { return v }
         if (typeof v == "function") { return "Closure" }
+        // A boxed double renders with its point (1.0, not 1); a boxed int renders its
+        // exact digits (9223372036854775807, not 9223372036854776000).
+        if (dIsFlo(v)) { return dFloStr(v.__flo) }
+        if (szIs(v)) { return szStr(v) }
         if (Array.isArray(v)) {
             var out = "["
             for (var i = 0; i < v.length; i++) {
@@ -1347,48 +1366,298 @@ KwDeferred  = "deferred" KwEnd ;
         }
     }
 
-    // ----- Dart arithmetic -----
-    // Dart has one numeric tower with real doubles: only ~/ and the bitwise operators
-    // truncate. / is always double division, and % follows the sign of the divisor.
+    // ----- Dart's numbers: int is 64 bit, double is a separate type -----
+    // Dart has TWO numeric types and no implicit conversion between them, and the value
+    // model here is untyped, so 1 and 1.0 used to be the same JS number: print(1.0) said
+    // "1", 1 / 1 said "1" instead of "1.0", `1 is double` was true and `1.0 is int` was
+    // true. Dart's int is also exactly 64-bit two's complement on the VM and WRAPS
+    // (int64max + 1 is int64min), which a JS double cannot represent at all - it said
+    // 9223372036854776000.
+    //
+    // Both are fixed by putting the type ON the value, the way java-interpreter.abnf's
+    // {__flo} box and go-interpreter.abnf's sized integers already do. The invariant, in
+    // BOTH halves of this language (abnf/jsrtdart.go implements exactly these rules):
+    //
+    //     a plain number    ==  an int whose value is exact in a double (|v| <= 2^53)
+    //     an {__sz} box     ==  an int outside that range (w = 64, u = false, always)
+    //     an {__flo} box    ==  a double
+    //
+    // The int side reuses the shared 64-bit pair layer of lib/interp-core.js unchanged
+    // (szArith / szCmp / szEq / szNorm / i64*), which was proved against 1.3M operator
+    // vectors for Go; Dart only ever asks it for the signed 64-bit width, so a program
+    // that stays inside 2^53 allocates no box and runs the arithmetic it ran before.
+    //
+    // Corpus citations, from tests/reference/dart/dart-language-tests:
+    //   language/double/to_string_test.dart          the double rendering below
+    //   language/number/int64_literal_test.dart:21-25  0x8000000000000000 IS int64min,
+    //                                                and int64min - 1 wraps to int64max
+    //   language/number/numbers_test.dart:16-29     int and double are disjoint types
+    //   language/operator/bit_operations_test.dart:26-54  64-bit shifts
+    var dZeroF = 0
+    var dNegOne = 0 - 1
+    var dInf = 1 / dZeroF
+    function dFlo(f) { return {__flo: f} }
+    function dIsFlo(v) { return v != undefined && v != null && typeof v == "object" && v.__flo !== undefined }
+    // dNum is the JS double reading of any Dart number: a double's payload, a boxed
+    // int's nearest double, a plain number as itself.
+    function dNum(v) {
+        if (v != undefined && v != null && typeof v == "object") {
+            if (v.__flo !== undefined) { return v.__flo }
+            if (v.__sz === true) { return szNum(v) }
+        }
+        return v
+    }
+    function dIsNum(v) { return typeof v == "number" || dIsFlo(v) || szIs(v) }
+    function dIsInt(v) { return typeof v == "number" || szIs(v) }
+    // dInt normalises any numeric operand to an int, truncating a double toward zero -
+    // which is what toInt(), truncate() and the operand of a bitwise operator all do.
+    function dInt(v) {
+        if (dIsFlo(v)) { return szNorm(i64FromNum(dTrunc(v.__flo)), 64, false) }
+        return v
+    }
+    function dTrunc(f) {
+        if (f !== f || f === dInf || f === 0 - dInf) { return 0 }
+        return f < 0 ? 0 - Math.floor(0 - f) : Math.floor(f)
+    }
+    // Dart's double.toString (language/double/to_string_test.dart): ECMAScript's
+    // number-to-string, with ".0" appended when the result carries neither a point nor
+    // an exponent - so 1.0 is "1.0", 1e21 is "1e+21" and 1e-7 is "1e-7". -0.0 renders
+    // with its sign (to_string_test.dart:33) although JS spells it "0".
+    function dFloStr(f) {
+        if (f !== f) { return "NaN" }
+        if (f === dInf) { return "Infinity" }
+        if (f === 0 - dInf) { return "-Infinity" }
+        var s = "" + f
+        if (f === 0 && (1 / f) < 0) { s = "-0" }
+        if (s.indexOf(".") < 0 && s.indexOf("e") < 0) { s = s + ".0" }
+        return s
+    }
+    // The text of a number literal without its '_' digit separators (Dart 3.6) and
+    // without the trailing whitespace the production consumed, ready for parseFloat.
+    function dNoUnd(s) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch != "_") { out = out + ch }
+        }
+        return stripWs(out)
+    }
+
+    // ----- num's own members (dart:core num / int / double) -----
+    // These did not exist at all before: `2.6.round()` failed with "method call 'round'
+    // on 2". They matter far more now that int and double are distinct, because
+    // toInt / toDouble are how a Dart program crosses between them. Every one of them
+    // answers {v: value} so that a null result means "not a num member" and the caller
+    // falls through to its extension lookup. Return TYPES follow dart:core: floor,
+    // ceil, round and truncate answer an int even on a double, and abs keeps the type.
+    // Corpus citations, from tests/reference/dart/dart-language-tests:
+    //   language/operator/arithmetic_test.dart:96-116  floor/ceil/round/truncate on an
+    //                                   int answer the int itself, both signs, past 2^40
+    //   language/operator/arithmetic_test.dart:57, :73  remainder() is the TRUNCATING
+    //                                   one, unlike %
+    //   language/operator/round_test.dart:22-26  round() is not floor(x + 0.5)
+    // The rest (toDouble, abs, sign, isEven, toRadixString, clamp) is spec-derived from
+    // the dart:core documentation of num / int / double; the corpus is silent on them.
+    function dNumMethod(t, name, args) {
+        var f = dNum(t)
+        if (name == "toDouble") { return {v: dIsFlo(t) ? t : dFlo(f)} }
+        if (name == "toInt" || name == "truncate") { return {v: dInt(t)} }
+        if (name == "floor") { return {v: dIsFlo(t) ? szNorm(i64FromNum(Math.floor(f)), 64, false) : t} }
+        if (name == "ceil") { return {v: dIsFlo(t) ? szNorm(i64FromNum(0 - Math.floor(0 - f)), 64, false) : t} }
+        if (name == "round") {
+            if (!dIsFlo(t)) { return {v: t} }
+            return {v: szNorm(i64FromNum(dRound(f)), 64, false)}
+        }
+        if (name == "floorToDouble") { return {v: dFlo(Math.floor(f))} }
+        if (name == "ceilToDouble") { return {v: dFlo(0 - Math.floor(0 - f))} }
+        if (name == "truncateToDouble") { return {v: dFlo(dTrunc(f))} }
+        if (name == "roundToDouble") { return {v: dFlo(dRound(f))} }
+        if (name == "abs") {
+            if (dIsFlo(t)) { return {v: dFlo(f < 0 ? 0 - f : f)} }
+            return {v: szCmp(t, 0) < 0 ? szNeg(t) : t}
+        }
+        if (name == "isNaN") { return {v: f !== f} }
+        if (name == "isFinite") { return {v: f === f && f !== dInf && f !== 0 - dInf} }
+        if (name == "isInfinite") { return {v: f === dInf || f === 0 - dInf} }
+        if (name == "isNegative") { return {v: f < 0 || (f === 0 && (1 / f) < 0)} }
+        if (name == "isEven") { return {v: dIsInt(t) && szEq(dIntMod(t, 2), 0)} }
+        if (name == "isOdd") { return {v: dIsInt(t) && !szEq(dIntMod(t, 2), 0)} }
+        if (name == "sign") {
+            if (dIsFlo(t)) { return {v: f !== f ? dFlo(f) : dFlo(f > 0 ? 1 : (f < 0 ? 0 - 1 : f))} }
+            return {v: szCmp(t, 0) > 0 ? 1 : (szCmp(t, 0) < 0 ? 0 - 1 : 0)}
+        }
+        if (name == "remainder" && args.length == 1) {
+            var rf = dNum(args[0])
+            if (dIsFlo(t) || dIsFlo(args[0])) { return {v: dFlo(f % rf)} }
+            return {v: szArith("%", t, args[0])}
+        }
+        if (name == "compareTo" && args.length == 1) {
+            var c = dCmp(t, args[0])
+            return {v: c === 2 ? 0 : c}
+        }
+        if (name == "clamp" && args.length == 2) {
+            if (dCmp(t, args[0]) === 0 - 1) { return {v: args[0]} }
+            if (dCmp(t, args[1]) === 1) { return {v: args[1]} }
+            return {v: t}
+        }
+        // Spelled out rather than handed to Number.prototype.toString(radix), which
+        // exists under goja and NOT in the frozen engine (java-interpreter.abnf:1029).
+        if (name == "toRadixString" && args.length == 1) { return {v: dBigRadix(dInt(t), dNum(args[0]))} }
+        return null
+    }
+    // Dart rounds to the nearest integer with TIES AWAY FROM ZERO, and deliberately
+    // NOT as Math.floor(x + 0.5): language/operator/round_test.dart:22 and :25 exist
+    // precisely to reject that formula, because 0.49999999999999994 + 0.5 is 1.0 and
+    // 9007199254740991 + 0.5 is 9007199254740992.
+    // A negative operand rounds by SYMMETRY (ties away from zero is symmetric)
+    // rather than through floor(f) directly: floor(-0.49999999999999994) is -1 and
+    // the difference from it rounds to exactly 0.5, which would answer -1.
+    function dRound(f) {
+        if (f !== f || f === dInf || f === 0 - dInf) { return f }
+        if (f < 0) { return 0 - dRoundPos(0 - f) }
+        return dRoundPos(f)
+    }
+    function dRoundPos(a) {
+        var fl = Math.floor(a)
+        if (a - fl >= 0.5) { return fl + 1 }
+        return fl
+    }
+    // The digits of an int in an arbitrary base, exact past 2^53 as well.
+    function dBigRadix(v, radix) {
+        var neg = szCmp(v, 0) < 0
+        var x = anytype
+        x = neg ? szNeg(v) : v
+        var digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+        var out = ""
+        while (szCmp(x, 0) > 0) {
+            var d = szNum(szArith("%", x, radix))
+            out = digits.charAt(d) + out
+            x = szArith("/", x, radix)
+        }
+        if (out == "") { out = "0" }
+        return neg ? "-" + out : out
+    }
+    // The old `x - 0` in stepRef coerced a string counter to a number; a boxed one has
+    // to survive it untouched.
+    function dNumOrSelf(v) {
+        if (dIsNum(v)) { return v }
+        return v - 0
+    }
+
+    // Dart's % is EUCLIDEAN on both types: the result r of a % b satisfies
+    // 0 <= r < b.abs(), so -7 % 3 is 2 (and (-7).remainder(3) is -1, which is JS's %).
     function dartMod(l, r) {
         var m = l % r
         if (m < 0) { m = m + (r < 0 ? 0 - r : r) }
         return m
     }
-    // `+` and `+=` reach the shared core.add, whose DEFAULT truncates the sum with |0 -
-    // so 0.1 + 0.2 was 0 and 1.5 + 1.0 was 2 here, while the compiler half (js_jadd)
-    // answered 0.30000000000000004 and 2.5. Only + was affected: - * / % are handled by
-    // the binOp override below and never truncated. This is js_jadd's rule exactly, so
-    // the two halves now agree: a string operand concatenates, two values that are both
-    // int32 add as int32, and anything else adds in floating point.
-    core.add = function(l, r) {
-        if (typeof l == "string" || typeof r == "string") { return l + r }
-        if (typeof l == "number" && typeof r == "number") {
-            var s = l + r
-            if (l === (l | 0) && r === (r | 0)) { return s | 0 }
-            return s
-        }
-        return (l + r) | 0
+    function dIntMod(l, r) {
+        // anytype: an int is a plain number or a box, so a slot that holds one has to
+        // accept both - the frozen engine pins a var to the type of its first value.
+        var m = anytype
+        m = szArith("%", l, r)
+        if (szCmp(m, 0) < 0) { m = szArith("+", m, szCmp(r, 0) < 0 ? szNeg(r) : r) }
+        return m
     }
+    // ~/ is truncating integer division and its result is an int even for two doubles.
+    function dTruncDiv(l, r) {
+        if (dIsFlo(l) || dIsFlo(r)) {
+            var q = dNum(l) / dNum(r)
+            if (q !== q || q === dInf || q === 0 - dInf) { fail("Unsupported operation: Result of truncating division is " + dFloStr(q)) }
+            return szNorm(i64FromNum(dTrunc(q)), 64, false)
+        }
+        return szArith("/", dInt(l), dInt(r))
+    }
+    // >>> is a 64-bit LOGICAL shift; szArith's ">>" is the arithmetic one.
+    function dUshr(l, r) {
+        var n = dNum(r)
+        if (n < 0) { fail("Unsupported operation: negative shift amount") }
+        if (n >= 64) { return 0 }
+        return szNorm(i64ShrU(szPair(dInt(l)), n), 64, false)
+    }
+    // One arithmetic operator on two numbers: floating point as soon as either operand
+    // is a double (and `/` ALWAYS, which is the rule with no static types to lean on),
+    // exact 64-bit integer arithmetic otherwise.
+    function dArith(op, l, r) {
+        if (op == "/") { return dFlo(dNum(l) / dNum(r)) }
+        if (op == "~/") { return dTruncDiv(l, r) }
+        if (dIsFlo(l) || dIsFlo(r)) {
+            var a = dNum(l)
+            var b = dNum(r)
+            if (op == "+") { return dFlo(a + b) }
+            if (op == "-") { return dFlo(a - b) }
+            if (op == "*") { return dFlo(a * b) }
+            if (op == "%") { return dFlo(dartMod(a, b)) }
+        }
+        if (op == "%") { return dIntMod(dInt(l), dInt(r)) }
+        if (op == ">>>") { return dUshr(l, r) }
+        return szArith(op, dInt(l), dInt(r))
+    }
+    // The ordered comparisons: a double operand compares as a double, two ints through
+    // szCmp so that a value past 2^53 compares exactly.
+    function dCmp(l, r) {
+        if (dIsFlo(l) || dIsFlo(r)) {
+            var a = dNum(l)
+            var b = dNum(r)
+            return a < b ? 0 - 1 : (a > b ? 1 : (a === b ? 0 : 2))   // 2 == unordered (NaN)
+        }
+        return szCmp(l, r)
+    }
+    // `+` and `+=` reach the shared core.add, whose DEFAULT truncates the sum with |0 -
+    // so 0.1 + 0.2 was 0 and 1.5 + 1.0 was 2 here. Every numeric case now goes to
+    // dArith; only the string concatenation of an interpolation stays.
+    core.add = function(l, r) {
+        if (typeof l == "string" || typeof r == "string") { return dstr(l) + dstr(r) }
+        if (dIsNum(l) && dIsNum(r)) { return dArith("+", l, r) }
+        return l + r
+    }
+    var dArithOps = {"+": 1, "-": 1, "*": 1, "/": 1, "~/": 1, "%": 1,
+                     "&": 1, "|": 1, "^": 1, "<<": 1, ">>": 1, ">>>": 1}
     var baseBinOp = binOp
     binOp = function(op, l, r) {
+        // FAST PATH. Two PLAIN numbers are two ints inside 2^53 by the invariant above,
+        // which is what nearly all arithmetic in a Dart program is, and neither of them
+        // can carry a user `operator` or be NaN - so the whole dispatch below (two
+        // dIsNum probes, a table lookup, dArith's two dIsFlo probes and szArith's own
+        // boxing tests) collapses to the operation itself. Measured on a 3M-iteration
+        // `s = s + i % 7` loop: 48s without this path, 21s with it, which is what the
+        // grammar cost before any of the boxing existed.
+        if (typeof l == "number" && typeof r == "number") {
+            if (op == "<") { return l < r }
+            if (op == ">") { return l > r }
+            if (op == "<=") { return l <= r }
+            if (op == ">=") { return l >= r }
+            if (op == "==") { return l === r }
+            if (op == "!=") { return l !== r }
+            var fv = 0
+            if (op == "+") { fv = l + r }
+            else if (op == "-") { fv = l - r }
+            else if (op == "*") { fv = l * r }
+            else if (op == "%" && r !== 0) {
+                fv = l % r
+                if (fv < 0) { fv = fv + (r < 0 ? 0 - r : r) }
+                return fv
+            }
+            else { return dArith(op, l, r) }
+            // Strictly inside 2^53: a true result of 2^53 + 1 rounds DOWN here, so the
+            // exact 64-bit path has to answer for anything at or past the bound.
+            if (fv < SZ_EXACT && fv > 0 - SZ_EXACT) { return fv }
+            return dArith(op, l, r)
+        }
         if (hasUserOp(l) && op != "==" && op != "!=") {
             var uv = userBinOp(op, l, r)
             if (uv != undefined) { return uv }
         }
-        if (op == "~/") { return (l / r) | 0 }
-        if (op == "/") { return l / r }
-        if (op == "-") { return l - r }
-        if (op == "*") { return l * r }
-        if (op == "%") { return dartMod(l, r) }
         if (op == "==") { return dartEq(l, r) }
         if (op == "!=") { return !dartEq(l, r) }
-        if (op == "&") { return l & r }
-        if (op == "|") { return l | r }
-        if (op == "^") { return l ^ r }
-        if (op == "<<") { return l << r }
-        if (op == ">>") { return l >> r }
-        if (op == ">>>") { return l >>> r }
+        if (dIsNum(l) && dIsNum(r)) {
+            if (dArithOps[op] == 1) { return dArith(op, l, r) }
+            if (op == "<") { return dCmp(l, r) === 0 - 1 }
+            if (op == ">") { return dCmp(l, r) === 1 }
+            if (op == "<=") { var c1 = dCmp(l, r); return c1 === 0 - 1 || c1 === 0 }
+            if (op == ">=") { var c2 = dCmp(l, r); return c2 === 1 || c2 === 0 }
+        }
+        if (op == "+") { return core.add(l, r) }
         return baseBinOp(op, l, r)
     }
     var baseApplyOp = applyOp
@@ -1397,16 +1666,9 @@ KwDeferred  = "deferred" KwEnd ;
             var uv = userBinOp(op.substring(0, op.length - 1), a, b)
             if (uv != undefined) { return uv }
         }
-        if (op == "&=") { return a & b }
-        if (op == "|=") { return a | b }
-        if (op == "^=") { return a ^ b }
-        if (op == "<<=") { return a << b }
-        if (op == ">>=") { return a >> b }
-        if (op == "-=") { return a - b }
-        if (op == "*=") { return a * b }
-        if (op == "/=") { return a / b }
-        if (op == "%=") { return dartMod(a, b) }
-        if (op == "~/=") { return (a / b) | 0 }
+        var base = op.substring(0, op.length - 1)
+        if (dArithOps[base] == 1 && dIsNum(a) && dIsNum(b)) { return dArith(base, a, b) }
+        if (base == "+") { return core.add(a, b) }
         return baseApplyOp(op, a, b)
     }
     // -x keeps doubles (the shared makeNeg wraps to 32 bits).
@@ -1419,12 +1681,19 @@ KwDeferred  = "deferred" KwEnd ;
                 var m = findMember(v.__class, "-")
                 if (m != null) { return m.fn.apply(undefined, [v]) }
             }
+            // -x keeps the operand's TYPE: a double negates as a double (so -0.0 and
+            // -1.0/0.0 stay real), an int at 64 bits (so -int64min wraps back to itself).
+            // Multiplied, not subtracted from zero: `0 - 0` is +0 in JS, so -0.0
+            // would have lost its sign and printed "0.0" (to_string_test.dart:33).
+            if (dIsFlo(v)) { return dFlo(v.__flo * dNegOne) }
+            if (dIsInt(v)) { return szNeg(v) }
             return 0 - v
         }
     }
 
-    // ~v flips the bits of the ToInt32 value (agrees with the compiler's js_bxor -1).
-    function makeBitNot(t) { return function() { return ~t() } }
+    // ~v flips all 64 bits of the int operand (Dart's int is 64-bit two's complement,
+    // so ~0 is -1 and ~(1 << 62) is not a 32-bit value).
+    function makeBitNot(t) { return function() { return szNot(dInt(t())) } }
 
     // A type test: items = [operand] or [operand, {tt}, {tname}]. `as` is an identity cast
     // (types are erased here), `is` / `is!` are real runtime tests.
@@ -1644,8 +1913,14 @@ KwDeferred  = "deferred" KwEnd ;
         if (t.length > 0 && t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1); opt = true }
         if (v === null || v === undefined) { return opt || t == "Null" }
         if (t == "dynamic" || t == "Object" || t == "var") { return true }
-        if (t == "int") { return typeof v == "number" && Math.floor(v) == v }
-        if (t == "double" || t == "num") { return typeof v == "number" }
+        // int and double are DISJOINT types in Dart - `1 is double` is false and
+        // `1.0 is int` is false even though 1 == 1.0
+        // (language/number/numbers_test.dart:16-29 asserts all four directions, with
+        // v.jsNumbers false on the VM). The value model answers this from the box, not
+        // from the value: an unboxed number is an int.
+        if (t == "int") { return dIsInt(v) }
+        if (t == "double") { return dIsFlo(v) }
+        if (t == "num") { return dIsNum(v) }
         if (t == "String") { return typeof v == "string" }
         if (t == "bool") { return typeof v == "boolean" }
         if (t == "List" || t == "Iterable") {
@@ -1849,6 +2124,17 @@ KwDeferred  = "deferred" KwEnd ;
     // `operator ==` when the left operand defines one.
     function dartEq(l, r) {
         if (isRec(l) && isRec(r)) { return recEq(l, r) }
+        // A number is BOXED here as soon as it is a double or leaves 2^53, and two boxes
+        // holding the same number are two different objects - so === would have made
+        // 1.0 == 1.0 false. Dart's == on numbers is value equality ACROSS the two
+        // types - 1 == 1.0 is true although `1 is double` is false
+        // (language/number/numbers_test.dart:16-29 for the types; the equality across
+        // them is spec-derived from dart:core num.operator==) - so a double operand
+        // compares in floating point and two ints compare exactly.
+        if (dIsNum(l) && dIsNum(r)) {
+            if (dIsFlo(l) || dIsFlo(r)) { return dNum(l) === dNum(r) }
+            return szEq(l, r)
+        }
         if (hasUserOp(l)) {
             var m = findMember(l.__class, "==")
             if (m != null) { return m.fn.apply(undefined, [l, r]) ? true : false }
@@ -2091,6 +2377,12 @@ KwDeferred  = "deferred" KwEnd ;
             var mm = findMember(cur.__class, name)
             if (mm != null) { return makeTearOff(cur, mm.fn) }   // a method tear-off
         }
+        // num's getters (isEven, isNaN, sign, ...) read like fields, so they are
+        // answered here as well as through mcall - dart:core spells them as getters.
+        if (dIsNum(cur)) {
+            var ng = dNumMethod(cur, name, [])
+            if (ng != null) { return ng.v }
+        }
         if (name == "length") { return dlen(cur) }
         if (name == "isEmpty") { return dlen(cur) == 0 }
         if (name == "isNotEmpty") { return dlen(cur) != 0 }
@@ -2189,6 +2481,10 @@ KwDeferred  = "deferred" KwEnd ;
         // answers both (an override wins there). Without this the call fell through
         // to the extension lookup and failed with "method call 'toString' on 3".
         if (name == "toString" && args.length == 0) { return dstr(target) }
+        if (dIsNum(target)) {
+            var nm = dNumMethod(target, name, args)
+            if (nm != null) { return nm.v }
+        }
         if (typeof target == "string") {
             if (name == "substring") { return args.length > 1 ? target.slice(args[0], args[1]) : target.slice(args[0]) }
             if (name == "indexOf") { return target.indexOf(args[0]) }
@@ -2625,7 +2921,11 @@ KwDeferred  = "deferred" KwEnd ;
         if (v === true) { return "b1" }
         if (v === false) { return "b0" }
         if (typeof v == "string") { return "s" + v.length + ":" + v }
-        if (typeof v == "number") { return "d" + v }
+        // int and double are different types, so const [1] and const [1.0] are NOT the
+        // same const - the two key prefixes have to differ.
+        if (typeof v == "number") { return "i" + v }
+        if (dIsFlo(v)) { return "d" + dFloStr(v.__flo) }
+        if (szIs(v)) { return "i" + szStr(v) }
         if (typeof v != "object") { return "x" + v }
         if (v.__isclass === true) { return "T:" + v.__name }
         var out = ""
@@ -3322,28 +3622,33 @@ KwDeferred  = "deferred" KwEnd ;
     // The prefix form is the same update yielding the NEW value.
     function stepRef(ref, delta) {
         if (ref.path.length == 0 && ref.seed == null) {
-            var n = getVar(ref.name) - 0
+            var n = dNumOrSelf(getVar(ref.name))
             setVar(ref.name, incNum(n, delta))
             return n
         }
         var p = resolveRefDart(ref)
         if (p.skip === true) { return null }
         if (p.field) {
-            var f = readMember(p.obj, p.key) - 0
+            var f = dNumOrSelf(readMember(p.obj, p.key))
             setFieldD(p.obj, p.key, incNum(f, delta))
             return f
         }
-        var d = dget(p.obj, p.key) - 0
+        var d = dNumOrSelf(dget(p.obj, p.key))
         dsetIndexD(p.obj, p.key, incNum(d, delta))
         return d
     }
-    // Dart's ++ is +1 on the value's own type: an int stays an int, a double stays a
-    // double. Truncating with |0 would turn 1.5++ into 2, so only an integral value
-    // is wrapped back into the 32-bit range.
+    // Dart's ++ is +1 on the value's own type: an int stays an int (wrapping at 64 bits),
+    // a double stays a double, so 1.5++ is 2.5 and not 2.
     function incNum(n, delta) {
-        var r = n + delta
-        if (r === Math.floor(r)) { return r | 0 }
-        return r
+        // The same fast path binOp takes: a plain number is an int inside 2^53, and
+        // +/-1 keeps it there unless it is at the very bound.
+        if (typeof n == "number") {
+            var v = n + delta
+            if (v < SZ_EXACT && v > 0 - SZ_EXACT) { return v }
+            return dArith("+", n, delta)
+        }
+        if (dIsNum(n)) { return dArith("+", n, delta) }
+        return n + delta
     }
     function makeIncDec(items) {
         var ref = items[0]
@@ -3478,6 +3783,20 @@ KwDeferred  = "deferred" KwEnd ;
 
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "dart"
+    // Map keys. A Dart map keys on == and hashCode, and 1 == 1.0 with equal hashCodes,
+    // so {1: 'a'}[1.0] finds the entry. The shared dictFind indexes on typeof and
+    // confirms with ===, which a boxed double or a boxed 64-bit int fails on both
+    // counts; these two knobs are the language's own answer for exactly those values.
+    core.keyId = function(k) {
+        if (dIsFlo(k)) { return "n" + dNum(k) }
+        if (szIs(k)) { return "n" + szStr(k) }
+        return null
+    }
+    core.keyEq = function(a, b) {
+        if (!dIsNum(a) || !dIsNum(b)) { return false }
+        if (dIsFlo(a) || dIsFlo(b)) { return dNum(a) === dNum(b) }
+        return szEq(a, b)
+    }
     core.varMiss = function(name) {
         var self = findThis()
         if (self != undefined && self != null) {
@@ -3522,6 +3841,24 @@ KwDeferred  = "deferred" KwEnd ;
     // identical(a, b): reference identity (structural for records, which have no identity).
     hostGlobals["identical"] = function(a, b) {
         if (isRec(a) && isRec(b)) { return recEq(a, b) }
+        // Numbers have no identity separate from their value in Dart: identical(8, 8+0)
+        // and identical(8.0, 8.0+0.0) are TRUE (language/number/identity_test.dart:20
+        // and :31) while identical(mint, 8.0) is FALSE because the two are of different
+        // types (:27), and identical(nan, nan+0.0) is TRUE
+        // (language/number/identity2_test.dart:24). Since a double and a large int are
+        // boxed objects here, === would have answered the opposite of all of them.
+        if (dIsNum(a) || dIsNum(b)) {
+            if (!dIsNum(a) || !dIsNum(b)) { return false }
+            if (dIsFlo(a) != dIsFlo(b)) { return false }
+            if (dIsFlo(a)) {
+                var x = a.__flo
+                var y = b.__flo
+                if (x !== x && y !== y) { return true }              // identical(NaN, NaN)
+                if (x === 0 && y === 0) { return (1 / x) === (1 / y) } // 0.0 is not -0.0
+                return x === y
+            }
+            return szEq(a, b)
+        }
         return a === b
     }
     function findThis() {

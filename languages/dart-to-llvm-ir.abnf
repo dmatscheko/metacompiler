@@ -1020,9 +1020,23 @@ PosRecField <~~ push({rname: "", t: pop()}) ~~> = AssignExpr ;
 // integer. All three accept '_' digit separators (Dart 3.6). The longest/prefixed forms
 // come first because this is a PEG.
 // A double may start with the point: `.5`. It comes first so the plain forms never see it.
-NumLit      = NumLeadDot | NumHex | NumDec | NumInt ;
-NumLeadDot  <~~ push(makeConst(parseFloat("0" + stripWs(up.in)))) ~~>
+// Dart's `int` and `double` are DIFFERENT types, so a literal has to say which one it
+// is: a form with a point or an exponent emits the js_dartflo double box, and a plain
+// or hex digit run emits an int - through js_dartlit past 2^53, because emitNum would
+// already have rounded 9223372036854775807 to 9223372036854776000 on the way into the
+// module. The shared NumHex/NumDec/NumInt of lib/numbers.abnf push plain
+// parseInt/parseFloat constants, so Dart uses its own three; NumHexDig and NumExp are
+// still the shared ones. Mirrors dart-interpreter.abnf's DartHexLit/DartDecLit/DartIntLit.
+NumLit      = NumLeadDot | DartHexLit | DartDecLit | DartIntLit ;
+NumLeadDot  <~~ push(makeFloConst(parseFloat("0" + dNoUnd(up.in)))) ~~>
             = "." :whitespace() "0"..."9" { "0"..."9" | "_" } :whitespace(Whitespace) ;
+DartHexLit  <~~ push(dIntLit(up.in, 16)) ~~>
+            = "0" ( "x" | "X" ) :whitespace() NumHexDig { NumHexDig | "_" } :whitespace(Whitespace) ;
+DartDecLit  <~~ push(makeFloConst(parseFloat(dNoUnd(up.in)))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
+              ( "." "0"..."9" { "0"..."9" | "_" } [ NumExp ] | NumExp ) :whitespace(Whitespace) ;
+DartIntLit  <~~ push(dIntLit(up.in, 10)) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } :whitespace(Whitespace) ;
 
 // A collection literal with an explicit type argument: <int>[...], <K,V>{...}. The type
 // argument is erased and the list/map/set is built as usual.
@@ -1338,60 +1352,88 @@ KwSuper     = "super" KwEnd ;
         }
     }
 
-    // Dart has ONE numeric tower with real doubles, and only ~/ (and the bitwise
-    // operators) truncate:
-    //   ~/  integer division: js_div wrapped to 32 bits (also the ~/= form).
-    //   /   ALWAYS a double result (7 / 2 == 3.5), so it must NOT be wrapped - the
-    //       shared compile-core defaults wrap it, which is the JS-like behaviour.
-    //   %   euclidean: the result lies in [0, r.abs()), so -7 % 3 == 2 (js_mod, like
-    //       JS %, gives -1, which is what (-7).remainder(3) returns in Dart).
-    binExt["~/"] = "js_div"
-    wraps["~/"] = 1
-    binExt["~/="] = "js_div"
-    wraps["~/="] = 1
-    wraps["/"] = 0
-    wraps["/="] = 0
-    wraps["%"] = 0
-    wraps["%="] = 0
-    // - and * were still wrapped, so 2.5 - 1.0 was 1 and -1.5 was -1 here while
-    // dart-interpreter.abnf (whose binOp override never truncates) answered 1.5 and
-    // -1.5. Dart has ONE numeric tower: only ~/ and the bitwise operators truncate.
-    wraps["-"] = 0
-    wraps["*"] = 0
-    wraps["-="] = 0
-    wraps["*="] = 0
-
-    // % : m = l % r ; if (m < 0) m += r.abs(). Emitted branch free with two selects, so
-    // emitBin keeps its (b, op, l, r) -> value shape and every caller (foldBinary,
-    // makeAssign's compound forms) picks the Dart semantics up for free.
+    // ----- Dart's numbers: a 64-bit int and a separate double -----
+    // Every arithmetic, bitwise, shift, ordered-comparison and equality operator goes
+    // to the js_dart* externs of abnf/jsrtdart.go, which carry the TYPE on the value:
+    // a plain number is an int inside 2^53, a jsGInt (the shared sized-integer box of
+    // jsrtint.go, always w=64 signed here) is an int outside it, and a jsDartFlo is a
+    // double. Before this, every number was one JS double and every operator went to
+    // js_sub / js_mul / js_div or to the 32-bit js_band / js_shl, so:
+    //   1 / 1            "1"        Dart 1.0   (`/` ALWAYS yields a double)
+    //   print(1.0)       "1"        Dart 1.0
+    //   1 is double      true       Dart false
+    //   int64max + 1     9.2e+18    Dart -9223372036854775808  (and -1 in the
+    //                                              interpreter half - a live divergence)
+    //   1 << 62          0          Dart 4611686018427387904
+    // dart-interpreter.abnf implements the identical rules on top of szArith / the
+    // {__flo} box; ./test.sh --cross diffs the two, so the two files must stay in step.
+    //
+    //   /    ALWAYS a double result, for two ints as well (7 / 2 is 3.5)
+    //   ~/   truncating division, and its result is an int even for two doubles
+    //   %    EUCLIDEAN: the result lies in [0, r.abs()), so -7 % 3 is 2 (whereas
+    //        (-7).remainder(3) is -1, which is what JS's % gives)
+    var dArithOp = {"+": "+", "-": "-", "*": "*", "/": "/", "~/": "~/", "%": "%",
+                    "&": "&", "|": "|", "^": "^", "<<": "<<", ">>": ">>", ">>>": ">>>",
+                    "+=": "+", "-=": "-", "*=": "*", "/=": "/", "~/=": "~/", "%=": "%",
+                    "&=": "&", "|=": "|", "^=": "^", "<<=": "<<", ">>=": ">>", ">>>=": ">>>"}
+    var dRelExt = {"<": "js_dartlt", "<=": "js_dartle", ">": "js_dartgt", ">=": "js_dartge"}
+    var dNumGetters = {"$isEven": 1, "$isOdd": 1, "$isNaN": 1, "$isFinite": 1,
+                       "$isInfinite": 1, "$isNegative": 1, "$sign": 1}
     var baseEmitBin = emitBin
     emitBin = function(b, op, l, r) {
-        if (op == "%" || op == "%=") {
-            var zero = emitNum(b, 0)
-            var m = callExt(b, "js_mod", [l, r])
-            var absr = b.NewSelect(truthy(b, callExt(b, "js_lt", [r, zero])),
-                                   callExt(b, "js_neg", [r]), r)
-            return b.NewSelect(truthy(b, callExt(b, "js_lt", [m, zero])),
-                               callExt(b, "js_jadd", [m, absr]), m)
-        }
+        var base = dArithOp[op]
+        if (typeof base == "string") { return callExt(b, "js_dartarith", [emitStr(b, base), l, r]) }
+        var rl = dRelExt[op]
+        if (typeof rl == "string") { return callExt(b, rl, [l, r]) }
+        if (op == "==") { return callExt(b, "js_darteq", [l, r]) }
+        if (op == "!=") { return callExt(b, "js_dartne", [l, r]) }
         return baseEmitBin(b, op, l, r)
     }
 
-    // Bitwise and shift operators reuse the ToInt32/ToUint32 externals (js.go); the
-    // results are already 32-bit, so no extra wrap is needed.
-    binExt["|"] = "js_bor"
-    binExt["^"] = "js_bxor"
-    binExt["&"] = "js_band"
-    binExt["<<"] = "js_shl"
-    binExt[">>"] = "js_shr"
-    binExt[">>>"] = "js_ushr"
+    // A double literal, and an int literal past 2^53 (see NumLit above).
+    function makeFloConst(f) {
+        return function(b) { return {b: b, v: callExt(b, "js_dartflo", [emitNum(b, f)])} }
+    }
+    function dIntLit(text, radix) {
+        var digits = ""
+        var v = 0
+        for (var i = 0; i < text.length; i++) {
+            var cc = text.charCodeAt(i)
+            var d = 0 - 1
+            if (cc >= 48 && cc <= 57) { d = cc - 48 }
+            else if (cc >= 97 && cc <= 102) { d = cc - 87 }
+            else if (cc >= 65 && cc <= 70) { d = cc - 55 }
+            if (d < 0 || d >= radix) { continue }   // the 0x prefix, a '_', whitespace
+            v = v * radix + d
+            digits = digits + text.charAt(i)
+        }
+        // Strictly BELOW 2^53: at the bound and above, the double `v` accumulated here
+        // is itself already rounded, so it cannot be trusted to decide.
+        if (v < 9007199254740992) { return makeConst(v) }
+        var rx = radix
+        var dg = digits
+        return function(b) {
+            return {b: b, v: callExt(b, "js_dartlit", [emitStr(b, dg), emitNum(b, rx)])}
+        }
+    }
+    // The text of a number literal without its '_' digit separators (Dart 3.6) and
+    // without the trailing whitespace the production consumed, ready for parseFloat.
+    function dNoUnd(s) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch != "_") { out = out + ch }
+        }
+        return stripWs(out)
+    }
 
-    // ~v is v ^ -1 on the ToInt32 value (reuses the xor external), like MetaJS.
+    // ~v flips all 64 bits: Dart's int is 64-bit two's complement, so ~(1 << 62) is not
+    // a 32-bit value and the old js_bxor -1 (which is ToInt32) could not answer it.
     function makeBitNot(t) {
         return function(b) {
             var r = t(b)
             b = r.b
-            return {b: b, v: callExt(b, "js_bxor", [r.v, callExt(b, "js_num_i", [handle(-1)])])}
+            return {b: b, v: callExt(b, "js_dartnot", [r.v])}
         }
     }
 
@@ -1820,11 +1862,14 @@ KwSuper     = "super" KwEnd ;
         var name = items[0]
         var args = items.slice(1)
         return function(b) {
-            // identical(a, b) is reference equality, which is exactly js_seq.
+            // identical(a, b) is reference equality - except for numbers, which have no
+            // identity apart from their value and their type: identical(1.0, 1.0) is
+            // TRUE and identical(1, 1.0) is FALSE. Since a double and a large int are
+            // boxed objects now, js_seq would have answered the opposite of both.
             if (name == "identical" && args.length == 2) {
                 var i1 = args[0](b)
                 var i2 = args[1](i1.b)
-                return {b: i2.b, v: callExt(i2.b, "js_seq", [i1.v, i2.v])}
+                return {b: i2.b, v: callExt(i2.b, "js_dartident", [i1.v, i2.v])}
             }
             // A bare call to an instance method of the class whose body this call stands
             // in: `go()` inside a method is `this.go()`.
@@ -1961,13 +2006,21 @@ KwSuper     = "super" KwEnd ;
                     } else {
                         var margs = callExt(b, "js_arr_new", [])
                         b = emitCallArgsInto(b, margs, s.args)
-                        cur = callExt(b, "js_mcall", [cur, emitStr(b, s.name), margs])
+                        // js_dartnm is js_mcall plus num's own members (toInt, round,
+                        // abs, ...), which the runtime's member dispatch does not know
+                        // and which matter far more now that int and double are
+                        // distinct types: a non-number receiver, and a name that is not
+                        // one of them, falls straight through to js_mcall's memberCall.
+                        cur = callExt(b, "js_dartnm", [cur, emitStr(b, s.name), margs])
                     }
                 } else if (s.kind == "field") {
                     if (s.name == "length") { var lr = emitLength(b, cur); b = lr.b; cur = lr.v }
                     else if (s.name == "isEmpty") { var er = emitLength(b, cur); b = er.b; cur = callExt(b, "js_seq", [er.v, emitNum(b, 0)]) }
                     else if (s.name == "isNotEmpty") { var nr = emitLength(b, cur); b = nr.b; cur = callExt(b, "js_gt", [nr.v, emitNum(b, 0)]) }
                     else if (s.name == "keys") { cur = callExt(b, "js_mcall", [cur, emitStr(b, "keys"), callExt(b, "js_arr_new", [])]) }
+                    // num's getters (isEven, isNaN, sign, ...) read like fields;
+                    // js_dartnm answers them and hands anything else to memberCall.
+                    else if (dNumGetters["$" + s.name] == 1) { cur = callExt(b, "js_dartnm", [cur, emitStr(b, s.name), callExt(b, "js_arr_new", [])]) }
                     else if (s.name == "values") { var vr2 = emitValuesRead(b, cur); b = vr2.b; cur = vr2.v }
                     else { var gr = emitGetterRead(b, cur, s.name); b = gr.b; cur = gr.v }
                 } else if (s.kind == "callv") {
@@ -2022,7 +2075,7 @@ KwSuper     = "super" KwEnd ;
         if (s.kind == "mcall") {
             var argsV = callExt(b, "js_arr_new", [])
             b = emitCallArgsInto(b, argsV, s.args)
-            return {b: b, v: callExt(b, "js_mcall", [cur, emitStr(b, s.name), argsV])}
+            return {b: b, v: callExt(b, "js_dartnm", [cur, emitStr(b, s.name), argsV])}
         }
         if (s.kind == "field") { return emitGetterRead(b, cur, s.name) }
         var ir = s.idx(b)
@@ -3207,13 +3260,14 @@ KwSuper     = "super" KwEnd ;
     // -x : a user `operator -()` with no argument when the operand is an instance of a
     // class that declares one (the interpreter keys unary minus under "-" too), else the
     // shared numeric negation.
-    // The shared makeNeg wraps the negation to 32 bits, which made -1.5 answer -1 here
-    // while the interpreter half answered -1.5. Dart's unary minus is plain negation.
+    // -x keeps the operand's TYPE: a double negates as a double (so -0.0 and -1.0/0.0
+    // stay real), an int at 64 bits (so -int64min wraps back to itself). js_neg went
+    // through one JS double and the shared makeNeg then wrapped it to 32 bits.
     var baseMakeNeg = makeNeg
     makeNeg = function(t) {
         var inner = function(b) {
             var ri = t(b)
-            return {b: ri.b, v: callExt(ri.b, "js_neg", [ri.v])}
+            return {b: ri.b, v: callExt(ri.b, "js_dartneg", [ri.v])}
         }
         return function(b) {
             if (operatorNames["$-"] == undefined) { return inner(b) }
@@ -3221,7 +3275,7 @@ KwSuper     = "super" KwEnd ;
             b = r.b
             var ov = r.v
             return emitOpDispatch(b, "-", ov, [],
-                                  function(bb) { return {b: bb, v: callExt(bb, "js_neg", [ov])} })
+                                  function(bb) { return {b: bb, v: callExt(bb, "js_dartneg", [ov])} })
         }
     }
     // ----- patterns (Dart 3) -----
@@ -3885,11 +3939,13 @@ KwSuper     = "super" KwEnd ;
         var oneV = anytype
         if (ref.path.length == 0 && ref.seed == undefined) {
             var nameV = emitStr(b, ref.name)
-            var oldV = callExt(b, "js_tonum", [callExt(b, "js_kget", [curScopeV, nameV])])
+            // NOT js_tonum: that reads the value as one JS double and would strip
+            // the int/double box, so `double x = 1.5; x++` would answer an int.
+            var oldV = callExt(b, "js_kget", [curScopeV, nameV])
             oneV = callExt(b, "js_num_i", [handle(1)])
-            // NOT intWrap: Dart's ++ on a double keeps the double (x = 1.5; x++ is
-            // 2.5), and the interpreter half's step never truncated either.
-            var newV = callExt(b, extName, [oldV, oneV])
+            // Dart's ++ is +1 on the value's OWN type: an int stays an int (wrapping at
+            // 64 bits), a double stays a double, so x = 1.5; x++ is 2.5.
+            var newV = callExt(b, "js_dartarith", [emitStr(b, extName), oldV, oneV])
             callExt(b, "js_kset", [curScopeV, nameV, newV])
             return {b: b, old: oldV, nw: newV, skips: []}
         }
@@ -3897,14 +3953,14 @@ KwSuper     = "super" KwEnd ;
         var p = emitRefPath(b, ref, nullBs)
         b = p.b
         var old2 = anytype
-        if (p.field) { old2 = callExt(b, "js_tonum", [callExt(b, "js_get", [p.obj, p.key])]) }
+        if (p.field) { old2 = callExt(b, "js_get", [p.obj, p.key]) }
         else {
             var g = emitIndexGet(b, p.obj, p.key)
             b = g.b
-            old2 = callExt(b, "js_tonum", [g.v])
+            old2 = g.v
         }
         oneV = callExt(b, "js_num_i", [handle(1)])
-        var new2 = callExt(b, extName, [old2, oneV])
+        var new2 = callExt(b, "js_dartarith", [emitStr(b, extName), old2, oneV])
         if (p.field) { b = emitSetterWrite(b, p.obj, ref.path[ref.path.length - 1].key, new2) }
         else { b = emitIndexSet(b, p.obj, p.key, new2) }
         return {b: b, old: old2, nw: new2, skips: nullBs}
@@ -3912,7 +3968,7 @@ KwSuper     = "super" KwEnd ;
     // Prefix ++x / --x: the same update as the postfix form, but the value of the
     // expression is the NEW one.
     function makePreIncDec(items) {
-        var extName = (items[0] == "++") ? "js_add" : "js_sub"
+        var extName = (items[0] == "++") ? "+" : "-"
         var ref = items[1]
         return function(b) {
             var r = emitStep(b, ref, extName)
@@ -3921,7 +3977,7 @@ KwSuper     = "super" KwEnd ;
     }
     function makeIncDec(items) {
         var ref = items[0]
-        var extName = (items[1] == "++") ? "js_add" : "js_sub"
+        var extName = (items[1] == "++") ? "+" : "-"
         return function(b) {
             var r = emitStep(b, ref, extName)
             return joinNullSkips(r.b, r.old, r.skips)

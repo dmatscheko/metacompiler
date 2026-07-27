@@ -99,7 +99,11 @@ int classify(int n) {
 
 int main() {
   // Bitwise and shift operators are genuinely compiled.
-  var bits = (6 & 3) | (1 << 2) ^ (~1 >>> 30);
+  // ~1 is -2 and Dart's int is 64-bit, so `>>>` shifts a 64-bit UNSIGNED value:
+  // 0xFFFFFFFFFFFFFFFE >>> 62 is 3. This used to read `>>> 30`, which is 3 only in
+  // 32 bits (0xFFFFFFFE >>> 30) and is 0x3FFFFFFFF in Dart; the shift distance is
+  // the only thing that changed, so the self-check arithmetic below is untouched.
+  var bits = (6 & 3) | (1 << 2) ^ (~1 >>> 62);
   var masked = bits & 255;
 
   var name = "dart";

@@ -802,6 +802,174 @@ void s29() {
 
 // ===== END SECTIONS =====
 
+
+// ===== SECTION 30: int and double are different types; int is 64-bit =====
+// Dart has TWO numeric types with no implicit conversion, and its int is exactly
+// 64-bit two's complement on the VM and WRAPS. Both grammars used to model every
+// number as one JS double, so `print(1.0)` said "1", `1 / 1` said "1" although `/`
+// always yields a double, `1 is double` was true, `1.0 is int` was true, and
+// int64max + 1 answered 9.2e+18 in the compiler half and -1 in the interpreter half
+// (a live cross-half divergence). Every expectation below is quoted from the
+// vendored corpus at tests/reference/dart, file:line given per assertion; the ones
+// marked SPEC come from the dart:core documentation instead, because the corpus is
+// silent on them. There is no dart toolchain on this machine, so none of this was
+// run against a real Dart VM.
+const int tnBig = 9223372036854775807;
+const int tnMin = -9223372036854775808;
+int tnId(int x) => x;
+double tnIdD(double x) => x;
+void s30() {
+  // --- the two types are disjoint -------------------------------------------
+  // language/number/numbers_test.dart:16-17   one is int, one is NOT double
+  // language/number/numbers_test.dart:22-23   two is NOT int, two is double
+  var one = 1;
+  var two = 2.0;
+  check("nt1", one is int && one is num && !(one is double));
+  check("nt2", two is double && two is num && !(two is int));
+  // language/number/numbers_test.dart:27-31   1 + 2.0 is a double and equals 3.0
+  var sum = one + two;
+  check("nt3", sum is double && !(sum is int) && sum == 3.0);
+  // The double type is "contagious": arithmetic_test.dart:119-140 assigns each of
+  // these to a `double` variable, which only type-checks if the value is a double.
+  check("nt4", (1 + 1.0) is double && (1.0 + 1) is double && (1 * 1.0) is double
+      && (0 * 1.0) is double && (1.0 * 0) is double);
+
+  // --- rendering: double.toString --------------------------------------------
+  // language/double/to_string_test.dart:9-11, 26, 33, 56
+  check("nt5", (0.0 / 0.0).toString() == "NaN" && (1 / 0).toString() == "Infinity"
+      && (-1 / 0).toString() == "-Infinity");
+  check("nt6", "${90.12}" == "90.12" && "${0.1}" == "0.1" && "${0.0123}" == "0.0123");
+  check("nt7", (0.0000001).toString() == "1e-7" && (0.000001).toString() == "0.000001"
+      && (1000000000000000012800.0).toString() == "1e+21");
+  check("nt8", (-0.0).toString() == "-0.0" && (-90.12).toString() == "-90.12");
+  // A whole-valued double keeps its point, which is the whole reason for the box.
+  check("nt9", "${1.0}" == "1.0" && 2.0.toString() == "2.0" && "${-3.0}" == "-3.0");
+
+  // --- / always yields a double ----------------------------------------------
+  // language/operator/arithmetic_test.dart:54-55   22 / 4 is 5.5, 10 / 5 is 2.0
+  check("nt10", (22 / 4) == 5.5 && (10 / 5) == 2.0 && (10 / 5) is double);
+  check("nt11", (1 / 1) is double && "${1 / 1}" == "1.0");
+
+  // --- the four operand-type combinations ------------------------------------
+  // language/operator/arithmetic_test.dart:50-57 (int/int), :67-73 (int/double),
+  // :77-83 (double/int) and :87-93 (double/double)
+  var a = 22;
+  var b = 4;
+  var c = 4.0;
+  var d = 22.0;
+  check("nt12", a + b == 26 && a - b == 18 && a * b == 88 && a ~/ b == 5
+      && a % b == 2 && a.remainder(b) == 2);
+  check("nt13", (a + c) is double && a + c == 26.0 && (a ~/ c) is int && a ~/ c == 5
+      && a % c == 2.0 && a.remainder(c) == 2.0);
+  check("nt14", (d + b) is double && d - b == 18.0 && d * b == 88.0
+      && (d ~/ b) is int && d / b == 5.5);
+  check("nt15", (d + c) is double && d % c == 2.0 && d.remainder(c) == 2.0
+      && (d ~/ c) is int && d ~/ c == 5);
+  // % is EUCLIDEAN, so the result lies in [0, r.abs()): language/operator/modulo_test.dart
+  // checks i % 256 and i % -256 over i in [-30, 30); remainder() is the truncating one.
+  check("nt16", (-7) % 3 == 2 && (-7).remainder(3) == -1 && 7 % (-3) == 1);
+
+  // --- 64-bit int: the literal, the wrap, and the printed digits -------------
+  // language/number/int64_literal_test.dart:21-25
+  //   0x8000000000000000 IS int64min, and int64min - 1 is int64max (it wraps)
+  check("nt17", "$tnMin" == "-9223372036854775808" && "${tnMin - 1}" == "9223372036854775807");
+  check("nt18", 0x8000000000000000 == tnMin && -0x8000000000000000 == tnMin);
+  // language/operator/arithmetic_int64_test.dart:18-19  the two extremes round-trip
+  check("nt19", "$tnBig" == "9223372036854775807" && tnBig + 1 == tnMin);
+  check("nt20", tnId(tnBig) == 9223372036854775807 && tnBig - 1 == 9223372036854775806);
+  // A value past 2^53 stays exact through arithmetic and through interpolation.
+  check("nt21", "${4611686018427387904 + 1}" == "4611686018427387905");
+
+  // --- 64-bit shifts and bitwise ---------------------------------------------
+  // language/operator/bit_operations_test.dart:26-27, 29, 33-34, 50, 54
+  check("nt22", 1 << 64 == 0 && -1 << 64 == 0);
+  check("nt23", 0x0400000000000000 << 4 == 0x4000000000000000);
+  check("nt24", 1 >> 160 == 0 && -1 >> 160 == -1);
+  check("nt25", 0xF00000000 >> 32 == 15 && 15 << 32 == 0xF00000000);
+  check("nt26", 1 << 62 == 4611686018427387904 && ~0 == -1);
+  // SPEC (dart:core int.operator>>>): the operand is read as an UNSIGNED 64-bit
+  // value, so -1 >>> 28 is 0xFFFFFFFFF. The corpus has no numeric >>> assertion.
+  check("nt27", -1 >>> 28 == 68719476735 && -2 >>> 62 == 3);
+
+  // --- identity ---------------------------------------------------------------
+  // language/number/identity_test.dart:20   identical(8, 8 + 0)
+  // language/number/identity_test.dart:27   an int is never identical to a double
+  // language/number/identity_test.dart:31   identical(8.0, 8.0 + 0.0)
+  check("nt28", identical(8, 8 + 0) && identical(8.0, 8.0 + 0.0));
+  check("nt29", !identical(9223372036854775806, 8.0) && !identical(1, 1.0));
+  // language/number/identity2_test.dart:24   identical(nan, nan + 0.0) is true
+  check("nt30", identical(0.0 / 0.0, 0.0 / 0.0 + 0.0));
+  // == crosses the two types even though `is` does not.
+  check("nt31", 1 == 1.0 && 1.0 == 1 && !(1 == 2.0));
+
+  // --- toInt / toDouble / floor / ceil / round / truncate ---------------------
+  // language/operator/arithmetic_test.dart:96-99 and :101-104 - the four on an int
+  // answer the int itself, for a positive and for a negative operand.
+  check("nt32", (2).floor() == 2 && (2).ceil() == 2 && (2).round() == 2 && (2).truncate() == 2);
+  check("nt33", (-2).floor() == -2 && (-2).ceil() == -2 && (-2).round() == -2
+      && (-2).truncate() == -2);
+  // language/operator/arithmetic_test.dart:109-116  a 53-bit value, both signs
+  check("nt34", 123456789012345.floor() == 123456789012345
+      && (-123456789012345).round() == -123456789012345);
+  // language/operator/round_test.dart:22-26  round() is NOT floor(x + 0.5):
+  // 0.49999999999999994 + 0.5 is 1.0 and 9007199254740991 + 0.5 is 9007199254740992.
+  check("nt35", (0.49999999999999994).round() == 0 && (-0.49999999999999994).round() == 0);
+  check("nt36", (9007199254740991.0).round() == 9007199254740991
+      && (-9007199254740991.0).round() == -9007199254740991);
+  // SPEC (dart:core double.round): ties round AWAY FROM ZERO.
+  check("nt37", (2.5).round() == 3 && (-2.5).round() == -3 && (2.6).round() == 3
+      && (-2.6).round() == -3);
+  // SPEC (dart:core): floor/ceil/truncate on a double answer an INT; toDouble a double.
+  check("nt38", (2.6).floor() == 2 && (2.6).ceil() == 3 && (2.6).truncate() == 2
+      && (-2.6).floor() == -3 && (-2.6).ceil() == -2 && (-2.6).truncate() == -2);
+  check("nt39", (2.6).floor() is int && (2.9).toInt() is int && 3.toDouble() is double
+      && 3.toDouble() == 3.0 && "${3.toDouble()}" == "3.0");
+  // SPEC (dart:core num.abs / int.isEven / double.isNaN): abs keeps the type.
+  check("nt40", (-1.5).abs() == 1.5 && (-1.5).abs() is double && (-7).abs() == 7
+      && (-7).abs() is int);
+  check("nt41", 4.isEven && !4.isOdd && (0.0 / 0.0).isNaN && !(1.0).isNaN
+      && (1 / 0).isInfinite && (1.0).isFinite);
+  // SPEC (dart:core int.toRadixString): exact past 2^53 as well.
+  check("nt42", 255.toRadixString(16) == "ff" && tnBig.toRadixString(16) == "7fffffffffffffff");
+
+  // --- boxes must not leak into identity-shaped machinery --------------------
+  // A Map keys on == and hashCode, and 1 == 1.0, so the two are the SAME key
+  // (SPEC: dart:core Map / num.hashCode). A boxed number is an object here, so a
+  // naive === would have made every double key unfindable.
+  var m = <num, String>{1: "a", 2.5: "b"};
+  check("nt43", m[1] == "a" && m[1.0] == "a" && m[2.5] == "b" && m.length == 2);
+  var mBig = <int, int>{};
+  mBig[tnBig] = 7;
+  check("nt44", mBig[9223372036854775807] == 7 && !mBig.containsKey(tnBig - 1));
+  // const canonicalization keys on the value AND the type: language/canonicalize/
+  // const_test.dart asserts identical(const <int>[1, 2], const <int>[1, 2]), and
+  // int and double are different types, so const [1] is not const [1.0].
+  check("nt45", identical(const [1, 2], const [1, 2])
+      && !identical(const [1], const [1.0]));
+  // The double rendering has to be reachable from a collection and a record too.
+  check("nt46", "${[1.0, 2]}" == "[1.0, 2]" && "${(1.0, 2)}" == "(1.0, 2)"
+      && "${<String, double>{'k': 1.0}}" == "{k: 1.0}");
+
+  // --- ++ / -- and the compound assignments keep the operand's type -----------
+  // SPEC (dart:core num.operator+): x++ is x + 1 at x's own type.
+  var iv = 41;
+  iv++;
+  var dv = 1.5;
+  dv++;
+  check("nt47", iv == 42 && iv is int && dv == 2.5 && dv is double);
+  var wv = tnBig;
+  wv++;
+  check("nt48", wv == tnMin);
+  var cv = 7;
+  cv ~/= 2;
+  var cd = 7.0;
+  cd /= 2;
+  check("nt49", cv == 3 && cv is int && cd == 3.5 && cd is double);
+  var sv = 1;
+  sv <<= 62;
+  check("nt50", sv == 4611686018427387904 && tnIdD(2.0) == 2.0);
+}
+
 int main() {
   s01(); // SECTION-CALL 01
   s02(); // SECTION-CALL 02
@@ -832,6 +1000,7 @@ int main() {
   s27(); // SECTION-CALL 27
   s28(); // SECTION-CALL 28
   s29(); // SECTION-CALL 29
+  s30(); // SECTION-CALL 30
   print("full: $checks checks, $fails failures");
   return fails;
 }

@@ -289,7 +289,12 @@ int main() {
   check("bit-not", (~5) == -6);
   check("bit-shl", (1 << 4) == 16);
   check("bit-shr-neg", (-8 >> 1) == -4);
-  check("bit-ushr", (-1 >>> 28) == 15);
+  // Dart's int is 64-bit, so `>>>` shifts a 64-bit unsigned value: -1 is
+  // 0xFFFFFFFFFFFFFFFF and >>> 28 leaves 0xFFFFFFFFF. The old expectation (15) was
+  // the JS 32-bit answer, which both halves used to give. Neighbouring 64-bit shift
+  // behaviour is pinned by the corpus in
+  // language/operator/bit_operations_test.dart:50 (0xF00000000 >> 32 == 15) and :54.
+  check("bit-ushr", (-1 >>> 28) == 68719476735);
 
   // ----- comparisons, logic, ternary -----
   check("cmp-ops", 2 < 3 && 3 <= 3 && 3 > 2 && 3 >= 3 && !(2 >= 3));
