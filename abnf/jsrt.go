@@ -916,6 +916,8 @@ func (rt *jsrt) truthy(v interface{}) bool {
 		return t != 0 && t == t
 	case jsPhpFlo: // PHP's boxed float (see jsrtphp.go); 0.0 is falsy.
 		return t.f != 0
+	case jsJFlo: // Java's boxed double (see jsrtjvm.go).
+		return t.f != 0 && t.f == t.f
 	case string:
 		return len(t) > 0
 	case *jsBigInt:
@@ -932,6 +934,8 @@ func (rt *jsrt) toNumber(v interface{}) float64 {
 	case jsFlo: // Ruby's boxed Float / Rational / Complex are numbers.
 		return t.f
 	case jsPhpFlo: // PHP's boxed float.
+		return t.f
+	case jsJFlo: // Java's boxed double.
 		return t.f
 	case jsRat:
 		return t.n / t.d
@@ -1008,6 +1012,8 @@ func (rt *jsrt) toString(v interface{}) string {
 		return rubyFloStr(t.f)
 	case jsPhpFlo: // PHP prints a float without a fraction as an integer ((string)3.0 == "3").
 		return phpFloStr(t.f)
+	case jsJFlo: // Each language's own float rendering (see jsrtjvm.go).
+		return jvmFloText(t)
 	case jsRat:
 		return jsNumString(t.n) + "/" + jsNumString(t.d)
 	case jsCpx:
@@ -1061,6 +1067,8 @@ func (rt *jsrt) toGoNatural(v interface{}) interface{} {
 		return rt.rubyStr(v)
 	case jsPhpFlo: // print/println show PHP's rendering (3.0 prints as 3).
 		return phpFloStr(t.f)
+	case jsJFlo: // print/println show the language's own float rendering.
+		return jvmFloText(t)
 	case jsUndefT, jsNullT:
 		return nil
 	case float64:
@@ -1140,6 +1148,14 @@ func (rt *jsrt) strictEq(a, b interface{}) bool {
 	}
 	if bv, isChar := charCode(b); isChar {
 		return rt.strictEq(a, bv)
+	}
+	// Java's boxed double (jsrtjvm.go): 1.0 == 1 holds, so the box is compared by
+	// VALUE against the other side's number - never by identity.
+	if af, isFlo := a.(jsJFlo); isFlo {
+		return jvmNumEq(af.f, b)
+	}
+	if bf, isFlo := b.(jsJFlo); isFlo {
+		return jvmNumEq(bf.f, a)
 	}
 	switch at := a.(type) {
 	case jsUndefT:
@@ -1470,6 +1486,8 @@ func (rt *jsrt) typeOf(v interface{}) string {
 	switch v.(type) {
 	case jsChar:
 		return "char"
+	case jsJFlo: // Java's boxed double is a number like any other.
+		return "number"
 	case jsSym:
 		return "symbol"
 	case jsUndefT:
@@ -2395,6 +2413,15 @@ func (rt *jsrt) pyString(v interface{}) string {
 	default:
 		return rt.toString(v)
 	}
+}
+
+// csString renders a value for C# style string concatenation: a null operand
+// contributes the EMPTY string (String.Concat skips it), where Java writes "null".
+func (rt *jsrt) csString(v interface{}) string {
+	if isUndefOrNull(v) {
+		return ""
+	}
+	return rt.toString(v)
 }
 
 // javaString renders a value for Java style string concatenation:
@@ -4971,6 +4998,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if ls || rs {
 				return rt.wrapStr(strConcat(rt.javaString(l), rt.javaString(r)))
 			}
+			if jvmIsFlo(l) || jvmIsFlo(r) {
+				// A double operand pulls the whole addition into floating point.
+				return w(jsJFlo{f: rt.toNumber(l) + rt.toNumber(r), sty: jvmStyleOf(l, r)})
+			}
 			ln, rn := rt.toNumber(l), rt.toNumber(r)
 			if isInt32Value(ln) && isInt32Value(rn) {
 				return rt.wrapNum(float64(int32(int64(ln) + int64(rn))))
@@ -5938,6 +5969,97 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return boolH(rt.strictEq(x, y))
 		},
+		// ----- Java's / Kotlin's boxed double (see the jsJFlo type in jsrtjvm.go) -----
+		// A double from any numeric value: the (double)/(float) cast, a floating
+		// point literal and a `double`-declared variable's initializer.
+		"js_jflo": func(a []uint64) uint64 { return w(jvmMkFlo(rt.toNumber(u(a[0])))) },
+		// ----- C#: the two places its value semantics differ from Java's -----
+		// C#'s '+': a null operand renders as the EMPTY string, not as "null"
+		// (String.Concat(object) calls ToString() only on a non-null argument,
+		// ECMA-334 12.4.7 / .NET String.Concat), where Java spells it "null".
+		// Otherwise it is js_jadd: string concat, 32 bit add for two ints, float add
+		// when a double is involved.
+		"js_csadd": func(a []uint64) uint64 {
+			l, r := u(a[0]), u(a[1])
+			_, ls := l.(string)
+			_, rs := r.(string)
+			if ls || rs {
+				return rt.wrapStr(strConcat(rt.csString(l), rt.csString(r)))
+			}
+			if jvmIsFlo(l) || jvmIsFlo(r) {
+				return w(jsJFlo{f: rt.toNumber(l) + rt.toNumber(r), sty: jvmStyleOf(l, r)})
+			}
+			ln, rn := rt.toNumber(l), rt.toNumber(r)
+			if isInt32Value(ln) && isInt32Value(rn) {
+				return rt.wrapNum(float64(int32(int64(ln) + int64(rn))))
+			}
+			return rt.wrapNum(ln + rn)
+		},
+		// C#'s .Length / .Count. A string's Length counts UTF-16 CODE UNITS
+		// (System.String is a UTF-16 sequence, so "😀".Length is 2), where
+		// js_pylen counts code points because Python's len() does. Everything else
+		// is js_pylen.
+		"js_cslen": func(a []uint64) uint64 {
+			switch o := u(a[0]).(type) {
+			case string:
+				return rt.wrapNum(float64(len(utf16.Encode([]rune(o)))))
+			case *jsArray:
+				return rt.wrapNum(float64(len(o.elems)))
+			}
+			if keys, _, ok := dictParts(u(a[0])); ok {
+				return rt.wrapNum(float64(len(keys.elems)))
+			}
+			rt.fail("Length/Count of a %s", rt.typeOf(u(a[0])))
+			return 0
+		},
+		// The same box in Go's / C#'s print style (see jsrtjvm.go).
+		"js_gflo": func(a []uint64) uint64 { return w(jsJFlo{f: rt.toNumber(u(a[0])), sty: floGo}) },
+		"js_csflo": func(a []uint64) uint64 { return w(jsJFlo{f: rt.toNumber(u(a[0])), sty: floCS}) },
+		// The integral casts ((int), (long), (short), (byte)): truncate towards
+		// zero and wrap to 32 bits, which is what the compiler emitted before.
+		"js_jfint": func(a []uint64) uint64 { return rt.wrapNum(float64(rt.toInt32(u(a[0])))) },
+		"js_jfsub": func(a []uint64) uint64 { return w(rt.jvmArith('-', u(a[0]), u(a[1]))) },
+		"js_jfmul": func(a []uint64) uint64 { return w(rt.jvmArith('*', u(a[0]), u(a[1]))) },
+		"js_jfdiv": func(a []uint64) uint64 { return w(rt.jvmArith('/', u(a[0]), u(a[1]))) },
+		"js_jfmod": func(a []uint64) uint64 { return w(rt.jvmArith('%', u(a[0]), u(a[1]))) },
+		// -x keeps the operand's type: a double negates as a double (so -0.0 and
+		// -1.0/0.0 are real), everything else negates as an int32.
+		"js_jfneg": func(a []uint64) uint64 {
+			if f, ok := u(a[0]).(jsJFlo); ok {
+				return w(jsJFlo{f: -f.f, sty: f.sty})
+			}
+			return rt.wrapNum(float64(rt.toInt32(-rt.toNumber(u(a[0])))))
+		},
+		// ++ / -- keep the type of what they step, like the interpreter's jStep: a
+		// double stays a double, a char stays a char, everything else is an int32.
+		"js_jfstep": func(a []uint64) uint64 {
+			if c, ok := u(a[0]).(jsChar); ok {
+				return w(jsChar{code: int32((int64(c.code) + int64(rt.toNumber(u(a[1])))) & 65535)})
+			}
+			return w(rt.jvmArith('+', u(a[0]), u(a[1])))
+		},
+		// Java's String.charAt: a CHAR, not a one-character String - so
+		// s.charAt(1) + 0 is 101 and not "e0" (JLS 4.2.1, char is an integral
+		// type). Only the Java compiler grammar emits it, and only for the name
+		// charAt; a user class that declares its own charAt still dispatches
+		// through memberCall.
+		"js_jcharat": func(a []uint64) uint64 { // (target, args array)
+			args, ok := u(a[1]).(*jsArray)
+			if !ok {
+				rt.fail("js_jcharat args must be an array")
+			}
+			if str, isStr := u(a[0]).(string); isStr {
+				i := jsToInt(rt.toNumber(argAt(args.elems, 0)))
+				units := utf16.Encode([]rune(str))
+				if i < 0 || i >= len(units) {
+					rt.fail("string index %d out of range for %q", i, str)
+				}
+				return w(jsChar{code: int32(units[i])})
+			}
+			return w(rt.memberCall(u(a[0]), "charAt", args.elems))
+		},
+		// java.lang.String.valueOf for the printable subset.
+		"js_jfstr": func(a []uint64) uint64 { return rt.wrapStr(rt.javaString(u(a[0]))) },
 		// Define a getter/setter property: (obj, key, getter|undef, setter|undef). Two
 		// calls for the same key merge, so 'get x' and 'set x' of one accessor pair meet
 		// on one record.
@@ -6424,7 +6546,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			case "bool":
 				return boolH(rt.truthy(v))
 			case "float32", "float64":
-				return rt.wrapNum(rt.toNumber(v))
+				// float64(x) BOXES: the result is a float64 whatever x was, which
+				// is what makes float64(7)/2 == 3.5 (see jsrtjvm.go).
+				return w(jsJFlo{f: rt.toNumber(v), sty: floGo})
 			}
 			n := math.Trunc(rt.toNumber(v))
 			switch to {
@@ -7936,6 +8060,11 @@ func standardJSBindings() map[string]interface{} {
 			fmt.Fprintf(outWriter, rt.toString(args[0]), rt.printArgs(args[1:])...)
 			return jsUndef
 		}),
+		// fmt.Sprint's text: the same rendering println gives, returned instead of
+		// printed. The Go compiler grammar binds fmt.Sprint to it.
+		"sprint": jsHostFunc("sprint", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return fmt.Sprint(rt.printArgs(args)...)
+		}),
 		"sprintf": jsHostFunc("sprintf", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			if len(args) == 0 {
 				return ""
@@ -7977,6 +8106,9 @@ func standardJSBindings() map[string]interface{} {
 		"Infinity": math.Inf(1),
 		"NaN":      math.NaN(),
 		"Math":     mathObj,
+		// The Java subset's Math (abs/max/min only, and double-aware); the Java and
+		// Kotlin compiler grammars bind their `Math` to it. See jsrtjvm.go.
+		"__jmath": jvmMathObject(),
 		"String":   stringObj,
 		"Object":   objectObj,
 		"Array":    arrayObj,

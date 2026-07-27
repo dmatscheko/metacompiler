@@ -1684,6 +1684,15 @@ NotMemberKw = :script(~~
     kNumOp2(">=", "compareTo", function(l, r) { return l >= r }, true)
     binOps["=="] = function(l, r) { return kEq(l, r) }
     binOps["!="] = function(l, r) { return !kEq(l, r) }
+    // The compound assignments are the same operators (a *= b is a = a * b), so they
+    // resolve through binOps rather than through the shared applyOps table, whose
+    // arithmetic is 32 bit integer only - which made `d *= 2` on a Double truncate.
+    var kCompound = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%"}
+    var coreApplyOpK = applyOp
+    applyOp = function(op, a, b) {
+        if (hasOwn(kCompound, op)) { return binOp(kCompound[op], a, b) }
+        return coreApplyOpK(op, a, b)
+    }
     // -x: a user `operator fun unaryMinus` wins, otherwise the 32-bit negation.
     makeNeg = function(t) {
         return function() {

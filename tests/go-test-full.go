@@ -652,6 +652,70 @@ func s22() {
 	check("opr9", 7/2 == 3 && -7/2 == -3 && 7%3 == 1 && -7%3 == -1)
 }
 
+// ===== SECTION 23: floating point arithmetic =====
+// float64/float32 are a DIFFERENT type from int, and every value below was
+// checked against `go run` (go 1.26) before it was written down. The section
+// exists because both grammars used to evaluate every arithmetic operator in 32
+// bit integers: a/b with a = 1.0 and b = 3.0 was 0, 2.5 * 1.5 was 3, and +Inf /
+// -Inf / NaN did not exist at all. Note that the assertions run through
+// VARIABLES wherever the answer matters: Go folds untyped constants at
+// arbitrary precision, so `1.0/3.0 == 0.3333333333333333` is false in real Go
+// and would test the wrong thing.
+type point23 struct {
+	x float64
+}
+
+func (p point23) half() float64 { return p.x / 2 }
+
+func fs23(f float64) string { return fmt.Sprint(f) }
+
+func s23() {
+	a, b := 1.0, 3.0
+	check("flt1", a/b == 0.3333333333333333)
+	check("flt2", 7/2 == 3 && -7/2 == -3)
+	check("flt3", float64(7)/2 == 3.5 && a/2 == 0.5)
+	check("flt4", 2.5*1.5 == 3.75 && 7.0-0.5 == 6.5 && 3.0*2.0 == 6.0)
+	check("flt5", fs23(a) == "1" && fs23(2.5) == "2.5" && fs23(a/b) == "0.3333333333333333")
+	// The infinities and NaN, which integer arithmetic could not produce.
+	var z float64 = 0
+	check("flt6", fs23(a/z) == "+Inf" && fs23(-a/z) == "-Inf" && fs23(z/z) == "NaN")
+	check("flt7", z/z != z/z)
+	// fmt's %v is FormatFloat(f, 'g', -1, 64): scientific below 1e-4 and from 1e6.
+	check("flt8", fs23(1e20) == "1e+20" && fs23(1.5e-8) == "1.5e-08")
+	check("flt9", fs23(1e-3) == "0.001" && fs23(100000.0) == "100000" && fs23(1e6) == "1e+06")
+	// A float64 declaration converts its initializer; ++ and the compound
+	// operators keep the variable a float64.
+	var d float64 = 1
+	check("flt10", fs23(d) == "1")
+	d += 0.25
+	check("flt11", d == 1.25)
+	d++
+	check("flt12", d == 2.25)
+	d *= 2
+	check("flt13", d == 4.5)
+	d /= 3
+	check("flt14", d == 1.5)
+	d--
+	check("flt15", d == 0.5 && fs23(d) == "0.5")
+	check("flt16", fs23(-2.5) == "-2.5" && -d == -0.5)
+	n29 := 2.9
+	check("flt17", int(d*4) == 2 && float64(int(n29)) == 2.0)
+	check("flt18", d > 0.25 && d < 1 && d <= 0.5 && d >= 0.5 && d == 0.5 && d != 0.4)
+	// A float64 survives a struct field, a slice element and a method boundary.
+	p := point23{x: 5.0}
+	check("flt19", p.half() == 2.5 && fs23(p.x) == "5")
+	xs := []float64{0.5, 1.5}
+	check("flt20", xs[0]+xs[1] == 2.0 && fs23(xs[0]*2) == "1")
+	var f32 float32 = 3
+	check("flt21", f32/2 == 1.5)
+	check("flt22", min(2.5, 2.0) == 2.0 && max(2.5, 2.0) == 2.5)
+	sum := 0.0
+	for i := 0; i < 4; i++ {
+		sum += 0.25
+	}
+	check("flt23", sum == 1.0 && fs23(sum) == "1")
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -677,6 +741,7 @@ func main() {
 	s20() // SECTION-CALL 20
 	s21() // SECTION-CALL 21
 	s22() // SECTION-CALL 22
+	s23() // SECTION-CALL 23
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

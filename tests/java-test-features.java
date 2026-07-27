@@ -337,7 +337,9 @@ public class Main {
         Main.check("str-int-concat", ("n=" + 42).equals("n=42") && (42 + "x").equals("42x") && (1 + 2 + "x").equals("3x"));
         Main.check("str-length", "hello".length() == 5 && "".length() == 0);
         Main.check("str-unicode-len", "héllo".length() == 5);
-        Main.check("str-charat", "abc".charAt(0).equals("a") && "abc".charAt(2).equals("c"));
+        // charAt answers a CHAR (JLS 4.2.1), so it compares with == against a char
+        // literal and computes on its code - it is not a one-character String.
+        Main.check("str-charat", "abc".charAt(0) == 'a' && "abc".charAt(2) == 'c');
         Main.check("str-substring", "hello".substring(1, 3).equals("el") && "hello".substring(3).equals("lo"));
         Main.check("str-indexof", "abcabc".indexOf("b") == 1 && "abc".indexOf("z") == -1);
         Main.check("str-equals", "abc".equals("abc") && !"abc".equals("abd"));

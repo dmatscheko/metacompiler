@@ -800,10 +800,15 @@ KwSync      = "synchronized" KwEnd ;
         },
         exit: function(code) { exit(code | 0) }
     }
+    // Math.abs/max/min keep the argument type: a double in, a double out (Java has
+    // an int and a double overload of each).
     hostGlobals["Math"] = {
-        abs: function(v) { return v < 0 ? -v | 0 : v | 0 },
-        max: function(a, b) { return a > b ? a : b },
-        min: function(a, b) { return a < b ? a : b }
+        abs: function(v) {
+            if (jIsFlo(v)) { var f = v.__flo; return jFlo(f < 0 ? jNegF(f) : f) }
+            return v < 0 ? -v | 0 : v | 0
+        },
+        max: function(a, b) { return jMinMax(a, b, jNumD(a) > jNumD(b)) },
+        min: function(a, b) { return jMinMax(a, b, jNumD(a) < jNumD(b)) }
     }
 
     // ----- char: a boxed {__char: code} value -----
@@ -813,7 +818,109 @@ KwSync      = "synchronized" KwEnd ;
     // jstr renders the character, and only a (char) cast or String.charAt boxes again.
     function jChar(code) { return {__char: code} }
     function jIsChar(v) { return v !== null && v !== undefined && typeof v == "object" && v.__char !== undefined }
-    function jNum(v) { return jIsChar(v) ? v.__char : v }
+    function jNum(v) { return jIsChar(v) ? v.__char : (jIsFlo(v) ? v.__flo : v) }
+
+    // ----- double / float: a boxed {__flo: value} -----
+    // Java's `double` is a DIFFERENT type from `int`, and the value model here is
+    // untyped, so 1.0 and 1 would be the same JS number: 1.0 / 3.0 would divide as
+    // integers (0 instead of 0.3333333333333333) and println(1.0) would print "1"
+    // instead of "1.0". Boxing every floating-point value keeps the two apart, the
+    // same way jChar keeps a char apart from its code and the same way the compiled
+    // world's js_jflo box does (see abnf/jsrtjvm.go). Invariant: a PLAIN number is an
+    // integral type (int/long/short/byte), a {__flo} box is a double/float.
+    var jNegOne = 0 - 1
+    var jZeroF = 0
+    var jInf = 1 / jZeroF
+    function jFlo(f) { return {__flo: f} }
+    // Math.max/min pick an operand, but the DOUBLE overload is selected as soon as
+    // one side is a double, so the answer is a double then (Math.max(1.5, 2) is 2.0).
+    function jMinMax(a, b, takeA) {
+        var v = anytype
+        v = takeA ? a : b
+        if (jIsFlo(a) || jIsFlo(b)) { return jIsFlo(v) ? v : jFlo(jNumD(v)) }
+        return v
+    }
+    function jIsFlo(v) { return v !== null && v !== undefined && typeof v == "object" && v.__flo !== undefined }
+    // The numeric value of any numeric operand (a plain number, a char or a double).
+    function jNumD(v) {
+        if (v === null || v === undefined) return v
+        if (typeof v == "object") {
+            if (v.__flo !== undefined) return v.__flo
+            if (v.__char !== undefined) return v.__char
+        }
+        return v
+    }
+    function jNegF(f) { return f * jNegOne }
+    // One binary operator with at least one double operand: the whole operation is
+    // floating point (JLS 5.6.2, binary numeric promotion) and its result is a double.
+    function jFloOp(op, l, r) {
+        if (op == "+" && (typeof l == "string" || typeof r == "string")) { return jstr2(l) + jstr2(r) }
+        var a = jNumD(l)
+        var b = jNumD(r)
+        if (op == "+")  return jFlo(a + b)
+        if (op == "-")  return jFlo(a - b)
+        if (op == "*")  return jFlo(a * b)
+        if (op == "/")  return jFlo(a / b)
+        if (op == "%")  return jFlo(a % b)
+        if (op == "==") return a == b
+        if (op == "!=") return a != b
+        if (op == "<")  return a < b
+        if (op == ">")  return a > b
+        if (op == "<=") return a <= b
+        if (op == ">=") return a >= b
+        return coreBinOp(op, a, b)
+    }
+    // Double.toString (JLS 5.1.11 / java.lang.Double): always a decimal point, the
+    // shortest digit run that round-trips, plain decimal for 1e-3 <= |d| < 1e7 and
+    // computerized scientific notation ("1.0E20") outside it.
+    function jFloStr(d) {
+        if (d !== d) return "NaN"
+        if (d === jInf) return "Infinity"
+        if (d === jNegF(jInf)) return "-Infinity"
+        if (d === 0) return (1 / d < 0) ? "-0.0" : "0.0"
+        var neg = d < 0
+        var a = neg ? jNegF(d) : d
+        var s = (a >= 0.001 && a < 10000000) ? jFloPlain(a) : jFloSci(a)
+        return neg ? "-" + s : s
+    }
+    function jFloPlain(a) {
+        var s = "" + a
+        if (s.indexOf(".") < 0) { s = s + ".0" }
+        return s
+    }
+    // Re-renders the host's shortest decimal for a as Java's d.dddEnn. The host
+    // switches to exponent form at different magnitudes than Java does, so the
+    // digits are recovered first and the form is rebuilt.
+    function jFloSci(a) {
+        var s = "" + a
+        var mant = s
+        var exp = 0
+        var ei = 0 - 1
+        for (var i = 0; i < s.length; i++) { if (s.charAt(i) == "e" || s.charAt(i) == "E") { ei = i } }
+        if (ei >= 0) {
+            mant = s.substring(0, ei)
+            var et = s.substring(ei + 1)
+            if (et.charAt(0) == "+") { et = et.substring(1) }
+            exp = parseInt(et, 10)
+        }
+        var digits = ""
+        var pt = 0 - 1
+        for (var j = 0; j < mant.length; j++) {
+            var ch = mant.charAt(j)
+            if (ch == ".") { pt = digits.length } else { digits = digits + ch }
+        }
+        if (pt < 0) { pt = digits.length }
+        var lead = 0
+        while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead++ }
+        digits = digits.substring(lead)
+        pt = pt - lead
+        var endz = digits.length
+        while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
+        digits = digits.substring(0, endz)
+        var frac = digits.substring(1)
+        if (frac == "") { frac = "0" }
+        return digits.charAt(0) + "." + frac + "E" + (pt + exp - 1)
+    }
     // Java's escape set, shared by char literals, string literals and text blocks:
     // the single letters, \s (a space that survives text-block trailing-space
     // stripping), a one-to-three digit OCTAL escape, \uXXXX, and a backslash before a
@@ -907,6 +1014,7 @@ KwSync      = "synchronized" KwEnd ;
     function jstr(v) {
         if (v === undefined || v === null) return "null"
         if (typeof v == "object") {
+            if (v.__flo !== undefined) return jFloStr(v.__flo)
             if (v.__char !== undefined) return String.fromCharCode(v.__char)
             if (v.__isclass) return "class " + v.__name
             if (v.__class != undefined) return v.__class.__name + "@obj"
@@ -969,6 +1077,7 @@ KwSync      = "synchronized" KwEnd ;
 
     function jadd(l, r) {
         if (typeof l == "string" || typeof r == "string") return jstr2(l) + jstr2(r)
+        if (jIsFlo(l) || jIsFlo(r)) { return jFlo(jNumD(l) + jNumD(r)) }
         var a = anytype
         var b = anytype
         a = jNum(l)
@@ -992,7 +1101,8 @@ KwSync      = "synchronized" KwEnd ;
         var op = items[1]
         var valT = items[2]
         return function() {
-            var v = valT()
+            var v = anytype // The assigned value may be a number, a string, a double box, ...
+            v = valT()
             if (ref.path.length == 0) {
                 if (op != "=") v = applyOp(op, getVar(ref.name), v)
                 setVar(ref.name, v)
@@ -1008,6 +1118,7 @@ KwSync      = "synchronized" KwEnd ;
     // again (Java's c++ on a char yields a char), on anything else an int32.
     function jStep(v, d) {
         if (jIsChar(v)) { return jChar((v.__char + d) & 65535) }
+        if (jIsFlo(v)) { return jFlo(v.__flo + d) }
         return (v + d) | 0
     }
     function makeIncDec(items) {
@@ -1043,17 +1154,27 @@ KwSync      = "synchronized" KwEnd ;
     // Numeric literal decoding: strip digit-group underscores and a trailing
     // L/l/F/f/D/d suffix, then parse in the base. Hex may carry a p-exponent
     // (0x1p4 = 1 * 2^4); decimal fractional/exponent forms go through
-    // parseFloat. One number type - a suffix only selects the parse.
+    // parseFloat. The literal's TYPE follows the Java rules: a fractional or
+    // exponent form, an f/F/d/D suffix and a hexadecimal p-exponent are doubles
+    // (a jFlo box), everything else is an integral value (a plain number).
     function numLit(text, base) {
         var s = stripWs(text).split("_").join("")
         var last = s.charAt(s.length - 1)
         // Only L marks a long on hex/binary/octal (f/F/d/D are hex digits or
         // invalid there); decimal also takes the float suffixes.
         var isSfx = last == "L" || last == "l"
-        if (base == 10 && (last == "F" || last == "f" || last == "D" || last == "d")) { isSfx = true }
+        var isFlt = false
+        if (base == 10 && (last == "F" || last == "f" || last == "D" || last == "d")) { isSfx = true; isFlt = true }
         if (isSfx) {
             s = s.substring(0, s.length - 1)
         }
+        if (base == 10 && !isFlt) {
+            for (var fi = 0; fi < s.length; fi++) {
+                var fc = s.charAt(fi)
+                if (fc == "." || fc == "e" || fc == "E") { isFlt = true }
+            }
+        }
+        if (isFlt) { return jFlo(parseFloat(s)) }
         if (base == 16) {
             var pAt = -1
             for (var i = 2; i < s.length; i++) {
@@ -1061,6 +1182,7 @@ KwSync      = "synchronized" KwEnd ;
                 if (c == "p" || c == "P") { pAt = i }
             }
             if (pAt < 0) { return parseInt(s.substring(2), 16) }
+            // 0x1p4 is a hexadecimal DOUBLE literal (JLS 3.10.2).
             var mant = parseInt(s.substring(2, pAt), 16)
             var et = s.substring(pAt + 1)
             if (et.charAt(0) == "+") { et = et.substring(1) }
@@ -1068,15 +1190,25 @@ KwSync      = "synchronized" KwEnd ;
             var k = exp < 0 ? 0 - exp : exp
             var scale = 1
             while (k > 0) { scale = scale * 2; k = k - 1 }
-            return exp < 0 ? mant / scale : mant * scale
+            return jFlo(exp < 0 ? mant / scale : mant * scale)
         }
         if (base == 2) { return parseInt(s.substring(2), 2) }
         if (base == 8) { return parseInt(s.substring(1), 8) }
-        return parseFloat(s)
+        return parseInt(s, 10)
     }
 
     // Unary + is identity; ~x is the int32 complement.
     function makeUPlus(inner) { return inner }
+    // -x keeps the operand's type: a double negates as a double (so -0.0 and
+    // -1.0/0.0 are real), a char and an int negate as int32.
+    makeNeg = function(t) {
+        return function() {
+            var v = anytype
+            v = t()
+            if (jIsFlo(v)) { return jFlo(jNegF(v.__flo)) }
+            return (0 - jNum(v)) | 0
+        }
+    }
     function makeBitNot(inner, pos) {
         return function() { return ~inner() }
     }
@@ -1089,7 +1221,16 @@ KwSync      = "synchronized" KwEnd ;
         // 'b' - 'a' == 1, c == 65 and c < 'z' all hold. Gated on one typeof test that
         // an ordinary number fails immediately.
         if (typeof l == "object" || typeof r == "object") {
-            if (jIsChar(l) || jIsChar(r)) { return binOp(op, jNum(l), jNum(r)) }
+            // A double operand pulls the WHOLE operation into floating point, so it
+            // is tested before the char unboxing ('a' + 0.5 is a double, not an int).
+            if (jIsFlo(l) || jIsFlo(r)) { return jFloOp(op, l, r) }
+            // A char unboxes for arithmetic and comparison, but NOT for the string
+            // concatenation form of '+': "x" + 'a' is "xa", not "x97" (JLS 15.18.1
+            // picks the string conversion, which renders a char as its glyph).
+            if (jIsChar(l) || jIsChar(r)) {
+                if (op == "+" && (typeof l == "string" || typeof r == "string")) { return jstr2(l) + jstr2(r) }
+                return binOp(op, jNum(l), jNum(r))
+            }
         }
         if (op == "&") { if (typeof l == "boolean" && typeof r == "boolean") { return l && r } return l & r }
         if (op == "|") { if (typeof l == "boolean" && typeof r == "boolean") { return l || r } return l | r }
@@ -1100,7 +1241,13 @@ KwSync      = "synchronized" KwEnd ;
         return coreBinOp(op, l, r)
     }
     var coreApplyOp = applyOp
+    var jCompound = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%"}
     applyOp = function(op, a, b) {
+        // A double on either side makes the compound operator floating point too.
+        if (jIsFlo(a) || jIsFlo(b)) {
+            var bop = hasOwn(jCompound, op) ? jCompound[op] : ""
+            if (bop != "") { return binOp(bop, a, b) }
+        }
         if (op == "&=") return binOp("&", a, b)
         if (op == "|=") return binOp("|", a, b)
         if (op == "^=") return binOp("^", a, b)
@@ -1317,9 +1464,9 @@ KwSync      = "synchronized" KwEnd ;
     function makeCast(inner, ty) {
         if (ty == "char") { return function() { return jChar(jNum(inner()) & 65535) } }
         if (ty == "int" || ty == "long" || ty == "short" || ty == "byte") {
-            return function() { return jNum(inner()) | 0 }
+            return function() { return jNumD(inner()) | 0 }
         }
-        if (ty == "double" || ty == "float") { return function() { return jNum(inner()) } }
+        if (ty == "double" || ty == "float") { return function() { return jFlo(jNumD(inner())) } }
         return inner
     }
     // A lambda is a real closure: evaluating the lambda expression captures the
@@ -1609,7 +1756,14 @@ KwSync      = "synchronized" KwEnd ;
     // becomes an OBJECT of that interface, so its default methods work and the
     // abstract one dispatches back into the closure.
     function jTypeAdopt(v, ty) {
-        if (typeof v != "function" || ty == undefined) { return v }
+        if (ty == undefined) { return v }
+        // A declared primitive type CONVERTS its initializer (JLS 5.2, assignment
+        // conversion): `double d = 1;` holds 1.0, `int i = 'a';` holds 97.
+        if (ty == "double" || ty == "float") {
+            if (typeof v == "number" || jIsChar(v)) { return jFlo(jNumD(v)) }
+            return v
+        }
+        if (typeof v != "function") { return v }
         var base = ty
         var lt = base.indexOf("<")
         if (lt >= 0) { base = base.substring(0, lt) }

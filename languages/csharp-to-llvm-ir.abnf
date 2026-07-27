@@ -896,7 +896,7 @@ VbChar      = "\x00"..."\x21" | "\x23"..."\U0010ffff" ;
 // C# numeric literals beyond the plain decimal integer that IntLit already handles: hex
 // (0x), binary (0b), reals (a '.' fraction, an exponent or an f/d/m suffix), and decimals
 // with '_' digit groups or an integer u/l suffix. The value is computed by csNum.
-CsNum       <~~ push(makeConst(csNum(up.in))) ~~>
+CsNum       <~~ push(makeNumConst(csNum(up.in))) ~~>
             = CsHex | CsBin | CsDot | CsReal | CsDecU | CsDecS ;
 CsHex       = ( "0x" | "0X" ) :whitespace() CsHexD { CsHexD | "_" } [ CsISfx ] :whitespace(Whitespace) ;
 CsBin       = ( "0b" | "0B" ) :whitespace() CsBit { CsBit | "_" } [ CsISfx ] :whitespace(Whitespace) ;
@@ -1140,6 +1140,10 @@ KwLet       = "let" KwEnd ;
 
     // == / != go through the char-aware equality (js_jchareq is js_seq unless a char meets
     // the one-character string it renders as).
+    // C#'s '+': "x" + null is "x", not "xnull" - the js_csadd external, which is
+    // js_jadd with C#'s null rendering (and the same double awareness).
+    binExt["+"] = "js_csadd"
+    binExt["+="] = "js_csadd"
     var coreEmitBin = emitBin
     emitBin = function(b, op, l, r) {
         if (op == "==" || op == "!=") {
@@ -1158,6 +1162,18 @@ KwLet       = "let" KwEnd ;
             if (op == "!=") { return callExt(b, "js_not", [eqv]) }
             return eqv
         }
+        // ----- double / float / decimal: a boxed js_csflo value (see jsrtjvm.go) -----
+        // C#'s double is a DIFFERENT type from int, and the handle runtime models every
+        // number as one JS double, so 1.0 / 3.0 and 1 / 3 arrived here as the same two
+        // operands. Every arithmetic operator was followed by the shared intWrap, which
+        // made the float half of the language silently integer arithmetic: 2.5 * 1.5 was
+        // 3, 1.0 / 3.0 was 0 and Infinity / NaN did not exist. The js_jf* externs answer
+        // a double whenever one operand is one and keep the old int32 wrap otherwise -
+        // this is what csharp-interpreter.abnf's {__flo} box does.
+        if (op == "-" || op == "-=") return callExt(b, "js_jfsub", [l, r])
+        if (op == "*" || op == "*=") return callExt(b, "js_jfmul", [l, r])
+        if (op == "/" || op == "/=") return callExt(b, "js_jfdiv", [l, r])
+        if (op == "%" || op == "%=") return callExt(b, "js_jfmod", [l, r])
         return coreEmitBin(b, op, l, r)
     }
 
@@ -1182,7 +1198,7 @@ KwLet       = "let" KwEnd ;
     makeNeg = function(t) {
         return function(b) {
             var r = t(b)
-            return emitUnDyn(r.b, "-", r.v, function(bb) { return intWrap(bb, callExt(bb, "js_neg", [r.v])) })
+            return emitUnDyn(r.b, "-", r.v, function(bb) { return callExt(bb, "js_jfneg", [r.v]) })
         }
     }
     makeNot = function(t) {
@@ -1358,7 +1374,7 @@ KwLet       = "let" KwEnd ;
     function csPropFn(name, sub, v) {
         return function(b) {
             var fv = anytype
-            if (name == "Count" || name == "Length") { fv = callExt(b, "js_pylen", [v]) }
+            if (name == "Count" || name == "Length") { fv = callExt(b, "js_cslen", [v]) }
             else if (csPropAcc[name] != undefined) { fv = emitPropGet(b, v, name) }
             else { fv = callExt(b, "js_get", [v, emitStr(b, name)]) }
             return emitPat(b, sub, fv)
@@ -1380,7 +1396,7 @@ KwLet       = "let" KwEnd ;
     }
     function csLenFn(v, exact, n) {
         return function(b) {
-            var lv = callExt(b, "js_pylen", [v])
+            var lv = callExt(b, "js_cslen", [v])
             if (exact) { return {b: b, v: callExt(b, "js_seq", [lv, emitNum(b, n)])} }
             return {b: b, v: callExt(b, "js_ge", [lv, emitNum(b, n)])}
         }
@@ -1391,13 +1407,13 @@ KwLet       = "let" KwEnd ;
     // An element counted from the END: index length - k.
     function csTailElemFn(v, k, sub) {
         return function(b) {
-            var iv = callExt(b, "js_sub", [callExt(b, "js_pylen", [v]), emitNum(b, k)])
+            var iv = callExt(b, "js_sub", [callExt(b, "js_cslen", [v]), emitNum(b, k)])
             return emitPat(b, sub, callExt(b, "js_pyget", [v, iv]))
         }
     }
     function csSliceFn(v, head, tail, sub) {
         return function(b) {
-            var hi = callExt(b, "js_sub", [callExt(b, "js_pylen", [v]), emitNum(b, tail)])
+            var hi = callExt(b, "js_sub", [callExt(b, "js_cslen", [v]), emitNum(b, tail)])
             return emitPat(b, sub, callExt(b, "js_goslice", [v, emitNum(b, head), hi]))
         }
     }
@@ -1559,8 +1575,21 @@ KwLet       = "let" KwEnd ;
         for (var i = 0; i < s.length; i++) { if (s.charAt(i) != "_") { t = t + s.charAt(i) } }
         if (t.length >= 2 && t.charAt(0) == "0" && (t.charAt(1) == "x" || t.charAt(1) == "X")) { return parseInt(t.substring(2), 16) }
         if (t.length >= 2 && t.charAt(0) == "0" && (t.charAt(1) == "b" || t.charAt(1) == "B")) { return parseInt(t.substring(2), 2) }
-        if (t.indexOf(".") >= 0 || t.indexOf("e") >= 0 || t.indexOf("E") >= 0) { return parseFloat(t) }
+        // A real literal is a DOUBLE: a '.' fraction, an exponent, or one of the
+        // f/F/d/D/m/M suffixes (ECMA-334 6.4.5.3). It emits the js_csflo box.
+        var lastc = t.charAt(t.length - 1)
+        var isReal = t.indexOf(".") >= 0 || t.indexOf("e") >= 0 || t.indexOf("E") >= 0
+                     || lastc == "f" || lastc == "F" || lastc == "d" || lastc == "D"
+                     || lastc == "m" || lastc == "M"
+        if (isReal) { return {__flo: parseFloat(t)} }
         return parseInt(t, 10)
+    }
+    function makeNumConst(v) {
+        if (v !== null && typeof v == "object") {
+            var f = v.__flo
+            return function(b) { return {b: b, v: callExt(b, "js_csflo", [emitNum(b, f)])} }
+        }
+        return makeConst(v)
     }
 
     // 'lock (e) s': run the guard (keeping its calls), then the guarded statement.
@@ -2301,13 +2330,13 @@ KwLet       = "let" KwEnd ;
             var rl = s.lo(b)
             b = rl.b
             lv = rl.v
-            if (s.loEnd == true) { lv = callExt(b, "js_sub", [callExt(b, "js_pylen", [cur]), lv]) }
+            if (s.loEnd == true) { lv = callExt(b, "js_sub", [callExt(b, "js_cslen", [cur]), lv]) }
         }
         if (s.hi != null) {
             var rh = s.hi(b)
             b = rh.b
             hv = rh.v
-            if (s.hiEnd == true) { hv = callExt(b, "js_sub", [callExt(b, "js_pylen", [cur]), hv]) }
+            if (s.hiEnd == true) { hv = callExt(b, "js_sub", [callExt(b, "js_cslen", [cur]), hv]) }
         }
         return {b: b, v: callExt(b, "js_goslice", [cur, lv, hv])}
     }
@@ -2510,15 +2539,17 @@ KwLet       = "let" KwEnd ;
     // '++x' / 'x++': the same update; the prefix form yields the NEW value, the postfix
     // form the old one.
     function makePreIncDec(items) { return makeIncDec([items[1], items[0]], true) }
+    // ++ / -- keep the type of what they step (js_jfstep): a double stays a double, a
+    // char stays a char, everything else wraps to int32.
     function makeIncDec(items, pre) {
         var ref = items[0]
-        var extName = (items[1] == "++") ? "js_jadd" : "js_sub"
+        var step = (items[1] == "++") ? 1 : 0 - 1
         return function(b) {
-            var oneV = emitNum(b, 1)
+            var oneV = emitNum(b, step)
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
                 var oldV = callExt(b, "js_scope_get", [curScopeV, nameV])
-                var newV = intWrap(b, callExt(b, extName, [oldV, oneV]))
+                var newV = callExt(b, "js_jfstep", [oldV, oneV])
                 callExt(b, "js_scope_set", [curScopeV, nameV, newV])
                 return {b: b, v: pre ? newV : oldV}
             }
@@ -2526,12 +2557,12 @@ KwLet       = "let" KwEnd ;
             b = p.b
             if (p.isField) {
                 var oldM = callExt(b, "js_get", [p.obj, p.key])
-                var newM = intWrap(b, callExt(b, extName, [oldM, oneV]))
+                var newM = callExt(b, "js_jfstep", [oldM, oneV])
                 callExt(b, "js_set", [p.obj, p.key, newM])
                 return {b: b, v: pre ? newM : oldM}
             }
             var oldI = callExt(b, "js_pyget", [p.obj, p.key])
-            var newI = intWrap(b, callExt(b, extName, [oldI, oneV]))
+            var newI = callExt(b, "js_jfstep", [oldI, oneV])
             callExt(b, "js_pyset", [p.obj, p.key, newI])
             return {b: b, v: pre ? newI : oldI}
         }
@@ -2767,10 +2798,12 @@ KwLet       = "let" KwEnd ;
                 return emitConvTo(r.b, t, r.v, function(bb, v) { return intWrap(bb, callExt(bb, "js_char_code", [v])) })
             }
         }
+        // (double)/(float)/(decimal) BOX: the result is a double whatever the operand
+        // was, which is what makes (double)7 / 2 == 3.5.
         if (t == "double" || t == "float" || t == "decimal") {
             return function(b) {
                 var r = inner(b)
-                return emitConvTo(r.b, t, r.v, function(bb, v) { return callExt(bb, "js_char_code", [v]) })
+                return emitConvTo(r.b, t, r.v, function(bb, v) { return callExt(bb, "js_csflo", [callExt(bb, "js_char_code", [v])]) })
             }
         }
         return inner
@@ -3070,7 +3103,7 @@ KwLet       = "let" KwEnd ;
                         b = rcu.b
                         cur = rcu.v
                     } else if (s.name == "Count" || s.name == "Length") {
-                        cur = callExt(b, "js_pylen", [cur])
+                        cur = callExt(b, "js_cslen", [cur])
                     } else if (s.name == "Keys") {
                         cur = callExt(b, "js_mcall", [cur, emitStr(b, "keys"), callExt(b, "js_arr_new", [])])
                     } else if (s.name == "Values") {
@@ -3093,7 +3126,7 @@ KwLet       = "let" KwEnd ;
                     var ir = s.idx(b)
                     b = ir.b
                     var iv = ir.v
-                    if (s.fromend == true) { iv = callExt(b, "js_sub", [callExt(b, "js_pylen", [cur]), iv]) }
+                    if (s.fromend == true) { iv = callExt(b, "js_sub", [callExt(b, "js_cslen", [cur]), iv]) }
                     var ix = emitIndexGet(b, cur, iv)
                     b = ix.b
                     cur = ix.v
@@ -3250,10 +3283,14 @@ KwLet       = "let" KwEnd ;
         // 'S v = w;' with a struct type copies field by field: structs are value types,
         // and the declared type names the fields at compile time.
         var isStruct = csStructs[ty] != undefined
+        // A double/float/decimal declaration CONVERTS its initializer (ECMA-334 10.2.3,
+        // implicit numeric conversion): `double d = 1;` holds 1.0.
+        var isDbl = (ty == "double" || ty == "float" || ty == "decimal")
         return function(b) {
             var r = init(b)
             b = r.b
             var v = r.v
+            if (isDbl) { v = callExt(b, "js_csflo", [v]) }
             // 'S12Vec d = 5;': the declared type declares 'implicit operator S12Vec(int)',
             // so the value is converted before anything else looks at it.
             if (csOpDecls["__conv_" + ty] != undefined) {

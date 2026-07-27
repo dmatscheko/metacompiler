@@ -647,12 +647,12 @@ ImagLit     <~~ push(makeImag(parseImag(up.in))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
               [ "." { "0"..."9" } ] [ ImagExp ] "i" KwEnd :whitespace(Whitespace) ;
 ImagExp     = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
-DotFloatLit <~~ push(makeConst(parseFloat("0" + up.in))) ~~>
+DotFloatLit <~~ push(makeFloConst(parseFloat("0" + up.in))) ~~>
             = "." :whitespace() "0"..."9" { "0"..."9" }
               [ ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ] :whitespace(Whitespace) ;
 // 0x1p4 / 0x1.8p1: a HEX float. The 'p' exponent is decimal and scales by a power of
 // TWO, and it is mandatory - without it the same text is the hex integer above.
-HexFloatLit <~~ push(makeConst(parseHexFloat(up.in))) ~~>
+HexFloatLit <~~ push(makeFloConst(parseHexFloat(up.in))) ~~>
             = "0" ( "x" | "X" ) :whitespace() HexDigits [ "." { HexDigit | "_" } ]
               ( "p" | "P" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } :whitespace(Whitespace) ;
 // 017: the LEGACY octal form, which has no base letter - 017 is 15, not 17. Tried
@@ -663,7 +663,7 @@ LegOctLit   <~~ push(makeConst(parseLegOct(up.in))) ~~>
 // A named production on purpose: a :command() directly followed by a (group) parses
 // as a Times repetition in this dialect - the Times trap.
 OctSep      = "0"..."7" | "_" ;
-FloatLit    <~~ push(makeConst(parseFloat(up.in))) ~~>
+FloatLit    <~~ push(makeFloConst(parseFloat(up.in))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" }
               ( "." { "0"..."9" } [ ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ]
               | ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ) :whitespace(Whitespace) ;
@@ -1016,12 +1016,43 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Only a program that mentions a complex value pays for the probe (see
         // usesComplex); every other one emits the same single extern call as before.
         if (usesComplex && cxOps[op] == 1) { return emitCxCall(b, op, l, r) }
+        return emitBinNum(b, op, l, r)
+    }
+    // The primitive (non-complex) binary step: the float-aware arithmetic externs,
+    // then the shared core. Used by emitBin AND by the complex dispatch's fallback
+    // arm, which must not fall back to the truncating core path.
+    function emitBinNum(b, op, l, r) {
+        var fe = floExt[op]
+        if (typeof fe == "string") { return callExt(b, fe, [l, r]) }
         return coreEmitBin(b, op, l, r)
     }
     var cxOps = {"+": 1, "-": 1, "*": 1, "/": 1, "+=": 1, "-=": 1, "*=": 1, "/=": 1}
+    // ----- float64 / float32: a boxed js_gflo value (see abnf/jsrtjvm.go) -----
+    // Go's float64 is a DIFFERENT type from int, and the handle runtime models every
+    // number as one JS double, so `a / b` with a = 1.0, b = 3.0 arrived here as the
+    // same two operands as `1 / 3`. Every arithmetic operator was followed by the
+    // shared intWrap, which made the float half of the language silently integer
+    // arithmetic: 2.5 * 1.5 was 3, a/b was 0, and +Inf / -Inf / NaN did not exist.
+    // A float literal now emits the js_gflo box, float64(x) boxes, and the js_jf*
+    // operators answer a float whenever one operand is one. This mirrors
+    // go-interpreter.abnf's {__flo} box; keep the two in step.
+    function makeFloConst(f) {
+        return function(b) { return {b: b, v: callExt(b, "js_gflo", [emitNum(b, f)])} }
+    }
+    var floExt = {"-": "js_jfsub", "*": "js_jfmul", "/": "js_jfdiv", "%": "js_jfmod",
+                  "-=": "js_jfsub", "*=": "js_jfmul", "/=": "js_jfdiv", "%=": "js_jfmod"}
     // ^x is 'x XOR -1'. On an unsigned operand of known width Go complements WITHIN
     // that width, so ^uint8(0xF0) is 0x0F and not -241.
     // items = [operandThunk, {at}].
+    // -x keeps the operand's type: js_jfneg negates a float64 as a float64 (so -0.0
+    // and -1.0/0.0 are real) and wraps everything else to int32, which is what the
+    // shared js_neg + intWrap did. A complex operand keeps its own path.
+    makeNeg = function(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_jfneg", [r.v])}
+        }
+    }
     function makeCompl(items) {
         var t = items[0]
         var w = uintBits(tyAt(items[1].at))
@@ -1076,8 +1107,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // so it must NOT go through emitBin, whose wraps table truncates '- * / %' to an
     // integer; a sized unsigned type masks the result to its width instead.
     function emitTypedBin(b, ty, op, l, r) {
-        if (isFloatTy(ty) && typeof binExt[op] == "string") {
-            return callExt(b, binExt[op], [l, r])
+        if (isFloatTy(ty)) {
+            // Both operands are float64 by construction here, so one side is boxed
+            // and the js_jf* externs answer a float; '+' goes through js_jadd, which
+            // has the same rule.
+            var fe2 = floExt[op]
+            if (typeof fe2 == "string") { return callExt(b, fe2, [callExt(b, "js_gflo", [l]), r]) }
+            if (typeof binExt[op] == "string") { return callExt(b, binExt[op], [callExt(b, "js_gflo", [l]), r]) }
         }
         var v = emitBin(b, op, l, r)
         var w = uintBits(ty)
@@ -1499,8 +1535,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // string, false for a bool and nil for everything else (slice, map, pointer, struct).
     function emitZeroOf(b, t) {
         if (t == undefined || t == null) { return hNull }
+        if (t.indexOf("float") == 0) { return callExt(b, "js_gflo", [emitNum(b, 0)]) }
         if (t.indexOf("int") == 0 || t.indexOf("uint") == 0 || t.indexOf("byte") == 0
-            || t.indexOf("rune") == 0 || t.indexOf("float") == 0) { return emitNum(b, 0) }
+            || t.indexOf("rune") == 0) { return emitNum(b, 0) }
         if (t.indexOf("string") == 0) { return emitStr(b, "") }
         if (t.indexOf("bool") == 0) { return hFalse }
         return hNull
@@ -1596,7 +1633,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var isr = callExt(fb, "js_is_type", [r, emitStr(fb, "$cx")])
         var cxPath = function(cb) { return emitCxOp(cb, op, l, r) }
         var res = emitSelect(fb, isl, cxPath, function(eb) {
-            return emitSelect(eb, isr, cxPath, function(e2) { return {b: e2, v: coreEmitBin(e2, op, l, r)} })
+            return emitSelect(eb, isr, cxPath, function(e2) { return {b: e2, v: emitBinNum(e2, op, l, r)} })
         })
         res.b.NewRet(res.v)
         curF = savedF
@@ -2284,13 +2321,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return b
         }
     }
+    // x++ / x-- : js_jfstep keeps the TYPE of what it steps, so a float64 counter
+    // stays a float64 instead of being truncated by the old intWrap.
     function makeIncDec(items) {
         var ref = items[0]
-        var extName = (items[1] == "++") ? "js_jadd" : "js_sub"
+        var step = (items[1] == "++") ? 1 : 0 - 1
         return function(b) {
             var rr = emitRefRead(b, ref)
             b = rr.b
-            return emitRefWrite(b, ref, intWrap(b, callExt(b, extName, [rr.v, emitNum(b, 1)])))
+            return emitRefWrite(b, ref, callExt(b, "js_jfstep", [rr.v, emitNum(b, step)]))
         }
     }
 
@@ -2370,7 +2409,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 }
             }
             for (var n = 0; n < names.length; n++) {
-                if (names[n] != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n]), vals[n]]) }
+                // A float64/float32 declaration CONVERTS its initializer, so
+                // `var d float64 = 1` holds a float64 and d/2 is 0.5, not 0.
+                var dv = isFloatTy(ty) ? callExt(b, "js_gflo", [vals[n]]) : vals[n]
+                if (names[n] != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n]), dv]) }
             }
             return b
         }
@@ -3401,6 +3443,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var fmtV = callExt(b, "js_obj_new", [])
         b = declPrint(b, fmtV, "Println", "println")
         b = declPrint(b, fmtV, "Print", "print")
+        b = declPrint(b, fmtV, "Sprint", "sprint")
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "fmt"), fmtV])
         var osV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [osV, emitStr(b, "Exit"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])

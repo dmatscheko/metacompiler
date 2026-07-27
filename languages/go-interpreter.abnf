@@ -676,12 +676,12 @@ ImagLit     <~~ push(makeConst(newCx(0, parseImag(up.in)))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
               [ "." { "0"..."9" } ] [ ImagExp ] "i" KwEnd :whitespace(Whitespace) ;
 ImagExp     = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
-DotFloatLit <~~ push(makeConst(parseFloat("0" + up.in))) ~~>
+DotFloatLit <~~ push(makeConst(gFlo(parseFloat("0" + up.in)))) ~~>
             = "." :whitespace() "0"..."9" { "0"..."9" }
               [ ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ] :whitespace(Whitespace) ;
 // 0x1p4 / 0x1.8p1: a HEX float. The 'p' exponent is decimal and scales by a power of
 // TWO, and it is mandatory - without it the same text is the hex integer above.
-HexFloatLit <~~ push(makeConst(parseHexFloat(up.in))) ~~>
+HexFloatLit <~~ push(makeConst(gFlo(parseHexFloat(up.in)))) ~~>
             = "0" ( "x" | "X" ) :whitespace() HexDigits [ "." { HexDigit | "_" } ]
               ( "p" | "P" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } :whitespace(Whitespace) ;
 // 017: the LEGACY octal form, which has no base letter - 017 is 15, not 17. Tried
@@ -692,7 +692,7 @@ LegOctLit   <~~ push(makeConst(parseLegOct(up.in))) ~~>
 // A named production on purpose: a :command() directly followed by a (group) parses
 // as a Times repetition in this dialect - the Times trap.
 OctSep      = "0"..."7" | "_" ;
-FloatLit    <~~ push(makeConst(parseFloat(up.in))) ~~>
+FloatLit    <~~ push(makeConst(gFlo(parseFloat(up.in)))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" }
               ( "." { "0"..."9" } [ ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ]
               | ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ) :whitespace(Whitespace) ;
@@ -992,6 +992,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 prevStr = isStr
             }
             print(out)
+        },
+        // fmt.Sprint: Print's text, returned instead of printed.
+        Sprint: function() {
+            var out = ""
+            var prevStr = true
+            for (var i = 0; i < arguments.length; i++) {
+                var isStr = typeof arguments[i] == "string"
+                if (i > 0 && !prevStr && !isStr) { out += " " }
+                out += gstr(arguments[i])
+                prevStr = isStr
+            }
+            return out
         }
     }
     hostGlobals["os"] = { Exit: function(code) { exit(code | 0) } }
@@ -1044,14 +1056,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var n = goLen(x)
         for (var i = 0; i < n; i++) { goSetAt(x, i, 0) }
     }
+    // min/max compare a float64 by its VALUE (a boxed operand would otherwise
+    // compare as an object and never win).
     hostGlobals["min"] = function() {
-        var m = arguments[0]
-        for (var i = 1; i < arguments.length; i++) { if (arguments[i] < m) { m = arguments[i] } }
+        var m = anytype
+        m = arguments[0]
+        for (var i = 1; i < arguments.length; i++) { if (gNumF(arguments[i]) < gNumF(m)) { m = arguments[i] } }
         return m
     }
     hostGlobals["max"] = function() {
-        var m = arguments[0]
-        for (var i = 1; i < arguments.length; i++) { if (arguments[i] > m) { m = arguments[i] } }
+        var m = anytype
+        m = arguments[0]
+        for (var i = 1; i < arguments.length; i++) { if (gNumF(arguments[i]) > gNumF(m)) { m = arguments[i] } }
         return m
     }
     // The identifier-spelled conversions reach goConvert through the ordinary call path.
@@ -1080,6 +1096,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // is printed behind an '&' (which is what fmt does for a pointer to a struct).
         if (isPtr(v)) { return "&" + gstr(ptrGet(v)) }
         if (isCx(v)) { return cxStr(v) }
+        if (isFlo(v)) { return gFloStr(v.__flo) }
         if (isSl(v)) { return gstr(slElems(v)) }
         if (Array.isArray(v)) {
             var out = "["
@@ -1371,7 +1388,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return slOf(out)
         }
         if (to == "bool") { return v ? true : false }
-        if (to == "float64" || to == "float32") { return v * 1 }
+        // float64(x) BOXES: the result is a float64 whatever x was, which is what
+        // makes float64(7)/2 == 3.5.
+        if (to == "float64" || to == "float32") { return gFlo(gNumF(v) * 1) }
+        if (isFlo(v)) { return goConvert(to, v.__flo) }
         if (to == "uint8" || to == "byte") { return gtrunc(v) & 255 }
         if (to == "uint16") { return gtrunc(v) & 65535 }
         if (to == "uint32") { return gtrunc(v) >>> 0 }
@@ -1482,11 +1502,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // a sized unsigned type wraps to its width, everything else is the untyped path.
     function goTypedOp(ty, op, l, r) {
         if (isFloatTy(ty)) {
-            if (op == "+") { return l + r }
-            if (op == "-") { return l - r }
-            if (op == "*") { return l * r }
-            if (op == "/") { return l / r }
-            if (op == "%") { return l % r }
+            var a = gNumF(l)
+            var b = gNumF(r)
+            if (op == "+") { return gFlo(a + b) }
+            if (op == "-") { return gFlo(a - b) }
+            if (op == "*") { return gFlo(a * b) }
+            if (op == "/") { return gFlo(a / b) }
+            if (op == "%") { return gFlo(a % b) }
             return binOp(op, l, r)
         }
         var v = binOp(op, l, r)
@@ -1529,8 +1551,87 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // four arithmetic operators below can afford one cheap isCx probe and otherwise
     // hand straight back to the untyped path.
     function newCx(re, im) { return {__cx: true, re: re, im: im} }
+    // ----- float64 / float32: a boxed {__flo: value} -----
+    // Go's float64 is a DIFFERENT type from int, and this value model is untyped, so
+    // 1.0 and 1 would both be the JS number 1: a/b with a=1.0, b=3.0 divided as
+    // integers (0 instead of 0.3333333333333333) and fmt.Println(1.0) printed "1"
+    // for the wrong reason. Boxing every floating-point value keeps the two apart -
+    // the same trick as the complex {re, im} box next door, and the same box the
+    // compiled half now gets from js_gflo. Invariant: a PLAIN number is an integer
+    // type, a {__flo} box is a float64/float32. The conversion mechanism keyed by
+    // source position (convByPos) still handles the SIZED UNSIGNED types, which have
+    // no box - only the float half moved to a value tag.
+    var gNegOne = 0 - 1
+    var gZeroF = 0
+    var gInf = 1 / gZeroF
+    function gFlo(f) { return {__flo: f} }
+    function isFlo(v) { return v != undefined && v != null && typeof v == "object" && v.__flo !== undefined }
+    function gNumF(v) { return isFlo(v) ? v.__flo : v }
+    function gNegF(f) { return f * gNegOne }
+    // fmt's %v for a float64: strconv.FormatFloat(f, 'g', -1, 64), which uses
+    // scientific notation when the decimal exponent is below -4 or at least 6, and
+    // spells the infinities "+Inf" / "-Inf".
+    function gFloStr(x) {
+        if (x !== x) return "NaN"
+        if (x === gInf) return "+Inf"
+        if (x === gNegF(gInf)) return "-Inf"
+        var neg = x < 0 || (x === 0 && 1 / x < 0)
+        var a = neg ? gNegF(x) : x
+        var s = gFloDigits(a)
+        return neg ? "-" + s : s
+    }
+    // Splits the host's shortest decimal for a >= 0 into its digit run and its
+    // decimal point position, then renders Go's 'g' form.
+    function gFloDigits(a) {
+        if (a === 0) { return "0" }
+        var s = "" + a
+        var mant = s
+        var exp = 0
+        var ei = 0 - 1
+        for (var i = 0; i < s.length; i++) { if (s.charAt(i) == "e" || s.charAt(i) == "E") { ei = i } }
+        if (ei >= 0) {
+            mant = s.substring(0, ei)
+            var et = s.substring(ei + 1)
+            if (et.charAt(0) == "+") { et = et.substring(1) }
+            exp = parseInt(et, 10)
+        }
+        var digits = ""
+        var pt = 0 - 1
+        for (var j = 0; j < mant.length; j++) {
+            var ch = mant.charAt(j)
+            if (ch == ".") { pt = digits.length } else { digits = digits + ch }
+        }
+        if (pt < 0) { pt = digits.length }
+        var lead = 0
+        while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead++ }
+        digits = digits.substring(lead)
+        pt = pt - lead + exp
+        var endz = digits.length
+        while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
+        digits = digits.substring(0, endz)
+        var e10 = pt - 1
+        if (e10 < 0 - 4 || e10 >= 6) {
+            var frac = digits.substring(1)
+            var es = e10 < 0 ? (0 - e10) : e10
+            var etx = "" + es
+            if (es < 10) { etx = "0" + etx }
+            return digits.charAt(0) + (frac == "" ? "" : "." + frac) + "e" + (e10 < 0 ? "-" : "+") + etx
+        }
+        if (pt <= 0) {
+            var z = ""
+            var n0 = 0 - pt
+            for (var q = 0; q < n0; q++) { z = z + "0" }
+            return "0." + z + digits
+        }
+        if (pt >= digits.length) {
+            var z2 = ""
+            for (var q2 = 0; q2 < pt - digits.length; q2++) { z2 = z2 + "0" }
+            return digits + z2
+        }
+        return digits.substring(0, pt) + "." + digits.substring(pt)
+    }
     function isCx(v) { return v != undefined && v != null && typeof v == "object" && v.__cx == true }
-    function cxRe(v) { return isCx(v) ? v.re : v }
+    function cxRe(v) { return isCx(v) ? v.re : gNumF(v) }
     function cxIm(v) { return isCx(v) ? v.im : 0 }
     // A complex whose imaginary part vanished is still a complex in Go (imag(2i*2i) is
     // 0, not an error), so the box is kept.
@@ -1552,6 +1653,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var im = v.im
         return "(" + v.re + (im < 0 ? "-" : "+") + (im < 0 ? 0 - im : im) + "i)"
     }
+    // -x keeps the operand's type: a float64 negates as a float64 (so -0.0 and
+    // -1.0/0.0 are real), a complex component-wise, everything else as an integer.
+    makeNeg = function(t) {
+        return function() {
+            var v = anytype
+            v = t()
+            if (isFlo(v)) { return gFlo(gNegF(v.__flo)) }
+            if (isCx(v)) { return newCx(gNegF(v.re), gNegF(v.im)) }
+            return (0 - v) | 0
+        }
+    }
     hostGlobals["real"] = function(v) { return cxRe(v) }
     hostGlobals["imag"] = function(v) { return cxIm(v) }
     hostGlobals["complex"] = function(re, im) { return newCx(cxRe(re), cxRe(im)) }
@@ -1561,14 +1673,37 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     var coreSubOp = binOps["-"]
     var coreMulOp = binOps["*"]
     var coreDivOp = binOps["/"]
-    binOps["+"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxAdd(l, r) : coreAddOp(l, r) }
-    binOps["-"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxSub(l, r) : coreSubOp(l, r) }
-    binOps["*"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxMul(l, r) : coreMulOp(l, r) }
-    binOps["/"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxDiv(l, r) : coreDivOp(l, r) }
+    binOps["+"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxAdd(l, r) : ((isFlo(l) || isFlo(r)) ? gFlo(gNumF(l) + gNumF(r)) : coreAddOp(l, r)) }
+    binOps["-"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxSub(l, r) : ((isFlo(l) || isFlo(r)) ? gFlo(gNumF(l) - gNumF(r)) : coreSubOp(l, r)) }
+    binOps["*"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxMul(l, r) : ((isFlo(l) || isFlo(r)) ? gFlo(gNumF(l) * gNumF(r)) : coreMulOp(l, r)) }
+    binOps["/"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxDiv(l, r) : ((isFlo(l) || isFlo(r)) ? gFlo(gNumF(l) / gNumF(r)) : coreDivOp(l, r)) }
+    // The four comparisons unbox a float64 so it can be compared against an untyped
+    // constant (x > 2 with x a float64).
+    var coreLtOp = binOps["<"]
+    var coreGtOp = binOps[">"]
+    var coreLeOp = binOps["<="]
+    var coreGeOp = binOps[">="]
+    binOps["<"]  = function(l, r) { return (isFlo(l) || isFlo(r)) ? gNumF(l) < gNumF(r)  : coreLtOp(l, r) }
+    binOps[">"]  = function(l, r) { return (isFlo(l) || isFlo(r)) ? gNumF(l) > gNumF(r)  : coreGtOp(l, r) }
+    binOps["<="] = function(l, r) { return (isFlo(l) || isFlo(r)) ? gNumF(l) <= gNumF(r) : coreLeOp(l, r) }
+    binOps[">="] = function(l, r) { return (isFlo(l) || isFlo(r)) ? gNumF(l) >= gNumF(r) : coreGeOp(l, r) }
+    // The compound assignments are the same operators (x *= 2 is x = x * 2), so they
+    // resolve through binOps instead of the shared 32 bit applyOps table.
+    var gCompound = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%"}
+    var coreApplyOpG = applyOp
+    applyOp = function(op, a, b) {
+        if (hasOwn(gCompound, op) && (isFlo(a) || isFlo(b) || isCx(a) || isCx(b))) {
+            return binOp(gCompound[op], a, b)
+        }
+        return coreApplyOpG(op, a, b)
+    }
 
     // Go's == is VALUE equality for structs and arrays (both are value types) and
     // identity for everything else. nil compares equal to an unset slice/map/pointer.
     function goEq(l, r) {
+        // A float64 box compares by VALUE, against another box or against an
+        // untyped constant (x == 1 with x a float64).
+        if (isFlo(l) || isFlo(r)) { return gNumF(l) === gNumF(r) }
         if (l === r) { return true }
         if (l === undefined) { return r === null || r === undefined }
         if (r === undefined) { return l === null }
@@ -1759,8 +1894,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // The zero value of a type text, used for the untouched slots of [5]int{0: 1}.
     function zeroOfType2(t) {
+        if (t.indexOf("float") == 0) { return gFlo(0) }
         if (t.indexOf("int") == 0 || t.indexOf("uint") == 0 || t.indexOf("byte") == 0
-            || t.indexOf("rune") == 0 || t.indexOf("float") == 0) { return 0 }
+            || t.indexOf("rune") == 0) { return 0 }
         if (t.indexOf("string") == 0) { return "" }
         if (t.indexOf("bool") == 0) { return false }
         return null
@@ -2075,11 +2211,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var n = 0; n < names.length; n++) declVar(names[n], goVal(vals[n]))
         }
     }
+    // x++ / x-- keep the type of what they step: a float64 stays a float64,
+    // everything else steps as an integer.
     function makeIncDec(items) {
         var ref = items[0]
         var d = (items[1] == "++") ? 1 : -1
         return function() {
-            assignRef(ref, (readRef(ref) + d) | 0)
+            var cur = anytype // The slot may hold a number or a float64 box.
+            cur = readRef(ref)
+            assignRef(ref, isFlo(cur) ? gFlo(cur.__flo + d) : ((cur + d) | 0))
         }
     }
 
@@ -2115,6 +2255,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // items = [name..., {ty}?, initThunk...]: 'var a, b = 1, 2', 'var i int',
     // 'var q, r int' and the const forms all go through here. With more names than
     // initializers the single initializer is a multi-value call and gets unpacked.
+    // The declared type applied to a value: only the float types change it (the
+    // sized integer types keep the position-keyed conversion mechanism).
+    function gAdoptTy(ty, v) {
+        if (isFloatTy(ty) && typeof v == "number") { return gFlo(v) }
+        return v
+    }
     function makeVarDecl(items) {
         var names = []
         var i = 0
@@ -2133,7 +2279,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var vals = []
             for (var k = 0; k < inits.length; k++) { vals.push(inits[k]()) }
             if (names.length > 1 && inits.length == 1) { vals = vals[0] }
-            for (var n = 0; n < names.length; n++) { declVar(names[n], goVal(vals[n])) }
+            // A float64/float32 declaration CONVERTS its initializer, so
+            // `var d float64 = 1` holds a float64 and d/2 is 0.5, not 0.
+            for (var n = 0; n < names.length; n++) { declVar(names[n], gAdoptTy(ty, goVal(vals[n]))) }
         }
     }
 

@@ -1101,13 +1101,108 @@ KwLet       = "let" KwEnd ;
     // concatenate). Every operator unboxes it through csNumV; csStr renders the glyph.
     function csChar(code) { return {__char: code} }
     function csIsChar(v) { return v !== null && v !== undefined && typeof v == "object" && v.__char !== undefined }
-    function csNumV(v) { return csIsChar(v) ? v.__char : v }
+    function csNumV(v) { return csIsChar(v) ? v.__char : (csIsFlo(v) ? v.__flo : v) }
+
+    // ----- double / float / decimal: a boxed {__flo: value} -----
+    // C#'s double is a DIFFERENT type from int, and this value model is untyped, so
+    // 1.0 and 1 would both be the JS number 1: 1.0 / 3.0 divided as integers (0
+    // instead of 0.3333333333333333) and there was no Infinity, no NaN and no -0.0.
+    // Boxing every floating-point value keeps them apart, exactly like csChar keeps a
+    // char apart from its code and like the compiled half's js_csflo box (see
+    // abnf/jsrtjvm.go). Invariant: a PLAIN number is an integral type, a {__flo} box
+    // is a double/float/decimal.
+    var csNegOne = 0 - 1
+    var csZeroF = 0
+    var csInf = 1 / csZeroF
+    function csFlo(f) { return {__flo: f} }
+    function csIsFlo(v) { return v !== null && v !== undefined && typeof v == "object" && v.__flo !== undefined }
+    function csNumD(v) {
+        if (v === null || v === undefined) return v
+        if (typeof v == "object") {
+            if (v.__flo !== undefined) return v.__flo
+            if (v.__char !== undefined) return v.__char
+        }
+        return v
+    }
+    function csNegF(f) { return f * csNegOne }
+    // double.ToString() under the invariant culture (ECMA-335 / .NET "G"): the
+    // shortest round-tripping digits, NO trailing ".0" for an integral value, and the
+    // NumberFormatInfo.InvariantInfo symbols "Infinity" / "-Infinity" / "NaN".
+    // Scientific notation starts outside [1e-5, 1e15).
+    function csFloStr(d) {
+        if (d !== d) return "NaN"
+        if (d === csInf) return "Infinity"
+        if (d === csNegF(csInf)) return "-Infinity"
+        if (d === 0) return (1 / d < 0) ? "-0" : "0"
+        var neg = d < 0
+        var a = neg ? csNegF(d) : d
+        var s = (a >= 0.00001 && a < 1000000000000000) ? csFloPlain(a) : csFloSci(a)
+        return neg ? "-" + s : s
+    }
+    function csFloPlain(a) {
+        var s = "" + a
+        // The host switches to exponent form at 1e21; inside this range it does not.
+        return s
+    }
+    function csFloSci(a) {
+        var s = "" + a
+        var mant = s
+        var exp = 0
+        var ei = 0 - 1
+        for (var i = 0; i < s.length; i++) { if (s.charAt(i) == "e" || s.charAt(i) == "E") { ei = i } }
+        if (ei >= 0) {
+            mant = s.substring(0, ei)
+            var et = s.substring(ei + 1)
+            if (et.charAt(0) == "+") { et = et.substring(1) }
+            exp = parseInt(et, 10)
+        }
+        var digits = ""
+        var pt = 0 - 1
+        for (var j = 0; j < mant.length; j++) {
+            var ch = mant.charAt(j)
+            if (ch == ".") { pt = digits.length } else { digits = digits + ch }
+        }
+        if (pt < 0) { pt = digits.length }
+        var lead = 0
+        while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead++ }
+        digits = digits.substring(lead)
+        pt = pt - lead
+        var endz = digits.length
+        while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
+        digits = digits.substring(0, endz)
+        var frac = digits.substring(1)
+        var e10 = pt + exp - 1
+        var es = e10 < 0 ? (0 - e10) : e10
+        var etx = "" + es
+        if (es < 10) { etx = "0" + etx }
+        return digits.charAt(0) + (frac == "" ? "" : "." + frac) + "E" + (e10 < 0 ? "-" : "+") + etx
+    }
+    // One binary operator with at least one double operand: the whole operation is
+    // floating point and its result is a double (ECMA-334 12.4.7, binary numeric
+    // promotion).
+    function csFloOp(op, l, r) {
+        var a = csNumD(l)
+        var b = csNumD(r)
+        if (op == "+")  return csFlo(a + b)
+        if (op == "-")  return csFlo(a - b)
+        if (op == "*")  return csFlo(a * b)
+        if (op == "/")  return csFlo(a / b)
+        if (op == "%")  return csFlo(a % b)
+        if (op == "==") return a == b
+        if (op == "!=") return a != b
+        if (op == "<")  return a < b
+        if (op == ">")  return a > b
+        if (op == "<=") return a <= b
+        if (op == ">=") return a >= b
+        return undefined
+    }
     // Equality with a char on either side: two chars compare by code, and a char equals
     // the one-character string it renders as (the twin of the js_jchareq external).
     function csEq(l, r) {
         if (csIsChar(l) && typeof r == "string") { return r.length == 1 && r.charCodeAt(0) === l.__char }
         if (csIsChar(r) && typeof l == "string") { return l.length == 1 && l.charCodeAt(0) === r.__char }
         if (csIsChar(l) && csIsChar(r)) { return l.__char === r.__char }
+        if (csIsFlo(l) || csIsFlo(r)) { return csNumD(l) === csNumD(r) }
         if (l === r) { return true }
         // Records and tuples compare by VALUE in C#, not by identity.
         if (csIsRecObj(l) && csIsRecObj(r)) { return csRecEq(l, r) }
@@ -1151,6 +1246,7 @@ KwLet       = "let" KwEnd ;
         if (v === false) return "false"
         if (typeof v == "string") return v
         if (csIsChar(v)) return String.fromCharCode(v.__char)
+        if (csIsFlo(v)) return csFloStr(v.__flo)
         return "" + v
     }
     function csStr2(v) {
@@ -1163,6 +1259,7 @@ KwLet       = "let" KwEnd ;
         if (typeof l == "string" || typeof r == "string") return csStr2(l) + csStr2(r)
         // 'f += g' on delegates combines their invocation lists.
         if (csHasDeleg && csIsDelegVal(r)) { return csDelegAdd(l, r) }
+        if (csIsFlo(l) || csIsFlo(r)) { return csFlo(csNumD(l) + csNumD(r)) }
         var a = anytype
         var b = anytype
         a = csNumV(l)
@@ -1595,26 +1692,36 @@ KwLet       = "let" KwEnd ;
     // '++x' / 'x++': the same update; the prefix form yields the NEW value, the postfix
     // form the old one.
     function makePreIncDec(items) { return makeIncDec([items[1], items[0]], true) }
+    // ++ / -- keep the type of what they step: a double stays a double, a char stays
+    // a char, everything else steps as an int32.
+    function csStep(v, d) {
+        if (csIsFlo(v)) { return csFlo(v.__flo + d) }
+        if (csIsChar(v)) { return csChar((v.__char + d) & 65535) }
+        return (v + d) | 0
+    }
     function makeIncDec(items, pre) {
         var ref = items[0]
         var d = (items[1] == "++") ? 1 : -1
         return function() {
             if (ref.path.length == 0) {
-                var n = getVar(ref.name)
-                var nn = (n + d) | 0
+                var n = anytype // The variable may hold a number, a char or a double.
+                n = getVar(ref.name)
+                var nn = csStep(n, d)
                 setVar(ref.name, nn)
                 return pre ? nn : n
             }
             var p = csResolveRef(ref)
             if (isDict(p.obj)) {
                 var di = dictFind(p.obj, p.key)
-                var m = di < 0 ? 0 : p.obj.vals[di]
-                var mn = (m + d) | 0
+                var m = anytype
+                m = di < 0 ? 0 : p.obj.vals[di]
+                var mn = csStep(m, d)
                 dictSet(p.obj, p.key, mn)
                 return pre ? mn : m
             }
-            var m2 = hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined
-            var m2n = (m2 + d) | 0
+            var m2 = anytype
+            m2 = hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined
+            var m2n = csStep(m2, d)
             p.obj[p.key] = m2n
             return pre ? m2n : m2
         }
@@ -1789,12 +1896,12 @@ KwLet       = "let" KwEnd ;
                 var f = csConvOf(v, t)
                 if (f != undefined) { v = f(v) }
             }
-            if (t == "char") { return csChar(csNumV(v) | 0) }
-            if (t == "byte" || t == "sbyte") { return csNumV(v) & 255 }
+            if (t == "char") { return csChar(csNumD(v) | 0) }
+            if (t == "byte" || t == "sbyte") { return csNumD(v) & 255 }
             if (t == "int" || t == "uint" || t == "long" || t == "ulong" || t == "short" || t == "ushort") {
-                return csNumV(v) | 0
+                return csNumD(v) | 0
             }
-            if (t == "double" || t == "float" || t == "decimal") { return csNumV(v) }
+            if (t == "double" || t == "float" || t == "decimal") { return csFlo(csNumD(v)) }
             return v
         }
     }
@@ -2020,7 +2127,13 @@ KwLet       = "let" KwEnd ;
         for (var i = 0; i < s.length; i++) { if (s.charAt(i) != "_") { t = t + s.charAt(i) } }
         if (t.length >= 2 && t.charAt(0) == "0" && (t.charAt(1) == "x" || t.charAt(1) == "X")) { return parseInt(t.substring(2), 16) }
         if (t.length >= 2 && t.charAt(0) == "0" && (t.charAt(1) == "b" || t.charAt(1) == "B")) { return parseInt(t.substring(2), 2) }
-        if (t.indexOf(".") >= 0 || t.indexOf("e") >= 0 || t.indexOf("E") >= 0) { return parseFloat(t) }
+        // A real literal is a DOUBLE: a '.' fraction, an exponent, or one of the
+        // f/F/d/D/m/M suffixes (ECMA-334 6.4.5.3).
+        var lastc = t.charAt(t.length - 1)
+        var isReal = t.indexOf(".") >= 0 || t.indexOf("e") >= 0 || t.indexOf("E") >= 0
+                     || lastc == "f" || lastc == "F" || lastc == "d" || lastc == "D"
+                     || lastc == "m" || lastc == "M"
+        if (isReal) { return csFlo(parseFloat(t)) }
         return parseInt(t, 10)
     }
 
@@ -3343,6 +3456,11 @@ KwLet       = "let" KwEnd ;
             if (uf != undefined) { return uf(l0, r0) }
         }
         if (op == "+") return core.add(l0, r0)
+        // A double operand pulls the whole operation into floating point.
+        if (csIsFlo(l0) || csIsFlo(r0)) {
+            var fr = csFloOp(op, l0, r0)
+            if (fr !== undefined) { return fr }
+        }
         var l = anytype
         var r = anytype
         l = csNumV(l0)
@@ -3365,7 +3483,10 @@ KwLet       = "let" KwEnd ;
         if (op == "<<") return l << r
         if (op == ">>") return l >> r
     }
+    var csCompound = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%"}
     applyOp = function(op, a, b) {
+        // A double on either side makes the compound operator floating point too.
+        if ((csIsFlo(a) || csIsFlo(b)) && hasOwn(csCompound, op)) { return binOp(csCompound[op], a, b) }
         if (op == "+=") return core.add(a, b)
         // 'f -= g' on delegates removes g from the invocation list.
         if (op == "-=" && csHasDeleg && csIsDelegVal(b)) { return csDelegSub(a, b) }
@@ -3389,6 +3510,9 @@ KwLet       = "let" KwEnd ;
                 var f = csFindAcc(v, "__op1_-")
                 if (f != undefined) { return f(v) }
             }
+            // -x keeps the operand's type: a double negates as a double (so -0.0
+            // and -1.0/0.0 are real), everything else as an int32.
+            if (csIsFlo(v)) { return csFlo(csNegF(v.__flo)) }
             return (0 - csNumV(v)) | 0
         }
     }
@@ -3406,6 +3530,9 @@ KwLet       = "let" KwEnd ;
     // An implicit user conversion at a typed declaration ('S12Vec d = 5;'): the target type
     // declares 'implicit operator S12Vec(int n)', so the class carries a '__conv_S12Vec'.
     function csImplicitConv(ty, v) {
+        // A double/float/decimal declaration CONVERTS its initializer (ECMA-334
+        // 10.2.3, implicit numeric conversion): `double d = 1;` holds 1.0.
+        if ((ty == "double" || ty == "float" || ty == "decimal") && typeof v == "number") { return csFlo(v) }
         if (!csHasOps) { return v }
         if (v !== null && v !== undefined && typeof v == "object" && v.__class != undefined) { return v }
         var cls = hasOwn(globalScope, ty) ? globalScope[ty] : undefined

@@ -1169,7 +1169,7 @@ AtAdjacent  = :script(~~
 // A floating-point literal (1.5, 2.0f, 1e9, 3.14E-2, digit-group underscores):
 // a genuine double value (parseFloat stops before the f/F suffix). Comparisons
 // are exact; see the arithmetic note at the core config for the int-wrap caveat.
-FloatLit    <~~ push(makeConst(parseFloat(up.in.split("_").join("")))) ~~>
+FloatLit    <~~ push(makeFloConst(parseFloat(up.in.split("_").join("")))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
               ( "." "0"..."9" { "0"..."9" | "_" } [ FloatExp ] [ FloatSfx ]
               | FloatExp [ FloatSfx ]
@@ -1643,20 +1643,40 @@ KwContract  = "contract" KwEnd ;
             return {b: b, v: v}
         }
     }
+    // ----- Double / Float: a boxed js_jflo value (see abnf/jsrtjvm.go) -----
+    // Kotlin's Double is a DIFFERENT type from Int, and the handle runtime models
+    // every number as one JS double, so 1.0 / 3.0 and 1 / 3 arrived here as the same
+    // two operands. Every arithmetic operator used to be followed by the shared
+    // intWrap, which made the float half of the language silently integer
+    // arithmetic: 2.5 * 1.5 was 3, 1.0 / 3.0 was 0, println(1.0) printed "1" and
+    // Infinity / NaN / -0.0 did not exist. A floating-point literal now emits the
+    // js_jflo box and the js_jf* operators answer a Double whenever one operand is
+    // one, which is what kotlin-interpreter.abnf's {__flo} box does.
+    function makeFloConst(f) {
+        return function(b) { return {b: b, v: callExt(b, "js_jflo", [emitNum(b, f)])} }
+    }
+    var coreEmitBinK = emitBin
+    emitBin = function(b, op, l, r) {
+        if (op == "-" || op == "-=") return callExt(b, "js_jfsub", [l, r])
+        if (op == "*" || op == "*=") return callExt(b, "js_jfmul", [l, r])
+        if (op == "/" || op == "/=") return callExt(b, "js_jfdiv", [l, r])
+        if (op == "%" || op == "%=") return callExt(b, "js_jfmod", [l, r])
+        return coreEmitBinK(b, op, l, r)
+    }
     // -x: the unaryMinus convention, else the primitive negation.
     makeNeg = function(t) {
         return function(b) {
             var r = t(b)
             b = r.b
             var cls = opClasses["$unaryMinus"]
-            if (cls == undefined) { return {b: b, v: intWrap(b, callExt(b, "js_neg", [r.v]))} }
+            if (cls == undefined) { return {b: b, v: callExt(b, "js_jfneg", [r.v])} }
             var objB = curF.NewBlock("")
             var primB = curF.NewBlock("")
             var mergeB = curF.NewBlock("")
             b.NewCondBr(emitClassProbe(b, r.v, cls), objB, primB)
             var ov = callExt(objB, "js_mcall", [r.v, emitStr(objB, "unaryMinus"), callExt(objB, "js_arr_new", [])])
             objB.NewBr(mergeB)
-            var pv = intWrap(primB, callExt(primB, "js_neg", [r.v]))
+            var pv = callExt(primB, "js_jfneg", [r.v])
             primB.NewBr(mergeB)
             return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(ov, objB), llvm.ir.NewIncoming(pv, primB)])}
         }
@@ -2895,21 +2915,23 @@ KwContract  = "contract" KwEnd ;
             return {b: r1.b, v: r1.v}
         }
     }
+    // ++ / -- keep the type of what they step (js_jfstep): a Double stays a Double,
+    // a Char stays a Char, everything else wraps to int32.
     function makeIncDec(items) {
         var ref = items[0]
-        var extName = (items[1] == "++") ? "js_jadd" : "js_sub"
+        var step = (items[1] == "++") ? 1 : 0 - 1
         return function(b) {
-            var oneV = emitNum(b, 1)
+            var oneV = emitNum(b, step)
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
                 var oldV = callExt(b, "js_kget", [curScopeV, nameV])
-                callExt(b, "js_kset", [curScopeV, nameV, intWrap(b, callExt(b, extName, [oldV, oneV]))])
+                callExt(b, "js_kset", [curScopeV, nameV, callExt(b, "js_jfstep", [oldV, oneV])])
                 return {b: b, v: oldV}
             }
             var p = emitRefPath(b, ref)
             b = p.b
             var oldM = callExt(b, "js_get", [p.obj, p.key])
-            callExt(b, "js_set", [p.obj, p.key, intWrap(b, callExt(b, extName, [oldM, oneV]))])
+            callExt(b, "js_set", [p.obj, p.key, callExt(b, "js_jfstep", [oldM, oneV])])
             return {b: b, v: oldM}
         }
     }

@@ -580,6 +580,66 @@ fun s23() {
     check("re48", Regex("(?<n>a)\\k<n>").matches("aa") && !Regex("(?<n>a)\\k<n>").matches("ab"))
 }
 
+// ===== SECTION 24: floating point arithmetic =====
+// Double/Float are a DIFFERENT type from Int, and every value below was checked
+// against the equivalent Java program run on `java` (JDK 24) - Kotlin/JVM's
+// Double is java.lang.Double, its arithmetic is the JVM's and its toString is
+// java.lang.Double.toString, so Java is the oracle here (no kotlinc available).
+// The section exists because both grammars used to evaluate every arithmetic
+// operator in 32 bit integers: 1.0 / 3.0 was 0, 2.5 * 1.5 was 3, println(1.0)
+// printed "1" and Infinity / NaN / -0.0 did not exist at all.
+class Money24(val amount: Double) {
+    fun half(): Double = amount / 2
+}
+fun s24(d: Double): String = "" + d
+fun sec24() {
+    // Division is real division as soon as one side is a Double, and integer
+    // division (truncating towards zero) when both sides are Int.
+    check("flt1", 1.0 / 3.0 == 0.3333333333333333)
+    check("flt2", 7 / 2 == 3 && -7 / 2 == -3)
+    check("flt3", 7 / 2.0 == 3.5 && 7.0 / 2 == 3.5)
+    check("flt4", 2.5 * 1.5 == 3.75 && 7.0 - 0.5 == 6.5 && 3.0 * 2.0 == 6.0)
+    check("flt5", 2.0 % 0.75 == 0.5 && 1.5 + 1 == 2.5)
+    // A Double operand promotes the whole operation, so an integral result still
+    // prints with its decimal point.
+    check("flt6", s24(1.0) == "1.0" && s24(6.0) == "6.0")
+    check("flt7", s24(0.1 + 0.2) == "0.30000000000000004")
+    check("flt8", s24(1.0 / 3.0) == "0.3333333333333333")
+    // Infinity, NaN and the two zeroes.
+    val inf = 1.0 / 0.0
+    val nan = 0.0 / 0.0
+    check("flt9", s24(inf) == "Infinity" && s24(-1.0 / 0.0) == "-Infinity")
+    check("flt10", s24(nan) == "NaN" && nan != nan)
+    check("flt11", s24(-0.0) == "-0.0" && 0.0 == -0.0)
+    check("flt12", 1e300 * 1e300 == inf)
+    // Double.toString switches to scientific notation outside [1e-3, 1e7).
+    check("flt13", s24(1e20) == "1.0E20" && s24(1.5e-8) == "1.5E-8")
+    check("flt14", s24(1e-3) == "0.001" && s24(2.5) == "2.5")
+    // ++ and the compound operators keep a Double a Double.
+    var d = 1.0
+    check("flt15", s24(d) == "1.0")
+    d += 0.25
+    check("flt16", d == 1.25)
+    d++
+    check("flt17", d == 2.25 && s24(d) == "2.25")
+    d *= 2
+    check("flt18", d == 4.5)
+    d /= 3
+    check("flt19", d == 1.5)
+    d--
+    check("flt20", s24(d) == "0.5")
+    // A string template renders a Double like toString does.
+    check("flt21", "$d/${1.0}" == "0.5/1.0")
+    check("flt22", s24(-2.5) == "-2.5")
+    // Comparisons mix Double and Int freely.
+    check("flt23", 2.5 > 2 && 2 < 2.5 && 1.0 == 1.0 && 3.0 <= 3 && 3.0 >= 3)
+    // A Double survives a property, a list element and a function boundary.
+    val m = Money24(5.0)
+    check("flt24", m.half() == 2.5 && s24(m.amount) == "5.0")
+    val xs = listOf(0.5, 1.5)
+    check("flt25", xs[0] + xs[1] == 2.0 && s24(xs[0] * 2) == "1.0")
+}
+
 // ===== END SECTIONS =====
 
 fun main() {
@@ -606,6 +666,7 @@ fun main() {
     s21() // SECTION-CALL 21
     s22() // SECTION-CALL 22
     s23() // SECTION-CALL 23
+    sec24() // SECTION-CALL 24
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

@@ -610,6 +610,69 @@ b";                                                   // verbatim keeps the newl
             Program.Check("arg6", mid.Length == 2 && mid[0] == 2);
         }
 
+        // ===== SECTION 23: floating point arithmetic =====
+        // double/float/decimal are a DIFFERENT type from int. No C# compiler is
+        // available on this machine, so every value below is SPEC-CITED, not
+        // executed: ECMA-334 12.4.7 (binary numeric promotion: one double operand
+        // makes the whole operation floating point), 6.4.5.3 (a real literal is a
+        // double unless it carries an f/m suffix), 10.2.3 (implicit numeric
+        // conversion on assignment), and, for the rendering, the .NET Core 3.0+
+        // shortest-round-trip double.ToString() with the invariant
+        // NumberFormatInfo symbols "Infinity" / "-Infinity" / "NaN". The section
+        // exists because both grammars used to evaluate every arithmetic operator
+        // in 32 bit integers: 1.0 / 3.0 was 0 and 2.5 * 1.5 was 3.
+        static string S23S(double d) { return "" + d; }
+
+        static double S23Half() { return 0.5; }
+
+        static void S23()
+        {
+            Program.Check("flt1", 1.0 / 3.0 == 0.3333333333333333);
+            Program.Check("flt2", 7 / 2 == 3 && -7 / 2 == -3 && 1 / 3 == 0);
+            Program.Check("flt3", (double)7 / 2 == 3.5 && 7 / 2.0 == 3.5);
+            Program.Check("flt4", 2.5 * 1.5 == 3.75 && 7.0 - 0.5 == 6.5 && 3.0 * 2.0 == 6.0);
+            Program.Check("flt5", 2.0 % 0.75 == 0.5 && 1.5 + 1 == 2.5);
+            // Rendering: no trailing ".0" for an integral double, and the three
+            // special values that integer arithmetic could not produce.
+            Program.Check("flt6", Program.S23S(1.0) == "1" && Program.S23S(2.5) == "2.5");
+            Program.Check("flt7", Program.S23S(0.1 + 0.2) == "0.30000000000000004");
+            Program.Check("flt8", Program.S23S(1.0 / 3.0) == "0.3333333333333333");
+            double inf = 1.0 / 0.0;
+            double nan = 0.0 / 0.0;
+            Program.Check("flt9", Program.S23S(inf) == "Infinity" && Program.S23S(-1.0 / 0.0) == "-Infinity");
+            Program.Check("flt10", Program.S23S(nan) == "NaN" && nan != nan);
+            Program.Check("flt11", 1e300 * 1e300 == inf && 0.0 == -0.0);
+            // A double declaration converts its initializer; ++ and the compound
+            // operators keep the variable a double.
+            double d = 1;
+            Program.Check("flt12", Program.S23S(d) == "1" && d / 2 == 0.5);
+            d += 0.25;
+            Program.Check("flt13", d == 1.25);
+            d++;
+            Program.Check("flt14", d == 2.25);
+            d *= 2;
+            Program.Check("flt15", d == 4.5);
+            d /= 3;
+            Program.Check("flt16", d == 1.5);
+            d--;
+            Program.Check("flt17", d == 0.5 && Program.S23S(d) == "0.5");
+            Program.Check("flt18", (int)2.9 == 2 && (int)-2.9 == -2 && (double)3 == 3.0);
+            Program.Check("flt19", Program.S23S(-2.5) == "-2.5" && -Program.S23Half() == -0.5);
+            Program.Check("flt20", 2.5 > 2 && 2 < 2.5 && 1.0 == 1 && 3.0 <= 3 && 3.0 >= 3);
+            // A double survives an array element and a method boundary.
+            double[] xs = new double[]{0.5, 1.5};
+            Program.Check("flt21", xs[0] + xs[1] == 2.0 && Program.S23S(xs[0] * 2) == "1");
+            Program.Check("flt22", Program.S23Half() / 2 == 0.25);
+            float f = 3;
+            Program.Check("flt23", f / 2 == 1.5 && 1.5f + 1.5f == 3.0f && 2.5d * 2 == 5.0);
+            // Two C# rules the compiler half used to get wrong: a null operand of
+            // '+' renders as the EMPTY string (Java writes "null"), and
+            // String.Length counts UTF-16 code units (System.String is UTF-16).
+            string nul = null;
+            Program.Check("flt24", "x" + nul == "x" && "x" + null == "x");
+            Program.Check("flt25", "ab".Length == 2 && "\u00e9".Length == 1 && "😀".Length == 2);
+        }
+
         // ===== END SECTIONS =====
 
         static int Main()
@@ -636,6 +699,7 @@ b";                                                   // verbatim keeps the newl
             Program.S20(); // SECTION-CALL 20
             Program.S21(); // SECTION-CALL 21
             Program.S22(); // SECTION-CALL 22
+            Program.S23(); // SECTION-CALL 23
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

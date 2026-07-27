@@ -24,7 +24,7 @@ arguments or by an array), the enhanced for loop
 parsed; the semantics are dynamic, but char is a value of its own that prints as its
 glyph and computes on its code), String concatenation with +, the String methods
 length(), charAt(), equals(), substring(), indexOf() and isEmpty() (charAt yields a
-one character String, which compares equal to the matching char),
+char, so it prints as its glyph and computes on its code),
 System.out.println/print, System.exit, Math.abs/max/min,
 if/else, while, do-while, both for forms, the classic colon switch on int or String
 (fallthrough, stacked labels, default) and the arrow switch statement (case 1, 2 ->
@@ -487,8 +487,10 @@ UPlus       <~~ push(makeUPlus(pop())) ~~>
 // any unary operand; a reference cast excludes a leading '-'/'+' so `(a) - b` stays
 // subtraction (Java's cast/subtraction disambiguation).
 Cast        = PrimCast | RefCast ;
-PrimCast    <~~ push(makeCast(pop())) ~~>
-            = "(" { Annotation } PrimName KwEnd { { Annotation } "[" "]" } ")" UnaryExpr ;
+PrimCast    <~~ var pcInner = pop(); push(makePrimCast(pcInner, pop().ct)) ~~>
+            = "(" CastPrim ")" UnaryExpr ;
+CastPrim    <~~ push({ct: stripWs(up.in)}) ~~>
+            = { Annotation } PrimName KwEnd { { Annotation } "[" "]" } ;
 RefCast     <~~ push(makeCast(pop())) ~~>
             = "(" RefType ")" UnaryNoPM ;
 UnaryNoPM   = Not | PostfixExpr ;
@@ -651,27 +653,27 @@ TextBlock   <~~ push(makeConst(textBlock(up.in))) ~~>
 TBItem      = "\\" "\x00"..."\U0010ffff" | "\x00"..."\U0010ffff" ;
 // Hex / binary: the 0x / 0b prefix is distinctive, so these never shadow a decimal int.
 // A hex literal may carry a p-exponent (0x1p4 == 16.0, a hexadecimal double).
-HexLit      <~~ push(makeConst(numLit(up.in, 16))) ~~>
+HexLit      <~~ push(makeNumConst(numLit(up.in, 16))) ~~>
             = ( "0x" | "0X" ) :whitespace() HexDig { HexDig | "_" } [ HexPTail ] [ NumSfx ] :whitespace(Whitespace) ;
 HexPTail    = ( "p" | "P" ) [ "+" | "-" ] Dig { Dig } ;
-BinLit      <~~ push(makeConst(numLit(up.in, 2))) ~~>
+BinLit      <~~ push(makeNumConst(numLit(up.in, 2))) ~~>
             = ( "0b" | "0B" ) :whitespace() BinDig { BinDig | "_" } [ NumSfx ] :whitespace(Whitespace) ;
 // The classic leading-zero octal (017); it needs at least one octal digit after
 // the 0, so plain 0, 0.5 and 0x... are untouched.
-OctLit      <~~ push(makeConst(numLit(up.in, 8))) ~~>
+OctLit      <~~ push(makeNumConst(numLit(up.in, 8))) ~~>
             = "0" :whitespace() OctDig { OctDig | "_" } [ NumSfx ] :whitespace(Whitespace) ;
 // A fractional or exponent literal: 1.5, 5., .5, 1e3, 2.5e-2 (underscores and
 // an f/F/d/D/L suffix allowed). Distinct from an integer and from x.y access.
-FloatLit    <~~ push(makeConst(numLit(up.in, 10))) ~~>
+FloatLit    <~~ push(makeNumConst(numLit(up.in, 10))) ~~>
             = FloatBody [ NumSfx ] :whitespace(Whitespace) ;
 FloatBody   = "." :whitespace() Dig { Dig | "_" } [ ExpPart ]
             | Dig :whitespace() { Dig | "_" } ( "." { Dig | "_" } [ ExpPart ] | ExpPart ) ;
 ExpPart     = ( "e" | "E" ) [ "+" | "-" ] Dig { Dig } ;
 // A decimal digit run containing an underscore (a digit-grouping literal like 1_000_000).
-UscoreInt   <~~ push(makeConst(numLit(up.in, 10))) ~~>
+UscoreInt   <~~ push(makeNumConst(numLit(up.in, 10))) ~~>
             = Dig :whitespace() { Dig } "_" { Dig | "_" } [ NumSfx ] :whitespace(Whitespace) ;
 // A decimal digit run with an L / F / D suffix (like 100L, 2F, 5D).
-SuffInt     <~~ push(makeConst(numLit(up.in, 10))) ~~>
+SuffInt     <~~ push(makeNumConst(numLit(up.in, 10))) ~~>
             = Dig :whitespace() { Dig } NumSfx :whitespace(Whitespace) ;
 HexDig      = "0"..."9" | "a"..."f" | "A"..."F" ;
 BinDig      = "0" | "1" ;
@@ -937,40 +939,44 @@ KwYield     = "yield" KwEnd ;
             return {b: b, v: v}
         }
     }
+    // x++ / x-- : one js_jfstep with the step as its second argument. js_jfstep
+    // keeps the TYPE of what it steps (a double stays a double, a char stays a
+    // char, everything else wraps to int32), so the intWrap that used to follow -
+    // and that turned d++ on a double into integer arithmetic - is gone.
     function makeIncDec(items) {
         var ref = items[0]
-        var extName = (items[1] == "++") ? "js_jadd" : "js_sub"
+        var step = (items[1] == "++") ? 1 : 0 - 1
         return function(b) {
-            var oneV = emitNum(b, 1)
+            var oneV = emitNum(b, step)
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
                 var oldV = callExt(b, "js_scope_get", [curScopeV, nameV])
-                callExt(b, "js_scope_set", [curScopeV, nameV, intWrap(b, callExt(b, extName, [oldV, oneV]))])
+                callExt(b, "js_scope_set", [curScopeV, nameV, callExt(b, "js_jfstep", [oldV, oneV])])
                 return {b: b, v: oldV}
             }
             var p = emitRefPath(b, ref)
             b = p.b
             var oldM = callExt(b, "js_get", [p.obj, p.key])
-            callExt(b, "js_set", [p.obj, p.key, intWrap(b, callExt(b, extName, [oldM, oneV]))])
+            callExt(b, "js_set", [p.obj, p.key, callExt(b, "js_jfstep", [oldM, oneV])])
             return {b: b, v: oldM}
         }
     }
-    // Prefix ++/-- : like makeIncDec but yields the NEW value (genuine, same externs).
+    // Prefix ++/-- : like makeIncDec but yields the NEW value (genuine, same extern).
     function makePreIncDec(ref, op) {
-        var extName = (op == "++") ? "js_jadd" : "js_sub"
+        var step = (op == "++") ? 1 : 0 - 1
         return function(b) {
-            var oneV = emitNum(b, 1)
+            var oneV = emitNum(b, step)
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
                 var oldV = callExt(b, "js_scope_get", [curScopeV, nameV])
-                var nv = intWrap(b, callExt(b, extName, [oldV, oneV]))
+                var nv = callExt(b, "js_jfstep", [oldV, oneV])
                 callExt(b, "js_scope_set", [curScopeV, nameV, nv])
                 return {b: b, v: nv}
             }
             var p = emitRefPath(b, ref)
             b = p.b
             var oldM = callExt(b, "js_get", [p.obj, p.key])
-            var nv2 = intWrap(b, callExt(b, extName, [oldM, oneV]))
+            var nv2 = callExt(b, "js_jfstep", [oldM, oneV])
             callExt(b, "js_set", [p.obj, p.key, nv2])
             return {b: b, v: nv2}
         }
@@ -978,17 +984,28 @@ KwYield     = "yield" KwEnd ;
     // Numeric literal decoding: strip digit-group underscores and a trailing
     // L/l/F/f/D/d suffix, then parse in the base. Hex may carry a p-exponent
     // (0x1p4 = 1 * 2^4); decimal fractional/exponent forms go through
-    // parseFloat. One number type - a suffix only selects the parse.
+    // parseFloat. The literal's TYPE follows the Java rules: a fractional or
+    // exponent form, an f/F/d/D suffix and a hexadecimal p-exponent are DOUBLES
+    // and emit a js_jflo box (see jFloConst); everything else is an integral
+    // value and emits a plain number.
     function numLit(text, base) {
         var s = stripWs(text).split("_").join("")
         var last = s.charAt(s.length - 1)
         // Only L marks a long on hex/binary/octal (f/F/d/D are hex digits or
         // invalid there); decimal also takes the float suffixes.
         var isSfx = last == "L" || last == "l"
-        if (base == 10 && (last == "F" || last == "f" || last == "D" || last == "d")) { isSfx = true }
+        var isFlt = false
+        if (base == 10 && (last == "F" || last == "f" || last == "D" || last == "d")) { isSfx = true; isFlt = true }
         if (isSfx) {
             s = s.substring(0, s.length - 1)
         }
+        if (base == 10 && !isFlt) {
+            for (var fi = 0; fi < s.length; fi++) {
+                var fc = s.charAt(fi)
+                if (fc == "." || fc == "e" || fc == "E") { isFlt = true }
+            }
+        }
+        if (isFlt) { return {__flo: parseFloat(s)} }
         if (base == 16) {
             var pAt = -1
             for (var i = 2; i < s.length; i++) {
@@ -996,6 +1013,7 @@ KwYield     = "yield" KwEnd ;
                 if (c == "p" || c == "P") { pAt = i }
             }
             if (pAt < 0) { return parseInt(s.substring(2), 16) }
+            // 0x1p4 is a hexadecimal DOUBLE literal (JLS 3.10.2).
             var mant = parseInt(s.substring(2, pAt), 16)
             var et = s.substring(pAt + 1)
             if (et.charAt(0) == "+") { et = et.substring(1) }
@@ -1003,11 +1021,20 @@ KwYield     = "yield" KwEnd ;
             var k = exp < 0 ? 0 - exp : exp
             var scale = 1
             while (k > 0) { scale = scale * 2; k = k - 1 }
-            return exp < 0 ? mant / scale : mant * scale
+            return {__flo: exp < 0 ? mant / scale : mant * scale}
         }
         if (base == 2) { return parseInt(s.substring(2), 2) }
         if (base == 8) { return parseInt(s.substring(1), 8) }
-        return parseFloat(s)
+        return parseInt(s, 10)
+    }
+    // A numeric literal's constant thunk: a double emits the js_jflo box, an
+    // integral value the plain number the shared makeConst emits.
+    function makeNumConst(v) {
+        if (v !== null && typeof v == "object") {
+            var f = v.__flo
+            return function(b) { return {b: b, v: callExt(b, "js_jflo", [emitNum(b, f)])} }
+        }
+        return makeConst(v)
     }
 
     // ----- Java escapes, char literals -----
@@ -1130,6 +1157,15 @@ KwYield     = "yield" KwEnd ;
 
     // Unary + is identity; ~x is the int32 complement (x ^ -1).
     function makeUPlus(inner) { return inner }
+    // -x keeps the operand's type: js_jfneg negates a double as a double (so -0.0
+    // and -1.0/0.0 are real) and wraps everything else to int32, which is what the
+    // shared js_neg + intWrap did.
+    makeNeg = function(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_jfneg", [r.v])}
+        }
+    }
     function makeBitNot(inner, pos) {
         return function(b) {
             var r = inner(b)
@@ -1149,6 +1185,15 @@ KwYield     = "yield" KwEnd ;
         if (op == "<<" || op == "<<=") return callExt(b, "js_shl", [l, r])
         if (op == ">>" || op == ">>=") return callExt(b, "js_shr", [l, r])
         if (op == ">>>" || op == ">>>=") return intWrap(b, callExt(b, "js_ushr", [l, r]))
+        // The arithmetic operators are DOUBLE-aware: js_jfsub/js_jfmul/js_jfdiv/
+        // js_jfmod answer a boxed double when either operand is one (JLS 5.6.2) and
+        // wrap to int32 when both are integral - so the shared intWrap, which turned
+        // every one of them into integer arithmetic, is gone. '+' already went
+        // through js_jadd, which now has the same rule.
+        if (op == "-" || op == "-=") return callExt(b, "js_jfsub", [l, r])
+        if (op == "*" || op == "*=") return callExt(b, "js_jfmul", [l, r])
+        if (op == "/" || op == "/=") return callExt(b, "js_jfdiv", [l, r])
+        if (op == "%" || op == "%=") return callExt(b, "js_jfmod", [l, r])
         // == / != go through the char-aware equality (js_jchareq is js_seq unless a
         // char meets the one-character String that charAt answers).
         if (op == "==") return callExt(b, "js_jchareq", [l, r])
@@ -1373,6 +1418,27 @@ KwYield     = "yield" KwEnd ;
     }
     // A cast is identity: (Type) expr lowers to expr.
     function makeCast(inner) { return inner }
+    // A PRIMITIVE cast converts: (double)/(float) box their operand into a double
+    // (that is what makes (double)7 / 2 == 3.5), the integral casts truncate
+    // towards zero and wrap to int32, and (char) re-boxes as a char. A reference
+    // cast stays the identity.
+    function makePrimCast(inner, ty) {
+        var ext = ""
+        if (ty == "double" || ty == "float") { ext = "js_jflo" }
+        if (ty == "int" || ty == "long" || ty == "short" || ty == "byte") { ext = "js_jfint" }
+        if (ty == "char") { ext = "js_char" }
+        if (ext == "") { return inner }
+        if (ext == "js_char") {
+            return function(b) {
+                var rc = inner(b)
+                return {b: rc.b, v: callExt(rc.b, "js_char", [callExt(rc.b, "js_char_code", [rc.v])])}
+            }
+        }
+        return function(b) {
+            var r = inner(b)
+            return {b: r.b, v: callExt(r.b, ext, [r.v])}
+        }
+    }
     // A lambda is a real closure: its body becomes an own IR function jsf_N(env,
     // args) and the site yields js_closure(N, currentScope), so it captures the
     // defining scope. An expression body returns its value; a block body returns
@@ -1484,7 +1550,12 @@ KwYield     = "yield" KwEnd ;
                     b.NewCondBr(isFn, callB, mcallB)
                     var cv = callExt(callB, "js_call", [cur, hUndef, ea.v])
                     callB.NewBr(mergeB)
-                    var mv = callExt(mcallB, "js_mcall", [cur, emitStr(mcallB, s.name), ea.v])
+                    // String.charAt answers a CHAR (js_jcharat), not a one-character
+                    // String: Java's char is an integral type, so s.charAt(1) + 0
+                    // is 101. A user class with its own charAt still dispatches.
+                    var mv = (s.name == "charAt")
+                             ? callExt(mcallB, "js_jcharat", [cur, ea.v])
+                             : callExt(mcallB, "js_mcall", [cur, emitStr(mcallB, s.name), ea.v])
                     mcallB.NewBr(mergeB)
                     cur = mergeB.NewPhi([llvm.ir.NewIncoming(cv, callB), llvm.ir.NewIncoming(mv, mcallB)])
                     b = mergeB
@@ -1693,13 +1764,19 @@ KwYield     = "yield" KwEnd ;
     // initializer is SAM-converted (emitSam): a lambda / method reference stored in a
     // Greet variable becomes an object whose class chain reaches Greet, so the
     // interface's DEFAULT methods are callable on it and `instanceof` answers true.
-    function makeDecl(name, init, tyName) {
+    function makeDecl(name, init, tyName, rawTy) {
         if (init == null) { init = makeConst(0) }
         var sam = samOf(tyName)
+        // A `double`/`float` declaration CONVERTS its initializer (JLS 5.2,
+        // assignment conversion): `double d = 1;` holds 1.0, not 1. The RAW type
+        // decides, not the base name: `double[] xs = {...}` declares an ARRAY and
+        // must not box the array itself.
+        var isDbl = (rawTy == "double" || rawTy == "float")
         return function(b) {
             var r = init(b)
             b = r.b
             var v = r.v
+            if (isDbl) { v = callExt(b, "js_jflo", [v]) }
             if (sam != null) {
                 var sr = emitSam(b, v, tyName, sam)
                 b = sr.b
@@ -1711,11 +1788,12 @@ KwYield     = "yield" KwEnd ;
     }
     function makeDeclSeq(items) {
         var ty = ""
+        var rawTy = ""
         var thunks = []
         for (var i = 0; i < items.length; i++) {
-            if (items[i].dty != undefined) { ty = baseTypeName(items[i].dty); continue }
+            if (items[i].dty != undefined) { ty = baseTypeName(items[i].dty); rawTy = items[i].dty; continue }
             var d = items[i].dname
-            thunks.push(makeDecl(d[0], d.length > 1 ? d[1] : null, ty))
+            thunks.push(makeDecl(d[0], d.length > 1 ? d[1] : null, ty, rawTy))
         }
         return makeSeq(thunks)
     }
@@ -2876,6 +2954,11 @@ KwYield     = "yield" KwEnd ;
         callExt(b, "js_set", [sysV, emitStr(b, "out"), outV])
         callExt(b, "js_set", [sysV, emitStr(b, "exit"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "System"), sysV])
+        // Java's Math (abs/max/min, double-aware) instead of the runtime's
+        // JavaScript one, whose abs/max/min always answer a plain number - so
+        // Math.abs(-2.0) is 2.0 here, exactly like in java-interpreter.abnf.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Math"),
+                                     callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__jmath")])])
         b = emitBuiltinExc(b)
         b = emitImported(b)
         b = makeSeq(items)(b)

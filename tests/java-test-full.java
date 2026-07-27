@@ -65,6 +65,7 @@ class Main {
         S20.run(); // SECTION-CALL 20
         S21.run(); // SECTION-CALL 21
         S22.run(); // SECTION-CALL 22
+        S23.run(); // SECTION-CALL 23
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -122,6 +123,16 @@ class S03 {
         switch (c) { case 'b': hit = 1; break; default: hit = 2; }
         Main.check("chr6", hit == 1 && "abc".charAt(1) == 'b');
         Main.check("chr7", "A\102".equals("AB") && "a\tb".length() == 3);
+        // char is an INTEGRAL type that PRINTS as its glyph, and the two halves used
+        // to disagree about which of the two it is: the interpreter concatenated
+        // 'a' as 97, and the compiler answered a one-character String from charAt,
+        // so charAt(1) + 0 was "e0" instead of 101 (JLS 4.2.1, 15.18.1).
+        Main.check("chr8", ("x" + c).equals("xb") && ("" + 'q').equals("q"));
+        String hi = "hello";
+        Main.check("chr9", hi.charAt(1) + 0 == 101 && hi.charAt(1) == 'e');
+        Main.check("chr10", ("" + hi.charAt(1)).equals("e") && (int) hi.charAt(0) == 104);
+        char[] cs = new char[]{'x', 'y'};
+        Main.check("chr11", ("" + cs[0]).equals("x") && cs[1] + 1 == 122);
     }
 }
 
@@ -671,6 +682,70 @@ class S22 {
         Main.check("ann2", local == 5);
         @Meta(id = 1, nums = 4) int single = 1; // one value fills the array
         Main.check("ann3", single == 1);
+    }
+}
+
+// ===== SECTION 23: floating point arithmetic =====
+// double/float are a DIFFERENT type from int, and every value below was checked
+// against `java` (JDK 24) before it was written down. The whole section exists
+// because both grammars used to evaluate every arithmetic operator in 32 bit
+// integers: 1.0 / 3.0 was 0, 2.5 * 1.5 was 3, println(1.0) printed "1" and
+// Infinity / NaN / -0.0 did not exist at all.
+class S23 {
+    static String s(double d) { return "" + d; }
+    static double half() { return 0.5; }
+    static void run() {
+        // Division is REAL division as soon as one side is a double, and integer
+        // division (truncating towards zero) when both sides are integral.
+        Main.check("flt1", 1.0 / 3.0 == 0.3333333333333333);
+        Main.check("flt2", 7 / 2 == 3 && -7 / 2 == -3 && 1 / 3 == 0);
+        Main.check("flt3", (double) 7 / 2 == 3.5 && 7 / 2.0 == 3.5);
+        Main.check("flt4", 2.5 * 1.5 == 3.75 && 7.0 - 0.5 == 6.5 && 3.0 * 2.0 == 6.0);
+        Main.check("flt5", 2.0 % 0.75 == 0.5 && 1.5 + 1 == 2.5);
+        // The mixed-type rule (JLS 5.6.2): a double operand promotes the whole
+        // operation, so an integral result still prints with its decimal point.
+        Main.check("flt6", S23.s(1.0).equals("1.0") && S23.s(6.0).equals("6.0"));
+        Main.check("flt7", S23.s(0.1 + 0.2).equals("0.30000000000000004"));
+        Main.check("flt8", S23.s(1.0 / 3.0).equals("0.3333333333333333"));
+        // Infinity, NaN and the two zeroes.
+        double inf = 1.0 / 0.0;
+        double nan = 0.0 / 0.0;
+        Main.check("flt9", S23.s(inf).equals("Infinity") && S23.s(-1.0 / 0.0).equals("-Infinity"));
+        Main.check("flt10", S23.s(nan).equals("NaN") && nan != nan);
+        Main.check("flt11", S23.s(-0.0).equals("-0.0") && 0.0 == -0.0);
+        Main.check("flt12", 1e300 * 1e300 == inf);
+        // Double.toString switches to scientific notation outside [1e-3, 1e7).
+        Main.check("flt13", S23.s(1e20).equals("1.0E20") && S23.s(1.5e-8).equals("1.5E-8"));
+        Main.check("flt14", S23.s(1e-3).equals("0.001") && S23.s(2.5).equals("2.5"));
+        // A double-declared variable converts its initializer; ++ and the compound
+        // operators keep it a double.
+        double d = 1;
+        Main.check("flt15", S23.s(d).equals("1.0"));
+        d += 0.25;
+        Main.check("flt16", d == 1.25);
+        d++;
+        Main.check("flt17", d == 2.25 && S23.s(d).equals("2.25"));
+        d *= 2;
+        Main.check("flt18", d == 4.5);
+        d /= 3;
+        Main.check("flt19", d == 1.5);
+        d--;
+        Main.check("flt20", S23.s(d).equals("0.5"));
+        // A cast in each direction, and unary minus on a double.
+        Main.check("flt21", (int) 2.9 == 2 && (int) -2.9 == -2 && (double) 3 == 3.0);
+        Main.check("flt22", S23.s(-2.5).equals("-2.5") && -S23.half() == -0.5);
+        // Math.abs/max/min take the double overload as soon as one side is one.
+        Main.check("flt23", Math.abs(-2.5) == 2.5 && S23.s(Math.abs(-2.0)).equals("2.0"));
+        Main.check("flt24", S23.s(Math.max(1.5, 2)).equals("2.0") && Math.min(1.5, 2) == 1.5);
+        // A double survives a field, an array element and a method boundary.
+        double[] xs = new double[]{0.5, 1.5};
+        Main.check("flt25", xs[0] + xs[1] == 2.0 && S23.s(xs[0] * 2).equals("1.0"));
+        Main.check("flt26", S23.half() / 2 == 0.25);
+        // Comparisons mix the two kinds freely.
+        Main.check("flt27", 2.5 > 2 && 2 < 2.5 && 1.0 == 1 && 3.0 <= 3 && 3.0 >= 3);
+        // A float literal and an f/d suffix are doubles here too.
+        float f = 3;
+        Main.check("flt28", f / 2 == 1.5 && 1.5f + 1.5F == 3.0f && 2.5d * 2 == 5.0D);
     }
 }
 
