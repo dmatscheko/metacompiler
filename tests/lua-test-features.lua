@@ -81,6 +81,19 @@ check("str-upper-lower", string.upper("Lua") .. string.lower("Lua"), "LUAlua")
 check("str-sub-range", string.sub("compiler", 2, 4), "omp")
 check("str-sub-tail", string.sub("compiler", 5), "iler")
 check("str-sub-single", string.sub("abc", 2, 2), "b")
+-- Lua's negative index is INCLUSIVE and 1-based: -1 is the last character, so it
+-- normalises to #s + i + 1, not to #s + i, and both ends clamp into 1..#s instead of
+-- being reinterpreted. Handing i-1 to a JS-style slice got every one of these wrong.
+-- Checked against lua 5.5.
+check("str-sub-neg-start", string.sub("hello", -3), "llo")
+check("str-sub-neg-end", string.sub("hello", 2, -2), "ell")
+check("str-sub-neg-both", string.sub("hello", -2, -1), "lo")
+check("str-sub-neg-last", string.sub("hello", -1), "o")
+check("str-sub-full", string.sub("hello", 1, -1), "hello")
+check("str-sub-zero-start", string.sub("hello", 0, 2), "he")
+check("str-sub-under", string.sub("hello", -100, 2), "he")
+check("str-sub-over-end", string.sub("hello", 4, 100), "lo")
+check("str-sub-empty-range", string.sub("hello", 4, 2), "")
 check("str-rep", string.rep("ab", 3), "ababab")
 check("str-rep-zero", string.rep("x", 0), "")
 check("str-combo", string.upper(string.sub("handle", 1, 4)), "HAND")

@@ -301,6 +301,24 @@ function getVar(name) {
     fail("unknown name: " + name)
 }
 
+// The same walk as getVar, answering whether the name resolves instead of its value
+// and never aborting. A grammar needs this when a construct is only PARTLY genuine -
+// Kotlin's `recv::member` is a real bound property reference when `recv` is a value
+// and a not-implemented type-level reference (`String::length`) when it is a type
+// name. Without the test the not-implemented arm would evaluate its operand first
+// and abort with "unknown name: String" before notImpl ever ran, which is exactly
+// how the two halves of a language drift: the compiler warns and places a
+// placeholder, the interpreter dies on the same line.
+function hasVar(name) {
+    var sc = scopes
+    var ho = objHasOwn
+    for (var i = sc.length - 1; i >= 0; i--) {
+        if (ho.call(sc[i], name)) return true
+    }
+    if (core.varMiss != null && core.varMiss(name) != null) return true
+    return hasOwn(hostGlobals, name)
+}
+
 function makeConst(v) { return function() { return v } }
 
 function makeVarRef(name) { return function() { return getVar(name) } }

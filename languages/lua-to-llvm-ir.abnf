@@ -785,7 +785,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var luaFnArity = {lua_getvar: 2, lua_ismv: 1, lua_first: 1, lua_all: 1, lua_mk: 1, lua_appendall: 2, lua_extend: 2, lua_spread: 3,
                       lua_tail: 2, lua_shift: 3, lua_strall: 1,
                       lua_num: 1, lua_isnum: 1, lua_isint: 1, lua_mkflt: 1, lua_res: 3,
-                      lua_arith: 3, lua_eq: 2, lua_cmp: 3, lua_cmpv: 1, lua_str: 1}
+                      lua_arith: 3, lua_eq: 2, lua_cmp: 3, lua_cmpv: 1, lua_str: 1,
+                      lua_sub: 3, lua_subi: 2, lua_subj: 2, lua_subjv: 2, lua_clamplo: 1, lua_clamphi: 2}
     // Inside a helper the tested value is already a real boolean, so the plain host test
     // is enough - Lua's own truthiness (the `truthy` override below) would recurse.
     function rawTruthy(b, v) { return b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_truthy", [v]), handle(0)) }
@@ -839,6 +840,69 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [callExt(b, "js_scope_typeof", [ps[0], ps[1]]), emitStr(b, "undefined")])), misB, hitB)
             misB.NewRet(hUndef)
             hitB.NewRet(callExt(hitB, "js_scope_get", [ps[0], ps[1]]))
+            return
+        }
+        // ----- string.sub's index normalisation, one step per helper -----
+        // lua_clamplo raises a start to 1, lua_clamphi lowers an end to len; lua_subi /
+        // lua_subj turn a possibly negative Lua index into an inclusive 1-based one
+        // (-1 is the LAST character, hence len + i + 1); lua_subjv supplies the default
+        // end (#s) when string.sub was called with two arguments; lua_sub assembles them
+        // and answers "" when the range is empty, as Lua does instead of erroring.
+        if (name == "lua_clamplo") {
+            var cloB = curF.NewBlock("")
+            var choB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_lt", [ps[0], emitNum(b, 1)])), cloB, choB)
+            cloB.NewRet(emitNum(cloB, 1))
+            choB.NewRet(ps[0])
+            return
+        }
+        if (name == "lua_clamphi") {
+            var hiB = curF.NewBlock("")
+            var okhB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_gt", [ps[1], ps[0]])), hiB, okhB)
+            hiB.NewRet(ps[0])
+            okhB.NewRet(ps[1])
+            return
+        }
+        if (name == "lua_subi") {
+            var iNegB = curF.NewBlock("")
+            var iPosB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_lt", [ps[1], emitNum(b, 0)])), iNegB, iPosB)
+            iNegB.NewRet(callLua(iNegB, "lua_clamplo",
+                [callExt(iNegB, "js_add", [callExt(iNegB, "js_add", [ps[0], ps[1]]), emitNum(iNegB, 1)])]))
+            iPosB.NewRet(callLua(iPosB, "lua_clamplo", [ps[1]]))
+            return
+        }
+        if (name == "lua_subj") {
+            var jNegB = curF.NewBlock("")
+            var jPosB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_lt", [ps[1], emitNum(b, 0)])), jNegB, jPosB)
+            jNegB.NewRet(callLua(jNegB, "lua_clamphi", [ps[0],
+                callExt(jNegB, "js_add", [callExt(jNegB, "js_add", [ps[0], ps[1]]), emitNum(jNegB, 1)])]))
+            jPosB.NewRet(callLua(jPosB, "lua_clamphi", [ps[0], ps[1]]))
+            return
+        }
+        if (name == "lua_subjv") {
+            var jUndB = curF.NewBlock("")
+            var jHaveB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [ps[1], hUndef])), jUndB, jHaveB)
+            jUndB.NewRet(ps[0])
+            jHaveB.NewRet(callLua(jHaveB, "lua_subj", [ps[0], callLua(jHaveB, "lua_num", [ps[1]])]))
+            return
+        }
+        if (name == "lua_sub") {
+            var sv = callExt(b, "js_add", [emitStr(b, ""), ps[0]])
+            var slen = callExt(b, "js_get", [sv, emitStr(b, "length")])
+            var sa = callLua(b, "lua_subi", [slen, callLua(b, "lua_num", [ps[1]])])
+            var se = callLua(b, "lua_subjv", [slen, ps[2]])
+            var emptyB = curF.NewBlock("")
+            var cutB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_gt", [sa, se])), emptyB, cutB)
+            emptyB.NewRet(emitStr(emptyB, ""))
+            var sArgs = callExt(cutB, "js_arr_new", [])
+            callExt(cutB, "js_arr_push", [sArgs, callExt(cutB, "js_sub", [sa, emitNum(cutB, 1)])])
+            callExt(cutB, "js_arr_push", [sArgs, se])
+            cutB.NewRet(libStrMethod(cutB, sv, "slice", sArgs))
             return
         }
         if (name == "lua_num") {
@@ -1800,14 +1864,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var s = libArg(bb, argsH, 0)
         return {b: bb, v: libStrMethod(bb, s, "toLowerCase", callExt(bb, "js_arr_new", []))}
     }
+    // string.sub is NOT JS slice(i-1, j): Lua's negative index is INCLUSIVE and 1-based
+    // (-1 is the last character, so it normalises to len+i+1) and both ends clamp into
+    // 1..len instead of being reinterpreted. Handing i-1 to slice was wrong by one on
+    // every negative index. The whole normalisation lives in the emitted lua_sub helper
+    // so the branching is written once; the interpreter half's luaSubStart / luaSubEnd
+    // are the same three steps.
     function libSub(bb, argsH) {
-        var s = libArg(bb, argsH, 0)
-        var i = callLua(bb, "lua_num", [libArg(bb, argsH, 1)])
-        var j = libArg(bb, argsH, 2)
-        var arr = callExt(bb, "js_arr_new", [])
-        callExt(bb, "js_arr_push", [arr, callExt(bb, "js_sub", [i, emitNum(bb, 1)])])
-        callExt(bb, "js_arr_push", [arr, j])
-        return {b: bb, v: libStrMethod(bb, s, "slice", arr)}
+        return {b: bb, v: callLua(bb, "lua_sub", [libArg(bb, argsH, 0), libArg(bb, argsH, 1), libArg(bb, argsH, 2)])}
     }
     function libRep(bb, argsH) {
         var s = libArg(bb, argsH, 0)

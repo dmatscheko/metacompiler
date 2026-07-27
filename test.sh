@@ -296,12 +296,33 @@ fi
 # define. On interpreter output nothing matches and the text passes through.
 # It also drops the harness's own trailers, which name the half that ran and so
 # differ by construction ("ruby interpreter: program finished" vs "ruby compiler:
-# jsmain() returned 0"), and blank padding. What survives is the program's own
+# jsmain() returned 0"), and blank padding. An abort message is one of those: the
+# interpreter half's "<lang> interpreter error: ..." was already dropped, so the
+# compiled half's "IR interpreter: ..." is dropped with it - otherwise the two
+# halves aborting on the SAME cause read as a divergence purely because only one
+# of the two spellings survived. An abort is still visible either way, as the
+# output that stops. What survives is the program's own
 # output plus any warning text - and a warning present in one half and not the
 # other IS a real finding, because it means the halves implement different
 # subsets, so those are deliberately kept.
+#
+# Warnings need one extra step to survive that. A COMPILER emits them while it
+# is building the module, so they land BEFORE the IR and the structural strip
+# above would delete them wholesale - which made all thirteen languages look as
+# though only their interpreter half warned, when in fact both halves warn
+# identically and the harness was eating one copy. So lift every "warning:" line
+# out first and re-emit it ahead of the stripped body. Relative order between a
+# warning and the program output is not comparable across the halves anyway (one
+# warns during compilation, the other during the run), but PRESENCE is exactly
+# what this group wants to see.
 cross_strip() {
-    awk 'BEGIN { n = 0 } { l[n++] = $0 }
+    # A NUL byte reaches here from grammars that embed one in a string constant;
+    # command substitution drops it anyway and warns about it on stderr, so drop
+    # it explicitly and identically for both halves.
+    local all; all="$(LC_ALL=C tr -d '\000')"
+    printf '%s\n' "$all" | grep -E '^warning: ' || true
+    printf '%s\n' "$all" | grep -vE '^warning: ' \
+    | awk 'BEGIN { n = 0 } { l[n++] = $0 }
          END { last = -1
                for (i = 0; i < n; i++)
                    if (l[i] == "}" || l[i] ~ /^declare / || l[i] ~ /^@/ || l[i] ~ /^define /) last = i
@@ -310,6 +331,7 @@ cross_strip() {
     | grep -Ev '^(js runtime error: |jsmain\(\) returned )' \
     | grep -Ev '^[a-z0-9-]+: (exit status|main\(\) returned|program value is) [0-9-]+$' \
     | grep -Ev '^--- Executed with the built-in IR interpreter, output:$' \
+    | grep -Ev '^IR interpreter: ' \
     | awk 'NF { blank = 0; for (i = 1; i <= held; i++) print ""; held = 0; print; seen = 1; next }
            seen { held++ }'
 }
@@ -321,8 +343,13 @@ cross_one() {
     local gi="languages/$L-interpreter.abnf" gc="languages/$L-to-llvm-ir.abnf"
     local oi oc ri rc
 
-    oi="$(RUN "$BIN" "$gi" "$P" -q -warn-unsupported -warn-imports 2>&1 | cross_strip)"; ri=$?
-    oc="$(RUN "$BIN" "$gc" "$P" -q -warn-unsupported -warn-imports 2>&1 | cross_strip)"; rc=$?
+    # -i tests/imports is what the matrix gives every *-test-multifile entry, and
+    # without it those programs run in their DEGENERATE mode: the import does not
+    # resolve, -warn-imports skips it, and each half then fails its own way on the
+    # missing symbol. That compares the recovery paths instead of the feature, so
+    # pass the same include root here. It is inert for every other program.
+    oi="$(RUN "$BIN" -i tests/imports "$gi" "$P" -q -warn-unsupported -warn-imports 2>&1 | cross_strip)"; ri=$?
+    oc="$(RUN "$BIN" -i tests/imports "$gc" "$P" -q -warn-unsupported -warn-imports 2>&1 | cross_strip)"; rc=$?
 
     if [ "$oi" = "$oc" ]; then
         printf 'agree\n' > "$R"; return

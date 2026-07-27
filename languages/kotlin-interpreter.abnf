@@ -1121,7 +1121,7 @@ AtAdjacent  = :script(~~
 // A floating-point literal (1.5, 2.0f, 1e9, 3.14E-2, digit-group underscores):
 // a genuine double value (parseFloat stops before the f/F suffix). Comparisons
 // are exact; see the arithmetic note at the core config for the int-wrap caveat.
-FloatLit    <~~ push(makeConst(parseFloat(up.in.split("_").join("")))) ~~>
+FloatLit    <~~ push(makeConst(kFlo(parseFloat(up.in.split("_").join(""))))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
               ( "." "0"..."9" { "0"..."9" | "_" } [ FloatExp ] [ FloatSfx ]
               | FloatExp [ FloatSfx ]
@@ -1129,7 +1129,7 @@ FloatLit    <~~ push(makeConst(parseFloat(up.in.split("_").join("")))) ~~>
 FloatExp    = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" | "_" } ;
 // A float literal written without its integer part (.5, .1_1). Only reachable at the
 // start of an operand, where a lone `.` cannot mean anything else.
-DotFloatLit <~~ push(makeConst(parseFloat("0" + up.in.split("_").join("")))) ~~>
+DotFloatLit <~~ push(makeConst(kFlo(parseFloat("0" + up.in.split("_").join(""))))) ~~>
             = "." :whitespace() "0"..."9" { "0"..."9" | "_" } [ FloatExp ] [ FloatSfx ] :whitespace(Whitespace) ;
 FloatSfx    = "f" | "F" ;
 
@@ -1171,10 +1171,16 @@ RawTwoQ     = '"' '"' ( "\x00"..."\x21" | "\x23"..."\U0010ffff" ) ;
 // (the lateinit test), callable through .invoke(), and otherwise the bound member.
 CallableRef = BareRef | QualRef ;
 BareRef     = "::" KId <~~ push(makeVarRef(up.in)) ~~> ;
-QualRef     <~~ var n = pop(); push(makePropRef(pop(), n)) ~~>
+// A TYPE-qualified reference - String::length - is a different construct: it is a
+// KProperty1 over an unbound receiver, which this interpreter does not implement, and
+// the compiler half routes it to notImplExpr. The two are told apart only at run time,
+// by whether the base name resolves to a value, so makePropRef makes that test itself
+// rather than evaluating the base unconditionally (which aborted with "unknown name:
+// String" before the not-implemented path could warn).
+QualRef     <~~ var n = pop(); push(makePropRef(pop(), n, up.pos)) ~~>
             = QualRefBase "::" RefName ;
 RefName     = KId <~~ push(up.in) ~~> | "class" KwEnd <~~ push("class") ~~> ;
-QualRefBase <~~ push(makeVarRef(stripWs(up.in))) ~~>
+QualRefBase <~~ push(stripWs(up.in)) ~~>
             = KId [ SkipAngle ] { "." KId [ SkipAngle ] } ;
 
 // An anonymous function expression - fun(n: Int): Int { return n * n }. GENUINE: it
@@ -1554,7 +1560,79 @@ NotMemberKw = :script(~~
     // code (the identity for everything else) and kChStr renders the glyph.
     function kChar(code) { return {__char: code} }
     function kIsChar(v) { return v !== null && v !== undefined && typeof v == "object" && v.__char !== undefined }
-    function kNum(v) { return kIsChar(v) ? v.__char : v }
+    function kNum(v) { return kIsChar(v) ? v.__char : (kIsFlo(v) ? v.__flo : v) }
+
+    // ----- Double / Float: a boxed {__flo: value} -----
+    // Kotlin's Double is a DIFFERENT type from Int, and this value model is untyped,
+    // so 1.0 and 1 would both be the JS number 1: 1.0 / 3.0 would divide as integers
+    // (0 instead of 0.3333333333333333) and println(1.0) would print "1" instead of
+    // "1.0". Boxing every floating-point value keeps them apart, exactly like kChar
+    // keeps a Char apart from its code and like the compiled half's js_jflo box (see
+    // abnf/jsrtjvm.go). Invariant: a PLAIN number is an integral type (Int/Long/
+    // Short/Byte), a {__flo} box is a Double or a Float.
+    var kNegOne = 0 - 1
+    var kZeroF = 0
+    var kInf = 1 / kZeroF
+    function kFlo(f) { return {__flo: f} }
+    function kIsFlo(v) { return v !== null && v !== undefined && typeof v == "object" && v.__flo !== undefined }
+    // The numeric value of any numeric operand (a plain number, a Char or a Double).
+    function kNumD(v) {
+        if (v === null || v === undefined) return v
+        if (typeof v == "object") {
+            if (v.__flo !== undefined) return v.__flo
+            if (v.__char !== undefined) return v.__char
+        }
+        return v
+    }
+    function kNegF(f) { return f * kNegOne }
+    // Double.toString (Kotlin/JVM delegates to java.lang.Double): always a decimal
+    // point, the shortest digit run that round-trips, plain decimal for
+    // 1e-3 <= |d| < 1e7 and scientific notation ("1.0E20") outside it.
+    function kFloStr(d) {
+        if (d !== d) return "NaN"
+        if (d === kInf) return "Infinity"
+        if (d === kNegF(kInf)) return "-Infinity"
+        if (d === 0) return (1 / d < 0) ? "-0.0" : "0.0"
+        var neg = d < 0
+        var a = neg ? kNegF(d) : d
+        var s = (a >= 0.001 && a < 10000000) ? kFloPlain(a) : kFloSci(a)
+        return neg ? "-" + s : s
+    }
+    function kFloPlain(a) {
+        var s = "" + a
+        if (s.indexOf(".") < 0) { s = s + ".0" }
+        return s
+    }
+    function kFloSci(a) {
+        var s = "" + a
+        var mant = s
+        var exp = 0
+        var ei = 0 - 1
+        for (var i = 0; i < s.length; i++) { if (s.charAt(i) == "e" || s.charAt(i) == "E") { ei = i } }
+        if (ei >= 0) {
+            mant = s.substring(0, ei)
+            var et = s.substring(ei + 1)
+            if (et.charAt(0) == "+") { et = et.substring(1) }
+            exp = parseInt(et, 10)
+        }
+        var digits = ""
+        var pt = 0 - 1
+        for (var j = 0; j < mant.length; j++) {
+            var ch = mant.charAt(j)
+            if (ch == ".") { pt = digits.length } else { digits = digits + ch }
+        }
+        if (pt < 0) { pt = digits.length }
+        var lead = 0
+        while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead++ }
+        digits = digits.substring(lead)
+        pt = pt - lead
+        var endz = digits.length
+        while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
+        digits = digits.substring(0, endz)
+        var frac = digits.substring(1)
+        if (frac == "") { frac = "0" }
+        return digits.charAt(0) + "." + frac + "E" + (pt + exp - 1)
+    }
     function kChStr(v) { return String.fromCharCode(v.__char) }
     // The comparison and arithmetic operators unbox their operands, so a Char behaves
     // like its code everywhere except in string context. Installed into the shared
@@ -1575,8 +1653,23 @@ NotMemberKw = :script(~~
                     return uv
                 }
             }
+            // A Double on either side makes the whole operation floating point and
+            // its result a Double; two integral operands keep the 32 bit behavior.
+            if (kIsFlo(l) || kIsFlo(r)) { return kFloOp2(op, kNumD(l), kNumD(r)) }
             return f(kNum(l), kNum(r))
         }
+    }
+    // The floating-point twin of the kNumOp2 table: the arithmetic operators answer
+    // a Double, the comparisons a Boolean.
+    function kFloOp2(op, a, b) {
+        if (op == "-") return kFlo(a - b)
+        if (op == "*") return kFlo(a * b)
+        if (op == "/") return kFlo(a / b)
+        if (op == "%") return kFlo(a % b)
+        if (op == "<") return a < b
+        if (op == ">") return a > b
+        if (op == "<=") return a <= b
+        return a >= b
     }
     function kIsUser(v) {
         return v !== null && v !== undefined && typeof v == "object" && v.__class != undefined && v.__class != null
@@ -1597,6 +1690,9 @@ NotMemberKw = :script(~~
             var v = t()
             var m = lookupMethod(v, "unaryMinus")
             if (m != null) { return m.apply(undefined, [v]) }
+            // -x keeps the operand's type: a Double negates as a Double (so -0.0
+            // and -1.0/0.0 are real), a Char and an Int as an Int32.
+            if (kIsFlo(v)) { return kFlo(kNegF(v.__flo)) }
             return (0 - kNum(v)) | 0
         }
     }
@@ -2170,6 +2266,7 @@ NotMemberKw = :script(~~
         if (v === undefined) return "kotlin.Unit"
         if (v === null) return "null"
         if (kIsChar(v)) return kChStr(v)
+        if (kIsFlo(v)) return kFloStr(v.__flo)
         // A user object renders through its toString(): the data-class generated one
         // (Pt13(x=1, y=2)), an explicit override, or the Kotlin default Name@hash shape.
         if (typeof v == "object" && v.__class != undefined && v.__class != null) {
@@ -2284,10 +2381,27 @@ NotMemberKw = :script(~~
         }
         // Int/Long/Double receivers: the handful of member functions Kotlin defines on
         // the primitive number types (the operators go through binOps).
+        // A Double receiver: the same member functions, but toDouble/toFloat keep the
+        // box and toInt/toLong truncate towards zero out of it.
+        if (kIsFlo(target)) {
+            var tf = target.__flo
+            if (name == "toInt" || name == "toLong" || name == "toShort" || name == "toByte") return tf | 0
+            if (name == "toDouble" || name == "toFloat") return target
+            if (name == "toChar") return kChar(tf | 0)
+            if (name == "toString") return kFloStr(tf)
+            if (name == "compareTo") return tf < kNumD(args[0]) ? -1 : (tf > kNumD(args[0]) ? 1 : 0)
+            if (name == "equals") return tf === kNumD(args[0])
+            if (name == "coerceAtLeast") return tf < kNumD(args[0]) ? args[0] : target
+            if (name == "coerceAtMost") return tf > kNumD(args[0]) ? args[0] : target
+            if (name == "hashCode") return kHash(target)
+            if (name == "isNaN") return tf !== tf
+            return mfallback(target, name, args, "Double")
+        }
         if (typeof target == "number") {
             if (name == "inv") return ~target | 0
             if (name == "toInt" || name == "toLong" || name == "toShort" || name == "toByte") return target | 0
-            if (name == "toDouble" || name == "toFloat") return target
+            // Int.toDouble() is a CONVERSION: 7.toDouble() / 2 is 3.5, not 3.
+            if (name == "toDouble" || name == "toFloat") return kFlo(target)
             if (name == "toChar") return kChar(target | 0)
             if (name == "toString") return kstr(target)
             if (name == "compareTo") return target < kNum(args[0]) ? -1 : (target > kNum(args[0]) ? 1 : 0)
@@ -2489,6 +2603,7 @@ NotMemberKw = :script(~~
     function kHash(v) {
         if (v === null || v === undefined) { return 0 }
         if (kIsChar(v)) { return v.__char }
+        if (kIsFlo(v)) { return v.__flo | 0 }
         var t = typeof v
         if (t == "boolean") { return v ? 1231 : 1237 }
         if (t == "number") { return v | 0 }
@@ -2540,6 +2655,7 @@ NotMemberKw = :script(~~
 
     function kadd(l, r) {
         if (typeof l == "string" || typeof r == "string") return kstr2(l) + kstr2(r)
+        if (kIsFlo(l) || kIsFlo(r)) { return kFlo(kNumD(l) + kNumD(r)) }
         if (kIsChar(l) || kIsChar(r)) { return (kNum(l) + kNum(r)) | 0 }
         if (typeof l == "number" && typeof r == "number") { return (l + r) | 0 }
         // A user class may define operator plus (Vec + Vec); dispatch to it.
@@ -2559,8 +2675,8 @@ NotMemberKw = :script(~~
         // parameter must keep its inferred type under the frozen engine).
         var a = anytype
         var b = anytype
-        a = kIsChar(l) ? l.__char : l
-        b = kIsChar(r) ? r.__char : r
+        a = kIsChar(l) ? l.__char : (kIsFlo(l) ? l.__flo : l)
+        b = kIsChar(r) ? r.__char : (kIsFlo(r) ? r.__flo : r)
         if (a === b) { return true }
         if (a === null || a === undefined || b === null || b === undefined) { return false }
         if (typeof a == "object" && typeof b == "object") {
@@ -2880,13 +2996,22 @@ NotMemberKw = :script(~~
             return function() { lhsT(); return rhsT() }
         }
         var conv = assignConv(op)
+        var warned = false
         return function() {
             var recv = anytype
             recv = lhsT()
             var rv = anytype
             rv = rhsT()
             var m = lookupMethod(recv, conv)
-            if (m == null) { fail("no operator " + conv + " on the target of " + op) }
+            if (m == null) {
+                // No plusAssign/... on the value, so `f(x) += 1` is not an assignment
+                // this interpreter can perform - and Kotlin itself rejects it ("variable
+                // expected"), so there is no faithful runtime answer either. Report it
+                // the way the compiler half reports the whole form, once, rather than
+                // aborting: the two halves then agree on the same line and the same text.
+                if (!warned) { warned = true; notImpl("assignment to a computed target", pos) }
+                return rv
+            }
             return m.apply(undefined, [recv, rv])
         }
     }
@@ -4035,8 +4160,17 @@ NotMemberKw = :script(~~
     }
 
     // ----- Property references (recv::member) -----
-    function makePropRef(objT, name) {
-        return function() { return {__propref: true, obj: objT(), pname: name} }
+    function makePropRef(baseName, name, pos) {
+        var ni = null
+        return function() {
+            if (!hasVar(baseName)) {
+                // A type name, not a value: Type::member. Warn (or abort) exactly as
+                // the compiler half does, once, and answer a placeholder.
+                if (ni == null) { ni = notImplExpr("callable reference", pos) }
+                return ni()
+            }
+            return {__propref: true, obj: getVar(baseName), pname: name}
+        }
     }
 
     // ----- Anonymous functions and local extensions -----
@@ -4081,8 +4215,15 @@ NotMemberKw = :script(~~
             }
             if (n == 1 && hasOwn(v, "first")) { return v.first }
             if (n == 2 && hasOwn(v, "second")) { return v.second }
+            fail("no component" + n + "() on " + kstr(v))
         }
-        fail("no component" + n + "() on " + kstr(v))
+        // A SCALAR has no componentN in any Kotlin - `{ (a, b) -> ... }` over a
+        // List<Int> is a compile error there, not a runtime one - so neither half can
+        // be faithful and the two must at least agree. The compiler's emitComponent
+        // is a three-way select (list -> element, object -> componentN, else ->
+        // undefined); this is its `else` arm. Aborting here instead made the whole
+        // recognition corpus die in the interpreter and run in the compiler.
+        return undefined
     }
     // items = [name..., initThunk]
     // A destructuring entry: a plain string is POSITIONAL (componentN), a {dn, dfrom}
@@ -4342,6 +4483,12 @@ NotMemberKw = :script(~~
         if (last.key != undefined) { return {obj: o, key: last.key, isIndex: false} }
         return {obj: o, key: last.idx(), isIndex: true}
     }
+    // ++ / -- keep the type of what they step: a Double stays a Double, everything
+    // else steps as an Int32 (a Char is stepped as its code, like before).
+    function kStep(v, d) {
+        if (kIsFlo(v)) { return kFlo(v.__flo + d) }
+        return (kNum(v) + d) | 0
+    }
     function makeIncDec(items) {
         var ref = items[0]
         var d = (items[1] == "++") ? 1 : -1
@@ -4349,14 +4496,14 @@ NotMemberKw = :script(~~
             if (ref.path.length == 0) {
                 var n = anytype // The variable may hold a Char or a delegate box.
                 n = getVar(ref.name)
-                if (isPDeleg(n)) { var dv = pdelegGet(n); pdelegSet(n, (kNum(dv) + d) | 0); return dv }
-                setVar(ref.name, (kNum(n) + d) | 0)
+                if (isPDeleg(n)) { var dv = pdelegGet(n); pdelegSet(n, kStep(dv, d)); return dv }
+                setVar(ref.name, kStep(n, d))
                 return n
             }
             var p = resolveRef(ref)
-            var mv = anytype // The slot may hold a number or a Char.
+            var mv = anytype // The slot may hold a number, a Char or a Double.
             mv = kReadSlot(p)
-            var nv = (kNum(mv) + d) | 0
+            var nv = kStep(mv, d)
             if (p.isIndex) { kSetIndex(p.obj, p.key, nv) } else { kSetField(p.obj, p.key, nv) }
             return mv
         }

@@ -1344,9 +1344,15 @@ KwInstanceof = "instanceof" KwEnd ;
     // deviation.
     var walkFnName = ""
     function noteFnName(n) { walkFnName = n; return n }
-    // A bareword: a magic constant, or a global / already-declared constant. The lookup
-    // does NOT abort on an unknown name (js_phclslookup answers null), so a program
-    // that reads a constant this subset does not model degrades instead of failing.
+    // A bareword: a magic constant, or a global / already-declared constant.
+    //
+    // js_phclslookup answers null rather than aborting - an interface list has to
+    // survive a forward reference - so reading it alone made an UNDEFINED constant
+    // evaluate to null and the program run on, where PHP raises ("Undefined constant
+    // NOPE") and the interpreter half fails. The null answer is ambiguous on its own,
+    // though: `const X = null;` looks the same. So the null arm re-reads the name with
+    // js_scope_get, which returns the declared null and ABORTS when the name really is
+    // not there - the two halves then stop on the same statement.
     function makeConstRef(name) {
         if (name == "__FUNCTION__" || name == "__METHOD__") { return makeConst(walkFnName) }
         if (name == "__CLASS__") {
@@ -1355,7 +1361,16 @@ KwInstanceof = "instanceof" KwEnd ;
             }
         }
         return function(b) {
-            return {b: b, v: callExt(b, "js_phclslookup", [curScopeV, emitStr(b, name)])}
+            var nameV = emitStr(b, name)
+            var v = callExt(b, "js_phclslookup", [curScopeV, nameV])
+            var missB = curF.NewBlock("")
+            var haveB = curF.NewBlock("")
+            var mergeB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [v, hNull])), missB, haveB)
+            var mv = callExt(missB, "js_scope_get", [curScopeV, emitStr(missB, name)])
+            missB.NewBr(mergeB)
+            haveB.NewBr(mergeB)
+            return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(mv, missB), llvm.ir.NewIncoming(v, haveB)])}
         }
     }
     // static $n = 0: one reference cell per declaration SITE, created where the program

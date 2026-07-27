@@ -778,6 +778,30 @@ Two notes on the flags: `-q` prints the module AND the program output for a
 uniform substitute — for a grammar that runs through the JS runtime it still shows
 program output, for one that runs through `llvm.Run` it does not.
 
+### Two ways the differ itself lies
+
+That strip is where the differ's own first two bugs lived, and both made a green half
+look broken:
+
+**The strip ate the compiler's warnings.** A compiler emits a `warning:` line while it
+is BUILDING the module, so the line lands *before* the IR — and "drop everything up to
+the last `}`/`declare`/`@`/`define`" drops it. Thirteen languages then read as
+"interpreter warns, compiler silent" when in fact both warned identically. Lift the
+`warning:` lines out first and re-emit them ahead of the stripped body. Relative order
+between a warning and program output is not comparable across the halves anyway (one
+warns at compile time, the other while running); PRESENCE is the thing to compare.
+
+**The differ dropped only one of the two abort spellings.** `<lang> interpreter error:`
+was filtered and `IR interpreter: call to undefined external function @f` was not, so
+two halves aborting on the SAME cause read as a divergence. Filter both, or neither; an
+abort is still visible as the output that stops.
+
+And one on the input side: the `*-test-multifile.*` programs need `-i tests/imports`,
+exactly as the matrix gives them. Without it the import does not resolve, `-warn-imports`
+skips it, and each half then fails its own way on the missing symbol — so the comparison
+is between two RECOVERY paths, not between the feature. Give the cross runner the same
+include root the matrix uses.
+
 ### The recurring shapes
 
 Every divergence found in the 2026-07-27 sweep was one of five shapes. Check these

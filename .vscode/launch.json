@@ -1385,6 +1385,18 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-recognize.kt", "-q", "-warn-unsupported"]
         },
         {
+            "name": "Kotlin recognition, interpreted SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-recognize.kt", "-q"]
+        },
+        {
+            "name": "Kotlin recognition, interpreted warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-recognize.kt", "-q", "-warn-unsupported"]
+        },
+        {
             "name": "Kotlin -main entry point (interpreter)",
             "type": "go",
             "request": "launch",
@@ -1551,6 +1563,18 @@
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "tests/csharp-test-recognize.cs", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "PHP undefined constant SHOULD FAIL (interpreted)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-undefconst.php", "-q"]
+        },
+        {
+            "name": "PHP undefined constant SHOULD FAIL (compiled)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-undefconst.php", "-q"]
         },
         {
             "name": "PHP recognition SHOULD FAIL",
