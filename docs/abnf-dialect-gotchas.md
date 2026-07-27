@@ -1067,3 +1067,21 @@ by `oneV = callExt(…)` fails with `variable 'oneV' has type number and cannot
 hold a object` — under `-frozen` only, behind a green goja run and a green
 `--full` ratchet for the interpreter half. Start any slot that will hold a
 handle as `anytype`.
+
+## A grammar script has no exponent literals: `1e308` kills `-frozen` only
+
+Write `1.7976931348623157e308` in a tag script and goja stays green while the
+**whole grammar becomes unparseable under `-frozen`**, with the unhelpful
+"cannot parse script". The number rule the script dialect uses is
+`lib/numbers.abnf`'s `DecLit`, which is MetaJS's, and it **has no exponent
+form** — so `1e308` lexes as the number `1` followed by the name `e308`, and the
+script that was fine a moment ago is now a syntax error.
+
+Spell it as a runtime call instead: `parseFloat("1.7976931348623157e308")`, or
+`Math.pow(2, -52)` for the small ones.
+
+Two agents hit this independently on 2026-07-27, one writing `Double.MAX_VALUE`
+for Kotlin and one writing PHP's float epsilon, which is why it is recorded here.
+It belongs to the "green under goja, dead under `-frozen`" class along with the
+`anytype` slot rule above — and it is the more confusing member, because the
+failure is not at the offending line and does not name a value at all.

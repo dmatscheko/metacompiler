@@ -903,6 +903,207 @@ fun sec30() {
     check("raw6", """ok""""" == "ok\"\"")
 }
 
+// ===== SECTION 31: Int and Long have real WIDTHS =====
+// Kotlin's integral types are fixed-width and their arithmetic WRAPS silently on
+// overflow (unlike Swift, which traps). Both grammars used to model every integer
+// as one JS double, so Int.MAX_VALUE + 1 grew instead of wrapping, 1L shl 40 was
+// 256 (a 32 bit shift), Long.MAX_VALUE could not be written down at all and
+// `Int` was an unknown name.
+//
+// Kotlin/JVM's Int and Long ARE java.lang's, so every value below was checked
+// against the EQUIVALENT JAVA PROGRAM run on `java` (JDK 24) - there is no
+// kotlinc on this machine. The Java probe and both halves of this grammar pair
+// print the same 60 lines under goja and under -frozen.
+fun s31(v: Any?): String = "" + v
+fun zero31(): Int = 0
+fun sec31() {
+    // Overflow wraps at the type's width, in both directions.
+    check("int1", Int.MAX_VALUE + 1 == Int.MIN_VALUE)
+    check("int2", Int.MIN_VALUE - 1 == Int.MAX_VALUE)
+    check("int3", Int.MAX_VALUE * 2 == -2)
+    check("int4", Long.MAX_VALUE + 1L == Long.MIN_VALUE)
+    // A Long is exact to 64 bits, well past what a double holds. 9007199254740993
+    // is 2^53 + 1: a double rounds it DOWN to 2^53 and cannot represent it.
+    check("int5", s31(Long.MAX_VALUE) == "9223372036854775807")
+    check("int6", s31(Long.MIN_VALUE) == "-9223372036854775808")
+    check("int7", s31(9223372036854775807L - 1L) == "9223372036854775806")
+    check("int8", s31(9007199254740993L + 0L) == "9007199254740993")
+    check("int9", 1000000L * 1000000L == 1000000000000L)
+    // The shift COUNT is masked - & 31 for an Int, & 63 for a Long - so a count at
+    // or above the width shifts by count mod width rather than clearing the value.
+    check("int10", 1 shl 32 == 1 && 1L shl 64 == 1L)
+    check("int11", 1 shl 31 == Int.MIN_VALUE && 1L shl 63 == Long.MIN_VALUE)
+    check("int12", s31(1L shl 40) == "1099511627776")
+    // shr keeps the sign, ushr does not; both stay at the left operand's width.
+    check("int13", -16 shr 2 == -4 && -16L shr 2 == -4L)
+    check("int14", -1 ushr 1 == Int.MAX_VALUE)
+    check("int15", -1L ushr 1 == Long.MAX_VALUE)
+    // and / or / xor / inv are infix FUNCTIONS in Kotlin, not operators.
+    check("int16", 0xFF and 0x0F == 15 && 0xF0 or 0x0F == 255)
+    check("int17", 0xFF xor 0x0F == 240)
+    check("int18", 5.inv() == -6 && 0L.inv() == -1L)
+    check("int19", s31((1L shl 40).inv()) == "-1099511627777")
+    // Division truncates towards zero and MIN / -1 wraps back to MIN.
+    check("int20", 7 / 2 == 3 && -7 / 2 == -3 && 7 / -2 == -3)
+    check("int21", -7 % 2 == -1 && 7 % -2 == 1)
+    check("int22", Int.MIN_VALUE / -1 == Int.MIN_VALUE && Int.MIN_VALUE % -1 == 0)
+    check("int23", Long.MIN_VALUE / -1L == Long.MIN_VALUE)
+    // Division and remainder by zero THROW a catchable ArithmeticException instead
+    // of quietly yielding 0, and the message is java.lang's.
+    var caught = ""
+    try { s31(1 / zero31()) } catch (e: ArithmeticException) { caught = "" + e.message }
+    check("int24", caught == "/ by zero")
+    caught = ""
+    try { s31(1 % zero31()) } catch (e: ArithmeticException) { caught = "" + e.message }
+    check("int25", caught == "/ by zero")
+    // A DECLARED type puts its width on the value, so the multiplication below is
+    // 64 bit throughout instead of wrapping at 32.
+    val big: Long = 1
+    check("int26", s31(big * 1000000 * 1000000) == "1000000000000")
+    // ++ steps at the value's own width, which is what makes a Byte wrap at 127.
+    var b: Byte = 127
+    b++
+    check("int27", s31(b) == "-128")
+    var l: Long = 9223372036854775806L
+    l++
+    check("int28", l == Long.MAX_VALUE)
+    l++
+    check("int29", l == Long.MIN_VALUE)
+    // Byte and Short arithmetic PROMOTES to Int, so a sum of two bytes does not
+    // wrap at 8 bits, and a Byte compares against an Int at Int width.
+    val b1: Byte = 100
+    val b2: Byte = 100
+    check("int30", b1 + b2 == 200)
+    check("int31", b1 < 1000 && b1 > -1000)
+    check("int32", s31(Byte.MAX_VALUE) == "127" && s31(Byte.MIN_VALUE) == "-128")
+    check("int33", s31(Short.MAX_VALUE) == "32767" && s31(Short.MIN_VALUE) == "-32768")
+    // A Long compares EXACTLY, past the range where a double would round.
+    check("int34", Long.MAX_VALUE > 0L && Long.MIN_VALUE < 0L)
+    check("int35", 9007199254740993L > 9007199254740992L)
+    check("int36", 1L == 1L && !(1L == 2L))
+    // A sized value survives a list, a template and a function boundary.
+    val xs = listOf(1L, 2L)
+    check("int37", s31(xs) == "[1, 2]" && xs[0] + xs[1] == 3L)
+    check("int38", "v=${Long.MAX_VALUE}" == "v=9223372036854775807")
+}
+
+// ===== SECTION 32: the CONVERSION methods =====
+// Kotlin has NO implicit numeric conversions and no cast syntax for them either,
+// so every width change is a METHOD: toByte(), toShort(), toInt(), toLong(),
+// toDouble(). An integral source truncates its bits; a Double source SATURATES at
+// the target's range and answers 0 for NaN, because Kotlin/JVM compiles
+// Double.toInt() to the JVM's d2i. Java's `(byte)` / `(int)` casts are the same
+// two instructions, so every value below was checked against the equivalent Java
+// program run on `java` (JDK 24).
+fun s32(v: Any?): String = "" + v
+fun sec32() {
+    // An integral source is a pure bit truncation.
+    check("cnv1", s32(255.toByte()) == "-1" && s32(200.toByte()) == "-56")
+    check("cnv2", s32(70000.toShort()) == "4464")
+    check("cnv3", s32(3000000000L.toInt()) == "-1294967296")
+    check("cnv4", s32(Long.MAX_VALUE.toInt()) == "-1")
+    check("cnv5", s32(5.toLong()) == "5" && s32((-1).toLong()) == "-1")
+    // A Double source truncates towards zero and saturates at the range ends.
+    check("cnv6", 3.9.toInt() == 3 && (-3.9).toInt() == -3)
+    check("cnv7", 1e20.toInt() == Int.MAX_VALUE && (-1e20).toInt() == Int.MIN_VALUE)
+    check("cnv8", 1e20.toLong() == Long.MAX_VALUE)
+    check("cnv9", Double.NaN.toInt() == 0)
+    // toDouble() is a genuine conversion, which is what makes 7.toDouble() / 2
+    // divide as floating point where 7 / 2 does not.
+    check("cnv10", 7.toDouble() / 2 == 3.5 && s32(7.toDouble()) == "7.0")
+    check("cnv11", s32(Long.MAX_VALUE.toDouble()) == "9.223372036854776E18")
+    // toChar() takes the low 16 bits.
+    check("cnv12", 65.toChar() == 'A' && 65601.toChar() == 'A')
+    // The companion constants exist at all - `Int` was an unknown name in both
+    // halves before, and Long.MAX_VALUE cannot be written as a plain number.
+    check("cnv13", Int.SIZE_BITS == 32 && Int.SIZE_BYTES == 4)
+    check("cnv14", Long.SIZE_BITS == 64 && Long.SIZE_BYTES == 8)
+    check("cnv15", s32(Double.POSITIVE_INFINITY) == "Infinity")
+    check("cnv16", s32(Double.NEGATIVE_INFINITY) == "-Infinity")
+    check("cnv17", s32(Double.NaN) == "NaN")
+    // Mixed Int/Double arithmetic still promotes to Double: the sized-integer box
+    // and the floating-point box of the previous section compose.
+    check("cnv18", 2.0 + 1 == 3.0 && 1 + 2.0 == 3.0 && 7 / 2.0 == 3.5)
+    check("cnv19", s32(1 + 2.0) == "3.0" && s32(1L + 2.0) == "3.0")
+    check("cnv20", 1L < 2.0 && 2.0 > 1L)
+    // A declared type retypes its INITIALIZER, which is the one place Kotlin does
+    // convert an integer literal without a method: `val d: Double = 1` holds 1.0.
+    val dd: Double = 1
+    val ll: Long = 1
+    check("cnv21", s32(dd) == "1.0" && dd / 2 == 0.5)
+    check("cnv22", s32(ll) == "1" && ll is Long)
+}
+
+// ===== SECTION 33: the UNSIGNED types, and how a LITERAL is typed =====
+// UByte / UShort / UInt / ULong are the one place Kotlin's integers are not
+// Java's, so java cannot be the oracle here and every rule below is cited to the
+// Kotlin documentation and is UNVERIFIED by any toolchain (there is no kotlinc on
+// this machine).
+//
+//   - kotlin.UInt / ULong / UByte / UShort are unsigned 32 / 64 / 8 / 16 bit
+//     types whose arithmetic wraps, whose division and comparison are unsigned,
+//     and whose toString prints the UNSIGNED reading.
+//   - the literal suffixes are u / U (unsigned) and uL / UL (unsigned long);
+//     a `u` literal is a UInt when it fits in one and a ULong otherwise.
+//   - an UNSUFFIXED literal is an Int when it fits in one and a Long otherwise -
+//     which is why 0xFFFFFFFF is the Long 4294967295 in Kotlin where the same
+//     text is the int -1 in Java.
+//   - there are no implicit conversions between signed and unsigned, so a mixed
+//     expression is a compile error rather than a promotion; the value model
+//     cannot enforce that and simply takes the unsigned reading.
+fun s33(v: Any?): String = "" + v
+fun sec33() {
+    // An unsigned type prints and wraps as unsigned.
+    check("uns1", s33(1u) == "1" && s33(UInt.MAX_VALUE) == "4294967295")
+    check("uns2", UInt.MAX_VALUE + 1u == 0u && s33(0u - 1u) == "4294967295")
+    check("uns3", s33(ULong.MAX_VALUE) == "18446744073709551615")
+    check("uns4", s33(ULong.MAX_VALUE / 2uL) == "9223372036854775807")
+    check("uns5", s33(5uL - 7uL) == "18446744073709551614")
+    check("uns6", s33(UByte.MAX_VALUE) == "255" && s33(UShort.MAX_VALUE) == "65535")
+    check("uns7", s33(UInt.MIN_VALUE) == "0" && s33(ULong.MIN_VALUE) == "0")
+    // Division and comparison are UNSIGNED: a value above 2^31 is large, not
+    // negative, which is exactly what a signed reading would get wrong.
+    check("uns8", s33(4294967295u / 2u) == "2147483647")
+    check("uns9", 3000000000u > 1u && 3000000000u > 2147483647u)
+    check("uns10", ULong.MAX_VALUE > 1uL)
+    // A shift keeps the left operand's type and masks its count.
+    check("uns11", s33(1uL shl 63) == "9223372036854775808")
+    check("uns12", s33(1u shl 31) == "2147483648")
+    // inv() answers the operand's OWN type, not Int.
+    check("uns13", s33(1u.inv()) == "4294967294")
+    // The conversions reinterpret the bits in both directions.
+    check("uns14", s33((-1).toUInt()) == "4294967295")
+    check("uns15", s33((-1L).toULong()) == "18446744073709551615")
+    check("uns16", s33(256u.toUByte()) == "0" && s33(300.toUByte()) == "44")
+    check("uns17", s33(4294967295u.toInt()) == "-1")
+    // A Double conversion to an unsigned type saturates at [0, MAX].
+    check("uns18", s33(1e20.toUInt()) == "4294967295" && s33((-5.0).toUInt()) == "0")
+    // ++ wraps at the unsigned width too.
+    var u: UInt = 1u
+    u++
+    check("uns19", s33(u) == "2")
+    var m: UByte = 255u
+    m++
+    check("uns20", s33(m) == "0")
+    // An unsuffixed literal is an Int when it fits and a Long otherwise, so this
+    // hexadecimal is 4294967295 and not -1 (the Java answer for the same text).
+    check("uns21", 0xFFFFFFFF == 4294967295L)
+    check("uns22", s33(2147483648) == "2147483648")
+    check("uns23", 0b1010 == 10 && 1_000_000 == 1000000)
+    check("uns24", 0xFFFFFFFFL == 4294967295L)
+    // A value carries its real type into `is`, which the untyped value model could
+    // not answer before: every integer was an Int AND a Long at once.
+    val a: Any = 10L
+    val i: Any = 10
+    val q: Any = 1u
+    check("uns25", a is Long && !(a is Int))
+    check("uns26", i is Int && !(i is Long))
+    check("uns27", q is UInt && !(q is Int))
+    // An unsigned value survives a list and a string template.
+    check("uns28", s33(listOf(1uL, 2uL)) == "[1, 2]")
+    check("uns29", "u=${UInt.MAX_VALUE}" == "u=4294967295")
+}
+
 // ===== END SECTIONS =====
 
 fun main() {
@@ -936,6 +1137,9 @@ fun main() {
     sec28() // SECTION-CALL 28
     sec29() // SECTION-CALL 29
     sec30() // SECTION-CALL 30
+    sec31() // SECTION-CALL 31
+    sec32() // SECTION-CALL 32
+    sec33() // SECTION-CALL 33
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

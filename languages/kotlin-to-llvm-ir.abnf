@@ -1199,14 +1199,15 @@ FloatExp    = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" | "_" } ;
 FloatSfx    = "f" | "F" ;
 
 // Integer literal forms beyond the plain decimal IntLit: hex, binary, digit-group
-// underscores, and the Long suffix (the value model is a JS number, so a Long is
-// simply a number beyond 32 bits; its arithmetic wraps like Int arithmetic).
-KHexLit     = NumHex [ IntSfx ] ;
-KBinLit     = NumBin [ IntSfx ] ;
-KIntLit     = NumInt [ IntSfx ] ;
+// underscores and the L / u / U / uL / UL suffixes. Each tag DROPS the constant the
+// shared NumInt / NumHex / NumBin pushed (a JS double, which already rounds
+// 9223372036854775807) and rebuilds the literal from its own text, so the digits
+// reach makeIntConst exactly.
+KHexLit     <~~ pop(); push(makeIntConst(up.in)) ~~> = NumHex [ IntSfx ] ;
+KBinLit     <~~ pop(); push(makeIntConst(up.in)) ~~> = NumBin [ IntSfx ] ;
+KIntLit     <~~ pop(); push(makeIntConst(up.in)) ~~> = NumInt [ IntSfx ] ;
 // Kotlin's integer literal suffixes: L (Long), u/U (unsigned) and the uL/UL pair.
-// The value model has one number type, so the suffix only has to be consumed. The
-// trailing KwEnd is essential: the literal's own whitespace is consumed before the
+// The trailing KwEnd is essential: the literal's own whitespace is consumed before the
 // suffix is tried, so without a word boundary `0 until n` would read as `0u` followed
 // by the method call `ntil`.
 IntSfx      = ( ( "u" | "U" ) [ "L" ] | "L" ) KwEnd ;
@@ -1704,12 +1705,72 @@ KwContract  = "contract" KwEnd ;
     function makeFloConst(f) {
         return function(b) { return {b: b, v: callExt(b, "js_jflo", [emitNum(b, f)])} }
     }
+    // ----- An integer literal's TEXT -----
+    // Kotlin types an integer literal by its suffix AND its value: unsuffixed it is an
+    // Int when it fits in one and a Long otherwise (so 0xFFFFFFFF is the Long
+    // 4294967295 here, where Java's constant conversion makes the same text int -1);
+    // `u` gives a UInt when it fits and a ULong otherwise; `L` a Long and `uL` a ULong.
+    // The suffix code is the one js_ktlit reads: 0 none, 1 L, 2 u, 3 uL.
+    function ktLitParts(raw) {
+        var s = ""
+        for (var i = 0; i < raw.length; i++) { if (raw.charAt(i) != "_") { s = s + raw.charAt(i) } }
+        var sfx = 0
+        var end = s.length
+        var lastc = s.charAt(end - 1)
+        if (lastc == "L" || lastc == "l") { sfx = 1; end = end - 1 }
+        var c2 = s.charAt(end - 1)
+        if (c2 == "u" || c2 == "U") { sfx = (sfx == 1) ? 3 : 2; end = end - 1 }
+        var body = s.substring(0, end)
+        var radix = 10
+        if (body.length > 2 && body.charAt(0) == "0") {
+            var k = body.charAt(1)
+            if (k == "x" || k == "X") { radix = 16; body = body.substring(2) }
+            else if (k == "b" || k == "B") { radix = 2; body = body.substring(2) }
+        }
+        return {t: body, r: radix, s: sfx}
+    }
+    // The literal's constant thunk. An unsuffixed literal that fits in an Int stays a
+    // PLAIN NUMBER emitted as before - which is the overwhelming majority of literals
+    // in any program, so the IR does not grow and nothing gets slower. Only a literal
+    // that carries a type (a suffix, or a value past Int) pays for js_ktlit, whose
+    // DIGITS travel as text because emitNum would already have rounded
+    // 9223372036854775807 to 9223372036854776000 on the way into the module - and
+    // rounded it DIFFERENTLY under goja and -frozen, which the matrix demands agree.
+    function makeIntConst(raw) {
+        var p = ktLitParts(raw)
+        if (p.s == 0) {
+            var n = parseInt(p.t, p.r)
+            if (n <= 2147483647) { return makeConst(n) }
+        }
+        var txt = p.t
+        var rdx = p.r
+        var sfc = p.s
+        return function(b) {
+            return {b: b, v: callExt(b, "js_ktlit", [emitStr(b, txt), emitNum(b, rdx), emitNum(b, sfc)])}
+        }
+    }
+    // ----- Int / Long / Byte / Short and the four unsigned types -----
+    // Every arithmetic and ordered-comparison operator goes through the sized-integer
+    // externs of abnf/jsrtkotlin.go, which apply the width rules (Byte + Byte is an
+    // Int, Int + Long is a Long, UInt + UInt is a UInt), wrap silently on overflow and
+    // throw ArithmeticException on a divide by zero. A Double operand still pulls the
+    // whole operation into floating point, so mixed Int/Double arithmetic is unchanged.
+    // The twins are jArith / jCmp / kadd in kotlin-interpreter.abnf.
     var coreEmitBinK = emitBin
+    var ktArithOp = {"$-": "-", "$-=": "-", "$*": "*", "$*=": "*",
+                     "$/": "/", "$/=": "/", "$%": "%", "$%=": "%"}
+    var ktCmpOp = {"$<": "<", "$>": ">", "$<=": "<=", "$>=": ">="}
     emitBin = function(b, op, l, r) {
-        if (op == "-" || op == "-=") return callExt(b, "js_jfsub", [l, r])
-        if (op == "*" || op == "*=") return callExt(b, "js_jfmul", [l, r])
-        if (op == "/" || op == "/=") return callExt(b, "js_jfdiv", [l, r])
-        if (op == "%" || op == "%=") return callExt(b, "js_jfmod", [l, r])
+        var ao = ktArithOp["$" + op]
+        if (ao != undefined) { return callExt(b, "js_ktarith", [emitStr(b, ao), l, r]) }
+        var co = ktCmpOp["$" + op]
+        if (co != undefined) { return callExt(b, "js_ktcmp", [emitStr(b, co), l, r]) }
+        // The numeric half of `+` (emitPrimBin has already split the String case off).
+        if (op == "+" || op == "+=") { return callExt(b, "js_ktadd", [l, r]) }
+        // == / != compare two integers by VALUE across the box; every other pair keeps
+        // the equality the runtime had, so a data class still uses its own equals.
+        if (op == "==") { return callExt(b, "js_kteq", [l, r]) }
+        if (op == "!=") { return callExt(b, "js_ktne", [l, r]) }
         return coreEmitBinK(b, op, l, r)
     }
     // -x: the unaryMinus convention, else the primitive negation.
@@ -1718,14 +1779,14 @@ KwContract  = "contract" KwEnd ;
             var r = t(b)
             b = r.b
             var cls = opClasses["$unaryMinus"]
-            if (cls == undefined) { return {b: b, v: callExt(b, "js_jfneg", [r.v])} }
+            if (cls == undefined) { return {b: b, v: callExt(b, "js_ktneg", [r.v])} }
             var objB = curF.NewBlock("")
             var primB = curF.NewBlock("")
             var mergeB = curF.NewBlock("")
             b.NewCondBr(emitClassProbe(b, r.v, cls), objB, primB)
             var ov = callExt(objB, "js_ktsmcall", [r.v, emitStr(objB, "unaryMinus"), callExt(objB, "js_arr_new", [])])
             objB.NewBr(mergeB)
-            var pv = callExt(primB, "js_jfneg", [r.v])
+            var pv = callExt(primB, "js_ktneg", [r.v])
             primB.NewBr(mergeB)
             return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(ov, objB), llvm.ir.NewIncoming(pv, primB)])}
         }
@@ -2054,7 +2115,10 @@ KwContract  = "contract" KwEnd ;
     function makeCharConst(code) {
         return function(b) { return {b: b, v: callExt(b, "js_char", [handle(code)])} }
     }
-    // x is T / x !is T: emits the shared dynamic type test (extern js_is_type).
+    // x is T / x !is T: js_ktis is the shared dynamic type test plus the one thing it
+    // cannot know - a SIZED INTEGER box carries its real type, so `5L is Long` holds
+    // and `5L is Int` does not, where the shared probe answers "integral number" for
+    // Int, Long, Short and Byte alike. Every other value falls straight through it.
     function makeIsCheck(operand, m) {
         // `x is T` where T is a REIFIED type parameter of the enclosing function: the
         // type name arrives in the hidden parameter, so the probe reads it from there.
@@ -2064,15 +2128,16 @@ KwContract  = "contract" KwEnd ;
             var tV = (reifiedName != null)
                 ? callExt(r.b, "js_scope_get", [curScopeV, emitStr(r.b, reifiedName)])
                 : emitStr(r.b, m.tname)
-            var v = callExt(r.b, "js_is_type", [r.v, tV])
+            var v = callExt(r.b, "js_ktis", [r.v, tV])
             if (m.neg) { v = callExt(r.b, "js_not", [v]) }
             return {b: r.b, v: v}
         }
     }
     // A curated stdlib infix call, folded left to right: a to b builds a Pair object
-    // with first/second fields; and/or/xor lower to js_jband/js_jbor/js_jbxor (boolean
-    // logical on two booleans, int32 bitwise otherwise); shl/shr/ushr to the int32
-    // shift externs (ushr wraps back to a signed int like Kotlin's Int.ushr).
+    // with first/second fields; and/or/xor go through js_ktarith (boolean logical on
+    // two booleans, sized-integer bitwise otherwise) and shl/shr/ushr through
+    // js_ktshift, which is width-aware. In Kotlin these seven are infix FUNCTIONS
+    // rather than operators, which is why they lower here and not in emitBin.
     // items alternates operand thunks and {iop} markers.
     function makeInfix(items) {
         if (items.length == 1) { return items[0] }
@@ -2091,12 +2156,14 @@ KwContract  = "contract" KwEnd ;
                     v = callExt(b, "js_ktsmcall", [v, emitStr(b, op), iargsV])
                 } else if (op == "to") {
                     v = emitPair(b, v, r2.v)
-                } else if (op == "and") { v = callExt(b, "js_jband", [v, r2.v]) }
-                else if (op == "or") { v = callExt(b, "js_jbor", [v, r2.v]) }
-                else if (op == "xor") { v = callExt(b, "js_jbxor", [v, r2.v]) }
-                else if (op == "shl") { v = callExt(b, "js_shl", [v, r2.v]) }
-                else if (op == "shr") { v = callExt(b, "js_shr", [v, r2.v]) }
-                else { v = intWrap(b, callExt(b, "js_ushr", [v, r2.v])) }
+                } else if (op == "and") { v = callExt(b, "js_ktarith", [emitStr(b, "&"), v, r2.v]) }
+                else if (op == "or") { v = callExt(b, "js_ktarith", [emitStr(b, "|"), v, r2.v]) }
+                else if (op == "xor") { v = callExt(b, "js_ktarith", [emitStr(b, "^"), v, r2.v]) }
+                // The shift COUNT is MASKED - & 31 for an Int, & 63 for a Long - and
+                // the result type is the LEFT operand's alone, which is why
+                // `1 shl 32` is 1 here and `1L shl 40` is 1099511627776 rather than
+                // the 256 the 32 bit js_shl used to answer.
+                else { v = callExt(b, "js_ktshift", [emitStr(b, op), v, r2.v]) }
             }
             return {b: b, v: v}
         }
@@ -2209,7 +2276,7 @@ KwContract  = "contract" KwEnd ;
             if (!m.safe) { return operand } // x as T: identity (untyped values)
             return function(b) { // x as? T: the value when it matches, else null
                 var r = operand(b)
-                var isV = callExt(r.b, "js_is_type", [r.v, emitStr(r.b, m.tname)])
+                var isV = callExt(r.b, "js_ktis", [r.v, emitStr(r.b, m.tname)])
                 return {b: r.b, v: r.b.NewSelect(truthy(r.b, isV), r.v, hNull)}
             }
         }
@@ -2297,7 +2364,7 @@ KwContract  = "contract" KwEnd ;
                     var nextB = curF.NewBlock("")
                     if (cond.isType) {
                         var subjV0 = callExt(b, "js_scope_get", [curScopeV, emitStr(b, wName)])
-                        var isV = callExt(b, "js_is_type", [subjV0, emitStr(b, cond.tname)])
+                        var isV = callExt(b, "js_ktis", [subjV0, emitStr(b, cond.tname)])
                         if (cond.neg) { isV = callExt(b, "js_not", [isV]) }
                         b.NewCondBr(truthy(b, isV), matchB, nextB)
                     } else if (cond.v != undefined) {
@@ -2374,7 +2441,7 @@ KwContract  = "contract" KwEnd ;
                 // Int.inv(): the runtime has no method table for numbers, so the bitwise
                 // complement is emitted inline (unless a class declares its own `inv`).
                 if (s.name == "inv" && s.args.length == 0 && classMethodNames["$inv"] != true) {
-                    return {b: b, v: callExt(b, "js_bxor", [cur, emitNum(b, -1)])}
+                    return {b: b, v: callExt(b, "js_ktinv", [cur])}
                 }
                 // recv.name(args) where `name` holds a lambda WITH RECEIVER: call the
                 // closure with the receiver in front. When a class ALSO declares a method
@@ -3007,8 +3074,9 @@ KwContract  = "contract" KwEnd ;
             return {b: r1.b, v: r1.v}
         }
     }
-    // ++ / -- keep the type of what they step (js_jfstep): a Double stays a Double,
-    // a Char stays a Char, everything else wraps to int32.
+    // ++ / -- keep the type of what they step (js_ktstep): a Double stays a Double,
+    // a Char stays a Char, and a sized integer steps at its own WIDTH - which is what
+    // makes `var b: Byte = 127; b++` answer -128 rather than 128.
     function makeIncDec(items) {
         var ref = items[0]
         var step = (items[1] == "++") ? 1 : 0 - 1
@@ -3017,13 +3085,13 @@ KwContract  = "contract" KwEnd ;
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
                 var oldV = callExt(b, "js_kget", [curScopeV, nameV])
-                callExt(b, "js_kset", [curScopeV, nameV, callExt(b, "js_jfstep", [oldV, oneV])])
+                callExt(b, "js_kset", [curScopeV, nameV, callExt(b, "js_ktstep", [oldV, oneV])])
                 return {b: b, v: oldV}
             }
             var p = emitRefPath(b, ref)
             b = p.b
             var oldM = callExt(b, "js_get", [p.obj, p.key])
-            callExt(b, "js_set", [p.obj, p.key, callExt(b, "js_jfstep", [oldM, oneV])])
+            callExt(b, "js_set", [p.obj, p.key, callExt(b, "js_ktstep", [oldM, oneV])])
             return {b: b, v: oldM}
         }
     }
@@ -3058,18 +3126,47 @@ KwContract  = "contract" KwEnd ;
             return b
         }
     }
+    // The eight integral types and their {bits, unsigned}. Kotlin has NO implicit
+    // numeric conversions, so a declared type can only ever retype an integer
+    // LITERAL - `val x: Long = 1` is legal, `val y: Int = 1; val x: Long = y` is not -
+    // but that one case is what makes `var t: Long = 1; t = t * 1000000 * 1000000`
+    // stay 64 bit instead of wrapping at 32. The keys are "$"-prefixed because
+    // compile-core has no hasOwn and a bare lookup would find Object.prototype's
+    // members. The twin is kDeclWidth in kotlin-interpreter.abnf.
+    var ktDeclWidth = {"$Int": 32, "$Long": 64, "$Byte": 8, "$Short": 16,
+                       "$UInt": 32, "$ULong": 64, "$UByte": 8, "$UShort": 16}
+    var ktDeclUns = {"$UInt": true, "$ULong": true, "$UByte": true, "$UShort": true}
+    // The declared type's width, or 0 when it is not an integral type. A nullable
+    // spelling (Long?) declares the same width.
+    function ktWidthOfType(dt) {
+        var t = dt
+        if (t.length > 0 && t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1) }
+        // Double / Float are the float half of the same rule: `val d: Double = 1` holds
+        // 1.0, because an integer literal takes the type it is expected to have.
+        if (t == "Double" || t == "Float") { return {w: 0, u: false, flo: true} }
+        var w = ktDeclWidth["$" + t]
+        if (w == undefined) { return {w: 0, u: false, flo: false} }
+        return {w: w, u: ktDeclUns["$" + t] == true, flo: false}
+    }
     function makeDecl(items) {
         var name = items[0]
         var at = 1
+        var dw = {w: 0, u: false, flo: false}
         if (items[at] != undefined && items[at].dtype != undefined) {
             if (isRecvFnType(items[at].dtype)) { recvLambdaNames["$" + name] = true }
+            dw = ktWidthOfType(items[at].dtype)
             at++
         }
         var init = items[at]
         return function(b) {
             var r = init(b)
             b = r.b
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), r.v])
+            var v = r.v
+            // js_ktadopt narrows only an INTEGRAL value, so `val s: String = "x"` and
+            // a lambda pass through untouched.
+            if (dw.w > 0) { v = callExt(b, "js_ktadopt", [v, emitNum(b, dw.w), dw.u ? hTrue : hFalse]) }
+            else if (dw.flo == true) { v = callExt(b, "js_ktadoptf", [v]) }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
             return b
         }
     }
@@ -4406,6 +4503,18 @@ KwContract  = "contract" KwEnd ;
         // other language's println changes. See abnf/jsrtkotlin.go.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "println"), callExt(b, "js_ktprint", [])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"), callExt(b, "js_ktwrite", [])])
+        // Kotlin's number types as VALUES, for their companion constants. Int.MAX_VALUE
+        // and friends existed in neither half before ("unknown name: Int"), and
+        // Long.MAX_VALUE cannot be written as a plain number at all - which is the
+        // whole reason a sized integer had to exist. The twin is hostGlobals["Int"] etc
+        // in kotlin-interpreter.abnf; the objects come from js_kttype
+        // (abnf/jsrtkotlin.go).
+        var ktNumTypes = ["Int", "Long", "Byte", "Short", "UInt", "ULong", "UByte", "UShort",
+                          "Char", "Double", "Float"]
+        for (var kt = 0; kt < ktNumTypes.length; kt++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ktNumTypes[kt]),
+                                         callExt(b, "js_kttype", [emitStr(b, ktNumTypes[kt])])])
+        }
         b = emitImported(b)   // imported files' items, each under its own source (call-graph file attribution)
         b = makeSeq(items)(b)
         // The entry point defaults to main(), but the -main flag (c.mainName) can override

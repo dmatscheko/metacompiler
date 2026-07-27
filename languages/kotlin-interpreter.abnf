@@ -644,7 +644,11 @@ Block       <~~ push(makeBlockStmt(takeAll())) ~~>
 // recv.dot(arg). Any other type annotation is parsed and dropped as before.
 Decl        <~~ push(makeDecl(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd { Annotation } KId <~~ push(up.in) ~~> [ ":" DeclType ] "=" Expression [ ";" ] ;
-DeclType    = RecvFnType | Type ;
+// The declared type is pushed as {dty}: an INTEGRAL one retypes the initializer.
+// RecvFnType and DeclTypeName each push exactly ONE item, so makeDecl's item count
+// does not depend on which alternative matched.
+DeclType    = RecvFnType | DeclTypeName ;
+DeclTypeName <~~ push({dty: up.in}) ~~> = Type ;
 // The same declaration WITHOUT an initializer - `val f1: File` - which Kotlin allows
 // wherever a definite assignment follows. It binds the name to null so later reads and
 // the assignment that fills it in both resolve. Tried after Decl, so an initialized
@@ -1251,12 +1255,17 @@ DotFloatLit <~~ push(makeConst(kFlo(parseFloat("0" + up.in.split("_").join("")))
 FloatSfx    = "f" | "F" ;
 
 // Integer literal forms beyond the plain decimal IntLit: hex, binary, digit-group
-// underscores, and the Long suffix (the value model is a JS number, so a Long is
-// simply a number beyond 32 bits; its arithmetic wraps like Int arithmetic).
+// underscores and the L / u / U / uL / UL suffixes. Each tag DROPS the constant the
+// shared NumInt / NumHex / NumBin pushed (a JS double, which already rounds
+// 9223372036854775807) and rebuilds the literal from its own text, so kIntLit sees
+// the digits exactly and can type the literal by its suffix AND its value.
 // The suffix is matched with whitespace OFF, so `1 L` stays an Int followed by a name.
-KHexLit     = NumHex :whitespace() [ IntSfx ] :whitespace(Whitespace) ;
-KBinLit     = NumBin :whitespace() [ IntSfx ] :whitespace(Whitespace) ;
-KIntLit     = NumInt :whitespace() [ IntSfx ] :whitespace(Whitespace) ;
+KHexLit     <~~ pop(); push(makeConst(kIntLit(up.in))) ~~>
+            = NumHex :whitespace() [ IntSfx ] :whitespace(Whitespace) ;
+KBinLit     <~~ pop(); push(makeConst(kIntLit(up.in))) ~~>
+            = NumBin :whitespace() [ IntSfx ] :whitespace(Whitespace) ;
+KIntLit     <~~ pop(); push(makeConst(kIntLit(up.in))) ~~>
+            = NumInt :whitespace() [ IntSfx ] :whitespace(Whitespace) ;
 IntSfx      = ( "u" | "U" ) [ "l" | "L" ] | "l" | "L" ;
 
 // A character literal. Char is its own value type - a boxed {__char: code} - so it
@@ -1684,7 +1693,10 @@ NotMemberKw = :script(~~
     // code (the identity for everything else) and kChStr renders the glyph.
     function kChar(code) { return {__char: code} }
     function kIsChar(v) { return v !== null && v !== undefined && typeof v == "object" && v.__char !== undefined }
-    function kNum(v) { return kIsChar(v) ? v.__char : (kIsFlo(v) ? v.__flo : v) }
+    // The PLAIN NUMBER reading of any numeric operand - what an array index, a
+    // string offset, a list length and a range bound all want. A sized integer box
+    // unwraps through szNum (exact below 2^53, the nearest double above it).
+    function kNum(v) { return kIsChar(v) ? v.__char : (kIsFlo(v) ? v.__flo : szNum(v)) }
 
     // ----- Double / Float: a boxed {__flo: value} -----
     // Kotlin's Double is a DIFFERENT type from Int, and this value model is untyped,
@@ -1699,12 +1711,15 @@ NotMemberKw = :script(~~
     var kInf = 1 / kZeroF
     function kFlo(f) { return {__flo: f} }
     function kIsFlo(v) { return v !== null && v !== undefined && typeof v == "object" && v.__flo !== undefined }
-    // The numeric value of any numeric operand (a plain number, a Char or a Double).
+    // The numeric value of any numeric operand: a plain number, a Char, a Double or a
+    // sized integer (which reads as the nearest double above 2^53, the way a
+    // Long -> Double conversion does).
     function kNumD(v) {
         if (v === null || v === undefined) return v
         if (typeof v == "object") {
             if (v.__flo !== undefined) return v.__flo
             if (v.__char !== undefined) return v.__char
+            if (v.__sz === true) return szNum(v)
         }
         return v
     }
@@ -1758,6 +1773,285 @@ NotMemberKw = :script(~~
         return digits.charAt(0) + "." + frac + "E" + (pt + exp - 1)
     }
     function kChStr(v) { return String.fromCharCode(v.__char) }
+
+    // ----- Int / Long / Byte / Short and the four UNSIGNED types -----
+    // Kotlin's integral types have fixed widths and WRAP silently on overflow (unlike
+    // Swift, which traps), and the width has to survive into the next operation -
+    // `var b: Byte = 127; b++` is -128, and nothing about the value 127 says so. That
+    // is the same problem the {__flo} box solves for floating point and it gets the
+    // same answer: the type goes ON the value. The machinery is the language-neutral
+    // sz* layer in lib/interp-core.js (szArith / szConv / szCmp / szStr on exact 64
+    // bit pairs); abnf/jsrtkotlin.go implements the identical rules for the compiled
+    // half and ./test.sh --cross diffs the two, so the two MUST stay in step.
+    //
+    // The INVARIANT is Java's, because Kotlin/JVM's Int and Long ARE Java's:
+    //
+    //     a plain number   ==  an `Int`, i.e. a SIGNED 32 BIT value
+    //     an {__sz} box    ==  Long / Byte / Short, or any UNSIGNED type
+    //     an {__flo} box   ==  a Double / Float
+    //     a {__char} box   ==  a Char
+    //
+    // Int is the type of every unsuffixed literal that fits in one and of every
+    // arithmetic result with no Long operand, so keeping IT unboxed is what makes the
+    // change affordable: an ordinary program allocates no box at all. The cost is
+    // that a 64 bit value stays boxed even when it would fit in a double, because a
+    // plain number means Int here - szNorm unboxes such a result, so kL boxes it
+    // straight back rather than teaching the shared layer a second invariant.
+    var kNoU = false
+    function kIsSz(v) { return szIs(v) }
+    function kIsLong(v) { return szIs(v) && v.w == 64 }
+    // kSz is "read this at (w, u)": ALWAYS a box, never a plain number.
+    function kSz(v, w, u) { return szMake(i64Trunc(szIs(v) ? v.p : i64FromNum(kNumD(v)), w, u), w, u) }
+    // kNorm applies the Kotlin invariant to a 64 bit pair: a signed 32 bit result is a
+    // plain number, everything else a box.
+    function kNorm(p, w, u) {
+        if (w == 32 && !u) { return szNum(szNorm(p, 32, kNoU)) | 0 }
+        return szMake(i64Trunc(p, w, u), w, u)
+    }
+    // The RESULT type of a binary operator. Kotlin requires both operands to have the
+    // same type, so the only widenings a program kotlinc accepts can exhibit are
+    // Byte+Byte -> Int, Short+Short -> Int, Int+Long -> Long and UInt+ULong -> ULong:
+    // 64 bits if either side is 64, else 32; unsigned if either side is unsigned.
+    // There is no `uint + int -> long` ladder to model - in Kotlin that is a compile
+    // error, because the language has NO implicit numeric conversions at all.
+    function kWidth(l, r) {
+        if (kIsLong(l) || kIsLong(r)) { return 64 }
+        return 32
+    }
+    function kUns(l, r) {
+        if (szIs(l) && l.u) { return true }
+        return szIs(r) && r.u
+    }
+    // Is this an operand of INTEGER arithmetic (as opposed to a String, a Boolean, a
+    // reference)? A Char counts - Kotlin's Char does code arithmetic.
+    function kIsIntegral(v) {
+        if (typeof v == "number") { return true }
+        if (v === null || v === undefined || typeof v != "object") { return false }
+        return v.__sz === true || v.__char !== undefined
+    }
+    // ArithmeticException, THROWN rather than failed, so a program can catch it.
+    // interp-core's exception protocol is {__exc: true, v: <thrown value>}.
+    function kThrowExc(clsName, msg) {
+        throw {__exc: true, v: {__class: globalScope[clsName], message: msg}}
+    }
+    // (a * b) mod 2^32. `(a * b) | 0` is WRONG: the exact product needs up to 62 bits
+    // and a double keeps only 53, so the low bits - the only ones that survive - are
+    // already gone by the time |0 runs. Splitting into 16 bit halves keeps every
+    // partial product exact.
+    function kMul32(a, b) {
+        var ah = (a >>> 16) & 65535
+        var al = a & 65535
+        var bh = (b >>> 16) & 65535
+        var bl = b & 65535
+        return (((ah * bl + al * bh) << 16) + al * bl) | 0
+    }
+    // kArith is one binary arithmetic or bitwise operator on two INTEGRAL operands.
+    // The plain Int case is ordinary 32 bit JavaScript arithmetic; only a Long or an
+    // unsigned operand pays for the exact 64 bit pair path.
+    // The Int case, on two operands already known to be plain numbers. It is kept as
+    // its own function so the FAST PATH below - two plain numbers, which is what an
+    // ordinary Kotlin program is made of - costs one typeof pair and nothing else:
+    // no width computation, no unboxing, no allocation.
+    function kArith32(op, a, b) {
+        if (op == "+") return (a + b) | 0
+        if (op == "-") return (a - b) | 0
+        if (op == "*") return kMul32(a, b)
+        if (op == "/") {
+            if (b == 0) { kThrowExc("ArithmeticException", "/ by zero") }
+            // |0 truncates toward zero inside the Int range and wraps outside it,
+            // which is exactly what Int.MIN_VALUE / -1 needs: the mathematical
+            // 2147483648 wraps back to Int.MIN_VALUE, as the JVM's idiv does.
+            return (a / b) | 0
+        }
+        if (op == "%") {
+            if (b == 0) { kThrowExc("ArithmeticException", "/ by zero") }
+            return (a % b) | 0
+        }
+        if (op == "&") return a & b
+        if (op == "|") return a | b
+        if (op == "^") return a ^ b
+        return (a + b) | 0
+    }
+    function kArith(op, l, r) {
+        if (typeof l == "number" && typeof r == "number") { return kArith32(op, l, r) }
+        var w = kWidth(l, r)
+        var u = kUns(l, r)
+        if (w == 32 && !u) { return kArith32(op, szNum(kNumD(l)) | 0, szNum(kNumD(r)) | 0) }
+        var la = kSz(l, w, u)
+        var lb = kSz(r, w, u)
+        if ((op == "/" || op == "%") && i64IsZero(lb.p)) { kThrowExc("ArithmeticException", "/ by zero") }
+        return kNorm(szPair(szArith(op, la, lb)), w, u)
+    }
+    // shl / shr / ushr. The result type is the LEFT operand's alone and the COUNT is
+    // MASKED - & 31 for a 32 bit left operand, & 63 for a 64 bit one - which is why
+    // `1 shl 32` is 1 rather than 0.
+    function kShift(op, l, r) {
+        var w = kIsLong(l) ? 64 : 32
+        var u = szIs(l) ? l.u : false
+        var n = szNum(kNumD(r)) | 0
+        if (w == 32 && !u) {
+            var a = szNum(kNumD(l)) | 0
+            // JavaScript's shift operators already mask the count by 31 and operate on
+            // 32 bits, which IS Kotlin's Int rule; >>> yields an unsigned value there,
+            // so it is wrapped back into the Int range.
+            if (op == "shl") return a << n
+            if (op == "shr") return a >> n
+            return (a >>> n) | 0
+        }
+        var m = n & (w == 64 ? 63 : 31)
+        var la = kSz(l, w, u)
+        if (op == "shl") { return kNorm(szPair(szArith("<<", la, m)), w, u) }
+        if (op == "shr" && !u) { return kNorm(szPair(szArith(">>", la, m)), w, u) }
+        // A logical shift: read the operand as unsigned at its width, shift, read the
+        // result back at the operand's own signedness. `shr` on an unsigned type IS
+        // the logical shift, and `ushr` is it for a signed one.
+        return kNorm(szPair(szArith(">>", szConv(la, w, true), m)), w, u)
+    }
+    // The ordered comparison of two integral operands, at the promoted width. szCmp on
+    // its own is NOT usable here: it compares at the WIDEST operand's width, so
+    // `val b: Byte = 5; b < 1000` would truncate 1000 into a byte and answer false
+    // where Kotlin promotes both to Int and answers true.
+    function kCmp32(op, a, b) {
+        if (op == "<") return a < b
+        if (op == ">") return a > b
+        if (op == "<=") return a <= b
+        if (op == ">=") return a >= b
+        return op == "==" ? a == b : a != b
+    }
+    function kCmpI(op, l, r) {
+        if (typeof l == "number" && typeof r == "number") { return kCmp32(op, l, r) }
+        var w = kWidth(l, r)
+        var u = kUns(l, r)
+        var c = 0
+        if (w == 32 && !u) {
+            var a = szNum(kNumD(l)) | 0
+            var b = szNum(kNumD(r)) | 0
+            c = a < b ? 0 - 1 : (a > b ? 1 : 0)
+        } else {
+            c = szCmp(kSz(l, w, u), kSz(r, w, u))
+        }
+        if (op == "<") return c < 0
+        if (op == ">") return c > 0
+        if (op == "<=") return c <= 0
+        if (op == ">=") return c >= 0
+        return op == "==" ? c == 0 : c != 0
+    }
+    // ----- conversions -----
+    // The eight integral types, for a DECLARED type and for the toXxx() methods.
+    // The keys are "$"-prefixed so a lookup can never land on Object.prototype's own
+    // members (a `toString()` call would otherwise ask kDeclWidth for "String").
+    var kDeclWidth = {"$Int": 32, "$Long": 64, "$Byte": 8, "$Short": 16,
+                      "$UInt": 32, "$ULong": 64, "$UByte": 8, "$UShort": 16}
+    var kDeclUns = {"$UInt": true, "$ULong": true, "$UByte": true, "$UShort": true}
+    // "toLong" -> "$Long"; "" for a name that is not a conversion.
+    function kConvName(name) {
+        if (name.length > 2 && name.charAt(0) == "t" && name.charAt(1) == "o") { return "$" + name.substring(2) }
+        return "$"
+    }
+    // A declared type's width, or 0 when it is not an integral type. A nullable
+    // spelling (Long?) declares the same width.
+    function kTypeWidth(dt) {
+        var t = dt
+        if (t.length > 0 && t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1) }
+        var w = kDeclWidth["$" + t]
+        return w == undefined ? 0 : w
+    }
+    // Double / Float are the float half of the same rule: `val d: Double = 1` holds
+    // 1.0, because an integer literal takes the type it is expected to have.
+    function kTypeFlo(dt) {
+        var t = dt
+        if (t.length > 0 && t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1) }
+        return t == "Double" || t == "Float"
+    }
+    function kTypeUns(dt) {
+        var t = dt
+        if (t.length > 0 && t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1) }
+        return kDeclUns["$" + t] == true
+    }
+    var kLongMaxP = i64Make(0x7fffffff, 0xffffffff)
+    var kLongMinP = i64Make(0x80000000, 0)
+    var kULongMaxP = i64Make(0xffffffff, 0xffffffff)
+    // Truncation toward zero, without Math.trunc (which the frozen engine has not).
+    function kTruncF(n) { return n < 0 ? 0 - Math.floor(0 - n) : Math.floor(n) }
+    // toByte() / toShort() / toInt() / toLong() / toUByte() / ... and a declared
+    // integral type.
+    //
+    // A FLOATING POINT source does not just take the low bits: Kotlin/JVM compiles
+    // Double.toInt() to the JVM's d2i and toLong() to d2l, both of which SATURATE at
+    // the target's range and answer 0 for NaN, and a target narrower than 32 bits goes
+    // through the 32 bit one first. The unsigned conversions saturate at [0, 2^w - 1]
+    // instead. An INTEGRAL source is a pure bit reinterpretation with no saturation
+    // anywhere, which is what makes (-1).toUInt() == 4294967295u.
+    function kConv(v, w, u) {
+        if (kIsFlo(v)) {
+            var n = v.__flo
+            if (n !== n) { n = 0 }
+            if (u) {
+                if (w == 64) {
+                    if (n <= 0) { return szMake(i64Make(0, 0), 64, true) }
+                    if (n >= 18446744073709551616) { return szMake(kULongMaxP, 64, true) }
+                    return szMake(i64FromNum(kTruncF(n)), 64, true)
+                }
+                var un = 0
+                if (n > 0) { un = n >= 4294967295 ? 4294967295 : kTruncF(n) }
+                return kNorm(i64FromNum(un), w, true)
+            }
+            if (w == 64) {
+                if (n >= 9223372036854775808) { return szMake(kLongMaxP, 64, kNoU) }
+                if (n < 0 - 9223372036854775808) { return szMake(kLongMinP, 64, kNoU) }
+                return szMake(i64FromNum(kTruncF(n)), 64, kNoU)
+            }
+            var i = 0
+            if (n >= 2147483648) { i = 2147483647 }
+            else if (n < 0 - 2147483648) { i = 0 - 2147483648 }
+            else { i = kTruncF(n) }
+            return kNorm(i64FromNum(i), w, u)
+        }
+        return kNorm(szIs(v) ? v.p : i64FromNum(kNumD(v)), w, u)
+    }
+    // The Kotlin type a box stands for, which is what `is` asks it. The twin is
+    // ktBoxTypeName in abnf/jsrtkotlin.go.
+    function kBoxTypeName(v) {
+        if (v.u) { return v.w == 8 ? "UByte" : (v.w == 16 ? "UShort" : (v.w == 32 ? "UInt" : "ULong")) }
+        return v.w == 8 ? "Byte" : (v.w == 16 ? "Short" : (v.w == 32 ? "Int" : "Long"))
+    }
+    // One integer LITERAL. Kotlin types it by its suffix AND its value: unsuffixed it
+    // is an Int when it fits in one and a Long otherwise (so 0xFFFFFFFF is the Long
+    // 4294967295 here, where Java's constant conversion makes the same text int -1);
+    // `u` gives a UInt when it fits and a ULong otherwise; `L` a Long, `uL` a ULong.
+    // sfx: 0 none, 1 L, 2 u, 3 uL.
+    function kLit(p, sfx) {
+        if (sfx == 1) { return szMake(i64Trunc(p, 64, kNoU), 64, kNoU) }
+        if (sfx == 3) { return szMake(i64Trunc(p, 64, true), 64, true) }
+        if (sfx == 2) {
+            if (i64CmpU(p, i64Make(0, 0xffffffff)) <= 0) { return szMake(i64Trunc(p, 32, true), 32, true) }
+            return szMake(i64Trunc(p, 64, true), 64, true)
+        }
+        if (i64CmpU(p, i64Make(0, 0x7fffffff)) <= 0 && p.h === 0) { return i64ToNumS(p) }
+        return szMake(i64Trunc(p, 64, kNoU), 64, kNoU)
+    }
+    // The literal's text: strip the digit-group underscores, read off the suffix, and
+    // accumulate the digits EXACTLY (parseInt would already have rounded
+    // 9223372036854775807 to 9223372036854775808, and the two script engines even
+    // round it differently, which the matrix's byte-identity requirement would fail).
+    function kIntLit(raw) {
+        var s = ""
+        for (var i = 0; i < raw.length; i++) { if (raw.charAt(i) != "_") { s = s + raw.charAt(i) } }
+        var sfx = 0
+        var end = s.length
+        var lastc = s.charAt(end - 1)
+        if (lastc == "L" || lastc == "l") { sfx = 1; end = end - 1 }
+        var c2 = s.charAt(end - 1)
+        if (c2 == "u" || c2 == "U") { sfx = (sfx == 1) ? 3 : 2; end = end - 1 }
+        var body = s.substring(0, end)
+        var radix = 10
+        if (body.length > 2 && body.charAt(0) == "0") {
+            var k = body.charAt(1)
+            if (k == "x" || k == "X") { radix = 16; body = body.substring(2) }
+            else if (k == "b" || k == "B") { radix = 2; body = body.substring(2) }
+        }
+        return kLit(radix == 10 ? i64FromStr(body) : i64FromRadix(body, radix), sfx)
+    }
     // The comparison and arithmetic operators unbox their operands, so a Char behaves
     // like its code everywhere except in string context. Installed into the shared
     // binOps table (not by overriding binOp), so opResolve's fast path stays intact.
@@ -1768,6 +2062,12 @@ NotMemberKw = :script(~~
     // against 0, an arithmetic operator yields the operator function's value as it is.
     function kNumOp2(op, uname, f, isCmp) {
         binOps[op] = function(l, r) {
+            // Two plain numbers - two Ints - are the overwhelming majority of every
+            // operator site, so they are answered before any of the boxes are probed.
+            if (typeof l == "number" && typeof r == "number") {
+                if (isCmp) { return kCmp32(op, l, r) }
+                return kArith32(op, l, r)
+            }
             if (uname != null && kIsUser(l)) {
                 var m = lookupMethod(l, uname)
                 if (m != null) {
@@ -1778,8 +2078,14 @@ NotMemberKw = :script(~~
                 }
             }
             // A Double on either side makes the whole operation floating point and
-            // its result a Double; two integral operands keep the 32 bit behavior.
+            // its result a Double; two integral operands go through the SIZED
+            // arithmetic, which applies the width rules (Byte + Byte is an Int,
+            // Int + Long is a Long) and wraps at the result type's width.
             if (kIsFlo(l) || kIsFlo(r)) { return kFloOp2(op, kNumD(l), kNumD(r)) }
+            if (kIsIntegral(l) && kIsIntegral(r)) {
+                if (isCmp) { return kCmpI(op, l, r) }
+                return kArith(op, l, r)
+            }
             return f(kNum(l), kNum(r))
         }
     }
@@ -1825,7 +2131,16 @@ NotMemberKw = :script(~~
             if (m != null) { return m.apply(undefined, [v]) }
             // -x keeps the operand's type: a Double negates as a Double (so -0.0
             // and -1.0/0.0 are real), a Char and an Int as an Int32.
+            // -x keeps the operand's type: a Double negates as a Double (so -0.0
+            // and -1.0/0.0 are real), a Long stays a Long, and a Byte, a Short and
+            // a Char promote to Int first - which is what Kotlin's unaryMinus
+            // returns for them. UInt has no unaryMinus at all, so an unsigned box
+            // negating at its own width is a spelling kotlinc would refuse.
             if (kIsFlo(v)) { return kFlo(kNegF(v.__flo)) }
+            if (szIs(v)) {
+                if (v.w == 64 || v.u) { return kNorm(szPair(szNeg(v)), v.w, v.u) }
+                return (0 - szNum(v)) | 0
+            }
             return (0 - kNum(v)) | 0
         }
     }
@@ -1848,18 +2163,18 @@ NotMemberKw = :script(~~
     }
     // A curated stdlib infix call, folded left to right: a to b builds a Pair
     // {first, second}; and/or/xor are the non-short-circuit boolean operators on two
-    // booleans and int32 bit operations otherwise; shl/shr/ushr are the int32 shifts
-    // (ushr wraps back to a signed int like Kotlin's Int.ushr).
+    // booleans and the SIZED bitwise operations otherwise; shl/shr/ushr go through
+    // kShift, which masks the count and keeps the left operand's width. In Kotlin
+    // these seven are infix FUNCTIONS rather than operators, which is why they are
+    // applied here and not in the binOps table.
     // items alternates operand thunks and {iop} markers.
     function applyInfix(op, l, r) {
         if (op == "to") { return {first: l, second: r} }
         if (op == "\x01user") { return null }
-        if (op == "and") { if (typeof l == "boolean" && typeof r == "boolean") { return l && r } return l & r }
-        if (op == "or") { if (typeof l == "boolean" && typeof r == "boolean") { return l || r } return l | r }
-        if (op == "xor") { if (typeof l == "boolean" && typeof r == "boolean") { return l != r } return l ^ r }
-        if (op == "shl") { return l << r }
-        if (op == "shr") { return l >> r }
-        return (l >>> r) | 0 // ushr
+        if (op == "and") { if (typeof l == "boolean" && typeof r == "boolean") { return l && r } return kArith("&", l, r) }
+        if (op == "or") { if (typeof l == "boolean" && typeof r == "boolean") { return l || r } return kArith("|", l, r) }
+        if (op == "xor") { if (typeof l == "boolean" && typeof r == "boolean") { return l != r } return kArith("^", l, r) }
+        return kShift(op, l, r) // shl / shr / ushr
     }
     // items alternates operands and operator markers: {iop} for one of the built-in
     // stdlib infix names, {uiop} for a USER infix function - lowered to the ordinary
@@ -2071,6 +2386,45 @@ NotMemberKw = :script(~~
     hostGlobals["abs"] = function(v) { return v < 0 ? -v | 0 : v | 0 }
     hostGlobals["max"] = function(a, b) { return a > b ? a : b }
     hostGlobals["min"] = function(a, b) { return a < b ? a : b }
+    // Kotlin's number types as VALUES, for their COMPANION CONSTANTS. Int.MAX_VALUE
+    // and friends existed in neither half before ("unknown name: Int"), and
+    // Long.MAX_VALUE cannot be written as a plain number at all - which is the whole
+    // reason a sized integer had to exist, since Int.MAX_VALUE + 1 also has to wrap to
+    // Int.MIN_VALUE rather than grow. The pairs are built with szMake / i64Make rather
+    // than through kConv because this runs at SCRIPT BODY time. The twin is js_kttype
+    // in abnf/jsrtkotlin.go.
+    hostGlobals["Int"] = {MAX_VALUE: 2147483647, MIN_VALUE: 0 - 2147483648, SIZE_BITS: 32, SIZE_BYTES: 4}
+    hostGlobals["Long"] = {MAX_VALUE: szMake(i64Make(0x7fffffff, 0xffffffff), 64, false),
+                           MIN_VALUE: szMake(i64Make(0x80000000, 0), 64, false), SIZE_BITS: 64, SIZE_BYTES: 8}
+    hostGlobals["Byte"] = {MAX_VALUE: szMake(i64Make(0, 127), 8, false),
+                           MIN_VALUE: szMake(i64Make(0xffffffff, 0xffffff80), 8, false), SIZE_BITS: 8, SIZE_BYTES: 1}
+    hostGlobals["Short"] = {MAX_VALUE: szMake(i64Make(0, 32767), 16, false),
+                            MIN_VALUE: szMake(i64Make(0xffffffff, 0xffff8000), 16, false), SIZE_BITS: 16, SIZE_BYTES: 2}
+    hostGlobals["UInt"] = {MAX_VALUE: szMake(i64Make(0, 0xffffffff), 32, true),
+                           MIN_VALUE: szMake(i64Make(0, 0), 32, true), SIZE_BITS: 32, SIZE_BYTES: 4}
+    hostGlobals["ULong"] = {MAX_VALUE: szMake(i64Make(0xffffffff, 0xffffffff), 64, true),
+                            MIN_VALUE: szMake(i64Make(0, 0), 64, true), SIZE_BITS: 64, SIZE_BYTES: 8}
+    hostGlobals["UByte"] = {MAX_VALUE: szMake(i64Make(0, 255), 8, true),
+                            MIN_VALUE: szMake(i64Make(0, 0), 8, true), SIZE_BITS: 8, SIZE_BYTES: 1}
+    hostGlobals["UShort"] = {MAX_VALUE: szMake(i64Make(0, 65535), 16, true),
+                             MIN_VALUE: szMake(i64Make(0, 0), 16, true), SIZE_BITS: 16, SIZE_BYTES: 2}
+    hostGlobals["Char"] = {MAX_VALUE: {__char: 65535}, MIN_VALUE: {__char: 0}, SIZE_BITS: 16, SIZE_BYTES: 2}
+    // The float companions, boxed so that Double.NaN is a Double rather than an Int:
+    // kotlin.Double declares MIN_VALUE as the smallest POSITIVE value, as
+    // java.lang.Double does.
+    // The extremes go through parseFloat rather than being written as literals: the
+    // frozen MetaJS engine's number rule (lib/numbers.abnf DecLit) has NO EXPONENT
+    // form, so a `1.79e308` in this script makes the whole grammar unparseable under
+    // -frozen while goja reads it perfectly - one of the "green under goja, dead
+    // under -frozen" traps.
+    hostGlobals["Double"] = {MAX_VALUE: kFlo(parseFloat("1.7976931348623157e308")),
+                             MIN_VALUE: kFlo(parseFloat("4.9e-324")),
+                             NaN: kFlo(kZeroF / kZeroF), POSITIVE_INFINITY: kFlo(kInf),
+                             NEGATIVE_INFINITY: kFlo(kNegF(kInf)), SIZE_BITS: 64, SIZE_BYTES: 8}
+    hostGlobals["Float"] = {MAX_VALUE: kFlo(parseFloat("3.4028234663852886e38")),
+                            MIN_VALUE: kFlo(parseFloat("1.4e-45")),
+                            NaN: kFlo(kZeroF / kZeroF), POSITIVE_INFINITY: kFlo(kInf),
+                            NEGATIVE_INFINITY: kFlo(kNegF(kInf)), SIZE_BITS: 32, SIZE_BYTES: 4}
     hostGlobals["listOf"] = function() {
         var out = []
         for (var i = 0; i < arguments.length; i++) out.push(arguments[i])
@@ -2408,6 +2762,10 @@ NotMemberKw = :script(~~
         if (v === null) return "null"
         if (kIsChar(v)) return kChStr(v)
         if (kIsFlo(v)) return kFloStr(v.__flo)
+        // A sized integer prints its exact digits, and an UNSIGNED one its unsigned
+        // reading: ULong.MAX_VALUE is 18446744073709551615, not -1. "" + v would
+        // print [object Object] and szNum rounds above 2^53.
+        if (szIs(v)) return szStr(v)
         // A range renders as the list of its elements. Real Kotlin prints an IntRange
         // as "1..3", but the COMPILED half has no first-class range value at all (a
         // range is materialised into a list at the point of use), so this is the only
@@ -2566,11 +2924,20 @@ NotMemberKw = :script(~~
         // the primitive number types (the operators go through binOps).
         // A Double receiver: the same member functions, but toDouble/toFloat keep the
         // box and toInt/toLong truncate towards zero out of it.
+        // The CONVERSIONS - toInt(), toLong(), toUInt(), toDouble() - are where a
+        // declared type comes from in Kotlin at all: the language has NO implicit
+        // numeric conversions, so there is no cast syntax to carry them. They are
+        // shared by every numeric receiver, so they are answered before the
+        // per-receiver branches below. The twin is ktNumMethod in abnf/jsrtkotlin.go.
+        if (kIsFlo(target) || szIs(target) || typeof target == "number") {
+            var cn = kConvName(name)
+            var cw = kDeclWidth[cn]
+            if (cw != undefined) { return kConv(target, cw, kDeclUns[cn] == true) }
+            if (name == "toDouble" || name == "toFloat") { return kIsFlo(target) ? target : kFlo(kNumD(target)) }
+            if (name == "toChar") { return kChar(szNum(kConv(target, 16, true)) & 65535) }
+        }
         if (kIsFlo(target)) {
             var tf = target.__flo
-            if (name == "toInt" || name == "toLong" || name == "toShort" || name == "toByte") return tf | 0
-            if (name == "toDouble" || name == "toFloat") return target
-            if (name == "toChar") return kChar(tf | 0)
             if (name == "toString") return kFloStr(tf)
             if (name == "compareTo") return tf < kNumD(args[0]) ? -1 : (tf > kNumD(args[0]) ? 1 : 0)
             if (name == "equals") return tf === kNumD(args[0])
@@ -2580,17 +2947,24 @@ NotMemberKw = :script(~~
             if (name == "isNaN") return tf !== tf
             return mfallback(target, name, args, "Double")
         }
+        // A sized-integer receiver: the same surface as an Int, at its own width.
+        if (szIs(target)) {
+            if (name == "inv") return kNorm(i64Not(szPair(target)), target.w, target.u)
+            if (name == "toString") return szStr(target)
+            if (name == "compareTo") return kCmpI("<", target, args[0]) ? 0 - 1 : (kCmpI(">", target, args[0]) ? 1 : 0)
+            if (name == "equals") return kEq(target, args[0])
+            if (name == "coerceAtLeast") return kCmpI("<", target, args[0]) ? args[0] : target
+            if (name == "coerceAtMost") return kCmpI(">", target, args[0]) ? args[0] : target
+            if (name == "hashCode") return kHash(target)
+            return mfallback(target, name, args, kBoxTypeName(target))
+        }
         if (typeof target == "number") {
             if (name == "inv") return ~target | 0
-            if (name == "toInt" || name == "toLong" || name == "toShort" || name == "toByte") return target | 0
-            // Int.toDouble() is a CONVERSION: 7.toDouble() / 2 is 3.5, not 3.
-            if (name == "toDouble" || name == "toFloat") return kFlo(target)
-            if (name == "toChar") return kChar(target | 0)
             if (name == "toString") return kstr(target)
-            if (name == "compareTo") return target < kNum(args[0]) ? -1 : (target > kNum(args[0]) ? 1 : 0)
-            if (name == "equals") return target === kNum(args[0])
-            if (name == "coerceAtLeast") return target < args[0] ? args[0] : target
-            if (name == "coerceAtMost") return target > args[0] ? args[0] : target
+            if (name == "compareTo") return kIsIntegral(args[0]) ? (kCmpI("<", target, args[0]) ? 0 - 1 : (kCmpI(">", target, args[0]) ? 1 : 0)) : (target < kNumD(args[0]) ? 0 - 1 : (target > kNumD(args[0]) ? 1 : 0))
+            if (name == "equals") return kEq(target, args[0])
+            if (name == "coerceAtLeast") return kIsIntegral(args[0]) && kCmpI("<", target, args[0]) ? args[0] : target
+            if (name == "coerceAtMost") return kIsIntegral(args[0]) && kCmpI(">", target, args[0]) ? args[0] : target
             if (name == "hashCode") return kHash(target)
             return mfallback(target, name, args, "Int")
         }
@@ -2794,6 +3168,9 @@ NotMemberKw = :script(~~
         if (v === null || v === undefined) { return 0 }
         if (kIsChar(v)) { return v.__char }
         if (kIsFlo(v)) { return v.__flo | 0 }
+        // Long.hashCode is (value xor (value ushr 32)) read as an Int; for every
+        // narrower width that is the value itself.
+        if (szIs(v)) { return szNum(szConv(szArith("^", v, szArith(">>", szConv(v, 64, true), 32)), 32, false)) | 0 }
         var t = typeof v
         if (t == "boolean") { return v ? 1231 : 1237 }
         if (t == "number") { return v | 0 }
@@ -2844,10 +3221,12 @@ NotMemberKw = :script(~~
     // ----- Expression thunks -----
 
     function kadd(l, r) {
+        if (typeof l == "number" && typeof r == "number") { return (l + r) | 0 }
         if (typeof l == "string" || typeof r == "string") return kstr2(l) + kstr2(r)
         if (kIsFlo(l) || kIsFlo(r)) { return kFlo(kNumD(l) + kNumD(r)) }
-        if (kIsChar(l) || kIsChar(r)) { return (kNum(l) + kNum(r)) | 0 }
-        if (typeof l == "number" && typeof r == "number") { return (l + r) | 0 }
+        // Two integral operands: Int + Int wraps at 32 bits, anything with a Long in
+        // it at 64, and an unsigned pair at its own width.
+        if (kIsIntegral(l) && kIsIntegral(r)) { return kArith("+", l, r) }
         // A user class may define operator plus (Vec + Vec); dispatch to it.
         var uo = userBinOp("plus", l, r)
         if (uo != null) { return uo.v }
@@ -2867,6 +3246,13 @@ NotMemberKw = :script(~~
         var b = anytype
         a = kIsChar(l) ? l.__char : (kIsFlo(l) ? l.__flo : l)
         b = kIsChar(r) ? r.__char : (kIsFlo(r) ? r.__flo : r)
+        // A sized integer equals another integer by VALUE across the box, which is
+        // all a well-typed program can observe: it could not have written the
+        // comparison at all if the two types disagreed.
+        if (szIs(a) || szIs(b)) {
+            if (kIsIntegral(a) && kIsIntegral(b)) { return szEq(szIs(a) ? a : kSz(a, 64, kNoU), szIs(b) ? b : kSz(b, 64, kNoU)) }
+            return false
+        }
         if (a === b) { return true }
         if (a === null || a === undefined || b === null || b === undefined) { return false }
         if (typeof a == "object" && typeof b == "object") {
@@ -3311,21 +3697,36 @@ NotMemberKw = :script(~~
         }
     }
 
-    // items = [name, {recvFn}?, initThunk]
+    // items = [name, ({recvFn} | {dty})?, initThunk?]
+    // A DECLARED integral type puts its width on the value, which is what makes
+    // `var t: Long = 1; t = t * 1000000 * 1000000` stay 64 bit and
+    // `var b: Byte = 127; b++` wrap to -128. Kotlin has NO implicit numeric
+    // conversions, so the only value a declared type can ever retype is an integer
+    // LITERAL typed by its expectation (`val x: Long = 1` is legal, `val y: Int = 1;
+    // val x: Long = y` is not) - but that one case is the whole story.
     function makeDecl(items) {
         var name = items[0]
         var recvFn = false
+        var dw = 0
+        var du = false
+        var df = false
         var i = 1
-        if (items.length > 2 && items[1] != undefined && items[1] != null && items[1].recvFn != undefined) {
-            recvFn = true
+        var mark = items[1]
+        if (mark != undefined && mark != null && typeof mark != "function") {
+            if (mark.recvFn != undefined) { recvFn = true }
+            else if (mark.dty != undefined) { dw = kTypeWidth(mark.dty); du = kTypeUns(mark.dty); df = kTypeFlo(mark.dty) }
             i = 2
         }
         var init = items[i]
         return function() {
             var v = anytype // A declaration binds a value of any type.
-            v = init()
+            // A BareDecl (`val f1: String`, filled in by a later definite assignment)
+            // has no initializer at all and binds null.
+            v = (typeof init == "function") ? init() : null
             var s = blockSignalOf(v)
             if (s != undefined) return s
+            if (dw > 0 && kIsIntegral(v)) { v = kConv(v, dw, du) }
+            else if (df && kIsIntegral(v)) { v = kFlo(kNumD(v)) }
             declVar(name, recvFn ? kRecvLambda(v) : v)
         }
     }
@@ -4574,6 +4975,27 @@ NotMemberKw = :script(~~
         if (v === null || v === undefined) { return opt }
         if (t == "Any" || t == "Object") { return true }
         if (kIsChar(v)) { return t == "Char" || t == "Comparable" }
+        // A sized integer carries its real type, so `5L is Long` holds and
+        // `5L is Int` does not - where the shared rtIsType answers "integral
+        // number" for Int, Long, Short and Byte alike. The four unsigned types are
+        // not kotlin.Number.
+        if (szIs(v)) {
+            if (t == "Any" || t == "Comparable") { return true }
+            if (t == "Number") { return !v.u }
+            return t == kBoxTypeName(v)
+        }
+        // A Double and a plain number carry a type just as definitely: the value model
+        // makes a plain number an Int, so `10 is Long` is FALSE and `1.5 is Double` is
+        // TRUE - neither of which the shared rtIsType can answer, since it has one
+        // number type and no float box.
+        if (kIsFlo(v)) {
+            if (t == "Any" || t == "Comparable" || t == "Number") { return true }
+            return t == "Double" || t == "Float"
+        }
+        if (typeof v == "number") {
+            if (t == "Any" || t == "Comparable" || t == "Number") { return true }
+            return t == "Int"
+        }
         if (isRange(v)) { return t == "IntRange" || t == "CharRange" || t == "IntProgression" }
         if (typeof v == "object" && v.__class != undefined && v.__class != null) {
             return clsNamed(v.__class, t)
@@ -4673,10 +5095,12 @@ NotMemberKw = :script(~~
         if (last.key != undefined) { return {obj: o, key: last.key, isIndex: false} }
         return {obj: o, key: last.idx(), isIndex: true}
     }
-    // ++ / -- keep the type of what they step: a Double stays a Double, everything
-    // else steps as an Int32 (a Char is stepped as its code, like before).
+    // ++ / -- keep the type of what they step: a Double stays a Double, a sized
+    // integer steps at its OWN width (so `var b: Byte = 127; b++` is -128), and
+    // everything else steps as an Int32 (a Char as its code, like before).
     function kStep(v, d) {
         if (kIsFlo(v)) { return kFlo(v.__flo + d) }
+        if (szIs(v)) { return kNorm(szPair(szArith("+", v, kSz(d, v.w, v.u))), v.w, v.u) }
         return (kNum(v) + d) | 0
     }
     function makeIncDec(items) {
