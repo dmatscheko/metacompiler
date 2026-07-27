@@ -136,14 +136,37 @@ run_one() {
     expect="${rest%%|*}"; file="${rest#*|}"
     grammar="$MEC_SWEEP_GRAMMAR_DIR/$(eval "echo \$MEC_SWEEP_GRAMMAR_$lang")"
 
+    # C is a two-stage language, and this repo models that: c-preprocessor.abnf
+    # feeds the C grammar through -pipe, and both stages are first-class matrix
+    # entries. Running a .c file straight at the C grammar therefore measures a
+    # stage no real toolchain uses alone - cc always preprocesses, and a file
+    # holding `#define BAR 0` then `int x = BAR;` is not meaningfully parseable
+    # without it. So sweep C the way the matrix does.
+    #
+    # Measured before adopting: of 30 direct parse failures 3 are recovered, and
+    # of 60 files that already parsed 0 break. (An agent had estimated ~9
+    # recovered; the measurement says 3. The point is the honest pipeline, not
+    # the three files.) Macro EXPANSION lives in the preprocessor and must not
+    # be copied into the C grammars.
+    pre=""
+    if [ "$lang" = "c" ]; then
+        pre="$MEC_SWEEP_GRAMMAR_DIR/languages/c-preprocessor.abnf"
+        [ -f "$pre" ] || pre=""
+    fi
+
     # Cap the captured output (a corpus program may print without bound) while
     # still learning the run's real exit status: the producer writes it to a
     # side file. If head closed the pipe first the producer dies by SIGPIPE and
     # leaves no status - but a run that printed 64K plainly got past parsing.
     rcf="$MEC_SWEEP_RESDIR/$$.rc"
     rm -f "$rcf"
-    out="$( { RUN "$MEC_SWEEP_BIN" "$grammar" "$file" -q -warn-unsupported -warn-imports 2>&1
-              echo $? > "$rcf"; } | head -c 65536 )"
+    if [ -n "$pre" ]; then
+        out="$( { RUN "$MEC_SWEEP_BIN" "$pre" "$file" -pipe "$grammar" -q -warn-unsupported -warn-imports 2>&1
+                  echo $? > "$rcf"; } | head -c 65536 )"
+    else
+        out="$( { RUN "$MEC_SWEEP_BIN" "$grammar" "$file" -q -warn-unsupported -warn-imports 2>&1
+                  echo $? > "$rcf"; } | head -c 65536 )"
+    fi
     rc="$(cat "$rcf" 2>/dev/null || echo 0)"
     case "$rc" in ''|*[!0-9]*) rc=0 ;; esac
 
@@ -193,8 +216,13 @@ run_one() {
         # this sweep measures. Only timeouts pay for this second pass.
         cgram="$(printf '%s' "$grammar" | sed 's/-interpreter\.abnf$/-to-llvm-ir.abnf/')"
         if [ "$cgram" != "$grammar" ] && [ -f "$cgram" ]; then
-            cout="$(RUN "$MEC_SWEEP_BIN" "$cgram" "$file" -q -warn-unsupported \
-                        -warn-imports -max-steps 2000000 2>&1 | head -c 4096)"
+            if [ -n "$pre" ]; then
+                cout="$(RUN "$MEC_SWEEP_BIN" "$pre" "$file" -pipe "$cgram" -q \
+                            -warn-unsupported -warn-imports -max-steps 2000000 2>&1 | head -c 4096)"
+            else
+                cout="$(RUN "$MEC_SWEEP_BIN" "$cgram" "$file" -q -warn-unsupported \
+                            -warn-imports -max-steps 2000000 2>&1 | head -c 4096)"
+            fi
             case "$cout" in
                 *"Not everything could be parsed"*) ;;   # genuinely unparseable
                 *"step limit exceeded"*|*"@str."*|*"define "*|*"declare "*)
