@@ -840,6 +840,63 @@ function s30(): void {
     check("opc2", s.both() === 12);
 }
 
+// ===== SECTION 31: BigInt =====
+// BigInt is an arbitrary-precision integer TYPE of its own ('bigint'), not a wide
+// number: 2n ** 100n is exact, and mixing it with a number in an arithmetic or
+// bitwise operator is a TypeError. Assertions marked 'as any' are the ones tsc
+// rejects statically for exactly that reason - the RUNTIME rule is what is under
+// test here, so the operand is widened the way SECTION 22 already does.
+function s31(): void {
+    // The literal forms and the type.
+    check("big1", typeof 10n === "bigint");
+    check("big2", String(10n) === "10" && "" + 10n === "10" && `${10n}` === "10");
+    check("big3", 0xffn === 255n && 0b1010n === 10n && 0o17n === 15n && 1_000n === 1000n);
+    // Arbitrary precision: every one of these is past what a double holds exactly.
+    check("big4", String(2n ** 64n) === "18446744073709551616");
+    check("big5", String(2n ** 100n) === "1267650600228229401496703205376");
+    check("big6", String(9007199254740993n) === "9007199254740993");
+    check("big7", 9007199254740993n !== 9007199254740992n);
+    check("big8", String(100n * 100n * 100n * 100n * 100n * 100n * 100n * 100n * 100n * 100n) === "100000000000000000000");
+    check("big9", String((2n ** 100n) % 1000000007n) === "976371285");
+    check("big10", String(-(2n ** 100n) / 7n) === "-181092942889747057356671886482");
+    // Division truncates toward zero; the remainder keeps the dividend's sign.
+    check("big11", 7n / 2n === 3n && -7n / 2n === -3n);
+    check("big12", 7n % 3n === 1n && -7n % 3n === -1n);
+    // Equality is strict about the type, loose equality crosses it mathematically.
+    check("big13", 10n === 10n && !((10n as any) === (10 as any)));
+    check("big14", (10n as any) == 10 && (10n as any) == "10" && !((10n as any) == "10.0"));
+    check("big15", 10n < 11 && 10n <= 10 && !(10n > 11) && 10n >= 10n);
+    check("big16", 2n ** 64n > 2n ** 63n);
+    // Bitwise, on the infinite two's complement bit string.
+    check("big17", (1n & 3n) === 1n && (1n | 2n) === 3n && (5n ^ 3n) === 6n);
+    check("big18", (1n << 10n) === 1024n && (1024n >> 3n) === 128n && (-1n >> 1n) === -1n);
+    check("big19", ~1n === -2n && -(-5n) === 5n && (5n - 8n) === -3n);
+    // 0n is the one falsy BigInt.
+    check("big20", !0n && !(!1n) && (0n ? false : true) && (1n ? true : false));
+    check("big21", ((0n as any) || "zero") === "zero" && ((1n as any) && "one") === "one");
+    // Compound assignment and the steppers stay in the type.
+    check("big22", (function (): bigint { let x: bigint = 5n; x += 3n; x *= 2n; x -= 1n; x **= 2n; return x; })() === 225n);
+    check("big23", (function (): bigint { let y: bigint = 1n; y++; ++y; y--; return y; })() === 2n);
+    check("big24", (function (): bigint { let c: bigint = 0n; while (c < 3n) { c++; } return c; })() === 3n);
+    // Conversions in both directions.
+    check("big25", BigInt(42) === 42n && BigInt("0x1f") === 31n && BigInt(true) === 1n);
+    check("big26", Number(3n) === 3 && typeof Number(3n) === "number");
+    check("big27", (255n).toString(16) === "ff" && (255n).toString() === "255");
+    check("big28", (2n ** 64n - 1n).toString(16) === "ffffffffffffffff");
+    check("big29", (2n ** 64n).toString(2).length === 65);
+    // A BigInt is a PRIMITIVE: it joins and concatenates as its digits.
+    check("big30", [1n, 2n].join(",") === "1,2" && ([1n] as any) + "" === "1");
+    // ToPrimitive still runs FIRST, so an object operand reaches its primitive form
+    // before the BigInt rules (and before the mixed-operand TypeError) see it.
+    check("big31", (1n as any) == [1n] && (1n as any) < [2n] && ((1n as any) + []) === "1");
+    check("big32", (-255n).toString(16) === "-ff" && BigInt("") === 0n && BigInt(" 12 ") === 12n);
+    check("big33", (0n ** 0n) === 1n && ((-2n) ** 3n) === -8n && ((-8n) % (-3n)) === -2n);
+    // The relational operators are ToNumber on the other side, not ToBigInt, so null
+    // is 0, an unparsable string is NaN (every relation false) and 1.5 really orders.
+    check("big34", (1n as any) > null && (1n as any) <= true && !((2n as any) > "abc")
+        && !((1n as any) < undefined) && !((1n as any) < "") && 2n > 1.5);
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -873,6 +930,7 @@ function main(): number {
     s28(); // SECTION-CALL 28
     s29(); // SECTION-CALL 29
     s30(); // SECTION-CALL 30
+    s31(); // SECTION-CALL 31
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

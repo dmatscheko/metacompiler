@@ -70,7 +70,12 @@ and static methods, accessors, computed and literal-keyed members, private membe
 super(...) and super.method(), and 'instanceof'.
 
 Values: numbers (decimal with exponents, '.5', hex, binary, octal and numeric
-separators), BigInt literals (a boxed number - only 'typeof' tells it apart), strings with
+separators), REAL BigInts - arbitrary precision (2n ** 100n is exact), a type of their
+own for typeof and ===, the spec's mixed-operand TypeError on an arithmetic or bitwise
+operator, the mathematical == and < across the BigInt/Number line, the bitwise and shift
+operators on the two's complement bit string, decimal/hex/binary/octal literals,
+BigInt(v) / Number(v) and (255n).toString(16); only a mixed COMPARISON goes through the
+double value, so a magnitude past 2^53 could round there - strings with
 JavaScript's own escape grammar (the hex, four-digit-Unicode and braced-code-point escapes,
 the latter yielding the surrogate pair above the BMP, plus the line continuation - and
 every shape JavaScript does NOT have is a syntax error rather than a stray character)
@@ -1537,25 +1542,35 @@ NumberLit   = HexLit | BinLit | OctLit | LegacyOctLit | BigIntLit | SepNumLit | 
 
 // Hex must be tried before decimal, otherwise '0x1A' would stop after the '0'.
 HexLit      <~~ push(makeConst(radixVal(up.in, 2, 16))) ~~>
-            = ( "0x" | "0X" ) :whitespace() HexDigit { HexDigit | "_" } [ "n" ] KwEnd :whitespace(Whitespace) ;
+            = ( "0x" | "0X" ) :whitespace() HexDigit { HexDigit | "_" } KwEnd :whitespace(Whitespace) ;
 HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
 BinLit      <~~ push(makeConst(radixVal(up.in, 2, 2))) ~~>
-            = ( "0b" | "0B" ) :whitespace() BinDigit { BinDigit | "_" } [ "n" ] KwEnd :whitespace(Whitespace) ;
+            = ( "0b" | "0B" ) :whitespace() BinDigit { BinDigit | "_" } KwEnd :whitespace(Whitespace) ;
 BinDigit    = "0"..."1" ;
 OctLit      <~~ push(makeConst(radixVal(up.in, 2, 8))) ~~>
-            = ( "0o" | "0O" ) :whitespace() OctDigit { OctDigit | "_" } [ "n" ] KwEnd :whitespace(Whitespace) ;
+            = ( "0o" | "0O" ) :whitespace() OctDigit { OctDigit | "_" } KwEnd :whitespace(Whitespace) ;
 OctDigit    = "0"..."7" ;
 // The Annex B legacy octal literal: a leading '0' directly followed by octal digits, as
 // in '01' or '0777'. It needs at least two digits, so a bare '0' and '0.5' still reach
 // JsDecLit, and it is tried before that one, which would otherwise stop after the '0'.
 LegacyOctLit <~~ push(makeConst(radixVal(up.in, 1, 8))) ~~>
             = "0" :whitespace() OctDigit { OctDigit } KwEnd :whitespace(Whitespace) ;
-// A decimal BigInt literal ends in 'n'; tried before the plain decimal so the 'n' is
-// not orphaned (a non-BigInt number fails the 'n' and rolls back to DecLit). The value
-// model has one number type, so a BigInt is a boxed number (see makeBigInt): it prints
-// and compares as its numeric value, and only 'typeof' tells it apart ("bigint").
-BigIntLit   <~~ push(makeBigInt(radixVal(up.in, 0, 10))) ~~>
-            = Digit :whitespace() { Digit | "_" } "n" KwEnd :whitespace(Whitespace) ;
+// A BigInt literal ends in 'n'; tried before the plain decimal so the 'n' is not
+// orphaned (a non-BigInt number fails the 'n' and rolls back to DecLit). BigInt is a
+// value type of its own with arbitrary precision (see the BigInt section of the start
+// script), so it cannot go through makeConst, which only knows the double numbers.
+// The hex/binary/octal forms ('0xffn') keep their prefix, which makeBigInt reads too;
+// they are listed first, since the decimal alternative would otherwise match the
+// leading '0' and then fail on the 'x'.
+BigIntLit   <~~ push(makeBigInt(up.in)) ~~>
+            = ( BigHexPrefix HexDigit { HexDigit | "_" }
+              | BigBinPrefix BinDigit { BinDigit | "_" }
+              | BigOctPrefix OctDigit { OctDigit | "_" }
+              | Digit :whitespace() { Digit | "_" } )
+              "n" KwEnd :whitespace(Whitespace) ;
+BigHexPrefix = ( "0x" | "0X" ) :whitespace() ;
+BigBinPrefix = ( "0b" | "0B" ) :whitespace() ;
+BigOctPrefix = ( "0o" | "0O" ) :whitespace() ;
 // A decimal with numeric separators (1_000, 3.141_59, 1.1_00_01). Since stripSeps makes
 // the separator-free text the ordinary decimal, this form is deliberately a SUPERSET of
 // JsDecLit rather than requiring a '_': one production then covers both, and the plain
@@ -2434,7 +2449,9 @@ NotFuncHead = :script(~~
     // apart (docs/abnf-dialect-gotchas.md, "The matrix compares each engine against
     // ITSELF").
 
-    function jsIsObjLike(v) { return v !== null && v !== undefined && typeof v == "object" }
+    // A BigInt is a record in the value model but a PRIMITIVE in the language, so it
+    // must not go through ToPrimitive (which would look for a toString method on it).
+    function jsIsObjLike(v) { return v !== null && v !== undefined && typeof v == "object" && !isBigInt(v) }
 
     // Runs o's own toString / valueOf, if it has one, and answers {v: result}. The two
     // places a method can live take DIFFERENT calling conventions: a CLASS method sits
@@ -2457,6 +2474,8 @@ NotFuncHead = :script(~~
         if (v === null) { return "null" }
         if (typeof v == "string") { return v }
         if (typeof v == "function") { return "[function]" }
+        // A BigInt prints as its digits with no 'n' suffix: String(10n) is "10".
+        if (isBigInt(v)) { return biToStr(v, 10) }
         if (Array.isArray(v)) {
             var out = ""
             for (var i = 0; i < v.length; i++) {
@@ -2501,7 +2520,32 @@ NotFuncHead = :script(~~
         if (ao && bo) { return a === b }
         if (ao) { return jsLooseEq(jsToPrim(a), b) }
         if (bo) { return jsLooseEq(a, jsToPrim(b)) }
+        // '==' is the one comparison that crosses the BigInt/Number line, and it does
+        // it MATHEMATICALLY: 1n == 1 and 1n == "1" are true, 1n == "1.0" is false
+        // (StringToBigInt has no value for a string that is not an integer literal).
+        if (isBigInt(a) || isBigInt(b)) {
+            if (isBigInt(a) && isBigInt(b)) { return biCmp(a, b) == 0 }
+            var bg = isBigInt(a) ? a : b
+            var ot = isBigInt(a) ? b : a
+            if (typeof ot == "string") {
+                var p = biFromStrStrict(ot)
+                if (p === null) { return false }
+                return biCmp(bg, p) == 0
+            }
+            if (typeof ot == "boolean") { return biCmp(bg, biFromNum(ot ? 1 : 0)) == 0 }
+            if (typeof ot == "number") {
+                if (ot !== ot || ot === 1 / 0 || ot === -1 / 0 || Math.floor(ot) !== ot) { return false }
+                return biCmp(bg, biFromNum(ot)) == 0
+            }
+            return false
+        }
         return a == b
+    }
+    // ToBoolean. Only a BigInt needs help: it is a record, so the host engine calls
+    // every one of them truthy, while 0n is falsy in JavaScript.
+    function jsTruthy(v) {
+        if (isBigInt(v)) { return v.s !== 0 }
+        return v ? true : false
     }
 
     // ----- Small string/array helpers -----
@@ -3068,6 +3112,18 @@ NotFuncHead = :script(~~
         if (arguments.length == 0) { return "" }
         return jsStr(v)
     }
+    function jsBigIntFn(v) {
+        if (arguments.length == 0) { fail("TypeError: Cannot convert undefined to a BigInt") }
+        return biOf(v)
+    }
+    function jsNumberFn(v) {
+        if (arguments.length == 0) { return 0 }
+        if (isBigInt(v)) { return biToNum(v) }
+        if (typeof v == "string") { return v === "" ? 0 : parseFloat(v) }
+        if (typeof v == "boolean") { return v ? 1 : 0 }
+        if (v === null) { return 0 }
+        return v - 0
+    }
 
     var hostGlobals = {
         // println / print render every argument with JAVASCRIPT's ToString first. The
@@ -3076,6 +3132,9 @@ NotFuncHead = :script(~~
         // "1,2" and "[object Object]". js_jsprintfn is the compiler twin.
         "println": jsPrintln, "print": jsPrint, "printf": printf, "sprintf": sprintf,
         "parseInt": parseInt, "parseFloat": parseFloat, "Math": Math, "String": jsStringFn,
+        // BigInt(v) is ToBigInt and Number(v) is ToNumber; the latter is the only way
+        // back out of a BigInt, since unary '+' refuses it.
+        "BigInt": jsBigIntFn, "Number": jsNumberFn,
         // Object is OURS, not the host's: the host's leaked the hidden __keys slot out
         // of Object.keys / entries under goja and had no keys at all under -frozen.
         "Object": jsObjectGlobal, "Array": Array,
@@ -3323,11 +3382,36 @@ NotFuncHead = :script(~~
 
     // ----- Expression thunks: function() -> value -----
 
-    makeNeg = function(t) { return function() { return -t() } }
+    // '!' is ToBoolean-then-negate, so !0n is true.
+    makeNot = function(t) { return function() { return !jsTruthy(t()) } }
+    makeNeg = function(t) {
+        return function() {
+            var v = anytype // A number or a BigInt.
+            v = t()
+            if (isBigInt(v)) { return biNeg(v) }
+            return -v
+        }
+    }
     // Unary plus is numeric coercion, nothing else: '- 0' does exactly that without
     // being a second spelling of addition (which '0 + v' would be for a string operand).
-    function makePos(t) { return function() { return t() - 0 } }
-    function makeBitNot(t) { return function() { return ~t() } }
+    // It is the ONE unary operator a BigInt refuses, since there is no number to
+    // coerce it to without losing precision.
+    function makePos(t) {
+        return function() {
+            var v = anytype
+            v = t()
+            if (isBigInt(v)) { fail("TypeError: Cannot convert a BigInt value to a number") }
+            return v - 0
+        }
+    }
+    function makeBitNot(t) {
+        return function() {
+            var v = anytype
+            v = t()
+            if (isBigInt(v)) { return biNot(v) }
+            return ~v
+        }
+    }
     // 'void x' evaluates its operand for the side effects and yields undefined.
     function makeVoid(t) { return function() { t(); return undefined } }
     // typeof reports "bigint" for a boxed BigInt (see makeBigInt) and otherwise the
@@ -3385,10 +3469,497 @@ NotFuncHead = :script(~~
         for (var i = 0; i < s.length; i++) { if (s.charCodeAt(i) != 95) { out = out + s.charAt(i) } }
         return out
     }
-    // A BigInt is a boxed number: one number type in the value model, one extra tag so
-    // typeof can answer "bigint". Arithmetic on it degrades to the numeric value.
+    // ----- BigInt: a real arbitrary precision integer -----
+    // A BigInt is a value type of its own, not a boxed double: 2n ** 64n is exact,
+    // 1n + 1 is a TypeError, and typeof answers "bigint". The representation is
+    //     {__bigint: true, s: -1|0|1, d: [limb, ...]}
+    // with the magnitude little endian in base 2^24 and no leading zero limb, so
+    // s is 0 exactly when d is empty. 24 bits is the widest limb whose SQUARE
+    // (2^48) plus carries still lands exactly in a double, which is what makes the
+    // schoolbook multiply below correct with no 64-bit help.
+    //
+    // Everything here is written in the -frozen subset (no host BigInt, no for..in,
+    // no splice, no split/join) and was validated digit for digit against node 24:
+    // every operator over 144 signed pairs spanning 1 to 39 decimal digits, the
+    // radix 2/8/10/16 round trips, and 11 exponentiations. abnf/jsrt.go's jsBigInt
+    // (Go big.Int) is the compiler half's twin; ./test.sh --full diffs the two.
+    var BI_BASE = 16777216
+    var BI_MASK = 16777215
+    var BI_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
     function isBigInt(v) { return v != undefined && v != null && typeof v == "object" && v.__bigint == true }
-    function makeBigInt(n) { return function() { return {__bigint: true, v: n} } }
+    // ----- magnitude helpers: plain little endian limb arrays -----
+    function biTrim(d) {
+        while (d.length > 0 && d[d.length - 1] === 0) { d.pop() }
+        return d
+    }
+    function biCopy(d) { var o = []; for (var i = 0; i < d.length; i++) { o.push(d[i]) } return o }
+    function biMake(s, d) {
+        var dd = biTrim(d)
+        if (dd.length === 0) { return {__bigint: true, s: 0, d: dd} }
+        return {__bigint: true, s: s, d: dd}
+    }
+    function biZero() { return biMake(0, []) }
+    function biIsZero(v) { return v.s === 0 }
+    function biNeg(v) { return biMake(-v.s, biCopy(v.d)) }
+    function biCmpD(a, b) {
+        if (a.length !== b.length) { return a.length < b.length ? -1 : 1 }
+        for (var i = a.length - 1; i >= 0; i--) {
+            if (a[i] !== b[i]) { return a[i] < b[i] ? -1 : 1 }
+        }
+        return 0
+    }
+    function biAddD(a, b) {
+        var out = []
+        var carry = 0
+        var n = a.length > b.length ? a.length : b.length
+        for (var i = 0; i < n; i++) {
+            var s = carry
+            if (i < a.length) { s = s + a[i] }
+            if (i < b.length) { s = s + b[i] }
+            if (s >= BI_BASE) { out.push(s - BI_BASE); carry = 1 } else { out.push(s); carry = 0 }
+        }
+        if (carry > 0) { out.push(carry) }
+        return out
+    }
+    // Requires |a| >= |b|; the signed layer above picks the operands so it holds.
+    function biSubD(a, b) {
+        var out = []
+        var borrow = 0
+        for (var i = 0; i < a.length; i++) {
+            var s = a[i] - borrow
+            if (i < b.length) { s = s - b[i] }
+            if (s < 0) { s = s + BI_BASE; borrow = 1 } else { borrow = 0 }
+            out.push(s)
+        }
+        return biTrim(out)
+    }
+    // Schoolbook multiply. The carry is folded INSIDE the inner loop, so the widest
+    // intermediate is (B-1)^2 + 2(B-1) < 2^48 and stays exact in a double; a version
+    // that accumulated a column first would not.
+    function biMulD(a, b) {
+        if (a.length === 0 || b.length === 0) { return [] }
+        var out = []
+        for (var i = 0; i < a.length + b.length; i++) { out.push(0) }
+        for (var i = 0; i < a.length; i++) {
+            var carry = 0
+            var ai = a[i]
+            for (var j = 0; j < b.length; j++) {
+                var t = out[i + j] + ai * b[j] + carry
+                carry = Math.floor(t / BI_BASE)
+                out[i + j] = t - carry * BI_BASE
+            }
+            var k = i + b.length
+            while (carry > 0) {
+                var t2 = out[k] + carry
+                carry = Math.floor(t2 / BI_BASE)
+                out[k] = t2 - carry * BI_BASE
+                k = k + 1
+            }
+        }
+        return biTrim(out)
+    }
+    function biMulSmallD(a, m) {
+        var out = []
+        var carry = 0
+        for (var i = 0; i < a.length; i++) {
+            var t = a[i] * m + carry
+            carry = Math.floor(t / BI_BASE)
+            out.push(t - carry * BI_BASE)
+        }
+        while (carry > 0) {
+            var c2 = Math.floor(carry / BI_BASE)
+            out.push(carry - c2 * BI_BASE)
+            carry = c2
+        }
+        return biTrim(out)
+    }
+    // m must be <= 2^24 so rem * BI_BASE + limb stays below 2^48.
+    function biDivModSmallD(a, m) {
+        var q = []
+        for (var i = 0; i < a.length; i++) { q.push(0) }
+        var rem = 0
+        for (var i = a.length - 1; i >= 0; i--) {
+            var cur = rem * BI_BASE + a[i]
+            var dv = Math.floor(cur / m)
+            q[i] = dv
+            rem = cur - dv * m
+        }
+        return {q: biTrim(q), r: rem}
+    }
+    function biTopBits(x) {
+        var n = 0
+        var v = x
+        while (v > 0) { n = n + 1; v = Math.floor(v / 2) }
+        return n
+    }
+    function biBitsD(d) {
+        if (d.length === 0) { return 0 }
+        return (d.length - 1) * 24 + biTopBits(d[d.length - 1])
+    }
+    function biBitD(a, k) {
+        var i = Math.floor(k / 24)
+        if (i >= a.length) { return 0 }
+        return (a[i] >> (k - i * 24)) & 1
+    }
+    function biShl1D(a) {
+        var out = []
+        var carry = 0
+        for (var i = 0; i < a.length; i++) {
+            var t = a[i] * 2 + carry
+            if (t >= BI_BASE) { out.push(t - BI_BASE); carry = 1 } else { out.push(t); carry = 0 }
+        }
+        if (carry > 0) { out.push(carry) }
+        return out
+    }
+    // Division of magnitudes. A single limb divisor takes the O(n) path; anything
+    // wider goes through plain binary long division, which is O(bits x limbs) and
+    // needs none of Knuth D's quotient-digit estimation - the sizes a BigInt program
+    // actually reaches here make the simpler algorithm the right trade.
+    function biDivModD(a, b) {
+        if (biCmpD(a, b) < 0) { return {q: [], r: biCopy(a)} }
+        if (b.length === 1) {
+            var s = biDivModSmallD(a, b[0])
+            return {q: s.q, r: s.r === 0 ? [] : [s.r]}
+        }
+        var nbits = biBitsD(a)
+        var q = []
+        for (var i = 0; i < a.length; i++) { q.push(0) }
+        var r = []
+        for (var k = nbits - 1; k >= 0; k--) {
+            r = biShl1D(r)
+            if (biBitD(a, k) === 1) {
+                if (r.length === 0) { r.push(1) } else { r[0] = r[0] + 1 }
+            }
+            if (biCmpD(r, b) >= 0) {
+                r = biSubD(r, b)
+                var qi = Math.floor(k / 24)
+                q[qi] = q[qi] + (1 << (k - qi * 24))
+            }
+        }
+        return {q: biTrim(q), r: biTrim(r)}
+    }
+    // ----- the signed operators -----
+    function biAdd(a, b) {
+        if (a.s === 0) { return b }
+        if (b.s === 0) { return a }
+        if (a.s === b.s) { return biMake(a.s, biAddD(a.d, b.d)) }
+        var c = biCmpD(a.d, b.d)
+        if (c === 0) { return biZero() }
+        if (c > 0) { return biMake(a.s, biSubD(a.d, b.d)) }
+        return biMake(b.s, biSubD(b.d, a.d))
+    }
+    function biSub(a, b) { return biAdd(a, biNeg(b)) }
+    function biMul(a, b) {
+        if (a.s === 0 || b.s === 0) { return biZero() }
+        return biMake(a.s * b.s, biMulD(a.d, b.d))
+    }
+    // BigInt division TRUNCATES toward zero and the remainder takes the sign of the
+    // dividend, so -7n / 2n is -3n and -7n % 3n is -1n (node agrees).
+    function biDiv(a, b) {
+        if (b.s === 0) { fail("RangeError: Division by zero") }
+        return biMake(a.s * b.s, biDivModD(a.d, b.d).q)
+    }
+    function biRem(a, b) {
+        if (b.s === 0) { fail("RangeError: Division by zero") }
+        return biMake(a.s, biDivModD(a.d, b.d).r)
+    }
+    function biCmp(a, b) {
+        if (a.s !== b.s) { return a.s < b.s ? -1 : 1 }
+        if (a.s === 0) { return 0 }
+        var c = biCmpD(a.d, b.d)
+        return a.s > 0 ? c : -c
+    }
+    function biPow(a, e) {
+        if (e.s < 0) { fail("RangeError: Exponent must be non-negative") }
+        var r = biFromNum(1)
+        var base = a
+        var nbits = biBitsD(e.d)
+        for (var k = 0; k < nbits; k++) {
+            if (biBitD(e.d, k) === 1) { r = biMul(r, base) }
+            if (k + 1 < nbits) { base = biMul(base, base) }
+        }
+        return r
+    }
+    function biShl(a, k) {
+        if (a.s === 0 || k === 0) { return a }
+        if (k < 0) { return biShr(a, -k) }
+        var d = biCopy(a.d)
+        var limbs = Math.floor(k / 24)
+        var bits = k - limbs * 24
+        if (bits > 0) { d = biMulSmallD(d, Math.pow(2, bits)) }
+        var out = []
+        for (var i = 0; i < limbs; i++) { out.push(0) }
+        for (var i = 0; i < d.length; i++) { out.push(d[i]) }
+        return biMake(a.s, out)
+    }
+    // >> on a BigInt is an ARITHMETIC (floor) shift, so -1n >> 1n is -1n, not 0n:
+    // a negative value that lost any bit rounds away from zero by one.
+    function biShr(a, k) {
+        if (a.s === 0 || k === 0) { return a }
+        if (k < 0) { return biShl(a, -k) }
+        var limbs = Math.floor(k / 24)
+        var bits = k - limbs * 24
+        var lost = false
+        var d = []
+        for (var i = 0; i < limbs && i < a.d.length; i++) { if (a.d[i] !== 0) { lost = true } }
+        for (var i = limbs; i < a.d.length; i++) { d.push(a.d[i]) }
+        if (bits > 0) {
+            var s = biDivModSmallD(d, Math.pow(2, bits))
+            if (s.r !== 0) { lost = true }
+            d = s.q
+        }
+        d = biTrim(d)
+        if (a.s < 0 && lost) { d = biAddD(d, [1]) }
+        if (d.length === 0) { return a.s < 0 ? biFromNum(-1) : biZero() }
+        return biMake(a.s, d)
+    }
+    // & | ^ are defined on the infinite two's complement bit string. One extra limb
+    // of sign extension is enough for any pair, because the sign of the result is
+    // decided by the operator applied to the two sign bits.
+    function biTwos(v, w) {
+        var out = []
+        for (var i = 0; i < w; i++) { out.push(i < v.d.length ? v.d[i] : 0) }
+        if (v.s < 0) {
+            var carry = 1
+            for (var i = 0; i < w; i++) {
+                var t = (BI_MASK - out[i]) + carry
+                if (t >= BI_BASE) { out[i] = t - BI_BASE; carry = 1 } else { out[i] = t; carry = 0 }
+            }
+        }
+        return out
+    }
+    function biFromTwos(limbs, neg) {
+        if (!neg) { return biMake(1, limbs) }
+        var out = []
+        var carry = 1
+        for (var i = 0; i < limbs.length; i++) {
+            var t = (BI_MASK - limbs[i]) + carry
+            if (t >= BI_BASE) { out.push(t - BI_BASE); carry = 1 } else { out.push(t); carry = 0 }
+        }
+        return biMake(-1, out)
+    }
+    function biBitOp(op, a, b) {
+        var w = (a.d.length > b.d.length ? a.d.length : b.d.length) + 1
+        var x = biTwos(a, w)
+        var y = biTwos(b, w)
+        var out = []
+        for (var i = 0; i < w; i++) {
+            if (op === "&") { out.push(x[i] & y[i]) }
+            else if (op === "|") { out.push(x[i] | y[i]) }
+            else { out.push(x[i] ^ y[i]) }
+        }
+        var an = a.s < 0
+        var bn = b.s < 0
+        var neg = false
+        if (op === "&") { neg = an && bn }
+        else if (op === "|") { neg = an || bn }
+        else { neg = an !== bn }
+        return biFromTwos(out, neg)
+    }
+    // ~x is exactly -x - 1 in every precision, so it needs no bit machinery at all.
+    function biNot(a) { return biSub(biNeg(a), biFromNum(1)) }
+    // ----- conversions -----
+    function biFromNum(n) {
+        if (n !== n || n === 1 / 0 || n === -1 / 0) { fail("RangeError: cannot convert " + n + " to a BigInt") }
+        if (Math.floor(n) !== n) { fail("RangeError: The number " + n + " cannot be converted to a BigInt because it is not an integer") }
+        if (n === 0) { return biZero() }
+        var neg = n < 0
+        var a = neg ? -n : n
+        var d = []
+        while (a > 0) {
+            var q = Math.floor(a / BI_BASE)
+            d.push(a - q * BI_BASE)
+            a = q
+        }
+        return biMake(neg ? -1 : 1, d)
+    }
+    function biToNum(v) {
+        var a = 0
+        for (var i = v.d.length - 1; i >= 0; i--) { a = a * BI_BASE + v.d[i] }
+        return v.s < 0 ? -a : a
+    }
+    // Reads a digit run in the given radix: an optional sign, '_' separators skipped,
+    // and the scan stops at the first character that is not a digit of the radix
+    // (the trailing 'n' of a literal). Digits go in CHUNKS so the big multiply runs
+    // once per 24 bits of input rather than once per digit.
+    function biFromDigits(src, radix) {
+        var s = "" + src
+        var d = []
+        var neg = false
+        var i = 0
+        if (i < s.length && (s.charAt(i) === "-" || s.charAt(i) === "+")) {
+            neg = s.charAt(i) === "-"
+            i = i + 1
+        }
+        var chunk = 1
+        var chunkN = 0
+        while (chunk * radix <= BI_BASE) { chunk = chunk * radix; chunkN = chunkN + 1 }
+        var acc = 0
+        var accN = 0
+        for (; i < s.length; i++) {
+            var cc = s.charCodeAt(i)
+            if (cc === 95) { continue }
+            var dg = 99
+            if (cc >= 48 && cc <= 57) { dg = cc - 48 }
+            else if (cc >= 97 && cc <= 122) { dg = cc - 87 }
+            else if (cc >= 65 && cc <= 90) { dg = cc - 55 }
+            if (dg >= radix) { break }
+            acc = acc * radix + dg
+            accN = accN + 1
+            if (accN === chunkN) {
+                d = biTrim(biAddD(biMulSmallD(d, chunk), [acc]))
+                acc = 0
+                accN = 0
+            }
+        }
+        if (accN > 0) {
+            var m = 1
+            for (var k = 0; k < accN; k++) { m = m * radix }
+            d = biTrim(biAddD(biMulSmallD(d, m), [acc]))
+        }
+        return biMake(neg ? -1 : 1, d)
+    }
+    function biToStr(v, radix) {
+        if (v.s === 0) { return "0" }
+        var chunk = 1
+        var chunkN = 0
+        while (chunk * radix <= BI_BASE) { chunk = chunk * radix; chunkN = chunkN + 1 }
+        var parts = []
+        var d = biCopy(v.d)
+        while (d.length > 0) {
+            var m = biDivModSmallD(d, chunk)
+            d = m.q
+            parts.push(m.r)
+        }
+        var out = ""
+        for (var i = parts.length - 1; i >= 0; i--) {
+            var piece = ""
+            var x = parts[i]
+            while (x > 0) {
+                var q = Math.floor(x / radix)
+                piece = BI_DIGITS.charAt(x - q * radix) + piece
+                x = q
+            }
+            if (piece === "") { piece = "0" }
+            if (i < parts.length - 1) {
+                while (piece.length < chunkN) { piece = "0" + piece }
+            }
+            out = out + piece
+        }
+        return (v.s < 0 ? "-" : "") + out
+    }
+    // StringToBigInt: the whole string must be an integer literal (with an optional
+    // sign and optional 0x/0b/0o prefix), otherwise the conversion has no value at
+    // all - which is how '1n == "1.0"' comes out false in node.
+    function biFromStrStrict(src) {
+        var s = jsTrim("" + src, true, true)
+        if (s === "") { return biZero() }
+        var sign = ""
+        var body = s
+        if (body.charAt(0) === "-" || body.charAt(0) === "+") {
+            sign = body.charAt(0)
+            body = body.substring(1, body.length)
+        }
+        var radix = 10
+        if (body.length > 2 && body.charAt(0) === "0") {
+            var p = body.charAt(1)
+            if (p === "x" || p === "X") { radix = 16 }
+            else if (p === "b" || p === "B") { radix = 2 }
+            else if (p === "o" || p === "O") { radix = 8 }
+            if (radix !== 10) {
+                if (sign !== "") { return null }
+                body = body.substring(2, body.length)
+            }
+        }
+        if (body.length === 0) { return null }
+        for (var i = 0; i < body.length; i++) {
+            var cc = body.charCodeAt(i)
+            var dg = 99
+            if (cc >= 48 && cc <= 57) { dg = cc - 48 }
+            else if (cc >= 97 && cc <= 122) { dg = cc - 87 }
+            else if (cc >= 65 && cc <= 90) { dg = cc - 55 }
+            if (dg >= radix) { return null }
+        }
+        return biFromDigits(sign + body, radix)
+    }
+    // ToBigInt, the conversion the BigInt(v) global performs.
+    function biOf(v) {
+        if (isBigInt(v)) { return v }
+        if (typeof v == "boolean") { return biFromNum(v ? 1 : 0) }
+        if (typeof v == "string") {
+            var r = biFromStrStrict(v)
+            if (r === null) { fail("SyntaxError: Cannot convert " + v + " to a BigInt") }
+            return r
+        }
+        if (typeof v == "number") { return biFromNum(v) }
+        fail("TypeError: Cannot convert " + jsStr(v) + " to a BigInt")
+    }
+    // The mixed-operand rule: an arithmetic or bitwise operator wants BOTH operands
+    // to be BigInts or NEITHER. Comparison (< == etc.) and string concatenation are
+    // the exceptions and never reach here.
+    function biMixFail(op) {
+        fail("TypeError: Cannot mix BigInt and other types, use explicit conversions (operator '" + op + "')")
+    }
+    // The BigInt arm of a binary operator, or null when neither operand is one.
+    function biBinOp(op, l, r) {
+        var lb = isBigInt(l)
+        var rb = isBigInt(r)
+        if (!lb && !rb) { return null }
+        if (!lb || !rb) { biMixFail(op) }
+        if (op == "+") { return {v: biAdd(l, r)} }
+        if (op == "-") { return {v: biSub(l, r)} }
+        if (op == "*") { return {v: biMul(l, r)} }
+        if (op == "/") { return {v: biDiv(l, r)} }
+        if (op == "%") { return {v: biRem(l, r)} }
+        if (op == "**") { return {v: biPow(l, r)} }
+        if (op == "&") { return {v: biBitOp("&", l, r)} }
+        if (op == "|") { return {v: biBitOp("|", l, r)} }
+        if (op == "^") { return {v: biBitOp("^", l, r)} }
+        if (op == "<<") { return {v: biShl(l, biToNum(r))} }
+        if (op == ">>") { return {v: biShr(l, biToNum(r))} }
+        if (op == ">>>") { fail("TypeError: BigInts have no unsigned right shift, use >> instead") }
+        return null
+    }
+    // The relational operators compare a BigInt against a number MATHEMATICALLY, so
+    // 1n < 2 holds. Two BigInts compare exactly; a mixed pair goes through the double
+    // value, the one place where a value beyond 2^53 could round (the compiler half's
+    // js_jslt does the same, so both halves answer alike).
+    function biRel(l, r) {
+        if (isBigInt(l) && isBigInt(r)) { return biCmp(l, r) }
+        // The two sides start out as arbitrary values and end up as numbers, so they
+        // need anytype locals: under -frozen a var takes the type of its FIRST
+        // assignment and 'x = parseFloat(x)' on a string one is a type error.
+        var a = anytype
+        var b = anytype
+        a = biRelNum(l)
+        b = biRelNum(r)
+        if (a !== a || b !== b) { return 2 }
+        return a < b ? -1 : (a > b ? 1 : 0)
+    }
+    // One relational operand as a double: a BigInt through its value, a string through
+    // parseFloat (NaN makes every relation false), anything else through the host.
+    function biRelNum(v) {
+        if (isBigInt(v)) { return biToNum(v) }
+        if (typeof v == "string") { return v === "" ? 0 : parseFloat(v) }
+        if (typeof v == "boolean") { return v ? 1 : 0 }
+        if (v === null) { return 0 }
+        if (v === undefined) { return 0 / 0 }
+        return v - 0
+    }
+    function makeBigInt(src) {
+        var s = "" + src
+        var radix = 10
+        var body = s
+        if (body.length > 1 && body.charAt(0) === "0") {
+            var p = body.charAt(1)
+            if (p === "x" || p === "X") { radix = 16 }
+            else if (p === "b" || p === "B") { radix = 2 }
+            else if (p === "o" || p === "O") { radix = 8 }
+            if (radix !== 10) { body = body.substring(2, body.length) }
+        }
+        var v = biFromDigits(body, radix)
+        return function() { return v }
+    }
     // ----- Regular expressions -----
     // The MATCHER is the shared engine in lib/regex.js (abnf/jsrtregex.go is its Go twin,
     // used by js-to-llvm-ir.abnf); everything below is JavaScript's SURFACE on top of it.
@@ -3789,8 +4360,14 @@ NotFuncHead = :script(~~
     function makeExp(items, pos) {
         if (items.length == 1) return items[0]
         return function() {
-            var v = items[items.length - 1]()
-            for (var i = items.length - 2; i >= 0; i--) { v = Math.pow(items[i](), v) }
+            var v = anytype // The operands may be numbers or BigInts.
+            v = items[items.length - 1]()
+            for (var i = items.length - 2; i >= 0; i--) {
+                var l = anytype
+                l = items[i]()
+                if (isBigInt(l) || isBigInt(v)) { v = biBinOp("**", l, v).v }
+                else { v = Math.pow(l, v) }
+            }
             return v
         }
     }
@@ -4012,7 +4589,13 @@ NotFuncHead = :script(~~
             out = ""
             for (var i = 0; i < items.length; i++) {
                 if (items[i].str != undefined) { out = out + items[i].str }
-                else { out = out + items[i].expr() }
+                else {
+                    var v = anytype // A substitution is an arbitrary expression.
+                    v = items[i].expr()
+                    // A BigInt is a record here, so host concatenation would spell it
+                    // "[object Object]"; ToString gives its digits.
+                    if (isBigInt(v)) { out = out + biToStr(v, 10) } else { out = out + v }
+                }
             }
             return out
         }
@@ -4464,6 +5047,18 @@ NotFuncHead = :script(~~
     // object-literal methods never reach here - foldCallMember calls this only when the
     // looked-up member was not itself a function value.
     function mcall(target, name, args) {
+        // BigInt.prototype: toString([radix]) and valueOf, the two that make sense
+        // without a wrapper object.
+        if (isBigInt(target)) {
+            if (name == "toString") {
+                var radix = 10
+                if (args.length > 0 && args[0] !== undefined) { radix = args[0] - 0 }
+                if (radix < 2 || radix > 36) { fail("RangeError: toString() radix must be between 2 and 36") }
+                return biToStr(target, radix)
+            }
+            if (name == "valueOf") { return target }
+            fail("unknown method '" + name + "' on a BigInt")
+        }
         if (target != undefined && target != null && target.__class != undefined) {
             var m = undefined
             for (var cl = target.__class; cl != undefined && m == undefined; cl = cl.__super) { if (hasOwn(cl, name)) m = cl[name] }
@@ -4830,8 +5425,8 @@ NotFuncHead = :script(~~
                 var cur = anytype
                 cur = superGet(keyT())
                 var assign = false
-                if (op == "&&=") { assign = cur ? true : false }
-                else if (op == "||=") { assign = cur ? false : true }
+                if (op == "&&=") { assign = jsTruthy(cur) }
+                else if (op == "||=") { assign = !jsTruthy(cur) }
                 else { assign = (cur === null || cur === undefined) }
                 if (!assign) { return cur }
                 var nv = anytype
@@ -4871,9 +5466,10 @@ NotFuncHead = :script(~~
         return function() {
             var k = anytype // A computed key is an arbitrary value.
             k = keyT()
-            var old = superGet(k) - 0
-            superSet(k, old + delta)
-            if (pre) { return old + delta }
+            var old = anytype // A number, or a BigInt (which ++ steps by 1n).
+            old = jsToNumeric(superGet(k))
+            superSet(k, jsStep(old, delta))
+            if (pre) { return jsStep(old, delta) }
             return old
         }
     }
@@ -5007,20 +5603,47 @@ NotFuncHead = :script(~~
     }
 
     binOp = function(op, l, r) {
-        if (op == "+") return l + r
-        if (op == "-") return l - r
-        if (op == "*") return l * r
-        if (op == "/") return l / r
-        if (op == "%") return l % r
         // The abstract equality and relational comparisons, and '+', need ToPrimitive
         // on an OBJECT operand; the host operators only have it under goja, so `[1] == 1`
         // and `[2] > 1` were true under goja and false under -frozen. See jsStr above and
         // abnf/jsrtjsprint.go (js_jseq / js_jslt) for the compiler twin.
         if (op == "==") return jsLooseEq(l, r)
         if (op == "!=") return !jsLooseEq(l, r)
+        // A BigInt is an object to the host engine, so every arm below would read it
+        // wrong; it is dispatched first. Relational operators compare it numerically,
+        // '+' concatenates when the other side is a string, and every remaining
+        // arithmetic/bitwise operator needs BOTH sides to be BigInts (biBinOp raises
+        // the mixed-operand TypeError). '===' is value equality within the type.
+        if (isBigInt(l) || isBigInt(r)) {
+            // An OBJECT on the other side is still ToPrimitive'd first, so '1n + []'
+            // concatenates with "" the way it does in node.
+            if (op == "<" || op == ">" || op == "<=" || op == ">=" || op == "+") {
+                if (jsIsObjLike(l) || jsIsObjLike(r)) { return binOp(op, jsToPrim(l), jsToPrim(r)) }
+            }
+            if (op == "<" || op == ">" || op == "<=" || op == ">=") {
+                var c = biRel(l, r)
+                if (c == 2) { return false }
+                if (op == "<") { return c < 0 }
+                if (op == ">") { return c > 0 }
+                if (op == "<=") { return c <= 0 }
+                return c >= 0
+            }
+            if (op == "===") { return isBigInt(l) && isBigInt(r) && biCmp(l, r) == 0 }
+            if (op == "!==") { return !(isBigInt(l) && isBigInt(r) && biCmp(l, r) == 0) }
+            if (op == "+" && (typeof l == "string" || typeof r == "string")) { return jsStr(l) + jsStr(r) }
+            var br = biBinOp(op, l, r)
+            if (br != null) { return br.v }
+        }
         if (op == "<" || op == ">" || op == "<=" || op == ">=" || op == "+") {
             if (jsIsObjLike(l) || jsIsObjLike(r)) { return binOp(op, jsToPrim(l), jsToPrim(r)) }
         }
+        // The arithmetic arms sit BELOW the BigInt dispatch: a BigInt is a record to the
+        // host engine, so a '+' fast path in front of it spelled 1n + 1 "[object Object]1".
+        if (op == "+") return l + r
+        if (op == "-") return l - r
+        if (op == "*") return l * r
+        if (op == "/") return l / r
+        if (op == "%") return l % r
         if (op == "===") return l === r
         if (op == "!==") return l !== r
         if (op == "<")  return l < r
@@ -5042,7 +5665,7 @@ NotFuncHead = :script(~~
             var v = anytype // The operands may be of mixed types.
             v = items[0]()
             for (var i = 1; i < items.length; i++) {
-                if (v) return v
+                if (jsTruthy(v)) return v
                 v = items[i]()
             }
             return v
@@ -5054,7 +5677,7 @@ NotFuncHead = :script(~~
             var v = anytype // The operands may be of mixed types.
             v = items[0]()
             for (var i = 1; i < items.length; i++) {
-                if (!v) return v
+                if (!jsTruthy(v)) return v
                 v = items[i]()
             }
             return v
@@ -5063,7 +5686,7 @@ NotFuncHead = :script(~~
     // items = [thunk] or [condThunk, thenThunk, elseThunk].
     function makeCond(items) {
         if (items.length == 1) return items[0]
-        return function() { return items[0]() ? items[1]() : items[2]() }
+        return function() { return jsTruthy(items[0]()) ? items[1]() : items[2]() }
     }
 
     // items = [primaryThunk, {kind:"call"|"member", ...}...].
@@ -5168,6 +5791,13 @@ NotFuncHead = :script(~~
         return {obj: cur, key: last.key()}
     }
     applyOp = function(op, a, b) {
+        // A compound assignment is its operator applied to the current value, so it
+        // takes the same BigInt path (and the same mixed-operand TypeError) as binOp.
+        if (isBigInt(a) || isBigInt(b)) {
+            if (op == "+=" && (typeof a == "string" || typeof b == "string")) { return jsStr(a) + jsStr(b) }
+            var br = biBinOp(op.substring(0, op.length - 1), a, b)
+            if (br != null) { return br.v }
+        }
         if (op == "+=") return a + b
         if (op == "-=") return a - b
         if (op == "*=") return a * b
@@ -5204,8 +5834,8 @@ NotFuncHead = :script(~~
             var cur = anytype // The current value may be of any type.
             cur = refGet(ref)
             var assign = false
-            if (op == "&&=") { assign = cur ? true : false }
-            else if (op == "||=") { assign = cur ? false : true }
+            if (op == "&&=") { assign = jsTruthy(cur) }
+            else if (op == "||=") { assign = !jsTruthy(cur) }
             else { assign = (cur === null || cur === undefined) }
             if (!assign) { return cur }
             var v = anytype // So may the new one.
@@ -5256,30 +5886,42 @@ NotFuncHead = :script(~~
         var ref = items[0]
         var delta = (items[1] == "++") ? 1 : -1
         return function() {
+            var n = anytype // A number, or a BigInt (which ++ steps by 1n).
             if (ref.path.length == 0) {
-                var n = getVar(ref.name) - 0
-                setVar(ref.name, n + delta)
+                n = jsToNumeric(getVar(ref.name))
+                setVar(ref.name, jsStep(n, delta))
                 return n
             }
             var p = resolveRef(ref)
-            var m = getMember(p.obj, p.key) - 0
-            setMember(p.obj, p.key, m + delta)
-            return m
+            n = jsToNumeric(getMember(p.obj, p.key))
+            setMember(p.obj, p.key, jsStep(n, delta))
+            return n
         }
+    }
+    // ToNumeric: a BigInt stays a BigInt, everything else becomes a number. jsStep is
+    // the +1 / -1 that ++ and -- perform, in whichever of the two types it got.
+    function jsToNumeric(v) {
+        if (isBigInt(v)) { return v }
+        return v - 0
+    }
+    function jsStep(v, delta) {
+        if (isBigInt(v)) { return biAdd(v, biFromNum(delta)) }
+        return v + delta
     }
     // Prefix ++/--: like makeIncDec, but the expression value is the new one.
     function makePreIncDec(ref, op) {
         var delta = (op == "++") ? 1 : -1
         return function() {
+            var n = anytype
             if (ref.path.length == 0) {
-                var n = getVar(ref.name) - 0 + delta
+                n = jsStep(jsToNumeric(getVar(ref.name)), delta)
                 setVar(ref.name, n)
                 return n
             }
             var p = resolveRef(ref)
-            var m = getMember(p.obj, p.key) - 0 + delta
-            setMember(p.obj, p.key, m)
-            return m
+            n = jsStep(jsToNumeric(getMember(p.obj, p.key)), delta)
+            setMember(p.obj, p.key, n)
+            return n
         }
     }
 
@@ -5346,7 +5988,7 @@ NotFuncHead = :script(~~
         var bodyT = items[2]
         return function() {
             var res = undefined
-            while (condT()) {
+            while (jsTruthy(condT())) {
                 var r = bodyT()
                 var a = loopAction(r, label)
                 if (a == "break") break
@@ -5367,7 +6009,7 @@ NotFuncHead = :script(~~
                 var a = loopAction(r, label)
                 if (a == "break") break
                 if (a == "propagate") { res = r; break }
-            } while (condT())
+            } while (jsTruthy(condT()))
             return res
         }
     }
@@ -5385,7 +6027,7 @@ NotFuncHead = :script(~~
             scopes.push({}) // The for header is its own scope (for the loop variable).
             var res = undefined
             if (init != null) init()
-            while (cond == null || cond()) {
+            while (cond == null || jsTruthy(cond())) {
                 var r = bodyT()
                 var a = loopAction(r, label)
                 if (a == "break") break
@@ -5449,6 +6091,7 @@ NotFuncHead = :script(~~
     // Build the program thunk out of the parsed source.
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "typescript"
+    core.test = jsTruthy
 
     // Build an import statement (see the ImportStmt rule): resolve the referenced file at
     // compile time - which loads and runs it, registering its declarations - and leave a
