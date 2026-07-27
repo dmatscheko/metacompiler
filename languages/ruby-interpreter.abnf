@@ -45,13 +45,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
 // The whole program is a sequence of definitions and statements executed in order.
 Program     <~~ runProgram(takeAll()) ~~>
-            = { Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | ModuleDecl | Statement } ;
+            = { BodyItem } ;
+// A def / class / module is a STATEMENT in Ruby, not only a top-level item: it may
+// stand inside a method, an if, a block ('it "..." do def helper; end end' is the
+// shape most of a spec suite has). Body and Program therefore accept the same items.
+BodyItem    = Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | ModuleDecl | Statement ;
 
 // module M ... end: accepted but not implemented (no namespacing). Its body is a
 // program of the same items; under -warn-unsupported they run in the current scope
 // so any defs/classes/calls stay visible. A nested module recurses.
-ModuleDecl  <~~ push(makeModule(takeAll(), up.pos)) ~~>
-            = KwModule ScopedName { Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | ModuleDecl | Statement } End ;
+ModuleDecl  <~~ push(makeModuleStmt(takeAll())) ~~>
+            = KwModule ScopedName <~~ push(up.in) ~~>
+              { Semi | Def <~~ push({method: pop()}) ~~> | ClassDecl <~~ push({nested: pop()}) ~~>
+              | ModuleDecl <~~ push({nested: pop()}) ~~> | AliasStmt | ClassBodyStmt } End ;
 // A constant path Foo::Bar::Baz (module / class name or a scoped reference).
 ScopedName  = Name { "::" Name } ;
 
@@ -61,34 +67,69 @@ ScopedName  = Name { "::" Name } ;
 // splat / block / keyword parameters; the fancy forms are notImplemented (the method
 // is still built with the parameter names, so its body stays runnable).
 Def         <~~ push(makeFun(takeAll())) ~~>
-            = KwDef [ SelfRecv ] MethodName <~~ push(up.in) ~~> [ ParamList ] Body End ;
-SelfRecv    <~~ notImpl("singleton method (def self.m / def obj.m)", up.pos) ~~>
+            = KwDef [ SelfRecv ] MethodName <~~ push(up.in) ~~> [ ParamList ] DefTail ;
+// An endless def (def sq(x) = x * x) has an EXPRESSION body and no `end`; the
+// ordinary body may carry rescue/else/ensure clauses with no `begin` of their own.
+DefTail     = EndlessBody | GuardedBody ;
+EndlessBody <~~ push({body: pop()}) ~~>
+            = "=" !"=" Expression ;
+GuardedBody <~~ push({body: makeGuardedBody(takeAll())}) ~~>
+            = Body <~~ push({trybody: pop().body}) ~~> { RescueClause }
+              [ KwElse Body <~~ push({elsebody: pop().body}) ~~> ]
+              [ KwEnsure Body <~~ push({finalbody: pop().body}) ~~> ] End ;
+// def self.m: a method of the class object itself, not of its instances.
+SelfRecv    <~~ push({selfrecv: true}) ~~>
             = ( KwSelf | Name ) "." ;
 ParamList   = "(" [ Param { "," Param } ] ")" ;
-Param       = ParamDSplat | ParamSplat | ParamBlock | ParamKw | ParamDefault | ParamSimple ;
-ParamDSplat <~~ var n = takeAll(); notImpl("double-splat parameter (**kw)", up.pos); push({param: n.length > 0 ? n[0] : "$kwrest"}) ~~>
+Param       = ParamFwd | ParamDSplat | ParamSplat | ParamBlock | ParamKw | ParamDefault | ParamSimple ;
+// def m(...) - argument forwarding. It is exactly `*__fwd_a, &__fwd_b` under two
+// reserved names, and `m(...)` on the call side splices the same two back out, so no
+// new binding machinery is needed at all.
+ParamFwd    <~~ push({param: "__fwd_a", splat: true}) ; push({param: "__fwd_b", blockp: true}) ~~>
+            = "..." ;
+ParamDSplat <~~ var n = takeAll(); push({param: n.length > 0 ? n[0] : null, kwrest: true}) ~~>
             = "**" [ Name <~~ push(up.in) ~~> ] ;
-ParamSplat  <~~ var n = takeAll(); notImpl("splat parameter (*args)", up.pos); push({param: n.length > 0 ? n[0] : "$rest"}) ~~>
-            = "*" [ Name <~~ push(up.in) ~~> ] ;
+ParamSplat  <~~ var n = takeAll(); push({param: n.length > 0 ? n[0] : null, splat: true}) ~~>
+            = "*" !"*" [ Name <~~ push(up.in) ~~> ] ;
 // &blk: the block the call was given, received as an ordinary named parameter.
-ParamBlock  <~~ push({param: pop()}) ~~>
+ParamBlock  <~~ push({param: pop(), blockp: true}) ~~>
             = "&" Name <~~ push(up.in) ~~> ;
-ParamKw     <~~ var n = takeAll(); notImpl("keyword parameter (name:)", up.pos); push({param: n[0]}) ~~>
-            = Name <~~ push(up.in) ~~> ":" [ Expression ] ;
-ParamDefault <~~ var n = takeAll(); notImpl("default parameter value", up.pos); push({param: n[0]}) ~~>
+// name: / name: DEFAULT - a keyword parameter, filled from the call's trailing hash.
+ParamKw     <~~ var n = takeAll(); push({param: n[0], kw: true, defT: n.length > 1 ? n[1] : undefined}) ~~>
+            = Name <~~ push(up.in) ~~> ":" !":" [ Expression ] ;
+ParamDefault <~~ var n = takeAll(); push({param: n[0], defT: n[1]}) ~~>
             = Name <~~ push(up.in) ~~> "=" !"=" Expression ;
 ParamSimple = Name <~~ push({param: up.in}) ~~> ;
-// Method / call names may end with ? or ! (empty?, include?); Name may not.
-MethodName  = Id [ "?" | "!" ] ;
+// Method / call names may end with ? or ! (empty?, include?); Name may not. A def
+// may equally name an OPERATOR (def +, def -@, def [], def []=, def <=>), which is
+// how a class joins the operator table - the longest spelling comes first (PEG).
+MethodName  = OpMethodName | Id [ "?" | "!" ] ;
+OpMethodName = "[]=" | "[]" | "<=>" | "===" | "==" | "!=" | "<<" | ">>" | "<=" | ">="
+            | "**" | "+@" | "-@" | "=~" | "+" | "-" | "*" | "/" | "%" | "<" | ">"
+            | "&" | "|" | "^" | "~" | "!" ;
 
 // class C ... end with instance methods; C.new builds an instance. attr_reader /
 // attr_writer / attr_accessor declare @ivar getters/setters on the class.
 // A superclass (class D < Base) is accepted but not implemented (no inheritance);
 // the class body still runs as its own methods.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwClass Name <~~ push(up.in) ~~> [ Superclass ] { Semi | Def <~~ push({method: pop()}) ~~> | AttrDecl } End ;
-Superclass  <~~ notImpl("class superclass (< Base)", up.pos) ~~>
-            = "<" ScopedName ;
+            = KwClass Name <~~ push(up.in) ~~> [ Superclass ]
+              { Semi | SingletonBlock | Def <~~ push({method: pop()}) ~~> | AttrDecl
+              | AliasStmt | ClassBodyStmt } End ;
+// class << self ... end: every def inside it is a method of the class object.
+SingletonBlock <~~ push({sblock: takeAll()}) ~~>
+            = KwClass "<<" KwSelf { Semi | Def <~~ push({method: pop()}) ~~> } End ;
+// alias NEW OLD (a keyword, unlike alias_method which is an ordinary call).
+AliasStmt   <~~ push({alias: takeAll()}) ~~>
+            = KwAlias AliasName AliasName ;
+AliasName   = ":" SymName <~~ push(up.in) ~~> | MethodName <~~ push(up.in) ~~> ;
+// class D < Base: real inheritance (method lookup walks __super, and `super` calls
+// the overridden method).
+Superclass  = "<" Name <~~ push({supername: up.in}) ~~> ;
+// Anything else in a class body - @@classvar = v, include M, private, alias - runs
+// as an ordinary statement with `self` bound to the class object.
+ClassBodyStmt <~~ push({cstmt: pop()}) ~~>
+            = Statement ;
 AttrDecl    <~~ push(makeAttr(takeAll())) ~~>
             = AttrKind <~~ push({akind: up.in}) ~~> AttrSym { "," AttrSym } ;
 AttrKind    = ( "attr_accessor" | "attr_reader" | "attr_writer" ) KwEnd ;
@@ -99,7 +140,7 @@ End         = "end" KwEnd ;
 // Body collects its statements into a single marker so the enclosing production
 // (if/while/def/block) sees exactly one item on the stack for its body.
 Body        <~~ push({body: makeBody(takeAll())}) ~~>
-            = { Statement } ;
+            = { BodyItem } ;
 
 // Every statement pushes exactly one thunk: function() -> value | signal.
 // A statement may be a post-condition loop (begin..end while/until COND, runs its
@@ -117,7 +158,26 @@ DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
 DoWhileKw   = KwWhile <~~ push({dw: "while"}) ~~> | KwUntil <~~ push({dw: "until"}) ~~> ;
 ModStmt     <~~ push(applyMod(takeAll())) ~~>
             = SimpleStmt [ SameLine ModKw Expression ] ;
-SimpleStmt  = PutsStmt | MultiAssign | ExprStmt ;
+SimpleStmt  = PutsStmt | MultiAssign | AppendStmt | CommandStmt | PatAssign | ExprStmt ;
+// EXPR => PATTERN: Ruby 3's rightward assignment / destructuring statement. It raises
+// when the pattern does not match, so it is a statement and not a test. FatArrowAhead
+// is a cheap fast-fail: without it EVERY statement would parse its expression twice.
+PatAssign   <~~ push(makePatAssign(takeAll())) ~~>
+            = FatArrowAhead Expression "=>" Pattern [ ";" ] ;
+// NAME arg[, arg] [block]: the parenthesis-less command call (`describe "x" do .. end`,
+// `include Comparable`, `alias_method :other, :real`). It lives at STATEMENT level
+// only: inside an argument list `f(double, 21)` a bare name is a VALUE, not a call of
+// the following arguments, and Ruby itself resolves that with the local-variable
+// table a PEG parser does not have. CmdArgAhead is the spacing rule Ruby uses to tell
+// `foo -1` (an argument) from `foo - 1` (a subtraction).
+CommandStmt <~~ push(makeCall(takeAll())) ~~>
+            = BareName <~~ push(up.in) ~~> SameLine CmdArgAhead Arg { "," Arg } [ Block ] ;
+// TARGET << V [<< V]: Ruby strings are mutable, so `s << "bc"` has to update the
+// variable itself. The append is therefore a statement form that WRITES BACK to its
+// target - for an array that is the same object it already mutated in place, for a
+// string it is the new value.
+AppendStmt  <~~ push(makeAppendStmt(takeAll())) ~~>
+            = Target "<<" !"<" AddExpr { "<<" AddExpr } ;
 ModKw       = KwIf <~~ push({mod: "if"}) ~~> | KwUnless <~~ push({mod: "unless"}) ~~>
             | KwWhile <~~ push({mod: "while"}) ~~> | KwUntil <~~ push({mod: "until"}) ~~> ;
 
@@ -164,42 +224,84 @@ ExprStmt    = Expression [ ";" ] ;
 
 // Every expression pushes exactly one thunk: function() -> value. A ternary
 // cond ? a : b binds looser than the boolean operators (like Ruby).
-Expression  = Assignment | Ternary ;
+// The word forms and/or/not bind LOOSER than assignment in Ruby, which is the whole
+// point of `x = false or true` (x is false, the `or true` is a separate step). They
+// therefore sit ABOVE the assignment, in their own three levels, while the symbol
+// forms && || ! keep their tight precedence inside OrExpr/AndExpr/NotExpr below.
+Expression  = LowOr ;
+LowOr       <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = LowAnd { OrWord LowAnd } ;
+LowAnd      <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = LowNot { AndWord LowNot } ;
+LowNot      = LowNotOp | PatTest ;
+// EXPR in PATTERN is a boolean test (Ruby 3.0). SameLine is what keeps the `in` of a
+// `case SUBJ` newline `in ...' clause from being read as a test on the subject.
+PatTest     <~~ push(makePatTest(takeAll())) ~~>
+            = RescueMod [ SameLine KwIn Pattern ] ;
+// EXPR rescue FALLBACK: the expression modifier form of rescue. SameLine keeps it
+// clear of a def-level `rescue` clause that opens the next line.
+RescueMod   <~~ push(makeRescueMod(takeAll())) ~~>
+            = AssignExpr [ SameLine KwRescue AssignExpr ] ;
+LowNotOp    <~~ push(makeNot(pop())) ~~>
+            = NotWord LowNot ;
+OrWord      = "or" KwEnd ;
+AndWord     = "and" KwEnd ;
+NotWord     = "not" KwEnd ;
+
+AssignExpr  = Assignment | Ternary ;
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "?" Expression ":" Expression ] ;
 
 Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
-            = Target AssignOp <~~ push(up.in) ~~> Expression ;
+            = Target AssignOp <~~ push(up.in) ~~> AssignExpr ;
 // ||= and &&= (conditional assignment) are accepted but not implemented (no short
 // circuit); makeAssign warns and falls back to a plain assignment.
 AssignOp    = "||=" | "&&=" | "+=" | "-=" | "*=" | "/=" | "%=" | ( "=" !"=" ) ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = TargetHead { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
-TargetHead  = "@" Id <~~ push({ivar: up.in}) ~~> | Name <~~ push({var: up.in}) ~~> ;
+// The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win).
+TargetHead  = "$" Id <~~ push({gvar: up.in}) ~~>
+            | "@@" Id <~~ push({cvar: up.in}) ~~>
+            | "@" Id <~~ push({ivar: up.in}) ~~>
+            | Name <~~ push({var: up.in}) ~~> ;
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
 
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { OrOp AndExpr } ;
-OrOp        = "||" | ( "or" KwEnd ) ;
+OrOp        = "||" ;
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = NotExpr { AndOp NotExpr } ;
-AndOp       = "&&" | ( "and" KwEnd ) ;
+AndOp       = "&&" ;
 NotExpr     = NotOp | EqExpr ;
 NotOp       <~~ push(makeNot(pop())) ~~>
-            = ( "!" | ( "not" KwEnd ) ) NotExpr ;
+            = "!" !"=" NotExpr ;
 
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
-            = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+            = RelExpr { ( "===" | "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+// <=> (the spaceship) is listed FIRST so "<=" cannot swallow its prefix.
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = RangeExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> RangeExpr } ;
-// A range 1..5 (inclusive) or 1...5 (exclusive); built as an eager array.
+            = BitOrExpr { ( "<=>" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> BitOrExpr } ;
+// Bitwise | ^ and & (the lookaheads keep || && and the safe-navigation &. out).
+BitOrExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = BitAndExpr { BitOrOp <~~ push(up.in) ~~> BitAndExpr } ;
+BitOrOp     = ( "|" !"|" ) | "^" ;
+BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = RangeExpr { BitAndOp <~~ push(up.in) ~~> RangeExpr } ;
+BitAndOp    = "&" !"&" !"." ;
+// A range 1..5 (inclusive) or 1...5 (exclusive), and the endless (5..) / beginless
+// (..9) forms; built as a lazy Range object.
+// The beginless form comes FIRST (PEG): it starts with the operator, so nothing else
+// can match it, and makeRange recognizes it by items[0] being the operator string.
 RangeExpr   <~~ push(makeRange(takeAll())) ~~>
-            = ShiftExpr [ ( "..." | ".." ) <~~ push(up.in) ~~> ShiftExpr ] ;
-// The << append operator: arr << x pushes onto the array and yields the array
-// (so a << b << c chains). Binds tighter than range/comparison, looser than +.
+            = RangeOp <~~ push(up.in) ~~> ShiftExpr
+            | ShiftExpr [ RangeOp <~~ push(up.in) ~~> [ ShiftExpr ] ] ;
+RangeOp     = "..." | ".." ;
+// The << and >> operators: on an array << appends (and yields the array, so
+// a << b << c chains), on a string it concatenates, on an integer it shifts.
 ShiftExpr   <~~ push(makeShift(takeAll())) ~~>
-            = AddExpr { "<<" AddExpr } ;
+            = AddExpr { ShiftOp <~~ push(up.in) ~~> AddExpr } ;
+ShiftOp     = "<<" | ">>" ;
 // The LineCont guard is what keeps `first, *rest = [1, 2, 3]' followed by a line
 // that OPENS with `*init, last = ...' from reading as one multiplication: in Ruby a
 // newline ends the statement once the expression is complete, so a binary operator
@@ -209,16 +311,25 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { LineCont ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Neg | PostfixExpr ;
+UnaryExpr   = Neg | BitNot | PowExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
+BitNot      <~~ push(makeBitNot(pop())) ~~>
+            = "~" UnaryExpr ;
+// ** binds tighter than unary minus (-2 ** 2 is -4) and is RIGHT associative
+// (2 ** 3 ** 2 is 512), so its right operand is a whole UnaryExpr again.
+PowExpr     <~~ push(makePow(takeAll())) ~~>
+            = PostfixExpr [ "**" UnaryExpr ] ;
 
 // obj.method(args), obj.method do |x| ... end, obj.field, arr[i]. A trailing
 // block (do..end or {..}) becomes the last argument of the method call.
 PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | SafeMethodSfx | SafeFieldSfx | IndexSfx } ;
+            = Primary { CallSfx | MethodSfx | FieldSfx | SafeMethodSfx | SafeFieldSfx | IndexSfx } ;
 MethodSfx   <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
             = "." MethodName <~~ push({mname: up.in}) ~~> MArgs ;
+// p.(x): the parenthesis-only call shorthand for a Proc (Proc#call).
+CallSfx     <~~ push({kind: "mcall", name: "call", args: takeAll()}) ~~>
+            = "." "(" [ Arg { "," Arg } ] ")" ;
 FieldSfx    = "." MethodName <~~ push({kind: "field", name: up.in}) ~~> ;
 // Safe navigation obj&.m / obj&.m(args): yields nil (and skips the call, not even
 // evaluating the arguments) when the receiver is nil, else a normal method/field.
@@ -235,37 +346,60 @@ MArgs       = "(" [ Arg { "," Arg } ] ")" [ Block ] | Block ;
 // recognition but not implemented - keyword argument (name: v), splat / double-splat
 // (*a, **h) and block pass (&blk, &:sym). The unsupported forms warn and become a
 // placeholder argument, so the call still runs.
-Arg         = KwArg | SplatArg | BlockArg | Expression ;
-KwArg       <~~ takeAll(); push(notImplExpr("keyword argument (name:)", up.pos)) ~~>
-            = SymName ":" Expression ;
-SplatArg    <~~ takeAll(); push(notImplExpr("splat argument (* / **)", up.pos)) ~~>
+// FwdArg comes LAST: a leading "..." is first offered to Expression, which reads it
+// as a beginless exclusive range and only fails when no operand follows - so `f(...)`
+// forwards while `f(...9)` stays a range.
+Arg         = KwArg | SplatArg | BlockArg | Expression | FwdArg ;
+FwdArg      <~~ push({splatT: makeVarRef("__fwd_a")}) ; push({blkT: makeVarRef("__fwd_b")}) ~~>
+            = "..." ;
+KwArg       <~~ var n = takeAll(); push({kwname: n[0], kwT: n[1]}) ~~>
+            = SymName <~~ push(up.in) ~~> ":" !":" Expression ;
+// *arr splices an array into the positional arguments, **h merges a hash into the
+// keyword arguments.
+SplatArg    <~~ push({splatT: pop()}) ~~>
             = ( "**" | "*" ) Expression ;
 // &expr: pass expr as the call's block. A Proc is passed straight through; a symbol
 // becomes the "call this method on each element" proc (`[1, 2].map(&:to_s)`).
 BlockArg    <~~ push({blkT: makeBlockArg(pop())}) ~~>
             = "&" Expression ;
 
+// ->(a, b = 1) { ... } / -> { ... }: a lambda literal. Unlike a block it is a VALUE,
+// and a `return` inside it returns from the lambda itself.
+LambdaLit   <~~ push(makeLambda(takeAll())) ~~>
+            = "->" [ "(" [ Param { "," Param } ] ")" | Param { "," Param } ] LambdaBody ;
+LambdaBody  = KwDo Body End | "{" [ BlockParams ] Body "}" ;
+
 // A block passed to a method call: a real closure over the current scope.
 Block       <~~ push(makeBlock(takeAll())) ~~>
-            = KwDo [ BlockParams ] Body End
-            | "{" [ BlockParams ] Body "}" ;
+            = KwDo [ BlockParams ] BlockBody End
+            | "{" [ BlockParams ] BlockBody "}" ;
+// The body is wrapped only to keep its SOURCE TEXT: a block with no |params| that
+// mentions _1 / _2 takes them as its parameters, and Ruby decides the block's arity
+// from the HIGHEST one mentioned (which is what makes { _1 + _2 } destructure a
+// two-element item while { _1 * 2 } gets the item whole). Nothing else can tell them
+// apart, so makeBlock scans this text.
+BlockBody   <~~ var bb = pop(); push({body: bb.body, btext: up.in}) ~~>
+            = Body ;
+// The trailing comma is legal and meaningful: `{ |a, | ... }` forces the single
+// argument to be DESTRUCTURED rather than taken whole.
 BlockParams <~~ push({bparams: takeAll()}) ~~>
-            = "|" [ BParam { "," BParam } ] "|" ;
+            = "|" [ BParam { "," BParam } [ "," ] ] "|" ;
 // A block parameter may be a parenthesized group that destructures one element:
 // `[[1, [2, 3]]].each { |a, (b, c)| ... }`.
 BParam      = BGroup | Param ;
 BGroup      <~~ push({pgroup: takeAll()}) ~~>
             = "(" BParam { "," BParam } ")" ;
 
-Primary     = "(" Expression ")"
+Primary     = "(" Expression ")" | LambdaLit
             | IfExpr | UnlessExpr | WhileExpr | UntilExpr | ForExpr | CaseExpr | BeginExpr
-            | ReturnExpr | BreakExpr | NextExpr | RedoExpr | RaiseExpr | YieldExpr
-            | DqStr | SqStr | PercentLit
+            | ReturnExpr | BreakExpr | NextExpr | RedoExpr | RetryExpr | RaiseExpr | YieldExpr | SuperExpr
+            | HeredocLit
+            | StrLit | CharLit | PercentLit
             | NumHex | NumBin | NumOct | Oct0Lit | RatLit | ImagLit | FloatLit | NumInt
             | SymLit
             | ArrayLit | HashLit
             | True | False | Nil | Self
-            | IvarRef | ScopedConst | Call | VarRef ;
+            | DefinedExpr | GvarRef | CvarRef | IvarRef | ScopedConst | Call | VarRef ;
 
 // for VAR[, VAR] in COLL ... end: unlike a block, `for` does NOT open a scope - the
 // loop variable stays visible after the loop (Ruby), so it is written with the same
@@ -273,6 +407,12 @@ Primary     = "(" Expression ")"
 ForExpr     <~~ push(makeForIn(takeAll())) ~~>
             = KwFor ForVars KwIn Expression [ KwDo ] Body End ;
 ForVars     = Name <~~ push({fvar: up.in}) ~~> { "," Name <~~ push({fvar: up.in}) ~~> } ;
+
+// super / super(args): call the method of the same name in the superclass. A BARE
+// super forwards the arguments the current method received (Ruby), while super()
+// with an explicit list passes exactly that list - so `super` and `super()` differ.
+SuperExpr   <~~ push(makeSuper(takeAll())) ~~>
+            = KwSuper [ "(" <~~ push({explicit: true}) ~~> [ Arg { "," Arg } ] ")" ] ;
 
 // yield / yield(args) / yield args: accepted but not implemented (no block passing);
 // warns and yields a placeholder value.
@@ -295,19 +435,179 @@ FloatLit    <~~ push(makeConst(mkFlo(parseFloat(up.in.split("_").join(""))))) ~~
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
               ( "." "0"..."9" { "0"..."9" | "_" } [ NumExp ] | NumExp ) :whitespace(Whitespace) ;
 
-// A scoped constant Foo::Bar: accepted but not implemented (no namespaces); warns
-// and yields a placeholder value.
-ScopedConst <~~ push(notImplExpr("scoped constant (::)", up.pos)) ~~>
+// A scoped constant Foo::Bar::Baz: walked down the module/class chain at run time.
+ScopedConst <~~ push(makeScopedConst(up.in)) ~~>
             = Name "::" Name { "::" Name } ;
 
-// A percent literal %w[..] %i[..] %q(..) %Q(..) %r[..] ...: accepted but not
-// implemented; the body is read (bracket or parenthesis delimited) and warns.
-PercentLit  <~~ push(notImplExpr("percent literal (%w / %i / %q / ...)", up.pos)) ~~>
-            = PctTag :whitespace() PctBody :whitespace(Whitespace) ;
-PctTag      = "%w" | "%i" | "%W" | "%I" | "%q" | "%Q" | "%r" | "%s" ;
-PctBody     = "[" { PctBrk } "]" | "(" { PctPar } ")" ;
-PctBrk      = "\x00"..."\x5c" | "\x5e"..."\U0010ffff" ;
-PctPar      = "\x00"..."\x28" | "\x2a"..."\U0010ffff" ;
+// A heredoc: <<ID / <<-ID / <<~ID, optionally with a quoted marker (<<~'ID' is raw,
+// <<~"ID" interpolates like the bare form). The body lives on the FOLLOWING lines, so
+// it cannot be described by ordinary productions: HdScan is a lexer that scans from
+// the marker to the terminator line and returns ONE token covering all of it, and
+// makeHeredoc then splits that text back apart (indent strip for <<~, escapes and
+// '#{}' interpolation unless the marker was single-quoted).
+//
+// LIMIT: the marker must be the last thing on its line. Ruby also allows code after
+// it (`f(<<~A, x)`, `<<~A + <<~B`), which would need the body to be consumed at the
+// END of the line rather than at the marker; HdScan refuses those rather than
+// mis-parsing them, so they stay an honest parse failure.
+HeredocLit  <~~ push(makeHeredoc(up.in)) ~~>
+            = HdScan :whitespace(Whitespace) ;
+HdScan = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01noheredoc", 0)
+        // Whitespace is not skipped before a script, so step over it (and comments)
+        // exactly like the token match that follows will.
+        var i = 0
+        var cc = c.peek(i)
+        var steps = 0
+        while (steps < 100000) {
+            steps = steps + 1
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i); continue }
+            if (cc === 35) { while (cc !== 10 && cc !== -1) { i = i + 1; cc = c.peek(i) } continue }
+            break
+        }
+        var start = i
+        if (c.peek(i) !== 60 || c.peek(i + 1) !== 60) { return no }
+        i = i + 2
+        var squiggly = false
+        var dashed = false
+        if (c.peek(i) === 126) { squiggly = true; i = i + 1 }
+        else if (c.peek(i) === 45) { dashed = true; i = i + 1 }
+        var quote = 0
+        var q = c.peek(i)
+        if (q === 39 || q === 34) { quote = q; i = i + 1 }
+        // An unquoted, undecorated marker must start with an upper-case letter or '_',
+        // which is what keeps `a << b' (the append/shift operator) out of here.
+        var f = c.peek(i)
+        var upperOk = (f >= 65 && f <= 90) || f === 95
+        if (!upperOk && quote === 0 && !squiggly && !dashed) { return no }
+        if (!((f >= 65 && f <= 90) || (f >= 97 && f <= 122) || f === 95)) { return no }
+        var id = ""
+        var ch = f
+        while ((ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch === 95) {
+            id = id + String.fromCharCode(ch)
+            i = i + 1
+            ch = c.peek(i)
+        }
+        if (quote !== 0) {
+            if (c.peek(i) !== quote) { return no }
+            i = i + 1
+        }
+        // Nothing but blanks (or a comment) may follow the marker on its own line.
+        var j = i
+        var dd = c.peek(j)
+        while (dd === 32 || dd === 9 || dd === 13) { j = j + 1; dd = c.peek(j) }
+        if (dd === 35) { while (dd !== 10 && dd !== -1) { j = j + 1; dd = c.peek(j) } }
+        if (dd !== 10) { return no }
+        j = j + 1
+        // Walk whole lines until one is exactly the marker (indented only when the
+        // heredoc is <<~ or <<-), and stop after that line.
+        var end = -1
+        var guard = 0
+        while (guard < 1000000) {
+            guard = guard + 1
+            var ls = j
+            var k = j
+            var b = c.peek(k)
+            if (b === -1) { end = k; break }
+            if (squiggly || dashed) {
+                while (b === 32 || b === 9) { k = k + 1; b = c.peek(k) }
+            }
+            var m = 0
+            while (m < id.length && c.peek(k + m) === id.charCodeAt(m)) { m = m + 1 }
+            var after = c.peek(k + m)
+            if (m === id.length && (after === 10 || after === 13 || after === -1)) {
+                k = k + m
+                if (c.peek(k) === 13) { k = k + 1 }
+                if (c.peek(k) === 10) { k = k + 1 }
+                end = k
+                break
+            }
+            // Not the terminator: skip the whole line.
+            while (b !== 10 && b !== -1) { k = k + 1; b = c.peek(k) }
+            if (b === -1) { return no }
+            j = k + 1
+            if (ls === j) { return no }
+        }
+        if (end < 0) { return no }
+        // Rebuild the exact source slice as a token. c.peek answers BYTES, so the
+        // UTF-8 has to be decoded here or a non-ASCII body would never match.
+        var out = ""
+        var p = start
+        while (p < end) {
+            var b0 = c.peek(p)
+            if (b0 < 128) { out = out + String.fromCharCode(b0); p = p + 1; continue }
+            if (b0 >= 240) {
+                var cp4 = ((b0 - 240) * 262144) + ((c.peek(p + 1) - 128) * 4096) + ((c.peek(p + 2) - 128) * 64) + (c.peek(p + 3) - 128)
+                var off = cp4 - 65536
+                out = out + String.fromCharCode(55296 + ((off - (off % 1024)) / 1024)) + String.fromCharCode(56320 + (off % 1024))
+                p = p + 4
+                continue
+            }
+            if (b0 >= 224) {
+                out = out + String.fromCharCode(((b0 - 224) * 4096) + ((c.peek(p + 1) - 128) * 64) + (c.peek(p + 2) - 128))
+                p = p + 3
+                continue
+            }
+            if (b0 >= 192) {
+                out = out + String.fromCharCode(((b0 - 192) * 64) + (c.peek(p + 1) - 128))
+                p = p + 2
+                continue
+            }
+            return no
+        }
+        return abnf.newToken(out, 0)
+    })()
+~~) ;
+
+// The percent literals. The lower-case tags (%q %w %i) are RAW - no escapes beyond
+// the delimiters and no '#{}' - while the upper-case ones (%Q %W %I) and the bare
+// %(..) interpolate exactly like a double-quoted string. %w/%i split their body on
+// whitespace into an array of strings / symbols. Each form accepts the three usual
+// delimiter pairs ( ) [ ] { }; the body characters are spelled out per delimiter,
+// because the dialect has no parameterized rules.
+PercentLit  = PctQ | PctW | PctI | PctBigQ | PctBigW | PctBigI | PctBare ;
+PctQ        <~~ push(makeConst(unescapeSq(pctRawOf(takeAll())))) ~~>
+            = "%q" :whitespace() PctRawBody :whitespace(Whitespace) ;
+PctW        <~~ push(makeConst(pctWords(pctRawOf(takeAll()), false))) ~~>
+            = "%w" :whitespace() PctRawBody :whitespace(Whitespace) ;
+PctI        <~~ push(makeConst(pctWords(pctRawOf(takeAll()), true))) ~~>
+            = "%i" :whitespace() PctRawBody :whitespace(Whitespace) ;
+PctBigQ     <~~ push(makeTemplate(takeAll())) ~~>
+            = "%Q" :whitespace() PctTplBody :whitespace(Whitespace) ;
+PctBare     <~~ push(makeTemplate(takeAll())) ~~>
+            = "%" :whitespace() PctTplBody :whitespace(Whitespace) ;
+PctBigW     <~~ push(makeWordsThunk(makeTemplate(takeAll()), false)) ~~>
+            = "%W" :whitespace() PctTplBody :whitespace(Whitespace) ;
+PctBigI     <~~ push(makeWordsThunk(makeTemplate(takeAll()), true)) ~~>
+            = "%I" :whitespace() PctTplBody :whitespace(Whitespace) ;
+
+PctRawBody  = PctParRaw | PctBrkRaw | PctBrcRaw ;
+PctParRaw   = "(" { PctParCh } <~~ push({raw: up.in}) ~~> ")" ;
+PctBrkRaw   = "[" { PctBrkCh } <~~ push({raw: up.in}) ~~> "]" ;
+PctBrcRaw   = "{" { PctBrcCh } <~~ push({raw: up.in}) ~~> "}" ;
+PctParCh    = "\x00"..."\x27" | "\x2a"..."\U0010ffff" ;
+PctBrkCh    = "\x00"..."\x5a" | "\x5c" | "\x5e"..."\U0010ffff" ;
+PctBrcCh    = "\x00"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+
+PctTplBody  = "(" { TplExpr | PctParChunk } ")"
+            | "[" { TplExpr | PctBrkChunk } "]"
+            | "{" { TplExpr | PctBrcChunk } "}" ;
+PctParChunk <~~ push({s: unescapeJs(up.in)}) ~~> = PctParTC { PctParTC } ;
+PctParTC    = TplEsc | HashChar | PctParPlain ;
+PctParPlain = "\x00"..."\x22" | "\x24"..."\x27" | "\x2a"..."\x5b" | "\x5d"..."\U0010ffff" ;
+PctBrkChunk <~~ push({s: unescapeJs(up.in)}) ~~> = PctBrkTC { PctBrkTC } ;
+PctBrkTC    = TplEsc | HashChar | PctBrkPlain ;
+PctBrkPlain = "\x00"..."\x22" | "\x24"..."\x5a" | "\x5e"..."\U0010ffff" ;
+PctBrcChunk <~~ push({s: unescapeJs(up.in)}) ~~> = PctBrcTC { PctBrcTC } ;
+PctBrcTC    = TplEsc | HashChar | PctBrcPlain ;
+PctBrcPlain = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+
+// ?a / ?\n: the one-character string literal. The body may not start with a space,
+// which is exactly what keeps the ternary `c ? a : b` out of it.
+CharLit     <~~ push(makeConst(charLitVal(up.in))) ~~>
+            = "?" :whitespace() CharBody :whitespace(Whitespace) ;
+CharBody    = "\\" "\x21"..b"\x7e" | "\x21"..."\U0010ffff" ;
 
 // if / unless usable as a statement and as an expression (yields the branch value).
 IfExpr      <~~ push(makeIf(takeAll())) ~~>
@@ -324,17 +624,68 @@ UntilExpr   <~~ push(makeUntil(pop().body, pop())) ~~>
 
 // case SUBJ / when V1, V2 / else - lowered to a chain of == tests (a switch). A
 // subject-less case (case / when COND) tests each when expression for truthiness.
+// A case may equally carry Ruby 3 `in PATTERN` clauses instead of `when` values;
+// makeCase tells the two apart by what the clause pushed.
 CaseExpr    <~~ push(makeCase(takeAll())) ~~>
-            = KwCase [ Expression ] { WhenClause } [ KwElse Body <~~ push({els: pop().body}) ~~> ] End ;
+            = KwCase [ Expression ] [ Semi ] { InClause | WhenClause } [ KwElse Body <~~ push({els: pop().body}) ~~> ] End ;
 WhenClause  <~~ push(makeWhen(takeAll())) ~~>
             = KwWhen WhenVal { "," WhenVal } [ KwThen ] Body ;
 // A when value: a range LO..HI / LO...HI matches by membership (Range#===); any
 // other expression matches by == (subject form) or truthiness (subjectless form).
-WhenVal     = RangeVal | ScalarVal ;
+WhenVal     = WhenSplat | RangeVal | ScalarVal ;
+// when *arr: every element of the array is a candidate value.
+WhenSplat   <~~ push({t: pop(), isSplat: true}) ~~>
+            = "*" !"*" Expression ;
 RangeVal    <~~ push(makeRangeVal(takeAll())) ~~>
             = ShiftExpr ( "..." | ".." ) <~~ push(up.in) ~~> ShiftExpr ;
 ScalarVal   <~~ push({t: pop(), isRange: false}) ~~>
             = Expression ;
+
+// ----- Pattern matching (case/in, `expr => pattern', `expr in pattern') -----
+// A pattern is compiled to a function(value) -> bool that BINDS as it goes, exactly
+// like Ruby: every name in a pattern (except a pinned ^name and a Constant) is a
+// local that receives the matched part, and the bindings of a failed alternative
+// simply stay behind, which is what Ruby does too.
+InClause    <~~ push(makeIn(takeAll())) ~~>
+            = KwIn Pattern [ PatGuard ] [ KwThen ] Body ;
+PatGuard    = PatGuardIf | PatGuardUnless ;
+PatGuardIf  <~~ push({guard: pop(), gneg: false}) ~~> = KwIf Expression ;
+PatGuardUnless <~~ push({guard: pop(), gneg: true}) ~~> = KwUnless Expression ;
+
+// PATTERN => name binds the whole matched value as well ({a: Integer} => whole).
+Pattern     <~~ push(makePatBind(takeAll())) ~~>
+            = PatAlt [ "=>" !">" PatBindName ] ;
+PatBindName <~~ push({bindname: up.in}) ~~> = Name ;
+PatAlt      <~~ push(makePatAlt(takeAll())) ~~>
+            = PatPrim { "|" !"|" PatPrim } ;
+// Order matters (PEG): the bracketed forms first, then a pinned name, then a bare
+// LOWER-case name (a binding), and only then a general expression - which is what a
+// Constant (Integer, String), a literal and a range all are.
+PatPrim     = PatArray | PatHash | PatPin | PatVar | PatValue ;
+PatPin      <~~ push(makePatPin(pop())) ~~>
+            = "^" PatPinName ;
+PatPinName  <~~ push(up.in) ~~> = Name ;
+PatArray    <~~ push(makePatArray(takeAll())) ~~>
+            = "[" [ PatArrElem { "," PatArrElem } ] "]" ;
+PatArrElem  = PatSplat | Pattern ;
+// [*pre, 42, *post]: a splat swallows any number of elements; two of them make the
+// FIND pattern, which searches for the middle anywhere in the array.
+PatSplat    <~~ var n = takeAll(); push({psplat: n.length > 0 ? n[0] : ""}) ~~>
+            = "*" !"*" [ PatSplatName ] ;
+PatSplatName <~~ push(up.in) ~~> = Name ;
+PatHash     <~~ push(makePatHash(takeAll())) ~~>
+            = "{" [ PatHashElem { "," PatHashElem } ] "}" ;
+PatHashElem = PatHashRest | PatHashPair ;
+PatHashRest <~~ var n = takeAll(); push({prest: n.length > 0 ? n[0] : ""}) ~~>
+            = "**" [ PatSplatName ] ;
+// `k: PATTERN' tests the value under :k; the value may be omitted (`r:'), which
+// binds the local r to it.
+PatHashPair <~~ push(makePatPair(takeAll())) ~~>
+            = PatKey [ Pattern ] ;
+PatKey      <~~ push({pkey: hashShortName(up.in)}) ~~> = SymName ":" !":" ;
+PatVar      <~~ push(makePatVar(up.in)) ~~> = NotKw LcId ;
+LcId        = ( "a"..."z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
+PatValue    <~~ push(makePatValue(pop())) ~~> = RangeExpr ;
 
 // begin / rescue / else / ensure: genuinely executed (like Python try/except/else/
 // finally). A raise in the body unwinds to the first rescue (exception types are
@@ -348,8 +699,9 @@ BeginExpr   <~~ push(makeTry(takeAll(), up.pos)) ~~>
 // rescue [Type[, Type]] [=> Id]: the type list is parsed and discarded (types are not
 // discriminated); the `=> Id` name is pushed so makeExcept can bind it to the value.
 RescueClause <~~ push(makeExcept(takeAll())) ~~>
-            = KwRescue [ ErrList ] [ "=>" Name <~~ push(up.in) ~~> ] [ KwThen ] Body <~~ push(pop().body) ~~> ;
-ErrList     = Name { "," Name } ;
+            = KwRescue [ ErrList ] [ "=>" Name <~~ push({hname: up.in}) ~~> ] [ KwThen ] Body <~~ push({rbody: pop().body}) ~~> ;
+ErrList     = ErrName { "," ErrName } ;
+ErrName     = ScopedName <~~ push({etype: up.in}) ~~> ;
 
 // The optional argument of return/break/next must not start at a statement-modifier
 // keyword: in `break if C` the `if` belongs to the enclosing ModStmt - without the
@@ -365,6 +717,9 @@ NextExpr    <~~ push(makeNext(takeAll())) ~~>
 // iteration (it travels to the iterating method as its own control signal).
 RedoExpr    <~~ push(makeRedo(up.pos)) ~~>
             = KwRedo ;
+// retry re-runs the begin body that the running rescue clause belongs to.
+RetryExpr   <~~ push(makeRetry()) ~~>
+            = KwRetry ;
 
 // raise [EXPR[, EXPR]]: raise the first expression's value (a bare raise re-raise is
 // approximated as raising nil); a trailing message argument is parsed and ignored.
@@ -392,6 +747,16 @@ PredSfx     = "?" | "!" ;
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Name ;
 IvarRef     = "@" Id <~~ push(makeIvarRef(up.in)) ~~> ;
+// $global and @@classvar reads (their writes go through TargetHead above).
+GvarRef     = "$" Id <~~ push(makeGvarRef(up.in)) ~~> ;
+CvarRef     = "@@" Id <~~ push(makeCvarRef(up.in)) ~~> ;
+// defined?(X) answers what kind of thing X is - or nil when it is nothing. Its
+// argument is NOT evaluated, so the production keeps only the source text and
+// makeDefined classifies it at run time.
+DefinedExpr <~~ push(makeDefined(takeAll())) ~~>
+            = "defined?" :whitespace(Whitespace) "(" DefArgTxt ")" ;
+DefArgTxt   <~~ takeAll(); push({dtext: up.in}) ~~>
+            = Expression | GvarRef | Id ;
 Self        <~~ push(makeSelf()) ~~>    = KwSelf ;
 Nil         <~~ push(makeConst(null)) ~~> = "nil" KwEnd ;
 
@@ -405,7 +770,11 @@ HashLit     <~~ push(makeHash(takeAll())) ~~>
             = "{" [ HashEntry { "," HashEntry } ] "}" ;
 // { k => v } (arrow) and { name: v } (symbol key, genuinely lowered - name: is the
 // symbol :name, which the runtime already represents as the string "name").
-HashEntry   = HashDSplat | HashColon | HashArrow ;
+// HashShort is the Ruby 3.1 value omission {x:, y:} - the value is the local (or
+// method) of the same name. It comes AFTER HashColon so the form WITH a value wins.
+HashEntry   = HashDSplat | HashColon | HashShort | HashArrow ;
+HashShort   <~~ var n = hashShortName(up.in); push({hk: makeConst(mkSym(n)), hv: makeVarRef(n)}) ~~>
+            = SymName ":" !":" ;
 // {**other, k: v} merges another hash in.
 HashDSplat  <~~ push({hsplat: pop()}) ~~>
             = "**" Expression ;
@@ -413,11 +782,21 @@ HashArrow   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
             = Expression "=>" Expression ;
 HashColon   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
             = SymKey ":" Expression ;
-SymKey      <~~ push(makeConst(up.in)) ~~>
+SymKey      <~~ push(makeConst(mkSym(up.in))) ~~>
             = SymName ;
 
-SymLit      = ":" SymName <~~ push(makeConst(up.in)) ~~> :whitespace(Whitespace) ;
+// :"two words" and :"n#{1 + 1}" are symbol literals with a string body.
+SymLit      = SymQuoted | SymPlain ;
+SymPlain    = ":" SymName <~~ push(makeConst(mkSym(up.in))) ~~> :whitespace(Whitespace) ;
+SymQuoted   <~~ push(makeSymOf(pop())) ~~>
+            = ":" DqStr ;
 SymName     = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
+
+// Two string literals that are only separated by whitespace are ONE string in Ruby
+// ("a" 'd' is "ad"), so a string primary is a run of pieces.
+StrLit      <~~ push(makeAdjacent(takeAll())) ~~>
+            = StrPiece { StrPiece } ;
+StrPiece    = DqStr | SqStr ;
 
 // Double quoted strings interpolate '#{expr}'; single quoted are literal.
 DqStr       <~~ push(makeTemplate(takeAll())) ~~>
@@ -431,8 +810,10 @@ TplEsc      = "\\" "\x20"..b"\x7e" ;
 HashChar    = "#" !"{" ;
 TplPlain    = "\x20"..."\x21" | "\x24"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
 
-SqStr       = "'" :whitespace() { SqEsc | SqPlain } <~~ push(makeConst(unescapeSq(up.in))) ~~> "'" :whitespace(Whitespace) ;
+SqStr       = "'" :whitespace() { SqEsc | SqLone | SqPlain } <~~ push(makeConst(unescapeSq(up.in))) ~~> "'" :whitespace(Whitespace) ;
 SqEsc       = "\\" ( "'" | "\\" ) ;
+// Only \' and \\ are escapes inside '..'; any other backslash is a literal one.
+SqLone      = "\\" ;
 SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" ;
 
 // A Name that is not a reserved word (keywords, literals, puts/print). The
@@ -460,7 +841,7 @@ NotKw       = :script(~~
                    "do", "then", "return", "break", "next", "class", "module", "for",
                    "self", "nil", "true", "false", "and", "or", "not", "case", "when",
                    "in", "yield", "begin", "rescue", "ensure", "raise", "puts", "print",
-                   "redo"]
+                   "redo", "super", "retry", "alias"]
         for (var k = 0; k < kws.length; k++) {
             if (kws[k] === s) { return abnf.newToken("\x01reserved", 0) }
         }
@@ -567,6 +948,109 @@ SameLine    = :script(~~
     })()
 ~~) ;
 
+// CmdArgAhead succeeds (matching empty) only where a parenthesis-less argument list
+// really starts: the next character must be able to OPEN an expression and must not
+// be readable as a binary operator continuing the previous one. Ruby's own rule is
+// spacing - `foo -1` passes -1, `foo - 1` subtracts - so a sign/star/ampersand only
+// counts when it is glued to what follows. A keyword that ends or modifies the
+// statement (end, if, do, and, ...) is not an argument either. Pure function of
+// (source, position), like the other guards here.
+CmdArgAhead = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01nocmd", 0)
+        var i = 0
+        var cc = c.peek(i)
+        var sawSpace = false
+        while (true) {
+            if (cc === 32 || cc === 9) { sawSpace = true; i = i + 1; cc = c.peek(i); continue }
+            if (cc === 13) { i = i + 1; cc = c.peek(i); continue }
+            break
+        }
+        if (!sawSpace) { return no }                      // `foo(1)` is a normal call
+        if (cc < 0 || cc === 10 || cc === 35) { return no }
+        // Characters that can only continue an expression, never open one.
+        if (cc === 40 || cc === 41 || cc === 93 || cc === 125 || cc === 44 || cc === 59
+            || cc === 46 || cc === 61 || cc === 60 || cc === 62 || cc === 63 || cc === 124
+            || cc === 94 || cc === 47 || cc === 37 || cc === 43 || cc === 92) { return no }
+        var nx = c.peek(i + 1)
+        // - * & ** are arguments only when glued to the value that follows.
+        if (cc === 45 || cc === 42 || cc === 38) {
+            if (nx === 32 || nx === 9 || nx === 61 || nx < 0) { return no }
+            return undefined
+        }
+        if (cc === 33) { if (nx === 61) { return no } return undefined }
+        // A reserved word that closes or modifies the statement is not an argument.
+        if ((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95) {
+            var w = ""
+            var j = i
+            var dd = cc
+            while ((dd >= 48 && dd <= 57) || (dd >= 65 && dd <= 90) || (dd >= 97 && dd <= 122) || dd === 95) {
+                w = w + String.fromCharCode(dd)
+                j = j + 1
+                dd = c.peek(j)
+            }
+            var bad = ["end", "if", "unless", "while", "until", "do", "then", "else",
+                       "elsif", "rescue", "ensure", "and", "or", "in", "when"]
+            for (var k = 0; k < bad.length; k++) { if (bad[k] === w) { return no } }
+        }
+        return undefined
+    })()
+~~) ;
+
+// FatArrowAhead succeeds (matching empty) only when a '=>' follows on this line at
+// BRACKET DEPTH ZERO - that is, a rightward-assignment arrow rather than the one
+// inside a hash literal { k => v } or an argument list f(k => v). Without it every
+// ordinary statement would parse its whole expression once for PatAssign and again
+// for ExprStmt; with it the second parse only happens on the rare line that has one.
+// Pure function of (source, position), capped, and it stops at the end of the line.
+FatArrowAhead = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01nofatarrow", 0)
+        var i = 0
+        var depth = 0
+        var steps = 0
+        // Whitespace is NOT skipped before a script, so the blank lines and comments
+        // that separate this statement from the previous one are still ahead: step
+        // over them first, or the scan would stop at the very first newline.
+        var lead = c.peek(i)
+        while (steps < 4000) {
+            steps = steps + 1
+            if (lead === 32 || lead === 9 || lead === 13 || lead === 10) { i = i + 1; lead = c.peek(i); continue }
+            if (lead === 35) { while (lead !== 10 && lead !== -1) { i = i + 1; lead = c.peek(i) } continue }
+            break
+        }
+        while (steps < 4000) {
+            steps = steps + 1
+            var cc = c.peek(i)
+            if (cc < 0 || cc === 10 || cc === 35) { return no }
+            if (cc === 59 && depth === 0) { return no }          // ';' ends the statement
+            if (cc === 40 || cc === 91 || cc === 123) { depth = depth + 1; i = i + 1; continue }
+            if (cc === 41 || cc === 93 || cc === 125) {
+                if (depth === 0) { return no }
+                depth = depth - 1
+                i = i + 1
+                continue
+            }
+            if (cc === 34 || cc === 39) {                        // skip over a string
+                var q = cc
+                i = i + 1
+                var dd = c.peek(i)
+                while (dd >= 0 && dd !== q && dd !== 10) {
+                    if (dd === 92) { i = i + 1 }
+                    i = i + 1
+                    dd = c.peek(i)
+                }
+                if (dd !== q) { return no }
+                i = i + 1
+                continue
+            }
+            if (cc === 61 && c.peek(i + 1) === 62 && depth === 0) { return undefined }
+            i = i + 1
+        }
+        return no
+    })()
+~~) ;
+
 KwDef       = "def" KwEnd ;
 KwClass     = "class" KwEnd ;
 KwModule    = "module" KwEnd ;
@@ -591,7 +1075,10 @@ KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwNext      = "next" KwEnd ;
 KwRedo      = "redo" KwEnd ;
+KwRetry     = "retry" KwEnd ;
 KwSelf      = "self" KwEnd ;
+KwSuper     = "super" KwEnd ;
+KwAlias     = "alias" KwEnd ;
 KwPuts      = ( "puts" | "print" ) KwEnd ;
 
 // ---
@@ -732,6 +1219,73 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return null
     }
     function makeSelf() { return function() { return findSelf() } }
+    function makeScopedConst(text) {
+        var name = stripWs(text)
+        return function() {
+            var v = anytype
+            v = lookupConst(name)
+            if (v == undefined) { fail("uninitialized constant " + name) }
+            return v
+        }
+    }
+    // $globals live in one program-wide table (they are not scoped).
+    var rubyGlobals = {}
+    function makeGvarRef(name) {
+        return function() { return hasOwn(rubyGlobals, name) ? rubyGlobals[name] : null }
+    }
+    // A @@classvar lives on the class object under its '@@' name and is shared with
+    // every subclass, so the lookup walks the superclass chain.
+    function selfClass() {
+        var s = findSelf()
+        if (s === null || s === undefined) { return null }
+        if (s.__isclass === true) { return s }
+        if (s.__class != undefined) { return s.__class }
+        return null
+    }
+    function cvarHolder(name) {
+        var c = selfClass()
+        while (c != null && c != undefined) {
+            if (hasOwn(c, "@@" + name)) { return c }
+            c = c.__super
+        }
+        return null
+    }
+    function makeCvarRef(name) {
+        return function() {
+            var h = cvarHolder(name)
+            if (h == null) { return null }
+            return h["@@" + name]
+        }
+    }
+    function setCvar(name, v) {
+        var h = cvarHolder(name)
+        if (h == null) { h = selfClass() }
+        if (h == null) { fail("@@" + name + " outside of a class") }
+        h["@@" + name] = v
+    }
+    // defined?(X): classified from the SOURCE TEXT of the argument, which is what
+    // Ruby's own answer amounts to - the argument is never evaluated.
+    function makeDefined(items) {
+        var txt = ""
+        for (var i = 0; i < items.length; i++) { if (items[i].dtext != undefined) { txt = items[i].dtext } }
+        var t = strStrip(txt)
+        return function() {
+            if (t.length == 0) { return null }
+            var c0 = t.charAt(0)
+            if (c0 == "$") { return hasOwn(rubyGlobals, t.slice(1)) ? "global-variable" : null }
+            if (c0 == "@") { return "instance-variable" }
+            if (t == "self") { return "self" }
+            if (t == "nil" || t == "true" || t == "false") { return "expression" }
+            if (c0 >= "A" && c0 <= "Z") {
+                for (var i2 = scopes.length - 1; i2 >= 0; i2--) { if (hasOwn(scopes[i2], t)) { return "constant" } }
+                return hasOwn(hostGlobals, t) ? "constant" : null
+            }
+            for (var j = scopes.length - 1; j >= 1; j--) { if (hasOwn(scopes[j], t)) { return "local-variable" } }
+            if (rubyMethods["$" + t] === true) { return "method" }
+            if (hasOwn(globalScope, t) || hasOwn(hostGlobals, t)) { return "method" }
+            return null
+        }
+    }
     function makeIvarRef(name) {
         return function() {
             var s = findSelf()
@@ -756,6 +1310,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             coll = collT()
             var seq = []
             if (Array.isArray(coll)) { seq = coll }
+            else if (isRange(coll)) { seq = rangeToA(coll) }
             else if (isDict(coll)) { for (var d = 0; d < coll.keys.length; d++) { seq.push([coll.keys[d], coll.vals[d]]) } }
             else { fail("for-in needs an array or a hash") }
             for (var i = 0; i < seq.length; i++) {
@@ -775,19 +1330,259 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
 
-    function makeRange(items) {
+    // ----- Symbols -----
+    // :name is its OWN type in Ruby (:ok != "ok"), so it cannot stay the string it
+    // used to be here. Symbols are INTERNED in symTable, which makes === identity
+    // decide equality and therefore lets them work as hash keys unchanged.
+    var symTable = {}
+    function mkSym(name) {
+        var k = "$" + name
+        if (hasOwn(symTable, k)) { return symTable[k] }
+        var s = {__sym: true, s: name}
+        symTable[k] = s
+        return s
+    }
+    function isSym(v) { return v !== null && v !== undefined && typeof v == "object" && v.__sym === true }
+
+    // ----- The numeric tower -----
+    // An Integer is a plain (exact, un-truncated) JS number; Float, Rational and
+    // Complex are BOXES, because Ruby needs 7 / 2 == 3 and 7.0 / 2 == 3.5 at the same
+    // time and one JS number cannot carry that distinction. Every arithmetic step
+    // promotes to the higher of the two ranks (int < rational < float < complex).
+    function isFlo(v) { return v !== null && v !== undefined && typeof v == "object" && v.__flo === true }
+    function isRat(v) { return v !== null && v !== undefined && typeof v == "object" && v.__rat === true }
+    function isCpx(v) { return v !== null && v !== undefined && typeof v == "object" && v.__cpx === true }
+    function mkFlo(x) { return {__flo: true, f: x} }
+    function mkCpx(re, im) { return {__cpx: true, re: re, im: im} }
+    function gcd2(a, b) {
+        var x = a < 0 ? 0 - a : a
+        var y = b < 0 ? 0 - b : b
+        while (y != 0) {
+            var t = x % y
+            x = y
+            y = t
+        }
+        return x
+    }
+    function mkRat(n, d) {
+        var nn = n
+        var dd = d
+        if (dd < 0) { nn = 0 - nn; dd = 0 - dd }
+        var g = gcd2(nn, dd)
+        if (g > 1) { nn = nn / g; dd = dd / g }
+        return {__rat: true, n: nn, d: dd}
+    }
+    function isNumV(v) { return typeof v == "number" || isFlo(v) || isRat(v) || isCpx(v) }
+    function numRank(v) {
+        if (typeof v == "number") { return 0 }
+        if (isRat(v)) { return 1 }
+        if (isFlo(v)) { return 2 }
+        if (isCpx(v)) { return 3 }
+        return -1
+    }
+    function toF(v) {
+        if (typeof v == "number") { return v }
+        if (isFlo(v)) { return v.f }
+        if (isRat(v)) { return v.n / v.d }
+        if (isCpx(v)) { return v.re }
+        return 0
+    }
+    function asRat(v) { if (isRat(v)) { return v } return mkRat(toF(v), 1) }
+    function reOf(v) { if (isCpx(v)) { return v.re } return toF(v) }
+    function imOf(v) { if (isCpx(v)) { return v.im } return 0 }
+    function isUserObj(v) { return v !== null && v !== undefined && typeof v == "object" && v.__class != undefined }
+    // Integer division and modulo FLOOR in Ruby (-7 / 2 is -4, -7 % 3 is 2).
+    function idiv(a, b) { if (b == 0) { fail("divided by 0") } return Math.floor(a / b) }
+    function imod(a, b) { if (b == 0) { fail("divided by 0") } return a - Math.floor(a / b) * b }
+    function numBin(op, l, r) {
+        var rk = numRank(l)
+        var rr = numRank(r)
+        if (rr > rk) { rk = rr }
+        if (rk < 0) { fail("not a number in '" + op + "'") }
+        if (rk == 3) {
+            var ar = reOf(l)
+            var ai = imOf(l)
+            var br = reOf(r)
+            var bi = imOf(r)
+            if (op == "+") { return mkCpx(ar + br, ai + bi) }
+            if (op == "-") { return mkCpx(ar - br, ai - bi) }
+            if (op == "*") { return mkCpx(ar * br - ai * bi, ar * bi + ai * br) }
+            if (op == "/") {
+                var den = br * br + bi * bi
+                return mkCpx((ar * br + ai * bi) / den, (ai * br - ar * bi) / den)
+            }
+            fail("Complex does not support '" + op + "'")
+        }
+        if (rk == 1) {
+            var p = asRat(l)
+            var q = asRat(r)
+            if (op == "+") { return mkRat(p.n * q.d + q.n * p.d, p.d * q.d) }
+            if (op == "-") { return mkRat(p.n * q.d - q.n * p.d, p.d * q.d) }
+            if (op == "*") { return mkRat(p.n * q.n, p.d * q.d) }
+            if (op == "/") { return mkRat(p.n * q.d, p.d * q.n) }
+        }
+        if (rk >= 1) {
+            var x = toF(l)
+            var y = toF(r)
+            if (op == "+") { return mkFlo(x + y) }
+            if (op == "-") { return mkFlo(x - y) }
+            if (op == "*") { return mkFlo(x * y) }
+            if (op == "/") { return mkFlo(x / y) }
+            if (op == "%") { return mkFlo(x - Math.floor(x / y) * y) }
+            if (op == "**") { return mkFlo(Math.pow(x, y)) }
+            fail("Float does not support '" + op + "'")
+        }
+        if (op == "+") { return l + r }
+        if (op == "-") { return l - r }
+        if (op == "*") { return l * r }
+        if (op == "/") { return idiv(l, r) }
+        if (op == "%") { return imod(l, r) }
+        if (op == "**") { if (r < 0) { return mkFlo(Math.pow(l, r)) } return Math.pow(l, r) }
+        if (op == "&") { return l & r }
+        if (op == "|") { return l | r }
+        if (op == "^") { return l ^ r }
+        if (op == "<<") { return l * Math.pow(2, r) }
+        if (op == ">>") { return Math.floor(l / Math.pow(2, r)) }
+        fail("Integer does not support '" + op + "'")
+    }
+    function numCmp(l, r) {
+        var a = toF(l)
+        var b = toF(r)
+        if (a < b) { return -1 }
+        if (a > b) { return 1 }
+        return 0
+    }
+    function numEq(l, r) {
+        if (isCpx(l) || isCpx(r)) { return reOf(l) == reOf(r) && imOf(l) == imOf(r) }
+        return toF(l) == toF(r)
+    }
+    function rneg(v) {
+        if (typeof v == "number") { return 0 - v }
+        if (isFlo(v)) { return mkFlo(0 - v.f) }
+        if (isRat(v)) { return mkRat(0 - v.n, v.d) }
+        if (isCpx(v)) { return mkCpx(0 - v.re, 0 - v.im) }
+        if (isUserObj(v)) { return mcall(v, "-@", [], null) }
+        fail("cannot negate")
+    }
+    makeNeg = function(t) { return function() { return rneg(t()) } }
+    function makeBitNot(t) { return function() { return 0 - toF(t()) - 1 } }
+    // One binary step for every operator that is not '+': a user object dispatches to
+    // its own operator method (def +, def <=>, def []), everything else is numeric.
+    function rbin(op, l, r) {
+        if (isUserObj(l)) { return mcall(l, op, [r], null) }
+        return numBin(op, l, r)
+    }
+    function makePow(items) {
         if (items.length == 1) { return items[0] }
-        var loT = items[0]
-        var op = items[1]
-        var hiT = items[2]
-        return function() {
-            var lo = loT()
-            var hi = hiT()
-            var out = []
-            var end = op == "..." ? hi - 1 : hi
-            for (var i = lo; i <= end; i++) { out.push(i) }
+        var lt = items[0]
+        var rt = items[1]
+        return function() { return rbin("**", lt(), rt()) }
+    }
+    // <=> yields nil for values that cannot be compared (1 <=> "x").
+    function spaceship(l, r) {
+        if (isUserObj(l)) { return mcall(l, "<=>", [r], null) }
+        if (isNumV(l) && isNumV(r)) { return numCmp(l, r) }
+        if (typeof l == "string" && typeof r == "string") { return l < r ? -1 : (l > r ? 1 : 0) }
+        return null
+    }
+    function rcmp(l, r) {
+        var s = spaceship(l, r)
+        if (s === null || s === undefined) { fail("comparison of incompatible values") }
+        return s
+    }
+
+    // ----- Ranges: lazy objects (Ruby's Range), not eager arrays. lo/hi may be
+    // integers or strings, and hi may be nil for an endless range (5..). -----
+    function mkRange(lo, hi, excl) { return {__rng: true, lo: lo, hi: hi, excl: excl} }
+    function isRange(v) { return v !== null && v !== undefined && typeof v == "object" && v.__rng === true }
+    // "a".succ: increment the last character, carrying into the ones before it.
+    function strSucc(s) {
+        var i = s.length - 1
+        var out = s
+        while (i >= 0) {
+            var cc = out.charCodeAt(i)
+            if (cc == 122) { out = out.slice(0, i) + "a" + out.slice(i + 1); i = i - 1; continue }
+            if (cc == 90) { out = out.slice(0, i) + "A" + out.slice(i + 1); i = i - 1; continue }
+            if (cc == 57) { out = out.slice(0, i) + "0" + out.slice(i + 1); i = i - 1; continue }
+            return out.slice(0, i) + String.fromCharCode(cc + 1) + out.slice(i + 1)
+        }
+        return "a" + out
+    }
+    function rangeToA(r) {
+        if (r.hi === null || r.hi === undefined) { fail("cannot convert an endless range to an array") }
+        var out = []
+        if (typeof r.lo == "string") {
+            var cur = r.lo
+            var guard = 0
+            while (guard < 100000) {
+                if (cur.length > r.hi.length) { break }
+                if (r.excl && cur == r.hi) { break }
+                out.push(cur)
+                if (cur == r.hi) { break }
+                cur = strSucc(cur)
+                guard = guard + 1
+            }
             return out
         }
+        var end = toF(r.hi)
+        for (var i = toF(r.lo); r.excl ? i < end : i <= end; i++) { out.push(i) }
+        return out
+    }
+    function rangeCover(r, v) {
+        if (r.lo !== null && r.lo !== undefined) {
+            var lc = spaceship(r.lo, v)
+            if (lc === null || lc === undefined || lc > 0) { return false }
+        }
+        if (r.hi === null || r.hi === undefined) { return true }
+        var hc = spaceship(v, r.hi)
+        if (hc === null || hc === undefined) { return false }
+        return r.excl ? hc < 0 : hc <= 0
+    }
+    // items = [lo] | [lo, op] (endless) | [lo, op, hi]
+    // {x:, y:}: the rule's own text is "x:" (possibly with spaces before the colon),
+    // and the name is the identifier prefix of it.
+    function hashShortName(s) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var c = s.charCodeAt(i)
+            var ok = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95
+            if (!ok) { return out }
+            out += String.fromCharCode(c)
+        }
+        return out
+    }
+    function makeRange(items) {
+        if (items.length == 1) { return items[0] }
+        // Beginless (..9): the operator is the FIRST item, so lo stays nil.
+        if (typeof items[0] == "string") {
+            var bop = items[0]
+            var bhiT = items[1]
+            return function() {
+                var bhi = anytype
+                bhi = bhiT()
+                return mkRange(null, bhi, bop == "...")
+            }
+        }
+        var loT = items[0]
+        var op = items[1]
+        var hiT = items.length > 2 ? items[2] : null
+        return function() {
+            var lo = anytype
+            lo = loT()
+            var hi = anytype
+            hi = hiT != null ? hiT() : null
+            return mkRange(lo, hi, op == "...")
+        }
+    }
+    // The methods of a Range; iteration and the Enumerable methods go through the
+    // materialized array, membership stays lazy (an endless range has no array).
+    function rangeMethod(t, name, args, blk) {
+        if (name == "to_a" || name == "entries" || name == "to_ary") { return rangeToA(t) }
+        if (name == "include?" || name == "member?" || name == "cover?" || name == "===") { return rangeCover(t, args[0]) }
+        if (name == "first" || name == "begin" || name == "min") { return t.lo }
+        if (name == "last" || name == "end") { return t.hi }
+        if (name == "exclude_end?") { return t.excl }
+        return arrayMethod(rangeToA(t), name, args, blk)
     }
     // [a, *b, c]: a splat element splices an array in (a non-array splats as itself).
     function makeArray(items) {
@@ -826,18 +1621,33 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Dictionaries (isDict/dictFind/dictSet) are shared - see lib/interp-core.js.
 
     // Ruby to_s / interpolation and inspect.
+    // A Float prints with a decimal point even when its value is whole (1000.0).
+    function floStr(x) {
+        if (x != x) { return "NaN" }
+        if (x == Math.floor(x) && x < 10000000000000000 && x > -10000000000000000) { return "" + x + ".0" }
+        return "" + x
+    }
     function rstr(v) {
         if (v === null || v === undefined) { return "" }
         if (v === true) { return "true" }
         if (v === false) { return "false" }
         if (typeof v == "string") { return v }
+        if (isSym(v)) { return v.s }
+        if (isFlo(v)) { return floStr(v.f) }
+        if (isRat(v)) { return "" + v.n + "/" + v.d }
+        if (isCpx(v)) { return "" + v.re + "+" + v.im + "i" }
+        if (isRange(v)) { return rstr(v.lo) + (v.excl ? "..." : "..") + rstr(v.hi) }
         if (Array.isArray(v)) { return rinspect(v) }
         if (isDict(v)) { return rinspect(v) }
+        // to_s may be inherited (Exception#to_s lives on the base class), so the whole
+        // ancestor chain has to be searched - a direct property read on v.__class misses it.
+        if (isUserObj(v) && typeof lookupMethod(v.__class, "to_s") == "function") { return rstr(mcall(v, "to_s", [], null)) }
         return "" + v
     }
     function rinspect(v) {
         if (v === null || v === undefined) { return "nil" }
         if (typeof v == "string") { return "\"" + v + "\"" }
+        if (isSym(v)) { return ":" + v.s }
         if (Array.isArray(v)) {
             var out = "["
             for (var i = 0; i < v.length; i++) { if (i > 0) { out += ", " } out += rinspect(v[i]) }
@@ -853,9 +1663,117 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return rstr(v)
     }
+    // An exception object stands in for its message wherever a plain string is
+    // expected. MRI would raise here, but `raise "x"` producing a RuntimeError rather
+    // than the bare string is the one place the feature matrix deliberately diverges,
+    // and this keeps `e + "er"` / `e == "boom"` reading as the message.
+    function isExcObj(v) {
+        return isUserObj(v) && valueIsA(v, hostGlobals["Exception"])
+    }
     function radd(l, r) {
+        if (isExcObj(l) && typeof lookupMethod(l.__class, "+") != "function") { return rstr(l) + rstr(r) }
+        if (isUserObj(l)) { return mcall(l, "+", [r], null) }
         if (typeof l == "string" || typeof r == "string") { return rstr(l) + rstr(r) }
-        return (l + r) | 0
+        if (Array.isArray(l) && Array.isArray(r)) { return l.concat(r) }
+        return numBin("+", l, r)
+    }
+    // "ab" * 3, and the format operator "%d-%d" % [3, 4] (Kernel#format).
+    function strRepeat(s, n) {
+        var out = ""
+        for (var i = 0; i < n; i++) { out += s }
+        return out
+    }
+    function padTo(s, width, left, padChar) {
+        var out = s
+        while (out.length < width) { if (left) { out = padChar + out } else { out = out + padChar } }
+        return out
+    }
+    function fixedStr(x, prec) {
+        var neg = x < 0
+        var v = neg ? 0 - x : x
+        var scale = Math.pow(10, prec)
+        var r = Math.floor(v * scale + 0.5)
+        var ip = Math.floor(r / scale)
+        var fp = "" + (r - ip * scale)
+        while (fp.length < prec) { fp = "0" + fp }
+        var out = "" + ip
+        if (prec > 0) { out = out + "." + fp }
+        return neg ? "-" + out : out
+    }
+    function baseStr(n, base) {
+        if (n == 0) { return "0" }
+        var neg = n < 0
+        var v = neg ? 0 - n : n
+        var digits = "0123456789abcdef"
+        var out = ""
+        while (v > 0) {
+            var d = v % base
+            out = digits.charAt(d) + out
+            v = Math.floor(v / base)
+        }
+        return neg ? "-" + out : out
+    }
+    // A single %-directive: [-][0][width][.prec]<conv>.
+    function fmtOne(spec, conv, v) {
+        var left = false
+        var zero = false
+        var i = 0
+        while (i < spec.length) {
+            var ch = spec.charAt(i)
+            if (ch == "-") { left = true; i = i + 1; continue }
+            if (ch == "0") { zero = true; i = i + 1; continue }
+            if (ch == "+" || ch == " ") { i = i + 1; continue }
+            break
+        }
+        var width = 0
+        while (i < spec.length && spec.charCodeAt(i) >= 48 && spec.charCodeAt(i) <= 57) {
+            width = width * 10 + (spec.charCodeAt(i) - 48)
+            i = i + 1
+        }
+        var prec = -1
+        if (i < spec.length && spec.charAt(i) == ".") {
+            i = i + 1
+            prec = 0
+            while (i < spec.length && spec.charCodeAt(i) >= 48 && spec.charCodeAt(i) <= 57) {
+                prec = prec * 10 + (spec.charCodeAt(i) - 48)
+                i = i + 1
+            }
+        }
+        var body = ""
+        if (conv == "d" || conv == "i" || conv == "u") { body = "" + Math.floor(toF(v)) }
+        else if (conv == "f") { body = fixedStr(toF(v), prec < 0 ? 6 : prec) }
+        else if (conv == "x") { body = baseStr(Math.floor(toF(v)), 16) }
+        else if (conv == "X") { body = baseStr(Math.floor(toF(v)), 16).toUpperCase() }
+        else if (conv == "o") { body = baseStr(Math.floor(toF(v)), 8) }
+        else if (conv == "b") { body = baseStr(Math.floor(toF(v)), 2) }
+        else { body = rstr(v) }
+        return padTo(body, width, !left, (zero && !left && conv != "s") ? "0" : " ")
+    }
+    function rformat(fmt, arg) {
+        var args = Array.isArray(arg) ? arg : [arg]
+        var out = ""
+        var ai = 0
+        var i = 0
+        while (i < fmt.length) {
+            var ch = fmt.charAt(i)
+            if (ch != "%") { out += ch; i = i + 1; continue }
+            if (i + 1 < fmt.length && fmt.charAt(i + 1) == "%") { out += "%"; i = i + 2; continue }
+            var j = i + 1
+            var spec = ""
+            while (j < fmt.length) {
+                var c2 = fmt.charAt(j)
+                if ((c2 >= "a" && c2 <= "z") || (c2 >= "A" && c2 <= "Z")) { break }
+                spec += c2
+                j = j + 1
+            }
+            if (j >= fmt.length) { out += ch; i = i + 1; continue }
+            var av = anytype
+            av = ai < args.length ? args[ai] : null
+            ai = ai + 1
+            out += fmtOne(spec, fmt.charAt(j), av)
+            i = j + 1
+        }
+        return out
     }
     function makeTemplate(items) {
         return function() {
@@ -866,6 +1784,152 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return out
         }
+    }
+    // ----- Heredocs -----
+    // HdScan handed the WHOLE literal over as one token: the marker line, the body
+    // lines and the terminator line. Everything below is plain text work on that
+    // string - split off the body, strip the <<~ indentation, then reuse the ordinary
+    // template pieces (makeTemplate) for '#{}' interpolation.
+    function makeHeredoc(text) {
+        var i = 2
+        var squiggly = false
+        if (text.charAt(i) == "~") { squiggly = true; i++ }
+        else if (text.charAt(i) == "-") { i++ }
+        var quote = ""
+        if (text.charAt(i) == "'" || text.charAt(i) == "\"") { quote = text.charAt(i); i++ }
+        var nl = text.indexOf("\n")
+        var body = nl < 0 ? "" : text.slice(nl + 1)
+        // The scanner stopped right after the terminator line, so the LAST line of
+        // what it returned is that terminator; drop it.
+        var trimmed = body
+        if (trimmed.length > 0 && trimmed.charAt(trimmed.length - 1) == "\n") { trimmed = trimmed.slice(0, trimmed.length - 1) }
+        // lastIndexOf does not exist in the frozen engine - walk back by hand.
+        var lastNl = -1
+        for (var b = trimmed.length - 1; b >= 0; b--) {
+            if (trimmed.charAt(b) == "\n") { lastNl = b; break }
+        }
+        body = lastNl < 0 ? "" : body.slice(0, lastNl + 1)
+        if (squiggly) { body = stripHeredocIndent(body) }
+        if (quote == "'") { return makeConst(body) }
+        return makeTemplate(heredocParts(body))
+    }
+    // <<~ removes the SMALLEST indentation of any non-blank line from every line.
+    // No split()/join() and no indexOf FROM-INDEX here: the frozen engine has
+    // neither, so the body is walked line by line by hand.
+    function nlAt(s, from) {
+        for (var i = from; i < s.length; i++) { if (s.charAt(i) == "\n") { return i } }
+        return -1
+    }
+    function stripHeredocIndent(body) {
+        var min = -1
+        var i = 0
+        while (i < body.length) {
+            var e = nlAt(body, i)
+            if (e < 0) { e = body.length }
+            var w = i
+            while (w < e && (body.charAt(w) == " " || body.charAt(w) == "\t")) { w++ }
+            if (w < e) {
+                var ind = w - i
+                if (min < 0 || ind < min) { min = ind }
+            }
+            i = e + 1
+        }
+        if (min <= 0) { return body }
+        var out = ""
+        var j = 0
+        while (j < body.length) {
+            var e2 = nlAt(body, j)
+            var hasNl = e2 >= 0
+            if (e2 < 0) { e2 = body.length }
+            var take = j + min < e2 ? j + min : e2
+            out += body.slice(take, e2)
+            if (hasNl) { out += "\n" }
+            j = e2 + 1
+        }
+        return out
+    }
+    // Split an interpolating body into the {s: text} / {e: thunk} pieces makeTemplate
+    // consumes. The expression of a '#{}' is parsed with the grammar itself, from the
+    // Expression production - the same door require uses to pull in another file.
+    function heredocParts(body) {
+        var parts = []
+        var lit = ""
+        var i = 0
+        while (i < body.length) {
+            var ch = body.charAt(i)
+            if (ch == "\\" && i + 1 < body.length) { lit += ch + body.charAt(i + 1); i += 2; continue }
+            if (ch == "#" && body.charAt(i + 1) == "{") {
+                var depth = 1
+                var j = i + 2
+                while (j < body.length && depth > 0) {
+                    var cj = body.charAt(j)
+                    if (cj == "{") { depth++ }
+                    else if (cj == "}") { depth-- ; if (depth == 0) { break } }
+                    j++
+                }
+                if (depth != 0) { lit += ch; i++; continue }
+                if (lit.length > 0) { parts.push({s: unescapeJs(lit)}) ; lit = "" }
+                parts.push({e: parseFragment(body.slice(i + 2, j))})
+                i = j + 1
+                continue
+            }
+            lit += ch
+            i++
+        }
+        if (lit.length > 0) { parts.push({s: unescapeJs(lit)}) }
+        return parts
+    }
+    function parseFragment(src) {
+        var frag = c.parseFrom(c.agrammar, src, "Expression")
+        return c.compile(frag).stack[0]
+    }
+
+    // "a" 'd' is one string: a run of adjacent literal pieces is concatenated.
+    function makeAdjacent(items) {
+        if (items.length == 1) { return items[0] }
+        return function() {
+            var out = ""
+            for (var i = 0; i < items.length; i++) { out += rstr(items[i]()) }
+            return out
+        }
+    }
+    function makeSymOf(t) { return function() { return mkSym(rstr(t())) } }
+    // ?a / ?\n: the body of a one-character literal, with the escapes of "..".
+    function charLitVal(s) {
+        var body = s.slice(1)
+        if (body.charCodeAt(0) == 92) { return unescapeJs(body) }
+        return body
+    }
+    // pctRawOf digs the {raw: text} the delimiter production pushed out of the items.
+    function pctRawOf(items) {
+        for (var i = 0; i < items.length; i++) { if (items[i].raw != undefined) { return items[i].raw } }
+        return ""
+    }
+    // %w / %i: split the body on whitespace into strings (or symbols).
+    function splitWords(s) {
+        var out = []
+        var cur = ""
+        for (var i = 0; i < s.length; i++) {
+            var cc = s.charCodeAt(i)
+            if (cc == 32 || cc == 9 || cc == 10 || cc == 13) {
+                if (cur.length > 0) { out.push(cur); cur = "" }
+                continue
+            }
+            cur += s.charAt(i)
+        }
+        if (cur.length > 0) { out.push(cur) }
+        return out
+    }
+    function pctWords(s, asSym) {
+        var w = splitWords(s)
+        if (!asSym) { return w }
+        var out = []
+        for (var i = 0; i < w.length; i++) { out.push(mkSym(w[i])) }
+        return out
+    }
+    // %W / %I: the body interpolates first, so the split has to happen at run time.
+    function makeWordsThunk(t, asSym) {
+        return function() { return pctWords(rstr(t()), asSym) }
     }
     function unescapeSq(s) {
         var out = ""
@@ -889,6 +1953,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return v.length
     }
     function rindex(o, i) {
+        // p[x] calls a Proc, obj[i] a user-defined def [].
+        if (typeof o == "function") { return blockCall(o, [i]) }
+        if (isRange(o)) { return rangeToA(o)[i] }
+        if (isUserObj(o)) { return mcall(o, "[]", [i], null) }
         if (isDict(o)) {
             var di = dictFind(o, i)
             return di < 0 ? null : o.vals[di]
@@ -905,6 +1973,52 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
 
     // ----- Method dispatch (js_mcall equivalent) -----
+    // The class object of any value (Object#class), used by is_a? / instance_of? and
+    // by the `when Integer` form of case.
+    function classOf(v) {
+        if (v === null || v === undefined) { return hostGlobals["NilClass"] }
+        if (v === true) { return hostGlobals["TrueClass"] }
+        if (v === false) { return hostGlobals["FalseClass"] }
+        if (typeof v == "number") { return hostGlobals["Integer"] }
+        if (isFlo(v)) { return hostGlobals["Float"] }
+        if (isRat(v)) { return hostGlobals["Rational"] }
+        if (isCpx(v)) { return hostGlobals["Complex"] }
+        if (typeof v == "string") { return hostGlobals["String"] }
+        if (isSym(v)) { return hostGlobals["Symbol"] }
+        if (isRange(v)) { return hostGlobals["Range"] }
+        if (typeof v == "function") { return hostGlobals["Proc"] }
+        if (Array.isArray(v)) { return hostGlobals["Array"] }
+        if (isDict(v)) { return hostGlobals["Hash"] }
+        if (isUserObj(v)) { return v.__class }
+        return hostGlobals["Object"]
+    }
+    function strStrip(s) {
+        var a = 0
+        var b = s.length
+        while (a < b && (s.charCodeAt(a) == 32 || s.charCodeAt(a) == 9 || s.charCodeAt(a) == 10 || s.charCodeAt(a) == 13)) { a = a + 1 }
+        while (b > a && (s.charCodeAt(b - 1) == 32 || s.charCodeAt(b - 1) == 9 || s.charCodeAt(b - 1) == 10 || s.charCodeAt(b - 1) == 13)) { b = b - 1 }
+        return s.slice(a, b)
+    }
+    // The methods of the boxed numerics (Float, Rational, Complex).
+    function numberMethod(t, name, args, blk) {
+        if (name == "to_s" || name == "inspect") { return rstr(t) }
+        if (name == "to_f") { return isFlo(t) ? t : mkFlo(toF(t)) }
+        if (name == "to_i" || name == "to_int" || name == "truncate") { var x1 = toF(t); return x1 < 0 ? Math.ceil(x1) : Math.floor(x1) }
+        if (name == "to_r") { return asRat(t) }
+        if (name == "to_c") { return isCpx(t) ? t : mkCpx(toF(t), 0) }
+        if (name == "abs") { var x2 = toF(t); return mkFlo(x2 < 0 ? 0 - x2 : x2) }
+        if (name == "floor") { return Math.floor(toF(t)) }
+        if (name == "ceil") { return Math.ceil(toF(t)) }
+        if (name == "round") { var x3 = toF(t); return Math.floor(x3 + 0.5) }
+        if (name == "zero?") { return toF(t) == 0 }
+        if (name == "positive?") { return toF(t) > 0 }
+        if (name == "negative?") { return toF(t) < 0 }
+        if (name == "numerator") { return asRat(t).n }
+        if (name == "denominator") { return asRat(t).d }
+        if (name == "real") { return reOf(t) }
+        if (name == "imaginary" || name == "imag") { return imOf(t) }
+        fail("unknown Numeric method: " + name)
+    }
     function mcall(target, name, args, blk) {
         // A Proc / block closure: Proc#call, and the two call shorthands p.(x) and p[x].
         if (typeof target == "function") {
@@ -912,17 +2026,57 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return blockCall(target, args)
             }
             if (name == "to_proc") { return target }
+            if (name == "lambda?") { return isLambda(target) }
+            if (name == "arity") { return 0 }
             fail("unknown Proc method: " + name)
         }
+        // The methods every value answers.
+        if (name == "class") { return classOf(target) }
+        if (name == "is_a?" || name == "kind_of?" || name == "instance_of?") {
+            if (name == "instance_of?") { return classOf(target) === args[0] }
+            return valueIsA(target, args[0])
+        }
+        if (name == "nil?") { return target === null || target === undefined }
+        if (name == "frozen?") { return typeof target == "string" || isSym(target) || isNumV(target) }
+        if (name == "hash" || name == "object_id") { return 0 }
+        if (name == "tap") { blockCall(blk, [target]); return target }
+        if (isNumV(target) && typeof target != "number") { return numberMethod(target, name, args, blk) }
+        if (isSym(target)) {
+            if (name == "to_s" || name == "name" || name == "id2name") { return target.s }
+            if (name == "to_sym") { return target }
+            if (name == "inspect") { return ":" + target.s }
+            if (name == "length" || name == "size") { return target.s.length }
+            if (name == "to_proc") { return function(x) { return mcall(x, target.s, [], null) } }
+            fail("unknown Symbol method: " + name)
+        }
+        if (isRange(target)) { return rangeMethod(target, name, args, blk) }
         if (typeof target == "number") {
-            if (name == "to_s" || name == "inspect") { return "" + target }
-            if (name == "to_i") { return target | 0 }
-            if (name == "abs") { return target < 0 ? (0 - target) | 0 : target }
+            if (name == "to_s" || name == "inspect") { return args.length > 0 ? baseStr(target, toF(args[0])) : "" + target }
+            if (name == "to_i" || name == "to_int" || name == "truncate" || name == "floor") { return Math.floor(target) }
+            if (name == "to_f") { return mkFlo(target) }
+            if (name == "to_r") { return mkRat(target, 1) }
+            if (name == "to_c") { return mkCpx(target, 0) }
+            if (name == "abs") { return target < 0 ? 0 - target : target }
             if (name == "zero?") { return target == 0 }
-            if (name == "even?") { return (target % 2) == 0 }
-            if (name == "odd?") { return (target % 2) != 0 }
+            if (name == "positive?") { return target > 0 }
+            if (name == "negative?") { return target < 0 }
+            if (name == "even?") { return imod(target, 2) == 0 }
+            if (name == "odd?") { return imod(target, 2) != 0 }
+            if (name == "succ" || name == "next") { return target + 1 }
+            if (name == "pred") { return target - 1 }
+            if (name == "divmod") { return [idiv(target, toF(args[0])), imod(target, toF(args[0]))] }
+            if (name == "fdiv") { return mkFlo(target / toF(args[0])) }
+            if (name == "pow") { return rbin("**", target, args[0]) }
             if (name == "times") {
                 for (var ni = 0; ni < target; ni++) { blockCall(blk, [ni]) }
+                return target
+            }
+            if (name == "upto") {
+                for (var ui = target; ui <= toF(args[0]); ui++) { blockCall(blk, [ui]) }
+                return target
+            }
+            if (name == "downto") {
+                for (var wi = target; wi >= toF(args[0]); wi--) { blockCall(blk, [wi]) }
                 return target
             }
             fail("unknown Integer method: " + name)
@@ -933,10 +2087,27 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (typeof target == "string") {
             if (name == "length" || name == "size") { return target.length }
-            if (name == "to_s") { return target }
+            if (name == "to_s" || name == "to_str" || name == "dup" || name == "clone" || name == "freeze") { return target }
+            if (name == "to_sym" || name == "intern") { return mkSym(target) }
+            if (name == "to_i") { var pi = parseInt(target); return pi != pi ? 0 : pi }
+            if (name == "to_f") { var pf = parseFloat(target); return mkFlo(pf != pf ? 0 : pf) }
             if (name == "upcase") { return target.toUpperCase() }
             if (name == "downcase") { return target.toLowerCase() }
-            if (name == "include?") { return target.indexOf(args[0]) >= 0 }
+            if (name == "capitalize") { return target.length == 0 ? target : target.charAt(0).toUpperCase() + target.slice(1).toLowerCase() }
+            if (name == "reverse") { return target.split("").reverse().join("") }
+            if (name == "strip") { return strStrip(target) }
+            if (name == "chars") { return target.split("") }
+            if (name == "split") { return args.length > 0 ? target.split(rstr(args[0])) : target.split(" ") }
+            if (name == "start_with?") { return target.slice(0, rstr(args[0]).length) == rstr(args[0]) }
+            if (name == "end_with?") { return target.slice(target.length - rstr(args[0]).length) == rstr(args[0]) }
+            if (name == "index") { var ix = target.indexOf(rstr(args[0])); return ix < 0 ? null : ix }
+            if (name == "empty?") { return target.length == 0 }
+            if (name == "inspect") { return "\"" + target + "\"" }
+            if (name == "ord") { return target.charCodeAt(0) }
+            if (name == "succ" || name == "next") { return strSucc(target) }
+            if (name == "replace") { return rstr(args[0]) }
+            if (name == "each_char") { for (var sc = 0; sc < target.length; sc++) { blockCall(blk, [target.charAt(sc)]) } return target }
+            if (name == "include?") { return target.indexOf(rstr(args[0])) >= 0 }
             fail("unknown String method: " + name)
         }
         if (isDict(target)) {
@@ -954,10 +2125,30 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (Array.isArray(target)) { return arrayMethod(target, name, args, blk) }
         if (target.__class != undefined) {
             if (name == "class") { return target.__class }
-            // Own-property read: a bare [name] resolved inherited Object.prototype
-            // members (toString, valueOf, ...) under a host JS engine.
-            var m = hasOwn(target.__class, name) ? target.__class[name] : undefined
-            if (typeof m != "function") { fail("unknown method '" + name + "' on " + target.__class.__name) }
+            // The lookup walks prepends, the class, its mixins and then the
+            // superclass chain (own-property reads throughout: a bare [name] would
+            // resolve inherited Object.prototype members under a host JS engine).
+            var m = anytype
+            m = lookupMethod(target.__class, name)
+            if (typeof m != "function") {
+                // Comparable: a class that defines <=> gets the comparison methods
+                // (that is all `include Comparable` does).
+                if (typeof lookupMethod(target.__class, "<=>") == "function") {
+                    if (name == "between?") {
+                        return toF(mcall(target, "<=>", [args[0]], null)) >= 0
+                            && toF(mcall(target, "<=>", [args[1]], null)) <= 0
+                    }
+                    if (name == "clamp") { return target }
+                    if (name == "<" || name == ">" || name == "<=" || name == ">=") {
+                        var cv2 = toF(mcall(target, "<=>", [args[0]], null))
+                        if (name == "<") { return cv2 < 0 }
+                        if (name == ">") { return cv2 > 0 }
+                        if (name == "<=") { return cv2 <= 0 }
+                        return cv2 >= 0
+                    }
+                }
+                fail("unknown method '" + name + "' on " + target.__class.__name)
+            }
             // The block is BOTH put on blockStack (so `yield` in the body finds it) and
             // appended as the last positional argument, which is how a method that names
             // it as an ordinary parameter receives it. invokeRuby binds only as many
@@ -970,21 +2161,33 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return mr
         }
         if (target.__isclass === true) {
+            if (name == "new" && target === hostGlobals["Proc"]) { return markLambda(blk) != null ? blk : blk }
             if (name == "new") {
                 var obj = {__class: target}
-                if (typeof target["initialize"] == "function") {
+                var ini = anytype
+                ini = lookupMethod(target, "initialize")
+                if (typeof ini == "function") {
                     blockStack.push(blk)
-                    target["initialize"].apply(undefined, concat2impl([obj], args))
+                    ini.apply(undefined, concat2impl([obj], args))
                     blockStack.pop()
                 }
                 return obj
             }
-            if (name == "name") { return target.__name }
-            var sm = hasOwn(target, name) ? target[name] : undefined
+            if (name == "name" || name == "to_s" || name == "inspect") { return target.__name }
+            if (name == "superclass") { return target.__super }
+            if (name == "instance_methods" || name == "ancestors") { return [] }
+            // A class method is stored under a "$s$" prefix so it cannot collide with
+            // an instance method of the same name; `extend M` puts M's methods there.
+            var sm = anytype
+            sm = lookupMethod(target, "$s$" + name)
+            if (typeof sm != "function") { sm = lookupMethod(target, "$x$" + name) }
             if (typeof sm == "function") {
                 blockStack.push(blk)
                 var sr = anytype
-                sr = sm.apply(undefined, blk == null ? args : concat2impl(args, [blk]))
+                // The class object itself is the receiver of a class method, so
+                // @@classvars and other class methods resolve from inside it.
+                sr = sm.apply(undefined, blk == null ? concat2impl([target], args)
+                                                     : concat2impl([target], concat2impl(args, [blk])))
                 blockStack.pop()
                 return sr
             }
@@ -1030,9 +2233,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // One .method(args) [block] suffix. A call that was handed a block also catches the
     // block's non-local break, whose value becomes the value of THIS call.
     function invokeMcall(recv, s) {
+        visCheck(recv, s.name)
         var sp = splitBlock(s.args)
-        var argv = []
-        for (var j = 0; j < sp.args.length; j++) { argv.push(sp.args[j]()) }
+        var argv = evalArgList(sp.args)
         if (sp.blk == null) { return mcall(recv, s.name, argv, null) }
         var bf = sp.blk()
         return catchBlkBreak(function() { return mcall(recv, s.name, argv, bf) })
@@ -1054,9 +2257,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     if (cur === null || cur === undefined) { cur = null }
                     else { cur = invokeMcall(cur, s) }
                 } else if (s.kind == "field") {
-                    if (s.name == "length" || s.name == "size") { cur = rlen(cur) }
+                    visCheck(cur, s.name)
+                    if (isUserObj(cur)) { cur = mcall(cur, s.name, [], null) }
+                    else if (s.name == "length" || s.name == "size") { cur = rlen(cur) }
                     else if (s.name == "to_s") { cur = rstr(cur) }
-                    else { cur = mcall(cur, s.name, []) }
+                    else { cur = mcall(cur, s.name, [], null) }
                 } else if (s.kind == "sfield") {
                     if (cur === null || cur === undefined) { cur = null }
                     else if (s.name == "length" || s.name == "size") { cur = rlen(cur) }
@@ -1086,17 +2291,90 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var vv = []
                 if (Array.isArray(av)) { vv = av } else { vv = [av] }
                 blkBind(params[i].pgroup, vv)
+            } else if (params[i].defT != undefined && i >= args.length) {
+                declVar(params[i].param, params[i].defT())
+            } else if (params[i].splat === true) {
+                var rest = []
+                for (var j = i; j < args.length; j++) { rest.push(args[j]) }
+                if (params[i].param != null && params[i].param != undefined) { declVar(params[i].param, rest) }
             } else {
                 declVar(params[i].param, av)
             }
         }
     }
-    function makeBlock(items) {
+    // The lambdas built so far, so Proc#lambda? can tell them from ordinary procs
+    // (a property on the function value is not portable across the two engines).
+    var lambdaSet = []
+    function markLambda(f) { lambdaSet.push(f); return f }
+    function isLambda(f) {
+        for (var i = 0; i < lambdaSet.length; i++) { if (lambdaSet[i] === f) { return true } }
+        return false
+    }
+    // -> (params) { body }: a callable value. `return` inside it is LOCAL (it returns
+    // from the lambda), which is the one behavioural difference from a block.
+    function makeLambda(items) {
         var params = []
         var body = null
         for (var i = 0; i < items.length; i++) {
+            if (items[i] == undefined) { continue }
             if (items[i].body != undefined) { body = items[i].body }
+            else if (items[i].bparams != undefined) { params = items[i].bparams }
+            else if (items[i].param != undefined) { params.push(items[i]) }
+        }
+        var bodyT = body != null ? body : makeBody([])
+        return function() {
+            var captured = scopes.slice(0)
+            var f = function() {
+                var args = []
+                for (var k = 0; k < arguments.length; k++) { args.push(arguments[k]) }
+                var saved = scopes
+                scopes = captured.slice(0)
+                scopes.push({})
+                bindParams(params, args)
+                var r = anytype
+                try {
+                    r = bodyT()
+                } catch (e) {
+                    scopes = saved
+                    if (e !== null && e !== undefined && e.__blkret === true) { return e.v }
+                    throw e
+                }
+                scopes = saved
+                if (isSig(r)) { return r.v }
+                return r
+            }
+            return markLambda(f)
+        }
+    }
+    // The highest _N mentioned as a whole identifier in a block body, 0 for none. The
+    // neighbour test is what keeps `a_1`, `_1x` and `x._1` from counting.
+    function numberedParamCount(src) {
+        var maxN = 0
+        for (var i = 0; i + 1 < src.length; i++) {
+            if (src.charCodeAt(i) != 95) { continue }
+            var d = src.charCodeAt(i + 1)
+            if (d < 49 || d > 57) { continue }
+            if (i + 2 < src.length && isIdentByte(src.charCodeAt(i + 2))) { continue }
+            if (i > 0 && (isIdentByte(src.charCodeAt(i - 1)) || src.charCodeAt(i - 1) == 46)) { continue }
+            var n = d - 48
+            if (n > maxN) { maxN = n }
+        }
+        return maxN
+    }
+    function isIdentByte(c) {
+        return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95
+    }
+    function makeBlock(items) {
+        var params = []
+        var body = null
+        var btext = ""
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].body != undefined) { body = items[i].body; btext = items[i].btext != undefined ? items[i].btext : "" }
             else { params = items[i].bparams }
+        }
+        if (params.length == 0) {
+            var np = numberedParamCount(btext)
+            for (var p = 1; p <= np; p++) { params.push({param: "_" + p}) }
         }
         return {blkT: function() {
             var captured = scopes.slice(0)
@@ -1123,6 +2401,33 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return f
         }}
+    }
+    // One call's argument list: *arr splices, name: v and **h collect into the single
+    // trailing keyword hash that bindParams unpacks on the other side.
+    function evalArgList(thunks) {
+        var out = []
+        var kwd = null
+        for (var i = 0; i < thunks.length; i++) {
+            var t = thunks[i]
+            if (t.kwname != undefined) {
+                if (kwd == null) { kwd = {__dict: true, keys: [], vals: []} }
+                dictSet(kwd, mkSym(t.kwname), t.kwT())
+                continue
+            }
+            if (t.splatT != undefined) {
+                var sv = anytype
+                sv = t.splatT()
+                if (Array.isArray(sv)) { for (var j = 0; j < sv.length; j++) { out.push(sv[j]) } }
+                else if (isDict(sv)) {
+                    if (kwd == null) { kwd = {__dict: true, keys: [], vals: []} }
+                    for (var k = 0; k < sv.keys.length; k++) { dictSet(kwd, sv.keys[k], sv.vals[k]) }
+                } else { out.push(sv) }
+                continue
+            }
+            out.push(t())
+        }
+        if (kwd != null) { out.push(kwd) }
+        return out
     }
     // splitBlock separates a call's block marker (pushed by makeBlock or by an `&blk`
     // argument) from its ordinary argument thunks. Done once, at build time.
@@ -1163,8 +2468,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var v = anytype
             v = t()
             if (typeof v == "function") { return v }
-            if (typeof v == "string") {
-                return function(x) { return mcall(x, v, [], null) }
+            if (isSym(v)) {
+                return function(x) { return mcall(x, v.s, [], null) }
             }
             fail("& needs a proc or a symbol")
         }
@@ -1198,9 +2503,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // ----- Assignment (locals, @ivars, index / field targets) -----
     makeTargetRef = function(items) {
         var head = items[0]
-        return {ivar: head.ivar, name: head.var, path: items.slice(1)}
+        return {ivar: head.ivar, gvar: head.gvar, cvar: head.cvar, name: head.var, path: items.slice(1)}
     }
     function readTarget(ref) {
+        if (ref.gvar != undefined) { return hasOwn(rubyGlobals, ref.gvar) ? rubyGlobals[ref.gvar] : null }
+        if (ref.cvar != undefined) { return makeCvarRef(ref.cvar)() }
         if (ref.ivar != undefined) {
             var s = findSelf()
             if (s === null || s === undefined) { fail("@" + ref.ivar + " outside of a method") }
@@ -1209,10 +2516,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return getVar(ref.name)
     }
     function writeTarget(ref, v) {
+        if (ref.gvar != undefined) { scopePut(rubyGlobals, ref.gvar, v); return }
+        if (ref.cvar != undefined) { setCvar(ref.cvar, v); return }
         if (ref.ivar != undefined) {
             var s = findSelf()
             if (s === null || s === undefined) { fail("@" + ref.ivar + " outside of a method") }
-            s[ref.ivar] = v
+            scopePut(s, ref.ivar, v)
             return
         }
         rubySet(ref.name, v)
@@ -1221,9 +2530,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // the scope chain) or creates a new one in the innermost scope.
     function rubySet(name, value) {
         for (var i = scopes.length - 1; i >= 0; i--) {
-            if (hasOwn(scopes[i], name)) { scopes[i][name] = value; return }
+            if (hasOwn(scopes[i], name)) { scopePut(scopes[i], name, value); return }
         }
-        scopes[scopes.length - 1][name] = value
+        var sc = scopes[scopes.length - 1]
+        // The name trail a module body needs (see publishModuleScope) - the frozen
+        // engine cannot enumerate an object's keys.
+        if (!hasOwn(sc, "__names")) { sc["__names"] = [] }
+        sc["__names"].push(name)
+        scopePut(sc, name, value)
     }
     function resolveRefRuby(ref) {
         var o = anytype
@@ -1250,23 +2564,30 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 writeTarget(ref, v)
             } else {
                 var p = resolveRefRuby(ref)
-                if (isDict(p.obj)) {
-                    if (op != "=") { var di = dictFind(p.obj, p.key); v = applyRuby(op, di < 0 ? null : p.obj.vals[di], v) }
-                    dictSet(p.obj, p.key, v)
-                } else {
-                    if (op != "=") { v = applyRuby(op, hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined, v) }
-                    p.obj[p.key] = v
+                if (op != "=") {
+                    var old = anytype
+                    if (isDict(p.obj)) { var di = dictFind(p.obj, p.key); old = di < 0 ? null : p.obj.vals[di] }
+                    else if (isUserObj(p.obj)) { old = rindex(p.obj, p.key) }
+                    else { old = hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined }
+                    v = applyRuby(op, old, v)
                 }
+                rsetIndex(p.obj, p.key, v)
             }
             return v
         }
     }
     function applyRuby(op, a, b) {
         if (op == "+=") { return radd(a, b) }
-        if (op == "-=") { return (a - b) | 0 }
-        if (op == "*=") { return (a * b) | 0 }
-        if (op == "/=") { return (a / b) | 0 }
-        if (op == "%=") { return (a % b) | 0 }
+        if (op == "-=") { return rbin("-", a, b) }
+        if (op == "*=") { if (typeof a == "string") { return strRepeat(a, toF(b)) } return rbin("*", a, b) }
+        if (op == "/=") { return rbin("/", a, b) }
+        if (op == "%=") { return rbin("%", a, b) }
+        if (op == "**=") { return rbin("**", a, b) }
+        if (op == "<<=") { return appendOp(a, b) }
+        if (op == "&=") { return rbin("&", a, b) }
+        if (op == "|=") { return rbin("|", a, b) }
+        if (op == "^=") { return rbin("^", a, b) }
+        fail("unknown compound assignment " + op)
     }
 
     // ----- Calls, defs and classes -----
@@ -1285,12 +2606,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function() {
             // block_given? asks whether the ENCLOSING method received a block.
             if (name == "block_given?") { return getVar("$blk") != null }
-            var argv = []
-            for (var i = 0; i < args.length; i++) { argv.push(args[i]()) }
+            var argv = evalArgList(args)
             var bf = null
             if (blkT != null) { bf = blkT() }
             var f = anytype
-            f = getVar(name)
+            f = undefined
+            for (var si = scopes.length - 1; si >= 1 && f == undefined; si--) {
+                if (hasOwn(scopes[si], name)) { f = scopes[si][name] }
+            }
+            if (f == undefined && typeof selfMethod(name) == "function") {
+                if (bf == null) { return mcall(findSelf(), name, argv, null) }
+                return catchBlkBreak(function() { return mcall(findSelf(), name, argv, bf) })
+            }
+            if (f == undefined) { f = getVar(name) }
             if (f != undefined && f != null && f.__isclass === true) {
                 if (bf == null) { return mcall(f, "new", argv, null) }
                 return catchBlkBreak(function() { return mcall(f, "new", argv, bf) })
@@ -1316,14 +2644,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
     function makeFun(items) {
-        var name = items[0]
+        var name = ""
         var params = []
         var body = null
-        for (var i = 1; i < items.length; i++) {
-            if (items[i].body != undefined) { body = items[i].body }
-            else { params.push(items[i].param) }
+        var singleton = false
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].selfrecv === true) { singleton = true }
+            else if (typeof items[i] == "string") { name = items[i] }
+            else if (items[i].body != undefined) { body = items[i].body }
+            else if (items[i].param != undefined) { params.push(items[i]) }
         }
-        return {name: name, params: params, body: body != null ? body : makeBody([])}
+        return {name: name, params: params, singleton: singleton, owner: null,
+                body: body != null ? body : makeBody([])}
     }
     function runProgram(items) {
         // A raise that escapes the top level is reported like any runtime error.
@@ -1336,22 +2668,169 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // module M ... end: not implemented (no namespacing). Run the body items in
     // sequence in the current scope so any defs / classes / calls stay visible.
-    function makeModule(items, pos) {
-        notImpl("module", pos)
+    // module M ... end: a real module object. It is the same shape as a class object
+    // (so include/extend/prepend can copy methods off it and a def inside it lands in
+    // the same table), plus __methodNames, which `extend` needs because the frozen
+    // engine has no for..in over an object. Its constants and nested modules/classes
+    // are stored under a "$c$" prefix so Outer::Inner::VALUE can walk down to them,
+    // and ALSO in the enclosing scope, which is how an unqualified WORD inside an
+    // included module's method still resolves.
+    function makeModuleStmt(items) {
+        var name = items[0]
+        var ordered = items.slice(1)
         return function() {
-            for (var i = 0; i < items.length; i++) { items[i]() }
+            var existing = anytype
+            existing = hasOwn(globalScope, name) ? globalScope[name] : undefined
+            var mod = anytype
+            if (existing != undefined && existing != null && existing.__ismodule === true) { mod = existing }
+            else { mod = {__isclass: true, __ismodule: true, __name: name, __super: null,
+                          __mixins: [], __prepends: [], __methodNames: []} }
+            rubySet(name, mod)
+            var saved = scopes
+            var savedClass = curClass
+            var savedVis = curVis
+            var modScope = {}
+            scopes = [globalScope, modScope]
+            declVar("self", mod)
+            curClass = mod
+            curVis = "public"
+            for (var i = 0; i < ordered.length; i++) {
+                var it = ordered[i]
+                if (it == undefined) { continue }
+                if (it.method != undefined) {
+                    var fn = it.method
+                    fn.owner = mod
+                    if (fn.singleton === true) { scopePut(mod, "$s$" + fn.name, makeMethodClosure(fn)) }
+                    else {
+                        scopePut(mod, fn.name, makeMethodClosure(fn))
+                        mod.__methodNames.push(fn.name)
+                        // module_function: the method is ALSO callable on the module.
+                        if (curVis == "module_function") { scopePut(mod, "$s$" + fn.name, makeMethodClosure(fn)) }
+                    }
+                } else if (it.alias != undefined) { doAlias(mod, it.alias[0], it.alias[1]) }
+                else if (it.nested != undefined) { it.nested() }
+                else if (it.cstmt != undefined) { it.cstmt() }
+            }
+            // Publish the module scope: constants and nested definitions become
+            // members of the module AND stay visible where the module was written.
+            scopes = saved
+            curClass = savedClass
+            curVis = savedVis
+            publishModuleScope(mod, modScope)
             return null
         }
     }
+    // The frozen engine has no for..in, so the names a module body introduced are
+    // recovered from the assignment trail rubySet leaves in the scope object.
+    function publishModuleScope(mod, sc) {
+        var names = hasOwn(sc, "__names") ? sc["__names"] : []
+        for (var i = 0; i < names.length; i++) {
+            var n = names[i]
+            if (n == "self") { continue }
+            scopePut(mod, "$c$" + n, sc[n])
+            if (!hasOwn(globalScope, n)) { scopePut(globalScope, n, sc[n]) }
+        }
+    }
 
+    // Bind one call's arguments to a parameter list: required, default-valued, splat
+    // (*rest), keyword (name:), double-splat (**rest) and block (&blk) parameters, in
+    // Ruby's own order. When the method declares keyword parameters, a trailing Hash
+    // argument is the keyword hash rather than a positional value.
+    function bindParams(params, args) {
+        var i
+        var kw = null
+        var wantsKw = false
+        for (i = 0; i < params.length; i++) { if (params[i].kw === true || params[i].kwrest === true) { wantsKw = true } }
+        var pos = args
+        if (wantsKw && pos.length > 0 && isDict(pos[pos.length - 1])) {
+            kw = pos[pos.length - 1]
+            pos = pos.slice(0, pos.length - 1)
+        }
+        var posParams = []
+        for (i = 0; i < params.length; i++) {
+            if (params[i].kw === true || params[i].kwrest === true || params[i].blockp === true) { continue }
+            posParams.push(params[i])
+        }
+        var required = 0
+        for (i = 0; i < posParams.length; i++) {
+            if (posParams[i].splat !== true && posParams[i].defT == undefined) { required = required + 1 }
+        }
+        var spare = pos.length - required
+        var ai = 0
+        for (i = 0; i < posParams.length; i++) {
+            var pp = posParams[i]
+            if (pp.splat === true) {
+                var after = 0
+                for (var q = i + 1; q < posParams.length; q++) { if (posParams[q].splat !== true) { after = after + 1 } }
+                var take = pos.length - ai - after
+                if (take < 0) { take = 0 }
+                var rest = []
+                for (var r2 = 0; r2 < take; r2++) { rest.push(pos[ai]); ai = ai + 1 }
+                if (pp.param != null && pp.param != undefined) { declVar(pp.param, rest) }
+                continue
+            }
+            if (pp.defT != undefined) {
+                if (spare > 0 && ai < pos.length) { declVar(pp.param, pos[ai]); ai = ai + 1; spare = spare - 1 }
+                else { declVar(pp.param, pp.defT()) }
+                continue
+            }
+            declVar(pp.param, ai < pos.length ? pos[ai] : null)
+            ai = ai + 1
+        }
+        var claimed = []
+        for (i = 0; i < params.length; i++) {
+            if (params[i].kw !== true) { continue }
+            var kname = params[i].param
+            claimed.push(kname)
+            var found = kw != null ? dictFind(kw, mkSym(kname)) : -1
+            if (found >= 0) { declVar(kname, kw.vals[found]) }
+            else if (params[i].defT != undefined) { declVar(kname, params[i].defT()) }
+            else { fail("missing keyword: " + kname) }
+        }
+        for (i = 0; i < params.length; i++) {
+            if (params[i].kwrest !== true) { continue }
+            var d = {__dict: true, keys: [], vals: []}
+            if (kw != null) {
+                for (var k = 0; k < kw.keys.length; k++) {
+                    var kn = rstr(kw.keys[k])
+                    var isClaimed = false
+                    for (var c2 = 0; c2 < claimed.length; c2++) { if (claimed[c2] == kn) { isClaimed = true } }
+                    if (!isClaimed) { dictSet(d, kw.keys[k], kw.vals[k]) }
+                }
+            }
+            if (params[i].param != null && params[i].param != undefined) { declVar(params[i].param, d) }
+        }
+        for (i = 0; i < params.length; i++) {
+            if (params[i].blockp === true) { declVar(params[i].param, currentBlock()) }
+        }
+    }
+    function currentParamValues(params) {
+        var out = []
+        for (var i = 0; i < params.length; i++) {
+            if (params[i].kw === true || params[i].kwrest === true || params[i].blockp === true) { continue }
+            if (params[i].param == null || params[i].param == undefined) { continue }
+            var v = anytype
+            v = getVar(params[i].param)
+            if (params[i].splat === true && Array.isArray(v)) {
+                for (var j = 0; j < v.length; j++) { out.push(v[j]) }
+                continue
+            }
+            out.push(v)
+        }
+        return out
+    }
     function invokeRuby(fn, self, args) {
         var saved = scopes
         scopes = [globalScope, {}]
         if (self !== undefined && self !== null) { declVar("self", self) }
         declVar("$blk", currentBlock())
-        for (var i = 0; i < fn.params.length; i++) {
-            declVar(fn.params[i], i < args.length ? args[i] : null)
-        }
+        declVar("$defclass", fn.owner)
+        declVar("$mname", fn.name)
+        bindParams(fn.params, args)
+        // A bare `super` forwards the current VALUES of the parameters (Ruby), not
+        // the raw argument list - which is what makes `def initialize(msg = "d");
+        // super; end` pass the default on.
+        declVar("$sargs", currentParamValues(fn.params))
         var r = anytype
         // `return` inside a block returns from the enclosing METHOD, so the block's
         // host throw is caught here rather than by the iterating call.
@@ -1381,6 +2860,80 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return invokeRuby(fn, self, args)
         }
     }
+    // Method lookup walks the class, its included modules (last include wins, and a
+    // prepended module comes BEFORE the class itself) and then the superclass chain.
+    function lookupMethod(cls, name) {
+        var c = cls
+        while (c != undefined && c != null) {
+            if (c.__prepends != undefined) {
+                for (var p = c.__prepends.length - 1; p >= 0; p--) {
+                    if (hasOwn(c.__prepends[p], name)) { return c.__prepends[p][name] }
+                }
+            }
+            if (hasOwn(c, name)) { return c[name] }
+            if (c.__mixins != undefined) {
+                for (var m = c.__mixins.length - 1; m >= 0; m--) {
+                    if (hasOwn(c.__mixins[m], name)) { return c.__mixins[m][name] }
+                }
+            }
+            c = c.__super
+        }
+        return undefined
+    }
+    // The owner of a method is the class whose body defined it - that is what `super`
+    // starts its search above. A prepended module counts as sitting BELOW the class.
+    function ownerOf(cls, name) {
+        var c = cls
+        while (c != undefined && c != null) {
+            if (c.__prepends != undefined) {
+                for (var p = c.__prepends.length - 1; p >= 0; p--) {
+                    if (hasOwn(c.__prepends[p], name)) { return {mod: c.__prepends[p], cls: c} }
+                }
+            }
+            if (hasOwn(c, name)) { return {mod: null, cls: c} }
+            if (c.__mixins != undefined) {
+                for (var m = c.__mixins.length - 1; m >= 0; m--) {
+                    if (hasOwn(c.__mixins[m], name)) { return {mod: c.__mixins[m], cls: c} }
+                }
+            }
+            c = c.__super
+        }
+        return null
+    }
+    // super / super(args): the method of the same name, looked up strictly ABOVE the
+    // class the running method belongs to.
+    function makeSuper(items) {
+        var explicit = false
+        var argTs = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].explicit === true) { explicit = true }
+            else { argTs.push(items[i]) }
+        }
+        return function() {
+            var self = findSelf()
+            var dc = anytype
+            dc = getVar("$defclass")
+            var mn = anytype
+            mn = getVar("$mname")
+            var args = anytype
+            if (explicit) {
+                var av = []
+                var sp = splitBlock(argTs)
+                for (var j = 0; j < sp.args.length; j++) { av.push(sp.args[j]()) }
+                args = av
+            } else {
+                args = getVar("$sargs")
+            }
+            if (dc == null || dc == undefined) { fail("super called outside of a method") }
+            // A method defined in a prepended module supers into the class itself.
+            var m = anytype
+            m = hasOwn(prependOwners, "$" + dc.__name) ? lookupOwn(prependOwners["$" + dc.__name], mn) : undefined
+            if (typeof m != "function") { m = lookupMethod(dc.__super, mn) }
+            if (typeof m != "function") { fail("super: no superclass method '" + mn + "'") }
+            return m.apply(undefined, concat2impl([self], args))
+        }
+    }
+    function lookupOwn(cls, name) { return hasOwn(cls, name) ? cls[name] : undefined }
     // Ruby has no bare method references: an identifier that is not a local variable
     // is a parenthesis-less call of the method of that name (`pa, qa = s08_pair`).
     // rubyMethods records every name introduced by a top-level def, so makeVarRef can
@@ -1393,11 +2946,33 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (fn.params.length == 0) { rubyMethods["$" + fn.name] = true }
         return function() { declVar(fn.name, makeFunClosure(fn)); return null }
     }
+    // A bare name inside a method body may also be a method of `self` (Ruby's
+    // implicit receiver), which is how `intro` reaches the overridden `speak`.
+    function selfMethod(name) {
+        var s = findSelf()
+        if (s === null || s === undefined) { return undefined }
+        if (s.__isclass === true) {
+            var cm = lookupMethod(s, "$s$" + name)
+            if (typeof cm == "function") { return cm }
+            return undefined
+        }
+        if (s.__class == undefined) { return undefined }
+        return lookupMethod(s.__class, name)
+    }
     makeVarRef = function(name) {
         return function() {
             for (var i = scopes.length - 1; i >= 1; i--) {
                 if (hasOwn(scopes[i], name)) { return scopes[i][name] }
             }
+            if (name == "__method__") { return mkSym(rstr(getVar("$mname"))) }
+            // `private` / `module_function` on a line of their own are ZERO-argument
+            // calls, not references to the method object.
+            if (name == "private" || name == "protected" || name == "public" || name == "module_function") {
+                return hostGlobals[name]()
+            }
+            var sm2 = anytype
+            sm2 = selfMethod(name)
+            if (typeof sm2 == "function") { return mcall(findSelf(), name, [], null) }
             if (rubyMethods["$" + name] === true) {
                 var f = anytype
                 f = hasOwn(globalScope, name) ? globalScope[name] : undefined
@@ -1406,27 +2981,119 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return getVar(name)
         }
     }
+    // The class whose body is running, and the visibility mode `private` /
+    // `protected` last selected in it. Both are needed because Ruby's visibility is
+    // POSITIONAL: it applies to the defs that follow it in the class body, so the
+    // body items have to be executed in source order.
+    var curClass = null
+    var curVis = "public"
     function makeClassStmt(items) {
         var name = items[0]
-        var methods = []
+        var supName = null
+        var ordered = []
         for (var i = 1; i < items.length; i++) {
-            if (items[i].method != undefined) { methods.push(items[i].method) }
-            else if (items[i].attr != undefined) {
-                var a = items[i].attr
-                for (var j = 0; j < a.names.length; j++) {
-                    if (a.kind == "attr_reader" || a.kind == "attr_accessor") { methods.push(attrGetterFn(a.names[j])) }
-                    if (a.kind == "attr_writer" || a.kind == "attr_accessor") { methods.push(attrSetterFn(a.names[j])) }
-                }
-            }
+            if (items[i].supername != undefined) { supName = items[i].supername }
+            else { ordered.push(items[i]) }
         }
         return function() {
-            var cls = {__isclass: true, __name: name}
-            for (var m2 = 0; m2 < methods.length; m2++) {
-                cls[methods[m2].name] = makeMethodClosure(methods[m2])
+            // Reopening a class keeps the object it already has (Ruby), so `class C`
+            // twice adds to one class rather than replacing it.
+            var existing = anytype
+            existing = hasOwn(globalScope, name) ? globalScope[name] : undefined
+            var cls = anytype
+            if (existing != undefined && existing != null && existing.__isclass === true && existing.__builtin !== true) {
+                cls = existing
+            } else {
+                cls = {__isclass: true, __name: name, __super: null, __mixins: [], __prepends: []}
             }
-            declVar(name, cls)
+            if (supName != null) {
+                var sv = anytype
+                sv = getVar(supName)
+                if (sv != undefined && sv != null && sv.__isclass === true) { cls.__super = sv }
+            }
+            rubySet(name, cls)
+            // Run the body items in SOURCE order with self bound to the class object:
+            // a `private` only affects the defs that come after it, and a class-body
+            // statement may reference a method defined above it.
+            var saved = scopes
+            var savedClass = curClass
+            var savedVis = curVis
+            scopes = [globalScope, {}]
+            declVar("self", cls)
+            curClass = cls
+            curVis = "public"
+            for (var st = 0; st < ordered.length; st++) {
+                var it = ordered[st]
+                if (it.method != undefined) { declareMethods(cls, [it.method]) }
+                else if (it.sblock != undefined) {
+                    for (var sb = 0; sb < it.sblock.length; sb++) {
+                        if (it.sblock[sb].method == undefined) { continue }
+                        var sm = it.sblock[sb].method
+                        sm.singleton = true
+                        declareMethods(cls, [sm])
+                    }
+                }
+                else if (it.attr != undefined) {
+                    var a = it.attr
+                    for (var j = 0; j < a.names.length; j++) {
+                        if (a.kind == "attr_reader" || a.kind == "attr_accessor") { declareMethods(cls, [attrGetterFn(a.names[j])]) }
+                        if (a.kind == "attr_writer" || a.kind == "attr_accessor") { declareMethods(cls, [attrSetterFn(a.names[j])]) }
+                    }
+                }
+                else if (it.alias != undefined) { doAlias(cls, it.alias[0], it.alias[1]) }
+                else if (it.cstmt != undefined) { it.cstmt() }
+            }
+            scopes = saved
+            curClass = savedClass
+            curVis = savedVis
             return null
         }
+    }
+    // Install a list of method descriptors on a class: `def self.m` lands on the class
+    // object itself, every other def on the instance-method table (the same object -
+    // an instance looks its methods up through __class, a class through itself).
+    function declareMethods(cls, methods) {
+        for (var m2 = 0; m2 < methods.length; m2++) {
+            var fn = methods[m2]
+            fn.owner = cls
+            if (fn.singleton === true) { scopePut(cls, "$s$" + fn.name, makeMethodClosure(fn)) }
+            else {
+                scopePut(cls, fn.name, makeMethodClosure(fn))
+                if (curVis != "public" && curClass === cls) { scopePut(cls, "$v$" + fn.name, curVis) }
+            }
+        }
+    }
+    // alias NEW OLD / alias_method :new, :old - the new name keeps the CURRENT body,
+    // so a later redefinition of the old name does not follow it.
+    function doAlias(cls, newName, oldName) {
+        var m = anytype
+        m = lookupMethod(cls, oldName)
+        if (typeof m != "function") { fail("alias: unknown method '" + oldName + "'") }
+        scopePut(cls, newName, m)
+    }
+    // The declared visibility of a method, looked up along the class chain.
+    function visOf(cls, name) {
+        var c = cls
+        while (c != undefined && c != null) {
+            if (hasOwn(c, "$v$" + name)) { return c["$v$" + name] }
+            if (hasOwn(c, name)) { return "public" }
+            c = c.__super
+        }
+        return "public"
+    }
+    // A call with an EXPLICIT receiver may not reach a private method, and may reach a
+    // protected one only from inside the same class.
+    function visCheck(recv, name) {
+        if (!isUserObj(recv)) { return }
+        var v = visOf(recv.__class, name)
+        if (v == "public") { return }
+        var self = findSelf()
+        if (v == "private") {
+            if (self === recv) { return }
+            throw {__exc: true, v: mkExc(hostGlobals["NoMethodError"], "private method '" + name + "' called")}
+        }
+        if (self !== null && self !== undefined && isUserObj(self) && valueIsA(self, recv.__class)) { return }
+        throw {__exc: true, v: mkExc(hostGlobals["NoMethodError"], "protected method '" + name + "' called")}
     }
     // attr_reader / attr_writer / attr_accessor become @ivar getter/setter methods
     // synthesized as ordinary function descriptors on the class descriptor.
@@ -1461,26 +3128,51 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var els = null
         var idx = 0
         if (items.length > 0 && typeof items[0] == "function") { subject = items[0]; idx = 1 }
+        var anyPat = false
         for (var i = idx; i < items.length; i++) {
             if (items[i].els != undefined) { els = items[i].els }
-            else { whens.push(items[i]) }
+            else {
+                if (items[i].pat != undefined) { anyPat = true }
+                whens.push(items[i])
+            }
         }
         return function() {
             var subj = anytype
             var hasSubj = subject != null
             if (hasSubj) { subj = subject() }
             for (var w = 0; w < whens.length; w++) {
+                // `in PATTERN [if GUARD]': a pattern clause rather than a when list.
+                if (whens[w].pat != undefined) {
+                    if (whens[w].pat(subj)) {
+                        var g = whens[w].guard
+                        if (g == null) { return whens[w].whenbody() }
+                        var gv = rtest(g())
+                        if (whens[w].gneg === true ? !gv : gv) { return whens[w].whenbody() }
+                    }
+                    continue
+                }
                 var vals = whens[w].vals
                 for (var k = 0; k < vals.length; k++) {
                     var val = vals[k]
-                    var cv = val.t()
+                    var cv = anytype
+                    cv = val.t()
                     var matched = false
-                    if (hasSubj) { matched = val.isRange ? (cv.indexOf(subj) >= 0) : (subj === cv) }
+                    if (val.isSplat === true) {
+                        // when *arr: any element of the array matches.
+                        var cands = Array.isArray(cv) ? cv : [cv]
+                        for (var q = 0; q < cands.length; q++) {
+                            if (hasSubj ? rtest(caseEq(cands[q], subj)) : rtest(cands[q])) { matched = true }
+                        }
+                    } else if (hasSubj) { matched = rtest(caseEq(cv, subj)) }
                     else { matched = rtest(cv) }
                     if (matched) { return whens[w].whenbody() }
                 }
             }
             if (els != null) { return els() }
+            // An unmatched case/in raises in Ruby (an unmatched case/when is nil).
+            if (anyPat) {
+                throw {__exc: true, v: mkExc(hostGlobals["StandardError"], "NoMatchingPatternError: " + rinspect(subj))}
+            }
             return null
         }
     }
@@ -1494,6 +3186,172 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             else { vals.push(items[i]) }
         }
         return {vals: vals, whenbody: body}
+    }
+
+    // ----- Pattern matching -----
+    // Every pattern is a function(value) -> bool that binds its names as it goes; the
+    // combinators below just compose those functions. Nothing is evaluated at build
+    // time, so a pattern that mentions a local reads it at MATCH time, like Ruby.
+    function makeIn(items) {
+        var pat = items[0]
+        var guard = null
+        var gneg = false
+        var body = null
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].body != undefined) { body = items[i].body }
+            else if (items[i].guard != undefined) { guard = items[i].guard; gneg = items[i].gneg === true }
+        }
+        return {pat: pat, guard: guard, gneg: gneg, whenbody: body}
+    }
+    function makePatBind(items) {
+        var pat = items[0]
+        if (items.length == 1) { return pat }
+        var nm = items[1].bindname
+        return function(v) {
+            if (!pat(v)) { return false }
+            rubySet(nm, v)
+            return true
+        }
+    }
+    function makePatAlt(items) {
+        if (items.length == 1) { return items[0] }
+        var alts = items
+        return function(v) {
+            for (var i = 0; i < alts.length; i++) { if (alts[i](v)) { return true } }
+            return false
+        }
+    }
+    function makePatVar(name) {
+        return function(v) { rubySet(name, v) ; return true }
+    }
+    // ^name: match against the CURRENT value of the local, never rebind it.
+    function makePatPin(name) {
+        return function(v) { return rubyEq(getVar(name), v) }
+    }
+    // A constant, a literal or a range: Ruby uses === here, which is class membership
+    // for a Constant, range cover for a range and == for everything else.
+    function makePatValue(t) {
+        return function(v) { return rtest(caseEq(t(), v)) }
+    }
+    // An array pattern deconstructs an Array as itself and any other object through
+    // its #deconstruct. A non-deconstructable value simply does not match.
+    function patSeq(v) {
+        if (Array.isArray(v)) { return v }
+        if (isUserObj(v) && typeof lookupMethod(v.__class, "deconstruct") == "function") {
+            var d = mcall(v, "deconstruct", [], null)
+            if (Array.isArray(d)) { return d }
+        }
+        return null
+    }
+    function patMap(v) {
+        if (isDict(v)) { return v }
+        if (isUserObj(v) && typeof lookupMethod(v.__class, "deconstruct_keys") == "function") {
+            var d = mcall(v, "deconstruct_keys", [null], null)
+            if (isDict(d)) { return d }
+        }
+        return null
+    }
+    function makePatArray(items) {
+        var parts = items
+        // Where the splats sit decides the shape: none (fixed length), one (a rest)
+        // or two (the FIND pattern [*pre, MIDDLE.., *post]).
+        var splats = []
+        for (var i = 0; i < parts.length; i++) { if (parts[i].psplat != undefined) { splats.push(i) } }
+        return function(v) {
+            var arr = patSeq(v)
+            if (arr == null) { return false }
+            if (splats.length == 0) {
+                if (arr.length != parts.length) { return false }
+                for (var i2 = 0; i2 < parts.length; i2++) { if (!parts[i2](arr[i2])) { return false } }
+                return true
+            }
+            if (splats.length == 1) {
+                var s = splats[0]
+                var post = parts.length - s - 1
+                if (arr.length < s + post) { return false }
+                for (var a = 0; a < s; a++) { if (!parts[a](arr[a])) { return false } }
+                for (var b = 0; b < post; b++) {
+                    if (!parts[s + 1 + b](arr[arr.length - post + b])) { return false }
+                }
+                bindSplat(parts[s].psplat, arr, s, arr.length - post)
+                return true
+            }
+            if (splats.length != 2 || splats[0] != 0 || splats[1] != parts.length - 1) { return false }
+            // Find pattern: slide the middle over the array and take the first hit.
+            var mid = parts.length - 2
+            for (var start = 0; start + mid <= arr.length; start++) {
+                var ok = true
+                for (var m = 0; m < mid; m++) { if (!parts[1 + m](arr[start + m])) { ok = false; break } }
+                if (!ok) { continue }
+                bindSplat(parts[0].psplat, arr, 0, start)
+                bindSplat(parts[parts.length - 1].psplat, arr, start + mid, arr.length)
+                return true
+            }
+            return false
+        }
+    }
+    function bindSplat(name, arr, from, to) {
+        if (name == undefined || name == null || name == "") { return }
+        var out = []
+        for (var i = from; i < to; i++) { out.push(arr[i]) }
+        rubySet(name, out)
+    }
+    // A hash pattern is NON-exhaustive in Ruby: the listed keys must be present and
+    // match, extra keys are ignored unless **rest collects them.
+    function makePatHash(items) {
+        var pairs = []
+        var restName = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].prest != undefined) { restName = items[i].prest }
+            else { pairs.push(items[i]) }
+        }
+        return function(v) {
+            var d = patMap(v)
+            if (d == null) { return false }
+            for (var i2 = 0; i2 < pairs.length; i2++) {
+                var idx = dictFind(d, mkSym(pairs[i2].pkey))
+                if (idx < 0) { return false }
+                var val = d.vals[idx]
+                if (pairs[i2].pval != null) {
+                    if (!pairs[i2].pval(val)) { return false }
+                } else { rubySet(pairs[i2].pkey, val) }
+            }
+            if (restName != null && restName != "") {
+                var rest = {__dict: true, keys: [], vals: []}
+                for (var k = 0; k < d.keys.length; k++) {
+                    var used = false
+                    for (var p = 0; p < pairs.length; p++) {
+                        if (rubyEq(d.keys[k], mkSym(pairs[p].pkey))) { used = true }
+                    }
+                    if (!used) { dictSet(rest, d.keys[k], d.vals[k]) }
+                }
+                rubySet(restName, rest)
+            }
+            return true
+        }
+    }
+    function makePatPair(items) {
+        return {pkey: items[0].pkey, pval: items.length > 1 ? items[1] : null}
+    }
+    // EXPR in PATTERN - a boolean test, no raise.
+    function makePatTest(items) {
+        if (items.length == 1) { return items[0] }
+        var t = items[0]
+        var pat = items[1]
+        return function() { return pat(t()) }
+    }
+    // EXPR => PATTERN - the rightward assignment; raises when it does not match.
+    function makePatAssign(items) {
+        var t = items[0]
+        var pat = items[1]
+        return function() {
+            var v = anytype
+            v = t()
+            if (!pat(v)) {
+                throw {__exc: true, v: mkExc(hostGlobals["StandardError"], "NoMatchingPatternError: " + rinspect(v))}
+            }
+            return null
+        }
     }
 
     // A trailing statement modifier: STMT if/unless COND (run once when the guard
@@ -1558,17 +3416,47 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
 
-    // arr << x: push and yield the array (so a << b << c chains).
+    // arr << x: push and yield the array (so a << b << c chains). On a string <<
+    // concatenates, on an integer it is the left shift.
     function appendOp(l, r) {
         if (Array.isArray(l)) { l.push(r); return l }
-        fail("<< requires an array")
+        if (typeof l == "string") { return l + rstr(r) }
+        if (isUserObj(l)) { return mcall(l, "<<", [r], null) }
+        return rbin("<<", l, r)
     }
+    // items = [v, op, v, op, v, ...]
     function makeShift(items) {
         if (items.length == 1) { return items[0] }
         return function() {
             var v = anytype
             v = items[0]()
-            for (var i = 1; i < items.length; i++) { v = appendOp(v, items[i]()) }
+            for (var i = 1; i < items.length; i += 2) {
+                if (items[i] == ">>") { v = rbin(">>", v, items[i + 1]()) }
+                else { v = appendOp(v, items[i + 1]()) }
+            }
+            return v
+        }
+    }
+    // TARGET << V: the append statement, which writes the result BACK to the target.
+    // For an array that is the object it just mutated; for a string (immutable here,
+    // mutable in Ruby) it is the only way `s << "bc"` can be observable.
+    function readTargetFull(ref) {
+        if (ref.path.length == 0) { return readTarget(ref) }
+        var p = resolveRefRuby(ref)
+        if (isDict(p.obj)) {
+            var di = dictFind(p.obj, p.key)
+            return di < 0 ? null : p.obj.vals[di]
+        }
+        return rindex(p.obj, p.key)
+    }
+    function makeAppendStmt(items) {
+        var ref = items[0]
+        var vals = items.slice(1)
+        return function() {
+            var v = anytype
+            v = readTargetFull(ref)
+            for (var i = 0; i < vals.length; i++) { v = appendOp(v, vals[i]()) }
+            assignTargetRef(ref, v)
             return v
         }
     }
@@ -1577,7 +3465,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function assignTargetRef(ref, v) {
         if (ref.path.length == 0) { writeTarget(ref, v); return }
         var p = resolveRefRuby(ref)
-        if (isDict(p.obj)) { dictSet(p.obj, p.key, v) } else { p.obj[p.key] = v }
+        rsetIndex(p.obj, p.key, v)
+    }
+    // obj[k] = v: a hash entry, an array slot, an @ivar/field, or a user-defined []=.
+    function rsetIndex(o, k, v) {
+        if (isDict(o)) { dictSet(o, k, v); return }
+        if (isUserObj(o) && typeof lookupMethod(o.__class, "[]=") == "function") {
+            mcall(o, "[]=", [k, v], null)
+            return
+        }
+        scopePut(o, k, v)
     }
     // A multiple-assignment target list may hold a splat target (*rest) and nested
     // groups ((m, n), o). destructure writes one value list into one target list:
@@ -1638,70 +3535,327 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // {finalbody}?]. makeExcept pairs a rescue's `=> Id` name (if any) with its body.
     // items = [name, bodyThunk] or [bodyThunk] (rescue with no binding).
     function makeExcept(items) {
-        if (items.length > 1) { return {handler: items[1], hname: items[0]} }
-        return {handler: items[0], hname: undefined}
+        var types = []
+        var hname = undefined
+        var body = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].etype != undefined) { types.push(stripWs(items[i].etype)) }
+            else if (items[i].hname != undefined) { hname = items[i].hname }
+            else if (items[i].rbody != undefined) { body = items[i].rbody }
+        }
+        return {handler: body, hname: hname, etypes: types}
+    }
+    // A rescue clause matches when the raised value is an instance of ANY of its
+    // listed classes; a clause with no list catches every StandardError.
+    function rescueMatches(clause, v) {
+        if (clause.etypes.length == 0) { return valueIsA(v, hostGlobals["StandardError"]) || !isUserObj(v) }
+        for (var i = 0; i < clause.etypes.length; i++) {
+            var cls = anytype
+            cls = lookupConst(clause.etypes[i])
+            if (cls != undefined && cls != null && valueIsA(v, cls)) { return true }
+        }
+        return false
+    }
+    // Resolve a (possibly scoped) constant name: Foo, or Foo::Bar::Baz.
+    function lookupConst(name) {
+        var parts = name.split("::")
+        var cur = anytype
+        cur = undefined
+        for (var i = scopes.length - 1; i >= 0 && cur == undefined; i--) {
+            if (hasOwn(scopes[i], parts[0])) { cur = scopes[i][parts[0]] }
+        }
+        if (cur == undefined && hasOwn(hostGlobals, parts[0])) { cur = hostGlobals[parts[0]] }
+        for (var j = 1; j < parts.length && cur != undefined && cur != null; j++) {
+            cur = hasOwn(cur, "$c$" + parts[j]) ? cur["$c$" + parts[j]]
+                : (hasOwn(cur, parts[j]) ? cur[parts[j]] : undefined)
+        }
+        return cur
     }
     // A raise in the body unwinds (a host throw) to the first rescue, which binds its
     // `=> Id` name to the value; else runs only when the body raised nothing AND produced
     // no return/break/next signal; ensure always runs and a control signal from it
     // overrides. A return/break/next signal from the body propagates as the begin's value.
     // The scope chain is restored to its begin-entry snapshot on the way out of a throw.
+    // The exception currently being handled, so a bare `raise` inside a rescue can
+    // re-raise it (Ruby's $!).
+    var curExc = []
+    function makeRetry() { return function() { throw {__retry: true} } }
     function makeTry(items, pos) {
-        var tryT = anytype, handlerT = anytype, hname = anytype, elseT = anytype, finallyT = anytype
+        var tryT = anytype, elseT = anytype, finallyT = anytype
+        var clauses = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].trybody != undefined) { tryT = items[i].trybody }
-            else if (items[i].handler != undefined) {
-                if (handlerT == undefined) { handlerT = items[i].handler; hname = items[i].hname }
-            }
+            else if (items[i].handler != undefined) { clauses.push(items[i]) }
             else if (items[i].elsebody != undefined) { elseT = items[i].elsebody }
             else if (items[i].finalbody != undefined) { finallyT = items[i].finalbody }
         }
         return function() {
-            var savedChain = scopes.slice()
-            var box = {v: null}
-            var threw = false
-            try {
-                box.v = tryT()
-            } catch (e) {
-                scopes = savedChain.slice()
-                if (excIsUser(e) && handlerT != undefined) {
+            while (true) {
+                var savedChain = scopes.slice()
+                var box = {v: null, again: false}
+                var threw = false
+                try {
+                    box.v = tryT()
+                } catch (e) {
+                    scopes = savedChain.slice()
+                    if (!excIsUser(e)) { throw e }
+                    var hit = null
+                    for (var k = 0; k < clauses.length && hit == null; k++) {
+                        if (rescueMatches(clauses[k], e.v)) { hit = clauses[k] }
+                    }
+                    if (hit == null) { throw e }
                     threw = true
                     scopes.push({})
-                    if (hname != undefined) { declVar(hname, e.v) }
-                    box.v = handlerT()
-                    scopes.pop()
-                } else {
-                    throw e
+                    if (hit.hname != undefined) { declVar(hit.hname, e.v) }
+                    curExc.push(e.v)
+                    try {
+                        box.v = hit.handler()
+                    } catch (e2) {
+                        curExc.pop()
+                        scopes.pop()
+                        // retry re-runs the whole begin body from the top.
+                        if (e2 !== null && e2 !== undefined && e2.__retry === true) { box.again = true }
+                        else { throw e2 }
+                    }
+                    if (!box.again) { curExc.pop(); scopes.pop() }
+                } finally {
+                    scopes = savedChain.slice()
+                    if (!threw && !box.again && !isSig(box.v) && elseT != undefined) {
+                        box.v = elseT()
+                    }
+                    if (finallyT != undefined) {
+                        var fr = finallyT()
+                        // A return/break/next signal out of ensure must override the
+                        // begin/rescue completion AND cancel a pending re-raise - only
+                        // a return from the host finally block does both.
+                        if (isSig(fr)) { return fr }
+                    }
                 }
-            } finally {
-                scopes = savedChain.slice()
-                if (!threw && !isSig(box.v) && elseT != undefined) {
-                    box.v = elseT()
-                }
-                if (finallyT != undefined) {
-                    var fr = finallyT()
-                    // A return/break/next signal out of ensure must override the
-                    // begin/rescue completion AND cancel a pending re-raise - only a
-                    // return from the host finally block does both (box.v = fr cannot
-                    // stop a rethrow that is already in flight).
-                    if (isSig(fr)) { return fr }
-                }
+                if (box.again) { continue }
+                return box.v
             }
-            return box.v
+        }
+    }
+    // A def body that carries its own rescue/else/ensure clauses (no `begin`).
+    function makeGuardedBody(items) {
+        var only = true
+        for (var i = 0; i < items.length; i++) { if (items[i].trybody == undefined) { only = false } }
+        if (only) { return items[0].trybody }
+        return makeTry(items, 0)
+    }
+    // EXPR rescue FALLBACK: the modifier form, which catches any StandardError.
+    function makeRescueMod(items) {
+        if (items.length == 1) { return items[0] }
+        var mainT = items[0]
+        var altT = items[1]
+        return function() {
+            var savedChain = scopes.slice()
+            try {
+                return mainT()
+            } catch (e) {
+                scopes = savedChain.slice()
+                if (!excIsUser(e)) { throw e }
+                return altT()
+            }
         }
     }
     // raise [EXPR[, EXPR]]: raise the first expression's value as a host exception (a
     // bare raise re-raise is approximated by raising nil); the message argument is ignored.
+    // raise "msg" wraps in a RuntimeError, raise CLASS[, msg] instantiates the class,
+    // raise EXC re-raises an instance, and a bare raise re-raises the one being
+    // handled - exactly Kernel#raise.
     function makeRaise(items, pos) {
         var t = items.length > 0 ? items[0] : null
-        return function() { throw {__exc: true, v: (t != null ? t() : null)} }
+        var mt = items.length > 1 ? items[1] : null
+        return function() {
+            if (t == null) {
+                if (curExc.length > 0) { throw {__exc: true, v: curExc[curExc.length - 1]} }
+                throw {__exc: true, v: mkExc(hostGlobals["RuntimeError"], "unhandled exception")}
+            }
+            var v = anytype
+            v = t()
+            var msg = anytype
+            msg = mt != null ? rstr(mt()) : undefined
+            if (typeof v == "string") { throw {__exc: true, v: mkExc(hostGlobals["RuntimeError"], v)} }
+            if (v !== null && v !== undefined && typeof v == "object" && v.__isclass === true) {
+                throw {__exc: true, v: mcall(v, "new", msg === undefined ? [] : [msg], null)}
+            }
+            throw {__exc: true, v: v}
+        }
     }
+    function mkExc(cls, msg) { return mcall(cls, "new", [msg], null) }
+
+    // ----- The builtin class objects -----
+    // `when Integer`, `x.is_a?(String)` and `rescue ArgumentError` all need the class
+    // NAME to resolve to a value. A builtin class is a class descriptor with no
+    // methods, flagged __builtin so valueIsA tests the host representation instead of
+    // walking a __class chain. The exception classes carry __super so `rescue
+    // StandardError` catches an ArgumentError.
+    function mkBuiltinClass(name, sup) { return {__isclass: true, __name: name, __builtin: true, __super: sup} }
+    function valueIsA(v, cls) {
+        if (cls === null || cls === undefined || cls.__isclass !== true) { return false }
+        if (cls.__builtin === true) {
+            var n = cls.__name
+            if (n == "Integer") { return typeof v == "number" }
+            if (n == "Float") { return isFlo(v) }
+            if (n == "Rational") { return isRat(v) }
+            if (n == "Complex") { return isCpx(v) }
+            if (n == "Numeric") { return isNumV(v) }
+            if (n == "String") { return typeof v == "string" }
+            if (n == "Symbol") { return isSym(v) }
+            if (n == "Array") { return Array.isArray(v) }
+            if (n == "Hash") { return isDict(v) }
+            if (n == "Range") { return isRange(v) }
+            if (n == "Proc") { return typeof v == "function" }
+            if (n == "NilClass") { return v === null || v === undefined }
+            if (n == "TrueClass") { return v === true }
+            if (n == "FalseClass") { return v === false }
+            if (n == "Object" || n == "BasicObject" || n == "Kernel" || n == "Comparable") { return true }
+            // An exception class: the raised value is an instance whose own class
+            // chain has to reach this one.
+            return userIsA(v, cls)
+        }
+        return userIsA(v, cls)
+    }
+    function userIsA(v, cls) {
+        if (!isUserObj(v)) { return false }
+        var c = v.__class
+        while (c != undefined && c != null) {
+            if (c === cls) { return true }
+            if (c.__mixins != undefined) {
+                for (var i = 0; i < c.__mixins.length; i++) { if (c.__mixins[i] === cls) { return true } }
+            }
+            c = c.__super
+        }
+        return false
+    }
+    var builtinClassNames = ["Integer", "Float", "Rational", "Complex", "Numeric", "String",
+                             "Symbol", "Array", "Hash", "Range", "Proc", "NilClass",
+                             "TrueClass", "FalseClass", "Object", "BasicObject", "Kernel",
+                             "Comparable", "Enumerable", "Math"]
+    for (var bci = 0; bci < builtinClassNames.length; bci++) {
+        hostGlobals[builtinClassNames[bci]] = mkBuiltinClass(builtinClassNames[bci], null)
+    }
+    // The exception hierarchy, enough of it that `rescue => e` (StandardError) and the
+    // named rescues of real code discriminate correctly.
+    var excBase = mkBuiltinClass("Exception", null)
+    hostGlobals["Exception"] = excBase
+    var stdErr = mkBuiltinClass("StandardError", excBase)
+    hostGlobals["StandardError"] = stdErr
+    var excNames = ["RuntimeError", "ArgumentError", "TypeError", "NameError", "IndexError",
+                    "KeyError", "RangeError", "ZeroDivisionError", "IOError", "NotImplementedError",
+                    "FrozenError", "StopIteration", "LocalJumpError"]
+    for (var eci = 0; eci < excNames.length; eci++) {
+        hostGlobals[excNames[eci]] = mkBuiltinClass(excNames[eci], stdErr)
+    }
+    hostGlobals["NoMethodError"] = mkBuiltinClass("NoMethodError", hostGlobals["NameError"])
+    // Exception#initialize / #message: the message defaults to the class name, which
+    // is what `raise S18Sub` (no message) has to produce.
+    function excInitFn() {
+        var self = arguments[0]
+        var m = anytype
+        m = arguments.length > 1 ? arguments[1] : undefined
+        scopePut(self, "message", (m !== undefined && m !== null) ? rstr(m) : self.__class.__name)
+        return null
+    }
+    function excMessageFn() {
+        var self = arguments[0]
+        return hasOwn(self, "message") ? self["message"] : self.__class.__name
+    }
+    excBase["initialize"] = excInitFn
+    excBase["message"] = excMessageFn
+    excBase["to_s"] = excMessageFn
+    excBase["full_message"] = excMessageFn
+    excBase["backtrace"] = function() { return [] }
+
+    // ----- Class-body directives (ordinary method calls in Ruby) -----
+    // They all act on the class whose body is running, which findSelf() supplies.
+    function directiveClass() {
+        var s = findSelf()
+        if (s !== null && s !== undefined && s.__isclass === true) { return s }
+        return curClass
+    }
+    function moduleMethodNames(mod) {
+        return hasOwn(mod, "__methodNames") ? mod.__methodNames : []
+    }
+    hostGlobals["include"] = function() {
+        var c = directiveClass()
+        for (var i = 0; i < arguments.length; i++) { c.__mixins.push(arguments[i]) }
+        return null
+    }
+    // prepend M: M's methods come BEFORE the class's own, and a `super` inside one of
+    // them reaches the class itself. The owner is recorded by module NAME rather than
+    // on the module object, so it survives the trip through the scope chain.
+    var prependOwners = {}
+    hostGlobals["prepend"] = function() {
+        var c = directiveClass()
+        var mods = []
+        for (var i = 0; i < arguments.length; i++) { mods.push(arguments[i]) }
+        for (var j = 0; j < mods.length; j++) {
+            var pl = c.__prepends
+            pl.push(mods[j])
+            c.__prepends = pl
+            scopePut(prependOwners, "$" + mods[j].__name, c)
+        }
+        return null
+    }
+    // extend M: M's instance methods become methods of the class OBJECT.
+    hostGlobals["extend"] = function() {
+        var c = directiveClass()
+        for (var i = 0; i < arguments.length; i++) {
+            var names = moduleMethodNames(arguments[i])
+            for (var j = 0; j < names.length; j++) { scopePut(c, "$x$" + names[j], arguments[i][names[j]]) }
+        }
+        return null
+    }
+    hostGlobals["alias_method"] = function(nu, old) { doAlias(directiveClass(), rstr(nu), rstr(old)); return null }
+    hostGlobals["define_method"] = function(nm, blk) {
+        var c = directiveClass()
+        scopePut(c, rstr(nm), function() {
+            var a = []
+            for (var i = 1; i < arguments.length; i++) { a.push(arguments[i]) }
+            return blockCall(blk, a)
+        })
+        return null
+    }
+    // private / protected / public: with no argument they switch the mode for the
+    // defs that follow, with arguments they mark exactly those methods.
+    function visDirective(mode, args) {
+        var c = directiveClass()
+        if (args.length == 0) { curVis = mode; return null }
+        for (var i = 0; i < args.length; i++) { scopePut(c, "$v$" + rstr(args[i]), mode) }
+        return null
+    }
+    // The frozen engine has no Array.prototype, so `arguments` is copied by hand.
+    function argsArray(a) {
+        var out = []
+        for (var i = 0; i < a.length; i++) { out.push(a[i]) }
+        return out
+    }
+    hostGlobals["private"] = function() { return visDirective("private", argsArray(arguments)) }
+    hostGlobals["protected"] = function() { return visDirective("protected", argsArray(arguments)) }
+    hostGlobals["public"] = function() { return visDirective("public", argsArray(arguments)) }
+    // module_function: every following def is ALSO a method of the module object.
+    hostGlobals["module_function"] = function() { curVis = "module_function"; return null }
+    hostGlobals["attr_reader"] = function() { return null }
+    hostGlobals["attr_accessor"] = function() { return null }
+    hostGlobals["attr_writer"] = function() { return null }
+    hostGlobals["freeze"] = function(v) { return v }
 
     // ----- Builtins -----
     hostGlobals["puts"] = function() {}   // never reached: puts is a statement form
     hostGlobals["exit"] = function(code) { exit(code === undefined ? 0 : code | 0) }
     hostGlobals["abs"] = function(v) { return v < 0 ? -v | 0 : v | 0 }
     hostGlobals["rand"] = function() { return 0 }
+    // Kernel#lambda and Kernel#proc: the block itself is the value; only lambda marks
+    // it, so Proc#lambda? can tell the two apart.
+    hostGlobals["lambda"] = function(blk) { return markLambda(blk) }
+    hostGlobals["proc"] = function(blk) { return blk }
+    hostGlobals["format"] = function() {
+        var a = argsArray(arguments)
+        return rformat(rstr(a[0]), a.slice(1))
+    }
+    hostGlobals["raise"] = function() { throw {__exc: true, v: mkExc(hostGlobals["RuntimeError"], rstr(arguments[0])) } }
     // Kernel#loop: an endless loop whose only exit is a break out of the block (which
     // arrives here as the non-local break makeCall catches, so `loop { break 42 }` is 42).
     hostGlobals["loop"] = function(blk) {
@@ -1712,6 +3866,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // element / key by key), while every other value compares by identity. -----
     function rubyEq(l, r) {
         if (l === r) { return true }
+        if (isNumV(l) && isNumV(r)) { return numEq(l, r) }
+        if (isRange(l) && isRange(r)) { return rubyEq(l.lo, r.lo) && rubyEq(l.hi, r.hi) && l.excl === r.excl }
+        if (isUserObj(l) && typeof lookupMethod(l.__class, "==") == "function") { return rtest(mcall(l, "==", [r], null)) }
+        if (isExcObj(l) && typeof r == "string") { return rstr(l) === r }
+        if (isExcObj(r) && typeof l == "string") { return rstr(r) === l }
         if (Array.isArray(l) && Array.isArray(r)) {
             if (l.length != r.length) { return false }
             for (var i = 0; i < l.length; i++) { if (!rubyEq(l[i], r[i])) { return false } }
@@ -1730,6 +3889,28 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     binOps["=="] = function(l, r) { return rubyEq(l, r) }
     binOps["!="] = function(l, r) { return !rubyEq(l, r) }
+    // === is the case-equality operator: membership for a range, is_a? for a class
+    // object, plain == otherwise. It is what `case/when` dispatches on.
+    function caseEq(l, r) {
+        if (isRange(l)) { return rangeCover(l, r) }
+        if (l !== null && l !== undefined && typeof l == "object" && l.__isclass === true) { return valueIsA(r, l) }
+        if (isUserObj(l) && typeof lookupMethod(l.__class, "===") == "function") { return rtest(mcall(l, "===", [r], null)) }
+        return rubyEq(l, r)
+    }
+    binOps["==="] = function(l, r) { return caseEq(l, r) }
+    binOps["<=>"] = function(l, r) { return spaceship(l, r) }
+    binOps["<"]  = function(l, r) { return rcmp(l, r) < 0 }
+    binOps[">"]  = function(l, r) { return rcmp(l, r) > 0 }
+    binOps["<="] = function(l, r) { return rcmp(l, r) <= 0 }
+    binOps[">="] = function(l, r) { return rcmp(l, r) >= 0 }
+    binOps["-"]  = function(l, r) { return rbin("-", l, r) }
+    binOps["*"]  = function(l, r) { if (typeof l == "string") { return strRepeat(l, toF(r)) } return rbin("*", l, r) }
+    binOps["/"]  = function(l, r) { return rbin("/", l, r) }
+    binOps["%"]  = function(l, r) { if (typeof l == "string") { return rformat(l, r) } return rbin("%", l, r) }
+    binOps["**"] = function(l, r) { return rbin("**", l, r) }
+    binOps["&"]  = function(l, r) { return rbin("&", l, r) }
+    binOps["|"]  = function(l, r) { return rbin("|", l, r) }
+    binOps["^"]  = function(l, r) { return rbin("^", l, r) }
 
     // ----- Core config -----
     core.lang = "ruby"

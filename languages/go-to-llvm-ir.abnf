@@ -24,20 +24,41 @@ and fmt.Print, os.Exit, and string concatenation. int arithmetic is 32 bit, / tr
 Widened surface (parsed so a real Go file gets through; -warn-unsupported downgrades
 the abort to a warning and keeps the rest compiling, enough for call graphs/CFGs/traces):
 a single-result type assertion x.(T) is GENUINELY handled as the identity on the value
-(the target type is parsed and ignored), and channel/interface/chan types are parsed in
-type positions. Accepted but reported not implemented (no concurrency, channel, or
-interface model): interface type declarations, goroutines (go f()), channel make
-(make(chan T)), channel send (ch <- v) and receive (<-ch), select, and type switches
-(switch x.(type)). Where operands exist (the goroutine callee, the send/receive channel
+(the target type is parsed and ignored), the TYPE SWITCH (switch v := x.(type)) is
+genuinely implemented (each arm is a runtime type test), and channel/interface/chan
+types are parsed in type positions. Accepted but reported not implemented (no
+concurrency, channel, or interface model): interface type declarations, goroutines
+(go f()), channel make (make(chan T)), channel send (ch <- v) and receive (<-ch), and
+select. Where operands exist (the goroutine callee, the send/receive channel
 and value) they still emit under -warn-unsupported so their calls stay visible.
+
+Also implemented (added while widening toward the full language, and measured by
+tests/go-test-full.go): grouped declarations - several names sharing a type in
+parameters and in struct fields -, multi-name var declarations with a shared type or
+an unpacked multi-value initializer, and the full operator set (bitwise and or xor
+and-not, shifts, the matching compound assignments, unary complement). A line break
+now ends a var spec or a struct field, so a following name is not read as the
+previous one's type. Slice expressions (s[lo:hi], byte ranges on a string), the
+bracketed conversions []byte(s) / []rune(s), 'for {}', labels with labelled break and
+continue and a backward goto, generics ERASED (type parameter lists and instantiations
+f[int] / T[K, V] are parsed and ignored), defined types (type myInt int becomes the
+conversion to its underlying type), keyed and empty struct literals, Go's own escape
+sequences (a byte-wise x and octal escape, and
+the eight digit U form), strings as BYTE strings (len and s[i] count bytes, and
+ranging one yields byte offsets and runes), the identifier spelled conversions
+(string(r), int(x), byte(x), ...), calls on arbitrary values (fs[0]()), variadic
+parameters and the f(xs...) spread, named results (a bare return yields them and a
+deferred function may still change them), defer on a function literal or a method
+value, per iteration loop variables (Go 1.22), an init statement in an if or switch
+header, fallthrough, and the min/max/clear builtins.
 
 Deviations and limits: structs behave like references (as if every value were a *T),
 append mutates in place (write s = append(s, v) as usual), composite literals must not
 appear in if/for/switch headers, map iteration and printing follow the insertion order
 (real Go randomizes resp. sorts), 'var m map[K]V' is not a usable map (create maps with
-a literal or make), defer cannot take struct methods, there are no pointers,
-fallthrough, method values, generics, or the comma-ok type assertion, and s[i] on
-strings is not supported.
+a literal or make), arrays are not copied on assignment and a slice expression COPIES
+instead of sharing a backing array, and there are no pointers, method values,
+panic/recover, or the comma-ok type assertion.
 
 
 Functions, methods and function literals become IR functions jsf_N(env, args) (methods
@@ -80,8 +101,19 @@ ImportStr   <~~ resolveImport(up.in.slice(1, up.in.length - 1), up.pos) ~~>
 // The name is pushed first; the body decides between a struct (lowered) and an
 // interface (accepted, then reported not implemented - no interface semantics).
 TypeDecl    <~~ push(makeTypeDecl(takeAll(), up.pos)) ~~>
-            = "type" KwEnd Id <~~ push(up.in) ~~> ( StructBody | IfaceBody ) ;
-StructBody  = "struct" KwEnd "{" { Id <~~ push(up.in) ~~> Type [ ";" ] } "}" ;
+            = "type" KwEnd Id <~~ push(up.in) ~~> [ TypeParams ] ( StructBody | IfaceBody | DefinedType ) ;
+// type myInt int / type Celsius float64: a defined type over an existing one. The value
+// model has no distinct type for it, so the name becomes the CONVERSION to its
+// underlying type - which is exactly how a defined type is used in an expression.
+DefinedType <~~ push({under: firstType(up.in)}) ~~>
+            = Type ;
+// Struct fields: one or more names sharing a type (x, y int), an optional raw string
+// tag, and embedded fields (a bare type name, whose field name is the type).
+StructBody  = "struct" KwEnd "{" { FieldDecl } "}" ;
+FieldDecl   = NamedField | EmbedField ;
+NamedField  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } SameLine Type [ FieldTag ] [ ";" ] ;
+EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in) ~~> [ FieldTag ] [ ";" ] ;
+FieldTag    = RawString <~~ pop() ~~> ;
 IfaceBody   <~~ push({iface: true}) ~~>
             = "interface" KwEnd SkipBlock ;
 
@@ -102,19 +134,80 @@ ConstSingle <~~ push(makeVarDecl(takeAll())) ~~>
 
 // func name(params) rets { } and func (r Type) name(params) rets { }
 FuncDecl    <~~ push(makeFuncStmt(takeAll())) ~~>
-            = "func" KwEnd [ Receiver ] Id <~~ push(up.in) ~~> ParamList [ RetTypes ] Block ;
+            = "func" KwEnd [ Receiver ] Id <~~ push(up.in) ~~> [ TypeParams ] ParamList [ RetTypes ] Block ;
+// Generics are ERASED: a type parameter list is parsed and ignored, the constraint with
+// it, and an instantiation (f[int], T[K, V]) is the identity on the value it indexes.
+// The value model is dynamically typed, so an erased generic behaves exactly like the
+// instantiated one - only compile-time type CHECKING is lost, which a syntax-driven
+// front end does not do anyway.
+TypeParams  = "[" TypeParamGrp { "," TypeParamGrp } "]" ;
+TypeParamGrp = Id { "," Id } Constraint ;
+Constraint  = ConstrTerm { "|" ConstrTerm } ;
+ConstrTerm  = [ "~" ] Type ;
 Receiver    <~~ push({recv: takeAll()}) ~~>
-            = "(" Id <~~ push(up.in) ~~> [ "*" ] Id <~~ push(up.in) ~~> ")" ;
-ParamList   <~~ push({params: takeAll()}) ~~>
-            = "(" [ Id <~~ push(up.in) ~~> [ "..." ] Type { "," Id <~~ push(up.in) ~~> [ "..." ] Type } ] ")" ;
-RetTypes    = Type | "(" Type { "," Type } ")" ;
+            = "(" Id <~~ push(up.in) ~~> [ "*" ] Id <~~ push(up.in) ~~> [ TypeArgs ] ")" ;
+// Parameters: several names may share a type (a, b int), a name may be omitted
+// entirely (func(int), only in type positions), and the last one may be variadic.
+// A named group is tried first; on an unnamed list it fails and the bare-type form
+// takes over.
+ParamList   <~~ push(makeParams(takeAll())) ~~>
+            = "(" [ ParamItem { "," ParamItem } [ "," ] ] ")" ;
+ParamItem   = NamedParam | AnonParam ;
+NamedParam  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ Variadic ] Type ;
+AnonParam   = [ Variadic ] Type ;
+// The last parameter may be variadic: it collects the remaining arguments as a slice.
+Variadic    <~~ push({vararg: true}) ~~> = "..." ;
+// f(xs...) spreads a slice into a variadic parameter instead of passing it as one
+// argument.
+Spread      <~~ push({spread: true}) ~~> = "..." ;
+// Results: a single type, or a parenthesized list that may NAME its results
+// (func f(a int) (q, r int)). Named results become zero-valued locals that a bare
+// 'return' yields and that a deferred function can still change. NamedAhead decides
+// which shape it is BEFORE any name is pushed, so the unnamed list never leaks half a
+// name list onto the tag stack.
+RetTypes    = NamedRets | Type | "(" [ Type { "," Type } ] ")" ;
+NamedRets   <~~ push({rets: takeAll()}) ~~>
+            = NamedAhead "(" NamedRetGrp { "," NamedRetGrp } ")" ;
+NamedRetGrp = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } Type ;
+// A parenthesized list is NAMED exactly when some element at depth 1 is two words
+// separated by whitespace ('q, r int' has 'r int'; '(int, string)' has no such pair).
+NamedAhead = :script(~~
+    (function () {
+        var i = 0
+        var depth = 0
+        var cc = 0
+        var prevWord = false
+        var sawSpace = false
+        while (i < 8192) {
+            cc = c.peek(i)
+            if (cc < 0) { break }
+            var isWord = (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { sawSpace = true; i++; continue }
+            if (cc === 40) { depth++; prevWord = false; sawSpace = false; i++; continue }
+            if (cc === 41) {
+                depth--
+                if (depth === 0) { break }
+                prevWord = false
+                sawSpace = false
+                i++
+                continue
+            }
+            if (depth === 1 && prevWord && sawSpace && (isWord || cc === 91 || cc === 42)) { return undefined }
+            prevWord = isWord
+            sawSpace = false
+            i++
+        }
+        return abnf.newToken("\x01unnamed-results", 0)
+    })()
+~~) ;
 
 // A package level var: its declaration thunk becomes a top level statement.
 // Grouped form (var ( a int; b = 2 )) is GENUINELY bound one spec at a time.
 TopVar      = VarGroup | VarDecl ;
 
 Type        = "*" Type | "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT
-            | ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) ;
+            | ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) [ "." Id ] [ TypeArgs ] ;
+TypeArgs    = "[" Type { "," Type } "]" ;
 // A pointer type (*T) and a fixed size array ([N]T / [...]T) are parsed in every type
 // position; the pointer is transparent (structs already behave like references) and an
 // array declares like a slice. The size expression is parsed and ignored.
@@ -129,11 +222,12 @@ IfaceTypeT  = "interface" KwEnd SkipBlock ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = Block | If | For | Switch | Return | Break | Continue | Defer | GoStmt | Select | Fallthrough
-            | ConstSingle | VarGroup | VarDecl | SimpleStmt | Empty ;
+            = Block | If | For | Switch | Return | Break | Continue | Goto | Defer | GoStmt | Select | Fallthrough
+            | ConstSingle | VarGroup | VarDecl | Labeled | SimpleStmt | Empty ;
 
 // fallthrough: accepted, reported not implemented (our switch has no fallthrough model).
-Fallthrough <~~ push(notImplStmt("fallthrough", up.pos)) ~~>
+// fallthrough: continues into the NEXT case body instead of leaving the switch.
+Fallthrough <~~ push({isFallthrough: true}) ~~>
             = "fallthrough" KwEnd [ ";" ] ;
 
 // go f(args) / go pkg.Fn(args): a goroutine. True concurrency is not modeled, so
@@ -147,15 +241,23 @@ Select      <~~ push(notImplStmt("select statement", up.pos)) ~~>
 // defer f(args) / defer pkg.fn(args): the function value and the arguments are
 // evaluated now, the call runs when the surrounding function returns (LIFO).
 Defer       <~~ push(makeDefer(takeAll())) ~~>
-            = "defer" KwEnd Id <~~ push(up.in) ~~> [ "." Id <~~ push({mname: up.in}) ~~> ]
-              "(" [ Expression { "," Expression } ] ")" [ ";" ] ;
+            = "defer" KwEnd DeferTarget "(" [ Expression { "," Expression } [ Spread ] ] ")" [ ";" ] ;
+// Whatever the call is made ON: a name, a package member, a method value or a
+// function literal. It is evaluated at defer time, together with the arguments.
+// It must NOT swallow the call itself, so the chain carries only the non-call
+// suffixes and the primary is restricted to the forms a callee can take.
+DeferTarget <~~ push({dfn: pop()}) ~~>
+            = DeferChain ;
+DeferChain  <~~ push(foldCallMember(takeAll())) ~~>
+            = DeferPrim { FieldSfx | IndexSfx } ;
+DeferPrim   = "(" Expression ")" | FuncLit | VarRef ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
 
 // var x int = 5 / var s string -- the zero value depends on the type.
 VarDecl     <~~ push(makeVarDecl(takeAll())) ~~>
-            = "var" KwEnd Id <~~ push(up.in) ~~> [ VType ] [ "=" Expression ] [ ";" ] ;
+            = "var" KwEnd Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ SameLine VType ] [ "=" ExprList ] [ ";" ] ;
 VType       <~~ push({ty: up.in}) ~~>
             = Type ;
 
@@ -164,7 +266,7 @@ VType       <~~ push({ty: up.in}) ~~>
 VarGroup    <~~ push(makeVarGroup(takeAll())) ~~>
             = "var" KwEnd "(" { VarSpec } ")" [ ";" ] ;
 VarSpec     <~~ push(makeVarDecl(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ VType ] [ "=" Expression ] [ ";" ] ;
+            = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ SameLine VType ] [ "=" ExprList ] [ ";" ] ;
 
 // Short declarations, assignments, ++/-- and expression statements. The cores do
 // not eat the separator themselves: for headers reuse them between the semicolons.
@@ -192,7 +294,9 @@ IncDecStmt  <~~ push(makeIncDec(takeAll())) ~~>
 
 // a = e / a, b = b, a / p.x = e / s[i] = e / a += e
 Assign      <~~ push(makeAssign(takeAll())) ~~>
-            = Target { "," Target } ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push({op: up.in}) ~~> ExprList ;
+            = Target { "," Target } AssignOp <~~ push({op: up.in}) ~~> ExprList ;
+// Longest first: '&^=' before '&=', and the bare '=' last of all.
+AssignOp    = "&^=" | "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "=" ;
 
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
@@ -205,42 +309,57 @@ Empty       <~~ push(function(b) { return b }) ~~>
             = ";" ;
 
 // Go style headers without parentheses. Composite literals are gated off inside.
-If          <~~ push(makeIf(takeAll())) ~~>
-            = "if" KwEnd CondOn Expression CondOff Block [ "else" KwEnd ( If | Block ) ] ;
+If          <~~ push(makeIfG(takeAll())) ~~>
+            = "if" KwEnd CondOn [ InitAhead FInit ";" ] Expression CondOff Block [ "else" KwEnd ( If | Block ) ] ;
 
 // ForCond is tried before ForClassic: a classic header would leave the
 // composite literal gate pushed when it fails at its first semicolon.
-For         = ForRange | ForCond | ForClassic ;
+For         = ForEver | ForRange | ForCond | ForClassic ;
+// 'for {}': tried first, because the other forms would push the composite-literal
+// gate and then fail on the '{', leaking the marker. Each form claims the pending
+// label (see Labeled) at the 'for' keyword, BEFORE its body is built, so a nested
+// loop cannot steal the outer loop's label.
+ForEver     <~~ push(makeForEver(takeAll())) ~~>
+            = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~> Block ;
 // for i, v := range s / for _, v := range s / for i := range s
 ForRange    <~~ push(makeForRange(takeAll())) ~~>
-            = "for" KwEnd Id <~~ push(up.in) ~~> [ "," Id <~~ push(up.in) ~~> ] ":="
+            = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~> Id <~~ push(up.in) ~~> [ "," Id <~~ push(up.in) ~~> ] ":="
               "range" KwEnd CondOn Expression CondOff Block ;
 ForClassic  <~~ push(makeForClassic(takeAll())) ~~>
-            = "for" KwEnd CondOn [ FInit ] ";" [ FCond ] ";" [ FPost ] CondOff Block ;
-FInit       <~~ push({k:"init", t:pop()}) ~~> = SimpleStmt2 ;
+            = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~> CondOn [ FInit ] ";" [ FCond ] ";" [ FPost ] CondOff Block ;
+FInit       <~~ push({k:"init", t:pop(), names: takeDeclNames()}) ~~> = SimpleStmt2 ;
 FCond       <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
 FPost       <~~ push({k:"post", t:pop()}) ~~> = SimpleStmt2 ;
 SimpleStmt2 = ShortDecl | IncDecStmt | Assign ;
-ForCond     <~~ push(makeWhile(pop(), pop())) ~~>
-            = "for" KwEnd CondOn Expression CondOff Block ;
+ForCond     <~~ push(makeWhileG(takeAll())) ~~>
+            = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~> CondOn Expression CondOff Block ;
 
 // Go switch: no fallthrough (an implicit break ends every case), several values per
 // case, with a subject (compared ==) or without one (the first true condition wins).
 Switch      = TypeSwitch | ValueSwitch ;
-// A type switch (switch x.(type) / switch v := x.(type)) needs interface and type-set
-// semantics we do not model: the subject (an identifier chain) is accepted and the
-// body skipped, then it is reported not implemented. Tried before the value switch so
-// its subject's '.(type)' is not mistaken for a value plus a type assertion.
-TypeSwitch  <~~ push(notImplStmt("type switch", up.pos)) ~~>
-            = "switch" KwEnd [ Id ":=" ] TSSubject "." "(" "type" KwEnd ")" SkipBlock ;
-TSSubject   = Id { "." Id } ;
+// switch v := x.(type) { case int: ... }: the subject is evaluated once, every case
+// lists TYPES (compared with the runtime type test js_gotypeis), and the bound name
+// takes the subject's value inside the matching case body. Tried before the value
+// switch so its subject's '.(type)' is not mistaken for a value plus a type assertion.
+TypeSwitch  <~~ push(makeTypeSwitch(takeAll())) ~~>
+            = "switch" KwEnd TypeSwAhead [ Id <~~ push({tsname: up.in}) ~~> ":=" ]
+              CondOn TSSubject CondOff "." "(" "type" KwEnd ")"
+              "{" { TypeCase | Statement } "}" ;
+TSSubject   <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+TypeCase    <~~ push(makeTypeCase(takeAll())) ~~>
+            = ( "case" KwEnd CaseType { "," CaseType }
+              | "default" KwEnd ) ":" ;
+CaseType    <~~ push({ct: up.in}) ~~>
+            = Type ;
 // The subjectless body is tried before the subject so a bare 'switch {' never enters
 // SwitchSubj: that would push the composite-literal gate marker (CondOn) and then fail
 // its Expression on the '{', leaking the marker (pushes are not rolled back) and
 // blocking every later composite literal.
 ValueSwitch <~~ push(makeSwitch(takeAll())) ~~>
-            = "switch" KwEnd ( "{" { CaseLabel | Statement } "}"
-                             | SwitchSubj "{" { CaseLabel | Statement } "}" ) ;
+            = "switch" KwEnd [ InitAhead FInit ";" ]
+              ( "{" { CaseLabel | Statement } "}"
+              | SwitchSubj "{" { CaseLabel | Statement } "}" ) ;
 SwitchSubj  <~~ push({subj: pop()}) ~~>
             = CondOn Expression CondOff ;
 // The body is parsed flat: the labels must be tried before Statement (a bare 'case'
@@ -253,8 +372,49 @@ CaseLabel   <~~ push(makeCaseLabel(takeAll())) ~~>
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = "return" KwEnd [ Expression { "," Expression } ] [ ";" ] ;
 
-Break       <~~ push(makeBreak()) ~~>    = "break" KwEnd [ ";" ] ;
-Continue    <~~ push(makeContinue()) ~~> = "continue" KwEnd [ ";" ] ;
+// break / continue carry an optional label: they leave (resp. re-enter) the loop that
+// carries that label rather than the innermost one.
+Break       <~~ push(makeBreakG(takeAll())) ~~>
+            = "break" KwEnd [ Id <~~ push(up.in) ~~> ] [ ";" ] ;
+Continue    <~~ push(makeContinueG(takeAll())) ~~>
+            = "continue" KwEnd [ Id <~~ push(up.in) ~~> ] [ ";" ] ;
+// goto name: a branch to a label of an ENCLOSING labelled statement (the backward
+// jump Go programs actually use). A forward goto is reported at compile time.
+Goto        <~~ push(makeGoto(takeAll(), up.pos)) ~~>
+            = "goto" KwEnd Id <~~ push(up.in) ~~> [ ";" ] ;
+
+// 'name:' in front of a statement. LabelAhead decides before anything is pushed, so a
+// short declaration ('x := 1', whose ':' is the head of ':=') never leaks a half-parsed
+// label onto the tag stack. pendingLabel is set BEFORE the statement is parsed, so the
+// loop builder inside can claim it - that is what makes 'continue outer' reach the
+// right loop.
+Labeled     <~~ push(makeLabeled(pop(), pop())) ~~>
+            = LabelAhead Id <~~ pendingLabel = up.in; push(up.in) ~~> ":" Statement ;
+LabelAhead = :script(~~
+    (function () {
+        var i = 0
+        var cc = 0
+        // Whitespace is not skipped before a guard, so step over it first.
+        while (i < 4096) {
+            cc = c.peek(i)
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i++; continue }
+            break
+        }
+        cc = c.peek(i)
+        if (!((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95)) {
+            return abnf.newToken("\x01not-a-label", 0)
+        }
+        while (i < 4096) {
+            cc = c.peek(i)
+            if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95) { i++; continue }
+            break
+        }
+        return (c.peek(i) === 58 && c.peek(i + 1) !== 61)
+            ? undefined
+            : abnf.newToken("\x01not-a-label", 0)
+    })()
+~~) ;
+
 
 // Every expression production pushes exactly one thunk: function() -> value.
 Expression  = OrExpr ;
@@ -271,13 +431,30 @@ EqExpr      <~~ push(foldBinary(takeAll())) ~~>
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = AddExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr } ;
 
+// Go's two binary levels below the comparisons: '+ - | ^' bind loosest, then
+// '* / % << >> & &^'. The single-character '&' and '|' must not swallow the first
+// half of '&&' / '||', which bind even looser - NotAmp/NotBar reject that.
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+            = MulExpr { AddOp <~~ push(up.in) ~~> MulExpr } ;
+AddOp       = "+" | "-" | "^" | BarOp ;
+BarOp       = "|" NotBar ;
 
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+            = UnaryExpr { MulOp <~~ push(up.in) ~~> UnaryExpr } ;
+MulOp       = "*" | "/" | "%" | "<<" | ">>" | "&^" | AmpOp ;
+AmpOp       = "&" NotAmp ;
+NotAmp = :script(~~
+    (c.peek(0) === 38) ? abnf.newToken("\x01logical-and", 0) : undefined
+~~) ;
+NotBar = :script(~~
+    (c.peek(0) === 124) ? abnf.newToken("\x01logical-or", 0) : undefined
+~~) ;
 
-UnaryExpr   = Recv | Neg | Not | AddrOf | Deref | PostfixExpr ;
+UnaryExpr   = Recv | Neg | Not | Compl | Plus | AddrOf | Deref | PostfixExpr ;
+// ^x: the bitwise complement (Go spells it '^', not '~'). Unary '+' is the identity.
+Compl       <~~ push(makeCompl(pop())) ~~>
+            = "^" UnaryExpr ;
+Plus        = "+" UnaryExpr ;
 // <-ch: a channel receive as a value. Accepted, reported not implemented; the
 // operand still evaluates under -warn-unsupported. Tried before Neg so '<-' wins
 // over '<' (a compare's '<' is followed by whitespace or a different next token).
@@ -299,13 +476,22 @@ Deref       = "*" UnaryExpr ;
 // bound still evaluate under -warn-unsupported so nested calls stay visible. It is
 // tried before the plain postfix chain so the ':' inside the brackets is reached
 // (a chain's IndexSfx would fail at the ':' and fall through to the slice form).
-PostfixExpr = SliceExpr | CallMember ;
-SliceExpr   <~~ push(makeSliceNI(takeAll(), up.pos)) ~~>
-            = CallMember "[" [ Expression ] ":" [ Expression ] [ ":" Expression ] "]" ;
+PostfixExpr = CallMember ;
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | IndexSfx | TypeAssertSfx } ;
-MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } [ "..." ] ] ")" ;
+            = Primary { MethodSfx | FieldSfx | SliceSfx | IndexSfx | CallSfx | TypeAssertSfx } ;
+// s[lo:hi] / s[lo:hi:max]. Tried before IndexSfx so the ':' inside the brackets is
+// reached (an index would fail there and the whole chain with it). Each bound is
+// tagged, so an omitted one is told apart from a following one.
+SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
+            = "[" [ Expression <~~ push({lo: pop()}) ~~> ] ":" [ Expression <~~ push({hi: pop()}) ~~> ]
+              [ ":" Expression <~~ push({mx: pop()}) ~~> ] "]" ;
+// A call on an arbitrary value, not on a name: fs[0](), mk(1)(), p.f().g(). Primary's
+// Call covers only the 'Id(args)' form, so without this suffix a call on any other
+// expression does not parse at all.
+CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
+            = "(" [ Expression { "," Expression } [ Spread ] ] ")" ;
+MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll())) ~~>
+            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } [ Spread ] ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
@@ -317,7 +503,14 @@ TypeAssertSfx = "." "(" Type ")" ;
 
 Primary     = "(" Expression ")" | FloatLit | HexLit | OctLit | BinLit | DecULit | DqString | RawString | RuneLit
             | IntLit | True | False | Nil | FuncLit | SliceLit
-            | MapLit | MakeMap | MakeChan | StructLit | CompLitNI | Call | VarRef ;
+            | MapLit | MakeMap | MakeChan | StructLit | CompLitNI | ConvExpr | Call | VarRef ;
+
+// []byte(s) / []rune(s): the bracketed conversions. The identifier-spelled ones
+// (string(r), int(x), ...) are ordinary calls and go through Call.
+ConvExpr    <~~ push(makeConv(takeAll())) ~~>
+            = ConvType "(" Expression ")" ;
+ConvType    <~~ push({conv: firstType(up.in)}) ~~>
+            = "[" "]" Type ;
 
 // nil is the null value (structs, slices, maps and pointers share one). Tried before
 // VarRef so it is not read as an undefined identifier.
@@ -357,7 +550,7 @@ CompHead    = [ "[" [ "..." | Expression <~~ pop() ~~> ] "]" ] [ "*" ]
 CompName    = "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id { "." Id } ;
 
 // func(x int) int { ... }: a function literal; a real closure over its scope.
-FuncLit     <~~ push(makeFuncLit(pop(), pop())) ~~>
+FuncLit     <~~ push(makeFuncLit(takeAll())) ~~>
             = "func" KwEnd ParamList [ RetTypes ] Block ;
 
 // []int{1, 2, 3}
@@ -382,13 +575,18 @@ ZType       <~~ push({mzero: up.in}) ~~>
             = Type ;
 
 // Point{3, 4} -- positional, at least one element, and not inside if/for headers.
+// Point{3, 4} positional, Point{y: 4, x: 3} keyed, Point{} empty. A keyed element is
+// tried first: its 'name:' would otherwise parse as a bare expression.
 StructLit   <~~ push(makeStructLit(takeAll())) ~~>
-            = StructGate Id <~~ push(up.in) ~~> "{" Expression { "," Expression } "}" ;
+            = StructGate Id <~~ push(up.in) ~~> [ TypeArgs ]
+              "{" [ LitElem { "," LitElem } [ "," ] ] "}" ;
+LitElem     = KeyedElem | Expression ;
+KeyedElem   = Id <~~ push({fkey: up.in}) ~~> ":" Expression ;
 
 // f(a, b): a function or a builtin. A trailing '...' (spread of a slice into a
 // variadic parameter) is accepted and ignored (the last argument passes through).
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } [ "..." ] ] ")" ;
+            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } [ Spread ] ] ")" ;
 
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
@@ -403,6 +601,125 @@ CondOff = :script(~~
     pop()
     undefined
 ~~) ;
+// InitAhead answers "does this if/switch header carry an init statement?" - i.e. is
+// there a ';' before the body's '{' at bracket depth 0. Without it the optional init
+// would be ATTEMPTED on a plain header, and its half-parsed pushes are not rolled
+// back (see the CondOn note above). TypeSwAhead is the same shape for '.(type)'.
+// Both are pure functions of (source, position): they only ever read with c.peek.
+InitAhead = :script(~~
+    (function () {
+        var i = 0
+        var depth = 0
+        var cc = 0
+        while (i < 8192) {
+            cc = c.peek(i)
+            if (cc < 0) { break }
+            if (cc === 34 || cc === 39 || cc === 96) {       // " ' `
+                var q = cc
+                i++
+                while (i < 8192) {
+                    var d = c.peek(i)
+                    if (d < 0 || d === q) { break }
+                    if (d === 92 && q !== 96) { i++ }
+                    i++
+                }
+                i++
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 47) {          // // comment
+                while (i < 8192 && c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 42) {          // /* comment
+                i += 2
+                while (i < 8192 && c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) { i++ }
+                i += 2
+                continue
+            }
+            if (cc === 40 || cc === 91) { depth++ }
+            if (cc === 41 || cc === 93) { depth-- }
+            if (depth === 0 && cc === 59) { return undefined }
+            if (depth === 0 && (cc === 123 || cc === 125)) { break }
+            i++
+        }
+        return abnf.newToken("\x01no-header-init", 0)
+    })()
+~~) ;
+// TypeSwAhead answers "is this switch a TYPE switch?" - i.e. does a '.(type)' come
+// before the body's '{' at bracket depth 0. Without it the type-switch alternative
+// would be ATTEMPTED on every switch, and its half-parsed pushes are not rolled back
+// (see the CondOn note above). It is a pure function of (source, position): it only
+// ever reads with c.peek.
+TypeSwAhead = :script(~~
+    (function () {
+        var i = 0
+        var depth = 0
+        var cc = 0
+        while (i < 8192) {
+            cc = c.peek(i)
+            if (cc < 0) { break }
+            if (cc === 34 || cc === 39 || cc === 96) {       // " ' `
+                var q = cc
+                i++
+                while (i < 8192) {
+                    var d = c.peek(i)
+                    if (d < 0 || d === q) { break }
+                    if (d === 92 && q !== 96) { i++ }
+                    i++
+                }
+                i++
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 47) {          // // comment
+                while (i < 8192 && c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 42) {          // /* comment
+                i += 2
+                while (i < 8192 && c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) { i++ }
+                i += 2
+                continue
+            }
+            if (cc === 46 && c.peek(i + 1) === 40 && c.peek(i + 2) === 116 && c.peek(i + 3) === 121
+                && c.peek(i + 4) === 112 && c.peek(i + 5) === 101 && c.peek(i + 6) === 41) {
+                return undefined
+            }
+            if (cc === 40 || cc === 91) { depth++ }
+            if (cc === 41 || cc === 93) { depth-- }
+            if (depth === 0 && (cc === 123 || cc === 125)) { break }
+            i++
+        }
+        return abnf.newToken("\x01not-a-type-switch", 0)
+    })()
+~~) ;
+// SameLine stands in for Go's automatic semicolon insertion where it actually bites:
+// in a grouped const/var block and in a struct body, 'green04 NEWLINE blue04' must not
+// read the second name as the first one's TYPE. It fails when a line break (or a line
+// comment) comes before the next token.
+SameLine = :script(~~
+    (function () {
+        var i = 0
+        var cc = 0
+        while (i < 8192) {
+            cc = c.peek(i)
+            if (cc === 32 || cc === 9 || cc === 13) { i++; continue }
+            if (cc === 10) { return abnf.newToken("\x01line-break", 0) }
+            if (cc === 47 && c.peek(i + 1) === 47) { return abnf.newToken("\x01line-break", 0) }
+            if (cc === 47 && c.peek(i + 1) === 42) {
+                i += 2
+                while (i < 8192 && c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) {
+                    if (c.peek(i) === 10) { return abnf.newToken("\x01line-break", 0) }
+                    i++
+                }
+                i += 2
+                continue
+            }
+            break
+        }
+        return undefined
+    })()
+~~) ;
+
 StructGate = :script(~~
     (function() {
         var t = pop()
@@ -443,8 +760,46 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // protocol, expression/statement builders); see the `core` knobs below.
     include("lib/compile-core.js")
 
+    // ----- Operators Go has and the shared core does not -----
+    // The bitwise and shift externals already exist in the handle runtime; wiring them
+    // into binExt puts them on the ordinary emitBin path. js_shl/js_shr are 32 bit,
+    // which is what Go's shift results are used for here.
+    binExt["<<"] = "js_shl"
+    binExt[">>"] = "js_shr"
+    binExt["&"] = "js_band"
+    binExt["|"] = "js_bor"
+    binExt["^"] = "js_bxor"
+
+    binExt["<<="] = "js_shl"
+    binExt[">>="] = "js_shr"
+    binExt["&="] = "js_band"
+    binExt["|="] = "js_bor"
+    binExt["^="] = "js_bxor"
+
+    // Go's AND NOT has no external of its own: 'a &^ b' is 'a & (b XOR -1)'. The
+    // override is by ASSIGNMENT so both engines agree on which definition is live.
+    var coreEmitBin = emitBin
+    emitBin = function(b, op, l, r) {
+        if (op == "&^" || op == "&^=") {
+            return coreEmitBin(b, "&", l, coreEmitBin(b, "^", r, emitNum(b, 0 - 1)))
+        }
+        return coreEmitBin(b, op, l, r)
+    }
+    // ^x is 'x XOR -1'.
+    function makeCompl(t) {
+        return function(b) {
+            var r = t(b)
+            b = r.b
+            return {b: b, v: emitBin(b, "^", r.v, emitNum(b, 0 - 1))}
+        }
+    }
+
     var hidCount = 0     // Names hidden range-loop counters.
     var structFields = {} // struct name -> field name list (source order).
+    // The NAMED results of the function being emitted right now (emitFunc saves and
+    // restores it around every nested function), read by return and by the fallthrough
+    // end of a body.
+    var curRets = []
 
     // ----- Project-file import state (see core.importFile near the core config) -----
     var importedFiles = {} // "$" + absolute file path -> already imported (once only)
@@ -457,12 +812,84 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // ----- Expression thunks: function(block) -> {b, v} -----
 
+    function makeMethodSfx(name, args) {
+        var sp = takeSpread(args)
+        return {kind: "mcall", name: name, args: args, spread: sp}
+    }
+    // items = [argThunks..., {spread}?]: the '(args)' suffix of a postfix chain.
+    function makeCallSfx(items) {
+        var sp = takeSpread(items)
+        return {kind: "call", args: items, spread: sp}
+    }
+    // A trailing {spread} marker is popped off an argument list; it means the last
+    // argument is a slice to be spread into the variadic parameter.
+    function takeSpread(args) {
+        if (args.length > 0 && typeof args[args.length - 1] != "function") { args.pop(); return true }
+        return false
+    }
+    // emitArgs plus Go's f(xs...): js_gospread flattens the last element in place.
+    function emitArgs2(b, args, spread) {
+        var ea = emitArgs(b, args)
+        if (spread) { callExt(ea.b, "js_gospread", [ea.v]) }
+        return ea
+    }
+    // items = [name..., {vararg}?]: the parameter names, and whether the last one
+    // collects the remaining arguments.
+    function makeParams(items) {
+        var names = []
+        var variadic = false
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "string") { names.push(items[i]) }
+            else if (items[i] != undefined && items[i].vararg == true) { variadic = true }
+        }
+        return {params: names, variadic: variadic}
+    }
+    // Go's suffix chain: the shared core knows .m(), .field and [i]; the plain call on
+    // an arbitrary value is added here. Assigned, not declared - compile-core.js already
+    // defines foldCallMember, and a second declaration would leave the two engines
+    // disagreeing about which one is live.
+    foldCallMember = function(items) {
+        if (items.length == 1) { return items[0] }
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function(b) {
+            var r = primary(b)
+            b = r.b
+            var cur = r.v
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "mcall") {
+                    var ea = emitArgs2(b, s.args, s.spread)
+                    b = ea.b
+                    cur = callExt(b, "js_mcall", [cur, emitStr(b, s.name), ea.v])
+                } else if (s.kind == "field") {
+                    cur = callExt(b, "js_get", [cur, emitStr(b, s.name)])
+                } else if (s.kind == "slice") {
+                    var lov = hUndef, hiv = hUndef
+                    if (s.lo != null) { var rl = s.lo(b); b = rl.b; lov = rl.v }
+                    if (s.hi != null) { var rh = s.hi(b); b = rh.b; hiv = rh.v }
+                    if (s.mx != null) { var rm = s.mx(b); b = rm.b }
+                    cur = callExt(b, "js_goslice", [cur, lov, hiv])
+                } else if (s.kind == "call") {
+                    var ec = emitArgs2(b, s.args, s.spread)
+                    b = ec.b
+                    cur = callExt(b, "js_call", [cur, hUndef, ec.v])
+                } else {
+                    var ir2 = s.idx(b)
+                    b = ir2.b
+                    cur = callExt(b, core.indexExt, [cur, ir2.v])
+                }
+            }
+            return {b: b, v: cur}
+        }
+    }
     function makeCall(items) {
         var name = items[0]
         var args = items.slice(1)
+        var spread = takeSpread(args)
         return function(b) {
             var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
-            var ea = emitArgs(b, args)
+            var ea = emitArgs2(b, args, spread)
             b = ea.b
             return {b: b, v: callExt(b, "js_call", [fV, hUndef, ea.v])}
         }
@@ -537,10 +964,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // items = [{params}, bodyT] (an ignored RetTypes leaves no stack entry). The
     // literal becomes an own IR function closed over the current scope (js_closure).
-    function makeFuncLit(bodyT, plist) {
-        var params = plist.params
+    // items = [{params}, {rets}?, bodyT]: an unnamed RetTypes leaves no stack entry.
+    function makeFuncLit(items) {
+        var params = items[0]
+        var i = 1
+        var rets = []
+        if (items[i] != undefined && items[i].rets != undefined) { rets = items[i].rets; i++ }
+        var bodyT = items[i]
         return function(b) {
-            var idx = emitFunc(params, bodyT, null)
+            var idx = emitFunc(params, bodyT, null, rets)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }
     }
@@ -548,15 +980,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // are evaluated at defer time and pushed as a [f, args] pair onto the innermost
     // function's $defers list; js_rundefers runs them LIFO at every return.
     function makeDefer(items) {
-        var fname = items[0]
-        var i = 1
-        var mname = null
-        if (i < items.length && items[i] != undefined && items[i].mname != undefined) { mname = items[i].mname; i++ }
-        var argTs = items.slice(i)
+        var fnT = items[0].dfn
+        var argTs = items.slice(1)
+        var spread = false
+        if (argTs.length > 0 && typeof argTs[argTs.length - 1] != "function") { spread = true; argTs.pop() }
         return function(b) {
-            var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, fname)])
-            if (mname != null) fV = callExt(b, "js_get", [fV, emitStr(b, mname)])
-            var ea = emitArgs(b, argTs)
+            var rf = fnT(b)
+            b = rf.b
+            var fV = rf.v
+            var ea = emitArgs2(b, argTs, spread)
             b = ea.b
             var pairV = callExt(b, "js_arr_new", [])
             callExt(b, "js_arr_push", [pairV, fV])
@@ -567,6 +999,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
 
     // Point{a, b}: the field names are known at compile time.
+    // items = [name, ({fkey}? valueThunk)...]: a positional or keyed struct literal.
+    // A field the literal leaves out keeps no entry, which reads back as undefined -
+    // falsy and != a set value, the zero value in every test the subset covers.
     function makeStructLit(items) {
         var tyName = items[0]
         var args = items.slice(1)
@@ -575,10 +1010,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, tyName)])
             var objV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+            var pos = 0
+            var key = null
             for (var i = 0; i < args.length; i++) {
+                if (typeof args[i] != "function") { key = args[i].fkey; continue }
                 var r = args[i](b)
                 b = r.b
-                callExt(b, "js_set", [objV, emitStr(b, fields[i]), r.v])
+                var name = key
+                if (name == null) { name = fields[pos]; pos++ }
+                key = null
+                callExt(b, "js_set", [objV, emitStr(b, name), r.v])
             }
             return {b: b, v: objV}
         }
@@ -661,6 +1102,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return b
         }
     }
+    // The names the LAST short declaration bound, for the for-header's FInit tag:
+    // Go 1.22 gives 'for i := 0; ...' a FRESH i per iteration, so the loop needs to
+    // know which names to copy (see makeForClassic).
+    var lastDeclNames = []
+    function takeDeclNames() {
+        var n = lastDeclNames
+        lastDeclNames = []
+        return n
+    }
     function makeShortDecl(items) {
         var names = []
         var i = 0
@@ -668,6 +1118,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (typeof items[i] != "string") break
             names.push(items[i])
         }
+        lastDeclNames = names
         var exprs = items.slice(i)
         return function(b) {
             var vals = []
@@ -705,38 +1156,65 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // ----- Statement thunks -----
 
+    // items = [name..., {ty}?, initThunk...]: 'var a, b = 1, 2', 'var i int' and
+    // 'var q, r int' all go through here. With more names than initializers the single
+    // initializer is a multi-value call and gets unpacked, like a multi assignment.
     function makeVarDecl(items) {
-        var name = items[0]
-        var i = 1
+        var names = []
+        var i = 0
+        for (; i < items.length; i++) {
+            if (typeof items[i] != "string") { break }
+            names.push(items[i])
+        }
         var ty = ""
         if (i < items.length && items[i] != undefined && items[i].ty != undefined) { ty = items[i].ty; i++ }
-        var init = i < items.length ? items[i] : null
+        var inits = items.slice(i)
         return function(b) {
-            var v
-            if (init != null) {
-                var r = init(b)
-                b = r.b
-                v = r.v
-            } else if (ty == "int") { v = emitNum(b, 0) }
-            else if (ty == "string") { v = emitStr(b, "") }
-            else if (ty == "bool") { v = hFalse }
-            else if (ty.charCodeAt(0) == 91) { v = callExt(b, "js_arr_new", []) }
-            else { v = hNull }
-            if (name != "_") callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
+            var vals = []
+            if (inits.length == 0) {
+                for (var z = 0; z < names.length; z++) { vals.push(emitZeroDecl(b, ty)) }
+            } else {
+                for (var k = 0; k < inits.length; k++) {
+                    var r = inits[k](b)
+                    b = r.b
+                    vals.push(r.v)
+                }
+                if (names.length > 1 && inits.length == 1) {
+                    var multi = vals[0]
+                    vals = []
+                    for (var u = 0; u < names.length; u++) {
+                        vals.push(callExt(b, "js_arr_get", [multi, emitNum(b, u)]))
+                    }
+                }
+            }
+            for (var n = 0; n < names.length; n++) {
+                if (names[n] != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n]), vals[n]]) }
+            }
             return b
         }
+    }
+    // The zero value of a DECLARED type, as an emitted handle. (emitZero above is the
+    // map-value variant: it never sees a slice type.)
+    function emitZeroDecl(b, ty) {
+        if (ty.length > 0 && ty.charCodeAt(0) == 91) { return callExt(b, "js_arr_new", []) }
+        return emitZero(b, ty)
     }
     function makeForClassic(items) {
         var bodyT = items.pop()
         var init = null, cond = null, post = null
+        var lbl = null
+        var loopVars = []
         for (var i = 0; i < items.length; i++) {
-            if (items[i].k == "init") init = items[i].t
+            if (items[i].lbl != undefined) { lbl = items[i].lbl }
+            if (items[i].k == "init") { init = items[i].t; loopVars = items[i].names }
             if (items[i].k == "cond") cond = items[i].t
             if (items[i].k == "post") post = items[i].t
         }
+        if (loopVars == undefined) { loopVars = [] }
         return function(b) {
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            var outerScopeV = curScopeV
             if (init != null) b = init(b)
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
@@ -749,14 +1227,152 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             } else {
                 headB.NewBr(bodyB)
             }
-            loopStack.push({cont: postB, brk: exitB})
-            bodyT(bodyB).NewBr(postB)
+            loopStack.push({cont: postB, brk: exitB, lbl: lbl})
+            // Per-iteration variables (Go 1.22): the body runs in a FRESH scope holding
+            // copies of the loop variables, so a closure made inside keeps this turn's
+            // values; the copies are written back before the post statement runs.
+            var bodyScopeV = null
+            if (loopVars.length > 0) {
+                bodyScopeV = callExt(bodyB, "js_scope_new", [outerScopeV])
+                for (var lv = 0; lv < loopVars.length; lv++) {
+                    callExt(bodyB, "js_scope_decl", [bodyScopeV, emitStr(bodyB, loopVars[lv]),
+                                                     callExt(bodyB, "js_scope_get", [outerScopeV, emitStr(bodyB, loopVars[lv])])])
+                }
+                curScopeV = bodyScopeV
+            }
+            var endB = bodyT(bodyB)
+            if (loopVars.length > 0) {
+                for (var lw = 0; lw < loopVars.length; lw++) {
+                    callExt(endB, "js_scope_set", [outerScopeV, emitStr(endB, loopVars[lw]),
+                                                   callExt(endB, "js_scope_get", [bodyScopeV, emitStr(endB, loopVars[lw])])])
+                }
+                curScopeV = outerScopeV
+            }
+            endB.NewBr(postB)
             loopStack.pop()
             var pb = postB
             if (post != null) pb = post(postB)
             pb.NewBr(headB)
             curScopeV = saved
             return exitB
+        }
+    }
+    // ----- Labels, goto, and labelled break/continue -----
+    // The label of the statement being PARSED right now, claimed by the loop header
+    // that follows it (so a nested loop cannot steal the outer loop's label).
+    var pendingLabel = null
+    function takeLabel() {
+        var l = pendingLabel
+        pendingLabel = null
+        return l
+    }
+    // The labelled statements currently being EMITTED, innermost last: two parallel
+    // arrays rather than an object, so no name can collide with Object.prototype.
+    var labelNames = []
+    var labelBlocks = []
+    function makeLabeled(stmtT, name) {
+        return function(b) {
+            var lb = curF.NewBlock("")
+            b.NewBr(lb)
+            labelNames.push(name)
+            labelBlocks.push(lb)
+            var out = stmtT(lb)
+            labelNames.pop()
+            labelBlocks.pop()
+            return out
+        }
+    }
+    function makeGoto(items, pos) {
+        var name = items[0]
+        return function(b) {
+            var target = null
+            for (var i = labelNames.length - 1; i >= 0; i--) {
+                if (labelNames[i] == name) { target = labelBlocks[i]; break }
+            }
+            if (target == null) {
+                println("go compiler error: goto " + name + " has no enclosing label (" + c.lineOf(pos) + ")")
+                exit(1)
+            }
+            b.NewBr(target)
+            return deadBlock()
+        }
+    }
+    // The innermost loop carrying `lbl` (the innermost loop of all when lbl is null).
+    function loopFor(lbl) {
+        if (loopStack.length == 0) { return null }
+        if (lbl == null) { return loopStack[loopStack.length - 1] }
+        for (var i = loopStack.length - 1; i >= 0; i--) {
+            if (loopStack[i].lbl == lbl) { return loopStack[i] }
+        }
+        return null
+    }
+    function makeBreakG(items) {
+        var lbl = items.length > 0 ? items[0] : null
+        if (lbl == null) { return makeBreak() }
+        return function(b) {
+            var e = loopFor(lbl)
+            if (e == null) { println("go compiler error: break " + lbl + ": no such loop label"); exit(1) }
+            b.NewBr(e.brk)
+            return deadBlock()
+        }
+    }
+    function makeContinueG(items) {
+        var lbl = items.length > 0 ? items[0] : null
+        if (lbl == null) { return makeContinue() }
+        return function(b) {
+            var e = loopFor(lbl)
+            if (e == null) { println("go compiler error: continue " + lbl + ": no such loop label"); exit(1) }
+            b.NewBr(e.cont)
+            return deadBlock()
+        }
+    }
+    // items = [{lbl}, bodyT]: 'for { ... }', left only by break/return.
+    function makeForEver(items) {
+        var lbl = items[0].lbl
+        var bodyT = items[1]
+        return function(b) {
+            var headB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            loopStack.push({cont: headB, brk: exitB, lbl: lbl})
+            bodyT(headB).NewBr(headB)
+            loopStack.pop()
+            return exitB
+        }
+    }
+    // items = [{lbl}, bodyT, condT]: 'for cond { ... }' (Go's while).
+    function makeWhileG(items) {
+        var lbl = items[0].lbl
+        var condT = items[1]
+        var bodyT = items[2]
+        return function(b) {
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var r = condT(headB)
+            r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
+            loopStack.push({cont: headB, brk: exitB, lbl: lbl})
+            bodyT(bodyB).NewBr(headB)
+            loopStack.pop()
+            return exitB
+        }
+    }
+    // items = [{k:"init"}?, cond, then, else?]: Go's if may carry an init statement
+    // ('if v := f(); v > 0'), whose bindings live only for the if - so it runs in a
+    // scope of its own that the two branches see through the chain.
+    function makeIfG(items) {
+        var init = null
+        if (items[0] != undefined && items[0].k == "init") { init = items[0].t; items = items.slice(1) }
+        var plain = makeIf(items)
+        if (init == null) { return plain }
+        return function(b) {
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            b = init(b)
+            var out = plain(b)
+            curScopeV = saved
+            return out
         }
     }
     // items = [{v: thunk}...]: one label; no values means 'default'.
@@ -771,20 +1387,30 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // exit (no fallthrough), and break inside a case leaves the switch (loop stack).
     function makeSwitch(items) {
         var subj = null
+        var init = null
         var cases = []
         var cur = null
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "function") {
                 if (cur != null) cur.body.push(it)
+            } else if (it.k == "init") {
+                init = it.t
+            } else if (it.isFallthrough == true) {
+                if (cur != null) { cur.falls = true }
             } else if (it.subj != undefined) {
                 subj = it.subj
             } else {
-                cur = {isDefault: it.isDefault, vals: it.vals, body: []}
+                cur = {isDefault: it.isDefault, vals: it.vals, body: [], falls: false}
                 cases.push(cur)
             }
         }
         return function(b) {
+            var savedScope = curScopeV
+            if (init != null) {
+                curScopeV = callExt(b, "js_scope_new", [curScopeV])
+                b = init(b)
+            }
             var subjV = null
             if (subj != null) {
                 var rs = subj(b)
@@ -816,6 +1442,85 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var bb = bodyBs[i]
                 var body = cases[i].body
                 for (var j = 0; j < body.length; j++) { bb = body[j](bb) }
+                // 'fallthrough' as the last statement of a case continues into the next
+                // case BODY (its condition is not re-tested); every other case ends the
+                // switch (Go has no implicit fallthrough).
+                if (cases[i].falls == true && i + 1 < cases.length) { bb.NewBr(bodyBs[i + 1]) }
+                else { bb.NewBr(exitB) }
+            }
+            loopStack.pop()
+            curScopeV = savedScope
+            return exitB
+        }
+    }
+    // ----- Type switches -----
+    // items = [{ct}...]: one 'case T1, T2:' label; no types means 'default'.
+    function makeTypeCase(items) {
+        var ts = []
+        for (var i = 0; i < items.length; i++) { ts.push(firstWord(items[i].ct)) }
+        return {isTypeCase: true, isDefault: items.length == 0, types: ts}
+    }
+    // The bare type name out of the captured source text (it may carry comments or
+    // trailing whitespace); '[', ']' and '*' stay so []int and *T keep their spelling.
+    function firstWord(s) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var cc = s.charCodeAt(i)
+            if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc == 95
+                || cc == 91 || cc == 93 || cc == 42) { out += s.charAt(i) }
+            else if (out.length > 0) { break }
+        }
+        return out
+    }
+    // items = [{tsname}?, subjectThunk, label or statement thunk...]: switch x.(type).
+    // The subject is evaluated ONCE and every arm is a runtime type test (js_gotypeis);
+    // the bound name of 'switch v := x.(type)' is declared in a fresh scope per body.
+    function makeTypeSwitch(items) {
+        var bind = null
+        var i = 0
+        if (items[0] != undefined && items[0].tsname != undefined) { bind = items[0].tsname; i = 1 }
+        var subj = items[i]
+        i++
+        var cases = []
+        var cur = null
+        for (; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { if (cur != null) { cur.body.push(it) } }
+            else { cur = {isDefault: it.isDefault, types: it.types, body: []}; cases.push(cur) }
+        }
+        return function(b) {
+            var rs = subj(b)
+            b = rs.b
+            var subjV = rs.v
+            var exitB = curF.NewBlock("")
+            var bodyBs = []
+            var dfltB = exitB
+            for (var k = 0; k < cases.length; k++) {
+                bodyBs.push(curF.NewBlock(""))
+                if (cases[k].isDefault) { dfltB = bodyBs[k] }
+            }
+            for (var k2 = 0; k2 < cases.length; k2++) {
+                if (cases[k2].isDefault) { continue }
+                for (var t = 0; t < cases[k2].types.length; t++) {
+                    var condV = callExt(b, "js_gotypeis", [subjV, emitStr(b, cases[k2].types[t])])
+                    var nextB = curF.NewBlock("")
+                    b.NewCondBr(truthy(b, condV), bodyBs[k2], nextB)
+                    b = nextB
+                }
+            }
+            b.NewBr(dfltB)
+            var outerCont = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : null
+            loopStack.push({cont: outerCont, brk: exitB})
+            for (var k3 = 0; k3 < cases.length; k3++) {
+                var bb = bodyBs[k3]
+                var saved = curScopeV
+                if (bind != null) {
+                    curScopeV = callExt(bb, "js_scope_new", [curScopeV])
+                    callExt(bb, "js_scope_decl", [curScopeV, emitStr(bb, bind), subjV])
+                }
+                var body = cases[k3].body
+                for (var j = 0; j < body.length; j++) { bb = body[j](bb) }
+                curScopeV = saved
                 bb.NewBr(exitB)
             }
             loopStack.pop()
@@ -828,8 +1533,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function makeForRange(items) {
         var bodyT = items.pop()
         var listT = items.pop()
-        var iName = items[0]
-        var vName = items.length > 1 ? items[1] : null
+        var lbl = items[0].lbl
+        var iName = items[1]
+        var vName = items.length > 2 ? items[2] : null
         return function(b) {
             hidCount++
             var cName = "$c" + hidCount
@@ -838,11 +1544,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             curScopeV = callExt(b, "js_scope_new", [curScopeV])
             var r = listT(b)
             b = r.b
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), r.v])
+            // js_gorange normalizes a STRING subject into a byte-offset / code-point
+            // pair of arrays (Go ranges a string by rune); everything else passes
+            // through, so one emitted loop still covers ints, slices and maps.
+            var subjV = callExt(b, "js_gorange", [r.v])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), subjV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cName), emitNum(b, 0)])
             if (iName != "_") callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), hUndef])
             if (vName != null && vName != "_") callExt(b, "js_scope_decl", [curScopeV, emitStr(b, vName), hUndef])
-            var lenV = callExt(b, "js_range_len", [r.v])
+            var lenV = callExt(b, "js_range_len", [subjV])
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
@@ -858,23 +1568,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
             var bb = bodyB
             if (vName != null && vName != "_") {
-                // Ranging a string yields its i-th one-character substring (js_range_val
-                // only knows lists and maps); a runtime typeof picks the string path.
-                var strB = curF.NewBlock("")
-                var elseB = curF.NewBlock("")
-                var joinB = curF.NewBlock("")
-                var isStr = callExt(bb, "js_seq", [callExt(bb, "js_typeof", [aV2]), emitStr(bb, "string")])
-                bb.NewCondBr(truthy(bb, isStr), strB, elseB)
-                var kS = callExt(strB, "js_range_key", [aV2, cV2])
-                callExt(strB, "js_scope_set", [curScopeV, emitStr(strB, vName),
-                                               callExt(strB, "js_pyslice", [aV2, kS, callExt(strB, "js_jadd", [kS, emitNum(strB, 1)])])])
-                strB.NewBr(joinB)
-                callExt(elseB, "js_scope_set", [curScopeV, emitStr(elseB, vName),
-                                                callExt(elseB, "js_range_val", [aV2, cV2])])
-                elseB.NewBr(joinB)
-                bb = joinB
+                callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, vName),
+                                             callExt(bb, "js_range_val", [aV2, cV2])])
             }
-            loopStack.push({cont: postB, brk: exitB})
+            loopStack.push({cont: postB, brk: exitB, lbl: lbl})
             bodyT(bb).NewBr(postB)
             loopStack.pop()
             var cV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, cName)])
@@ -886,6 +1583,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // Multiple return values travel as an array. The return value is computed
     // first, then the collected defers run (Go order), then the function returns.
+    // The value of a return in a function with NAMED results: the results are read
+    // back AFTER the defers ran, so a deferred function that assigns one is seen.
+    function readRets(b) {
+        if (curRets.length == 0) { return hUndef }
+        if (curRets.length == 1) { return callExt(b, "js_scope_get", [curScopeV, emitStr(b, curRets[0])]) }
+        var arr = callExt(b, "js_arr_new", [])
+        for (var i = 0; i < curRets.length; i++) {
+            callExt(b, "js_arr_push", [arr, callExt(b, "js_scope_get", [curScopeV, emitStr(b, curRets[i])])])
+        }
+        return arr
+    }
     function makeReturn(items) {
         return function(b) {
             var v = hUndef
@@ -902,7 +1610,20 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 }
                 v = arr
             }
+            // 'return v' in a function with named results ASSIGNS them first (Go), so
+            // the defers see the returned value; a bare return leaves them as they are.
+            if (curRets.length > 0 && items.length > 0) {
+                if (curRets.length == 1) {
+                    callExt(b, "js_scope_set", [curScopeV, emitStr(b, curRets[0]), v])
+                } else {
+                    for (var k = 0; k < curRets.length; k++) {
+                        callExt(b, "js_scope_set", [curScopeV, emitStr(b, curRets[k]),
+                                                    callExt(b, "js_get", [v, emitNum(b, k)])])
+                    }
+                }
+            }
             callExt(b, "js_rundefers", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$defers")])])
+            if (curRets.length > 0) { v = readRets(b) }
             b.NewRet(v)
             return deadBlock()
         }
@@ -928,19 +1649,160 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         notImpl("channel receive", pos)
         return function(b) { var r = chT(b); return {b: r.b, v: hUndef} }
     }
-    // s[lo:hi] / s[lo:hi:max]: accepted, reported not implemented. The base and every
-    // bound still emit (nested calls stay visible); the value is undefined.
-    function makeSliceNI(items, pos) {
-        notImpl("slice expression", pos)
-        return function(b) {
-            for (var i = 0; i < items.length; i++) { var r = items[i](b); b = r.b }
-            return {b: b, v: hUndef}
+    // items = [{lo}?, {hi}?, {mx}?]: the s[lo:hi:max] suffix of a postfix chain.
+    function makeSliceSfx(items) {
+        var lo = null, hi = null, mx = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].lo != undefined) { lo = items[i].lo }
+            if (items[i].hi != undefined) { hi = items[i].hi }
+            if (items[i].mx != undefined) { mx = items[i].mx }
         }
+        return {kind: "slice", lo: lo, hi: hi, mx: mx}
+    }
+    // []byte(s) / []rune(s), handed to the same runtime conversion as string(x).
+    function makeConv(items) {
+        var to = items[0].conv
+        var t = items[1]
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_goconv", [emitStr(r.b, to), r.v])}
+        }
+    }
+    // The bare type text out of the captured source (it may carry a comment or
+    // trailing whitespace); brackets stay so []byte keeps its spelling.
+    function firstType(s) {
+        var out = ""
+        var depth = 0
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            var cc = s.charCodeAt(i)
+            if (cc == 47 && i + 1 < s.length && s.charCodeAt(i + 1) == 47) { break }
+            if (cc == 91) { depth++; out += ch; continue }
+            if (cc == 93) { depth--; out += ch; continue }
+            if (cc == 32 || cc == 9 || cc == 10 || cc == 13) { if (depth == 0 && out.length > 0) { break } continue }
+            out += ch
+        }
+        return out
     }
     // var ( ... ) / a single var spec per name: run each spec's var-decl thunk in order.
     function makeVarGroup(items) { return makeSeq(items) }
+    function gtrunc(v) { return v < 0 ? Math.ceil(v) : Math.floor(v) }
+    function fromCodePoint(cp) {
+        if (cp < 0x10000) { return String.fromCharCode(cp) }
+        var x = cp - 0x10000
+        return String.fromCharCode(0xd800 + gtrunc(x / 1024)) + String.fromCharCode(0xdc00 + (x % 1024))
+    }
+    function strRuneAt(s, i) {
+        var c0 = s.charCodeAt(i)
+        if (c0 >= 0xd800 && c0 <= 0xdbff && i + 1 < s.length) {
+            var c1 = s.charCodeAt(i + 1)
+            if (c1 >= 0xdc00 && c1 <= 0xdfff) {
+                return {cp: (c0 - 0xd800) * 1024 + (c1 - 0xdc00) + 0x10000, n: 2}
+            }
+        }
+        return {cp: c0, n: 1}
+    }
+    // Go's escape sequences, which differ from the shared core's JS ones: \a \v exist,
+    // \xHH and \OOO produce a single BYTE (so "h\xc3\xa9" is "hé", two escapes forming
+    // one rune), and \U takes eight hex digits. Byte escapes are therefore buffered and
+    // UTF-8 decoded together. Assigned, not declared: interp-core.js already defines
+    // unescapeJs and a second declaration would leave the two engines disagreeing.
+    unescapeJs = function(s) {
+        var out = ""
+        var pend = []
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c != 92) { out += utf8Decode(pend); pend = []; out += s.charAt(i); i++; continue }
+            var e = s.charCodeAt(i + 1)
+            if (e == 120) { pend.push(hexAt(s, i + 2, 2)); i += 4; continue }        // \xHH
+            if (e >= 48 && e <= 55) { pend.push(octAt(s, i + 1, 3)); i += 4; continue } // \OOO
+            out += utf8Decode(pend)
+            pend = []
+            if (e == 110) { out += "\n"; i += 2; continue }
+            if (e == 116) { out += "\t"; i += 2; continue }
+            if (e == 114) { out += "\r"; i += 2; continue }
+            if (e == 97)  { out += String.fromCharCode(7); i += 2; continue }
+            if (e == 98)  { out += String.fromCharCode(8); i += 2; continue }
+            if (e == 102) { out += String.fromCharCode(12); i += 2; continue }
+            if (e == 118) { out += String.fromCharCode(11); i += 2; continue }
+            if (e == 117) { out += fromCodePoint(hexAt(s, i + 2, 4)); i += 6; continue }
+            if (e == 85)  { out += fromCodePoint(hexAt(s, i + 2, 8)); i += 10; continue }
+            out += String.fromCharCode(e)
+            i += 2
+        }
+        return out + utf8Decode(pend)
+    }
+    function octAt(s, at, n) {
+        var v = 0
+        for (var i = 0; i < n; i++) {
+            var cc = s.charCodeAt(at + i)
+            if (cc < 48 || cc > 55) { break }
+            v = v * 8 + (cc - 48)
+        }
+        return v
+    }
+    // ----- Go strings are BYTE strings -----
+    // The value model keeps them as host (UTF-16) strings, so the byte view is built
+    // on demand: s[i] is a byte, s[lo:hi] slices bytes, len counts bytes.
+    function utf8Bytes(s) {
+        var out = []
+        var i = 0
+        while (i < s.length) {
+            var r = strRuneAt(s, i)
+            i += r.n
+            var cp = r.cp
+            if (cp < 0x80) { out.push(cp); continue }
+            if (cp < 0x800) { out.push(0xc0 | gtrunc(cp / 64)); out.push(0x80 | (cp % 64)); continue }
+            if (cp < 0x10000) {
+                out.push(0xe0 | gtrunc(cp / 4096))
+                out.push(0x80 | (gtrunc(cp / 64) % 64))
+                out.push(0x80 | (cp % 64))
+                continue
+            }
+            out.push(0xf0 | gtrunc(cp / 262144))
+            out.push(0x80 | (gtrunc(cp / 4096) % 64))
+            out.push(0x80 | (gtrunc(cp / 64) % 64))
+            out.push(0x80 | (cp % 64))
+        }
+        return out
+    }
+    // The inverse: a byte list back to a host string. A byte that does not start a
+    // well-formed sequence is passed through as its own code point (Go would render
+    // U+FFFD; nothing in the subset depends on that).
+    function utf8Decode(bytes) {
+        var out = ""
+        var i = 0
+        while (i < bytes.length) {
+            var b0 = bytes[i] & 255
+            if (b0 < 0x80) { out += String.fromCharCode(b0); i++; continue }
+            var need = 0
+            var cp = 0
+            if (b0 >= 0xf0) { need = 3; cp = b0 & 7 }
+            else if (b0 >= 0xe0) { need = 2; cp = b0 & 15 }
+            else if (b0 >= 0xc0) { need = 1; cp = b0 & 31 }
+            else { out += String.fromCharCode(b0); i++; continue }
+            if (i + need > bytes.length - 1) { out += String.fromCharCode(b0); i++; continue }
+            var ok = true
+            for (var k = 1; k <= need; k++) {
+                var bk = bytes[i + k] & 255
+                if (bk < 0x80 || bk > 0xbf) { ok = false; break }
+                cp = cp * 64 + (bk & 63)
+            }
+            if (!ok) { out += String.fromCharCode(b0); i++; continue }
+            out += fromCodePoint(cp)
+            i += need + 1
+        }
+        return out
+    }
     // A rune literal is its first code point (Go runes are int32); empty is 0.
-    function runeVal(s) { var u = unescapeJs(s); return u.length > 0 ? u.charCodeAt(0) : 0 }
+    // '\U0001F600' is a single rune, so the astral surrogate pair has to be folded
+    // back into its code point - charCodeAt(0) alone would answer the high half.
+    function runeVal(s) {
+        var u = unescapeJs(s)
+        if (u.length == 0) { return 0 }
+        return strRuneAt(u, 0).cp
+    }
     // The integer value of a 0x / 0o / 0b literal, ignoring '_' digit separators.
     function parseRadix(s) {
         var radix = 10
@@ -973,7 +1835,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // ----- Functions, methods and structs -----
 
-    function emitFunc(params, body, recvName) {
+    function emitFunc(plist, body, recvName, rets) {
+        var params = plist.params
+        var variadic = plist.variadic == true
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -990,13 +1854,26 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             off = 1
         }
         for (var i = 0; i < params.length; i++) {
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
-                                         callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
+            if (variadic && i == params.length - 1) {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
+                                             callExt(b, "js_gorest", [f.Params[1], handle(i + off)])])
+            } else {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
+                                             callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
+            }
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$defers"), callExt(b, "js_arr_new", [])])
+        // Named results are zero-valued locals of the function; a bare return yields
+        // them, and a deferred function still sees (and may change) them.
+        var savedRets = curRets
+        curRets = (rets == undefined || rets == null) ? [] : rets
+        for (var nr = 0; nr < curRets.length; nr++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, curRets[nr]), emitNum(b, 0)])
+        }
         var endB = body(b)
         callExt(endB, "js_rundefers", [callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, "$defers")])])
-        endB.NewRet(hUndef)
+        endB.NewRet(readRets(endB))
+        curRets = savedRets
         curF = savedF
         curScopeV = savedScope
         loopStack = savedLoops
@@ -1021,11 +1898,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var recv = null
         if (items[i] != undefined && items[i].recv != undefined) { recv = items[i].recv; i++ }
         var name = items[i]
-        var params = items[i + 1].params
-        var body = items[i + 2]
+        var params = items[i + 1]
+        i = i + 2
+        var rets = []
+        if (items[i] != undefined && items[i].rets != undefined) { rets = items[i].rets; i++ }
+        var body = items[i]
         if (recv != null) {
             return function(b) {
-                var idx = emitFunc(params, body, recv[0])
+                var idx = emitFunc(params, body, recv[0], rets)
                 var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, recv[1])])
                 callExt(b, "js_set", [clsV, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
                 return b
@@ -1035,13 +1915,26 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // the package object (pkg.Fn); record it for buildPackages (see core.importFile).
         if (curPkgName != null && isExported(name)) { pkgExports["$" + curPkgName].push(name) }
         return function(b) {
-            var idx = emitFunc(params, body, null)
+            var idx = emitFunc(params, body, null, rets)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name),
                                          callExt(b, "js_closure", [handle(idx), curScopeV])])
             return b
         }
     }
 
+    // A builtin whose extern takes the callee's ARGUMENT ARRAY (plus an optional
+    // constant flag), bound in the jsmain scope under `name`.
+    function declBuiltin(b, name, ext, flag) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var fb = f.NewBlock("entry")
+        var args = [f.Params[1]]
+        if (flag != null) { args.push(emitNum(fb, flag)) }
+        fb.NewRet(fb.NewCall(getExtern(ext, args.length), args))
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+        return b
+    }
     // jsmain: declare fmt/os/len/append, run the top level, call main(). An imported
     // file's Program also lands here (importDepth > 0): its top-level declaration thunks
     // are stashed for the real jsmain instead of emitting a second one.
@@ -1067,7 +1960,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var lf = m.NewFunc("jsf_" + lenIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         var lb = lf.NewBlock("entry")
         var lArg = lb.NewCall(getExtern("js_arg", 2), [lf.Params[1], handle(0)])
-        lb.NewRet(lb.NewCall(getExtern("js_pylen", 1), [lArg]))
+        // js_golen, not js_pylen: len() on a Go string counts BYTES.
+        lb.NewRet(lb.NewCall(getExtern("js_golen", 1), [lArg]))
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "len"), callExt(b, "js_closure", [handle(lenIdx), curScopeV])])
         // delete(m, k)
         funcCount++
@@ -1078,15 +1972,30 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                                                 db.NewCall(getExtern("js_arg", 2), [df.Params[1], handle(1)])])
         db.NewRet(hUndef)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "delete"), callExt(b, "js_closure", [handle(delIdx), curScopeV])])
-        funcCount++
-        var apIdx = funcCount
-        var af = m.NewFunc("jsf_" + apIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
-        var ab = af.NewBlock("entry")
-        var aArr = ab.NewCall(getExtern("js_arg", 2), [af.Params[1], handle(0)])
-        var aVal = ab.NewCall(getExtern("js_arg", 2), [af.Params[1], handle(1)])
-        ab.NewCall(getExtern("js_arr_push", 2), [aArr, aVal])
-        ab.NewRet(aArr)
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "append"), callExt(b, "js_closure", [handle(apIdx), curScopeV])])
+        // append(s, v...), min(...), max(...), clear(x): the variadic builtins get the
+        // callee's whole argument array, so one extern covers every arity - and append
+        // starts a new slice when its first argument is a nil one (append(m[k], v)).
+        b = declBuiltin(b, "append", "js_goappend", null)
+        b = declBuiltin(b, "min", "js_gominmax", 0)
+        b = declBuiltin(b, "max", "js_gominmax", 1)
+        b = declBuiltin(b, "clear", "js_goclear", null)
+        // The identifier-spelled conversions - string(r), int(x), byte(x), ... - are
+        // ordinary calls, so each gets a one-line function that hands its name and
+        // argument to js_goconv (the runtime mirror of the interpreter's goConvert).
+        var convNames = ["int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16",
+                         "uint32", "uint64", "uintptr", "byte", "rune", "float32", "float64",
+                         "string", "bool"]
+        for (var cni = 0; cni < convNames.length; cni++) {
+            funcCount++
+            var cIdx = funcCount
+            var cf = m.NewFunc("jsf_" + cIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+            var cb = cf.NewBlock("entry")
+            cb.NewRet(cb.NewCall(getExtern("js_goconv", 2),
+                                 [emitStr(cb, convNames[cni]),
+                                  cb.NewCall(getExtern("js_arg", 2), [cf.Params[1], handle(0)])]))
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, convNames[cni]),
+                                         callExt(b, "js_closure", [handle(cIdx), curScopeV])])
+        }
         // Imported top-level declarations run first (flat in the jsmain scope), so an
         // imported package resolves its OWN names unqualified; then the package objects are
         // assembled from the exported functions (pkg.Fn, like fmt/os); then the main file's

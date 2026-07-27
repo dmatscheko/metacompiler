@@ -5,11 +5,13 @@
 // GENUINELY implemented and checked here: the single-result type assertion x.(T),
 // which is the identity on the value (the target type is parsed and ignored).
 //
-// Accepted but reported "not implemented" (they need concurrency / channel / interface
-// semantics the subset does not model): an interface type declaration, a goroutine
-// (go f()), a channel make/send/receive, a select, and a type switch. Where operands
-// exist (the goroutine callee, the send / receive channel and value) they still run,
-// so their calls stay visible in call graphs.
+// The TYPE SWITCH is genuinely implemented now too, and its arm runs.
+//
+// Accepted but reported "not implemented" (they need concurrency / channel semantics
+// the subset does not model): an interface type declaration, a goroutine (go f()), a
+// channel make/send/receive, and a select. Where operands exist (the goroutine callee,
+// the send / receive channel and value) they still run, so their calls stay visible in
+// call graphs.
 //
 // Without a flag the compile stops at the FIRST not-implemented construct (the
 // Stringer interface) with a clean file:line message - this file SHOULD FAIL by
@@ -76,9 +78,12 @@ func main() {
 		tally += 2
 	}
 
-	// The goroutine callee ran (its call is visible); the channel/select/type-switch
-	// bodies are no-ops under -warn-unsupported, so tally stayed 5.
-	check("goroutine callee ran", tally, 5)
+	// The goroutine callee ran (its call is visible) and the TYPE SWITCH is
+	// genuinely implemented now, so its 'case int' arm adds 1: 5 + 1 = 6. The
+	// channel and select bodies are still no-ops under -warn-unsupported.
+	// (This expected 5 while the type switch was merely recognised; that is the
+	// kind of assertion that has to move as the subset grows, not be defended.)
+	check("goroutine callee ran", tally, 6)
 
 	if fails == 0 {
 		fmt.Println("Go widening test passed")

@@ -53,16 +53,19 @@ and getMessage(); a class may extend them.
 
 Widened surface (parsed so a whole Java file is accepted): generics (<...>) and the
 extra primitive keywords are parsed and dropped; casts ((Type) expr) are identity;
-annotations (with or without arguments), throws clauses, sealed / non-sealed and the
-permits clause are parsed and ignored. assert and synchronized are recognized and
-reported as not implemented; -warn-unsupported downgrades that to a warning so call
-graphs / CFGs / traces still work on partly understood files.
+annotations (with or without arguments), TYPE ANNOTATIONS in every position JLS
+9.7.4 allows, throws clauses, sealed / non-sealed and the permits clause, qualified
+and generic supertypes, several declarators per field, array class literals and the
+stray semicolon after a type declaration are parsed and ignored. assert and
+synchronized are recognized and reported as not implemented; -warn-unsupported
+downgrades that to a warning so call graphs / CFGs / traces still work on partly
+understood files.
 
 Not genuinely modelled: overload resolution by argument TYPE (only the count
 discriminates), generic type checking (type arguments are erased at parse time),
-implicit field access (fields are reached via this.x or ClassName.x - like the
-explicit style many code bases enforce), checked exception analysis, threads and
-reflection.
+implicit FIELD access (a field is reached via this.x or ClassName.x - like the
+explicit style many code bases enforce; only calls resolve unqualified), checked
+exception analysis, modules, threads and reflection.
 
 Fields live directly on the instance object (js_get/js_set), methods become own IR
 functions jsf_N(env, args) with the instance prepended to the arguments, stored on the
@@ -87,7 +90,10 @@ The same language with the same semantics is interpreted directly by java-interp
 :whitespace(Whitespace) ;
 
 Program     <~~ buildMain(takeAll()) ~~>
-            = [ Package ] { Import } { UnsupType | ClassDecl | RecordDecl } ;
+            = [ Package ] { Import } { UnsupType | ClassDecl | RecordDecl | StraySemi } ;
+// A stray ';' after a top-level type declaration (`class F { };`) is legal and
+// means nothing - the member-level form is EmptyMember below.
+StraySemi   = ";" ;
 
 // An optional package header (parsed and ignored) then repeated imports. Each
 // import path is resolved against the runtime builtins (core.stdlibImports); one
@@ -95,19 +101,25 @@ Program     <~~ buildMain(takeAll()) ~~>
 // a warning (see resolveImport in compile-core.js). 'import static a.b.C.d'
 // resolves the dotted path too. QualName also accepts a trailing '.*' wildcard.
 // Neither Package nor Import pushes a statement, so buildMain never sees them.
-Package     <~~ pop() ~~> = KwPackage QualName ";" ;
+// package-info.java carries its annotations on the package declaration.
+Package     <~~ pop() ~~> = LeadMods KwPackage QualName ";" ;
 Import      <~~ resolveImport(pop(), up.pos) ~~> = KwImport [ "static" KwEnd ] QualName ";" ;
 QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = [ LeadMods ] KwClass Id <~~ push(up.in); curClassName = up.in ~~> [ SkipAngle ]
-              [ KwExtends Id <~~ push({ext: up.in}) ~~> [ SkipAngle ] ]
+            = [ LeadMods ] KwClass Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ]
+              [ KwExtends ExtRef ]
               [ ImplementsSkip ] [ PermitsSkip ] "{" { Member } "}" ;
+// A supertype may be qualified and generic (`extends Outer.Super`, `extends
+// A<B>.C`). Nested types are hoisted under their SIMPLE name, so the qualifier
+// only has to be accepted - the last segment names the descriptor.
+ExtRef      <~~ push({ext: jLastSeg(takeAll())}) ~~>
+            = Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] { "." Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] } ;
 
 // record Pair(int a, int b) { } -- generates fields, a constructor and accessors.
 RecordDecl  <~~ push(makeRecordStmt(takeAll())) ~~>
-            = [ LeadMods ] KwRecord Id <~~ push(up.in) ~~> [ SkipAngle ] RParams
-              [ ImplementsSkip ] "{" { Member } "}" ;
+            = [ LeadMods ] KwRecord Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ] RParams
+              [ ImplementsSkip ] [ PermitsSkip ] "{" { Member } "}" ;
 RParams     <~~ push({rparams: takeAll()}) ~~>
             = "(" [ Type Id <~~ push(up.in) ~~> { "," Type Id <~~ push(up.in) ~~> } ] ")" ;
 
@@ -153,8 +165,12 @@ CtorDelegate <~~ push(makeCtorDelegate(takeAll())) ~~>
 Method      <~~ push(makeMethod(takeAll())) ~~>
             = Mods [ SkipAngle ] Type Id <~~ push(up.in) ~~> ParamList [ Throws ] Block ;
 
-Field       <~~ push(makeField(takeAll())) ~~>
-            = Mods FType Id <~~ push(up.in) ~~> [ "=" Expression ] ";" ;
+// One `int a, b = 2, c;` declares several fields, which share their modifiers
+// and type but not their initializer - so each declarator becomes its own member.
+Field       <~~ pushFields(takeAll()) ~~>
+            = Mods FType FieldVar { "," FieldVar } ";" ;
+FieldVar    <~~ push(makeFieldVar(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { "[" "]" } [ "=" Expression ] ;
 
 // Modifiers before a member: annotations (with or without arguments) are parsed and
 // ignored; ModWord keeps the modifier text so `static` is still detectable.
@@ -176,8 +192,11 @@ Param       = { Annotation | "final" KwEnd } Type [ "..." <~~ push({vararg: true
 // Types are parsed and (apart from field defaults) ignored. Generic arguments
 // (<...>), dotted names, extra array dimensions and the extra primitive keywords are
 // accepted and dropped. Semantics stay dynamic.
-Type        = ( PrimName KwEnd | "String" KwEnd | "void" KwEnd | "var" KwEnd
-              | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ) { "[" "]" } ;
+// A TYPE ANNOTATION may sit in front of the type, in front of any segment of a
+// qualified one, and in front of each array bracket pair (`@A String @A []`,
+// `Outer.@A Inner`) - JLS 9.7.4. They are dropped like every other annotation.
+Type        = { Annotation } ( PrimName KwEnd | "String" KwEnd | "void" KwEnd | "var" KwEnd
+              | Id [ SkipAngle ] { "." { Annotation } Id [ SkipAngle ] } ) { { Annotation } "[" "]" } ;
 PrimName    = "int" | "boolean" | "char" | "long" | "double" | "float" | "short" | "byte" ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
@@ -263,8 +282,10 @@ ArrowDefault <~~ pushArrowDefault(takeAll()) ~~>
             = KwDefault "->" ArrowBody ;
 Case        <~~ push(makeCase(takeAll())) ~~>
             = KwCase CLabel ":" { Statement } ;
-CLabel      <~~ push(enumLabel(pop(), stripWs(up.in))) ~~>
-            = CondExpr ;
+// The colon form takes the same labels as the arrow form. It needs no ALabName
+// guard: without a '->' after it, a bare name cannot be read as a lambda.
+CLabel      <~~ push(makeArrowLabel(pop(), stripWs(up.in))) ~~>
+            = PatLabel | CondExpr ;
 Default     <~~ push(makeDefault(takeAll())) ~~>
             = KwDefault ":" { Statement } ;
 
@@ -349,7 +370,7 @@ ResRef      <~~ push({res: stripWs(up.in), rinit: null}) ~~> = Id ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
 CatchClause <~~ push(makeCatch(takeAll())) ~~>
-            = KwCatch "(" CatchType Id <~~ push(up.in) ~~> ")" Block ;
+            = KwCatch "(" { Annotation | "final" KwEnd } CatchType Id <~~ push(up.in) ~~> ")" Block ;
 FinallyClause <~~ push({finbody: pop()}) ~~>
             = KwFinally Block ;
 Throw       <~~ push(makeThrow(pop())) ~~>
@@ -467,20 +488,18 @@ UPlus       <~~ push(makeUPlus(pop())) ~~>
 // subtraction (Java's cast/subtraction disambiguation).
 Cast        = PrimCast | RefCast ;
 PrimCast    <~~ push(makeCast(pop())) ~~>
-            = "(" PrimName KwEnd { "[" "]" } ")" UnaryExpr ;
+            = "(" { Annotation } PrimName KwEnd { { Annotation } "[" "]" } ")" UnaryExpr ;
 RefCast     <~~ push(makeCast(pop())) ~~>
             = "(" RefType ")" UnaryNoPM ;
 UnaryNoPM   = Not | PostfixExpr ;
-RefType     = ( "String" KwEnd | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ) { "[" "]" } ;
+RefType     = { Annotation } ( "String" KwEnd | Id [ SkipAngle ] { "." { Annotation } Id [ SkipAngle ] } ) { { Annotation } "[" "]" } ;
 
 // NewExpr is a Primary, not an alternative here, so `new Foo().bar()` and
 // `new int[]{1, 2}[0]` take the ordinary suffix chain.
-PostfixExpr = IncDec | QualNew | QSuperCall | SuperCall | CallMember ;
+PostfixExpr = IncDec | QSuperCall | SuperCall | CallMember ;
 // `o.new Inner(args)`: creates an INNER instance whose __outer is o, which is what
 // `Outer.this` inside the inner class reads.
-QualNew     <~~ push(makeQualNew(takeAll())) ~~>
-            = Id <~~ push({qouter: up.in}) ~~> "." KwNew Id <~~ push(up.in) ~~> [ SkipAngle ]
-              "(" [ Expression { "," Expression } ] ")" ;
+
 // Iface.super.m(args): calls that interface's default method directly (Java's way of
 // picking one of several inherited defaults). Tried before SuperCall, whose 'super'
 // comes first and therefore cannot match this shape.
@@ -502,8 +521,8 @@ NewObject   <~~ push(makeNew(takeAll())) ~~>
 // Its constructor forwards its arguments to the base constructor; a base that is an
 // interface has none, so nothing is chained.
 NewAnon     <~~ push(makeNewAnon(takeAll(), up.pos)) ~~>
-            = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ] "(" [ Expression { "," Expression } ] ")"
-              "{" { Member } "}" ;
+            = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ] { "." Id <~~ push(up.in) ~~> [ SkipAngle ] }
+              "(" [ Expression { "," Expression } ] ")" "{" { Member } "}" ;
 NewArrLit   <~~ push(makeArray(takeAll())) ~~>
             = KwNew Type "{" [ Expression { "," Expression } [ "," ] ] "}" ;
 // new T[a][b]...[] : every SIZED dimension is built (the innermost one filled with
@@ -524,7 +543,16 @@ SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
 // A primary followed by method calls, field reads and indexing:
 // System.out.println(x), p.dist(), this.x, arr[i], Main.check(...).
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+            = Primary { QNewSfx | MethodSfx | FieldSfx | IndexSfx } ;
+// `o.new Inner(args)` - creation qualified by an enclosing instance, which the new
+// object records as __outer and `Outer.this` reads back. It is a SUFFIX of the
+// member chain, so the qualifier may be any expression (`new Outer().new Inner()`);
+// as an alternative starting with a Primary it would parse the qualifier once for
+// itself and once again for CallMember, and deeply nested calls would cost 2^depth.
+// It precedes FieldSfx, which would otherwise read `.new` as a field named `new`.
+QNewSfx     <~~ push(makeQNewSfx(takeAll())) ~~>
+            = "." KwNew Id <~~ push({qname: up.in}) ~~> [ SkipAngle ]
+              "(" [ Expression { "," Expression } ] ")" ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
             = "." [ SkipAngle ] Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
@@ -553,7 +581,7 @@ SwYield     <~~ push(makeYield(pop())) ~~>
 ArrLit      <~~ push(makeArray(takeAll())) ~~>
             = "{" [ Expression { "," Expression } [ "," ] ] "}" ;
 
-Primary     = ArrLit | NewExpr | SwitchExpr | Lambda | MethodRef | "(" Expression ")" | TextBlock | DqString | CharLit
+Primary     = ArrClassLit | ArrLit | NewExpr | SwitchExpr | Lambda | MethodRef | "(" Expression ")" | TextBlock | DqString | CharLit
             | HexLit | BinLit | OctLit | FloatLit | UscoreInt | SuffInt | IntLit | True | False | Null
             | OuterThis | BareCall | VarRef ;
 
@@ -579,6 +607,13 @@ MethodRef   <~~ push(makeMethodRef(stripWs(up.in), up.pos)) ~~>
             = Id { "." Id } "::" ( Id | KwNew ) ;
 
 Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
+
+// `int[].class` / `String[].class` - a class literal over an ARRAY type. The plain
+// `Foo.class` needs nothing (it reads as a field), but this one is no member chain:
+// `String[` starts an index that has no subscript. Class objects are not modelled,
+// so the value is null. It has to beat VarRef.
+ArrClassLit <~~ push(makeConst(null)) ~~>
+            = ( PrimName KwEnd | Id { "." Id } ) [ SkipAngle ] "[" "]" { "[" "]" } "." "class" KwEnd ;
 
 // `Outer.this`: the enclosing instance of an inner-class instance, stored as
 // __outer when it is created. Tried before VarRef, which would otherwise read
@@ -670,7 +705,28 @@ SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
 // Annotations (with or without arguments), modifier keywords, and the implements /
 // throws clauses are parsed and ignored. LeadMods drops everything (headers with no
 // static to track). ModWord (used by Mods) keeps the modifier text.
-Annotation  = "@" Id { "." Id } [ SkipParen ] ;
+// `@interface` opens an annotation TYPE, so it is never an annotation - without
+// the guard, LeadMods would eat it and the declaration behind it would not parse
+// (`@Retention(...) public @interface A {}` is the ordinary shape). NotIfaceKw is
+// a pure function of (source, position): a :script sees the RAW input, so it
+// steps over the whitespace itself, and it FAILS by returning an impossible token.
+Annotation  = "@" NotIfaceKw Id { "." Id } [ SkipParen ] ;
+NotIfaceKw  = :script(~~
+    (function() {
+        var s = 0
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var w = "interface"
+        var ok = true
+        for (var i = 0; i < w.length; i++) { if (c.peek(s + i) !== w.charCodeAt(i)) { ok = false } }
+        if (ok) {
+            var cc = c.peek(s + w.length)
+            if (!((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122))) {
+                return abnf.newToken("\x01annotation-type", 0)
+            }
+        }
+        return undefined
+    })()
+~~) ;
 ModKw       = ( "public" | "private" | "protected" | "static" | "final" | "abstract"
               | "synchronized" | "native" | "transient" | "volatile" | "strictfp"
               | "non-sealed" | "sealed" | "default" ) KwEnd ;
@@ -694,7 +750,7 @@ UnsupType   = AnnotationDecl | Interface | EnumDecl ;
 // no reflection, so the declaration only has to introduce the NAME: it lowers to an
 // empty descriptor, like a marker interface with no members.
 AnnotationDecl <~~ push(makeAnnotationTypeStmt(takeAll())) ~~>
-            = { ModKw } "@" KwInterface Id <~~ push(up.in) ~~> SkipBlock ;
+            = LeadMods "@" KwInterface Id <~~ push(up.in) ~~> SkipBlock ;
 // An interface lowers to a plain class descriptor: the default / static / private
 // methods become closures on it and the (implicitly static final) constants become
 // its properties. It has no constructor, so a class implementing it does not chain
@@ -703,7 +759,7 @@ AnnotationDecl <~~ push(makeAnnotationTypeStmt(takeAll())) ~~>
 // falls back to InterfaceSkip, which stays reported as not implemented.
 Interface   = InterfaceReal | InterfaceSkip ;
 InterfaceReal <~~ push(makeInterfaceStmt(takeAll())) ~~>
-            = LeadMods KwInterface Id <~~ push(up.in) ~~> [ SkipAngle ]
+            = LeadMods KwInterface Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ]
               [ KwExtends IType { "," IType } ] [ PermitsSkip ] "{" { Member } "}" ;
 InterfaceSkip <~~ push(notImplStmt("interface", up.pos)) ~~>
             = LeadMods KwInterface Id [ SkipAngle ] [ KwExtends Type { "," Type } ] [ PermitsSkip ] SkipBlock ;
@@ -715,7 +771,7 @@ InterfaceSkip <~~ push(notImplStmt("interface", up.pos)) ~~>
 // A body outside the member subset falls back to EnumSkip.
 EnumDecl    = EnumReal | EnumSkip ;
 EnumReal    <~~ push(makeEnumStmt(takeAll())) ~~>
-            = LeadMods KwEnum Id <~~ push(up.in) ~~> [ ImplementsSkip ]
+            = LeadMods KwEnum Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ImplementsSkip ]
               "{" [ EnumConst { "," EnumConst } ] [ "," ] [ ";" { Member } ] "}" ;
 EnumConst   <~~ push(makeEnumConst(takeAll())) ~~>
             = { Annotation } Id <~~ push(up.in) ~~>
@@ -1149,27 +1205,26 @@ KwYield     = "yield" KwEnd ;
 
     // `o.new Inner(args)`: like new, plus the enclosing instance in __outer, set
     // before the constructor runs so the constructor body can already use it.
-    function makeQualNew(items) {
-        var outerName = items[0].qouter
-        var clsName = items[1]
-        var args = items.slice(2)
-        return function(b) {
-            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
-            var objV = callExt(b, "js_obj_new", [])
-            callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
-            callExt(b, "js_set", [objV, emitStr(b, "__outer"),
-                                  callExt(b, "js_scope_get", [curScopeV, emitStr(b, outerName)])])
-            var argsV = callExt(b, "js_arr_new", [])
-            callExt(b, "js_arr_push", [argsV, objV])
-            for (var i = 0; i < args.length; i++) {
-                var r = args[i](b)
-                b = r.b
-                callExt(b, "js_arr_push", [argsV, r.v])
-            }
-            var ctorV = callExt(b, "js_get", [clsV, emitStr(b, "__ctor")])
-            callExt(b, "js_call", [ctorV, hUndef, argsV])
-            return {b: b, v: objV}
+    function makeQNewSfx(items) {
+        return {kind: "qnew", cname: items[0].qname, args: items.slice(1)}
+    }
+    // Emits `outerV.new Cls(args)`: a fresh object whose __class is Cls and whose
+    // __outer is the qualifier, then Cls' constructor over it.
+    function emitQualNew(b, outerV, clsName, args) {
+        var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
+        var objV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+        callExt(b, "js_set", [objV, emitStr(b, "__outer"), outerV])
+        var argsV = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [argsV, objV])
+        for (var i = 0; i < args.length; i++) {
+            var r = args[i](b)
+            b = r.b
+            callExt(b, "js_arr_push", [argsV, r.v])
         }
+        var ctorV = callExt(b, "js_get", [clsV, emitStr(b, "__ctor")])
+        callExt(b, "js_call", [ctorV, hUndef, argsV])
+        return {b: b, v: objV}
     }
     // Which class declares a method under which name, and whether it is static; plus
     // each class's superclass, so an inherited method is found too. Filled while the
@@ -1435,6 +1490,10 @@ KwYield     = "yield" KwEnd ;
                     b = mergeB
                 } else if (s.kind == "field") {
                     cur = callExt(b, "js_get", [cur, emitStr(b, s.name)])
+                } else if (s.kind == "qnew") {
+                    var qr = emitQualNew(b, cur, s.cname, s.args)
+                    b = qr.b
+                    cur = qr.v
                 } else {
                     var ir2 = s.idx(b)
                     b = ir2.b
@@ -1728,7 +1787,7 @@ KwYield     = "yield" KwEnd ;
         }
     }
     // A case label is {v: valueThunk} (compare) or {test: predicate} (a pattern).
-    function makeCase(items) { return {isDefault: false, lab: {v: items[0]}, body: items.slice(1)} }
+    function makeCase(items) { return {isDefault: false, lab: items[0], body: items.slice(1)} }
     function makeDefault(items) { return {isDefault: true, body: items} }
     // Arrow arms: one classic case object per label (empty bodies fall through
     // to the last, which carries the arm body plus an implicit break).
@@ -1977,18 +2036,24 @@ KwYield     = "yield" KwEnd ;
             return b
         }
     }
-    function makeField(items) {
+    function makeFieldVar(items) {
+        return {fname: items[0], finit: items.length > 1 ? items[1] : null}
+    }
+    // Pushes one member per declarator; they share the modifiers and the type.
+    function pushFields(items) {
         var mods = items[0].mods
         var ty = items[1].ty
-        var name = items[2]
-        var init = items.length > 3 ? items[3] : null
         var isStatic = false
-        for (var i = 0; i < mods.length; i++) if (mods[i] == "static") isStatic = true
+        var i
+        for (i = 0; i < mods.length; i++) { if (mods[i] == "static") { isStatic = true } }
         var dflt = 0
         if (ty == "boolean") dflt = 2 // The handle constants: 2 false, 1 null.
         if (ty != "int" && ty != "boolean") dflt = 1
         if (ty.indexOf("[") >= 0) dflt = 1
-        return {kind: "field", name: name, statik: isStatic, init: init, dfltH: dflt, isInt: ty == "int"}
+        for (i = 2; i < items.length; i++) {
+            push({kind: "field", name: items[i].fname, statik: isStatic, init: items[i].finit,
+                  dfltH: dflt, isInt: ty == "int"})
+        }
     }
     function fieldDefault(b, f) {
         if (f.isInt) return emitNum(b, 0)
@@ -2046,6 +2111,20 @@ KwYield     = "yield" KwEnd ;
     // fields != null marks a constructor: the field initializers run before the body.
     // The class whose body is currently being built (for super calls).
     var curClassName = ""
+    // curClassName is what super.m() and an unqualified call resolve against. A
+    // NESTED type declaration interrupts its enclosing one, so the name has to be
+    // a STACK - without that, the outer type's later members would resolve against
+    // the nested one. Every type declaration enters it, not just ClassDecl.
+    var jClassStack = []
+    function jEnterClass(n) {
+        jClassStack.push(curClassName)
+        curClassName = n
+    }
+    function jExitClass() {
+        curClassName = jClassStack.pop()
+    }
+    // "Outer", "Nested" -> "Nested": nested types are hoisted under their simple name.
+    function jLastSeg(parts) { return parts[parts.length - 1] }
 
     // isCtl marks a try/catch body closure: a return/break/continue leaving it emits a
     // control signal instead of a ret/br (see compile-core inCtlBody / excDispatch).
@@ -2387,9 +2466,11 @@ KwYield     = "yield" KwEnd ;
         }
     }
     function makeClassStmt(items) {
+        jExitClass()
         return buildClassStmt(items[0], items.slice(1), undefined)
     }
     function makeRecordStmt(items) {
+        jExitClass()
         recordComponents["$" + items[0]] = items[1].rparams
         return buildClassStmt(items[0], items.slice(2), items[1].rparams)
     }
@@ -2476,6 +2557,7 @@ KwYield     = "yield" KwEnd ;
     var interfaceMethodNames = {}
     var interfaceAbstracts = {}
     function makeInterfaceStmt(items) {
+        jExitClass()
         var name = items[0]
         var members = []
         var supers = []
@@ -2555,6 +2637,7 @@ KwYield     = "yield" KwEnd ;
         return emitFunc([], body, false, null)
     }
     function makeEnumStmt(items) {
+        jExitClass()
         var name = items[0]
         var consts = []
         var members = []
@@ -2718,11 +2801,15 @@ KwYield     = "yield" KwEnd ;
     // ----- Anonymous classes -----
     var anonCount = 0
     function makeNewAnon(items, pos) {
-        var baseName = items[0]
+        // A qualified base (new java.beans.Listener() {...}) pushes each segment;
+        // the LAST one names the descriptor, as in makeNew.
+        var baseName = ""
         var args = []
         var members = []
-        for (var i = 1; i < items.length; i++) {
-            if (typeof items[i] == "function") { args.push(items[i]) } else { members.push(items[i]) }
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "string") { baseName = items[i] }
+            else if (typeof items[i] == "function") { args.push(items[i]) }
+            else { members.push(items[i]) }
         }
         anonCount++
         var aname = "Anon$" + anonCount

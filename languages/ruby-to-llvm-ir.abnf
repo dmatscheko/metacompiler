@@ -45,8 +45,10 @@ Program     <~~ buildMain(takeAll()) ~~>
 // module M ... end: accepted but not implemented (no namespacing). Its body is a
 // program of the same items; under -warn-unsupported they run in the current scope
 // so any defs/classes/calls stay visible. A nested module recurses.
-ModuleDecl  <~~ push(makeModule(takeAll(), up.pos)) ~~>
-            = KwModule ScopedName { Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | ModuleDecl | Statement } End ;
+ModuleDecl  <~~ push(makeModuleStmt(takeAll())) ~~>
+            = KwModule ScopedName <~~ push(up.in) ~~>
+              { Semi | Def <~~ push({method: pop()}) ~~> | ClassDecl <~~ push({nested: pop()}) ~~>
+              | ModuleDecl <~~ push({nested: pop()}) ~~> | AliasStmt | ClassBodyStmt } End ;
 // A constant path Foo::Bar::Baz (module / class name or a scoped reference).
 ScopedName  = Name { "::" Name } ;
 
@@ -56,34 +58,64 @@ ScopedName  = Name { "::" Name } ;
 // splat / block / keyword parameters; the fancy forms are notImplemented (the method
 // is still built with the parameter names, so its body stays compilable).
 Def         <~~ push(makeFun(takeAll())) ~~>
-            = KwDef [ SelfRecv ] MethodName <~~ push(up.in) ~~> [ ParamList ] Body End ;
-SelfRecv    <~~ notImpl("singleton method (def self.m / def obj.m)", up.pos) ~~>
+            = KwDef [ SelfRecv ] MethodName <~~ push(up.in) ~~> [ ParamList ] DefTail ;
+// An endless def (def sq(x) = x * x) has an EXPRESSION body and no `end`; the
+// ordinary body may carry rescue/else/ensure clauses with no `begin` of their own.
+DefTail     = EndlessBody | GuardedBody ;
+EndlessBody <~~ push({body: pop()}) ~~>
+            = "=" !"=" Expression ;
+GuardedBody <~~ push({body: makeGuardedBody(takeAll())}) ~~>
+            = Body <~~ push({trybody: pop().body}) ~~> { RescueClause }
+              [ KwElse Body <~~ push({elsebody: pop().body}) ~~> ]
+              [ KwEnsure Body <~~ push({finalbody: pop().body}) ~~> ] End ;
+// def self.m: a method of the class object itself, not of its instances.
+SelfRecv    <~~ push({selfrecv: true}) ~~>
             = ( KwSelf | Name ) "." ;
 ParamList   = "(" [ Param { "," Param } ] ")" ;
 Param       = ParamDSplat | ParamSplat | ParamBlock | ParamKw | ParamDefault | ParamSimple ;
-ParamDSplat <~~ var n = takeAll(); notImpl("double-splat parameter (**kw)", up.pos); push({param: n.length > 0 ? n[0] : "$kwrest"}) ~~>
+ParamDSplat <~~ var n = takeAll(); push({param: n.length > 0 ? n[0] : null, kwrest: true}) ~~>
             = "**" [ Name <~~ push(up.in) ~~> ] ;
-ParamSplat  <~~ var n = takeAll(); notImpl("splat parameter (*args)", up.pos); push({param: n.length > 0 ? n[0] : "$rest"}) ~~>
-            = "*" [ Name <~~ push(up.in) ~~> ] ;
+ParamSplat  <~~ var n = takeAll(); push({param: n.length > 0 ? n[0] : null, splat: true}) ~~>
+            = "*" !"*" [ Name <~~ push(up.in) ~~> ] ;
 // &blk: the block the call was given, received as an ordinary named parameter.
-ParamBlock  <~~ push({param: pop()}) ~~>
+ParamBlock  <~~ push({param: pop(), blockp: true}) ~~>
             = "&" Name <~~ push(up.in) ~~> ;
-ParamKw     <~~ var n = takeAll(); notImpl("keyword parameter (name:)", up.pos); push({param: n[0]}) ~~>
-            = Name <~~ push(up.in) ~~> ":" [ Expression ] ;
-ParamDefault <~~ var n = takeAll(); notImpl("default parameter value", up.pos); push({param: n[0]}) ~~>
+// name: / name: DEFAULT - a keyword parameter, filled from the call's trailing hash.
+ParamKw     <~~ var n = takeAll(); push({param: n[0], kw: true, defT: n.length > 1 ? n[1] : undefined}) ~~>
+            = Name <~~ push(up.in) ~~> ":" !":" [ Expression ] ;
+ParamDefault <~~ var n = takeAll(); push({param: n[0], defT: n[1]}) ~~>
             = Name <~~ push(up.in) ~~> "=" !"=" Expression ;
 ParamSimple = Name <~~ push({param: up.in}) ~~> ;
-// Method / call names may end with ? or ! (empty?, include?); Name may not.
-MethodName  = Id [ "?" | "!" ] ;
+// Method / call names may end with ? or ! (empty?, include?); Name may not. A def
+// may equally name an OPERATOR (def +, def -@, def [], def []=, def <=>), which is
+// how a class joins the operator table - the longest spelling comes first (PEG).
+MethodName  = OpMethodName | Id [ "?" | "!" ] ;
+OpMethodName = "[]=" | "[]" | "<=>" | "===" | "==" | "!=" | "<<" | ">>" | "<=" | ">="
+            | "**" | "+@" | "-@" | "=~" | "+" | "-" | "*" | "/" | "%" | "<" | ">"
+            | "&" | "|" | "^" | "~" | "!" ;
 
 // class C ... end with instance methods; C.new builds an instance. attr_reader /
 // attr_writer / attr_accessor declare @ivar getters/setters on the class.
 // A superclass (class D < Base) is accepted but not implemented (no inheritance);
 // the class body still compiles as its own methods.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwClass Name <~~ push(up.in) ~~> [ Superclass ] { Semi | Def <~~ push({method: pop()}) ~~> | AttrDecl } End ;
-Superclass  <~~ notImpl("class superclass (< Base)", up.pos) ~~>
-            = "<" ScopedName ;
+            = KwClass Name <~~ push(up.in) ~~> [ Superclass ]
+              { Semi | SingletonBlock | Def <~~ push({method: pop()}) ~~> | AttrDecl
+              | AliasStmt | ClassBodyStmt } End ;
+// class << self ... end: every def inside it is a method of the class object.
+SingletonBlock <~~ push({sblock: takeAll()}) ~~>
+            = KwClass "<<" KwSelf { Semi | Def <~~ push({method: pop()}) ~~> } End ;
+// alias NEW OLD (a keyword, unlike alias_method which is an ordinary call).
+AliasStmt   <~~ push({alias: takeAll()}) ~~>
+            = KwAlias AliasName AliasName ;
+AliasName   = ":" SymName <~~ push(up.in) ~~> | MethodName <~~ push(up.in) ~~> ;
+// class D < Base: real inheritance (method lookup walks __super, and `super` calls
+// the overridden method).
+Superclass  = "<" Name <~~ push({supername: up.in}) ~~> ;
+// Anything else in a class body - @@classvar = v, include M, private, alias - runs
+// as an ordinary statement with `self` bound to the class object.
+ClassBodyStmt <~~ push({cstmt: pop()}) ~~>
+            = Statement ;
 AttrDecl    <~~ push(makeAttr(takeAll())) ~~>
             = AttrKind <~~ push({akind: up.in}) ~~> AttrSym { "," AttrSym } ;
 AttrKind    = ( "attr_accessor" | "attr_reader" | "attr_writer" ) KwEnd ;
@@ -112,7 +144,21 @@ DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
 DoWhileKw   = KwWhile <~~ push({dw: "while"}) ~~> | KwUntil <~~ push({dw: "until"}) ~~> ;
 ModStmt     <~~ push(applyMod(takeAll())) ~~>
             = SimpleStmt [ SameLine ModKw Expression ] ;
-SimpleStmt  = PutsStmt | MultiAssign | ExprStmt ;
+SimpleStmt  = PutsStmt | MultiAssign | AppendStmt | CommandStmt | ExprStmt ;
+// NAME arg[, arg] [block]: the parenthesis-less command call (`describe "x" do .. end`,
+// `include Comparable`, `alias_method :other, :real`). It lives at STATEMENT level
+// only: inside an argument list `f(double, 21)` a bare name is a VALUE, not a call of
+// the following arguments, and Ruby itself resolves that with the local-variable
+// table a PEG parser does not have. CmdArgAhead is the spacing rule Ruby uses to tell
+// `foo -1` (an argument) from `foo - 1` (a subtraction).
+CommandStmt <~~ push(makeCall(takeAll())) ~~>
+            = BareName <~~ push(up.in) ~~> SameLine CmdArgAhead Arg { "," Arg } [ Block ] ;
+// TARGET << V [<< V]: Ruby strings are mutable, so `s << "bc"` has to update the
+// variable itself. The append is therefore a statement form that WRITES BACK to its
+// target - for an array that is the same object it already mutated in place, for a
+// string it is the new value.
+AppendStmt  <~~ push(makeAppendStmt(takeAll())) ~~>
+            = Target "<<" !"<" AddExpr { "<<" AddExpr } ;
 ModKw       = KwIf <~~ push({mod: "if"}) ~~> | KwUnless <~~ push({mod: "unless"}) ~~>
             | KwWhile <~~ push({mod: "while"}) ~~> | KwUntil <~~ push({mod: "until"}) ~~> ;
 
@@ -160,42 +206,77 @@ ExprStmt    = Expression [ ";" ] ;
 
 // Every expression pushes exactly one thunk: function() -> value. A ternary
 // cond ? a : b binds looser than the boolean operators (like Ruby).
-Expression  = Assignment | Ternary ;
+// The word forms and/or/not bind LOOSER than assignment in Ruby, which is the whole
+// point of `x = false or true` (x is false, the `or true` is a separate step). They
+// therefore sit ABOVE the assignment, in their own three levels, while the symbol
+// forms && || ! keep their tight precedence inside OrExpr/AndExpr/NotExpr below.
+Expression  = LowOr ;
+LowOr       <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = LowAnd { OrWord LowAnd } ;
+LowAnd      <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = LowNot { AndWord LowNot } ;
+LowNot      = LowNotOp | RescueMod ;
+// EXPR rescue FALLBACK: the expression modifier form of rescue. SameLine keeps it
+// clear of a def-level `rescue` clause that opens the next line.
+RescueMod   <~~ push(makeRescueMod(takeAll())) ~~>
+            = AssignExpr [ SameLine KwRescue AssignExpr ] ;
+LowNotOp    <~~ push(makeNot(pop())) ~~>
+            = NotWord LowNot ;
+OrWord      = "or" KwEnd ;
+AndWord     = "and" KwEnd ;
+NotWord     = "not" KwEnd ;
+
+AssignExpr  = Assignment | Ternary ;
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "?" Expression ":" Expression ] ;
 
 Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
-            = Target AssignOp <~~ push(up.in) ~~> Expression ;
+            = Target AssignOp <~~ push(up.in) ~~> AssignExpr ;
 // ||= and &&= (conditional assignment) are accepted but not implemented (no short
 // circuit); makeAssign warns and falls back to a plain assignment.
 AssignOp    = "||=" | "&&=" | "+=" | "-=" | "*=" | "/=" | "%=" | ( "=" !"=" ) ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = TargetHead { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
-TargetHead  = "@" Id <~~ push({ivar: up.in}) ~~> | Name <~~ push({var: up.in}) ~~> ;
+// The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win).
+TargetHead  = "$" Id <~~ push({gvar: up.in}) ~~>
+            | "@@" Id <~~ push({cvar: up.in}) ~~>
+            | "@" Id <~~ push({ivar: up.in}) ~~>
+            | Name <~~ push({var: up.in}) ~~> ;
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
 
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { OrOp AndExpr } ;
-OrOp        = "||" | ( "or" KwEnd ) ;
+OrOp        = "||" ;
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = NotExpr { AndOp NotExpr } ;
-AndOp       = "&&" | ( "and" KwEnd ) ;
+AndOp       = "&&" ;
 NotExpr     = NotOp | EqExpr ;
 NotOp       <~~ push(makeNot(pop())) ~~>
-            = ( "!" | ( "not" KwEnd ) ) NotExpr ;
+            = "!" !"=" NotExpr ;
 
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
-            = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+            = RelExpr { ( "===" | "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+// <=> (the spaceship) is listed FIRST so "<=" cannot swallow its prefix.
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = RangeExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> RangeExpr } ;
-// A range 1..5 (inclusive) or 1...5 (exclusive); built as an eager array.
+            = BitOrExpr { ( "<=>" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> BitOrExpr } ;
+// Bitwise | ^ and & (the lookaheads keep || && and the safe-navigation &. out).
+BitOrExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = BitAndExpr { BitOrOp <~~ push(up.in) ~~> BitAndExpr } ;
+BitOrOp     = ( "|" !"|" ) | "^" ;
+BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = RangeExpr { BitAndOp <~~ push(up.in) ~~> RangeExpr } ;
+BitAndOp    = "&" !"&" !"." ;
+// A range 1..5 (inclusive) or 1...5 (exclusive), and the endless (5..) / beginless
+// (..9) forms; built as a lazy Range object.
 RangeExpr   <~~ push(makeRange(takeAll())) ~~>
-            = ShiftExpr [ ( "..." | ".." ) <~~ push(up.in) ~~> ShiftExpr ] ;
-// The << append operator: arr << x pushes onto the array and yields the array
-// (so a << b << c chains). Binds tighter than range/comparison, looser than +.
+            = ShiftExpr [ RangeOp <~~ push(up.in) ~~> [ ShiftExpr ] ] ;
+RangeOp     = "..." | ".." ;
+// The << and >> operators: on an array << appends (and yields the array, so
+// a << b << c chains), on a string it concatenates, on an integer it shifts.
 ShiftExpr   <~~ push(makeShift(takeAll())) ~~>
-            = AddExpr { "<<" AddExpr } ;
+            = AddExpr { ShiftOp <~~ push(up.in) ~~> AddExpr } ;
+ShiftOp     = "<<" | ">>" ;
 // The LineCont guard is what keeps `first, *rest = [1, 2, 3]' followed by a line
 // that OPENS with `*init, last = ...' from reading as one multiplication: in Ruby a
 // newline ends the statement once the expression is complete, so a binary operator
@@ -205,16 +286,25 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { LineCont ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Neg | PostfixExpr ;
+UnaryExpr   = Neg | BitNot | PowExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
+BitNot      <~~ push(makeBitNot(pop())) ~~>
+            = "~" UnaryExpr ;
+// ** binds tighter than unary minus (-2 ** 2 is -4) and is RIGHT associative
+// (2 ** 3 ** 2 is 512), so its right operand is a whole UnaryExpr again.
+PowExpr     <~~ push(makePow(takeAll())) ~~>
+            = PostfixExpr [ "**" UnaryExpr ] ;
 
 // obj.method(args), obj.method do |x| ... end, obj.field, arr[i]. A trailing
 // block (do..end or {..}) becomes the last argument of the method call.
 PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | SafeMethodSfx | SafeFieldSfx | IndexSfx } ;
+            = Primary { CallSfx | MethodSfx | FieldSfx | SafeMethodSfx | SafeFieldSfx | IndexSfx } ;
 MethodSfx   <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
             = "." MethodName <~~ push({mname: up.in}) ~~> MArgs ;
+// p.(x): the parenthesis-only call shorthand for a Proc (Proc#call).
+CallSfx     <~~ push({kind: "mcall", name: "call", args: takeAll()}) ~~>
+            = "." "(" [ Arg { "," Arg } ] ")" ;
 FieldSfx    = "." MethodName <~~ push({kind: "field", name: up.in}) ~~> ;
 // Safe navigation obj&.m / obj&.m(args): yields nil (and skips the call, not even
 // evaluating the arguments) when the receiver is nil, else a normal method/field.
@@ -232,14 +322,22 @@ MArgs       = "(" [ Arg { "," Arg } ] ")" [ Block ] | Block ;
 // (*a, **h) and block pass (&blk, &:sym). The unsupported forms warn and become a
 // placeholder argument, so the call still compiles.
 Arg         = KwArg | SplatArg | BlockArg | Expression ;
-KwArg       <~~ takeAll(); push(notImplExpr("keyword argument (name:)", up.pos)) ~~>
-            = SymName ":" Expression ;
-SplatArg    <~~ takeAll(); push(notImplExpr("splat argument (* / **)", up.pos)) ~~>
+KwArg       <~~ var n = takeAll(); push({kwname: n[0], kwT: n[1]}) ~~>
+            = SymName <~~ push(up.in) ~~> ":" !":" Expression ;
+// *arr splices an array into the positional arguments, **h merges a hash into the
+// keyword arguments.
+SplatArg    <~~ push({splatT: pop()}) ~~>
             = ( "**" | "*" ) Expression ;
 // &expr: pass expr as the call's block. A Proc is passed straight through; a symbol
 // becomes the "call this method on each element" proc (`[1, 2].map(&:to_s)`).
 BlockArg    <~~ push({blkT: makeBlockArg(pop())}) ~~>
             = "&" Expression ;
+
+// ->(a, b = 1) { ... } / -> { ... }: a lambda literal. Unlike a block it is a VALUE,
+// and a `return` inside it returns from the lambda itself.
+LambdaLit   <~~ push(makeLambda(takeAll())) ~~>
+            = "->" [ "(" [ Param { "," Param } ] ")" ] LambdaBody ;
+LambdaBody  = KwDo Body End | "{" [ BlockParams ] Body "}" ;
 
 // A block passed to a method call: a real closure over the current scope.
 Block       <~~ push(makeBlock(takeAll())) ~~>
@@ -253,13 +351,15 @@ BParam      = BGroup | Param ;
 BGroup      <~~ push({pgroup: takeAll()}) ~~>
             = "(" BParam { "," BParam } ")" ;
 
-Primary     = "(" Expression ")"
+Primary     = "(" Expression ")" | LambdaLit
             | IfExpr | UnlessExpr | WhileExpr | UntilExpr | ForExpr | CaseExpr | BeginExpr
-            | ReturnExpr | BreakExpr | NextExpr | RedoExpr | RaiseExpr | YieldExpr
-            | DqStr | SqStr | PercentLit | FloatLit | IntLit | SymLit
+            | ReturnExpr | BreakExpr | NextExpr | RedoExpr | RetryExpr | RaiseExpr | YieldExpr | SuperExpr
+            | StrLit | CharLit | PercentLit
+            | NumHex | NumBin | NumOct | Oct0Lit | RatLit | ImagLit | FloatLit | NumInt
+            | SymLit
             | ArrayLit | HashLit
             | True | False | Nil | Self
-            | IvarRef | ScopedConst | Call | VarRef ;
+            | DefinedExpr | GvarRef | CvarRef | IvarRef | ScopedConst | Call | VarRef ;
 
 // for VAR[, VAR] in COLL ... end: unlike a block, `for` does NOT open a scope - the
 // loop variable stays visible after the loop (Ruby), so it is written with the same
@@ -268,30 +368,85 @@ ForExpr     <~~ push(makeForIn(takeAll())) ~~>
             = KwFor ForVars KwIn Expression [ KwDo ] Body End ;
 ForVars     = Name <~~ push({fvar: up.in}) ~~> { "," Name <~~ push({fvar: up.in}) ~~> } ;
 
+// super / super(args): call the method of the same name in the superclass. A BARE
+// super forwards the arguments the current method received (Ruby), while super()
+// with an explicit list passes exactly that list - so `super` and `super()` differ.
+SuperExpr   <~~ push(makeSuper(takeAll())) ~~>
+            = KwSuper [ "(" <~~ push({explicit: true}) ~~> [ Arg { "," Arg } ] ")" ] ;
+
 // yield / yield(args) / yield args: accepted but not implemented (no block passing);
 // warns and yields a placeholder value.
 YieldExpr   <~~ push(makeYield(takeAll(), up.pos)) ~~>
             = KwYield [ "(" [ Arg { "," Arg } ] ")" | SameLine Arg { "," Arg } ] ;
 
-// A floating point literal 3.14 / 1.0e9: accepted but not implemented (the runtime
-// is 32-bit integer only); warns and yields a placeholder value.
-FloatLit    <~~ push(notImplExpr("float literal", up.pos)) ~~>
-            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } "." "0"..."9" { "0"..."9" } [ FloatExp ] :whitespace(Whitespace) ;
-FloatExp    = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
+// The numeric tower. Integers are exact (hex 0xff, binary 0b1010, octal 0o17 and
+// Ruby's bare-zero form 017, decimal with '_' separators, all via lib/numbers.abnf
+// except the bare-zero octal below). A float 1.5 / 1e3 / 25e-2 is a BOXED value so
+// it stays distinguishable from an integer - Ruby needs 7 / 2 == 3 AND 7.0 / 2 ==
+// 3.5, which one JS number cannot express. 3r is a Rational, 2i an imaginary
+// Complex; both are boxes too. The prefixed / suffixed forms come first (PEG).
+Oct0Lit     <~~ push(makeConst(parseInt(up.in.split("_").join("").substring(1), 8))) ~~>
+            = "0" :whitespace() "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
+RatLit      <~~ push(makeConst(mkRat(parseInt(up.in.split("_").join("")), 1))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } "r" :whitespace(Whitespace) ;
+ImagLit     <~~ push(makeConst(mkCpx(0, parseInt(up.in.split("_").join(""))))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } "i" :whitespace(Whitespace) ;
+FloatLit    <~~ push(makeConst(mkFlo(parseFloat(up.in.split("_").join(""))))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
+              ( "." "0"..."9" { "0"..."9" | "_" } [ NumExp ] | NumExp ) :whitespace(Whitespace) ;
 
-// A scoped constant Foo::Bar: accepted but not implemented (no namespaces); warns
-// and yields a placeholder value.
-ScopedConst <~~ push(notImplExpr("scoped constant (::)", up.pos)) ~~>
+// A scoped constant Foo::Bar::Baz: walked down the module/class chain at run time.
+ScopedConst <~~ push(makeScopedConst(up.in)) ~~>
             = Name "::" Name { "::" Name } ;
 
-// A percent literal %w[..] %i[..] %q(..) %Q(..) %r[..] ...: accepted but not
-// implemented; the body is read (bracket or parenthesis delimited) and warns.
-PercentLit  <~~ push(notImplExpr("percent literal (%w / %i / %q / ...)", up.pos)) ~~>
-            = PctTag :whitespace() PctBody :whitespace(Whitespace) ;
-PctTag      = "%w" | "%i" | "%W" | "%I" | "%q" | "%Q" | "%r" | "%s" ;
-PctBody     = "[" { PctBrk } "]" | "(" { PctPar } ")" ;
-PctBrk      = "\x00"..."\x5c" | "\x5e"..."\U0010ffff" ;
-PctPar      = "\x00"..."\x28" | "\x2a"..."\U0010ffff" ;
+// The percent literals. The lower-case tags (%q %w %i) are RAW - no escapes beyond
+// the delimiters and no '#{}' - while the upper-case ones (%Q %W %I) and the bare
+// %(..) interpolate exactly like a double-quoted string. %w/%i split their body on
+// whitespace into an array of strings / symbols. Each form accepts the three usual
+// delimiter pairs ( ) [ ] { }; the body characters are spelled out per delimiter,
+// because the dialect has no parameterized rules.
+PercentLit  = PctQ | PctW | PctI | PctBigQ | PctBigW | PctBigI | PctBare ;
+PctQ        <~~ push(makeConst(unescapeSq(pctRawOf(takeAll())))) ~~>
+            = "%q" :whitespace() PctRawBody :whitespace(Whitespace) ;
+PctW        <~~ push(makeConst(pctWords(pctRawOf(takeAll()), false))) ~~>
+            = "%w" :whitespace() PctRawBody :whitespace(Whitespace) ;
+PctI        <~~ push(makeConst(pctWords(pctRawOf(takeAll()), true))) ~~>
+            = "%i" :whitespace() PctRawBody :whitespace(Whitespace) ;
+PctBigQ     <~~ push(makeTemplate(takeAll())) ~~>
+            = "%Q" :whitespace() PctTplBody :whitespace(Whitespace) ;
+PctBare     <~~ push(makeTemplate(takeAll())) ~~>
+            = "%" :whitespace() PctTplBody :whitespace(Whitespace) ;
+PctBigW     <~~ push(makeWordsThunk(makeTemplate(takeAll()), false)) ~~>
+            = "%W" :whitespace() PctTplBody :whitespace(Whitespace) ;
+PctBigI     <~~ push(makeWordsThunk(makeTemplate(takeAll()), true)) ~~>
+            = "%I" :whitespace() PctTplBody :whitespace(Whitespace) ;
+
+PctRawBody  = PctParRaw | PctBrkRaw | PctBrcRaw ;
+PctParRaw   = "(" { PctParCh } <~~ push({raw: up.in}) ~~> ")" ;
+PctBrkRaw   = "[" { PctBrkCh } <~~ push({raw: up.in}) ~~> "]" ;
+PctBrcRaw   = "{" { PctBrcCh } <~~ push({raw: up.in}) ~~> "}" ;
+PctParCh    = "\x00"..."\x27" | "\x2a"..."\U0010ffff" ;
+PctBrkCh    = "\x00"..."\x5a" | "\x5c" | "\x5e"..."\U0010ffff" ;
+PctBrcCh    = "\x00"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+
+PctTplBody  = "(" { TplExpr | PctParChunk } ")"
+            | "[" { TplExpr | PctBrkChunk } "]"
+            | "{" { TplExpr | PctBrcChunk } "}" ;
+PctParChunk <~~ push({s: unescapeJs(up.in)}) ~~> = PctParTC { PctParTC } ;
+PctParTC    = TplEsc | HashChar | PctParPlain ;
+PctParPlain = "\x00"..."\x22" | "\x24"..."\x27" | "\x2a"..."\x5b" | "\x5d"..."\U0010ffff" ;
+PctBrkChunk <~~ push({s: unescapeJs(up.in)}) ~~> = PctBrkTC { PctBrkTC } ;
+PctBrkTC    = TplEsc | HashChar | PctBrkPlain ;
+PctBrkPlain = "\x00"..."\x22" | "\x24"..."\x5a" | "\x5e"..."\U0010ffff" ;
+PctBrcChunk <~~ push({s: unescapeJs(up.in)}) ~~> = PctBrcTC { PctBrcTC } ;
+PctBrcTC    = TplEsc | HashChar | PctBrcPlain ;
+PctBrcPlain = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+
+// ?a / ?\n: the one-character string literal. The body may not start with a space,
+// which is exactly what keeps the ternary `c ? a : b` out of it.
+CharLit     <~~ push(makeConst(charLitVal(up.in))) ~~>
+            = "?" :whitespace() CharBody :whitespace(Whitespace) ;
+CharBody    = "\\" "\x21"..b"\x7e" | "\x21"..."\U0010ffff" ;
 
 // if / unless usable as a statement and as an expression (yields the branch value).
 IfExpr      <~~ push(makeIf(takeAll())) ~~>
@@ -309,22 +464,25 @@ UntilExpr   <~~ push(makeUntil(pop().body, pop())) ~~>
 // case SUBJ / when V1, V2 / else - lowered to a chain of == tests (a switch). A
 // subject-less case (case / when COND) tests each when expression for truthiness.
 CaseExpr    <~~ push(makeCase(takeAll())) ~~>
-            = KwCase [ Expression ] { WhenClause } [ KwElse Body <~~ push({els: pop().body}) ~~> ] End ;
+            = KwCase [ Expression ] [ Semi ] { WhenClause } [ KwElse Body <~~ push({els: pop().body}) ~~> ] End ;
 WhenClause  <~~ push(makeWhen(takeAll())) ~~>
             = KwWhen WhenVal { "," WhenVal } [ KwThen ] Body ;
 // A when value: a range LO..HI / LO...HI matches by membership (Range#===); any
 // other expression matches by == (subject form) or truthiness (subjectless form).
-WhenVal     = RangeVal | ScalarVal ;
+WhenVal     = WhenSplat | RangeVal | ScalarVal ;
+// when *arr: every element of the array is a candidate value.
+WhenSplat   <~~ push({t: pop(), isSplat: true}) ~~>
+            = "*" !"*" Expression ;
 RangeVal    <~~ push(makeRangeVal(takeAll())) ~~>
             = ShiftExpr ( "..." | ".." ) <~~ push(up.in) ~~> ShiftExpr ;
 ScalarVal   <~~ push({t: pop(), isRange: false}) ~~>
             = Expression ;
 
-// begin / rescue / else / ensure: the body (with any else appended) and the first
-// rescue compile to ctl closures handed to js_try; a raise -> js_throw is recovered and
-// the rescue binds the value via its `=> Id` parameter. else runs only when the body
-// completed without a raise; ensure always runs. A return/break/next leaving the try or
-// rescue becomes a control signal that excDispatch re-issues here.
+// begin / rescue / else / ensure: genuinely executed (like Python try/except/else/
+// finally). A raise in the body unwinds to the first rescue (exception types are
+// parsed but not discriminated), which binds its `=> Id` name; else runs only when the
+// body raised nothing and produced no return/break/next; ensure always runs. A
+// return/break/next leaving the body propagates as the ordinary control signal.
 BeginExpr   <~~ push(makeTry(takeAll(), up.pos)) ~~>
             = KwBegin Body <~~ push({trybody: pop().body}) ~~> { RescueClause }
               [ KwElse Body <~~ push({elsebody: pop().body}) ~~> ]
@@ -332,8 +490,9 @@ BeginExpr   <~~ push(makeTry(takeAll(), up.pos)) ~~>
 // rescue [Type[, Type]] [=> Id]: the type list is parsed and discarded (types are not
 // discriminated); the `=> Id` name is pushed so makeExcept can bind it to the value.
 RescueClause <~~ push(makeExcept(takeAll())) ~~>
-            = KwRescue [ ErrList ] [ "=>" Name <~~ push(up.in) ~~> ] [ KwThen ] Body <~~ push(pop().body) ~~> ;
-ErrList     = Name { "," Name } ;
+            = KwRescue [ ErrList ] [ "=>" Name <~~ push({hname: up.in}) ~~> ] [ KwThen ] Body <~~ push({rbody: pop().body}) ~~> ;
+ErrList     = ErrName { "," ErrName } ;
+ErrName     = ScopedName <~~ push({etype: up.in}) ~~> ;
 
 // The optional argument of return/break/next must not start at a statement-modifier
 // keyword: in `break if C` the `if` belongs to the enclosing ModStmt - without the
@@ -349,9 +508,12 @@ NextExpr    <~~ push(makeNext(takeAll())) ~~>
 // iteration (it travels to the iterating method as its own control signal).
 RedoExpr    <~~ push(makeRedo(up.pos)) ~~>
             = KwRedo ;
+// retry re-runs the begin body that the running rescue clause belongs to.
+RetryExpr   <~~ push(makeRetry()) ~~>
+            = KwRetry ;
 
-// raise [EXPR[, EXPR]]: raise the first expression's value with js_throw (a bare raise
-// re-raise is approximated by throwing nil); a trailing message argument is ignored.
+// raise [EXPR[, EXPR]]: raise the first expression's value (a bare raise re-raise is
+// approximated as raising nil); a trailing message argument is parsed and ignored.
 RaiseExpr   <~~ push(makeRaise(takeAll(), up.pos)) ~~>
             = KwRaise [ Expression { "," Expression } ] ;
 
@@ -376,6 +538,16 @@ PredSfx     = "?" | "!" ;
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Name ;
 IvarRef     = "@" Id <~~ push(makeIvarRef(up.in)) ~~> ;
+// $global and @@classvar reads (their writes go through TargetHead above).
+GvarRef     = "$" Id <~~ push(makeGvarRef(up.in)) ~~> ;
+CvarRef     = "@@" Id <~~ push(makeCvarRef(up.in)) ~~> ;
+// defined?(X) answers what kind of thing X is - or nil when it is nothing. Its
+// argument is NOT evaluated, so the production keeps only the source text and
+// makeDefined classifies it at run time.
+DefinedExpr <~~ push(makeDefined(takeAll())) ~~>
+            = "defined?" :whitespace(Whitespace) "(" DefArgTxt ")" ;
+DefArgTxt   <~~ takeAll(); push({dtext: up.in}) ~~>
+            = Expression | GvarRef | Id ;
 Self        <~~ push(makeSelf()) ~~>    = KwSelf ;
 Nil         <~~ push(makeConst(null)) ~~> = "nil" KwEnd ;
 
@@ -397,11 +569,21 @@ HashArrow   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
             = Expression "=>" Expression ;
 HashColon   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
             = SymKey ":" Expression ;
-SymKey      <~~ push(makeConst(up.in)) ~~>
+SymKey      <~~ push(makeConst(mkSym(up.in))) ~~>
             = SymName ;
 
-SymLit      = ":" SymName <~~ push(makeConst(up.in)) ~~> :whitespace(Whitespace) ;
+// :"two words" and :"n#{1 + 1}" are symbol literals with a string body.
+SymLit      = SymQuoted | SymPlain ;
+SymPlain    = ":" SymName <~~ push(makeConst(mkSym(up.in))) ~~> :whitespace(Whitespace) ;
+SymQuoted   <~~ push(makeSymOf(pop())) ~~>
+            = ":" DqStr ;
 SymName     = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
+
+// Two string literals that are only separated by whitespace are ONE string in Ruby
+// ("a" 'd' is "ad"), so a string primary is a run of pieces.
+StrLit      <~~ push(makeAdjacent(takeAll())) ~~>
+            = StrPiece { StrPiece } ;
+StrPiece    = DqStr | SqStr ;
 
 // Double quoted strings interpolate '#{expr}'; single quoted are literal.
 DqStr       <~~ push(makeTemplate(takeAll())) ~~>
@@ -415,8 +597,10 @@ TplEsc      = "\\" "\x20"..b"\x7e" ;
 HashChar    = "#" !"{" ;
 TplPlain    = "\x20"..."\x21" | "\x24"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
 
-SqStr       = "'" :whitespace() { SqEsc | SqPlain } <~~ push(makeConst(unescapeSq(up.in))) ~~> "'" :whitespace(Whitespace) ;
+SqStr       = "'" :whitespace() { SqEsc | SqLone | SqPlain } <~~ push(makeConst(unescapeSq(up.in))) ~~> "'" :whitespace(Whitespace) ;
 SqEsc       = "\\" ( "'" | "\\" ) ;
+// Only \' and \\ are escapes inside '..'; any other backslash is a literal one.
+SqLone      = "\\" ;
 SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" ;
 
 // A Name that is not a reserved word (keywords, literals, puts/print). The
@@ -444,7 +628,7 @@ NotKw       = :script(~~
                    "do", "then", "return", "break", "next", "class", "module", "for",
                    "self", "nil", "true", "false", "and", "or", "not", "case", "when",
                    "in", "yield", "begin", "rescue", "ensure", "raise", "puts", "print",
-                   "redo"]
+                   "redo", "super", "retry", "alias"]
         for (var k = 0; k < kws.length; k++) {
             if (kws[k] === s) { return abnf.newToken("\x01reserved", 0) }
         }
@@ -551,6 +735,55 @@ SameLine    = :script(~~
     })()
 ~~) ;
 
+// CmdArgAhead succeeds (matching empty) only where a parenthesis-less argument list
+// really starts: the next character must be able to OPEN an expression and must not
+// be readable as a binary operator continuing the previous one. Ruby's own rule is
+// spacing - `foo -1` passes -1, `foo - 1` subtracts - so a sign/star/ampersand only
+// counts when it is glued to what follows. A keyword that ends or modifies the
+// statement (end, if, do, and, ...) is not an argument either. Pure function of
+// (source, position), like the other guards here.
+CmdArgAhead = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01nocmd", 0)
+        var i = 0
+        var cc = c.peek(i)
+        var sawSpace = false
+        while (true) {
+            if (cc === 32 || cc === 9) { sawSpace = true; i = i + 1; cc = c.peek(i); continue }
+            if (cc === 13) { i = i + 1; cc = c.peek(i); continue }
+            break
+        }
+        if (!sawSpace) { return no }                      // `foo(1)` is a normal call
+        if (cc < 0 || cc === 10 || cc === 35) { return no }
+        // Characters that can only continue an expression, never open one.
+        if (cc === 40 || cc === 41 || cc === 93 || cc === 125 || cc === 44 || cc === 59
+            || cc === 46 || cc === 61 || cc === 60 || cc === 62 || cc === 63 || cc === 124
+            || cc === 94 || cc === 47 || cc === 37 || cc === 43 || cc === 92) { return no }
+        var nx = c.peek(i + 1)
+        // - * & ** are arguments only when glued to the value that follows.
+        if (cc === 45 || cc === 42 || cc === 38) {
+            if (nx === 32 || nx === 9 || nx === 61 || nx < 0) { return no }
+            return undefined
+        }
+        if (cc === 33) { if (nx === 61) { return no } return undefined }
+        // A reserved word that closes or modifies the statement is not an argument.
+        if ((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95) {
+            var w = ""
+            var j = i
+            var dd = cc
+            while ((dd >= 48 && dd <= 57) || (dd >= 65 && dd <= 90) || (dd >= 97 && dd <= 122) || dd === 95) {
+                w = w + String.fromCharCode(dd)
+                j = j + 1
+                dd = c.peek(j)
+            }
+            var bad = ["end", "if", "unless", "while", "until", "do", "then", "else",
+                       "elsif", "rescue", "ensure", "and", "or", "in", "when"]
+            for (var k = 0; k < bad.length; k++) { if (bad[k] === w) { return no } }
+        }
+        return undefined
+    })()
+~~) ;
+
 KwDef       = "def" KwEnd ;
 KwClass     = "class" KwEnd ;
 KwModule    = "module" KwEnd ;
@@ -575,11 +808,13 @@ KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwNext      = "next" KwEnd ;
 KwRedo      = "redo" KwEnd ;
+KwRetry     = "retry" KwEnd ;
 KwSelf      = "self" KwEnd ;
+KwSuper     = "super" KwEnd ;
+KwAlias     = "alias" KwEnd ;
 KwPuts      = ( "puts" | "print" ) KwEnd ;
 
 // ---
-
 
 
 :startScript(~~
@@ -792,6 +1027,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // ----- ranges (eager arrays), arrays, hashes, templates -----
     function makeRange(items) {
         if (items.length == 1) { return items[0] }
+        // An endless range (5..) has no upper bound to count to, and the lowering
+        // materializes ranges as arrays - so it stays unsupported rather than hanging.
+        if (items.length < 3) { return notImplExpr("endless range (5..)", 0) }
         var loT = items[0]
         var op = items[1]
         var hiT = items[2]
@@ -936,14 +1174,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var objV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [objV, emitStr(b, "__class"), cur])
         var argsV = callExt(b, "js_arr_new", [])
-        callExt(b, "js_arr_push", [argsV, objV])
         for (var k = 0; k < argThunks.length; k++) {
             var ra = argThunks[k](b)
             b = ra.b
             callExt(b, "js_arr_push", [argsV, ra.v])
         }
-        var initV = callExt(b, "js_get", [cur, emitStr(b, "initialize")])
-        callExt(b, "js_call", [initV, hUndef, argsV])
+        // Dispatched on the INSTANCE, not read off the class descriptor: that is the
+        // lookup that walks __class and its __super chain, so a subclass without an
+        // initialize of its own inherits the one above it.
+        callExt(b, "js_rmcall", [objV, emitStr(b, "initialize"), argsV])
         return {b: b, v: objV}
     }
     // Ruby's Array#== / Hash#== compare structurally. js_pyeq/js_pyne are exactly that
@@ -951,8 +1190,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // points at them instead of the identity comparisons js_seq/js_sne.
     binExt["=="] = "js_pyeq"
     binExt["!="] = "js_pyne"
+    // Ruby's Integer#/ FLOORS (-7 / 2 == -4) and Integer#% takes the sign of the
+    // DIVISOR (-7 % 3 == 2). js_fdiv/js_fmod are exactly those two operations - they
+    // already back Python's // and %, which agree with Ruby here.
+    binExt["/"] = "js_fdiv"
+    binExt["%"] = "js_fmod"
+    binExt["/="] = "js_fdiv"
+    binExt["%="] = "js_fmod"
 
-    core.indexExt = "js_pyget"    // [i] works for arrays, strings and hashes
+    core.indexExt = "js_rget"    // [i] over arrays, strings and hashes; nil when absent
     foldCallMember = function(items) {
         if (items.length == 1) { return items[0] }
         var primary = items[0]
@@ -1049,6 +1295,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // The LLVM lowering keeps the interpreter's older convention of handing the block
     // to js_rmcall as the LAST positional argument, so unwrapArgs simply puts it back
     // at the end of the argument list.
+    // name: v and *arr / **h call arguments have no lowering yet; each becomes the
+    // notImplemented placeholder so the call itself still compiles.
+    function rubyPlainArgs(args) {
+        var out = []
+        for (var i = 0; i < args.length; i++) {
+            if (args[i].kwname != undefined) { out.push(notImplExpr("keyword argument (name:)", 0)) }
+            else if (args[i].splatT != undefined) { out.push(notImplExpr("splat argument (* / **)", 0)) }
+            else { out.push(args[i]) }
+        }
+        return out
+    }
     function splitBlock(args) {
         var plain = []
         var blk = null
@@ -1058,7 +1315,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return {args: plain, blk: blk}
     }
     function unwrapArgs(args) {
-        var sp = splitBlock(args)
+        var sp = splitBlock(rubyPlainArgs(args))
         if (sp.blk == null) { return sp.args }
         var out = []
         for (var i = 0; i < sp.args.length; i++) { out.push(sp.args[i]) }
@@ -1148,7 +1405,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // ----- assignment (locals via create-on-assign, @ivars, index/field paths) -----
     makeTargetRef = function(items) {
         var head = items[0]
-        return {ivar: head.ivar, name: head.var, path: items.slice(1)}
+        if (head.gvar != undefined) { notImpl("$global variable", 0) }
+        if (head.cvar != undefined) { notImpl("@@class variable", 0) }
+        return {ivar: head.ivar, name: head.var != undefined ? head.var : head.gvar,
+                path: items.slice(1)}
     }
     function emitHead(b, ref) {
         if (ref.ivar != undefined) {
@@ -1382,16 +1642,47 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
 
     // arr << x: push and yield the array (so a << b << c chains); js_arr_push
     // mutates the array in place, so the array handle is kept as the value.
+    // items = [v, op, v, op, v, ...]; only << (array append) is lowered.
     function makeShift(items) {
         if (items.length == 1) { return items[0] }
+        for (var k = 1; k < items.length; k += 2) {
+            if (items[k] == ">>") { return notImplExpr(">> (right shift)", 0) }
+        }
         return function(b) {
             var r = items[0](b)
             b = r.b
             var v = r.v
-            for (var i = 1; i < items.length; i++) {
+            for (var i = 2; i < items.length; i += 2) {
                 var rr = items[i](b)
                 b = rr.b
                 callExt(b, "js_arr_push", [v, rr.v])
+            }
+            return {b: b, v: v}
+        }
+    }
+    // TARGET << V: the append statement. Arrays are mutated in place, so the write
+    // back to the target is what the interpreter does for a (mutable) Ruby string;
+    // here it is the same array and the append alone is enough.
+    function makeAppendStmt(items) {
+        var ref = items[0]
+        var vals = items.slice(1)
+        return function(b) {
+            var rr = emitHead(b, ref)
+            b = rr.b
+            var v = rr.v
+            for (var q = 0; q < ref.path.length; q++) {
+                var st = ref.path[q]
+                if (st.key != undefined) { v = callExt(b, "js_get", [v, emitStr(b, st.key)]) }
+                else {
+                    var ri = st.idx(b)
+                    b = ri.b
+                    v = callExt(b, "js_pyget", [v, ri.v])
+                }
+            }
+            for (var i = 0; i < vals.length; i++) {
+                var rv = vals[i](b)
+                b = rv.b
+                callExt(b, "js_arr_push", [v, rv.v])
             }
             return {b: b, v: v}
         }
@@ -1518,8 +1809,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // begin / rescue / else / ensure. makeExcept pairs a rescue's `=> Id` name (if any)
     // with its body; items = [name, bodyThunk] or [bodyThunk] (rescue with no binding).
     function makeExcept(items) {
-        if (items.length > 1) { return {handler: items[1], hname: items[0]} }
-        return {handler: items[0], hname: undefined}
+        var hname = undefined
+        var body = null
+        var typed = false
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].etype != undefined) { typed = true }
+            else if (items[i].hname != undefined) { hname = items[i].hname }
+            else if (items[i].rbody != undefined) { body = items[i].rbody }
+        }
+        // The lowering has no runtime type test, so a typed clause still catches
+        // everything; that is the pre-existing behavior, made explicit.
+        return {handler: body, hname: hname, etypes: typed}
     }
     // The begin body and the first rescue compile to ctl closures handed to js_try (so a
     // return/break/next leaving them becomes a control signal that excDispatch re-issues);
@@ -1579,6 +1879,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var name = items[0]
         var args = unwrapArgs(items.slice(1))
         return function(b) {
+            if (selfMethod(curClsName, name)) {
+                var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+                var eam = emitArgs(b, args)
+                b = eam.b
+                return {b: b, v: callExt(b, "js_rmcall", [selfV, emitStr(b, name), eam.v])}
+            }
             var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
             var ea = emitArgs(b, args)
             b = ea.b
@@ -1623,16 +1929,157 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return idx
     }
     function makeFun(items) {
-        var name = items[0]
+        var name = ""
         var params = []
         var body = null
-        for (var i = 1; i < items.length; i++) {
-            if (items[i].body != undefined) { body = items[i].body }
-            else { params.push(items[i].param) }
+        var singleton = false
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] == undefined) { continue }
+            if (items[i].selfrecv === true) { singleton = true }
+            else if (typeof items[i] == "string") { name = items[i] }
+            else if (items[i].body != undefined) { body = items[i].body }
+            else if (items[i].param != undefined || items[i].splat === true || items[i].kwrest === true) {
+                // Only the plain positional parameters are lowered; the fancy forms
+                // still contribute their NAME, so the body stays compilable.
+                if (items[i].defT != undefined) { notImpl("default parameter value", 0) }
+                else if (items[i].splat === true) { notImpl("splat parameter (*args)", 0) }
+                else if (items[i].kwrest === true) { notImpl("double-splat parameter (**kw)", 0) }
+                else if (items[i].kw === true) { notImpl("keyword parameter (name:)", 0) }
+                params.push(items[i].param != null && items[i].param != undefined
+                            ? items[i].param : "$rest")
+            }
         }
-        return {name: name, params: params, body: body != null ? body : makeBody([])}
+        if (singleton) { notImpl("singleton method (def self.m / def obj.m)", 0) }
+        return {name: name, params: params, singleton: singleton,
+                body: body != null ? body : makeBody([])}
     }
     function makeMethodInfo(fn) { return fn }
+
+    // ----- The rules mirrored from ruby-interpreter.abnf -----
+    // The two grammars share one rule section, so every tag the interpreter grew has
+    // to exist here too. What the handle runtime can express is lowered; the rest is
+    // notImplemented, which keeps the clean file:line report (and -warn-unsupported)
+    // instead of a crash.
+    //
+    // The numeric tower needs BOXED floats to keep 7 / 2 == 3 apart from 7.0 / 2 ==
+    // 3.5, and the handle runtime has one number type, so the three boxed literal
+    // kinds stay unsupported. mkFlo/mkRat/mkCpx therefore hand makeConst a marker
+    // that the override below turns into the notImplemented placeholder.
+    function mkFlo(x) { return {__unsup: "float literal"} }
+    function mkRat(n, d) { return {__unsup: "rational literal (3r)"} }
+    function mkCpx(re, im) { return {__unsup: "imaginary literal (2i)"} }
+    // A Symbol is its OWN type, not a string: `:hello == "hello"` is false and :size
+    // and "size" are different Hash keys. The runtime models it as jsSym (abnf/jsrt.go,
+    // built by the js_sym extern), which renders as the bare name but compares only
+    // against another Symbol - the same split the interpreter's {__sym: true, s} gives.
+    // mkSym therefore hands makeConst a marker that the override below lowers.
+    function mkSym(name) { return {__rsym: name} }
+    function makeSymOf(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_sym", [r.v])}
+        }
+    }
+    var rubyBaseConst = makeConst
+    makeConst = function(v) {
+        if (v !== null && v !== undefined && typeof v == "object" && v.__unsup != undefined) {
+            return notImplExpr(v.__unsup, 0)
+        }
+        if (v !== null && v !== undefined && typeof v == "object" && v.__rsym != undefined) {
+            var nm = v.__rsym
+            return function(b) { return {b: b, v: callExt(b, "js_sym", [emitStr(b, nm)])} }
+        }
+        return rubyBaseConst(v)
+    }
+    // "a" 'd' is one string: adjacent literal pieces concatenate.
+    function makeAdjacent(items) {
+        if (items.length == 1) { return items[0] }
+        return function(b) {
+            var r = items[0](b)
+            b = r.b
+            var v = r.v
+            for (var i = 1; i < items.length; i++) {
+                var ri = items[i](b)
+                b = ri.b
+                v = callExt(b, "js_jadd", [v, ri.v])
+            }
+            return {b: b, v: v}
+        }
+    }
+    function charLitVal(s) {
+        var body = s.slice(1)
+        if (body.charCodeAt(0) == 92) { return unescapeJs(body) }
+        return body
+    }
+    function pctRawOf(items) {
+        for (var i = 0; i < items.length; i++) { if (items[i].raw != undefined) { return items[i].raw } }
+        return ""
+    }
+    function pctWords(str, asSym) { return {__unsup: "percent word list (%w / %i)"} }
+    function makeWordsThunk(t, asSym) { return notImplExpr("percent word list (%W / %I)", 0) }
+    function makeBitNot(t) { return notImplExpr("~ (bitwise not)", 0) }
+    function makePow(items) {
+        if (items.length == 1) { return items[0] }
+        return notImplExpr("** (exponentiation)", 0)
+    }
+    function makeGvarRef(name) { return notImplExpr("$global variable", 0) }
+    function makeCvarRef(name) { return notImplExpr("@@class variable", 0) }
+    function makeDefined(items) { return notImplExpr("defined?", 0) }
+    // super / super(args). The runtime's js_supercall takes the class to START the
+    // lookup at, so the emitter hands it the __super of the class whose body is being
+    // compiled - which is why makeClassStmt publishes the class name, the method name
+    // and the method's parameter names while it emits each method. A BARE super passes
+    // the parameters the method received; super(...) passes exactly its own list.
+    var curClsName = ""
+    var curMethName = ""
+    var curMethParams = []
+    function makeSuper(items) {
+        var explicit = false
+        var argTs = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].explicit === true) { explicit = true }
+            else { argTs.push(items[i]) }
+        }
+        return function(b) {
+            if (curClsName == "" || classSupers["$" + curClsName] == undefined) {
+                return notImplExpr("super outside of a subclass", 0)(b)
+            }
+            var clsName = curClsName
+            var methName = curMethName
+            var ownParams = curMethParams
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
+            var supV = callExt(b, "js_get", [clsV, emitStr(b, "__super")])
+            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+            var argsV = callExt(b, "js_arr_new", [])
+            if (explicit) {
+                var ua = unwrapArgs(argTs)
+                for (var j = 0; j < ua.length; j++) {
+                    var r = ua[j](b)
+                    b = r.b
+                    callExt(b, "js_arr_push", [argsV, r.v])
+                }
+            } else {
+                for (var k = 0; k < ownParams.length; k++) {
+                    callExt(b, "js_arr_push", [argsV,
+                        callExt(b, "js_scope_get", [curScopeV, emitStr(b, ownParams[k])])])
+                }
+            }
+            return {b: b, v: callExt(b, "js_supercall", [supV, selfV, emitStr(b, methName), argsV])}
+        }
+    }
+    function makeLambda(items) { return notImplExpr("lambda literal (->)", 0) }
+    function makeRetry() { return notImplExpr("retry", 0) }
+    function makeRescueMod(items) {
+        if (items.length == 1) { return items[0] }
+        return notImplExpr("rescue modifier (EXPR rescue FALLBACK)", 0)
+    }
+    // A def body carrying its own rescue/else/ensure clauses (no `begin`).
+    function makeGuardedBody(items) {
+        var only = true
+        for (var i = 0; i < items.length; i++) { if (items[i].trybody == undefined) { only = false } }
+        if (only) { return items[0].trybody }
+        return makeTry(items, 0)
+    }
     // Ruby has no bare method references: an identifier that is not a local variable is
     // a parenthesis-less call of the method of that name. Only a ZERO parameter method
     // is auto-called (a bare name for a method taking arguments is an error in Ruby, and
@@ -1642,12 +2089,42 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var rubyMethods = {}
     makeVarRef = function(name) {
         return function(b) {
+            // Inside a method body a bare name that is a method of the SAME class (or
+            // of one above it) is a call on the implicit self - `def intro; speak; end'.
+            if (selfMethod(curClsName, name)) {
+                var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+                return {b: b, v: callExt(b, "js_rmcall", [selfV, emitStr(b, name), callExt(b, "js_arr_new", [])])}
+            }
             var v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
             if (rubyMethods["$" + name] === true) {
                 v = callExt(b, "js_call", [v, hUndef, callExt(b, "js_arr_new", [])])
             }
             return {b: b, v: v}
         }
+    }
+    // The class registry: filled by makeClassStmt while the tags run, consulted while
+    // the thunks EMIT, so every class of the file is known by then.
+    var classMethods = {}
+    var classSupers = {}
+    // A parameter of the method being emitted is a LOCAL and wins over a method of the
+    // same name - which is exactly what `def initialize(name); @name = name; end' needs
+    // next to an `attr_reader :name'.
+    function selfMethod(clsName, name) {
+        for (var p = 0; p < curMethParams.length; p++) { if (curMethParams[p] == name) { return false } }
+        return classHasMethod(clsName, name)
+    }
+    function classHasMethod(clsName, name) {
+        var c = clsName
+        var hops = 0
+        while (c != undefined && c != "" && hops < 64) {
+            hops = hops + 1
+            var ms = classMethods["$" + c]
+            if (ms != undefined) {
+                for (var i = 0; i < ms.length; i++) { if (ms[i] == name) { return true } }
+            }
+            c = classSupers["$" + c]
+        }
+        return false
     }
     function makeDefStmt(fn) {
         if (fn.params.length == 0) { rubyMethods["$" + fn.name] = true }
@@ -1688,8 +2165,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var name = items[0]
         var methods = []
         var hasInit = false
+        var superName = ""
         for (var i = 1; i < items.length; i++) {
-            if (items[i].method != undefined) {
+            if (items[i].supername != undefined) { superName = items[i].supername }
+            else if (items[i].sblock != undefined) { notImpl("singleton class (class << self)", 0) }
+            else if (items[i].alias != undefined) { notImpl("alias", 0) }
+            else if (items[i].cstmt != undefined) { notImpl("statement in a class body", 0) }
+            else if (items[i].method != undefined) {
                 methods.push(items[i].method)
                 if (items[i].method.name == "initialize") { hasInit = true }
             } else if (items[i].attr != undefined) {
@@ -1700,17 +2182,38 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
             }
         }
+        var mnames = []
+        for (var mi = 0; mi < methods.length; mi++) { mnames.push(methods[mi].name) }
+        classMethods["$" + name] = mnames
+        if (superName != "") { classSupers["$" + name] = superName }
         return function(b) {
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            // class D < Base: the descriptor's __super is what the runtime's member
+            // lookup, `instanceof' and js_supercall all walk.
+            if (superName != "") {
+                callExt(b, "js_set", [clsV, emitStr(b, "__super"),
+                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])])
+            }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
+            var savedCls = curClsName
+            var savedMeth = curMethName
+            var savedParams = curMethParams
+            curClsName = name
             for (var k = 0; k < methods.length; k++) {
+                curMethName = methods[k].name
+                curMethParams = methods[k].params
                 var idx = emitFunc(methods[k].params, methods[k].body, true)
                 callExt(b, "js_set", [clsV, emitStr(b, methods[k].name),
                                       callExt(b, "js_closure", [handle(idx), curScopeV])])
             }
-            if (!hasInit) {
+            curClsName = savedCls
+            curMethName = savedMeth
+            curMethParams = savedParams
+            // A subclass with no initialize of its own INHERITS one, so the empty
+            // default is only for a root class.
+            if (!hasInit && superName == "") {
                 var emptyBody = function(bb) { return {b: bb, v: hNull} }
                 var iidx = emitFunc([], emptyBody, true)
                 callExt(b, "js_set", [clsV, emitStr(b, "initialize"),
@@ -1722,16 +2225,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
 
     // module M ... end: not implemented (no namespacing). Emit the body items in
     // sequence in the current scope so any defs / classes / calls stay visible.
-    function makeModule(items, pos) {
-        notImpl("module", pos)
-        return function(b) {
-            for (var i = 0; i < items.length; i++) {
-                var r = items[i](b)
-                b = r.b
-            }
-            return {b: b, v: hNull}
-        }
-    }
+    // module M ... end: not lowered (the handle runtime has no namespaces). The body
+    // items still built, so the report names the module and not its contents.
+    function makeModuleStmt(items) { return notImplExpr("module", 0) }
+    function makeScopedConst(text) { return notImplExpr("scoped constant (::)", 0) }
 
     // ----- Project-file imports (require / require_relative) -----
     // A handful of stdlib names whose require is a no-op (the runtime provides them or

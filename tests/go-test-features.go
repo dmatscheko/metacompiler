@@ -247,23 +247,27 @@ func main() {
 	raw := `a\nb`
 	check("str-raw", len(raw) == 4)
 
+	// range over a string yields (byte offset, rune) - NOT (index, one-char
+	// string). This block used to assert the latter, and len("héllo") == 5,
+	// which is not Go: the range variable is an int32 and len counts BYTES, so
+	// the é makes it 6. Verified against the real toolchain before fixing.
 	rebuilt := ""
 	isum := 0
 	for j, ch := range "abc" {
-		rebuilt += ch
+		rebuilt += string(ch)
 		isum += j
 	}
 	check("str-range", rebuilt == "abc" && isum == 3)
 	third := ""
 	for j, ch := range "abcd" {
 		if j == 2 {
-			third = ch
+			third = string(ch)
 		}
 	}
 	check("str-range-nth", third == "c")
 	hits := 0
 	for _, ch := range "banana" {
-		if ch == "a" {
+		if ch == 'a' {
 			hits++
 		}
 	}
@@ -272,12 +276,12 @@ func main() {
 	acc := ""
 	for _, ch := range "héllo" {
 		uni++
-		acc += ch
+		acc += string(ch)
 	}
-	check("str-unicode", uni == 5 && acc == "héllo" && len("héllo") == 5)
+	check("str-unicode", uni == 5 && acc == "héllo" && len("héllo") == 6)
 	rev := ""
 	for _, ch := range "abc" {
-		rev = ch + rev
+		rev = string(ch) + rev
 	}
 	check("str-build-reverse", rev == "cba")
 
@@ -505,8 +509,11 @@ func main() {
 	nd := Node{5, nil}
 	check("ptr-struct-param", headVal(&nd) == 5)
 
-	// ----- type assertion is the identity -----
-	av := 7
+	// ----- type assertion needs an interface -----
+	// This used to be 'av := 7' plus 'av.(int)', described as "the identity".
+	// Go rejects that outright: a type assertion is only legal on an interface
+	// value, and go vet says so. The assertion is genuine now.
+	var av interface{} = 7
 	check("type-assert", av.(int) == 7 && av.(int)+3 == 10)
 
 	// ----- combined pipeline -----

@@ -908,6 +908,8 @@ func (rt *jsrt) toString(v interface{}) string {
 	switch t := v.(type) {
 	case jsChar: // Kotlin's Char renders as its glyph, not as its code.
 		return string(rune(t.code))
+	case jsSym: // Ruby's Symbol renders as its bare name.
+		return t.s
 	case jsUndefT:
 		return "undefined"
 	case jsNullT:
@@ -951,6 +953,8 @@ func (rt *jsrt) toGoNatural(v interface{}) interface{} {
 	switch t := v.(type) {
 	case jsChar: // print/println show the glyph.
 		return string(rune(t.code))
+	case jsSym: // print/println show the symbol's name.
+		return t.s
 	case jsUndefT, jsNullT:
 		return nil
 	case float64:
@@ -1164,6 +1168,8 @@ func (rt *jsrt) typeOf(v interface{}) string {
 	switch v.(type) {
 	case jsChar:
 		return "char"
+	case jsSym:
+		return "symbol"
 	case jsUndefT:
 		return "undefined"
 	case jsNullT:
@@ -1907,7 +1913,7 @@ func (rt *jsrt) reindex(keys *jsArray) {
 // scan (a Go map would either panic on it or use the wrong equality).
 func dictKeyable(v interface{}) bool {
 	switch v.(type) {
-	case string, float64, bool, jsUndefT, jsNullT:
+	case string, float64, bool, jsUndefT, jsNullT, jsSym:
 		return true
 	}
 	return false
@@ -2073,6 +2079,19 @@ type jsBigInt struct {
 // Go, Python and the rest: their behaviour is untouched.
 type jsChar struct {
 	code int32
+}
+
+// jsSym is Ruby's Symbol: it RENDERS as its name (in an interpolation, in puts, in
+// string concatenation) but is NOT a String, so `:hello == "hello"` is false and
+// `{size: 4}["size"]` is nil - :size and "size" are different Hash keys. That pair of
+// requirements is exactly why it cannot simply be the name string, and it mirrors the
+// boxed {__sym: true, s: name} of ruby-interpreter.abnf.
+//
+// It is a comparable value struct, so two symbols of the same name are equal through
+// identityEq (and hash to the same Go map key in a dict index) without any interning.
+// Only the Ruby compiler grammar ever creates one, via the js_sym extern below.
+type jsSym struct {
+	s string
 }
 
 // charCode unboxes a Char to its code and leaves every other value alone, so the
@@ -2306,6 +2325,22 @@ func rubyTruthy(v interface{}) bool {
 // js_mcall.
 func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) interface{} {
 	switch o := target.(type) {
+	case jsSym:
+		switch name {
+		case "to_s", "id2name", "name":
+			return o.s
+		case "to_sym":
+			return o
+		case "length", "size":
+			return float64(rt.strLen(o.s))
+		case "inspect":
+			return ":" + o.s
+		case "upcase":
+			return jsSym{s: strings.ToUpper(o.s)}
+		case "downcase":
+			return jsSym{s: strings.ToLower(o.s)}
+		}
+		rt.fail("unknown Symbol method: %s", name)
 	case string:
 		switch name {
 		case "length", "size":
@@ -2340,6 +2375,29 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				return o
 			}
 			rt.fail("unknown Hash method: %s", name)
+		}
+		// Ruby's type predicates. is_a?/kind_of? walk the __super chain of the
+		// instance's class; instance_of? compares the exact class.
+		switch name {
+		case "class":
+			if c, ok := o.props["__class"]; ok {
+				return c
+			}
+		case "instance_of?":
+			return o.props["__class"] == argAt(args, 0)
+		case "is_a?", "kind_of?":
+			want := argAt(args, 0)
+			for cls := o.props["__class"]; cls != nil; {
+				if cls == want {
+					return true
+				}
+				clsObj, ok := cls.(*jsObject)
+				if !ok {
+					break
+				}
+				cls = clsObj.props["__super"]
+			}
+			return false
 		}
 		// A class instance or class object: the generic dispatch handles it.
 		return rt.memberCall(target, name, args)
@@ -3227,6 +3285,42 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(rt.rubyMethod(u(a[0]), rt.toString(u(a[1])), args.elems))
 		},
+		// Ruby indexing: a[i], h[k], s[i]. Identical to js_pyget except that a missing
+		// Hash key and an out-of-range index answer NIL instead of raising - which is
+		// Ruby's Hash#[] / Array#[] / String#[], and what ruby-interpreter.abnf does.
+		"js_rget": func(a []uint64) uint64 {
+			if keys, vals, ok := dictParts(u(a[0])); ok {
+				i := rt.dictFind(keys, u(a[1]))
+				if i < 0 {
+					return w(jsNull)
+				}
+				return w(vals.elems[i])
+			}
+			idx := int(rt.toNumber(u(a[1])))
+			switch o := u(a[0]).(type) {
+			case *jsArray:
+				if idx < 0 {
+					idx += len(o.elems)
+				}
+				if idx < 0 || idx >= len(o.elems) {
+					return w(jsNull)
+				}
+				return w(o.elems[idx])
+			case string:
+				n := rt.strLen(o)
+				if idx < 0 {
+					idx += n
+				}
+				if idx < 0 || idx >= n {
+					return w(jsNull)
+				}
+				return rt.wrapStr(rt.strAt(o, idx))
+			}
+			if isUndefOrNull(u(a[0])) {
+				rt.fail("indexing nil")
+			}
+			return w(rt.getMember(u(a[0]), u(a[1])))
+		},
 		"js_supercall": func(a []uint64) uint64 { // (super class, this, method name, args array)
 			args, ok := u(a[3]).(*jsArray)
 			if !ok {
@@ -3596,6 +3690,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return boolH(false)
 		},
+		// ----- Ruby's Symbol (see the jsSym type) -----
+		// :name from its name. Only ruby-to-llvm-ir.abnf emits this.
+		"js_sym": func(a []uint64) uint64 { return w(jsSym{s: rt.toString(u(a[0]))}) },
 		// ----- Kotlin's Char (see the jsChar type) -----
 		// A Char from its code. The Kotlin grammars' char literals compile to this.
 		"js_char": func(a []uint64) uint64 { return w(jsChar{code: int32(int64(a[0]))}) },
@@ -3821,6 +3918,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return w(arr.elems[i])
 			}
+			if str, ok := u(a[0]).(string); ok { // s[i] is the i-th BYTE of a Go string
+				i := int(rt.toNumber(u(a[1])))
+				if i < 0 || i >= len(str) {
+					rt.fail("index %d out of range", i)
+				}
+				return rt.wrapNum(float64(str[i]))
+			}
 			rt.fail("indexing a %s", rt.typeOf(u(a[0])))
 			return 0
 		},
@@ -3868,6 +3972,263 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 			}
 			return w(jsUndef)
+		},
+		// ----- Go builtins with no Python/JS equivalent (go-to-llvm-ir.abnf) -----
+		// len() on a Go string counts BYTES - len("héllo") is 6, not 5 and not
+		// the UTF-16 count; on a slice or map it is the element / entry count.
+		"js_golen": func(a []uint64) uint64 {
+			switch o := u(a[0]).(type) {
+			case string:
+				return rt.wrapNum(float64(len(o)))
+			case *jsArray:
+				return rt.wrapNum(float64(len(o.elems)))
+			case jsUndefT, jsNullT: // a nil slice / map has length 0
+				return rt.wrapNum(0)
+			}
+			if keys, _, ok := dictParts(u(a[0])); ok {
+				return rt.wrapNum(float64(len(keys.elems)))
+			}
+			rt.fail("len() of a %s", rt.typeOf(u(a[0])))
+			return 0
+		},
+		// `for i, ch := range s` walks a Go string by RUNE: i is the rune's BYTE
+		// offset and ch its code point (an int32), NOT a one-character substring.
+		// Normalizing the subject into a keys/vals dict lets the single emitted
+		// range loop keep reading it through js_range_len/key/val. Anything else
+		// (int bound, slice, map) passes through unchanged.
+		"js_gorange": func(a []uint64) uint64 {
+			s, isStr := u(a[0]).(string)
+			if !isStr {
+				return a[0]
+			}
+			keys := &jsArray{}
+			vals := &jsArray{}
+			for i, r := range s {
+				keys.elems = append(keys.elems, float64(i))
+				vals.elems = append(vals.elems, float64(r))
+			}
+			return w(&jsObject{props: map[string]interface{}{
+				"__dict": true, "keys": keys, "vals": vals,
+			}})
+		},
+		// One arm of a Go type switch: does v have dynamic type `want`? The value
+		// model has a single numeric type, so an integral number is an int and a
+		// fractional one a float64; a map, a slice and a struct answer their own
+		// spelling, and any / interface{} matches every non-nil value.
+		"js_gotypeis": func(a []uint64) uint64 {
+			want := rt.toString(u(a[1]))
+			v := u(a[0])
+			got := "any"
+			switch t := v.(type) {
+			case jsUndefT, jsNullT:
+				got = "nil"
+			case bool:
+				got = "bool"
+			case string:
+				got = "string"
+			case float64:
+				if t == math.Trunc(t) {
+					got = "int"
+				} else {
+					got = "float64"
+				}
+			case *jsArray:
+				got = "slice"
+			case *jsObject:
+				if _, _, isDict := dictParts(v); isDict {
+					got = "map"
+				} else if cls, has := t.props["__class"]; has {
+					if co, ok := cls.(*jsObject); ok {
+						if nm, ok2 := co.props["__name"].(string); ok2 {
+							got = nm
+						}
+					}
+				}
+			}
+			if want == "any" || want == "interface{}" {
+				return boolH(got != "nil")
+			}
+			return boolH(got == want)
+		},
+		// The variadic Go builtins, taking the callee's whole argument array: append
+		// starts a new slice from a nil one (append(m[k], v) where m[k] is missing),
+		// and min/max/clear are the Go 1.21 builtins.
+		"js_goappend": func(a []uint64) uint64 {
+			args, ok := u(a[0]).(*jsArray)
+			if !ok || len(args.elems) == 0 {
+				rt.fail("append() needs a slice")
+			}
+			arr, isArr := args.elems[0].(*jsArray)
+			if !isArr {
+				arr = &jsArray{} // a nil slice: append starts a new one
+			}
+			for _, v := range args.elems[1:] {
+				arr.dropIdx()
+				arr.elems = append(arr.elems, v)
+			}
+			return w(arr)
+		},
+		"js_gominmax": func(a []uint64) uint64 {
+			args, ok := u(a[0]).(*jsArray)
+			if !ok || len(args.elems) == 0 {
+				rt.fail("min()/max() needs an argument")
+			}
+			wantMax := rt.truthy(u(a[1]))
+			best := args.elems[0]
+			for _, v := range args.elems[1:] {
+				less := false
+				if bs, ok1 := best.(string); ok1 {
+					if vs, ok2 := v.(string); ok2 {
+						less = vs < bs
+					}
+				} else {
+					less = rt.toNumber(v) < rt.toNumber(best)
+				}
+				if less != wantMax {
+					best = v
+				}
+			}
+			return w(best)
+		},
+		// clear(m) empties a map; clear(s) zeroes a slice's elements in place.
+		"js_goclear": func(a []uint64) uint64 {
+			args, isArgs := u(a[0]).(*jsArray)
+			if !isArgs || len(args.elems) == 0 {
+				rt.fail("clear() needs an argument")
+			}
+			x := args.elems[0]
+			if keys, vals, ok := dictParts(x); ok {
+				keys.dropIdx()
+				keys.elems = nil
+				vals.elems = nil
+				return 0
+			}
+			if arr, ok := x.(*jsArray); ok {
+				arr.dropIdx()
+				for i := range arr.elems {
+					arr.elems[i] = float64(0)
+				}
+			}
+			return 0
+		},
+		// A variadic parameter: the arguments from index i on, as a slice.
+		"js_gorest": func(a []uint64) uint64 {
+			args, ok := u(a[0]).(*jsArray)
+			if !ok {
+				rt.fail("js_gorest needs the argument array")
+			}
+			from := int(a[1])
+			out := &jsArray{}
+			if from < len(args.elems) {
+				out.elems = append(out.elems, args.elems[from:]...)
+			}
+			return w(out)
+		},
+		// f(xs...): flatten the LAST element of the argument array in place, so the
+		// callee sees the slice's elements as separate arguments.
+		"js_gospread": func(a []uint64) uint64 {
+			args, ok := u(a[0]).(*jsArray)
+			if !ok || len(args.elems) == 0 {
+				return 0
+			}
+			last := args.elems[len(args.elems)-1]
+			args.dropIdx()
+			args.elems = args.elems[:len(args.elems)-1]
+			if arr, isArr := last.(*jsArray); isArr {
+				args.elems = append(args.elems, arr.elems...)
+			} else if _, isNil := last.(jsNullT); !isNil {
+				if _, isU := last.(jsUndefT); !isU {
+					args.elems = append(args.elems, last)
+				}
+			}
+			return 0
+		},
+		// A Go named-type conversion T(v). One numeric type carries every integer
+		// width, so the sized forms truncate and mask; string(r) is the rune
+		// spelling and string([]byte{...}) joins the code points.
+		// s[lo:hi] / s[lo:hi:max]. On a Go STRING the bounds are BYTE offsets and the
+		// result is the decoded byte range; on a slice the elements are COPIED (the
+		// backing array is not shared yet - see tests/go-test-full.go section 07).
+		// An absent bound arrives as undefined.
+		"js_goslice": func(a []uint64) uint64 {
+			bound := func(h uint64, dflt int) int {
+				v := u(h)
+				if _, isU := v.(jsUndefT); isU {
+					return dflt
+				}
+				return int(rt.toNumber(v))
+			}
+			if str, isStr := u(a[0]).(string); isStr {
+				lo := bound(a[1], 0)
+				hi := bound(a[2], len(str))
+				if lo < 0 || hi > len(str) || lo > hi {
+					rt.fail("slice bounds [%d:%d] out of range", lo, hi)
+				}
+				return w(str[lo:hi])
+			}
+			arr, isArr := u(a[0]).(*jsArray)
+			if !isArr {
+				rt.fail("slicing a %s", rt.typeOf(u(a[0])))
+			}
+			lo := bound(a[1], 0)
+			hi := bound(a[2], len(arr.elems))
+			if lo < 0 || hi > len(arr.elems) || lo > hi {
+				rt.fail("slice bounds [%d:%d] out of range", lo, hi)
+			}
+			out := &jsArray{}
+			out.elems = append(out.elems, arr.elems[lo:hi]...)
+			return w(out)
+		},
+		"js_goconv": func(a []uint64) uint64 {
+			to := rt.toString(u(a[0]))
+			v := u(a[1])
+			switch to {
+			case "string":
+				switch t := v.(type) {
+				case float64:
+					return w(string(rune(int64(t))))
+				case *jsArray:
+					out := ""
+					for _, e := range t.elems {
+						out += string(rune(int64(rt.toNumber(e))))
+					}
+					return w(out)
+				}
+				return w(rt.toString(v))
+			case "[]byte", "[]rune":
+				// Both spellings decode to CODE POINTS, exactly like the interpreter's
+				// goConvert: the value model has one array type, so a later string(x)
+				// cannot tell bytes from runes apart. Identical for ASCII, which is
+				// what the byte form is used on.
+				out := &jsArray{}
+				for _, r := range rt.toString(v) {
+					out.elems = append(out.elems, float64(r))
+				}
+				return w(out)
+			case "bool":
+				return boolH(rt.truthy(v))
+			case "float32", "float64":
+				return rt.wrapNum(rt.toNumber(v))
+			}
+			n := math.Trunc(rt.toNumber(v))
+			switch to {
+			case "byte", "uint8":
+				return rt.wrapNum(float64(int64(n) & 255))
+			case "uint16":
+				return rt.wrapNum(float64(int64(n) & 65535))
+			case "uint32":
+				return rt.wrapNum(float64(int64(n) & 4294967295))
+			case "int8":
+				return rt.wrapNum(float64(int8(int64(n))))
+			case "int16":
+				return rt.wrapNum(float64(int16(int64(n))))
+			case "int32", "rune":
+				return rt.wrapNum(float64(int32(int64(n))))
+			}
+			if strings.HasPrefix(to, "int") || strings.HasPrefix(to, "uint") {
+				return rt.wrapNum(n)
+			}
+			return a[1] // a named struct / interface type: the value is unchanged
 		},
 		"js_rundefers": func(a []uint64) uint64 { // Runs collected [f, args] pairs LIFO (Go defer).
 			arr, ok := u(a[0]).(*jsArray)

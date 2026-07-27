@@ -33,7 +33,11 @@ hides behind an otherwise green run. Hoist the group into a named production.
 
 **`!Rule` is not supported — only `!"literal"`.** There is no negative lookahead
 on a rule reference anywhere in this tree. When you need one, write a `:script`
-guard instead.
+guard instead. The failure mode is unusually confusing: writing
+`Annotation = "@" !KwInterface Id …` does not report a grammar error, it makes
+the whole grammar unparseable, and the loader then dumps a parse tree of the
+GRAMMAR FILE itself — which looks nothing like the mistake. The working pattern
+is a small `:script` that checks the identifier and its boundary explicitly.
 
 **Whitespace is NOT skipped before a `:script` guard.** The dialect skips spaces
 in front of each *token*, so at the moment a guard runs, any newline or run of
@@ -102,6 +106,12 @@ these fail ONLY under `-frozen` — behind an otherwise green goja run.
   `function f(v) { v = v + "" }` fails with "variable 'v' has type number and
   cannot hold a string". Copy the parameter into a fresh `anytype` local before
   mutating it.
+- **No `string.split` / `array.join`, no `string.lastIndexOf`, and `indexOf`
+  IGNORES its from-index argument.** The last one is the nasty one: it does not
+  raise, it returns the same match every time, so a `while (i < s.length) { i =
+  s.indexOf("\n", i) + 1 }` line walker spins until the IR step cap — under
+  `-frozen` only. Write a small `for` scan instead. (All four found while adding
+  the Ruby heredoc lexer.)
 - **A `var` declared in a `for`-init is scoped to that loop.** A second
   `for (i = 0; …)` reusing the name dies with "assignment to undeclared
   variable". Declare it standalone first.
@@ -160,3 +170,65 @@ graph on the interpreter side.
 parses as the lambda `S -> 1` if a general expression alternative is tried
 first — the same ordered-choice trap as everywhere else, but easy to miss
 because both readings are syntactically valid.
+
+## `:script` productions
+
+**A guard that scans FORWARD for a token on "this line" must skip the leading
+whitespace itself — including newlines.** `SameLine`/`LineCont` treat a newline
+as significant because they ask "did a line break just happen"; a lookahead that
+asks "is there a `=>` ahead on this statement" starts at a position where the
+blank lines and comments separating it from the PREVIOUS statement are still
+ahead, so bailing on the first newline makes it answer "no" everywhere. Skip
+whitespace and `#` comments first, then start the real scan. (Ruby's
+`FatArrowAhead`; the symptom was that the rightward-assignment statement never
+matched, and the parse error pointed inside the expression instead.)
+
+**A `:script` returns a RULE, and a returned `newToken(text, …)` must match the
+input literally** — the text cannot be a rewritten or synthesized value. What a
+scanner CAN do is return a token longer than one lexeme: Ruby's heredoc lexer
+returns the marker, the body lines and the terminator line as one token and
+splits them apart again in the tag. Building that token from `c.peek` means
+decoding UTF-8 by hand, since a string of raw bytes is re-encoded on the way to
+Go and then no longer matches.
+
+**Returning `undefined` from a `:script` means "match empty and SUCCEED"**, not
+"fail". To make a script FAIL, return an impossible token — the convention in
+this tree is `abnf.newToken("\x01<reason>", 0)`. A long-string scanner that
+returned `undefined` on no-match made every expression match empty, which looks
+nothing like the actual mistake.
+
+**A `:script` sees the RAW input** — no whitespace is skipped before it — but
+the token it returns IS matched after whitespace skipping. So a scanner has to
+step over the prefix itself to find its literal, and then return a token
+covering only the literal, without that prefix.
+
+**Override a shared helper by ASSIGNMENT, not by declaration.** `makeSeq` and
+friends already exist in `languages/lib/interp-core.js`, so a grammar that wants
+its own must write `makeSeq = function (…) {…}`. Writing `function makeSeq(…)`
+instead is hoisted under goja but position-dependent in the frozen engine, so
+the two engines disagree about which definition is live. (See also the duplicate
+top-level function trap above, which `mec -verify` now catches.)
+
+## A recurring shape: object creation must SEED the member chain
+
+Three languages independently lost 5-35 points of corpus coverage to the same
+mistake, so check for it before theorising about a big `.` cluster.
+
+`new Foo().bar()`, `new C ().test ()`, `new Outer().new Inner()` — if the
+object-creation production is written as an ALTERNATIVE of the postfix or unary
+level, it takes no suffix chain, and every one of those parses fails. In Java's
+compiler this was a 744-file cluster that looked like "qualified names" and was
+nothing of the kind; moving `NewExpr` into the primary/seed position was worth
+six points on its own, and the identical fix moved C# 48.0% -> 54.1%.
+
+The working shape is: object creation is a SEED of the member chain (like an
+identifier or a parenthesized expression), not a form that sits above it. A
+qualified `new` (`outer.new Inner()`) then wants to be a SUFFIX of that chain
+rather than a form of its own — writing it as its own postfix form makes the
+primary parse twice per nesting level, which is a 2^depth blowup that OpenJDK
+ships a regression test for.
+
+Related ordering trap from the same work: keyword-shaped call forms —
+`typeof(T)`, `nameof(x)`, `sizeof(T)`, `default(T)` — look exactly like a bare
+call, so they must be tried BEFORE the general call seed. Otherwise
+`typeof(IShape)` parses as a call of a variable named `typeof`.

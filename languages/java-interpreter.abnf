@@ -40,17 +40,25 @@ references (static, bound, unbound and constructor) that become real values of t
 functional interface they are assigned to, the full operator set including the
 bitwise and shift operators with Java int semantics, and the compound assignments.
 
+UNQUALIFIED calls work - check(x), not just this.check(x) - and pick their
+receiver by Java's own rule: a method the enclosing class or an ancestor declares
+static is called on the class descriptor, every other one on the enclosing
+instance, and a static context has none, so the descriptor stands in there too.
+
 Widened surface (parsed so a whole file is accepted): generics are parsed and
 erased, call-site type arguments included; casts are identity except the primitive
-ones, which truncate or box; implements / throws / permits clauses are parsed.
--warn-unsupported downgrades what is left to a warning so call graphs, CFGs and
-traces still work on partly understood files.
+ones, which truncate or box; implements / throws / permits clauses, TYPE
+ANNOTATIONS in every position JLS 9.7.4 allows, qualified and generic supertypes,
+several declarators per field, array class literals and the stray semicolon after
+a type declaration are all parsed. -warn-unsupported downgrades what is left to a
+warning so call graphs, CFGs and traces still work on partly understood files.
 
 Not genuinely modelled: generic type CHECKING (erased), sealed-hierarchy and
 switch EXHAUSTIVENESS checking, method overloading by parameter type (constructors
 are picked by arity), the flow scoping of pattern variables (a binding outlives the
-test that introduced it), implicit field access (fields are reached via this.x or
-ClassName.x, the explicit style many code bases enforce), threads and reflection.
+test that introduced it), implicit FIELD access (a field is reached via this.x or
+ClassName.x, the explicit style many code bases enforce - only calls resolve
+unqualified), modules, threads and reflection.
 
 Fields live directly on the instance object, methods on the class descriptor.
 main(String[] args) of class Main is the entry point; its return is void, so self
@@ -69,7 +77,10 @@ checking programs end with System.exit(failures).") ;
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
-Program     = [ Package ] { Import } { UnsupType | ClassDecl | RecordDecl } ;
+// A stray ';' after a type declaration (`class F { };`) is legal and means
+// nothing, at the top level and inside a class body alike.
+Program     = [ Package ] { Import } { UnsupType | ClassDecl | RecordDecl | StraySemi } ;
+StraySemi   = ";" ;
 
 // An optional package header (parsed and ignored) then repeated imports. Each
 // import path is resolved against the runtime builtins (core.stdlibImports); one
@@ -77,26 +88,32 @@ Program     = [ Package ] { Import } { UnsupType | ClassDecl | RecordDecl } ;
 // (see resolveImport in interp-core.js). 'import static a.b.C.d' resolves the
 // dotted path too. QualName also accepts a trailing '.*' wildcard. Neither Package
 // nor Import leaves a value on the stack.
-Package     <~~ pop() ~~> = KwPackage QualName ";" ;
+// package-info.java carries its annotations on the package declaration.
+Package     <~~ pop() ~~> = LeadMods KwPackage QualName ";" ;
 Import      <~~ resolveImport(pop(), up.pos) ~~> = KwImport [ "static" KwEnd ] QualName ";" ;
 QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 
 ClassDecl   <~~ buildClass(takeAll()) ~~>
             = [ LeadMods ] KwClass Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ]
-              [ KwExtends Id <~~ push({ext: up.in}) ~~> [ SkipAngle ] ]
-              [ ImplementsSkip ] "{" { Member } "}" ;
+              [ KwExtends ExtRef ]
+              [ ImplementsSkip ] [ Permits ] "{" { Member } "}" ;
+// A supertype may be qualified and generic (`extends Outer.Super`, `extends
+// A<B>.C`). The type arguments are dropped and the dotted name is kept whole -
+// jResolveClass tries it, then falls back to the last segment.
+ExtRef      <~~ push({ext: jJoinDots(takeAll())}) ~~>
+            = Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] { "." Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] } ;
 
 // record Pair(int a, int b) { } -- generates fields, a constructor and accessors.
 RecordDecl  <~~ buildRecord(takeAll()) ~~>
-            = [ LeadMods ] KwRecord Id <~~ push(up.in) ~~> [ SkipAngle ] RParams
-              [ ImplementsSkip ] "{" { Member } "}" ;
+            = [ LeadMods ] KwRecord Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ] RParams
+              [ ImplementsSkip ] [ Permits ] "{" { Member } "}" ;
 RParams     <~~ push({rparams: takeAll()}) ~~>
             = "(" [ Type Id <~~ push(up.in) ~~> { "," Type Id <~~ push(up.in) ~~> } ] ")" ;
 
 // A member starting with '{' (or 'static {') can only be an initializer block, so
 // both come first and no other member alternative is disturbed.
 Member      = StaticInit | InstInit | NestedType | Ctor | AbstractMethod | Method
-            | CompactCtor | Field ;
+            | CompactCtor | Field | StraySemi ;
 // static { ... } runs once when the class is built; { ... } runs on every
 // construction, in TEXTUAL order with the field initializers around it.
 StaticInit  <~~ push({kind: "sinit", body: pop()}) ~~>
@@ -122,8 +139,12 @@ AbstractMethod <~~ push({kind: "amethod", name: pop()}) ~~>
 Method      <~~ push(makeMethod(takeAll())) ~~>
             = Mods [ SkipAngle ] Type Id <~~ push(up.in) ~~> ParamList [ Throws ] Block ;
 
-Field       <~~ push(makeField(takeAll())) ~~>
-            = Mods FType Id <~~ push(up.in) ~~> [ CDims ] [ "=" VarInit ] ";" ;
+// One `int a, b = 2, c;` declares several fields, which share their modifiers
+// and type but not their initializer - so each declarator becomes its own member.
+Field       <~~ pushFields(takeAll()) ~~>
+            = Mods FType FieldVar { "," FieldVar } ";" ;
+FieldVar    <~~ push(makeFieldVar(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ CDims ] [ "=" VarInit ] ;
 
 // Modifiers before a member: annotations (with or without arguments) are parsed and
 // ignored; ModWord keeps the modifier text so `static` is still detectable.
@@ -148,8 +169,11 @@ CDims       = "[" "]" { "[" "]" } ;
 // Types are parsed and (apart from field defaults) ignored. Generic arguments
 // (<...>), dotted names, extra array dimensions and the extra primitive keywords are
 // accepted and dropped. Semantics stay dynamic.
-Type        = ( PrimName KwEnd | "String" KwEnd | "void" KwEnd | "var" KwEnd
-              | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ) { "[" "]" } ;
+// A TYPE ANNOTATION may sit in front of the type, in front of any segment of a
+// qualified one, and in front of each array bracket pair (`@A String @A []`,
+// `Outer.@A Inner`) - JLS 9.7.4. They are dropped like every other annotation.
+Type        = { Annotation } ( PrimName KwEnd | "String" KwEnd | "void" KwEnd | "var" KwEnd
+              | Id [ SkipAngle ] { "." { Annotation } Id [ SkipAngle ] } ) { { Annotation } "[" "]" } ;
 PrimName    = "int" | "boolean" | "char" | "long" | "double" | "float" | "short" | "byte" ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
@@ -233,7 +257,7 @@ Default     <~~ push(makeDefault(takeAll())) ~~>
 
 // The enhanced for is tried first: its ':' fails fast for the classic form.
 ForEach     <~~ push(makeForEach(pop(), pop(), pop())) ~~>
-            = KwFor "(" Type Id <~~ push(up.in) ~~> ":" Expression ")" Statement ;
+            = KwFor "(" { Annotation | "final" KwEnd } Type Id <~~ push(up.in) ~~> [ CDims ] ":" Expression ")" Statement ;
 
 For         <~~ push(makeFor(takeAll())) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
@@ -307,7 +331,7 @@ ResRef      <~~ push(makeResRef(up.in)) ~~>
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
 CatchClause <~~ push(jCatch(takeAll())) ~~>
-            = KwCatch "(" [ "final" KwEnd ] CatchTypes Id <~~ push(up.in) ~~> ")" Block ;
+            = KwCatch "(" { Annotation | "final" KwEnd } CatchTypes Id <~~ push(up.in) ~~> ")" Block ;
 CatchTypes  <~~ push({ctypes: stripWs(up.in)}) ~~>
             = Type { "|" Type } ;
 FinallyClause <~~ push({finbody: pop()}) ~~>
@@ -430,22 +454,15 @@ Cast        = PrimCast | RefCast ;
 PrimCast    <~~ var pcInner = pop(); push(makeCast(pcInner, pop().ct)) ~~>
             = "(" CastPrim ")" UnaryExpr ;
 CastPrim    <~~ push({ct: stripWs(up.in)}) ~~>
-            = PrimName KwEnd { "[" "]" } ;
+            = { Annotation } PrimName KwEnd { { Annotation } "[" "]" } ;
 RefCast     <~~ push(makeCast(pop(), "")) ~~>
             = "(" RefType ")" UnaryNoPM ;
 UnaryNoPM   = Not | PostfixExpr ;
-RefType     = ( "String" KwEnd | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ) { "[" "]" } ;
+RefType     = { Annotation } ( "String" KwEnd | Id [ SkipAngle ] { "." { Annotation } Id [ SkipAngle ] } ) { { Annotation } "[" "]" } ;
 
 // NewExpr is a Primary, not an alternative here, so `new Foo().bar()` and
 // `new int[]{1, 2}[0]` take the ordinary suffix chain.
-PostfixExpr = IncDec | SuperCall | IfaceSuper | QualNew | CallMember ;
-// o.new Inner(args): creation qualified by an enclosing instance. It comes
-// before CallMember, which would otherwise stop at `o` and leave `.new` behind.
-QualNew     <~~ push(makeQualNew(takeAll())) ~~>
-            = OuterRef "." KwNew Id <~~ push({qname: up.in}) ~~> [ SkipAngle ]
-              "(" [ Expression { "," Expression } ] ")" ;
-OuterRef    <~~ push({qouter: pop()}) ~~>
-            = Primary ;
+PostfixExpr = IncDec | SuperCall | IfaceSuper | CallMember ;
 // Greet.super.hello() - the default method of a NAMED interface, which is how a
 // class that inherits two defaults picks one.
 IfaceSuper  <~~ push(makeIfaceSuper(takeAll())) ~~>
@@ -489,7 +506,16 @@ SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
 // A primary followed by method calls, field reads and indexing:
 // System.out.println(x), p.dist(), this.x, arr[i], Main.check(...).
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+            = Primary { QNewSfx | MethodSfx | FieldSfx | IndexSfx } ;
+// o.new Inner(args) - creation qualified by an enclosing instance. It is a
+// SUFFIX of the member chain, not a postfix form of its own: an alternative
+// beginning with a Primary would parse the qualifier once for itself and once
+// again for CallMember, so deeply nested calls would cost 2^depth (the OpenJDK
+// corpus has tests built to provoke exactly that). It precedes FieldSfx, which
+// would otherwise read `.new` as a field named `new`.
+QNewSfx     <~~ push(makeQNewSfx(takeAll())) ~~>
+            = "." KwNew Id <~~ push({qname: up.in}) ~~> [ SkipAngle ]
+              "(" [ Expression { "," Expression } ] ")" ;
 // An explicit call-site type argument (list.<String>of(...)) is parsed and
 // dropped like every other generic: types are erased in this model.
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
@@ -523,9 +549,25 @@ ArmValue    <~~ push({sval: pop()}) ~~>
 ArmStmts    <~~ push({sstmts: takeAll()}) ~~>
             = { Statement } ;
 
-Primary     = NewExpr | SwitchExpr | Lambda | MethodRef | "(" Expression ")" | TextBlock | JavaStr | CharLit
+Primary     = ArrClassLit | NewExpr | SwitchExpr | Lambda | MethodRef | "(" Expression ")" | TextBlock | JavaStr | CharLit
             | HexLit | BinLit | OctLit | FloatLit | UscoreInt | SuffInt | IntLit | True | False | Null
-            | OuterThis | VarRef ;
+            | OuterThis | BareCall | VarRef ;
+
+// An UNQUALIFIED method call - `check(x)` rather than `this.check(x)` or
+// `Main.check(x)`. Java's own rule picks the receiver: a method the enclosing
+// class (or an ancestor) declares static is called on the class descriptor,
+// every other one on the enclosing instance - and a static context has none, so
+// the descriptor stands in there too. Tried before VarRef, which would read the
+// name alone and leave the argument list behind.
+BareCall    <~~ push(makeBareCall(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
+
+// `int[].class` / `String[].class` - a class literal over an ARRAY type. The
+// plain `Foo.class` needs nothing (it reads as a field), but this one is no
+// member chain: `String[` starts an index that has no subscript. Class objects
+// are not modelled, so the value is null. It has to beat VarRef.
+ArrClassLit <~~ push(makeConst(null)) ~~>
+            = ( PrimName KwEnd | Id { "." Id } ) [ SkipAngle ] "[" "]" { "[" "]" } "." "class" KwEnd ;
 
 // Outer.this - the enclosing instance of an inner class. It has to beat VarRef,
 // which would read `Outer` as the class and then look for a field named `this`.
@@ -643,14 +685,34 @@ SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
 // Annotations (with or without arguments), modifier keywords, and the implements /
 // throws clauses are parsed and ignored. LeadMods drops everything (headers with no
 // static to track). ModWord (used by Mods) keeps the modifier text.
-Annotation  = "@" Id { "." Id } [ SkipParen ] ;
+// `@interface` opens an annotation TYPE, so it is never an annotation - without
+// the guard, LeadMods would eat it and the declaration behind it would not parse
+// (`@Retention(...) public @interface A {}` is the ordinary shape). NotIfaceKw is
+// a pure function of (source, position), like NotSwitchKw above.
+Annotation  = "@" NotIfaceKw Id { "." Id } [ SkipParen ] ;
+NotIfaceKw  = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var w = "interface"
+        var ok = true
+        for (var i = 0; i < w.length; i++) { if (c.peek(s + i) !== w.charCodeAt(i)) { ok = false } }
+        if (ok) {
+            var cc = c.peek(s + w.length)
+            if (!((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122))) {
+                return abnf.newToken("\x01annotation-type", 0)
+            }
+        }
+        return undefined
+    })()
+~~) ;
 ModKw       = ( "public" | "private" | "protected" | "static" | "final" | "abstract"
               | "synchronized" | "native" | "transient" | "volatile" | "strictfp"
               | "non-sealed" | "sealed" | "default" ) KwEnd ;
 LeadMods    = { Annotation | ModKw } ;
 ImplementsSkip = KwImplements ImplRef { "," ImplRef } ;
-ImplRef     <~~ push({impl: stripWs(up.in)}) ~~>
-            = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
+ImplRef     <~~ push({impl: jJoinDots(takeAll())}) ~~>
+            = Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] { "." Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] } ;
 Throws      = KwThrows Type { "," Type } ;
 CatchType   = Type { "|" Type } ;
 
@@ -661,20 +723,20 @@ UnsupType   = AnnotationDecl | Interface | EnumDecl ;
 // and `private` instance methods and `static` methods. `sealed ... permits` is
 // accepted and dropped - the hierarchy is not checked, only parsed.
 Permits     = "permits" KwEnd Type { "," Type } ;
-IfaceExt    <~~ push({iext: stripWs(up.in)}) ~~>
-            = Id [ SkipAngle ] ;
+IfaceExt    <~~ push({iext: jJoinDots(takeAll())}) ~~>
+            = Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] { "." Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] } ;
 // An annotation TYPE is pure metadata - nothing in this model reads it at run
 // time - so the declaration is parsed and dropped, like the annotations themselves.
-AnnotationDecl = { ModKw } "@" KwInterface Id SkipBlock ;
+AnnotationDecl = LeadMods "@" KwInterface Id SkipBlock ;
 Interface   <~~ buildInterface(takeAll()) ~~>
-            = LeadMods KwInterface Id <~~ push(up.in) ~~> [ SkipAngle ]
+            = LeadMods KwInterface Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ]
               [ KwExtends IfaceExt { "," IfaceExt } ] [ Permits ] "{" { Member } "}" ;
 // enum E { A(1), B { ... }; members }: a class whose constants are singleton
 // instances built once, in order. A constant with a body becomes an anonymous
 // SUBCLASS of the enum (so it can override a method), which is why the class
 // descriptor is built first and the constants are instantiated afterwards.
 EnumDecl    <~~ buildEnum(takeAll()) ~~>
-            = LeadMods KwEnum Id <~~ push(up.in) ~~> [ SkipAngle ] [ ImplementsSkip ]
+            = LeadMods KwEnum Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ] [ ImplementsSkip ]
               "{" [ EnumConst { "," EnumConst } ] [ "," ] [ ";" { Member } ] "}" ;
 EnumConst   <~~ push(makeEnumConst(takeAll())) ~~>
             = { Annotation } Id <~~ push(up.in) ~~> [ EnumArgs ] [ EnumBody ] ;
@@ -1816,18 +1878,23 @@ KwSync      = "synchronized" KwEnd ;
         var args = items.slice(1)
         return {ctorhead: true, which: which, args: args}
     }
-    function makeField(items) {
+    function makeFieldVar(items) {
+        return {fname: items[0], finit: items.length > 1 ? items[1] : null}
+    }
+    // Pushes one member per declarator; they share the modifiers and the type.
+    function pushFields(items) {
         var mods = items[0].mods
         var ty = items[1].ty
-        var name = items[2]
-        var init = items.length > 3 ? items[3] : null
         var isStatic = false
-        for (var i = 0; i < mods.length; i++) if (mods[i] == "static") isStatic = true
+        var i
+        for (i = 0; i < mods.length; i++) { if (mods[i] == "static") { isStatic = true } }
         var dflt = 0
         if (ty == "boolean") dflt = false
         if (ty != "int" && ty != "boolean") dflt = null
         if (ty.indexOf("[") >= 0) dflt = null
-        return {kind: "field", name: name, statik: isStatic, init: init, dflt: dflt}
+        for (i = 2; i < items.length; i++) {
+            push({kind: "field", name: items[i].fname, statik: isStatic, init: items[i].finit, dflt: dflt})
+        }
     }
 
     // Runs a method body with a fresh scope: params bound, this bound for instance methods.
@@ -1853,10 +1920,11 @@ KwSync      = "synchronized" KwEnd ;
                     sup = null
                 } else {
                     cls.__super = sup
+                    jClassSuperName["$" + name] = sup.__name
                 }
             }
             if (members[i].impl != undefined) {
-                var iv = globalScope[members[i].impl]
+                var iv = jResolveClass(members[i].impl)
                 if (iv != undefined && iv != null) {
                     if (cls.__ifaces == undefined) { cls.__ifaces = [] }
                     cls.__ifaces.push(iv)
@@ -1922,7 +1990,12 @@ KwSync      = "synchronized" KwEnd ;
             var m2 = members[i]
             if (m2.kind == "method") {
                 cls[m2.name] = m2.statik ? makeStaticClosure(m2) : makeInstanceClosure(m2)
+                jNoteKind(name, m2.name, m2.statik)
             }
+            if (m2.kind == "amethod") { jNoteKind(name, m2.name, false) }
+        }
+        if (recordParams != undefined) {
+            for (i = 0; i < recordParams.length; i++) { jNoteKind(name, recordParams[i], false) }
         }
         // Static fields and static initializer blocks, again in textual order.
         for (i = 0; i < statics.length; i++) {
@@ -2091,16 +2164,18 @@ KwSync      = "synchronized" KwEnd ;
         var i3 = 0
         for (i3 = 0; i3 < members.length; i3++) {
             var m = members[i3]
-            if (m.kind == "amethod") { cls.__abstract.push(m.name); continue }
+            if (m.kind == "amethod") { cls.__abstract.push(m.name); jNoteKind(name, m.name, false); continue }
             if (m.kind == "method") {
                 cls[m.name] = m.statik ? makeStaticClosure(m) : makeInstanceClosure(m)
+                jNoteKind(name, m.name, m.statik)
                 continue
             }
             // An interface field is implicitly public static final.
             if (m.kind == "field") { cls[m.name] = (m.init != null) ? m.init() : m.dflt }
             if (m.kind == "sinit") { invokeBody([], m.body, undefined, "this", []) }
         }
-        return cls
+        jExitClass(name, cls)
+        // No return value: see buildEnum on cyclic completion values.
     }
     // Walks a type and everything it inherits - superclasses first, then the
     // interfaces of each - for a member. Interface DEFAULT methods therefore lose
@@ -2173,6 +2248,7 @@ KwSync      = "synchronized" KwEnd ;
         cls.values = makeEnumValues(vals)
         cls.valueOf = makeEnumValueOf(name, vals)
         globalScope[name] = cls
+        jExitClass(name, cls)
         // Deliberately no return value: an enum class holds its own constants,
         // whose __class points back at it, so exporting it as the tag's
         // completion value would send a CYCLIC object graph across the bridge
@@ -2208,6 +2284,61 @@ KwSync      = "synchronized" KwEnd ;
         return dot > 0 && text.charAt(dot) == "." && text.substring(dot + 1) === v.__ename
     }
 
+    // ----- Unqualified calls -----
+    // Which methods each type declares, and under what name its supertype is
+    // registered. Filled by the class builders, read when a bare call RUNS - by
+    // then every declaration in the file has been walked, so the table is
+    // complete even for a method that appears later in its own class.
+    var jMethodKind = {}
+    var jClassSuperName = {}
+    function jNoteKind(cls, name, statik) {
+        jMethodKind["$" + cls + "#" + name] = statik ? "static" : "instance"
+    }
+    function jLookupKind(cls, name) {
+        var seen = {}
+        var c = cls
+        while (c != undefined && c != "" && seen["$" + c] != true) {
+            seen["$" + c] = true
+            var k = jMethodKind["$" + c + "#" + name]
+            if (k != undefined) { return k }
+            c = jClassSuperName["$" + c]
+        }
+        return null
+    }
+    // The enclosing instance, or null in a static context. `this` is simply not
+    // bound there (invokeBody only declares it for a real receiver), so the scope
+    // chain is probed rather than read - getVar would abort.
+    function jThisOrNull() {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], "this")) { return scopes[i]["this"] }
+        }
+        return null
+    }
+    function makeBareCall(items) {
+        var name = items[0]
+        var args = items.slice(1)
+        var cls = curClassName
+        return function() {
+            var argv = []
+            for (var i = 0; i < args.length; i++) { argv.push(args[i]()) }
+            var kind = jLookupKind(cls, name)
+            if (kind != "static") {
+                var self = jThisOrNull()
+                if (self != null && self != undefined) { return mcall(self, name, argv) }
+            }
+            if (cls != "" && cls != undefined) {
+                var c = jResolveClass(cls)
+                if (c != undefined && c != null) { return mcall(c, name, argv) }
+            }
+            // Not a method of the enclosing type at all: the only other reading
+            // is a callable value of that name in scope (a functional-interface
+            // variable, or a lambda parameter).
+            var fn = getVar(name)
+            if (typeof fn == "function") { return fn.apply(undefined, argv) }
+            return mcall(fn, name, argv)
+        }
+    }
+
     // curClassName is what super.m() resolves against. A nested class declaration
     // interrupts its enclosing one, so the name is a STACK - without that, the
     // outer class' later methods would search from the nested class' superclass.
@@ -2216,11 +2347,17 @@ KwSync      = "synchronized" KwEnd ;
         jClassStack.push(curClassName)
         curClassName = n
     }
-    function buildClass(items) {
-        var cls = buildClassFrom(items[0], items.slice(1), undefined)
+    // Leaves the class body: restores the enclosing name and, for a NESTED type,
+    // additionally registers it under its qualified name.
+    function jExitClass(name, cls) {
         var outer = jClassStack.pop()
         curClassName = outer
-        if (outer != "" && outer != undefined) { globalScope[outer + "." + items[0]] = cls }
+        if (outer != "" && outer != undefined && cls != undefined && cls != null) {
+            globalScope[outer + "." + name] = cls
+        }
+    }
+    function buildClass(items) {
+        jExitClass(items[0], buildClassFrom(items[0], items.slice(1), undefined))
     }
     // "Outer", "Nested" -> "Outer.Nested" (the type arguments are already gone).
     function jJoinDots(parts) { return parts.join(".") }
@@ -2255,23 +2392,47 @@ KwSync      = "synchronized" KwEnd ;
     }
     // o.new Inner(args) - a qualified creation: the new instance records o as
     // its enclosing instance, which is what Outer.this then finds.
-    function makeQualNew(items) {
-        var outerT = items[0].qouter
-        var cname = items[1].qname
-        var args = items.slice(2)
+    function makeQNewSfx(items) {
+        return {kind: "qnew", cname: items[0].qname, args: items.slice(1)}
+    }
+    function jNewInner(cname, outer, argv) {
+        var cls = jResolveClass(cname)
+        if (cls == undefined || cls == null || !cls.__isclass) fail("unknown class: " + cname)
+        var obj = {__class: cls, __outer: outer}
+        jCallCtor(cls, obj, argv)
+        return obj
+    }
+    // The shared foldCallMember knows the three ordinary suffixes; Java adds the
+    // qualified-creation one, so it installs its own fold over the same shape.
+    foldCallMember = function(items) {
+        if (items.length == 1) { return items[0] }
+        var primary = items[0]
+        var suffixes = items.slice(1)
         return function() {
-            var outer = outerT()
-            var cls = jResolveClass(cname)
-            if (cls == undefined || cls == null || !cls.__isclass) fail("unknown class: " + cname)
-            var obj = {__class: cls, __outer: outer}
-            var argv = []
-            for (var i = 0; i < args.length; i++) { argv.push(args[i]()) }
-            jCallCtor(cls, obj, argv)
-            return obj
+            var cur = anytype // A member chain hops between types: obj.name.length is object, string, number.
+            cur = primary()
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "mcall") {
+                    var argv = []
+                    for (var j = 0; j < s.args.length; j++) { argv.push(s.args[j]()) }
+                    cur = mcall(cur, s.name, argv)
+                } else if (s.kind == "field") {
+                    if (cur === undefined || cur === null) fail("field ." + s.name + " of " + core.nullWord)
+                    cur = core.getField(cur, s.name)
+                } else if (s.kind == "qnew") {
+                    var av = []
+                    for (var k = 0; k < s.args.length; k++) { av.push(s.args[k]()) }
+                    cur = jNewInner(s.cname, cur, av)
+                } else {
+                    cur = core.getIndex(cur, s.idx())
+                }
+            }
+            return cur
         }
     }
     function buildRecord(items) {
-        buildClassFrom(items[0], items.slice(2), items[1].rparams)
+        jExitClass(items[0], buildClassFrom(items[0], items.slice(2), items[1].rparams))
     }
 
     // Appends b to a copy of a (kept as a plain function to stay inside MetaJS).

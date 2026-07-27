@@ -20,23 +20,47 @@ implicit break ends every case), Go style if/else without parentheses (else if w
 continue, i++ and i-- as statements, assignment operators += -= *= /= %=, fmt.Println
 and fmt.Print, os.Exit, and string concatenation. int arithmetic is 32 bit, / truncates.
 
+Also genuinely implemented (added while widening toward the full language, and
+measured by tests/go-test-full.go): grouped declarations - several names sharing a
+type in parameters, results, struct fields, var and const specs -, named results
+with a bare return, variadic parameters and the s... spread, the full operator set
+(bitwise and or xor and-not, shifts, the matching compound assignments, unary
+complement), const blocks with iota and implicit repetition, every composite-literal
+form (slice, array with counted or indexed elements, map, struct - positional or
+keyed -, anonymous struct types, and untyped nested brace groups), make for maps and
+slices, new, the conversion builtins, cap/copy/clear/min/max/append with many values,
+call suffixes on any expression (func literals, elements, returned functions), slice
+expressions, if and switch with an init statement, fallthrough, labelled statements
+with labelled break and continue and goto, per-iteration loop variables (Go 1.22),
+defer on any callee including function literals, interface declarations (dispatch is
+dynamic, so satisfaction is structural by construction), type switches, the two-result
+type assertion, value versus pointer method receivers, method values, embedded structs
+with field promotion, and panic/recover with the defers of every unwound frame.
+
 Widened surface (parsed so a real Go file gets through; -warn-unsupported downgrades
 the abort to a warning and keeps the rest running, enough for call graphs/CFGs/traces):
-a single-result type assertion x.(T) is GENUINELY handled as the identity on the value
-(the target type is parsed and ignored), and channel/interface/chan types are parsed in
-type positions. Accepted but reported not implemented (no concurrency, channel, or
-interface model): interface type declarations, goroutines (go f()), channel make
-(make(chan T)), channel send (ch <- v) and receive (<-ch), select, and type switches
-(switch x.(type)). Where operands exist (the goroutine callee, the send/receive channel
-and value) they still evaluate under -warn-unsupported so their calls stay visible.
+channel and chan types are parsed in type positions. Accepted but reported not
+implemented (no concurrency or channel model): goroutines (go f()), channel send
+(ch <- v) and receive (<-ch), and select. Where operands exist (the goroutine callee,
+the send/receive channel and value) they still evaluate under -warn-unsupported so
+their calls stay visible.
+
+Go strings are BYTE strings here too: len and s[i] count UTF-8 bytes, a string slice
+s[lo:hi] is a byte range, ranging a string yields byte offsets and runes, and the
+literal escapes are Go's own (the byte-wise x and octal forms, and the eight digit U
+form).
 
 Deviations and limits: structs behave like references (as if every value were a *T),
-append mutates in place (write s = append(s, v) as usual), composite literals must not
-appear in if/for/switch headers, map iteration and printing follow the insertion order
-(real Go randomizes resp. sorts), 'var m map[K]V' is not a usable map (create maps with
-a literal or make), defer cannot take struct methods, there are no pointers,
-fallthrough, method values, generics, or the comma-ok type assertion, and s[i] on
-strings is not supported.
+append mutates in place (write s = append(s, v) as usual), a bare-name composite
+literal must not appear in an if/for/switch header (the bracketed forms may), map
+iteration and printing follow the insertion order (real Go randomizes resp. sorts),
+'var m map[K]V' is not a usable map (create maps with a literal or make). There is one
+numeric type, so a float and an int with the same value are indistinguishable and
+integer division decides; arrays are not copied on assignment and a slice expression
+copies instead of sharing a backing array; and there are
+no pointers to scalars and no complex numbers. Generics are ERASED: type parameter
+lists, constraints and instantiations (f[int], T[K, V]) are parsed and ignored, which
+behaves like the instantiated form in a dynamically typed value model.
 
 The entry point is func main(); self checking programs end with os.Exit(failures).") ;
 
@@ -53,7 +77,7 @@ The entry point is func main(); self checking programs end with os.Exit(failures
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
-Program     = PackageClause { Import } { TypeDecl | TypeGroup | ConstGroup | TopConst | FuncDecl | TopVar } ;
+Program     = PackageClause { Import } { TypeDecl | TypeGroup | TopConst | FuncDecl | TopVar } ;
 
 PackageClause = "package" KwEnd Id ;
 Import      = "import" KwEnd ( ImportStr | "(" { ImportStr } ")" ) ;
@@ -64,8 +88,21 @@ ImportStr   <~~ resolveImport(up.in.slice(1, up.in.length - 1), up.pos) ~~>
 // The name is pushed first; the body decides between a struct (built) and an
 // interface (accepted, then reported not implemented - no interface semantics).
 TypeDecl    <~~ buildTypeDecl(takeAll(), up.pos) ~~>
-            = "type" KwEnd Id <~~ push(up.in) ~~> ( StructBody | IfaceBody ) ;
-StructBody  = "struct" KwEnd "{" { Id <~~ push(up.in) ~~> Type [ ";" ] } "}" ;
+            = "type" KwEnd Id <~~ push(up.in) ~~> [ TypeParams ] ( StructBody | IfaceBody | DefinedType ) ;
+// type myInt int / type Celsius float64: a defined type over an existing one. The
+// value model has no distinct type for it, so the name becomes the CONVERSION to its
+// underlying type - which is exactly how a defined type is used in an expression.
+DefinedType <~~ push({under: firstType(up.in)}) ~~>
+            = Type ;
+// Struct fields: one or more names sharing a type (x, y int), an optional raw
+// string tag, and embedded fields (a bare type name, whose field name is the type).
+StructBody  = "struct" KwEnd "{" { FieldDecl } "}" ;
+FieldDecl   = NamedField | EmbedField ;
+NamedField  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } SameLine FType [ FieldTag ] [ ";" ] ;
+FType       <~~ push({fty: firstType(up.in)}) ~~> = Type ;
+// An embedded field's NAME is its type name (w.base09 as well as the promoted w.id).
+EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in); push({fty: ""}) ~~> [ FieldTag ] [ ";" ] ;
+FieldTag    = RawString <~~ pop() ~~> ;
 IfaceBody   <~~ push({iface: true}) ~~>
             = "interface" KwEnd SkipBlock ;
 
@@ -78,29 +115,95 @@ TypeGroup   <~~ notImpl("grouped type declaration", up.pos) ~~>
 // const Name [Type] = expr is GENUINELY bound like a var (its value is reused). A
 // grouped const block (const ( A = iota ... )) is skipped and reported not implemented
 // (iota, implicit repetition and bit-shift expressions are not modeled).
-ConstGroup  <~~ notImpl("grouped const declaration", up.pos) ~~>
-            = "const" KwEnd SkipGroup [ ";" ] ;
+// const ( A = iota; B; C ): every spec gets the running iota index, and a spec
+// without its own '=' repeats the previous spec's expression list.
+ConstGroup  <~~ push(makeConstGroup(takeAll())) ~~>
+            = "const" KwEnd "(" { ConstSpec } ")" [ ";" ] ;
+ConstSpec   <~~ push(makeConstSpec(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ SameLine VType ] [ "=" ExprList ] [ ";" ] ;
 ConstSingle <~~ push(makeVarDecl(takeAll())) ~~>
-            = "const" KwEnd Id <~~ push(up.in) ~~> [ VType ] [ "=" Expression ] [ ";" ] ;
+            = "const" KwEnd Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ VType ] [ "=" ExprList ] [ ";" ] ;
 
 // func name(params) rets { } and func (r Type) name(params) rets { }
 FuncDecl    <~~ buildFunc(takeAll()) ~~>
-            = "func" KwEnd [ Receiver ] Id <~~ push(up.in) ~~> ParamList [ RetTypes ] Block ;
+            = "func" KwEnd [ Receiver ] Id <~~ push(up.in) ~~> [ TypeParams ] ParamList [ RetTypes ] Block ;
+// Generics are ERASED: a type parameter list is parsed and ignored, the constraint with
+// it, and an instantiation (f[int], T[K, V]) is the identity on the value it indexes.
+// The value model is dynamically typed, so an erased generic behaves exactly like the
+// instantiated one - only compile-time type CHECKING is lost, which a syntax-driven
+// front end does not do anyway.
+TypeParams  = "[" TypeParamGrp { "," TypeParamGrp } "]" ;
+TypeParamGrp = Id { "," Id } Constraint ;
+Constraint  = ConstrTerm { "|" ConstrTerm } ;
+ConstrTerm  = [ "~" ] Type ;
+// A POINTER receiver (func (c *T) m()) sees the caller's struct; a VALUE receiver
+// (func (c T) m()) sees a copy, so mutations in the method do not reach the caller.
 Receiver    <~~ push({recv: takeAll()}) ~~>
-            = "(" Id <~~ push(up.in) ~~> [ "*" ] Id <~~ push(up.in) ~~> ")" ;
-ParamList   <~~ push({params: takeAll()}) ~~>
-            = "(" [ Id <~~ push(up.in) ~~> [ "..." ] Type { "," Id <~~ push(up.in) ~~> [ "..." ] Type } ] ")" ;
-RetTypes    = Type | "(" Type { "," Type } ")" ;
+            = "(" Id <~~ push(up.in) ~~> [ "*" <~~ push({ptr: true}) ~~> ] Id <~~ push(up.in) ~~> [ TypeArgs ] ")" ;
+// Parameters: several names may share a type (a, b int), a name may be omitted
+// entirely (func(int) - only in type positions), and the last one may be variadic
+// (vals ...int). A named group is tried first; on an unnamed list it fails and the
+// bare-type form takes over.
+ParamList   <~~ push(makeParams(takeAll())) ~~>
+            = "(" [ ParamItem { "," ParamItem } [ "," ] ] ")" ;
+ParamItem   = NamedParam | AnonParam ;
+NamedParam  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ Variadic ] Type ;
+AnonParam   = [ Variadic ] Type ;
+Variadic    <~~ push({vararg: true}) ~~> = "..." ;
+// Results: a single type, or a parenthesized list that may name its results
+// (func f(a int) (q, r int)). Named results become zero-valued locals that a bare
+// 'return' yields. NamedAhead decides which shape it is BEFORE any name is pushed,
+// so the unnamed list never leaks half a name list onto the tag stack.
+RetTypes    = NamedRets | Type | "(" [ Type { "," Type } ] ")" ;
+NamedRets   <~~ push({rets: takeAll()}) ~~>
+            = NamedAhead "(" NamedRetGrp { "," NamedRetGrp } ")" ;
+NamedRetGrp = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } Type ;
+// A parenthesized list is NAMED exactly when some element at depth 1 is two words
+// separated by whitespace ('q, r int' has 'r int'; '(int, string)' has no such pair).
+NamedAhead = :script(~~
+    (function () {
+        var i = 0
+        var depth = 0
+        var cc = 0
+        var prevWord = false
+        var sawSpace = false
+        while (i < 8192) {
+            cc = c.peek(i)
+            if (cc < 0) { break }
+            var isWord = (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { sawSpace = true; i++; continue }
+            if (cc === 40) { depth++; prevWord = false; sawSpace = false; i++; continue }
+            if (cc === 41) {
+                depth--
+                if (depth === 0) { break }
+                prevWord = false
+                sawSpace = false
+                i++
+                continue
+            }
+            if (depth === 1 && prevWord && sawSpace && (isWord || cc === 91 || cc === 42)) { return undefined }
+            prevWord = isWord
+            sawSpace = false
+            i++
+        }
+        return abnf.newToken("\x01unnamed-results", 0)
+    })()
+~~) ;
 
 // A package level var, registered right away. Grouped (var ( a int; b = 2 )) runs each
 // spec in order. A single const at top level is bound right away too.
 TopVar      <~~ var t = pop(); t() ~~>
             = VarGroup | VarDecl ;
 TopConst    <~~ var t = pop(); t() ~~>
-            = ConstSingle ;
+            = ConstGroup | ConstSingle ;
 
 Type        = "*" Type | "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT
-            | ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) ;
+            | StructTypeT | NamedType ;
+// A named type: a predeclared name, a qualified one (time.Duration) or a generic
+// instantiation (Stack[int]).
+NamedType   = ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) [ "." Id ] [ TypeArgs ] ;
+TypeArgs    = "[" Type { "," Type } "]" ;
+StructTypeT = "struct" KwEnd SkipBlock ;
 // A pointer type (*T) is transparent (structs already behave like references) and a
 // fixed size array ([N]T / [...]T) declares like a slice; the size is parsed, ignored.
 ArrayTypeT  = "[" ( "..." | Expression <~~ pop() ~~> ) "]" Type ;
@@ -113,11 +216,12 @@ ChanTypeT   = ( "chan" KwEnd [ "<-" ] | "<-" "chan" KwEnd ) Type ;
 IfaceTypeT  = "interface" KwEnd SkipBlock ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | If | For | Switch | Return | Break | Continue | Defer | GoStmt | Select | Fallthrough
-            | ConstSingle | VarGroup | VarDecl | SimpleStmt | Empty ;
+Statement   = Block | If | For | Switch | Return | Break | Continue | Goto | Defer | GoStmt | Select | Fallthrough
+            | ConstGroup | ConstSingle | VarGroup | VarDecl | Labeled | SimpleStmt | Empty ;
 
 // fallthrough: accepted, reported not implemented (our switch has no fallthrough model).
-Fallthrough <~~ push(notImplStmt("fallthrough", up.pos)) ~~>
+// fallthrough: a signal the enclosing switch body catches (see runSwitch).
+Fallthrough <~~ push(makeFallthrough()) ~~>
             = "fallthrough" KwEnd [ ";" ] ;
 
 // go f(args) / go pkg.Fn(args): a goroutine. True concurrency is not modeled, so
@@ -131,15 +235,23 @@ Select      <~~ push(notImplStmt("select statement", up.pos)) ~~>
 // defer f(args) / defer pkg.fn(args): the function value and the arguments are
 // evaluated now, the call runs when the surrounding function returns (LIFO).
 Defer       <~~ push(makeDefer(takeAll())) ~~>
-            = "defer" KwEnd Id <~~ push(up.in) ~~> [ "." Id <~~ push({mname: up.in}) ~~> ]
-              "(" [ Expression { "," Expression } ] ")" [ ";" ] ;
+            = "defer" KwEnd DeferTarget "(" [ Expression { "," Expression } [ Spread ] ] ")" [ ";" ] ;
+// Whatever the call is made ON: a name, a package member, a method value or a
+// function literal. It is evaluated at defer time, together with the arguments.
+// It must NOT swallow the call itself, so the chain carries only the non-call
+// suffixes and the primary is restricted to the forms a callee can take.
+DeferTarget <~~ push({dfn: pop()}) ~~>
+            = DeferChain ;
+DeferChain  <~~ push(foldCallMember(takeAll())) ~~>
+            = DeferPrim { FieldSfx | IndexSfx } ;
+DeferPrim   = "(" Expression ")" | FuncLit | VarRef ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
 
 // var x int = 5 / var s string -- the zero value depends on the type.
 VarDecl     <~~ push(makeVarDecl(takeAll())) ~~>
-            = "var" KwEnd Id <~~ push(up.in) ~~> [ VType ] [ "=" Expression ] [ ";" ] ;
+            = "var" KwEnd Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ VType ] [ "=" ExprList ] [ ";" ] ;
 VType       <~~ push({ty: up.in}) ~~>
             = Type ;
 
@@ -148,12 +260,12 @@ VType       <~~ push({ty: up.in}) ~~>
 VarGroup    <~~ push(makeVarGroup(takeAll())) ~~>
             = "var" KwEnd "(" { VarSpec } ")" [ ";" ] ;
 VarSpec     <~~ push(makeVarDecl(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ VType ] [ "=" Expression ] [ ";" ] ;
+            = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ SameLine VType ] [ "=" ExprList ] [ ";" ] ;
 
 // Short declarations, assignments, ++/-- and expression statements. The cores do
 // not eat the separator themselves: for headers reuse them between the semicolons.
 // MapOk (v, ok := m[k]) must come first: as a ShortDecl it would miss the flag.
-SimpleStmt  = ( MapOk | ShortDecl | IncDecStmt | Assign | ChanSend | ExprOnly ) [ ";" ] ;
+SimpleStmt  = ( AssertOk | MapOk | ShortDecl | IncDecStmt | Assign | ChanSend | ExprOnly ) [ ";" ] ;
 
 // ch <- v: a channel send. The left side is a postfix expression (so the leading
 // '<' of a relational compare is never mistaken for the '<-' send token: a compare
@@ -161,6 +273,17 @@ SimpleStmt  = ( MapOk | ShortDecl | IncDecStmt | Assign | ChanSend | ExprOnly ) 
 // operands still evaluate under -warn-unsupported so their calls stay visible.
 ChanSend    <~~ push(makeChanSend(takeAll(), up.pos)) ~~>
             = PostfixExpr "<-" Expression ;
+
+// The two-result type assertion: v, ok := x.(T) yields the zero value and false
+// instead of panicking. Its base must NOT take the .(T) suffix itself, so the chain
+// here is the ordinary one minus TypeAssertSfx.
+AssertOk    <~~ push(makeAssertOk(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "," Id <~~ push(up.in) ~~> ( ":=" | "=" )
+              AssertBase "." "(" AssertType ")" ;
+AssertBase  <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { MethodSfx | FieldSfx | SliceSfx | IndexSfx | CallSfx } ;
+AssertType  <~~ push({at: firstType(up.in)}) ~~>
+            = Type ;
 
 // The comma ok idiom: the value (or the zero value) plus the key presence flag.
 MapOk       <~~ push(makeMapOk(takeAll())) ~~>
@@ -176,10 +299,14 @@ IncDecStmt  <~~ push(makeIncDec(takeAll())) ~~>
 
 // a = e / a, b = b, a / p.x = e / s[i] = e / a += e
 Assign      <~~ push(makeAssign(takeAll())) ~~>
-            = Target { "," Target } ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push({op: up.in}) ~~> ExprList ;
+            = Target { "," Target } AssignOp <~~ push({op: up.in}) ~~> ExprList ;
+// Longest first: '&^=' before '&=', and the bare '=' last of all.
+AssignOp    = "&^=" | "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "=" ;
 
+// A leading '*' (a pointer store, *p = v) is transparent: our structs are already
+// references and a plain variable's pointer is modelled by the variable itself.
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
+            = { "*" } Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
 
@@ -189,24 +316,35 @@ Empty       <~~ push(function() {}) ~~>
             = ";" ;
 
 // Go style headers without parentheses. Composite literals are gated off inside.
-If          <~~ push(makeIf(takeAll())) ~~>
-            = "if" KwEnd CondOn Expression CondOff Block [ "else" KwEnd ( If | Block ) ] ;
+// 'if init; cond { }': the init statement is scoped to the whole if/else chain.
+If          <~~ push(makeIfG(takeAll())) ~~>
+            = "if" KwEnd CondOn [ InitAhead FInit ";" ] Expression CondOff Block [ "else" KwEnd ( If | Block ) ] ;
 
 // ForCond is tried before ForClassic: a classic header would leave the
 // composite literal gate pushed when it fails at its first semicolon.
-For         = ForRange | ForCond | ForClassic ;
-// for i, v := range s / for _, v := range s / for i := range s
+// ForEver ('for {') comes first: the other forms would push the composite-literal
+// gate and then fail on the '{', leaking the marker. Each form claims the pending
+// label (see Labeled) at the 'for' keyword, BEFORE its body is built, so a nested
+// loop cannot steal the outer loop's label.
+For         = ForEver | ForRange | ForCond | ForClassic ;
+ForEver     <~~ push(makeForEver(takeAll())) ~~>
+            = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~> Block ;
+// for i, v := range s / for _, v := range s / for i := range s / for range s
 ForRange    <~~ push(makeForRange(takeAll())) ~~>
-            = "for" KwEnd Id <~~ push(up.in) ~~> [ "," Id <~~ push(up.in) ~~> ] ":="
+            = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~>
+              [ Id <~~ push({rv: up.in}) ~~> [ "," Id <~~ push({rv: up.in}) ~~> ] ( ":=" | "=" ) ]
               "range" KwEnd CondOn Expression CondOff Block ;
 ForClassic  <~~ push(makeForClassic(takeAll())) ~~>
-            = "for" KwEnd CondOn [ FInit ] ";" [ FCond ] ";" [ FPost ] CondOff Block ;
-FInit       <~~ push({k:"init", t:pop()}) ~~> = SimpleStmt2 ;
+            = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~>
+              CondOn [ FInit ] ";" [ FCond ] ";" [ FPost ] CondOff Block ;
+// The names a ':=' init declares are recorded so a classic for can give each
+// iteration its own copy of them (Go 1.22 loop-variable scoping).
+FInit       <~~ push({k:"init", t:pop(), names: takeDeclNames()}) ~~> = SimpleStmt2 ;
 FCond       <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
 FPost       <~~ push({k:"post", t:pop()}) ~~> = SimpleStmt2 ;
-SimpleStmt2 = ShortDecl | IncDecStmt | Assign ;
-ForCond     <~~ push(makeWhile(pop(), pop())) ~~>
-            = "for" KwEnd CondOn Expression CondOff Block ;
+SimpleStmt2 = AssertOk | MapOk | ShortDecl | IncDecStmt | Assign | ExprOnly ;
+ForCond     <~~ push(makeWhileG(takeAll())) ~~>
+            = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~> CondOn Expression CondOff Block ;
 
 // Go switch: no fallthrough (an implicit break ends every case), several values per
 // case, with a subject (compared ==) or without one (the first true condition wins).
@@ -215,16 +353,26 @@ Switch      = TypeSwitch | ValueSwitch ;
 // semantics we do not model: the subject (an identifier chain) is accepted and the
 // body skipped, then it is reported not implemented. Tried before the value switch so
 // its subject's '.(type)' is not mistaken for a value plus a type assertion.
-TypeSwitch  <~~ push(notImplStmt("type switch", up.pos)) ~~>
-            = "switch" KwEnd [ Id ":=" ] TSSubject "." "(" "type" KwEnd ")" SkipBlock ;
-TSSubject   = Id { "." Id } ;
+// switch v := x.(type) { case int: ... }: the subject is evaluated once, every case
+// lists TYPES (compared with the runtime type test), and the bound name takes the
+// subject's value inside the matching case body.
+TypeSwitch  <~~ push(makeTypeSwitch(takeAll())) ~~>
+            = "switch" KwEnd TypeSwAhead [ InitAhead FInit ";" ] [ Id <~~ push({tsname: up.in}) ~~> ":=" ]
+              CondOn AssertBase CondOff "." "(" "type" KwEnd ")"
+              "{" { TypeCase | Statement } "}" ;
+TypeCase    <~~ push(makeTypeCase(takeAll())) ~~>
+            = ( "case" KwEnd CaseType { "," CaseType }
+              | "default" KwEnd ) ":" ;
+CaseType    <~~ push({ct: up.in}) ~~>
+            = Type ;
 // The subjectless body is tried before the subject so a bare 'switch {' never enters
 // SwitchSubj: that would push the composite-literal gate marker (CondOn) and then fail
 // its Expression on the '{', leaking the marker (pushes are not rolled back) and
 // blocking every later composite literal.
 ValueSwitch <~~ push(makeSwitch(takeAll())) ~~>
-            = "switch" KwEnd ( "{" { CaseLabel | Statement } "}"
-                             | SwitchSubj "{" { CaseLabel | Statement } "}" ) ;
+            = "switch" KwEnd [ InitAhead FInit ";" ]
+              ( "{" { CaseLabel | Statement } "}"
+              | SwitchSubj "{" { CaseLabel | Statement } "}" ) ;
 SwitchSubj  <~~ push({subj: pop()}) ~~>
             = CondOn Expression CondOff ;
 // The body is parsed flat: the labels must be tried before Statement (a bare 'case'
@@ -237,8 +385,46 @@ CaseLabel   <~~ push(makeCaseLabel(takeAll())) ~~>
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = "return" KwEnd [ Expression { "," Expression } ] [ ";" ] ;
 
-Break       <~~ push(makeBreak()) ~~>    = "break" KwEnd [ ";" ] ;
-Continue    <~~ push(makeContinue()) ~~> = "continue" KwEnd [ ";" ] ;
+// break / continue carry an optional label; the labelled forms travel up as a
+// signal until the loop that carries that label catches them.
+Break       <~~ push(makeBreakG(takeAll())) ~~>
+            = "break" KwEnd [ Id <~~ push(up.in) ~~> ] [ ";" ] ;
+Continue    <~~ push(makeContinueG(takeAll())) ~~>
+            = "continue" KwEnd [ Id <~~ push(up.in) ~~> ] [ ";" ] ;
+Goto        <~~ push(makeGoto(takeAll())) ~~>
+            = "goto" KwEnd Id <~~ push(up.in) ~~> [ ";" ] ;
+
+// 'name:' in front of a statement. LabelAhead decides before anything is pushed,
+// so a short declaration ('x := 1', whose ':' is the head of ':=') never leaks a
+// half-parsed label onto the tag stack.
+// pendingLabel is set BEFORE the statement is built, so the loop builder inside
+// can claim it (that is what makes 'continue outer' reach the right loop).
+Labeled     <~~ var lt = pop(); push({lbl: pop(), t: lt}) ~~>
+            = LabelAhead Id <~~ pendingLabel = up.in; push(up.in) ~~> ":" Statement ;
+LabelAhead = :script(~~
+    (function () {
+        var i = 0
+        var cc = 0
+        // Whitespace is not skipped before a guard, so step over it first.
+        while (i < 4096) {
+            cc = c.peek(i)
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i++; continue }
+            break
+        }
+        cc = c.peek(i)
+        if (!((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95)) {
+            return abnf.newToken("\x01not-a-label", 0)
+        }
+        while (i < 4096) {
+            cc = c.peek(i)
+            if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95) { i++; continue }
+            break
+        }
+        return (c.peek(i) === 58 && c.peek(i + 1) !== 61)
+            ? undefined
+            : abnf.newToken("\x01not-a-label", 0)
+    })()
+~~) ;
 
 // Every expression production pushes exactly one thunk: function() -> value.
 Expression  = OrExpr ;
@@ -255,13 +441,30 @@ EqExpr      <~~ push(foldBinary(takeAll())) ~~>
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = AddExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr } ;
 
+// Go's two binary levels below the comparisons: '+ - | ^' bind loosest, then
+// '* / % << >> & &^'. The single-character '&' and '|' must not swallow the first
+// half of '&&' / '||', which bind even looser - NotAmp/NotBar reject that.
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+            = MulExpr { AddOp <~~ push(up.in) ~~> MulExpr } ;
+AddOp       = "+" | "-" | "^" | BarOp ;
+BarOp       = "|" NotBar ;
 
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+            = UnaryExpr { MulOp <~~ push(up.in) ~~> UnaryExpr } ;
+MulOp       = "*" | "/" | "%" | "<<" | ">>" | "&^" | AmpOp ;
+AmpOp       = "&" NotAmp ;
+NotAmp = :script(~~
+    (c.peek(0) === 38) ? abnf.newToken("\x01logical-and", 0) : undefined
+~~) ;
+NotBar = :script(~~
+    (c.peek(0) === 124) ? abnf.newToken("\x01logical-or", 0) : undefined
+~~) ;
 
-UnaryExpr   = Recv | Neg | Not | AddrOf | Deref | PostfixExpr ;
+UnaryExpr   = Recv | Neg | Not | Compl | Plus | AddrOf | Deref | PostfixExpr ;
+// ^x: the bitwise complement (Go spells it '^', not '~'). Unary '+' is the identity.
+Compl       <~~ push(makeCompl(pop())) ~~>
+            = "^" UnaryExpr ;
+Plus        = "+" UnaryExpr ;
 // <-ch: a channel receive as a value. Accepted, reported not implemented; the
 // operand still evaluates under -warn-unsupported. Tried before Neg so '<-' wins
 // over '<' (a compare's '<' is followed by whitespace or a different next token).
@@ -281,16 +484,23 @@ Deref       = "*" UnaryExpr ;
 // A slice expression is accepted and reported not implemented; its base and every
 // bound still evaluate under -warn-unsupported so nested calls stay visible. Tried
 // before the plain postfix chain so the ':' inside the brackets is reached.
-PostfixExpr = SliceExpr | CallMember ;
-SliceExpr   <~~ push(makeSliceNI(takeAll(), up.pos)) ~~>
-            = CallMember "[" [ Expression ] ":" [ Expression ] [ ":" Expression ] "]" ;
+// A suffix chain over any primary: .m(args), .field, [i], [lo:hi:max], (args) and
+// .(T). The plain call suffix is what makes func literals, slice elements and
+// returned functions callable (func(){...}(), fs[0](), adder(3)(10)).
+PostfixExpr = CallMember ;
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | IndexSfx | TypeAssertSfx } ;
+            = Primary { MethodSfx | FieldSfx | SliceSfx | IndexSfx | CallSfx | TypeAssertSfx } ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } [ "..." ] ] ")" ;
+            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } [ Spread ] ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
+            = "[" [ Expression <~~ push({lo: pop()}) ~~> ] ":" [ Expression <~~ push({hi: pop()}) ~~> ]
+              [ ":" Expression <~~ push({mx: pop()}) ~~> ] "]" ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
+CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
+            = "(" [ Expression { "," Expression } [ Spread ] ] ")" ;
+Spread      <~~ push({spread: true}) ~~> = "..." ;
 // x.(T): a type assertion, GENUINELY handled as the identity on the value (a
 // successful assertion yields the same underlying value; the target type is parsed
 // and ignored). It pushes no suffix, so foldCallMember passes the value through.
@@ -298,8 +508,62 @@ IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
 TypeAssertSfx = "." "(" Type ")" ;
 
 Primary     = "(" Expression ")" | FloatLit | HexLit | OctLit | BinLit | DecULit | DqString | RawString | RuneLit
-            | IntLit | True | False | Nil | FuncLit | SliceLit
-            | MapLit | MakeMap | MakeChan | StructLit | CompLitNI | Call | VarRef ;
+            | IntLit | True | False | Nil | FuncLit | MakeCall | NewCall | ConvExpr
+            | CompositeLit | Call | Iota | VarRef ;
+
+// ----- Composite literals -----
+// One production covers every form: []T{...}, [N]T{...}, [...]T{...}, map[K]V{...},
+// Name{...} (positional or keyed by field) and struct{...}{...}. An element may be a
+// bare brace group ([][]int{{1}, {2, 3}}), which is built against the element type.
+// Gated off inside if/for/switch headers, where '{' opens the body instead.
+CompositeLit <~~ push(makeCompositeLit(takeAll())) ~~>
+            = CompType CompBody ;
+// Only the BARE-NAME form is ambiguous with an if/for/switch body, so only it is
+// gated ('for _, v := range []any{...} {' is legal Go and must keep working).
+CompType    = CompSlice | CompArray | CompMapT | CompStructT | GatedNamed ;
+GatedNamed  = StructGate CompNamed ;
+CompSlice   <~~ push({ckind: "slice", cet: pop().cet}) ~~>
+            = "[" "]" CompElemT ;
+CompArray   <~~ push(makeArrDesc(takeAll())) ~~>
+            = "[" ( "..." | Expression ) "]" CompElemT ;
+CompMapT    <~~ push({ckind: "map", czero: pop().mzero}) ~~>
+            = MapTypeZ ;
+CompNamed   <~~ push({ckind: "struct", cname: typeBaseName(up.in)}) ~~>
+            = NamedType ;
+CompElemT   <~~ push({cet: firstType(up.in)}) ~~>
+            = Type ;
+// An anonymous struct type carries its own field list.
+CompStructT <~~ push({ckind: "anon", cfields: takeAll()}) ~~>
+            = "struct" KwEnd "{" { AnonField } "}" ;
+AnonField   = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } Type [ FieldTag ] [ ";" ] ;
+
+CompBody    <~~ push({celems: takeAll()}) ~~>
+            = "{" [ CompElem { "," CompElem } [ "," ] ] "}" ;
+CompElem    <~~ push(makeCompElem(takeAll())) ~~>
+            = [ KeyAhead CompKey ] CompValue ;
+CompKey     <~~ push({ckey: pop(), ktext: firstWord(up.in)}) ~~>
+            = Expression ":" ;
+CompValue   = CompNested | Expression ;
+CompNested  <~~ push({cnested: pop()}) ~~>
+            = CompBody ;
+
+// make(T) / make(T, n) / make(T, n, cap): a map, a slice or a channel.
+MakeCall    <~~ push(makeMakeCall(takeAll())) ~~>
+            = "make" KwEnd "(" MakeType [ "," Expression ] [ "," Expression ] ")" ;
+MakeType    = MakeMapT | MakeSliceT | MakeChanT ;
+MakeMapT    <~~ push({mkind: "map", czero: pop().mzero}) ~~> = MapTypeZ ;
+MakeSliceT  <~~ push({mkind: "slice", cet: pop().cet}) ~~> = "[" "]" CompElemT ;
+MakeChanT   <~~ push({mkind: "chan"}) ~~> = ChanTypeT ;
+
+// A conversion whose target type is not a bare identifier: []byte(s), []rune(s),
+// map[K]V(x). The identifier forms (int(x), string(b), ...) go through Call.
+ConvExpr    <~~ push(makeConv(takeAll())) ~~>
+            = ConvType "(" Expression ")" ;
+ConvType    <~~ push({conv: firstType(up.in)}) ~~>
+            = "[" "]" Type ;
+
+// iota: the index of the current spec inside a const group (0 outside one).
+Iota        <~~ push(makeIota()) ~~> = "iota" KwEnd ;
 
 // nil is the null value (structs, slices, maps and pointers share one). Tried before
 // VarRef so it is not read as an undefined identifier.
@@ -315,7 +579,8 @@ FloatLit    <~~ push(makeConst(parseFloat(up.in))) ~~>
               | ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ) :whitespace(Whitespace) ;
 HexLit      <~~ push(makeConst(parseRadix(up.in))) ~~>
             = "0" ( "x" | "X" ) :whitespace() HexDigits :whitespace(Whitespace) ;
-HexDigits   = HexDigit { HexDigit | "_" } ;
+// Go allows the digit separator right after the base prefix, too: 0x_FF_f.
+HexDigits   = { "_" } HexDigit { HexDigit | "_" } ;
 HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
 OctLit      <~~ push(makeConst(parseRadix(up.in))) ~~>
             = "0" ( "o" | "O" ) :whitespace() "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
@@ -328,49 +593,62 @@ DecULit     <~~ push(makeConst(parseRadix(up.in))) ~~>
 RawString   = "`" :whitespace() { "\x00"..."\x5f" | "\x61"..."\U0010ffff" } <~~ push(makeConst(up.in)) ~~> "`" :whitespace(Whitespace) ;
 RuneLit     = "'" :whitespace() { StrEsc | SqPlain } <~~ push(makeConst(runeVal(up.in))) ~~> "'" :whitespace(Whitespace) ;
 
-// A composite literal the positional forms above do not cover: keyed (Point{X: 1}),
-// empty (Config{}), nested (\[\]P{{1, 2}}) or with an unmodeled element type. Accepted
-// with a balanced-skipped body and reported not implemented. Gated off inside if/for
-// headers exactly like the positional struct literal.
-CompLitNI   <~~ push(notImplExpr("composite literal", up.pos)) ~~>
-            = StructGate CompHead SkipBlock ;
-CompHead    = [ "[" [ "..." | Expression <~~ pop() ~~> ] "]" ] [ "*" ]
-              ( "map" KwEnd "[" Type "]" [ "*" ] CompName | CompName ) ;
-CompName    = "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id { "." Id } ;
-
 // func(x int) int { ... }: a function literal; a real closure over its scope.
-FuncLit     <~~ push(makeFuncLit(pop(), pop())) ~~>
+FuncLit     <~~ push(makeFuncLit(takeAll())) ~~>
             = "func" KwEnd ParamList [ RetTypes ] Block ;
 
-// []int{1, 2, 3}
-SliceLit    <~~ push(makeSliceLit(takeAll())) ~~>
-            = "[" "]" Type "{" [ Expression { "," Expression } ] "}" ;
-
-// map[string]int{"a": 1} and make(map[string]int). The value type decides the
-// zero value that a read of a missing key yields.
-MapLit      <~~ push(makeMapLit(takeAll())) ~~>
-            = MapTypeZ "{" [ MapEntry { "," MapEntry } ] "}" ;
-MapEntry    <~~ var mv = pop(); push({mk: pop(), mv: mv}) ~~>
-            = Expression ":" Expression ;
-MakeMap     <~~ push(makeMakeMap(pop())) ~~>
-            = "make" KwEnd "(" MapTypeZ ")" ;
-
-// make(chan T) / make(chan T, n): a channel. Accepted, reported not implemented; an
-// optional buffer size is parsed and discarded.
-MakeChan    <~~ push(notImplExpr("channel make", up.pos)) ~~>
-            = "make" KwEnd "(" ChanTypeT [ "," Expression <~~ pop() ~~> ] ")" ;
 MapTypeZ    = "map" KwEnd "[" Type "]" ZType ;
 ZType       <~~ push({mzero: up.in}) ~~>
             = Type ;
 
-// Point{3, 4} -- positional, at least one element, and not inside if/for headers.
-StructLit   <~~ push(makeStructLit(takeAll())) ~~>
-            = StructGate Id <~~ push(up.in) ~~> "{" Expression { "," Expression } "}" ;
+// new(T): a zero value of T (a pointer to it in Go; our structs are references).
+NewCall     <~~ push(makeNew(firstType(up.in))) ~~>
+            = "new" KwEnd "(" Type ")" ;
 
-// f(a, b): a function or a builtin. A trailing '...' (spread of a slice into a
-// variadic parameter) is accepted and ignored (the last argument passes through).
+// f(a, b): a function, a builtin or an identifier-named conversion (int(x)). A
+// trailing '...' spreads a slice into the variadic parameter.
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } [ "..." ] ] ")" ;
+            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } [ Spread ] ] ")" ;
+
+// KeyAhead answers "is this composite-literal element keyed?" - is there a ':' before
+// the element's ',' or the closing '}' at bracket depth 0. Like InitAhead it decides
+// before anything is pushed, so an unkeyed element leaks nothing.
+KeyAhead = :script(~~
+    (function () {
+        var i = 0
+        var depth = 0
+        var cc = 0
+        while (i < 8192) {
+            cc = c.peek(i)
+            if (cc < 0) { break }
+            if (cc === 34 || cc === 39 || cc === 96) {
+                var q = cc
+                i++
+                while (i < 8192) {
+                    var d = c.peek(i)
+                    if (d < 0 || d === q) { break }
+                    if (d === 92 && q !== 96) { i++ }
+                    i++
+                }
+                i++
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 47) {
+                while (i < 8192 && c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+                continue
+            }
+            if (cc === 40 || cc === 91 || cc === 123) { depth++ }
+            if (cc === 41 || cc === 93 || cc === 125) {
+                if (depth === 0) { break }
+                depth--
+            }
+            if (depth === 0 && cc === 44) { break }
+            if (depth === 0 && cc === 58) { return undefined }
+            i++
+        }
+        return abnf.newToken("\x01unkeyed-element", 0)
+    })()
+~~) ;
 
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
@@ -385,6 +663,121 @@ CondOff = :script(~~
     pop()
     undefined
 ~~) ;
+// InitAhead answers "does this if/switch header carry an init statement?" - i.e. is
+// there a ';' before the body's '{' at bracket depth 0. Without it the optional init
+// would be ATTEMPTED on a plain header, and its half-parsed pushes are not rolled
+// back (see the CondOn note above). TypeSwAhead is the same shape for '.(type)'.
+// Both are pure functions of (source, position): they only ever read with c.peek.
+InitAhead = :script(~~
+    (function () {
+        var i = 0
+        var depth = 0
+        var cc = 0
+        while (i < 8192) {
+            cc = c.peek(i)
+            if (cc < 0) { break }
+            if (cc === 34 || cc === 39 || cc === 96) {       // " ' `
+                var q = cc
+                i++
+                while (i < 8192) {
+                    var d = c.peek(i)
+                    if (d < 0 || d === q) { break }
+                    if (d === 92 && q !== 96) { i++ }
+                    i++
+                }
+                i++
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 47) {          // // comment
+                while (i < 8192 && c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 42) {          // /* comment
+                i += 2
+                while (i < 8192 && c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) { i++ }
+                i += 2
+                continue
+            }
+            if (cc === 40 || cc === 91) { depth++ }
+            if (cc === 41 || cc === 93) { depth-- }
+            if (depth === 0 && cc === 59) { return undefined }
+            if (depth === 0 && (cc === 123 || cc === 125)) { break }
+            i++
+        }
+        return abnf.newToken("\x01no-header-init", 0)
+    })()
+~~) ;
+TypeSwAhead = :script(~~
+    (function () {
+        var i = 0
+        var depth = 0
+        var cc = 0
+        while (i < 8192) {
+            cc = c.peek(i)
+            if (cc < 0) { break }
+            if (cc === 34 || cc === 39 || cc === 96) {
+                var q = cc
+                i++
+                while (i < 8192) {
+                    var d = c.peek(i)
+                    if (d < 0 || d === q) { break }
+                    if (d === 92 && q !== 96) { i++ }
+                    i++
+                }
+                i++
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 47) {
+                while (i < 8192 && c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 42) {
+                i += 2
+                while (i < 8192 && c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) { i++ }
+                i += 2
+                continue
+            }
+            if (cc === 46 && c.peek(i + 1) === 40 && c.peek(i + 2) === 116 && c.peek(i + 3) === 121
+                && c.peek(i + 4) === 112 && c.peek(i + 5) === 101 && c.peek(i + 6) === 41) {
+                return undefined
+            }
+            if (cc === 40 || cc === 91) { depth++ }
+            if (cc === 41 || cc === 93) { depth-- }
+            if (depth === 0 && (cc === 123 || cc === 125)) { break }
+            i++
+        }
+        return abnf.newToken("\x01not-a-type-switch", 0)
+    })()
+~~) ;
+
+// SameLine stands in for Go's automatic semicolon insertion where it actually
+// bites: inside a grouped const/var block, 'green04 NEWLINE blue04' must not read
+// the second name as the first one's TYPE. It fails when a line break (or a line
+// comment) comes before the next token.
+SameLine = :script(~~
+    (function () {
+        var i = 0
+        var cc = 0
+        while (i < 8192) {
+            cc = c.peek(i)
+            if (cc === 32 || cc === 9 || cc === 13) { i++; continue }
+            if (cc === 10) { return abnf.newToken("\x01line-break", 0) }
+            if (cc === 47 && c.peek(i + 1) === 47) { return abnf.newToken("\x01line-break", 0) }
+            if (cc === 47 && c.peek(i + 1) === 42) {
+                i += 2
+                while (i < 8192 && c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) {
+                    if (c.peek(i) === 10) { return abnf.newToken("\x01line-break", 0) }
+                    i++
+                }
+                i += 2
+                continue
+            }
+            break
+        }
+        return undefined
+    })()
+~~) ;
+
 StructGate = :script(~~
     (function() {
         var t = pop()
@@ -473,9 +866,50 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     hostGlobals["os"] = { Exit: function(code) { exit(code | 0) } }
     hostGlobals["len"] = function(x) {
         if (isMap(x)) return x.keys.length
+        // len(string) counts BYTES in Go, not runes and not UTF-16 code units:
+        // len("héllo") is 6. byteLen is the host's UTF-8 length.
+        if (typeof x == "string") return byteLen(x)
         return x.length
     }
-    hostGlobals["append"] = function(arr, v) { arr.push(v); return arr }
+    // append takes any number of values; a nil slice starts a new one.
+    hostGlobals["append"] = function() {
+        var arr = arguments[0]
+        if (arr === undefined || arr === null) { arr = [] }
+        for (var i = 1; i < arguments.length; i++) { arr.push(arguments[i]) }
+        return arr
+    }
+    hostGlobals["cap"] = function(x) {
+        if (x === undefined || x === null) { return 0 }
+        if (isMap(x)) { return x.keys.length }
+        return getCap(x)
+    }
+    hostGlobals["copy"] = function(dst, src) {
+        var n = dst.length < src.length ? dst.length : src.length
+        for (var i = 0; i < n; i++) { dst[i] = src[i] }
+        return n
+    }
+    // clear(m) empties a map; clear(s) zeroes a slice's elements in place.
+    hostGlobals["clear"] = function(x) {
+        if (isMap(x)) { x.keys = []; x.vals = []; return }
+        for (var i = 0; i < x.length; i++) { x[i] = 0 }
+    }
+    hostGlobals["min"] = function() {
+        var m = arguments[0]
+        for (var i = 1; i < arguments.length; i++) { if (arguments[i] < m) { m = arguments[i] } }
+        return m
+    }
+    hostGlobals["max"] = function() {
+        var m = arguments[0]
+        for (var i = 1; i < arguments.length; i++) { if (arguments[i] > m) { m = arguments[i] } }
+        return m
+    }
+    // The identifier-spelled conversions reach goConvert through the ordinary call path.
+    var convNames = ["int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16",
+                     "uint32", "uint64", "uintptr", "byte", "rune", "float32", "float64", "string", "bool"]
+    // The frozen engine does not hoist function declarations, so the factory has to
+    // be defined before the loop that runs at module-evaluation time uses it.
+    var makeConvFn = function(nm) { return function(v) { return goConvert(nm, v) } }
+    for (var cni = 0; cni < convNames.length; cni++) { hostGlobals[convNames[cni]] = makeConvFn(convNames[cni]) }
     hostGlobals["delete"] = function(m, k) {
         if (!isMap(m)) fail("delete() needs a map")
         var i = mapFind(m, k)
@@ -519,6 +953,166 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return "" + v
     }
 
+    // ----- Postfix suffixes: (args), [lo:hi:max] -----
+    // items = [argThunks..., {spread}?]
+    function makeCallSfx(items) {
+        var args = items
+        var spread = false
+        if (items.length > 0 && typeof items[items.length - 1] != "function") {
+            spread = true
+            args = items.slice(0, items.length - 1)
+        }
+        return {kind: "call", args: args, spread: spread}
+    }
+    function makeSliceSfx(items) {
+        var lo = null, hi = null, mx = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].lo != undefined) { lo = items[i].lo }
+            if (items[i].hi != undefined) { hi = items[i].hi }
+            if (items[i].mx != undefined) { mx = items[i].mx }
+        }
+        return {kind: "slice", lo: lo, hi: hi, mx: mx}
+    }
+    // The argument list of a call, with a trailing '...' spreading its slice.
+    function callArgs(s) {
+        var argv = []
+        for (var j = 0; j < s.args.length; j++) { argv.push(s.args[j]()) }
+        if (s.spread && argv.length > 0) {
+            var last = argv.pop()
+            for (var k = 0; k < last.length; k++) { argv.push(last[k]) }
+        }
+        return argv
+    }
+    // Go's suffix chain: the shared core knows .m(), .field and [i]; the plain call
+    // and the slice expression are added here.
+    foldCallMember = function(items) {
+        if (items.length == 1) { return items[0] }
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function() {
+            var cur = anytype
+            cur = primary()
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "mcall") { cur = mcall(cur, s.name, callArgs(s)) }
+                else if (s.kind == "field") {
+                    if (cur === undefined || cur === null) { fail("field ." + s.name + " of " + core.nullWord) }
+                    cur = goField(cur, s.name)
+                }
+                else if (s.kind == "call") {
+                    if (typeof cur != "function") { fail("call of a non function value") }
+                    cur = cur.apply(undefined, callArgs(s))
+                }
+                else if (s.kind == "slice") { cur = goSlice(cur, s) }
+                else if (typeof cur == "function") { cur = cur } // f[int]: erased instantiation
+                else if (typeof cur == "string") { cur = utf8Bytes(cur)[s.idx()] }
+                else { cur = core.getIndex(cur, s.idx()) }
+            }
+            return cur
+        }
+    }
+    // s[lo:hi] / s[lo:hi:max] over a slice or a string. Our slices are plain arrays,
+    // so a slice expression COPIES rather than sharing the backing array.
+    function goSlice(base, s) {
+        if (typeof base == "string") {
+            // A string slice is a BYTE range: "héllo"[1:3] is the two bytes of é.
+            var bs = utf8Bytes(base)
+            var blo = s.lo != null ? s.lo() : 0
+            var bhi = s.hi != null ? s.hi() : bs.length
+            return utf8Decode(bs.slice(blo, bhi))
+        }
+        var lo = s.lo != null ? s.lo() : 0
+        var hi = s.hi != null ? s.hi() : base.length
+        var out = base.slice(lo, hi)
+        if (s.mx != null) { setCap(out, s.mx() - lo) }
+        return out
+    }
+    // Field read: struct fields, and the promoted fields of an embedded struct.
+    function goField(o, name) {
+        if (hasOwn(o, name)) { return o[name] }
+        if (typeof o == "object" && o.__class != undefined) {
+            var fs = o.__class.__fields
+            for (var i = 0; i < fs.length; i++) {
+                var inner = o[fs[i]]
+                if (inner != undefined && inner != null && typeof inner == "object" && inner.__class != undefined) {
+                    if (hasOwn(inner, name)) { return inner[name] }
+                }
+            }
+            // A method used as a value: bind the receiver now (a method value). A value
+            // receiver is COPIED at bind time, so later writes to the variable do not
+            // reach the bound method - exactly like Go.
+            if (hasOwn(o.__class, name)) {
+                var byPtr = o.__class["__ptr$" + name] == true
+                return bindMethod(byPtr ? o : goCopy(o), o.__class[name])
+            }
+        }
+        return core.getField(o, name)
+    }
+    function bindMethod(self, f) {
+        return function() {
+            var args = [self]
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            return f.apply(undefined, args)
+        }
+    }
+
+    // ----- Slices: capacity, and the builtins that need it -----
+    var capOf = []      // parallel arrays: a slice value and the capacity declared for it
+    var capVal = []
+    function setCap(a, n) {
+        var i = capOf.indexOf(a)
+        if (i >= 0) { capVal[i] = n; return }
+        capOf.push(a)
+        capVal.push(n)
+    }
+    function getCap(a) {
+        var i = capOf.indexOf(a)
+        return (i >= 0 && capVal[i] > a.length) ? capVal[i] : a.length
+    }
+    function newChan(n) { return {__chan: true, buf: [], closed: false} }
+
+    // ----- Conversions -----
+    // The named-type conversions (int(x), string(b), []byte(s), ...). Our value model
+    // has one numeric type, so the integer conversions truncate and the sized ones
+    // also mask; string(int) is the rune spelling, string([]byte) joins the bytes.
+    function goConvert(to, v) {
+        if (to == "string") {
+            if (typeof v == "number") { return fromCodePoint(v) }
+            if (Array.isArray(v)) {
+                var s = ""
+                for (var i = 0; i < v.length; i++) { s += fromCodePoint(v[i]) }
+                return s
+            }
+            return "" + v
+        }
+        if (to == "[]byte" || to == "[]rune") {
+            var out = []
+            var t = "" + v
+            var i2 = 0
+            while (i2 < t.length) {
+                var r = strRuneAt(t, i2)
+                out.push(r.cp)
+                i2 += r.n
+            }
+            return out
+        }
+        if (to == "bool") { return v ? true : false }
+        if (to == "float64" || to == "float32") { return v * 1 }
+        if (to == "uint8" || to == "byte") { return gtrunc(v) & 255 }
+        if (to == "uint16") { return gtrunc(v) & 65535 }
+        if (to == "uint32") { return gtrunc(v) >>> 0 }
+        if (to == "int8") { return (gtrunc(v) << 24) >> 24 }
+        if (to == "int16") { return (gtrunc(v) << 16) >> 16 }
+        if (to == "int32" || to == "rune") { return gtrunc(v) | 0 }
+        if (to.indexOf("int") == 0 || to.indexOf("uint") == 0) { return gtrunc(v) }
+        return v
+    }
+    function fromCodePoint(cp) {
+        if (cp < 0x10000) { return String.fromCharCode(cp) }
+        var x = cp - 0x10000
+        return String.fromCharCode(0xd800 + gtrunc(x / 1024)) + String.fromCharCode(0xdc00 + (x % 1024))
+    }
+
     function mcall(target, name, args) {
         if (target === undefined || target === null) fail("method call ." + name + "() on nil")
         if (typeof target == "object" && target.__class != undefined) {
@@ -534,6 +1128,157 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
 
 
+    // ----- Operators Go has and the shared core does not -----
+    // Go ints are 64 bit; JS numbers carry 53 bits exactly, which covers everything
+    // the shift and mask forms below need (1 << 40 and friends). Shifts are therefore
+    // multiplication/division by a power of two rather than the 32-bit << and >>, and
+    // the bitwise ops fall back to the 32-bit host operators, which is exact for the
+    // value range they are used on.
+    function gtrunc(v) { return v < 0 ? Math.ceil(v) : Math.floor(v) }
+    function gpow2(n) {
+        var v = 1
+        for (var i = 0; i < n; i++) { v = v * 2 }
+        return v
+    }
+    function gshl(l, r) { return r >= 53 ? 0 : l * gpow2(r) }
+    function gshr(l, r) { return r >= 53 ? (l < 0 ? -1 : 0) : gtrunc(l / gpow2(r)) }
+    binOps["<<"] = function(l, r) { return gshl(l, r) }
+    binOps[">>"] = function(l, r) { return gshr(l, r) }
+    binOps["&"]  = function(l, r) { return l & r }
+    binOps["|"]  = function(l, r) { return l | r }
+    binOps["^"]  = function(l, r) { return l ^ r }
+    binOps["&^"] = function(l, r) { return l & ~r }
+    applyOps["&="]  = function(a, b) { return a & b }
+    applyOps["|="]  = function(a, b) { return a | b }
+    applyOps["^="]  = function(a, b) { return a ^ b }
+    applyOps["&^="] = function(a, b) { return a & ~b }
+    applyOps["<<="] = function(a, b) { return gshl(a, b) }
+    applyOps[">>="] = function(a, b) { return gshr(a, b) }
+    function makeCompl(t) { return function() { return ~t() } }
+    function makeFallthrough() { return function() { return {sig: "fallthrough"} } }
+
+    // Go's == is VALUE equality for structs and arrays (both are value types) and
+    // identity for everything else. nil compares equal to an unset slice/map/pointer.
+    function goEq(l, r) {
+        if (l === r) { return true }
+        if (l === undefined) { return r === null || r === undefined }
+        if (r === undefined) { return l === null }
+        if (l === null || r === null) { return false }
+        if (typeof l != "object" || typeof r != "object") { return false }
+        if (Array.isArray(l) && Array.isArray(r)) {
+            if (l.length != r.length) { return false }
+            for (var i = 0; i < l.length; i++) { if (!goEq(l[i], r[i])) { return false } }
+            return true
+        }
+        if (l.__class != undefined && r.__class != undefined) {
+            if (l.__class !== r.__class) { return false }
+            var fs = l.__class.__fields
+            for (var k = 0; k < fs.length; k++) { if (!goEq(l[fs[k]], r[fs[k]])) { return false } }
+            return true
+        }
+        return false
+    }
+    binOps["=="] = function(l, r) { return goEq(l, r) }
+    binOps["!="] = function(l, r) { return !goEq(l, r) }
+
+    // One UTF-16 code point of a string at index i: {cp, n} with n code units.
+    function strRuneAt(s, i) {
+        var c0 = s.charCodeAt(i)
+        if (c0 >= 0xd800 && c0 <= 0xdbff && i + 1 < s.length) {
+            var c1 = s.charCodeAt(i + 1)
+            if (c1 >= 0xdc00 && c1 <= 0xdfff) {
+                return {cp: (c0 - 0xd800) * 1024 + (c1 - 0xdc00) + 0x10000, n: 2}
+            }
+        }
+        return {cp: c0, n: 1}
+    }
+    // The number of UTF-8 BYTES a code point occupies - what Go's byte offsets count.
+    function utf8Len(cp) {
+        if (cp < 0x80) { return 1 }
+        if (cp < 0x800) { return 2 }
+        if (cp < 0x10000) { return 3 }
+        return 4
+    }
+
+    // ----- Labels: 'outer: for ... { continue outer }' -----
+    // The label is recorded when the label is PARSED and claimed by the next loop
+    // header, before that loop's body is built - so a nested loop cannot steal it.
+    var pendingLabel = null
+    function takeLabel() {
+        var l = pendingLabel
+        pendingLabel = null
+        return l
+    }
+    // break/continue signals carry their label (null for the bare forms); a loop
+    // consumes a signal that is unlabelled or that names the loop's own label, and
+    // passes anything else further up.
+    function makeBreakG(items) {
+        if (items.length == 0) { return function() { return BRK } }
+        var l = items[0]
+        return function() { return {sig: "break", label: l} }
+    }
+    function makeContinueG(items) {
+        if (items.length == 0) { return function() { return CONT } }
+        var l = items[0]
+        return function() { return {sig: "continue", label: l} }
+    }
+    function makeGoto(items) {
+        var l = items[0]
+        return function() { return {sig: "goto", label: l} }
+    }
+    // loopSig classifies a body result for a loop labelled `lbl`:
+    // 0 = keep looping, 1 = break out, 2 = propagate r to the caller.
+    function loopSig(r, lbl) {
+        if (r === undefined) { return 0 }
+        if (r === CONT) { return 0 }
+        if (r === BRK) { return 1 }
+        if (r.sig == "continue") { return (r.label == lbl) ? 0 : 2 }
+        if (r.sig == "break") { return (r.label == lbl) ? 1 : 2 }
+        return 2
+    }
+    // A labelled statement travels as {lbl, t} through the statement list so the
+    // enclosing block can find it again when a goto arrives.
+    function labelOf(it) { return (typeof it == "function") ? null : it.lbl }
+    function thunkOf(it) { return (typeof it == "function") ? it : it.t }
+
+    // The block runs its statements in order and resolves a goto to one of its OWN
+    // labels by jumping to that index; anything else propagates.
+    makeBlockStmt = function(items) {
+        var thunks = []
+        var labels = []
+        for (var i = 0; i < items.length; i++) {
+            thunks.push(thunkOf(items[i]))
+            labels.push(labelOf(items[i]))
+        }
+        return function() { return runStmts(thunks, labels, true) }
+    }
+    function findLabel(labels, name) {
+        for (var i = 0; i < labels.length; i++) { if (labels[i] == name) { return i } }
+        return -1
+    }
+    function runStmts(thunks, labels, ownScope) {
+        if (ownScope) { scopes.push({}) }
+        var res = undefined
+        var i = 0
+        var guard = 0
+        while (i < thunks.length) {
+            guard++
+            if (guard > 10000000) { fail("goto loop does not terminate") }
+            var r = thunks[i]()
+            if (r != undefined) {
+                if (typeof r != "function" && r.sig == "goto") {
+                    var j = findLabel(labels, r.label)
+                    if (j >= 0) { i = j; continue }
+                }
+                res = r
+                break
+            }
+            i++
+        }
+        if (ownScope) { scopes.pop() }
+        return res
+    }
+
     // ----- Expression thunks -----
 
     function gadd(l, r) {
@@ -542,36 +1287,199 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function makeCall(items) {
         var name = items[0]
-        var args = items.slice(1)
+        var sfx = makeCallSfx(items.slice(1))
         return function() {
-            var argv = []
-            for (var i = 0; i < args.length; i++) argv.push(args[i]())
             var f = getVar(name)
             if (typeof f != "function") fail("call of a non function: " + name)
-            return f.apply(undefined, argv)
+            return f.apply(undefined, callArgs(sfx))
         }
     }
+    // items = [name..., {vararg}?...]: only the LAST parameter can be variadic, and
+    // it collects the remaining arguments into a slice.
+    function makeParams(items) {
+        var names = []
+        var variadic = false
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "string") { names.push(items[i]) }
+            else { variadic = true }
+        }
+        return {params: names, variadic: variadic}
+    }
 
-    function makeSliceLit(items) {
-        return function() {
+    // ----- Composite literals, make() and conversions -----
+    // The leading type word of a captured type text, with the array/slice/pointer
+    // punctuation kept ("[]int", "[2]int", "point09") and comments dropped.
+    function firstType(s) {
+        var out = ""
+        var depth = 0
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            var cc = s.charCodeAt(i)
+            if (cc == 47 && i + 1 < s.length && s.charCodeAt(i + 1) == 47) { break }
+            if (cc == 91) { depth++; out += ch; continue }
+            if (cc == 93) { depth--; out += ch; continue }
+            if (cc == 32 || cc == 9 || cc == 10 || cc == 13) { if (depth == 0 && out.length > 0) { break } continue }
+            out += ch
+        }
+        return out
+    }
+    // items = [lenThunk?, {cet}] for [N]T / [...]T.
+    function makeArrDesc(items) {
+        var last = items[items.length - 1]
+        var lenT = items.length > 1 ? items[0] : null
+        return {ckind: "array", cet: last.cet, clen: lenT}
+    }
+    // items = [{ckey}?, valueThunk or {cnested}]
+    function makeCompElem(items) {
+        var i = 0
+        var key = null
+        var ktext = null
+        if (items[0] != undefined && typeof items[0] != "function" && items[0].ckey != undefined) {
+            key = items[0].ckey
+            ktext = items[0].ktext
+            i = 1
+        }
+        var v = items[i]
+        if (typeof v == "function") { return {ekey: key, ektext: ktext, eval: v} }
+        return {ekey: key, ektext: ktext, enest: v.cnested.celems}
+    }
+    // The zero value of a type text, used for the untouched slots of [5]int{0: 1}.
+    function zeroOfType2(t) {
+        if (t.indexOf("int") == 0 || t.indexOf("uint") == 0 || t.indexOf("byte") == 0
+            || t.indexOf("rune") == 0 || t.indexOf("float") == 0) { return 0 }
+        if (t.indexOf("string") == 0) { return "" }
+        if (t.indexOf("bool") == 0) { return false }
+        return null
+    }
+    // Builds one composite literal value. `desc` is the type descriptor pushed by
+    // CompType; `elems` are the {ekey, ektext, eval|enest} records of its body. A
+    // nested brace group is built recursively against the element type.
+    function buildLit(desc, elems) {
+        if (desc.ckind == "map") {
+            var m = newMap(zeroOfType(desc.czero))
+            for (var i = 0; i < elems.length; i++) {
+                mapSet(m, elems[i].ekey(), elemValue(elems[i], desc.czero))
+            }
+            return m
+        }
+        if (desc.ckind == "slice" || desc.ckind == "array") {
             var a = []
-            for (var i = 0; i < items.length; i++) a.push(items[i]())
+            var at = 0
+            for (var s = 0; s < elems.length; s++) {
+                if (elems[s].ekey != null) { at = elems[s].ekey() }
+                while (a.length < at) { a.push(zeroOfType2(desc.cet)) }
+                a[at] = elemValue(elems[s], desc.cet)
+                at++
+            }
+            if (desc.ckind == "array" && desc.clen != null) {
+                var n = desc.clen()
+                while (a.length < n) { a.push(zeroOfType2(desc.cet)) }
+            }
+            return a
+        }
+        // A struct: a named one (its descriptor is a global) or an anonymous one.
+        var cls = anytype
+        if (desc.ckind == "anon") { cls = anonClass(desc) }
+        else {
+            cls = getVar(desc.cname)
+            if (cls == undefined || cls == null || cls.__isclass != true) { fail("unknown struct type: " + desc.cname) }
+        }
+        var obj = {__class: cls}
+        var fs = cls.__fields
+        var ftypes = cls.__ftypes
+        for (var f = 0; f < fs.length; f++) { scopePut(obj, fs[f], zeroOfType2(ftypes != undefined ? ftypes[f] : "")) }
+        var pos = 0
+        for (var e = 0; e < elems.length; e++) {
+            var name = elems[e].ektext
+            if (name == null) { name = fs[pos]; pos++ }
+            scopePut(obj, name, elemValue(elems[e], fieldTypeOf(cls, name)))
+        }
+        return obj
+    }
+    function fieldTypeOf(cls, name) {
+        var fs = cls.__fields
+        for (var i = 0; i < fs.length; i++) { if (fs[i] == name) { return cls.__ftypes[i] } }
+        return ""
+    }
+    // The value of one element: either its expression, or a nested brace group built
+    // against the element type text (\[\]P{{1, 2}} -> a P, \[\]\[\]int{{1}} -> a slice).
+    function elemValue(e, elemType) {
+        if (e.enest == undefined) { return e.eval() }
+        return buildLit(descOfTypeText(elemType), e.enest)
+    }
+    function descOfTypeText(t) {
+        if (t.length > 0 && t.charCodeAt(0) == 91) {
+            var close = t.indexOf("]")
+            var inner = t.substring(close + 1)
+            if (close == 1) { return {ckind: "slice", cet: inner} }
+            return {ckind: "array", cet: inner, clen: null}
+        }
+        if (t.indexOf("map[") == 0) {
+            var d = t.lastIndexOf("]")
+            return {ckind: "map", czero: t.substring(d + 1)}
+        }
+        return {ckind: "struct", cname: t}
+    }
+    // Anonymous struct types get one descriptor per literal site, cached on the desc.
+    function anonClass(desc) {
+        if (desc.cls == undefined) {
+            var ft = []
+            for (var i = 0; i < desc.cfields.length; i++) { ft.push("") }
+            desc.cls = {__isclass: true, __name: "struct", __fields: desc.cfields, __ftypes: ft}
+        }
+        return desc.cls
+    }
+    function makeCompositeLit(items) {
+        var desc = items[0]
+        var elems = items[1].celems
+        return function() { return buildLit(desc, elems) }
+    }
+    // items = [{mkind,...}, lenThunk?, capThunk?]
+    function makeMakeCall(items) {
+        var d = items[0]
+        var lenT = items.length > 1 ? items[1] : null
+        var capT = items.length > 2 ? items[2] : null
+        if (d.mkind == "map") {
+            var zero = zeroOfType(d.czero)
+            return function() { return newMap(zero) }
+        }
+        if (d.mkind == "chan") { return function() { return newChan(capT != null ? capT() : 0) } }
+        var ez = d.cet
+        return function() {
+            var n = lenT != null ? lenT() : 0
+            var a = []
+            for (var i = 0; i < n; i++) { a.push(zeroOfType2(ez)) }
+            if (capT != null) { setCap(a, capT()) }
             return a
         }
     }
-    // items = [{mzero}, {mk, mv}...] -> a map built in source order.
-    function makeMapLit(items) {
-        var zero = zeroOfType(items[0].mzero)
-        var entries = items.slice(1)
+    function makeNew(ty) {
+        var d = ty
         return function() {
-            var m = newMap(zero)
-            for (var i = 0; i < entries.length; i++) mapSet(m, entries[i].mk(), entries[i].mv())
-            return m
+            if (d.length > 0 && d.charCodeAt(0) == 91) { return [] }
+            var z = zeroOfType2(d)
+            if (z != null) { return z }
+            return buildLit({ckind: "struct", cname: d}, [])
         }
     }
-    function makeMakeMap(mz) {
-        var zero = zeroOfType(mz.mzero)
-        return function() { return newMap(zero) }
+    // items = [{conv}, exprThunk]: a conversion whose type is not a bare name.
+    function makeConv(items) {
+        var to = items[0].conv
+        var t = items[1]
+        return function() { return goConvert(to, t()) }
+    }
+    // items = [valueName, okName, baseThunk, {at}]: v, ok := x.(T).
+    function makeAssertOk(items) {
+        var vName = items[0]
+        var okName = items[1]
+        var baseT = items[2]
+        var ty = items[3].at
+        return function() {
+            var v = baseT()
+            if (typeMatches(ty, v)) { declVar(vName, v); declVar(okName, true); return }
+            declVar(vName, zeroOfType2(ty))
+            declVar(okName, false)
+        }
     }
     // items = [valueName, okName, baseThunk, keyThunk]: v, ok := m[k].
     function makeMapOk(items) {
@@ -590,23 +1498,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // items = [{params}, bodyT] (an ignored RetTypes leaves no stack entry).
     // The literal captures the scope chain of its evaluation (a real closure).
-    function makeFuncLit(bodyT, plist) {
-        var params = plist.params
+    // items = [{params}, {rets}?, bodyT]. The literal captures the scope chain of its
+    // evaluation (a real closure) and otherwise runs like any other function body.
+    function makeFuncLit(items) {
+        var params = items[0].params
+        var variadic = items[0].variadic
+        var i = 1
+        var rets = []
+        if (items[i] != undefined && items[i].rets != undefined) { rets = items[i].rets; i++ }
+        var bodyT = items[i]
         return function() {
             var env = scopes.slice(0)
             return function() {
                 var args = []
-                for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
-                var saved = scopes
-                scopes = env.slice(0)
-                var sc = {}
-                for (var p = 0; p < params.length; p++) sc[params[p]] = p < args.length ? args[p] : undefined
-                scopes.push(sc)
-                deferFrames.push([])
-                var r = bodyT()
-                runDefers(deferFrames.pop())
-                scopes = saved
-                return (r != undefined && r.isRet) ? r.v : undefined
+                for (var a = 0; a < arguments.length; a++) { args.push(arguments[a]) }
+                return invokeBodyG(params, bodyT, undefined, "", args, rets, env, variadic)
             }
         }
     }
@@ -660,6 +1566,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var r = 0; r < refs.length; r++) assignRef(refs[r], vals[r])
         }
     }
+    // lastDeclNames is written at BUILD time by the short declaration just built, and
+    // read by the enclosing for-init tag right after (see FInit) - the tags run in
+    // source order, so the value is always the one that belongs to that init.
+    var lastDeclNames = []
+    function takeDeclNames() {
+        var n = lastDeclNames
+        lastDeclNames = []
+        return n
+    }
     function makeShortDecl(items) {
         var names = []
         var i = 0
@@ -667,6 +1582,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (typeof items[i] != "string") break
             names.push(items[i])
         }
+        lastDeclNames = names
         var exprs = items.slice(i)
         return function() {
             var vals = []
@@ -685,73 +1601,346 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // ----- Statement thunks -----
 
+    // The zero value a 'var x T' without initializer gets. The captured type text may
+    // carry trailing whitespace and comments, so only the leading word is examined.
+    function zeroOfDeclType(ty) {
+        var t = ty
+        if (t.length == 0) { return null }
+        // "[N]T" is an ARRAY: it exists with N zero elements from the start, where
+        // "[]T" is a slice and starts empty.
+        if (t.charCodeAt(0) == 91) {
+            var close = t.indexOf("]")
+            var n = 0
+            for (var d = 1; d < close; d++) {
+                var cc = t.charCodeAt(d)
+                if (cc < 48 || cc > 57) { n = 0; break }
+                n = n * 10 + (cc - 48)
+            }
+            var el = t.substring(close + 1)
+            var a = []
+            for (var k = 0; k < n; k++) { a.push(zeroOfType2(el)) }
+            return a
+        }
+        if (t.indexOf("int") == 0 || t.indexOf("uint") == 0 || t.indexOf("byte") == 0
+            || t.indexOf("rune") == 0 || t.indexOf("float") == 0) { return 0 }
+        if (t.indexOf("string") == 0) { return "" }
+        if (t.indexOf("bool") == 0) { return false }
+        if (t.indexOf("map") == 0) { return null }
+        return null
+    }
+    // items = [name..., {ty}?, initThunk...]: 'var a, b = 1, 2', 'var i int',
+    // 'var q, r int' and the const forms all go through here. With more names than
+    // initializers the single initializer is a multi-value call and gets unpacked.
     function makeVarDecl(items) {
-        var name = items[0]
-        var i = 1
+        var names = []
+        var i = 0
+        for (; i < items.length; i++) {
+            if (typeof items[i] != "string") { break }
+            names.push(items[i])
+        }
         var ty = ""
         if (i < items.length && items[i] != undefined && items[i].ty != undefined) { ty = items[i].ty; i++ }
-        var init = i < items.length ? items[i] : null
+        var inits = items.slice(i)
         return function() {
-            var v
-            if (init != null) { v = init() }
-            else if (ty == "int") { v = 0 }
-            else if (ty == "string") { v = "" }
-            else if (ty == "bool") { v = false }
-            else if (ty.charCodeAt(0) == 91) { v = [] } // A slice type: [ ...
-            else { v = null }
-            declVar(name, v)
+            if (inits.length == 0) {
+                for (var z = 0; z < names.length; z++) { declVar(names[z], zeroOfDeclType(ty)) }
+                return
+            }
+            var vals = []
+            for (var k = 0; k < inits.length; k++) { vals.push(inits[k]()) }
+            if (names.length > 1 && inits.length == 1) { vals = vals[0] }
+            for (var n = 0; n < names.length; n++) { declVar(names[n], vals[n]) }
         }
     }
+
+    // ----- const blocks and iota -----
+    var iotaVal = 0
+    function makeIota() { return function() { return iotaVal } }
+    // A spec keeps its names and its own initializer list (empty when it repeats).
+    function makeConstSpec(items) {
+        var names = []
+        var i = 0
+        for (; i < items.length; i++) {
+            if (typeof items[i] != "string") { break }
+            names.push(items[i])
+        }
+        if (i < items.length && items[i] != undefined && items[i].ty != undefined) { i++ }
+        return {cnames: names, cinits: items.slice(i)}
+    }
+    // const ( a = iota; b; c ): iota counts the specs, and a spec without '=' repeats
+    // the previous one's expressions - which is what makes the repetition advance.
+    function makeConstGroup(specs) {
+        return function() {
+            var last = []
+            var savedIota = iotaVal
+            for (var i = 0; i < specs.length; i++) {
+                var sp = specs[i]
+                if (sp.cinits.length > 0) { last = sp.cinits }
+                iotaVal = i
+                var vals = []
+                for (var k = 0; k < last.length; k++) { vals.push(last[k]()) }
+                if (sp.cnames.length > 1 && vals.length == 1) { vals = vals[0] }
+                for (var n = 0; n < sp.cnames.length; n++) { declVar(sp.cnames[n], vals[n]) }
+            }
+            iotaVal = savedIota
+        }
+    }
+
+    // The result names of 'func f() (q, r int)', recovered from the matched text:
+    // the first identifier of every comma-separated part.
+    function retNames(text) {
+        var names = []
+        var cur = ""
+        var seen = false
+        for (var i = 0; i < text.length; i++) {
+            var ch = text.charAt(i)
+            var cc = text.charCodeAt(i)
+            var isWord = (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc == 95
+            if (ch == "," || ch == "(" || ch == ")") {
+                if (cur.length > 0) { names.push(cur) }
+                cur = ""
+                seen = false
+                continue
+            }
+            if (isWord) { if (!seen) { cur += ch } }
+            else { if (cur.length > 0) { seen = true } }
+        }
+        if (cur.length > 0) { names.push(cur) }
+        return names
+    }
+
+    // ----- Control flow the shared core does not cover -----
+    // items = [{k:"init"}?, condThunk, thenT, elseT?]
+    function makeIfG(items) {
+        var init = null
+        var i = 0
+        if (items[0] != undefined && items[0].k == "init") { init = items[0].t; i = 1 }
+        var cond = items[i]
+        var thenT = items[i + 1]
+        var elseT = items.length > i + 2 ? items[i + 2] : null
+        if (init == null) {
+            return function() {
+                if (core.test(cond())) { return thenT() }
+                if (elseT != null) { return elseT() }
+            }
+        }
+        return function() {
+            scopes.push({})
+            var r = undefined
+            init()
+            if (core.test(cond())) { r = thenT() }
+            else if (elseT != null) { r = elseT() }
+            scopes.pop()
+            return r
+        }
+    }
+    // items = [{lbl}, bodyThunk]: 'for { ... }'
+    function makeForEver(items) {
+        var lbl = items[0].lbl
+        var bodyT = items[1]
+        return function() {
+            while (true) {
+                var r = bodyT()
+                var s = loopSig(r, lbl)
+                if (s == 1) { return undefined }
+                if (s == 2) { return r }
+            }
+        }
+    }
+    // items = [{lbl}, condThunk, bodyThunk]: 'for cond { ... }'
+    function makeWhileG(items) {
+        var lbl = items[0].lbl
+        var condT = items[1]
+        var bodyT = items[2]
+        return function() {
+            while (core.test(condT())) {
+                var r = bodyT()
+                var s = loopSig(r, lbl)
+                if (s == 1) { break }
+                if (s == 2) { return r }
+            }
+        }
+    }
+    // items = [{lbl}, {k:init}?, {k:cond}?, {k:post}?, bodyThunk]. Go 1.22 gives every
+    // iteration a FRESH copy of the loop variables, so a closure made in the body keeps
+    // that iteration's values: the frame is re-created per turn and the values copied in.
     function makeForClassic(items) {
         var bodyT = items.pop()
+        var lbl = null
         var init = null, cond = null, post = null
         for (var i = 0; i < items.length; i++) {
+            if (items[i].lbl != undefined) lbl = items[i].lbl
             if (items[i].k == "init") init = items[i].t
             if (items[i].k == "cond") cond = items[i].t
             if (items[i].k == "post") post = items[i].t
         }
+        var loopVars = []
+        for (var j = 0; j < items.length; j++) {
+            if (items[j].k == "init" && items[j].names != undefined) { loopVars = items[j].names }
+        }
         return function() {
             scopes.push({})
             var res = undefined
+            var top = scopes.length - 1
             if (init != null) init()
-            while (cond == null || cond()) {
+            while (cond == null || core.test(cond())) {
+                // Per-iteration variables (Go 1.22): the body runs on a FRESH frame
+                // holding copies, so a closure made inside keeps this turn's values;
+                // the values are then carried into another fresh frame for the post.
+                if (loopVars.length > 0) { scopes[top] = copyVars(scopes[top], loopVars) }
                 var r = bodyT()
-                if (r != undefined) {
-                    if (r === BRK) break
-                    if (r !== CONT) { res = r; break }
-                }
+                if (loopVars.length > 0) { scopes[top] = copyVars(scopes[top], loopVars) }
+                var s = loopSig(r, lbl)
+                if (s == 1) { break }
+                if (s == 2) { res = r; break }
                 if (post != null) post()
             }
             scopes.pop()
             return res
         }
     }
+    // A fresh frame carrying copies of the named variables (see makeForClassic).
+    function copyVars(f, names) {
+        var out = {}
+        for (var i = 0; i < names.length; i++) { scopePut(out, names[i], f[names[i]]) }
+        return out
+    }
     // items = [name, name?, listThunk, bodyThunk]: for i, v := range s. Ranging over
     // a map yields its keys (and values) in insertion order (real Go randomizes).
+    // items = [{lbl}, {rv}?, {rv}?, listThunk, bodyThunk]: for i, v := range s. Ranging
+    // over a map yields its keys (and values) in insertion order (real Go randomizes);
+    // over a string it yields BYTE OFFSETS and decoded runes, like Go; over an int the
+    // value itself is the bound (Go 1.22). Every turn gets a fresh frame, so a closure
+    // made in the body keeps that iteration's values.
     function makeForRange(items) {
         var bodyT = items.pop()
         var listT = items.pop()
-        var iName = items[0]
-        var vName = items.length > 1 ? items[1] : null
+        var lbl = items[0].lbl
+        var names = []
+        for (var i = 1; i < items.length; i++) { names.push(items[i].rv) }
+        var iName = names.length > 0 ? names[0] : null
+        var vName = names.length > 1 ? names[1] : null
         return function() {
             var arr = listT()
             var keys = null
             var vals = null
             if (isMap(arr)) { keys = arr.keys.slice(0); vals = arr.vals.slice(0) }
-            // range over an int (Go 1.22): the bound is the value itself.
+            else if (typeof arr == "string") {
+                // Go ranges a string by RUNE: the index is the rune's BYTE OFFSET and
+                // the value is its code point (an int32), not a one-character string.
+                keys = []
+                vals = []
+                var off = 0
+                var b = 0
+                while (b < arr.length) {
+                    var ru = strRuneAt(arr, b)
+                    keys.push(off)
+                    vals.push(ru.cp)
+                    off += utf8Len(ru.cp)
+                    b += ru.n
+                }
+            }
             var n = (typeof arr == "number") ? arr : (keys != null ? keys.length : arr.length)
             var res = undefined
             scopes.push({})
-            declVar(iName, 0)
-            if (vName != null) declVar(vName, undefined)
+            var top = scopes.length - 1
             for (var i = 0; i < n; i++) {
-                setVar(iName, keys != null ? keys[i] : i)
-                if (vName != null) setVar(vName, keys != null ? vals[i] : arr[i])
+                scopes[top] = {}
+                if (iName != null) { declVar(iName, keys != null ? keys[i] : i) }
+                if (vName != null) { declVar(vName, keys != null ? vals[i] : arr[i]) }
                 var r = bodyT()
-                if (r != undefined) {
-                    if (r === BRK) break
-                    if (r !== CONT) { res = r; break }
+                var s = loopSig(r, lbl)
+                if (s == 1) { break }
+                if (s == 2) { res = r; break }
+            }
+            scopes.pop()
+            return res
+        }
+    }
+
+    // ----- Type switches -----
+    // items = [{k:init}?, {tsname}?, subjectThunk, ({ct}-list label | statement)...]
+    function makeTypeCase(items) {
+        var ts = []
+        for (var i = 0; i < items.length; i++) { ts.push(firstWord(items[i].ct)) }
+        return {isTypeCase: true, isDefault: items.length == 0, types: ts}
+    }
+    function firstWord(s) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var cc = s.charCodeAt(i)
+            if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc == 95
+                || cc == 91 || cc == 93 || cc == 42) { out += s.charAt(i) }
+            else if (out.length > 0) { break }
+        }
+        return out
+    }
+    // The bare name of a named type, WITHOUT its type arguments: pair16[string, int]
+    // is the type pair16 (generics are erased, see TypeParams).
+    function typeBaseName(s) {
+        var w = firstWord(s)
+        for (var i = 0; i < w.length; i++) {
+            if (w.charAt(i) == "[") { return w.substring(0, i) }
+        }
+        return w
+    }
+    // The dynamic type name of a runtime value, in the spelling a case label uses.
+    function goTypeName(v) {
+        if (v === undefined || v === null) { return "nil" }
+        if (typeof v == "boolean") { return "bool" }
+        if (typeof v == "string") { return "string" }
+        if (typeof v == "number") { return (v == gtrunc(v)) ? "int" : "float64" }
+        if (isMap(v)) { return "map" }
+        if (Array.isArray(v)) { return "slice" }
+        if (typeof v == "object" && v.__class != undefined) { return v.__class.__name }
+        return "any"
+    }
+    function typeMatches(want, v) {
+        if (want == "any" || want == "interface{}") { return v !== undefined && v !== null }
+        var got = goTypeName(v)
+        if (want == got) { return true }
+        if (want == "float64" && got == "int") { return false }
+        return false
+    }
+    function makeTypeSwitch(items) {
+        var init = null
+        var i = 0
+        if (items[0] != undefined && items[0].k == "init") { init = items[0].t; i = 1 }
+        var bind = null
+        if (items[i] != undefined && items[i].tsname != undefined) { bind = items[i].tsname; i++ }
+        var subj = items[i]
+        i++
+        var cases = []
+        var cur = null
+        for (; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { if (cur != null) { cur.body.push(it) } }
+            else { cur = {isDefault: it.isDefault, types: it.types, body: []}; cases.push(cur) }
+        }
+        return function() {
+            scopes.push({})
+            if (init != null) { init() }
+            var v = subj()
+            var dflt = -1
+            var hit = -1
+            for (var k = 0; k < cases.length && hit < 0; k++) {
+                if (cases[k].isDefault) { dflt = k; continue }
+                for (var t = 0; t < cases[k].types.length && hit < 0; t++) {
+                    if (typeMatches(cases[k].types[t], v)) { hit = k }
                 }
+            }
+            if (hit < 0) { hit = dflt }
+            var res = undefined
+            if (hit >= 0) {
+                scopes.push({})
+                if (bind != null) { declVar(bind, v) }
+                var body = cases[hit].body
+                for (var b = 0; b < body.length; b++) {
+                    var r = body[b]()
+                    if (r === BRK) { break }
+                    if (r != undefined) { res = r; break }
+                }
+                scopes.pop()
             }
             scopes.pop()
             return res
@@ -780,12 +1969,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // The flat item list is regrouped: every statement belongs to the last label.
     function makeSwitch(items) {
         var subj = null
+        var init = null
         var cases = []
         var cur = null
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "function") {
                 if (cur != null) cur.body.push(it)
+            } else if (it.k == "init") {
+                init = it.t
             } else if (it.subj != undefined) {
                 subj = it.subj
             } else {
@@ -794,26 +1986,44 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
         }
         return function() {
-            var s = subj != null ? subj() : undefined
-            var dflt = -1
-            var hit = -1
-            for (var i = 0; i < cases.length && hit < 0; i++) {
-                if (cases[i].isDefault) { dflt = i; continue }
-                for (var v = 0; v < cases[i].vals.length && hit < 0; v++) {
-                    var val = cases[i].vals[v]()
-                    if (subj != null ? val === s : val) hit = i
-                }
+            scopes.push({})
+            var out = runSwitch(init, subj, cases)
+            scopes.pop()
+            return out
+        }
+    }
+    // The switch body, with Go's fallthrough: a case that ends in 'fallthrough'
+    // continues into the NEXT case's body without re-testing its values.
+    function runSwitch(init, subj, cases) {
+        if (init != null) { init() }
+        var s = subj != null ? subj() : undefined
+        var dflt = -1
+        var hit = -1
+        for (var i = 0; i < cases.length && hit < 0; i++) {
+            if (cases[i].isDefault) { dflt = i; continue }
+            for (var v = 0; v < cases[i].vals.length && hit < 0; v++) {
+                var val = cases[i].vals[v]()
+                if (subj != null ? goEq(val, s) : core.test(val)) hit = i
             }
-            if (hit < 0) hit = dflt
-            if (hit < 0) return undefined
-            var body = cases[hit].body
+        }
+        if (hit < 0) hit = dflt
+        if (hit < 0) return undefined
+        var at = hit
+        while (at >= 0 && at < cases.length) {
+            var body = cases[at].body
+            var fell = false
             for (var j = 0; j < body.length; j++) {
                 var r = body[j]()
                 if (r === BRK) return undefined
-                if (r != undefined) return r
+                if (r != undefined) {
+                    if (r.sig == "fallthrough") { fell = true; break }
+                    return r
+                }
             }
-            return undefined
+            if (!fell) { return undefined }
+            at++
         }
+        return undefined
     }
     // ----- Defer -----
     // One frame per running function; a defer statement appends {f, args} to the
@@ -827,20 +2037,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // items = [fname, {mname}?, argThunks...]: the function value and the arguments
     // are evaluated at defer time. pkg.fn(...) reaches a function valued property
     // (fmt.Println); struct methods are not supported here.
+    // items = [{dfn}, argThunks..., {spread}?]: the callee and the arguments are
+    // evaluated at defer time; the call runs at function exit, in LIFO order.
     function makeDefer(items) {
-        var fname = items[0]
-        var i = 1
-        var mname = null
-        if (i < items.length && items[i] != undefined && items[i].mname != undefined) { mname = items[i].mname; i++ }
-        var argTs = items.slice(i)
+        var fnT = items[0].dfn
+        var rest = items.slice(1)
+        var sfx = makeCallSfx(rest)
         return function() {
-            var f = getVar(fname)
-            if (mname != null) f = f == undefined ? undefined : f[mname]
-            if (typeof f != "function") fail("defer needs a function: " + fname + (mname != null ? "." + mname : ""))
-            var argv = []
-            for (var a = 0; a < argTs.length; a++) argv.push(argTs[a]())
-            if (deferFrames.length == 0) fail("defer outside a function")
-            deferFrames[deferFrames.length - 1].push({f: f, args: argv})
+            var f = fnT()
+            if (typeof f != "function") { fail("defer needs a function") }
+            var argv = callArgs(sfx)
+            if (deferFrames.length == 0) { fail("defer outside a function") }
+            var frame = deferFrames[deferFrames.length - 1]
+            frame.push({f: f, args: argv})
         }
     }
 
@@ -880,8 +2089,107 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var i = 0; i < items.length; i++) items[i]()
         }
     }
+    // Go's escape sequences, which differ from the shared core's JS ones: \a \v exist,
+    // \xHH and \OOO produce a single BYTE (so "h\xc3\xa9" is "hé", two escapes forming
+    // one rune), and \U takes eight hex digits. Byte escapes are therefore buffered and
+    // UTF-8 decoded together. Assigned, not declared: interp-core.js already defines
+    // unescapeJs and a second declaration would leave the two engines disagreeing.
+    unescapeJs = function(s) {
+        var out = ""
+        var pend = []
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c != 92) { out += utf8Decode(pend); pend = []; out += s.charAt(i); i++; continue }
+            var e = s.charCodeAt(i + 1)
+            if (e == 120) { pend.push(hexAt(s, i + 2, 2)); i += 4; continue }        // \xHH
+            if (e >= 48 && e <= 55) { pend.push(octAt(s, i + 1, 3)); i += 4; continue } // \OOO
+            out += utf8Decode(pend)
+            pend = []
+            if (e == 110) { out += "\n"; i += 2; continue }
+            if (e == 116) { out += "\t"; i += 2; continue }
+            if (e == 114) { out += "\r"; i += 2; continue }
+            if (e == 97)  { out += String.fromCharCode(7); i += 2; continue }
+            if (e == 98)  { out += String.fromCharCode(8); i += 2; continue }
+            if (e == 102) { out += String.fromCharCode(12); i += 2; continue }
+            if (e == 118) { out += String.fromCharCode(11); i += 2; continue }
+            if (e == 117) { out += fromCodePoint(hexAt(s, i + 2, 4)); i += 6; continue }
+            if (e == 85)  { out += fromCodePoint(hexAt(s, i + 2, 8)); i += 10; continue }
+            out += String.fromCharCode(e)
+            i += 2
+        }
+        return out + utf8Decode(pend)
+    }
+    function octAt(s, at, n) {
+        var v = 0
+        for (var i = 0; i < n; i++) {
+            var cc = s.charCodeAt(at + i)
+            if (cc < 48 || cc > 55) { break }
+            v = v * 8 + (cc - 48)
+        }
+        return v
+    }
+    // ----- Go strings are BYTE strings -----
+    // The value model keeps them as host (UTF-16) strings, so the byte view is built
+    // on demand: s[i] is a byte, s[lo:hi] slices bytes, len counts bytes.
+    function utf8Bytes(s) {
+        var out = []
+        var i = 0
+        while (i < s.length) {
+            var r = strRuneAt(s, i)
+            i += r.n
+            var cp = r.cp
+            if (cp < 0x80) { out.push(cp); continue }
+            if (cp < 0x800) { out.push(0xc0 | gtrunc(cp / 64)); out.push(0x80 | (cp % 64)); continue }
+            if (cp < 0x10000) {
+                out.push(0xe0 | gtrunc(cp / 4096))
+                out.push(0x80 | (gtrunc(cp / 64) % 64))
+                out.push(0x80 | (cp % 64))
+                continue
+            }
+            out.push(0xf0 | gtrunc(cp / 262144))
+            out.push(0x80 | (gtrunc(cp / 4096) % 64))
+            out.push(0x80 | (gtrunc(cp / 64) % 64))
+            out.push(0x80 | (cp % 64))
+        }
+        return out
+    }
+    // The inverse: a byte list back to a host string. A byte that does not start a
+    // well-formed sequence is passed through as its own code point (Go would render
+    // U+FFFD; nothing in the subset depends on that).
+    function utf8Decode(bytes) {
+        var out = ""
+        var i = 0
+        while (i < bytes.length) {
+            var b0 = bytes[i] & 255
+            if (b0 < 0x80) { out += String.fromCharCode(b0); i++; continue }
+            var need = 0
+            var cp = 0
+            if (b0 >= 0xf0) { need = 3; cp = b0 & 7 }
+            else if (b0 >= 0xe0) { need = 2; cp = b0 & 15 }
+            else if (b0 >= 0xc0) { need = 1; cp = b0 & 31 }
+            else { out += String.fromCharCode(b0); i++; continue }
+            if (i + need > bytes.length - 1) { out += String.fromCharCode(b0); i++; continue }
+            var ok = true
+            for (var k = 1; k <= need; k++) {
+                var bk = bytes[i + k] & 255
+                if (bk < 0x80 || bk > 0xbf) { ok = false; break }
+                cp = cp * 64 + (bk & 63)
+            }
+            if (!ok) { out += String.fromCharCode(b0); i++; continue }
+            out += fromCodePoint(cp)
+            i += need + 1
+        }
+        return out
+    }
     // A rune literal is its first code point (Go runes are int32); empty is 0.
-    function runeVal(s) { var u = unescapeJs(s); return u.length > 0 ? u.charCodeAt(0) : 0 }
+    // '\U0001F600' is a single rune, so the astral surrogate pair has to be folded
+    // back into its code point - charCodeAt(0) alone would answer the high half.
+    function runeVal(s) {
+        var u = unescapeJs(s)
+        if (u.length == 0) { return 0 }
+        return strRuneAt(u, 0).cp
+    }
     // The integer value of a 0x / 0o / 0b literal, ignoring '_' digit separators.
     function parseRadix(s) {
         var radix = 10
@@ -908,52 +2216,163 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // accepted (marked with {iface}) and reported not implemented.
     function buildTypeDecl(items, pos) {
         var last = items[items.length - 1]
-        if (typeof last == "object" && last != null && last.iface == true) { notImpl("interface", pos); return }
+        // An interface declaration needs no runtime model here: method dispatch is
+        // dynamic, so a value satisfies an interface exactly when it has the methods.
+        // The name is bound to a descriptor so it can be used in type positions.
+        if (typeof last == "object" && last != null && last.iface == true) {
+            globalScope[items[0]] = {__isiface: true, __name: items[0]}
+            return
+        }
+        if (typeof last == "object" && last != null && last.under != undefined) {
+            globalScope[items[0]] = makeDefinedConv(last.under)
+            return
+        }
         buildStruct(items)
     }
+
+    // The conversion a defined type's name stands for (see buildTypeDecl). A factory,
+    // so the captured underlying type is not shared by every declaration.
+    function makeDefinedConv(under) { return function(v) { return goConvert(under, v) } }
 
     // ----- Functions, methods and structs -----
 
     var structs = {}
-    // items = [name, fieldName...]
+    // items = [name, fieldName..., {fty}, fieldName..., {fty}, ...]: the names of one
+    // group share the {fty} that follows them, which gives every field its zero value.
     function buildStruct(items) {
-        var cls = {__isclass: true, __name: items[0], __fields: items.slice(1)}
+        var fields = []
+        var ftypes = []
+        var pending = []
+        for (var i = 1; i < items.length; i++) {
+            if (typeof items[i] == "string") { pending.push(items[i]); continue }
+            for (var k = 0; k < pending.length; k++) { fields.push(pending[k]); ftypes.push(items[i].fty) }
+            pending = []
+        }
+        // An embedded field leaves its name without a following type.
+        for (var p = 0; p < pending.length; p++) { fields.push(pending[p]); ftypes.push("") }
+        var cls = {__isclass: true, __name: items[0], __fields: fields, __ftypes: ftypes}
         structs[items[0]] = cls
         globalScope[items[0]] = cls
     }
-    // items = [{recv:{...}}?, name, {params}, body]
+    // items = [{recv:{...}}?, name, {params}, {rets}?, body]
     function buildFunc(items) {
         var i = 0
         var recv = null
         if (items[i] != undefined && items[i].recv != undefined) { recv = items[i].recv; i++ }
         var name = items[i]
-        var params = items[i + 1].params
-        var body = items[i + 2]
+        var plist = items[i + 1]
+        var params = plist.params
+        var variadic = plist.variadic
+        i += 2
+        var rets = []
+        if (items[i] != undefined && items[i].rets != undefined) { rets = items[i].rets; i++ }
+        var body = items[i]
         if (recv != null) {
             // A method: attached to its struct descriptor after the whole compile.
-            methodTodo.push({recvName: recv, name: name, params: params, body: body})
+            methodTodo.push({recvName: recv, name: name, params: params, body: body, rets: rets, variadic: variadic})
         } else {
-            globalScope[name] = makeFunClosure(params, body)
+            globalScope[name] = makeFunClosure(params, body, rets, variadic)
             // In an imported package, an exported (capitalized) function is ALSO reached
             // through the package object (pkg.Fn), the way fmt.Println is (see importFile).
             if (curPkgName != null && isExported(name)) { pkgExports["$" + curPkgName].push(name) }
         }
     }
     var methodTodo = []
-    function makeFunClosure(params, body) {
+    function makeFunClosure(params, body, rets, variadic) {
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBody(params, body, undefined, "", args)
+            return invokeBodyG(params, body, undefined, "", args, rets, null, variadic)
         }
+    }
+    // A shallow copy of a struct value, for a value receiver and for array/struct
+    // assignment (Go copies both).
+    function goCopy(v) {
+        if (v == undefined || v == null || typeof v != "object") { return v }
+        if (Array.isArray(v)) { return v.slice(0) }
+        if (v.__class == undefined) { return v }
+        var out = {__class: v.__class}
+        var fs = v.__class.__fields
+        for (var i = 0; i < fs.length; i++) { scopePut(out, fs[i], goCopy(v[fs[i]])) }
+        return out
     }
     function makeMethodClosure(mm) {
         return function() {
-            var self = arguments[0]
+            var self = mm.byPtr ? arguments[0] : goCopy(arguments[0])
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBody(mm.params, mm.body, self, mm.recvName, args)
+            return invokeBodyG(mm.params, mm.body, self, mm.recvName, args, mm.rets, null, mm.variadic)
         }
+    }
+
+    // ----- Calling a Go function body -----
+    // Beyond the shared invokeBody this adds Go's NAMED RESULTS (declared as zero
+    // valued locals, filled in by an explicit return, read back AFTER the defers so a
+    // deferred closure can still change them) and panic/recover: a panic unwinds as a
+    // host exception, the defers of every frame it passes still run, and a recover()
+    // inside one of them turns it back into an ordinary return.
+    var panicVal = null
+    var panicking = false
+    hostGlobals["panic"] = function(v) { throw {__gopanic: true, v: v} }
+    hostGlobals["recover"] = function() {
+        if (!panicking) { return null }
+        panicking = false
+        var v = panicVal
+        panicVal = null
+        return v
+    }
+    // env == null: a top-level function (a fresh chain); otherwise a closure's chain.
+    function invokeBodyG(params, body, self, recvName, args, rets, env, variadic) {
+        var rl = (rets == undefined || rets == null) ? [] : rets
+        var saved = scopes
+        scopes = (env == null) ? [globalScope, {}] : env.slice(0)
+        if (env != null) { scopes.push({}) }
+        if (self != undefined) { declVar(recvName, self) }
+        var np = params.length
+        for (var i = 0; i < np; i++) {
+            if (variadic && i == np - 1) { declVar(params[i], args.slice(i)) }
+            else { declVar(params[i], i < args.length ? args[i] : undefined) }
+        }
+        for (var r = 0; r < rl.length; r++) { declVar(rl[r], 0) }
+        var frame = []
+        deferFrames.push(frame)
+        var myChain = scopes
+        var res = undefined
+        var caught = null
+        try {
+            res = body()
+        } catch (e) {
+            // The unwind left `scopes` wherever the panic happened; the defers of THIS
+            // frame have to run on this frame's own chain.
+            scopes = myChain
+            if (e != undefined && e != null && e.__gopanic == true) { caught = e }
+            else { deferFrames.pop(); scopes = saved; throw e }
+        }
+        deferFrames.pop()
+        if (caught != null) { panicking = true; panicVal = caught.v }
+        var out = (res != undefined && res != null && res.isRet) ? res.v : undefined
+        if (rl.length > 0 && res != undefined && res != null && res.isRet && res.v !== undefined) {
+            if (rl.length == 1) { setVar(rl[0], res.v) }
+            else { for (var k = 0; k < rl.length; k++) { setVar(rl[k], res.v[k]) } }
+        }
+        runDefers(frame)
+        if (panicking) {
+            panicking = false
+            var pv = panicVal
+            panicVal = null
+            scopes = saved
+            throw {__gopanic: true, v: pv}
+        }
+        if (rl.length > 0) {
+            if (rl.length == 1) { out = getVar(rl[0]) }
+            else {
+                var vs = []
+                for (var m = 0; m < rl.length; m++) { vs.push(getVar(rl[m])) }
+                out = vs
+            }
+        }
+        scopes = saved
+        return out
     }
 
     // ----- Core library config (see lib/interp-core.js) -----
@@ -1023,10 +2442,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     for (var mi = 0; mi < methodTodo.length; mi++) {
         var mm = methodTodo[mi]
         var recvVar = mm.recvName[0]
-        var recvType = mm.recvName[1]
+        var byPtr = mm.recvName.length > 2
+        var recvType = mm.recvName[mm.recvName.length - 1]
         var cls = hasOwn(structs, recvType) ? structs[recvType] : undefined
         if (cls == undefined) fail("method receiver type not found: " + recvType)
-        cls[mm.name] = makeMethodClosure({recvName: recvVar, name: mm.name, params: mm.params, body: mm.body})
+        cls["__ptr$" + mm.name] = byPtr
+        cls[mm.name] = makeMethodClosure({recvName: recvVar, name: mm.name, params: mm.params,
+                                          body: mm.body, rets: mm.rets, variadic: mm.variadic, byPtr: byPtr})
     }
 
     // The entry point defaults to main(), but the -main flag (c.mainName) can override it:

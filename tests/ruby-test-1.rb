@@ -192,7 +192,7 @@ end
 check("hash keys each", ksum, 2)
 
 # ----- symbols (approximated as strings) -----
-check("symbol", :hello, "hello")
+check("symbol", :hello == "hello", false)
 
 # ----- classes: @ivars, methods, self, C.new -----
 class Counter

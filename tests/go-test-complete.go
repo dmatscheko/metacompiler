@@ -66,7 +66,7 @@ func main() {
 	isum := 0
 	n := 0
 	for i, ch := range "hello" {
-		rebuilt += ch
+		rebuilt += string(ch)
 		isum += i
 		n++
 	}
@@ -77,7 +77,7 @@ func main() {
 	// blank index over a string
 	word := ""
 	for _, ch := range "go" {
-		word += ch
+		word += string(ch)
 	}
 	checkS("string range blank index", word, "go")
 
@@ -85,13 +85,13 @@ func main() {
 	third := ""
 	for i, ch := range "abcd" {
 		if i == 2 {
-			third = ch
+			third = string(ch)
 		}
 	}
 	checkS("string range nth char", third, "c")
 	hits := 0
 	for _, ch := range "banana" {
-		if ch == "a" {
+		if ch == 'a' {
 			hits++
 		}
 	}

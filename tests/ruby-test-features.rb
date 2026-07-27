@@ -26,9 +26,9 @@ check("arith-precedence", 1 + 2 * 3, 7)
 check("arith-paren", (1 + 2) * 3, 9)
 check("arith-unary-minus", -5 + 2, -3)
 check("arith-int-div", 7 / 2, 3)
-check("arith-int-div-neg", -7 / 2, -3)
+check("arith-int-div-neg", -7 / 2, -4)   # Ruby floors: -3.5 -> -4, not toward zero
 check("arith-mod", 7 % 3, 1)
-check("arith-mod-neg", -7 % 3, -1)
+check("arith-mod-neg", -7 % 3, 2)       # Ruby % takes the sign of the DIVISOR
 check("arith-chain", 20 - 5 - 3, 12)
 ca = 10
 ca += 5
@@ -65,7 +65,7 @@ check("str-include-miss", "hello".include?("z"), false)
 check("str-structural-eq", "ab" == "a" + "b", true)
 check("str-compare-lt", "apple" < "banana", true)
 check("str-unicode-len", "héllo".length, 5)
-check("symbol-is-string", :hello, "hello")
+check("symbol-not-string", :hello == "hello", false)  # a Symbol is its own type
 
 # ----- booleans, truthiness (only nil and false are falsy), short-circuit -----
 check("and-value", 3 && 4, 4)
@@ -412,7 +412,7 @@ check("hash-each-values", hvals, 6)
 
 opts = { color: "red", size: 4 }
 check("hash-symbol-key", opts[:color], "red")
-check("hash-symbol-as-string", opts["size"], 4)
+check("hash-symbol-not-string", opts["size"], nil)    # :size and "size" are different keys
 
 # ----- multiple assignment -----
 ma, mb = 1, 2
