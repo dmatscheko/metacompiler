@@ -1,49 +1,51 @@
 :title("Bash interpreter") ;
-:description("Parses a large practical subset of Bash and executes it directly during the
-compile walk, without generating code. Every value is a string (Bash's only data type);
-integer arithmetic converts on demand. Commands return an integer exit status (0 = success,
-like the shell); a 'return' inside a function yields the wrapper {ret: n} that the enclosing
-statement thunks pass on, and an 'exit' yields the same wrapper marked isExit, so it unwinds
-past callers but is caught by a subshell. echo writes to stdout, and 'exit N' ends the run
-with code N, so a test script is self checking: it echoes PASS/FAIL lines and exits with the
-failure count.
+:description("Parses and executes practical Bash directly during the compile walk, without
+generating code. Every value is a string (Bash's only data type); integer arithmetic converts on
+demand. Commands return an integer exit status (0 = success, like the shell); `return` yields the
+wrapper {ret: n} that the enclosing statement thunks pass on, `exit` the same wrapper marked
+isExit (so it unwinds past callers but is caught by a subshell), and break / continue travel as
+{brk: n} / {cont: n} through the same one protocol.
 
-Supported:
-  - assignment name=value, expansion $name, and the whole ${...} family that does not need
-    a pattern: ${name}, ${#name}, ${!name}, ${v:-d} ${v-d} ${v:=d} ${v:+a} ${v:?m}
-  - quoting: double \"...\" with interpolation, single '...', $'...' ANSI-C escapes, an
-    unquoted backslash escape and a backslash-newline line continuation
-  - command substitution $(...) and `...`, nested, with the trailing newlines stripped;
-    v=$(cmd) leaves cmd's status in $?
-  - arithmetic $(( )) and the (( )) command and let: the full operator set (** * / % + -
-    << >> comparisons == != & ^ | && || ?: assignment forms ++ -- and the comma), with
-    hexadecimal, octal and BASE#DIGITS literals
-  - if/elif/else, while, until, for name in words, for (( init; cond; step )), case with
-    glob patterns and the ;; ;& ;;& terminators, and [[ ]] conditionals (glob == and !=,
-    string and integer comparisons, ! && || and parentheses)
-  - the test builtin, [ ... ] and test ..., as a real expression: unary and binary
-    operators, ! -a -o and parenthesized groups
-  - functions in both spellings, name() and 'function' name; positional $1.., $#, $*, $@,
-    $?, $FUNCNAME; local with REAL dynamic scoping (saved and restored per call frame),
-    plus declare/typeset/export/readonly and unset
-  - pipelines with |, ! to negate a pipeline's status, && and || lists; each pipeline stage
-    runs with its stdout captured and handed to the next stage as standard input, and the
-    read builtin consumes it
-  - subshells ( LIST ) with variable, positional-parameter and exit isolation, and brace
-    groups { LIST; } that run in the current shell
-  - redirections >, >>, <, >&, <&, &>, >| and the here-string <<< ; and shift
+All 22 sections of tests/bash-test-full.sh pass, goja and -frozen byte-identical:
+  - quoting: double, single, $'...' ANSI-C escapes, backslash escapes, line continuation
+  - the whole ${...} family: ${v} ${#v} ${!v} ${v:-d} ${v-d} ${v:=d} ${v:+a} ${v:?m}
+    ${v:off:len} ${v#p} ${v##p} ${v%p} ${v%%p} ${v/p/r} ${v//p/r} ${v/#p/r} ${v/%p/r}
+    ${v^} ${v^^} ${v,} ${v,,} and every subscripted form of them
+  - command substitution $(...) and `...`, nested; v=$(cmd) leaves cmd's status in $?
+  - arithmetic $(( )), (( )) and let: the full operator set (** * / % + - << >> comparisons
+    == != & ^ | && || ?: the assignment forms ++ -- and the comma) with hexadecimal, octal
+    and BASE#DIGITS literals
+  - if/elif/else, while, until, for..in, for NAME (the positional parameters), for (( ;; )),
+    case with glob patterns and the ;; ;& ;;& terminators, break/continue with a level
+  - [[ ]] conditionals: glob == and != (a quoted pattern is literal), =~ with BASH_REMATCH
+    through the shared engine in lib/regex.js, string and integer comparisons, ! && || and
+    parentheses; and the test builtin as a real expression, with ! -a -o and groups
+  - functions in both spellings; local with REAL dynamic scoping, positional parameters,
+    $# $* $@ $? $FUNCNAME, shift and set --
+  - indexed and associative arrays: a=(x y z) a[i]=v a+=(w) ${a[i]} ${a[@]} ${a[*]} ${!a[*]}
+    ${#a[@]} ${a[*]:o:n}, unset a[i], declare -a/-A/-i/-u/-l, and read -a
+  - word splitting on IFS, brace expansion (lists, ranges and cross products) and tilde
+  - pipelines with |, ! to negate one, PIPESTATUS, && and || lists; each stage runs with its
+    stdout captured and handed to the next stage as standard input, which read consumes
+  - subshells ( LIST ) with variable, positional-parameter, option and exit isolation, and
+    brace groups { LIST; } that run in the current shell
+  - redirections > >> < >& <& &> >| , here-strings <<< and here-documents << and <<-
+  - builtins: echo (-n -e), printf (with -v), read, test/[, local/declare/typeset/export/
+    readonly, unset, shift, set (-e -u -o pipefail and --), trap ... EXIT, eval, break,
+    continue, return, exit, true/false/:
 
-There is NO filesystem behind a grammar run, so the file predicates (-e -f -d ...) answer
-from a small model of the standard paths (/dev/null and friends exist, / and /tmp and a few
-others are directories, everything else is absent), and an output redirection DISCARDS the
-output instead of writing a file, while an input redirection other than a here-string is
-end of file at once.
+Two things have no counterpart behind a grammar run and are MODELLED rather than faked. There
+is no filesystem, so the file predicates (-e -f -d ...) answer from a small model of the
+standard paths (/dev/null and friends exist, / and /tmp and a few others are directories,
+everything else is absent), and an output redirection discards the output instead of writing a
+file while an input redirection other than a here-document is end of file at once. There is no
+process environment or process id, so HOME, PWD and IFS start at fixed documented values and
+$$ / $! are constants. Standard error is a real second CHANNEL - which channel a redirection
+routes a command to is modelled exactly - but its text is dropped, since only stdout exists.
 
-Still OUT OF SCOPE: here-documents (<< and <<-), arrays (indexed and associative), brace
-and tilde expansion, the pattern-based ${v#p} ${v%p} ${v/p/r} and case-conversion forms,
-the =~ regex operator, word splitting of an unquoted expansion, set -e / -u / traps,
-printf, eval, and external commands. A leading # always starts a comment, so do not put a
-bare # inside an unquoted word (quote it).") ;
+Still out of scope: external commands of every kind, job control, process substitution,
+globbing against a real directory, getopts, and a here-document whose marker is not the last
+thing on its line (HdScan refuses those rather than mis-parsing them).") ;
 
 
 // --- main rules
@@ -62,7 +64,7 @@ OptSep      = [ Sep ] ;
 Sep         = SepTok { SepTok } ;
 SepTok      = ";" | "\n" ;
 
-Statement   = IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | FuncDef | AndOrList ;
+Statement   = AndOrList ;
 
 // A brace / keyword delimited body: at least one statement. The trailing OptSep swallows the
 // final ; or newline before the closing keyword (fi / done / }), and a reserved word in
@@ -110,12 +112,14 @@ CForStmt    <~~ push(makeCFor(takeAll())) ~~>
             = KwFor "((" :whitespace(Whitespace) ArList ";" ArList ";" ArList "))" OptSep KwDo CompoundList KwDone ;
 
 // for NAME in WORD...; do LIST; done  -- each word is one iteration value (no re-splitting).
+// for NAME in WORD...; do LIST; done   /   for NAME; do LIST; done (the positional parameters)
 ForStmt     <~~ push(makeFor(takeAll())) ~~>
-            = KwFor ForName KwIn ForWords Sep KwDo CompoundList KwDone ;
+            = KwFor ForName [ ForIn ] Sep KwDo CompoundList KwDone ;
+ForIn       = KwIn ForWords ;
 ForName     <~~ push({fname: up.in}) ~~>
             = Name ;
 ForWords    <~~ push({words: takeAll()}) ~~>
-            = { Word } ;
+            = { CWord } ;
 
 // NAME() { LIST; }, and the `function NAME [()]  { LIST; }` keyword form.
 FuncDef     <~~ push(makeFuncDef(takeAll())) ~~>
@@ -143,7 +147,20 @@ BangOp      <~~ push({bang: 1}) ~~> = "!" KwEnd ;
 PipeOp      = "|" NotBar ;
 
 // "((" must be tried before "(" or an arithmetic command parses as nested subshells.
-Command     = ArithCmd | CondCmd | Subshell | BraceGroup | LetCmd | DeclCommand | Assignment | SimpleCommand ;
+// A compound command is an ordinary Command, so it can be a pipeline stage
+// (`echo x | while read l; do ...; done`) and can carry redirections that apply to the
+// whole thing (`while read l; do ...; done < file`, `for x in ...; done <<EOF`).
+Command     = ArithCmd | CondCmd | Subshell | BraceGroup | CompoundRedir | LetCmd | DeclCommand | PrefixCommand | Assignment | SimpleCommand ;
+CompoundRedir <~~ push(mkRedirected(takeAll())) ~~> = CompoundCore [ RedirList ] ;
+CompoundCore = IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | FuncDef ;
+
+// NAME=VALUE... COMMAND ARGS : the assignments apply only for the duration of the command.
+// Tried before a bare Assignment, which is the same shape without a command word after it.
+PrefixCommand <~~ push(makePrefixCmd(takeAll())) ~~>
+            = AsgPrefix { AsgPrefix } NotReserved CWord { CmdSuffix } ;
+AsgPrefix   <~~ push(mkPrefixAsg(takeAll())) ~~>
+            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() AsgEq :whitespace() [ Word ] ;
+AsgEq       = "=" NotEq ;
 
 // ( LIST ) runs in a copy of the shell: variable changes and `exit` stay inside.
 Subshell    <~~ push(makeSubshell(pop())) ~~> = "(" CompoundList ")" [ RedirList ] ;
@@ -154,7 +171,8 @@ ArithCmd    <~~ push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArL
 // [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
 CondCmd     <~~ push(makeCondCmd(pop())) ~~> = "[[" :whitespace(Whitespace) CondOr "]]" ;
 
-RedirList   = Redir { Redir } ;
+RedirList   = RedirItem { RedirItem } ;
+RedirItem   = HereDoc | Redir ;
 
 // let EXPR ... : the same evaluator as (( )); a quoted argument is parsed as arithmetic.
 LetCmd      <~~ push(makeLetCmd(takeAll())) ~~> = KwLet LetArg { LetArg } ;
@@ -175,24 +193,60 @@ DeclFlag    <~~ push({dflag: up.in}) ~~> = "-" :whitespace() DeclFlagCh { DeclFl
 DeclFlagCh  = "a" | "A" | "i" | "r" | "x" | "u" | "l" | "g" | "n" | "p" | "f" | "F" ;
 DeclItem    = DeclAssign | DeclName ;
 DeclAssign  <~~ push(mkDeclItem(takeAll())) ~~>
-            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() "=" :whitespace() [ Word ] ;
+            = AsgIdent <~~ push({aname: up.in}) ~~> AsgTail ;
 DeclName    <~~ push({dname: up.in}) ~~> = Name ;
 
 // name=value : the = must stick to the name (no surrounding spaces), so the disable
 // (:whitespace()) sits in THIS sequence, right after the identifier. The value is optional
 // (name= is valid) and starts immediately after = with no space.
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
-            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() "=" :whitespace() [ Word ] ;
+            = AsgIdent <~~ push({aname: up.in}) ~~> AsgTail ;
+
+// The right hand side of an assignment: a word, or a parenthesised array literal. `+=`
+// appends (a string for a scalar, elements for an array).
+AsgTail     = [ AsgIdx ] :whitespace() AsgOp2 :whitespace() AsgRhs ;
+AsgIdx      <~~ push({aidx: 1}) ~~> = "[" IdxWord "]" ;
+AsgOp2      <~~ push({aop2: up.in}) ~~> = "+=" | AsgEq ;
+AsgRhs      = ArrayLit | AsgWord ;
+AsgWord     = [ Word ] ;
+ArrayLit    <~~ push(mkArrayLit(takeAll())) ~~> = "(" :whitespace(WsNL) ArrayItems ")" ;
+ArrayItems  = { ArrayItem } ;
+ArrayItem   = ArrayKV | CWord ;
+ArrayKV     <~~ push(mkArrayKV(takeAll())) ~~> = "[" IdxWord "]" :whitespace() "=" :whitespace() Word ;
+WsNL        = { @+" \t\r\n" | Comment } ;
 AsgIdent    = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
 
 // A command word followed by argument words. NotReserved blocks a bare reserved keyword in
 // command position (so 'done' / 'fi' / ... end an enclosing list instead of being commands).
 SimpleCommand <~~ push(makeSimpleCommand(takeAll())) ~~>
-            = NotReserved Word { CmdSuffix } ;
-CmdSuffix   = Redir | Word ;
+            = NotReserved CWord { CmdSuffix } ;
+CmdSuffix   = HereDoc | Redir | CWord ;
 
-// Redirections. Here-documents (<< and <<-) are NOT supported, so `<` declines a second "<"
-// rather than mis-parsing a here-document as two input redirections.
+// A here-document. Its body lives on the FOLLOWING lines, so it cannot be described by
+// ordinary productions: HdScan is a lexer that scans from the marker to the terminator line
+// and returns ONE token covering all of it (minus the terminator's own newline, which stays
+// behind as the statement separator), and mkHereDoc splits that text apart again.
+//
+// LIMIT: the marker must be the last thing on its line. Bash also allows code after it
+// (`cat <<EOF; echo --`, `cat <<A 3<<B`), which would need the body to be consumed where the
+// LINE ends rather than at the marker; HdScan refuses those rather than mis-parsing them, so
+// they stay an honest parse failure - as does <<< , which RedirTok handles instead.
+HereDoc     <~~ push(mkHereDoc(up.in)) ~~> = HdScan :whitespace(Whitespace) ;
+
+// The body of an unquoted here-document, re-parsed with this grammar. mec -verify reports
+// HereBodyW and its parts as unreachable, which is correct and expected: nothing in the start
+// rule refers to them, they are entered through c.parseFrom from mkHereDoc.
+// Literal runs, escapes
+// and $ expansions, exactly like the inside of a double-quoted string. The leading "\x01" is
+// prepended by mkHereDoc so the production can start with a token and then turn whitespace
+// skipping off (a production may not START with a Command - that is read as a repetition).
+HereBodyW   <~~ push(mkWord(takeAll())) ~~> = "\x01" :whitespace() HereSegs ;
+HereSegs    = { HereSeg } ;
+HereSeg     = ExpSeg | DqEsc | HereLit ;
+HereLit     <~~ push(makeConst(up.in)) ~~> = !@+"$\\`" ;
+
+// Redirections. `<` declines a second "<" so a here-document HdScan refused cannot fall
+// through and be mis-read as two input redirections.
 Redir       <~~ push(mkRedir(takeAll())) ~~>
             = [ IoNum ] RedirOp [ Word ] ;
 IoNum       <~~ push({iofd: up.in}) ~~> = "0"..."9" :whitespace() { "0"..."9" } ;
@@ -207,8 +261,40 @@ LtOne       = "<" NotLt ;
 // skipping off for the remaining segments so foo\"bar\"$x concatenates as one word.
 
 Word        <~~ push(mkWord(takeAll())) ~~>
-            = WordSeg :whitespace() { WordSeg } ;
-WordSeg     = SqSeg | DqSeg | AnsiSeg | ExpSeg | LineCont | EscSeg | BareSeg ;
+            = WordFirst :whitespace() { WordSeg } ;
+WordFirst   = Tilde | WordSeg ;
+WordSeg     = SqSeg | DqSeg | AnsiSeg | UqExp | LineCont | EscSeg | BraceLit | BareSeg ;
+
+// An expansion OUTSIDE quotes is subject to word splitting on IFS; the same production
+// inside a double-quoted string (or a ${...} word) is not, which is the only difference
+// between the two - so the split-able form is marked here rather than in the expansion.
+UqExp       <~~ push(mkSplittable(pop())) ~~> = ExpSeg ;
+
+// A word in COMMAND ARGUMENT position, where brace expansion applies and one written word
+// can therefore become several. Real bash does not brace-expand an assignment's right hand
+// side (a=x{1,2} really is the four characters x{1,2}), which is why this is its own rule.
+CWord       <~~ pushWords(mkWords(takeAll())) ~~>
+            = CWordFirst :whitespace() { CWordSeg } ;
+CWordFirst  = Tilde | CWordSeg ;
+CWordSeg    = SqSeg | DqSeg | AnsiSeg | UqExp | LineCont | EscSeg | BraceRange | BraceAlts | BraceLit | BareSeg ;
+
+// {a,b,c} needs at least one comma; {x} is literal. {1..5} {5..1} {a..e} {1..9..3} are ranges.
+BraceAlts   <~~ push(mkBraceAlts(takeAll())) ~~>
+            = "{" :whitespace() BraceAlt "," BraceAlt { "," BraceAlt } "}" ;
+BraceAlt    <~~ push({alt: takeAll()}) ~~> = { BraceAltSeg } ;
+BraceAltSeg = SqSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | BraceRange | BraceAlts | AltBare ;
+AltBare     <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;#$'\"\\(){},&|<>`" ;
+BraceRange  <~~ push(mkBraceRange(takeAll())) ~~>
+            = "{" :whitespace() RangeEnd ".." RangeEnd [ RangeStep ] "}" ;
+RangeEnd    <~~ push({rend: up.in}) ~~> = RangeTok ;
+RangeStep   <~~ push({rstep: up.in}) ~~> = ".." RangeNum ;
+RangeTok    = RangeNum | RangeAlpha ;
+RangeNum    = [ "-" ] "0"..."9" { "0"..."9" } ;
+RangeAlpha  = "a"..."z" | "A"..."Z" ;
+BraceLit    <~~ push(makeConst(up.in)) ~~> = "{" | "}" ;
+
+// ~ or ~/... at the START of a word expands to $HOME.
+Tilde       <~~ push(mkTilde()) ~~> = "~" TildeEnd ;
 
 // A backslash immediately followed by a newline is a line continuation: both vanish.
 LineCont    <~~ push(makeConst("")) ~~> = "\\" "\n" ;
@@ -223,7 +309,7 @@ AnsiLit     = !@+"'\\" ;
 SqSeg       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(up.in)) ~~> "'" ;
 
 // "double quoted" : literal runs, escapes and $ expansions concatenated.
-DqSeg       <~~ push(mkWord(takeAll())) ~~>
+DqSeg       <~~ push(mkDqWord(takeAll())) ~~>
             = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
 DqLit       <~~ push(makeConst(up.in)) ~~>
             = !@+"\"$\\`" ;
@@ -263,26 +349,64 @@ ArithExp    <~~ push(mkArith(pop())) ~~>
 // skipped (a default word may contain spaces), and the enclosing state is restored on return.
 DollarBrace <~~ push(mkParamExp(takeAll())) ~~>
             = "${" :whitespace() PeBody "}" ;
-PeBody      = PeLen | PeInd | PeOpForm | PePlain ;
-PeLen       <~~ push({pe: "len"}) ~~> = "#" PeName ;
-PeInd       <~~ push({pe: "ind"}) ~~> = "!" PeName ;
-PeOpForm    = PeName PeOp [ BraceWord ] ;
-PePlain     = PeName ;
+PeBody      = PeLen | PeInd | PePatForm | PeCaseForm | PeReplForm | PeOpForm | PeSubstrForm | PePlain ;
+PeLen       <~~ push({pe: "len"}) ~~> = "#" PeTarget ;
+PeInd       <~~ push({pe: "ind"}) ~~> = "!" PeTarget ;
+PeOpForm    = PeTarget PeOp [ BraceWord ] ;
+PePlain     = PeTarget ;
+
+// NAME or NAME[SUBSCRIPT] - the subscript is a word, read as an arithmetic index for an
+// indexed array and as a literal key for an associative one. "@" and "*" mean the whole array.
+PeTarget    = PeIdxRef | PeName ;
+PeIdxRef    <~~ push({hasIdx: 1}) ~~> = PeName "[" IdxWord "]" ;
+IdxWord     <~~ push(mkWord(takeAll())) ~~> = { IdxSeg } ;
+IdxSeg      = SqSeg | DqSeg | ExpSeg | EscSeg | IdxBare ;
+IdxBare     <~~ push(makeConst(up.in)) ~~> = !@+"]}\"'\\$`" ;
 PeName      <~~ push({pname: up.in}) ~~> = PeNameTok ;
 PeNameTok   = PeIdent | PeDigits | "@" | "*" | "#" | "?" | "!" | "$" | "-" ;
 PeIdent     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
 PeDigits    = "0"..."9" { "0"..."9" } ;
 // Longest first: ":-" must be tried before "-" (see the ordered-choice rule).
 PeOp        <~~ push({op: up.in}) ~~> = ":-" | ":=" | ":?" | ":+" | "-" | "=" | "?" | "+" ;
+// ${v#pat} ${v##pat} ${v%pat} ${v%%pat} : strip a matching prefix / suffix (# from the
+// front, % from the back; doubled = longest match).
+PePatForm   = PeTarget PePatOp PePatArg ;
+PePatOp     <~~ push({pe: up.in}) ~~> = "##" | "#" | "%%" | "%" ;
+PePatArg    <~~ push(mkWord(takeAll())) ~~> = { BraceSeg } ;
+
+// ${v^} ${v^^} ${v,} ${v,,} : case conversion of the first / of every character.
+PeCaseForm  = PeTarget PeCaseOp [ PePatArg ] ;
+PeCaseOp    <~~ push({pe: up.in}) ~~> = "^^" | "^" | ",," | "," ;
+
+// ${v/pat/rep} first match, ${v//pat/rep} every match, ${v/#pat/rep} anchored at the
+// start, ${v/%pat/rep} anchored at the end. The replacement may be omitted (delete).
+PeReplForm  = PeTarget PeReplOp [ PeReplAnchor ] ReplPat [ ReplTail ] ;
+PeReplOp    <~~ push({pe: up.in}) ~~> = "//" | "/" ;
+PeReplAnchor <~~ push({anchor: up.in}) ~~> = "#" | "%" ;
+ReplPat     <~~ push(mkWord(takeAll())) ~~> = { ReplSeg } ;
+ReplSeg     = SqSeg | DqSeg | ExpSeg | EscSeg | ReplBare ;
+ReplBare    <~~ push(makeConst(up.in)) ~~> = !@+"}/\"'\\$`" ;
+ReplTail    = "/" PePatArg ;
+
+// ${v:off} and ${v:off:len} : the offsets are arithmetic, so whitespace matters again -
+// which is also what tells ${v: -1} (a substring) from ${v:-default}.
+PeSubstrForm <~~ push({pe: "substr"}) ~~> = PeTarget ":" :whitespace(Whitespace) ArList [ PeSubLen ] ;
+PeSubLen    = ":" ArList ;
+
 // A word inside ${...}: anything up to the closing brace, expansions included.
 BraceWord   <~~ push(mkWord(takeAll())) ~~> = BraceSeg { BraceSeg } ;
 BraceSeg    = SqSeg | DqSeg | ExpSeg | EscSeg | BraceBare ;
 BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 DollarName  = "$" VarName <~~ push(mkVarRef(up.in)) ~~> ;
 DollarDigit = "$" ArgDigit <~~ push(mkVarRef(up.in)) ~~> ;
-DollarSpecial = DollarHash | DollarQ ;
+DollarSpecial = DollarHash | DollarQ | DollarStar | DollarAt | DollarPid | DollarBang | DollarDash ;
 DollarHash  <~~ push(mkVarRef("#")) ~~> = "$#" ;
 DollarQ     <~~ push(mkVarRef("?")) ~~> = "$?" ;
+DollarStar  <~~ push(mkVarRef("*")) ~~> = "$*" ;
+DollarAt    <~~ push(mkVarRef("@")) ~~> = "$@" ;
+DollarPid   <~~ push(mkVarRef("$")) ~~> = "$$" ;
+DollarBang  <~~ push(mkVarRef("!")) ~~> = "$!" ;
+DollarDash  <~~ push(mkVarRef("-")) ~~> = "$-" ;
 DollarLit   <~~ push(makeConst("$")) ~~> = "$" ;
 
 VarName     = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
@@ -363,14 +487,33 @@ CondOr      <~~ push(foldCondOr(takeAll())) ~~> = CondAnd { "||" CondAnd } ;
 CondAnd     <~~ push(foldCondAnd(takeAll())) ~~> = CondNot { "&&" CondNot } ;
 CondNot     = CondNeg | CondPrim ;
 CondNeg     <~~ push(mkCondNot(pop())) ~~> = "!" CondNot ;
-CondPrim    = CondParen | CondUn | CondBin | CondSingle ;
+CondPrim    = CondParen | CondUn | CondMatch | CondBin | CondSingle ;
+
+// [[ STR =~ ERE ]] : the right hand side is a REGEX, so ( ) | + ? { } are ordinary
+// characters there and need a word production of their own. Quoted parts stay literal and
+// $ expansions still happen, exactly as in bash.
+CondMatch   <~~ push(mkCondMatch(takeAll())) ~~> = Word CondMatchOp RegexWord ;
+CondMatchOp <~~ push({cop: up.in}) ~~> = "=~" ;
+RegexWord   <~~ push(mkWord(takeAll())) ~~> = RegexSeg :whitespace() { RegexSeg } ;
+RegexSeg    = SqSeg | DqSeg | ExpSeg | EscSeg | RegexBare ;
+RegexBare   <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;&<>$'\"\\`" ;
 CondParen   = "(" CondOr ")" ;
 CondUn      <~~ push(mkCondUn(takeAll())) ~~> = CondUnOp Word ;
 CondUnOp    <~~ push({cop: up.in}) ~~> = CondUnTok KwEnd ;
 CondUnTok   = "-z" | "-n" | "-v" | "-e" | "-f" | "-d" | "-s" | "-r" | "-w" | "-x" | "-h" | "-L" | "-b" | "-c" | "-p" | "-S" | "-t" | "-o" ;
-CondBin     <~~ push(mkCondBin(takeAll())) ~~> = Word CondBinOp Word ;
+// The right hand side of == / != inside [[ ]] is a PATTERN, and a quoted part of it is
+// literal (`[[ $s == "h*" ]]` does not glob), so quoted segments are glob-escaped here.
+CondBin     <~~ push(mkCondBin(takeAll())) ~~> = Word CondBinOp PatWord ;
+PatWord     <~~ push(mkWord(takeAll())) ~~> = PatSeg :whitespace() { PatSeg } ;
+PatSeg      = PatSq | PatDq | PatAnsi | ExpSeg | PatEsc | BareSeg ;
+PatSq       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(globEscape(up.in))) ~~> "'" ;
+PatDq       <~~ push(mkQuotedPat(mkDqWord(takeAll()))) ~~>
+            = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
+PatAnsi     = "$'" :whitespace() PatAnsiBody "'" ;
+PatAnsiBody <~~ push(makeConst(globEscape(ansiC(up.in)))) ~~> = { AnsiEsc | AnsiLit } ;
+PatEsc      <~~ push(makeConst(globEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 CondBinOp   <~~ push({cop: up.in}) ~~> = CondBinTok ;
-CondBinTok  = "==" | "!=" | "=~" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-nt" | "-ot" | "-ef" | "=" | "<" | ">" ;
+CondBinTok  = "==" | "!=" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-nt" | "-ot" | "-ef" | "=" | "<" | ">" ;
 CondSingle  <~~ push(mkCondSingle(pop())) ~~> = Word ;
 
 
@@ -403,6 +546,106 @@ NotBar = :script(~~
 NotLt = :script(~~
     (function() {
         if (c.peek(0) === 60) { return abnf.newToken("\x01lt", 0) }
+    })()
+~~) ;
+
+// A tilde only expands when the word ends there or continues with "/".
+TildeEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        if (cc == -1 || cc == 47) { return undefined }
+        if (cc == 32 || cc == 9 || cc == 10 || cc == 13) { return undefined }
+        if (cc == 59 || cc == 38 || cc == 124 || cc == 41 || cc == 62 || cc == 60) { return undefined }
+        return abnf.newToken("\x01tilde", 0)
+    })()
+~~) ;
+
+HdScan = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01noheredoc", 0)
+        // Whitespace is not skipped before a script, so step over blanks exactly like the
+        // token match that follows will.
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
+        var start = i
+        if (c.peek(i) !== 60 || c.peek(i + 1) !== 60) { return no }
+        i = i + 2
+        if (c.peek(i) === 60) { return no }           // <<< is a here-STRING
+        var dashed = false
+        if (c.peek(i) === 45) { dashed = true; i = i + 1 }
+        while (c.peek(i) === 32 || c.peek(i) === 9) { i = i + 1 }
+        var quote = 0
+        var q = c.peek(i)
+        if (q === 39 || q === 34) { quote = q; i = i + 1 }
+        var id = ""
+        var ch = c.peek(i)
+        while ((ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch === 95) {
+            id = id + String.fromCharCode(ch)
+            i = i + 1
+            ch = c.peek(i)
+        }
+        if (id === "") { return no }
+        if (quote !== 0) {
+            if (c.peek(i) !== quote) { return no }
+            i = i + 1
+        }
+        // Nothing but blanks may follow the marker on its own line.
+        var j = i
+        var dd = c.peek(j)
+        while (dd === 32 || dd === 9 || dd === 13) { j = j + 1; dd = c.peek(j) }
+        if (dd !== 10) { return no }
+        j = j + 1
+        // Walk whole lines until one is exactly the marker (leading tabs ignored for <<-),
+        // and stop just BEFORE that line's newline.
+        var end = -1
+        var guard = 0
+        while (guard < 1000000) {
+            guard = guard + 1
+            var k = j
+            var b = c.peek(k)
+            if (b === -1) { end = k; guard = 1000000; continue }
+            if (dashed) { while (b === 9) { k = k + 1; b = c.peek(k) } }
+            var mm = 0
+            while (mm < id.length && c.peek(k + mm) === id.charCodeAt(mm)) { mm = mm + 1 }
+            var after = c.peek(k + mm)
+            if (mm === id.length && (after === 10 || after === 13 || after === -1)) {
+                end = k + mm
+                guard = 1000000
+                continue
+            }
+            while (b !== 10 && b !== -1) { k = k + 1; b = c.peek(k) }
+            if (b === -1) { return no }
+            j = k + 1
+        }
+        if (end < 0) { return no }
+        // Rebuild the exact source slice as a token. c.peek answers BYTES, so the UTF-8 has
+        // to be decoded here or a non-ASCII body would never match.
+        var out = ""
+        var p = start
+        while (p < end) {
+            var b0 = c.peek(p)
+            if (b0 < 128) { out = out + String.fromCharCode(b0); p = p + 1; continue }
+            if (b0 >= 240) {
+                var cp4 = ((b0 - 240) * 262144) + ((c.peek(p + 1) - 128) * 4096) + ((c.peek(p + 2) - 128) * 64) + (c.peek(p + 3) - 128)
+                var off = cp4 - 65536
+                out = out + String.fromCharCode(55296 + ((off - (off % 1024)) / 1024)) + String.fromCharCode(56320 + (off % 1024))
+                p = p + 4
+                continue
+            }
+            if (b0 >= 224) {
+                out = out + String.fromCharCode(((b0 - 224) * 4096) + ((c.peek(p + 1) - 128) * 64) + (c.peek(p + 2) - 128))
+                p = p + 3
+                continue
+            }
+            if (b0 >= 192) {
+                out = out + String.fromCharCode(((b0 - 192) * 64) + (c.peek(p + 1) - 128))
+                p = p + 2
+                continue
+            }
+            return no
+        }
+        return abnf.newToken(out, 0)
     })()
 ~~) ;
 
@@ -446,6 +689,14 @@ NotReserved = :script(~~
         var i = 0
         var cc = c.peek(i)
         while (cc == 32 || cc == 9) { i = i + 1; cc = c.peek(i) }
+        // "}" standing alone is the reserved word that closes a brace group, never a command
+        // (a bare "{" or "}" IS an ordinary word character elsewhere, for {single} and a}b).
+        if (cc == 125) {
+            var nb = c.peek(i + 1)
+            if (nb == -1 || nb == 32 || nb == 9 || nb == 10 || nb == 13 || nb == 59 || nb == 38 || nb == 124 || nb == 41) {
+                return abnf.newToken("\x01close-brace", 0)
+            }
+        }
         var w = ""
         cc = c.peek(i)
         while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) { w = w + String.fromCharCode(cc); i = i + 1; cc = c.peek(i) }
@@ -467,6 +718,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 // ---
 
 :startScript(~~
+
+    // The shared regular-expression engine, used for [[ str =~ ere ]].
+    include("lib/regex.js")
 
     // ---- tiny stack / string helpers (self contained, no shared core) ----
 
@@ -548,10 +802,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var capStack = []
     var cmdSubRan = false   // did the word just evaluated contain a substitution? ($? rule)
 
-    function emitOut(s) {
+    // Two output channels. 0 = standard output (captured by $( ) when one is open), 1 = the
+    // standard error channel, 2 = discarded. There is no stderr primitive behind a grammar
+    // run, so channel 1's text is dropped - what MATTERS for a script is which channel a
+    // redirection routes a command to, and that is modelled exactly.
+    var sinkOut = 0
+    var sinkErr = 1
+
+    function writeChan(ch, s) {
+        if (ch != 0) { return }
         if (capStack.length > 0) { capStack[capStack.length - 1] = capStack[capStack.length - 1] + s }
         else { print(s) }
     }
+    function emitOut(s) { writeChan(sinkOut, s) }
+    function emitErr(s) { writeChan(sinkErr, s) }
 
     function setStatus(s) { lastStatus = s | 0 }
 
@@ -560,7 +824,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function touchVar(name) {
         if (!hasOwn(varsHas, "$" + name)) { varNames.push(name) }
     }
-    function setVarVal(name, val) { touchVar(name); vars["$" + name] = val; varsHas["$" + name] = true }
+    function setVarVal(name, val) {
+        if (isArr(name)) { arrSet(name, "0", val); return }
+        touchVar(name); vars["$" + name] = val; varsHas["$" + name] = true
+    }
     function snapshotVars() {
         var snap = []
         var i
@@ -583,6 +850,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // here-string, empty (immediate end of file) otherwise.
     var stdinBuf = ""
     var stdinPos = 0
+
+    // Shell options (set -e / -u / -o pipefail) and the EXIT trap. They are part of the
+    // subshell state, so ( ) and $( ) save and restore them along with the variables.
+    var optErrExit = false
+    var optNounset = false
+    var optPipefail = false
+    var exitTrap = null      // a statement thunk, or null
+    var condDepth = 0        // >0 while a command runs as a CONDITION (set -e does not fire)
+    var abortSignal = null   // set by a set -u failure during expansion
+
+    // There is no process environment behind a grammar run, so the few variables a script may
+    // reasonably expect to exist get a fixed, documented default.
+    vars["$HOME"] = "/home/user"; varsHas["$HOME"] = true; varNames.push("HOME")
+    vars["$PWD"] = "/home/user"; varsHas["$PWD"] = true; varNames.push("PWD")
+    // IFS is an ordinary SET variable in a real shell, which is what makes the
+    // saved_ifs="$IFS" ... IFS="$saved_ifs" idiom round-trip.
+    vars["$IFS"] = " \t\n"; varsHas["$IFS"] = true; varNames.push("IFS")
     function isSetVar(name) {
         var key = "$" + name
         if (!hasOwn(varsHas, key)) { return false }
@@ -621,16 +905,25 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function getVarVal(name) {
         if (name == "?") { return numToStr(lastStatus) }
+        // There is no process behind a grammar run, so $$ and $! are fixed, documented values.
+        if (name == "$") { return "1000" }
+        if (name == "!") { return "0" }
+        if (name == "-") { return "hB" }
         if (name == "#") { return numToStr(posParams.length) }
-        if (name == "*" || name == "@") { return joinParams(ifsFirst()) }
+        if (name == "*") { return joinParams(ifsFirst()) }
+        if (name == "@") { return encFields(posParams) }
         if (allDigits(name)) {
             var idx = strToInt(name)
             if (idx == 0) { return "bash" }
             if (idx <= posParams.length) { return posParams[idx - 1] }
             return ""
         }
+        if (isArr(name)) { return arrGet(name, "0") }
         var key = "$" + name
-        if (hasOwn(vars, key)) { return vars[key] }
+        if (hasOwn(vars, key) && (!hasOwn(varsHas, key) || varsHas[key])) { return vars[key] }
+        // set -u: an unbound variable ends the (sub)shell. Expansion has no way to return a
+        // status, so the abort is recorded and picked up by the command about to run.
+        if (optNounset) { abortSignal = {ret: 1, isExit: 1} }
         return ""
     }
     // "$*" joins with the FIRST character of IFS (a space when IFS is unset).
@@ -641,34 +934,218 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return v.charAt(0)
     }
 
-    // ${...} : items are [{pe}?, {pname}, {op}?, defaultWordThunk?]
+    // ---- the pattern based ${...} forms, all built on the glob matcher ----
+
+    // Shortest / longest prefix or suffix of v that matches pat, removed.
+    function stripPat(v, pat, isPrefix, longest) {
+        var n = v.length
+        var t = 0
+        while (t <= n) {
+            var k = (longest == isPrefix) ? (n - t) : t
+            var cand = isPrefix ? v.slice(0, k) : v.slice(k)
+            if (globMatch(pat, cand)) { return isPrefix ? v.slice(k) : v.slice(0, k) }
+            t = t + 1
+        }
+        return v
+    }
+    // The end index of the LONGEST match of pat starting at i, or -1.
+    function matchLenAt(pat, v, i) {
+        var j = v.length
+        while (j >= i) {
+            if (globMatch(pat, v.slice(i, j))) { return j }
+            j = j - 1
+        }
+        return -1
+    }
+    // The start index of the LONGEST match of pat that reaches the end of v, or -1.
+    function matchAtEnd(pat, v) {
+        var i = 0
+        while (i <= v.length) {
+            if (globMatch(pat, v.slice(i))) { return i }
+            i = i + 1
+        }
+        return -1
+    }
+    function replacePat(v, pat, rep, mode) {
+        if (mode == "#") {
+            var j = matchLenAt(pat, v, 0)
+            if (j < 0) { return v }
+            return rep + v.slice(j)
+        }
+        if (mode == "%") {
+            var i0 = matchAtEnd(pat, v)
+            if (i0 < 0) { return v }
+            return v.slice(0, i0) + rep
+        }
+        var out = ""
+        var i = 0
+        var done = false
+        while (i <= v.length && !done) {
+            var j2 = matchLenAt(pat, v, i)
+            if (j2 > i) {
+                out = out + rep
+                i = j2
+                if (mode == "one") { out = out + v.slice(i); done = true }
+            } else {
+                if (i < v.length) { out = out + v.charAt(i) }
+                i = i + 1
+            }
+        }
+        return out
+    }
+    function caseMap(v, mode) {
+        var out = ""
+        var i
+        var up = (mode == "^" || mode == "^^")
+        var all = (mode == "^^" || mode == ",,")
+        for (i = 0; i < v.length; i++) {
+            var cc = v.charCodeAt(i)
+            if (all || i == 0) {
+                if (up) { if (cc >= 97 && cc <= 122) { cc = cc - 32 } }
+                else { if (cc >= 65 && cc <= 90) { cc = cc + 32 } }
+            }
+            out = out + String.fromCharCode(cc)
+        }
+        return out
+    }
+
+    function sliceStr(v, offT, lenT) {
+        var off = offT()
+        if (off < 0) { off = v.length + off; if (off < 0) { off = 0 } }
+        if (off > v.length) { return "" }
+        if (lenT == null) { return v.slice(off) }
+        var ln = lenT()
+        if (ln < 0) {
+            var end = v.length + ln
+            if (end < off) { return "" }
+            return v.slice(off, end)
+        }
+        var e2 = off + ln
+        if (e2 > v.length) { e2 = v.length }
+        return v.slice(off, e2)
+    }
+
+    // ${...} : items are [{pname}, {pe}?, {op}?, {anchor}?, wordThunk / arithThunk ...]
     function mkParamExp(items) {
-        var pe = "", name = "", op = ""
+        var pe = "", name = "", op = "", anchor = ""
+        var args = []
         var wordT = null
+        var hasIdx = false
         var i
         for (i = 0; i < items.length; i++) {
             var it = items[i]
-            if (typeof it == "function") { wordT = it }
+            if (typeof it == "function") { args.push(it); wordT = it }
+            else if (it.hasIdx != undefined) { hasIdx = true }
             else if (it.pe != undefined) { pe = it.pe }
             else if (it.pname != undefined) { name = it.pname }
             else if (it.op != undefined) { op = it.op }
+            else if (it.anchor != undefined) { anchor = it.anchor }
+        }
+        // NAME[SUBSCRIPT]: the first word thunk is the subscript, the rest belong to the
+        // operator form (a default word, a pattern, a replacement).
+        var idxT = null
+        if (hasIdx && args.length > 0) {
+            idxT = args[0]
+            args = args.slice(1)
+            if (wordT == args[0]) { wordT = null }
+            wordT = (args.length > 0) ? args[args.length - 1] : null
+        }
+        if (idxT != null) {
+            var readIdx = function() {
+                var sub = wordJoin(idxT())
+                if (sub == "@" || sub == "*") { return sub }
+                if (isArr(name) && arrs[arrKey(name)].assoc) { return sub }
+                return numToStr(strToInt(sub))
+            }
+            if (pe == "len") {
+                return function() {
+                    var sub = readIdx()
+                    if (sub == "@" || sub == "*") { return numToStr(arrKeyList(name).length) }
+                    return numToStr(arrGet(name, sub).length)
+                }
+            }
+            if (pe == "ind") {
+                return function() {
+                    var sub = readIdx()
+                    var ks = arrKeyList(name)
+                    if (sub == "@") { return encFields(ks) }
+                    return joinList(ks, ifsFirst())
+                }
+            }
+            if (pe == "substr") {
+                // ${a[@]:off:len} slices the ELEMENT list, not a string.
+                var offT = args[0]
+                var lenT = (args.length > 1) ? args[1] : null
+                return function() {
+                    var sub = readIdx()
+                    if (sub != "@" && sub != "*") { return sliceStr(arrGet(name, sub), offT, lenT) }
+                    var vals = arrValList(name)
+                    var off = offT()
+                    if (off < 0) { off = vals.length + off; if (off < 0) { off = 0 } }
+                    var n = (lenT != null) ? lenT() : (vals.length - off)
+                    if (n < 0) { n = vals.length + n - off }
+                    var out = []
+                    var i2
+                    for (i2 = off; i2 < off + n && i2 < vals.length; i2++) { out.push(vals[i2]) }
+                    if (sub == "@") { return encFields(out) }
+                    return joinList(out, ifsFirst())
+                }
+            }
+            return function() {
+                var sub = readIdx()
+                if (sub == "@") { return encFields(arrValList(name)) }
+                if (sub == "*") { return joinList(arrValList(name), ifsFirst()) }
+                return arrGet(name, sub)
+            }
         }
         if (pe == "len") { return function() { return numToStr(getVarVal(name).length) } }
         if (pe == "ind") { return function() { return getVarVal(getVarVal(name)) } }
+        if (pe == "substr") {
+            var offT0 = args[0]
+            var lenT0 = (args.length > 1) ? args[1] : null
+            return function() { return sliceStr(getVarVal(name), offT0, lenT0) }
+        }
+        if (pe == "#" || pe == "##" || pe == "%" || pe == "%%") {
+            var isPre = (pe == "#" || pe == "##")
+            var lng = (pe == "##" || pe == "%%")
+            var patT = (args.length > 0) ? args[0] : null
+            return function() {
+                var v = getVarVal(name)
+                var pat = (patT != null) ? wordJoin(patT()) : ""
+                if (pat == "") { return v }
+                return stripPat(v, pat, isPre, lng)
+            }
+        }
+        if (pe == "^" || pe == "^^" || pe == "," || pe == ",,") {
+            var cmode = pe
+            return function() { return caseMap(getVarVal(name), cmode) }
+        }
+        if (pe == "/" || pe == "//") {
+            var rmode = (anchor != "") ? anchor : ((pe == "//") ? "all" : "one")
+            var pT = (args.length > 0) ? args[0] : null
+            var rT = (args.length > 1) ? args[1] : null
+            return function() {
+                var v = getVarVal(name)
+                var pat = (pT != null) ? wordJoin(pT()) : ""
+                var rep = (rT != null) ? wordJoin(rT()) : ""
+                if (pat == "") { return v }
+                return replacePat(v, pat, rep, rmode)
+            }
+        }
         if (op == "") { return function() { return getVarVal(name) } }
         return function() {
             var v = getVarVal(name)
             var colon = (op.charAt(0) == ":")
             var o = colon ? op.slice(1) : op
             var blank = colon ? (!isSetVar(name) || v == "") : (!isSetVar(name))
-            if (o == "-") { return blank ? ((wordT != null) ? wordT() : "") : v }
-            if (o == "+") { return blank ? "" : ((wordT != null) ? wordT() : "") }
+            if (o == "-") { return blank ? ((wordT != null) ? wordJoin(wordT()) : "") : v }
+            if (o == "+") { return blank ? "" : ((wordT != null) ? wordJoin(wordT()) : "") }
             if (o == "=") {
-                if (blank) { var d = (wordT != null) ? wordT() : ""; setVarVal(name, d); return d }
+                if (blank) { var d = (wordT != null) ? wordJoin(wordT()) : ""; setVarVal(name, d); return d }
                 return v
             }
             if (o == "?") {
-                if (blank) { fail(name + ": " + ((wordT != null) ? wordT() : "parameter null or not set")) }
+                if (blank) { fail(name + ": " + ((wordT != null) ? wordJoin(wordT()) : "parameter null or not set")) }
                 return v
             }
             return v
@@ -678,30 +1155,40 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // items = [{dkw}, {dflag}*, ({dname} | {aname, val})*]
     function makeDecl(items) {
         var kw = items[0].dkw
+        var flags = ""
         var names = []
-        var vals = []
+        var asgs = []
         var i
         for (i = 1; i < items.length; i++) {
             var it = items[i]
-            if (it.dflag != undefined) { continue }
-            if (it.dname != undefined) { names.push(it.dname); vals.push(null) }
-            else { names.push(it.aname); vals.push(it.val) }
+            if (it.dflag != undefined) { flags = flags + it.dflag; continue }
+            if (it.dname != undefined) { names.push(it.dname); asgs.push(null) }
+            else { names.push(it.a.name); asgs.push(it.a) }
         }
+        var isArray = (flags.indexOf("a") >= 0) || (flags.indexOf("A") >= 0)
+        var assoc = (flags.indexOf("A") >= 0)
+        var upper = (flags.indexOf("u") >= 0)
+        var lower = (flags.indexOf("l") >= 0)
+        var integer = (flags.indexOf("i") >= 0)
         return function() {
             var k
             for (k = 0; k < names.length; k++) {
                 if (kw == "local") { declareLocal(names[k]) }
-                if (vals[k] != null) { setVarVal(names[k], vals[k]()) }
-                else if (kw == "local") { unsetVar(names[k]) }
+                if (integer) { intVars["$" + names[k]] = true }
+                if (isArray && asgs[k] == null) { arrs[arrKey(names[k])] = {assoc: assoc, keys: [], vals: {}} }
+                if (asgs[k] != null) {
+                    if (isArray) { arrs[arrKey(names[k])] = {assoc: assoc, keys: [], vals: {}} }
+                    runAssign(asgs[k], assoc)
+                    if (upper) { setVarVal(names[k], caseMap(getVarVal(names[k]), "^^")) }
+                    if (lower) { setVarVal(names[k], caseMap(getVarVal(names[k]), ",,")) }
+                }
+                else if (kw == "local" && !isArray) { unsetVar(names[k]) }
             }
             setStatus(0)
             return 0
         }
     }
-    // items = [{aname}] or [{aname}, valueWordThunk]
-    function mkDeclItem(items) {
-        return {aname: items[0].aname, val: (items.length > 1) ? items[1] : null}
-    }
+    function mkDeclItem(items) { return {a: parseAssign(items)} }
 
     // ---- glob (pathname-style) pattern matching: * ? [...] and a backslash escape ----
     // The same matcher backs case, [[ == ]] and the ${v#pat} family, exactly like the shell.
@@ -773,6 +1260,156 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function globMatch(pat, s) { return globAt(pat, 0, s, 0) }
 
+    // ---- field lists ------------------------------------------------------------------
+    // A word thunk normally answers a plain string (exactly one field). When a word can
+    // expand to SEVERAL fields - "$@", "${a[@]}", or an unquoted expansion split on IFS - it
+    // answers an ENCODED list instead: "\x02" followed by each field and a "\x01" after it.
+    // The trailing separator makes the empty list ("\x02") and the one-empty-field list
+    // ("\x02\x01") different, which is what makes `a=($empty)` produce no element at all.
+    function encFields(list) {
+        var out = "\x02"
+        var i
+        for (i = 0; i < list.length; i++) { out = out + list[i] + "\x01" }
+        return out
+    }
+    function isFields(s) { return s.length > 0 && s.charAt(0) == "\x02" }
+    function decFields(s) {
+        if (!isFields(s)) { return [s] }
+        var out = []
+        var cur = ""
+        var i
+        for (i = 1; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch == "\x01") { out.push(cur); cur = "" } else { cur = cur + ch }
+        }
+        return out
+    }
+    function wordFields(s) { return decFields(s) }
+    function wordJoin(s) {
+        if (!isFields(s)) { return s }
+        var f = decFields(s)
+        var out = ""
+        var i
+        for (i = 0; i < f.length; i++) { if (i > 0) { out = out + " " }; out = out + f[i] }
+        return out
+    }
+    // Expand a list of word thunks into the flat list of fields they produce.
+    function expandWords(thunks) {
+        var out = []
+        var i
+        for (i = 0; i < thunks.length; i++) {
+            var f = wordFields(thunks[i]())
+            var k
+            for (k = 0; k < f.length; k++) { out.push(f[k]) }
+        }
+        return out
+    }
+    function mkSplittable(t) { return {sp: t} }
+
+    // ---- arrays -------------------------------------------------------------------------
+    // One store for both kinds: keys are strings, kept in insertion order for an associative
+    // array and in numeric order for an indexed one (which is also what ${!a[*]} reports).
+    var intVars = {}   // names declared with `declare -i`: their assignments are arithmetic
+    var arrs = {}
+    function arrKey(name) { return "$" + name }
+    function isArr(name) {
+        var k = arrKey(name)
+        if (!hasOwn(arrs, k)) { return false }
+        return arrs[k] != null
+    }
+    function arrEnsure(name, assoc) {
+        var k = arrKey(name)
+        if (!hasOwn(arrs, k)) { arrs[k] = {assoc: assoc, keys: [], vals: {}} }
+        else if (assoc) { arrs[k].assoc = true }
+        return arrs[k]
+    }
+    function arrNorm(a, key) {
+        if (a.assoc) { return key }
+        return numToStr(strToInt(key))
+    }
+    function arrSet(name, key, val) {
+        var a = arrEnsure(name, false)
+        var kk = arrNorm(a, key)
+        if (!hasOwn(a.vals, "$" + kk)) {
+            if (a.assoc) { a.keys.push(kk) }
+            else {
+                // keep the index list in numeric order, so ${!a[*]} and ${a[@]} are sorted
+                var n = strToInt(kk)
+                var at = a.keys.length
+                var i
+                for (i = a.keys.length - 1; i >= 0; i--) { if (strToInt(a.keys[i]) > n) { at = i } }
+                a.keys.push("")
+                var j
+                for (j = a.keys.length - 1; j > at; j--) { a.keys[j] = a.keys[j - 1] }
+                a.keys[at] = kk
+            }
+        }
+        a.vals["$" + kk] = val
+    }
+    function arrGet(name, key) {
+        if (!isArr(name)) { return "" }
+        var a = arrs[arrKey(name)]
+        var kk = arrNorm(a, key)
+        if (hasOwn(a.vals, "$" + kk)) { return a.vals["$" + kk] }
+        return ""
+    }
+    function arrHas(name, key) {
+        if (!isArr(name)) { return false }
+        var a = arrs[arrKey(name)]
+        return hasOwn(a.vals, "$" + arrNorm(a, key))
+    }
+    function arrDel(name, key) {
+        if (!isArr(name)) { return }
+        var a = arrs[arrKey(name)]
+        var kk = arrNorm(a, key)
+        if (!hasOwn(a.vals, "$" + kk)) { return }
+        a.vals["$" + kk] = ""
+        var at = -1
+        var i
+        for (i = 0; i < a.keys.length; i++) { if (a.keys[i] == kk) { at = i } }
+        if (at >= 0) {
+            for (i = at; i < a.keys.length - 1; i++) { a.keys[i] = a.keys[i + 1] }
+            a.keys.pop()
+        }
+        delete0(a.vals, "$" + kk)
+    }
+    // The frozen engine has no `delete`, so an erased key is remembered by the key LIST only.
+    function delete0(o, k) { o[k] = "" }
+    function arrKeyList(name) {
+        if (!isArr(name)) { return [] }
+        var a = arrs[arrKey(name)]
+        var out = []
+        var i
+        for (i = 0; i < a.keys.length; i++) { out.push(a.keys[i]) }
+        return out
+    }
+    function arrValList(name) {
+        var ks = arrKeyList(name)
+        var out = []
+        var i
+        for (i = 0; i < ks.length; i++) { out.push(arrGet(name, ks[i])) }
+        return out
+    }
+    function arrFromList(name, assoc, list) {
+        var k = arrKey(name)
+        arrs[k] = {assoc: assoc, keys: [], vals: {}}
+        var i
+        for (i = 0; i < list.length; i++) { arrSet(name, numToStr(i), list[i]) }
+    }
+    function arrAppendList(name, list) {
+        var a = arrEnsure(name, false)
+        var next = 0
+        var i
+        for (i = 0; i < a.keys.length; i++) { var n = strToInt(a.keys[i]); if (n >= next) { next = n + 1 } }
+        for (i = 0; i < list.length; i++) { arrSet(name, numToStr(next + i), list[i]) }
+    }
+    function joinList(list, sep) {
+        var out = ""
+        var i
+        for (i = 0; i < list.length; i++) { if (i > 0) { out = out + sep }; out = out + list[i] }
+        return out
+    }
+
     // ---- word / expansion thunks: function() -> string ----
 
     function makeConst(s) { return function() { return s } }
@@ -787,23 +1424,164 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkCmdSub(bodyT) {
         return function() {
             capStack.push("")
+            var saved = saveShellState()
+            var savedFrames = localFrames
+            localFrames = []
             var r = anytype
             r = bodyT()
+            runExitTrap()
+            restoreShellState(saved)
+            localFrames = savedFrames
             var out = capStack.pop()
             if (typeof r == "object") { setStatus(r.ret) } else { setStatus(r) }
             cmdSubRan = true
             return stripTrailNL(out)
         }
     }
-    function mkArCmdSub(subT) { return function() { return strToInt(subT()) } }
+    function mkArCmdSub(subT) { return function() { return strToInt(wordJoin(subT())) } }
     function mkVarRef(name) { return function() { return getVarVal(name) } }
     function mkArith(intThunk) { return function() { return numToStr(intThunk()) } }
-    function mkWord(segThunks) {
+    // ---- brace expansion (purely syntactic, so it is done once at BUILD time) ----
+    // A word's segment list is turned into N segment lists (the cross product of every brace
+    // group in it) and CWord pushes one word thunk per variant.
+    function pushWords(ws) {
+        var i
+        for (i = 0; i < ws.length; i++) { push(ws[i]) }
+    }
+    function mkBraceAlts(items) {
+        var alts = []
+        var i
+        for (i = 0; i < items.length; i++) { alts.push(items[i].alt) }
+        return {alts: alts}
+    }
+    // {1..5} {5..1} {a..e} {1..9..3} -> the expanded list, as constant segments.
+    function mkBraceRange(items) {
+        var ends = []
+        var step = 0
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.rend != undefined) { ends.push(it.rend) } else { step = strToInt(it.rstep.slice(2)) }
+        }
+        var lo = ends[0], hi = ends[1]
+        var alts = []
+        var numeric = !(lo.length == 1 && isAlphaCh(lo.charCodeAt(0)))
+        var a = numeric ? strToInt(lo) : lo.charCodeAt(0)
+        var b = numeric ? strToInt(hi) : hi.charCodeAt(0)
+        var st = (step != 0) ? step : 1
+        if (st < 0) { st = (0 - st) | 0 }
+        var v = a
+        var guard = 0
+        while (guard < 100000) {
+            guard = guard + 1
+            alts.push([makeConst(numeric ? numToStr(v) : String.fromCharCode(v))])
+            if (a <= b) { if (v + st > b) { guard = 100000 } else { v = v + st } }
+            else { if (v - st < b) { guard = 100000 } else { v = v - st } }
+        }
+        return {alts: alts}
+    }
+    function isAlphaCh(cc) { return (cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) }
+
+    // A segment list -> every brace variant of it (a list of segment lists).
+    function braceVariants(segs) {
+        var variants = [[]]
+        var i
+        for (i = 0; i < segs.length; i++) {
+            var sg = segs[i]
+            var out = []
+            var v
+            if (typeof sg == "function" || sg.alts == undefined) {
+                for (v = 0; v < variants.length; v++) { out.push(concatSegs(variants[v], [sg])) }
+            } else {
+                for (v = 0; v < variants.length; v++) {
+                    var a
+                    for (a = 0; a < sg.alts.length; a++) {
+                        var subs = braceVariants(sg.alts[a])
+                        var k
+                        for (k = 0; k < subs.length; k++) { out.push(concatSegs(variants[v], subs[k])) }
+                    }
+                }
+            }
+            variants = out
+        }
+        return variants
+    }
+    function concatSegs(a, b) {
+        var out = []
+        var i
+        for (i = 0; i < a.length; i++) { out.push(a[i]) }
+        for (i = 0; i < b.length; i++) { out.push(b[i]) }
+        return out
+    }
+    function mkWords(segs) {
+        var hasBrace = false
+        var i
+        for (i = 0; i < segs.length; i++) { if (typeof segs[i] != "function" && segs[i].alts != undefined) { hasBrace = true } }
+        if (!hasBrace) { return [mkWord(segs)] }
+        var vs = braceVariants(segs)
+        var out = []
+        for (i = 0; i < vs.length; i++) { out.push(mkWord(vs[i])) }
+        return out
+    }
+    function mkTilde() { return function() { return getVarVal("HOME") } }
+
+    // A word is the concatenation of its segments. When no segment can produce more than one
+    // field the fast path just concatenates strings; otherwise the fields are joined at the
+    // boundaries ( x"$@"y with (a b c) is "xa" "b" "cy" ), and a word that consists only of
+    // expansions which produced nothing disappears entirely.
+    // A double-quoted string: no splitting, but "$@" / "${a[@]}" still contribute several
+    // fields, joined onto the neighbouring text at the boundaries.
+    function mkDqWord(segs) {
         return function() {
-            var out = ""
+            var res = [""]
             var i
-            for (i = 0; i < segThunks.length; i++) { out = out + segThunks[i]() }
-            return out
+            for (i = 0; i < segs.length; i++) {
+                var v = segs[i]()
+                var f = isFields(v) ? decFields(v) : [v]
+                if (f.length > 0) {
+                    res[res.length - 1] = res[res.length - 1] + f[0]
+                    var j
+                    for (j = 1; j < f.length; j++) { res.push(f[j]) }
+                }
+            }
+            if (res.length == 1) { return res[0] }
+            return encFields(res)
+        }
+    }
+
+    function mkWord(segThunks) {
+        var canSplit = false
+        var i
+        for (i = 0; i < segThunks.length; i++) { if (typeof segThunks[i] != "function") { canSplit = true } }
+        if (!canSplit) {
+            return function() {
+                var out = ""
+                var k
+                for (k = 0; k < segThunks.length; k++) { out = out + segThunks[k]() }
+                return out
+            }
+        }
+        return function() {
+            var res = [""]
+            var hadLiteral = false
+            var k
+            for (k = 0; k < segThunks.length; k++) {
+                var sg = segThunks[k]
+                var f = anytype
+                if (typeof sg == "function") { hadLiteral = true; f = [sg()] }
+                else {
+                    var v = sg.sp()
+                    f = isFields(v) ? decFields(v) : splitIFS(v)
+                }
+                if (f.length > 0) {
+                    res[res.length - 1] = res[res.length - 1] + f[0]
+                    var j
+                    for (j = 1; j < f.length; j++) { res.push(f[j]) }
+                }
+            }
+            if (!hadLiteral && res.length == 1 && res[0] == "") { return encFields([]) }
+            if (res.length == 1) { return res[0] }
+            return encFields(res)
         }
     }
 
@@ -884,7 +1662,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return v
     }
     function mkNum(text) { var n = parseNumLit(text); return function() { return n } }
-    function mkArOfStr(t) { return function() { return strToInt(t()) } }
+    function mkArOfStr(t) { return function() { return strToInt(wordJoin(t())) } }
     function mkUn(op, t) {
         return function() {
             var v = t()
@@ -995,18 +1773,87 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ---- statement / command thunks: function() -> int status | {ret: int} ----
 
-    // items = [{aname}] or [{aname}, valueWordThunk].
-    function makeAssign(items) {
+    // items = [{aname}, {aidx}?, idxThunk?, {aop2}, valueWordThunk? | {arr}]
+    function mkArrayKV(items) { return {kv: 1, key: items[0], val: items[1]} }
+    function mkArrayLit(items) { return {arr: items} }
+    function parseAssign(items) {
         var name = items[0].aname
-        var valT = (items.length > 1) ? items[1] : null
+        var idxT = null
+        var op = "="
+        var valT = null
+        var lit = null
+        var i
+        for (i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { if (idxT == null && op == "=" && lit == null && valT == null && hasIdxMark(items)) { idxT = it } else { valT = it } }
+            else if (it.aop2 != undefined) { op = it.aop2 }
+            else if (it.arr != undefined) { lit = it.arr }
+        }
+        return {name: name, idxT: idxT, op: op, valT: valT, lit: lit}
+    }
+    function hasIdxMark(items) {
+        var i
+        for (i = 0; i < items.length; i++) { if (typeof items[i] != "function" && items[i].aidx != undefined) { return true } }
+        return false
+    }
+    // Evaluate an array literal into a list of (key, value) pairs; a bare word contributes
+    // one element per FIELD, so a=($x) with x="a b c" really is three elements.
+    function evalArrayLit(litItems) {
+        var out = []
+        var i
+        for (i = 0; i < litItems.length; i++) {
+            var it = litItems[i]
+            if (typeof it == "function") {
+                var f = wordFields(it())
+                var k
+                for (k = 0; k < f.length; k++) { out.push({k: null, v: f[k]}) }
+            } else {
+                out.push({k: wordJoin(it.key()), v: wordJoin(it.val())})
+            }
+        }
+        return out
+    }
+    function applyArrayLit(name, pairs, append, assoc) {
+        if (!append) { arrs[arrKey(name)] = {assoc: assoc, keys: [], vals: {}} }
+        else { arrEnsure(name, assoc) }
+        var plain = []
+        var i
+        for (i = 0; i < pairs.length; i++) {
+            if (pairs[i].k == null) { plain.push(pairs[i].v) } else { arrSet(name, pairs[i].k, pairs[i].v) }
+        }
+        if (plain.length > 0) { arrAppendList(name, plain) }
+    }
+    function makeAssign(items) {
+        var a = parseAssign(items)
         return function() {
             cmdSubRan = false
-            var v = (valT != null) ? valT() : ""
-            setVarVal(name, v)
-            // v=$(cmd) leaves $? at cmd's status; a plain assignment always succeeds.
+            runAssign(a, false)
             if (!cmdSubRan) { setStatus(0) }
             return lastStatus
         }
+    }
+    function runAssign(a, assoc) {
+        if (a.lit != null) {
+            applyArrayLit(a.name, evalArrayLit(a.lit), a.op == "+=", assoc)
+            return
+        }
+        var v = (a.valT != null) ? wordJoin(a.valT()) : ""
+        if (a.idxT != null) {
+            var key = wordJoin(a.idxT())
+            arrEnsure(a.name, assoc)
+            if (!arrs[arrKey(a.name)].assoc) { key = numToStr(strToInt(key)) }
+            if (a.op == "+=") { arrSet(a.name, key, arrGet(a.name, key) + v) } else { arrSet(a.name, key, v) }
+            return
+        }
+        if (a.op == "+=") {
+            if (isArr(a.name)) { arrAppendList(a.name, [v]) }
+            else if (hasOwn(intVars, "$" + a.name)) { setVarVal(a.name, numToStr(strToInt(getVarVal(a.name)) + evalArithStr(v))) }
+            else { setVarVal(a.name, getVarVal(a.name) + v) }
+            return
+        }
+        // `declare -i n` makes n=EXPR evaluate EXPR as arithmetic.
+        if (hasOwn(intVars, "$" + a.name)) { setVarVal(a.name, numToStr(evalArithStr(v))); return }
+        setVarVal(a.name, v)
     }
 
     // items[0] is the command word thunk; the rest are argument word thunks and redirections.
@@ -1020,10 +1867,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (typeof it == "function") { argTs.push(it) } else { redirs.push(it) }
         }
         return function() {
-            var cmd = cmdT()
-            var args = []
+            var cmd = wordJoin(cmdT())
+            var args = expandWords(argTs)
             var k
-            for (k = 0; k < argTs.length; k++) { args.push(argTs[k]()) }
+            if (abortSignal != null) { var ab = abortSignal; abortSignal = null; return ab }
             if (redirs.length == 0) { return runCommand(cmd, args) }
             var rs = openRedirs(redirs)
             var st = anytype
@@ -1036,35 +1883,201 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Apply a redirection list: an output redirection swallows the command's output (there is
     // no filesystem here), an input redirection other than a here-string gives end of file.
     function openRedirs(redirs) {
-        var suppress = false
+        var st = {out: sinkOut, err: sinkErr, inb: stdinBuf, inp: stdinPos, hadIn: false}
         var newIn = null
         var i
         for (i = 0; i < redirs.length; i++) {
             var r = redirs[i]
-            var tgt = (r.target != null) ? r.target() : ""
-            if (r.rd == "<<<") { newIn = tgt + "\n" }
+            var tgt = (r.target != null) ? wordJoin(r.target()) : ""
+            var fd = (r.iofd == "") ? "1" : r.iofd
+            if (r.rd == "<<") { newIn = tgt }
+            else if (r.rd == "<<<") { newIn = tgt + "\n" }
             else if (r.rd == "<") { newIn = "" }
-            else if (r.rd == ">&" || r.rd == "<&") { }
-            else { if (r.iofd == "" || r.iofd == "1") { suppress = true } }
+            else if (r.rd == ">&" || r.rd == "<&") {
+                // N>&M : route channel N wherever channel M currently goes.
+                var src = (tgt == "2") ? sinkErr : sinkOut
+                if (fd == "2") { sinkErr = src } else { sinkOut = src }
+            } else if (r.rd == "&>" || r.rd == "&>>") {
+                var ch = (tgt == "/dev/stdout") ? 0 : 2
+                sinkOut = ch
+                sinkErr = ch
+            } else {
+                var ch2 = (tgt == "/dev/stdout") ? 0 : ((tgt == "/dev/stderr") ? 1 : 2)
+                if (fd == "2") { sinkErr = ch2 } else { sinkOut = ch2 }
+            }
         }
-        var st = {sup: suppress, inb: stdinBuf, inp: stdinPos, hadIn: (newIn != null)}
-        if (suppress) { capStack.push("") }
-        if (newIn != null) { stdinBuf = newIn; stdinPos = 0 }
+        if (newIn != null) { stdinBuf = newIn; stdinPos = 0; st.hadIn = true }
         return st
     }
     function closeRedirs(st) {
-        if (st.sup) { capStack.pop() }
+        sinkOut = st.out
+        sinkErr = st.err
         if (st.hadIn) { stdinBuf = st.inb; stdinPos = st.inp }
+    }
+
+    // The arithmetic evaluator, reachable from a runtime string (declare -i assignments).
+    function evalArithStr(src) {
+        if (src == "") { return 0 }
+        var frag = c.parseFrom(c.agrammar, src, "ArList")
+        var t = c.compile(frag).stack[0]
+        return t()
+    }
+
+    // eval / trap re-parse a string with THIS grammar, starting at CompoundList (which pushes
+    // one statement-sequence thunk), and run the thunk that comes back.
+    function compileSnippet(src) {
+        var frag = c.parseFrom(c.agrammar, src, "CompoundList")
+        return c.compile(frag).stack[0]
+    }
+    function runExitTrap() {
+        if (exitTrap == null) { return }
+        var t = exitTrap
+        exitTrap = null
+        var r = anytype
+        r = t()
+    }
+
+    // printf FORMAT [ARG...] : %s %d %i %c %x %% with a width, a "-" (left align) and a "0"
+    // pad flag, plus the usual backslash escapes. The format is reused until the arguments
+    // run out, exactly like the shell.
+    function printfBuiltin(args) {
+        var dest = null
+        var a = args
+        if (a.length >= 2 && a[0] == "-v") { dest = a[1]; a = a.slice(2) }
+        if (a.length == 0) { return 0 }
+        var fmt = a[0]
+        var rest = a.slice(1)
+        var out = ""
+        var ai = 0
+        var pass = 0
+        while (pass == 0 || ai < rest.length) {
+            pass = pass + 1
+            var used = false
+            var i = 0
+            while (i < fmt.length) {
+                var ch = fmt.charAt(i)
+                if (ch == "\\" && i + 1 < fmt.length) {
+                    var e = fmt.charAt(i + 1)
+                    i = i + 2
+                    if (e == "n") { out = out + "\n" }
+                    else if (e == "t") { out = out + "\t" }
+                    else if (e == "r") { out = out + "\r" }
+                    else if (e == "\\") { out = out + "\\" }
+                    else { out = out + "\\" + e }
+                } else if (ch == "%") {
+                    i = i + 1
+                    if (fmt.charAt(i) == "%") { out = out + "%"; i = i + 1 }
+                    else {
+                        var left = false
+                        var zero = false
+                        var flagging = true
+                        while (flagging && i < fmt.length) {
+                            var fc = fmt.charAt(i)
+                            if (fc == "-") { left = true; i = i + 1 }
+                            else if (fc == "0") { zero = true; i = i + 1 }
+                            else if (fc == "+" || fc == " " || fc == "#") { i = i + 1 }
+                            else { flagging = false }
+                        }
+                        var width = 0
+                        while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) {
+                            width = width * 10 + (fmt.charCodeAt(i) - 48)
+                            i = i + 1
+                        }
+                        var prec = -1
+                        if (fmt.charAt(i) == ".") {
+                            i = i + 1
+                            prec = 0
+                            while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) {
+                                prec = prec * 10 + (fmt.charCodeAt(i) - 48)
+                                i = i + 1
+                            }
+                        }
+                        var conv = fmt.charAt(i)
+                        i = i + 1
+                        var arg = (ai < rest.length) ? rest[ai] : ""
+                        ai = ai + 1
+                        used = true
+                        var piece = ""
+                        if (conv == "s") { piece = arg; if (prec >= 0 && piece.length > prec) { piece = piece.slice(0, prec) } }
+                        else if (conv == "d" || conv == "i") { piece = numToStr(strToInt(arg)) }
+                        else if (conv == "c") { piece = (arg.length > 0) ? arg.charAt(0) : "" }
+                        else if (conv == "x" || conv == "X") { piece = toHex(strToInt(arg), conv == "X") }
+                        else { piece = arg }
+                        while (piece.length < width) {
+                            if (left) { piece = piece + " " }
+                            else if (zero && (conv == "d" || conv == "i" || conv == "x" || conv == "X")) { piece = "0" + piece }
+                            else { piece = " " + piece }
+                        }
+                        out = out + piece
+                    }
+                } else { out = out + ch; i = i + 1 }
+            }
+            if (!used) { ai = rest.length }
+        }
+        if (dest != null) { setVarVal(dest, out) } else { emitOut(out) }
+        return 0
+    }
+    function toHex(n, upper) {
+        if (n == 0) { return "0" }
+        var neg = false
+        var v = n
+        if (v < 0) { neg = true; v = (0 - v) | 0 }
+        var digits = upper ? "0123456789ABCDEF" : "0123456789abcdef"
+        var out = ""
+        while (v > 0) {
+            var d = v % 16
+            out = digits.charAt(d) + out
+            v = ((v - d) / 16) | 0
+        }
+        if (neg) { out = "-" + out }
+        return out
+    }
+
+    // set [-e|+e] [-u|+u] [-o pipefail|+o pipefail] [-- WORD...]
+    function setBuiltin(args) {
+        var i = 0
+        while (i < args.length) {
+            var a = args[i]
+            if (a == "--") {
+                var rest = []
+                var j
+                for (j = i + 1; j < args.length; j++) { rest.push(args[j]) }
+                posParams = rest
+                i = args.length
+            } else if (a == "-o" || a == "+o") {
+                var on = (a == "-o")
+                if (i + 1 < args.length) {
+                    var nm = args[i + 1]
+                    if (nm == "pipefail") { optPipefail = on }
+                    if (nm == "errexit") { optErrExit = on }
+                    if (nm == "nounset") { optNounset = on }
+                    i = i + 1
+                }
+            } else if (a.length > 1 && (a.charAt(0) == "-" || a.charAt(0) == "+")) {
+                var on2 = (a.charAt(0) == "-")
+                var k
+                for (k = 1; k < a.length; k++) {
+                    var f = a.charAt(k)
+                    if (f == "e") { optErrExit = on2 }
+                    if (f == "u") { optNounset = on2 }
+                }
+            }
+            i = i + 1
+        }
+        setStatus(0)
+        return 0
     }
 
     // read [-r] [-a NAME] NAME... : one line of standard input, split on IFS, the last name
     // taking the rest. Returns 1 at end of file, exactly like the shell.
     function readBuiltin(args) {
         var names = []
+        var arrName = null
         var i = 0
         while (i < args.length) {
             var a = args[i]
-            if (a == "-a" || a == "-d" || a == "-n" || a == "-N" || a == "-p" || a == "-t" || a == "-u") { i = i + 1 }
+            if (a == "-a") { i = i + 1; if (i < args.length) { arrName = args[i] } }
+            else if (a == "-d" || a == "-n" || a == "-N" || a == "-p" || a == "-t" || a == "-u") { i = i + 1 }
             else if (a.length > 1 && a.charAt(0) == "-") { }
             else { names.push(a) }
             i = i + 1
@@ -1072,14 +2085,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (stdinPos >= stdinBuf.length) {
             var z
             for (z = 0; z < names.length; z++) { setVarVal(names[z], "") }
+            if (arrName != null) { arrFromList(arrName, false, []) }
             return 1
         }
         var e = stdinPos
         while (e < stdinBuf.length && stdinBuf.charAt(e) != "\n") { e = e + 1 }
         var line = stdinBuf.slice(stdinPos, e)
         stdinPos = (e < stdinBuf.length) ? (e + 1) : e
-        if (names.length == 0) { setVarVal("REPLY", line); return 0 }
         var fields = splitIFS(line)
+        if (arrName != null) { arrFromList(arrName, false, fields); return 0 }
+        if (names.length == 0) { setVarVal("REPLY", line); return 0 }
         var k
         for (k = 0; k < names.length; k++) {
             if (k == names.length - 1) {
@@ -1114,12 +2129,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function echoCmd(args) {
         var i = 0
         var newline = true
-        if (args.length > 0 && args[0] == "-n") { newline = false; i = 1 }
+        var escapes = false
+        var flagging = true
+        while (flagging && i < args.length) {
+            var a = args[i]
+            if (a == "-n") { newline = false; i = i + 1 }
+            else if (a == "-e") { escapes = true; i = i + 1 }
+            else if (a == "-E") { escapes = false; i = i + 1 }
+            else { flagging = false }
+        }
         var out = ""
         var first = true
         while (i < args.length) {
             if (!first) { out = out + " " }
-            out = out + args[i]
+            out = out + (escapes ? ansiC(args[i]) : args[i])
             first = false
             i = i + 1
         }
@@ -1139,6 +2162,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return 0
     }
 
+    // "name" or "name[key]" - the form `unset a[0]` and `[[ -v a[k] ]]` use.
+    function splitSubscript(s0) {
+        var i
+        for (i = 0; i < s0.length; i++) {
+            if (s0.charAt(i) == "[" && s0.charAt(s0.length - 1) == "]") {
+                return {name: s0.slice(0, i), key: s0.slice(i + 1, s0.length - 1)}
+            }
+        }
+        return {name: s0, key: null}
+    }
     function isTestUnary(t) {
         if (t == "-z" || t == "-n" || t == "-v") { return true }
         if (t == "-e" || t == "-f" || t == "-d" || t == "-s" || t == "-r" || t == "-w") { return true }
@@ -1155,7 +2188,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function testUnary(op, s) {
         if (op == "-z") { return (s == "") ? 0 : 1 }
         if (op == "-n") { return (s != "") ? 0 : 1 }
-        if (op == "-v") { return isSetVar(s) ? 0 : 1 }
+        if (op == "-v") {
+            var sp = splitSubscript(s)
+            if (sp.key != null) { return arrHas(sp.name, sp.key) ? 0 : 1 }
+            return (isSetVar(s) || isArr(s)) ? 0 : 1
+        }
         if (op == "-d") { return (fsKind(s) == 2) ? 0 : 1 }
         if (op == "-e" || op == "-r" || op == "-w") { return (fsKind(s) != 0) ? 0 : 1 }
         if (op == "-f" || op == "-s") { return (fsKind(s) == 1) ? 0 : 1 }
@@ -1235,11 +2272,39 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (cmd == "true" || cmd == ":") { setStatus(0); return 0 }
         if (cmd == "unset") {
             var ui
-            for (ui = 0; ui < args.length; ui++) { unsetVar(args[ui]) }
+            for (ui = 0; ui < args.length; ui++) {
+                var sp = splitSubscript(args[ui])
+                if (sp.key == null) { unsetVar(sp.name); arrs[arrKey(sp.name)] = null }
+                else { arrDel(sp.name, sp.key) }
+            }
             setStatus(0)
             return 0
         }
         if (cmd == "false") { setStatus(1); return 1 }
+        if (cmd == "break") { return {brk: (args.length > 0) ? strToInt(args[0]) : 1} }
+        if (cmd == "continue") { return {cont: (args.length > 0) ? strToInt(args[0]) : 1} }
+        if (cmd == "set") { return setBuiltin(args) }
+        if (cmd == "trap") {
+            // trap 'CODE' EXIT : only the EXIT trap is modelled. The code is re-parsed with
+            // this grammar's own parser, exactly like eval.
+            if (args.length > 0 && args[0] != "" && args[0] != "-") { exitTrap = compileSnippet(args[0]) }
+            else { exitTrap = null }
+            setStatus(0)
+            return 0
+        }
+        if (cmd == "eval") {
+            var src = ""
+            var ei
+            for (ei = 0; ei < args.length; ei++) { if (ei > 0) { src = src + " " }; src = src + args[ei] }
+            if (src == "") { setStatus(0); return 0 }
+            var et = compileSnippet(src)
+            var er = anytype
+            er = et()
+            if (typeof er == "object") { return er }
+            setStatus(er)
+            return er
+        }
+        if (cmd == "printf") { var pst = printfBuiltin(args); setStatus(pst); return pst }
         if (cmd == "read") { var rst = readBuiltin(args); setStatus(rst); return rst }
         if (cmd == "shift") {
             var n = (args.length > 0) ? strToInt(args[0]) : 1
@@ -1291,14 +2356,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (items.length == 1) { return items[0] }
         return function() {
             var st = anytype
-            st = items[0]()
+            // Every element but the last runs as a condition, so set -e does not fire on it.
+            st = runCond(items[0])
             if (typeof st == "object") { return st }
             var i
             for (i = 1; i < items.length; i += 2) {
                 var op = items[i].op
                 var runIt = (op == "&&") ? (st == 0) : (st != 0)
                 if (runIt) {
-                    st = items[i + 1]()
+                    var isLast = (i + 2 >= items.length)
+                    st = isLast ? items[i + 1]() : runCond(items[i + 1])
                     if (typeof st == "object") { return st }
                 }
             }
@@ -1316,9 +2383,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 r = thunks[i]()
                 if (typeof r == "object") { return r }
                 last = r
+                // set -e: leave on the first failing command, unless it is a CONDITION.
+                if (optErrExit && last != 0 && condDepth == 0) { return {ret: last, isExit: 1} }
             }
             return last
         }
+    }
+    // Run a thunk as a CONDITION: its failure must not trip set -e.
+    function runCond(t) {
+        condDepth = condDepth + 1
+        var r = anytype
+        r = t()
+        condDepth = condDepth - 1
+        return r
     }
 
     // items = [{pats}, bodyThunk, {cterm}?]
@@ -1340,7 +2417,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var subjT = items[0]
         var clauses = items.slice(1)
         return function() {
-            var s = subjT()
+            var s = wordJoin(subjT())
             var i = 0
             var fall = false
             var last = 0
@@ -1349,7 +2426,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var cl = clauses[i]
                 var hit = fall
                 var k
-                for (k = 0; k < cl.pats.length; k++) { if (globMatch(cl.pats[k](), s)) { hit = true } }
+                for (k = 0; k < cl.pats.length; k++) { if (globMatch(wordJoin(cl.pats[k]()), s)) { hit = true } }
                 fall = false
                 if (hit) {
                     var r = anytype
@@ -1384,11 +2461,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var savedIn = stdinBuf, savedPos = stdinPos
             var st = anytype
             st = 0
+            var firstFail = 0
+            var statuses = []
             var k
             for (k = 0; k < stages.length; k++) {
                 var lastStage = (k == stages.length - 1)
                 if (!lastStage) { capStack.push("") }
-                st = stages[k]()
+                st = lastStage ? stages[k]() : runCond(stages[k])
+                statuses.push((typeof st == "object") ? st.ret : st)
+                if (typeof st != "object" && st != 0 && firstFail == 0) { firstFail = st }
                 if (!lastStage) {
                     var out = capStack.pop()
                     stdinBuf = out
@@ -1398,7 +2479,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             stdinBuf = savedIn
             stdinPos = savedPos
+            arrFromList("PIPESTATUS", false, statuses)
             if (typeof st == "object") { return st }
+            // set -o pipefail: the pipeline reports the first failing stage.
+            if (optPipefail && st == 0 && firstFail != 0) { st = firstFail }
             if (bang) { st = (st == 0) ? 1 : 0 }
             setStatus(st)
             return st
@@ -1407,17 +2491,29 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ( LIST ) : variables and positional parameters are restored afterwards, and both a
     // `return` and an `exit` inside end only the subshell.
+    // Everything a subshell must restore: variables, positional parameters, call frames,
+    // the shell options and the EXIT trap.
+    function saveShellState() {
+        return {vars: snapshotVars(), pos: posParams, frames: localFrames,
+                e: optErrExit, u: optNounset, pf: optPipefail, tr: exitTrap}
+    }
+    function restoreShellState(st) {
+        restoreVars(st.vars)
+        posParams = st.pos
+        localFrames = st.frames
+        optErrExit = st.e
+        optNounset = st.u
+        optPipefail = st.pf
+        exitTrap = st.tr
+    }
     function makeSubshell(bodyT) {
         return function() {
-            var saved = snapshotVars()
-            var savedPos = posParams
-            var savedFrames = localFrames
+            var saved = saveShellState()
             localFrames = []
             var r = anytype
             r = bodyT()
-            localFrames = savedFrames
-            restoreVars(saved)
-            posParams = savedPos
+            runExitTrap()
+            restoreShellState(saved)
             var st = 0
             if (typeof r == "object") { st = r.ret } else { st = r }
             setStatus(st)
@@ -1463,21 +2559,63 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     function mkCondNot(t) { return function() { return !t() } }
-    function mkCondSingle(w) { return function() { return w() != "" } }
+    function mkCondSingle(w) { return function() { return wordJoin(w()) != "" } }
     function mkCondUn(items) {
         var op = items[0].cop
         var w = items[1]
-        return function() { return testUnary(op, w()) == 0 }
+        return function() { return testUnary(op, wordJoin(w())) == 0 }
     }
+    // [[ STR =~ ERE ]] : a successful match fills BASH_REMATCH with the whole match and the
+    // capture groups, and a failed one empties it (bash).
+    var reCache = {}
+    function bashRegex(src) {
+        var key = "$" + src
+        if (hasOwn(reCache, key)) { return reCache[key] }
+        var prog = rxCompile(src, "")
+        if (!prog.ok) { fail("invalid regular expression: " + src + ": " + prog.err) }
+        reCache[key] = prog
+        return prog
+    }
+    function mkCondMatch(items) {
+        var lT = items[0], rT = items[2]
+        return function() {
+            var subj = wordJoin(lT())
+            var re = bashRegex(wordJoin(rT()))
+            var m = rxSearch(re, subj, 0)
+            if (m == null) { arrFromList("BASH_REMATCH", false, []); return false }
+            var list = []
+            var i
+            for (i = 0; i <= re.ngroups; i++) {
+                // rxGroup answers null for a group that did not participate; bash reports "".
+                var g = rxGroup(re, subj, m, i)
+                list.push((g == null) ? "" : g)
+            }
+            arrFromList("BASH_REMATCH", false, list)
+            return true
+        }
+    }
+
+    // Make every glob metacharacter of s literal (a quoted pattern part).
+    function globEscape(s) {
+        var out = ""
+        var i
+        for (i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch == "*" || ch == "?" || ch == "[" || ch == "]" || ch == "\\") { out = out + "\\" }
+            out = out + ch
+        }
+        return out
+    }
+    function mkQuotedPat(t) { return function() { return globEscape(wordJoin(t())) } }
+
     function mkCondBin(items) {
         var l = items[0], op = items[1].cop, r = items[2]
         return function() {
-            var lv = l()
-            var rv = r()
+            var lv = wordJoin(l())
+            var rv = wordJoin(r())
             // == and != glob-match their right hand side inside [[ ]]; = is a synonym of ==.
             if (op == "==" || op == "=") { return globMatch(rv, lv) }
             if (op == "!=") { return !globMatch(rv, lv) }
-            if (op == "=~") { fail("[[ =~ ]] (regex matching) is not supported") }
             return testBinary(lv, op, rv) == 0
         }
     }
@@ -1496,6 +2634,110 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {rd: op, iofd: fd, target: t}
     }
 
+    // <<DELIM / <<-DELIM / <<'DELIM' : split the scanned token back into marker and body.
+    function mkHereDoc(text) {
+        var i = 2
+        var dashed = false
+        if (text.charAt(i) == "-") { dashed = true; i = i + 1 }
+        while (text.charAt(i) == " " || text.charAt(i) == "\t") { i = i + 1 }
+        var quote = ""
+        var q = text.charAt(i)
+        if (q == "'" || q == "\"") { quote = q; i = i + 1 }
+        // the body starts after the first newline and ends after the last one
+        var firstNL = -1
+        var lastNL = -1
+        var k
+        for (k = 0; k < text.length; k++) {
+            var ch = text.charAt(k)
+            if (ch == "\n") { if (firstNL < 0) { firstNL = k }; lastNL = k }
+        }
+        var body = ""
+        if (firstNL >= 0 && lastNL > firstNL) { body = text.slice(firstNL + 1, lastNL + 1) }
+        if (dashed) { body = stripLeadingTabs(body) }
+        var t = (quote != "") ? makeConst(body) : compileHereBody(body)
+        return {rd: "<<", iofd: "", target: t}
+    }
+    function stripLeadingTabs(b) {
+        var out = ""
+        var atLineStart = true
+        var i
+        for (i = 0; i < b.length; i++) {
+            var ch = b.charAt(i)
+            if (atLineStart && ch == "\t") { continue }
+            atLineStart = (ch == "\n")
+            out = out + ch
+        }
+        return out
+    }
+    // An unquoted here-document body is re-parsed with this grammar so that $ expansions,
+    // command substitutions and backslash escapes inside it work exactly as in a word.
+    function compileHereBody(body) {
+        var frag = c.parseFrom(c.agrammar, "\x01" + body, "HereBodyW")
+        return c.compile(frag).stack[0]
+    }
+
+    // A compound statement plus its redirections; items = [bodyThunk, redir...]
+    function mkRedirected(items) {
+        var bodyT = items[0]
+        var redirs = []
+        var i
+        for (i = 1; i < items.length; i++) { redirs.push(items[i]) }
+        if (redirs.length == 0) { return bodyT }
+        return function() {
+            var rs = openRedirs(redirs)
+            var st = anytype
+            st = bodyT()
+            closeRedirs(rs)
+            return st
+        }
+    }
+
+    function mkPrefixAsg(items) {
+        return {aname: items[0].aname, val: (items.length > 1) ? items[1] : null}
+    }
+    // items = [{aname,val}..., cmdWordThunk, argThunk/redir...]
+    function makePrefixCmd(items) {
+        var asgs = []
+        var rest = []
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it != "function" && it.aname != undefined) { asgs.push(it) } else { rest.push(it) }
+        }
+        var inner = makeSimpleCommand(rest)
+        return function() {
+            var saved = []
+            var k
+            for (k = 0; k < asgs.length; k++) {
+                var nm = asgs[k].aname
+                saved.push({name: nm, had: isSetVar(nm), val: getVarVal(nm)})
+                setVarVal(nm, (asgs[k].val != null) ? wordJoin(asgs[k].val()) : "")
+            }
+            var st = anytype
+            st = inner()
+            for (k = saved.length - 1; k >= 0; k--) {
+                vars["$" + saved[k].name] = saved[k].val
+                varsHas["$" + saved[k].name] = saved[k].had
+            }
+            return st
+        }
+    }
+
+    // break / continue travel as {brk: n} / {cont: n}, the same object-signal shape this
+    // interpreter already uses for `return` ({ret}) and `exit` ({ret, isExit}); every
+    // sequence, conditional and loop already propagates an object result unchanged.
+    // loopSignal answers what a loop should do with one: 0 = not mine, 1 = break,
+    // 2 = continue, 3 = propagate one level further out.
+    function loopSignal(r) {
+        if (r.brk != undefined) { return (r.brk <= 1) ? 1 : 3 }
+        if (r.cont != undefined) { return (r.cont <= 1) ? 2 : 3 }
+        return 0
+    }
+    function loopOuter(r) {
+        if (r.brk != undefined) { return {brk: r.brk - 1} }
+        return {cont: r.cont - 1}
+    }
+
     function mkCond(items) { return {cond: items[0], body: items[1]} }
     function makeUntil(items) {
         var condT = items[0], bodyT = items[1]
@@ -1505,12 +2747,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var r = anytype
             var loop = true
             while (loop) {
-                cst = condT()
+                cst = runCond(condT)
                 if (typeof cst == "object") { return cst }
                 if (cst == 0) { loop = false } else {
                     r = bodyT()
-                    if (typeof r == "object") { return r }
-                    last = r
+                    if (typeof r == "object") {
+                        var sg2 = loopSignal(r)
+                        if (sg2 == 0 || sg2 == 3) { return (sg2 == 3) ? loopOuter(r) : r }
+                        if (sg2 == 1) { loop = false }
+                    } else { last = r }
                 }
             }
             return last
@@ -1523,11 +2768,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var last = 0
             var r = anytype
             initT()
-            while (condT() != 0) {
+            var go = true
+            while (go && condT() != 0) {
                 r = bodyT()
-                if (typeof r == "object") { return r }
-                last = r
-                stepT()
+                if (typeof r == "object") {
+                    var sg = loopSignal(r)
+                    if (sg == 0 || sg == 3) { return (sg == 3) ? loopOuter(r) : r }
+                    if (sg == 1) { go = false }
+                } else { last = r }
+                if (go) { stepT() }
             }
             return last
         }
@@ -1541,7 +2790,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (i = 0; i < clauses.length; i++) {
                 var cl = clauses[i]
                 if (cl.els != undefined) { return cl.els() }
-                cst = cl.cond()
+                cst = runCond(cl.cond)
                 if (typeof cst == "object") { return cst }
                 if (cst == 0) { return cl.body() }
             }
@@ -1559,12 +2808,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var r = anytype
             var loop = true
             while (loop) {
-                cst = condT()
+                cst = runCond(condT)
                 if (typeof cst == "object") { return cst }
                 if (cst != 0) { loop = false } else {
                     r = bodyT()
-                    if (typeof r == "object") { return r }
-                    last = r
+                    if (typeof r == "object") {
+                        var sg = loopSignal(r)
+                        if (sg == 0 || sg == 3) { return (sg == 3) ? loopOuter(r) : r }
+                        if (sg == 1) { loop = false }
+                    } else { last = r }
                 }
             }
             return last
@@ -1574,7 +2826,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // items = [{fname}, {words:[wordThunks]}, bodyThunk] in source order.
     function makeFor(items) {
         var fname = ""
-        var wordThunks = anytype
+        var wordThunks = null
         var bodyT = anytype
         var i
         for (i = 0; i < items.length; i++) {
@@ -1584,14 +2836,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (it.fname != undefined) { fname = it.fname }
         }
         return function() {
+            // `for NAME; do` with no `in` list iterates the positional parameters.
+            var vals = []
+            if (wordThunks == null) {
+                var w
+                for (w = 0; w < posParams.length; w++) { vals.push(posParams[w]) }
+            } else { vals = expandWords(wordThunks) }
             var last = 0
             var r = anytype
             var k
-            for (k = 0; k < wordThunks.length; k++) {
-                setVarVal(fname, wordThunks[k]())
+            for (k = 0; k < vals.length; k++) {
+                setVarVal(fname, vals[k])
                 r = bodyT()
-                if (typeof r == "object") { return r }
-                last = r
+                if (typeof r == "object") {
+                    var sg = loopSignal(r)
+                    if (sg == 0 || sg == 3) { return (sg == 3) ? loopOuter(r) : r }
+                    if (sg == 1) { k = vals.length }
+                } else { last = r }
             }
             return last
         }
@@ -1618,10 +2879,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (i = 0; i < stmts.length; i++) {
             r = stmts[i]()
             if (typeof r == "object") {
-                if (r.isExit != undefined) { exit(r.ret) }
+                if (r.isExit != undefined) { setStatus(r.ret); runExitTrap(); exit(r.ret) }
                 setStatus(r.ret)
             }
         }
+        runExitTrap()
         exit(lastStatus)
     }
 
