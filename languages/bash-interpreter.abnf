@@ -3074,9 +3074,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function bashRegex(src) {
         var key = "$" + src
         if (hasOwn(reCache, key)) { return reCache[key] }
-        // No flags: bash's =~ is a POSIX ERE where ^ and $ anchor the whole subject and "."
-        // does not cross a newline, and nocasematch is off.
-        var prog = rxCompile(src, "")
+        // "e" is the shared engine's POSIX ERE dialect: no escape sequences or (? forms,
+        // [[:alpha:]] classes, a literal ) at the top level, a literal backslash inside a
+        // bracket, one quantifier per atom, no empty branch, and POSIX capture semantics
+        // for ^(a*)*$. ^ and $ anchor the whole subject (no "m"), and nocasematch is off.
+        var prog = rxCompile(src, "e")
         reCache[key] = prog
         return prog
     }
@@ -3091,7 +3093,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (!re.ok) {
                 emitErr("bash: [[: invalid regular expression: " + re.err + "\n")
                 condErr = 2
-                arrFromList("BASH_REMATCH", false, [])
+                // BASH_REMATCH is deliberately NOT touched: bash only rewrites it once
+                // it has a compiled pattern to search with, so after a bad pattern the
+                // previous match's contents are still readable.
                 return false
             }
             var m = rxSearch(re, subj, 0)

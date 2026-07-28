@@ -110,6 +110,65 @@ func rxIsHex(c rune) bool {
 	return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f')
 }
 
+// rxPosixAdd adds the POSIX bracket class `name` ([:alpha:] and friends) to cls and
+// answers whether the name is known. These exist only in the ERE dialect (flag e):
+// JavaScript, Python and Java all read [[:alpha:]] as an ordinary nested-looking class,
+// and Ruby is the only one of the five that has them - so the engine keeps reporting
+// them as unsupported unless the caller asked for ERE.
+//
+// The definitions are the C locale's, and deliberately the SAME ones the emitted ERE
+// engine in bash-to-llvm-ir.abnf carries in its re_ctype, so the two halves cannot
+// drift. Every one is expressible as plain ranges, so no new shorthand opcode is needed.
+func rxPosixAdd(cls *rxCls, name string) bool {
+	switch name {
+	case "alpha":
+		cls.add('A', 'Z')
+		cls.add('a', 'z')
+	case "digit":
+		cls.add('0', '9')
+	case "alnum":
+		cls.add('0', '9')
+		cls.add('A', 'Z')
+		cls.add('a', 'z')
+	case "upper":
+		cls.add('A', 'Z')
+	case "lower":
+		cls.add('a', 'z')
+	case "space":
+		cls.add(9, 13)
+		cls.add(' ', ' ')
+	case "blank":
+		cls.add(9, 9)
+		cls.add(' ', ' ')
+	case "punct":
+		cls.add(33, 47)
+		cls.add(58, 64)
+		cls.add(91, 96)
+		cls.add(123, 126)
+	case "print":
+		cls.add(32, 126)
+	case "graph":
+		cls.add(33, 126)
+	case "cntrl":
+		cls.add(0, 31)
+		cls.add(127, 127)
+	case "xdigit":
+		cls.add('0', '9')
+		cls.add('A', 'F')
+		cls.add('a', 'f')
+	case "word":
+		cls.add('0', '9')
+		cls.add('A', 'Z')
+		cls.add('_', '_')
+		cls.add('a', 'z')
+	case "ascii":
+		cls.add(0, 127)
+	default:
+		return false
+	}
+	return true
+}
+
 func rxSpHas(code int, c rune) bool {
 	switch code {
 	case rxSD:
@@ -207,6 +266,10 @@ type rxSt struct {
 	// capturing-group count from the rxCountGroups pre-pass.
 	octal  bool
 	ntotal int
+	// ere is the POSIX ERE dialect (flag e) and depth the open-group nesting it needs
+	// to tell a closing ) from a literal one.
+	ere   bool
+	depth int
 }
 
 // rxIsMetaCh answers whether a character has to be backslashed to stay a literal.
@@ -485,14 +548,34 @@ func (st *rxSt) parseClass() *rxNode {
 			return node
 		}
 		first = false
-		// A POSIX bracket [:alpha:] is not supported; report it rather than
-		// silently reading it as a set of punctuation characters.
+		// A POSIX bracket [:alpha:] is a real class in the ERE dialect and is not
+		// supported anywhere else; outside ERE, report it rather than silently
+		// reading it as a set of punctuation characters.
 		if c == '[' && st.i+1 < st.n && st.p[st.i+1] == ':' {
-			st.fail("POSIX bracket expressions are not supported")
-			return node
+			if !st.ere {
+				st.fail("POSIX bracket expressions are not supported")
+				return node
+			}
+			pj := st.i + 2
+			for pj+1 < st.n && !(st.p[pj] == ':' && st.p[pj+1] == ']') {
+				pj++
+			}
+			if pj+1 >= st.n {
+				st.fail("Unmatched [, [^, [:, [., or [=")
+				return node
+			}
+			if !rxPosixAdd(cls, string(st.p[st.i+2:pj])) {
+				st.fail("Invalid character class name")
+				return node
+			}
+			st.i = pj + 2
+			continue
 		}
 		var loCode rune
-		if c == '\\' {
+		// In a POSIX ERE a backslash inside a bracket expression is an ORDINARY
+		// CHARACTER: [a\-b] is {a} plus the range \ .. b, and [a\] closes on the ],
+		// leaving a literal backslash in the set. Every other dialect here escapes.
+		if c == '\\' && !st.ere {
 			st.i++
 			e := st.esc(true)
 			if e.kind == 1 {
@@ -508,7 +591,7 @@ func (st *rxSt) parseClass() *rxNode {
 			st.i++
 			var hiCode rune
 			c2 := st.p[st.i]
-			if c2 == '\\' {
+			if c2 == '\\' && !st.ere {
 				st.i++
 				e2 := st.esc(true)
 				if e2.kind == 1 {
@@ -560,7 +643,9 @@ func (st *rxSt) expect(c rune, msg string) {
 }
 
 func (st *rxSt) parseGroup() *rxNode {
-	if st.i < st.n && st.p[st.i] == '?' {
+	// A POSIX ERE has no (? forms at all: the ? is simply a quantifier sitting where an
+	// atom belongs, which is the error bash reports for (?:a).
+	if st.i < st.n && st.p[st.i] == '?' && !st.ere {
 		st.i++
 		if st.i >= st.n {
 			st.fail("unterminated group")
@@ -618,8 +703,14 @@ func (st *rxSt) parseGroup() *rxNode {
 	cg := rxNewNode("group")
 	st.ngroups++
 	cg.gidx = st.ngroups
+	st.depth++
 	cg.items = append(cg.items, st.parseAlt())
-	st.expect(')', "unterminated group")
+	st.depth--
+	if st.ere {
+		st.expect(')', "Unmatched ( or \\(")
+	} else {
+		st.expect(')', "unterminated group")
+	}
 	return cg
 }
 
@@ -651,6 +742,20 @@ func (st *rxSt) parseAtom() *rxNode {
 		d.gidx = rxEOL
 		return d
 	case '\\':
+		if st.ere {
+			// A POSIX ERE has no escape SEQUENCES: a backslash always quotes the next
+			// character, so \d is the letter d and \1 is the digit 1.
+			if st.i+1 >= st.n {
+				st.fail("Trailing backslash")
+				st.i++
+				return rxNewNode("empty")
+			}
+			qc := st.p[st.i+1]
+			st.i += 2
+			qn := rxNewNode("cls")
+			qn.cls.add(qc, qc)
+			return qn
+		}
 		var nxt rune
 		if st.i+1 < st.n {
 			nxt = st.p[st.i+1]
@@ -697,12 +802,31 @@ func (st *rxSt) parseAtom() *rxNode {
 		ln := rxNewNode("cls")
 		ln.cls.add(e.ch, e.ch)
 		return ln
-	case ')', '|':
+	case ')':
+		// A ) only closes a group when one is OPEN. At the top level of a POSIX ERE it
+		// is an ordinary character - [[ "a)b" =~ ")" ]] matches in bash - where every
+		// other dialect here calls it "unmatched )".
+		if !st.ere || st.depth > 0 {
+			return rxNewNode("empty")
+		}
+	case '|':
 		return rxNewNode("empty")
 	case '*', '+', '?':
-		st.fail("quantifier with nothing to repeat")
+		if st.ere {
+			st.fail("Invalid preceding regular expression")
+		} else {
+			st.fail("quantifier with nothing to repeat")
+		}
 		st.i++
 		return rxNewNode("empty")
+	case '{':
+		// A { that opens an interval where no atom precedes it is the same error; a {
+		// NOT followed by a digit is an ordinary character (bash matches "a{b").
+		if st.ere && st.i+1 < st.n && rxIsDigit(st.p[st.i+1]) {
+			st.fail("Invalid preceding regular expression")
+			st.i++
+			return rxNewNode("empty")
+		}
 	}
 	st.i++
 	lit := rxNewNode("cls")
@@ -748,6 +872,7 @@ func (st *rxSt) parseBound() (int, int, bool) {
 func (st *rxSt) parsePiece() *rxNode {
 	atom := st.parseAtom()
 	st.skipX()
+	seen := 0
 	for st.i < st.n {
 		c := st.p[st.i]
 		var minV, maxV int
@@ -762,8 +887,16 @@ func (st *rxSt) parsePiece() *rxNode {
 			st.i++
 			minV, maxV = 0, 1
 		case c == '{':
+			// In a POSIX ERE a { opens an interval EXACTLY WHEN a digit follows, and an
+			// interval that then fails to close is an error: bash matches "a{b" and "a{"
+			// literally but rejects "a{1" outright. Everywhere else an unreadable brace
+			// stays a literal brace.
+			ivl := st.ere && st.i+1 < st.n && rxIsDigit(st.p[st.i+1])
 			lo, hi, ok := st.parseBound()
 			if !ok {
+				if ivl {
+					st.fail("Invalid content of \\{\\}")
+				}
 				return atom
 			}
 			minV, maxV = lo, hi
@@ -774,11 +907,26 @@ func (st *rxSt) parsePiece() *rxNode {
 		default:
 			return atom
 		}
+		// A second quantifier on the same atom - a**, a?*, a{2}{3}, and in an ERE also
+		// a*? - is a syntax error in bash, node, python3 and java alike. (Ruby 2.6 is the
+		// one dissenter: it warns about the "redundant nested repeat operator" and folds
+		// it. The engine follows the four.)
+		seen++
+		if seen > 1 {
+			if st.ere {
+				st.fail("Invalid preceding regular expression")
+			} else {
+				st.fail("multiple repeat")
+			}
+			return atom
+		}
 		rep := rxNewNode("rep")
 		rep.min = minV
 		rep.max = maxV
 		rep.greedy = true
-		if st.i < st.n {
+		// A POSIX ERE has no lazy or possessive form, so the ? of "a*?" is a SECOND
+		// quantifier there rather than a modifier of the first.
+		if st.i < st.n && !st.ere {
 			q := st.p[st.i]
 			if q == '?' {
 				rep.greedy = false
@@ -799,7 +947,10 @@ func (st *rxSt) parseCat() *rxNode {
 	st.skipX()
 	for st.i < st.n {
 		c := st.p[st.i]
-		if c == '|' || c == ')' {
+		if c == '|' {
+			break
+		}
+		if c == ')' && (!st.ere || st.depth > 0) {
 			break
 		}
 		before := st.i
@@ -823,6 +974,19 @@ func (st *rxSt) parseAlt() *rxNode {
 		alt.items = append(alt.items, st.parseCat())
 		if st.err != "" {
 			break
+		}
+	}
+	// A POSIX ERE branch may not be empty: bash rejects "", "a|", "|a", "(a|)" and
+	// "(|a)" alike with "empty (sub)expression". The one exception is a group whose
+	// WHOLE body is empty - "()" and "(())" match the empty string in bash 5.3 - so the
+	// emptiness is only an error for a branch of a real alternation, or for the top
+	// level of the pattern.
+	if st.ere && st.err == "" {
+		for _, br := range alt.items {
+			if len(br.items) == 0 && (len(alt.items) > 1 || st.depth == 0) {
+				st.fail("empty (sub)expression")
+				break
+			}
 		}
 	}
 	if len(alt.items) == 1 {
@@ -976,8 +1140,11 @@ type rxRe struct {
 	icase      bool
 	dotall     bool
 	multi      bool
-	src        string
-	flags      string
+	// jsrep is the j flag: an unbounded-loop iteration that consumed nothing is
+	// DISCARDED rather than kept. See the rxOpProg case in run().
+	jsrep bool
+	src   string
+	flags string
 }
 
 func rxCompile(pattern, flags string) *rxRe {
@@ -987,6 +1154,18 @@ func rxCompile(pattern, flags string) *rxRe {
 	ext := strings.ContainsRune(flags, 'x')
 	octal := strings.ContainsRune(flags, 'o')
 	quoting := strings.ContainsRune(flags, 'q')
+	ere := strings.ContainsRune(flags, 'e')
+	jsrep := strings.ContainsRune(flags, 'j')
+	// The POSIX ERE dialect (bash's [[ =~ ]]). What it changes is spelled out at each
+	// site; the two whole-engine consequences are here. A "." matches a newline in an
+	// ERE, and an ERE has POSIX capture semantics, of which the visible one is that an
+	// unbounded loop whose iteration consumed nothing DISCARDS that iteration - so
+	// ^(a*)*$ on "aaa" reports "aaa" for group 1, as bash and node do and Perl, Python,
+	// Ruby and Java do not.
+	if ere {
+		dotall = true
+		jsrep = true
+	}
 	// \Q...\E is expanded before anything else looks at the text, so neither the group
 	// counter nor the parser needs a quoting mode. re.src keeps the ORIGINAL pattern,
 	// which is what a language's .source / inspect reports.
@@ -994,9 +1173,11 @@ func rxCompile(pattern, flags string) *rxRe {
 	if quoting {
 		pat = rxExpandQuotes(pat)
 	}
-	st := &rxSt{p: pat, ext: ext, dotall: dotall, octal: octal}
+	st := &rxSt{p: pat, ext: ext, dotall: dotall, octal: octal, ere: ere}
 	st.n = len(st.p)
-	st.ntotal = rxCountGroups(st.p)
+	if !ere {
+		st.ntotal = rxCountGroups(st.p)
+	}
 	ast := st.parseAlt()
 	// Resolve every \k<name> now that the whole name table is known.
 	for _, nd := range st.pending {
@@ -1015,7 +1196,7 @@ func rxCompile(pattern, flags string) *rxRe {
 	}
 	if st.err != "" {
 		return &rxRe{ok: false, err: st.err, icase: icase, dotall: dotall, multi: multi,
-			src: pattern, flags: flags}
+			jsrep: jsrep, src: pattern, flags: flags}
 	}
 	pg := &rxProg{dummy: rxNewCls()}
 	pg.add(rxOpSave, 0, 0, pg.dummy)
@@ -1025,7 +1206,8 @@ func rxCompile(pattern, flags string) *rxRe {
 	return &rxRe{
 		ok: true, ops: pg.ops, as: pg.as, bs: pg.bs, clss: pg.clss,
 		ngroups: st.ngroups, nmarks: pg.nmarks, names: st.names, nameGroups: st.nameGroups,
-		icase: icase, dotall: dotall, multi: multi, src: pattern, flags: flags,
+		icase: icase, dotall: dotall, multi: multi, jsrep: jsrep,
+		src: pattern, flags: flags,
 	}
 }
 
@@ -1130,6 +1312,20 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 			return -1
 		case rxOpProg:
 			if marks[re.as[pc]] == sp {
+				// The iteration consumed nothing. Two readings, and they differ ONLY in
+				// what the captures inside the body are left holding:
+				//   jsrep off - leave the loop from here, KEEPING whatever that empty
+				//     iteration saved. /^(a*)*$/ on "aaa" then reports "" for group 1,
+				//     which is what Perl, Python, Ruby and Java print.
+				//   jsrep on  - FAIL the iteration, so the run unwinds through the
+				//     enclosing MARK/SAVE frames (which restore what they wrote) and the
+				//     SPLIT leaves the loop as if the body had never been entered. Group
+				//     1 keeps "aaa", which is what node and bash print.
+				// Failing here always terminates: the SPLIT above has exactly one
+				// alternative left, and it is the loop exit.
+				if re.jsrep {
+					return -1
+				}
 				pc = re.bs[pc]
 			} else {
 				pc++

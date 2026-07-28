@@ -380,6 +380,42 @@ s11() {
   re='[z-a]'; [[ b =~ $re ]] 2>/dev/null; check dbr45 "$?" 2
   re='[a'; [[ "[a" =~ $re ]] 2>/dev/null; check dbr46 "$?" 2
   re='a\'; [[ a =~ $re ]] 2>/dev/null; check dbr47 "$?" 2
+  # POSIX capture semantics for an unbounded loop: the iteration that consumes nothing
+  # is DISCARDED, so group 1 keeps "aaa". node agrees; Perl, Python, Ruby and Java all
+  # report "" here, which is why the shared engine needs to be TOLD which reading to use.
+  re='^(a*)*$'; [[ aaa =~ $re ]]; check dbr48 "${BASH_REMATCH[1]}" aaa
+  re='(a*)*b'; [[ aaab =~ $re ]]; check dbr49 "${BASH_REMATCH[1]}" aaa
+  # POSIX bracket expressions. Of the languages sharing the engine only Ruby has these;
+  # in JavaScript, Python and Java [[:alpha:]] is an ordinary class of punctuation.
+  re='[[:alpha:]]'; [[ x =~ $re ]]; check dbr50 "$?" 0
+  re='^[[:digit:]]+$'; [[ 123 =~ $re ]]; check dbr51 "$?" 0
+  re='[[:upper:][:space:]]'; [[ "a b" =~ $re ]]; check dbr52 "$?" 0
+  re='[[:foo:]]'; [[ x =~ $re ]] 2>/dev/null; check dbr53 "$?" 2
+  # a ) closes a group only when one is OPEN; at the top level it is an ordinary
+  # character. JavaScript, Python and Ruby all call a lone ) a syntax error.
+  re=')'; [[ "a)b" =~ $re ]]; check dbr54 "$?-${BASH_REMATCH[0]}" "0-)"
+  # inside a bracket expression a backslash is an ORDINARY CHARACTER, so [a\-b] is
+  # {a} plus the range \ .. b - it contains _ and does NOT contain -
+  re='^[a\-b]$'; [[ "_" =~ $re ]]; check dbr55 "$?" 0
+  re='^[a\-b]$'; [[ "-" =~ $re ]]; check dbr56 "$?" 1
+  # exactly ONE quantifier per atom; a second is an error, not a fold. (Ruby is the one
+  # dialect that folds it, with a warning.)
+  re='a**'; [[ ab =~ $re ]] 2>/dev/null; check dbr57 "$?" 2
+  re='a*?'; [[ ab =~ $re ]] 2>/dev/null; check dbr58 "$?" 2
+  # a { opens an interval only before a DIGIT - so a{b is literal (dbr30) and a{1 is a
+  # malformed interval rather than a literal
+  re='a{1'; [[ "a{1" =~ $re ]] 2>/dev/null; check dbr59 "$?" 2
+  # an ERE branch may not be empty. NOTE: this is the one behaviour in this block that
+  # is the C library's rather than bash's - glibc's regcomp accepts both of these - so
+  # it is pinned against the regcomp this tree is developed on.
+  re=''; [[ abc =~ $re ]] 2>/dev/null; check dbr60 "$?" 2
+  re='(a|)'; [[ b =~ $re ]] 2>/dev/null; check dbr61 "$?" 2
+  # an ERE has no escape SEQUENCES and no (? forms: \d is the letter d, and the ? of
+  # (?:a) is a quantifier with nothing in front of it
+  re='\d'; [[ d =~ $re ]]; check dbr62 "$?" 0
+  re='(?:a)'; [[ a =~ $re ]] 2>/dev/null; check dbr63 "$?" 2
+  # . matches a newline in an ERE; there is no "dot does not cross a line" rule to lift
+  re='a.b'; [[ $'a\nb' =~ $re ]]; check dbr64 "$?" 0
 }
 
 # ===== SECTION 12: the test builtin =====
