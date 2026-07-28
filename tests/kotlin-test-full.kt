@@ -2386,6 +2386,171 @@ fun sec60() {
     check("enc7", caught60 == "iae")
 }
 
+// ===== SECTION 61: labelled returns, including to an OUTER lambda =====
+// `return@label` targeting a lambda was implemented for the INNERMOST lambda only:
+// the return builder walked the walk-time retLabels stack, accepted a match whose
+// kind was "fun", and reported everything else as "non-local labelled return not
+// implemented". A plain non-local `return` out of a lambda already worked, so the
+// unwinding machinery existed - what was missing was naming a target.
+// Kotlin's rule is the one implemented here: `return@l` targets the NEAREST enclosing
+// function or lambda labelled `l`, with that frame's value. A lambda target raises a
+// {__lamret: l} marker rather than returning a control value, because the target may
+// be an outer lambda with forEach/map/a user function in between - only the lambda
+// whose own label matches absorbs it. A FUNCTION target reached through one or more
+// lambdas reuses the __nlret marker every function frame already catches.
+// The implicit label of an unlabelled lambda is its callee's name (`return@forEach`).
+fun s61outer(): Int {
+    var seen = 0
+    listOf(1, 2).forEach outer@{ a ->
+        listOf(3, 4).forEach { b -> if (b == 3) return@outer }
+        seen += a
+    }
+    return seen
+}
+fun s61inner(): String {
+    var out = ""
+    listOf(1, 2, 3).forEach { if (it == 2) return@forEach; out += it }
+    return out
+}
+fun s61nonlocal(): Int { listOf(1, 2, 3).forEach { if (it == 2) return 99 }; return 7 }
+fun s61labelfun(): Int {
+    listOf(1, 2).forEach { a -> listOf(3, 4).forEach { b -> if (b == 3) return@s61labelfun 42 } }
+    return 0
+}
+fun s61expr(): Int {
+    var n = 0
+    listOf(1, 2, 3).forEach lam@{ x -> val y = if (x == 2) return@lam else x; n += y }
+    return n
+}
+fun s61value(): Int = listOf(1, 2, 3).map outer@{ a -> listOf(9).map { return@outer a * 2 }; 0 }.sum()
+fun s61run(): Int = run outer@{ run { return@outer 5 }; 9 }
+fun sec61() {
+    // The inner lambda's return@outer leaves the OUTER lambda, so `seen` is never added to.
+    check("lret1", s61outer() == 0)
+    check("lret2", s61inner() == "13")
+    check("lret3", s61nonlocal() == 99)
+    // return@functionName from two lambdas deep: a genuine non-local return.
+    check("lret4", s61labelfun() == 42)
+    // return@label in EXPRESSION position (the `?:` / if-else idiom).
+    check("lret5", s61expr() == 4)
+    // The labelled lambda's VALUE is what return@label carries.
+    check("lret6", s61value() == 12)
+    check("lret7", s61run() == 5)
+}
+
+// ===== SECTION 62: MEMBER extension functions, including the bodiless ones =====
+// A member extension function - one declared inside a class or interface, whose `this`
+// is the extension receiver while `this@Class` is the enclosing instance - already
+// worked WITH a body. The BODILESS forms did not: `fun Int.qty(): String` in an
+// interface and `abstract fun Int.scaled(): Int` in an abstract class both fell
+// through to UnsupFun and aborted the whole run, even though the override beside them
+// was already understood. MemberExtAbs is AbstractFun's shape with a receiver in
+// front; like AbstractFun it contributes no implementation, and the override installs
+// the real entry, which the lookup reaches from the runtime receiver.
+interface Unit62 { fun Int.qty(): String }
+abstract class Base62 {
+    abstract fun Int.scaled(): Int
+    fun apply62(x: Int): Int = x.scaled()
+}
+class Impl62 : Base62(), Unit62 {
+    val factor = 3
+    override fun Int.scaled(): Int = this * this@Impl62.factor
+    override fun Int.qty(): String = "$this pcs"
+    fun describe(x: Int): String = x.qty()
+}
+class Dsl62 { var out = ""
+    fun String.emit() { out += this + ";" }
+    fun build(): String { "a".emit(); "b".emit(); return out } }
+fun sec62() {
+    val i = Impl62()
+    // Declared abstract in Base62, overridden in Impl62, called through a base member.
+    check("mxf1", i.apply62(5) == 15)
+    // Declared bodiless in an INTERFACE.
+    check("mxf2", i.describe(4) == "4 pcs")
+    // The dispatch receiver stays reachable from the body (`out` is Dsl62's).
+    check("mxf3", Dsl62().build() == "a;b;")
+    // In scope wherever an instance of the declaring class is the enclosing receiver.
+    check("mxf4", with(i) { 7.scaled() } == 21)
+}
+
+// ===== SECTION 63: the whole `super` surface =====
+// Three defects, all found by probing and all wrong ANSWERS rather than missing
+// features:
+//   - `super.property` had no branch at all in the field reader, so the {__superref}
+//     marker fell through to the extension-property fallback and answered undefined:
+//     `override val v get() = super.v + 1` quietly evaluated to 0.
+//   - `super` inside an OBJECT EXPRESSION resolved its declaring class through the
+//     walk-time class name, which an anonymous object does not have - so it failed
+//     with "no super method". The object expression now pushes "<object>" (its
+//     descriptor's own name) and the lookup walks the RECEIVER's supertype graph.
+//   - a `super<Base>` qualifier was parsed and DROPPED, so both halves of
+//     `super<I1>.tag() + super<I2>.tag()` resolved to the first parent.
+// And one more the probe exposed underneath them: an object expression did not
+// CONSTRUCT its superclass, so `(object : B() {}).v` answered Unit in both halves.
+open class SB63 { open val v = 1
+                  open val w: Int get() = 7
+                  open fun g() = 10 }
+interface SI63a { fun tag(): String = "a" }
+interface SI63b { fun tag(): String = "b" }
+class SD63 : SB63() {
+    override val v get() = super.v + 100
+    override val w: Int get() = super.w + 100
+    override fun g() = super.g() + 1
+    fun viaLambda(): Int = listOf(1).map { super.g() + 1000 }[0]
+}
+class STwo63 : SI63a, SI63b { override fun tag(): String = super<SI63a>.tag() + super<SI63b>.tag() }
+class SOuter63 { open class N63 { open fun n() = 7 }
+                 class NI63 : N63() { override fun n() = super.n() + 1 } }
+fun s63local(): Int {
+    open class LB63 { open fun q() = 3 }
+    class LD63 : LB63() { override fun q() = super.q() + 1 }
+    return LD63().q()
+}
+fun sec63() {
+    check("sup1", SD63().v == 101)          // super.<backing field>
+    check("sup2", SD63().w == 107)          // super.<computed property>
+    check("sup3", SD63().g() == 11)         // super.method()
+    check("sup4", SD63().viaLambda() == 1010)   // super from inside a lambda
+    check("sup5", STwo63().tag() == "ab")   // super<Interface>.method(), two supertypes
+    check("sup6", SOuter63.NI63().n() == 8) // super in a NESTED class
+    check("sup7", s63local() == 4)          // super in a LOCAL class
+    check("sup8", (object : SB63() { override fun g() = super.g() + 5 }).g() == 15)
+    check("sup9", (object : SB63() { override val v get() = super.v + 5 }).v == 6)
+    check("sup10", (object : SB63() {}).v == 1)   // the supertype's initializer RAN
+    check("sup11", (object : SB63() {}).g() == 10)
+}
+
+// ===== SECTION 64: a lambda-with-receiver as a PARAMETER (the DSL builder shape) =====
+// `val f: T.() -> Unit = { ... }` bound the receiver to `this`; the same type used as a
+// FUNCTION PARAMETER did not, so every DSL builder - the commonest receiver-lambda
+// shape in real Kotlin - died with "unknown name: <member>" the moment the body called
+// a member of the receiver. The receiver arrived as the lambda's `it` instead of as
+// `this`. A parameter whose declared type is a receiver function type now gets the
+// same wrapper the local declaration already got, so both `t.body()` and `body(t)`
+// bind `this`.
+class Node64(val name: String) {
+    val kids = mutableListOf<Node64>()
+    val attrs = mutableListOf<String>()
+    fun child(n: String, body: Node64.() -> Unit): Node64 { val c = Node64(n); c.body(); kids.add(c); return c }
+    fun attr(k: String, v: String) { attrs.add("$k=$v") }
+    fun render(): String {
+        var s = "<" + name
+        for (a in attrs) s += " " + a
+        s += ">"
+        for (k in kids) s += k.render()
+        return s + "</" + name + ">"
+    }
+}
+fun doc64(body: Node64.() -> Unit): Node64 { val r = Node64("root"); r.body(); return r }
+fun applyTwice64(x: Int, f: Int.() -> Int): Int = x.f().f()
+fun sec64() {
+    val d = doc64 { attr("lang", "en"); child("body") { attr("id", "b") } }
+    check("rcv1", d.render() == "<root lang=en><body id=b></body></root>")
+    // A receiver function type on a BUILTIN receiver, invoked in extension position.
+    check("rcv2", applyTwice64(3) { this + 1 } == 5)
+    check("rcv3", doc64 { attr("k", "v") }.attrs.size == 1)
+}
+
 // ===== END SECTIONS =====
 
 fun main() {
@@ -2449,6 +2614,10 @@ fun main() {
     sec58() // SECTION-CALL 58
     sec59() // SECTION-CALL 59
     sec60() // SECTION-CALL 60
+    sec61() // SECTION-CALL 61
+    sec62() // SECTION-CALL 62
+    sec63() // SECTION-CALL 63
+    sec64() // SECTION-CALL 64
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

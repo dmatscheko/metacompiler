@@ -682,12 +682,30 @@ CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
             = [ Modifiers ] [ KwVararg <~~ push({isvararg: true}) ~~> ] [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] KId <~~ push({pname: up.in}) ~~> ":" PType [ "=" ParamDefault ] ;
 
 // A nested typealias is erased exactly like a top-level one.
-Member      = [ Modifiers ] ( InitBlock | CompanionBlk | CompanionObject | SecondaryCtor | NestedClass | NestedType | TypeAlias | AccessorProp | UnsupAccessor | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | AbstractFun | UnsupFun ) ;
+Member      = [ Modifiers ] ( InitBlock | CompanionBlk | CompanionObject | SecondaryCtor | NestedClass | NestedType | TypeAlias | AccessorProp | UnsupAccessor | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | MemberExtFun | MemberExtAbs | AbstractFun | UnsupFun ) ;
 // A member function WITHOUT a body: an abstract method of an abstract class, or an
 // interface method with no default. Nothing is emitted for it (the overriding class
 // provides the implementation), but its NAME and arity are recorded, which is what
 // interface delegation (`: I by impl`) needs to synthesize its forwarders. Tried
 // after FunDecl, so a function that HAS a body never lands here.
+// A MEMBER extension function - fun B.ext() declared INSIDE a class - is the only
+// construct with TWO receivers: the extension receiver, bound to `this` in the body,
+// and the DISPATCH receiver, the enclosing class instance. The lowering keeps both:
+// the function is installed on the descriptor under "ext$name" and takes
+// (dispatchReceiver, extensionReceiver, args...), with the dispatch receiver bound in
+// the frame as `__dispatch` so an unqualified member of the declaring class and
+// `this@Class` still resolve. Being a member, it is in scope only where an instance of
+// the declaring class is the enclosing receiver, which is what js_ktmextcall tests.
+// The twin of MemberExtFun in kotlin-interpreter.abnf.
+MemberExtFun <~~ push({memberExt: makeFun(takeAll(), retLblTop())}); retLblPop() ~~>
+            = KwFun [ SkipAngle ] AnnoRecv { RecvSeg } KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> [ SkipAngle ] ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
+// The BODILESS member extension - `fun Int.qty(): String` in an interface and
+// `abstract fun Int.scaled(): Int` in an abstract class. Like AbstractFun it
+// contributes no implementation; the override in the subclass installs the real
+// ext$name entry, which the lookup reaches from the runtime receiver. Ordered AFTER
+// MemberExtFun so a member extension WITH a body keeps its own error positions.
+MemberExtAbs <~~ takeAll() ~~>
+            = KwFun [ SkipAngle ] AnnoRecv { RecvSeg } KId [ SkipAngle ] SigParamsSkip [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] [ ";" ] ;
 AbstractFun <~~ push({absmethod: makeAbstract(takeAll())}) ~~>
             = KwFun [ SkipAngle ] KId <~~ push(up.in) ~~> ParamList [ ":" Type ] [ WhereClause ] ;
 // A nested CLASS - class Nested { } / inner class Inner { } inside another class or
@@ -748,9 +766,23 @@ PropVis     = [ Modifiers ] ( KwGet | KwSet ) NotParen ;
 // `var by` (Kotlin allows lazy only on val) - needs the delegate protocol, which is
 // outside the subset: parsed and reported as not implemented (no field, like an
 // accessor). LazyProp is tried first; a non-lazy delegate backtracks to UnsupDelegate.
-PropDelegate = LazyProp | UnsupDelegate ;
+// `by lazy { init }` is special-cased (eager, see LazyProp); every other delegate goes
+// through Kotlin's real DELEGATE PROTOCOL - the delegate object is stored in a hidden
+// `name$delegate` field on the instance and the descriptor gets a js_defprop accessor
+// pair whose getter calls getValue(thisRef, property) and whose setter calls
+// setValue(thisRef, property, value). An expression that is not a delegate at all (no
+// getValue on its class chain) is reported as not implemented when the DECLARATION
+// runs - js_ktdcheck, the twin of delegCheck in kotlin-interpreter.abnf, so the message
+// and the -warn-unsupported placeholder are identical in both halves. An EXTENSION
+// delegated property (val Recv.x by ...) has no single owner to pass as thisRef and
+// stays unsupported.
+PropDelegate = LazyProp | RealPropDelegate | UnsupDelegate ;
 LazyProp    <~~ push(makeProp(takeAll())) ~~>
             = "val" KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit { PropVis } [ ";" ] ;
+RealPropDelegate <~~ push({accprop: makeDelegProp(takeAll(), up.pos)}) ~~>
+            = ( "val" | "var" ) KwEnd KId <~~ push({apname: up.in}) ~~> [ ":" Type ] KwBy DelegSrc { PropVis } [ ";" ] ;
+DelegSrc    <~~ push({dsrc: pop()}) ~~>
+            = Expression ;
 // A delegated property may still declare accessors - `val p: Int by A()` on one line and
 // `get() = 1` on the next (psi/propertyDelegate/PropertyWithGetter.kt), or
 // `val a by A(); get() = 1;` (psi/propertyDelegate/GetterInSameLine.kt). The accessors are
@@ -940,9 +972,15 @@ DeclType    <~~ var dt = stripWs(up.in); pendingRecvLambda = isRecvFnType(dt); p
 // PropDelegate: `val x by lazy { init }` is GENUINE (LazyDecl - the initializer is
 // lowered once and x becomes an ordinary binding); every other delegate is not
 // implemented, with a placeholder so the rest still lowers under -warn-unsupported.
-DelegateDecl = LazyDecl | UnsupDelegateDecl ;
+DelegateDecl = LazyDecl | RealDelegateDecl | UnsupDelegateDecl ;
 LazyDecl    <~~ push(makeDecl(takeAll())) ~~>
             = "val" KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit [ ";" ] ;
+// The same delegate protocol for a local or top-level `val x by d`: the binding holds
+// a delegate BOX (js_ktdbox), and every read (js_ktget) and every write (js_ktvarset)
+// goes through getValue/setValue. thisRef is null, as it is in Kotlin for a property
+// with no owner. The twin of RealDelegateDecl in kotlin-interpreter.abnf.
+RealDelegateDecl <~~ push(makeDelegDecl(takeAll(), up.pos)) ~~>
+            = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] KwBy DelegSrc [ ";" ] [ AccRun ] [ ";" ] ;
 UnsupDelegateDecl <~~ push(notImplStmt("delegated property", up.pos)) ~~>
             = ( "val" | "var" ) KwEnd [ { TypeAnno } RecvSeg { RecvSeg } ] KId [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] [ ";" ] { DropAcc } [ ";" ] ;
 
@@ -1034,8 +1072,18 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
 // Statement's own { StmtAnn } run; a when arm / if branch holds an EXPRESSION, and the
 // AnnExpr level below only reaches a UnaryExpr, so `@ann x` parsed and the `+=` was
 // stranded. The annotations push nothing, so this is item-neutral.
-Expression  = AnnAssign | Assignment | CallAssign | OrExpr ;
-AnnAssign   = Annotation { Annotation } ( Assignment | CallAssign ) ;
+Expression  = AnnAssign | SuperAssign | Assignment | CallAssign | OrExpr ;
+AnnAssign   = Annotation { Annotation } ( SuperAssign | Assignment | CallAssign ) ;
+// `super.p = v` - the superclass's SETTER, which an overriding setter calls to store
+// the value the base keeps. It needs its own form because `Target` is rooted at a KId
+// and `super` matches one, so the write went to a variable named `super` and aborted
+// with "unknown name: super" in BOTH halves. Tried before Assignment, whose Target
+// would swallow it. UNVERIFIED against kotlinc (none on this machine): the Kotlin
+// documentation's "Calling the superclass implementation" section spells the read,
+// and the write is the same qualified access on the left of an assignment.
+SuperAssign <~~ push(makeSuperAssign(takeAll(), up.pos)) ~~>
+            = KwSuper [ SuperQual ] "." KId <~~ push({sfname: up.in}) ~~>
+              ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
 // An assignment whose left side is a postfix expression containing a call, so a plain
@@ -1549,7 +1597,7 @@ PlainArg    <~~ push({at: pop()}) ~~>
 // else/arm bodies are full Expressions, so `if (c) a else b + 1` still binds b + 1 as
 // the else. A leading `if` at statement level is the If statement (matched before
 // ExprStmt); a leading `when` is this expression form.
-Primary     = DeclExpr | CollLit | ParenApply | "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | DotFloatLit | FloatLit | KIntLit | CharLit | True | False | Null | Lambda | AnonFun | AnonFunUnsup | CallableRef | ObjectExpr | IfExpr | WhenExpr | TryExpr | ThrowExpr | ReturnAtExpr | BreakAtExpr | ContinueAtExpr | ReturnExpr | BreakExpr | ContinueExpr | SuperCall | SuperRef | ThisExpr | LabeledPrim | Call | VarRef ;
+Primary     = DeclExpr | CollLit | ParenApply | "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | DotFloatLit | FloatLit | KIntLit | CharLit | True | False | Null | Lambda | AnonFun | AnonFunUnsup | CallableRef | ObjectExpr | IfExpr | WhenExpr | TryExpr | ThrowExpr | ReturnAtExpr | BreakAtExpr | ContinueAtExpr | ReturnExpr | BreakExpr | ContinueExpr | SuperCall | SuperField | SuperRef | ThisExpr | LabeledPrim | Call | VarRef ;
 
 // super.m(args) - the base implementation of an overridden method. It compiles to
 // js_supercall(<the DEFINING class's superclass descriptor>, this, "m", args), which
@@ -1560,7 +1608,22 @@ Primary     = DeclExpr | CollLit | ParenApply | "(" Expression ")" | RawStr | Te
 SuperCall   <~~ push(makeSuperCall(takeAll(), up.pos)) ~~>
 // SkipAngle1, not SkipAngle: `super<>` is a genuine syntax error ("Type expected" in
 // psi/Super.txt), and an EMPTY angle pair would otherwise be accepted here.
-            = KwSuper [ SkipAngle1 ] "." KId <~~ push({smname: up.in}) ~~> [ SkipAngle ] "(" [ CallArgs ] ")" ;
+            = KwSuper [ SuperQual ] "." KId <~~ push({smname: up.in}) ~~> [ SkipAngle ] "(" [ CallArgs ] ")" ;
+// `super<I>` NAMES which supertype the call means, and a class with two supertypes
+// needs it - `class C : I1, I2 { override fun f() = super<I1>.f() }`. The qualifier
+// used to be skipped, so both spellings reached the FIRST supertype and
+// `super<I2>.f()` silently ran I1's default. The name is recorded here and
+// makeSuperCall / makeSuperField start the __super walk at that descriptor instead.
+SuperQual   <~~ push({squal: superQualName(up.in)}) ~~>
+            = SkipAngle1 ;
+// `super.x` as a VALUE - `override val v: Int get() = super.v + 1`. Kotlin's rule is
+// that it runs the SUPERCLASS's getter, so the walk starts at the defining class's
+// superclass descriptor exactly as super.m() does; a supertype that declares the
+// property as a plain field has no accessor on the chain, and the read then lands on
+// the instance's own backing slot (js_ktsupget). Ordered AFTER SuperCall (which needs
+// a `(`) and BEFORE SuperRef, which is the bare `super`.
+SuperField  <~~ push(makeSuperField(takeAll(), up.pos)) ~~>
+            = KwSuper [ SuperQual ] "." KId <~~ push({sfname: up.in}) ~~> ;
 // A BARE `super`, optionally qualified - `super<sdf>` as a parameter default in
 // psi/SimpleExpressions.kt, clean tree. There is no super OBJECT in this subset (only
 // the super CALL above), so the reference is recognised and reported. SkipAngle1 rather
@@ -2181,7 +2244,11 @@ CompanionReal <~~ push({companion: takeAll()}) ~~>
 // keyword and therefore a perfectly good KId, so a nameless `companion object` followed
 // by a blank line and a nested `object C` (psi/NamedClassObject.kt) had the NEXT
 // declaration's `object` eaten as the companion's name, stranding its `C`.
-            = KwCompanion KwObject [ SameLine KId <~~ push({cname: up.in}) ~~> ] [ ":" SuperList ] ( "{" { Member } "}" | !"{" ) ;
+// The supertype list is `Supers`, not the discarding `SuperList`: a companion object
+// may IMPLEMENT an interface (`companion object : Named`), and its default methods have
+// to be copied onto the companion's method holder or `Cls.show()` aborts with "unknown
+// method" while the interpreter half answers it.
+            = KwCompanion KwObject [ SameLine KId <~~ push({cname: up.in}) ~~> ] [ ":" Supers ] ( "{" { Member } "}" | !"{" ) ;
 CompanionSkip <~~ notImpl("companion object", up.pos) ~~>
             = KwCompanion KwObject [ KId ] [ ":" SuperList ] SkipBlock ;
 // A secondary constructor - constructor(a, b) : this(a + b) { ... } - is genuine. It
@@ -2660,6 +2727,16 @@ KwContract  = "contract" KwEnd ;
             else if (items[i].isvararg != undefined) { rec.vararg = true }
             else if (items[i].pty != undefined) { rec.ty = items[i].pty }
         }
+        // A PARAMETER whose declared type is a receiver function type - the DSL builder
+        // shape, `fun doc(body: Node.() -> Unit)` - binds its receiver as `this`
+        // exactly as a local `val f: T.() -> R` does, so `t.body()` inside the callee
+        // must reach the closure with the receiver in front rather than look for a
+        // METHOD named body. Registering the name here is what the call-site branch on
+        // recvLambdaNames already needs; without it every DSL builder aborted with
+        // "unknown method 'body' on an instance".
+        if (rec.name != null && rec.ty != "" && isRecvFnType(rec.ty)) {
+            recvLambdaNames["$" + rec.name] = true
+        }
         return rec
     }
     // {params: [names], defs: [thunk|null], varargAt: index|-1}. `params` keeps the
@@ -2804,6 +2881,18 @@ KwContract  = "contract" KwEnd ;
         if (sig.tys != undefined) {
             for (var t = 0; t < sig.tys.length; t++) {
                 b = emitAdoptSlot(b, sig.params[t], sig.tys[t])
+                // A parameter declared with a RECEIVER function type (the DSL builder
+                // shape, `body: Node.() -> Unit`) is re-bound to a wrapper that runs
+                // the closure with its first argument as `this`. The lambda the CALLER
+                // wrote is an ordinary one - the callee is the only place that knows
+                // the type - so the binding, not the literal, is what carries the
+                // receiver. js_ktrecvlam is the same rule ktWithRecv gives `with`.
+                if (sig.tys[t] != "" && isRecvFnType(sig.tys[t])) {
+                    var rlV = emitStr(b, sig.params[t])
+                    callExt(b, "js_scope_set", [curScopeV, rlV,
+                                                callExt(b, "js_ktrecvlam",
+                                                        [callExt(b, "js_scope_get", [curScopeV, rlV])])])
+                }
             }
         }
         return b
@@ -3387,6 +3476,16 @@ KwContract  = "contract" KwEnd ;
                 // An extension function wins only when no builtin or class method
                 // uses the name: call ext$name directly, receiver prepended (it may
                 // be null for a nullable-receiver extension; ?. still skips first).
+                // A MEMBER extension of the enclosing class wins over a top-level
+                // one (it is the more specific declaration, and it is only in scope
+                // here at all). The lookup is a runtime one - which class instance is
+                // the enclosing receiver is not known at emit time - and falls back to
+                // the ordinary method dispatch when nothing declares it.
+                if (memberExtNames["$" + s.name] == true && builtinMethodNames["$" + s.name] != true) {
+                    var mxa = emitArgs(b, orderArgs(s.args, undefined))
+                    return {b: mxa.b, v: callExt(mxa.b, "js_ktmextcall",
+                                                 [curScopeV, cur, emitStr(mxa.b, s.name), mxa.v])}
+                }
                 if (extResolves(s.name)) {
                     var efV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "ext$" + s.name)])
                     var eargsV = callExt(b, "js_arr_new", [])
@@ -3543,10 +3642,23 @@ KwContract  = "contract" KwEnd ;
     function makeLambda(items) {
         var params = ["it"]
         var start = 0
+        // The label this lambda ANSWERS TO, so a `return@lbl` aimed at it - from any
+        // depth, not only from its own body - is absorbed here and nowhere else. An
+        // explicit label (lab@{ ... }) pushed its entry when it was seen and the body
+        // has now been walked, so it is popped again here; without one, the implicit
+        // label is the callee's name, the "lam" entry the enclosing Call / MethodSfx
+        // pushed, which is still on top. The twin of makeLambda in the other half.
+        var myLbl = null
+        var myEntry = retLblTop()
         // A labelled lambda: drop the marker and release its return-target entry.
         if (items.length > 0 && items[0] != undefined && items[0].lamlbl != undefined) {
+            myLbl = items[0].lamlbl
             retLblPop()
             items = items.slice(1)
+        } else if (myEntry != null && myEntry.kind == "lam") {
+            myLbl = myEntry.lbl
+        } else {
+            myEntry = null
         }
         if (items.length > 0 && items[0] != undefined && items[0].lparams != undefined) {
             params = items[0].lparams
@@ -3596,8 +3708,14 @@ KwContract  = "contract" KwEnd ;
         // function: f(recv, a) and recv.f(a) then mean the same call, as in Kotlin.
         var withRecv = pendingRecvLambda
         pendingRecvLambda = false
+        // Only a lambda some `return@<its label>` actually names needs the absorbing
+        // wrapper, so a program without one emits byte-identical IR.
+        var lamBody = bodyStmt
+        if (myLbl != null && myEntry != null && myEntry.lamret == true) {
+            lamBody = wrapLamRet(bodyStmt, myLbl)
+        }
         return function(b) {
-            var idx = emitFunc(argNames, bodyStmt, withRecv)
+            var idx = emitFunc(argNames, lamBody, withRecv)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }
     }
@@ -3741,6 +3859,7 @@ KwContract  = "contract" KwEnd ;
         var nested = []
         var sctors = []
         var abstracts = []
+        var memberExts = []
         var inits = []          // Property initializers AND init blocks, in DECLARATION order.
         var companion = null
         var compName = null
@@ -3755,17 +3874,27 @@ KwContract  = "contract" KwEnd ;
             else if (items[i].sctor != undefined) { sctors.push(items[i].sctor) }
             else if (items[i].accprop != undefined) {
                 accprops.push(items[i].accprop)
+                // A delegated property's "initializer" fills the hidden delegate field.
+                if (items[i].accprop.isDeleg == true) {
+                    inits.push({prop: delegField(items[i].accprop.name),
+                                init: delegInitThunk(items[i].accprop)})
+                }
                 // Only a property WITH an initializer has a backing field to fill.
-                if (items[i].accprop.init != null) {
+                else if (items[i].accprop.init != null) {
                     inits.push({prop: backingName(items[i].accprop.name), init: items[i].accprop.init})
                 }
             }
             else if (items[i].initblk != undefined) { inits.push(items[i]) }
+            else if (items[i].memberExt != undefined) {
+                memberExts.push(items[i].memberExt)
+                memberExtNames["$" + items[i].memberExt.name] = true
+            }
             else if (items[i].absmethod != undefined) { abstracts.push(items[i].absmethod) }
             else if (items[i].prop != undefined && items[i].init != undefined) { props.push(items[i]); inits.push(items[i]) }
             else if (items[i].method != undefined) { methods.push(items[i].method) }
         }
         return {props: props, methods: methods, accprops: accprops, abstracts: abstracts,
+                memberExts: memberExts,
                 nested: nested, sctors: sctors, inits: inits, companion: companion, compName: compName}
     }
     // The leading non-member entries of a walked type declaration: the supertype list
@@ -3849,7 +3978,7 @@ KwContract  = "contract" KwEnd ;
     // instance as a value) and the object DECLARATION (which also binds the singleton to its
     // name); the only per-caller difference is the __name string and what happens with the
     // instance afterwards.
-    function emitObjectInstance(b, name, methods, props, supers, accprops) {
+    function emitObjectInstance(b, name, methods, props, supers, accprops, memberExts) {
         if (supers == undefined) { supers = [] }
         if (accprops == undefined) { accprops = [] }
         var own = {}
@@ -3868,6 +3997,7 @@ KwContract  = "contract" KwEnd ;
             callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
         }
         for (var ap = 0; ap < accprops.length; ap++) { b = emitAccessorPair(b, clsV, accprops[ap]) }
+        b = emitMemberExts(b, clsV, memberExts)
         emitClassNames.pop()
         emitSuperName = savedSuper
         var objV = callExt(b, "js_obj_new", [])
@@ -3875,10 +4005,24 @@ KwContract  = "contract" KwEnd ;
         var saved = curScopeV
         curScopeV = callExt(b, "js_scope_new", [curScopeV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), objV])
+        // `object : B(...)` genuinely CONSTRUCTS its superclass, exactly as a class
+        // declaration does - without this the base's property initializers never ran,
+        // so `(object : B() {}).v` answered undefined and a `super.v` inside an
+        // override had nothing to read. The twin fix landed in the interpreter half.
+        b = emitSuperCtor(b, objV, (supers.length > 0 ? supers[0] : null))
         for (var p = 0; p < props.length; p++) {
             var r = props[p].init(b)
             b = r.b
-            callExt(b, "js_set", [objV, emitStr(b, props[p].prop), r.v])
+            callExt(b, "js_ktpropset", [objV, emitStr(b, props[p].prop), r.v])
+        }
+        // An object expression / declaration may carry a delegated property too; its
+        // hidden field is filled here, since this emitter runs `props` rather than the
+        // full initializer list a class emitter walks.
+        for (var dp = 0; dp < accprops.length; dp++) {
+            if (accprops[dp].isDeleg != true) { continue }
+            var rd = delegInitThunk(accprops[dp])(b)
+            b = rd.b
+            callExt(b, "js_set", [objV, emitStr(b, delegField(accprops[dp].name)), rd.v])
         }
         curScopeV = saved
         return {b: b, v: objV, cls: clsV}
@@ -3890,7 +4034,7 @@ KwContract  = "contract" KwEnd ;
         var methods = parts.methods
         for (var om = 0; om < methods.length; om++) { classMethodNames["$" + methods[om].name] = true }
         return function(b) {
-            return emitObjectInstance(b, "<object>", methods, props, hdr.supers, parts.accprops)
+            return emitObjectInstance(b, "<object>", methods, props, hdr.supers, parts.accprops, parts.memberExts)
         }
     }
 
@@ -4062,7 +4206,9 @@ KwContract  = "contract" KwEnd ;
                     b = ro.b
                     v = ro.v
                 }
-                callExt(b, "js_kset", [curScopeV, nameV, v])
+                // js_ktvarset, not js_kset: a binding holding a delegate box is written
+                // through the delegate's setValue (see RealDelegateDecl).
+                callExt(b, "js_ktvarset", [curScopeV, nameV, v])
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
@@ -4308,15 +4454,32 @@ KwContract  = "contract" KwEnd ;
         if (top != null && top.lbl == lbl) {
             return makeReturn(items.slice(1), false)
         }
+        // Kotlin's rule: return@l targets the NEAREST enclosing function or lambda
+        // labelled l.
+        var idx = -1
+        for (var i = retLabels.length - 1; i >= 0; i--) {
+            if (retLabels[i].lbl == lbl) { idx = i; break }
+        }
+        if (idx < 0) { return notImplStmt("non-local labelled return", pos) }
         // return@outerFun from inside a lambda: the enclosing function's wrapper can
         // deliver it, exactly like a bare non-local return.
-        for (var i = retLabels.length - 1; i >= 0; i--) {
-            if (retLabels[i].kind == "fun" && retLabels[i].lbl == lbl) {
-                retLabels[i].nl = true
-                return makeReturn(items.slice(1), true)
-            }
+        if (retLabels[idx].kind == "fun") {
+            retLabels[idx].nl = true
+            return makeReturn(items.slice(1), true)
         }
-        return notImplStmt("non-local labelled return", pos)
+        // return@outerLambda: the labelled lambda's own value, raised as a marker that
+        // only that lambda absorbs (see wrapLamRet).
+        retLabels[idx].lamret = true
+        var t = items.length > 1 ? items[1] : null
+        return function(b) {
+            var v = hUndef
+            if (t != null) {
+                var r = t(b)
+                b = r.b
+                v = r.v
+            }
+            return retLamLabel(b, lbl, v)
+        }
     }
 
     function makeBreakTo(lbl, pos) {
@@ -4571,6 +4734,58 @@ KwContract  = "contract" KwEnd ;
         callExt(reB, "js_throw", [mV])
         reB.NewRet(hUndef)
         return deadBlock()
+    }
+    // `return@lbl` aimed at a LAMBDA raises a marker instead of returning a value: the
+    // target may be an OUTER lambda with forEach / map / a user function in between, and
+    // a return VALUE cannot travel through those. Only the lambda whose own label
+    // matches absorbs it (lamCatchBody); anything else rethrows, so it keeps travelling
+    // outwards. The twin of the __lamret protocol in kotlin-interpreter.abnf.
+    function retLamLabel(b, lbl, v) {
+        var mV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [mV, emitStr(b, "__lamret"), emitStr(b, lbl)])
+        callExt(b, "js_set", [mV, emitStr(b, "__lamvalue"), v])
+        callExt(b, "js_throw", [mV])
+        b.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
+        return deadBlock()
+    }
+    // The catch body of a labelled lambda: absorb a marker carrying THIS label as the
+    // lambda's value, rethrow everything else (another label, a real exception, the
+    // non-local-return marker).
+    function lamCatchBody(lbl) {
+        return function(b) {
+            var mV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__lr")])
+            var objB = curF.NewBlock("")
+            var reB = curF.NewBlock("")
+            var hitB = curF.NewBlock("")
+            var isObj = b.NewAnd(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [mV]), emitStr(b, "object")])),
+                                 truthy(b, callExt(b, "js_sne", [mV, hNull])))
+            b.NewCondBr(isObj, objB, reB)
+            objB.NewCondBr(truthy(objB, callExt(objB, "js_seq",
+                                                [callExt(objB, "js_get", [mV, emitStr(objB, "__lamret")]),
+                                                 emitStr(objB, lbl)])), hitB, reB)
+            hitB.NewRet(callExt(hitB, "js_get", [mV, emitStr(hitB, "__lamvalue")]))
+            callExt(reB, "js_throw", [mV])
+            reB.NewRet(hUndef)
+            return deadBlock()
+        }
+    }
+    // Wrap a lambda body so a return@<its label> lands here, exactly as wrapNonLocal
+    // wraps a function body for the non-local-return marker. Applied only when the walk
+    // actually saw a `return@lbl` naming this lambda, so a program without one emits
+    // byte-identical IR.
+    function wrapLamRet(bodyT, lbl) {
+        return function(b) {
+            var tryClo = callExt(b, "js_closure",
+                                 [handle(emitFunc([], bodyT, false, true,
+                                                  {params: [], defs: [], tys: [], varargAt: -1, rty: curRetTy})),
+                                  curScopeV])
+            var catchClo = callExt(b, "js_closure",
+                                   [handle(emitFunc(["__lr"], lamCatchBody(lbl), false, false)), curScopeV])
+            var ctl = callExt(b, "js_try", [tryClo, catchClo, hUndef])
+            var nb = excDispatch(b, ctl)
+            nb.NewRet(ctl)
+            return deadBlock()
+        }
     }
     // Wrap a function body so a non-local return inside it lands here. The body becomes a
     // ctl closure (so an ORDINARY return leaving it still travels as a control signal that
@@ -4897,14 +5112,14 @@ KwContract  = "contract" KwEnd ;
         for (var k2 = 0; k2 < cparams.length; k2++) {
             if (!cparams[k2].prop) { continue }
             var nv = emitStr(b, cparams[k2].name)
-            callExt(b, "js_set", [thisV, nv, callExt(b, "js_scope_get", [curScopeV, nv])])
+            callExt(b, "js_ktpropset", [thisV, nv, callExt(b, "js_scope_get", [curScopeV, nv])])
         }
         b = emitSuperCtor(b, thisV, (supers.length > 0 ? supers[0] : null))
         for (var p = 0; p < inits.length; p++) {
             if (inits[p].initblk != undefined) { b = inits[p].initblk(b); continue }
             var r = inits[p].init(b)
             b = r.b
-            callExt(b, "js_set", [thisV, emitStr(b, inits[p].prop), r.v])
+            callExt(b, "js_ktpropset", [thisV, emitStr(b, inits[p].prop), r.v])
         }
         b.NewRet(hUndef)
         curF = savedF
@@ -4927,6 +5142,120 @@ KwContract  = "contract" KwEnd ;
         }
         return rec
     }
+    // ----- member extension functions (two receivers) -----
+    // Which names some class declares as a member extension, so the mcall emitter knows
+    // to try the runtime lookup. A name a builtin already implements is never taken
+    // over this way - the same rule memberExtLookup applies in the other half.
+    var memberExtNames = {}
+    // Set while a member extension's BODY is emitted: `this@DeclaringClass` inside it is
+    // the DISPATCH receiver, not `this` (which is the extension receiver).
+    var emitMemberExtOf = null
+    // The IR function of one member extension: (dispatch, extensionReceiver, args...).
+    // Declaring the two leading slots as ordinary parameter NAMES is what binds them -
+    // `this` in a scope is exactly what js_ktget resolves - so the signature machinery
+    // (defaults, vararg, declared widths) applies unchanged, shifted by two.
+    function emitMemberExtFunc(f) {
+        var ps = ["__dispatch", "this"]
+        var ds = [null, null]
+        var ts = ["", ""]
+        for (var i = 0; i < f.params.length; i++) {
+            ps.push(f.params[i])
+            ds.push(f.sig.defs[i])
+            ts.push(f.sig.tys[i])
+        }
+        var sig = {params: ps, defs: ds, tys: ts,
+                   varargAt: (f.sig.varargAt < 0 ? -1 : f.sig.varargAt + 2), rty: f.sig.rty}
+        var saved = emitMemberExtOf
+        emitMemberExtOf = emitClassTop()
+        var idx = emitFunc(ps, f.body, false, false, sig)
+        emitMemberExtOf = saved
+        return idx
+    }
+    function emitMemberExts(b, clsV, list) {
+        if (list == undefined) { return b }
+        for (var i = 0; i < list.length; i++) {
+            callExt(b, "js_set", [clsV, emitStr(b, "ext$" + list[i].name),
+                                  callExt(b, "js_closure", [handle(emitMemberExtFunc(list[i])), curScopeV])])
+        }
+        return b
+    }
+
+    // ----- delegated properties (the getValue/setValue protocol) -----
+    // A MEMBER `val/var x by d` is an accessor property whose pair is synthesized: the
+    // delegate lands in the instance field `x$delegate` (one more entry in the
+    // initializer list, so it is evaluated in declaration order like every other
+    // property initializer) and the descriptor gets a js_defprop pair that routes reads
+    // and writes through it. Both accessors are installed for a `val` too, exactly as
+    // installMembers does in kotlin-interpreter.abnf.
+    // items = [{apname}, {dsrc}] -> the accprop record splitMembers and emitAccessorPair
+    // consume, marked isDeleg.
+    function makeDelegProp(items, pos) {
+        var rec = {name: null, init: null, getter: null, setter: null, setParam: "value",
+                   isDeleg: true, dsrc: null, dwhere: c.file + ":" + c.lineOf(pos)}
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] == undefined || items[i] == null) { continue }
+            if (items[i].apname != undefined) { rec.name = items[i].apname }
+            else if (items[i].dsrc != undefined) { rec.dsrc = items[i].dsrc }
+        }
+        return rec
+    }
+    // The hidden field a member delegate is stored in.
+    function delegField(name) { return name + "$delegate" }
+    // The initializer thunk for that field: evaluate the `by` expression and check it
+    // really is a delegate. js_ktdcheck warns (or fails) exactly as notImpl does.
+    function delegInitThunk(rec) {
+        var src = rec.dsrc
+        var where = rec.dwhere
+        return function(b) {
+            var r = src(b)
+            var bb = r.b
+            return {b: bb, v: callExt(bb, "js_ktdcheck",
+                                      [r.v, emitStr(bb, where), c.warnUnsupported ? hTrue : hFalse,
+                                       callExt(bb, "js_ktdthis", [curScopeV]), emitStr(bb, rec.name)])}
+        }
+    }
+    // The js_defprop pair of a delegated member property.
+    function emitDelegPair(b, clsV, rec) {
+        var fld = delegField(rec.name)
+        var nm = rec.name
+        var getIdx = emitFunc([], function(bb) {
+            var thisV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "this")])
+            bb.NewRet(callExt(bb, "js_ktdget", [callExt(bb, "js_get", [thisV, emitStr(bb, fld)]),
+                                                thisV, emitStr(bb, nm)]))
+            return deadBlock()
+        }, false, false, undefined, true)
+        var setIdx = emitFunc(["value"], function(bb) {
+            var thisV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "this")])
+            callExt(bb, "js_ktdset", [callExt(bb, "js_get", [thisV, emitStr(bb, fld)]), thisV,
+                                      emitStr(bb, nm),
+                                      callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "value")])])
+            bb.NewRet(hUndef)
+            return deadBlock()
+        }, false, false, undefined, true)
+        callExt(b, "js_defprop", [clsV, emitStr(b, nm),
+                                  callExt(b, "js_closure", [handle(getIdx), curScopeV]),
+                                  callExt(b, "js_closure", [handle(setIdx), curScopeV])])
+        return b
+    }
+    // A LOCAL or top-level `val/var x by d`: bind the box. items = [name, {dsrc}, ...].
+    function makeDelegDecl(items, pos) {
+        var name = items[0]
+        var src = null
+        for (var i = 1; i < items.length; i++) {
+            if (items[i] != undefined && items[i] != null && items[i].dsrc != undefined) { src = items[i].dsrc }
+        }
+        var where = c.file + ":" + c.lineOf(pos)
+        return function(b) {
+            var r = src(b)
+            b = r.b
+            var dV = callExt(b, "js_ktdcheck", [r.v, emitStr(b, where),
+                                                c.warnUnsupported ? hTrue : hFalse,
+                                                hNull, emitStr(b, name)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name),
+                                         callExt(b, "js_ktdbox", [dV, emitStr(b, name)])])
+            return b
+        }
+    }
     // items = [{sparam}?, bodyThunk]. Kotlin's implicit setter parameter is `value`.
     function makeSetAcc(items) {
         if (items.length > 1) { return {setter: items[1], setname: items[0].sparam} }
@@ -4942,6 +5271,7 @@ KwContract  = "contract" KwEnd ;
     var emitBackingField = null
     // Emit the accessor pair of one property onto the descriptor clsV.
     function emitAccessorPair(b, clsV, rec) {
+        if (rec.isDeleg == true) { return emitDelegPair(b, clsV, rec) }
         var savedField = emitBackingField
         emitBackingField = backingName(rec.name)
         var getV = hUndef
@@ -5438,6 +5768,11 @@ KwContract  = "contract" KwEnd ;
             // js_ktthisat walks the __outer chain BY NAME and falls back to the receiver
             // when nothing matches; a bare `js_get(this, "__outer")` aborted for an inner
             // class constructed inside its outer's own method, where nothing sets it.
+            // Inside a MEMBER extension, `this` is the EXTENSION receiver, so
+            // `this@DeclaringClass` is the dispatch receiver rather than `this`.
+            if (emitMemberExtOf != null && emitMemberExtOf == lbl) {
+                return {b: b, v: callExt(b, "js_ktget", [curScopeV, emitStr(b, "__dispatch")])}
+            }
             if (top != null && top != lbl) {
                 return {b: b, v: callExt(b, "js_ktthisat", [thisV, emitStr(b, lbl)])}
             }
@@ -5585,6 +5920,7 @@ KwContract  = "contract" KwEnd ;
                 callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
             }
             for (var ap = 0; ap < parts.accprops.length; ap++) { b = emitAccessorPair(b, clsV, parts.accprops[ap]) }
+            b = emitMemberExts(b, clsV, parts.memberExts)
             emitClassNames.pop()
             b = emitNestedList(b, clsV, null, parts.nested, name)
             emitSuperName = savedSuper
@@ -5704,19 +6040,26 @@ KwContract  = "contract" KwEnd ;
     // js_mcall, which prepends clsV as the receiver), properties become fields of clsV
     // (so ClassName.prop reads them). The property initializers see clsV as 'this'.
     function emitCompanion(b, clsV, comp, compName) {
-        var cparts = splitMembers(comp, 0)
+        var chdr = takeHeader(comp, 0)
+        var cparts = splitMembers(comp, chdr.i)
         var cprops = cparts.props
         var cmethods = cparts.methods
         emitClassNames.push("<companion>")
-        if (cmethods.length > 0) {
+        // The holder is also what carries the companion's SUPERTYPES, so it is built
+        // whenever the companion has either methods or an interface to inherit from.
+        if (cmethods.length > 0 || chdr.supers.length > 0) {
+            var own = {}
+            for (var oc = 0; oc < cmethods.length; oc++) { own["$" + cmethods[oc].name] = true }
             var holderV = callExt(b, "js_obj_new", [])
             for (var k = 0; k < cmethods.length; k++) {
                 var idx = emitFunc(cmethods[k].params, cmethods[k].body, true, false, cmethods[k].sig)
                 callExt(b, "js_set", [holderV, emitStr(b, cmethods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
             }
+            b = emitSuperLinks(b, holderV, chdr.supers, own)
             callExt(b, "js_set", [clsV, emitStr(b, "__class"), holderV])
         }
         for (var ap = 0; ap < cparts.accprops.length; ap++) { b = emitAccessorPair(b, clsV, cparts.accprops[ap]) }
+        b = emitMemberExts(b, clsV, cparts.memberExts)
         var saved = curScopeV
         curScopeV = callExt(b, "js_scope_new", [curScopeV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), clsV])
@@ -5724,6 +6067,14 @@ KwContract  = "contract" KwEnd ;
             var r = cprops[p].init(b)
             b = r.b
             callExt(b, "js_set", [clsV, emitStr(b, cprops[p].prop), r.v])
+        }
+        // A DELEGATED property of the companion: its hidden delegate field, filled the
+        // same way the class and object emitters fill theirs.
+        for (var cd = 0; cd < cparts.accprops.length; cd++) {
+            if (cparts.accprops[cd].isDeleg != true) { continue }
+            var rcd = delegInitThunk(cparts.accprops[cd])(b)
+            b = rcd.b
+            callExt(b, "js_set", [clsV, emitStr(b, delegField(cparts.accprops[cd].name)), rcd.v])
         }
         curScopeV = saved
         // A NAMED companion (companion object Maker) is also reachable through its own
@@ -5750,7 +6101,7 @@ KwContract  = "contract" KwEnd ;
         lastDeclaredType = name
         for (var om = 0; om < methods.length; om++) { classMethodNames["$" + methods[om].name] = true }
         return function(b) {
-            var r = emitObjectInstance(b, name, methods, props, hdr.supers, parts.accprops)
+            var r = emitObjectInstance(b, name, methods, props, hdr.supers, parts.accprops, parts.memberExts)
             b = r.b
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), r.v])
             // A nested type of an object hangs on the object's DESCRIPTOR, not on the
@@ -5825,6 +6176,7 @@ KwContract  = "contract" KwEnd ;
                 callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
             }
             for (var ap = 0; ap < parts.accprops.length; ap++) { b = emitAccessorPair(b, clsV, parts.accprops[ap]) }
+            b = emitMemberExts(b, clsV, parts.memberExts)
             emitClassNames.pop()
             emitSuperName = savedSuper
             b = emitNestedList(b, clsV, null, parts.nested, name)
@@ -5833,16 +6185,86 @@ KwContract  = "contract" KwEnd ;
     }
     // super.m(args): js_supercall walks the __super chain from the DEFINING class's
     // superclass descriptor (emitSuperName, valid while that class's methods emit).
+    // `super<I>` - the token run of SkipAngle1 without its angle brackets, reduced to
+    // the base type name (`<Map<K, V>>` names Map).
+    function superQualName(raw) {
+        var t = stripWs(raw)
+        if (t.length > 1 && t.charAt(0) == "<") { t = t.substring(1, t.length - 1) }
+        return baseTypeName(t)
+    }
+    // Which descriptor a `super` reference walks from: the qualifier when one is
+    // written and names a type this compile emits, otherwise the defining class's
+    // superclass (emitSuperName). null when neither is available.
+    function superTargetName(qual) {
+        if (qual != null && knownType(qual)) { return qual }
+        return emitSuperName
+    }
     function makeSuperCall(items, pos) {
-        var mname = items[0].smname
-        var args = items.slice(1)
+        var qual = null
+        var at = 0
+        if (items[at] != undefined && items[at] != null && items[at].squal != undefined) {
+            qual = items[at].squal
+            at++
+        }
+        var mname = items[at].smname
+        var args = items.slice(at + 1)
         return function(b) {
-            if (emitSuperName == null) { notImpl("super call outside a subclass", pos); return {b: b, v: hUndef} }
-            var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, emitSuperName)])
+            var target = superTargetName(qual)
+            if (target == null) { notImpl("super call outside a subclass", pos); return {b: b, v: hUndef} }
+            var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, target)])
             var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
             var ea = emitArgs(b, args)
             b = ea.b
             return {b: b, v: callExt(b, "js_supercall", [supV, thisV, emitStr(b, mname), ea.v])}
+        }
+    }
+    // super.x: the same walk, for a PROPERTY read. js_ktsupget runs an accessor found
+    // on the chain with `this` as the receiver and otherwise reads the instance's own
+    // slot, which is where a supertype's plain `val x = 1` keeps its value in this
+    // flat object model.
+    function makeSuperField(items, pos) {
+        var qual = null
+        var at = 0
+        if (items[at] != undefined && items[at] != null && items[at].squal != undefined) {
+            qual = items[at].squal
+            at++
+        }
+        var fname = items[at].sfname
+        return function(b) {
+            var target = superTargetName(qual)
+            if (target == null) { notImpl("super reference", pos); return {b: b, v: hUndef} }
+            var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, target)])
+            var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
+            return {b: b, v: callExt(b, "js_ktsupget", [supV, thisV, emitStr(b, fname)])}
+        }
+    }
+    // `super.x = v` and its compound forms. items = [{squal}?, {sfname}, op, rhs].
+    function makeSuperAssign(items, pos) {
+        var qual = null
+        var at = 0
+        if (items[at] != undefined && items[at] != null && items[at].squal != undefined) {
+            qual = items[at].squal
+            at++
+        }
+        var fname = items[at].sfname
+        var op = items[at + 1]
+        var valT = items[at + 2]
+        return function(b) {
+            var target = superTargetName(qual)
+            if (target == null) { notImpl("super reference", pos); return {b: b, v: hUndef} }
+            var r = valT(b)
+            b = r.b
+            var v = r.v
+            var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, target)])
+            var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
+            var nameV = emitStr(b, fname)
+            if (op != "=") {
+                var ro = emitOpBin(b, op, callExt(b, "js_ktsupget", [supV, thisV, nameV]), v)
+                b = ro.b
+                v = ro.v
+            }
+            callExt(b, "js_ktsupset", [supV, thisV, nameV, v])
+            return {b: b, v: v}
         }
     }
 
@@ -5909,6 +6331,8 @@ KwContract  = "contract" KwEnd ;
                           // the listOf alias above because it must DROP the nulls, which
                           // the "return the argument array" function did not.
                           "compareBy", "compareByDescending", "Comparator", "compareValues",
+                          // kotlin.properties.Delegates - observable / vetoable / notNull.
+                          "Delegates",
                           "maxOf", "minOf", "require", "check", "requireNotNull",
                           "checkNotNull", "error", "TODO", "runCatching", "lazy",
                           "List", "MutableList", "Array", "arrayOfNulls", "IntArray",

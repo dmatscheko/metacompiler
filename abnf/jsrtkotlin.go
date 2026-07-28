@@ -1466,6 +1466,322 @@ func init() {
 		// one per name. See the block above ktRecvStack.
 		m["js_ktglobal"] = func(a []uint64) uint64 { return w(ktGlobalFn(rt, rt.toString(u(a[0])))) }
 
+		// js_ktpropset(this, "x", v) stores ONE property initializer. It is not js_set,
+		// because a property a SUBCLASS overrides with accessors has a js_defprop pair
+		// on the descriptor chain, and the shared setMember then routes the base
+		// class's own initializer into the subclass's setter - or, for a getter-only
+		// override, DROPS it. Kotlin initializes the declaring class's backing field
+		// directly, so that is what happens here: the value lands in the backing slot
+		// the accessor model already uses (`x$f`), which is where js_ktsupget then
+		// finds it for `super.x`. Without this, `open class B { open val v = 1 }` /
+		// `class D : B() { override val v get() = super.v + 1 }` answered 1 (the value
+		// was never stored at all) where Kotlin and the interpreter half answer 2.
+		m["js_ktpropset"] = func(a []uint64) uint64 {
+			o, isObj := u(a[0]).(*jsObject)
+			if !isObj {
+				return m["js_set"](a)
+			}
+			name := rt.toString(u(a[1]))
+			if _, own := o.props[name]; !own && rt.accessorCount > 0 {
+				if acc := rt.findClassAccessor(o, name); acc != nil {
+					o.set(name+"$f", u(a[2]))
+					return 0
+				}
+			}
+			o.set(name, u(a[2]))
+			return 0
+		}
+
+		// js_ktsupget(super class, this, "x") is `super.x` as a VALUE. The walk starts
+		// AT the given descriptor (the emitter already resolved the superclass of the
+		// DEFINING class, exactly as js_supercall does), so an override never shadows
+		// what super.x means. An accessor found on the way runs with the receiver.
+		// Kotlin differs from the shared js_supget in the FALLBACK: a supertype that
+		// declares `open val x = 1` keeps no accessor at all - the value lives in the
+		// instance's own slot, which is that property's backing field in this flat
+		// object model - so a chain miss reads the receiver rather than answering
+		// undefined.
+		m["js_ktsupget"] = func(a []uint64) uint64 {
+			name := rt.toString(u(a[2]))
+			for cls := u(a[0]); cls != nil; {
+				clsObj, isObj := cls.(*jsObject)
+				if !isObj {
+					break
+				}
+				if v, found := clsObj.props[name]; found {
+					if acc, isAcc := v.(*jsAccessor); isAcc {
+						if acc.get == nil {
+							return w(jsUndef)
+						}
+						return w(rt.call(acc.get, u(a[1]), nil))
+					}
+					return w(v)
+				}
+				cls = clsObj.props["__super"]
+			}
+			if o, isObj := u(a[1]).(*jsObject); isObj {
+				if v, found := o.props[name]; found {
+					return w(v)
+				}
+				// A property the supertype declared with accessors keeps its value in
+				// the emitted backing slot.
+				if v, found := o.props[name+"$f"]; found {
+					return w(v)
+				}
+			}
+			return w(jsNull)
+		}
+
+		// js_ktsupset(super class, this, "x", v) is `super.x = v`. A setter found on
+		// the chain runs with the receiver; otherwise the value lands in the slot
+		// js_ktpropset chose for the declaring class's backing field, so a `super.x`
+		// read sees it again.
+		m["js_ktsupset"] = func(a []uint64) uint64 {
+			name := rt.toString(u(a[2]))
+			for cls := u(a[0]); cls != nil; {
+				clsObj, isObj := cls.(*jsObject)
+				if !isObj {
+					break
+				}
+				if v, found := clsObj.props[name]; found {
+					if acc, isAcc := v.(*jsAccessor); isAcc {
+						if acc.set != nil {
+							rt.call(acc.set, u(a[1]), []interface{}{u(a[3])})
+						}
+						return 0
+					}
+					break
+				}
+				cls = clsObj.props["__super"]
+			}
+			if o, isObj := u(a[1]).(*jsObject); isObj {
+				if _, own := o.props[name]; own {
+					o.set(name, u(a[3]))
+					return 0
+				}
+				o.set(name+"$f", u(a[3]))
+				return 0
+			}
+			return 0
+		}
+
+		// js_ktmextcall(scope, receiver, "name", args) dispatches a MEMBER extension
+		// function: one declared inside a class, whose `this` is the extension
+		// receiver while the enclosing instance rides along as the dispatch receiver.
+		// Which class instance is enclosing is a RUN-TIME question (the emitter only
+		// knows that some class declares the name), so the lookup walks the frame's
+		// `this` and `__dispatch` bindings and their __class / __outer graphs for an
+		// `ext$name` entry, exactly as memberExtLookup does in the interpreter half.
+		// Nothing found means the name was an ordinary method after all.
+		m["js_ktmextcall"] = func(a []uint64) uint64 {
+			name := rt.toString(u(a[2]))
+			args, ok := u(a[3]).(*jsArray)
+			if !ok {
+				rt.fail("js_ktmextcall args must be an array")
+			}
+			if fn, disp, found := rt.ktMemberExtFind(rt.scopeOf(a[0]), "ext$"+name); found {
+				return rt.wrap(rt.call(fn, jsUndef, append([]interface{}{disp, u(a[1])}, args.elems...)))
+			}
+			return m["js_ktsmcall"]([]uint64{a[1], a[2], a[3]})
+		}
+
+		// js_ktrecvlam(f) wraps the value bound to a parameter whose declared type is a
+		// receiver function type (`body: Node.() -> Unit`). The wrapper takes the
+		// receiver in its FIRST slot and runs f with that receiver as `this`, which is
+		// exactly what ktWithRecv does for with / run / apply - so `t.body()` and
+		// `body(t)` are the same call, as in Kotlin, and the body's unqualified member
+		// reads resolve against the receiver.
+		m["js_ktrecvlam"] = func(a []uint64) uint64 {
+			f := u(a[0])
+			if !isCallable(f) {
+				return a[0]
+			}
+			return rt.wrap(jsHostFunc("<recvlam>", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				if len(args) == 0 {
+					return rt.ktWithRecv(jsNull, f)
+				}
+				// The receiver is passed on as the first ARGUMENT as well as bound as
+				// `this`: `fun scoped(block: FeatScope.() -> Int) = block(Scope(9))`
+				// with `scoped { s -> s.v }` reads it through the value parameter,
+				// which is what both halves did before the receiver was bound at all.
+				return rt.ktWithRecv(args[0], f, args...)
+			}))
+		}
+
+		// ----- the delegated-property protocol (val/var x by d) -----
+		// The twin of delegCheck / pdelegGet / pdelegSet in kotlin-interpreter.abnf.
+		// A delegate is any value whose class chain declares getValue; the check runs
+		// when the DECLARATION runs, exactly as it does in the other half, so the
+		// message and the -warn-unsupported placeholder are the same in both.
+		// The property reference handed to getValue/setValue. Only `.name` is
+		// meaningful for a delegate, which is what Kotlin's own Map delegate uses.
+		ktdRef := func(owner interface{}, name string) interface{} {
+			if o, isObj := owner.(*jsObject); isObj {
+				return rt.ktMakeRef(&ktRefInfo{recv: o, name: name, bound: true})
+			}
+			return rt.ktMakeRef(&ktRefInfo{name: name, bound: true})
+		}
+		// js_ktdcheck(d, "file:line", warn, thisRef, "name") answers the delegate to
+		// store - d itself, or what its provideDelegate hands back - and null after
+		// reporting when d is no delegate at all. The four delegate kinds Kotlin's
+		// stdlib and user code produce: a user object with getValue, a MAP (delegated
+		// by the property's NAME), the kotlin.properties.Delegates boxes, and a lazy
+		// box (`by lazy` has its own eager lowering, but a lazy value reaching here
+		// through a variable still works).
+		m["js_ktdcheck"] = func(a []uint64) uint64 {
+			d := u(a[0])
+			name := ""
+			var thisRef interface{} = jsNull
+			if len(a) > 4 {
+				thisRef, name = u(a[3]), rt.toString(u(a[4]))
+			}
+			if ktHasMethod(d, "provideDelegate") {
+				d = u(m["js_ktsmcall"]([]uint64{w(d), rt.wrapStr("provideDelegate"),
+					w(&jsArray{elems: []interface{}{thisRef, ktdRef(thisRef, name)}})}))
+			}
+			if ktDelegKind(d) != "" {
+				return w(d)
+			}
+			where := rt.toString(u(a[1]))
+			if u(a[2]) == float64(1) || u(a[2]) == true {
+				fmt.Fprint(outWriter, "warning: "+where+": delegated property not implemented (ignored)\n")
+				return w(jsNull)
+			}
+			rt.fail("delegated property not implemented (%s); use -warn-unsupported to ignore", where)
+			return jsHUndefined
+		}
+		// js_ktdthis(scope) is the `this` a delegate declaration should pass as
+		// thisRef: the enclosing instance for a member, null for a local or a
+		// top-level property. It cannot be a plain scope read - there is no `this`
+		// binding at top level, and js_ktget aborts on a name it cannot resolve.
+		m["js_ktdthis"] = func(a []uint64) uint64 {
+			for s := rt.scopeOf(a[0]); s != nil; s = s.parent {
+				if t, ok := s.get("this"); ok {
+					return w(t)
+				}
+			}
+			return w(jsNull)
+		}
+		// js_ktdget(d, thisRef, "name") - one read of a delegated property.
+		m["js_ktdget"] = func(a []uint64) uint64 {
+			d := u(a[0])
+			name := rt.toString(u(a[2]))
+			switch ktDelegKind(d) {
+			case "":
+				return w(jsNull)
+			case "map":
+				// Kotlin's Map delegate reads the entry under the property's NAME,
+				// and getValue on a missing key is an error (Map.get would answer
+				// null; the delegate uses getValue).
+				return m["js_ktsmcall"]([]uint64{a[0], rt.wrapStr("getValue"),
+					w(&jsArray{elems: []interface{}{name}})})
+			case "lazy":
+				return w(rt.ktLazyValue(d.(*jsObject)))
+			case "box":
+				bo := d.(*jsObject)
+				if k, _ := bo.props["__ktdeleg"].(string); k == "notNull" {
+					if set, _ := bo.props["set"].(bool); !set {
+						rt.fail("Property %s should be initialized before get.", name)
+					}
+				}
+				return w(bo.props["v"])
+			}
+			return m["js_ktsmcall"]([]uint64{a[0], rt.wrapStr("getValue"),
+				w(&jsArray{elems: []interface{}{u(a[1]), ktdRef(u(a[1]), name)}})})
+		}
+		// js_ktdset(d, thisRef, "name", v) - one write.
+		m["js_ktdset"] = func(a []uint64) uint64 {
+			d := u(a[0])
+			name := rt.toString(u(a[2]))
+			switch ktDelegKind(d) {
+			case "", "lazy":
+				return 0
+			case "map":
+				rt.ktMapPut(d.(*jsObject), name, u(a[3]))
+				return 0
+			case "box":
+				// kotlin.properties.Delegates: observable notifies AFTER the change,
+				// vetoable asks BEFORE it and keeps the old value on a false answer,
+				// notNull simply refuses to be read before it is written.
+				box := d.(*jsObject)
+				old, nv := box.props["v"], u(a[3])
+				kind, _ := box.props["__ktdeleg"].(string)
+				cb := box.props["cb"]
+				if kind == "vetoable" && cb != nil && !isUndefOrNull(cb) {
+					if !rt.truthy(rt.call(cb, jsUndef, []interface{}{ktdRef(u(a[1]), name), old, nv})) {
+						return 0
+					}
+				}
+				box.set("v", nv)
+				box.set("set", true)
+				if kind == "observable" && cb != nil && !isUndefOrNull(cb) {
+					rt.call(cb, jsUndef, []interface{}{ktdRef(u(a[1]), name), old, nv})
+				}
+				return 0
+			}
+			m["js_ktsmcall"]([]uint64{a[0], rt.wrapStr("setValue"),
+				w(&jsArray{elems: []interface{}{u(a[1]), ktdRef(u(a[1]), name), u(a[3])}})})
+			return 0
+		}
+		// A LOCAL or top-level delegated property binds a BOX; js_ktget unwraps it on
+		// every read and js_ktvarset routes every write through setValue. thisRef is
+		// null, as it is in Kotlin for a property with no owner.
+		m["js_ktdbox"] = func(a []uint64) uint64 {
+			if isUndefOrNull(u(a[0])) {
+				return w(jsNull)
+			}
+			box := newJSObject()
+			box.set("__pdeleg", true)
+			box.set("d", u(a[0]))
+			box.set("owner", jsNull)
+			box.set("pname", rt.toString(u(a[1])))
+			return w(box)
+		}
+		// js_ktvarset(scope, name, v) is js_kset made delegate-aware: a binding
+		// holding a delegate box is WRITTEN through its setValue.
+		m["js_ktvarset"] = func(a []uint64) uint64 {
+			sc := rt.scopeOf(a[0])
+			name := rt.toString(u(a[1]))
+			for s := sc; s != nil; s = s.parent {
+				if cur, ok := s.get(name); ok {
+					if box, isBox := ktPDeleg(cur); isBox {
+						m["js_ktdset"]([]uint64{w(box.props["d"]), w(box.props["owner"]),
+							w(box.props["pname"]), a[2]})
+						return 0
+					}
+					break
+				}
+			}
+			// The dispatch receiver of a MEMBER extension is a write target too:
+			// `fun String.emit() { out += this }` assigns the declaring class's own
+			// property while `this` is the String. js_kset stops at the first scope
+			// carrying a `this`, so the fallback has to be tried here.
+			for s := sc; s != nil; s = s.parent {
+				if _, ok := s.get(name); ok {
+					return m["js_kset"](a)
+				}
+				if t, ok := s.get("this"); ok {
+					if obj, isObj := t.(*jsObject); isObj {
+						if _, has := obj.props[name]; has {
+							return m["js_kset"](a)
+						}
+					}
+				}
+				if d, ok := s.get("__dispatch"); ok {
+					if obj, isObj := d.(*jsObject); isObj {
+						if _, has := obj.props[name]; has {
+							obj.set(name, u(a[2]))
+							if rt.traced {
+								rt.trVar("write", name, u(a[2]))
+							}
+							return 0
+						}
+					}
+				}
+			}
+			return m["js_kset"](a)
+		}
+
 		// js_ktiter is the SEQUENCE a `for` runs over. A list, a string and anything
 		// else are used as they are; a MAP iterates its entries (Kotlin's rule, and
 		// what kIterable does in the other half) and a SET its elements, neither of
@@ -1495,6 +1811,13 @@ func init() {
 			name := rt.toString(u(a[1]))
 			for s := sc; s != nil; s = s.parent {
 				if v, ok := s.get(name); ok {
+					// A LOCAL or top-level delegated property binds a box, not a
+					// value: every read goes through the delegate's getValue. The
+					// twin is the makeVarRef override in kotlin-interpreter.abnf.
+					if box, isBox := ktPDeleg(v); isBox {
+						v = u(m["js_ktdget"]([]uint64{w(box.props["d"]), w(box.props["owner"]),
+							w(box.props["pname"])}))
+					}
 					if rt.traced {
 						rt.trVar("read", name, v)
 					}
@@ -1528,6 +1851,21 @@ func init() {
 							return w(v)
 						}
 					}
+				}
+			}
+			// Inside a MEMBER extension function, `this` is the EXTENSION receiver, so
+			// a name that belongs to the DECLARING class is resolved against the
+			// dispatch receiver the frame carries - Kotlin's second implicit receiver.
+			// The twin is core.varMiss consulting findDispatch in the other half.
+			for s := sc; s != nil; s = s.parent {
+				if d, ok := s.get("__dispatch"); ok {
+					if v, hit := rt.ktRecvMember(d, name); hit {
+						if rt.traced {
+							rt.trVar("read", name, v)
+						}
+						return w(v)
+					}
+					break
 				}
 			}
 			for i := len(ktRecvStack) - 1; i >= 0; i-- {
@@ -2381,6 +2719,121 @@ func ktMakeMap() *jsObject {
 // dicts (abnf/jsrt.go) and everything map-shaped would otherwise claim a set.
 //
 // The twin is kMakeSet / kSetMethod in languages/kotlin-interpreter.abnf.
+// ktHasMethod reports whether v is a class instance whose descriptor chain declares
+// a callable member `name`. The twin of lookupMethod's delegate use in
+// kotlin-interpreter.abnf, and the test js_ktdcheck applies to a `by` expression.
+func ktHasMethod(v interface{}, name string) bool {
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return false
+	}
+	for cls := o.props["__class"]; cls != nil; {
+		co, isCls := cls.(*jsObject)
+		if !isCls {
+			return false
+		}
+		if mv, ok := co.props[name]; ok && isCallable(mv) {
+			return true
+		}
+		cls = co.props["__super"]
+	}
+	return false
+}
+
+// ktClsFind walks a descriptor's __super chain for a callable member.
+func ktClsFind(cls interface{}, name string) interface{} {
+	for c := cls; c != nil; {
+		co, isObj := c.(*jsObject)
+		if !isObj {
+			return nil
+		}
+		if v, ok := co.props[name]; ok && isCallable(v) {
+			return v
+		}
+		c = co.props["__super"]
+	}
+	return nil
+}
+
+// ktMemberExtFind looks a mangled member-extension name up on the enclosing receiver
+// chain of a frame: the innermost `this`, then the dispatch receiver of a member
+// extension we are already inside, each followed out through its __outer instances.
+// It answers the function and the DISPATCH receiver to pass as its first argument.
+func (rt *jsrt) ktMemberExtFind(sc *jsScope, mangled string) (interface{}, interface{}, bool) {
+	var starts []interface{}
+	for _, key := range []string{"this", "__dispatch"} {
+		for s := sc; s != nil; s = s.parent {
+			if v, ok := s.get(key); ok {
+				starts = append(starts, v)
+				break
+			}
+		}
+	}
+	for _, cur := range starts {
+		for i := 0; i < 64; i++ {
+			o, isObj := cur.(*jsObject)
+			if !isObj {
+				break
+			}
+			if fn := ktClsFind(o.props["__class"], mangled); fn != nil {
+				return fn, o, true
+			}
+			nxt, ok := o.props["__outer"]
+			if !ok || isUndefOrNull(nxt) {
+				break
+			}
+			cur = nxt
+		}
+	}
+	return nil, nil, false
+}
+
+// ktDelegKind names which delegate protocol a `by` expression implements, or "" when
+// it implements none. "obj" is a user object with getValue (and optionally setValue),
+// "map" a Map delegated by the property's NAME, "box" one of the
+// kotlin.properties.Delegates boxes and "lazy" a lazy handle.
+func ktDelegKind(v interface{}) string {
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return ""
+	}
+	if k, ok := o.props["__ktdeleg"].(string); ok && k != "" {
+		return "box"
+	}
+	if lz, _ := o.props["__lazy"].(bool); lz {
+		return "lazy"
+	}
+	if _, _, isDict := dictParts(o); isDict {
+		return "map"
+	}
+	if ktHasMethod(v, "getValue") {
+		return "obj"
+	}
+	return ""
+}
+
+// ktDelegBox builds one kotlin.properties.Delegates delegate.
+func ktDelegBox(kind string, initial, cb interface{}) *jsObject {
+	o := newJSObject()
+	o.set("__ktdeleg", kind)
+	o.set("v", initial)
+	o.set("cb", cb)
+	o.set("set", kind != "notNull")
+	return o
+}
+
+// ktPDeleg recognizes the box a LOCAL or top-level delegated property binds.
+func ktPDeleg(v interface{}) (*jsObject, bool) {
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return nil, false
+	}
+	if b, ok := o.props["__pdeleg"].(bool); ok && b {
+		return o, true
+	}
+	return nil, false
+}
+
 func ktMakeSet() *jsObject {
 	o := newJSObject()
 	o.set("__set", true)
@@ -4483,6 +4936,20 @@ func (rt *jsrt) ktPkgMember(pkg, name string) interface{} {
 // ktGlobalFn is the VALUE of one global builder name.
 func ktGlobalFn(rt *jsrt, name string) interface{} {
 	switch name {
+	case "Delegates":
+		// kotlin.properties.Delegates: the three standard property delegates. Each
+		// answers a box js_ktdget / js_ktdset drive (see ktDelegKind).
+		d := newJSObject()
+		d.set("observable", jsHostFunc("observable", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return ktDelegBox("observable", argAt(args, 0), argAt(args, 1))
+		}))
+		d.set("vetoable", jsHostFunc("vetoable", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return ktDelegBox("vetoable", argAt(args, 0), argAt(args, 1))
+		}))
+		d.set("notNull", jsHostFunc("notNull", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return ktDelegBox("notNull", jsNull, nil)
+		}))
+		return d
 	case "mapOf", "mutableMapOf", "hashMapOf", "linkedMapOf", "sortedMapOf", "emptyMap":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return rt.ktMapOf(args)

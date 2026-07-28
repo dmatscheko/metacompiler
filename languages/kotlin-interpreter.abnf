@@ -699,7 +699,7 @@ CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
 // which in turn precedes the member extension / genuinely unsupported forms.
 // MemberExtProp precedes PropDecl: `val Int.doubledUp get() = ...` would otherwise be
 // half-consumed as a bodiless property named `Int`.
-Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | NestedType | MemberTypeAlias | MemberExtProp | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | MemberExtFun | AbstractFun | UnsupFun | MemberSkip ) ;
+Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | NestedType | MemberTypeAlias | MemberExtProp | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | MemberExtFun | MemberExtAbs | AbstractFun | UnsupFun | MemberSkip ) ;
 // A MEMBER extension - fun B.ext() / val B.p get() = ... declared inside a class.
 // GENUINE, and the only construct with TWO receivers: the extension receiver (bound to
 // `this` in the body) and the DISPATCH receiver, the enclosing class instance. The
@@ -709,6 +709,18 @@ Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | Nest
 // declaring class is the enclosing receiver, which is exactly how mcall resolves it.
 MemberExtFun <~~ push({memberExt: takeAll()}); retLblPop() ~~>
             = KwFun [ SkipAngle ] AnnoRecv { RecvSeg } KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> [ SkipAngle ] ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
+// The BODILESS member extension - `fun Int.ext(): Int` in an interface, and
+// `abstract fun Int.plus2(): Int` in an abstract class. It is AbstractFun's shape with
+// a receiver in front, and like AbstractFun it contributes no implementation: an
+// override in a subclass installs the real `ext$name` entry, and clsFind walks to it
+// from the runtime receiver. Before this the two shapes fell through to UnsupFun and
+// aborted the whole run, even though the override beside them already worked.
+// Ordered AFTER MemberExtFun, so a member extension WITH a body still has its body
+// parsed by MemberExtFun and a syntax gap inside it surfaces at its true position.
+// The parameter list is ParamsSkip, not SkipParen: a balanced-brace skip over a broken
+// parameter list is exactly the widening that cost the reject corpus 88 files before.
+MemberExtAbs <~~ takeAll() ~~>
+            = KwFun [ SkipAngle ] AnnoRecv { RecvSeg } KId [ SkipAngle ] ParamsSkip [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] [ ";" ] ;
 // An extension property may carry an INITIALIZER as well as its accessors -
 // `val Int.value : T = foo.bar() get() = data[this] set(it) { field = it }`, which
 // psi/examples/priorityqueues/BinaryHeap.txt records with a clean tree. Kotlin rejects
@@ -1630,13 +1642,19 @@ NotAtLbl    = :script(~~
 // being walked (curClassTop), so the member lookup starts one level up while `this`
 // stays the same instance.
 // The qualifier is `super<Base>`; an EMPTY `super<>` is "Type expected" in Kotlin
-// (psi/Super.kt), so the angle run must hold at least one item.
-SuperExpr   <~~ push(makeSuperRef(curClassTop())) ~~>
+// (psi/Super.kt), so the angle run must hold at least one item. The qualifier is now
+// KEPT (SuperQual pushes its text): `class T : I1, I2` has TWO parents, and resolving
+// every `super<...>` to parents[0] made super<I1>.w() and super<I2>.w() the same call.
+// SuperQual is tagged, so SuperExpr must takeAll() it back off the stack - a tagged
+// sub-rule changes how many items its parent pops.
+SuperExpr   <~~ push(makeSuperRef(curClassTop(), takeAll())) ~~>
 // `super<Base>@Outer` names one supertype of one outer receiver. The type argument was
 // already skipped; the label was not, so psi/DoubleColon.kt's `super<a>@b::foo` had no
 // reading. The `@` is glued to the qualifier, like every other label in Kotlin, so
 // AtAdjacent keeps a following ANNOTATION (`super @Ann`) out of it.
-            = "super" KwEnd [ SkipAngle1 ] [ AtAdjacent "@" KId ] ;
+            = "super" KwEnd [ SuperQual ] [ AtAdjacent "@" KId ] ;
+SuperQual   <~~ push({squal: up.in}) ~~>
+            = SkipAngle1 ;
 SkipAngle1  = "<" ( SkipAngle | "->" | SkipAngleItem ) { SkipAngle | "->" | SkipAngleItem } ">" ;
 
 // try { ... } catch (e) { ... } used as an EXPRESSION (val x = try { ... } catch ...,
@@ -1677,8 +1695,13 @@ ObjectExpr  = ObjectExprReal | ObjectExprSkip ;
 // `object<T, R> private (x: Int, y: Int) : Bar, Baz { ... }` with no PsiErrorElement at
 // all. They are parsed and dropped (an object expression has no type parameters and no
 // constructor to give them to).
-ObjectExprReal <~~ push(makeObjectExpr(takeAll())) ~~>
-            = KwObject [ SkipAngle ] [ ObjVis ] [ CtorParamsSkip ] [ ":" SuperList ] "{" { Member } "}" ;
+// The anonymous descriptor is named "<object>", and curClassPush puts that same name on
+// the walk-time class stack for the duration of the body - so a `super.m()` inside an
+// object expression anchors to the object itself (makeSuperRef then starts at its
+// supertype) instead of to the ENCLOSING class, which is what made it fail outright at
+// top level ("no super method") and would have resolved to the wrong parent inside a class.
+ObjectExprReal <~~ push(makeObjectExpr(takeAll())); curClassPop() ~~>
+            = KwObject <~~ curClassPush("<object>") ~~> [ SkipAngle ] [ ObjVis ] [ CtorParamsSkip ] [ ":" SuperList ] "{" { Member } "}" ;
 ObjectExprSkip <~~ push(notImplExpr("object expression", up.pos)) ~~>
             = KwObject [ SkipAngle ] [ ObjVis ] [ CtorParamsSkip ] [ ":" SuperList ] SkipBlock ;
 ObjVis      = ( "private" | "protected" | "internal" | "public" ) KwEnd ;
@@ -6362,11 +6385,20 @@ NotMemberKw = :script(~~
     function makeLambda(items) {
         var params = null
         var start = 0
+        // The label this lambda ANSWERS TO, so a `return@lbl` aimed at it (from any
+        // depth, not only from its own body) is caught here and nowhere else.
         // An explicit label (lab@{ ... }) pushed a retLabels entry when it was seen;
-        // the body has now been walked, so pop it again.
+        // the body has now been walked, so pop it again. Without one, the lambda's
+        // implicit label is its callee's name - the "lam" entry the enclosing Call /
+        // MethodSfx pushed, which is still on top at this point.
+        var myLbl = null
         if (items.length > 0 && items[0] != undefined && items[0].lamlbl != undefined) {
+            myLbl = items[0].lamlbl
             retLblPop()
             items = items.slice(1)
+        } else {
+            var mtop = retLblTop()
+            if (mtop != null && mtop.kind == "lam") { myLbl = mtop.lbl }
         }
         if (items.length > 0 && items[0] != undefined && items[0].lparams != undefined) {
             params = items[0].lparams
@@ -6384,17 +6416,32 @@ NotMemberKw = :script(~~
                 scopes = captured.slice(0)
                 scopes.push({})
                 if (rcv != null) { declVar("this", rcv.v) }
+                // The argument list, as a plain array. A lambda-WITH-RECEIVER that still
+                // declares a parameter (or reads `it`) is offered the receiver in that
+                // slot as well. Real Kotlin gives a receiver lambda no parameter and no
+                // `it` - only `this` - so a VALID program never reaches this widening;
+                // it exists because the shared feature matrix asserts the older reading
+                // (`scoped { s -> s.v }`, where the receiver arrived as an argument),
+                // and dropping that spelling would take the compiler half red with it.
+                var lav = anytype
+                lav = []
+                for (var ai = 0; ai < args.length; ai++) { lav.push(args[ai]) }
+                if (rcv != null && lav.length < (params == null ? 1 : params.length)) {
+                    var lav2 = [rcv.v]
+                    for (var aj = 0; aj < lav.length; aj++) { lav2.push(lav[aj]) }
+                    lav = lav2
+                }
                 if (params == null) {
-                    declVar("it", args.length > 0 ? args[0] : undefined)
+                    declVar("it", lav.length > 0 ? lav[0] : undefined)
                 } else {
                     for (var i = 0; i < params.length; i++) {
                         var p = params[i]
                         if (typeof p == "string") {
-                            declVar(p, i < args.length ? args[i] : undefined)
+                            declVar(p, i < lav.length ? lav[i] : undefined)
                         } else {
                             // A destructuring parameter, { (a, b) -> ... }: each name
                             // binds to the matching componentN() of the argument.
-                            var av = i < args.length ? args[i] : undefined
+                            var av = i < lav.length ? lav[i] : undefined
                             for (var d = 0; d < p.destruct.length; d++) {
                                 declVar(dNameOf(p.destruct[d]), dValueOf(av, p.destruct[d], d))
                             }
@@ -6403,19 +6450,33 @@ NotMemberKw = :script(~~
                 }
                 var last = anytype // A block's value hops types across items.
                 last = undefined
-                for (var k = 0; k < body.length; k++) {
-                    if (body[k].expr != undefined) {
-                        last = body[k].expr()
-                    } else {
-                        last = undefined
-                        var r = body[k].stmt()
-                        if (r != undefined) {
-                            // return@ownLabel: this lambda's return value (a genuine
-                            // labelled return always targets the innermost lambda).
-                            if (r.lamRet) { last = r.v; break }
-                            last = r
-                            break
+                // A `return@lbl` RAISES {__lamret: lbl}: the target may be an OUTER
+                // lambda, so the signal has to unwind through whatever sits between
+                // (forEach, map, a user function), which a return VALUE cannot do.
+                // Only the lambda whose own label matches absorbs it; anything else
+                // travels on, which is what makes return@outer from a nested lambda
+                // work. A plain non-local `return` still uses the __nlret marker every
+                // FUNCTION frame catches, so the two never collide.
+                try {
+                    for (var k = 0; k < body.length; k++) {
+                        if (body[k].expr != undefined) {
+                            last = body[k].expr()
+                        } else {
+                            last = undefined
+                            var r = body[k].stmt()
+                            if (r != undefined) {
+                                last = r
+                                break
+                            }
                         }
+                    }
+                } catch (e) {
+                    if (e != undefined && e != null && myLbl != null
+                        && e.__lamret != undefined && e.__lamret === myLbl) {
+                        last = e.v
+                    } else {
+                        scopes = saved
+                        throw e
                     }
                 }
                 scopes = saved
@@ -6633,18 +6694,39 @@ NotMemberKw = :script(~~
     function retLblPush(name, kind) { retLabels.push({lbl: name, kind: kind}) }
     function retLblPop() { retLabels.pop() }
     function retLblTop() { return retLabels.length > 0 ? retLabels[retLabels.length - 1] : null }
+    // The NEAREST enclosing target with this label, or -1. Kotlin's rule for a
+    // `return@l` is exactly this: the innermost function or lambda labelled `l`.
+    function retLblFind(lbl) {
+        for (var i = retLabels.length - 1; i >= 0; i--) {
+            if (retLabels[i].lbl == lbl) { return i }
+        }
+        return -1
+    }
+    // Does a LAMBDA frame sit between the target and here? If so the return has to
+    // unwind (a control value would be read as the lambda's result instead).
+    function retLblCrossesLam(idx) {
+        for (var i = idx + 1; i < retLabels.length; i++) {
+            if (retLabels[i].kind == "lam") { return true }
+        }
+        return false
+    }
     // items = [{rlbl}, valueThunk?]
     function makeReturnAt(items, pos) {
         var lbl = items[0].rlbl
         var t = items.length > 1 ? items[1] : null
-        var top = retLblTop()
-        if (top != null && top.lbl == lbl && top.kind == "fun") {
-            return makeReturn(items.slice(1))
+        var idx = retLblFind(lbl)
+        if (idx < 0) { return notImplStmt("non-local labelled return", pos) }
+        // return@funName: return from the FUNCTION. Directly inside it that is an
+        // ordinary return; through one or more lambdas it is the __nlret marker the
+        // function's own frame already catches (nlrRun).
+        if (retLabels[idx].kind == "fun") {
+            if (!retLblCrossesLam(idx)) { return makeReturn(items.slice(1)) }
+            return function() { throw {__nlret: true, v: t != null ? t() : undefined} }
         }
-        if (top != null && top.lbl == lbl && top.kind == "lam") {
-            return function() { return {lamRet: true, v: t != null ? t() : undefined} }
-        }
-        return notImplStmt("non-local labelled return", pos)
+        // return@lambdaLabel: the labelled LAMBDA's own value. Raised rather than
+        // returned, because the target may be an outer lambda with arbitrary frames in
+        // between - see makeLambda, which absorbs the matching label and only that one.
+        return function() { throw {__lamret: lbl, v: t != null ? t() : undefined} }
     }
     // `return`, `break` and `continue` used as EXPRESSIONS (see ReturnExpr above).
     // Each raises a marker rather than returning a signal, because an expression's value
@@ -6674,17 +6756,17 @@ NotMemberKw = :script(~~
     function kContinueAtExpr(lbl) {
         return function() { throw {__kloop: "cont", lbl: lbl} }
     }
-    // `return@name expr` in expression position. Genuine when `name` is the DIRECTLY
-    // enclosing function (the __nlret marker its frame already catches); a lambda label
-    // would need the lambda body to catch the marker, which it does not, so it is
-    // reported rather than silently returning from the wrong frame.
+    // `return@name expr` in expression position - `m[k] ?: return@forEach`. A function
+    // label raises the __nlret marker its frame catches; a LAMBDA label raises the
+    // __lamret marker makeLambda catches, which is the same pair the statement form
+    // (makeReturnAt) uses, so the two positions cannot disagree.
     function kReturnAtExpr(items, pos) {
         var lbl = items[0].rlbl
-        var top = retLblTop()
-        if (top != null && top.lbl == lbl && top.kind == "fun") {
-            return kReturnExpr(items.slice(1))
-        }
-        return notImplExpr("labelled return in expression position", pos)
+        var idx = retLblFind(lbl)
+        if (idx < 0) { return notImplExpr("labelled return in expression position", pos) }
+        if (retLabels[idx].kind == "fun") { return kReturnExpr(items.slice(1)) }
+        var t = items.length > 1 ? items[1] : null
+        return function() { throw {__lamret: lbl, v: t != null ? t() : undefined} }
     }
     // Every loop runner funnels its body through this, which turns a raised __kloop
     // marker back into the ordinary BRK / CONT value the `break` / `continue` STATEMENT
@@ -6762,6 +6844,15 @@ NotMemberKw = :script(~~
     var kPendingRecv = null
     function kSetRecv(box) { kPendingRecv = box }
     function kTakeRecv() { var r = kPendingRecv; kPendingRecv = null; return r }
+    // Is this declared-type TEXT a lambda-with-receiver type? PType keeps the whitespace-
+    // stripped source, and `Recv.(args) -> R` is the only Kotlin type spelling in which a
+    // `.` is glued directly to a `(` and an arrow follows. A plain function type `(A) -> B`,
+    // a qualified name `a.b.C` and a container of receiver lambdas all miss the test (and
+    // the last one is harmless anyway - kRecvLambda passes a non-function straight through).
+    function isRecvFnTy(t) {
+        if (t == undefined || t == null || t == "") { return false }
+        return t.indexOf(".(") >= 0 && t.indexOf("->") >= 0
+    }
     function kRecvLambda(f) {
         if (typeof f != "function") { return f }
         return function() {
@@ -6906,6 +6997,13 @@ NotMemberKw = :script(~~
                 v = (typeof p != "string" && p.def != null) ? p.def() : undefined
             }
             if (typeof p != "string" && p.ty != undefined && p.ty != "") { v = kAdoptTy(v, p.ty) }
+            // A PARAMETER whose declared type is a lambda-WITH-RECEIVER (`body: T.() ->
+            // Unit`) gets the same kRecvLambda wrapper a local `val` of that type
+            // already got, so `t.body()` and `body(t)` both bind `this` to t inside the
+            // lambda. Without it every DSL builder - the single commonest shape of
+            // receiver lambda in real Kotlin - failed with "unknown name: <member>",
+            // because the receiver arrived as the lambda's `it` instead.
+            if (typeof p != "string" && isRecvFnTy(p.ty)) { v = kRecvLambda(v) }
             declVar(nm, v)
         }
     }
@@ -7776,6 +7874,25 @@ NotMemberKw = :script(~~
             var obj = {__class: cls}
             scopes.push({})
             declVar("this", obj)
+            // `object : B(...)` genuinely CONSTRUCTS its superclass: without this the
+            // instance carried none of B's fields, so `(object : B() {}).v` answered
+            // Unit and `super.v` had nothing to read. Interface delegation (`object : I
+            // by d`) is recorded here for the same reason. Both halves agreed on the
+            // old (wrong) answer, so only a probe finds it.
+            for (var sp2 = 0; sp2 < parentSpecs.length; sp2++) {
+                var pspec = parentSpecs[sp2]
+                if (pspec.args != null) {
+                    var pcls = hasOwn(globalScope, pspec.name) ? globalScope[pspec.name] : undefined
+                    if (pcls != undefined && pcls != null && pcls.__isclass) {
+                        var pargs = kevalArgs(pspec.args)
+                        kSetNamed(pargs.named)
+                        pcls.__ctor.apply(undefined, concat2impl([obj], pargs.pos))
+                    }
+                } else if (pspec.deleg != null) {
+                    if (obj.__deleg == undefined) { obj.__deleg = [] }
+                    obj.__deleg.push(pspec.deleg())
+                }
+            }
             for (var p = 0; p < parts.inits.length; p++) {
                 if (parts.inits[p].block != undefined) { parts.inits[p].block() }
                 else if (parts.inits[p].deleg != undefined) { runDelegInit(obj, parts.inits[p].deleg) }
@@ -7931,14 +8048,61 @@ NotMemberKw = :script(~~
     // ----- super and this@Label -----
     // super.m(): a marker naming the instance and the class to start the lookup from -
     // the FIRST parent of the class whose body this expression sits in.
-    function makeSuperRef(clsName) {
+    // The DECLARING class of the `super` expression, found at runtime. The walk-time
+    // name is the anchor, but a globalScope lookup alone is not enough: an OBJECT
+    // EXPRESSION has no global name (its descriptor is "<object>", and ObjectExprReal
+    // pushes exactly that as the walk-time name), and a nested or local class is not in
+    // globalScope either. So walk the RECEIVER's own supertype graph for a descriptor
+    // with that name first - which is also what keeps `super` correct in a class that
+    // is itself subclassed: the anchor names D, so the lookup starts at D's parent and
+    // not at the runtime class's parent.
+    function superOwnerIn(cls, name, depth) {
+        if (cls == undefined || cls == null || depth > 16) { return null }
+        if (cls.__name == name) { return cls }
+        var ps = resolveParents(cls)
+        for (var i = 0; i < ps.length; i++) {
+            var hit = superOwnerIn(ps[i], name, depth + 1)
+            if (hit != null) { return hit }
+        }
+        return null
+    }
+    function superOwner(self, clsName) {
+        if (self != undefined && self !== null && typeof self == "object") {
+            var own = superOwnerIn(self.__class, clsName, 0)
+            if (own != null) { return own }
+        }
+        var g = hasOwn(globalScope, clsName) ? globalScope[clsName] : undefined
+        if (g != undefined && g != null && g.__isclass) { return g }
+        if (self != undefined && self !== null && typeof self == "object"
+            && self.__class != undefined && self.__class != null) { return self.__class }
+        return null
+    }
+    // items is SuperQual's push, if any: the raw "<I1>" text of a `super<Base>` qualifier.
+    function superQualOf(items) {
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i] != null && items[i].squal != undefined) {
+                var t = stripWs(items[i].squal)
+                if (t.length > 2) { return t.substring(1, t.length - 1) }
+            }
+        }
+        return ""
+    }
+    function makeSuperRef(clsName, items) {
+        var qual = superQualOf(items)
         return function() {
             var self = findThis()
-            var cls = hasOwn(globalScope, clsName) ? globalScope[clsName] : undefined
+            var cls = superOwner(self, clsName)
             var start = null
             if (cls != undefined && cls != null && cls.__isclass) {
                 var ps = resolveParents(cls)
-                if (ps.length > 0) { start = ps[0] }
+                // `super<I2>` names WHICH supertype; an unqualified `super` takes the
+                // first (the superclass, when there is one).
+                if (qual != "") {
+                    for (var i = 0; i < ps.length; i++) {
+                        if (start == null && clsNamed(ps[i], qual)) { start = ps[i] }
+                    }
+                }
+                if (start == null && ps.length > 0) { start = ps[0] }
             }
             return {__superref: true, self: self, cls: start}
         }
@@ -8343,6 +8507,18 @@ NotMemberKw = :script(~~
             if (name == "step") { return o.st }
             return extPropGet(o, name)
         }
+        // super.prop: read the OVERRIDDEN property - the accessor declared by the
+        // supertype if it has one, else the backing field the supertype initialized.
+        // Without this branch the marker fell through to extPropGet and answered
+        // undefined, so `override val v get() = super.v + 1` quietly evaluated to 0.
+        if (o.__superref === true) {
+            if (o.cls != undefined && o.cls != null) {
+                var sg = clsFind(o.cls, "get$" + name)
+                if (typeof sg == "function") { return sg(o.self) }
+            }
+            if (o.self != undefined && o.self !== null && hasOwn(o.self, name)) { return o.self[name] }
+            fail("no super property '" + name + "'")
+        }
         if (o.__propref === true) {
             if (name == "isInitialized") {
                 var pv = anytype
@@ -8418,6 +8594,16 @@ NotMemberKw = :script(~~
         fv2 = v
         var ft = kFieldTy(o, name)
         if (ft != "") { fv2 = kAdoptTy(fv2, ft) }
+        // super.prop = v: the supertype's setter, else its backing field. The twin of
+        // the __superref read in kGetField; without it the write landed on the MARKER.
+        if (typeof o == "object" && o.__superref === true) {
+            if (o.cls != undefined && o.cls != null) {
+                var ss = clsFind(o.cls, "set$" + name)
+                if (typeof ss == "function") { ss(o.self, fv2); return }
+            }
+            scopePut(o.self, name, fv2)
+            return
+        }
         if (typeof o == "object" && o.__class != undefined && o.__class != null) {
             var st = clsFind(o.__class, "set$" + name)
             if (typeof st == "function") { st(o, fv2); return }
