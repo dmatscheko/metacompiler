@@ -34,24 +34,28 @@ unset from empty and how set -u recognises an unbound read. eval and `trap ... E
 their argument with THIS grammar and emit it inline; a computed eval is lowered only for the
 assignment form NAME=VALUE, through a runtime name-to-slot dispatch.
 
-All 22 sections of tests/bash-test-full.sh pass, goja and -frozen byte-identical.
+All 25 sections of tests/bash-test-full.sh pass, goja and -frozen byte-identical, AND the
+clang-built executable agrees (tests/clang-check.sh bash).
 
-[[ str =~ ere ]] is the one construct that needs help from outside the emitted module: it calls
-rt_regex_search / rt_regex_error, two externs the IR machine provides, backed by the SAME
-rxCompile/rxSearch engine the interpreter grammar reaches through lib/regex.js - there is no
-second matcher, so the two halves cannot drift. rt_regex_search answers the capture-PAIR count
-(exactly ${#BASH_REMATCH[@]}), 0 for no match, -1 for a pattern that did not compile and -2 for
-the engine's step cap; the caps array it fills carries BYTE offsets into the subject, which is
-what bash indexes, and a group that did not participate reads -1/-1 and becomes bash's
-empty-but-counted BASH_REMATCH entry.
+The module is entirely SELF-CONTAINED: it declares no extern but putchar/getchar, so `-exe`
+links it with nothing else and the native program is the same program llvm.Run runs.
+[[ str =~ ere ]] used to be the exception - it called rt_regex_search / rt_regex_error, two
+externs implemented in Go (abnf/jsrtregexptr.go) so that both halves shared one matcher. Under
+llvm.Run that was right; natively it was silently broken, because a Go function has no C symbol
+and stubUndefined gave the declaration a `ret i32 0` body - and 0 means NO MATCH. Measured
+2026-07-27: 289/289 under llvm.Run, 282/289 natively, the seven being exactly the =~ assertions
+that need a match or a compile error. Neither ./test.sh (each engine against itself, and both
+called the same Go extern) nor `clang -S -x ir` (the module is well-formed; the defect is an
+absent symbol) could see it.
 
-IMPORTANT for -exe: rt_regex_search has NO C symbol, so a native build has nothing to link it
-against. The link still succeeds, because stubUndefined gives every declared-but-undefined
-non-libc function a zero-returning body - and since 0 means NO MATCH, a =~ in a native binary
-degrades to 'never matches' rather than to a silent false match. That is deliberate but it is
-still wrong, so a native build that uses =~ needs a real implementation of rt_regex_search
-linked in. Measured: the whole ratchet file compiled with -exe and run natively passes 252 of
-its 259 checks, and the 7 that fail are exactly the =~ assertions of section 11.
+So the ERE engine is now EMITTED, near the [[ str =~ ere ]] banner below: a Thompson-style
+compiler into a 4-word instruction array plus a recursive backtracking VM, leftmost-first and
+greedy, with a save/restore fence on * and + loops so an iteration that consumed nothing cannot
+repeat. rt_regex_search keeps its old contract exactly - the capture-PAIR count (${#BASH_REMATCH[@]}),
+0 for no match, -1 for a pattern that did not compile, -2 for the step cap, and BYTE offsets in
+the caps array, with a group that did not take part reading -1/-1. The cost of owning a matcher
+is that the two halves CAN now drift, which is why section 11 of the ratchet grew dbr22..dbr47
+and section 25 the ${...} corners - all settled against the real bash 5.3 first.
 
 The generated module is printed (this is the compiler output); it is valid LLVM IR and can be
 handed to clang. Passing -exe PATH to mec links it into a native executable with clang directly
@@ -297,7 +301,7 @@ LtOne       = "<" NotLt ;
 Word        <~~ push(mkWord(takeAll())) ~~>
             = WordFirst :whitespace() { WordSeg } ;
 WordFirst   = Tilde | WordSeg ;
-WordSeg     = SqSeg | DqSeg | AnsiSeg | UqExp | LineCont | EscSeg | BraceLit | BareSeg ;
+WordSeg     = SqSeg | DqSeg | AnsiSeg | UqExp | LineCont | EscSeg | BraceLit | EgPfxLit | BareSeg ;
 
 // An expansion OUTSIDE quotes is subject to word splitting on IFS; the same production
 // inside a double-quoted string (or a ${...} word) is not, which is the only difference
@@ -310,7 +314,7 @@ UqExp       <~~ push(mkSplittable(pop())) ~~> = ExpSeg ;
 CWord       <~~ pushWords(mkWords(takeAll())) ~~>
             = CWordFirst :whitespace() { CWordSeg } ;
 CWordFirst  = Tilde | CWordSeg ;
-CWordSeg    = SqSeg | DqSeg | AnsiSeg | UqExp | LineCont | EscSeg | BraceRange | BraceAlts | BraceLit | BareSeg ;
+CWordSeg    = SqSeg | DqSeg | AnsiSeg | UqExp | LineCont | EscSeg | BraceRange | BraceAlts | BraceLit | EgPfxLit | BareSeg ;
 
 // {a,b,c} needs at least one comma; {x} is literal. {1..5} {5..1} {a..e} {1..9..3} are ranges.
 BraceAlts   <~~ push(mkBraceAlts(takeAll())) ~~>
@@ -355,12 +359,36 @@ DqCont      <~~ push(makeConst("")) ~~> = "\\" "\n" ;
 EscSeg      <~~ push(makeConst(escChar(up.in))) ~~>
             = "\\" AnyCh ;
 
+// The extended globs @(a|b) ?(a|b) *(a|b) +(a|b) !(a|b). MEASURED SCOPE, and identical to
+// bash-interpreter.abnf: only PatSeg - the right hand side of == / != inside [[ ]] - refers
+// to ExtGlob. bash parses the WHOLE file before it runs anything, so a `shopt -s extglob` on
+// line 1 does not make line 5 parse, while `[[ --verbose == --@(help|verbose) ]]` needs no
+// shopt at all. Wiring ExtGlob into WordSeg / CWordSeg as well was measured on the
+// interpreter and REVERTED (-27 on the reject row), so it is not done here either.
+// The group is rebuilt LITERALLY (with $ expansions and quoted arms substituted) and
+// rt_glob is what understands it. Nesting is allowed:
+//     [[ --verbose=1 == --@(help|verbose=@(1|2)) ]]   is true in bash.
+ExtGlob     = ExtGlobPfx EgOpen EgSegs EgClose ;
+ExtGlobPfx  <~~ push(makeConst(up.in)) ~~> = EgPfxTok EgLParen ;
+EgPfxTok    = "@" | "?" | "*" | "+" | "!" ;
+// BareSeg's greedy run must not swallow the "@" of "--@(help|verbose)", so the five extglob
+// prefix characters are excluded from it and matched by this segment instead whenever they
+// are NOT opening a group (ordered choice puts ExtGlob first). A word is the concatenation
+// of its segments, so "a@b" is still exactly "a@b" - it is just three segments now.
+EgPfxLit    <~~ push(makeConst(up.in)) ~~> = EgPfxTok ;
+EgOpen      <~~ push(makeConst("(")) ~~> = "(" :whitespace() ;
+EgClose     <~~ push(makeConst(")")) ~~> = ")" ;
+EgSegs      = { EgSeg } ;
+EgSeg       = SqSeg | DqSeg | ExpSeg | EscSeg | ExtGlob | EgBar | EgPfxLit | EgBare ;
+EgBar       <~~ push(makeConst("|")) ~~> = "|" ;
+EgBare      <~~ push(makeConst(up.in)) ~~> = !@+"|()\"'\\$`@?*+!" ;
+
 // A bare run: any char that is not whitespace, a separator, or a shell metacharacter.
 // "#" is NOT excluded: it only opens a comment at the START of a word, and the Whitespace
 // rule (which contains Comment) has already run before a word's first segment. Excluding it
 // made `echo a#b` print "a" - real bash prints a#b.
 BareSeg     <~~ push(makeConst(up.in)) ~~>
-            = !@+" \t\n\r;$'\"\\(){}&|<>`" ;
+            = !@+" \t\n\r;$'\"\\(){}&|<>`@?*+!" ;
 
 AnyCh       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
@@ -386,11 +414,35 @@ ArithExp    <~~ push(mkArith(pop())) ~~>
 // skipped (a default word may contain spaces), and the enclosing state is restored on return.
 DollarBrace <~~ push(mkParamExp(takeAll())) ~~>
             = "${" :whitespace() PeBody "}" ;
-PeBody      = PeLen | PeInd | PePatForm | PeCaseForm | PeReplForm | PeOpForm | PeSubstrForm | PePlain ;
-PeLen       <~~ push({pe: "len"}) ~~> = "#" PeTarget ;
-PeInd       <~~ push({pe: "ind"}) ~~> = "!" PeTarget ;
+// "#" (length) and "!" (indirection) are PREFIXES of a whole parameter expansion, not just of
+// a name: bash parses `${#x-default}` and `${!ref-default}` and `${!r@a}`. It refuses the
+// first at RUN time ("bad substitution") and honours the other, which is what mkParamExp does
+// with the {lenp} / {indp} markers. Separate marker keys, not {pe}: the inner form pushes
+// {pe} of its own and `${###}` needs both.
+// Ordered choice COMMITS: once an alternative matches, a later failure of the "}" kills the
+// whole ${...}, it does not retry the next alternative. So the two alternatives that can end
+// early - the bare length form and the bare name - assert the closing brace themselves with
+// PeBraceEnd, which is what lets `${##}` (length of $#, = 1) and `${###}` ($# with an empty
+// "#" strip) both come out the way bash prints them.
+// This mirrors bash-interpreter.abnf rule for rule; before it the compiler had a flat
+// PeLen/PeInd taking only a PeTarget, so `${###}` fell out of DollarBrace, then out of
+// DollarLit as a bare "$", and the rest became LITERAL TEXT - silently, because nothing
+// in the matrix exercised it.
+PeBody      = PeLen | PeIndForm | PeCore | PeLenBad ;
+PeLen       <~~ push({lenp: 1}) ~~> = "#" PeTarget PeBraceEnd ;
+// `${#x-default}` and `${#a[0]/1/xxx}` PARSE in bash and then fail at run time with
+// "bad substitution"; this is the alternative that reaches that documented behaviour.
+PeLenBad    <~~ push({lenp: 1}) ~~> = "#" PeCore ;
+PeIndForm   <~~ push({indp: 1}) ~~> = "!" PeCore ;
+PeCore      = PePatForm | PeCaseForm | PeReplForm | PeXform | PeOpForm | PeSubstrForm | PePlain ;
 PeOpForm    = PeTarget PeOp [ BraceWord ] ;
-PePlain     = PeTarget ;
+PePlain     = PeTarget PeBraceEnd ;
+// ${v@Q} ${v@U} ${v@L} ${v@u} ${v@E} ${v@a} ${v@A} ${v@K} ${v@k} ${v@P} : the transform
+// operators. Verified against GNU bash 5.3.15 with x='a b':
+//     @Q -> 'a b'   @U -> A B   @L -> a b   @u -> A b   @E -> a b   @A -> x='a b'
+//     @a -> the attribute letters (a for an indexed array, empty for a plain variable)
+PeXform     = PeTarget "@" PeXfOp ;
+PeXfOp      <~~ push({xf: up.in}) ~~> = "Q" | "E" | "P" | "A" | "K" | "a" | "k" | "L" | "U" | "u" ;
 
 // NAME or NAME[SUBSCRIPT] - the subscript is a word, read as an arithmetic index for an
 // indexed array and as a literal key for an associative one. "@" and "*" mean the whole array.
@@ -427,8 +479,18 @@ ReplTail    = "/" PePatArg ;
 
 // ${v:off} and ${v:off:len} : the offsets are arithmetic, so whitespace matters again -
 // which is also what tells ${v: -1} (a substring) from ${v:-default}.
-PeSubstrForm <~~ push({pe: "substr"}) ~~> = PeTarget ":" :whitespace(Whitespace) ArList [ PeSubLen ] ;
-PeSubLen    = ":" ArList ;
+// An omitted offset or length is legal and means 0 / "to the end":
+//     $ x=abc;   echo "[${x::1}]"      ->  [a]
+//     $ a=(1 2); echo "${a[@]: }"      ->  1 2
+// PeArPad: whitespace skipping is OFF again for DollarBrace's own closing "}", so a blank
+// between the last arithmetic token and the brace (`${foo:3 :-3 }`, `${a[@]: }`) has to be
+// eaten while this production still has the Whitespace rule installed.
+PeSubstrForm <~~ push({pe: "substr"}) ~~> = PeTarget ":" :whitespace(Whitespace) ArOff [ PeSubLen ] :whitespace() PeArPad ;
+PeSubLen    = ":" ArOff ;
+ArOff       = ArList | ArEmpty ;
+ArEmpty     <~~ push(mkNum("0")) ~~> = ArEndHere ;
+PeArPad     = { PeBlank } ;
+PeBlank     = @+" \t" ;
 
 // A word inside ${...}: anything up to the closing brace, expansions included.
 BraceWord   <~~ push(mkWord(takeAll())) ~~> = BraceSeg { BraceSeg } ;
@@ -444,7 +506,7 @@ DollarAt    <~~ push(mkVarRef("@")) ~~> = "$@" ;
 DollarPid   <~~ push(mkVarRef("$")) ~~> = "$$" ;
 DollarBang  <~~ push(mkVarRef("!")) ~~> = "$!" ;
 DollarDash  <~~ push(mkVarRef("-")) ~~> = "$-" ;
-DollarLit   <~~ push(makeConst("$")) ~~> = "$" ;
+DollarLit   <~~ push(makeConst("$")) ~~> = "$" NotDollarBrace ;
 
 VarName     = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
 ArgDigit    = "0"..."9" ;
@@ -542,7 +604,7 @@ CondUnTok   = "-z" | "-n" | "-v" | "-e" | "-f" | "-d" | "-s" | "-r" | "-w" | "-x
 // literal (`[[ $s == "h*" ]]` does not glob), so quoted segments are glob-escaped here.
 CondBin     <~~ push(mkCondBin(takeAll())) ~~> = Word CondBinOp PatWord ;
 PatWord     <~~ push(mkWord(takeAll())) ~~> = PatSeg :whitespace() { PatSeg } ;
-PatSeg      = PatSq | PatDq | PatAnsi | ExpSeg | PatEsc | BareSeg ;
+PatSeg      = PatSq | PatDq | PatAnsi | ExpSeg | PatEsc | ExtGlob | EgPfxLit | BareSeg ;
 PatSq       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(globEscape(up.in))) ~~> "'" ;
 PatDq       <~~ push(mkQuotedPat(mkDqWord(takeAll()))) ~~>
             = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
@@ -684,6 +746,34 @@ HdScan = :script(~~
         }
         return abnf.newToken(out, 0)
     })()
+~~) ;
+
+// Succeeds (consuming nothing) when the arithmetic slot of a ${v:off:len} is EMPTY, i.e.
+// when the next non-blank character is the ":" before the length or the closing "}".
+ArEndHere = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc == 32 || cc == 9) { i = i + 1; cc = c.peek(i) }
+        if (cc !== 125 && cc !== 58) { return abnf.newToken("\x01ar-empty", 0) }
+    })()
+~~) ;
+
+// Succeeds only when the very next character closes the ${...}. See PeBody for why.
+PeBraceEnd = :script(~~
+    (function() { if (c.peek(0) !== 125) { return abnf.newToken("\x01pe-end", 0) } })()
+~~) ;
+
+// A bare "$" is a literal dollar, but never in front of "{": there it is the head of a
+// ${...} that failed to parse, and letting it degrade turns a malformed expansion into
+// silent LITERAL TEXT instead of a parse error.
+NotDollarBrace = :script(~~
+    (function() { if (c.peek(0) === 123) { return abnf.newToken("\x01dollar-brace", 0) } })()
+~~) ;
+
+// The extglob prefix characters are only that when a "(" follows immediately.
+EgLParen = :script(~~
+    (function() { if (c.peek(0) !== 40) { return abnf.newToken("\x01eg", 0) } })()
 ~~) ;
 
 NotEq    = :script(~~ (function() { if (c.peek(0) === 61) { return abnf.newToken("\x01eq", 0) } })() ~~) ;
@@ -1337,6 +1427,41 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         dx.NewRet(dx.NewMul(dx.NewLoad(i32, vp), dx.NewLoad(i32, sp)))
     })()
 
+    // ---- shared IR-emitting shorthand, used by the @-transforms below and by the ERE
+    // engine further down. `var` initialisers do not hoist, so these live above their first
+    // use rather than beside the engine that grew them.
+    function reK(n) { return llvm.constant.NewInt(i32, n) }
+    var reEQ = llvm.enum.IPredEQ, reNE = llvm.enum.IPredNE
+    var reSLT = llvm.enum.IPredSLT, reSLE = llvm.enum.IPredSLE
+    var reSGT = llvm.enum.IPredSGT, reSGE = llvm.enum.IPredSGE
+    var one8 = llvm.constant.NewInt(i8, 1)
+    var ff8 = llvm.constant.NewInt(i8, 255)
+    // re_bad, declared here because reForL's guard reads it before the engine defines the
+    // rest of its state.
+    var gReBad = m.NewGlobalDef("re_bad", zero)
+
+    // Emit `for (*ip = from; *ip < to; ++*ip) body`. `ip` must come from the function's
+    // ENTRY block: an alloca reached repeatedly grows the native stack, which our machine
+    // would never have shown us. `live` also stops the loop once re_bad is set, which is
+    // what keeps a {1000} that overruns re_prog from running the emitter dry.
+    function reForG(f, tag, b, ip, from, to, live, body) {
+        b.NewStore(from, ip)
+        var h = f.NewBlock(tag + "h")
+        var bd = f.NewBlock(tag + "b")
+        var x = f.NewBlock(tag + "x")
+        b.NewBr(h)
+        var i = h.NewLoad(i32, ip)
+        var go = h.NewICmp(reSLT, i, to)
+        if (live) { go = h.NewAnd(go, h.NewICmp(reEQ, h.NewLoad(i32, gReBad), zero)) }
+        h.NewCondBr(go, bd, x)
+        var e2 = body(bd, i)
+        e2.NewStore(e2.NewAdd(e2.NewLoad(i32, ip), one), ip)
+        e2.NewBr(h)
+        return x
+    }
+    function reFor(f, tag, b, ip, from, to, body) { return reForG(f, tag, b, ip, from, to, false, body) }
+    function reForL(f, tag, b, ip, from, to, body) { return reForG(f, tag, b, ip, from, to, true, body) }
+
     // ---- glob (pathname-style) matching in IR: * ? [...] and a backslash escape ------
     // The same matcher backs case and [[ == ]], exactly like the shell. Both functions walk
     // raw i8* pointers; "*" backtracks by CALLING rt_glob again, so the IR call stack is the
@@ -1400,6 +1525,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         dn.NewRet(dn.NewOr(dn.NewMul(dn.NewAdd(dn.NewLoad(i32, jp), one), llvm.constant.NewInt(i32, 2)), fin))
     })()
 
+    // i32 rt_eg(i8* p, i8* s, i32 star): the extended globs. Declared here because rt_glob
+    // dispatches into it and it calls rt_glob straight back; its body needs rt_substr and so
+    // is emitted below that.
+    var rtEg = m.NewFunc("rt_eg", i32,
+        [llvm.ir.NewParam("egp", i8ptr), llvm.ir.NewParam("egs", i8ptr),
+         llvm.ir.NewParam("egstar", i32)])
+
     // i32 rt_glob(i8* pat, i8* s): 1 when the whole subject matches the whole pattern.
     var rtGlob = m.NewFunc("rt_glob", i32, [llvm.ir.NewParam("p", i8ptr), llvm.ir.NewParam("s", i8ptr)])
     ;(function() {
@@ -1433,7 +1565,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
         var pcur = h.NewLoad(i8ptr, pp)
         var pc = h.NewZExt(h.NewLoad(i8, h.NewGetElementPtr(i8, pcur, zero)), i32)
-        h.NewCondBr(h.NewICmp(llvm.enum.IPredEQ, pc, zero), pend, nostar)
+        // An extglob head has to be recognised BEFORE the plain "*" and "?" arms, or "*(x)"
+        // and "?(x)" would be eaten as an ordinary star / any-char followed by a literal
+        // paren. All five prefixes are only that when "(" is the very next byte.
+        var heg = rtGlob.NewBlock("heg")
+        var egb = rtGlob.NewBlock("egb")
+        h.NewCondBr(h.NewICmp(llvm.enum.IPredEQ, pc, zero), pend, heg)
+        var isPfx = heg.NewOr(heg.NewOr(heg.NewOr(
+            heg.NewICmp(llvm.enum.IPredEQ, pc, llvm.constant.NewInt(i32, 64)),
+            heg.NewICmp(llvm.enum.IPredEQ, pc, llvm.constant.NewInt(i32, 63))),
+            heg.NewOr(heg.NewICmp(llvm.enum.IPredEQ, pc, llvm.constant.NewInt(i32, 42)),
+                      heg.NewICmp(llvm.enum.IPredEQ, pc, llvm.constant.NewInt(i32, 43)))),
+            heg.NewICmp(llvm.enum.IPredEQ, pc, llvm.constant.NewInt(i32, 33)))
+        var nextc = heg.NewZExt(heg.NewLoad(i8, heg.NewGetElementPtr(i8, pcur, one)), i32)
+        heg.NewCondBr(heg.NewAnd(isPfx, heg.NewICmp(llvm.enum.IPredEQ, nextc,
+                                                    llvm.constant.NewInt(i32, 40))), egb, nostar)
+        egb.NewRet(egb.NewCall(rtEg, [pcur, egb.NewLoad(i8ptr, sp), zero]))
 
         var sat = pend.NewZExt(pend.NewLoad(i8, pend.NewGetElementPtr(i8, pend.NewLoad(i8ptr, sp), zero)), i32)
         pend.NewCondBr(pend.NewICmp(llvm.enum.IPredEQ, sat, zero), r1, r0)
@@ -1550,6 +1697,204 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         byteN = e.NewSelect(e.NewICmp(llvm.enum.IPredSLT, byteN, zero),
                             llvm.constant.NewInt(i32, -1), byteN)
         e.NewRet(e.NewCall(rtSubstr, [s0, bo, byteN]))
+    })()
+
+    // ---- the extended globs @(a|b) ?(a|b) *(a|b) +(a|b) !(a|b) --------------------------
+    //
+    // Two scanners plus rt_eg. Both scanners count nested parens and step over a backslash
+    // escape, so `@(a\)b|c)` splits where bash splits it.
+
+    // i32 rt_egclose(i8* q): q points at "("; the offset from q of the MATCHING ")", or -1.
+    var rtEgClose = m.NewFunc("rt_egclose", i32, llvm.ir.NewParam("ecq", i8ptr))
+    ;(function() {
+        var f = rtEgClose
+        var q = f.Params[0]
+        var e = f.NewBlock("ecent")
+        var h = f.NewBlock("ech")
+        var ip = e.NewAlloca(i32), dp = e.NewAlloca(i32)
+        e.NewStore(zero, ip)
+        e.NewStore(zero, dp)
+        e.NewBr(h)
+        var i = h.NewLoad(i32, ip)
+        var c = h.NewZExt(h.NewLoad(i8, h.NewGetElementPtr(i8, q, i)), i32)
+        var bad = f.NewBlock("ecbad"), h2 = f.NewBlock("ech2")
+        h.NewCondBr(h.NewICmp(llvm.enum.IPredEQ, c, zero), bad, h2)
+        bad.NewRet(llvm.constant.NewInt(i32, -1))
+        var esc = f.NewBlock("ecesc"), h3 = f.NewBlock("ech3")
+        h2.NewCondBr(h2.NewAnd(h2.NewICmp(llvm.enum.IPredEQ, c, llvm.constant.NewInt(i32, 92)),
+                     h2.NewICmp(llvm.enum.IPredNE,
+                       h2.NewZExt(h2.NewLoad(i8, h2.NewGetElementPtr(i8, q, h2.NewAdd(i, one))), i32),
+                       zero)), esc, h3)
+        esc.NewStore(esc.NewAdd(i, llvm.constant.NewInt(i32, 2)), ip)
+        esc.NewBr(h)
+        var nx = f.NewBlock("ecnext")
+        var opn = f.NewBlock("ecopen"), h4 = f.NewBlock("ech4")
+        h3.NewCondBr(h3.NewICmp(llvm.enum.IPredEQ, c, llvm.constant.NewInt(i32, 40)), opn, h4)
+        opn.NewStore(opn.NewAdd(opn.NewLoad(i32, dp), one), dp)
+        opn.NewBr(nx)
+        var cls = f.NewBlock("ecclose")
+        h4.NewCondBr(h4.NewICmp(llvm.enum.IPredEQ, c, llvm.constant.NewInt(i32, 41)), cls, nx)
+        var d2 = cls.NewSub(cls.NewLoad(i32, dp), one)
+        cls.NewStore(d2, dp)
+        var hit = f.NewBlock("echit")
+        cls.NewCondBr(cls.NewICmp(llvm.enum.IPredEQ, d2, zero), hit, nx)
+        hit.NewRet(i)
+        nx.NewStore(nx.NewAdd(i, one), ip)
+        nx.NewBr(h)
+    })()
+
+    // i32 rt_egalt(i8* q, i32 a): q points at "(" and a is the offset of an alternative's
+    // first byte; the offset of its terminator - a "|" at depth 0, or the group's own ")".
+    var rtEgAlt = m.NewFunc("rt_egalt", i32,
+        [llvm.ir.NewParam("eaq", i8ptr), llvm.ir.NewParam("eaa", i32)])
+    ;(function() {
+        var f = rtEgAlt
+        var q = f.Params[0]
+        var e = f.NewBlock("eaent")
+        var h = f.NewBlock("eah")
+        var ip = e.NewAlloca(i32), dp = e.NewAlloca(i32)
+        e.NewStore(f.Params[1], ip)
+        e.NewStore(zero, dp)
+        e.NewBr(h)
+        var i = h.NewLoad(i32, ip)
+        var c = h.NewZExt(h.NewLoad(i8, h.NewGetElementPtr(i8, q, i)), i32)
+        var stop = f.NewBlock("eastop"), h2 = f.NewBlock("eah2")
+        h.NewCondBr(h.NewICmp(llvm.enum.IPredEQ, c, zero), stop, h2)
+        stop.NewRet(i)
+        var esc = f.NewBlock("eaesc"), h3 = f.NewBlock("eah3")
+        h2.NewCondBr(h2.NewAnd(h2.NewICmp(llvm.enum.IPredEQ, c, llvm.constant.NewInt(i32, 92)),
+                     h2.NewICmp(llvm.enum.IPredNE,
+                       h2.NewZExt(h2.NewLoad(i8, h2.NewGetElementPtr(i8, q, h2.NewAdd(i, one))), i32),
+                       zero)), esc, h3)
+        esc.NewStore(esc.NewAdd(i, llvm.constant.NewInt(i32, 2)), ip)
+        esc.NewBr(h)
+        var nx = f.NewBlock("eanext")
+        var opn = f.NewBlock("eaopen"), h4 = f.NewBlock("eah4")
+        h3.NewCondBr(h3.NewICmp(llvm.enum.IPredEQ, c, llvm.constant.NewInt(i32, 40)), opn, h4)
+        opn.NewStore(opn.NewAdd(opn.NewLoad(i32, dp), one), dp)
+        opn.NewBr(nx)
+        var d = h4.NewLoad(i32, dp)
+        var cls = f.NewBlock("eaclose"), h5 = f.NewBlock("eah5")
+        h4.NewCondBr(h4.NewICmp(llvm.enum.IPredEQ, c, llvm.constant.NewInt(i32, 41)), cls, h5)
+        var atTop = f.NewBlock("eatop"), dec = f.NewBlock("eadec")
+        cls.NewCondBr(cls.NewICmp(llvm.enum.IPredEQ, d, zero), atTop, dec)
+        atTop.NewRet(i)
+        dec.NewStore(dec.NewSub(d, one), dp)
+        dec.NewBr(nx)
+        h5.NewCondBr(h5.NewAnd(h5.NewICmp(llvm.enum.IPredEQ, c, llvm.constant.NewInt(i32, 124)),
+                               h5.NewICmp(llvm.enum.IPredEQ, d, zero)), atTop, nx)
+        nx.NewStore(nx.NewAdd(i, one), ip)
+        nx.NewBr(h)
+    })()
+
+    // i32 rt_eg(i8* p, i8* s, i32 star): p points at the prefix character of an extglob and
+    // s at the subject; 1 when p (group AND everything after it) matches all of s.
+    //
+    // Each alternative is tried against every PREFIX of the subject and the rest of the
+    // pattern against what is left - the same "split and recurse" shape rt_glob already uses
+    // for "*", with the IR call stack as the backtracking stack. `star` is the +(...)
+    // continuation: after one mandatory occurrence the group carries on with *(...)
+    // semantics, and because a repeat must consume at least one byte the recursion is finite.
+    //   @(A|B)  exactly one alternative        !(A|B)  a prefix NO alternative matches
+    //   ?(A|B)  zero or one                    *(A|B)  zero or more
+    //   +(A|B)  one or more
+    ;(function() {
+        var f = rtEg
+        var p = f.Params[0], s = f.Params[1], star = f.Params[2]
+        var e = f.NewBlock("egent")
+        var kind = e.NewSelect(e.NewICmp(llvm.enum.IPredNE, star, zero),
+                               llvm.constant.NewInt(i32, 42),
+                               e.NewZExt(e.NewLoad(i8, e.NewGetElementPtr(i8, p, zero)), i32))
+        var open = e.NewGetElementPtr(i8, p, one)
+        var clo = e.NewCall(rtEgClose, open)
+        var bad = f.NewBlock("egbad"), ok = f.NewBlock("egok")
+        e.NewCondBr(e.NewICmp(llvm.enum.IPredSLT, clo, zero), bad, ok)
+        bad.NewRet(zero)
+        var rest = ok.NewGetElementPtr(i8, p, ok.NewAdd(clo, llvm.constant.NewInt(i32, 2)))
+        var slen = ok.NewCall(rtStrlen, s)
+        function isk(b, v) { return b.NewICmp(llvm.enum.IPredEQ, kind, llvm.constant.NewInt(i32, v)) }
+        var isBang = isk(ok, 33)
+        var isAt = isk(ok, 64), isQ = isk(ok, 63)
+        var zeroOk = ok.NewOr(isQ, isk(ok, 42))
+        var one1 = ok.NewOr(isAt, isQ)              // exactly one occurrence, so k may be 0
+        var ret1 = f.NewBlock("egret1"), ret0 = f.NewBlock("egret0")
+        ret1.NewRet(one)
+        ret0.NewRet(zero)
+        var bang = f.NewBlock("egbang"), pos = f.NewBlock("egpos")
+        ok.NewCondBr(isBang, bang, pos)
+
+        // ---- @ ? * + : zero occurrences first (? and *), then one alternative at a time.
+        var z1 = f.NewBlock("egz1"), z2 = f.NewBlock("egz2")
+        pos.NewCondBr(zeroOk, z1, z2)
+        z1.NewCondBr(z1.NewICmp(llvm.enum.IPredNE, z1.NewCall(rtGlob, [rest, s]), zero), ret1, z2)
+        var minK = z2.NewSelect(one1, zero, one)
+        var ap = e.NewAlloca(i32), kp = e.NewAlloca(i32)
+        var ah = f.NewBlock("egah"), abody = f.NewBlock("egab"), adone = f.NewBlock("egad")
+        z2.NewStore(one, ap)
+        z2.NewBr(ah)
+        var a = ah.NewLoad(i32, ap)
+        ah.NewCondBr(ah.NewICmp(llvm.enum.IPredSLT, a, clo), abody, adone)
+        var aend = abody.NewCall(rtEgAlt, [open, a])
+        var alt = abody.NewCall(rtSubstr, [abody.NewGetElementPtr(i8, open, a), zero,
+                                           abody.NewSub(aend, a)])
+        var kx = reFor(f, "egk", abody, kp, minK, abody.NewAdd(slen, one), function(b, k) {
+            var m1 = f.NewBlock("egm1"), cont = f.NewBlock("egkc")
+            var pre = b.NewCall(rtSubstr, [s, zero, k])
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtGlob, [alt, pre]), zero), m1, cont)
+            var m2 = f.NewBlock("egm2"), m3 = f.NewBlock("egm3")
+            m1.NewCondBr(one1, m2, m3)
+            var tail = m2.NewGetElementPtr(i8, s, k)
+            m2.NewCondBr(m2.NewICmp(llvm.enum.IPredNE, m2.NewCall(rtGlob, [rest, tail]), zero),
+                         ret1, cont)
+            // a * / + repeat must consume something, or the recursion would not terminate
+            var t3 = m3.NewGetElementPtr(i8, s, k)
+            m3.NewCondBr(m3.NewAnd(m3.NewICmp(llvm.enum.IPredSGT, k, zero),
+                         m3.NewICmp(llvm.enum.IPredNE, m3.NewCall(rtEg, [p, t3, one]), zero)),
+                         ret1, cont)
+            return cont
+        })
+        var anx = f.NewBlock("egan"), aend2 = f.NewBlock("egae")
+        kx.NewCondBr(kx.NewICmp(llvm.enum.IPredEQ,
+                       kx.NewZExt(kx.NewLoad(i8, kx.NewGetElementPtr(i8, open, aend)), i32),
+                       llvm.constant.NewInt(i32, 41)), aend2, anx)
+        aend2.NewBr(adone)
+        anx.NewStore(anx.NewAdd(aend, one), ap)
+        anx.NewBr(ah)
+        adone.NewRet(zero)
+
+        // ---- ! : a prefix that NO alternative matches, with the rest matching what is left.
+        var bp = e.NewAlloca(i32), bap = e.NewAlloca(i32), anyp = e.NewAlloca(i32)
+        var bx = reFor(f, "egb", bang, bp, zero, bang.NewAdd(slen, one), function(b, k) {
+            b.NewStore(zero, anyp)
+            b.NewStore(one, bap)
+            // NOT "egbh"/"egbb": reForG derives its own header and body labels from the
+            // tag ("egb" -> egbh/egbb/egbx), and a duplicate label is invalid LLVM that
+            // llvm.Run resolves by handle and runs anyway. clang caught this one.
+            var bh = f.NewBlock("egb2h"), bb = f.NewBlock("egb2b"), bd2 = f.NewBlock("egb2d")
+            b.NewBr(bh)
+            var ba = bh.NewLoad(i32, bap)
+            bh.NewCondBr(bh.NewICmp(llvm.enum.IPredSLT, ba, clo), bb, bd2)
+            var be = bb.NewCall(rtEgAlt, [open, ba])
+            var balt = bb.NewCall(rtSubstr, [bb.NewGetElementPtr(i8, open, ba), zero,
+                                             bb.NewSub(be, ba)])
+            var bpre = bb.NewCall(rtSubstr, [s, zero, k])
+            bb.NewStore(bb.NewSelect(bb.NewICmp(llvm.enum.IPredNE,
+                          bb.NewCall(rtGlob, [balt, bpre]), zero), one, bb.NewLoad(i32, anyp)), anyp)
+            var bn = f.NewBlock("egb2n"), be2 = f.NewBlock("egb2e")
+            bb.NewCondBr(bb.NewICmp(llvm.enum.IPredEQ,
+                           bb.NewZExt(bb.NewLoad(i8, bb.NewGetElementPtr(i8, open, be)), i32),
+                           llvm.constant.NewInt(i32, 41)), be2, bn)
+            be2.NewBr(bd2)
+            bn.NewStore(bn.NewAdd(be, one), bap)
+            bn.NewBr(bh)
+            var cont2 = f.NewBlock("egb2c")
+            var btail = bd2.NewGetElementPtr(i8, s, k)
+            bd2.NewCondBr(bd2.NewAnd(bd2.NewICmp(llvm.enum.IPredEQ, bd2.NewLoad(i32, anyp), zero),
+                            bd2.NewICmp(llvm.enum.IPredNE, bd2.NewCall(rtGlob, [rest, btail]), zero)),
+                          ret1, cont2)
+            return cont2
+        })
+        bx.NewBr(ret0)
     })()
 
     // i32 rt_matchlen(i8* pat, i8* s, i32 i): end index of the LONGEST match of pat starting
@@ -1735,6 +2080,148 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         bd.NewStore(bd.NewAdd(i, one), ip)
         bd.NewBr(h)
         x.NewStore(zero8, x.NewGetElementPtr(i8, dst, len))
+        x.NewRet(dst)
+    })()
+
+    // i8* rt_shquote(i8* s): the ${v@Q} / ${v@K} / ${v@k} form - s quoted so the shell would
+    // read it back unchanged. Mirrors bash-interpreter.abnf's shellQuote: single quotes
+    // normally, with an embedded ' spelled '\'', and the $'...' form as soon as the value
+    // holds a control character, where the C escapes bash prints are used.
+    var rtShQuote = m.NewFunc("rt_shquote", i8ptr, llvm.ir.NewParam("sq", i8ptr))
+    ;(function() {
+        var f = rtShQuote
+        var s0 = f.Params[0]
+        var e = f.NewBlock("sqent")
+        var len = e.NewCall(rtStrlen, s0)
+        // 4 bytes per input byte is the worst case ('\'' and \xNN alike), plus $'' and NUL.
+        var dst = e.NewCall(rtBump, e.NewAdd(e.NewMul(len, llvm.constant.NewInt(i32, 4)),
+                                             llvm.constant.NewInt(i32, 8)))
+        var op = e.NewAlloca(i32), ip = e.NewAlloca(i32), ctlp = e.NewAlloca(i32)
+        e.NewStore(zero, op)
+        e.NewStore(zero, ctlp)
+        function put(b, ch) {
+            var o = b.NewLoad(i32, op)
+            b.NewStore(b.NewTrunc(ch, i8), b.NewGetElementPtr(i8, dst, o))
+            b.NewStore(b.NewAdd(o, one), op)
+        }
+        function putK(b, n) { put(b, llvm.constant.NewInt(i32, n)) }
+        // pass 1: is there a control character?
+        var cx = reFor(f, "sqscan", e, ip, zero, len, function(b, i) {
+            var c0 = b.NewZExt(b.NewLoad(i8, b.NewGetElementPtr(i8, s0, i)), i32)
+            var isCtl = b.NewOr(b.NewICmp(llvm.enum.IPredSLT, c0, llvm.constant.NewInt(i32, 32)),
+                                b.NewICmp(llvm.enum.IPredEQ, c0, llvm.constant.NewInt(i32, 127)))
+            b.NewStore(b.NewSelect(isCtl, one, b.NewLoad(i32, ctlp)), ctlp)
+            return b
+        })
+        var plain = f.NewBlock("sqplain"), ansi = f.NewBlock("sqansi"), done = f.NewBlock("sqdone")
+        cx.NewCondBr(cx.NewICmp(llvm.enum.IPredNE, cx.NewLoad(i32, ctlp), zero), ansi, plain)
+
+        putK(plain, 39)
+        var jp = e.NewAlloca(i32)
+        var px = reFor(f, "sqp", plain, jp, zero, len, function(b, i) {
+            var c0 = b.NewZExt(b.NewLoad(i8, b.NewGetElementPtr(i8, s0, i)), i32)
+            var q = f.NewBlock("sqpq"), n = f.NewBlock("sqpn"), j = f.NewBlock("sqpj")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, c0, llvm.constant.NewInt(i32, 39)), q, n)
+            putK(q, 39); putK(q, 92); putK(q, 39); putK(q, 39)
+            q.NewBr(j)
+            put(n, c0)
+            n.NewBr(j)
+            return j
+        })
+        putK(px, 39)
+        px.NewBr(done)
+
+        putK(ansi, 36); putK(ansi, 39)
+        var kp = e.NewAlloca(i32)
+        var ax = reFor(f, "sqa", ansi, kp, zero, len, function(b, i) {
+            var c0 = b.NewZExt(b.NewLoad(i8, b.NewGetElementPtr(i8, s0, i)), i32)
+            var j = f.NewBlock("sqaj")
+            var nb = b
+            var an = 0
+            function esc(code, letter) {
+                an = an + 1
+                var hit = f.NewBlock("sqah" + an)
+                var nx = f.NewBlock("sqan" + an)
+                nb.NewCondBr(nb.NewICmp(llvm.enum.IPredEQ, c0, llvm.constant.NewInt(i32, code)), hit, nx)
+                putK(hit, 92); putK(hit, letter)
+                hit.NewBr(j)
+                nb = nx
+            }
+            esc(39, 39)   // \'
+            esc(92, 92)   // backslash
+            esc(7, 97)    // \a
+            esc(8, 98)    // \b
+            esc(9, 116)   // \t
+            esc(10, 110)  // \n
+            esc(11, 118)  // \v
+            esc(12, 102)  // \f
+            esc(13, 114)  // \r
+            var hx = f.NewBlock("sqahex"), lit = f.NewBlock("sqalit")
+            nb.NewCondBr(nb.NewOr(nb.NewICmp(llvm.enum.IPredSLT, c0, llvm.constant.NewInt(i32, 32)),
+                                  nb.NewICmp(llvm.enum.IPredEQ, c0, llvm.constant.NewInt(i32, 127))),
+                         hx, lit)
+            putK(hx, 92); putK(hx, 120)
+            var hi = hx.NewSDiv(c0, llvm.constant.NewInt(i32, 16))
+            var lo = hx.NewSRem(c0, llvm.constant.NewInt(i32, 16))
+            function hexd(b, v) {
+                return b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, v, ten),
+                                   b.NewAdd(v, llvm.constant.NewInt(i32, 48)),
+                                   b.NewAdd(v, llvm.constant.NewInt(i32, 87)))
+            }
+            put(hx, hexd(hx, hi))
+            put(hx, hexd(hx, lo))
+            hx.NewBr(j)
+            put(lit, c0)
+            lit.NewBr(j)
+            return j
+        })
+        putK(ax, 39)
+        ax.NewBr(done)
+
+        done.NewStore(zero8, done.NewGetElementPtr(i8, dst, done.NewLoad(i32, op)))
+        done.NewRet(dst)
+    })()
+
+    // i8* rt_ansic(i8* s): the ${v@E} form - the $'...' escapes decoded at RUN time.
+    var rtAnsiC = m.NewFunc("rt_ansic", i8ptr, llvm.ir.NewParam("ac", i8ptr))
+    ;(function() {
+        var f = rtAnsiC
+        var s0 = f.Params[0]
+        var e = f.NewBlock("acent")
+        var h = f.NewBlock("ach")
+        var bd = f.NewBlock("acb")
+        var x = f.NewBlock("acx")
+        var len = e.NewCall(rtStrlen, s0)
+        var dst = e.NewCall(rtBump, e.NewAdd(len, one))
+        var ip = e.NewAlloca(i32), op = e.NewAlloca(i32)
+        e.NewStore(zero, ip)
+        e.NewStore(zero, op)
+        e.NewBr(h)
+        var i = h.NewLoad(i32, ip)
+        h.NewCondBr(h.NewICmp(llvm.enum.IPredSLT, i, len), bd, x)
+        var c0 = bd.NewZExt(bd.NewLoad(i8, bd.NewGetElementPtr(i8, s0, i)), i32)
+        var c1 = bd.NewZExt(bd.NewLoad(i8, bd.NewGetElementPtr(i8, s0,
+                    bd.NewSelect(bd.NewICmp(llvm.enum.IPredSLT, bd.NewAdd(i, one), len),
+                                 bd.NewAdd(i, one), i))), i32)
+        var esc = f.NewBlock("acesc"), lit = f.NewBlock("aclit")
+        bd.NewCondBr(bd.NewAnd(bd.NewICmp(llvm.enum.IPredEQ, c0, llvm.constant.NewInt(i32, 92)),
+                               bd.NewICmp(llvm.enum.IPredSLT, bd.NewAdd(i, one), len)), esc, lit)
+        var mapped = c1
+        function em(code, out) {
+            mapped = esc.NewSelect(esc.NewICmp(llvm.enum.IPredEQ, c1, llvm.constant.NewInt(i32, code)),
+                                   llvm.constant.NewInt(i32, out), mapped)
+        }
+        em(97, 7); em(98, 8); em(116, 9); em(110, 10)
+        em(118, 11); em(102, 12); em(114, 13); em(101, 27); em(69, 27)
+        esc.NewStore(esc.NewTrunc(mapped, i8), esc.NewGetElementPtr(i8, dst, esc.NewLoad(i32, op)))
+        esc.NewStore(esc.NewAdd(esc.NewLoad(i32, op), one), op)
+        esc.NewStore(esc.NewAdd(i, llvm.constant.NewInt(i32, 2)), ip)
+        esc.NewBr(h)
+        lit.NewStore(lit.NewTrunc(c0, i8), lit.NewGetElementPtr(i8, dst, lit.NewLoad(i32, op)))
+        lit.NewStore(lit.NewAdd(lit.NewLoad(i32, op), one), op)
+        lit.NewStore(lit.NewAdd(i, one), ip)
+        lit.NewBr(h)
+        x.NewStore(zero8, x.NewGetElementPtr(i8, dst, x.NewLoad(i32, op)))
         x.NewRet(dst)
     })()
 
@@ -2528,8 +3015,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     })()
 
     // ---- [[ str =~ ere ]] -----------------------------------------------------------------
-    // Two externs the IR machine provides, backed by the SAME rxCompile/rxSearch engine the
-    // interpreter grammar uses through lib/regex.js - there is no second matcher.
+    //
+    // A POSIX ERE engine, EMITTED AS IR. Same contract as before:
     //   rt_regex_search > 0  matched; the number of capture PAIRS, i.e. ${#BASH_REMATCH[@]}
     //                  == 0  no match
     //                  == -1 the pattern did not compile; rt_regex_error() has the text
@@ -2537,12 +3024,1048 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // caps is caller-allocated, ncaps SLOTS (ncaps/2 pairs), pre-filled with -1, so a group
     // that did not participate reads -1/-1 - bash's empty-but-counted BASH_REMATCH entry.
     // Offsets are BYTES into the subject, which is what bash indexes.
+    //
+    // WHY IT IS EMITTED AND NOT AN EXTERN, which is what it used to be.
+    //
+    // rt_regex_search and rt_regex_error were Go functions (abnf/jsrtregexptr.go) reached
+    // through the IR machine's extern table, sharing rxCompile/rxSearch with lib/regex.js so
+    // the two halves could not drift. Under llvm.Run that is exactly right. In a clang-built
+    // executable it was INVISIBLY BROKEN: a Go function has no C symbol, so `-exe` had
+    // nothing to link, and buildExecutable's stubUndefined gave the DECLARATION a
+    // `ret i32 0` body. 0 means NO MATCH. Every =~ in a native binary therefore answered
+    // "no match", and every uncompilable pattern answered "no match" instead of status 2.
+    //
+    // Measured 2026-07-27 on tests/bash-test-full.sh: 289/289 under llvm.Run, 282/289 in the
+    // clang executable, and the seven were exactly the =~ assertions that need a MATCH or a
+    // compile ERROR - dbr5 dbr6 dbr7 dbr15 dbr16 dbr19 dbr21. dbr17 and dbr18, the two that
+    // expect NO match, passed for entirely the wrong reason. ./test.sh cannot see any of
+    // this: it compares each engine against ITSELF, and both engines called the same Go
+    // extern, so they agreed. `clang -S -x ir` cannot see it either - the module is
+    // well-formed; the defect is a symbol that is not there.
+    //
+    // Emitting the engine closes the class BY CONSTRUCTION rather than by test: llvm.Run and
+    // clang now execute the same instructions, so there is nothing left that can diverge.
+    // The price is that this, not lib/regex.js, is now the compiler half's matcher, so the
+    // two halves CAN drift - which is why section 11 of the ratchet grew a block of =~
+    // assertions (dbr22..dbr45), every one settled against the real bash 5.3 first. That is
+    // a gap a test can see, where the old one was a gap no test could see.
+    //
+    // The design is Thompson-style codegen plus a recursive backtracking VM, both in IR:
+    //   * re_alt/re_cat/re_rep/re_atom parse the ERE and emit a 4-word instruction into
+    //     re_prog. Recursion is the IR call stack, exactly as rt_glob already does it.
+    //   * re_run walks that program, recursing at SPLIT. Leftmost-first, greedy - which is
+    //     what bash reports: `^(foo|foobar)bar$` on "foobar" yields BASH_REMATCH[1]=foo.
+    //   * a * or + loop is fenced by SAVE/PROG on a scratch slot, so an iteration that
+    //     consumed nothing cannot repeat. Without it `^(a*)*$` on "aaa" would leave
+    //     BASH_REMATCH[1] empty; bash says "aaa".
     var i32ptr = llvm.types.NewPointer(i32)
     var rtRegexSearch = m.NewFunc("rt_regex_search", i32,
         [llvm.ir.NewParam("pat", i8ptr), llvm.ir.NewParam("subj", i8ptr),
          llvm.ir.NewParam("flags", i8ptr), llvm.ir.NewParam("caps", i32ptr),
          llvm.ir.NewParam("ncaps", i32)])
     var rtRegexError = m.NewFunc("rt_regex_error", i8ptr)
+
+    var RE_PROG  = 4096   // instruction slots
+    var RE_NCLS  = 64     // bracket-expression bitmaps, 32 bytes each
+    var RE_NCAP  = 128    // capture slots - 64 pairs, matching NCAPPAIRS at the call site
+    var RE_NMARK = 64     // empty-iteration guard slots, one per * or + loop
+    var RE_SLOTS = RE_NCAP + RE_NMARK
+    var RE_STEPS = 400000 // total VM steps per rt_regex_search call
+
+    var OP_CHAR = 1, OP_ANY = 2, OP_CLASS = 3, OP_SPLIT = 4, OP_JMP = 5
+    var OP_SAVE = 6, OP_MATCH = 7, OP_BOL = 8, OP_EOL = 9, OP_PROG = 10
+
+    // Indexed by re_bad. The text only ever reaches the stderr CHANNEL, whose bytes this
+    // runtime drops, but a wrong code would still be a wrong status, so they are real.
+    var reErrText = ["", "Unmatched ( or \\(", "Unmatched [, [^, [:, [., or [=",
+                     "Invalid content of \\{\\}", "Regular expression too big",
+                     "Invalid preceding regular expression", "Trailing backslash",
+                     "Invalid range end", "empty (sub)expression",
+                     "Invalid character class name"]
+
+    var reProgTy = llvm.types.NewArray(RE_PROG * 4, i32)
+    var gReProg = m.NewGlobalDef("re_prog", llvm.constant.NewZeroInitializer(reProgTy))
+    var reClsTy = llvm.types.NewArray(RE_NCLS * 32, i8)
+    var gReCls = m.NewGlobalDef("re_cls", llvm.constant.NewZeroInitializer(reClsTy))
+    var reSlotTy = llvm.types.NewArray(RE_SLOTS, i32)
+    var gReSlot = m.NewGlobalDef("re_slot", llvm.constant.NewZeroInitializer(reSlotTy))
+    var gRePc = m.NewGlobalDef("re_pc", zero)
+    var gRePat = m.NewGlobalDef("re_pat", nullStr)
+    var gRePos = m.NewGlobalDef("re_pos", zero)
+    var gReNg = m.NewGlobalDef("re_ng", zero)
+    var gReNcls = m.NewGlobalDef("re_ncls", zero)
+    var gReNmark = m.NewGlobalDef("re_nmark", zero)
+    var gReDepth = m.NewGlobalDef("re_depth", zero)
+    var gReErr = m.NewGlobalDef("re_err", nullStr)
+    var gReSubj = m.NewGlobalDef("re_subj", nullStr)
+    var gReSlen = m.NewGlobalDef("re_slen", zero)
+    var gReSteps = m.NewGlobalDef("re_steps", zero)
+    var gReFold = m.NewGlobalDef("re_fold", zero)
+
+    // The mutually recursive halves, declared before any body needs them.
+    var reAlt = m.NewFunc("re_alt", i32)
+    var reCat = m.NewFunc("re_cat", i32)
+    var reRep = m.NewFunc("re_rep", i32)
+    var reAtom = m.NewFunc("re_atom", i32)
+    var reRun = m.NewFunc("re_run", i32,
+        [llvm.ir.NewParam("rpc", i32), llvm.ir.NewParam("rsp", i32)])
+
+    // ---- program store ----
+    // i32 re_get(i32 pc, i32 k) / re_set(i32 pc, i32 k, i32 v): word k of instruction pc.
+    var reGet = m.NewFunc("re_get", i32,
+        [llvm.ir.NewParam("gpc", i32), llvm.ir.NewParam("gk", i32)])
+    ;(function() {
+        var pc = reGet.Params[0], k = reGet.Params[1]
+        var e = reGet.NewBlock("rgent")
+        e.NewRet(e.NewLoad(i32, e.NewGetElementPtr(reProgTy, gReProg, zero,
+                 e.NewAdd(e.NewMul(pc, reK(4)), k))))
+    })()
+    var reSet = m.NewFunc("re_set", i32,
+        [llvm.ir.NewParam("spc", i32), llvm.ir.NewParam("sk", i32), llvm.ir.NewParam("sv", i32)])
+    ;(function() {
+        var pc = reSet.Params[0], k = reSet.Params[1], v = reSet.Params[2]
+        var e = reSet.NewBlock("rsent")
+        e.NewStore(v, e.NewGetElementPtr(reProgTy, gReProg, zero,
+                   e.NewAdd(e.NewMul(pc, reK(4)), k)))
+        e.NewRet(zero)
+    })()
+    function reSetF(b, pc, k, v) { b.NewCall(reSet, [pc, reK(k), v]) }
+    function reGetF(b, pc, k) { return b.NewCall(reGet, [pc, reK(k)]) }
+
+    // i32 re_emit(op, x, y): append one instruction, answer its pc. An overrun raises
+    // re_bad rather than writing past re_prog - the arena would have absorbed that write.
+    var reEmit = m.NewFunc("re_emit", i32,
+        [llvm.ir.NewParam("eop", i32), llvm.ir.NewParam("ex", i32), llvm.ir.NewParam("ey", i32)])
+    ;(function() {
+        var op = reEmit.Params[0], x = reEmit.Params[1], y = reEmit.Params[2]
+        var e = reEmit.NewBlock("reent")
+        var ov = reEmit.NewBlock("reover")
+        var ok = reEmit.NewBlock("reok")
+        var pc = e.NewLoad(i32, gRePc)
+        e.NewCondBr(e.NewICmp(reSGE, pc, reK(RE_PROG)), ov, ok)
+        ov.NewStore(reK(4), gReBad)
+        ov.NewRet(zero)
+        reSetF(ok, pc, 0, op)
+        reSetF(ok, pc, 1, x)
+        reSetF(ok, pc, 2, y)
+        ok.NewStore(ok.NewAdd(pc, one), gRePc)
+        ok.NewRet(pc)
+    })()
+    function reEmitF(b, op, x, y) { return b.NewCall(reEmit, [reK(op), x, y]) }
+
+    // i32 re_mark(): the next empty-iteration guard slot. Slots wrap rather than run out,
+    // so a pattern with more than RE_NMARK loops degrades to sharing a guard instead of
+    // indexing off the end of re_slot.
+    var reMark = m.NewFunc("re_mark", i32)
+    ;(function() {
+        var e = reMark.NewBlock("rment")
+        var n = e.NewLoad(i32, gReNmark)
+        e.NewStore(e.NewAdd(n, one), gReNmark)
+        e.NewRet(e.NewAdd(reK(RE_NCAP), e.NewSRem(n, reK(RE_NMARK))))
+    })()
+
+    // ---- pattern cursor ----
+    // i32 re_at(i32 d): the pattern byte d ahead of the cursor, 0 at or past the end. The
+    // scan STOPS at the NUL, so a two-character lookahead at the last character never reads
+    // the byte after the terminator - our arena tolerates that, a real heap need not.
+    var reAt = m.NewFunc("re_at", i32, llvm.ir.NewParam("atd", i32))
+    ;(function() {
+        var d = reAt.Params[0]
+        var e = reAt.NewBlock("raent")
+        var h = reAt.NewBlock("rahead")
+        var bd = reAt.NewBlock("rabody")
+        var x = reAt.NewBlock("raexit")
+        var p = e.NewLoad(i8ptr, gRePat)
+        var ip = e.NewAlloca(i32), kp = e.NewAlloca(i32), cp = e.NewAlloca(i32)
+        e.NewStore(e.NewLoad(i32, gRePos), ip)
+        e.NewStore(zero, kp)
+        e.NewStore(zero, cp)
+        e.NewBr(h)
+        var ch = h.NewZExt(h.NewLoad(i8, h.NewGetElementPtr(i8, p, h.NewLoad(i32, ip))), i32)
+        h.NewStore(ch, cp)
+        h.NewCondBr(h.NewAnd(h.NewICmp(reNE, ch, zero),
+                             h.NewICmp(reSLT, h.NewLoad(i32, kp), d)), bd, x)
+        bd.NewStore(bd.NewAdd(bd.NewLoad(i32, ip), one), ip)
+        bd.NewStore(bd.NewAdd(bd.NewLoad(i32, kp), one), kp)
+        bd.NewBr(h)
+        x.NewRet(x.NewLoad(i32, cp))
+    })()
+    function reAtF(b, d) { return b.NewCall(reAt, reK(d)) }
+    function reAdv(b, n) { b.NewStore(b.NewAdd(b.NewLoad(i32, gRePos), reK(n)), gRePos) }
+
+    // i32 re_num(): the decimal number at the cursor, clamped, cursor advanced past it.
+    var reNum = m.NewFunc("re_num", i32)
+    ;(function() {
+        var e = reNum.NewBlock("rnent")
+        var h = reNum.NewBlock("rnhead")
+        var bd = reNum.NewBlock("rnbody")
+        var x = reNum.NewBlock("rnexit")
+        var vp = e.NewAlloca(i32)
+        e.NewStore(zero, vp)
+        e.NewBr(h)
+        var c = h.NewCall(reAt, zero)
+        h.NewCondBr(h.NewAnd(h.NewICmp(reSGE, c, reK(48)), h.NewICmp(reSLE, c, reK(57))), bd, x)
+        var v = bd.NewLoad(i32, vp)
+        bd.NewStore(bd.NewSelect(bd.NewICmp(reSLT, v, reK(256)),
+                                 bd.NewAdd(bd.NewMul(v, ten), bd.NewSub(c, reK(48))),
+                                 reK(256)), vp)
+        reAdv(bd, 1)
+        bd.NewBr(h)
+        x.NewRet(x.NewLoad(i32, vp))
+    })()
+
+    // i32 re_isq(): 1 when the cursor sits on a quantifier. bash 5.3 rejects a SECOND one
+    // outright - "a**", "a*?", "a+*", "a{2}{3}" and "a*{2}" are all status 2 - so this is
+    // the guard, not a fold. (A "{" that is not followed by a digit is a literal brace and
+    // therefore not a quantifier: "a{b" matches.)
+    var reIsq = m.NewFunc("re_isq", i32)
+    ;(function() {
+        var e = reIsq.NewBlock("riqent")
+        var c = e.NewCall(reAt, zero)
+        var d = e.NewCall(reAt, one)
+        var simple = e.NewOr(e.NewOr(e.NewICmp(reEQ, c, reK(42)), e.NewICmp(reEQ, c, reK(43))),
+                             e.NewICmp(reEQ, c, reK(63)))
+        var iv = e.NewAnd(e.NewICmp(reEQ, c, reK(123)),
+                          e.NewAnd(e.NewICmp(reSGE, d, reK(48)), e.NewICmp(reSLE, d, reK(57))))
+        e.NewRet(e.NewSelect(e.NewOr(simple, iv), one, zero))
+    })()
+
+    // i32 re_fold1(i32 c): c lowercased when the i flag is on, else c unchanged.
+    var reFold1 = m.NewFunc("re_fold1", i32, llvm.ir.NewParam("fdc", i32))
+    ;(function() {
+        var c = reFold1.Params[0]
+        var e = reFold1.NewBlock("rfent")
+        var isU = e.NewAnd(e.NewICmp(reSGE, c, reK(65)), e.NewICmp(reSLE, c, reK(90)))
+        var on = e.NewICmp(reNE, e.NewLoad(i32, gReFold), zero)
+        e.NewRet(e.NewSelect(e.NewAnd(on, isU), e.NewAdd(c, reK(32)), c))
+    })()
+
+    // ---- bracket-expression bitmaps ----
+    var reBit1 = m.NewFunc("re_bit1", i32,
+        [llvm.ir.NewParam("b1k", i32), llvm.ir.NewParam("b1c", i32)])
+    ;(function() {
+        var k = reBit1.Params[0], c = reBit1.Params[1]
+        var e = reBit1.NewBlock("rb1ent")
+        var p = e.NewGetElementPtr(reClsTy, gReCls, zero,
+                  e.NewAdd(e.NewMul(k, reK(32)), e.NewSDiv(c, reK(8))))
+        e.NewStore(e.NewOr(e.NewLoad(i8, p),
+                   e.NewShl(one8, e.NewTrunc(e.NewSRem(c, reK(8)), i8))), p)
+        e.NewRet(zero)
+    })()
+    // Under the i flag a letter joins the set in BOTH cases, which is why the VM only has
+    // to fold the subject byte.
+    var reSetBit = m.NewFunc("re_setbit", i32,
+        [llvm.ir.NewParam("sbk", i32), llvm.ir.NewParam("sbc", i32)])
+    ;(function() {
+        var k = reSetBit.Params[0], c = reSetBit.Params[1]
+        var e = reSetBit.NewBlock("rbent")
+        var fo = reSetBit.NewBlock("rbfold")
+        var x = reSetBit.NewBlock("rbexit")
+        e.NewCall(reBit1, [k, c])
+        var isU = e.NewAnd(e.NewICmp(reSGE, c, reK(65)), e.NewICmp(reSLE, c, reK(90)))
+        var isL = e.NewAnd(e.NewICmp(reSGE, c, reK(97)), e.NewICmp(reSLE, c, reK(122)))
+        e.NewCondBr(e.NewAnd(e.NewICmp(reNE, e.NewLoad(i32, gReFold), zero),
+                             e.NewOr(isU, isL)), fo, x)
+        fo.NewCall(reBit1, [k, fo.NewSelect(isU, fo.NewAdd(c, reK(32)), fo.NewSub(c, reK(32)))])
+        fo.NewBr(x)
+        x.NewRet(zero)
+    })()
+    var reClrCls = m.NewFunc("re_clrcls", i32, llvm.ir.NewParam("cck", i32))
+    ;(function() {
+        var k = reClrCls.Params[0]
+        var e = reClrCls.NewBlock("rccent")
+        var ip = e.NewAlloca(i32)
+        var base = e.NewMul(k, reK(32))
+        var x = reFor(reClrCls, "rcc", e, ip, zero, reK(32), function(b, i) {
+            b.NewStore(zero8, b.NewGetElementPtr(reClsTy, gReCls, zero, b.NewAdd(base, i)))
+            return b
+        })
+        x.NewRet(zero)
+    })()
+    var reNegCls = m.NewFunc("re_negcls", i32, llvm.ir.NewParam("nck", i32))
+    ;(function() {
+        var k = reNegCls.Params[0]
+        var e = reNegCls.NewBlock("rncent")
+        var ip = e.NewAlloca(i32)
+        var base = e.NewMul(k, reK(32))
+        var x = reFor(reNegCls, "rnc", e, ip, zero, reK(32), function(b, i) {
+            var p = b.NewGetElementPtr(reClsTy, gReCls, zero, b.NewAdd(base, i))
+            b.NewStore(b.NewXor(b.NewLoad(i8, p), ff8), p)
+            return b
+        })
+        x.NewRet(zero)
+    })()
+
+    // i32 re_ctype(i32 id, i32 ch): membership of the POSIX character classes, branch-free.
+    var reCtype = m.NewFunc("re_ctype", i32,
+        [llvm.ir.NewParam("ctid", i32), llvm.ir.NewParam("ctch", i32)])
+    ;(function() {
+        var id = reCtype.Params[0], ch = reCtype.Params[1]
+        var e = reCtype.NewBlock("rctent")
+        function rng(lo, hi) {
+            return e.NewSelect(e.NewAnd(e.NewICmp(reSGE, ch, reK(lo)),
+                                        e.NewICmp(reSLE, ch, reK(hi))), one, zero)
+        }
+        function eqc(v) { return e.NewSelect(e.NewICmp(reEQ, ch, reK(v)), one, zero) }
+        var upper = rng(65, 90), lower = rng(97, 122), digit = rng(48, 57)
+        var alpha = e.NewOr(upper, lower)
+        var alnum = e.NewOr(alpha, digit)
+        var graph = rng(33, 126)
+        var vals = [alpha, digit, alnum, upper, lower,
+                    e.NewOr(eqc(32), rng(9, 13)),          // space
+                    e.NewOr(eqc(32), eqc(9)),              // blank
+                    e.NewAnd(graph, e.NewSub(one, alnum)), // punct
+                    rng(32, 126),                          // print
+                    graph,
+                    e.NewOr(rng(0, 31), eqc(127)),         // cntrl
+                    e.NewOr(digit, e.NewOr(rng(97, 102), rng(65, 70))), // xdigit
+                    e.NewOr(alnum, eqc(95)),               // word
+                    rng(0, 127)]                           // ascii
+        var r = zero
+        var q
+        for (q = 0; q < vals.length; q = q + 1) {
+            r = e.NewSelect(e.NewICmp(reEQ, id, reK(q + 1)), vals[q], r)
+        }
+        e.NewRet(r)
+    })()
+
+    // i32 re_clsname(): the cursor sits just after "[:". Answers the re_ctype id and steps
+    // past the closing ":]", or 0 when the name is unknown or the "[:" never closes.
+    var reClsName = m.NewFunc("re_clsname", i32)
+    ;(function() {
+        var f = reClsName
+        var e = f.NewBlock("rcnent")
+        var h = f.NewBlock("rcnh")
+        var bd = f.NewBlock("rcnb")
+        var hit = f.NewBlock("rcnhit")
+        var x = f.NewBlock("rcnx")
+        var c0 = e.NewCall(reAt, zero), c1 = e.NewCall(reAt, one), c2 = e.NewCall(reAt, reK(2))
+        function isa(v, c) { return e.NewICmp(reEQ, v, reK(c)) }
+        var id = zero
+        function pick(cond, n) { id = e.NewSelect(cond, reK(n), id) }
+        pick(e.NewAnd(e.NewAnd(isa(c0, 97), isa(c1, 108)), isa(c2, 112)), 1)  // alpha
+        pick(e.NewAnd(e.NewAnd(isa(c0, 97), isa(c1, 108)), isa(c2, 110)), 3)  // alnum
+        pick(e.NewAnd(isa(c0, 97), isa(c1, 115)), 14)                         // ascii
+        pick(isa(c0, 98), 7)                                                  // blank
+        pick(isa(c0, 99), 11)                                                 // cntrl
+        pick(isa(c0, 100), 2)                                                 // digit
+        pick(isa(c0, 103), 10)                                                // graph
+        pick(isa(c0, 108), 5)                                                 // lower
+        pick(e.NewAnd(isa(c0, 112), isa(c1, 114)), 9)                         // print
+        pick(e.NewAnd(isa(c0, 112), isa(c1, 117)), 8)                         // punct
+        pick(isa(c0, 115), 6)                                                 // space
+        pick(isa(c0, 117), 4)                                                 // upper
+        pick(isa(c0, 119), 13)                                                // word
+        pick(isa(c0, 120), 12)                                                // xdigit
+        var idp = e.NewAlloca(i32), ip = e.NewAlloca(i32)
+        e.NewStore(id, idp)
+        e.NewStore(zero, ip)
+        e.NewBr(h)
+        var d = h.NewLoad(i32, ip)
+        var hc = h.NewCall(reAt, d)
+        var h2 = f.NewBlock("rcnh2")
+        h.NewCondBr(h.NewICmp(reEQ, hc, zero), x, h2)
+        h2.NewCondBr(h2.NewAnd(h2.NewICmp(reEQ, hc, reK(58)),
+                               h2.NewICmp(reEQ, h2.NewCall(reAt, h2.NewAdd(d, one)), reK(93))),
+                     hit, bd)
+        bd.NewStore(bd.NewAdd(d, one), ip)
+        bd.NewBr(h)
+        hit.NewStore(hit.NewAdd(hit.NewLoad(i32, gRePos), hit.NewAdd(d, reK(2))), gRePos)
+        hit.NewRet(hit.NewLoad(i32, idp))
+        x.NewRet(zero)
+    })()
+
+    // i32 re_bracket(): parse [...] at the cursor into a bitmap and emit CLASS.
+    // Settled against bash 5.3: a leading "]" is a literal, "\" inside a bracket is a
+    // LITERAL backslash (so [a\-b] is {a} plus the range \..b, and does NOT match "-"),
+    // and a reversed range like [z-a] is a compile error.
+    var reBracket = m.NewFunc("re_bracket", i32)
+    ;(function() {
+        var f = reBracket
+        var e = f.NewBlock("rbkent")
+        var neg = f.NewBlock("rbkneg")
+        var h = f.NewBlock("rbkh")
+        var h2 = f.NewBlock("rbkh2")
+        var item = f.NewBlock("rbkitem")
+        var pcls = f.NewBlock("rbkpcls")
+        var ord = f.NewBlock("rbkord")
+        var rng = f.NewBlock("rbkrng")
+        var sgl = f.NewBlock("rbksgl")
+        var close = f.NewBlock("rbkclose")
+        var doneg = f.NewBlock("rbkdoneg")
+        var unterm = f.NewBlock("rbkunterm")
+        var badcls = f.NewBlock("rbkbadcls")
+        var badrng = f.NewBlock("rbkbadrng")
+        var over = f.NewBlock("rbkover")
+        var ip = e.NewAlloca(i32), negp = e.NewAlloca(i32), firstp = e.NewAlloca(i32)
+        var k = e.NewLoad(i32, gReNcls)
+        e.NewCondBr(e.NewICmp(reSGE, k, reK(RE_NCLS)), over, neg)
+        over.NewStore(reK(4), gReBad)
+        over.NewRet(zero)
+        neg.NewStore(neg.NewAdd(k, one), gReNcls)
+        neg.NewCall(reClrCls, k)
+        reAdv(neg, 1)
+        var c0 = neg.NewCall(reAt, zero)
+        var isNeg = neg.NewICmp(reEQ, c0, reK(94))
+        neg.NewStore(neg.NewSelect(isNeg, one, zero), negp)
+        neg.NewStore(neg.NewAdd(neg.NewLoad(i32, gRePos), neg.NewSelect(isNeg, one, zero)), gRePos)
+        neg.NewStore(one, firstp)
+        neg.NewBr(h)
+
+        var c = h.NewCall(reAt, zero)
+        h.NewCondBr(h.NewICmp(reEQ, c, zero), unterm, h2)
+        h2.NewCondBr(h2.NewAnd(h2.NewICmp(reEQ, c, reK(93)),
+                               h2.NewICmp(reEQ, h2.NewLoad(i32, firstp), zero)), close, item)
+        item.NewStore(zero, firstp)
+        item.NewCondBr(item.NewAnd(item.NewICmp(reEQ, c, reK(91)),
+                                   item.NewICmp(reEQ, item.NewCall(reAt, one), reK(58))), pcls, ord)
+
+        reAdv(pcls, 2)
+        var cid = pcls.NewCall(reClsName)
+        var pcls2 = f.NewBlock("rbkpcls2")
+        pcls.NewCondBr(pcls.NewICmp(reEQ, cid, zero), badcls, pcls2)
+        var jp = e.NewAlloca(i32)
+        var pafter = reFor(f, "rbkcl", pcls2, jp, zero, reK(256), function(b, j) {
+            var yes = f.NewBlock("rbkcly")
+            var nx = f.NewBlock("rbkcln")
+            b.NewCondBr(b.NewICmp(reNE, b.NewCall(reCtype, [cid, j]), zero), yes, nx)
+            yes.NewCall(reSetBit, [k, j])
+            yes.NewBr(nx)
+            return nx
+        })
+        pafter.NewBr(h)
+
+        reAdv(ord, 1)
+        var nxt = ord.NewCall(reAt, zero)
+        var nxt2 = ord.NewCall(reAt, one)
+        ord.NewCondBr(ord.NewAnd(ord.NewICmp(reEQ, nxt, reK(45)),
+                                 ord.NewAnd(ord.NewICmp(reNE, nxt2, reK(93)),
+                                            ord.NewICmp(reNE, nxt2, zero))), rng, sgl)
+        reAdv(rng, 2)
+        var rng2 = f.NewBlock("rbkrng2")
+        rng.NewCondBr(rng.NewICmp(reSGT, c, nxt2), badrng, rng2)
+        var rp = e.NewAlloca(i32)
+        var rafter = reFor(f, "rbkr", rng2, rp, c, rng2.NewAdd(nxt2, one), function(b, j) {
+            b.NewCall(reSetBit, [k, j])
+            return b
+        })
+        rafter.NewBr(h)
+        sgl.NewCall(reSetBit, [k, c])
+        sgl.NewBr(h)
+
+        var close2 = f.NewBlock("rbkclose2")
+        reAdv(close, 1)
+        close.NewCondBr(close.NewICmp(reNE, close.NewLoad(i32, negp), zero), doneg, close2)
+        doneg.NewCall(reNegCls, k)
+        doneg.NewBr(close2)
+        close2.NewCall(reEmit, [reK(OP_CLASS), k, zero])
+        close2.NewRet(zero)
+
+        unterm.NewStore(reK(2), gReBad)
+        unterm.NewRet(zero)
+        badcls.NewStore(reK(9), gReBad)
+        badcls.NewRet(zero)
+        badrng.NewStore(reK(7), gReBad)
+        badrng.NewRet(zero)
+    })()
+
+    // i32 re_copy(i32 from, i32 to): append a copy of instructions [from,to), relocating the
+    // jump targets that point INSIDE the fragment (including its one-past-the-end label).
+    // A fragment is self-contained by construction, so no other target can occur. SAVE and
+    // PROG operands are slot ids, not pcs, and are deliberately left alone - copies of one
+    // loop body share a guard slot, which is correct because MARK saves and restores it.
+    var reCopy = m.NewFunc("re_copy", i32,
+        [llvm.ir.NewParam("cpfrom", i32), llvm.ir.NewParam("cpto", i32)])
+    ;(function() {
+        var f = reCopy
+        var from = f.Params[0], to = f.Params[1]
+        var e = f.NewBlock("rcpent")
+        var ip = e.NewAlloca(i32)
+        var delta = e.NewSub(e.NewLoad(i32, gRePc), from)
+        var x = reForL(f, "rcp", e, ip, from, to, function(b, i) {
+            var op = b.NewCall(reGet, [i, zero])
+            var vx = b.NewCall(reGet, [i, one])
+            var vy = b.NewCall(reGet, [i, reK(2)])
+            var isJ = b.NewOr(b.NewICmp(reEQ, op, reK(OP_JMP)), b.NewICmp(reEQ, op, reK(OP_SPLIT)))
+            var xin = b.NewAnd(b.NewICmp(reSGE, vx, from), b.NewICmp(reSLE, vx, to))
+            var yin = b.NewAnd(b.NewICmp(reSGE, vy, from), b.NewICmp(reSLE, vy, to))
+            var nx = b.NewSelect(b.NewAnd(isJ, xin), b.NewAdd(vx, delta), vx)
+            var ny = b.NewSelect(b.NewAnd(b.NewICmp(reEQ, op, reK(OP_SPLIT)), yin),
+                                 b.NewAdd(vy, delta), vy)
+            b.NewCall(reEmit, [op, nx, ny])
+            return b
+        })
+        x.NewRet(zero)
+    })()
+
+    // i32 re_atom(): one ERE atom.
+    ;(function() {
+        var f = reAtom
+        var e = f.NewBlock("aament")
+        var c = e.NewCall(reAt, zero)
+        function isc(v) { return e.NewICmp(reEQ, c, reK(v)) }
+        var bGrp = f.NewBlock("aamgrp"), bDot = f.NewBlock("aamdot")
+        var bBol = f.NewBlock("aambol"), bEol = f.NewBlock("aameol")
+        var bBrk = f.NewBlock("aambrk"), bEsc = f.NewBlock("aamesc")
+        var bQ = f.NewBlock("aamq"), bLit = f.NewBlock("aamlit")
+        var nb = e
+        var an = 0
+        function chain(cond, tgt) {
+            an = an + 1
+            var nx = f.NewBlock("aamn" + an)
+            nb.NewCondBr(cond, tgt, nx)
+            nb = nx
+        }
+        chain(isc(40), bGrp)   // (
+        chain(isc(46), bDot)   // .
+        chain(isc(94), bBol)   // ^
+        chain(isc(36), bEol)   // $
+        chain(isc(91), bBrk)   // [
+        chain(isc(92), bEsc)   // backslash
+        chain(e.NewOr(e.NewOr(isc(42), isc(43)), isc(63)), bQ)  // * + ? with nothing to repeat
+        nb.NewBr(bLit)
+
+        // A group numbers itself on its OPENING paren, which is what bash reports, so the
+        // index is taken before re_alt can nest another one. Past RE_NCAP/2 groups the
+        // brackets are dropped but the group is still COUNTED, matching the call site's
+        // "true pair count even when it overflows caps".
+        reAdv(bGrp, 1)
+        var gn = bGrp.NewAdd(bGrp.NewLoad(i32, gReNg), one)
+        bGrp.NewStore(gn, gReNg)
+        var fits = bGrp.NewICmp(reSLT, bGrp.NewAdd(bGrp.NewMul(gn, reK(2)), one), reK(RE_NCAP))
+        var gs = f.NewBlock("aamgs"), gs2 = f.NewBlock("aamgs2")
+        bGrp.NewCondBr(fits, gs, gs2)
+        gs.NewCall(reEmit, [reK(OP_SAVE), gs.NewMul(gn, reK(2)), zero])
+        gs.NewBr(gs2)
+        gs2.NewStore(gs2.NewAdd(gs2.NewLoad(i32, gReDepth), one), gReDepth)
+        gs2.NewCall(reAlt)
+        gs2.NewStore(gs2.NewSub(gs2.NewLoad(i32, gReDepth), one), gReDepth)
+        var gclose = f.NewBlock("aamgcl"), gbad = f.NewBlock("aamgbad")
+        var gdead = f.NewBlock("aamgdead"), glive = f.NewBlock("aamglive")
+        gs2.NewCondBr(gs2.NewICmp(reNE, gs2.NewLoad(i32, gReBad), zero), gdead, glive)
+        gdead.NewRet(zero)
+        glive.NewCondBr(glive.NewICmp(reEQ, glive.NewCall(reAt, zero), reK(41)), gclose, gbad)
+        gbad.NewStore(one, gReBad)   // Unmatched ( or \(
+        gbad.NewRet(zero)
+        reAdv(gclose, 1)
+        var ge = f.NewBlock("aamge"), ge2 = f.NewBlock("aamge2")
+        gclose.NewCondBr(fits, ge, ge2)
+        ge.NewCall(reEmit, [reK(OP_SAVE), ge.NewAdd(ge.NewMul(gn, reK(2)), one), zero])
+        ge.NewBr(ge2)
+        ge2.NewRet(zero)
+
+        reAdv(bDot, 1); bDot.NewCall(reEmit, [reK(OP_ANY), zero, zero]); bDot.NewRet(zero)
+        // ^ and $ are anchors ANYWHERE in an ERE, not only at the ends: bash 5.3 says
+        // [[ "a^b" =~ a^b ]] is false.
+        reAdv(bBol, 1); bBol.NewCall(reEmit, [reK(OP_BOL), zero, zero]); bBol.NewRet(zero)
+        reAdv(bEol, 1); bEol.NewCall(reEmit, [reK(OP_EOL), zero, zero]); bEol.NewRet(zero)
+        bBrk.NewCall(reBracket); bBrk.NewRet(zero)
+
+        var ec = bEsc.NewCall(reAt, one)
+        var etr = f.NewBlock("aametr"), eok = f.NewBlock("aameok")
+        bEsc.NewCondBr(bEsc.NewICmp(reEQ, ec, zero), etr, eok)
+        etr.NewStore(reK(6), gReBad)  // trailing backslash
+        etr.NewRet(zero)
+        reAdv(eok, 2)
+        eok.NewCall(reEmit, [reK(OP_CHAR), eok.NewCall(reFold1, ec), zero])
+        eok.NewRet(zero)
+
+        bQ.NewStore(reK(5), gReBad)   // Invalid preceding regular expression
+        bQ.NewRet(zero)
+
+        reAdv(bLit, 1)
+        bLit.NewCall(reEmit, [reK(OP_CHAR), bLit.NewCall(reFold1, c), zero])
+        bLit.NewRet(zero)
+    })()
+
+    // i32 re_rep(): an atom plus its quantifier. TWO slots are reserved ahead of the atom -
+    // one for the quantifier's SPLIT/JMP and one for the loop's empty-iteration MARK - so
+    // neither has to be inserted in front of code that is already emitted.
+    ;(function() {
+        var f = reRep
+        var e = f.NewBlock("rpent")
+        var ip = e.NewAlloca(i32), jp = e.NewAlloca(i32)
+        var endp = e.NewAlloca(i32)
+        var emptyp = e.NewAlloca(i32), infp = e.NewAlloca(i32), anyp = e.NewAlloca(i32)
+        var mp = e.NewAlloca(i32), np = e.NewAlloca(i32)
+        e.NewStore(zero, emptyp); e.NewStore(zero, infp); e.NewStore(zero, anyp)
+        e.NewStore(reK(-1), endp)
+        var hole1 = e.NewCall(reEmit, [reK(OP_JMP), zero, zero])
+        var hole2 = e.NewCall(reEmit, [reK(OP_JMP), zero, zero])
+        var astart = e.NewLoad(i32, gRePc)
+        e.NewCall(reAtom)
+        var aend = e.NewLoad(i32, gRePc)
+        var bad0 = f.NewBlock("rpbad"), q = f.NewBlock("rpq")
+        e.NewCondBr(e.NewICmp(reNE, e.NewLoad(i32, gReBad), zero), bad0, q)
+        bad0.NewRet(zero)
+
+        // "{" opens an interval only when a DIGIT follows; bash 5.3 takes "a{b" and "a{"
+        // as a literal brace but rejects "a{1" outright.
+        var qc = q.NewCall(reAt, zero)
+        var qd = q.NewCall(reAt, one)
+        var iv = f.NewBlock("rpiv"), sh = f.NewBlock("rpsh")
+        q.NewCondBr(q.NewAnd(q.NewICmp(reEQ, qc, reK(123)),
+                             q.NewAnd(q.NewICmp(reSGE, qd, reK(48)),
+                                      q.NewICmp(reSLE, qd, reK(57)))), iv, sh)
+
+        // ---- simple quantifiers. Exactly ONE is allowed; a second is a compile error.
+        var sstar = f.NewBlock("rpsstar"), splus = f.NewBlock("rpsplus")
+        var sopt = f.NewBlock("rpsopt"), snoq = f.NewBlock("rpsnoq")
+        var sdone = f.NewBlock("rpsdone")
+        var sq = f.NewBlock("rpsq"), badq = f.NewBlock("rpbadq")
+        var sc = sh.NewCall(reAt, zero)
+        var s1 = f.NewBlock("rpsh1"), s2 = f.NewBlock("rpsh2"), s3 = f.NewBlock("rpsh3")
+        var shx = f.NewBlock("rpshx"), shy = f.NewBlock("rpshy")
+        sh.NewCondBr(sh.NewICmp(reEQ, sc, reK(42)), s1, shx)
+        reAdv(s1, 1); s1.NewStore(one, emptyp); s1.NewStore(one, infp); s1.NewStore(one, anyp)
+        s1.NewBr(sq)
+        shx.NewCondBr(shx.NewICmp(reEQ, sc, reK(43)), s2, shy)
+        reAdv(s2, 1); s2.NewStore(one, infp); s2.NewStore(one, anyp)
+        s2.NewBr(sq)
+        shy.NewCondBr(shy.NewICmp(reEQ, sc, reK(63)), s3, sdone)
+        reAdv(s3, 1); s3.NewStore(one, emptyp); s3.NewStore(one, anyp)
+        s3.NewBr(sq)
+        sq.NewCondBr(sq.NewICmp(reNE, sq.NewCall(reIsq), zero), badq, sdone)
+        badq.NewStore(reK(5), gReBad)
+        badq.NewRet(zero)
+
+        var sd1 = f.NewBlock("rpsd1"), sd2 = f.NewBlock("rpsd2")
+        sdone.NewCondBr(sdone.NewICmp(reEQ, sdone.NewLoad(i32, anyp), zero), snoq, sd1)
+        sd1.NewCondBr(sd1.NewICmp(reEQ, sd1.NewLoad(i32, infp), zero), sopt, sd2)
+        sd2.NewCondBr(sd2.NewICmp(reEQ, sd2.NewLoad(i32, emptyp), zero), splus, sstar)
+
+        reSetF(snoq, hole1, 1, hole2)
+        reSetF(snoq, hole2, 1, astart)
+        snoq.NewRet(zero)
+
+        reSetF(sopt, hole1, 0, reK(OP_SPLIT))
+        reSetF(sopt, hole1, 1, hole2)
+        reSetF(sopt, hole1, 2, sopt.NewLoad(i32, gRePc))
+        reSetF(sopt, hole2, 1, astart)
+        sopt.NewRet(zero)
+
+        var pt = splus.NewCall(reMark)
+        reSetF(splus, hole1, 1, hole2)
+        reSetF(splus, hole2, 0, reK(OP_SAVE))
+        reSetF(splus, hole2, 1, pt)
+        splus.NewCall(reEmit, [reK(OP_PROG), pt, zero])
+        var ps = splus.NewCall(reEmit, [reK(OP_SPLIT), hole2, zero])
+        reSetF(splus, ps, 2, splus.NewLoad(i32, gRePc))
+        splus.NewRet(zero)
+
+        var st = sstar.NewCall(reMark)
+        reSetF(sstar, hole2, 0, reK(OP_SAVE))
+        reSetF(sstar, hole2, 1, st)
+        sstar.NewCall(reEmit, [reK(OP_PROG), st, zero])
+        sstar.NewCall(reEmit, [reK(OP_JMP), hole1, zero])
+        reSetF(sstar, hole1, 0, reK(OP_SPLIT))
+        reSetF(sstar, hole1, 1, hole2)
+        reSetF(sstar, hole1, 2, sstar.NewLoad(i32, gRePc))
+        sstar.NewRet(zero)
+
+        // ---- {m}, {m,}, {m,n}
+        reAdv(iv, 1)
+        var mv = iv.NewCall(reNum)
+        iv.NewStore(mv, mp)
+        var ivc = f.NewBlock("rpivc"), ivn = f.NewBlock("rpivn"), ivm = f.NewBlock("rpivm")
+        iv.NewCondBr(iv.NewICmp(reEQ, iv.NewCall(reAt, zero), reK(44)), ivc, ivm)
+        ivm.NewStore(mv, np)
+        ivm.NewBr(ivn)
+        reAdv(ivc, 1)
+        var ivinf = f.NewBlock("rpivinf"), ivnum = f.NewBlock("rpivnum")
+        ivc.NewCondBr(ivc.NewICmp(reEQ, ivc.NewCall(reAt, zero), reK(125)), ivinf, ivnum)
+        ivinf.NewStore(reK(-1), np)
+        ivinf.NewBr(ivn)
+        ivnum.NewStore(ivnum.NewCall(reNum), np)
+        ivnum.NewBr(ivn)
+
+        var ivbad = f.NewBlock("rpivbad"), ivok = f.NewBlock("rpivok")
+        ivn.NewCondBr(ivn.NewICmp(reNE, ivn.NewCall(reAt, zero), reK(125)), ivbad, ivok)
+        ivbad.NewStore(reK(3), gReBad)
+        ivbad.NewRet(zero)
+        reAdv(ivok, 1)
+        var nv = ivok.NewLoad(i32, np), mv2 = ivok.NewLoad(i32, mp)
+        var ivok1 = f.NewBlock("rpivok1"), ivok2 = f.NewBlock("rpivok2")
+        ivok.NewCondBr(ivok.NewAnd(ivok.NewICmp(reSGE, nv, zero),
+                                   ivok.NewICmp(reSLT, nv, mv2)), ivbad, ivok1)
+        // "a{2}{3}" is status 2 in bash 5.3, exactly like "a**".
+        ivok1.NewCondBr(ivok1.NewICmp(reNE, ivok1.NewCall(reIsq), zero), badq, ivok2)
+
+        var ivZero = f.NewBlock("rpivzero"), ivInf = f.NewBlock("rpivinf2")
+        var ivFin = f.NewBlock("rpivfin"), ivz2 = f.NewBlock("rpivz2")
+        ivok2.NewCondBr(ivok2.NewAnd(ivok2.NewICmp(reEQ, nv, zero),
+                                     ivok2.NewICmp(reEQ, mv2, zero)), ivZero, ivz2)
+        // {0}: the atom never runs at all - jump straight past it.
+        reSetF(ivZero, hole1, 1, aend)
+        ivZero.NewRet(zero)
+        ivz2.NewCondBr(ivz2.NewICmp(reSLT, nv, zero), ivInf, ivFin)
+
+        // {m,}: m mandatory copies, then a starred one.
+        var ii0 = f.NewBlock("rpii0"), ii1 = f.NewBlock("rpii1")
+        ivInf.NewCondBr(ivInf.NewICmp(reEQ, mv2, zero), ii0, ii1)
+        var it0 = ii0.NewCall(reMark)
+        reSetF(ii0, hole2, 0, reK(OP_SAVE))
+        reSetF(ii0, hole2, 1, it0)
+        ii0.NewCall(reEmit, [reK(OP_PROG), it0, zero])
+        ii0.NewCall(reEmit, [reK(OP_JMP), hole1, zero])
+        reSetF(ii0, hole1, 0, reK(OP_SPLIT))
+        reSetF(ii0, hole1, 1, hole2)
+        reSetF(ii0, hole1, 2, ii0.NewLoad(i32, gRePc))
+        ii0.NewRet(zero)
+
+        reSetF(ii1, hole1, 1, hole2)
+        reSetF(ii1, hole2, 1, astart)
+        var ii1x = reForL(f, "rpii1c", ii1, ip, one, mv2, function(b, i) {
+            b.NewCall(reCopy, [astart, aend])
+            return b
+        })
+        var isp = ii1x.NewCall(reEmit, [reK(OP_SPLIT), zero, zero])
+        var it1 = ii1x.NewCall(reMark)
+        var imk = ii1x.NewCall(reEmit, [reK(OP_SAVE), it1, zero])
+        ii1x.NewCall(reCopy, [astart, aend])
+        ii1x.NewCall(reEmit, [reK(OP_PROG), it1, zero])
+        ii1x.NewCall(reEmit, [reK(OP_JMP), isp, zero])
+        reSetF(ii1x, isp, 1, imk)
+        reSetF(ii1x, isp, 2, ii1x.NewLoad(i32, gRePc))
+        ii1x.NewRet(zero)
+
+        // {m,n}: n-m of the copies are optional. Each optional SPLIT parks its END target
+        // in word 2 as a chain link and the walk at the bottom fills them all in.
+        var if0 = f.NewBlock("rpif0"), if1 = f.NewBlock("rpif1"), ifend = f.NewBlock("rpifend")
+        ivFin.NewCondBr(ivFin.NewICmp(reEQ, mv2, zero), if0, if1)
+
+        reSetF(if0, hole1, 0, reK(OP_SPLIT))
+        reSetF(if0, hole1, 1, hole2)
+        reSetF(if0, hole1, 2, if0.NewLoad(i32, endp))
+        if0.NewStore(hole1, endp)
+        reSetF(if0, hole2, 1, astart)
+        var if0x = reForL(f, "rpif0c", if0, ip, one, nv, function(b, i) {
+            var s = b.NewCall(reEmit, [reK(OP_SPLIT), zero, b.NewLoad(i32, endp)])
+            b.NewStore(s, endp)
+            var cs = b.NewLoad(i32, gRePc)
+            b.NewCall(reCopy, [astart, aend])
+            reSetF(b, s, 1, cs)
+            return b
+        })
+        if0x.NewBr(ifend)
+
+        reSetF(if1, hole1, 1, hole2)
+        reSetF(if1, hole2, 1, astart)
+        var if1a = reForL(f, "rpif1a", if1, ip, one, mv2, function(b, i) {
+            b.NewCall(reCopy, [astart, aend])
+            return b
+        })
+        var if1x = reForL(f, "rpif1b", if1a, jp, mv2, nv, function(b, i) {
+            var s = b.NewCall(reEmit, [reK(OP_SPLIT), zero, b.NewLoad(i32, endp)])
+            b.NewStore(s, endp)
+            var cs = b.NewLoad(i32, gRePc)
+            b.NewCall(reCopy, [astart, aend])
+            reSetF(b, s, 1, cs)
+            return b
+        })
+        if1x.NewBr(ifend)
+
+        var ifh = f.NewBlock("rpifh"), ifb = f.NewBlock("rpifb"), ifx = f.NewBlock("rpifx")
+        var endv = ifend.NewLoad(i32, gRePc)
+        ifend.NewBr(ifh)
+        var pv = ifh.NewLoad(i32, endp)
+        ifh.NewCondBr(ifh.NewICmp(reSGE, pv, zero), ifb, ifx)
+        ifb.NewStore(reGetF(ifb, pv, 2), endp)
+        reSetF(ifb, pv, 2, endv)
+        ifb.NewBr(ifh)
+        ifx.NewRet(zero)
+    })()
+
+    // i32 re_cat(): a run of quantified atoms; answers how many there were, so re_alt can
+    // reject an EMPTY branch - bash 5.3 rejects "(a|)", "|a" and "" alike, status 2.
+    ;(function() {
+        var f = reCat
+        var e = f.NewBlock("rctent")
+        var h = f.NewBlock("rcth")
+        var bd = f.NewBlock("rctb")
+        var x = f.NewBlock("rctx")
+        var np = e.NewAlloca(i32)
+        e.NewStore(zero, np)
+        e.NewBr(h)
+        var c = h.NewCall(reAt, zero)
+        // A ")" only closes a group when one is open; at the top level bash takes it as a
+        // literal - [[ "a)b" =~ ")" ]] matches, it is not "unmatched )".
+        var isRp = h.NewAnd(h.NewICmp(reEQ, c, reK(41)),
+                            h.NewICmp(reSGT, h.NewLoad(i32, gReDepth), zero))
+        var stop = h.NewOr(h.NewOr(h.NewICmp(reEQ, c, zero), h.NewICmp(reEQ, c, reK(124))), isRp)
+        h.NewCondBr(h.NewOr(stop, h.NewICmp(reNE, h.NewLoad(i32, gReBad), zero)), x, bd)
+        bd.NewCall(reRep)
+        bd.NewStore(bd.NewAdd(bd.NewLoad(i32, np), one), np)
+        bd.NewBr(h)
+        x.NewRet(x.NewLoad(i32, np))
+    })()
+
+    // i32 re_alt(): branch | branch | ...
+    ;(function() {
+        var f = reAlt
+        var e = f.NewBlock("ralent")
+        var lp = f.NewBlock("rallp")
+        var lp1 = f.NewBlock("rallp1"), lp2 = f.NewBlock("rallp2")
+        var mt = f.NewBlock("ralmt")
+        var more = f.NewBlock("ralmore"), last = f.NewBlock("rallast")
+        var ph = f.NewBlock("ralph"), pb = f.NewBlock("ralpb"), x = f.NewBlock("ralx")
+        var pendp = e.NewAlloca(i32)
+        e.NewStore(reK(-1), pendp)
+        e.NewBr(lp)
+
+        var sp = lp.NewCall(reEmit, [reK(OP_JMP), zero, zero])
+        var body = lp.NewLoad(i32, gRePc)
+        var n = lp.NewCall(reCat)
+        lp.NewCondBr(lp.NewAnd(lp.NewICmp(reEQ, n, zero),
+                               lp.NewICmp(reEQ, lp.NewLoad(i32, gReBad), zero)), mt, lp1)
+        mt.NewStore(reK(8), gReBad)   // empty (sub)expression
+        mt.NewBr(lp1)
+        lp1.NewCondBr(lp1.NewICmp(reNE, lp1.NewLoad(i32, gReBad), zero), last, lp2)
+        lp2.NewCondBr(lp2.NewICmp(reEQ, lp2.NewCall(reAt, zero), reK(124)), more, last)
+
+        reAdv(more, 1)
+        var j = more.NewCall(reEmit, [reK(OP_JMP), zero, more.NewLoad(i32, pendp)])
+        more.NewStore(j, pendp)
+        reSetF(more, sp, 0, reK(OP_SPLIT))
+        reSetF(more, sp, 1, body)
+        reSetF(more, sp, 2, more.NewLoad(i32, gRePc))
+        more.NewBr(lp)
+
+        reSetF(last, sp, 1, body)
+        var endv = last.NewLoad(i32, gRePc)
+        last.NewBr(ph)
+        var pv = ph.NewLoad(i32, pendp)
+        ph.NewCondBr(ph.NewICmp(reSGE, pv, zero), pb, x)
+        pb.NewStore(reGetF(pb, pv, 2), pendp)
+        reSetF(pb, pv, 1, endv)
+        pb.NewBr(ph)
+        x.NewRet(zero)
+    })()
+
+    // i32 re_run(i32 pc, i32 sp): the backtracking VM. 1 match, 0 fail, -2 step cap.
+    ;(function() {
+        var f = reRun
+        var e = f.NewBlock("rvent")
+        var h = f.NewBlock("rvh")
+        var over = f.NewBlock("rvover"), go = f.NewBlock("rvgo")
+        var fail = f.NewBlock("rvfail"), hit = f.NewBlock("rvhit")
+        var pcp = e.NewAlloca(i32), spp = e.NewAlloca(i32)
+        e.NewStore(f.Params[0], pcp)
+        e.NewStore(f.Params[1], spp)
+        e.NewBr(h)
+        var st = h.NewLoad(i32, gReSteps)
+        h.NewCondBr(h.NewICmp(reSGE, st, reK(RE_STEPS)), over, go)
+        over.NewRet(reK(-2))
+        go.NewStore(go.NewAdd(st, one), gReSteps)
+        var pc = go.NewLoad(i32, pcp), sp = go.NewLoad(i32, spp)
+        var op = go.NewCall(reGet, [pc, zero])
+        var vx = go.NewCall(reGet, [pc, one])
+        var vy = go.NewCall(reGet, [pc, reK(2)])
+        var slen = go.NewLoad(i32, gReSlen)
+        var subj = go.NewLoad(i8ptr, gReSubj)
+        var atEnd = go.NewICmp(reSGE, sp, slen)
+        var pc1 = go.NewAdd(pc, one), sp1 = go.NewAdd(sp, one)
+        fail.NewRet(zero)
+        hit.NewRet(one)
+
+        var bChar = f.NewBlock("rvchar"), bAny = f.NewBlock("rvany")
+        var bCls = f.NewBlock("rvcls"), bSplit = f.NewBlock("rvsplit")
+        var bJmp = f.NewBlock("rvjmp"), bSave = f.NewBlock("rvsave")
+        var bBol = f.NewBlock("rvbol"), bEol = f.NewBlock("rveol")
+        var bProg = f.NewBlock("rvprog")
+        var nb = go
+        var vn = 0
+        function vchain(cond, tgt) {
+            vn = vn + 1
+            var nx = f.NewBlock("rvn" + vn)
+            nb.NewCondBr(cond, tgt, nx)
+            nb = nx
+        }
+        function isop(v) { return go.NewICmp(reEQ, op, reK(v)) }
+        vchain(isop(OP_CHAR), bChar)
+        vchain(isop(OP_ANY), bAny)
+        vchain(isop(OP_CLASS), bCls)
+        vchain(isop(OP_SPLIT), bSplit)
+        vchain(isop(OP_JMP), bJmp)
+        vchain(isop(OP_SAVE), bSave)
+        vchain(isop(OP_MATCH), hit)
+        vchain(isop(OP_BOL), bBol)
+        vchain(isop(OP_EOL), bEol)
+        vchain(isop(OP_PROG), bProg)
+        nb.NewBr(fail)
+
+        // Every byte read is fenced by sp < slen, so no path loads the NUL terminator or
+        // anything after it.
+        var bc2 = f.NewBlock("rvchar2")
+        bChar.NewCondBr(atEnd, fail, bc2)
+        var cb = bc2.NewCall(reFold1,
+                   bc2.NewZExt(bc2.NewLoad(i8, bc2.NewGetElementPtr(i8, subj, sp)), i32))
+        var bc3 = f.NewBlock("rvchar3")
+        bc2.NewCondBr(bc2.NewICmp(reNE, cb, vx), fail, bc3)
+        bc3.NewStore(pc1, pcp); bc3.NewStore(sp1, spp); bc3.NewBr(h)
+
+        var ba2 = f.NewBlock("rvany2")
+        bAny.NewCondBr(atEnd, fail, ba2)
+        ba2.NewStore(pc1, pcp); ba2.NewStore(sp1, spp); ba2.NewBr(h)
+
+        var bl2 = f.NewBlock("rvcls2"), bl3 = f.NewBlock("rvcls3")
+        bCls.NewCondBr(atEnd, fail, bl2)
+        var lb = bl2.NewCall(reFold1,
+                   bl2.NewZExt(bl2.NewLoad(i8, bl2.NewGetElementPtr(i8, subj, sp)), i32))
+        var byt = bl2.NewZExt(bl2.NewLoad(i8, bl2.NewGetElementPtr(reClsTy, gReCls, zero,
+                    bl2.NewAdd(bl2.NewMul(vx, reK(32)), bl2.NewSDiv(lb, reK(8))))), i32)
+        var got = bl2.NewAnd(bl2.NewLShr(byt, bl2.NewSRem(lb, reK(8))), one)
+        bl2.NewCondBr(bl2.NewICmp(reEQ, got, zero), fail, bl3)
+        bl3.NewStore(pc1, pcp); bl3.NewStore(sp1, spp); bl3.NewBr(h)
+
+        // The IR call stack IS the backtracking stack, exactly as rt_glob's "*" does it.
+        var sr = bSplit.NewCall(reRun, [vx, sp])
+        var sp2 = f.NewBlock("rvsplit2"), sret = f.NewBlock("rvsret")
+        bSplit.NewCondBr(bSplit.NewICmp(reNE, sr, zero), sret, sp2)
+        sret.NewRet(sr)
+        sp2.NewStore(vy, pcp); sp2.NewBr(h)
+
+        bJmp.NewStore(vx, pcp); bJmp.NewBr(h)
+
+        // A capture (or a loop's empty-iteration mark) is UNDONE when the branch that set
+        // it fails, so a dead alternative cannot leave an offset behind.
+        var slp = bSave.NewGetElementPtr(reSlotTy, gReSlot, zero, vx)
+        var old = bSave.NewLoad(i32, slp)
+        bSave.NewStore(sp, slp)
+        var vr = bSave.NewCall(reRun, [pc1, sp])
+        var und = f.NewBlock("rvundo"), vrt = f.NewBlock("rvsavret")
+        bSave.NewCondBr(bSave.NewICmp(reEQ, vr, zero), und, vrt)
+        und.NewStore(old, slp)
+        und.NewBr(vrt)
+        vrt.NewRet(vr)
+
+        var pg2 = f.NewBlock("rvprog2")
+        bProg.NewCondBr(bProg.NewICmp(reEQ, sp,
+                          bProg.NewLoad(i32, bProg.NewGetElementPtr(reSlotTy, gReSlot, zero, vx))),
+                        fail, pg2)
+        pg2.NewStore(pc1, pcp); pg2.NewBr(h)
+
+        var bb2 = f.NewBlock("rvbol2")
+        bBol.NewCondBr(bBol.NewICmp(reNE, sp, zero), fail, bb2)
+        bb2.NewStore(pc1, pcp); bb2.NewBr(h)
+        var be2 = f.NewBlock("rveol2")
+        bEol.NewCondBr(bEol.NewICmp(reNE, sp, slen), fail, be2)
+        be2.NewStore(pc1, pcp); be2.NewBr(h)
+    })()
+
+    // ---- the two entry points ----
+    ;(function() {
+        var f = rtRegexSearch
+        var pat = f.Params[0], subj = f.Params[1], flg = f.Params[2]
+        var caps = f.Params[3], ncaps = f.Params[4]
+        var e = f.NewBlock("rxent")
+        var ip = e.NewAlloca(i32), jp = e.NewAlloca(i32), kp = e.NewAlloca(i32)
+        var startp = e.NewAlloca(i32)
+        // Pre-fill with -1 so no caller can read a stale offset, whatever it does with the
+        // answer - the contract the Go extern documented and this must keep.
+        var hasCaps = e.NewICmp(reNE, caps, llvm.constant.NewNull(i32ptr))
+        var cl0 = f.NewBlock("rxcl0"), cl1 = f.NewBlock("rxcl1")
+        e.NewCondBr(hasCaps, cl0, cl1)
+        var cl0x = reFor(f, "rxcl", cl0, ip, zero, ncaps, function(b, i) {
+            b.NewStore(reK(-1), b.NewGetElementPtr(i32, caps, i))
+            return b
+        })
+        cl0x.NewBr(cl1)
+
+        // flags: only "i" is meaningful to bash's =~ (shopt -s nocasematch); a null pointer
+        // is "no flags" and must not be dereferenced.
+        cl1.NewStore(zero, gReFold)
+        var fl0 = f.NewBlock("rxfl0"), fl1 = f.NewBlock("rxfl1")
+        cl1.NewCondBr(cl1.NewICmp(reNE, flg, llvm.constant.NewNull(i8ptr)), fl0, fl1)
+        var flh = f.NewBlock("rxflh"), flb = f.NewBlock("rxflb"), flset = f.NewBlock("rxflset")
+        fl0.NewStore(zero, jp)
+        fl0.NewBr(flh)
+        var fc = flh.NewZExt(flh.NewLoad(i8, flh.NewGetElementPtr(i8, flg, flh.NewLoad(i32, jp))), i32)
+        flh.NewCondBr(flh.NewICmp(reEQ, fc, zero), fl1, flb)
+        var flb2 = f.NewBlock("rxflb2")
+        flb.NewCondBr(flb.NewICmp(reEQ, fc, reK(105)), flset, flb2)
+        flset.NewStore(one, gReFold)
+        flset.NewBr(flb2)
+        flb2.NewStore(flb2.NewAdd(flb2.NewLoad(i32, jp), one), jp)
+        flb2.NewBr(flh)
+
+        // ---- compile
+        fl1.NewStore(fl1.NewSelect(fl1.NewICmp(reEQ, pat, llvm.constant.NewNull(i8ptr)),
+                                   emptyPtr(fl1), pat), gRePat)
+        fl1.NewStore(zero, gRePos)
+        fl1.NewStore(zero, gRePc)
+        fl1.NewStore(zero, gReNg)
+        fl1.NewStore(zero, gReNcls)
+        fl1.NewStore(zero, gReNmark)
+        fl1.NewStore(zero, gReBad)
+        fl1.NewStore(zero, gReDepth)
+        fl1.NewCall(reEmit, [reK(OP_SAVE), zero, zero])
+        fl1.NewCall(reAlt)
+        var cbad = f.NewBlock("rxcbad"), cok = f.NewBlock("rxcok")
+        fl1.NewCondBr(fl1.NewICmp(reNE, fl1.NewLoad(i32, gReBad), zero), cbad, cok)
+        var bad = cbad.NewLoad(i32, gReBad)
+        var msg = emptyPtr(cbad)
+        var t
+        for (t = 1; t < reErrText.length; t = t + 1) {
+            msg = cbad.NewSelect(cbad.NewICmp(reEQ, bad, reK(t)), gepStr(cbad, reErrText[t]), msg)
+        }
+        cbad.NewStore(msg, gReErr)
+        cbad.NewRet(reK(-1))
+
+        cok.NewStore(emptyPtr(cok), gReErr)
+        cok.NewCall(reEmit, [reK(OP_SAVE), one, zero])
+        cok.NewCall(reEmit, [reK(OP_MATCH), zero, zero])
+        var slen = cok.NewCall(rtStrlen, subj)
+        cok.NewStore(subj, gReSubj)
+        cok.NewStore(slen, gReSlen)
+        cok.NewStore(zero, gReSteps)
+        var pairs = cok.NewAdd(cok.NewLoad(i32, gReNg), one)
+
+        // ---- search: leftmost wins, so the start position is tried in order.
+        var sh = f.NewBlock("rxsh"), sb = f.NewBlock("rxsb"), nom = f.NewBlock("rxnom")
+        cok.NewStore(zero, startp)
+        cok.NewBr(sh)
+        var start = sh.NewLoad(i32, startp)
+        sh.NewCondBr(sh.NewICmp(reSLE, start, slen), sb, nom)
+        var sbx = reFor(f, "rxsl", sb, kp, zero, reK(RE_SLOTS), function(b, i) {
+            b.NewStore(reK(-1), b.NewGetElementPtr(reSlotTy, gReSlot, zero, i))
+            return b
+        })
+        var r = sbx.NewCall(reRun, [zero, start])
+        var lim = f.NewBlock("rxlim"), r2 = f.NewBlock("rxr2")
+        sbx.NewCondBr(sbx.NewICmp(reEQ, r, reK(-2)), lim, r2)
+        lim.NewRet(reK(-2))
+        var won = f.NewBlock("rxwon"), nxt = f.NewBlock("rxnxt")
+        r2.NewCondBr(r2.NewICmp(reEQ, r, one), won, nxt)
+        nxt.NewStore(nxt.NewAdd(start, one), startp)
+        nxt.NewBr(sh)
+        nom.NewRet(zero)
+
+        // The TRUE pair count is answered even when it exceeds the caps array, so
+        // ${#BASH_REMATCH[@]} stays exact and the entries past it read as empty.
+        var room = won.NewSDiv(ncaps, reK(2))
+        var lastp = won.NewSelect(won.NewICmp(reSLT, pairs, room), pairs, room)
+        var slots = won.NewSelect(hasCaps, won.NewMul(lastp, reK(2)), zero)
+        var wonx = reFor(f, "rxfill", won, jp, zero, slots, function(b, i) {
+            b.NewStore(b.NewLoad(i32, b.NewGetElementPtr(reSlotTy, gReSlot, zero, i)),
+                       b.NewGetElementPtr(i32, caps, i))
+            return b
+        })
+        wonx.NewRet(pairs)
+    })()
+
+    ;(function() {
+        var f = rtRegexError
+        var e = f.NewBlock("rxeent")
+        var nn = f.NewBlock("rxenn"), x = f.NewBlock("rxex")
+        var v = e.NewLoad(i8ptr, gReErr)
+        // Never a null: the caller concatenates this straight into a message, and reading
+        // byte 0 of address 0 is the documented trap our machine forgives and a real
+        // process does not.
+        e.NewCondBr(e.NewICmp(reEQ, v, llvm.constant.NewNull(i8ptr)), nn, x)
+        nn.NewRet(emptyPtr(nn))
+        x.NewRet(v)
+    })()
 
     // i8* rt_nounset(i8* v): under set -u, reading an unset variable raises the abort flag.
     var rtNounset = m.NewFunc("rt_nounset", i8ptr, llvm.ir.NewParam("v", i8ptr))
@@ -2790,7 +4313,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // ${...} : items are [{pname}, {pe}?, {op}?, {anchor}?, word objects / arithmetic thunks]
     function mkParamExp(items) {
-        var pe = "", name = "", op = "", anchor = ""
+        var pe = "", name = "", op = "", anchor = "", xf = ""
+        var lenp = false, indp = false
         var words = []     // word objects {fn, c}
         var ariths = []    // bare arithmetic thunks (the ${v:off:len} offsets)
         var wordT = null
@@ -2801,10 +4325,37 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (typeof it == "function") { ariths.push(it) }
             else if (it.hasIdx != undefined) { hasIdx = true }
             else if (it.fn != undefined) { words.push(it); wordT = it }
+            else if (it.lenp != undefined) { lenp = true }
+            else if (it.indp != undefined) { indp = true }
+            else if (it.xf != undefined) { xf = it.xf }
             else if (it.pe != undefined) { pe = it.pe }
             else if (it.pname != undefined) { name = it.pname }
             else if (it.op != undefined) { op = it.op }
             else if (it.anchor != undefined) { anchor = it.anchor }
+        }
+        // A BARE "#"/"!" prefix keeps the dedicated length / indirection paths (including
+        // their array forms ${#a[@]} and ${!a[@]}); combined with an operator it does not.
+        var bare = (op == "" && pe == "" && xf == "")
+        if (lenp && bare) { pe = "len" }
+        if (indp && bare) { pe = "ind" }
+        // The @-transforms. @U/@L/@u are rt_case, @Q/@K/@k are rt_shquote, @A is the
+        // assignment that would recreate the variable and @E decodes the $'...' escapes at
+        // run time. @a answers the attribute letters, which for this compiler is "a" for a
+        // name it saw declared as an associative array and empty otherwise. @P (prompt
+        // expansion) is NOT modelled: it answers the value unchanged, which is right for
+        // every value holding no backslash escape and wrong for one that does.
+        var xfIsArr = hasOwn(assocArrays, "$" + name)
+        var xfName = name
+        function applyXf(b, v) {
+            if (xf == "U") { return b.NewCall(rtCase, [v, one]) }
+            if (xf == "L") { return b.NewCall(rtCase, [v, llvm.constant.NewInt(i32, 3)]) }
+            if (xf == "u") { return b.NewCall(rtCase, [v, zero]) }
+            if (xf == "E") { return b.NewCall(rtAnsiC, v) }
+            if (xf == "P") { return v }
+            if (xf == "a") { return gepStr(b, xfIsArr ? "a" : "") }
+            var q = b.NewCall(rtShQuote, v)
+            if (xf == "A") { return b.NewCall(rtStrcat, [gepStr(b, xfName + "="), q]) }
+            return q
         }
         // NAME[SUBSCRIPT]: the first word is the subscript, the rest belong to the operator.
         if (hasIdx && words.length > 0) {
@@ -2889,14 +4440,58 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var star = b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 2))
                 var lst = b.NewCall(rtArrList, [nmOf(b), ifsFirstValue(b), b.NewZExt(star, i32), zero])
                 var one1 = b.NewCall(rtArrGet, [nmOf(b), keyOf(b, rs.v)])
-                return {b: b, v: b.NewSelect(whole, lst, one1)}
+                var sel = b.NewSelect(whole, lst, one1)
+                // ${a[i]@Q} and friends: the transform applies to the ELEMENT, exactly as
+                // it does to a scalar. Without this the array path silently dropped it.
+                if (xf != "") { return {b: b, v: applyXf(b, sel)} }
+                return {b: b, v: sel}
             }}
+        }
+        if (pe == "len") {
+            return {c: undefined, fn: function(b) {
+                // ${#v} counts CHARACTERS in bash (rt_strlen counts bytes).
+                return {b: b, v: b.NewCall(rtInt2str, b.NewCall(rtCharLen, varString(b, name)))}
+            }}
+        }
+        if (pe == "ind") {
+            return {c: undefined, fn: function(b) {
+                return {b: b, v: b.NewCall(rtGetByName, varString(b, name))}
+            }}
+        }
+        // ${#v OP arg} is a parse-time-legal, run-time-illegal combination in bash:
+        //     $ echo "${#x-default}"   ->  bash: ${#x-default}: bad substitution
+        // The shell dies; here that is the abort flag, the same one set -u raises.
+        if (lenp) {
+            return {c: undefined, fn: function(b) {
+                b.NewStore(one, gAbort)
+                return {b: b, v: emptyPtr(b)}
+            }}
+        }
+        // ${!ref OP arg}: the operator applies to the variable the indirection LANDED on, so
+        // every leaf below reads and writes through valOf/setOf instead of the fixed slot.
+        var indirect = indp
+        function valOf(b) {
+            if (indirect) { return b.NewCall(rtGetByName, varString(b, name)) }
+            return varString(b, name)
+        }
+        function setOf(b, v) {
+            if (indirect) { b.NewCall(rtSetByName, [varString(b, name), v]); return }
+            storeVar(b, name, v)
+        }
+        // The @-transforms. @U/@L/@u are rt_case, @Q/@K/@k are rt_shquote, @A is the
+        // assignment that would recreate the variable and @E decodes the $'...' escapes.
+        // @a answers the attribute letters, which for this compiler is "a" for a name it
+        // saw declared as an array and empty otherwise. @P (prompt expansion) is NOT
+        // modelled: it answers the value unchanged, which is right for every value that
+        // holds no backslash escape and wrong for one that does.
+        if (xf != "") {
+            return {c: undefined, fn: function(b) { return {b: b, v: applyXf(b, valOf(b))} }}
         }
         if (pe == "substr") {
             var offT = ariths[0]
             var lenT = (ariths.length > 1) ? ariths[1] : null
             return {c: undefined, fn: function(b) {
-                var v = varString(b, name)
+                var v = valOf(b)
                 var ro = offT(b)
                 b = ro.b
                 // Offsets and lengths of ${v:off:len} are in CHARACTERS in bash,
@@ -2925,7 +4520,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (pe == "%%") { smode = 3 }
             var patW = (words.length > 0) ? words[0] : null
             return {c: undefined, fn: function(b) {
-                var v = varString(b, name)
+                var v = valOf(b)
                 if (patW == null) { return {b: b, v: v} }
                 var rp = evalWord(b, patW)
                 b = rp.b
@@ -2938,7 +4533,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (pe == ",") { cmode = 2 }
             if (pe == ",,") { cmode = 3 }
             return {c: undefined, fn: function(b) {
-                return {b: b, v: b.NewCall(rtCase, [varString(b, name), llvm.constant.NewInt(i32, cmode)])}
+                return {b: b, v: b.NewCall(rtCase, [valOf(b), llvm.constant.NewInt(i32, cmode)])}
             }}
         }
         if (pe == "/" || pe == "//") {
@@ -2948,7 +4543,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var pW = (words.length > 0) ? words[0] : null
             var rW = (words.length > 1) ? words[1] : null
             return {c: undefined, fn: function(b) {
-                var v = varString(b, name)
+                var v = valOf(b)
                 if (pW == null) { return {b: b, v: v} }
                 var rp2 = evalWord(b, pW)
                 b = rp2.b
@@ -2957,22 +4552,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return {b: b, v: b.NewCall(rtReplace, [v, rp2.v, rep, llvm.constant.NewInt(i32, rmode)])}
             }}
         }
-        if (pe == "len") {
-            return {c: undefined, fn: function(b) {
-                // ${#v} counts CHARACTERS in bash (rt_strlen counts bytes).
-                return {b: b, v: b.NewCall(rtInt2str, b.NewCall(rtCharLen, varString(b, name)))}
-            }}
-        }
-        if (pe == "ind") {
-            return {c: undefined, fn: function(b) {
-                return {b: b, v: b.NewCall(rtGetByName, varString(b, name))}
-            }}
-        }
-        if (op == "") { return mkVarRef(name) }
+        if (op == "") { return {c: undefined, f: (name == "@"), fn: function(b) { return {b: b, v: valOf(b)} }} }
         var colon = (op.charAt(0) == ":")
         var o = colon ? op.slice(1) : op
         return {c: undefined, fn: function(b) {
-            var v = varString(b, name)
+            var v = valOf(b)
             // ":" forms treat "" like unset; the bare forms only test set-ness, which the
             // unset marker (a distinct empty string) records.
             var blank = colon ? isEmptyStr(b, v)
@@ -2981,7 +4565,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (wordT != null) { var r = evalWord(b, wordT); b = r.b; d = r.v }
             if (o == "+") { return {b: b, v: b.NewSelect(blank, emptyPtr(b), d)} }
             var picked = b.NewSelect(blank, d, v)
-            if (o == "=") { storeVar(b, name, picked) }
+            if (o == "=") { setOf(b, picked) }
             return {b: b, v: picked}
         }}
     }

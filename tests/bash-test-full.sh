@@ -336,6 +336,50 @@ s11() {
   check dbr20 "$?" 1
   # backtracking into an alternation, and a match that must reach the end
   if [[ foobar =~ ^(foo|foobar)bar$ ]]; then check dbr21 "${BASH_REMATCH[1]}" foo; else check dbr21 no yes; fi
+  # ---- the ERE engine itself ------------------------------------------------------
+  # The compiler half owns a matcher of its own (the interpreter reaches lib/regex.js,
+  # the compiler emits one into the module so a native build has something to run), so
+  # every ERE construct below is pinned here or the two can drift unseen. Each expected
+  # value was taken from the real bash 5.3, which runs this file unchanged.
+  local re
+  # greedy, and leftmost-first: the first alternative that can win, does
+  re='(a+)(a*)'; [[ aaa =~ $re ]]; check dbr22 "[${BASH_REMATCH[1]}][${BASH_REMATCH[2]}]" "[aaa][]"
+  # leftmost beats longest: a* matches the empty string at position 0, not "aaa" at 1
+  re='a*'; [[ baaa =~ $re ]]; check dbr23 "${#BASH_REMATCH[0]}" 0
+  # intervals
+  re='^a{2,3}$'; [[ aaa =~ $re ]]; check dbr24 "$?" 0
+  re='a{2,3}'; [[ aaaa =~ $re ]]; check dbr25 "${BASH_REMATCH[0]}" aaa
+  re='^a{2,}b$'; [[ aab =~ $re ]]; check dbr26 "$?" 0
+  re='^a{0}b$'; [[ ab =~ $re ]]; check dbr27 "$?" 1
+  re='^a{0,2}b$'; [[ b =~ $re ]]; check dbr28 "$?" 0
+  re='^(ab){2}$'; [[ abab =~ $re ]]; check dbr29 "$?-${BASH_REMATCH[1]}" "0-ab"
+  # a { that no digit follows is a literal brace, not a malformed interval
+  re='a{b'; [[ "a{b" =~ $re ]]; check dbr30 "$?" 0
+  # bracket expressions: a leading ] is literal, a trailing - is literal, ^ negates,
+  # and a . inside brackets is just a dot
+  re='^[]ab]+$'; [[ "a]b" =~ $re ]]; check dbr31 "$?" 0
+  re='a[^x]b'; [[ aXb =~ $re ]]; check dbr32 "$?" 0
+  re='a[.]b'; [[ "a.b" =~ $re ]]; check dbr33 "$?" 0
+  re='^[A-Z-]+$'; [[ "A-Z" =~ $re ]]; check dbr34 "$?" 0
+  re='^[0-9]{3,5}$'; [[ 12345 =~ $re ]]; check dbr35 "$?" 0
+  # an alternation's groups are numbered across the whole pattern, participating or not
+  re='(a)|(b)'; [[ b =~ $re ]]
+  check dbr36 "${#BASH_REMATCH[@]}-[${BASH_REMATCH[1]}][${BASH_REMATCH[2]}]" "3-[][b]"
+  re='^(a|b|x)yz$'; [[ xyz =~ $re ]]; check dbr37 "${BASH_REMATCH[1]}" x
+  re='^(a|aa)+$'; [[ aaa =~ $re ]]; check dbr38 "$?" 0
+  # nesting numbers by OPENING paren
+  re='((a)b)'; [[ ab =~ $re ]]; check dbr39 "[${BASH_REMATCH[1]}][${BASH_REMATCH[2]}]" "[ab][a]"
+  # a backslash makes a metacharacter literal
+  re='x\)'; [[ "x)" =~ $re ]]; check dbr40 "$?" 0
+  # ^ and $ are anchors ANYWHERE in an ERE, so a^b can never match
+  re='a^b'; [[ "a^b" =~ $re ]]; check dbr41 "$?" 1
+  re='^$'; [[ "" =~ $re ]]; check dbr42 "$?" 0
+  # patterns that cannot compile: status 2 every time, and the shell carries on
+  re='*a'; [[ a =~ $re ]] 2>/dev/null; check dbr43 "$?" 2
+  re='a{2,1}'; [[ aa =~ $re ]] 2>/dev/null; check dbr44 "$?" 2
+  re='[z-a]'; [[ b =~ $re ]] 2>/dev/null; check dbr45 "$?" 2
+  re='[a'; [[ "[a" =~ $re ]] 2>/dev/null; check dbr46 "$?" 2
+  re='a\'; [[ a =~ $re ]] 2>/dev/null; check dbr47 "$?" 2
 }
 
 # ===== SECTION 12: the test builtin =====
@@ -821,6 +865,85 @@ i=2"
 }
 # ===== END SECTIONS =====
 
+# ===== SECTION 25: ${...} corners and the extended globs =====
+# The five things the COMPILER half used to handle differently from the
+# interpreter, all of them silently: without the "$ may not degrade to a literal
+# in front of {" guard a malformed or unsupported expansion turned into ordinary
+# LITERAL TEXT instead of a parse error, so nothing anywhere went red. --cross
+# read 0 divergent only because no file exercised the gap; this section is what
+# closes it. Every expected value below came from GNU bash 5.3.15 running this
+# same file.
+#
+#   - "#" and "!" are prefixes of a WHOLE expansion, not just of a name, which is
+#     what makes ${##} and ${###} two different things
+#   - the ${v@Q E P A K a k L U u} transform operators
+#   - an empty or blank-padded arithmetic slot: ${x::1}, ${a[@]: }
+#   - @( ) ?( ) *( ) +( ) !( ) on the pattern side of [[ == ]]
+s25() {
+  set -- a b c
+  # ${##} is the LENGTH of $#; ${###} is $# with an empty "#" strip, i.e. $# itself
+  check pex1 "${##}" 1
+  check pex2 "${###}" 3
+  set -- a b c d e f g h i j
+  check pex3 "${##}" 2
+  check pex4 "${###}" 10
+  local x='a b'
+  check pex5 "${x@Q}" "'a b'"
+  check pex6 "${x@U}" "A B"
+  check pex7 "${x@L}" "a b"
+  check pex8 "${x@u}" "A b"
+  check pex9 "${x@E}" "a b"
+  # @A on a LOCAL prints "declare x=..." in bash 5.3; a global prints the plain
+  # assignment, which is the form both halves model
+  pex_g='a b'
+  check pex10 "${pex_g@A}" "pex_g='a b'"
+  local esc='a\tb'
+  check pex11 "${esc@E}" "$(printf 'a\tb')"
+  local q="it's"
+  check pex12 "${q@Q}" "'it'\\''s'"
+  # an omitted offset means 0, an omitted length means "to the end", and a blank
+  # between the last arithmetic token and the brace is allowed
+  local y=abcdef
+  check pex13 "${y::2}" ab
+  check pex14 "${y:2}" cdef
+  check pex15 "${y: 1 : 2 }" bc
+  check pex16 "${y: -2}" ef
+  local -a arr=(1 2 3)
+  # [*] not [@]: inside double quotes "${a[@]}" is still several WORDS, so it
+  # would reach check() as several arguments
+  check pex17 "${arr[*]: }" "1 2 3"
+  check pex18 "${arr[*]:1}" "2 3"
+  # a transform applies to an array ELEMENT, not to the joined array
+  local -a qa=(x "y z")
+  check pex22 "${qa[1]@Q}" "'y z'"
+  check pex23 "${qa[0]@U}" X
+  # indirection carries the OPERATOR over to the variable it lands on
+  local ref=y
+  check pex19 "${!ref}" abcdef
+  check pex20 "${!ref:0:3}" abc
+  local unref=nosuchvar
+  check pex21 "${!unref-fallback}" fallback
+  # the extended globs, on the pattern side of [[ == ]] - no shopt needed there
+  if [[ --verbose == --@(help|verbose) ]]; then check peg1 yes yes; else check peg1 no yes; fi
+  if [[ --other == --@(help|verbose) ]]; then check peg2 no yes; else check peg2 ok ok; fi
+  if [[ abc == +(a|b|c) ]]; then check peg3 yes yes; else check peg3 no yes; fi
+  if [[ "" == +(a|b|c) ]]; then check peg4 no yes; else check peg4 ok ok; fi
+  if [[ abc == !(xyz) ]]; then check peg5 yes yes; else check peg5 no yes; fi
+  if [[ xyz == !(xyz) ]]; then check peg6 no yes; else check peg6 ok ok; fi
+  if [[ ac == a?(b)c ]]; then check peg7 yes yes; else check peg7 no yes; fi
+  if [[ abbc == a?(b)c ]]; then check peg8 no yes; else check peg8 ok ok; fi
+  if [[ abbbc == a*(b)c ]]; then check peg9 yes yes; else check peg9 no yes; fi
+  if [[ file.txt == *.@(txt|md) ]]; then check peg10 yes yes; else check peg10 no yes; fi
+  if [[ file.log == *.@(txt|md) ]]; then check peg11 no yes; else check peg11 ok ok; fi
+  # nesting
+  if [[ --verbose=1 == --@(help|verbose=@(1|2)) ]]; then check peg12 yes yes; else check peg12 no yes; fi
+  if [[ --verbose=3 == --@(help|verbose=@(1|2)) ]]; then check peg13 no yes; else check peg13 ok ok; fi
+  # a prefix character that is NOT opening a group is an ordinary literal
+  if [[ "a@b" == "a@b" ]]; then check peg14 yes yes; else check peg14 no yes; fi
+  if [[ "a+b" == a+b ]]; then check peg15 yes yes; else check peg15 no yes; fi
+}
+
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -845,5 +968,6 @@ s21   # SECTION-CALL 21
 s22   # SECTION-CALL 22
 s23   # SECTION-CALL 23
 s24   # SECTION-CALL 24
+s25   # SECTION-CALL 25
 echo "full: $checks checks, $fails failures"
 exit $fails
