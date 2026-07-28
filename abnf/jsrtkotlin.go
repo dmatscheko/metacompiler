@@ -946,6 +946,11 @@ func init() {
 			}
 			return a[0]
 		}
+		// ktIsType is js_ktis as a plain Go call, installed here so the collection
+		// builtins (filterIsInstance) can ask the same question the `is` operator asks.
+		ktIsType = func(v interface{}, tname string) bool {
+			return u(m["js_ktis"]([]uint64{w(v), rt.wrapStr(tname)})) == interface{}(true)
+		}
 		m["js_ktis"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			switch v.(type) {
@@ -1585,6 +1590,30 @@ func init() {
 			return m["js_ktsmcall"]([]uint64{a[1], a[2], a[3]})
 		}
 
+		// js_ktmextget(scope, recv, "name") / js_ktmextset(scope, recv, "name", v) are
+		// the same lookup for a member extension PROPERTY - `val Int.scaled get() = ...`
+		// declared inside a class. The accessor pair is installed as extget$name /
+		// extset$name and takes (dispatchReceiver, extensionReceiver[, value]), exactly
+		// like the ext$name functions above and exactly like makeMemberExtGetter /
+		// makeMemberExtSetter in kotlin-interpreter.abnf. Nothing found means the name
+		// was an ordinary field after all.
+		m["js_ktmextget"] = func(a []uint64) uint64 {
+			name := rt.toString(u(a[2]))
+			if fn, disp, found := rt.ktMemberExtFind(rt.scopeOf(a[0]), "extget$"+name); found {
+				return rt.wrap(rt.call(fn, jsUndef, []interface{}{disp, u(a[1])}))
+			}
+			return m["js_ktfget"]([]uint64{a[1], a[2]})
+		}
+		m["js_ktmextset"] = func(a []uint64) uint64 {
+			name := rt.toString(u(a[2]))
+			if fn, disp, found := rt.ktMemberExtFind(rt.scopeOf(a[0]), "extset$"+name); found {
+				rt.call(fn, jsUndef, []interface{}{disp, u(a[1]), u(a[3])})
+				return a[3]
+			}
+			rt.setMember(u(a[1]), name, u(a[3]))
+			return a[3]
+		}
+
 		// js_ktrecvlam(f) wraps the value bound to a parameter whose declared type is a
 		// receiver function type (`body: Node.() -> Unit`). The wrapper takes the
 		// receiver in its FIRST slot and runs f with that receiver as `this`, which is
@@ -1765,6 +1794,21 @@ func init() {
 						if _, has := obj.props[name]; has {
 							return m["js_kset"](a)
 						}
+						// The write twin of the accessor branch in js_ktget: a
+						// property with a SETTER (and every delegated property) is a
+						// js_defprop pair on the DESCRIPTOR, so an unqualified
+						// `m += 1` inside the class's own member aborted with
+						// "assignment to unknown name: m" while the interpreter half
+						// wrote through the setter.
+						if acc := rt.findClassAccessor(obj, name); acc != nil {
+							if acc.set != nil {
+								rt.call(acc.set, obj, []interface{}{u(a[2])})
+							}
+							if rt.traced {
+								rt.trVar("write", name, u(a[2]))
+							}
+							return 0
+						}
 					}
 				}
 				if d, ok := s.get("__dispatch"); ok {
@@ -1838,6 +1882,24 @@ func init() {
 							// An unqualified read of a `lateinit var` throws
 							// too - see ktLateinitCheck.
 							rt.ktLateinitCheck(obj, name, v)
+							if rt.traced {
+								rt.trVar("read", name, v)
+							}
+							return w(v)
+						}
+						// A property with an ACCESSOR - `val c: Int get() = b * 2`,
+						// and every DELEGATED property - is a js_defprop pair on the
+						// DESCRIPTOR, not an own property of the instance, so the
+						// lookup above missed it and an unqualified read of the
+						// class's own computed property aborted with "unknown name:
+						// c" while the interpreter half (whose recvLookup consults
+						// get$name) answered. Only the accessor case is added here;
+						// a method name still falls through, as it did before.
+						if acc := rt.findClassAccessor(obj, name); acc != nil {
+							var v interface{} = jsUndef
+							if acc.get != nil {
+								v = rt.call(acc.get, obj, nil)
+							}
 							if rt.traced {
 								rt.trVar("read", name, v)
 							}
@@ -2002,6 +2064,18 @@ func init() {
 				r = next(a)
 			} else {
 				r = m["js_get"](a)
+			}
+			// `.size` is Kotlin's collection length, and the emitter used to rewrite it
+			// to `.length` for EVERY receiver - so a user class declaring its own `size`
+			// property read undefined and printed "kotlin.Unit", where the interpreter
+			// half answered the property. The rewrite now happens HERE, only when the
+			// receiver has no `size` of its own, which is the same fast-path-versus-
+			// dispatcher trap recorded in docs/abnf-dialect-gotchas.md.
+			if name == "size" && isUndefOrNull(u(r)) {
+				lr := m["js_get"]([]uint64{a[0], rt.wrapStr("length")})
+				if !isUndefOrNull(u(lr)) {
+					return lr
+				}
 			}
 			// A `lateinit var` that is still null has NOT been assigned, and Kotlin
 			// throws rather than answering null - see ktLateinitCheck.
@@ -2365,7 +2439,7 @@ func ktParseNum(rt *jsrt, s, name string) (interface{}, bool) {
 	if name == "toDouble" {
 		var f float64
 		if _, err := fmt.Sscanf(t, "%g", &f); err != nil || t == "" {
-			rt.fail("For input string: \"%s\"", s)
+			rt.ktRaise("NumberFormatException", fmt.Sprintf("For input string: \"%s\"", s))
 		}
 		return jsJFlo{f: f}, true
 	}
@@ -2380,7 +2454,7 @@ func ktParseNum(rt *jsrt, s, name string) (interface{}, bool) {
 		if name == "toIntOrNull" {
 			return jsNull, true
 		}
-		rt.fail("For input string: \"%s\"", s)
+		rt.ktRaise("NumberFormatException", fmt.Sprintf("For input string: \"%s\"", s))
 	}
 	var acc int64
 	for _, r := range body {
@@ -2388,7 +2462,7 @@ func ktParseNum(rt *jsrt, s, name string) (interface{}, bool) {
 			if name == "toIntOrNull" {
 				return jsNull, true
 			}
-			rt.fail("For input string: \"%s\"", s)
+			rt.ktRaise("NumberFormatException", fmt.Sprintf("For input string: \"%s\"", s))
 		}
 		acc = acc*10 + int64(r-'0')
 	}
@@ -2774,6 +2848,18 @@ func (rt *jsrt) ktMemberExtFind(sc *jsScope, mangled string) (interface{}, inter
 			o, isObj := cur.(*jsObject)
 			if !isObj {
 				break
+			}
+			// The receiver's OWN properties first. A COMPANION object's members hang
+			// on the class descriptor itself (its methods live one level down, on the
+			// holder the descriptor's __class points at), so a member extension
+			// declared in a companion was installed on the descriptor and the
+			// __class walk below never saw it: `fun Int.tripled() = ...` inside a
+			// companion aborted the compiled half with "method call 'tripled' on a
+			// number" while the interpreter half, whose clsFind starts at the
+			// descriptor, answered. No Kotlin identifier can contain `$`, so a
+			// mangled name is never an ordinary field.
+			if fn, ok := o.props[mangled]; ok && isCallable(fn) {
+				return fn, o, true
 			}
 			if fn := ktClsFind(o.props["__class"], mangled); fn != nil {
 				return fn, o, true
@@ -3739,6 +3825,25 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 	// reaches for them constantly and every one aborted the run in BOTH halves with
 	// "unknown list method". The twin is kSeqMethod in kotlin-interpreter.abnf; the two
 	// tables are kept in step name for name.
+	// filterIsInstance<T>(): the elements that ARE a T. The type argument is the whole
+	// point of the call, and both grammars used to SKIP a call's explicit type arguments
+	// (`"." KId [ SkipAngle ] MArgs`), so the name reached the runtime with nothing to
+	// filter on and both halves aborted with "unknown list method". MTypeArgs now
+	// captures the list and the mcall emitters pass the type NAME as a trailing string
+	// argument for the handful of methods that need it. A null is never an instance of a
+	// non-nullable T, so it is dropped, exactly as Kotlin's own filterIsInstance does.
+	case "filterIsInstance":
+		want := "Any"
+		if sv, isStr := f.(string); isStr && sv != "" {
+			want = sv
+		}
+		out := []interface{}{}
+		for _, e := range es {
+			if ktIsType != nil && ktIsType(e, want) {
+				out = append(out, e)
+			}
+		}
+		return arr(out), true
 	case "filterNotNull", "requireNoNulls":
 		out := []interface{}{}
 		for _, e := range es {
@@ -4055,14 +4160,27 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 		o.elems = nil
 		return jsUndef, true
 	case "removeAll", "retainAll":
-		drop := ktElems(rt, f)
+		// Kotlin has TWO overloads of each: one takes a collection of elements, the
+		// other a PREDICATE. `l.removeAll { it % 2 == 0 }` is the commoner of the two
+		// in real code and aborted BOTH halves with "not a sequence: [function]",
+		// because only the collection overload existed. The twin is the same branch of
+		// kMutListMethod in languages/kotlin-interpreter.abnf.
+		isPred := isCallable(f)
+		var drop []interface{}
+		if !isPred {
+			drop = ktElems(rt, f)
+		}
 		keep := []interface{}{}
 		for _, e := range es {
 			hit := false
-			for _, d := range drop {
-				if rt.ktEqVals(d, e) {
-					hit = true
-					break
+			if isPred {
+				hit = rt.truthy(rt.call(f, jsUndef, []interface{}{e}))
+			} else {
+				for _, d := range drop {
+					if rt.ktEqVals(d, e) {
+						hit = true
+						break
+					}
 				}
 			}
 			if hit == (name == "retainAll") {
@@ -4471,6 +4589,18 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 			return vals.elems[i], true
 		}
 		return argAt(args, 1), true
+	// getOrPut(key) { default }: the value under key, or - when there is none - the
+	// lambda's value, STORED under the key and then answered. It is the standard way
+	// to build a map of collections (`m.getOrPut(k) { mutableListOf() }.add(v)`) and
+	// existed in neither half ("unknown dict method 'getOrPut'"). The twin is the same
+	// branch of kMapMethod in languages/kotlin-interpreter.abnf.
+	case "getOrPut":
+		if i := rt.ktMapFind(keys, f); i >= 0 {
+			return vals.elems[i], true
+		}
+		nv := rt.call(argAt(args, 1), jsUndef, nil)
+		rt.ktMapPut(m, f, nv)
+		return nv, true
 	case "getOrElse":
 		if i := rt.ktMapFind(keys, f); i >= 0 {
 			return vals.elems[i], true
@@ -4650,6 +4780,10 @@ var ktRecvStack []interface{}
 // bound-builtin closures below reach the full method surface (including the Regex
 // and shared js_mcall tails) without duplicating its dispatch.
 var ktMemberCall func(recv interface{}, name string, args []interface{}) interface{}
+
+// ktIsType is js_ktis as a plain Go call - the `x is T` test - installed by the
+// registrar so filterIsInstance answers exactly what an `is` branch would.
+var ktIsType func(v interface{}, tname string) bool
 
 // ktRecvProps are the names Kotlin declares as PROPERTIES on a builtin receiver;
 // everything else resolves to a bound method, so a lookup never turns a property

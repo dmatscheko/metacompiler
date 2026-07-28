@@ -2551,6 +2551,387 @@ fun sec64() {
     check("rcv3", doc64 { attr("k", "v") }.attrs.size == 1)
 }
 
+// ===== SECTION 65: super.property, and a setter that stores somewhere else =====
+// `super.p = v` had no reading in the interpreter half at all: `Target` is rooted at an
+// identifier and `super` matches one, so the write went to a variable named `super` and
+// aborted with "unknown name: super", while the compiler half answered correctly. The
+// same probe then exposed a second, deeper defect on this half only - a property setter
+// wrote its ENTRY snapshot of `field` back over the slot when it returned, so a setter
+// that stores anywhere else (`set(v) { super.p = v }`, the delegating override) had its
+// store silently undone: `d.p = 7` left the base's property at 1. Kotlin materializes a
+// backing field only when an accessor actually mentions `field`, which is what the
+// write-back now honours. UNVERIFIED against kotlinc (none on this machine); the Kotlin
+// documentation's "Calling the superclass implementation" and "Backing fields" sections
+// are the source.
+open class Base65 {
+    open var p: Int = 1
+    open val tag: String get() = "base"
+    fun rawP(): Int = p
+}
+class Sub65 : Base65() {
+    var log = ""
+    override var p: Int
+        get() = super.p
+        set(v) { log += "s"; super.p = v + 10 }
+    override val tag: String get() = super.tag + "+sub"
+    fun poke(v: Int) { super.p = v }
+    fun peek(): Int = super.p
+}
+open class Counted65 {
+    var raw: Int = 0
+    var doubled: Int
+        get() = raw * 2
+        set(v) { raw = v / 2 }
+}
+fun sec65() {
+    val d = Sub65()
+    check("sup1", d.p == 1 && d.peek() == 1)
+    d.poke(3)
+    check("sup2", d.p == 3)
+    d.p = 7
+    // The setter's `super.p = v + 10` must SURVIVE the setter returning.
+    check("sup3", d.p == 17 && d.peek() == 17 && d.log == "s")
+    d.p += 3
+    check("sup4", d.p == 30)
+    check("sup5", d.tag == "base+sub")
+    // A plain base instance is unaffected, and a setter that DOES use `field` still
+    // writes through it.
+    val b = Base65()
+    b.p = 9
+    check("sup6", b.p == 9 && b.rawP() == 9)
+    val c = Counted65()
+    c.doubled = 10
+    check("sup7", c.raw == 5 && c.doubled == 10)
+}
+
+// ===== SECTION 66: the delegated-property protocol beyond a user getValue =====
+// Kotlin has four `by` delegate kinds. The interpreter half recognized only ONE of them
+// (a user object with getValue), because its check was a bare method lookup that does
+// not see the builtin Map surface - so `val a: Int by map`, the kotlin.properties
+// Delegates boxes and `provideDelegate` all warned "delegated property not implemented"
+// or aborted with "unknown name: Delegates", while the compiler half ran every one of
+// them. Under kotlinc this section additionally needs `import kotlin.properties.Delegates`
+// and `import kotlin.reflect.KProperty`.
+class Conf66(val map: Map<String, Any?>) {
+    val name: String by map
+    val size: Int by map
+}
+class MConf66(val m: MutableMap<String, Any?>) {
+    var nick: String by m
+}
+class Named66(val n: String) {
+    operator fun getValue(t: Any?, p: KProperty<*>): String = "d:" + n
+}
+class Prov66 {
+    operator fun provideDelegate(t: Any?, p: KProperty<*>): Named66 = Named66(p.name)
+}
+class Holder66 {
+    val alpha: String by Prov66()
+    val beta: String by Named66("fixed")
+}
+var obs66 = ""
+var watched66: Int by Delegates.observable(0) { _, old, new -> obs66 += "$old>$new;" }
+var gated66: Int by Delegates.vetoable(0) { _, _, new -> new >= 0 }
+var late66: String by Delegates.notNull()
+fun sec66() {
+    // A Map delegate is keyed by the PROPERTY NAME, not by a key the code passes.
+    val c = Conf66(mapOf("name" to "ann", "size" to 7))
+    check("dlg1", c.name == "ann" && c.size == 7)
+    val mc = MConf66(mutableMapOf("nick" to "zz"))
+    check("dlg2", mc.nick == "zz")
+    mc.nick = "qq"
+    check("dlg3", mc.nick == "qq" && mc.m["nick"] == "qq")
+    // provideDelegate substitutes the delegate at the DECLARATION, so it can read the
+    // property's name before any access happens.
+    val h = Holder66()
+    check("dlg4", h.alpha == "d:alpha" && h.beta == "d:fixed")
+    // kotlin.properties.Delegates: observable notifies AFTER, vetoable decides BEFORE.
+    watched66 = 3
+    watched66 = 5
+    check("dlg5", watched66 == 5 && obs66 == "0>3;3>5;")
+    gated66 = 4
+    check("dlg6", gated66 == 4)
+    gated66 = -1
+    check("dlg7", gated66 == 4)
+    late66 = "hi"
+    check("dlg8", late66 == "hi")
+    // A LOCAL delegated property binds the same box.
+    val local: String by Named66("loc")
+    check("dlg9", local == "d:loc")
+    var lobs = ""
+    var lwatched: Int by Delegates.observable(1) { _, old, new -> lobs += "$old/$new" }
+    lwatched = 2
+    check("dlg10", lwatched == 2 && lobs == "1/2")
+}
+
+// ===== SECTION 67: a supertype declared LATER in the file =====
+// Kotlin has no forward-declaration rule: a class may extend one declared further down,
+// and forward-referenced FUNCTIONS already worked in both halves. The compiler half
+// emitted the top level in SOURCE order and resolved a supertype with a scope read at
+// the moment the class statement ran, so `class Inh : Base()` above `open class Base`
+// aborted with "variable not defined: Base" while the interpreter half answered. The
+// same read serves an INTERFACE supertype, so one fix covers both; the class items of
+// the top level are now emitted in topological order. A one-line interface body is here
+// too: `fun f(): Int;` - a bodiless member followed by the ordinary statement separator
+// - fell out of the compiler's member set and made the whole interface "not implemented",
+// while the identical interface written across lines worked.
+class Fwd67 : FwdBase67() {
+    override fun label(): String = "fwd:" + super.label()
+    fun total(): Int = seed + bonus67
+}
+class FwdIface67 : Marker67 { override fun f(): Int = 1 }
+open class FwdBase67 {
+    val seed = 5
+    open fun label(): String = "base"
+}
+interface Marker67 { fun f(): Int; fun g(): Int = f() + 10 }
+val bonus67 = 2
+enum class Mode67 : Marker67 { ON, OFF; override fun f(): Int = if (this == ON) 1 else 0 }
+object Solo67 : Marker67 { override fun f(): Int = 4 }
+fun sec67() {
+    val a = Fwd67()
+    check("fwd1", a.total() == 7)
+    check("fwd2", a.label() == "fwd:base")
+    check("fwd3", FwdIface67().g() == 11)
+    // An enum and an object may name a later-declared supertype as well.
+    check("fwd4", Mode67.ON.g() == 11 && Mode67.OFF.g() == 10)
+    check("fwd5", Solo67.g() == 14)
+    check("fwd6", a is FwdBase67 && FwdIface67() is Marker67)
+}
+
+// ===== SECTION 68: member extension PROPERTIES (the DSL scope shape) =====
+// `val Int.scaled get() = this * factor` declared INSIDE a class is the property twin of
+// a member extension function, and the shape every scoped DSL (kotlinx.html, Compose
+// modifiers, a units scope) is built from. The interpreter half had it; the compiler half
+// dropped it into "property accessor not implemented (ignored)", so a read answered Unit
+// and a WRITE aborted with "cannot set member 'slot' on float64". The accessor pair is
+// now installed as extget$name / extset$name taking (dispatch, extensionReceiver[, value]),
+// exactly like the ext$name member extension FUNCTIONS beside it. Probing this also found
+// that a member extension declared in a COMPANION object was invisible to the compiled
+// half's runtime lookup - its members hang on the class descriptor, one level above the
+// method holder the lookup walked - so a companion member extension FUNCTION was broken
+// too, and is asserted here.
+class Units68(val factor: Int) {
+    var store = 0
+    val Int.scaled: Int get() = this * factor
+    var Int.slot: Int
+        get() = store
+        set(v) { store = v + this }
+    fun Int.viaFun(): Int = this.scaled + 1
+    fun run(): String {
+        val n = 4
+        var s = "" + n.scaled
+        n.slot = 5
+        s += "/" + n.slot
+        n.slot += 3
+        s += "/" + n.slot
+        s += "/" + n.viaFun()
+        return s
+    }
+    fun direct(): Int = 7.scaled
+}
+class Wrap68(val sep: String) {
+    val String.wrapped: String get() = sep + this + sep
+    fun go(s: String): String = s.wrapped
+}
+object Reg68 {
+    val factor = 3
+    val String.width: Int get() = length * factor
+    fun w(s: String): Int = s.width
+}
+class Holder68 {
+    companion object {
+        val f = 3
+        val Int.tripled: Int get() = this * f
+        fun Int.tripledFun(): Int = this * f
+        fun go(n: Int): Int = n.tripled
+        fun goFun(n: Int): Int = n.tripledFun()
+    }
+}
+fun sec68() {
+    check("mxp1", Units68(10).run() == "40/9/16/41")
+    check("mxp2", Units68(2).direct() == 14)
+    check("mxp3", Wrap68("|").go("x") == "|x|")
+    // An `object` declaration and a companion object host them too.
+    check("mxp4", Reg68.w("abcd") == 12)
+    check("mxp5", Holder68.go(5) == 15 && Holder68.goFun(5) == 15)
+}
+
+// ===== SECTION 69: three collection builtins, and a call's EXPLICIT TYPE ARGUMENTS =====
+// Map.getOrPut, the PREDICATE overload of MutableList.removeAll/retainAll, and
+// List.filterIsInstance were missing from BOTH halves - the first two aborting with
+// "unknown Map method" / "not a sequence: <lambda>", which is what a builtin table that
+// lands on one half only looks like from the other side, so all three are added together.
+// filterIsInstance is the interesting one: both grammars spelled a method-call suffix as
+// `"." KId [ SkipAngle ] MArgs`, so a call's explicit type arguments were SKIPPED and
+// never captured. They are captured now (MTypeArgs) and delivered for the two things
+// that need them: filterIsInstance's element type, and a REIFIED type parameter of an
+// extension function called in method position - `"x".isA<String>()` answered false for
+// every T in both halves, because an extension's type-parameter list was skipped too.
+inline fun <reified T> Any.isA69(): Boolean = this is T
+class Bag69 { val n = 1 }
+fun sec69() {
+    // getOrPut: the standard way to build a map of collections.
+    val g = mutableMapOf<String, MutableList<Int>>()
+    g.getOrPut("a") { mutableListOf() }.add(1)
+    g.getOrPut("a") { mutableListOf() }.add(2)
+    g.getOrPut("b") { mutableListOf() }.add(3)
+    check("blt1", g["a"]!!.size == 2 && g["b"]!!.size == 1 && g.size == 2)
+    var calls = 0
+    val c = mutableMapOf<String, Int>()
+    check("blt2", c.getOrPut("x") { calls++; 5 } == 5)
+    check("blt3", c.getOrPut("x") { calls++; 9 } == 5 && calls == 1)
+    // removeAll / retainAll take a COLLECTION or a PREDICATE.
+    val l = mutableListOf(1, 2, 3, 4, 5)
+    check("blt4", l.removeAll { it % 2 == 0 } && l == listOf(1, 3, 5))
+    check("blt5", !l.removeAll { it > 100 } && l.size == 3)
+    val r = mutableListOf(1, 2, 3, 4, 5)
+    check("blt6", r.retainAll { it > 3 } && r == listOf(4, 5))
+    val d = mutableListOf(1, 2, 3, 4)
+    check("blt7", d.removeAll(listOf(2, 4)) && d == listOf(1, 3))
+    // filterIsInstance<T>() reads the call's type argument, and drops nulls.
+    val xs: List<Any?> = listOf(1, "a", 2.5, "b", 3, null, Bag69())
+    check("blt8", xs.filterIsInstance<String>() == listOf("a", "b"))
+    check("blt9", xs.filterIsInstance<Int>() == listOf(1, 3))
+    check("blt10", xs.filterIsInstance<Bag69>().size == 1)
+    check("blt11", xs.filterIsInstance<Double>() == listOf(2.5))
+    // A reified type parameter of an extension, called in METHOD position.
+    check("blt12", "x".isA69<String>() && !"x".isA69<Int>())
+    check("blt13", 7.isA69<Int>() && !7.isA69<String>())
+    // A type argument on a method that does not use one is still ignored.
+    check("blt14", listOf(1, 2, 3).map<Int, Int> { it + 1 } == listOf(2, 3, 4))
+}
+
+// ===== SECTION 70: six defects one page of application Kotlin found =====
+// Written as ordinary application code (a value type with an infix extension, an enum
+// whose constants carry their own behaviour, a nullable-receiver extension property,
+// price strings, a range-dispatch `when`, and input parsing). Every assertion below
+// failed somewhere before:
+//   - `enum class L(w) { A(1) { override fun f() = ... }; abstract fun f() }` - an entry
+//     with its OWN CLASS BODY had no reading in the compiler half, so the whole
+//     declaration fell to "enum class not implemented" and the enum's NAME was then
+//     undefined for the rest of the program; the interpreter half ran it.
+//   - `infix fun Int.pctOf(m: Money)` used INFIX went through the method dispatcher in
+//     the compiler half and aborted with "method call 'pctOf' on a number", while the
+//     identical `25.pctOf(m)` in dotted form worked - and the interpreter half ran both.
+//   - `val String?.safeLen get() = this?.length ?: -1` on a NULL receiver aborted the
+//     interpreter half with "property .safeLen of null"; a nullable-receiver extension
+//     property is exactly where a null receiver is legal.
+//   - `"$"`, `"100$"`: a `$` not followed by an identifier or `{` is an ordinary
+//     character (psi/StringTemplates.txt records it as REGULAR_STRING_PART with no error
+//     element). BOTH halves refused every string containing a literal dollar.
+//   - two `when` arms in a row whose conditions are `in <range>`: the first arm's VALUE
+//     swallowed the next line's `in` as a membership operator and the parse died on the
+//     second arm, in BOTH halves. An `in` that opens a line is a condition.
+//   - `"nope".toInt()` aborted the program in both halves instead of THROWING
+//     NumberFormatException, so neither try/catch nor runCatching could see it.
+class Money70(val cents: Int) : Comparable<Money70> {
+    operator fun plus(o: Money70) = Money70(cents + o.cents)
+    operator fun times(n: Int) = Money70(cents * n)
+    override fun compareTo(other: Money70) = cents.compareTo(other.cents)
+    override fun toString(): String = "$" + (cents / 100) + "." + (cents % 100).toString().padStart(2, '0')
+}
+infix fun Int.pctOf70(m: Money70) = Money70(m.cents * this / 100)
+enum class Level70(val weight: Int) {
+    LOW(1) { override fun label() = "low" },
+    HIGH(5) { override fun label() = "high" };
+    abstract fun label(): String
+    fun heavy() = weight > 3
+}
+val String?.safeLen70: Int get() = this?.length ?: -1
+fun classify70(n: Int): String = when (n) {
+    in 0..9 -> "digit"
+    in 10..99 -> "two"
+    in 100..999 -> "three"
+    else -> if (n < 0) "neg" else "big"
+}
+fun main70(raw: String): Int = runCatching { raw.toInt() }.getOrElse { -1 }
+fun sec70() {
+    val a = Money70(1250)
+    val b = Money70(375)
+    check("app1", (a + b).toString() == "$16.25" && (a * 2).toString() == "$25.00")
+    check("app2", maxOf(a, b) === a && listOf(a, b).sorted().first() === b)
+    // An infix EXTENSION function, both ways round.
+    check("app3", (25 pctOf70 a).cents == 312 && 25.pctOf70(a).cents == 312)
+    // An enum entry with its own class body, plus the enum's own members.
+    check("app4", Level70.LOW.label() == "low" && Level70.HIGH.label() == "high")
+    check("app5", !Level70.LOW.heavy() && Level70.HIGH.heavy())
+    check("app6", Level70.entries.size == 2 && Level70.valueOf("HIGH").ordinal == 1)
+    check("app7", Level70.LOW.name == "LOW" && Level70.LOW.weight == 1)
+    // An extension property on a NULLABLE receiver.
+    val missing: String? = null
+    check("app8", "abc".safeLen70 == 3 && missing.safeLen70 == -1)
+    // A literal dollar, in a normal string and in a raw one.
+    check("app9", "$".length == 1 && "cost: 100$" == "cost: " + 100 + "$")
+    check("app10", """raw $ end""".length == 9)
+    // Consecutive `in <range>` when arms.
+    check("app11", classify70(5) == "digit" && classify70(50) == "two")
+    check("app12", classify70(500) == "three" && classify70(-1) == "neg" && classify70(5000) == "big")
+    // A bad number THROWS, and is catchable both ways.
+    check("app13", main70("42") == 42 && main70("nope") == -1)
+    var caught = ""
+    try { "nope".toInt() } catch (e: NumberFormatException) { caught = e.message ?: "" }
+    check("app14", caught == "For input string: \"nope\"")
+    check("app15", runCatching { "x".toDouble() }.isFailure && "nope".toIntOrNull() == null)
+}
+
+// ===== SECTION 71: four more, from a registry/DTO page of application Kotlin =====
+//   - `buildList { addAll(listOf(2, 3)) }`: inside a builder lambda the implicit
+//     receiver claimed EVERY unqualified name, so the global `listOf` was bound as a
+//     method of the list under construction and the interpreter half aborted with
+//     "unknown list method: listOf" (its receiver lookup runs before the hostGlobals
+//     lookup). The compiler half consults the scope first and ran it.
+//   - an unqualified read or write of the class's OWN computed or delegated property
+//     inside a member: the accessor pair lives on the DESCRIPTOR (js_defprop), not on
+//     the instance, so the compiler half's `this` fallback - which looked at own
+//     properties only - aborted with "unknown name: c" / "assignment to unknown name:
+//     m" where the interpreter half answered.
+//   - a NAMED argument filling a `vararg` parameter. Kotlin's rule is that the single
+//     named argument IS the array; the interpreter half bound the EMPTY list (it only
+//     collected the positional tail) and the compiler half wrapped the array in another
+//     array. Neither was Kotlin's answer.
+//   - named arguments to an OBJECT's method: an object registered its method NAMES but
+//     not their parameter lists, so `R.f(c = 9)` put 9 in the FIRST slot in the
+//     compiler half while the identical method on a class was correct.
+object Reg71 {
+    var writes = 0
+    val doubled: Int get() = writes * 2
+    var tracked: Int by Delegates.observable(5) { _, _, _ -> writes++ }
+    fun bump(): Int { tracked += 1; return tracked }
+    fun pick(a: Int = 1, b: Int = 2, c: Int = 3): String = "$a/$b/$c"
+    fun label(name: String, sep: String = "-", vararg tags: String): String =
+        name + sep + tags.toList().joinToString(",")
+}
+class Own71 {
+    var raw = 3
+    val trebled: Int get() = raw * 3
+    var mirrored: Int
+        get() = raw
+        set(v) { raw = v }
+    fun readAll(): String = "" + trebled + "/" + mirrored
+    fun writeThrough(v: Int) { mirrored = v }
+}
+fun sec71() {
+    // A builder lambda may still call the ordinary global builders.
+    check("reg1", buildList { add(1); addAll(listOf(2, 3)) } == listOf(1, 2, 3))
+    check("reg2", buildString { append(listOf(1, 2).joinToString("-")) } == "1-2")
+    check("reg3", buildMap<String, Int> { put("a", maxOf(1, 2)) }["a"] == 2)
+    // An unqualified read and write of the class's own accessor properties.
+    val o = Own71()
+    check("reg4", o.readAll() == "9/3")
+    o.writeThrough(5)
+    check("reg5", o.raw == 5 && o.readAll() == "15/5")
+    // The same through an object, including a delegated property.
+    check("reg6", Reg71.bump() == 6 && Reg71.tracked == 6 && Reg71.writes == 1)
+    check("reg7", Reg71.doubled == 2)
+    // Named arguments to an object's method land in the right slots.
+    check("reg8", Reg71.pick(c = 9) == "1/2/9" && Reg71.pick(2, c = 9) == "2/2/9")
+    // A named argument filling a vararg parameter IS the array.
+    check("reg9", Reg71.label("n", tags = arrayOf("a", "b")) == "n-a,b")
+    check("reg10", Reg71.label("n", ":", "a") == "n:a")
+    check("reg11", Reg71.label("n") == "n-")
+}
+
 // ===== END SECTIONS =====
 
 fun main() {
@@ -2618,6 +2999,13 @@ fun main() {
     sec62() // SECTION-CALL 62
     sec63() // SECTION-CALL 63
     sec64() // SECTION-CALL 64
+    sec65() // SECTION-CALL 65
+    sec66() // SECTION-CALL 66
+    sec67() // SECTION-CALL 67
+    sec68() // SECTION-CALL 68
+    sec69() // SECTION-CALL 69
+    sec70() // SECTION-CALL 70
+    sec71() // SECTION-CALL 71
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

@@ -581,8 +581,13 @@ ExprBody    <~~ push(makeExprBody(pop())) ~~>
 // may see null). The receiver type (dotted, generic, nullable) is parsed and DROPPED:
 // dispatch is by NAME, so an extension must not reuse a builtin or class method name
 // (those always win; see extResolves). The tag-less RecvSeg pushes nothing.
+// The leading angle run is the function's own TYPE PARAMETERS, not a skippable
+// decoration: `inline fun <reified T> Any.isA(): Boolean = this is T` resolves `is T`
+// against the call site, exactly as the non-extension form does. Recording them here is
+// what makes that work; TypeParams is item-neutral (it only calls tpSet), so
+// registerExtFun's positional item list is unchanged.
 ExtFun      <~~ registerExtFun(takeAll()); retLblPop() ~~>
-            = KwFun [ SkipAngle ] AnnoRecv { RecvSeg } KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> [ SkipAngle ] ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
+            = KwFun <~~ tpBegin() ~~> [ TypeParams ] AnnoRecv { RecvSeg } KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> [ SkipAngle ] ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
 RecvSeg     = NameRecvSeg | "(" Type ")" [ "?" ] "." ;
 NameRecvSeg = KId [ SkipAngle ] [ "?" ] "." ;
 // An annotation between `fun` and the receiver belongs to the RECEIVER TYPE, and
@@ -1103,7 +1108,19 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
 // A leading annotation - when (@Ann "") { }, `@ann x += f()` as a when-arm body - is
 // parsed and dropped; Annotation pushes nothing, so the alternatives below still leave
 // exactly one thunk on the stack.
-Expression  = { Annotation } ( Assignment | CallAssign | OrExpr ) ;
+Expression  = { Annotation } ( SuperAssign | Assignment | CallAssign | OrExpr ) ;
+// `super.p = v` - the superclass's SETTER, which an overriding setter calls to store the
+// value the base keeps. It needs its own form because `Target` is rooted at a KId and
+// `super` matches one, so the write went to a variable named `super` and aborted with
+// "unknown name: super". Tried before Assignment, whose Target would swallow it; the
+// required `.name` and assignment operator make it decline `super.f()` and `super.p + 1`
+// on their own. The twin of SuperAssign in kotlin-to-llvm-ir.abnf. UNVERIFIED against
+// kotlinc (none on this machine): the Kotlin documentation's "Calling the superclass
+// implementation" section spells the read, and the write is the same qualified access
+// on the left of an assignment.
+SuperAssign <~~ push(makeSuperAssign(curClassTop(), takeAll())) ~~>
+            = "super" KwEnd [ SuperQual ] "." KId <~~ push({sfname: up.in}) ~~>
+              ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
 // An assignment whose left side is a postfix expression containing a call, so a plain
@@ -1196,7 +1213,20 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
 // agree; !in negates. The receiver is a list here (contains checks membership).
 InExpr      <~~ push(makeInExpr(takeAll())) ~~>
             = Elvis { InOp Elvis } ;
-InOp        = "!" KwIn <~~ push({inop: "!in"}) ~~> | KwIn <~~ push({inop: "in"}) ~~> ;
+// The `in` operator must sit on its LEFT OPERAND's line - the guard IsSfx already
+// carries, for the same reason and at the same boundary. A `when` arm's value is an
+// expression, so
+//     in 0..9   -> "digit"
+//     in 10..99 -> "two"
+// read as `"digit" in 10..99` and the second arm's `->` was stranded: the parse died on
+// the SECOND arm, two lines below a first arm that is perfectly correct, in BOTH halves.
+// A `when` entry ends at the newline in Kotlin, and an `in` that OPENS a line is a
+// membership condition, never a continuation - the same rule this tree already applies
+// to a call's argument list (docs/abnf-dialect-gotchas.md) and to a postfix `is T`.
+// Multi-line expressions are unaffected: Kotlin puts a continued operator at the END of
+// the line, where it still sits on its left operand's line.
+InOp        = SameLine InOpKw ;
+InOpKw      = "!" KwIn <~~ push({inop: "!in"}) ~~> | KwIn <~~ push({inop: "in"}) ~~> ;
 
 // x as T / x as? T = identity (untyped values); x is T / x !is T undecidable, so
 // not implemented. The suffix is optional, so plain expressions are unaffected.
@@ -1428,10 +1458,19 @@ CallMember  <~~ push(foldCallMember(takeAll())) ~~>
 // RefName PUSHES its text, so the tag drains it before pushing the suffix record.
 RefSfx      <~~ push({kind: "refsfx", name: pop()}) ~~>
             = "::" RefName ;
-MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}); retLblPop() ~~>
-            = "." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ SkipAngle ] MArgs ;
-SafeMethodSfx <~~ push({kind:"mcall", name: popName(), args: takeAll(), safe: true}); retLblPop() ~~>
-            = "?." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ SkipAngle ] MArgs ;
+// A call's EXPLICIT TYPE ARGUMENTS used to be skipped and dropped here. They are the
+// whole meaning of `xs.filterIsInstance<String>()`, so the run is now captured (as its
+// raw text) and popMCall lifts it off the item list beside the method name; every other
+// method ignores it, so the only cost is one push per type-argument list. tArgName turns
+// "<String>" into "String" and mcallTArg decides - by method NAME - whether to append it
+// as a trailing argument, which keeps `listOf<Int>()`, `emptyMap<K, V>()` and every other
+// type-argument-carrying call emitting exactly what they emitted before.
+MTypeArgs   <~~ push({mtargs: up.in}) ~~>
+            = SkipAngle ;
+MethodSfx   <~~ var mc = popMCall(); push({kind:"mcall", name: mc.name, targ: mc.targ, args: takeAll()}); retLblPop() ~~>
+            = "." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ MTypeArgs ] MArgs ;
+SafeMethodSfx <~~ var mcs = popMCall(); push({kind:"mcall", name: mcs.name, targ: mcs.targ, args: takeAll(), safe: true}); retLblPop() ~~>
+            = "?." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ MTypeArgs ] MArgs ;
 FieldSfx    = "." KId <~~ push({kind:"field", name: up.in}) ~~> ;
 // `receiver.{ ... }` and `receiver.(expr)` - the anonymous-method syntax of very early
 // Kotlin. psi/examples/With.kt (`System.out.{ println("foo"); ... }`),
@@ -1805,7 +1844,7 @@ TypeArgs    <~~ push({targs: up.in}) ~~>
 
 // String templates: "x=$x sum=${a + b}".
 Template    <~~ push(makeTemplate(takeAll())) ~~>
-            = '"' :whitespace() { TplExpr | TplVar | TplChunk } '"' :whitespace(Whitespace) ;
+            = '"' :whitespace() { TplExpr | TplVar | TplDollar | TplChunk } '"' :whitespace(Whitespace) ;
 TplExpr     <~~ push({e: pop()}) ~~>
             = "${" :whitespace(Whitespace) Expression "}" ;
 // The SHORT entry is a simple name, and a hard keyword is not one: `"$try"` is
@@ -1818,6 +1857,26 @@ TplExpr     <~~ push({e: pop()}) ~~>
 // keeps working.
 TplVar      = "$" NotHardKw TplName <~~ push({e: makeVarRef(up.in)}) ~~> ;
 TplName     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
+// A lone `$` - `"$"`, `"cost: 100$"`, `"$.$.asdf"`. Kotlin's own lexer makes a `$` that
+// is not followed by an identifier start or by `{` an ordinary REGULAR_STRING_PART:
+// psi/StringTemplates.txt records `"$"` and `"$.$.asdf$\t"` as LITERAL_STRING_TEMPLATE_
+// ENTRYs with no error element. `$` is deliberately absent from TplPlain / RawPlain (see
+// TplVar above), so before this alternative existed BOTH halves refused every string with
+// a literal dollar in it - which is a price, a shell snippet or a regex end-anchor in real
+// code. The guard is a `:script` on c.peek(0) rather than a `!"..."` lookahead because it
+// has to be anchored to the very next BYTE (docs/abnf-dialect-gotchas.md), and it declines
+// exactly the two cases the template entries own, so a `$` in front of a hard KEYWORD
+// (`"$as"`) still refuses the whole template the way TplVar's NotHardKw intends.
+TplDollar   <~~ push({s: "$"}) ~~>
+            = "$" NotTplStart ;
+NotTplStart = :script(~~
+    (function() {
+        var c0 = c.peek(0)
+        if ((c0 >= 97 && c0 <= 122) || (c0 >= 65 && c0 <= 90) || c0 === 95 || c0 === 123) {
+            return abnf.newToken("\x01tplstart", 0)
+        }
+    })()
+~~) ;
 TplChunk    <~~ push({s: unescapeJs(up.in)}) ~~>
             = TplChar { TplChar } ;
 TplChar     = TplEsc | TplPlain ;
@@ -2011,7 +2070,7 @@ CharPlain   = "\x09" | "\x0b"..."\x0c" | "\x20"..."\x26" | "\x28"..."\x5b" | "\x
 // $name / ${expr} interpolation (same maker as Template). A $ directly after an
 // internal quote is consumed as raw text (exotic corner, kept simple).
 RawStr      <~~ push(makeTemplate(takeAll())) ~~>
-            = '"""' :whitespace() { TplExpr | TplVar | RawChunk } RawClose :whitespace(Whitespace) ;
+            = '"""' :whitespace() { TplExpr | TplVar | TplDollar | RawChunk } RawClose :whitespace(Whitespace) ;
 // A raw string ends at the LAST """ of a run of quotes, so the extra quotes in
 // psi/stringTemplates/RawStringsWithManyQuotes.kt (""""""" is the one-character string
 // ") belong to the CONTENT. RawChunk cannot take a quote that is glued to the
@@ -3604,6 +3663,18 @@ NotMemberKw = :script(~~
     // lazy { ... }: the delegate whose `.value` is computed once. A property that
     // delegates to it is read through the same box.
     hostGlobals["lazy"] = function(f) { return {__lazy: true, f: f, done: false, v: null} }
+    // kotlin.properties.Delegates: the three standard property delegates. Each answers
+    // a box delegGet / delegSet drive (see delegKind), and the twin is the "Delegates"
+    // arm of ktGlobal in abnf/jsrtkotlin.go, which the compiler half already had - this
+    // half aborted with "unknown name: Delegates".
+    hostGlobals["Delegates"] = {
+        observable: function(initial, cb) { return kDelegBox("observable", initial, cb) },
+        vetoable: function(initial, cb) { return kDelegBox("vetoable", initial, cb) },
+        notNull: function() { return kDelegBox("notNull", null, null) }
+    }
+    function kDelegBox(kind, initial, cb) {
+        return {__ktdeleg: kind, v: initial, cb: cb, set: kind != "notNull"}
+    }
     // ----- kotlinx.coroutines, as a SYNCHRONOUS subset -----
     // `launch`, `async`, `runBlocking`, `delay` and the scope builders were UNDEFINED
     // in both halves, so any program with a coroutine in it stopped at the import.
@@ -4154,6 +4225,7 @@ NotMemberKw = :script(~~
     // this = null, and the compiled twin binds args[0] unconditionally). Global-rooted
     // like a top-level function; the receiver is args[0], so params start at argOff 1.
     function registerExtFun(items) {
+        tpEnd()
         var params = items[1].params
         var body = items[2]
         extFuns["$" + items[0]] = function() {
@@ -4571,13 +4643,17 @@ NotMemberKw = :script(~~
         }
         return out
     }
-    // toInt() / toLong() / toDouble() on a String. Kotlin throws NumberFormatException
-    // for text that is not a number, with java.lang's message.
+    // toInt() / toLong() / toDouble() on a String. Kotlin THROWS NumberFormatException
+    // for text that is not a number, with java.lang's message - a catchable exception,
+    // not a hard abort: `runCatching { s.toInt() }.getOrElse { -1 }` and an ordinary
+    // try/catch are how real code parses input, and both halves used to stop the program
+    // dead instead (identically, so nothing flagged it). The compiled twin is ktParseNum
+    // in abnf/jsrtkotlin.go, which now raises the same class through ktRaise.
     function kParseNum(sv, name) {
         var t = kTrimSide(sv, true, true)
         if (name == "toDouble") {
             var d = parseFloat(t)
-            if (t.length == 0 || d !== d) { fail("For input string: \"" + sv + "\"") }
+            if (t.length == 0 || d !== d) { kThrowExc("NumberFormatException", "For input string: \"" + sv + "\"") }
             return kFlo(d)
         }
         var neg = false
@@ -4591,7 +4667,7 @@ NotMemberKw = :script(~~
         }
         if (bad) {
             if (name == "toIntOrNull") { return null }
-            fail("For input string: \"" + sv + "\"")
+            kThrowExc("NumberFormatException", "For input string: \"" + sv + "\"")
         }
         // anytype, not a bare initializer: the frozen engine PINS a slot to the type
         // of its declaration, and a sized-integer accumulator that starts as a box may
@@ -4680,6 +4756,44 @@ NotMemberKw = :script(~~
         return out
     }
 
+    // ----- explicit TYPE ARGUMENTS on a method call -----
+    // The methods whose type argument is part of the call's MEANING. For these the type
+    // name is appended as a trailing string argument; for every other method the
+    // captured list is dropped exactly as it was before this existed, so a program that
+    // calls none of them is unchanged.
+    var mcallTArgMethods = {"$filterIsInstance": true}
+    // MethodSfx's item list holds the method name, the (optional) type-argument text and
+    // the arguments. The shared popName lifts only the name, and a `{mtargs}` item left
+    // among the arguments would be read as one - so this is popName with the type-
+    // argument case added, local to Kotlin.
+    function popMCall() {
+        var items = takeAll()
+        var name = ""
+        var targ = ""
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i] != null && items[i].mname != undefined) { name = items[i].mname }
+            else if (items[i] != undefined && items[i] != null && items[i].mtargs != undefined) { targ = items[i].mtargs }
+            else { push(items[i]) }
+        }
+        return {name: name, targ: targ}
+    }
+    // "<String>" / "< String , Int >" -> "String": the FIRST type argument, whitespace
+    // stripped. Only the first is used; no builtin here takes two.
+    function tArgName(t) {
+        var s = stripWs(t)
+        if (s.length < 3) { return "" }
+        s = s.substring(1, s.length - 1)
+        var cut = s.indexOf(",")
+        if (cut >= 0) { s = s.substring(0, cut) }
+        return s
+    }
+    // The trailing string argument a method call's type arguments contribute, or null.
+    function mcallTArg(s) {
+        if (s.targ == undefined || s.targ == null || s.targ == "") { return null }
+        if (mcallTArgMethods["$" + s.name] != true) { return null }
+        var n = tArgName(s.targ)
+        return n == "" ? null : n
+    }
     // ----- Collections -----
     function kElems(v) {
         if (Array.isArray(v)) { return v }
@@ -5076,6 +5190,21 @@ NotMemberKw = :script(~~
         // reaches for them constantly and every one of them aborted the run in BOTH
         // halves with "unknown list method". The compiled twin is ktSeqMethod in
         // abnf/jsrtkotlin.go; the two tables are kept in step name for name.
+        // filterIsInstance<T>(): the elements that ARE a T. The type argument is the
+        // whole point of the call, and both grammars used to SKIP a call's explicit type
+        // arguments (`"." KId [ SkipAngle ] MArgs`), so the name reached the runtime
+        // with nothing to filter on and both halves aborted with "unknown list method".
+        // MTypeArgs now captures the list and makeCallMember passes the type NAME as a
+        // trailing string argument for the handful of methods that need it. A null is
+        // never an instance of a non-nullable T, so it is dropped, exactly as Kotlin's
+        // own filterIsInstance does. The compiled twin is ktSeqMethod in
+        // abnf/jsrtkotlin.go.
+        if (name == "filterIsInstance") {
+            var want = (args.length > 0 && typeof args[0] == "string" && args[0] != "") ? args[0] : "Any"
+            out = []
+            for (i = 0; i < es.length; i++) { if (kIsType(es[i], want)) { out.push(es[i]) } }
+            return {v: out}
+        }
         if (name == "filterNotNull" || name == "requireNoNulls") {
             out = []
             for (i = 0; i < es.length; i++) {
@@ -5330,11 +5459,18 @@ NotMemberKw = :script(~~
             return {v: undefined}
         }
         if (name == "removeAll" || name == "retainAll") {
-            var drop = kElems(f)
+            // Kotlin has TWO overloads of each: one takes a collection of elements, the
+            // other a PREDICATE. `l.removeAll { it % 2 == 0 }` is the commoner of the
+            // two in real code and aborted BOTH halves with "not a sequence: <lambda>",
+            // because only the collection overload existed. The twin is the same branch
+            // of ktMutListMethod in abnf/jsrtkotlin.go.
+            var isPred = (typeof f == "function")
+            var drop = isPred ? [] : kElems(f)
             var keep = []
             for (i = 0; i < es.length; i++) {
                 var hit = false
-                for (var di = 0; di < drop.length; di++) { if (kEqVals(drop[di], es[i])) { hit = true } }
+                if (isPred) { hit = f(es[i]) === true }
+                else { for (var di = 0; di < drop.length; di++) { if (kEqVals(drop[di], es[i])) { hit = true } } }
                 if (hit == (name == "retainAll")) { keep.push(es[i]) }
             }
             var changed2 = keep.length != es.length
@@ -5355,6 +5491,19 @@ NotMemberKw = :script(~~
             if (name == "getOrDefault") { return {v: args[1]} }
             if (name == "getOrElse") { return {v: args[1]()} }
             return {v: null}
+        }
+        // getOrPut(key) { default }: the value under key, or - when there is none - the
+        // lambda's value, STORED under the key and then answered. It is the standard
+        // way to build a map of collections (`m.getOrPut(k) { mutableListOf() }.add(v)`)
+        // and existed in neither half ("unknown Map method: getOrPut"). The twin is the
+        // same case of ktMapMethod in abnf/jsrtkotlin.go.
+        if (name == "getOrPut") {
+            i = kMapFind(m, f)
+            if (i >= 0) { return {v: m.vals[i]} }
+            var np = anytype
+            np = args[1]()
+            kMapPut(m, f, np)
+            return {v: np}
         }
         if (name == "put" || name == "set") {
             i = kMapFind(m, f)
@@ -6219,7 +6368,13 @@ NotMemberKw = :script(~~
         }
         return true
     }
-    function kfield(o, name) { return hasOwn(o, name) ? o[name] : undefined }
+    // A NULL receiver has no field, and hasOwn on one raises "Cannot convert undefined
+    // or null to object" - which an extension property on a NULLABLE receiver reaches
+    // the moment its getter runs (makeGetter snapshots the backing field of `this`).
+    function kfield(o, name) {
+        if (o === undefined || o === null) { return undefined }
+        return hasOwn(o, name) ? o[name] : undefined
+    }
     // An operator convention resolved on the LEFT operand's class - operator fun plus,
     // times, unaryMinus, contains, get, invoke, compareTo. Returns {v: result} when the
     // receiver is a user object whose class defines the method, else null so the caller
@@ -6342,7 +6497,22 @@ NotMemberKw = :script(~~
                 if (s.safe && (cur === undefined || cur === null)) { cur = null; continue }
                 if (s.kind == "mcall") {
                     var spec = kevalArgs(s.args)
-                    cur = mcall(cur, s.name, spec.pos, spec)
+                    // An explicit type argument the method actually uses -
+                    // xs.filterIsInstance<String>() - rides along as a trailing string.
+                    var tn = mcallTArg(s)
+                    if (tn != null) { spec.pos = concat2impl(spec.pos, [tn]) }
+                    // A REIFIED type parameter of an extension called in method position
+                    // - `inline fun <reified T> Any.isA() = this is T`, then
+                    // `"x".isA<String>()`. The plain call form `isA<String>(x)` already
+                    // pushed the call site's type arguments; the method-suffix form
+                    // skipped them, so `is T` inside answered false for every T in BOTH
+                    // halves. Same stack, same rule.
+                    if (s.targ != undefined && s.targ != null && s.targ != "") {
+                        kTypeArgsPush(parseTypeArgs(s.targ))
+                        try { cur = mcall(cur, s.name, spec.pos, spec) } finally { kTypeArgsPop() }
+                    } else {
+                        cur = mcall(cur, s.name, spec.pos, spec)
+                    }
                 } else if (s.kind == "field") {
                     cur = kGetField(cur, s.name)
                 } else if (s.kind == "dotanon") {
@@ -6986,6 +7156,18 @@ NotMemberKw = :script(~~
             if (typeof p != "string" && p.vararg) {
                 var va = []
                 for (var k = i + off; k < args.length; k++) { va.push(args[k]) }
+                // A vararg parameter may also be filled by NAME, and Kotlin's rule is
+                // that the single named argument IS the array ("only one named argument
+                // for a vararg parameter is allowed, and it must be an array"). Without
+                // this, `add("b", roles = arrayOf("dev"))` bound `roles` to the EMPTY
+                // list here - there were no positional arguments left - while the
+                // compiler half wrapped the array in another array and answered
+                // [[dev]]. Neither was Kotlin's [dev].
+                if (va.length == 0 && named != null && hasOwn(named, p.pname)) {
+                    var nv = anytype
+                    nv = named[p.pname]
+                    va = Array.isArray(nv) ? nv : kIterable(nv)
+                }
                 declVar(p.pname, va)
                 continue
             }
@@ -7497,8 +7679,25 @@ NotMemberKw = :script(~~
             scopes = [globalScope, {}]
             declVar("this", self)
             declVar(pn, arguments[1])
-            declVar("field", kfield(self, name))
-            try { nlrRun(body); self[name] = getVar("field") } finally { scopes = saved }
+            var f0 = anytype // The backing value at entry; the body may leave any type in it.
+            f0 = kfield(self, name)
+            declVar("field", f0)
+            // The write-back is CONDITIONAL. Kotlin only materializes a backing field
+            // when an accessor actually mentions `field`, so a setter that stores
+            // somewhere else - `set(v) { super.p = v }`, the delegating override -
+            // must not have its store undone. An unconditional `self[name] = field`
+            // put the ENTRY value back on top of the write the body had just made, so
+            // `d.p = 7` left the base's property at 1 while the same store from an
+            // ordinary method (`fun poke(v: Int) { super.p = v }`) worked. Comparing
+            // against the entry value keeps `field = x` writing through and makes a
+            // setter that never touches `field` a no-op on the slot, which is what the
+            // compiler half already did.
+            try {
+                nlrRun(body)
+                var f1 = anytype
+                f1 = getVar("field")
+                if (f1 !== f0) { self[name] = f1 }
+            } finally { scopes = saved }
         }
     }
     // Attach the nested declarations of a body: each one registered itself as a global
@@ -7583,7 +7782,7 @@ NotMemberKw = :script(~~
     function runDelegInit(self, dg) {
         var d = anytype
         d = dg.dsrc()
-        self[dg.prop + "$delegate"] = delegCheck(d, dg.pos) ? d : null
+        self[dg.prop + "$delegate"] = delegResolve(d, self, dg.prop, dg.pos)
     }
     function newDescriptor(name, parentSpecs) {
         return {__isclass: true, __name: name, __parentSpecs: parentSpecs, __parents: null,
@@ -7939,13 +8138,84 @@ NotMemberKw = :script(~~
         }
         return r
     }
-    // An expression that provides no getValue is not a delegate at all (a DI stub, a
-    // plain value): reported as not implemented when the declaration runs, and the
-    // field is left null so -warn-unsupported can carry on.
-    function delegCheck(d, pos) {
-        if (lookupMethod(d, "getValue") != null) { return true }
+    // Which delegate protocol a `by` expression implements, or "" when it implements
+    // none. The twin of ktDelegKind in abnf/jsrtkotlin.go, which the compiler half
+    // drives: "obj" is a user object with getValue, "map" a Map delegated by the
+    // property's NAME, "box" one of the kotlin.properties.Delegates boxes and "lazy"
+    // a lazy handle. Only the "obj" arm was recognized before, because the test was a
+    // bare lookupMethod - which does not see the builtin Map surface at all, and whose
+    // kMapMethod getValue takes a KEY rather than a property. So `val a: Int by map`
+    // warned "delegated property not implemented" in this half while the compiler
+    // answered map["a"]; each non-obj kind therefore needs its own branch.
+    function delegKind(d) {
+        if (d === null || d === undefined || typeof d != "object") { return "" }
+        if (typeof d.__ktdeleg == "string" && d.__ktdeleg != "") { return "box" }
+        if (d.__lazy === true) { return "lazy" }
+        if (kIsMap(d)) { return "map" }
+        if (lookupMethod(d, "getValue") != null) { return "obj" }
+        return ""
+    }
+    // Resolve a `by` expression to the delegate that will actually be stored. A
+    // provideDelegate operator gets to substitute one at the DECLARATION - that is the
+    // whole point of the operator, and it is how a delegate learns the property name
+    // before any access happens. An expression that implements no protocol at all is
+    // not a delegate (a DI stub, a plain value): reported as not implemented when the
+    // declaration runs, and null is stored so -warn-unsupported can carry on.
+    function delegResolve(d, owner, name, pos) {
+        var dd = anytype
+        dd = d
+        if (lookupMethod(dd, "provideDelegate") != null) {
+            dd = mcall(dd, "provideDelegate", [owner, propRefOf(owner, name)])
+        }
+        if (delegKind(dd) != "") { return dd }
         notImpl("delegated property", pos)
-        return false
+        return null
+    }
+    // One read of a delegated property, by kind.
+    function delegGet(d, owner, name) {
+        var k = delegKind(d)
+        if (k == "") { return null }
+        if (k == "map") {
+            // Kotlin's Map delegate reads the entry under the property's NAME, and
+            // getValue on a missing key is an error (Map.get would answer null).
+            var mr = kMapMethod(d, "getValue", [name])
+            return mr == null ? null : mr.v
+        }
+        if (k == "lazy") { return kLazyValue(d) }
+        if (k == "box") {
+            if (d.__ktdeleg == "notNull" && d.set !== true) {
+                fail("Property " + name + " should be initialized before get.")
+            }
+            return d.v
+        }
+        return mcall(d, "getValue", [owner, propRefOf(owner, name)])
+    }
+    // One write of a delegated property, by kind.
+    function delegSet(d, owner, name, v) {
+        var k = delegKind(d)
+        if (k == "" || k == "lazy") { return }
+        if (k == "map") { kMapPut(d, name, v); return }
+        if (k == "box") {
+            // kotlin.properties.Delegates: observable notifies AFTER the change,
+            // vetoable asks BEFORE it and keeps the old value on a false answer,
+            // notNull simply refuses to be read before it is written.
+            var old = anytype
+            old = d.v
+            var kind = d.__ktdeleg
+            var cb = d.cb
+            if (kind == "vetoable" && cb != undefined && cb !== null) {
+                var okv = anytype // The lambda answers a Boolean; anything else is let through.
+                okv = cb.apply(undefined, [propRefOf(owner, name), old, v])
+                if (okv === false || okv === null || okv === undefined) { return }
+            }
+            d.v = v
+            d.set = true
+            if (kind == "observable" && cb != undefined && cb !== null) {
+                cb.apply(undefined, [propRefOf(owner, name), old, v])
+            }
+            return
+        }
+        mcall(d, "setValue", [owner, propRefOf(owner, name), v])
     }
     function propRefOf(owner, name) { return {__propref: true, obj: owner, pname: name, kbound: true, kthis: false} }
     function makeDelegGetter(name) {
@@ -7954,7 +8224,7 @@ NotMemberKw = :script(~~
             var d = anytype
             d = kfield(self, name + "$delegate")
             if (d === null || d === undefined) { return null }
-            return mcall(d, "getValue", [self, propRefOf(self, name)])
+            return delegGet(d, self, name)
         }
     }
     function makeDelegSetter(name) {
@@ -7963,7 +8233,7 @@ NotMemberKw = :script(~~
             var d = anytype
             d = kfield(self, name + "$delegate")
             if (d === null || d === undefined) { return }
-            mcall(d, "setValue", [self, propRefOf(self, name), arguments[1]])
+            delegSet(d, self, name, arguments[1])
         }
     }
     // items = [name, {dsrc}]
@@ -7971,17 +8241,19 @@ NotMemberKw = :script(~~
         var name = items[0]
         var src = items[1].dsrc
         return function() {
+            var d0 = anytype
+            d0 = src()
             var d = anytype
-            d = src()
-            if (!delegCheck(d, pos)) { declVar(name, null); return }
+            d = delegResolve(d0, null, name, pos)
+            if (d === null) { declVar(name, null); return }
             declVar(name, {__pdeleg: true, d: d, owner: null, pname: name})
         }
     }
     function isPDeleg(v) {
         return v !== null && v !== undefined && typeof v == "object" && v.__pdeleg === true
     }
-    function pdelegGet(box) { return mcall(box.d, "getValue", [box.owner, propRefOf(box.owner, box.pname)]) }
-    function pdelegSet(box, v) { mcall(box.d, "setValue", [box.owner, propRefOf(box.owner, box.pname), v]) }
+    function pdelegGet(box) { return delegGet(box.d, box.owner, box.pname) }
+    function pdelegSet(box, v) { delegSet(box.d, box.owner, box.pname, v) }
     // A variable read unwraps a delegate box. The test is two comparisons for every
     // non-object value, which is small next to the scope-chain walk getVar already does.
     makeVarRef = function(name) {
@@ -8105,6 +8377,27 @@ NotMemberKw = :script(~~
                 if (start == null && ps.length > 0) { start = ps[0] }
             }
             return {__superref: true, self: self, cls: start}
+        }
+    }
+    // `super.p = v` and its compound forms. items = [{squal}?, {sfname}, op, rhs].
+    // The marker makeSuperRef builds already routes through kGetField/kSetField's
+    // __superref branches, so this only has to name the field and pick the operator.
+    function makeSuperAssign(clsName, items) {
+        var at = 0
+        if (items[at] != undefined && items[at] != null && items[at].squal != undefined) { at++ }
+        var quals = []
+        if (at > 0) { quals.push(items[0]) }
+        var refT = makeSuperRef(clsName, quals)
+        var fname = items[at].sfname
+        var op = items[at + 1]
+        var valT = items[at + 2]
+        return function() {
+            var v = anytype // An assignment moves a value of any type.
+            v = valT()
+            var o = refT()
+            if (op != "=") { v = applyOp(op, kGetField(o, fname), v) }
+            kSetField(o, fname, v)
+            return v
         }
     }
     // this@Outer: walk out along the __outer chain of an inner-class instance until the
@@ -8449,7 +8742,17 @@ NotMemberKw = :script(~~
 
     // ----- Field / index access with accessors and operator conventions -----
     function kGetField(o, name) {
-        if (o === undefined || o === null) { fail("property ." + name + " of null") }
+        // An extension property declared on a NULLABLE receiver - `val String?.safeLen
+        // get() = this?.length ?: -1` - is exactly the case where a null receiver is
+        // legal, and its getter is the only thing that can decide what to answer. The
+        // null test came first and aborted with "property .safeLen of null" while the
+        // compiler half (whose field emitter reaches extp$name before any null check)
+        // answered -1. A name no extension declares still fails, as before.
+        if (o === undefined || o === null) {
+            var ep0 = extProps["$" + name]
+            if (ep0 != undefined) { return ep0(o) }
+            fail("property ." + name + " of null")
+        }
         // ::topLevelFun is the function value itself, and KFunction.name is its name.
         if (typeof o == "function") {
             if (name == "name") { return fnRefName(o) }
@@ -8919,6 +9222,15 @@ NotMemberKw = :script(~~
             if (cls == undefined && cur.__isclass == undefined &&
                 (Array.isArray(cur) || kIsMap(cur) || cur.__sb === true)) {
                 if (kRecvProps["$" + name] === true) { return {v: kGetField(cur, name)} }
+                // A name the RUNTIME provides as a global is not a member of the
+                // receiver: `buildList { addAll(listOf(2, 3)) }` bound `listOf` as a
+                // method of the list under construction and aborted with "unknown list
+                // method: listOf", because core.varMiss runs BEFORE the hostGlobals
+                // lookup in getVar. Declining here lets it fall through, which is what
+                // the compiler half does (js_ktget consults the scope first). A builtin
+                // receiver has no member of any of these names, so nothing that used to
+                // resolve stops resolving.
+                if (hasOwn(hostGlobals, name)) { return null }
                 return {v: kBoundBuiltin(cur, name)}
             }
             cur = hasOwn(cur, "__outer") ? cur.__outer : null
