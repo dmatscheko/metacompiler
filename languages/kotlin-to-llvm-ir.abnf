@@ -1391,7 +1391,7 @@ CallMember  <~~ push(foldCallMember(takeAll())) ~~>
 // reading at all and the parse died on the `::`. The value is not modelled - a class
 // literal has no runtime representation in this subset - so it is reported.
 // RefName PUSHES its text, so the tag drains it before pushing the suffix record.
-RefSfx      <~~ takeAll(); push({kind: "dotanon", t: notImplExpr("callable reference on an expression", up.pos)}) ~~>
+RefSfx      <~~ push({kind: "refsfx", name: pop()}) ~~>
             = "::" RefName ;
 RefName     = KId <~~ push(up.in) ~~> | "class" KwEnd <~~ push("class") ~~> ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}); retLblPop() ~~>
@@ -1959,10 +1959,11 @@ RawTwoQ     = '"' '"' ( "\x00"..."\x21" | "\x23"..."\U0010ffff" ) ;
 
 // A callable reference. A bare ::fn is genuine: top-level functions and builtins are
 // already first-class closures, so ::fn lowers exactly like the name itself (stored,
-// passed as a lambda, called later). A constructor reference ::Cls yields the class
-// descriptor, which is not callable - out of the subset. A QUALIFIED reference
-// (Type::member, pkg.Type::member, recv::method) needs a bound-method value the
-// subset does not model: recognised, not implemented.
+// passed as a lambda, called later); ::Cls is a CONSTRUCTOR reference and js_ktbareref
+// turns the descriptor into one. A QUALIFIED reference (Type::member, recv::method,
+// recv::prop) becomes a runtime reference value - see makeQualRef and the
+// js_ktref / js_ktclasslit block in abnf/jsrtkotlin.go. Every form here is the twin of
+// one in kotlin-interpreter.abnf; ./test.sh --cross diffs the two.
 CallableRef = IsInitRef | BareClassRef | BareRef | QualRef ;
 // A RECEIVERLESS class literal, `::class` (psi/DoubleColon.kt, clean tree). It names the
 // class of the implicit receiver, which this subset does not model, so it is recognised
@@ -1977,9 +1978,18 @@ BareClassRef <~~ push(notImplExpr("receiverless class literal", up.pos)) ~~>
 // same thing, and it used to fall through to BareRef, which READ the property and
 // then asked for `.isInitialized` of the (null) value - aborting both halves with
 // "member 'isInitialized' of null".
-IsInitRef   <~~ push(makeIsInit(pop().irname)) ~~>
-            = [ "this" KwEnd ] "::" KId <~~ push({irname: up.in}) ~~> "." "isInitialized" KwEnd ;
-BareRef     = "::" KId <~~ push(makeVarRef(up.in)) ~~> ;
+// The receiver is refused when it is anything OTHER than `this` / `this@Label` /
+// absent: the Kotlin documentation ("Checking whether a lateinit var is initialized")
+// makes the check available only for a property lexically accessible at the site, and a
+// type-qualified `Type::prop` is a KProperty1 - an unbound reference - where
+// isInitialized is declared on KProperty0 alone. `l::a.isInitialized` from OUTSIDE the
+// declaring class is therefore a compile error, not `false`. Widened from a literal
+// `[ "this" ]` to a full base so that the refusal happens HERE rather than falling
+// through to QualRef, which (since references were implemented) would build a perfectly
+// good bound reference and read a member off it.
+IsInitRef   <~~ push(makeIsInit(takeAll(), up.pos)) ~~>
+            = [ QualRefBase [ "?" ] [ "?" ] ] "::" KId <~~ push({irname: up.in}) ~~> "." "isInitialized" KwEnd ;
+BareRef     = "::" KId <~~ push(makeBareRef(up.in)) ~~> ;
 // A NULLABLE receiver is allowed in front of the `::` - `X?::x`, `X ?:: x`, `X? ?:: x`,
 // `X ??:: x`, `X ?? :: x`. All five are CALLABLE_REFERENCE_EXPRESSIONs in Kotlin's own
 // tree (psi/greatSyntacticShift/nullableTypes.txt), differing only in where the QUEST
@@ -1987,14 +1997,16 @@ BareRef     = "::" KId <~~ push(makeVarRef(up.in)) ~~> ;
 // which this form drops anyway, so they are consumed and ignored.
 // This has to be matched at the Primary level, before Elvis gets to see the `?:` of
 // `a?::b` as its own operator.
-QualRef     <~~ push(notImplExpr("callable reference", up.pos)) ~~>
+QualRef     <~~ var qn = pop(); push(makeQualRef(pop(), qn)) ~~>
 // Each segment may carry TYPE ARGUMENTS - `a<b>?::c`, `a<b?,c?>?::d`, `a.b<c.d<e.f>>::g`
 // and `a<b,c>::class` are all clean CALLABLE_REFERENCE_EXPRESSIONs in psi/DoubleColon.txt -
 // and the referenced name may be `class` (a class literal). Both as in the interpreter half.
 // The base may also carry a LABEL - `super<a>@b::foo` (psi/DoubleColon.txt records it as
 // one CALLABLE_REFERENCE_EXPRESSION over a labelled super). The `::` that has to follow is
 // what keeps this apart from an ordinary `label@ statement`.
-            = KId [ SkipAngle ] [ "@" KId ] { "." KId [ SkipAngle ] } [ "?" ] [ "?" ] "::" ( KId | "class" KwEnd ) ;
+            = QualRefBase [ "?" ] [ "?" ] "::" RefName ;
+QualRefBase <~~ push(stripWs(up.in)) ~~>
+            = KId [ SkipAngle ] [ "@" KId ] { "." KId [ SkipAngle ] } ;
 
 // An anonymous function expression - fun(params): T { ... } or fun(params) = expr - is
 // genuine: it lowers to exactly what a named local function lowers to (an own IR
@@ -3446,6 +3458,12 @@ KwContract  = "contract" KwEnd ;
                 return {b: ea.b, v: callExt(ea.b, "js_ktsmcall", [cur, emitStr(ea.b, s.name), ea.v])}
             }
             if (s.kind == "dotanon") { return s.t(b) }
+            // `X()::class`, `foo()::bar` - a reference whose RECEIVER is an arbitrary
+            // expression, so it is always a BOUND one.
+            if (s.kind == "refsfx") {
+                if (s.name == "class") { return {b: b, v: callExt(b, "js_ktclasslit", [cur])} }
+                return {b: b, v: emitRefValue(b, cur, s.name)}
+            }
             if (s.kind == "invoke") {
                 // The value in hand IS the callee. Same three cases the named `invoke`
                 // method suffix above handles: a plain function value is called, and a
@@ -5417,11 +5435,56 @@ KwContract  = "contract" KwEnd ;
             return {b: b, v: thisV}
         }
     }
-    function makeIsInit(name) {
+    // items = [base?, {irname}]. See the IsInitRef production for the rule this
+    // enforces. The twin is makeIsInit in kotlin-interpreter.abnf.
+    function makeIsInit(items, pos) {
+        var base = null
+        var name = ""
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "string") { base = it }
+            else if (it != undefined && it != null && it.irname != undefined) { name = it.irname }
+        }
+        if (base != null && base != "this" && base.substring(0, 5) != "this@") {
+            return notImplExpr("isInitialized on a property that is not lexically accessible here", pos)
+        }
         return function(b) {
             var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
             return {b: b, v: callExt(b, "js_sne", [callExt(b, "js_get", [thisV, emitStr(b, name)]), hNull])}
         }
+    }
+    // `::name`. A scope binding is the value itself - which is what ::fn has always
+    // been - except that a CLASS descriptor becomes a constructor reference, and a name
+    // the scope does not carry but the implicit receiver does becomes a BOUND property
+    // reference. All three decisions are made by js_ktbareref, the twin of makeBareRef /
+    // kCtorRefOf in kotlin-interpreter.abnf, so the two halves cannot drift apart.
+    function makeBareRef(name) {
+        return function(b) {
+            return {b: b, v: callExt(b, "js_ktbareref", [curScopeV, emitStr(b, name)])}
+        }
+    }
+    // `base::name` and `base::class`. Whether the base is a VALUE (a bound reference) or
+    // a TYPE (an unbound one) is a run-time question here exactly as it is in the
+    // interpreter half - js_ktrefbase answers a marker for a base that resolves to
+    // neither a binding nor a receiver member, which is what makes `String::length`
+    // work without a String descriptor.
+    function makeQualRef(baseName, name) {
+        return function(b) {
+            var baseV = callExt(b, "js_ktrefbase", [curScopeV, emitStr(b, baseName)])
+            if (name == "class") { return {b: b, v: callExt(b, "js_ktclasslit", [baseV])} }
+            return {b: b, v: emitRefValue(b, baseV, name)}
+        }
+    }
+    // js_ktref(base, name, ext). An EXTENSION function is resolved at COMPILE time here
+    // exactly as a call to it is (extResolves), because the runtime has no extension
+    // table: the closure is handed to the reference so that `Box::tripled` and
+    // `b::tripled` call it with the receiver in front. Without it both halves read a
+    // property that does not exist and answered kotlin.Unit. undefined otherwise, so a
+    // program that declares no extension emits the same call it did before.
+    function emitRefValue(b, baseV, name) {
+        var extV = hUndef
+        if (extResolves(name)) { extV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "ext$" + name)]) }
+        return callExt(b, "js_ktref", [baseV, emitStr(b, name), extV])
     }
 
     // items = [name, {cparams}?, {supers}?, ({prop}|{method}|{initblk}|{absmethod})...]

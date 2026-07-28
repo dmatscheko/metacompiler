@@ -2033,6 +2033,95 @@ fun sec55() = runBlocking {
     check("cor6", "" + awaitAll(two[0], two[1]) == "[1, 2]")
 }
 
+// ===== SECTION 57: the callable-reference surface =====
+// `b::v`, `b::w`, `b::method` and `b::class` are ordinary Kotlin (bound references
+// since 1.1) and the COMPILER aborted on every one of them with "callable reference
+// not implemented" while the interpreter answered them - a live cross-half divergence
+// that --cross never exercised because no test used one. Alongside it, an UNBOUND
+// reference's accessors gave a wrong answer in the interpreter: `(Box57::v).get(b)`
+// answered kotlin.Unit where Kotlin answers 3, because a type-qualified reference kept
+// the class DESCRIPTOR as its receiver instead of taking one from the call.
+//
+// Everything below is the KCallable / KClass surface both halves now implement, pinned
+// name by name. Semantics from the Kotlin documentation ("Callable references", "Class
+// references", "Reflection"): an unbound reference takes the receiver as the FIRST
+// argument of get/set/invoke, a bound one has it already; .name is the member's simple
+// name and "<init>" for a constructor reference; KClass.simpleName and .qualifiedName
+// agree for a top-level class in the default package; and two bound references to the
+// same member of the same receiver are EQUAL.
+class Box57(val v: Int) {
+    var w: Int = 5
+    fun twice(): Int = v * 2
+    fun ownName(): String = this::v.name
+    fun ownBare(): Int = ::v.get()
+}
+fun Box57.tripled(): Int = v * 3
+fun top57(x: Int): Int = x + 100
+fun apply57(f: (Box57) -> Int, b: Box57): Int = f(b)
+fun sec57() {
+    val b = Box57(3)
+    val lst = listOf(Box57(2), Box57(1))
+    // BOUND property references: get / invoke / set / name.
+    check("ref1", b::v.get() == 3 && b::v.invoke() == 3 && b::v.name == "v")
+    check("ref2", b::w.get() == 5)
+    b::w.set(9)
+    check("ref3", b.w == 9 && b::w.get() == 9)
+    // UNBOUND (type-qualified) references take the receiver from the call.
+    check("ref4", Box57::v.get(b) == 3 && Box57::v.invoke(b) == 3 && Box57::v.name == "v")
+    Box57::w.set(b, 4)
+    check("ref5", b.w == 4)
+    // FUNCTION references, bound and unbound, called directly and through invoke.
+    check("ref6", b::twice.invoke() == 6 && Box57::twice.invoke(b) == 6)
+    check("ref7", b::twice() == 6 && Box57::twice.name == "twice")
+    val f = b::twice
+    check("ref8", f() == 6)
+    // A reference to a member of a BUILTIN type: the base names a type, not a value.
+    check("ref9", String::length.get("abcd") == 4)
+    // A top-level function reference is the function value, and carries its name.
+    check("ref10", ::top57.invoke(1) == 101 && ::top57.name == "top57")
+    // A CONSTRUCTOR reference.
+    check("ref11", ::Box57.invoke(7).v == 7)
+    check("ref12", "" + listOf(7, 8).map(::Box57).map { it.v } == "[7, 8]")
+    // CLASS LITERALS, from a value and from a type name.
+    check("ref13", b::class.simpleName == "Box57" && Box57::class.simpleName == "Box57")
+    check("ref14", Box57::class.qualifiedName == "Box57")
+    check("ref15", Box57::class.isInstance(b) && !Box57::class.isInstance(3))
+    check("ref16", "" + Box57::class == "class Box57")
+    // .java is the same handle again - java.lang.Class renders "class Box57" too.
+    check("ref17", b::class.java.simpleName == "Box57")
+    check("ref18", String::class.simpleName == "String" && 3::class.simpleName == "Int")
+    // A reference passed where a LAMBDA is expected - a builtin and a user function.
+    check("ref19", "" + lst.map(Box57::v) == "[2, 1]")
+    check("ref20", "" + lst.map(Box57::twice) == "[4, 2]")
+    check("ref21", "" + lst.sortedBy(Box57::v).map(Box57::v) == "[1, 2]")
+    check("ref22", apply57(Box57::v, b) == 3)
+    // An EXTENSION function reference: a member the receiver really has still wins.
+    check("ref23", b::tripled.invoke() == 9 && "" + lst.map(Box57::tripled) == "[6, 3]")
+    // EQUALITY: two bound references to the same member of the same receiver.
+    check("ref24", b::v == b::v && !(b::v == b::w))
+    check("ref25", b::class == Box57::class)
+    // A reference whose RECEIVER is an arbitrary expression.
+    check("ref26", Box57(1)::v.get() == 1 && Box57(1)::class.simpleName == "Box57")
+    // A NULLABLE receiver in front of the `::` - the `?` belongs to the type.
+    check("ref27", b?::v.get() == 3)
+    // A reference read from inside the class, qualified and bare.
+    check("ref28", b.ownName() == "v" && b.ownBare() == 3)
+    // A reference stored in a val keeps its accessors.
+    val p = b::w
+    p.set(11)
+    check("ref29", p.get() == 11 && p.name == "w")
+    check("ref30", "" + listOf(1, 2).map(::top57) == "[101, 102]")
+    // A constructor reference is named "<init>", and KCallable.toString() renders the
+    // REFERENCE rather than the value it reads. Real kotlin-reflect prints
+    // "val Box57.v: kotlin.Int" and, without the reflection library on the class path,
+    // "property v (Kotlin reflection is not available)"; neither is reproducible here,
+    // so both halves agree on a short form and the divergence from the JVM is
+    // deliberate. The interpreter used to answer "3" for the line below - the value -
+    // where the compiled half rendered the reference.
+    check("ref31", ::Box57.name == "<init>")
+    check("ref32", b::v.toString() == "" + b::v && b::v.toString() != "3")
+}
+
 // ===== SECTION 56: the enum statics, and the MutableList mutating surface =====
 // Two clusters found by probing next to the sections above, both wrong in BOTH
 // halves and therefore invisible to the cross-check:
@@ -2139,6 +2228,7 @@ fun main() {
     sec54() // SECTION-CALL 54
     sec55() // SECTION-CALL 55
     sec56() // SECTION-CALL 56
+    sec57() // SECTION-CALL 57
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

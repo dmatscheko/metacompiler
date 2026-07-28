@@ -776,6 +776,11 @@ func init() {
 			if giIsInt(l) || giIsInt(r) {
 				return boolH(rt.giEq(l, r))
 			}
+			// Two callable references / class literals. See ktRefEq; without it the
+			// comparison fell through to identity and `b::v == b::v` was false.
+			if v, decided := ktRefEq(l, r); decided {
+				return boolH(v)
+			}
 			// A list, a map or a Pair/Triple compares STRUCTURALLY (ktStructEq): none
 			// of them carries a class descriptor, so the fallback below is identity
 			// and `listOf(1, 2) == listOf(1, 2)` answered false.
@@ -798,6 +803,11 @@ func init() {
 			l, r := u(a[0]), u(a[1])
 			if giIsInt(l) || giIsInt(r) {
 				return boolH(!rt.giEq(l, r))
+			}
+			// Two callable references / class literals. See ktRefEq; without it the
+			// comparison fell through to identity and `b::v == b::v` was false.
+			if v, decided := ktRefEq(l, r); decided {
+				return boolH(!v)
 			}
 			if v, decided := rt.ktStructEq(l, r); decided {
 				return boolH(!v)
@@ -1091,6 +1101,44 @@ func init() {
 			// 'toDouble' on a number" while the interpreter answered 7.0 - a live
 			// cross-half divergence that no test happened to exercise.
 			recv, mname := u(a[0]), rt.toString(u(a[1]))
+			// A callable reference receiver: get / set / invoke, with the receiver as
+			// the FIRST argument when the reference is unbound (Kotlin's
+			// KProperty1.get(receiver)). The twin is the __propref arm of mcall in
+			// kotlin-interpreter.abnf.
+			if info, isRef := ktRefOf(recv); isRef {
+				switch mname {
+				case "invoke":
+					return w(rt.ktRefApply(info, arr.elems))
+				case "get":
+					return w(ktRefRead(ktRefRecv(info, arr.elems), info.name))
+				case "set":
+					rest := ktRefRest(info, arr.elems)
+					ktRefWrite(ktRefRecv(info, arr.elems), info.name, argAt(rest, 0))
+					return w(jsUndef)
+				case "equals":
+					eq, _ := ktRefEq(recv, argAt(arr.elems, 0))
+					return boolH(eq)
+				case "toString":
+					return rt.wrapStr(rt.ktpRender(recv, 0))
+				}
+				if !info.bound {
+					rt.fail("method .%s() of an unbound callable reference ::%s", mname, info.name)
+				}
+				recv = ktRefRead(info.recv, info.name)
+			}
+			// A KClass receiver.
+			if co, isCls := ktIsClassLit(recv); isCls {
+				switch mname {
+				case "isInstance":
+					return m["js_ktis"]([]uint64{w(argAt(arr.elems, 0)), w(co.props["kname"])})
+				case "toString":
+					return rt.wrapStr(rt.ktpRender(recv, 0))
+				case "equals":
+					eq, _ := ktRefEq(recv, argAt(arr.elems, 0))
+					return boolH(eq)
+				}
+				rt.fail("method .%s() of a class literal", mname)
+			}
 			// A QUALIFIED stdlib call - kotlin.math.abs(-3). The receiver is a
 			// package handle (see ktPkg) and the member is the same global function
 			// the bare spelling reaches; a call is a METHOD call in the tree, so it
@@ -1257,6 +1305,140 @@ func init() {
 			return u(m["js_ktsmcall"]([]uint64{w(recv), rt.wrapStr(name), w(&jsArray{elems: args})}))
 		}
 		ktRecvStack = nil
+		// The reference machinery reaches fields through exactly the externs the
+		// emitted code uses, and its two side tables are per-runtime.
+		ktRefRead = func(recv interface{}, name string) interface{} {
+			return u(m["js_ktfget"]([]uint64{w(recv), rt.wrapStr(name)}))
+		}
+		ktRefWrite = func(recv interface{}, name string, v interface{}) {
+			rt.setMember(recv, name, v)
+		}
+		ktRefs = map[*hostFunc]*ktRefInfo{}
+		ktFuncNames = map[interface{}]string{}
+
+		// js_ktrefbase(scope, "Box") resolves the BASE of a `::`. A base that names a
+		// value answers that value; one that names a TYPE this value model has no
+		// binding for (String::length) answers a ktTypeName marker instead of failing,
+		// which is what makes the reference unbound. The twin is the hasVar test in
+		// makePropRef (kotlin-interpreter.abnf).
+		m["js_ktrefbase"] = func(a []uint64) uint64 {
+			sc := rt.scopeOf(a[0])
+			name := rt.toString(u(a[1]))
+			// A builtin TYPE name is a type even though the scope carries a same-named
+			// builder for it: without this, `String::length` bound itself to the String
+			// conversion function and .get("abcd") answered kotlin.Unit here while the
+			// interpreter half answered 4.
+			if ktTypeNames[name] {
+				return w(ktTypeName{name: name})
+			}
+			for s := sc; s != nil; s = s.parent {
+				if v, ok := s.get(name); ok {
+					return w(v)
+				}
+			}
+			for s := sc; s != nil; s = s.parent {
+				if t, ok := s.get("this"); ok {
+					if obj, isObj := t.(*jsObject); isObj {
+						if _, ok := obj.props[name]; ok {
+							return w(t)
+						}
+					}
+				}
+			}
+			return w(ktTypeName{name: name})
+		}
+
+		// js_ktref(base, "v") is `base::v`. The base decides which of Kotlin's two
+		// reference kinds it is: a class descriptor or a type name gives an UNBOUND
+		// reference (KProperty1 / KFunction1, whose get/set/invoke take the receiver
+		// first), anything else a BOUND one.
+		m["js_ktref"] = func(a []uint64) uint64 {
+			base, name := u(a[0]), rt.toString(u(a[1]))
+			var ext interface{}
+			if len(a) > 2 && isCallable(u(a[2])) {
+				ext = u(a[2])
+			}
+			if tn, isType := base.(ktTypeName); isType {
+				return w(rt.ktMakeRef(&ktRefInfo{name: name, tname: tn.name, ext: ext}))
+			}
+			if o, isObj := base.(*jsObject); isObj {
+				if b, isCls := o.props["__isclass"].(bool); isCls && b {
+					nm, _ := o.props["__name"].(string)
+					return w(rt.ktMakeRef(&ktRefInfo{name: name, tname: nm, ext: ext}))
+				}
+			}
+			return w(rt.ktMakeRef(&ktRefInfo{recv: base, name: name, bound: true, ext: ext}))
+		}
+
+		// js_ktbareref(scope, "name") is a bare `::name`. A scope binding is the value
+		// itself (::fn has always been the closure), except that a CLASS descriptor
+		// becomes a constructor reference; a name the scope does not carry but the
+		// implicit receiver DOES becomes a bound property reference, which is what makes
+		// `::prop` inside a member a KProperty0. Anything else falls through to the
+		// ordinary name resolution. The twin is makeBareRef in kotlin-interpreter.abnf.
+		m["js_ktbareref"] = func(a []uint64) uint64 {
+			sc := rt.scopeOf(a[0])
+			name := rt.toString(u(a[1]))
+			for s := sc; s != nil; s = s.parent {
+				if v, ok := s.get(name); ok {
+					if isCallable(v) {
+						ktFuncNames[v] = name
+					}
+					return m["js_ktctorref"]([]uint64{w(v)})
+				}
+			}
+			for s := sc; s != nil; s = s.parent {
+				if t, ok := s.get("this"); ok {
+					if obj, isObj := t.(*jsObject); isObj {
+						if _, has := obj.props[name]; has {
+							return w(rt.ktMakeRef(&ktRefInfo{recv: obj, name: name, bound: true}))
+						}
+					}
+				}
+			}
+			r := m["js_ktget"](a)
+			if isCallable(u(r)) {
+				ktFuncNames[u(r)] = name
+			}
+			return m["js_ktctorref"]([]uint64{r})
+		}
+
+		// js_ktctorref(v) turns `::Box` into a CONSTRUCTOR reference (Kotlin names it
+		// "<init>"): callable, and passable where a lambda is expected. A bare `::fn`
+		// is handed back untouched - a function is already a first-class value.
+		m["js_ktctorref"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if o, isObj := v.(*jsObject); isObj {
+				if b, isCls := o.props["__isclass"].(bool); isCls && b {
+					return w(rt.ktMakeRef(&ktRefInfo{recv: o, name: "<init>", bound: true, ctor: true}))
+				}
+			}
+			return a[0]
+		}
+
+		// js_ktclasslit(base) is `base::class`.
+		m["js_ktclasslit"] = func(a []uint64) uint64 {
+			base := u(a[0])
+			if tn, isType := base.(ktTypeName); isType {
+				return w(ktClassLit(tn.name))
+			}
+			if o, isObj := base.(*jsObject); isObj {
+				if b, isCls := o.props["__isclass"].(bool); isCls && b {
+					return w(ktClassLit(o.props["__name"]))
+				}
+			}
+			return w(ktClassLit(ktSimpleName(base)))
+		}
+
+		// js_ktnameval(v, "topFun") remembers the name a `::` spelled against the
+		// closure it resolved to, so KFunction.name can answer it, and hands the value
+		// straight back. The twin is fnRefName in kotlin-interpreter.abnf.
+		m["js_ktnameval"] = func(a []uint64) uint64 {
+			if isCallable(u(a[0])) {
+				ktFuncNames[u(a[0])] = rt.toString(u(a[1]))
+			}
+			return a[0]
+		}
 
 		// js_ktglobal(name) is the VALUE of one global builder; buildMain declares
 		// one per name. See the block above ktRecvStack.
@@ -1353,6 +1535,36 @@ func init() {
 			o, name := u(a[0]), rt.toString(u(a[1]))
 			if p, isPkg := ktIsPkg(o); isPkg {
 				return w(rt.ktPkgMember(p, name))
+			}
+			// A callable reference: KCallable.name. The twin is the __propref arm of
+			// kGetField in kotlin-interpreter.abnf.
+			if info, isRef := ktRefOf(o); isRef {
+				if name == "name" {
+					return rt.wrapStr(info.name)
+				}
+				if !info.bound {
+					rt.fail("member .%s of an unbound callable reference ::%s", name, info.name)
+				}
+				return w(ktRefRead(info.recv, info.name))
+			}
+			// ::topLevelFun is the closure itself, and KFunction.name is the name the
+			// reference site spelled - recorded by js_ktnameval, since a closure
+			// carries none of its own.
+			if isCallable(o) && name == "name" {
+				if n, has := ktFuncNames[o]; has {
+					return rt.wrapStr(n)
+				}
+			}
+			// A KClass. simpleName and qualifiedName agree for a top-level class in
+			// the default package, and .java is the same handle again.
+			if co, isCls := ktIsClassLit(o); isCls {
+				switch name {
+				case "simpleName", "qualifiedName", "name":
+					return w(co.props["kname"])
+				case "java", "javaClass", "javaObjectType":
+					return w(co)
+				}
+				rt.fail("member .%s of a class literal", name)
 			}
 			// `Col.entries` is a PROPERTY (an EnumEntries, which is a List) where
 			// values() is a function, so it is read here too.
@@ -1966,6 +2178,14 @@ func (rt *jsrt) ktpRender(v interface{}, depth int) string {
 			parts[i] = rt.ktpRender(e, depth+1)
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
+	case *hostFunc:
+		// A callable reference. Real kotlin-reflect renders "val Box.v: kotlin.Int";
+		// without the reflection library on the class path it prints "property v
+		// (Kotlin reflection is not available)". Neither is reproducible here, so
+		// both halves agree on the short form - a deliberate, recorded divergence.
+		if info, isRef := ktRefOf(t); isRef {
+			return "reference " + info.name
+		}
 	case *jsObject:
 		if s, ok := rt.ktpObj(t, depth); ok {
 			return s
@@ -1977,6 +2197,11 @@ func (rt *jsrt) ktpRender(v interface{}, depth int) string {
 // ktpObj renders the object shapes the Kotlin compiler grammar builds. It reports
 // false for a shape it does not know, which falls back to the generic ToString.
 func (rt *jsrt) ktpObj(o *jsObject, depth int) (string, bool) {
+	// A KClass. java.lang.Class.toString() is "class Box" too, which is why .java
+	// answers the same handle. The twin is the __kclass arm of kstr.
+	if co, isCls := ktIsClassLit(o); isCls {
+		return "class " + rt.ktpRender(co.props["kname"], depth+1), true
+	}
 	// A Regex renders as its pattern and a MatchResult as the matched text, which is
 	// what their toString answers (see abnf/jsrtregexkt.go); neither carries a
 	// __class, so without this they fell through to "[object Object]".
@@ -4807,4 +5032,206 @@ func ktClassChainHas(o *jsObject, name string) bool {
 		cls = clsObj.props["__super"]
 	}
 	return false
+}
+
+// ----- Callable references and class literals -----
+//
+// Kotlin's `b::v`, `Box::v`, `b::twice`, `::topFun`, `::Box`, `b::class` and
+// `Box::class` (the Kotlin documentation, "Callable references" and "Class
+// references"). The twins are kRefMake / kRefApply / kClassOf / kSimpleName in
+// languages/kotlin-interpreter.abnf and the two MUST stay in step - ./test.sh
+// --cross diffs the two halves.
+//
+// A reference is a *hostFunc, not a record, and that is the whole design: it makes
+// the value CALLABLE by every path the runtime already has (js_call, and the
+// rt.call inside ktSeqMethod that `list.map(Box::v)` goes through), with no change
+// to abnf/jsrt.go at all. The metadata hangs off a side table keyed by the
+// hostFunc POINTER, which is safe because the value is built at run time and never
+// crosses the tag stack - the identity trap in docs/abnf-dialect-gotchas.md is a
+// BUILD-time one.
+type ktRefInfo struct {
+	recv  interface{} // the bound receiver; nil when unbound
+	name  string
+	bound bool
+	ctor  bool        // ::Box - a constructor reference
+	tname string      // the TYPE the base named, for an unbound reference
+	ext   interface{} // the EXTENSION function of that name, resolved at compile time
+}
+
+// ktTypeName is what js_ktrefbase answers when the base of a `::` named a type
+// rather than a value (`String::length`). The twin is the !hasVar arm of
+// makePropRef in the interpreter half.
+type ktTypeName struct{ name string }
+
+var ktRefs map[*hostFunc]*ktRefInfo
+var ktFuncNames map[interface{}]string
+
+func ktRefOf(v interface{}) (*ktRefInfo, bool) {
+	hf, ok := v.(*hostFunc)
+	if !ok || ktRefs == nil {
+		return nil, false
+	}
+	info, has := ktRefs[hf]
+	return info, has
+}
+
+// ktMakeRef builds the callable. Calling it IS KFunction.invoke / KProperty.invoke:
+// a name the receiver's class chain declares as a METHOD is called, anything else
+// is read as a property - which is what lets one shape serve both kinds.
+func (rt *jsrt) ktMakeRef(info *ktRefInfo) interface{} {
+	hf := &hostFunc{name: "::" + info.name}
+	hf.fn = func(r *jsrt, this uint64, args []interface{}) interface{} {
+		return r.ktRefApply(info, args)
+	}
+	if ktRefs == nil {
+		ktRefs = map[*hostFunc]*ktRefInfo{}
+	}
+	ktRefs[hf] = info
+	return hf
+}
+
+func ktRefRecv(info *ktRefInfo, args []interface{}) interface{} {
+	if info.bound {
+		return info.recv
+	}
+	if len(args) > 0 {
+		return args[0]
+	}
+	return jsNull
+}
+
+func ktRefRest(info *ktRefInfo, args []interface{}) []interface{} {
+	if info.bound || len(args) == 0 {
+		return args
+	}
+	return args[1:]
+}
+
+func (rt *jsrt) ktRefApply(info *ktRefInfo, args []interface{}) interface{} {
+	if info.ctor {
+		return rt.ktConstruct(info.recv, args)
+	}
+	recv := ktRefRecv(info, args)
+	if o, isObj := recv.(*jsObject); isObj {
+		if ktClassChainHas(o, info.name) {
+			return ktMemberCall(recv, info.name, ktRefRest(info, args))
+		}
+		// A member the receiver really HAS wins over a same-named extension, which is
+		// Kotlin's rule for the call too.
+		if _, own := o.props[info.name]; own {
+			return ktRefRead(recv, info.name)
+		}
+	}
+	if info.ext != nil {
+		return rt.call(info.ext, jsUndef, append([]interface{}{recv}, ktRefRest(info, args)...))
+	}
+	return ktRefRead(recv, info.name)
+}
+
+// ktRefRead / ktRefWrite are KProperty.get and KProperty.set: the property READ and
+// WRITE, never the method. They are installed by the registrar so the reference code
+// reaches exactly the field paths the emitted code uses (js_ktfget / js_set).
+var ktRefRead func(recv interface{}, name string) interface{}
+var ktRefWrite func(recv interface{}, name string, v interface{})
+
+// ktConstruct runs a class descriptor's constructor - what `::Box.invoke(7)` and
+// `list.map(::Box)` do. It is the runtime twin of the emitted `new` sequence.
+func (rt *jsrt) ktConstruct(cls interface{}, args []interface{}) interface{} {
+	clsObj, ok := cls.(*jsObject)
+	if !ok {
+		rt.fail("constructor reference on a non-class")
+	}
+	obj := newJSObject()
+	obj.set("__class", clsObj)
+	if ctor, has := clsObj.props["__ctor"]; has && isCallable(ctor) {
+		rt.call(ctor, jsUndef, append([]interface{}{obj}, args...))
+	}
+	return obj
+}
+
+// ktSimpleName is the simple name of a value's class - KClass.simpleName. The twin
+// is kSimpleName in kotlin-interpreter.abnf.
+func ktSimpleName(v interface{}) interface{} {
+	switch t := v.(type) {
+	case jsUndefT, jsNullT:
+		return jsNull
+	case jsChar:
+		return "Char"
+	case jsJFlo:
+		return "Double"
+	case jsGInt:
+		return ktBoxTypeName(t)
+	case float64:
+		return "Int"
+	case string:
+		return "String"
+	case bool:
+		return "Boolean"
+	case *jsArray:
+		return "ArrayList"
+	case *jsObject:
+		if b, isCls := t.props["__isclass"].(bool); isCls && b {
+			return t.props["__name"]
+		}
+		if cls, has := t.props["__class"].(*jsObject); has {
+			return cls.props["__name"]
+		}
+	}
+	return jsNull
+}
+
+// ktClassLit is `x::class` / `Type::class`. A KClass renders "class Box", and so
+// does java.lang.Class - which is why .java answers the same handle here.
+func ktClassLit(name interface{}) *jsObject {
+	o := newJSObject()
+	o.set("__kclass", true)
+	o.set("kname", name)
+	return o
+}
+
+func ktIsClassLit(v interface{}) (*jsObject, bool) {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil, false
+	}
+	b, isB := o.props["__kclass"].(bool)
+	return o, isB && b
+}
+
+// ktRefEq is Kotlin's equality on the two reflection shapes: two BOUND references
+// are equal when they name the same member of the same receiver (`b::v == b::v` is
+// true), and two class literals when they name the same class. Answers handled=false
+// for anything that is not one of the two.
+func ktRefEq(l, r interface{}) (bool, bool) {
+	li, lIsRef := ktRefOf(l)
+	ri, rIsRef := ktRefOf(r)
+	if lIsRef || rIsRef {
+		if !lIsRef || !rIsRef {
+			return false, true
+		}
+		return li.name == ri.name && li.bound == ri.bound && li.ctor == ri.ctor &&
+			li.tname == ri.tname && li.recv == ri.recv, true
+	}
+	lc, lIsCls := ktIsClassLit(l)
+	rc, rIsCls := ktIsClassLit(r)
+	if lIsCls || rIsCls {
+		if !lIsCls || !rIsCls {
+			return false, true
+		}
+		return lc.props["kname"] == rc.props["kname"], true
+	}
+	return false, false
+}
+
+// ktTypeNames are the names Kotlin declares as TYPES rather than values, so that a
+// `::` in front of one of them is an UNBOUND reference. The twin is kTypeNames in
+// languages/kotlin-interpreter.abnf and the two lists MUST stay in step.
+var ktTypeNames = map[string]bool{
+	"String": true, "CharSequence": true, "Int": true, "Long": true, "Short": true,
+	"Byte": true, "UInt": true, "ULong": true, "UShort": true, "UByte": true,
+	"Double": true, "Float": true, "Boolean": true, "Char": true, "Any": true,
+	"Unit": true, "Number": true, "Nothing": true, "List": true, "MutableList": true,
+	"Set": true, "MutableSet": true, "Map": true, "MutableMap": true, "Array": true,
+	"Collection": true, "Iterable": true, "Comparable": true, "IntRange": true,
+	"CharRange": true, "LongRange": true, "Regex": true, "StringBuilder": true,
 }

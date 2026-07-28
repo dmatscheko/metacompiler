@@ -479,6 +479,18 @@
             "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/lisp-to-llvm-ir.abnf", "tests/lisp-test-multifile.txt", "-q"]
         },
         {
+            "name": "Kotlin isInitialized out of scope SHOULD FAIL (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-fail-test-isinit.kt", "-q"]
+        },
+        {
+            "name": "Kotlin isInitialized out of scope SHOULD FAIL (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-fail-test-isinit.kt", "-q"]
+        },
+        {
             "name": "Kotlin unresolved import SHOULD FAIL",
             "type": "go",
             "request": "launch",

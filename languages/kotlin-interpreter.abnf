@@ -1414,7 +1414,7 @@ CallMember  <~~ push(foldCallMember(takeAll())) ~~>
 // reading at all and the parse died on the `::`. The value is not modelled - a class
 // literal has no runtime representation in this subset - so it is reported.
 // RefName PUSHES its text, so the tag drains it before pushing the suffix record.
-RefSfx      <~~ takeAll(); push({kind: "dotanon", t: notImplExpr("callable reference on an expression", up.pos)}) ~~>
+RefSfx      <~~ push({kind: "refsfx", name: pop()}) ~~>
             = "::" RefName ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}); retLblPop() ~~>
             = "." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ SkipAngle ] MArgs ;
@@ -1993,7 +1993,22 @@ RawTwoQ     = '"' '"' ( "\x00"..."\x21" | "\x23"..."\U0010ffff" ) ;
 // as a lambda, called later). A QUALIFIED reference binds the receiver: recv::member
 // yields a property reference {__propref, obj, name} - readable through .isInitialized
 // (the lateinit test), callable through .invoke(), and otherwise the bound member.
-CallableRef = BareClassRef | BareRef | QualRef ;
+CallableRef = IsInitRef | BareClassRef | BareRef | QualRef ;
+// `::prop.isInitialized` - Kotlin's lateinit check, and a SCOPE question rather than a
+// type one. The Kotlin documentation ("Checking whether a lateinit var is initialized")
+// makes the check available only for a property that is lexically accessible at the
+// site: declared in the same type, in one of the outer types, or at top level in the
+// same file. `l::a.isInitialized` from OUTSIDE the declaring class is a compile error,
+// where this half used to answer `false` - a wrong answer, not a missing feature.
+// The enclosing class chain is known to the grammar while it walks (curClasses), so the
+// receiver is a pure SYNTAX question, so it is decided here: absent, `this` or
+// `this@Label` is accepted and every other receiver is refused. (`Type::prop` is a
+// KProperty1 - an UNBOUND reference - and isInitialized is declared on KProperty0
+// alone, so a type-qualified spelling is refused by the same rule.) Matched BEFORE
+// QualRef, which would otherwise build an ordinary bound reference and read
+// .isInitialized off it - answering `false` where Kotlin refuses the program.
+IsInitRef   <~~ push(makeIsInit(takeAll(), up.pos)) ~~>
+            = [ QualRefBase [ "?" ] [ "?" ] ] "::" KId <~~ push({irname: up.in}) ~~> "." "isInitialized" KwEnd ;
 // A RECEIVERLESS class literal, `::class` (psi/DoubleColon.kt line 40, clean tree). It
 // names the class of the implicit receiver, which this subset does not model, so it is
 // recognised and reported rather than guessed at. It must precede BareRef, whose KId
@@ -4002,6 +4017,13 @@ NotMemberKw = :script(~~
         }
         // A class descriptor printed on its own is its name.
         if (typeof v == "object" && v.__isclass === true) { return v.__name }
+        // KClass.toString() and java.lang.Class.toString() are both "class Box".
+        if (typeof v == "object" && v.__kclass === true) { return "class " + v.kname }
+        // A callable reference. Real kotlin-reflect renders "val Box.v: kotlin.Int";
+        // without the reflection library on the class path it prints "property v (Kotlin
+        // reflection is not available)". Neither is reproducible here, so both halves
+        // agree on the short form and the divergence is deliberate and recorded.
+        if (typeof v == "object" && v.__propref === true) { return "reference " + v.pname }
         // A user object renders through its toString(): the data-class generated one
         // (Pt13(x=1, y=2)), an explicit override, or the Kotlin default Name@hash shape.
         if (typeof v == "object" && v.__class != undefined && v.__class != null) {
@@ -4189,9 +4211,11 @@ NotMemberKw = :script(~~
     // let / run / apply / also / takeIf / takeUnless: extensions on ANY receiver, so no
     // receiver branch owns them. A class MEMBER of the same name wins, exactly as it
     // does in Kotlin, which is what the lookupMethod probe is for.
-    function kScopeMethod(target, name, args) {
+    function kScopeMethod(target, name, rawArgs) {
         if (name != "let" && name != "run" && name != "apply" && name != "also" &&
             name != "takeIf" && name != "takeUnless") { return null }
+        // b.let(::println) - a callable reference is a lambda here too.
+        var args = kNormArgs(rawArgs)
         if (args.length != 1 || typeof args[0] != "function") { return null }
         if (target !== null && target !== undefined && typeof target == "object" &&
             target.__class != undefined && target.__class != null) {
@@ -4673,7 +4697,10 @@ NotMemberKw = :script(~~
         }
         return out
     }
-    function kSeqMethod(es, name, args) {
+    function kSeqMethod(es, name, rawArgs) {
+        // A callable reference passed where a lambda is expected - list.map(Box::v),
+        // forEach(::println) - is the closure it stands for at every BUILTIN member.
+        var args = kNormArgs(rawArgs)
         var f = args.length > 0 ? args[0] : null
         var i
         var out
@@ -5221,7 +5248,8 @@ NotMemberKw = :script(~~
         }
         return null
     }
-    function kMapMethod(m, name, args) {
+    function kMapMethod(m, name, rawArgs) {
+        var args = kNormArgs(rawArgs)
         var f = args.length > 0 ? args[0] : null
         var i
         if (name == "get" || name == "getValue" || name == "getOrDefault" || name == "getOrElse") {
@@ -5338,7 +5366,8 @@ NotMemberKw = :script(~~
     // elements, which is right because kotlin.collections declares map / filter /
     // sorted / reversed / joinToString / take / ... on Iterable and they all answer a
     // LIST even for a Set receiver. The twin is ktSetMethod in abnf/jsrtkotlin.go.
-    function kSetMethod(s, name, args) {
+    function kSetMethod(s, name, rawArgs) {
+        var args = kNormArgs(rawArgs)
         var f = args.length > 0 ? args[0] : null
         var i
         if (name == "size") { return {v: s.keys.length} }
@@ -5561,10 +5590,29 @@ NotMemberKw = :script(~~
             kSetNamed(sp.named)
             return sm.apply(undefined, concat2impl([target.self], args))
         }
-        // recv::member used as a callable.
+        // recv::member used as a callable. get/set take the receiver as their first
+        // argument when the reference is UNBOUND (Kotlin's KProperty1.get(receiver));
+        // a bound one already has it. invoke() runs the method when the name is one and
+        // reads the property otherwise, which is what makes `b::twice()` and
+        // `Box::v.invoke(b)` the same code.
         if (target.__propref === true) {
-            if (name == "invoke" || name == "get") { return kGetField(target.obj, target.pname) }
+            if (name == "invoke") { return kRefApply(target, args) }
+            if (name == "get") { return kRefGet(target, args) }
+            if (name == "set") { kRefSet(target, args); return undefined }
+            if (name == "equals") { return kEq(target, args.length > 0 ? args[0] : null) }
+            // KCallable.toString() renders the REFERENCE, not the value it reads: this
+            // branch sits above mcall's general toString, so without it `b::v.toString()`
+            // answered "3" here and "reference v" in the compiled half.
+            if (name == "toString" && args.length == 0) { return kstr(target) }
+            if (target.kbound === false) { fail("method ." + name + "() of an unbound callable reference ::" + target.pname) }
             return mcall(kGetField(target.obj, target.pname), name, args, spec)
+        }
+        // A class literal, `x::class` / `Type::class`.
+        if (target.__kclass === true) {
+            if (name == "isInstance") { return kIsType(args.length > 0 ? args[0] : null, target.kname) }
+            if (name == "toString") { return kstr(target) }
+            if (name == "equals") { return kEq(target, args.length > 0 ? args[0] : null) }
+            fail("method ." + name + "() of a class literal")
         }
         // A class descriptor: a nested type constructor, a companion member or an enum
         // helper (values()/valueOf()).
@@ -5583,6 +5631,10 @@ NotMemberKw = :script(~~
                 }
             }
             if (target.__companion != undefined) { return mcall(target.__companion, name, args, spec) }
+            // ::Box is a CONSTRUCTOR reference, so ::Box.invoke(7) constructs - after
+            // every companion/static reading of the name has been tried, so a companion
+            // that declares its own `invoke` still wins.
+            if (name == "invoke") { return kNew(target, sp) }
             fail("unknown member '" + name + "' on " + target.__name)
         }
         // v.toString() is the rendering of the value, which is what println writes -
@@ -5592,6 +5644,13 @@ NotMemberKw = :script(~~
         // outright ("unknown list method: toString") and an enum entry answered E@1.
         // The compiled half emits js_ktstr at the same point (see foldCallMember).
         if (name == "toString" && args.length == 0) { return kstr(target) }
+        // Everything from here down is a BUILTIN receiver (a list, a string, a range, a
+        // map, a set, ... - a class instance is dispatched further below, through its own
+        // __class chain). A callable reference passed to one of those is passed where a
+        // LAMBDA is expected - list.map(Box::v) - so it becomes the closure it stands
+        // for. A user method keeps the reference itself, which is what lets it read
+        // .name or call .get(x).
+        if (target.__class == undefined) { args = kNormArgs(args) }
         // A range answers contains without materialising, and every other list method
         // (map/filter/sumOf/forEach/count/any/...) on its element sequence.
         // A MAP: the shared {__dict, keys, vals} handle mapOf/groupBy/associate build.
@@ -5974,6 +6033,17 @@ NotMemberKw = :script(~~
             // so nothing below would ever have found an `equals` for them: before this
             // `listOf(1, 2) == listOf(1, 2)` was FALSE in both halves. Structural
             // equality also has to agree with kHash, which was already element-wise.
+            // Two callable references are equal when they name the same member of the
+            // same receiver (Kotlin: `b::v == b::v` is true for bound references), and
+            // two class literals when they name the same class. Both are plain records
+            // here, so without this they compared by identity and answered false.
+            if (a.__propref === true || b.__propref === true) {
+                return a.__propref === true && b.__propref === true && a.pname == b.pname &&
+                       a.kbound === b.kbound && a.obj === b.obj && a.ktype == b.ktype
+            }
+            if (a.__kclass === true || b.__kclass === true) {
+                return a.__kclass === true && b.__kclass === true && a.kname == b.kname
+            }
             var se = kStructEq(a, b)
             if (se != 0) { return se > 0 }
             var eq = lookupMethod(a, "equals")
@@ -6153,6 +6223,11 @@ NotMemberKw = :script(~~
                     cur = kGetField(cur, s.name)
                 } else if (s.kind == "dotanon") {
                     cur = s.t()
+                } else if (s.kind == "refsfx") {
+                    // `X()::class`, `foo()::bar` - a reference whose RECEIVER is an
+                    // arbitrary expression. The value in hand is that receiver, so the
+                    // reference is always a BOUND one.
+                    cur = (s.name == "class") ? kClassOf(cur) : kRefMake(cur, s.name, true, null)
                 } else if (s.kind == "invoke") {
                     // The value in hand is the callee: a class descriptor constructs, a
                     // function value applies, and anything else is offered its `invoke`
@@ -6163,6 +6238,8 @@ NotMemberKw = :script(~~
                     } else if (typeof cur == "function") {
                         kSetNamed(ispec.named)
                         cur = cur.apply(undefined, ispec.pos)
+                    } else if (kIsRef(cur)) {
+                        cur = kRefApply(cur, ispec.pos)
                     } else {
                         var inv = lookupMethod(cur, "invoke")
                         if (inv == null) { fail("call of a non function value") }
@@ -6780,8 +6857,23 @@ NotMemberKw = :script(~~
     function kRetAdopt(f, v) {
         return (f.rty == undefined || f.rty == "") ? v : kAdoptTy(v, f.rty)
     }
+    // A top-level function's name, remembered against its closure so that
+    // `::topLevelFun.name` can answer it (Kotlin: KFunction.name). A function VALUE
+    // carries no name of its own here, and a side table keyed by identity is safe
+    // because these closures are built once, at registration, and never copied: the
+    // tag-stack round trip that loses a thunk's identity under goja happens at BUILD
+    // time, not while the program runs. The table is one entry per declared function.
+    var fnRefFns = []
+    var fnRefNames = []
+    function fnRefName(v) {
+        for (var i = 0; i < fnRefFns.length; i++) { if (fnRefFns[i] === v) { return fnRefNames[i] } }
+        return undefined
+    }
     function registerFun(f) {
-        globalScope[f.name] = makeFunClosure(f)
+        var cl = makeFunClosure(f)
+        fnRefFns.push(cl)
+        fnRefNames.push(f.name)
+        globalScope[f.name] = cl
     }
     // A local function statement: bind a closure over the enclosing scope under the
     // function's name in the CURRENT scope. Unlike a top-level function (invokeBody
@@ -7612,7 +7704,7 @@ NotMemberKw = :script(~~
         notImpl("delegated property", pos)
         return false
     }
-    function propRefOf(owner, name) { return {__propref: true, obj: owner, pname: name} }
+    function propRefOf(owner, name) { return {__propref: true, obj: owner, pname: name, kbound: true, kthis: false} }
     function makeDelegGetter(name) {
         return function() {
             var self = arguments[0]
@@ -7771,29 +7863,187 @@ NotMemberKw = :script(~~
         return function() {
             var sc = scopes
             var ho = objHasOwn
-            for (var i = sc.length - 1; i >= 0; i--) { if (ho.call(sc[i], name)) { return vr() } }
+            for (var i = sc.length - 1; i >= 0; i--) { if (ho.call(sc[i], name)) { return kCtorRefOf(vr()) } }
             var chain = findThisChain()
             for (var ci = 0; ci < chain.length; ci++) {
                 var r = chain[ci]
                 if (r !== null && r !== undefined && typeof r == "object" && hasOwn(r, name)) {
-                    return propRefOf(r, name)
+                    var br = propRefOf(r, name)
+                    br.kthis = true
+                    return br
                 }
             }
-            return vr()
+            return kCtorRefOf(vr())
         }
     }
+    // `::Box` names a CONSTRUCTOR, not the class descriptor: it is callable, it can be
+    // passed where a lambda is expected, and Kotlin gives it the name "<init>". A bare
+    // `::fn` is unaffected - a top-level function is already a first-class value.
+    function kCtorRefOf(v) {
+        if (v !== null && v !== undefined && typeof v == "object" && v.__isclass === true) {
+            var cr = kRefMake(v, "<init>", true, null)
+            cr.kctor = true
+            return cr
+        }
+        return v
+    }
+    // items = [base?, {irname}]. See the IsInitRef production for the rule this
+    // enforces; curClassHas is what makes "one of the outer types" decidable here.
+    function makeIsInit(items, pos) {
+        var base = null
+        var name = ""
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "string") { base = it }
+            else if (it != null && it != undefined && it.irname != undefined) { name = it.irname }
+        }
+        if (base != null && base != "this" && base.substring(0, 5) != "this@") {
+            return notImplExpr("isInitialized on a property that is not lexically accessible here", pos)
+        }
+        var refT = (base == null) ? makeBareRef(name) : makePropRef(base, name, pos)
+        return function() { return kGetField(refT(), "isInitialized") }
+    }
+    // A QUALIFIED reference, `base::name`. Kotlin distinguishes two things that look
+    // identical in the source (the Kotlin documentation, "Callable references"):
+    //   - base is a VALUE      -> a BOUND reference. get()/set(v)/invoke(...) take no
+    //                             receiver; the one captured here is used.
+    //   - base is a TYPE       -> an UNBOUND reference (KProperty1 / KFunction1). Its
+    //                             get(recv)/set(recv, v)/invoke(recv, ...) take the
+    //                             receiver as their FIRST argument.
+    // The two are only told apart at run time, by whether the base resolves to a value
+    // and whether that value is a class descriptor, so the test is made inside the
+    // thunk rather than at walk time. `base::class` is neither: it is a CLASS LITERAL.
     function makePropRef(baseName, name, pos) {
-        var ni = null
         return function() {
-            if (!hasVar(baseName)) {
-                // A type name, not a value: Type::member. Warn (or abort) exactly as
-                // the compiler half does, once, and answer a placeholder.
-                if (ni == null) { ni = notImplExpr("callable reference", pos) }
-                return ni()
+            var hv = hasVar(baseName)
+            var base = anytype // A type name resolves to a descriptor, a value to anything.
+            base = hv ? getVar(baseName) : null
+            var isCls = kIsTypeName(baseName) || (hv && base !== null && base !== undefined && typeof base == "object" && base.__isclass === true)
+            if (name == "class") {
+                if (!hv || kIsTypeName(baseName)) { return kClassLitNamed(baseName) }
+                return isCls ? kClassLitNamed(base.__name) : kClassOf(base)
             }
-            return {__propref: true, obj: getVar(baseName), pname: name}
+            // String::length - the base names a builtin type this value model has no
+            // descriptor for. It is still a perfectly good unbound reference: the
+            // receiver arrives with the call, and the member is read off it.
+            if (!hv || isCls) { return kRefMake(null, name, false, baseName) }
+            var r = kRefMake(base, name, true, null)
+            r.kthis = (baseName == "this" || baseName.substring(0, 5) == "this@")
+            return r
         }
     }
+
+    // ----- The callable-reference and class-literal values -----
+    // A reference is one shape for both KProperty and KFunction: which one it is can be
+    // decided from the receiver at the moment of the call (a class chain that declares a
+    // METHOD of the name makes it a function reference, anything else a property one),
+    // and doing it there means `b::v`, `b::twice`, `Box::v` and `Box::twice` all share
+    // this code. kbound false = the receiver is the first argument.
+    function kRefMake(recv, name, bound, tname) {
+        return {__propref: true, obj: recv, pname: name, kbound: bound, ktype: tname, kthis: false}
+    }
+    // The names Kotlin declares as TYPES rather than values. A `::` in front of one of
+    // them is an UNBOUND reference (String::length, Int::class) even where the runtime
+    // happens to carry a same-named builder in scope - which the compiled half does, and
+    // which made `String::length.get("abcd")` answer kotlin.Unit there while this half
+    // answered 4. The twin is ktIsTypeName in abnf/jsrtkotlin.go; the two lists MUST
+    // stay in step.
+    var kTypeNames = {}
+    function kIsTypeName(n) { return hasOwn(kTypeNames, n) }
+    function kInstallTypeNames() {
+        var ns = ["String", "CharSequence", "Int", "Long", "Short", "Byte", "UInt", "ULong",
+                  "UShort", "UByte", "Double", "Float", "Boolean", "Char", "Any", "Unit",
+                  "Number", "Nothing", "List", "MutableList", "Set", "MutableSet", "Map",
+                  "MutableMap", "Array", "Collection", "Iterable", "Comparable", "IntRange",
+                  "CharRange", "LongRange", "Regex", "StringBuilder"]
+        for (var i = 0; i < ns.length; i++) { rawSet(kTypeNames, ns[i], true) }
+    }
+    kInstallTypeNames()
+    function kIsRef(v) { return v !== null && v !== undefined && typeof v == "object" && v.__propref === true }
+    function kRefRecv(r, args) { return r.kbound ? r.obj : (args.length > 0 ? args[0] : null) }
+    function kRefRest(r, args) { return r.kbound ? args : args.slice(1) }
+    // KProperty.get: the property READ, never the method.
+    function kRefGet(r, args) { return kGetField(kRefRecv(r, args), r.pname) }
+    function kRefSet(r, args) {
+        var recv = kRefRecv(r, args)
+        var rest = kRefRest(r, args)
+        kSetField(recv, r.pname, rest.length > 0 ? rest[0] : null)
+    }
+    // KFunction.invoke / KProperty.invoke - and the same thing a reference does when it
+    // is passed where a lambda is expected (list.map(Box::v)).
+    function kRefApply(r, args) {
+        // ::Box - a CONSTRUCTOR reference. Kotlin names it "<init>", which is what
+        // .name answers, and calling it builds an instance.
+        if (r.kctor === true) { return kNew(r.obj, {pos: args, named: null}) }
+        var recv = anytype // Any receiver type reaches a reference.
+        recv = kRefRecv(r, args)
+        if (lookupMethod(recv, r.pname) != null) { return mcall(recv, r.pname, kRefRest(r, args)) }
+        // A member the receiver really HAS wins over a same-named extension, which is
+        // Kotlin's rule for the call too.
+        if (recv !== null && recv !== undefined && typeof recv == "object" && hasOwn(recv, r.pname)) {
+            return kGetField(recv, r.pname)
+        }
+        // An EXTENSION function - `Box::tripled`, `b::tripled`. extResolves is the same
+        // resolution the call `b.tripled()` uses; without it both halves read a property
+        // that does not exist and answered kotlin.Unit.
+        if (extResolves(r.pname)) {
+            return extFuns["$" + r.pname].apply(undefined, concat2impl([recv], kRefRest(r, args)))
+        }
+        if (recvFn(r.pname) != null) { return mcall(recv, r.pname, kRefRest(r, args)) }
+        return kGetField(recv, r.pname)
+    }
+    // A reference (or a class descriptor - ::Box is a constructor reference) used AS a
+    // function value. The builtins that take a lambda apply their argument directly, so
+    // they normalise it through here first; a user method keeps the reference itself,
+    // which is what lets it read .name or call .get(x).
+    function kCallable(v) {
+        if (v === null || v === undefined || typeof v != "object") { return v }
+        if (v.__propref === true) {
+            var r = v
+            return function() {
+                var av = []
+                for (var i = 0; i < arguments.length; i++) { av.push(arguments[i]) }
+                return kRefApply(r, av)
+            }
+        }
+        return v
+    }
+    // The argument list of a BUILTIN member, with every callable reference turned into
+    // the closure it stands for. Only the builtins go through this: a user class's own
+    // method keeps the reference itself. The array is rebuilt only when there is
+    // something to rebuild, so the ordinary call is one scan.
+    function kNormArgs(args) {
+        var any = false
+        var i
+        for (i = 0; i < args.length; i++) {
+            var a = args[i]
+            if (a !== null && a !== undefined && typeof a == "object" && a.__propref === true) { any = true }
+        }
+        if (!any) { return args }
+        var out = []
+        for (i = 0; i < args.length; i++) { out.push(kCallable(args[i])) }
+        return out
+    }
+    // `expr::class` / `Type::class`. KClass renders as "class Box" (java.lang.Class does
+    // too, which is why .java answers the same value here), and for a top-level class in
+    // the default package qualifiedName IS the simple name.
+    function kClassLitNamed(n) { return {__kclass: true, kname: n} }
+    function kClassOf(v) { return {__kclass: true, kname: kSimpleName(v)} }
+    // The simple name of a value's class. The twin is ktSimpleName in abnf/jsrtkotlin.go.
+    function kSimpleName(v) {
+        if (v === null || v === undefined) { return null }
+        if (kIsChar(v)) { return "Char" }
+        if (kIsFlo(v)) { return "Double" }
+        if (szIs(v)) { return kBoxTypeName(v) }
+        if (typeof v == "number") { return "Int" }
+        if (typeof v == "string") { return "String" }
+        if (typeof v == "boolean") { return "Boolean" }
+        if (typeof v == "object" && v.__isclass === true) { return v.__name }
+        if (typeof v == "object" && v.__class != undefined && v.__class != null) { return v.__class.__name }
+        if (Array.isArray(v)) { return "ArrayList" }
+        return null
+    }
+    function kIsClassLit(v) { return v !== null && v !== undefined && typeof v == "object" && v.__kclass === true }
 
     // ----- Anonymous functions and local extensions -----
     // items = [name?, {params}, body?]: an anonymous function may be named and, in the
@@ -7904,6 +8154,11 @@ NotMemberKw = :script(~~
     // ----- Field / index access with accessors and operator conventions -----
     function kGetField(o, name) {
         if (o === undefined || o === null) { fail("property ." + name + " of null") }
+        // ::topLevelFun is the function value itself, and KFunction.name is its name.
+        if (typeof o == "function") {
+            if (name == "name") { return fnRefName(o) }
+            return extPropGet(o, name)
+        }
         if (kIsPkg(o)) { return kPkgMember(o, name) }
         var krxf = krxField(o, name)
         if (krxf != null) { return krxf.v }
@@ -7963,7 +8218,16 @@ NotMemberKw = :script(~~
                 return pv !== undefined && pv !== null
             }
             if (name == "name") { return o.pname }
+            if (o.kbound === false) { fail("member ." + name + " of an unbound callable reference ::" + o.pname) }
             return kGetField(o.obj, o.pname)
+        }
+        // KClass: simpleName / qualifiedName (a top-level class in the default package
+        // has no package prefix, so the two agree) and .java, which is the same handle
+        // again - java.lang.Class renders "class Box" exactly as KClass does.
+        if (o.__kclass === true) {
+            if (name == "simpleName" || name == "qualifiedName" || name == "name") { return o.kname }
+            if (name == "java" || name == "javaClass" || name == "javaObjectType") { return o }
+            fail("member ." + name + " of a class literal")
         }
         if (o.__isclass === true) {
             var sv = clsStatic(o, name)
@@ -8145,6 +8409,8 @@ NotMemberKw = :script(~~
             var f = getVar(name)
             if (f != undefined && f !== null && f.__isclass) { return kNew(f, spec) }
             if (typeof f != "function") {
+                // A local holding a callable reference - `val g = b::twice; g()`.
+                if (kIsRef(f)) { return kRefApply(f, spec.pos) }
                 var inv = lookupMethod(f, "invoke")
                 if (inv != null) { return inv.apply(undefined, concat2impl([f], spec.pos)) }
                 fail("call of a non function: " + name)
