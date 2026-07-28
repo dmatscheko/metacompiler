@@ -737,11 +737,11 @@ fun sec26() {
     // The names the shared table already carried keep working.
     check("str15", s.length == 3 && s.isEmpty() == false && s.equals("aBc"))
     check("str16", s.substring(1) == "Bc" && s.indexOf("B") == 1)
-    // charAt is the JAVA spelling. Real Kotlin has no String.charAt at all (it is
-    // get / the indexing operator, both of which answer a Char); both grammars
-    // carry it as a builtin that answers a one-character STRING, so that is what is
-    // asserted - the point of this section is that the two halves agree.
-    check("str18", s.charAt(0) == "a" && s[0] == 'a' && s.get(0) == 'a')
+    // charAt is the JAVA spelling. Real Kotlin has no String.charAt at all - it is
+    // get / the indexing operator - but both grammars carry it as a builtin, and it
+    // used to answer a one-character STRING while its two Kotlin spellings answered a
+    // Char, so `s.charAt(0) == 'a'` was FALSE. All three now answer a Char.
+    check("str18", s.charAt(0) == 'a' && s[0] == 'a' && s.get(0) == 'a')
     check("str17", s.toString() == "aBc")
 }
 
@@ -1232,6 +1232,310 @@ fun sec35() {
                          2) == 3)
 }
 
+// ===== SECTION 36: scope functions =====
+// let / also / takeIf / takeUnless - the four kotlin.standard scope functions whose
+// receiver arrives as `it`. They are extensions on Any, so no receiver type owns them
+// and both halves answer them from one universal branch (kScopeMethod /
+// ktScopeMethod). A class MEMBER of the same name still wins, which is Kotlin's rule
+// that a member always beats an extension - checked below with a class that declares
+// its own let().
+// run / apply / with bind the receiver as `this` instead; only the interpreter half
+// has a receiver channel for a bare lambda, so they live in SECTION 40.
+class Scope36(val n: Int) {
+    fun let(k: Int): Int = n + k          // A MEMBER named let: it must win.
+}
+fun sec36() {
+    check("scp1", "x".let { it + "y" } == "xy")
+    check("scp2", 5.let { it * 2 } == 10)
+    check("scp3", listOf(1, 2, 3).let { it.size } == 3)
+    // also returns the RECEIVER, and its lambda is run for its effect.
+    var seen = 0
+    val same = listOf(4, 5).also { seen = it.size }
+    check("scp4", seen == 2 && same.size == 2)
+    check("scp5", "q".also { seen = it.length } == "q" && seen == 1)
+    // takeIf answers the receiver or null; takeUnless is its negation.
+    check("scp6", 7.takeIf { it > 3 } == 7)
+    check("scp7", 2.takeIf { it > 3 } == null)
+    check("scp8", 2.takeUnless { it > 3 } == 2)
+    check("scp9", 7.takeUnless { it > 3 } == null)
+    // A chain: each step hands its own value on.
+    check("scp10", "ab".let { it + "c" }.let { it.length } == 3)
+    // The member wins over the extension.
+    check("scp11", Scope36(10).let(5) == 15)
+    // let on a nullable receiver, the idiom the function exists for.
+    val maybe: String? = "z"
+    check("scp12", maybe?.let { it + "!" } == "z!")
+    val none: String? = null
+    check("scp13", none?.let { it + "!" } == null)
+}
+
+// ===== SECTION 37: the collections API =====
+// The kotlin.collections operations a real program leans on. Every one of them is a
+// METHOD, so both halves answer from the same table (kSeqMethod in
+// kotlin-interpreter.abnf, ktSeqMethod in abnf/jsrtkotlin.go) and --cross diffs them.
+// Values checked against the equivalent Java program under `java` (JDK 24) wherever
+// Kotlin's answer is java.util's: List.hashCode is the 31*h + element fold, and a
+// `sumOf` whose selector answers a Long sums at 64 bits.
+fun sec37() {
+    val xs = listOf(1, 2, 3, 4, 5)
+    check("col1", xs.fold(0) { a, b -> a + b } == 15)
+    check("col2", xs.fold("") { a, b -> a + b } == "12345")
+    check("col3", xs.foldRight("") { a, b -> a + b } == "12345")
+    check("col4", xs.reduce { a, b -> a * b } == 120)
+    check("col5", xs.sumOf { it * 2 } == 30)
+    // sumOf takes the WIDTH of its selector: a Long selector sums at 64 bits, where a
+    // 32 bit accumulator would have wrapped 6000000000 to 1705032704.
+    check("col6", "" + xs.sumOf { it.toLong() * 1000000000L } == "15000000000")
+    check("col7", xs.filter { it % 2 == 1 }.toString() == "[1, 3, 5]")
+    check("col8", xs.filterNot { it % 2 == 1 }.toString() == "[2, 4]")
+    check("col9", xs.map { it * it }.toString() == "[1, 4, 9, 16, 25]")
+    check("col10", xs.mapIndexed { i, v -> i * v }.toString() == "[0, 2, 6, 12, 20]")
+    check("col11", xs.flatMap { listOf(it, it) }.size == 10)
+    check("col12", listOf(listOf(1, 2), listOf(3)).flatten().toString() == "[1, 2, 3]")
+    check("col13", xs.partition { it > 2 }.toString() == "([3, 4, 5], [1, 2])")
+    check("col14", xs.chunked(2).toString() == "[[1, 2], [3, 4], [5]]")
+    check("col15", xs.windowed(3).toString() == "[[1, 2, 3], [2, 3, 4], [3, 4, 5]]")
+    check("col16", xs.zip(listOf("a", "b")).toString() == "[(1, a), (2, b)]")
+    check("col17", xs.zip(listOf(10, 20)) { a, b -> a + b }.toString() == "[11, 22]")
+    check("col18", xs.take(2).toString() == "[1, 2]" && xs.drop(3).toString() == "[4, 5]")
+    check("col19", xs.takeLast(2).toString() == "[4, 5]" && xs.dropLast(3).toString() == "[1, 2]")
+    check("col20", xs.reversed().toString() == "[5, 4, 3, 2, 1]")
+    check("col21", listOf(3, 1, 2).sorted().toString() == "[1, 2, 3]")
+    check("col22", listOf(3, 1, 2).sortedDescending().toString() == "[3, 2, 1]")
+    val words = listOf("bbb", "a", "cc")
+    check("col23", words.sortedBy { it.length }.toString() == "[a, cc, bbb]")
+    check("col24", words.sortedByDescending { it.length }.toString() == "[bbb, cc, a]")
+    check("col25", words.maxByOrNull { it.length } == "bbb" && words.minByOrNull { it.length } == "a")
+    check("col26", xs.maxOrNull() == 5 && xs.minOrNull() == 1)
+    check("col27", listOf<Int>().maxOrNull() == null)
+    check("col28", xs.all { it > 0 } && !xs.all { it > 1 })
+    check("col29", xs.none { it > 9 } && !xs.none { it > 4 })
+    check("col30", xs.find { it > 3 } == 4 && xs.find { it > 9 } == null)
+    check("col31", xs.first { it % 2 == 0 } == 2 && xs.firstOrNull { it > 9 } == null)
+    check("col32", xs.indexOfFirst { it == 3 } == 2 && xs.indexOfFirst { it == 9 } == -1)
+    check("col33", listOf(1, 1, 2, 2, 3).distinct().toString() == "[1, 2, 3]")
+    check("col34", xs.joinToString("-") == "1-2-3-4-5")
+    check("col35", xs.joinToString(", ", "[", "]") == "[1, 2, 3, 4, 5]")
+    check("col36", xs.withIndex().toString() == "[(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)]")
+    // java.util.List.hashCode: 31*h + element, starting at 1.
+    check("col37", listOf(1, 2, 3).hashCode() == 30817)
+    check("col38", listOf<Int>().hashCode() == 1 && listOf(1, 2, 3).hashCode() == listOf(1, 2, 3).hashCode())
+    check("col39", xs.count { it > 2 } == 3 && xs.count() == 5)
+    check("col40", xs.mapNotNull { if (it > 3) it else null }.toString() == "[4, 5]")
+    // A Sequence pipeline. Sequences are EAGER in this subset - the answer of a
+    // finite pipeline is identical either way, which is what is asserted.
+    check("col41", xs.asSequence().map { it * 2 }.filter { it > 4 }.toList().toString() == "[6, 8, 10]")
+    check("col42", xs.single { it == 3 } == 3)
+    check("col43", listOf(2).single() == 2)
+    var acc37 = 0
+    xs.forEachIndexed { i, v -> acc37 += i * v }
+    check("col44", acc37 == 40)
+    check("col45", xs.average() == 3.0)
+    check("col46", xs.sum() == 15)
+}
+
+// ===== SECTION 38: Char is a real type, and the String is a sequence of it =====
+// Kotlin's String has no charAt: it is get / the indexing operator, both answering a
+// CHAR. Both halves used to answer a one-character STRING from charAt, so
+// `s.charAt(0) == 'a'` was false while `s[0] == 'a'` was true - the same expression
+// written two ways disagreeing with itself. Every Char-valued member now answers a
+// Char, and the Char member surface (.code, .digitToInt(), the isX predicates, the
+// case conversions) reads the CODE.
+// Kotlin's Char is java.lang.Character's, so the classification and case answers were
+// checked against the equivalent Java program under `java` (JDK 24).
+fun sec38() {
+    val s = "aBc"
+    check("chr1", s[0] == 'a' && s.get(1) == 'B' && s.charAt(2) == 'c')
+    check("chr2", s.first() == 'a' && s.last() == 'c')
+    check("chr3", "z".single() == 'z')
+    check("chr4", s.toCharArray().toString() == "[a, B, c]")
+    var n38 = 0
+    for (c in s) { if (c == 'a' || c == 'c') n38++ }
+    check("chr5", n38 == 2)
+    check("chr6", 'a'.code == 97 && 'A'.code == 65)
+    check("chr7", '7'.digitToInt() == 7)
+    check("chr8", 'a'.isLetter() && !'1'.isLetter())
+    check("chr9", '1'.isDigit() && !'a'.isDigit())
+    check("chr10", 'a'.isLetterOrDigit() && !' '.isLetterOrDigit())
+    check("chr11", ' '.isWhitespace() && !'a'.isWhitespace())
+    check("chr12", 'A'.isUpperCase() && 'a'.isLowerCase())
+    check("chr13", 'a'.uppercaseChar() == 'A' && 'B'.lowercaseChar() == 'b')
+    check("chr14", 'a'.toString() == "a" && "" + 'a' == "a")
+    // Char arithmetic: 'a' + 1 is a Char in Kotlin, and comparison is by code.
+    check("chr15", 'a' < 'b' && 'b' > 'a' && 'a' == 'a')
+    check("chr16", 'a'.compareTo('b') == -1 && 'b'.compareTo('b') == 0)
+    check("chr17", 'a'.hashCode() == 97)
+    // A String is a sequence of Char, so the collection operations apply to it.
+    check("chr18", s.map { it.code }.toString() == "[97, 66, 99]")
+    check("chr19", s.filter { it.isUpperCase() }.toString() == "[B]")
+    check("chr20", s.count { it.isLetter() } == 3)
+    check("chr21", s.any { it == 'B' } && !s.any { it == 'z' })
+    // The rest of the kotlin.text surface both halves were missing.
+    check("str19", "  pad  ".trim() == "pad")
+    check("str20", "  pad  ".trimStart() == "pad  " && "  pad  ".trimEnd() == "  pad")
+    check("str21", "abc".startsWith("ab") && "abc".endsWith("bc") && !"abc".startsWith("b"))
+    check("str22", "7".padStart(3, '0') == "007" && "7".padEnd(3) == "7  ")
+    check("str23", "abc".reversed() == "cba")
+    check("str24", "a,b,c".split(",").toString() == "[a, b, c]")
+    check("str25", "a\nb".lines().toString() == "[a, b]")
+    check("str26", "abcde".drop(2) == "cde" && "abcde".take(2) == "ab")
+    check("str27", "abcde".dropLast(2) == "abc" && "abcde".takeLast(2) == "de")
+    check("str28", "42".toInt() == 42 && "-7".toInt() == -7)
+    check("str29", "" + "9000000000".toLong() == "9000000000")
+    check("str30", "1.5".toDouble() == 1.5)
+    check("str31", "abc".indexOf('b') == 1 && "abc".contains('b') && !"abc".contains('z'))
+    check("str32", "abab".lastIndexOf("ab") == 2)
+    // kotlin.text.format is java.util.Formatter.
+    check("str33", "%.2f".format(3.14159) == "3.14")
+    check("str34", "%d/%s".format(42, "z") == "42/z")
+    // %f rounds HALF UP, which is java.util.Formatter's rule: `java` (JDK 24, with
+    // the locale forced to en_US) prints "  1.3|", "2.68" and "0.3" for these three,
+    // and Go's Sprintf - which rounds half to EVEN - printed "  1.2|", "2.67", "0.2"
+    // until the compiler half got its own fixed-point renderer.
+    check("str35", "%5.1f|".format(1.25) == "  1.3|")
+    check("str36", "%.2f".format(2.675) == "2.68" && "%.1f".format(0.25) == "0.3")
+    check("str37", "%s|%b".format("q", true) == "q|true")
+}
+
+// ===== SECTION 39: maps =====
+// A Map is the runtime's shared {__dict, keys, vals} handle - the same shape Go maps
+// and Python dicts use - so both halves carry one map value model and one member
+// table. The maps below are built with associate / groupBy / toMap rather than with
+// mapOf, because a global NAME is declared by each grammar's own builtin block and
+// only the interpreter half has mapOf yet (SECTION 40).
+// A Map renders as java.util.AbstractMap.toString does: {a=1, b=2}.
+fun sec39() {
+    val squares = listOf(1, 2, 3).associate { it to it * it }
+    check("map1", squares.toString() == "{1=1, 2=4, 3=9}")
+    check("map2", squares[2] == 4)
+    check("map3", squares.size == 3)
+    check("map4", squares.containsKey(3) && !squares.containsKey(9))
+    check("map5", squares.keys.toString() == "[1, 2, 3]")
+    check("map6", squares.values.toString() == "[1, 4, 9]")
+    check("map7", squares.isNotEmpty() && !squares.isEmpty())
+    val byLen = listOf("a", "bb", "cc", "d").groupBy { it.length }
+    check("map8", byLen.toString() == "{1=[a, d], 2=[bb, cc]}")
+    check("map9", byLen[2].toString() == "[bb, cc]")
+    val withV = listOf("x", "yy").associateWith { it.length }
+    check("map10", withV.toString() == "{x=1, yy=2}")
+    val byK = listOf("x", "yy").associateBy { it.length }
+    check("map11", byK.toString() == "{1=x, 2=yy}")
+    val fromPairs = listOf(1 to "a", 2 to "b").toMap()
+    check("map12", fromPairs.toString() == "{1=a, 2=b}")
+    check("map13", fromPairs.getValue(1) == "a")
+    check("map14", fromPairs.getOrDefault(9, "?") == "?")
+    // An entry is destructurable and carries key/value. The loop reads `.entries`
+    // rather than the map itself: the compiler half's `for (x in e)` emitter walks its
+    // subject by `length` and an integer index (kotlin-to-llvm-ir.abnf, the For rule),
+    // which a Map handle cannot answer - iterating the map DIRECTLY is asserted in
+    // SECTION 40, where the interpreter-only behaviour lives.
+    var joined = ""
+    for ((k, v) in fromPairs.entries) { joined += "" + k + v }
+    check("map15", joined == "1a2b")
+    check("map16", fromPairs.entries.size == 2)
+    check("map17", fromPairs.containsValue("b") && !fromPairs.containsValue("z"))
+    // A Pair is (first, second) and destructures; `to` builds one.
+    val p = 3 to "c"
+    check("pair1", p.toString() == "(3, c)")
+    check("pair2", p.first == 3 && p.second == "c")
+    val (pa, pb) = p
+    check("pair3", pa == 3 && pb == "c")
+    check("pair4", listOf(1, 2, 3, 4).partition { it > 2 }.first.toString() == "[3, 4]")
+    // A map is a sequence of entries, so the collection operations apply.
+    check("map18", squares.map { it.value }.toString() == "[1, 4, 9]")
+    check("map19", squares.filter { it.key > 1 }.size == 2)
+    check("map20", squares.count() == 3)
+}
+
+// ===== SECTION 40: the global BUILDERS and the this-bound scope functions =====
+// INTERPRETER ONLY, deliberately, and the only section of this file whose two halves
+// are expected to disagree until the compiler grammar catches up.
+//
+// A global NAME is declared by each grammar's own builtin block - js_scope_decl in
+// kotlin-to-llvm-ir.abnf - not by the shared runtime, so mapOf/Pair/Triple/with/
+// StringBuilder/buildString/sequenceOf have to be registered there by hand. What they
+// BUILD is a shared shape whose whole member surface already lives in
+// abnf/jsrtkotlin.go, so the port is the declaration only.
+//
+// run / apply / with bind the receiver as `this`. The interpreter half has a receiver
+// channel for a bare lambda (kSetRecv, the one a lambda-with-receiver already uses)
+// and resolves an unqualified member call against a builtin receiver; the compiler
+// half passes the receiver as the lambda's argument only.
+fun sec40() {
+    val m = mapOf(1 to "a", 2 to "b")
+    check("gbl1", m.toString() == "{1=a, 2=b}" && m[1] == "a")
+    val mm = mutableMapOf(1 to "a")
+    mm[2] = "b"
+    check("gbl2", mm.toString() == "{1=a, 2=b}" && mm.size == 2)
+    check("gbl3", emptyMap<Int, Int>().size == 0)
+    check("gbl4", Pair(1, 2).toString() == "(1, 2)")
+    check("gbl5", Triple(1, 2, 3).toString() == "(1, 2, 3)")
+    val (t1, t2, t3) = Triple(4, 5, 6)
+    check("gbl6", t1 + t2 + t3 == 15)
+    // with / run / apply bind the receiver as `this`.
+    check("gbl7", with(listOf(1, 2, 3)) { size } == 3)
+    check("gbl8", listOf(1, 2, 3).run { size } == 3)
+    val built = mutableListOf(1, 2).apply { add(3) }
+    check("gbl9", built.toString() == "[1, 2, 3]")
+    // StringBuilder and buildString.
+    val sb = StringBuilder()
+    sb.append("a")
+    sb.append(1)
+    check("gbl10", sb.toString() == "a1" && sb.length == 2)
+    check("gbl11", buildString { append("x"); append("y") } == "xy")
+    check("gbl12", with(StringBuilder("s")) { append("t"); toString() } == "st")
+    // Sequences and buildList / buildMap.
+    check("gbl13", sequenceOf(1, 2, 3).map { it + 1 }.toList().toString() == "[2, 3, 4]")
+    check("gbl14", buildList { add(1); add(2) }.toString() == "[1, 2]")
+    check("gbl15", buildMap { put(1, "a") }.toString() == "{1=a}")
+    var r40 = 0
+    repeat(3) { r40 += it }
+    check("gbl16", r40 == 3)
+    // Iterating the MAP itself (rather than its .entries) - the compiler half's For
+    // emitter reads `length` and integer-indexes its subject, so a Map handle needs an
+    // iteration rule there before this can move into SECTION 39.
+    var j40 = ""
+    for ((k, v) in m) { j40 += "" + k + v }
+    check("gbl17", j40 == "1a2b")
+    var c40 = 0
+    for (e in m) { c40++ }
+    check("gbl18", c40 == 2)
+}
+
+// ===== SECTION 41: a declared type carries its WIDTH past the declaration =====
+// INTERPRETER ONLY for now: the compiler half needs the same capture rules ported.
+//
+// SECTION 31 pinned the width a LOCAL `val x: Long = 1` carries. The same rule applies
+// at every other binding site, and none of them had it: a property, a parameter, a
+// parameter DEFAULT, a function's return type and a field WRITE all dropped the
+// declared width, so a Long that never passed through a local was silently 32 bit.
+// Kotlin/JVM's Int and Long are java.lang's, so each value below is what the
+// equivalent Java program prints under `java` (JDK 24) - verified, not assumed.
+class Widths41(val x: Long, val b: Byte = 127) {
+    var y: Long = 1
+}
+fun ret41(): Long = 1
+fun dflt41(v: Long = 1): Long = v
+fun sec41() {
+    // A declared RETURN type: `fun ret41(): Long = 1` answers a Long.
+    check("wid1", "" + ret41() * 1000000 * 1000000 == "1000000000000")
+    // A PROPERTY initializer, both the constructor-parameter form and the body form.
+    val w = Widths41(1L)
+    check("wid2", "" + w.x * 1000000 * 1000000 == "1000000000000")
+    check("wid3", "" + w.y * 1000000 * 1000000 == "1000000000000")
+    // A parameter DEFAULT, and the parameter itself.
+    check("wid4", "" + dflt41() * 1000000 * 1000000 == "1000000000000")
+    check("wid5", "" + dflt41(1L) * 1000000 * 1000000 == "1000000000000")
+    // A field WRITE adopts the declared type: `w.y = 1` stores a Long, not an Int.
+    w.y = 1
+    check("wid6", "" + w.y * 1000000 * 1000000 == "1000000000000")
+    // A Byte property wraps at its own width, which is what proves the width is on
+    // the stored value rather than on the literal that produced it.
+    var bb: Byte = w.b
+    bb++
+    check("wid7", "" + bb == "-128")
+}
+
 // ===== END SECTIONS =====
 
 fun main() {
@@ -1270,6 +1574,12 @@ fun main() {
     sec33() // SECTION-CALL 33
     sec34() // SECTION-CALL 34
     sec35() // SECTION-CALL 35
+    sec36() // SECTION-CALL 36
+    sec37() // SECTION-CALL 37
+    sec38() // SECTION-CALL 38
+    sec39() // SECTION-CALL 39
+    sec40() // SECTION-CALL 40
+    sec41() // SECTION-CALL 41
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

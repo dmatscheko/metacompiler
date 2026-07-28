@@ -1735,6 +1735,21 @@ func atoiName(name string) (int, error) {
 
 var errNotAnIndex = errors.New("not an index")
 
+// dictMemberHit / dictMemberIdx answer whether a dict handle holds `key`, using
+// Kotlin's value equality so a boxed Long key and a plain Int key are the same key.
+// ADDITIVE: they are consulted only when the receiver is a {__dict, keys, vals}
+// handle and the name is not already one of its own properties.
+func (rt *jsrt) dictMemberHit(keys *jsArray, key interface{}) bool {
+	return rt.dictMemberIdx(keys, key) >= 0
+}
+
+func (rt *jsrt) dictMemberIdx(keys *jsArray, key interface{}) int {
+	if s, isStr := key.(string); isStr && (s == "keys" || s == "vals" || s == "__dict") {
+		return -1
+	}
+	return rt.ktMapFind(keys, key)
+}
+
 func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 	if isUndefOrNull(obj) {
 		rt.fail("member '%s' of %s", rt.toString(key), rt.toString(obj))
@@ -1743,9 +1758,46 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 	if ks, isStr := key.(string); isStr && (ks == "apply" || ks == "call") && isCallable(obj) {
 		return &boundMethod{recv: obj, name: ks}
 	}
+	// ADDITIVE, Kotlin only: Char.code is a PROPERTY in Kotlin, not a method, so it
+	// arrives here rather than at js_ktsmcall. jsChar had no case at all before, so
+	// nothing that used to work changes; kotlin-interpreter.abnf answers the same
+	// name in kGetField.
+	if c, isChar := obj.(jsChar); isChar {
+		if ks, isStr := key.(string); isStr && ks == "code" {
+			return float64(c.code)
+		}
+	}
 	switch o := obj.(type) {
 	case *jsObject:
 		name := rt.toString(key)
+		// ADDITIVE, Kotlin only: a MAP is the shared {__dict, keys, vals} handle and
+		// kotlin.Map declares size / entries as properties. Both names were absent
+		// from the props map and therefore answered undefined, so no existing dict
+		// user (Python, Go) can observe a change.
+		if keys, vals, isDict := dictParts(o); isDict && (name == "size" || name == "length" ||
+			name == "entries" || name == "values" || rt.dictMemberHit(keys, key)) {
+			if name == "size" || name == "length" {
+				return float64(len(keys.elems))
+			}
+			if name == "values" {
+				return &jsArray{elems: append([]interface{}{}, vals.elems...)}
+			}
+			// m[k] / m.k for a key the map actually holds. A MISS is left to the
+			// existing path (undefined), so no non-Kotlin dict user changes.
+			if i := rt.dictMemberIdx(keys, key); i >= 0 {
+				return vals.elems[i]
+			}
+			out := &jsArray{}
+			for i := range keys.elems {
+				e := newJSObject()
+				e.set("key", keys.elems[i])
+				e.set("value", vals.elems[i])
+				e.set("first", keys.elems[i])
+				e.set("second", vals.elems[i])
+				out.elems = append(out.elems, e)
+			}
+			return out
+		}
 		v, ok := o.props[name]
 		if rt.accessorCount == 0 { // No accessor exists at all: the original path.
 			if ok {

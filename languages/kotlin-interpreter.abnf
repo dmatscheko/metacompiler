@@ -274,7 +274,12 @@ CompanionMod = "companion" KwEnd NotColon NotBrace NotObjectKw ;
 // A context-receiver / context-parameter list, `context(Logger, Tx) fun f() { ... }`.
 // Parsed and dropped like any other declaration modifier. The `(` is required, so an
 // ordinary identifier named `context` is never mistaken for the keyword.
-ContextClause = "context" KwEnd "(" [ CtxParam ] { "," [ CtxParam ] } ")" ;
+// The entries are NOT individually optional. Written as `[ CtxParam ] { "," [ CtxParam ] }`
+// the list accepted every shape of psi/contextParameters/trailingCommaForbidden.kt -
+// `context(s: String,,)`, `context(,)`, `context(, s: String)` - each of which Kotlin
+// reports as "Type expected". A single TRAILING comma stays allowed (Kotlin's list
+// trailing-comma rule); only an EMPTY entry is refused.
+ContextClause = "context" KwEnd "(" [ CtxParam { "," CtxParam } [ "," ] ] ")" ;
 // A context parameter is an optional name - or a label, in a function type
 // (context(label@String)) - followed by its type.
 // The modifiers are what `context(noinline a: () -> Int)` needs (psi/contracts/good/
@@ -305,7 +310,81 @@ AnnSet      = "[" { AnnEntry } "]" ;
 // Each segment may carry type arguments - `@[foo<A, B>(a, b) foo.bar.doo<f>.foo<bar, goo>.foo]`
 // in psi/annotation/Annotations.kt is one annotation set with a clean parse tree - so the
 // angle run is skipped after every name, not only after the last.
-AnnEntry    = KId [ SkipAngle ] { "." KId [ SkipAngle ] } [ SkipParen NotArrow ] ;
+AnnEntry    = KId [ SkipAngle ] { "." KId [ SkipAngle ] } [ AnnArgsOk SkipParen NotArrow ] ;
+// SkipParen consumes any balanced run, so every shape of psi/emptyArgumentsInAnnotations.kt
+// - `@Ann(1, ,)`, `@Ann(,)`, `@Ann(x =)`, `@Ann(*, 2)` - was swallowed whole where Kotlin
+// reports "Expecting an argument". This zero-width guard walks the run the skip is about
+// to eat and refuses it when a depth-1 argument is EMPTY (nothing between two commas, or
+// between the `(` and the first comma), or ends in a dangling `=` (a named argument with
+// no value) or a lone `*` (a spread with no operand). `@Ann()` and a trailing comma stay
+// legal, since both are ordinary Kotlin.
+// It is a guard rather than a real argument grammar because annotation arguments are
+// parsed and dropped here; the only question asked is whether the run is well formed.
+AnnArgsOk   = :script(~~
+    (function() {
+        var i = 0
+        var steps = 0
+        var ch = c.peek(i)
+        while ((ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) && steps < 100000) {
+            steps++; i++; ch = c.peek(i)
+        }
+        if (c.peek(i) !== 40) { return undefined }
+        i++
+        var depth = 1
+        var last = 40
+        var bad = false
+        while (steps < 200000) {
+            steps++
+            var b = c.peek(i)
+            if (b < 0) { break }
+            if (b === 32 || b === 9 || b === 10 || b === 13 || b === 12) { i++ }
+            else if (b === 47 && c.peek(i + 1) === 47) {
+                i = i + 2
+                var d = c.peek(i)
+                while (d >= 0 && d !== 10 && steps < 200000) { steps++; i++; d = c.peek(i) }
+            }
+            else if (b === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                var e = c.peek(i)
+                while (e >= 0 && steps < 200000) {
+                    steps++
+                    if (e === 42 && c.peek(i + 1) === 47) { i = i + 2; break }
+                    i++; e = c.peek(i)
+                }
+                last = 120
+            }
+            else if (b === 34 || b === 39) {
+                var q = b
+                i++
+                var f = c.peek(i)
+                while (f >= 0 && steps < 200000) {
+                    steps++
+                    if (f === 92) { i = i + 2; f = c.peek(i); continue }
+                    if (f === q) { i++; break }
+                    i++; f = c.peek(i)
+                }
+                last = 120
+            }
+            else if (b === 40) { depth++; i++; last = 120 }
+            else if (b === 41) {
+                depth--
+                if (depth === 0) {
+                    if (last === 61 || last === 42) { bad = true }
+                    i++
+                    break
+                }
+                i++; last = 120
+            }
+            else if (b === 44 && depth === 1) {
+                if (last === 40 || last === 44 || last === 61 || last === 42) { bad = true; break }
+                i++; last = 44
+            }
+            else { i++; if (depth === 1) { last = b } }
+        }
+        if (bad) { return abnf.newToken("\x01empty-annotation-argument", 0) }
+        return undefined
+    })()
+~~) ;
 // The argument-less annotation form, for the places where a `(` right after the
 // annotation belongs to the construct being annotated (a destructuring for-loop
 // pattern) rather than to the annotation.
@@ -338,12 +417,15 @@ TopProp     <~~ var t = pop(); t() ~~>
 TopVisProp  <~~ var t = pop(); t() ~~>
             = VisDecl ;
 VisDecl     <~~ push(makeDecl(takeAll())) ~~>
-            = ( "val" | "var" ) KwEnd { Annotation } KId <~~ push(up.in) ~~> [ ":" DeclType ] "=" Expression PropVis { Accessor | PropVis } [ ";" ] ;
+            = ( "val" | "var" ) KwEnd { Annotation } KId <~~ push(up.in) ~~> [ ":" DeclType ] "=" Expression AccRunV [ ";" ] ;
 
 // The generic parameter names are remembered while the body walks, so an `x is T`
 // inside can be resolved against the call site's type arguments (reified).
 FunDecl     <~~ push(makeFun(takeAll())); retLblPop() ~~>
-            = KwFun <~~ tpBegin() ~~> [ TypeParams ] KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> [ SkipAngle ] ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
+            = KwFun <~~ tpBegin() ~~> [ TypeParams ] KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> [ SkipAngle ] ParamList [ ":" RetType ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
+// The declared RETURN type, same rule again at the last binding site a value crosses:
+// `fun sf(): Long = 1` answers a Long, so `sf() * 1000000 * 1000000` is 64 bit.
+RetType     <~~ push({rty: stripWs(up.in)}) ~~> = Type ;
 // An experimental `contract [ ... ]` clause on a function or an accessor. It states
 // what the function guarantees about its arguments; nothing in it affects execution,
 // so the bracketed body is skipped whole.
@@ -412,7 +494,14 @@ ParamList   <~~ push({params: takeAll()}) ~~>
 // and `fun (x, y, ): Int` are missing-type SEMANTIC errors and psi/ParameterType.kt /
 // psi/trailingCommaAllowed.kt both carry a clean parse tree.
 Param       <~~ push(makeParam(takeAll())) ~~>
-            = { Annotation | ParamMod } [ ( "val" | "var" ) KwEnd ] KId <~~ push(up.in) ~~> [ ":" Type ] [ "=" ParamDefault ] ;
+            = { Annotation | ParamMod } [ ( "val" | "var" ) KwEnd ] KId <~~ push(up.in) ~~> [ ":" PType ] [ "=" ParamDefault ] ;
+// A parameter's declared type, captured the way a local declaration's DeclType is. An
+// integral one retypes the bound argument, which is what makes a Long parameter 64 bit
+// even when the value that reached it carries no width of its own - the same rule
+// `val x: Long = 1` already had, applied one binding site further out. It is a wrapper
+// production rather than a tag on Type because Type is referenced ~40 times here and a
+// tag on it would change how many items every one of those parents pops.
+PType       <~~ push({pty: stripWs(up.in)}) ~~> = Type ;
 // AnnEnumMod / VarianceMod for the same reason Modifiers carries them: a parameter's
 // modifier run may hold `annotation`, `enum`, `in` or `out` (psi/SoftKeywords.kt spells
 // a multi-line one inside a primary constructor's parameter list).
@@ -451,7 +540,7 @@ CtorParams  <~~ push({cparams: takeAll()}) ~~>
 // instance and, for a data/value class, a component); the default value is genuine,
 // exactly like a function Param's.
 CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
-            = { Annotation | ParamMod } [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] KId <~~ push(up.in) ~~> ":" Type [ "=" ParamDefault ] ;
+            = { Annotation | ParamMod } [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] KId <~~ push(up.in) ~~> ":" PType [ "=" ParamDefault ] ;
 
 // A class/interface/object body member. FunDecl (a function WITH a body) is tried
 // before AbstractFun (a bodiless declaration in an interface or an abstract class),
@@ -474,7 +563,7 @@ MemberExtFun <~~ push({memberExt: takeAll()}); retLblPop() ~~>
 // it SEMANTICALLY (an extension property has no backing field), not syntactically, and
 // the initializer is dropped here for the same reason.
 MemberExtProp <~~ push({memberExtProp: takeAll()}) ~~>
-            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in) ~~> [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] Accessor { Accessor | PropVis } ;
+            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in) ~~> [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] AccRunB ;
 // A nested type declaration. GENUINE: the nested class/interface/object is built and
 // attached to the enclosing descriptor under its own name, so Outer.Nested() and
 // Outer.Companion-style qualified access work. An `inner` class additionally captures
@@ -504,12 +593,31 @@ AbstractFun <~~ takeAll() ~~>
 // A visibility-only accessor (var x = 0; private set) still parses and is ignored;
 // PropVis's NotParen guard keeps it clear of the body forms above.
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
-            = ( "val" | "var" ) KwEnd { Annotation } KId <~~ push(up.in) ~~> [ ":" Type ] [ "=" PropInit ] { Accessor | PropVis } [ ";" ] ;
+            = ( "val" | "var" ) KwEnd { Annotation } KId <~~ push(up.in) ~~> [ ":" PType ] [ "=" PropInit ] [ AccRun ] [ ";" ] ;
 PropInit    <~~ push({pinit: pop()}) ~~>
             = Expression ;
 PropVis     = [ Modifiers ] ( KwGet | KwSet ) NotParen ;
-// get() / set(v) with a body. The setter parameter name defaults to `value`.
-Accessor    = [ Modifiers ] ( Getter | Setter ) [ ";" ] ;
+// get() / set(v) with a body. The setter parameter name defaults to `value`; the two
+// halves of it are AccGetB / AccSetB below, which is what the accessor RUN is built
+// from now that a property may carry at most one of each.
+// The accessor RUN. Spelled `{ Accessor | PropVis }` it was an unbounded repetition, so
+// psi/DuplicateAccessor.kt - `val a : Int` with TWO `get() = 0` bodies - parsed clean
+// where Kotlin reports "Expecting a top level declaration" on the second. A property
+// has at most ONE getter and at most ONE setter, in either order, and each of the two
+// may be a body form (Getter/Setter) or a visibility-only one (`private set`).
+// AccRunB is the same thing where at least one of the two must carry a BODY: it is what
+// separates PropAccessor / ExtProp from the plain declaration forms that follow them in
+// the ordered choice, and dropping that requirement would let PropAccessor swallow
+// TopVisProp's `val x = 1 private set`.
+AccGetB     = [ Modifiers ] Getter [ ";" ] ;
+AccSetB     = [ Modifiers ] Setter [ ";" ] ;
+AccGetV     = [ Modifiers ] KwGet NotParen [ ";" ] ;
+AccSetV     = [ Modifiers ] KwSet NotParen [ ";" ] ;
+AccGetPart  = AccGetB | AccGetV ;
+AccSetPart  = AccSetB | AccSetV ;
+AccRun      = AccGetPart [ AccSetPart ] | AccSetPart [ AccGetPart ] ;
+AccRunB     = AccGetB [ AccSetPart ] | AccSetB [ AccGetPart ] | AccGetV AccSetB | AccSetV AccGetB ;
+AccRunV     = AccGetV [ AccSetPart ] | AccSetV [ AccGetPart ] ;
 // The parameter list is REQUIRED: `val a: Int get = 1` is "Accessor body expected" in
 // Kotlin (psi/CommentsBinding.kt records it as an error). A body is what separates an
 // accessor from a visibility-only `private set` (see PropVis).
@@ -650,6 +758,25 @@ Throw       <~~ push(excThrow(pop())) ~~>
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
+// MEASURED AND REVERTED (2026-07-28). Kotlin refuses two statements on one line
+// without a `;` - "Unexpected tokens (use ';' to separate expressions on the same
+// line)" - and a `NewStmtLine` guard at the block-item boundary was written for it: a
+// FORWARD scan (the whitespace after the previous token is still ahead at a :script)
+// that accepts a newline, a `;`, a `}` or the `{` that opened the block and refuses
+// anything else. Both rows, against 386 parse / 289 reject:
+//
+//     backward scan (wrong, kept only as the reason the forward one exists)
+//                              parse 284 (-102)   reject 292 (+3)
+//     forward scan             parse 378 (-8)     reject 292 (+3)
+//
+// Net -5, so it is out. The eight files it costs are ones where THIS grammar already
+// splits a construct Kotlin keeps whole - a local class after an annotation
+// (psi/LocalDeclarations.kt), an annotated block-level expression
+// (psi/annotation/at/blockLevelExpressions.kt), the old label syntax
+// (psi/newLabels/oldSyntaxExpressions.kt) - so the guard is correct and the parses it
+// breaks were accidental. It becomes a win once those constructs parse as one
+// statement each; until then the three files it would gain (AssertNotNull,
+// primaryConstructor/local, and one more) are not worth eight.
 
 // A declared RECEIVER function type - val dot: Int.(Int) -> Int - makes the
 // initializing lambda a lambda-with-receiver: its first argument becomes `this`, so it
@@ -683,7 +810,7 @@ LazyDecl    <~~ push(makeDecl(unwrapInit(takeAll()))) ~~>
 // a delegate box, and reads (makeVarRef) and writes (kSetName) go through
 // getValue/setValue. thisRef is null, as it is in Kotlin for a non-member property.
 RealDelegateDecl <~~ push(makeDelegDecl(takeAll(), up.pos)) ~~>
-            = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] KwBy DelegSrc [ ";" ] { Accessor | PropVis } [ ";" ] ;
+            = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] KwBy DelegSrc [ ";" ] [ AccRun ] [ ";" ] ;
 UnsupDelegateDecl <~~ push(notImplStmt("delegated property", up.pos)) ~~>
             = ( "val" | "var" ) KwEnd [ RecvSeg { RecvSeg } ] KId [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] [ ";" ] ;
 
@@ -708,15 +835,17 @@ ForIn       <~~ push(makeForIn(pop(), pop(), pop())) ~~>
 // A destructuring for-loop, for ((px, py) in points): the element is decomposed with
 // the same componentN protocol as a destructuring declaration, once per iteration.
 ForDestruct <~~ push(makeForDestruct(takeAll())) ~~>
-            = KwFor "(" [ ( "val" | "var" ) KwEnd ] { AnnNoArgs } DTuple KwIn Expression ")" Statement ;
+            = KwFor "(" ( ( "val" | "var" ) KwEnd { AnnNoArgs } DTuple | { AnnNoArgs } DTupleKwV | { AnnNoArgs } DTuple ) KwIn Expression ")" Statement ;
 DTuple      <~~ push({dnames: takeAll()}) ~~>
             = "(" DName { "," DName } [ "," ] ")" | "[" DName { "," DName } [ "," ] "]" ;
+DTupleKwV   <~~ push({dnames: takeAll()}) ~~>
+            = "(" DNameKwV { "," DNameKwV } [ "," ] ")" | "[" DNameKwV { "," DNameKwV } [ "," ] "]" ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
-            = KwReturn [ Expression ] [ ";" ] ;
+            = KwReturn NoSpacedAt [ Expression ] [ ";" ] ;
 
-Break       <~~ push(makeBreak()) ~~>    = KwBreak [ ";" ] ;
-Continue    <~~ push(makeContinue()) ~~> = KwContinue [ ";" ] ;
+Break       <~~ push(makeBreak()) ~~>    = KwBreak NoSpacedAt [ ";" ] ;
+Continue    <~~ push(makeContinue()) ~~> = KwContinue NoSpacedAt [ ";" ] ;
 
 Empty       <~~ push(function() {}) ~~>
             = ";" ;
@@ -1187,9 +1316,9 @@ BreakAtExpr <~~ push(kBreakAtExpr(pop().lbl)) ~~>
 ContinueAtExpr <~~ push(kContinueAtExpr(pop().lbl)) ~~>
             = KwContinue AtAdjacent "@" KId <~~ push({lbl: up.in}) ~~> ;
 ReturnExpr  <~~ push(kReturnExpr(takeAll())) ~~>
-            = KwReturn NotAtLbl [ SameLine Expression ] ;
-BreakExpr    <~~ push(kBreakExpr()) ~~>    = KwBreak NotAtLbl ;
-ContinueExpr <~~ push(kContinueExpr()) ~~> = KwContinue NotAtLbl ;
+            = KwReturn NotAtLbl NoSpacedAt [ SameLine Expression ] ;
+BreakExpr    <~~ push(kBreakExpr()) ~~>    = KwBreak NotAtLbl NoSpacedAt ;
+ContinueExpr <~~ push(kContinueExpr()) ~~> = KwContinue NotAtLbl NoSpacedAt ;
 // A LABEL on an ordinary operand - `1 + label3@ 3 + 4`, `l1@ foo bar l2@ baz`. Kotlin's
 // own tree (psi/newLabels/basic.txt) records each as a LABELED_EXPRESSION wrapping the
 // operand, so the label binds at the PRIMARY level, not at the statement level. A label
@@ -1309,9 +1438,25 @@ LambdaParams <~~ push({lparams: takeAll()}) ~~>
 // warns once, so the lambda still parses and runs under -warn-unsupported.
 LParam      = { Annotation } ( DestructLParam | KId <~~ push(up.in) ~~> [ ":" Type ] ) ;
 DestructLParam <~~ push({destruct: takeAll(), pos: up.pos}) ~~>
-            = ( "(" DName { "," DName } [ "," ] ")" | "[" DName { "," DName } [ "," ] "]" ) [ ":" Type ] ;
+            = ( "(" DNameKwV { "," DNameKwV } [ "," ] ")" | "[" DNameKwV { "," DNameKwV } [ "," ] "]"
+              | "(" DName { "," DName } [ "," ] ")" | "[" DName { "," DName } [ "," ] "]" ) [ ":" Type ] ;
+// No `val` / `var` on an entry. Kotlin's name-based destructuring forbids it in every
+// position - declaration, for-loop and lambda parameter - and
+// psi/destructuring/fullNameBasedDestructuringErrors.kt records each of
+// `val (val first, var second,) = x`, `for ((first, val second) in x)` and
+// `foo { (var first) -> }` as a syntax error ("Expecting ')'", "Expecting a name").
 DName       <~~ push(dName(takeAll())) ~~>
-            = [ ( "val" | "var" ) KwEnd ] KId <~~ push(up.in) ~~> [ ":" Type ] [ "=" KId <~~ push({dfrom: up.in}) ~~> ] ;
+            = KId <~~ push(up.in) ~~> [ ":" Type ] [ "=" KId <~~ push({dfrom: up.in}) ~~> ] ;
+// The two KEYWORD-carrying entry forms. DNameKw takes val or var and is what the
+// SHORT declaration form `(val first, var second) = x` is made of; DNameKwV takes only
+// `val`, which is what a for-loop and a lambda parameter allow (`for ((var first) in x)`
+// and `foo { (var first) -> }` are both errors in
+// psi/destructuring/fullNameBasedDestructuringErrors.kt, while
+// `for ((val key, val value) in l)` in variableNamedValueInSquareBrackets.kt is clean).
+DNameKw     <~~ push(dName(takeAll())) ~~>
+            = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] [ "=" KId <~~ push({dfrom: up.in}) ~~> ] ;
+DNameKwV    <~~ push(dName(takeAll())) ~~>
+            = "val" KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] [ "=" KId <~~ push({dfrom: up.in}) ~~> ] ;
 
 // f(a, b): a top level function, a builtin, or a class constructor. A trailing lambda
 // becomes the last argument (Kotlin): after a parenthesized list - f(a) { ... } - or on
@@ -1330,7 +1475,15 @@ Template    <~~ push(makeTemplate(takeAll())) ~~>
             = '"' :whitespace() { TplExpr | TplVar | TplChunk } '"' :whitespace(Whitespace) ;
 TplExpr     <~~ push({e: pop()}) ~~>
             = "${" :whitespace(Whitespace) Expression "}" ;
-TplVar      = "$" TplName <~~ push({e: makeVarRef(up.in)}) ~~> ;
+// The SHORT entry is a simple name, and a hard keyword is not one: `"$try"` is
+// "Keyword cannot be used as a reference" in Kotlin
+// (psi/stringTemplates/StringTemplateWithTryWithoutBlockInShortEntry.kt), and the long
+// `"${try { … } catch …}"` form is what that file's neighbours use instead. `$` is not
+// in TplPlain, so a refused TplVar cannot fall through to TplChunk and the whole
+// template - and with it the file - is refused, which is the point.
+// NotHardKw is the same guard KId uses; it leaves `this` and `super` alone, so `"$this"`
+// keeps working.
+TplVar      = "$" NotHardKw TplName <~~ push({e: makeVarRef(up.in)}) ~~> ;
 TplName     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
 TplChunk    <~~ push({s: unescapeJs(up.in)}) ~~>
             = TplChar { TplChar } ;
@@ -1429,6 +1582,46 @@ ReturnAt    <~~ push(makeReturnAt(takeAll(), up.pos)) ~~>
 AtAdjacent  = :script(~~
     (function() {
         return (c.peek(0) === 64) ? undefined : abnf.newToken("\x01need-adjacent-at", 0)
+    })()
+~~) ;
+// The other half of the same rule, and the one that makes the file REJECT rather than
+// merely mis-parse. AtAdjacent only declines the labelled alternative; the bare
+// `break` / `continue` / `return` then matches and the stranded `@l1` is read as an
+// ANNOTATION on the next declaration, so `break @l1` parsed clean. Kotlin's parser
+// reports "There should be no space or comments before '@' in label reference"
+// (psi/newLabels/spaceBeforeLabelReference.kt) for every one of `break @l1`,
+// `return @l2 1`, `continue @l4 5`, `break/**/@l5` and `return//\n@l7 4` - so a `@`
+// reachable from a control keyword across whitespace OR comments is an error, not an
+// annotation. This guard therefore does the full skip (spaces, tabs, CR, LF, form
+// feed, `//` to end of line and `/* */`) the way a refusing guard must, and fails the
+// unlabelled alternative outright.
+NoSpacedAt  = :script(~~
+    (function() {
+        var i = 0
+        var steps = 0
+        while (steps < 100000) {
+            steps++
+            var ch = c.peek(i)
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { i++ }
+            else if (ch === 47 && c.peek(i + 1) === 47) {
+                i = i + 2
+                var d = c.peek(i)
+                while (d >= 0 && d !== 10 && steps < 100000) { steps++; i++; d = c.peek(i) }
+            }
+            else if (ch === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                var e = c.peek(i)
+                while (e >= 0 && steps < 100000) {
+                    steps++
+                    if (e === 42 && c.peek(i + 1) === 47) { i = i + 2; break }
+                    i++
+                    e = c.peek(i)
+                }
+            }
+            else { break }
+        }
+        if (c.peek(i) === 64) { return abnf.newToken("\x01spaced-label-ref", 0) }
+        return undefined
     })()
 ~~) ;
 
@@ -1697,11 +1890,11 @@ CtorDelegate <~~ push({delegArgs: takeAll()}) ~~>
 // this also keeps an extension DELEGATED property (val Int.x: T by store()) out - it
 // falls through to the delegated-property forms instead of being half-consumed here.
 ExtProp     <~~ registerExtProp(takeAll()) ~~>
-            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in) ~~> [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] Accessor { Accessor | PropVis } ;
+            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in) ~~> [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] AccRunB ;
 // A top-level COMPUTED property (val x: T get() = ...) with no receiver: the same
 // machinery as a class property, bound as a global whose reads run the getter.
 PropAccessor <~~ registerTopProp(takeAll()) ~~>
-            = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] [ "=" PropInit ] Accessor { Accessor | PropVis } ;
+            = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" PType ] [ "=" PropInit ] AccRunB ;
 
 // A destructuring declaration - val (a, b) = pair. GENUINE: each name binds to the
 // matching componentN() of the initializer value (a data class's generated ones, a
@@ -1710,9 +1903,11 @@ PropAccessor <~~ registerTopProp(takeAll()) ~~>
 Destructure <~~ push(makeDestructure(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd { Annotation } DPattern [ ":" Type ] "=" Expression [ ";" ] ;
 DPattern    = "(" DName { "," DName } [ "," ] ")" | "[" DName { "," DName } [ "," ] "]" ;
+// The keyword-carrying pattern, used by the outer-keyword-LESS assignment form only.
+DPatternKw  = "(" DNameKw { "," DNameKw } [ "," ] ")" | "[" DNameKw { "," DNameKw } [ "," ] "]" ;
 // A destructuring ASSIGNMENT with no leading val/var: (val a, var b) = pair.
 DestructAssign <~~ push(makeDestructure(takeAll())) ~~>
-            = { AnnNoArgs } DPattern [ ":" Type ] "=" Expression [ ";" ] ;
+            = { AnnNoArgs } DPatternKw [ ":" Type ] "=" Expression [ ";" ] ;
 
 // A top-level property with neither an initializer nor an accessor (an abstract or
 // expect declaration, or a header split across files). It still binds its name, to
@@ -2187,6 +2382,31 @@ NotMemberKw = :script(~~
         if (t.length > 0 && t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1) }
         return kDeclUns["$" + t] == true
     }
+    // The one rule makeDecl already applied to a local `val x: Long = 1`, lifted into a
+    // helper so every OTHER binding site can apply it too: a property initializer and
+    // field write, a parameter (including its default), and a function's return value.
+    // Kotlin has no implicit numeric conversions, so the only value a declared type can
+    // retype is an integer literal typed by its expectation - but that literal reaches a
+    // property, a parameter and a return position exactly as often as it reaches a local,
+    // and until now only the local carried the width. `class A { var y: Long = 1 }`
+    // followed by `a.y * 1000000 * 1000000` answered -727379968 where java (JDK 24) on
+    // the equivalent program prints 1000000000000.
+    function kAdoptTy(v, dt) {
+        if (dt == undefined || dt == null || dt == "") { return v }
+        if (kIsIntegral(v)) {
+            var w = kTypeWidth(dt)
+            if (w > 0) { return kConv(v, w, kTypeUns(dt)) }
+            if (kTypeFlo(dt)) { return kFlo(kNumD(v)) }
+        }
+        return v
+    }
+    // Wrap an initializer thunk so its value adopts the declared type.
+    function kAdoptThunk(t, dt) {
+        if (dt == undefined || dt == null || dt == "" || typeof t != "function") { return t }
+        var w = kTypeWidth(dt)
+        if (w == 0 && !kTypeFlo(dt)) { return t }
+        return function() { return kAdoptTy(t(), dt) }
+    }
     var kLongMaxP = i64Make(0x7fffffff, 0xffffffff)
     var kLongMinP = i64Make(0x80000000, 0)
     var kULongMaxP = i64Make(0xffffffff, 0xffffffff)
@@ -2465,6 +2685,7 @@ NotMemberKw = :script(~~
     // string (which yields its characters, like Kotlin's CharSequence).
     function kIterable(v) {
         if (isRange(v)) { return rangeList(v) }
+        if (kIsMap(v)) { return kElems(v) }
         if (typeof v == "string") {
             var out = []
             for (var i = 0; i < v.length; i++) { out.push(kChar(v.charCodeAt(i))) }
@@ -2668,6 +2889,81 @@ NotMemberKw = :script(~~
     hostGlobals["longArrayOf"] = hostGlobals["listOf"]
     hostGlobals["emptyList"] = hostGlobals["listOf"]
     hostGlobals["emptySet"] = hostGlobals["listOf"]
+    // ----- Maps, Pair/Triple, `with` and StringBuilder -----
+    // NOT AVAILABLE IN THE COMPILED HALF YET. A global NAME is declared by each
+    // grammar's own builtin block (js_scope_decl in kotlin-to-llvm-ir.abnf), not by
+    // the runtime, so these six builders have to be ported there by hand. Everything
+    // they BUILD is a shared shape whose whole member surface already lives in
+    // abnf/jsrtkotlin.go (ktMapMethod / ktPairMethod), so the port is the declaration
+    // only - the methods come with it.
+    hostGlobals["mapOf"] = function() {
+        var m = kMakeMap()
+        for (var i = 0; i < arguments.length; i++) {
+            var p = arguments[i]
+            if (kIsPair(p)) { kMapPut(m, p.first, p.second) }
+            else if (Array.isArray(p)) {
+                for (var j = 0; j < p.length; j++) {
+                    if (kIsPair(p[j])) { kMapPut(m, p[j].first, p[j].second) }
+                }
+            }
+        }
+        return m
+    }
+    hostGlobals["mutableMapOf"] = hostGlobals["mapOf"]
+    hostGlobals["hashMapOf"] = hostGlobals["mapOf"]
+    hostGlobals["linkedMapOf"] = hostGlobals["mapOf"]
+    hostGlobals["sortedMapOf"] = hostGlobals["mapOf"]
+    hostGlobals["emptyMap"] = hostGlobals["mapOf"]
+    // buildMap { put(k, v) } - the builder lambda takes the fresh map as `it`.
+    hostGlobals["buildMap"] = function(f) {
+        var m = kMakeMap()
+        if (typeof f == "function") { kSetRecv({v: m}); f(m) }
+        return m
+    }
+    hostGlobals["buildList"] = function(f) {
+        var l = []
+        if (typeof f == "function") { kSetRecv({v: l}); f(l) }
+        return l
+    }
+    hostGlobals["Pair"] = function(a, b) { return {first: a, second: b} }
+    hostGlobals["Triple"] = function(a, b, c) { return {first: a, second: b, third: c} }
+    // with(receiver) { ... }: the scope function that is a top-level FUNCTION rather
+    // than an extension. Same receiver channel as `run` - the receiver arrives as the
+    // lambda's single parameter.
+    hostGlobals["with"] = function(recv, f) { kSetRecv({v: recv}); return f(recv) }
+    hostGlobals["run"] = function(f) { return f() }
+    hostGlobals["repeat"] = function(n, f) {
+        for (var i = 0; i < kNum(n); i++) { f(i) }
+    }
+    hostGlobals["sequenceOf"] = hostGlobals["listOf"]
+    hostGlobals["emptySequence"] = hostGlobals["listOf"]
+    // A Sequence is EAGER here: `asSequence()` copies the list and every operator on
+    // it is the list operator. Kotlin's laziness is observable only through side
+    // effects in the intermediate lambdas and through an infinite generateSequence,
+    // neither of which this subset builds, so the two agree on every finite pipeline.
+    hostGlobals["generateSequence"] = function(seed, next) {
+        var out = []
+        var v = anytype
+        v = (typeof seed == "function") ? seed() : seed
+        var guard = 0
+        while (v !== null && v !== undefined && guard < 100000) {
+            out.push(v)
+            guard++
+            if (typeof next != "function") { break }
+            v = next(v)
+        }
+        return out
+    }
+    // StringBuilder: append/toString/length/clear, on a {__sb} box whose methods are
+    // answered by mcall.
+    hostGlobals["StringBuilder"] = function(init) {
+        return {__sb: true, s: (init === undefined || init === null) ? "" : kstr2(init)}
+    }
+    hostGlobals["buildString"] = function(f) {
+        var b = {__sb: true, s: ""}
+        if (typeof f == "function") { kSetRecv({v: b}); f(b) }
+        return b.s
+    }
     hostGlobals["Regex"] = function() {
         return mkKRegex(arguments[0], arguments.length > 1 ? arguments[1] : null)
     }
@@ -3002,6 +3298,22 @@ NotMemberKw = :script(~~
             }
             return out + "]"
         }
+        if (typeof v == "object" && v.__sb === true) { return v.s }
+        // A MAP renders as java.util.AbstractMap.toString does: {a=1, b=2}.
+        if (kIsMap(v)) {
+            var mo = "{"
+            for (var mi = 0; mi < v.keys.length; mi++) {
+                if (mi > 0) { mo += ", " }
+                mo += kstr(v.keys[mi]) + "=" + kstr(v.vals[mi])
+            }
+            return mo + "}"
+        }
+        // A Pair / Triple renders as (a, b) / (a, b, c) - kotlin.Pair.toString.
+        if (kIsPair(v)) {
+            var po = "(" + kstr(v.first) + ", " + kstr(v.second)
+            if (v.third !== undefined) { po += ", " + kstr(v.third) }
+            return po + ")"
+        }
         // A class descriptor printed on its own is its name.
         if (typeof v == "object" && v.__isclass === true) { return v.__name }
         // A user object renders through its toString(): the data-class generated one
@@ -3086,6 +3398,748 @@ NotMemberKw = :script(~~
     // args is the positional argument list; spec (optional) additionally carries the
     // named arguments, so a call into a user-declared method or extension can fit them
     // to its parameter list. Builtins take the positional list as-is.
+    // ================= The member surface: Char, String, collections, maps =================
+    //
+    // The twins of ktCharMethod / ktStrMethod2 / ktSeqMethod / ktMapMethod /
+    // ktScopeMethod in abnf/jsrtkotlin.go, which is what the COMPILED half calls
+    // through js_ktsmcall. ./test.sh --cross diffs the two, so a change here needs the
+    // same change there. Each answers {v: ...} for a name it implements and null for
+    // one it does not, so the dispatch below it is unchanged.
+    //
+    // No kotlinc here: the semantics are kotlin.text / kotlin.collections as
+    // documented, and the ones Kotlin shares with java.lang were checked against the
+    // equivalent Java program under `java` (JDK 24).
+
+    // A MAP is the runtime's shared dict handle {__dict, keys, vals} - the same shape
+    // Go maps and Python dicts use (dictParts in abnf/jsrt.go), so js_pyset / js_pyget
+    // and iteration already understand it and the compiled half needs no new value type.
+    function kMakeMap() { return {__dict: true, keys: [], vals: []} }
+    function kIsMap(v) {
+        return v !== null && v !== undefined && typeof v == "object" && !Array.isArray(v) && v.__dict === true
+    }
+    function kMapFind(m, k) {
+        var ks = m.keys
+        for (var i = 0; i < ks.length; i++) { if (kEqVals(ks[i], k)) { return i } }
+        return 0 - 1
+    }
+    function kMapPut(m, k, v) {
+        var i = kMapFind(m, k)
+        if (i >= 0) { m.vals[i] = v; return }
+        m.keys.push(k)
+        m.vals.push(v)
+    }
+    // `==` for the collection operations: numeric across the box, otherwise kEq.
+    function kEqVals(a, b) { return kEq(a, b) }
+    // The {first, second[, third]} shape `to`, Pair() and Triple() build. It is a plain
+    // object rather than a class instance in both halves, so its rendering, its
+    // componentN and its destructuring all live with the runtime.
+    function kIsPair(v) {
+        if (v === null || v === undefined || typeof v != "object" || Array.isArray(v)) { return false }
+        if (v.__dict === true || v.__isclass !== undefined) { return false }
+        if (v.first === undefined || v.second === undefined) { return false }
+        // The COMPILED half builds a real Pair class instance where this one builds a
+        // plain object; both are a Pair, and a user class that merely has `first` and
+        // `second` is not (only Kotlin's own two tuple names are accepted).
+        var cls = v.__class
+        if (cls != undefined && cls != null) {
+            return cls.__name == "Pair" || cls.__name == "Triple"
+        }
+        return true
+    }
+    function kPair(a, b) { return {first: a, second: b} }
+
+    // let / run / apply / also / takeIf / takeUnless: extensions on ANY receiver, so no
+    // receiver branch owns them. A class MEMBER of the same name wins, exactly as it
+    // does in Kotlin, which is what the lookupMethod probe is for.
+    function kScopeMethod(target, name, args) {
+        if (name != "let" && name != "run" && name != "apply" && name != "also" &&
+            name != "takeIf" && name != "takeUnless") { return null }
+        if (args.length != 1 || typeof args[0] != "function") { return null }
+        if (target !== null && target !== undefined && typeof target == "object" &&
+            target.__class != undefined && target.__class != null) {
+            if (clsFind(target.__class, name) != undefined) { return null }
+        }
+        var f = args[0]
+        // `x.run { ... }` binds the receiver as `this`; a bare closure value has no
+        // receiver channel in this model, so the receiver arrives as `it` instead -
+        // and the compiled half does exactly the same.
+        // `run` and `apply` bind the receiver as `this` (kSetRecv is the channel a
+        // lambda-with-receiver already uses), so an UNQUALIFIED member call inside the
+        // lambda resolves against it; the receiver also arrives as `it`, which `let`
+        // and `also` are defined to do.
+        if (name == "let") { return {v: f(target)} }
+        if (name == "run") { kSetRecv({v: target}); return {v: f(target)} }
+        if (name == "apply") { kSetRecv({v: target}); f(target); return {v: target} }
+        if (name == "also") { f(target); return {v: target} }
+        if (name == "takeIf") { return {v: f(target) ? target : null} }
+        return {v: f(target) ? null : target}
+    }
+
+    // ----- Char -----
+    function kIsLetterCh(code) {
+        if ((code >= 97 && code <= 122) || (code >= 65 && code <= 90)) { return true }
+        if (code <= 127) { return false }
+        var g = String.fromCharCode(code)
+        return g.toUpperCase() != g.toLowerCase()
+    }
+    function kUpperCode(code) {
+        var u = String.fromCharCode(code).toUpperCase()
+        return u.length == 1 ? u.charCodeAt(0) : code
+    }
+    function kLowerCode(code) {
+        var l = String.fromCharCode(code).toLowerCase()
+        return l.length == 1 ? l.charCodeAt(0) : code
+    }
+    function kCharMethod(cv, name, args) {
+        var code = cv.__char
+        if (name == "code") { return {v: code} }
+        if (name == "toString") { return {v: String.fromCharCode(code)} }
+        if (name == "isLetter") { return {v: kIsLetterCh(code)} }
+        if (name == "isDigit") { return {v: code >= 48 && code <= 57} }
+        if (name == "isLetterOrDigit") { return {v: kIsLetterCh(code) || (code >= 48 && code <= 57)} }
+        if (name == "isWhitespace") {
+            return {v: code == 32 || code == 9 || code == 10 || code == 13 || code == 12 || code == 11}
+        }
+        if (name == "isUpperCase") { return {v: code >= 65 && code <= 90} }
+        if (name == "isLowerCase") { return {v: code >= 97 && code <= 122} }
+        if (name == "uppercaseChar") { return {v: kChar(kUpperCode(code))} }
+        if (name == "lowercaseChar") { return {v: kChar(kLowerCode(code))} }
+        if (name == "uppercase") { return {v: String.fromCharCode(kUpperCode(code))} }
+        if (name == "lowercase") { return {v: String.fromCharCode(kLowerCode(code))} }
+        if (name == "digitToInt") {
+            if (code < 48 || code > 57) { fail("Char \"" + String.fromCharCode(code) + "\" is not a digit") }
+            return {v: code - 48}
+        }
+        if (name == "compareTo") {
+            var o = kIsChar(args[0]) ? args[0].__char : kNum(args[0])
+            return {v: code < o ? 0 - 1 : (code > o ? 1 : 0)}
+        }
+        if (name == "equals") { return {v: kIsChar(args[0]) && args[0].__char === code} }
+        if (name == "hashCode") { return {v: code} }
+        return null
+    }
+
+    // ----- String -----
+    function kChars(sv) {
+        var out = []
+        for (var i = 0; i < sv.length; i++) { out.push(kChar(sv.charCodeAt(i))) }
+        return out
+    }
+    // A Char argument to a String member is its glyph, so s.indexOf('B') and
+    // s.indexOf("B") agree.
+    function kStrArg(v) { return kIsChar(v) ? String.fromCharCode(v.__char) : kstr2(v) }
+    function kIsSpaceCh(code) {
+        return code == 32 || code == 9 || code == 10 || code == 13 || code == 12
+    }
+    function kTrimSide(sv, left, right) {
+        var b = 0
+        var e = sv.length
+        while (left && b < e && kIsSpaceCh(sv.charCodeAt(b))) { b++ }
+        while (right && e > b && kIsSpaceCh(sv.charCodeAt(e - 1))) { e-- }
+        return sv.substring(b, e)
+    }
+    // The frozen engine has no String.split, so the scan is written out.
+    function kSplitStr(sv, sep) {
+        var out = []
+        var start = 0
+        var i = 0
+        while (i + sep.length <= sv.length) {
+            if (sv.substring(i, i + sep.length) === sep) {
+                out.push(sv.substring(start, i))
+                i = i + sep.length
+                start = i
+                continue
+            }
+            i++
+        }
+        out.push(sv.substring(start, sv.length))
+        return out
+    }
+    function kLastIndexOfStr(sv, sub) {
+        var found = 0 - 1
+        var i = 0
+        while (i + sub.length <= sv.length) {
+            if (sv.substring(i, i + sub.length) === sub) { found = i }
+            i++
+        }
+        return found
+    }
+    function kStrMethod2(sv, name, args) {
+        var n = sv.length
+        if (name == "charAt" || name == "first" || name == "last" || name == "single" ||
+            name == "firstOrNull" || name == "lastOrNull") {
+            if (name == "charAt") {
+                var ci = kNum(args[0])
+                if (ci < 0 || ci >= n) { fail("charAt(" + ci + ") out of range for " + sv) }
+                return {v: kChar(sv.charCodeAt(ci))}
+            }
+            if (name == "firstOrNull") { return {v: n == 0 ? null : kChar(sv.charCodeAt(0))} }
+            if (name == "lastOrNull") { return {v: n == 0 ? null : kChar(sv.charCodeAt(n - 1))} }
+            if (name == "single") {
+                if (n != 1) { fail("single() on a string of length " + n) }
+                return {v: kChar(sv.charCodeAt(0))}
+            }
+            if (n == 0) { fail(name + "() on an empty string") }
+            return {v: kChar(sv.charCodeAt(name == "first" ? 0 : n - 1))}
+        }
+        if (name == "toCharArray" || name == "toList") { return {v: kChars(sv)} }
+        if (name == "trim") { return {v: kTrimSide(sv, true, true)} }
+        if (name == "trimStart") { return {v: kTrimSide(sv, true, false)} }
+        if (name == "trimEnd") { return {v: kTrimSide(sv, false, true)} }
+        if (name == "startsWith") {
+            var pf = kStrArg(args[0])
+            return {v: sv.substring(0, pf.length) === pf}
+        }
+        if (name == "endsWith") {
+            var sf = kStrArg(args[0])
+            return {v: sf.length <= n && sv.substring(n - sf.length, n) === sf}
+        }
+        if (name == "padStart" || name == "padEnd") {
+            var want = kNum(args[0])
+            var pad = args.length > 1 ? kStrArg(args[1]) : " "
+            var outp = sv
+            while (outp.length < want && pad.length > 0) {
+                outp = (name == "padStart") ? pad + outp : outp + pad
+            }
+            return {v: outp}
+        }
+        if (name == "reversed") {
+            var rv = ""
+            for (var ri = n - 1; ri >= 0; ri--) { rv += sv.charAt(ri) }
+            return {v: rv}
+        }
+        if (name == "lines") {
+            var ls = kSplitStr(sv, "\n")
+            for (var li = 0; li < ls.length; li++) {
+                var one = ls[li]
+                if (one.length > 0 && one.charCodeAt(one.length - 1) == 13) { ls[li] = one.substring(0, one.length - 1) }
+            }
+            return {v: ls}
+        }
+        if (name == "split") {
+            if (args.length == 0) { return null }
+            var sp = kStrArg(args[0])
+            if (sp.length == 0) { return null }
+            return {v: kSplitStr(sv, sp)}
+        }
+        if (name == "drop" || name == "take" || name == "dropLast" || name == "takeLast") {
+            var k = kNum(args[0])
+            if (k < 0) { k = 0 }
+            if (k > n) { k = n }
+            if (name == "drop") { return {v: sv.substring(k, n)} }
+            if (name == "take") { return {v: sv.substring(0, k)} }
+            if (name == "dropLast") { return {v: sv.substring(0, n - k)} }
+            return {v: sv.substring(n - k, n)}
+        }
+        if (name == "indexOf") { return {v: sv.indexOf(kStrArg(args[0]))} }
+        if (name == "lastIndexOf") { return {v: kLastIndexOfStr(sv, kStrArg(args[0]))} }
+        if (name == "contains") { return {v: sv.indexOf(kStrArg(args[0])) >= 0} }
+        if (name == "toInt" || name == "toLong" || name == "toDouble" || name == "toIntOrNull") {
+            return {v: kParseNum(sv, name)}
+        }
+        if (name == "format") { return {v: kFormat(sv, args)} }
+        // Everything a String shares with a List of Char.
+        return kSeqMethod(kChars(sv), name, args)
+    }
+    // toInt() / toLong() / toDouble() on a String. Kotlin throws NumberFormatException
+    // for text that is not a number, with java.lang's message.
+    function kParseNum(sv, name) {
+        var t = kTrimSide(sv, true, true)
+        if (name == "toDouble") {
+            var d = parseFloat(t)
+            if (t.length == 0 || d !== d) { fail("For input string: \"" + sv + "\"") }
+            return kFlo(d)
+        }
+        var neg = false
+        var body = t
+        if (body.length > 0 && body.charAt(0) == "-") { neg = true; body = body.substring(1, body.length) }
+        else if (body.length > 0 && body.charAt(0) == "+") { body = body.substring(1, body.length) }
+        var bad = body.length == 0
+        for (var i = 0; !bad && i < body.length; i++) {
+            var cc = body.charCodeAt(i)
+            if (cc < 48 || cc > 57) { bad = true }
+        }
+        if (bad) {
+            if (name == "toIntOrNull") { return null }
+            fail("For input string: \"" + sv + "\"")
+        }
+        // anytype, not a bare initializer: the frozen engine PINS a slot to the type
+        // of its declaration, and a sized-integer accumulator that starts as a box may
+        // still be handed a plain number by szArith (see docs/abnf-dialect-gotchas.md).
+        var acc = anytype
+        acc = szMake(i64Make(0, 0), 64, false)
+        for (var j = 0; j < body.length; j++) {
+            acc = szArith("+", szArith("*", acc, kSz(10, 64, kNoU)), kSz(body.charCodeAt(j) - 48, 64, kNoU))
+        }
+        if (neg) { acc = szArith("-", kSz(0, 64, kNoU), acc) }
+        if (name == "toLong") { return kConv(acc, 64, false) }
+        return kConv(acc, 32, false)
+    }
+    // The subset of java.util.Formatter a test program writes: %s, %d, %f (with a
+    // precision), %x, %c, %b, %% and a width. The Go twin is ktFormat.
+    function kFixed(f, prec) {
+        var neg = f < 0
+        var x = neg ? 0 - f : f
+        var scale = 1
+        for (var p = 0; p < prec; p++) { scale = scale * 10 }
+        var scaled = Math.floor(x * scale + 0.5)
+        var whole = Math.floor(scaled / scale)
+        var frac = scaled - whole * scale
+        var fs = "" + frac
+        while (fs.length < prec) { fs = "0" + fs }
+        var outs = "" + whole
+        if (prec > 0) { outs = outs + "." + fs }
+        return neg ? "-" + outs : outs
+    }
+    function kPadNum(sv, width, left, zero) {
+        var out = sv
+        while (out.length < width) { out = left ? (zero ? "0" : " ") + out : out + " " }
+        return out
+    }
+    function kFormat(f, args) {
+        var out = ""
+        var ai = 0
+        var i = 0
+        while (i < f.length) {
+            var ch = f.charAt(i)
+            if (ch != "%") { out += ch; i++; continue }
+            if (i + 1 < f.length && f.charAt(i + 1) == "%") { out += "%"; i = i + 2; continue }
+            i++
+            var flags = ""
+            while (i < f.length) {
+                var fc = f.charAt(i)
+                if (fc == "-" || fc == "+" || fc == "0" || fc == " " || fc == "." || fc == "," ||
+                    (fc >= "0" && fc <= "9")) { if (fc != ",") { flags += fc }; i++; continue }
+                break
+            }
+            if (i >= f.length) { break }
+            var verb = f.charAt(i)
+            i++
+            var a = anytype
+            a = ai < args.length ? args[ai] : undefined
+            ai++
+            var leftPad = flags.indexOf("-") < 0
+            var zeroPad = flags.length > 0 && flags.charAt(0) == "0"
+            var width = 0
+            var prec = 0 - 1
+            var wpart = flags
+            var dot = flags.indexOf(".")
+            if (dot >= 0) {
+                wpart = flags.substring(0, dot)
+                prec = parseFloat("0" + flags.substring(dot + 1, flags.length))
+            }
+            var wnum = ""
+            for (var wi = 0; wi < wpart.length; wi++) {
+                var wc = wpart.charAt(wi)
+                if (wc >= "0" && wc <= "9") { wnum += wc }
+            }
+            if (wnum.length > 0) { width = parseFloat(wnum) }
+            var piece = ""
+            if (verb == "s") { piece = kstr2(a) }
+            else if (verb == "d") { piece = szIs(a) ? szStr(a) : ("" + (kNum(a) | 0)) }
+            else if (verb == "f") { piece = kFixed(kNumD(a), prec < 0 ? 6 : prec) }
+            else if (verb == "x" || verb == "X") {
+                var hx = (kNum(a) | 0).toString(16)
+                piece = verb == "X" ? hx.toUpperCase() : hx
+            }
+            else if (verb == "c") { piece = kIsChar(a) ? String.fromCharCode(a.__char) : kstr2(a) }
+            else if (verb == "b") { piece = a ? "true" : "false" }
+            else { piece = verb; ai-- }
+            out += kPadNum(piece, width, leftPad, zeroPad)
+        }
+        return out
+    }
+
+    // ----- Collections -----
+    function kElems(v) {
+        if (Array.isArray(v)) { return v }
+        if (typeof v == "string") { return kChars(v) }
+        if (isRange(v)) { return rangeList(v) }
+        if (kIsMap(v)) {
+            var out = []
+            for (var i = 0; i < v.keys.length; i++) {
+                out.push({key: v.keys[i], value: v.vals[i], first: v.keys[i], second: v.vals[i]})
+            }
+            return out
+        }
+        fail("not a sequence: " + kstr(v))
+    }
+    // Kotlin's sumOf/sum take the WIDTH of what they sum: a Long selector sums to a
+    // Long and a Double selector to a Double, where the shared list branch accumulated
+    // in 32 bits for everything.
+    function kSumOf(es, f) {
+        var isFlo = false
+        var isLong = false
+        var vals = []
+        for (var i = 0; i < es.length; i++) {
+            var v = anytype
+            v = (f == null) ? es[i] : f(es[i])
+            vals.push(v)
+            if (kIsFlo(v)) { isFlo = true }
+            if (szIs(v) && v.w == 64) { isLong = true }
+        }
+        if (isFlo) {
+            var t = 0
+            for (var j = 0; j < vals.length; j++) { t = t + kNumD(vals[j]) }
+            return kFlo(t)
+        }
+        // anytype, not a bare initializer: the frozen engine PINS a slot to the type
+        // of its declaration, and a sized-integer accumulator that starts as a box may
+        // still be handed a plain number by szArith (see docs/abnf-dialect-gotchas.md).
+        var acc = anytype
+        acc = szMake(i64Make(0, 0), 64, false)
+        for (var k = 0; k < vals.length; k++) { acc = szArith("+", acc, kSz(kNum2(vals[k]), 64, kNoU)) }
+        return kConv(acc, isLong ? 64 : 32, false)
+    }
+    function kNum2(v) { return szIs(v) ? v : kNum(v) }
+    function kKeyLess(a, b) {
+        if (typeof a == "string" && typeof b == "string") { return a < b }
+        if (kIsChar(a) && kIsChar(b)) { return a.__char < b.__char }
+        if (kIsIntegral(a) && kIsIntegral(b)) { return kCmpI("<", a, b) }
+        return kNumD(a) < kNumD(b)
+    }
+    function kKeyEq(a, b) { return !kKeyLess(a, b) && !kKeyLess(b, a) }
+    // A stable insertion sort by an optional selector. Small on purpose: the two
+    // halves have to produce byte-identical orders, so the algorithm is spelled out
+    // rather than delegated to a host sort.
+    function kSortBy(es, sel, desc) {
+        var out = []
+        var keys = []
+        for (var i = 0; i < es.length; i++) {
+            out.push(es[i])
+            keys.push(sel == null ? es[i] : sel(es[i]))
+        }
+        for (var m = 1; m < out.length; m++) {
+            var v = anytype
+            var kk = anytype
+            v = out[m]
+            kk = keys[m]
+            var j = m - 1
+            while (j >= 0 && kKeyLess(kk, keys[j]) != desc && !kKeyEq(kk, keys[j])) {
+                out[j + 1] = out[j]
+                keys[j + 1] = keys[j]
+                j--
+            }
+            out[j + 1] = v
+            keys[j + 1] = kk
+        }
+        return out
+    }
+    function kSeqMethod(es, name, args) {
+        var f = args.length > 0 ? args[0] : null
+        var i
+        var out
+        if (name == "isEmpty") { return {v: es.length == 0} }
+        if (name == "isNotEmpty") { return {v: es.length > 0} }
+        // The names the shared list branch already answers for an ARRAY are repeated
+        // here because a STRING reaches this function too (a String is a sequence of
+        // Char in Kotlin, so "abc".map { it.code } is ordinary). The bodies are the
+        // same ones, so an array's answer is unchanged whichever branch reaches it.
+        if (name == "map") {
+            out = []
+            for (i = 0; i < es.length; i++) { out.push(f(es[i])) }
+            return {v: out}
+        }
+        if (name == "filter") {
+            out = []
+            for (i = 0; i < es.length; i++) { if (f(es[i])) { out.push(es[i]) } }
+            return {v: out}
+        }
+        if (name == "forEach") {
+            for (i = 0; i < es.length; i++) { f(es[i]) }
+            return {v: undefined}
+        }
+        if (name == "count") {
+            if (args.length == 0) { return {v: es.length} }
+            var cn = 0
+            for (i = 0; i < es.length; i++) { if (f(es[i])) { cn++ } }
+            return {v: cn}
+        }
+        if (name == "any") {
+            for (i = 0; i < es.length; i++) { if (f(es[i])) { return {v: true} } }
+            return {v: false}
+        }
+        if (name == "indexOf") {
+            for (i = 0; i < es.length; i++) { if (kEqVals(es[i], f)) { return {v: i} } }
+            return {v: 0 - 1}
+        }
+        if (name == "first") {
+            if (args.length == 1 && typeof f == "function") {
+                for (i = 0; i < es.length; i++) { if (f(es[i])) { return {v: es[i]} } }
+                fail("no element matching the predicate")
+            }
+            if (es.length == 0) { fail("first() on an empty list") }
+            return {v: es[0]}
+        }
+        if (name == "last") {
+            if (es.length == 0) { fail("last() on an empty list") }
+            return {v: es[es.length - 1]}
+        }
+        if (name == "single") {
+            if (args.length == 1 && typeof f == "function") {
+                var hit = anytype
+                hit = undefined
+                var nhit = 0
+                for (i = 0; i < es.length; i++) { if (f(es[i])) { hit = es[i]; nhit++ } }
+                if (nhit != 1) { fail("single() matched " + nhit + " elements") }
+                return {v: hit}
+            }
+            if (es.length != 1) { fail("single() on a list of size " + es.length) }
+            return {v: es[0]}
+        }
+        if (name == "firstOrNull") {
+            if (args.length == 1 && typeof f == "function") {
+                for (i = 0; i < es.length; i++) { if (f(es[i])) { return {v: es[i]} } }
+                return {v: null}
+            }
+            return {v: es.length == 0 ? null : es[0]}
+        }
+        if (name == "lastOrNull") { return {v: es.length == 0 ? null : es[es.length - 1]} }
+        if (name == "find") {
+            for (i = 0; i < es.length; i++) { if (f(es[i])) { return {v: es[i]} } }
+            return {v: null}
+        }
+        if (name == "all") {
+            for (i = 0; i < es.length; i++) { if (!f(es[i])) { return {v: false} } }
+            return {v: true}
+        }
+        if (name == "none") {
+            if (args.length == 0) { return {v: es.length == 0} }
+            for (i = 0; i < es.length; i++) { if (f(es[i])) { return {v: false} } }
+            return {v: true}
+        }
+        if (name == "indexOfFirst") {
+            for (i = 0; i < es.length; i++) { if (f(es[i])) { return {v: i} } }
+            return {v: 0 - 1}
+        }
+        if (name == "fold") {
+            var acc = anytype
+            acc = args[0]
+            for (i = 0; i < es.length; i++) { acc = args[1](acc, es[i]) }
+            return {v: acc}
+        }
+        if (name == "foldRight") {
+            var accr = anytype
+            accr = args[0]
+            for (i = es.length - 1; i >= 0; i--) { accr = args[1](es[i], accr) }
+            return {v: accr}
+        }
+        if (name == "reduce") {
+            if (es.length == 0) { fail("reduce() on an empty list") }
+            var accd = anytype
+            accd = es[0]
+            for (i = 1; i < es.length; i++) { accd = f(accd, es[i]) }
+            return {v: accd}
+        }
+        if (name == "sumOf") { return {v: kSumOf(es, f)} }
+        if (name == "sum") { return {v: kSumOf(es, null)} }
+        if (name == "average") {
+            if (es.length == 0) { return {v: kFlo(parseFloat("nan"))} }
+            var tot = 0
+            for (i = 0; i < es.length; i++) { tot = tot + kNumD(es[i]) }
+            return {v: kFlo(tot / es.length)}
+        }
+        if (name == "flatMap" || name == "flatten") {
+            out = []
+            for (i = 0; i < es.length; i++) {
+                var sub = kElems(name == "flatMap" ? f(es[i]) : es[i])
+                for (var q = 0; q < sub.length; q++) { out.push(sub[q]) }
+            }
+            return {v: out}
+        }
+        if (name == "mapIndexed") {
+            out = []
+            for (i = 0; i < es.length; i++) { out.push(f(i, es[i])) }
+            return {v: out}
+        }
+        if (name == "mapNotNull") {
+            out = []
+            for (i = 0; i < es.length; i++) {
+                var mv = anytype
+                mv = f(es[i])
+                if (mv !== null && mv !== undefined) { out.push(mv) }
+            }
+            return {v: out}
+        }
+        if (name == "forEachIndexed") {
+            for (i = 0; i < es.length; i++) { f(i, es[i]) }
+            return {v: undefined}
+        }
+        if (name == "filterNot") {
+            out = []
+            for (i = 0; i < es.length; i++) { if (!f(es[i])) { out.push(es[i]) } }
+            return {v: out}
+        }
+        if (name == "partition") {
+            var yes = []
+            var no = []
+            for (i = 0; i < es.length; i++) { if (f(es[i])) { yes.push(es[i]) } else { no.push(es[i]) } }
+            return {v: kPair(yes, no)}
+        }
+        if (name == "zip") {
+            var other = kElems(args[0])
+            out = []
+            for (i = 0; i < es.length && i < other.length; i++) {
+                if (args.length > 1 && typeof args[1] == "function") { out.push(args[1](es[i], other[i])) }
+                else { out.push(kPair(es[i], other[i])) }
+            }
+            return {v: out}
+        }
+        if (name == "chunked" || name == "windowed") {
+            var sz = kNum(args[0])
+            var step = 1
+            if (name == "chunked") { step = sz }
+            else if (args.length > 1) { step = kNum(args[1]) }
+            if (sz <= 0 || step <= 0) { fail(name + "() size and step must be positive") }
+            out = []
+            for (i = 0; (name == "chunked" ? i < es.length : i + sz <= es.length); i = i + step) {
+                var piece = []
+                for (var w = i; w < i + sz && w < es.length; w++) { piece.push(es[w]) }
+                out.push(piece)
+            }
+            return {v: out}
+        }
+        if (name == "distinct" || name == "toSet" || name == "toMutableSet") {
+            out = []
+            for (i = 0; i < es.length; i++) {
+                var seen = false
+                for (var d = 0; d < out.length; d++) { if (kEqVals(out[d], es[i])) { seen = true } }
+                if (!seen) { out.push(es[i]) }
+            }
+            return {v: out}
+        }
+        if (name == "reversed" || name == "asReversed") {
+            out = []
+            for (i = es.length - 1; i >= 0; i--) { out.push(es[i]) }
+            return {v: out}
+        }
+        if (name == "sorted") { return {v: kSortBy(es, null, false)} }
+        if (name == "sortedDescending") { return {v: kSortBy(es, null, true)} }
+        if (name == "sortedBy") { return {v: kSortBy(es, f, false)} }
+        if (name == "sortedByDescending") { return {v: kSortBy(es, f, true)} }
+        if (name == "maxOrNull" || name == "minOrNull") {
+            if (es.length == 0) { return {v: null} }
+            return {v: kSortBy(es, null, name == "maxOrNull")[0]}
+        }
+        if (name == "maxByOrNull" || name == "minByOrNull") {
+            if (es.length == 0) { return {v: null} }
+            return {v: kSortBy(es, f, name == "maxByOrNull")[0]}
+        }
+        if (name == "take" || name == "drop" || name == "takeLast" || name == "dropLast") {
+            var kk2 = kNum(args[0])
+            if (kk2 < 0) { kk2 = 0 }
+            if (kk2 > es.length) { kk2 = es.length }
+            var lo = 0
+            var hi = es.length
+            if (name == "take") { hi = kk2 }
+            else if (name == "drop") { lo = kk2 }
+            else if (name == "dropLast") { hi = es.length - kk2 }
+            else { lo = es.length - kk2 }
+            out = []
+            for (i = lo; i < hi; i++) { out.push(es[i]) }
+            return {v: out}
+        }
+        if (name == "toList" || name == "toMutableList" || name == "asSequence" ||
+            name == "asIterable" || name == "toTypedArray") {
+            out = []
+            for (i = 0; i < es.length; i++) { out.push(es[i]) }
+            return {v: out}
+        }
+        if (name == "withIndex") {
+            out = []
+            for (i = 0; i < es.length; i++) {
+                out.push({index: i, value: es[i], first: i, second: es[i]})
+            }
+            return {v: out}
+        }
+        if (name == "groupBy") {
+            var gm = kMakeMap()
+            for (i = 0; i < es.length; i++) {
+                var gk = f(es[i])
+                var gi = kMapFind(gm, gk)
+                if (gi < 0) { kMapPut(gm, gk, [es[i]]) }
+                else { gm.vals[gi].push(es[i]) }
+            }
+            return {v: gm}
+        }
+        if (name == "associate" || name == "associateWith" || name == "associateBy" || name == "toMap") {
+            var am = kMakeMap()
+            for (i = 0; i < es.length; i++) {
+                if (name == "associateWith") { kMapPut(am, es[i], f(es[i])); continue }
+                if (name == "associateBy") { kMapPut(am, f(es[i]), es[i]); continue }
+                var pr = anytype
+                pr = (name == "toMap") ? es[i] : f(es[i])
+                if (!kIsPair(pr)) { fail(name + "() needs a Pair") }
+                kMapPut(am, pr.first, pr.second)
+            }
+            return {v: am}
+        }
+        if (name == "joinToString") {
+            var sep = args.length > 0 ? kStrArg(args[0]) : ", "
+            var pre = args.length > 1 ? kStrArg(args[1]) : ""
+            var post = args.length > 2 ? kStrArg(args[2]) : ""
+            var js = ""
+            for (i = 0; i < es.length; i++) { if (i > 0) { js += sep }; js += kstr2(es[i]) }
+            return {v: pre + js + post}
+        }
+        if (name == "hashCode") { return {v: kHash(es)} }
+        return null
+    }
+    function kMapMethod(m, name, args) {
+        var f = args.length > 0 ? args[0] : null
+        var i
+        if (name == "get" || name == "getValue" || name == "getOrDefault" || name == "getOrElse") {
+            i = kMapFind(m, f)
+            if (i >= 0) { return {v: m.vals[i]} }
+            if (name == "getValue") { fail("key " + kstr(f) + " is missing in the map") }
+            if (name == "getOrDefault") { return {v: args[1]} }
+            if (name == "getOrElse") { return {v: args[1]()} }
+            return {v: null}
+        }
+        if (name == "put" || name == "set") {
+            i = kMapFind(m, f)
+            var old = anytype
+            old = i >= 0 ? m.vals[i] : null
+            kMapPut(m, f, args[1])
+            return {v: old}
+        }
+        if (name == "remove") {
+            i = kMapFind(m, f)
+            if (i < 0) { return {v: null} }
+            var gone = anytype
+            gone = m.vals[i]
+            // No array.splice under the frozen engine: the two arrays are rebuilt.
+            var nk = []
+            var nv = []
+            for (var j = 0; j < m.keys.length; j++) {
+                if (j == i) { continue }
+                nk.push(m.keys[j])
+                nv.push(m.vals[j])
+            }
+            m.keys = nk
+            m.vals = nv
+            return {v: gone}
+        }
+        if (name == "containsKey") { return {v: kMapFind(m, f) >= 0} }
+        if (name == "containsValue") {
+            for (i = 0; i < m.vals.length; i++) { if (kEqVals(m.vals[i], f)) { return {v: true} } }
+            return {v: false}
+        }
+        if (name == "size") { return {v: m.keys.length} }
+        if (name == "isEmpty") { return {v: m.keys.length == 0} }
+        if (name == "isNotEmpty") { return {v: m.keys.length > 0} }
+        if (name == "keys") { return {v: kSeqMethod(m.keys, "toList", []).v} }
+        if (name == "values") { return {v: kSeqMethod(m.vals, "toList", []).v} }
+        if (name == "entries" || name == "toList") { return {v: kElems(m)} }
+        if (name == "toMap" || name == "toMutableMap") {
+            var out = kMakeMap()
+            for (i = 0; i < m.keys.length; i++) { kMapPut(out, m.keys[i], m.vals[i]) }
+            return {v: out}
+        }
+        if (name == "clear") { m.keys = []; m.vals = []; return {v: undefined}}
+        return kSeqMethod(kElems(m), name, args)
+    }
+
     function mcall(target, name, args, spec) {
         // Both are copied into locals rather than reassigned: a parameter keeps the
         // type of its first call under the frozen engine, and these two legitimately
@@ -3109,17 +4163,23 @@ NotMemberKw = :script(~~
         // for everything that is not a regexp call, so the dispatch below is unchanged.
         var krx = krxMethod(target, name, args)
         if (krx != null) { return krx.v }
+        // The SCOPE FUNCTIONS: let/run/apply/also/takeIf/takeUnless are extensions on
+        // Any, so no receiver branch below owns them; a class member of the same name
+        // still wins (kScopeMethod declines then).
+        var ksc = kScopeMethod(target, name, args)
+        if (ksc != null) { return ksc.v }
+        // A Char receiver. Char is a real type here (the {__char} box), so .code,
+        // .digitToInt(), .isLetter() and the case conversions answer from the CODE.
+        if (kIsChar(target)) {
+            var kcm = kCharMethod(target, name, args)
+            if (kcm != null) { return kcm.v }
+        }
         if (typeof target == "string") {
             // The String methods of the `bmn` list above, with the semantics of the
             // js_mcall external the compiled twin calls: substring clamps and swaps
             // its bounds (JS substring, not slice) and charAt rejects an index
             // outside the string instead of yielding "".
             if (name == "length") return target.length
-            if (name == "charAt") {
-                var ci = kNum(args[0])
-                if (ci < 0 || ci >= target.length) fail("charAt(" + ci + ") out of range for " + target)
-                return target.charAt(ci)
-            }
             if (name == "equals") return target === args[0]
             if (name == "substring") return args.length > 1 ? target.substring(kNum(args[0]), kNum(args[1])) : target.substring(kNum(args[0]))
             if (name == "indexOf") return target.indexOf(kstr2(args[0]))
@@ -3135,8 +4195,9 @@ NotMemberKw = :script(~~
             // here and in the compiled twin's js_ktsmcall (abnf/jsrtkotlin.go).
             if (name == "uppercase" || name == "toUpperCase") return target.toUpperCase()
             if (name == "lowercase" || name == "toLowerCase") return target.toLowerCase()
-            if (name == "contains") return target.indexOf(kstr2(args[0])) >= 0
             if (name == "hashCode") return kHash(target)
+            var ksm = kStrMethod2(target, name, args)
+            if (ksm != null) { return ksm.v }
             return mfallback(target, name, args, "String")
         }
         // Int/Long/Double receivers: the handful of member functions Kotlin defines on
@@ -3239,6 +4300,41 @@ NotMemberKw = :script(~~
         if (name == "toString" && args.length == 0) { return kstr(target) }
         // A range answers contains without materialising, and every other list method
         // (map/filter/sumOf/forEach/count/any/...) on its element sequence.
+        // A MAP: the shared {__dict, keys, vals} handle mapOf/groupBy/associate build.
+        if (kIsMap(target)) {
+            var kmm = kMapMethod(target, name, args)
+            if (kmm != null) { return kmm.v }
+            fail("unknown Map method: " + name)
+        }
+        // A StringBuilder box.
+        if (target !== null && target !== undefined && typeof target == "object" && target.__sb === true) {
+            if (name == "append") {
+                for (var sbi = 0; sbi < args.length; sbi++) { target.s = target.s + kstr2(args[sbi]) }
+                return target
+            }
+            if (name == "appendLine") {
+                for (var sbj = 0; sbj < args.length; sbj++) { target.s = target.s + kstr2(args[sbj]) }
+                target.s = target.s + "\n"
+                return target
+            }
+            if (name == "toString") { return target.s }
+            if (name == "length") { return target.s.length }
+            if (name == "isEmpty") { return target.s.length == 0 }
+            if (name == "clear") { target.s = ""; return target }
+            if (name == "reverse") {
+                var rv2 = ""
+                for (var sbk = target.s.length - 1; sbk >= 0; sbk--) { rv2 += target.s.charAt(sbk) }
+                target.s = rv2
+                return target
+            }
+            return mcall(target.s, name, args, spec)
+        }
+        // A Pair / Triple: componentN, so `val (a, b) = 1 to 2` destructures.
+        if (kIsPair(target)) {
+            if (name == "component1") { return target.first }
+            if (name == "component2") { return target.second }
+            if (name == "component3" && target.third !== undefined) { return target.third }
+        }
         var tgt = anytype
         tgt = target
         if (isRange(tgt)) {
@@ -3254,8 +4350,6 @@ NotMemberKw = :script(~~
             if (name == "isEmpty") return tgt.length == 0
             if (name == "isNotEmpty") return tgt.length > 0
             if (name == "hashCode") return kHash(tgt)
-            if (name == "first") return tgt[0]
-            if (name == "last") return tgt[tgt.length - 1]
             var i
             var out
             if (name == "map") {
@@ -3267,11 +4361,6 @@ NotMemberKw = :script(~~
                 out = []
                 for (i = 0; i < tgt.length; i++) { if (args[0](tgt[i])) out.push(tgt[i]) }
                 return out
-            }
-            if (name == "sumOf") {
-                var sum = 0
-                for (i = 0; i < tgt.length; i++) sum = (sum + kNum(args[0](tgt[i]))) | 0
-                return sum
             }
             if (name == "forEach") {
                 for (i = 0; i < tgt.length; i++) args[0](tgt[i])
@@ -3287,12 +4376,8 @@ NotMemberKw = :script(~~
                 for (i = 0; i < tgt.length; i++) { if (args[0](tgt[i])) return true }
                 return false
             }
-            if (name == "joinToString") {
-                var sep = args.length > 0 ? kstr2(args[0]) : ", "
-                var js = ""
-                for (i = 0; i < tgt.length; i++) { if (i > 0) js += sep; js += kstr2(tgt[i]) }
-                return js
-            }
+            var kqm = kSeqMethod(tgt, name, args)
+            if (kqm != null) { return kqm.v }
             return mfallback(tgt, name, args, "list")
         }
         if (target.__class != undefined) {
@@ -4131,12 +5216,13 @@ NotMemberKw = :script(~~
     // production pushed (the modifier and annotation alternatives push nothing, so
     // only the name string, an optional {pvararg} and an optional {pdef} arrive).
     function makeParam(items) {
-        var p = {pname: "", def: null, vararg: false}
+        var p = {pname: "", def: null, vararg: false, ty: ""}
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "string") { p.pname = it }
             else if (it != undefined && it.pvararg != undefined) { p.vararg = true }
             else if (it != undefined && it.pdef != undefined) { p.def = it.pdef }
+            else if (it != undefined && it.pty != undefined) { p.ty = it.pty }
         }
         return p
     }
@@ -4174,6 +5260,7 @@ NotMemberKw = :script(~~
             if (v === kMISSING) {
                 v = (typeof p != "string" && p.def != null) ? p.def() : undefined
             }
+            if (typeof p != "string" && p.ty != undefined && p.ty != "") { v = kAdoptTy(v, p.ty) }
             declVar(nm, v)
         }
     }
@@ -4208,7 +5295,23 @@ NotMemberKw = :script(~~
 
     function makeFun(items) {
         tpEnd()
-        return {name: items[0], params: items[1].params, body: items[2]}
+        var name = items[0]
+        var params = []
+        var body = null
+        var rty = ""
+        for (var i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { body = it }
+            else if (it != undefined && it != null && it.params != undefined) { params = it.params }
+            else if (it != undefined && it != null && it.rty != undefined) { rty = it.rty }
+        }
+        return {name: name, params: params, body: body, rty: rty}
+    }
+    // The declared return type retypes the answer. It is applied at the frame runners
+    // rather than inside the body so that both the block form (`fun f(): Long { return 1 }`)
+    // and the expression form (`fun f(): Long = 1`) go through it.
+    function kRetAdopt(f, v) {
+        return (f.rty == undefined || f.rty == "") ? v : kAdoptTy(v, f.rty)
     }
     function registerFun(f) {
         globalScope[f.name] = makeFunClosure(f)
@@ -4224,7 +5327,7 @@ NotMemberKw = :script(~~
             declVar(f.name, function() {
                 var base = captured.slice(0)
                 base.push({})
-                return runFrame(base, undefined, false, f.params, arguments, 0, f.body)
+                return kRetAdopt(f, runFrame(base, undefined, false, f.params, arguments, 0, f.body))
             })
         }
     }
@@ -4232,7 +5335,7 @@ NotMemberKw = :script(~~
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBody(f.params, f.body, undefined, "this", args)
+            return kRetAdopt(f, invokeBody(f.params, f.body, undefined, "this", args))
         }
     }
     function makeMethodClosure(f) {
@@ -4240,7 +5343,7 @@ NotMemberKw = :script(~~
             var self = arguments[0]
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBody(f.params, f.body, self, "this", args)
+            return kRetAdopt(f, invokeBody(f.params, f.body, self, "this", args))
         }
     }
     // A primary-constructor parameter is a Param record ({pname, def, vararg}) plus the
@@ -4399,14 +5502,51 @@ NotMemberKw = :script(~~
                 if (it.getter != undefined || it.setter != undefined) {
                     r.accessors.push(it)
                 }
-                if (it.hasField) { r.inits.push({prop: it.prop, init: it.init}) }
+                if (it.hasField) { r.inits.push({prop: it.prop, init: it.init, ty: it.ty}) }
             }
         }
         return r
     }
     // Install a member list onto a descriptor: the methods under their names, the
     // property accessors under the mangled get$/set$ names.
+    // The declared type of every property this descriptor OWNS, keyed "$name". Together
+    // with __cparams (which already carries a primary-constructor property's type) it is
+    // what lets a FIELD WRITE adopt the declared width: `class A { var y: Long = 0 }`
+    // followed by `a.y = 1` used to store a plain Int, so `a.y * 1000000 * 1000000` gave
+    // -727379968 where java (JDK 24) prints 1000000000000. Go's __ftypes table
+    // (commit 457791c) is the same idea; the Kotlin version needs no zero-value builder
+    // because a property always has an initializer thunk.
+    function kInstallPTypes(cls, parts) {
+        var t = {}
+        for (var i = 0; i < parts.inits.length; i++) {
+            var it = parts.inits[i]
+            if (it.prop != undefined && it.ty != undefined && it.ty != "") { t["$" + it.prop] = it.ty }
+        }
+        cls.__ptypes = t
+    }
+    // The declared type of a field, looked up through the class chain. Answers "" when
+    // nothing declares one, which makes kAdoptTy a no-op.
+    function kFieldTy(o, name) {
+        if (o === undefined || o === null || typeof o != "object") { return "" }
+        var cls = o.__class
+        var guard = 0
+        while (cls != undefined && cls != null && guard < 64) {
+            guard++
+            var pt = cls.__ptypes
+            if (pt != undefined && pt != null && hasOwn(pt, "$" + name)) { return pt["$" + name] }
+            var cp = cls.__cparams
+            if (cp != undefined && cp != null) {
+                for (var i = 0; i < cp.length; i++) {
+                    if (cp[i].pname == name && cp[i].ty != undefined && cp[i].ty != "") { return cp[i].ty }
+                }
+            }
+            var ps = cls.__parents
+            cls = (ps != undefined && ps != null && ps.length > 0) ? ps[0] : null
+        }
+        return ""
+    }
     function installMembers(cls, parts) {
+        kInstallPTypes(cls, parts)
         for (var i = 0; i < parts.methods.length; i++) {
             cls[parts.methods[i].name] = makeMethodClosure(parts.methods[i])
             classMethodNames["$" + parts.methods[i].name] = true
@@ -4865,11 +6005,12 @@ NotMemberKw = :script(~~
     // `name = ...` in a method resolves against `this`.
     function makeProp(items) {
         var r = {prop: items[0], init: null, getter: undefined, setter: undefined,
-                 sparam: null, hasField: true}
+                 sparam: null, hasField: true, ty: ""}
         for (var i = 1; i < items.length; i++) {
             var it = items[i]
             if (it == undefined || it == null) { continue }
-            if (it.pinit != undefined) { r.init = it.pinit }
+            if (it.pty != undefined) { r.ty = it.pty }
+            else if (it.pinit != undefined) { r.init = it.pinit }
             else if (it.getter != undefined) { r.getter = it.getter }
             else if (it.setter != undefined) { r.setter = it.setter; r.sparam = it.sparam }
         }
@@ -4877,6 +6018,7 @@ NotMemberKw = :script(~~
             r.init = makeConst(null)
             if (r.getter != undefined) { r.hasField = false }
         }
+        r.init = kAdoptThunk(r.init, r.ty)
         return r
     }
     // ----- Delegated properties (the getValue/setValue protocol) -----
@@ -5101,6 +6243,10 @@ NotMemberKw = :script(~~
             }
             if (n == 1 && hasOwn(v, "first")) { return v.first }
             if (n == 2 && hasOwn(v, "second")) { return v.second }
+            if (n == 3 && hasOwn(v, "third")) { return v.third }
+            // A map ENTRY destructures as (key, value) - `for ((k, v) in m)`.
+            if (n == 1 && hasOwn(v, "key")) { return v.key }
+            if (n == 2 && hasOwn(v, "value")) { return v.value }
             fail("no component" + n + "() on " + kstr(v))
         }
         // A SCALAR has no componentN in any Kotlin - `{ (a, b) -> ... }` over a
@@ -5172,6 +6318,19 @@ NotMemberKw = :script(~~
             return extPropGet(o, name)
         }
         if (typeof o == "number" || typeof o == "boolean") { return extPropGet(o, name) }
+        // Char.code is a PROPERTY in Kotlin, not a method.
+        if (kIsChar(o)) {
+            if (name == "code") { return o.__char }
+            return extPropGet(o, name)
+        }
+        if (kIsMap(o)) {
+            if (name == "size") { return o.keys.length }
+            if (name == "keys") { return kSeqMethod(o.keys, "toList", []).v }
+            if (name == "values") { return kSeqMethod(o.vals, "toList", []).v }
+            if (name == "entries") { return kElems(o) }
+            return extPropGet(o, name)
+        }
+        if (typeof o == "object" && o.__sb === true && name == "length") { return o.s.length }
         if (Array.isArray(o)) {
             if (name == "size") { return o.length }
             if (name == "lastIndex") { return o.length - 1 }
@@ -5236,20 +6395,32 @@ NotMemberKw = :script(~~
     }
     function kSetField(o, name, v) {
         if (o === undefined || o === null) { fail("assignment to property ." + name + " of null") }
+        // A fresh local, not the parameter: the frozen engine pins a REASSIGNED
+        // parameter to the type of its first call, and this one legitimately turns a
+        // plain number into a sized box (see docs/abnf-dialect-gotchas.md).
+        var fv2 = anytype
+        fv2 = v
+        var ft = kFieldTy(o, name)
+        if (ft != "") { fv2 = kAdoptTy(fv2, ft) }
         if (typeof o == "object" && o.__class != undefined && o.__class != null) {
             var st = clsFind(o.__class, "set$" + name)
-            if (typeof st == "function") { st(o, v); return }
+            if (typeof st == "function") { st(o, fv2); return }
         }
         var mx = memberExtLookup(name, "extset$")
-        if (mx != null && (typeof o != "object" || !hasOwn(o, name))) { mx.fn.apply(undefined, [mx.self, o, v]); return }
+        if (mx != null && (typeof o != "object" || !hasOwn(o, name))) { mx.fn.apply(undefined, [mx.self, o, fv2]); return }
         var es = extPropSetters["$" + name]
-        if (es != undefined && (typeof o != "object" || !hasOwn(o, name))) { es(o, v); return }
-        scopePut(o, name, v)
+        if (es != undefined && (typeof o != "object" || !hasOwn(o, name))) { es(o, fv2); return }
+        scopePut(o, name, fv2)
     }
     function kIndex(o, i) {
         if (o === undefined || o === null) { fail("indexing of " + kstr(o)) }
         // m.groups[1] / m.groups["name"]: a MatchGroup (value + range) or null.
         if (isKGroups(o)) { return krxGroupAt(o.md, i) }
+        // m[k] on a Map: the missing key answers null, exactly as kotlin.Map.get does.
+        if (kIsMap(o)) {
+            var mi = kMapFind(o, i)
+            return mi < 0 ? null : o.vals[mi]
+        }
         if (typeof o == "string") { return kChar(o.charCodeAt(kNum(i))) }
         if (Array.isArray(o)) { return o[kNum(i)] }
         if (isRange(o)) { return rangeList(o)[kNum(i)] }
@@ -5369,6 +6540,7 @@ NotMemberKw = :script(~~
     }
     function kSetIndex(o, i, v) {
         if (Array.isArray(o)) { o[kNum(i)] = v; return }
+        if (kIsMap(o)) { kMapPut(o, i, v); return }
         if (typeof o == "object" && o != null && o.__class != undefined && o.__class != null) {
             var st = clsFind(o.__class, "set")
             if (typeof st == "function") { st(o, i, v); return }
@@ -5483,9 +6655,29 @@ NotMemberKw = :script(~~
                 var st = clsStatic(cls, name)
                 if (st != null) { return st }
             }
+            // A BUILTIN receiver - the StringBuilder box, a list, a map - reached
+            // through `with(x) { ... }` / `x.apply { ... }`, where Kotlin binds the
+            // receiver as `this` and an unqualified `append("a")` is a member call on
+            // it. The few PROPERTIES come from kGetField; everything else is a bound
+            // method, so the lookup never turns a property into a callable.
+            if (cls == undefined && cur.__isclass == undefined &&
+                (Array.isArray(cur) || kIsMap(cur) || cur.__sb === true)) {
+                if (kRecvProps["$" + name] === true) { return {v: kGetField(cur, name)} }
+                return {v: kBoundBuiltin(cur, name)}
+            }
             cur = hasOwn(cur, "__outer") ? cur.__outer : null
         }
         return null
+    }
+    var kRecvProps = {}
+    var krpn = ["size", "length", "keys", "values", "entries", "indices", "lastIndex"]
+    for (var krpi = 0; krpi < krpn.length; krpi++) { kRecvProps["$" + krpn[krpi]] = true }
+    function kBoundBuiltin(self, name) {
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            return mcall(self, name, args)
+        }
     }
     // A method value with the receiver already bound, so an unqualified member call
     // (hidden(), secret()) is an ordinary callable.
