@@ -476,7 +476,14 @@ AnnArgsOk   = :script(~~
 // warning (see resolveImport in the startScript). QualName also accepts a
 // trailing .* wildcard. Neither pushes a statement, so buildMain never sees them.
 Package     <~~ pop() ~~> = KwPackage QualName [ ";" ] ;
-Import      <~~ resolveImport(pop(), up.pos) ~~> = KwImport QualName [ KwAs KId ] [ ";" ] ;
+// The import policy is unchanged - resolveImport still resolves, warns under
+// -warn-imports, or aborts. What is ADDED is a record of the simple name each import
+// brings in (and its `as` alias), which is what tells a supertype that is genuinely
+// OUTSIDE the program (`class MyApp : Application()` after an Android import this
+// machine cannot resolve) apart from one the resolver merely failed to find. The two
+// are different bugs and only the second is ours: see noteImportName.
+Import      <~~ ktImport(takeAll(), up.pos) ~~>
+            = KwImport QualName [ KwAs KId <~~ push({ialias: up.in}) ~~> ] [ ";" ] ;
 QualName    <~~ push(stripWs(up.in)) ~~> = KId { "." KId } [ "." "*" ] ;
 
 // A top level val/var: its declaration thunk becomes a top level statement. Unlike a
@@ -2299,8 +2306,13 @@ NotEntryEnd = :script(~~
 // the untyped handle world, so every use of the alias already compiles.
 AnnotationClass <~~ push(makeErased()) ~~>
             = KwAnnotation KwClass KId [ SkipAngle ] [ CtorParamsSkip ] [ SkipBlock ] ;
-TypeAlias   <~~ push(makeErased()) ~~>
-            = KwTypealias KId [ SkipAngle ] "=" Type [ ";" ] ;
+// The declaration itself is still erased, but the alias -> target mapping is RECORDED:
+// `typealias Alias = Real ; class C : Alias()` names its superclass through the alias,
+// and resolvedTypeName has to be able to follow it or `super.g()` inside C reports
+// "super call outside a subclass" - the exact error four rounds of super fixes kept
+// leaving behind. The interpreter half has kept this table (typeAliases) all along.
+TypeAlias   <~~ push(registerTypeAlias(takeAll())) ~~>
+            = KwTypealias KId <~~ push(up.in) ~~> [ SkipAngle ] "=" TypeName [ ";" ] ;
 
 // Member forms accepted structurally, then reported as not implemented. Each fires
 // notImpl at compile time and pushes nothing, so makeClassStmt simply skips it.
@@ -2528,6 +2540,10 @@ KwContract  = "contract" KwEnd ;
     // super.m() reads it (emission of a class's methods happens inside makeClassStmt's
     // thunk, so a dynamic variable is exactly the right scope); null outside a class.
     var emitSuperName = null
+    // What was WRITTEN for that superclass, resolved or not, so a super reference that
+    // cannot be resolved can NAME the supertype it failed on instead of claiming there
+    // is no subclass. Saved and restored in lockstep with emitSuperName.
+    var emitSuperRaw = null
 
     // ----- Extension functions: dispatch by name, the receiver becomes `this` -----
     // Method names the runtime implements on strings/lists/dicts (the interpreter
@@ -3107,6 +3123,61 @@ KwContract  = "contract" KwEnd ;
     // A declaration that is fully ERASED: it parses, contributes nothing to the module,
     // and is NOT a gap (annotation classes and typealiases are metadata / type sugar).
     function makeErased() { return function(b) { return b } }
+
+    // ----- Imports that name a type this program does not contain -----
+    // The SIMPLE name each import brings in, and its `as` alias. An import that RESOLVED
+    // puts its types into the program, so a name recorded here that is STILL not a
+    // program type came from an import this run could not resolve - which only happens
+    // under -warn-imports, i.e. after the user has already chosen to continue past the
+    // missing import. `class MyApp : Application()` over an unresolvable
+    // `import android.app.Application` is exactly that shape, and it is the commonest
+    // `super` in a real Android tree.
+    //
+    // This is a DIFFERENT class of failure from a supertype the resolver merely could
+    // not find (a typealias, a dotted path, an interface listed first). Those are bugs
+    // here and stay hard failures that NAME the supertype. An external one is not a gap
+    // in this grammar and never will be: there is no such class anywhere, so a `super`
+    // into it degrades to Unit and the override's own body still runs.
+    //
+    // No second warning is printed at the super site, deliberately. The import already
+    // warned and named the type, the degradation is only reachable because the user
+    // passed -warn-imports, and a per-site warning cannot be made byte-identical between
+    // a static emitter (which would warn about code that never runs) and a walker (which
+    // would warn once per execution) - and the two halves must print the same bytes.
+    var importedNames = {}
+    function noteImportName(n) {
+        if (n == "" || n == "*") { return }
+        importedNames["$" + n] = true
+    }
+    function ktImport(items, pos) {
+        var path = ""
+        var alias = ""
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] == undefined || items[i] == null) { continue }
+            if (items[i].ialias != undefined) { alias = stripWs(items[i].ialias) }
+            else { path = stripWs(items[i]) }
+        }
+        resolveImport(path, pos)
+        var seg = path
+        var dot = -1
+        for (var j = 0; j < path.length; j++) { if (path.charAt(j) == ".") { dot = j } }
+        if (dot >= 0) { seg = path.substring(dot + 1, path.length) }
+        noteImportName(seg)
+        noteImportName(alias)
+    }
+    function externalType(name) { return importedNames["$" + name] == true }
+
+    // ----- Type aliases -----
+    // `typealias Alias = Real` is still ERASED - no descriptor, no code - but the
+    // mapping is kept so that a type REFERENCE written through the alias can be reduced
+    // to the name the real descriptor is bound under. The flat table (no scoping) is
+    // exactly what the interpreter half keeps, so both halves resolve the same way.
+    // items = [aliasName, targetTypeText]; the return value is the erased statement.
+    var typeAliases = {}
+    function registerTypeAlias(items) {
+        typeAliases["$" + stripWs(items[0])] = stripWs(items[1])
+        return makeErased()
+    }
 
     // ----- Supertypes -----
     // The bare name of a (possibly generic, possibly dotted) supertype: Box<T> -> Box,
@@ -3734,13 +3805,13 @@ KwContract  = "contract" KwEnd ;
                     var lamRecv = cur
                     var lea = emitArgs(b, orderArgs(s.args, undefined))
                     var lb = lea.b
-                    var lamV = callExt(lb, "js_ktget", [curScopeV, emitStr(lb, s.name)])
                     var callArgsV = callExt(lb, "js_arr_new", [])
                     callExt(lb, "js_arr_push", [callArgsV, lamRecv])
                     b = emitConcatArgs(lb, callArgsV, lea.v)
                     var mcls = methodClasses["$" + s.name]
                     if (mcls == undefined) {
-                        return {b: b, v: callExt(b, "js_call", [lamV, hUndef, callArgsV])}
+                        var lamV0 = callExt(b, "js_ktget", [curScopeV, emitStr(b, s.name)])
+                        return {b: b, v: callExt(b, "js_call", [lamV0, hUndef, callArgsV])}
                     }
                     var margsV = lea.v
                     var objB2 = curF.NewBlock("")
@@ -3749,6 +3820,15 @@ KwContract  = "contract" KwEnd ;
                     b.NewCondBr(emitClassProbe(b, lamRecv, mcls), objB2, lamB)
                     var mv = callExt(objB2, "js_ktsmcall", [lamRecv, emitStr(objB2, s.name), margsV])
                     objB2.NewBr(mrg)
+                    // The scope read for the lambda belongs INSIDE the lambda arm. It used
+                    // to be emitted unconditionally, before the branch, so a program that
+                    // merely DECLARED a receiver-function-typed parameter named `f`
+                    // anywhere made every `x.f()` in the file - including an ordinary
+                    // method call on a user class - abort with "unknown name: f", because
+                    // js_ktget ran (and threw) before the probe could pick the method. The
+                    // interpreter half always answered correctly; found while pinning the
+                    // super surface, where a class method happened to be called `f`.
+                    var lamV = callExt(lamB, "js_ktget", [curScopeV, emitStr(lamB, s.name)])
                     var lv2 = callExt(lamB, "js_call", [lamV, hUndef, callArgsV])
                     lamB.NewBr(mrg)
                     return {b: mrg, v: mrg.NewPhi([llvm.ir.NewIncoming(mv, objB2), llvm.ir.NewIncoming(lv2, lamB)])}
@@ -4154,21 +4234,84 @@ KwContract  = "contract" KwEnd ;
         if (items.length > i && items[i] != undefined && items[i].supers != undefined) { supers = items[i].supers; i++ }
         return {i: i, cparams: cparams, supers: supers, sup: (supers.length > 0 ? supers[0] : null)}
     }
+    // The name a type REFERENCE ends up bound under at run time, or null when this
+    // compile emits no descriptor for it. Three reductions, all reachable from ordinary
+    // Kotlin and all of which used to make knownType answer false:
+    //   * generics and a dotted path      Box<T> -> Box, Outer.In -> In  (baseTypeName;
+    //     every descriptor is bound under its SIMPLE name, nested ones included)
+    //   * a typealias                     typealias Alias = Real -> Real, followed
+    //     transitively (the 8-step cap is the same one resolveAlias uses in the other
+    //     half, and stops a cyclic alias dead)
+    // The answer is the name to READ OUT OF THE SCOPE, so every caller that emits a
+    // js_scope_get for a supertype must use it rather than the written text.
+    // This runs from EMIT thunks only, never during the walk, so classNames /
+    // interfaceNames / typeAliases are all complete by the time it is asked.
+    function resolvedTypeName(name) {
+        var t = baseTypeName(stripWs(name))
+        for (var s = 0; s < 8; s++) {
+            if (classNames[t] == 1 || interfaceNames["$" + t] == true) { return t }
+            if (typeAliases["$" + t] == undefined) { return null }
+            t = baseTypeName(typeAliases["$" + t])
+        }
+        return null
+    }
     // True when `name` names a type this compile emits a descriptor for, so its
     // descriptor value can be read out of the scope at run time.
-    function knownType(name) { return classNames[name] == 1 || interfaceNames["$" + name] == true }
-    // Link clsV to its supertypes: the first becomes __super (the chain the runtime
-    // walks); every further one is an extra interface whose default methods are copied
+    function knownType(name) { return resolvedTypeName(name) != null }
+    // WHICH supertype is the superclass. Kotlin does not require the superclass to come
+    // first: `class C : I3, Base2()` lists the interface first and is ordinary code, and
+    // taking supers[0] handed the __super slot to I3, dropped Base2's constructor call
+    // and left `super.g()` walking an interface. The superclass is the supertype written
+    // with a CONSTRUCTOR CALL (`Base2()` has parentheses, `I3` does not); a class that
+    // declares only secondary constructors writes no parentheses anywhere, so the
+    // fallback is the first supertype that resolves to a class rather than an interface,
+    // and only then position. `I by d` is a delegated INTERFACE and never a superclass.
+    // Returns an index into supers, or -1.
+    function pickSuperIndex(supers) {
+        for (var i = 0; i < supers.length; i++) {
+            if (supers[i].iscall == true && supers[i].deleg == null) { return i }
+        }
+        for (var j = 0; j < supers.length; j++) {
+            if (supers[j].deleg != null) { continue }
+            var r = resolvedTypeName(supers[j].name)
+            if (r != null && classNames[r] == 1) { return j }
+        }
+        return supers.length > 0 ? 0 : -1
+    }
+    function pickSuper(supers) {
+        var k = pickSuperIndex(supers)
+        return k < 0 ? null : supers[k]
+    }
+    // The two halves of the emitSuperName / emitSuperRaw pair: the name the superclass
+    // descriptor is BOUND under (null when it cannot be resolved) and the name that was
+    // WRITTEN for it (kept even when resolution failed, for the diagnostic).
+    function pickSuperName(supers) {
+        var p = pickSuper(supers)
+        return p == null ? null : resolvedTypeName(p.name)
+    }
+    function pickSuperRaw(supers) {
+        var p = pickSuper(supers)
+        return p == null ? null : p.name
+    }
+    // Link clsV to its supertypes: the SUPERCLASS becomes __super (the chain the runtime
+    // walks); every other one is an extra interface whose default methods are copied
     // in (own is not on the chain, so `is` does not see it - see the Supers comment).
     function emitSuperLinks(b, clsV, supers, ownMethods) {
-        if (supers.length > 0 && knownType(supers[0].name)) {
+        var pk = pickSuperIndex(supers)
+        var pn = pk >= 0 ? resolvedTypeName(supers[pk].name) : null
+        if (pn != null) {
             callExt(b, "js_set", [clsV, emitStr(b, "__super"),
-                                  callExt(b, "js_scope_get", [curScopeV, emitStr(b, supers[0].name)])])
+                                  callExt(b, "js_scope_get", [curScopeV, emitStr(b, pn)])])
         }
-        for (var k = 1; k < supers.length; k++) {
-            var sig = interfaceMethods["$" + supers[k].name]
+        for (var k = 0; k < supers.length; k++) {
+            if (k == pk) { continue }
+            // The alias-and-path-reduced name: an interface reached through a typealias
+            // or written as a dotted path is still bound under its simple name.
+            var kn = resolvedTypeName(supers[k].name)
+            if (kn == null) { kn = supers[k].name }
+            var sig = interfaceMethods["$" + kn]
             if (sig == undefined) { continue }
-            var ifV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, supers[k].name)])
+            var ifV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, kn)])
             for (var j = 0; j < sig.length; j++) {
                 if (ownMethods["$" + sig[j].name] == true) { continue }
                 // The member is read off the interface that DECLARES it: an interface
@@ -4176,8 +4319,8 @@ KwContract  = "contract" KwEnd ;
                 // methods as properties, so reading them from D answered undefined and
                 // the class was left without them.
                 var declV = ifV
-                if (sig[j].from != undefined && sig[j].from != supers[k].name && knownType(sig[j].from)) {
-                    declV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, sig[j].from)])
+                if (sig[j].from != undefined && sig[j].from != kn && knownType(sig[j].from)) {
+                    declV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, resolvedTypeName(sig[j].from))])
                 }
                 callExt(b, "js_set", [clsV, emitStr(b, sig[j].name),
                                       callExt(b, "js_get", [declV, emitStr(b, sig[j].name)])])
@@ -4189,6 +4332,16 @@ KwContract  = "contract" KwEnd ;
     // C does not define by forwarding to the stored delegate. One forwarder IR function
     // per such method - it reads this.__delegN and re-dispatches through js_mcall, so
     // the delegate's own overrides win, exactly like Kotlin's generated bridges.
+    // MEASURED GAP (2026-07-28, found while sweeping the super surface): only METHODS
+    // are forwarded. An interface that declares an abstract PROPERTY -
+    //     interface I { val h: Int } ; class Impl : I { override val h = 7 }
+    //     class C(d: I) : I by d          C(Impl()).h
+    // - answers kotlin.Unit here where the interpreter half answers 7. The cause is not
+    // this loop: an interface's abstract property is dropped by splitMembers (no
+    // initializer, no accessor), so there is no interface-PROPERTY signature table to
+    // forward from at all - interfaceMethods holds methods only. Closing it means adding
+    // that table, which is a feature rather than a fix, so it is left measured rather
+    // than half-done. Unrelated to `super`: it reproduces with no `super` in the program.
     function emitDelegates(b, clsV, supers, ownMethods) {
         for (var k = 0; k < supers.length; k++) {
             if (supers[k].deleg == null) { continue }
@@ -4235,8 +4388,10 @@ KwContract  = "contract" KwEnd ;
         b = emitLateinit(b, clsV, props)
         b = emitSuperLinks(b, clsV, supers, own)
         var savedSuper = emitSuperName
+        var savedSuperRaw = emitSuperRaw
         emitClassNames.push(name)
-        emitSuperName = (supers.length > 0 && knownType(supers[0].name)) ? supers[0].name : null
+        emitSuperName = pickSuperName(supers)
+        emitSuperRaw = pickSuperRaw(supers)
         for (var k = 0; k < methods.length; k++) {
             var idx = emitFunc(methods[k].params, methods[k].body, true, false, methods[k].sig)
             callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
@@ -4247,6 +4402,7 @@ KwContract  = "contract" KwEnd ;
         b = emitMemberExtDelegs(b, clsV, memberExtDelegs)
         emitClassNames.pop()
         emitSuperName = savedSuper
+        emitSuperRaw = savedSuperRaw
         var objV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
         var saved = curScopeV
@@ -4256,7 +4412,7 @@ KwContract  = "contract" KwEnd ;
         // declaration does - without this the base's property initializers never ran,
         // so `(object : B() {}).v` answered undefined and a `super.v` inside an
         // override had nothing to read. The twin fix landed in the interpreter half.
-        b = emitSuperCtor(b, objV, (supers.length > 0 ? supers[0] : null))
+        b = emitSuperCtor(b, objV, pickSuper(supers))
         for (var p = 0; p < props.length; p++) {
             var r = props[p].init(b)
             b = r.b
@@ -5396,8 +5552,9 @@ KwContract  = "contract" KwEnd ;
             b = r.b
             argVs.push(r.v)
         }
-        if (classNames[sup.name] == 1) {
-            var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, sup.name)])
+        var rn = resolvedTypeName(sup.name)
+        if (rn != null && classNames[rn] == 1) {
+            var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, rn)])
             var ctorV = callExt(b, "js_get", [supV, emitStr(b, "__ctor")])
             var argsV = callExt(b, "js_arr_new", [])
             callExt(b, "js_arr_push", [argsV, thisV])
@@ -5449,7 +5606,7 @@ KwContract  = "contract" KwEnd ;
             var nv = emitStr(b, cparams[k2].name)
             callExt(b, "js_ktpropset", [thisV, nv, callExt(b, "js_scope_get", [curScopeV, nv])])
         }
-        b = emitSuperCtor(b, thisV, (supers.length > 0 ? supers[0] : null))
+        b = emitSuperCtor(b, thisV, pickSuper(supers))
         for (var p = 0; p < inits.length; p++) {
             if (inits[p].initblk != undefined) { b = inits[p].initblk(b); continue }
             var r = inits[p].init(b)
@@ -6512,7 +6669,9 @@ KwContract  = "contract" KwEnd ;
             b = emitSuperLinks(b, clsV, hdr.supers, own)
             b = emitDelegates(b, clsV, hdr.supers, own)
             var savedSuper = emitSuperName
-            emitSuperName = (hdr.sup != null && knownType(hdr.sup.name)) ? hdr.sup.name : null
+            var savedSuperRaw = emitSuperRaw
+            emitSuperName = pickSuperName(hdr.supers)
+            emitSuperRaw = pickSuperRaw(hdr.supers)
             emitClassNames.push(name)
             var ctorIdx = emitCtor(hdr.cparams, parts.inits, hdr.supers)
             var entryIdx = ctorIdx
@@ -6536,6 +6695,7 @@ KwContract  = "contract" KwEnd ;
             emitClassNames.pop()
             b = emitNestedList(b, clsV, null, parts.nested, name)
             emitSuperName = savedSuper
+            emitSuperRaw = savedSuperRaw
             if (dmod != null) { b = emitDataMembers(b, clsV, name, hdr.cparams, dmod == "data", own) }
             // Every class answers hashCode(). A data / value class already got the
             // structural one above; anything else (and a data class with no properties)
@@ -6606,8 +6766,10 @@ KwContract  = "contract" KwEnd ;
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [curScopeV])
             var savedSuper = emitSuperName
+            var savedSuperRaw = emitSuperRaw
             emitClassNames.push(name)
-            emitSuperName = (hdr.sup != null && knownType(hdr.sup.name)) ? hdr.sup.name : null
+            emitSuperName = pickSuperName(hdr.supers)
+            emitSuperRaw = pickSuperRaw(hdr.supers)
             for (var k = 0; k < methods.length; k++) {
                 var idx = emitFunc(methods[k].params, methods[k].body, true, false, methods[k].sig)
                 callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
@@ -6625,6 +6787,7 @@ KwContract  = "contract" KwEnd ;
             b = emitMemberExtDelegs(b, clsV, parts.memberExtDelegs)
             emitClassNames.pop()
             emitSuperName = savedSuper
+            emitSuperRaw = savedSuperRaw
             // __entries is the entry list in DECLARATION order, which is what
             // values() / valueOf() / entries read (ktEnumMethod in
             // abnf/jsrtkotlin.go). The interpreter half keeps the same field; without
@@ -6665,7 +6828,9 @@ KwContract  = "contract" KwEnd ;
                     // target: the lookup must START at the enum class, or an override in
                     // the body would call itself.
                     var savedESuper = emitSuperName
+                    var savedESuperRaw = emitSuperRaw
                     emitSuperName = name
+                    emitSuperRaw = name
                     for (var em = 0; em < eb.methods.length; em++) {
                         var eidx = emitFunc(eb.methods[em].params, eb.methods[em].body, true, false, eb.methods[em].sig)
                         callExt(b, "js_set", [entClsV, emitStr(b, eb.methods[em].name),
@@ -6673,6 +6838,7 @@ KwContract  = "contract" KwEnd ;
                     }
                     for (var ea2 = 0; ea2 < eb.accprops.length; ea2++) { b = emitAccessorPair(b, entClsV, eb.accprops[ea2]) }
                     emitSuperName = savedESuper
+                    emitSuperRaw = savedESuperRaw
                     emitClassNames.pop()
                 }
                 callExt(b, "js_set", [objV, emitStr(b, "__class"), entClsV])
@@ -6853,8 +7019,10 @@ KwContract  = "contract" KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             b = emitSuperLinks(b, clsV, hdr.supers, own)
             var savedSuper = emitSuperName
+            var savedSuperRaw = emitSuperRaw
             emitClassNames.push(name)
-            emitSuperName = (hdr.sup != null && knownType(hdr.sup.name)) ? hdr.sup.name : null
+            emitSuperName = pickSuperName(hdr.supers)
+            emitSuperRaw = pickSuperRaw(hdr.supers)
             for (var k = 0; k < methods.length; k++) {
                 var idx = emitFunc(methods[k].params, methods[k].body, true, false, methods[k].sig)
                 callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
@@ -6865,6 +7033,7 @@ KwContract  = "contract" KwEnd ;
             b = emitMemberExtDelegs(b, clsV, parts.memberExtDelegs)
             emitClassNames.pop()
             emitSuperName = savedSuper
+            emitSuperRaw = savedSuperRaw
             b = emitNestedList(b, clsV, null, parts.nested, name)
             return b
         }
@@ -6880,10 +7049,32 @@ KwContract  = "contract" KwEnd ;
     }
     // Which descriptor a `super` reference walks from: the qualifier when one is
     // written and names a type this compile emits, otherwise the defining class's
-    // superclass (emitSuperName). null when neither is available.
+    // superclass (emitSuperName). Both go through resolvedTypeName, so a supertype
+    // named through a typealias or a dotted path answers the name its descriptor is
+    // actually bound under. null when neither is available.
     function superTargetName(qual) {
-        if (qual != null && knownType(qual)) { return qual }
+        if (qual != null) {
+            var q = resolvedTypeName(qual)
+            if (q != null) { return q }
+        }
         return emitSuperName
+    }
+    // What a failed `super` reference could not resolve. Saying "outside a subclass"
+    // was wrong in every case that actually reached it - the class HAD a superclass and
+    // the compiler could not find its descriptor - so the message names the supertype
+    // instead and the next report diagnoses itself.
+    // True when the supertype a `super` names came from an import this run could not
+    // resolve. See the imports section: that is a different class of failure from a
+    // supertype this compiler simply failed to resolve, and only this one degrades.
+    function superExternal(qual) {
+        var raw = (qual != null) ? qual : emitSuperRaw
+        if (raw == null) { return false }
+        return externalType(baseTypeName(stripWs(raw)))
+    }
+    function superFailWhat(qual) {
+        if (qual != null) { return "unresolved supertype '" + qual + "'" }
+        if (emitSuperRaw != null) { return "unresolved supertype '" + emitSuperRaw + "'" }
+        return "no superclass declared"
     }
     function makeSuperCall(items, pos) {
         var qual = null
@@ -6896,7 +7087,15 @@ KwContract  = "contract" KwEnd ;
         var args = items.slice(at + 1)
         return function(b) {
             var target = superTargetName(qual)
-            if (target == null) { notImpl("super call outside a subclass", pos); return {b: b, v: hUndef} }
+            if (target == null) {
+                // A supertype that came from an import this run could not resolve is not
+                // a gap in this compiler - there is no such class anywhere - so the call
+                // degrades to Unit and the override's own body still runs. Arguments are
+                // still evaluated, for their side effects.
+                if (superExternal(qual)) { var xa = emitArgs(b, args); return {b: xa.b, v: hUndef} }
+                notImpl("super call (" + superFailWhat(qual) + ")", pos)
+                return {b: b, v: hUndef}
+            }
             var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, target)])
             var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
             var ea = emitArgs(b, args)
@@ -6918,7 +7117,11 @@ KwContract  = "contract" KwEnd ;
         var fname = items[at].sfname
         return function(b) {
             var target = superTargetName(qual)
-            if (target == null) { notImpl("super reference", pos); return {b: b, v: hUndef} }
+            if (target == null) {
+                if (superExternal(qual)) { return {b: b, v: hUndef} }
+                notImpl("super reference (" + superFailWhat(qual) + ")", pos)
+                return {b: b, v: hUndef}
+            }
             var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, target)])
             var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
             return {b: b, v: callExt(b, "js_ktsupget", [supV, thisV, emitStr(b, fname)])}
@@ -6937,7 +7140,12 @@ KwContract  = "contract" KwEnd ;
         var valT = items[at + 2]
         return function(b) {
             var target = superTargetName(qual)
-            if (target == null) { notImpl("super reference", pos); return {b: b, v: hUndef} }
+            if (target == null) {
+                // The RHS still runs; the store has nowhere to go.
+                if (superExternal(qual)) { var xr = valT(b); return {b: xr.b, v: xr.v} }
+                notImpl("super reference (" + superFailWhat(qual) + ")", pos)
+                return {b: b, v: hUndef}
+            }
             var r = valT(b)
             b = r.b
             var v = r.v

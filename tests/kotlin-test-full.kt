@@ -3109,6 +3109,125 @@ fun sec74() {
     check("le5", m.p == 5)
 }
 
+// ===== SECTION 75: WHICH supertype `super` names, and how that name RESOLVES =====
+// The fourth round on "super call outside a subclass". Every previous round fixed a
+// SHAPE; the root cause was one expression, repeated at four sites in the compiler half
+// and mirrored by ps[0] in the interpreter half:
+//     (supers.length > 0 && knownType(supers[0].name)) ? supers[0].name : null
+// It is wrong twice over, and both halves were reachable from ordinary Kotlin.
+//   (a) supers[0] - the FIRST supertype. Kotlin does not require the superclass to come
+//       first: `class C : I3, Base2()` is legal and common, the interface took the slot
+//       and Base2 was never seen. The superclass is the supertype written with a
+//       CONSTRUCTOR CALL; failing that (a class with only secondary constructors writes
+//       no parentheses anywhere) the first supertype that is a class rather than an
+//       interface; only then position. A delegated `I by d` is never the superclass.
+//   (b) knownType(name) - a LITERAL declared class name. A supertype named through a
+//       `typealias`, or written as a dotted path (`Outer.In`), resolved to nothing:
+//       the typealias form is what the user report was actually hitting, and the
+//       interpreter half failed on BOTH with "no super method". Every supertype name now
+//       goes through resolvedTypeName - generics and the dotted path dropped, then
+//       typealiases followed - in both halves, and the failure message names the
+//       supertype it could not resolve instead of claiming there is no subclass.
+// Fixing (a) also repaired two things that were never about `super` at all: with an
+// interface listed first, the SUPERCLASS CONSTRUCTOR was not run (emitSuperCtor saw a
+// supertype with no argument list and returned), and the interface's own default
+// methods were never copied in (the copy loop started at index 1, i.e. skipped it).
+// UNVERIFIED against kotlinc (none on this machine); the Kotlin documentation's
+// "Inheritance" / "Calling the superclass implementation" and "Type aliases" sections
+// are the source for every expected value below.
+interface XI75 { fun h() = 40 }
+interface XJ75 { fun j() = 50 }
+open class XBase75(val seed: Int = 2) { open fun g() = 1
+                                        open val p: Int get() = 1
+                                        open var q: Int = 1 }
+typealias XAlias75 = XBase75
+class XHold75 { open class XIn75 { open fun g() = 1
+                                   open val p: Int get() = 1 } }
+open class XGen75<T> { open fun g() = 1 }
+// (a) the interface is listed FIRST and the superclass second.
+class XIfaceFirst75 : XI75, XBase75() { override fun g() = super.g() + 3
+                                        override val p: Int get() = super.p + 3 }
+class XTwoIface75 : XI75, XJ75, XBase75() { override fun g() = super.g() + 3 }
+// (b) the superclass is named through a typealias, and through a dotted path.
+class XViaAlias75 : XAlias75() { override fun g() = super.g() + 3
+                                 override val p: Int get() = super.p + 3
+                                 override var q: Int
+                                     get() = super.q
+                                     set(v) { super.q = v + 3 } }
+class XViaPath75 : XHold75.XIn75() { override fun g() = super.g() + 3
+                                     override val p: Int get() = super.p + 3 }
+// The qualified form over each parent shape.
+class XQualAlias75 : XAlias75() { override fun g() = super<XAlias75>.g() + 3 }
+class XQualPath75 : XHold75.XIn75() { override fun g() = super<XHold75.XIn75>.g() + 3 }
+class XQualGen75 : XGen75<Int>() { override fun g() = super<XGen75<Int>>.g() + 3 }
+// A `where` clause, and a generic class with a generic parent.
+class XWhere75<T> : XBase75() where T : Comparable<T> { override fun g() = super.g() + 3 }
+class XGenGen75<T> : XGen75<T>() { override fun g() = super.g() + 3 }
+// Delegation combined with a superclass, in BOTH orders. The delegated interface is
+// declared with an ABSTRACT member on purpose: an interface with a DEFAULT body is a
+// separate, older divergence - the interpreter half lets the inherited default win over
+// the `by` delegate while the compiler half lets the delegate win (Kotlin's rule, from
+// the documentation's "Delegation" section: the compiler generates forwarders for every
+// member the class does not itself override) - and it reproduces with no `super` in
+// sight, so it does not belong to this section.
+interface XK75 { fun k(): Int }
+class XDelegImpl75 : XK75 { override fun k() = 7 }
+class XDelegAfter75(d: XK75) : XBase75(), XK75 by d { override fun g() = super.g() + 3 }
+class XDelegFirst75(d: XK75) : XK75 by d, XBase75() { override fun g() = super.g() + 3 }
+// A secondary constructor: NO supertype carries parentheses in the header at all.
+class XSecond75 : XBase75 {
+    constructor() : super(2)
+    fun f() = super.g() + 3
+    fun fp() = super.p + 3
+}
+enum class XEnum75 { A { override fun g() = super.g() + 3
+                         override val p: Int get() = super.p + 3 } ;
+                     open fun g() = 1
+                     open val p: Int get() = 1 }
+class XOuter75 { class XNest75 : XAlias75() { fun f() = super.g() + 3 }
+                 inner class XInner75 : XHold75.XIn75() { fun f() = super.g() + 3 } }
+fun xlocal75(): Int { class L : XAlias75() { fun f() = super.g() + 3 }; return L().f() }
+fun sec75() {
+    // (a) the superclass is picked by its constructor call, not by position - and the
+    // interface listed first still contributes its default method.
+    check("sx1", XIfaceFirst75().g() == 4)
+    check("sx2", XIfaceFirst75().p == 4)
+    check("sx3", XIfaceFirst75().h() == 40)
+    check("sx4", XTwoIface75().g() == 4 && XTwoIface75().h() == 40 && XTwoIface75().j() == 50)
+    // The superclass CONSTRUCTOR runs even when it is not the first supertype.
+    check("sx5", XIfaceFirst75().seed == 2)
+    // (b) resolution through a typealias and through a dotted path.
+    check("sx6", XViaAlias75().g() == 4)
+    check("sx7", XViaAlias75().p == 4)
+    val va = XViaAlias75(); va.q = 1
+    check("sx8", va.q == 4)
+    check("sx9", XViaPath75().g() == 4 && XViaPath75().p == 4)
+    // The qualified `super<T>` form over each parent shape.
+    check("sx10", XQualAlias75().g() == 4)
+    check("sx11", XQualPath75().g() == 4)
+    check("sx12", XQualGen75().g() == 4)
+    // Generic parent, generic child, and a `where` clause.
+    check("sx13", XWhere75<Int>().g() == 4 && XGenGen75<Int>().g() == 4)
+    // Delegation next to a superclass, in both orders.
+    val da = XDelegAfter75(XDelegImpl75())
+    check("sx14", da.g() == 4 && da.k() == 7)
+    val df = XDelegFirst75(XDelegImpl75())
+    check("sx15", df.g() == 4 && df.k() == 7)
+    // A class whose only constructor is SECONDARY still finds its superclass.
+    check("sx16", XSecond75().f() == 4 && XSecond75().fp() == 4 && XSecond75().seed == 2)
+    // An enum ENTRY body, and nested / inner / local classes over an aliased parent.
+    check("sx17", XEnum75.A.g() == 4 && XEnum75.A.p == 4)
+    check("sx18", XOuter75.XNest75().f() == 4)
+    check("sx19", XOuter75().XInner75().f() == 4)
+    check("sx20", xlocal75() == 4)
+    // Object expressions over each parent shape.
+    check("sx21", (object : XI75, XBase75() { override fun g() = super.g() + 3 }).g() == 4)
+    check("sx22", (object : XAlias75() { override fun g() = super.g() + 3 }).g() == 4)
+    check("sx23", (object : XHold75.XIn75() { override fun g() = super.g() + 3 }).g() == 4)
+    check("sx24", (object : XAlias75() { override val p: Int get() = super.p + 3 }).p == 4)
+    check("sx25", (object : XI75, XBase75() {}).seed == 2)
+}
+
 // ===== END SECTIONS =====
 
 fun main() {
@@ -3186,6 +3305,7 @@ fun main() {
     sec72() // SECTION-CALL 72
     sec73() // SECTION-CALL 73
     sec74() // SECTION-CALL 74
+    sec75() // SECTION-CALL 75
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

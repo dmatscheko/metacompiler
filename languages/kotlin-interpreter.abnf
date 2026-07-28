@@ -538,7 +538,14 @@ Package     <~~ takeAll() ~~> = KwPackage PkgPath [ ";" ] ;
 // coverage. The name is still ignored; it just has to be a name.
 PkgPath     <~~ push(stripWs(up.in)) ~~>
             = KId { "." KId } ;
-Import      <~~ resolveImport(pop(), up.pos) ~~> = KwImport QualName [ KwAs KId ] [ ";" ] ;
+// The import policy is unchanged - resolveImport still resolves, warns under
+// -warn-imports, or aborts. What is ADDED is a record of the simple name each import
+// brings in (and its `as` alias), which is what tells a supertype that is genuinely
+// OUTSIDE the program (`class MyApp : Application()` after an Android import this
+// machine cannot resolve) apart from one the resolver merely failed to find. The two
+// are different bugs and only the second is ours: see noteImportName.
+Import      <~~ ktImport(takeAll(), up.pos) ~~>
+            = KwImport QualName [ KwAs KId <~~ push({ialias: up.in}) ~~> ] [ ";" ] ;
 QualName    <~~ push(stripWs(up.in)) ~~> = KId { "." KId } [ "." "*" ] ;
 
 // A top level val/var: its declaration thunk runs right away (into the global scope).
@@ -5870,7 +5877,10 @@ NotMemberKw = :script(~~
         // super.m(): start the lookup at the recorded parent, keep `this`.
         if (target.__superref === true) {
             var sm = clsFind(target.cls, name)
-            if (typeof sm != "function") fail("no super method '" + name + "'")
+            if (typeof sm != "function") {
+                if (target.sext == true) { kSetNamed(sp.named); return undefined }
+                fail("no super method " + "'" + name + "'" + superOf(target))
+            }
             kSetNamed(sp.named)
             return sm.apply(undefined, concat2impl([target.self], args))
         }
@@ -6067,6 +6077,17 @@ NotMemberKw = :script(~~
             if (gen != null) { return gen.v }
             // An interface implemented by delegation forwards everything it does not
             // override to the delegate instance.
+            // MEASURED DIVERGENCE (2026-07-28, found while sweeping the super surface):
+            // this fallback sits AFTER clsFind, so an interface DEFAULT body inherited
+            // through the parent chain wins over the `by` delegate -
+            //     interface I { fun h() = 40 } ; class Impl : I { override fun h() = 7 }
+            //     class C(d: I) : I by d         C(Impl()).h()
+            // answers 40 here and 7 in the compiler half. Kotlin's rule (documentation,
+            // "Delegation": the compiler generates forwarders for every member the class
+            // does not itself override) makes the COMPILER right. Fixing it needs the
+            // OWNER of the found member, so a class's own / a superclass's member still
+            // wins - a dispatch-ordering change across the whole method surface, not a
+            // super fix, and it reproduces with no `super` in the program.
             var ds = target.__deleg
             if (ds != undefined) {
                 for (var di = 0; di < ds.length; di++) {
@@ -7437,12 +7458,83 @@ NotMemberKw = :script(~~
         return body.split(",")
     }
 
+    // ----- Imports that name a type this program does not contain -----
+    // The SIMPLE name each import brings in, and its `as` alias. An import that RESOLVED
+    // puts its types into the program, so a name recorded here that is STILL not a
+    // program type came from an import this run could not resolve - which only happens
+    // under -warn-imports, i.e. after the user has already chosen to continue past the
+    // missing import. `class MyApp : Application()` over an unresolvable
+    // `import android.app.Application` is exactly that shape, and it is the commonest
+    // `super` in a real Android tree.
+    //
+    // This is a DIFFERENT class of failure from a supertype the resolver merely could
+    // not find (a typealias, a dotted path, an interface listed first). Those are bugs
+    // here and stay hard failures that NAME the supertype. An external one is not a gap
+    // in this grammar and never will be: there is no such class anywhere, so a `super`
+    // into it degrades to Unit and the override's own body still runs.
+    //
+    // No second warning is printed at the super site, deliberately. The import already
+    // warned and named the type, the degradation is only reachable because the user
+    // passed -warn-imports, and a per-site warning cannot be made byte-identical between
+    // a static emitter (which would warn about code that never runs) and a walker (which
+    // would warn once per execution) - and the two halves must print the same bytes.
+    var importedNames = {}
+    function noteImportName(n) {
+        if (n == "" || n == "*") { return }
+        importedNames["$" + n] = true
+    }
+    function ktImport(items, pos) {
+        var path = ""
+        var alias = ""
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] == undefined || items[i] == null) { continue }
+            if (items[i].ialias != undefined) { alias = stripWs(items[i].ialias) }
+            else { path = stripWs(items[i]) }
+        }
+        resolveImport(path, pos)
+        var seg = path
+        var dot = -1
+        for (var j = 0; j < path.length; j++) { if (path.charAt(j) == ".") { dot = j } }
+        if (dot >= 0) { seg = path.substring(dot + 1, path.length) }
+        noteImportName(seg)
+        noteImportName(alias)
+    }
+    function externalType(name) { return importedNames["$" + name] == true }
+
     // ----- Type aliases -----
     var typeAliases = {}
     function registerTypeAlias(items) { typeAliases["$" + items[0]] = items[1] }
     function resolveAlias(t) {
         var seen = 0
         while (hasOwn(typeAliases, "$" + t) && seen < 8) { t = typeAliases["$" + t].split("<")[0]; seen++ }
+        return t
+    }
+    // The SIMPLE name of a (possibly generic, possibly nullable, possibly dotted) type
+    // reference: Box<T> -> Box, Outer.In -> In, Base? -> Base. Every descriptor is bound
+    // in globalScope under its simple name and carries it as __name, so a supertype
+    // written as a dotted path used to resolve to nothing at all.
+    function typeBaseName(t) {
+        t = stripWs(t)
+        var cut = t.length
+        for (var i = 0; i < t.length; i++) { if (t.charAt(i) == "<" || t.charAt(i) == "?") { cut = i; break } }
+        t = t.substring(0, cut)
+        var dot = -1
+        for (var j = 0; j < t.length; j++) { if (t.charAt(j) == ".") { dot = j } }
+        return (dot >= 0) ? t.substring(dot + 1, t.length) : t
+    }
+    // typeBaseName, then typealiases followed (re-basing at every hop, so
+    // `typealias A = Outer.In<Int>` lands on In). Stops as soon as the name IS a
+    // declared type, so a class may shadow an alias of the same name; falls back to the
+    // last name tried, which keeps a type from outside the program resolving as before.
+    // The compiler half's resolvedTypeName is the same function over its own tables.
+    function resolvedTypeName(name) {
+        var t = typeBaseName(name)
+        for (var s = 0; s < 8; s++) {
+            var d = hasOwn(globalScope, t) ? globalScope[t] : undefined
+            if (d != undefined && d != null && (d.__isclass == true || d.__class != undefined)) { return t }
+            if (!hasOwn(typeAliases, "$" + t)) { return t }
+            t = typeBaseName(typeAliases["$" + t])
+        }
         return t
     }
 
@@ -7476,7 +7568,11 @@ NotMemberKw = :script(~~
         var sup = null
         var missing = false
         for (var i = 0; i < cls.__parentSpecs.length; i++) {
-            var nm = cls.__parentSpecs[i].name
+            // Through a typealias and through a dotted path: `class C : Alias()` and
+            // `class C : Outer.In()` both name a descriptor that IS in globalScope, but
+            // under a different name, so the raw lookup failed and the parent was
+            // silently dropped - which is what left `super.g()` with nothing to walk.
+            var nm = resolvedTypeName(cls.__parentSpecs[i].name)
             var d = hasOwn(globalScope, nm) ? globalScope[nm] : undefined
             if (d != undefined && d != null && d.__isclass) {
                 ps.push(d)
@@ -7495,6 +7591,14 @@ NotMemberKw = :script(~~
         // lookup time (a supertype from outside the program) simply resolves again;
         // parentSpecs is one or two entries, so retrying is cheap.
         if (!missing) { cls.__parents = ps }
+        // No supertype was written with a constructor call - a class that declares only
+        // SECONDARY constructors writes none - so fall back to the first parent that is
+        // a class rather than an interface, and only then to position.
+        if (sup == null) {
+            for (var q = 0; q < ps.length; q++) {
+                if (sup == null && ps[q].__isiface != true) { sup = ps[q] }
+            }
+        }
         if (sup == null && ps.length > 0) { sup = ps[0] }
         cls.__super = sup                  // Also read by rtIsType (lib/interp-core.js).
         return ps
@@ -7891,7 +7995,8 @@ NotMemberKw = :script(~~
                 for (var p = 0; p < parentSpecs.length; p++) {
                     var spec = parentSpecs[p]
                     if (spec.args != null) {
-                        var pc = hasOwn(globalScope, spec.name) ? globalScope[spec.name] : undefined
+                        var pcn = resolvedTypeName(spec.name)
+                        var pc = hasOwn(globalScope, pcn) ? globalScope[pcn] : undefined
                         if (pc != undefined && pc != null && pc.__isclass) {
                             var sspec = kevalArgs(spec.args)
                             kSetNamed(sspec.named)
@@ -8210,7 +8315,8 @@ NotMemberKw = :script(~~
             for (var sp2 = 0; sp2 < parentSpecs.length; sp2++) {
                 var pspec = parentSpecs[sp2]
                 if (pspec.args != null) {
-                    var pcls = hasOwn(globalScope, pspec.name) ? globalScope[pspec.name] : undefined
+                    var pcn2 = resolvedTypeName(pspec.name)
+                        var pcls = hasOwn(globalScope, pcn2) ? globalScope[pcn2] : undefined
                     if (pcls != undefined && pcls != null && pcls.__isclass) {
                         var pargs = kevalArgs(pspec.args)
                         kSetNamed(pargs.named)
@@ -8515,19 +8621,55 @@ NotMemberKw = :script(~~
             var self = findThis()
             var cls = superOwner(self, clsName)
             var start = null
+            var want = ""
             if (cls != undefined && cls != null && cls.__isclass) {
                 var ps = resolveParents(cls)
-                // `super<I2>` names WHICH supertype; an unqualified `super` takes the
-                // first (the superclass, when there is one).
+                // `super<I2>` names WHICH supertype - reduced through generics, a dotted
+                // path and any typealias first, because clsNamed matches the descriptor's
+                // SIMPLE name (`super<Outer.In>` and `super<Alias>` both used to miss).
                 if (qual != "") {
+                    want = resolvedTypeName(qual)
                     for (var i = 0; i < ps.length; i++) {
-                        if (start == null && clsNamed(ps[i], qual)) { start = ps[i] }
+                        if (start == null && clsNamed(ps[i], want)) { start = ps[i] }
                     }
                 }
+                // An unqualified `super` names the SUPERCLASS, which is not necessarily
+                // the first supertype: Kotlin lets the interfaces be listed first, and
+                // `class C : I3, Base2()` gave ps[0] = I3 and lost Base2 entirely.
+                // resolveParents already picks the supertype written with a constructor
+                // call (falling back to the first non-interface, then to position) and
+                // records it as __super - that is the one to start from.
+                if (start == null) { start = cls.__super }
                 if (start == null && ps.length > 0) { start = ps[0] }
+                if (start == null) { want = superWantName(cls, qual) }
             }
-            return {__superref: true, self: self, cls: start}
+            else if (qual != "") { want = qual }
+            // A supertype that came from an import this run could not resolve is not a
+            // gap in this interpreter - there is no such class anywhere - so the
+            // reference degrades to Unit instead of aborting, and the override's own body
+            // still runs. The compiler half makes the same call at the same three sites.
+            return {__superref: true, self: self, cls: start, swant: want,
+                    sext: (start == null && want != "" && externalType(typeBaseName(want)))}
         }
+    }
+    // The tail of a failed `super.m()` / `super.p`: when the marker has NO class to walk
+    // from, say which supertype could not be resolved instead of leaving the report to
+    // guess. Empty when the supertype resolved and only the member is missing.
+    function superOf(o) {
+        if (o != undefined && o !== null && typeof o == "object" && o.__superref === true
+            && (o.cls == undefined || o.cls == null)) {
+            if (o.swant != undefined && o.swant != "") { return " (unresolved supertype '" + o.swant + "')" }
+            return " (no superclass declared)"
+        }
+        return ""
+    }
+    // What a `super` reference could not resolve, for the diagnostic: the qualifier when
+    // one is written, else the supertype the class declared, else nothing.
+    function superWantName(cls, qual) {
+        if (qual != "") { return qual }
+        if (cls != undefined && cls != null && cls.__parentSpecs != undefined
+            && cls.__parentSpecs.length > 0) { return cls.__parentSpecs[0].name }
+        return ""
     }
     // `super.p = v` and its compound forms. items = [{squal}?, {sfname}, op, rhs].
     // The marker makeSuperRef builds already routes through kGetField/kSetField's
@@ -8970,7 +9112,8 @@ NotMemberKw = :script(~~
                 if (typeof sg == "function") { return sg(o.self) }
             }
             if (o.self != undefined && o.self !== null && hasOwn(o.self, name)) { return o.self[name] }
-            fail("no super property '" + name + "'")
+            if (o.sext == true) { return undefined }
+            fail("no super property " + "'" + name + "'" + superOf(o))
         }
         if (o.__propref === true) {
             if (name == "isInitialized") {
@@ -9054,6 +9197,9 @@ NotMemberKw = :script(~~
                 var ss = clsFind(o.cls, "set$" + name)
                 if (typeof ss == "function") { ss(o.self, fv2); return }
             }
+            // The RHS has already run; an external supertype has nowhere to store it,
+            // which is what the compiler half does too.
+            if (o.sext == true) { return }
             scopePut(o.self, name, fv2)
             return
         }

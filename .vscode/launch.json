@@ -497,10 +497,22 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-fail-test-import.kt", "-q"]
         },
         {
+            "name": "Kotlin unresolved import SHOULD FAIL (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-fail-test-import.kt", "-q"]
+        },
+        {
             "name": "Kotlin unresolved import warned+ignored",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-fail-test-import.kt", "-q", "-warn-imports"]
+        },
+        {
+            "name": "Kotlin unresolved import warned+ignored (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-fail-test-import.kt", "-q", "-warn-imports"]
         },
         {
             "name": "Kotlin widened syntax +warn (interpreter)",
