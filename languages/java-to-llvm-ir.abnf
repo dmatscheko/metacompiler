@@ -61,6 +61,12 @@ synchronized are recognized and reported as not implemented; -warn-unsupported
 downgrades that to a warning so call graphs / CFGs / traces still work on partly
 understood files.
 
+Unicode escapes are translated in PHASE ONE, before the scanner runs (JLS 3.3),
+so a unicode escape anywhere in the file - in an identifier, in a keyword, in a
+comment - is the character it denotes. An IMPLICITLY DECLARED class (JEP 512) is
+accepted: a file that declares members but no class becomes a synthetic class
+Main, whose `main` may be an instance method (the launcher constructs it).
+
 Not genuinely modelled: overload resolution by argument TYPE (only the count
 discriminates), generic type checking (type arguments are erased at parse time),
 implicit FIELD access (a field is reached via this.x or ClassName.x - like the
@@ -90,10 +96,175 @@ The same language with the same semantics is interpreted directly by java-interp
 :whitespace(Whitespace) ;
 
 Program     <~~ buildMain(takeAll()) ~~>
-            = [ Package ] { Import } { ModuleDecl | UnsupType | ClassDecl | RecordDecl | StraySemi } ;
+            = UniPre [ Package ] { Import } { ModuleDecl | UnsupType | ClassDecl | RecordDecl | StraySemi } [ ImplicitClass ] ;
 // A stray ';' after a top-level type declaration (`class F { };`) is legal and
 // means nothing - the member-level form is EmptyMember below.
 StraySemi   = ";" ;
+
+// ----- JEP 512: an IMPLICITLY DECLARED class. A compilation unit that declares
+// no class at all but does declare members is one class body without the
+// `class X {` around it: `void main() { ... }` alone in a file is a program.
+// The members are built into a synthetic class named Main, which is exactly the
+// class this grammar's entry point looks for, and its `main` may be an INSTANCE
+// method - the launcher instantiates the class when the static lookup misses.
+// It is the LAST element of Program, so an ordinary file consumes everything
+// through the declaration repetition and reaches it at EOF, where Member fails
+// at once and the optional is skipped.
+ImplicitClass <~~ push(makeClassStmt(takeAll())) ~~>
+            = ImplicitHead Member { Member } ;
+ImplicitHead <~~ push("Main"); jEnterClass("Main") ~~>
+            = NotTypeKw ;
+
+// The implicit class may not START with a type declaration: a file whose first
+// top-level item is `class` / `record` / `interface` / `enum` / `@interface` is
+// an ordinary compilation unit, and if that declaration does not parse the file
+// is broken - it is not a member of an implicit class. Without this, a record
+// javac refuses (`record R(final int x) {}`) matched Method (`record` as the
+// return type, `R(...)` as the signature, `{}` as the body) and five reject
+// files were accepted for eight parse files gained; with it, the eight stay and
+// the five come back. The modifier run is walked exactly as NoDupMods walks it.
+NotTypeKw   = :script(~~
+    (function() {
+        var i = 0
+        var done = false
+        var bad = false
+        var rounds = 0
+        while (!done && rounds < 64) {
+            rounds++
+            var moving = true
+            while (moving) {
+                var ch = c.peek(i)
+                if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { i++ }
+                else if (ch === 47 && c.peek(i + 1) === 47) { while (c.peek(i) >= 0 && c.peek(i) !== 10) { i++ } }
+                else if (ch === 47 && c.peek(i + 1) === 42) {
+                    i = i + 2
+                    var g = 0
+                    while (c.peek(i) >= 0 && g < 40000) {
+                        if (c.peek(i) === 42 && c.peek(i + 1) === 47) { i = i + 2; g = 40000 } else { i++; g++ }
+                    }
+                } else { moving = false }
+            }
+            if (c.peek(i) === 64) {            // an annotation, or `@interface`
+                i++
+                var ws = 0
+                while (c.peek(i + ws) === 32 || c.peek(i + ws) === 9 || c.peek(i + ws) === 10 || c.peek(i + ws) === 13) { ws++ }
+                var iw = "interface"
+                var isAt = true
+                for (var q = 0; q < iw.length; q++) { if (c.peek(i + ws + q) !== iw.charCodeAt(q)) { isAt = false } }
+                if (isAt) { bad = true; done = true }
+                else {
+                    var an = 0
+                    while (an < 4000) {
+                        var ac = c.peek(i)
+                        if ((ac >= 48 && ac <= 57) || (ac >= 65 && ac <= 90) || ac === 95 || ac === 36 || ac === 46 || (ac >= 97 && ac <= 122)) { i++; an++ } else { an = 4000 }
+                    }
+                    var ms = 0
+                    while (c.peek(i + ms) === 32 || c.peek(i + ms) === 9 || c.peek(i + ms) === 10 || c.peek(i + ms) === 13) { ms++ }
+                    if (c.peek(i + ms) === 40) {
+                        i = i + ms + 1
+                        var d = 1
+                        var g3 = 0
+                        while (d > 0 && g3 < 40000 && c.peek(i) >= 0) {
+                            var pc = c.peek(i)
+                            if (pc === 40) { d++ } else if (pc === 41) { d-- }
+                            i++
+                            g3++
+                        }
+                    }
+                }
+            } else {
+                var n = 0
+                var more = true
+                while (more) {
+                    var wc = c.peek(i + n)
+                    if ((wc >= 97 && wc <= 122) || wc === 45) { n++ } else { more = false }
+                    if (n > 12) { more = false }
+                }
+                var mods = ["public", "private", "protected", "static", "final",
+                            "abstract", "synchronized", "native", "transient",
+                            "volatile", "strictfp", "sealed", "non-sealed", "default"]
+                var types = ["class", "record", "interface", "enum"]
+                var hit = false
+                for (var k = 0; k < mods.length; k++) {
+                    var w = mods[k]
+                    if (w.length === n) {
+                        var ok = true
+                        for (var j = 0; j < n; j++) { if (c.peek(i + j) !== w.charCodeAt(j)) { ok = false } }
+                        if (ok) { hit = true }
+                    }
+                }
+                for (var k2 = 0; k2 < types.length; k2++) {
+                    var w2 = types[k2]
+                    if (w2.length === n) {
+                        var ok2 = true
+                        for (var j2 = 0; j2 < n; j2++) { if (c.peek(i + j2) !== w2.charCodeAt(j2)) { ok2 = false } }
+                        if (ok2) { bad = true }
+                    }
+                }
+                if (hit && !bad) { i = i + n } else { done = true }
+            }
+        }
+        return bad ? abnf.newToken("\x01type-declaration", 0) : undefined
+    })()
+~~) ;
+
+// ----- Phase ONE of the Java compilation pipeline (JLS 3.3): a unicode escape
+// is translated into the character it denotes BEFORE the scanner runs, so
+// `public class X {}` really is `public class X {}` and a `\` really
+// is a backslash the scanner then reads as an escape. It is a source PRE-PASS,
+// not a grammar rule, and it is expressed as one: the script reads the whole
+// source with c.getSrc(), rewrites it and hands it back with c.setSrc(), then
+// restarts the parse position - the same shape as C's -pipe preprocessor stage,
+// but inside one grammar so the corpus row measures it.
+// A backslash is ELIGIBLE only when the run of backslashes ending at it has ODD
+// length (JLS: an even number of preceding backslashes), so `"\\u0041"` stays
+// the six characters A; the eligible one may then be followed by any
+// number of `u` and must be followed by exactly four hex digits.
+// The whole pass leaves after one indexOf on a file that contains no `\u`,
+// which is every file but a handful.
+UniPre      = :script(~~
+    (function() {
+        var src = c.getSrc()
+        if (src.indexOf("\\u") < 0) { return undefined }
+        var n = src.length
+        var out = ""
+        var last = 0      // start of the not-yet-copied run
+        var i = 0
+        var changed = false
+        while (i < n) {
+            if (src.charAt(i) !== "\\") { i++; continue }
+            var j = i
+            while (j < n && src.charAt(j) === "\\") { j++ }
+            var odd = ((j - i) % 2) === 1
+            if (odd && j < n && src.charAt(j) === "u") {
+                var k = j
+                while (k < n && src.charAt(k) === "u") { k++ }
+                var hex = src.substring(k, k + 4)
+                var ok = hex.length === 4
+                for (var h = 0; h < hex.length; h++) {
+                    var hc = hex.charCodeAt(h)
+                    if (!((hc >= 48 && hc <= 57) || (hc >= 97 && hc <= 102) || (hc >= 65 && hc <= 70))) { ok = false }
+                }
+                if (ok) {
+                    // Everything before the eligible backslash is copied as it
+                    // stands - that includes the (j - i - 1) literal ones.
+                    out += src.substring(last, j - 1)
+                    out += String.fromCharCode(parseInt(hex, 16))
+                    last = k + 4
+                    i = k + 4
+                    changed = true
+                    continue
+                }
+            }
+            i = j
+        }
+        if (!changed) { return undefined }
+        out += src.substring(last, n)
+        c.setSrc(out)
+        c.setSdx(0)
+        return undefined
+    })()
+~~) ;
 
 // --- module-info.java: a JPMS module declaration (JLS 7.7). Modules are not
 // modelled, and there is nothing in one to compile, so the whole declaration is
@@ -147,7 +318,19 @@ ExtRef      <~~ push({ext: jLastSeg(takeAll())}) ~~>
 // record Pair(int a, int b) { } -- generates fields, a constructor and accessors.
 RecordDecl  <~~ push(makeRecordStmt(takeAll())) ~~>
             = [ LeadMods ] KwRecord Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ] RParams
-              [ ImplementsSkip ] [ PermitsSkip ] "{" { Member } "}" ;
+              [ ImplementsSkip ] [ PermitsSkip ] "{" { RMember } "}" ;
+// A record body is restricted (JLS 8.10.4): no INSTANCE initializer
+// (instance.initializer.not.allowed.in.records) and no instance FIELD
+// (record.cannot.declare.instance.fields). Both are simply absent here -
+// InitBlock is gone, and a field must carry `static`, which HasStatic demands.
+// An interface has no instance initializer (initializer.not.allowed, JLS 9.1.1):
+// InitBlock is simply absent from its member set.
+IMember     = EmptyMember | NestedType | StaticInit | Ctor | AbstractMethod
+            | CompactCtor | Method | Field ;
+RMember     = EmptyMember | NestedType | StaticInit | Ctor | AbstractMethod
+            | CompactCtor | Method | RField ;
+RField      <~~ pushFields(takeAll()) ~~>
+            = HasStatic Mods FType FieldVar { "," FieldVar } ";" ;
 RParams     <~~ push({rparams: takeAll()}) ~~>
             = "(" [ RParam { "," RParam } ] ")" ;
 // A record component may carry annotations and may be VARARGS (JLS 8.10.1);
@@ -173,7 +356,7 @@ InitBlock   <~~ push({kind: "initblock", body: pop()}) ~~>
 // method of an interface. It contributes no code - the overriding subclass supplies
 // it - so the tag drains what the header pushed and the member list never sees it.
 AbstractMethod <~~ push(makeAbstract(takeAll())) ~~>
-            = Mods [ SkipAngle ] Type Id <~~ push(up.in) ~~> ParamList [ Throws ] ";" ;
+            = Mods [ SkipAngle ] Type Id <~~ push(up.in) ~~> ParamList [ CDims ] [ Throws ] ";" ;
 
 // A constructor. Its body is CtorBody rather than Block so the optional explicit
 // constructor invocation - super(args) / this(args), which Java only admits as the
@@ -194,29 +377,31 @@ CtorDelegate <~~ push(makeCtorDelegate(takeAll())) ~~>
               "(" [ Expression { "," Expression } ] ")" ";" ;
 
 Method      <~~ push(makeMethod(takeAll())) ~~>
-            = Mods [ SkipAngle ] Type Id <~~ push(up.in) ~~> ParamList [ Throws ] Block ;
+            = Mods [ SkipAngle ] Type Id <~~ push(up.in) ~~> ParamList [ CDims ] [ Throws ] Block ;
 
 // One `int a, b = 2, c;` declares several fields, which share their modifiers
 // and type but not their initializer - so each declarator becomes its own member.
 Field       <~~ pushFields(takeAll()) ~~>
             = Mods FType FieldVar { "," FieldVar } ";" ;
 FieldVar    <~~ push(makeFieldVar(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> { { Annotation } "[" "]" } [ "=" Expression ] ;
+            = NotResvKw NotUscore Id <~~ push(up.in) ~~> [ CDims ] [ "=" Expression ] ;
+// The C-style declarator suffix: `int a[]` and `int[] a[]` declare arrays too.
+CDims       = { Annotation } "[" "]" { { Annotation } "[" "]" } ;
 
 // Modifiers before a member: annotations (with or without arguments) are parsed and
 // ignored; ModWord keeps the modifier text so `static` is still detectable.
 Mods        <~~ push({mods: takeAll()}) ~~>
-            = { Annotation | ModWord } ;
+            = NoDupMods { Annotation | ModWord } ;
 ModWord     <~~ push(up.in) ~~>
             = ModKw ;
 FType       <~~ push({ty: up.in}) ~~>
-            = Type ;
+            = NotVarKw Type ;
 
 // A parameter may carry annotations and `final` (both ignored). A VARARGS parameter
 // (`int... xs`) is real: it collects the remaining arguments into an array, and an
 // array handed in its place is passed straight through, like in Java.
 ParamList   <~~ push(makeParams(takeAll())) ~~>
-            = "(" [ Param { "," Param } ] ")" ;
+            = ParamOk "(" [ Param { "," Param } ] ")" ;
 // RecvParam is the JLS 8.4.1 RECEIVER parameter (`void m(Foo Foo.this)`) - a
 // declaration of the type of `this`, not a real parameter, so it pushes nothing.
 // It has to come FIRST: the ordinary form matches `Foo Foo` and dies on `.this`.
@@ -231,8 +416,8 @@ RecvParam   = { Annotation } Type { Id "." } "this" KwEnd ;
 // A TYPE ANNOTATION may sit in front of the type, in front of any segment of a
 // qualified one, and in front of each array bracket pair (`@A String @A []`,
 // `Outer.@A Inner`) - JLS 9.7.4. They are dropped like every other annotation.
-Type        = { Annotation } ( PrimName KwEnd | "String" KwEnd | "void" KwEnd | "var" KwEnd
-              | Id [ SkipAngle ] { "." { Annotation } Id [ SkipAngle ] } ) { { Annotation } "[" "]" } ;
+Type        = { Annotation } ( PrimName KwEnd | "String" KwEnd | "void" KwEnd | "var" KwEnd NoBracket
+              | NotResvKw NotVarArr Id [ SkipAngle ] { "." { Annotation } Id [ SkipAngle ] } ) { { Annotation } "[" "]" } ;
 PrimName    = "int" | "boolean" | "char" | "long" | "double" | "float" | "short" | "byte" ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
@@ -243,20 +428,30 @@ Statement   <~~ push(stmtPos(pop())) ~~>
 
 // A LOCAL type declaration - `class Local { ... }` inside a method body. It lowers
 // exactly like a top-level one, into the enclosing block's scope, so it sees the
-// method's locals.
-LocalType   = TypeDecl ;
+// method's locals. A local class may not be `sealed` / `non-sealed` (JLS 8.1.1.2).
+LocalType   = NoSealed TypeDecl ;
+
+// JLS 14.5: the body of an if / loop / labeled statement is a *Statement*, and a
+// local variable declaration and a local class declaration are NOT Statements -
+// they are BlockStatements, which only a block admits. `if (true) int x = 0;` and
+// `if (true) class X {}` are what javac rejects with variable.not.allowed /
+// class.not.allowed, and SubStmt is exactly Statement minus those two. It carries
+// Statement's own tag so a sub-statement still gets its js_srcpos marker.
+SubStmt     <~~ push(stmtPos(pop())) ~~>
+            = Block | If | While | Do | ForEach | For | Switch | Return | Yield | Break | Continue
+            | Try | Throw | Assert | Synchronized | CtorCall | Labeled | Empty | ExprStmt ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
-            = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
+            = KwIf "(" Expression ")" SubStmt [ KwElse SubStmt ] ;
 
 While       <~~ push(makeWhile(pop(), pop())) ~~>
-            = KwWhile "(" Expression ")" Statement ;
+            = KwWhile "(" Expression ")" SubStmt ;
 
 Do          <~~ push(makeDo(pop(), pop())) ~~>
-            = KwDo Statement KwWhile "(" Expression ")" ";" ;
+            = KwDo SubStmt KwWhile "(" Expression ")" ";" ;
 
 // The classic colon switch (on int or String): execution starts at the first matching
 // label and runs until a break or the end of the switch. Labels may stack.
@@ -267,7 +462,7 @@ Switch      <~~ push(makeSwitch(takeAll())) ~~>
 // per arm. Tried first; they fail fast at ':' for the classic forms.
 SwitchCase  = ArrowCase | ArrowDefault | Case | Default ;
 ArrowCase   <~~ pushArrowCase(takeAll()) ~~>
-            = KwCase ALabel { "," ALabel } "->" ArrowBody ;
+            = KwCase NotDfltKw ALabel { "," ALabel } "->" ArrowBody ;
 ALabel      <~~ push({alab: makeArrowLabel(pop(), stripWs(up.in))}) ~~>
             = ALabCore ;
 // A label that is a bare name directly before the arrow - `case S -> ...` - has to be
@@ -288,7 +483,7 @@ Pattern     = RecPattern | TypePattern | UnnamedPat ;
 UnnamedPat  <~~ push(makeTypePattern([{pty: "var"}, {pbind: "_"}])) ~~>
             = "_" KwEnd ;
 RecPattern  <~~ push(makeRecPattern(takeAll())) ~~>
-            = PatType "(" [ Pattern { "," Pattern } ] ")" [ PatBind ] ;
+            = NoAnnot PatType "(" [ Pattern { "," Pattern } ] ")" ;
 TypePattern <~~ push(makeTypePattern(takeAll())) ~~>
             = PatType PatBind ;
 // Same shape as IofType: `final` must not reach the tag's `up.in`.
@@ -321,21 +516,24 @@ IdArrowAhead = :script(~~
 ArrowBody   = Block | Throw | ExprStmt ;
 ArrowDefault <~~ pushArrowDefault(takeAll()) ~~>
             = KwDefault "->" ArrowBody ;
-Case        <~~ push(makeCase(takeAll())) ~~>
-            = KwCase CLabel ":" { Statement } ;
+// Stacked labels on ONE colon case - `case 3, 4:` (JLS 14.11) - become one
+// classic case object per label: all but the last have an empty body, so they
+// fall through into it, which is exactly what Java's stacked labels mean.
+Case        <~~ pushColonCase(takeAll()) ~~>
+            = KwCase NotDfltKw CLabel { "," CLabel } ":" { Statement } ;
 // The colon form takes the same labels as the arrow form. It needs no ALabName
 // guard: without a '->' after it, a bare name cannot be read as a lambda.
-CLabel      <~~ push(makeArrowLabel(pop(), stripWs(up.in))) ~~>
+CLabel      <~~ push({alab: makeArrowLabel(pop(), stripWs(up.in))}) ~~>
             = PatLabel | CondExpr ;
 Default     <~~ push(makeDefault(takeAll())) ~~>
             = KwDefault ":" { Statement } ;
 
 // The enhanced for is tried first: its ':' fails fast for the classic form.
 ForEach     <~~ push(makeForEach(pop(), pop(), pop())) ~~>
-            = KwFor "(" [ LeadMods ] Type Id <~~ push(up.in) ~~> ":" Expression ")" Statement ;
+            = KwFor "(" [ LeadMods ] Type Id <~~ push(up.in) ~~> [ CDims ] ":" Expression ")" SubStmt ;
 
 For         <~~ push(makeFor(takeAll())) ~~>
-            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
+            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" SubStmt ;
 ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
 ForVar      = DeclCore ;
 ForExpr     <~~ push(exprToStmt(pop())) ~~> = Expression ;
@@ -370,7 +568,7 @@ Synchronized <~~ push(makeSync(takeAll(), up.pos)) ~~>
 // NotSwitchKw keeps a switch's 'default:' / 'case ...:' from being misread as a label
 // (Id matches keywords in this grammar), the same guard C's Label uses.
 Labeled     <~~ push(makeLabeled(takeAll(), up.pos)) ~~>
-            = NotSwitchKw LabelName ":" Statement ;
+            = NotSwitchKw LabelName ":" SubStmt ;
 LabelName   <~~ push({lbl: stripWs(up.in)}) ~~> = Id ;
 NotSwitchKw = :script(~~
     (function() {
@@ -397,8 +595,14 @@ NotSwitchKw = :script(~~
 // re-issues in the enclosing frame. The first catch clause wins (types, including
 // multi-catch A | B, are parsed but not discriminated); a try-with-resources header
 // is skipped.
+// JLS 14.20: a try must have a resource list, or a catch clause, or a finally -
+// a bare `try { }` is try.without.catch.finally.or.resource.decls. Spelling that
+// as three alternatives is what makes the requirement a PARSE failure; the
+// resource form comes first because `(` can only start a resource list.
 Try         <~~ push(makeTry(takeAll())) ~~>
-            = KwTry [ Resources ] TryBody { CatchClause } [ FinallyClause ] ;
+            = KwTry Resources TryBody { CatchClause } [ FinallyClause ]
+            | KwTry TryBody CatchClause { CatchClause } [ FinallyClause ]
+            | KwTry TryBody FinallyClause ;
 // try-with-resources: each resource is closed after the body, in reverse order,
 // whether the body completes or throws - so each one wraps the body in its own
 // try/finally. A bare name (`try (r3)`) reuses an existing effectively final value.
@@ -429,20 +633,26 @@ Decl        = DeclCore ";" ;
 // The declared TYPE is kept: when it names a functional interface, an initializer
 // that evaluates to a closure (a lambda or method reference) is SAM-converted at
 // run time - Java's target typing, the one place the subset needs a static type.
+// JLS 14.4.1: a `var` declaration declares exactly ONE variable
+// (restricted.type.not.allowed.compound), so the var form is its own
+// alternative with no comma tail. It is tried first; a non-var type declines it
+// at the keyword and falls through in one step.
 DeclCore    <~~ push(makeDeclSeq(takeAll())) ~~>
-            = [ LeadMods ] DType Declarator { "," Declarator } ;
+            = [ LeadMods ] VarDType Declarator
+            | [ LeadMods ] DType Declarator { "," Declarator } ;
+VarDType    <~~ push({dty: stripWs(up.in)}) ~~> = "var" KwEnd NoBracket ;
 DType       <~~ push({dty: stripWs(up.in)}) ~~> = Type ;
 // The C-style declarator `int cstyle[] = {5, 6}` puts the array brackets after the
 // NAME (and `int[] mixed[]` splits them across both places); they carry no run-time
 // meaning here, so they are parsed and dropped.
 Declarator  <~~ push({dname: takeAll()}) ~~>
-            = Id <~~ push(up.in) ~~> { "[" "]" } [ "=" Expression ] ;
+            = NotResvKw UsBrkt Id <~~ push(up.in) ~~> { "[" "]" } [ "=" Expression ] ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
             = ";" ;
 
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
-            = Expression ";" ;
+            = StmtExprOk Expression ";" ;
 
 // Every expression production pushes exactly one thunk: function() -> value.
 Expression  = Assignment | CondExpr ;
@@ -682,7 +892,7 @@ NewAnon     <~~ push(makeNewAnon(takeAll(), up.pos)) ~~>
               { "." { Annotation } Id <~~ push(up.in) ~~> [ SkipAngle ] }
               "(" [ Expression { "," Expression } ] ")" "{" { Member } "}" ;
 NewArrLit   <~~ push(makeArray(takeAll())) ~~>
-            = KwNew Type "{" [ Expression { "," Expression } [ "," ] ] "}" ;
+            = KwNew Type "{" [ Expression { "," Expression } ] [ "," ] "}" ;
 // new T[a][b]...[] : every SIZED dimension is built (the innermost one filled with
 // the element type's default), and any trailing empty dimension leaves the last
 // level holding nulls - Java's `new int[2][]`.
@@ -693,7 +903,7 @@ NewArrSize  <~~ push(makeNewArray(takeAll())) ~~>
 // annotations stay out of `naty`, which names the element type.
 NAType      = { Annotation } NATypeName ;
 NATypeName  <~~ push({naty: stripWs(up.in)}) ~~>
-            = ( PrimName KwEnd | "String" KwEnd | Id ) ;
+            = PrimName KwEnd | "String" KwEnd | Id [ NotDiamond SkipAngle ] { "." Id [ NotDiamond SkipAngle ] } ;
 NADim       <~~ push({dim: pop()}) ~~> = { Annotation } "[" Expression "]" ;
 NAEmpty     <~~ push({nadim0: true}) ~~> = { Annotation } "[" "]" ;
 
@@ -738,7 +948,7 @@ SwitchExpr  <~~ push(makeSwitchExpr(takeAll())) ~~>
             = KwSwitch "(" Expression ")" "{" { SwCase } "}" ;
 SwCase      = SwArrowCase | SwArrowDefault | Case | Default ;
 SwArrowCase <~~ pushArrowCase(takeAll()) ~~>
-            = KwCase ALabel { "," ALabel } "->" SwArrowBody ;
+            = KwCase NotDfltKw ALabel { "," ALabel } "->" SwArrowBody ;
 SwArrowDefault <~~ pushArrowDefault(takeAll()) ~~>
             = KwDefault "->" SwArrowBody ;
 // An arrow arm's expression IS the yield; a block or throw arm behaves as usual.
@@ -750,11 +960,14 @@ SwYield     <~~ push(makeYield(pop())) ~~>
 // jagged form. Only reachable where an expression is expected, so it cannot be
 // confused with a block (Statement tries Block long before ExprStmt).
 ArrLit      <~~ push(makeArray(takeAll())) ~~>
-            = "{" [ Expression { "," Expression } [ "," ] ] "}" ;
+            = "{" [ Expression { "," Expression } ] [ "," ] "}" ;
 
-Primary     = ArrClassLit | PrimClassLit | ArrLit | NewExpr | SwitchExpr | Lambda | MethodRef | "(" Expression ")" | TextBlock | DqString | CharLit
-            | HexLit | BinLit | OctLit | FloatLit | UscoreInt | SuffInt | IntLit | True | False | Null
+Primary     = ArrClassLit | PrimClassLit | ArrLit | NewExpr | SwitchExpr | Lambda | MethodRef | "(" Expression ")" | TextBlock | JavaStr | CharLit
+            | JNum | True | False | Null
             | OuterThis | BareCall | VarRef ;
+// Every numeric literal in the language goes through NumOk first, so a literal
+// javac's scanner refuses never reaches the parser.
+JNum        = NumOk ( HexLit | BinLit | OctLit | FloatLit | UscoreInt | SuffInt | IntLit ) ;
 
 // Lambdas and method references are real closures on the handle runtime. A lambda
 // captures the defining scope (js_closure); a functional-interface call site (any
@@ -762,7 +975,7 @@ Primary     = ArrClassLit | PrimClassLit | ArrLit | NewExpr | SwitchExpr | Lambd
 // it (js_call). The body is an expression (its value is the result) or a block (a
 // return supplies the result).
 Lambda      <~~ push(makeLambdaExpr(takeAll(), up.pos)) ~~>
-            = LambdaHead "->" LambdaBody ;
+            = LamUniform LambdaHead "->" LambdaBody ;
 LambdaHead  = "(" [ LamParam { "," LamParam } ] ")" | LamId ;
 // A parameter is an optional type then a name; the explicit "Type LamId | LamId"
 // alternation lets an untyped "(x)" work despite the possessive optional (Type
@@ -840,11 +1053,21 @@ OuterThis   <~~ push(makeOuterThis()) ~~>
 // on the enclosing instance - and in a static context there is none, so the class
 // descriptor is used there too. Tried before VarRef, which would read the name alone.
 BareCall    <~~ push(makeBareCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
+            = BareName "(" [ Expression { "," Expression } ] ")" ;
+// A reserved word is not a method name (`case 0 -> if (true);` used to parse as
+// a call to a method named `if`) - but `this(...)` and `super(...)` reach this
+// rule whenever they are NOT the first thing in a constructor body, which JEP
+// 447 flexible constructors rely on.
+BareName    <~~ push(stripWs(up.in)) ~~>
+            = "this" KwEnd | KwSuper | NotResvKw Id ;
 
 // 'this' and class names resolve like variables.
+// A reserved word is not a variable - without this `new<Integer> Object[3]`
+// (cannot.create.array.with.type.arguments) read as the comparison chain
+// `new < Integer > Object[3]`. `this` and `super` ARE resolved like variables
+// here, which is what this grammar's field access is built on.
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
-            = Id ;
+            = NotUscore ( "this" KwEnd | KwSuper | NotResvKw Id ) ;
 
 // ----- Widened literals. The numeric forms are genuine now: hex / binary /
 // octal / underscored / suffixed integers and fractional / exponent / hex-float
@@ -856,11 +1079,67 @@ VarRef      <~~ push(makeVarRef(up.in)) ~~>
 // A char literal 'c' (escapes included). Reuses the balanced SkipChar shape. The
 // value is a genuine char: it does arithmetic and compares as its code, prints as
 // its glyph, and concatenates as its glyph - see makeCharLit.
-CharLit     <~~ push(makeCharLit(up.in)) ~~> = SkipChar ;
+// The escape set is Java's: the single letters, a one-to-three digit OCTAL
+// escape and the \u form. SkipChar - a balanced run of anything - used to stand
+// here, which accepted the empty literal '' (empty.char.lit) and a raw newline
+// inside one (illegal.line.end.in.char.lit).
+CharLit     <~~ push(makeCharLit(up.in)) ~~>
+            = "'" :whitespace() CharBody "'" :whitespace(Whitespace) ;
+CharBody    = "\\" CharEscBody | CharPlain ;
+CharEscBody = "u" JHexD JHexD JHexD JHexD | JOctRun | CharEsc ;
+JOctRun     = JOct [ JOct [ JOct ] ] ;
+JOct        = "0"..."7" ;
+JHexD       = "0"..."9" | "a"..."f" | "A"..."F" ;
+CharEsc     = "n" | "t" | "r" | "b" | "f" | "s" | "'" | '"' | "\\" ;
+// Same widening as JStrPlain: a raw control character is a legal
+// SingleCharacter (`'\u0010'` is one after the pre-pass); CR and LF are not
+// (illegal.line.end.in.char.lit).
+CharPlain   = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+
+// Java's string literal. Same shape as lib/dq-strings.abnf, but the escape set
+// is Java's own (JLS 3.10.7), not lib/dq-strings' "backslash plus any
+// printable": `"\!"` is illegal.esc.char, and StrEsc accepted it. jUnescape
+// decodes it - it knows Java's octal escapes ("A\102") and \s, which the shared
+// unescapeJs does not, so the two halves now agree on the VALUE as well.
+JStrPlain   = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+JavaStr     = '"' :whitespace() { JStrEsc | JStrPlain } <~~ push(makeConst(jUnescape(up.in))) ~~> '"' :whitespace(Whitespace) ;
+JStrEsc     = "\\" ( CharEsc | JOct | "u" ) | UniBS "\\" "\x20"..."\x7e" ;
+// JLS 3.10.5: a StringCharacter is any InputCharacter but `"` and `\` - which
+// includes the raw CONTROL characters, and lib/dq-strings' DqPlain starts at
+// \x20. They are not typed directly; the unicode-escape pre-pass produces them
+// (`"foo\u0000bar"` is a real NUL in the literal), and javac accepts that -
+// verified with -XDshould-stop.ifNoError=PARSE, which exits 0. Only the two
+// line terminators are excluded (illegal.line.end.in.string).
+
+// javac translates unicode escapes in PHASE ONE, before the scanner runs, so a
+// `\u005C` earlier on the line has already become a real backslash and the
+// escape that follows is whatever those two characters spell -
+// javac/UnicodeBackslash/UnicodeBackslash.java is a whole file of
+// `test("1.2", "\u005C\]", "\\]")`. Without this the escape set above costs
+// that file. The scan stops at the line start, which no string literal crosses.
+UniBS       = :script(~~
+    (function() {
+        var i = -1
+        var seen = false
+        var n = 0
+        while (n < 4000) {
+            var ch = c.peek(i)
+            if (ch < 0 || ch === 10 || ch === 13) { n = 4000 }
+            else {
+                if (ch === 92 && c.peek(i + 1) === 117 && c.peek(i + 2) === 48 && c.peek(i + 3) === 48
+                    && c.peek(i + 4) === 53 && (c.peek(i + 5) === 99 || c.peek(i + 5) === 67)) { seen = true }
+                i--
+                n++
+            }
+        }
+        return seen ? undefined : abnf.newToken("\x01no-unicode-backslash", 0)
+    })()
+~~) ;
+
 // A text block """ ... """ ; the !'"""' lookahead lets single and double quotes appear
 // inside without ending the block. Whitespace is disabled inside so newlines are content.
 TextBlock   <~~ push(makeConst(textBlock(up.in))) ~~>
-            = '"""' :whitespace() { !'"""' TBItem } '"""' :whitespace(Whitespace) ;
+            = '"""' TBOpen :whitespace() { !'"""' TBItem } '"""' :whitespace(Whitespace) ;
 TBItem      = "\\" "\x00"..."\U0010ffff" | "\x00"..."\U0010ffff" ;
 // Hex / binary: the 0x / 0b prefix is distinctive, so these never shadow a decimal int.
 // A hex literal may carry a p-exponent (0x1p4 == 16.0, a hexadecimal double).
@@ -928,7 +1207,7 @@ SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
 // (`@Retention(...) public @interface A {}` is the ordinary shape). NotIfaceKw is
 // a pure function of (source, position): a :script sees the RAW input, so it
 // steps over the whitespace itself, and it FAILS by returning an impossible token.
-Annotation  = "@" NotIfaceKw Id { "." Id } [ SkipParen ] ;
+Annotation  = "@" NotIfaceKw Id { "." Id } [ AnnArgOk SkipParen ] ;
 NotIfaceKw  = :script(~~
     (function() {
         var s = 0
@@ -973,21 +1252,25 @@ AnnotationDecl <~~ push(makeAnnotationTypeStmt(takeAll())) ~~>
 // methods become closures on it and the (implicitly static final) constants become
 // its properties. It has no constructor, so a class implementing it does not chain
 // to one; putting it on the implementor's __super chain is what makes the default
-// methods reachable and `instanceof` answer true. A body outside the member subset
-// falls back to InterfaceSkip, which stays reported as not implemented.
-Interface   = InterfaceReal | InterfaceSkip ;
+// methods reachable and `instanceof` answer true.
+// MEASURED: the InterfaceSkip / EnumSkip fallbacks - LeadMods ... SkipBlock, a
+// balanced skip over any body the member set declines - are GONE. They cost the
+// three reject files InitializerNotAllowed, EnumConstantExpected and
+// EnumConstantNotExpected, because a body javac's parser refuses was swallowed
+// whole by the skip; removing them is 3 reject files gained for 1 must-parse
+// file lost (DefaultAllowedInIntfAnnotationMember, which the interpreter half
+// does not parse either), and it is what makes the two halves agree file for
+// file on the corpus.
+Interface   = InterfaceReal ;
 InterfaceReal <~~ push(makeInterfaceStmt(takeAll())) ~~>
             = LeadMods KwInterface Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ]
-              [ KwExtends IType { "," IType } ] [ PermitsSkip ] "{" { Member } "}" ;
-InterfaceSkip <~~ push(notImplStmt("interface", up.pos)) ~~>
-            = LeadMods KwInterface Id [ SkipAngle ] [ KwExtends Type { "," Type } ] [ PermitsSkip ] SkipBlock ;
+              [ KwExtends IType { "," IType } ] [ PermitsSkip ] "{" { IMember } "}" ;
 // An enum lowers to a class descriptor plus one instance per constant, stored on the
 // descriptor under the constant's name. The constants are built in textual order, so
 // __eord (ordinal()) is their index and __values (values()) their list; name() and
 // valueOf() read the same two. A constant with its own BODY gets a per-constant
 // descriptor whose __super is the enum, so its overrides win over the enum's methods.
-// A body outside the member subset falls back to EnumSkip.
-EnumDecl    = EnumReal | EnumSkip ;
+EnumDecl    = EnumReal ;
 EnumReal    <~~ push(makeEnumStmt(takeAll())) ~~>
             = LeadMods KwEnum Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ImplementsSkip ]
               "{" [ EnumConst { "," EnumConst } ] [ "," ] [ ";" { Member } ] "}" ;
@@ -995,8 +1278,6 @@ EnumConst   <~~ push(makeEnumConst(takeAll())) ~~>
             = { Annotation } Id <~~ push(up.in) ~~>
               [ "(" [ Expression { "," Expression } ] ")" ] [ EnumBody ] ;
 EnumBody    <~~ push({ebody: takeAll()}) ~~> = "{" { Member } "}" ;
-EnumSkip    <~~ push(notImplStmt("enum", up.pos)) ~~>
-            = LeadMods KwEnum Id [ ImplementsSkip ] SkipBlock ;
 
 // A type declared inside a class body (nested or inner). It is lowered exactly like
 // a top-level one and HOISTED: its descriptor is declared under its simple name in
@@ -1039,6 +1320,791 @@ KwAssert    = "assert" KwEnd ;
 KwSync      = "synchronized" KwEnd ;
 KwThis      = "this" KwEnd ;
 KwYield     = "yield" KwEnd ;
+
+// ----- Post-shape parser checks (what javac's parser refuses AFTER the shape
+// matched), MIRRORED VERBATIM from java-interpreter.abnf so the two halves
+// refuse the same programs. Every rule below REFUSES something; each is
+// anchored as narrowly as the diagnostic it mirrors, because a refusal that is
+// one step too wide costs must-parse files. Each is a pure function of
+// (source, position), like NotSwitchKw / NotIfaceKw above.
+
+// A RESERVED word is never an identifier (JLS 3.9). Id in this grammar matches
+// keywords, so `int assert;`, `Object this;`, `return null;` as a class member
+// and `case 0 -> if (true);` (an `if` read as a method call) all parsed. The
+// list is the 50 reserved words plus the three literals; the CONTEXTUAL ones
+// (var, record, sealed, permits, yield, module, ...) are deliberately absent.
+// Screened on first byte AND length before any comparison - this guard sits on
+// Type and on every declarator, so it runs constantly.
+NotResvKw   = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var f0 = c.peek(s)
+        if (f0 < 97 || f0 > 122) { return undefined } // every reserved word is lower-case
+        var n = 0
+        var more = true
+        while (more) {
+            var cc = c.peek(s + n)
+            if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122)) { n++ } else { more = false }
+            if (n > 12) { more = false }
+        }
+        var kws = ["abstract", "assert", "boolean", "break", "byte", "case", "catch",
+                   "char", "class", "const", "continue", "default", "do", "double",
+                   "else", "enum", "extends", "final", "finally", "float", "for",
+                   "goto", "if", "implements", "import", "instanceof", "int",
+                   "interface", "long", "native", "new", "package", "private",
+                   "protected", "public", "return", "short", "static", "strictfp",
+                   "super", "switch", "synchronized", "this", "throw", "throws",
+                   "transient", "try", "void", "volatile", "while",
+                   "true", "false", "null"]
+        var hit = false
+        for (var k = 0; k < kws.length; k++) {
+            var w = kws[k]
+            if (w.length === n && w.charCodeAt(0) === f0) {
+                var ok = true
+                for (var i = 1; i < n; i++) { if (c.peek(s + i) !== w.charCodeAt(i)) { ok = false } }
+                if (ok) { hit = true }
+            }
+        }
+        return hit ? abnf.newToken("\x01java-reserved", 0) : undefined
+    })()
+~~) ;
+
+// `case default:` on its own is default.label.not.allowed; `case null, default ->`
+// is legal (JEP 441), so the guard sits only on the FIRST label of a case.
+NotDfltKw   = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var w = "default"
+        var ok = true
+        for (var i = 0; i < w.length; i++) { if (c.peek(s + i) !== w.charCodeAt(i)) { ok = false } }
+        if (ok) {
+            var cc = c.peek(s + w.length)
+            if (!((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122))) {
+                return abnf.newToken("\x01default-label", 0)
+            }
+        }
+        return undefined
+    })()
+~~) ;
+
+// No annotation may stand here. A RECORD pattern refuses one
+// (record.patterns.annotations.not.allowed) although a type pattern accepts it.
+NoAnnot     = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        return c.peek(s) === 64 ? abnf.newToken("\x01annotation-here", 0) : undefined
+    })()
+~~) ;
+
+// A NUMERIC literal that javac's SCANNER refuses. Four checks, all anchored on
+// the literal token that starts right here, and all of them shapes no legal
+// program contains:
+//   `1_`     illegal.underscore            - an underscore must sit BETWEEN digits
+//   `08`     illegal.digit.in.octal.literal - a leading zero makes it octal
+//   1e9999   fp.number.too.large / .too.small - a 4-digit decimal exponent is
+//            out of double's range in both directions (max ~1.8e308)
+//   12345678901234567890  int.number.too.large - more than 10 significant
+//            digits, or 10 that read above 2147483648, with no L suffix
+// The magnitude test compares DIGITS, never arithmetic, so nothing overflows.
+NumOk       = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var c0 = c.peek(s)
+        if (!(c0 >= 48 && c0 <= 57)) { return undefined }
+        var c1 = c.peek(s + 1)
+        var base = 10
+        var i = s
+        if (c0 === 48 && (c1 === 120 || c1 === 88)) { base = 16; i = s + 2 }
+        else if (c0 === 48 && (c1 === 98 || c1 === 66)) { base = 2; i = s + 2 }
+        var runStart = i
+        var dig = []          // the digit run, underscores removed
+        var bad = false
+        var more = true
+        while (more) {
+            var ch = c.peek(i)
+            var isd = (ch >= 48 && ch <= 57)
+            if (base === 16 && ((ch >= 97 && ch <= 102) || (ch >= 65 && ch <= 70))) { isd = true }
+            if (isd) { dig.push(ch); i++ }
+            else if (ch === 95) {   // '_' only between digits (JLS 3.10.1)
+                var p = c.peek(i - 1)
+                var q = c.peek(i + 1)
+                var pd = (p >= 48 && p <= 57) || p === 95
+                var qd = (q >= 48 && q <= 57) || q === 95
+                if (base === 16) {
+                    if ((p >= 97 && p <= 102) || (p >= 65 && p <= 70)) { pd = true }
+                    if ((q >= 97 && q <= 102) || (q >= 65 && q <= 70)) { qd = true }
+                }
+                if (!pd || !qd || i === runStart) { bad = true }
+                i++
+            }
+            else { more = false }
+            if (dig.length > 64) { more = false }
+        }
+        if (base !== 10) { return bad ? abnf.newToken("\x01bad-literal", 0) : undefined }
+        // decimal: fraction, exponent and suffix decide what the token IS
+        var isFloat = false
+        var expAt = -1
+        if (c.peek(i) === 46) {         // a fraction
+            isFloat = true
+            i++
+            var m2 = true
+            while (m2) {
+                var fc = c.peek(i)
+                if ((fc >= 48 && fc <= 57) || fc === 95) { i++ } else { m2 = false }
+            }
+        }
+        if (c.peek(i) === 101 || c.peek(i) === 69) {   // 'e' / 'E'
+            var k = i + 1
+            if (c.peek(k) === 43 || c.peek(k) === 45) { k++ }
+            if (c.peek(k) >= 48 && c.peek(k) <= 57) { isFloat = true; expAt = k }
+        }
+        var sfx = c.peek(i)
+        if (expAt >= 0) {
+            var e2 = expAt
+            var m3 = true
+            while (m3) { var ec = c.peek(e2); if ((ec >= 48 && ec <= 57) || ec === 95) { e2++ } else { m3 = false } }
+            sfx = c.peek(e2)
+            var ed = 0                    // exponent DIGITS: no underscores (1e1__0
+            var lead = true               // is 1e10), leading zeros dropped
+            for (var e = expAt; e < e2; e++) {
+                var ec2 = c.peek(e)
+                if (ec2 !== 95) {
+                    if (lead && ec2 === 48) { ed = ed } else { lead = false; ed++ }
+                }
+            }
+            var nz = false                // a zero mantissa underflows to 0.0 legally
+            for (var d0 = 0; d0 < dig.length; d0++) { if (dig[d0] >= 49 && dig[d0] <= 57) { nz = true } }
+            if (ed > 3 && nz) { bad = true }
+        }
+        var isLong = (sfx === 76 || sfx === 108)
+        if (sfx === 102 || sfx === 70 || sfx === 100 || sfx === 68) { isFloat = true }
+        if (!isFloat && dig.length > 1 && dig[0] === 48) {          // an OCTAL literal
+            for (var o = 0; o < dig.length; o++) { if (dig[o] === 56 || dig[o] === 57) { bad = true } }
+        } else if (!isFloat && !isLong) {                            // a plain int
+            var z = 0
+            while (z < dig.length - 1 && dig[z] === 48) { z++ }
+            var len = dig.length - z
+            if (len > 10) { bad = true }
+            else if (len === 10) {
+                var lim = "2147483648"
+                var over = false
+                var settled = false
+                for (var t = 0; t < 10; t++) {
+                    if (!settled) {
+                        if (dig[z + t] > lim.charCodeAt(t)) { over = true; settled = true }
+                        else if (dig[z + t] < lim.charCodeAt(t)) { settled = true }
+                    }
+                }
+                if (over) { bad = true }
+            }
+        }
+        return bad ? abnf.newToken("\x01bad-literal", 0) : undefined
+    })()
+~~) ;
+
+// The parameter list that starts here (at its '(') must place a VARARGS
+// parameter last, and that parameter may not be a receiver or carry the C-style
+// array suffix - varargs.must.be.last, varargs.and.receiver,
+// varargs.and.old.array.syntax. One scan of the group answers all three.
+// Generic arguments are tracked with their own depth so `Map<String, Integer>...`
+// is one parameter, not two.
+ParamOk     = :script(~~
+    (function() {
+        var i = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(i) === 32 || c.peek(i) === 9 || c.peek(i) === 10 || c.peek(i) === 13) { i++ }
+        if (c.peek(i) !== 40) { return undefined }
+        i++
+        var depth = 1
+        var ang = 0
+        var vararg = false
+        var bad = false
+        var n = 0
+        while (depth > 0 && n < 4000) {
+            n++
+            var ch = c.peek(i)
+            if (ch < 0) { depth = 0 }
+            else if (ch === 34 || ch === 39) {           // a string / char in an annotation
+                var q = ch
+                i++
+                var g = 0
+                while (c.peek(i) >= 0 && c.peek(i) !== q && g < 4000) {
+                    if (c.peek(i) === 92) { i++ }
+                    i++
+                    g++
+                }
+                i++
+            }
+            else if (ch === 47 && c.peek(i + 1) === 47) { while (c.peek(i) >= 0 && c.peek(i) !== 10) { i++ } }
+            else if (ch === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                var g2 = 0
+                while (c.peek(i) >= 0 && g2 < 40000) {
+                    if (c.peek(i) === 42 && c.peek(i + 1) === 47) { i = i + 2; g2 = 40000 } else { i++; g2++ }
+                }
+            }
+            else if (ch === 40) { depth++; i++ }
+            else if (ch === 41) { depth--; i++ }
+            else if (ch === 60) { ang++; i++ }
+            else if (ch === 62) { if (ang > 0) { ang-- } ; i++ }
+            else if (ch === 44 && depth === 1 && ang === 0) {
+                if (vararg) { bad = true }               // a parameter AFTER the varargs one
+                i++
+            }
+            else if (ch === 46 && c.peek(i + 1) === 46 && c.peek(i + 2) === 46 && depth === 1 && ang === 0) {
+                vararg = true
+                i = i + 3
+            }
+            else if (ch === 91 && depth === 1 && ang === 0 && vararg) { bad = true; i++ }
+            else if (ch === 116 && vararg && depth === 1 && ang === 0
+                     && c.peek(i + 1) === 104 && c.peek(i + 2) === 105 && c.peek(i + 3) === 115) {
+                var cc = c.peek(i + 4)
+                var pc = c.peek(i - 1)
+                var word = (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122)
+                var pword = (pc >= 48 && pc <= 57) || (pc >= 65 && pc <= 90) || pc === 95 || pc === 36 || (pc >= 97 && pc <= 122) || pc === 46
+                if (!word && !pword) { bad = true }
+                i = i + 4
+            }
+            else { i++ }
+        }
+        return bad ? abnf.newToken("\x01bad-varargs", 0) : undefined
+    })()
+~~) ;
+
+// A lambda's parameters are ALL implicit, ALL `var` or ALL explicitly typed
+// (JLS 15.27.1) - `(int x, y)`, `(x, var y)` and `(int x, var y)` are all
+// invalid.lambda.parameter.declaration. The guard sits at the head of Lambda,
+// which every parenthesized expression reaches, so it leaves immediately unless
+// the group is really followed by `->`.
+LamUniform  = :script(~~
+    (function() {
+        var i = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(i) === 32 || c.peek(i) === 9 || c.peek(i) === 10 || c.peek(i) === 13) { i++ }
+        if (c.peek(i) !== 40) { return undefined }
+        var open = i
+        i++
+        var depth = 1
+        var n = 0
+        while (depth > 0 && n < 4000) {
+            n++
+            var ch = c.peek(i)
+            if (ch < 0) { return undefined }
+            else if (ch === 34 || ch === 39) {
+                var q = ch
+                i++
+                var g = 0
+                while (c.peek(i) >= 0 && c.peek(i) !== q && g < 4000) {
+                    if (c.peek(i) === 92) { i++ }
+                    i++
+                    g++
+                }
+                i++
+            }
+            else if (ch === 40) { depth++; i++ }
+            else if (ch === 41) { depth--; i++ }
+            else { i++ }
+        }
+        if (n >= 4000) { return undefined }
+        var a = i
+        while (c.peek(a) === 32 || c.peek(a) === 9 || c.peek(a) === 10 || c.peek(a) === 13) { a++ }
+        if (!(c.peek(a) === 45 && c.peek(a + 1) === 62)) { return undefined }   // not a lambda head
+        // classify each parameter: 1 = implicit (one word), 2 = var, 3 = typed
+        var kinds = 0
+        var j = open + 1
+        var depth2 = 1
+        var ang = 0
+        var words = 0
+        var firstIsVar = false
+        var sawBracket = false
+        var m = 0
+        var flush = false
+        while (depth2 > 0 && m < 4000) {
+            m++
+            var ch2 = c.peek(j)
+            if (ch2 < 0) { depth2 = 0 }
+            else if (ch2 === 40) { depth2++; j++ }
+            else if (ch2 === 41) { depth2--; j++; if (depth2 === 0) { flush = true } }
+            else if (ch2 === 60) { ang++; j++ }
+            else if (ch2 === 62) { if (ang > 0) { ang-- } ; j++ }
+            else if (ch2 === 91 || ch2 === 93) { sawBracket = true; j++ }
+            else if (ch2 === 64) { j++ }                     // an annotation's '@'
+            else if (ch2 === 44 && depth2 === 1 && ang === 0) { flush = true; j++ }
+            else if ((ch2 >= 97 && ch2 <= 122) || (ch2 >= 65 && ch2 <= 90) || ch2 === 95 || ch2 === 36) {
+                var w0 = j
+                var len = 0
+                var more = true
+                while (more) {
+                    var wc = c.peek(j)
+                    if ((wc >= 48 && wc <= 57) || (wc >= 65 && wc <= 90) || wc === 95 || wc === 36 || (wc >= 97 && wc <= 122)) { j++; len++ } else { more = false }
+                }
+                var isFinal = (len === 5 && c.peek(w0) === 102 && c.peek(w0 + 1) === 105 && c.peek(w0 + 2) === 110
+                               && c.peek(w0 + 3) === 97 && c.peek(w0 + 4) === 108)
+                if (!isFinal) {
+                    if (words === 0 && len === 3 && c.peek(w0) === 118 && c.peek(w0 + 1) === 97 && c.peek(w0 + 2) === 114) { firstIsVar = true }
+                    words++
+                }
+            }
+            else { j++ }
+            if (flush) {
+                flush = false
+                if (words > 0) {
+                    var k = 3
+                    if (firstIsVar) { k = 2 } else if (words === 1 && !sawBracket) { k = 1 }
+                    if (kinds === 0) { kinds = k } else if (kinds !== k) { return abnf.newToken("\x01mixed-lambda-params", 0) }
+                }
+                words = 0
+                firstIsVar = false
+                sawBracket = false
+            }
+        }
+        return undefined
+    })()
+~~) ;
+
+// `var` is a RESTRICTED type name (JLS 3.9): a field may not be declared with
+// it (restricted.type.not.allowed.here) and `var[]` is never a type
+// (restricted.type.not.allowed.array).
+NotVarKw    = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        if (c.peek(s) === 118 && c.peek(s + 1) === 97 && c.peek(s + 2) === 114) {
+            var cc = c.peek(s + 3)
+            if (!((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122))) {
+                return abnf.newToken("\x01restricted-var", 0)
+            }
+        }
+        return undefined
+    })()
+~~) ;
+
+// No '[' may follow. Used after `var`, which takes no array brackets.
+NoBracket   = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        return c.peek(s) === 91 ? abnf.newToken("\x01var-array", 0) : undefined
+    })()
+~~) ;
+
+// `_` alone is not an identifier since Java 9 and is reserved for the UNNAMED
+// variable since Java 21: it may name a local, a lambda parameter, a pattern or
+// a catch parameter and nothing else - not a field, not a value
+// (use.of.underscore.not.allowed, .non.variable), and it never takes the
+// C-style array suffix (.with.brackets, which UsBrkt adds on top).
+NotUscore   = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        if (c.peek(s) === 95) {
+            var cc = c.peek(s + 1)
+            if (!((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122))) {
+                return abnf.newToken("\x01underscore-name", 0)
+            }
+        }
+        return undefined
+    })()
+~~) ;
+
+UsBrkt      = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        if (c.peek(s) === 95) {
+            var cc = c.peek(s + 1)
+            if (!((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122))) {
+                var b = s + 1
+                while (c.peek(b) === 32 || c.peek(b) === 9 || c.peek(b) === 10 || c.peek(b) === 13) { b++ }
+                if (c.peek(b) === 91) { return abnf.newToken("\x01underscore-brackets", 0) }
+            }
+        }
+        return undefined
+    })()
+~~) ;
+
+// `new Object<>[3]` is cannot.create.array.with.diamond. Only the DIAMOND is
+// refused: `new List<String>[10]` is generic array creation, which javac reports
+// from attribution, not from the parser, so it still parses here.
+NotDiamond  = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        if (c.peek(s) === 60) {
+            var t = s + 1
+            while (c.peek(t) === 32 || c.peek(t) === 9 || c.peek(t) === 10 || c.peek(t) === 13) { t++ }
+            if (c.peek(t) === 62) { return abnf.newToken("\x01array-diamond", 0) }
+        }
+        return undefined
+    })()
+~~) ;
+
+// `var[]` is not a type (restricted.type.not.allowed.array). The `var` branch of
+// Type already declines a following '[', but the general Id branch would then
+// read `var` as an ordinary type name - which it legitimately is under
+// `--release 9`, so ONLY the bracketed form is refused here.
+NotVarArr   = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        if (c.peek(s) === 118 && c.peek(s + 1) === 97 && c.peek(s + 2) === 114) {
+            var cc = c.peek(s + 3)
+            if (!((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122))) {
+                var b = s + 3
+                while (c.peek(b) === 32 || c.peek(b) === 9 || c.peek(b) === 10 || c.peek(b) === 13) { b++ }
+                if (c.peek(b) === 91) { return abnf.newToken("\x01var-array", 0) }
+            }
+        }
+        return undefined
+    })()
+~~) ;
+
+// A local class may not be `sealed` or `non-sealed`
+// (sealed.or.non.sealed.local.classes.not.allowed, JLS 8.1.1.2). The scan is the
+// modifier run in front of the declaration, exactly as HasStatic walks it.
+NoSealed    = :script(~~
+    (function() {
+        var i = 0
+        var bad = false
+        var done = false
+        var rounds = 0
+        while (!done && rounds < 64) {
+            rounds++
+            var moving = true
+            while (moving) {
+                var ch = c.peek(i)
+                if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { i++ }
+                else if (ch === 47 && c.peek(i + 1) === 47) { while (c.peek(i) >= 0 && c.peek(i) !== 10) { i++ } }
+                else if (ch === 47 && c.peek(i + 1) === 42) {
+                    i = i + 2
+                    var g = 0
+                    while (c.peek(i) >= 0 && g < 40000) {
+                        if (c.peek(i) === 42 && c.peek(i + 1) === 47) { i = i + 2; g = 40000 } else { i++; g++ }
+                    }
+                } else { moving = false }
+            }
+            if (c.peek(i) === 64) { done = true }        // an annotation: stop here
+            else {
+                var n = 0
+                var more = true
+                while (more) {
+                    var wc = c.peek(i + n)
+                    if ((wc >= 97 && wc <= 122) || wc === 45) { n++ } else { more = false }
+                    if (n > 12) { more = false }
+                }
+                var mods = ["public", "private", "protected", "static", "final",
+                            "abstract", "synchronized", "native", "transient",
+                            "volatile", "strictfp", "sealed", "non-sealed", "default"]
+                var hit = false
+                for (var k = 0; k < mods.length; k++) {
+                    var w = mods[k]
+                    if (w.length === n) {
+                        var ok = true
+                        for (var j = 0; j < n; j++) { if (c.peek(i + j) !== w.charCodeAt(j)) { ok = false } }
+                        if (ok) { hit = true; if (w === "sealed" || w === "non-sealed") { bad = true } }
+                    }
+                }
+                if (hit) { i = i + n } else { done = true }
+            }
+        }
+        return bad ? abnf.newToken("\x01sealed-local", 0) : undefined
+    })()
+~~) ;
+
+// javac's not.stmt: an ExpressionStatement is an assignment, a pre/post
+// increment or decrement, a method invocation or a class instance creation
+// (JLS 14.8) - `x + 1;` is none of them. The test is deliberately WEAK: the
+// statement is accepted if it ends in `)`, `++` or `--`, or if it contains a
+// top-level assignment operator, which every legal statement expression does.
+// A ternary or a parenthesized expression still slips through, and that is the
+// point - this guard is easy to over-apply, so it only refuses shapes that
+// cannot be a statement under any reading. Strings, chars and comments are
+// skipped so a `;` inside one never ends the scan early.
+StmtExprOk  = :script(~~
+    (function() {
+        var i = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(i) === 32 || c.peek(i) === 9 || c.peek(i) === 10 || c.peek(i) === 13) { i++ }
+        // a PREFIX ++/-- is a statement expression on its own (`--pd;`)
+        if (c.peek(i) === 43 && c.peek(i + 1) === 43) { return undefined }
+        if (c.peek(i) === 45 && c.peek(i + 1) === 45) { return undefined }
+        var depth = 0
+        var assign = false
+        var last = 0
+        var prev = 0
+        var n = 0
+        var stop = 0        // 1 = at the ';' we were looking for, 2 = give up
+        while (stop === 0 && n < 4000) {
+            n++
+            var ch = c.peek(i)
+            if (ch < 0) { stop = 2 }
+            else if (ch === 34 || ch === 39) {
+                var q = ch
+                i++
+                var g = 0
+                while (c.peek(i) >= 0 && c.peek(i) !== q && g < 4000) {
+                    if (c.peek(i) === 92) { i++ }
+                    i++
+                    g++
+                }
+                i++
+                prev = last; last = q
+            }
+            else if (ch === 47 && c.peek(i + 1) === 47) { while (c.peek(i) >= 0 && c.peek(i) !== 10) { i++ } }
+            else if (ch === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                var g2 = 0
+                while (c.peek(i) >= 0 && g2 < 40000) {
+                    if (c.peek(i) === 42 && c.peek(i + 1) === 47) { i = i + 2; g2 = 40000 } else { i++; g2++ }
+                }
+            }
+            else if (ch === 40 || ch === 91 || ch === 123) { depth++; prev = last; last = ch; i++ }
+            else if (ch === 41 || ch === 93 || ch === 125) {
+                if (depth === 0) { stop = 2 } else { depth--; prev = last; last = ch; i++ }
+            }
+            else if (ch === 59 && depth === 0) { stop = 1 }
+            else if (ch === 32 || ch === 9 || ch === 10 || ch === 13) { i++ }
+            else {
+                if (depth === 0 && ch === 61 && c.peek(i + 1) !== 61 && last !== 61 && last !== 33) {
+                    // `>=` / `<=` are comparisons; `>>=` / `<<=` / `>>>=` are not
+                    if (last === 60 || last === 62) { if (prev === last) { assign = true } }
+                    else { assign = true }
+                }
+                prev = last; last = ch
+                i++
+            }
+        }
+        if (stop !== 1) { return undefined }
+        // `}` closes an anonymous class body (`new Runnable() { ... };`) or an
+        // array initializer, both of which end a legal statement expression.
+        var ok = assign || last === 41 || last === 125
+        if (last === 43 && prev === 43) { ok = true }
+        if (last === 45 && prev === 45) { ok = true }
+        return ok ? undefined : abnf.newToken("\x01not-a-statement", 0)
+    })()
+~~) ;
+
+// javac's repeated.modifier: `public public String toString()`. The modifier run
+// in front of a member is walked exactly as HasStatic walks it (annotations, with
+// their argument list, are stepped over rather than ending the run), and a word
+// that has already been seen refuses the member.
+NoDupMods   = :script(~~
+    (function() {
+        var i = 0
+        var dup = false
+        var done = false
+        var rounds = 0
+        var seen = []
+        while (!done && rounds < 64) {
+            rounds++
+            var moving = true
+            while (moving) {
+                var ch = c.peek(i)
+                if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { i++ }
+                else if (ch === 47 && c.peek(i + 1) === 47) { while (c.peek(i) >= 0 && c.peek(i) !== 10) { i++ } }
+                else if (ch === 47 && c.peek(i + 1) === 42) {
+                    i = i + 2
+                    var g = 0
+                    while (c.peek(i) >= 0 && g < 40000) {
+                        if (c.peek(i) === 42 && c.peek(i + 1) === 47) { i = i + 2; g = 40000 } else { i++; g++ }
+                    }
+                } else { moving = false }
+            }
+            if (c.peek(i) === 64) {            // an annotation: @Name[.Name][(...)]
+                i++
+                var an = 0
+                while (an < 4000) {
+                    var ac = c.peek(i)
+                    if ((ac >= 48 && ac <= 57) || (ac >= 65 && ac <= 90) || ac === 95 || ac === 36 || ac === 46 || (ac >= 97 && ac <= 122)) { i++; an++ } else { an = 4000 }
+                }
+                var ms = 0
+                while (c.peek(i + ms) === 32 || c.peek(i + ms) === 9 || c.peek(i + ms) === 10 || c.peek(i + ms) === 13) { ms++ }
+                if (c.peek(i + ms) === 40) {
+                    i = i + ms + 1
+                    var d = 1
+                    var g3 = 0
+                    while (d > 0 && g3 < 40000 && c.peek(i) >= 0) {
+                        var pc = c.peek(i)
+                        if (pc === 40) { d++ } else if (pc === 41) { d-- }
+                        i++
+                        g3++
+                    }
+                }
+            } else {
+                var n = 0
+                var more = true
+                while (more) {
+                    var wc = c.peek(i + n)
+                    if ((wc >= 97 && wc <= 122) || wc === 45) { n++ } else { more = false }
+                    if (n > 12) { more = false }
+                }
+                var mods = ["public", "private", "protected", "static", "final",
+                            "abstract", "synchronized", "native", "transient",
+                            "volatile", "strictfp", "sealed", "non-sealed", "default"]
+                var hit = ""
+                for (var k = 0; k < mods.length; k++) {
+                    var w = mods[k]
+                    if (w.length === n) {
+                        var ok = true
+                        for (var j = 0; j < n; j++) { if (c.peek(i + j) !== w.charCodeAt(j)) { ok = false } }
+                        if (ok) { hit = w }
+                    }
+                }
+                if (hit === "") { done = true }
+                else {
+                    for (var q = 0; q < seen.length; q++) { if (seen[q] === hit) { dup = true } }
+                    seen.push(hit)
+                    i = i + n
+                }
+            }
+        }
+        return dup ? abnf.newToken("\x01repeated-modifier", 0) : undefined
+    })()
+~~) ;
+
+// An annotation's argument list is otherwise SkipParen - balanced text, never
+// read. This is the one shape inside it that javac's parser refuses: an
+// element-value ARRAY that starts with a comma and then has a VALUE,
+// `@SuppressWarnings({,0})` (annotation.missing.element.value) - the bare `{,}`
+// is legal, and javac has a positive test for it. Strings, chars and comments
+// are skipped so a `{,` inside one is never seen.
+AnnArgOk    = :script(~~
+    (function() {
+        var i = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(i) === 32 || c.peek(i) === 9 || c.peek(i) === 10 || c.peek(i) === 13) { i++ }
+        if (c.peek(i) !== 40) { return undefined }
+        i++
+        var depth = 1
+        var bad = false
+        var n = 0
+        while (depth > 0 && n < 8000) {
+            n++
+            var ch = c.peek(i)
+            if (ch < 0) { depth = 0 }
+            else if (ch === 34 || ch === 39) {
+                var q = ch
+                i++
+                var g = 0
+                while (c.peek(i) >= 0 && c.peek(i) !== q && g < 8000) {
+                    if (c.peek(i) === 92) { i++ }
+                    i++
+                    g++
+                }
+                i++
+            }
+            else if (ch === 47 && c.peek(i + 1) === 47) { while (c.peek(i) >= 0 && c.peek(i) !== 10) { i++ } }
+            else if (ch === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                var g2 = 0
+                while (c.peek(i) >= 0 && g2 < 40000) {
+                    if (c.peek(i) === 42 && c.peek(i + 1) === 47) { i = i + 2; g2 = 40000 } else { i++; g2++ }
+                }
+            }
+            else if (ch === 40) { depth++; i++ }
+            else if (ch === 41) { depth--; i++ }
+            else if (ch === 123) {
+                i++
+                var b = i
+                while (c.peek(b) === 32 || c.peek(b) === 9 || c.peek(b) === 10 || c.peek(b) === 13) { b++ }
+                if (c.peek(b) === 44) {
+                    // `{,}` is the SINGLE-COMMA array, which javac's parser
+                    // accepts (javac/parser/SingleCommaAnnotationValue.java is a
+                    // positive test); `{,0}` is the missing element value.
+                    var e = b + 1
+                    while (c.peek(e) === 32 || c.peek(e) === 9 || c.peek(e) === 10 || c.peek(e) === 13) { e++ }
+                    if (c.peek(e) !== 125) { bad = true }
+                }
+            }
+            else { i++ }
+        }
+        return bad ? abnf.newToken("\x01annotation-element", 0) : undefined
+    })()
+~~) ;
+
+// A text block's opening delimiter must be followed by nothing but whitespace
+// and a line terminator (JLS 3.10.6, illegal.text.block.open).
+TBOpen      = :script(~~
+    (function() {
+        var i = 0
+        while (c.peek(i) === 32 || c.peek(i) === 9 || c.peek(i) === 12) { i++ }
+        var ch = c.peek(i)
+        return (ch === 10 || ch === 13) ? undefined : abnf.newToken("\x01text-block-open", 0)
+    })()
+~~) ;
+
+// The modifier run that starts here must contain `static`. Only a record body
+// uses it: a record may declare STATIC fields and nothing else
+// (record.cannot.declare.instance.fields). The scan walks annotations (name,
+// then a balanced argument list) and modifier words, and stops at the first
+// word that is neither - which is the type of the member.
+HasStatic   = :script(~~
+    (function() {
+        var i = 0
+        var found = false
+        var done = false
+        var rounds = 0
+        while (!done && rounds < 64) {
+            rounds++
+            var moving = true
+            while (moving) {  // whitespace and comments
+                var ch = c.peek(i)
+                if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { i++ }
+                else if (ch === 47 && c.peek(i + 1) === 47) { while (c.peek(i) >= 0 && c.peek(i) !== 10) { i++ } }
+                else if (ch === 47 && c.peek(i + 1) === 42) {
+                    i = i + 2
+                    var g = 0
+                    while (c.peek(i) >= 0 && g < 40000) {
+                        if (c.peek(i) === 42 && c.peek(i + 1) === 47) { i = i + 2; g = 40000 } else { i++; g++ }
+                    }
+                } else { moving = false }
+            }
+            if (c.peek(i) === 64) {          // an annotation: @Name[.Name][(...)]
+                i++
+                var an = 0
+                while (an < 4000) {
+                    var ac = c.peek(i)
+                    if ((ac >= 48 && ac <= 57) || (ac >= 65 && ac <= 90) || ac === 95 || ac === 36 || ac === 46 || (ac >= 97 && ac <= 122)) { i++; an++ } else { an = 4000 }
+                }
+                var ms = 0
+                while (c.peek(i + ms) === 32 || c.peek(i + ms) === 9 || c.peek(i + ms) === 10 || c.peek(i + ms) === 13) { ms++ }
+                if (c.peek(i + ms) === 40) {
+                    i = i + ms + 1
+                    var d = 1
+                    var g3 = 0
+                    while (d > 0 && g3 < 40000 && c.peek(i) >= 0) {
+                        var pc = c.peek(i)
+                        if (pc === 40) { d++ } else if (pc === 41) { d-- }
+                        i++
+                        g3++
+                    }
+                }
+            } else {
+                var n = 0
+                var more = true
+                while (more) {
+                    var wc = c.peek(i + n)
+                    if ((wc >= 97 && wc <= 122) || wc === 45) { n++ } else { more = false }
+                    if (n > 12) { more = false }
+                }
+                var mods = ["public", "private", "protected", "static", "final",
+                            "abstract", "synchronized", "native", "transient",
+                            "volatile", "strictfp", "sealed", "non-sealed", "default"]
+                var hit = false
+                for (var k = 0; k < mods.length; k++) {
+                    var w = mods[k]
+                    if (w.length === n) {
+                        var ok = true
+                        for (var j = 0; j < n; j++) { if (c.peek(i + j) !== w.charCodeAt(j)) { ok = false } }
+                        if (ok) { hit = true; if (w === "static") { found = true } }
+                    }
+                }
+                if (hit) { i = i + n } else { done = true }
+            }
+        }
+        return found ? undefined : abnf.newToken("\x01needs-static", 0)
+    })()
+~~) ;
 
 // ---
 
@@ -1427,6 +2493,48 @@ KwYield     = "yield" KwEnd ;
     // 'x' -> the char value of its single (possibly escaped) character. js_char boxes
     // the code, so the value knows it is a char: it renders as the glyph but does
     // arithmetic and comparison on the code, exactly like Java's char.
+    // Java's escape set (JLS 3.10.7), decoded exactly as the interpreter half
+    // decodes it: \b \f \s, the one-to-three digit OCTAL escapes and \u with any
+    // number of u's. The shared unescapeJs knows none of those, so `"A\102"` and
+    // `'\s'` used to compile to a different value than they interpret to.
+    function jUnescape(s2) {
+        var out = ""
+        var i = 0
+        while (i < s2.length) {
+            var c = s2.charAt(i)
+            if (c != "\\") { out += c; i++; continue }
+            var e = s2.charAt(i + 1)
+            if (e == "n") { out += "\n"; i += 2; continue }
+            if (e == "t") { out += "\t"; i += 2; continue }
+            if (e == "r") { out += "\r"; i += 2; continue }
+            if (e == "b") { out += String.fromCharCode(8); i += 2; continue }
+            if (e == "f") { out += String.fromCharCode(12); i += 2; continue }
+            if (e == "s") { out += " "; i += 2; continue }
+            if (e == "\n") { i += 2; continue }
+            if (e == "u") {
+                var j = i + 2
+                while (s2.charAt(j) == "u") { j++ }
+                out += String.fromCharCode(parseInt(s2.substring(j, j + 4), 16))
+                i = j + 4
+                continue
+            }
+            if (e >= "0" && e <= "7") {
+                var oct = e
+                var k = i + 2
+                while (k < s2.length && oct.length < 3 && s2.charAt(k) >= "0" && s2.charAt(k) <= "7") {
+                    oct += s2.charAt(k)
+                    k++
+                }
+                out += String.fromCharCode(parseInt(oct, 8))
+                i = k
+                continue
+            }
+            out += e
+            i += 2
+        }
+        return out
+    }
+
     function makeCharLit(text) {
         // The token is 'x', possibly with trailing layout: cut between the first and
         // the last quote (stripWs would eat a literal space or tab char).
@@ -1434,7 +2542,7 @@ KwYield     = "yield" KwEnd ;
         while (a < text.length && text.charAt(a) != "'") { a++ }
         var z = text.length - 1
         while (z > a && text.charAt(z) != "'") { z-- }
-        var dec = unescapeJs(text.substring(a + 1, z))
+        var dec = jUnescape(text.substring(a + 1, z))
         var code = dec.length > 0 ? dec.charCodeAt(0) : 0
         return function(b) { return {b: b, v: callExt(b, "js_char", [handle(code)])} }
     }
@@ -2280,7 +3388,18 @@ KwYield     = "yield" KwEnd ;
         }
     }
     // A case label is {v: valueThunk} (compare) or {test: predicate} (a pattern).
-    function makeCase(items) { return {isDefault: false, lab: items[0], body: items.slice(1)} }
+    function pushColonCase(items) {
+        var labels = []
+        var body = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].alab != undefined) { labels.push(items[i].alab) }
+            else { body.push(items[i]) }
+        }
+        for (var i = 0; i < labels.length - 1; i++) {
+            push({isDefault: false, lab: labels[i], body: []})
+        }
+        push({isDefault: false, lab: labels[labels.length - 1], body: body})
+    }
     function makeDefault(items) { return {isDefault: true, body: items} }
     // Arrow arms: one classic case object per label (empty bodies fall through
     // to the last, which carries the arm body plus an implicit break).
@@ -3465,6 +4584,21 @@ KwYield     = "yield" KwEnd ;
             var mainCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Main")])
             var mainV = callExt(b, "js_get", [mainCls, emitStr(b, entry)])
             var argsV = callExt(b, "js_arr_new", [])
+            // JEP 512: the entry may be an INSTANCE method (`void main()` in an
+            // implicitly declared class). An instance method sits on the class
+            // descriptor like a static one, so the static-ness is read from
+            // methodKind, never from the property; the receiver is a fresh
+            // instance built with the no-argument constructor, exactly as
+            // java's own launcher does it.
+            if (lookupMethodKind("Main", entry) == "instance") {
+                var selfV = callExt(b, "js_obj_new", [])
+                callExt(b, "js_set", [selfV, emitStr(b, "__class"), mainCls])
+                var ctorArgs = callExt(b, "js_arr_new", [])
+                callExt(b, "js_arr_push", [ctorArgs, selfV])
+                var ctorV = callExt(b, "js_get", [mainCls, emitStr(b, "__ctor")])
+                callExt(b, "js_call", [ctorV, hUndef, ctorArgs])
+                callExt(b, "js_arr_push", [argsV, selfV])
+            }
             callExt(b, "js_arr_push", [argsV, callExt(b, "js_arr_new", [])])
             b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
         }

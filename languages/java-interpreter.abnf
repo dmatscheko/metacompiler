@@ -53,6 +53,12 @@ several declarators per field, array class literals and the stray semicolon afte
 a type declaration are all parsed. -warn-unsupported downgrades what is left to a
 warning so call graphs, CFGs and traces still work on partly understood files.
 
+Unicode escapes are translated in PHASE ONE, before the scanner runs (JLS 3.3),
+so a unicode escape anywhere in the file - in an identifier, in a keyword, in a
+comment - is the character it denotes. An IMPLICITLY DECLARED class (JEP 512) is
+accepted: a file that declares members but no class becomes a synthetic class
+Main, whose `main` may be an instance method (the launcher constructs it).
+
 Not genuinely modelled: generic type CHECKING (erased), sealed-hierarchy and
 switch EXHAUSTIVENESS checking, method overloading by parameter type (constructors
 are picked by arity), the flow scoping of pattern variables (a binding outlives the
@@ -81,8 +87,173 @@ checking programs end with System.exit(failures).") ;
 
 // A stray ';' after a type declaration (`class F { };`) is legal and means
 // nothing, at the top level and inside a class body alike.
-Program     = [ Package ] { Import } { ModuleDecl | UnsupType | ClassDecl | RecordDecl | StraySemi } ;
+Program     = UniPre [ Package ] { Import } { ModuleDecl | UnsupType | ClassDecl | RecordDecl | StraySemi } [ ImplicitClass ] ;
 StraySemi   = ";" ;
+
+// ----- JEP 512: an IMPLICITLY DECLARED class. A compilation unit that declares
+// no class at all but does declare members is one class body without the
+// `class X {` around it: `void main() { ... }` alone in a file is a program.
+// The members are built into a synthetic class named Main, which is exactly the
+// class this grammar's entry point looks for, and its `main` may be an INSTANCE
+// method - the launcher instantiates the class when the static lookup misses.
+// It is the LAST element of Program, so an ordinary file consumes everything
+// through the declaration repetition and reaches it at EOF, where Member fails
+// at once and the optional is skipped.
+ImplicitClass <~~ buildClass(takeAll()) ~~>
+            = ImplicitHead Member { Member } ;
+ImplicitHead <~~ push("Main"); jEnterClass("Main") ~~>
+            = NotTypeKw ;
+
+// The implicit class may not START with a type declaration: a file whose first
+// top-level item is `class` / `record` / `interface` / `enum` / `@interface` is
+// an ordinary compilation unit, and if that declaration does not parse the file
+// is broken - it is not a member of an implicit class. Without this, a record
+// javac refuses (`record R(final int x) {}`) matched Method (`record` as the
+// return type, `R(...)` as the signature, `{}` as the body) and five reject
+// files were accepted for eight parse files gained; with it, the eight stay and
+// the five come back. The modifier run is walked exactly as NoDupMods walks it.
+NotTypeKw   = :script(~~
+    (function() {
+        var i = 0
+        var done = false
+        var bad = false
+        var rounds = 0
+        while (!done && rounds < 64) {
+            rounds++
+            var moving = true
+            while (moving) {
+                var ch = c.peek(i)
+                if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { i++ }
+                else if (ch === 47 && c.peek(i + 1) === 47) { while (c.peek(i) >= 0 && c.peek(i) !== 10) { i++ } }
+                else if (ch === 47 && c.peek(i + 1) === 42) {
+                    i = i + 2
+                    var g = 0
+                    while (c.peek(i) >= 0 && g < 40000) {
+                        if (c.peek(i) === 42 && c.peek(i + 1) === 47) { i = i + 2; g = 40000 } else { i++; g++ }
+                    }
+                } else { moving = false }
+            }
+            if (c.peek(i) === 64) {            // an annotation, or `@interface`
+                i++
+                var ws = 0
+                while (c.peek(i + ws) === 32 || c.peek(i + ws) === 9 || c.peek(i + ws) === 10 || c.peek(i + ws) === 13) { ws++ }
+                var iw = "interface"
+                var isAt = true
+                for (var q = 0; q < iw.length; q++) { if (c.peek(i + ws + q) !== iw.charCodeAt(q)) { isAt = false } }
+                if (isAt) { bad = true; done = true }
+                else {
+                    var an = 0
+                    while (an < 4000) {
+                        var ac = c.peek(i)
+                        if ((ac >= 48 && ac <= 57) || (ac >= 65 && ac <= 90) || ac === 95 || ac === 36 || ac === 46 || (ac >= 97 && ac <= 122)) { i++; an++ } else { an = 4000 }
+                    }
+                    var ms = 0
+                    while (c.peek(i + ms) === 32 || c.peek(i + ms) === 9 || c.peek(i + ms) === 10 || c.peek(i + ms) === 13) { ms++ }
+                    if (c.peek(i + ms) === 40) {
+                        i = i + ms + 1
+                        var d = 1
+                        var g3 = 0
+                        while (d > 0 && g3 < 40000 && c.peek(i) >= 0) {
+                            var pc = c.peek(i)
+                            if (pc === 40) { d++ } else if (pc === 41) { d-- }
+                            i++
+                            g3++
+                        }
+                    }
+                }
+            } else {
+                var n = 0
+                var more = true
+                while (more) {
+                    var wc = c.peek(i + n)
+                    if ((wc >= 97 && wc <= 122) || wc === 45) { n++ } else { more = false }
+                    if (n > 12) { more = false }
+                }
+                var mods = ["public", "private", "protected", "static", "final",
+                            "abstract", "synchronized", "native", "transient",
+                            "volatile", "strictfp", "sealed", "non-sealed", "default"]
+                var types = ["class", "record", "interface", "enum"]
+                var hit = false
+                for (var k = 0; k < mods.length; k++) {
+                    var w = mods[k]
+                    if (w.length === n) {
+                        var ok = true
+                        for (var j = 0; j < n; j++) { if (c.peek(i + j) !== w.charCodeAt(j)) { ok = false } }
+                        if (ok) { hit = true }
+                    }
+                }
+                for (var k2 = 0; k2 < types.length; k2++) {
+                    var w2 = types[k2]
+                    if (w2.length === n) {
+                        var ok2 = true
+                        for (var j2 = 0; j2 < n; j2++) { if (c.peek(i + j2) !== w2.charCodeAt(j2)) { ok2 = false } }
+                        if (ok2) { bad = true }
+                    }
+                }
+                if (hit && !bad) { i = i + n } else { done = true }
+            }
+        }
+        return bad ? abnf.newToken("\x01type-declaration", 0) : undefined
+    })()
+~~) ;
+
+// ----- Phase ONE of the Java compilation pipeline (JLS 3.3): a unicode escape
+// is translated into the character it denotes BEFORE the scanner runs, so
+// `public class X {}` really is `public class X {}` and a `\` really
+// is a backslash the scanner then reads as an escape. It is a source PRE-PASS,
+// not a grammar rule, and it is expressed as one: the script reads the whole
+// source with c.getSrc(), rewrites it and hands it back with c.setSrc(), then
+// restarts the parse position - the same shape as C's -pipe preprocessor stage,
+// but inside one grammar so the corpus row measures it.
+// A backslash is ELIGIBLE only when the run of backslashes ending at it has ODD
+// length (JLS: an even number of preceding backslashes), so `"\\u0041"` stays
+// the six characters A; the eligible one may then be followed by any
+// number of `u` and must be followed by exactly four hex digits.
+// The whole pass leaves after one indexOf on a file that contains no `\u`,
+// which is every file but a handful.
+UniPre      = :script(~~
+    (function() {
+        var src = c.getSrc()
+        if (src.indexOf("\\u") < 0) { return undefined }
+        var n = src.length
+        var out = ""
+        var last = 0      // start of the not-yet-copied run
+        var i = 0
+        var changed = false
+        while (i < n) {
+            if (src.charAt(i) !== "\\") { i++; continue }
+            var j = i
+            while (j < n && src.charAt(j) === "\\") { j++ }
+            var odd = ((j - i) % 2) === 1
+            if (odd && j < n && src.charAt(j) === "u") {
+                var k = j
+                while (k < n && src.charAt(k) === "u") { k++ }
+                var hex = src.substring(k, k + 4)
+                var ok = hex.length === 4
+                for (var h = 0; h < hex.length; h++) {
+                    var hc = hex.charCodeAt(h)
+                    if (!((hc >= 48 && hc <= 57) || (hc >= 97 && hc <= 102) || (hc >= 65 && hc <= 70))) { ok = false }
+                }
+                if (ok) {
+                    // Everything before the eligible backslash is copied as it
+                    // stands - that includes the (j - i - 1) literal ones.
+                    out += src.substring(last, j - 1)
+                    out += String.fromCharCode(parseInt(hex, 16))
+                    last = k + 4
+                    i = k + 4
+                    changed = true
+                    continue
+                }
+            }
+            i = j
+        }
+        if (!changed) { return undefined }
+        out += src.substring(last, n)
+        c.setSrc(out)
+        c.setSdx(0)
+        return undefined
+    })()
+~~) ;
 
 // --- module-info.java: a JPMS module declaration (JLS 7.7). Modules are not
 // modelled, and there is nothing in one to execute, so the whole declaration is
@@ -278,8 +449,11 @@ ArrowCase   <~~ pushArrowCase(takeAll()) ~~>
 ArrowBody   = Block | Throw | ExprStmt ;
 ArrowDefault <~~ pushArrowDefault(takeAll()) ~~>
             = KwDefault "->" ArrowBody ;
-Case        <~~ push(makeCase(takeAll())) ~~>
-            = KwCase NotDfltKw CaseLabel ":" { Statement } ;
+// Stacked labels on ONE colon case - `case 3, 4:` (JLS 14.11) - become one
+// classic case object per label: all but the last have an empty body, so they
+// fall through into it, which is exactly what Java's stacked labels mean.
+Case        <~~ pushColonCase(takeAll()) ~~>
+            = KwCase NotDfltKw CaseLabel { "," CaseLabel } ":" { Statement } ;
 
 // ----- Case labels (shared by the statement switch and the switch expression).
 // A label is a PATTERN (type or record deconstruction, with an optional `when`
@@ -905,8 +1079,15 @@ MethodRef   <~~ push(makeMethodRef(stripWs(up.in), up.pos)) ~~>
 // jUnescape, which knows Java's octal escapes ("A\102") and \s.
 // The escape set is Java's own (JLS 3.10.7), not lib/dq-strings' "backslash plus
 // any printable": `"\!"` is illegal.esc.char, and StrEsc accepted it.
-JavaStr     = '"' :whitespace() { JStrEsc | DqPlain } <~~ push(makeConst(jUnescape(up.in))) ~~> '"' :whitespace(Whitespace) ;
+JStrPlain   = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+JavaStr     = '"' :whitespace() { JStrEsc | JStrPlain } <~~ push(makeConst(jUnescape(up.in))) ~~> '"' :whitespace(Whitespace) ;
 JStrEsc     = "\\" ( CharEsc | JOct | "u" ) | UniBS "\\" "\x20"..."\x7e" ;
+// JLS 3.10.5: a StringCharacter is any InputCharacter but `"` and `\` - which
+// includes the raw CONTROL characters, and lib/dq-strings' DqPlain starts at
+// \x20. They are not typed directly; the unicode-escape pre-pass produces them
+// (`"foo\u0000bar"` is a real NUL in the literal), and javac accepts that -
+// verified with -XDshould-stop.ifNoError=PARSE, which exits 0. Only the two
+// line terminators are excluded (illegal.line.end.in.string).
 
 Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
 
@@ -937,7 +1118,10 @@ JOctRun     = JOct [ JOct [ JOct ] ] ;
 JOct        = "0"..."7" ;
 JHexD       = "0"..."9" | "a"..."f" | "A"..."F" ;
 CharEsc     = "n" | "t" | "r" | "b" | "f" | "s" | "'" | '"' | "\\" ;
-CharPlain   = "\x09" | "\x0b"..."\x0c" | "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+// Same widening as JStrPlain: a raw control character is a legal
+// SingleCharacter (`'\u0010'` is one after the pre-pass); CR and LF are not
+// (illegal.line.end.in.char.lit).
+CharPlain   = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 // A text block """ ... """ ; the !'"""' lookahead lets single and double quotes appear
 // inside without ending the block. Whitespace is disabled inside so newlines are content.
 TextBlock   <~~ push(makeConst(jTextBlock(up.in))) ~~>
@@ -3388,7 +3572,18 @@ HasStatic   = :script(~~
             } while (condT())
         }
     }
-    function makeCase(items) { return {isDefault: false, lab: items[0].lab, body: items.slice(1)} }
+    function pushColonCase(items) {
+        var labels = []
+        var body = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].lab != undefined) { labels.push(items[i].lab) }
+            else { body.push(items[i]) }
+        }
+        for (var i = 0; i < labels.length - 1; i++) {
+            push({isDefault: false, lab: labels[i], body: []})
+        }
+        push({isDefault: false, lab: labels[labels.length - 1], body: body})
+    }
     // Does a case label match the scrutinee? A pattern binds and tests; `null`
     // matches only null; an ENUM scrutinee compares its label by NAME (the label
     // is a bare constant, not an expression anywhere in scope); everything else
@@ -4326,11 +4521,26 @@ HasStatic   = :script(~~
         println("java interpreter: -main snippet returned " + (ret === undefined ? 0 : ret))
     } else {
         var mainCls = globalScope["Main"]
-        if (mainCls == undefined || typeof mainCls[entry] != "function") {
+        if (mainCls == undefined) {
+            fail("Java programs need a class Main with a static " + entry + " method.")
+        }
+        // JEP 512: the entry point may be an INSTANCE method - `void main()` in
+        // an implicitly declared class is the whole program. The launcher then
+        // does what java's does: construct the class with its no-argument
+        // constructor and call the method on that instance. An instance method
+        // lives on the class descriptor like a static one, so the STATIC-ness is
+        // read from jMethodKind (jLookupKind), never from the property.
+        var mainStatic = jLookupKind("Main", entry) == "static"
+        var mainInst = null
+        if (!mainStatic) {
+            mainInst = {__class: mainCls}
+            if (typeof mainCls.__ctor == "function") { mainCls.__ctor.apply(undefined, [mainInst]) }
+        }
+        if (typeof mainCls[entry] != "function") {
             fail("Java programs need a class Main with a static " + entry + " method.")
         }
         try {
-            ret = mainCls[entry]([])
+            ret = mainStatic ? mainCls[entry]([]) : mcall(mainInst, entry, [[]])
         } catch (e) {
             if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
             throw e

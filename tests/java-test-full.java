@@ -71,6 +71,7 @@ class Main {
         S25.run(); // SECTION-CALL 25
         S26.run(); // SECTION-CALL 26
         S27.run(); // SECTION-CALL 27
+        S28.run(); // SECTION-CALL 28
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -1182,5 +1183,71 @@ class S27 {
             seen = seen + 1;
         }
         Main.check("pp15", seen == 2);
+    }
+}
+
+// ===== SECTION 28: phase-one unicode escapes, Java's escape set, `{,}` and
+// stacked colon labels =====
+// JLS 3.3 says a unicode escape is translated BEFORE the scanner runs, so the
+// six characters \u0078 here really are the identifier x and \u0041 inside a string
+// literal really is an A - the grammars run that translation as a source
+// pre-pass (UniPre). The near side of it is pinned too: a backslash preceded by
+// an ODD number of backslashes is not eligible, so "\\u0041" stays six
+// characters. The escape may also produce a raw CONTROL character, which is a
+// legal string / char character (JStrPlain, CharPlain).
+// Java's own escape set (JLS 3.10.7) carries the octal escapes and \s, which
+// the shared unescapeJs does not know - both halves decode them with jUnescape
+// now. `{,}` is javac's single-comma array initializer, and `case 3, 4:` is a
+// colon case with stacked labels, which falls through into the next one.
+// Verified against OpenJDK 24.0.2: javac -XDshould-stop.ifNoError=PARSE exits 0
+// and `java` prints 15 of the checks below with 0 failures.
+
+class S28 {
+    static int classify(int n) {
+        int r = 0;
+        switch (n) {
+            case 1, 2: r = 12; break;
+            case 3, 4: r = 34;
+            case 5: r = r + 100; break;
+            default: r = -1;
+        }
+        return r;
+    }
+    static String pick(int n) {
+        return switch (n) {
+            case 1, 2: yield "lo";
+            case 3, 4: yield "hi";
+            default: yield "?";
+        };
+    }
+
+    static void run() {
+        // ----- phase one: the escape IS the character -----
+        int \u0078 = 41;
+        Main.check("uu1", x + 1 == 42);
+        Main.check("uu2", "\u0041\u0042".equals("AB"));
+        Main.check("uu3", '\u0041' == 'A');
+        String bs = "\\u0041";
+        Main.check("uu4", bs.length() == 6 && bs.charAt(0) == '\\' && bs.charAt(1) == 'u');
+        String nul = "a\u0000b";
+        Main.check("uu5", nul.length() == 3 && nul.charAt(1) == 0);
+        Main.check("uu6", '\u0010' == 16);
+
+        // ----- Java's escape set: the octal forms and \s -----
+        Main.check("uu7", "A\102C".equals("ABC"));
+        Main.check("uu8", "x\sy".equals("x y"));
+        Main.check("uu9", '\s' == ' ');
+
+        // ----- array initializers: the single comma and the trailing one -----
+        int[] e = {,};
+        Main.check("uu10", e.length == 0);
+        int[] t = {1, 2, 3,};
+        Main.check("uu11", t.length == 3 && t[2] == 3);
+
+        // ----- stacked colon labels, in a statement switch and an expression one -----
+        Main.check("uu12", S28.classify(1) == 12 && S28.classify(2) == 12);
+        Main.check("uu13", S28.classify(3) == 134 && S28.classify(4) == 134);
+        Main.check("uu14", S28.classify(5) == 100 && S28.classify(9) == -1);
+        Main.check("uu15", S28.pick(2).equals("lo") && S28.pick(4).equals("hi") && S28.pick(8).equals("?"));
     }
 }
