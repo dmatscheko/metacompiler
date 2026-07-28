@@ -822,8 +822,9 @@ LocalPlainFun <~~ push(makeFunStmt(pop())) ~~>
 
 // try/catch/finally and throw are implemented: throw calls js_throw (a Go panic the
 // runtime unwinds), and each try/catch/finally body is compiled to its own closure
-// handed to js_try (see makeTry). The first catch clause wins (exception types are
-// parsed but not discriminated). A return/break/continue that leaves a try or catch
+// handed to js_try (see makeTry). The catch clauses are DISCRIMINATED by their
+// declared type: all of them go into one closure whose body is a js_ktexcmatch chain,
+// and a value no clause matches is rethrown. A return/break/continue that leaves a try or catch
 // body becomes a control signal that excDispatch re-issues in the enclosing frame
 // (compile-core). Each part is marked so makeTry can tell them apart.
 TryStmt     <~~ push(makeTry(takeAll())) ~~>
@@ -833,7 +834,12 @@ TryBody     <~~ push({trybody: pop()}) ~~>
 CatchClause <~~ push(makeCatch(takeAll())) ~~>
 // The catch parameter may carry a trailing comma - `catch (e: Exception,)`,
 // psi/trailingCommaAllowed.kt, clean tree - as in the interpreter half.
-            = KwCatch "(" KId <~~ push(up.in) ~~> [ ":" Type ] [ "," ] ")" Block ;
+            = KwCatch "(" KId <~~ push(up.in) ~~> [ ":" CatchTy ] [ "," ] ")" Block ;
+// The DECLARED type of the catch parameter, kept so emitCatchClosure can pick the
+// matching clause. Tagging it means CatchClause now pushes three items instead of
+// two, which is why this grammar overrides the shared makeCatch by assignment.
+CatchTy     <~~ push({ctype: up.in}) ~~>
+            = Type ;
 FinallyClause <~~ push({finbody: pop()}) ~~>
             = KwFinally Block ;
 Throw       <~~ push(makeThrow(pop())) ~~>
@@ -2286,8 +2292,9 @@ KwContract  = "contract" KwEnd ;
     var funNames = {}
     // Parameter NAME lists by callee name, so a call site can place its named
     // arguments: functions (and lambdas' owners) in funParams, member methods in
-    // methodParams. A method name declared by two classes keeps the first list -
-    // named arguments to an overloaded member name are resolved by that one.
+    // methodParams. A method name declared by two classes keeps the LAST list here;
+    // every list is also kept in methodParamAlts, and paramsFor picks the one that
+    // carries the call site's named arguments (see the note there).
     var funParams = {}
     var methodParams = {}
     var ctorParamNames = {}   // Primary-constructor parameter names, for named arguments.
@@ -2628,6 +2635,39 @@ KwContract  = "contract" KwEnd ;
     // argument reaches stays undefined, which is exactly the signal emitParamSig turns
     // into the declared default. Without a named argument (or without a known callee)
     // the list is returned unchanged, so ordinary calls emit byte-identically.
+    // Named arguments are ordered against the parameter names of the method being
+    // called, and methodParams is keyed by the method NAME alone - so a second class
+    // declaring a method of the same name overwrote the first one's slots. That is not
+    // hypothetical for a data class: `copy`'s slots are the component names, so
+    // `data class Pt(val x: Int, val y: Int)` followed by ANY other data class made
+    // `p.copy(y = 9)` write into slot 0 and answer Pt(x=9, y=2). The interpreter half,
+    // which binds named arguments by name at call time, was right.
+    // Every declared vector is kept here; the one that carries every named argument of
+    // this call site wins, latest declaration first (which is the tie-break the single
+    // slot used to give unconditionally).
+    var methodParamAlts = {}
+    function noteParams(name, params) {
+        methodParams["$" + name] = params
+        var alts = methodParamAlts["$" + name]
+        if (alts == undefined) { alts = [] }
+        alts.push(params)
+        methodParamAlts["$" + name] = alts
+    }
+    function paramsFor(name, args) {
+        var alts = methodParamAlts["$" + name]
+        if (alts == undefined) { return methodParams["$" + name] }
+        for (var i = alts.length - 1; i >= 0; i--) {
+            var ok = true
+            for (var j = 0; j < args.length; j++) {
+                if (args[j].aname == undefined) { continue }
+                var found = false
+                for (var k = 0; k < alts[i].length; k++) { if (alts[i][k] == args[j].aname) { found = true } }
+                if (!found) { ok = false }
+            }
+            if (ok) { return alts[i] }
+        }
+        return methodParams["$" + name]
+    }
     function orderArgs(args, names) {
         var named = false
         for (var i = 0; i < args.length; i++) { if (args[i].aname != undefined) { named = true } }
@@ -2766,7 +2806,7 @@ KwContract  = "contract" KwEnd ;
         return rec
     }
     // An abstract (bodiless) member function: only its name and arity matter.
-    function makeAbstract(items) { methodParams["$" + items[0]] = items[1].params; return {name: items[0], params: items[1].params} }
+    function makeAbstract(items) { noteParams(items[0], items[1].params); return {name: items[0], params: items[1].params} }
     // Base types the runtime does not model as user classes but whose constructor
     // argument programs DO observe: `class E(m: String) : Exception(m)` must make
     // e.message readable, so the synthesized "super constructor" stores it.
@@ -2782,7 +2822,8 @@ KwContract  = "contract" KwEnd ;
                        "$NullPointerException": true, "$NumberFormatException": true,
                        "$UnsupportedOperationException": true, "$ArithmeticException": true,
                        "$NoSuchElementException": true, "$ConcurrentModificationException": true,
-                       "$ClassCastException": true, "$IllegalAccessException": true}
+                       "$ClassCastException": true, "$IllegalAccessException": true,
+                       "$StackOverflowError": true, "$OutOfMemoryError": true}
 
     // Import prefixes the runtime already satisfies: their symbols are provided
     // as builtins (abs/max/min, listOf, exitProcess, ...), so importing them is a
@@ -2840,17 +2881,66 @@ KwContract  = "contract" KwEnd ;
             return deadBlock()
         }
     }
-    // The parts of a try, whichever form it came in.
+    // A catch clause, with the DECLARED type CatchTy now records. Overridden by
+    // assignment (never re-declared): makeCatch lives in lib/compile-core.js and is
+    // shared, and this grammar's CatchClause pushes one item more than it expects.
+    makeCatch = function (items) {
+        var body = anytype
+        var nm = anytype
+        var ty = anytype
+        body = null
+        nm = undefined
+        ty = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { body = it }
+            else if (it != null && it != undefined && it.ctype != undefined) { ty = it.ctype }
+            else { nm = it }
+        }
+        return {catchbody: body, catchname: nm, catchtype: ty}
+    }
+    // The parts of a try, whichever form it came in. EVERY catch clause is kept - the
+    // dispatch that picks the matching one is emitCatchClosure's.
     function tryParts(items) {
-        var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
+        var tryT = anytype, finallyT = anytype
+        var catches = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].trybody != undefined) { tryT = items[i].trybody }
-            else if (items[i].catchbody != undefined) {
-                if (catchT == undefined) { catchT = items[i].catchbody; catchName = items[i].catchname }
-            }
+            else if (items[i].catchbody != undefined) { catches.push(items[i]) }
             else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
         }
-        return {tryT: tryT, catchT: catchT, catchName: catchName, finallyT: finallyT}
+        return {tryT: tryT, catches: catches, finallyT: finallyT}
+    }
+    // ONE catch closure for all the clauses of a try. js_try can only be handed a
+    // single catch function, so the clause SELECTION is emitted inside it: the thrown
+    // value arrives as `__caught`, each typed clause is guarded by js_ktexcmatch
+    // (abnf/jsrtkotlin.go, the twin of kExcMatches in the interpreter half), an
+    // untyped clause takes everything from there on, and a value no clause matches is
+    // rethrown - which is Kotlin's rule and what makes an outer try see it.
+    // Before this the compiler ran the FIRST clause whatever its type.
+    function emitCatchClosure(cls) {
+        return emitFunc(["__caught"], function(bb) {
+            var b2 = anytype
+            b2 = bb
+            for (var i = 0; i < cls.length; i++) {
+                var cn = (cls[i].catchname != undefined) ? cls[i].catchname : "__caught"
+                var ty = cls[i].catchtype
+                var caughtV = callExt(b2, "js_scope_get", [curScopeV, emitStr(b2, "__caught")])
+                if (ty == null || ty == undefined) {
+                    callExt(b2, "js_scope_decl", [curScopeV, emitStr(b2, cn), caughtV])
+                    return cls[i].catchbody(b2)
+                }
+                var hitB = curF.NewBlock("")
+                var nextB = curF.NewBlock("")
+                b2.NewCondBr(truthy(b2, callExt(b2, "js_ktexcmatch", [caughtV, emitStr(b2, ty)])), hitB, nextB)
+                callExt(hitB, "js_scope_decl", [curScopeV, emitStr(hitB, cn), caughtV])
+                cls[i].catchbody(hitB).NewRet(hUndef)
+                b2 = nextB
+            }
+            callExt(b2, "js_throw", [callExt(b2, "js_scope_get", [curScopeV, emitStr(b2, "__caught")])])
+            b2.NewRet(hUndef)
+            return deadBlock()
+        }, false, true)
     }
     // Emit the js_try call and the control-signal dispatch. Returns {b, v}: v is the
     // value of whichever clause completed (undefined for statement bodies), valid on the
@@ -2860,9 +2950,8 @@ KwContract  = "contract" KwEnd ;
         // continue leaving them becomes a control signal that excDispatch re-issues.
         var tryClo = callExt(b, "js_closure", [handle(emitFunc([], p.tryT, false, true)), curScopeV])
         var catchClo = hUndef
-        if (p.catchT != undefined) {
-            var cn = (p.catchName != undefined) ? p.catchName : "__caught"
-            catchClo = callExt(b, "js_closure", [handle(emitFunc([cn], p.catchT, false, true)), curScopeV])
+        if (p.catches.length > 0) {
+            catchClo = callExt(b, "js_closure", [handle(emitCatchClosure(p.catches)), curScopeV])
         }
         var finClo = hUndef
         if (p.finallyT != undefined) {
@@ -3303,7 +3392,7 @@ KwContract  = "contract" KwEnd ;
                     lamB.NewBr(mrg)
                     return {b: mrg, v: mrg.NewPhi([llvm.ir.NewIncoming(mv, objB2), llvm.ir.NewIncoming(lv2, lamB)])}
                 }
-                var ea = emitArgs(b, orderArgs(s.args, methodParams["$" + s.name]))
+                var ea = emitArgs(b, orderArgs(s.args, paramsFor(s.name, s.args)))
                 // f.invoke(x) on a function VALUE is a plain call; on an instance of a
                 // class declaring the invoke convention it is that method.
                 if (s.name == "invoke" && classMethodNames["$invoke"] != true) {
@@ -3823,13 +3912,22 @@ KwContract  = "contract" KwEnd ;
             if (emitClassTop() != null && classNames[name] == undefined
                 && funNames["$" + name] != true && classMethodNames["$" + name] == true) {
                 var selfV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
-                var ma = emitArgs(b, orderArgs(args, methodParams["$" + name]))
+                var ma = emitArgs(b, orderArgs(args, paramsFor(name, args)))
                 return {b: ma.b, v: callExt(ma.b, "js_ktsmcall", [selfV, emitStr(ma.b, name), ma.v])}
             }
             if (classNames[name] == 1) {
                 var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
                 var objV = callExt(b, "js_obj_new", [])
                 callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+                // A bare `Inner()` written inside the enclosing class captures that
+                // instance, exactly as `outer.Inner()` does. js_ktouter picks the
+                // receiver whose class is NAMED by the owner, so a construction inside
+                // a `with` still finds the right one.
+                var ownerN = innerOwner["$" + name]
+                if (ownerN != undefined) {
+                    callExt(b, "js_set", [objV, emitStr(b, "__outer"),
+                                          callExt(b, "js_ktouter", [curScopeV, emitStr(b, ownerN)])])
+                }
                 var cargs = orderArgs(args, ctorParamNames["$" + name])
                 var argsV = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [argsV, objV])
@@ -4892,7 +4990,11 @@ KwContract  = "contract" KwEnd ;
         }, true)
     }
     // equals(other): the same class (js_is_type walks the __super chain) and every
-    // property structurally equal (js_seq, folded with the boolean js_jband).
+    // property structurally equal (js_kteq, folded with the boolean js_jband).
+    // js_kteq and not js_seq: a property holding a LIST or a MAP compares
+    // element-wise, and a property holding another data instance goes through that
+    // class's own equals - `data class D(val a: Int, val b: List<Int>)` compared
+    // FALSE against an equal copy while the interpreter half said true.
     function emitEqualsFunc(name, props) {
         return emitFunc(["other"], function(bb) {
             var thisV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "this")])
@@ -4902,8 +5004,8 @@ KwContract  = "contract" KwEnd ;
             bb.NewCondBr(truthy(bb, callExt(bb, "js_is_type", [otherV, emitStr(bb, name)])), cmpB, noB)
             var acc = anytype
             for (var k = 0; k < props.length; k++) {
-                var eq = callExt(cmpB, "js_seq", [callExt(cmpB, "js_get", [thisV, emitStr(cmpB, props[k])]),
-                                                 callExt(cmpB, "js_get", [otherV, emitStr(cmpB, props[k])])])
+                var eq = callExt(cmpB, "js_kteq", [callExt(cmpB, "js_get", [thisV, emitStr(cmpB, props[k])]),
+                                                  callExt(cmpB, "js_get", [otherV, emitStr(cmpB, props[k])])])
                 acc = (k == 0) ? eq : callExt(cmpB, "js_jband", [acc, eq])
             }
             cmpB.NewRet(acc)
@@ -5240,6 +5342,8 @@ KwContract  = "contract" KwEnd ;
     // this@Label and this::prop.isInitialized.
     var emitClassNames = []
     function emitClassTop() { return emitClassNames.length > 0 ? emitClassNames[emitClassNames.length - 1] : null }
+    // "$Inner" -> "Outer" for every `inner` class, filled by makeClassStmt of the owner.
+    var innerOwner = {}
     function makeThisAt(lbl) {
         return function(b) {
             var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
@@ -5285,9 +5389,19 @@ KwContract  = "contract" KwEnd ;
             ownProps["$" + parts.accprops[ac].name] = true
         }
         classOwnProps["$" + name] = ownProps
+        // Which class encloses each `inner` class, recorded at WALK time so the bare
+        // `Inner()` call site below can capture the enclosing instance as __outer. The
+        // qualified `outer.Inner()` always did (emitNestedFactory); a bare one did not,
+        // so `this@Outer` inside such an instance answered the INNER instance in both
+        // halves. The twin is cls.__isinner / __outerName in kotlin-interpreter.abnf.
+        for (var nn = 0; nn < parts.nested.length; nn++) {
+            if (parts.nested[nn].inner == true && parts.nested[nn].name != null) {
+                innerOwner["$" + parts.nested[nn].name] = name
+            }
+        }
         for (var cm = 0; cm < methods.length; cm++) {
             classMethodNames["$" + methods[cm].name] = true
-            methodParams["$" + methods[cm].name] = methods[cm].params
+            noteParams(methods[cm].name, methods[cm].params)
             own["$" + methods[cm].name] = true
             noteMethodClass(methods[cm].name, name)
             declOpIfConvention(methods[cm].name, name)
@@ -5301,7 +5415,7 @@ KwContract  = "contract" KwEnd ;
                 classMethodNames["$equals"] = true
                 classMethodNames["$toString"] = true
                 if (dmod == "data") {
-                    methodParams["$copy"] = dprops
+                    noteParams("copy", dprops)
                     classMethodNames["$copy"] = true
                     for (var dc = 0; dc < dprops.length; dc++) { classMethodNames["$component" + (dc + 1)] = true }
                 }
@@ -5375,7 +5489,7 @@ KwContract  = "contract" KwEnd ;
         var own = {}
         for (var cm = 0; cm < methods.length; cm++) {
             classMethodNames["$" + methods[cm].name] = true
-            methodParams["$" + methods[cm].name] = methods[cm].params
+            noteParams(methods[cm].name, methods[cm].params)
             own["$" + methods[cm].name] = true
             declOpIfConvention(methods[cm].name, name)
         }
@@ -5593,7 +5707,6 @@ KwContract  = "contract" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "floatArrayOf"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "booleanArrayOf"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "charArrayOf"), loV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "listOfNotNull"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "emptyList"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "emptySet"), loV])
         // A Sequence is EAGER in this subset (see kotlin-interpreter.abnf), so
@@ -5608,16 +5721,30 @@ KwContract  = "contract" KwEnd ;
         // the declaration is the entire port.
         var ktBuilders = ["mapOf", "mutableMapOf", "hashMapOf", "linkedMapOf", "sortedMapOf",
                           "emptyMap", "buildMap", "buildList", "buildString", "Pair", "Triple",
-                          "with", "run", "repeat", "StringBuilder", "generateSequence"]
+                          "with", "run", "repeat", "StringBuilder", "generateSequence",
+                          // The stdlib top-level functions added with the missing-builtin
+                          // sweep; their twins are the hostGlobals block in
+                          // kotlin-interpreter.abnf. listOfNotNull is here rather than on
+                          // the listOf alias above because it must DROP the nulls, which
+                          // the "return the argument array" function did not.
+                          "compareBy", "compareByDescending", "Comparator", "compareValues",
+                          "maxOf", "minOf", "require", "check", "requireNotNull",
+                          "checkNotNull", "error", "TODO", "runCatching", "lazy",
+                          "List", "MutableList", "Array", "arrayOfNulls", "IntArray",
+                          "LongArray", "ShortArray", "ByteArray", "DoubleArray",
+                          "FloatArray", "BooleanArray", "listOfNotNull", "setOfNotNull"]
         for (var kb = 0; kb < ktBuilders.length; kb++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ktBuilders[kb]),
                                          callExt(b, "js_ktglobal", [emitStr(b, ktBuilders[kb])])])
         }
-        // abs/max/min from Math, exitProcess from exit.
-        var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "max"), callExt(b, "js_get", [mathV, emitStr(b, "max")])])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "min"), callExt(b, "js_get", [mathV, emitStr(b, "min")])])
+        // kotlin.math's abs/max/min, and exitProcess from exit. NOT JavaScript's Math:
+        // that one answers a plain number, so `max(1.5, 2.0)` printed `2` here and
+        // `2.0` in the interpreter half, which is Kotlin's answer for a Double.
+        var ktMath = ["abs", "max", "min"]
+        for (var km = 0; km < ktMath.length; km++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ktMath[km]),
+                                         callExt(b, "js_ktglobal", [emitStr(b, ktMath[km])])])
+        }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "exitProcess"),
                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
         // println / print: Kotlin's OWN rendering, not the shared println host

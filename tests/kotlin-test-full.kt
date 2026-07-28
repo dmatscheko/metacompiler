@@ -1629,6 +1629,208 @@ fun sec44() {
     check("neg6", "" + (w - 1) == "2147483647")
 }
 
+// ===== SECTION 45: structural equality on the collection shapes =====
+// Kotlin's `==` is equals(), and a List, a Set, a Map, a Pair and a Triple all have
+// STRUCTURAL equality - they are java.util's on the JVM, so the answers below are the
+// ones the equivalent Java program prints under `java` (JDK 24): List.of(1,2).equals(
+// List.of(1,2)) is true, Map.of(1,2).equals(Map.of(1,2)) is true, and the hashes are
+// 994 for [1, 2], 4066 for [a, b], 3 for {1=2} and 1025 for [[1, 2]]. Before this both
+// halves answered FALSE for every one of them while hashCode was already element-wise,
+// so equality and hash disagreed.
+data class Cfg45(val n: Int, val tags: List<String>)
+fun sec45() {
+    check("seq1", listOf(1, 2) == listOf(1, 2))
+    check("seq2", listOf(1, 2) != listOf(1, 3))
+    check("seq3", listOf(listOf(1), listOf(2)) == listOf(listOf(1), listOf(2)))
+    check("seq4", mapOf(1 to 2) == mapOf(1 to 2))
+    check("seq5", mapOf("a" to 1, "b" to 2) == mapOf("b" to 2, "a" to 1))
+    check("seq6", setOf(1, 2) == setOf(1, 2))
+    check("seq7", Pair(1, 2) == Pair(1, 2) && Pair(1, 2) != Pair(1, 3))
+    check("seq8", Triple(1, 2, 3) == Triple(1, 2, 3))
+    // A data class whose component IS a collection compares component-wise too.
+    check("seq9", Cfg45(1, listOf("a")) == Cfg45(1, listOf("a")))
+    check("sq10", Cfg45(1, listOf("a")) != Cfg45(1, listOf("b")))
+    // Equality and hashCode must agree; the numbers are java's.
+    check("sq11", listOf(1, 2).hashCode() == 994)
+    check("sq12", listOf("a", "b").hashCode() == 4066)
+    check("sq13", listOf(listOf(1, 2)).hashCode() == 1025)
+    check("sq14", mapOf(1 to 2).hashCode() == 3)
+    check("sq15", Pair(1, 2).hashCode() == 33 && Triple(1, 2, 3).hashCode() == 1026)
+    // `in`, indexOf and distinct all go through the same equality.
+    check("sq16", listOf(1, 2) in listOf(listOf(1, 2)))
+    check("sq17", listOf(listOf(1, 2), listOf(3)).indexOf(listOf(3)) == 1)
+    check("sq18", listOf(listOf(1), listOf(1)).distinct().size == 1)
+    // A named argument to `copy` must land in THIS class's slot. The compiler half
+    // keyed its parameter-name table by method name alone, so the second data class in
+    // a file overwrote the first one's slots and `Pt13(1, 2).copy(y = 9)` answered
+    // Pt13(x=9, y=2) - which is exactly what section 13 asserts, and which stayed green
+    // only because this file had one data class with a named copy in it.
+    check("sq19", "" + Cfg45(1, listOf("a")).copy(tags = listOf("b")) == "Cfg45(n=1, tags=[b])")
+}
+
+// ===== SECTION 46: sorting through a user Comparable, and Comparator =====
+// `sorted()` on a class that declares `operator fun compareTo` sorts by THAT, the way
+// `<` already did; before this the key comparison fell through to a numeric one, no
+// pair was ever "less", and the list came back in its original order in both halves.
+class V46(val n: Int) : Comparable<V46> {
+    override fun compareTo(other: V46): Int = n - other.n
+    override fun toString(): String = "V($n)"
+}
+fun sec46() {
+    val l = listOf(V46(3), V46(1), V46(2))
+    check("cmp1", "" + l.sorted() == "[V(1), V(2), V(3)]")
+    check("cmp2", "" + l.sortedDescending() == "[V(3), V(2), V(1)]")
+    check("cmp3", l.maxOrNull()!!.n == 3 && l.minOrNull()!!.n == 1)
+    check("cmp4", l.max().n == 3 && l.min().n == 1)
+    check("cmp5", V46(1) < V46(2) && V46(3) > V46(2))
+    // A Comparator is a plain function of two elements; compareBy builds one.
+    check("cmp6", "" + listOf(3, 1, 2).sortedWith(compareBy { it }) == "[1, 2, 3]")
+    check("cmp7", "" + listOf(3, 1, 2).sortedWith(compareByDescending { it }) == "[3, 2, 1]")
+    check("cmp8", "" + l.sortedWith(compareBy { it.n }) == "[V(1), V(2), V(3)]")
+}
+
+// ===== SECTION 47: the throwable hierarchy and typed catch =====
+// java.lang's chain is Kotlin/JVM's; every relation below was checked with `instanceof`
+// under `java` (JDK 24). The interpreter half used to parent every builtin directly to
+// Throwable (so `IllegalStateException("z") is Exception` was false) and the compiler
+// half used to run the FIRST catch clause whatever its declared type.
+fun sec47() {
+    check("exc1", IllegalStateException("z") is Exception)
+    check("exc2", IllegalStateException("z") is RuntimeException)
+    check("exc3", NumberFormatException("z") is IllegalArgumentException)
+    check("exc4", IndexOutOfBoundsException("z") is RuntimeException)
+    check("exc5", StackOverflowError() is Error && OutOfMemoryError() is Error)
+    check("exc6", IllegalAccessException() is Exception)
+    var hit = ""
+    try { throw IllegalStateException("a") } catch (e: RuntimeException) { hit = "rt:" + e.message }
+    check("exc7", hit == "rt:a")
+    // The clause SELECTION is by declared type, and a clause that does not match is
+    // skipped rather than taken.
+    hit = ""
+    try { throw NumberFormatException("b") } catch (e: IllegalStateException) { hit = "ise" } catch (e: IllegalArgumentException) { hit = "iae" }
+    check("exc8", hit == "iae")
+    // An Error is not an Exception, so the inner clause must NOT take it.
+    hit = ""
+    try {
+        try { throw StackOverflowError() } catch (e: Exception) { hit = "inner" }
+    } catch (e: Throwable) { hit = "outer" }
+    check("exc9", hit == "outer")
+    // A user exception class still matches its own declared supertype.
+    hit = ""
+    try { throw MyExc47("m") } catch (e: IllegalStateException) { hit = "ise" } catch (e: Exception) { hit = "exc:" + e.message }
+    check("ex10", hit == "exc:m")
+}
+class MyExc47(m: String) : Exception(m)
+
+// ===== SECTION 48: implicit receivers form a stack =====
+// A name the innermost receiver does not answer falls through to the enclosing one:
+// `with(P) { tag }` inside a member of Q is this@Q.tag. Both halves used to stop at the
+// innermost `this` and fail with "unknown name: tag". And a bare `Inner()` built inside
+// its outer's own member captures that instance, so this@Outer answers the OUTER one -
+// before this it answered the inner instance in both halves.
+class P48(val n: Int)
+class Q48(val tag: String) {
+    fun viaWith(): String = with(P48(1)) { "" + n + tag }
+    inner class In48(val q: Int) {
+        fun who(): String = this@Q48.tag + "/" + q
+        fun bare(): String = tag
+    }
+    fun make(): In48 = In48(7)
+}
+fun sec48() {
+    check("rcv1", Q48("hi").viaWith() == "1hi")
+    check("rcv2", Q48("O").make().who() == "O/7")
+    check("rcv3", Q48("O").make().bare() == "O")
+    check("rcv4", Q48("Z").In48(1).who() == "Z/1")
+}
+
+// ===== SECTION 49: the stdlib members the subset was missing =====
+// Every call below aborted the run with "unknown list method" / "unknown String method"
+// / "unknown name" in BOTH halves. They are grouped rather than spread out because they
+// were added as one sweep over the kotlin.collections, kotlin.text and kotlin.ranges
+// member lists.
+fun sec49() {
+    check("std1", "" + listOf(1, null, 2).filterNotNull() == "[1, 2]")
+    check("std2", "" + listOf(1, 2, 3).filterIndexed { i, _ -> i > 0 } == "[2, 3]")
+    check("std3", listOf(1, 2, 3).findLast { it < 3 } == 2)
+    check("std4", listOf(1, 2, 1).lastIndexOf(1) == 2)
+    check("std5", "" + listOf(1, 2, 3).takeWhile { it < 3 } == "[1, 2]")
+    check("std6", "" + listOf(1, 2, 3).dropWhile { it < 3 } == "[3]")
+    check("std7", "" + listOf(1, 2, 3).distinctBy { it % 2 } == "[1, 2]")
+    check("std8", listOf(1, 2, 3).containsAll(listOf(1, 2)))
+    check("std9", listOf(1, 2, 3).elementAt(1) == 2 && listOf(1, 2, 3).getOrNull(9) == null)
+    check("st10", listOf(1, 2, 3).getOrElse(9) { -1 } == -1)
+    check("st11", listOf(1, 2, 3).maxOf { it * 2 } == 6 && listOf(1, 2, 3).minOf { it * 2 } == 2)
+    check("st12", "" + listOf(1, 2, 3).plus(4) == "[1, 2, 3, 4]")
+    check("st13", "" + listOf(1, 2, 3).minus(2) == "[1, 3]")
+    check("st14", "" + listOf(1, 2, 3).intersect(listOf(2, 3)) == "[2, 3]")
+    check("st15", "" + listOf(1, 2).union(listOf(2, 4)) == "[1, 2, 4]")
+    check("st16", "" + listOf(1, 2, 3).subtract(listOf(1)) == "[2, 3]")
+    check("st17", "" + listOf(1, 2, 3).slice(0..1) == "[1, 2]")
+    check("st18", "" + listOf(1, 2, 3).subList(0, 2) == "[1, 2]")
+    check("st19", "" + listOf(1, 2, 3).zipWithNext() == "[(1, 2), (2, 3)]")
+    check("st20", "" + listOf(1, 2, 3).runningFold(0) { a, b -> a + b } == "[0, 1, 3, 6]")
+    check("st21", "" + listOf(1, 2, 3).ifEmpty { listOf(0) } == "[1, 2, 3]")
+    check("st22", "" + listOf(1, 2, 3).onEach { } == "[1, 2, 3]")
+    val ml = mutableListOf(1, 2, 3)
+    check("st23", ml.removeAt(1) == 2 && "" + ml == "[1, 3]")
+    // kotlin.text.
+    check("st24", "hello".replace("l", "L") == "heLLo")
+    check("st25", "hello".replaceFirst("l", "L") == "heLlo")
+    check("st26", "  ".isBlank() && "x".isNotBlank())
+    check("st27", "hello".removePrefix("he") == "llo" && "hello".removeSuffix("lo") == "hel")
+    check("st28", "hello".removeSurrounding("h", "o") == "ell")
+    check("st29", "a.b.c".substringBefore(".") == "a" && "a.b.c".substringAfter(".") == "b.c")
+    check("st30", "a.b.c".substringBeforeLast(".") == "a.b" && "a.b.c".substringAfterLast(".") == "c")
+    check("st31", "".ifEmpty { "x" } == "x" && "  ".ifBlank { "y" } == "y")
+    check("st32", "hello".capitalize() == "Hello")
+    check("st33", "hello".subSequence(1, 3) == "el")
+    check("st34", "hello".single { it == 'h' } == 'h')
+    // kotlin.collections.Map.
+    check("st35", "" + mapOf("a" to 1, "b" to 2).filterValues { it > 1 } == "{b=2}")
+    check("st36", "" + mapOf("a" to 1, "b" to 2).filterKeys { it == "a" } == "{a=1}")
+    check("st37", "" + mapOf("a" to 1).mapValues { it.value + 1 } == "{a=2}")
+    check("st38", "" + mapOf("a" to 1).mapKeys { it.key + "!" } == "{a!=1}")
+    check("st39", "" + mapOf("a" to 1).plus("b" to 2) == "{a=1, b=2}")
+    check("st40", "" + mapOf("a" to 1, "b" to 2).minus("a") == "{b=2}")
+    // Map.filter answers a MAP, not a list of entries.
+    check("st41", "" + mapOf("a" to 1, "b" to 2).filter { it.value > 1 } == "{b=2}")
+    // The top-level functions.
+    check("st42", maxOf(1, 2) == 2 && minOf(1, 2, 0) == 0)
+    check("st43", "" + listOfNotNull(1, null, 2) == "[1, 2]")
+    check("st44", "" + List(3) { it } == "[0, 1, 2]" && "" + arrayOfNulls<Int>(2) == "[null, null]")
+    check("st45", lazy { 5 }.value == 5)
+    check("st46", 7.coerceIn(0, 5) == 5 && 1.coerceIn(0, 5) == 1)
+    // kotlin.math keeps the operand's TYPE: abs(-1.5) is 1.5 and max(1.5, 2.0) is 2.0,
+    // which is what `java` prints for Math.abs / Math.max on the same values.
+    check("st47", "" + abs(-1.5) == "1.5" && "" + max(1.5, 2.0) == "2.0")
+    check("st48", "" + abs(-3L) == "3" && abs(-3) == 3)
+    // require / check / error, and runCatching's Result.
+    check("st49", runCatching { 1 }.isSuccess && runCatching { error("x") }.isFailure)
+    check("st50", runCatching { error("boom") }.exceptionOrNull()!!.message == "boom")
+    check("st51", runCatching { error("x") }.getOrDefault(9) == 9 && runCatching { 5 }.getOrThrow() == 5)
+    var msg = ""
+    try { require(false) { "need it" } } catch (e: IllegalArgumentException) { msg = e.message!! }
+    check("st52", msg == "need it")
+    // NOT `check(false)`: this file declares its own two-argument `check`, which wins
+    // over the stdlib one exactly as Kotlin's shadowing rule says. checkNotNull is the
+    // same contract function under a name the file does not shadow.
+    try { checkNotNull(null) } catch (e: IllegalStateException) { msg = e.message!! }
+    check("st53", msg == "Required value was null.")
+    // joinToString's TRAILING LAMBDA is its transform, not its separator. Both halves
+    // read it as the separator and printed the lambda between the elements - a page of
+    // script text in the interpreter and "[function]" in the compiler.
+    check("st54", listOf(1, 2, 3).joinToString { "" + it * 2 } == "2, 4, 6")
+    check("st55", listOf(1, 2, 3).joinToString("-") { "" + it } == "1-2-3")
+    // `+` on a collection is kotlin.collections.plus. It used to fall through to the
+    // numeric/JavaScript tail: 0 in the interpreter, the string "1,23" in the compiler.
+    check("st56", "" + (listOf(1, 2) + listOf(3)) == "[1, 2, 3]")
+    check("st57", "" + (listOf(1, 2) + 3) == "[1, 2, 3]")
+    check("st58", "" + (mapOf("a" to 1) + ("b" to 2)) == "{a=1, b=2}")
+    // A String on the left still wins, and renders the list Kotlin's way.
+    check("st59", "x" + listOf(1) == "x[1]")
+}
+
 // ===== END SECTIONS =====
 
 fun main() {
@@ -1676,6 +1878,11 @@ fun main() {
     sec42() // SECTION-CALL 42
     sec43() // SECTION-CALL 43
     sec44() // SECTION-CALL 44
+    sec45() // SECTION-CALL 45
+    sec46() // SECTION-CALL 46
+    sec47() // SECTION-CALL 47
+    sec48() // SECTION-CALL 48
+    sec49() // SECTION-CALL 49
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

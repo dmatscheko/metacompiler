@@ -175,12 +175,17 @@ func ktExcHierarchy() map[string]*jsObject {
 	h["Error"] = mk("Error", h["Throwable"])
 	h["RuntimeException"] = mk("RuntimeException", h["Exception"])
 	for _, n := range []string{"IllegalStateException", "IllegalArgumentException",
-		"IndexOutOfBoundsException", "NullPointerException", "NumberFormatException",
+		"IndexOutOfBoundsException", "NullPointerException",
 		"UnsupportedOperationException", "ArithmeticException", "NoSuchElementException",
 		"ConcurrentModificationException", "ClassCastException"} {
 		h[n] = mk(n, h["RuntimeException"])
 	}
+	// NumberFormatException is under IllegalArgumentException, not directly under
+	// RuntimeException - checked with `instanceof` under java (JDK 24).
+	h["NumberFormatException"] = mk("NumberFormatException", h["IllegalArgumentException"])
 	h["IllegalAccessException"] = mk("IllegalAccessException", h["Exception"])
+	h["StackOverflowError"] = mk("StackOverflowError", h["Error"])
+	h["OutOfMemoryError"] = mk("OutOfMemoryError", h["Error"])
 	ktExcHier = h
 	return h
 }
@@ -514,6 +519,17 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 			return o, true
 		}
 		return target, true
+	// coerceIn(min, max): the third member of the coerce family, missing in both
+	// halves while coerceAtLeast and coerceAtMost were present.
+	case "coerceIn":
+		lo, hi := argAt(args, 0), argAt(args, 1)
+		if !isUndefOrNull(lo) && rt.ktNumLess(target, lo) {
+			return lo, true
+		}
+		if !isUndefOrNull(hi) && rt.ktNumLess(hi, target) {
+			return hi, true
+		}
+		return target, true
 	case "isNaN":
 		f, ok := target.(jsJFlo)
 		return ok && math.IsNaN(f.f), true
@@ -654,6 +670,22 @@ func init() {
 			if ktIsIntegral(l) && ktIsIntegral(r) {
 				return w(rt.ktArith("+", l, r))
 			}
+			// `+` on a COLLECTION is kotlin.collections.plus: a list gains the elements
+			// of another collection, or the single element. Before this it fell through
+			// to the runtime's JavaScript `+` and `listOf(1, 2) + listOf(3)` answered
+			// the string "1,23" here and 0 in the interpreter half.
+			if la, isArr := l.(*jsArray); isArr {
+				if v, ok := rt.ktSeqMethod(la, "plus", []interface{}{r}); ok {
+					return w(v)
+				}
+			}
+			if lo, isObj := l.(*jsObject); isObj {
+				if _, _, isDict := dictParts(lo); isDict {
+					if v, ok := rt.ktMapMethod(lo, "plus", []interface{}{r}); ok {
+						return w(v)
+					}
+				}
+			}
 			return w(rt.jsAdd(l, r))
 		}
 		// == / != where a box may be involved. Two numbers compare by VALUE across
@@ -666,12 +698,36 @@ func init() {
 			if giIsInt(l) || giIsInt(r) {
 				return boolH(rt.giEq(l, r))
 			}
+			// A list, a map or a Pair/Triple compares STRUCTURALLY (ktStructEq): none
+			// of them carries a class descriptor, so the fallback below is identity
+			// and `listOf(1, 2) == listOf(1, 2)` answered false.
+			if v, decided := rt.ktStructEq(l, r); decided {
+				return boolH(v)
+			}
+			// An instance whose class declares equals (a data or value class does)
+			// answers for itself. The emit site already dispatches the convention when
+			// the operand's class is KNOWN to declare it; this is the same rule reached
+			// from a NESTED position - a data-class property holding another data
+			// instance, which emitEqualsFunc now compares with js_kteq.
+			if lo, isObj := l.(*jsObject); isObj {
+				if mth, found := ktpFindMember(lo, "equals"); found {
+					return boolH(rt.truthy(rt.call(mth, jsUndef, []interface{}{lo, r})))
+				}
+			}
 			return baseEq(a)
 		}
 		m["js_ktne"] = func(a []uint64) uint64 {
 			l, r := u(a[0]), u(a[1])
 			if giIsInt(l) || giIsInt(r) {
 				return boolH(!rt.giEq(l, r))
+			}
+			if v, decided := rt.ktStructEq(l, r); decided {
+				return boolH(!v)
+			}
+			if lo, isObj := l.(*jsObject); isObj {
+				if mth, found := ktpFindMember(lo, "equals"); found {
+					return boolH(!rt.truthy(rt.call(mth, jsUndef, []interface{}{lo, r})))
+				}
 			}
 			return baseNe(a)
 		}
@@ -833,6 +889,80 @@ func init() {
 			return boolH(t == "Number" || t == "Int")
 		}
 
+		// js_ktouter(scope, "Outer") answers the enclosing INSTANCE a bare `Inner()`
+		// captures: the first implicit receiver in the scope chain whose class (or a
+		// class on its __super chain) is named "Outer", and undefined when there is
+		// none - which is what a construction from outside the owner does. The twin is
+		// the kNamedType walk in kNew (kotlin-interpreter.abnf).
+		m["js_ktouter"] = func(a []uint64) uint64 {
+			want := rt.toString(u(a[1]))
+			for s := rt.scopeOf(a[0]); s != nil; s = s.parent {
+				t, ok := s.get("this")
+				if !ok {
+					continue
+				}
+				o, isObj := t.(*jsObject)
+				if !isObj {
+					continue
+				}
+				for cls := o.props["__class"]; cls != nil; {
+					co, isCls := cls.(*jsObject)
+					if !isCls {
+						break
+					}
+					if n, ok := co.props["__name"]; ok && rt.toString(n) == want {
+						return w(t)
+					}
+					cls = co.props["__super"]
+				}
+			}
+			return w(jsUndef)
+		}
+
+		// js_ktexcmatch(thrown, "TypeName") is Kotlin's CATCH-CLAUSE selection: does
+		// this thrown value match the declared type of this clause? Before it, the
+		// compiler half took the FIRST catch clause whatever its type, so
+		// `try { throw MyExc() } catch (e: IllegalStateException) {...} catch (e:
+		// Exception) {...}` ran the wrong one - while kotlin-interpreter.abnf, which
+		// has had kExcMatches all along, ran the right one. The rule is kExcMatches':
+		// Throwable/Any accept everything (this model lets any value be thrown), the
+		// three intermediate roots accept a NON-throwable too, and everything else is
+		// the ordinary dynamic type test.
+		m["js_ktexcmatch"] = func(a []uint64) uint64 {
+			t := rt.toString(u(a[1]))
+			if i := strings.IndexByte(t, '<'); i >= 0 {
+				t = t[:i]
+			}
+			t = strings.TrimSuffix(t, "?")
+			if t == "Throwable" || t == "Any" {
+				return jsHTrue
+			}
+			isThr := func() bool {
+				o, ok := u(a[0]).(*jsObject)
+				if !ok {
+					return false
+				}
+				cls := o.props["__class"]
+				for cls != nil {
+					co, isCls := cls.(*jsObject)
+					if !isCls {
+						return false
+					}
+					if n, ok := co.props["__name"]; ok && rt.toString(n) == "Throwable" {
+						return true
+					}
+					cls = co.props["__super"]
+				}
+				return false
+			}
+			if t == "Exception" || t == "RuntimeException" || t == "Error" {
+				if !isThr() {
+					return jsHTrue
+				}
+			}
+			return m["js_ktis"]([]uint64{a[0], rt.wrapStr(t)})
+		}
+
 		// Kotlin's println / print, as a VALUE: the extern takes no arguments and
 		// returns the host function, which buildMain declares into the program
 		// scope under the names `println` and `print`. Binding a value rather than
@@ -912,8 +1042,19 @@ func init() {
 					if v, handled := rt.ktMapMethod(mo, mname, arr.elems); handled {
 						return rt.wrap(v)
 					}
+				} else if ro, isRes := ktIsResult(mo); isRes {
+					if v, handled := rt.ktResultMethod(ro, mname, arr.elems); handled {
+						return rt.wrap(v)
+					}
+				} else if lz, _ := mo.props["__lazy"].(bool); lz {
+					switch mname {
+					case "getValue", "value":
+						return rt.wrap(rt.ktLazyValue(mo))
+					case "isInitialized":
+						return rt.wrap(mo.props["done"])
+					}
 				} else if po, isPair := ktIsPair(mo); isPair {
-					if v, handled := ktPairMethod(po, mname); handled {
+					if v, handled := rt.ktPairMethod2(po, mname, arr.elems); handled {
 						return rt.wrap(v)
 					}
 				}
@@ -988,6 +1129,13 @@ func init() {
 					return w(v)
 				}
 			}
+			// Kotlin's implicit receivers form a STACK, and an unqualified name the
+			// innermost one does not answer falls through to the next one OUT. This
+			// loop used to `break` at the first scope carrying a `this`, so
+			// `with(P(1)) { tag }` written inside a member of Q - where ktWithRecv
+			// inserts a scope binding `this` to the P - failed with "unknown name:
+			// tag" instead of reading this@Q.tag. The twin is findThisChain /
+			// core.varMiss in kotlin-interpreter.abnf.
 			for s := sc; s != nil; s = s.parent {
 				if t, ok := s.get("this"); ok {
 					if obj, isObj := t.(*jsObject); isObj {
@@ -1005,7 +1153,6 @@ func init() {
 							return w(v)
 						}
 					}
-					break
 				}
 			}
 			for i := len(ktRecvStack) - 1; i >= 0; i-- {
@@ -1031,6 +1178,21 @@ func init() {
 				if ktIsSb(mo) {
 					if v, handled := rt.ktSbMethod(mo, name, nil); handled {
 						return w(v)
+					}
+				}
+				// kotlin.Result's isSuccess / isFailure and lazy's value are
+				// PROPERTIES, so they are read here rather than through js_ktsmcall.
+				if ro, isRes := ktIsResult(mo); isRes {
+					if v, handled := rt.ktResultMethod(ro, name, nil); handled {
+						return w(v)
+					}
+				}
+				if lz, _ := mo.props["__lazy"].(bool); lz {
+					switch name {
+					case "value":
+						return w(rt.ktLazyValue(mo))
+					case "isInitialized":
+						return w(mo.props["done"])
 					}
 				}
 				// A dotted name on a MAP that is neither one of Kotlin's map
@@ -1168,6 +1330,12 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 		}
 		return jsChar{code: int32(rt.strCodeAt(s, n-1))}, true
 	case "single":
+		// single(predicate) filters first - the predicate used to be IGNORED, so
+		// `"hello".single { it == 'h' }` aborted with "single() on a string of length
+		// 5" in both halves instead of answering 'h'.
+		if len(args) > 0 && isCallable(args[0]) {
+			return rt.ktSeqMethod(&jsArray{elems: chars()}, name, args)
+		}
 		if n != 1 {
 			rt.fail("single() on a string of length %d", n)
 		}
@@ -1265,6 +1433,84 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 		// "%.2f".format(x): the receiver is the format string, as kotlin.text.format
 		// declares it (String.Companion.format has the arguments the other way round).
 		return ktFormat(rt, s, args), true
+
+	// ----- More of kotlin.text, added in one batch: every one of these aborted the
+	// run in BOTH halves with "unknown String method". The twin is the `typeof target
+	// == "string"` branch of mcall in kotlin-interpreter.abnf.
+	// `replace` with a Regex receiver never reaches here - js_ktsmcall routes a
+	// pattern argument to the Regex dispatcher first.
+	case "replace", "replaceFirst":
+		old, nw := rt.ktStrArg(argAt(args, 0)), rt.ktStrArg(argAt(args, 1))
+		if old == "" {
+			return s, true
+		}
+		if name == "replaceFirst" {
+			return strings.Replace(s, old, nw, 1), true
+		}
+		return strings.ReplaceAll(s, old, nw), true
+	case "isBlank", "isNotBlank":
+		return (strings.TrimSpace(s) == "") == (name == "isBlank"), true
+	case "removePrefix":
+		return strings.TrimPrefix(s, rt.ktStrArg(argAt(args, 0))), true
+	case "removeSuffix":
+		return strings.TrimSuffix(s, rt.ktStrArg(argAt(args, 0))), true
+	case "removeSurrounding":
+		pre := rt.ktStrArg(argAt(args, 0))
+		post := pre
+		if len(args) > 1 {
+			post = rt.ktStrArg(argAt(args, 1))
+		}
+		if len(s) >= len(pre)+len(post) && strings.HasPrefix(s, pre) && strings.HasSuffix(s, post) {
+			return s[len(pre) : len(s)-len(post)], true
+		}
+		return s, true
+	case "substringBefore", "substringAfter", "substringBeforeLast", "substringAfterLast":
+		delim := rt.ktStrArg(argAt(args, 0))
+		miss := s
+		if len(args) > 1 {
+			miss = rt.ktStrArg(argAt(args, 1))
+		}
+		i := strings.Index(s, delim)
+		if name == "substringBeforeLast" || name == "substringAfterLast" {
+			i = strings.LastIndex(s, delim)
+		}
+		if i < 0 || delim == "" {
+			return miss, true
+		}
+		if name == "substringBefore" || name == "substringBeforeLast" {
+			return s[:i], true
+		}
+		return s[i+len(delim):], true
+	case "ifEmpty":
+		if s == "" {
+			return rt.ktCall(argAt(args, 0)), true
+		}
+		return s, true
+	case "ifBlank":
+		if strings.TrimSpace(s) == "" {
+			return rt.ktCall(argAt(args, 0)), true
+		}
+		return s, true
+	case "capitalize", "replaceFirstChar":
+		if s == "" {
+			return s, true
+		}
+		rs := []rune(s)
+		if name == "replaceFirstChar" && isCallable(argAt(args, 0)) {
+			head := rt.ktCall(argAt(args, 0), jsChar{code: int32(rs[0])})
+			return rt.ktStr2(head) + string(rs[1:]), true
+		}
+		return string(ktUpper(rs[0])) + string(rs[1:]), true
+	case "decapitalize":
+		if s == "" {
+			return s, true
+		}
+		rs := []rune(s)
+		return string(ktLower(rs[0])) + string(rs[1:]), true
+	case "subSequence":
+		return rt.strRange(s, jsToInt(rt.toNumber(argAt(args, 0))), jsToInt(rt.toNumber(argAt(args, 1)))), true
+	case "trimIndent":
+		return ktTrimIndent(s), true
 	}
 	// Everything a String shares with a List of Char - map/filter/forEach/any/all/
 	// count/fold/joinToString/... - goes through the collection surface.
@@ -1272,6 +1518,44 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 		return v, true
 	}
 	return nil, false
+}
+
+// ktTrimIndent is kotlin.text.trimIndent: drop a leading and a trailing BLANK
+// line, then remove the common indent of every non-blank line. The twin is
+// kTrimIndent in kotlin-interpreter.abnf.
+func ktTrimIndent(s string) string {
+	lines := strings.Split(s, "\n")
+	for len(lines) > 0 && strings.TrimSpace(lines[0]) == "" {
+		lines = lines[1:]
+	}
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	ind := -1
+	for _, l := range lines {
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		k := 0
+		for k < len(l) && (l[k] == ' ' || l[k] == '\t') {
+			k++
+		}
+		if ind < 0 || k < ind {
+			ind = k
+		}
+	}
+	if ind < 0 {
+		ind = 0
+	}
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		if len(l) >= ind {
+			out[i] = l[ind:]
+		} else {
+			out[i] = strings.TrimLeft(l, " \t")
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // ktParseNum is toInt() / toLong() / toDouble() on a String. Kotlin throws a
@@ -1644,7 +1928,73 @@ func (rt *jsrt) ktEqVals(a, b interface{}) bool {
 			}
 		}
 	}
+	if v, decided := rt.ktStructEq(a, b); decided {
+		return v
+	}
 	return rt.strictEq(a, b)
+}
+
+// ktStructEq is the structural half of Kotlin's `==`, over the shapes this runtime
+// models WITHOUT a class descriptor: a list/array/set (*jsArray), a map (the shared
+// {__dict, keys, vals} handle) and a Pair/Triple. None of them can ever reach an
+// `equals` member, so `listOf(1, 2) == listOf(1, 2)` used to fall through to
+// identity and answer FALSE in both halves - while `listOf(1, 2).hashCode()` was
+// already the element-wise java.util.AbstractList hash, so equality and hash
+// disagreed. Verified against java (JDK 24): List/Map/Set equals are all
+// element-wise. The twin is kStructEq in kotlin-interpreter.abnf.
+//
+// The second result says whether the question was DECIDED here; false means
+// neither side is one of these shapes and the caller keeps its own fallback.
+//
+// Not a full model of Kotlin's rule: a Set is a list in this value model, so
+// `setOf(2, 1) == setOf(1, 2)` is false and `listOf(1) == setOf(1)` is true. That
+// is the setOf-is-listOf collapse, not this function.
+func (rt *jsrt) ktStructEq(a, b interface{}) (bool, bool) {
+	aa, aIsArr := a.(*jsArray)
+	ba, bIsArr := b.(*jsArray)
+	if aIsArr || bIsArr {
+		if !aIsArr || !bIsArr || len(aa.elems) != len(ba.elems) {
+			return false, true
+		}
+		for i := range aa.elems {
+			if !rt.ktEqVals(aa.elems[i], ba.elems[i]) {
+				return false, true
+			}
+		}
+		return true, true
+	}
+	ak, av, aIsMap := dictParts(a)
+	bk, bv, bIsMap := dictParts(b)
+	if aIsMap || bIsMap {
+		if !aIsMap || !bIsMap || len(ak.elems) != len(bk.elems) {
+			return false, true
+		}
+		for i, k := range ak.elems {
+			j := rt.ktMapFind(bk, k)
+			if j < 0 || !rt.ktEqVals(av.elems[i], bv.elems[j]) {
+				return false, true
+			}
+		}
+		return true, true
+	}
+	ap, aIsPair := ktIsPair(a)
+	bp, bIsPair := ktIsPair(b)
+	if aIsPair || bIsPair {
+		if !aIsPair || !bIsPair {
+			return false, true
+		}
+		if !rt.ktEqVals(ap.props["first"], bp.props["first"]) ||
+			!rt.ktEqVals(ap.props["second"], bp.props["second"]) {
+			return false, true
+		}
+		at, aHas := ap.props["third"]
+		bt, bHas := bp.props["third"]
+		if aHas != bHas {
+			return false, true
+		}
+		return !aHas || rt.ktEqVals(at, bt), true
+	}
+	return false, false
 }
 
 // ktIsPair reports the {first, second[, third]} shape `to`, Pair() and Triple()
@@ -2240,19 +2590,36 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 		}
 		return m, true
 	case "joinToString":
+		// The TRANSFORM is joinToString's last parameter, so `joinToString { ... }`
+		// passes a function - which used to be read as the SEPARATOR and printed
+		// "[function]" between the elements (a wrong answer, and a divergence: the
+		// interpreter half rendered the whole lambda's script text there).
+		var transform interface{}
+		text := []interface{}{}
+		for _, a := range args {
+			if isCallable(a) {
+				transform = a
+			} else {
+				text = append(text, a)
+			}
+		}
 		sep := ", "
-		if len(args) > 0 {
-			sep = rt.ktStrArg(args[0])
+		if len(text) > 0 {
+			sep = rt.ktStrArg(text[0])
 		}
 		pre, post := "", ""
-		if len(args) > 1 {
-			pre = rt.ktStrArg(args[1])
+		if len(text) > 1 {
+			pre = rt.ktStrArg(text[1])
 		}
-		if len(args) > 2 {
-			post = rt.ktStrArg(args[2])
+		if len(text) > 2 {
+			post = rt.ktStrArg(text[2])
 		}
 		parts := make([]string, len(es))
 		for i, e := range es {
+			if transform != nil {
+				parts[i] = rt.ktStr2(rt.ktCall(transform, e))
+				continue
+			}
 			parts[i] = rt.ktpRender(e, 0)
 		}
 		return pre + strings.Join(parts, sep) + post, true
@@ -2263,6 +2630,303 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 			h = 31*h + int32(ktElemHash(rt, e))
 		}
 		return float64(h), true
+
+	// ----- More of kotlin.collections, added in one batch because a realistic program
+	// reaches for them constantly and every one aborted the run in BOTH halves with
+	// "unknown list method". The twin is kSeqMethod in kotlin-interpreter.abnf; the two
+	// tables are kept in step name for name.
+	case "filterNotNull", "requireNoNulls":
+		out := []interface{}{}
+		for _, e := range es {
+			if isUndefOrNull(e) {
+				if name == "requireNoNulls" {
+					rt.fail("null element in requireNoNulls()")
+				}
+				continue
+			}
+			out = append(out, e)
+		}
+		return arr(out), true
+	case "filterIndexed", "filterNotIndexed":
+		out := []interface{}{}
+		for i, e := range es {
+			if rt.truthy(rt.ktCall(f, float64(i), e)) != (name == "filterNotIndexed") {
+				out = append(out, e)
+			}
+		}
+		return arr(out), true
+	case "findLast":
+		for i := len(es) - 1; i >= 0; i-- {
+			if rt.truthy(rt.ktCall(f, es[i])) {
+				return es[i], true
+			}
+		}
+		return jsNull, true
+	case "lastIndexOf":
+		for i := len(es) - 1; i >= 0; i-- {
+			if rt.ktEqVals(es[i], f) {
+				return float64(i), true
+			}
+		}
+		return float64(-1), true
+	case "indexOfLast":
+		for i := len(es) - 1; i >= 0; i-- {
+			if rt.truthy(rt.ktCall(f, es[i])) {
+				return float64(i), true
+			}
+		}
+		return float64(-1), true
+	case "takeWhile", "dropWhile":
+		cut := len(es)
+		for i, e := range es {
+			if !rt.truthy(rt.ktCall(f, e)) {
+				cut = i
+				break
+			}
+		}
+		if name == "takeWhile" {
+			return arr(append([]interface{}{}, es[:cut]...)), true
+		}
+		return arr(append([]interface{}{}, es[cut:]...)), true
+	case "distinctBy":
+		out := []interface{}{}
+		keys := []interface{}{}
+		for _, e := range es {
+			k := rt.ktCall(f, e)
+			dup := false
+			for _, sk := range keys {
+				if rt.ktEqVals(sk, k) {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				keys = append(keys, k)
+				out = append(out, e)
+			}
+		}
+		return arr(out), true
+	case "containsAll":
+		for _, w := range ktElems(rt, f) {
+			got := false
+			for _, e := range es {
+				if rt.ktEqVals(e, w) {
+					got = true
+					break
+				}
+			}
+			if !got {
+				return false, true
+			}
+		}
+		return true, true
+	case "elementAt", "elementAtOrNull", "elementAtOrElse", "getOrNull", "getOrElse":
+		ix := jsToInt(rt.toNumber(f))
+		if ix >= 0 && ix < len(es) {
+			return es[ix], true
+		}
+		switch name {
+		case "elementAt":
+			rt.fail("index %d is out of bounds", ix)
+		case "elementAtOrElse", "getOrElse":
+			return rt.ktCall(argAt(args, 1), float64(ix)), true
+		}
+		return jsNull, true
+	case "maxOf", "minOf", "maxOfOrNull", "minOfOrNull":
+		if len(es) == 0 {
+			if name == "maxOf" || name == "minOf" {
+				rt.fail("%s() on an empty list", name)
+			}
+			return jsNull, true
+		}
+		wantMax := name == "maxOf" || name == "maxOfOrNull"
+		best := rt.ktCall(f, es[0])
+		for _, e := range es[1:] {
+			cand := rt.ktCall(f, e)
+			if ktKeyLess(rt, best, cand) == wantMax {
+				best = cand
+			}
+		}
+		return best, true
+	// max()/min() were removed in Kotlin 1.7 and reintroduced as the throwing
+	// counterparts of maxOrNull/minOrNull; both spellings answer the same thing.
+	case "max", "min":
+		if len(es) == 0 {
+			rt.fail("%s() on an empty list", name)
+		}
+		return ktSortBy(rt, es, nil, name == "max").elems[0], true
+	case "maxBy", "minBy":
+		if len(es) == 0 {
+			rt.fail("%s() on an empty list", name)
+		}
+		return ktSortBy(rt, es, f, name == "maxBy").elems[0], true
+	case "onEach":
+		for _, e := range es {
+			rt.ktCall(f, e)
+		}
+		return o, true
+	case "onEachIndexed":
+		for i, e := range es {
+			rt.ktCall(f, float64(i), e)
+		}
+		return o, true
+	case "plus":
+		out := append([]interface{}{}, es...)
+		switch f.(type) {
+		case *jsArray:
+			out = append(out, ktElems(rt, f)...)
+		default:
+			if _, _, isDict := dictParts(f); isDict {
+				out = append(out, ktElems(rt, f)...)
+			} else {
+				out = append(out, f)
+			}
+		}
+		return arr(out), true
+	case "minus":
+		rem := []interface{}{f}
+		if _, isArr := f.(*jsArray); isArr {
+			rem = ktElems(rt, f)
+		}
+		out := []interface{}{}
+		for _, e := range es {
+			drop := false
+			for _, r := range rem {
+				if rt.ktEqVals(r, e) {
+					drop = true
+					break
+				}
+			}
+			if !drop {
+				out = append(out, e)
+			}
+		}
+		return arr(out), true
+	case "intersect", "subtract":
+		oth := ktElems(rt, f)
+		out := []interface{}{}
+		for _, e := range es {
+			inOth := false
+			for _, x := range oth {
+				if rt.ktEqVals(x, e) {
+					inOth = true
+					break
+				}
+			}
+			if inOth == (name == "subtract") {
+				continue
+			}
+			dup := false
+			for _, x := range out {
+				if rt.ktEqVals(x, e) {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				out = append(out, e)
+			}
+		}
+		return arr(out), true
+	case "union":
+		all := append([]interface{}{}, es...)
+		all = append(all, ktElems(rt, f)...)
+		return rt.ktSeqMethod(arr(all), "distinct", nil)
+	case "slice":
+		out := []interface{}{}
+		for _, ix := range ktElems(rt, f) {
+			out = append(out, es[jsToInt(rt.toNumber(ix))])
+		}
+		return arr(out), true
+	case "subList":
+		lo, hi := jsToInt(rt.toNumber(f)), jsToInt(rt.toNumber(argAt(args, 1)))
+		return arr(append([]interface{}{}, es[lo:hi]...)), true
+	case "zipWithNext":
+		out := []interface{}{}
+		for i := 0; i+1 < len(es); i++ {
+			if isCallable(f) {
+				out = append(out, rt.ktCall(f, es[i], es[i+1]))
+			} else {
+				p := newJSObject()
+				p.set("first", es[i])
+				p.set("second", es[i+1])
+				out = append(out, p)
+			}
+		}
+		return arr(out), true
+	case "runningFold", "scan", "runningReduce":
+		out := []interface{}{}
+		if name == "runningReduce" {
+			if len(es) == 0 {
+				return arr(out), true
+			}
+			acc := es[0]
+			out = append(out, acc)
+			for _, e := range es[1:] {
+				acc = rt.ktCall(f, acc, e)
+				out = append(out, acc)
+			}
+			return arr(out), true
+		}
+		acc := f
+		out = append(out, acc)
+		for _, e := range es {
+			acc = rt.ktCall(argAt(args, 1), acc, e)
+			out = append(out, acc)
+		}
+		return arr(out), true
+	case "ifEmpty":
+		if len(es) == 0 {
+			return rt.ktCall(f), true
+		}
+		return o, true
+	// A COMPARATOR (compareBy / compareByDescending / a two-argument lambda) is a
+	// function of two elements answering an Int, so this is an insertion sort driven
+	// by that function rather than by ktKeyLess.
+	case "sortedWith":
+		out := append([]interface{}{}, es...)
+		for i := 1; i < len(out); i++ {
+			v := out[i]
+			j := i - 1
+			for j >= 0 && rt.toNumber(rt.ktCall(f, out[j], v)) > 0 {
+				out[j+1] = out[j]
+				j--
+			}
+			out[j+1] = v
+		}
+		return arr(out), true
+	case "removeAt":
+		ix := jsToInt(rt.toNumber(f))
+		if ix < 0 || ix >= len(o.elems) {
+			rt.fail("index %d is out of bounds", ix)
+		}
+		gone := o.elems[ix]
+		o.dropIdx()
+		o.elems = append(o.elems[:ix], o.elems[ix+1:]...)
+		return gone, true
+	case "removeFirst", "removeLast":
+		if len(o.elems) == 0 {
+			rt.fail("%s() on an empty list", name)
+		}
+		ix := 0
+		if name == "removeLast" {
+			ix = len(o.elems) - 1
+		}
+		return rt.ktSeqMethod(o, "removeAt", []interface{}{float64(ix)})
+	case "remove":
+		for i, e := range o.elems {
+			if rt.ktEqVals(e, f) {
+				o.dropIdx()
+				o.elems = append(o.elems[:i], o.elems[i+1:]...)
+				return true, true
+			}
+		}
+		return false, true
+	case "addAll":
+		more := ktElems(rt, f)
+		o.dropIdx()
+		o.elems = append(o.elems, more...)
+		return len(more) > 0, true
 	}
 	return nil, false
 }
@@ -2288,6 +2952,40 @@ func ktElemHash(rt *jsrt, v interface{}) int64 {
 			return x ^ (x >> 32)
 		}
 		return int64(int32(x))
+	}
+	// A NESTED collection hashes element-wise, exactly as kHash does in the other
+	// half: before this every object answered 1 here, so listOf(listOf(1, 2)) hashed
+	// to 32 in the compiler and to 1025 - java's answer - in the interpreter.
+	switch t := v.(type) {
+	case *jsArray:
+		var h int32 = 1
+		for _, e := range t.elems {
+			h = 31*h + int32(ktElemHash(rt, e))
+		}
+		return int64(h)
+	case *jsObject:
+		// java.util.AbstractMap.hashCode is the SUM of key XOR value over the entries.
+		if keys, vals, isDict := dictParts(t); isDict {
+			var h int32
+			for i, k := range keys.elems {
+				h += int32(ktElemHash(rt, k)) ^ int32(ktElemHash(rt, vals.elems[i]))
+			}
+			return int64(h)
+		}
+		// Pair/Triple are data classes in Kotlin: the same 31-fold their components
+		// would get from a generated hashCode.
+		if p, isPair := ktIsPair(t); isPair {
+			h := int32(ktElemHash(rt, p.props["first"]))
+			h = 31*h + int32(ktElemHash(rt, p.props["second"]))
+			if third, has := p.props["third"]; has {
+				h = 31*h + int32(ktElemHash(rt, third))
+			}
+			return int64(h)
+		}
+		// A user class that declares hashCode (a data class does) answers for itself.
+		if mth, found := ktpFindMember(t, "hashCode"); found {
+			return int64(int32(rt.toNumber(rt.call(mth, jsUndef, []interface{}{t}))))
+		}
 	}
 	return 1
 }
@@ -2340,17 +3038,24 @@ func ktElems(rt *jsrt, v interface{}) []interface{} {
 	if keys, vals, ok := dictParts(v); ok {
 		out := make([]interface{}, len(keys.elems))
 		for i := range keys.elems {
-			e := newJSObject()
-			e.set("key", keys.elems[i])
-			e.set("value", vals.elems[i])
-			e.set("first", keys.elems[i])
-			e.set("second", vals.elems[i])
-			out[i] = e
+			out[i] = ktMapEntry(keys.elems[i], vals.elems[i])
 		}
 		return out
 	}
 	rt.fail("not a sequence: %s", rt.ktpRender(v, 0))
 	return nil
+}
+
+// ktMapEntry is one Map.Entry as this value model spells it: key/value for the
+// Kotlin member names and first/second so it also destructures as a Pair. The twin
+// is the entry literal in kElems (kotlin-interpreter.abnf).
+func ktMapEntry(k, v interface{}) *jsObject {
+	e := newJSObject()
+	e.set("key", k)
+	e.set("value", v)
+	e.set("first", k)
+	e.set("second", v)
+	return e
 }
 
 // ktSortBy is an insertion sort (stable, and small enough to keep the two halves
@@ -2390,6 +3095,13 @@ func ktKeyLess(rt *jsrt, a, b interface{}) bool {
 	}
 	if ktIsIntegral(a) && ktIsIntegral(b) {
 		return rt.ktCmp("<", a, b)
+	}
+	// A user `Comparable`: `listOf(V(3), V(1)).sorted()` sorts by the class's own
+	// compareTo, exactly as `V(1) < V(2)` already did through js_ktcmp. Without this
+	// every element compared as giFloat(...) = NaN, no pair was ever "less", and the
+	// list came back in its original order - silently, in BOTH halves.
+	if ao, isObj := a.(*jsObject); isObj && ktMemberCall != nil && ktClassChainHas(ao, "compareTo") {
+		return rt.toNumber(ktMemberCall(a, "compareTo", []interface{}{b})) < 0
 	}
 	return giFloat(rt, a) < giFloat(rt, b)
 }
@@ -2475,6 +3187,85 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 		keys.elems = nil
 		vals.elems = nil
 		return jsUndef, true
+	case "hashCode":
+		return float64(int32(ktElemHash(rt, m))), true
+	case "equals":
+		return rt.ktEqVals(m, f), true
+	case "filterKeys", "filterValues", "filter", "filterNot", "mapValues", "mapKeys":
+		// Every kotlin.collections filter/mapper on a Map answers a MAP. Before this
+		// they fell through to the entry-LIST tail below, so `filter` gave a list of
+		// Pairs where Kotlin gives a Map, and the four named ones aborted outright.
+		out := ktMakeMap()
+		for i, k := range keys.elems {
+			v := vals.elems[i]
+			ent := ktMapEntry(k, v)
+			switch name {
+			case "filterKeys":
+				if rt.truthy(rt.ktCall(f, k)) {
+					rt.ktMapPut(out, k, v)
+				}
+			case "filterValues":
+				if rt.truthy(rt.ktCall(f, v)) {
+					rt.ktMapPut(out, k, v)
+				}
+			case "filter":
+				if rt.truthy(rt.ktCall(f, ent)) {
+					rt.ktMapPut(out, k, v)
+				}
+			case "filterNot":
+				if !rt.truthy(rt.ktCall(f, ent)) {
+					rt.ktMapPut(out, k, v)
+				}
+			case "mapValues":
+				rt.ktMapPut(out, k, rt.ktCall(f, ent))
+			default:
+				rt.ktMapPut(out, rt.ktCall(f, ent), v)
+			}
+		}
+		return out, true
+	case "plus", "putAll":
+		out := m
+		if name == "plus" {
+			out = ktMakeMap()
+			for i, k := range keys.elems {
+				rt.ktMapPut(out, k, vals.elems[i])
+			}
+		}
+		switch add := f.(type) {
+		case *jsArray:
+			for _, e := range add.elems {
+				if p, isPair := ktIsPair(e); isPair {
+					rt.ktMapPut(out, p.props["first"], p.props["second"])
+				}
+			}
+		case *jsObject:
+			if ak, av, isDict := dictParts(add); isDict {
+				for i, k := range ak.elems {
+					rt.ktMapPut(out, k, av.elems[i])
+				}
+			} else if p, isPair := ktIsPair(add); isPair {
+				rt.ktMapPut(out, p.props["first"], p.props["second"])
+			}
+		}
+		return out, true
+	case "minus":
+		drop := []interface{}{f}
+		if a, isArr := f.(*jsArray); isArr {
+			drop = a.elems
+		}
+		out := ktMakeMap()
+		for i, k := range keys.elems {
+			hit := false
+			for _, d := range drop {
+				if rt.ktEqVals(d, k) {
+					hit = true
+				}
+			}
+			if !hit {
+				rt.ktMapPut(out, k, vals.elems[i])
+			}
+		}
+		return out, true
 	}
 	// map/filter/forEach/any/... over the entry sequence.
 	return rt.ktSeqMethod(&jsArray{elems: ktElems(rt, m)}, name, args)
@@ -2812,6 +3603,150 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 			}
 			return ktMakeSb(rt.ktStr2(init))
 		})
+	// ----- The kotlin stdlib top-level functions the subset was missing. Each aborted
+	// the run with "unknown name" in BOTH halves; the twins are the hostGlobals block
+	// in kotlin-interpreter.abnf.
+	// A COMPARATOR is a plain function of two elements answering an Int, which is what
+	// sortedWith drives.
+	case "compareBy", "compareByDescending":
+		desc := name == "compareByDescending"
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			sel := argAt(args, 0)
+			return jsHostFunc("comparator", func(rt *jsrt, this uint64, ab []interface{}) interface{} {
+				ka, kb := rt.ktCall(sel, argAt(ab, 0)), rt.ktCall(sel, argAt(ab, 1))
+				return float64(ktCmpKeys(rt, ka, kb, desc))
+			})
+		})
+	case "Comparator":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return argAt(args, 0)
+		})
+	case "compareValues":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			a, b := argAt(args, 0), argAt(args, 1)
+			if isUndefOrNull(a) {
+				if isUndefOrNull(b) {
+					return float64(0)
+				}
+				return float64(-1)
+			}
+			if isUndefOrNull(b) {
+				return float64(1)
+			}
+			return float64(ktCmpKeys(rt, a, b, false))
+		})
+	// kotlin.math.abs: the operand's own TYPE, so abs(-1.5) is the Double 1.5 and
+	// abs(-3L) a Long. JavaScript's Math.abs, which this used to be bound to, answers
+	// a plain number - so `max(1.5, 2.0)` printed `2` where Kotlin prints `2.0`.
+	case "abs":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			v := argAt(args, 0)
+			if f, isFlo := v.(jsJFlo); isFlo {
+				return jsJFlo{f: math.Abs(f.f)}
+			}
+			if rt.ktNumLess(v, float64(0)) {
+				return rt.ktArith("-", ktNorm(0, 32, false), v)
+			}
+			return v
+		})
+	case "max", "min", "maxOf", "minOf":
+		wantMax := name == "maxOf" || name == "max"
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			best := argAt(args, 0)
+			for _, v := range args[1:] {
+				if ktKeyLess(rt, best, v) == wantMax {
+					best = v
+				}
+			}
+			return best
+		})
+	// The contract functions. Kotlin throws IllegalArgumentException from require and
+	// IllegalStateException from check.
+	case "require", "check", "requireNotNull", "checkNotNull", "error", "TODO":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			switch name {
+			case "error":
+				rt.ktRaise("IllegalStateException", rt.ktStr2(argAt(args, 0)))
+			case "TODO":
+				msg := "An operation is not implemented."
+				if len(args) > 0 && !isUndefOrNull(args[0]) {
+					msg = "An operation is not implemented: " + rt.ktStr2(args[0])
+				}
+				rt.ktRaise("NotImplementedError", msg)
+			}
+			cls, dflt := "IllegalArgumentException", "Failed requirement."
+			if name == "check" || name == "checkNotNull" {
+				cls, dflt = "IllegalStateException", "Check failed."
+			}
+			ok := rt.truthy(argAt(args, 0))
+			if name == "requireNotNull" || name == "checkNotNull" {
+				ok = !isUndefOrNull(argAt(args, 0))
+				dflt = "Required value was null."
+			}
+			if !ok {
+				text := dflt
+				if len(args) > 1 && !isUndefOrNull(args[1]) {
+					if isCallable(args[1]) {
+						text = rt.ktStr2(rt.ktCall(args[1]))
+					} else {
+						text = rt.ktStr2(args[1])
+					}
+				}
+				rt.ktRaise(cls, text)
+			}
+			if name == "requireNotNull" || name == "checkNotNull" {
+				return argAt(args, 0)
+			}
+			return jsUndef
+		})
+	// runCatching { ... }: Kotlin's Result, the {__result, value, exc} box whose
+	// members ktResultMethod answers.
+	case "runCatching":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.ktRunCatching(argAt(args, 0))
+		})
+	case "List", "MutableList", "Array", "IntArray", "LongArray", "ShortArray",
+		"ByteArray", "DoubleArray", "FloatArray", "BooleanArray", "arrayOfNulls":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			n := jsToInt(rt.toNumber(argAt(args, 0)))
+			init := argAt(args, 1)
+			out := &jsArray{}
+			for i := 0; i < n; i++ {
+				switch {
+				case isCallable(init):
+					out.elems = append(out.elems, rt.ktCall(init, float64(i)))
+				case name == "BooleanArray":
+					out.elems = append(out.elems, false)
+				case name == "List" || name == "MutableList" || name == "Array" || name == "arrayOfNulls":
+					out.elems = append(out.elems, jsNull)
+				default:
+					out.elems = append(out.elems, float64(0))
+				}
+			}
+			return out
+		})
+	case "listOfNotNull", "setOfNotNull":
+		// listOf's "return the argument array" function is WRONG here: it kept the
+		// nulls, so the compiler answered [1, null, 2] where Kotlin (and now the
+		// interpreter half) answers [1, 2].
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			out := &jsArray{}
+			for _, v := range args {
+				if !isUndefOrNull(v) {
+					out.elems = append(out.elems, v)
+				}
+			}
+			return out
+		})
+	case "lazy":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			o := newJSObject()
+			o.set("__lazy", true)
+			o.set("f", argAt(args, 0))
+			o.set("done", false)
+			o.set("v", jsNull)
+			return o
+		})
 	case "generateSequence":
 		// A Sequence is EAGER here (see the note on sequenceOf in the grammar), so an
 		// infinite generator is capped rather than lazy.
@@ -2838,6 +3773,17 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 }
 
 // ktPairMethod is componentN / toString on the {first, second[, third]} shape.
+func (rt *jsrt) ktPairMethod2(o *jsObject, name string, args []interface{}) (interface{}, bool) {
+	// Pair/Triple are data classes in Kotlin, so equals/hashCode are structural.
+	switch name {
+	case "hashCode":
+		return float64(int32(ktElemHash(rt, o))), true
+	case "equals":
+		return rt.ktEqVals(o, argAt(args, 0)), true
+	}
+	return ktPairMethod(o, name)
+}
+
 func ktPairMethod(o *jsObject, name string) (interface{}, bool) {
 	switch name {
 	case "component1":
@@ -2852,6 +3798,137 @@ func ktPairMethod(o *jsObject, name string) (interface{}, bool) {
 	return nil, false
 }
 
+
+// ktCmpKeys is one comparator step over two selector keys: -1, 0 or 1, reversed for
+// compareByDescending.
+func ktCmpKeys(rt *jsrt, a, b interface{}, desc bool) int {
+	c := 0
+	if ktKeyLess(rt, a, b) {
+		c = -1
+	} else if ktKeyLess(rt, b, a) {
+		c = 1
+	}
+	if desc {
+		return -c
+	}
+	return c
+}
+
+// ktRaise throws one of the builtin throwables from a host builtin, in the shape
+// js_try catches. The twin is kRaise in kotlin-interpreter.abnf.
+func (rt *jsrt) ktRaise(cls, msg string) {
+	o := newJSObject()
+	o.set("__class", ktExcHierarchy()[cls])
+	o.set("message", msg)
+	panic(&jsThrown{value: o})
+}
+
+// ktRunCatching runs a lambda and boxes its completion as a kotlin.Result.
+func (rt *jsrt) ktRunCatching(f interface{}) *jsObject {
+	box := newJSObject()
+	box.set("__result", true)
+	box.set("value", jsNull)
+	box.set("exc", jsNull)
+	caught := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				th, ok := r.(*jsThrown)
+				if !ok {
+					panic(r)
+				}
+				box.set("exc", th.value)
+				caught = true
+			}
+		}()
+		box.set("value", rt.ktCall(f))
+	}()
+	_ = caught
+	return box
+}
+
+// ktIsResult / ktResultMethod are the kotlin.Result member surface over the
+// {__result, value, exc} box. isSuccess and isFailure are PROPERTIES in Kotlin, so
+// js_ktfget reaches this too. The twin is kResultMethod in kotlin-interpreter.abnf.
+func ktIsResult(v interface{}) (*jsObject, bool) {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil, false
+	}
+	if tag, has := o.props["__result"]; !has || tag != true {
+		return nil, false
+	}
+	return o, true
+}
+
+func (rt *jsrt) ktResultMethod(r *jsObject, name string, args []interface{}) (interface{}, bool) {
+	ok := isUndefOrNull(r.props["exc"])
+	switch name {
+	case "isSuccess":
+		return ok, true
+	case "isFailure":
+		return !ok, true
+	case "getOrNull":
+		if ok {
+			return r.props["value"], true
+		}
+		return jsNull, true
+	case "exceptionOrNull":
+		if ok {
+			return jsNull, true
+		}
+		return r.props["exc"], true
+	case "getOrDefault":
+		if ok {
+			return r.props["value"], true
+		}
+		return argAt(args, 0), true
+	case "getOrElse":
+		if ok {
+			return r.props["value"], true
+		}
+		return rt.ktCall(argAt(args, 0), r.props["exc"]), true
+	case "getOrThrow":
+		if ok {
+			return r.props["value"], true
+		}
+		panic(&jsThrown{value: r.props["exc"]})
+	case "onSuccess":
+		if ok {
+			rt.ktCall(argAt(args, 0), r.props["value"])
+		}
+		return r, true
+	case "onFailure":
+		if !ok {
+			rt.ktCall(argAt(args, 0), r.props["exc"])
+		}
+		return r, true
+	case "map":
+		if !ok {
+			return r, true
+		}
+		out := newJSObject()
+		out.set("__result", true)
+		out.set("value", rt.ktCall(argAt(args, 0), r.props["value"]))
+		out.set("exc", jsNull)
+		return out, true
+	case "fold":
+		if ok {
+			return rt.ktCall(argAt(args, 0), r.props["value"]), true
+		}
+		return rt.ktCall(argAt(args, 1), r.props["exc"]), true
+	}
+	return nil, false
+}
+
+// ktLazyValue is the lazy {} delegate's cached value.
+func (rt *jsrt) ktLazyValue(o *jsObject) interface{} {
+	if done, _ := o.props["done"].(bool); !done {
+		o.set("v", rt.ktCall(o.props["f"]))
+		o.set("done", true)
+	}
+	return o.props["v"]
+}
 
 // ktFixed renders a float with `prec` decimals, rounding HALF UP the way java's
 // %f does. The twin is kFixed in kotlin-interpreter.abnf.
