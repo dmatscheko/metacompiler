@@ -123,7 +123,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 // not model build configurations), and it is what makes a file that merely wraps
 // a #region or a #pragma around ordinary code parse at all.
 PPDirective = "#" :whitespace() { NotNewline } :whitespace(Whitespace) ;
-:include("lib/ident.abnf") ;
 :include("lib/dq-strings.abnf") ;
 :include("lib/numbers.abnf") ;
 :include("lib/bools.abnf") ;
@@ -597,7 +596,13 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
 // STATEMENT it does not terminate its block (the surrounding ternary still wants to
 // branch to the merge); js_throw unwinds on the host side, so the code after it in
 // the emitted block is unreachable at run time.
-Expression  = Assignment | ThrowExpr | CondExpr ;
+Expression  = RefExpr | Assignment | ThrowExpr | CondExpr ;
+// `ref x` in expression position (a ref local's initializer, `return ref x`,
+// `=> ref field`, `b ? ref x : ref y`). This model copies rather than aliases, so
+// the `ref` is dropped and the operand stands for the whole thing - it carries no
+// tag at all. `ref` is a reserved word, so nothing else can start this way, and an
+// argument's own `ref` is taken by ArgRefMod before this is ever reached.
+RefExpr     = "ref" KwEnd [ "readonly" KwEnd ] Expression ;
 ThrowExpr   <~~ push(makeThrowExpr(pop())) ~~>
             = KwThrow CondExpr ;
 // The compound bitwise/shift forms compile like their arithmetic siblings; '??=' is
@@ -609,8 +614,105 @@ Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
 
 // An assignable place: a variable (this and class names are variables too), or a
 // member/index path: this.x, p.X, Program.Fails, arr[i], dict[k].
-Target      <~~ push(makeTargetRef(takeAll())) ~~>
+// `(a) = 1` wraps the target in parentheses, and the target's ROOT may be any
+// primary at all - `((IF) ia).Prop = 3`, `GetList().Offset += added`,
+// `t.GetMe().GetMe().bar++`, `(new Foo()).s += "A"`. ParenTarget carries no tag,
+// so exactly one target record reaches the enclosing Assignment / IncDec.
+Target      = ParenTarget | ChainTarget | PlainTarget ;
+ParenTarget = "(" Target ")" ;
+// The suffix run is one greedy repetition rather than "{ Sfx } LastSfx": a PEG
+// repetition never gives a match back, so the two-part spelling could never see
+// its final suffix. The LAST suffix the run consumed is the place. PlaceAhead is
+// a fast-fail: without it every expression is parsed twice per nesting level.
+ChainTarget <~~ push(makeChainTarget(takeAll())) ~~>
+            = PlaceAhead CallSeed ChainSfx { ChainSfx } ;
+ChainSfx    = MethodSfx | CallSfx | FieldSfx | IndexSfx ;
+PlaceAhead  = :script(~~
+    (function() {
+        var i = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(i) === 32 || c.peek(i) === 9 || c.peek(i) === 10 || c.peek(i) === 13) { i++ }
+        var depth = 0
+        var n = 0
+        var found = false
+        var done = false
+        while (!done && n < 4000) {
+            var ch = c.peek(i)
+            if (ch < 0) { done = true }
+            else if (depth > 0) {
+                if (ch === 34 || ch === 39) {
+                    var q0 = ch
+                    i++
+                    var g1 = 0
+                    while (c.peek(i) >= 0 && c.peek(i) !== q0 && g1 < 4000) {
+                        if (c.peek(i) === 92) { i++ }
+                        i++
+                        g1++
+                    }
+                    i++
+                }
+                else if (ch === 47 && c.peek(i + 1) === 47) {
+                    while (c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+                }
+                else if (ch === 47 && c.peek(i + 1) === 42) {
+                    i = i + 2
+                    var g2 = 0
+                    while (c.peek(i) >= 0 && g2 < 40000) {
+                        if (c.peek(i) === 42 && c.peek(i + 1) === 47) { g2 = 40000 } else { i++ }
+                        g2++
+                    }
+                    i = i + 2
+                }
+                else if (ch === 40 || ch === 91 || ch === 123) { depth++; i++ }
+                else if (ch === 41 || ch === 93 || ch === 125) { depth--; i++ }
+                else { i++ }
+            }
+            else if (ch === 47 && (c.peek(i + 1) === 47 || c.peek(i + 1) === 42)) {
+                if (c.peek(i + 1) === 47) {
+                    while (c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+                } else {
+                    i = i + 2
+                    var g3 = 0
+                    while (c.peek(i) >= 0 && g3 < 40000) {
+                        if (c.peek(i) === 42 && c.peek(i + 1) === 47) { g3 = 40000 } else { i++ }
+                        g3++
+                    }
+                    i = i + 2
+                }
+            }
+            else if (ch === 40 || ch === 91) { depth++; i++ }
+            // At depth 0 only a MEMBER PATH may stand before the operator, so a
+            // name character, a dot, a `->` and whitespace continue the scan and
+            // anything else settles it. That bound keeps the scan proportional to
+            // the target rather than to the whole statement.
+            else if (ch === 46 || ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 36 || ch === 95
+                     || (ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch >= 128) { i++ }
+            else if (ch === 61) { found = c.peek(i + 1) !== 61; done = true }
+            else if (ch === 45 && c.peek(i + 1) === 62) { i = i + 2 }
+            else if (ch === 43 || ch === 45) {
+                found = c.peek(i + 1) === ch || c.peek(i + 1) === 61
+                done = true
+            }
+            else if (ch === 42 || ch === 47 || ch === 37 || ch === 38 || ch === 124 || ch === 94) {
+                found = c.peek(i + 1) === 61
+                done = true
+            }
+            else if (ch === 63 && c.peek(i + 1) === 63 && c.peek(i + 2) === 61) { found = true; done = true }
+            else if (ch === 60 || ch === 62) {
+                var q = i
+                var run = 0
+                while (c.peek(q) === ch) { q++; run++ }
+                found = run >= 2 && c.peek(q) === 61
+                done = true
+            }
+            else { done = true }
+            n++
+        }
+        return found ? undefined : abnf.newToken("\x01no-place", 0)
+    })()
+~~) ;
+PlainTarget <~~ push(makeTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
+
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression { "," DiscardExpr } "]" ;
 
@@ -746,7 +848,10 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 // Neither shadows the BINARY '&' or '*', which are only reached after an operand has
 // already been parsed - but see the !"&" on the bitwise level above, which is what
 // keeps `a && b` from being read as `a & (&b)`.
-UnaryExpr   = Await | PreIncDec | Cast | Neg | Not | BitNot | AddrOf | Deref | PostfixExpr ;
+UnaryExpr   = Await | PreIncDec | Cast | Neg | UPlus | Not | BitNot | AddrOf | Deref | PostfixExpr ;
+// Unary + is the identity, so it needs no tag. The `!"+"` keeps it away from the
+// `++` that PreIncDec above already owns.
+UPlus       = "+" !"+" UnaryExpr ;
 AddrOf      = "&" !"=" UnaryExpr ;
 Deref       = "*" !"=" UnaryExpr ;
 PreIncDec   <~~ push(makePreIncDec(takeAll())) ~~>
@@ -768,7 +873,10 @@ CastPrim    <~~ push({castty: stripWs(up.in)}) ~~>
             = PrimType ;
 RefCast     <~~ push(makeCast(pop())) ~~>
             = "(" RefType ")" UnaryNoPM ;
-UnaryNoPM   = Not | PostfixExpr ;
+// Cast is in here so a cast of a cast - `(TService) (object) x`, which the mono
+// suite is full of - parses; without it the inner cast is not a legal operand of
+// the outer one.
+UnaryNoPM   = Not | Cast | PostfixExpr ;
 // The trailing '?' is the NULLABLE suffix of a cast target - '(MyStruct?) s'. It is
 // inside the parentheses, so the ternary '(cond) ? a : b' is untouched.
 RefType     = ( "string" KwEnd | "String" KwEnd | UserType ) { "*" | "[" "]" } [ "?" ] ;
@@ -781,10 +889,21 @@ IncDec      <~~ push(makeIncDec(takeAll(), false)) ~~>
 
 // new Point(1, 2) | new List<int>() | new Dictionary<K,V>() | new int[]{...} | new int[n]
 // | new Foo{ X = 1 } (object initializer) | new Foo(a){ X = 1 } (ctor + initializer)
-NewExpr     = NewAnon | NewImplArr | NewObjInit | NewArrLit | NewArrSize | NewObject ;
+NewExpr     = NewAnon | NewImplArr | NewObjInit | NewArrLit | NewArrSize | NewObject | StackAlloc ;
 // An anonymous type ('new { X = 1, Y = 2 }'): a plain object with those members.
 NewAnon     <~~ push(makeAnon(pop())) ~~>
-            = KwNew ObjInit ;
+            = KwNew AnonInit ;
+// An anonymous type has its OWN initializer list, because it alone may PROJECT a
+// member instead of naming one: `new { a.B, C }` is `new { B = a.B, C = C }`
+// (C# 7.6.10.6). Putting the projection in the shared ObjInit instead made a
+// collection initializer - `new List<int> { 1, 2 }` - match it, and every entry
+// became a member named after its own text.
+AnonInit    <~~ push({objinit: takeAll()}) ~~>
+            = "{" [ AnonMember { "," AnonMember } ] [ "," ] "}" ;
+AnonMember  = NestedInit | IndexedInit | PlainInit | ProjInit ;
+ProjInit    <~~ push(makeMemberInit(pop(), csProjName(up.in))) ~~>
+            = Expression ;
+
 // An object initializer without constructor parens: 'new Foo{ X = 1, Y = 2 }' runs the
 // parameterless constructor, then assigns each named member. Tried before NewArrLit so a
 // collection literal ('new List<int>{1, 2}', whose entries are plain expressions) still
@@ -794,8 +913,10 @@ NewObjInit  <~~ push(makeNew(takeAll())) ~~>
 // The created type's name. It may be qualified ('new Outer.Inner()', 'new System.Text.X()');
 // only the last segment is kept, which is the simple name every type is registered under.
 // The generic arguments are kept too (reified type arguments, see makeNew).
+// The trailing '?' is the NULLABLE suffix - `new S? ()` creates a Nullable<S>,
+// which this model does not distinguish from an S. csSimpleName drops it.
 NewName     <~~ push({cname: csSimpleName(up.in), targs: csTypeArgs(up.in)}) ~~>
-            = Id [ "::" Id ] [ SkipAngle ] { "." Id [ SkipAngle ] } ;
+            = Id [ "::" Id ] [ SkipAngle ] { "." Id [ SkipAngle ] } [ "?" ] ;
 // The array type suffix ('[]') is part of Type, so 'new int[]{...}' consumes it here.
 NewArrLit   <~~ push(makeArray(takeAll())) ~~>
             = KwNew Type "{" [ ArrElem { "," ArrElem } ] [ "," ] "}" ;
@@ -805,6 +926,14 @@ NewImplArr  <~~ push(makeArray(takeAll())) ~~>
 // 'new A[1] { new A() }': a sized array MAY still carry an initializer, which wins.
 NewArrSize  <~~ push(makeSizedArray(takeAll())) ~~>
             = KwNew Type "[" ArrDim { "," ArrDim } "]" { "[" { "," } "]" } [ ArrInit ] ;
+// `stackalloc T[n]` / `stackalloc T[] { ... }`: a stack buffer. Nothing here has a
+// stack, so it allocates the same array `new T[n]` would - which is all a program
+// that only reads and writes it can observe.
+StackAlloc  = StackSized | StackLit ;
+StackSized  <~~ push(makeSizedArray(takeAll())) ~~>
+            = KwStackalloc Type "[" ArrDim { "," ArrDim } "]" [ ArrInit ] ;
+StackLit    <~~ push(makeArray(takeAll())) ~~>
+            = KwStackalloc Type "{" [ ArrElem { "," ArrElem } ] [ "," ] "}" ;
 ArrDim      <~~ push({adim: pop()}) ~~>
             = Expression ;
 ArrInit     <~~ push({ainit: pop()}) ~~>
@@ -866,8 +995,28 @@ CallSeed    = KwExpr | NewExpr | BaseCall | Lambda | AnonMethod
 // type, and a PEG never goes back. Requiring the '.' costs nothing real - a
 // constructed type is only ever a receiver - and keeps every comparison intact.
 GenSeed     = GenName "." GenMemb ;
+// The type may itself be NESTED - `A<int>.B<ulong>.foo()`, `Outer.Inner<string>.V`,
+// `HasherBuilder.ByPrototype<U>.Examine()`. Every alternative still demands at
+// least one `<...>`, which together with the `"." GenMemb` that follows is what
+// keeps the relational chain `a < b > c` from being read as a constructed type.
+// csSimpleName drops the type arguments and keeps the last segment, which is the
+// simple name every nested type is registered under.
 GenName     <~~ push(csGenSeed(csSimpleName(up.in))) ~~>
-            = Id SkipAngle ;
+            = Id SkipAngle { "." Id SkipAngle DotAhead }
+            | Id "." Id SkipAngle { "." Id SkipAngle DotAhead }
+            | Id "." Id "." Id SkipAngle { "." Id SkipAngle DotAhead } ;
+// A further `.Name<args>` segment is only part of the TYPE when another `.`
+// follows it; otherwise it is the generic METHOD being called, and GenMemb has to
+// see it. The repetition cannot give a match back, so the test belongs inside the
+// iteration: `C<object>.foo<int>(null)` would otherwise lose its member.
+DotAhead    = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        return c.peek(s) === 46 ? undefined : abnf.newToken("\x01no-dot", 0)
+    })()
+~~) ;
+
 GenMemb     = GenMCall | GenField ;
 GenMCall    <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
             = Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] "(" ArgList ")" ;
@@ -905,7 +1054,15 @@ FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 // with the 'omitted' marker (undefined) that the parameter binder answers with the
 // parameter's default. 'ref' / 'out' / 'in' at a call site are parsed and dropped.
 ArgList     = [ Arg { "," Arg } ] ;
-Arg         = NamedArg | PlainArg ;
+Arg         = OutVarArg | NamedArg | PlainArg ;
+// `M(out int x)` / `M(out var x)` (C# 7): the argument DECLARES the variable, in
+// the enclosing scope. There are no genuine out parameters in this model, so the
+// declaration is what is kept: the name is bound to null before the call, which
+// is what makes the uses after the call resolve.
+OutVarArg   <~~ push(csOutVar(pop())) ~~>
+            = ( "out" | "ref" ) KwEnd Type OutVarName ;
+OutVarName  <~~ push(up.in) ~~>
+            = Id ;
 NamedArg    <~~ push(csNamedArg(takeAll())) ~~>
             = ArgName ":" !":" [ ArgRefMod ] Expression ;
 ArgName     <~~ push({argname: up.in}) ~~>
@@ -921,7 +1078,12 @@ IndexSfx    <~~ push(csIndexSfx(takeAll())) ~~>
 // ('1..3', '1..', '..3', '..'), which slices. It is written as one optional index
 // followed by an optional '..' tail, so an ordinary index is still parsed exactly once
 // (a 'range | index' choice would parse every index twice, which nests exponentially).
-IdxArg      = [ IdxOne ] [ IdxTail ] ;
+// An indexer takes NAMED arguments too (`b["a", arg2: 20]`). The model indexes
+// positionally, so the name is parsed and dropped; it has to be tried before the
+// ordinary index, which would read the name as an expression and die on the ':'.
+IdxArg      = NamedIdx | ( [ IdxOne ] [ IdxTail ] ) ;
+NamedIdx    = ArgName2 ":" !":" Expression ;
+ArgName2    = Id ;
 IdxOne      = FromEnd | Expression ;
 FromEnd     <~~ push({fromEnd: pop()}) ~~>
             = "^" Expression ;
@@ -1066,10 +1228,30 @@ LambdaBody  = LamBlock | LamExpr ;
 LamBlock    <~~ push({body: pop()}) ~~> = Block ;
 LamExpr     <~~ push({ebody: pop()}) ~~> = Expression ;
 // A LINQ query expression: accepted, reported as not implemented.
+// The whole query-expression syntax (C# 7.16) is RECOGNIZED - from/let/where/
+// join/orderby/group/select and the `into` continuation - and then reported as
+// not implemented, like it was before: every sub-expression goes through
+// DiscardExpr, so nothing is left on the stack.
+//
+// The range variable's explicit TYPE (`from int i in a`) is a separate
+// alternative rather than an optional `[ Type ]`: a PEG optional that matched
+// would never be given back, and `from i in a` has Type swallow `i`.
 LinqQuery   <~~ push(makeLinq(up.pos)) ~~>
-            = KwFrom Id KwIn DiscardExpr LinqTail ;
-LinqTail    = { LinqClause } KwSelect DiscardExpr ;
-LinqClause  = KwWhere DiscardExpr | KwOrderby DiscardExpr | KwLet Id "=" DiscardExpr ;
+            = LinqFrom LinqBody ;
+LinqFrom    = KwFrom Type Id KwIn DiscardExpr | KwFrom Id KwIn DiscardExpr ;
+LinqBody    = { LinqClause } LinqResult [ LinqCont ] ;
+// `... into g <more clauses>` restarts the body with a new range variable.
+LinqCont    = KwInto Id LinqBody ;
+LinqResult  = KwSelect DiscardExpr | KwGroup DiscardExpr KwBy DiscardExpr ;
+LinqClause  = LinqFrom
+            | KwWhere DiscardExpr
+            | KwOrderby LinqOrd { "," LinqOrd }
+            | KwLet Id "=" DiscardExpr
+            | LinqJoin ;
+LinqJoin    = KwJoin Type Id KwIn DiscardExpr KwOn DiscardExpr KwEquals DiscardExpr [ KwInto Id ]
+            | KwJoin Id KwIn DiscardExpr KwOn DiscardExpr KwEquals DiscardExpr [ KwInto Id ] ;
+LinqOrd     = DiscardExpr [ ( "ascending" | "descending" ) KwEnd ] ;
+
 DiscardExpr <~~ pop() ~~>
             = Expression ;
 
@@ -1139,7 +1321,7 @@ KwAs        = "as" KwEnd ;
 ModKw       = ( "public" | "private" | "protected" | "internal" | "static" | "abstract"
               | "sealed" | "virtual" | "override" | "readonly" | "const" | "partial"
               | "unsafe" | "async" | "extern" | "volatile" | "new" | "required" | "event"
-              | "file" | "fixed" ) KwEnd ;
+              | "file" | "fixed" | "ref" | "scoped" ) KwEnd ;
 LeadMods    = { ModKw | AttrSection } ;
 
 // Type declarations accepted structurally, then reported as not implemented (so a whole
@@ -1171,6 +1353,27 @@ NestedUnsup <~~ notImpl("nested type", up.pos) ~~>
             = LeadMods NestedKw Id [ SkipAngle ] [ ":" Type { "," Type } ] SkipBlock ;
 NestedKw    = ( "record" ) KwEnd ;
 
+// C# identifiers are UNICODE (ECMA-334 7.4.3: an identifier may contain any
+// Unicode letter, and Ändern / 쯠쯡쯢 / Fo\u203fo are all legal names), so this
+// grammar carries its OWN Id and KwEnd instead of including lib/ident.abnf -
+// that fragment is shared by a dozen grammars and must stay ASCII. The range
+// starts at \x7f rather than \x80 on purpose: \x80 is a UTF-8 CONTINUATION byte
+// and a range starting there matches nothing at all (docs/abnf-dialect-gotchas).
+Id          = IdStart :whitespace() { IdPart } :whitespace(Whitespace) ;
+IdStart     = "a"..."z" | "A"..."Z" | "_" | "\x7f"..."\U0010ffff" ;
+IdPart      = "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "\x7f"..."\U0010ffff" ;
+// The keyword boundary counts a non-ASCII byte as a word character too, so
+// `newÄ` stays one identifier rather than `new` followed by a name.
+KwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95
+                || (cc >= 97 && cc <= 122) || cc >= 127)
+            ? abnf.newToken("\x01keyword-boundary", 0)
+            : undefined
+    })()
+~~) ;
+
 KwUsing     = "using" KwEnd ;
 KwNamespace = "namespace" KwEnd ;
 KwEnum      = "enum" KwEnd ;
@@ -1201,6 +1404,13 @@ KwFrom      = "from" KwEnd ;
 KwSelect    = "select" KwEnd ;
 KwWhere     = "where" KwEnd ;
 KwOrderby   = "orderby" KwEnd ;
+KwStackalloc = "stackalloc" KwEnd ;
+KwGroup     = "group" KwEnd ;
+KwBy        = "by" KwEnd ;
+KwJoin      = "join" KwEnd ;
+KwOn        = "on" KwEnd ;
+KwEquals    = "equals" KwEnd ;
+KwInto      = "into" KwEnd ;
 KwLet       = "let" KwEnd ;
 
 // ---
@@ -2630,8 +2840,39 @@ KwLet       = "let" KwEnd ;
 
     // A member/index target: a '.field' step (js_get/js_set on objects) or an '[i]' step
     // (js_pyget/js_pyset on arrays and dicts).
+    // The property name of an anonymous-type PROJECTION: `new { a.B }` names `B`.
+    function csProjName(text) { return csSimpleName(text) }
+    // `M(out int x)`: bind the name before the call so the uses after it resolve.
+    function csOutVar(name) {
+        return function(b) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hNull])
+            return {b: b, v: hNull}
+        }
+    }
+    // The target of an assignment whose root is an arbitrary primary. It is an
+    // ordinary target record with a `base` thunk in place of a variable name;
+    // emitRefPath below is what lowers that thunk.
+    function makeChainTarget(items) {
+        var head = []
+        for (var i = 0; i < items.length - 1; i++) { head.push(items[i]) }
+        var last = items[items.length - 1]
+        // Three separate returns rather than one reassigned local: under the
+        // frozen engine a variable keeps the shape it was first given.
+        if (last.kind == "field") { return {name: "", path: [{key: last.name}], base: foldCallMember(head)} }
+        if (last.kind == "index") { return {name: "", path: [{idx: last.idx}], base: foldCallMember(head)} }
+        // A run that ends in a call is not an assignable place; the parse still
+        // succeeds and the enclosing Assignment fails on the missing operator.
+        return {name: "", path: [{key: "\x01not-a-place"}], base: foldCallMember(head)}
+    }
     function emitRefPath(b, ref) {
-        var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+        var o = anytype // Either the lowered base expression or a scope read.
+        if (ref.base != undefined) {
+            var br = ref.base(b)
+            b = br.b
+            o = br.v
+        } else {
+            o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+        }
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) {
@@ -3807,6 +4048,7 @@ KwLet       = "let" KwEnd ;
             var ch = t.charAt(i)
             if (ch == "<") { depth++; continue }
             if (ch == ">") { if (depth > 0) { depth-- }; continue }
+            if (ch == "?") { continue } // the nullable suffix of `new S? ()`
             if (depth == 0) { out += ch }
         }
         return csLastSeg(out)

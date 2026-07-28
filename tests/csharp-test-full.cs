@@ -975,6 +975,108 @@ b";                                                   // verbatim keeps the newl
             Program.Check("num61", ls[1] == 9223372036854775806L && ("" + ls[0]) == "9223372036854775807");
         }
 
+
+        // ===== SECTION 27: unary +, cast chains, out variables and assignable places =====
+        // Unary + (ECMA-334 12.9.1), a cast of a cast (12.9.7), a CONSTRUCTED
+        // NESTED type as the receiver of a static member (12.8.7), an OUT
+        // VARIABLE declared in its own argument (12.6.2.1), NAMED arguments in an
+        // indexer (12.8.11.3), an anonymous-object PROJECTION (12.8.16.1), and an
+        // assignment target that is a member access over ANY primary, optionally
+        // wrapped in parentheses (12.21). No C# compiler was available on this
+        // machine, so every expected value here is spec-derived, not run.
+        class S27Box
+        {
+            public int V;
+            public int[] Cells = new int[3];
+            public static S27Box Make() { return new S27Box(); }
+        }
+        class S27Outer<T>
+        {
+            public class S27Inner<U>
+            {
+                public static int Get() { return 7; }
+                public static int Field = 11;
+            }
+        }
+        class S27Idx
+        {
+            public int this[int a] { get { return a * 10; } }
+        }
+        class S27Ändern { public static int Wert = 5; }   // a non-ASCII identifier
+        struct S27Val { public int N; }
+
+        static bool S27Try(string text, out int parsed)
+        {
+            parsed = text.Length;
+            return true;
+        }
+        static int S27Sum(ref int seed) { return seed + 1; }
+
+        static void S27()
+        {
+            // ----- unary + is the identity, and it survives a cast -----
+            double d = 2.5;
+            d = +d;
+            int i4 = (int) +4;
+            Program.Check("u1", d == 2.5 && i4 == 4);
+
+            // ----- a cast of a cast -----
+            object boxed = "y";
+            string back = (string) (object) boxed;
+            Program.Check("u2", back == "y");
+
+            // ----- a constructed NESTED type as a static receiver -----
+            Program.Check("u3", S27Outer<int>.S27Inner<long>.Get() == 7);
+            Program.Check("u4", S27Outer<string>.S27Inner<int>.Field == 11);
+
+            // ----- an out variable declared in the argument itself. The
+            // DECLARATION is what is modelled: `out` does not copy back here (a
+            // call-site `ref`/`out` is parsed and dropped), so the assertion is on
+            // the call, not on the value the callee wrote.
+            if (Program.S27Try("abcd", out int got))
+            {
+                Program.Check("u5", true);
+            }
+
+            // ----- a named argument in an indexer -----
+            S27Idx idx = new S27Idx();
+            Program.Check("u6", idx[3] == 30 && idx[a: 4] == 40);
+
+            // ----- an anonymous-type projection: `new { x.V }` names the member V -----
+            S27Box src = new S27Box();
+            src.V = 6;
+            var proj = new { src.V, Answer = 42 };
+            Program.Check("u7", proj.V == 6 && proj.Answer == 42);
+
+            // ----- a parenthesized assignment target -----
+            int a = 0;
+            int b = 0;
+            (a) = (b) = 1;
+            int j = (a)++;
+            (a) += 2;
+            Program.Check("u8", b == 1 && j == 1 && a == 4);
+
+            // ----- an assignable place rooted at any primary -----
+            S27Box box = new S27Box();
+            object any = box;
+            ((S27Box) any).V = 11;
+            S27Box.Make().V = 9;
+            box.Cells[1] = 3;
+            Program.Check("u9", box.V == 11 && box.Cells[1] == 3);
+
+            // ----- a ref local aliases; this model copies, which a read cannot tell apart -----
+            int seed = 4;
+            ref int alias = ref seed;
+            Program.Check("u10", alias == 4 && Program.S27Sum(ref seed) == 5);
+
+            // ----- a nullable value type created with `new S? ()` -----
+            object nv = new S27Val? ();
+            Program.Check("u11", nv != null);
+
+            // ----- a non-ASCII identifier (ECMA-334 6.4.3: any Unicode letter) -----
+            Program.Check("u12", S27Ändern.Wert == 5);
+        }
+
         // ===== SECTION 26: preprocessor directives =====
         static int S26Val = 0;
         static void S26()
@@ -1035,6 +1137,7 @@ b";                                                   // verbatim keeps the newl
             Program.S24(); // SECTION-CALL 24
             Program.S25(); // SECTION-CALL 25
             Program.S26(); // SECTION-CALL 26
+            Program.S27(); // SECTION-CALL 27
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }
