@@ -21,13 +21,16 @@ arguments and empty parameter lists, variadic '...'/'__VA_ARGS__', and calls tha
 lines (the newlines are re-emitted after the expansion so line numbers hold). A
 function-like macro name NOT followed by '(' is left alone. '#undef' removes a
 definition; backslash-newline continuations are joined. A body may be empty (a bare
-'#define FLAG'). Every OTHER directive - '#include', the '#if/#ifdef/#ifndef/#else/#elif/
-#endif' family, '#pragma', '#error', '#line' - is passed through UNCHANGED for the
-downstream language to handle (which, for the C grammars, means #include resolves and the
-rest are skipped). Conditionals are NOT evaluated: a guarded block is always emitted.
-Macro uses inside pass-through directives are not expanded. The tokenizer reproduces
-every byte, so non-macro source is emitted verbatim; removed directive lines are replaced
-by their newlines so line numbers hold. A space is inserted at the seam between an
+'#define FLAG'). EVERY directive line is passed through UNCHANGED, including the
+'#define'/'#undef' lines this pass consumes: conditionals are NOT evaluated here, they are
+the downstream language's job, and the ONLY thing that decides them is the same
+'#define'/'#undef' history - so erasing those lines would hide from the C grammar's
+'#if'/'#ifdef' evaluator exactly the table it must read ('#define DEF' followed by
+'#ifndef DEF' has to come out dead, and cannot if the '#define' is gone). '#include', the
+'#if/#ifdef/#ifndef/#else/#elif/#endif' family, '#pragma', '#error' and '#line' are
+likewise untouched (for the C grammars #include resolves and the rest are skipped).
+Macro uses inside directives are not expanded. The tokenizer reproduces
+every byte, so non-macro source is emitted verbatim and line numbers hold. A space is inserted at the seam between an
 expansion and its neighbours only when the two would otherwise lex as one token.") ;
 
 :startRule(File) ;
@@ -596,9 +599,10 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
         return {word: "", at: p}
     }
 
-    // Handle a directive at index i (the '#' token). Returns {text, next}: `text` is what
-    // to emit (blank newlines for a removed #define/#undef, the verbatim line otherwise),
-    // `next` is the index to resume scanning at (just past the terminating newline).
+    // Handle a directive at index i (the '#' token). Returns {text, next}: `text` is the
+    // directive line VERBATIM - a '#define'/'#undef' updates the table here AND is still
+    // emitted, because the downstream '#if'/'#ifdef' evaluator has no other way to learn
+    // the same table - and `next` is the index to resume at, just past the newline.
     function handleDirective(tokens, i, macros) {
         var end = lineEndOf(tokens, i)
         var afterLine = end < tokens.length ? end + 1 : end
@@ -621,15 +625,15 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
                 }
                 putOwn(macros, name,
                        newMacro(true, pp.params, pp.variadic, collectBody(tokens, pp.next, end)))
-                return {text: newlinesText(tokens, i, end), next: afterLine}
+                return {text: rawText(tokens, i, afterLine), next: afterLine}
             }
             putOwn(macros, name, newMacro(false, noParams(), false, collectBody(tokens, q, end)))
-            return {text: newlinesText(tokens, i, end), next: afterLine}
+            return {text: rawText(tokens, i, afterLine), next: afterLine}
         }
         if (word == "undef") {
             var p2 = skipHws(tokens, kw.at + 1)
             if (p2 < end && tokens[p2].kind == "ident") { putOwn(macros, tokens[p2].text, undefined) }
-            return {text: newlinesText(tokens, i, end), next: afterLine}
+            return {text: rawText(tokens, i, afterLine), next: afterLine}
         }
         // Every other directive passes through for the downstream language to handle.
         return {text: rawText(tokens, i, afterLine), next: afterLine}

@@ -960,6 +960,313 @@ int s34(void) {
     return 0;
 }
 
+// ===== SECTION 35: suffixes on a call RESULT =====
+/* A call result is a value, not a place, but C still lets a suffix step off it:
+   '.f' on a returned struct, '[i]' and '->f' on a returned pointer, and a further
+   call on what those found ('go()()->fp()'). Verified against cc before being
+   pinned here. */
+struct S35P { int a; int b; };
+struct S35F { int (*fp)(void); int tag; };
+static int s35_arr[4];
+static struct S35F s35_obj;
+
+struct S35P s35_mk(int a, int b) { struct S35P p; p.a = a; p.b = b; return p; }
+int *s35_ptr(void) { s35_arr[0] = 10; s35_arr[1] = 11; s35_arr[2] = 12; return s35_arr; }
+int s35_five(void) { return 5; }
+struct S35F *s35_obj_ptr(void) { s35_obj.fp = s35_five; s35_obj.tag = 9; return &s35_obj; }
+typedef struct S35F *(*s35_fty)(void);
+s35_fty s35_go(void) { return s35_obj_ptr; }
+int s35_twice(int x) { return x + x; }
+int s35_triple(int x) { return x * 3; }
+typedef int (*s35_ify)(int);
+s35_ify s35_pick(int w) { return w ? s35_twice : s35_triple; }
+struct S35P *s35_pp(void) { static struct S35P q; q.a = 41; q.b = 42; return &q; }
+
+int s35(void) {
+    check(3501, s35_mk(3, 4).a == 3);
+    check(3502, s35_mk(3, 4).b == 4);
+    check(3503, s35_mk(1, 2).a + s35_mk(5, 6).b == 7);
+    check(3504, s35_ptr()[0] == 10 && s35_ptr()[2] == 12);
+    check(3505, *s35_ptr() == 10);
+    check(3506, s35_obj_ptr()->tag == 9);
+    check(3507, s35_obj_ptr()->fp() == 5);
+    /* A chain of calls: the second call's callee is what the first returned.
+       'go()()->fp()' - a SUFFIX off an INDIRECT call's result - parses in both halves
+       and runs in the interpreter, but is not pinned here: this model's function-pointer
+       type carries no return type, so the compiler cannot say what '->' would step
+       through, and an indirect call's result is an int whatever the callee returned.
+       The corpus (00089.c) pins the parse. */
+    check(3508, s35_pick(1)(5) == 10 && s35_pick(0)(5) == 15);
+    check(3509, s35_go() == s35_obj_ptr);   /* the returned callee, before it is called */
+    check(3510, s35_pp()->a + s35_pp()->b == 83);
+    /* a pointer-returning function still works the ordinary way */
+    {
+        int *p = s35_ptr();
+        check(3511, p[1] == 11);
+        check(3512, s35_ptr() != 0);
+    }
+    return 0;
+}
+
+// ===== SECTION 36: function-pointer and array TYPE NAMES =====
+/* An abstract declarator may follow the base type of a type name, so a cast can name
+   a function-pointer type ('(void (*)(void))0'), and sizeof / _Generic can name an
+   array type ('int[4]'). A _Generic selection may itself be called, and one of its
+   associations may name a TYPEDEF - the ':' that must follow makes that unambiguous,
+   which it is NOT in a cast. Verified against cc. */
+int s36_twice(int x) { return x + x; }
+int s36_thrice(int x) { return x * 3; }
+typedef int (*s36_fp)(int);
+
+int s36(void) {
+    int a = 5;
+    long l = 5;
+    s36_fp fp = s36_twice;
+    check(3601, ((int (*)(int))fp)(4) == 8);
+    check(3602, ((int (*)(int))s36_twice)(6) == 12);
+    check(3603, sizeof(void (*)(void)) == sizeof(void *));
+    check(3604, sizeof(int (*)(int, int)) == sizeof(void *));
+    check(3605, sizeof(int[4]) == 4 * sizeof(int));
+    check(3606, sizeof(char[7]) == 7);
+    check(3607, _Generic(a, int: 1, long: 2, default: 3) == 1);
+    check(3608, _Generic(l, int: 1, long: 2, default: 3) == 2);
+    check(3609, _Generic(a, int: s36_twice, default: s36_thrice)(6) == 12);
+    check(3610, _Generic(l, int: s36_twice, default: s36_thrice)(6) == 18);
+    check(3611, _Generic(a, char: 1, double: 2, default: 5) == 5);
+    check(3612, _Generic(fp, s36_fp: 7, default: 8) == 7);
+    /* a null function pointer built by a cast: parsed, and never called */
+    check(3613, ((void (*)(void))0) == 0);
+    return 0;
+}
+
+// ===== SECTION 37: enum initializers are constant EXPRESSIONS =====
+/* An enumerator's '= value' is a constant expression and may NAME another enum
+   constant, including one from an earlier enum (which is how the GCC tree-code enums
+   chain) and one from the SAME enum declared before it. Verified against cc. */
+enum s37_first { S37_A = 3, S37_B, S37_LAST };
+enum s37_second {
+    S37_C = S37_LAST,           /* names a previous enum's constant */
+    S37_D,                      /* keeps counting from it */
+    S37_E = S37_C * 2 + 1,      /* arithmetic over enum constants */
+    S37_F = (1 << 4) - 6,
+    S37_G = ~0,
+    S37_H = -3,
+    S37_I = S37_D + S37_A       /* two constants, one of them from this enum */
+};
+enum s37_third { S37_J = S37_I / 2, S37_K = S37_I % 4 };
+
+int s37(void) {
+    check(3701, S37_A == 3 && S37_B == 4 && S37_LAST == 5);
+    check(3702, S37_C == 5 && S37_D == 6);
+    check(3703, S37_E == 11);
+    check(3704, S37_F == 10);
+    check(3705, S37_G == -1);
+    check(3706, S37_H == -3);
+    check(3707, S37_I == 9);
+    check(3708, S37_J == 4 && S37_K == 1);
+    {
+        enum s37_second v = S37_E;
+        check(3709, v == 11);
+        check(3710, sizeof(enum s37_second) == sizeof(int));
+    }
+    return 0;
+}
+
+// ===== SECTION 38: GCC statement expressions =====
+/* '({ stmt; stmt; expr; })' is an expression whose value is that of its LAST
+   expression statement, evaluated in a scope of its own. It nests, it may declare
+   locals, and it may hold any statement a block may. A jump OUT of one is refused
+   rather than silently dropped, so it is not exercised here. Verified against cc. */
+int s38_side = 0;
+int s38_bump(int by) { s38_side = s38_side + by; return s38_side; }
+
+int s38(void) {
+    int a = 5;
+    check(3801, ({ 7; }) == 7);
+    check(3802, ({ int t = a * 2; t + 1; }) == 11);
+    check(3803, ({ int u = 3; int v = 4; u + v * 2; }) == 11);
+    check(3804, ({ int x = 9; if (x > 3) { x = x - 1; } x; }) == 8);
+    check(3805, ({ int s = 0; int i; for (i = 0; i < 4; i++) { s += i; } s; }) == 6);
+    check(3806, ({ int o = ({ int n = 2; n * 3; }); o + 1; }) == 7);   /* nested */
+    check(3807, ({ a; }) == 5);
+    s38_side = 0;
+    check(3808, ({ s38_bump(2); s38_bump(3); }) == 5);   /* both run, the last is the value */
+    check(3809, s38_side == 5);
+    check(3810, ({ int w = 1; w; }) + ({ int w = 2; w; }) == 3);
+    {
+        /* the block has its own scope: the outer 'a' is untouched */
+        int r = ({ int a = 100; a + 1; });
+        check(3811, r == 101 && a == 5);
+    }
+    return 0;
+}
+
+// ===== SECTION 39: case labels are LABELED STATEMENTS =====
+/* A switch body is a statement, not a list of clauses, and a case label may stand
+   wherever a statement may: directly under the switch with no braces at all, inside a
+   nested block, or halfway down a loop body - which is what makes Duff's device legal
+   C. Fallthrough is then just ordinary sequencing. Every value below was produced by
+   cc first. */
+int s39_plain(int x) {
+    switch (x) { case 0: return 10; case 1: return 11; default: return 99; }
+}
+int s39_nobrace(int x) {                    /* body is a single labeled statement */
+    int r = 0;
+    switch (x) case 0: r = 7;
+    return r;
+}
+int s39_nested(int x) {                     /* a case inside a nested block, after a label */
+    int r = 0;
+    switch (x) {
+        {
+            r = 1;
+            s39_lbl: case 1: r = r + 5;
+        }
+        case 2: r = r + 100;
+    }
+    return r;
+}
+int s39_fall(int x) {
+    int r = 0;
+    switch (x) { case 0: r += 1; case 1: r += 2; break; case 3: r += 4; }
+    return r;
+}
+int s39_stack(int x) {                      /* stacked labels, and default in the middle */
+    int r = 0;
+    switch (x) { case 1: case 2: r = 20; break; default: r = 50; break; case 3: r = 30; }
+    return r;
+}
+int s39_loopcase(int x) {                   /* a case INSIDE a for body */
+    int i = 0, r = 0;
+    switch (x) {
+        case 0:
+            for (i = 0; i < 3; i++) { r += 1; case 5: r += 10; }
+            break;
+        default: r = -1;
+    }
+    return r;
+}
+int s39_duff(void) {                        /* Duff's device: a case inside a do-while */
+    int count, n;
+    short *from, *to;
+    short a[39], b[39];
+    for (n = 0; n < 39; n++) { a[n] = n; b[n] = 0; }
+    from = a; to = b; count = 39;
+    n = (count + 7) / 8;
+    switch (count % 8) {
+    case 0: do { *to++ = *from++;
+    case 7:      *to++ = *from++;
+    case 6:      *to++ = *from++;
+    case 5:      *to++ = *from++;
+    case 4:      *to++ = *from++;
+    case 3:      *to++ = *from++;
+    case 2:      *to++ = *from++;
+    case 1:      *to++ = *from++;
+            } while (--n > 0);
+    }
+    for (n = 0; n < 39; n++) { if (a[n] != b[n]) { return 1; } }
+    return 0;
+}
+int s39_inner(int x, int y) {               /* a nested switch owns its own labels */
+    int r = 0;
+    switch (x) {
+        case 1:
+            switch (y) { case 1: r = 11; break; case 2: r = 12; break; default: r = 19; }
+            break;
+        case 2: r = 20; break;
+        default: r = 90;
+    }
+    return r;
+}
+int s39_skip(int x) {                       /* a jump PAST a declaration: it exists, uninitialized */
+    int r = 0;
+    switch (x) {
+        case 0: {
+            int local = 5;
+            r = local;
+            break;
+        }
+        case 1: r = 1; break;
+    }
+    return r;
+}
+
+int s39(void) {
+    check(3901, s39_plain(0) == 10 && s39_plain(1) == 11 && s39_plain(7) == 99);
+    check(3902, s39_nobrace(0) == 7);
+    check(3903, s39_nobrace(1) == 0);       /* no label matches: the body does nothing */
+    check(3904, s39_nested(1) == 105);      /* enters the nested block at 'case 1' */
+    check(3905, s39_nested(2) == 100);
+    check(3906, s39_nested(9) == 0);
+    check(3907, s39_fall(0) == 3);          /* case 0 falls into case 1 */
+    check(3908, s39_fall(1) == 2 && s39_fall(3) == 4 && s39_fall(8) == 0);
+    check(3909, s39_stack(1) == 20 && s39_stack(2) == 20 && s39_stack(3) == 30);
+    check(3910, s39_stack(7) == 50);        /* default need not be last */
+    check(3911, s39_loopcase(0) == 33);     /* three iterations, both halves each */
+    check(3912, s39_loopcase(5) == 32);     /* enters the loop mid-body, then loops on */
+    check(3913, s39_loopcase(9) == -1);
+    check(3914, s39_duff() == 0);
+    check(3915, s39_inner(1, 1) == 11 && s39_inner(1, 2) == 12 && s39_inner(1, 7) == 19);
+    check(3916, s39_inner(2, 1) == 20 && s39_inner(5, 5) == 90);
+    check(3917, s39_skip(0) == 5 && s39_skip(1) == 1 && s39_skip(9) == 0);
+    {   /* a switch with NO matching label and no default runs nothing at all */
+        int hit = 0;
+        switch (4) { case 0: hit = 1; break; case 1: hit = 2; break; }
+        check(3918, hit == 0);
+    }
+    {   /* break inside a switch inside a loop leaves the SWITCH, not the loop */
+        int i, n = 0;
+        for (i = 0; i < 3; i++) {
+            switch (i) { case 1: break; default: n += 1; }
+            n += 10;
+        }
+        check(3919, n == 32);
+    }
+    {   /* continue inside a switch inside a loop leaves the ITERATION */
+        int i, n = 0;
+        for (i = 0; i < 3; i++) {
+            switch (i) { case 1: continue; default: n += 1; }
+            n += 10;
+        }
+        check(3920, n == 22);
+    }
+    return 0;
+}
+
+// ===== SECTION 40: a function returning a FUNCTION POINTER =====
+/* 'int (*f(int, int))(int, int)' declares a function returning a function pointer, and
+   'int (* (*p)(int, int))(int, int)' a POINTER to such a function. Calling through both
+   levels spells '(*(*p)(0, 2))(2, 2)', where the leading '*' is the identity: it turns a
+   function pointer into a function designator, which decays straight back (C11
+   6.5.3.2p4). Verified against cc. */
+int s40_sub(int c, int d) { return c - d; }
+int s40_add(int c, int d) { return c + d; }
+int (*s40_pick(int a, int b))(int c, int d) {   /* returns a function pointer */
+    if (a != b) { return s40_sub; }
+    return s40_add;
+}
+typedef int (*s40_fp2)(int, int);
+
+int s40(void) {
+    int (* (*p)(int a, int b))(int c, int d) = s40_pick;   /* pointer to it */
+    s40_fp2 q;
+    check(4001, s40_pick(0, 2)(9, 2) == 7);       /* call the returned pointer directly */
+    check(4002, s40_pick(1, 1)(9, 2) == 11);
+    check(4003, (*(*p)(0, 2))(9, 2) == 7);        /* both levels, with the '*' identity */
+    check(4004, (*(*p)(1, 1))(9, 2) == 11);
+    check(4005, (*p)(0, 2)(4, 1) == 3);           /* the same without the '*' */
+    q = (*p)(0, 2);
+    check(4006, q(8, 3) == 5);
+    check(4007, p == s40_pick);
+    {   /* a whole array of them */
+        int (* (*tab[2])(int, int))(int, int);
+        tab[0] = s40_pick;
+        tab[1] = s40_pick;
+        check(4008, (*tab[1](0, 2))(9, 2) == 7);
+    }
+    return 0;
+}
+
 int main() {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
@@ -995,6 +1302,12 @@ int main() {
     s32(); // SECTION-CALL 32
     s33(); // SECTION-CALL 33
     s34(); // SECTION-CALL 34
+    s35(); // SECTION-CALL 35
+    s36(); // SECTION-CALL 36
+    s37(); // SECTION-CALL 37
+    s38(); // SECTION-CALL 38
+    s39(); // SECTION-CALL 39
+    s40(); // SECTION-CALL 40
     /* summary: "full: <checks> checks, <failures> failures" */
     putchar('f'); putchar('u'); putchar('l'); putchar('l'); putchar(':'); putchar(' ');
     print_num(nchecks);

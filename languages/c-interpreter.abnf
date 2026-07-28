@@ -81,11 +81,27 @@ PPChar      = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 // constants live in a global table and resolve wherever a bare name is read.
 EnumDef     <~~ defineEnum(takeAll()) ~~>
             = KwEnum [ Id <~~ push({tag: up.in}) ~~> ]
-              "{" [ Enumerator { "," Enumerator } [ "," ] ] "}" ";" ;
+              EnumOpen [ Enumerator { "," Enumerator } [ "," ] ] "}" ";" ;
+// The running enumerator counter is per enum BODY, so it restarts at the brace.
+EnumOpen    <~~ enumStart() ~~> = "{" ;
 Enumerator  <~~ push(makeEnumerator(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> [ "=" EnumInit ] ;
-EnumInit    <~~ push({val: makeEnumVal(takeAll())}) ~~>
-            = [ "-" <~~ push("-") ~~> ] Number ;
+// An enum initializer is a constant EXPRESSION, and it may NAME another enum constant:
+// 'enum c_tree_code { C_DUMMY = LAST_AND_UNUSED_TREE_CODE, ... }' continues a previous
+// enum's numbering, which is how the GCC tree-code enums are chained. The value is
+// folded here, at parse time, exactly like an array dimension - by the time an
+// enumerator reduces, every constant before it (this enum's included, see
+// makeEnumerator) is already in the table, so the fold never needs a frame.
+EnumInit    <~~ push({val: pop()}) ~~> = ECShift ;
+ECShift     <~~ push(foldDimBin(takeAll())) ~~> = ECAdd { DimShOp ECAdd } ;
+ECAdd       <~~ push(foldDimBin(takeAll())) ~~> = ECMul { DimAddOp ECMul } ;
+ECMul       <~~ push(foldDimBin(takeAll())) ~~> = ECUn { DimMulOp ECUn } ;
+ECUn        = Number | ECParen | ECNeg | ECPos | ECNot | ECName ;
+ECParen     = "(" ECShift ")" ;
+ECNeg       <~~ push(0 - pop()) ~~> = "-" ECUn ;
+ECPos       = "+" ECUn ;
+ECNot       <~~ push(0 - pop() - 1) ~~> = "~" ECUn ;
+ECName      <~~ push(enumConstOf(up.in)) ~~> = Id ;
 
 // union U { int i; unsigned u; }; -- a union is laid out exactly like a struct whose
 // fields ALL sit at offset 0, with the size (and the byte size behind sizeof) the
@@ -128,7 +144,7 @@ TdUnionDef  <~~ push({tb: tdTagDef(takeAll(), true)}) ~~>
             = KwUnion { Attr } [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}" { Attr } ;
 TdEnumDef   <~~ defineEnum(takeAll()); push({tb: ctInt}) ~~>
             = KwEnum [ Id <~~ push({tag: up.in}) ~~> ]
-              "{" [ Enumerator { "," Enumerator } [ "," ] ] "}" ;
+              EnumOpen [ Enumerator { "," Enumerator } [ "," ] ] "}" ;
 TdDeclr     = TdFnPtr | TdPlain ;
 TdFnPtr     <~~ push({dcl: makeDeclr(takeAll(), "fnptr")}) ~~>
             = [ PStars ] "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams ;
@@ -608,7 +624,7 @@ FieldType   = TypeInt <~~ push({bty: baseCtOf(up.in), raw: up.in}) ~~>
 // 'enum { X } x;' as a member: the constants are registered, the member is an int.
 FieldEnumDef <~~ defineEnum(takeAll()); push({bty: ctInt}) ~~>
             = KwEnum [ Id <~~ push({tag: up.in}) ~~> ]
-              "{" [ Enumerator { "," Enumerator } [ "," ] ] "}" ;
+              EnumOpen [ Enumerator { "," Enumerator } [ "," ] ] "}" ;
 TdFieldTy   <~~ push({bty: typedefOf(up.in)}) ~~> = NotCKw Id ;
 FieldDecl   = FnPtrField | FDecl ;
 FDecl       = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] [ BitWidth ] ;
@@ -736,7 +752,7 @@ PtrQual     = "const" KwEnd | "volatile" KwEnd | "restrict" KwEnd | "_Atomic" Kw
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 // StructDecl / UnionDecl come BEFORE Decl: they own the 'struct'/'union' base type,
 // which BaseTy does not read.
-Statement   = Block | If | While | Do | For | Switch | Return | Break | Continue
+Statement   = Block | If | While | Do | For | Switch | SwitchCase | Return | Break | Continue
             | AssertStmt | BoolDecl | LProto | LTagFwd | LStructDef | LUnionDef | StructDefDecl | UnionDefDecl
             | LTypedef | StaticDecl | StructDecl | UnionDecl | Decl
             | Goto | PPCondStmt | PPStmt | Label | TdDecl | Empty | ExprStmt ;
@@ -870,12 +886,17 @@ Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
 // C switch with fallthrough: execution starts at the first matching case (or default)
 // and runs until a break or the end of the switch. Labels may stack (case 1: case 2:).
 Switch      <~~ push(makeSwitch(takeAll())) ~~>
-            = KwSwitch "(" Expression ")" "{" { SwitchCase } "}" ;
+            = KwSwitch "(" Expression ")" Statement ;
+// A case label is a LABELED STATEMENT, not a clause of the switch, and it may stand
+// wherever a statement may - directly under the switch ('switch (x) case 0: ;'), inside
+// a nested block, or in the middle of a loop body, which is what makes Duff's device
+// legal C. Fallthrough is then just ordinary sequencing: the statements after a case
+// label are its siblings, and the next case label is another one.
 SwitchCase  = Case | Default ;
 Case        <~~ push(makeCase(takeAll())) ~~>
-            = KwCase CondExpr ":" { Statement } ;
-Default     <~~ push(makeDefault(takeAll())) ~~>
-            = KwDefault ":" { Statement } ;
+            = KwCase CondExpr ":" Statement ;
+Default     <~~ push(makeDefault(pop())) ~~>
+            = KwDefault ":" Statement ;
 
 Decl        = DeclCore ";" ;
 DeclCore    <~~ push(makeDeclSeq(takeAll(), false)) ~~>
@@ -885,11 +906,19 @@ DeclCore    <~~ push(makeDeclSeq(takeAll(), false)) ~~>
 // reads. It has to be tried first - InitDecl cannot start with a '('.
 // FnPtrDecl comes first: both start '( * name', and only what follows the ')' tells
 // a function pointer ('(int)') from a pointer to an array ('[3]') apart.
-DeclItem    = FnPtrDecl | PtrArrDecl | InitDecl ;
+DeclItem    = FnPtrRetDecl | FnPtrDecl | PtrArrDecl | InitDecl ;
 // 'int (*fp)(int)' - a pointer to a function - and 'int (*tab[2])(int)', an array
 // of them. A function pointer is one cell holding the callee's identifier.
 FnPtrDecl   <~~ push({dcl: makeDeclr(takeAll(), "fnptr")}) ~~>
             = [ PStars ] "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams [ "=" DInit ] ;
+// 'int (* (*p)(int, int))(int, int)' - a pointer to a function RETURNING a function
+// pointer, the declarator FnPtrFuncDef defines ('int (*f1(int, int))(int, int)') read
+// as a variable. It has to come before FnPtrDecl: both open '( *', and only the second
+// '(' tells them apart. A function pointer is one cell holding a callee identifier
+// whatever its signature, so the two levels need no separate type - the calls
+// '(*(*p)(0, 2))(2, 2)' resolve one at a time.
+FnPtrRetDecl <~~ push({dcl: makeDeclr(takeAll(), "fnptr")}) ~~>
+            = [ PStars ] "(" Stars "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams ")" FnParams [ "=" DInit ] ;
 PtrArrDecl  <~~ push({dcl: makeDeclr(takeAll(), "ptrarr")}) ~~>
             = "(" Stars Id <~~ push(up.in) ~~> ")" ArrDims [ "=" DInit ] ;
 InitDecl    <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
@@ -1107,7 +1136,7 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 // * dereferences (as an expression it loads the pointed to value).
 // AlignOf comes before PostfixExpr: '_Alignof(int)' looks exactly like a call of a
 // function named _Alignof, and the general call seed would claim it first.
-UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Pos | Not | BitNot | Sizeof | AlignOf | Generic | Cast | PostfixExpr ;
+UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Pos | Not | BitNot | Sizeof | AlignOf | GenericCall | Generic | Cast | PostfixExpr ;
 
 // A cast '(Type)expr' converts the value to the named type: an integer wraps to that
 // type's width and signedness, a float truncates towards zero on the way to an
@@ -1134,8 +1163,14 @@ SizeofExpr  <~~ push(makeSizeofExpr(pop())) ~~>
 AlignOf     <~~ push(makeSizeof(pop())) ~~>
             = KwAlignof "(" TypeName ")" ;
 // A TYPE NAME: a scalar/struct/union/enum base plus a run of pointer stars.
+// An ABSTRACT function-pointer declarator may follow, so a cast can name a function
+// pointer type: '(void (*)(void))0' and '(int (*)(int, int))f'. All this model needs
+// from it is that the result IS a function pointer, so the parameter list is skipped
+// whole and every one of them is the same ctFn. GCC attributes are allowed where a
+// declarator may carry them ('int (__attribute__((noinline)) *)(void)').
 TypeName    <~~ push(makeTypeName(takeAll())) ~~>
-            = SizeBase { "*" <~~ push("*") ~~> [ PtrQual ] } ;
+            = SizeBase { "*" <~~ push("*") ~~> [ PtrQual ] } [ AbsFnPtr | ArrDims ] ;
+AbsFnPtr    <~~ push({fnabs: true}) ~~> = "(" { Attr } Stars { Attr } ")" FnParams ;
 SizeBase    = ScalarName
             | EnumRef <~~ push(ctInt) ~~>
             | KwStruct Id <~~ push(ctStruct(up.in)) ~~>
@@ -1150,8 +1185,20 @@ ScalarName  <~~ push(makeScalarName(takeAll())) ~~>
 // the whole construct yields; the others are never evaluated.
 Generic     <~~ push(makeGeneric(takeAll())) ~~>
             = KwGeneric "(" AssignExpr "," GenAssoc { "," GenAssoc } ")" ;
+// '_Generic(a, int: a_f, const int: b_f)()' - the selection yields a function pointer
+// and the call follows. It needs its OWN production because UnaryExpr reaches Generic
+// before PostfixExpr, so the bare form would win and leave the '(' behind; requiring at
+// least one suffix here keeps the bare form falling through to Generic unchanged.
+GenericCall <~~ push(makeCallExpr(takeAll())) ~~>
+            = Generic ( ArgList | PlaceSfx ) { ArgList | PlaceSfx } ;
+// A TYPEDEF NAME may name the association's type ('_Generic(foo, fptr: 3, int: 4)').
+// This is the one place a bare identifier can be read as a type without the ambiguity
+// that makes it impossible in a CAST: the ':' has to follow, and no expression may
+// stand there, so nothing else could have been meant. KwDefault comes first - 'default'
+// is a keyword, not a typedef name.
 GenAssoc    <~~ push(makeGenAssoc(takeAll())) ~~>
-            = ( TypeName | KwDefault <~~ push("default") ~~> ) ":" AssignExpr ;
+            = ( TypeName | KwDefault <~~ push("default") ~~> | TdGenTy ) ":" AssignExpr ;
+TdGenTy     <~~ push(typedefOf(up.in)) ~~> = NotCKw Id ;
 KwGeneric   = "_Generic" KwEnd ;
 ScalarTok   <~~ push(up.in) ~~> = ScalarKw ;
 ScalarKw    = "char" KwEnd | "short" KwEnd | "int" KwEnd | "long" KwEnd
@@ -1182,9 +1229,28 @@ PostIncDec  <~~ push(makePostIncDec(pop(), pop())) ~~>
 // also a variable holding a function pointer), a parenthesized place ('(*fp)(4)'),
 // or a place path ('tab[0](3)'). Several argument lists chain, so 'pick(1)(5)' calls
 // what pick returned.
+//
+// A call result is a VALUE, not a place, but C still lets a suffix step off it:
+// 'mk().a' selects a field of a returned struct, 'getp()[1]' indexes a returned
+// pointer, and 'go()()->zerofunc()' does both and then calls what it found. So the
+// chain after the first argument list mixes the two - each PlaceSfx steps the value
+// (makeValStep) and each ArgList calls it. Only the FIRST step of such a chain is
+// value-based; everything after it is an ordinary address walk again.
 CallExpr    <~~ push(makeCallExpr(takeAll())) ~~>
-            = CallSeed ArgList { ArgList } ;
-CallSeed    = ParenSfxRef | ParenPlaceRef | PlaceRef | NameSeed ;
+            = CallSeed ArgList { ArgList | PlaceSfx } ;
+// ParenCastRef is what lets a CAST be the callee: '((void (*)(void))0)()' calls the
+// address the cast names. It is deliberately a Cast and not a general parenthesized
+// expression - Cast fails on its first token unless a type keyword is there, so an
+// ordinary '(a + b)' pays nothing for it, whereas re-parsing every parenthesized
+// expression would double the work on the deeply nested casts the corpus is full of.
+// ParenDerefCall is '(*(*p)(0, 2))(2, 2)': the callee is what a call returned, with a
+// '*' in front of it. Dereferencing a FUNCTION POINTER yields the function designator,
+// which decays straight back to the same pointer (C11 6.5.3.2p4), so the '*' is the
+// identity here - unlike '(*fp)(4)', where fp is a VARIABLE and the cell must be read,
+// which is why this alternative sits before the place form but insists on a CALL inside.
+CallSeed    = ParenSfxRef | ParenDerefCall | ParenPlaceRef | PlaceRef | NameSeed | ParenCastRef ;
+ParenDerefCall = "(" "*" CallExpr ")" ;
+ParenCastRef = "(" Cast ")" ;
 ParenPlaceRef <~~ push(makeLoad(pop())) ~~> = "(" Lvalue ")" ;
 NameSeed    <~~ push({fname: up.in}) ~~> = Id ;
 ArgList     <~~ push({args: takeAll()}) ~~>
@@ -1198,7 +1264,18 @@ ArgList     <~~ push({args: takeAll()}) ~~>
 // general form would consume '(*pa)' and leave the '[1]' behind.
 // FloatLit comes before NumberLit: the integer form matches the '1' of '1e3' and a
 // PEG never goes back for the longer read.
-Primary     = CompLitRef | ParenSfxRef | "(" Expression ")" | StrRef | FloatLit | NumberLit | CharLit | PlaceRef | VarRef ;
+// StmtExpr comes first: '({ ... })' starts like a parenthesized expression, and the
+// general form would consume the '(' and then choke on the '{'.
+Primary     = StmtExpr | CompLitRef | ParenSfxRef | "(" Expression ")" | StrRef | FloatLit | NumberLit | CharLit | PlaceRef | VarRef ;
+// A GCC STATEMENT EXPRESSION '({ stmt; stmt; expr; })': an ordinary block, in its own
+// scope, whose value is the value of its LAST expression statement (and 0 when it has
+// none). Rather than single that statement out in the syntax - which needs a lookahead
+// for 'is the next token after this ";" the closing "}"' - every expression statement
+// records its value, so the last one to record simply wins. That is the same order in
+// both halves: the interpreter records while it RUNS the block, the compiler while it
+// EMITS it, and in either case the block's own statements are the last to act.
+StmtExpr    <~~ push(makeStmtExpr(takeAll())) ~~>
+            = "(" "{" { Statement } "}" ")" ;
 ParenSfxRef <~~ push(makeLoad(pop())) ~~> = ParenSfx ;
 CompLitRef  <~~ push(makeLoad(pop())) ~~> = CompLitP ;
 StrRef      <~~ push(makeLoad(pop())) ~~> = StrPlaceP ;
@@ -1528,10 +1605,21 @@ KwDefault   = "default" KwEnd ;
         return (item != undefined && item.ptr != undefined) ? item.ptr : 0
     }
     // enum: sequential values from 0, or continuing after an explicit '= n'.
-    function makeEnumVal(items) { return items.length > 1 ? -items[1] : items[0] }
+    // The counter lives here rather than in defineEnum because a constant has to be
+    // READABLE by the enumerators after it ('A = 4, B = A + 1'), which means it must be
+    // in the table when the NEXT enumerator's initializer folds, not one rule later.
+    var enumNext = 0
+    function enumStart() { enumNext = 0 }
+    function enumConstOf(name) {
+        if (!hasOwn(enumConsts, name)) fail("enum initializer names an unknown constant: " + name)
+        return enumConsts[name] | 0
+    }
     function makeEnumerator(items) {
-        if (items.length > 1) return {name: items[0], explicit: items[1].val}
-        return {name: items[0]}
+        var v = enumNext
+        if (items.length > 1) { v = items[1].val | 0 }
+        enumConsts[items[0]] = v
+        enumNext = v + 1
+        return items.length > 1 ? {name: items[0], explicit: v} : {name: items[0]}
     }
     function defineEnum(items) {
         var next = 0
@@ -1608,7 +1696,14 @@ KwDefault   = "default" KwEnd ;
     // A type NAME: the base type plus one pointer level per '*'.
     function makeTypeName(items) {
         var ct = items[0]
-        for (var i = 1; i < items.length; i++) ct = {k: "ptr", p: ct}
+        for (var i = 1; i < items.length; i++) {
+            // An abstract function-pointer declarator ends the type whatever came before
+            // it: '(void (*)(void))' is a function pointer, not a pointer to void.
+            if (items[i] != undefined && items[i].fnabs == true) return ctFn
+            // An abstract ARRAY declarator: '_Generic(a, int[4]: 2, ...)', 'sizeof(int[4])'.
+            if (items[i] != undefined && items[i].dims != undefined) return arrCt(items[i].dims, ct, 0)
+            ct = {k: "ptr", p: ct}
+        }
         return ct
     }
     // A _Bool declarator: the initializer is normalized to 0 or 1.
@@ -2106,7 +2201,12 @@ KwDefault   = "default" KwEnd ;
     // that knows the label catches it and resumes there - which covers forward jumps,
     // backward jumps and jumps out of nested loops alike.
     function makeLabel(items) { return {lbl: items[0], t: items[1]} }
-    function makeGoto(name) { return function() { return {isGoto: true, label: name} } }
+    function makeGoto(name) {
+        return function() {
+            if (swSkip()) return undefined
+            return {isGoto: true, label: name}
+        }
+    }
     makeSeq = function (items) {
         var stmts = []
         var labels = {}
@@ -2330,13 +2430,57 @@ KwDefault   = "default" KwEnd ;
     }
     // Reading a place loads its cell - except an ARRAY place, which decays to the
     // address of its first element ('m[0]' used as an int*).
+    function placeVal(p) {
+        var ct = p.ct != undefined ? p.ct : ctInt
+        if (ct.k == "arr") return val(p.a, {k: "ptr", p: ct.e})
+        if (ct.k == "struct") return val(p.a, ct)
+        return val(load(p.a), ct)
+    }
     function makeLoad(placeT) {
+        return function() { return placeVal(placeT()) }
+    }
+    // One suffix step off a VALUE rather than a place. A struct value already IS the
+    // address of its storage, so '.f' only adds the field offset; a pointer value is
+    // the address itself, so '[i]' and '->f' must NOT load first the way walkPath
+    // does for a pointer VARIABLE (there is no cell holding this pointer). The answer
+    // is a place, so any further steps carry on through walkPath unchanged.
+    function makeValStep(v, s) {
+        var ct = v.t != undefined ? v.t : ctInt
+        if (s.idx != undefined) {
+            if (ct.k != "arr" && ct.k != "ptr") fail("indexing needs an array or a pointer: call result")
+            var et = ct.k == "arr" ? ct.e : ct.p
+            return {a: v.v + szNum(s.idx().v) * ctSize(et), ct: et, bf: undefined}
+        }
+        if (s.fld != undefined) {
+            if (ct.k != "struct") fail("'.' needs a struct value: ." + s.fld)
+            var f = fieldOf(ct.s, s.fld)
+            return {a: v.v + f.off, ct: f.ct, bf: f.bf}
+        }
+        if (ct.k != "ptr" || ct.p.k != "struct") fail("'->' needs a struct pointer: ->" + s.arw)
+        var f2 = fieldOf(ct.p.s, s.arw)
+        return {a: v.v + f2.off, ct: f2.ct, bf: f2.bf}
+    }
+    // ----- GCC statement expressions -----
+    // The value of the last expression statement to RUN. exprToStmt is overridden to
+    // record it: every expression statement in the program writes here, and a statement
+    // expression reads it back after its block has run. Nesting is safe because the
+    // writes happen in execution order - a call inside the block writes while it runs,
+    // and the block's own statement writes after it returns.
+    var lastExprVal = undefined
+    exprToStmt = function(t) { return function() { if (swSkip()) return undefined; lastExprVal = t() } }
+    function makeStmtExpr(items) {
+        var body = makeBlockStmt(items)
         return function() {
-            var p = placeT()
-            var ct = p.ct != undefined ? p.ct : ctInt
-            if (ct.k == "arr") return val(p.a, {k: "ptr", p: ct.e})
-            if (ct.k == "struct") return val(p.a, ct)
-            return val(load(p.a), ct)
+            var saved = lastExprVal
+            lastExprVal = undefined
+            var sig = body()
+            // return / goto / break / continue leaving a statement expression would have
+            // to travel out through an EXPRESSION, which no thunk here can carry. Saying
+            // so is the honest answer; silently dropping the jump is not.
+            if (sig != undefined) fail("a jump out of a statement expression is not supported")
+            var v = lastExprVal
+            lastExprVal = saved
+            return v != undefined ? v : val(0, ctInt)
         }
     }
     makeNot = function(t) { return function() { return val(nzv(t().v) ? 0 : 1, ctInt) } }
@@ -2490,7 +2634,9 @@ KwDefault   = "default" KwEnd ;
                 v = seed()
             }
             for (var i = start; i < lists.length; i++) {
-                v = callFunction(funcNameOf(v.v), evalArgs(lists[i].args))
+                var s = lists[i]
+                if (s.args != undefined) { v = callFunction(funcNameOf(v.v), evalArgs(s.args)) }
+                else { v = placeVal(makeValStep(v, s)) }
             }
             return v
         }
@@ -2561,7 +2707,10 @@ KwDefault   = "default" KwEnd ;
     function makeDeclOf(name, ct, opt) {
         return function() {
             var a = alloc(ctSize(ct))
-            if (opt != undefined) initInto(ct, opt, a)
+            // A switch may jump PAST a declaration (C11 6.2.4: the object still exists,
+            // it just was never initialized), so while seeking the storage is still
+            // made - only the initializer is skipped.
+            if (opt != undefined && !swSkip()) initInto(ct, opt, a)
             declVar(name, a, ct.k == "arr", ct)
         }
     }
@@ -2614,8 +2763,67 @@ KwDefault   = "default" KwEnd ;
     }
     // items = [{ptr}, name, [params...], bodyThunk].
     function defineFnPtrFunc(items) { funcs[items[1]] = {params: items[2], body: items[3]} }
+    // The loop and branch forms all follow the same shape while a switch is seeking:
+    // enter the BODY without evaluating anything (a jump into a loop skips the
+    // controlling expression, C11 6.8.6.1), and if the label was found in there, carry
+    // straight on with the ordinary loop from that point.
+    makeIf = function(items) {
+        var cond = items[0]
+        var thenT = items[1]
+        var elseT = items.length > 2 ? items[2] : null
+        return function() {
+            if (swSeeking) {
+                // The label may be in EITHER arm, and the arm that finds it is the one
+                // that keeps running - so the other must not be entered at all.
+                var rt = thenT()
+                if (!swSeeking) return rt
+                if (elseT != null) return elseT()
+                return undefined
+            }
+            if (nzv(cond().v)) return thenT()
+            if (elseT != null) return elseT()
+            return undefined
+        }
+    }
+    makeWhile = function(bodyT, condT) {
+        return function() {
+            if (swSeeking) {
+                var r0 = bodyT()
+                if (swSeeking) return undefined          // not in this loop
+                if (r0 != undefined) {
+                    if (r0 === BRK) return undefined
+                    if (r0 !== CONT) return r0
+                }
+            }
+            while (nzv(condT().v)) {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) return r
+                }
+            }
+            return undefined
+        }
+    }
     function makeDo(condT, bodyT) {
         return function() {
+            if (swSeeking) {
+                var r0 = bodyT()
+                if (swSeeking) return undefined
+                if (r0 != undefined) {
+                    if (r0 === BRK) return undefined
+                    if (r0 !== CONT) return r0
+                }
+                // The partial iteration is done; the condition decides the next one.
+                while (nzv(condT().v)) {
+                    var r1 = bodyT()
+                    if (r1 != undefined) {
+                        if (r1 === BRK) break
+                        if (r1 !== CONT) return r1
+                    }
+                }
+                return undefined
+            }
             do {
                 var r = bodyT()
                 if (r != undefined) {
@@ -2623,6 +2831,7 @@ KwDefault   = "default" KwEnd ;
                     if (r !== CONT) return r
                 }
             } while (nzv(condT().v))
+            return undefined
         }
     }
     function makeFor(items) {
@@ -2636,7 +2845,17 @@ KwDefault   = "default" KwEnd ;
         return function() {
             scopes.push({})
             var res = undefined
-            if (init != null) init()
+            var seeking0 = swSeeking
+            if (init != null && !seeking0) init()
+            if (seeking0) {
+                var r0 = bodyT()
+                if (swSeeking) { scopes.pop(); return undefined }   // not in this loop
+                if (r0 != undefined) {
+                    if (r0 === BRK) { scopes.pop(); return undefined }
+                    if (r0 !== CONT) { scopes.pop(); return r0 }
+                }
+                if (post != null) post()
+            }
             while (cond == null || nzv(cond().v)) {
                 var r = bodyT()
                 if (r != undefined) {
@@ -2649,38 +2868,75 @@ KwDefault   = "default" KwEnd ;
             return res
         }
     }
-    // items = [valueThunk, stmtThunk...] resp. [stmtThunk...] -> one case descriptor.
-    function makeCase(items) { return {isDefault: false, v: items[0], body: items.slice(1)} }
-    function makeDefault(items) { return {isDefault: true, body: items} }
-    // items = [scrutineeThunk, caseDescriptor...]: C switch with fallthrough.
+    // ----- switch: the SEEK model -----
+    // A case label may sit anywhere inside the switch body, including inside a nested
+    // block or halfway down a loop body (Duff's device), so a switch cannot be a list
+    // of clauses: it has to JUMP INTO its body. An interpreter that walks thunks cannot
+    // jump, so it does the equivalent - it runs the body in SEEK mode, where every
+    // statement with an effect is a no-op and only the case labels look at anything.
+    // The label that matches clears the flag, and from that instant the very same walk
+    // is an ordinary execution that simply continues where it stands: through the rest
+    // of the block, out of it, and on into the following statements (fallthrough), or
+    // round the enclosing loop again (which is exactly what Duff's device wants).
+    //
+    // A pass that finds nothing has no effects at all, which is what makes the second
+    // pass - the one that looks for 'default:' - safe.
+    var swSeeking = false
+    var swTarget = 0
+    var swDefault = false
+    // Every leaf statement asks this before doing anything.
+    function swSkip() { return swSeeking }
+    function makeCase(items) {
+        var vT = items[0]
+        var t = items[1]
+        return function() {
+            if (swSeeking && !swDefault && vT().v == swTarget) { swSeeking = false }
+            return t()
+        }
+    }
+    function makeDefault(t) {
+        return function() {
+            if (swSeeking && swDefault) { swSeeking = false }
+            return t()
+        }
+    }
     function makeSwitch(items) {
         var scrut = items[0]
-        var cases = items.slice(1)
+        var bodyT = items[1]
         return function() {
+            // A switch met while an ENCLOSING switch is still seeking is skipped whole:
+            // a case label belongs to its nearest enclosing switch, so the label being
+            // sought cannot be in there.
+            if (swSeeking) return undefined
             var v = scrut().v
-            var start = -1
-            var dflt = -1
-            for (var i = 0; i < cases.length; i++) {
-                if (cases[i].isDefault) { dflt = i; continue }
-                if (start < 0 && cases[i].v().v == v) { start = i }
+            swSeeking = true
+            swTarget = v
+            swDefault = false
+            var r = bodyT()
+            if (swSeeking) {
+                // No case matched. Look for 'default:' - the first pass had no effects.
+                swDefault = true
+                r = bodyT()
+                var missed = swSeeking
+                swSeeking = false
+                swDefault = false
+                if (missed) return undefined
             }
-            if (start < 0) { start = dflt }
-            if (start < 0) { return undefined }
-            for (var i = start; i < cases.length; i++) {
-                var body = cases[i].body
-                for (var j = 0; j < body.length; j++) {
-                    var r = body[j]()
-                    if (r === BRK) { return undefined }        // break leaves the switch
-                    if (r != undefined) { return r }           // return/continue propagate
-                }
-            }
-            return undefined
+            swSeeking = false
+            swDefault = false
+            if (r === BRK) return undefined                // break leaves the switch
+            return r                                       // return/continue/goto propagate
         }
     }
     function makeReturn(items) {
         var t = items.length > 0 ? items[0] : makeInt(0)
-        return function() { return {isRet: true, v: t()} }
+        return function() {
+            if (swSkip()) return undefined
+            return {isRet: true, v: t()}
+        }
     }
+    makeBreak = function() { return function() { return swSkip() ? undefined : BRK } }
+    makeContinue = function() { return function() { return swSkip() ? undefined : CONT } }
     // ----- Top level -----
 
     var unnamedSeq = 0
