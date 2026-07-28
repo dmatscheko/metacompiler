@@ -1696,7 +1696,8 @@ ValueBlock  <~~ push(makeValueBlock(takeAll())) ~~>
 LamStmt     = { Annotation } ( LamCtrl | LamIfValue | LamIf | LamExpr ) | ";" ;
 LamCtrl     <~~ push({stmt: pop()}) ~~>
             = ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
-            | Labeled | LocalFun | LocalType | Decl | While | Do | For | TryStmt | Throw ;
+            | Labeled | LocalFun | LocalModDecl | LocalType | Destructure | DelegateDecl
+            | Decl | BareDecl | While | Do | For | TryStmt | Throw ;
 LamIfValue  <~~ push({expr: pop()}) ~~>
             = IfExpr ;
 LamIf       <~~ push({stmt: pop()}) ~~>
@@ -3796,8 +3797,16 @@ KwContract  = "contract" KwEnd ;
             var ifV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, supers[k].name)])
             for (var j = 0; j < sig.length; j++) {
                 if (ownMethods["$" + sig[j].name] == true) { continue }
+                // The member is read off the interface that DECLARES it: an interface
+                // that merely EXTENDS another (`interface D : X`) does not own X's
+                // methods as properties, so reading them from D answered undefined and
+                // the class was left without them.
+                var declV = ifV
+                if (sig[j].from != undefined && sig[j].from != supers[k].name && knownType(sig[j].from)) {
+                    declV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, sig[j].from)])
+                }
                 callExt(b, "js_set", [clsV, emitStr(b, sig[j].name),
-                                      callExt(b, "js_get", [ifV, emitStr(b, sig[j].name)])])
+                                      callExt(b, "js_get", [declV, emitStr(b, sig[j].name)])])
             }
         }
         return b
@@ -5653,6 +5662,11 @@ KwContract  = "contract" KwEnd ;
             // divergence no test happened to exercise.
             var entriesV = callExt(b, "js_arr_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__entries"), entriesV])
+            // Bare `entries` inside an enum's own member or its companion: Kotlin 1.9's
+            // EnumEntries is a member of the enum, so it needs no qualifier there. Only
+            // `L.entries` resolved before, in BOTH halves. Declared into the ENTRY
+            // scope, which the members and the companion close over.
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "entries"), entriesV])
             for (var e = 0; e < entries.length; e++) {
                 var objV = callExt(b, "js_obj_new", [])
                 callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
@@ -5671,6 +5685,14 @@ KwContract  = "contract" KwEnd ;
                 callExt(b, "js_arr_push", [entriesV, objV])
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, entries[e].ename), objV])
             }
+            // The COMPANION of an enum class - `enum class L { A, B; companion object
+            // { fun of(n: Int) = ... } }`, the ordinary spelling of an enum factory.
+            // Only the class emitter used to attach one, so `L.of(1)` aborted the
+            // compiled half with "unknown method 'of'" while the interpreter answered
+            // it: a live cross-half divergence. It is emitted while curScopeV is still
+            // the ENTRY scope, so a bare entry name (and the enum's own methods) resolve
+            // inside the companion's members, which is what Kotlin's scoping says.
+            if (parts.companion != null) { b = emitCompanion(b, clsV, parts.companion, parts.compName) }
             curScopeV = saved
             b = emitNestedList(b, clsV, null, parts.nested, name)
             return b
@@ -5752,13 +5774,36 @@ KwContract  = "contract" KwEnd ;
         interfaceNames["$" + name] = true
         lastDeclaredType = name
         var sig = []
+        // `from` is the interface that DECLARES the member, which is not always the one
+        // a class names as its supertype (see the inheritance loop below): the copy in
+        // emitSuperLinks has to read the method off the declaring descriptor.
         for (var i = 0; i < methods.length; i++) {
-            sig.push({name: methods[i].name, params: methods[i].params})
+            sig.push({name: methods[i].name, params: methods[i].params, from: name})
             classMethodNames["$" + methods[i].name] = true
         }
         for (var a = 0; a < parts.abstracts.length; a++) {
-            sig.push({name: parts.abstracts[a].name, params: parts.abstracts[a].params})
+            sig.push({name: parts.abstracts[a].name, params: parts.abstracts[a].params, from: name})
             classMethodNames["$" + parts.abstracts[a].name] = true
+        }
+        // An interface INHERITS its own supertypes' members, and emitSuperLinks copies
+        // a signature list into the implementing class - so `interface D : X` with an
+        // empty body left `class C : A, D` without any of X's defaults ("unknown method
+        // 'x'"), while the interpreter half, which walks the supertype graph at lookup
+        // time, answered them. Only the FIRST supertype gets the __super link a lookup
+        // can follow, which is why the second one has to carry the full list. The walk
+        // is a static pass in file order, so a supertype declared LATER in the file
+        // contributes nothing here - the same limitation knownType() already has.
+        for (var si = 0; si < hdr.supers.length; si++) {
+            var psig = interfaceMethods["$" + hdr.supers[si].name]
+            if (psig == undefined) { continue }
+            for (var pj = 0; pj < psig.length; pj++) {
+                var dup = false
+                for (var dj = 0; dj < sig.length; dj++) {
+                    if (sig[dj].name == psig[pj].name) { dup = true }
+                }
+                if (!dup) { sig.push({name: psig[pj].name, params: psig[pj].params,
+                                      from: psig[pj].from != undefined ? psig[pj].from : hdr.supers[si].name}) }
+            }
         }
         interfaceMethods["$" + name] = sig
         // The SAM is installed only for a `fun interface` whose body declares exactly
@@ -5832,13 +5877,19 @@ KwContract  = "contract" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arrayOf"), loV])
         // The typed array constructors are the same "return the argument array"
         // function: intArrayOf(1, 2) is a list of those elements in this value model.
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "intArrayOf"), loV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "longArrayOf"), loV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "doubleArrayOf"), loV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "floatArrayOf"), loV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "booleanArrayOf"), loV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "charArrayOf"), loV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "emptyList"), loV])
+        // The value model cannot tell one element WIDTH from another either (a Byte and
+        // an Int are the same host number), so `byteArrayOf(200)` - a Kotlin COMPILE
+        // error, whose legal spelling is `byteArrayOf((-56).toByte())` - is accepted
+        // here, exactly as in the interpreter half. The unsigned builders are Kotlin's
+        // @ExperimentalUnsignedTypes ones; the whole family is declared so a program
+        // using any of them resolves the name in both halves.
+        var arrayBuilders = ["intArrayOf", "longArrayOf", "doubleArrayOf", "floatArrayOf",
+                             "booleanArrayOf", "charArrayOf", "byteArrayOf", "shortArrayOf",
+                             "ubyteArrayOf", "ushortArrayOf", "uintArrayOf", "ulongArrayOf",
+                             "emptyArray", "emptyList"]
+        for (var ab = 0; ab < arrayBuilders.length; ab++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, arrayBuilders[ab]), loV])
+        }
         // A Sequence is EAGER in this subset (see kotlin-interpreter.abnf), so
         // sequenceOf IS listOf and every operator on it is the list operator.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "sequenceOf"), loV])
@@ -5862,7 +5913,9 @@ KwContract  = "contract" KwEnd ;
                           "checkNotNull", "error", "TODO", "runCatching", "lazy",
                           "List", "MutableList", "Array", "arrayOfNulls", "IntArray",
                           "LongArray", "ShortArray", "ByteArray", "DoubleArray",
-                          "FloatArray", "BooleanArray", "listOfNotNull", "setOfNotNull",
+                          "FloatArray", "BooleanArray", "CharArray", "UByteArray",
+                          "UShortArray", "UIntArray", "ULongArray",
+                          "listOfNotNull", "setOfNotNull",
                           // The SET constructors: their own shape since sets stopped
                           // being lists (ktMakeSet / ktSetMethod in jsrtkotlin.go).
                           "setOf", "mutableSetOf", "hashSetOf", "linkedSetOf",

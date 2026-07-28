@@ -951,7 +951,29 @@ func init() {
 			switch v.(type) {
 			case jsGInt, jsJFlo, float64:
 			default:
-				return baseIs(a)
+				if r := baseIs(a); u(r) == interface{}(true) {
+					return r
+				}
+				// A QUALIFIED type name - `is Shape.Circle`, which is how a NESTED
+				// class is spelled from outside its owner, and the shape a sealed
+				// hierarchy is normally written in. A descriptor is registered under
+				// its SIMPLE name, so the qualified spelling matched nothing and the
+				// `is` branch of an ordinary `when (this)` over a sealed class fell
+				// through to the else. Dropping the qualifier is the same convention
+				// this subset already applies to packages and imports; the twin is
+				// kIsType in kotlin-interpreter.abnf.
+				qt := rt.toString(u(a[1]))
+				if i := strings.IndexByte(qt, '<'); i >= 0 {
+					qt = qt[:i]
+				}
+				if i := strings.LastIndexByte(strings.TrimSuffix(qt, "?"), '.'); i >= 0 {
+					short := strings.TrimSuffix(qt, "?")[i+1:]
+					if strings.HasSuffix(qt, "?") {
+						short += "?"
+					}
+					return baseIs([]uint64{a[0], rt.wrapStr(short)})
+				}
+				return boolH(false)
 			}
 			t := rt.toString(u(a[1]))
 			if i := strings.IndexByte(t, '<'); i >= 0 {
@@ -2410,7 +2432,12 @@ func (rt *jsrt) ktEnumMethod(recv interface{}, name string, args []interface{}) 
 			}
 		}
 		cn, _ := o.props["__name"].(string)
-		rt.fail("no enum constant %s.%s", cn, want)
+		// Kotlin THROWS IllegalArgumentException here, which is why
+		// `runCatching { Level.valueOf(s) }.getOrNull()` is the ordinary way to parse
+		// an enum from text. This used to abort the whole run with a host error in
+		// both halves, so that idiom could not be written. Twin: the valueOf arm of
+		// mcall in kotlin-interpreter.abnf.
+		rt.ktRaise("IllegalArgumentException", "No enum constant "+cn+"."+want)
 	}
 	return nil, false
 }
@@ -3086,6 +3113,34 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 		return arr(out), true
 	case "sorted", "sortedDescending":
 		return ktSortBy(rt, es, nil, name == "sortedDescending"), true
+	// The ARRAY spellings of sorted/sortedDescending/reversed. Kotlin gives Array its
+	// own names because they answer an Array rather than a List; the two are one shape
+	// here, so they are the list operators under a second name.
+	case "sortedArray", "sortedArrayDescending":
+		return ktSortBy(rt, es, nil, name == "sortedArrayDescending"), true
+	case "reversedArray":
+		out := make([]interface{}, len(es))
+		for i, e := range es {
+			out[len(es)-1-i] = e
+		}
+		return arr(out), true
+	// contentToString / contentEquals: an Array gets NO structural toString or equals in
+	// Kotlin (it prints as its identity and compares by reference), so these two are how
+	// an array is printed and compared element by element. ktpRender already produces
+	// Kotlin's `[1, 2]` for the list shape an array is here.
+	case "contentToString", "contentDeepToString":
+		return rt.ktpRender(arr(es), 0), true
+	case "contentEquals", "contentDeepEquals":
+		other, ok := argAt(args, 0).(*jsArray)
+		if !ok || len(other.elems) != len(es) {
+			return false, true
+		}
+		for i, e := range es {
+			if !rt.ktEqVals(e, other.elems[i]) {
+				return false, true
+			}
+		}
+		return true, true
 	case "sortedBy", "sortedByDescending":
 		return ktSortBy(rt, es, f, name == "sortedByDescending"), true
 	case "maxOrNull", "minOrNull":
@@ -3117,7 +3172,17 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 			return arr(append([]interface{}{}, es[:len(es)-k]...)), true
 		}
 		return arr(append([]interface{}{}, es[len(es)-k:]...)), true
-	case "toList", "toMutableList", "asSequence", "asIterable", "toTypedArray":
+	// The ARRAY-to-collection conversions. An Array and a List are the same host array
+	// in this value model, so every one of them is a COPY of the elements - which is
+	// what Kotlin's toList/toMutableList/toTypedArray/to*Array do. `asList`,
+	// `asSequence` and `asIterable` are Kotlin VIEWS (a write through the array shows
+	// in them); the copy differs observably only for a program that mutates the array
+	// and then reads the view, which this subset does not model. Twin of the same
+	// grouped arm in kotlin-interpreter.abnf.
+	case "toList", "toMutableList", "asSequence", "asIterable", "asList",
+		"toIntArray", "toLongArray", "toShortArray", "toByteArray",
+		"toDoubleArray", "toFloatArray", "toBooleanArray", "toCharArray",
+		"toTypedArray":
 		return arr(append([]interface{}{}, es...)), true
 	case "withIndex":
 		out := make([]interface{}, len(es))
@@ -4592,7 +4657,8 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 			return rt.ktRunCatching(argAt(args, 0))
 		})
 	case "List", "MutableList", "Array", "IntArray", "LongArray", "ShortArray",
-		"ByteArray", "DoubleArray", "FloatArray", "BooleanArray", "arrayOfNulls":
+		"ByteArray", "DoubleArray", "FloatArray", "BooleanArray", "CharArray",
+		"UByteArray", "UShortArray", "UIntArray", "ULongArray", "arrayOfNulls":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			n := jsToInt(rt.toNumber(argAt(args, 0)))
 			init := argAt(args, 1)
@@ -4603,6 +4669,10 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 					out.elems = append(out.elems, rt.ktCall(init, float64(i)))
 				case name == "BooleanArray":
 					out.elems = append(out.elems, false)
+				case name == "CharArray":
+					// A Char is a real type here, so CharArray(n) fills with
+					// Kotlin's NUL char, not with the number 0.
+					out.elems = append(out.elems, jsChar{code: 0})
 				case name == "List" || name == "MutableList" || name == "Array" || name == "arrayOfNulls":
 					out.elems = append(out.elems, jsNull)
 				default:
@@ -4631,9 +4701,11 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 	// returns its argument array; they are here too so a QUALIFIED spelling
 	// (kotlin.collections.listOf) resolves through ktPkgMember, which has no reach
 	// into the emitted scope.
-	case "listOf", "mutableListOf", "arrayListOf", "arrayOf", "emptyList",
+	case "listOf", "mutableListOf", "arrayListOf", "arrayOf", "emptyList", "emptyArray",
 		"intArrayOf", "longArrayOf", "doubleArrayOf", "floatArrayOf",
-		"booleanArrayOf", "charArrayOf", "sequenceOf", "emptySequence":
+		"booleanArrayOf", "charArrayOf", "byteArrayOf", "shortArrayOf",
+		"ubyteArrayOf", "ushortArrayOf", "uintArrayOf", "ulongArrayOf",
+		"sequenceOf", "emptySequence":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return &jsArray{elems: append([]interface{}{}, args...)}
 		})

@@ -1073,7 +1073,7 @@ ForDestruct <~~ push(makeForDestruct(takeAll())) ~~>
 DTuple      <~~ push({dnames: takeAll()}) ~~>
             = "(" DName { "," DName } [ "," ] ")" | "[" DName { "," DName } [ "," ] "]" ;
 DTupleKwV   <~~ push({dnames: takeAll()}) ~~>
-            = "(" DNameKwV { "," DNameKwV } [ "," ] ")" | "[" DNameKwV { "," DNameKwV } [ "," ] "]" ;
+            = "(" DNameKwV { "," DNameKwV } [ "," ] ")" | "[" DNameKwVB { "," DNameKwVB } [ "," ] "]" ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn NoSpacedAt [ Expression ] [ ";" ] ;
@@ -1719,7 +1719,9 @@ ValueBlock  <~~ push(makeValueBlock(takeAll())) ~~>
 LamStmt     = { Annotation } ( LamCtrl | LamIfValue | LamIf | LamExpr ) | ";" ;
 LamCtrl     <~~ push({stmt: pop()}) ~~>
             = ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
-            | Labeled | LocalTypeDecl | LocalExtFun | LocalFun | Destructure | Decl | BareDecl | While | Do | For | TryStmt | Throw ;
+            | Labeled | LocalTypeAlias | LocalClass | LocalTypeDecl | LocalExtFun | LocalFun
+            | Destructure | DestructAssign | DelegateDecl | Decl | BareDecl | LocalModDecl
+            | While | Do | For | TryStmt | Throw ;
 LamIfValue  <~~ push({expr: pop()}) ~~>
             = IfExpr ;
 LamIf       <~~ push({stmt: pop()}) ~~>
@@ -1734,7 +1736,7 @@ LambdaParams <~~ push({lparams: takeAll()}) ~~>
 // warns once, so the lambda still parses and runs under -warn-unsupported.
 LParam      = { Annotation } ( DestructLParam | KId <~~ push(up.in) ~~> [ ":" Type ] ) ;
 DestructLParam <~~ push({destruct: takeAll(), pos: up.pos}) ~~>
-            = ( "(" DNameKwV { "," DNameKwV } [ "," ] ")" | "[" DNameKwV { "," DNameKwV } [ "," ] "]"
+            = ( "(" DNameKwV { "," DNameKwV } [ "," ] ")" | "[" DNameKwVB { "," DNameKwVB } [ "," ] "]"
               | "(" DName { "," DName } [ "," ] ")" | "[" DName { "," DName } [ "," ] "]" ) [ ":" Type ] ;
 // No `val` / `var` on an entry. Kotlin's name-based destructuring forbids it in every
 // position - declaration, for-loop and lambda parameter - and
@@ -1749,9 +1751,21 @@ DName       <~~ push(dName(takeAll())) ~~>
 // and `foo { (var first) -> }` are both errors in
 // psi/destructuring/fullNameBasedDestructuringErrors.kt, while
 // `for ((val key, val value) in l)` in variableNamedValueInSquareBrackets.kt is clean).
-DNameKw     <~~ push(dName(takeAll())) ~~>
+// A PARENTHESIZED keyword entry is NAME based - `(val second, val first) = box` reads
+// box.second and box.first, so the ORDER does not matter - while the BRACKETED spelling
+// of the same entry stays POSITION based whatever it says (Kotlin's name-based
+// destructuring proposal; psi/destructuring/fullNameBasedDestructuring.kt next to
+// fullPositionBasedDestructuring.kt). The interpreter read both positionally, so a
+// reversed `(val second, val first)` bound the wrong values while the compiled half -
+// which splits the two through DEntryN / DEntryP - bound Kotlin's. Hence the split into
+// a paren pair and a bracket pair; the two differ only in the flag they hand dName.
+DNameKw     <~~ push(dName(takeAll(), true)) ~~>
             = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] [ "=" KId <~~ push({dfrom: up.in}) ~~> ] ;
-DNameKwV    <~~ push(dName(takeAll())) ~~>
+DNameKwV    <~~ push(dName(takeAll(), true)) ~~>
+            = "val" KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] [ "=" KId <~~ push({dfrom: up.in}) ~~> ] ;
+DNameKwB    <~~ push(dName(takeAll(), false)) ~~>
+            = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] [ "=" KId <~~ push({dfrom: up.in}) ~~> ] ;
+DNameKwVB   <~~ push(dName(takeAll(), false)) ~~>
             = "val" KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] [ "=" KId <~~ push({dfrom: up.in}) ~~> ] ;
 
 // f(a, b): a top level function, a builtin, or a class constructor. A trailing lambda
@@ -2269,7 +2283,7 @@ Destructure <~~ push(makeDestructure(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd { Annotation } DPattern [ ":" Type ] "=" Expression [ ";" ] ;
 DPattern    = "(" DName { "," DName } [ "," ] ")" | "[" DName { "," DName } [ "," ] "]" ;
 // The keyword-carrying pattern, used by the outer-keyword-LESS assignment form only.
-DPatternKw  = "(" DNameKw { "," DNameKw } [ "," ] ")" | "[" DNameKw { "," DNameKw } [ "," ] "]" ;
+DPatternKw  = "(" DNameKw { "," DNameKw } [ "," ] ")" | "[" DNameKwB { "," DNameKwB } [ "," ] "]" ;
 // A destructuring ASSIGNMENT with no leading val/var: (val a, var b) = pair.
 DestructAssign <~~ push(makeDestructure(takeAll())) ~~>
             = { AnnNoArgs } DPatternKw [ ":" Type ] "=" Expression [ ";" ] ;
@@ -3311,11 +3325,28 @@ NotMemberKw = :script(~~
         for (var j = 0; j < sorted.length; j++) { kSetAdd(s, sorted[j]) }
         return s
     }
+    // The PRIMITIVE-array builders. All of them collapse onto listOf: this value model
+    // cannot tell an Array from a List (both are a plain host array), and it cannot tell
+    // one element WIDTH from another either - a Byte and an Int are the same host number.
+    // So `byteArrayOf(200)`, which Kotlin refuses at compile time (200 is not a Byte
+    // literal; the legal spelling is `byteArrayOf((-56).toByte())`), is accepted here.
+    // That is the same width-blindness the rest of the numeric surface already has, and
+    // it is a TYPE question, not a syntax one. The full family is declared so that a
+    // program which uses any of them resolves the name; the unsigned ones (ubyteArrayOf
+    // and friends) are Kotlin's @ExperimentalUnsignedTypes builders.
     hostGlobals["intArrayOf"] = hostGlobals["listOf"]
     hostGlobals["charArrayOf"] = hostGlobals["listOf"]
     hostGlobals["booleanArrayOf"] = hostGlobals["listOf"]
     hostGlobals["doubleArrayOf"] = hostGlobals["listOf"]
+    hostGlobals["floatArrayOf"] = hostGlobals["listOf"]
     hostGlobals["longArrayOf"] = hostGlobals["listOf"]
+    hostGlobals["byteArrayOf"] = hostGlobals["listOf"]
+    hostGlobals["shortArrayOf"] = hostGlobals["listOf"]
+    hostGlobals["ubyteArrayOf"] = hostGlobals["listOf"]
+    hostGlobals["ushortArrayOf"] = hostGlobals["listOf"]
+    hostGlobals["uintArrayOf"] = hostGlobals["listOf"]
+    hostGlobals["ulongArrayOf"] = hostGlobals["listOf"]
+    hostGlobals["emptyArray"] = hostGlobals["listOf"]
     hostGlobals["emptyList"] = hostGlobals["listOf"]
     hostGlobals["emptySet"] = function() { return kMakeSet() }
     // ----- Maps, Pair/Triple, `with` and StringBuilder -----
@@ -3518,6 +3549,16 @@ NotMemberKw = :script(~~
     hostGlobals["ByteArray"] = hostGlobals["IntArray"]
     hostGlobals["DoubleArray"] = hostGlobals["IntArray"]
     hostGlobals["FloatArray"] = hostGlobals["IntArray"]
+    // CharArray(n) fills with Kotlin's NUL char, not 0 - a Char is its glyph here.
+    hostGlobals["CharArray"] = function(n, init) {
+        var out = []
+        for (var i = 0; i < kNum(n); i++) { out.push(typeof init == "function" ? init(i) : kChar(0)) }
+        return out
+    }
+    hostGlobals["UByteArray"] = hostGlobals["IntArray"]
+    hostGlobals["UShortArray"] = hostGlobals["IntArray"]
+    hostGlobals["UIntArray"] = hostGlobals["IntArray"]
+    hostGlobals["ULongArray"] = hostGlobals["IntArray"]
     hostGlobals["BooleanArray"] = function(n, init) {
         var out = []
         for (var i = 0; i < kNum(n); i++) { out.push(typeof init == "function" ? init(i) : false) }
@@ -4896,6 +4937,28 @@ NotMemberKw = :script(~~
         }
         if (name == "sorted") { return {v: kSortBy(es, null, false)} }
         if (name == "sortedDescending") { return {v: kSortBy(es, null, true)} }
+        // The ARRAY spellings of the same three. Kotlin gives Array its own names
+        // because they return an Array rather than a List; here the two are one shape,
+        // so they are the list operators under a second name.
+        if (name == "sortedArray") { return {v: kSortBy(es, null, false)} }
+        if (name == "sortedArrayDescending") { return {v: kSortBy(es, null, true)} }
+        if (name == "reversedArray") {
+            out = []
+            for (i = es.length - 1; i >= 0; i--) { out.push(es[i]) }
+            return {v: out}
+        }
+        // contentToString / contentEquals: Array does NOT get a structural toString or
+        // equals in Kotlin (an array prints as its identity and compares by reference),
+        // so these two are how an array is printed and compared element by element.
+        // `[1, 2]` is Kotlin's rendering, which is what kstr already produces for the
+        // list shape an array is here.
+        if (name == "contentToString" || name == "contentDeepToString") { return {v: kstr(es)} }
+        if (name == "contentEquals" || name == "contentDeepEquals") {
+            var oth = args.length > 0 ? args[0] : null
+            if (!Array.isArray(oth) || oth.length != es.length) { return {v: false} }
+            for (i = 0; i < es.length; i++) { if (!kEq(es[i], oth[i])) { return {v: false} } }
+            return {v: true}
+        }
         if (name == "sortedBy") { return {v: kSortBy(es, f, false)} }
         if (name == "sortedByDescending") { return {v: kSortBy(es, f, true)} }
         if (name == "maxOrNull" || name == "minOrNull") {
@@ -4920,8 +4983,18 @@ NotMemberKw = :script(~~
             for (i = lo; i < hi; i++) { out.push(es[i]) }
             return {v: out}
         }
+        // The ARRAY-to-collection conversions. An Array and a List are the same host
+        // array in this value model, so every one of them is a COPY of the elements -
+        // which is what Kotlin's toList/toMutableList/toTypedArray do. `asList` is
+        // Kotlin's VIEW (writes through to the array) and `asSequence`/`asIterable`
+        // are views too; the copy is observably different only for a program that
+        // mutates the array afterwards and then reads the view, which this subset does
+        // not model. Grouped here so the whole family answers with one shape.
         if (name == "toList" || name == "toMutableList" || name == "asSequence" ||
-            name == "asIterable" || name == "toTypedArray") {
+            name == "asIterable" || name == "asList" || name == "toIntArray" ||
+            name == "toLongArray" || name == "toShortArray" || name == "toByteArray" ||
+            name == "toDoubleArray" || name == "toFloatArray" || name == "toBooleanArray" ||
+            name == "toCharArray" || name == "toTypedArray") {
             out = []
             for (i = 0; i < es.length; i++) { out.push(es[i]) }
             return {v: out}
@@ -5627,7 +5700,12 @@ NotMemberKw = :script(~~
                 if (name == "valueOf") {
                     var ev = clsStatic(target, args[0])
                     if (ev != null) return ev.v
-                    fail("no enum constant " + target.__name + "." + args[0])
+                    // Kotlin THROWS IllegalArgumentException here, which is why
+                    // `runCatching { Level.valueOf(s) }.getOrNull()` is the ordinary way
+                    // to parse an enum from text. This used to abort the whole run with
+                    // a host error in both halves, so that idiom could not be written.
+                    kRaise("IllegalArgumentException",
+                           "No enum constant " + target.__name + "." + args[0])
                 }
             }
             if (target.__companion != undefined) { return mcall(target.__companion, name, args, spec) }
@@ -6137,10 +6215,33 @@ NotMemberKw = :script(~~
         return (typeof m == "function") ? m : null
     }
     // Walk a class descriptor and its __super chain for an own member `name`.
+    // Find a member in the supertype GRAPH. Kotlin's resolution is not one chain: a
+    // class may implement several interfaces, each of those may extend more, and a
+    // default method (or an accessor) from ANY of them is inherited. This used to walk
+    // `__super` only - the superclass, or else the FIRST supertype - so a second
+    // interface's default (`class C : A, B` calling b()), anything reached through an
+    // interface's own supertypes (`interface B : A`), and a superclass's interface seen
+    // from an OBJECT declaration were all invisible, while the compiled half answered
+    // every one of them. Breadth first, so the nearest declaration wins, which is the
+    // override; a member declared in two unrelated supertypes is an error Kotlin makes
+    // the class resolve explicitly, so either order is right for it.
+    // The parents of a supertype are resolved LAZILY here, at lookup time: an object
+    // declaration is BUILT while the rest of the file is still being declared, so its
+    // superclass's own parents are typically not in globalScope yet - by the time a
+    // member is looked up they are.
     function clsFind(cls, name) {
-        while (cls != undefined && cls != null) {
-            if (hasOwn(cls, name)) { return cls[name] }
-            cls = cls.__super
+        var queue = [cls]
+        var qi = 0
+        while (qi < queue.length && qi < 500) {
+            var c = queue[qi]
+            qi++
+            if (c == undefined || c == null) { continue }
+            if (hasOwn(c, name)) { return c[name] }
+            var ps = c.__parents
+            if ((ps == undefined || ps == null) && c.__parentSpecs != undefined) { ps = resolveParents(c) }
+            if (ps != undefined && ps != null) {
+                for (var pi = 0; pi < ps.length; pi++) { queue.push(ps[pi]) }
+            }
         }
         return undefined
     }
@@ -7054,6 +7155,7 @@ NotMemberKw = :script(~~
         if (cls.__parents != null) { return cls.__parents }
         var ps = []
         var sup = null
+        var missing = false
         for (var i = 0; i < cls.__parentSpecs.length; i++) {
             var nm = cls.__parentSpecs[i].name
             var d = hasOwn(globalScope, nm) ? globalScope[nm] : undefined
@@ -7062,9 +7164,18 @@ NotMemberKw = :script(~~
                 if (cls.__parentSpecs[i].args != null && sup == null) { sup = d }
             } else if (d != undefined && d != null && d.__class != undefined) {
                 ps.push(d.__class)   // A supertype that is an object declaration.
+            } else {
+                missing = true       // Not declared YET (or not a program type at all).
             }
         }
-        cls.__parents = ps
+        // The answer is only MEMOIZED once every supertype named actually resolved. A
+        // nested object declaration is BUILT while its owner's body is being walked -
+        // before the owner itself is in globalScope - so `class Shape { object Empty :
+        // Shape() }` used to memoize an EMPTY parent list and lose every member Shape
+        // and Shape's interfaces gave it, for the whole run. Anything still missing at
+        // lookup time (a supertype from outside the program) simply resolves again;
+        // parentSpecs is one or two entries, so retrying is cheap.
+        if (!missing) { cls.__parents = ps }
         if (sup == null && ps.length > 0) { sup = ps[0] }
         cls.__super = sup                  // Also read by rtIsType (lib/interp-core.js).
         return ps
@@ -7312,7 +7423,15 @@ NotMemberKw = :script(~~
         for (var i = 0; i < comp.length; i++) {
             if (comp[i] != undefined && comp[i] != null && comp[i].cname != undefined) { cname = comp[i].cname }
         }
-        var obj = buildSingleton(cname, comp, supersOf(comp))
+        var obj = buildSingleton(cname, comp, supersOf(comp), cls)
+        // The companion's descriptor remembers WHOSE companion it is. A companion
+        // object is nested in its owner's scope, so the owner's statics - the entries
+        // of an enum above all - resolve UNQUALIFIED inside its members: `enum class L
+        // { A, B; companion object { fun of(n: Int) = if (n == 0) A else B } }` is the
+        // ordinary spelling of an enum factory, and it failed with "unknown name: A"
+        // here while the compiled half (which emits the companion inside the entry
+        // scope) answered it. Read by recvLookup.
+        obj.__class.__owner = cls
         cls.__statics[cname] = obj
         cls.__companion = obj
     }
@@ -7517,9 +7636,13 @@ NotMemberKw = :script(~~
     // ----- Objects (declarations, companions and object expressions) -----
     // A singleton: build the descriptor, then the one instance, running the property
     // initializers with the object itself as `this`.
-    function buildSingleton(name, items, parentSpecs) {
+    function buildSingleton(name, items, parentSpecs, owner) {
         var parts = splitBody(items, 0)
         var cls = newDescriptor(name, parentSpecs)
+        // A companion's owner is recorded BEFORE the property initializers below run:
+        // `companion object { val def = A }` inside an enum reads an owner static in
+        // its INITIALIZER, so setting it after the singleton was built was too late.
+        if (owner != undefined && owner != null) { cls.__owner = owner }
         installMembers(cls, parts)
         attachNested(cls, parts.nested)
         for (var m = 0; m < parts.methods.length; m++) { cls.__methodNames.push(parts.methods[m].name) }
@@ -7574,7 +7697,6 @@ NotMemberKw = :script(~~
         var cls = newDescriptor(name, supersOf(items))
         installMembers(cls, parts)
         attachNested(cls, parts.nested)
-        attachCompanion(cls, parts.companion)
         cls.__cparams = cparams
         cls.__isenum = true
         cls.__ctor = makeCtor(cls, cparams, supersOf(items), parts.inits)
@@ -7603,6 +7725,10 @@ NotMemberKw = :script(~~
             all.push(obj)
         }
         cls.__entries = all
+        // The companion is built LAST, after the entries are registered as statics:
+        // Kotlin initializes the entries before the companion object, and a companion
+        // property initializer that names an entry (`val def = A`) reads one.
+        attachCompanion(cls, parts.companion)
         push({nname: name, nval: cls, inner: false})
     }
     function enumEntryOf(items) {
@@ -8104,8 +8230,14 @@ NotMemberKw = :script(~~
     // items = [name..., initThunk]
     // A destructuring entry: a plain string is POSITIONAL (componentN), a {dn, dfrom}
     // record is NAME-BASED - it reads the property `dfrom` and binds it as `dn`.
-    function dName(items) {
-        if (items.length == 1) { return items[0] }
+    // nameBased is true for a PARENTHESIZED keyword entry, where the entry's own name
+    // IS the property it reads; a bracketed entry is positional however it is written.
+    // An explicit renaming (`val aa = first`) is name-based in either bracketing.
+    function dName(items, nameBased) {
+        if (items.length == 1) {
+            if (nameBased === true) { return {dn: items[0], dfrom: items[0]} }
+            return items[0]
+        }
         return {dn: items[0], dfrom: items[1].dfrom}
     }
     function dNameOf(n) { return (n.dn != undefined) ? n.dn : n }
@@ -8348,7 +8480,18 @@ NotMemberKw = :script(~~
         }
         if (isRange(v)) { return t == "IntRange" || t == "CharRange" || t == "IntProgression" }
         if (typeof v == "object" && v.__class != undefined && v.__class != null) {
-            return clsNamed(v.__class, t)
+            if (clsNamed(v.__class, t)) { return true }
+            // A QUALIFIED type name - `is Shape.Circle`, which is how a NESTED class is
+            // spelled from outside its owner, and the shape a sealed hierarchy is
+            // normally written in. A descriptor is registered under its SIMPLE name
+            // here, so the qualified spelling matched nothing and the `is` branch of an
+            // ordinary `when (this)` over a sealed class silently fell through to the
+            // else (both halves; the compiled twin is the js_ktis wrapper in
+            // abnf/jsrtkotlin.go). Dropping the qualifier is the same convention the
+            // rest of this subset already applies to packages and imports.
+            var segs = t.split(".")
+            if (segs.length > 1) { return clsNamed(v.__class, segs[segs.length - 1]) }
+            return false
         }
         return rtIsType(v, t)
     }
@@ -8566,6 +8709,21 @@ NotMemberKw = :script(~~
                 if (typeof m == "function") { return {v: boundMethod(cur, m)} }
                 var st = clsStatic(cls, name)
                 if (st != null) { return st }
+                // Inside a COMPANION object, the OWNER's statics are in scope too
+                // (attachCompanion records the owner) - an enum's entries above all.
+                if (cls.__owner != undefined && cls.__owner != null) {
+                    var ost = clsStatic(cls.__owner, name)
+                    if (ost != null) { return ost }
+                }
+                // Bare `entries` inside an enum's own member or its companion: Kotlin
+                // 1.9's EnumEntries is a member of the enum, so it needs no qualifier
+                // there. Only `L.entries` resolved before, in BOTH halves.
+                if (name == "entries") {
+                    var ecl = cls.__isenum === true ? cls
+                              : (cls.__owner != undefined && cls.__owner != null
+                                 && cls.__owner.__isenum === true ? cls.__owner : null)
+                    if (ecl != null && ecl.__entries != undefined) { return {v: ecl.__entries.slice(0)} }
+                }
             }
             // A BUILTIN receiver - the StringBuilder box, a list, a map - reached
             // through `with(x) { ... }` / `x.apply { ... }`, where Kotlin binds the

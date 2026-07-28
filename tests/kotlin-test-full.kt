@@ -2169,6 +2169,223 @@ fun sec56() {
     check("mut13", "" + Triple(1, 2, 3).toList() == "[1, 2, 3]")
 }
 
+// ===== SECTION 58: a declaration in EVERY kind of block =====
+// A user report - ordinary application Kotlin that would not compile here - reduced to
+// a destructuring declaration inside a lambda body and inside a `when` branch. The
+// COMPILER half had two different block productions: Statement/PlainStmt (a function
+// body, an if/while/for body) and LamStmt/LamCtrl (a lambda body, and the `{ ... }` of
+// a when/if ARM, which is a ValueBlock made of LamStmt). LamCtrl admitted a strict
+// SUBSET of PlainStmt, so `val (a, b) = p`, a bare `val x: Int`, a modified local
+// (`private val x = 1`) and a delegated `val x by lazy { }` all parsed at statement
+// level and failed inside a lambda or a when branch. PEG's ordered choice never
+// retries a committed alternative, so a rule missing from a block production cannot be
+// recovered later - the two lists have to agree. The interpreter half had the mirror
+// gap: its LamCtrl was missing the keyword-less destructuring ASSIGNMENT and the local
+// `typealias`, which its own PlainStmt accepts. Every form below is therefore checked
+// at all four sites: statement level, an if block, a lambda body and a when branch.
+fun mk58(): Pair<Int, Int> = Pair(1, 2)
+data class Named58(val first: Int, val second: Int)
+fun sec58() {
+    // 1. statement level.
+    val (a1, b1) = mk58()
+    // The keyword-less form. Parenthesized, it is NAME based - each entry reads the
+    // property of its own name, which for a Pair is first/second - while the bracketed
+    // spelling below is POSITION based whatever its entries are called.
+    (val first, val second) = mk58()
+    [val p1, val p2] = mk58()
+    val bare1: Int
+    bare1 = 7
+    private58()
+    check("blk1", a1 + b1 == 3 && first + second == 3 && p1 + p2 == 3 && bare1 == 7)
+    check("blk1b", first == 1 && second == 2 && p1 == 1 && p2 == 2)
+
+    // 2. an if block.
+    if (a1 == 1) {
+        val (a2, b2) = mk58()
+        [val p3, val p4] = mk58()
+        val lz2 by lazy { 40 + 2 }
+        check("blk2", a2 + b2 == 3 && p3 + p4 == 3 && lz2 == 42)
+    }
+
+    // 3. a LAMBDA body - the reported failure.
+    val fromLambda = run {
+        val (a3, b3) = mk58()
+        [val p5, val p6] = mk58()
+        typealias58()
+        fun local3(n: Int) = n * 10
+        class Local3(val n: Int)
+        val bare3: Int = 5
+        val lz3 by lazy { 3 }
+        a3 + b3 + p5 + p6 + local3(1) + Local3(2).n + bare3 + lz3
+    }
+    check("blk3", fromLambda == 3 + 3 + 10 + 2 + 5 + 3)
+
+    // 4. a `when` BRANCH block - the second reported failure. Same production.
+    val fromWhen = when (a1) {
+        1 -> {
+            val (a4, b4) = mk58()
+            [val p7, val p8] = mk58()
+            fun local4(n: Int) = n * 100
+            val bare4: Int = 6
+            val lz4 by lazy { 4 }
+            a4 + b4 + p7 + p8 + local4(1) + bare4 + lz4
+        }
+        else -> 0
+    }
+    check("blk4", fromWhen == 3 + 3 + 100 + 6 + 4)
+
+    // 5. the reported program's own shape: a local `fun`, then a destructuring
+    //    declaration, inside the `{ }` of a when branch used as an expression body.
+    check("blk5", extract58(1) == "[1, 2]/[3]" && extract58(2) == "none")
+    // The NAME based reading in full: reversing the entries must NOT reverse the
+    // values, and the same entries in BRACKETS must read positionally instead. The
+    // interpreter used to read the parenthesized form positionally too.
+    (val second: Int, val first: Int) = Named58(10, 20)
+    check("blk6", first == 10 && second == 20)
+    [val q1, val q2] = Named58(10, 20)
+    check("blk7", q1 == 10 && q2 == 20)
+    (val aa = first) = Named58(30, 40)
+    check("blk8", aa == 30)
+}
+private fun private58() { }
+fun typealias58() { }
+fun decode58(): Pair<ByteArray, ByteArray> = Pair(byteArrayOf(1, 2), byteArrayOf(3))
+fun extract58(cmd: Int): String = when (cmd) {
+    1 -> {
+        fun shortList(bytes: ByteArray) = bytes.asList().map { it.toShort() }
+        val (opened, notOpened) = decode58()
+        "" + shortList(opened) + "/" + shortList(notOpened)
+    }
+    else -> { "none" }
+}
+
+// ===== SECTION 59: the primitive-array builders and the array conversions =====
+// From the same user report. `byteArrayOf` was "unknown name" in BOTH halves - only
+// int/long/double/float/boolean/charArrayOf and arrayOf were declared - and so were
+// shortArrayOf, the four unsigned builders and emptyArray. The ARRAY-to-collection
+// surface was missing too: `asList` (the report's own call), sortedArray,
+// sortedArrayDescending, reversedArray, contentToString and contentEquals all aborted
+// with "unknown list method". An Array and a List are one shape in this value model, so
+// each of them is the list operator under Kotlin's array name; contentToString and
+// contentEquals matter because Kotlin's Array does NOT get a structural toString or
+// equals. The value model is also width-blind - `byteArrayOf(200)`, which kotlinc
+// rejects (200 is not a Byte; the legal spelling is `byteArrayOf((-56).toByte())`), is
+// accepted here, which is a TYPE question and is documented at both declaration sites.
+fun sec59() {
+    check("arr1", byteArrayOf(1, 2, 3).size == 3)
+    check("arr2", shortArrayOf(1, 2).size == 2)
+    check("arr3", charArrayOf('a', 'b').size == 2 && booleanArrayOf(true).size == 1)
+    check("arr4", intArrayOf(1).size == 1 && longArrayOf(1L).size == 1)
+    check("arr5", doubleArrayOf(1.0).size == 1 && floatArrayOf(1.0f).size == 1)
+    check("arr6", ubyteArrayOf(1u).size == 1 && ushortArrayOf(1u).size == 1)
+    check("arr7", uintArrayOf(1u).size == 1 && ulongArrayOf(1uL).size == 1)
+    check("arr8", emptyArray<Int>().size == 0 && arrayOf(1, 2).size == 2)
+    // The size-and-initializer constructors of the same family.
+    check("arr9", IntArray(3).size == 3 && ByteArray(2).size == 2 && CharArray(2).size == 2)
+    check("arr10", UIntArray(2).size == 2 && ULongArray(2).size == 2)
+
+    // A Byte element is signed 8-bit in Kotlin; the legal way to write one is a
+    // conversion, and widening it with .toShort() keeps the value.
+    val bs = byteArrayOf((-56).toByte(), 1)
+    check("arr11", "" + bs.asList().map { it.toShort() } == "[-56, 1]")
+    check("arr12", bs[0].toInt() == -56 && bs.size == 2)
+
+    // The conversions - asList was the reported one.
+    val xs = intArrayOf(3, 1, 2)
+    check("arr13", "" + xs.asList() == "[3, 1, 2]")
+    check("arr14", "" + xs.toList() == "[3, 1, 2]" && "" + xs.toMutableList() == "[3, 1, 2]")
+    check("arr15", xs.toTypedArray().size == 3 && "" + xs.toSet() == "[3, 1, 2]")
+    check("arr16", "" + xs.asIterable().toList() == "[3, 1, 2]")
+    check("arr17", "" + xs.asSequence().toList() == "[3, 1, 2]")
+    check("arr18", "" + listOf(1, 2).toIntArray().asList() == "[1, 2]")
+    // The array spellings of sorted / sortedDescending / reversed.
+    check("arr19", "" + xs.sortedArray().asList() == "[1, 2, 3]")
+    check("arr20", "" + xs.sortedArrayDescending().asList() == "[3, 2, 1]")
+    check("arr21", "" + xs.reversedArray().asList() == "[2, 1, 3]")
+    // contentToString / contentEquals: Kotlin's Array has no structural toString/equals.
+    check("arr22", xs.contentToString() == "[3, 1, 2]")
+    check("arr23", intArrayOf(1, 2).contentEquals(intArrayOf(1, 2)))
+    check("arr24", !intArrayOf(1, 2).contentEquals(intArrayOf(1, 3)))
+    check("arr25", !intArrayOf(1, 2).contentEquals(intArrayOf(1)))
+    // Indexing, iteration and the numeric folds on a primitive array.
+    var sum59 = 0
+    for (v in xs) { sum59 += v }
+    check("arr26", sum59 == 6 && xs[0] == 3 && xs.sum() == 6)
+    check("arr27", xs.average() == 2.0 && xs.max() == 3 && xs.min() == 1)
+    check("arr28", xs.joinToString("-") == "3-1-2")
+}
+
+// ===== SECTION 60: the supertype GRAPH, qualified `is`, and the enum companion =====
+// Four defects found by probing ordinary application Kotlin (a sealed hierarchy, an
+// interface with a default method, a companion factory), each one a cross-half
+// divergence or a wrong answer in both halves:
+//   - the interpreter's member lookup walked ONE chain (`__super`), so a second
+//     interface's default method, anything reached through an interface's own
+//     supertypes, and a superclass's interface seen from an OBJECT declaration were
+//     all invisible - while the compiled half answered every one of them. A nested
+//     object made it worse: it is built while its owner's body is walked, so it
+//     memoized an EMPTY parent list for the whole run.
+//   - `is Shape.Circle` - the QUALIFIED spelling of a nested class, which is how a
+//     sealed hierarchy is normally written - matched nothing in EITHER half, so the
+//     `is` branch of a `when (this)` silently fell through to the else.
+//   - an enum class's COMPANION was never attached by the compiled half ("unknown
+//     method 'of'"), and in the interpreter its members could not see the enum's own
+//     entries ("unknown name: A").
+//   - `Level.valueOf(bad)` aborted the run in both halves instead of throwing the
+//     IllegalArgumentException Kotlin throws, so the ordinary
+//     `runCatching { valueOf(s) }.getOrNull()` parse idiom could not be written.
+interface Aud60 { val label: String
+                  fun audit(): String = "audit:" + label }
+interface Extra60 { fun extra(): String = "extra" }
+interface Deep60 : Extra60
+sealed class Shape60 : Aud60 {
+    data class Circle(val r: Int) : Shape60() { override val label = "circle" }
+    data class Rect(val w: Int, val h: Int) : Shape60() { override val label = "rect" }
+    object Empty : Shape60() { override val label = "empty" }
+}
+class Both60 : Aud60, Deep60 { override val label = "both" }
+fun Shape60.area60(): Int = when (this) {
+    is Shape60.Circle -> r * r
+    is Shape60.Rect -> w * h
+    Shape60.Empty -> 0
+}
+enum class Level60(val severity: Int) {
+    DEBUG(0), INFO(1), ERROR(2);
+    fun louderThan(o: Level60) = severity > o.severity
+    fun countAll() = entries.size
+    companion object {
+        val fallback = DEBUG
+        fun of(s: Int): Level60 = entries.first { it.severity == s }
+    }
+}
+fun sec60() {
+    // The supertype GRAPH: a second interface, an interface's own supertype, and a
+    // superclass's interface reached from an object declaration.
+    check("grf1", Both60().audit() == "audit:both")
+    check("grf2", Both60().extra() == "extra")
+    check("grf3", Shape60.Empty.audit() == "audit:empty")
+    check("grf4", Shape60.Circle(2).audit() == "audit:circle")
+    // The QUALIFIED nested-type name in an `is` check.
+    check("grf5", Shape60.Circle(3).area60() == 9)
+    check("grf6", Shape60.Rect(2, 3).area60() == 6 && Shape60.Empty.area60() == 0)
+    check("grf7", Shape60.Circle(1) is Shape60.Circle && !(Shape60.Circle(1) is Shape60.Rect))
+    check("grf8", listOf(Shape60.Circle(2), Shape60.Rect(2, 3), Shape60.Empty).map { it.area60() }
+                  .sum() == 10)
+    // The enum COMPANION: a factory, a property initialized from an entry, and the
+    // bare `entries` of Kotlin 1.9 inside a member and inside the companion.
+    check("enc1", Level60.of(2) == Level60.ERROR)
+    check("enc2", Level60.fallback == Level60.DEBUG)
+    check("enc3", Level60.DEBUG.countAll() == 3)
+    check("enc4", Level60.ERROR.louderThan(Level60.INFO))
+    // valueOf THROWS IllegalArgumentException for an unknown name, so runCatching
+    // boxes it - the ordinary way to parse an enum out of text.
+    check("enc5", runCatching { Level60.valueOf("WARN") }.getOrNull() == null)
+    check("enc6", runCatching { Level60.valueOf("INFO") }.getOrNull() == Level60.INFO)
+    var caught60 = ""
+    try { Level60.valueOf("NOPE") } catch (e: IllegalArgumentException) { caught60 = "iae" }
+    check("enc7", caught60 == "iae")
+}
+
 // ===== END SECTIONS =====
 
 fun main() {
@@ -2229,6 +2446,9 @@ fun main() {
     sec55() // SECTION-CALL 55
     sec56() // SECTION-CALL 56
     sec57() // SECTION-CALL 57
+    sec58() // SECTION-CALL 58
+    sec59() // SECTION-CALL 59
+    sec60() // SECTION-CALL 60
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
