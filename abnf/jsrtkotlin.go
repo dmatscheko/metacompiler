@@ -146,9 +146,19 @@ func ktIsIntegral(v interface{}) bool {
 // One compile runs one program, so a package-level holder is per-program.
 var ktArithExcCls *jsObject
 
-func ktExcClass() *jsObject {
-	if ktArithExcCls != nil {
-		return ktArithExcCls
+// ktExcHier is the builtin throwable hierarchy, built once per program. It is what
+// `Exception("m")` / `IllegalStateException("m")` construct: the Kotlin compiler
+// grammar has no user class for them, and before this the call aborted with
+// "unknown name: Exception" while kotlin-interpreter.abnf ran the same program.
+// The chain is Kotlin's own (IllegalStateException -> RuntimeException -> Exception
+// -> Throwable), so js_ktis answers `e is Exception` for one - see the report note
+// about installThrowables in the other half, which parents all of them directly to
+// Throwable and therefore answers false.
+var ktExcHier map[string]*jsObject
+
+func ktExcHierarchy() map[string]*jsObject {
+	if ktExcHier != nil {
+		return ktExcHier
 	}
 	mk := func(name string, super *jsObject) *jsObject {
 		o := newJSObject()
@@ -159,10 +169,33 @@ func ktExcClass() *jsObject {
 		}
 		return o
 	}
-	thr := mk("Throwable", nil)
-	exc := mk("Exception", thr)
-	run := mk("RuntimeException", exc)
-	ktArithExcCls = mk("ArithmeticException", run)
+	h := map[string]*jsObject{}
+	h["Throwable"] = mk("Throwable", nil)
+	h["Exception"] = mk("Exception", h["Throwable"])
+	h["Error"] = mk("Error", h["Throwable"])
+	h["RuntimeException"] = mk("RuntimeException", h["Exception"])
+	for _, n := range []string{"IllegalStateException", "IllegalArgumentException",
+		"IndexOutOfBoundsException", "NullPointerException", "NumberFormatException",
+		"UnsupportedOperationException", "ArithmeticException", "NoSuchElementException",
+		"ConcurrentModificationException", "ClassCastException"} {
+		h[n] = mk(n, h["RuntimeException"])
+	}
+	h["IllegalAccessException"] = mk("IllegalAccessException", h["Exception"])
+	ktExcHier = h
+	return h
+}
+
+// ktIsBuiltinExc reports a name the hierarchy above provides.
+func ktIsBuiltinExc(name string) bool {
+	_, ok := ktExcHierarchy()[name]
+	return ok
+}
+
+func ktExcClass() *jsObject {
+	if ktArithExcCls != nil {
+		return ktArithExcCls
+	}
+	ktArithExcCls = ktExcHierarchy()["ArithmeticException"]
 	return ktArithExcCls
 }
 
@@ -581,6 +614,25 @@ func init() {
 			if ktIsIntegral(l) && ktIsIntegral(r) && !jvmIsFlo(l) && !jvmIsFlo(r) {
 				return boolH(rt.ktCmp(op, l, r))
 			}
+			// Kotlin's COMPARISON convention: `a < b` on a class that declares
+			// `operator fun compareTo` is `a.compareTo(b) < 0`. Without this the two
+			// halves disagreed on a user Comparable - `V(1) < V(2)` was true in
+			// kotlin-interpreter.abnf (whose kNumOp2 routes all four operators through
+			// compareTo) and FALSE here, because jsCompare fell back to comparing the
+			// two objects as values. The probe is on the RECEIVER's descriptor chain,
+			// so a program that declares no compareTo emits and runs exactly as before.
+			if lo, isObj := l.(*jsObject); isObj && ktMemberCall != nil && ktClassChainHas(lo, "compareTo") {
+				c := int(rt.toNumber(ktMemberCall(l, "compareTo", []interface{}{r})))
+				switch op {
+				case "<":
+					return boolH(c < 0)
+				case ">":
+					return boolH(c > 0)
+				case "<=":
+					return boolH(c <= 0)
+				}
+				return boolH(c >= 0)
+			}
 			c := rt.jsCompare(l, r)
 			switch op {
 			case "<":
@@ -707,6 +759,49 @@ func init() {
 		// where every integral number is an Int AND a Long; a box carries its real
 		// type, so it is answered here and everything else falls through unchanged.
 		baseIs := m["js_is_type"]
+		// js_ktnewexc(name, message) constructs one of the builtin throwables. The
+		// Kotlin grammar emits it for a call of a throwable name the program does not
+		// itself declare; `message` is the field both halves read.
+		m["js_ktnewexc"] = func(a []uint64) uint64 {
+			name := rt.toString(u(a[0]))
+			cls, ok := ktExcHierarchy()[name]
+			if !ok {
+				rt.fail("unknown builtin exception %s", name)
+			}
+			o := newJSObject()
+			o.set("__class", cls)
+			o.set("message", u(a[1]))
+			return w(o)
+		}
+		// js_ktthisat(this, "Outer") is Kotlin's labelled `this@Outer`: walk the
+		// __outer chain for an instance whose class is named `Outer`, and fall back to
+		// the receiver itself when there is none - which is what makeThisAt does in
+		// kotlin-interpreter.abnf (thisAtIn, then findThis). Reading `__outer` blindly
+		// aborted with "member 'tag' of undefined" whenever an inner class was
+		// constructed from inside its outer's own method, where nothing sets it.
+		m["js_ktthisat"] = func(a []uint64) uint64 {
+			want := rt.toString(u(a[1]))
+			cur := u(a[0])
+			for i := 0; i < 64; i++ {
+				o, isObj := cur.(*jsObject)
+				if !isObj {
+					break
+				}
+				if cls, ok := o.props["__class"]; ok {
+					if co, isCls := cls.(*jsObject); isCls {
+						if n, ok := co.props["__name"]; ok && rt.toString(n) == want {
+							return w(cur)
+						}
+					}
+				}
+				nxt, ok := o.props["__outer"]
+				if !ok || isUndefOrNull(nxt) {
+					break
+				}
+				cur = nxt
+			}
+			return a[0]
+		}
 		m["js_ktis"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			switch v.(type) {
@@ -832,6 +927,29 @@ func init() {
 					return rt.wrap(v)
 				}
 			}
+			// SAM CONVERSION: `Op43 { it + 100 }` on a `fun interface` builds an
+			// instance whose single abstract member is carried as a FIELD holding the
+			// lambda (the descriptor has no such method - every conversion has its own
+			// body). The shared js_mcall stops at the __class chain and fails with
+			// "unknown method '...' on an instance", so the field is answered here, and
+			// only when the chain does NOT declare the name: a real method always wins,
+			// which is the order kotlin-interpreter.abnf's mcall uses. The field is
+			// applied WITHOUT the receiver, exactly as that half does.
+			if mo, isObj := recv.(*jsObject); isObj {
+				if _, hasCls := mo.props["__class"]; hasCls {
+					if fv, ok := mo.props[mname]; ok && isCallable(fv) && !ktClassChainHas(mo, mname) {
+						return w(rt.call(fv, jsUndef, arr.elems))
+					}
+					// Every Kotlin class inherits equals() from Any. A class that
+					// overrides it has it on the chain and is dispatched below; one
+					// that does not used to ABORT here with "unknown method 'equals'
+					// on an instance" while kotlin-interpreter.abnf answered the
+					// identity comparison.
+					if mname == "equals" && !ktClassChainHas(mo, "equals") {
+						return boolH(rt.strictEq(recv, argAt(arr.elems, 0)))
+					}
+				}
+			}
 			if next := m["js_rxktmcall"]; next != nil {
 				return next(a)
 			}
@@ -915,9 +1033,15 @@ func init() {
 						return w(v)
 					}
 				}
+				// A dotted name on a MAP that is neither one of Kotlin's map
+				// properties nor a present key. Kotlin refuses `m.bogus` outright, so
+				// no correct program reaches this; what matters is that the two halves
+				// answer the SAME thing, and kotlin-interpreter.abnf's kGetField misses
+				// to undefined (which renders as kotlin.Unit). jsNull here made the
+				// halves print `null` and `kotlin.Unit` for the same program.
 				if keys, _, isDict := dictParts(mo); isDict && !ktRecvProp(name) &&
 					rt.ktMapFind(keys, u(a[1])) < 0 {
-					return w(jsNull)
+					return w(jsUndef)
 				}
 			}
 			if next := m["js_rxktget"]; next != nil {
@@ -2416,6 +2540,34 @@ func ktIsBuiltinRecv(v interface{}) bool {
 
 // ktRecvMember answers an unqualified name against an implicit receiver.
 func (rt *jsrt) ktRecvMember(recv interface{}, name string) (interface{}, bool) {
+	// A USER-CLASS instance reached through with / run / apply. Its FIELDS are its own
+	// properties; its METHODS live on the descriptor chain and come back as a bound
+	// callable, so an unqualified `method()` inside the lambda dispatches on the
+	// receiver. recvLookup in kotlin-interpreter.abnf answers exactly this set.
+	if o, isObj := recv.(*jsObject); isObj && ktMemberCall != nil {
+		if _, hasCls := o.props["__class"]; hasCls {
+			if v, ok := o.props[name]; ok {
+				return v, true
+			}
+			// A property with a GETTER: the accessor pair lives on the descriptor
+			// chain (js_defprop), not on the instance, so findClassAccessor is what
+			// sees it - reading it through the method branch below would hand back a
+			// callable instead of the value.
+			if acc := rt.findClassAccessor(o, name); acc != nil {
+				if acc.get == nil {
+					return jsUndef, true
+				}
+				return rt.call(acc.get, o, nil), true
+			}
+			if ktClassChainHas(o, name) {
+				self := recv
+				return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+					return ktMemberCall(self, name, args)
+				}), true
+			}
+			return nil, false
+		}
+	}
 	if !ktIsBuiltinRecv(recv) || ktMemberCall == nil {
 		return nil, false
 	}
@@ -2559,13 +2711,30 @@ func (rt *jsrt) ktMapOf(args []interface{}) *jsObject {
 	return mp
 }
 
-// ktWithRecv runs f with `recv` on the implicit-receiver stack.
+// ktWithRecv runs f with `recv` as the lambda's implicit receiver.
+//
+// It does that TWO ways, and both are needed. The receiver goes on ktRecvStack, which
+// is what answers a BUILTIN receiver's members (`with(sb) { append("a") }`). And, when
+// the lambda is a compiled closure, the call runs in a fresh scope layered on the
+// closure's own env with `this` bound to the receiver - which is exactly the model
+// kotlin-interpreter.abnf uses (its `with` binds `this` and nothing else), and which is
+// what makes Kotlin's INNERMOST-WINS rule fall out of the ordinary scope walk in
+// js_ktget: a `with(i) { tag }` written inside a member of another class used to answer
+// the ENCLOSING this's `tag`, because the stack was consulted only after it. Measured
+// before the change: `with(i) { tag }` in Outer.show printed OUTER here and INNER in the
+// interpreter half - the halves disagreed and this half was the wrong one.
 func (rt *jsrt) ktWithRecv(recv interface{}, f interface{}, args ...interface{}) interface{} {
 	if !isCallable(f) {
 		return jsUndef
 	}
 	ktRecvStack = append(ktRecvStack, recv)
 	defer func() { ktRecvStack = ktRecvStack[:len(ktRecvStack)-1] }()
+	if cl, ok := f.(*jsClosure); ok {
+		inner := &jsScope{parent: rt.scopeOf(cl.env)}
+		inner.put("this", recv)
+		bound := &jsClosure{fn: cl.fn, env: rt.wrap(inner), ma: cl.ma}
+		return rt.call(bound, jsUndef, args)
+	}
 	return rt.call(f, jsUndef, args)
 }
 
@@ -2711,4 +2880,23 @@ func ktFixed(f float64, prec int) string {
 		out = "-" + out
 	}
 	return out
+}
+
+// ktClassChainHas answers whether the instance's descriptor - or anything on its
+// __super chain - declares a callable member of this name. It is the guard on the
+// own-field dispatch in js_ktsmcall: a declared method must still win over a field
+// that happens to hold a function.
+func ktClassChainHas(o *jsObject, name string) bool {
+	cls := o.props["__class"]
+	for cls != nil {
+		clsObj, ok := cls.(*jsObject)
+		if !ok {
+			return false
+		}
+		if m, ok := clsObj.props[name]; ok && isCallable(m) {
+			return true
+		}
+		cls = clsObj.props["__super"]
+	}
+	return false
 }

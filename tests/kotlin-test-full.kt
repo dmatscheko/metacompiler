@@ -1533,6 +1533,102 @@ fun sec41() {
     check("wid7", "" + bb == "-128")
 }
 
+// ===== SECTION 42: LOCAL type declarations =====
+// A class, an interface or an object declared INSIDE a function body. Every value
+// below is what the equivalent Java program prints under `java` (JDK 24) - a local
+// class, a local class implementing an interface, and a local class declared inside a
+// loop body were all written out and run; only the local `object` singleton has no
+// Java spelling and is asserted from the Kotlin specification.
+// Known limitation, deliberately NOT asserted: a local class body does not CAPTURE the
+// enclosing function's locals here (the constructor runs with a fresh scope chain, the
+// same one a top-level class gets), so a member reading an enclosing `val` is out of
+// scope. Kotlin captures; this subset does not.
+fun sec42() {
+    class L42(val v: Int) {
+        fun twice(): Int = v * 2
+    }
+    val l = L42(21)
+    check("loc1", l.v == 21)
+    check("loc2", l.twice() == 42)
+    // A local INTERFACE and a local class that implements it.
+    interface Shape42 {
+        fun area(): Int
+    }
+    class Sq42(val s: Int) : Shape42 {
+        override fun area(): Int = s * s
+    }
+    val sh: Shape42 = Sq42(4)
+    check("loc3", sh.area() == 16)
+    check("loc4", sh is Shape42)
+    // A local class declared inside a loop body is one type, not one per iteration.
+    var total = 0
+    for (i in 0 until 3) {
+        class P42 {
+            fun p(): Int = 7
+        }
+        total += P42().p()
+    }
+    check("loc5", total == 21)
+    // A local `object` is a singleton, so its state survives between calls.
+    object Counter42 {
+        var n = 0
+        fun bump(): Int { n += 1; return n }
+    }
+    check("loc6", Counter42.bump() == 1)
+    check("loc7", Counter42.bump() == 2)
+}
+
+// ===== SECTION 43: `fun interface` and SAM conversion =====
+// `fun interface F { fun go(x: Int): Int }` declares a single-abstract-method
+// interface, and `F { ... }` converts a lambda into an instance of it. Java's
+// @FunctionalInterface is the same construct, so the equivalent Java program was
+// written and run under `java` (JDK 24): the values below are its output. The only
+// piece with no Java spelling is Kotlin's implicit single parameter `it`, which the
+// lambda sections already pin.
+fun interface Op43 {
+    fun run(a: Int): Int
+}
+fun interface Mk43 {
+    fun make(a: String, b: String): String
+}
+fun sec43() {
+    val o = Op43 { it + 100 }
+    check("sam1", o.run(5) == 105)
+    // A second conversion of the SAME interface is an independent instance.
+    val o2 = Op43 { x -> x * x }
+    check("sam2", o2.run(9) == 81)
+    check("sam3", "" + o.run(1) + "/" + o2.run(1) == "101/1")
+    // More than one parameter is fine; `fun interface` constrains the count of
+    // abstract MEMBERS, not of parameters.
+    val m = Mk43 { x, y -> x + "-" + y }
+    check("sam4", m.make("a", "b") == "a-b")
+    // The converted value is an instance of the interface.
+    check("sam5", o is Op43)
+}
+
+// ===== SECTION 44: a unary minus is folded into the LITERAL =====
+// `2147483648` on its own is out of Int range and is a Long; `-2147483648` is
+// Int.MIN_VALUE and stays 32 bit, because Kotlin types the negated CONSTANT rather than
+// negating a Long. Kotlin/JVM's Int is java.lang's, so the values below are what the
+// equivalent Java program prints under `java` (JDK 24) - verified, not assumed:
+// -2147483648, 2147483647, 0 for x, x - 1 and x * 2, and -2147483649 for the Long.
+fun sec44() {
+    val x = -2147483648
+    check("neg1", "" + x == "-2147483648")
+    // The wrap is the proof the value is 32 bit: a Long would answer -2147483649.
+    check("neg2", "" + (x - 1) == "2147483647")
+    check("neg3", "" + (x * 2) == "0")
+    // An explicit Long suffix is untouched - the fold applies to the literal's TYPE,
+    // not to the minus.
+    val y = -2147483648L
+    check("neg4", "" + (y - 1) == "-2147483649")
+    // Everything smaller is unchanged, and the minus still works as an operator.
+    val z = -1
+    check("neg5", "" + (z * 3) == "-3")
+    val w = 2147483648
+    check("neg6", "" + (w - 1) == "2147483647")
+}
+
 // ===== END SECTIONS =====
 
 fun main() {
@@ -1577,6 +1673,9 @@ fun main() {
     sec39() // SECTION-CALL 39
     sec40() // SECTION-CALL 40
     sec41() // SECTION-CALL 41
+    sec42() // SECTION-CALL 42
+    sec43() // SECTION-CALL 43
+    sec44() // SECTION-CALL 44
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

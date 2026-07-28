@@ -120,7 +120,102 @@ Whitespace  = { @+" \t\r\n\x0c" | Comment } ;
 Comment     = LineComment | BlockComment ;
 LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 // Kotlin block comments NEST (psi/NestedComments.kt): /*/**/*/ is one comment.
-BlockComment = "/*" :whitespace() { NestedComment | NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+BlockComment = KDocOk "/*" :whitespace() { NestedComment | NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+// A KDoc comment is NOT trivia to Kotlin's parser: `/** ... */` is parsed, and the
+// errors it finds are ordinary PsiErrorElements in the file's tree. This grammar lexes
+// the whole comment away, so every such error was invisible and three corpus files
+// whose ONLY defect is inside a doc comment were wrongly accepted.
+//
+// A full KDoc sub-parser is not what those three files need. Every error element in
+// them is the same one - a qualified name with a DANGLING DOT, `Identifier expected` -
+// in the two places KDoc parses a name:
+//
+//     [A.]   [O.]   [A.B.C...]      a markdown link
+//     @see A.        @see O.        the subject of a name-taking tag
+//
+// so the guard recognizes exactly that and lets the comment fail to match, which makes
+// the `/**` reach the code rules and the file be refused. It is deliberately narrow in
+// the two directions that would cost the parse row:
+//   - a bracket run whose content holds a SPACE, or does not START with an identifier
+//     character, is markdown TEXT and not a link at all. Kotlin's own tree records
+//     `[top level]`, `[O.with space]` and `[....]` as KDOC_TEXT, with no error.
+//   - a bare `@see` with no subject is legal (psi/kdoc/SeeEmpty.txt gives it a KDOC_TAG
+//     with no link), so an empty name run is not an error.
+// Measured over the whole vendored corpus, the two patterns occur in exactly the three
+// files Kotlin rejects and nowhere else.
+KDocOk      = :script(~~
+    (function() {
+        if (c.peek(0) !== 47 || c.peek(1) !== 42 || c.peek(2) !== 42) { return undefined }
+        var tags = ["see", "throws", "exception", "sample", "param", "property"]
+        var i = 3
+        var steps = 0
+        var bad = false
+        while (steps < 20000) {
+            steps++
+            var ch = c.peek(i)
+            if (ch < 0) { break }
+            if (ch === 42 && c.peek(i + 1) === 47) { break }
+            if (ch === 91) {
+                // A bracket run, up to the closing `]` on the SAME line.
+                var j = i + 1
+                var body = ""
+                var n = 0
+                var cc = c.peek(j)
+                while (cc >= 0 && cc !== 93 && cc !== 10 && n < 256) {
+                    body = body + String.fromCharCode(cc)
+                    j++
+                    n++
+                    cc = c.peek(j)
+                }
+                if (cc === 93 && body.length > 0) {
+                    var f = body.charCodeAt(0)
+                    var isName = (f >= 97 && f <= 122) || (f >= 65 && f <= 90) || f === 95 || f === 96
+                    var spaced = body.indexOf(" ") >= 0 || body.indexOf("\t") >= 0
+                    if (isName && !spaced && body.charCodeAt(body.length - 1) === 46) { bad = true }
+                }
+                if (bad) { break }
+                i = j
+                continue
+            }
+            if (ch === 64) {
+                // A tag. Only the ones whose subject KDoc parses as a NAME are checked.
+                var k = i + 1
+                var w = ""
+                var wn = 0
+                var wc = c.peek(k)
+                while (((wc >= 97 && wc <= 122) || (wc >= 65 && wc <= 90)) && wn < 24) {
+                    w = w + String.fromCharCode(wc)
+                    k++
+                    wn++
+                    wc = c.peek(k)
+                }
+                var known = false
+                var t = 0
+                while (t < tags.length) {
+                    if (tags[t] === w) { known = true }
+                    t++
+                }
+                if (known) {
+                    while (c.peek(k) === 32 || c.peek(k) === 9) { k++ }
+                    var name = ""
+                    var nn = 0
+                    var nc = c.peek(k)
+                    while (nn < 256 && ((nc >= 97 && nc <= 122) || (nc >= 65 && nc <= 90) || (nc >= 48 && nc <= 57) || nc === 95 || nc === 46 || nc === 96)) {
+                        name = name + String.fromCharCode(nc)
+                        k++
+                        nn++
+                        nc = c.peek(k)
+                    }
+                    if (name.length > 0 && name.charCodeAt(name.length - 1) === 46) { bad = true; break }
+                }
+                i = k
+                continue
+            }
+            i++
+        }
+        if (bad) { return abnf.newToken("\x01kdoc-dangling-name", 0) }
+    })()
+~~) ;
 NestedComment = "/*" { NestedComment | NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" ;
 NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
@@ -412,7 +507,14 @@ NameRecvSeg = KId [ SkipAngle ] [ "?" ] "." ;
 // while `fun @[a] foo()` (no receiver at all) and `fun <T> @ann (T & Any).f()` (a
 // parenthesized receiver) are both errors its parser records as such. Requiring a
 // NameRecvSeg behind the annotations is what keeps those two out.
-AnnoRecv    = TypeAnno { TypeAnno } ( NameRecvSeg | FnRecvSeg ) | RecvSeg ;
+AnnoRecv    = TypeAnno { TypeAnno } ( NameRecvSeg | FnRecvSeg | BareFnRecvSeg ) | RecvSeg ;
+// An annotated receiver may also be an UNPARENTHESIZED function type:
+// `fun @receiver:A () -> Unit?.functionWithAnnotatedReceiver2() {}` is a TYPE_REFERENCE
+// whose child is a FUNCTION_TYPE, followed by the DOT - psi/annotationsOnNullableTypes.txt
+// records exactly that, with no PsiErrorElement. It stays behind the annotation run (a
+// bare `fun () -> Unit.f()` is not offered), so no shape the strict rules already refused
+// becomes reachable.
+BareFnRecvSeg = "(" [ FnTypeParam { "," FnTypeParam } [ "," ] ] ")" "->" Type "." ;
 // The one PARENTHESIZED receiver an annotation may precede is a FUNCTION type -
 // `fun @[a] (T.(A) -> R).foo()` parses, `fun <T> @ann (T & Any).foo8()` does not, and
 // the corpus records exactly that split. The arrow is what tells them apart, so this
@@ -433,7 +535,15 @@ UnsupFun    <~~ notImpl("extension or abstract function", up.pos) ~~>
             = KwFun [ SkipAngle ] ( ExtFunName SkipParen [ ":" Type ] [ WhereClause ] [ SkipBlock | "=" DiscardExpr ]
                                   | AnnoRecv { RecvSeg } [ SkipAngle ] SkipParen [ ":" Type ] [ WhereClause ] [ SkipBlock | "=" DiscardExpr ]
                                   | SkipParen [ ":" Type ] [ WhereClause ] [ SkipBlock | "=" DiscardExpr ]
-                                  | KId [ SkipAngle ] SkipParen [ ":" Type ] [ WhereClause ] ) [ ";" ] ;
+                                  | KId [ SkipAngle ] SigParamsSkip [ ":" Type ] [ WhereClause ] ) [ ";" ] ;
+// The parameter list of a BODILESS `fun name(...)` - the one UnsupFun alternative that
+// is reached from a shape the strict rules refused for no structural reason. A plain
+// SkipParen there accepted `fun foo(@Deprecated)`, whose whole point is that the
+// parameter has no name (psi/annotation/noParameterYet.txt records
+// "Expecting a parameter declaration"). This keeps the run balanced-and-skipped in
+// every OTHER alternative and only demands a name here.
+SigParamsSkip = "(" [ SigParamSkip { "," SigParamSkip } [ "," ] ] ")" ;
+SigParamSkip = [ Modifiers ] [ KwVararg ] [ Modifiers ] [ ( "val" | "var" ) KwEnd ] KId [ ":" Type ] [ "=" DiscardExpr ] ;
 // The receiver of a member-level (or bodiless) extension function: annotated,
 // parenthesized (fun (suspend () -> T).f()), nullable, dotted.
 ExtFunName  = AnnoRecv { RecvSeg } KId [ SkipAngle ] { "." KId [ SkipAngle ] } ;
@@ -677,7 +787,16 @@ TypeAnno    = "@" [ AnnTarget ":" ] ( AnnSet | KId { "." KId } :whitespace() [ S
 Statement   <~~ push(stmtPos(pop())) ~~>
             = { StmtAnn } ( ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
             | Labeled | PlainStmt ) ;
-PlainStmt   = Block | LocalFun | LocalType | Destructure | DelegateDecl | Decl | BareDecl | If | While | Do | For | TryStmt | Throw | Empty | ExprStmt ;
+PlainStmt   = Block | LocalFun | LocalModDecl | LocalType | Destructure | DelegateDecl | Decl | BareDecl | If | While | Do | For | TryStmt | Throw | Empty | ExprStmt ;
+// A local declaration carrying MODIFIERS (`private val x = 1`, `inline fun f() {}`
+// inside a body). Kotlin keeps the run and the declaration as ONE statement, which is
+// what NewStmtLine below needs to be true before it can refuse the genuine same-line
+// files. It sits AFTER the unmodified forms so the common path is untouched, and ModRun
+// requires at least one real modifier so an ordinary statement never reaches it twice.
+// The modifiers are parsed and DROPPED (Modifiers is item-neutral here).
+LocalModDecl = ModRun LocalModTarget ;
+ModRun      = ( Modifier | AnnEnumMod | VarianceMod ) Modifiers ;
+LocalModTarget = LocalFun | Destructure | DelegateDecl | Decl | BareDecl ;
 Labeled     <~~ push(makeLabeled(takeAll(), up.pos)) ~~>
             = LabelDef PlainStmt ;
 // A LOCAL type declaration - `class Local`, `interface I`, `object O`, `enum class E`,
@@ -721,7 +840,48 @@ Throw       <~~ push(makeThrow(pop())) ~~>
             = KwThrow Expression [ ";" ] ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
-            = "{" { Statement } "}" ;
+            = "{" [ Statement ] { NewStmtLine Statement } "}" ;
+// Kotlin refuses two statements on ONE line without a `;` between them: "Unexpected
+// tokens (use ';' to separate expressions on the same line)". The guard sits at the
+// block-item boundary and scans FORWARD - the whitespace after the previous statement's
+// last token is still ahead at a :script, so a backward scan sees nothing and silently
+// does nothing (docs/abnf-dialect-gotchas.md). It accepts a newline, a `;` (either just
+// consumed by the previous statement or still ahead), a `}` (the block is over) and end
+// of input, and refuses everything else. Comments are skipped like whitespace, and a
+// comment containing a newline separates - Kotlin's parser sees the same line breaks the
+// lexer does, whether or not a comment is wrapped around them.
+NewStmtLine = :script(~~
+    (function() {
+        if (c.peek(-1) === 59) { return undefined }
+        var i = 0
+        var steps = 0
+        while (steps < 100000) {
+            steps++
+            var ch = c.peek(i)
+            if (ch < 0) { return undefined }
+            if (ch === 10 || ch === 59 || ch === 125) { return undefined }
+            if (ch === 32 || ch === 9 || ch === 13 || ch === 12) { i++; continue }
+            if (ch === 47 && c.peek(i + 1) === 47) { return undefined }
+            if (ch === 47 && c.peek(i + 1) === 42) {
+                var d = 1
+                i = i + 2
+                while (d > 0 && steps < 100000) {
+                    steps++
+                    var b = c.peek(i)
+                    if (b < 0) { return undefined }
+                    if (b === 10) { return undefined }
+                    if (b === 47 && c.peek(i + 1) === 42) { d = d + 1; i = i + 2; continue }
+                    if (b === 42 && c.peek(i + 1) === 47) { d = d - 1; i = i + 2; continue }
+                    i++
+                }
+                continue
+            }
+            return abnf.newToken("\x01same-line-statement", 0)
+        }
+        return undefined
+    })()
+~~) ;
+
 
 Decl        <~~ push(makeDecl(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd NotHardKw KId <~~ push(up.in) ~~> [ ":" DeclType ] "=" Expression [ ";" ] ;
@@ -862,8 +1022,8 @@ Target      <~~ push(makeTargetRef(takeAll())) ~~>
 // postfix targets in Kotlin's own tree (psiUtil/isSelectorInExpression.txt). Both are the
 // identity in the untyped handle world, so the key is recorded exactly as for `.`.
             = KId <~~ push(up.in) ~~> { "." KId <~~ push({key: up.in}) ~~> | "?." KId <~~ push({key: up.in}) ~~> | "!!" | TIndex } ;
-TIndex      <~~ push({idx: pop()}) ~~>
-            = "[" Expression "]" ;
+TIndex      <~~ push({idx: kIndexArg(takeAll(), up.pos)}) ~~>
+            = "[" Expression { "," Expression } [ "," ] "]" ;
 
 // if as an expression needs both arms.
 IfExpr      <~~ push(makeIfExpr(pop(), pop(), pop())) ~~>
@@ -875,9 +1035,20 @@ WhenExpr    <~~ push(makeWhen(takeAll())) ~~>
               { WhenElse | WhenArm } "}" ;
 // The subject is a plain expression, or a val/var binding - when (val x = e) { ... } -
 // whose name is in scope in every arm body. The type annotation is parsed and ignored.
-WhenSubj    = WhenBind | WhenExprSubj ;
+WhenSubj    = WhenBind | WhenBindDestr | WhenExprSubj ;
+// The initializer may be missing (when (val x: T) { }); the subject is Unit then.
+// Kotlin's own tree also records an extension RECEIVER on the subject variable
+// (when (val T.x5 = foo) { }) - a PROPERTY with a TYPE_REFERENCE before the DOT,
+// semantically meaningless but syntactically accepted. psi/WhenWithSubjectVariable.kt.
 WhenBind    <~~ var e = pop(); push({subj: e, subjName: pop()}) ~~>
-            = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] "=" Expression ;
+            = { Annotation } ( "val" | "var" ) KwEnd { WhenBindRecv } KId <~~ push(up.in) ~~> [ ":" Type ] "=" Expression
+            | { Annotation } ( "val" | "var" ) KwEnd { WhenBindRecv } KId <~~ push(up.in); push(makeConst(undefined)) ~~> [ ":" Type ] ;
+WhenBindRecv = KId [ SkipAngle ] "." ;
+// A DESTRUCTURING subject variable - when (val (x, y) = foo) { ... }. The components are
+// parsed and dropped (nothing binds them), so only the subject EXPRESSION is genuine;
+// the arms still see the value they compare against. psi/WhenWithSubjectVariable.kt.
+WhenBindDestr <~~ push({subj: pop()}) ~~>
+            = { Annotation } ( "val" | "var" ) KwEnd SkipParen "=" Expression ;
 WhenExprSubj <~~ push({subj: pop()}) ~~>
             = Expression ;
 // The else arm must be tried first: otherwise 'else' would parse as a variable arm
@@ -982,15 +1153,49 @@ NotParen    = :script(~~
 // an infix operator there); anything else is a legal simpleIdentifier.
 NotKeyword  = :script(~~
     (function() {
+        // The DECLARATION MODIFIERS that are soft keywords are deliberately NOT here:
+        // they are ordinary names, so Kotlin reads `x7 infix x9` and
+        // `@Ann() class C annotation y` as infix calls and says so in as many words -
+        // psi/annotation/modifiersMigration/newModifiers.kt carries the comment
+        // `// infix call` on that line, psi/annotation/at/blockLevelExpressions.txt
+        // makes `x6 ?: x7 infix x9 + 10` one BINARY_EXPRESSION whose OPERATION_REFERENCE
+        // is `infix`, and psi/recovery/binaryExpression/SoftModifierAsInfixFunction.txt
+        // spells the rule out in its file name. Excluding them split those lines into
+        // two statements, which NewStmtLine then refused. The VISIBILITY modifiers and
+        // get/set/init/constructor/companion stay in: `var x = 0` followed on the SAME
+        // line by `private set` is an accessor run, and an infix reading swallows it.
+        // Same list as the interpreter half's NotInfixKw.
         var reserved = "|as|break|class|continue|do|else|false|for|fun|if|in|interface|is|null"
             + "|object|package|return|super|this|throw|true|try|typealias|val|var|when|while"
-            + "|by|where|get|set|init|constructor|companion|catch|finally|out|vararg|import"
-            + "|override|private|public|protected|internal|abstract|open|final|sealed|data"
-            + "|value|enum|annotation|inline|infix|operator|suspend|lateinit|const|inner"
-            + "|tailrec|noinline|crossinline|external|expect|actual|reified|dynamic|field|"
+            + "|by|where|get|set|init|constructor|companion|catch|finally|import"
+            + "|private|public|protected|internal|step|until|downTo"
+            + "|to|and|or|xor|shl|shr|ushr|"
+        // Skip spaces, tabs AND comments: the operand of an infix call may be written
+        // `12 /*true*/c 12` (psiUtil/isCallee.kt), and a guard that stops at the `/`
+        // reads an EMPTY word and refuses a perfectly good infix operator - the
+        // "keyword-rejecting guard must skip COMMENTS" trap in docs/abnf-dialect-
+        // gotchas.md, met from the refusing side.
         var i = 0
+        var steps = 0
         var cc = c.peek(i)
-        while (cc === 32 || cc === 9) { i++; cc = c.peek(i) }
+        while (steps < 20000) {
+            steps++
+            if (cc === 32 || cc === 9) { i++; cc = c.peek(i); continue }
+            if (cc === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                cc = c.peek(i)
+                while (steps < 20000 && cc >= 0 && !(cc === 42 && c.peek(i + 1) === 47)) {
+                    steps++
+                    i++
+                    cc = c.peek(i)
+                }
+                if (cc < 0) { break }
+                i = i + 2
+                cc = c.peek(i)
+                continue
+            }
+            break
+        }
         var w = ""
         while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) || (cc >= 48 && cc <= 57) || cc === 95) {
             w = w + String.fromCharCode(cc)
@@ -1106,7 +1311,14 @@ AsExpr      <~~ push(applyTypeOp(takeAll())) ~~> = UnaryExpr { AsSfx } ;
 // A leading annotation on an EXPRESSION - when (@Ann "") { ... }, @Ann x += f() -
 // is legal wherever an expression starts. Annotations are erased, so an annotated
 // expression IS the expression; AnnExpr pushes nothing of its own.
-UnaryExpr   = AnnExpr | PreIncDec | Neg | Not | PostfixExpr ;
+UnaryExpr   = AnnExpr | PreIncDecRef | PreIncDec | Neg | Not | PostfixExpr ;
+// `++a::b` is `++(a::b)` - `::` binds tighter than the prefix operator - so the operand
+// is a callable reference, not the assignable Target that PreIncDec wants.
+// psi/DoubleColon.kt spells it next to `-a::b` and `a+b::c`; the reference has no
+// runtime value in this subset, so the whole form is reported. It is tried FIRST and
+// declines on the missing `::`, which leaves ordinary `++a` to PreIncDec unchanged.
+PreIncDecRef <~~ takeAll(); push(notImplExpr("callable reference on an increment target", up.pos)) ~~>
+            = ( "++" | "--" ) Target "::" RefName ;
 // PREFIX ++x / --x. Kotlin has both fixities and they differ in their VALUE: the postfix
 // form yields the old value, the prefix form the new one. It must precede Neg, or `--a`
 // reads as a double negation - which quietly gives the right answer for a number and
@@ -1114,10 +1326,16 @@ UnaryExpr   = AnnExpr | PreIncDec | Neg | Not | PostfixExpr ;
 PreIncDec   <~~ push(makePreIncDec(takeAll())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
 AnnExpr     = Annotation { Annotation } UnaryExpr ;
-Neg         <~~ push(makeNeg(pop())) ~~>
+Neg         <~~ push(kNegFold(pop(), up.in)) ~~>
             = "-" UnaryExpr ;
+// The operand of a prefix `!` must be on the `!`'s own line. Kotlin ends the statement
+// at the newline, so `true!!!` followed by `true!!!!` on the next line is a POSTFIX_
+// EXPRESSION plus a stray `!` that its parser records as
+// "Unexpected tokens (use ';' to separate expressions on the same line)" -
+// psi/AssertNotNull.txt. Without the guard the stray `!` negated the NEXT statement and
+// the file parsed clean.
 Not         <~~ push(makeNot(pop())) ~~>
-            = "!" UnaryExpr ;
+            = "!" SameLine UnaryExpr ;
 
 PostfixExpr = IncDec | CallMember ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
@@ -1130,7 +1348,16 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // A trailing "!!" (non-null assertion) is consumed and dropped: in the untyped handle
 // world it is the identity, so x!! lowers exactly like x (and x!!.m() still chains).
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | GenericSfx | DotAnonSfx | InvokeSfx | "!!" } ;
+            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | GenericSfx | DotAnonSfx | InvokeSfx | RefSfx | "!!" } ;
+// A callable reference or class literal whose RECEIVER is an arbitrary expression:
+// `X()::class`, `object {}::class`, `foo()::bar`. CallableRef in Primary covers only a
+// dotted NAME on the left (`a.b::c`), so these three lines of psi/DoubleColon.kt had no
+// reading at all and the parse died on the `::`. The value is not modelled - a class
+// literal has no runtime representation in this subset - so it is reported.
+// RefName PUSHES its text, so the tag drains it before pushing the suffix record.
+RefSfx      <~~ takeAll(); push({kind: "dotanon", t: notImplExpr("callable reference on an expression", up.pos)}) ~~>
+            = "::" RefName ;
+RefName     = KId <~~ push(up.in) ~~> | "class" KwEnd <~~ push("class") ~~> ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}); retLblPop() ~~>
             = "." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ SkipAngle ] MArgs ;
 SafeMethodSfx <~~ push({kind:"mcall", name: popName(), args: takeAll(), safe: true}); retLblPop() ~~>
@@ -1215,8 +1442,12 @@ InstAhead   = :script(~~
         return abnf.newToken("\x01not-instantiation", 0)
     })()
 ~~) ;
-IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
-            = "[" Expression "]" ;
+// The index operator takes an argument LIST (`a[i, j]` is `get(i, j)`), and the list
+// takes a trailing comma like every other one (psi/trailingCommaAllowed.kt writes
+// `x[ 1, 3 , ]`). Only the ONE-argument form is implemented; a wider one is accepted
+// and reported, rather than silently indexing by its first argument.
+IndexSfx    <~~ push({kind:"index", idx: kIndexArg(takeAll(), up.pos)}) ~~>
+            = "[" Expression { "," Expression } [ "," ] "]" ;
 // The argument list must OPEN on the callee's own line. Kotlin's own tree settles this:
 // psi/DoubleColon.txt has `a::b.c` followed by a blank line and then `(a::b)()`, and
 // records them as TWO statements, not as one call of `c`. A trailing LAMBDA is
@@ -1249,8 +1480,12 @@ DotAnonSfx  <~~ push({kind:"dotanon", t: notImplExpr("anonymous method", up.pos)
 
 // A trailing lambda is the call's LAST argument, so it is wrapped in the same
 // {at} record the other arguments use.
+// It may carry ANNOTATIONS, which is also Kotlin's OLD label syntax: `x2.filter @f
+// { return 2 }` is a LAMBDA_ARGUMENT whose child is an ANNOTATED_EXPRESSION wrapping the
+// lambda (psi/newLabels/oldSyntaxExpressions.txt). Annotation pushes nothing, so the
+// record still wraps exactly one lambda.
 TrailLambda <~~ push({at: pop()}) ~~>
-            = Lambda ;
+            = { Annotation } Lambda ;
 // A call's argument list. Kotlin has three forms and they can be mixed:
 //   f(x)            positional
 //   f(name = x)     NAMED - resolved against the callee's parameter names at emit
@@ -1407,7 +1642,7 @@ ThisExpr    <~~ push(makeThisAt(pop().tlbl)) ~~>
 // registers it on the walk-time return-target stack; makeLambda pops it again.
 Lambda      <~~ push(makeLambda(takeAll())) ~~>
             = [ LamLabel ] "{" [ LambdaParams ] { LamStmt } "}" ;
-LamLabel    = KId <~~ push({lamlbl: up.in}); retLblPush(up.in, "lam") ~~> "@" ;
+LamLabel    = KId <~~ push({lamlbl: up.in}); retLblPush(up.in, "lam") ~~> AtAdjacent "@" ;
 // A { ... } in value position (an if / when arm) is a BLOCK, not a lambda: it runs its
 // statements in a fresh scope and its value is the last expression (Unit if it ends in a
 // statement). Tried before a plain Expression in those arms; a real lambda ({ x -> ... })
@@ -1562,7 +1797,12 @@ SkipParenItem = "\x00"..."\x27" | "\x2a"..."\U0010ffff" ;
 // block read as the label `fun@` followed by the collection literal `[a]` - the statement
 // SUCCEEDED, consuming `fun @[a]`, and the parse then died on the `.` of `T.()` two
 // tokens later, so the position pointed nowhere near the cause. (psi/FunctionExpressions.kt)
-LabelDef    = NotHardKw KId <~~ push({lbl: up.in}) ~~> "@" ;
+// The `@` must be GLUED to the name, for the reason AtAdjacent already carries on
+// break/continue/return: `abstract @a class F {}` was read as the label `abstract@` on
+// a statement `a`, leaving `class F {}` as a second statement on the same line - and
+// Kotlin's tree records both as ONE declaration (psi/LocalDeclarations.kt,
+// psi/newLabels/oldSyntaxExpressions.kt). Ported from the interpreter half.
+LabelDef    = NotHardKw KId <~~ push({lbl: up.in}) ~~> AtAdjacent "@" ;
 BreakAt     <~~ push(makeBreakTo(pop().lbl, up.pos)) ~~>
             = KwBreak AtAdjacent "@" KId <~~ push({lbl: up.in}) ~~> [ ";" ] ;
 ContinueAt  <~~ push(makeContinueTo(pop().lbl, up.pos)) ~~>
@@ -1766,11 +2006,14 @@ Interface   = InterfaceCtor | InterfaceReal | InterfaceSkip ;
 InterfaceCtor <~~ push(notImplStmt("interface", up.pos)) ~~>
             = [ KwFun ] KwInterface KId [ SkipAngle ] [ PrimaryCtorKw | CtorModsOnly ] CtorParamsSkip
               [ ":" SuperList ] [ SkipBlock ] ;
-// `fun interface` is a functional (SAM) interface. The `fun` only constrains how many
-// abstract members the interface may have, which changes nothing here, so it is parsed
-// and dropped and the declaration lowers like any other interface.
+// `fun interface` is a functional (SAM) interface: with exactly ONE abstract member it
+// admits SAM conversion, `F { ... }` building an instance whose single member IS the
+// lambda (see makeCall). The `fun` is recorded as a leading marker item, the way
+// ClassDecl records `data`/`value`, so makeInterfaceStmt can tell the two apart -
+// an ordinary interface with one abstract member is NOT convertible, which is
+// Kotlin's rule. The twin of IfaceKw/buildInterface in kotlin-interpreter.abnf.
 InterfaceReal <~~ push(makeInterfaceStmt(takeAll())) ~~>
-            = [ KwFun ] KwInterface KId <~~ push(up.in) ~~> [ SkipAngle ] [ ":" Supers ] [ WhereClause ] ( "{" { Member } "}" | !"{" ) ;
+            = [ KwFun <~~ push({samfun: true}) ~~> ] KwInterface KId <~~ push(up.in) ~~> [ SkipAngle ] [ ":" Supers ] [ WhereClause ] ( "{" { Member } "}" | !"{" ) ;
 InterfaceSkip <~~ push(notImplStmt("interface", up.pos)) ~~>
             = [ KwFun ] KwInterface KId [ SkipAngle ] [ ":" SuperList ] [ SkipBlock ] ;
 // object Name { ... } is a real singleton: its member body is lowered into a backing
@@ -1829,7 +2072,14 @@ EnumEntry   <~~ push(makeEnumEntry(takeAll())) ~~>
 // `FIRST: My(13)` - which Kotlin rejects with "Expecting ';' after the last enum entry".
 EnumSkip    <~~ push(notImplStmt("enum class", up.pos)) ~~>
             = KwEnum KwClass KId [ SkipAngle ] [ CtorParamsSkip ] [ ":" SuperList ] EnumSkipBody ;
-EnumSkipBody = "{" [ EnumEntrySkip { "," EnumEntrySkip } [ "," ] ] [ ";" { SkipItem } ] "}" ;
+// The member run after the `;` is tried as real members FIRST: an enum reaches EnumSkip
+// because its ENTRIES are outside the subset, and its members are usually ordinary. A
+// bare `{ SkipItem }` run swallowed `inner object` (psi/namelessObjectAsEnumMember.txt
+// records "Name expected"). Two full alternatives, not a group - a group that matched
+// the empty repetition would commit and never offer the second (gotchas.md, "A GROUP of
+// alternatives is committed exactly like an ordered choice").
+EnumSkipBody = "{" [ EnumEntrySkip { "," EnumEntrySkip } [ "," ] ] [ ";" { DropMember } ] "}" ;
+DropMember  <~~ takeAll() ~~> = Member ;
 // An entry may carry modifiers and annotations in any order (`private @Ann() Z()`,
 // and `inline public` - where `inline` is a modifier and `public` the entry NAME).
 EnumEntrySkip = { ( Modifier | Annotation ) NotEntryEnd } NotHardKw KId [ SkipParen ] [ SkipBlock ] ;
@@ -2021,6 +2271,10 @@ KwContract  = "contract" KwEnd ;
     var hidCount = 0     // Names hidden loop counters.
     var classNames = {}  // Known class names (constructor calls).
     var interfaceNames = {}   // Known interface names ("$" prefixed): descriptors without a __ctor.
+    // `fun interface` name -> its single abstract member's name. Filled while the
+    // interface is walked; read at EMISSION time by makeCall, so an interface declared
+    // after the conversion site is still seen.
+    var samNames = {}
     // Every interface's method signature list [{name, params}], collected while the
     // interface is walked. Interface DELEGATION (`class C(b: I) : I by b`) synthesizes
     // one forwarder per entry the class does not override, so the arity has to be known.
@@ -2274,6 +2528,22 @@ KwContract  = "contract" KwEnd ;
         if (op == "!=") { return callExt(b, "js_ktne", [l, r]) }
         return coreEmitBinK(b, op, l, r)
     }
+    // Kotlin folds a unary minus into an integer LITERAL when typing it: `2147483648`
+    // on its own is out of Int range and is a Long, while `-2147483648` is Int.MIN_VALUE
+    // and stays 32 bit. Only the exact boundary TEXT is folded; up.in is the
+    // production's matched tokens with the separators removed, so a `_` grouping and
+    // stray whitespace are stripped before the comparison. Anything else - including an
+    // explicit `L` suffix - keeps the ordinary negation. The twin of kNegFold in
+    // kotlin-interpreter.abnf.
+    function kNegFold(t, raw) {
+        var txt = ""
+        for (var i = 0; i < raw.length; i++) {
+            var ch = raw.charAt(i)
+            if (ch != "_" && ch != " " && ch != "\t" && ch != "\n" && ch != "\r") { txt = txt + ch }
+        }
+        if (txt == "-2147483648") { return makeConst(-2147483648) }
+        return makeNeg(t)
+    }
     // -x: the unaryMinus convention, else the primitive negation.
     makeNeg = function(t) {
         return function(b) {
@@ -2503,6 +2773,16 @@ KwContract  = "contract" KwEnd ;
     var excBases = {"$Exception": true, "$RuntimeException": true, "$Throwable": true,
                     "$Error": true, "$IllegalStateException": true, "$IllegalArgumentException": true,
                     "$IllegalAccessException": true, "$ArithmeticException": true}
+    // The builtin throwables that can also be CONSTRUCTED directly - `throw
+    // IllegalStateException("x")`. The set matches ktExcHierarchy in abnf/jsrtkotlin.go
+    // and installThrowables in kotlin-interpreter.abnf.
+    var excBuiltins = {"$Throwable": true, "$Exception": true, "$Error": true,
+                       "$RuntimeException": true, "$IllegalStateException": true,
+                       "$IllegalArgumentException": true, "$IndexOutOfBoundsException": true,
+                       "$NullPointerException": true, "$NumberFormatException": true,
+                       "$UnsupportedOperationException": true, "$ArithmeticException": true,
+                       "$NoSuchElementException": true, "$ConcurrentModificationException": true,
+                       "$ClassCastException": true, "$IllegalAccessException": true}
 
     // Import prefixes the runtime already satisfies: their symbols are provided
     // as builtins (abs/max/min, listOf, exitProcess, ...), so importing them is a
@@ -3464,6 +3744,13 @@ KwContract  = "contract" KwEnd ;
     }
 
     // f(args): a class constructor (known at compile time) or a function value.
+    // The index operator's argument list. Kotlin's `a[i, j]` is `get(i, j)`; only the
+    // one-argument form is modelled, so a wider one is reported and its thunk fails
+    // rather than silently indexing by the first argument.
+    function kIndexArg(items, pos) {
+        if (items.length == 1) { return items[0] }
+        return notImplExpr("index with more than one argument", pos)
+    }
     function makeCall(items) {
         var name = items[0]
         var at = 1
@@ -3493,6 +3780,37 @@ KwContract  = "contract" KwEnd ;
                     roV = ro.v
                 }
                 return {b: b, v: callExt(b, "js_rxktnew", [rp.v, roV])}
+            }
+            // SAM CONVERSION: `Op43 { it + 100 }` on a `fun interface` builds an instance
+            // whose single abstract member IS the lambda. No method goes on the
+            // DESCRIPTOR (each conversion has its own body), so the instance carries it
+            // as a field, which js_ktsmcall's "a field holding a function value" branch
+            // dispatches and js_ktfget reads for `f.run`. An interface has no __ctor, so
+            // there is no other reading of a one-argument call of its name.
+            if (samNames["$" + name] != undefined && args.length == 1) {
+                var samCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+                var samObj = callExt(b, "js_obj_new", [])
+                callExt(b, "js_set", [samObj, emitStr(b, "__class"), samCls])
+                var samR = args[0].at(b)
+                b = samR.b
+                callExt(b, "js_set", [samObj, emitStr(b, samNames["$" + name]), samR.v])
+                return {b: b, v: samObj}
+            }
+            // One of the BUILTIN THROWABLES - `Exception("m")`, `IllegalStateException(m)`.
+            // The subset has no user class for them, so the call used to abort with
+            // "unknown name: Exception" while the interpreter half ran the same program
+            // (its installThrowables registers all twelve as real descriptors). The
+            // hierarchy lives in abnf/jsrtkotlin.go; a program that declares its own
+            // class or function of the name keeps it, exactly like the Regex branch.
+            if (excBuiltins["$" + name] == true && classNames[name] == undefined
+                && funNames["$" + name] != true && interfaceNames["$" + name] != true) {
+                var emV = hNull
+                if (args.length > 0) {
+                    var emR = args[0].at(b)
+                    b = emR.b
+                    emV = emR.v
+                }
+                return {b: b, v: callExt(b, "js_ktnewexc", [emitStr(b, name), emV])}
             }
             // A BARE call to a method of the enclosing class (own or inherited):
             // `secret()` inside a method is `this.secret()`. Decided at emission time,
@@ -4464,7 +4782,15 @@ KwContract  = "contract" KwEnd ;
                 && funNames["$" + name] != true) {
                 return {b: b, v: callExt(b, "js_rxktglobal", [emitStr(b, name)])}
             }
-            if (emitOuterProps != null && emitOuterProps["$" + name] == true) {
+            // A property of the ENCLOSING class, read unqualified inside an inner class.
+            // The INNER class wins when it declares the same name - Kotlin's shadowing
+            // rule, and what recvLookup does in the other half: `inner class In(val tag:
+            // String)` inside `class Outer(val tag: String)` read the OUTER `tag` here,
+            // which aborted with "member 'tag' of undefined" whenever the inner instance
+            // had no __outer (constructed bare inside the outer's own method).
+            if (emitOuterProps != null && emitOuterProps["$" + name] == true
+                && !(emitClassTop() != null && classOwnProps["$" + emitClassTop()] != undefined
+                     && classOwnProps["$" + emitClassTop()]["$" + name] == true)) {
                 var itV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
                 return {b: b, v: callExt(b, "js_get", [callExt(b, "js_get", [itV, emitStr(b, "__outer")]),
                                                        emitStr(b, name)])}
@@ -4919,9 +5245,11 @@ KwContract  = "contract" KwEnd ;
             var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
             var top = emitClassTop()
             // A label naming an ENCLOSING class is the inner instance's outer receiver.
+            // js_ktthisat walks the __outer chain BY NAME and falls back to the receiver
+            // when nothing matches; a bare `js_get(this, "__outer")` aborted for an inner
+            // class constructed inside its outer's own method, where nothing sets it.
             if (top != null && top != lbl) {
-                var outerV = callExt(b, "js_get", [thisV, emitStr(b, "__outer")])
-                return {b: b, v: outerV}
+                return {b: b, v: callExt(b, "js_ktthisat", [thisV, emitStr(b, lbl)])}
             }
             return {b: b, v: thisV}
         }
@@ -5167,8 +5495,11 @@ KwContract  = "contract" KwEnd ;
     // interface I [: Supers] { defaults }: a descriptor with the default-method closures
     // and no __ctor. Its signature list feeds interface delegation.
     function makeInterfaceStmt(items) {
-        var name = items[0]
-        var hdr = takeHeader(items, 1)
+        var at = 0
+        var samfun = false
+        if (items[at] != undefined && items[at].samfun != undefined) { samfun = true; at++ }
+        var name = items[at]
+        var hdr = takeHeader(items, at + 1)
         var parts = splitMembers(items, hdr.i)
         var methods = parts.methods
         interfaceNames["$" + name] = true
@@ -5183,6 +5514,9 @@ KwContract  = "contract" KwEnd ;
             classMethodNames["$" + parts.abstracts[a].name] = true
         }
         interfaceMethods["$" + name] = sig
+        // The SAM is installed only for a `fun interface` whose body declares exactly
+        // one abstract member - the same test buildInterface makes in the other half.
+        if (samfun && parts.abstracts.length == 1) { samNames["$" + name] = parts.abstracts[0].name }
         var own = {}
         for (var o = 0; o < methods.length; o++) { own["$" + methods[o].name] = true }
         return function(b) {
