@@ -584,6 +584,25 @@ function s21() {
     // shared engine offers quote regions behind a dialect flag that JavaScript does
     // not pass, and this check is what keeps it from creeping in.
     check("re53", !/\Qa.b\E/.test("a.b") && /\Qa.b\E/.test("Qa.bE"));
+    // ===== JavaScript repeat semantics =====
+    // Two rules the shared engine keeps behind a dialect flag, both node v24's.
+    // (a) An iteration of an unbounded loop that consumed NOTHING is discarded, so
+    //     /^(a*)*$/ on "aaa" reports "aaa" for group 1 and not "" - Perl, Python,
+    //     Ruby and Java print "" here, node and POSIX print "aaa".
+    check("re54", /^(a*)*$/.exec("aaa")[1] === "aaa" && /^(a*)*$/.exec("")[1] === undefined);
+    check("re55", /(a*)*/.exec("b")[1] === undefined &&
+                  "aaa".replace(/(a*)*/g, "[$1]") === "[aaa][]");
+    check("re56", /^(a|b|)*$/.exec("ab")[1] === "b" && /(a?)*/.exec("aa")[1] === "a" &&
+                  /(|a)*/.exec("aa")[0] === "aa");
+    check("re57", /^(a*)+$/.exec("aaa")[1] === "aaa" && /^(a*)*?$/.exec("aaa")[1] === "aaa");
+    // (b) The captures INSIDE a repeated atom are cleared at the start of every
+    //     iteration, so a group that took part in an earlier one but not the last
+    //     reads as "did not take part". This holds for {n,m} as well as for + and *.
+    check("re58", /(?:(a)|b)+/.exec("ab")[1] === undefined &&
+                  /(?:(a)|b)+/.exec("ba")[1] === "a");
+    check("re59", /^((a)|b*)*$/.exec("ab")[1] === "b" &&
+                  /^((a)|b*)*$/.exec("ab")[2] === undefined &&
+                  /(?:(a)|b){2}/.exec("ab")[1] === undefined);
 }
 
 // ===== SECTION 22: JavaScript value semantics (rendering, ==, instanceof, methods) =====

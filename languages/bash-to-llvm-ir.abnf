@@ -3074,6 +3074,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     var OP_CHAR = 1, OP_ANY = 2, OP_CLASS = 3, OP_SPLIT = 4, OP_JMP = 5
     var OP_SAVE = 6, OP_MATCH = 7, OP_BOL = 8, OP_EOL = 9, OP_PROG = 10
+    // OP_CLEAR x,y: set capture slots x..y to -1 (the per-iteration capture reset). x > y
+    // is a legal no-op, which is what a repeated atom with no groups inside it gets.
+    var OP_CLEAR = 11
 
     // Indexed by re_bad. The text only ever reaches the stderr CHANNEL, whose bytes this
     // runtime drops, but a wrong code would still be a wrong status, so they are real.
@@ -3100,6 +3103,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var gReSubj = m.NewGlobalDef("re_subj", nullStr)
     var gReSlen = m.NewGlobalDef("re_slen", zero)
     var gReSteps = m.NewGlobalDef("re_steps", zero)
+    // The undo stack for OP_CLEAR. A cleared slot has to come BACK when the iteration
+    // that cleared it fails, exactly as OP_SAVE puts its old offset back - but a CLEAR
+    // writes a whole range, which will not fit in the re_run frame (one frame per
+    // backtracking choice: an alloca that big would be paid on every one of them). So
+    // the old values go on a stack of their own, pushed on the way in and popped on the
+    // way out, and an overrun fails the attempt the way the step cap does.
+    var RE_CSTK = 8192
+    var reCstkTy = llvm.types.NewArray(RE_CSTK, i32)
+    var gReCstk = m.NewGlobalDef("re_cstk", llvm.constant.NewZeroInitializer(reCstkTy))
+    var gReCtop = m.NewGlobalDef("re_ctop", zero)
     var gReFold = m.NewGlobalDef("re_fold", zero)
 
     // The mutually recursive halves, declared before any body needs them.
@@ -3433,17 +3446,32 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             yes.NewBr(nx)
             return nx
         })
-        pafter.NewBr(h)
+        // A POSIX class is a SET, so it cannot be an endpoint of a range: bash reports
+        // "invalid character range" for [[:alpha:]-z] and for [a-[:digit:]]. A trailing
+        // "-]" is still an ordinary hyphen, so the test is the same one the range below
+        // uses. Same rule as lib/regex.js rxParseCls.
+        var pafter2 = f.NewBlock("rbkpaf2")
+        var pd0 = pafter.NewCall(reAt, zero)
+        var pd1 = pafter.NewCall(reAt, one)
+        pafter.NewCondBr(pafter.NewAnd(pafter.NewICmp(reEQ, pd0, reK(45)),
+                                       pafter.NewAnd(pafter.NewICmp(reNE, pd1, reK(93)),
+                                                     pafter.NewICmp(reNE, pd1, zero))),
+                         badrng, pafter2)
+        pafter2.NewBr(h)
 
         reAdv(ord, 1)
         var nxt = ord.NewCall(reAt, zero)
         var nxt2 = ord.NewCall(reAt, one)
+        var nxt3 = ord.NewCall(reAt, reK(2))
         ord.NewCondBr(ord.NewAnd(ord.NewICmp(reEQ, nxt, reK(45)),
                                  ord.NewAnd(ord.NewICmp(reNE, nxt2, reK(93)),
                                             ord.NewICmp(reNE, nxt2, zero))), rng, sgl)
-        reAdv(rng, 2)
+        var rng1 = f.NewBlock("rbkrng1")
+        rng.NewCondBr(rng.NewAnd(rng.NewICmp(reEQ, nxt2, reK(91)),
+                                 rng.NewICmp(reEQ, nxt3, reK(58))), badrng, rng1)
+        reAdv(rng1, 2)
         var rng2 = f.NewBlock("rbkrng2")
-        rng.NewCondBr(rng.NewICmp(reSGT, c, nxt2), badrng, rng2)
+        rng1.NewCondBr(rng1.NewICmp(reSGT, c, nxt2), badrng, rng2)
         var rp = e.NewAlloca(i32)
         var rafter = reFor(f, "rbkr", rng2, rp, c, rng2.NewAdd(nxt2, one), function(b, j) {
             b.NewCall(reSetBit, [k, j])
@@ -3592,9 +3620,31 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         e.NewStore(reK(-1), endp)
         var hole1 = e.NewCall(reEmit, [reK(OP_JMP), zero, zero])
         var hole2 = e.NewCall(reEmit, [reK(OP_JMP), zero, zero])
-        var astart = e.NewLoad(i32, gRePc)
+        // A THIRD reserved slot, and it is deliberately INSIDE the atom's fragment: it
+        // carries the per-iteration capture reset, so every copy re_copy makes for an
+        // interval carries its own. Which groups to clear is only known once the atom
+        // has been parsed, hence the hole.
+        var g0 = e.NewLoad(i32, gReNg)
+        var hole3 = e.NewCall(reEmit, [reK(OP_JMP), zero, zero])
+        var astart = hole3
         e.NewCall(reAtom)
         var aend = e.NewLoad(i32, gRePc)
+        var g1 = e.NewLoad(i32, gReNg)
+        // The captures inside a repeated atom are cleared at the start of every
+        // iteration, so a group that took part in an earlier iteration but not the last
+        // one reads as unset: [[ ab =~ ^((a)|b*)*$ ]] leaves BASH_REMATCH[2] empty. The
+        // group numbers inside the atom are contiguous, so one range covers them; with
+        // no groups at all the slot degrades to a jump onto the atom.
+        var hasG = e.NewICmp(reSGT, g1, g0)
+        reSetF(e, hole3, 0, e.NewSelect(hasG, reK(OP_CLEAR), reK(OP_JMP)))
+        reSetF(e, hole3, 1, e.NewSelect(hasG, e.NewMul(e.NewAdd(g0, one), reK(2)),
+                                        e.NewAdd(hole3, one)))
+        // Groups past the 64th get no SAVE either (the call site's caps array ends), so
+        // the range stops at the last real capture slot and never reaches the marks
+        // that share re_slot with them.
+        var hiSlot = e.NewAdd(e.NewMul(g1, reK(2)), one)
+        reSetF(e, hole3, 2, e.NewSelect(e.NewICmp(reSLT, hiSlot, reK(RE_NCAP)),
+                                        hiSlot, reK(RE_NCAP - 1)))
         var bad0 = f.NewBlock("rpbad"), q = f.NewBlock("rpq")
         e.NewCondBr(e.NewICmp(reNE, e.NewLoad(i32, gReBad), zero), bad0, q)
         bad0.NewRet(zero)
@@ -3811,14 +3861,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var ph = f.NewBlock("ralph"), pb = f.NewBlock("ralpb"), x = f.NewBlock("ralx")
         var pendp = e.NewAlloca(i32)
         e.NewStore(reK(-1), pendp)
+        // An empty BRANCH is not decided here: whether it is an error depends on how
+        // many branches there turn out to be. emptyp remembers that one was seen and
+        // naltp counts them; the verdict is at the end.
+        var emptyp = e.NewAlloca(i32), naltp = e.NewAlloca(i32)
+        e.NewStore(zero, emptyp)
+        e.NewStore(zero, naltp)
         e.NewBr(lp)
 
+        lp.NewStore(lp.NewAdd(lp.NewLoad(i32, naltp), one), naltp)
         var sp = lp.NewCall(reEmit, [reK(OP_JMP), zero, zero])
         var body = lp.NewLoad(i32, gRePc)
         var n = lp.NewCall(reCat)
         lp.NewCondBr(lp.NewAnd(lp.NewICmp(reEQ, n, zero),
                                lp.NewICmp(reEQ, lp.NewLoad(i32, gReBad), zero)), mt, lp1)
-        mt.NewStore(reK(8), gReBad)   // empty (sub)expression
+        mt.NewStore(one, emptyp)
         mt.NewBr(lp1)
         lp1.NewCondBr(lp1.NewICmp(reNE, lp1.NewLoad(i32, gReBad), zero), last, lp2)
         lp2.NewCondBr(lp2.NewICmp(reEQ, lp2.NewCall(reAt, zero), reK(124)), more, last)
@@ -3839,7 +3896,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pb.NewStore(reGetF(pb, pv, 2), pendp)
         reSetF(pb, pv, 1, endv)
         pb.NewBr(ph)
-        x.NewRet(zero)
+        // A POSIX ERE branch may not be empty: bash rejects "", "a|", "|a", "(a|)" and
+        // "(|a)" alike with "empty (sub)expression". The one exception is a group whose
+        // WHOLE body is empty - "()", "(())" and "(a)()" match the empty string in bash
+        // 5.3 - so the emptiness is only an error for a branch of a real alternation, or
+        // for the top level of the pattern. Same rule as lib/regex.js rxParseAlt.
+        var xbad = f.NewBlock("ralxbad"), xret = f.NewBlock("ralxret")
+        var wasEmpty = x.NewICmp(reNE, x.NewLoad(i32, emptyp), zero)
+        var isReal = x.NewOr(x.NewICmp(reSGT, x.NewLoad(i32, naltp), one),
+                             x.NewICmp(reEQ, x.NewLoad(i32, gReDepth), zero))
+        var stillOK = x.NewICmp(reEQ, x.NewLoad(i32, gReBad), zero)
+        x.NewCondBr(x.NewAnd(x.NewAnd(wasEmpty, isReal), stillOK), xbad, xret)
+        xbad.NewStore(reK(8), gReBad)   // empty (sub)expression
+        xbad.NewBr(xret)
+        xret.NewRet(zero)
     })()
 
     // i32 re_run(i32 pc, i32 sp): the backtracking VM. 1 match, 0 fail, -2 step cap.
@@ -3850,6 +3920,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var over = f.NewBlock("rvover"), go = f.NewBlock("rvgo")
         var fail = f.NewBlock("rvfail"), hit = f.NewBlock("rvhit")
         var pcp = e.NewAlloca(i32), spp = e.NewAlloca(i32)
+        var cip = e.NewAlloca(i32)
         e.NewStore(f.Params[0], pcp)
         e.NewStore(f.Params[1], spp)
         e.NewBr(h)
@@ -3873,6 +3944,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var bJmp = f.NewBlock("rvjmp"), bSave = f.NewBlock("rvsave")
         var bBol = f.NewBlock("rvbol"), bEol = f.NewBlock("rveol")
         var bProg = f.NewBlock("rvprog")
+        var bClear = f.NewBlock("rvclear")
         var nb = go
         var vn = 0
         function vchain(cond, tgt) {
@@ -3892,6 +3964,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         vchain(isop(OP_BOL), bBol)
         vchain(isop(OP_EOL), bEol)
         vchain(isop(OP_PROG), bProg)
+        vchain(isop(OP_CLEAR), bClear)
         nb.NewBr(fail)
 
         // Every byte read is fenced by sp < slen, so no path loads the NUL terminator or
@@ -3938,6 +4011,36 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         und.NewStore(old, slp)
         und.NewBr(vrt)
         vrt.NewRet(vr)
+
+        // OP_CLEAR: the same write / recurse / put-it-back discipline as OP_SAVE, over a
+        // RANGE of slots. The old values go on re_cstk (see there for why not the frame),
+        // and an overrun of that stack fails the attempt rather than writing past it.
+        var cbase = bClear.NewLoad(i32, gReCtop)
+        var cn = bClear.NewAdd(bClear.NewSub(vy, vx), one)
+        var cGo = f.NewBlock("rvclgo")
+        bClear.NewCondBr(bClear.NewICmp(reSGT, bClear.NewAdd(cbase, cn), reK(RE_CSTK)),
+                         fail, cGo)
+        var cPushX = reFor(f, "rvclp", cGo, cip, vx, cGo.NewAdd(vy, one), function(b, i) {
+            var sl = b.NewGetElementPtr(reSlotTy, gReSlot, zero, i)
+            b.NewStore(b.NewLoad(i32, sl),
+                       b.NewGetElementPtr(reCstkTy, gReCstk, zero,
+                                          b.NewAdd(cbase, b.NewSub(i, vx))))
+            b.NewStore(reK(-1), sl)
+            return b
+        })
+        cPushX.NewStore(cPushX.NewAdd(cbase, cn), gReCtop)
+        var cr = cPushX.NewCall(reRun, [pc1, sp])
+        cPushX.NewStore(cbase, gReCtop)
+        var cUndo = f.NewBlock("rvclun"), cRet = f.NewBlock("rvclrt")
+        cPushX.NewCondBr(cPushX.NewICmp(reEQ, cr, zero), cUndo, cRet)
+        var cPopX = reFor(f, "rvclq", cUndo, cip, vx, cUndo.NewAdd(vy, one), function(b, i) {
+            b.NewStore(b.NewLoad(i32, b.NewGetElementPtr(reCstkTy, gReCstk, zero,
+                                       b.NewAdd(cbase, b.NewSub(i, vx)))),
+                       b.NewGetElementPtr(reSlotTy, gReSlot, zero, i))
+            return b
+        })
+        cPopX.NewBr(cRet)
+        cRet.NewRet(cr)
 
         var pg2 = f.NewBlock("rvprog2")
         bProg.NewCondBr(bProg.NewICmp(reEQ, sp,
@@ -4019,6 +4122,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         cok.NewStore(subj, gReSubj)
         cok.NewStore(slen, gReSlen)
         cok.NewStore(zero, gReSteps)
+        cok.NewStore(zero, gReCtop)
         var pairs = cok.NewAdd(cok.NewLoad(i32, gReNg), one)
 
         // ---- search: leftmost wins, so the start position is tried in order.
@@ -5488,7 +5592,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var ip = b.NewAlloca(i32)
             b.NewStore(zero, resP)
             var nm = gepStr(b, "BASH_REMATCH")
-            b.NewCall(rtArrClear, nm)
             // No flags: bash's =~ is a POSIX ERE where ^ and $ anchor the whole subject and
             // "." does not cross a newline, and nocasematch is off.
             var n = b.NewCall(rtRegexSearch, [rr.v, subj, llvm.constant.NewNull(i8ptr),
@@ -5510,6 +5613,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             emitOnStderr(overrun, gepStr(overrun, "bash: [[: regular expression step limit exceeded\n"))
             overrun.NewBr(merge)
 
+            // BASH_REMATCH is rebuilt only when the pattern COULD be used: a match fills
+            // it and a failed match empties it, but a pattern that would not compile
+            // leaves the previous match in place - which is what real bash does, and
+            // why the clear lives here and not before the search.
+            okB.NewCall(rtArrClear, nm)
             okB.NewCondBr(okB.NewICmp(llvm.enum.IPredEQ, n, zero), merge, matchB)
             matchB.NewStore(one, resP)
             matchB.NewStore(zero, ip)

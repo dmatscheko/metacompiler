@@ -416,6 +416,24 @@ s11() {
   re='(?:a)'; [[ a =~ $re ]] 2>/dev/null; check dbr63 "$?" 2
   # . matches a newline in an ERE; there is no "dot does not cross a line" rule to lift
   re='a.b'; [[ $'a\nb' =~ $re ]]; check dbr64 "$?" 0
+  # a pattern that will not COMPILE leaves BASH_REMATCH exactly as the last usable
+  # pattern left it - it is not cleared the way a failed match clears it (dbr18).
+  re='(b)(c)'; [[ abc =~ $re ]]
+  re='a['; [[ abc =~ $re ]] 2>/dev/null
+  check dbr65 "$?-${#BASH_REMATCH[@]}-${BASH_REMATCH[1]}${BASH_REMATCH[2]}" "2-3-bc"
+  # a group whose WHOLE body is empty is legal - it is only a branch of a real
+  # alternation, or the top level, that may not be empty (dbr60/dbr61)
+  re='()'; [[ a =~ $re ]] 2>/dev/null; check dbr66 "$?" 0
+  re='(())'; [[ a =~ $re ]] 2>/dev/null; check dbr67 "$?" 0
+  re='(a)()'; [[ a =~ $re ]] 2>/dev/null; check dbr68 "$?-${#BASH_REMATCH[@]}" "0-3"
+  # a POSIX class is a SET, so it cannot be either endpoint of a range; a trailing
+  # "-]" is still an ordinary hyphen
+  re='[[:alpha:]-z]'; [[ a =~ $re ]] 2>/dev/null; check dbr69 "$?" 2
+  re='[a-[:digit:]]'; [[ a =~ $re ]] 2>/dev/null; check dbr70 "$?" 2
+  re='[[:alpha:]-]'; [[ - =~ $re ]] 2>/dev/null; check dbr71 "$?" 0
+  # the captures inside a repeated group are cleared at the start of every iteration,
+  # so a group that took part in an EARLIER iteration but not the last one is empty
+  re='^((a)|b*)*$'; [[ ab =~ $re ]]; check dbr72 "[${BASH_REMATCH[1]}][${BASH_REMATCH[2]}]" "[b][]"
 }
 
 # ===== SECTION 12: the test builtin =====

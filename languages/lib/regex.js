@@ -51,7 +51,16 @@
 //                                            than kept, so /^(a*)*$/ on "aaa"
 //                                            reports "aaa" for group 1 the way node
 //                                            and POSIX do, not "" the way Perl,
-//                                            Python, Ruby and Java do; e implies j)
+//                                            Python, Ruby and Java do; it also CLEARS
+//                                            the captures inside a repeated atom at
+//                                            the start of every iteration, so
+//                                            /(?:(a)|b)+/ on "ab" leaves group 1
+//                                            unset; e implies j),
+//                                            p (POSIX bracket expressions [[:alpha:]]
+//                                            and nothing else from the e dialect -
+//                                            this is Ruby, which has [[:alpha:]] AND
+//                                            \d, lazy quantifiers and (?...); e
+//                                            implies p)
 //                                            re.ok is false and re.err is set on a
 //                                            bad pattern.
 //   rxSearch(re, text, start) -> m | null    m.begin, m.end, m.caps (2*(n+1) ints,
@@ -90,6 +99,7 @@ var RX_ASSERT = 8  // zero-width assertion a
 var RX_LOOK = 9    // lookahead: a = address after the body, b = 1 when negative
 var RX_LOOKEND = 10
 var RX_BREF = 11   // backreference to group a
+var RX_CLEAR = 12  // caps[2a .. 2b+1] = -1 (per-iteration capture reset; j only)
 
 // ----- Assertion kinds -----
 var RX_BOL = 1     // ^
@@ -484,11 +494,12 @@ function rxParseClass(st) {
             return node
         }
         first = false
-        // A POSIX bracket [:alpha:] is a real class in the ERE dialect and is not
-        // supported anywhere else; outside ERE, report it rather than silently
+        // A POSIX bracket [:alpha:] is a real class under the "e" (POSIX ERE) and
+        // "p" (POSIX classes only, which is Ruby) dialects, and is not supported
+        // anywhere else; without one of those, report it rather than silently
         // reading it as a set of punctuation characters.
         if (c == 91 && st.i + 1 < st.n && p.charCodeAt(st.i + 1) == 58) {
-            if (!st.ere) {
+            if (!st.posix) {
                 rxErr(st, "POSIX bracket expressions are not supported")
                 return node
             }
@@ -505,6 +516,15 @@ function rxParseClass(st) {
                 return node
             }
             st.i = pj + 2
+            // A POSIX class is a SET, so it cannot be the low end of a range: bash
+            // says "invalid character range" for [[:alpha:]-z] and Ruby refuses it
+            // with "unmatched range specifier in char-class". A trailing "-]" is
+            // still a literal hyphen.
+            if (st.posix && st.i + 1 < st.n && p.charCodeAt(st.i) == 45
+                && p.charCodeAt(st.i + 1) != 93) {
+                rxErr(st, "Invalid range end")
+                return node
+            }
             continue
         }
         var loCode = -1
@@ -528,6 +548,11 @@ function rxParseClass(st) {
             st.i = st.i + 1
             var hiCode = -1
             var c2 = p.charCodeAt(st.i)
+            // ... nor the high end: [a-[:digit:]] is the same error.
+            if (st.posix && c2 == 91 && st.i + 1 < st.n && p.charCodeAt(st.i + 1) == 58) {
+                rxErr(st, "Invalid range end")
+                return node
+            }
             if (c2 == 92 && !st.ere) {
                 st.i = st.i + 1
                 var e2 = rxEsc(st, true)
@@ -893,7 +918,36 @@ function rxParseAlt(st) {
 // class representation - no mixed-type record anywhere.
 
 function rxNewProg() {
-    return {ops: [], as: [], bs: [], clss: [], nmarks: 0, dummy: rxNewCls()}
+    return {ops: [], as: [], bs: [], clss: [], nmarks: 0, jsrep: false, dummy: rxNewCls()}
+}
+
+// The smallest / largest group NUMBER declared inside a subtree, or -1 for none.
+// Only a "group" node carries a group number in gidx: "assert" keeps the assertion
+// kind there, "bref" the group it points at and "look" the negation flag.
+function rxLoG(node) {
+    var best = -1
+    if (node.t == "group" && node.gidx >= 0) { best = node.gidx }
+    var items = node.items
+    var i = 0
+    while (i < items.length) {
+        var k = rxLoG(items[i])
+        if (k >= 0 && (best < 0 || k < best)) { best = k }
+        i = i + 1
+    }
+    return best
+}
+
+function rxHiG(node) {
+    var best = -1
+    if (node.t == "group" && node.gidx >= 0) { best = node.gidx }
+    var items = node.items
+    var i = 0
+    while (i < items.length) {
+        var k = rxHiG(items[i])
+        if (k > best) { best = k }
+        i = i + 1
+    }
+    return best
 }
 
 function rxAdd(pg, op, a, b, cls) {
@@ -990,10 +1044,25 @@ function rxEmitAlt(pg, node) {
     }
 }
 
+// Under the j dialect every iteration of a repeat starts by CLEARING the captures
+// declared inside the repeated atom, so a group that took part in an earlier
+// iteration but not the last one reads as "did not take part":
+// /(?:(a)|b)+/.exec("ab") leaves group 1 undefined in node, and bash reports the
+// same group empty. Perl, Python, Ruby and Java carry the earlier value forward,
+// so nothing is emitted for them. The group numbers inside a subtree are
+// contiguous ('(' is counted left to right), so one lo..hi range covers them.
+function rxEmitClear(pg, body) {
+    if (!pg.jsrep) { return }
+    var lo = rxLoG(body)
+    if (lo < 0) { return }
+    rxAdd(pg, RX_CLEAR, lo, rxHiG(body), pg.dummy)
+}
+
 function rxEmitRep(pg, node) {
     var body = node.items[0]
     var i = 0
     while (i < node.min) {
+        rxEmitClear(pg, body)
         rxEmit(pg, body)
         i = i + 1
     }
@@ -1006,6 +1075,7 @@ function rxEmitRep(pg, node) {
         var l1 = rxHere(pg)
         var sp = rxAdd(pg, RX_SPLIT, 0, 0, pg.dummy)
         rxAdd(pg, RX_MARK, mk, 0, pg.dummy)
+        rxEmitClear(pg, body)
         rxEmit(pg, body)
         var pgi = rxAdd(pg, RX_PROG, mk, 0, pg.dummy)
         rxAdd(pg, RX_JMP, l1, 0, pg.dummy)
@@ -1026,6 +1096,7 @@ function rxEmitRep(pg, node) {
     while (k < extra) {
         var s = rxAdd(pg, RX_SPLIT, 0, 0, pg.dummy)
         splits.push(s)
+        rxEmitClear(pg, body)
         rxEmit(pg, body)
         k = k + 1
     }
@@ -1056,6 +1127,7 @@ function rxCompile(pattern, flags) {
     var quoting = false
     var ere = false
     var jsrep = false
+    var posix = false
     var fi = 0
     while (fi < flags.length) {
         var f = flags.charAt(fi)
@@ -1067,6 +1139,7 @@ function rxCompile(pattern, flags) {
         else if (f == "q") { quoting = true }
         else if (f == "e") { ere = true }
         else if (f == "j") { jsrep = true }
+        else if (f == "p") { posix = true }
         fi = fi + 1
     }
     // The POSIX ERE dialect (bash's [[ =~ ]]). What it changes is spelled out at each
@@ -1079,7 +1152,12 @@ function rxCompile(pattern, flags) {
     if (ere) {
         dotall = true
         jsrep = true
+        posix = true
     }
+    // "p" on its own is the POSIX BRACKET EXPRESSIONS and nothing else. Ruby takes
+    // [[:alpha:]] from POSIX but keeps \d, \w, \s, lazy quantifiers, (?...) groups
+    // and an escaping backslash inside a bracket - so it wants this letter and NOT
+    // the whole "e" dialect, which would switch all of those off.
     // \Q...\E is expanded before anything else looks at the text, so neither the
     // group counter nor the parser needs a quoting mode. re.src keeps the ORIGINAL
     // pattern, which is what a language's .source / inspect reports.
@@ -1087,7 +1165,8 @@ function rxCompile(pattern, flags) {
     var st = {
         p: pat, i: 0, n: pat.length, err: "",
         ngroups: 0, names: [], nameGroups: [], pending: [], ext: ext, dotall: dotall,
-        octal: octal, ntotal: ere ? 0 : rxCountGroups(pat), ere: ere, depth: 0
+        octal: octal, ntotal: ere ? 0 : rxCountGroups(pat), ere: ere, posix: posix,
+        depth: 0
     }
     var ast = rxParseAlt(st)
     // Resolve every \k<name> now that the whole name table is known.
@@ -1110,6 +1189,7 @@ function rxCompile(pattern, flags) {
                 src: pattern, flags: flags}
     }
     var pg = rxNewProg()
+    pg.jsrep = jsrep
     rxAdd(pg, RX_SAVE, 0, 0, pg.dummy)
     rxEmit(pg, ast)
     rxAdd(pg, RX_SAVE, 1, 0, pg.dummy)
@@ -1188,6 +1268,26 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
             var rs = rxRun(re, text, pc + 1, sp, caps, marks, st)
             if (rs >= 0) { return rs }
             caps[slot] = old
+            return -1
+        } else if (op == RX_CLEAR) {
+            // Same shape as SAVE: write, recurse, and put back what was there when the
+            // run fails, so a backtrack out of the iteration restores the old captures.
+            var cFrom = 2 * as[pc]
+            var cTo = 2 * bs[pc] + 1
+            var cSaved = []
+            var ci = cFrom
+            while (ci <= cTo) {
+                cSaved.push(caps[ci])
+                caps[ci] = -1
+                ci = ci + 1
+            }
+            var rcl = rxRun(re, text, pc + 1, sp, caps, marks, st)
+            if (rcl >= 0) { return rcl }
+            ci = cFrom
+            while (ci <= cTo) {
+                caps[ci] = cSaved[ci - cFrom]
+                ci = ci + 1
+            }
             return -1
         } else if (op == RX_MARK) {
             var mslot = as[pc]

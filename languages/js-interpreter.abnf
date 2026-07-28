@@ -4443,8 +4443,13 @@ NotFuncHead = :script(~~
         // no such group is a LEGACY OCTAL character escape (Annex B), not a
         // backreference - /\1/.test("") is false in node because \1 is U+0001. Under
         // u/v that spelling is a SyntaxError, which the ReStrictU parse guard already
-        // refuses before anything reaches the engine.
-        var out = "o"
+        // refuses before anything reaches the engine. "j" is unconditional too:
+        // JavaScript has the POSIX-style loop reading. An iteration of an unbounded
+        // repeat that consumed nothing is DISCARDED, so /^(a*)*$/.exec("aaa") reports
+        // "aaa" for group 1 (node) and not "" (Perl, Python, Ruby, Java); and the
+        // captures inside a repeated atom are cleared at the start of every iteration,
+        // so /(?:(a)|b)+/.exec("ab") leaves group 1 undefined.
+        var out = "oj"
         if (jsReHas(flags, "i")) { out = out + "i" }
         if (jsReHas(flags, "s")) { out = out + "s" }
         if (jsReHas(flags, "m")) { out = out + "m" }

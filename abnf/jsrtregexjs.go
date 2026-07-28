@@ -49,7 +49,12 @@ func jsxNeutral(flags string) string {
 	// /\1/.test("") is false in node because \1 is U+0001. Under u/v that spelling is
 	// a SyntaxError, which the ReStrictU parse guard already refuses before anything
 	// reaches the engine.
-	out := "o"
+	// "j" is unconditional too: JavaScript has the POSIX-style loop reading. An
+	// iteration of an unbounded repeat that consumed nothing is DISCARDED rather than
+	// kept, so /^(a*)*$/.exec("aaa") reports "aaa" for group 1 (node), not "" (Perl,
+	// Python, Ruby, Java). It also clears the captures inside a repeated atom at the
+	// start of every iteration: /(?:(a)|b)+/.exec("ab") leaves group 1 undefined.
+	out := "oj"
 	if jsxHasFlag(flags, 'i') {
 		out += "i"
 	}

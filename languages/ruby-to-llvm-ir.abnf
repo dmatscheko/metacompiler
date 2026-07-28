@@ -4306,8 +4306,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // line anchors, so the engine's multiline mode is unconditionally on. o/u/n/e/s
     // are encoding and once-only hints that do not change the match; they are
     // accepted and ignored.
+    // Ruby's flag letters are NOT the engine's. Ruby /m/ is dot-matches-newline (the
+    // engine's "s"), Ruby's ^ and $ are always line anchors (the engine's "m", always
+    // on), and "p" is the engine's POSIX BRACKET EXPRESSIONS and nothing else: Ruby
+    // has [[:alpha:]] but is NOT a POSIX ERE - it keeps \d, \w, \s, lazy quantifiers,
+    // (?...) groups and an escaping backslash inside a bracket, all of which the
+    // engine's whole-dialect "e" letter would remove.
     function rubyReFlags(rflags) {
-        var out = "m"
+        var out = "mp"
         for (var i = 0; i < rflags.length; i++) {
             var f = rflags.charAt(i)
             if (f == "i") { out += "i" }

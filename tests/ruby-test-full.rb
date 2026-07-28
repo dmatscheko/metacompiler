@@ -426,6 +426,18 @@ def s20
   check("rex7", $1 == "7")
   kind = case "grape"; when /gr/ then "match"; else "no"; end
   check("rex8", kind == "match" && 8 / 2 / 2 == 2)
+  # Ruby has POSIX BRACKET EXPRESSIONS, plus [[:word:]] and [[:ascii:]] of its own.
+  # It is NOT a POSIX ERE, though: \d, \s, lazy quantifiers and (?...) all still
+  # work, so the shared engine has to be told "POSIX classes" and nothing else.
+  check("rex9", /[[:alpha:]]/.match?("x") == true && /[[:alpha:]]/.match?("1") == false)
+  check("rex10", /^[[:digit:]]+$/.match?("123") == true &&
+                 /[[:upper:][:space:]]/.match?("a b") == true)
+  check("rex11", /[[:word:]]/.match?("_") == true && /[^[:digit:]]/.match?("x") == true)
+  check("rex12", /[[:alpha:]]\d/.match?("a1") == true && /[[:alpha:]]\s/.match?("a ") == true)
+  check("rex13", /(a+?)/.match("aaa")[1] == "a")
+  # Ruby is on the OTHER side of the repeat-semantics divide from JavaScript and bash:
+  # the empty final iteration is KEPT, so group 1 reads "" and not "aaa".
+  check("rex14", /^(a*)*$/.match("aaa")[1] == "")
 end
 # ===== SECTION 21: pattern matching with case/in =====
 def s21_pm(v)

@@ -40,6 +40,7 @@ const (
 	rxOpLook    = 9  // lookahead: a = address after the body, b = 1 when negative
 	rxOpLookEnd = 10 //
 	rxOpBref    = 11 // backreference to group a
+	rxOpClear   = 12 // caps[2a .. 2b+1] = -1 (per-iteration capture reset; j only)
 )
 
 // ----- Assertion kinds -----
@@ -268,7 +269,9 @@ type rxSt struct {
 	ntotal int
 	// ere is the POSIX ERE dialect (flag e) and depth the open-group nesting it needs
 	// to tell a closing ) from a literal one.
-	ere   bool
+	ere bool
+	// posix is the p flag: POSIX bracket expressions are recognised. e implies it.
+	posix bool
 	depth int
 }
 
@@ -548,11 +551,12 @@ func (st *rxSt) parseClass() *rxNode {
 			return node
 		}
 		first = false
-		// A POSIX bracket [:alpha:] is a real class in the ERE dialect and is not
-		// supported anywhere else; outside ERE, report it rather than silently
+		// A POSIX bracket [:alpha:] is a real class under the "e" (POSIX ERE) and
+		// "p" (POSIX classes only, which is Ruby) dialects, and is not supported
+		// anywhere else; without one of those, report it rather than silently
 		// reading it as a set of punctuation characters.
 		if c == '[' && st.i+1 < st.n && st.p[st.i+1] == ':' {
-			if !st.ere {
+			if !st.posix {
 				st.fail("POSIX bracket expressions are not supported")
 				return node
 			}
@@ -569,6 +573,14 @@ func (st *rxSt) parseClass() *rxNode {
 				return node
 			}
 			st.i = pj + 2
+			// A POSIX class is a SET, so it cannot be the low end of a range: bash
+			// says "invalid character range" for [[:alpha:]-z] and Ruby refuses it
+			// with "unmatched range specifier in char-class". A trailing "-]" is
+			// still a literal hyphen.
+			if st.posix && st.i+1 < st.n && st.p[st.i] == '-' && st.p[st.i+1] != ']' {
+				st.fail("Invalid range end")
+				return node
+			}
 			continue
 		}
 		var loCode rune
@@ -591,6 +603,11 @@ func (st *rxSt) parseClass() *rxNode {
 			st.i++
 			var hiCode rune
 			c2 := st.p[st.i]
+			// ... nor the high end: [a-[:digit:]] is the same error.
+			if st.posix && c2 == '[' && st.i+1 < st.n && st.p[st.i+1] == ':' {
+				st.fail("Invalid range end")
+				return node
+			}
 			if c2 == '\\' && !st.ere {
 				st.i++
 				e2 := st.esc(true)
@@ -1003,7 +1020,55 @@ type rxProg struct {
 	bs     []int
 	clss   []*rxCls
 	nmarks int
+	jsrep  bool
 	dummy  *rxCls
+}
+
+// loG / hiG are the smallest and largest group NUMBER declared inside a subtree, or
+// -1 for none. Only a "group" node carries a group number in gidx: "assert" keeps the
+// assertion kind there, "bref" the group it points at and "look" the negation flag.
+func (n *rxNode) loG() int {
+	best := -1
+	if n.t == "group" && n.gidx >= 0 {
+		best = n.gidx
+	}
+	for _, k := range n.items {
+		if g := k.loG(); g >= 0 && (best < 0 || g < best) {
+			best = g
+		}
+	}
+	return best
+}
+
+func (n *rxNode) hiG() int {
+	best := -1
+	if n.t == "group" && n.gidx >= 0 {
+		best = n.gidx
+	}
+	for _, k := range n.items {
+		if g := k.hiG(); g > best {
+			best = g
+		}
+	}
+	return best
+}
+
+// emitClear is the j dialect's per-iteration capture reset: every iteration of a
+// repeat starts by clearing the captures declared inside the repeated atom, so a
+// group that took part in an earlier iteration but not the last one reads as "did
+// not take part" - /(?:(a)|b)+/.exec("ab") leaves group 1 undefined in node, and
+// bash reports the same group empty. Perl, Python, Ruby and Java carry the earlier
+// value forward, so nothing is emitted for them. The group numbers inside a subtree
+// are contiguous ('(' is counted left to right), so one lo..hi range covers them.
+func (pg *rxProg) emitClear(body *rxNode) {
+	if !pg.jsrep {
+		return
+	}
+	lo := body.loG()
+	if lo < 0 {
+		return
+	}
+	pg.add(rxOpClear, lo, body.hiG(), pg.dummy)
 }
 
 func (pg *rxProg) add(op, a, b int, cls *rxCls) int {
@@ -1082,6 +1147,7 @@ func (pg *rxProg) emitAlt(node *rxNode) {
 func (pg *rxProg) emitRep(node *rxNode) {
 	body := node.items[0]
 	for i := 0; i < node.min; i++ {
+		pg.emitClear(body)
 		pg.emit(body)
 	}
 	if node.max < 0 {
@@ -1093,6 +1159,7 @@ func (pg *rxProg) emitRep(node *rxNode) {
 		l1 := pg.here()
 		sp := pg.add(rxOpSplit, 0, 0, pg.dummy)
 		pg.add(rxOpMark, mk, 0, pg.dummy)
+		pg.emitClear(body)
 		pg.emit(body)
 		pgi := pg.add(rxOpProg, mk, 0, pg.dummy)
 		pg.add(rxOpJmp, l1, 0, pg.dummy)
@@ -1110,6 +1177,7 @@ func (pg *rxProg) emitRep(node *rxNode) {
 	var splits []int
 	for k := 0; k < node.max-node.min; k++ {
 		splits = append(splits, pg.add(rxOpSplit, 0, 0, pg.dummy))
+		pg.emitClear(body)
 		pg.emit(body)
 	}
 	endAt := pg.here()
@@ -1156,6 +1224,7 @@ func rxCompile(pattern, flags string) *rxRe {
 	quoting := strings.ContainsRune(flags, 'q')
 	ere := strings.ContainsRune(flags, 'e')
 	jsrep := strings.ContainsRune(flags, 'j')
+	posix := strings.ContainsRune(flags, 'p')
 	// The POSIX ERE dialect (bash's [[ =~ ]]). What it changes is spelled out at each
 	// site; the two whole-engine consequences are here. A "." matches a newline in an
 	// ERE, and an ERE has POSIX capture semantics, of which the visible one is that an
@@ -1165,7 +1234,12 @@ func rxCompile(pattern, flags string) *rxRe {
 	if ere {
 		dotall = true
 		jsrep = true
+		posix = true
 	}
+	// "p" on its own is the POSIX BRACKET EXPRESSIONS and nothing else. Ruby takes
+	// [[:alpha:]] from POSIX but keeps \d, \w, \s, lazy quantifiers, (?...) groups and
+	// an escaping backslash inside a bracket - so it wants this letter and NOT the whole
+	// "e" dialect, which would switch all of those off.
 	// \Q...\E is expanded before anything else looks at the text, so neither the group
 	// counter nor the parser needs a quoting mode. re.src keeps the ORIGINAL pattern,
 	// which is what a language's .source / inspect reports.
@@ -1173,7 +1247,7 @@ func rxCompile(pattern, flags string) *rxRe {
 	if quoting {
 		pat = rxExpandQuotes(pat)
 	}
-	st := &rxSt{p: pat, ext: ext, dotall: dotall, octal: octal, ere: ere}
+	st := &rxSt{p: pat, ext: ext, dotall: dotall, octal: octal, ere: ere, posix: posix}
 	st.n = len(st.p)
 	if !ere {
 		st.ntotal = rxCountGroups(st.p)
@@ -1198,7 +1272,7 @@ func rxCompile(pattern, flags string) *rxRe {
 		return &rxRe{ok: false, err: st.err, icase: icase, dotall: dotall, multi: multi,
 			jsrep: jsrep, src: pattern, flags: flags}
 	}
-	pg := &rxProg{dummy: rxNewCls()}
+	pg := &rxProg{jsrep: jsrep, dummy: rxNewCls()}
 	pg.add(rxOpSave, 0, 0, pg.dummy)
 	pg.emit(ast)
 	pg.add(rxOpSave, 1, 0, pg.dummy)
@@ -1300,6 +1374,20 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 				return r
 			}
 			caps[slot] = old
+			return -1
+		case rxOpClear:
+			// Same shape as Save: write, recurse, and put back what was there when
+			// the run fails, so a backtrack out of the iteration restores them.
+			from, to := 2*re.as[pc], 2*re.bs[pc]+1
+			saved := make([]int, to-from+1)
+			copy(saved, caps[from:to+1])
+			for i := from; i <= to; i++ {
+				caps[i] = -1
+			}
+			if r := re.run(text, pc+1, sp, caps, marks, st); r >= 0 {
+				return r
+			}
+			copy(caps[from:to+1], saved)
 			return -1
 		case rxOpMark:
 			slot := re.as[pc]
