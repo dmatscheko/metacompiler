@@ -1104,6 +1104,134 @@ fun sec33() {
     check("uns29", "u=${UInt.MAX_VALUE}" == "u=4294967295")
 }
 
+
+// ===== SECTION 34: return / break / continue as EXPRESSIONS, and PREFIX ++ / -- =====
+// `x ?: return` is the idiom this section exists for. Kotlin types return, break and
+// continue as Nothing, so each is a legal EXPRESSION that never yields a value and
+// instead transfers control out of the whole surrounding expression.
+// Ground truth for the SYNTAX is Kotlin's own parse tree: the corpus file
+// tests/reference/kotlin/.../psi/greatSyntacticShift/nullableTypes.txt records
+// `x as? X ?: return` as BINARY_EXPRESSION(BINARY_WITH_TYPE, ELVIS, RETURN) with no
+// PsiErrorElement, and psi/SimpleExpressions.txt puts `= break@la` / `= continue@la` in a
+// parameter default, also clean. The VALUES asserted below are the language rule (the
+// prefix form yields the NEW value, the postfix form the old one) and are UNVERIFIED by
+// any toolchain - there is no kotlinc on this machine.
+fun firstOr34(v: Int?): Int {
+    val x = v ?: return -1
+    return x + 100
+}
+fun sumUntilNull34(limit: Int): Int {
+    var s = 0
+    for (i in 1..10) {
+        val x = if (i > limit) null else i
+        s = s + (x ?: break)
+    }
+    return s
+}
+fun sumOdd34(): Int {
+    var s = 0
+    for (i in 1..6) {
+        val x = if (i % 2 == 0) null else i
+        s = s + (x ?: continue)
+    }
+    return s
+}
+fun labelledBreak34(): Int {
+    var s = 0
+    outer@ for (i in 1..5) {
+        for (j in 1..5) {
+            val x = if (i > 2) null else j
+            s = s + (x ?: break@outer)
+        }
+    }
+    return s
+}
+fun labelledContinue34(): Int {
+    var s = 0
+    outer@ for (i in 1..5) {
+        for (j in 1..5) {
+            val x = if (j > 2) null else j
+            s = s + (x ?: continue@outer)
+        }
+        s = s + 100
+    }
+    return s
+}
+class Cell34(var v: Int)
+
+fun sec34() {
+    // return in expression position, in both directions.
+    check("ctl01", firstOr34(3) == 103)
+    check("ctl02", firstOr34(null) == -1)
+    // break leaves the loop AND the expression that asked for it: 1+2+3+4.
+    check("ctl03", sumUntilNull34(4) == 10)
+    // continue skips only the rest of the iteration: 1+3+5.
+    check("ctl04", sumOdd34() == 9)
+    // A LABELLED signal raised from inside an expression still names the outer loop.
+    check("ctl05", labelledBreak34() == 30)
+    check("ctl06", labelledContinue34() == 15)
+    // A `return` raised out of a lambda body is Kotlin's NON-LOCAL return: it leaves
+    // sumWhilePositive34, not just the lambda, so the 9 after the -1 is never added.
+    check("ctl07", sumWhilePositive34(listOf(3, 5, -1, 9)) == 8)
+    check("ctl08", sumWhilePositive34(listOf(-2, 4)) == 0)
+
+    // PREFIX ++ / -- yields the NEW value; the postfix form yields the old one.
+    var i = 1
+    check("ctl09", ++i == 2)
+    check("ctl10", i == 2)
+    check("ctl11", i++ == 2)
+    check("ctl12", i == 3)
+    check("ctl13", --i == 2 && i == 2)
+    // ... on an indexed slot ...
+    val arr = intArrayOf(5, 6)
+    check("ctl14", ++arr[0] == 6 && arr[0] == 6)
+    // ... and on a field.
+    val c = Cell34(9)
+    check("ctl15", ++c.v == 10 && c.v == 10)
+    check("ctl16", c.v-- == 10 && c.v == 9)
+}
+fun sumWhilePositive34(xs: List<Int>): Int {
+    var acc = 0
+    xs.forEach { acc = acc + (if (it > 0) it else return acc) }
+    return acc
+}
+
+// ===== SECTION 35: the CALL SURFACE - a parenthesized callee, and a body's `;` =====
+// Every form here is ordinary Kotlin; each was refused by these grammars before.
+// SYNTAX ground truth is again Kotlin's own tree: psi/CallWithManyClosures.txt records
+// `val a = (f) {} {} {}` and `(f)() {} {} {}` with clean trees, psi/DoubleColon.txt has
+// `(a::b)()` as a CALL_EXPRESSION whose callee is a PARENTHESIZED expression, and
+// psi/FunctionExpressions.txt has `fun c() = fun name();` - the trailing semicolon
+// included - also clean.
+// psi/DoubleColon.txt is also the ground truth for the guard the last two checks pin:
+// it puts `a::b.c` on one line and `(a::b)()` two lines below, and records them as TWO
+// statements rather than one call of `c`. So an argument list must OPEN on its callee's
+// own line, while a call whose arguments merely SPAN lines is unaffected.
+fun add35(a: Int, b: Int): Int = a + b
+fun twice35(f: (Int) -> Int, v: Int): Int = f(f(v))
+fun konst35(): Int = 41;
+fun anon35() = fun(): Int { return 5 };
+
+fun sec35() {
+    val tripler = { x: Int -> x * 3 }
+    // A PARENTHESIZED callee is invoked like any other.
+    check("cal01", (tripler)(7) == 21)
+    check("cal02", (::add35)(2, 5) == 7)
+    check("cal03", ((tripler))(2) == 6)
+    // A trailing `;` after an expression body and after a block body.
+    check("cal04", konst35() == 41)
+    check("cal05", anon35()() == 5)
+    // A lambda argument still reaches an ordinary call.
+    check("cal06", twice35({ it + 1 }, 9) == 11)
+    // A call whose ARGUMENTS span several lines keeps working - only a `(` that opens a
+    // NEW line is refused (see the DoubleColon citation above).
+    check("cal07", add35(
+        1,
+        2) == 3)
+    check("cal08", add35(1,
+                         2) == 3)
+}
+
 // ===== END SECTIONS =====
 
 fun main() {
@@ -1140,6 +1268,8 @@ fun main() {
     sec31() // SECTION-CALL 31
     sec32() // SECTION-CALL 32
     sec33() // SECTION-CALL 33
+    sec34() // SECTION-CALL 34
+    sec35() // SECTION-CALL 35
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

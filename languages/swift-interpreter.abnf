@@ -400,7 +400,14 @@ ProtocolDecl <~~ push(makeProtocolStmt(takeAll())) ~~>
 // A requirement has no body, so it is matched BEFORE the member forms: `var name:
 // String { get }` would otherwise read as a computed property whose getter returns
 // the value of a variable called `get`.
-ProtoMember = ProtoReq | Member ;
+ProtoMember = PoundIfProto | ProtoReq | Member ;
+// A #if inside a PROTOCOL body. PoundIfMember (reached through Member) collects
+// only Members, and a protocol REQUIREMENT is not one - so `#if FOO / func f() ->
+// Int / #endif` inside a protocol died on the `#`.
+PoundIfProto <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
+            = PoundIf PoundCond PoundBodyProto { PoundElseIf PoundCond PoundBodyProto }
+              [ PoundElse PoundBodyProto ] PoundEndif ;
+PoundBodyProto <~~ push({branch: takeAll()}) ~~> = { PoundIfProto | ProtoReq | Member } ;
 ProtoReq    = AssocTypeDecl | [ MemberModifiers ] ( ProtoVar | ProtoFunc | ProtoInit | ProtoSubscript ) ;
 AssocTypeDecl <~~ push({}) ~~>
             = "associatedtype" KwEnd Id [ ":" TypeList ] [ "=" Type ] [ GenWhere ] [ ";" ] ;
@@ -454,7 +461,10 @@ TypeAmp     = "&" !"&" ;
 // also a legal type NAME: `func zim(x: borrowing) {}` declares a parameter of a type
 // called `borrowing`. The lookahead is what tells them apart - a modifier is always
 // followed by the type it modifies, never by the token that ends one.
-TypeMod     = { ( "some" | "any" | "inout" | "borrowing" | "consuming" | "each" ) KwEnd NotTypeEnd } ;
+// `repeat each T` is a PACK EXPANSION type (SE-0393): `repeat` is a real keyword
+// here and `each` a contextual one, and both only ever precede the type they
+// modify - so they belong in the same modifier run as `some` / `any`.
+TypeMod     = { ( "some" | "any" | "inout" | "borrowing" | "consuming" | "each" | "repeat" ) KwEnd NotTypeEnd } ;
 NotTypeEnd  = !")" !"," !"=" !">" !"{" ;
 TypeCore    = "[" Type [ ":" Type ] "]"
             | "(" [ TupleTypeElem { "," TupleTypeElem } ] ")" [ TypeEffects ] [ "->" Type ]
@@ -732,7 +742,13 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
             = Expression [ ";" ] ;
 
 // Every expression production pushes exactly one thunk: function() -> value.
-Expression  = Assignment | Ternary ;
+Expression  = PackRepeat | Assignment | Ternary ;
+// `repeat <expr>` - a pack expansion EXPRESSION (SE-0393). It evaluates its body
+// once per element of the packs `each` names inside it and yields the results as a
+// tuple, which is what makes `(repeat 2 * each arg + 3)` a tuple of the same arity
+// as the value pack. `repeat` is a reserved word, and the repeat/while STATEMENT is
+// matched before ExprStmt, so no guard is needed to tell the two apart.
+PackRepeat  <~~ push(makePackRepeat(pop())) ~~> = KwRepeat Expression ;
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
 
@@ -800,7 +816,23 @@ NotAmpOp    = :script(~~
 CustomBin   <~~ push(foldCustomOps(takeAll())) ~~>
             = UnaryExpr { CustomOp <~~ push({op: stripWs(up.in)}) ~~> UnaryExpr } ;
 
-UnaryExpr   = Neg | Not | CustomPrefix | BitNot | TryExpr | Await | CallMember ;
+UnaryExpr   = Neg | Not | CustomPrefix | BitNot | TryExpr | Await | EachExpr | CallMember ;
+// `each x` inside a pack expansion - the element of the value pack x for the
+// iteration the enclosing `repeat` is on. `each` is a CONTEXTUAL keyword, so it is
+// also a legal variable name; EachStart is what tells the two apart, by demanding
+// that a name or a parenthesis (never `.`, `[`, `?`, an operator or a comma) follow
+// it. Ordered before CallMember so the modifier reading is tried first.
+EachExpr    <~~ push(makeEach(pop())) ~~> = "each" KwEnd EachStart UnaryExpr ;
+EachStart   = :script(~~
+    (function() {
+        var i = 0
+        var ch = c.peek(i)
+        var cap = 0
+        while ((ch === 32 || ch === 9 || ch === 10 || ch === 13) && cap < 4096) { i++; cap++; ch = c.peek(i) }
+        var ok = (ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || ch === 95 || ch === 40
+        return ok ? undefined : abnf.newToken("\x01not-a-pack-element", 0)
+    })()
+~~) ;
 Neg         <~~ push(makeNeg(pop())) ~~>   = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>   = "!" UnaryExpr ;
 // A user-defined prefix operator, tried before ~ so that ~~~x is one operator and
@@ -970,9 +1002,9 @@ ArgLabel    = Id <~~ push({alabel: up.in}) ~~> ":" ;
 // character of a && operator.
 InoutArg    = "&" !"&" Id <~~ push({aref: up.in}) ~~> ;
 
-Primary     = Paren | MultiStr | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
+Primary     = Paren | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
             | True | False | Nil
-            | PoundExpr | SuperRef | DotMember | Closure | DictLit | ArrayLit
+            | PoundExpr | SuperRef | DotMember | Closure | ArrayTypeLit | DictLit | ArrayLit
             | Shorthand | MultiTrail | Call | VarRef ;
 
 // The numeric literal forms, longest/most specific first (PEG first-match): a hex
@@ -1071,8 +1103,15 @@ CaptureList <~~ push({caps: takeAll()}) ~~>
 CapItem     = [ CapMode ] Id <~~ push(up.in) ~~> [ "=" DiscardExpr ] ;
 CapMode     = ( "weak" | "unowned" ) KwEnd ;
 LamStmt     = LamCtrl | LamExpr ;
+// A closure body is an ordinary body: every statement form except the bare
+// expression (which LamExpr takes, so that the closure's VALUE is its last
+// expression) belongs here. TrailCallStmt is deliberately absent - `g { 1 }` is
+// already an expression through MultiTrail, and as a statement it would stop being
+// the closure's result.
 LamCtrl     <~~ push({stmt: pop()}) ~~>
-            = Decl | While | Repeat | For | Return | Break | Continue | If ;
+            = AttrDecl | Decl | LocalFunc | LocalType | CplxIf | If | CplxGuard | Guard
+            | CplxWhile | While | Repeat | For | Switch | Return | Throw | Break
+            | Continue | Fallthrough | Do | Defer | Empty | TupleAssign ;
 LamExpr     <~~ push({expr: pop()}) ~~>
             = Expression [ ";" ] ;
 
@@ -1083,6 +1122,18 @@ DictEntry   <~~ var v = pop(); push({dk: pop(), dv: v}) ~~>
             = Expression ":" Expression ;
 ArrayLit    <~~ push(makeArray(takeAll())) ~~>
             = "[" [ Expression { "," Expression } ] "]" ;
+// `[Int]()`, `[String: Int]()`, `[() async -> ()]()` - a collection TYPE written as
+// a literal and immediately constructed EMPTY. It is ordered BEFORE ArrayLit and
+// DictLit: those two match `[Int]` and `[String: Int]` as a one-element array / a
+// one-entry dictionary and then hand the `()` to CallSfx, which aborted with "call
+// of a non-function value" - so every one of these three constructions used to fail
+// at RUNTIME, and `[() async -> ()]()` did not even parse. The empty argument list
+// is part of the rule, so nothing that is genuinely an array literal (`[a][0]`,
+// `[f](x)`) can be taken for a type. `[Int](repeating: 0, count: 3)` is NOT covered
+// and still aborts the way it did before.
+ArrayTypeLit <~~ push(makeEmptyColl(takeAll())) ~~>
+            = "[" Type [ TypeLitDict ] "]" NoSpaceParen "(" ")" ;
+TypeLitDict <~~ push({dictty: 1}) ~~> = ":" Type ;
 
 // f(args): a global function or a struct/class constructor (calls init).
 Call        <~~ push(makeCall(takeAll())) ~~>
@@ -1127,7 +1178,13 @@ MlChunk     <~~ push({s: up.in}) ~~> = MlChar { MlChar } ;
 // literal's line-continuation. It is spelled here and not in TplEsc because a
 // single-line literal cannot contain a line break at all.
 MlChar      = TplEsc | MlCont | MlPlain ;
-MlCont      = "\\" ( "\n" | "\r" ) ;
+// Real swift 6.1.2 elides the trailing HORIZONTAL whitespace between the backslash
+// and the line break as well - `\` + spaces + newline joins the two lines with
+// nothing between them - which is what `Parse/multiline_string.swift` asserts. The
+// elision itself is done in swUnescape; this rule only has to let the run through.
+MlCont      = "\\" { MlContSp } MlContEol ;
+MlContSp    = "\x20" | "\x09" ;
+MlContEol   = "\n" | "\r" ;
 // Any character that does not start the closing delimiter; the backslash (0x5c) is
 // excluded so an escape and an interpolation are reached first.
 MlPlain     = !'"""' ( "\x00"..."\x5b" | "\x5d"..."\U0010ffff" ) ;
@@ -1139,6 +1196,93 @@ MlPlain     = !'"""' ( "\x00"..."\x5b" | "\x5d"..."\U0010ffff" ) ;
 // Three pound levels. The multi-line raw forms (###""" ... """###) ride the same
 // rules: the opening delimiter starts with ###" and the closing one ends with "###,
 // so the extra quotes are simply content - which is exactly the text Swift keeps.
+// Raw string delimiters BEYOND three pounds - `#####"This is a string"#####`.
+// The levels 1..3 above are spelled as ordinary rules because they support the
+// matching `\#( ... )` interpolation, which needs a real Expression sub-parse; a
+// scanner cannot call the parser back. Level 4 and up is a `:script` that counts
+// the pounds and returns the whole literal as ONE token, so the level is unbounded.
+// Two shapes are deliberately DECLINED rather than mis-read, and each stays the
+// parse failure it already was: a MULTI-LINE raw literal (`####""" ... """####`),
+// whose closing-delimiter indentation strip lives in makeMultiStr, and any literal
+// carrying its own `\####(` interpolation.
+RawStrN     <~~ push(makeRawScanned(up.in)) ~~> = RawScan ;
+RawScan     = :script(~~
+    (function() {
+        var i = 0
+        var ch = c.peek(i)
+        var cap = 0
+        while ((ch === 32 || ch === 9 || ch === 10 || ch === 13) && cap < 100000) {
+            i++; cap++; ch = c.peek(i)
+        }
+        var start = i
+        var n = 0
+        while (c.peek(i) === 35 && n < 4096) { i++; n++ }
+        if (n < 4) { return abnf.newToken("\x01not-a-deep-raw-string", 0) }
+        if (c.peek(i) !== 34) { return abnf.newToken("\x01not-a-deep-raw-string", 0) }
+        i++
+        // `####""####` is the EMPTY literal, not the multi-line opener: the second
+        // quote is already the closing delimiter. Three quotes IS the multi-line
+        // form, which this scanner declines.
+        if (c.peek(i) === 34 && c.peek(i + 1) === 34) {
+            return abnf.newToken("\x01multiline-raw-string", 0)
+        }
+        var body = i
+        var end = -1
+        var guardN = 0
+        while (guardN < 4000000) {
+            guardN++
+            var cc = c.peek(i)
+            if (cc < 0) { return abnf.newToken("\x01unterminated-raw-string", 0) }
+            if (cc === 10) { return abnf.newToken("\x01newline-in-raw-string", 0) }
+            if (cc === 34) {
+                var k = i + 1
+                var hit = true
+                var z = 0
+                while (z < n) {
+                    if (c.peek(k) !== 35) { hit = false; z = n } else { k++; z++ }
+                }
+                if (hit) { end = i; i = k; z = n }
+                if (hit) { break }
+            }
+            // A matching interpolation `\####(` needs the parser, so decline.
+            if (cc === 92) {
+                var j = i + 1
+                var m = 0
+                while (c.peek(j) === 35 && m < 4096) { j++; m++ }
+                if (m === n && c.peek(j) === 40) {
+                    return abnf.newToken("\x01interpolated-raw-string", 0)
+                }
+            }
+            i++
+        }
+        if (end < 0) { return abnf.newToken("\x01unterminated-raw-string", 0) }
+        var s = ""
+        var p = start
+        var guard2 = 0
+        while (p < i && guard2 < 4000000) {
+            guard2++
+            var b0 = c.peek(p)
+            if (b0 < 128) { s = s + String.fromCharCode(b0); p = p + 1 }
+            else if (b0 < 224) {
+                s = s + String.fromCharCode(((b0 - 192) * 64) + (c.peek(p + 1) - 128))
+                p = p + 2
+            }
+            else if (b0 < 240) {
+                s = s + String.fromCharCode(((b0 - 224) * 4096) + ((c.peek(p + 1) - 128) * 64)
+                                            + (c.peek(p + 2) - 128))
+                p = p + 3
+            }
+            else {
+                var cp = ((b0 - 240) * 262144) + ((c.peek(p + 1) - 128) * 4096)
+                         + ((c.peek(p + 2) - 128) * 64) + (c.peek(p + 3) - 128) - 65536
+                s = s + String.fromCharCode(55296 + Math.floor(cp / 1024))
+                s = s + String.fromCharCode(56320 + (cp - Math.floor(cp / 1024) * 1024))
+                p = p + 4
+            }
+        }
+        return abnf.newToken(s, 0)
+    })()
+~~) ;
 RawStr3     <~~ push(makeRawStr(takeAll())) ~~>
             = '###"' :whitespace() { Raw3Expr | Raw3Chunk } '"###' :whitespace(Whitespace) ;
 Raw3Expr    <~~ push({e: pop()}) ~~> = "\\###(" :whitespace(Whitespace) [ TplLabel ] Expression ")" ;
@@ -1471,6 +1615,18 @@ KwContinue  = "continue" KwEnd ;
             // line continuation); both spellings of the break.
             if (e == 10) { i += 2; continue }
             if (e == 13) { i += 2; if (str.charCodeAt(i) == 10) { i++ } ; continue }
+            // ... and a backslash followed by trailing spaces/tabs and THEN a line
+            // break elides the whole run, which real swift does too.
+            if (e == 32 || e == 9) {
+                var j3 = i + 1
+                while (j3 < str.length && (str.charCodeAt(j3) == 32 || str.charCodeAt(j3) == 9)) { j3++ }
+                if (str.charCodeAt(j3) == 10) { i = j3 + 1; continue }
+                if (str.charCodeAt(j3) == 13) {
+                    i = j3 + 1
+                    if (str.charCodeAt(i) == 10) { i++ }
+                    continue
+                }
+            }
             if (e == 117 && str.charCodeAt(i + 2) == 123) {
                 var j = i + 3
                 var cp = 0
@@ -1554,6 +1710,13 @@ KwContinue  = "continue" KwEnd ;
     }
     // A raw literal keeps its characters verbatim; only \#( ... ) interpolates.
     function makeRawStr(items) { return makeTemplate(items) }
+    // The token RawScan returned is the WHOLE literal, delimiters included: n pound
+    // signs, a quote, the content verbatim, the closing quote and n pound signs.
+    function makeRawScanned(text) {
+        var n = 0
+        while (n < text.length && text.charAt(n) == "#") { n++ }
+        return makeConst(text.substring(n + 1, text.length - n - 1))
+    }
 
     // ----- Strings are sequences of extended grapheme clusters -----
     // .count counts CLUSTERS, so an astral emoji is one and a base letter plus its
@@ -2296,10 +2459,66 @@ KwContinue  = "continue" KwEnd ;
         for (var i = 0; i < vals.length; i++) { scopePut(t, "" + i, vals[i]) }
         return t
     }
+    // A tuple is the value a `repeat` expansion produces, and `for x in repeat each
+    // p` is Swift's pack ITERATION - the one place a tuple is walked as a sequence.
+    function isTupleVal(v) {
+        return v !== null && v !== undefined && typeof v == "object"
+            && !Array.isArray(v) && v.__tuple != undefined
+    }
+    function tupleArray(v) {
+        var out = []
+        for (var i = 0; i < v.__tuple; i++) { out.push(v["" + i]) }
+        return out
+    }
     function tupleAt(v, i) {
         if (v === null || v === undefined) { fail("tuple element of nil") }
         if (Array.isArray(v)) { return v[i] }
         return hasOwn(v, "" + i) ? v["" + i] : undefined
+    }
+    // ----- Parameter packs (SE-0393) -----
+    // A value pack is an ARRAY, exactly like a variadic parameter's tail - which is
+    // what makes `func f<each T>(_ v: repeat each T)` bind for free (makeParam turns
+    // a `repeat`-led parameter type into a variadic one).
+    //
+    // `repeat BODY` evaluates BODY once per element. The arity is not known before
+    // the body runs, so the FIRST iteration doubles as the measuring pass: every
+    // `each p` it reaches records the length of p, the shortest of those lengths is
+    // the arity, and iterations 1..n-1 follow. A `repeat` whose body names no pack
+    // yields a one-element tuple, which is what Swift does for a zero-pack expansion
+    // in a tuple. KNOWN LIMIT: an EMPTY pack still evaluates the body once (with
+    // undefined elements) before the arity is known.
+    var packStack = []
+    function makeEach(t) {
+        return function() {
+            var v = t()
+            if (packStack.length == 0) { return v }
+            if (!Array.isArray(v)) { return v }
+            var ctx = packStack[packStack.length - 1]
+            ctx.lens.push(v.length)
+            return ctx.idx < v.length ? v[ctx.idx] : undefined
+        }
+    }
+    function makePackRepeat(t) {
+        return function() {
+            var ctx = {lens: [], idx: 0}
+            packStack.push(ctx)
+            var first = t()
+            var n = -1
+            var lens = ctx.lens
+            for (var i = 0; i < lens.length; i++) {
+                if (n < 0 || lens[i] < n) { n = lens[i] }
+            }
+            if (n < 0) { n = 1 }
+            var out = []
+            if (n > 0) { out.push(first) }
+            for (var k = 1; k < n; k++) {
+                ctx.idx = k
+                ctx.lens = []
+                out.push(t())
+            }
+            packStack.pop()
+            return newTupleVal(out)
+        }
     }
     // ( e ) passes the single unlabelled operand through; anything else is a tuple.
     function makeParen(items, pos) {
@@ -2734,6 +2953,11 @@ KwContinue  = "continue" KwEnd ;
             return out
         }
     }
+    // `[T]()` / `[K: V]()`: the empty collection of that type.
+    function makeEmptyColl(items) {
+        var isDictTy = items.length > 0 && items[0].dictty != undefined
+        return isDictTy ? makeDict([]) : makeArray([])
+    }
     function makeDict(items) {
         return function() {
             var d = {__dict: true, keys: [], vals: []}
@@ -2850,6 +3074,9 @@ KwContinue  = "continue" KwEnd ;
             else if (it.pdflt != undefined) { hasDflt = true; dflt = it.pdflt }
             else if (it.pattr != undefined && it.pattr == "autoclosure") { isAuto = true }
         }
+        // `arg: repeat each T` is a VALUE PACK: it binds every remaining argument,
+        // which is exactly what the variadic tail already does.
+        if (type.length >= 6 && type.substring(0, 6) == "repeat") { isVar = true }
         var name = ids[ids.length - 1]
         var label = ids.length > 1 ? ids[0] : name
         if (label == "_") { label = "" }
@@ -3231,6 +3458,7 @@ KwContinue  = "continue" KwEnd ;
         return function() {
             var arr = listT()
             if (isRange(arr)) { arr = rangeArray(arr) }
+            if (isTupleVal(arr)) { arr = tupleArray(arr) }
             var res = undefined
             var isD = isDict(arr)
             var n = swlen(arr)

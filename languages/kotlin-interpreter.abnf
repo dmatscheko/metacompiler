@@ -352,7 +352,10 @@ SkipBracket = "[" { SkipBracket | SkipParen | SkipBlock | SkipStr | SkipChar | S
 SkipBracketItem = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x5e"..."\x7a" | "\x7c"..."\U0010ffff" ;
 TypeParams  <~~ tpSet(parseTypeParams(up.in)) ~~>
             = SkipAngle ;
-FunBody     = Block | "=" ExprBody ;
+// A trailing `;` after a function body is ordinary Kotlin - psi/FunctionExpressions.kt
+// spells `fun c() = fun name();` out with a clean tree - and it is the SEMICOLON that
+// was missing, not the body: `fun c() = 1;` and `fun c() { };` were both refused.
+FunBody     = Block [ ";" ] | "=" ExprBody [ ";" ] ;
 ExprBody    <~~ push(makeExprBody(pop())) ~~>
             = Expression ;
 
@@ -390,6 +393,7 @@ FnRecvType  = { TypeAnno } [ "suspend" KwEnd ] { TypeAnno }
 // here: they carry two receivers, which the single-`this` subset cannot model.)
 UnsupFun    <~~ notImpl("extension or abstract function", up.pos) ~~>
             = KwFun [ SkipAngle ] ( ExtFunName SkipParen [ ":" Type ] [ ContractClause ] [ SkipBlock | "=" DiscardExpr ]
+                                  | SkipParen [ ":" Type ] [ ContractClause ] [ SkipBlock | "=" DiscardExpr ]
                                   | [ KId ] [ SkipAngle ] SkipParen [ ":" Type ] [ ContractClause ] ) [ ";" ] ;
 ExtFunName  = AnnoRecv { RecvSeg } [ KId ] [ SkipAngle ] ;
 
@@ -464,8 +468,13 @@ Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | Nest
 // declaring class is the enclosing receiver, which is exactly how mcall resolves it.
 MemberExtFun <~~ push({memberExt: takeAll()}); retLblPop() ~~>
             = KwFun [ SkipAngle ] AnnoRecv { RecvSeg } KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> [ SkipAngle ] ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
+// An extension property may carry an INITIALIZER as well as its accessors -
+// `val Int.value : T = foo.bar() get() = data[this] set(it) { field = it }`, which
+// psi/examples/priorityqueues/BinaryHeap.txt records with a clean tree. Kotlin rejects
+// it SEMANTICALLY (an extension property has no backing field), not syntactically, and
+// the initializer is dropped here for the same reason.
 MemberExtProp <~~ push({memberExtProp: takeAll()}) ~~>
-            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in) ~~> [ ":" Type ] [ WhereClause ] Accessor { Accessor | PropVis } ;
+            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in) ~~> [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] Accessor { Accessor | PropVis } ;
 // A nested type declaration. GENUINE: the nested class/interface/object is built and
 // attached to the enclosing descriptor under its own name, so Outer.Nested() and
 // Outer.Companion-style qualified access work. An `inner` class additionally captures
@@ -555,7 +564,11 @@ LazyInit    <~~ push({pinit: makeLazyInit(pop())}) ~~>
 Type        = { TypeAnno } [ ContextClause ] [ "suspend" KwEnd ] [ ContextClause ] { TypeAnno } ( "(" [ FnTypeParam { "," FnTypeParam } [ "," ] ] ")" ( "->" Type | NullRecvFnTail | RecvFnTail )
             | "(" FnTypeParam { "," FnTypeParam } [ "," ] ")"
             | KId [ SkipAngle ] { "." KId [ SkipAngle ] } [ NullRecvFnTail | RecvFnTail ] ) [ "?" NotColon ] [ "&" Type ] ;
-NullRecvFnTail = "?" RecvFnTail ;
+// A DOUBLED question mark is still just a nullable receiver: `X??.() -> Unit` and
+// `X?? .() -> Unit` are FUNCTION_TYPEs with a NULLABLE_TYPE receiver in Kotlin's own
+// tree (psi/greatSyntacticShift/nullableTypes.txt), with no PsiErrorElement - the second
+// `?` is redundant, not wrong.
+NullRecvFnTail = "?" [ "?" ] RecvFnTail ;
 // A function-type parameter: an optional name (Kotlin allows named function-type
 // parameters, onRun: (root: Boolean) -> Unit) then the type. Also serves the
 // grouped-type case (a bare type with no name, in parentheses without a following ->).
@@ -980,7 +993,13 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = { Annotation } ( Neg | Not | PostfixExpr ) ;
+UnaryExpr   = { Annotation } ( PreIncDec | Neg | Not | PostfixExpr ) ;
+// PREFIX ++x / --x. Kotlin has both fixities and they differ in their VALUE: the postfix
+// form yields the old value, the prefix form the new one (`var i = 1; println(++i)`
+// prints 2, `println(i++)` prints 1). It must precede Neg, or `--a` reads as a double
+// negation - which quietly gives the right answer for a number and never assigns.
+PreIncDec   <~~ push(makePreIncDec(takeAll())) ~~>
+            = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>
@@ -997,20 +1016,117 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // A trailing "!!" (non-null assertion) is consumed and dropped: for untyped values it
 // is the identity, so x!! evaluates exactly like x (and x!!.m() still chains).
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | "!!" } ;
+            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | GenericSfx | DotAnonSfx | InvokeSfx | "!!" } ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}); retLblPop() ~~>
             = "." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ SkipAngle ] MArgs ;
 SafeMethodSfx <~~ push({kind:"mcall", name: popName(), args: takeAll(), safe: true}); retLblPop() ~~>
             = "?." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ SkipAngle ] MArgs ;
 FieldSfx    = "." KId <~~ push({kind:"field", name: up.in}) ~~> ;
+// `receiver.{ ... }` and `receiver.(expr)` - the anonymous-method syntax of very early
+// Kotlin. psi/examples/With.kt (`System.out.{ println("foo"); ... }`),
+// psi/CallsInWhen.kt (`a.{bar} -> a`) and psi/DoubleColon.kt (`a.(b::c)()`) all record it
+// with a clean tree, so it is a SYNTAX this file grammar has to recognise. The construct
+// no longer exists in the language and has no defined meaning in this subset, so the body
+// is consumed and the step is reported as not implemented rather than guessed at.
+// Both spellings may be INVOKED straight away - `System.out.{ ... }()`, `a.(b::c)()` -
+// which is how Kotlin's own tree reads them (a CALL_EXPRESSION whose callee is the
+// parenthesized or brace-delimited body), so an immediately following argument list is
+// part of the step.
+DotAnonSfx  <~~ push({kind:"dotanon", t: notImplExpr("anonymous method", up.pos)}) ~~>
+            = "." ( SkipBlock | "(" DiscardExpr ")" ) [ SkipParen ] ;
 SafeFieldSfx = "?." KId <~~ push({kind:"field", name: up.in, safe: true}) ~~> ;
+// An EXPLICIT TYPE ARGUMENT LIST in expression position that is NOT followed by a call:
+// `p(qux<a, b>)`, `a.foo<T> -> a` in a when arm, `Foo<out Int>` as a statement. Kotlin
+// resolves the `a < b` ambiguity with a continuation/stop-token rule (the same rule Dart
+// states verbatim in its own corpus - see docs/abnf-dialect-gotchas.md); InstAhead below
+// implements it, and the run itself is parsed and dropped, so the suffix is item-neutral
+// and foldCallMember pops exactly what it did before.
+GenericSfx  = InstAhead SkipAngle ;
+// A zero-width guard deciding whether the `<` at the parse position opens a type
+// argument list rather than a comparison. It scans a BALANCED angle run built only of
+// type-shaped characters and accepts only when the token AFTER the closing `>` cannot
+// follow a comparison's right operand: a stop token ( ) ] } , ; : . ? end of line, end
+// of file ) or a continuation token ( ( . == != -> ). `a < b` never reaches a closing
+// `>`; `a < b && c > d` bails on the `&`; `f(a < b, c > d)` closes but is followed by
+// `d`, so all three keep parsing as comparisons.
+InstAhead   = :script(~~
+    (function () {
+        var i = 0
+        var cc = c.peek(0)
+        var steps = 0
+        // The guard sees RAW input, so the whitespace and comments in front of the `<`
+        // are still ahead of the position and have to be stepped over here.
+        while (steps < 4000) {
+            steps = steps + 1
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10 || cc === 12) { i = i + 1; cc = c.peek(i); continue }
+            if (cc === 47 && c.peek(i + 1) === 47) {
+                while (cc >= 0 && cc !== 10) { i = i + 1; cc = c.peek(i) }
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                cc = c.peek(i)
+                while (cc >= 0 && !(cc === 42 && c.peek(i + 1) === 47)) { i = i + 1; cc = c.peek(i) }
+                if (cc < 0) { return abnf.newToken("\x01unterminated-comment", 0) }
+                i = i + 2
+                cc = c.peek(i)
+                continue
+            }
+            break
+        }
+        if (cc !== 60) { return abnf.newToken("\x01no-angle", 0) }
+        // An EMPTY run is "Type expected" in Kotlin, not an instantiation: psi/Super.kt
+        // spells `super<>.foo()` out as a PsiErrorElement, so the guard must decline it
+        // and leave the `<` to the comparison operator that will fail on it.
+        if (c.peek(i + 1) === 62) { return abnf.newToken("\x01empty-angle", 0) }
+        var depth = 0
+        var n = 0
+        while (n < 4000) {
+            n = n + 1
+            cc = c.peek(i)
+            if (cc < 0) { return abnf.newToken("\x01eof-in-angle", 0) }
+            if (cc === 60) { depth = depth + 1; i = i + 1; continue }
+            if (cc === 62) {
+                depth = depth - 1
+                i = i + 1
+                if (depth === 0) { break }
+                continue
+            }
+            // `->` of a function type argument, HashMap<String, () -> Unit>.
+            if (cc === 45 && c.peek(i + 1) === 62) { i = i + 2; continue }
+            var ok = (cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) || (cc >= 48 && cc <= 57)
+                  || cc === 95 || cc === 32 || cc === 9 || cc === 13 || cc === 10
+                  || cc === 44 || cc === 46 || cc === 63 || cc === 42 || cc === 40 || cc === 41
+                  || cc === 58 || cc === 64 || cc === 91 || cc === 93
+            if (!ok) { return abnf.newToken("\x01not-a-type", 0) }
+            i = i + 1
+        }
+        if (depth !== 0) { return abnf.newToken("\x01unbalanced-angle", 0) }
+        cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
+        if (cc < 0) { return undefined }
+        if (cc === 41 || cc === 93 || cc === 125 || cc === 44 || cc === 59 || cc === 58
+            || cc === 46 || cc === 40 || cc === 63 || cc === 10 || cc === 13) { return undefined }
+        if (cc === 61 && c.peek(i + 1) === 61) { return undefined }
+        if (cc === 33 && c.peek(i + 1) === 61) { return undefined }
+        if (cc === 45 && c.peek(i + 1) === 62) { return undefined }
+        return abnf.newToken("\x01not-instantiation", 0)
+    })()
+~~) ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 // More than one trailing lambda is a SEMANTIC error in Kotlin, not a syntactic one:
 // psi/CallWithManyClosures.kt writes `f() {} {} {}` and `f {} {} {}` and carries a clean
 // parse tree. Only the FIRST lambda is passed as an argument (makeCall reads one), which
 // is what the single-lambda form already did.
-MArgs       = "(" [ Arg ] { "," [ Arg ] } ")" { Lambda } | Lambda { Lambda } ;
+// The argument list must OPEN on the callee's own line. Kotlin's own tree settles this:
+// psi/DoubleColon.txt has `a::b.c` followed by a blank line and then `(a::b)()`, and
+// records them as TWO statements - a DOT_QUALIFIED_EXPRESSION and a separate
+// CALL_EXPRESSION with a PARENTHESIZED callee - not as one call of `c`. Without the
+// guard the `(` on the next line is read as this call's arguments, the following `()` is
+// then left over, and the parse dies on a `)` two lines below the mistake. A trailing
+// LAMBDA is deliberately not guarded: Kotlin does allow it after a line break.
+MArgs       = SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" { Lambda } | Lambda { Lambda } ;
 
 // A call argument: a spread (*array, which splices the array into the positional
 // arguments of a vararg parameter), a NAMED argument (name = value, matched against
@@ -1035,13 +1151,58 @@ NamedArg    <~~ var v = pop(); push({argname: pop(), av: v}) ~~>
 // else/arm bodies are full Expressions, so `if (c) a else b + 1` still binds b + 1 as
 // the else. A leading `if` at statement level is the If statement (matched before
 // ExprStmt); a leading `when` is this expression form.
-Primary     = CollectionLit | "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | DotFloatLit | FloatLit | KIntLit | CharLit | True | False | Null | Lambda | AnonFun | CallableRef | ObjectExpr | IfExpr | WhenExpr | TryExpr | ThrowExpr | ThisExpr | SuperExpr | Call | VarRef ;
+Primary     = CollectionLit | ParenApply | "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | DotFloatLit | FloatLit | KIntLit | CharLit | True | False | Null | Lambda | AnonFun | CallableRef | ObjectExpr | IfExpr | WhenExpr | TryExpr | ThrowExpr | ReturnAtExpr | BreakAtExpr | ContinueAtExpr | ReturnExpr | BreakExpr | ContinueExpr | ThisExpr | SuperExpr | LabeledPrim | Call | VarRef ;
 
 // `throw e` in EXPRESSION position - a Nothing-typed expression body
 // (fun bail(msg: String): Nothing = throw AppError(msg)) or the body of a when arm.
 // It raises the exception exactly like the statement form and never yields a value.
 ThrowExpr   <~~ push(excThrow(pop())) ~~>
             = KwThrow Expression ;
+
+// `return`, `break` and `continue` in EXPRESSION position - `val v = map[k] ?: return`,
+// `val line = it.next() ?: break`. Each is Nothing-typed: it never yields a value, it
+// transfers control out of the whole surrounding expression. An interpreter cannot do
+// that by RETURNING a signal (the enclosing operator would fold the signal as if it
+// were a value), so each RAISES one instead. `return` raises the same __nlret marker a
+// non-local return already uses, which every function frame catches through nlrRun;
+// break/continue raise a __kloop marker that kLoopBody turns back into the ordinary
+// BRK / CONT the statement forms return.
+// NotAtLbl declines the labelled spellings (return@loop, break@outer): those name a
+// target this form does not model, and the statement-level ReturnAt / BreakAt /
+// ContinueAt productions own them. Without the guard `x ?: return@forEach true` would
+// match `return` here and leave the `@forEach` behind as a wrong parse.
+// The LABELLED spellings in expression position - psi/SimpleExpressions.kt puts
+// `break@la` and `continue@la` in a parameter default with a clean tree. break@l and
+// continue@l raise the label with the marker, and kLoopBody hands loopSignal exactly the
+// {brkL} / {contL} record makeBreakTo / makeContinueTo return, so a label naming an OUTER
+// loop still travels out through the inner one. `return@l` is genuine only when `l` is
+// the DIRECTLY enclosing function's name (kReturnAtExpr checks the walk-time retLabels
+// stack, as makeReturnAt does); a lambda's label would need the lambda body itself to
+// catch the marker, which it does not, so that case stays not implemented rather than
+// returning from the wrong frame.
+ReturnAtExpr <~~ push(kReturnAtExpr(takeAll(), up.pos)) ~~>
+            = KwReturn AtAdjacent "@" KId <~~ push({rlbl: up.in}) ~~> [ SameLine Expression ] ;
+BreakAtExpr <~~ push(kBreakAtExpr(pop().lbl)) ~~>
+            = KwBreak AtAdjacent "@" KId <~~ push({lbl: up.in}) ~~> ;
+ContinueAtExpr <~~ push(kContinueAtExpr(pop().lbl)) ~~>
+            = KwContinue AtAdjacent "@" KId <~~ push({lbl: up.in}) ~~> ;
+ReturnExpr  <~~ push(kReturnExpr(takeAll())) ~~>
+            = KwReturn NotAtLbl [ SameLine Expression ] ;
+BreakExpr    <~~ push(kBreakExpr()) ~~>    = KwBreak NotAtLbl ;
+ContinueExpr <~~ push(kContinueExpr()) ~~> = KwContinue NotAtLbl ;
+// A LABEL on an ordinary operand - `1 + label3@ 3 + 4`, `l1@ foo bar l2@ baz`. Kotlin's
+// own tree (psi/newLabels/basic.txt) records each as a LABELED_EXPRESSION wrapping the
+// operand, so the label binds at the PRIMARY level, not at the statement level. A label
+// only names something on a loop (statement-level Labeled) or a lambda (LamLabel); on an
+// ordinary operand it names nothing, so it is consumed and dropped and the operand is its
+// own value - which is what the tree says too.
+LabeledPrim <~~ var t = pop(); pop(); push(t) ~~>
+            = LabelDef Primary ;
+NotAtLbl    = :script(~~
+    (function() {
+        return (c.peek(0) === 64) ? abnf.newToken("\x01labelled", 0) : undefined
+    })()
+~~) ;
 
 // `super` as the receiver of a member access - super.describe(). It evaluates to a
 // {__superref, self, cls} marker naming the SUPERCLASS of the class whose body is
@@ -1085,10 +1246,17 @@ VFinally    <~~ push({vfin: pop()}) ~~>
 // back to ObjectExprSkip (notImplemented). Must precede Call/VarRef, which would
 // otherwise read `object` as an identifier.
 ObjectExpr  = ObjectExprReal | ObjectExprSkip ;
+// The header pieces after `object` - type parameters, a visibility modifier and a
+// constructor parameter list - are all SEMANTIC errors on an object expression, never
+// syntactic ones: psi/recovery/objects/expressions/Everything.txt records
+// `object<T, R> private (x: Int, y: Int) : Bar, Baz { ... }` with no PsiErrorElement at
+// all. They are parsed and dropped (an object expression has no type parameters and no
+// constructor to give them to).
 ObjectExprReal <~~ push(makeObjectExpr(takeAll())) ~~>
-            = KwObject [ ":" SuperList ] "{" { Member } "}" ;
+            = KwObject [ SkipAngle ] [ ObjVis ] [ CtorParamsSkip ] [ ":" SuperList ] "{" { Member } "}" ;
 ObjectExprSkip <~~ push(notImplExpr("object expression", up.pos)) ~~>
-            = KwObject [ ":" SuperList ] SkipBlock ;
+            = KwObject [ SkipAngle ] [ ObjVis ] [ CtorParamsSkip ] [ ":" SuperList ] SkipBlock ;
+ObjVis      = ( "private" | "protected" | "internal" | "public" ) KwEnd ;
 
 // A labelled receiver - this@Outer11. It walks out from the innermost `this` along the
 // __outer chain an inner class instance carries until it reaches an instance whose
@@ -1151,7 +1319,7 @@ DName       <~~ push(dName(takeAll())) ~~>
 // works as a Primary anywhere, including as an argument to an outer call
 // (modules(module(createdAtStart = true) { ... }, module { ... }, ...)).
 Call        <~~ push(makeCall(takeAll())); retLblPop() ~~>
-            = KId <~~ push(up.in); retLblPush(up.in, "lam") ~~> [ TypeArgs ] ( "(" [ Arg ] { "," [ Arg ] } ")" { Lambda } | Lambda { Lambda } ) ;
+            = KId <~~ push(up.in); retLblPush(up.in, "lam") ~~> [ TypeArgs ] ( SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" { Lambda } | Lambda { Lambda } ) ;
 // The explicit type arguments of a call - tag17<String>(x) - kept so that a reified
 // type parameter inside the callee resolves to the real type name.
 TypeArgs    <~~ push({targs: up.in}) ~~>
@@ -1174,11 +1342,36 @@ TplEsc      = "\\" "\x20"..b"\x7e" ;
 // the literal, which is why they stay out of the set.
 TplPlain    = "\x20"..."\x21" | "\x23"..."\x23" | "\x25"..."\x5b" | "\x5d"..."\x7e" | @"\t\x0b\x0c" | "\x7f"..."\U0010ffff" ;
 
+// CALLING a parenthesized expression - `(f)()`, `(f) {} {} {}`, `(a::b)()`
+// (psi/CallWithManyClosures.txt and psi/DoubleColon.txt both record these with clean
+// trees). `f()` and `f { }` are matched by Call, which is keyed on a NAME; once the
+// callee is an arbitrary expression there is no name, so the call becomes a SUFFIX of
+// the member chain and the value in hand is invoked. It is confined to a parenthesized
+// seed on purpose: a general trailing-lambda suffix on every primary would read
+//     val x = y
+//     { ... }
+// as `y { ... }`, which is a wrong parse with no error anywhere.
+ParenApply  <~~ push(foldCallMember(takeAll())) ~~>
+            = ParenSeed InvokeLike { InvokeLike } ;
+ParenSeed   = "(" Expression ")" ;
+InvokeLike  = InvokeSfx | TrailLamSfx | GenericSfx ;
+// SameLine, for the reason MArgs carries it: psi/DoubleColon.txt records a `(` that
+// OPENS a line as a new statement, not as the previous expression's argument list.
+InvokeSfx   <~~ push({kind:"invoke", args: takeAll()}) ~~>
+            = SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" { Lambda } ;
+TrailLamSfx <~~ push({kind:"invoke", args: takeAll()}) ~~>
+            = Lambda { Lambda } ;
 // A collection literal, [1, 2]. Kotlin allows it only as an annotation argument (the
 // spelling of an array constant); it is lowered to a list, which is how this subset
 // models an array anyway.
+// An argument slot may not be EMPTY: `f(1, ,)`, `@Ann(,)` and `[1, , 3]` are
+// "Expecting an argument" / "Expecting an index element" in Kotlin
+// (psi/emptyArgumentsInAnnotations.txt, psi/emptyArgumentsInArrayAccesses.txt), and the
+// old spelling `[ Arg ] { "," [ Arg ] }` accepted every one of them. A TRAILING comma is
+// real Kotlin and stays. The compiler half's CallArgs / CollLit were already in this
+// shape, so this also converges the two.
 CollectionLit <~~ push(makeListLit(takeAll())) ~~>
-            = "[" [ Expression ] { "," [ Expression ] } "]" ;
+            = "[" [ Expression { "," Expression } [ "," ] ] "]" ;
 
 Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
 
@@ -1302,7 +1495,14 @@ RawTwoQ     = '"' '"' ( "\x00"..."\x21" | "\x23"..."\U0010ffff" ) ;
 // as a lambda, called later). A QUALIFIED reference binds the receiver: recv::member
 // yields a property reference {__propref, obj, name} - readable through .isInitialized
 // (the lateinit test), callable through .invoke(), and otherwise the bound member.
-CallableRef = BareRef | QualRef ;
+CallableRef = BareClassRef | BareRef | QualRef ;
+// A RECEIVERLESS class literal, `::class` (psi/DoubleColon.kt line 40, clean tree). It
+// names the class of the implicit receiver, which this subset does not model, so it is
+// recognised and reported rather than guessed at. It must precede BareRef, whose KId
+// cannot match the `class` keyword anyway - the ordering is what keeps the two apart if
+// KId ever widens.
+BareClassRef <~~ push(notImplExpr("receiverless class literal", up.pos)) ~~>
+            = "::" "class" KwEnd ;
 BareRef     = "::" KId <~~ push(makeVarRef(up.in)) ~~> ;
 // A TYPE-qualified reference - String::length - is a different construct: it is a
 // KProperty1 over an unbound receiver, which this interpreter does not implement, and
@@ -1310,8 +1510,15 @@ BareRef     = "::" KId <~~ push(makeVarRef(up.in)) ~~> ;
 // by whether the base name resolves to a value, so makePropRef makes that test itself
 // rather than evaluating the base unconditionally (which aborted with "unknown name:
 // String" before the not-implemented path could warn).
+// A NULLABLE receiver is allowed in front of the `::` - `X?::x`, `X ?:: x`, `X? ?:: x`,
+// `X ??:: x`, `X ?? :: x`. All five are CALLABLE_REFERENCE_EXPRESSIONs in Kotlin's own
+// tree (psi/greatSyntacticShift/nullableTypes.txt), differing only in where the QUEST
+// tokens sit, and none of them is a syntax error. The `?`s belong to the receiver TYPE,
+// which this form drops anyway, so they are consumed and ignored.
+// This has to be matched at the Primary level, before Elvis gets to see the `?:` of
+// `a?::b` as its own operator.
 QualRef     <~~ var n = pop(); push(makePropRef(pop(), n, up.pos)) ~~>
-            = QualRefBase "::" RefName ;
+            = QualRefBase [ "?" ] [ "?" ] "::" RefName ;
 RefName     = KId <~~ push(up.in) ~~> | "class" KwEnd <~~ push("class") ~~> ;
 QualRefBase <~~ push(stripWs(up.in)) ~~>
             = KId [ SkipAngle ] { "." KId [ SkipAngle ] } ;
@@ -1321,7 +1528,7 @@ QualRefBase <~~ push(stripWs(up.in)) ~~>
 // (Kotlin's rule), which is why it pushes its own "fun" return target while its body
 // walks.
 AnonFun     <~~ push(makeAnonFun(takeAll())); retLblPop() ~~>
-            = [ ContextClause ] KwFun <~~ retLblPush("", "fun") ~~> { TypeAnno } [ SkipAngle ] [ RecvSeg { RecvSeg } ] [ KId ] [ SkipAngle ] ParamList [ ":" Type ] [ ContractClause ] [ FunBody ] ;
+            = [ ContextClause ] KwFun <~~ retLblPush("", "fun") ~~> { TypeAnno } [ SkipAngle ] [ RecvSeg { RecvSeg } ] [ KId ] [ SkipAngle ] ParamList [ ":" Type ] [ ContractClause ] [ WhereClause ] [ FunBody ] ;
 
 // A supertype list. A supertype is a SUPERCLASS when it carries a constructor-argument
 // list (`: Shape12(id)`), an INTERFACE otherwise (`: Named12`), and an interface
@@ -1336,17 +1543,29 @@ SuperItem   <~~ push(makeSuperItem(takeAll())) ~~>
 SuperName   <~~ push({sname: stripWs(up.in)}) ~~>
             = { TypeAnno } ( "(" Type ")" | KId [ SkipAngle ] { "." KId [ SkipAngle ] } ) [ "?" ] ;
 SuperArgs   <~~ push({sargs: takeAll()}) ~~>
-            = "(" [ Arg ] { "," [ Arg ] } ")" ;
+            = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 // The delegate of `: Iface by expr` is a postfix expression WITHOUT a trailing-lambda
 // call: `Greeter15 by base { override fun bye() ... }` must leave the `{ ... }` to the
 // class body rather than reading it as base's trailing lambda argument.
 DelegExpr   <~~ push({deleg: pop()}) ~~>
-            = NoLamExpr ;
+            = NoLamAdd ;
+// The delegate may be a whole ARITHMETIC expression - psi/ByClauses.txt records
+// `class A : b by a + b() * 5 { ... }` with a clean tree. These two levels are the
+// ordinary AddExpr / MulExpr built on the NO-LAMBDA postfix chain, so precedence is the
+// same while the class body still cannot be read as a trailing lambda. foldBinary
+// returns a single operand unchanged, so `by base` is byte-identical to what it was.
+NoLamAdd    <~~ push(foldBinary(takeAll())) ~~>
+            = NoLamMul { ( "+" | "-" ) <~~ push(up.in) ~~> NoLamMul } ;
+NoLamMul    <~~ push(foldBinary(takeAll())) ~~>
+            = NoLamExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> NoLamExpr } ;
 NoLamExpr   <~~ push(foldCallMember(takeAll())) ~~>
             = NoLamPrim { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx } ;
-NoLamPrim   = "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | FloatLit | KIntLit | CharLit | True | False | Null | ParenCall | VarRef ;
+// `class A : b by object { ... } { ... }` (psi/ByClauses.kt line 21) delegates to an
+// object EXPRESSION, whose own braces are its body and whose FOLLOWING braces are the
+// class body - which is exactly why the delegate must stay lambda-free.
+NoLamPrim   = "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | FloatLit | KIntLit | CharLit | True | False | Null | ObjectExpr | ParenCall | VarRef ;
 ParenCall   <~~ push(makeCall(takeAll())); retLblPop() ~~>
-            = KId <~~ push(up.in); retLblPush(up.in, "lam") ~~> [ TypeArgs ] "(" [ Arg ] { "," [ Arg ] } ")" ;
+            = KId <~~ push(up.in); retLblPush(up.in, "lam") ~~> [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 DiscardExpr <~~ pop() ~~> = Expression ;
 
 // An interface: a descriptor holding its DEFAULT methods (a member with a body) and
@@ -1438,7 +1657,7 @@ EnumEntries = EnumEntry { "," EnumEntry } [ "," ] ;
 EnumEntry   <~~ push({entry: takeAll()}) ~~>
             = NotMemberKw { Annotation | Modifier } KId <~~ push({ename: up.in}) ~~> [ EnumArgs ] [ "{" { Member } "}" ] ;
 EnumArgs    <~~ push({eargs: takeAll()}) ~~>
-            = "(" [ Arg ] { "," [ Arg ] } ")" ;
+            = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 // annotation class Note(val label: String): the declaration is recognised and the name
 // bound to an inert descriptor, so @Note("x") sites and the class name both resolve.
 // Annotations carry no runtime behavior in this subset (they are parsed and dropped),
@@ -1468,7 +1687,7 @@ CompanionObject <~~ push({companion: takeAll()}) ~~>
 SecondaryCtor <~~ push({secondary: takeAll()}) ~~>
             = KwConstructor ParamList [ ":" CtorDelegate ] [ Block ] ;
 CtorDelegate <~~ push({delegArgs: takeAll()}) ~~>
-            = ( "this" | "super" ) <~~ push({dtarget: up.in}) ~~> KwEnd "(" [ Arg ] { "," [ Arg ] } ")" ;
+            = ( "this" | "super" ) <~~ push({dtarget: up.in}) ~~> KwEnd "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 // An EXTENSION property - val String.mid10: Char get() = this[length / 2]. GENUINE:
 // the getter (and an optional setter) is registered under the bare NAME, exactly like
 // an extension function, and a `recv.name` read that finds no field on the receiver
@@ -1478,7 +1697,7 @@ CtorDelegate <~~ push({delegArgs: takeAll()}) ~~>
 // this also keeps an extension DELEGATED property (val Int.x: T by store()) out - it
 // falls through to the delegated-property forms instead of being half-consumed here.
 ExtProp     <~~ registerExtProp(takeAll()) ~~>
-            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in) ~~> [ ":" Type ] [ WhereClause ] Accessor { Accessor | PropVis } ;
+            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in) ~~> [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] Accessor { Accessor | PropVis } ;
 // A top-level COMPUTED property (val x: T get() = ...) with no receiver: the same
 // machinery as a class property, bound as a global whose reads run the getter.
 PropAccessor <~~ registerTopProp(takeAll()) ~~>
@@ -3380,6 +3599,23 @@ NotMemberKw = :script(~~
                     cur = mcall(cur, s.name, spec.pos, spec)
                 } else if (s.kind == "field") {
                     cur = kGetField(cur, s.name)
+                } else if (s.kind == "dotanon") {
+                    cur = s.t()
+                } else if (s.kind == "invoke") {
+                    // The value in hand is the callee: a class descriptor constructs, a
+                    // function value applies, and anything else is offered its `invoke`
+                    // operator - exactly the three cases makeCall tries for a NAME.
+                    var ispec = kevalArgs(s.args)
+                    if (cur != undefined && cur !== null && cur.__isclass) {
+                        cur = kNew(cur, ispec)
+                    } else if (typeof cur == "function") {
+                        kSetNamed(ispec.named)
+                        cur = cur.apply(undefined, ispec.pos)
+                    } else {
+                        var inv = lookupMethod(cur, "invoke")
+                        if (inv == null) { fail("call of a non function value") }
+                        cur = inv.apply(undefined, concat2impl([cur], ispec.pos))
+                    }
                 } else {
                     cur = kIndex(cur, s.idx())
                 }
@@ -3680,13 +3916,72 @@ NotMemberKw = :script(~~
         }
         return notImplStmt("non-local labelled return", pos)
     }
+    // `return`, `break` and `continue` used as EXPRESSIONS (see ReturnExpr above).
+    // Each raises a marker rather than returning a signal, because an expression's value
+    // has nowhere to put one: `m[k] ?: return` must leave makeElvis, then the operand
+    // chain, then the statement, all at once.
+    // `return` reuses the __nlret marker of a non-local return, so nothing new has to
+    // catch it - every function frame already runs its body through nlrRun, and that is
+    // true whether the `return` sits directly in a `fun` (nlrRun turns the marker into
+    // this frame's {isRet}) or inside a lambda (the lambda body is NOT wrapped, so the
+    // marker travels on to the enclosing function, which is Kotlin's own rule).
+    function kReturnExpr(items) {
+        var t = items.length > 0 ? items[0] : makeConst(undefined)
+        return function() { throw {__nlret: true, v: t()} }
+    }
+    function kBreakExpr() {
+        return function() { throw {__kloop: "brk"} }
+    }
+    function kContinueExpr() {
+        return function() { throw {__kloop: "cont"} }
+    }
+    // The labelled twins. The marker carries the label, and kLoopBody rebuilds the very
+    // record the STATEMENT forms return, so loopSignal's existing label matching decides
+    // which loop the signal is for and an unmatched one keeps travelling outwards.
+    function kBreakAtExpr(lbl) {
+        return function() { throw {__kloop: "brk", lbl: lbl} }
+    }
+    function kContinueAtExpr(lbl) {
+        return function() { throw {__kloop: "cont", lbl: lbl} }
+    }
+    // `return@name expr` in expression position. Genuine when `name` is the DIRECTLY
+    // enclosing function (the __nlret marker its frame already catches); a lambda label
+    // would need the lambda body to catch the marker, which it does not, so it is
+    // reported rather than silently returning from the wrong frame.
+    function kReturnAtExpr(items, pos) {
+        var lbl = items[0].rlbl
+        var top = retLblTop()
+        if (top != null && top.lbl == lbl && top.kind == "fun") {
+            return kReturnExpr(items.slice(1))
+        }
+        return notImplExpr("labelled return in expression position", pos)
+    }
+    // Every loop runner funnels its body through this, which turns a raised __kloop
+    // marker back into the ordinary BRK / CONT value the `break` / `continue` STATEMENT
+    // forms return - so loopSignal and the labelled-loop handling below stay untouched.
+    // Anything else is re-raised unchanged, so a user exception still reaches its catch.
+    function kLoopBody(bodyT) {
+        try {
+            return bodyT()
+        } catch (e) {
+            if (e != undefined && e != null && e.__kloop != undefined) {
+                if (e.lbl != undefined) {
+                    if (e.__kloop == "brk") { return makeBreakTo(e.lbl)() }
+                    return makeContinueTo(e.lbl)()
+                }
+                if (e.__kloop == "brk") { return makeBreak()() }
+                return makeContinue()()
+            }
+            throw e
+        }
+    }
     // Kotlin's loops consume pendingLabel on entry and handle their own
     // labelled continue; the shared core makeWhile is reassigned to do the same.
     makeWhile = function(bodyT, condT) {
         return function() {
             var lbl = takeLabel()
             while (core.test(condT())) {
-                var r = bodyT()
+                var r = kLoopBody(bodyT)
                 if (r != undefined) {
                     var act = loopSignal(r, lbl)
                     if (act == "brk") break
@@ -3751,7 +4046,7 @@ NotMemberKw = :script(~~
         return function() {
             var lbl = takeLabel()
             do {
-                var r = bodyT()
+                var r = kLoopBody(bodyT)
                 if (r != undefined) {
                     var act = loopSignal(r, lbl)
                     if (act == "brk") break
@@ -3773,7 +4068,7 @@ NotMemberKw = :script(~~
             declVar(name, undefined)
             for (var i = 0; i < arr.length; i++) {
                 setVar(name, arr[i])
-                var r = bodyT()
+                var r = kLoopBody(bodyT)
                 if (r != undefined) {
                     var act = loopSignal(r, lbl)
                     if (act == "brk") break
@@ -4852,7 +5147,7 @@ NotMemberKw = :script(~~
             for (var n = 0; n < names.length; n++) { declVar(dNameOf(names[n]), undefined) }
             for (var i = 0; i < arr.length; i++) {
                 for (var d = 0; d < names.length; d++) { setVar(dNameOf(names[d]), dValueOf(arr[i], names[d], d)) }
-                var r = bodyT()
+                var r = kLoopBody(bodyT)
                 if (r != undefined) {
                     var act = loopSignal(r, lbl)
                     if (act == "brk") break
@@ -5102,6 +5397,28 @@ NotMemberKw = :script(~~
         if (kIsFlo(v)) { return kFlo(v.__flo + d) }
         if (szIs(v)) { return kNorm(szPair(szArith("+", v, kSz(d, v.w, v.u))), v.w, v.u) }
         return (kNum(v) + d) | 0
+    }
+    // items = [op, ref]: the PREFIX form. It writes the same slot makeIncDec writes and
+    // differs only in what it hands back - the NEW value rather than the old one.
+    function makePreIncDec(items) {
+        var d = (items[0] == "++") ? 1 : -1
+        var ref = items[1]
+        return function() {
+            if (ref.path.length == 0) {
+                var n = anytype // The variable may hold a Char or a delegate box.
+                n = getVar(ref.name)
+                if (isPDeleg(n)) { var nd = kStep(pdelegGet(n), d); pdelegSet(n, nd); return nd }
+                var nv0 = kStep(n, d)
+                setVar(ref.name, nv0)
+                return nv0
+            }
+            var p = resolveRef(ref)
+            var mv = anytype // The slot may hold a number, a Char or a Double.
+            mv = kReadSlot(p)
+            var nv = kStep(mv, d)
+            if (p.isIndex) { kSetIndex(p.obj, p.key, nv) } else { kSetField(p.obj, p.key, nv) }
+            return nv
+        }
     }
     function makeIncDec(items) {
         var ref = items[0]

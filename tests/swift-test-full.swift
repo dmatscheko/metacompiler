@@ -926,6 +926,109 @@ func s25() {
     check("flo32", one[1] == "a" && one[1.0] == "a")
 }
 
+// ===== SECTION 26: parameter packs =====
+// SE-0393 variadic generics: `each T` in a generic parameter list, `repeat each T`
+// as a parameter and a return type, the `repeat` expansion EXPRESSION (whose value
+// is a tuple), `each p` inside it, and pack iteration with `for x in repeat each p`.
+// Verified against swift 6.1.2: this section prints "full: 5 checks, 0 failures".
+func packScale<each T: Numeric>(args arg: repeat each T) -> (repeat each T) {
+    (repeat 2 * each arg + 3)
+}
+func packCount<each T>(_ v: repeat each T) -> Int {
+    var n = 0
+    for _ in repeat each v { n += 1 }
+    return n
+}
+func packJoin<each T>(_ v: repeat each T) -> String {
+    var s = ""
+    for x in repeat each v { s += "\(x)|" }
+    return s
+}
+func packDesc<each T>(_ v: repeat each T) -> String {
+    return "\((repeat each v))"
+}
+func s26() {
+    let r = packScale(args: 12, 12.3)
+    check("pk1", r.0 == 27)
+    check("pk2", r.1 == 27.6)
+    check("pk3", packCount(1, 2, 3) == 3 && packCount("a") == 1)
+    check("pk4", packJoin(1, "b", true) == "1|b|true|")
+    check("pk5", packDesc(9, 8) == "(9, 8)")
+}
+
+// ===== SECTION 27: collection type constructors =====
+// `[T]()` / `[K: V]()` - a collection TYPE written as a literal and constructed
+// empty, including the element type no expression can read: a function type.
+// Verified against swift 6.1.2: this section prints "full: 4 checks, 0 failures".
+func s27() {
+    var xs = [Int]()
+    check("ctl1", xs.count == 0)
+    xs.append(4)
+    xs.append(5)
+    check("ctl2", xs.count == 2 && xs[0] == 4 && xs[1] == 5)
+    var ds = [String: Int]()
+    check("ctl3", ds.count == 0)
+    ds["k"] = 7
+    let fns = [() -> Int]()
+    let afs = [() async throws -> ()]()
+    check("ctl4", ds["k"] == 7 && fns.count == 0 && afs.count == 0)
+}
+
+// ===== SECTION 28: deep raw strings, line continuations, #if in a protocol =====
+// Raw delimiters past three pounds, a multi-line line-continuation with TRAILING
+// whitespace after the backslash, a multi-line literal nested in an interpolation
+// of a multi-line literal, a #if between protocol requirements, and a closure body
+// holding real statements (a nested func, guard, switch, do, for).
+// Verified against swift 6.1.2: this section prints "full: 6 checks, 0 failures".
+protocol Shape28 {
+    func area() -> Int
+#if DEBUG
+    func debugName() -> String
+#else
+    func name() -> String
+#endif
+}
+struct Sq28: Shape28 {
+    let side: Int
+    func area() -> Int { return side * side }
+    func name() -> String { return "sq" }
+}
+func s28() {
+    let deep = #####"raw \#(no) "quotes" #### here"#####
+    check("str1", deep == "raw \\#(no) \"quotes\" #### here" && deep.count == 29)
+    let joined = """
+      one \   
+      two
+      """
+    check("str2", joined == "one two")
+    let nested = """
+      outer \
+      \("""
+        inner \
+        tail
+        """) end
+      """
+    check("str3", nested == "outer inner tail end")
+    let s: Shape28 = Sq28(side: 3)
+    check("pif1", s.area() == 9 && s.name() == "sq")
+    let classify = { (n: Int) -> String in
+        func twice(_ x: Int) -> Int { return x * 2 }
+        guard n > 0 else { return "neg" }
+        switch twice(n) {
+        case 2: return "two"
+        default: return "many"
+        }
+    }
+    check("lam1", classify(1) == "two" && classify(5) == "many" && classify(-1) == "neg")
+    let counted = { () -> Int in
+        var t = 0
+        do { t += 3 }
+        for i in 1...3 { t += i }
+        return t
+    }
+    check("lam2", counted() == 9)
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -954,6 +1057,9 @@ func main() {
     s23() // SECTION-CALL 23
     s24() // SECTION-CALL 24
     s25() // SECTION-CALL 25
+    s26() // SECTION-CALL 26
+    s27() // SECTION-CALL 27
+    s28() // SECTION-CALL 28
     print("full: \(checks) checks, \(fails) failures")
 }
 

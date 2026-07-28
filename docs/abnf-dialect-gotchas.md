@@ -1102,3 +1102,60 @@ than the construct that caused it. Found in a BigInt relational helper, where
 
 Declare any slot that will hold more than one type as `anytype`, or split the
 two meanings into two names.
+
+## A SKIPPED body makes a widening cost the reject corpus, invisibly
+
+`UnsupFun` recognizes the function shapes the Kotlin subset cannot lower, and its
+first alternative ends in `[ SkipBlock | "=" DiscardExpr ]` — a balanced-brace run
+that is consumed without being understood. Adding a body to its *second*
+alternative, so that the nameless `fun () {}` of `psi/FunctionsWithoutName.kt`
+would parse, changed
+
+    | [ KId ] [ SkipAngle ] SkipParen [ ":" Type ] … )
+
+into a rule that accepts a NAMED function whose body is *anything balanced*. The
+parse corpus jumped 370 → 384. The reject corpus collapsed 282 → 194: eighty-eight
+files whose whole point is a broken function body were now swallowed whole.
+
+**Net −74, and the parse number alone reads like a win.** Only the reject column
+sees it, which is the argument for measuring both on every change. The fix was to
+give the nameless form its own tight alternative (`SkipParen [ ":" Type ] …`, no
+`KId` at all) rather than to relax the general one: +2 parse, 0 reject.
+
+The general rule: an alternative that ends in a `Skip*` run must be reachable
+only from a shape the strict rules have already refused for a *structural*
+reason, never from one they refused because the code inside is wrong.
+
+## A label on an operand must be ordered after `this` and `super`
+
+Kotlin's `1 + label3@ 3 + 4` is a LABELED_EXPRESSION around the operand, so the
+natural fix is a `LabeledPrim = LabelDef Primary` alternative in `Primary`.
+Put it anywhere before `ThisExpr` and `this@Box.side` silently becomes `Box.side`:
+`LabelDef` is `KId "@"`, `this` matches `KId`, the label is dropped by design, and
+the receiver disappears.
+
+The run does not fail with a parse error. It fails in the WALK, and in this tree
+that surfaced as `Stage 2: compile` followed by exit 1 and **no message at all** —
+a matrix entry that had been green for months, with nothing pointing at the new
+rule. Order `LabeledPrim` immediately before the `Call | VarRef` seeds, after
+every keyword-shaped primary.
+
+## An argument list must OPEN on its callee's line
+
+`Call = KId [ TypeArgs ] ( "(" args ")" … )` with no line guard reads
+
+    a::b.c
+
+    (a::b)()
+
+as one call `c(a::b)` with a leftover `()`, and the parse dies on a `)` two lines
+below the mistake. Kotlin's own tree (`psi/DoubleColon.txt`) records the two lines
+as a DOT_QUALIFIED_EXPRESSION and a separate CALL_EXPRESSION whose callee is
+PARENTHESIZED — so a `(` that OPENS a line is never the previous expression's
+argument list. The guard is the `SameLine` script the Go grammars already use, and
+it belongs on `Call`, on `MArgs` and on any invoke suffix, but **not** on a
+trailing lambda: Kotlin does allow `foo` / `{ … }` across a line break.
+
+This is the "Go-style semicolon insertion applies at the BINARY OPERATOR level"
+entry met in a language that has no semicolon insertion at all. Any language whose
+call suffix is optional has the same exposure.
