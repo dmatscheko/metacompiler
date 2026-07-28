@@ -346,7 +346,7 @@ IfaceTypeT  = "interface" KwEnd SkipBlock ;
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   <~~ push(stmtPos(pop())) ~~>
             = Block | If | For | Switch | Return | Break | Continue | Goto | Defer | GoStmt | Select | Fallthrough
-            | ConstGroup | ConstSingle | VarGroup | VarDecl | Labeled | SimpleStmt | Empty ;
+            | TypeDecl | TypeGroup | ConstGroup | ConstSingle | VarGroup | VarDecl | Labeled | SimpleStmt | Empty ;
 
 // fallthrough: accepted, reported not implemented (our switch has no fallthrough model).
 // fallthrough: continues into the NEXT case body instead of leaving the switch.
@@ -585,15 +585,60 @@ Goto        <~~ push(makeGoto(takeAll(), up.pos)) ~~>
 // loop builder inside can claim it - that is what makes 'continue outer' reach the
 // right loop.
 Labeled     <~~ push(makeLabeled(pop(), pop())) ~~>
-            = LabelAhead Id <~~ pendingLabel = up.in; push(up.in) ~~> ":" Statement ;
+            = LabelAhead Id <~~ pendingLabel = up.in; push(up.in) ~~> ":" ( Statement | LabelNoop ) ;
+// A label with NOTHING after it - `loop:` as the last thing in a block, and the `_:`
+// the corpus uses to check that a blank label is legal. That is a labeled EMPTY
+// statement, and Go writes no semicolon for it (no semicolon is inserted after ':').
+// BlockEndAhead is what keeps this from swallowing a statement the grammar cannot yet
+// parse: it succeeds only where a statement genuinely cannot begin. Mirrors
+// go-interpreter.abnf.
+LabelNoop   <~~ push(function(b) { return b }) ~~>
+            = BlockEndAhead ;
+BlockEndAhead = :script(~~
+    (function () {
+        var i = 0
+        var cc = 0
+        while (i < 4096) {
+            cc = c.peek(i)
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i++; continue }
+            if (cc === 47 && c.peek(i + 1) === 47) {
+                while (i < 4096 && c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+                continue
+            }
+            break
+        }
+        cc = c.peek(i)
+        // undefined is SUCCESS here and a token is failure, the convention LabelAhead
+        // and KeyAhead use. Only '}' (the end of a block) and EOF qualify: gc rejects
+        // `_:` in front of a 'case' or 'default' with "missing statement after label",
+        // so accepting those would be MORE permissive than Go and would let a label
+        // swallow a switch arm this grammar cannot yet parse. Anywhere else a
+        // statement can begin, and this guard has to get out of Statement's way.
+        if (cc < 0 || cc === 125) { return undefined }
+        return abnf.newToken("\x01not-a-label-only", 0)
+    })()
+~~) ;
 LabelAhead = :script(~~
     (function () {
         var i = 0
         var cc = 0
-        // Whitespace is not skipped before a guard, so step over it first.
+        // Whitespace is not skipped before a guard, so step over it first - and a
+        // COMMENT is not skipped either, which used to hide every label that follows
+        // one ("// backward declared" above `loop:` in the corpus made LabelAhead
+        // read the '/' and answer not-a-label).
         while (i < 4096) {
             cc = c.peek(i)
             if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i++; continue }
+            if (cc === 47 && c.peek(i + 1) === 47) {
+                while (i < 4096 && c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 42) {
+                i += 2
+                while (i < 4096 && c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) { i++ }
+                i += 2
+                continue
+            }
             break
         }
         cc = c.peek(i)
@@ -790,7 +835,7 @@ ParenConvT  <~~ push({conv: firstType(up.in)}) ~~>
 // '(' this rule needs after the type is a '.' there.
 PtrTypeT    = "*" Type ;
 ConvType    <~~ push({conv: firstType(up.in)}) ~~>
-            = "[" "]" Type | ScalarType KwEnd ;
+            = "[" "]" Type | ArrayTypeT | MapTypeT | ChanTypeT | ScalarType KwEnd ;
 ScalarType  = "uintptr" | "float32" | "float64" | "uint16" | "uint32" | "uint64"
             | "int16" | "int32" | "int64" | "uint8" | "int8" | "byte" | "rune"
             | "uint" | "int" ;
@@ -975,7 +1020,11 @@ AnonStructLit <~~ push(makeAnonStructLit(takeAll())) ~~>
             = "struct" KwEnd "{" { AnonField } "}"
               "{" [ LitElem { "," LitElem } [ "," ] ] "}" ;
 AnonField   = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } FType [ FieldTag ] [ ";" ] ;
-LitElem     = KeyedElem | Expression ;
+// An element may be a bare BRACE GROUP built against the slot's declared type -
+// `type G [][]int; G{{1, 2}}`, and `Config{{1, 2}}` for a struct whose first field is
+// a composite. It cannot be confused with the other two: no Go expression starts
+// with '{', so this only takes work away from CompLitNI.
+LitElem     = KeyedElem | SeqNest | Expression ;
 KeyedElem   = Id <~~ push({fkey: up.in}) ~~> ":" Expression ;
 
 // f(a, b): a function or a builtin. A trailing '...' (spread of a slice into a
@@ -1480,6 +1529,24 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     var hidCount = 0     // Names hidden range-loop counters.
     var structFields = {} // struct name -> field name list (source order).
     var structFTypes = {} // struct name -> the parallel list of field type texts.
+    // Defined type name -> the type text it is defined OVER (`type L []int` -> "[]int",
+    // `type Q Point` -> "Point"), the compiler's mirror of the interpreter's table.
+    var definedUnder = {}
+    // Follow a chain of defined types to a spelling that is not itself a defined name.
+    // Bounded, so a cyclic declaration cannot hang the compile.
+    function resolveDefined(name) {
+        var t = name
+        var hops = 0
+        // A bare read: there is no hasOwn in compile-core, and only a type NAME is
+        // ever stored, so a hit that is not a string is an inherited member.
+        while (typeof definedUnder[t] == "string" && hops < 16) { t = definedUnder[t]; hops++ }
+        return t
+    }
+    // Does this type text spell a composite (slice, array or map) rather than a name?
+    function isCompositeText(t) {
+        if (t == undefined || t == null || t.length == 0) { return false }
+        return t.charCodeAt(0) == 91 || t.indexOf("map[") == 0
+    }
     // The NAMED results of the function being emitted right now (emitFunc saves and
     // restores it around every nested function), read by return and by the fallthrough
     // end of a body.
@@ -1809,10 +1876,56 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var tyName = items[0]
         var args = items.slice(1)
         return function(b) {
-            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, tyName)])
-            return emitStructVal(b, clsV, structFields[tyName], structFTypes[tyName], args)
+            // A DEFINED type: `type L []int; L{1, 2, 3}` is the []int literal and
+            // `type Q Point; Q{1, 2}` is the Point literal. Resolved HERE, at emit
+            // time, so a literal that precedes its own `type` declaration still sees
+            // the table (every tag has walked by the time an emit closure runs).
+            var name = resolveDefined(tyName)
+            if (name != tyName && isCompositeText(name)) { return emitDefinedSeq(b, name, args) }
+            var flds = structFields[name]
+            if (flds == undefined) { fail("composite literal of unsupported type " + tyName) }
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+            return emitStructVal(b, clsV, flds, structFTypes[name], args)
         }
     }
+    // The literal of a defined SLICE, ARRAY or MAP type, whose elements arrived in the
+    // struct literal's shape (a bare thunk, or a {fkey} marker followed by one).
+    function emitDefinedSeq(b, under, args) {
+        if (under.indexOf("map[") == 0) {
+            // The VALUE type: everything after the ']' that closes the key. Scanned by
+            // hand rather than with lastIndexOf, which -frozen does not have.
+            var d = -1
+            for (var q = 0; q < under.length; q++) { if (under.charCodeAt(q) == 93) { d = q } }
+            var zero = under.substring(d + 1)
+            var mV = callExt(b, "js_dict_new", [])
+            callExt(b, "js_set", [mV, emitStr(b, "zero"), emitZero(b, zero)])
+            if (args.length > 0) { fail("a keyed literal of a defined map type is not supported") }
+            return {b: b, v: mV}
+        }
+        var close = under.indexOf("]")
+        var cet = under.substring(close + 1)
+        var elems = []
+        for (var i = 0; i < args.length; i++) {
+            if (typeof args[i] == "function") { elems.push({ekey: null, eval: args[i], enest: null}); continue }
+            if (args[i].enest != undefined) { elems.push({ekey: null, eval: null, enest: args[i].enest}); continue }
+            fail("a keyed literal of a defined slice or array type is not supported")
+        }
+        if (close == 1) { return emitSeqLit(b, "slice", cet, null, elems) }
+        return emitSeqLit(b, "array", cet, constLenThunk(under.substring(1, close)), elems)
+    }
+    // The [N] of an array type text, as the length thunk emitSeqLit wants, or null
+    // when N is not written out in digits.
+    function constLenThunk(d) {
+        if (d.length == 0) { return null }
+        var n = 0
+        for (var i = 0; i < d.length; i++) {
+            var cc = d.charCodeAt(i)
+            if (cc < 48 || cc > 57) { return null }
+            n = n * 10 + (cc - 48)
+        }
+        return makeConstLenThunk(n)
+    }
+    function makeConstLenThunk(n) { return function(b) { return {b: b, v: emitNum(b, n)} } }
     // struct{ a, b int }{10, 20}: items = [fieldName..., {fty}, ..., body elements].
     // The descriptor is built fresh at the literal site (there is no name to look up);
     // js_goeq compares two anonymous structs by name and field list, not by identity.
@@ -1853,11 +1966,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var pos = 0
         var key = null
         for (var i = 0; i < args.length; i++) {
-            if (typeof args[i] != "function") { key = args[i].fkey; continue }
-            var r = args[i](b)
-            b = r.b
             var name = key
+            var r = null
+            if (typeof args[i] == "function") { r = args[i](b) }
+            else if (args[i].enest != undefined) {
+                // A bare brace group takes the FIELD's declared type: Config{{1, 2}}
+                // builds its first field from the type the struct says it has.
+                if (name == null) { name = fields[pos] }
+                r = emitElemVal(b, {ekey: null, eval: null, enest: args[i].enest},
+                                ftypeOfName(fields, ftypes, name))
+            } else { key = args[i].fkey; continue }
+            b = r.b
             if (name == null) { name = fields[pos]; pos++ }
+            else if (key == null) { pos++ }
             key = null
             callExt(b, "js_set", [objV, emitStr(b, name), emitAdoptTy(b, ftypeOfName(fields, ftypes, name), r.v)])
         }
@@ -2130,21 +2251,33 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
         // len(x) / cap(x): a header answers from its own fields, everything else - an
         // array, a string, a map, nil - goes to js_golen.
+        // A POINTER TO AN ARRAY measures, indexes, slices and ranges as the array
+        // itself - len(p), p[0], p[:], `for range p` are all legal Go on a *[N]T. The
+        // six shared bodies below are the whole funnel for those operations, so one
+        // deref at the top of each is the whole feature; a cell is the only thing
+        // emitDerefV reaches through, so slices, maps and structs are untouched. Keep
+        // in step with goIndex/goSetAt/goLen/goCap in go-interpreter.abnf.
         b = declFn(b, "len", 1, function(fb, a) {
-            var x = a[0]
+            var rd = emitDerefV(fb, a[0])
+            fb = rd.b
+            var x = rd.v
             return emitSelect(fb, emitIsSl(fb, x),
                               function(tb) { return {b: tb, v: slF(tb, x, "n")} },
                               function(eb) { return {b: eb, v: callExt(eb, "js_golen", [x])} })
         })
         b = declFn(b, "cap", 1, function(fb, a) {
-            var x = a[0]
+            var rd = emitDerefV(fb, a[0])
+            fb = rd.b
+            var x = rd.v
             return emitSelect(fb, emitIsSl(fb, x),
                               function(tb) { return {b: tb, v: slF(tb, x, "c")} },
                               function(eb) { return {b: eb, v: callExt(eb, "js_golen", [x])} })
         })
         // x[i] and x[i] = v, both of which have to reach through a header's offset.
         b = declFn(b, "$sidx", 2, function(fb, a) {
-            var x = a[0]
+            var rd = emitDerefV(fb, a[0])
+            fb = rd.b
+            var x = rd.v
             var i = a[1]
             return emitSelect(fb, emitIsSl(fb, x),
                               function(tb) {
@@ -2154,7 +2287,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                               function(eb) { return {b: eb, v: callExt(eb, "js_map_get", [x, i])} })
         })
         b = declFn(b, "$sset", 3, function(fb, a) {
-            var x = a[0]
+            var rd = emitDerefV(fb, a[0])
+            fb = rd.b
+            var x = rd.v
             var i = a[1]
             var v = a[2]
             return emitSelect(fb, emitIsSl(fb, x),
@@ -2169,7 +2304,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // The elements of a slice as a PLAIN array - what range, the ... spread,
         // string(bs) and printing want. Anything else passes through untouched.
         b = declFn(b, "$sels", 1, function(fb, a) {
-            var x = a[0]
+            var rd = emitDerefV(fb, a[0])
+            fb = rd.b
+            var x = rd.v
             return emitSelect(fb, emitIsSl(fb, x), function(tb) {
                 var out = callExt(tb, "js_arr_new", [])
                 var base = slF(tb, x, "a")
@@ -2185,7 +2322,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // x[lo:hi:mx] - a new header into the SAME backing array. A string slices with
         // the extern (it is a byte range and copies, exactly as in the interpreter).
         b = declFn(b, "$sslice", 4, function(fb, a) {
-            var x = a[0]
+            var rd = emitDerefV(fb, a[0])
+            fb = rd.b
+            var x = rd.v
             var lo = a[1]
             var hi = a[2]
             var mx = a[3]
@@ -2450,8 +2589,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var scopeV = curScopeV
             var mkCell = function(cb) { return {b: cb, v: emitPtrCell(cb, scopeV, emitStr(cb, name))} }
             return emitSelect(b, emitIsPtr(b, cur), mkCell, function(eb) {
-                var isObj = callExt(eb, "js_seq", [callExt(eb, "js_typeof", [cur]), emitStr(eb, "object")])
-                return emitSelect(eb, isObj, function(tb) { return {b: tb, v: cur} }, mkCell)
+                // An ARRAY is a VALUE in Go and every assignment of one copies it, so
+                // &arr cannot be the array: `h := &arr` would hand h a copy and
+                // `h[0] = 5` would be lost. It gets a real cell, like a scalar. (A
+                // slice header, a map and a struct are references already.) js_is_type
+                // "Array" is true for a plain array handle and false for the $sl
+                // header. Mirrors makeAddrVar in go-interpreter.abnf.
+                var isArr = callExt(eb, "js_is_type", [cur, emitStr(eb, "Array")])
+                return emitSelect(eb, isArr, mkCell, function(nb) {
+                    var isObj = callExt(nb, "js_seq", [callExt(nb, "js_typeof", [cur]), emitStr(nb, "object")])
+                    return emitSelect(nb, isObj, function(tb) { return {b: tb, v: cur} }, mkCell)
+                })
             })
         }
     }
@@ -2788,6 +2936,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return emitStructZero(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, wd)]),
                                   flds, structFTypes[wd])
         }
+        // A defined type zeroes to the zero of what it is defined over, so `var l L`
+        // over `type L []int` is an empty SLICE (append/len/range all work) rather
+        // than the nil a name with no struct descriptor used to answer.
+        var rn = resolveDefined(wd)
+        if (rn != wd) { return emitZeroTy(b, rn) }
         return hNull
     }
     // A zero INSTANCE of a struct: every field at the zero of its own declared type,
@@ -3408,12 +3561,25 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // js_gival unwraps a sized integer to its plain number and passes
             // everything else through, so js_goconv - which only knows plain
             // numbers, arrays and strings - keeps working for string(rune(65)).
-            var v = (itc != null) ? emitGiConv(eb, r.v, itc)
-                                  : callExt(eb, "js_goconv", [emitStr(eb, to),
-                                            callExt(eb, "js_gival", [emitHelper(eb, "$sels", [r.v])])])
-            // []byte(s) / []rune(s): the header records the element type, so a
-            // later bs[0] += 200 wraps at 8 bits the way Go's byte does.
-            if (isSliceTy) { v = emitSlT(eb, emitSlOf(eb, v), elemTy(to)) }
+            if (itc != null) { return {b: eb, v: emitGiConv(eb, r.v, itc)} }
+            // []T(x): a value that is ALREADY a slice header comes back unchanged -
+            // the conversion is a re-typing and keeps the same backing store, so
+            // `b2 := []byte(bs); b2[0] = 106` is seen by bs (checked with `go run`).
+            // Only a string (or a plain array) is converted, and the fresh header
+            // records the element type so a later bs[0] += 200 wraps at 8 bits.
+            if (isSliceTy) {
+                var et = elemTy(to)
+                var toS = to
+                return emitSelect(eb, emitIsSl(eb, r.v),
+                    function(tb) { return {b: tb, v: r.v} },
+                    function(fb) {
+                        var cv = callExt(fb, "js_goconv", [emitStr(fb, toS),
+                                 callExt(fb, "js_gival", [emitHelper(fb, "$sels", [r.v])])])
+                        return {b: fb, v: emitSlT(fb, emitSlOf(fb, cv), et)}
+                    })
+            }
+            var v = callExt(eb, "js_goconv", [emitStr(eb, to),
+                            callExt(eb, "js_gival", [emitHelper(eb, "$sels", [r.v])])])
             return {b: eb, v: v}
         }
     }
@@ -3670,6 +3836,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (typeof last == "object" && last != null && last.under != undefined) {
             var dName = items[0]
             var dUnder = last.under
+            // Keep the SPELLING as well as the conversion. `type L []int` kept only
+            // the conversion, so `L{1, 2, 3}` reached makeStructLit, looked up an
+            // undefined structFields["L"] and crashed inside emitStructVal. The table
+            // is read from inside the emit closures, which run long after every
+            // TypeDecl has been walked - so a type used before it is declared is fine.
+            definedUnder[dName] = dUnder
             return function(b) { return declConv(b, dName, dUnder) }
         }
         return makeStructStmt(items)

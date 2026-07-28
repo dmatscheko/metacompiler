@@ -918,6 +918,45 @@ function s31(): void {
 
 // ===== END SECTIONS =====
 
+// ===== SECTION 32: shift and logical assignment through an expression member =====
+// '[o][0].a >>= 1' assigns through a member of an arbitrary expression, which only
+// LhsAssign can express. Two things were wrong there. The forward scan that decides
+// whether an assignment operator follows at all excluded EVERY '=' preceded by '<' or
+// '>', so it took the '=' of '<<=' / '>>=' / '>>>=' for the tail of a '<=' / '>=' and
+// never entered the production. And the three LOGICAL assignments were folded through the
+// compound-operator path, which evaluates the right side unconditionally - they SHORT
+// CIRCUIT. Ground truth from node 24 via new vm.Script (not `node --check`).
+function s32(): void {
+    const o: any = { a: 8 };
+    [o][0].a >>= 1;
+    check("sa1", o.a === 4);
+    [o][0].a <<= 3;
+    check("sa2", o.a === 32);
+    [o][0].a >>>= 2;
+    check("sa3", o.a === 8);
+    const p: any = { b: 1 };
+    [p][0].b ||= 7;
+    check("sa4", p.b === 1);
+    const q: any = { c: 0 };
+    [q][0].c ||= 5;
+    check("sa5", q.c === 5);
+    [q][0].c &&= 9;
+    check("sa6", q.c === 9);
+    [q][0].c ??= 11;
+    check("sa7", q.c === 9);
+    // The short circuit is observable: the right side must not run at all.
+    let n: number = 0;
+    const z: any = { d: 3 };
+    [z][0].d ||= (n = 1, 99);
+    check("sa8", z.d === 3 && n === 0);
+    const w: any = { e: 0 };
+    [w][0].e &&= (n = 2, 99);
+    check("sa9", w.e === 0 && n === 0);
+    const y: any = { f: 5 };
+    [y][0].f ??= (n = 3, 99);
+    check("sa10", y.f === 5 && n === 0);
+}
+
 function main(): number {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
@@ -950,6 +989,7 @@ function main(): number {
     s29(); // SECTION-CALL 29
     s30(); // SECTION-CALL 30
     s31(); // SECTION-CALL 31
+    s32(); // SECTION-CALL 32
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

@@ -197,7 +197,15 @@ NamespaceBody <~~ push(makeSeq(takeAll())) ~~>
 AmbientDecl <~~ takeAll(); push(function() {}) ~~>
             = KwDeclare AmbientBody ;
 AmbientBody = AmbientNs | AmbientClass | AmbientEnum | AmbientFunc | InterfaceDecl | TypeAliasDecl | AmbientVar ;
-AmbientNs   = ( KwNamespace | KwModule | KwGlobal ) [ NamespaceName | StringLit ] SkipBlock ;
+AmbientNs   = ( KwNamespace | KwModule | KwGlobal ) [ NamespaceName | StringLit ] SkipBlock
+            | KwModule ModPath [ ";" ] ;
+// 'declare module "jquery";' - the SHORTHAND ambient module, whose whole point is that it
+// has no body (everything it exports is `any`). tsc allows it only for a STRING name and
+// only for 'module', never 'namespace' and never a dotted one, so this alternative asks
+// for exactly that; the bodied form above is tried first and only fails when there is no
+// '{'. Without it the declaration used to degrade into two bare identifier expression
+// statements, which is why it "parsed" only while the ';' after an expression was
+// optional (see the ASI note at ExprStmt).
 AmbientClass = [ KwAbstract ] KwClass Id [ TypeParams ] [ KwExtends TypeList ] [ KwImplements TypeList ] SkipBlock ;
 AmbientEnum = [ KwConst ] KwEnum Id SkipBlock ;
 AmbientFunc = [ KwAsync ] KwFunction [ GenMark ] Id [ TypeParams ] SigParamList [ TypeAnnot ] [ ";" ] ;
@@ -372,15 +380,37 @@ Empty       <~~ push(function() {}) ~~>
 
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
             = Expression [ ";" ] ;
-// MEASURED AND REVERTED (2026-07-28): spelling this end as ( ";" | AsiEnd ), where AsiEnd
-// is the spec's automatic-semicolon rule (a line terminator, a '}' or the end of file must
-// follow), is correct JavaScript and a net LOSS on this corpus - reject 100 -> 103, parse
-// 5277 -> ~5137. The 140 files it costs were parsing only BECAUSE the ';' is optional:
-// 'declare module "jquery"' (the shorthand ambient module, which AmbientNs cannot express
-// without a body), 'export as namespace Foo;' (the UMD global export), 'import defer * as
-// ns from "m"' and 'protected class C {}' all currently degrade into a soup of bare
-// identifier expression statements and count as parsed. Restoring the guard is worth
-// roughly 25 + 9 + 5 files the moment those three real forms exist.
+
+// MEASURED AND REVERTED TWICE. Spelling this end as ( ";" | AsiEnd ), where AsiEnd is the
+// spec's automatic-semicolon rule (a line terminator, a '}' or the end of file must
+// follow), is correct JavaScript and a net LOSS on this corpus.
+//
+//   2026-07-28, first attempt: reject 100 -> 103, parse 5277 -> ~5137. The 140 files it
+//   cost were parsing only BECAUSE the ';' is optional: 'declare module "jquery"' (the
+//   shorthand ambient module), 'export as namespace Foo;' (the UMD global export),
+//   'import defer * as ns from "m"' and 'protected class C {}' all degraded into a soup
+//   of bare identifier expression statements and counted as parsed. Restoring the guard
+//   was estimated at 25 + 9 + 5 files once those three real forms existed.
+//
+//   2026-07-28, second attempt, AFTER the three forms were implemented (AmbientNs's
+//   shorthand alternative, ExportNs, KwDefer - all live below): the estimate did not
+//   hold. Measured with the copied js-interpreter.abnf AsiEnd on this production alone:
+//   parse-fails 247 -> 344 (-97 files) against reject-fails 147 -> 154 (+7 files). A
+//   rule that costs 97 to gain 7 is a loss by any reading, so it was reverted again.
+//
+//   The 97 are NOT more missing forms in any useful proportion. Reading every one of
+//   them: about 70 are genuinely INVALID inputs the corpus still marks 'parse' - 'async
+//   class C {}', 'public class A {}', 'protected namespace M {}', 'class void {}',
+//   'interface I implements A', 'new Foo[]', 'for (a = 1 in b)', 'This file is not
+//   processed.' as prose - which parse today only because the degradation into bare
+//   identifier statements succeeds. The ~25 that ARE real forms are named here so the
+//   next attempt starts from a list rather than a guess: 'export type * from "m"' and
+//   'export type * as ns from "m"' (11 files), the bare-binding defer imports 'import
+//   defer from "m"' / 'import defer, {} from "m"' (4), a computed property '[e] = 1' in a
+//   class body (6), 'get foo<T>()' / 'set foo<T>(v)' accessors with type parameters (2),
+//   a non-'declare' ambient 'module "Foo" { }' (2), 'async get'/'async set'/'async
+//   static {}' class members (5), and a mixin heritage 'declare class X extends f(A) {}'
+//   (2). Even with every one of those, ASI would cost ~70 to gain 7.
 
 // Every expression production pushes exactly one thunk: function() -> value.
 // The comma (sequence) operator is ACCEPTED but not lowered. With no comma this level
@@ -391,7 +421,29 @@ Expression  <~~ push(makeSequence(takeAll(), up.pos)) ~~>
 
 // Assignment is an expression and associates to the right: a = b = c.
 // If the assignment shape does not fit (e.g. 'a == b'), the parser falls back to CondExpr.
-AssignExpr  = Assignment | PatternAssign | LogicalAssign | AssignExtended | SuperAssign | LhsAssign | Yield | CondExpr ;
+AssignExpr  = Assignment | PatternAssign | LogicalAssign | AssignExtended | SuperAssign | LhsAssign | AssignNoRef | Yield | CondExpr ;
+
+// An assignment whose left side is not a reference at all: 'true = value', '0 = 0',
+// '1 >>= 2', 'x++ = 4', 'null += value'. In the spec these PARSE - the cover grammar
+// accepts them - and are rejected afterwards as an EARLY error, which is why test262
+// files them under early/ rather than under fail/. There is no early-error pass here, so
+// they are accepted and refuse at run time with a clean message. This is the mirror of
+// AssignNoRef in typescript-to-llvm-ir.abnf, which the compiler half has had all along.
+//
+// It is the LAST assignment alternative, so every assignable shape above has already had
+// its chance and nothing that could be lowered ends up here. The left side is a
+// LeftHandSideExpression and NOTHING WIDER - which is exactly what keeps '(foo()) = bar',
+// '(1 + 1) = 10' and 'i + 2 = 42' the syntax errors they are: no parenthesized form
+// appears in NoRefPrimary, so LhsSuffixes' "a target must end in a member" invariant is
+// untouched. An update tail is allowed because 'x++ = 4' has to reach here as a whole.
+AssignNoRef <~~ takeAll(); push(notImplExpr("assignment to a non-reference", up.pos)) ~~>
+            = HasTopLevelAssign NoRefPrimary { NoRefSuffix } [ UpdateOp ]
+              ( "**=" | ">>>=" | "<<=" | ">>=" | "&&=" | "||=" | "??=" | "&=" | "^=" | "|="
+              | "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) AssignExpr ;
+NoRefPrimary = NewTarget | NewExpr | NewWidened | SuperProp | AsyncFuncExpr | GenFuncExpr
+             | FunctionExpr | ClassExpr | ClassExprWidened | TemplateLit | RegexLit | ObjectLit
+             | ArrayLit | StringLit | NumberLit | True | False | Null | Undefined | VarRef ;
+NoRefSuffix = CallSuffix | DotSuffix | IndexSuffix ;
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
 
@@ -530,7 +582,7 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 ExpExpr     <~~ push(makeExp(takeAll(), up.pos)) ~~>
             = UnaryExpr { "**" UnaryExpr } ;
 
-UnaryExpr   = SuperPreUpdate | PreIncDec | Neg | Pos | Not | BitNot | TypeofName | Typeof | DeleteMember | Delete | Void | Await | PostfixExpr ;
+UnaryExpr   = SuperPreUpdate | PreIncDec | PreUpdateExpr | Neg | Pos | Not | BitNot | TypeofName | Typeof | DeleteMember | Delete | Void | Await | PostfixExpr ;
 // '++super.x' / '--super[i]'. Target starts at 'NotReserved Id', which refuses the
 // reserved word 'super', so PreIncDec cannot reach a super property and the form needs
 // its own production - exactly the reason SuperAssign exists next to Assignment. It is
@@ -560,7 +612,16 @@ Await       <~~ push(makeAwait(pop())) ~~>
             = KwAwait UnaryExpr ;
 // Prefix ++/--: the expression value is the new one.
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
-            = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
+            = ( "++" | "--" ) <~~ push(up.in) ~~> Target NotSuffix ;
+// '++1', '++{}', '++[0]', '++obj?.a', '++new Foo()', '--(E.A + E.B)': an update
+// expression whose operand is not a valid target. That is an EARLY error in the spec,
+// not a syntax error - tsc builds the tree and then complains - so it has to parse here
+// too, exactly as the postfix side already does ('0++' reaches CallMemberUpdate and
+// makeMaybeUpdate refuses it there). Tried after PreIncDec, so a real prefix update is
+// never routed through it, and before Neg/Pos, whose '!"+"' lookahead already refuses
+// to read '++' as two signs.
+PreUpdateExpr <~~ takeAll(); push(notImplExpr("update of an expression target", up.pos)) ~~>
+            = ( "++" | "--" ) UnaryExpr ;
 // The two signs refuse to be doubled: '++1' and '--1' are update expressions on a
 // literal, which is a syntax error, and without the lookahead they would quietly parse as
 // '+(+1)' and '-(-1)'. A SPACE between them is fine ('- -1' is negation twice), because
@@ -1308,7 +1369,11 @@ MemberDecorators <~~ push({decs: takeAll()}) ~~>
 // and the legacy 'import fs = require("fs")' equals form; all three are recognized, and
 // the type-only ones name nothing at run time anyway.
 ImportStmt  <~~ push(jsImport(takeAll(), up.pos)) ~~>
-            = KwImport ( ImportEquals | KwType ImportEquals | [ KwType ] ImportClause KwFrom ModPath [ ImportAttrs ] | ModPath [ ImportAttrs ] ) [ ";" ] ;
+            = KwImport ( ImportEquals | KwType ImportEquals | [ KwType | KwDefer ] ImportClause KwFrom ModPath [ ImportAttrs ] | ModPath [ ImportAttrs ] ) [ ";" ] ;
+// 'import defer * as ns from "m"': the deferred-evaluation import. The module is loaded
+// the same way here (this flat model has no lazy namespace object), so the modifier is
+// parsed and dropped, exactly like 'import type'.
+KwDefer     = "defer" KwEnd ;
 // Import ATTRIBUTES: 'import x from "./m" with { type: "json" }' (and the older
 // 'assert { ... }' spelling). They describe how the host should load the module, which
 // this flat import model has no use for, so the clause is parsed and dropped.
@@ -1335,7 +1400,12 @@ ModSq       = "'" :whitespace() { StrEsc | SqPlain } <~~ push(unescapeJs(up.in))
 // (ExportStmt adds no frame of its own). That is what makes an 'export const' usable in
 // the same file, and what makes an exported namespace member reach its namespace object.
 // The value-LESS forms name no declaration and are accepted but not lowered.
-ExportStmt  = KwExport ( ExportAll | ExportNamed | ExportAssign | KwDefault ExportDefault | ExportBody ) ;
+ExportStmt  = KwExport ( ExportNs | ExportAll | ExportNamed | ExportAssign | KwDefault ExportDefault | ExportBody ) ;
+// 'export as namespace Foo;' - the UMD global export, which says the module is also
+// reachable as a global of that name. It declares nothing this model can bind, so it is
+// erased. Tried FIRST: 'as' would otherwise be read as the start of ExportBody.
+ExportNs    <~~ takeAll(); push(function() { return undefined }) ~~>
+            = KwAs KwNamespace Id [ ";" ] ;
 // A declaration: the 'export' vanishes and the declaration's own thunk is what the
 // statement contributes.
 ExportBody  = Statement ;
@@ -2211,7 +2281,13 @@ HasTopLevelAssign = :script(~~
                 var nxt = c.peek(i + 1)
                 var prv = (i > 0) ? c.peek(i - 1) : 0
                 // Not '==' / '=>', and not the tail of '==', '!=', '<=', '>='.
-                if (nxt !== 61 && nxt !== 62 && prv !== 61 && prv !== 33 && prv !== 60 && prv !== 62) {
+                // A DOUBLED '<' or '>' before the '=' is the shift-assignment operator
+                // '<<=' / '>>=' / '>>>=', which IS an assignment - only the single '<='
+                // and '>=' comparisons have to be excluded.
+                var prv2 = (i > 1) ? c.peek(i - 2) : 0
+                var shift = (prv === 62 || prv === 60) && prv2 === prv
+                if (nxt !== 61 && nxt !== 62 && prv !== 61 && prv !== 33
+                    && (shift || (prv !== 60 && prv !== 62))) {
                     return undefined
                 }
             }
@@ -5858,6 +5934,27 @@ NotFuncHead = :script(~~
         var op = items[items.length - 2]
         var valT = items[items.length - 1]
         return function() {
+            // The three LOGICAL assignments SHORT CIRCUIT: the right side is evaluated,
+            // and the store happens, only when the current value asks for it. Folding
+            // them through applyOp like a compound operator - which is what this builder
+            // used to do, since LhsAssign lists them alongside '+=' - both evaluated the
+            // right side unconditionally and stored a value applyOp does not compute.
+            // makeLogicalAssign has always done it correctly for the Target forms, and
+            // the compiler half for every form; this is the missing case.
+            if (op == "&&=" || op == "||=" || op == "??=") {
+                var p0 = resolveRef(ref)
+                var cur = anytype // The current value may be of any type.
+                cur = getMember(p0.obj, p0.key)
+                var assign = false
+                if (op == "&&=") { assign = jsTruthy(cur) }
+                else if (op == "||=") { assign = !jsTruthy(cur) }
+                else { assign = (cur === null || cur === undefined) }
+                if (!assign) { return cur }
+                var lv = anytype // So may the new one.
+                lv = valT()
+                setMember(p0.obj, p0.key, lv)
+                return lv
+            }
             var v = anytype // A compound assignment may change the value's type.
             v = valT()
             var p = resolveRef(ref)

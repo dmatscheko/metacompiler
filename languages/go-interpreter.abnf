@@ -322,7 +322,14 @@ IfaceTypeT  = "interface" KwEnd SkipBlock ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   = Block | If | For | Switch | Return | Break | Continue | Goto | Defer | GoStmt | Select | Fallthrough
-            | ConstGroup | ConstSingle | VarGroup | VarDecl | Labeled | SimpleStmt | Empty ;
+            | TypeStmt | ConstGroup | ConstSingle | VarGroup | VarDecl | Labeled | SimpleStmt | Empty ;
+
+// A type declaration in STATEMENT position (`func f() { type S []T; ... }`). Go scopes
+// a local type to its block; the value model has one namespace for type names, so the
+// declaration is built exactly as a top-level one, and the statement itself is a no-op
+// (TypeDecl's own tag has already registered the descriptor by the time this runs).
+TypeStmt    <~~ push(function() {}) ~~>
+            = TypeDecl | TypeGroup ;
 
 // fallthrough: accepted, reported not implemented (our switch has no fallthrough model).
 // fallthrough: a signal the enclosing switch body catches (see runSwitch).
@@ -570,15 +577,60 @@ Goto        <~~ push(makeGoto(takeAll())) ~~>
 // pendingLabel is set BEFORE the statement is built, so the loop builder inside
 // can claim it (that is what makes 'continue outer' reach the right loop).
 Labeled     <~~ var lt = pop(); push({lbl: pop(), t: lt}) ~~>
-            = LabelAhead Id <~~ pendingLabel = up.in; push(up.in) ~~> ":" Statement ;
+            = LabelAhead Id <~~ pendingLabel = up.in; push(up.in) ~~> ":" ( Statement | LabelNoop ) ;
+// A label with NOTHING after it - `loop:` as the last thing in a block, and the `_:`
+// the corpus uses to check that a blank label is legal. That is a labeled EMPTY
+// statement, and Go writes no semicolon for it (no semicolon is inserted after ':').
+// BlockEndAhead is what keeps this from swallowing a statement the grammar cannot yet
+// parse: it succeeds only where a statement genuinely cannot begin.
+LabelNoop   <~~ push(function() {}) ~~>
+            = BlockEndAhead ;
+BlockEndAhead = :script(~~
+    (function () {
+        var i = 0
+        var cc = 0
+        while (i < 4096) {
+            cc = c.peek(i)
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i++; continue }
+            // A line comment, then keep looking: `loop: // done` still ends the block.
+            if (cc === 47 && c.peek(i + 1) === 47) {
+                while (i < 4096 && c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+                continue
+            }
+            break
+        }
+        cc = c.peek(i)
+        // undefined is SUCCESS here and a token is failure, the convention LabelAhead
+        // and KeyAhead use. Only '}' (the end of a block) and EOF qualify: gc rejects
+        // `_:` in front of a 'case' or 'default' with "missing statement after label",
+        // so accepting those would be MORE permissive than Go and would let a label
+        // swallow a switch arm this grammar cannot yet parse. Anywhere else a
+        // statement can begin, and this guard has to get out of Statement's way.
+        if (cc < 0 || cc === 125) { return undefined }
+        return abnf.newToken("\x01not-a-label-only", 0)
+    })()
+~~) ;
 LabelAhead = :script(~~
     (function () {
         var i = 0
         var cc = 0
-        // Whitespace is not skipped before a guard, so step over it first.
+        // Whitespace is not skipped before a guard, so step over it first - and a
+        // COMMENT is not skipped either, which used to hide every label that follows
+        // one ("// backward declared" above `loop:` in the corpus made LabelAhead
+        // read the '/' and answer not-a-label).
         while (i < 4096) {
             cc = c.peek(i)
             if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i++; continue }
+            if (cc === 47 && c.peek(i + 1) === 47) {
+                while (i < 4096 && c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 42) {
+                i += 2
+                while (i < 4096 && c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) { i++ }
+                i += 2
+                continue
+            }
             break
         }
         cc = c.peek(i)
@@ -814,7 +866,7 @@ ParenConvT  <~~ push({conv: firstType(up.in)}) ~~>
 // '(' this rule needs after the type is a '.' there.
 PtrTypeT    = "*" Type ;
 ConvType    <~~ push({conv: firstType(up.in)}) ~~>
-            = "[" "]" Type | ScalarType KwEnd ;
+            = "[" "]" Type | ArrayTypeT | MapTypeT | ChanTypeT | ScalarType KwEnd ;
 ScalarType  = "uintptr" | "float32" | "float64" | "uint16" | "uint32" | "uint64"
             | "int16" | "int32" | "int64" | "uint8" | "int8" | "byte" | "rune"
             | "uint" | "int" ;
@@ -1569,7 +1621,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // s[lo:hi] / s[lo:hi:max] over a slice, an array or a string. The result SHARES the
     // backing array: it is a new header into the same storage, with the capacity running
     // to the end of that storage (or to max in the three-index form).
-    function goSlice(base, s) {
+    function goSlice(baseIn, s) {
+        var base = isPtr(baseIn) ? ptrGet(baseIn) : baseIn   // p[:] on a *[N]T: see goIndex.
         if (typeof base == "string") {
             // A string slice is a BYTE range: "héllo"[1:3] is the two bytes of é.
             var bs = utf8Bytes(base)
@@ -1652,14 +1705,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return out
     }
     // Length and capacity of anything len()/cap() accept.
-    function goLen(x) {
+    function goLen(xIn) {
+        var x = isPtr(xIn) ? ptrGet(xIn) : xIn   // len(&arr): see goIndex.
         if (x === undefined || x === null) { return 0 }
         if (isSl(x)) { return x.n }
         if (isMap(x)) { return x.keys.length }
         if (typeof x == "string") { return byteLen(x) }
         return x.length
     }
-    function goCap(x) {
+    function goCap(xIn) {
+        var x = isPtr(xIn) ? ptrGet(xIn) : xIn   // cap(&arr): see goIndex.
         if (x === undefined || x === null) { return 0 }
         if (isSl(x)) { return x.c }
         if (isMap(x)) { return x.keys.length }
@@ -1670,7 +1725,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // usable property key, so every index is read as a plain number first. A MAP
     // key is left alone: it keeps whatever type it has, and mapFind compares by
     // value.
-    function goIndex(o, i) {
+    function goIndex(oIn, i) {
+        // A POINTER TO AN ARRAY indexes, measures and ranges as the array itself
+        // (p[0], len(p), for range p are all legal Go on a *[N]T), so every container
+        // operation steps through the cell first. isPtr is only ever true for a real
+        // cell, so a slice header, a map and a struct are untouched.
+        var o = isPtr(oIn) ? ptrGet(oIn) : oIn
         if (isMap(o)) { return mapGet(o, i) }
         var ix = szIs(i) ? szNum(i) : i
         if (isSl(o)) { return slGet(o, ix) }
@@ -1681,7 +1741,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // one place the DECLARED width of the slot can be reapplied: a struct field takes
     // it from its descriptor's __ftypes, an element takes it from the box the zero
     // value left in the slot (see goAdoptLike).
-    function goSetAt(o, i, v) {
+    function goSetAt(oIn, i, v) {
+        // See goIndex: `h := &arr; h[0] = 5` writes into the array the cell points at,
+        // which is the array itself - Go's whole reason for pointers to arrays.
+        var o = isPtr(oIn) ? ptrGet(oIn) : oIn
         if (isMap(o)) { mapSet(o, i, goAdoptLike(o.zero, v)); return }
         var ix = szIs(i) ? szNum(i) : i
         if (isSl(o)) { slSet(o, ix, slAdopt(o, ix, v)); return }
@@ -1791,6 +1854,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return "" + v
         }
         if (to == "[]byte" || to == "[]rune") {
+            // []byte(bs) where bs is ALREADY a slice is a re-typing, not a copy: Go
+            // hands back the same backing store, and `b2 := []byte(bs); b2[0] = 106`
+            // is seen by bs (checked with `go run`). Only a STRING is decoded below -
+            // stringifying a slice header used to yield "[object Object]".
+            if (isSl(v)) { return v }
+            if (Array.isArray(v)) { return slT(slOf(v), to == "[]byte" ? "byte" : "rune") }
             var out = []
             var t = "" + v
             var i2 = 0
@@ -1802,6 +1871,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return slT(slOf(out), to == "[]byte" ? "byte" : "rune")
         }
         if (to == "bool") { return v ? true : false }
+        // [N]T(s): a slice-to-ARRAY conversion COPIES (an array is a value), so the
+        // result must not alias the slice's backing store - `a := [4]byte(s); a[0] = 9`
+        // leaves s[0] alone, which `go run` confirms. []T(x) is a re-typing of the same
+        // header and keeps aliasing, so only the sized form copies.
+        if (to.length > 1 && to.charCodeAt(0) == 91 && to.charCodeAt(1) != 93) {
+            if (isSl(v)) { return goVal(slElems(v)) }
+            if (Array.isArray(v)) { return goVal(v) }
+            return v
+        }
         // float64(x) BOXES: the result is a float64 whatever x was, which is what
         // makes float64(7)/2 == 3.5.
         if (to == "float64" || to == "float32") { return gFlo(szNum(gNumF(v)) * 1) }
@@ -2377,6 +2455,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (w == "map" || w == "chan" || w == "func" || w == "interface" || w == "struct") { return null }
         var cls = hasOwn(structs, w) ? structs[w] : undefined
         if (cls != undefined && cls != null && cls.__isclass == true) { return goZeroStruct(cls) }
+        // A defined type zeroes to the zero of what it is defined over, so `var l L`
+        // over `type L []int` is an empty SLICE (append/len/range all work) rather
+        // than the null a name with no struct descriptor used to answer.
+        var rn = resolveDefined(w)
+        if (rn != w) { return goZeroTy(rn) }
         return null
     }
     // A zero INSTANCE of a struct descriptor: every field at the zero of its own
@@ -2426,6 +2509,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var cls = anytype
         if (desc.ckind == "anon") { cls = anonClass(desc) }
         else {
+            // A DEFINED type: `type L []int; L{1, 2, 3}` is the []int literal, and
+            // `type Q Point; Q{1, 2}` is the Point literal. resolveDefined lands on a
+            // spelling that is no longer a defined name, so neither branch re-enters.
+            var rn = resolveDefined(desc.cname)
+            if (rn != desc.cname) {
+                if (isCompositeText(rn)) { return buildLit(descOfTypeText(rn), elems) }
+                return buildLit({ckind: "struct", cname: rn}, elems)
+            }
             cls = getVar(desc.cname)
             if (cls == undefined || cls == null || cls.__isclass != true) { fail("unknown struct type: " + desc.cname) }
         }
@@ -2454,17 +2545,36 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (e.enest == undefined) { return gAdoptTy(elemType, e.eval()) }
         return buildLit(descOfTypeText(elemType), e.enest)
     }
+    // The [N] of an array type text, as the thunk buildLit's array branch wants, or
+    // null when N is not written out in digits.
+    function constLenThunk(d) {
+        if (d.length == 0) { return null }
+        var n = 0
+        for (var i = 0; i < d.length; i++) {
+            var cc = d.charCodeAt(i)
+            if (cc < 48 || cc > 57) { return null }
+            n = n * 10 + (cc - 48)
+        }
+        return makeConstThunk(n)
+    }
+    function makeConstThunk(n) { return function() { return n } }
+    // The VALUE type of a map type text: everything after the ']' that closes the key.
+    // Scanned by hand rather than with lastIndexOf, which -frozen does not have.
+    function mapValText(t) {
+        var d = -1
+        for (var i = 0; i < t.length; i++) { if (t.charCodeAt(i) == 93) { d = i } }
+        return t.substring(d + 1)
+    }
     function descOfTypeText(t) {
         if (t.length > 0 && t.charCodeAt(0) == 91) {
             var close = t.indexOf("]")
             var inner = t.substring(close + 1)
             if (close == 1) { return {ckind: "slice", cet: inner} }
-            return {ckind: "array", cet: inner, clen: null}
+            // A written-out length ([3]int) is what pads A{} out to three zeroes; a
+            // length that is a constant NAME is still unreadable from the text alone.
+            return {ckind: "array", cet: inner, clen: constLenThunk(t.substring(1, close))}
         }
-        if (t.indexOf("map[") == 0) {
-            var d = t.lastIndexOf("]")
-            return {ckind: "map", czero: t.substring(d + 1)}
-        }
+        if (t.indexOf("map[") == 0) { return {ckind: "map", czero: mapValText(t)} }
         return {ckind: "struct", cname: t}
     }
     // Anonymous struct types get one descriptor per literal site, cached on the desc.
@@ -2611,7 +2721,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function makeAddrVar(name) {
         return function() {
             var v = getVar(name)
-            if (v != undefined && v != null && typeof v == "object" && !isPtr(v)) { return v }
+            // An ARRAY is a VALUE in Go, and every assignment of one copies it
+            // (goVal). So &arr cannot be the array: `h := &arr` would hand h a copy
+            // and `h[0] = 5` would be lost. It gets a real cell, like a scalar.
+            if (v != undefined && v != null && typeof v == "object" && !isPtr(v) && !Array.isArray(v)) { return v }
             return varCell(name)
         }
     }
@@ -3475,6 +3588,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return
         }
         if (typeof last == "object" && last != null && last.under != undefined) {
+            // Remember the SPELLING as well as the conversion. `type L []int` used to
+            // keep only the conversion closure, so `L{1, 2, 3}` found a function where
+            // buildLit wanted a class and died with "unknown struct type: L". The
+            // underlying text is the whole answer: a composite literal of a defined
+            // type is a literal of what it is defined over.
+            definedUnder[items[0]] = last.under
             globalScope[items[0]] = makeDefinedConv(last.under)
             return
         }
@@ -3488,6 +3607,22 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // ----- Functions, methods and structs -----
 
     var structs = {}
+    // Defined type name -> the type text it is defined OVER (`type L []int` -> "[]int",
+    // `type Q Point` -> "Point"). buildTypeDecl fills it; buildLit and goZeroTy read it.
+    var definedUnder = {}
+    // Follow a chain of defined types (type A B; type B []int) to the spelling that is
+    // not itself a defined name. Bounded, so a cyclic declaration cannot hang the run.
+    function resolveDefined(name) {
+        var t = name
+        var hops = 0
+        while (hasOwn(definedUnder, t) && hops < 16) { t = definedUnder[t]; hops++ }
+        return t
+    }
+    // Does this type text spell a composite (slice, array or map) rather than a name?
+    function isCompositeText(t) {
+        if (t == undefined || t == null || t.length == 0) { return false }
+        return t.charCodeAt(0) == 91 || t.indexOf("map[") == 0
+    }
     // items = [name, fieldName..., {fty}, fieldName..., {fty}, ...]: the names of one
     // group share the {fty} that follows them, which gives every field its zero value.
     function buildStruct(items) {

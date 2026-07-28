@@ -220,7 +220,12 @@ AmbientDecl <~~ takeAll(); push(tsNoop()) ~~>
             = KwDeclare ( AmbGlobal | AmbNamespace | AmbClass | AmbFunc | AmbVar
                         | Interface | TypeAlias | AmbEnum ) ;
 AmbGlobal   = KwGlobal SkipBlock ;
-AmbNamespace = ( KwNamespace | KwModule ) NsPath SkipBlock ;
+AmbNamespace = ( KwNamespace | KwModule ) NsPath SkipBlock
+             | KwModule ModPath [ ";" ] ;
+// 'declare module "jquery";' - the SHORTHAND ambient module, whose whole point is that it
+// has no body (everything it exports is `any`). tsc allows it only for a STRING name and
+// only for 'module', so this alternative asks for exactly that; the bodied form above is
+// tried first and only fails when there is no '{'. Mirrors typescript-interpreter.abnf.
 AmbClass    = [ "abstract" KwEnd ] KwClass Id [ TypeParams ] [ KwExtends Type ] [ KwImplements TypeList ] SkipBlock ;
 AmbFunc     = [ KwAsync ] KwFunction [ "*" ] Id [ TypeParams ] ParamList [ TypeAnnot ] [ ";" ] ;
 AmbVar      = KwVar AmbDeclarator { "," AmbDeclarator } [ ";" ] ;
@@ -520,15 +525,12 @@ Empty       <~~ push(function(b) { return b }) ~~>
 
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
             = Expression [ ";" ] ;
-// MEASURED AND REVERTED (2026-07-28): spelling this end as ( ";" | AsiEnd ), where AsiEnd
-// is the spec's automatic-semicolon rule (a line terminator, a '}' or the end of file must
-// follow), is correct JavaScript and a net LOSS on this corpus - reject 100 -> 103, parse
-// 5277 -> ~5137. The 140 files it costs were parsing only BECAUSE the ';' is optional:
-// 'declare module "jquery"' (the shorthand ambient module, which AmbientNs cannot express
-// without a body), 'export as namespace Foo;' (the UMD global export), 'import defer * as
-// ns from "m"' and 'protected class C {}' all currently degrade into a soup of bare
-// identifier expression statements and count as parsed. Restoring the guard is worth
-// roughly 25 + 9 + 5 files the moment those three real forms exist.
+// MEASURED AND REVERTED TWICE - see the long note at ExprStmt in
+// typescript-interpreter.abnf for both measurements and for the list of the ~25 real
+// forms behind the loss. Short version: automatic semicolon insertion on this production
+// costs 97 corpus files and gains 7, because ~70 of the files that parse today are
+// genuinely invalid inputs the corpus still marks 'parse' and they parse only by
+// degrading into bare identifier expression statements.
 
 // Every expression production pushes exactly one thunk: function(block) -> {b, v}.
 // The comma (sequence) operator is ACCEPTED but not lowered. With no comma this level
@@ -682,7 +684,7 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 ExpExpr     <~~ push(makeExp(takeAll(), up.pos)) ~~>
             = UnaryExpr { "**" UnaryExpr } ;
 
-UnaryExpr   = SuperPreUpdate | PreIncDec | Neg | Plus | Not | BitNot | Typeof | Delete | Void | Await | PostfixExpr ;
+UnaryExpr   = SuperPreUpdate | PreIncDec | PreUpdateExpr | Neg | Plus | Not | BitNot | Typeof | Delete | Void | Await | PostfixExpr ;
 // '++super.x' / 'super[i]--'. A Target starts at a name and refuses the reserved word
 // 'super', so neither update production can reach a super property - the same reason
 // SuperAssign sits next to Assignment. The prefix form is tried before PreIncDec and the
@@ -708,7 +710,42 @@ Await       <~~ push(pop()) ~~>
             = KwAwait UnaryExpr ;
 // Prefix ++/--: the expression value is the new one.
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
-            = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
+            = ( "++" | "--" ) <~~ push(up.in) ~~> Target NotSuffix ;
+// '++1', '++{}', '++[0]', '++obj?.a', '++new Foo()', '--(E.A + E.B)': an update
+// expression whose operand is not a valid target. That is an EARLY error in the spec,
+// not a syntax error - tsc builds the tree and then complains - so it has to parse here
+// too, exactly as the postfix side already does. Tried after PreIncDec (a real prefix
+// update is never routed through it) and BEFORE Neg/Plus, which have no '!"-"' lookahead
+// on this side and would otherwise read '--1' as '-(-1)' and answer 1 where the
+// interpreter half refuses. The '!"?."' on PreIncDec is what stops it succeeding on
+// just the head of an optional chain and leaving '?.a' behind.
+PreUpdateExpr <~~ takeAll(); push(notImplExpr("update of an expression target", up.pos)) ~~>
+            = ( "++" | "--" ) UnaryExpr ;
+// "Is the very next thing a suffix?" - a '.', '[', '(', a template backtick, an optional
+// '?.' or a glued '++'/'--'. Copied verbatim from typescript-interpreter.abnf so the two
+// engines agree byte for byte on where a prefix update's operand ends: without it
+// PreIncDec succeeds on just the head of '++foo()' or '++obj?.a' and leaves the rest of
+// the expression behind for the next statement.
+NotSuffix   = :script(~~
+    (function() {
+        var i = 0, cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (cc === 63) {
+            var d = c.peek(i + 2)
+            if (c.peek(i + 1) === 46 && !(d >= 48 && d <= 57)) { return abnf.newToken("\x01suffix", 0) }
+            return undefined
+        }
+        // '++' / '--' glued to the name is an UPDATE expression, so the operand is not a
+        // bare name either: 'typeof t--' is typeof (t--). A single '-' or '+' is the
+        // ordinary binary operator and must stay out of it ('typeof a - 1').
+        if ((cc === 43 || cc === 45) && c.peek(i + 1) === cc) { return abnf.newToken("\x01suffix", 0) }
+        return (cc === 46 || cc === 91 || cc === 40 || cc === 96) ? abnf.newToken("\x01suffix", 0) : undefined
+    })()
+~~) ;
+
 Neg         <~~ push(makeUnary(pop(), "js_neg")) ~~>
             = "-" UnaryExpr ;
 // Unary plus is ToNumber, not a no-op: '+"3"' is the number 3. It is tried after
@@ -1400,7 +1437,11 @@ ImportStmt  <~~ push(jsImport(takeAll(), up.pos)) ~~>
 // and the older 'import X = require("...")' / 'import X = A.B' aliases; all of them are
 // erased the same way - only the module SPECIFIER matters, and only when it names a
 // project file.
-            = KwImport ( ImportEquals | KwType ImportEquals | ImportClause KwFrom ModPath | ModPath ) [ ImportAttrs ] [ ";" ] ;
+            = KwImport ( ImportEquals | KwType ImportEquals | [ KwDefer ] ImportClause KwFrom ModPath | ModPath ) [ ImportAttrs ] [ ";" ] ;
+// 'import defer * as ns from "m"': the deferred-evaluation import. The module is emitted
+// the same way here (this flat model has no lazy namespace object), so the modifier is
+// parsed and dropped, exactly like 'import type'.
+KwDefer     = "defer" KwEnd ;
 ImportAttrs = ( "with" | "assert" ) KwEnd SkipBlock ;
 ImportEquals = NotBindName Id "=" ( Id "(" ModPath ")" | Id { "." Id } ) ;
 ImportClause = [ KwType ] ( ImportBinding [ "," ImportTail ] | ImportTail ) ;
@@ -1423,7 +1464,12 @@ ModSq       = "'" :whitespace() { StrEsc | SqPlain } <~~ push(unescapeJs(up.in))
 // 'export =', 'export default <expr>' - have no declaration to compile and stay
 // accepted-but-not-lowered. ExportBody delegates to the ordinary declaration
 // productions, whose thunk lands directly on the ExportStmt frame.
-ExportStmt  = KwExport [ KwDefault ] ExportBody ;
+ExportStmt  = KwExport ( ExportNs | [ KwDefault ] ExportBody ) ;
+// 'export as namespace Foo;' - the UMD global export, which says the module is also
+// reachable as a global of that name. It declares nothing this model can bind, so it
+// emits nothing. Tried FIRST: 'as' would otherwise be read as the start of ExportBody.
+ExportNs    <~~ takeAll(); push(function(b) { return b }) ~~>
+            = KwAs KwNamespace Id [ ";" ] ;
 ExportBody  = AmbientDecl | NamespaceDecl | Interface | TypeAlias | EnumDecl | DecoratedDecl
             | ClassDecl | ClassDeclWidened | AsyncFuncDecl | GenFuncDecl | FuncOverload | FuncDecl
             | Destructure | VarDecl

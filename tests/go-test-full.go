@@ -1191,6 +1191,218 @@ func s29() {
 	check("ptgt7", st[0].x == 5)
 }
 
+// ===== SECTION 30: defined types, and pointers to arrays =====
+// A composite literal of a DEFINED type is a literal of what the type is defined over:
+// `type L []int; L{1, 2, 3}` is the []int literal, `type A [4]int; A{7, 8}` keeps the
+// declared length and zeroes the rest, and `type Q P; Q{1, 2}` is P's literal. `var l L`
+// zeroes the same way. An ARRAY is a VALUE - assigning one copies it - so &arr must be a
+// real pointer: h := &arr; h[0] = 5 is seen by arr, and len/cap/index/slice/range all
+// reach through it. Verified against go1 (`go run`) before being pinned here.
+type ints30 []int
+type grid30 [][]int
+type quad30 [4]int
+type lookup30 map[string]int
+type base30 struct {
+	x int
+	y int
+}
+type alias30 base30
+type deep30 ints30
+
+func sum30(p *[3]int) int {
+	t := 0
+	for _, v := range p {
+		t += v
+	}
+	return t
+}
+
+func s30() {
+	// a composite literal of a defined SLICE type is a literal of what it is defined over
+	a := ints30{1, 2, 3}
+	check("dfl1", len(a) == 3)
+	check("dfl2", a[0] == 1 && a[2] == 3)
+	a = append(a, 4)
+	check("dfl3", len(a) == 4 && a[3] == 4)
+	check("dfl4", cap(a) >= 4)
+	var z ints30
+	check("dfl5", len(z) == 0)
+	z = append(z, 9)
+	check("dfl6", len(z) == 1 && z[0] == 9)
+	e := ints30{}
+	check("dfl7", len(e) == 0)
+
+	// a chain of defined types resolves to the spelling at the end of it
+	d := deep30{5, 6}
+	check("dfl8", len(d) == 2 && d[1] == 6)
+
+	// a defined ARRAY type keeps its length, so the unwritten slots are zero
+	q := quad30{7, 8}
+	check("dfl9", len(q) == 4)
+	check("dfl10", q[0] == 7 && q[1] == 8 && q[2] == 0 && q[3] == 0)
+	var qz quad30
+	check("dfl11", len(qz) == 4 && qz[3] == 0)
+
+	// a defined MAP type zeroes and builds empty
+	lk := lookup30{}
+	lk["a"] = 1
+	check("dfl12", len(lk) == 1 && lk["a"] == 1)
+	check("dfl13", lk["missing"] == 0)
+
+	// a defined STRUCT type is a literal of the struct it is defined over
+	al := alias30{1, 2}
+	check("dfl14", al.x == 1 && al.y == 2)
+	al.y = 5
+	check("dfl15", al.y == 5)
+
+	// nested brace groups inside a defined slice-of-slice type
+	g := grid30{{1, 2}, {3}}
+	check("dfl16", len(g) == 2)
+	check("dfl17", len(g[0]) == 2 && g[0][1] == 2)
+	check("dfl18", len(g[1]) == 1 && g[1][0] == 3)
+
+	// an ARRAY is a value: assigning one copies it, so the copy moves alone
+	arr := [3]int{1, 2, 3}
+	cp := arr
+	cp[0] = 99
+	check("parr1", arr[0] == 1 && cp[0] == 99)
+
+	// a POINTER to an array is a reference: a write through it is seen by the array
+	h := &arr
+	h[0] = 5
+	check("parr2", arr[0] == 5)
+	h[2] += 4
+	check("parr3", arr[2] == 7)
+	check("parr4", h[1] == 2)
+	check("parr5", len(h) == 3 && cap(h) == 3)
+	check("parr6", sum30(h) == 14)
+	check("parr7", (*h)[0] == 5)
+	sl := h[:]
+	check("parr8", len(sl) == 3 && sl[0] == 5)
+	sl[1] = 20
+	check("parr9", arr[1] == 20)
+	tot := 0
+	for i, v := range h {
+		tot += i * v
+	}
+	check("parr10", tot == 0*5+1*20+2*7)
+
+	// a pointer to an array of a defined array type, and a pointer taken twice
+	g2 := &qz
+	g2[1] = 8
+	check("parr11", qz[1] == 8)
+	hh := &arr
+	hh[0] = 11
+	check("parr12", h[0] == 11)
+}
+
+// ===== SECTION 31: local type declarations, and labels with no statement =====
+// A `type` declaration is a STATEMENT too: Go scopes a local type to its block, and every
+// top-level shape (struct, defined slice/int/map, alias) is legal there. A LABEL may also
+// stand alone - `_:` at the end of a block is a labeled EMPTY statement, for which Go
+// writes no semicolon; gc rejects the same thing in front of a 'case' or 'default'
+// ("missing statement after label"), so the grammar does too. Verified against go1
+// (`go run`) before being pinned here.
+func s31() {
+	// a type declaration in STATEMENT position, in every shape the top level has
+	type T31 struct {
+		a int
+		b string
+	}
+	type S31 []T31
+	type N31 int
+	type M31 map[string]int
+	type A31 = T31
+
+	var e S31
+	e = append(e, T31{1, "foo"})
+	check("lty1", len(e) == 1)
+	check("lty2", e[0].a == 1 && e[0].b == "foo")
+	var n N31 = 7
+	check("lty3", int(n)+1 == 8)
+	m := M31{}
+	m["k"] = 3
+	check("lty4", m["k"] == 3)
+	var al A31
+	al.a = 9
+	check("lty5", al.a == 9)
+	lit := S31{{2, "x"}}
+	check("lty6", len(lit) == 1 && lit[0].a == 2 && lit[0].b == "x")
+
+	// a label with NOTHING after it is a labeled EMPTY statement. Go writes no
+	// semicolon for it, and the blank '_' label needs no goto to be legal.
+	n2 := 0
+outer:
+	for i := 0; i < 3; i++ {
+		for j := 0; j < 3; j++ {
+			if j == 1 {
+				continue outer
+			}
+			n2 += i
+		}
+	_:
+	}
+	check("elbl1", n2 == 3)
+	switch n2 {
+	default:
+		n2 = 5
+	case 3:
+		n2 = 4
+	_:
+	}
+	check("elbl2", n2 == 4)
+_:
+}
+
+// ===== SECTION 32: conversions to a written-out array, map, chan or slice type =====
+// A conversion's target type may be spelled out in full: `[4]byte(s)`, `[3]int(a)`,
+// `map[string]int(m)`, `chan int(c)`, and it may carry the trailing comma a call may
+// carry. Converting a SLICE to an ARRAY copies (an array is a value); every other form
+// here is a RE-TYPING that keeps the same backing store, so []byte(bs) is bs. Verified
+// against go1 (`go run`) before being pinned here.
+func s32() {
+	// a conversion whose target type is an ARRAY type written out. Converting a slice
+	// to an array COPIES (an array is a value), so the result does not alias the slice.
+	s := []byte{1, 2, 3, 4}
+	a := [4]byte(s)
+	check("cvt1", len(a) == 4 && a[0] == 1 && a[3] == 4)
+	a[0] = 9
+	check("cvt2", s[0] == 1 && a[0] == 9)
+	b := [3]int{1, 2, 3}
+	b2 := [3]int(b)
+	b2[0] = 7
+	check("cvt3", b[0] == 1 && b2[0] == 7)
+
+	// a MAP type written out, and a CHAN type written out
+	m := map[string]int{"x": 1}
+	m2 := map[string]int(m)
+	check("cvt4", m2["x"] == 1)
+	m2["y"] = 2
+	check("cvt5", m["y"] == 2) // a map conversion is a re-typing: still the same map
+	var c chan int
+	c2 := chan int(c)
+	check("cvt6", c2 == nil)
+
+	// a conversion may carry the trailing comma a call may carry
+	check("cvt7", int(1.0) == 1)
+	check("cvt8", len([]byte("foo")) == 3)
+	check("cvt9", string([]rune{104, 105}) == "hi")
+
+	// []T(x) is a RE-TYPING of the same header and keeps aliasing
+	sl := []int{1, 2, 3}
+	al := []int(sl)
+	al[0] = 8
+	check("cvt10", sl[0] == 8)
+	bs := []byte{104, 105}
+	b3 := []byte(bs)
+	b3[0] = 106
+	check("cvt11", string(bs) == "ji" && string(b3) == "ji" && len(b3) == 2)
+	rs := []rune("hi")
+	r3 := []rune(rs)
+	check("cvt12", string(r3) == "hi" && len(r3) == 2)
+	check("cvt13", string([]byte("ok")) == "ok")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -1221,6 +1433,9 @@ func main() {
 	s27() // SECTION-CALL 27
 	s28() // SECTION-CALL 28
 	s29() // SECTION-CALL 29
+	s30() // SECTION-CALL 30
+	s31() // SECTION-CALL 31
+	s32() // SECTION-CALL 32
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
