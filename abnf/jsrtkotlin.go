@@ -808,6 +808,11 @@ func init() {
 				}
 			}
 			if mo, isObj := recv.(*jsObject); isObj {
+				if ktIsSb(mo) {
+					if v, handled := rt.ktSbMethod(mo, mname, arr.elems); handled {
+						return rt.wrap(v)
+					}
+				}
 				if _, _, isDict := dictParts(mo); isDict {
 					if v, handled := rt.ktMapMethod(mo, mname, arr.elems); handled {
 						return rt.wrap(v)
@@ -832,10 +837,139 @@ func init() {
 			}
 			return baseMcall(a)
 		}
+
+		// ----- the global builders and the implicit receiver -----
+
+		// ktMemberCall lets the bound-builtin closures reach the whole method surface.
+		ktMemberCall = func(recv interface{}, name string, args []interface{}) interface{} {
+			if args == nil {
+				args = []interface{}{}
+			}
+			return u(m["js_ktsmcall"]([]uint64{w(recv), rt.wrapStr(name), w(&jsArray{elems: args})}))
+		}
+		ktRecvStack = nil
+
+		// js_ktglobal(name) is the VALUE of one global builder; buildMain declares
+		// one per name. See the block above ktRecvStack.
+		m["js_ktglobal"] = func(a []uint64) uint64 { return w(ktGlobalFn(rt, rt.toString(u(a[0])))) }
+
+		// js_ktget is js_kget plus the implicit receiver of with / run / apply /
+		// buildString / buildList / buildMap: a name that is neither a local nor a
+		// member of the enclosing `this` is resolved against the receiver on
+		// ktRecvStack, so `with(sb) { append("a") }` and `with(list) { size }` mean
+		// what they mean in Kotlin. The two earlier steps are js_kget's, byte for
+		// byte, so a name that already resolved resolves the same way.
+		m["js_ktget"] = func(a []uint64) uint64 {
+			sc := rt.scopeOf(a[0])
+			name := rt.toString(u(a[1]))
+			for s := sc; s != nil; s = s.parent {
+				if v, ok := s.get(name); ok {
+					if rt.traced {
+						rt.trVar("read", name, v)
+					}
+					return w(v)
+				}
+			}
+			for s := sc; s != nil; s = s.parent {
+				if t, ok := s.get("this"); ok {
+					if obj, isObj := t.(*jsObject); isObj {
+						if v, ok := obj.props[name]; ok {
+							if rt.traced {
+								rt.trVar("read", name, v)
+							}
+							return w(v)
+						}
+					} else if !isUndefOrNull(t) {
+						if v := rt.getMember(t, name); !isUndefOrNull(v) {
+							if rt.traced {
+								rt.trVar("read", name, v)
+							}
+							return w(v)
+						}
+					}
+					break
+				}
+			}
+			for i := len(ktRecvStack) - 1; i >= 0; i-- {
+				if v, ok := rt.ktRecvMember(ktRecvStack[i], name); ok {
+					if rt.traced {
+						rt.trVar("read", name, v)
+					}
+					return w(v)
+				}
+			}
+			rt.fail("unknown name: %s", name)
+			return 0
+		}
+
+		// js_ktfget is the field-read extern: the StringBuilder box's properties, a
+		// Map MISS as null (kotlin.Map.get answers null, where the shared js_get
+		// answers undefined - the one place the two halves still disagreed on a map),
+		// then js_rxktget. The delegate is looked up LAZILY, for the reason
+		// js_ktsmcall's is.
+		m["js_ktfget"] = func(a []uint64) uint64 {
+			o, name := u(a[0]), rt.toString(u(a[1]))
+			if mo, isObj := o.(*jsObject); isObj {
+				if ktIsSb(mo) {
+					if v, handled := rt.ktSbMethod(mo, name, nil); handled {
+						return w(v)
+					}
+				}
+				if keys, _, isDict := dictParts(mo); isDict && !ktRecvProp(name) &&
+					rt.ktMapFind(keys, u(a[1])) < 0 {
+					return w(jsNull)
+				}
+			}
+			if next := m["js_rxktget"]; next != nil {
+				return next(a)
+			}
+			return m["js_get"](a)
+		}
+
+		// js_ktindex is the same rule for the INDEXED read: `m[9]` on a map that has no
+		// key 9 is null in Kotlin (Map.get answers null), where the shared js_kindex
+		// answers undefined - which printed "kotlin.Unit" and made `m[9] == null` false
+		// in the compiler while the interpreter said true. Everything else falls through
+		// to js_rxktindex (js_kindex plus the MatchResult group readers).
+		m["js_ktindex"] = func(a []uint64) uint64 {
+			if mo, isObj := u(a[0]).(*jsObject); isObj {
+				if keys, _, isDict := dictParts(mo); isDict && rt.ktMapFind(keys, u(a[1])) < 0 {
+					return w(jsNull)
+				}
+			}
+			if next := m["js_rxktindex"]; next != nil {
+				return next(a)
+			}
+			return m["js_kindex"](a)
+		}
+
+		// js_ktset is js_set plus the map handle: `mm[2] = "b"` is Map.put, which the
+		// shared setMember cannot answer (it stored a plain PROPERTY named "2", so the
+		// map kept its old size and the write was invisible to every map operation).
+		baseSet := m["js_set"]
+		m["js_ktset"] = func(a []uint64) uint64 {
+			if mo, isObj := u(a[0]).(*jsObject); isObj {
+				if _, _, isDict := dictParts(mo); isDict {
+					rt.ktMapPut(mo, u(a[1]), u(a[2]))
+					return 0
+				}
+				// A field WRITE adopts the property's DECLARED type: `var y: Long = 1`
+				// followed by `w.y = 1` stores a Long. __ptypes is the width table the
+				// class emitter installs; kFieldTy in kotlin-interpreter.abnf is the twin.
+				if ty := ktFieldTy(mo, rt.toString(u(a[1]))); ty != "" {
+					if v := rt.ktAdoptTy(u(a[2]), ty); v != nil {
+						return baseSet([]uint64{a[0], a[1], w(v)})
+					}
+				}
+			}
+			return baseSet(a)
+		}
 	})
 	// js_ktsmcall reads its argument array in position 2, exactly like js_mcall and
 	// js_rxktmcall: the handle must arrive as the array itself, not as a value.
 	jsThroughArgs["js_ktsmcall"] = 1 << 2
+	// js_ktget reads a SCOPE in position 0, exactly like js_kget.
+	jsThroughArgs["js_ktget"] = 1 << 0
 }
 
 // ktStrMethod is the Go twin of the String branch of `mcall` in
@@ -1216,6 +1350,11 @@ func (rt *jsrt) ktpObj(o *jsObject, depth int) (string, bool) {
 			return rt.ktpRender(v, depth+1), true
 		}
 	}
+	// A StringBuilder renders as its accumulated text (java.lang.StringBuilder's
+	// toString), the same answer kstr gives it in kotlin-interpreter.abnf.
+	if ktIsSb(o) {
+		return ktSbText(o), true
+	}
 	// A MAP renders as java.util.AbstractMap.toString does: {a=1, b=2}. This is the
 	// rendering the header note said had nothing to render; it does now, because
 	// groupBy/associate/toMap build the shared {__dict, keys, vals} handle.
@@ -1445,11 +1584,15 @@ func (rt *jsrt) ktScopeMethod(target interface{}, name string, args []interface{
 	case "let":
 		return rt.ktCall(f, target), true
 	case "run":
-		// `x.run { … }` binds the receiver as `this`; this value model has no
-		// receiver channel through a bare closure handle, so the receiver is also
-		// passed as `it` - which is what the interpreter half does too.
-		return rt.ktCall(f, target), true
-	case "apply", "also":
+		// `x.run { … }` binds the receiver as `this`. A bare closure handle has no
+		// receiver slot, so the receiver goes onto ktRecvStack for the duration of
+		// the call (which is what makes an unqualified `size` inside resolve) and is
+		// ALSO passed as `it` - which is what the interpreter half does too.
+		return rt.ktWithRecv(target, f, target), true
+	case "apply":
+		rt.ktWithRecv(target, f, target)
+		return target, true
+	case "also":
 		rt.ktCall(f, target)
 		return target, true
 	case "takeIf":
@@ -2211,6 +2354,318 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 	}
 	// map/filter/forEach/any/... over the entry sequence.
 	return rt.ktSeqMethod(&jsArray{elems: ktElems(rt, m)}, name, args)
+}
+
+// ============================================================================
+// THE GLOBAL BUILDERS, and the implicit receiver of the this-bound scope functions
+//
+// A global NAME is declared by each grammar's own builtin block - hostGlobals in
+// kotlin-interpreter.abnf, js_scope_decl in kotlin-to-llvm-ir.abnf - so the twelve
+// builders below (mapOf/Pair/Triple/with/repeat/StringBuilder/buildString/...) had
+// to be given a VALUE the compiler half can bind. js_ktglobal(name) answers that
+// value; buildMain declares one per name. Everything they BUILD is a shape whose
+// member surface already lives above (ktMapMethod, ktPairMethod, ktSbMethod), so
+// the declaration is the whole port.
+//
+// ktRecvStack is the receiver channel. Kotlin's with / run / apply bind their
+// receiver as `this`, so an unqualified `size` or `append("a")` inside the lambda
+// is a member call on it. The compiler's lambda is a bare IR closure with no
+// receiver slot, so the builder pushes the receiver here for the duration of the
+// call and js_ktget consults it AFTER a local and after the enclosing `this` -
+// which means it can only ever turn "unknown name" into a member read, never
+// change a name that already resolved. The twin is kSetRecv / recvLookup in
+// kotlin-interpreter.abnf.
+var ktRecvStack []interface{}
+
+// ktMemberCall is js_ktsmcall as a plain Go call, installed by the registrar so the
+// bound-builtin closures below reach the full method surface (including the Regex
+// and shared js_mcall tails) without duplicating its dispatch.
+var ktMemberCall func(recv interface{}, name string, args []interface{}) interface{}
+
+// ktRecvProps are the names Kotlin declares as PROPERTIES on a builtin receiver;
+// everything else resolves to a bound method, so a lookup never turns a property
+// into a callable. The twin is kRecvProps in kotlin-interpreter.abnf.
+func ktRecvProp(name string) bool {
+	switch name {
+	case "size", "length", "keys", "values", "entries", "indices", "lastIndex":
+		return true
+	}
+	return false
+}
+
+// ktIsBuiltinRecv reports a receiver whose members come from the runtime rather
+// than from a class descriptor: a list, a map, a StringBuilder box or a String.
+func ktIsBuiltinRecv(v interface{}) bool {
+	switch t := v.(type) {
+	case *jsArray, string:
+		return true
+	case *jsObject:
+		if _, isCls := t.props["__class"]; isCls {
+			return false
+		}
+		if _, isClsDesc := t.props["__isclass"]; isClsDesc {
+			return false
+		}
+		if _, _, isDict := dictParts(t); isDict {
+			return true
+		}
+		return ktIsSb(t)
+	}
+	return false
+}
+
+// ktRecvMember answers an unqualified name against an implicit receiver.
+func (rt *jsrt) ktRecvMember(recv interface{}, name string) (interface{}, bool) {
+	if !ktIsBuiltinRecv(recv) || ktMemberCall == nil {
+		return nil, false
+	}
+	if ktRecvProp(name) {
+		return ktMemberCall(recv, name, nil), true
+	}
+	self := recv
+	return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return ktMemberCall(self, name, args)
+	}), true
+}
+
+// ktMakeSb builds the StringBuilder box, {__sb: true, s: "..."}, the same shape
+// kotlin-interpreter.abnf builds.
+func ktMakeSb(s string) *jsObject {
+	o := newJSObject()
+	o.set("__sb", true)
+	o.set("s", s)
+	return o
+}
+
+func ktIsSb(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	b, has := o.props["__sb"]
+	return has && b == true
+}
+
+func ktSbText(o *jsObject) string {
+	s, _ := o.props["s"].(string)
+	return s
+}
+
+// ktSbMethod is the StringBuilder member surface, the Go twin of the `target.__sb`
+// branch of `mcall` in kotlin-interpreter.abnf. A name it does not know falls
+// through to the String methods on the accumulated text, exactly as there.
+func (rt *jsrt) ktSbMethod(o *jsObject, name string, args []interface{}) (interface{}, bool) {
+	switch name {
+	case "append":
+		s := ktSbText(o)
+		for _, a := range args {
+			s += rt.ktStr2(a)
+		}
+		o.set("s", s)
+		return o, true
+	case "appendLine":
+		s := ktSbText(o)
+		for _, a := range args {
+			s += rt.ktStr2(a)
+		}
+		o.set("s", s+"\n")
+		return o, true
+	case "toString":
+		return ktSbText(o), true
+	case "length":
+		return float64(len([]rune(ktSbText(o)))), true
+	case "isEmpty":
+		return len(ktSbText(o)) == 0, true
+	case "isNotEmpty":
+		return len(ktSbText(o)) > 0, true
+	case "clear":
+		o.set("s", "")
+		return o, true
+	case "reverse":
+		r := []rune(ktSbText(o))
+		for i, j := 0, len(r)-1; i < j; i, j = i+1, j-1 {
+			r[i], r[j] = r[j], r[i]
+		}
+		o.set("s", string(r))
+		return o, true
+	}
+	return rt.ktStrMethod(ktSbText(o), name, args)
+}
+
+// ktFieldTy answers the declared type of a property, walking the __class / __super
+// chain for the __ptypes table the class emitter installs. "" when nothing declares
+// one, which makes the adoption a no-op. The twin is kFieldTy in
+// kotlin-interpreter.abnf.
+func ktFieldTy(o *jsObject, name string) string {
+	cls, _ := o.props["__class"].(*jsObject)
+	for i := 0; cls != nil && i < 64; i++ {
+		if pt, ok := cls.props["__ptypes"].(*jsObject); ok {
+			if ty, has := pt.props[name].(string); has && ty != "" {
+				return ty
+			}
+		}
+		cls, _ = cls.props["__super"].(*jsObject)
+	}
+	return ""
+}
+
+// ktAdoptTy retypes a value by a declared type name, or answers nil when the type
+// carries no width. The width table is the one ktDeclWidth spells in both grammars.
+func (rt *jsrt) ktAdoptTy(v interface{}, ty string) interface{} {
+	t := strings.TrimSuffix(ty, "?")
+	if !ktIsIntegral(v) {
+		return nil
+	}
+	switch t {
+	case "Double", "Float":
+		return jsJFlo{f: giFloat(rt, v)}
+	case "Int":
+		return rt.ktConv(v, 32, false)
+	case "Long":
+		return rt.ktConv(v, 64, false)
+	case "Byte":
+		return rt.ktConv(v, 8, false)
+	case "Short":
+		return rt.ktConv(v, 16, false)
+	case "UInt":
+		return rt.ktConv(v, 32, true)
+	case "ULong":
+		return rt.ktConv(v, 64, true)
+	case "UByte":
+		return rt.ktConv(v, 8, true)
+	case "UShort":
+		return rt.ktConv(v, 16, true)
+	}
+	return nil
+}
+
+// ktMapOf builds a map from mapOf's arguments: each is a Pair, or (after a spread)
+// an array of Pairs.
+func (rt *jsrt) ktMapOf(args []interface{}) *jsObject {
+	mp := ktMakeMap()
+	for _, p := range args {
+		if po, ok := ktIsPair(p); ok {
+			rt.ktMapPut(mp, po.props["first"], po.props["second"])
+			continue
+		}
+		if arr, ok := p.(*jsArray); ok {
+			for _, e := range arr.elems {
+				if po, ok2 := ktIsPair(e); ok2 {
+					rt.ktMapPut(mp, po.props["first"], po.props["second"])
+				}
+			}
+		}
+	}
+	return mp
+}
+
+// ktWithRecv runs f with `recv` on the implicit-receiver stack.
+func (rt *jsrt) ktWithRecv(recv interface{}, f interface{}, args ...interface{}) interface{} {
+	if !isCallable(f) {
+		return jsUndef
+	}
+	ktRecvStack = append(ktRecvStack, recv)
+	defer func() { ktRecvStack = ktRecvStack[:len(ktRecvStack)-1] }()
+	return rt.call(f, jsUndef, args)
+}
+
+// ktGlobalFn is the VALUE of one global builder name.
+func ktGlobalFn(rt *jsrt, name string) interface{} {
+	switch name {
+	case "mapOf", "mutableMapOf", "hashMapOf", "linkedMapOf", "sortedMapOf", "emptyMap":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.ktMapOf(args)
+		})
+	case "buildMap":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			mp := ktMakeMap()
+			rt.ktWithRecv(mp, argAt(args, 0), mp)
+			return mp
+		})
+	case "buildList":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			l := &jsArray{}
+			rt.ktWithRecv(l, argAt(args, 0), l)
+			return l
+		})
+	case "buildString":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			sb := ktMakeSb("")
+			rt.ktWithRecv(sb, argAt(args, 0), sb)
+			return ktSbText(sb)
+		})
+	case "Pair":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			o := newJSObject()
+			o.set("first", argAt(args, 0))
+			o.set("second", argAt(args, 1))
+			return o
+		})
+	case "Triple":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			o := newJSObject()
+			o.set("first", argAt(args, 0))
+			o.set("second", argAt(args, 1))
+			o.set("third", argAt(args, 2))
+			return o
+		})
+	case "with":
+		// with(receiver) { ... }: the scope function that is a top-level FUNCTION
+		// rather than an extension. The receiver is `this` AND the lambda's single
+		// argument, which is what the interpreter half does too.
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			recv := argAt(args, 0)
+			return rt.ktWithRecv(recv, argAt(args, 1), recv)
+		})
+	case "run":
+		// The NULLARY global run { ... }; the member form x.run { } is ktScopeMethod's.
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			f := argAt(args, 0)
+			if !isCallable(f) {
+				return jsUndef
+			}
+			return rt.ktCall(f)
+		})
+	case "repeat":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			n := int(rt.toNumber(argAt(args, 0)))
+			f := argAt(args, 1)
+			for i := 0; i < n; i++ {
+				rt.ktCall(f, float64(i))
+			}
+			return jsUndef
+		})
+	case "StringBuilder":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			init := argAt(args, 0)
+			if isUndefOrNull(init) {
+				return ktMakeSb("")
+			}
+			return ktMakeSb(rt.ktStr2(init))
+		})
+	case "generateSequence":
+		// A Sequence is EAGER here (see the note on sequenceOf in the grammar), so an
+		// infinite generator is capped rather than lazy.
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			seed, next := argAt(args, 0), argAt(args, 1)
+			var v interface{}
+			if isCallable(seed) {
+				v = rt.ktCall(seed)
+			} else {
+				v = seed
+			}
+			out := &jsArray{}
+			for guard := 0; guard < 100000 && !isUndefOrNull(v); guard++ {
+				out.elems = append(out.elems, v)
+				if !isCallable(next) {
+					break
+				}
+				v = rt.ktCall(next, v)
+			}
+			return out
+		})
+	}
+	return jsUndef
 }
 
 // ktPairMethod is componentN / toString on the {first, second[, third]} shape.

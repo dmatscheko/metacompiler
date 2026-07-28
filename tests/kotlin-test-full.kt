@@ -1239,8 +1239,7 @@ fun sec35() {
 // ktScopeMethod). A class MEMBER of the same name still wins, which is Kotlin's rule
 // that a member always beats an extension - checked below with a class that declares
 // its own let().
-// run / apply / with bind the receiver as `this` instead; only the interpreter half
-// has a receiver channel for a bare lambda, so they live in SECTION 40.
+// run / apply / with bind the receiver as `this` instead, so they live in SECTION 40.
 class Scope36(val n: Int) {
     fun let(k: Int): Int = n + k          // A MEMBER named let: it must win.
 }
@@ -1400,9 +1399,8 @@ fun sec38() {
 // ===== SECTION 39: maps =====
 // A Map is the runtime's shared {__dict, keys, vals} handle - the same shape Go maps
 // and Python dicts use - so both halves carry one map value model and one member
-// table. The maps below are built with associate / groupBy / toMap rather than with
-// mapOf, because a global NAME is declared by each grammar's own builtin block and
-// only the interpreter half has mapOf yet (SECTION 40).
+// table. The maps below are built with associate / groupBy / toMap; the mapOf family
+// of global builders is asserted in SECTION 40.
 // A Map renders as java.util.AbstractMap.toString does: {a=1, b=2}.
 fun sec39() {
     val squares = listOf(1, 2, 3).associate { it to it * it }
@@ -1424,16 +1422,20 @@ fun sec39() {
     check("map12", fromPairs.toString() == "{1=a, 2=b}")
     check("map13", fromPairs.getValue(1) == "a")
     check("map14", fromPairs.getOrDefault(9, "?") == "?")
-    // An entry is destructurable and carries key/value. The loop reads `.entries`
-    // rather than the map itself: the compiler half's `for (x in e)` emitter walks its
-    // subject by `length` and an integer index (kotlin-to-llvm-ir.abnf, the For rule),
-    // which a Map handle cannot answer - iterating the map DIRECTLY is asserted in
-    // SECTION 40, where the interpreter-only behaviour lives.
+    // An entry is destructurable and carries key/value. Iterating the map DIRECTLY
+    // (rather than its .entries) is asserted in SECTION 40.
     var joined = ""
     for ((k, v) in fromPairs.entries) { joined += "" + k + v }
     check("map15", joined == "1a2b")
     check("map16", fromPairs.entries.size == 2)
     check("map17", fromPairs.containsValue("b") && !fromPairs.containsValue("z"))
+    // A MISS answers null, not Unit: kotlin.Map.get is declared to return V?, and the
+    // indexed form is that same get. The compiler half used to answer the runtime's
+    // undefined here (printing "kotlin.Unit", so `m[9] == null` was false) while the
+    // interpreter answered null - a live cross-half divergence with no assertion on it.
+    check("map21", fromPairs[9] == null && fromPairs.get(9) == null)
+    check("map22", "" + fromPairs[9] == "null")
+    check("map23", byLen[7] == null && squares[9] == null)
     // A Pair is (first, second) and destructures; `to` builds one.
     val p = 3 to "c"
     check("pair1", p.toString() == "(3, c)")
@@ -1448,19 +1450,18 @@ fun sec39() {
 }
 
 // ===== SECTION 40: the global BUILDERS and the this-bound scope functions =====
-// INTERPRETER ONLY, deliberately, and the only section of this file whose two halves
-// are expected to disagree until the compiler grammar catches up.
+// A global NAME is declared by each grammar's own builtin block - hostGlobals in
+// kotlin-interpreter.abnf, js_scope_decl in kotlin-to-llvm-ir.abnf - not by the shared
+// runtime, so mapOf/Pair/Triple/with/StringBuilder/buildString/sequenceOf are
+// registered in BOTH by hand. What they BUILD is a shared shape whose whole member
+// surface lives in abnf/jsrtkotlin.go, so the compiler-side port was the declaration.
 //
-// A global NAME is declared by each grammar's own builtin block - js_scope_decl in
-// kotlin-to-llvm-ir.abnf - not by the shared runtime, so mapOf/Pair/Triple/with/
-// StringBuilder/buildString/sequenceOf have to be registered there by hand. What they
-// BUILD is a shared shape whose whole member surface already lives in
-// abnf/jsrtkotlin.go, so the port is the declaration only.
-//
-// run / apply / with bind the receiver as `this`. The interpreter half has a receiver
-// channel for a bare lambda (kSetRecv, the one a lambda-with-receiver already uses)
-// and resolves an unqualified member call against a builtin receiver; the compiler
-// half passes the receiver as the lambda's argument only.
+// run / apply / with bind the receiver as `this`, so an unqualified `size` or
+// `append("a")` inside the lambda is a member call on it. The interpreter binds it
+// through kSetRecv (the channel a lambda-with-receiver already uses); the compiler's
+// lambda is a bare IR closure with no receiver slot, so the builder parks the receiver
+// on ktRecvStack and js_ktget consults it after a local and after the enclosing
+// `this` - which can only ever turn "unknown name" into a member read.
 fun sec40() {
     val m = mapOf(1 to "a", 2 to "b")
     check("gbl1", m.toString() == "{1=a, 2=b}" && m[1] == "a")
@@ -1491,9 +1492,7 @@ fun sec40() {
     var r40 = 0
     repeat(3) { r40 += it }
     check("gbl16", r40 == 3)
-    // Iterating the MAP itself (rather than its .entries) - the compiler half's For
-    // emitter reads `length` and integer-indexes its subject, so a Map handle needs an
-    // iteration rule there before this can move into SECTION 39.
+    // Iterating the MAP itself, rather than its .entries.
     var j40 = ""
     for ((k, v) in m) { j40 += "" + k + v }
     check("gbl17", j40 == "1a2b")
@@ -1503,8 +1502,6 @@ fun sec40() {
 }
 
 // ===== SECTION 41: a declared type carries its WIDTH past the declaration =====
-// INTERPRETER ONLY for now: the compiler half needs the same capture rules ported.
-//
 // SECTION 31 pinned the width a LOCAL `val x: Long = 1` carries. The same rule applies
 // at every other binding site, and none of them had it: a property, a parameter, a
 // parameter DEFAULT, a function's return type and a field WRITE all dropped the

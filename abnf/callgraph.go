@@ -219,7 +219,7 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 	fnName := map[string]string{}
 	forEachCall(func(f *ir.Func, call *ir.InstCall, callee string) {
 		switch callee {
-		case "js_scope_get", "js_kget":
+		case "js_scope_get", "js_kget", "js_ktget":
 			if len(call.Args) >= 2 {
 				if s, ok := strOf[call.Args[1]]; ok {
 					nameRead[call] = s

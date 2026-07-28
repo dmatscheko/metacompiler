@@ -47,7 +47,7 @@ Known gaps and deviations. Char is a character CODE, but the runtime's string in
 yields a one-character string, so 'a' + 1 == 'b' works while \"abc\"[1] == 'b' does not,
 and a Char put into a string renders as its number (a char literal interpolated directly,
 \"${'$'}\", is folded at compile time and is exact). An unqualified name inside an
-extension body resolves through js_kget, which falls back to the properties of `this`
+extension body resolves through js_ktget, which falls back to the properties of `this`
 only when the receiver is an object - so a bare `length` on a String receiver fails
 (write this.length). A range VALUE is materialized as a list (Kotlin's progression is
 lazy). A non-local return is delivered by raising a marker object, so a user
@@ -81,7 +81,7 @@ Functions, methods and lambdas become IR functions jsf_N(env, args) (methods get
 instance prepended, lambdas close over their scope via js_closure), classes become
 descriptor objects linked by __super (the chain the runtime walks for method lookup,
 super calls and `is`), accessors are js_defprop pairs on the descriptor, implicit
-property access goes through the js_kget/js_kset externals (locals first, then the
+property access goes through the js_ktget/js_kset externals (locals first, then the
 properties of this), method calls dispatch through js_mcall (which also implements the
 list higher order methods), and ?. compiles to a null test branching around the access
 (a phi merges the null). The whole program becomes jsmain(env, args).
@@ -264,7 +264,79 @@ StmtAnn     = "@" [ AnnTarget ":" ] ( AnnSet | KId { "." KId } [ SkipParen NotAs
 // Each segment may carry type arguments - `@[foo<A, B>(a, b) foo.bar.doo<f>.foo<bar, goo>.foo]`
 // in psi/annotation/Annotations.kt is one annotation set with a clean parse tree - so the
 // angle run is skipped after every name, not only after the last.
-AnnEntry    = KId [ SkipAngle ] { "." KId [ SkipAngle ] } [ SkipParen ] ;
+AnnEntry    = KId [ SkipAngle ] { "." KId [ SkipAngle ] } [ AnnArgsOk SkipParen ] ;
+// SkipParen consumes any balanced run, so every shape of psi/emptyArgumentsInAnnotations.kt
+// - `@Ann(1, ,)`, `@Ann(,)`, `@Ann(x =)`, `@Ann(*, 2)` - was swallowed whole where Kotlin
+// reports "Expecting an argument". This zero-width guard walks the run the skip is about
+// to eat and refuses it when a depth-1 argument is EMPTY (nothing between two commas, or
+// between the `(` and the first comma), or ends in a dangling `=` (a named argument with
+// no value) or a lone `*` (a spread with no operand). `@Ann()` and a trailing comma stay
+// legal, since both are ordinary Kotlin. The twin is AnnArgsOk in kotlin-interpreter.abnf.
+AnnArgsOk   = :script(~~
+    (function() {
+        var i = 0
+        var steps = 0
+        var ch = c.peek(i)
+        while ((ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) && steps < 100000) {
+            steps++; i++; ch = c.peek(i)
+        }
+        if (c.peek(i) !== 40) { return undefined }
+        i++
+        var depth = 1
+        var last = 40
+        var bad = false
+        while (steps < 200000) {
+            steps++
+            var b = c.peek(i)
+            if (b < 0) { break }
+            if (b === 32 || b === 9 || b === 10 || b === 13 || b === 12) { i++ }
+            else if (b === 47 && c.peek(i + 1) === 47) {
+                i = i + 2
+                var d = c.peek(i)
+                while (d >= 0 && d !== 10 && steps < 200000) { steps++; i++; d = c.peek(i) }
+            }
+            else if (b === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                var e = c.peek(i)
+                while (e >= 0 && steps < 200000) {
+                    steps++
+                    if (e === 42 && c.peek(i + 1) === 47) { i = i + 2; break }
+                    i++; e = c.peek(i)
+                }
+                last = 120
+            }
+            else if (b === 34 || b === 39) {
+                var q = b
+                i++
+                var f = c.peek(i)
+                while (f >= 0 && steps < 200000) {
+                    steps++
+                    if (f === 92) { i = i + 2; f = c.peek(i); continue }
+                    if (f === q) { i++; break }
+                    i++; f = c.peek(i)
+                }
+                last = 120
+            }
+            else if (b === 40) { depth++; i++; last = 120 }
+            else if (b === 41) {
+                depth--
+                if (depth === 0) {
+                    if (last === 61 || last === 42) { bad = true }
+                    i++
+                    break
+                }
+                i++; last = 120
+            }
+            else if (b === 44 && depth === 1) {
+                if (last === 40 || last === 44 || last === 61 || last === 42) { bad = true; break }
+                i++; last = 44
+            }
+            else { i++; if (depth === 1) { last = b } }
+        }
+        if (bad) { return abnf.newToken("\x01empty-annotation-argument", 0) }
+        return undefined
+    })()
+~~) ;
 
 // package / import headers. The package name is parsed and ignored. Each import
 // is resolved against the runtime builtins (core.stdlibImports); one that does
@@ -295,7 +367,7 @@ FunDecl     <~~ push(makeFun(takeAll(), retLblTop(), reifiedTop())); retLblPop()
 // (psi/examples/util/Comparison.kt, clean tree) - is where Kotlin's parser still accepts
 // type parameters even though the language wants them before the name. Skipped, not
 // erased into pendingReified: only the leading TypeParams position declares reified ones.
-            = KwFun [ TypeParams ] KId <~~ push(up.in); retLblPush(up.in, "fun"); reifiedPush() ~~> [ SkipAngle ] ParamList [ ":" Type ] { WhereClause | ContractClause } FunBody ;
+            = KwFun [ TypeParams ] KId <~~ push(up.in); retLblPush(up.in, "fun"); reifiedPush() ~~> [ SkipAngle ] ParamList [ ":" RetType ] { WhereClause | ContractClause } FunBody ;
 // A function CONTRACT - fun f(): Int contract [ returns() implies (x != null) ] - is a
 // static promise to the compiler's smart-cast analysis with no run-time effect, so it is
 // parsed and dropped. Its entries are ordinary expressions (callsInPlace(...),
@@ -381,9 +453,23 @@ Param       <~~ push(makeParam(takeAll())) ~~>
 // untilOperatorDifferentContexts.kt (`fun main(val x: Int = 0..<n) {}`) both carry a
 // clean tree. Same spelling as the interpreter half's Param.
             = [ Modifiers ] [ KwVararg <~~ push({isvararg: true}) ~~> ] [ Modifiers ]
-              [ ( "val" | "var" ) KwEnd ] KId <~~ push({pname: up.in}) ~~> [ ":" Type ] [ "=" ParamDefault ] ;
+              [ ( "val" | "var" ) KwEnd ] KId <~~ push({pname: up.in}) ~~> [ ":" PType ] [ "=" ParamDefault ] ;
 ParamDefault <~~ push({pdef: pop()}) ~~>
             = CollLit | Expression ;
+// A DECLARED type in a binding position - a parameter, a constructor parameter, a
+// property - captured for its WIDTH. Types are erased here, but `val x: Long = 1`
+// says the literal is a Long, and until this rule existed only a LOCAL carried that:
+// a property, a parameter, a parameter default, a field write and a return position
+// all dropped it, so a Long that never passed through a local silently stayed 32 bit
+// (`w.x * 1000000 * 1000000` answered -727379968 where java 24 prints 1000000000000).
+// It is a WRAPPER production rather than a tag on Type itself because ~40 parents
+// reference Type and a tag there would change how every one of them pops (see
+// docs/abnf-dialect-gotchas.md). The twin is PType in kotlin-interpreter.abnf.
+PType       <~~ push({pty: stripWs(up.in)}) ~~>
+            = Type ;
+// The same capture in RETURN position: `fun ret(): Long = 1` answers a Long.
+RetType     <~~ push({rty: stripWs(up.in)}) ~~>
+            = Type ;
 // [1, 2, 3] - Kotlin's collection literal. It is legal ONLY as an annotation argument
 // or as the default of an annotation-class parameter, so it lives here rather than in
 // Primary, where it would make `[a]` a valid expression anywhere. It builds a list.
@@ -457,7 +543,7 @@ CtorParams  <~~ push({cparams: takeAll()}) ~~>
 // the default is not supplied at call sites, but the header parses (common in data
 // classes - data class Spec(val action: String = "", val flags: Int = 0)).
 CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
-            = [ Modifiers ] [ KwVararg <~~ push({isvararg: true}) ~~> ] [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] KId <~~ push({pname: up.in}) ~~> ":" Type [ "=" ParamDefault ] ;
+            = [ Modifiers ] [ KwVararg <~~ push({isvararg: true}) ~~> ] [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] KId <~~ push({pname: up.in}) ~~> ":" PType [ "=" ParamDefault ] ;
 
 // A nested typealias is erased exactly like a top-level one.
 Member      = [ Modifiers ] ( InitBlock | CompanionBlk | CompanionObject | SecondaryCtor | NestedClass | NestedType | TypeAlias | AccessorProp | UnsupAccessor | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | AbstractFun | UnsupFun ) ;
@@ -513,7 +599,7 @@ NestedTypeSkip <~~ notImpl("nested type declaration", up.pos) ~~>
 // still exists - an implicit `name = ...` in a method resolves to this.name, and a read
 // before assignment yields null (the flat, dispatch-by-name model has no real subclass).
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
-            = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] [ "=" Expression ] { PropVis } [ ";" ] ;
+            = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" PType ] [ "=" Expression ] { PropVis } [ ";" ] ;
 PropVis     = [ Modifiers ] ( KwGet | KwSet ) NotParen ;
 // A delegated property (val/var x [: T] by <delegate>). The `by lazy { init }` form
 // is GENUINE (see LazyProp): the initializer is lowered once and its value becomes a
@@ -735,10 +821,10 @@ DEntProp    = KId <~~ push({dk: "prop", ds: up.in}) ~~> ;
 // purely lexical question, decided here at walk time from the return-target stack: the
 // top entry is a lambda's label exactly when we are inside a lambda argument.
 Return      <~~ var nl = inLambdaBody(); push(makeReturn(takeAll(), nl)) ~~>
-            = KwReturn [ Expression ] [ ";" ] ;
+            = KwReturn NoSpacedAt [ Expression ] [ ";" ] ;
 
-Break       <~~ push(makeBreak()) ~~>    = KwBreak [ ";" ] ;
-Continue    <~~ push(makeContinue()) ~~> = KwContinue [ ";" ] ;
+Break       <~~ push(makeBreak()) ~~>    = KwBreak NoSpacedAt [ ";" ] ;
+Continue    <~~ push(makeContinue()) ~~> = KwContinue NoSpacedAt [ ";" ] ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
             = ";" ;
@@ -1242,9 +1328,9 @@ BreakAtExpr <~~ push(exprOfStmt(makeBreakTo(pop().lbl, up.pos))) ~~>
 ContinueAtExpr <~~ push(exprOfStmt(makeContinueTo(pop().lbl, up.pos))) ~~>
             = KwContinue AtAdjacent "@" KId <~~ push({lbl: up.in}) ~~> ;
 ReturnExpr  <~~ var nl = inLambdaBody(); push(makeReturnExpr(takeAll(), nl)) ~~>
-            = KwReturn NotAtLbl [ SameLine Expression ] ;
-BreakExpr    <~~ push(makeBreakExpr()) ~~>    = KwBreak NotAtLbl ;
-ContinueExpr <~~ push(makeContinueExpr()) ~~> = KwContinue NotAtLbl ;
+            = KwReturn NotAtLbl NoSpacedAt [ SameLine Expression ] ;
+BreakExpr    <~~ push(makeBreakExpr()) ~~>    = KwBreak NotAtLbl NoSpacedAt ;
+ContinueExpr <~~ push(makeContinueExpr()) ~~> = KwContinue NotAtLbl NoSpacedAt ;
 // A LABEL on an ordinary operand - `1 + label3@ 3 + 4`, `l1@ foo bar l2@ baz`. Kotlin's
 // own tree (psi/newLabels/basic.txt) records each as a LABELED_EXPRESSION wrapping the
 // operand, so the label binds at the PRIMARY level. It names nothing on an ordinary
@@ -1376,7 +1462,13 @@ Template    <~~ push(makeTemplate(takeAll())) ~~>
             = '"' :whitespace() { TplExpr | TplVar | TplChunk } '"' :whitespace(Whitespace) ;
 TplExpr     <~~ push({e: pop()}) ~~>
             = "${" :whitespace(Whitespace) Expression "}" ;
-TplVar      = "$" TplName <~~ push({e: makeVarRef(up.in)}) ~~> ;
+// A SHORT template entry names a variable, and a hard keyword is not one: Kotlin
+// records `"$try"` as an error (psi/stringTemplates/
+// StringTemplateWithTryWithoutBlockInShortEntry.kt), and the long form `${try ...}` is
+// how a keyword-led expression is interpolated. `$` on its own is already ordinary text
+// in TplPlain, so a refused TplVar cannot fall through to TplChunk and the whole string
+// is refused - which is the reject this guard is for. Same spelling as the interpreter.
+TplVar      = "$" NotHardKw TplName <~~ push({e: makeVarRef(up.in)}) ~~> ;
 TplName     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
 TplChunk    <~~ push({s: unescapeJs(up.in)}) ~~>
             = TplChar { TplChar } ;
@@ -1405,7 +1497,12 @@ VarRef      <~~ push(makeVarRef(up.in)) ~~>
 // `this` (no @label) is lowered through VarRef, which is where the receiver lives.
 NotHardKw   = :script(~~
     (function() {
-        var hard = "|as|break|class|continue|do|else|false|for|fun|if|in|interface|is|null"
+        // catch / finally are here for the same reason the interpreter half has them:
+        // without them `catch` with no parameter list (psi/recovery/CatchKeywordRBrace.kt,
+        // which Kotlin records as an error) parsed as an ordinary identifier expression
+        // and the file was accepted.
+        var hard = "|as|break|catch|class|continue|do|else|false|finally|for|fun|if|in"
+            + "|interface|is|null"
             + "|object|package|return|super|throw|true|try|typealias|typeof|val|var"
             + "|when|while|"
         var i = 0
@@ -1480,6 +1577,46 @@ ReturnAt    <~~ push(makeReturnAt(takeAll(), up.pos)) ~~>
 AtAdjacent  = :script(~~
     (function() {
         return (c.peek(0) === 64) ? undefined : abnf.newToken("\x01need-adjacent-at", 0)
+    })()
+~~) ;
+// The other half of the same rule, and the one that makes the file REJECT rather than
+// merely mis-parse. AtAdjacent only declines the labelled alternative; the bare
+// `break` / `continue` / `return` then matches and the stranded `@l1` is read as an
+// ANNOTATION on the next declaration, so `break @l1` parsed clean. Kotlin's parser
+// reports "There should be no space or comments before '@' in label reference"
+// (psi/newLabels/spaceBeforeLabelReference.kt) for every one of `break @l1`,
+// `return @l2 1`, `continue @l4 5`, `break/**/@l5` and `return//\n@l7 4` - so a `@`
+// reachable from a control keyword across whitespace OR comments is an error, not an
+// annotation. This guard therefore does the full skip (spaces, tabs, CR, LF, form
+// feed, `//` to end of line and `/* */`) the way a refusing guard must, and fails the
+// unlabelled alternative outright.
+NoSpacedAt  = :script(~~
+    (function() {
+        var i = 0
+        var steps = 0
+        while (steps < 100000) {
+            steps++
+            var ch = c.peek(i)
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { i++ }
+            else if (ch === 47 && c.peek(i + 1) === 47) {
+                i = i + 2
+                var d = c.peek(i)
+                while (d >= 0 && d !== 10 && steps < 100000) { steps++; i++; d = c.peek(i) }
+            }
+            else if (ch === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                var e = c.peek(i)
+                while (e >= 0 && steps < 100000) {
+                    steps++
+                    if (e === 42 && c.peek(i + 1) === 47) { i = i + 2; break }
+                    i++
+                    e = c.peek(i)
+                }
+            }
+            else { break }
+        }
+        if (c.peek(i) === 64) { return abnf.newToken("\x01spaced-label-ref", 0) }
+        return undefined
     })()
 ~~) ;
 
@@ -1618,7 +1755,7 @@ UnsupType   = Interface | ObjectDecl | EnumClass | AnnotationClass | TypeAlias ;
 // plus the closures of its DEFAULT methods. It has no __ctor (it is never
 // constructed); its abstract members contribute only their names (see AbstractFun),
 // and its properties are abstract, so no field is emitted - the implementing class
-// initializes them on the instance, where js_kget finds them. An implementing class
+// initializes them on the instance, where js_ktget finds them. An implementing class
 // puts the interface on its __super chain, so the runtime's memberCall finds the
 // default methods and js_is_type answers `x is Interface`. The body is optional (a
 // marker interface); a body outside the member subset falls back to InterfaceSkip.
@@ -1731,7 +1868,7 @@ InitBlock   <~~ push({initblk: pop()}) ~~>
 // descriptor (properties as fields, methods into a holder the descriptor's __class
 // points at), so ClassName.member and ClassName.m() work. A body outside the subset
 // falls back to CompanionSkip (notImplemented).
-CompanionObject = CompanionBlock | CompanionReal | CompanionSkip ;
+CompanionObject = CompanionBlock | CompanionReal ;
 // `companion { ... }` - the brace-only spelling of a companion object. Same members,
 // same lowering; it just has no `object` keyword and no name.
 CompanionBlock <~~ push({companion: takeAll()}) ~~>
@@ -1765,10 +1902,15 @@ CtorDelegate <~~ push({cdeleg: takeAll()}) ~~>
 // slot (see the makeVarRef / makeAssign overrides). A property with only a getter and no
 // initializer has no backing field, which is the computed-property case.
 AccessorProp <~~ push({accprop: makeAccessorProp(takeAll())}) ~~>
-            = ( "val" | "var" ) KwEnd KId <~~ push({apname: up.in}) ~~> [ ":" Type ] [ "=" PropInit ] Accessor { Accessor } ;
+            = ( "val" | "var" ) KwEnd KId <~~ push({apname: up.in}) ~~> [ ":" PType ] [ "=" PropInit ] AccRun ;
 PropInit    <~~ push({apinit: pop()}) ~~>
             = Expression ;
 Accessor    = GetAcc | SetAcc ;
+// Kotlin allows at MOST one getter and one setter, in either order. Spelling the run
+// as `AccRun` accepted `get() = 0 get() = 0` (psi/DuplicateAccessor.kt,
+// which Kotlin's own parser records as an error), so the run is spelled the way the
+// interpreter half spells it: one of each kind, either order.
+AccRun      = GetAcc [ SetAcc ] | SetAcc [ GetAcc ] ;
 GetAcc      <~~ push({getter: pop()}) ~~>
             = [ Modifiers ] KwGet "(" ")" [ ":" Type ] [ ContractClause ] AccBody [ ";" ] ;
 SetAcc      <~~ push(makeSetAcc(takeAll())) ~~>
@@ -1787,16 +1929,16 @@ AccBody     = Block | "=" ExprBody ;
 // it SEMANTICALLY (an extension property has no backing field), not syntactically, and
 // the initializer is dropped here for the same reason.
 ExtProp     <~~ push(makeExtProp(takeAll())) ~~>
-            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push({apname: up.in}) ~~> [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] Accessor { Accessor } ;
+            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push({apname: up.in}) ~~> [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] AccRun ;
 // A TOP-LEVEL computed property. There is no instance to hang an accessor on, so the
 // getter runs ONCE at the declaration and the name is bound to that value - a deviation
 // from Kotlin, which re-evaluates the getter on every read.
 TopAccProp  <~~ push(makeTopAccProp(takeAll())) ~~>
-            = ( "val" | "var" ) KwEnd [ SkipAngle ] KId <~~ push({apname: up.in}) ~~> [ ":" Type ] [ WhereClause ] Accessor { Accessor } ;
+            = ( "val" | "var" ) KwEnd [ SkipAngle ] KId <~~ push({apname: up.in}) ~~> [ ":" Type ] [ WhereClause ] AccRun ;
 // The forms left over: a MEMBER extension property (two receivers, which the single
 // `this` model cannot express) and a delegated accessor property.
 UnsupAccessor <~~ push(notImplStmt("property accessor", up.pos)) ~~>
-            = ( "val" | "var" ) KwEnd [ SkipAngle ] [ { TypeAnno } RecvSeg { RecvSeg } ] KId [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] Accessor { Accessor } ;
+            = ( "val" | "var" ) KwEnd [ SkipAngle ] [ { TypeAnno } RecvSeg { RecvSeg } ] KId [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] AccRun ;
 
 // A destructuring declaration: accepted, reported as not implemented; the
 // initializer still runs so its calls stay visible under -warn-unsupported.
@@ -2187,11 +2329,12 @@ KwContract  = "contract" KwEnd ;
     // INSIDE the callee (so it can read the earlier parameters and `this`), exactly
     // where Kotlin evaluates it.
     function makeParam(items) {
-        var rec = {name: null, def: null, vararg: false}
+        var rec = {name: null, def: null, vararg: false, ty: ""}
         for (var i = 0; i < items.length; i++) {
             if (items[i].pname != undefined) { rec.name = items[i].pname }
             else if (items[i].pdef != undefined) { rec.def = items[i].pdef }
             else if (items[i].isvararg != undefined) { rec.vararg = true }
+            else if (items[i].pty != undefined) { rec.ty = items[i].pty }
         }
         return rec
     }
@@ -2200,13 +2343,15 @@ KwContract  = "contract" KwEnd ;
     function makeParamList(items) {
         var names = []
         var defs = []
+        var tys = []
         var varargAt = -1
         for (var i = 0; i < items.length; i++) {
             names.push(items[i].name)
             defs.push(items[i].def)
+            tys.push(items[i].ty == undefined ? "" : items[i].ty)
             if (items[i].vararg) { varargAt = i }
         }
-        return {params: names, defs: defs, varargAt: varargAt}
+        return {params: names, defs: defs, tys: tys, varargAt: varargAt}
     }
     // Place named arguments into the callee's positional slots. Unnamed arguments fill
     // from the left in order; a named one lands at its parameter's index; a slot no
@@ -2295,7 +2440,33 @@ KwContract  = "contract" KwEnd ;
             r.b.NewBr(mergeB)
             b = mergeB
         }
+        // A DECLARED parameter type carries its width, exactly as a declared local type
+        // does: `fun f(v: Long = 1)` binds a 64 bit 1 whether the caller passed it or the
+        // default supplied it, so this runs AFTER the defaults above. Verified against
+        // java 24: `dflt41() * 1000000 * 1000000` is 1000000000000, not -727379968.
+        if (sig.tys != undefined) {
+            for (var t = 0; t < sig.tys.length; t++) {
+                b = emitAdoptSlot(b, sig.params[t], sig.tys[t])
+            }
+        }
         return b
+    }
+    // Re-bind a scope slot to its declared type's width. A no-op for a type that is not
+    // integral / Double / Float, so nothing is emitted for the ordinary case.
+    function emitAdoptSlot(b, name, ty) {
+        if (ty == undefined || ty == "") { return b }
+        var dw = ktWidthOfType(ty)
+        if (dw.w == 0 && dw.flo != true) { return b }
+        var nameV = emitStr(b, name)
+        var curV = callExt(b, "js_scope_get", [curScopeV, nameV])
+        callExt(b, "js_scope_set", [curScopeV, nameV, emitAdoptV(b, curV, dw)])
+        return b
+    }
+    // One value, retyped by a declared type's width record.
+    function emitAdoptV(b, v, dw) {
+        if (dw.w > 0) { return callExt(b, "js_ktadopt", [v, emitNum(b, dw.w), dw.u ? hTrue : hFalse]) }
+        if (dw.flo == true) { return callExt(b, "js_ktadoptf", [v]) }
+        return v
     }
 
     // A declaration that is fully ERASED: it parses, contributes nothing to the module,
@@ -2801,7 +2972,7 @@ KwContract  = "contract" KwEnd ;
                 // uses the name: call ext$name directly, receiver prepended (it may
                 // be null for a nullable-receiver extension; ?. still skips first).
                 if (extResolves(s.name)) {
-                    var efV = callExt(b, "js_kget", [curScopeV, emitStr(b, "ext$" + s.name)])
+                    var efV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "ext$" + s.name)])
                     var eargsV = callExt(b, "js_arr_new", [])
                     callExt(b, "js_arr_push", [eargsV, cur])
                     var eargs = orderArgs(s.args, funParams["$" + s.name])
@@ -2833,7 +3004,7 @@ KwContract  = "contract" KwEnd ;
                     var lamRecv = cur
                     var lea = emitArgs(b, orderArgs(s.args, undefined))
                     var lb = lea.b
-                    var lamV = callExt(lb, "js_kget", [curScopeV, emitStr(lb, s.name)])
+                    var lamV = callExt(lb, "js_ktget", [curScopeV, emitStr(lb, s.name)])
                     var callArgsV = callExt(lb, "js_arr_new", [])
                     callExt(lb, "js_arr_push", [callArgsV, lamRecv])
                     b = emitConcatArgs(lb, callArgsV, lea.v)
@@ -2890,25 +3061,29 @@ KwContract  = "contract" KwEnd ;
                 // An extension property wins only when no builtin and no class property
                 // uses the name: call its getter with the receiver as `this`.
                 if (extPropResolves(s.name)) {
-                    var gV = callExt(b, "js_kget", [curScopeV, emitStr(b, "extp$" + s.name)])
+                    var gV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "extp$" + s.name)])
                     var gargsV = callExt(b, "js_arr_new", [])
                     callExt(b, "js_arr_push", [gargsV, cur])
                     return {b: b, v: callExt(b, "js_call", [gV, hUndef, gargsV])}
                 }
                 var fname = s.name == "size" ? "length" : s.name
-                // js_rxktget is js_get plus Regex.pattern and the MatchResult
-                // properties (value / range / groupValues / groups / destructured);
-                // every other receiver falls through to js_get.
-                return {b: b, v: callExt(b, "js_rxktget", [cur, emitStr(b, fname)])}
+                // js_ktfget is the StringBuilder box's properties, plus a Map MISS as
+                // null (kotlin.Map.get answers null where the shared js_get answers
+                // undefined), then js_rxktget - js_get plus Regex.pattern and the
+                // MatchResult properties (value / range / groupValues / groups /
+                // destructured). Every other receiver falls through to js_get.
+                return {b: b, v: callExt(b, "js_ktfget", [cur, emitStr(b, fname)])}
             }
             // a[i]: the `get` convention when some class declares it, else the plain
             // read. js_kindex, not js_get, so a STRING yields the Char at that index
             // (Kotlin's CharSequence.get) while a list still yields its element.
             var ir2 = s.idx(b)
             var keyV = ir2.v
-            // js_rxktindex is js_kindex plus m.groups[i] / m.groups["name"].
+            // js_ktindex is a Map MISS as null (kotlin.Map.get answers null where the
+            // shared read answers undefined), then js_rxktindex - js_kindex plus
+            // m.groups[i] / m.groups["name"].
             return emitOpDispatch(ir2.b, cur, "get", [keyV], function(bb) {
-                return callExt(bb, "js_rxktindex", [cur, keyV])
+                return callExt(bb, "js_ktindex", [cur, keyV])
             })
         }
         return function(b) {
@@ -3252,6 +3427,7 @@ KwContract  = "contract" KwEnd ;
         var clsV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
         callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+        b = emitPTypes(b, clsV, null, props)
         b = emitSuperLinks(b, clsV, supers, own)
         var savedSuper = emitSuperName
         emitClassNames.push(name)
@@ -3328,7 +3504,7 @@ KwContract  = "contract" KwEnd ;
             // level, where it is an ordinary call on a value of that name.
             if (emitClassTop() != null && classNames[name] == undefined
                 && funNames["$" + name] != true && classMethodNames["$" + name] == true) {
-                var selfV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
+                var selfV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
                 var ma = emitArgs(b, orderArgs(args, methodParams["$" + name]))
                 return {b: ma.b, v: callExt(ma.b, "js_ktsmcall", [selfV, emitStr(ma.b, name), ma.v])}
             }
@@ -3349,7 +3525,7 @@ KwContract  = "contract" KwEnd ;
                 callExt(b, "js_call", [ctorV, hUndef, argsV])
                 return {b: b, v: objV}
             }
-            var fV = callExt(b, "js_kget", [curScopeV, emitStr(b, name)])
+            var fV = callExt(b, "js_ktget", [curScopeV, emitStr(b, name)])
             var ea = emitArgs(b, orderArgs(args, funParams["$" + name]))
             b = ea.b
             // `v(args)` where v holds an instance of a class declaring the invoke
@@ -3365,7 +3541,7 @@ KwContract  = "contract" KwEnd ;
     }
 
     function emitRefPath(b, ref) {
-        var o = callExt(b, "js_kget", [curScopeV, emitStr(b, ref.name)])
+        var o = callExt(b, "js_ktget", [curScopeV, emitStr(b, ref.name)])
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) {
@@ -3391,7 +3567,7 @@ KwContract  = "contract" KwEnd ;
             var v = r.v
             if (ref.name == "field" && ref.path.length == 0 && emitBackingField != null) {
                 // `field = v` inside an accessor writes the backing field of its property.
-                var fThisV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
+                var fThisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
                 var fNameV = emitStr(b, emitBackingField)
                 if (op != "=") {
                     var oldF = callExt(b, "js_get", [fThisV, fNameV])
@@ -3403,7 +3579,7 @@ KwContract  = "contract" KwEnd ;
             } else if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
                 if (op != "=") {
-                    var old = callExt(b, "js_kget", [curScopeV, nameV])
+                    var old = callExt(b, "js_ktget", [curScopeV, nameV])
                     var ro = emitOpBin(b, op, old, v)
                     b = ro.b
                     v = ro.v
@@ -3418,7 +3594,7 @@ KwContract  = "contract" KwEnd ;
                     b = rm.b
                     v = rm.v
                 }
-                callExt(b, "js_set", [p.obj, p.key, v])
+                callExt(b, "js_ktset", [p.obj, p.key, v])
             }
             return {b: b, v: v}
         }
@@ -3456,7 +3632,7 @@ KwContract  = "contract" KwEnd ;
                     bb = ro.b
                     v = ro.v
                 }
-                callExt(bb, "js_set", [objV, keyV, v])
+                callExt(bb, "js_ktset", [objV, keyV, v])
                 return {b: bb, v: v}
             }
         }
@@ -3484,14 +3660,14 @@ KwContract  = "contract" KwEnd ;
             var oneV = emitNum(b, step)
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
-                var newV = callExt(b, "js_ktstep", [callExt(b, "js_kget", [curScopeV, nameV]), oneV])
+                var newV = callExt(b, "js_ktstep", [callExt(b, "js_ktget", [curScopeV, nameV]), oneV])
                 callExt(b, "js_kset", [curScopeV, nameV, newV])
                 return {b: b, v: newV}
             }
             var p = emitRefPath(b, ref)
             b = p.b
             var newM = callExt(b, "js_ktstep", [callExt(b, "js_get", [p.obj, p.key]), oneV])
-            callExt(b, "js_set", [p.obj, p.key, newM])
+            callExt(b, "js_ktset", [p.obj, p.key, newM])
             return {b: b, v: newM}
         }
     }
@@ -3502,14 +3678,14 @@ KwContract  = "contract" KwEnd ;
             var oneV = emitNum(b, step)
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
-                var oldV = callExt(b, "js_kget", [curScopeV, nameV])
+                var oldV = callExt(b, "js_ktget", [curScopeV, nameV])
                 callExt(b, "js_kset", [curScopeV, nameV, callExt(b, "js_ktstep", [oldV, oneV])])
                 return {b: b, v: oldV}
             }
             var p = emitRefPath(b, ref)
             b = p.b
             var oldM = callExt(b, "js_get", [p.obj, p.key])
-            callExt(b, "js_set", [p.obj, p.key, callExt(b, "js_ktstep", [oldM, oneV])])
+            callExt(b, "js_ktset", [p.obj, p.key, callExt(b, "js_ktstep", [oldM, oneV])])
             return {b: b, v: oldM}
         }
     }
@@ -3582,8 +3758,7 @@ KwContract  = "contract" KwEnd ;
             var v = r.v
             // js_ktadopt narrows only an INTEGRAL value, so `val s: String = "x"` and
             // a lambda pass through untouched.
-            if (dw.w > 0) { v = callExt(b, "js_ktadopt", [v, emitNum(b, dw.w), dw.u ? hTrue : hFalse]) }
-            else if (dw.flo == true) { v = callExt(b, "js_ktadoptf", [v]) }
+            v = emitAdoptV(b, v, dw)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
             return b
         }
@@ -3889,6 +4064,7 @@ KwContract  = "contract" KwEnd ;
                 b = r.b
                 v = r.v
             }
+            v = emitRetAdopt(b, v)
             if (nonLocal == true) { return retNonLocal(b, v) }
             return retStmt(b, v) // plain ret, or a control signal when leaving a try body
         }
@@ -3930,7 +4106,10 @@ KwContract  = "contract" KwEnd ;
     // excDispatch re-issues), and js_try routes the marker to nlCatchBody.
     function wrapNonLocal(bodyT) {
         return function(b) {
-            var tryClo = callExt(b, "js_closure", [handle(emitFunc([], bodyT, false, true)), curScopeV])
+            var tryClo = callExt(b, "js_closure",
+                                 [handle(emitFunc([], bodyT, false, true,
+                                                  {params: [], defs: [], tys: [], varargAt: -1, rty: curRetTy})),
+                                  curScopeV])
             var catchClo = callExt(b, "js_closure", [handle(emitFunc(["__nl"], nlCatchBody, false, false)), curScopeV])
             var ctl = callExt(b, "js_try", [tryClo, catchClo, hUndef])
             var nb = excDispatch(b, ctl)
@@ -3941,7 +4120,7 @@ KwContract  = "contract" KwEnd ;
     function makeExprBody(t) {
         return function(b) {
             var r = t(b)
-            r.b.NewRet(r.v)
+            r.b.NewRet(emitRetAdopt(r.b, r.v))
             return deadBlock()
         }
     }
@@ -3958,6 +4137,8 @@ KwContract  = "contract" KwEnd ;
         var savedScope = curScopeV
         var savedLoops = loopStack
         var savedTag = curFTag
+        var savedRetTy = curRetTy
+        curRetTy = (sig == undefined || sig == null || sig.rty == undefined) ? "" : sig.rty
         curF = f
         curFTag = idx
         loopStack = []
@@ -3986,11 +4167,36 @@ KwContract  = "contract" KwEnd ;
         curScopeV = savedScope
         loopStack = savedLoops
         curFTag = savedTag
+        curRetTy = savedRetTy
         return idx
+    }
+    // The declared RETURN type of the IR function being emitted, "" when it declares
+    // none. A lambda emitted inside a typed function resets it (emitFunc saves and
+    // restores), so only the function that declared the type retypes its own returns.
+    var curRetTy = ""
+    // One returned value, retyped by the enclosing function's declared return type.
+    // Applied at makeReturn and makeExprBody, so the block form (`fun f(): Long {
+    // return 1 }`) and the expression form (`fun f(): Long = 1`) both go through it -
+    // the same split kRetAdopt makes in kotlin-interpreter.abnf.
+    function emitRetAdopt(b, v) {
+        if (curRetTy == "") { return v }
+        var dw = ktWidthOfType(curRetTy)
+        if (dw.w == 0 && dw.flo != true) { return v }
+        return emitAdoptV(b, v, dw)
     }
     function makeFun(items, retEntry, reified) {
         var sig = items[1]
         var params = sig.params
+        // The DECLARED return type rides on the signature record, which every emitFunc
+        // call site already hands over - so `fun ret(): Long = 1` answers a Long without
+        // a new parameter on any of them. RetType pushes {rty} between the parameter
+        // list and the body, so the body is found by scanning rather than at items[2].
+        var rty = ""
+        var bodyAt = 2
+        if (items[bodyAt] != undefined && items[bodyAt] != null && items[bodyAt].rty != undefined) {
+            rty = items[bodyAt].rty
+            bodyAt++
+        }
         // A reified type parameter becomes a hidden trailing parameter holding the type
         // name; the call sites append the matching type argument. Note the rebuild: a
         // record that travelled through the tag stack hands back a FRESH array on every
@@ -4003,10 +4209,11 @@ KwContract  = "contract" KwEnd ;
                 params.push(reifiedSlot(reified[r]))
                 defs.push(null)
             }
-            sig = {params: params, defs: defs, varargAt: sig.varargAt}
+            sig = {params: params, defs: defs, tys: sig.tys, varargAt: sig.varargAt}
         }
+        sig = {params: sig.params, defs: sig.defs, tys: sig.tys, varargAt: sig.varargAt, rty: rty}
         funParams["$" + items[0]] = params
-        var body = items[2]
+        var body = items[bodyAt]
         // A non-local return somewhere inside marked this function's return-target entry;
         // its body then needs the catch wrapper that delivers the marker as a return.
         if (retEntry != null && retEntry.nl == true) { body = wrapNonLocal(body) }
@@ -4037,12 +4244,13 @@ KwContract  = "contract" KwEnd ;
     // A primary constructor parameter: a name, whether `val`/`var` makes it a property,
     // and the same default / vararg information an ordinary parameter carries.
     function makeCtorParam(items) {
-        var rec = {name: null, prop: false, def: null, vararg: false}
+        var rec = {name: null, prop: false, def: null, vararg: false, ty: ""}
         for (var i = 0; i < items.length; i++) {
             if (items[i].pname != undefined) { rec.name = items[i].pname }
             else if (items[i].vv != undefined) { rec.prop = true }
             else if (items[i].pdef != undefined) { rec.def = items[i].pdef }
             else if (items[i].isvararg != undefined) { rec.vararg = true }
+            else if (items[i].pty != undefined) { rec.ty = items[i].pty }
         }
         return rec
     }
@@ -4050,23 +4258,77 @@ KwContract  = "contract" KwEnd ;
     function ctorSig(cparams) {
         var names = []
         var defs = []
+        var tys = []
         var varargAt = -1
         for (var i = 0; i < cparams.length; i++) {
             names.push(cparams[i].name)
             defs.push(cparams[i].def)
+            tys.push(cparams[i].ty == undefined ? "" : cparams[i].ty)
             if (cparams[i].vararg) { varargAt = i }
         }
-        return {params: names, defs: defs, varargAt: varargAt}
+        return {params: names, defs: defs, tys: tys, varargAt: varargAt}
     }
     // Property names declared by some class: an extension property never shadows them.
     function notePropName(name) { classPropNames["$" + name] = true }
+    // The declared type of each SIZED property, stored on the class descriptor so that
+    // a field WRITE can adopt it: `var y: Long = 1` followed by `w.y = 1` has to store
+    // a Long, and without this it stored a plain Int, so `w.y * 1000000 * 1000000`
+    // answered -727379968 where java 24 prints 1000000000000. Only widths are recorded,
+    // so a class with no sized property emits exactly the IR it did before. The twin is
+    // kInstallPTypes / kFieldTy in kotlin-interpreter.abnf; js_ktset consults it.
+    function emitPTypes(b, clsV, cparams, inits) {
+        var names = []
+        var tys = []
+        if (cparams != undefined && cparams != null) {
+            for (var i = 0; i < cparams.length; i++) {
+                if (cparams[i].prop == true) { names.push(cparams[i].name); tys.push(cparams[i].ty) }
+            }
+        }
+        if (inits != undefined && inits != null) {
+            for (var j = 0; j < inits.length; j++) {
+                if (inits[j].prop != undefined) { names.push(inits[j].prop); tys.push(inits[j].ty) }
+            }
+        }
+        var keep = []
+        var keepT = []
+        for (var k = 0; k < names.length; k++) {
+            var ty = tys[k]
+            if (ty == undefined || ty == "") { continue }
+            var dw = ktWidthOfType(ty)
+            if (dw.w == 0 && dw.flo != true) { continue }
+            keep.push(names[k])
+            keepT.push(ty)
+        }
+        if (keep.length == 0) { return b }
+        var tV = callExt(b, "js_obj_new", [])
+        for (var q = 0; q < keep.length; q++) {
+            callExt(b, "js_set", [tV, emitStr(b, keep[q]), emitStr(b, keepT[q])])
+        }
+        callExt(b, "js_set", [clsV, emitStr(b, "__ptypes"), tV])
+        return b
+    }
     function makeProp(items) {
         notePropName(items[0])
+        var ty = ""
+        var at = 1
+        if (items[at] != undefined && items[at].pty != undefined) { ty = items[at].pty; at++ }
         // A bodiless property (abstract/lateinit/interface: no `= init`) still needs a
         // backing field so an implicit `name = ...` in a method resolves to this.name and
         // reads before assignment are defined. Default it to null (identical to `= null`).
-        if (items[1] == undefined) { return {prop: items[0], init: makeConst(null)} }
-        return {prop: items[0], init: items[1]}
+        if (items[at] == undefined) { return {prop: items[0], init: makeConst(null), ty: ty} }
+        return {prop: items[0], init: ktAdoptThunk(items[at], ty), ty: ty}
+    }
+    // Wrap a property initializer so its value adopts the declared type, the way a
+    // local's does. Returns the thunk unchanged when the type carries no width, so a
+    // program that declares no sized property emits exactly the IR it did before.
+    function ktAdoptThunk(t, ty) {
+        if (ty == undefined || ty == "" || t == undefined || t == null) { return t }
+        var dw = ktWidthOfType(ty)
+        if (dw.w == 0 && dw.flo != true) { return t }
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: emitAdoptV(r.b, r.v, dw)}
+        }
     }
 
     // The super-constructor call of `class C(...) : Base(args)`. A user Base runs its
@@ -4116,7 +4378,6 @@ KwContract  = "contract" KwEnd ;
         for (var k = 0; k < cparams.length; k++) {
             var pv = callExt(b, "js_arg", [f.Params[1], handle(k + 1)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cparams[k].name), pv])
-            if (cparams[k].prop) callExt(b, "js_set", [thisV, emitStr(b, cparams[k].name), pv])
         }
         if (supers == undefined) { supers = [] }
         for (var d = 0; d < supers.length; d++) {
@@ -4126,6 +4387,16 @@ KwContract  = "contract" KwEnd ;
             callExt(b, "js_set", [thisV, emitStr(b, "__deleg" + d), rd.v])
         }
         b = emitParamSig(b, ctorSig(cparams), f.Params[1], 1)
+        // The `val`/`var` constructor parameters become fields AFTER emitParamSig, not
+        // before: a parameter the caller left out holds undefined until the default
+        // runs, so storing it first put undefined on the instance (`Widths41(1L).b`
+        // read 0 where its declared default is 127), and the declared WIDTH is applied
+        // by the same pass.
+        for (var k2 = 0; k2 < cparams.length; k2++) {
+            if (!cparams[k2].prop) { continue }
+            var nv = emitStr(b, cparams[k2].name)
+            callExt(b, "js_set", [thisV, nv, callExt(b, "js_scope_get", [curScopeV, nv])])
+        }
         b = emitSuperCtor(b, thisV, (supers.length > 0 ? supers[0] : null))
         for (var p = 0; p < inits.length; p++) {
             if (inits[p].initblk != undefined) { b = inits[p].initblk(b); continue }
@@ -4194,12 +4465,12 @@ KwContract  = "contract" KwEnd ;
                 return {b: b, v: callExt(b, "js_rxktglobal", [emitStr(b, name)])}
             }
             if (emitOuterProps != null && emitOuterProps["$" + name] == true) {
-                var itV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
+                var itV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
                 return {b: b, v: callExt(b, "js_get", [callExt(b, "js_get", [itV, emitStr(b, "__outer")]),
                                                        emitStr(b, name)])}
             }
             if (name == "field" && emitBackingField != null) {
-                var thisV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
+                var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
                 return {b: b, v: callExt(b, "js_get", [thisV, emitStr(b, emitBackingField)])}
             }
             return {b: b, v: callExt(b, core.scopeGetExt, [curScopeV, emitStr(b, name)])}
@@ -4645,7 +4916,7 @@ KwContract  = "contract" KwEnd ;
     function emitClassTop() { return emitClassNames.length > 0 ? emitClassNames[emitClassNames.length - 1] : null }
     function makeThisAt(lbl) {
         return function(b) {
-            var thisV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
+            var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
             var top = emitClassTop()
             // A label naming an ENCLOSING class is the inner instance's outer receiver.
             if (top != null && top != lbl) {
@@ -4657,7 +4928,7 @@ KwContract  = "contract" KwEnd ;
     }
     function makeIsInit(name) {
         return function(b) {
-            var thisV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
+            var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
             return {b: b, v: callExt(b, "js_sne", [callExt(b, "js_get", [thisV, emitStr(b, name)]), hNull])}
         }
     }
@@ -4717,6 +4988,7 @@ KwContract  = "contract" KwEnd ;
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            b = emitPTypes(b, clsV, hdr.cparams, parts.inits)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             b = emitSuperLinks(b, clsV, hdr.supers, own)
             b = emitDelegates(b, clsV, hdr.supers, own)
@@ -4787,6 +5059,7 @@ KwContract  = "contract" KwEnd ;
             // js_ktstr can render an entry as its NAME (java.lang.Enum.toString)
             // instead of the Name@1 an ordinary instance gets.
             callExt(b, "js_set", [clsV, emitStr(b, "__isenum"), hTrue])
+            b = emitPTypes(b, clsV, hdr.cparams, parts.inits)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             b = emitSuperLinks(b, clsV, hdr.supers, own)
             var ctorIdx = emitCtor(hdr.cparams, parts.inits, hdr.supers)
@@ -4940,7 +5213,7 @@ KwContract  = "contract" KwEnd ;
         return function(b) {
             if (emitSuperName == null) { notImpl("super call outside a subclass", pos); return {b: b, v: hUndef} }
             var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, emitSuperName)])
-            var thisV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
+            var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
             var ea = emitArgs(b, args)
             b = ea.b
             return {b: b, v: callExt(b, "js_supercall", [supV, thisV, emitStr(b, mname), ea.v])}
@@ -4989,6 +5262,23 @@ KwContract  = "contract" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "listOfNotNull"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "emptyList"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "emptySet"), loV])
+        // A Sequence is EAGER in this subset (see kotlin-interpreter.abnf), so
+        // sequenceOf IS listOf and every operator on it is the list operator.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "sequenceOf"), loV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "emptySequence"), loV])
+        // The remaining global BUILDERS. Each is a runtime VALUE from js_ktglobal
+        // (abnf/jsrtkotlin.go), the compiler-half twin of hostGlobals[...] in
+        // kotlin-interpreter.abnf. What they build - the {__dict, keys, vals} map
+        // handle, the {first, second[, third]} Pair, the {__sb} StringBuilder box -
+        // are shapes whose whole member surface already lives in jsrtkotlin.go, so
+        // the declaration is the entire port.
+        var ktBuilders = ["mapOf", "mutableMapOf", "hashMapOf", "linkedMapOf", "sortedMapOf",
+                          "emptyMap", "buildMap", "buildList", "buildString", "Pair", "Triple",
+                          "with", "run", "repeat", "StringBuilder", "generateSequence"]
+        for (var kb = 0; kb < ktBuilders.length; kb++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ktBuilders[kb]),
+                                         callExt(b, "js_ktglobal", [emitStr(b, ktBuilders[kb])])])
+        }
         // abs/max/min from Math, exitProcess from exit.
         var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
@@ -5036,7 +5326,7 @@ KwContract  = "contract" KwEnd ;
     }
 
     // ----- Core library config (see lib/compile-core.js) -----
-    core.scopeGetExt = "js_kget" // Scope read with fallback to properties of this.
+    core.scopeGetExt = "js_ktget" // Scope read with fallback to properties of this.
 
     c.compile(c.asg)
 
