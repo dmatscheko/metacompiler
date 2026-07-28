@@ -2932,6 +2932,183 @@ fun sec71() {
     check("reg11", Reg71.label("n") == "n-")
 }
 
+// ===== SECTION 72: extension DELEGATED properties (the DataStore idiom) =====
+//   `val Ctx.store: Int by D()` - an extension property whose value comes from a
+//   delegate. Both halves reported "delegated property not implemented" and both
+//   grammars documented it as out of scope, on the grounds that an extension property
+//   "has no single owner to pass as thisRef". Kotlin's protocol answers that directly:
+//   the delegate belongs to the DECLARATION SITE (the `by` expression is evaluated once,
+//   at the declaration, not per instance) and getValue/setValue receive the EXTENSION
+//   RECEIVER as thisRef, supplied per access. This is `val Context.dataStore by
+//   preferencesDataStore(...)`, which is why a real Android application hit it at once.
+//   Also pinned here: a top-level extension property's SETTER, which the compiler half
+//   never emitted at all - the write fell through to a plain field store, so the setter
+//   body never ran while the interpreter half ran it.
+class Ctx72(val tag: String)
+class Store72 {
+    var cell = 0
+    var reads = 0
+    operator fun getValue(thisRef: Any?, property: KProperty<*>): String {
+        reads++
+        return (thisRef as Ctx72).tag + ":" + property.name + ":" + cell
+    }
+    operator fun setValue(thisRef: Any?, property: KProperty<*>, value: String) {
+        cell = value.length
+    }
+}
+val store72 = Store72()
+val memberStore72 = Store72()
+var Ctx72.pref72: String by store72
+class Holder72(val base: Int) {
+    var Ctx72.memcell72: String by memberStore72
+    fun readMem(c: Ctx72): String = c.memcell72
+    fun writeMem(c: Ctx72, v: String) { c.memcell72 = v }
+}
+class Plain72 { var raw = 0 }
+var Plain72.scaled72: Int
+    get() = raw * 2
+    set(v) { raw = v / 2 }
+
+fun sec72() {
+    val a = Ctx72("a")
+    val b = Ctx72("b")
+    // thisRef is the RECEIVER of the access, and the property name reaches the delegate.
+    check("xd1", a.pref72 == "a:pref72:0")
+    check("xd2", b.pref72 == "b:pref72:0")
+    // ONE delegate object per declaration site: a write through `a` is seen through `b`.
+    a.pref72 = "abcd"
+    check("xd3", b.pref72 == "b:pref72:4")
+    check("xd4", store72.reads == 3)
+    // The member-level form: same protocol, thisRef is still the extension receiver.
+    val h = Holder72(10)
+    check("xd5", h.readMem(a) == "a:memcell72:0")
+    h.writeMem(b, "xyz")
+    check("xd6", h.readMem(a) == "a:memcell72:3")
+    // A plain (non-delegated) extension property setter runs its body.
+    val p = Plain72()
+    p.scaled72 = 10
+    check("xd7", p.raw == 5)
+    check("xd8", p.scaled72 == 10)
+    p.scaled72 += 4
+    check("xd9", p.raw == 7 && p.scaled72 == 14)
+}
+
+// ===== SECTION 73: super in an enum entry body, and secondary-constructor delegation =====
+//   - an enum entry with a BODY is a subclass of its own enum class, so `super.g()` and
+//     `super.p` inside it are ordinary super calls. The compiler half never told its
+//     super-target resolver that, and answered "super call outside a subclass not
+//     implemented" / "super reference not implemented" while the interpreter ran both.
+//   - an enum class's own ACCESSOR property was never installed on the descriptor by the
+//     compiler half at all (only the class and object emitters did that), so `E.A.p`
+//     answered kotlin.Unit where the interpreter answered the value.
+//   - a secondary constructor delegating with `: super(...)` ran this class's OWN
+//     primary constructor with the delegation arguments in the interpreter half, so the
+//     superclass's `val` parameters were never stored and an inherited method died with
+//     "unknown name: n"; and in the compiler half a `: super(...)` skipped this class's
+//     property initializers and init blocks entirely.
+//   - a secondary constructor delegating with `: this(...)` always ran the PRIMARY in
+//     the compiler half, never the secondary of matching arity.
+enum class Ent73 {
+    A { override fun g() = super.g() + 1
+        override val p: Int get() = super.p + 1 },
+    B;
+    open fun g() = 10
+    open val p: Int get() = 5
+}
+open class Base73(val n: Int, val m: Int = 9) {
+    open fun describe() = "b$n/$m"
+}
+class NoPrimary73 : Base73 {
+    val tag = "t"
+    var seen = 0
+    init { seen = 1 }
+    constructor() : super(4) { seen += 10 }
+    constructor(k: Int) : super(k, k + 1) { seen += 100 }
+    override fun describe() = super.describe() + "/$tag$seen"
+}
+class ThisDeleg73 {
+    val v: Int
+    var note = ""
+    constructor(n: Int) { v = n * 2; note = "int" }
+    constructor() : this(5) { note += "/none" }
+    constructor(s: String, mark: Boolean) : this(s.length) { note += "/str$mark" }
+}
+class Ordered73 {
+    val log = StringBuilder()
+    init { log.append("i1;") }
+    constructor(x: Int) { log.append("c$x;") }
+    init { log.append("i2;") }
+}
+
+fun sec73() {
+    // super inside an enum entry body, both the method and the property form.
+    check("es1", Ent73.A.g() == 11)
+    check("es2", Ent73.B.g() == 10)
+    check("es3", Ent73.A.p == 6)
+    check("es4", Ent73.B.p == 5)
+    // A secondary constructor delegating to the SUPERCLASS: its val parameters are
+    // stored, defaults apply, and this class's own initializers still run.
+    val d0 = NoPrimary73()
+    check("es5", d0.n == 4 && d0.m == 9)
+    check("es6", d0.seen == 11 && d0.tag == "t")
+    check("es7", d0.describe() == "b4/9/t11")
+    val d1 = NoPrimary73(2)
+    check("es8", d1.n == 2 && d1.m == 3 && d1.seen == 101)
+    // A secondary constructor delegating with `: this(...)` reaches the secondary of
+    // matching arity, not the primary.
+    check("es9", ThisDeleg73().v == 10)
+    check("es10", ThisDeleg73().note == "int/none")
+    // Two secondary constructors of the same ARITY are not told apart by parameter
+    // type in either half (both dispatch on argument count alone), so this one is
+    // given a distinct arity - a shared limitation, not a divergence.
+    check("es11", ThisDeleg73("abc", true).v == 6 && ThisDeleg73("abc", true).note == "int/strtrue")
+    check("es12", ThisDeleg73(4).v == 8 && ThisDeleg73(4).note == "int")
+    // init blocks run in declaration order, before the secondary constructor's body.
+    check("es13", Ordered73(1).log.toString() == "i1;i2;c1;")
+}
+
+// ===== SECTION 74: a local enum class, and accessors on a delegated member =====
+//   - a LOCAL enum class (`fun f() { enum class E { A, B } }`) was offered only to the
+//     interpreter half's SKIP forms, so it warned "enum class not implemented" and then
+//     died with "unknown name: E", while the compiler half lowered it: a live cross-half
+//     divergence found while inventorying what each notImpl message can still reach.
+//   - a delegated MEMBER property that also declares accessors did not PARSE in either
+//     half. Kotlin's own PSI corpus records both spellings with a clean tree
+//     (propertyDelegate/PropertyWithGetter.kt on the next line,
+//     propertyDelegate/GetterInSameLine.kt on the same line) and rejects them
+//     semantically; here the accessors are consumed and dropped, and the delegate wins.
+//     The rule that was supposed to catch this shape (UnsupDelegate) was unreachable:
+//     RealPropDelegate matched up to the delegate and SUCCEEDED, and a PEG never
+//     re-enters a rule that succeeded, so the class body died on the `get` instead.
+class Deleg74 {
+    var cell = 0
+    operator fun getValue(thisRef: Any?, property: KProperty<*>): Int = cell + 1
+    operator fun setValue(thisRef: Any?, property: KProperty<*>, value: Int) { cell = value }
+}
+class NextLine74 { var p: Int by Deleg74()
+    get() = 99 }
+class SameLine74 { var p: Int by Deleg74(); get() = 99; }
+
+fun localEnum74(): String {
+    enum class Dir74 { NORTH, SOUTH, EAST }
+    val d = Dir74.SOUTH
+    return d.name + d.ordinal + Dir74.EAST.ordinal + Dir74.values().size
+}
+
+fun sec74() {
+    // A local enum class is a real enum: names, ordinals and values() all work.
+    check("le1", localEnum74() == "SOUTH123")
+    // The accessor is dropped; the DELEGATE answers, in both spellings.
+    val n = NextLine74()
+    check("le2", n.p == 1)
+    n.p = 7
+    check("le3", n.p == 8)
+    val m = SameLine74()
+    check("le4", m.p == 1)
+    m.p = 4
+    check("le5", m.p == 5)
+}
+
 // ===== END SECTIONS =====
 
 fun main() {
@@ -3006,6 +3183,9 @@ fun main() {
     sec69() // SECTION-CALL 69
     sec70() // SECTION-CALL 70
     sec71() // SECTION-CALL 71
+    sec72() // SECTION-CALL 72
+    sec73() // SECTION-CALL 73
+    sec74() // SECTION-CALL 74
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

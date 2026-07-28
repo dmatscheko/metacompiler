@@ -250,7 +250,7 @@ Program     <~~ buildMain(takeAll()) ~~>
 // slots they occupy. noteTopItem and ClassMark are item-neutral - each pops the thunk
 // the alternative pushed and pushes it straight back.
 TopItem     <~~ push(noteTopItem(pop())) ~~>
-            = [ Modifiers ] ( TypeMark | FunDecl <~~ push(makeFunStmt(pop())) ~~> | ExtFun | UnsupFun | ClassMark | ExtProp | TopAccProp | UnsupAccessor | TopProp ) ;
+            = [ Modifiers ] ( TypeMark | FunDecl <~~ push(makeFunStmt(pop())) ~~> | ExtFun | UnsupFun | ClassMark | ExtProp | ExtDelegProp | TopAccProp | UnsupAccessor | TopProp ) ;
 TypeMark    <~~ push(markTopType(pop())) ~~>
             = UnsupType ;
 ClassMark   <~~ push(markTopType(pop())) ~~>
@@ -697,7 +697,7 @@ CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
             = [ Modifiers ] [ KwVararg <~~ push({isvararg: true}) ~~> ] [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] KId <~~ push({pname: up.in}) ~~> ":" PType [ "=" ParamDefault ] ;
 
 // A nested typealias is erased exactly like a top-level one.
-Member      = [ Modifiers ] ( InitBlock | CompanionBlk | CompanionObject | SecondaryCtor | NestedClass | NestedType | TypeAlias | MemberExtProp | AccessorProp | UnsupAccessor | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | MemberExtFun | MemberExtAbs | AbstractFun | UnsupFun ) ;
+Member      = [ Modifiers ] ( InitBlock | CompanionBlk | CompanionObject | SecondaryCtor | NestedClass | NestedType | TypeAlias | MemberExtProp | MemberExtDelegProp | AccessorProp | UnsupAccessor | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | MemberExtFun | MemberExtAbs | AbstractFun | UnsupFun ) ;
 // A member function WITHOUT a body: an abstract method of an abstract class, or an
 // interface method with no default. Nothing is emitted for it (the overriding class
 // provides the implementation), but its NAME and arity are recorded, which is what
@@ -801,8 +801,15 @@ PropVis     = [ Modifiers ] ( KwGet | KwSet ) NotParen ;
 PropDelegate = LazyProp | RealPropDelegate | UnsupDelegate ;
 LazyProp    <~~ push(makeProp(takeAll())) ~~>
             = "val" KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit { PropVis } [ ";" ] ;
+// A delegated MEMBER property may still declare accessors - `val p: Int by A()` on one
+// line and `get() = 1` on the next (psi/propertyDelegate/PropertyWithGetter.kt), or
+// `val a by A(); get() = 1;` (psi/propertyDelegate/GetterInSameLine.kt). Kotlin parses
+// both with a clean tree and rejects them SEMANTICALLY, so they are consumed and DROPPED
+// here. The run used to live on UnsupDelegate below, which ordered choice never reached:
+// RealPropDelegate matched up to the delegate and SUCCEEDED, so the class body died on
+// the `get` and the member spelling did not parse in either half.
 RealPropDelegate <~~ push({accprop: makeDelegProp(takeAll(), up.pos)}) ~~>
-            = ( "val" | "var" ) KwEnd KId <~~ push({apname: up.in}) ~~> [ ":" Type ] KwBy DelegSrc { PropVis } [ ";" ] ;
+            = ( "val" | "var" ) KwEnd KId <~~ push({apname: up.in}) ~~> [ ":" Type ] KwBy DelegSrc [ ";" ] { DropAcc } { PropVis } [ ";" ] ;
 DelegSrc    <~~ push({dsrc: pop()}) ~~>
             = Expression ;
 // A delegated property may still declare accessors - `val p: Int by A()` on one line and
@@ -2373,6 +2380,19 @@ AccBody     = Block | "=" ExprBody ;
 // the initializer is dropped here for the same reason.
 ExtProp     <~~ push(makeExtProp(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push({apname: up.in}) ~~> [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] AccRun ;
+// An EXTENSION DELEGATED property - `val Ctx.store: Int by D()`, the shape the Android
+// DataStore idiom (`val Context.dataStore by preferencesDataStore(name = "settings")`)
+// is written in. GENUINE, and the twin of ExtDelegProp in kotlin-interpreter.abnf: the
+// delegate belongs to the DECLARATION SITE, so the `by` expression is lowered once, at
+// the declaration, and both accessors close over the resulting box; every read of
+// `recv.name` calls getValue(recv, property) with the EXTENSION RECEIVER as thisRef and
+// every write setValue(recv, property, value). The accessors are ordinary extension
+// accessors (extp$name / extps$name), so the field-read and field-assign emitters route
+// to them by NAME exactly as they do for a computed extension property.
+// UNVERIFIED against kotlinc (none on this machine); the operator arity and the thisRef
+// identity are read off the Kotlin documentation's "Delegated properties" page.
+ExtDelegProp <~~ push(makeExtDelegProp(takeAll(), up.pos)) ~~>
+            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push({apname: up.in}) ~~> [ ":" Type ] [ WhereClause ] KwBy DelegSrc { PropVis } [ ";" ] ;
 // A MEMBER extension PROPERTY - `val Int.scaled: Int get() = this * factor` declared
 // inside a class. The twin of MemberExtProp in kotlin-interpreter.abnf, and the property
 // counterpart of MemberExtFun above: the accessor pair is installed on the descriptor as
@@ -2385,6 +2405,13 @@ ExtProp     <~~ push(makeExtProp(takeAll())) ~~>
 // receiver segment would otherwise be half-consumed as the property name.
 MemberExtProp <~~ push({memberExtProp: makeAccessorProp(takeAll())}) ~~>
             = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push({apname: up.in}) ~~> [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] AccRun ;
+// The member-level EXTENSION DELEGATED property - `val Ctx.mem: Int by D()` inside a
+// class. Same protocol as the top-level ExtDelegProp (one delegate per declaration
+// site, thisRef is the extension receiver) lowered onto the descriptor as the ordinary
+// member-extension accessor pair. Ordered before AccessorProp / PropDelegate, neither
+// of which has a receiver segment, for the reason MemberExtProp above is.
+MemberExtDelegProp <~~ push({memberExtDeleg: makeDelegProp(takeAll(), up.pos)}) ~~>
+            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push({apname: up.in}) ~~> [ ":" Type ] [ WhereClause ] KwBy DelegSrc [ ";" ] { DropAcc } { PropVis } [ ";" ] ;
 // A TOP-LEVEL computed property. There is no instance to hang an accessor on, so the
 // getter runs ONCE at the declaration and the name is bound to that value - a deviation
 // from Kotlin, which re-evaluates the getter on every read.
@@ -4068,6 +4095,7 @@ KwContract  = "contract" KwEnd ;
         var abstracts = []
         var memberExts = []
         var memberExtProps = []
+        var memberExtDelegs = []
         var inits = []          // Property initializers AND init blocks, in DECLARATION order.
         var companion = null
         var compName = null
@@ -4101,12 +4129,17 @@ KwContract  = "contract" KwEnd ;
                 memberExtProps.push(items[i].memberExtProp)
                 memberExtPropNames["$" + items[i].memberExtProp.name] = true
             }
+            else if (items[i].memberExtDeleg != undefined) {
+                memberExtDelegs.push(items[i].memberExtDeleg)
+                memberExtPropNames["$" + items[i].memberExtDeleg.name] = true
+            }
             else if (items[i].absmethod != undefined) { abstracts.push(items[i].absmethod) }
             else if (items[i].prop != undefined && items[i].init != undefined) { props.push(items[i]); inits.push(items[i]) }
             else if (items[i].method != undefined) { methods.push(items[i].method) }
         }
         return {props: props, methods: methods, accprops: accprops, abstracts: abstracts,
                 memberExts: memberExts, memberExtProps: memberExtProps,
+                memberExtDelegs: memberExtDelegs,
                 nested: nested, sctors: sctors, inits: inits, companion: companion, compName: compName}
     }
     // The leading non-member entries of a walked type declaration: the supertype list
@@ -4190,7 +4223,7 @@ KwContract  = "contract" KwEnd ;
     // instance as a value) and the object DECLARATION (which also binds the singleton to its
     // name); the only per-caller difference is the __name string and what happens with the
     // instance afterwards.
-    function emitObjectInstance(b, name, methods, props, supers, accprops, memberExts, memberExtProps) {
+    function emitObjectInstance(b, name, methods, props, supers, accprops, memberExts, memberExtProps, memberExtDelegs) {
         if (supers == undefined) { supers = [] }
         if (accprops == undefined) { accprops = [] }
         var own = {}
@@ -4211,6 +4244,7 @@ KwContract  = "contract" KwEnd ;
         for (var ap = 0; ap < accprops.length; ap++) { b = emitAccessorPair(b, clsV, accprops[ap]) }
         b = emitMemberExts(b, clsV, memberExts)
         b = emitMemberExtProps(b, clsV, memberExtProps)
+        b = emitMemberExtDelegs(b, clsV, memberExtDelegs)
         emitClassNames.pop()
         emitSuperName = savedSuper
         var objV = callExt(b, "js_obj_new", [])
@@ -4247,7 +4281,7 @@ KwContract  = "contract" KwEnd ;
         var methods = parts.methods
         for (var om = 0; om < methods.length; om++) { classMethodNames["$" + methods[om].name] = true }
         return function(b) {
-            return emitObjectInstance(b, "<object>", methods, props, hdr.supers, parts.accprops, parts.memberExts, parts.memberExtProps)
+            return emitObjectInstance(b, "<object>", methods, props, hdr.supers, parts.accprops, parts.memberExts, parts.memberExtProps, parts.memberExtDelegs)
         }
     }
 
@@ -4408,6 +4442,10 @@ KwContract  = "contract" KwEnd ;
             if (lastStep != null && lastStep.key != undefined && memberExtPropResolves(lastStep.key)) {
                 mxWrite = lastStep.key
             }
+            var epWrite = null
+            if (lastStep != null && lastStep.key != undefined && extPropSetResolves(lastStep.key)) {
+                epWrite = lastStep.key
+            }
             var r = valT(b)
             b = r.b
             var v = r.v
@@ -4444,6 +4482,22 @@ KwContract  = "contract" KwEnd ;
                         v = rx.v
                     }
                     callExt(b, "js_ktmextset", [curScopeV, p.obj, p.key, v])
+                } else if (epWrite != null) {
+                    // A top-level extension property's setter (computed or delegated):
+                    // the twin of the extPropResolves READ arm in the suffix emitter.
+                    if (op != "=") {
+                        var gEV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "extp$" + epWrite)])
+                        var gEA = callExt(b, "js_arr_new", [])
+                        callExt(b, "js_arr_push", [gEA, p.obj])
+                        var rE = emitOpBin(b, op, callExt(b, "js_call", [gEV, hUndef, gEA]), v)
+                        b = rE.b
+                        v = rE.v
+                    }
+                    var sEV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "extps$" + epWrite)])
+                    var sEA = callExt(b, "js_arr_new", [])
+                    callExt(b, "js_arr_push", [sEA, p.obj])
+                    callExt(b, "js_arr_push", [sEA, v])
+                    callExt(b, "js_call", [sEV, hUndef, sEA])
                 } else {
                     if (op != "=") {
                         var oldM = callExt(b, "js_get", [p.obj, p.key])
@@ -4492,6 +4546,27 @@ KwContract  = "contract" KwEnd ;
                         v = rx2.v
                     }
                     callExt(bb, "js_ktmextset", [curScopeV, objV, keyV, v])
+                    return {b: bb, v: v}
+                }
+                // A top-level extension property's SETTER - a computed `set(v) { ... }`
+                // or a delegated extension property's setValue forwarder. Without this
+                // arm the write fell to js_ktset and landed as an own field on the
+                // receiver, so the setter never ran (the interpreter half always ran
+                // it, through extPropSetters).
+                if (isField && extPropSetResolves(fname)) {
+                    if (op != "=") {
+                        var gV0 = callExt(bb, "js_ktget", [curScopeV, emitStr(bb, "extp$" + fname)])
+                        var ga0 = callExt(bb, "js_arr_new", [])
+                        callExt(bb, "js_arr_push", [ga0, objV])
+                        var rx3 = emitOpBin(bb, op, callExt(bb, "js_call", [gV0, hUndef, ga0]), v)
+                        bb = rx3.b
+                        v = rx3.v
+                    }
+                    var sV = callExt(bb, "js_ktget", [curScopeV, emitStr(bb, "extps$" + fname)])
+                    var sargsV = callExt(bb, "js_arr_new", [])
+                    callExt(bb, "js_arr_push", [sargsV, objV])
+                    callExt(bb, "js_arr_push", [sargsV, v])
+                    callExt(bb, "js_call", [sV, hUndef, sargsV])
                     return {b: bb, v: v}
                 }
                 if (op != "=") {
@@ -4658,6 +4733,22 @@ KwContract  = "contract" KwEnd ;
     // break@l / continue@l branch to the labelled loopStack entry. A label
     // inside a try/catch closure cannot see the outer loop (the closure resets
     // loopStack) - that stays reported as not implemented.
+    //
+    // MEASURED cross-half divergence, 2026-07-28, left open deliberately. The UNLABELLED
+    // forms already cross a try boundary (emitBreak / emitContinue raise a js_ctl_break
+    // or js_ctl_continue signal and excDispatch re-issues it); the labelled forms do not,
+    // because the signal carries no label and excDispatch would re-issue the jump against
+    // the INNERMOST loop rather than the named one. On
+    //     a@ for (i in 1..3) { try { if (i == 2) continue@a; n += i } finally { n += 10 } }
+    // the interpreter half answers 34 and this half 36 (and 21 vs 36 for break@a);
+    // Kotlin's answers are 34 and 21, so the interpreter half is right.
+    // Closing it means giving the control signal a LABEL and teaching excDispatch to
+    // compare it - and excDispatch, emitBreak and emitContinue live in
+    // languages/lib/compile-core.js, which backs all fifteen compiler grammars. A
+    // Kotlin-local shortcut that re-issues the generic signal is right only when the
+    // label names the IMMEDIATELY enclosing loop and silently wrong one nesting level
+    // out, which is the wrong-answer-no-error shape this tree documents at length. So it
+    // stays an honest notImpl until the shared protocol carries the label.
     function findLabeled(lbl) {
         for (var i = loopStack.length - 1; i >= 0; i--) {
             if (loopStack[i].label == lbl) { return loopStack[i] }
@@ -5446,6 +5537,64 @@ KwContract  = "contract" KwEnd ;
         }
         return b
     }
+    // The accessor pair of one member-level extension DELEGATED property (see
+    // MemberExtDelegProp). The delegate belongs to the DECLARATION SITE, so the `by`
+    // expression is lowered here - once, while the descriptor is built - and parked in
+    // the emitting scope; both accessors reach it from there. Their shape is the
+    // ordinary member-extension one, (dispatch, extensionReceiver[, value]), so the
+    // js_ktmextget / js_ktmextset lookups find them with no special case.
+    var extDelegSlot = 0
+    function emitMemberExtDelegs(b, clsV, list) {
+        if (list == undefined || list == null) { return b }
+        for (var i = 0; i < list.length; i++) {
+            var rec = list[i]
+            if (rec.dsrc == null) { continue }
+            extDelegSlot++
+            var slot = "extd$m" + extDelegSlot
+            var nm = rec.name
+            // The `by` expression is lowered into its own function and the descriptor
+            // gets a memo BOX, not the delegate itself: buildMain emits class items in
+            // TOPOLOGICAL order, so a delegate naming a top-level val is not bound yet
+            // while this class is being built, and resolving it here aborted with
+            // "unknown name: <val>" in a large file while the same two declarations ran
+            // in isolation. js_ktdmemo resolves it on first access and caches it, so it
+            // is still ONE delegate per declaration site; installMemberExtDeleg in
+            // kotlin-interpreter.abnf memoizes the same way, so both halves evaluate the
+            // expression at the same moment.
+            var initIdx = emitFunc([], function(bb) {
+                var ri = rec.dsrc(bb)
+                bb = ri.b
+                bb.NewRet(callExt(bb, "js_ktdcheck", [ri.v, emitStr(bb, rec.dwhere),
+                                                      c.warnUnsupported ? hTrue : hFalse,
+                                                      hNull, emitStr(bb, nm)]))
+                return deadBlock()
+            }, false)
+            var boxV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [boxV, emitStr(b, "init"),
+                                  callExt(b, "js_closure", [handle(initIdx), curScopeV])])
+            callExt(b, "js_set", [boxV, emitStr(b, "done"), hFalse])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, slot), boxV])
+            var gi = emitFunc(["__dispatch", "this"], function(bb) {
+                bb.NewRet(callExt(bb, "js_ktdget", [callExt(bb, "js_ktdmemo", [callExt(bb, "js_ktget", [curScopeV, emitStr(bb, slot)])]),
+                                                    callExt(bb, "js_ktget", [curScopeV, emitStr(bb, "this")]),
+                                                    emitStr(bb, nm)]))
+                return deadBlock()
+            }, false, false, undefined, true)
+            callExt(b, "js_set", [clsV, emitStr(b, "extget$" + nm),
+                                  callExt(b, "js_closure", [handle(gi), curScopeV])])
+            var si = emitFunc(["__dispatch", "this", "value"], function(bb) {
+                callExt(bb, "js_ktdset", [callExt(bb, "js_ktdmemo", [callExt(bb, "js_ktget", [curScopeV, emitStr(bb, slot)])]),
+                                          callExt(bb, "js_ktget", [curScopeV, emitStr(bb, "this")]),
+                                          emitStr(bb, nm),
+                                          callExt(bb, "js_ktget", [curScopeV, emitStr(bb, "value")])])
+                bb.NewRet(hUndef)
+                return deadBlock()
+            }, false, false, undefined, true)
+            callExt(b, "js_set", [clsV, emitStr(b, "extset$" + nm),
+                                  callExt(b, "js_closure", [handle(si), curScopeV])])
+        }
+        return b
+    }
     function emitMemberExts(b, clsV, list) {
         if (list == undefined) { return b }
         for (var i = 0; i < list.length; i++) {
@@ -5628,20 +5777,84 @@ KwContract  = "contract" KwEnd ;
     // would also be redirected (locals are not tracked at compile time).
     var classOwnProps = {}
     var emitOuterProps = null
+    // The names a top-level extension property declares a SETTER for (a computed
+    // `set(v) {...}` or a delegated property's synthesized setValue forwarder).
+    var extPropSetNames = {}
     function extPropResolves(name) {
         if (extPropNames["$" + name] != true) { return false }
         if (builtinMethodNames["$" + name] == true) { return false }
         if (classPropNames["$" + name] == true) { return false }
         return true
     }
+    function extPropSetResolves(name) {
+        return extPropSetNames["$" + name] == true && extPropResolves(name)
+    }
     function makeExtProp(items) {
         var rec = makeAccessorProp(items)
         extPropNames["$" + rec.name] = true
+        if (rec.setter != null) { extPropSetNames["$" + rec.name] = true }
         return function(b) {
-            if (rec.getter == null) { return b }
-            var idx = emitFunc([], rec.getter, true)
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "extp$" + rec.name),
-                                         callExt(b, "js_closure", [handle(idx), curScopeV])])
+            if (rec.getter != null) {
+                var idx = emitFunc([], rec.getter, true)
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "extp$" + rec.name),
+                                             callExt(b, "js_closure", [handle(idx), curScopeV])])
+            }
+            // The SETTER was never emitted before, and nothing consulted it: a write
+            // through a top-level `var Box.doubled` fell to the plain js_ktset and put
+            // an own field on the receiver, so the setter body never ran while the
+            // interpreter half ran it. See extPropSetResolves and the field-assign
+            // emitter. (dispatchless: args[0] is the receiver, args[1] the value.)
+            if (rec.setter != null) {
+                var si = emitFunc([rec.setParam], rec.setter, true)
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "extps$" + rec.name),
+                                             callExt(b, "js_closure", [handle(si), curScopeV])])
+            }
+            return b
+        }
+    }
+    // An extension DELEGATED property (see ExtDelegProp). One delegate per DECLARATION
+    // site: the `by` expression is lowered here, checked with js_ktdcheck exactly as
+    // every other delegate is, and parked in the scope under `extd$name`. The accessors
+    // are the ordinary extension pair, so nothing downstream needs to know they are
+    // delegated. thisRef for provideDelegate is null - the declaration has no receiver.
+    function makeExtDelegProp(items, pos) {
+        var name = null
+        var src = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] == undefined || items[i] == null) { continue }
+            if (items[i].apname != undefined) { name = items[i].apname }
+            else if (items[i].dsrc != undefined) { src = items[i].dsrc }
+        }
+        extPropNames["$" + name] = true
+        extPropSetNames["$" + name] = true
+        var where = c.file + ":" + c.lineOf(pos)
+        var slot = "extd$" + name
+        return function(b) {
+            if (src == null) { return b }
+            var r = src(b)
+            b = r.b
+            var dV = callExt(b, "js_ktdcheck", [r.v, emitStr(b, where),
+                                                c.warnUnsupported ? hTrue : hFalse,
+                                                hNull, emitStr(b, name)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, slot), dV])
+            var gi = emitFunc([], function(bb) {
+                bb.NewRet(callExt(bb, "js_ktdget", [callExt(bb, "js_ktget", [curScopeV, emitStr(bb, slot)]),
+                                                    callExt(bb, "js_ktget", [curScopeV, emitStr(bb, "this")]),
+                                                    emitStr(bb, name)]))
+                return deadBlock()
+            }, true)
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "extp$" + name),
+                                         callExt(b, "js_closure", [handle(gi), curScopeV])])
+            var si = emitFunc(["value"], function(bb) {
+                callExt(bb, "js_ktdset", [callExt(bb, "js_ktget", [curScopeV, emitStr(bb, slot)]),
+                                          callExt(bb, "js_ktget", [curScopeV, emitStr(bb, "this")]),
+                                          emitStr(bb, name),
+                                          callExt(bb, "js_ktget", [curScopeV, emitStr(bb, "value")])])
+                bb.NewRet(hUndef)
+                return deadBlock()
+            }, true)
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "extps$" + name),
+                                         callExt(b, "js_closure", [handle(si), curScopeV])])
             return b
         }
     }
@@ -6076,7 +6289,15 @@ KwContract  = "contract" KwEnd ;
         return {sig: sig, kind: kind, args: args, body: body}
     }
     // One secondary constructor: run the delegation on the same instance, then the body.
-    function emitSecondaryCtor(sec, primaryIdx, supName) {
+    // clsName is this class's own name, which the `: this(...)` arm needs: an explicit
+    // `this` delegation goes through the class's __ctor DISPATCHER so that it reaches
+    // the secondary constructor of matching arity. Calling primaryIdx there (what this
+    // did) always ran the PRIMARY, so `class A { val v: Int; constructor(n: Int) { v =
+    // n * 2 }; constructor() : this(5) {} }` left v unset and A().v printed null while
+    // the interpreter half answered 10. An IMPLICIT delegation (kind == null) still goes
+    // straight to the primary - dispatching that by arity would send a bodiless
+    // `constructor(n: Int)` to the zero-argument secondary that delegates back to it.
+    function emitSecondaryCtor(sec, primaryIdx, supName, clsName) {
         var bodyT = function(b) {
             var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
             var argsV = callExt(b, "js_arr_new", [])
@@ -6090,6 +6311,21 @@ KwContract  = "contract" KwEnd ;
             if (sec.kind == "super" && supName != null) {
                 var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, supName)])
                 callExt(b, "js_call", [callExt(b, "js_get", [supV, emitStr(b, "__ctor")]), hUndef, argsV])
+                // This class's own property initializers and init blocks still have to
+                // run: with no primary constructor they belong to whichever secondary
+                // constructor executes. The primary is emitted for such a class anyway
+                // (empty parameter list, no supertype arguments - those live in the
+                // `: super(...)` just run), so calling it with the instance alone
+                // contributes exactly the initializer pass. Without this a `val` or an
+                // `init` block beside a `: super(...)` constructor was never assigned
+                // and the compiled program aborted with "unknown name: <prop>", while
+                // the interpreter half ran it.
+                var ownV = callExt(b, "js_arr_new", [])
+                callExt(b, "js_arr_push", [ownV, thisV])
+                callExt(b, "js_call", [callExt(b, "js_closure", [handle(primaryIdx), curScopeV]), hUndef, ownV])
+            } else if (sec.kind == "this" && clsName != null) {
+                var selfClsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
+                callExt(b, "js_call", [callExt(b, "js_get", [selfClsV, emitStr(b, "__ctor")]), hUndef, argsV])
             } else {
                 callExt(b, "js_call", [callExt(b, "js_closure", [handle(primaryIdx), curScopeV]), hUndef, argsV])
             }
@@ -6283,7 +6519,7 @@ KwContract  = "contract" KwEnd ;
             if (parts.sctors.length > 0) {
                 var secs = []
                 for (var sc = 0; sc < parts.sctors.length; sc++) {
-                    secs.push({idx: emitSecondaryCtor(parts.sctors[sc], ctorIdx, emitSuperName),
+                    secs.push({idx: emitSecondaryCtor(parts.sctors[sc], ctorIdx, emitSuperName, name),
                                arity: parts.sctors[sc].sig.params.length})
                 }
                 entryIdx = emitCtorDispatch(ctorIdx, hdr.cparams.length, secs)
@@ -6296,6 +6532,7 @@ KwContract  = "contract" KwEnd ;
             for (var ap = 0; ap < parts.accprops.length; ap++) { b = emitAccessorPair(b, clsV, parts.accprops[ap]) }
             b = emitMemberExts(b, clsV, parts.memberExts)
             b = emitMemberExtProps(b, clsV, parts.memberExtProps)
+            b = emitMemberExtDelegs(b, clsV, parts.memberExtDelegs)
             emitClassNames.pop()
             b = emitNestedList(b, clsV, null, parts.nested, name)
             emitSuperName = savedSuper
@@ -6375,6 +6612,17 @@ KwContract  = "contract" KwEnd ;
                 var idx = emitFunc(methods[k].params, methods[k].body, true, false, methods[k].sig)
                 callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
             }
+            // An enum class's own ACCESSOR properties (`open val p: Int get() = 5`),
+            // member extensions and member extension properties were never installed:
+            // only the class and object emitters did that, so `E.A.p` answered
+            // kotlin.Unit here while the interpreter half answered 5 - and a `super.p`
+            // from an entry body had nothing to find. A delegated member property
+            // (isDeleg) goes through the same emitAccessorPair as everywhere else; its
+            // hidden field initializer is already in parts.inits, which emitCtor uses.
+            for (var ap = 0; ap < parts.accprops.length; ap++) { b = emitAccessorPair(b, clsV, parts.accprops[ap]) }
+            b = emitMemberExts(b, clsV, parts.memberExts)
+            b = emitMemberExtProps(b, clsV, parts.memberExtProps)
+            b = emitMemberExtDelegs(b, clsV, parts.memberExtDelegs)
             emitClassNames.pop()
             emitSuperName = savedSuper
             // __entries is the entry list in DECLARATION order, which is what
@@ -6405,12 +6653,26 @@ KwContract  = "contract" KwEnd ;
                     callExt(b, "js_set", [entClsV, emitStr(b, "__super"), clsV])
                     var eb = entries[e].body
                     emitClassNames.push(name)
+                    // An enum entry with a body IS a subclass - of its own enum class,
+                    // which is exactly what entClsV.__super was just set to - so
+                    // `super.g()` and `super.p` inside the body resolve against the enum
+                    // descriptor, declared in this scope under `name`. Without this the
+                    // entry body emitted with whatever emitSuperName the ENCLOSING scope
+                    // had (null at top level), and superTargetName answered null:
+                    // "super call outside a subclass not implemented" for a method and
+                    // "super reference not implemented" for a property, while the
+                    // interpreter half ran both. The entry's own descriptor is never the
+                    // target: the lookup must START at the enum class, or an override in
+                    // the body would call itself.
+                    var savedESuper = emitSuperName
+                    emitSuperName = name
                     for (var em = 0; em < eb.methods.length; em++) {
                         var eidx = emitFunc(eb.methods[em].params, eb.methods[em].body, true, false, eb.methods[em].sig)
                         callExt(b, "js_set", [entClsV, emitStr(b, eb.methods[em].name),
                                               callExt(b, "js_closure", [handle(eidx), curScopeV])])
                     }
                     for (var ea2 = 0; ea2 < eb.accprops.length; ea2++) { b = emitAccessorPair(b, entClsV, eb.accprops[ea2]) }
+                    emitSuperName = savedESuper
                     emitClassNames.pop()
                 }
                 callExt(b, "js_set", [objV, emitStr(b, "__class"), entClsV])
@@ -6469,6 +6731,7 @@ KwContract  = "contract" KwEnd ;
         for (var ap = 0; ap < cparts.accprops.length; ap++) { b = emitAccessorPair(b, clsV, cparts.accprops[ap]) }
         b = emitMemberExts(b, clsV, cparts.memberExts)
         b = emitMemberExtProps(b, clsV, cparts.memberExtProps)
+        b = emitMemberExtDelegs(b, clsV, cparts.memberExtDelegs)
         var saved = curScopeV
         curScopeV = callExt(b, "js_scope_new", [curScopeV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), clsV])
@@ -6521,7 +6784,7 @@ KwContract  = "contract" KwEnd ;
             declOpIfConvention(methods[om].name, name)
         }
         return function(b) {
-            var r = emitObjectInstance(b, name, methods, props, hdr.supers, parts.accprops, parts.memberExts, parts.memberExtProps)
+            var r = emitObjectInstance(b, name, methods, props, hdr.supers, parts.accprops, parts.memberExts, parts.memberExtProps, parts.memberExtDelegs)
             b = r.b
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), r.v])
             // A nested type of an object hangs on the object's DESCRIPTOR, not on the
@@ -6599,6 +6862,7 @@ KwContract  = "contract" KwEnd ;
             for (var ap = 0; ap < parts.accprops.length; ap++) { b = emitAccessorPair(b, clsV, parts.accprops[ap]) }
             b = emitMemberExts(b, clsV, parts.memberExts)
             b = emitMemberExtProps(b, clsV, parts.memberExtProps)
+            b = emitMemberExtDelegs(b, clsV, parts.memberExtDelegs)
             emitClassNames.pop()
             emitSuperName = savedSuper
             b = emitNestedList(b, clsV, null, parts.nested, name)

@@ -1,11 +1,14 @@
-/* Kotlin widened surface v2: type/member declarations we now PARSE but do not lower
+/* Kotlin widened surface v2: type/member declarations this grammar pair recognizes
  * (interface, object, enum class, annotation class, typealias, companion object, init
- * block, secondary constructor, property accessor, destructuring), plus a construct we
- * GENUINELY lower - the multi-statement lambda body. The declarations are reported via
- * notImpl: without flags the run stops at the FIRST one (the interface) with a clean
- * file:line message (this file SHOULD fail by default); with -warn-unsupported each is
- * warned, dropped, and the rest runs, so the genuinely lowered multi-statement lambdas
- * self-check. main() ends with exitProcess(fails), so that run exits 0 when they pass.
+ * block, secondary constructor, property accessor, destructuring), plus constructs we
+ * GENUINELY lower - the multi-statement lambda body and the extension DELEGATED
+ * property. Every declaration listed above started out reported via notImpl and has
+ * since been lowered for real; what is left unsupported is ONE construct, the
+ * multi-argument indexed access at the top of main's file scope. Without flags the run
+ * stops there with a clean file:line message (this file SHOULD fail by default); with
+ * -warn-unsupported it is warned, dropped, and the rest runs, so the genuinely lowered
+ * forms self-check. main() ends with exitProcess(fails), so that run exits 0 when they
+ * pass.
  * SkipBlock is stressed inside the skipped bodies: nested braces, a string holding a
  * lone } and a string template ${...}, and a char literal. The marker interface and
  * empty object below exercise the OPTIONAL body (a bodiless declaration - no { } at all). **/
@@ -50,9 +53,30 @@ object Singleton
 val Int.asMarker: String
     get() = "marker"
 
-// A top-level extension DELEGATED property (receiver + a `by` delegate): both recognised
-// and notImpl. The delegate expression is parsed and discarded (never evaluated).
+// A top-level extension DELEGATED property (receiver + a `by` delegate). GENUINELY
+// lowered since extension delegates landed: the delegate object belongs to the
+// DECLARATION site (storeDelegate("m") runs ONCE, here), and every read calls its
+// getValue with the EXTENSION RECEIVER as thisRef - which is what `stamp` records.
+class StoreDelegate(val tag: String) {
+    var reads = 0
+    operator fun getValue(thisRef: Any?, property: KProperty<*>): String {
+        reads = reads + 1
+        return tag + ":" + thisRef.toString() + ":" + property.name
+    }
+}
+fun storeDelegate(tag: String) = StoreDelegate(tag)
 val Int.viaStore: String by storeDelegate("m")
+
+// A MULTI-ARGUMENT indexed access (operator get(a, b)) - still outside the subset in
+// both halves, and the one construct in this file that is. It sits in a top-level
+// property INITIALIZER so that, exactly as the extension delegated property used to,
+// it aborts the default run before main() and is warned-and-dropped under
+// -warn-unsupported. Everything else this file was written for - interface, object,
+// enum class, annotation class, typealias, companion object, init block, secondary
+// constructor, property accessor, destructuring, and now the extension delegated
+// property - has since been genuinely lowered.
+class Grid { operator fun get(r: Int, c: Int) = r * 10 + c }
+val cell = Grid()[1, 2]
 
 class WithExtras(val n: Int) {
     var doubled: Int = 0
@@ -98,6 +122,11 @@ fun main() {
 
     // destructuring declaration: not implemented; its initializer still runs
     val (p, q) = listOf(10, 20)
+
+    // the extension delegated property: thisRef is the RECEIVER of each read, and the
+    // one delegate object is shared by every read (so `reads` counts across receivers).
+    if (7.viaStore != "m:7:viaStore") { fails = fails + 1 }
+    if (9.viaStore != "m:9:viaStore") { fails = fails + 1 }
 
     exitProcess(fails)
 }

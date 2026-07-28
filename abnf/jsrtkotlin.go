@@ -1766,6 +1766,30 @@ func init() {
 			box.set("pname", rt.toString(u(a[1])))
 			return w(box)
 		}
+		// js_ktdmemo(box) answers the delegate of a MEMBER-level extension delegated
+		// property (`val Ctx.mem: Int by D()` inside a class), resolving it on FIRST
+		// ACCESS and remembering it in the box. The delegate still belongs to the
+		// declaration site - one object shared by every receiver - but it cannot be
+		// evaluated when the descriptor is built: the compiler half emits class items
+		// in topological order, so a `by` expression naming a top-level val is not
+		// bound yet at that point, and an eager resolution aborted with "unknown
+		// name: <val>" in a file where the same two declarations worked in isolation.
+		// The box is {init: closure, d, done}; kotlin-interpreter.abnf's
+		// installMemberExtDeleg memoizes identically, so both halves run the `by`
+		// expression at the same moment.
+		m["js_ktdmemo"] = func(a []uint64) uint64 {
+			box, ok := u(a[0]).(*jsObject)
+			if !ok {
+				return w(jsNull)
+			}
+			if done, _ := box.props["done"].(bool); done {
+				return w(box.props["d"])
+			}
+			box.set("done", true)
+			d := rt.call(box.props["init"], jsUndef, nil)
+			box.set("d", d)
+			return w(d)
+		}
 		// js_ktvarset(scope, name, v) is js_kset made delegate-aware: a binding
 		// holding a delegate box is WRITTEN through its setValue.
 		m["js_ktvarset"] = func(a []uint64) uint64 {

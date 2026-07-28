@@ -289,7 +289,7 @@ Program     = { Annotation } [ [ Modifiers ] Package ] { Import } { TopDecl } ;
 // at the head of a file, and letting them recur mid-file is what made the 37 `// FILE:`
 // corpus files - several compilation units, sometimes several LANGUAGES, concatenated
 // into one .kt by the test harness - parse as though they were one legal file.
-TopDecl     = [ Modifiers ] ( Interface | ObjectDecl | EnumClass | AnnotationClass | TypeAlias | ClassDecl | FunDecl <~~ registerFun(pop()) ~~> | ExtFun | ExtProp | UnsupFun | PropAccessor | TopVisProp | TopProp | TopBareProp ) ;
+TopDecl     = [ Modifiers ] ( Interface | ObjectDecl | EnumClass | AnnotationClass | TypeAlias | ClassDecl | FunDecl <~~ registerFun(pop()) ~~> | ExtFun | ExtProp | ExtDelegProp | UnsupFun | PropAccessor | TopVisProp | TopProp | TopBareProp ) ;
 
 // Modifiers/annotations before a declaration are parsed and ignored. Annotations
 // accept ALL forms: an argument list @Suppress("Unused"), qualified names @a.b.C,
@@ -704,7 +704,7 @@ CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
 // which in turn precedes the member extension / genuinely unsupported forms.
 // MemberExtProp precedes PropDecl: `val Int.doubledUp get() = ...` would otherwise be
 // half-consumed as a bodiless property named `Int`.
-Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | NestedType | MemberTypeAlias | MemberExtProp | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | MemberExtFun | MemberExtAbs | AbstractFun | UnsupFun | MemberSkip ) ;
+Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | NestedType | MemberTypeAlias | MemberExtProp | MemberExtDelegProp | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | MemberExtFun | MemberExtAbs | AbstractFun | UnsupFun | MemberSkip ) ;
 // A MEMBER extension - fun B.ext() / val B.p get() = ... declared inside a class.
 // GENUINE, and the only construct with TWO receivers: the extension receiver (bound to
 // `this` in the body) and the DISPATCH receiver, the enclosing class instance. The
@@ -733,6 +733,12 @@ MemberExtAbs <~~ takeAll() ~~>
 // the initializer is dropped here for the same reason.
 MemberExtProp <~~ push({memberExtProp: takeAll()}) ~~>
             = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in) ~~> [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] AccRunB ;
+// The member-level EXTENSION DELEGATED property - `val Ctx.mem: Int by D()` inside a
+// class. Same protocol as the top-level ExtDelegProp: one delegate per declaration
+// site, thisRef is the extension receiver. Ordered before PropDelegate, which has no
+// receiver segment and would otherwise leave the receiver half-consumed.
+MemberExtDelegProp <~~ push({memberExtDeleg: {items: takeAll(), dpos: up.pos}}) ~~>
+            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in) ~~> [ ":" Type ] [ WhereClause ] KwBy DelegSrc [ ";" ] { DropAcc } { PropVis } [ ";" ] ;
 // A nested type declaration. GENUINE: the nested class/interface/object is built and
 // attached to the enclosing descriptor under its own name, so Outer.Nested() and
 // Outer.Companion-style qualified access work. An `inner` class additionally captures
@@ -819,8 +825,19 @@ Setter      <~~ var b = pop(); push({setter: b, sparam: pop()}) ~~>
 PropDelegate = LazyProp | RealPropDelegate | UnsupDelegate ;
 LazyProp    <~~ push(makeProp(takeAll())) ~~>
             = "val" KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit { PropVis } [ ";" ] ;
+// A delegated MEMBER property may still declare accessors - `val p: Int by A()` on one
+// line and `get() = 1` on the next (psi/propertyDelegate/PropertyWithGetter.kt), or
+// `val a by A(); get() = 1;` (psi/propertyDelegate/GetterInSameLine.kt). Kotlin parses
+// both with a clean tree and rejects them SEMANTICALLY ("delegated property cannot have
+// accessors"), so they are consumed and DROPPED (DropAcc), exactly as the local form
+// (RealDelegateDecl) already tolerated its `[ AccRun ]`. Without the run neither half
+// parsed the member spelling at all: RealPropDelegate matched up to the delegate,
+// SUCCEEDED, and the class body then died on the `get` - and because it succeeded,
+// ordered choice never offered the shape to UnsupDelegate, whose whole reason for
+// carrying an accessor run was this case.
 RealPropDelegate <~~ push(makeDelegProp(takeAll(), up.pos)) ~~>
-            = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] KwBy DelegSrc { PropVis } [ ";" ] ;
+            = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] KwBy DelegSrc [ ";" ] { DropAcc } { PropVis } [ ";" ] ;
+DropAcc     <~~ pop() ~~> = AccGetB | AccSetB ;
 DelegSrc    <~~ push({dsrc: pop()}) ~~>
             = Expression ;
 UnsupDelegate <~~ notImpl("delegated property", up.pos) ~~>
@@ -921,8 +938,13 @@ LocalTypeAlias <~~ push(function() {}) ~~>
 // scope a top-level one does. Two local classes of the same name in different functions
 // therefore share one globalScope slot - the last one walked wins for anything that
 // resolves through globalScope, while the statement binding is per-frame and correct.
+// A local ENUM class is built for real too. It used to be offered only to the SKIP
+// forms below, so `fun f() { enum class E { A, B }; return E.B.ordinal }` warned "enum
+// class not implemented" and then died with "unknown name: E", while the compiler half
+// lowered it and answered 1 - a live cross-half divergence. EnumReal/EnumBare push the
+// same {nname, nval, inner} record ClassReal does, so nothing else changes.
 LocalClass  <~~ push(makeLocalTypeStmt(pop())) ~~>
-            = [ Modifiers ] ( ClassReal | InterfaceReal | ObjectReal ) ;
+            = [ Modifiers ] ( EnumReal | EnumBare | ClassReal | InterfaceReal | ObjectReal ) ;
 // The shapes the real builders decline (an enum, or a body outside the member set):
 // only the SKIP forms are offered, the shape is accepted, reported as not implemented,
 // and the statement is a no-op thunk. takeAll drains the placeholder the skip form
@@ -2348,10 +2370,27 @@ CtorDelegate <~~ push({delegArgs: takeAll()}) ~~>
 // dispatches to it with the receiver bound to `this`. The receiver type is dropped, so
 // an extension property must not reuse a real field name.
 // At least one accessor is REQUIRED: an extension property has no backing field, so
-// this also keeps an extension DELEGATED property (val Int.x: T by store()) out - it
-// falls through to the delegated-property forms instead of being half-consumed here.
+// this keeps an extension DELEGATED property (val Int.x: T by store()) out - it falls
+// through to ExtDelegProp below instead of being half-consumed here.
 ExtProp     <~~ registerExtProp(takeAll()) ~~>
             = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in) ~~> [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] AccRunB ;
+// An EXTENSION DELEGATED property - `val Ctx.store: Int by D()`, the shape the Android
+// DataStore idiom (`val Context.dataStore by preferencesDataStore(name = "settings")`)
+// is written in. GENUINE, and it is the ordinary delegate protocol read the way Kotlin
+// defines it for an extension: the delegate object belongs to the DECLARATION SITE, not
+// to any instance, so the `by` expression is evaluated ONCE here (this tag runs while
+// the top level executes, exactly like TopProp's), and every read of `recv.name` calls
+// getValue(recv, property) with the EXTENSION RECEIVER as thisRef - every write
+// setValue(recv, property, value). That is what makes the "no single owner to pass as
+// thisRef" objection this rule used to carry wrong: the owner is the receiver of the
+// access, supplied per access rather than per declaration. UNVERIFIED against kotlinc
+// (none on this machine); the arity (getValue/2, setValue/3) and the thisRef identity
+// are read off the Kotlin documentation's "Delegated properties" page, which spells the
+// operator signatures with thisRef typed as the extension receiver's type.
+// provideDelegate still gets a null thisRef, as it does for any property with no
+// dispatch receiver: it runs at the declaration, where no receiver exists yet.
+ExtDelegProp <~~ registerExtDelegProp(takeAll(), up.pos) ~~>
+            = ( "val" | "var" ) KwEnd [ SkipAngle ] { TypeAnno } RecvSeg { RecvSeg } KId <~~ push(up.in) ~~> [ ":" Type ] [ WhereClause ] KwBy DelegSrc { PropVis } [ ";" ] ;
 // A top-level COMPUTED property (val x: T get() = ...) with no receiver: the same
 // machinery as a class property, bound as a global whose reads run the getter.
 PropAccessor <~~ registerTopProp(takeAll()) ~~>
@@ -7467,12 +7506,14 @@ NotMemberKw = :script(~~
     // ORDER, because Kotlin runs them in that order.
     function splitBody(items, start) {
         var r = {inits: [], methods: [], accessors: [], companion: null, secondary: [],
-                 nested: [], memberExts: [], memberExtProps: [], delegs: [], abstracts: []}
+                 nested: [], memberExts: [], memberExtProps: [], memberExtDelegs: [],
+                 delegs: [], abstracts: []}
         for (var i = start; i < items.length; i++) {
             var it = items[i]
             if (it == undefined || it == null) { continue }
             if (it.absname != undefined) { r.abstracts.push(it.absname) }
             else if (it.memberExt != undefined) { r.memberExts.push(it.memberExt) }
+            else if (it.memberExtDeleg != undefined) { r.memberExtDelegs.push(it.memberExtDeleg) }
             else if (it.memberExtProp != undefined) { r.memberExtProps.push(it.memberExtProp) }
             else if (it.companion != undefined) { r.companion = it.companion }
             else if (it.secondary != undefined) { r.secondary.push(it.secondary) }
@@ -7585,6 +7626,43 @@ NotMemberKw = :script(~~
             var mp = makeProp(parts.memberExtProps[q])
             if (mp.getter != undefined) { cls["extget$" + mp.prop] = makeMemberExtGetter(mp.getter) }
             if (mp.setter != undefined) { cls["extset$" + mp.prop] = makeMemberExtSetter(mp.setter, mp.sparam) }
+        }
+        // A member-level extension DELEGATED property (see ExtDelegProp). The delegate
+        // belongs to the declaration site, and a class body is walked once, so it is
+        // resolved here rather than per instance - the same rule as the top-level form.
+        for (var w = 0; w < parts.memberExtDelegs.length; w++) {
+            installMemberExtDeleg(cls, parts.memberExtDelegs[w])
+        }
+    }
+    // rec = {items: [name, {dsrc}], dpos}. The position rides in the record, not on the
+    // item array: the frozen runtime rejects a non-index property on an array.
+    // Both accessors take (dispatchReceiver, extensionReceiver[, value]), like every
+    // other member extension, and pass the EXTENSION receiver as thisRef.
+    function installMemberExtDeleg(cls, rec) {
+        var items = rec.items
+        var name = items[0]
+        var src = null
+        for (var i = 1; i < items.length; i++) {
+            if (items[i] != undefined && items[i] != null && items[i].dsrc != undefined) { src = items[i].dsrc }
+        }
+        if (src === null) { return }
+        // Resolved on FIRST ACCESS and remembered - still ONE delegate per declaration
+        // site, but not evaluated while the descriptor is built. The compiler half
+        // cannot evaluate it there (buildMain emits class items in topological order, so
+        // a delegate naming a top-level val is not bound yet), and the two halves must
+        // run the `by` expression at the same moment; js_ktdmemo in abnf/jsrtkotlin.go
+        // is the twin of this box.
+        var box = {d: null, done: false}
+        var pos = rec.dpos
+        cls["extget$" + name] = function() {
+            if (!box.done) { box.done = true; box.d = delegResolve(src(), null, name, pos) }
+            if (box.d === null) { return null }
+            return delegGet(box.d, arguments[1], name)
+        }
+        cls["extset$" + name] = function() {
+            if (!box.done) { box.done = true; box.d = delegResolve(src(), null, name, pos) }
+            if (box.d === null) { return }
+            delegSet(box.d, arguments[1], name, arguments[2])
         }
     }
     // f = {name, params, body}. Called as (dispatchReceiver, extensionReceiver, args...):
@@ -7881,6 +7959,25 @@ NotMemberKw = :script(~~
         }
         return r
     }
+    // The first CLASS parent of cls (interfaces have no constructor to delegate to).
+    function firstClassParent(cls) {
+        var ps = resolveParents(cls)
+        for (var i = 0; i < ps.length; i++) {
+            if (ps[i] != undefined && ps[i] != null && ps[i].__isiface !== true) { return ps[i] }
+        }
+        return null
+    }
+    // `: this(args)` - another constructor of THIS class. Kotlin picks by arity, the
+    // same rule kNew applies: a secondary constructor that takes exactly that many,
+    // otherwise the primary.
+    function runThisDeleg(cls, self, dspec) {
+        for (var i = 0; i < cls.__secondary.length; i++) {
+            var sc2 = secondaryOf(cls.__secondary[i])
+            if (sc2.params.length == dspec.pos.length) { runSecondary(cls, sc2, self, dspec); return }
+        }
+        kSetNamed(dspec.named)
+        cls.__ctor.apply(undefined, concat2impl([self], dspec.pos))
+    }
     function runSecondary(cls, sc, self, spec) {
         var saved = scopes
         scopes = [globalScope, {}]
@@ -7888,15 +7985,47 @@ NotMemberKw = :script(~~
             declVar("this", self)
             bindParams(sc.params, spec.pos, 0, spec.named)
             var dargs = []
+            // null = NO delegation clause at all, which implicitly delegates to this
+            // class's primary constructor (Kotlin's rule) - never re-dispatched by
+            // arity, or a bodiless `constructor(n: Int)` would find the zero-argument
+            // secondary that delegates back to it and spin forever.
+            var dtarget = null
             if (sc.delegArgs != null) {
                 for (var i = 0; i < sc.delegArgs.length; i++) {
-                    if (sc.delegArgs[i] != undefined && sc.delegArgs[i] != null && sc.delegArgs[i].dtarget != undefined) { continue }
+                    if (sc.delegArgs[i] != undefined && sc.delegArgs[i] != null && sc.delegArgs[i].dtarget != undefined) {
+                        dtarget = sc.delegArgs[i].dtarget
+                        continue
+                    }
                     dargs.push(sc.delegArgs[i])
                 }
             }
             var dspec = kevalArgs(dargs)
-            kSetNamed(dspec.named)
-            cls.__ctor.apply(undefined, concat2impl([self], dspec.pos))
+            if (dtarget == "super") {
+                // `: super(args)` runs the SUPERCLASS constructor, not this class's own.
+                // Calling cls.__ctor with the delegation arguments (what this used to do
+                // unconditionally) bound them to this class's OWN parameter list - empty,
+                // since Kotlin forbids `: super(...)` in a class that has a primary
+                // constructor - so the superclass's `val` parameters were never stored on
+                // the instance and `n` inside an inherited method died with "unknown
+                // name: n", while the compiler half answered correctly.
+                var pc = firstClassParent(cls)
+                if (pc != null && pc.__ctor != undefined && pc.__ctor != null) {
+                    kSetNamed(dspec.named)
+                    pc.__ctor.apply(undefined, concat2impl([self], dspec.pos))
+                }
+                // This class's own property initializers and init blocks still have to
+                // run: with no primary constructor they belong to whichever secondary
+                // constructor executes. cls.__ctor with no arguments does exactly that -
+                // its cparams are empty and its supertype specs carry no argument list
+                // (the `: super(...)` here is where the superclass arguments live), so it
+                // contributes nothing but the initializer run.
+                cls.__ctor.apply(undefined, [self])
+            } else if (dtarget == "this") {
+                runThisDeleg(cls, self, dspec)
+            } else {
+                kSetNamed(dspec.named)
+                cls.__ctor.apply(undefined, concat2impl([self], dspec.pos))
+            }
             scopes = [globalScope, {}]
             declVar("this", self)
             bindParams(sc.params, spec.pos, 0, spec.named)
@@ -8315,6 +8444,27 @@ NotMemberKw = :script(~~
         var p = makeProp(items)
         if (p.getter != undefined) { extProps["$" + p.prop] = makeGetter(p.prop, p.getter) }
         if (p.setter != undefined) { extPropSetters["$" + p.prop] = makeSetter(p.prop, p.setter, p.sparam) }
+    }
+    // An extension DELEGATED property (see ExtDelegProp). The delegate belongs to the
+    // declaration site, so it is resolved ONCE here - this tag runs while the top level
+    // executes - and both accessors close over it. thisRef is the receiver the access
+    // supplies, which is exactly Kotlin's rule for an extension property; a `val` gets a
+    // setter too, harmlessly, because nothing can reach it through a val.
+    // items = [name, {dsrc}] (RecvSeg is tag-less, so no receiver item arrives).
+    function registerExtDelegProp(items, pos) {
+        var name = items[0]
+        var src = null
+        for (var i = 1; i < items.length; i++) {
+            if (items[i] != undefined && items[i] != null && items[i].dsrc != undefined) { src = items[i].dsrc }
+        }
+        if (src === null) { return }
+        var d0 = anytype
+        d0 = src()
+        var d = anytype
+        d = delegResolve(d0, null, name, pos)
+        if (d === null) { return }   // Not a delegate: delegResolve has already reported it.
+        extProps["$" + name] = function(recv) { return delegGet(d, recv, name) }
+        extPropSetters["$" + name] = function(recv, v) { delegSet(d, recv, name, v) }
     }
 
     // ----- super and this@Label -----
