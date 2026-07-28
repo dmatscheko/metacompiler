@@ -55,8 +55,29 @@ catch(e: Exception) between the lambda and its function would see it. componentN
 value that has none yields undefined instead of being rejected. Type arguments are
 erased, so variance, bounds and overload resolution by type are not enforced; a method
 name declared by two classes shares one named-argument slot list. Not in the subset:
-coroutines (suspend parses but nothing resumes), reflection, member-level extension
-functions, non-lazy property delegates.
+reflection, member-level extension functions, non-lazy property delegates.
+
+COROUTINES run SYNCHRONOUSLY. runBlocking, coroutineScope, supervisorScope and
+withContext are their bodies; async and launch run their block at the point it is
+written and answer a Job whose await/join are immediate; delay and yield are no-ops;
+Dispatchers.IO and friends are names that carry no behaviour. So the RESULTS are right
+and the ORDERING is not: nothing suspends, so two coroutines never interleave and a
+program whose output depends on interleaving prints a different (but deterministic)
+order than kotlinx.coroutines. Flow, Channel, select and cancellation are not
+modelled. `suspend` itself remains syntax only.
+
+A SEQUENCE IS EAGER: sequenceOf is listOf and every operator on it is the list
+operator, so a pipeline over a finite source gives Kotlin's answer while an INFINITE
+generateSequence is materialised up to a cap of 100000 elements (the cap prints a
+warning when it is reached) rather than being pulled lazily. take() on an
+infinite generator therefore still answers correctly; a generator with side effects
+runs them 100000 times, and one that needs more than 100000 elements is truncated.
+
+A SET is its own shape - it deduplicates, compares without regard to order and is
+never equal to a List - while an ARRAY still collapses onto a list. hashCode() is
+java's throughout: the 31-fold for a list, the SUM for a set, doubleToLongBits for a
+Double. A qualified stdlib path (kotlin.math.abs) resolves to the same builtin as the
+bare name.
 
 REGULAR EXPRESSIONS are genuine, over the shared engine (abnf/jsrtregex.go plus the
 Kotlin dispatcher abnf/jsrtregexkt.go, reached through the js_rxkt externals; the
@@ -301,10 +322,15 @@ ModWordAhead = :script(~~
 // is actually a name: a real modifier is never immediately followed by `:`, but a
 // parameter or property named `data`/`value`/`inner` is (data: Intent?). Without the
 // guard [Modifiers] would eat the name and strand the `:`.
+// `lateinit` is the third modifier that CHANGES what is emitted (see DataMod): the
+// property it marks throws on a read before assignment instead of answering null, so
+// PropDecl has to see it. This grammar has no pendingMods list, so it is a single
+// walk-time flag the next property declaration takes.
 Modifier    = ContextClause | CompanionMod
             | ( DataMod | "inner" ) KwEnd NotColon NotClassW
+            | "lateinit" KwEnd NotColon <~~ noteLateinit() ~~>
             | ( "public" | "private" | "protected" | "internal" | "open" | "final"
-              | "abstract" | "sealed" | "override" | "lateinit" | "const"
+              | "abstract" | "sealed" | "override" | "const"
               | "noinline" | "crossinline" | "tailrec"
               | "operator" | "infix" | "inline" | "external" | "suspend"
               | "expect" | "actual" | "reified" ) KwEnd NotColon ;
@@ -708,8 +734,12 @@ NestedTypeSkip <~~ notImpl("nested type declaration", up.pos) ~~>
 // interface property) has no `= init`; makeProp then defaults it to null so the field
 // still exists - an implicit `name = ...` in a method resolves to this.name, and a read
 // before assignment yields null (the flat, dispatch-by-name model has no real subclass).
+// The modifier run is TAKEN at the name (nothing between `val` and the name notes a
+// modifier, and every alternative Member tries after this one either drains the run
+// itself or ignores it), so `lateinit` reaches makeProp instead of leaking into the
+// next declaration that reads pendingMods.
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
-            = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" PType ] [ "=" Expression ] { PropVis } [ ";" ] ;
+            = ( "val" | "var" ) KwEnd KId <~~ push(up.in); push({pmods: takeLateinit()}) ~~> [ ":" PType ] [ "=" Expression ] { PropVis } [ ";" ] ;
 PropVis     = [ Modifiers ] ( KwGet | KwSet ) NotParen ;
 // A delegated property (val/var x [: T] by <delegate>). The `by lazy { init }` form
 // is GENUINE (see LazyProp): the initializer is lowered once and its value becomes a
@@ -1943,8 +1973,12 @@ BareClassRef <~~ push(notImplExpr("receiverless class literal", up.pos)) ~~>
 // `this::prop.isInitialized` - Kotlin's lateinit check. A `lateinit var` has no
 // initializer, and a bodiless property defaults to null here, so "initialized" is
 // exactly "the field is not null".
+// The `this` is OPTIONAL: a bare `::prop.isInitialized` inside a member means the
+// same thing, and it used to fall through to BareRef, which READ the property and
+// then asked for `.isInitialized` of the (null) value - aborting both halves with
+// "member 'isInitialized' of null".
 IsInitRef   <~~ push(makeIsInit(pop().irname)) ~~>
-            = "this" KwEnd "::" KId <~~ push({irname: up.in}) ~~> "." "isInitialized" KwEnd ;
+            = [ "this" KwEnd ] "::" KId <~~ push({irname: up.in}) ~~> "." "isInitialized" KwEnd ;
 BareRef     = "::" KId <~~ push(makeVarRef(up.in)) ~~> ;
 // A NULLABLE receiver is allowed in front of the `::` - `X?::x`, `X ?:: x`, `X? ?:: x`,
 // `X ??:: x`, `X ?? :: x`. All five are CALLABLE_REFERENCE_EXPRESSIONs in Kotlin's own
@@ -2828,7 +2862,7 @@ KwContract  = "contract" KwEnd ;
     // Import prefixes the runtime already satisfies: their symbols are provided
     // as builtins (abs/max/min, listOf, exitProcess, ...), so importing them is a
     // no-op. Anything else is an external library we cannot resolve.
-    core.stdlibImports = ["kotlin", "kotlin.math", "kotlin.collections", "kotlin.system", "kotlin.text", "kotlin.ranges", "kotlin.sequences"]
+    core.stdlibImports = ["kotlin", "kotlin.math", "kotlin.collections", "kotlin.system", "kotlin.text", "kotlin.ranges", "kotlin.sequences", "kotlinx.coroutines"]
 
     // Project-file imports: 'import a.b.C' looks for a/b/C.kt, then a/b.kt
     // under the program's directory and the -i roots (c.findImport). The file
@@ -3797,6 +3831,7 @@ KwContract  = "contract" KwEnd ;
         callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
         callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
         b = emitPTypes(b, clsV, null, props)
+        b = emitLateinit(b, clsV, props)
         b = emitSuperLinks(b, clsV, supers, own)
         var savedSuper = emitSuperName
         emitClassNames.push(name)
@@ -4371,24 +4406,17 @@ KwContract  = "contract" KwEnd ;
             return exitB
         }
     }
-    // The sequence a `for` runs over. A MAP (the shared {__dict, keys, vals} handle) has
-    // no `length`, so the index loop below would run zero times over it; Kotlin iterates a
-    // map's ENTRIES, and so does the interpreter half. The probe is the __dict marker
-    // rather than a missing length, so a value that is neither a list, a string nor a map
-    // keeps behaving exactly as it did instead of being asked for entries it has not got.
-    // Each entry carries key/value AND first/second, which is what makes both
-    // `for (e in m)` and `for ((k, v) in m)` work (ktElems in abnf/jsrtkotlin.go).
+    // The sequence a `for` runs over. A MAP (the shared {__dict, keys, vals} handle) and
+    // a SET ({__set, keys}) have no `length`, so the index loop below would run zero
+    // times over either; Kotlin iterates a map's ENTRIES and a set's elements, and so
+    // does the interpreter half (kIterable). One runtime call decides, so a value that
+    // is neither a list, a string, a map nor a set keeps behaving exactly as it did.
+    // Each map entry carries key/value AND first/second, which is what makes both
+    // `for (e in m)` and `for ((k, v) in m)` work (js_ktiter in abnf/jsrtkotlin.go).
+    // This used to be an inline __dict probe with its own three basic blocks, which
+    // did not know about a set.
     function emitIterSrc(b, v) {
-        var mapB = curF.NewBlock("")
-        var asIsB = curF.NewBlock("")
-        var mrgB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_get", [v, emitStr(b, "__dict")]), hTrue])),
-                    mapB, asIsB)
-        var entV = callExt(mapB, "js_ktsmcall", [v, emitStr(mapB, "entries"),
-                                                 callExt(mapB, "js_arr_new", [])])
-        mapB.NewBr(mrgB)
-        asIsB.NewBr(mrgB)
-        return {b: mrgB, v: mrgB.NewPhi([llvm.ir.NewIncoming(entV, mapB), llvm.ir.NewIncoming(v, asIsB)])}
+        return {b: b, v: callExt(b, "js_ktiter", [v])}
     }
     function makeForList(bodyT, listT, name) {
         return function(b) {
@@ -4686,6 +4714,11 @@ KwContract  = "contract" KwEnd ;
     }
     // Property names declared by some class: an extension property never shadows them.
     function notePropName(name) { classPropNames["$" + name] = true }
+    // The `lateinit` modifier of the property declaration being walked. Set by the
+    // Modifier production, taken by PropDecl; see the note there.
+    var pendLateinit = false
+    function noteLateinit() { pendLateinit = true }
+    function takeLateinit() { var v = pendLateinit; pendLateinit = false; return v }
     // The declared type of each SIZED property, stored on the class descriptor so that
     // a field WRITE can adopt it: `var y: Long = 1` followed by `w.y = 1` has to store
     // a Long, and without this it stored a plain Int, so `w.y * 1000000 * 1000000`
@@ -4715,24 +4748,50 @@ KwContract  = "contract" KwEnd ;
             keep.push(names[k])
             keepT.push(ty)
         }
-        if (keep.length == 0) { return b }
-        var tV = callExt(b, "js_obj_new", [])
-        for (var q = 0; q < keep.length; q++) {
-            callExt(b, "js_set", [tV, emitStr(b, keep[q]), emitStr(b, keepT[q])])
+        if (keep.length > 0) {
+            var tV = callExt(b, "js_obj_new", [])
+            for (var q = 0; q < keep.length; q++) {
+                callExt(b, "js_set", [tV, emitStr(b, keep[q]), emitStr(b, keepT[q])])
+            }
+            callExt(b, "js_set", [clsV, emitStr(b, "__ptypes"), tV])
         }
-        callExt(b, "js_set", [clsV, emitStr(b, "__ptypes"), tV])
+        return b
+    }
+    // Which properties are `lateinit var`, stored on the descriptor as __lateinit. A
+    // lateinit property cannot hold null in Kotlin, so "the field is still null" IS
+    // "not initialized yet" - no per-instance flag is needed, and reading one throws
+    // UninitializedPropertyAccessException instead of answering null (which is what
+    // both halves used to do). A class that declares no lateinit property emits
+    // exactly the IR it did before. The twin is kInstallPTypes in
+    // kotlin-interpreter.abnf; js_ktfget and js_ktget consult it.
+    function emitLateinit(b, clsV, inits) {
+        if (inits == undefined || inits == null) { return b }
+        var li = []
+        for (var i = 0; i < inits.length; i++) {
+            if (inits[i].prop != undefined && inits[i].li === true) { li.push(inits[i].prop) }
+        }
+        if (li.length == 0) { return b }
+        var lV = callExt(b, "js_obj_new", [])
+        for (var j = 0; j < li.length; j++) {
+            callExt(b, "js_set", [lV, emitStr(b, li[j]), hTrue])
+        }
+        callExt(b, "js_set", [clsV, emitStr(b, "__lateinit"), lV])
         return b
     }
     function makeProp(items) {
         notePropName(items[0])
         var ty = ""
         var at = 1
+        var li = false
+        // LazyProp reaches this function too and pushes no modifier record, so the
+        // slot is optional.
+        if (items[at] != undefined && items[at].pmods != undefined) { li = items[at].pmods === true; at++ }
         if (items[at] != undefined && items[at].pty != undefined) { ty = items[at].pty; at++ }
         // A bodiless property (abstract/lateinit/interface: no `= init`) still needs a
         // backing field so an implicit `name = ...` in a method resolves to this.name and
         // reads before assignment are defined. Default it to null (identical to `= null`).
-        if (items[at] == undefined) { return {prop: items[0], init: makeConst(null), ty: ty} }
-        return {prop: items[0], init: ktAdoptThunk(items[at], ty), ty: ty}
+        if (items[at] == undefined) { return {prop: items[0], init: makeConst(null), ty: ty, li: li} }
+        return {prop: items[0], init: ktAdoptThunk(items[at], ty), ty: ty, li: li}
     }
     // Wrap a property initializer so its value adopts the declared type, the way a
     // local's does. Returns the thunk unchanged when the type carries no width, so a
@@ -5431,6 +5490,7 @@ KwContract  = "contract" KwEnd ;
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
             b = emitPTypes(b, clsV, hdr.cparams, parts.inits)
+            b = emitLateinit(b, clsV, parts.inits)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             b = emitSuperLinks(b, clsV, hdr.supers, own)
             b = emitDelegates(b, clsV, hdr.supers, own)
@@ -5502,6 +5562,7 @@ KwContract  = "contract" KwEnd ;
             // instead of the Name@1 an ordinary instance gets.
             callExt(b, "js_set", [clsV, emitStr(b, "__isenum"), hTrue])
             b = emitPTypes(b, clsV, hdr.cparams, parts.inits)
+            b = emitLateinit(b, clsV, parts.inits)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             b = emitSuperLinks(b, clsV, hdr.supers, own)
             var ctorIdx = emitCtor(hdr.cparams, parts.inits, hdr.supers)
@@ -5521,6 +5582,14 @@ KwContract  = "contract" KwEnd ;
             }
             emitClassNames.pop()
             emitSuperName = savedSuper
+            // __entries is the entry list in DECLARATION order, which is what
+            // values() / valueOf() / entries read (ktEnumMethod in
+            // abnf/jsrtkotlin.go). The interpreter half keeps the same field; without
+            // it `Col.values()` aborted the compiled half with "unknown method
+            // 'values'" while the interpreter answered the list - a live cross-half
+            // divergence no test happened to exercise.
+            var entriesV = callExt(b, "js_arr_new", [])
+            callExt(b, "js_set", [clsV, emitStr(b, "__entries"), entriesV])
             for (var e = 0; e < entries.length; e++) {
                 var objV = callExt(b, "js_obj_new", [])
                 callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
@@ -5536,6 +5605,7 @@ KwContract  = "contract" KwEnd ;
                 callExt(b, "js_set", [objV, emitStr(b, "name"), emitStr(b, entries[e].ename)])
                 callExt(b, "js_set", [objV, emitStr(b, "ordinal"), emitNum(b, e)])
                 callExt(b, "js_set", [clsV, emitStr(b, entries[e].ename), objV])
+                callExt(b, "js_arr_push", [entriesV, objV])
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, entries[e].ename), objV])
             }
             curScopeV = saved
@@ -5687,18 +5757,16 @@ KwContract  = "contract" KwEnd ;
         var lob = lo.NewBlock("entry")
         lob.NewRet(lo.Params[1])
         var loV = callExt(b, "js_closure", [handle(loIdx), curScopeV])
-        // The set/array constructors collapse onto listOf: in this untyped subset a set
-        // is modelled as a list (element uniqueness is not enforced). setOf()/emptyList()
-        // with no arguments yields the empty list, since jsf just returns its arg array.
+        // The ARRAY constructors collapse onto listOf: this value model cannot tell an
+        // Array from a List (both are a plain host array), which is a deliberate and
+        // documented simplification. emptyList() with no arguments yields the empty
+        // list, since jsf just returns its arg array. The SET constructors do NOT
+        // collapse any more - a Set is its own shape (ktMakeSet in
+        // abnf/jsrtkotlin.go), so they are js_ktglobal builders like mapOf.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "listOf"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "mutableListOf"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arrayListOf"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arrayOf"), loV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "setOf"), loV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "mutableSetOf"), loV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "hashSetOf"), loV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "linkedSetOf"), loV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "sortedSetOf"), loV])
         // The typed array constructors are the same "return the argument array"
         // function: intArrayOf(1, 2) is a list of those elements in this value model.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "intArrayOf"), loV])
@@ -5708,7 +5776,6 @@ KwContract  = "contract" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "booleanArrayOf"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "charArrayOf"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "emptyList"), loV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "emptySet"), loV])
         // A Sequence is EAGER in this subset (see kotlin-interpreter.abnf), so
         // sequenceOf IS listOf and every operator on it is the list operator.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "sequenceOf"), loV])
@@ -5732,7 +5799,18 @@ KwContract  = "contract" KwEnd ;
                           "checkNotNull", "error", "TODO", "runCatching", "lazy",
                           "List", "MutableList", "Array", "arrayOfNulls", "IntArray",
                           "LongArray", "ShortArray", "ByteArray", "DoubleArray",
-                          "FloatArray", "BooleanArray", "listOfNotNull", "setOfNotNull"]
+                          "FloatArray", "BooleanArray", "listOfNotNull", "setOfNotNull",
+                          // The SET constructors: their own shape since sets stopped
+                          // being lists (ktMakeSet / ktSetMethod in jsrtkotlin.go).
+                          "setOf", "mutableSetOf", "hashSetOf", "linkedSetOf",
+                          "sortedSetOf", "emptySet",
+                          // kotlinx.coroutines, as a SYNCHRONOUS subset: the block
+                          // runs immediately and to completion, so the RESULTS are
+                          // right and the ORDERING is not (see the :description note
+                          // and ktGlobalFn in abnf/jsrtkotlin.go).
+                          "runBlocking", "coroutineScope", "supervisorScope",
+                          "withContext", "async", "launch", "delay", "yield",
+                          "Job", "CoroutineScope", "awaitAll", "Dispatchers"]
         for (var kb = 0; kb < ktBuilders.length; kb++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ktBuilders[kb]),
                                          callExt(b, "js_ktglobal", [emitStr(b, ktBuilders[kb])])])

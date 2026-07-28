@@ -57,12 +57,31 @@ has no single owner to pass as thisRef and stays unsupported.
 
 The value model is untyped: Int arithmetic is 32 bit and / truncates, + concatenates
 when one side is a String, and == is structural for strings, Chars, data and value
-classes and identity otherwise; hashCode() is the matching structural hash (Kotlin's
-own 31 * h + component fold), so equal values hash equally. Sets and arrays collapse onto lists. The builtins are
-println/print/abs/max/min/exitProcess, listOf and its aliases, and the list methods
-map/filter/sumOf/forEach/count/any/joinToString plus the usual size/get/add/contains.
-Coroutines are syntax only (`suspend` is parsed, never resumed); so are reflection
-and the collections API beyond the calls above.
+classes and identity otherwise; hashCode() is the matching structural hash (java's:
+the 31-fold for a list, the SUM for a set, doubleToLongBits for a Double), so equal
+values hash equally. A SET is its own shape - it deduplicates, compares without regard
+to order and is never equal to a List - while an ARRAY still collapses onto a list.
+The builtins are println/print/abs/max/min/exitProcess, listOf and its aliases, and
+the list methods map/filter/sumOf/forEach/count/any/joinToString plus the usual
+size/get/add/contains. A qualified stdlib path (kotlin.math.abs) resolves to the same
+builtin as the bare name.
+
+COROUTINES run SYNCHRONOUSLY. runBlocking, coroutineScope, supervisorScope and
+withContext are their bodies; async and launch run their block at the point it is
+written and answer a Job whose await/join are immediate; delay and yield are no-ops;
+Dispatchers.IO and friends are names that carry no behaviour. So the RESULTS are right
+and the ORDERING is not: nothing suspends, so two coroutines never interleave and a
+program whose output depends on interleaving prints a different (but deterministic)
+order than kotlinx.coroutines. Flow, Channel, select and cancellation are not
+modelled. `suspend` itself remains syntax only.
+
+A SEQUENCE IS EAGER: sequenceOf is listOf and every operator on it is the list
+operator, so a pipeline over a finite source gives Kotlin's answer while an INFINITE
+generateSequence is materialised up to a cap of 100000 elements (the cap prints a
+warning when it is reached) rather than being pulled lazily. take() on an
+infinite generator therefore still answers correctly; a generator with side effects
+runs them 100000 times, and one that needs more than 100000 elements is truncated.
+Reflection and the collections API beyond the calls above are also out of scope.
 
 REGULAR EXPRESSIONS are genuine, over the shared engine in languages/lib/regex.js.
 Kotlin has no regexp literal, so a pattern arrives as Regex(p), Regex(p, options) or
@@ -729,8 +748,12 @@ AbstractFun <~~ push({absname: takeAll()[0]}) ~~>
 // accessor body is the backing field (bound on entry, written back on exit).
 // A visibility-only accessor (var x = 0; private set) still parses and is ignored;
 // PropVis's NotParen guard keeps it clear of the body forms above.
+// The modifier run is TAKEN at the name (nothing between `val` and the name notes a
+// modifier, and every alternative Member tries after this one either drains the run
+// itself or ignores it), so `lateinit` reaches makeProp instead of leaking into the
+// next declaration that reads pendingMods.
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
-            = ( "val" | "var" ) KwEnd { Annotation } KId <~~ push(up.in) ~~> [ ":" PType ] [ "=" PropInit ] [ AccRun ] [ ";" ] ;
+            = ( "val" | "var" ) KwEnd { Annotation } KId <~~ push(up.in); push({pmods: takeMods()}) ~~> [ ":" PType ] [ "=" PropInit ] [ AccRun ] [ ";" ] ;
 PropInit    <~~ push({pinit: pop()}) ~~>
             = Expression ;
 PropVis     = [ Modifiers ] ( KwGet | KwSet ) NotParen ;
@@ -1978,7 +2001,7 @@ CallableRef = BareClassRef | BareRef | QualRef ;
 // KId ever widens.
 BareClassRef <~~ push(notImplExpr("receiverless class literal", up.pos)) ~~>
             = "::" "class" KwEnd ;
-BareRef     = "::" KId <~~ push(makeVarRef(up.in)) ~~> ;
+BareRef     = "::" KId <~~ push(makeBareRef(up.in)) ~~> ;
 // A TYPE-qualified reference - String::length - is a different construct: it is a
 // KProperty1 over an unbound receiver, which this interpreter does not implement, and
 // the compiler half routes it to notImplExpr. The two are told apart only at run time,
@@ -2383,7 +2406,7 @@ NotMemberKw = :script(~~
 
     // ----- Imports (same policy as the compiler grammar) -----
     // Prefixes the runtime already provides as builtins; importing them is a no-op.
-    core.stdlibImports = ["kotlin", "kotlin.math", "kotlin.collections", "kotlin.system", "kotlin.text", "kotlin.ranges", "kotlin.sequences"]
+    core.stdlibImports = ["kotlin", "kotlin.math", "kotlin.collections", "kotlin.system", "kotlin.text", "kotlin.ranges", "kotlin.sequences", "kotlinx.coroutines"]
 
     // Project-file imports: 'import a.b.C' looks for a/b/C.kt, then a/b.kt
     // under the program's directory and the -i roots (c.findImport). The file
@@ -2839,6 +2862,15 @@ NotMemberKw = :script(~~
                 if (isCmp) { return kCmp32(op, l, r) }
                 return kArith32(op, l, r)
             }
+            // `-` on a COLLECTION is kotlin.collections.minus, the twin of the `+`
+            // branch in kadd: a list, set or map loses the given element or every
+            // element of the given collection. Before this it fell through to the
+            // numeric tail, so `listOf(1, 2, 3) - 1` answered 0 in BOTH halves.
+            if (op == "-") {
+                if (Array.isArray(l)) { return kSeqMethod(l, "minus", [r]).v }
+                if (kIsSet(l)) { return kSetMethod(l, "minus", [r]).v }
+                if (kIsMap(l)) { return kMapMethod(l, "minus", [r]).v }
+            }
             if (uname != null && kIsUser(l)) {
                 var m = lookupMethod(l, uname)
                 if (m != null) {
@@ -3017,7 +3049,7 @@ NotMemberKw = :script(~~
     // string (which yields its characters, like Kotlin's CharSequence).
     function kIterable(v) {
         if (isRange(v)) { return rangeList(v) }
-        if (kIsMap(v)) { return kElems(v) }
+        if (kIsMap(v) || kIsSet(v)) { return kElems(v) }
         if (typeof v == "string") {
             var out = []
             for (var i = 0; i < v.length; i++) { out.push(kChar(v.charCodeAt(i))) }
@@ -3240,25 +3272,37 @@ NotMemberKw = :script(~~
         for (var i = 0; i < arguments.length; i++) out.push(arguments[i])
         return out
     }
-    // The set/array constructors collapse onto listOf: in this untyped subset a set is
-    // modelled as a list (element uniqueness is not enforced), which is enough to parse
-    // and run the collection-literal top level of real code. setOf()/emptyList() with no
-    // arguments yields the empty list.
+    // The ARRAY constructors collapse onto listOf: this value model cannot tell an
+    // Array from a List (both are a plain host array), which is a deliberate and
+    // documented simplification. The SET constructors do NOT - a Set is its own shape
+    // (see kMakeSet), so setOf(1, 1, 2) deduplicates and setOf(2, 1) == setOf(1, 2).
     hostGlobals["mutableListOf"] = hostGlobals["listOf"]
     hostGlobals["arrayListOf"] = hostGlobals["listOf"]
     hostGlobals["arrayOf"] = hostGlobals["listOf"]
-    hostGlobals["setOf"] = hostGlobals["listOf"]
-    hostGlobals["mutableSetOf"] = hostGlobals["listOf"]
-    hostGlobals["hashSetOf"] = hostGlobals["listOf"]
-    hostGlobals["linkedSetOf"] = hostGlobals["listOf"]
-    hostGlobals["sortedSetOf"] = hostGlobals["listOf"]
+    hostGlobals["setOf"] = function() {
+        var s = kMakeSet()
+        for (var i = 0; i < arguments.length; i++) { kSetAdd(s, arguments[i]) }
+        return s
+    }
+    hostGlobals["mutableSetOf"] = hostGlobals["setOf"]
+    hostGlobals["hashSetOf"] = hostGlobals["setOf"]
+    hostGlobals["linkedSetOf"] = hostGlobals["setOf"]
+    // sortedSetOf is a java.util.TreeSet: ascending order, not insertion order.
+    hostGlobals["sortedSetOf"] = function() {
+        var raw = []
+        for (var i = 0; i < arguments.length; i++) { raw.push(arguments[i]) }
+        var s = kMakeSet()
+        var sorted = kSortBy(raw, null, false)
+        for (var j = 0; j < sorted.length; j++) { kSetAdd(s, sorted[j]) }
+        return s
+    }
     hostGlobals["intArrayOf"] = hostGlobals["listOf"]
     hostGlobals["charArrayOf"] = hostGlobals["listOf"]
     hostGlobals["booleanArrayOf"] = hostGlobals["listOf"]
     hostGlobals["doubleArrayOf"] = hostGlobals["listOf"]
     hostGlobals["longArrayOf"] = hostGlobals["listOf"]
     hostGlobals["emptyList"] = hostGlobals["listOf"]
-    hostGlobals["emptySet"] = hostGlobals["listOf"]
+    hostGlobals["emptySet"] = function() { return kMakeSet() }
     // ----- Maps, Pair/Triple, `with` and StringBuilder -----
     // NOT AVAILABLE IN THE COMPILED HALF YET. A global NAME is declared by each
     // grammar's own builtin block (js_scope_decl in kotlin-to-llvm-ir.abnf), not by
@@ -3311,16 +3355,27 @@ NotMemberKw = :script(~~
     // it is the list operator. Kotlin's laziness is observable only through side
     // effects in the intermediate lambdas and through an infinite generateSequence,
     // neither of which this subset builds, so the two agree on every finite pipeline.
+    // How far an EAGER generateSequence walks an infinite generator before it gives
+    // up. See the :description note; the twin is ktSeqCap in abnf/jsrtkotlin.go.
+    var kSeqCap = 100000
     hostGlobals["generateSequence"] = function(seed, next) {
         var out = []
         var v = anytype
         v = (typeof seed == "function") ? seed() : seed
         var guard = 0
-        while (v !== null && v !== undefined && guard < 100000) {
+        while (v !== null && v !== undefined && guard < kSeqCap) {
             out.push(v)
             guard++
             if (typeof next != "function") { break }
             v = next(v)
+        }
+        // The cap is a REAL limit, not a formality: an eager Sequence cannot
+        // represent an infinite generator, so say so instead of handing back a
+        // silently truncated list. take(n) on an infinite generator still gets the
+        // right answer - it just paid for 100000 elements to get there.
+        if (guard >= kSeqCap) {
+            println("warning: generateSequence is EAGER here and stopped at " + kSeqCap +
+                    " elements; a Sequence is not lazy in this subset")
         }
         return out
     }
@@ -3460,10 +3515,111 @@ NotMemberKw = :script(~~
         }
         return out
     }
-    hostGlobals["setOfNotNull"] = hostGlobals["listOfNotNull"]
+    hostGlobals["setOfNotNull"] = function() {
+        var s = kMakeSet()
+        for (var i = 0; i < arguments.length; i++) {
+            if (arguments[i] !== null && arguments[i] !== undefined) { kSetAdd(s, arguments[i]) }
+        }
+        return s
+    }
     // lazy { ... }: the delegate whose `.value` is computed once. A property that
     // delegates to it is read through the same box.
     hostGlobals["lazy"] = function(f) { return {__lazy: true, f: f, done: false, v: null} }
+    // ----- kotlinx.coroutines, as a SYNCHRONOUS subset -----
+    // `launch`, `async`, `runBlocking`, `delay` and the scope builders were UNDEFINED
+    // in both halves, so any program with a coroutine in it stopped at the import.
+    // They run their block IMMEDIATELY and to completion here, on the calling thread:
+    // runBlocking { } is its body, async { } computes its value at the point it is
+    // written and await() hands it back, launch { } is the block itself, delay() is a
+    // no-op, and withContext / coroutineScope / supervisorScope are their bodies.
+    //
+    // THE LIMITATION, stated the way the JS async subset states its own (commit
+    // 3ce4862): the RESULTS are right and the ORDERING is not. Nothing suspends, so
+    // no two coroutines interleave - a `launch` block runs before the statement after
+    // it rather than concurrently, `delay` does not yield, and a program whose output
+    // DEPENDS on interleaving prints a different (but deterministic) order than the
+    // real kotlinx.coroutines runtime. Programs that use coroutines to compute a
+    // value - the common case - get the right answer.
+    //
+    // Not modelled at all, and still reported as unknown: Flow, Channel, select,
+    // cancellation semantics, and any dispatcher behaviour beyond the name.
+    // The twin is the coroutine block of ktGlobalFn in abnf/jsrtkotlin.go.
+    function kCoroBlock(args) {
+        for (var i = args.length - 1; i >= 0; i--) { if (typeof args[i] == "function") { return args[i] } }
+        return null
+    }
+    function kCoroRun(args) {
+        var f = kCoroBlock(args)
+        return f == null ? undefined : f()
+    }
+    function kJob(v) { return {__job: true, v: v} }
+    function kIsJob(v) {
+        return v !== null && v !== undefined && typeof v == "object" && v.__job === true
+    }
+    // await / join / cancel and the two state flags, on the Job an `async` or `launch`
+    // answers. The block has already run, so every one of them is immediate.
+    function kJobMethod(j, name) {
+        if (name == "await" || name == "getCompleted") { return {v: j.v} }
+        if (name == "join" || name == "cancel" || name == "cancelAndJoin" || name == "start") { return {v: undefined} }
+        if (name == "isActive") { return {v: false} }
+        if (name == "isCompleted") { return {v: true} }
+        if (name == "isCancelled") { return {v: false} }
+        return null
+    }
+    hostGlobals["runBlocking"] = function() { return kCoroRun(arguments) }
+    hostGlobals["coroutineScope"] = hostGlobals["runBlocking"]
+    hostGlobals["supervisorScope"] = hostGlobals["runBlocking"]
+    hostGlobals["withContext"] = hostGlobals["runBlocking"]
+    hostGlobals["async"] = function() { return kJob(kCoroRun(arguments)) }
+    hostGlobals["launch"] = hostGlobals["async"]
+    hostGlobals["delay"] = function() { return undefined }
+    hostGlobals["yield"] = hostGlobals["delay"]
+    hostGlobals["Job"] = function() { return kJob(undefined) }
+    hostGlobals["CoroutineScope"] = function() { return {__coroscope: true} }
+    hostGlobals["awaitAll"] = function() {
+        var out = []
+        for (var i = 0; i < arguments.length; i++) {
+            out.push(kIsJob(arguments[i]) ? arguments[i].v : arguments[i])
+        }
+        return out
+    }
+    // Dispatchers.IO / Main / Default / Unconfined are NAMES here: nothing dispatches,
+    // so they carry no behaviour, but a program that mentions one still runs.
+    hostGlobals["Dispatchers"] = {IO: "Dispatchers.IO", Main: "Dispatchers.Main",
+                                  Default: "Dispatchers.Default",
+                                  Unconfined: "Dispatchers.Unconfined"}
+
+    // ----- The QUALIFIED stdlib paths -----
+    // `kotlin.math.abs(-3)` is the same function as the unqualified `abs(-3)`, and it
+    // resolved in NEITHER half before ("unknown name: kotlin") - the builtins are
+    // global names here, so only the bare spelling reached them. `kotlin` is a value
+    // now: a package handle whose field read either descends into a known sub-package
+    // or answers the GLOBAL of that name. Membership is deliberately not modelled per
+    // package - the last segment is looked up wherever it lives - because a wrong
+    // membership table would REJECT correct code, and Kotlin's own resolution has
+    // already decided the path is valid by the time a program runs.
+    // `import kotlin.math.abs` needed nothing: an import of a builtin is already a
+    // no-op in both halves (see the -warn-imports note).
+    // The twin is ktPkgMember in abnf/jsrtkotlin.go.
+    var kPkgPaths = {}
+    var kPkgList = ["kotlin", "kotlin.math", "kotlin.collections", "kotlin.text",
+                    "kotlin.sequences", "kotlin.comparisons", "kotlin.ranges",
+                    "kotlin.system", "kotlin.io", "kotlin.random", "kotlin.jvm",
+                    "kotlin.reflect", "kotlin.time", "kotlin.concurrent"]
+    for (var kp = 0; kp < kPkgList.length; kp++) { rawSet(kPkgPaths, kPkgList[kp], true) }
+    function kPkg(path) { return {__pkg: path} }
+    function kIsPkg(v) {
+        return v !== null && v !== undefined && typeof v == "object" && typeof v.__pkg == "string"
+    }
+    function kPkgMember(o, name) {
+        var sub = o.__pkg + "." + name
+        if (hasOwn(kPkgPaths, sub)) { return kPkg(sub) }
+        if (hasOwn(hostGlobals, name)) { return hostGlobals[name] }
+        var sc = scopes
+        for (var i = sc.length - 1; i >= 0; i--) { if (hasOwn(sc[i], name)) { return sc[i][name] } }
+        fail("unknown name: " + sub)
+    }
+    hostGlobals["kotlin"] = kPkg("kotlin")
     function kLazyValue(box) {
         if (!box.done) { box.v = box.f(); box.done = true }
         return box.v
@@ -3513,8 +3669,9 @@ NotMemberKw = :script(~~
     function krxFlags(opts) {
         var list = []
         if (opts != undefined && opts != null) {
-            if (Array.isArray(opts)) { for (var i = 0; i < opts.length; i++) { list.push(kstr2(opts[i])) } }
-            else { list.push(kstr2(opts)) }
+            // setOf(...) is the idiomatic spelling and answers a SET now, not a list.
+            var raw = (Array.isArray(opts) || kIsSet(opts)) ? kElems(opts) : [opts]
+            for (var i = 0; i < raw.length; i++) { list.push(kstr2(raw[i])) }
         }
         // "q" unconditionally: the JVM regex dialect always understands \Q...\E quote
         // regions, which is what Pattern.quote (Regex.escape / RegexOption.LITERAL)
@@ -3822,6 +3979,9 @@ NotMemberKw = :script(~~
             return out + "]"
         }
         if (typeof v == "object" && v.__sb === true) { return v.s }
+        // A SET renders like a List - java.util.AbstractCollection.toString again -
+        // in its iteration order: [1, 2].
+        if (kIsSet(v)) { return kstr(v.keys) }
         // A MAP renders as java.util.AbstractMap.toString does: {a=1, b=2}.
         if (kIsMap(v)) {
             var mo = "{"
@@ -3831,6 +3991,9 @@ NotMemberKw = :script(~~
             }
             return mo + "}"
         }
+        // A Map.Entry renders as a=1 (java.util.AbstractMap's entry toString), NOT as
+        // the Pair it also destructures as - so `println(m.entries)` is [a=1, b=2].
+        if (kIsEntry(v)) { return kstr(v.key) + "=" + kstr(v.value) }
         // A Pair / Triple renders as (a, b) / (a, b, c) - kotlin.Pair.toString.
         if (kIsPair(v)) {
             var po = "(" + kstr(v.first) + ", " + kstr(v.second)
@@ -3944,6 +4107,58 @@ NotMemberKw = :script(~~
         var ks = m.keys
         for (var i = 0; i < ks.length; i++) { if (kEqVals(ks[i], k)) { return i } }
         return 0 - 1
+    }
+    // A SET is its own shape, {__set: true, keys: []} - the map handle without the
+    // parallel `vals` array, which is exactly what java.util.LinkedHashSet is. Before
+    // this every set constructor was an alias of listOf, so setOf(1, 1, 2) did not
+    // deduplicate, setOf(2, 1) == setOf(1, 2) was FALSE (java: true) and
+    // listOf(1) == setOf(1) was TRUE (java: false). Three properties come with the
+    // shape at once: uniqueness on insertion, order-INDEPENDENT equality, and
+    // java.util.AbstractSet's hashCode, which is the plain SUM of the element hashes
+    // (java: Set.of(1, 2).hashCode() is 3, where the list fold answers 994).
+    // The ITERATION order is insertion order for setOf / mutableSetOf / linkedSetOf
+    // (LinkedHashSet, which is what kotlin.collections.setOf returns) and ascending
+    // for sortedSetOf / toSortedSet. hashSetOf / toHashSet are java.util.HashSet,
+    // whose order is unspecified; insertion order is used for them too, because two
+    // halves that must print identically cannot model "unspecified".
+    // The twin is ktMakeSet / ktSetMethod in abnf/jsrtkotlin.go.
+    function kMakeSet() { return {__set: true, keys: []} }
+    function kIsSet(v) {
+        return v !== null && v !== undefined && typeof v == "object" && !Array.isArray(v) && v.__set === true
+    }
+    function kSetFind(s, e) {
+        var ks = s.keys
+        for (var i = 0; i < ks.length; i++) { if (kEqVals(ks[i], e)) { return i } }
+        return 0 - 1
+    }
+    function kSetAdd(s, e) {
+        if (kSetFind(s, e) >= 0) { return false }
+        s.keys.push(e)
+        return true
+    }
+    function kSetFrom(es) {
+        var s = kMakeSet()
+        for (var i = 0; i < es.length; i++) { kSetAdd(s, es[i]) }
+        return s
+    }
+    // A set whose elements are ALREADY distinct (a map's keys, its entries), so the
+    // quadratic uniqueness scan is skipped.
+    function kSetOfDistinct(es) {
+        var s = kMakeSet()
+        for (var i = 0; i < es.length; i++) { s.keys.push(es[i]) }
+        return s
+    }
+    // One Map.Entry. It carries key/value for the Kotlin member names AND first/second
+    // so `for ((k, v) in m)` destructures it as a Pair - but it is NOT a Pair, and the
+    // __entry marker is what says so: java.util.AbstractMap.SimpleEntry.toString is
+    // `a=1` where kotlin.Pair.toString is `(a, 1)`, and Map.Entry.hashCode is
+    // key.hashCode() XOR value.hashCode() where a Pair uses the data-class 31-fold.
+    // Verified against java (JDK 24): for {a=1, b=2}, entrySet() prints [a=1, b=2],
+    // one entry prints a=1 and hashes to 96 ("a".hashCode() ^ 1), and the entry SET
+    // hashes to 192, which is the map's own hash.
+    function kMapEntry(k, v) { return {__entry: true, key: k, value: v, first: k, second: v} }
+    function kIsEntry(v) {
+        return v !== null && v !== undefined && typeof v == "object" && v.__entry === true
     }
     function kMapPut(m, k, v) {
         var i = kMapFind(m, k)
@@ -4382,11 +4597,11 @@ NotMemberKw = :script(~~
         if (Array.isArray(v)) { return v }
         if (typeof v == "string") { return kChars(v) }
         if (isRange(v)) { return rangeList(v) }
+        // A SET iterates its elements; the handle itself is not an array (see kMakeSet).
+        if (kIsSet(v)) { return v.keys }
         if (kIsMap(v)) {
             var out = []
-            for (var i = 0; i < v.keys.length; i++) {
-                out.push({key: v.keys[i], value: v.vals[i], first: v.keys[i], second: v.vals[i]})
-            }
+            for (var i = 0; i < v.keys.length; i++) { out.push(kMapEntry(v.keys[i], v.vals[i])) }
             return out
         }
         fail("not a sequence: " + kstr(v))
@@ -4632,7 +4847,11 @@ NotMemberKw = :script(~~
             }
             return {v: out}
         }
-        if (name == "distinct" || name == "toSet" || name == "toMutableSet") {
+        // distinct answers a LIST and toSet/toMutableSet/toHashSet a SET - the
+        // deduplication is the same, the SHAPE is not (kotlin.collections declares
+        // distinct(): List and toSet(): Set). While every set was a list these four
+        // were one branch.
+        if (name == "distinct") {
             out = []
             for (i = 0; i < es.length; i++) {
                 var seen = false
@@ -4641,6 +4860,8 @@ NotMemberKw = :script(~~
             }
             return {v: out}
         }
+        if (name == "toSet" || name == "toMutableSet" || name == "toHashSet") { return {v: kSetFrom(es)} }
+        if (name == "toSortedSet") { return {v: kSetFrom(kSortBy(es, null, false))} }
         if (name == "reversed" || name == "asReversed") {
             out = []
             for (i = es.length - 1; i >= 0; i--) { out.push(es[i]) }
@@ -4854,26 +5075,24 @@ NotMemberKw = :script(~~
             }
             return {v: out}
         }
+        // union / intersect / subtract are declared on Iterable and answer a SET, not
+        // a List - they used to answer a deduplicated list, which was only right while
+        // a set WAS a list.
         if (name == "intersect" || name == "subtract") {
             var oth = kElems(f)
-            out = []
+            var iout = kMakeSet()
             for (i = 0; i < es.length; i++) {
                 var inOth = false
                 for (var oi = 0; oi < oth.length; oi++) { if (kEqVals(oth[oi], es[i])) { inOth = true } }
-                if (inOth != (name == "subtract")) {
-                    var dup2 = false
-                    for (var d2 = 0; d2 < out.length; d2++) { if (kEqVals(out[d2], es[i])) { dup2 = true } }
-                    if (!dup2) { out.push(es[i]) }
-                }
+                if (inOth != (name == "subtract")) { kSetAdd(iout, es[i]) }
             }
-            return {v: out}
+            return {v: iout}
         }
         if (name == "union") {
-            var all = []
-            for (i = 0; i < es.length; i++) { all.push(es[i]) }
+            var uout = kSetFrom(es)
             var oth2 = kElems(f)
-            for (i = 0; i < oth2.length; i++) { all.push(oth2[i]) }
-            return kSeqMethod(all, "distinct", [])
+            for (i = 0; i < oth2.length; i++) { kSetAdd(uout, oth2[i]) }
+            return {v: uout}
         }
         if (name == "slice" || name == "subList") {
             var idxs = anytype
@@ -4950,6 +5169,56 @@ NotMemberKw = :script(~~
             for (i = 0; i < more.length; i++) { es.push(more[i]) }
             return {v: more.length > 0}
         }
+        // The rest of the MutableList surface, all of it IN PLACE. Every one of these
+        // aborted the run with "unknown list method" in BOTH halves, while their
+        // copying twins (sorted, sortedBy, reversed) were present - so `l.sort()` and
+        // `l.set(0, x)`, which any realistic program reaches for, were unreachable.
+        if (name == "set") {
+            var si2 = kNum(f)
+            if (si2 < 0 || si2 >= es.length) { fail("index " + si2 + " is out of bounds") }
+            var old2 = anytype
+            old2 = es[si2]
+            es[si2] = args[1]
+            return {v: old2}
+        }
+        if (name == "add") {
+            if (args.length < 2) { es.push(f); return {v: true} }
+            // add(index, element): shift up and insert; it answers Unit, not Boolean.
+            var ai = kNum(f)
+            if (ai < 0 || ai > es.length) { fail("index " + ai + " is out of bounds") }
+            es.push(args[1])
+            for (i = es.length - 1; i > ai; i--) { es[i] = es[i - 1] }
+            es[ai] = args[1]
+            return {v: undefined}
+        }
+        if (name == "sort" || name == "sortDescending" || name == "sortBy" ||
+            name == "sortByDescending" || name == "sortWith" || name == "reverse") {
+            var ord = anytype
+            if (name == "reverse") { ord = kSeqMethod(es, "reversed", []).v }
+            else if (name == "sortWith") { ord = kSeqMethod(es, "sortedWith", [f]).v }
+            else if (name == "sortBy") { ord = kSortBy(es, f, false) }
+            else if (name == "sortByDescending") { ord = kSortBy(es, f, true) }
+            else { ord = kSortBy(es, null, name == "sortDescending") }
+            for (i = 0; i < es.length; i++) { es[i] = ord[i] }
+            return {v: undefined}
+        }
+        if (name == "clear") {
+            while (es.length > 0) { es.pop() }
+            return {v: undefined}
+        }
+        if (name == "removeAll" || name == "retainAll") {
+            var drop = kElems(f)
+            var keep = []
+            for (i = 0; i < es.length; i++) {
+                var hit = false
+                for (var di = 0; di < drop.length; di++) { if (kEqVals(drop[di], es[i])) { hit = true } }
+                if (hit == (name == "retainAll")) { keep.push(es[i]) }
+            }
+            var changed2 = keep.length != es.length
+            while (es.length > keep.length) { es.pop() }
+            for (i = 0; i < keep.length; i++) { es[i] = keep[i] }
+            return {v: changed2}
+        }
         return null
     }
     function kMapMethod(m, name, args) {
@@ -4995,9 +5264,18 @@ NotMemberKw = :script(~~
         if (name == "size") { return {v: m.keys.length} }
         if (name == "isEmpty") { return {v: m.keys.length == 0} }
         if (name == "isNotEmpty") { return {v: m.keys.length > 0} }
-        if (name == "keys") { return {v: kSeqMethod(m.keys, "toList", []).v} }
+        // Map.keys is a SET in Kotlin (java.util.Map.keySet), Map.values a Collection.
+        if (name == "keys") { return {v: kSetFrom(m.keys)} }
         if (name == "values") { return {v: kSeqMethod(m.vals, "toList", []).v} }
-        if (name == "entries" || name == "toList") { return {v: kElems(m)} }
+        // Map.entries is a SET of entries; Map.toList is a LIST of PAIRS, which is why
+        // they no longer share one branch - `m.toList()` prints [(a, 1)] and
+        // `m.entries` prints [a=1].
+        if (name == "entries") { return {v: kSetOfDistinct(kElems(m))} }
+        if (name == "toList") {
+            var pl = []
+            for (i = 0; i < m.keys.length; i++) { pl.push(kPair(m.keys[i], m.vals[i])) }
+            return {v: pl}
+        }
         if (name == "toMap" || name == "toMutableMap") {
             var out = kMakeMap()
             for (i = 0; i < m.keys.length; i++) { kMapPut(out, m.keys[i], m.vals[i]) }
@@ -5055,12 +5333,91 @@ NotMemberKw = :script(~~
         return kSeqMethod(kElems(m), name, args)
     }
 
+    // The Set member surface. Only the members whose ANSWER is a Set, or that mutate
+    // the set, live here; everything else falls through to kSeqMethod over the
+    // elements, which is right because kotlin.collections declares map / filter /
+    // sorted / reversed / joinToString / take / ... on Iterable and they all answer a
+    // LIST even for a Set receiver. The twin is ktSetMethod in abnf/jsrtkotlin.go.
+    function kSetMethod(s, name, args) {
+        var f = args.length > 0 ? args[0] : null
+        var i
+        if (name == "size") { return {v: s.keys.length} }
+        if (name == "isEmpty") { return {v: s.keys.length == 0} }
+        if (name == "isNotEmpty") { return {v: s.keys.length > 0} }
+        if (name == "contains") { return {v: kSetFind(s, f) >= 0} }
+        if (name == "containsAll") {
+            var need = kElems(f)
+            for (i = 0; i < need.length; i++) { if (kSetFind(s, need[i]) < 0) { return {v: false} } }
+            return {v: true}
+        }
+        if (name == "add") { return {v: kSetAdd(s, f)} }
+        if (name == "addAll") {
+            var more = kElems(f)
+            var grew = false
+            for (i = 0; i < more.length; i++) { if (kSetAdd(s, more[i])) { grew = true } }
+            return {v: grew}
+        }
+        if (name == "remove" || name == "removeAll" || name == "retainAll") {
+            var gone = anytype
+            gone = (name == "remove") ? [f] : kElems(f)
+            var nk = []
+            var changed = false
+            for (i = 0; i < s.keys.length; i++) {
+                var hit = false
+                for (var g = 0; g < gone.length; g++) { if (kEqVals(gone[g], s.keys[i])) { hit = true } }
+                if (hit == (name == "retainAll")) { nk.push(s.keys[i]) } else { changed = true }
+            }
+            s.keys = nk
+            return {v: changed}
+        }
+        if (name == "clear") { s.keys = []; return {v: undefined} }
+        if (name == "hashCode") { return {v: kHash(s)} }
+        if (name == "equals") { return {v: kEq(s, f)} }
+        // The Set-valued operators. plus/union add, minus/subtract remove and
+        // intersect keeps the common elements - all of them answering a Set, where the
+        // list versions answer a List.
+        if (name == "plus" || name == "union") {
+            var pu = kSetFrom(s.keys)
+            var add = (kIsSet(f) || Array.isArray(f) || isRange(f) || kIsMap(f) || typeof f == "string") ? kElems(f) : [f]
+            for (i = 0; i < add.length; i++) { kSetAdd(pu, add[i]) }
+            return {v: pu}
+        }
+        if (name == "minus" || name == "subtract" || name == "intersect") {
+            var oth = (name == "minus" && !(kIsSet(f) || Array.isArray(f) || isRange(f) || kIsMap(f))) ? [f] : kElems(f)
+            var keep = kMakeSet()
+            for (i = 0; i < s.keys.length; i++) {
+                var inOth = false
+                for (var oi = 0; oi < oth.length; oi++) { if (kEqVals(oth[oi], s.keys[i])) { inOth = true } }
+                if (inOth == (name == "intersect")) { kSetAdd(keep, s.keys[i]) }
+            }
+            return {v: keep}
+        }
+        if (name == "toSet" || name == "toMutableSet" || name == "toHashSet") { return {v: kSetFrom(s.keys)} }
+        if (name == "toSortedSet") {
+            var ss = kMakeSet()
+            var sorted = kSortBy(s.keys, null, false)
+            for (i = 0; i < sorted.length; i++) { kSetAdd(ss, sorted[i]) }
+            return {v: ss}
+        }
+        return kSeqMethod(s.keys, name, args)
+    }
+
     function mcall(target, name, args, spec) {
         // Both are copied into locals rather than reassigned: a parameter keeps the
         // type of its first call under the frozen engine, and these two legitimately
         // change shape (an omitted spec, a range materialised into a list).
         var sp = anytype
         sp = (spec == undefined) ? {pos: args, named: null} : spec
+        // A QUALIFIED stdlib call - kotlin.math.abs(-3). The receiver is a package
+        // handle (see kPkg), and `abs` is the same global function the bare spelling
+        // reaches; a call is a METHOD call in the tree, so it never passes through
+        // kGetField.
+        if (kIsPkg(target)) {
+            kSetNamed(sp.named)
+            var pf = kPkgMember(target, name)
+            if (typeof pf != "function") { fail("not a function: " + target.__pkg + "." + name) }
+            return pf.apply(undefined, args)
+        }
         // An extension function wins only when no builtin or class method uses the
         // name; it runs with the receiver as `this` (null for a nullable receiver).
         // A MEMBER extension of the enclosing class wins over a top-level one (it is
@@ -5178,6 +5535,9 @@ NotMemberKw = :script(~~
             if (name == "not") return !target
             if (name == "toString") return kstr(target)
             if (name == "hashCode") return kHash(target)
+            if (name == "equals") return args[0] === target
+            // java.lang.Boolean.compareTo: false sorts before true.
+            if (name == "compareTo") return target === args[0] ? 0 : (target ? 1 : 0 - 1)
             return mfallback(target, name, args, "Boolean")
         }
         // A function value: f.invoke(args) is the call itself (slot?.invoke(1)).
@@ -5185,7 +5545,15 @@ NotMemberKw = :script(~~
             if (name == "invoke") { kSetNamed(sp.named); return target.apply(undefined, args) }
             fail("unknown function method: " + name)
         }
-        if (target === undefined || target === null) fail("method call ." + name + "() on null")
+        // kotlin.hashCode() and kotlin.toString() are extensions on Any?, so they are
+        // the two members a NULL receiver answers rather than throwing: java's
+        // Objects.hashCode(null) is 0 and String.valueOf(null) is "null". Before this
+        // both halves aborted the run.
+        if (target === undefined || target === null) {
+            if (name == "hashCode") return 0
+            if (name == "toString") return "null"
+            fail("method call ." + name + "() on null")
+        }
         // super.m(): start the lookup at the recorded parent, keep `this`.
         if (target.__superref === true) {
             var sm = clsFind(target.cls, name)
@@ -5232,6 +5600,12 @@ NotMemberKw = :script(~~
             if (kmm != null) { return kmm.v }
             fail("unknown Map method: " + name)
         }
+        // A SET: its own {__set, keys} handle (see kMakeSet).
+        if (kIsSet(target)) {
+            var ksm2 = kSetMethod(target, name, args)
+            if (ksm2 != null) { return ksm2.v }
+            fail("unknown Set method: " + name)
+        }
         // A StringBuilder box.
         if (target !== null && target !== undefined && typeof target == "object" && target.__sb === true) {
             if (name == "append") {
@@ -5260,6 +5634,12 @@ NotMemberKw = :script(~~
             if (name == "component1") { return target.first }
             if (name == "component2") { return target.second }
             if (name == "component3" && target.third !== undefined) { return target.third }
+            // Pair.toList() / Triple.toList(): [a, b] / [a, b, c].
+            if (name == "toList") {
+                var pl2 = [target.first, target.second]
+                if (target.third !== undefined) { pl2.push(target.third) }
+                return pl2
+            }
             // Pair/Triple are data classes in Kotlin, so equals/hashCode are structural.
             if (name == "equals") { return kEq(target, args[0]) }
             if (name == "hashCode") { return kHash(target) }
@@ -5275,6 +5655,11 @@ NotMemberKw = :script(~~
             if (name == "getValue" || name == "value") { return kLazyValue(target) }
             if (name == "isInitialized") { return target.done }
         }
+        // The Job / Deferred an `async` or `launch` answers (see kJob).
+        if (kIsJob(target)) {
+            var jm = kJobMethod(target, name)
+            if (jm != null) { return jm.v }
+        }
         var tgt = anytype
         tgt = target
         if (isRange(tgt)) {
@@ -5282,7 +5667,9 @@ NotMemberKw = :script(~~
             tgt = rangeList(tgt)
         }
         if (Array.isArray(tgt)) {
-            if (name == "add") { tgt.push(args[0]); return true }
+            // add(element); add(index, element) is the INSERTING overload and belongs
+            // to kSeqMethod below, so the fast path takes the one-argument form only.
+            if (name == "add" && args.length == 1) { tgt.push(args[0]); return true }
             if (name == "size") return tgt.length
             if (name == "get") return tgt[kNum(args[0])]
             if (name == "contains") { for (var ci2 = 0; ci2 < tgt.length; ci2++) { if (kEq(tgt[ci2], args[0])) return true } return false }
@@ -5412,7 +5799,7 @@ NotMemberKw = :script(~~
     function kHash(v) {
         if (v === null || v === undefined) { return 0 }
         if (kIsChar(v)) { return v.__char }
-        if (kIsFlo(v)) { return v.__flo | 0 }
+        if (kIsFlo(v)) { return kDblHash(v.__flo) }
         // Long.hashCode is (value xor (value ushr 32)) read as an Int; for every
         // narrower width that is the value itself.
         if (szIs(v)) { return szNum(szConv(szArith("^", v, szArith(">>", szConv(v, 64, true), 32)), 32, false)) | 0 }
@@ -5426,6 +5813,14 @@ NotMemberKw = :script(~~
             return lh
         }
         if (isRange(v)) { return (Math.imul(31, v.from) + v.to) | 0 }
+        // java.util.AbstractSet.hashCode is the plain SUM of the element hashes, which
+        // is what makes it order-independent. Verified against java (JDK 24):
+        // Set.of(1, 2).hashCode() is 3, where the LIST fold answers 994.
+        if (kIsSet(v)) {
+            var sh = 0
+            for (var si = 0; si < v.keys.length; si++) { sh = (sh + kHash(v.keys[si])) | 0 }
+            return sh
+        }
         // java.util.AbstractMap.hashCode is the SUM of the entry hashes, and an entry
         // hashes as key XOR value. Verified against java (JDK 24): Map.of(1, 2) is 3.
         if (kIsMap(v)) {
@@ -5435,6 +5830,9 @@ NotMemberKw = :script(~~
             }
             return mh
         }
+        // java.util.Map.Entry.hashCode is key.hashCode() XOR value.hashCode(), which is
+        // what makes the entry SET hash to the same value as the map itself.
+        if (kIsEntry(v)) { return (kHash(v.key) ^ kHash(v.value)) | 0 }
         // Pair/Triple are data classes in Kotlin, so they hash by the same 31-fold their
         // components would get from __dataProps - which they have no descriptor for.
         if (kIsPair(v)) {
@@ -5461,6 +5859,49 @@ NotMemberKw = :script(~~
         var h = 0
         for (var i = 0; i < sv.length; i++) { h = (Math.imul(31, h) + sv.charCodeAt(i)) | 0 }
         return h
+    }
+    // java.lang.Double.hashCode, which is what Kotlin/JVM's Double.hashCode() IS:
+    // doubleToLongBits(d) xor (bits ushr 32), read as an Int. Before this the box's
+    // hash was the TRUNCATED value, so 1.5.hashCode() answered 1 where java answers
+    // 1073217536 and listOf(1.5).hashCode() answered 32 where java answers
+    // 1073217567 - and a hash that disagrees with kEq is a real defect, because the
+    // collection equality this file already implements is paired with it.
+    // Neither engine has typed arrays, so the bit pattern is derived arithmetically:
+    // the magnitude is normalised into [1, 2) by halving/doubling (every step is an
+    // exact power of two), and the 52-bit significand is split into its top 20 bits
+    // and its bottom 32. Verified against java (JDK 24) for 1.5, 0.1, -1.5, 3.0,
+    // +-0.0, NaN, +-Infinity, 1e300 and the smallest subnormal 4.9E-324.
+    // A FLOAT shares the {__flo} box with a Double in this value model, so
+    // 1.5f.hashCode() answers Double's hash (1073217536) and not Float's
+    // (1069547520) - see the box's own comment; nothing at runtime says which of the
+    // two a value is.
+    function kDblHash(d) {
+        if (d !== d) { return 2146959360 }
+        if (d === kInf) { return 2146435072 }
+        if (d === kNegF(kInf)) { return 0 - 1048576 }
+        if (d === 0) { return (1 / d < 0) ? (0 - 2147483648) : 0 }
+        var neg = d < 0
+        var a = neg ? kNegF(d) : d
+        var e = 0
+        while (a >= 2) { a = a / 2; e = e + 1 }
+        while (a < 1) { a = a * 2; e = e - 1 }
+        var m = 0
+        var biased = 0
+        if (e < 0 - 1022) {
+            // Subnormal: the biased exponent is 0 and there is no implicit leading 1,
+            // so the significand is scaled back down to the fixed exponent -1022.
+            var k = (0 - 1022) - e
+            var sub = a
+            while (k > 0) { sub = sub / 2; k = k - 1 }
+            m = sub * 4503599627370496
+        } else {
+            m = (a - 1) * 4503599627370496
+            biased = e + 1023
+        }
+        var hi20 = Math.floor(m / 4294967296)
+        var hi = (biased * 1048576) + hi20
+        if (neg) { hi = hi - 2147483648 }
+        return ((hi | 0) ^ ((m - (hi20 * 4294967296)) | 0)) | 0
     }
     // The last resort for a method call the receiver's own type does not answer: a
     // VARIABLE of that name holding a function, called with the receiver as its first
@@ -5491,6 +5932,9 @@ NotMemberKw = :script(~~
         // "1,23" in the compiled half - a wrong answer and a divergence.
         if (Array.isArray(l)) { return kSeqMethod(l, "plus", [r]).v }
         if (kIsMap(l)) { return kMapMethod(l, "plus", [r]).v }
+        // A SET gains elements as a Set, not as a List (kotlin.collections.plus is
+        // declared on Set separately from Iterable and keeps the receiver's shape).
+        if (kIsSet(l)) { return kSetMethod(l, "plus", [r]).v }
         if (kIsFlo(l) || kIsFlo(r)) { return kFlo(kNumD(l) + kNumD(r)) }
         // Two integral operands: Int + Int wraps at 32 bits, anything with a Long in
         // it at 64, and an unsigned pair at its own width.
@@ -5548,6 +5992,16 @@ NotMemberKw = :script(~~
     // (Kotlin says false). Element uniqueness and set identity are the same gap the
     // setOf-is-listOf collapse already had; making them right needs a real set shape.
     function kStructEq(a, b) {
+        // A SET first, so a Set never reaches the element-WISE array branch: two sets
+        // are equal when they hold the same elements in ANY order, and a Set is never
+        // equal to a List (java: Set.of(1, 2).equals(Set.of(2, 1)) is true and
+        // List.of(1).equals(Set.of(1)) is false).
+        if (kIsSet(a) || kIsSet(b)) {
+            if (!kIsSet(a) || !kIsSet(b)) { return 0 - 1 }
+            if (a.keys.length !== b.keys.length) { return 0 - 1 }
+            for (var sk = 0; sk < a.keys.length; sk++) { if (kSetFind(b, a.keys[sk]) < 0) { return 0 - 1 } }
+            return 1
+        }
         if (Array.isArray(a) || Array.isArray(b)) {
             if (!Array.isArray(a) || !Array.isArray(b)) { return -1 }
             if (a.length !== b.length) { return -1 }
@@ -6547,7 +7001,7 @@ NotMemberKw = :script(~~
                 if (it.getter != undefined || it.setter != undefined) {
                     r.accessors.push(it)
                 }
-                if (it.hasField) { r.inits.push({prop: it.prop, init: it.init, ty: it.ty}) }
+                if (it.hasField) { r.inits.push({prop: it.prop, init: it.init, ty: it.ty, li: it.lateinit}) }
             }
         }
         return r
@@ -6563,11 +7017,42 @@ NotMemberKw = :script(~~
     // because a property always has an initializer thunk.
     function kInstallPTypes(cls, parts) {
         var t = {}
+        var li = {}
         for (var i = 0; i < parts.inits.length; i++) {
             var it = parts.inits[i]
             if (it.prop != undefined && it.ty != undefined && it.ty != "") { t["$" + it.prop] = it.ty }
+            // Which properties are `lateinit var`. A lateinit property cannot hold
+            // null in Kotlin, so "the field is still null" IS "not initialized yet" -
+            // no separate flag per instance is needed, and reading one throws
+            // UninitializedPropertyAccessException instead of answering null (which is
+            // what both halves used to do). The twin is __lateinit in
+            // kotlin-to-llvm-ir.abnf.
+            if (it.prop != undefined && it.li === true) { li["$" + it.prop] = true }
         }
         cls.__ptypes = t
+        cls.__lateinit = li
+    }
+    // Whether `name` is a lateinit property of this object's class chain.
+    function kIsLateinit(o, name) {
+        if (o === undefined || o === null || typeof o != "object") { return false }
+        var cls = o.__class
+        var guard = 0
+        while (cls != undefined && cls != null && guard < 64) {
+            guard++
+            var li = cls.__lateinit
+            if (li != undefined && li != null && li["$" + name] === true) { return true }
+            var ps = cls.__parents
+            cls = (ps != undefined && ps != null && ps.length > 0) ? ps[0] : null
+        }
+        return false
+    }
+    // The read of an unassigned lateinit property.
+    function kLateinitCheck(o, name, v) {
+        if ((v === null || v === undefined) && kIsLateinit(o, name)) {
+            kThrowExc("UninitializedPropertyAccessException",
+                      "lateinit property " + name + " has not been initialized")
+        }
+        return v
     }
     // The declared type of a field, looked up through the class chain. Answers "" when
     // nothing declares one, which makes kAdoptTy a no-op.
@@ -7090,11 +7575,12 @@ NotMemberKw = :script(~~
     // `name = ...` in a method resolves against `this`.
     function makeProp(items) {
         var r = {prop: items[0], init: null, getter: undefined, setter: undefined,
-                 sparam: null, hasField: true, ty: ""}
+                 sparam: null, hasField: true, ty: "", lateinit: false}
         for (var i = 1; i < items.length; i++) {
             var it = items[i]
             if (it == undefined || it == null) { continue }
-            if (it.pty != undefined) { r.ty = it.pty }
+            if (it.pmods != undefined) { r.lateinit = hasMod(it.pmods, "lateinit") }
+            else if (it.pty != undefined) { r.ty = it.pty }
             else if (it.pinit != undefined) { r.init = it.pinit }
             else if (it.getter != undefined) { r.getter = it.getter }
             else if (it.setter != undefined) { r.setter = it.setter; r.sparam = it.sparam }
@@ -7273,6 +7759,29 @@ NotMemberKw = :script(~~
     }
 
     // ----- Property references (recv::member) -----
+    // A BARE `::name`. Inside a class member it is a reference to THIS receiver's
+    // property, which is what makes `::name.isInitialized` - the lateinit test - work;
+    // it used to be a plain variable READ, so it evaluated the property and then asked
+    // for `.isInitialized` of the (null) value, aborting both halves with
+    // "property .isInitialized of null". Anywhere else - a top-level function, a
+    // builtin, a local - it stays the value itself, which is what ::fn has always been.
+    // A scope binding wins over a receiver property, so a local `::x` is unchanged.
+    function makeBareRef(name) {
+        var vr = makeVarRef(name)
+        return function() {
+            var sc = scopes
+            var ho = objHasOwn
+            for (var i = sc.length - 1; i >= 0; i--) { if (ho.call(sc[i], name)) { return vr() } }
+            var chain = findThisChain()
+            for (var ci = 0; ci < chain.length; ci++) {
+                var r = chain[ci]
+                if (r !== null && r !== undefined && typeof r == "object" && hasOwn(r, name)) {
+                    return propRefOf(r, name)
+                }
+            }
+            return vr()
+        }
+    }
     function makePropRef(baseName, name, pos) {
         var ni = null
         return function() {
@@ -7395,6 +7904,7 @@ NotMemberKw = :script(~~
     // ----- Field / index access with accessors and operator conventions -----
     function kGetField(o, name) {
         if (o === undefined || o === null) { fail("property ." + name + " of null") }
+        if (kIsPkg(o)) { return kPkgMember(o, name) }
         var krxf = krxField(o, name)
         if (krxf != null) { return krxf.v }
         if (typeof o == "string") {
@@ -7410,9 +7920,13 @@ NotMemberKw = :script(~~
         }
         if (kIsMap(o)) {
             if (name == "size") { return o.keys.length }
-            if (name == "keys") { return kSeqMethod(o.keys, "toList", []).v }
+            if (name == "keys") { return kSetFrom(o.keys) }
             if (name == "values") { return kSeqMethod(o.vals, "toList", []).v }
-            if (name == "entries") { return kElems(o) }
+            if (name == "entries") { return kSetOfDistinct(kElems(o)) }
+            return extPropGet(o, name)
+        }
+        if (kIsSet(o)) {
+            if (name == "size") { return o.keys.length }
             return extPropGet(o, name)
         }
         if (typeof o == "object" && o.__sb === true && name == "length") { return o.s.length }
@@ -7425,6 +7939,10 @@ NotMemberKw = :script(~~
         if (typeof o == "object" && o.__lazy === true) {
             if (name == "value") { return kLazyValue(o) }
             if (name == "isInitialized") { return o.done }
+        }
+        if (kIsJob(o)) {
+            var jp = kJobMethod(o, name)
+            if (jp != null) { return jp.v }
         }
         if (Array.isArray(o)) {
             if (name == "size") { return o.length }
@@ -7450,6 +7968,11 @@ NotMemberKw = :script(~~
         if (o.__isclass === true) {
             var sv = clsStatic(o, name)
             if (sv != null) { return sv.v }
+            // Kotlin 1.9's `Col.entries` is a PROPERTY (an EnumEntries, which is a
+            // List) where values() is a function, so it is read here rather than
+            // through mcall; before this it answered undefined, printed as
+            // "kotlin.Unit".
+            if (o.__isenum === true && name == "entries") { return o.__entries.slice(0) }
             if (o.__companion != undefined) { return kGetField(o.__companion, name) }
             return undefined
         }
@@ -7457,7 +7980,9 @@ NotMemberKw = :script(~~
         if (cls != undefined && cls != null) {
             var g = clsFind(cls, "get$" + name)
             if (typeof g == "function") { return g(o) }
-            if (hasOwn(o, name)) { return o[name] }
+            // A `lateinit var` that is still null has NOT been assigned, and Kotlin
+            // throws rather than answering null - see kLateinitCheck.
+            if (hasOwn(o, name)) { return kLateinitCheck(o, name, o[name]) }
             var ds = o.__deleg
             if (ds != undefined) {
                 for (var i = 0; i < ds.length; i++) {
@@ -7582,7 +8107,7 @@ NotMemberKw = :script(~~
                      "NoSuchElementException", "ConcurrentModificationException",
                      "ClassCastException", "NumberFormatException",
                      "IllegalAccessException", "StackOverflowError", "OutOfMemoryError",
-                     "NotImplementedError"]
+                     "NotImplementedError", "UninitializedPropertyAccessException"]
         var supers = ["", "Throwable", "Throwable", "Exception",
                       "RuntimeException", "RuntimeException",
                       "RuntimeException", "RuntimeException",
@@ -7590,7 +8115,7 @@ NotMemberKw = :script(~~
                       "RuntimeException", "RuntimeException",
                       "RuntimeException", "IllegalArgumentException",
                       "Exception", "Error", "Error",
-                      "Error"]
+                      "Error", "RuntimeException"]
         for (var i = 0; i < names.length; i++) {
             var cls = newDescriptor(names[i], i == 0 ? [] : [{name: supers[i], args: null, deleg: null}])
             cls.__ctor = function() {
@@ -7766,7 +8291,7 @@ NotMemberKw = :script(~~
                 if (typeof cur == "string" && name == "length") { return {v: cur.length} }
                 return null
             }
-            if (hasOwn(cur, name)) { return {v: cur[name]} }
+            if (hasOwn(cur, name)) { return {v: kLateinitCheck(cur, name, cur[name])} }
             var cls = cur.__class
             if (cls != undefined && cls != null) {
                 var g = clsFind(cls, "get$" + name)

@@ -55,6 +55,7 @@ package abnf
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 )
 
@@ -184,10 +185,35 @@ func ktExcHierarchy() map[string]*jsObject {
 	// RuntimeException - checked with `instanceof` under java (JDK 24).
 	h["NumberFormatException"] = mk("NumberFormatException", h["IllegalArgumentException"])
 	h["IllegalAccessException"] = mk("IllegalAccessException", h["Exception"])
+	h["UninitializedPropertyAccessException"] = mk("UninitializedPropertyAccessException", h["RuntimeException"])
 	h["StackOverflowError"] = mk("StackOverflowError", h["Error"])
 	h["OutOfMemoryError"] = mk("OutOfMemoryError", h["Error"])
 	ktExcHier = h
 	return h
+}
+
+// ktLateinitCheck is the read of a `lateinit var`. A lateinit property cannot hold
+// null in Kotlin, so "the field is still null" IS "not initialized yet": reading one
+// before it is assigned throws UninitializedPropertyAccessException where both halves
+// used to answer null. __lateinit is the name table the class emitter installs on the
+// descriptor (emitLateinit in kotlin-to-llvm-ir.abnf); a class that declares no
+// lateinit property has none, so the walk stops immediately. The twin is
+// kLateinitCheck in kotlin-interpreter.abnf.
+func (rt *jsrt) ktLateinitCheck(o *jsObject, name string, v interface{}) interface{} {
+	if !isUndefOrNull(v) {
+		return v
+	}
+	cls, _ := o.props["__class"].(*jsObject)
+	for guard := 0; cls != nil && guard < 64; guard++ {
+		if li, ok := cls.props["__lateinit"].(*jsObject); ok {
+			if t, has := li.props[name]; has && t == true {
+				rt.ktRaise("UninitializedPropertyAccessException",
+					"lateinit property "+name+" has not been initialized")
+			}
+		}
+		cls, _ = cls.props["__super"].(*jsObject)
+	}
+	return v
 }
 
 // ktIsBuiltinExc reports a name the hierarchy above provides.
@@ -534,12 +560,34 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 		f, ok := target.(jsJFlo)
 		return ok && math.IsNaN(f.f), true
 	case "hashCode":
+		if f, ok := target.(jsJFlo); ok {
+			return float64(ktDblHash(f.f)), true
+		}
 		if b, ok := target.(jsGInt); ok {
 			return float64(int32(b.v ^ (b.v >> 32))), true
 		}
 		return float64(int32(giVal(rt, target))), true
 	}
 	return nil, false
+}
+
+// ktDblHash is java.lang.Double.hashCode, which is what Kotlin/JVM's
+// Double.hashCode() IS: doubleToLongBits(d) xor (bits ushr 32), read as an Int.
+// Before this a Double hashed as its TRUNCATED value in BOTH halves, so
+// 1.5.hashCode() answered 1 where java answers 1073217536. The twin is kDblHash in
+// kotlin-interpreter.abnf, which has to derive the bits arithmetically because
+// neither engine has typed arrays; here math.Float64bits is the whole job.
+// A FLOAT shares the jsJFlo box with a Double in this value model, so
+// 1.5f.hashCode() answers Double's hash and not Float's - nothing at runtime says
+// which of the two a value is. Same simplification in the interpreter half.
+func ktDblHash(d float64) int32 {
+	// doubleToLongBits COLLAPSES every NaN to 0x7ff8000000000000, which
+	// math.Float64bits does not (Go's own math.NaN() is ...0001).
+	if math.IsNaN(d) {
+		return 2146959360
+	}
+	bits := math.Float64bits(d)
+	return int32(bits ^ (bits >> 32))
 }
 
 // ktBoxTypeName is the Kotlin type a box stands for, which is what `is` and the
@@ -597,6 +645,28 @@ func init() {
 		// Int/Double arithmetic still answers a Double.
 		m["js_ktarith"] = func(a []uint64) uint64 {
 			op, l, r := opOf(a[0]), u(a[1]), u(a[2])
+			// `-` on a COLLECTION is kotlin.collections.minus, the twin of the `+`
+			// branch in js_ktadd: a list, set or map loses the given element or every
+			// element of the given collection. Before this it fell through to the
+			// numeric tail, so `listOf(1, 2, 3) - 1` answered 0 in BOTH halves.
+			if op == "-" {
+				if la, isArr := l.(*jsArray); isArr {
+					if v, ok := rt.ktSeqMethod(la, "minus", []interface{}{r}); ok {
+						return w(v)
+					}
+				}
+				if lo, isObj := l.(*jsObject); isObj {
+					if ktIsSet(lo) {
+						if v, ok := rt.ktSetMethod(lo, "minus", []interface{}{r}); ok {
+							return w(v)
+						}
+					} else if _, _, isDict := dictParts(lo); isDict {
+						if v, ok := rt.ktMapMethod(lo, "minus", []interface{}{r}); ok {
+							return w(v)
+						}
+					}
+				}
+			}
 			if jvmIsFlo(l) || jvmIsFlo(r) {
 				return w(rt.jvmArith(op[0], l, r))
 			}
@@ -680,6 +750,14 @@ func init() {
 				}
 			}
 			if lo, isObj := l.(*jsObject); isObj {
+				// A SET gains elements as a Set, not as a List
+				// (kotlin.collections.plus is declared on Set separately from
+				// Iterable and keeps the receiver's shape).
+				if ktIsSet(lo) {
+					if v, ok := rt.ktSetMethod(lo, "plus", []interface{}{r}); ok {
+						return w(v)
+					}
+				}
 				if _, _, isDict := dictParts(lo); isDict {
 					if v, ok := rt.ktMapMethod(lo, "plus", []interface{}{r}); ok {
 						return w(v)
@@ -1013,11 +1091,73 @@ func init() {
 			// 'toDouble' on a number" while the interpreter answered 7.0 - a live
 			// cross-half divergence that no test happened to exercise.
 			recv, mname := u(a[0]), rt.toString(u(a[1]))
+			// A QUALIFIED stdlib call - kotlin.math.abs(-3). The receiver is a
+			// package handle (see ktPkg) and the member is the same global function
+			// the bare spelling reaches; a call is a METHOD call in the tree, so it
+			// never passes through js_ktfget.
+			if p, isPkg := ktIsPkg(recv); isPkg {
+				f := rt.ktPkgMember(p, mname)
+				if !isCallable(f) {
+					rt.fail("not a function: %s.%s", p, mname)
+				}
+				return w(rt.call(f, jsUndef, arr.elems))
+			}
 			// The SCOPE FUNCTIONS first: let/run/apply/also/takeIf/takeUnless are
 			// extensions on Any, so no receiver branch below owns them. A class
 			// member of the same name still wins (ktScopeMethod declines then).
 			if v, handled := rt.ktScopeMethod(recv, mname, arr.elems); handled {
 				return rt.wrap(v)
+			}
+			// kotlin.hashCode() and kotlin.toString() are extensions on Any?, so a
+			// NULL receiver answers them rather than throwing (java's
+			// Objects.hashCode(null) is 0, String.valueOf(null) is "null"), and a
+			// BOOLEAN receiver owns hashCode/toString/not - none of which any branch
+			// below claims, so `true.hashCode()` aborted the compiled half with
+			// "method call 'hashCode' on a boolean" while the interpreter answered
+			// 1231. The twin is the null and boolean tail of mcall in
+			// kotlin-interpreter.abnf.
+			if isUndefOrNull(recv) {
+				switch mname {
+				case "hashCode":
+					return rt.wrap(float64(0))
+				case "toString":
+					return rt.wrap("null")
+				}
+			}
+			// An ENUM descriptor: values() / valueOf(name) / entries. The compiler
+			// emits __entries (the entry list in declaration order) on the
+			// descriptor; the twin is the __isenum branch of mcall / kGetField in
+			// kotlin-interpreter.abnf.
+			if ev, handled := rt.ktEnumMethod(recv, mname, arr.elems); handled {
+				return rt.wrap(ev)
+			}
+			if bv, isBool := recv.(bool); isBool {
+				switch mname {
+				case "hashCode":
+					if bv {
+						return rt.wrap(float64(1231))
+					}
+					return rt.wrap(float64(1237))
+				case "toString":
+					if bv {
+						return rt.wrap("true")
+					}
+					return rt.wrap("false")
+				case "not":
+					return rt.wrap(!bv)
+				case "equals":
+					ov, isB := argAt(arr.elems, 0).(bool)
+					return rt.wrap(isB && ov == bv)
+				case "compareTo":
+					ov, _ := argAt(arr.elems, 0).(bool)
+					switch {
+					case bv == ov:
+						return rt.wrap(float64(0))
+					case bv:
+						return rt.wrap(float64(1))
+					}
+					return rt.wrap(float64(-1))
+				}
 			}
 			if v, handled := rt.ktNumMethod(recv, mname, arr.elems); handled {
 				return rt.wrap(v)
@@ -1038,6 +1178,11 @@ func init() {
 						return rt.wrap(v)
 					}
 				}
+				if ktIsSet(mo) {
+					if v, handled := rt.ktSetMethod(mo, mname, arr.elems); handled {
+						return rt.wrap(v)
+					}
+				}
 				if _, _, isDict := dictParts(mo); isDict {
 					if v, handled := rt.ktMapMethod(mo, mname, arr.elems); handled {
 						return rt.wrap(v)
@@ -1052,6 +1197,11 @@ func init() {
 						return rt.wrap(rt.ktLazyValue(mo))
 					case "isInitialized":
 						return rt.wrap(mo.props["done"])
+					}
+				} else if j, isJob := ktIsJob(mo); isJob {
+					// The Job / Deferred an `async` or `launch` answers.
+					if v, handled := rt.ktJobMethod(j, mname); handled {
+						return rt.wrap(v)
 					}
 				} else if po, isPair := ktIsPair(mo); isPair {
 					if v, handled := rt.ktPairMethod2(po, mname, arr.elems); handled {
@@ -1112,6 +1262,24 @@ func init() {
 		// one per name. See the block above ktRecvStack.
 		m["js_ktglobal"] = func(a []uint64) uint64 { return w(ktGlobalFn(rt, rt.toString(u(a[0])))) }
 
+		// js_ktiter is the SEQUENCE a `for` runs over. A list, a string and anything
+		// else are used as they are; a MAP iterates its entries (Kotlin's rule, and
+		// what kIterable does in the other half) and a SET its elements, neither of
+		// which has a `length` for the index loop the grammar emits. It replaced an
+		// inline __dict probe at the emit site, which ran a set's for-loop zero times.
+		m["js_ktiter"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if o, isObj := v.(*jsObject); isObj {
+				if _, _, isDict := dictParts(o); isDict {
+					return w(&jsArray{elems: ktElems(rt, o)})
+				}
+				if keys, isSet := ktSetParts(o); isSet {
+					return w(keys)
+				}
+			}
+			return a[0]
+		}
+
 		// js_ktget is js_kget plus the implicit receiver of with / run / apply /
 		// buildString / buildList / buildMap: a name that is neither a local nor a
 		// member of the enclosing `this` is resolved against the receiver on
@@ -1140,6 +1308,9 @@ func init() {
 				if t, ok := s.get("this"); ok {
 					if obj, isObj := t.(*jsObject); isObj {
 						if v, ok := obj.props[name]; ok {
+							// An unqualified read of a `lateinit var` throws
+							// too - see ktLateinitCheck.
+							rt.ktLateinitCheck(obj, name, v)
 							if rt.traced {
 								rt.trVar("read", name, v)
 							}
@@ -1163,6 +1334,12 @@ func init() {
 					return w(v)
 				}
 			}
+			// `kotlin` is the head of a QUALIFIED stdlib path - kotlin.math.abs(-3),
+			// the same function the bare `abs(-3)` reaches. It resolved in NEITHER
+			// half before ("unknown name: kotlin"). See ktPkgMember.
+			if name == "kotlin" {
+				return w(ktPkg("kotlin"))
+			}
 			rt.fail("unknown name: %s", name)
 			return 0
 		}
@@ -1174,6 +1351,16 @@ func init() {
 		// js_ktsmcall's is.
 		m["js_ktfget"] = func(a []uint64) uint64 {
 			o, name := u(a[0]), rt.toString(u(a[1]))
+			if p, isPkg := ktIsPkg(o); isPkg {
+				return w(rt.ktPkgMember(p, name))
+			}
+			// `Col.entries` is a PROPERTY (an EnumEntries, which is a List) where
+			// values() is a function, so it is read here too.
+			if name == "entries" {
+				if v, handled := rt.ktEnumMethod(o, name, nil); handled {
+					return w(v)
+				}
+			}
 			if mo, isObj := o.(*jsObject); isObj {
 				if ktIsSb(mo) {
 					if v, handled := rt.ktSbMethod(mo, name, nil); handled {
@@ -1195,6 +1382,36 @@ func init() {
 						return w(mo.props["done"])
 					}
 				}
+				if j, isJob := ktIsJob(mo); isJob {
+					if v, handled := rt.ktJobMethod(j, name); handled {
+						return w(v)
+					}
+				}
+				// A SET has no `length`, so `s.size` - which the emitter spells
+				// as `.length` - read undefined and printed "kotlin.Unit".
+				if ktIsSet(mo) {
+					switch name {
+					case "length", "size":
+						keys, _ := ktSetParts(mo)
+						return w(float64(len(keys.elems)))
+					}
+				}
+				// Map.keys is a SET (java.util.Map.keySet) and Map.entries a set of
+				// entries. Read as PROPERTIES they used to fall through to js_get,
+				// which handed back the raw `keys` array behind the handle - so
+				// `m.keys == setOf("a")` was false in the compiled half only.
+				if _, _, isDict := dictParts(mo); isDict {
+					switch name {
+					case "keys", "values", "entries":
+						if v, handled := rt.ktMapMethod(mo, name, nil); handled {
+							return w(v)
+						}
+					case "length", "size":
+						if v, handled := rt.ktMapMethod(mo, "size", nil); handled {
+							return w(v)
+						}
+					}
+				}
 				// A dotted name on a MAP that is neither one of Kotlin's map
 				// properties nor a present key. Kotlin refuses `m.bogus` outright, so
 				// no correct program reaches this; what matters is that the two halves
@@ -1206,10 +1423,20 @@ func init() {
 					return w(jsUndef)
 				}
 			}
+			var r uint64
+			// js_rxktget is js_get plus Regex.pattern and the MatchResult properties,
+			// so it is the tail whenever the regex layer is registered.
 			if next := m["js_rxktget"]; next != nil {
-				return next(a)
+				r = next(a)
+			} else {
+				r = m["js_get"](a)
 			}
-			return m["js_get"](a)
+			// A `lateinit var` that is still null has NOT been assigned, and Kotlin
+			// throws rather than answering null - see ktLateinitCheck.
+			if mo, isObj := o.(*jsObject); isObj {
+				rt.ktLateinitCheck(mo, name, u(r))
+			}
+			return r
 		}
 
 		// js_ktindex is the same rule for the INDEXED read: `m[9]` on a map that has no
@@ -1773,6 +2000,16 @@ func (rt *jsrt) ktpObj(o *jsObject, depth int) (string, bool) {
 		}
 		return "{" + strings.Join(parts, ", ") + "}", true
 	}
+	// A SET renders like a List - java.util.AbstractCollection.toString again - in
+	// its iteration order: [1, 2].
+	if keys, isSet := ktSetParts(o); isSet {
+		return rt.ktpRender(keys, depth), true
+	}
+	// A Map.Entry renders as a=1 (java.util.AbstractMap's entry toString), NOT as the
+	// Pair it also destructures as - so `println(m.entries)` is [a=1, b=2].
+	if ktIsEntry(o) {
+		return rt.ktpRender(o.props["key"], depth+1) + "=" + rt.ktpRender(o.props["value"], depth+1), true
+	}
 	// A Pair / Triple renders as (a, b) / (a, b, c) - kotlin.Pair.toString.
 	if po, isPair := ktIsPair(o); isPair {
 		out := "(" + rt.ktpRender(po.props["first"], depth+1) + ", " + rt.ktpRender(po.props["second"], depth+1)
@@ -1880,6 +2117,105 @@ func ktMakeMap() *jsObject {
 	return o
 }
 
+// ----------------------------------------------------------------------------
+// SETS
+//
+// A SET is its own shape, a jsObject tagged {__set: true, keys: [...]} - the map
+// handle without the parallel `vals` array, which is exactly what
+// java.util.LinkedHashSet is. Before this every set constructor was an alias of
+// listOf in BOTH halves, so setOf(1, 1, 2) did not deduplicate, setOf(2, 1) ==
+// setOf(1, 2) was FALSE (java: true) and listOf(1) == setOf(1) was TRUE (java:
+// false). Three properties come with the shape at once: uniqueness on insertion,
+// order-INDEPENDENT equality, and java.util.AbstractSet's hashCode, the plain SUM
+// of the element hashes (java: Set.of(1, 2).hashCode() is 3, where the list fold
+// answers 994).
+//
+// The tag is deliberately NOT __dict: dictParts is shared with Go maps and Python
+// dicts (abnf/jsrt.go) and everything map-shaped would otherwise claim a set.
+//
+// The twin is kMakeSet / kSetMethod in languages/kotlin-interpreter.abnf.
+func ktMakeSet() *jsObject {
+	o := newJSObject()
+	o.set("__set", true)
+	o.set("keys", &jsArray{})
+	return o
+}
+
+// ktSetParts returns the element array of a set handle.
+func ktSetParts(v interface{}) (*jsArray, bool) {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil, false
+	}
+	if tag, has := o.props["__set"]; !has || tag != true {
+		return nil, false
+	}
+	keys, _ := o.props["keys"].(*jsArray)
+	if keys == nil {
+		return nil, false
+	}
+	return keys, true
+}
+
+// ktEnumMethod is values() / valueOf(name) / entries on an enum class descriptor.
+// `entries` is Kotlin 1.9's EnumEntries, a List; `values()` is an Array. Both are the
+// declaration-ordered entry list in this value model.
+func (rt *jsrt) ktEnumMethod(recv interface{}, name string, args []interface{}) (interface{}, bool) {
+	o, ok := recv.(*jsObject)
+	if !ok {
+		return nil, false
+	}
+	if t, has := o.props["__isenum"]; !has || t != true {
+		return nil, false
+	}
+	es, _ := o.props["__entries"].(*jsArray)
+	if es == nil {
+		return nil, false
+	}
+	switch name {
+	case "values", "entries":
+		return &jsArray{elems: append([]interface{}{}, es.elems...)}, true
+	case "valueOf":
+		want := rt.toString(argAt(args, 0))
+		for _, e := range es.elems {
+			if eo, isObj := e.(*jsObject); isObj {
+				if n, _ := eo.props["name"].(string); n == want {
+					return e, true
+				}
+			}
+		}
+		cn, _ := o.props["__name"].(string)
+		rt.fail("no enum constant %s.%s", cn, want)
+	}
+	return nil, false
+}
+
+func ktIsSet(v interface{}) bool {
+	_, ok := ktSetParts(v)
+	return ok
+}
+
+// ktSetAdd inserts unless an equal element is already present; it reports whether
+// the set GREW, which is what kotlin.collections.MutableSet.add answers.
+func (rt *jsrt) ktSetAdd(s *jsObject, e interface{}) bool {
+	keys, _ := ktSetParts(s)
+	if rt.ktMapFind(keys, e) >= 0 {
+		return false
+	}
+	keys.dropIdx()
+	keys.elems = append(keys.elems, e)
+	return true
+}
+
+// ktSetFrom builds a set from a slice, deduplicating in first-seen order.
+func (rt *jsrt) ktSetFrom(es []interface{}) *jsObject {
+	s := ktMakeSet()
+	for _, e := range es {
+		rt.ktSetAdd(s, e)
+	}
+	return s
+}
+
 // ktMapPut inserts or replaces, keeping insertion order.
 func (rt *jsrt) ktMapPut(m *jsObject, k, v interface{}) {
 	keys, vals, _ := dictParts(m)
@@ -1950,6 +2286,23 @@ func (rt *jsrt) ktEqVals(a, b interface{}) bool {
 // `setOf(2, 1) == setOf(1, 2)` is false and `listOf(1) == setOf(1)` is true. That
 // is the setOf-is-listOf collapse, not this function.
 func (rt *jsrt) ktStructEq(a, b interface{}) (bool, bool) {
+	// A SET first, so a Set never reaches the element-WISE array branch: two sets
+	// are equal when they hold the same elements in ANY order, and a Set is never
+	// equal to a List (java: Set.of(1, 2).equals(Set.of(2, 1)) is true and
+	// List.of(1).equals(Set.of(1)) is false).
+	as, aIsSet := ktSetParts(a)
+	bs, bIsSet := ktSetParts(b)
+	if aIsSet || bIsSet {
+		if !aIsSet || !bIsSet || len(as.elems) != len(bs.elems) {
+			return false, true
+		}
+		for _, e := range as.elems {
+			if rt.ktMapFind(bs, e) < 0 {
+				return false, true
+			}
+		}
+		return true, true
+	}
 	aa, aIsArr := a.(*jsArray)
 	ba, bIsArr := b.(*jsArray)
 	if aIsArr || bIsArr {
@@ -2477,7 +2830,11 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 			out = append(out, arr(append([]interface{}{}, es[i:i+k]...)))
 		}
 		return arr(out), true
-	case "distinct", "toSet", "toMutableSet":
+	case "distinct":
+		// distinct answers a LIST and toSet/toMutableSet/toHashSet a SET - the
+		// deduplication is the same, the SHAPE is not (kotlin.collections declares
+		// distinct(): List and toSet(): Set). While every set was a list these were
+		// one case.
 		out := []interface{}{}
 		for _, e := range es {
 			seen := false
@@ -2492,6 +2849,10 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 			}
 		}
 		return arr(out), true
+	case "toSet", "toMutableSet", "toHashSet":
+		return rt.ktSetFrom(es), true
+	case "toSortedSet":
+		return rt.ktSetFrom(ktSortBy(rt, es, nil, false).elems), true
 	case "reversed", "asReversed":
 		out := make([]interface{}, len(es))
 		for i, e := range es {
@@ -2772,20 +3133,15 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 		return o, true
 	case "plus":
 		out := append([]interface{}{}, es...)
-		switch f.(type) {
-		case *jsArray:
+		if ktIsCollection(f) {
 			out = append(out, ktElems(rt, f)...)
-		default:
-			if _, _, isDict := dictParts(f); isDict {
-				out = append(out, ktElems(rt, f)...)
-			} else {
-				out = append(out, f)
-			}
+		} else {
+			out = append(out, f)
 		}
 		return arr(out), true
 	case "minus":
 		rem := []interface{}{f}
-		if _, isArr := f.(*jsArray); isArr {
+		if ktIsCollection(f) {
 			rem = ktElems(rt, f)
 		}
 		out := []interface{}{}
@@ -2803,8 +3159,11 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 		}
 		return arr(out), true
 	case "intersect", "subtract":
+		// union / intersect / subtract are declared on Iterable and answer a SET,
+		// not a List - they used to answer a deduplicated list, which was only right
+		// while a set WAS a list.
 		oth := ktElems(rt, f)
-		out := []interface{}{}
+		out := ktMakeSet()
 		for _, e := range es {
 			inOth := false
 			for _, x := range oth {
@@ -2813,25 +3172,17 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 					break
 				}
 			}
-			if inOth == (name == "subtract") {
-				continue
-			}
-			dup := false
-			for _, x := range out {
-				if rt.ktEqVals(x, e) {
-					dup = true
-					break
-				}
-			}
-			if !dup {
-				out = append(out, e)
+			if inOth != (name == "subtract") {
+				rt.ktSetAdd(out, e)
 			}
 		}
-		return arr(out), true
+		return out, true
 	case "union":
-		all := append([]interface{}{}, es...)
-		all = append(all, ktElems(rt, f)...)
-		return rt.ktSeqMethod(arr(all), "distinct", nil)
+		out := rt.ktSetFrom(es)
+		for _, e := range ktElems(rt, f) {
+			rt.ktSetAdd(out, e)
+		}
+		return out, true
 	case "slice":
 		out := []interface{}{}
 		for _, ix := range ktElems(rt, f) {
@@ -2904,6 +3255,81 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 		o.dropIdx()
 		o.elems = append(o.elems[:ix], o.elems[ix+1:]...)
 		return gone, true
+	// The rest of the MutableList surface, all of it IN PLACE. Every one of these
+	// aborted the run with "unknown list method" in BOTH halves, while their copying
+	// twins (sorted, sortedBy, reversed) were present - so `l.sort()` and
+	// `l.set(0, x)`, which any realistic program reaches for, were unreachable.
+	case "add":
+		// add(element) -> Boolean; add(index, element) -> Unit, INSERTING. The shared
+		// js_mcall knows only the appending one-argument form, so `l.add(1, 7)`
+		// appended the INDEX there. Answering both arities here keeps abnf/jsrt.go -
+		// which backs all fifteen languages - untouched.
+		if len(args) < 2 {
+			o.dropIdx()
+			o.elems = append(o.elems, f)
+			return true, true
+		}
+		i := jsToInt(rt.toNumber(f))
+		if i < 0 || i > len(es) {
+			rt.fail("index %d is out of bounds", i)
+		}
+		o.dropIdx()
+		o.elems = append(o.elems, nil)
+		copy(o.elems[i+1:], o.elems[i:])
+		o.elems[i] = argAt(args, 1)
+		return jsUndef, true
+	case "set":
+		i := jsToInt(rt.toNumber(f))
+		if i < 0 || i >= len(es) {
+			rt.fail("index %d is out of bounds", i)
+		}
+		old := es[i]
+		es[i] = argAt(args, 1)
+		return old, true
+	case "sort", "sortDescending", "sortBy", "sortByDescending", "sortWith", "reverse":
+		var ord []interface{}
+		switch name {
+		case "reverse":
+			ord = make([]interface{}, len(es))
+			for i := range es {
+				ord[i] = es[len(es)-1-i]
+			}
+		case "sortWith":
+			v, _ := rt.ktSeqMethod(o, "sortedWith", args)
+			ord = v.(*jsArray).elems
+		case "sortBy":
+			ord = ktSortBy(rt, es, f, false).elems
+		case "sortByDescending":
+			ord = ktSortBy(rt, es, f, true).elems
+		default:
+			ord = ktSortBy(rt, es, nil, name == "sortDescending").elems
+		}
+		copy(o.elems, ord)
+		o.dropIdx()
+		return jsUndef, true
+	case "clear":
+		o.dropIdx()
+		o.elems = nil
+		return jsUndef, true
+	case "removeAll", "retainAll":
+		drop := ktElems(rt, f)
+		keep := []interface{}{}
+		for _, e := range es {
+			hit := false
+			for _, d := range drop {
+				if rt.ktEqVals(d, e) {
+					hit = true
+					break
+				}
+			}
+			if hit == (name == "retainAll") {
+				keep = append(keep, e)
+			}
+		}
+		changed := len(keep) != len(es)
+		o.dropIdx()
+		o.elems = keep
+		return changed, true
 	case "removeFirst", "removeLast":
 		if len(o.elems) == 0 {
 			rt.fail("%s() on an empty list", name)
@@ -2945,6 +3371,9 @@ func ktElemHash(rt *jsrt, v interface{}) int64 {
 		return 1237
 	case jsNullT:
 		return 0
+	case jsJFlo:
+		// java.lang.Double.hashCode, not the truncated value - see ktDblHash.
+		return int64(ktDblHash(t.f))
 	}
 	if giIsNumeric(v) {
 		x := giVal(rt, v)
@@ -2964,6 +3393,16 @@ func ktElemHash(rt *jsrt, v interface{}) int64 {
 		}
 		return int64(h)
 	case *jsObject:
+		// java.util.AbstractSet.hashCode is the plain SUM of the element hashes,
+		// which is what makes it order-independent. Verified against java (JDK 24):
+		// Set.of(1, 2).hashCode() is 3, where the LIST fold answers 994.
+		if keys, isSet := ktSetParts(t); isSet {
+			var h int32
+			for _, e := range keys.elems {
+				h += int32(ktElemHash(rt, e))
+			}
+			return int64(h)
+		}
 		// java.util.AbstractMap.hashCode is the SUM of key XOR value over the entries.
 		if keys, vals, isDict := dictParts(t); isDict {
 			var h int32
@@ -2971,6 +3410,11 @@ func ktElemHash(rt *jsrt, v interface{}) int64 {
 				h += int32(ktElemHash(rt, k)) ^ int32(ktElemHash(rt, vals.elems[i]))
 			}
 			return int64(h)
+		}
+		// java.util.Map.Entry.hashCode is key.hashCode() XOR value.hashCode(), which
+		// is what makes the entry SET hash to the same value as the map itself.
+		if ktIsEntry(t) {
+			return int64(int32(ktElemHash(rt, t.props["key"])) ^ int32(ktElemHash(rt, t.props["value"])))
 		}
 		// Pair/Triple are data classes in Kotlin: the same 31-fold their components
 		// would get from a generated hashCode.
@@ -2988,6 +3432,129 @@ func ktElemHash(rt *jsrt, v interface{}) int64 {
 		}
 	}
 	return 1
+}
+
+// ktSetMethod is the Set member surface. Only the members whose ANSWER is a Set,
+// or that mutate the set, live here; everything else falls through to ktSeqMethod
+// over the elements, which is right because kotlin.collections declares map /
+// filter / sorted / reversed / joinToString / take / ... on Iterable and they all
+// answer a LIST even for a Set receiver. The twin is kSetMethod in
+// languages/kotlin-interpreter.abnf.
+func (rt *jsrt) ktSetMethod(s *jsObject, name string, args []interface{}) (interface{}, bool) {
+	keys, ok := ktSetParts(s)
+	if !ok {
+		return nil, false
+	}
+	f := argAt(args, 0)
+	switch name {
+	case "size":
+		return float64(len(keys.elems)), true
+	case "isEmpty":
+		return len(keys.elems) == 0, true
+	case "isNotEmpty":
+		return len(keys.elems) > 0, true
+	case "contains":
+		return rt.ktMapFind(keys, f) >= 0, true
+	case "containsAll":
+		for _, e := range ktElems(rt, f) {
+			if rt.ktMapFind(keys, e) < 0 {
+				return false, true
+			}
+		}
+		return true, true
+	case "add":
+		return rt.ktSetAdd(s, f), true
+	case "addAll":
+		grew := false
+		for _, e := range ktElems(rt, f) {
+			if rt.ktSetAdd(s, e) {
+				grew = true
+			}
+		}
+		return grew, true
+	case "remove", "removeAll", "retainAll":
+		gone := []interface{}{f}
+		if name != "remove" {
+			gone = ktElems(rt, f)
+		}
+		kept := []interface{}{}
+		changed := false
+		for _, e := range keys.elems {
+			hit := false
+			for _, g := range gone {
+				if rt.ktEqVals(g, e) {
+					hit = true
+					break
+				}
+			}
+			if hit == (name == "retainAll") {
+				kept = append(kept, e)
+			} else {
+				changed = true
+			}
+		}
+		keys.dropIdx()
+		keys.elems = kept
+		return changed, true
+	case "clear":
+		keys.dropIdx()
+		keys.elems = nil
+		return jsUndef, true
+	case "hashCode":
+		return float64(int32(ktElemHash(rt, s))), true
+	case "equals":
+		return rt.ktEqVals(s, f), true
+	// The Set-valued operators: plus/union add, minus/subtract remove and intersect
+	// keeps the common elements - all of them answering a Set, where the list
+	// versions answer a List.
+	case "plus", "union":
+		out := rt.ktSetFrom(keys.elems)
+		add := []interface{}{f}
+		if ktIsCollection(f) {
+			add = ktElems(rt, f)
+		}
+		for _, e := range add {
+			rt.ktSetAdd(out, e)
+		}
+		return out, true
+	case "minus", "subtract", "intersect":
+		oth := []interface{}{f}
+		if name != "minus" || ktIsCollection(f) {
+			oth = ktElems(rt, f)
+		}
+		out := ktMakeSet()
+		for _, e := range keys.elems {
+			inOth := false
+			for _, x := range oth {
+				if rt.ktEqVals(x, e) {
+					inOth = true
+					break
+				}
+			}
+			if inOth == (name == "intersect") {
+				rt.ktSetAdd(out, e)
+			}
+		}
+		return out, true
+	case "toSet", "toMutableSet", "toHashSet":
+		return rt.ktSetFrom(keys.elems), true
+	case "toSortedSet":
+		return rt.ktSetFrom(ktSortBy(rt, keys.elems, nil, false).elems), true
+	}
+	return rt.ktSeqMethod(keys, name, args)
+}
+
+// ktIsCollection reports the shapes kotlin.collections.plus/minus treat as a
+// SEQUENCE of elements rather than as one element.
+func ktIsCollection(v interface{}) bool {
+	if _, isArr := v.(*jsArray); isArr {
+		return true
+	}
+	if ktIsSet(v) {
+		return true
+	}
+	_, _, isDict := dictParts(v)
+	return isDict
 }
 
 // ktSumOf is Kotlin's sumOf/sum, at the WIDTH of what it is summing: a Long
@@ -3035,6 +3602,10 @@ func ktElems(rt *jsrt, v interface{}) []interface{} {
 	if s, ok := v.(string); ok {
 		return rt.ktChars(s)
 	}
+	// A SET iterates its elements; the handle itself is not an array (see ktMakeSet).
+	if keys, ok := ktSetParts(v); ok {
+		return keys.elems
+	}
 	if keys, vals, ok := dictParts(v); ok {
 		out := make([]interface{}, len(keys.elems))
 		for i := range keys.elems {
@@ -3047,15 +3618,41 @@ func ktElems(rt *jsrt, v interface{}) []interface{} {
 }
 
 // ktMapEntry is one Map.Entry as this value model spells it: key/value for the
-// Kotlin member names and first/second so it also destructures as a Pair. The twin
-// is the entry literal in kElems (kotlin-interpreter.abnf).
+// Kotlin member names and first/second so it also destructures as a Pair - but it
+// is NOT a Pair, and the __entry marker is what says so.
+// java.util.AbstractMap.SimpleEntry.toString is `a=1` where kotlin.Pair.toString is
+// `(a, 1)`, and Map.Entry.hashCode is key.hashCode() XOR value.hashCode() where a
+// Pair uses the data-class 31-fold. Verified against java (JDK 24): for {a=1, b=2},
+// entrySet() prints [a=1, b=2], one entry prints a=1 and hashes to 96, and the
+// entry SET hashes to 192, which is the map's own hash. Before the marker,
+// `m.entries` printed [(a, 1), (b, 2)] in both halves.
+// The twin is kMapEntry in kotlin-interpreter.abnf.
 func ktMapEntry(k, v interface{}) *jsObject {
 	e := newJSObject()
+	e.set("__entry", true)
 	e.set("key", k)
 	e.set("value", v)
 	e.set("first", k)
 	e.set("second", v)
 	return e
+}
+
+func ktIsEntry(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	t, has := o.props["__entry"]
+	return has && t == true
+}
+
+// ktSetOfDistinct builds a set from elements that are ALREADY distinct (a map's
+// keys, its entries), skipping the quadratic uniqueness scan.
+func ktSetOfDistinct(es []interface{}) *jsObject {
+	s := ktMakeSet()
+	keys, _ := ktSetParts(s)
+	keys.elems = append(keys.elems, es...)
+	return s
 }
 
 // ktSortBy is an insertion sort (stable, and small enough to keep the two halves
@@ -3171,11 +3768,25 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 	case "keys", "toList", "entries", "values":
 		switch name {
 		case "keys":
-			return &jsArray{elems: append([]interface{}{}, keys.elems...)}, true
+			// Map.keys is a SET in Kotlin (java.util.Map.keySet), Map.values a
+			// Collection.
+			return ktSetOfDistinct(keys.elems), true
 		case "values":
 			return &jsArray{elems: append([]interface{}{}, vals.elems...)}, true
+		case "entries":
+			// Map.entries is a SET of entries; Map.toList is a LIST of PAIRS, which
+			// is why they no longer share one branch - `m.toList()` prints [(a, 1)]
+			// and `m.entries` prints [a=1].
+			return ktSetOfDistinct(ktElems(rt, m)), true
 		}
-		return &jsArray{elems: ktElems(rt, m)}, true
+		out := make([]interface{}, len(keys.elems))
+		for i := range keys.elems {
+			p := newJSObject()
+			p.set("first", keys.elems[i])
+			p.set("second", vals.elems[i])
+			out[i] = p
+		}
+		return &jsArray{elems: out}, true
 	case "toMap", "toMutableMap":
 		out := ktMakeMap()
 		for i := range keys.elems {
@@ -3529,6 +4140,56 @@ func (rt *jsrt) ktWithRecv(recv interface{}, f interface{}, args ...interface{})
 	return rt.call(f, jsUndef, args)
 }
 
+// ----------------------------------------------------------------------------
+// THE QUALIFIED STDLIB PATHS
+//
+// `kotlin.math.abs(-3)` is the same function as the unqualified `abs(-3)`, and it
+// resolved in NEITHER half before ("unknown name: kotlin") - the builtins are
+// global names, so only the bare spelling reached them. `kotlin` is a value now: a
+// package handle whose field read either descends into a known sub-package or
+// answers the GLOBAL of that name. Membership is deliberately not modelled per
+// package - the last segment is looked up wherever it lives - because a wrong
+// membership table would REJECT correct code, and Kotlin's own resolution has
+// already decided the path is valid by the time a program runs.
+// `import kotlin.math.abs` needed nothing: an import of a builtin is already a
+// no-op in both halves.
+// The twin is kPkg / kPkgMember in languages/kotlin-interpreter.abnf.
+var ktPkgPaths = map[string]bool{
+	"kotlin": true, "kotlin.math": true, "kotlin.collections": true,
+	"kotlin.text": true, "kotlin.sequences": true, "kotlin.comparisons": true,
+	"kotlin.ranges": true, "kotlin.system": true, "kotlin.io": true,
+	"kotlin.random": true, "kotlin.jvm": true, "kotlin.reflect": true,
+	"kotlin.time": true, "kotlin.concurrent": true,
+}
+
+func ktPkg(path string) *jsObject {
+	o := newJSObject()
+	o.set("__pkg", path)
+	return o
+}
+
+func ktIsPkg(v interface{}) (string, bool) {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return "", false
+	}
+	p, isStr := o.props["__pkg"].(string)
+	return p, isStr
+}
+
+// ktPkgMember descends into a sub-package or answers the global of that name.
+func (rt *jsrt) ktPkgMember(pkg, name string) interface{} {
+	sub := pkg + "." + name
+	if ktPkgPaths[sub] {
+		return ktPkg(sub)
+	}
+	if v := ktGlobalFn(rt, name); !isUndefOrNull(v) {
+		return v
+	}
+	rt.fail("unknown name: %s", sub)
+	return nil
+}
+
 // ktGlobalFn is the VALUE of one global builder name.
 func ktGlobalFn(rt *jsrt, name string) interface{} {
 	switch name {
@@ -3725,7 +4386,7 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 			}
 			return out
 		})
-	case "listOfNotNull", "setOfNotNull":
+	case "listOfNotNull":
 		// listOf's "return the argument array" function is WRONG here: it kept the
 		// nulls, so the compiler answered [1, null, 2] where Kotlin (and now the
 		// interpreter half) answers [1, 2].
@@ -3738,6 +4399,107 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 			}
 			return out
 		})
+	// The SET constructors. They used to be aliases of listOf in the grammar's
+	// builtin block, which is what made a set a list; a set is its own shape now
+	// (see ktMakeSet), so they build one and deduplicate.
+	// The LIST constructors. The grammar declares them as an IR closure that simply
+	// returns its argument array; they are here too so a QUALIFIED spelling
+	// (kotlin.collections.listOf) resolves through ktPkgMember, which has no reach
+	// into the emitted scope.
+	case "listOf", "mutableListOf", "arrayListOf", "arrayOf", "emptyList",
+		"intArrayOf", "longArrayOf", "doubleArrayOf", "floatArrayOf",
+		"booleanArrayOf", "charArrayOf", "sequenceOf", "emptySequence":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return &jsArray{elems: append([]interface{}{}, args...)}
+		})
+	case "setOf", "mutableSetOf", "hashSetOf", "linkedSetOf":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.ktSetFrom(args)
+		})
+	case "sortedSetOf":
+		// A java.util.TreeSet: ascending order, not insertion order.
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.ktSetFrom(ktSortBy(rt, args, nil, false).elems)
+		})
+	case "emptySet":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return ktMakeSet()
+		})
+	case "setOfNotNull":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			out := ktMakeSet()
+			for _, v := range args {
+				if !isUndefOrNull(v) {
+					rt.ktSetAdd(out, v)
+				}
+			}
+			return out
+		})
+
+	// ----- kotlinx.coroutines, as a SYNCHRONOUS subset -----
+	//
+	// `launch`, `async`, `runBlocking`, `delay` and the scope builders were UNDEFINED
+	// in both halves, so any program with a coroutine in it stopped at the import.
+	// They run their block IMMEDIATELY and to completion here, on the calling
+	// goroutine: runBlocking { } is its body, async { } computes its value at the
+	// point it is written and await() hands it back, launch { } is the block itself,
+	// delay() is a no-op, and withContext / coroutineScope / supervisorScope are
+	// their bodies.
+	//
+	// THE LIMITATION, stated the way the JS async subset states its own: the RESULTS
+	// are right and the ORDERING is not. Nothing suspends, so no two coroutines
+	// interleave - a `launch` block runs before the statement after it rather than
+	// concurrently, `delay` does not yield, and a program whose output DEPENDS on
+	// interleaving prints a different (but deterministic) order than the real
+	// kotlinx.coroutines runtime. Programs that use coroutines to compute a value -
+	// the common case - get the right answer.
+	//
+	// Not modelled at all, and still reported as unknown: Flow, Channel, select,
+	// cancellation semantics, and any dispatcher behaviour beyond the name.
+	// The twin is the coroutine block of hostGlobals in kotlin-interpreter.abnf.
+	case "runBlocking", "coroutineScope", "supervisorScope", "withContext":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.ktCoroRun(args)
+		})
+	case "async", "launch":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return ktMakeJob(rt.ktCoroRun(args))
+		})
+	case "delay", "yield":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return jsUndef
+		})
+	case "Job":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return ktMakeJob(jsUndef)
+		})
+	case "CoroutineScope":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			o := newJSObject()
+			o.set("__coroscope", true)
+			return o
+		})
+	case "awaitAll":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			out := &jsArray{}
+			for _, a := range args {
+				if j, isJob := ktIsJob(a); isJob {
+					out.elems = append(out.elems, j.props["v"])
+				} else {
+					out.elems = append(out.elems, a)
+				}
+			}
+			return out
+		})
+	case "Dispatchers":
+		// Dispatchers.IO / Main / Default / Unconfined are NAMES here: nothing
+		// dispatches, so they carry no behaviour, but a program that mentions one
+		// still runs.
+		d := newJSObject()
+		for _, n := range []string{"IO", "Main", "Default", "Unconfined"} {
+			d.set(n, "Dispatchers."+n)
+		}
+		return d
 	case "lazy":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			o := newJSObject()
@@ -3759,17 +4521,79 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 				v = seed
 			}
 			out := &jsArray{}
-			for guard := 0; guard < 100000 && !isUndefOrNull(v); guard++ {
+			guard := 0
+			for ; guard < ktSeqCap && !isUndefOrNull(v); guard++ {
 				out.elems = append(out.elems, v)
 				if !isCallable(next) {
 					break
 				}
 				v = rt.ktCall(next, v)
 			}
+			// The cap is a REAL limit, not a formality: an eager Sequence cannot
+			// represent an infinite generator, so say so instead of handing back a
+			// silently truncated list. take(n) on an infinite generator still gets
+			// the right answer - it just paid for 100000 elements to get there.
+			if guard >= ktSeqCap {
+				fmt.Fprint(outWriter, "warning: generateSequence is EAGER here and stopped at "+
+					strconv.Itoa(ktSeqCap)+" elements; a Sequence is not lazy in this subset\n")
+			}
 			return out
 		})
 	}
 	return jsUndef
+}
+
+// ktSeqCap is how far an EAGER generateSequence walks an infinite generator before
+// it gives up. See the :description note in kotlin-to-llvm-ir.abnf; the twin is
+// kSeqCap in kotlin-interpreter.abnf.
+const ktSeqCap = 100000
+
+// ktCoroRun runs the LAST callable argument - `launch(Dispatchers.IO) { ... }` puts
+// the context first and the block last - and answers its value.
+func (rt *jsrt) ktCoroRun(args []interface{}) interface{} {
+	for i := len(args) - 1; i >= 0; i-- {
+		if isCallable(args[i]) {
+			return rt.call(args[i], jsUndef, nil)
+		}
+	}
+	return jsUndef
+}
+
+// ktMakeJob is the Job / Deferred an `async` or `launch` answers. The block has
+// already run, so the completed value is carried right here.
+func ktMakeJob(v interface{}) *jsObject {
+	o := newJSObject()
+	o.set("__job", true)
+	o.set("v", v)
+	return o
+}
+
+func ktIsJob(v interface{}) (*jsObject, bool) {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil, false
+	}
+	t, has := o.props["__job"]
+	if !has || t != true {
+		return nil, false
+	}
+	return o, true
+}
+
+// ktJobMethod is await / join / cancel and the state flags. Every one of them is
+// immediate, because the block ran at the point it was written.
+func (rt *jsrt) ktJobMethod(j *jsObject, name string) (interface{}, bool) {
+	switch name {
+	case "await", "getCompleted":
+		return j.props["v"], true
+	case "join", "cancel", "cancelAndJoin", "start":
+		return jsUndef, true
+	case "isActive", "isCancelled":
+		return false, true
+	case "isCompleted":
+		return true, true
+	}
+	return nil, false
 }
 
 // ktPairMethod is componentN / toString on the {first, second[, third]} shape.
@@ -3794,6 +4618,13 @@ func ktPairMethod(o *jsObject, name string) (interface{}, bool) {
 		if v, ok := o.props["third"]; ok {
 			return v, true
 		}
+	case "toList":
+		// Pair.toList() / Triple.toList(): [a, b] / [a, b, c].
+		out := &jsArray{elems: []interface{}{o.props["first"], o.props["second"]}}
+		if v, ok := o.props["third"]; ok {
+			out.elems = append(out.elems, v)
+		}
+		return out, true
 	}
 	return nil, false
 }

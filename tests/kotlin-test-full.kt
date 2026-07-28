@@ -19,10 +19,11 @@
 // Deliberately out of scope (not syntax, or unrunnable in this harness):
 // packages and imports (println/listOf/exitProcess are builtins here, exactly
 // as in kotlin-test-features.kt; under kotlinc this file additionally needs
-// 'import kotlin.system.exitProcess'), the coroutine RUNTIME (suspend syntax
-// is only defined, never resumed), reflection, the collections API beyond the
-// minimal calls the features file already uses, KDoc, and multiplatform
-// (expect/actual).
+// 'import kotlin.system.exitProcess'), reflection, the collections API beyond
+// the minimal calls the features file already uses, KDoc, and multiplatform
+// (expect/actual). The coroutine runtime is a SYNCHRONOUS subset (section 55):
+// the results are Kotlin's and the ordering is not - section 55 asserts the
+// eager ordering deliberately, so a change to it cannot pass unnoticed.
 //
 // Hand-written for the metacompiler project (Apache-2.0, no copied test-suite
 // code), organized after the Kotlin language specification with the ANTLR
@@ -1831,6 +1832,254 @@ fun sec49() {
     check("st59", "x" + listOf(1) == "x[1]")
 }
 
+// ===== SECTION 50: a Set is its own shape, not a List =====
+// Every set constructor used to be an alias of listOf, so a set did not
+// deduplicate, two sets with the same elements in different orders were unequal,
+// and a List compared EQUAL to a Set. A Set is its own value now.
+// The answers below are java's (JDK 24), because Kotlin/JVM's Set IS
+// java.util.Set: Set.of(1, 2).equals(Set.of(2, 1)) is true, List.of(1).equals(
+// Set.of(1)) is false and Set.of(1, 2).hashCode() is 3 - AbstractSet's hash is the
+// plain SUM of the element hashes, where AbstractList's is the 31-fold.
+fun sec50() {
+    val s = setOf(3, 1, 2, 1)
+    check("set1", s.size == 3 && "$s" == "[3, 1, 2]")
+    check("set2", setOf(2, 1) == setOf(1, 2))
+    check("set3", !(listOf(1) == setOf(1)) && !(setOf(1) == listOf(1)))
+    check("set4", setOf(1, 2).hashCode() == 3 && listOf(1, 2).hashCode() == 994)
+    check("set5", setOf("a", "b").hashCode() == 195)
+    // Iteration and `in`.
+    var seen = 0
+    for (x in s) { seen += x }
+    check("set6", seen == 6 && 2 in s && 9 !in s && s.contains(1))
+    // Every Iterable member answers a LIST even for a Set receiver; only the
+    // set-valued operators keep the Set shape.
+    check("set7", "" + s.map { it * 2 } == "[6, 2, 4]")
+    check("set8", "" + s.sorted() == "[1, 2, 3]" && "" + s.filter { it > 1 } == "[3, 2]")
+    check("set9", s.joinToString("-") == "3-1-2" && s.sum() == 6 && s.count() == 3)
+    check("set10", "" + s.toList() == "[3, 1, 2]")
+    // The mutable surface: add reports whether the set GREW.
+    val ms = mutableSetOf(1)
+    check("set11", ms.add(2) && !ms.add(1) && "$ms" == "[1, 2]")
+    check("set12", ms.remove(1) && "$ms" == "[2]" && ms.size == 1)
+    // union / intersect / subtract answer a Set, distinct answers a List.
+    check("set13", setOf(1, 2).union(setOf(2, 3)) == setOf(1, 2, 3))
+    check("set14", (setOf(1, 2) intersect setOf(2, 3)) == setOf(2))
+    check("set15", (setOf(1, 2) subtract setOf(2, 3)) == setOf(1))
+    check("set16", listOf(1, 2).union(listOf(2, 3)) == setOf(3, 2, 1))
+    check("set17", listOf(1, 1, 2).toSet() == setOf(2, 1))
+    check("set18", "" + listOf(1, 1, 2).distinct() == "[1, 2]")
+    // `+` and `-` keep the receiver's shape.
+    check("set19", setOf(1, 2) + 3 == setOf(1, 2, 3) && setOf(1, 2) - 1 == setOf(2))
+    // The other constructors. sortedSetOf is a TreeSet, so it is ordered.
+    check("set20", "" + sortedSetOf(3, 1, 2) == "[1, 2, 3]")
+    check("set21", emptySet<Int>().isEmpty() && setOfNotNull(1, null, 1) == setOf(1))
+    check("set22", hashSetOf(1, 1) == linkedSetOf(1) && s.toHashSet() == s)
+    check("set23", setOf(1, 2).containsAll(listOf(1)) && !setOf(1).containsAll(listOf(1, 2)))
+    // Map.keys is a Set (java.util.Map.keySet); Map.values is a Collection.
+    val m = mapOf("a" to 1, "b" to 2)
+    check("set24", m.keys == setOf("b", "a") && "" + m.values == "[1, 2]")
+    check("set25", m.keys.hashCode() == 195)
+    // A set OF sets still compares structurally.
+    check("set26", setOf(setOf(1), setOf(2)) == setOf(setOf(2), setOf(1)))
+    // A `-` on a LIST or a MAP is kotlin.collections.minus too; it used to fall
+    // through to the numeric tail and answer 0 in both halves.
+    check("set27", "" + (listOf(1, 2, 3) - 1) == "[2, 3]")
+    check("set28", "" + (listOf(1, 2, 3) - listOf(2)) == "[1, 3]")
+    check("set29", "" + (mapOf("a" to 1, "b" to 2) - "a") == "{b=2}")
+}
+
+// ===== SECTION 51: hashCode is java's, and it agrees with equals =====
+// Every answer below was read off the equivalent Java program under `java`
+// (JDK 24), because Kotlin/JVM's Double/Long/Boolean/String/Char hashCode ARE
+// java.lang's. The Double one was the defect: the value model used the TRUNCATED
+// value, so 1.5.hashCode() was 1 where java says 1073217536 (doubleToLongBits xor
+// its own high half). This matters beyond hashing, because hashCode must agree
+// with the structural equals the collections use.
+fun sec51() {
+    check("hsh1", 1.5.hashCode() == 1073217536)
+    check("hsh2", listOf(1.5).hashCode() == 1073217567)
+    check("hsh3", (0.1).hashCode() == -1507852285 && (-1.5).hashCode() == -1074266112)
+    check("hsh4", (3.0).hashCode() == 1074266112 && (1e300).hashCode() == -164130400)
+    // +-0.0 differ in their BITS, and NaN collapses to one canonical pattern.
+    check("hsh5", (0.0).hashCode() == 0 && (-0.0).hashCode() == -2147483648)
+    check("hsh6", Double.NaN.hashCode() == 2146959360)
+    check("hsh7", Double.POSITIVE_INFINITY.hashCode() == 2146435072)
+    check("hsh8", Double.NEGATIVE_INFINITY.hashCode() == -1048576)
+    // The subnormal floor: 4.9E-324 is the smallest positive Double, bits == 1.
+    check("hsh9", (4.9E-324).hashCode() == 1)
+    // The rest of the family, unchanged but never pinned before.
+    check("hsh10", 1234567890123L.hashCode() == 1912276436 && 7.hashCode() == 7)
+    check("hsh11", true.hashCode() == 1231 && false.hashCode() == 1237)
+    check("hsh12", "ab".hashCode() == 3105 && 'a'.hashCode() == 97)
+    check("hsh13", mapOf(1.5 to 2.5).hashCode() == 2147221504)
+    // hashCode() and toString() are extensions on Any?, so a null receiver answers
+    // them instead of throwing; both halves used to abort the run.
+    val n: String? = null
+    check("hsh14", n.hashCode() == 0 && n.toString() == "null")
+    // Boolean owns hashCode/toString/not/compareTo; the compiled half used to abort
+    // with "method call 'hashCode' on a boolean".
+    check("hsh15", true.toString() == "true" && true.not() == false)
+    check("hsh16", true.compareTo(false) == 1 && false.compareTo(false) == 0)
+}
+
+// ===== SECTION 52: Map.Entry is not a Pair =====
+// An entry destructures like a Pair - `for ((k, v) in m)` - but it renders as a=1
+// where a Pair renders as (a, 1), and it hashes as key XOR value where a Pair uses
+// the data-class 31-fold. Both halves used to print `[(a, 1)]` for m.entries.
+// java (JDK 24) on a LinkedHashMap {a=1, b=2}: entrySet() prints [a=1, b=2], one
+// entry prints a=1, that entry hashes to 96 and the entry SET hashes to 192, which
+// is exactly the map's own hash.
+fun sec52() {
+    val m = mapOf("a" to 1, "b" to 2)
+    check("ent1", "" + m.entries == "[a=1, b=2]")
+    check("ent2", "" + m.entries.first() == "a=1")
+    check("ent3", m.entries.first().hashCode() == 96)
+    check("ent4", m.entries.hashCode() == 192 && m.hashCode() == 192)
+    // toList is a list of PAIRS and still renders as one.
+    check("ent5", "" + m.toList() == "[(a, 1), (b, 2)]")
+    // The entry's own members, and the destructuring that made it Pair-shaped.
+    val e = m.entries.first()
+    check("ent6", e.key == "a" && e.value == 1)
+    check("ent7", e.component1() == "a" && e.component2() == 1)
+    var acc = ""
+    for ((k, v) in m) { acc += "$k$v" }
+    check("ent8", acc == "a1b2")
+    check("ent9", "" + m.entries.map { it.key } == "[a, b]")
+    // The rendering surface around it: nested collections, a data class in a list,
+    // a Pair as a map VALUE.
+    check("ent10", "" + mapOf("x" to listOf(1, 2)) == "{x=[1, 2]}")
+    check("ent11", "" + mapOf("p" to (1 to 2)) == "{p=(1, 2)}")
+    check("ent12", "" + listOf(listOf(1), setOf(2)) == "[[1], [2]]")
+    check("ent13", "" + listOf(mapOf("a" to 1)) == "[{a=1}]")
+    check("ent14", "" + setOf(1 to 2) == "[(1, 2)]")
+}
+
+// ===== SECTION 53: lateinit is enforced =====
+// Reading an unassigned `lateinit var` used to answer null in both halves; Kotlin
+// throws UninitializedPropertyAccessException. A lateinit property cannot hold null,
+// so "the field is still null" IS "not initialized yet" and no per-instance flag is
+// needed. `::name.isInitialized` is the language's own test for it, and it used to
+// abort both halves with "property .isInitialized of null" because the bare `::name`
+// READ the property first.
+class Li53 {
+    lateinit var a: String
+    var plain: String? = null
+    fun bare(): Boolean = ::a.isInitialized
+    fun qual(): Boolean = this::a.isInitialized
+    fun read(): String = a
+}
+open class Base53 { lateinit var s: String }
+class Sub53 : Base53()
+fun sec53() {
+    val o = Li53()
+    check("lat1", !o.bare() && !o.qual())
+    // A NULLABLE var is not lateinit: it still reads as null.
+    check("lat2", o.plain == null)
+    var msg = ""
+    try { o.read() } catch (e: UninitializedPropertyAccessException) { msg = e.message ?: "" }
+    check("lat3", msg == "lateinit property a has not been initialized")
+    // It is a RuntimeException, so the ordinary catch clauses see it.
+    var caught = false
+    try { println(o.a) } catch (e: RuntimeException) { caught = true }
+    check("lat4", caught)
+    o.a = "z"
+    check("lat5", o.bare() && o.qual() && o.read() == "z" && o.a == "z")
+    // An INHERITED lateinit property is enforced through the super chain.
+    val sub = Sub53()
+    var inh = false
+    try { println(sub.s) } catch (e: Exception) { inh = true }
+    check("lat6", inh)
+    sub.s = "q"
+    check("lat7", sub.s == "q")
+}
+
+// ===== SECTION 54: the qualified stdlib paths =====
+// `kotlin.math.abs(-3)` resolved in NEITHER half ("unknown name: kotlin") while the
+// unqualified `abs(-3)` worked, because the builtins are global names here. A package
+// path is a value now and its last segment is looked up wherever the builtin lives.
+fun sec54() {
+    check("pkg1", kotlin.math.abs(-3) == 3 && abs(-3) == 3)
+    check("pkg2", kotlin.math.max(1, 2) == 2 && kotlin.math.min(1, 2) == 1)
+    check("pkg3", "" + kotlin.collections.listOf(1, 2) == "[1, 2]")
+    check("pkg4", kotlin.collections.setOf(1, 1) == setOf(1))
+    check("pkg5", kotlin.text.buildString { append("x") } == "x")
+    // The root package resolves too.
+    check("pkg6", "" + kotlin.Pair(1, 2) == "(1, 2)")
+}
+
+// ===== SECTION 55: coroutines, as a synchronous subset =====
+// launch / async / runBlocking / delay were UNDEFINED in both halves, so any program
+// with a coroutine in it stopped at the import. They run their block immediately and
+// to completion now. THE LIMITATION IS THE ORDERING, not the results: nothing
+// suspends, so a `launch` block runs before the statement after it rather than
+// concurrently. Both :description blocks state it; the assertions below only pin what
+// this subset actually promises - the VALUES.
+suspend fun work55(): Int { delay(1); return 42 }
+fun sec55() = runBlocking {
+    val d = async { work55() }
+    check("cor1", d.await() == 42)
+    val order = StringBuilder()
+    launch { order.append("a") }
+    order.append("b")
+    // Eager, so "a" lands FIRST. Real kotlinx.coroutines prints "ba" here; this is
+    // the documented ordering limitation, asserted so it cannot change silently.
+    check("cor2", order.toString() == "ab")
+    val j = launch { }
+    j.join()
+    check("cor3", j.isCompleted && !j.isActive)
+    check("cor4", withContext(Dispatchers.Default) { 7 } == 7)
+    check("cor5", coroutineScope { 8 } == 8 && supervisorScope { 9 } == 9)
+    val two = listOf(async { 1 }, async { 2 })
+    check("cor6", "" + awaitAll(two[0], two[1]) == "[1, 2]")
+}
+
+// ===== SECTION 56: the enum statics, and the MutableList mutating surface =====
+// Two clusters found by probing next to the sections above, both wrong in BOTH
+// halves and therefore invisible to the cross-check:
+//   - `Col.values()` and `Col.valueOf(name)` aborted the COMPILED half outright
+//     ("unknown method 'values'") while the interpreter answered them, and
+//     `Col.entries` - Kotlin 1.9's EnumEntries property - answered kotlin.Unit in
+//     the interpreter and aborted the compiler.
+//   - every IN-PLACE MutableList mutator was missing in both halves while its
+//     copying twin was present: sort/sortDescending/sortBy/sortWith/reverse next to
+//     sorted/sortedBy/sortedWith/reversed, plus set, add(index, e), removeAll,
+//     retainAll and clear.
+enum class Col56 { RED, GREEN, BLUE }
+fun sec56() {
+    check("enm1", "" + Col56.values().toList() == "[RED, GREEN, BLUE]")
+    check("enm2", "" + Col56.entries == "[RED, GREEN, BLUE]")
+    check("enm3", Col56.valueOf("GREEN") == Col56.GREEN)
+    check("enm4", Col56.BLUE.ordinal == 2 && Col56.BLUE.name == "BLUE")
+    check("enm5", Col56.values().size == 3)
+    // `when` over an enum, with the entries reachable unqualified in the branches.
+    val w = when (Col56.GREEN) { Col56.RED -> 1; Col56.GREEN -> 2; Col56.BLUE -> 3 }
+    check("enm6", w == 2)
+
+    val l = mutableListOf(3, 1, 2)
+    l.sort()
+    check("mut1", "" + l == "[1, 2, 3]")
+    l.sortDescending()
+    check("mut2", "" + l == "[3, 2, 1]")
+    l.sortBy { it }
+    check("mut3", "" + l == "[1, 2, 3]")
+    l.sortByDescending { it }
+    check("mut4", "" + l == "[3, 2, 1]")
+    l.sortWith(compareBy { it })
+    check("mut5", "" + l == "[1, 2, 3]")
+    l.reverse()
+    check("mut6", "" + l == "[3, 2, 1]")
+    check("mut7", l.set(0, 9) == 3 && "" + l == "[9, 2, 1]")
+    l.add(1, 7)
+    check("mut8", "" + l == "[9, 7, 2, 1]")
+    check("mut9", l.removeAll(listOf(9, 1)) && "" + l == "[7, 2]")
+    check("mut10", l.retainAll(listOf(2)) && "" + l == "[2]")
+    l.clear()
+    check("mut11", l.isEmpty() && "" + l == "[]")
+    // Pair/Triple.toList, which aborted both halves with "unknown method 'toList'".
+    check("mut12", "" + (1 to 2).toList() == "[1, 2]")
+    check("mut13", "" + Triple(1, 2, 3).toList() == "[1, 2, 3]")
+}
+
 // ===== END SECTIONS =====
 
 fun main() {
@@ -1883,6 +2132,13 @@ fun main() {
     sec47() // SECTION-CALL 47
     sec48() // SECTION-CALL 48
     sec49() // SECTION-CALL 49
+    sec50() // SECTION-CALL 50
+    sec51() // SECTION-CALL 51
+    sec52() // SECTION-CALL 52
+    sec53() // SECTION-CALL 53
+    sec54() // SECTION-CALL 54
+    sec55() // SECTION-CALL 55
+    sec56() // SECTION-CALL 56
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

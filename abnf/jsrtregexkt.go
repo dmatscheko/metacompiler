@@ -112,8 +112,13 @@ func (rt *jsrt) ktRxSearch(re *rxRe, text []rune, at int) *rxMatch {
 func (rt *jsrt) ktRxFlags(opts interface{}) (string, bool) {
 	var names []string
 	if !isUndefOrNull(opts) {
+		// setOf(...) is the idiomatic spelling and answers a SET now, not a list.
 		if arr, isArr := opts.(*jsArray); isArr {
 			for _, e := range arr.elems {
+				names = append(names, rt.toString(e))
+			}
+		} else if keys, isSet := ktSetParts(opts); isSet {
+			for _, e := range keys.elems {
 				names = append(names, rt.toString(e))
 			}
 		} else {
