@@ -142,14 +142,17 @@ ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
 // A<B>.C`). Nested types are hoisted under their SIMPLE name, so the qualifier
 // only has to be accepted - the last segment names the descriptor.
 ExtRef      <~~ push({ext: jLastSeg(takeAll())}) ~~>
-            = Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] { "." Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] } ;
+            = { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] { "." { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] } ;
 
 // record Pair(int a, int b) { } -- generates fields, a constructor and accessors.
 RecordDecl  <~~ push(makeRecordStmt(takeAll())) ~~>
             = [ LeadMods ] KwRecord Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ] RParams
               [ ImplementsSkip ] [ PermitsSkip ] "{" { Member } "}" ;
 RParams     <~~ push({rparams: takeAll()}) ~~>
-            = "(" [ Type Id <~~ push(up.in) ~~> { "," Type Id <~~ push(up.in) ~~> } ] ")" ;
+            = "(" [ RParam { "," RParam } ] ")" ;
+// A record component may carry annotations and may be VARARGS (JLS 8.10.1);
+// the `...` is parsed and dropped - the component binds the single argument.
+RParam      = { Annotation } Type { Annotation } [ "..." ] Id <~~ push(up.in) ~~> ;
 
 // A stray ';' between members is legal Java (an empty declaration) and pushes nothing.
 Member      = EmptyMember | NestedType | StaticInit | InitBlock | Ctor | AbstractMethod
@@ -198,7 +201,7 @@ Method      <~~ push(makeMethod(takeAll())) ~~>
 Field       <~~ pushFields(takeAll()) ~~>
             = Mods FType FieldVar { "," FieldVar } ";" ;
 FieldVar    <~~ push(makeFieldVar(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> { "[" "]" } [ "=" Expression ] ;
+            = Id <~~ push(up.in) ~~> { { Annotation } "[" "]" } [ "=" Expression ] ;
 
 // Modifiers before a member: annotations (with or without arguments) are parsed and
 // ignored; ModWord keeps the modifier text so `static` is still detectable.
@@ -214,8 +217,13 @@ FType       <~~ push({ty: up.in}) ~~>
 // array handed in its place is passed straight through, like in Java.
 ParamList   <~~ push(makeParams(takeAll())) ~~>
             = "(" [ Param { "," Param } ] ")" ;
-Param       = { Annotation | "final" KwEnd } Type [ "..." <~~ push({vararg: true}) ~~> ]
-              Id <~~ push(up.in) ~~> { "[" "]" } ;
+// RecvParam is the JLS 8.4.1 RECEIVER parameter (`void m(Foo Foo.this)`) - a
+// declaration of the type of `this`, not a real parameter, so it pushes nothing.
+// It has to come FIRST: the ordinary form matches `Foo Foo` and dies on `.this`.
+Param       = RecvParam
+            | { Annotation | "final" KwEnd } Type { Annotation } [ "..." <~~ push({vararg: true}) ~~> ]
+              Id <~~ push(up.in) ~~> { { Annotation } "[" "]" } ;
+RecvParam   = { Annotation } Type { Id "." } "this" KwEnd ;
 
 // Types are parsed and (apart from field defaults) ignored. Generic arguments
 // (<...>), dotted names, extra array dimensions and the extra primitive keywords are
@@ -275,12 +283,17 @@ ALabCore    = ALabName | PatLabel | CondExpr ;
 PatLabel    <~~ push({plab: makePatLabel(takeAll())}) ~~>
             = Pattern [ WhenClause ] ;
 WhenClause  <~~ push({pwhen: pop()}) ~~> = "when" KwEnd Expression ;
-Pattern     = RecPattern | TypePattern ;
+Pattern     = RecPattern | TypePattern | UnnamedPat ;
+// JEP 456: `_` stands for a component that is matched but not bound.
+UnnamedPat  <~~ push(makeTypePattern([{pty: "var"}, {pbind: "_"}])) ~~>
+            = "_" KwEnd ;
 RecPattern  <~~ push(makeRecPattern(takeAll())) ~~>
             = PatType "(" [ Pattern { "," Pattern } ] ")" [ PatBind ] ;
 TypePattern <~~ push(makeTypePattern(takeAll())) ~~>
             = PatType PatBind ;
-PatType     <~~ push({pty: stripWs(up.in)}) ~~> = Type ;
+// Same shape as IofType: `final` must not reach the tag's `up.in`.
+PatType     = [ "final" KwEnd ] PatTypeName ;
+PatTypeName <~~ push({pty: stripWs(up.in)}) ~~> = Type ;
 PatBind     <~~ push({pbind: stripWs(up.in)}) ~~> = Id ;
 ALabName    <~~ push(makeLabelName(stripWs(up.in))) ~~>
             = IdArrowAhead Id ;
@@ -408,7 +421,7 @@ Throw       <~~ push(makeThrow(pop())) ~~>
 // reported as not implemented (the implicit no-argument super already ran). The
 // arguments are still lowered so their calls stay visible.
 CtorCall    <~~ push(makeCtorCall(takeAll(), up.pos)) ~~>
-            = ( KwSuper | "this" KwEnd ) "(" [ Expression { "," Expression } ] ")" ";" ;
+            = [ SkipAngle ] ( KwSuper | "this" KwEnd ) "(" [ Expression { "," Expression } ] ")" ";" ;
 
 Decl        = DeclCore ";" ;
 // A local declaration may carry annotations / `final` (e.g. @SuppressWarnings("x")
@@ -438,7 +451,105 @@ Assignment  <~~ push(makeAssign(takeAll())) ~~>
 
 // An assignable place: a variable (this and class names are variables too),
 // or a member/index path: this.x, p.x, Main.fails, arr[i].
-Target      <~~ push(makeTargetRef(takeAll())) ~~>
+// `(a) = 1`, `((x)) = 3`, `(i)++` (JLS 15.26) and, via ChainTarget, a target
+// whose ROOT is any primary: `new Foo().x = 1`, `f().x = 1`, `((C) e).x = 1`.
+// ParenTarget carries no tag, so exactly one target record reaches the caller.
+Target      = ParenTarget | ChainTarget | PlainTarget ;
+ParenTarget = "(" Target ")" ;
+// The suffix run is one greedy repetition rather than "{ Sfx } LastSfx": a PEG
+// repetition never gives a match back. The LAST suffix consumed is the place.
+// PlaceAhead is a fast-fail - without it every expression in the file is parsed
+// twice per nesting level.
+ChainTarget <~~ push(makeChainTarget(takeAll())) ~~>
+            = PlaceAhead Primary ChainSfx { ChainSfx } ;
+ChainSfx    = QNewSfx | MRefSfx | MethodSfx | FieldSfx | IndexSfx ;
+PlaceAhead  = :script(~~
+    (function() {
+        var i = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(i) === 32 || c.peek(i) === 9 || c.peek(i) === 10 || c.peek(i) === 13) { i++ }
+        var depth = 0
+        var n = 0
+        var found = false
+        var done = false
+        while (!done && n < 4000) {
+            var ch = c.peek(i)
+            if (ch < 0) { done = true }
+            else if (depth > 0) {
+                // Inside brackets anything may appear, so only literals, comments
+                // and the nesting itself are tracked.
+                if (ch === 34 || ch === 39) {
+                    var q0 = ch
+                    i++
+                    var g1 = 0
+                    while (c.peek(i) >= 0 && c.peek(i) !== q0 && g1 < 4000) {
+                        if (c.peek(i) === 92) { i++ }
+                        i++
+                        g1++
+                    }
+                    i++
+                }
+                else if (ch === 47 && c.peek(i + 1) === 47) {
+                    while (c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+                }
+                else if (ch === 47 && c.peek(i + 1) === 42) {
+                    i = i + 2
+                    var g2 = 0
+                    while (c.peek(i) >= 0 && g2 < 40000) {
+                        if (c.peek(i) === 42 && c.peek(i + 1) === 47) { g2 = 40000 } else { i++ }
+                        g2++
+                    }
+                    i = i + 2
+                }
+                else if (ch === 40 || ch === 91 || ch === 123) { depth++; i++ }
+                else if (ch === 41 || ch === 93 || ch === 125) { depth--; i++ }
+                else { i++ }
+            }
+            else if (ch === 47 && (c.peek(i + 1) === 47 || c.peek(i + 1) === 42)) {
+                if (c.peek(i + 1) === 47) {
+                    while (c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+                } else {
+                    i = i + 2
+                    var g3 = 0
+                    while (c.peek(i) >= 0 && g3 < 40000) {
+                        if (c.peek(i) === 42 && c.peek(i + 1) === 47) { g3 = 40000 } else { i++ }
+                        g3++
+                    }
+                    i = i + 2
+                }
+            }
+            else if (ch === 40 || ch === 91) { depth++; i++ }
+            // At depth 0 only a MEMBER PATH may stand before the operator, so a
+            // name character, a dot or whitespace continues the scan and anything
+            // else settles it. That bound is what keeps the scan proportional to
+            // the target rather than to the statement: a 32001-term string
+            // concatenation stops on its first quote instead of running to the cap.
+            else if (ch === 46 || ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 36 || ch === 95
+                     || (ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch >= 128) { i++ }
+            else if (ch === 61) { found = c.peek(i + 1) !== 61; done = true }
+            else if (ch === 43 || ch === 45) {
+                found = c.peek(i + 1) === ch || c.peek(i + 1) === 61
+                done = true
+            }
+            else if (ch === 42 || ch === 47 || ch === 37 || ch === 38 || ch === 124 || ch === 94) {
+                found = c.peek(i + 1) === 61
+                done = true
+            }
+            else if (ch === 60 || ch === 62) {
+                // A shift-assignment (<<=, >>=, >>>=) - but not <= or >=, whose run
+                // of angle brackets is only one long.
+                var q = i
+                var run = 0
+                while (c.peek(q) === ch) { q++; run++ }
+                found = run >= 2 && c.peek(q) === 61
+                done = true
+            }
+            else { done = true }
+            n++
+        }
+        return found ? undefined : abnf.newToken("\x01no-place", 0)
+    })()
+~~) ;
+PlainTarget <~~ push(makeTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
@@ -478,10 +589,13 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
 InstOf      <~~ push(makeInstOf(takeAll(), up.pos)) ~~>
             = ShiftExpr [ InstTail ] ;
 InstTail    <~~ push(makeInstTail(takeAll())) ~~>
-            = KwInstanceof ( InstPat | IofType [ IofBind ] ) ;
+            = KwInstanceof ( InstPat | [ "final" KwEnd ] IofType [ IofBind ] ) ;
 // x instanceof Dot(int v): the record deconstruction form of the test.
 InstPat     <~~ push({ipat: makePatLabel(takeAll())}) ~~>
             = RecPattern ;
+// `final` is matched OUTSIDE this production on purpose: the tag reads
+// `up.in`, so a `final` inside it would become part of the type NAME and the
+// test would quietly answer false instead of failing to parse.
 IofType     <~~ push(stripWs(up.in)) ~~>
             = Type ;
 IofBind     <~~ push({bind: stripWs(up.in)}) ~~>
@@ -501,7 +615,15 @@ UnaryExpr   = Cast | PreIncDec | Neg | Not | BitNot | UPlus | PostfixExpr ;
 // form, so it must be tried before Neg so "--x" is not parsed as "-(-x)"). Unary + is
 // identity. ~x is recognized but not implemented (no bit externs).
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
-            = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
+            = ( "++" | "--" ) <~~ push(up.in) ~~> PreTarget ;
+// The target of a PREFIX ++/-- may be a member chain (`--Box.mk(b).v`), and
+// PlaceAhead cannot see it: it scans FORWARD for the ++/--/= that proves a place
+// is being written, and here that token is already behind us. Dropping the
+// fast-fail here is safe because this rule is only entered after a literal
+// ++/--, so the chain is parsed once per occurrence, not once per expression.
+PreTarget   = ParenTarget | PreChain | PlainTarget ;
+PreChain    <~~ push(makeChainTarget(takeAll())) ~~>
+            = Primary ChainSfx { ChainSfx } ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>
@@ -519,9 +641,14 @@ PrimCast    <~~ var pcInner = pop(); push(makePrimCast(pcInner, pop().ct)) ~~>
             = "(" CastPrim ")" UnaryExpr ;
 CastPrim    <~~ push({ct: stripWs(up.in)}) ~~>
             = { Annotation } PrimName KwEnd { { Annotation } "[" "]" } ;
+// An INTERSECTION cast, `(A & B) x` (JLS 15.16): several bound types, one
+// operand. It stays identity like every other reference cast. A genuine
+// `(a & b)` is followed by an operator, and UnaryNoPM refuses to start on one,
+// so the whole RefCast rolls back and the parenthesized Primary picks it up.
 RefCast     <~~ push(makeCast(pop())) ~~>
-            = "(" RefType ")" UnaryNoPM ;
-UnaryNoPM   = Not | PostfixExpr ;
+            = "(" RefType { ( "&" !"&" ) RefType } ")" UnaryNoPM ;
+// Cast is in here so a cast of a cast - `(String) (Object) null` - parses.
+UnaryNoPM   = Not | Cast | PostfixExpr ;
 RefType     = { Annotation } ( "String" KwEnd | Id [ SkipAngle ] { "." { Annotation } Id [ SkipAngle ] } ) { { Annotation } "[" "]" } ;
 
 // NewExpr is a Primary, not an alternative here, so `new Foo().bar()` and
@@ -544,14 +671,15 @@ NewExpr     = NewAnon | NewObject | NewArrLit | NewArrSize ;
 // `new Outer.Nested()`: nested types are hoisted under their simple name, so the
 // qualifier only has to be accepted - the last segment names the descriptor.
 NewObject   <~~ push(makeNew(takeAll())) ~~>
-            = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ]
-              { "." Id <~~ push(up.in) ~~> [ SkipAngle ] } "(" [ Expression { "," Expression } ] ")" ;
+            = KwNew [ SkipAngle ] { Annotation } Id <~~ push(up.in) ~~> [ SkipAngle ]
+              { "." { Annotation } Id <~~ push(up.in) ~~> [ SkipAngle ] } "(" [ Expression { "," Expression } ] ")" ;
 // An anonymous class `new Base(args) { members }`: a real, uniquely named class
 // descriptor emitted at the expression site, so it captures the enclosing scope.
 // Its constructor forwards its arguments to the base constructor; a base that is an
 // interface has none, so nothing is chained.
 NewAnon     <~~ push(makeNewAnon(takeAll(), up.pos)) ~~>
-            = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ] { "." Id <~~ push(up.in) ~~> [ SkipAngle ] }
+            = KwNew [ SkipAngle ] { Annotation } Id <~~ push(up.in) ~~> [ SkipAngle ]
+              { "." { Annotation } Id <~~ push(up.in) ~~> [ SkipAngle ] }
               "(" [ Expression { "," Expression } ] ")" "{" { Member } "}" ;
 NewArrLit   <~~ push(makeArray(takeAll())) ~~>
             = KwNew Type "{" [ Expression { "," Expression } [ "," ] ] "}" ;
@@ -560,10 +688,14 @@ NewArrLit   <~~ push(makeArray(takeAll())) ~~>
 // level holding nulls - Java's `new int[2][]`.
 NewArrSize  <~~ push(makeNewArray(takeAll())) ~~>
             = KwNew NAType NADim { NADim } { NAEmpty } ;
-NAType      <~~ push({naty: stripWs(up.in)}) ~~>
+// A type annotation may precede the element type and EVERY bracket pair
+// (`new @A Object @C [2] @B [1]`); NATypeName carries the tag so the
+// annotations stay out of `naty`, which names the element type.
+NAType      = { Annotation } NATypeName ;
+NATypeName  <~~ push({naty: stripWs(up.in)}) ~~>
             = ( PrimName KwEnd | "String" KwEnd | Id ) ;
-NADim       <~~ push({dim: pop()}) ~~> = "[" Expression "]" ;
-NAEmpty     <~~ push({nadim0: true}) ~~> = "[" "]" ;
+NADim       <~~ push({dim: pop()}) ~~> = { Annotation } "[" Expression "]" ;
+NAEmpty     <~~ push({nadim0: true}) ~~> = { Annotation } "[" "]" ;
 
 // super.m(args): the method search starts at the superclass of the class the call
 // appears in (curClassName is set while the class body is being built).
@@ -590,8 +722,8 @@ MRefName    <~~ push({mname: stripWs(up.in)}) ~~> = Id | KwNew ;
 // itself and once again for CallMember, and deeply nested calls would cost 2^depth.
 // It precedes FieldSfx, which would otherwise read `.new` as a field named `new`.
 QNewSfx     <~~ push(makeQNewSfx(takeAll())) ~~>
-            = "." KwNew Id <~~ push({qname: up.in}) ~~> [ SkipAngle ]
-              "(" [ Expression { "," Expression } ] ")" ;
+            = "." KwNew [ SkipAngle ] { Annotation } Id <~~ push({qname: up.in}) ~~> [ SkipAngle ]
+              "(" [ Expression { "," Expression } ] ")" [ "{" { Member } "}" ] ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
             = "." [ SkipAngle ] Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
@@ -620,7 +752,7 @@ SwYield     <~~ push(makeYield(pop())) ~~>
 ArrLit      <~~ push(makeArray(takeAll())) ~~>
             = "{" [ Expression { "," Expression } [ "," ] ] "}" ;
 
-Primary     = ArrClassLit | ArrLit | NewExpr | SwitchExpr | Lambda | MethodRef | "(" Expression ")" | TextBlock | DqString | CharLit
+Primary     = ArrClassLit | PrimClassLit | ArrLit | NewExpr | SwitchExpr | Lambda | MethodRef | "(" Expression ")" | TextBlock | DqString | CharLit
             | HexLit | BinLit | OctLit | FloatLit | UscoreInt | SuffInt | IntLit | True | False | Null
             | OuterThis | BareCall | VarRef ;
 
@@ -636,7 +768,35 @@ LambdaHead  = "(" [ LamParam { "," LamParam } ] ")" | LamId ;
 // alternation lets an untyped "(x)" work despite the possessive optional (Type
 // would otherwise greedily consume the sole identifier).
 LamParam    = [ "final" KwEnd ] ( Type LamId | LamId ) ;
-LamId       <~~ push({lparam: up.in}) ~~> = Id ;
+// A lambda parameter is an IDENTIFIER, and Id in this grammar matches keywords
+// too - so without this guard `s != null -> "y"` (a `when` guard followed by the
+// arm arrow) parses as `s != (null -> "y")` and the arm dies on the missing
+// `->`. The first byte is screened before the word list because this guard sits
+// on a rule every Primary attempt reaches.
+LamId       <~~ push({lparam: up.in}) ~~> = NotJavaKw Id ;
+NotJavaKw   = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var kws = ["null", "true", "false", "this", "super", "new", "instanceof",
+                   "return", "throw", "break", "continue", "case", "default",
+                   "switch", "if", "else", "while", "do", "for", "class", "void",
+                   "int", "long", "short", "byte", "char", "float", "double", "boolean"]
+        var hit = false
+        var f0 = c.peek(s)
+        for (var k = 0; k < kws.length; k++) {
+            var w = kws[k]
+            if (w.charCodeAt(0) !== f0) { w = "\x00" }
+            var ok = true
+            for (var i = 0; i < w.length; i++) { if (c.peek(s + i) !== w.charCodeAt(i)) { ok = false } }
+            if (ok) {
+                var cc = c.peek(s + w.length)
+                if (!((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122))) { hit = true }
+            }
+        }
+        return hit ? abnf.newToken("\x01java-keyword", 0) : undefined
+    })()
+~~) ;
 LambdaBody  = LamBlock | LamExpr ;
 LamBlock    <~~ push({lblock: pop()}) ~~> = Block ;
 LamExpr     <~~ push({lexpr: pop()}) ~~> = Expression ;
@@ -660,6 +820,13 @@ Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
 // so the value is null. It has to beat VarRef.
 ArrClassLit <~~ push(makeConst(null)) ~~>
             = ( PrimName KwEnd | Id { "." Id } ) [ SkipAngle ] "[" "]" { "[" "]" } "." "class" KwEnd ;
+
+// `int.class`, `void.class` - a class literal over a PRIMITIVE type. It is no
+// member chain (there is no variable named `int` to read a field from), so it
+// needs its own Primary. Class objects are not modelled: the value is null,
+// exactly as for the array form above.
+PrimClassLit <~~ push(makeConst(null)) ~~>
+            = ( PrimName KwEnd | "void" KwEnd ) "." "class" KwEnd ;
 
 // `Outer.this`: the enclosing instance of an inner-class instance, stored as
 // __outer when it is created. Tried before VarRef, which would otherwise read
@@ -698,8 +865,13 @@ TBItem      = "\\" "\x00"..."\U0010ffff" | "\x00"..."\U0010ffff" ;
 // Hex / binary: the 0x / 0b prefix is distinctive, so these never shadow a decimal int.
 // A hex literal may carry a p-exponent (0x1p4 == 16.0, a hexadecimal double).
 HexLit      <~~ push(makeNumConst(numLit(up.in, 16))) ~~>
-            = ( "0x" | "0X" ) :whitespace() HexDig { HexDig | "_" } [ HexPTail ] [ NumSfx ] :whitespace(Whitespace) ;
-HexPTail    = ( "p" | "P" ) [ "+" | "-" ] Dig { Dig } ;
+            = ( "0x" | "0X" ) :whitespace() HexBody [ NumSfx ] :whitespace(Whitespace) ;
+// Hoisted into its own production: a Command immediately followed by a group is
+// read as a repetition. JLS 3.10.2 requires the p-exponent on the fractional
+// form, and demanding it is what keeps the '.' out of an ordinary `0xFF`.
+HexBody     = HexFrac HexPTail | HexDig { HexDig | "_" } [ HexPTail ] ;
+HexFrac     = HexDig { HexDig | "_" } "." { HexDig | "_" } | "." HexDig { HexDig | "_" } ;
+HexPTail    = ( "p" | "P" ) [ "+" | "-" ] Dig { Dig | "_" } ;
 BinLit      <~~ push(makeNumConst(numLit(up.in, 2))) ~~>
             = ( "0b" | "0B" ) :whitespace() BinDig { BinDig | "_" } [ NumSfx ] :whitespace(Whitespace) ;
 // The classic leading-zero octal (017); it needs at least one octal digit after
@@ -712,7 +884,7 @@ FloatLit    <~~ push(makeNumConst(numLit(up.in, 10))) ~~>
             = FloatBody [ NumSfx ] :whitespace(Whitespace) ;
 FloatBody   = "." :whitespace() Dig { Dig | "_" } [ ExpPart ]
             | Dig :whitespace() { Dig | "_" } ( "." { Dig | "_" } [ ExpPart ] | ExpPart ) ;
-ExpPart     = ( "e" | "E" ) [ "+" | "-" ] Dig { Dig } ;
+ExpPart     = ( "e" | "E" ) [ "+" | "-" ] Dig { Dig | "_" } ;
 // A decimal digit run containing an underscore (a digit-grouping literal like 1_000_000).
 UscoreInt   <~~ push(makeNumConst(numLit(up.in, 10))) ~~>
             = Dig :whitespace() { Dig } "_" { Dig | "_" } [ NumSfx ] :whitespace(Whitespace) ;
@@ -796,7 +968,7 @@ UnsupType   = AnnotationDecl | Interface | EnumDecl ;
 // no reflection, so the declaration only has to introduce the NAME: it lowers to an
 // empty descriptor, like a marker interface with no members.
 AnnotationDecl <~~ push(makeAnnotationTypeStmt(takeAll())) ~~>
-            = LeadMods "@" KwInterface Id <~~ push(up.in) ~~> SkipBlock ;
+            = LeadMods "@" KwInterface Id <~~ push(up.in) ~~> [ SkipAngle ] [ KwExtends Type { "," Type } ] SkipBlock ;
 // An interface lowers to a plain class descriptor: the default / static / private
 // methods become closures on it and the (implicitly static final) constants become
 // its properties. It has no constructor, so a class implementing it does not chain
@@ -939,8 +1111,30 @@ KwYield     = "yield" KwEnd ;
         }
     }
 
+    // The target of an assignment whose root is an arbitrary primary. The value
+    // it returns is an ordinary target record with a `base` thunk in place of a
+    // variable name; emitRefPath below is what lowers that thunk.
+    function makeChainTarget(items) {
+        var head = []
+        for (var i = 0; i < items.length - 1; i++) { head.push(items[i]) }
+        var last = items[items.length - 1]
+        // Three separate returns rather than one reassigned local: under the
+        // frozen engine a variable keeps the shape it was first given.
+        if (last.kind == "field") { return {name: "", path: [{key: last.name}], base: foldCallMember(head)} }
+        if (last.kind == "index") { return {name: "", path: [{idx: last.idx}], base: foldCallMember(head)} }
+        // A run that ends in a call is not an assignable place; the parse still
+        // succeeds and the enclosing Assignment fails on the missing operator.
+        return {name: "", path: [{key: "\x01not-a-place"}], base: foldCallMember(head)}
+    }
     function emitRefPath(b, ref) {
-        var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+        var o = anytype // Either the lowered base expression or a scope read.
+        if (ref.base != undefined) {
+            var br = ref.base(b)
+            b = br.b
+            o = br.v
+        } else {
+            o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+        }
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) {
@@ -1037,6 +1231,24 @@ KwYield     = "yield" KwEnd ;
     // exponent form, an f/F/d/D suffix and a hexadecimal p-exponent are DOUBLES
     // and emit a js_jflo box (see jFloConst); everything else is an integral
     // value and emits a plain number.
+    // The mantissa of a hexadecimal double: hex digits, optionally with a hex
+    // fraction after a '.'. Each fractional digit divides by another 16.
+    function jHexMant(m) {
+        var dot = -1
+        for (var di = 0; di < m.length; di++) { if (m.charAt(di) == ".") { dot = di } }
+        if (dot < 0) { return parseInt(m, 16) }
+        var ip = m.substring(0, dot)
+        var fp = m.substring(dot + 1)
+        var iv = 0
+        if (ip.length > 0) { iv = parseInt(ip, 16) }
+        var fv = 0
+        var den = 1
+        for (var fi = 0; fi < fp.length; fi++) {
+            fv = fv * 16 + parseInt(fp.charAt(fi), 16)
+            den = den * 16
+        }
+        return iv + fv / den
+    }
     function numLit(text, base) {
         var s = stripWs(text).split("_").join("")
         var last = s.charAt(s.length - 1)
@@ -1070,12 +1282,18 @@ KwYield     = "yield" KwEnd ;
                 if (c == "p" || c == "P") { pAt = i }
             }
             if (pAt < 0) { return {__int: s.substring(2), __radix: 16, __long: isLong} }
-            // 0x1p4 is a hexadecimal DOUBLE literal (JLS 3.10.2).
-            var mant = parseInt(s.substring(2, pAt), 16)
+            // 0x1p4 is a hexadecimal DOUBLE literal (JLS 3.10.2); the mantissa
+            // may itself be fractional (0x1.8p1 == 3.0, 0X.003p12 == 3.0).
+            var mant = jHexMant(s.substring(2, pAt))
             var et = s.substring(pAt + 1)
             if (et.charAt(0) == "+") { et = et.substring(1) }
             var exp = parseInt(et, 10)
             var k = exp < 0 ? 0 - exp : exp
+            // The exponent is written by a human and the corpus writes
+            // 0x0.0p2147483646, so cap the doubling loop: 2^1100 is already
+            // +Infinity as a double, and every larger exponent gives the same
+            // result (Infinity, or 0.0 for a negative one).
+            if (k > 1100) { k = 1100 }
             var scale = 1
             while (k > 0) { scale = scale * 2; k = k - 1 }
             return {__flo: exp < 0 ? mant / scale : mant * scale}
@@ -1334,8 +1552,36 @@ KwYield     = "yield" KwEnd ;
 
     // `o.new Inner(args)`: like new, plus the enclosing instance in __outer, set
     // before the constructor runs so the constructor body can already use it.
+    // `outer.new Inner(args)`, and `outer.new Inner(args) { members }` - the
+    // qualified creation that ALSO declares an anonymous subclass. The class
+    // statement travels in `cls`, which is ALWAYS a thunk (a no-op one when
+    // there is no body) so the record keeps one shape under the frozen engine.
+    function qnewNoClass(b) { return b }
     function makeQNewSfx(items) {
-        return {kind: "qnew", cname: items[0].qname, args: items.slice(1)}
+        var qargs = []
+        var qmembers = []
+        for (var i = 1; i < items.length; i++) {
+            if (typeof items[i] == "function") { qargs.push(items[i]) } else { qmembers.push(items[i]) }
+        }
+        if (qmembers.length == 0) {
+            return {kind: "qnew", cname: items[0].qname, args: qargs, cls: qnewNoClass}
+        }
+        anonCount++
+        var aname = "Anon$" + anonCount
+        var mem = [{ext: items[0].qname}]
+        if (qargs.length > 0) {
+            // Forward the arguments to the base constructor, as makeNewAnon does.
+            var ps = []
+            var dargs = []
+            for (var k = 0; k < qargs.length; k++) {
+                ps.push("$a" + k)
+                dargs.push(makeVarRef("$a" + k))
+            }
+            mem.push({kind: "ctor", name: aname, params: ps, body: null,
+                      deleg: {deleg: "super", dargs: dargs}})
+        }
+        for (var j = 0; j < qmembers.length; j++) { mem.push(qmembers[j]) }
+        return {kind: "qnew", cname: aname, args: qargs, cls: buildClassStmt(aname, mem, undefined)}
     }
     // Emits `outerV.new Cls(args)`: a fresh object whose __class is Cls and whose
     // __outer is the qualifier, then Cls' constructor over it.
@@ -1723,6 +1969,7 @@ KwYield     = "yield" KwEnd ;
                 } else if (s.kind == "mref") {
                     cur = jEmitBoundMRef(b, cur, s.name)
                 } else if (s.kind == "qnew") {
+                    b = s.cls(b)
                     var qr = emitQualNew(b, cur, s.cname, s.args)
                     b = qr.b
                     cur = qr.v

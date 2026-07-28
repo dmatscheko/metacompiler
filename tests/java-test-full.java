@@ -69,6 +69,8 @@ class Main {
         S23.run(); // SECTION-CALL 23
         S24.run(); // SECTION-CALL 24
         S25.run(); // SECTION-CALL 25
+        S26.run(); // SECTION-CALL 26
+        S27.run(); // SECTION-CALL 27
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -985,4 +987,200 @@ class S25 {
     }
 }
 
+
+// ===== SECTION 26: type annotations, receiver parameters and assignable places =====
+// A TYPE_USE annotation may sit in front of any type, including the one in a
+// `new`, a cast, an `extends`/`implements` clause and every array bracket pair
+// (JLS 9.7.4); a method may declare the type of `this` as a RECEIVER parameter
+// (JLS 8.4.1); a cast may name an INTERSECTION of types (JLS 15.16); and the
+// left-hand side of an assignment is a field or array access over ANY primary,
+// optionally wrapped in parentheses (JLS 15.26). The annotation type is
+// declared with a fully qualified @Target so the section needs no import.
+@java.lang.annotation.Target({java.lang.annotation.ElementType.TYPE_USE,
+                              java.lang.annotation.ElementType.METHOD,
+                              java.lang.annotation.ElementType.FIELD,
+                              java.lang.annotation.ElementType.LOCAL_VARIABLE})
+@interface TU {}
+
+interface Marker26 {}
+class Base26 { int tag() { return 1; } }
+class Sub26 extends @TU Base26 implements @TU Marker26 {
+    int tag() { return 2; }
+}
+class Box26 {
+    int v = 0;
+    int get(@TU Box26 this) { return this.v; }
+}
+class Outer26 {
+    class Inner26 { int val() { return 10; } }
+}
+record Pair26(String head, String... rest) {}
+
+class S26 {
+    static Box26 mk() { return new Box26(); }
+    static int sum(@TU int @TU ... xs) {
+        int t = 0;
+        for (int x : xs) { t += x; }
+        return t;
+    }
+
+    static void run() {
+        // ----- a type annotation on a `new`, a cast, an array and a supertype -----
+        Object o1 = new @TU Base26();
+        Main.check("ta1", o1 != null && new Sub26().tag() == 2);
+        @TU String s1 = (@TU String) (Object) "x";
+        Main.check("ta2", s1.equals("x"));
+        @TU int @TU [] arr = new @TU int @TU [3];
+        arr[1] = 7;
+        Main.check("ta3", arr.length == 3 && arr[1] == 7);
+
+        // ----- a receiver parameter, and an annotated varargs parameter -----
+        Main.check("ta4", new Box26().get() == 0 && sum(1, 2, 3) == 6);
+
+        // ----- an intersection cast, and a cast of a cast -----
+        Runnable r = (Runnable & Marker26) () -> { };
+        Object o2 = (String) (Object) "y";
+        Main.check("ta5", r != null && "y".equals(o2));
+
+        // ----- a parenthesized assignment target -----
+        int a = 0;
+        int b = 0;
+        (a) = (b) = 1;
+        Main.check("ta6", a == 1 && b == 1);
+        int i = 5;
+        int j = (i)++;
+        (i) += 2;
+        Main.check("ta7", j == 5 && i == 8);
+
+        // ----- an assignable place rooted at any primary -----
+        Box26 box = new Box26();
+        Object any = box;
+        ((Box26) any).v = 11;
+        Main.check("ta8", box.v == 11);
+        mk().v = 9;
+        new Box26().v = 12;
+        Main.check("ta9", mk().get() == 0);
+
+        // ----- a qualified `new` that also declares an anonymous subclass -----
+        Outer26 out = new Outer26();
+        Outer26.Inner26 in = out.new Inner26() { };
+        Main.check("ta10", in.val() == 10);
+
+        // ----- a VARARGS record component (the array form is passed straight through) -----
+        Pair26 p = new Pair26("h", new String[] {"a", "b"});
+        Main.check("ta11", p.head().equals("h") && p.rest().length == 2);
+
+        // ----- hexadecimal doubles, and an underscore inside an exponent -----
+        Main.check("ta12", 0x1.8p1 == 3.0 && 0X.003p12 == 3.0 && 0x1p4 == 16.0);
+        Main.check("ta13", 1e1_0 == 1e10);
+
+        // ----- a `when` guard whose expression ends in `null` (which is not a
+        // lambda parameter, however much `null -> "y"` looks like one) -----
+        Object k = "kk";
+        String w = switch (k) {
+            case String str when str != null -> "s" + str.length();
+            default -> "d";
+        };
+        Main.check("ta14", w.equals("s2") && k instanceof final String fs && fs.length() == 2);
+    }
+}
+
 // ===== END SECTIONS =====
+
+// ===== SECTION 27: the near side of javac's post-shape parser checks =====
+// Every rule the grammar carries for javac's post-shape diagnostics (`var` as a
+// restricted type name, the `_` rules, varargs placement, repeated modifiers,
+// not.stmt, and the scanner's literal limits) REFUSES something, and a refusal
+// cannot be asserted from inside a program that runs. What this section pins is
+// the other side of each of those rules: the legal shape that sits one step away
+// from the refusal and has to keep parsing. The corpus reject row in
+// tests/reference/sweep.sh measures the refusals themselves.
+
+interface Fn27 { int apply(int a, int b); }
+interface Run27 { void go(); }
+
+class Box27 {
+    int v = 5;
+    static Box27 mk(Box27 b) { return b; }
+}
+
+record Rec27(int a) {
+    static final int SHARED = 3;      // a record may declare a STATIC field
+    int twice() { return this.a * 2; }
+}
+
+class S27 {
+    @Deprecated public static final int K27 = 7;
+
+    static int sum(int seed, int... xs) {
+        int t = seed;
+        for (int x : xs) { t = t + x; }
+        return t;
+    }
+
+    // `case null, default ->` (JEP 441) is NOT here: both halves already refuse
+    // it - the interpreter parses the label and then cannot resolve the name
+    // `default`, and the compiler grammar does not parse it at all. The guard
+    // that refuses `case default:` deliberately sits on the FIRST label only, so
+    // it neither creates nor closes that gap.
+    static String kind(Object o) {
+        return switch (o) {
+            case String s -> "s" + s.length();
+            default -> "nd";
+        };
+    }
+
+    static void run() {
+        // ----- a PREFIX ++/-- whose target is a member CHAIN, not a bare name -----
+        Box27 b = new Box27();
+        --Box27.mk(b).v;
+        Main.check("pp1", b.v == 4);
+        ++b.v;
+        Main.check("pp2", b.v == 5);
+
+        // ----- a class literal over a PRIMITIVE type (`int.class`), which is no
+        // member chain: `int` stopped being readable as a variable name -----
+        Main.check("pp3", int.class == int.class && char.class == char.class);
+        Main.check("pp4", int[].class == int[].class);
+
+        // ----- literals one step inside the scanner's limits -----
+        Main.check("pp5", 1e1__0 == 1e10 && 1_0_0 == 100 && 0x1__0 == 16);
+        Main.check("pp6", 017 == 15 && 0 == 0 && 2147483647 > 0);
+        Main.check("pp7", 12345678901234L > 0L && 1e308 > 0.0 && 1e-308 > 0.0);
+        Main.check("pp8", "a\sb".equals("a b") && "a\102c".equals("aBc"));
+
+        // ----- a pattern switch with a `default ->` arm: `default` is refused only
+        // as a case LABEL (`case default:`), never as the default arm itself -----
+        Main.check("pp9", S27.kind("ab").equals("s2") && S27.kind(3).equals("nd"));
+
+        // ----- lambda parameters: all implicit, all `var`, all explicit -----
+        Fn27 f1 = (x, y) -> x + y;
+        Fn27 f2 = (var x, var y) -> x * y;
+        Fn27 f3 = (int x, int y) -> x - y;
+        Main.check("pp10", f1.apply(2, 3) == 5 && f2.apply(2, 3) == 6 && f3.apply(5, 3) == 2);
+
+        // ----- a varargs parameter, in last position -----
+        Main.check("pp11", S27.sum(0, 1, 2, 3) == 6 && S27.sum(4) == 4);
+
+        // ----- statement expressions the not.stmt guard must still admit -----
+        int sh = 1;
+        sh <<= 4;
+        Main.check("pp12", sh == 16);
+        sh >>= 2;
+        Main.check("pp13", sh == 4);
+        Run27 r = new Run27() { public void go() { } };
+        r.go();
+        Main.check("pp14", S27.K27 == 7 && Rec27.SHARED == 3 && new Rec27(4).twice() == 8);
+
+        // ----- a `var` local, which the compound-declaration rule still allows
+        // one of, and a try that has a finally but no catch -----
+        var one = 1;
+        int seen = 0;
+        try {
+            seen = one;
+        } finally {
+            seen = seen + 1;
+        }
+        Main.check("pp15", seen == 2);
+    }
+}
