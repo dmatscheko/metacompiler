@@ -92,6 +92,41 @@ func init() {
 		// Swift all three are value types and compare element by element.
 		m["js_sweq"] = func(a []uint64) uint64 { return boolH(rt.swEqual(u(a[0]), u(a[1]))) }
 
+		// ----- Parameter packs (SE-0393) -----
+		// A `repeat E` expansion produces a TUPLE of the per-element results, and
+		// `for x in repeat each p` is the one place a tuple is walked as a
+		// sequence. Both directions live here rather than in emitted IR because
+		// the element count is a runtime property of the pack, and because
+		// swift-interpreter.abnf's newTupleVal / tupleArray must agree with them
+		// exactly - ./test.sh --cross diffs the two halves.
+		m["js_swtuple"] = func(a []uint64) uint64 {
+			arr, ok := u(a[0]).(*jsArray)
+			if !ok {
+				rt.fail("js_swtuple needs an array")
+			}
+			o := newJSObject()
+			o.set("__tuple", float64(len(arr.elems)))
+			for i, e := range arr.elems {
+				o.set(itoa(i), e)
+			}
+			return rt.wrap(o)
+		}
+		m["js_swtuparr"] = func(a []uint64) uint64 {
+			o, ok := u(a[0]).(*jsObject)
+			if !ok {
+				return a[0]
+			}
+			n, ok := swNumProp(o, "__tuple")
+			if !ok {
+				return a[0]
+			}
+			out := &jsArray{elems: make([]interface{}, 0, n)}
+			for i := 0; i < n; i++ {
+				out.elems = append(out.elems, o.props[itoa(i)])
+			}
+			return rt.wrap(out)
+		}
+
 		// ----- Swift's arithmetic (see the "Integers" note below) -----
 		w := rt.wrap
 		// One binary arithmetic or bitwise operator: (op, left, right). Two
