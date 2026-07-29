@@ -8236,6 +8236,15 @@ func standardJSBindings() map[string]interface{} {
 			fmt.Fprint(outWriter, rt.printArgs(args)...)
 			return jsUndef
 		}),
+		// eprintln is the DIAGNOSTIC channel (warnings): standard error, never
+		// outWriter (which -pipe swaps to capture a stage's text) and never the
+		// emitted module. Not silenced by the quiet flags - frozenBaseBindings
+		// leaves it alone where it noops print/println/printf, exactly like the
+		// goja binding in commonscript.go. The two hosts must stay identical.
+		"eprintln": jsHostFunc("eprintln", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			fmt.Fprintln(warnWriter, rt.printArgs(args)...)
+			return jsUndef
+		}),
 		"printf": jsHostFunc("printf", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			if len(args) == 0 {
 				return jsUndef
@@ -8489,6 +8498,21 @@ func (rt *jsrt) toInt32(v interface{}) int32 {
 	return int32(int64(f))
 }
 
+// jsProgramPanic marks a failure of the RUNNING PROGRAM (llvm.RunJS) as opposed
+// to a failure of the tag script that started it. The distinction matters only
+// for the diagnostic: the frozen engine wraps a panic escaping a tag with that
+// tag's whole source text, while goja wraps only errors goja itself returns and
+// lets a Go panic through untouched. So the same program error read as two lines
+// under goja and as ~4800 lines under -frozen (the entire startScript). The
+// marker lets the frozen engine pass a program failure through unwrapped, so
+// both engines report it identically - which is what the matrix now checks on
+// stderr. Error() returns the message verbatim, so the text at the top level
+// (CompileASG's fmt.Errorf("%s", err)) is exactly what it was before.
+type jsProgramPanic struct{ msg string }
+
+func (e jsProgramPanic) Error() string  { return e.msg }
+func (e jsProgramPanic) String() string { return e.msg }
+
 // runJSModule is llvm.RunJS(): it executes the entry function of a MetaJS
 // module with the standard host bindings and returns its int32 result.
 // This is the program runtime, so the -cfgraph and -trace hooks live here.
@@ -8499,15 +8523,23 @@ func runJSModule(m *ir.Module, entry string) *RunResult {
 	rt.enableTrace()
 	ma := rt.attach(m)
 	// An exception that escapes the program's entry point is an uncaught throw;
-	// report it like any other runtime error (rt.fail panics a string that the
-	// caller's recover turns into a clean message and a non-zero exit).
+	// report it like any other runtime error (the same wording rt.fail gives, so
+	// the caller's recover turns it into a clean message and a non-zero exit).
+	// Everything that escapes here is re-panicked as a jsProgramPanic: the text
+	// is unchanged, but the tag-script engines can now tell "the program failed"
+	// from "the tag script failed" and diagnose them identically (see the type).
 	defer func() {
-		if r := recover(); r != nil {
-			if exc, ok := r.(*jsThrown); ok {
-				rt.fail("uncaught exception: %s", rt.toString(exc.value))
-			}
+		r := recover()
+		if r == nil {
+			return
+		}
+		if _, ok := r.(jsProgramPanic); ok {
 			panic(r)
 		}
+		if exc, ok := r.(*jsThrown); ok {
+			panic(jsProgramPanic{"js runtime error: uncaught exception: " + rt.toString(exc.value)})
+		}
+		panic(jsProgramPanic{fmt.Sprint(r)})
 	}()
 	h := rt.callEntry(ma, entry, 0)
 	return &RunResult{Ret: uint32(rt.toInt32(rt.unwrap(h))), Out: ""}

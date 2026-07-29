@@ -91,6 +91,19 @@ class reported "constructor name does not match class". Nothing points at the
 duplicated name. `mec <grammar> -verify` now reports this as an error; run it
 after editing a script.
 
+**A warning belongs on `eprintln`, never on `println`.** `println` is bound to
+`outWriter`, which is stdout — the same channel a compiler grammar emits its
+MODULE on and an interpreter grammar prints the PROGRAM's output on, and the
+channel `-pipe` swaps out to capture one stage's text as the SOURCE of the next.
+A `println("warning: …")` therefore ends up inside the emitted module, inside the
+program output, or inside the next stage's program text. `eprintln(…)` is the
+diagnostic channel: standard error, not redirectable, and deliberately NOT
+silenced by `-q`/`-qq` (those are about module and program output; a warning is a
+diagnostic about the compile). It is bound in both script hosts — goja in
+`abnf/commonscript.go`, frozen in `standardJSBindings` (`abnf/jsrt.go`) — and the
+two bindings must stay identical, since `./test.sh` compares the two engines'
+stderr byte for byte on every `-q` entry, exactly as it does their stdout.
+
 **The `:description(...)` block is PARSED, not inert prose.** A literal `\u` or
 `\x` in it is read as an escape and the whole grammar fails to load with
 `newTokenEscaped: invalid syntax`. This has caught several people, always while
@@ -102,7 +115,7 @@ editing rules.
 ## The frozen MetaJS engine
 
 `./test.sh` runs everything twice, once under goja and once with `-frozen`, and
-requires byte-identical stdout. The frozen engine is a smaller language, so
+requires byte-identical stdout and stderr. The frozen engine is a smaller language, so
 these fail ONLY under `-frozen` — behind an otherwise green goja run.
 
 - **No `for…in`.** Anything enumerating object keys (a class body, an instance
@@ -757,7 +770,9 @@ spaces, tabs, CR, LF, form feed, `//` to end of line, and `/* */`.
 ## The matrix compares each engine against ITSELF, never the two halves
 
 `./test.sh` runs every entry twice — goja and `-frozen` — and demands byte-identical
-stdout. That is a strong invariant and it is blind to one whole class of defect: the
+stdout AND stderr (stderr since the warnings moved there; it caught two entries whose
+error dumps had differed between the engines all along). That is a strong invariant and
+it is blind to one whole class of defect: the
 **interpreter grammar and the compiler grammar of the same language giving different
 answers.** Both halves are self-consistent across both script hosts, both report FULL,
 and the matrix is green while `nil.to_s` is `""` in one and `"null"` in the other.

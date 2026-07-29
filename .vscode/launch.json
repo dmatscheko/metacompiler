@@ -161,10 +161,10 @@
             "program": "${workspaceFolder}","args": ["languages/metajs-interpreter.abnf", "tests/metajs-fail-test.js", "-q"]
         },
         {
-            "name": "MetaJS type violation, compiled (SHOULD FAIL, no -q: the engines' error dumps differ)",
+            "name": "MetaJS type violation, compiled (SHOULD FAIL)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-fail-test.js"]
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-fail-test.js", "-q"]
         },
         {
             "name": "MetaJS undeclared assignment (SHOULD FAIL)",

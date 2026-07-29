@@ -8,7 +8,8 @@
 # invariants the project guarantees:
 #
 #   1. byte-identical output: for every run whose args contain -q (quiet), the goja
-#      and -frozen stdout must be identical (the frozen bootstrap must match goja).
+#      and -frozen stdout must be identical (the frozen bootstrap must match goja),
+#      and so must their stderr - that is where warnings and error messages go.
 #   2. correct exit status: the language tests are self-checking (exit 0 == the
 #      program's own checks passed). Ordinary entries must exit 0 on both engines;
 #      the by-design failures (names containing "FAIL", plus the smaller-match-first
@@ -179,9 +180,14 @@ full_probe() {
                     # while staying green. The two halves of a language must agree
                     # on it - see the CHECK-COUNT report at the end of this group.
                     printf '%s\n' "$out" | sed -n 's/^full: \([0-9]*\) checks.*/\1/p' | head -1 > "$R.checks"
-                    RUN "$BIN" "$G" "$F" -q          > "$work.g" 2>/dev/null
-                    RUN "$BIN" "$G" "$F" -q -frozen  > "$work.f" 2>/dev/null
-                    if cmp -s "$work.g" "$work.f"; then
+                    # stderr is compared too, not discarded: warnings live there
+                    # (they used to pollute stdout), so a ratchet file that starts
+                    # warning under one engine only would otherwise pass unseen.
+                    # Every ratchet file runs with an EMPTY stderr today, on both
+                    # engines and both halves - measured, all 15 languages.
+                    RUN "$BIN" "$G" "$F" -q          > "$work.g" 2>"$work.ge"
+                    RUN "$BIN" "$G" "$F" -q -frozen  > "$work.f" 2>"$work.fe"
+                    if cmp -s "$work.g" "$work.f" && cmp -s "$work.ge" "$work.fe"; then
                         printf '    FULL - %s assertions, goja and -frozen byte-identical\n' "$(cat "$R.checks")"
                     else
                         printf '    FULL under goja, BUT -frozen fails or differs - inspect before celebrating\n'
@@ -241,7 +247,7 @@ full_probe() {
             grep -v "SECTION-CALL $id" "$work" > "$work.n" && mv "$work.n" "$work"
         done
     } > "$R"
-    rm -f "$work" "$work.n" "$work.iso" "$work.g" "$work.f"
+    rm -f "$work" "$work.n" "$work.iso" "$work.g" "$work.f" "$work.ge" "$work.fe"
 }
 
 if [ "$FULL" -eq 1 ]; then
@@ -545,6 +551,31 @@ run_entry() {
     if [ "$has_q" -eq 1 ] && ! cmp -s "$og" "$of"; then
         problems+=("goja vs frozen -q output differ")
     fi
+    # STDERR is compared on exactly the same entries as stdout. Two reasons:
+    #
+    #   1. warnings live here now (they used to be printed to stdout, where they
+    #      polluted a compiler's emitted module and a program's output). Without
+    #      this line, moving them off stdout would silently DROP the 35 entries
+    #      that pass -warn-imports / -warn-unsupported out of the byte-identity
+    #      check - a coverage loss disguised as a clean change.
+    #   2. it closes an older gap: an ERROR message that differs between the two
+    #      engines was invisible to this matrix.
+    #
+    # Adding it found two entries (Kotlin delegation SHOULD FAIL, PHP undefined
+    # constant SHOULD FAIL) whose stderr had diverged all along: a panic from the
+    # RUNNING PROGRAM was re-panicked by the frozen engine wrapped in the whole
+    # startScript source (~4800 lines), where goja printed two lines. That is
+    # fixed at the source (jsProgramPanic in abnf/jsrt.go), not excluded here -
+    # and the fix also retired the documented exception, the MetaJS type
+    # violation entry, which had to run without -q for exactly that reason and
+    # now carries -q like everything else.
+    #
+    # Entries that still differ on stderr between the engines are the trace and
+    # timing ones (-vv/-vv2 tag traces, -speed) - all of them without -q, so they
+    # are excluded here exactly as they are for stdout.
+    if [ "$has_q" -eq 1 ] && ! cmp -s "$eg" "$ef"; then
+        problems+=("goja vs frozen -q stderr differ")
+    fi
 
     if [ "${#problems[@]}" -eq 0 ]; then
         : > "$RESDIR/$idx.ok"
@@ -555,7 +586,10 @@ run_entry() {
         local block p
         block="$(printf 'FAIL   %s\n' "$name"
                  for p in "${problems[@]}"; do printf '         - %s\n' "$p"; done
-                 head -3 "$eg" | sed 's/^/         goja: /')"
+                 head -3 "$eg" | sed 's/^/         goja: /'
+                 # Only when the two stderrs differ is the frozen side worth
+                 # showing - otherwise it is the same three lines twice.
+                 cmp -s "$eg" "$ef" || head -3 "$ef" | sed 's/^/         frozen: /')"
         printf '%s\n' "$block" > "$RESDIR/$idx.fail"
         printf '%s\n' "$block"
     fi

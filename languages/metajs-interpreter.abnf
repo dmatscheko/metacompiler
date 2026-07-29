@@ -309,6 +309,7 @@ KwDefault   = "default" KwEnd ;
 
     var hostGlobals = {
         "println": println, "print": print, "printf": printf, "sprintf": sprintf,
+        "eprintln": eprintln,
         "parseInt": parseInt, "parseFloat": parseFloat, "Math": Math, "String": String,
         "exit": exit, "anytype": anytypeMarker
     }

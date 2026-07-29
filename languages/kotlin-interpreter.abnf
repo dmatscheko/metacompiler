@@ -3548,8 +3548,8 @@ NotMemberKw = :script(~~
         // silently truncated list. take(n) on an infinite generator still gets the
         // right answer - it just paid for 100000 elements to get there.
         if (guard >= kSeqCap) {
-            println("warning: generateSequence is EAGER here and stopped at " + kSeqCap +
-                    " elements; a Sequence is not lazy in this subset")
+            eprintln("warning: generateSequence is EAGER here and stopped at " + kSeqCap +
+                     " elements; a Sequence is not lazy in this subset")
         }
         return out
     }

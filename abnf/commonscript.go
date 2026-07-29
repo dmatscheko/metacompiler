@@ -160,6 +160,15 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		vm.Set("printf", func(format string, a ...interface{}) (int, error) { return fmt.Fprintf(outWriter, format, a...) })
 	}
 
+	// eprintln is the DIAGNOSTIC channel of the tag scripts (warnings). It goes
+	// straight to standard error - never through outWriter, which -pipe swaps to
+	// capture a producer stage's text, and never into the emitted module. It is
+	// bound outside the quiet branch above on purpose: -q/-qq are about module and
+	// program output, a warning is a diagnostic. The frozen host binds the same
+	// name identically (standardJSBindings in jsrt.go); the two must agree or the
+	// matrix goes red.
+	vm.Set("eprintln", func(a ...interface{}) (int, error) { return fmt.Fprintln(warnWriter, a...) })
+
 	vm.Set("sprintf", fmt.Sprintf) // Sprintf is no output.
 	vm.Set("exit", os.Exit)
 

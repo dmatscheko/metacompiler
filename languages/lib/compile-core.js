@@ -75,7 +75,7 @@ function resolveImport(path, pos) {
     // with this grammar and returns true when it took the import.
     if (core.importFile != null && core.importFile(path, pos)) { return }
     var where = c.curFile() + ":" + c.lineOf(pos)
-    if (c.warnImports) { println("warning: " + where + ": unresolved import '" + path + "' (ignored)"); return }
+    if (c.warnImports) { eprintln("warning: " + where + ": unresolved import '" + path + "' (ignored)"); return }
     fail("unresolved import '" + path + "' (" + where + "); use -warn-imports to ignore")
 }
 // A construct that parsed but cannot be lowered. Default: abort with a clean
@@ -83,7 +83,7 @@ function resolveImport(path, pos) {
 // placeholder so the rest still compiles (enough for call graphs / CFGs / traces).
 function notImpl(construct, pos) {
     var where = c.file + ":" + c.lineOf(pos)
-    if (c.warnUnsupported) { println("warning: " + where + ": " + construct + " not implemented (ignored)"); return }
+    if (c.warnUnsupported) { eprintln("warning: " + where + ": " + construct + " not implemented (ignored)"); return }
     fail(construct + " not implemented (" + where + "); use -warn-unsupported to ignore")
 }
 // Placeholders - compiler thunks are function(block) -> {b, v} / -> nextBlock.

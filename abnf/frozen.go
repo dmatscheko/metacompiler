@@ -170,6 +170,12 @@ func (we *walkEngine) RunTagCode(tag *r.Rule, name scriptName, upStream map[stri
 	}
 	defer func() {
 		if err := recover(); err != nil {
+			// A failure of the PROGRAM the tag started (llvm.RunJS) is not a
+			// failure of this tag: pass it through with its own message, the
+			// way goja does. See jsProgramPanic in jsrt.go.
+			if _, ok := err.(jsProgramPanic); ok {
+				panic(err)
+			}
 			panic(wrapScriptError(err, tag.ToString(), code))
 		}
 	}()
@@ -586,6 +592,12 @@ func (eng *frozenEngine) RunTagCode(tag *r.Rule, name scriptName, upStream map[s
 	code := (*tag.CodeChilds)[slot].String
 	defer func() {
 		if err := recover(); err != nil {
+			// The program the tag ran (llvm.RunJS) failing is not this tag
+			// failing - report it plainly, exactly as goja does. See
+			// jsProgramPanic in jsrt.go.
+			if _, ok := err.(jsProgramPanic); ok {
+				panic(err)
+			}
 			panic(wrapScriptError(err, tag.ToString(), code))
 		}
 	}()

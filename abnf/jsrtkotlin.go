@@ -1673,7 +1673,7 @@ func init() {
 			}
 			where := rt.toString(u(a[1]))
 			if u(a[2]) == float64(1) || u(a[2]) == true {
-				fmt.Fprint(outWriter, "warning: "+where+": delegated property not implemented (ignored)\n")
+				fmt.Fprint(warnWriter, "warning: "+where+": delegated property not implemented (ignored)\n")
 				return w(jsNull)
 			}
 			rt.fail("delegated property not implemented (%s); use -warn-unsupported to ignore", where)
@@ -5456,7 +5456,7 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 			// silently truncated list. take(n) on an infinite generator still gets
 			// the right answer - it just paid for 100000 elements to get there.
 			if guard >= ktSeqCap {
-				fmt.Fprint(outWriter, "warning: generateSequence is EAGER here and stopped at "+
+				fmt.Fprint(warnWriter, "warning: generateSequence is EAGER here and stopped at "+
 					strconv.Itoa(ktSeqCap)+" elements; a Sequence is not lazy in this subset\n")
 			}
 			return out

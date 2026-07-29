@@ -20,3 +20,17 @@ func SetOutput(w io.Writer) io.Writer {
 	outWriter = w
 	return prev
 }
+
+// warnWriter is where DIAGNOSTICS go: the `eprintln` host function of the tag
+// scripts and the two Kotlin runtime warnings of jsrtkotlin.go. It is standard
+// error and, unlike outWriter, it is deliberately NOT redirectable:
+//
+//   - a warning must never land inside an emitted module (it would make the
+//     module unparseable) or inside a program's own output, and
+//   - it must never be captured by -pipe, which swaps outWriter to collect one
+//     stage's text as the next stage's SOURCE - a warning in there would be fed
+//     to the next grammar as program text.
+//
+// It is also not silenced by -q/-qq: those flags are about module and program
+// output, and a warning is a diagnostic about the compile, not output.
+var warnWriter io.Writer = os.Stderr
