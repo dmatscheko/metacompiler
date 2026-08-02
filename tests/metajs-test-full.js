@@ -726,6 +726,84 @@ function s22() {
     check("ieee28", "" + parseFloat("123456789123456789") === "123456789123456780")
 }
 
+// ===== SECTION 23: value INTERNING and the small-integer cache =====
+//
+// languages/lib/runtime.c shares cells: one string cell per string-literal
+// ADDRESS (str_intern), one number cell per small integer (mk_num/js_num_i), and
+// a scope that starts with no buffers at all. Phase 4a of
+// docs/runtime-rework-plan.md did that to stop the arena growing 18 KB per loop
+// iteration, and the whole argument for its being safe is that a shared cell is
+// INDISTINGUISHABLE from a fresh one. This section is that claim, written down.
+// ./test.sh cannot see it - both of its engines are the Go runtime - so it is
+// here, where tests/clang-check.sh runs the file as a native binary.
+function s23() {
+    // literals, computed strings and the coercions that used to allocate
+    var a = "abc"
+    var b = "abc"
+    var c = "ab" + "c"
+    check("intern01", a === b)
+    check("intern02", a === c)
+    check("intern03", a < "abd")
+    check("intern04", typeof a === "string" && typeof 1 === "number")
+    check("intern05", typeof true === "boolean" && typeof null === "object")
+    check("intern06", typeof undefined === "undefined")
+    check("intern07", "" + null === "null" && "" + true === "true")
+    check("intern08", "" + undefined === "undefined" && "" + false === "false")
+    // every integer across and beyond the cached window round-trips
+    var bad = -1
+    var i = 0
+    while (i <= 1030) {
+        var n = i * 1
+        if (n !== i) { bad = i; i = 1031 }
+        i = i + 1
+    }
+    check("intern09", bad === -1)
+    // (spelled as a STRING: the interpreter half does not bind Infinity - see the
+    // host-globals note in the header)
+    check("intern10", 0 === 0 && -0 === 0 && "" + (1 / -0) === "-Infinity")
+    check("intern11", "" + -0 === "0" && "" + (0 - 0.0) === "0")
+    check("intern12", 1024 + 1 === 1025 && 1025 - 1 === 1024)
+    check("intern13", -256 + 0 === -256 && -257 + 0 === -257)
+    check("intern14", "" + (0.1 + 0.2) === "0.30000000000000004")
+    check("intern15", 10 % 3 === 1 && "" + (10 % 0.1) === "0.09999999999999945")
+    // the method-name compare that no longer builds a string per candidate
+    var arr = [3, 1, 2]
+    check("intern16", arr.length === 3 && arr.indexOf(2) === 2)
+    check("intern17", arr.join("-") === "3-1-2" && arr.slice(1).join(",") === "1,2")
+    check("intern18", arr.concat([9]).join(",") === "3,1,2,9")
+    check("intern19", "hello".charAt(1) === "e" && "hello".charCodeAt(0) === 104)
+    check("intern20", "hello".slice(1, 3) === "el" && "hello".substring(0, 2) === "he")
+    check("intern21", "HeLLo".toUpperCase() === "HELLO" && "  x ".trim() === "x")
+    check("intern22", "hello".replace("l", "L") === "heLlo")
+    // a method name used as an ORDINARY key, and a key that is a PREFIX of one
+    var o = {}
+    o["length"] = 5
+    o.push = 1
+    check("intern23", o.length === 5 && o.push === 1)
+    check("intern24", arr["pu"] === undefined && "hello"["cha"] === undefined)
+    check("intern25", [].length === 0 && "".length === 0)
+    // blocks that declare nothing (an empty scope), and captured scopes
+    function mk(k) {
+        var q = 0
+        { { q = k * 2 } }
+        return function () { return q }
+    }
+    check("intern26", mk(21)() === 42 && mk(3)() === 6)
+    var fs = []
+    var j = 0
+    while (j < 5) {
+        (function (v) { fs.push(function () { return v * 1 }) })(j)
+        j = j + 1
+    }
+    var t = 0
+    j = 0
+    while (j < 5) { t = t + fs[j](); j = j + 1 }
+    check("intern27", t === 10)
+    // a NUL inside a string, against the C-literal compare in str_eq_c
+    var z = "ab" + String.fromCharCode(0) + "cd"
+    check("intern28", z.length === 5 && z !== "ab" && z.indexOf("cd") === 3)
+}
+
 function main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -749,6 +827,7 @@ function main() {
     s20() // SECTION-CALL 20
     s21() // SECTION-CALL 21
     s22() // SECTION-CALL 22
+    s23() // SECTION-CALL 23
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

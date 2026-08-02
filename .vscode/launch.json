@@ -1367,6 +1367,30 @@
             "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/lua-to-llvm-ir.abnf", "tests/lua-test-multifile.lua", "-q", "-exe", "tests/lua-native-multi.out"]
         },
         {
+            "name": "Lua allocation benchmark (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-bench-alloc.lua", "-q"]
+        },
+        {
+            "name": "Lua allocation benchmark (compiler, -exe: run tests/bench-alloc.sh for the numbers)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-bench-alloc.lua", "-q", "-exe", "tests/lua-bench-alloc.out"]
+        },
+        {
+            "name": "MetaJS try/catch allocation benchmark (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-bench-try.js", "-q"]
+        },
+        {
+            "name": "MetaJS try/catch allocation benchmark (compiler, -exe: run tests/bench-alloc.sh for the numbers)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-bench-try.js", "-q", "-exe", "tests/metajs-bench-try.out"]
+        },
+        {
             "name": "Lisp native link (compiler, -exe, no runtime: stub + warning)",
             "type": "go",
             "request": "launch",

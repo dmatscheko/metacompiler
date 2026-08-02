@@ -360,9 +360,49 @@ void die(const char *msg) {
 
 long num_bits(long h);      /* forward */
 
-long mk_num(long bits) {
+/* The small-integer cache, indexed by value + 256. It is shared with js_num_i,
+ * which fills the same slots from the raw integer side; see the comment there
+ * for why sharing a number cell is safe (a tag-3 cell is written once, in
+ * mk_num, and every number comparison in this runtime is by BIT PATTERN). */
+long NIC[1281];
+
+/* 0..1024 if these are the bits of a small non-negative integral double, else
+ * -1. Spelled out on the bit pattern rather than via d_is_integral/d_to_long
+ * because mk_num is on the result path of EVERY arithmetic operation: a
+ * non-integer pays one shift, one mask and one compare. +0.0 is bits == 0;
+ * -0.0 has the sign bit and is deliberately NOT cached, because it must keep
+ * printing as -0. */
+long small_int_bits(long bits) {
+	long e;
+	long m;
+	long sh;
+	long one = 1;
+	if (bits == 0) { return 0; }
+	if (bits < 0) { return -1; }                 /* the sign bit */
+	e = (bits >> 52) & 2047;
+	if (e < 1023 || e > 1033) { return -1; }     /* outside [1, 2048) */
+	sh = 1075 - e;
+	m = (bits & 4503599627370495) | 4503599627370496;
+	if ((m & ((one << sh) - 1)) != 0) { return -1; }
+	m = m >> sh;
+	if (m > 1024) { return -1; }
+	return m;
+}
+
+long mk_num_raw(long bits) {
 	long h = cell_new(3);
 	sa(h, bits);
+	return h;
+}
+
+long mk_num(long bits) {
+	long v = small_int_bits(bits);
+	long h;
+	if (v < 0) { return mk_num_raw(bits); }
+	h = NIC[v + 256];
+	if (h != 0) { return h; }
+	h = mk_num_raw(bits);
+	NIC[v + 256] = h;
 	return h;
 }
 long num_bits(long h) { return fa(h); }
@@ -381,6 +421,43 @@ long mk_str(const char *p, long n) {
 	sb(h, n);
 	return h;
 }
+/* js_str_mem is called once per evaluation of every string literal, so the
+ * (pointer, length) pair is cached - the same thing abnf/jsrt.go's strMemCache
+ * does.
+ *
+ * THIS USED TO BE DIRECT-MAPPED ON `p >> 3`, AND IT THRASHED. String literals
+ * are laid out CONTIGUOUSLY in the module, most of them a handful of bytes
+ * long, so `p >> 3` maps every literal inside an eight-byte window onto the
+ * same slot: a module with 236 distinct literals collided its way to 60 MISSES
+ * PER ITERATION of a `s = s + i %% 7` Lua loop (182.7 calls, 600,133 misses over
+ * 10,000 iterations), and each miss is a fresh string cell plus a fresh byte
+ * buffer that the arena never reclaims. Open addressing on the low pointer bits
+ * with linear probing and NO eviction gives exactly one allocation per distinct
+ * literal for the lifetime of the program. The probe is bounded, so a table
+ * that somehow fills degrades to the old behaviour instead of looping. */
+long SMC_PTR[8192];
+long SMC_LEN[8192];
+long SMC_VAL[8192];
+
+long str_intern(const char *p, long n) {
+	long k = (long)p;
+	long slot = (k ^ (k >> 13) ^ (k >> 26)) & 8191;
+	long probes = 0;
+	long h;
+	while (SMC_PTR[slot] != 0 && probes < 64) {
+		if (SMC_PTR[slot] == k && SMC_LEN[slot] == n) { return SMC_VAL[slot]; }
+		slot = (slot + 1) & 8191;
+		probes = probes + 1;
+	}
+	h = mk_str(p, n);
+	if (probes < 64) {
+		SMC_PTR[slot] = k;
+		SMC_LEN[slot] = n;
+		SMC_VAL[slot] = h;
+	}
+	return h;
+}
+
 const char *str_ptr(long h) { return (const char *)fa(h); }
 long str_len(long h) { return fb(h); }
 
@@ -608,6 +685,24 @@ int str_eq(long x, long y) {
 	return 1;
 }
 
+/* str_eq against a C literal, WITHOUT building a string cell for the literal.
+ * method_id_array/method_id_string used to spell every candidate name as
+ * `str_eq_c(name, "push")`, which allocated a cell and a byte buffer per
+ * CANDIDATE on every member lookup of an array or a string - 20 dead string
+ * cells per iteration of the Lua benchmark, and it also defeated str_eq's
+ * identity fast path. A NUL inside the JS string is compared honestly: the
+ * literal ends there, so the answer is false rather than an over-read. */
+int str_eq_c(long x, const char *s) {
+	long n = str_len(x);
+	long i = 0;
+	const char *px = str_ptr(x);
+	while (i < n) {
+		if (s[i] == 0 || px[i] != s[i]) { return 0; }
+		i = i + 1;
+	}
+	return s[n] == 0;
+}
+
 /* -1, 0, 1 by byte order, then by length - Go's string comparison. */
 int str_cmp(long x, long y) {
 	long nx = str_len(x);
@@ -632,10 +727,17 @@ long str_slice(long h, long begin, long end) {
 	return mk_str(p + begin, end - begin);
 }
 
+/* Every mk_cstr argument in this file is a C STRING LITERAL, so its address is
+ * fixed for the life of the process (checked: the only two call sites that pass
+ * a variable, seed_host and seed_root, are themselves called with literals from
+ * boot). It therefore goes through the same literal cache js_str_mem uses, and
+ * `to_string(undefined)`, `typeof x` and the array/string method names stop
+ * allocating a cell and a byte buffer per CALL: 19 dead string cells per
+ * iteration of the Lua benchmark became 0. */
 long mk_cstr(const char *s) {
 	long n = 0;
 	while (s[n] != 0) { n = n + 1; }
-	return mk_str(s, n);
+	return str_intern(s, n);
 }
 
 /* --- growable handle buffers -------------------------------------------- */
@@ -1517,13 +1619,26 @@ long G_ROOT;
  * holds a handful of names (parameters plus a few locals) and scope_put doubles
  * when it does not. Measured on a 2M-iteration Lua loop: the resident set and the
  * system time both fell by about a third. */
+/* A scope now starts EMPTY - capacity 0, no buffers - and scope_put allocates
+ * the first time a name is declared in it.
+ *
+ * The reason is measured. lib/compile-core.js's makeBlockStmt opens a scope for
+ * every BLOCK, not only for every call, so a `s = s + i %% 7` Lua loop through
+ * layer 2 allocated 33 scopes per iteration against 9 calls: roughly three
+ * quarters of them are block scopes that never declare a single name, and each
+ * was paying for three four-slot buffers it never wrote to. An empty scope costs
+ * one 56-byte cell and one arena call instead of four calls and 152 bytes.
+ *
+ * The three buffers are also ONE allocation rather than three: names, values and
+ * type classes are the three consecutive `cap`-sized thirds of a single block,
+ * so a scope that does declare costs two arena calls, not four. */
 long mk_scope(long parent) {
 	long h = cell_new(11);
-	sa(h, (long)buf_new(4));
-	sb(h, (long)buf_new(4));
-	sc(h, (long)buf_new(4));
+	sa(h, 0);
+	sb(h, 0);
+	sc(h, 0);
 	sd(h, 0);
-	se(h, 4);
+	se(h, 0);
 	sf(h, parent);
 	return h;
 }
@@ -1546,10 +1661,19 @@ void scope_put(long s, long name, long v) {
 	if (i >= 0) { vals[i] = v; return; }
 	if (n >= cap) {
 		long nc = cap * 2;
-		if (nc < 8) { nc = 8; }
-		names = buf_grow(names, n, nc);
-		vals = buf_grow(vals, n, nc);
-		tcs = buf_grow(tcs, n, nc);
+		long *base;
+		long k = 0;
+		if (nc < 4) { nc = 4; }
+		base = buf_new(nc * 3);
+		while (k < n) {
+			base[k] = names[k];
+			base[nc + k] = vals[k];
+			base[nc + nc + k] = tcs[k];
+			k = k + 1;
+		}
+		names = base;
+		vals = base + nc;
+		tcs = base + nc + nc;
 		sa(s, (long)names);
 		sb(s, (long)vals);
 		sc(s, (long)tcs);
@@ -1606,28 +1730,28 @@ long mk_bound(long recv, long mid) { long h = cell_new(9); sa(h, recv); sb(h, mi
  *   40..41 function apply call
  */
 long method_id_array(long name) {
-	if (str_eq(name, mk_cstr("push")))    { return 1; }
-	if (str_eq(name, mk_cstr("pop")))     { return 2; }
-	if (str_eq(name, mk_cstr("shift")))   { return 3; }
-	if (str_eq(name, mk_cstr("unshift"))) { return 4; }
-	if (str_eq(name, mk_cstr("reverse"))) { return 5; }
-	if (str_eq(name, mk_cstr("slice")))   { return 6; }
-	if (str_eq(name, mk_cstr("indexOf"))) { return 7; }
-	if (str_eq(name, mk_cstr("join")))    { return 8; }
-	if (str_eq(name, mk_cstr("concat")))  { return 9; }
+	if (str_eq_c(name, "push"))    { return 1; }
+	if (str_eq_c(name, "pop"))     { return 2; }
+	if (str_eq_c(name, "shift"))   { return 3; }
+	if (str_eq_c(name, "unshift")) { return 4; }
+	if (str_eq_c(name, "reverse")) { return 5; }
+	if (str_eq_c(name, "slice"))   { return 6; }
+	if (str_eq_c(name, "indexOf")) { return 7; }
+	if (str_eq_c(name, "join"))    { return 8; }
+	if (str_eq_c(name, "concat"))  { return 9; }
 	return 0;
 }
 long method_id_string(long name) {
-	if (str_eq(name, mk_cstr("charCodeAt")))  { return 20; }
-	if (str_eq(name, mk_cstr("charAt")))      { return 21; }
-	if (str_eq(name, mk_cstr("indexOf")))     { return 22; }
-	if (str_eq(name, mk_cstr("replace")))     { return 23; }
-	if (str_eq(name, mk_cstr("slice")))       { return 24; }
-	if (str_eq(name, mk_cstr("substring")))   { return 25; }
-	if (str_eq(name, mk_cstr("split")))       { return 26; }
-	if (str_eq(name, mk_cstr("toUpperCase"))) { return 27; }
-	if (str_eq(name, mk_cstr("toLowerCase"))) { return 28; }
-	if (str_eq(name, mk_cstr("trim")))        { return 29; }
+	if (str_eq_c(name, "charCodeAt"))  { return 20; }
+	if (str_eq_c(name, "charAt"))      { return 21; }
+	if (str_eq_c(name, "indexOf"))     { return 22; }
+	if (str_eq_c(name, "replace"))     { return 23; }
+	if (str_eq_c(name, "slice"))       { return 24; }
+	if (str_eq_c(name, "substring"))   { return 25; }
+	if (str_eq_c(name, "split"))       { return 26; }
+	if (str_eq_c(name, "toUpperCase")) { return 27; }
+	if (str_eq_c(name, "toLowerCase")) { return 28; }
+	if (str_eq_c(name, "trim"))        { return 29; }
 	return 0;
 }
 
@@ -1661,14 +1785,14 @@ long get_member(long obj, long key) {
 	long idx;
 	if (t == 0 || t == 1) { die3("member '", key, "' of ", obj); }
 	if (tag_of(key) == 4 && is_callable(obj)) {
-		if (str_eq(key, mk_cstr("apply"))) { return mk_bound(obj, 40); }
-		if (str_eq(key, mk_cstr("call")))  { return mk_bound(obj, 41); }
+		if (str_eq_c(key, "apply")) { return mk_bound(obj, 40); }
+		if (str_eq_c(key, "call"))  { return mk_bound(obj, 41); }
 	}
 	if (t == 6) { return obj_get(obj, to_string(key)); }
 	if (t == 5) {
 		if (tag_of(key) == 4) {
 			long mid;
-			if (str_eq(key, mk_cstr("length"))) { return mk_num(d_from_long(arr_len(obj))); }
+			if (str_eq_c(key, "length")) { return mk_num(d_from_long(arr_len(obj))); }
 			mid = method_id_array(key);
 			if (mid != 0) { return mk_bound(obj, mid); }
 		}
@@ -1680,7 +1804,7 @@ long get_member(long obj, long key) {
 	if (t == 4) {
 		if (tag_of(key) == 4) {
 			long mid;
-			if (str_eq(key, mk_cstr("length"))) { return mk_num(d_from_long(str_ulen(obj))); }
+			if (str_eq_c(key, "length")) { return mk_num(d_from_long(str_ulen(obj))); }
 			mid = method_id_string(key);
 			if (mid != 0) { return mk_bound(obj, mid); }
 		}
@@ -1699,7 +1823,7 @@ void set_member(long obj, long key, long val) {
 	if (t == 0 || t == 1) { die3("member assignment '", key, "' on ", obj); }
 	if (t == 6) { obj_put(obj, to_string(key), val); return; }
 	if (t == 5) {
-		if (tag_of(key) == 4 && str_eq(key, mk_cstr("length"))) {
+		if (tag_of(key) == 4 && str_eq_c(key, "length")) {
 			long n = to_number(val);
 			long ln;
 			if (!d_is_integral(n) || d_sign(n)) { die2("invalid array length ", val); }
@@ -1923,8 +2047,21 @@ long fmt_sprint(long args) {
 
 long mk_ctl(long kind, long value) { long h = cell_new(10); sa(h, kind); sb(h, value); return h; }
 
+/* One jmp_buf per DEPTH, allocated once and reused. It used to be a fresh
+ * malloc(512) per js_try - three of them for a try/catch/finally - and nothing
+ * ever frees it, so a `try { throw } catch {} finally {}` in a loop leaked about
+ * 1.5 KB per iteration: 200,000 of them cost 499 MB, of which this was 261 MB.
+ * A buffer at depth d is only live while JB_DEPTH > d, and js_try restores
+ * JB_DEPTH before it returns, so two try statements at the same depth are
+ * sequential and can share the buffer. THE SETJMP MUST STILL BE DONE ONCE PER
+ * ENTRY - only the storage is reused. */
 long JB[512];
 long JB_DEPTH;
+
+long jb_at(long d) {
+	if (JB[d] == 0) { JB[d] = (long)malloc(512); }
+	return JB[d];
+}
 long THROWN;
 
 long js_throw(long v);
@@ -2717,8 +2854,7 @@ long js_try(long tryC, long catchC, long finC) {
 	long buf;
 	int hasCatch = is_callable(catchC);
 	int hasFin = is_callable(finC);
-	buf = (long)malloc(512);
-	JB[JB_DEPTH] = buf;
+	buf = jb_at(JB_DEPTH);
 	JB_DEPTH = JB_DEPTH + 1;
 	if (setjmp((void *)buf) == 0) {
 		result = js_call(tryC, H_UNDEF, mk_arr());
@@ -2732,9 +2868,8 @@ long js_try(long tryC, long catchC, long finC) {
 		long a = mk_arr();
 		arr_push(a, pending);
 		havePending = 0;
-		buf = (long)malloc(512);
-		JB[JB_DEPTH] = buf;
-		JB_DEPTH = JB_DEPTH + 1;
+		buf = jb_at(JB_DEPTH);
+			JB_DEPTH = JB_DEPTH + 1;
 		if (setjmp((void *)buf) == 0) {
 			result = js_call(catchC, H_UNDEF, a);
 			JB_DEPTH = mydepth;
@@ -2746,9 +2881,8 @@ long js_try(long tryC, long catchC, long finC) {
 	}
 	if (hasFin) {
 		long fres = H_UNDEF;
-		buf = (long)malloc(512);
-		JB[JB_DEPTH] = buf;
-		JB_DEPTH = JB_DEPTH + 1;
+		buf = jb_at(JB_DEPTH);
+			JB_DEPTH = JB_DEPTH + 1;
 		if (setjmp((void *)buf) == 0) {
 			fres = js_call(finC, H_UNDEF, mk_arr());
 			JB_DEPTH = mydepth;
@@ -2769,25 +2903,29 @@ long js_try(long tryC, long catchC, long finC) {
 
 long RETSLOT;
 
-/* js_str_mem is called once per evaluation of every string literal, so the
- * (pointer, length) pair is cached - the same thing abnf/jsrt.go's strMemCache
- * does. Direct-mapped, and a miss just re-creates the string. */
-long SMC_PTR[1024];
-long SMC_LEN[1024];
-long SMC_VAL[1024];
+/* js_str_mem is the string-literal cache; str_intern, next to mk_str above, is
+ * the whole of it. */
+long js_str_mem(const char *p, long n) { return str_intern(p, n); }
 
-long js_str_mem(const char *p, long n) {
-	long slot = ((long)p >> 3) & 1023;
+/* Small-integer cache. js_num_i is how EVERY numeric literal in the emitted IR
+ * becomes a value, and layer 2 is full of them - operator indices, 0, 1, 2, the
+ * bit widths - so it ran 58.7 times per iteration of the Lua benchmark, each one
+ * a fresh 56-byte cell the arena never reclaims. A number cell is written once,
+ * in mk_num, and never mutated (checked: no other sa/sb/... touches a tag-3
+ * cell), and every number comparison in the runtime is by BIT PATTERN, never by
+ * handle identity - so one shared cell per small integer is indistinguishable
+ * from a fresh one. -256..1024 covers the literals a compiled module emits. */
+long js_num_i(long v) {
 	long h;
-	if (SMC_PTR[slot] == (long)p && SMC_LEN[slot] == n) { return SMC_VAL[slot]; }
-	h = mk_str(p, n);
-	SMC_PTR[slot] = (long)p;
-	SMC_LEN[slot] = n;
-	SMC_VAL[slot] = h;
-	return h;
+	if (v >= -256 && v <= 1024) {
+		h = NIC[v + 256];
+		if (h != 0) { return h; }
+		h = mk_num(d_from_long(v));
+		NIC[v + 256] = h;
+		return h;
+	}
+	return mk_num(d_from_long(v));
 }
-
-long js_num_i(long v)   { return mk_num(d_from_long(v)); }
 long js_num_str(long h) { return mk_num(str_to_num(h)); }
 long js_obj_new(void)   { return mk_obj(); }
 long js_arr_new(void)   { return mk_arr(); }
@@ -3057,8 +3195,7 @@ int main(void) {
 	long r;
 	long buf;
 	boot();
-	buf = (long)malloc(512);
-	JB[0] = buf;
+	buf = jb_at(0);
 	JB_DEPTH = 1;
 	if (setjmp((void *)buf) != 0) {
 		long s = to_string(THROWN);

@@ -57,10 +57,10 @@ integers and raw memory**. C is the one we already have a working native compile
 
 ## Invariants - none of these may regress at any checkpoint
 
-(The figures are the ones current after phase 4; the parenthesised ones are what the
+(The figures are the ones current after phase 4a; the parenthesised ones are what the
 plan was written against.)
 
-- matrix **321/321** (was 308), byte-identical stdout **and stderr** between goja and
+- matrix **325/325** (was 308), byte-identical stdout **and stderr** between goja and
   `-frozen`
 - `--full` ratchet **5,258 assertions** (was 4,822), no language whose halves disagree
 - `--cross` **119/0**
@@ -778,7 +778,9 @@ stderr and exits 1, which is what the Go side does at the program boundary.
   flag with no `-exe` entry in the matrix, so nothing regressed; splitting the derived
   13 into a second `.ll` would fix it when it is wanted.
 - **No GC.** The arena leaks by construction. A long-running MetaJS program will grow
-  without bound; every test program here allocates a few megabytes at most.
+  without bound; every test program here allocates a few megabytes at most. Phase 4a
+  measured the rate and cut it 2.58x; the residual is still exactly linear, and the
+  design for a collector is recorded there.
 - **`jsdispatch` is a linear compare chain.** O(number of functions) per call. It did not
   show up in the benchmark above, but a program with thousands of functions would want a
   binary search or a real table.
@@ -1041,10 +1043,227 @@ The first working build was **497s** on this benchmark. Four changes brought it 
 Both remaining costs have obvious next steps, neither taken here: the arena has no
 GC (Risk 3, and at ~19 KB per loop iteration it is far more acute for layer 2 than
 it was for MetaJS alone), and the emitter could inline the layer-2 fast paths into
-the IR instead of calling into MetaJS for them.
+the IR instead of calling into MetaJS for them. **Phase 4a took the first of these
+apart and found that most of the 19 KB was not layer 2 at all** - see below; the
+figure is now 7,006 bytes, and the second next step is still open.
 
 **Gate:** `tests/lua-test-full.lua` runs as a native binary and agrees byte-for-byte
 with `llvm.Run`; lua is in clang-check's run-natively row. **Met.**
+
+## Phase 4a - where the memory actually goes - DONE (2026-08-02)
+
+Phase 4 left the native Lua binary at **18,072 bytes per loop iteration**, growing
+without bound. "No GC" explains *unbounded*; it does not explain **320 cells for one
+`s + i % 7`**. This phase measured which it was before changing anything, and the
+answer was that most of it was neither GC nor layer 2. Six things came out of it: three
+are plain defects in `runtime.c` that any allocation counter would have found on day
+one and nobody had looked for, two are structural reductions, and one is a leak on the
+exception path.
+
+### How it was measured
+
+`ar_alloc` was instrumented directly - a counter per allocating function, a byte total,
+and a report written to stderr at the end of `main` - in a COPY of `runtime.c` compiled
+by `c-to-llvm-ir.abnf` into a `.ll` linked with `-rt`, so the checked-in runtime was
+never touched. The benchmark was run at 10,000 and 20,000 iterations and the two
+subtracted, which removes the constant boot cost and leaves the exact per-iteration
+figure. The instrumented tree is not committed; `tests/bench-alloc.sh` reproduces the
+totals from the outside, which is what matters, because **the arena is never freed and
+therefore peak RSS divided by the iteration count IS bytes allocated per operation** -
+no profiler, no sampling.
+
+### The breakdown, `s = s + i % 7`, per iteration
+
+```
+                        HEAD 4eea0cf     after      what it is
+ar_alloc calls                397.7       106
+ar_alloc bytes             17,997.7     6,976
+  number cells (tag 3)         78.7        26      one cell per intermediate
+  string cells (tag 4)         80.0         0      <- 60 of them were a CACHE MISS
+  array  cells (tag 5)         12.0        12      one argument array per call
+  scope  cells (tag 11)        33.0        33      one per CALL and per BLOCK
+  buf_new calls               113.0        34
+  buf_new bytes             3,616.0     2,368
+  js_str_mem calls            182.7     201.7
+  js_str_mem misses            60.0         0
+  mk_cstr calls                20.0        19      (now interned, 0 allocations)
+  js_call calls                 9.0         9
+```
+
+**Three defects, all in `runtime.c`, none of them structural:**
+
+1. **The string-literal cache was thrashing.** `js_str_mem` was direct-mapped on
+   `p >> 3`. String literals are laid out CONTIGUOUSLY in the module and most are a
+   handful of bytes long, so `p >> 3` maps every literal inside an eight-byte window
+   onto the same slot. The module has **236 distinct literals and 1,024 slots** and
+   still missed **60 times per iteration** - 600,133 misses over 10,000 iterations,
+   each a fresh string cell plus a fresh byte buffer. Now open addressing with linear
+   probing and no eviction (bounded probe, so a full table degrades instead of
+   looping): **60 misses per iteration became 0**, and 150 for the whole program.
+2. **`method_id_array`/`method_id_string` allocated a string per CANDIDATE.** Every
+   member lookup on an array or a string ran up to ten `str_eq(name, mk_cstr("push"))`,
+   each building a cell and a byte buffer - and defeating `str_eq`'s identity fast path
+   on the way. Replaced by `str_eq_c`, which compares against the C literal directly.
+3. **`mk_cstr` allocated on every call.** Its argument is always a C string literal
+   (checked: the only two call sites that pass a variable, `seed_host` and `seed_root`,
+   are themselves called with literals from `boot`), so it now goes through the same
+   literal cache. `to_string(undefined)`, `typeof x` and the method names stop
+   allocating: **19 string cells per iteration became 0**.
+
+**Two structural reductions:**
+
+4. **A scope starts EMPTY.** `lib/compile-core.js`'s `makeBlockStmt` opens a scope for
+   every BLOCK, not only for every call - 33 scopes against 9 calls per iteration, so
+   roughly three quarters of them are block scopes that never declare a name. Each was
+   paying for three four-slot buffers it never wrote to. `scope_put` now allocates on
+   the first declaration, and allocates the names/values/type-classes buffers as the
+   three thirds of ONE block instead of three: a scope that declares costs two arena
+   calls instead of four, and one that does not costs one instead of four.
+5. **A small-integer cache on `mk_num`/`js_num_i`.** Every numeric literal in the
+   emitted IR is a `js_num_i` call and layer 2 is full of them (58.7 per iteration);
+   `mk_num` is the result path of every arithmetic operation. A tag-3 cell is written
+   once and never mutated - checked, no other `sa`/`sb`/... touches one - and every
+   number comparison in the runtime is by BIT PATTERN, never by handle identity, so one
+   shared cell per small integer is indistinguishable from a fresh one. -0.0 is
+   deliberately excluded, because it has to keep printing as `-0`. Number cells fell
+   78.7 -> 26. This is the SMALLEST of the five: measured on its own it was -5% memory
+   and time within noise (2.01-2.05s against 2.04-2.07s), kept because it is a strict
+   reduction and it will matter more for integer-heavy programs.
+
+**And one leak on the exception path:**
+
+6. **The `jmp_buf` is pooled per depth.** `js_try` did `malloc(512)` per ENTRY - three
+   of them for a try/catch/finally - and nothing frees it. A buffer at depth `d` is only
+   live while `JB_DEPTH > d` and `js_try` restores `JB_DEPTH` before returning, so two
+   try statements at the same depth are sequential and share the buffer. The `setjmp` is
+   still done once per entry; only the storage is reused.
+
+### The two hypotheses in the brief, checked rather than assumed
+
+- **The abandoned chunk tail is NOT a factor.** `ar_alloc` does drop the tail of a chunk
+  on overflow, but measured: 65 chunks for 69,032,368 requested bytes is 1,062,036 bytes
+  per 1,048,576-byte chunk - the tail waste is under half a percent, because the largest
+  allocation on this path is 96 bytes. Nothing was changed here.
+- **The `malloc(512)` sites ARE hot, but only on the exception path.** All four are
+  `js_try`/`main` jump buffers; the arithmetic benchmark calls them zero times. A
+  try/catch/finally loop is a different story, and that is item 6 above.
+
+### Ground truth
+
+Both figures come from a clean archive with its own binary run in its own tree, per the
+measurement trap recorded in phase 3a - `tests/bench-alloc.sh` copied into
+`/tmp/headtree` after `git archive 4eea0cf`, never the working tree's grammar.
+
+```
+                                    HEAD 4eea0cf        phase 4a
+lua, s = s + i % 7, 200k iters       2.75s / 3447 MB    2.41s / 1336 MB
+  bytes per iteration                    18,072            7,006     (2.58x less)
+  ar_alloc calls per iteration              397.7            106     (3.75x fewer)
+metajs, try/catch/finally, 200k       0.76s /  652 MB    0.70s /  246 MB
+llvm.Run (the Go runtime), same       0.51s /  201 MB    0.50s /  205 MB
+real lua 5.5                          0.02s /    1 MB
+```
+
+```
+matrix                325/325   (321 + four benchmark entries)
+--full                5,286 assertions, 0 languages whose halves disagree
+                        (metajs 298 -> 326: the new interning section)
+--cross               119 programs, 0 divergent
+clang-check           16/16, bash batch c lua metajs all "the clang executable agrees"
+go test ./abnf/       ok
+jsbootstrap.ll        regenerates byte-identically from source
+gen-runtime-ll.sh --check    runtime.ll is up to date (36656 lines)
+gen-lua-rt-ll.sh --check     lua-rt.ll  is up to date (12067 lines)
+```
+
+Every Lua and MetaJS program in `tests/`, `llvm.Run` against the native binary, stdout
+and stderr: all identical.
+
+### What pins it
+
+**`tests/metajs-test-full.js` SECTION 23, 28 assertions** - exactly what sharing a cell
+could break: repeated string literals compared by `===`, `typeof` and the string
+coercions, all 1,031 integers from 0 to 1030 round-tripped through `* 1`, `-0` and its
+sign, `1 / -0`, `0.1 + 0.2`, `10 % 0.1`, every array and string method name, an object
+with `length` and `push` as ORDINARY keys, a key that is a PREFIX of a method name,
+nested blocks that declare nothing, five closures capturing a loop variable, and a NUL
+inside a string compared against a C literal. `./test.sh` is structurally blind to all
+of it - both of its engines are the Go runtime - so the section earns its place by
+being run as a NATIVE BINARY by `tests/clang-check.sh`.
+
+Stated plainly, because it is the honest shape of this kind of ratchet: **the section is
+green against a clean archive of 4eea0cf too** (measured: `full: 326 checks, 0
+failures`). It is a regression pin, not a red-then-green proof. The proof that the
+change did anything is the RSS table above; the proof that it changed no ANSWER is that
+the native binary is byte-identical to the one built from that archive on every Lua and
+MetaJS program in `tests/` and on this section.
+
+### And the residual is still exactly linear - so the GC question is now unavoidable
+
+```
+iters=50000      rss=351289344      bytes/iter=7025
+iters=100000     rss=701513728      bytes/iter=7015
+iters=200000     rss=1401782272     bytes/iter=7008
+iters=400000     rss=2802483200     bytes/iter=7006
+```
+
+7,006 bytes per iteration, forever. What is left is no longer waste - it is live data
+that simply is never reclaimed:
+
+```
+33 scope cells      1,848 B   one per call AND one per block (makeBlockStmt)
+20 scope buffers    1,920 B   the scopes that do declare something
+26 number cells     1,456 B   intermediates outside the small-integer window
+12 array cells +    1,056 B   the argument array of every call
+   their buffers
+ 1 object cell        120 B
+```
+
+**A program that runs for a minute cannot be made to work by allocating less.** Two
+directions, and they are not alternatives - the first reduces the garbage, the second
+reclaims it:
+
+1. **Stop generating the garbage in the emitter.** Three of the five lines above exist
+   because a Lua `+` is a MetaJS CALL. `makeBlockStmt` opening a scope for a block that
+   declares nothing is pure waste and is fixable in `lib/compile-core.js` alone (the
+   difficulty is that the thunk has already been emitted by the time you know); and
+   phase 4's own note - "the emitter could inline the layer-2 fast paths into the IR
+   instead of calling into MetaJS for them" - would remove the call, its scope, its
+   argument array and its intermediates in one move. That is also where the remaining
+   4.8x of TIME against the Go runtime is: phase 4 measured the inline fast path as
+   497s -> 29.5s, the single biggest win of that phase.
+
+2. **A GC, and the cheapest correct one here is mark/sweep over the arena, not
+   refcounting.** Recorded as a design, not started, because the measurement above is
+   what justifies it and the measurement is this phase's deliverable:
+
+   - **Refcounting is the wrong shape for this runtime.** A scope holds its parent and
+     a closure holds its scope, so a closure that refers to its own defining scope is a
+     cycle - and that is the common case, not a corner. Refcounting also puts a
+     read-modify-write on `js_get`/`js_set`/`js_arg`/every assignment, which is the
+     hottest code in the module.
+   - **The roots are already enumerable, which is the part that usually blocks this.**
+     They are: `G_ROOT`, the `NIC` small-integer table, the `SMC_VAL` literal table,
+     `THROWN`, `RETSLOT`, the layer-2 library scope global, and the live C frames. The
+     last one is the only real work: the emitted IR keeps its handles in SSA registers
+     and `alloca` slots that a C collector cannot see, so the emitter has to maintain a
+     **shadow stack** - a per-function frame of handle slots pushed in the prologue and
+     popped at every return - exactly the mechanism phase 3's control-signal protocol
+     already proves is expressible (`compile-core.js` already emits a prologue and
+     already threads `js_ctl_*` through every return path).
+   - **The heap is walkable without a header.** Every cell is the same 56 bytes from a
+     bump arena, so a chunk is an array of cells: a mark bit can live in the spare high
+     bits of `Cell.tag`, and sweeping is a linear walk that threads free cells onto a
+     free list which `cell_new` checks before bumping. The raw `buf_new` blocks are the
+     one complication - they are NOT cells, so they need either a header word or a
+     separate size-class arena.
+   - **Cost, honestly:** the shadow stack is a per-call store of every live handle, and
+     phase 4 already measured that a guard cheap enough to look free can cost more than
+     the arithmetic it guards. It should be measured on `tests/bench-alloc.sh` before
+     any of it is believed.
+
+   **Do direction 1 first.** It is smaller, it is where the time is as well as the
+   memory, and every allocation it removes is one the collector then never has to trace.
 
 ## Phase 5 - roll out
 
@@ -1100,6 +1319,12 @@ Python, Java, Perl and Ruby capture `""`. Unifying them would break three langua
    problem dissolving rather than moving. It is also the main slowdown.
 3. **No GC.** An arena leaks. Fine for compile-and-run tests, not for long-running
    programs. Decide explicitly whether to ship refcounting later or accept the limit.
+   **Decided in phase 4a, with numbers:** refcounting is the WRONG shape (a closure
+   referring to its own defining scope is a cycle, and it is the common case), and the
+   residual after the allocation work is 7,006 bytes per loop iteration and exactly
+   linear, so the limit cannot simply be accepted either. The cheapest correct option
+   is mark/sweep over the arena with a shadow stack for the C frames; the design and
+   its cost are written up in phase 4a.
 4. **The `-frozen` subset binds layer 2.** The MetaJS runtime must itself run under the
    frozen bootstrap: no `for...in`, no `splice`, `array.length` not assignable, a
    reassigned parameter *or local* keeps its first type, no `split`/`join`, no exponent
