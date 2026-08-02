@@ -1693,10 +1693,7 @@ KwDefault   = "default" KwEnd ;
     // Pack a callee's result into the trampoline's i32* result, and unpack it again at
     // the call site. Both directions are exact: a pointer is bitcast, an i32 is
     // sign-extended to the pointer's 64 bits and truncated back.
-    function icallBox(b, v) {
-        if (llvm.types.IsPointer(v.Type())) return b.NewBitCast(v, i32p)
-        return b.NewIntToPtr(llIs64(v) ? v : b.NewSExt(v, llvm.types.I64), i32p)
-    }
+    function icallBox(b, v) { return ptrOperand(b, v) }
     function icallUnbox(b, v) { return b.NewTrunc(b.NewPtrToInt(v, llvm.types.I64), i32) }
     // Unpack one boxed argument into the type the callee actually declares: a pointer
     // parameter takes the box itself, a 64-bit one its full integer value (which is how
@@ -1933,6 +1930,26 @@ KwDefault   = "default" KwEnd ;
                 var cv = convertNum(ct, r.cv)
                 return {b: r.b, v: (ct.k == "flt") ? zero : kint(cv | 0), ct: ct, cv: cv}
             }
+            // Pointer <-> integer is ptrtoint / inttoptr; LLVM has no sext from a
+            // pointer, and emitConv would emit exactly that. The opcode is chosen from
+            // the C TYPE DESCRIPTORS and never from the emitted LLVM type, because this
+            // compiler models every pointer as i32* - so the LLVM type cannot tell a
+            // 'long' apart from an 'int' the way ct.w can, and a value that is already
+            // an integer register (the folded 0 of '(char *)0') must not be ptrtoint'd.
+            // The ct descriptor is authoritative, but it can UNDERSTATE a pointer: a
+            // call reports its result as ctInt unless the callee returns a wide
+            // integer (emitDirectCall / funcRetCt), so 'void *malloc()' hands back an
+            // i32* value carrying ct "int". Hence each direction also accepts a value
+            // that already sits in a pointer register.
+            var vIsPtr = llvm.types.IsPointer(r.v.Type())
+            if (ct.k == "int" && (isPtrLike(fct) || vIsPtr)) {
+                var pi = r.b.NewPtrToInt(ptrOperand(r.b, r.v), llvm.types.I64)
+                return {b: r.b, v: emitConv(r.b, ct, pi, ctI(8, false)), ct: ct}
+            }
+            if (isPtrLike(ct)) {
+                if (vIsPtr || isPtrLike(fct)) return {b: r.b, v: ptrOperand(r.b, r.v), ct: ct}
+                if (fct.k == "int") return {b: r.b, v: ptrOperand(r.b, emitWiden(r.b, r.v, fct.u == true, true)), ct: ct}
+            }
             if (isFlt(ct)) return {b: r.b, v: fltOperand(r.b, r, ct), ct: ct}
             if (isFlt(fct)) return {b: r.b, v: emitConv(r.b, ct, emitD2I(r.b, dblOf(r.b, r)), ctI(8, false)), ct: ct}
             return {b: r.b, v: emitConv(r.b, ct, r.v, fct), ct: ct}
@@ -2010,6 +2027,18 @@ KwDefault   = "default" KwEnd ;
     var ctFn = {k: "fnp"}
     var structs = {}
     function isFlt(ct) { return ct.k == "flt" }
+    // The C types whose VALUE is a machine address, and so whose conversions to and
+    // from an integer are ptrtoint / inttoptr. "fnp" is deliberately NOT one of them:
+    // a function-pointer cell holds a funcId, an ordinary i32, not an address.
+    function isPtrLike(ct) { return ct.k == "ptr" || ct.k == "arr" }
+    // Normalize a value into the uniform i32* every pointer is modelled as: a pointer
+    // is re-labelled, an integer becomes an address (sign-extended first if it is
+    // still in a 32-bit register, so a negative int names the same address it would
+    // in a 64-bit one).
+    function ptrOperand(b, v) {
+        if (llvm.types.IsPointer(v.Type())) return b.NewBitCast(v, i32p)
+        return b.NewIntToPtr(llIs64(v) ? v : b.NewSExt(v, llvm.types.I64), i32p)
+    }
     function pointeeOf(ct) { return ct.k == "ptr" ? ct.p : (ct.k == "arr" ? ct.e : undefined) }
     // Truncation towards zero, which is what C's integer conversions and its
     // float-to-integer conversion both do.

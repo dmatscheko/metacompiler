@@ -997,21 +997,84 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 	"BuildExecutable": buildExecutable,
 }
 
-// libcExterns are the external functions the IR interpreter implements and that clang
-// resolves from the C runtime; every OTHER declared-but-undefined function is a
+// libcExterns are the external functions clang resolves from the real C runtime, so
+// they must NOT be stubbed; every OTHER declared-but-undefined function is a
 // user/language function with no linkable symbol (e.g. a lisp form that references a
 // never-defined name inside a short-circuit) and would make clang fail at link time.
-var libcExterns = map[string]bool{"putchar": true, "getchar": true, "puts": true, "abs": true}
+//
+// This list was `{putchar, getchar, puts, abs}` until 2026-08-02, which meant that
+// `malloc` got a null-returning STUB: a C program that allocated built successfully
+// under -exe and segfaulted on its first field write, while the identical module
+// handed straight to clang printed the right answer. Same failure class as bash's
+// rt_regex_search - a missing symbol became a wrong answer instead of a link error.
+//
+// THE BAR FOR ADDING A NAME HERE is that the C model can implement it CORRECTLY, not
+// merely consistently. Two conditions, both required:
+//
+//  1. clang's real symbol must answer what cc answers for the same source, given the
+//     way languages/c-to-llvm-ir.abnf lays memory out.
+//  2. libcNative (below) must implement it too, so `llvm.Run` and the clang-built
+//     binary agree. A name listed for clang ALONE reintroduces exactly the divergence
+//     -exe exists to close.
+//
+// A name that fails either condition is deliberately left OFF, which makes it loud on
+// both sides: `llvm.Run` panics naming the function (externHandler) and -exe warns on
+// stderr naming the symbol before linking a zero stub (stubUndefined). Loud-and-absent
+// beats listed-and-wrong every time; a silently wrong answer is the single defect class
+// this project most wants surfaced, and byte-identity between the two engines is exactly
+// the invariant that cannot see it.
+//
+// MEASURED 2026-08-02 - why the whole str*/mem* family is NOT here, and why atoi/atol
+// and strdup are not either. languages/c-to-llvm-ir.abnf gives `char` a FOUR-byte cell:
+// machBytes() returns 4 for every integer narrower than a long, so "hello" is emitted as
+// `[6 x i32]` and a byte-oriented strlen stops at the first padding NUL. For
+//
+//	extern unsigned long strlen(const char *s);
+//	int main(void) { putchar('0' + (int)strlen("hello")); putchar('\n'); return 0; }
+//
+//	llvm.Run   ==> Fail / IR interpreter: call to undefined external function @strlen
+//	-exe       warning: no definition for strlen ...  then prints 0 from the stub
+//	real cc    5                                       <- the oracle
+//
+// Listing strlen (and implementing it in libcNative) made BOTH engines print 1 - silent,
+// agreeing, and wrong. That is strictly worse than the loud state above, so it was
+// reverted. Do not re-derive it. atoi("42") fails the same way: the model reads '4', 0
+// and stops, answering 4 where cc answers 42.
+//
+// Widening `char` to a real byte in c-to-llvm-ir.abnf is the PREREQUISITE for listing
+// this family, and it is a separate change to that grammar - not a change here. Note
+// that `puts` is byte-oriented too and predates this bar; it is left as it was rather
+// than silently narrowed, and it is on the same hook as the rest.
+//
+// Also deliberately absent, condition 2: the varargs printf family (printf, fprintf,
+// sprintf, snprintf, fwrite, fputs, putc, fputc), exit, abort, qsort and bsearch. See
+// libcNative for why the interpreter cannot implement each of them; clang could link
+// them, and that is precisely the divergence condition 2 forbids.
+var libcExterns = map[string]bool{
+	// stdio / stdlib character and integer primitives, all pre-existing.
+	"putchar": true, "getchar": true, "puts": true, "abs": true,
+	// The allocator. Address-based, so the four-byte `char` cell does not reach it:
+	// sizes come from sizeof over structs and wide integers, which ctBytes() and
+	// machBytes() agree on. This is the family Phase 0 exists for.
+	"malloc": true, "calloc": true, "realloc": true, "free": true,
+	// Pure integer arithmetic, so it cannot be affected by the memory model at all.
+	"labs": true,
+}
 
 // stubUndefined gives every declared-but-undefined non-libc function a trivial body
-// (return the zero value of its result type) so the module links. These stubs are only
-// reached if such a function is actually called - which the IR interpreter would reject
-// too - so a program that never calls them behaves identically to `llvm.Run`.
+// (return the zero value of its result type) so the module links, and WARNS on stderr
+// naming each one. The stub exists for a language-level function that has no linkable
+// symbol at all - a lisp form referencing a never-defined name inside a short-circuit
+// is the case it was written for - and reaching one at run time yields a zero that no
+// diagnostic would otherwise explain, so the warning is the only thing standing between
+// a missing symbol and a silently wrong answer.
 func stubUndefined(m *ir.Module) {
 	for _, f := range m.Funcs {
 		if len(f.Blocks) > 0 || libcExterns[f.Name()] {
 			continue
 		}
+		fmt.Fprintln(warnWriter, "warning: no definition for "+f.Name()+
+			"; linking a stub that returns zero, so a call to it answers 0/null")
 		blk := f.NewBlock("")
 		switch rt := f.Sig.RetType.(type) {
 		case *types.IntType:
@@ -1156,6 +1219,12 @@ type machine struct {
 	relThru map[string]uint32 // Per extern, the argument positions whose handle it only READS (see jsThroughArgs).
 	release func(h uint64)    // Drops the value behind a handle that provably went dead.
 	pin     func(h uint64)    // Marks an argument array the callee can keep past the call.
+
+	// heapSize records the byte size handed out by each malloc/calloc/realloc, which
+	// is the one thing realloc needs and the flat arena does not otherwise remember.
+	// free() is a no-op here on purpose: the arena never reuses memory, so freeing
+	// cannot produce a dangling reuse that the native binary would not also produce.
+	heapSize map[uint64]uint64
 }
 
 // funcLayout is the decoded program of one function: every value the function
@@ -2242,6 +2311,96 @@ func (ma *machine) bindExterns() {
 	}
 }
 
+// ----- The C standard library, natively, for the IR interpreter -----
+//
+// libcExterns (above) is the set clang links against for real, and every name in it is
+// implemented here as well - that is condition 2 of the bar documented at libcExterns,
+// and it is the only reason -exe can be trusted: a module has to run the same way under
+// `llvm.Run` and as a clang-built binary.
+//
+// The converse also holds: nothing is implemented here that is not in libcExterns.
+// Adding an implementation here alone would make `llvm.Run` answer where -exe stubs a
+// zero, which is the same divergence pointing the other way.
+//
+// Names deliberately absent from BOTH, and therefore a loud panic under `llvm.Run`
+// naming the function (externHandler) plus a loud stderr warning under -exe:
+//   - the whole str*/mem* family, atoi/atol, strdup: the four-byte `char` cell. See the
+//     measurement at libcExterns; implementing them here made both engines agree on a
+//     wrong answer, which is worse than either engine failing loudly.
+//   - printf / fprintf / sprintf / snprintf / fwrite / fflush / putc / fputc / fputs:
+//     varargs and FILE* streams. The interpreter has no varargs ABI at all - the
+//     argument list it receives is already flattened to uint64 with no type tags - so a
+//     format string could not be walked correctly, and an approximation that got %ld
+//     wrong would be exactly the "wrong answer instead of an error" this change is
+//     about. Use putchar/puts under llvm.Run.
+//   - exit / abort: the interpreter has no unwind path out of ma.call, so these would
+//     have to fake a return, which is not what they mean.
+//   - qsort / bsearch: they call back through a function pointer, and in the C model a
+//     function pointer is a funcId in an i32, not an address the machine can call.
+//   - getenv / time / rand and friends: not reproducible, so never byte-identical.
+
+// memAt bounds-checks a slice of the machine's arena. It returns nil for a null or
+// out-of-range address, which the caller treats as "do nothing" rather than panicking -
+// the same tolerance rxPtrCStr already applies.
+func (ma *machine) memAt(addr, n uint64) []byte {
+	if addr == 0 || addr >= uint64(len(ma.mem)) || addr+n > uint64(len(ma.mem)) {
+		return nil
+	}
+	return ma.mem[addr : addr+n]
+}
+
+// heapAlloc is malloc: a bump allocation out of the same arena the allocas use. It can
+// never answer 0, because newMachine reserves offset 0 as null.
+func (ma *machine) heapAlloc(size uint64) uint64 {
+	if size == 0 {
+		size = 1 // malloc(0) must still return a distinct, non-null pointer.
+	}
+	addr := ma.alloc(size)
+	if ma.heapSize == nil {
+		ma.heapSize = map[uint64]uint64{}
+	}
+	ma.heapSize[addr] = size
+	return addr
+}
+
+// libcNative returns the interpreter's implementation of one libc name, or nil if the
+// name is not one it implements (see the list of exclusions above).
+func libcNative(ma *machine, name string) func(args []uint64) uint64 {
+	switch name {
+	case "malloc":
+		return func(args []uint64) uint64 { return ma.heapAlloc(args[0]) }
+	case "calloc":
+		// The arena is zeroed by alloc(), so calloc is malloc of the product.
+		return func(args []uint64) uint64 { return ma.heapAlloc(args[0] * args[1]) }
+	case "realloc":
+		return func(args []uint64) uint64 {
+			old, size := args[0], args[1]
+			nw := ma.heapAlloc(size)
+			if old != 0 {
+				n := ma.heapSize[old]
+				if n > size {
+					n = size
+				}
+				if src := ma.memAt(old, n); src != nil {
+					copy(ma.mem[nw:nw+n], src)
+				}
+			}
+			return nw
+		}
+	case "free":
+		return func(args []uint64) uint64 { return 0 } // See heapSize: the arena never reuses.
+	case "labs":
+		return func(args []uint64) uint64 {
+			v := int64(args[0])
+			if v < 0 {
+				v = -v
+			}
+			return uint64(v)
+		}
+	}
+	return nil
+}
+
 // resolveExtern finds the handler for one external function by name, or nil if the name is
 // not known at all. The host functions of the attached runtime win over the built-in ones.
 // getchar() reads from the input given to run() and returns 0 at its end.
@@ -2256,6 +2415,9 @@ func (ma *machine) resolveExtern(f *ir.Func) func(args []uint64) uint64 {
 	// a runtime's extern table because a grammar with no handle runtime - bash, batch -
 	// runs with ma.externs == nil and never reaches one.
 	if fn := nativeExtern(ma, name); fn != nil {
+		return fn
+	}
+	if fn := libcNative(ma, name); fn != nil {
 		return fn
 	}
 	switch name {

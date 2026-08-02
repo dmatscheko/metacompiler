@@ -1267,6 +1267,128 @@ int s40(void) {
     return 0;
 }
 
+// ===== SECTION 41: a pointer round-tripped through an integer =====
+/* '(long)p' and '(T *)n' are C11 6.3.2.3p5-6: the conversion is implementation-defined,
+   but on LP64 - which this file already pins - a pointer fits a long exactly and the
+   round trip gives back a pointer that compares equal and still dereferences. In LLVM
+   this is 'ptrtoint' and 'inttoptr'; a compiler that reaches for 'sext' emits a module
+   clang rejects outright ("invalid cast opcode for cast from 'ptr' to 'i64'"), which is
+   what this section exists to catch, since the IR interpreter resolves by handle and
+   never notices. Verified against cc.
+   Nothing here compares an address against a NUMBER or subtracts two addresses in
+   bytes: an address is whatever the running model hands out, and the interpreter's
+   one-cell-per-scalar layout and the compiler's packed one legitimately differ. */
+struct S41 { long tag; int v; };
+long s41_addr(struct S41 *p) { return (long)p; }
+int s41(void) {
+    struct S41 obj;
+    long a;
+    long b;
+    struct S41 *back;
+    int arr[4];
+    int *ip;
+    unsigned long u;
+    obj.tag = 1234567890123L; obj.v = 42;
+    a = (long)&obj;
+    back = (struct S41 *)a;
+    check(4101, back->v == 42);
+    check(4102, back->tag == 1234567890123L);
+    check(4103, back == &obj);
+    check(4104, s41_addr(&obj) == a);       /* through a call boundary, still equal */
+    back->v = 43;
+    check(4105, obj.v == 43);               /* and it is the SAME object, not a copy */
+    arr[0] = 7; arr[3] = 9;
+    b = (long)arr;                          /* an ARRAY decays, then converts */
+    ip = (int *)b;
+    check(4106, ip[0] == 7 && ip[3] == 9);
+    check(4107, (long)(int *)0 == 0);       /* the constant-folded null, both ways */
+    check(4108, (int *)(long)0 == 0);
+    check(4109, (struct S41 *)((long)&obj) == &obj);
+    check(4110, a != 0);                    /* an object's address is never null */
+    u = (unsigned long)&obj;                /* unsigned is the other half of 6.3.2.3 */
+    check(4111, (struct S41 *)u == &obj);
+    check(4112, (long)(char *)&obj == a);   /* via a second pointer type, unchanged */
+    return 0;
+}
+
+// ===== SECTION 42: dynamically allocated structs, written, read back and released =====
+/* The <stdlib.h> allocator is out of scope for this file (see the header: only the
+   putchar prototype is assumed), so the allocator is written in C over a file-scope
+   pool. The point of the section is the part that is NOT the allocator: a struct
+   reached only through a pointer that was CHOSEN at run time, its fields written and
+   read back, linked into a list through a pointer member, walked, and released. That is
+   the shape a heap runtime needs, and it is the shape the two grammars have to agree on.
+   Verified against cc. */
+struct S42 { long tag; int v; struct S42 *next; };
+static struct S42 s42_pool[4];
+static int s42_used = 0;
+struct S42 *s42_alloc(void) {
+    struct S42 *p;
+    if (s42_used >= 4) { return (struct S42 *)0; }   /* out of pool: the null answer */
+    p = &s42_pool[s42_used];
+    s42_used++;
+    p->tag = 0; p->v = 0; p->next = (struct S42 *)0;
+    return p;
+}
+/* Releasing POISONS the cell rather than reusing it, so the check below can prove the
+   release ran at all - a pool that reuses would hide it. */
+void s42_free(struct S42 *p) { p->tag = -1; p->v = -1; }
+int s42(void) {
+    struct S42 *head = 0;
+    struct S42 *p;
+    int i, sum;
+    for (i = 0; i < 3; i++) {
+        p = s42_alloc();
+        check(4201 + i, p != 0);
+        p->tag = 100 + i;
+        p->v = (i + 1) * 5;
+        p->next = head;
+        head = p;
+    }
+    sum = 0;
+    for (p = head; p != 0; p = p->next) { sum = sum + p->v; }
+    check(4204, sum == 30);
+    check(4205, head->tag == 102 && head->next->tag == 101);
+    check(4206, head->next->next->next == 0);
+    check(4207, s42_alloc() != 0 && s42_alloc() == 0);   /* the 4th fits, the 5th does not */
+    for (p = head; p != 0; ) {
+        struct S42 *nx = p->next;    /* read the link BEFORE releasing the cell */
+        s42_free(p);
+        p = nx;
+    }
+    check(4208, s42_pool[0].tag == -1 && s42_pool[2].tag == -1);
+    check(4209, s42_used == 4);
+    return 0;
+}
+
+// ===== SECTION 43: a function pointer called through a STRUCT FIELD =====
+/* 's->op(a, b)' calls through a member whose type is 'int (*)(int, int)'. This is the
+   representation a closure needs - code plus captured data in one object - so it is
+   worth its own section rather than being folded into section 36's type names.
+   Verified against cc. */
+int s43_add(int a, int b) { return a + b; }
+int s43_mul(int a, int b) { return a * b; }
+struct S43 { int (*op)(int, int); int base; };
+int s43_apply(struct S43 *s, int x) { return s->op(s->base, x); }
+int s43(void) {
+    struct S43 t;
+    struct S43 tab[2];
+    int i, n;
+    t.op = s43_add; t.base = 10;
+    check(4301, t.op(3, 4) == 7);            /* through the field of a local */
+    check(4302, s43_apply(&t, 5) == 15);     /* through a POINTER to the struct */
+    t.op = s43_mul;                          /* the field is data: reassign it */
+    check(4303, s43_apply(&t, 5) == 50);
+    check(4304, (*t.op)(6, 7) == 42);        /* the '*' identity (C11 6.5.3.2p4) */
+    tab[0].op = s43_add; tab[0].base = 1;
+    tab[1].op = s43_mul; tab[1].base = 3;
+    n = 0;
+    for (i = 0; i < 2; i++) { n = n + tab[i].op(tab[i].base, 4); }   /* a dispatch table */
+    check(4305, n == 17);
+    check(4306, t.op != s43_add && tab[0].op == s43_add);   /* they compare, too */
+    return 0;
+}
+
 int main() {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
@@ -1308,6 +1430,9 @@ int main() {
     s38(); // SECTION-CALL 38
     s39(); // SECTION-CALL 39
     s40(); // SECTION-CALL 40
+    s41(); // SECTION-CALL 41
+    s42(); // SECTION-CALL 42
+    s43(); // SECTION-CALL 43
     /* summary: "full: <checks> checks, <failures> failures" */
     putchar('f'); putchar('u'); putchar('l'); putchar('l'); putchar(':'); putchar(' ');
     print_num(nchecks);
