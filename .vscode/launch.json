@@ -1319,6 +1319,30 @@
             "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-1.js", "-q", "-rt-prims"]
         },
         {
+            "name": "MetaJS native link (compiler, -exe + stand-in runtime)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-link-hello.js", "-q", "-exe", "tests/metajs-link.out", "-rt", "tests/metajs-link-stubrt.c"]
+        },
+        {
+            "name": "MetaJS native link, unresolved runtime symbol SHOULD FAIL (compiler, -exe)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-link-missing.js", "-q", "-exe", "tests/metajs-link-missing.out", "-rt", "tests/metajs-link-stubrt.c"]
+        },
+        {
+            "name": "Lisp native link (compiler, -exe, no runtime: stub + warning)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lisp-to-llvm-ir.abnf", "tests/lisp-test-features.txt", "-q", "-exe", "tests/lisp-link.out"]
+        },
+        {
+            "name": "Lisp native link, missing -l library SHOULD FAIL (compiler, -exe)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lisp-to-llvm-ir.abnf", "tests/lisp-test-features.txt", "-q", "-exe", "tests/lisp-link-nolib.out", "-l", "mec_no_such_lib"]
+        },
+        {
             "name": "PHP features (interpreter)",
             "type": "go",
             "request": "launch",

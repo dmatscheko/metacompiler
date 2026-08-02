@@ -44,6 +44,25 @@ var EntryPoint = ""
 // running the module in the built-in IR interpreter. Empty means "unset".
 var ExePath = ""
 
+// RuntimeInputs are extra files clang links into the -exe build alongside the
+// emitted module, set from the -rt CLI flag (repeatable): .c sources, .ll modules,
+// .o objects, .a archives - anything one clang invocation accepts. Grammars read
+// the list as c.runtime and hand it to llvm.BuildExecutable, which also merges it
+// in on its own, so a grammar that supplies its own runtime and a user who adds one
+// on the command line compose instead of overriding each other.
+//
+// Declaring a runtime also changes what an unresolved symbol MEANS: see
+// buildExecutable in llvmmap.go - it is then an error, not a zero stub.
+var RuntimeInputs []string
+
+// LinkDirs and LinkLibs are the -L and -l passthrough for the -exe link, so a
+// build can use real system libraries (e.g. -l m). They reach clang verbatim, in
+// command line order, after the module and the runtime inputs.
+var (
+	LinkDirs []string
+	LinkLibs []string
+)
+
 // ----------------------------------------------------------------------------
 // ASG compiler
 

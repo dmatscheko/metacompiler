@@ -6,6 +6,8 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"sort"
+	"strconv"
 	"strings"
 
 	"14.gy/mec/abnf/r"
@@ -994,6 +996,11 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 	// clang to link a native executable at outPath. Returns "" on success or a
 	// human-readable error string. Driven by the -exe flag (c.exePath) from a compiler
 	// grammar, so `mec <compiler> <source> -exe out` turns the source into a real binary.
+	//
+	// The optional third argument is the grammar's own runtime: extra files clang links
+	// with the module (.c/.ll/.o/.a). It is merged with the -rt flag (c.runtime), and
+	// -L/-l reach clang too. Supplying any of them switches OFF the zero-stubbing of
+	// undefined symbols - see buildExecutable.
 	"BuildExecutable": buildExecutable,
 }
 
@@ -1061,6 +1068,21 @@ var libcExterns = map[string]bool{
 	"labs": true,
 }
 
+// undefinedSymbols lists, sorted, every function the module declares but neither
+// defines nor expects from libc - i.e. exactly the set stubUndefined would stub and
+// the set a linked runtime is supposed to provide.
+func undefinedSymbols(m *ir.Module) []string {
+	var names []string
+	for _, f := range m.Funcs {
+		if len(f.Blocks) > 0 || libcExterns[f.Name()] {
+			continue
+		}
+		names = append(names, f.Name())
+	}
+	sort.Strings(names)
+	return names
+}
+
 // stubUndefined gives every declared-but-undefined non-libc function a trivial body
 // (return the zero value of its result type) so the module links, and WARNS on stderr
 // naming each one. The stub exists for a language-level function that has no linkable
@@ -1068,6 +1090,10 @@ var libcExterns = map[string]bool{
 // is the case it was written for - and reaching one at run time yields a zero that no
 // diagnostic would otherwise explain, so the warning is the only thing standing between
 // a missing symbol and a silently wrong answer.
+//
+// It is skipped entirely when the build links a runtime (see buildExecutable): there
+// the same symbol is a genuine link error, and papering over it with a zero would
+// reintroduce the malloc-returns-null failure class phase 0 removed.
 func stubUndefined(m *ir.Module) {
 	for _, f := range m.Funcs {
 		if len(f.Blocks) > 0 || libcExterns[f.Name()] {
@@ -1089,11 +1115,79 @@ func stubUndefined(m *ir.Module) {
 	}
 }
 
+// linkInputs is the runtime the build links with the module: what the grammar passed
+// to llvm.BuildExecutable, then what -rt added, in that order and without duplicates.
+// Both sources compose on purpose - a grammar that knows where its own runtime lives
+// should not stop a user from adding a second object file to the same link.
+func linkInputs(fromGrammar []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, list := range [][]string{fromGrammar, RuntimeInputs} {
+		for _, p := range list {
+			if p == "" || seen[p] {
+				continue
+			}
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// mentionsSymbol reports whether the linker's diagnostics name this symbol. Both
+// spellings occur: ld64 prints `"_js_add", referenced from:` and GNU ld prints
+// "undefined reference to `js_add'", so instead of parsing either format the check
+// asks whether the name appears delimited by non-identifier characters - the C
+// leading underscore included, which is why '_' does not count as a left delimiter
+// only when it is the mangling prefix.
+func mentionsSymbol(out, name string) bool {
+	for i := 0; ; {
+		j := strings.Index(out[i:], name)
+		if j < 0 {
+			return false
+		}
+		s := i + j
+		e := s + len(name)
+		leftOK := s == 0 || !isSymByte(out[s-1]) || (out[s-1] == '_' && (s == 1 || !isSymByte(out[s-2])))
+		rightOK := e == len(out) || !isSymByte(out[e])
+		if leftOK && rightOK {
+			return true
+		}
+		i = s + 1
+	}
+}
+
+func isSymByte(b byte) bool {
+	return b == '_' || b == '$' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
 // buildExecutable emits m as LLVM IR text and links it into a native executable with
-// clang (override with the MEC_CLANG env var). It returns "" on success, else an error
-// message the calling grammar prints before exiting non-zero.
-func buildExecutable(m *ir.Module, outPath string) string {
-	stubUndefined(m)
+// clang (override with the MEC_CLANG env var), together with the runtime files the
+// grammar and -rt supply and the -L/-l libraries. It returns "" on success, else an
+// error message the calling grammar prints before exiting non-zero.
+//
+// TWO MODES, and the difference is what an undefined symbol means:
+//
+//   - Nothing to link with (no runtime, no -l). The module must stand alone, so a
+//     declared-but-undefined function can only be a language-level name that has no
+//     symbol anywhere - the lisp form referencing a never-defined name inside a
+//     short-circuit. stubUndefined links a zero body and warns. This is the historical
+//     behaviour and it is preserved exactly.
+//   - A runtime IS declared. Then every remaining declaration is a symbol the runtime
+//     was supposed to define, and stubbing it would turn a missing runtime function
+//     into an answer of 0/null at run time - the exact failure class phase 0 removed
+//     from malloc. So nothing is stubbed, clang links for real, and if the link fails
+//     the unresolved names are reported on stderr and the build fails.
+//
+// The failure report is built from the MODULE (sorted names, filtered by what the
+// linker's output mentions), never from the raw linker text: that text carries the
+// temp file names, and this path is in the test matrix, which compares bytes.
+func buildExecutable(m *ir.Module, outPath string, runtime []string) string {
+	inputs := linkInputs(runtime)
+	linkingForReal := len(inputs) > 0 || len(LinkLibs) > 0
+	if !linkingForReal {
+		stubUndefined(m)
+	}
 	tmp, err := os.CreateTemp("", "mec-*.ll")
 	if err != nil {
 		return "cannot create temporary .ll file: " + err.Error()
@@ -1112,8 +1206,36 @@ func buildExecutable(m *ir.Module, outPath string) string {
 		clangBin = "clang"
 	}
 	// -Wno-override-module silences the note that the IR carries no target triple.
-	out, err := exec.Command(clangBin, "-Wno-override-module", "-o", outPath, tmpName).CombinedOutput()
+	args := []string{"-Wno-override-module", "-o", outPath, tmpName}
+	args = append(args, inputs...)
+	for _, d := range LinkDirs {
+		args = append(args, "-L"+d)
+	}
+	for _, l := range LinkLibs {
+		args = append(args, "-l"+l)
+	}
+	out, err := exec.Command(clangBin, args...).CombinedOutput()
 	if err != nil {
+		if linkingForReal {
+			var missing []string
+			for _, name := range undefinedSymbols(m) {
+				if mentionsSymbol(string(out), name) {
+					missing = append(missing, name)
+				}
+			}
+			if len(missing) > 0 {
+				fmt.Fprintf(warnWriter, "error: %d unresolved symbol(s), and this build links a runtime,"+
+					" so they are NOT stubbed:\n", len(missing))
+				for _, name := range missing {
+					fmt.Fprintln(warnWriter, "error:     "+name)
+				}
+				fmt.Fprintln(warnWriter, "error: each name above is declared by the emitted module and defined by"+
+					" neither the module\nerror: nor any linked input (c.runtime / -rt, -L, -l). Implement it in the"+
+					" runtime;\nerror: a stub would answer 0/null at run time instead of failing here.")
+				return "clang could not link the executable: " + strconv.Itoa(len(missing)) +
+					" unresolved symbol(s), named on stderr"
+			}
+		}
 		return "clang could not build the executable (" + err.Error() + "):\n" + string(out)
 	}
 	return ""

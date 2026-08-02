@@ -49,6 +49,14 @@ import (
 //                lets call graphs / CFGs / traces be built from partially understood languages
 //  -main NAME    call NAME as the program entry point instead of main (grammars that
 //                support it read it as c.mainName)
+//  -exe PATH     a -to-llvm-ir grammar links a native executable at PATH with clang
+//                instead of running the emitted module in the IR interpreter
+//  -rt FILE      link FILE (.c, .ll, .o, .a) into the -exe build alongside the emitted
+//                module (repeatable; grammars read the list as c.runtime). Declaring a
+//                runtime also makes an unresolved symbol a hard error instead of a
+//                zero-returning stub
+//  -L DIR / -l NAME   library search path / system library for the -exe link, passed
+//                through to clang (repeatable; write them separated, -l m, not -lm)
 //  -code SRC     take the final program's source from SRC (inline) instead of a file,
 //                e.g. languages/calculator-global-stack-interpreter.abnf -code '9*(2+3)'
 //  -code-stdin   take the final program's source from stdin instead of a file
@@ -87,6 +95,9 @@ type options struct {
 	rtPrims                               bool     // -rt-prims: compile the derivable runtime primitives from MetaJS (languages/lib/rt-prims.metajs) instead of calling the Go externals.
 	entryPoint                            string   // -main: entry-point function name a compiled program calls (default "main").
 	exePath                               string   // -exe PATH: a -to-llvm-ir grammar links a native executable at PATH (via clang) instead of running the module.
+	runtimeInputs                         []string // -rt FILE: extra files (.c/.ll/.o/.a) clang links into the -exe build; repeatable. Grammars read the list as c.runtime.
+	linkDirs                              []string // -L DIR: library search paths passed through to the -exe link.
+	linkLibs                              []string // -l NAME: system libraries passed through to the -exe link.
 	code                                  string   // -code VALUE: the final program's source, given inline instead of as a file.
 	codeSet, codeStdin                    bool     // -code / -code-stdin were passed (codeStdin reads the source from stdin).
 	speedTest, useBlockList, useFoundList bool
@@ -154,6 +165,21 @@ func parseArgs(args []string) (*options, error) {
 			o.entryPoint, err = takeVal()
 		case "-exe":
 			o.exePath, err = takeVal()
+		case "-rt":
+			var f string
+			if f, err = takeVal(); err == nil {
+				o.runtimeInputs = append(o.runtimeInputs, f)
+			}
+		case "-L":
+			var d string
+			if d, err = takeVal(); err == nil {
+				o.linkDirs = append(o.linkDirs, d)
+			}
+		case "-l":
+			var lib string
+			if lib, err = takeVal(); err == nil {
+				o.linkLibs = append(o.linkLibs, lib)
+			}
 		case "-code":
 			o.code, err = takeVal()
 			o.codeSet = true
@@ -332,6 +358,9 @@ func main() {
 	}
 	abnf.EntryPoint = o.entryPoint
 	abnf.ExePath = o.exePath
+	abnf.RuntimeInputs = o.runtimeInputs
+	abnf.LinkDirs = o.linkDirs
+	abnf.LinkLibs = o.linkLibs
 	abnf.CFGOutPath = o.cfgPath
 	abnf.TraceOutPath = o.tracePath
 	abnf.CallgraphOutPath = o.callgraphPath
@@ -647,6 +676,14 @@ anywhere among the files.
                 lets call graphs / CFGs / traces be built from partially understood languages
   -main NAME    call NAME as the program entry point instead of main (grammars that
                 support it read it as c.mainName)
+  -exe PATH     a -to-llvm-ir grammar links a native executable at PATH with clang
+                instead of running the emitted module in the IR interpreter
+  -rt FILE      link FILE (.c, .ll, .o, .a) into the -exe build alongside the emitted
+                module (repeatable; grammars read the list as c.runtime). Declaring a
+                runtime also makes an unresolved symbol a hard error instead of a
+                zero-returning stub
+  -L DIR / -l NAME   library search path / system library for the -exe link, passed
+                through to clang (repeatable; write them separated, -l m, not -lm)
   -code SRC     take the final program's source from SRC (inline) instead of a file,
                 e.g. languages/calculator-global-stack-interpreter.abnf -code '9*(2+3)'
   -code-stdin   take the final program's source from stdin instead of a file

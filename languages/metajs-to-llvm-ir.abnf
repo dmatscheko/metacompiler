@@ -922,6 +922,19 @@ KwDefault   = "default" KwEnd ;
     // Build the module out of the parsed program.
     c.compile(c.asg)
 
+    // With -exe PATH, link the module into a native executable (clang) instead of running
+    // it here. This module is HANDLE IR: every value is an i64 handle and the js_* externs
+    // it declares are the runtime, so the build only produces a working binary when a
+    // runtime that defines them is linked in - c.runtime (the -rt flag) is how it gets
+    // there. Because a runtime is declared, llvm.BuildExecutable does NOT stub what is
+    // left over: a missing js_* is an error naming the symbol, not a silent zero.
+    if (c.exePath != undefined && c.exePath != "") {
+        var buildErr = llvm.BuildExecutable(m, c.exePath, c.runtime)
+        if (buildErr != "") { println(buildErr); exit(1) }
+        println("js compiler: wrote executable " + c.exePath)
+        exit(0)
+    }
+
     // Show the compiler output (the LLVM IR module).
     println(m)
 

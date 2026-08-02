@@ -309,6 +309,10 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		// interpreter instead. A -to-llvm-ir grammar hands its module to
 		// llvm.BuildExecutable when this is set.
 		"exePath": ExePath,
+		// The runtime a native build links with the module (-rt, repeatable). A
+		// grammar hands it to llvm.BuildExecutable; supplying anything here also
+		// turns an unresolved symbol from a zero stub into a hard error.
+		"runtime": RuntimeInputs,
 		// Project-file imports (the -i include roots): findImport locates a
 		// grammar-mapped relative path ("a/b/C.kt"), readFile loads it, and
 		// pushSource/popSource swap the file/line attribution around the

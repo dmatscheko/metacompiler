@@ -188,20 +188,62 @@ string test, `x === x * 1` the number test, `x === x` the NaN test.
 difference. `-rt-prims` is opt-in and off for tag scripts (the frozen tag-script runtime's
 `c` has no `parse`), so the bootstrap does not pay for the measurement.
 
-## Phase 2 - the linking feature
+## Phase 2 - the linking feature - DONE (2026-08-02)
 
-`buildExecutable` (`abnf/llvmmap.go:1032`) writes one temp `.ll` and runs
-`clang -Wno-override-module -o out tmp.ll`. It cannot link anything else.
+`buildExecutable` wrote one temp `.ll` and ran `clang -Wno-override-module -o out tmp.ll`.
+It now takes a third argument - the grammar's runtime - and links it, plus `-L`/`-l`:
 
-- extend it to accept **additional modules / C sources / objects** (clang takes them in
-  one invocation: `clang -o app program.ll runtime.c`)
-- give a grammar a way to declare its runtime, e.g. `c.runtime = [...]`
-- add `-l`/`-L` passthrough while here - that is what gives C real native libraries
-- **refuse to stub when linking for real.** An unresolved runtime symbol must be a loud
-  error on stderr (via `warnWriter`, which `SetOutput` deliberately does not touch), not
-  a silent zero.
+- `llvm.BuildExecutable(m, c.exePath, c.runtime)`. The runtime list is any mix of
+  `.c`/`.ll`/`.o`/`.a`; the grammar's own list and the new **`-rt FILE`** flag (which a
+  grammar reads as `c.runtime`) are merged, deduplicated, in that order - so a grammar
+  supplying its own runtime and a user adding an object file compose instead of
+  overriding. `-rt` works even for a grammar that passes nothing, because
+  `buildExecutable` merges it itself.
+- **`-L DIR` / `-l NAME`** reach clang verbatim (write them separated: `-l m`, not `-lm`,
+  because `-lb`/`-lf` are existing parser flags).
+- **Stubbing is now conditional, and that is the important half.** With nothing to link,
+  a declared-but-undefined symbol can only be a language-level name with no symbol
+  anywhere (the lisp form referencing a never-defined name inside a short-circuit), so
+  `stubUndefined` links a zero body and warns - unchanged. As soon as the build links a
+  runtime (`c.runtime`/`-rt`, or any `-l`), the same symbol is a genuine link error:
+  nothing is stubbed, and an unresolved name is reported on stderr *by name* with a
+  non-zero exit. The report is built from the MODULE (sorted, filtered by what the linker
+  mentions), never from raw linker text, which carries temp file names the matrix would
+  see as noise.
 
-**Gate:** `metajs-to-llvm-ir.abnf hello.metajs -exe hello` produces a binary that runs.
+`metajs-to-llvm-ir.abnf` grew the `-exe` branch (in the goja-driver tail, so
+`jsbootstrap.ll` regenerates byte-identically; `jsagrammar.go` does change, as it embeds
+the whole start script).
+
+**Gate:** the plan's stated gate needs the phase-3 C floor, so it was proven with an
+explicit STAND-IN instead: `tests/metajs-link-stubrt.c` defines by hand the ten `js_*`
+the smallest MetaJS program declares, plus a `main` calling `jsmain`.
+
+```
+$ mec languages/metajs-to-llvm-ir.abnf tests/metajs-link-hello.js -q \
+      -exe tests/metajs-link.out -rt tests/metajs-link-stubrt.c
+js compiler: wrote executable tests/metajs-link.out          # exit 0, and it runs
+$ nm tests/metajs-link.out | grep -c ' T _js_'
+11                                                            # every extern resolved
+
+$ mec ... tests/metajs-link-missing.js -exe ... -rt tests/metajs-link-stubrt.c
+error: 1 unresolved symbol(s), and this build links a runtime, so they are NOT stubbed:
+error:     js_add                                             # exit 1, nothing written
+
+$ mec languages/lisp-to-llvm-ir.abnf tests/lisp-test-features.txt -q -exe tests/lisp-link.out
+warning: no definition for boom; linking a stub that returns zero ...   # exit 0
+$ tests/lisp-link.out
+features: 63 checks, 0 failures                               # the stub case still works
+```
+
+`-l`/`-L` against a real library (not in the matrix - it depends on what the machine has):
+a C program calling `zlibVersion()` links only with `-l z`, and `-L <dir> -l mecdemo`
+against a hand-built `libmecdemo.a` printed `42`. A bogus `-l` fails with
+`ld: library 'mec_no_such_lib' not found`, which is the matrix entry that pins the
+passthrough permanently.
+
+Four `launch.json` entries were added (matrix 311 -> 315): the metajs link, the
+unresolved-symbol failure, the lisp stub-and-warn build, and the bogus `-l`.
 
 ## Phase 3 - runtime.c, the floor
 
