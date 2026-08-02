@@ -300,6 +300,7 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		// turns an up.pos byte offset into a 1-based line (0 if unknown).
 		"warnImports":     WarnUnresolvedImports,
 		"warnUnsupported": WarnUnsupported,
+		"rtPrims":         RuntimePrims,
 		"file":            traceSrcName,
 		"lineOf":          func(pos int) int { return lineOfPos(pos) },
 		// The entry-point function name (-main flag, default "main").

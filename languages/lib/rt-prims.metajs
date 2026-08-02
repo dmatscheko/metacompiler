@@ -1,0 +1,239 @@
+// rt-prims.metajs -- the derived half of the MetaJS runtime, written in MetaJS.
+//
+// The MetaJS compiler (languages/metajs-to-llvm-ir.abnf) emits handle-threaded IR
+// that calls 48 js_* externals. The self-hosted-runtime plan (docs/runtime-rework-plan.md)
+// wants those 48 split into a small FLOOR that has to be written in C - because it
+// needs raw memory, unboxed machine integers or an indirect call - and everything
+// else written here, in MetaJS, on top of the floor.
+//
+// This file is that "everything else". Compile a program with -rt-prims and the
+// grammar emits each function below as an ordinary IR function and routes the
+// operator to it INSTEAD of declaring the Go external (see emitPrims/registerPrim
+// in the grammar). Whatever the emitted module still `declare`s afterwards is the
+// measured floor - that check is the whole point of the file, so:
+//
+// THE ONE RULE HERE: an operator may appear in a body only if it is a FLOOR
+// primitive, or a primitive DEFINED EARLIER IN THIS FILE. A body is compiled with
+// the routing table as it stands at that moment, so a primitive using itself
+// (directly or in a cycle) silently falls back to the Go external - the program
+// still works, but the primitive never left the floor and the measurement lies.
+// The residual `declare` list of the emitted module is what proves it did not:
+//
+//     mec languages/metajs-to-llvm-ir.abnf prog.js -q -rt-prims | grep '^declare'
+//
+// So `-` (js_sub), `==` (js_eq) and `~`-free negation are used deliberately below,
+// each only after its own definition. Still banned everywhere in this file, because
+// nothing here defines them: nothing at all - every remaining operator is floor.
+//
+// The functions cannot call each other BY NAME. Each one is entered through a shim
+// that passes the undefined handle as the environment (there is no runtime scope
+// holding these declarations: jsrtprims is emitted but never called), so a free
+// name would not resolve. They reach each other only through the operators the
+// compiler routes - which is also why js_ge repeats js_le's comparison instead of
+// delegating to it: `a >= b` inside js_ge would be that function calling itself.
+//
+// The frozen-subset rules of every MetaJS source apply (docs/abnf-dialect-gotchas.md):
+// there is no ASI, so every `return` carries its value on the same line.
+
+// ----- Equality -----
+//
+// Only ONE equality primitive has to unbox: === (js_seq). Loose equality is a
+// coercion cascade on top of it, and the Go twin (looseEq, abnf/jsrt.go:1442)
+// deliberately answers false for "primitive against object" instead of running
+// ToPrimitive, which is exactly what the tests below reproduce.
+//
+// Three coercions do the type tests without a tag read:
+//   x === x + ""   the string test - a string is the only value strictly equal to
+//                  its own concatenation with the empty string.
+//   x === x * 1    the number test - js_mul runs ToNumber on both operands and 1 is
+//                  the identity of every double. NaN fails it (NaN === NaN is
+//                  false), which is right: every NaN comparison is false anyway.
+//   x === true / x === false   the boolean test.
+function js_eq(a, b) {
+    // undefined and null equal each other and nothing else.
+    if (a === undefined) { if (b === undefined) { return true } if (b === null) { return true } return false }
+    if (a === null)      { if (b === undefined) { return true } if (b === null) { return true } return false }
+    if (b === undefined) { return false }
+    if (b === null)      { return false }
+    var aS = (a === a + "")
+    var bS = (b === b + "")
+    if (aS) { if (bS) { return a === b } } // Two strings compare as strings, not as numbers.
+    // Everything else primitive compares as a number - a boolean as 1/0, a string
+    // through ToNumber, and an unparsable string as NaN, which equals nothing.
+    var aP = aS
+    if (a === a * 1) { aP = true }
+    if (a === true)  { aP = true }
+    if (a === false) { aP = true }
+    var bP = bS
+    if (b === b * 1) { bP = true }
+    if (b === true)  { bP = true }
+    if (b === false) { bP = true }
+    if (aP) {
+        if (bP) { return a * 1 === b * 1 }
+        return false // Primitive against object: false, like the Go twin.
+    }
+    if (bP) { return false }
+    return a === b // Two objects (or a NaN): reference identity.
+}
+
+// != is the negation of ==, and == is now the function above.
+function js_ne(a, b) {
+    if (a == b) { return false }
+    return true
+}
+
+// !== likewise. === itself stays in the floor: telling undefined from null, or a
+// number from the string that renders the same, is a tag inspection.
+function js_sne(a, b) {
+    if (a === b) { return false }
+    return true
+}
+
+// ----- Truthiness -----
+
+// !v is exactly the branch condition inverted, and the branch condition IS the
+// floor primitive js_truthy (the compiler emits `icmp ne js_truthy(v), 0` for
+// every if/while/?:/&&/||). So js_not adds nothing js_truthy does not already
+// provide, and it goes.
+function js_not(v) {
+    if (v) { return false }
+    return true
+}
+
+// ----- Relational -----
+//
+// The floor keeps exactly one relational primitive, js_lt. The other three are
+// that one comparison read differently, which is also how the spec defines them:
+// jsCompare (abnf/jsrt.go:1490) compares two strings lexicographically and
+// everything else as ToNumber, and answers "unordered" when either side is NaN,
+// which makes every relation false.
+
+// a > b is b < a. The spec swaps the operands of the abstract relational
+// comparison and changes nothing else.
+function js_gt(a, b) {
+    if (b < a) { return true }
+    return false
+}
+
+// a <= b is "not (b < a)", but only once NaN is out of the way: with a NaN on
+// either side jsCompare returns "unordered" and <= is false, while `b < a` is
+// false too - so the plain negation would answer true. Hence the explicit
+// number path with the NaN test (x === x fails only for NaN).
+function js_le(a, b) {
+    if (a === a + "") {
+        if (b === b + "") {
+            if (b < a) { return false }
+            return true
+        }
+    }
+    var x = a * 1
+    var y = b * 1
+    if (x === x) {
+        if (y === y) {
+            if (y < x) { return false }
+            return true
+        }
+    }
+    return false
+}
+
+// a >= b is js_le with the operands exchanged; see the comment there.
+function js_ge(a, b) {
+    if (a === a + "") {
+        if (b === b + "") {
+            if (a < b) { return false }
+            return true
+        }
+    }
+    var x = a * 1
+    var y = b * 1
+    if (x === x) {
+        if (y === y) {
+            if (x < y) { return false }
+            return true
+        }
+    }
+    return false
+}
+
+// ----- Numeric coercion and arithmetic -----
+
+// -v is v * -1. The identity holds for every double the runtime can hold,
+// including the signed zeros (-1 * 0 is -0, exactly like -(0)) and NaN.
+// The -1 is written ~0: a literal -1 would be unary minus, i.e. this function
+// calling itself, and 0 - 1 would be js_sub, which is derived just below. ~
+// compiles to js_bxor(v, js_num_i(-1)) - both floor, and the -1 in there is a
+// raw machine constant, not a MetaJS negation.
+function js_neg(v) {
+    return v * ~0
+}
+
+// a - b is a + (-b) once both sides are numbers. The detour through ToNumber is
+// what makes it correct: js_add on two numbers adds, but js_add on a string
+// concatenates, and subtraction never concatenates. Signed zeros survive
+// (0 + -0 is 0, -0 + -0 is -0, matching 0-0 and -0-0), and Inf + -Inf is NaN
+// like Inf - Inf. js_add and js_mul stay in the floor; js_sub adds no new
+// unboxing on top of them.
+function js_sub(a, b) {
+    return a * 1 + b * ~0
+}
+
+// ToNumber, the coercion behind ++/--. js_mul already runs ToNumber on both of
+// its operands, so multiplying by the identity is the whole of it.
+function js_tonum(v) {
+    return v * 1
+}
+
+// The number literals the compiler cannot express as an i64 (the floats) arrive
+// as their source text and are parsed here. Same coercion as js_tonum: the string
+// path of ToNumber is the number parser. The Go twin fails loudly on an
+// unparsable literal where this yields NaN - unreachable, because the only caller
+// is emitNum, which formats the string itself.
+function js_num_str(s) {
+    return s * 1
+}
+
+// ----- Bitwise -----
+//
+// The bitwise operators are floor: each has to run ToInt32, which is an unboxing
+// load. >>> is the exception - it is >> plus a mask, and both are already there.
+// Go: uint32(toInt32(a)) >> (uint32(toInt32(b)) & 31).
+function js_ushr(a, b) {
+    var s = b & 31 // js_band runs ToInt32 on both sides: exactly the Go shift count.
+    var t = a | 0  // ToInt32(a), the value the shift works on.
+    if (s === 0) {
+        // A zero shift is the only case with no room for a sign bit to fall out
+        // of: the result is the unsigned reading of the same 32 bits.
+        if (t < 0) { return t + 4294967296 }
+        return t
+    }
+    // An arithmetic shift smears the sign bit into the top s bits; masking with
+    // the s low-order-preserving mask 0x7FFFFFFF >> (s-1) clears them again.
+    // The mask is built with * 2 + 1 because s - 1 would be js_sub, which is
+    // defined ABOVE and would therefore route back through a MetaJS call - correct,
+    // but a pointless one inside a primitive this small.
+    return (t >> s) & ((0x7FFFFFFF >> s) * 2 + 1)
+}
+
+// ----- typeof -----
+//
+// The Go twin reads the value's dynamic type (typeOf, abnf/jsrt.go:1523). Every
+// case of that switch MetaJS can produce is reachable from === against the four
+// singleton handles plus the two coercions above, so no tag read is needed after
+// all - typeof leaves the floor.
+function js_typeof(v) {
+    if (v === undefined) { return "undefined" }
+    if (v === null) { return "object" }        // The famous JS wart, kept deliberately.
+    if (v === true) { return "boolean" }
+    if (v === false) { return "boolean" }
+    if (v === v) { } else { return "number" }  // NaN: not equal to itself, still a number.
+    if (v === v + "") { return "string" }
+    if (v === v * 1) { return "number" }
+    // Closures and host functions both render as "[function]" (jsString, jsrt.go).
+    // A one-element array holding that exact text renders the same way, so the
+    // length probe - undefined on a function, a number on an array - separates them.
+    if (v + "" === "[function]") {
+        if (v["length"] === undefined) { return "function" }
+    }
+    return "object"
+}

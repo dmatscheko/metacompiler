@@ -512,6 +512,87 @@ KwDefault   = "default" KwEnd ;
         }
     }
 
+    // ----- Primitives implemented in MetaJS (-rt-prims) -----
+    // Phase 1 of docs/runtime-rework-plan.md asks how small the C floor of the runtime
+    // really is. With -rt-prims this compiler compiles lib/rt-prims.metajs into the
+    // module it is building and routes every primitive DEFINED there to the compiled
+    // MetaJS body instead of declaring the Go external - so whatever the emitted module
+    // still `declare`s afterwards is the measured floor. Without the flag none of this
+    // runs and the output is byte for byte the old one.
+    var funcByIdx = {}   // "$<jsf index>" -> the IR function (registerPrim needs the callee)
+    var primShim = {}    // "$js_ne" -> the IR function the operator now calls
+    var inPrims = false  // True while lib/rt-prims.metajs is emitted (makeFuncDecl then
+                         // knows that each declaration it sees IS a primitive).
+
+    // The routing point: the same contract as compile-core's callExt, plus the lookup.
+    // It stays live while the primitives themselves are emitted, so a primitive can be
+    // written on top of the ones ABOVE it in lib/rt-prims.metajs (js_ne uses ==, which
+    // is js_eq, three lines up). It cannot accidentally recurse: registerPrim runs
+    // AFTER the body it registers, so a primitive using itself finds no shim yet and
+    // quietly falls back to the external - visible as a leftover `declare` in the
+    // emitted module, which is exactly the measurement.
+    callExt = function(b, name, args) {
+        var sh = primShim["$" + name]
+        if (sh != undefined) { return b.NewCall(sh, args) }
+        return b.NewCall(getExtern(name, args.length), args)
+    }
+
+    // One shim per primitive: a function with the EXTERNAL's signature (i64 in, i64 out)
+    // that packs its arguments into a js array and calls the compiled MetaJS body as a
+    // direct IR call. Not through js_call: that is a floor primitive itself, and going
+    // through it would make every routed operator depend on the very machinery it is
+    // supposed to sit on top of. The environment is the undefined handle - the prims
+    // resolve no free name (see the header of lib/rt-prims.metajs).
+    function registerPrim(name, idx, arity) {
+        // The external is already declared: something emitted before this point called
+        // it - which for a primitive being defined here means its own body did (directly
+        // or through a cycle). The routing still works, but the primitive did NOT leave
+        // the floor: the module now carries both a declare and a define of the name.
+        // Say so, instead of letting the measurement quietly lie.
+        if (externs[name] != undefined) {
+            eprintln("warning: rt-prims: " + name + " is used by its own implementation - it stays a floor primitive")
+        }
+        var params = []
+        for (var i = 0; i < arity; i++) { params.push(llvm.ir.NewParam("", i64)) }
+        var sh = m.NewFunc(name, i64, params)
+        var b = sh.NewBlock("entry")
+        var argsV = b.NewCall(getExtern("js_arr_new", 0), [])
+        for (var i = 0; i < arity; i++) { b.NewCall(getExtern("js_arr_push", 2), [argsV, sh.Params[i]]) }
+        b.NewRet(b.NewCall(funcByIdx["$" + idx], [hUndef, argsV]))
+        primShim["$" + name] = sh
+    }
+
+    // Compile lib/rt-prims.metajs and emit its top-level function declarations. The
+    // declaring statements land in jsrtprims, which is NEVER called: only the jsf_N
+    // bodies they create matter, and makeFuncDecl hands each one to registerPrim.
+    // load() reads relative to the grammar file under both engines. The c.parse guard
+    // keeps this out of the frozen TAG-script runtime, whose c carries only `tracing`
+    // (abnf/frozen.go, newWalkRuntime): tag scripts keep the Go floor, so the bootstrap
+    // does not pay for the measurement.
+    function emitPrims() {
+        if (c.rtPrims != true) { return false }
+        if (c.parse == undefined) { return false }
+        var src = load("lib/rt-prims.metajs")
+        var asg = c.parse(c.agrammar, src, null, "lib/rt-prims.metajs")
+        c.pushSource("lib/rt-prims.metajs", src)
+        importDepth = importDepth + 1 // Stash the top-level thunks; do not build a second jsrun.
+        c.compile(asg)
+        importDepth = importDepth - 1
+        c.popSource()
+        var g = importedGroups.pop()
+        var pf = m.NewFunc("jsrtprims", i64, [llvm.ir.NewParam("env", i64)])
+        curF = pf
+        var b = pf.NewBlock("entry")
+        curScopeV = pf.Params[0]
+        inPrims = true
+        c.pushSourceFile(g.file)
+        for (var i = 0; i < g.items.length; i++) { b = g.items[i](b) }
+        c.popSource()
+        inPrims = false
+        b.NewRet(hUndef)
+        return true
+    }
+
     // A function body: an own IR function jsf_N(env, args) whose entry opens a scope on
     // the passed environment, binds the parameters and 'arguments', and runs the body.
     // isCtl marks a try/catch body closure: a return/break/continue leaving it emits a
@@ -520,6 +601,7 @@ KwDefault   = "default" KwEnd ;
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        funcByIdx["$" + idx] = f // -rt-prims: registerPrim needs the callee, not just its index.
 
         var savedF = curF
         var savedScope = curScopeV
@@ -744,6 +826,9 @@ KwDefault   = "default" KwEnd ;
     function makeFuncDecl(bodyT, paramNames, name) {
         return function(b) {
             var idx = emitFunction(paramNames, bodyT)
+            // Inside lib/rt-prims.metajs every declaration IS a primitive: wire the
+            // operator that used to call the external to this body (-rt-prims).
+            if (inPrims) { registerPrim(name, idx, paramNames.length) }
             var cl = callExt(b, "js_closure", [handle(idx), curScopeV])
             callExt(b, "js_tdecl", [curScopeV, emitStr(b, name), cl])
             return b
@@ -798,6 +883,9 @@ KwDefault   = "default" KwEnd ;
             stashImported(items) // stashed with its file; emitted later (compile-core)
             return
         }
+        // The MetaJS-implemented primitives go in FIRST: their shims must exist before
+        // any operator of the program is emitted (-rt-prims; a no-op without it).
+        emitPrims()
         var f = m.NewFunc("jsrun", i64, [llvm.ir.NewParam("scope", i64), llvm.ir.NewParam("args", i64)])
         curF = f
         var b = f.NewBlock("entry")

@@ -22,6 +22,15 @@ var WarnUnresolvedImports = false
 // c.warnUnsupported via the lib notImplemented() family.
 var WarnUnsupported = false
 
+// RuntimePrims is set from the -rt-prims CLI flag. It asks a compiler grammar to
+// implement the derivable half of its runtime IN the source language instead of
+// calling the Go externals: languages/metajs-to-llvm-ir.abnf then compiles
+// languages/lib/rt-prims.metajs into the emitted module and routes js_ne, js_le,
+// js_typeof and friends to those IR functions, so whatever is still `declare`d
+// afterwards is the measured floor of primitives that must be written in C
+// (docs/runtime-rework-plan.md, phase 1). Grammars read it as c.rtPrims.
+var RuntimePrims = false
+
 // EntryPoint is the name of the top-level function a compiled program calls as
 // its entry point, set from the -main CLI flag. Grammars read it as c.mainName; it
 // lets a program whose entry function is not named main - or a real-world file with

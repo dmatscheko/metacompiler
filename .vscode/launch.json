@@ -1301,6 +1301,24 @@
             "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-features.js", "-q"]
         },
         {
+            "name": "MetaJS features (compiler, MetaJS runtime primitives)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-features.js", "-q", "-rt-prims"]
+        },
+        {
+            "name": "MetaJS try/catch (compiler, MetaJS runtime primitives)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-try.js", "-q", "-rt-prims"]
+        },
+        {
+            "name": "MetaJS self test (compiler, MetaJS runtime primitives)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-1.js", "-q", "-rt-prims"]
+        },
+        {
             "name": "PHP features (interpreter)",
             "type": "go",
             "request": "launch",
