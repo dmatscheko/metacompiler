@@ -32,6 +32,18 @@ import (
 // metajs's `js_str_mem(i8*, i64)` has always been resolved against a definition
 // taking i32*. The interpreter's memory is a flat byte array and every
 // getelementptr names its element type explicitly, so the pointer stays a pointer.
+//
+// GLOBALS are bound the same way, and for the same reason. Bash's runtime state is
+// SHARED with the emitted program - the program loads last_status, writes gvars[],
+// reads read_eof - so a declaration on the program side has to name the runtime's
+// one definition rather than getting storage of its own. A global whose initializer
+// is nil is the declaration (`@gvars = external global [1024 x i8*]`, which is what
+// ir.NewGlobal builds); one with an initializer is the definition. The two may
+// disagree on the ELEMENT type exactly as a function signature may: `[1024 x i8*]`
+// against `[1024 x i32*]` is the same 8192 bytes, every getelementptr names the type
+// it is stepping through, and clang resolves the two objects by symbol name. What may
+// NOT disagree is the size, so that is checked rather than assumed - a declaration
+// narrower than its definition would silently address the wrong slot.
 
 // linkRuntimeModules parses each .ll runtime input and wires it into the machine.
 // Non-.ll entries (.c/.o/.a, which only clang can consume) are ignored, so the same
@@ -43,8 +55,24 @@ func (ma *machine) linkRuntimeModules(m *ir.Module, paths []string) {
 			defs[f.Name()] = f
 		}
 	}
+	// Where each global name is DEFINED, and which module said so, so that a
+	// duplicate can name both sides.
+	type gdef struct {
+		g    *ir.Global
+		from string
+	}
+	gdefs := map[string]gdef{}
+	for _, g := range m.Globals {
+		if g.Init != nil {
+			gdefs[g.Name()] = gdef{g, "the program module"}
+		}
+	}
 
-	var extra []*ir.Module
+	type rtmod struct {
+		m    *ir.Module
+		path string
+	}
+	var extra []rtmod
 	for _, p := range paths {
 		if !strings.HasSuffix(p, ".ll") {
 			continue
@@ -58,11 +86,17 @@ func (ma *machine) linkRuntimeModules(m *ir.Module, paths []string) {
 			panic("llvm.Run(): cannot parse the runtime module " + p + ": " + err.Error())
 		}
 		for _, g := range rm.Globals {
+			if g.Init == nil { // a declaration; it is bound below, like a function's
+				continue
+			}
+			if prev, dup := gdefs[g.Name()]; dup {
+				panic(fmt.Sprintf("llvm.Run(): duplicate global @%s - it is defined by %s and by %s",
+					g.Name(), prev.from, p))
+			}
+			gdefs[g.Name()] = gdef{g, p}
 			off := ma.alloc(ma.sizeOf(g.ContentType))
 			ma.globals[g] = off
-			if g.Init != nil {
-				ma.writeConst(off, g.Init)
-			}
+			ma.writeConst(off, g.Init)
 		}
 		for _, f := range rm.Funcs {
 			if len(f.Blocks) == 0 {
@@ -76,7 +110,7 @@ func (ma *machine) linkRuntimeModules(m *ir.Module, paths []string) {
 				ma.funcs[f.Name()] = f
 			}
 		}
-		extra = append(extra, rm)
+		extra = append(extra, rtmod{rm, p})
 	}
 
 	// The link step proper: a block-less function object anywhere in the set gets a
@@ -95,8 +129,35 @@ func (ma *machine) linkRuntimeModules(m *ir.Module, paths []string) {
 			ma.externBound[f] = func(args []uint64) uint64 { return ma.call(target, args) }
 		}
 	}
+	// The same, for globals: an initializer-less global anywhere in the set is
+	// re-pointed at the storage of the definition carrying its name. newMachine has
+	// already given the program module's declarations storage of their own, which
+	// this overwrites - the abandoned bytes are the cost of not having to know, at
+	// load time, whether a link is coming.
+	bindG := func(gs []*ir.Global, where string) {
+		for _, g := range gs {
+			if g.Init != nil {
+				continue
+			}
+			def, ok := gdefs[g.Name()]
+			if !ok {
+				panic(fmt.Sprintf("llvm.Run(): unresolved global @%s declared by %s - "+
+					"this build links a runtime, so it is NOT given storage of its own", g.Name(), where))
+			}
+			if def.g == g {
+				continue
+			}
+			if dn, gn := ma.sizeOf(def.g.ContentType), ma.sizeOf(g.ContentType); dn != gn {
+				panic(fmt.Sprintf("llvm.Run(): global @%s is declared %d bytes by %s but defined %d bytes by %s",
+					g.Name(), gn, where, dn, def.from))
+			}
+			ma.globals[g] = ma.globals[def.g]
+		}
+	}
 	bind(m.Funcs)
+	bindG(m.Globals, "the program module")
 	for _, rm := range extra {
-		bind(rm.Funcs)
+		bind(rm.m.Funcs)
+		bindG(rm.m.Globals, rm.path)
 	}
 }

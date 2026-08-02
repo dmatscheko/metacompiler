@@ -1002,14 +1002,6 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 	// -L/-l reach clang too. Supplying any of them switches OFF the zero-stubbing of
 	// undefined symbols - see buildExecutable.
 	"BuildExecutable": buildExecutable,
-	// SpliceIR parses a separately compiled runtime .ll and appends its globals and
-	// functions to the module being built, so that llvm.Run - which links nothing -
-	// still sees real definitions. See abnf/llvmsplice.go for why a grammar whose
-	// runtime has no Go twin needs this and c.runtime alone is not enough.
-	"SpliceIR": spliceIR,
-	// SpliceFunc / SpliceGlobal look a spliced name back up in the module.
-	"SpliceFunc":   spliceFunc,
-	"SpliceGlobal": spliceGlobal,
 }
 
 // libcExterns are the external functions clang resolves from the real C runtime, so
@@ -1230,7 +1222,13 @@ func buildExecutable(m *ir.Module, outPath string, runtime []string) string {
 		clangBin = "clang"
 	}
 	// -Wno-override-module silences the note that the IR carries no target triple.
-	args := []string{"-Wno-override-module", "-o", outPath, tmpName}
+	//
+	// -O2 is not cosmetic. languages/c-to-llvm-ir.abnf gives every local and every
+	// parameter an alloca/store/load and has no mem2reg of its own, and the MetaJS and
+	// Lua floors are compiled by it, so the emitted module leans on the backend to
+	// promote those slots to registers. Without any -O flag clang does none of it. The
+	// effect is measured in docs/runtime-rework-plan.md.
+	args := []string{"-Wno-override-module", "-O2", "-o", outPath, tmpName}
 	args = append(args, inputs...)
 	for _, d := range LinkDirs {
 		args = append(args, "-L"+d)

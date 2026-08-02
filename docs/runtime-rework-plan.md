@@ -1622,6 +1622,215 @@ touched:
   `k > 0` guard, because the IR computes both operands of an `And`. Kept, because the
   arena offsets are observable through pointer identity.
 
+## One linker, not two - DONE (2026-08-02)
+
+Two agents built two mechanisms for the same problem in the same commit (b2b5041) and
+both worked. There is now **one**: `abnf/llvmlink.go`. `abnf/llvmsplice.go` is deleted,
+and so are `llvm.SpliceIR` / `llvm.SpliceFunc` / `llvm.SpliceGlobal`.
+
+### What changed in the linker
+
+`linkRuntimeModules` bound FUNCTIONS only. It now binds **globals** the same way and in
+both directions, with clang's semantics spelled out rather than implied:
+
+- a global whose initializer is nil is a **declaration** (`ir.NewGlobal`, printed
+  `@gvars = external global [1024 x i8*]`); one with an initializer is the
+  **definition**;
+- a declaration anywhere in the set is re-pointed at the definition carrying its name,
+  so the program module and the runtime share one object;
+- **two definitions of one name is an error, not a silent pick** - it names both
+  modules. Splice's rule was "whoever is already there wins", which is exactly the
+  silent pick;
+- **an unresolved declaration is an error too**, for the reason `buildExecutable`
+  already refuses to stub when a runtime is linked: storage of its own would answer 0
+  instead of failing.
+
+One thing the function binder does not have to check and the global binder does:
+**size**. A signature mismatch is erased by separate compilation, but a global that is
+declared narrower than it is defined would silently address the wrong slot, so the two
+`sizeOf`s are compared and a mismatch panics naming both.
+
+### The `i8*` vs `i32*` question, answered rather than assumed
+
+Batch's claim was that separate modules make the pointer-type mismatch a non-issue. It
+holds for bash's globals too, and it was measured rather than reasoned about:
+
+```
+program module (bash-to-llvm-ir.abnf)     runtime module (lib/bash-rt.ll, from C)
+@gvars     = external global [1024 x i8*]  @gvars     = global [1024 x i32*] zeroinit
+@stdin_buf = external global i8*           @stdin_buf = global i32* null
+declare i8* @rt_strcat(i8*, i8*)           define i32* @rt_strcat(i32*, i32*)
+```
+
+Both are 8192 bytes and 8 bytes respectively, both step by 8, and resolution is by
+NAME under both engines - `abnf/llvmlink.go` for `llvm.Run`, the object linker for
+`-exe`. Ground truth, the bash ratchet through both engines and the native binary:
+
+```
+tests/bash-test-full.sh   378 checks, 0 failures  llvm.Run
+                          378 checks, 0 failures  -frozen
+                          378 checks, 0 failures  the clang-built -exe binary
+nm -u tests/bash native binary -> _putchar        (the only undefined symbol)
+```
+
+One thing had to be spelled out that splicing never needed: an initializer-less
+`ir.Global` prints as `@exited = global i32`, which clang rejects outright ("global
+variable reference must have pointer type"). `rtGlobal` sets
+`Linkage = LinkageExternal`.
+
+### What bash lost
+
+- **the 62 bitcasting shims**, one `rtw_<name>` per helper, and the `gvars`/`stdin_buf`
+  bitcasts at every load and store. `rtShim` became `rtDecl`, which builds a
+  `declare` in the emitter's own `i8*` types and nothing else;
+- `llvm.SpliceIR` / `SpliceFunc` / `SpliceGlobal`. `-exe` and `llvm.Run` now take the
+  same `rts` list, exactly as batch already did.
+
+The emitted module for `tests/bash-test-full.sh` went from **77,439 to 62,826 lines**:
+the runtime is no longer copied into it.
+
+`languages/batch-to-llvm-ir.abnf` is **unchanged** and still green through the same path
+(`clang-check`: *"ok, and the clang executable agrees"*, 28,956 lines, identical to
+before).
+
+## Four defects in c-to-llvm-ir.abnf - all FIXED, all pinned - 2026-08-02
+
+### 1 + 2. A parameter's POINTER-ness was dropped, and it cost two defects
+
+`noteParamCts` recorded a parameter's width and threw its pointer-ness away. That one
+line produced both of the defects the bash and batch ports reported:
+
+```
+$ mec languages/c-to-llvm-ir.abnf probe.c -q | grep declare
+HEAD b2b5041:  declare i32* @ext_id(i32 %0)      <- every parameter flattened to i32
+now:           declare i32* @ext_id(i32* %0)
+```
+
+```c
+int g(char *a);
+int f(char *a) { return g(a); }     /* the call is above the definition */
+int g(char *a) { return a[0]; }
+```
+```
+HEAD b2b5041:  Fail: store operands are not compatible: src=i32; dst=i32**
+now:           compiles; cc, llvm.Run, the interpreter and -exe all agree
+```
+
+The fix is `funcParamPtrs`, recorded unconditionally next to `funcParamCts` and read by
+`getFunc`, so a **prototype** now fixes the forward call - which is what C requires for
+mutual recursion anyway. `emitCallArgs` takes the pointer list too, so an integer
+argument reaching a pointer parameter (`f(0)`, `f(NULL)`) is `ptrOperand`-converted
+instead of being handed over as an i32.
+
+**A `?:` whose arms are pointers was NOT a separate defect.** Phase 3a's `makeCondExpr`
+fix already covers it; measured at HEAD b2b5041, `char *r = (e == 0) ? p + 1 : e;`
+compiles and answers what cc answers. The bash report saw it only inside a
+forward-declared function, i.e. as defect 2.
+
+**The workaround it forced is gone.** `languages/lib/bash-rt.c` no longer carries
+`rt_eg_fwd(long, long, int)`; `rt_glob` calls `rt_eg` directly through an ordinary
+prototype, and `bash-rt.ll` shrank from 13,184 to 13,156 lines.
+
+**The declared-only half showed up in the real floor.** Regenerating `runtime.ll` after
+the fix changed exactly three lines, and all three are the defect:
+
+```
+- declare i64 @write(i32 %0, i32 %1, i64 %2)      + declare i64 @write(i32 %0, i32* %1, i64 %2)
+- declare i32 @longjmp(i32 %0, i32 %1)            + declare i32 @longjmp(i32* %0, i32 %1)
+- declare i32 @setjmp(i32 %0)                     + declare i32 @setjmp(i32* %0)
+```
+
+The MetaJS and Lua floors have been passing a 64-bit buffer pointer to `write` and a
+64-bit `jmp_buf` to `setjmp`/`longjmp` through 32-bit IR parameters. **Honest
+measurement: it was not observable on this machine.** arm64-darwin passes the i32 in
+`w0` and the callee reads `x0`, and the upper bits happened to survive; a probe that
+links a declared-only `char *ext_id(char *)` against a definition in a second module
+printed the same answer at HEAD as after the fix, at -O0 and at -O2. It is wrong IR that
+this ABI forgives, which is precisely the class the plan says to fix before it stops
+being forgiven.
+
+Pinned by **`tests/c-test-full.c` SECTION 48** (10 checks, 4801-4810): a forward call
+with a pointer parameter, tail recursion through one, a pointer-returning function with
+pointer arms, a mutually recursive pair, `0` reaching a pointer parameter, and a mixed
+`(char*, long, char*)` signature. Every check validated against real `cc`. HEAD does not
+merely fail them - it **cannot compile the file**.
+
+### 3. `-O2`, and the aggregate `static` local it exposed
+
+`buildExecutable` invoked clang with **no `-O` flag at all**, so nothing downstream
+cleaned up the `alloca`/`store`/`load` per local that `c-to-llvm-ir.abnf` emits. It now
+passes **`-O2`**. Measured on this machine (mean of the runs shown; the same tree, one
+binary with the flag and one without, so nothing else differs):
+
+```
+                                        no -O      -O2
+metajs 3M-iteration loop + fib(26)      8.66s     6.16s     1.41x
+lua allocation benchmark                0.954s    0.497s    1.92x
+lua-test-full  x20                      0.648s    0.440s    1.47x
+metajs-test-full x20                    0.417s    0.395s    1.06x
+bash-test-full x20                      0.370s    0.359s    -
+batch, 100 cmp/iter x 100k              0.189s    0.106s    1.78x
+```
+
+The batch figure is the one the convergence report asked for. It measured a **1.25-1.32x
+native slowdown** from moving batch's runtime into C and named the missing `-O` as the
+cause. `-O2` does not merely recover it: the same benchmark at HEAD b2b5041 (its own
+tree, its own binary) runs in **0.189s** and now runs in **0.098-0.106s**, so the C
+runtime optimized is faster than the hand-written IR unoptimized was.
+
+**It costs build time**: roughly +0.9s per `-exe` build (metajs-test-full 0.44s -> 1.34s,
+lua-test-full 0.84s -> 2.10s, batch 0.34s -> 0.71s). `-O1` was measured too and is not
+cheaper to build (1.79s for metajs-test-full) while being no faster to run, so `-O2` it
+is.
+
+**`-O2` found a wrong answer, and that is the interesting part.** `tests/c-test-full.c`
+check 3510 - `s35_pp()->a + s35_pp()->b == 83`, where `s35_pp` returns the address of a
+function-local `static struct` - started failing in the native binary. It was not the
+flag's fault:
+
+```
+makeStaticOf:  if (isAggCt(ct)) return makeDeclOf(name, ct, opt)  // "Not yet persistent"
+```
+
+An aggregate `static` local was built as an ordinary `alloca`, so its address was a dead
+stack frame; -O0 left the bytes lying there and -O2 did not. And the same construct did
+not even reach `makeStaticOf`: `BaseTy` does not read a struct/union TAG, so
+`static struct S q;` fell past `StaticDecl` into `StructDecl`, which builds an ordinary
+local - **in both halves**. Measured against cc:
+
+```
+static struct P q; q.a++;  called three times     cc: 1 2 3   HEAD: 1 1 1  (both halves)
+static union U u;  u.i += 3; twice                cc: 3 6     HEAD: 3 3
+static int t[3];   t[0] += 2; twice               cc: 2 4     HEAD: 2 4    (arrays were fine)
+&(static struct) returned and read                cc: 83      HEAD: 83 at -O0, garbage at -O2
+```
+
+Both halves agreed with each other and disagreed with cc, so neither `--cross` nor the
+matrix could see it. Fixed in both grammars: new `SStructDecl` / `SUnionDecl`
+productions carry the `static` through, and `makeStaticOf` gives an aggregate the module
+global every other static gets (no `zeroAggregate` - the global's own
+`zeroinitializer` did it). Pinned by **SECTION 49** (11 checks, 4901-4911), validated
+against `cc`; HEAD's interpreter half fails 4902, 4903, 4904, 4906 and 4911.
+
+### Ground truth
+
+```
+matrix                325/325, byte-identical stdout and stderr goja vs -frozen
+--full                5,307 assertions, 0 languages whose halves disagree (c 484 -> 505)
+--cross               119 programs, 0 divergent
+clang-check           16 modules, all accepted by clang; bash, batch, c, lua and metajs
+                      all "ok, and the clang executable agrees"
+go test ./abnf/       ok
+gen-runtime-ll.sh --check    runtime.ll  is up to date (36656 lines)
+gen-lua-rt-ll.sh --check     lua-rt.ll   is up to date (12067 lines)
+gen-batch-rt-ll.sh --check   batch-rt.ll is up to date (3518 lines)
+gen-bash-rt-ll.sh --check    bash-rt.ll  is up to date (13156 lines)
+```
+
+`llvm.Run` against the clang-built `-O2` binary, stdout AND stderr, byte for byte:
+`metajs-test-full/-features/-try/-1/-2`, `lua-test-full/-features/-1`,
+`bash-test-full/-1`, `batch-test-full/-1`, `c-test-full/-features` - **all SAME**.
+
 ## Phase 5 - roll out
 
 Repeat phase 4 per language in the size order above, easiest first, kotlin last. One

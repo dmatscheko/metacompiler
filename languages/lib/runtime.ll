@@ -3585,7 +3585,7 @@ entry:
 	ret i32 0
 }
 
-declare i64 @write(i32 %0, i32 %1, i64 %2)
+declare i64 @write(i32 %0, i32* %1, i64 %2)
 
 define i32 @die(i32* %0) {
 entry:
@@ -28681,7 +28681,7 @@ dead443:
 	ret i64 0
 }
 
-declare i32 @longjmp(i32 %0, i32 %1)
+declare i32 @longjmp(i32* %0, i32 %1)
 
 define i64 @js_try(i64 %0, i64 %1, i64 %2) {
 entry:
@@ -28887,7 +28887,7 @@ dead444:
 	ret i64 0
 }
 
-declare i32 @setjmp(i32 %0)
+declare i32 @setjmp(i32* %0)
 
 define i64 @js_str_mem(i32* %0, i64 %1) {
 entry:

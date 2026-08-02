@@ -970,14 +970,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The helpers below used to be hand-built IR, several thousand lines of it. They now
     // live in languages/lib/bash-rt.c, compiled by languages/c-to-llvm-ir.abnf into the
     // checked-in languages/lib/bash-rt.ll (tests/gen-bash-rt-ll.sh), and that module is
-    // SPLICED into this one.
+    // LINKED with this one - by clang for -exe, and by abnf/llvmlink.go for llvm.Run,
+    // from the SAME list (rts, below).
     //
-    // Why spliced rather than linked through c.runtime: llvm.Run links nothing. It runs
-    // exactly the module it is handed, and bash - unlike MetaJS and Lua - has no Go twin
-    // answering its runtime externs, because its runtime has always been part of its own
-    // module. A `declare` would therefore be an unresolved external in every non -exe run,
-    // i.e. the whole matrix. Splicing keeps the module self-contained exactly as it was
-    // and keeps ONE implementation for both engines. See abnf/llvmsplice.go.
+    // It used to be spliced (llvm.SpliceIR appended the runtime's contents to this
+    // module) because llvm.Run had no linker for anything but functions and bash's
+    // runtime STATE is shared with the emitted program - the program loads last_status,
+    // writes gvars[], reads read_eof. linkRuntimeModules binds globals as well as
+    // functions now, so the two modules stay separate exactly as clang keeps them, and
+    // the 62 bitcasting shims this file used to emit per helper are gone: a declaration
+    // may say i8* where the definition says i32*, on a parameter, a result or a global,
+    // because separate compilation resolves by NAME.
     //
     // The .ll lives next to THIS grammar so nothing depends on the working directory.
     function libPath(name) {
@@ -991,18 +994,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return mn.substring(0, cut + 1) + "lib/" + name
     }
-    var spliceErr = llvm.SpliceIR(m, libPath("bash-rt.ll"))
-    if (spliceErr != "") { fail(spliceErr) }
+    var rts = c.runtime
+    if (rts == undefined || rts.length == 0) { rts = [libPath("bash-rt.ll")] }
 
     // Every pointer in a module out of c-to-llvm-ir.abnf is an i32*, whatever it points
-    // at; every string here is an i8*. The two are ABI-identical but not type-identical,
-    // so each C helper gets a one-block shim that bitcasts its pointer arguments and its
-    // pointer result. That is what keeps every CALL SITE in this file unchanged. `kinds`
-    // is one entry per parameter: 1 = pointer, 0 = i32; `retPtr` says the same of the
-    // result.
+    // at; every string here is an i8*. The two are ABI-identical but not type-identical.
+    // Because the runtime is a SEPARATE module, that is a non-issue: `declare i8*
+    // @rt_strcat(i8*, i8*)` here resolves to `define i32* @rt_strcat(i32*, i32*)` there,
+    // by name, under clang and under abnf/llvmlink.go alike. So the helper is simply
+    // DECLARED with the face this emitter wants, and every call site is unchanged.
+    // `kinds` is one entry per parameter: 1 = i8*, 2 = i32*, 0 = i32; `retPtr` says the
+    // result is an i8*.
     var i32ptr = llvm.types.NewPointer(i32)
-    function rtShim(name, retPtr, kinds) {
-        var cf = llvm.SpliceFunc(m, name)
+    function rtDecl(name, retPtr, kinds) {
         var ps = []
         var i = 0
         while (i < kinds.length) {
@@ -1013,19 +1017,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var rty = i32
         if (retPtr) { rty = i8ptr }
-        var f = m.NewFunc("rtw_" + name, rty, ps)
-        var b = f.NewBlock("entry")
-        var args = []
-        i = 0
-        while (i < kinds.length) {
-            if (kinds[i] == 1) { args.push(b.NewBitCast(f.Params[i], i32ptr)) }
-            else { args.push(f.Params[i]) }
-            i = i + 1
-        }
-        var r = b.NewCall(cf, args)
-        if (retPtr) { b.NewRet(b.NewBitCast(r, i8ptr)) } else { b.NewRet(r) }
-        return f
+        return m.NewFunc(name, rty, ps)
     }
+    // A global the runtime DEFINES, declared here with the type this emitter wants to
+    // step through. abnf/llvmlink.go binds it to the one definition and checks the two
+    // agree on SIZE; clang resolves the symbol.
+    // The linkage has to be spelled: an initializer-less ir.Global prints as
+    // `@exited = global i32` by default, which clang rejects outright ("global variable
+    // reference must have pointer type"). `external` is what makes it a declaration.
+    function rtGlobal(name, ty) {
+        var g = m.NewGlobal(name, ty)
+        g.Linkage = llvm.enum.LinkageExternal
+        return g
+    }
+
+    // c-to-llvm-ir.abnf does not put a global's initializer in the global itself; it
+    // emits __mec_ginit(), which main calls. bash-rt.c's own main is stripped when its
+    // module is generated, so THIS main makes the call - see the entry block below.
+    var rtGinit = m.NewFunc("__mec_ginit", i32)
 
     // The string heap lives in bash-rt.c; nothing outside rt_bump touches it.
 
@@ -1035,33 +1044,33 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // gvars[], reads read_eof - so there has to be exactly one definition, and the C file
     // is where the code that uses them most now lives.
     //
-    // ONE TYPE DIFFERENCE, and it is the whole reason for the bitcasts below: a `char *`
-    // out of c-to-llvm-ir.abnf is an `i32*`, so `char *gvars[1024]` is `[1024 x i32*]`
-    // where the hand-emitted module had `[1024 x i8*]`. The two are the same bytes; only
-    // the IR type differs, and only for the pointer-valued globals the emitter still
-    // touches directly - gvars and stdin_buf.
-    var gStatus = llvm.SpliceGlobal(m, "last_status")   // $?
-    var gExited = llvm.SpliceGlobal(m, "exited")        // set by `exit`
-    var gExitCode = llvm.SpliceGlobal(m, "exit_code")
+    // A `char *` out of c-to-llvm-ir.abnf is an `i32*`, so `char *gvars[1024]` is defined
+    // over there as `[1024 x i32*]`. It is DECLARED here as `[1024 x i8*]` - the same 8192
+    // bytes, the same 8-byte stride - and the linker binds the two by name, so no bitcast
+    // is needed on either side. That is what separate compilation buys, and llvmlink.go
+    // checks the sizes match rather than trusting this comment.
+    var gStatus = rtGlobal("last_status", i32)   // $?
+    var gExited = rtGlobal("exited", i32)        // set by `exit`
+    var gExitCode = rtGlobal("exit_code", i32)
 
     // A real "" at a NONZERO address. The IR interpreter traps loads at address 0, so an
     // empty / unset value must be a genuine pointer to a NUL byte, never a null pointer.
-    var gEmpty = llvm.SpliceGlobal(m, "empty")
     var emptyTy = llvm.types.NewArray(1, i8)
+    var gEmpty = rtGlobal("empty", emptyTy)
     function emptyPtr(b) { return b.NewGetElementPtr(emptyTy, gEmpty, zero, zero) }
 
     // A SECOND empty string, at a different address: the "variable is unset" marker. It reads
     // as "" everywhere (so no expansion has to special case it), but a pointer comparison
     // against it answers ${v-default} / ${v:+alt} and friends.
-    var gUnset = llvm.SpliceGlobal(m, "unset_marker")
+    var gUnset = rtGlobal("unset_marker", emptyTy)
     function unsetPtr(b) { return b.NewGetElementPtr(emptyTy, gUnset, zero, zero) }
 
     // Variable storage is ONE global array of char*, indexed by a compile-time id, so the
     // `local` unwinder can restore a slot chosen at run time (a per-name global could only
     // be reached through a generated dispatch).
     var NVARS = 1024
-    var gvarsTy = llvm.types.NewArray(NVARS, i32ptr)
-    var gVars = llvm.SpliceGlobal(m, "gvars")
+    var gvarsTy = llvm.types.NewArray(NVARS, i8ptr)
+    var gVars = rtGlobal("gvars", gvarsTy)
 
     var varIds = {}       // "$"+name -> slot index
     var varIdList = []    // index -> name (creation order, for the deterministic init run)
@@ -1080,39 +1089,39 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function varSlot(b, idx) {
         return b.NewGetElementPtr(gvarsTy, gVars, zero, idx)
     }
-    function loadVar(b, name) { return b.NewBitCast(b.NewLoad(i32ptr, varPtr(b, name)), i8ptr) }
-    function storeVar(b, name, v) { b.NewStore(b.NewBitCast(v, i32ptr), varPtr(b, name)) }
+    function loadVar(b, name) { return b.NewLoad(i8ptr, varPtr(b, name)) }
+    function storeVar(b, name, v) { b.NewStore(v, varPtr(b, name)) }
 
     // The `local` save stack and the capture stack are private to the runtime now; only
     // their depths are read here.
-    var gLsTop = llvm.SpliceGlobal(m, "ls_top")
-    var gNvars = llvm.SpliceGlobal(m, "nvars")   // filled by main's entry block
+    var gLsTop = rtGlobal("ls_top", i32)
+    var gNvars = rtGlobal("nvars", i32)   // filled by main's entry block
     // The standard input a pipeline stage hands on.
-    var gStdin = llvm.SpliceGlobal(m, "stdin_buf")
+    var gStdin = rtGlobal("stdin_buf", i8ptr)
 
     // Shell options (set -e / -u / -o pipefail) and the abort flag a set -u failure raises
     // during expansion (expansion cannot return a status, so the command about to run picks
     // it up - exactly the shape the interpreter uses).
-    var gOptE = llvm.SpliceGlobal(m, "opt_errexit")
-    var gOptU = llvm.SpliceGlobal(m, "opt_nounset")
-    var gOptPf = llvm.SpliceGlobal(m, "opt_pipefail")
-    var gAbort = llvm.SpliceGlobal(m, "abort_flag")
-    var gCondErr = llvm.SpliceGlobal(m, "cond_err")   // a [[ ]] that could not be evaluated
+    var gOptE = rtGlobal("opt_errexit", i32)
+    var gOptU = rtGlobal("opt_nounset", i32)
+    var gOptPf = rtGlobal("opt_pipefail", i32)
+    var gAbort = rtGlobal("abort_flag", i32)
+    var gCondErr = rtGlobal("cond_err", i32)   // a [[ ]] that could not be evaluated
 
     // Two output channels. 0 = standard output (captured by $( ) when one is open), 1 = the
     // standard error channel, 2 = discarded. There is no stderr primitive behind a compiled
     // run either, so channel 1's text is dropped - what MATTERS is which channel a
     // redirection routes a command to, and that is modelled exactly.
-    var gSinkOut = llvm.SpliceGlobal(m, "sink_out")
-    var gSinkErr = llvm.SpliceGlobal(m, "sink_err")
+    var gSinkOut = rtGlobal("sink_out", i32)
+    var gSinkErr = rtGlobal("sink_err", i32)
     // Standard input for `read`: the read position (the buffer is gStdin above).
-    var gStdinPos = llvm.SpliceGlobal(m, "stdin_pos")
+    var gStdinPos = rtGlobal("stdin_pos", i32)
 
     // Positional parameters live in ONE global stack rather than in function arguments, so
     // "$@" can expand to any number of words and `shift` and `set --` are ordinary writes.
-    var gArgvTop = llvm.SpliceGlobal(m, "argv_top")
-    var gFrameBase = llvm.SpliceGlobal(m, "frame_base")
-    var gFrameN = llvm.SpliceGlobal(m, "frame_n")
+    var gArgvTop = rtGlobal("argv_top", i32)
+    var gFrameBase = rtGlobal("frame_base", i32)
+    var gFrameN = rtGlobal("frame_n", i32)
 
     // ===================================================================================
     //  Emitter state.
@@ -1179,97 +1188,97 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ===================================================================================
     // ===================================================================================
     //  The string runtime. The BODIES are languages/lib/bash-rt.c; what is emitted here is
-    //  one bitcasting shim per helper (see rtShim above), so every call site below is
-    //  unchanged from when the bodies were built by hand.
+    //  one `declare` per helper (see rtDecl above), in this emitter's own i8* types, so
+    //  every call site below is unchanged from when the bodies were built by hand.
     // ===================================================================================
 
     // i8* rt_bump(i32 n): return &arena[pos]; pos += n.
-    var rtBump = rtShim("rt_bump", true, [0])
+    var rtBump = rtDecl("rt_bump", true, [0])
     // i32 rt_strlen(i8* s)
-    var rtStrlen = rtShim("rt_strlen", false, [1])
+    var rtStrlen = rtDecl("rt_strlen", false, [1])
     // i32 rt_charlen(i8* s): the number of CHARACTERS in s, which is what bash's ${#s}
     // counts - not bytes (rt_strlen) and not UTF-16 units.
-    var rtCharLen = rtShim("rt_charlen", false, [1])
+    var rtCharLen = rtDecl("rt_charlen", false, [1])
     // i32 rt_charoff(i8* s, i32 k): the BYTE offset of character number k, clamped to the
     // length of s. rt_csubstr converts a character range with it.
-    var rtCharOff = rtShim("rt_charoff", false, [1, 0])
+    var rtCharOff = rtDecl("rt_charoff", false, [1, 0])
     // i32 rt_streq(i8* a, i8* b) -> 1 if equal, else 0.
-    var rtStreq = rtShim("rt_streq", false, [1, 1])
+    var rtStreq = rtDecl("rt_streq", false, [1, 1])
     // i32 rt_strcmp(i8* a, i8* b): -1 / 0 / 1 by unsigned byte order (the shell's < and >).
-    var rtStrcmp = rtShim("rt_strcmp", false, [1, 1])
+    var rtStrcmp = rtDecl("rt_strcmp", false, [1, 1])
     // i8* rt_strcat(i8* a, i8* b): fresh arena string = a followed by b.
-    var rtStrcat = rtShim("rt_strcat", true, [1, 1])
+    var rtStrcat = rtDecl("rt_strcat", true, [1, 1])
     // i8* rt_int2str(i32 n): decimal string in the arena (mirrors the interpreter's numToStr).
-    var rtInt2str = rtShim("rt_int2str", true, [0])
+    var rtInt2str = rtDecl("rt_int2str", true, [0])
     // i32 rt_str2int(i8* s): leading spaces/tabs, one +/- sign, digits until non-digit.
-    var rtStr2int = rtShim("rt_str2int", false, [1])
+    var rtStr2int = rtDecl("rt_str2int", false, [1])
     // i32 rt_class(i8* p, i32 ch): p points at "[". Returns -1 when the bracket expression is
     // unterminated (the "[" is then a literal), else (bytesConsumed << 1) | matched.
-    var rtClass = rtShim("rt_class", false, [1, 0])
+    var rtClass = rtDecl("rt_class", false, [1, 0])
 
 
     // The shared IR-emitting shorthand that used to sit here (reK/reFor/reForL and the
     // re_bad guard) went with the ERE engine into languages/lib/bash-rt.c.
 
     // ---- glob, the ${...} family, field lists and arrays -------------------------------
-    // All of these are languages/lib/bash-rt.c now; what is left here is the shim that
-    // gives each one an i8*-typed face (see rtShim). The comments that used to sit above
-    // each hand-emitted body moved to the C file with the body.
+    // All of these are languages/lib/bash-rt.c now; what is left here is the declaration
+    // that gives each one an i8*-typed face (see rtDecl). The comments that used to sit
+    // above each hand-emitted body moved to the C file with the body.
 
     // glob (pathname-style) matching: * ? [...] and a backslash escape, plus the extended
     // globs @(a|b) ?(a|b) *(a|b) +(a|b) !(a|b). The same matcher backs case and [[ == ]].
-    var rtSubstr = rtShim("rt_substr", true, [1, 0, 0])
-    var rtCSubstr = rtShim("rt_csubstr", true, [1, 0, 0])
-    var rtEgClose = rtShim("rt_egclose", false, [1])
-    var rtEgAlt = rtShim("rt_egalt", false, [1, 0])
-    var rtGlob = rtShim("rt_glob", false, [1, 1])
-    var rtEg = rtShim("rt_eg", false, [1, 1, 0])
-    var rtMatchLen = rtShim("rt_matchlen", false, [1, 1, 0])
-    var rtMatchEnd = rtShim("rt_matchend", false, [1, 1])
+    var rtSubstr = rtDecl("rt_substr", true, [1, 0, 0])
+    var rtCSubstr = rtDecl("rt_csubstr", true, [1, 0, 0])
+    var rtEgClose = rtDecl("rt_egclose", false, [1])
+    var rtEgAlt = rtDecl("rt_egalt", false, [1, 0])
+    var rtGlob = rtDecl("rt_glob", false, [1, 1])
+    var rtEg = rtDecl("rt_eg", false, [1, 1, 0])
+    var rtMatchLen = rtDecl("rt_matchlen", false, [1, 1, 0])
+    var rtMatchEnd = rtDecl("rt_matchend", false, [1, 1])
 
     // ${v#p} ${v%p} ${v/p/r} ${v^} ${v@Q} ${v@E}, and `read`.
-    var rtStrip = rtShim("rt_strip", true, [1, 1, 0])
-    var rtReplace = rtShim("rt_replace", true, [1, 1, 1, 0])
-    var rtCase = rtShim("rt_case", true, [1, 0])
-    var rtShQuote = rtShim("rt_shquote", true, [1])
-    var rtAnsiC = rtShim("rt_ansic", true, [1])
-    var rtHasChar = rtShim("rt_haschar", false, [1, 0])
-    var rtReadLine = rtShim("rt_read_line", true, [0])
+    var rtStrip = rtDecl("rt_strip", true, [1, 1, 0])
+    var rtReplace = rtDecl("rt_replace", true, [1, 1, 1, 0])
+    var rtCase = rtDecl("rt_case", true, [1, 0])
+    var rtShQuote = rtDecl("rt_shquote", true, [1])
+    var rtAnsiC = rtDecl("rt_ansic", true, [1])
+    var rtHasChar = rtDecl("rt_haschar", false, [1, 0])
+    var rtReadLine = rtDecl("rt_read_line", true, [0])
 
     // field lists: a value carrying more than one word is "\x02" followed by the fields,
     // each terminated by "\x01".
-    var rtField = rtShim("rt_field", true, [1, 1, 0, 0])
-    var rtPad = rtShim("rt_pad", true, [1, 0, 0, 0])
-    var rtUnescape = rtShim("rt_unescape", true, [1])
-    var rtNFields = rtShim("rt_nfields", false, [1])
-    var rtGetField = rtShim("rt_getfield", true, [1, 0])
-    var rtWordJoin = rtShim("rt_wordjoin", true, [1])
-    var rtSplitIfs = rtShim("rt_splitifs", true, [1, 1])
-    var rtBndAcc = rtShim("rt_bnd_acc", true, [1, 1, 1])
-    var rtBndOpen = rtShim("rt_bnd_open", true, [1, 1])
+    var rtField = rtDecl("rt_field", true, [1, 1, 0, 0])
+    var rtPad = rtDecl("rt_pad", true, [1, 0, 0, 0])
+    var rtUnescape = rtDecl("rt_unescape", true, [1])
+    var rtNFields = rtDecl("rt_nfields", false, [1])
+    var rtGetField = rtDecl("rt_getfield", true, [1, 0])
+    var rtWordJoin = rtDecl("rt_wordjoin", true, [1])
+    var rtSplitIfs = rtDecl("rt_splitifs", true, [1, 1])
+    var rtBndAcc = rtDecl("rt_bnd_acc", true, [1, 1, 1])
+    var rtBndOpen = rtDecl("rt_bnd_open", true, [1, 1])
 
     // arrays: one flat store of (arrayName, key, value) triples with a linear scan.
-    var rtArrFind = rtShim("rt_arr_find", false, [1, 1])
-    var rtArrSet = rtShim("rt_arr_set", false, [1, 1, 1])
-    var rtArrGet = rtShim("rt_arr_get", true, [1, 1])
-    var rtArrHas = rtShim("rt_arr_has", false, [1, 1])
-    var rtArrDel = rtShim("rt_arr_del", false, [1, 1])
-    var rtArrCount = rtShim("rt_arr_count", false, [1])
-    var rtArrList = rtShim("rt_arr_list", true, [1, 1, 0, 0])
-    var rtArrNext = rtShim("rt_arr_nextidx", false, [1])
-    var rtArrClear = rtShim("rt_arr_clear", false, [1])
-    var rtArrAppend = rtShim("rt_arr_append", false, [1, 1])
-    var rtSliceFields = rtShim("rt_slicefields", true, [1, 0, 0, 1, 0])
-    var rtGlobEsc = rtShim("rt_globescape", true, [1])
-    var rtCatFields = rtShim("rt_catfields", true, [1, 1])
+    var rtArrFind = rtDecl("rt_arr_find", false, [1, 1])
+    var rtArrSet = rtDecl("rt_arr_set", false, [1, 1, 1])
+    var rtArrGet = rtDecl("rt_arr_get", true, [1, 1])
+    var rtArrHas = rtDecl("rt_arr_has", false, [1, 1])
+    var rtArrDel = rtDecl("rt_arr_del", false, [1, 1])
+    var rtArrCount = rtDecl("rt_arr_count", false, [1])
+    var rtArrList = rtDecl("rt_arr_list", true, [1, 1, 0, 0])
+    var rtArrNext = rtDecl("rt_arr_nextidx", false, [1])
+    var rtArrClear = rtDecl("rt_arr_clear", false, [1])
+    var rtArrAppend = rtDecl("rt_arr_append", false, [1, 1])
+    var rtSliceFields = rtDecl("rt_slicefields", true, [1, 0, 0, 1, 0])
+    var rtGlobEsc = rtDecl("rt_globescape", true, [1])
+    var rtCatFields = rtDecl("rt_catfields", true, [1, 1])
 
     // the positional parameters.
-    var rtArgPush = rtShim("rt_argpush", false, [1])
-    var rtParam = rtShim("rt_param", true, [0])
-    var rtParams = rtShim("rt_params", true, [1, 0])
+    var rtArgPush = rtDecl("rt_argpush", false, [1])
+    var rtParam = rtDecl("rt_param", true, [0])
+    var rtParams = rtDecl("rt_params", true, [1, 0])
 
     // `read` sets this when there was nothing left to read; the emitter reads it.
-    var gReadEof = llvm.SpliceGlobal(m, "read_eof")
+    var gReadEof = rtGlobal("read_eof", i32)
 
 
     // ---- [[ str =~ ere ]] -----------------------------------------------------------------
@@ -1299,23 +1308,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //
     // The caps argument is an i32*, the one non-i8* pointer in the whole runtime, so its
     // shim kind is 2.
-    var rtRegexSearch = rtShim("rt_regex_search", false, [1, 1, 1, 2, 0])
-    var rtRegexError = rtShim("rt_regex_error", true, [])
+    var rtRegexSearch = rtDecl("rt_regex_search", false, [1, 1, 1, 2, 0])
+    var rtRegexError = rtDecl("rt_regex_error", true, [])
 
     // ---- output, capture, subshell and `local` -----------------------------------------
     // Bodies in languages/lib/bash-rt.c.
     // rt_nounset: under set -u, reading an unset variable raises the abort flag.
-    var rtNounset = rtShim("rt_nounset", true, [1])
+    var rtNounset = rtDecl("rt_nounset", true, [1])
     // rt_putc: one byte to the current sink - the innermost capture buffer if one is open,
     // stdout if not, nowhere when the channel is not the standard output one.
-    var rtPutc = rtShim("rt_putc", false, [0])
-    var rtCapBegin = rtShim("rt_cap_begin", false, [0])
-    var rtCapEnd = rtShim("rt_cap_end", true, [0])
-    var rtPrints = rtShim("rt_prints", false, [1])
-    var rtSsSave = rtShim("rt_ss_save", false, [0])
-    var rtSsRestore = rtShim("rt_ss_restore", false, [0])
-    var rtPushLocal = rtShim("rt_push_local", false, [0])
-    var rtPopLocals = rtShim("rt_pop_locals", false, [0])
+    var rtPutc = rtDecl("rt_putc", false, [0])
+    var rtCapBegin = rtDecl("rt_cap_begin", false, [0])
+    var rtCapEnd = rtDecl("rt_cap_end", true, [0])
+    var rtPrints = rtDecl("rt_prints", false, [1])
+    var rtSsSave = rtDecl("rt_ss_save", false, [0])
+    var rtSsRestore = rtDecl("rt_ss_restore", false, [0])
+    var rtPushLocal = rtDecl("rt_push_local", false, [0])
+    var rtPopLocals = rtDecl("rt_pop_locals", false, [0])
 
     // ===================================================================================
     //  Value helpers used by the thunks.
@@ -2230,7 +2239,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //
     // There is no real filesystem behind a compiled run either, so the file predicates go
     // through rt_fskind, a model of the standard paths (see bash-interpreter.abnf).
-    var rtFskind = rtShim("rt_fskind", false, [1])
+    var rtFskind = rtDecl("rt_fskind", false, [1])
 
     // "name" or "name[key]"
     function splitSubscript(s0) {
@@ -2384,7 +2393,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewCall(rtArrClear, psName)
             // a pipeline rebinds standard input for its stages only
             var savedIn = b.NewAlloca(i8ptr), savedInPos = b.NewAlloca(i32)
-            b.NewStore(b.NewBitCast(b.NewLoad(i32ptr, gStdin), i8ptr), savedIn)
+            b.NewStore(b.NewLoad(i8ptr, gStdin), savedIn)
             b.NewStore(b.NewLoad(i32, gStdinPos), savedInPos)
             var k
             for (k = 0; k < stages.length; k++) {
@@ -2392,7 +2401,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (!isLast) { b.NewCall(rtCapBegin, zero) }
                 b = isLast ? stages[k](b) : emitCond(stages[k], b)
                 if (!isLast) {
-                    b.NewStore(b.NewBitCast(b.NewCall(rtCapEnd, zero), i32ptr), gStdin)
+                    b.NewStore(b.NewCall(rtCapEnd, zero), gStdin)
                     b.NewStore(zero, gStdinPos)
                 }
                 var stv = b.NewLoad(i32, gStatus)
@@ -2401,7 +2410,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var bad = b.NewAnd(fail0, b.NewICmp(llvm.enum.IPredNE, stv, zero))
                 b.NewStore(b.NewSelect(bad, stv, b.NewLoad(i32, ff)), ff)
             }
-            b.NewStore(b.NewBitCast(b.NewLoad(i8ptr, savedIn), i32ptr), gStdin)
+            b.NewStore(b.NewLoad(i8ptr, savedIn), gStdin)
             b.NewStore(b.NewLoad(i32, savedInPos), gStdinPos)
             // set -o pipefail: the pipeline reports the first failing stage.
             var st0 = b.NewLoad(i32, gStatus)
@@ -3189,7 +3198,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var sb = b.NewAlloca(i8ptr), sp = b.NewAlloca(i32)
         b.NewStore(b.NewLoad(i32, gSinkOut), so)
         b.NewStore(b.NewLoad(i32, gSinkErr), se)
-        b.NewStore(b.NewBitCast(b.NewLoad(i32ptr, gStdin), i8ptr), sb)
+        b.NewStore(b.NewLoad(i8ptr, gStdin), sb)
         b.NewStore(b.NewLoad(i32, gStdinPos), sp)
         var i
         for (i = 0; i < redirs.length; i++) {
@@ -3197,12 +3206,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var tgt = null
             if (r.target != null) { var rr = evalWord(b, r.target); b = rr.b; tgt = rr }
             var fd = (r.iofd == "") ? "1" : r.iofd
-            if (r.rd == "<<") { b.NewStore(b.NewBitCast(tgt.v, i32ptr), gStdin); b.NewStore(zero, gStdinPos) }
+            if (r.rd == "<<") { b.NewStore(tgt.v, gStdin); b.NewStore(zero, gStdinPos) }
             else if (r.rd == "<<<") {
-                b.NewStore(b.NewBitCast(b.NewCall(rtStrcat, [tgt.v, gepStr(b, "\n")]), i32ptr), gStdin)
+                b.NewStore(b.NewCall(rtStrcat, [tgt.v, gepStr(b, "\n")]), gStdin)
                 b.NewStore(zero, gStdinPos)
             }
-            else if (r.rd == "<") { b.NewStore(b.NewBitCast(emptyPtr(b), i32ptr), gStdin); b.NewStore(zero, gStdinPos) }
+            else if (r.rd == "<") { b.NewStore(emptyPtr(b), gStdin); b.NewStore(zero, gStdinPos) }
             else if (r.rd == ">&" || r.rd == "<&") {
                 var src = (r.target != null && r.target.c == "2") ? b.NewLoad(i32, gSinkErr) : b.NewLoad(i32, gSinkOut)
                 if (fd == "2") { b.NewStore(src, gSinkErr) } else { b.NewStore(src, gSinkOut) }
@@ -3226,7 +3235,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function emitCloseRedirs(b, sv) {
         b.NewStore(b.NewLoad(i32, sv.so), gSinkOut)
         b.NewStore(b.NewLoad(i32, sv.se), gSinkErr)
-        b.NewStore(b.NewBitCast(b.NewLoad(i8ptr, sv.sb), i32ptr), gStdin)
+        b.NewStore(b.NewLoad(i8ptr, sv.sb), gStdin)
         b.NewStore(b.NewLoad(i32, sv.sp), gStdinPos)
     }
 
@@ -3449,12 +3458,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // itself; it emits __mec_ginit(), which main calls. bash-rt.c's main is stripped
         // when its module is generated, so THIS main has to make the call - and it is not
         // optional bookkeeping: every string literal in the runtime is materialized there.
-        entry.NewCall(llvm.SpliceFunc(m, "__mec_ginit"), [])
+        entry.NewCall(rtGinit, [])
         // Now that every variable slot is known, mark them all unset in entry (a raw null
         // would trap on the first load, so the marker is a real pointer to a NUL byte).
         var up0 = unsetPtr(entry)
         for (i = 0; i < varIdList.length; i++) {
-            entry.NewStore(entry.NewBitCast(up0, i32ptr), varSlot(entry, llvm.constant.NewInt(i32, i)))
+            entry.NewStore(up0, varSlot(entry, llvm.constant.NewInt(i32, i)))
         }
         // There is no process environment behind a compiled run, so the few variables a script
         // may reasonably expect to exist get a fixed, documented default.
@@ -3468,7 +3477,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var sel = unsetPtr(gb)
         for (i = 0; i < varIdList.length; i++) {
             var hit = gb.NewICmp(llvm.enum.IPredNE, gb.NewCall(rtStreq, [nm, gepStr(gb, varIdList[i])]), zero)
-            var slot = gb.NewBitCast(gb.NewLoad(i32ptr, varSlot(gb, llvm.constant.NewInt(i32, i))), i8ptr)
+            var slot = gb.NewLoad(i8ptr, varSlot(gb, llvm.constant.NewInt(i32, i)))
             sel = gb.NewSelect(hit, slot, sel)
         }
         gb.NewRet(sel)
@@ -3479,8 +3488,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (i = 0; i < varIdList.length; i++) {
             var shit = sb.NewICmp(llvm.enum.IPredNE, sb.NewCall(rtStreq, [snm, gepStr(sb, varIdList[i])]), zero)
             var slot = varSlot(sb, llvm.constant.NewInt(i32, i))
-            var cur = sb.NewBitCast(sb.NewLoad(i32ptr, slot), i8ptr)
-            sb.NewStore(sb.NewBitCast(sb.NewSelect(shit, sval, cur), i32ptr), slot)
+            var cur = sb.NewLoad(i8ptr, slot)
+            sb.NewStore(sb.NewSelect(shit, sval, cur), slot)
         }
         sb.NewRet(zero)
         // rt_eval_assign: split "NAME=VALUE" at the first "=" and assign.
@@ -3512,14 +3521,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // With -exe PATH, link the module into a native executable (clang) instead of
     // running it in the built-in IR interpreter.
     if (c.exePath != undefined && c.exePath != "") {
-        var buildErr = llvm.BuildExecutable(m, c.exePath)
+        var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
         if (buildErr != "") { println(buildErr); exit(1) }
         println("bash-to-llvm-ir: wrote executable " + c.exePath)
         exit(0)
     }
 
     println(m)
-    var res = llvm.Run(m, "main")
+    var res = llvm.Run(m, "main", "", rts)
     print(res.Out)
     println("bash-to-llvm-ir: exit status " + res.Ret)
     exit(res.Ret)

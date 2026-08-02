@@ -24,7 +24,8 @@
 /* ---- the runtime's shared state ------------------------------------------
  * These globals are the runtime's AND the emitted program's: the program loads
  * last_status, writes gvars[], pushes argv. They are defined here, once, and
- * the grammar reaches them by name through llvm.SpliceGlobal.
+ * the grammar DECLARES them by name (`external global`) and the linker binds
+ * the two - abnf/llvmlink.go for llvm.Run, clang for -exe.
  */
 int last_status;              /* $?                                        */
 int exited;                   /* set by `exit`                             */
@@ -419,23 +420,21 @@ int rt_egalt(char *eaq, int eaa)
  * forward declaration the IR expressed by declaring the function early.
  */
 
-/* THE ONE PLACE THE C SUBSET COULD NOT EXPRESS THE IR DIRECTLY.
- * rt_glob and rt_eg are mutually recursive, so one of them is necessarily
- * CALLED before it is defined - and languages/c-to-llvm-ir.abnf builds a
+/* rt_glob and rt_eg are mutually recursive, so one of them is necessarily
+ * CALLED before it is defined; this prototype is the forward declaration, and
+ * it carries the POINTER parameters the definition has.
+ *
+ * Until 2026-08-02 it could not: languages/c-to-llvm-ir.abnf built a
  * not-yet-defined callee with non-pointer parameters (getFuncByArity pushes
- * {ptr: false} for every argument), so the later definition then tries to store
- * an i32 parameter into an i32** slot and the compile fails with
- *   store operands are not compatible: src=i32; dst=i32**
- * Minimal repro, nothing to do with bash:
- *   int g(char *a);
- *   int f(char *a) { return g(a); }
- *   int g(char *a) { return a[0]; }
- * The forward call therefore goes through INTEGER parameters, which the default
- * spec already matches, and rt_eg_fwd converts them back. See
- * docs/runtime-rework-plan.md; the fix belongs in c-to-llvm-ir.abnf and is not
- * made here.
+ * {ptr: false} for every argument) and a prototype did not correct it, so the
+ * later definition tried to store an i32 parameter into an i32** slot and the
+ * compile failed with "store operands are not compatible: src=i32; dst=i32**".
+ * The workaround here was an rt_eg_fwd(long, long, int) trampoline that the
+ * default spec already matched. noteParamCts now records pointer-ness and
+ * getFunc reads it, so the prototype does the job and the trampoline is gone.
+ * Pinned by SECTION 48 of tests/c-test-full.c.
  */
-int rt_eg_fwd(long egp, long egs, int egstar);
+int rt_eg(char *p, char *s, int star);
 
 /* int rt_glob(char *p, char *s): 1 when the whole subject matches the whole
  * pattern. */
@@ -476,7 +475,7 @@ int rt_glob(char *p, char *s)
          * arms; all five prefixes are only that when "(" is the next byte. */
         isPfx = (pc == 64) || (pc == 63) || (pc == 42) || (pc == 43) || (pc == 33);
         nextc = (int)(unsigned char)pcur[1];
-        if (isPfx && nextc == 40) return rt_eg_fwd((long)(void *)pcur, (long)(void *)sp, 0);
+        if (isPfx && nextc == 40) return rt_eg(pcur, sp, 0);
 
         if (pc == 42) {
             /* skip a run of "*" */
@@ -684,10 +683,6 @@ int rt_matchend(char *p, char *s)
     }
 }
 
-int rt_eg_fwd(long egp, long egs, int egstar)
-{
-    return rt_eg((char *)(void *)egp, (char *)(void *)egs, egstar);
-}
 /* ================= frag-strip.c ================= */
 /* ---- chunk: rt_strip .. rt_read_line -------------------------------------- */
 

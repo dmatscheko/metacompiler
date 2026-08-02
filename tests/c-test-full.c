@@ -1641,6 +1641,105 @@ int s47(void) {
     return 0;
 }
 
+// ===== SECTION 48: a call that PRECEDES the definition, with pointer parameters =====
+/* Two defects shared one line - noteParamCts dropped a parameter's POINTER-ness, so
+   only its width survived into funcParamCts.
+
+   1. A call emitted before the definition materialized the callee through
+      getFuncByArity, which pushes {ptr: false} for every argument, and a prototype
+      did not correct it. The definition then reused that object and the compile
+      failed outright: "store operands are not compatible: src=i32; dst=i32**".
+      Fatal for MUTUALLY RECURSIVE helpers, where no ordering avoids it - which is
+      what forced languages/lib/bash-rt.c to route rt_glob -> rt_eg through an
+      rt_eg_fwd(long, long, int) trampoline. That trampoline is gone.
+   2. A function only ever DECLARED came out as `declare i32* @ext1(i32 %0)` - the
+      return type right, every parameter flattened to i32, which truncates a 64-bit
+      pointer in a native binary. That half cannot be asserted from here: this file
+      has no standard library and an external that is never defined cannot be called,
+      so it is measured in docs/runtime-rework-plan.md against a linked helper module.
+      It is the same line, and this section is what pins the line.
+
+   Every check below is a HARD COMPILE FAILURE before the fix, not a wrong answer, so
+   the whole section is the assertion. cc answers all of it. */
+int s48_g(char *a);                       /* forward: pointer parameter */
+int s48_len(char *s, int acc);
+char *s48_pick(char *a, char *b, int k);  /* forward: pointer arms and a pointer return */
+int s48_ping(char *s, int n);
+int s48_pong(char *s, int n);
+
+int s48_f(char *a) { return s48_g(a); }   /* the CALL, above the definition */
+int s48_g(char *a) { return a[0]; }
+int s48_len(char *s, int acc) { if (s[0] == 0) return acc; return s48_len(s + 1, acc + 1); }
+char *s48_pick(char *a, char *b, int k) { return k ? a : b; }
+/* mutual recursion: whichever is defined second is called before it exists */
+int s48_ping(char *s, int n) { if (n <= 0) return s[0]; return s48_pong(s + 1, n - 1); }
+int s48_pong(char *s, int n) { if (n <= 0) return s[0]; return s48_ping(s + 1, n - 1); }
+/* an integer argument reaching a pointer parameter still has to typecheck */
+int s48_null(char *p) { if (p == 0) return 99; return p[0]; }
+int s48_two(char *a, long n, char *b) { return a[0] + (int)n + b[0]; }
+
+int s48(void) {
+    char buf[6];
+    char *p;
+    buf[0] = 'a'; buf[1] = 'b'; buf[2] = 'c'; buf[3] = 'd'; buf[4] = 0;
+    check(4801, s48_f(buf) == 'a');
+    check(4802, s48_len(buf, 0) == 4);
+    check(4803, s48_pick(buf, buf + 2, 1)[0] == 'a');
+    check(4804, s48_pick(buf, buf + 2, 0)[0] == 'c');
+    check(4805, s48_ping(buf, 2) == 'c');
+    check(4806, s48_pong(buf, 3) == 'd');
+    check(4807, s48_null(0) == 99);
+    check(4808, s48_null(buf + 1) == 'b');
+    check(4809, s48_two(buf, 5L, buf + 1) == 'a' + 5 + 'b');
+    /* the pointer must survive the round trip whole, not truncated to 32 bits */
+    p = s48_pick(buf + 3, buf, 1);
+    check(4810, p[0] == 'd' && p - buf == 3);
+    return 0;
+}
+
+// ===== SECTION 49: a static local of AGGREGATE type =====
+/* A `static` local has static storage duration whatever its type. An aggregate one
+   used to be built as an ordinary alloca in the compiler half and as ordinary local
+   storage in the interpreter half - `static struct P q; q.a++;` counted 1, 1 where cc
+   counts 1, 2 - because BaseTy does not read a struct/union TAG, so `static struct S q;`
+   fell past StaticDecl into StructDecl and lost the `static`. Both halves agreed with
+   each other and disagreed with cc, which is exactly the class --cross and the matrix
+   cannot see.
+
+   The compiler half had a second, worse symptom: returning the address of such an
+   object returned a dead stack frame. It passed at -O0 because the bytes were still
+   lying there, and check 3510 of SECTION 35 started FAILING natively the moment
+   buildExecutable began passing clang -O2. Validated against cc. */
+struct S49P { int a; int b; };
+union S49U { int i; char c[4]; };
+int s49_bump(void) { static struct S49P q; q.a = q.a + 1; q.b = q.b + 2; return q.a * 10 + q.b; }
+int s49_ubump(void) { static union S49U u; u.i = u.i + 3; return u.i; }
+struct S49P *s49_addr(void) { static struct S49P z; z.a = 41; z.b = 42; return &z; }
+int s49_arr(void) { static int t[3]; t[0] = t[0] + 2; return t[0]; }
+int s49_init(void) { static struct S49P w = {7, 8}; w.a = w.a + 1; return w.a * 10 + w.b; }
+int s49_id(struct S49P *p) { return p->a + p->b; }
+
+int s49(void) {
+    struct S49P *p1;
+    struct S49P *p2;
+    check(4901, s49_bump() == 12);
+    check(4902, s49_bump() == 24);          /* it SURVIVES the call, unlike an alloca */
+    check(4903, s49_bump() == 36);
+    check(4904, s49_ubump() == 3 && s49_ubump() == 6);
+    check(4905, s49_arr() == 2 && s49_arr() == 4);
+    /* the address is stable, and what it points at outlives the call */
+    p1 = s49_addr();
+    p2 = s49_addr();
+    check(4906, p1 == p2);
+    check(4907, p1->a + p1->b == 83);
+    check(4908, s49_id(s49_addr()) == 83);
+    check(4909, s49_addr()->a + s49_addr()->b == 83);
+    /* the initializer runs ONCE */
+    check(4910, s49_init() == 88);
+    check(4911, s49_init() == 98);
+    return 0;
+}
+
 // ===== END SECTIONS =====
 
 int main() {
@@ -1691,6 +1790,8 @@ int main() {
     s45(); // SECTION-CALL 45
     s46(); // SECTION-CALL 46
     s47(); // SECTION-CALL 47
+    s48(); // SECTION-CALL 48
+    s49(); // SECTION-CALL 49
     /* summary: "full: <checks> checks, <failures> failures" */
     putchar('f'); putchar('u'); putchar('l'); putchar('l'); putchar(':'); putchar(' ');
     print_num(nchecks);

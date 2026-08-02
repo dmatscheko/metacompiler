@@ -5,9 +5,9 @@
 #
 # WHY THE .ll IS CHECKED IN
 #
-# languages/bash-to-llvm-ir.abnf splices this module into the module it emits
-# (llvm.SpliceIR), and llvm.BuildExecutable would hand a runtime input straight
-# to clang - so shipping the .c would have CLANG compile bash's runtime. The
+# languages/bash-to-llvm-ir.abnf links this module with the module it emits, and
+# llvm.BuildExecutable would hand a runtime input straight to clang - so shipping
+# the .c would have CLANG compile bash's runtime. The
 # whole point of docs/runtime-rework-plan.md is that every layer is compiled by
 # this repository, so the runtime is compiled by languages/c-to-llvm-ir.abnf
 # here and what runs is IR that came out of a grammar in languages/. bash-rt.ll

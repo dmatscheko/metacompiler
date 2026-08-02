@@ -754,7 +754,7 @@ PtrQual     = "const" KwEnd | "volatile" KwEnd | "restrict" KwEnd | "_Atomic" Kw
 // which BaseTy does not read.
 Statement   = Block | If | While | Do | For | Switch | SwitchCase | Return | Break | Continue
             | AssertStmt | BoolDecl | LProto | LTagFwd | LStructDef | LUnionDef | StructDefDecl | UnionDefDecl
-            | LTypedef | StaticDecl | StructDecl | UnionDecl | Decl
+            | LTypedef | SStructDecl | SUnionDecl | StaticDecl | StructDecl | UnionDecl | Decl
             | Goto | PPCondStmt | PPStmt | Label | TdDecl | Empty | ExprStmt ;
 
 // A typedef inside a function body. C scopes it to the block; this model has one
@@ -779,6 +779,16 @@ LUnionDef   <~~ defineUnion(takeAll()); push(function() {}) ~~>
 // parsed by TypeInt, so this form only ever claims a statement.
 StaticDecl  <~~ push(makeDeclSeq(takeAll(), true)) ~~>
             = KwStatic BaseTy SInitDecl { "," SInitDecl } ";" ;
+// 'static struct S q;' / 'static union U u;'. BaseTy does not read a tag, so StaticDecl
+// cannot claim these and they used to fall through to StructDecl/UnionDecl, which build
+// an ORDINARY local - a wrong answer in both halves: the object was reset on every call
+// (`static struct P q; q.a++;` counted 1, 1 where cc counts 1, 2), and in the compiler
+// half returning its address returned a dead stack frame, which clang -O2 then made
+// visible as check 3510 of tests/c-test-full.c. Pinned by SECTION 49.
+SStructDecl <~~ push(makeDeclSeq(takeAll(), true)) ~~>
+            = KwStatic [ TypeInt ] KwStruct Id <~~ push({bty: ctStruct(up.in)}) ~~> [ TypeInt ] DeclItem { "," DeclItem } ";" ;
+SUnionDecl  <~~ push(makeDeclSeq(takeAll(), true)) ~~>
+            = KwStatic [ TypeInt ] KwUnion Id <~~ push({bty: ctStruct(uKey(up.in))}) ~~> [ TypeInt ] DeclItem { "," DeclItem } ";" ;
 SInitDecl   <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
             = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] [ "=" DInit ] ;
 

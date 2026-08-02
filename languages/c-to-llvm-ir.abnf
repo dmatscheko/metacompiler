@@ -752,7 +752,7 @@ PtrQual     = "const" KwEnd | "volatile" KwEnd | "restrict" KwEnd | "_Atomic" Kw
 // which BaseTy does not read.
 Statement   = Block | If | While | Do | For | Switch | SwitchCase | Return | Break | Continue
             | AssertStmt | BoolDecl | LProto | LTagFwd | LStructDef | LUnionDef | StructDefDecl | UnionDefDecl
-            | LTypedef | StaticDecl | StructDecl | UnionDecl | Decl
+            | LTypedef | SStructDecl | SUnionDecl | StaticDecl | StructDecl | UnionDecl | Decl
             | Goto | PPCondStmt | PPStmt | Label | TdDecl | Empty | ExprStmt ;
 
 // A typedef inside a function body. C scopes it to the block; this model has one
@@ -777,6 +777,16 @@ LUnionDef   <~~ defineUnion(takeAll()); push(function(b) { return b }) ~~>
 // parsed by TypeInt, so this form only ever claims a statement.
 StaticDecl  <~~ push(makeDeclSeq(takeAll(), true)) ~~>
             = KwStatic BaseTy SInitDecl { "," SInitDecl } ";" ;
+// 'static struct S q;' / 'static union U u;'. BaseTy does not read a tag, so StaticDecl
+// cannot claim these and they used to fall through to StructDecl/UnionDecl, which build
+// an ORDINARY local - a wrong answer in both halves: the object was reset on every call
+// (`static struct P q; q.a++;` counted 1, 1 where cc counts 1, 2), and in the compiler
+// half returning its address returned a dead stack frame, which clang -O2 then made
+// visible as check 3510 of tests/c-test-full.c. Pinned by SECTION 49.
+SStructDecl <~~ push(makeDeclSeq(takeAll(), true)) ~~>
+            = KwStatic [ TypeInt ] KwStruct Id <~~ push({bty: ctStruct(up.in)}) ~~> [ TypeInt ] DeclItem { "," DeclItem } ";" ;
+SUnionDecl  <~~ push(makeDeclSeq(takeAll(), true)) ~~>
+            = KwStatic [ TypeInt ] KwUnion Id <~~ push({bty: ctStruct(uKey(up.in))}) ~~> [ TypeInt ] DeclItem { "," DeclItem } ";" ;
 SInitDecl   <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
             = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] [ "=" DInit ] ;
 
@@ -1620,21 +1630,45 @@ KwDefault   = "default" KwEnd ;
         for (var i = 0; i < s.length; i++) { if (s.charAt(i) == "*") { n = n + 1 } }
         return n
     }
+    // Which parameters are POINTERS, by name, from whichever of the prototype and the
+    // definition the walk met first. Recorded SEPARATELY from funcParamCts because it
+    // is needed even when no parameter is wider than the model's i32, and because it is
+    // recorded unconditionally: a pointer parameter changes the LLVM signature (i32*,
+    // 64 bits) where a plain int does not.
+    //
+    // Until 2026-08-02 pointer-ness was dropped here, and that produced two defects
+    // that shared this one line. A declared-only function came out as
+    // `declare i32* @ext1(i32 %0)` - the return type right, every parameter flattened to
+    // i32, which TRUNCATES a 64-bit pointer in a native binary and is invisible to
+    // llvm.Run (untyped) and to any test that does not call an external taking a
+    // pointer. And a call emitted BEFORE the definition materialized the callee through
+    // getFuncByArity with {ptr: false} for every argument, so the definition then reused
+    // that object and failed outright with "store operands are not compatible:
+    // src=i32; dst=i32**" - fatal for mutually recursive helpers, which is what forced
+    // languages/lib/bash-rt.c's rt_eg_fwd(long, long, int) trampoline. A prototype now
+    // fixes both, which is what C requires for mutual recursion anyway.
+    var funcParamPtrs = {}
     function noteParamCts(name, params) {
         var cts = []
+        var ptrs = []
         var any = false
+        var anyPtr = false
         if (hasOwn(funcs, name)) { return }
         for (var i = 0; i < params.length; i++) {
             var pct = params[i].ct
             if (pct != undefined && (pct.k == "flt" || (pct.k == "int" && pct.w >= 8)) &&
                 params[i].ptr != true) { any = true }
             cts.push(pct)
+            ptrs.push(params[i].ptr == true)
+            if (params[i].ptr == true) { anyPtr = true }
         }
         if (any) { funcParamCts[name] = cts }
+        if (anyPtr) { funcParamPtrs[name] = ptrs }
     }
     // The parameter types a call should convert its arguments to, or undefined when
     // the function has none that is wider than the model's i32.
     function paramCtsOf(name) { return hasOwn(funcParamCts, name) ? funcParamCts[name] : undefined }
+    function paramPtrsOf(name) { return hasOwn(funcParamPtrs, name) ? funcParamPtrs[name] : undefined }
     // Functions that return a struct or union BY VALUE, name -> the returned C type.
     // Such a function takes a hidden first pointer parameter (the caller's destination)
     // and still returns i32, exactly like a C ABI's sret convention.
@@ -1650,10 +1684,15 @@ KwDefault   = "default" KwEnd ;
             var params = []
             if (hasOwn(structRet, name)) { params.push(llvm.ir.NewParam("", i32p)) }
             var known = paramCtsOf(name)
+            var knownP = paramPtrsOf(name)
             for (var i = 0; i < paramSpecs.length; i++) {
                 var pct = paramSpecs[i].ct
                 if (known != undefined && i < known.length && pct == undefined) { pct = known[i] }
-                params.push(llvm.ir.NewParam("", paramSpecs[i].ptr ? i32p
+                // A prototype's pointer-ness counts as much as the definition's: this is
+                // the only thing a CALL SITE (getFuncByArity, {ptr: false} throughout)
+                // can know about a callee it has not seen the body of.
+                var isP = paramSpecs[i].ptr == true || (knownP != undefined && i < knownP.length && knownP[i])
+                params.push(llvm.ir.NewParam("", isP ? i32p
                             : ((pct != undefined && pct.k == "flt") ? llvm.types.I64
                                : ((pct != undefined && pct.k == "int" && pct.w >= 8) ? llvm.types.I64 : i32))))
             }
@@ -3791,10 +3830,14 @@ KwDefault   = "default" KwEnd ;
             return {b: b, v: v, ct: vct}
         }
     }
-    function emitCallArgs(b, args, into, pcts) {
+    function emitCallArgs(b, args, into, pcts, pptrs) {
         for (var i = 0; i < args.length; i++) {
             var r = args[i](b)
             b = r.b
+            // A declared POINTER parameter takes a pointer whatever the argument is, so
+            // that f(0) and f(NULL) still typecheck once the signature says i32*.
+            // ptrOperand sign-extends an integer to the pointer's 64 bits first.
+            if (pptrs != undefined && i < pptrs.length && pptrs[i]) { into.push(ptrOperand(b, r.v)); continue }
             // Pointer arguments (&pt, &nodes[i]) become uniform i32* like the parameters;
             // a floating-point argument travels as its i64 bit pattern.
             if (r.ct != undefined && isFlt(r.ct)) { into.push(dblOf(b, r)); continue }
@@ -3818,7 +3861,7 @@ KwDefault   = "default" KwEnd ;
             dest = b.NewAlloca(ctLTy(sct))
             argValues.push(b.NewBitCast(dest, i32p))
         }
-        b = emitCallArgs(b, args, argValues, paramCtsOf(name))
+        b = emitCallArgs(b, args, argValues, paramCtsOf(name), paramPtrsOf(name))
         var cv = b.NewCall(getFuncByArity(name, args.length), argValues)
         if (sct != undefined) return {b: b, v: dest, ct: sct}
         // A POINTER-returning function reports its declared pointer type, not ctInt.
@@ -3947,12 +3990,35 @@ KwDefault   = "default" KwEnd ;
     // local alloca would be reset on every call).
     var staticSeq = 0
     function makeStaticOf(name, ct, opt) {
-        if (isAggCt(ct)) return makeDeclOf(name, ct, opt)  // Not yet persistent storage.
         var isPtr = ct.k == "ptr"
         staticSeq = staticSeq + 1
         var gname = name + ".static." + staticSeq
         var slty = ctLTy(ct)
         var g = m.NewGlobalDef(gname, isPtr ? llvm.constant.NewNull(i32p) : llvm.constant.NewZeroInitializer(slty))
+        // An AGGREGATE static used to fall back to makeDeclOf, i.e. to an ordinary
+        // alloca, and that is not a missing feature but a WRONG ANSWER: `static struct S
+        // q; return &q;` then returns the address of a dead stack frame. It survived
+        // because -O0 leaves the frame's bytes lying where they were; clang -O2 does not,
+        // and check 3510 of tests/c-test-full.c failed natively the moment
+        // buildExecutable started passing -O2. The storage is the global like every
+        // other static; only the scope entry differs (an array is a place, and an
+        // aggregate is pre-zeroed by the global's own zeroinitializer, so the
+        // zeroAggregate makeDeclOf emits is not needed here).
+        if (isAggCt(ct)) {
+            var aentry = {val: g, arr: ct.k == "arr", ty: slty, load: slty, ct: ct}
+            var aflag = (opt != undefined) ? m.NewGlobalDef(gname + ".done", zero) : undefined
+            return function(b) {
+                declVar(name, aentry)
+                if (opt == undefined) return b
+                var adoB = curF.NewBlock("")
+                var acontB = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, aflag), zero), adoB, acontB)
+                var adb = initInto(adoB, ct, opt, g)
+                adb.NewStore(one, aflag)
+                adb.NewBr(acontB)
+                return acontB
+            }
+        }
         var entry = {val: g, arr: false, ty: slty, load: isPtr ? i32p : slty, ct: ct}
         var flag = (opt != undefined) ? m.NewGlobalDef(gname + ".done", zero) : undefined
         return function(b) {
