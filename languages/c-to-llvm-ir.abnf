@@ -7,9 +7,13 @@ The built-in IR interpreter decodes no floating-point instruction, so a double i
 carried as its IEEE-754 bit pattern in an i64 and the arithmetic is emitted as integer
 code - the soft-float library a compiler ships for a target without an FPU, written
 into the module itself (branchless helpers __mec_dadd / __mec_dmul / __mec_ddiv /
-__mec_i2d / __mec_d2i, comparisons inline). Two documented simplifications: the
-mantissa arithmetic truncates where IEEE rounds to nearest even, and infinities, NaNs
-and subnormals are not modelled; a float is computed at double precision, like in the
+__mec_dsub / __mec_i2d / __mec_d2i, comparisons inline). The arithmetic ROUNDS TO
+NEAREST, TIES TO EVEN, the IEEE-754 default: every helper computes in an extended
+mantissa field with guard/round/sticky bits and rounds once at the end. Infinities,
+NaNs, subnormals and the sign of zero are all carried - overflow saturates, underflow
+is gradual, a NaN operand comes through with its payload and is unordered against
+everything. cc and this agree BIT FOR BIT over a 90,000-case differential probe
+covering all five of those. A float is computed at double precision, like in the
 interpreter. A constant expression still folds at compile time and never reaches a
 helper.
 Pointers compile to real addresses (alloca values), arrays to alloca [N x i32] plus
@@ -1586,7 +1590,13 @@ KwDefault   = "default" KwEnd ;
     var funcRetCt = {}
     var funcParamCts = {}
     function noteRetCt(name, ct) {
-        if (ct != undefined && ct.k == "int" && ct.w >= 8 && !hasOwn(funcs, name)) { funcRetCt[name] = ct }
+        // A DOUBLE return is 64 bits too - it travels as its IEEE bit pattern in an
+        // i64, exactly like a long. Leaving it out left every such function declared
+        // 'i32' while makeReturn handed it an i64, and the caller then read a
+        // truncated pattern: 'double gd(long x) { return 1.5; }' answered a value the
+        // caller saw as neither 1.5 nor anything else in particular.
+        if (ct != undefined && (ct.k == "flt" || (ct.k == "int" && ct.w >= 8)) &&
+            !hasOwn(funcs, name)) { funcRetCt[name] = ct }
     }
     // The FULL declared return type, pointers included. funcRetCt above may not hold it:
     // it drives the module SIGNATURE, and a pointer return keeps the model's single i32,
@@ -1616,7 +1626,8 @@ KwDefault   = "default" KwEnd ;
         if (hasOwn(funcs, name)) { return }
         for (var i = 0; i < params.length; i++) {
             var pct = params[i].ct
-            if (pct != undefined && pct.k == "int" && pct.w >= 8 && params[i].ptr != true) { any = true }
+            if (pct != undefined && (pct.k == "flt" || (pct.k == "int" && pct.w >= 8)) &&
+                params[i].ptr != true) { any = true }
             cts.push(pct)
         }
         if (any) { funcParamCts[name] = cts }
@@ -2562,10 +2573,15 @@ KwDefault   = "default" KwEnd ;
     // for a target without an FPU, written straight into the module. Every helper is
     // branchless (select instead of branches), so it needs no basic blocks of its own
     // and can be emitted while another function is being built.
-    // Two documented simplifications: the mantissa arithmetic TRUNCATES where IEEE
-    // rounds to nearest even (so an inexact result can be one ulp low), and infinities,
-    // NaNs and subnormals are not modelled. A `float` is computed at double precision,
-    // exactly as the interpreter does.
+    // The arithmetic ROUNDS TO NEAREST, TIES TO EVEN - the IEEE-754 default. Each
+    // helper computes in an EXTENDED mantissa field (the 53 bits shifted left by
+    // three, so bits 2..0 are guard/round/sticky) with a separate flag for whatever
+    // fell below even those, and rounds exactly once, at the end. It used to truncate,
+    // which put every inexact result one ulp low - 0.1 + 0.2 landed below 0.3.
+    // Infinities, NaNs, subnormals and the sign of zero are carried too: overflow
+    // saturates instead of wrapping the exponent, underflow is gradual, a subnormal
+    // operand is normalized on the way in, and a NaN is unordered against everything.
+    // A `float` is computed at double precision, exactly as the interpreter does.
     var i64 = llvm.types.I64
     function k64(n) { return llvm.constant.NewInt(i64, n) }
 
@@ -2620,7 +2636,7 @@ KwDefault   = "default" KwEnd ;
     }
     // An LLVM constant of the width a C type pins, from a plain JS integer.
     function kct(ct, n) {
-        if (ct != undefined && ct.k == "int" && ct.w >= 8) return k64exact(u64FromNum(n))
+        if (ct != undefined && (ct.k == "flt" || (ct.k == "int" && ct.w >= 8))) return k64exact(u64FromNum(n))
         return kint(n)
     }
     var zero64 = k64(0)
@@ -2636,7 +2652,14 @@ KwDefault   = "default" KwEnd ;
         var s = 0
         var v = x
         if (v < 0) { s = 1; v = 0 - v }
+        // Infinity and NaN have no exponent to search for, and the loops below would
+        // spin on them forever: a constant expression as ordinary as `1.0 / 0.0` -
+        // which is how C spells an infinity without a header - HUNG THE COMPILER.
+        // (v * 0.5 == v is the portable test for an infinity once zero is excluded;
+        // an exponent literal cannot be written in a tag script.)
+        if (v != v) return {hi: 2146959360, lo: 0}                 // the default NaN
         if (v == 0) return {hi: s * 2147483648, lo: 0}
+        if (v * 0.5 == v) return {hi: s * 2147483648 + 2146435072, lo: 0}
         var e = 0
         while (v >= 2) { v = v / 2; e = e + 1 }
         while (v < 1) { v = v * 2; e = e - 1 }
@@ -2652,12 +2675,15 @@ KwDefault   = "default" KwEnd ;
     }
     // The i64 bit pattern of a floating-point expression result.
     function dblOf(b, r) { return (r.cv != undefined) ? emitDblConst(b, r.cv) : r.v }
-    // Shift `m` left until its highest set bit is bit 52, and subtract as much from
-    // `e`. Six conditional steps cover all 52 possible shifts without a loop.
-    function normLeft(b, m, e) {
+    // Shift `m` left until its highest set bit is the one `lim` describes, and
+    // subtract as much from `e`. Six conditional steps cover all the possible
+    // shifts without a loop. `lim[i]` is 2^(top+1-ks[i]).
+    var normLim55 = [16777216, 1099511627776, 281474976710656, 4503599627370496,
+                     18014398509481984, 36028797018963968]
+    var normLim52 = [2097152, 137438953472, 35184372088832, 562949953421312,
+                     2251799813685248, 4503599627370496]
+    function normLeft(b, m, e, lim) {
         var ks = [32, 16, 8, 4, 2, 1]
-        var lim = [2097152, 137438953472, 35184372088832, 562949953421312,
-                   2251799813685248, 4503599627370496]
         for (var i = 0; i < 6; i++) {
             var c = b.NewSelect(b.NewICmp(llvm.enum.IPredULT, m, k64(lim[i])), k64(ks[i]), zero64)
             m = b.NewShl(m, c)
@@ -2670,12 +2696,107 @@ KwDefault   = "default" KwEnd ;
         var sg = b.NewLShr(a, k64(63))
         var ex = b.NewAnd(b.NewLShr(a, k64(52)), kExpMask)
         var mn = b.NewAnd(a, kM52)
-        mn = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, ex, zero64), b.NewOr(mn, kB52), mn)
-        return {s: sg, e: ex, m: mn}
+        var norm = b.NewICmp(llvm.enum.IPredNE, ex, zero64)
+        // A SUBNORMAL has no implicit bit and its true exponent is 1, not the 0 its
+        // field holds - the one place in the format where the field is not the
+        // exponent. It is NORMALIZED here: shifted up until its leading bit sits
+        // where a normal one's does, with the exponent going below 1 to match, so
+        // every helper below sees one uniform shape and roundPack's gradual underflow
+        // puts it back. Reported raw, a subnormal divisor overflowed the quotient
+        // accumulator and a subnormal factor left the product's exponent wrong.
+        // A true zero is left at exponent 1: normalizing it would drive the exponent
+        // 63 places down for a mantissa that stays zero, and every comparison below
+        // would then rank it above a real number.
+        var n = normLeft(b, mn, one64, normLim52)
+        var sub = b.NewAnd(b.NewZExt(b.NewICmp(llvm.enum.IPredEQ, ex, zero64), i64),
+                           b.NewZExt(b.NewICmp(llvm.enum.IPredNE, mn, zero64), i64))
+        var subc = b.NewICmp(llvm.enum.IPredNE, sub, zero64)
+        return {s: sg,
+                e: b.NewSelect(subc, n.e, ex),
+                m: b.NewSelect(norm, b.NewOr(mn, kB52), b.NewSelect(subc, n.m, mn))}
+    }
+    // ----- the values outside the ordinary range -----
+    // An exponent field of all ones is an infinity when the fraction is zero and a
+    // NaN when it is not. Both were left to fall through the ordinary arithmetic,
+    // which produced a finite number for Inf * 0.5 and let a NaN compare equal to
+    // itself; the reference toolchain says otherwise, so the rules are spelled out.
+    var kQuiet = k64(2251799813685248)               // 2^51, the quiet bit
+    var kInfBits = k64(9218868437227405312)          // +Inf
+    var kNanBits = k64(9221120237041090560)          // the default quiet NaN
+    var kAbsMask = k64(9223372036854775807)          // everything but the sign
+    function isNanOf(b, x) {
+        return b.NewICmp(llvm.enum.IPredUGT, b.NewAnd(x, kAbsMask), kInfBits)
+    }
+    function isInfOf(b, x) {
+        return b.NewICmp(llvm.enum.IPredEQ, b.NewAnd(x, kAbsMask), kInfBits)
+    }
+    function isZeroOf(b, x) {
+        return b.NewICmp(llvm.enum.IPredEQ, b.NewAnd(x, kAbsMask), zero64)
+    }
+    function signedInf(b, sg) { return b.NewOr(b.NewShl(sg, k64(63)), kInfBits) }
+    // A NaN operand carries THROUGH, payload and all, quieted - which is what the
+    // hardware does and therefore what cc answers.
+    function nanThrough(b, x, y, res) {
+        res = b.NewSelect(isNanOf(b, y), b.NewOr(y, kQuiet), res)
+        return b.NewSelect(isNanOf(b, x), b.NewOr(x, kQuiet), res)
     }
     function pack(b, sg, ex, mn) {
         var ez = b.NewAnd(ex, kExpMask)
         return b.NewOr(b.NewOr(b.NewShl(sg, k64(63)), b.NewShl(ez, k64(52))), b.NewAnd(mn, kM52))
+    }
+    // ----- round to nearest, ties to even -----
+    // Every helper below computes in an EXTENDED mantissa field: the 53-bit
+    // mantissa shifted left by three, so bits 2..0 hold the guard/round/sticky
+    // that the IEEE-754 default rounding mode needs, and a separate flag `st`
+    // (an i64 holding 0 or 1) carries whatever fell below even those.
+    var kB55 = k64(36028797018963968)     // 2^55, the extended leading bit
+    var kB56 = k64(72057594037927936)     // 2^56
+    var kThree = k64(3)
+    // m >> d, with a flag saying whether any set bit was lost. The flag is kept
+    // BESIDE the value rather than jammed into its low bit, because addition and
+    // subtraction need to move in opposite directions from it.
+    function shrSticky(b, m, d) {
+        var huge = b.NewICmp(llvm.enum.IPredSGT, d, k64(63))
+        var dc = b.NewSelect(huge, k64(63), d)
+        var q = b.NewLShr(m, dc)
+        var lost = b.NewSub(m, b.NewShl(q, dc))
+        var sLost = b.NewZExt(b.NewICmp(llvm.enum.IPredNE, lost, zero64), i64)
+        var sAll = b.NewZExt(b.NewICmp(llvm.enum.IPredNE, m, zero64), i64)
+        return {m: b.NewSelect(huge, zero64, q), s: b.NewSelect(huge, sAll, sLost)}
+    }
+    // Round an extended mantissa (leading bit 55) down to the stored 53, nearest
+    // with ties to even, and pack the result. `st` is a residue STRICTLY BELOW the
+    // extended field and always positive - every caller arranges that, which is
+    // what lets one flag serve both a sum and a difference.
+    function roundPack(b, sg, e, ext, st) {
+        // GRADUAL UNDERFLOW: an exponent at or below zero is not representable, so the
+        // mantissa is shifted down into the subnormal range - the bits that fall off
+        // joining the sticky - and rounded there instead. Without this the exponent
+        // simply wrapped and a product that should underflow came back enormous.
+        var sub = b.NewICmp(llvm.enum.IPredSLT, e, one64)
+        var dn = shrSticky(b, ext, b.NewSub(one64, e))
+        st = b.NewSelect(sub, b.NewOr(st, dn.s), st)
+        ext = b.NewSelect(sub, dn.m, ext)
+        e = b.NewSelect(sub, one64, e)
+        var mant = b.NewLShr(ext, kThree)
+        var g = b.NewAnd(b.NewLShr(ext, k64(2)), one64)         // the guard bit
+        var below = b.NewOr(b.NewAnd(ext, kThree), st)          // anything under it
+        var up = b.NewOr(b.NewZExt(b.NewICmp(llvm.enum.IPredNE, below, zero64), i64),
+                         b.NewAnd(mant, one64))                 // ...or an odd mantissa
+        var inc = b.NewAnd(g, up)
+        mant = b.NewAdd(mant, inc)
+        // Rounding 2^53-1 up carries into a new leading bit.
+        var over = b.NewICmp(llvm.enum.IPredUGE, mant, kB53)
+        mant = b.NewSelect(over, b.NewLShr(mant, one64), mant)
+        e = b.NewSelect(over, b.NewAdd(e, one64), e)
+        // A mantissa that never reached the implicit bit IS a subnormal, and a
+        // subnormal's exponent FIELD is zero; rounding one up to 2^52 lands exactly on
+        // the smallest normal, which the same formula spells with a field of 1.
+        var ez = b.NewSelect(b.NewICmp(llvm.enum.IPredULT, mant, kB52), zero64, e)
+        // OVERFLOW saturates to infinity rather than wrapping the exponent.
+        var inf = b.NewICmp(llvm.enum.IPredSGE, e, kExpMask)
+        return b.NewSelect(inf, b.NewOr(b.NewShl(sg, k64(63)), b.NewShl(kExpMask, k64(52))),
+                           pack(b, sg, ez, mant))
     }
     var softFns = {}
     function softFn(name, nargs, build) {
@@ -2690,64 +2811,124 @@ KwDefault   = "default" KwEnd ;
     }
     // a + b. The operands are ordered by exponent, the smaller mantissa is shifted
     // into place, and the sum (or difference) is renormalized.
-    function buildDAdd(b, f) {
-        var A = unpack(b, f.Params[0])
-        var B = unpack(b, f.Params[1])
-        var aGe = b.NewICmp(llvm.enum.IPredUGE, A.e, B.e)
+    function buildDAdd(b, f) { return addCore(b, f, false) }
+    function buildDSub(b, f) { return addCore(b, f, true) }
+    function addCore(b, f, negB) {
+        var xb = f.Params[0]
+        // Subtraction flips the sign HERE rather than at the call site, so that a NaN
+        // second operand reaches nanThrough with its own bits intact.
+        var yb = negB ? b.NewXor(f.Params[1], b.NewShl(one64, k64(63))) : f.Params[1]
+        var A = unpack(b, xb)
+        var B = unpack(b, yb)
+        // SIGNED: a normalized subnormal's exponent is below zero, and an unsigned
+        // compare would rank it as the largest number there is.
+        var aGe = b.NewICmp(llvm.enum.IPredSGE, A.e, B.e)
         var e1 = b.NewSelect(aGe, A.e, B.e)
-        var m1 = b.NewSelect(aGe, A.m, B.m)
+        var m1 = b.NewShl(b.NewSelect(aGe, A.m, B.m), kThree)
         var s1 = b.NewSelect(aGe, A.s, B.s)
         var e2 = b.NewSelect(aGe, B.e, A.e)
-        var m2 = b.NewSelect(aGe, B.m, A.m)
+        var m2 = b.NewShl(b.NewSelect(aGe, B.m, A.m), kThree)
         var s2 = b.NewSelect(aGe, B.s, A.s)
-        var d = b.NewSub(e1, e2)
-        var dc = b.NewSelect(b.NewICmp(llvm.enum.IPredUGT, d, k64(63)), k64(63), d)
-        var m2s = b.NewLShr(m2, dc)
+        var sh = shrSticky(b, m2, b.NewSub(e1, e2))
+        var m2s = sh.m
+        var st = sh.s
         var same = b.NewICmp(llvm.enum.IPredEQ, s1, s2)
-        var less = b.NewICmp(llvm.enum.IPredULT, m1, m2s)
-        var dif = b.NewSelect(less, b.NewSub(m2s, m1), b.NewSub(m1, m2s))
+        // Which operand is larger decides the sign of a cancelling subtraction, and
+        // the bits lost to the alignment count: an equal aligned mantissa with
+        // something still underneath it belongs to the LARGER number.
+        var lessN = b.NewOr(b.NewZExt(b.NewICmp(llvm.enum.IPredULT, m1, m2s), i64),
+                            b.NewAnd(b.NewZExt(b.NewICmp(llvm.enum.IPredEQ, m1, m2s), i64), st))
+        var less = b.NewICmp(llvm.enum.IPredNE, lessN, zero64)
+        // Both difference branches are arranged to leave a POSITIVE residue below
+        // the computed value, which is what lets the one sticky flag serve both:
+        // a - (b + f) is (a - b - 1) + (1 - f), and (b + f) - a is (b - a) + f.
+        var dif = b.NewSelect(less, b.NewSub(m2s, m1), b.NewSub(b.NewSub(m1, m2s), st))
         var mres = b.NewSelect(same, b.NewAdd(m1, m2s), dif)
         var sres = b.NewSelect(same, s1, b.NewSelect(less, s2, s1))
         var eres = e1
-        // A carry out of bit 52 costs one right shift; a cancelling subtraction can
-        // need up to 52 left shifts.
-        var over = b.NewICmp(llvm.enum.IPredUGE, mres, kB53)
+        // A carry out of the extended field costs one right shift, whose lost bit
+        // joins the sticky; a cancelling subtraction can need up to 55 left shifts,
+        // and only ever happens when nothing was lost to the alignment at all (a
+        // difference of more than three in the exponents cannot cancel).
+        var over = b.NewICmp(llvm.enum.IPredUGE, mres, kB56)
+        st = b.NewSelect(over, b.NewOr(st, b.NewAnd(mres, one64)), st)
         mres = b.NewSelect(over, b.NewLShr(mres, one64), mres)
         eres = b.NewSelect(over, b.NewAdd(eres, one64), eres)
-        var n = normLeft(b, mres, eres)
-        var res = pack(b, sres, n.e, n.m)
-        return b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, mres, zero64), zero64, res)
+        var n = normLeft(b, mres, eres, normLim55)
+        var res = roundPack(b, sres, n.e, n.m, st)
+        // A zero result keeps a sign: -0 + -0 is -0, while a cancellation between
+        // opposite signs is +0 under round-to-nearest.
+        res = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, mres, zero64),
+                          b.NewShl(b.NewSelect(same, s1, zero64), k64(63)), res)
+        // Infinity dominates a finite operand; two infinities of opposite sign are
+        // the one sum that has no answer.
+        var ai = b.NewZExt(isInfOf(b, xb), i64)
+        var bi = b.NewZExt(isInfOf(b, yb), i64)
+        res = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, bi, zero64), yb, res)
+        res = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, ai, zero64), xb, res)
+        res = b.NewSelect(b.NewICmp(llvm.enum.IPredNE,
+                  b.NewAnd(b.NewAnd(ai, bi),
+                           b.NewZExt(b.NewICmp(llvm.enum.IPredNE, A.s, B.s), i64)), zero64),
+                  kNanBits, res)
+        // The NaN that comes THROUGH is the operand as written: 'x - NaN' answers that
+        // NaN, sign and all, not the sign-flipped one the subtraction works with.
+        return nanThrough(b, xb, f.Params[1], res)
     }
-    // a * b. The 106-bit product of the two mantissas is formed from 26-bit halves,
-    // of which only the top 53 bits are kept.
+    // a * b. The 106-bit product of the two mantissas is formed from 26-bit halves
+    // and kept WHOLE - as a high half (bits 105..52) and a 52-bit remainder - so
+    // that nothing is discarded before the rounding decision is taken.
     function buildDMul(b, f) {
-        var A = unpack(b, f.Params[0])
-        var B = unpack(b, f.Params[1])
+        var xb = f.Params[0]
+        var yb = f.Params[1]
+        var A = unpack(b, xb)
+        var B = unpack(b, yb)
         var k26 = k64(26)
+        var k49 = k64(49)
+        var k52 = k64(52)
         var mask26 = k64(67108863)
         var ah = b.NewLShr(A.m, k26)
         var al = b.NewAnd(A.m, mask26)
         var bh = b.NewLShr(B.m, k26)
         var bl = b.NewAnd(B.m, mask26)
         var hh = b.NewMul(ah, bh)
-        var mid = b.NewAdd(b.NewAdd(b.NewMul(ah, bl), b.NewMul(al, bh)),
-                           b.NewLShr(b.NewMul(al, bl), k26))
-        var mres = b.NewAdd(hh, b.NewLShr(mid, k26))   // the product shifted right by 52
+        var mid = b.NewAdd(b.NewMul(ah, bl), b.NewMul(al, bh))
+        var t = b.NewAdd(b.NewMul(al, bl), b.NewShl(b.NewAnd(mid, mask26), k26))
+        var high = b.NewAdd(b.NewAdd(hh, b.NewLShr(mid, k26)), b.NewLShr(t, k52))
+        var lowr = b.NewSub(t, b.NewShl(b.NewLShr(t, k52), k52))
+        // The extended mantissa is the product shifted right by 49; the 49 bits
+        // that fall off it are the sticky.
+        var kept = b.NewLShr(lowr, k49)
+        var mres = b.NewOr(b.NewShl(high, kThree), kept)
+        var st = b.NewZExt(b.NewICmp(llvm.enum.IPredNE,
+                     b.NewSub(lowr, b.NewShl(kept, k49)), zero64), i64)
         var eres = b.NewSub(b.NewAdd(A.e, B.e), kBias)
-        var over = b.NewICmp(llvm.enum.IPredUGE, mres, kB53)
+        var over = b.NewICmp(llvm.enum.IPredUGE, mres, kB56)
+        st = b.NewSelect(over, b.NewOr(st, b.NewAnd(mres, one64)), st)
         mres = b.NewSelect(over, b.NewLShr(mres, one64), mres)
         eres = b.NewSelect(over, b.NewAdd(eres, one64), eres)
         // Either mantissa being zero makes the product zero. Testing their PRODUCT
         // would not do: 2^52 * 2^52 is 0 modulo 2^64.
         var az = b.NewICmp(llvm.enum.IPredEQ, A.m, zero64)
         var isZero = b.NewICmp(llvm.enum.IPredEQ, b.NewSelect(az, zero64, B.m), zero64)
-        var res = pack(b, b.NewXor(A.s, B.s), eres, mres)
-        return b.NewSelect(isZero, zero64, res)
+        var sgn = b.NewXor(A.s, B.s)
+        var res = roundPack(b, sgn, eres, mres, st)
+        res = b.NewSelect(isZero, b.NewShl(sgn, k64(63)), res)
+        // Infinity times anything but zero is infinity; times zero it has no answer.
+        var anyInf = b.NewOr(b.NewZExt(isInfOf(b, xb), i64), b.NewZExt(isInfOf(b, yb), i64))
+        var anyZero = b.NewOr(b.NewZExt(isZeroOf(b, xb), i64), b.NewZExt(isZeroOf(b, yb), i64))
+        res = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, anyInf, zero64), signedInf(b, sgn), res)
+        res = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewAnd(anyInf, anyZero), zero64),
+                          kNanBits, res)
+        return nanThrough(b, xb, yb, res)
     }
-    // a / b. Five unrolled long-division steps of 11 bits each give 55 quotient bits.
+    // a / b. Five unrolled long-division steps of 11 bits and one of 3 give 58
+    // quotient bits: the 55 the extended mantissa needs, and the guard/round/sticky
+    // under them. A remainder left at the end is the sticky proper.
     function buildDDiv(b, f) {
-        var A = unpack(b, f.Params[0])
-        var B = unpack(b, f.Params[1])
+        var xb = f.Params[0]
+        var yb = f.Params[1]
+        var A = unpack(b, xb)
+        var B = unpack(b, yb)
         var k11 = k64(11)
         var den = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, B.m, zero64), one64, B.m)
         var num = A.m
@@ -2757,22 +2938,64 @@ KwDefault   = "default" KwEnd ;
             acc = b.NewOr(b.NewShl(acc, k11), b.NewUDiv(sh, den))
             num = b.NewURem(sh, den)
         }
-        // acc is the quotient scaled by 2^55 and lies in (2^54, 2^56).
-        var c = b.NewSelect(b.NewICmp(llvm.enum.IPredUGE, acc, k64(36028797018963968)), k64(3), k64(2))
+        var sh3 = b.NewShl(num, kThree)
+        acc = b.NewOr(b.NewShl(acc, kThree), b.NewUDiv(sh3, den))
+        num = b.NewURem(sh3, den)
+        var st = b.NewZExt(b.NewICmp(llvm.enum.IPredNE, num, zero64), i64)
+        // acc is the quotient scaled by 2^58 and lies in (2^57, 2^59).
+        var c = b.NewSelect(b.NewICmp(llvm.enum.IPredUGE, acc, k64(288230376151711744)), kThree, k64(2))
         var mres = b.NewLShr(acc, c)
-        var eres = b.NewAdd(b.NewSub(b.NewAdd(b.NewSub(A.e, B.e), kBias), k64(3)), c)
+        st = b.NewOr(st, b.NewZExt(b.NewICmp(llvm.enum.IPredNE,
+                 b.NewSub(acc, b.NewShl(mres, c)), zero64), i64))
+        var eres = b.NewAdd(b.NewSub(b.NewAdd(b.NewSub(A.e, B.e), kBias), kThree), c)
         var isZero = b.NewICmp(llvm.enum.IPredEQ, A.m, zero64)
-        var res = pack(b, b.NewXor(A.s, B.s), eres, mres)
-        return b.NewSelect(isZero, zero64, res)
+        var sgn = b.NewXor(A.s, B.s)
+        var res = roundPack(b, sgn, eres, mres, st)
+        res = b.NewSelect(isZero, b.NewShl(sgn, k64(63)), res)
+        // x/0 is infinity, x/Inf is zero, Inf/x is infinity - and Inf/Inf and 0/0 are
+        // the two quotients with no answer.
+        var ai = b.NewZExt(isInfOf(b, xb), i64)
+        var bi = b.NewZExt(isInfOf(b, yb), i64)
+        var az2 = b.NewZExt(isZeroOf(b, xb), i64)
+        var bz = b.NewZExt(isZeroOf(b, yb), i64)
+        var sZero = b.NewShl(sgn, k64(63))
+        res = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, bz, zero64), signedInf(b, sgn), res)
+        res = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, bi, zero64), sZero, res)
+        res = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, ai, zero64), signedInf(b, sgn), res)
+        res = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewAnd(ai, bi), zero64), kNanBits, res)
+        res = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewAnd(az2, bz), zero64), kNanBits, res)
+        return nanThrough(b, xb, yb, res)
     }
-    // A signed 64-bit integer to a double.
+    // A signed 64-bit integer to a double, rounded to nearest even. The magnitude
+    // needs up to 63 bits, so it is first shifted DOWN under 2^53 - keeping what
+    // that loses as the sticky - and only then normalized up. Shifting down is what
+    // the old version did not do: every integer above 2^53 came out halved.
     function buildI2D(b, f) {
         var x = f.Params[0]
         var neg = b.NewICmp(llvm.enum.IPredSLT, x, zero64)
-        var ax = b.NewSelect(neg, b.NewSub(zero64, x), x)
-        var n = normLeft(b, ax, k64(1023 + 52))
-        var res = pack(b, b.NewSelect(neg, one64, zero64), n.e, n.m)
-        return b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, ax, zero64), zero64, res)
+        var ax0 = b.NewSelect(neg, b.NewSub(zero64, x), x)
+        var ax = ax0
+        // The magnitude enters the extended field UNSHIFTED, so it stands for a
+        // mantissa eight times smaller and the base exponent is three higher.
+        var e = k64(1023 + 52 + 3)
+        var st = zero64
+        // Down to the extended field (below 2^56), not to the mantissa itself: the
+        // three bits that would otherwise be thrown away ARE the guard bits, and
+        // rounding needs them. Four conditional steps cover the eight shifts a
+        // 63-bit magnitude can need.
+        var ks = [4, 2, 1, 1]
+        var lim = [1152921504606846976, 288230376151711744,
+                   144115188075855872, 72057594037927936]   // 2^60 2^58 2^57 2^56
+        for (var i = 0; i < 4; i++) {
+            var c = b.NewICmp(llvm.enum.IPredUGE, ax, k64(lim[i]))
+            var sh = shrSticky(b, ax, k64(ks[i]))
+            st = b.NewSelect(c, b.NewOr(st, sh.s), st)
+            ax = b.NewSelect(c, sh.m, ax)
+            e = b.NewSelect(c, b.NewAdd(e, k64(ks[i])), e)
+        }
+        var n = normLeft(b, ax, e, normLim55)
+        var res = roundPack(b, b.NewSelect(neg, one64, zero64), n.e, n.m, st)
+        return b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, ax0, zero64), zero64, res)
     }
     // A double to a signed 64-bit integer, truncating towards zero.
     function buildD2I(b, f) {
@@ -2788,8 +3011,7 @@ KwDefault   = "default" KwEnd ;
     }
     function emitDBin(b, op, x, y) {
         if (op == "+") return b.NewCall(softFn("__mec_dadd", 2, buildDAdd), [x, y])
-        if (op == "-") return b.NewCall(softFn("__mec_dadd", 2, buildDAdd),
-                                        [x, b.NewXor(y, b.NewShl(one64, k64(63)))])
+        if (op == "-") return b.NewCall(softFn("__mec_dsub", 2, buildDSub), [x, y])
         if (op == "*") return b.NewCall(softFn("__mec_dmul", 2, buildDMul), [x, y])
         if (op == "/") return b.NewCall(softFn("__mec_ddiv", 2, buildDDiv), [x, y])
         fail("operator " + op + " is not defined on floating-point operands")
@@ -2799,12 +3021,23 @@ KwDefault   = "default" KwEnd ;
     // numbers they encode.
     function dblKey(b, x) {
         var top = b.NewShl(one64, k64(63))
-        return b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, x, zero64), b.NewXor(x, k64(-1)), b.NewOr(x, top))
+        // -0 and +0 are the same NUMBER and must key the same, so the one pattern
+        // that is a negative zero is canonicalized before the ordering trick.
+        var z = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, x, top), zero64, x)
+        return b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, z, zero64), b.NewXor(z, k64(-1)), b.NewOr(z, top))
     }
+    function trueBit(b) { return b.NewICmp(llvm.enum.IPredEQ, zero64, zero64) }
+    function falseBit(b) { return b.NewICmp(llvm.enum.IPredNE, zero64, zero64) }
     function emitDCmp(b, op, x, y) {
         var pred = { "==": llvm.enum.IPredEQ, "!=": llvm.enum.IPredNE, "<": llvm.enum.IPredULT,
                      ">": llvm.enum.IPredUGT, "<=": llvm.enum.IPredULE, ">=": llvm.enum.IPredUGE }[op]
-        return toInt(b, b.NewICmp(pred, dblKey(b, x), dblKey(b, y)))
+        var c = b.NewICmp(pred, dblKey(b, x), dblKey(b, y))
+        // A NaN is UNORDERED against everything, itself included: every comparison but
+        // '!=' is false, and '!=' is true. The bit-pattern ordering below cannot say
+        // that on its own - it made NaN == NaN come out true.
+        var un = b.NewOr(b.NewZExt(isNanOf(b, x), i64), b.NewZExt(isNanOf(b, y), i64))
+        var unc = b.NewICmp(llvm.enum.IPredNE, un, zero64)
+        return toInt(b, b.NewSelect(unc, (op == "!=") ? trueBit(b) : falseBit(b), c))
     }
     // int -> double and double -> int, at the i32 boundary the rest of the model uses.
     function emitI2D(b, ct, v) {
@@ -3405,8 +3638,24 @@ KwDefault   = "default" KwEnd ;
     // and its value has the promoted type), while what reaches memory is truncated to
     // the cell. The two differ for char and short, which is why the truncation is a
     // separate local rather than the returned value.
+    // The byte width of an LLVM integer type / of a value's type. Which way a value
+    // has to move to fit its cell is a question about WIDTHS, not about whether it
+    // happens to be 64 bits: an i32 into an i8 cell truncates, an i32 into an i64 cell
+    // extends, and 'sext i32 to i8' is IR clang refuses outright.
+    function llWidth2(t) {
+        if (llvm.types.Equal(t, i8)) return 1
+        if (llvm.types.Equal(t, i16)) return 2
+        if (llvm.types.Equal(t, llvm.types.I64)) return 8
+        return 4
+    }
+    function llWidth(v) { return llWidth2(v.Type()) }
     function storeTo(b, ct, addr, v) {
-        if (ct != undefined && isFlt(ct)) { b.NewStore(v, addr); return v }
+        // The ADDRESS is made to match the cell as well as the value is. A place
+        // reached through '*p' arrives as the model's uniform i32*, so a long or a
+        // double stored through one was an i64 into an i32* - which llir refuses
+        // outright, and which is why '*p = v' did not compile while 'p[0] = v'
+        // (whose getelementptr already types the address) did.
+        if (ct != undefined && isFlt(ct)) { b.NewStore(v, cellAddr(b, llvm.types.I64, addr)); return v }
         if (llvm.types.IsPointer(v.Type())) {
             v = b.NewBitCast(v, i32p)
         } else if (ct != undefined && ct.k == "ptr") {
@@ -3415,9 +3664,17 @@ KwDefault   = "default" KwEnd ;
             v = emitConv(b, ct, v, ct)
         }
         var cell = v
-        if (ct != undefined && ct.k == "int" && ct.w < 4 && !llvm.types.IsPointer(v.Type())) {
-            cell = b.NewTrunc(v, ctLTy(ct))
-            addr = cellAddr(b, ctLTy(ct), addr)
+        if (ct != undefined && ct.k == "int" && !llvm.types.IsPointer(v.Type())) {
+            // The value is made to match the cell as well: a value that is already of
+            // this C type can still be sitting in a NARROWER register than the cell
+            // (an i32 on its way into a long array element), and now that the address
+            // is typed, llir compares the two.
+            var lt = ctLTy(ct)
+            if (!llvm.types.Equal(v.Type(), lt)) {
+                cell = (llWidth(v) > llWidth2(lt)) ? b.NewTrunc(v, lt)
+                       : (ct.u == true ? b.NewZExt(v, lt) : b.NewSExt(v, lt))
+            }
+            addr = cellAddr(b, lt, addr)
         }
         b.NewStore(cell, addr)
         return v
@@ -3545,7 +3802,10 @@ KwDefault   = "default" KwEnd ;
             // A declared parameter type fixes the argument's register width, so a
             // long parameter receives an i64 and an int parameter an i32.
             var pct = (pcts != undefined && i < pcts.length) ? pcts[i] : undefined
-            if (pct != undefined && pct.k == "int") { into.push(coerce(b, pct, r)); continue }
+            // A DOUBLE parameter converts its integer argument here, the way C11
+            // 6.5.2.2p7 says a declared parameter type does: f(1) with 'double d'
+            // sees 1.0, not the bit pattern 1.
+            if (pct != undefined && (pct.k == "int" || isFlt(pct))) { into.push(coerce(b, pct, r)); continue }
             into.push(emitWiden(b, r.v, r.ct != undefined && r.ct.k == "int" && r.ct.u == true, false))
         }
         return b
@@ -4052,8 +4312,13 @@ KwDefault   = "default" KwEnd ;
             // the declared width - an i8 for a char. Anything else is inconsistent:
             // a store through the place path truncates to the cell, so an i32 slot
             // would keep three stale bytes that the next plain read would see.
+            // A double parameter is an i64 - its bit pattern - which is what getFunc
+            // puts in the SIGNATURE. Saying i32 here instead left the prologue storing
+            // an i64 into an i32 slot, and no function with a double parameter would
+            // build at all.
             var pty = params[i].ptr ? i32p
-                      : ((pct != undefined && pct.k == "int" && pct.w >= 8) ? llvm.types.I64 : i32)
+                      : ((pct != undefined && (pct.k == "flt" || (pct.k == "int" && pct.w >= 8)))
+                         ? llvm.types.I64 : i32)
             var cty = (!params[i].ptr && pct != undefined && pct.k == "int" && pct.w < 4)
                       ? ctLTy(pct) : pty
             var ptr = b.NewAlloca(cty)

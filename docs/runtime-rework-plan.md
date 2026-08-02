@@ -553,7 +553,8 @@ $ nm tests/metajs-native-full.out | grep -c ' T _js_'
 
 ```
 matrix                318/318   (315 + three -exe entries for the native path)
---full                5,148 assertions, 0 languages whose halves disagree (metajs 252, new)
+--full                5,234 assertions, 0 languages whose halves disagree
+                        (metajs 252 -> 298, c 444 -> 484: the new ratchet sections)
 --cross               119 programs, 0 divergent
 clang-check           16/16, and metajs is now in the RUN-IT row:
                         metajs   8809   ok, and the clang executable agrees
@@ -600,69 +601,161 @@ table and interface dispatch cost.
 
 ### Where the C floor and the Go runtime genuinely differ - measured, not hidden
 
-1. **The last bit of an inexact float.** `c-to-llvm-ir.abnf` emits a soft float that
-   truncates where IEEE-754 rounds to nearest even. Everything exactly representable
-   agrees bit for bit; a non-representable fraction can be one ulp low:
+**Nowhere, as of 2026-08-02.** Every item that stood here has been closed; what follows
+is what each of them was and what closed it. The measurements are differential probes,
+`llvm.Run` (the Go runtime) against the native binary, and for the C layer the real
+`cc` on this machine.
 
 ```
-                        llvm.Run (Go)          native (C floor)
-0.1 + 0.2               0.30000000000000004    0.29999999999999991
-10 / 3                  3.3333333333333335     3.333333333333333
-Math.sqrt(2)            1.4142135623730951     1.414213562373095
-0.1 added ten times     0.9999999999999999     0.99999999999999964
+probe                                                       cases      divergent
+c, random doubles: + - * / and (double)long                 25,680          0
+c, ties/cancellation/wide exponents/comparisons             61,843          0
+c, infinities, NaNs, subnormals, signed zeros                3,200          0
+metajs, literals + - * / sqrt, extreme exponents             55,456         0
+metajs, the modelled domain, 500 sqrt and division cases     37,078         0
+metajs, labelled operand pairs                               35,594         0
+metajs, Infinity/NaN/signed zero over every operator          4,200         0
+metajs, Math.pow over 50 bases and 50 exponents               2,500         0
+metajs, toUpperCase/toLowerCase, EVERY code point            66,026         0
 ```
 
-   `1/2`, `1/4`, `7/2`, `100.125 * 8`, `1e21`, `1e-7`, `9007199254740993` and every
-   integer product below 2^53 agree exactly. Three conversions had to be taken **away**
-   from the soft float and done in bit arithmetic to get that far, and each was a wrong
-   answer before: the emitted `i2d` loses the low bits above 2^53 (the literal
-   `9007199254740993` came out as `4503599627370496`, half its value), the `d2i` round
-   trip made a large integral double look non-integral (`123456789 * 987654321` printed
-   as `1.2193263111263512e+17`), and `1 << 51` written with an `int` 1 is 0.
-2. **`Math.sqrt` and `Math.pow`.** Newton iteration and repeated multiplication, so the
-   last bit can differ; `pow` with a **non-integer** exponent is not modelled and answers
-   NaN. `sqrt(16)`, `pow(2,10)` and the other exact cases agree.
-3. **`toUpperCase`/`toLowerCase` are ASCII-only.** The Go twin is `strings.ToUpper`,
-   which is full Unicode.
-4. **The host global sets of the two MetaJS halves already differed, and still do.**
-   `metajs-interpreter.abnf` binds exactly `println print printf sprintf eprintln
-   parseInt parseFloat Math String exit anytype`; the compiler half
-   (`standardJSBindings`) also has `Infinity NaN Array Object byteLen sprint rawSet`.
-   The C floor matches the **compiler** half. `tests/metajs-test-full.js` asserts only
-   the intersection, because a check on the difference would fail on one half by
-   construction. This is pre-existing drift the phase surfaced, not drift it caused.
+1. **The last bit of an inexact float - FIXED.** `c-to-llvm-ir.abnf` truncated the
+   mantissa where IEEE-754 rounds to nearest even, so `0.1 + 0.2` was one ulp low and,
+   printed, sat *below* `0.3`. Every helper now computes in an EXTENDED mantissa field -
+   the 53 bits shifted left by three, so bits 2..0 are guard/round/sticky - with a
+   separate flag for whatever falls below even those, and rounds exactly once at the
+   end (`roundPack`). The three pieces that make it correct rather than merely closer:
+   the multiply keeps the whole 106-bit product instead of the top 53; the divide takes
+   58 quotient bits and treats a non-zero remainder as sticky; and addition and
+   subtraction arrange BOTH branches to leave a positive residue below the computed
+   value, which is what lets one sticky flag serve a sum and a difference (`a - (b+f)`
+   is `(a-b-1) + (1-f)`, `(b+f) - a` is `(b-a) + f`).
+2. **`(double)` of an integer above 2^53 - FIXED, and it was a wrong ANSWER.** The old
+   `i2d` only ever shifted the magnitude UP, so anything that needed shifting down came
+   out halved. It now shifts down into the extended field first, keeping the lost bits
+   as sticky, and rounds.
+3. **Overflow, underflow, infinities, NaNs, subnormals, signed zero - all now
+   modelled.** The exponent used to wrap, so a product that should be `+Inf` came back
+   as a finite `1.12e+307` and one that should underflow came back enormous. Overflow
+   now saturates and underflow is gradual (`roundPack`); a subnormal operand is
+   NORMALIZED in `unpack` (reported raw it overflowed the division accumulator and left
+   the product's exponent wrong) which makes every exponent comparison signed; and
+   `+-*/` and the comparisons carry the IEEE special-value rules, including a NaN
+   coming through with its own payload and being unordered against everything. `x - y`
+   became its own helper `__mec_dsub` so a NaN second operand reaches the propagation
+   with its sign intact.
+4. **`1.0 / 0.0` HUNG THE COMPILER.** The constant folder is the host's exact doubles,
+   so it folded that to an infinity, and `dblBits` - which finds an exponent by halving
+   until the value drops below 2 - never terminated. Found while porting `math.Pow`,
+   which spells its infinities exactly that way.
+5. **The number FORMATTER - rewritten exactly.** `runtime.c` generated digits by
+   repeatedly multiplying the remainder by ten in floating point, which is right to
+   about sixteen digits and therefore wrong in the last place of every seventeen-digit
+   number: `10/3` printed `3.3333333333333334`. A double is a 53-bit integer times a
+   power of two, so its decimal expansion terminates and every question about it has an
+   exact integer answer; `shortest_digits` now works on decimal digit arrays. The
+   shortest-form search is an exact integer comparison against the rounding interval
+   (`4N` against `4*M*10^(L-k)`, bounded by `2P` and, below a power of two, `P`), and
+   the digits are rounded to nearest with TIES TO EVEN, which is what makes
+   `1000000000000000.25` render as `...0.2` like Go and not `...0.3`.
+6. **The number PARSER - rewritten exactly.** `pow10` built its powers of ten by
+   repeated multiplication, one rounding per step, so `1.7976931348623157e308` parsed
+   to `+Inf` and `1e100` was a part in 10^16 too large; and the mantissa was
+   accumulated into a `long` that stops being exact at 2^53, so
+   `parseFloat("0.9999999999999999")` came back as exactly 1. `dec_to_double` now
+   reaches the answer without floating point at all: the mantissa is `T * 2^-e`, and
+   `2^-e` is `5^e / 10^e` or `2^|e|`, so it is always a decimal bignum divided by a
+   power of ten - which for a digit array is reading it from a different offset. The
+   fast path (at most 15 digits, |exponent| at most 22) is kept because it is provably
+   exact, not merely close.
+7. **Integral doubles above 2^53 printed all their digits.** `num_to_str` took the
+   exact-integer path for anything inside the `long` range, so `1234567891234567936`
+   printed in full where every JS engine prints `1234567891234568000`. The fast path is
+   now bounded by 2^53, where an integer IS its own shortest form.
+8. **`Math.sqrt` - now correctly rounded, and it no longer diverges.** Newton's
+   iteration started from the VALUE ITSELF, which needs one step per power of two:
+   eighty were not enough for `sqrt(1e100)`, which answered `8.27e+75`. The start is now
+   the exponent halved by a bit-pattern shift, which lands within a few percent. Which
+   of the two neighbouring doubles is actually nearest is then decided EXACTLY, by
+   comparing squares as whole numbers - a 53-bit mantissa squared is 106 bits, so the
+   comparison runs on the same decimal digit arrays the printer uses.
+9. **`Math.pow` with a non-integer exponent - now answered.** It used to be NaN.
+   Repeated multiplication cannot reach a non-integer exponent, and an approximation of
+   exp/log would have disagreed with the Go twin in the last bits, which is the whole
+   defect class this floor exists to avoid. `runtime.c` therefore carries a FAITHFUL
+   PORT of Go's own `math.Pow`, `math.Exp`, `math.Log`, `math.Frexp`, `math.Ldexp` and
+   `math.Modf` - the same constants, the same polynomials, the same order of operations.
+   The same sequence of operations gives the same bits now that the arithmetic under it
+   is correctly rounded, and 2,500 differential cases say it does.
+10. **`toUpperCase`/`toLowerCase` were ASCII-ONLY.** The Go twin is `strings.ToUpper`,
+    the full Unicode simple mapping - 2,321 code points on which the two engines
+    answered differently. `runtime.c` now carries that mapping as 328 ranges (mode 0 is
+    two deltas for a whole range, mode 1 the alternating pairing of the Latin, Greek and
+    Cyrillic extension blocks), GENERATED FROM THE GO RUNTIME'S OWN ANSWERS over every
+    code point and verified against them: 65,505 BMP and 521 astral rows, zero
+    divergent. It maps over code points rather than bytes, and it reproduces one lossy
+    Go behaviour deliberately - an UNPAIRED surrogate becomes three U+FFFD, because
+    that is what `strings.ToUpper` does to the three invalid UTF-8 bytes it is carried
+    in, and the two engines have to agree.
+11. **The host global sets of the two MetaJS halves still differ.**
+    `metajs-interpreter.abnf` binds exactly `println print printf sprintf eprintln
+    parseInt parseFloat Math String exit anytype`; the compiler half
+    (`standardJSBindings`) also has `Infinity NaN Array Object byteLen sprint rawSet`.
+    The C floor matches the **compiler** half. `tests/metajs-test-full.js` asserts only
+    the intersection, because a check on the difference would fail on one half by
+    construction. Pre-existing drift, and the ONE item on this list still open. The
+    sharp s is the same kind of thing in miniature: `"\u00df".toUpperCase()` is `"SS"`
+    in the interpreter half (real JS, a full mapping) and `"\u00df"` in the compiler
+    half (Go, a simple mapping), so section 07 asserts around it and says so.
 
-### Defects found in `languages/c-to-llvm-ir.abnf` while writing the floor
+### What now pins all of this
 
-All three are **pre-existing** - reproduced from clean archives of `e81dc94` (pre
-phase-3a) and `43cf14e`, so phase 3a did not cause them - and all three are invisible to
-`tests/c-test-full.c`, which never uses the constructs. Each was worked around in
-`runtime.c` rather than fixed here, because that file belongs to another change:
+`./test.sh` compares goja against `-frozen` and BOTH of them are the Go runtime, so it
+is structurally blind to a wrong answer in the C floor. The two ratchet files carry the
+assertions instead, and `tests/clang-check.sh` runs them natively:
+
+- **`tests/metajs-test-full.js` section 22**, 38 assertions on inexact arithmetic,
+  `sqrt`, `pow`, accumulation, integer-to-double above 2^53 and the decimal parse, plus
+  8 case-mapping assertions in section 07. Against the pre-change native binary, 22 of
+  the 28 the section started with FAIL; against the Go runtime and the new native binary
+  all of them pass.
+- **`tests/c-test-full.c` sections 46 and 47**, 40 assertions, all validated against
+  real `cc`. Section 47's operands come out of ARRAYS on purpose: written as literals
+  they are folded by the grammar's own constant folder, which uses the host's exact
+  doubles and is therefore right whatever the emitted soft float does - a section of
+  literals passed at HEAD with the truncating soft float still in place. 19 of its 26
+  fail against the pre-change grammar.
+
+### The three pre-existing defects in c-to-llvm-ir.abnf - all FIXED
+
+All three were reproduced from clean archives of `e81dc94` and `43cf14e`, so they
+predate this work; all three were invisible to `tests/c-test-full.c`, which never used
+the constructs, and all three are now asserted there (section 46) against `cc`.
 
 ```c
-void ph(double d) { }                 /* a double PARAMETER does not compile:      */
-                                      /* "store operands are not compatible:       */
-                                      /*  src=i64; dst=i32*"                       */
+void ph(double d) { }                 /* a double PARAMETER did not compile:      */
+                                      /* getFunc put an i64 in the signature and  */
+                                      /* the prologue allocated an i32 slot       */
 
-double gd(long x) { return 1.5; }     /* a double RETURN VALUE is SILENTLY WRONG:  */
-                                      /* cc says the caller sees 1.5, we say it    */
-                                      /* does not - the same class as the pointer- */
-                                      /* return defect phase 3a fixed, for doubles */
+double gd(long x) { return 1.5; }     /* a double RETURN was silently wrong: only */
+                                      /* a 64-bit INTEGER return was recorded, so */
+                                      /* the function was declared i32 while      */
+                                      /* makeReturn handed it an i64              */
 
-long a; long *p = &a; *p = 42;        /* does not compile; p[0] = 42 does          */
+long a; long *p = &a; *p = 42;        /* did not compile; p[0] = 42 did, because  */
+                                      /* only the subscript path typed the address*/
 ```
 
-Measured three ways for the second one (`gd(1) > 1.4`):
+The fixes: `noteRetCt` and `noteParamCts` record a floating-point type the same way they
+record a 64-bit integer one; `kct` gives a floating-point type a 64-bit zero; the
+parameter prologue allocates the width the signature promised; `emitCallArgs` converts an
+integer argument to a double parameter (C11 6.5.2.2p7); and `storeTo` types the ADDRESS
+to the cell (`cellAddr`) and the VALUE to its width - a value of the right C type can
+still be sitting in a narrower register than its cell, and `sext i32 to i8` is IR clang
+refuses outright.
 
-```
-cc (oracle)     Y
-e81dc94         N          43cf14e         N          worktree        N
-```
-
-The workaround in `runtime.c` is that **every number travels as its raw IEEE-754 bit
-pattern in a `long`** and a `double` is materialised only inside the function that
-computes with it, through a `union`. Unions of `double` and `long` do work, in both
-directions, and that is what makes the workaround possible.
+`languages/lib/runtime.c` no longer needs the workaround the three forced on it, though
+it still carries numbers as bit patterns in a `long` where that reads better.
 
 ### Exceptions
 

@@ -37,12 +37,13 @@
 // expression literals, getters/setters, Symbol, BigInt, labelled statements,
 // optional chaining, exponentiation.
 //
-// NOT asserted here, and measured rather than hidden - see the phase 3 section
-// of docs/runtime-rework-plan.md: the last bit of an INEXACT floating point
-// result. The C floor computes with the soft float that c-to-llvm-ir.abnf
-// emits, which truncates where IEEE-754 rounds to nearest even, so 0.1 + 0.2 is
-// one ulp below the Go runtime's answer. Every exactly representable value
-// (halves, quarters, integers below 2^53) agrees bit for bit and IS asserted.
+// The last bit of an INEXACT floating point result IS asserted, in section 22.
+// It used to be out of scope here: the C floor computes with the soft float
+// c-to-llvm-ir.abnf emits, which truncated where IEEE-754 rounds to nearest
+// even, so 0.1 + 0.2 came out one ulp below the Go runtime's answer. That is
+// exactly the kind of divergence ./test.sh cannot see - both of its engines are
+// the Go runtime - so it is pinned here instead, where tests/clang-check.sh runs
+// this file as a NATIVE BINARY and the C floor has to give the same answer.
 //
 // Hand-written for the metacompiler project (Apache-2.0, no copied test-suite
 // code).
@@ -200,6 +201,23 @@ function s07() {
     check("str6", s.slice(-5) === "world")
     check("str7", s.toUpperCase() === "HELLO WORLD")
     check("str8", "ABC".toLowerCase() === "abc")
+    // The case mapping is the full Unicode SIMPLE mapping, not ASCII: the C floor
+    // used to change only the 26 letters, which is 2,321 code points on which the two
+    // engines answered differently. Latin-1, Latin Extended-A (whose pairs alternate),
+    // Greek, Cyrillic and an astral block, one from each shape of the table.
+    // (not the sharp s: its uppercase is the two letters SS, which is a FULL mapping,
+    // and the two halves of MetaJS disagree about it - pre-existing drift, and the
+    // one thing in this area that is not settled)
+    check("str7a", "\u00e9\u00fc\u00e0".toUpperCase() === "\u00c9\u00dc\u00c0")
+    check("str7b", "\u0101\u0103\u0105".toUpperCase() === "\u0100\u0102\u0104")
+    check("str7c", "\u03b1\u03b2\u03c9".toUpperCase() === "\u0391\u0392\u03a9")
+    check("str7d", "\u0430\u0431\u044f".toUpperCase() === "\u0410\u0411\u042f")
+    check("str7e", "\u00c9\u0100\u0391\u0410".toLowerCase() === "\u00e9\u0101\u03b1\u0430")
+    check("str7f", String.fromCharCode(55297, 56320).toUpperCase() ===
+                   String.fromCharCode(55297, 56320))
+    check("str7g", String.fromCharCode(55297, 56360).toUpperCase() ===
+                   String.fromCharCode(55297, 56320))
+    check("str7h", "\u00b5".toUpperCase() === "\u039c" && "\u0131".toUpperCase() === "I")
     check("str9", "  pad  ".trim() === "pad")
     check("str10", s.replace("world", "there") === "hello there")
     check("str11", "a,b,c".split(",").length === 3)
@@ -639,6 +657,75 @@ function s21() {
     check("prog5", fib(10) === 55)
 }
 
+// ===== SECTION 22: INEXACT floating point, to the last bit =====
+// The point of this section is the one divergence ./test.sh is structurally
+// blind to. Its two engines - goja and -frozen - are both the Go runtime, so a
+// wrong answer in the C floor cannot make them disagree. tests/clang-check.sh
+// builds this file as a native binary and compares its output, and that is the
+// only place these assertions bite.
+//
+// Every value here is INEXACT: it needs correct round-to-nearest-ties-to-even in
+// the emitted soft float (add, subtract, multiply, divide, and the conversion of
+// an integer above 2^53), correct rounding in Math.sqrt, and an exact shortest
+// decimal in the formatter. Under the truncating soft float the C floor shipped
+// with until 2026-08-02, 0.1 + 0.2 printed 0.29999999999999991 and 10 / 3
+// printed 3.333333333333333. The oracle is the Go runtime, which is JS.
+function s22() {
+    check("ieee1", 0.1 + 0.2 === 0.30000000000000004)
+    check("ieee2", "" + (0.1 + 0.2) === "0.30000000000000004")
+    check("ieee3", 0.1 + 0.2 > 0.3)
+    check("ieee4", "" + (10 / 3) === "3.3333333333333335")
+    check("ieee5", "" + (1 / 3) === "0.3333333333333333")
+    check("ieee6", "" + (2 / 3) === "0.6666666666666666")
+    check("ieee7", "" + (100 / 7) === "14.285714285714286")
+    check("ieee8", "" + (0.1 * 0.2) === "0.020000000000000004")
+    check("ieee9", "" + (0.1 + 0.7) === "0.7999999999999999")
+    check("ieee10", "" + (0.1 - 0.3) === "-0.19999999999999998")
+    check("ieee11", "" + (0.3 / 0.1) === "2.9999999999999996")
+    check("ieee12", "" + (1.0000000000000002 * 1.0000000000000002) === "1.0000000000000004")
+    // sqrt of a non-square, and the product that shows its last bit is right
+    check("ieee13", "" + Math.sqrt(2) === "1.4142135623730951")
+    check("ieee14", "" + Math.sqrt(3) === "1.7320508075688772")
+    check("ieee15", "" + Math.sqrt(5) === "2.23606797749979")
+    check("ieee16", "" + (Math.sqrt(2) * Math.sqrt(2)) === "2.0000000000000004")
+    // an accumulation: the error has to land in the same place both times
+    var s = 0
+    for (var i = 0; i < 10; i++) { s = s + 0.1 }
+    check("ieee17", "" + s === "0.9999999999999999")
+    var t = 0
+    for (var j = 0; j < 100; j++) { t = t + 0.01 }
+    check("ieee18", "" + t === "1.0000000000000007")
+    // above 2^53 the integer-to-double conversion has to round, not drop bits
+    check("ieee19", "" + (123456789 * 987654321) === "121932631112635260")
+    check("ieee20", "" + 9007199254740993 === "9007199254740992")
+    check("ieee21", "" + (10000000000000000 + 1) === "10000000000000000")
+    check("ieee22", "" + (10000000000000000 + 3) === "10000000000000004")
+    // exact cases stay exact
+    check("ieee23", 1 / 1048576 * 1048576 === 1)
+    check("ieee24", 4 / 3 * 3 === 4)
+    // Math.pow with a NON-INTEGER exponent. It used to answer NaN outright: repeated
+    // multiplication cannot reach one, and an approximation would have disagreed with
+    // the Go twin in the last bits. The C floor now carries a faithful port of Go's
+    // own math.Pow (and the math.Exp, math.Log, math.Frexp, math.Ldexp and math.Modf
+    // underneath it), which gives the same bits because the arithmetic under it is
+    // now correctly rounded.
+    check("pow1", "" + Math.pow(2, 0.5) === "1.4142135623730951")
+    check("pow2", "" + Math.pow(2, 1.5) === "2.82842712474619")
+    check("pow3", "" + Math.pow(10, 1 / 3) === "2.154434690031884")
+    check("pow4", "" + Math.pow(0.5, -2.25) === "4.756828460010884")
+    check("pow5", "" + Math.pow(7.25, 3.5) === "1026.0842537594017")
+    check("pow6", "" + Math.pow(2, -0.5) === "0.7071067811865475")
+    check("pow7", "" + Math.pow(1.0000001, 1000000) === "1.1051709126081526")
+    check("pow8", Math.pow(3, 3) === 27 && Math.pow(2, 10) === 1024)
+    check("pow9", Math.pow(2, -3) === 0.125 && Math.pow(0, 0) === 1)
+    check("pow10", Math.pow(-2, 3) === -8 && "" + Math.pow(-2, 0.5) === "NaN")
+    // and the decimal PARSE of a literal no fast path can reach
+    check("ieee25", "" + parseFloat("1e100") === "1e+100")
+    check("ieee26", "" + parseFloat("1.7976931348623157e308") === "1.7976931348623157e+308")
+    check("ieee27", "" + parseFloat("0.9999999999999999") === "0.9999999999999999")
+    check("ieee28", "" + parseFloat("123456789123456789") === "123456789123456780")
+}
+
 function main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -661,6 +748,7 @@ function main() {
     s19() // SECTION-CALL 19
     s20() // SECTION-CALL 20
     s21() // SECTION-CALL 21
+    s22() // SECTION-CALL 22
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

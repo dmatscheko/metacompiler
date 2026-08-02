@@ -726,6 +726,134 @@ void obj_put(long h, long key, long v) {
 	sc(h, n + 1);
 }
 
+/* ----- Unicode simple case mapping -----
+ *
+ * toUpperCase/toLowerCase used to be ASCII ONLY, byte by byte, while the Go twin is
+ * strings.ToUpper - the full Unicode simple mapping. That is 2,879 code points the
+ * two engines answered differently. The table below is the same mapping as ranges:
+ * mode 0 gives every code point in [lo,hi] the two deltas as they stand, mode 1 is
+ * the alternating upper/lower pairing of the Latin, Greek and Cyrillic extension
+ * blocks (Go's own UpperLower case). It was GENERATED FROM THE GO RUNTIME'S OWN
+ * ANSWERS over every code point from 32 to 0x10FFFF and verified against them.
+ * Only the simple mapping is modelled, which is exactly what the Go twin does: no
+ * one-to-many expansion (no sharp s to SS) and no locale. */
+long NCASE = 328;
+static long CASE_LO[328] = {
+	65, 97, 181, 192, 216, 224, 248, 255, 256, 304, 305, 306, 313, 330, 376, 377, 383, 384, 
+	385, 386, 390, 391, 393, 395, 398, 399, 400, 401, 403, 404, 405, 406, 407, 408, 410, 412, 
+	413, 414, 415, 416, 422, 423, 425, 428, 430, 431, 433, 435, 439, 440, 444, 447, 452, 453, 
+	454, 455, 456, 457, 458, 459, 460, 461, 477, 478, 497, 498, 499, 500, 502, 503, 504, 544, 
+	546, 570, 571, 573, 574, 575, 577, 579, 580, 581, 582, 592, 593, 594, 595, 596, 598, 601, 
+	603, 604, 608, 609, 611, 613, 614, 616, 617, 618, 619, 620, 623, 625, 626, 629, 637, 640, 
+	642, 643, 647, 648, 649, 650, 652, 658, 669, 670, 837, 880, 886, 891, 895, 902, 904, 908, 
+	910, 913, 931, 940, 941, 945, 962, 963, 972, 973, 975, 976, 977, 981, 982, 983, 984, 1008, 
+	1009, 1010, 1011, 1012, 1013, 1015, 1017, 1018, 1021, 1024, 1040, 1072, 1104, 1120, 1162, 
+	1216, 1217, 1231, 1232, 1329, 1377, 4256, 4295, 4301, 4304, 4349, 5024, 5104, 5112, 7296, 
+	7297, 7298, 7299, 7301, 7302, 7303, 7304, 7312, 7357, 7545, 7549, 7566, 7680, 7835, 7838, 
+	7840, 7936, 7944, 7952, 7960, 7968, 7976, 7984, 7992, 8000, 8008, 8017, 8019, 8021, 8023, 
+	8025, 8027, 8029, 8031, 8032, 8040, 8048, 8050, 8054, 8056, 8058, 8060, 8064, 8072, 8080, 
+	8088, 8096, 8104, 8112, 8115, 8120, 8122, 8124, 8126, 8131, 8136, 8140, 8144, 8152, 8154, 
+	8160, 8165, 8168, 8170, 8172, 8179, 8184, 8186, 8188, 8486, 8490, 8491, 8498, 8526, 8544, 
+	8560, 8579, 9398, 9424, 11264, 11312, 11360, 11362, 11363, 11364, 11365, 11366, 11367, 
+	11373, 11374, 11375, 11376, 11378, 11381, 11390, 11392, 11499, 11506, 11520, 11559, 11565, 
+	42560, 42624, 42786, 42802, 42873, 42877, 42878, 42891, 42893, 42896, 42900, 42902, 42922, 
+	42923, 42924, 42925, 42926, 42928, 42929, 42930, 42931, 42932, 42948, 42949, 42950, 42951, 
+	42960, 42966, 42997, 43859, 43888, 65313, 65345, 66560, 66600, 66736, 66776, 66928, 66940, 
+	66956, 66964, 66967, 66979, 66995, 67003, 68736, 68800, 71840, 71872, 93760, 93792, 125184, 
+	125218,
+};
+static long CASE_HI[328] = {
+	90, 122, 181, 214, 222, 246, 254, 255, 303, 304, 305, 311, 328, 375, 376, 382, 383, 384, 
+	385, 389, 390, 392, 394, 396, 398, 399, 400, 402, 403, 404, 405, 406, 407, 409, 410, 412, 
+	413, 414, 415, 421, 422, 424, 425, 429, 430, 432, 434, 438, 439, 441, 445, 447, 452, 453, 
+	454, 455, 456, 457, 458, 459, 460, 476, 477, 495, 497, 498, 499, 501, 502, 503, 543, 544, 
+	563, 570, 572, 573, 574, 576, 578, 579, 580, 581, 591, 592, 593, 594, 595, 596, 599, 601, 
+	603, 604, 608, 609, 611, 613, 614, 616, 617, 618, 619, 620, 623, 625, 626, 629, 637, 640, 
+	642, 643, 647, 648, 649, 651, 652, 658, 669, 670, 837, 883, 887, 893, 895, 902, 906, 908, 
+	911, 929, 939, 940, 943, 961, 962, 971, 972, 974, 975, 976, 977, 981, 982, 983, 1007, 1008, 
+	1009, 1010, 1011, 1012, 1013, 1016, 1017, 1019, 1023, 1039, 1071, 1103, 1119, 1153, 1215, 
+	1216, 1230, 1231, 1327, 1366, 1414, 4293, 4295, 4301, 4346, 4351, 5103, 5109, 5117, 7296, 
+	7297, 7298, 7300, 7301, 7302, 7303, 7304, 7354, 7359, 7545, 7549, 7566, 7829, 7835, 7838, 
+	7935, 7943, 7951, 7957, 7965, 7975, 7983, 7991, 7999, 8005, 8013, 8017, 8019, 8021, 8023, 
+	8025, 8027, 8029, 8031, 8039, 8047, 8049, 8053, 8055, 8057, 8059, 8061, 8071, 8079, 8087, 
+	8095, 8103, 8111, 8113, 8115, 8121, 8123, 8124, 8126, 8131, 8139, 8140, 8145, 8153, 8155, 
+	8161, 8165, 8169, 8171, 8172, 8179, 8185, 8187, 8188, 8486, 8490, 8491, 8498, 8526, 8559, 
+	8575, 8580, 9423, 9449, 11311, 11359, 11361, 11362, 11363, 11364, 11365, 11366, 11372, 
+	11373, 11374, 11375, 11376, 11379, 11382, 11391, 11491, 11502, 11507, 11557, 11559, 11565, 
+	42605, 42651, 42799, 42863, 42876, 42877, 42887, 42892, 42893, 42899, 42900, 42921, 42922, 
+	42923, 42924, 42925, 42926, 42928, 42929, 42930, 42931, 42947, 42948, 42949, 42950, 42954, 
+	42961, 42969, 42998, 43859, 43967, 65338, 65370, 66599, 66639, 66771, 66811, 66938, 66954, 
+	66962, 66965, 66977, 66993, 67001, 67004, 68786, 68850, 71871, 71903, 93791, 93823, 125217, 
+	125251,
+};
+static long CASE_MODE[328] = {
+	0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 
+	0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+	0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 
+	1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 
+	0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+	0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 
+	1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 
+	1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+static long CASE_DU[328] = {
+	0, -32, 743, 0, 0, -32, -32, 121, 0, 0, -232, 0, 0, 0, 0, 0, -300, 195, 0, 0, 0, 0, 0, 0, 
+	0, 0, 0, 0, 0, 0, 97, 0, 0, 0, 163, 0, 0, 130, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 56, 
+	0, -1, -2, 0, -1, -2, 0, -1, -2, 0, -79, 0, 0, -1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10815, 
+	0, 0, 0, 0, 0, 10783, 10780, 10782, -210, -206, -205, -202, -203, 42319, -205, 42315, -207, 
+	42280, 42308, -209, -211, 42308, 10743, 42305, -211, 10749, -213, -214, 10727, -218, 42307, 
+	-218, 42282, -218, -69, -217, -71, -219, 42261, 42258, 84, 0, 0, 130, 0, 0, 0, 0, 0, 0, 0, 
+	-38, -37, -32, -31, -32, -64, -63, 0, -62, -57, -47, -54, -8, 0, -86, -80, 7, -116, 0, -96, 
+	0, 0, 0, 0, 0, 0, -32, -80, 0, 0, 0, 0, -15, 0, 0, -48, 0, 0, 0, 3008, 3008, 0, 0, -8, 
+	-6254, -6253, -6244, -6242, -6243, -6236, -6181, 35266, 0, 0, 35332, 3814, 35384, 0, -59, 
+	0, 0, 8, 0, 8, 0, 8, 0, 8, 0, 8, 0, 8, 8, 8, 8, 0, 0, 0, 0, 8, 0, 74, 86, 100, 128, 112, 
+	126, 8, 0, 8, 0, 8, 0, 8, 9, 0, 0, 0, -7205, 9, 0, 0, 8, 0, 0, 8, 7, 0, 0, 0, 9, 0, 0, 0, 
+	0, 0, 0, 0, -28, 0, -16, 0, 0, -26, 0, -48, 0, 0, 0, 0, -10795, -10792, 0, 0, 0, 0, 0, 0, 
+	0, 0, 0, 0, 0, -7264, -7264, -7264, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 48, 0, 0, 0, 0, 0, 0, 0, 
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -928, -38864, 0, -32, 0, -40, 0, -40, 0, 0, 0, 0, -39, 
+	-39, -39, -39, 0, -64, 0, -32, 0, -32, 0, -34,
+};
+static long CASE_DL[328] = {
+	32, 0, 0, 32, 32, 0, 0, 0, 0, -199, 0, 0, 0, 0, -121, 0, 0, 0, 210, 0, 206, 0, 205, 0, 79, 
+	202, 203, 0, 205, 207, 0, 211, 209, 0, 0, 211, 213, 0, 214, 0, 218, 0, 218, 0, 218, 0, 217, 
+	0, 219, 0, 0, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 0, 0, 0, 2, 1, 0, 0, -97, -56, 0, -130, 0, 
+	10795, 0, -163, 10792, 0, 0, -195, 69, 71, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 116, 38, 37, 64, 
+	63, 32, 32, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -60, 0, 0, -7, 0, -130, 
+	80, 32, 0, 0, 0, 0, 15, 0, 0, 0, 48, 0, 7264, 7264, 7264, 0, 0, 38864, 8, 0, 0, 0, 0, 0, 0, 
+	0, 0, 0, -3008, -3008, 0, 0, 0, 0, 0, -7615, 0, 0, -8, 0, -8, 0, -8, 0, -8, 0, -8, 0, 0, 0, 
+	0, -8, -8, -8, -8, 0, -8, 0, 0, 0, 0, 0, 0, 0, -8, 0, -8, 0, -8, 0, 0, -8, -74, -9, 0, 0, 
+	-86, -9, 0, -8, -100, 0, 0, -8, -112, -7, 0, -128, -126, -9, -7517, -8383, -8262, 28, 0, 
+	16, 0, 0, 26, 0, 48, 0, 0, -10743, -3814, -10727, 0, 0, 0, -10780, -10749, -10783, -10782, 
+	0, 0, -10815, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -35332, 0, 0, -42280, 0, 0, 0, -42308, 
+	-42319, -42315, -42305, -42308, -42258, -42282, -42261, 928, 0, -48, -42307, -35384, 0, 0, 
+	0, 0, 0, 0, 32, 0, 40, 0, 40, 0, 39, 39, 39, 39, 0, 0, 0, 0, 64, 0, 32, 0, 32, 0, 34, 0,
+};
+
+/* The mapped code point, or c itself. Binary search over the ranges. */
+long case_map(long c, int up) {
+	long lo = 0;
+	long hi = NCASE - 1;
+	long mid;
+	while (lo <= hi) {
+		mid = (lo + hi) / 2;
+		if (c < CASE_LO[mid]) { hi = mid - 1; }
+		else if (c > CASE_HI[mid]) { lo = mid + 1; }
+		else {
+			if (CASE_MODE[mid] != 0) {
+				/* even offset from lo is the upper of a pair, odd is the lower */
+				if ((c - CASE_LO[mid]) % 2 == 0) { return up ? c : c + 1; }
+				return up ? c - 1 : c;
+			}
+			return c + (up ? CASE_DU[mid] : CASE_DL[mid]);
+		}
+	}
+	return c;
+}
+
 /* ------------------------------------------------ number <-> string ------ */
 
 /* pow10 returns 10^n as bit pattern, for -308 <= n <= 308. */
@@ -742,99 +870,213 @@ long pow10(long n) {
 	return r.l;
 }
 
-/* Digits of |x| into buf (17 of them) plus the decimal exponent of the first
- * digit, returned. x must be finite and non-zero. */
-long g_ndig;
-long dtoa_digits(long x, char *buf) {
-	union DB m;
-	union DB ten;
-	long e10 = 0;
+/* ----- exact decimal arithmetic, for the digits of a double -----
+ *
+ * A double is a 53-bit integer times a power of two, so its value has a FINITE
+ * decimal expansion, and every question about it - what its digits are, and how
+ * few of them read back as itself - has an exact integer answer. These helpers
+ * work on decimal digit arrays (ONE DIGIT PER BYTE, least significant first),
+ * which is the representation that makes those digits fall straight out.
+ *
+ * The float-arithmetic version this replaces generated digits by repeatedly
+ * multiplying the remainder by ten, which is right to about sixteen digits and
+ * therefore WRONG IN THE LAST PLACE of every seventeen-digit number: 10.0/3.0
+ * printed as 3.3333333333333334 where the value is 3.3333333333333335, and the
+ * shortest-form search it drove could not find the sixteen-digit form of
+ * 0.9999999999999999 at all. Nothing here touches a double. */
+
+/* a = a * k, in place; k must be small enough that 9*k plus a carry stays inside
+ * a long, which every caller here satisfies (the largest k is a 53-bit
+ * mantissa). Returns the new length. */
+long dec_mul(char *a, long n, long k) {
 	long i = 0;
-	long dg;
-	x = d_abs(x);
-	m.l = x;
-	ten.d = 10.0;
-	while (m.d >= 10.0) { m.d = m.d / ten.d; e10 = e10 + 1; }
-	while (m.d < 1.0)   { m.d = m.d * ten.d; e10 = e10 - 1; }
-	while (i < 17) {
-		dg = (long)m.d;
-		if (dg > 9) { dg = 9; }
-		if (dg < 0) { dg = 0; }
-		buf[i] = (char)(48 + dg);
-		m.d = (m.d - (double)dg) * ten.d;
+	long carry = 0;
+	long t;
+	while (i < n || carry > 0) {
+		t = carry;
+		if (i < n) { t = t + (long)a[i] * k; }
+		a[i] = (char)(t % 10);
+		carry = t / 10;
 		i = i + 1;
 	}
-	g_ndig = 17;
-	return e10;
+	return i;
 }
-
-/* Round the 17 digits in buf to k digits (in place); returns 1 when the
- * rounding carried past the first digit, which shifts the exponent. */
-int dtoa_round(char *buf, long k) {
+/* The length with leading (that is, top-end) zero digits dropped. */
+long dec_norm(const char *a, long n) {
+	while (n > 0 && a[n - 1] == 0) { n = n - 1; }
+	return n;
+}
+long dec_cmp(const char *a, long na, const char *b, long nb) {
 	long i;
-	int carry;
-	if (k >= 17) { return 0; }
-	carry = buf[k] >= 53;      /* '5' */
-	i = k - 1;
-	while (carry && i >= 0) {
-		if (buf[i] == 57) { buf[i] = 48; i = i - 1; }
-		else { buf[i] = (char)(buf[i] + 1); carry = 0; }
-	}
-	i = k;
-	while (i < 17) { buf[i] = 48; i = i + 1; }
-	if (carry) {
-		i = 16;
-		while (i > 0) { buf[i] = buf[i - 1]; i = i - 1; }
-		buf[0] = 49;           /* '1' */
-		return 1;
+	if (na != nb) { return na > nb ? 1 : -1; }
+	i = na - 1;
+	while (i >= 0) {
+		if (a[i] != b[i]) { return a[i] > b[i] ? 1 : -1; }
+		i = i - 1;
 	}
 	return 0;
 }
-
-/* Rebuild the double from k digits at exponent e10. */
-long dtoa_value(const char *buf, long k, long e10) {
-	long mant = 0;
+/* d = |a - b| */
+long dec_absdiff(const char *a, long na, const char *b, long nb, char *d) {
+	const char *x;
+	const char *y;
+	long nx;
+	long ny;
 	long i = 0;
-	union DB r;
-	union DB p;
-	long e = e10 - k + 1;
-	while (i < k) { mant = mant * 10 + (buf[i] - 48); i = i + 1; }
-	r.l = d_from_long(mant);
-	/* DIVIDE by a positive power of ten rather than multiplying by its
-	 * reciprocal: 35 / 10 is exactly 3.5, while 35 * (1/10) is not. */
-	if (e < 0) { p.l = pow10(0 - e); r.d = r.d / p.d; }
-	else { p.l = pow10(e); r.d = r.d * p.d; }
-	return r.l;
-}
-
-/* shortest_digits fills digs with the SHORTEST decimal digit string that
- * reproduces |bits| exactly (17 digits always do), sets g_ndig to how many, and
- * returns the decimal exponent of the first digit. bits must be finite and
- * non-zero - it is the shared core of both renderings below. */
-long shortest_digits(long bits, char *digs) {
-	long e10 = dtoa_digits(bits, digs);
-	long best = 17;
-	long k = 1;
-	long i;
-	while (k <= 17) {
-		char tryb[24];
-		long te;
-		i = 0;
-		while (i < 17) { tryb[i] = digs[i]; i = i + 1; }
-		te = e10;
-		if (dtoa_round(tryb, k)) { te = te + 1; }
-		if (dtoa_value(tryb, k, te) == d_abs(bits)) {
-			i = 0;
-			while (i < 17) { digs[i] = tryb[i]; i = i + 1; }
-			e10 = te;
-			best = k;
-			k = 18;
-		} else {
-			k = k + 1;
-		}
+	long borrow = 0;
+	long t;
+	if (dec_cmp(a, na, b, nb) >= 0) { x = a; nx = na; y = b; ny = nb; }
+	else { x = b; nx = nb; y = a; ny = na; }
+	while (i < nx) {
+		t = (long)x[i] - borrow;
+		if (i < ny) { t = t - (long)y[i]; }
+		if (t < 0) { t = t + 10; borrow = 1; } else { borrow = 0; }
+		d[i] = (char)t;
+		i = i + 1;
 	}
-	while (best > 1 && digs[best - 1] == 48) { best = best - 1; }
-	g_ndig = best;
+	return dec_norm(d, nx);
+}
+/* The scratch is file scope rather than stack: 5^1074 is 751 digits, and the
+ * runtime is single threaded and never re-enters this. */
+char G_DP[1024];
+char G_DN[1024];
+char G_DV[1024];
+char G_DHI[1024];
+char G_DLO[1024];
+char G_DC[1024];
+char G_DD[1024];
+
+long g_ndig;
+
+/* shortest_digits fills digs with the SHORTEST decimal digit string that reads
+ * back as |bits| (seventeen digits always do), sets g_ndig to how many, and
+ * returns the decimal exponent of the first digit. bits must be finite and
+ * non-zero - it is the shared core of both renderings below.
+ *
+ * Write the value as m * 2^e with m a whole 53-bit mantissa. Let P be 2^e when
+ * e >= 0 and 5^(-e) when e < 0; then N = m * P is a whole number and the value
+ * is exactly N * 10^p, with p zero or e. A candidate of k digits reads back as
+ * this double exactly when it lands inside the rounding interval, whose two
+ * halves are 2^(e-1) wide - or half that below a power of two. Scaling
+ * everything by four keeps those halves whole too, so the whole decision is an
+ * integer comparison: 2P and (below a power of two) P are the bounds, 4N is the
+ * value, and 4*M*10^(L-k) is the candidate. */
+long shortest_digits(long bits, char *digs) {
+	long E;
+	long F;
+	long m;
+	long e;
+	long p;
+	long i;
+	long k;
+	long t;
+	long nP;
+	long nN;
+	long nV;
+	long nHI;
+	long nLO;
+	long nC;
+	long nD;
+	long L;
+	long M;
+	long best = 0;
+	long bestM = 0;
+	long bestK = 0;
+	long cmp;
+	long lim;
+	long round;
+	long cut;
+	long any;
+	long inc;
+	char rev[24];
+	long dm;
+	long e10;
+	bits = d_abs(bits);
+	E = (bits >> 52) & 2047;
+	F = bits & 4503599627370495L;
+	if (E == 0) { m = F; e = -1074; } else { m = F + 4503599627370496L; e = E - 1075; }
+	nP = 1;
+	G_DP[0] = 1;
+	if (e >= 0) {
+		p = 0;
+		i = 0;
+		while (i < e) { nP = dec_mul(G_DP, nP, 2); i = i + 1; }
+	} else {
+		p = e;
+		i = 0;
+		while (i < 0 - e) { nP = dec_mul(G_DP, nP, 5); i = i + 1; }
+	}
+	i = 0;
+	while (i < nP) { G_DN[i] = G_DP[i]; G_DHI[i] = G_DP[i]; G_DLO[i] = G_DP[i]; i = i + 1; }
+	nN = dec_mul(G_DN, nP, m);
+	L = nN;
+	i = 0;
+	while (i < nN) { G_DV[i] = G_DN[i]; i = i + 1; }
+	nV = dec_mul(G_DV, nN, 4);
+	nHI = dec_mul(G_DHI, nP, 2);
+	/* Directly below a power of two the gap down to the previous double is half
+	 * the gap up, so the interval is not symmetric. */
+	nLO = nP;
+	if (m != 4503599627370496L || E <= 1) { nLO = dec_mul(G_DLO, nP, 2); }
+	lim = L < 17 ? L : 17;
+	k = 1;
+	while (k <= lim && best == 0) {
+		round = 0;
+		while (round < 2 && best == 0) {
+			M = 0;
+			i = 0;
+			while (i < k) { M = M * 10 + (long)G_DN[L - 1 - i]; i = i + 1; }
+			/* Round the exact digits to k, NEAREST WITH TIES TO EVEN - the same
+			 * rule the Go and JS shortest-form printers use, and the reason
+			 * 1000000000000000.25 renders as ...0.2 and not ...0.3. Where two
+			 * candidates of the same length both read back, the second pass
+			 * offers the other one. */
+			cut = L > k ? (long)G_DN[L - 1 - k] : 0;
+			any = 0;
+			i = L - k - 2;
+			while (i >= 0) { if (G_DN[i] != 0) { any = 1; i = 0; } i = i - 1; }
+			inc = 0;
+			if (cut > 5 || (cut == 5 && (any != 0 || (M & 1) != 0))) { inc = 1; }
+			if (round == 1) { inc = 1 - inc; }
+			if (round == 1 && L <= k) { round = 2; }
+			else {
+				M = M + inc;
+				nC = 0;
+				while (nC < L - k) { G_DC[nC] = 0; nC = nC + 1; }
+				t = M * 4;
+				while (t > 0) { G_DC[nC] = (char)(t % 10); t = t / 10; nC = nC + 1; }
+				nC = dec_norm(G_DC, nC);
+				cmp = dec_cmp(G_DC, nC, G_DV, nV);
+				if (cmp == 0) { best = 1; }
+				else {
+					nD = dec_absdiff(G_DC, nC, G_DV, nV, G_DD);
+					if (cmp > 0) { t = dec_cmp(G_DD, nD, G_DHI, nHI); }
+					else { t = dec_cmp(G_DD, nD, G_DLO, nLO); }
+					/* A candidate exactly on the boundary reads back as this
+					 * double only when this double is the even one. */
+					if (t < 0 || (t == 0 && (m & 1) == 0)) { best = 1; }
+				}
+				if (best) { bestM = M; bestK = k; }
+				round = round + 1;
+			}
+		}
+		k = k + 1;
+	}
+	if (best == 0) {
+		bestK = lim;
+		bestM = 0;
+		i = 0;
+		while (i < bestK) { bestM = bestM * 10 + (long)G_DN[L - 1 - i]; i = i + 1; }
+		if (L > bestK && G_DN[L - 1 - bestK] >= 5) { bestM = bestM + 1; }
+	}
+	t = bestM;
+	dm = 0;
+	while (t > 0) { rev[dm] = (char)(48 + (t % 10)); t = t / 10; dm = dm + 1; }
+	i = 0;
+	while (i < dm) { digs[i] = rev[dm - 1 - i]; i = i + 1; }
+	e10 = L - bestK + p + dm - 1;
+	while (dm > 1 && digs[dm - 1] == 48) { dm = dm - 1; }
+	g_ndig = dm;
 	return e10;
 }
 
@@ -868,8 +1110,12 @@ long num_to_str(long bits) {
 	if (d_is_zero(bits)) { return mk_cstr("0"); }
 	neg = d_sign(bits);
 	/* The exact integer path: no decimal search at all, and it is the path the
-	 * whole integer arithmetic of a program takes. */
-	if (d_is_integral(bits) && d_in_long(bits)) {
+	 * whole integer arithmetic of a program takes. Only BELOW 2^53, where the
+	 * integer is its own shortest form: 1234567891234567936 is a double whose
+	 * shortest form is 1234567891234568000, and printing all of its digits is
+	 * not what any JS engine does. */
+	if (d_is_integral(bits) && d_in_long(bits) &&
+	    d_to_long(d_abs(bits)) < 9007199254740992L) {
 		if (neg) { out[o] = 45; o = o + 1; }
 		o = o + int_digits(bits, out + o);
 		return mk_str(out, o);
@@ -921,6 +1167,110 @@ long num_to_str(long bits) {
 
 int is_space(int c) { return c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12; }
 
+/* ----- exact decimal -> double -----
+ *
+ * The double nearest N * 10^e10, where N is the whole number whose digits are
+ * dig[0..nd-1], LEAST SIGNIFICANT FIRST. No float arithmetic takes part in the
+ * decision, which is the point: multiplying by a power of ten built up by
+ * repeated multiplication rounds once per step, so "1.7976931348623157e308"
+ * came out as +Inf and "1e100" one part in 10^16 too large.
+ *
+ * The mantissa m of the answer is T * 2^(-e) for the right binary exponent e,
+ * and THAT is reachable with decimal arithmetic alone: 2^(-e) is 5^e / 10^e
+ * when e >= 0, and 2^(-e) when e is negative, so m is always a decimal bignum
+ * divided by a power of ten - and dividing a decimal digit array by a power of
+ * ten is reading it from a different offset. e is found by guessing (log2(10)
+ * is 217706/65536 to a part in a million) and then stepping. */
+char G_DY[2400];
+char G_DT[2400];
+long dec_to_double(const char *dig, long nd, long e10, long neg) {
+	long p;
+	long L;
+	long e;
+	long q;
+	long shift = 0;
+	long nY = 0;
+	long i;
+	long t;
+	long m = 0;
+	long dm;
+	long any;
+	long tries;
+	long bits;
+	nd = dec_norm(dig, nd);
+	if (nd == 0) { return neg ? (0 - 9223372036854775807L - 1L) : 0L; }
+	/* N with any POSITIVE decimal exponent absorbed as trailing zeros, so the
+	 * remaining exponent p is never above zero. */
+	p = e10;
+	i = 0;
+	if (p > 0) {
+		while (i < p) { G_DT[i] = 0; i = i + 1; }
+		t = 0;
+		while (t < nd) { G_DT[i] = dig[t]; i = i + 1; t = t + 1; }
+		L = i;
+		p = 0;
+	} else {
+		while (i < nd) { G_DT[i] = dig[i]; i = i + 1; }
+		L = nd;
+	}
+	q = L - 1 + p;
+	t = q * 217706;
+	e = t >= 0 ? t / 65536 : 0 - ((0 - t + 65535) / 65536);
+	e = e - 52;
+	tries = 0;
+	while (tries < 24) {
+		if (e < -1074) { e = -1074; }
+		i = 0;
+		while (i < L) { G_DY[i] = G_DT[i]; i = i + 1; }
+		nY = L;
+		if (e >= 0) {
+			i = 0;
+			while (i < e) { nY = dec_mul(G_DY, nY, 5); i = i + 1; }
+			shift = e - p;
+		} else {
+			i = 0;
+			while (i < 0 - e) { nY = dec_mul(G_DY, nY, 2); i = i + 1; }
+			shift = 0 - p;
+		}
+		nY = dec_norm(G_DY, nY);
+		/* Everything below the cut is read again for the rounding, so it has to
+		 * be zero rather than whatever an earlier attempt left there. */
+		i = nY;
+		while (i < shift) { G_DY[i] = 0; i = i + 1; }
+		dm = nY - shift;
+		if (dm < 0) { dm = 0; }
+		if (dm > 17) {
+			e = e + ((dm - 16) * 217706) / 65536 + 1;
+			tries = tries + 1;
+		} else {
+			m = 0;
+			i = nY - 1;
+			while (i >= shift) { m = m * 10 + (long)G_DY[i]; i = i - 1; }
+			if (m >= 9007199254740992L) { e = e + 1; tries = tries + 1; }
+			else if (m < 4503599627370496L && e > -1074) {
+				if (dm < 15) { e = e - ((16 - dm) * 217706) / 65536 - 1; }
+				else { e = e - 1; }
+				tries = tries + 1;
+			} else { tries = 24; }
+		}
+	}
+	/* The digits below the cut decide the rounding: nearest, ties to even. */
+	if (shift > 0) {
+		t = shift - 1 < nY ? (long)G_DY[shift - 1] : 0;
+		any = 0;
+		i = shift - 2;
+		while (i >= 0) { if (G_DY[i] != 0) { any = 1; i = 0; } i = i - 1; }
+		if (t > 5 || (t == 5 && (any != 0 || (m & 1) != 0))) { m = m + 1; }
+	}
+	if (m >= 9007199254740992L) { m = m / 2; e = e + 1; }
+	if (e > 971) { return neg ? DNINF : DINF; }
+	if (m < 4503599627370496L) { bits = m; }
+	else { bits = ((e + 1075) << 52) | (m - 4503599627370496L); }
+	if (neg) { bits = bits | (0 - 9223372036854775807L - 1L); }
+	return bits;
+}
+char G_DIG[820];
+
 /* str_to_num is Go's strconv.ParseFloat on the TRIMMED string: an empty string
  * is 0 and anything that does not parse whole is NaN (so "0x10" is NaN here,
  * exactly as in the Go runtime). */
@@ -949,16 +1299,25 @@ long str_to_num(long h) {
 	if (j - i == 3 && s[i] == 73 && s[i+1] == 110 && s[i+2] == 102) {
 		return neg ? DNINF : DINF;
 	}
+	/* The significant digits are collected WHOLE, most significant first, so the
+	 * conversion below can be exact; exp10 is kept so that the value is exactly
+	 * those digits read as an integer, times 10^exp10. */
 	while (i < j && s[i] >= 48 && s[i] <= 57) {
-		if (mdig < 18) { mant = mant * 10 + (s[i] - 48); mdig = mdig + 1; }
+		long dv = s[i] - 48;
+		if (mdig == 0 && dv == 0) { }               /* a leading zero is nothing */
+		else if (mdig < 800) { G_DIG[mdig] = (char)dv; mdig = mdig + 1; }
 		else { exp10 = exp10 + 1; }
+		if (mdig < 16) { mant = mant * 10 + dv; }
 		digits = digits + 1;
 		i = i + 1;
 	}
 	if (i < j && s[i] == 46) {
 		i = i + 1;
 		while (i < j && s[i] >= 48 && s[i] <= 57) {
-			if (mdig < 18) { mant = mant * 10 + (s[i] - 48); mdig = mdig + 1; exp10 = exp10 - 1; }
+			long dv = s[i] - 48;
+			if (mdig == 0 && dv == 0) { exp10 = exp10 - 1; }
+			else if (mdig < 800) { G_DIG[mdig] = (char)dv; mdig = mdig + 1; exp10 = exp10 - 1; }
+			if (mdig < 16) { mant = mant * 10 + dv; }
 			digits = digits + 1;
 			i = i + 1;
 		}
@@ -979,13 +1338,29 @@ long str_to_num(long h) {
 		exp10 = exp10 + esign * eval;
 	}
 	if (i != j) { return DNAN; }
-	if (exp10 > 308) { return neg ? DNINF : DINF; }
-	if (exp10 < -340) { return neg ? (0 - 9223372036854775807 - 1) : 0; }
-	r.l = d_from_long(mant);
-	if (exp10 < 0) { p.l = pow10(0 - exp10); r.d = r.d / p.d; }
-	else { p.l = pow10(exp10); r.d = r.d * p.d; }
-	if (neg) { r.d = 0.0 - r.d; }
-	return r.l;
+	if (mdig == 0) { return neg ? (0 - 9223372036854775807L - 1L) : DZERO; }
+	/* The magnitude is 10^(mdig-1+exp10); only the far extremes are decided here,
+	 * so that the conversion below never has to hold an absurd number of digits. */
+	if (mdig - 1 + exp10 > 400) { return neg ? DNINF : DINF; }
+	if (mdig - 1 + exp10 < -400) { return neg ? (0 - 9223372036854775807L - 1L) : DZERO; }
+	/* The fast path, and it is EXACT rather than merely close: a mantissa of at
+	 * most fifteen digits is a whole double, 10^k for |k| <= 22 is a whole
+	 * double, and a single multiply or divide rounds once, correctly. Anything
+	 * else goes the long way round. */
+	if (mdig <= 15 && exp10 >= -22 && exp10 <= 22) {
+		r.l = d_from_long(mant);
+		if (exp10 < 0) { p.l = pow10(0 - exp10); r.d = r.d / p.d; }
+		else { p.l = pow10(exp10); r.d = r.d * p.d; }
+		if (neg) { r.d = 0.0 - r.d; }
+		return r.l;
+	}
+	/* dec_to_double wants the digits least significant first. */
+	{
+		char rev[820];
+		long k = 0;
+		while (k < mdig) { rev[k] = G_DIG[mdig - 1 - k]; k = k + 1; }
+		return dec_to_double(rev, mdig, exp10, neg);
+	}
 }
 
 /* -------------------------------------------------- the value operations - */
@@ -1769,20 +2144,43 @@ long builtin_method(long recv, long mid, long args) {
 			}
 		}
 		if (mid == 27 || mid == 28) {                         /* toUpperCase/LowerCase */
-			long bn = str_len(recv);
-			char *buf = ar_alloc(bn + 1);
-			const char *p = str_ptr(recv);
+			/* Over CODE POINTS, not bytes: the mapping is Unicode-wide, and it can
+			 * change a character's UTF-8 length in both directions. The units array
+			 * is UTF-16, so an astral character arrives as a surrogate pair and is
+			 * rejoined before mapping and split again after. */
+			long un = str_ulen(recv);
+			long *u = buf_new(3 * un + 1);
+			long k = 0;
 			long i = 0;
-			n = bn;
-			while (i < n) {
-				int c = (int)p[i] & 255;
-				if (mid == 27 && c >= 97 && c <= 122) { c = c - 32; }
-				if (mid == 28 && c >= 65 && c <= 90) { c = c + 32; }
-				buf[i] = (char)c;
-				i = i + 1;
+			while (i < un) {
+				long cu = str_ucode(recv, i);
+				long cp = cu;
+				long adv = 1;
+				if (cu >= 55296 && cu <= 56319 && i + 1 < un) {
+					long t = str_ucode(recv, i + 1);
+					if (t >= 56320 && t <= 57343) {
+						cp = 65536 + ((cu - 55296) << 10) + (t - 56320);
+						adv = 2;
+					}
+				}
+				if (adv == 1 && cu >= 55296 && cu <= 57343) {
+					/* An UNPAIRED surrogate is not valid UTF-8, and the Go twin is
+					 * strings.ToUpper, which replaces each of the three bytes it is
+					 * carried in with U+FFFD. Lossy, and matched here on purpose:
+					 * the two engines have to give the same answer. */
+					u[k] = 65533; u[k + 1] = 65533; u[k + 2] = 65533;
+					k = k + 3;
+					i = i + 1;
+					continue;
+				}
+				cp = case_map(cp, mid == 27);
+				if (cp > 65535) {
+					u[k] = 55296 + ((cp - 65536) >> 10); k = k + 1;
+					u[k] = 56320 + ((cp - 65536) & 1023); k = k + 1;
+				} else { u[k] = cp; k = k + 1; }
+				i = i + adv;
 			}
-			buf[n] = 0;
-			return mk_str(buf, n);
+			return str_from_units(u, k);
 		}
 		if (mid == 29) {                                      /* trim */
 			const char *p = str_ptr(recv);
@@ -1805,39 +2203,277 @@ long builtin_method(long recv, long mid, long args) {
  *      30 String.fromCharCode  31 Array.isArray  32 byteLen
  */
 
+/* Compare (M * 2^E)^2 with (m2 * 2^e2), exactly. A 53-bit mantissa squared is
+ * 106 bits, which no long holds, so the comparison is done on decimal digit
+ * arrays - the same exact arithmetic the printer uses. */
+long sq_cmp(long M, long E, long m2, long e2) {
+	long a = 2 * E;
+	long s = a < e2 ? a : e2;
+	long na = 0;
+	long nb = 0;
+	long i = 0;
+	long t = M;
+	while (t > 0) { G_DC[na] = (char)(t % 10); t = t / 10; na = na + 1; }
+	na = dec_mul(G_DC, na, M);
+	while (i < a - s) { na = dec_mul(G_DC, na, 2); i = i + 1; }
+	t = m2;
+	while (t > 0) { G_DD[nb] = (char)(t % 10); t = t / 10; nb = nb + 1; }
+	i = 0;
+	while (i < e2 - s) { nb = dec_mul(G_DD, nb, 2); i = i + 1; }
+	return dec_cmp(G_DC, na, G_DD, nb);
+}
+/* (bits)^2 against m2 * 2^e2. */
+long sq_cmp_bits(long bits, long m2, long e2) {
+	long E = (bits >> 52) & 2047;
+	long M = bits & 4503599627370495L;
+	long e = -1074;
+	if (E != 0) { M = M + 4503599627370496L; e = E - 1075; }
+	return sq_cmp(M, e, m2, e2);
+}
+/* Correctly rounded square root. Newton's iteration in soft float lands within
+ * an ulp or two of the true root; WHICH neighbour is nearest is then decided
+ * exactly, by comparing squares as whole numbers. Stepping by one ulp is a step
+ * of one on the bit pattern, which carries across the exponent by itself. */
 long d_sqrt(long x) {
 	union DB a;
 	union DB g;
 	union DB two;
 	long i = 0;
+	long Ex;
+	long mx;
+	long ex;
+	long steps;
+	long c;
+	long M;
+	long sc;
 	if (d_is_nan(x) || d_sign(x)) { if (d_is_zero(x)) { return x; } return DNAN; }
 	if (d_is_inf(x) || d_is_zero(x)) { return x; }
+	/* A subnormal is scaled up by 2^106 first (exactly) and the root scaled back
+	 * down by 2^53, so the iteration below always starts from a normal value. */
+	sc = 0;
+	if (((x >> 52) & 2047) == 0) { union DB u; u.l = x; u.d = u.d * 81129638414606681695789005144064.0; x = u.l; sc = 1; }
 	a.l = x;
-	g.d = a.d;
+	/* HALVE THE EXPONENT for the starting guess: shifting the bit pattern right by
+	 * one and adding back half the bias lands within a few percent of the root, so
+	 * Newton converges in half a dozen steps. Starting from the VALUE ITSELF, as this
+	 * did, needs one step per power of two - eighty were not enough for sqrt(1e100),
+	 * which came out 8.27e+75. */
+	g.l = (x >> 1) + 2305702271725338624L;      /* 1023 << 51 */
 	two.d = 2.0;
-	while (i < 80) { g.d = (g.d + a.d / g.d) / two.d; i = i + 1; }
+	while (i < 30) { g.d = (g.d + a.d / g.d) / two.d; i = i + 1; }
+	Ex = (x >> 52) & 2047;
+	mx = x & 4503599627370495L;
+	ex = -1074;
+	if (Ex != 0) { mx = mx + 4503599627370496L; ex = Ex - 1075; }
+	steps = 0;
+	while (steps < 16 && sq_cmp_bits(g.l, mx, ex) > 0) { g.l = g.l - 1; steps = steps + 1; }
+	steps = 0;
+	while (steps < 16 && sq_cmp_bits(g.l + 1, mx, ex) <= 0) { g.l = g.l + 1; steps = steps + 1; }
+	/* g*g <= x < (g+1ulp)^2 now, so the root is between g and the next double.
+	 * The midpoint is (2M+1) * 2^(e-1); comparing ITS square with x says which
+	 * side the root falls on. An exact hit is impossible - the square of an odd
+	 * number needs 107 bits - but the tie is broken to even anyway. */
+	Ex = (g.l >> 52) & 2047;
+	M = g.l & 4503599627370495L;
+	ex = -1074;
+	if (Ex != 0) { M = M + 4503599627370496L; ex = Ex - 1075; }
+	mx = x & 4503599627370495L;
+	i = -1074;
+	if (((x >> 52) & 2047) != 0) { mx = mx + 4503599627370496L; i = ((x >> 52) & 2047) - 1075; }
+	c = sq_cmp(2 * M + 1, ex - 1, mx, i);
+	if (c < 0 || (c == 0 && (M & 1) != 0)) { g.l = g.l + 1; }
+	if (sc) { union DB u; u.l = g.l; u.d = u.d / 9007199254740992.0; return u.l; }
 	return g.l;
 }
-/* Integer exponents only - the cases a MetaJS program actually uses. */
-long d_pow(long x, long y) {
-	union DB r;
-	union DB b;
-	long n;
-	long neg = 0;
-	long i = 0;
-	if (d_is_nan(y)) { return DNAN; }
-	if (d_is_zero(y)) { return DONE; }
-	if (!d_is_integral(y) || !d_in_long(y)) {
-		if (d_is_nan(x) || d_sign(x)) { return DNAN; }
-		return DNAN;                       /* not modelled; see the header */
+double d_sqrt_d(double v) { union DB u; u.d = v; u.l = d_sqrt(u.l); return u.d; }
+
+/* ----- pow -----
+ *
+ * A NON-INTEGER exponent used to answer NaN: repeated multiplication cannot reach
+ * one, and any approximation of exp/log would have disagreed with the Go twin in the
+ * last bits, which is the divergence this whole floor exists to avoid. What follows
+ * is therefore a FAITHFUL PORT of Go's own math.Pow, math.Exp, math.Log, math.Frexp,
+ * math.Ldexp and math.Modf - the same constants, the same polynomials, the same order
+ * of operations. Now that the emitted arithmetic is correctly rounded IEEE-754, the
+ * same sequence of operations gives the same bits, and it does: verified against the
+ * Go runtime over a differential probe of every shape of argument. Ported rather than
+ * invented precisely because "close enough" is not an answer here. */
+
+double d_frexp(double f, long *eout) {
+	union DB u;
+	long e;
+	long adj = 0;
+	if (f == 0.0) { eout[0] = 0; return f; }
+	u.d = f;
+	if (d_is_inf(u.l) || d_is_nan(u.l)) { eout[0] = 0; return f; }
+	if (u.d < 0.0 ? (0.0 - u.d) < 2.2250738585072014e-308 : u.d < 2.2250738585072014e-308) {
+		u.d = u.d * 4503599627370496.0;      /* 2^52 */
+		adj = -52;
 	}
-	n = d_to_long(y);
-	if (n < 0) { neg = 1; n = 0 - n; }
-	b.l = x;
-	r.d = 1.0;
-	while (i < n) { r.d = r.d * b.d; i = i + 1; }
-	if (neg) { r.d = 1.0 / r.d; }
-	return r.l;
+	e = ((u.l >> 52) & 2047) - 1023 + 1 + adj;
+	u.l = (u.l & (0 - 9218868437227405313L)) | (1022L << 52);
+	eout[0] = e;
+	return u.d;
+}
+double d_ldexp(double frac, long exp) {
+	union DB u;
+	double m = 1.0;
+	if (frac == 0.0) { return frac; }
+	u.d = frac;
+	if (d_is_inf(u.l) || d_is_nan(u.l)) { return frac; }
+	if (u.d < 0.0 ? (0.0 - u.d) < 2.2250738585072014e-308 : u.d < 2.2250738585072014e-308) {
+		u.d = u.d * 4503599627370496.0;
+		exp = exp - 52;
+	}
+	exp = exp + ((u.l >> 52) & 2047) - 1023;
+	if (exp < -1075) { return frac < 0.0 ? -0.0 : 0.0; }
+	if (exp > 1023) { return frac < 0.0 ? -1.0 / 0.0 : 1.0 / 0.0; }
+	if (exp < -1022) { exp = exp + 53; m = 1.0 / 9007199254740992.0; }
+	u.l = (u.l & (0 - 9218868437227405313L)) | ((exp + 1023) << 52);
+	return m * u.d;
+}
+/* The integer part; the caller takes the fraction as f - that. */
+double d_modf_int(double f) {
+	union DB u;
+	long e;
+	if (f < 1.0) {
+		if (f < 0.0) { return 0.0 - d_modf_int(0.0 - f); }
+		return 0.0;
+	}
+	u.d = f;
+	e = ((u.l >> 52) & 2047) - 1023;
+	if (e < 52) { u.l = u.l & (0 - (1L << (52 - e))); }
+	return u.d;
+}
+double d_log(double x) {
+	union DB u;
+	double f1; double f; double k; double s; double s2; double s4;
+	double t1; double t2; double R; double hfsq;
+	long ki;
+	long ke[1];
+	u.d = x;
+	if (d_is_nan(u.l) || (d_is_inf(u.l) && !d_sign(u.l))) { return x; }
+	if (x < 0.0) { u.l = DNAN; return u.d; }
+	if (x == 0.0) { return -1.0 / 0.0; }
+	f1 = d_frexp(x, ke);
+	ki = ke[0];
+	if (f1 < 0.7071067811865476) { f1 = f1 * 2.0; ki = ki - 1; }
+	f = f1 - 1.0;
+	k = (double)ki;
+	s = f / (2.0 + f);
+	s2 = s * s;
+	s4 = s2 * s2;
+	t1 = s2 * (6.666666666666735130e-01 + s4 * (2.857142874366239149e-01 +
+	     s4 * (1.818357216161805012e-01 + s4 * 1.479819860511658591e-01)));
+	t2 = s4 * (3.999999999940941908e-01 + s4 * (2.222219843214978396e-01 +
+	     s4 * 1.531383769920937332e-01));
+	R = t1 + t2;
+	hfsq = 0.5 * f * f;
+	return k * 6.93147180369123816490e-01 -
+	       ((hfsq - (s * (hfsq + R) + k * 1.90821492927058770002e-10)) - f);
+}
+double d_exp(double x) {
+	union DB u;
+	double hi; double lo; double r; double t; double c; double y;
+	long k;
+	u.d = x;
+	if (d_is_nan(u.l)) { return x; }
+	if (d_is_inf(u.l)) { return d_sign(u.l) ? 0.0 : x; }
+	if (x > 7.09782712893383973096e+02) { return 1.0 / 0.0; }
+	if (x < -7.45133219101941108420e+02) { return 0.0; }
+	if (x > -3.725290298461914e-09 && x < 3.725290298461914e-09) { return 1.0 + x; }
+	k = 0;
+	if (x < 0.0) { k = (long)(1.44269504088896338700e+00 * x - 0.5); }
+	if (x > 0.0) { k = (long)(1.44269504088896338700e+00 * x + 0.5); }
+	hi = x - (double)k * 6.93147180369123816490e-01;
+	lo = (double)k * 1.90821492927058770002e-10;
+	r = hi - lo;
+	t = r * r;
+	c = r - t * (1.66666666666666657415e-01 + t * (-2.77777777770155933842e-03 +
+	    t * (6.61375632143793436117e-05 + t * (-1.65339022054652515390e-06 +
+	    t * 4.13813679705723846039e-08))));
+	y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi);
+	return d_ldexp(y, k);
+}
+int d_odd_int(double y) {
+	double yi;
+	if (y < 0.0) { y = 0.0 - y; }
+	if (y >= 9007199254740992.0) { return 0; }
+	yi = d_modf_int(y);
+	if (y - yi != 0.0) { return 0; }
+	return ((long)yi & 1) == 1;
+}
+long d_pow(long xb, long yb) {
+	union DB ux;
+	union DB uy;
+	union DB ur;
+	double x; double y; double yi; double yf; double a1; double x1;
+	long ae; long xe; long i; long ke[1];
+	int ysign;
+	ux.l = xb;
+	uy.l = yb;
+	x = ux.d;
+	y = uy.d;
+	if (d_is_zero(yb) || x == 1.0) { return DONE; }
+	if (y == 1.0) { return xb; }
+	if (d_is_nan(xb) || d_is_nan(yb)) { return DNAN; }
+	if (d_is_zero(xb)) {
+		if (y < 0.0) {
+			if (d_sign(xb) && d_odd_int(y)) { return DNINF; }
+			return DINF;
+		}
+		if (d_sign(xb) && d_odd_int(y)) { return xb; }
+		return DZERO;
+	}
+	if (d_is_inf(yb)) {
+		double ax = x < 0.0 ? 0.0 - x : x;
+		if (x == -1.0) { return DONE; }
+		if ((ax < 1.0) == (!d_sign(yb))) { return DZERO; }
+		return DINF;
+	}
+	if (d_is_inf(xb)) {
+		if (d_sign(xb)) { ur.d = 1.0 / x; return d_pow(ur.l, uy.l ^ (0 - 9223372036854775807L - 1L)); }
+		if (y < 0.0) { return DZERO; }
+		return DINF;
+	}
+	if (y == 0.5) { return d_sqrt(xb); }
+	if (y == -0.5) { ur.d = 1.0 / d_sqrt_d(x); return ur.l; }
+	ysign = y < 0.0;
+	{ double ay = ysign ? 0.0 - y : y;
+	  yi = d_modf_int(ay);
+	  yf = ay - yi; }
+	if (yf != 0.0 && x < 0.0) { return DNAN; }
+	if (yi >= 9223372036854775808.0) {
+		double ax = x < 0.0 ? 0.0 - x : x;
+		if (x == -1.0) { return DONE; }
+		if ((ax < 1.0) == (!ysign)) { return DZERO; }
+		return DINF;
+	}
+	a1 = 1.0;
+	ae = 0;
+	if (yf != 0.0) {
+		if (yf > 0.5) { yf = yf - 1.0; yi = yi + 1.0; }
+		a1 = d_exp(yf * d_log(x));
+	}
+	x1 = d_frexp(x, ke);
+	xe = ke[0];
+	i = (long)yi;
+	while (i != 0) {
+		if (xe < -4096 || 4096 < xe) {
+			/* catastrophic under/overflow: the exponent alone decides */
+			ae = ae + xe;
+			i = 0;
+		} else {
+			if ((i & 1) == 1) { a1 = a1 * x1; ae = ae + xe; }
+			x1 = x1 * x1;
+			xe = xe << 1;
+			if (x1 < 0.5) { x1 = x1 + x1; xe = xe - 1; }
+			i = i >> 1;
+		}
+	}
+	if (ysign) { a1 = 1.0 / a1; ae = 0 - ae; }
+	ur.d = d_ldexp(a1, ae);
+	return ur.l;
 }
 
 /* UTF-8 encode one code unit, the strFromUnits of abnf/jsrt.go for everything

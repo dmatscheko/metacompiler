@@ -1526,6 +1526,121 @@ int s45(void) {
     return 0;
 }
 
+// ===== SECTION 46: double PARAMETERS, double RETURNS, and stores through a pointer =====
+/* Three defects that predate all of the floating-point work and were invisible here
+   because no section used the constructs (they were found while writing
+   languages/lib/runtime.c, which had to work around all three). A double travels as
+   its IEEE-754 bit pattern in an i64, so:
+     - a double PARAMETER did not compile at all: the signature said i64 and the
+       prologue allocated an i32 slot, "store operands are not compatible";
+     - a double RETURN was silently wrong: only a 64-bit INTEGER return was recorded
+       as such, so the function was declared to return i32 while makeReturn handed it
+       an i64 - the same class as the pointer-return defect of section 45;
+     - '*p = v' through a 'long *' or a 'double *' did not compile, while 'p[0] = v'
+       did, because a place reached through '*' arrives as the model's uniform i32*
+       and only the subscript path typed the address.
+   Verified against cc. */
+double s46_c(void) { return 1.5; }
+double s46_add(double a, double b) { return a + b; }
+double s46_scale(double d, int n) { return d * (double)n; }
+double s46_fromlong(long x) { return (double)x + 0.5; }
+int s46_gt(double d, double t) { return d > t; }
+long s46_setl(long *p, long v) { *p = v; return *p; }
+double s46_setd(double *p, double v) { *p = v; return *p; }
+int s46(void) {
+    double d; long l; double *dp; long *lp; int *ip; int n;
+    check(4601, s46_c() == 1.5);                    /* a double RETURN */
+    check(4602, s46_c() > 1.4 && s46_c() < 1.6);
+    check(4603, s46_add(1.25, 2.5) == 3.75);        /* double PARAMETERS */
+    check(4604, s46_scale(0.5, 6) == 3.0);          /* mixed with an int */
+    check(4605, s46_fromlong(5000000000L) == 5000000000.5);
+    check(4606, s46_gt(2.5, 2.25) == 1 && s46_gt(2.25, 2.5) == 0);
+    check(4607, s46_add(s46_c(), s46_c()) == 3.0);  /* a returned double as an argument */
+    check(4608, s46_add(1, 2) == 3.0);              /* int arguments convert */
+    l = 0; lp = &l;
+    *lp = 42;                                       /* through a long * */
+    check(4609, l == 42);
+    *lp = 5000000000L;
+    check(4610, l == 5000000000L && *lp == 5000000000L);
+    check(4611, s46_setl(&l, -7000000000L) == -7000000000L && l == -7000000000L);
+    d = 2.25; dp = &d;
+    *dp = 3.5;                                      /* through a double * */
+    check(4612, d == 3.5 && *dp == 3.5);
+    check(4613, s46_setd(&d, 0.125) == 0.125 && d == 0.125);
+    n = 3; ip = &n;
+    *ip = 9;                                        /* the int case still works */
+    check(4614, n == 9 && *ip == 9);
+    return 0;
+}
+
+// ===== SECTION 47: floating point rounds to NEAREST, ties to EVEN =====
+/* The emitted soft float used to TRUNCATE the mantissa where IEEE-754 rounds, so an
+   inexact result came out one ulp low - 0.1 + 0.2 was below 0.3 rather than above it -
+   and the integer-to-double conversion did not shift down at all, so every magnitude
+   above 2^53 came out halved. Every assertion here fails under either of those, and
+   every one was verified against cc.
+
+   THE OPERANDS COME OUT OF ARRAYS ON PURPOSE. Written as literals, all of this is
+   folded at compile time by the grammar's own constant folder - which uses the host's
+   exact doubles and is therefore right whatever the emitted soft float does. Only a
+   value the folder cannot see through reaches the emitted code, which is the code
+   under test. A section of literals passed at HEAD with the truncating soft float
+   still in place; these fail.
+
+   Nothing here depends on subnormals, infinities or NaN, which the model still does
+   not carry. */
+double s47_d[12];
+long s47_l[8];
+int s47(void) {
+    double a; double b; double c; double s; long l; int i;
+    s47_d[0] = 0.1; s47_d[1] = 0.2; s47_d[2] = 0.3; s47_d[3] = 10.0;
+    s47_d[4] = 3.0; s47_d[5] = 1.0; s47_d[6] = 7.0; s47_d[7] = 0.7;
+    s47_d[8] = 1.0000000000000002; s47_d[9] = 1e300; s47_d[10] = 1e-300; s47_d[11] = 1e16;
+    s47_l[0] = 9007199254740993L; s47_l[1] = 9007199254740995L;
+    s47_l[2] = -9007199254740993L; s47_l[3] = 9223372036854775807L;
+    s47_l[4] = 123456789123456789L; s47_l[5] = 1152921504606846977L;
+    s47_l[6] = 123456789L; s47_l[7] = 987654321L;
+    a = s47_d[0]; b = s47_d[1]; c = s47_d[2];
+    check(4701, a + b > c);                        /* 0.30000000000000004, not ...991 */
+    check(4702, a + b == 0.30000000000000004);
+    check(4703, (a + b) - c > 0.0);
+    check(4704, s47_d[3] / s47_d[4] == 3.3333333333333335);
+    check(4705, s47_d[3] / s47_d[4] * s47_d[4] == 10.0);
+    check(4706, s47_d[5] / s47_d[4] + s47_d[5] / s47_d[4] + s47_d[5] / s47_d[4] == 1.0);
+    check(4707, (s47_d[5] + s47_d[5]) / s47_d[4] == 0.6666666666666666);
+    check(4708, s47_d[5] / s47_d[6] * s47_d[6] == 1.0);
+    check(4709, a * s47_d[4] > c);
+    check(4710, s47_d[4] * a == a + b);
+    check(4711, a * b == 0.020000000000000004);
+    check(4712, a + s47_d[7] < 0.8);               /* 0.7999999999999999 */
+    check(4713, a - c == -0.19999999999999998);
+    check(4714, s47_d[8] * s47_d[8] == 1.0000000000000004);
+    check(4715, s47_d[9] * s47_d[10] == 1.0);
+    check(4716, s47_d[11] + s47_d[5] == s47_d[11]);          /* a tie, rounded to even */
+    check(4717, s47_d[11] + s47_d[4] == s47_d[11] + 4.0);    /* the other side of a tie */
+    /* Integer to double above 2^53: the low bits have to round, not vanish. */
+    l = s47_l[0];
+    check(4718, (double)l == 9007199254740992.0);
+    l = s47_l[1];
+    check(4719, (double)l == 9007199254740996.0);
+    l = s47_l[2];
+    check(4720, (double)l == -9007199254740992.0);
+    l = s47_l[3];
+    check(4721, (double)l == 9223372036854775808.0);
+    l = s47_l[4];
+    check(4722, (double)l == 123456789123456784.0);
+    l = s47_l[5];
+    check(4723, (double)l == 1152921504606847000.0);
+    check(4724, (double)s47_l[6] * (double)s47_l[7] == 121932631112635260.0);
+    s = 0.0;
+    for (i = 0; i < 10; i++) { s = s + s47_d[0]; }
+    check(4725, s == 0.9999999999999999);
+    s = 0.0;
+    for (i = 0; i < 100; i++) { s = s + 0.01; }
+    check(4726, s > 1.0);
+    return 0;
+}
+
 // ===== END SECTIONS =====
 
 int main() {
@@ -1574,6 +1689,8 @@ int main() {
     s43(); // SECTION-CALL 43
     s44(); // SECTION-CALL 44
     s45(); // SECTION-CALL 45
+    s46(); // SECTION-CALL 46
+    s47(); // SECTION-CALL 47
     /* summary: "full: <checks> checks, <failures> failures" */
     putchar('f'); putchar('u'); putchar('l'); putchar('l'); putchar(':'); putchar(' ');
     print_num(nchecks);
