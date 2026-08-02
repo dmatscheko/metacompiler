@@ -1276,7 +1276,8 @@ and **rejected on measurement**: a self-contained native batch binary runs a
 
 What converges is the **runtime layer**. Batch hand-wrote 26 `rt_*` helpers as raw LLVM
 text inside the grammar, which was one of the two largest remaining piles of
-hand-written `.ll` in the repository. **25 of the 26 are now C**, in
+hand-written `.ll` in the repository. **All 26 are now C** (25 in the first pass;
+`rt_expand` followed once `e8bf2c3` unblocked it - see below), in
 `languages/lib/batch-rt.c`, compiled by `languages/c-to-llvm-ir.abnf` into the
 checked-in `languages/lib/batch-rt.ll` by `tests/gen-batch-rt-ll.sh` (`--check` diffs
 instead of writing), and linked - not emitted.
@@ -1288,45 +1289,85 @@ instead of writing), and linked - not emitted.
 `rt_str2int` · `rt_prints` · `rt_capstart` · `rt_capend` · `rt_println` (the output
 capture a redirection and `for /f 'echo ...'` need) · `rt_stripq` · `rt_substr` ·
 `rt_subst` · `rt_mods` (the `~dpnx` modifiers) · `rt_fskind` (the filesystem MODEL
-behind `if exist`) · `rt_isdelim` · `rt_tokb` · `rt_nlines` · `rt_lineat`.
+behind `if exist`) · `rt_isdelim` · `rt_tokb` · `rt_nlines` · `rt_lineat` ·
+`rt_expand` (last, and only after `e8bf2c3`).
 
 The arena and the capture stack moved with them and are now statics of `batch-rt.c`,
 so `main` no longer initializes them - a C static starts at zero by itself. **Not one
 call site changed.** The ABI is the one it always was: a string is a `char*`, an
-integer is an `int`. Six of the 25 (`rt_bump`, `rt_lc`, `rt_lastch`, `rt_findstr`,
+integer is an `int`. Six of the 26 (`rt_bump`, `rt_lc`, `rt_lastch`, `rt_findstr`,
 `rt_prints`, `rt_isdelim`) are called only from inside the runtime, so the grammar does
 not even declare them any more; the emitted module went from 30,245 lines to 28,962 and
 declares 19 names.
 
-### What could NOT move, and the defect behind it
+### The 26th - `rt_expand` - and the defect that used to block it - CLOSED (2026-08-02)
 
-**`rt_expand` stays hand-emitted in the grammar, and this is a real finding.** It is the
-one helper coupled to the program: it calls `bat_lookup`, which the grammar GENERATES
-from the variable table of the batch script being compiled. A C file can only call it
-through a prototype, and
+`rt_expand` was the one helper coupled to the program: it calls `bat_lookup`, which the
+grammar GENERATES from the variable table of the batch script being compiled. A C file
+can only call it through a prototype, and at the time of the first pass the prototype
+did not survive compilation:
 
 ```
 $ cat probe.c
 char *ext1(char *nm);
 char *ext3(const char *nm);
 int   ext4(char *a, int b);
-$ mec languages/c-to-llvm-ir.abnf probe.c -q | grep '^declare'
+int main(void){ char *p = ext1("x"); p = ext3(p); return ext4(p, 3); }
+
+$ (at e8bf2c3^)  mec languages/c-to-llvm-ir.abnf probe.c -q | grep '^declare'
 declare i32* @ext1(i32 %0)
 declare i32* @ext3(i32 %0)
-declare i32  @ext4(i32 %0, i32 %1)
+declare i32 @ext4(i32 %0, i32 %1)
+
+$ (at 660c47a)   mec languages/c-to-llvm-ir.abnf probe.c -q | grep '^declare'
+declare i32* @ext1(i32* %0)
+declare i32* @ext3(i32* %0)
+declare i32 @ext4(i32* %0, i32 %1)
 ```
 
-**`c-to-llvm-ir.abnf` emits a declared-only function's POINTER PARAMETER as a plain
-`i32`.** The return type is right (`i32*`); every parameter type is lost. In a native
-binary that truncates a 64-bit pointer to 32 bits. It is invisible to everything we run
-today - `tests/c-test-full.c` never calls an external function that takes a pointer, and
-`llvm.Run` is untyped, so it would answer correctly right up until clang built the
-thing. Not fixed here (another agent is in that grammar); it is the blocker for moving
-any runtime helper that has to call back into its program module, and it is worth
-fixing before the next language tries.
+`c-to-llvm-ir.abnf` used to emit a declared-only function's POINTER PARAMETER as a plain
+`i32` - the return type was right, every parameter type was lost, and in a native binary
+that truncates a 64-bit pointer to 32 bits. It was invisible to everything we ran:
+`tests/c-test-full.c` called no external function taking a pointer, and `llvm.Run` is
+untyped, so it would have answered correctly right up until clang built the thing.
+**`e8bf2c3` fixed it** - `noteParamCts` was dropping pointer-ness, `funcParamPtrs` now
+records it, `getFunc` reads it and `emitCallArgs` converts - and SECTION 48 of
+`tests/c-test-full.c` pins it.
 
-The fallback of passing a function POINTER instead is not available either: the IR
-interpreter refuses an indirect call outright ("function pointers are not supported").
+So `rt_expand` simply moved. It is now 15 lines of C in `batch-rt.c`, above a
+`char *bat_lookup(char *nm);` prototype that compiles to
+`declare i32* @bat_lookup(i32* %0)`, and the call is resolved across the two modules by
+name in both directions - clang links the two objects, `abnf/llvmlink.go` binds the
+block-less function object for `llvm.Run`. The grammar's `fillExpand` (21 lines of
+`llvm.ir.*` block building) and the `rt_expand`/`bat_lookup` comment at both sites are
+gone; `rt_expand` is now one more `m.NewFunc` declaration alongside the other 19.
+
+The fallback that was NOT available, recorded because it will come up again: passing a
+function POINTER instead does not work - the IR interpreter refuses an indirect call
+outright ("function pointers are not supported").
+
+**Measurements for the move.** All 26 helpers are now `define`s in `batch-rt.ll`; six
+(`rt_bump`, `rt_lc`, `rt_lastch`, `rt_findstr`, `rt_prints`, `rt_isdelim`) remain
+runtime-internal and are still not declared by the grammar - re-confirmed. What the
+grammar still emits itself is `bat_setlocal`, `bat_endlocal`, `bat_shift`, `bat_lookup`
+and `main`, all five of which walk the per-program slot globals and are program-coupled
+by construction, not by any remaining defect.
+
+```
+                              before (660c47a)   after
+batch-to-llvm-ir.abnf              1,550         1,532 lines
+languages/lib/batch-rt.c             466           490 lines
+languages/lib/batch-rt.ll          3,518         3,629 lines
+emitted module, batch-test-full   28,956        28,901 lines
+declares in it                        19            20
+```
+
+`tests/batch-test-full.cmd` (139 assertions) and `tests/batch-test-1.bat` are
+**byte-identical on stdout AND stderr** across `llvm.Run`, `-frozen`, and a native
+`-exe` binary, and against the same three built from a clean archive of `660c47a`.
+`nm -u` on the new binary still reports exactly one undefined symbol, `_putchar`, and
+clang-check still rates batch *"ok, and the clang executable agrees"* - which is the
+only thing that would have caught a bad `declare`.
 
 ### The linker `llvm.Run` did not have - `abnf/llvmlink.go`
 
@@ -1396,6 +1437,21 @@ gen-batch-rt-ll.sh --check   batch-rt.ll is up to date (3518 lines)
 `llvm.Run` and the native binary, before and after - are **byte-identical on stdout and
 on stderr**, and the new native binary is byte-identical to the one built from a clean
 archive of 4eea0cf. `nm -u` on it reports exactly one undefined symbol, `_putchar`.
+
+Re-run after `rt_expand` moved (2026-08-02, working tree over `660c47a`):
+
+```
+matrix                325 entries run - 325 passed, 0 failed
+--full                5,307 assertions, 0 languages whose halves disagree (batch 139)
+--cross               119 programs compared, 0 divergent, 0 differing only in warnings
+clang-check           16 modules, all accepted by clang; batch 28,901 lines,
+                      "ok, and the clang executable agrees"
+go test ./abnf/       ok
+gen-runtime-ll.sh --check    runtime.ll  is up to date (36656 lines)
+gen-lua-rt-ll.sh --check     lua-rt.ll   is up to date (12067 lines)
+gen-bash-rt-ll.sh --check    bash-rt.ll  is up to date (13156 lines)
+gen-batch-rt-ll.sh --check   batch-rt.ll is up to date (3629 lines)
+```
 
 ### One follow-up, not coordinated live
 

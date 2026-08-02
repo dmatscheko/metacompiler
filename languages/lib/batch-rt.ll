@@ -3515,4 +3515,115 @@ dead80:
 	ret i32* null
 }
 
+define i32* @rt_expand(i32* %0) {
+entry:
+	%1 = alloca i32*
+	store i32* %0, i32** %1
+	%2 = alloca i32
+	%3 = load i32*, i32** %1
+	%4 = bitcast i32* %3 to i32*
+	%5 = call i32 @rt_strlen(i32* %4)
+	store i32 %5, i32* %2
+	%6 = alloca i32*
+	%7 = getelementptr [1 x i8], [1 x i8]* @EMPTY, i32 0, i32 0
+	%8 = bitcast i8* %7 to i32*
+	store i32* %8, i32** %6
+	%9 = alloca i32
+	store i32 0, i32* %9
+	br label %10
+
+10:
+	%11 = load i32, i32* %9
+	%12 = load i32, i32* %2
+	%13 = icmp slt i32 %11, %12
+	%14 = zext i1 %13 to i32
+	%15 = icmp ne i32 %14, 0
+	br i1 %15, label %16, label %26
+
+16:
+	%17 = alloca i32
+	%18 = load i32, i32* %9
+	%19 = load i32*, i32** %1
+	%20 = getelementptr i8, i32* %19, i32 %18
+	%21 = load i8, i8* %20
+	%22 = sext i8 %21 to i32
+	%23 = icmp eq i32 %22, 37
+	%24 = zext i1 %23 to i32
+	%25 = icmp ne i32 %24, 0
+	br i1 %25, label %29, label %35
+
+26:
+	%27 = load i32*, i32** %6
+	%28 = bitcast i32* %27 to i32*
+	ret i32* %28
+
+29:
+	%30 = load i32*, i32** %1
+	%31 = bitcast i32* %30 to i32*
+	%32 = load i32, i32* %9
+	%33 = add i32 %32, 1
+	%34 = call i32 @rt_findch(i32* %31, i32 37, i32 %33)
+	br label %36
+
+35:
+	br label %36
+
+36:
+	%37 = phi i32 [ %34, %29 ], [ -1, %35 ]
+	store i32 %37, i32* %17
+	%38 = load i32, i32* %17
+	%39 = load i32, i32* %9
+	%40 = add i32 %39, 1
+	%41 = icmp sgt i32 %38, %40
+	%42 = zext i1 %41 to i32
+	%43 = icmp ne i32 %42, 0
+	br i1 %43, label %44, label %61
+
+44:
+	%45 = load i32*, i32** %6
+	%46 = bitcast i32* %45 to i32*
+	%47 = load i32*, i32** %1
+	%48 = bitcast i32* %47 to i32*
+	%49 = load i32, i32* %9
+	%50 = add i32 %49, 1
+	%51 = load i32, i32* %17
+	%52 = call i32* @rt_sub(i32* %48, i32 %50, i32 %51)
+	%53 = bitcast i32* %52 to i32*
+	%54 = call i32* @bat_lookup(i32* %53)
+	%55 = bitcast i32* %54 to i32*
+	%56 = call i32* @rt_strcat(i32* %46, i32* %55)
+	%57 = bitcast i32* %56 to i32*
+	store i32* %57, i32** %6
+	%58 = load i32, i32* %17
+	%59 = add i32 %58, 1
+	store i32 %59, i32* %9
+	br label %60
+
+60:
+	br label %10
+
+61:
+	%62 = load i32*, i32** %6
+	%63 = bitcast i32* %62 to i32*
+	%64 = load i32*, i32** %1
+	%65 = bitcast i32* %64 to i32*
+	%66 = load i32, i32* %9
+	%67 = load i32, i32* %9
+	%68 = add i32 %67, 1
+	%69 = call i32* @rt_sub(i32* %65, i32 %66, i32 %68)
+	%70 = bitcast i32* %69 to i32*
+	%71 = call i32* @rt_strcat(i32* %63, i32* %70)
+	%72 = bitcast i32* %71 to i32*
+	store i32* %72, i32** %6
+	%73 = load i32, i32* %9
+	%74 = add i32 %73, 1
+	store i32 %74, i32* %9
+	br label %60
+
+dead81:
+	ret i32* null
+}
+
+declare i32* @bat_lookup(i32* %0)
+
 

@@ -445,20 +445,44 @@ char *rt_lineat(char *s, int idx) {
     return rt_sub(s, st, isCr ? en - 1 : en);
 }
 
-/* rt_expand - the 26th helper - is NOT here. It is the one that is coupled to the
-   program: it calls bat_lookup, which batch-to-llvm-ir.abnf GENERATES from the
-   variable table of the batch script being compiled, so this file would have to
-   declare it. It cannot: c-to-llvm-ir.abnf emits a declared-only function's
-   POINTER PARAMETER as a plain i32 -
+/* ------------------------------------------------- the second expansion pass */
 
-       char *bat_lookup(char *nm);   ->   declare i32* @bat_lookup(i32 %0)
+/* bat_lookup is GENERATED per program by batch-to-llvm-ir.abnf, from the variable
+   table of the batch script being compiled - it is the one thing in this file that
+   calls BACK into the program module. That is why rt_expand was the one helper of
+   the 26 that could not move when the other 25 did: c-to-llvm-ir.abnf used to emit
+   a declared-only function's POINTER PARAMETER as a plain i32
+   (`declare i32* @bat_lookup(i32 %0)`), which in a native binary truncates a 64-bit
+   pointer to 32 bits. Commit e8bf2c3 fixed that - funcParamPtrs now records
+   pointer-ness for a declared-only function and emitCallArgs converts - and it is
+   pinned by SECTION 48 of tests/c-test-full.c, so the prototype below survives:
 
-   the return type is right and every parameter type is lost. In a native binary
-   that truncates a 64-bit pointer to 32 bits. A function POINTER passed in instead
-   is not an option either: the IR interpreter refuses an indirect call outright
-   ("function pointers are not supported"). rt_expand therefore stays hand-emitted
-   in the grammar, next to the bat_lookup it calls, and the defect is recorded in
-   docs/runtime-rework-plan.md. */
+       declare i32* @bat_lookup(i32* %0)
+
+   The call is resolved across modules by NAME, in both directions: clang links the
+   two objects, and llvm.Run binds a block-less function object to the definition
+   carrying its name (abnf/llvmlink.go). */
+char *bat_lookup(char *nm);
+
+/* rt_expand(s): one more %VAR% pass over an already-expanded string, which is what
+   `call set NAME=%%%indirect%%%` needs. A %..% pair with at least one byte between
+   the percents is looked up; anything else is copied through literally. */
+char *rt_expand(char *s) {
+    int n = rt_strlen(s);
+    char *out = EMPTY;
+    int i = 0;
+    while (i < n) {
+        int j = s[i] == 37 ? rt_findch(s, 37, i + 1) : -1;
+        if (j > i + 1) {
+            out = rt_strcat(out, bat_lookup(rt_sub(s, i + 1, j)));
+            i = j + 1;
+        } else {
+            out = rt_strcat(out, rt_sub(s, i, i + 1));
+            i = i + 1;
+        }
+    }
+    return out;
+}
 
 /* c-to-llvm-ir.abnf refuses a translation unit without a main; the batch program
    module supplies the real one, and tests/gen-batch-rt-ll.sh strips this one out

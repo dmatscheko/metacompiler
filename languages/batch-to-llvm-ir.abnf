@@ -648,16 +648,17 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     //  The string runtime: languages/lib/batch-rt.c, compiled by languages/c-to-llvm-ir.abnf
     //  into languages/lib/batch-rt.ll (tests/gen-batch-rt-ll.sh) and LINKED, not emitted.
     //
-    //  These were 25 hand-written IR bodies inside this grammar. The ABI is unchanged -
+    //  These were 26 hand-written IR bodies inside this grammar. The ABI is unchanged -
     //  a string is a char* into the runtime's arena, an integer is an int - so no call
     //  site below changed; only where the bodies come from. The arena and the output
     //  capture stack moved with them and are now statics of batch-rt.c, which is why
     //  main no longer initializes them (a C static starts at zero by itself).
     //
-    //  rt_expand is the 26th and it did NOT move: it calls bat_lookup, which is
-    //  GENERATED per program below, and a declared-only function's pointer parameter
-    //  comes out of c-to-llvm-ir.abnf as a plain i32. See fillExpand and
-    //  docs/runtime-rework-plan.md.
+    //  rt_expand was the last to move, and only after e8bf2c3: it CALLS BACK into this
+    //  module, through the bat_lookup generated below, and c-to-llvm-ir.abnf used to
+    //  emit a declared-only function's pointer parameter as a plain i32. It now emits
+    //  `declare i32* @bat_lookup(i32* %0)`, so the C prototype survives and the call is
+    //  resolved across the two modules by name (clang, and abnf/llvmlink.go for llvm.Run).
     // ===================================================================================
 
     var rtStrlen = m.NewFunc("rt_strlen", i32, llvm.ir.NewParam("s", i8ptr))
@@ -699,6 +700,10 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     var rtNlines = m.NewFunc("rt_nlines", i32, llvm.ir.NewParam("s", i8ptr))
     // rt_lineat(s, idx): the idx-th newline-separated line, with a trailing CR removed.
     var rtLineat = m.NewFunc("rt_lineat", i8ptr, [llvm.ir.NewParam("s", i8ptr), llvm.ir.NewParam("idx", i32)])
+
+    // rt_expand(s): one more %VAR% pass, for `call set NAME=%%%indirect%%%`. It is the
+    // one runtime helper that calls back into this module, through bat_lookup below.
+    var rtExpand = m.NewFunc("rt_expand", i8ptr, llvm.ir.NewParam("s", i8ptr))
 
 
     // ===================================================================================
@@ -965,7 +970,7 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     var exitBlock = null
     var returnDispatch = null
     var retSites = []
-    var batSetlocal = null, batEndlocal = null, batShift = null, batLookup = null, rtExpand = null
+    var batSetlocal = null, batEndlocal = null, batShift = null, batLookup = null
 
     function makeNop() { return function(b) { return b } }
     function makeGroup(rec) { return rec.body }
@@ -1434,34 +1439,11 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         }
         cur.NewRet(emptyPtr(cur))
     }
-    function fillExpand() {
-        var s = rtExpand.Params[0]
-        var e = rtExpand.NewBlock("entry"), h = rtExpand.NewBlock("h")
-        var bd = rtExpand.NewBlock("bd"), pct = rtExpand.NewBlock("pct")
-        var name = rtExpand.NewBlock("name"), lit = rtExpand.NewBlock("lit"), x = rtExpand.NewBlock("x")
-        var n = e.NewCall(rtStrlen, s)
-        var op = e.NewAlloca(i8ptr), ip = e.NewAlloca(i32)
-        e.NewStore(emptyPtr(e), op); e.NewStore(zero, ip); e.NewBr(h)
-        var i = h.NewLoad(i32, ip)
-        h.NewCondBr(h.NewICmp(SGE, i, n), x, bd)
-        var ch = bd.NewSExt(bd.NewLoad(i8, bd.NewGetElementPtr(i8, s, i)), i32)
-        bd.NewCondBr(bd.NewICmp(EQ, ch, ci32(37)), pct, lit)
-        var j = pct.NewCall(rtFindch, [s, ci32(37), pct.NewAdd(i, one)])
-        pct.NewCondBr(pct.NewAnd(pct.NewICmp(SGE, j, zero), pct.NewICmp(SGT, j, pct.NewAdd(i, one))), name, lit)
-        var got = name.NewCall(batLookup, name.NewCall(rtSub, [s, name.NewAdd(i, one), j]))
-        name.NewStore(name.NewCall(rtStrcat, [name.NewLoad(i8ptr, op), got]), op)
-        name.NewStore(name.NewAdd(j, one), ip); name.NewBr(h)
-        lit.NewStore(lit.NewCall(rtStrcat, [lit.NewLoad(i8ptr, op), lit.NewCall(rtSub, [s, i, lit.NewAdd(i, one)])]), op)
-        lit.NewStore(lit.NewAdd(i, one), ip); lit.NewBr(h)
-        x.NewRet(x.NewLoad(i8ptr, op))
-    }
-
     function runProgram(items) {
         batSetlocal = m.NewFunc("bat_setlocal", i32)
         batEndlocal = m.NewFunc("bat_endlocal", i32)
         batShift = m.NewFunc("bat_shift", i32, llvm.ir.NewParam("from", i32))
         batLookup = m.NewFunc("bat_lookup", i8ptr, llvm.ir.NewParam("nm", i8ptr))
-        rtExpand = m.NewFunc("rt_expand", i8ptr, llvm.ir.NewParam("s", i8ptr))
         var main = m.NewFunc("main", i32)
         curF = main
         var entry = main.NewBlock("entry")
@@ -1494,7 +1476,7 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         Lblocks[items.length].NewBr(exitBlock)
         exitBlock.NewRet(exitBlock.NewLoad(i32, gExitCode))
         fillReturnDispatch()
-        fillLocals(); fillShift(); fillLookup(); fillExpand()
+        fillLocals(); fillShift(); fillLookup()
         // entry: initialize every slot, empty the stacks, jump to the first line.
         var ep = emptyPtr(entry)
         var i

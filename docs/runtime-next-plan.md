@@ -144,9 +144,13 @@ likely needed for the rollout anyway.
 - **bash: 3** (`rt_setvar_byname`, `rt_getvar_byname`, `rt_eval_assign`) - chains over
   every variable name the program mentions, generated after the walk. Movable only if
   the emitter also emits a `{name, slot}` table.
-- **batch: `rt_expand`** - it calls the generated `bat_lookup`. **Re-check this one
-  first**: it was blocked by the declared-only-function pointer-parameter defect, which
-  is now fixed in `e8bf2c3`. It may simply move now.
+- **batch: none. CLOSED 2026-08-02.** `rt_expand` was blocked only by the
+  declared-only-function pointer-parameter defect, and `e8bf2c3` fixed it - a probe
+  against clean archives of `e8bf2c3^` and `660c47a` shows `declare i32* @ext1(i32 %0)`
+  becoming `declare i32* @ext1(i32* %0)`. Batch is 26/26 in C. The five functions the
+  grammar still generates (`bat_setlocal`, `bat_endlocal`, `bat_shift`, `bat_lookup`,
+  `main`) all walk per-program slot globals, so they are program-coupled by
+  construction rather than by a defect - there is nothing left to move.
 
 ---
 
