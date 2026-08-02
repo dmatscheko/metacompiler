@@ -7,7 +7,7 @@ forward plan. HEAD when it was written: `e8bf2c3`.
 ## Where things stand
 
 ```
-matrix 325/325 · --full 5,504 assertions, 0 halves disagree · --cross 119/0
+matrix 325/325 · --full 5,518 assertions, 0 halves disagree · --cross 119/0
 clang-check 16/16 - bash, batch, c, lua, metajs all "the clang executable agrees"
 ```
 
@@ -22,11 +22,11 @@ languages.
 
 # Part 1 - Memory, which gates everything else
 
-Allocation is down 5.0x since phase 4a (18,072 -> 3,616 bytes per loop iteration; the
-last halving is 1a below, 2026-08-03) but **still exactly linear**. A program that runs
-for a minute cannot be fixed by allocating less. Rolling out eleven more languages on
-top of an unbounded-memory runtime multiplies the problem by eleven, so this comes
-first.
+**CLOSED 2026-08-03.** Allocation was down 5.0x since phase 4a (18,072 -> 3,616 bytes
+per loop iteration, part 1a below) and still exactly linear, which is a program that runs
+for a minute dying whatever the constant is. Part 1b replaced the arena with a mark/sweep
+heap and the line is now **flat: 3 MB at 50,000 iterations and 3 MB at 1,000,000**. The
+eleven-language rollout no longer multiplies an unbounded-memory runtime by eleven.
 
 The residual, per iteration of `s = s + i % 7`, is live data rather than waste. The
 figures 1a was written against, and what it left:
@@ -247,28 +247,276 @@ for a known top-level callee instead of `js_arr_new` + `js_call` + a scope of
 `js_tdecl`s - and the inlined arithmetic fast path costed above. Both are larger than
 anything in this phase.
 
-## 1b. Mark/sweep over the arena
+## 1b. Mark/sweep over the arena - DONE 2026-08-03
+
+**Memory is bounded.** The `s = s + i % 7` Lua loop's resident set no longer depends on
+the iteration count at all:
+
+```
+                MEC_GC=off (the old arena)        the collector on
+iters=50000     rss   228,720,640   4,574 B/it    rss  3,162,112    63 B/it
+iters=100000    rss   456,507,392   4,565 B/it    rss  3,194,880    31 B/it
+iters=200000    rss   911,949,824   4,559 B/it    rss  3,194,880    15 B/it
+iters=400000    rss 1,823,031,296   4,557 B/it    rss  3,178,496     7 B/it
+iters=1000000   rss 4,556,144,640   4,556 B/it    rss  3,194,880     3 B/it
+```
+
+Read the right-hand column as a constant, not as a rate: **3.1 MB flat**, against a line
+that was still perfectly straight after part 1a had cut its slope by 5x. Same binary in
+both columns - `MEC_GC=off` is the switch, so this is one measurement, not two builds.
 
 **Refcounting is the wrong shape here and this is settled, not a preference.** A scope
 holds its parent, and a closure holds its defining scope - so a closure defined inside a
 function cycles with the scope that names it, and that is the *common* case, not an edge
 case. Refcounting would leak exactly the programs people write.
 
-Mark/sweep is cheap here because the hard parts are already true:
+### The shadow stack was costed and NOT built, and that is the main design decision
 
-- **Roots are enumerable**: `G_ROOT`, `NIC`, `SMC_VAL`, `THROWN`, `RETSLOT`, and layer
-  2's scope global.
-- **Cells are uniform 56 bytes**, so an arena chunk is a walkable array and the mark bit
-  fits in `Cell.tag`.
-- **The one real cost is a shadow stack** in the emitter, so that handles live in C
-  frames are roots. This is the piece to design first - get it wrong and the collector
-  frees live data, which is the worst failure mode available.
+The plan said "shadow stack first". It is not there, and the reason is a constraint the
+plan states one paragraph further down: **the emitted IR runs in two worlds** - natively
+a handle is a `Cell *`, under `llvm.Run` it is an index into a Go table - and the two
+must stay byte-identical. Every push and pop a shadow stack emits is IR that the Go half
+has to carry and ignore, at every expression temporary, in fifteen emitters, forever.
 
-Sequence it as: shadow stack first, verified by a mark-only pass that proves it can
-reach everything live (mark, then assert no live handle is unmarked); sweep second.
+**Scanning the real C stack conservatively needs no emitted instruction at all**, so the
+compiler half is untouched *by construction* - which is the strongest available form of
+the invariant that matters most here ("a GC that changes an answer is worse than no
+GC"). The soundness argument is the ordinary ABI one, the same one Boehm's collector
+rests on: a handle live across a call is either spilled into the caller's frame, which
+is inside the scanned range, or held in a callee-saved register, which the collector
+captures with a `setjmp` of its own. Handles are i64 INTEGERS as far as LLVM is
+concerned, never pointers, so no pointer-provenance optimisation can rewrite one into a
+form the scan cannot see.
 
-Gate: the benchmarks run in **bounded** memory, and every existing suite stays green
-byte-for-byte. A GC that changes an answer is worse than no GC.
+The only IR that changed is **one extern, `js_gc_pin`, at three call sites**, and it is
+the IDENTITY in both halves. It exists because the emitted module has globals of its own
+that hold a handle for the life of the program and that the C floor cannot see:
+`lib/compile-core.js`'s `jsnumg.N` (part 1a's memoised literal boxing) and
+`metajs-to-llvm-ir.abnf`'s `jsrtlib_env` / `jsrtlib_f_*` (a `-rt-lib` library's scope and
+its resolved functions). `abnf/jsrt.go` binds it to `func(a) { return a[0] }`.
+
+### What was built (`languages/lib/runtime.c`)
+
+The bump arena is now a mark/sweep heap. Every allocation is a **block**: a 16 byte
+header (`size`, then flags = free bit, cell bit, and the **mark epoch** in bits 8 and up)
+and a 16 byte aligned payload. A cell's handle is its payload address, so nothing outside
+the allocator ever sees a header. A chunk is a malloc'd slab carrying a **start bitmap**,
+one bit per 16 bytes, set when a block is carved; blocks are never moved, never
+coalesced and never split after the fact, so a bit once set stays true and the bitmap
+never has to be rebuilt. Freed blocks go on **segregated free lists** by size class
+(`size/16`, classes 2..64) plus a first-fit list for anything larger. The mark epoch is
+why a collection never walks the heap to *clear* marks - it just bumps a counter.
+
+Roots are: the file's own globals (`G_ROOT`, `THROWN`, `RETSLOT`, `NIC`, `SMC_VAL`), the
+`jmp_buf` pool `JB`, the pinned module globals, the callee-saved registers, and the C
+stack from the collector's own frame up to an anchor `main` records. Marking is
+**precise from a cell** (the tag says which of `a..f` is a handle and which is a raw long
+- a number's IEEE bits, a closure's function index, a host id, a bound method's method
+id) and **conservative from a raw buffer** reached from the stack, whose shape is not
+knowable there. Every marking step goes through the validating `gc_try`, even for a field
+the tag calls a handle: a `_raw` operator index reaching a traced slot by mistake would
+otherwise write a mark word into unrelated memory, and a collector whose failure mode is
+silent corruption is not worth having.
+
+**The trigger is an explicit, testable knob**, which is what made the two defects below
+findable:
+
+```
+MEC_GC=off      never collect - this IS the old arena, so RSS/iterations is still
+                exactly the allocation rate (that is the left column above)
+(default)       collect when the bytes allocated since the last collection exceed
+                the live set, floor 1 MB
+MEC_GC=stress   collect at EVERY allocation
+MEC_GC=poison   collect on the ordinary threshold, but RETIRE every swept block and
+                fill it with a non-value instead of reusing it, so a root the mark
+                pass missed is a wrong answer rather than memory that happens to
+                still hold the right bytes
+MEC_GC_STATS=1  report collections / live / heap / pinned on stderr at exit
+```
+
+`poison` is deliberately *not* `stress` as well: retiring means the heap only grows, and
+collecting per allocation on top of that is quadratic - it did not finish on the Lua
+ratchet in eight minutes, against 1.1 s for the form that ships.
+
+### TWO defects the knob found, one of them a design error
+
+**1. Requiring an EXACT payload address is unsound at -O2. This is the important one.**
+The first version accepted a conservative root only when the word was exactly a block's
+payload address, on the argument that a buffer's owning cell is always reachable too and
+marks the buffer precisely. **That argument is false, and the native Lua suite said so.**
+In `u_slice` the only surviving reference while `str_from_units` allocates is `u + b`, an
+INTERIOR pointer into the UTF-16 unit buffer: clang had already dropped the string handle
+`h` after reading `fc(h)` out of it, so the cell was unreachable, the collector freed it,
+and the unit buffer went with it.
+
+```
+MEC_GC=stress, exact-pointers-only collector, clean build:
+  tests/lua-test-features.lua   142 checks, 9 failures   (all string.sub)
+  tests/lua-test-complete.lua                3 failures
+  MEC_GC=off / auto / poison on the same binary:         0 failures
+```
+
+Interior pointers are accepted now, resolved through the start bitmap by scanning back to
+the nearest set bit at or below the offset (with the exact-payload case checked first,
+because that is what almost every candidate is). The general lesson is worth carrying:
+**requiring exact pointers is a standing bet that no optimiser will ever keep only a
+derived pointer, and that bet does not hold.** `auto` mode never hit it - only
+`MEC_GC=stress` did, which is the argument for having the knob at all.
+
+**2. A chunk's tail was abandoned when the bump pointer moved to a new chunk**, so one
+large allocation could lose up to its own size of a perfectly good chunk, every time -
+a leak again by another name. The tail is carved as a free block instead.
+
+### The price, stated rather than buried: +25% allocation
+
+The 16 byte header per block is not free. Per iteration of the Lua loop, with the
+collector off so the figure is comparable to part 1a's:
+
+```
+                       8c396c4      HEAD
+bytes/iter (400,000)     3,633      4,557      +25.4%
+```
+
+That is the header, essentially exactly: part 1a counted 52 allocations an iteration, and
+52 x 16 = 832, so 3,633 + 832 = 4,465 against 4,557 measured - the remaining 92 being the
+rounding of a 56 byte cell to 64 and then, with a header in front of it, to 80. It buys a
+walkable heap, which is what a sweep needs.
+
+**The obvious next lever is that cells are all one size**: a cell-only region with the
+size implicit and the mark bits in a side array would give the header back, and it is a
+larger change than this one. Not done, and recorded here rather than assumed away.
+
+### Discriminating power of the new ratchet sections, measured
+
+`tests/metajs-test-full.js` SECTION 25 (7 assertions, metajs 397 -> 404) and
+`tests/lua-test-full.lua` SECTION 25 (7 assertions, lua 310 -> 317) are the shapes that
+show a collector freeing live data: data held across a call that allocates heavily, a
+closure keeping the scope that defines it, a value thrown across twenty frames, a
+repeatedly reallocated array and object, a mutated upvalue, and - the one the C stack
+scan exists for - an argument temporary live in a machine register while a LATER argument
+runs a few thousand allocations.
+
+They discriminate **only in the native binary**: the other two engines are collected by
+Go and by the host JS engine, so there they are ordinary correctness checks. Breaking the
+collector one way at a time, in a clean copy of the tree, both ratchets built with `-exe`
+and run under `MEC_GC=stress` (ABORT = the binary died or the run never reached its own
+summary; rc 139 is a segfault). Re-measured against the collector as it SHIPS, after the
+interior-pointer fix above - the earlier run against the exact-pointers-only version gave
+the same table but for two rows where lua segfaulted instead of dying on its own check:
+
+```
+                                              metajs (404)        lua (317)
+the C stack not scanned                    ABORT (segfault)   ABORT
+the callee-saved registers not scanned     ABORT              ABORT
+js_gc_pin's roots not scanned              ABORT              ABORT
+a scope's PARENT not traced                ABORT (segfault)   ABORT
+a closure's ENV not traced                 ABORT (segfault)   ABORT
+NIC / SMC_VAL (the two caches) not roots   ABORT              ABORT
+an object's VALUE buffer not traced        ABORT              ABORT (segfault)
+an array's element buffer not traced       ABORT (segfault)   ABORT
+a raw buffer's contents not scanned        ABORT              ABORT
+the JB jmp_buf pool not scanned            ABORT               0 of 317
+a string's UTF-16 UNIT buffer not traced     15 of 404         0 of 317
+G_ROOT not an explicit root                   0 of 404         0 of 317
+THROWN not an explicit root                   0 of 404         0 of 317
+```
+
+**The last two are honest zeros and they are stated, not hidden.** Neither is dead code:
+`G_ROOT` survives every current program because `scope_of` reads it constantly, so it is
+always live in some frame the conservative scan sees, and `THROWN` because `js_try`'s C
+frame holds the same handle across the whole unwind. Both are kept because a root set
+that depends on a register allocator's habits is not a root set. The `JB` row is the
+mirror image and is why it is there at all: Lua cannot tell (its ratchet has no
+exceptions - `error`/`pcall` are out of scope for that file), and MetaJS dies outright.
+
+### Every existing suite, and the native GC sweep
+
+Beyond the standing suites, every Lua and MetaJS program in `tests/` was built as a
+NATIVE binary and run in all four collector modes, with stdout, stderr and exit status
+compared byte for byte against `MEC_GC=off`:
+
+```
+native GC sweep: 16 programs built, 16 identical across off/auto/stress/poison, 0 divergent
+```
+
+and both full ratchets, whose four modes agree byte for byte on stdout, stderr and exit
+status (`MEC_GC_STATS=1` in the middle column, so "it ran" is a measurement):
+
+```
+                        off        auto      stress    poison    collections (auto)
+tests/metajs-test-full 0.43s      0.01s      4.41s     0.01s      7
+tests/lua-test-full    0.38s      0.05s     76.39s     0.94s
+```
+
+The `off` column being SLOWER than `auto` on both is not noise and is worth keeping:
+with nothing reclaimed these two short files touch 8 MB and 5 MB of fresh pages, and the
+page faults cost more than the collector does. `stress` is a collection per allocation
+(129,072 of them for the MetaJS ratchet) and is a debugging mode, not a configuration.
+
+### Time, from clean archives built and run in their own trees
+
+`8c396c4` and this tree, each `go build` inside its own directory. Three runs of
+`/usr/bin/time -p`; every program printed the right answer and exited 0.
+
+```
+                             user seconds              wall seconds       max RSS
+                          8c396c4      HEAD        8c396c4     HEAD
+lua  s = s + i%7, 2M    2.84 2.84 2.85  3.36 3.33 3.32   3.12  3.31   6,925 ->    3 MB
+lua  fib(26)            0.38 0.36 0.35  0.41 0.42 0.41   0.39  0.42     928 ->    2 MB
+metajs try/catch, 2M    1.99 1.98 1.96  2.12 2.11 2.10   2.48  2.56   1,880 ->    2 MB
+```
+
+**+17% / +14% / +7% of user time, against a resident set 2,300x / 460x / 940x smaller.**
+Wall clock moves much less (+6% / +8% / +3%) because the arena's own page faults were
+paying part of the difference already. The collector's work is the sweep, which walks
+every block of the heap, plus the +25% of allocation the headers cost.
+
+**The trigger threshold was tuned and the measurement is recorded rather than the
+conclusion alone.** A collection is due when the bytes allocated since the last one
+exceed the live set, with a floor; on the 2M Lua loop:
+
+```
+floor  1 MB   3.36 3.33 3.32 user    3 MB RSS    <- shipped
+floor  4 MB   3.16 3.20 3.20 user    6 MB RSS
+floor 16 MB   3.22 3.20 3.18 user   18 MB RSS
+```
+
+4 MB is 5% faster for twice the resident set, and 16 MB buys nothing beyond it. **1 MB
+ships anyway**, and the reason is test coverage rather than memory: at 1 MB every short
+program in the matrix actually enters the collector (the metajs ratchet collects 7 times
+instead of 4), and 5% of a benchmark is worth less than that.
+
+### Gate and verification
+
+```
+./test.sh              matrix 325/325, all green
+./test.sh --full       5,518 assertions (5,504 + 7 metajs + 7 lua),
+                       0 languages whose halves disagree
+                       (grep 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF': no hits)
+./test.sh --cross      119 programs compared, 0 divergent
+tests/clang-check.sh   16/16; bash, batch, c, lua, metajs all
+                       "ok, and the clang executable agrees"
+go test ./abnf/        ok
+gen-runtime-ll.sh   --check   up to date (42506 lines, regenerated)
+gen-lua-rt-ll.sh    --check   up to date (14360 lines, regenerated)
+gen-bash-rt-ll.sh   --check   up to date        gen-batch-rt-ll.sh --check  up to date
+mec -freeze languages/metajs-to-llvm-ir.abnf    fixed point (same MD5 on a re-freeze
+                       with the rebuilt binary); regenerated because the snapshot
+                       INLINES lib/compile-core.js, which grew the js_gc_pin call
+```
+
+### What this does NOT do
+
+- **It never moves an object**, and it cannot: conservative roots forbid it. So there is
+  no compaction, and fragmentation is whatever the segregated free lists leave. Not a
+  problem for this workload - every size in the benchmark is a cell or a small buffer -
+  but it is a real limit for a program that alternates sizes.
+- **It never returns memory to the OS.** A chunk, once malloc'd, is kept.
+- **It is not incremental**: a collection is a stop-the-world mark and a full sweep. The
+  sweep is what the 5% threshold measurement above is really measuring.
+- **The other native runtimes are untouched.** `bash-rt.c`, `batch-rt.c` and the C
+  interpreter's memory have their own arenas and no collector; only `runtime.c`, which
+  is what MetaJS and Lua (and the eleven languages after them) stand on, got one.
 
 ---
 

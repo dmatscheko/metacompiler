@@ -247,6 +247,11 @@ function numGetter(n) {
     } else {
         made = callExt(mkB, "js_num_str", [emitStr(mkB, "" + n)])
     }
+    // The global below outlives every collection and lib/runtime.c cannot see it (a
+    // module global is not on the C stack and not in the floor's own root set), so the
+    // cell is PINNED. js_gc_pin answers its argument unchanged and is the identity in
+    // the Go half, so the two engines stay byte-identical in behaviour.
+    made = callExt(mkB, "js_gc_pin", [made])
     mkB.NewStore(made, g)
     mkB.NewBr(okB)
     okB.NewRet(okB.NewPhi([llvm.ir.NewIncoming(had, eb), llvm.ir.NewIncoming(made, mkB)]))

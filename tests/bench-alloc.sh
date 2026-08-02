@@ -5,13 +5,19 @@
 #
 # WHY THIS EXISTS
 #
-# languages/lib/runtime.c allocates from a bump arena that is never freed
-# (docs/runtime-rework-plan.md, Risk 3), so a long-running program's resident
-# set IS its allocation total. That makes peak RSS divided by the iteration
-# count an exact figure for "bytes allocated per operation" - no profiler, no
-# sampling. This script measures it at four sizes, so linear growth is visible
-# as a constant, and compares the native binary against llvm.Run (the Go
-# runtime) and, if it is installed, against real lua.
+# languages/lib/runtime.c USED TO allocate from a bump arena that was never
+# freed, so a long-running program's resident set WAS its allocation total, and
+# peak RSS divided by the iteration count was an exact figure for "bytes
+# allocated per operation" - no profiler, no sampling.
+#
+# docs/runtime-next-plan.md part 1b made it a mark/sweep heap, so RSS is now
+# BOUNDED and no longer measures allocation. Both numbers still matter and the
+# script reports both, from the same binary:
+#
+#   MEC_GC=off   the collector never runs, which is exactly the old arena, so
+#                RSS / iterations is still the allocation rate in bytes per op
+#   default      the collector runs, and RSS must FLATTEN as the iteration
+#                count grows instead of scaling with it. That is the gate.
 #
 # Usage: tests/bench-alloc.sh [ITERS]     (default 200000)
 #
@@ -66,7 +72,8 @@ if command -v lua >/dev/null 2>&1; then
 fi
 
 echo
-echo "=== the arena has no GC, so RSS/iteration is bytes allocated per op ===="
+echo "=== MEC_GC=off: no collection, so RSS/iteration IS bytes allocated per op"
+echo "=== default:    the collector runs, and RSS must FLATTEN, not scale"
 for n in $((ITERS / 4)) $((ITERS / 2)) "$ITERS" $((ITERS * 2)); do
     cat > "$TMP/n.lua" <<EOF
 local s = 0
@@ -74,8 +81,13 @@ for i = 1, $n do s = s + i % 7 end
 print(s)
 EOF
     "$BIN" languages/lua-to-llvm-ir.abnf "$TMP/n.lua" -q -exe "$TMP/n.out" >/dev/null || exit 1
-    r=$(maxrss "$TMP/n.out")
-    printf 'iters=%-10s rss=%-14s bytes/iter=%s\n' "$n" "$r" "$((r / n))"
+    # `env` rather than a VAR=x prefix: maxrss is a shell function, and bash does
+    # not scope an assignment prefix to a function call the way it does to a
+    # binary - the setting would leak into the next measurement.
+    r=$(maxrss env MEC_GC=off "$TMP/n.out")
+    g=$(maxrss "$TMP/n.out")
+    printf 'iters=%-10s no-gc rss=%-12s bytes/iter=%-8s gc rss=%-11s bytes/iter=%s\n' \
+        "$n" "$r" "$((r / n))" "$g" "$((g / n))"
 done
 
 echo

@@ -4873,6 +4873,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			strMemCache[key] = h
 			return h
 		},
+		// js_gc_pin is the IDENTITY here. Natively (languages/lib/runtime.c) it also
+		// registers the handle as a permanent GC root, because the emitted module has
+		// globals - jsnumg.N, jsrtlib_env, jsrtlib_f_* - that hold a handle for the
+		// life of the program and that the C floor's root set cannot otherwise see.
+		// This half is garbage collected by Go, so there is nothing to do.
+		"js_gc_pin": func(a []uint64) uint64 { return a[0] },
+
 		"js_num_i": func(a []uint64) uint64 { // (i64 value) -> number handle
 			return rt.wrapNum(float64(int64(a[0])))
 		},

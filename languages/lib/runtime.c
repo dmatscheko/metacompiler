@@ -14,9 +14,12 @@
  * ever sees IR that came out of a grammar in languages/.
  *
  * WHAT IT IS NOT
- *   - It is not a garbage collector. Memory comes from a bump arena and is never
- *     freed; the process exits and the OS reclaims it. Accepted limit, recorded
- *     in the plan under Risks.
+ *   - It is not a MOVING or an incremental collector. Since 2026-08-03 it does
+ *     collect: a stop-the-world mark/sweep over the heap, with the C stack
+ *     scanned conservatively so no shadow stack has to be emitted (see "the heap
+ *     and its GC" below, and docs/runtime-next-plan.md part 1b). Nothing is ever
+ *     moved - conservative roots forbid it - so there is no compaction, and a
+ *     chunk once malloc'd is never handed back to the OS.
  *   - It is not a full ECMAScript runtime. It implements the MetaJS subset that
  *     metajs-to-llvm-ir.abnf emits, matching abnf/jsrt.go where it can.
  *   - It is not Unicode-complete. Strings carry the UTF-16 code unit view that
@@ -53,6 +56,7 @@ int putchar(int c);
 int puts(const char *s);
 long write(int fd, const char *buf, unsigned long n);
 void *malloc(unsigned long n);
+char *getenv(const char *name);
 int setjmp(void *env);
 void longjmp(void *env, int v);
 void exit(int code);
@@ -263,27 +267,213 @@ long to_uint32(long bits) {
 	return v;
 }
 
-/* ------------------------------------------------------------- the arena */
+/* -------------------------------------------------- the heap and its GC -- */
+/*
+ * THIS USED TO BE A BUMP ARENA THAT WAS NEVER FREED. It is now a MARK/SWEEP
+ * heap (docs/runtime-next-plan.md, part 1b). The allocation per iteration of a
+ * loop had been cut 5x by the emitter work of part 1a and was still exactly
+ * LINEAR, because what remains is live data rather than waste: no further
+ * reduction fixes a program that runs for a minute.
+ *
+ * WHY MARK/SWEEP AND NOT REFCOUNTING. A scope holds its parent and a closure
+ * holds its defining scope, so a closure defined inside a function CYCLES with
+ * the scope that names it - the common case, not an edge case.
+ *
+ * WHY THE C STACK IS SCANNED CONSERVATIVELY, AND NOT A SHADOW STACK IN THE
+ * EMITTER. The plan's sequence said "shadow stack first". A shadow stack was
+ * costed and rejected for a reason the plan itself states one paragraph later:
+ * the emitted IR runs in TWO worlds - natively a handle is a Cell *, under
+ * llvm.Run it is an index into a Go table - and the two must stay
+ * byte-identical. Every push/pop a shadow stack emits is IR that the Go half
+ * would have to carry and ignore, at every expression temporary, in fifteen
+ * emitters. Scanning the real C stack needs NO emitted instruction at all, so
+ * the compiler half is untouched by construction, which is the strongest form
+ * of the invariant that matters most here ("a GC that changes an answer is
+ * worse than no GC").
+ *
+ * What makes the scan sound is the ordinary ABI argument (this is what Boehm's
+ * collector does): a handle live across a call is either spilled to the caller's
+ * frame - which is inside the scanned range - or held in a callee-saved
+ * register, which the collector captures with a setjmp of its own. Handles are
+ * i64 INTEGERS as far as LLVM is concerned, never pointers, so no
+ * pointer-provenance optimisation can rewrite one into a form the scan cannot
+ * see. A collection can only start inside ar_alloc, so the invariant every
+ * allocator here must keep is: between an ar_alloc and the store of its result
+ * into a reachable object, do not allocate again. Checked at every site.
+ *
+ * A candidate word is accepted only when it is the EXACT payload address of a
+ * live block, which the per-chunk start bitmap answers in constant time. An
+ * INTERIOR pointer (scope_put's `vals = names + nc`) is therefore not a root on
+ * its own - and does not need to be: its block is always also owned by a cell
+ * that is itself reachable, and the block is marked from there.
+ *
+ * LAYOUT. Every allocation is a BLOCK: a 16 byte header and a 16 byte aligned
+ * payload. The handle of a cell is the address of its PAYLOAD, so nothing
+ * outside this section ever sees a header.
+ *     w[0]  total size of the block in bytes, header included
+ *     w[1]  bit 0 "on a free list", bit 1 "the payload is a Cell",
+ *           and the MARK EPOCH in bits 8 and up (so a collection never has to
+ *           walk the heap to CLEAR marks - it just bumps the epoch)
+ *     w[2]  while free: the next free block
+ * A chunk is a malloc'd slab: [0] next chunk, [1] payload capacity, [2] payload
+ * bytes handed out, [3] the start bitmap (one bit per 16 bytes, set when a block
+ * is carved). Blocks are never coalesced and never moved, so a bit once set
+ * stays true and the bitmap needs no rebuilding.
+ */
 
-char *ar_base;
-long ar_off;
-long ar_cap;
+long AR_CHUNKS;      /* head of the chunk list */
+long AR_CUR;         /* the chunk bump allocation is running in */
+long GC_FREE[65];    /* free lists by size class = size / 16, classes 2..64 */
+long GC_BIG;         /* free blocks over 1024 bytes, first fit */
+long GC_EPOCH;
+long GC_ON;          /* 0 during boot and inside a collection */
+long GC_MODE;        /* 0 auto, 1 never, 2 at every allocation, 3 = 2 + poison */
+long GC_ALLOCED;
+long GC_THRESH;
+long GC_LIVE;
+long GC_HEAP;
+long GC_STACK_BASE;
+long GC_REGS;        /* a jmp_buf used only to spill the callee-saved registers */
+long GC_MSTACK;
+long GC_MTOP;
+long GC_MCAP;
+long GC_COUNT;
+long PINS[8192];     /* js_gc_pin: module globals that hold a handle for ever */
+long PIN_N;
 
-void ar_init(void) { ar_cap = 1048576; ar_base = (char *)malloc(1048576); ar_off = 0; }
+void gc_collect(void);
 
-char *ar_alloc(long n) {
-	char *p;
-	n = (n + 15) & (0 - 16);          /* 16 byte aligned, like malloc */
-	if (ar_off + n > ar_cap) {
-		long want = 1048576;
-		while (want < n) { want = want * 2; }
-		ar_base = (char *)malloc(want);
-		ar_cap = want;
-		ar_off = 0;
+long chunk_new(long payload) {
+	long c = (long)malloc(payload + 32);
+	long nb = payload / 128 + 8;
+	long bm = (long)malloc(nb);
+	long *w = (long *)c;
+	char *b = (char *)bm;
+	long i = 0;
+	while (i < nb) { b[i] = 0; i = i + 1; }
+	w[0] = AR_CHUNKS;
+	w[1] = payload;
+	w[2] = 0;
+	w[3] = bm;
+	AR_CHUNKS = c;
+	GC_HEAP = GC_HEAP + payload;
+	return c;
+}
+
+void bm_set(long c, long off) {
+	long *w = (long *)c;
+	char *b = (char *)w[3];
+	long idx = off >> 4;
+	long by = idx >> 3;
+	long one = 1;
+	b[by] = (char)(((long)b[by] & 255) | (one << (idx & 7)));
+}
+int bm_get(long c, long off) {
+	long *w = (long *)c;
+	char *b = (char *)w[3];
+	long idx = off >> 4;
+	return (int)(((((long)b[idx >> 3]) & 255) >> (idx & 7)) & 1);
+}
+
+/* A block of exactly `need` bytes: the free list of its size class, then the
+ * big-block list, then a bump out of the current chunk, then a new chunk. */
+long ar_block(long need) {
+	long cls = need >> 4;
+	long b;
+	long *w;
+	if (cls <= 64) {
+		b = GC_FREE[cls];
+		if (b != 0) { w = (long *)b; GC_FREE[cls] = w[2]; return b; }
+	} else {
+		long prev = 0;
+		b = GC_BIG;
+		while (b != 0) {
+			w = (long *)b;
+			if (w[0] >= need) {
+				if (prev == 0) { GC_BIG = w[2]; }
+				else { long *pw = (long *)prev; pw[2] = w[2]; }
+				return b;
+			}
+			prev = b;
+			b = w[2];
+		}
 	}
-	p = ar_base + ar_off;
-	ar_off = ar_off + n;
-	return p;
+	if (AR_CUR != 0) {
+		long *cw = (long *)AR_CUR;
+		long off = cw[2];
+		long tail;
+		if (off + need <= cw[1]) {
+			cw[2] = off + need;
+			b = AR_CUR + 32 + off;
+			bm_set(AR_CUR, off);
+			w = (long *)b;
+			w[0] = need;
+			return b;
+		}
+		/* The tail is too small for THIS request, and AR_CUR is about to move on.
+		 * Carve it as a free block rather than losing it: one large allocation
+		 * would otherwise abandon up to its own size of a perfectly good chunk,
+		 * every time, which is a leak again by another name. */
+		tail = cw[1] - off;
+		if (tail >= 32) {
+			long tb = AR_CUR + 32 + off;
+			long *tw = (long *)tb;
+			long tcls = tail >> 4;
+			cw[2] = cw[1];
+			bm_set(AR_CUR, off);
+			tw[0] = tail;
+			tw[1] = 1;
+			if (tcls <= 64) { tw[2] = GC_FREE[tcls]; GC_FREE[tcls] = tb; }
+			else { tw[2] = GC_BIG; GC_BIG = tb; }
+		}
+	}
+	{
+		long want = 1048576;
+		long c;
+		long *cw;
+		while (want < need) { want = want * 2; }
+		c = chunk_new(want);
+		AR_CUR = c;
+		cw = (long *)c;
+		cw[2] = need;
+		bm_set(c, 0);
+		b = c + 32;
+		w = (long *)b;
+		w[0] = need;
+		return b;
+	}
+}
+
+/* kind 1 = the payload is a Cell (traced by its tag), 0 = a raw buffer. */
+char *ar_alloc_k(long n, long kind) {
+	long need = ((n + 15) & (0 - 16)) + 16;
+	long b;
+	long *w;
+	if (GC_ON != 0) {
+		if (GC_MODE == 2) { gc_collect(); }
+		else if (GC_MODE != 1 && GC_ALLOCED > GC_THRESH) { gc_collect(); }
+	}
+	b = ar_block(need);
+	w = (long *)b;
+	w[1] = kind * 2;
+	GC_ALLOCED = GC_ALLOCED + w[0];
+	return (char *)(b + 16);
+}
+char *ar_alloc(long n) { return ar_alloc_k(n, 0); }
+
+void ar_init(void) {
+	long i = 0;
+	AR_CHUNKS = 0; AR_CUR = 0; GC_BIG = 0; GC_EPOCH = 1; GC_ON = 0;
+	GC_ALLOCED = 0; GC_LIVE = 0; GC_HEAP = 0; GC_COUNT = 0; PIN_N = 0;
+	/* The same floor a collection leaves behind, so a short program still gets
+	 * one collection instead of running the whole matrix without ever entering
+	 * the collector. */
+	GC_THRESH = 1048576;
+	while (i < 65) { GC_FREE[i] = 0; i = i + 1; }
+	GC_MSTACK = (long)malloc(65536 * 8);
+	GC_MTOP = 0;
+	GC_MCAP = 65536;
+	GC_REGS = (long)malloc(512);
 }
 
 /* ---------------------------------------------------------------- values */
@@ -312,7 +502,7 @@ long H_FALSE;
 long H_TRUE;
 
 long cell_new(long tag) {
-	struct Cell *p = (struct Cell *)ar_alloc(56);
+	struct Cell *p = (struct Cell *)ar_alloc_k(56, 1);
 	p->tag = tag; p->a = 0; p->b = 0; p->c = 0; p->d = 0; p->e = 0; p->f = 0;
 	return (long)p;
 }
@@ -339,6 +529,222 @@ void sc(long h, long v) { struct Cell *p = (struct Cell *)h; p->c = v; }
 void sd(long h, long v) { struct Cell *p = (struct Cell *)h; p->d = v; }
 void se(long h, long v) { struct Cell *p = (struct Cell *)h; p->e = v; }
 void sf(long h, long v) { struct Cell *p = (struct Cell *)h; p->f = v; }
+
+/* --- the collector ------------------------------------------------------ */
+/*
+ * Marking is PRECISE from a cell (the tag says which fields hold a handle and
+ * which hold a raw long - a number's IEEE bits, a closure's function index, a
+ * host function's id, a bound method's method id) and CONSERVATIVE from a raw
+ * buffer that was reached from the C stack rather than from its owning cell.
+ * Both directions can only ever RETAIN too much, never free something live.
+ *
+ * Every marking step goes through gc_try, which VALIDATES the candidate against
+ * the heap before touching it. That is deliberately paid even for a field the
+ * tag says is a handle: a `_raw` operator index reaching a traced slot by
+ * mistake would otherwise write a mark word into unrelated memory, and a
+ * collector whose failure mode is silent corruption is not worth having.
+ */
+
+void gc_try(long v, int deep);
+
+void gc_grow(void) {
+	long nc = GC_MCAP * 2;
+	long ns = (long)malloc(nc * 8);
+	long *o = (long *)GC_MSTACK;
+	long *n = (long *)ns;
+	long i = 0;
+	while (i < GC_MTOP) { n[i] = o[i]; i = i + 1; }
+	GC_MSTACK = ns;
+	GC_MCAP = nc;
+}
+
+void gc_mark(long b, int deep) {
+	long *w = (long *)b;
+	long *ms;
+	if ((w[1] & 1) != 0) { return; }                  /* on a free list: garbage */
+	if ((w[1] >> 8) == GC_EPOCH) { return; }          /* already marked */
+	w[1] = (w[1] & 255) | (GC_EPOCH << 8);
+	GC_LIVE = GC_LIVE + w[0];
+	if (deep == 0) { return; }                        /* no children to look at */
+	if (GC_MTOP >= GC_MCAP) { gc_grow(); }
+	ms = (long *)GC_MSTACK;
+	ms[GC_MTOP] = b;
+	GC_MTOP = GC_MTOP + 1;
+}
+
+/* Does v point into a block, and if so, which one?
+ *
+ * INTERIOR POINTERS ARE ACCEPTED, and that is not conservatism for its own sake:
+ * the first version required an EXACT payload address, on the argument that a
+ * buffer's owning cell is always reachable too and marks the buffer precisely.
+ * That argument is false at -O2, and the whole native lua suite said so. In
+ * u_slice the only surviving reference during str_from_units' allocation is
+ * `u + b`, an interior pointer into the UTF-16 unit buffer: the compiler had
+ * already dropped the string handle `h` after reading fc(h) out of it, so the
+ * cell was unreachable, the collector freed it, and the unit buffer went with
+ * it. MEC_GC=stress turned that into 9 failures in tests/lua-test-features.lua
+ * and 3 in tests/lua-test-complete.lua, all in string.sub. Requiring exact
+ * pointers is a standing bet that no optimiser will ever keep only a derived
+ * pointer, and that bet does not hold.
+ *
+ * The start bitmap answers the containing block: scan back to the nearest set
+ * bit at or below the offset. The exact-payload case is checked first, because
+ * that is what almost every candidate is. */
+void gc_try(long v, int deep) {
+	long c;
+	long *w;
+	long off;
+	long idx;
+	long by;
+	long bit;
+	long msk;
+	char *bmp;
+	long one = 1;
+	if (v < 4096) { return; }
+	c = AR_CHUNKS;
+	while (c != 0) {
+		w = (long *)c;
+		off = v - c - 32;
+		if (off >= 0 && off < w[2]) {
+			bmp = (char *)w[3];
+			if ((off & 15) == 0 && off >= 16) {
+				idx = (off - 16) >> 4;
+				if (((((long)bmp[idx >> 3]) & 255) >> (idx & 7) & 1) != 0) {
+					gc_mark(v - 16, deep);            /* an exact payload address */
+					return;
+				}
+			}
+			idx = off >> 4;
+			by = idx >> 3;
+			bit = idx & 7;
+			msk = ((long)bmp[by] & 255) & ((one << (bit + 1)) - 1);
+			while (msk == 0) {
+				by = by - 1;
+				if (by < 0) { return; }
+				msk = (long)bmp[by] & 255;
+			}
+			bit = 0;
+			while (msk > 1) { msk = msk >> 1; bit = bit + 1; }
+			idx = (by << 3) + bit;
+			{
+				long start = idx << 4;
+				long *bw = (long *)(c + 32 + start);
+				/* Inside the payload, not inside the 16 byte header: a word that
+				 * happens to address a header is not a reference to the object. */
+				if (off >= start + 16 && off < start + bw[0]) { gc_mark(c + 32 + start, deep); }
+			}
+			return;
+		}
+		c = w[0];
+	}
+}
+
+void gc_trace(long b) {
+	long *w = (long *)b;
+	long t;
+	if (((w[1] >> 1) & 1) == 0) {
+		/* A raw buffer reached from the C stack. Its shape is not known here
+		 * (a scope's names/values/type-classes share one block, a string's
+		 * unit array holds code points), so every word in it is a candidate. */
+		long q = b + 16;
+		long end = b + w[0];
+		while (q + 8 <= end) { long *x = (long *)q; gc_try(x[0], 1); q = q + 8; }
+		return;
+	}
+	/* w[2..8] IS the Cell: tag, a, b, c, d, e, f. */
+	t = w[2];
+	if (t == 4)  { gc_try(w[3], 0); gc_try(w[5], 0); return; }  /* bytes, units */
+	if (t == 5)  { gc_try(w[3], 1); return; }                   /* array elements */
+	if (t == 6)  { gc_try(w[3], 1); gc_try(w[4], 1); return; }  /* keys, values */
+	if (t == 7)  { gc_try(w[4], 1); return; }                   /* closure env */
+	if (t == 9)  { gc_try(w[3], 1); return; }                   /* bound receiver */
+	if (t == 10) { gc_try(w[4], 1); return; }                   /* signal value */
+	if (t == 11) { gc_try(w[3], 1); gc_try(w[8], 1); return; }  /* names+vals, parent */
+	/* 3 number, 8 host function, 12 anytype, 13 sized integer: no children. */
+}
+
+void gc_drain(void) {
+	while (GC_MTOP > 0) {
+		long *ms = (long *)GC_MSTACK;
+		GC_MTOP = GC_MTOP - 1;
+		gc_trace(ms[GC_MTOP]);
+	}
+}
+
+void gc_scan_range(long lo, long hi) {
+	long p = (lo + 7) & (0 - 8);
+	while (p < hi) {
+		long *x = (long *)p;
+		gc_try(x[0], 1);
+		p = p + 8;
+	}
+}
+
+void gc_sweep(void) {
+	long c = AR_CHUNKS;
+	while (c != 0) {
+		long *cw = (long *)c;
+		long used = cw[2];
+		long off = 0;
+		while (off < used) {
+			long b = c + 32 + off;
+			long *w = (long *)b;
+			long sz = w[0];
+			if ((w[1] & 1) == 0 && (w[1] >> 8) != GC_EPOCH) {
+				if (GC_MODE == 3) {
+					/* Poison mode: the block is retired for good and its payload
+					 * filled with a value that is neither a tag nor a handle, so a
+					 * root the mark pass FAILED to reach shows up as a deterministic
+					 * wrong answer instead of a rare use-after-free. */
+					long *pw = (long *)(b + 16);
+					long q = 0;
+					while (q * 8 + 16 < sz) { pw[q] = 195948557; q = q + 1; }
+					w[1] = 1;
+				} else {
+					long cls = sz >> 4;
+					w[1] = 1;
+					if (cls <= 64) { w[2] = GC_FREE[cls]; GC_FREE[cls] = b; }
+					else { w[2] = GC_BIG; GC_BIG = b; }
+				}
+			}
+			off = off + sz;
+		}
+		c = cw[0];
+	}
+}
+
+void gc_roots(void);          /* the globals of this file; defined once they exist */
+
+void gc_collect(void) {
+	long guard;
+	long lo;
+	long i;
+	if (GC_ON == 0) { return; }
+	GC_ON = 0;
+	GC_EPOCH = GC_EPOCH + 1;
+	GC_MTOP = 0;
+	GC_LIVE = 0;
+	gc_roots();
+	/* The callee-saved registers. A handle live across a call is either spilled
+	 * into a frame inside the scanned range or sitting in one of these. */
+	setjmp((void *)GC_REGS);
+	i = 0;
+	while (i < 64) { long *r = (long *)GC_REGS; gc_try(r[i], 1); i = i + 1; }
+	/* The C stack, from this frame up to the anchor main() took. The 256 byte
+	 * margin below covers the compiler placing `guard` above other slots of this
+	 * frame; it reads the red zone, which is mapped, and a false pointer there
+	 * costs retention and nothing else. */
+	guard = 0;
+	lo = ((long)&guard) - 256;
+	gc_scan_range(lo, GC_STACK_BASE);
+	gc_drain();
+	gc_sweep();
+	GC_ALLOCED = 0;
+	GC_THRESH = GC_LIVE;
+	if (GC_THRESH < 1048576) { GC_THRESH = 1048576; }
+	GC_COUNT = GC_COUNT + 1;
+	GC_ON = 1;
+}
 
 /* --- fatal errors ------------------------------------------------------- */
 
@@ -748,7 +1154,9 @@ long mk_cstr(const char *s) {
 
 /* --- growable handle buffers -------------------------------------------- */
 
-/* A buffer is a raw long* in the arena; the owning cell carries n and cap. */
+/* A buffer is a raw long* in the heap; the owning cell carries n and cap. It is
+ * NOT a Cell, so the collector marks it from the cell that owns it, and scans
+ * its words conservatively when it is reached from the C stack instead. */
 long *buf_new(long cap) {
 	long *p = (long *)ar_alloc(cap * 8);
 	long i = 0;
@@ -1894,9 +2302,9 @@ long si_arith(long op, long l, long r) {
  * abnf/jsrt.go's scopeOf. */
 long G_ROOT;
 
-/* Capacity 4, not 8. A scope is allocated on EVERY function call and the arena
- * is never freed, so its size is both the per-call cost and the growth rate of a
- * long-running program: 8 cost 248 bytes a call, 4 costs 152. Almost every scope
+/* Capacity 4, not 8. A scope is allocated on EVERY function call, so its size is
+ * the per-call cost - and it was the growth rate of a long-running program too
+ * back when nothing was freed: 8 cost 248 bytes a call, 4 costs 152. Almost every scope
  * holds a handful of names (parameters plus a few locals) and scope_put doubles
  * when it does not. Measured on a 2M-iteration Lua loop: the resident set and the
  * system time both fell by about a third. */
@@ -3221,6 +3629,45 @@ long js_try(long tryC, long catchC, long finC) {
 
 long RETSLOT;
 
+/* The PRECISE half of the root set: every global of this file that can hold a
+ * handle. The C stack, the callee-saved registers and the pinned module globals
+ * are the other three; together they are the whole of it.
+ *
+ * SMC_VAL is the string-literal cache and NIC the small-integer cache: neither
+ * is a weak table, so both keep their cells alive for the life of the process -
+ * which is what makes one shared cell per literal sound in the first place.
+ * JB holds jmp_bufs, whose saved registers can be the only copy of a handle
+ * between a setjmp and the longjmp that restores them, so they are scanned too;
+ * that costs a retention at worst. */
+void gc_roots(void) {
+	long i = 0;
+	gc_try(G_ROOT, 1);
+	gc_try(THROWN, 1);
+	gc_try(RETSLOT, 1);
+	while (i < 1281) { gc_try(NIC[i], 1); i = i + 1; }
+	i = 0;
+	while (i < 8192) { gc_try(SMC_VAL[i], 1); i = i + 1; }
+	i = 0;
+	while (i < PIN_N) { gc_try(PINS[i], 1); i = i + 1; }
+	i = 0;
+	while (i < JB_DEPTH) { if (JB[i] != 0) { gc_scan_range(JB[i], JB[i] + 512); } i = i + 1; }
+}
+
+/* js_gc_pin answers its argument unchanged, and is IDENTITY in the Go half
+ * (abnf/jsrt.go). It exists because the emitted module has globals of its own
+ * that hold a handle for the life of the program and that this file cannot see:
+ * lib/compile-core.js's jsnumg.N (the memoised boxing of a numeric literal) and
+ * metajs-to-llvm-ir.abnf's jsrtlib_env / jsrtlib_f_* (a -rt-lib library's scope
+ * and its resolved functions). Registering them here is three call sites and one
+ * extern; conservatively scanning the data segment instead is not portable, and
+ * emitting a shadow stack for them would be IR the Go half has to carry. */
+long js_gc_pin(long v) {
+	if (PIN_N >= 8192) { die("too many pinned globals"); }
+	PINS[PIN_N] = v;
+	PIN_N = PIN_N + 1;
+	return v;
+}
+
 /* js_str_mem is the string-literal cache; str_intern, next to mk_str above, is
  * the whole of it. */
 long js_str_mem(const char *p, long n) { return str_intern(p, n); }
@@ -3602,11 +4049,36 @@ void boot(void) {
 	arrobj = mk_obj();
 	seed_host(arrobj, "isArray", 31);
 	seed_root("Array", arrobj);
+
+	/* The collector's trigger, made explicit and testable rather than implicit.
+	 *   MEC_GC=off      never collect (the pre-1b behaviour, for measurement)
+	 *   MEC_GC=stress   collect at EVERY allocation - turns a rare use-after-free
+	 *                   into a deterministic one
+	 *   MEC_GC=poison   collect on the ordinary threshold, but RETIRE every swept
+	 *                   block and fill it with a non-value instead of reusing it,
+	 *                   so a root the mark pass missed shows up as a wrong answer
+	 *                   rather than as memory that happens to still hold the right
+	 *                   bytes. (Deliberately NOT stress as well: retiring means the
+	 *                   heap only grows, and collecting per allocation on top of
+	 *                   that is quadratic - it did not finish on the Lua ratchet.) */
+	{
+		char *e = getenv("MEC_GC");
+		if (e != 0) {
+			if (e[0] == 111) { GC_MODE = 1; }     /* o */
+			if (e[0] == 115) { GC_MODE = 2; }     /* s */
+			if (e[0] == 112) { GC_MODE = 3; }     /* p */
+		}
+	}
+	GC_ON = 1;
 }
 
 int main(void) {
 	long r;
 	long buf;
+	long anchor = 0;
+	/* The far end of the C stack scan. The margin covers main's other locals,
+	 * whichever slots the compiler gave them. */
+	GC_STACK_BASE = ((long)&anchor) + 256;
 	boot();
 	buf = jb_at(0);
 	JB_DEPTH = 1;
@@ -3621,6 +4093,22 @@ int main(void) {
 	}
 	r = jsmain(0, 0);
 	JB_DEPTH = 0;
+	/* MEC_GC_STATS=1 reports the collector on stderr, so "it ran" is a
+	 * measurement rather than an assumption. Off by default: every suite here
+	 * compares stderr byte for byte. */
+	if (getenv("MEC_GC_STATS") != 0) {
+		OUTFD = 2;
+		o_cstr("gc: collections=");
+		o_str(to_string(mk_num(d_from_long(GC_COUNT))));
+		o_cstr(" live=");
+		o_str(to_string(mk_num(d_from_long(GC_LIVE))));
+		o_cstr(" heap=");
+		o_str(to_string(mk_num(d_from_long(GC_HEAP))));
+		o_cstr(" pinned=");
+		o_str(to_string(mk_num(d_from_long(PIN_N))));
+		o_ch(10);
+		OUTFD = 1;
+	}
 	{
 		long n = to_number(r);
 		if (d_is_nan(n)) { return 0; }

@@ -799,6 +799,94 @@ function s24()
     check("si67", "" .. ((e * 2 + 1) // 2), "9007199254740992")
 end
 
+-- ===== SECTION 25: the garbage collector (mark/sweep over the heap) =====
+-- languages/lib/runtime.c allocated from a bump arena that was never freed until
+-- docs/runtime-next-plan.md part 1b replaced it with a mark/sweep heap. The worst
+-- failure mode a collector has is freeing something still LIVE, and these are the
+-- shapes that would show it: data held across a call that allocates heavily, a
+-- closure keeping the scope that defines it (the cycle refcounting could not
+-- free, and the reason mark/sweep was chosen), a mutated upvalue, and - the one
+-- the conservative C-stack scan exists for - an argument temporary that is live
+-- in a machine register while a LATER argument runs a few thousand allocations.
+--
+-- WHERE THEY DISCRIMINATE: only in the NATIVE binary. Under llvm.Run the memory
+-- is Go's, so there they are ordinary correctness checks. Run the native binary
+-- with MEC_GC=stress (collect at every allocation) or MEC_GC=poison (and never
+-- reuse a swept block) to turn a rare use-after-free into a deterministic one;
+-- the measured discriminating power against a deliberately broken collector is
+-- in part 1b of docs/runtime-next-plan.md.
+function s25()
+    -- Enough churn to cross the collector's threshold, small enough to stay fast.
+    local churn = 2000
+    local function gcPad(seed, n)
+        local s = seed
+        for i = 1, n do s = seed .. i end
+        return s
+    end
+    local function gcAdder(x)
+        local y = x * 2
+        return function (z) return x + y + z end
+    end
+    local function gcLen3(a, b, c) return #a + #b + #c end
+
+    -- live data reachable from a local survives heavy churn
+    local keep = {}
+    for i = 1, 120 do keep[i] = {id = i, s = "v" .. i} end
+    gcPad("k", churn)
+    local ok = 0
+    for i = 1, 120 do if keep[i].id == i and keep[i].s == "v" .. i then ok = ok + 1 end end
+    check("gc01", ok, 120)
+
+    -- a closure keeps the scope that defines it
+    local fs = {}
+    for i = 1, 50 do fs[i] = gcAdder(i) end
+    gcPad("c", churn)
+    local sum = 0
+    for i = 1, 50 do sum = sum + fs[i](1) end
+    check("gc02", sum, 3875)                      -- 3i+1 summed over 1..50
+
+    -- THE C-STACK ROOT TEST: the first argument is live in no table and in no
+    -- scope while the second and third allocate a few thousand strings.
+    local tail = "" .. churn
+    check("gc03", gcLen3(gcPad("a", churn), gcPad("bb", churn), gcPad("ccc", churn)),
+          6 + 3 * #tail)
+
+    -- a table's storage reallocated many times over
+    local big = {}
+    for i = 1, 500 do big[i] = "e" .. i end
+    gcPad("b", churn)
+    check("gc04", #big == 500 and big[1] == "e1" and big[500] == "e500", true)
+
+    -- the same for string keys
+    local o = {}
+    for i = 1, 60 do o["k" .. i] = "w" .. i end
+    gcPad("o", churn)
+    local ok2 = 0
+    for i = 1, 60 do if o["k" .. i] == "w" .. i then ok2 = ok2 + 1 end end
+    check("gc05", ok2, 60)
+
+    -- two closures deep: the inner scope is reachable only through both
+    local function gcNest(v)
+        local a = v + 0
+        local g = function () return a end
+        return function () return g() end
+    end
+    local f = gcNest(7)
+    gcPad("n", churn)
+    check("gc06", f(), 7)
+
+    -- an upvalue MUTATED after capture, then churned around
+    local function gcCounter()
+        local n = 0
+        return function () n = n + 1 return n end
+    end
+    local cnt = gcCounter()
+    cnt()
+    cnt()
+    gcPad("u", churn)
+    check("gc07", cnt(), 3)
+end
+
 -- ===== END SECTIONS =====
 
 s01() -- SECTION-CALL 01
@@ -825,5 +913,6 @@ s21() -- SECTION-CALL 21
 s22() -- SECTION-CALL 22
 s23() -- SECTION-CALL 23
 s24() -- SECTION-CALL 24
+s25() -- SECTION-CALL 25
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

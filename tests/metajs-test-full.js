@@ -942,6 +942,111 @@ function s24() {
     check("sint71", sintCmp(um, mx) === 1 && sintCmp(mx, um) === 1)
 }
 
+// ===== SECTION 25: the garbage collector (mark/sweep over the heap) =====
+// languages/lib/runtime.c allocated from a bump arena that was never freed until
+// docs/runtime-next-plan.md part 1b replaced it with a mark/sweep heap. The worst
+// failure mode a collector has is freeing something that is still LIVE, and the
+// assertions below are the shapes that would show it: data held across a call
+// that allocates heavily, a closure that keeps the scope defining it, a value
+// thrown across twenty frames, and - the one the C stack scan exists for - an
+// argument temporary that is live in a machine register while a LATER argument
+// runs a few thousand allocations.
+//
+// WHERE THEY DISCRIMINATE. Only in the NATIVE binary: the other two engines are
+// garbage collected by Go and by the host JS engine, so there they are ordinary
+// correctness checks and cannot fail for a collector reason. The measured
+// discriminating power against a deliberately broken collector is in part 1b of
+// docs/runtime-next-plan.md; run the native binary with MEC_GC=stress (collect at
+// every allocation) or MEC_GC=poison (and never reuse a swept block) to make a
+// rare use-after-free a deterministic one.
+function s25() {
+    // Enough churn to cross the collector's threshold in the native binary, and
+    // small enough that the interpreter half still runs this file quickly.
+    var churn = 2000
+    function gcPad(seed, n) {
+        var s = "" + seed
+        var i = 0
+        while (i < n) { s = "" + seed + i; i = i + 1 }
+        return s
+    }
+    function gcAdder(x) {
+        var y = x * 2
+        return function (z) { return x + y + z }
+    }
+    function gcDeep(n, tag) {
+        if (n === 0) { throw {t: tag, s: "boom" + tag} }
+        var pad = "p" + n
+        return gcDeep(n - 1, tag) + pad
+    }
+    function gcLen3(a, b, c) { return a.length + b.length + c.length }
+    var i = 0
+
+    // ----- live data reachable from a scope survives heavy churn -----
+    var keep = []
+    i = 0
+    while (i < 120) { keep.push({id: i, s: "v" + i}); i = i + 1 }
+    gcPad("k", churn)
+    var ok = 0
+    i = 0
+    while (i < 120) { if (keep[i].id === i && keep[i].s === "v" + i) { ok = ok + 1 } i = i + 1 }
+    check("gc01", ok === 120)
+
+    // ----- a closure keeps the scope that defines it (the cycle refcounting
+    // could not free, and the reason mark/sweep was chosen) -----
+    var fs = []
+    i = 0
+    while (i < 50) { fs.push(gcAdder(i)); i = i + 1 }
+    gcPad("c", churn)
+    var sum = 0
+    i = 0
+    while (i < 50) { sum = sum + fs[i](1); i = i + 1 }
+    check("gc02", sum === 3725)                      // 3i+1 summed over 0..49
+
+    // ----- a value thrown across twenty frames, while every frame allocates -----
+    var caught = 0
+    i = 0
+    while (i < 40) {
+        try { gcDeep(20, i) } catch (e) { if (e.t === i && e.s === "boom" + i) { caught = caught + 1 } }
+        i = i + 1
+    }
+    check("gc03", caught === 40)
+
+    // ----- THE C-STACK ROOT TEST. The handle of the first argument is live in a
+    // machine register or a spill slot - in no scope and in no object - while the
+    // second and third arguments allocate. So is the argument array itself. -----
+    var tail = "" + (churn - 1)                      // what gcPad's last round appends
+    check("gc04", gcLen3(gcPad("a", churn), gcPad("bb", churn), gcPad("ccc", churn))
+                  === 6 + 3 * tail.length)
+
+    // ----- a buffer reallocated many times over: every doubling leaves the old
+    // block garbage while the new one is live -----
+    var big = []
+    i = 0
+    while (i < 500) { big.push("e" + i); i = i + 1 }
+    gcPad("b", churn)
+    check("gc05", big.length === 500 && big[0] === "e0" && big[499] === "e499")
+
+    // ----- the same for an object's key and value buffers -----
+    var o = {}
+    i = 0
+    while (i < 60) { o["k" + i] = "w" + i; i = i + 1 }
+    gcPad("o", churn)
+    var ok2 = 0
+    i = 0
+    while (i < 60) { if (o["k" + i] === "w" + i) { ok2 = ok2 + 1 } i = i + 1 }
+    check("gc06", ok2 === 60)
+
+    // ----- a chain of scopes two deep, reached only through two closures -----
+    function gcNest(v) {
+        var a = v + 0
+        var g = function () { return a }
+        return function () { return g() }
+    }
+    var f = gcNest(7)
+    gcPad("n", churn)
+    check("gc07", f() === 7)
+}
+
 function main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -967,6 +1072,7 @@ function main() {
     s22() // SECTION-CALL 22
     s23() // SECTION-CALL 23
     s24() // SECTION-CALL 24
+    s25() // SECTION-CALL 25
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

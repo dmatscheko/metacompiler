@@ -1021,7 +1021,9 @@ KwDefault   = "default" KwEnd ;
         var doB = bootF.NewBlock("boot")
         var skB = bootF.NewBlock("done")
         bb0.NewCondBr(bb0.NewICmp(llvm.enum.IPredEQ, bb0.NewLoad(i64, envG), llvm.constant.NewInt(i64, 0)), doB, skB)
-        var scV = callExt(doB, "js_scope_new", [handle(0)])
+        // Pinned: the library's scope lives in a module global for the whole run, which
+        // is not a place lib/runtime.c's collector can find it (see js_gc_pin there).
+        var scV = callExt(doB, "js_gc_pin", [callExt(doB, "js_scope_new", [handle(0)])])
         doB.NewStore(scV, envG)
         doB.NewCall(runF, [scV, callExt(doB, "js_arr_new", [])])
         doB.NewBr(skB)
@@ -1051,7 +1053,10 @@ KwDefault   = "default" KwEnd ;
             var goB = sf.NewBlock("go")
             sb.NewCondBr(sb.NewICmp(llvm.enum.IPredEQ, sb.NewLoad(i64, fG), llvm.constant.NewInt(i64, 0)), lkB, goB)
             lkB.NewCall(bootF, [])
-            lkB.NewStore(callExt(lkB, "js_scope_get", [lkB.NewLoad(i64, envG), emitStr(lkB, ex.n)]), fG)
+            // Pinned for the same reason as jsrtlib_env: the resolved closure is cached
+            // in a module global and is otherwise invisible to the collector.
+            lkB.NewStore(callExt(lkB, "js_gc_pin",
+                [callExt(lkB, "js_scope_get", [lkB.NewLoad(i64, envG), emitStr(lkB, ex.n)])]), fG)
             lkB.NewBr(goB)
             sb = goB
             var fV = sb.NewLoad(i64, fG)
