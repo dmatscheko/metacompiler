@@ -45,6 +45,7 @@ import (
 //  -warn-imports warn and skip imports a grammar cannot resolve (default: abort)
 //  -rt-prims     MetaJS: emit the derivable runtime primitives from lib/rt-prims.metajs
 //                instead of calling their Go externals (see docs/runtime-rework-plan.md)
+//  -rt-lib       MetaJS: compile the source as a linkable layer-2 runtime library
 //  -warn-unsupported  warn and placeholder parsed-but-unimplemented syntax (default: abort);
 //                lets call graphs / CFGs / traces be built from partially understood languages
 //  -main NAME    call NAME as the program entry point instead of main (grammars that
@@ -93,6 +94,7 @@ type options struct {
 	importRoots                           []string // -i include roots for project-file imports, in order.
 	warnUnsupported                       bool     // -warn-unsupported: warn+placeholder for not-implemented syntax instead of aborting.
 	rtPrims                               bool     // -rt-prims: compile the derivable runtime primitives from MetaJS (languages/lib/rt-prims.metajs) instead of calling the Go externals.
+	rtLib                                 bool     // -rt-lib: compile a MetaJS source as a linkable RUNTIME LIBRARY (layer 2) - exported js_* shims, offset function/string names, jsdispatch_ext - instead of a program.
 	entryPoint                            string   // -main: entry-point function name a compiled program calls (default "main").
 	exePath                               string   // -exe PATH: a -to-llvm-ir grammar links a native executable at PATH (via clang) instead of running the module.
 	runtimeInputs                         []string // -rt FILE: extra files (.c/.ll/.o/.a) clang links into the -exe build; repeatable. Grammars read the list as c.runtime.
@@ -161,6 +163,8 @@ func parseArgs(args []string) (*options, error) {
 			o.warnUnsupported = true
 		case "-rt-prims":
 			o.rtPrims = true
+		case "-rt-lib":
+			o.rtLib = true
 		case "-main":
 			o.entryPoint, err = takeVal()
 		case "-exe":
@@ -353,6 +357,7 @@ func main() {
 	abnf.ImportRoots = o.importRoots
 	abnf.WarnUnsupported = o.warnUnsupported
 	abnf.RuntimePrims = o.rtPrims
+	abnf.RuntimeLib = o.rtLib
 	if o.maxStepsSet {
 		abnf.MaxIRSteps = o.maxSteps
 	}
@@ -672,6 +677,7 @@ anywhere among the files.
   -warn-imports warn and skip imports a grammar cannot resolve (default: abort)
   -rt-prims     MetaJS: emit the derivable runtime primitives from lib/rt-prims.metajs
                 instead of calling their Go externals (see docs/runtime-rework-plan.md)
+  -rt-lib       MetaJS: compile the source as a linkable layer-2 runtime library
   -warn-unsupported  warn and placeholder parsed-but-unimplemented syntax (default: abort);
                 lets call graphs / CFGs / traces be built from partially understood languages
   -main NAME    call NAME as the program entry point instead of main (grammars that

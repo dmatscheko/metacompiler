@@ -1,0 +1,929 @@
+// lua-rt.metajs -- LUA'S OWN SEMANTICS, in MetaJS. Layer 2 of
+// docs/runtime-rework-plan.md, for the pilot language.
+//
+// languages/lua-to-llvm-ir.abnf emits handle IR that calls 54 js_* externs. 23 of
+// them are the generic MetaJS primitives languages/lib/runtime.c already provides
+// (the C floor, layer 1) and 5 more are the language-neutral scope/object walks
+// that were added to it alongside this file (js_scope_decl, js_scope_set,
+// js_scope_typeof, js_pyset_var, js_keys). The remaining 26 are LUA'S semantics,
+// and they are here.
+//
+// Compile with:
+//     mec languages/metajs-to-llvm-ir.abnf languages/lib/lua-rt.metajs -q -rt-lib
+// which is what tests/gen-lua-rt-ll.sh does; the result is the checked-in
+// languages/lib/lua-rt.ll that lua-to-llvm-ir.abnf links next to runtime.ll.
+// -rt-lib exports every TOP-LEVEL `function js_*` below under its own C symbol,
+// so nothing else in this file is visible to the linker - the helpers are
+// deliberately named lu*/i64* instead.
+//
+// THE AUTHORITATIVE SPECIFICATION IS abnf/jsrtlua.go, the Go twin, and this file
+// matches it function for function. Where it cannot, the site says so.
+//
+// ----- the value model, identical in both halves -----
+//
+//     a plain number       ==  a Lua INTEGER whose value is exact in a double
+//                              (|v| <= 2^53, integral), OR a Lua FLOAT whose
+//                              value is not integral (1.5, inf, nan)
+//     an {__li} box        ==  a Lua integer outside that range. The Go twin uses
+//                              jsGInt (abnf/jsrtint.go); a MetaJS value cannot be
+//                              a new primitive TYPE, so this is an object holding
+//                              an exact {h, l} 64 bit pair. That difference is
+//                              observable through js_typeof - "number" in Go,
+//                              "object" here - and it is why lua_str asks
+//                              js_luisnum BEFORE it asks js_typeof: see the
+//                              "reachability" note at js_pystr.
+//     an {__f} box         ==  a float whose value IS integral (1.0, 1e100), the
+//                              only case the plain reading could not tell from an
+//                              integer. lua-to-llvm-ir.abnf BUILDS this box in IR
+//                              itself (js_obj_new + js_set "__f"), so its shape is
+//                              fixed and must not change.
+//
+// MetaJS rules that shape the code below (docs/abnf-dialect-gotchas.md): a local
+// keeps the TYPE CLASS it is first assigned, so a variable that holds a number in
+// one branch and a box in another is declared `var x = anytype`; there is no ASI,
+// so every `return` carries its value on the same line; no for..in, no splice.
+
+// ============================================================ exact 64 bit ===
+// Copied from languages/lib/interp-core.js (the interpreter half's shared
+// sized-integer layer), which is validated against `go run` over 156,490
+// vectors. Only the operators Lua needs are here.
+
+function i64Make(h, l) { return {h: h >>> 0, l: l >>> 0} }
+
+function i64FromNum(n) {
+    if (n !== n) { return i64Make(0, 0) }
+    var neg = n < 0
+    var a = neg ? 0 - n : n
+    a = Math.floor(a)
+    if (a >= 18446744073709551616) { a = a - Math.floor(a / 18446744073709551616) * 18446744073709551616 }
+    var h = Math.floor(a / 4294967296)
+    var l = a - h * 4294967296
+    var v = i64Make(h, l)
+    if (neg) { v = i64Neg(v) }
+    return v
+}
+
+function i64ToNumS(x) {
+    if ((x.h & 0x80000000) !== 0) {
+        var n = i64Neg(x)
+        return 0 - (n.h * 4294967296 + n.l)
+    }
+    return x.h * 4294967296 + x.l
+}
+
+function i64Add(a, b) {
+    var l = a.l + b.l
+    var carry = l >= 4294967296 ? 1 : 0
+    var h = a.h + b.h + carry
+    return i64Make(h >>> 0, (l >>> 0))
+}
+function i64Not(a) { return i64Make(~a.h, ~a.l) }
+function i64Neg(a) { return i64Add(i64Not(a), i64Make(0, 1)) }
+function i64Sub(a, b) { return i64Add(a, i64Neg(b)) }
+
+function i64Mul(a, b) {
+    var a0 = a.l & 0xffff
+    var a1 = a.l >>> 16
+    var a2 = a.h & 0xffff
+    var a3 = a.h >>> 16
+    var b0 = b.l & 0xffff
+    var b1 = b.l >>> 16
+    var b2 = b.h & 0xffff
+    var b3 = b.h >>> 16
+    var c0 = a0 * b0
+    var c1 = (c0 >>> 16) + a1 * b0
+    var c2 = c1 >>> 16
+    c1 = (c1 & 0xffff) + a0 * b1
+    c2 = c2 + (c1 >>> 16) + a2 * b0
+    var c3 = c2 >>> 16
+    c2 = (c2 & 0xffff) + a1 * b1
+    c3 = c3 + (c2 >>> 16)
+    c2 = (c2 & 0xffff) + a0 * b2
+    c3 = c3 + (c2 >>> 16)
+    c3 = c3 + a3 * b0 + a2 * b1 + a1 * b2 + a0 * b3
+    return i64Make(((c2 & 0xffff) | ((c3 & 0xffff) << 16)) >>> 0,
+                   ((c0 & 0xffff) | ((c1 & 0xffff) << 16)) >>> 0)
+}
+
+function i64Shl(a, n) {
+    var k = n & 63
+    if (k === 0) { return i64Make(a.h, a.l) }
+    if (k < 32) { return i64Make((a.h << k) | (a.l >>> (32 - k)), a.l << k) }
+    return i64Make(a.l << (k - 32), 0)
+}
+function i64ShrU(a, n) {
+    var k = n & 63
+    if (k === 0) { return i64Make(a.h, a.l) }
+    if (k < 32) { return i64Make(a.h >>> k, (a.l >>> k) | (a.h << (32 - k))) }
+    return i64Make(0, a.h >>> (k - 32))
+}
+
+function i64And(a, b) { return i64Make(a.h & b.h, a.l & b.l) }
+function i64Or(a, b)  { return i64Make(a.h | b.h, a.l | b.l) }
+function i64Xor(a, b) { return i64Make(a.h ^ b.h, a.l ^ b.l) }
+
+function i64IsZero(a) { return a.h === 0 && a.l === 0 }
+function i64Eq(a, b) { return a.h === b.h && a.l === b.l }
+function i64CmpU(a, b) {
+    if (a.h !== b.h) { return (a.h >>> 0) < (b.h >>> 0) ? 0 - 1 : 1 }
+    if (a.l !== b.l) { return (a.l >>> 0) < (b.l >>> 0) ? 0 - 1 : 1 }
+    return 0
+}
+function i64CmpS(a, b) {
+    var an = (a.h & 0x80000000) !== 0
+    var bn = (b.h & 0x80000000) !== 0
+    if (an !== bn) { return an ? 0 - 1 : 1 }
+    return i64CmpU(a, b)
+}
+function i64IsNeg(a) { return (a.h & 0x80000000) !== 0 }
+
+function i64DivModSmall(a, d) {
+    var parts = [a.h >>> 16, a.h & 0xffff, a.l >>> 16, a.l & 0xffff]
+    var out = [0, 0, 0, 0]
+    var rem = 0
+    for (var i = 0; i < 4; i++) {
+        var cur = rem * 65536 + parts[i]
+        var q = Math.floor(cur / d)
+        rem = cur - q * d
+        out[i] = q
+    }
+    return {q: i64Make(((out[0] * 65536) + out[1]) >>> 0, ((out[2] * 65536) + out[3]) >>> 0), r: rem}
+}
+
+function i64DivModU(a, b) {
+    if (i64IsZero(b)) { return {q: i64Make(0, 0), r: i64Make(0, 0)} }
+    if (b.h === 0 && (b.l >>> 0) < 2147483648 && b.l !== 0) {
+        var s = i64DivModSmall(a, b.l >>> 0)
+        return {q: s.q, r: i64Make(0, s.r)}
+    }
+    var q = i64Make(0, 0)
+    var r = i64Make(0, 0)
+    for (var i = 63; i >= 0; i = i - 1) {
+        r = i64Shl(r, 1)
+        var bit = (i >= 32) ? ((a.h >>> (i - 32)) & 1) : ((a.l >>> i) & 1)
+        r = i64Or(r, i64Make(0, bit))
+        if (i64CmpU(r, b) >= 0) {
+            r = i64Sub(r, b)
+            q = i64Or(q, i64Shl(i64Make(0, 1), i))
+        }
+    }
+    return {q: q, r: r}
+}
+
+// Go's / and %: truncation toward zero, so the remainder takes the DIVIDEND's
+// sign. The most negative value divided by -1 wraps back to itself.
+function i64DivModS(a, b) {
+    var an = i64IsNeg(a)
+    var bn = i64IsNeg(b)
+    var ua = an ? i64Neg(a) : a
+    var ub = bn ? i64Neg(b) : b
+    var d = i64DivModU(ua, ub)
+    var q = d.q
+    var r = d.r
+    if (an !== bn) { q = i64Neg(q) }
+    if (an) { r = i64Neg(r) }
+    return {q: q, r: r}
+}
+
+function i64StrU(a) {
+    if (i64IsZero(a)) { return "0" }
+    var s = ""
+    var v = a
+    while (!i64IsZero(v)) {
+        var d = i64DivModSmall(v, 1000000000)
+        v = d.q
+        if (i64IsZero(v)) { s = "" + d.r + s }
+        else {
+            var chunk = "" + d.r
+            while (chunk.length < 9) { chunk = "0" + chunk }
+            s = chunk + s
+        }
+    }
+    return s
+}
+function i64StrS(a) {
+    if (i64IsNeg(a)) { return "-" + i64StrU(i64Neg(a)) }
+    return i64StrU(a)
+}
+
+// i64Fits53 reads the PAIR, not its double: converting first would round
+// 2^53 + 1 down to 2^53 and answer yes for a value that does not fit.
+function i64Fits53(p) {
+    var q = i64IsNeg(p) ? i64Neg(p) : p
+    if (i64IsNeg(q)) { return false }      // only -2^63 negates to itself
+    if (q.h < 0x200000) { return true }
+    return q.h === 0x200000 && q.l === 0
+}
+
+// ================================================================= the model ==
+
+// LU_MININT / LU_MAXINT as pairs, and the two constants a double needs.
+function luMaxPair() { return i64Make(0x7fffffff, 0xffffffff) }
+function luMinPair() { return i64Make(0x80000000, 0) }
+function luInf() { return Infinity }
+
+// luNorm is giNorm(v, 64, false): a plain number when the value is exact in a
+// double, the {__li} box otherwise.
+function luNorm(p) {
+    if (i64Fits53(p)) { return i64ToNumS(p) }
+    return {__li: p}
+}
+function luIsBox(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (typeof v != "object") { return false }
+    return v["__li"] !== undefined
+}
+// luFloOf reads the {__f} float box: the boxed value, or undefined.
+function luFloOf(v) {
+    if (v === undefined) { return undefined }
+    if (v === null) { return undefined }
+    if (typeof v != "object") { return undefined }
+    return v["__f"]
+}
+// luMkFlo boxes a float that would otherwise read back as an integer. The
+// infinities and NaN are floats already and never need the box.
+function luMkFlo(f) {
+    if (f !== f) { return f }
+    if (f === luInf()) { return f }
+    if (f === 0 - luInf()) { return f }
+    if (Math.floor(f) === f) { return {__f: f} }
+    return f
+}
+// luIsInt is Lua's `math.type(v) == "integer"`.
+function luIsInt(v) {
+    if (luIsBox(v)) { return true }
+    if (typeof v != "number") { return false }
+    if (v !== v) { return false }
+    if (v === luInf()) { return false }
+    if (v === 0 - luInf()) { return false }
+    return Math.floor(v) === v
+}
+// luIsNum is Lua's `type(v) == "number"` - either subtype, either box.
+function luIsNum(v) {
+    if (luIsBox(v)) { return true }
+    if (typeof v == "number") { return true }
+    return luFloOf(v) !== undefined
+}
+// luNumOf is the double reading. It loses precision above 2^53 by construction,
+// so only the consumers that genuinely want a double may use it.
+function luNumOf(v) {
+    if (luIsBox(v)) { return i64ToNumS(v["__li"]) }
+    if (typeof v == "number") { return v }
+    var f = luFloOf(v)
+    if (f !== undefined) { return f }
+    return NaN
+}
+// luPair is the exact 64 bit payload of a value already known to be an integer.
+function luPair(v) {
+    if (luIsBox(v)) { return v["__li"] }
+    return i64FromNum(luNumOf(v))
+}
+// luI64 turns an integral double into an integer value, or undefined when it does
+// not fit the signed 64 bit range. 2^63 is the first magnitude that is not one.
+function luI64(n) {
+    if (n >= 9223372036854775808) { return undefined }
+    if (n < 0 - 9223372036854775808) { return undefined }
+    return luNorm(i64FromNum(n))
+}
+
+// A Lua runtime error is the Go twin's rt.fail: the text on stderr behind
+// "js runtime error: ", and exit 1. It is NOT a MetaJS throw - that would add
+// "uncaught exception: " to the line. fail() is a host builtin of the C floor
+// (languages/lib/runtime.c), seeded in the root scope next to println.
+function luFail(msg) { fail(msg) }
+
+// ------------------------------------------------ reading a Lua numeral -----
+
+function luDigit(c) {
+    if (c >= 48 && c <= 57)  { return c - 48 }
+    if (c >= 97 && c <= 102) { return c - 87 }
+    if (c >= 65 && c <= 70)  { return c - 55 }
+    return 0 - 1
+}
+
+// luParseInt reads a run of digits in `radix` as an exact 64 bit pair, and
+// reports whether the value FIT: a hexadecimal literal wraps in Lua rather than
+// overflowing to a float, so the caller decides what the overflow means.
+function luParseInt(s, radix) {
+    var acc = i64Make(0, 0)
+    var rp = i64Make(0, radix)
+    var fits = true
+    for (var i = 0; i < s.length; i++) {
+        var d = luDigit(s.charCodeAt(i))
+        if (d < 0 || d >= radix) { continue }
+        var next = i64Add(i64Mul(acc, rp), i64Make(0, d))
+        // Overflow test on the same shape as the Go twin's: dividing the result
+        // back by the radix has to give the accumulator again.
+        var back = i64DivModU(next, rp)
+        if (!i64Eq(back.q, acc)) { fits = false }
+        if (i64CmpU(next, acc) < 0) { fits = false }
+        acc = next
+    }
+    if (i64CmpU(acc, luMaxPair()) > 0) { fits = false }
+    return {v: acc, fits: fits}
+}
+
+function luIsDigit(c) { return c >= 48 && c <= 57 }
+
+// luParseHex reads the body of a 0x numeral: an integer, unless the spelling
+// carries a '.' or a binary 'p' exponent.
+function luParseHex(s) {
+    var i = 0
+    var n = s.length
+    var f = 0
+    var digits = 0
+    var isFloat = false
+    while (i < n && luDigit(s.charCodeAt(i)) >= 0) {
+        f = f * 16 + luDigit(s.charCodeAt(i))
+        i = i + 1
+        digits = digits + 1
+    }
+    var intEnd = i
+    if (i < n && s.charAt(i) == ".") {
+        isFloat = true
+        i = i + 1
+        var scale = 1
+        while (i < n && luDigit(s.charCodeAt(i)) >= 0) {
+            scale = scale / 16
+            f = f + luDigit(s.charCodeAt(i)) * scale
+            i = i + 1
+            digits = digits + 1
+        }
+    }
+    if (digits === 0) { return undefined }
+    if (i < n && (s.charAt(i) == "p" || s.charAt(i) == "P")) {
+        isFloat = true
+        i = i + 1
+        var esign = 1
+        if (i < n && (s.charAt(i) == "+" || s.charAt(i) == "-")) {
+            if (s.charAt(i) == "-") { esign = 0 - 1 }
+            i = i + 1
+        }
+        var e = 0
+        var edig = 0
+        while (i < n && luIsDigit(s.charCodeAt(i))) {
+            e = e * 10 + (s.charCodeAt(i) - 48)
+            i = i + 1
+            edig = edig + 1
+        }
+        if (edig === 0) { return undefined }
+        f = f * Math.pow(2, esign * e)
+    }
+    if (i < n) { return undefined }
+    if (isFloat) { return luMkFlo(f) }
+    // A hexadecimal INTEGER wraps to 64 bits: 0x10000000000000000 is 0.
+    return luNorm(luParseInt(s.substring(0, intEnd), 16).v)
+}
+
+// luParseDec reads a decimal numeral: a float exactly when it has a fraction dot
+// or an exponent.
+function luParseDec(s) {
+    var i = 0
+    var n = s.length
+    var isFloat = false
+    var digits = 0
+    while (i < n && luIsDigit(s.charCodeAt(i))) {
+        i = i + 1
+        digits = digits + 1
+    }
+    if (i < n && s.charAt(i) == ".") {
+        isFloat = true
+        i = i + 1
+        while (i < n && luIsDigit(s.charCodeAt(i))) {
+            i = i + 1
+            digits = digits + 1
+        }
+    }
+    if (digits === 0) { return undefined }
+    if (i < n && (s.charAt(i) == "e" || s.charAt(i) == "E")) {
+        isFloat = true
+        i = i + 1
+        if (i < n && (s.charAt(i) == "+" || s.charAt(i) == "-")) { i = i + 1 }
+        var edig = 0
+        while (i < n && luIsDigit(s.charCodeAt(i))) {
+            i = i + 1
+            edig = edig + 1
+        }
+        if (edig === 0) { return undefined }
+    }
+    if (i < n) { return undefined }
+    var f = parseFloat(s)
+    if (f !== f) { return undefined }
+    if (isFloat) { return luMkFlo(f) }
+    // A decimal integer literal is EXACT, and one that does not fit a signed 64
+    // bit integer is a FLOAT rather than a wrapped integer.
+    var p = luParseInt(s, 10)
+    if (!p.fits) { return luMkFlo(f) }
+    return luNorm(p.v)
+}
+
+// luParseNum reads the text of a Lua numeral - the lexer's spelling and the one a
+// string goes through when it coerces in arithmetic. Surrounding blanks and a
+// leading sign are tolerated; anything that is not a complete numeral answers
+// undefined.
+function luParseNum(s) {
+    var i = 0
+    var n = s.length
+    while (i < n && (s.charAt(i) == " " || s.charAt(i) == "\t" || s.charAt(i) == "\n" || s.charAt(i) == "\r")) { i = i + 1 }
+    while (n > i && (s.charAt(n - 1) == " " || s.charAt(n - 1) == "\t" || s.charAt(n - 1) == "\n" || s.charAt(n - 1) == "\r")) { n = n - 1 }
+    var neg = false
+    if (i < n && (s.charAt(i) == "+" || s.charAt(i) == "-")) {
+        neg = s.charAt(i) == "-"
+        i = i + 1
+    }
+    if (i >= n) { return undefined }
+    var v = anytype
+    if (s.charAt(i) == "0" && i + 1 < n && (s.charAt(i + 1) == "x" || s.charAt(i + 1) == "X")) {
+        v = luParseHex(s.substring(i + 2, n))
+    } else {
+        v = luParseDec(s.substring(i, n))
+    }
+    if (v === undefined) { return undefined }
+    if (!neg) { return v }
+    var fb = luFloOf(v)
+    if (fb !== undefined) { return luMkFlo(0 - fb) }
+    if (luIsInt(v)) { return luNorm(i64Neg(luPair(v))) }
+    return 0 - luNumOf(v)
+}
+
+// luToNum is Lua's automatic coercion in an arithmetic or bitwise context: a
+// number passes, a string that spells a numeral converts, anything else answers
+// undefined.
+function luToNum(v) {
+    if (luIsNum(v)) { return v }
+    if (typeof v == "string") { return luParseNum(v) }
+    return undefined
+}
+
+// luTypeName is Lua's type() for an error message.
+function luTypeName(v) {
+    if (v === undefined) { return "nil" }
+    if (v === null) { return "nil" }
+    if (v === true) { return "boolean" }
+    if (v === false) { return "boolean" }
+    if (luIsNum(v)) { return "number" }
+    if (typeof v == "string") { return "string" }
+    if (typeof v == "function") { return "function" }
+    return "table"
+}
+
+// ------------------------------------------------------- the operators -----
+
+// luIDiv / luIMod are FLOOR division and FLOOR modulo on 64 bit pairs. Go's / and
+// % truncate toward zero; Lua rounds toward minus infinity, so a non-zero
+// remainder whose sign differs from the divisor's moves the quotient one step
+// down and the remainder one divisor up. Both wrap at 64 bits, which is what
+// makes math.mininteger // -1 answer math.mininteger.
+function luIDiv(a, b) {
+    if (i64Eq(a, luMinPair()) && i64Eq(b, i64Make(0xffffffff, 0xffffffff))) { return a }
+    var d = i64DivModS(a, b)
+    var q = d.q
+    if (!i64IsZero(d.r) && (i64IsNeg(d.r) !== i64IsNeg(b))) { q = i64Sub(q, i64Make(0, 1)) }
+    return q
+}
+function luIMod(a, b) {
+    if (i64Eq(a, luMinPair()) && i64Eq(b, i64Make(0xffffffff, 0xffffffff))) { return i64Make(0, 0) }
+    var d = i64DivModS(a, b)
+    var r = d.r
+    if (!i64IsZero(r) && (i64IsNeg(r) !== i64IsNeg(b))) { r = i64Add(r, b) }
+    return r
+}
+
+// luToIntOp is a bitwise operand: an integer, a float whose value is an exact
+// integer inside the 64 bit range, or a string that spells one. Anything else is
+// an error, and Lua distinguishes the two reasons.
+function luToIntOp(v) {
+    var a = luToNum(v)
+    if (a === undefined) { luFail("attempt to perform bitwise operation on a " + luTypeName(v) + " value") }
+    if (luIsInt(a)) { return luPair(a) }
+    var n = luNumOf(a)
+    if (n !== n) { luFail("number has no integer representation") }
+    if (n === luInf() || n === 0 - luInf()) { luFail("number has no integer representation") }
+    if (Math.floor(n) !== n) { luFail("number has no integer representation") }
+    var iv = luI64(n)
+    if (iv === undefined) { luFail("number has no integer representation") }
+    return luPair(iv)
+}
+
+// luCmpV is the -1/0/1 of Lua's ordered comparison, or 2 for "unordered" (a NaN
+// operand), which makes every relation false.
+function luCmpV(l, r) {
+    if (luIsInt(l) && luIsInt(r)) { return i64CmpS(luPair(l), luPair(r)) }
+    if (luIsNum(l) && luIsNum(r)) {
+        var a = luNumOf(l)
+        var b = luNumOf(r)
+        if (a < b) { return 0 - 1 }
+        if (a > b) { return 1 }
+        if (a !== b) { return 2 }
+        return 0
+    }
+    // jsCompare: two strings lexicographically, everything else as ToNumber.
+    if (l < r) { return 0 - 1 }
+    if (l > r) { return 1 }
+    return 0
+}
+
+// ================================================== the exported externs =====
+
+// ----- the fast paths -----
+// Everything below has a PLAIN NUMBER path in front of the general one. It is not
+// an approximation: a Lua integer inside 2^53 IS a plain double, and the double
+// operation on two of them is exact whenever the result stays inside 2^53 - which
+// is checked, not assumed. Without it every `i + 1` in a Lua loop went through
+// i64FromNum / i64Add / i64Fits53 and about forty MetaJS calls, each of which
+// opens a scope and builds an argument array; the loop benchmark below the fold
+// of docs/runtime-rework-plan.md measures what that cost. luIntFast is the shared
+// guard: a finite integral double.
+var LU_EXACT = 9007199254740992      // 2^53
+
+function luIntFast(v) {
+    if (typeof v != "number") { return false }
+    // The int32 window costs one ToInt32 (a floor primitive) and no name lookup;
+    // outside it, Math.floor is a scope-chain walk plus a host call.
+    if (v > -2147483649 && v < 2147483648) { return (v | 0) === v }
+    if (v - v !== 0) { return false }              // NaN and the infinities
+    return Math.floor(v) === v
+}
+
+function js_luisint(v) {
+    if (typeof v == "number") { return luIntFast(v) }
+    return luIsInt(v)
+}
+function js_luisnum(v) {
+    if (typeof v == "number") { return true }
+    return luIsNum(v)
+}
+
+// The raw double behind a Lua value, with Lua's string coercion. Every consumer
+// that genuinely wants a double (an index, a length, a repeat count, a float
+// operand) goes through it; a value that is no number at all reads as NaN.
+function js_lunum(v) {
+    if (typeof v == "number") { return v }
+    var a = luToNum(v)
+    if (a === undefined) { return NaN }
+    return luNumOf(a)
+}
+
+function js_lumkflo(v) { return luMkFlo(v * 1) }
+
+// One of + - * / // %, by index (0..5). The operator index arrives as a RAW
+// handle - a compile time constant the emitter writes with handle(k) - so it is a
+// plain small integer here, not a wrapped value.
+function js_luarith(op_raw, lv, rv) {
+    var op = op_raw
+    // The guard and the whole fast path are written out INLINE on purpose: in
+    // MetaJS a free name is a scope-chain walk and a call opens a scope and builds
+    // an argument array, so a helper here would cost more than the arithmetic. The
+    // int32 window is where a Lua loop counter and an index live.
+    if (op !== 3 && typeof lv == "number" && typeof rv == "number" &&
+        lv > -2147483649 && lv < 2147483648 && rv > -2147483649 && rv < 2147483648 &&
+        (lv | 0) === lv && (rv | 0) === rv) {
+        var fa = lv
+        var fb = rv
+        // Two int32 operands: the sum and the difference are exact, and the product
+        // needs the 2^53 test because 2^31 * 2^31 leaves the range.
+        if (op === 0) { return fa + fb }
+        if (op === 1) { return fa - fb }
+        if (op === 2) {
+            var v2 = fa * fb
+            if (v2 < 9007199254740992 && v2 > -9007199254740992) { return v2 }
+        }
+        if (fb !== 0 && (op === 4 || op === 5)) {
+            // ToInt32 truncates toward zero, and the truncation is exact here: the
+            // rounding error of fa / fb is below q * 2^-53 and the distance to the
+            // nearest integer is at least 1 / |fb|, and q * |fb| = |fa| < 2^53.
+            // Lua then FLOORS: a remainder whose sign differs from the divisor's
+            // moves the quotient one step down and the remainder one divisor up.
+            var tq = (fa / fb) | 0
+            var tr = fa - tq * fb
+            if (tr !== 0 && (tr < 0) !== (fb < 0)) {
+                tq = tq - 1
+                tr = tr + fb
+            }
+            if (op === 5) { return tr }
+            return tq
+        }
+    }
+    var l = luToNum(lv)
+    if (l === undefined) { luFail("attempt to perform arithmetic on a " + luTypeName(lv) + " value") }
+    var r = luToNum(rv)
+    if (r === undefined) { luFail("attempt to perform arithmetic on a " + luTypeName(rv) + " value") }
+    if (op === 3) { return luMkFlo(luNumOf(l) / luNumOf(r)) }
+    if (luIsInt(l) && luIsInt(r)) {
+        var a = luPair(l)
+        var b = luPair(r)
+        if (op === 0) { return luNorm(i64Add(a, b)) }
+        if (op === 1) { return luNorm(i64Sub(a, b)) }
+        if (op === 2) { return luNorm(i64Mul(a, b)) }
+        if (i64IsZero(b)) {
+            // Both messages are lua 5.5's own, as the Go twin records.
+            if (op === 4) { luFail("attempt to divide by zero") }
+            luFail("attempt to perform 'n%0'")
+        }
+        if (op === 4) { return luNorm(luIDiv(a, b)) }
+        return luNorm(luIMod(a, b))
+    }
+    var x = luNumOf(l)
+    var y = luNumOf(r)
+    if (op === 0) { return luMkFlo(x + y) }
+    if (op === 1) { return luMkFlo(x - y) }
+    if (op === 2) { return luMkFlo(x * y) }
+    if (op === 4) { return luMkFlo(Math.floor(x / y)) }
+    // Lua's float modulo follows the sign of the DIVISOR (-0.5 % 2 is 1.5). It is
+    // luai_nummod - fmod, then one correction - and NOT x - floor(x/y)*y; see the
+    // twin in abnf/jsrtlua.go for the measurement that separates them. MetaJS's %
+    // is fmod, and the C floor's js_mod is a port of Go's math.Mod, so it is exact.
+    var m = x % y
+    if (m !== 0 && (m < 0) !== (y < 0)) { return luMkFlo(m + y) }
+    return luMkFlo(m)
+}
+
+// One of & | ~ << >>, by index (0..4), exact at 64 bits. The shifts are LOGICAL
+// in both directions - Lua's >> never sign-extends - a count of 64 or more clears
+// the value, and a negative count shifts the other way.
+function js_lubit(op_raw, lv, rv) {
+    var op = op_raw
+    var a = luToIntOp(lv)
+    if (op === 3 || op === 4) {
+        var kp = luToIntOp(rv)
+        var left = op === 3
+        if (i64IsNeg(kp)) {
+            kp = i64Neg(kp)
+            left = !left
+        }
+        // A count that is still negative can only be math.mininteger, whose
+        // negation wraps; a count of 64 or more clears the value. Real Lua
+        // answers the INTEGER zero, and so does the Go twin's float64(0).
+        if (i64IsNeg(kp) || kp.h !== 0 || kp.l >= 64) { return 0 }
+        if (left) { return luNorm(i64Shl(a, kp.l)) }
+        return luNorm(i64ShrU(a, kp.l))
+    }
+    var b = luToIntOp(rv)
+    if (op === 0) { return luNorm(i64And(a, b)) }
+    if (op === 1) { return luNorm(i64Or(a, b)) }
+    return luNorm(i64Xor(a, b))   // Lua spells exclusive-or '~'
+}
+
+function js_lubnot(v) { return luNorm(i64Not(luToIntOp(v))) }
+
+// Two integers compare on the exact 64 bit value, because past 2^53 their double
+// readings are equal for values that are not.
+function js_lueq(l, r) {
+    if (typeof l == "number" && typeof r == "number") { return l === r }
+    if (luIsInt(l) && luIsInt(r)) { return i64Eq(luPair(l), luPair(r)) }
+    if (luIsNum(l) && luIsNum(r)) { return luNumOf(l) === luNumOf(r) }
+    return l === r
+}
+
+// < > <= >=, by index (0..3).
+function js_lucmp(op_raw, l, r) {
+    var op = op_raw
+    if (typeof l == "number" && typeof r == "number") {
+        // A NaN operand makes every one of the four false, which is what the
+        // direct comparison already answers.
+        if (op === 0) { return l < r }
+        if (op === 1) { return l > r }
+        if (op === 2) { return l <= r }
+        return l >= r
+    }
+    var c = luCmpV(l, r)
+    if (c === 2) { return false }         // a NaN operand is unordered
+    if (op === 0) { return c < 0 }
+    if (op === 1) { return c > 0 }
+    if (op === 2) { return c <= 0 }
+    return c >= 0
+}
+
+// How a Lua number renders: an integer without a fraction, a float always with
+// one, and inf / -inf / nan rather than JavaScript's spellings.
+function js_lustr(v) {
+    if (typeof v == "number") {
+        if (v !== v) { return "nan" }
+        if (v === luInf()) { return "inf" }
+        if (v === 0 - luInf()) { return "-inf" }
+        return "" + v
+    }
+    if (luIsBox(v)) { return i64StrS(luPair(v)) }
+    var n = luNumOf(v)
+    if (n !== n) { return "nan" }         // real Lua prints "nan", not "-nan"
+    if (n === luInf()) { return "inf" }
+    if (n === 0 - luInf()) { return "-inf" }
+    var s = "" + n
+    if (luFloOf(v) !== undefined) { return s + ".0" }
+    return s
+}
+
+// A table key. Numbers and strings address the map the way js_get does; a float
+// with an exact integer value normalises to that INTEGER key (t[2.0] is t[2]). An
+// integer past 2^53 has to become its exact decimal TEXT, because its double
+// reading would collide with its neighbour's.
+function js_lukey(v) {
+    if (typeof v == "number") { return v }
+    if (luIsBox(v)) { return i64StrS(luPair(v)) }
+    var f = luFloOf(v)
+    if (f !== undefined) {
+        if (f === f && f !== luInf() && f !== 0 - luInf() && Math.floor(f) === f) {
+            var iv = luI64(f)
+            if (iv !== undefined) {
+                if (luIsBox(iv)) { return i64StrS(luPair(iv)) }
+                return iv
+            }
+        }
+        return f
+    }
+    return v
+}
+
+// A literal the emitter could not put in the module as a double, because emitNum
+// would already have rounded 9223372036854775807 to 9223372036854776000 on the
+// way in. (digit text, radix)
+function js_lulit(s, radix) {
+    if (radix === 16) { return luNorm(luParseInt(s, 16).v) }
+    var p = luParseInt(s, 10)
+    if (!p.fits) { return luMkFlo(parseFloat(s)) }
+    return luNorm(p.v)
+}
+
+// math.type(x): "integer", "float", or nil for anything that is not a number (a
+// STRING is not, even one that spells a numeral).
+function js_lutype(v) {
+    if (typeof v == "number") {
+        if (luIntFast(v)) { return "integer" }
+        return "float"
+    }
+    if (luIsInt(v)) { return "integer" }
+    if (luIsNum(v)) { return "float" }
+    return undefined
+}
+
+// math.tointeger(x): the integer x names, or nil when it names none.
+function js_lutoint(v) {
+    var a = luToNum(v)
+    if (a === undefined) { return undefined }
+    if (luIsInt(a)) { return a }
+    var n = luNumOf(a)
+    if (n !== n) { return undefined }
+    if (n === luInf() || n === 0 - luInf()) { return undefined }
+    if (Math.floor(n) !== n) { return undefined }
+    return luI64(n)
+}
+
+// math.floor / math.ceil answer an INTEGER, and an operand that already is one is
+// handed back untouched - flooring math.maxinteger through a double would round it.
+function luRound(v, up) {
+    if (luIsInt(v)) { return v }
+    var n = luToNum(v)
+    if (n === undefined) { luFail("bad argument to 'floor' (number expected)") }
+    if (luIsInt(n)) { return n }
+    var f = luNumOf(n)
+    if (up) { f = Math.ceil(f) } else { f = Math.floor(f) }
+    var iv = luI64(f)
+    if (iv !== undefined) { return iv }
+    return f
+}
+function js_lufloor(v) { return luRound(v, false) }
+function js_luceil(v)  { return luRound(v, true) }
+
+// math.abs keeps the subtype, and an integer WRAPS:
+// math.abs(math.mininteger) is math.mininteger.
+function js_luabs(v) {
+    if (luIsInt(v)) {
+        var p = luPair(v)
+        if (i64IsNeg(p)) { p = i64Neg(p) }
+        return luNorm(p)
+    }
+    return luMkFlo(Math.abs(luNumOf(v)))
+}
+
+// math.max / math.min keep the WINNING argument, so the subtype survives - and
+// the tie goes to the FIRST one, which is real Lua's rule (its loop replaces the
+// running best only on a strict '<'), so math.max(1, 1.0) is the integer 1.
+function js_lumax(a, b) {
+    if (js_lucmp(0, a, b)) { return b }
+    return a
+}
+function js_lumin(a, b) {
+    if (js_lucmp(0, b, a)) { return b }
+    return a
+}
+
+// math.fmod keeps C's fmod: the remainder takes the sign of the DIVIDEND, which
+// is where it differs from the '%' operator.
+function js_lufmod(a, b) {
+    var l = luToNum(a)
+    var r = luToNum(b)
+    if (l === undefined || r === undefined) { luFail("bad argument to 'fmod' (number expected)") }
+    if (luIsInt(l) && luIsInt(r)) {
+        var bp = luPair(r)
+        if (i64IsZero(bp)) { luFail("bad argument #2 to 'fmod' (zero)") }
+        if (i64Eq(bp, i64Make(0xffffffff, 0xffffffff))) { return 0 }
+        return luNorm(i64DivModS(luPair(l), bp).r)
+    }
+    // Go's math.Mod, which is MetaJS's own % - the C floor's js_mod is a port of
+    // exactly that function, so this is the same bits and not an approximation.
+    return luMkFlo(luNumOf(l) % luNumOf(r))
+}
+
+function js_lumaxint() { return luNorm(luMaxPair()) }
+function js_luminint() { return luNorm(luMinPair()) }
+
+// ------------------------------------------------------------- printing ----
+
+// A Lua string is a BYTE string, so lua-to-llvm-ir.abnf holds one host character
+// per byte: every code unit is 0..255. js_luaout is the one place that model is
+// undone again - the bytes are decoded as UTF-8 on the way to the terminal, so a
+// program prints the byte sequence it holds. A byte that starts no valid sequence
+// is passed through as its own code point, which is what utf8.DecodeRune's
+// (RuneError, 1) answer makes the Go twin do.
+function luChar(cp) {
+    if (cp < 65536) { return String.fromCharCode(cp) }
+    var v = cp - 65536
+    return String.fromCharCode(55296 + Math.floor(v / 1024)) + String.fromCharCode(56320 + (v % 1024))
+}
+function js_luaout(s) {
+    var out = ""
+    var i = 0
+    var n = s.length
+    while (i < n) {
+        var b0 = s.charCodeAt(i) & 255
+        if (b0 < 128) {
+            out = out + String.fromCharCode(b0)
+            i = i + 1
+            continue
+        }
+        // How many continuation bytes the lead announces, and the smallest code
+        // point the sequence may legally carry (the overlong test). A lead byte
+        // outside these ranges (0x80..0xC1, 0xF5..0xFF) starts nothing.
+        var need = 0
+        var cp = 0
+        var lo = 0
+        if (b0 >= 194 && b0 <= 223) {
+            need = 1
+            cp = b0 - 192
+            lo = 128
+        } else if (b0 >= 224 && b0 <= 239) {
+            need = 2
+            cp = b0 - 224
+            lo = 2048
+        } else if (b0 >= 240 && b0 <= 244) {
+            need = 3
+            cp = b0 - 240
+            lo = 65536
+        }
+        var ok = need > 0 && i + need < n
+        var j = 1
+        while (ok && j <= need) {
+            var cb = s.charCodeAt(i + j) & 255
+            if (cb < 128 || cb > 191) { ok = false }
+            else { cp = cp * 64 + (cb - 128) }
+            j = j + 1
+        }
+        if (ok && cp < lo) { ok = false }
+        if (ok && cp > 1114111) { ok = false }
+        if (ok && cp >= 55296 && cp <= 57343) { ok = false }
+        if (!ok) {
+            out = out + luChar(b0)
+            i = i + 1
+            continue
+        }
+        out = out + luChar(cp)
+        i = i + need + 1
+    }
+    return out
+}
+
+// Lua's print separates its arguments with a TAB. Every element has already been
+// rendered by the emitter's lua_strall (lua_str + js_luaout), so this only joins
+// and writes.
+function js_luaprint(args) {
+    var out = ""
+    for (var i = 0; i < args.length; i++) {
+        if (i > 0) { out = out + "\t" }
+        out = out + args[i]
+    }
+    println(out)
+    return undefined
+}
+
+// str(v) with Python-style rendering. REACHABILITY: the only caller is the
+// emitter's lua_str, in the arm reached after nil, boolean, number, function and
+// table have all been ruled out - so the argument is always a STRING, for which
+// the Go twin's pyString is the identity. The other cases are spelled out anyway
+// so the function is not a lie, but nothing in the Lua compiler reaches them.
+function js_pystr(v) {
+    if (typeof v == "string") { return v }
+    if (v === undefined) { return "None" }
+    if (v === null) { return "None" }
+    if (v === true) { return "True" }
+    if (v === false) { return "False" }
+    return "" + v
+}
+
+// A method call: (receiver, method name, argument array). The Lua compiler emits
+// exactly one, Math.pow, so the receiver is always a host object here; apply is
+// the general form and costs nothing extra.
+function js_mcall(recv, name, args) {
+    var f = recv[name]
+    return f.apply(recv, args)
+}

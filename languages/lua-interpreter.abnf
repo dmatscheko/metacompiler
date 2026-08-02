@@ -1072,7 +1072,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         fail("attempt to get length of a " + luaType(v) + " value")
     }
     // Lua's modulo follows the sign of the DIVISOR (-0.5 % 2 is 1.5, not -0.5).
-    function luaMod(a, b) { return a - Math.floor(a / b) * b }
+    //
+    // It is luai_nummod - fmod, then one correction - and NOT a - floor(a/b)*b.
+    // The two agree only while a/b fits 53 bits: real lua 5.5 answers
+    // 10 % 3.14159265358979 with 0.57522203923063 and the floor form gives
+    // 0.5752220392306295, and 10 % 0.1 is 0.09999999999999945 rather than a
+    // rounded-off 0. JavaScript's % IS fmod, so this is exact in every engine
+    // (the C floor's js_mod is a port of Go's math.Mod).
+    function luaMod(a, b) {
+        var m = a % b
+        if (m !== 0 && (m < 0) !== (b < 0)) { return m + b }
+        return m
+    }
 
     // ----- 64-bit integer bit operations -----
     // Lua's & | ~ << >> are EXACT 64 bit two's complement operations and they are

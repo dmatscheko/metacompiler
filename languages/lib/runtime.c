@@ -77,6 +77,7 @@ long d_div(long x, long y);
 int  d_lt(long x, long y);
 int  d_eq(long x, long y);
 long d_abs(long x);
+long d_mod_go(long x, long y);
 int  d_is_nan(long x);
 int  d_is_inf(long x);
 int  d_is_zero(long x);
@@ -178,15 +179,15 @@ long d_div(long x, long y) {
 	a.l = x; b.l = y; r.d = a.d / b.d; return r.l;
 }
 /* JS % is fmod: the remainder keeps the sign of the dividend. */
-long d_mod(long x, long y) {
-	long q; long t;
-	if (d_is_nan(x) || d_is_nan(y) || d_is_inf(x) || d_is_zero(y)) { return DNAN; }
-	if (d_is_inf(y)) { return x; }
-	if (d_is_zero(x)) { return x; }
-	q = d_div(x, y);
-	t = d_trunc(q);
-	return d_sub(x, d_mul(t, y));
-}
+/* The truncated remainder. It USED to be x - trunc(x/y)*y, which is right only
+ * while the quotient fits 53 bits: `10 % 0.1` answered 0 where the Go runtime
+ * answers 0.09999999999999945, and 26 of a 90 case differential probe diverged
+ * between llvm.Run and the native binary. fmod is EXACT for every pair of
+ * doubles, so this is now a faithful port of Go's own math.Mod - the same
+ * algorithm on the same Frexp/Ldexp this file already carries (see the note
+ * above d_frexp: "close enough" is not an answer here). The body is defined
+ * further down, after d_frexp/d_ldexp. */
+long d_mod(long x, long y) { return d_mod_go(x, y); }
 
 /* Ordering. Only ever called with two non-NaN operands. */
 int d_lt(long x, long y) { union DB a; union DB b; a.l = x; b.l = y; return a.d < b.d; }
@@ -591,7 +592,13 @@ long wtf8_clean(long h) {
 }
 
 int str_eq(long x, long y) {
-	long n = str_len(x);
+	long n;
+	/* Identity first. js_str_mem caches one cell per string-literal ADDRESS, so
+	 * every occurrence of a name in a module is the same handle - which makes
+	 * scope_find and obj_find, the two hottest loops in the runtime, a pointer
+	 * compare per entry instead of a byte loop. */
+	if (x == y) { return 1; }
+	n = str_len(x);
 	long i = 0;
 	const char *px;
 	const char *py;
@@ -1504,13 +1511,19 @@ long js_add_v(long a, long b) {
  * abnf/jsrt.go's scopeOf. */
 long G_ROOT;
 
+/* Capacity 4, not 8. A scope is allocated on EVERY function call and the arena
+ * is never freed, so its size is both the per-call cost and the growth rate of a
+ * long-running program: 8 cost 248 bytes a call, 4 costs 152. Almost every scope
+ * holds a handful of names (parameters plus a few locals) and scope_put doubles
+ * when it does not. Measured on a 2M-iteration Lua loop: the resident set and the
+ * system time both fell by about a third. */
 long mk_scope(long parent) {
 	long h = cell_new(11);
-	sa(h, (long)buf_new(8));
-	sb(h, (long)buf_new(8));
-	sc(h, (long)buf_new(8));
+	sa(h, (long)buf_new(4));
+	sb(h, (long)buf_new(4));
+	sc(h, (long)buf_new(4));
 	sd(h, 0);
-	se(h, 8);
+	se(h, 4);
 	sf(h, parent);
 	return h;
 }
@@ -2332,6 +2345,42 @@ double d_ldexp(double frac, long exp) {
 	u.l = (u.l & (0 - 9218868437227405313L)) | ((exp + 1023) << 52);
 	return m * u.d;
 }
+/* Go's math.Mod, ported exactly. The loop subtracts |y| scaled to the same
+ * binade as the running remainder, so every subtraction is exact and the whole
+ * result is - which is what x - trunc(x/y)*y could not be. */
+long d_mod_go(long x, long y) {
+	union DB ux;
+	union DB uy;
+	union DB ur;
+	double ya;
+	double yfr;
+	double rfr;
+	double r;
+	long e[1];
+	long yexp;
+	long rexp;
+	int neg;
+	if (d_is_nan(x) || d_is_nan(y) || d_is_inf(x) || d_is_zero(y)) { return DNAN; }
+	if (d_is_inf(y)) { return x; }
+	if (d_is_zero(x)) { return x; }
+	ux.l = x;
+	uy.l = y;
+	ya = uy.d < 0.0 ? 0.0 - uy.d : uy.d;
+	neg = ux.d < 0.0;
+	r = neg ? 0.0 - ux.d : ux.d;
+	yfr = d_frexp(ya, e);
+	yexp = e[0];
+	while (r >= ya) {
+		rfr = d_frexp(r, e);
+		rexp = e[0];
+		if (rfr < yfr) { rexp = rexp - 1; }
+		r = r - d_ldexp(ya, rexp - yexp);
+	}
+	if (neg) { r = 0.0 - r; }
+	ur.d = r;
+	return ur.l;
+}
+
 /* The integer part; the caller takes the fraction as f - that. */
 double d_modf_int(double f) {
 	union DB u;
@@ -2617,6 +2666,18 @@ long host_call(long id, long self, long args) {
 	if (id == 30) { return from_char_code(args); }
 	if (id == 31) { return mk_bool(tag_of(arg_at(args, 0)) == 5); }
 	if (id == 32) { return mk_num(d_from_long(str_len(arg_str(args, 0)))); }
+	/* fail(msg): a RUNTIME ERROR, not an exception. The Go twin's rt.fail
+	 * (abnf/jsrt.go) panics with exactly this text, so the two engines report an
+	 * impossible operand the same way; throwing instead would prefix the message
+	 * with "uncaught exception: ". Layer 2 of every language needs it - Lua's
+	 * "attempt to perform arithmetic on a nil value" arrives here - and
+	 * languages/lib/interp-core.js already calls a fail() of its own. */
+	if (id == 36) {
+		werr("js runtime error: ");
+		wstr(to_string(arg_at(args, 0)));
+		werr("\n");
+		exit(1);
+	}
 	if (id == 33) {                                        /* sprintf */
 		if (n == 0) { return mk_cstr(""); }
 		return fmt_apply(arg_str(args, 0), args, 1);
@@ -2740,6 +2801,89 @@ long js_closure(long idx, long env) { long h = cell_new(7); sa(h, idx); sb(h, en
 
 long js_scope_new(long parent) { return mk_scope(scope_of(parent)); }
 long js_scope_get(long s, long name) { return scope_get(scope_of(s), name); }
+
+/* ----- the scope and object primitives the OTHER language emitters call -----
+ *
+ * MetaJS pins a variable's type, so its declaration/assignment pair is
+ * js_tdecl/js_tset above. Every other compiler grammar emits the UNPINNED pair
+ * js_scope_decl/js_scope_set, plus js_scope_typeof (a name that need not be
+ * declared) and js_pyset_var (assign up the chain, else declare here). These are
+ * the same walks js_tdecl/js_tset/js_scope_get already do, without the type
+ * check - they belong to the floor because a scope's storage is private to it,
+ * and they are LANGUAGE NEUTRAL, so layer 2 of any language finds them here.
+ * The twins are abnf/jsrt.go: js_scope_decl, js_scope_set (scopeSet),
+ * js_scope_typeof and js_pyset_var. */
+long js_scope_decl(long s, long name, long v) { scope_put(scope_of(s), name, v); return 0; }
+
+long js_scope_set(long s, long name, long v) {
+	long cur = scope_of(s);
+	while (cur != 0) {
+		long i = scope_find(cur, name);
+		if (i >= 0) { long *vals = (long *)fb(cur); vals[i] = v; return 0; }
+		cur = ff(cur);
+	}
+	die2("assignment to undeclared variable: ", name);
+	return 0;
+}
+
+long js_scope_typeof(long s, long name) {
+	long cur = scope_of(s);
+	while (cur != 0) {
+		long i = scope_find(cur, name);
+		if (i >= 0) { long *vals = (long *)fb(cur); return type_of(vals[i]); }
+		cur = ff(cur);
+	}
+	return mk_cstr("undefined");
+}
+
+/* Python's assignment rule, which the Lua compiler reuses for a bare `x = v`:
+ * the name binds where the chain already holds it, and otherwise in the scope
+ * the assignment stands in. The `global`/`nonlocal` and binding-boundary arms of
+ * the Go twin need js_pyfnscope/js_pyglobal, which only the Python compilers
+ * emit; a scope here carries no such mark, so those arms are unreachable and are
+ * NOT modelled. A Python layer 2 will have to add them. */
+long js_pyset_var(long s, long name, long v) {
+	long cur = scope_of(s);
+	while (cur != 0) {
+		long i = scope_find(cur, name);
+		if (i >= 0) { long *vals = (long *)fb(cur); vals[i] = v; return 0; }
+		cur = ff(cur);
+	}
+	scope_put(scope_of(s), name, v);
+	return 0;
+}
+
+/* An object's own keys in INSERTION ORDER (obj_put appends), skipping the
+ * internal __-prefixed slots, exactly like the Go twin. A dict box
+ * ({__dict,keys,vals}) yields its key array; nothing the Lua compiler builds is
+ * one, but the twin answers it and so does this. */
+long js_keys(long o) {
+	long out;
+	long n;
+	long i;
+	if (tag_of(o) != 6) { die2("js_keys: not an object (got ", o); }
+	if (truthy(obj_get(o, mk_cstr("__dict")))) {
+		long ks = obj_get(o, mk_cstr("keys"));
+		out = mk_arr();
+		i = 0;
+		while (i < arr_len(ks)) { arr_push(out, arr_get(ks, i)); i = i + 1; }
+		return out;
+	}
+	out = mk_arr();
+	n = fc(o);
+	i = 0;
+	while (i < n) {
+		long *keys = (long *)fa(o);
+		long k = keys[i];
+		i = i + 1;
+		if (str_len(k) >= 2) {
+			const char *p = str_ptr(k);
+			if (p[0] == '_' && p[1] == '_') { continue; }
+		}
+		arr_push(out, k);
+	}
+	return out;
+}
 
 long js_tdecl(long s, long name, long v) {
 	long sco = scope_of(s);
@@ -2874,6 +3018,7 @@ void boot(void) {
 	seed_root("sprintf", mk_host(33));
 	seed_root("printf", mk_host(34));
 	seed_root("sprint", mk_host(35));
+	seed_root("fail", mk_host(36));
 	seed_root("Infinity", mk_num(DINF));
 	seed_root("NaN", mk_num(DNAN));
 	seed_root("anytype", cell_new(12));

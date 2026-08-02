@@ -605,6 +605,62 @@ function s22()
     check("i64z5", math.maxinteger == math.maxinteger - 1, false)
 end
 
+-- ===== SECTION 23: the float number model, four engines =====
+-- ./test.sh compares each ENGINE against itself, so it is structurally blind to
+-- lua-interpreter.abnf, the Go compiler runtime (abnf/jsrtlua.go) and the NATIVE
+-- binary (languages/lib/runtime.c + languages/lib/lua-rt.metajs) computing a
+-- float differently. These assertions are the pin for that, and every value below
+-- was measured across all three AND against the installed lua 5.5.
+--
+-- The '%' cases are the reproducing ones. Lua's float modulo is luai_nummod -
+-- fmod, then one correction - and it was written in all three halves as
+-- a - floor(a/b)*b, which agrees only while a/b fits 53 bits. Two separate
+-- defects sat behind that:
+--   - real lua answers 10 % 0.1 with 0.09999999999999945; the floor form gives 0
+--   - on arm64 Go CONTRACTS a - floor(a/b)*b into a fused multiply-subtract,
+--     which goja and the C floor cannot do, so the two Go halves of this one
+--     language disagreed in 128 of a 12,557-line differential probe
+-- The comparisons against the floor form are deliberate: they are what fails if
+-- anyone puts the old formula back.
+function s23()
+    local x = 10.0
+    local y = 3.14159265358979
+    check("flo1", x % y == math.fmod(x, y), true)
+    check("flo2", x % y == x - math.floor(x / y) * y, false)
+    check("flo3", 10 % 0.1, 0.09999999999999945)
+    check("flo4", 10 - math.floor(10 / 0.1) * 0.1, 0.0)
+    -- The float modulo takes the sign of the DIVISOR, unlike math.fmod.
+    check("flo5", -0.5 % 2, 1.5)
+    check("flo6", math.fmod(-0.5, 2), -0.5)
+    check("flo7", 5.5 % -2, -0.5)
+    check("flo8", math.fmod(5.5, -2), 1.5)
+    check("flo9", math.type(2^53 % 3), "float")
+    -- The shortest round-tripping spelling, which the C floor's own formatter has
+    -- to reach digit for digit. (Real lua prints %.14g/%.17g, so it spells the
+    -- same VALUES with more digits - a formatter difference both halves share and
+    -- section 23 does not try to hide: 1/3 is 0.33333333333333331 there.)
+    check("flo10", "" .. (x % y), "0.57522203923063")
+    check("flo11", "" .. (1 / 3), "0.3333333333333333")
+    check("flo12", "" .. (0.1 + 0.2), "0.30000000000000004")
+    -- The non-finite spellings are Lua's, not JavaScript's.
+    check("flo13", ("" .. (1 / 0)) .. " " .. ("" .. (-1 / 0)) .. " " .. ("" .. (0 / 0)), "inf -inf nan")
+    -- An integral float always carries its fraction; an integer never does.
+    check("flo14", ("" .. (1.0)) .. " " .. ("" .. (1)), "1.0 1")
+    -- math.type separates the subtypes, and / is always a float.
+    check("flo15", math.type(4 / 2), "float")
+    check("flo16", math.type(4 // 2), "integer")
+    check("flo17", math.type(4.0 // 2), "float")
+    -- Integer overflow wraps; the float path does not.
+    check("flo18", math.maxinteger + 1 == math.mininteger, true)
+    check("flo19", math.maxinteger + 1.0 == math.mininteger, false)
+    -- A string coerces with its own spelling deciding the subtype.
+    check("flo20", math.type("10" + 0), "integer")
+    check("flo21", math.type("10.0" + 0), "float")
+    check("flo22", math.type("0x10" + 0), "integer")
+    check("flo23", "0xffffffffffffffff" + 0, -1)
+    check("flo24", math.type("9223372036854775808" + 0), "float")
+end
+
 -- ===== END SECTIONS =====
 
 s01() -- SECTION-CALL 01
@@ -629,5 +685,6 @@ s19() -- SECTION-CALL 19
 s20() -- SECTION-CALL 20
 s21() -- SECTION-CALL 21
 s22() -- SECTION-CALL 22
+s23() -- SECTION-CALL 23
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

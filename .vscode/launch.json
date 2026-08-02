@@ -1349,6 +1349,24 @@
             "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-try.js", "-q", "-exe", "tests/metajs-native-try.out"]
         },
         {
+            "name": "Lua native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-features.lua", "-q", "-exe", "tests/lua-native.out"]
+        },
+        {
+            "name": "Lua native binary, full-syntax ratchet (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-full.lua", "-q", "-exe", "tests/lua-native-full.out"]
+        },
+        {
+            "name": "Lua native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/lua-to-llvm-ir.abnf", "tests/lua-test-multifile.lua", "-q", "-exe", "tests/lua-native-multi.out"]
+        },
+        {
             "name": "Lisp native link (compiler, -exe, no runtime: stub + warning)",
             "type": "go",
             "request": "launch",

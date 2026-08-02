@@ -31,6 +31,15 @@ var WarnUnsupported = false
 // (docs/runtime-rework-plan.md, phase 1). Grammars read it as c.rtPrims.
 var RuntimePrims = false
 
+// RuntimeLib is set from the -rt-lib CLI flag. It asks metajs-to-llvm-ir.abnf to
+// compile its input as a LINKABLE RUNTIME LIBRARY (layer 2 of
+// docs/runtime-rework-plan.md) rather than as a program: every top-level js_*
+// function gets an exported C-ABI shim, the module's own function/string names are
+// offset so they cannot collide with the program module it is linked against, and
+// the function table it emits is jsdispatch_ext (the tail the program's own
+// jsdispatch falls through to) instead of jsdispatch. Grammars read it as c.rtLib.
+var RuntimeLib = false
+
 // EntryPoint is the name of the top-level function a compiled program calls as
 // its entry point, set from the -main CLI flag. Grammars read it as c.mainName; it
 // lets a program whose entry function is not named main - or a real-world file with

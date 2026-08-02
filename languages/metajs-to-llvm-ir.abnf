@@ -919,17 +919,168 @@ KwDefault   = "default" KwEnd ;
     // grammar. The freezer (-freeze) cuts the start script here: only the library above
     // goes into the bootstrap snapshot; in frozen mode the Go core replaces the driver.
 
+    // ----- layer 2: compile this file as a linkable runtime LIBRARY (-rt-lib) -----
+    // docs/runtime-rework-plan.md phase 4. A target language's compiler emits calls to
+    // js_* externs that are NOT the 48 generic MetaJS ones - js_luarith, js_lueq,
+    // js_lustr and so on. Those are the language's own semantics, they are written in
+    // MetaJS (languages/lib/<lang>-rt.metajs), and -rt-lib compiles such a file into a
+    // module that can be LINKED NEXT TO the program module instead of run.
+    //
+    // Three things separate the two modules, and all three are decided here, before
+    // c.compile, because they are just the counters compile-core names things with:
+    //
+    //   - jsf_N and str.N are OFFSET by a million, so no emitted name of the library
+    //     can collide with one of the program it is linked against. A program with a
+    //     million functions or string literals would collide; nothing here is close.
+    //   - the library's own jsmain/jsrun are RENAMED below (the program defines
+    //     jsmain, and runtime.c's main() calls it).
+    //   - the library's function table is jsdispatch_ext, the tail the PROGRAM's
+    //     jsdispatch falls through to. js_closure stores a raw index and js_call
+    //     resolves it through the one global jsdispatch; chaining is what lets two
+    //     separately compiled modules share that one entry point.
+    var rtLib = (c.rtLib == true)
+    if (rtLib) {
+        funcCount = 1000000
+        strCount = 1000000
+    }
+
     // Build the module out of the parsed program.
     c.compile(c.asg)
+
+    if (rtLib) {
+        // The exported surface is every TOP-LEVEL `function js_*` of the source. It is
+        // read off the source text rather than off the module because the module keeps
+        // only jsf_N: a MetaJS function is a value in a scope, and its name lives in the
+        // scope, not in the IR. A line starting in column 0 with `function js_` is a
+        // top-level declaration in a file the frozen subset already forbids ASI in.
+        var libSrc = c.readFile(c.file)
+        var exports = []
+        var li = 0
+        var line = ""
+        while (li <= libSrc.length) {
+            var ch = li < libSrc.length ? libSrc.charAt(li) : "\n"
+            if (ch == "\n") {
+                if (line.length > 12 && line.substring(0, 12) == "function js_") {
+                    var op = line.indexOf("(")
+                    var cp = line.indexOf(")")
+                    var nm = line.substring(9, op)
+                    var ps = line.substring(op + 1, cp)
+                    // The parameter names, split by hand (the frozen subset has no
+                    // split). A name ending in _raw marks a RAW parameter: see below.
+                    var pnames = []
+                    var cur = ""
+                    var pi = 0
+                    while (pi <= ps.length) {
+                        var pc = pi < ps.length ? ps.charAt(pi) : ","
+                        if (pc == ",") {
+                            if (cur.length > 0) { pnames.push(cur) }
+                            cur = ""
+                        } else if (pc != " " && pc != "\t") { cur = cur + pc }
+                        pi = pi + 1
+                    }
+                    exports.push({n: nm, p: pnames})
+                }
+                line = ""
+            } else { line = line + ch }
+            li = li + 1
+        }
+        if (exports.length == 0) {
+            eprintln("error: -rt-lib: no top-level 'function js_*' to export")
+            exit(1)
+        }
+
+        // jsmain is the program's entry point and jsrun is where its top level lives;
+        // both names are taken. Rename them: jsrtlib_run is called by the boot function
+        // below, and the library's jsmain (which would look up a main() that does not
+        // exist here) is renamed out of the way and never called.
+        var runF = undefined
+        var fi = 0
+        while (fi < m.Funcs.length) {
+            var fn = m.Funcs[fi]
+            if (fn.Name() == "jsrun") {
+                fn.GlobalName = "jsrtlib_run"
+                runF = fn
+            }
+            if (fn.Name() == "jsmain") { fn.GlobalName = "jsrtlib_unused_main" }
+            fi = fi + 1
+        }
+
+        // One global cell holding the library's own scope, and a boot function that
+        // fills it on first use. Lazy, so the library needs no hook in the program's
+        // startup path: whichever exported extern the program calls first boots it.
+        var envG = m.NewGlobalDef("jsrtlib_env", llvm.constant.NewInt(i64, 0))
+        var bootF = m.NewFunc("jsrtlib_boot", i64, [])
+        var bb0 = bootF.NewBlock("entry")
+        var doB = bootF.NewBlock("boot")
+        var skB = bootF.NewBlock("done")
+        bb0.NewCondBr(bb0.NewICmp(llvm.enum.IPredEQ, bb0.NewLoad(i64, envG), llvm.constant.NewInt(i64, 0)), doB, skB)
+        var scV = callExt(doB, "js_scope_new", [handle(0)])
+        doB.NewStore(scV, envG)
+        doB.NewCall(runF, [scV, callExt(doB, "js_arr_new", [])])
+        doB.NewBr(skB)
+        skB.NewRet(handle(0))
+
+        // One exported shim per function, with the EXTERNAL's signature (i64 in, i64
+        // out). It boots, looks the name up in the library scope and calls it through
+        // js_call - the same path any MetaJS call takes, so a library function is
+        // reached exactly as it would be from MetaJS source.
+        var ei = 0
+        while (ei < exports.length) {
+            var ex = exports[ei]
+            var params = []
+            var pj = 0
+            while (pj < ex.p.length) {
+                params.push(llvm.ir.NewParam("", i64))
+                pj = pj + 1
+            }
+            var sf = m.NewFunc(ex.n, i64, params)
+            // The CALLEE is cached in a global of its own. Without it every call of
+            // the extern walks the library scope by name (a linear compare over every
+            // function in the file), which is the single most expensive thing an
+            // exported shim can do: the callee never changes after boot.
+            var fG = m.NewGlobalDef("jsrtlib_f_" + ex.n, llvm.constant.NewInt(i64, 0))
+            var sb = sf.NewBlock("entry")
+            var lkB = sf.NewBlock("lookup")
+            var goB = sf.NewBlock("go")
+            sb.NewCondBr(sb.NewICmp(llvm.enum.IPredEQ, sb.NewLoad(i64, fG), llvm.constant.NewInt(i64, 0)), lkB, goB)
+            lkB.NewCall(bootF, [])
+            lkB.NewStore(callExt(lkB, "js_scope_get", [lkB.NewLoad(i64, envG), emitStr(lkB, ex.n)]), fG)
+            lkB.NewBr(goB)
+            sb = goB
+            var fV = sb.NewLoad(i64, fG)
+            var aV = callExt(sb, "js_arr_new", [])
+            pj = 0
+            while (pj < ex.p.length) {
+                // A RAW parameter. Not every argument of an extern is a value handle:
+                // the operator INDEX of js_luarith / js_lucmp / js_lubit (and the same
+                // trick in other language emitters) is a compile-time constant the
+                // grammar writes with handle(k), so the callee gets the small integer
+                // ITSELF, not a handle to it - and 0..3 happen to be the handles of
+                // undefined, null, false and true, which is what a MetaJS body would
+                // see instead. A parameter whose name ends in _raw is therefore boxed
+                // with js_num_i on the way in, so the MetaJS side reads a number.
+                var pv = sf.Params[pj]
+                var pn = ex.p[pj]
+                if (pn.length > 4 && pn.substring(pn.length - 4, pn.length) == "_raw") {
+                    pv = callExt(sb, "js_num_i", [pv])
+                }
+                callExt(sb, "js_arr_push", [aV, pv])
+                pj = pj + 1
+            }
+            sb.NewRet(callExt(sb, "js_call", [fV, hUndef, aV]))
+            ei = ei + 1
+        }
+    }
 
     // emitDispatch adds the FUNCTION TABLE a native build needs. js_closure stores a
     // raw function INDEX (see the js_closure extern), and under llvm.Run the Go runtime
     // turns that index back into a callee by looking "jsf_<idx>" up in the module it is
     // attached to. A linked binary has no such reflection, so the module has to carry
     // the mapping itself: jsdispatch(idx, env, args) compares idx against every emitted
-    // jsf_N and calls it directly. It is emitted ONLY for -exe, so every other run of
-    // this grammar keeps the module it always had, byte for byte.
-    function emitDispatch() {
+    // jsf_N and calls it directly. It is emitted ONLY for -exe (and for -rt-lib, which
+    // names it jsdispatch_ext - see there), so every other run of this grammar keeps the
+    // module it always had, byte for byte.
+    function emitDispatch(dname) {
         var idxs = []
         var fns = []
         var i = 0
@@ -942,7 +1093,7 @@ KwDefault   = "default" KwEnd ;
             }
             i = i + 1
         }
-        var d = m.NewFunc("jsdispatch", i64,
+        var d = m.NewFunc(dname, i64,
             [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         var b = d.NewBlock("entry")
         i = 0
@@ -955,6 +1106,14 @@ KwDefault   = "default" KwEnd ;
             i = i + 1
         }
         b.NewRet(llvm.constant.NewInt(i64, 0))
+    }
+
+    // A runtime library is not run and not linked here: it is PRINTED, and the printed
+    // module is what the language grammar hands to clang next to lib/runtime.ll.
+    if (rtLib) {
+        emitDispatch("jsdispatch_ext")
+        println(m)
+        exit(0)
     }
 
     // runtimePath locates lib/runtime.ll next to THIS grammar, so the build does not
@@ -982,7 +1141,7 @@ KwDefault   = "default" KwEnd ;
     // declared either way, llvm.BuildExecutable does NOT stub what is left over: a missing
     // js_* is an error naming the symbol, not a silent zero.
     if (c.exePath != undefined && c.exePath != "") {
-        emitDispatch()
+        emitDispatch("jsdispatch")
         var rts = c.runtime
         if (rts == undefined || rts.length == 0) { rts = [runtimePath()] }
         var buildErr = llvm.BuildExecutable(m, c.exePath, rts)

@@ -443,7 +443,20 @@ func (rt *jsrt) luArith(op int, lv, rv interface{}) interface{} {
 		return luMkFlo(math.Floor(x / y))
 	}
 	// Lua's float modulo follows the sign of the DIVISOR (-0.5 % 2 is 1.5).
-	return luMkFlo(x - math.Floor(x/y)*y)
+	//
+	// It is luai_nummod - fmod, then one correction - and NOT x - Floor(x/y)*y.
+	// The two agree only while x/y fits 53 bits: real lua 5.5 (the oracle here)
+	// answers 10 % 3.14159265358979 with 0.57522203923063, and the floor form
+	// gives 0.5752220392306295. The floor form was also ARCHITECTURE DEPENDENT:
+	// on arm64 Go contracts x - Floor(x/y)*y into a fused multiply-subtract,
+	// which goja (lua-interpreter.abnf) and the C floor cannot do, so the two
+	// halves of this language answered differently in 128 of a 12,557-line
+	// differential probe - invisible to --cross, which printed none of them.
+	m := math.Mod(x, y)
+	if m != 0 && (m < 0) != (y < 0) {
+		m += y
+	}
+	return luMkFlo(m)
 }
 
 // luToIntOp is a bitwise operand: an integer, a float whose value is an exact

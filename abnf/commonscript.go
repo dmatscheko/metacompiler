@@ -301,6 +301,7 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		"warnImports":     WarnUnresolvedImports,
 		"warnUnsupported": WarnUnsupported,
 		"rtPrims":         RuntimePrims,
+		"rtLib":           RuntimeLib,
 		"file":            traceSrcName,
 		"lineOf":          func(pos int) int { return lineOfPos(pos) },
 		// The entry-point function name (-main flag, default "main").

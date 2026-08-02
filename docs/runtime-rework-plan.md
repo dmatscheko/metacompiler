@@ -5,9 +5,11 @@
 Every compiled language produces a **self-contained native binary**, and the semantics of
 each language exist **once** instead of twice.
 
-Today twelve of the fifteen compilers emit *handle IR* - LLVM that calls `js_*` externs
-implemented in Go (`abnf/jsrt*.go`, 29,657 lines, 570 distinct externs). clang has
-nothing to link those against, so `-exe` is available only to bash, batch and c. Worse,
+When this was written, twelve of the fifteen compilers emitted *handle IR* - LLVM that
+calls `js_*` externs implemented in Go (`abnf/jsrt*.go`, 29,657 lines, 570 distinct
+externs). clang had nothing to link those against, so `-exe` was available only to bash,
+batch and c. After phases 3 and 4, metajs and lua link too, and the eleven still on the
+Go runtime are what phase 5 works through. Worse,
 those Go functions are *twins* of JavaScript already in `languages/lib/`: the interpreter
 implements each language's semantics in JS, the compiler implements the same semantics
 again in Go, and they are kept in sync by hand. `interp-core.js:287` says so outright:
@@ -55,15 +57,15 @@ integers and raw memory**. C is the one we already have a working native compile
 
 ## Invariants - none of these may regress at any checkpoint
 
-(The figures are the ones current after phase 3; the parenthesised ones are what the
+(The figures are the ones current after phase 4; the parenthesised ones are what the
 plan was written against.)
 
-- matrix **318/318** (was 308), byte-identical stdout **and stderr** between goja and
+- matrix **321/321** (was 308), byte-identical stdout **and stderr** between goja and
   `-frozen`
-- `--full` ratchet **5,148 assertions** (was 4,822), no language whose halves disagree
+- `--full` ratchet **5,258 assertions** (was 4,822), no language whose halves disagree
 - `--cross` **119/0**
-- `tests/clang-check.sh` **16/16** (was 15/15), with bash, batch, c **and metajs** in the
-  run-it-natively row
+- `tests/clang-check.sh` **16/16** (was 15/15), with bash, batch, c, metajs **and lua** in
+  the run-it-natively row
 - **Never a green suite over a binary nobody executed.** Any language that becomes
   self-contained must move from clang-check's `ok (module only)` row into the
   run-it-natively row in the same change.
@@ -794,35 +796,280 @@ stderr and exits 1, which is what the Go side does at the program boundary.
 **Gate:** `tests/metajs-test-full.*` runs as a native binary and agrees byte-for-byte
 with `llvm.Run`. Add metajs to clang-check's run-natively row. **Met.**
 
-## Phase 4 - layer 2, one pilot language
+## Phase 4 - layer 2, one pilot language - DONE (2026-08-02)
 
-Compile `interp-core.js` (proven) and export its functions under the extern names the
-emitters call. Do **one** language first.
-
-**Pilot: Lua** - smallest surface on both axes:
+**A Lua program now compiles to a self-contained native binary too, and the second
+layer of the architecture is written in MetaJS and compiled by this repository.**
 
 ```
-lua        externs=55   go twin=774 lines
-java       externs=61   go twin=804
-csharp     externs=67   go twin=813
-swift      externs=68   go twin=986
-dart       externs=72   go twin=896
-js/ts/py/ruby/go  externs=88-99   (twins spread across jsrt.go and friends)
-php        externs=101  go twin=1968
-kotlin     externs=96   go twin=5934
+$ nm -u tests/lua-native-full.out
+_exit  _longjmp  _malloc  _putchar  _setjmp  _write
+$ nm tests/lua-native-full.out | grep -c ' T _js_'
+83
+$ tests/clang-check.sh
+lua             15906  ok, and the clang executable agrees
 ```
 
-The work is *not* writing a runtime - it is exposing layer 2 under the extern names, and
-reconciling the JS and Go twins wherever they have drifted. Every reconciliation is a
-latent bug found.
+`abnf/jsrtlua.go` is **kept**, as the plan requires: `llvm.Run` still uses it, the
+native binary uses layer 2, and the two are now differentially compared.
 
-**Gate:** lua produces a native binary; the lua ratchet is byte-identical across
-`llvm.Run`, the native binary, goja and `-frozen`. Only then delete `abnf/jsrtlua.go`.
+### The surface, measured
+
+`lua-to-llvm-ir.abnf` declares **54** externs for the full-syntax ratchet. They split
+three ways, and the split is the phase-4 result that generalises:
+
+| where | count | what |
+|---|---|---|
+| already in the C floor | 23 | the generic MetaJS primitives of phase 3 |
+| **added** to the C floor | 5 | `js_scope_decl`, `js_scope_set`, `js_scope_typeof`, `js_pyset_var`, `js_keys` |
+| **layer 2**, in MetaJS | 26 | `js_lu*` (22), `js_luaprint`, `js_luaout`, `js_pystr`, `js_mcall` |
+
+The five that went to C are **not** Lua's: they are the unpinned
+declare/assign/typeof walk that *every* compiler grammar except MetaJS emits
+(MetaJS uses `js_tdecl`/`js_tset` because it pins types), plus an object's key list.
+A scope's storage is private to the floor, so they belong there, and the next eleven
+languages get them for free. `js_pyset_var` is modelled without its
+`global`/`nonlocal` arms - those need `js_pyfnscope`, which only the Python
+compilers emit, and a Python layer 2 has to add them.
+
+### What was built
+
+- **`languages/lib/lua-rt.metajs`** (929 lines) - Lua's semantics in MetaJS: the
+  integer/float subtype model, the six arithmetic and five bitwise operators, the
+  comparisons, the numeral reader, `math.*`, the number renderer, the table-key
+  normaliser and Lua's byte-string-to-UTF-8 print path. Its exact 64-bit layer is
+  the `i64*` pair arithmetic **copied from `languages/lib/interp-core.js`**, which
+  is the interpreter half's own shared sized-integer code - so both halves of Lua
+  now bottom out on the same algorithms.
+- **`languages/lib/lua-rt.ll`** (12,067 lines, 108 `define`s) - the checked-in
+  output of **our own MetaJS compiler** over that file, regenerated and verified by
+  **`tests/gen-lua-rt-ll.sh`** (`--check` diffs instead of writing), exactly as
+  `runtime.ll` is by `gen-runtime-ll.sh`.
+- **`-rt-lib`**, a new flag on `metajs-to-llvm-ir.abnf` - the mechanism that makes
+  layer 2 possible at all, and the part the remaining eleven languages will reuse
+  unchanged. See the next section.
+- **`lua-to-llvm-ir.abnf`** - an `emitDispatch` and an `-exe` branch that links
+  `lib/runtime.ll` and `lib/lua-rt.ll`. An explicit `-rt` replaces both.
+- three `launch.json` entries for the native path (matrix 318 -> 321), and
+  `tests/lua-test-full.lua` **SECTION 23** (24 assertions) for the float model.
+
+### `-rt-lib`: how a separately compiled MetaJS module links next to a program
+
+This is the reusable part. A MetaJS module and a language module both define
+`jsf_N`, `str.N`, `jsrun`, `jsmain` and `jsdispatch`; four mechanisms keep them
+apart, and all four live in the **goja-driver tail** of the grammar, so
+`abnf/jsbootstrap.ll` still regenerates **byte-identically** (verified; only
+`abnf/jsagrammar.go` changes, as it embeds the start script):
+
+1. **Offset counters.** `funcCount` and `strCount` start at 1,000,000, so the
+   library's `jsf_N`/`str.N` cannot collide with a program's.
+2. **Renaming.** `jsrun` becomes `jsrtlib_run` and `jsmain` becomes
+   `jsrtlib_unused_main`. Setting `GlobalName` on an `ir.Func` works under **both**
+   engines (verified under goja and `-frozen` before it was relied on).
+3. **A chained function table.** The library emits `jsdispatch_ext`; the program's
+   `jsdispatch` tests `idx >= 1000000` **first** and tail-calls it, so one indirect
+   MetaJS call reaches either module. `runtime.c` is untouched by this - it still
+   knows only `jsdispatch`.
+4. **Lazy boot + exported shims.** One global holds the library's scope; the first
+   exported call runs `jsrtlib_run` into it. Every top-level `function js_*` gets a
+   C-ABI shim of the external's own signature, which caches its callee in a global
+   of its own and calls it through `js_call`.
+
+Two conventions came out of this, both of which the next language will meet:
+
+- **The export list is read off the SOURCE TEXT** (`function js_` in column 0), not
+  off the module: the module keeps only `jsf_N`, because a MetaJS function's name
+  lives in a scope, not in the IR.
+- **`_raw` parameters.** Not every argument of an extern is a value handle. The
+  operator index of `js_luarith`/`js_lucmp`/`js_lubit` is a compile-time constant
+  the grammar writes with `handle(k)`, so the callee receives the small integer
+  itself - and 0..3 are the handles of `undefined`, `null`, `false` and `true`,
+  which is what a MetaJS body sees instead. **This was a real, silent wrong answer
+  in the first working build**: `print(1+1)` said `0`. A parameter whose name ends
+  in `_raw` is now boxed with `js_num_i` in the shim. Every emitter that uses the
+  same trick (most of them do) needs the same convention.
+
+### What layer 2 CANNOT do - the finding that shapes the remaining eleven
+
+**A MetaJS value cannot be a new primitive TYPE.** The Go twin carries a Lua
+integer outside 2^53 as `jsGInt`, a Go type for which `js_typeof` answers
+`"number"`. Layer 2 has no way to make one: the best it can do is an object box
+(`{__li: {h, l}}`), and `js_typeof` answers `"object"` for that.
+
+Lua survived it by luck of ordering - `lua_str` asks `js_luisnum` *before* it asks
+`js_typeof`, and `lua_ismv` probes for a `__mv` property that a number box does not
+have - and the 12,557-line probe below says the difference is not observable. **The
+next language may not be so lucky**, and there are only two honest answers when it
+is not: give the floor a real sized-integer tag (`jsGInt` is already shared by Go,
+Java, Kotlin and C#, so it is a language-NEUTRAL floor addition, not a Lua one), or
+change the emitter to stop asking `js_typeof` about a number. Do not paper over it.
+
+### Ground truth
+
+```
+matrix                321/321   (318 + three -exe entries for the native path)
+--full                5,258 assertions, 0 languages whose halves disagree
+                        (lua 219 -> 243: the new float-model section)
+--cross               119 programs, 0 divergent
+clang-check           16/16, and lua joins the RUN-IT row:
+                        lua      15906   ok, and the clang executable agrees
+go test ./abnf/       ok
+jsbootstrap.ll        regenerates byte-identically from source
+gen-runtime-ll.sh --check    runtime.ll is up to date (36202 lines)
+gen-lua-rt-ll.sh --check     lua-rt.ll  is up to date (12067 lines)
+```
+
+Every Lua and MetaJS program in `tests/`, `llvm.Run` against the native binary,
+stdout **and** stderr:
+
+```
+lua-test-full  lua-test-features  lua-test-1  lua-test-2  lua-test-3
+lua-test-complete  lua-test-recognize  lua-test-multifile        all SAME (rc=0)
+metajs-test-full  -features  -try  -1  -2                        all SAME (rc=0)
+```
+
+A **12,557-line differential probe** - `+ - * / // %` over 41 values (0, +-1, the
+2^53 boundary, `math.maxinteger`/`mininteger` and their neighbours, integral and
+non-integral floats, 1e100, 1e-100, +-inf, nan), the four comparisons plus `==`
+and `~=` over the same 41, the five bitwise operators over 16 integer values,
+unary minus, `math.type`/`tointeger`/`abs`/`floor`/`ceil`/`max`/`min`/`fmod`,
+twelve string coercions and the table-key normalisation - is **byte-identical**
+between `llvm.Run` and the native binary, and differs from `lua-interpreter.abnf`
+on ONE line (the interpreter prints its runtime error on stdout with its own
+prefix).
+
+### Three defects found by building the second engine, all fixed
+
+Each was reproduced against **real lua 5.5** (installed, `/opt/homebrew/bin/lua`)
+or against the Go runtime, and each was invisible to `./test.sh`, which compares
+each engine with itself.
+
+1. **The float `%` was the wrong formula, in all three halves.** It was written
+   `a - floor(a/b)*b`; Lua's is `luai_nummod` - `fmod`, then one correction - and
+   the two agree only while `a/b` fits 53 bits. The oracle:
+
+```
+                                lua 5.5      a - floor(a/b)*b
+10 % 0.1                        0.09999999999999945     0
+10 % 3.14159265358979           0.57522203923063        0.5752220392306295
+```
+
+   Fixed in `abnf/jsrtlua.go`, `languages/lua-interpreter.abnf` and
+   `languages/lib/lua-rt.metajs`; pinned by section 23, which asserts against the
+   floor form directly so the old formula cannot come back.
+
+2. **The Go twin's float `%` was ARCHITECTURE DEPENDENT.** On arm64 Go contracts
+   `x - math.Floor(x/y)*y` into a fused multiply-subtract, which goja (the
+   interpreter half) and the C floor cannot do, so **the two Go halves of Lua
+   answered differently in 128 of the 12,557 probe lines** - and `--cross` never
+   saw one, because no test printed it. Proven with opaque runtime operands:
+
+```
+x=10 y=3.14159265358979   fused 0.57522203923062998   two-step 0.57522203923062953
+x=1  y=1e-100             fused -3.5894790912362802e-17  two-step 0
+```
+
+   A plain intermediate variable is NOT enough to stop it - measured. Only an
+   explicit `float64(...)` conversion is, which is what the spec says. Moot after
+   fix 1 (`math.Mod` has no such expression), and recorded because the next port of
+   a Go float expression will meet it again.
+
+3. **The C floor's `%` was not `fmod` at all.** `d_mod` was
+   `x - trunc(x/y)*y`, which is exact only while the quotient fits 53 bits.
+   **26 of a 90-case MetaJS probe diverged between `llvm.Run` and the native
+   binary** - `10 % 0.1` answered `0` where the Go runtime answers
+   `0.09999999999999945`. This is a **phase-3 miss**: the phase-3 probes covered
+   `+ - * /`, `sqrt`, `pow` and the formatter, and never `%`. `d_mod` is now a
+   faithful port of Go's own `math.Mod` on the `Frexp`/`Ldexp` this file already
+   carried. A 15,625-case `%` probe over 125 values is now byte-identical.
+
+### Where our Lua and REAL lua still differ - measured, and NOT fixed here
+
+With the same 12,557-line probe run through the installed `lua 5.5`, 3,822 lines
+differ - and **every one of them is the number FORMATTER, not the arithmetic**;
+`llvm.Run` and the native binary agree with each other on all of them, so this is
+pre-existing behaviour of both halves, unchanged by this phase:
+
+```
+3,319   an integral float in exponent form gets ".0": we print 1e+100.0, lua 1e+100
+  312   negative zero: we print 0.0, lua -0.0
+  ~190  digits: we print the shortest round-tripping form (0.3333333333333333),
+        lua prints %.17g (0.33333333333333331), and 1e17 as 1e+17 not 100000000000000000.0
+```
+
+Fixing these means replacing `luNumStr` and `jsNumString`'s Lua path with Lua's own
+`%.14g`/`%.17g` policy in **three** halves at once. It is a self-contained job and
+it is not phase 4's gate, so it is recorded rather than done.
+
+### Performance - Risk 1, measured at the gate as the plan asks
+
+The benchmark is a 2M-iteration `s = s + i % 7` loop, `fib(24)`, 20k array writes
+and reads, and 2k string concatenations.
+
+```
+compile + link only                                    0.31s
+compile + llvm.Run (the Go runtime)                    5.01s      2.1 GB peak RSS
+native binary (C floor + MetaJS layer 2)              29.55s     38.4 GB peak RSS
+real lua 5.5                                           0.01s
+```
+
+**Layer 2 costs about 6x the time and 18x the memory of the hand-written Go
+runtime.** That is the honest number, and it is the opposite of phase 3's result
+for the C floor, which was within noise of Go. The reason is structural: a MetaJS
+call opens a scope, binds each parameter and builds an argument array, and a free
+NAME is a scope-chain walk - so one Lua `+` that is one Go function became dozens
+of them.
+
+The first working build was **497s** on this benchmark. Four changes brought it to
+29.5s, and they are the ones the next language should copy:
+
+- **A fast path on plain numbers, written INLINE** (23.1s -> 2.6s -> 1.6s on the
+  isolated `i % 7` loop). A Lua integer inside 2^53 IS a plain double, so `+ - *`
+  and floor `//`/`%` on two int32-window operands are done with the floor
+  primitives directly - no `i64` pair, no helper call. It is not an approximation:
+  the 2^53 range is CHECKED, and the truncating `|0` division is exact because
+  `q*|b| = |a| < 2^53`. Factoring the guard into a helper cost more than the
+  arithmetic it guarded, which is why it is spelled out at each site.
+- **The exported shim caches its callee** in a global instead of walking the
+  library scope by name on every call.
+- **`jsdispatch` tests the million boundary first**, so a layer-2 call does not
+  walk the program's whole table before reaching the library's.
+- **A scope is allocated with capacity 4, not 8** (`runtime.c`), and `str_eq`
+  answers identity first - `js_str_mem` caches one cell per literal ADDRESS, so
+  `scope_find` and `obj_find` became pointer compares.
+
+Both remaining costs have obvious next steps, neither taken here: the arena has no
+GC (Risk 3, and at ~19 KB per loop iteration it is far more acute for layer 2 than
+it was for MetaJS alone), and the emitter could inline the layer-2 fast paths into
+the IR instead of calling into MetaJS for them.
+
+**Gate:** `tests/lua-test-full.lua` runs as a native binary and agrees byte-for-byte
+with `llvm.Run`; lua is in clang-check's run-natively row. **Met.**
 
 ## Phase 5 - roll out
 
 Repeat phase 4 per language in the size order above, easiest first, kotlin last. One
 language per change. **Never delete a Go twin before its language passes natively.**
+
+What phase 4 says the next one will cost, and in what order to do it:
+
+1. **Diff the extern list against `languages/lib/runtime.ll`.** For lua that left 31,
+   and 5 of those turned out to be language-neutral floor work. Do that split first -
+   it is the difference between a week and an afternoon.
+2. **Write `languages/lib/<lang>-rt.metajs` and a `gen-<lang>-rt-ll.sh`** copied from
+   `tests/gen-lua-rt-ll.sh`. `-rt-lib` needs no change per language.
+3. **Add `emitDispatch` + the `-exe` branch** to the language grammar, copied from
+   `lua-to-llvm-ir.abnf`. The `jsdispatch`/`jsdispatch_ext` chain is already there.
+4. **Check every `handle(k)` argument in the emitter** and rename the matching MetaJS
+   parameter to `..._raw`. This is the mistake that produces a *silently wrong answer*
+   rather than a link error.
+5. **Check whether the emitter asks `js_typeof` about a value your layer 2 has to box.**
+   See "What layer 2 CANNOT do" above.
+6. **Write the fast path before measuring anything else.** 497s -> 29.5s on the lua
+   benchmark, and most of it was one inline guard.
+7. **Differential-probe the whole operator surface** against `llvm.Run`, and against the
+   real toolchain if one is installed. Lua's probe found three defects, two of them
+   older than this plan.
 
 ## Phase 6 - regex
 
