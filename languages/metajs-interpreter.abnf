@@ -307,17 +307,228 @@ KwDefault   = "default" KwEnd ;
     // object a program can only obtain through the anytype global below.
     var anytypeMarker = {}
 
+    // ----- The SIZED INTEGER, and the five places a program can see it -----
+    //
+    // The other half has a real primitive type for it: tag 13 of
+    // languages/lib/runtime.c natively, jsGInt of abnf/jsrtint.go under
+    // llvm.Run, and both bind the eleven sint* globals below (seed_root ids
+    // 40..50 / giBindings). This half cannot make a new primitive type at all -
+    // its values ARE goja/frozen-engine values - so the box is the {__sz} object
+    // of lib/interp-core.js, which already implements giNorm/giTrunc/giArith on
+    // exact 64 bit pairs and is validated against `go run` over 156,490 vectors.
+    //
+    // What that costs is the five observations a MetaJS program can make where
+    // an object and a number differ, each routed below to the floor's answer:
+    //
+    //   typeof v          "number", not "object"        siTypeof, makeTypeof
+    //   the pinned type   "number", so a variable may
+    //                     later hold a plain number     siTypeof, typeClass
+    //   an operator       to_number / to_string / the
+    //                     strict_eq and js_compare
+    //                     arms of runtime.c             siBinOp, binOp, applyOp
+    //   println / print   the decimal digits            the wrappers below
+    //
+    // The fifth, TRUTHINESS, is NOT converted: runtime.c's truthy() answers
+    // `fa(h) != 0` for tag 13, so `if (sint(0, 0, 8, 0))` is false there and
+    // true here, because the condition is the host engine's own and the
+    // statement builders live in lib/interp-core.js. Recorded in
+    // docs/runtime-next-plan.md part 2 and deliberately not asserted.
+    //
+    // Every function is named after the si_* of runtime.c it transliterates.
+    // interp-core.js's szNorm/szCmp are NOT reused directly: szNorm rounds a
+    // width that is not 8/16/32/64 to 16 bits where si_norm leaves it alone, and
+    // szCmp compares two plain operands as doubles where si_cmp truncates them
+    // to integers first. Those are the only two differences and they are here so
+    // that a future reader can see the floor, not a near-miss of it.
+    function siWidthOf(l, r) {
+        if (szIs(l)) return l.w
+        if (szIs(r)) return r.w
+        return 64
+    }
+    function siUnsOf(l, r) {
+        if (szIs(l)) return l.u
+        if (szIs(r)) return r.u
+        return false
+    }
+    // si_trunc: only 8, 16 and 32 wrap; anything else is a 64 bit value already.
+    function siTrunc(p, w, u) {
+        if (w == 8 || w == 16 || w == 32) return i64Trunc(p, w, u)
+        return p
+    }
+    // si_val: the 64 bit value of any operand, a plain number truncated toward
+    // zero (i64FromNum is giFromFloat, NaN and an infinity included).
+    function siPair(v) {
+        if (szIs(v)) return v.p
+        return i64FromNum(v * 1)
+    }
+    // si_norm: THE invariant, applied here and nowhere else.
+    function siNorm(p, w, u) {
+        var q = siTrunc(p, w, u)
+        if (w == 64 && !u && i64Fits53(q)) return i64ToNumS(q)
+        return szMake(q, w, u ? true : false)
+    }
+    // si_float: the double reading; a uint64 needs the unsigned one.
+    function siNum(v) {
+        if (!szIs(v)) return v * 1
+        if (v.u && v.w == 64) return i64ToNumU(v.p)
+        return i64ToNumS(v.p)
+    }
+    // si_str, and to_string for everything else.
+    function siStr(v) {
+        if (!szIs(v)) return "" + v
+        if (v.u) return i64StrU(siTrunc(v.p, v.w, true))
+        return i64StrS(v.p)
+    }
+    // si_apply, by the same 0..10 operator index the floor uses. An index the
+    // table does not have answers si_norm(0), which is what si_apply's
+    // `long x = 0` with no arm taken produces.
+    function siOp(code, l, r) {
+        var w = siWidthOf(l, r)
+        var u = siUnsOf(l, r)
+        var a = siPair(l)
+        var b = siPair(r)
+        var x = i64Make(0, 0)
+        if (code == 0) { x = i64Add(a, b) }
+        else if (code == 1) { x = i64Sub(a, b) }
+        else if (code == 2) { x = i64Mul(a, b) }
+        else if (code == 3 || code == 4) {
+            if (i64IsZero(b)) { fail("integer divide by zero") }
+            var d = u ? i64DivModU(siTrunc(a, w, true), siTrunc(b, w, true)) : i64DivModS(a, b)
+            x = (code == 3) ? d.q : d.r
+        }
+        else if (code == 5) { x = i64And(a, b) }
+        else if (code == 6) { x = i64Or(a, b) }
+        else if (code == 7) { x = i64Xor(a, b) }
+        else if (code == 8) { x = i64And(a, i64Not(b)) }
+        else if (code == 9 || code == 10) {
+            // The COUNT is read as the floor reads it, si_val(r) as a signed
+            // 64 bit value - so a uint64 count above 2^63 is negative here too.
+            var s = i64ToNumS(b)
+            if (code == 9) {
+                if (s >= 0 && s < w) { x = i64Shl(a, s) }
+            } else if (s >= 0) {
+                if (u) {
+                    if (s < w) { x = i64ShrU(siTrunc(a, w, true), s) }
+                } else {
+                    if (s >= w) { s = w - 1 }
+                    x = i64ShrS(a, s)
+                }
+            }
+        }
+        return siNorm(x, w, u)
+    }
+    // si_cmp: -1, 0 or 1, unsigned where the result type is.
+    function siCmp(l, r) {
+        var w = siWidthOf(l, r)
+        var x = siPair(l)
+        var y = siPair(r)
+        if (siUnsOf(l, r)) return i64CmpU(siTrunc(x, w, true), siTrunc(y, w, true))
+        return i64CmpS(x, y)
+    }
+    // strict_eq's two tag-13 arms: a sized integer compares by VALUE with
+    // another sized integer or with a plain number, and with nothing else.
+    function siStrictEq(l, r) {
+        if (szIs(l)) {
+            if (szIs(r) || typeof r == "number") return i64Eq(siPair(l), siPair(r))
+            return false
+        }
+        if (szIs(r)) {
+            if (typeof l == "number") return i64Eq(siPair(l), siPair(r))
+            return false
+        }
+        return l === r
+    }
+    // loose_eq, where a box is NEITHER a number nor a string: the
+    // `(ta == 3 || ta == 4) != (tb == 3 || tb == 4)` line answers 0 for a box
+    // against a plain number, so `box == 5` is FALSE while `box === 5` is true.
+    // Faithfully odd; both engines of the other half do exactly this.
+    function siLooseEq(l, r) {
+        if (l == undefined || r == undefined) return false
+        if (typeof l == "boolean" || typeof r == "boolean") return false
+        if (szIs(l) && szIs(r)) return siStrictEq(l, r)
+        return false
+    }
+    // The operators, for the case where at least one operand is a box.
+    function siBinOp(op, l, r) {
+        if (op == "+") {
+            // js_add_v: a string, an array or an object operand concatenates.
+            if (typeof l == "string" || typeof r == "string") return siStr(l) + siStr(r)
+            if (typeof l == "object" && !szIs(l)) return siStr(l) + siStr(r)
+            if (typeof r == "object" && !szIs(r)) return siStr(l) + siStr(r)
+            return siNum(l) + siNum(r)
+        }
+        if (op == "-") return siNum(l) - siNum(r)
+        if (op == "*") return siNum(l) * siNum(r)
+        if (op == "/") return siNum(l) / siNum(r)
+        if (op == "%") return siNum(l) % siNum(r)
+        if (op == "==") return siLooseEq(l, r)
+        if (op == "!=") return !siLooseEq(l, r)
+        if (op == "===") return siStrictEq(l, r)
+        if (op == "!==") return !siStrictEq(l, r)
+        // js_compare: both sides through to_number, so a uint64 compares as its
+        // unsigned double reading.
+        if (op == "<")  return siNum(l) < siNum(r)
+        if (op == ">")  return siNum(l) > siNum(r)
+        if (op == "<=") return siNum(l) <= siNum(r)
+        if (op == ">=") return siNum(l) >= siNum(r)
+        // The 32 bit bitwise operators are js_bitand and friends, which take
+        // to_number and then ToInt32 - they are NOT the sized-integer operators.
+        if (op == "|")  return siNum(l) | siNum(r)
+        if (op == "^")  return siNum(l) ^ siNum(r)
+        if (op == "&")  return siNum(l) & siNum(r)
+        if (op == "<<") return siNum(l) << siNum(r)
+        if (op == ">>") return siNum(l) >> siNum(r)
+        if (op == ">>>") return siNum(l) >>> siNum(r)
+    }
+    // typeof, and the type class a declaration pins: "number" for a box, which
+    // is js_typeof's answer in both engines of the other half.
+    function siTypeof(v) {
+        if (szIs(v)) return "number"
+        return typeof v
+    }
+    // print/println render a box as its digits, which is what fmt.Fprintln of
+    // the int64/uint64 toGoNatural hands out and what o_str(to_string(...))
+    // writes natively. printf and sprintf are deliberately NOT wrapped: their
+    // %d takes the Go int64 there, and a string here would print as
+    // %!d(string=...).
+    function siPrintArgs(a) {
+        var out = []
+        for (var i = 0; i < a.length; i++) out.push(szIs(a[i]) ? siStr(a[i]) : a[i])
+        return out
+    }
+    function siPrintln() { return println.apply(undefined, siPrintArgs(arguments)) }
+    function siPrint() { return print.apply(undefined, siPrintArgs(arguments)) }
+    function siEprintln() { return eprintln.apply(undefined, siPrintArgs(arguments)) }
+    // sint(hi, lo, bits, unsigned): two UNSIGNED 32 bit halves, because a MetaJS
+    // number is a double and cannot carry 64 bits exactly. bits defaults to 64
+    // and unsigned to false, matching the floor's `n > 2` / `n > 3`.
+    function siHost(hi, lo, bits, uns) {
+        var w = (bits === undefined) ? 64 : bits
+        return siNorm(i64Make(i64FromNum(hi).l, i64FromNum(lo).l), w, uns ? true : false)
+    }
+
     var hostGlobals = {
-        "println": println, "print": print, "printf": printf, "sprintf": sprintf,
-        "eprintln": eprintln,
+        "println": siPrintln, "print": siPrint, "printf": printf, "sprintf": sprintf,
+        "eprintln": siEprintln,
         "parseInt": parseInt, "parseFloat": parseFloat, "Math": Math, "String": String,
-        "exit": exit, "anytype": anytypeMarker
+        "exit": exit, "anytype": anytypeMarker,
+        // The eleven sized-integer names, the same set languages/lib/runtime.c
+        // seeds and abnf/jsrtint.go's giBindings adds.
+        "sint": siHost,
+        "sintIs": function(v) { return szIs(v) },
+        "sintHi": function(v) { return siPair(v).h >>> 0 },
+        "sintLo": function(v) { return siPair(v).l >>> 0 },
+        "sintWidth": function(v) { return siWidthOf(v, v) },
+        "sintUns": function(v) { return siUnsOf(v, v) ? true : false },
+        "sintOp": siOp, "sintCmp": siCmp,
+        "sintConv": function(v, bits, uns) { return siNorm(siPair(v), bits, uns ? true : false) },
+        "sintStr": siStr, "sintNum": siNum
     }
 
     // The type class that pins a variable: undefined and null pin nothing.
     function typeClass(v) {
         if (v === undefined || v === null) return ""
-        return typeof v
+        return siTypeof(v)
     }
     // Scope entries are {v, t} type boxes: reads unbox, declarations pin the
     // type; t '*' marks an anytype variable (starts undefined, never pins).
@@ -385,7 +596,7 @@ KwDefault   = "default" KwEnd ;
 
     makeNeg = function(t) { return function() { return -t() } }
     function makeBitNot(t) { return function() { return ~t() } }
-    function makeTypeof(t) { return function() { return typeof t() } }
+    function makeTypeof(t) { return function() { return siTypeof(t()) } }
 
     function makeArray(items) {
         return function() {
@@ -412,6 +623,13 @@ KwDefault   = "default" KwEnd ;
     }
 
     binOp = function(op, l, r) {
+        // A sized integer is a NUMBER (typeof says so in both halves), so every
+        // operator has to read it as one - siBinOp is runtime.c's arms. The
+        // guard is two typeof tests, so the ordinary path costs no call: only an
+        // object operand can possibly be a box.
+        if (typeof l == "object" || typeof r == "object") {
+            if (szIs(l) || szIs(r)) return siBinOp(op, l, r)
+        }
         if (op == "+") return l + r
         if (op == "-") return l - r
         if (op == "*") return l * r
@@ -516,12 +734,14 @@ KwDefault   = "default" KwEnd ;
         if (cur == undefined) fail("member assignment on " + cur)
         return {obj: cur, key: last.key()}
     }
+    // A compound assignment is its plain operator, so it goes through binOp and
+    // inherits the sized-integer arms with it (s += box is js_add there).
     applyOp = function(op, a, b) {
-        if (op == "+=") return a + b
-        if (op == "-=") return a - b
-        if (op == "*=") return a * b
-        if (op == "/=") return a / b
-        if (op == "%=") return a % b
+        if (op == "+=") return binOp("+", a, b)
+        if (op == "-=") return binOp("-", a, b)
+        if (op == "*=") return binOp("*", a, b)
+        if (op == "/=") return binOp("/", a, b)
+        if (op == "%=") return binOp("%", a, b)
     }
     // items = [ref, opString, valueThunk]. Returns the assigned value (assignment is an expression).
     function makeAssign(items) {

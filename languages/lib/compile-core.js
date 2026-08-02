@@ -157,7 +157,36 @@ function getExtern(name, paramCount) {
     externs[name] = f
     return f
 }
+// ----- Which externs BIND a name in the scope they are handed -----
+//
+// makeBlockStmt below needs to know whether a block declared anything, and it can
+// only know AFTER the block is emitted. declCount is the counter that answers it:
+// every emitted call to an extern that can create a binding bumps it, so a block
+// that leaves it unchanged bound nothing and needs no scope of its own.
+//
+// The set is the scope-taking externs MINUS the ones proven read-only, so a name
+// missing from this file is counted as declaring - the safe direction. The eight
+// deliberately absent, each checked in lib/runtime.c and abnf/jsrt*.go:
+//   js_scope_get, js_scope_typeof, js_kget, js_ktget   read a name
+//   js_scope_set, js_tset                              walk the chain and DIE if absent
+//   js_scope_new                                       makes a CHILD, binds nothing here
+//   js_closure                                         captures the scope handle
+// A scope nothing was bound in is transparent to lookups, so capturing it and
+// capturing its parent are the same thing - which is what makes the elision sound.
+var declCount = 0
+var scopeWriteExt = {
+    $js_scope_decl: 1, $js_tdecl: 1, $js_pyset_var: 1, $js_scope_set_or_create: 1,
+    $js_pyglobal: 1, $js_pynonlocal: 1, $js_pyfnscope: 1, $js_pyannot: 1, $js_pydel_var: 1,
+    $js_kset: 1, $js_ktvarset: 1, $js_ktbareref: 1, $js_ktouter: 1, $js_ktrefbase: 1,
+    $js_ktdthis: 1, $js_ktmextset: 1, $js_ktmextget: 1,
+    $js_rdefined: 1, $js_phrtinit: 1, $js_phthis: 1, $js_phclslookup: 1
+}
+// noteExt is called for EVERY emitted extern call. A grammar that replaces callExt
+// (metajs-to-llvm-ir does, for -rt-prims routing) must call it too, or a block whose
+// only declaration went through the replacement loses its scope.
+function noteExt(name) { if (scopeWriteExt["$" + name] == 1) { declCount++ } }
 function callExt(b, name, args) {
+    noteExt(name)
     return b.NewCall(getExtern(name, args.length), args)
 }
 var strGlobals = {}
@@ -183,11 +212,52 @@ function emitStr(b, s) {
     }
     return callExt(b, "js_str_mem", [g.ptr, g.len])
 }
-function emitNum(b, n) {
+// A numeric LITERAL outside the floor's small-integer cache used to box a fresh cell
+// every time it executed. Measured on the Lua allocation benchmark: 18 of the 26
+// number cells per iteration of `s = s + i % 7` were the GUARD CONSTANTS of layer 2's
+// own fast path (-2147483649, 2147483648, +-9007199254740992 in js_luarith), boxed
+// again on every call - compile-time constants paying a runtime allocation each.
+//
+// Each such constant now gets a memoizing getter of its own: one global holding the
+// handle, filled on first use. A getter is a FUNCTION rather than an inline branch
+// because emitNum answers a value, not a {b, v} - it is called from a hundred places
+// that cannot take a block split. Handle 0 is `undefined` and can never be a number,
+// so it is the empty marker (the same convention as the floor's NIC and as
+// jsrtlib_f_* above).
+//
+// -256..1024 stays a direct js_num_i: the floor already answers those from its cache
+// without allocating, so a call and a load would be pure loss.
+var numGetters = {}
+var numCount = 0
+function numGetter(n) {
+    var key = "$" + n
+    var f = numGetters[key]
+    if (f != undefined) { return f }
+    numCount++
+    var g = m.NewGlobalDef("jsnumg." + numCount, llvm.constant.NewInt(i64, 0))
+    f = m.NewFunc("jsnum." + numCount, i64, [])
+    var eb = f.NewBlock("entry")
+    var mkB = f.NewBlock("make")
+    var okB = f.NewBlock("done")
+    var had = eb.NewLoad(i64, g)
+    eb.NewCondBr(eb.NewICmp(llvm.enum.IPredEQ, had, llvm.constant.NewInt(i64, 0)), mkB, okB)
+    var made = anytype
     if (n % 1 == 0 && n < 9007199254740992 && n > -9007199254740992) {
+        made = callExt(mkB, "js_num_i", [handle(n)])
+    } else {
+        made = callExt(mkB, "js_num_str", [emitStr(mkB, "" + n)])
+    }
+    mkB.NewStore(made, g)
+    mkB.NewBr(okB)
+    okB.NewRet(okB.NewPhi([llvm.ir.NewIncoming(had, eb), llvm.ir.NewIncoming(made, mkB)]))
+    numGetters[key] = f
+    return f
+}
+function emitNum(b, n) {
+    if (n % 1 == 0 && n >= -256 && n <= 1024) {
         return callExt(b, "js_num_i", [handle(n)])
     }
-    return callExt(b, "js_num_str", [emitStr(b, "" + n)])
+    return b.NewCall(numGetter(n), [])
 }
 
 var curF = null
@@ -464,14 +534,43 @@ function emitImportedWith(b, apply) {
 function emitImported(b) {
     return emitImportedWith(b, function(item, bb) { return item(bb) })
 }
+// A block used to open a scope unconditionally, and three quarters of them never
+// declared anything: 33 scope cells per iteration of the Lua allocation benchmark
+// against 9 actual calls. The scope cannot simply be skipped, because whether the
+// block declares is only known once the block is EMITTED - and by then the thunk
+// has already had to be handed a scope value.
+//
+// The fix is a one-entry phi. The scope creation gets a block of its own (hdrB,
+// still empty and unterminated), the body runs against a phi that reads from it,
+// and the phi's incoming value is written afterwards - either the fresh scope, or
+// the enclosing one when declCount says nothing was bound. Everything here is an
+// APPEND (hdrB's terminator goes on last, after the js_scope_new), so no
+// instruction has to be moved or removed.
+//
+// declCount is restored on the way out, because whatever the block bound went into
+// the block's OWN scope and says nothing about the block enclosing it. A grammar's
+// function emitter should restore it the same way, for the same reason (a nested
+// function's locals live in the function's frame); metajs-to-llvm-ir does. Anything
+// NOT restored is merely conservative - the enclosing block keeps a scope it does
+// not need, and never loses one it does.
 function makeBlockStmt(items) {
     var seq = makeSeq(items)
     return function(b) {
         var saved = curScopeV
-        curScopeV = callExt(b, "js_scope_new", [curScopeV])
-        b = seq(b)
+        var hdrB = curF.NewBlock("")
+        b.NewBr(hdrB)
+        var bodyB = curF.NewBlock("")
+        var ph = bodyB.NewPhi([llvm.ir.NewIncoming(saved, hdrB)])
+        curScopeV = ph
+        var before = declCount
+        var endB = seq(bodyB)
         curScopeV = saved
-        return b
+        if (declCount != before) {
+            ph.Incs = [llvm.ir.NewIncoming(callExt(hdrB, "js_scope_new", [saved]), hdrB)]
+        }
+        declCount = before
+        hdrB.NewBr(bodyB)
+        return endB
     }
 }
 function makeIf(items) {

@@ -1569,6 +1569,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else { targets.push(items[i]) }
         }
         return function(b) {
+            // ONE target, ONE value is the assignment nearly every program writes, and
+            // it does not need the positional array at all: lua_first(v) IS
+            // js_get(appendall([], v), 0) for every v, the empty multi-value included
+            // (both answer nil). The array cost an arena cell and a four-slot buffer per
+            // execution - 96 bytes inside every loop body that assigns.
+            if (targets.length == 1 && vals.length == 1) {
+                var r1 = vals[0](b)
+                return emitTargetWrite(r1.b, targets[0], callLua(r1.b, "lua_first", [r1.v]))
+            }
             var ra = emitListArr(b, vals)
             b = ra.b
             for (var t = 0; t < targets.length; t++) {
@@ -1586,6 +1595,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return function(b) {
             var before = funcCount
+            // `local x = e` - one name, one value - skips the positional array for the
+            // same reason makeAssign does; see the note there.
+            if (names.length == 1 && vals.length == 1) {
+                var r1 = vals[0](b)
+                b = r1.b
+                var v1 = callLua(b, "lua_first", [r1.v])
+                if (funcCount != before) { curScopeV = callExt(b, "js_scope_new", [curScopeV]) }
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[0]), v1])
+                return b
+            }
             var ra = emitListArr(b, vals)
             b = ra.b
             // The new locals must stay invisible to a closure one of the initializers
@@ -1747,6 +1766,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, stepName), stepV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
+            // The step is written once, at the head of the loop, and nothing can
+            // reassign $fs (the name is unspellable in Lua), so its SIGN is loop
+            // invariant. It used to be recomputed TWICE per iteration - lua_num(step)
+            // is a layer-2 call, so that was two function frames and two scopes of
+            // garbage per iteration for a value that cannot change. Computed once here,
+            // in the preheader, and used by both tests below.
+            var stepPos = truthy(b, callExt(b, "js_gt", [callLua(b, "lua_num", [stepV]), emitNum(b, 0)]))
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
@@ -1754,16 +1780,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewBr(headB)
             var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
             var limV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, limName)])
-            var stpV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, stepName)])
             // The three control values keep their number subtype (a float start or step
             // makes the loop variable a float). The two bound tests go through lua_cmp
             // rather than through the raw doubles: a loop that runs near math.maxinteger
             // has to stop on the exact value, not on the rounded one.
-            var stepPos = truthy(headB, callExt(headB, "js_gt", [callLua(headB, "lua_num", [stpV]), emitNum(headB, 0)]))
-            var leCond = callLua(headB, "lua_cmp", [handle(2), iV, limV])
-            var geCond = callLua(headB, "lua_cmp", [handle(3), iV, limV])
-            var condH = headB.NewSelect(stepPos, leCond, geCond)
-            headB.NewCondBr(truthy(headB, condH), bodyB, exitB)
+            //
+            // A SELECT evaluates both of its operands, so the old form called lua_cmp
+            // twice per iteration and threw one answer away - a whole layer-2 frame of
+            // garbage for nothing. A branch runs the one test that is asked for.
+            var upB = curF.NewBlock("")
+            var downB = curF.NewBlock("")
+            var testB = curF.NewBlock("")
+            headB.NewCondBr(stepPos, upB, downB)
+            var leCond = callLua(upB, "lua_cmp", [handle(2), iV, limV])
+            upB.NewBr(testB)
+            var geCond = callLua(downB, "lua_cmp", [handle(3), iV, limV])
+            downB.NewBr(testB)
+            var condH = testB.NewPhi([llvm.ir.NewIncoming(leCond, upB), llvm.ir.NewIncoming(geCond, downB)])
+            testB.NewCondBr(truthy(testB, condH), bodyB, exitB)
             callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])])
             loopStack.push({cont: postB, brk: exitB})
             block(bodyB).NewBr(postB)
@@ -1777,12 +1811,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // stop, expressed on the values themselves - a step that does not move the
             // control variable in the step's own direction has overflowed, and the loop
             // is over.
-            var stepPos2 = truthy(postB, callExt(postB, "js_gt", [callLua(postB, "lua_num", [stpV2]), emitNum(postB, 0)]))
-            var upWrap = callLua(postB, "lua_cmp", [handle(2), nextV, iV2])
-            var downWrap = callLua(postB, "lua_cmp", [handle(3), nextV, iV2])
-            var wrapH = postB.NewSelect(stepPos2, upWrap, downWrap)
+            var upB2 = curF.NewBlock("")
+            var downB2 = curF.NewBlock("")
+            var testB2 = curF.NewBlock("")
+            postB.NewCondBr(stepPos, upB2, downB2)
+            var upWrap = callLua(upB2, "lua_cmp", [handle(2), nextV, iV2])
+            upB2.NewBr(testB2)
+            var downWrap = callLua(downB2, "lua_cmp", [handle(3), nextV, iV2])
+            downB2.NewBr(testB2)
+            var wrapH = testB2.NewPhi([llvm.ir.NewIncoming(upWrap, upB2), llvm.ir.NewIncoming(downWrap, downB2)])
             var stepB = curF.NewBlock("")
-            postB.NewCondBr(truthy(postB, wrapH), exitB, stepB)
+            testB2.NewCondBr(truthy(testB2, wrapH), exitB, stepB)
             callExt(stepB, "js_scope_set", [curScopeV, emitStr(stepB, iName), nextV])
             stepB.NewBr(headB)
             curScopeV = saved

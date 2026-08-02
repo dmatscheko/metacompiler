@@ -804,6 +804,144 @@ function s23() {
     check("intern28", z.length === 5 && z !== "ab" && z.indexOf("cd") === 3)
 }
 
+// ===== SECTION 24: sized integers (the sint* host globals) =====
+// The one primitive type MetaJS itself does not have. It is tag 13 of
+// languages/lib/runtime.c natively, jsGInt of abnf/jsrtint.go under llvm.Run,
+// and the {__sz} pair box of lib/interp-core.js in the interpreter half - three
+// implementations of one specification, reached from a MetaJS source program
+// through the eleven sint* names, which is what makes this section able to pin
+// them at all. See docs/runtime-next-plan.md part 2.
+//
+// The invariant every assertion below rests on: an integer that a double holds
+// exactly IS a plain number, and only the rest is boxed. That is why `typeof` is
+// "number" throughout - a version that always boxed would still pass sintStr and
+// fail sint01/sint03.
+function s24() {
+    // ----- the invariant, and typeof across the 2^53 boundary -----
+    check("sint01", sint(0, 5, 64, 0) === 5 && sintIs(sint(0, 5, 64, 0)) === false)
+    check("sint02", typeof sint(0, 5, 64, 0) === "number")
+    var exact = sint(2097152, 0, 64, 0)             // 2^53, the largest exact one
+    check("sint03", exact === 9007199254740992 && sintIs(exact) === false)
+    var over = sint(2097152, 1, 64, 0)              // 2^53 + 1 is not
+    check("sint04", sintIs(over) === true)
+    check("sint05", typeof over === "number")       // NOT "object" - the whole point
+    check("sint06", sintStr(over) === "9007199254740993")
+    // A box therefore pins the type class "number", so the variable may go on to
+    // hold an ordinary one. This is the assertion that fails if typeof does not.
+    var pinned = over
+    pinned = 7
+    check("sint07", pinned === 7)
+    // The missing arguments default to 64 bits, signed.
+    check("sint08", sint(0, 7) === 7 && sintNum(sint(0, 255, 8)) === -1)
+    check("sint09", sintWidth(5) === 64 && sintUns(5) === false)
+    check("sint10", sintWidth(over) === 64 && sintUns(over) === false)
+
+    // ----- arithmetic at and beyond the 64 bit boundary -----
+    var mx = sint(2147483647, 4294967295, 64, 0)    // int64 max
+    check("sint11", sintStr(mx) === "9223372036854775807" && sintIs(mx) === true)
+    var mn = sintOp(0, mx, 1)                       // wraps to int64 min
+    check("sint12", sintStr(mn) === "-9223372036854775808")
+    check("sint13", sintStr(sintOp(1, mn, 1)) === "9223372036854775807")
+    check("sint14", sintCmp(mx, mn) === 1 && sintCmp(mn, mx) === -1 && sintCmp(mx, mx) === 0)
+    var mn2 = sint(2147483648, 0, 64, 0)
+    check("sint15", sintStr(mn2) === "-9223372036854775808" && mn2 === mn)
+    // int64min / -1 has no answer in range; the hardware wrap keeps it, and the
+    // remainder is 0 (si_apply and giArith both say so explicitly).
+    check("sint16", sintStr(sintOp(3, mn2, -1)) === "-9223372036854775808")
+    check("sint17", sintOp(4, mn2, -1) === 0)
+    check("sint18", sintOp(1, over, 1) === 9007199254740992 && sintIs(sintOp(1, over, 1)) === false)
+    check("sint19", sintStr(sintOp(0, over, 1)) === "9007199254740994")
+    check("sint20", sintOp(0, exact, 1) === over)
+    // The PLAIN operators are not sized-integer operators: they read the box
+    // through to_number and compute in doubles, which is where the low bit goes.
+    check("sint21", over - 1 === 9007199254740991)
+    check("sint22", "" + over === "9007199254740993")
+    // A box compares by VALUE under ===, and under == it is neither a number nor
+    // a string, so the loose comparison is false. Both halves are odd here in
+    // exactly the same way.
+    var b8 = sintConv(5, 8, 0)
+    check("sint23", (b8 === 5) === true && (b8 == 5) === false)
+    check("sint24", b8 < 6 && b8 > 4 && b8 <= 5 && b8 >= 5)
+
+    // ----- signedness: the 64 bit unsigned reading -----
+    var um = sint(4294967295, 4294967295, 64, 1)
+    check("sint25", sintStr(um) === "18446744073709551615")
+    check("sint26", sintWidth(um) === 64 && sintUns(um) === true)
+    check("sint27", sintCmp(um, 0) === 1)           // unsigned, so ABOVE zero
+    check("sint28", sintStr(sintConv(um, 64, 0)) === "-1" && sintCmp(sintConv(um, 64, 0), 0) === -1)
+    check("sint29", sintNum(um) > 0 && um > 0)
+    check("sint30", sintOp(0, um, 1) === 0 && sintIs(sintOp(0, um, 1)) === true)
+    check("sint31", sintStr(sintOp(0, um, 1)) === "0")
+
+    // ----- width, and the wrap every operator does on overflow -----
+    var i8 = sint(0, 127, 8, 0)
+    check("sint32", sintWidth(i8) === 8 && sintUns(i8) === false && sintIs(i8) === true)
+    check("sint33", sintNum(sintOp(0, i8, 1)) === -128 && sintStr(sintOp(0, i8, 1)) === "-128")
+    check("sint34", sintNum(sintOp(0, sint(0, 255, 8, 1), 1)) === 0)
+    check("sint35", sintNum(sintOp(1, sint(0, 0, 8, 1), 1)) === 255)
+    check("sint36", sintNum(sintOp(0, sint(0, 32767, 16, 0), 1)) === -32768)
+    check("sint37", sintNum(sintOp(1, sint(0, 0, 32, 1), 1)) === 4294967295)
+    check("sint38", sintNum(sintOp(0, sint(0, 2147483647, 32, 0), 1)) === -2147483648)
+
+    // ----- conversion between widths and signednesses -----
+    check("sint39", sintNum(sintConv(300, 8, 0)) === 44)
+    check("sint40", sintNum(sintConv(-1, 8, 1)) === 255 && sintNum(sintConv(-1, 16, 1)) === 65535)
+    check("sint41", sintNum(sintConv(-1, 32, 1)) === 4294967295)
+    check("sint42", sintStr(sintConv(-1, 64, 1)) === "18446744073709551615")
+    check("sint43", sintConv(-1, 64, 0) === -1 && sintIs(sintConv(-1, 64, 0)) === false)
+    check("sint44", sintNum(sintConv(i8, 32, 0)) === 127 && sintWidth(sintConv(i8, 32, 0)) === 32)
+    check("sint45", sintNum(sintConv(sintConv(200, 8, 1), 8, 0)) === -56)
+    check("sint46", sintStr(sintConv(mx, 64, 1)) === "9223372036854775807")
+
+    // ----- shifts: a count at or above the width is defined, unlike in C -----
+    var sh = sintOp(9, 1, 62)
+    check("sint47", sintStr(sh) === "4611686018427387904" && sintIs(sh) === true)
+    check("sint48", sintOp(10, sh, 62) === 1)
+    check("sint49", sintNum(sintOp(9, sint(0, 3, 8, 0), 8)) === 0)
+    check("sint50", sintNum(sintOp(10, sint(0, 240, 8, 0), 100)) === -1)   // signed: clamps to w-1
+    check("sint51", sintNum(sintOp(10, sint(0, 240, 8, 1), 100)) === 0)    // unsigned: everything out
+    check("sint52", sintNum(sintOp(10, sint(0, 240, 8, 0), 1)) === -8)
+    check("sint53", sintNum(sintOp(10, sint(0, 240, 8, 1), 1)) === 120)
+
+    // ----- the bitwise operators, and division's truncation toward zero -----
+    check("sint54", sintOp(5, 12, 10) === 8 && sintOp(6, 12, 10) === 14)
+    check("sint55", sintOp(7, 12, 10) === 6 && sintOp(8, 12, 10) === 4)
+    check("sint56", sintOp(3, -7, 2) === -3 && sintOp(4, -7, 2) === -1)
+    check("sint57", sintNum(sintOp(3, sint(0, 200, 8, 1), 3)) === 66)
+    check("sint58", sintNum(sintOp(3, sint(0, 200, 8, 0), 3)) === -18)
+    check("sint59", sintNum(sintOp(4, sint(0, 200, 8, 0), 3)) === -2)
+
+    // ----- the two halves back out, and the text of a non-box -----
+    check("sint60", sintHi(mx) === 2147483647 && sintLo(mx) === 4294967295)
+    check("sint61", sintHi(5) === 0 && sintLo(5) === 5)
+    check("sint62", sintHi(-1) === 4294967295 && sintLo(-1) === 4294967295)
+    check("sint63", sintStr(sint(sintHi(um), sintLo(um), 64, 1)) === "18446744073709551615")
+    check("sint64", sintStr(42) === "42" && sintStr("x") === "x" && sintNum(3.5) === 3.5)
+    // a compound assignment reaches the same operator path
+    var acc = 0
+    acc += b8
+    check("sint65", acc === 5)
+
+    // ----- the four rules that only a 64 BIT operand can see -----
+    // Measured: with an 8 bit operand each of these passes whatever the
+    // implementation does, because the truncation to the width hides it. They
+    // are the assertions that discriminate, so they are spelled at 64 bits.
+    // A shift count at or above 64: the clamp to w-1 and the "everything out"
+    // rule are real here, where the pair arithmetic would otherwise take the
+    // count modulo 64 and shift by zero.
+    check("sint66", sintOp(10, mx, 64) === 0 && sintOp(10, mn, 64) === -1)
+    check("sint67", sintStr(sintOp(9, mx, 63)) === "-9223372036854775808" && sintOp(9, mx, 64) === 0)
+    // Unsigned division and an unsigned right shift, where the raw 64 bit value
+    // is NEGATIVE read as a signed one - the only place the two paths differ.
+    check("sint68", sintStr(sintOp(3, um, 2)) === "9223372036854775807")
+    check("sint69", sintStr(sintOp(4, um, 10)) === "5")
+    check("sint70", sintStr(sintOp(10, um, 1)) === "9223372036854775807" && sintOp(10, um, 63) === 1)
+    // The LEFT operand decides the result type where both are boxes, so this one
+    // pair compares unsigned one way round and signed the other - and answers 1
+    // both times, for two different reasons.
+    check("sint71", sintCmp(um, mx) === 1 && sintCmp(mx, um) === 1)
+}
+
 function main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -828,6 +966,7 @@ function main() {
     s21() // SECTION-CALL 21
     s22() // SECTION-CALL 22
     s23() // SECTION-CALL 23
+    s24() // SECTION-CALL 24
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

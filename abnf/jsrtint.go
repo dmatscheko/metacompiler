@@ -327,6 +327,109 @@ func (rt *jsrt) giConv(x interface{}, w uint8, u bool) interface{} {
 	return giNorm(giVal(rt, x), w, u)
 }
 
+// giOpNames is sintOp's operator table: the same 0..10 indexing
+// languages/lib/runtime.c's si_apply uses, so the two halves take one number
+// rather than an operator string across the boundary.
+var giOpNames = []string{"+", "-", "*", "/", "%", "&", "|", "^", "&^", "<<", ">>"}
+
+// giBindings adds the ELEVEN sint* host globals that languages/lib/runtime.c
+// seeds (host ids 40..50, `seed_root("sint", mk_host(40))` and the ten after
+// it) to a program's global set.
+//
+// WHY IT IS HERE. A natively linked program reaches a sized integer through
+// those names; a program run by llvm.Run reaches the very same runtime through
+// abnf/jsrt*.go, and until this existed it reached NOTHING - `sint` was
+// "variable not defined" in the Go half while it worked in the C one. A layer-2
+// file written against the C floor (languages/lib/lua-rt.metajs is the first)
+// therefore could not be run by llvm.Run at all, and no MetaJS source program
+// could pin the tag's semantics in a test that both halves run. Every function
+// below is the same giXxx the C floor's si_xxx transliterates, so the three
+// engines (goja/frozen interpreter, llvm.Run, native) implement one spec.
+func giBindings(b map[string]interface{}) {
+	// sint(hi, lo, bits, unsigned): two UNSIGNED 32 bit halves, because a
+	// MetaJS number is a double and cannot carry 64 bits exactly. bits
+	// defaults to 64 and unsigned to false, matching the floor's `n > 2` /
+	// `n > 3`. The result goes through giNorm, so it is a PLAIN NUMBER
+	// whenever the invariant says so.
+	b["sint"] = jsHostFunc("sint", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		hi := uint64(giFromFloat(rt.toNumber(argAt(args, 0)))) & 0xffffffff
+		lo := uint64(giFromFloat(rt.toNumber(argAt(args, 1)))) & 0xffffffff
+		w := uint8(64)
+		if len(args) > 2 {
+			w = uint8(jsToInt(rt.toNumber(args[2])))
+		}
+		u := false
+		if len(args) > 3 {
+			u = rt.truthy(args[3])
+		}
+		return giNorm(int64(hi<<32|lo), w, u)
+	})
+	b["sintIs"] = jsHostFunc("sintIs", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return giIsInt(argAt(args, 0))
+	})
+	// The two halves back out, both read UNSIGNED - si_u(si_val(v), 64) >> 32
+	// and si_val(v) & 0xffffffff.
+	b["sintHi"] = jsHostFunc("sintHi", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return float64(uint64(giVal(rt, argAt(args, 0))) >> 32)
+	})
+	b["sintLo"] = jsHostFunc("sintLo", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return float64(uint64(giVal(rt, argAt(args, 0))) & 0xffffffff)
+	})
+	b["sintWidth"] = jsHostFunc("sintWidth", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		v := argAt(args, 0)
+		w, _ := giWidthOf(v, v)
+		return float64(w)
+	})
+	b["sintUns"] = jsHostFunc("sintUns", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		v := argAt(args, 0)
+		_, u := giWidthOf(v, v)
+		return u
+	})
+	// One binary operator by INDEX (see giOpNames). An index the table does not
+	// have answers giNorm(0), which is what si_apply's `long x = 0` with no arm
+	// taken produces - stated rather than approximated, so the halves agree even
+	// on a caller's mistake.
+	b["sintOp"] = jsHostFunc("sintOp", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		c := jsToInt(rt.toNumber(argAt(args, 0)))
+		l, r := argAt(args, 1), argAt(args, 2)
+		if c < 0 || c >= len(giOpNames) {
+			w, u := giWidthOf(l, r)
+			return giNorm(0, w, u)
+		}
+		return rt.giArith(giOpNames[c], l, r)
+	})
+	b["sintCmp"] = jsHostFunc("sintCmp", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return float64(rt.giCmp(argAt(args, 0), argAt(args, 1)))
+	})
+	b["sintConv"] = jsHostFunc("sintConv", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return giNorm(giVal(rt, argAt(args, 0)),
+			uint8(jsToInt(rt.toNumber(argAt(args, 1)))), rt.truthy(argAt(args, 2)))
+	})
+	// The decimal text and the double reading. A non-box passes through the
+	// ordinary toString / toNumber, exactly as si_str's `if (tag_of(v) == 13)`
+	// and si_float's do.
+	b["sintStr"] = jsHostFunc("sintStr", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		if g, ok := argAt(args, 0).(jsGInt); ok {
+			return giStr(g)
+		}
+		return rt.toString(argAt(args, 0))
+	})
+	b["sintNum"] = jsHostFunc("sintNum", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return giFloat(rt, argAt(args, 0))
+	})
+}
+
+// programJSBindings is standardJSBindings plus the sint* family: the host set of
+// a RUNNING program (runJSModule), which is the only place a sized integer can
+// appear. The GRAMMAR script hosts deliberately keep the standard set, so that
+// goja (commonscript.go) and the frozen engine still bind the same names and a
+// tag script cannot come to depend on one of them.
+func programJSBindings() map[string]interface{} {
+	b := standardJSBindings()
+	giBindings(b)
+	return b
+}
+
 func init() {
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		u := rt.unwrap

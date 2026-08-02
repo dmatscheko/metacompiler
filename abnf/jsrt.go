@@ -8519,7 +8519,7 @@ func (e jsProgramPanic) String() string { return e.msg }
 func runJSModule(m *ir.Module, entry string) *RunResult {
 	maybeDumpCFG(m)
 	maybeDumpCallgraph(m)
-	rt := newJSRT(standardJSBindings())
+	rt := newJSRT(programJSBindings())
 	rt.enableTrace()
 	ma := rt.attach(m)
 	// An exception that escapes the program's entry point is an uncaught throw;

@@ -532,6 +532,7 @@ KwDefault   = "default" KwEnd ;
     // quietly falls back to the external - visible as a leftover `declare` in the
     // emitted module, which is exactly the measurement.
     callExt = function(b, name, args) {
+        noteExt(name)   // compile-core's block-scope elision counts declarations here.
         var sh = primShim["$" + name]
         if (sh != undefined) { return b.NewCall(sh, args) }
         return b.NewCall(getExtern(name, args.length), args)
@@ -607,6 +608,10 @@ KwDefault   = "default" KwEnd ;
         var savedScope = curScopeV
         var savedLoops = loopStack
         var savedTag = curFTag
+        // A nested function's declarations land in ITS frame, so they must not make the
+        // block that contains the function look like a block that declares (compile-core
+        // makeBlockStmt / declCount).
+        var savedDecl = declCount
         curF = f
         curFTag = idx
         loopStack = []
@@ -627,6 +632,7 @@ KwDefault   = "default" KwEnd ;
         curScopeV = savedScope
         loopStack = savedLoops
         curFTag = savedTag
+        declCount = savedDecl
         return idx
     }
     function makeFunctionExpr(bodyT, paramNames) {
@@ -942,6 +948,7 @@ KwDefault   = "default" KwEnd ;
     if (rtLib) {
         funcCount = 1000000
         strCount = 1000000
+        numCount = 1000000   // jsnum./jsnumg. are module-level symbols too (compile-core emitNum).
     }
 
     // Build the module out of the parsed program.

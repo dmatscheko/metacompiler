@@ -7,7 +7,7 @@ forward plan. HEAD when it was written: `e8bf2c3`.
 ## Where things stand
 
 ```
-matrix 325/325 · --full 5,307 assertions, 0 halves disagree · --cross 119/0
+matrix 325/325 · --full 5,504 assertions, 0 halves disagree · --cross 119/0
 clang-check 16/16 - bash, batch, c, lua, metajs all "the clang executable agrees"
 ```
 
@@ -22,42 +22,230 @@ languages.
 
 # Part 1 - Memory, which gates everything else
 
-Allocation is down 2.6x (18,072 -> 7,006 bytes per loop iteration) but **still exactly
-linear**. A program that runs for a minute cannot be fixed by allocating less. Rolling
-out eleven more languages on top of an unbounded-memory runtime multiplies the problem
-by eleven, so this comes first.
+Allocation is down 5.0x since phase 4a (18,072 -> 3,616 bytes per loop iteration; the
+last halving is 1a below, 2026-08-03) but **still exactly linear**. A program that runs
+for a minute cannot be fixed by allocating less. Rolling out eleven more languages on
+top of an unbounded-memory runtime multiplies the problem by eleven, so this comes
+first.
 
-The residual, per iteration of `s = s + i % 7`, is live data rather than waste:
+The residual, per iteration of `s = s + i % 7`, is live data rather than waste. The
+figures 1a was written against, and what it left:
 
 ```
-33 scope cells      1,848 B   one per call AND one per block (makeBlockStmt)
-20 scope buffers    1,920 B   the scopes that do declare something
-26 number cells     1,456 B   intermediates outside the small-integer window
-12 array cells +    1,056 B   the argument array of every call
- 1 object cell        120 B
+                       before 1a          after 1a
+scope cells        37   2,368 B     14      896 B
+buffers            34   2,368 B     19    1,504 B   scope/array/object storage
+number cells       26   1,664 B     14      896 B
+array cells        12     768 B      5      320 B   the argument array of every call
+object cells        1      64 B      0        0 B
+                       7,232 B           3,616 B
 ```
 
 Two directions. They are not alternatives: the first reduces garbage, the second
 reclaims it. **Do them in this order** - every allocation removed by step 1 is one the
 collector never has to trace, and step 1 is also where the remaining ~4.8x of TIME is.
 
-## 1a. Stop generating the garbage (emitter, no GC needed)
+## 1a. Stop generating the garbage (emitter, no GC needed) - DONE 2026-08-03
 
-- **Inline the layer-2 fast paths into the IR.** Three of the five lines above exist
-  because a Lua `+` is a MetaJS *call*: it costs a scope, an argument array and its
-  intermediates. Phase 4 measured an inlined plain-number fast path as the single
-  biggest win of that phase (497s -> 29.5s). Doing it in the emitter removes the call
-  and everything under it in one move.
-- **`makeBlockStmt` opens a scope per BLOCK**, 33 against 9 actual calls - three
-  quarters never declare anything. Fixable in `lib/compile-core.js` alone. The
-  difficulty is that the thunk is already emitted by the time you know whether the
-  block declares anything; solving that probably means a two-pass emit or a
-  patch-after-the-fact.
-- **Widen the small-integer cache** and check whether the 26 number cells are mostly
-  just outside its window before assuming they are not.
+**Allocation per iteration of `s = s + i % 7` is halved: 7,232 -> 3,616 bytes, exactly
+-50.0%.** Four emitter changes, no floor change - `lib/runtime.c` and `lib/runtime.ll`
+are byte-identical to `f19a8ad`, and `tests/gen-runtime-ll.sh --check` says so.
 
-Gate: re-run `tests/bench-alloc.sh` and report bytes/iteration. Target the scope and
-array lines specifically; if a change does not move them, it did not work.
+### The measurement
+
+Counters compiled into a SCRATCH copy of `runtime.c` (`mk_scope`, `mk_arr`,
+`mk_num_raw`, `mk_obj`, `buf_new`, `ar_alloc`), differenced between 100,000 and 101,000
+iterations so the figure is the STEADY state - at 100 iterations the loop counter is
+still sweeping fresh values into the small-integer cache and the number line reads
+20.4 instead of 26. `ar_alloc` rounds to 16, so a 56-byte cell costs 64.
+
+```
+                     f19a8ad              HEAD+           per-line
+scope cells      37   2,368 B      14      896 B          -62%
+buffers          34   2,368 B      19    1,504 B          -36%
+number cells     26   1,664 B      14      896 B          -46%
+array cells      12     768 B       5      320 B          -58%
+object cells      1      64 B       0        0 B         -100%
+arena calls     110                 52
+arena bytes          7,232 B           3,616 B            -50.0%
+```
+
+`tests/bench-alloc.sh`, which reads the same number off peak RSS, agrees within 0.5%:
+
+```
+                 f19a8ad                       HEAD+
+iters=50000      bytes/iter=7283               bytes/iter=3652
+iters=100000     bytes/iter=7272               bytes/iter=3641
+iters=200000     bytes/iter=7266               bytes/iter=3636
+iters=400000     bytes/iter=7263               bytes/iter=3633
+```
+
+### Time, from clean archives built and run in their own trees
+
+`git archive f19a8ad | tar x` in one directory, the working tree in the other, `go
+build` inside each. Three runs of `/usr/bin/time -p`, user seconds; every program
+printed the right answer and exited 0 (a crashing binary looks fast).
+
+```
+                            f19a8ad            HEAD+          RSS
+lua  s = s + i%7, 2M      4.28 4.38 4.37     2.83 2.89 2.87   13,849 -> 6,925 MB
+lua  fib(26)              0.38 0.39 0.39     0.35 0.35 0.36    1,157 ->   929 MB
+metajs try/catch, 2M      1.98 2.02 2.01     1.92 1.99 1.96    2,453 -> 1,881 MB
+```
+
+The Lua loop is **-34% wall clock and -50% memory**. `fib(26)` is -8%: it is call and
+scope bound, and its calls are the ones that really do declare. The try/catch benchmark
+is inside the noise on time and -23% on memory - it allocates for reasons this phase did
+not touch (a fresh closure frame per try body).
+
+The **Go** half improves too, since it is the same emitted IR: `llvm.Run` on the 200,000
+iteration loop went 0.51s / 198 MB -> 0.27s / 34 MB.
+
+### What changed
+
+1. **`makeBlockStmt` no longer opens a scope for a block that binds nothing**
+   (`lib/compile-core.js`, so all fifteen compilers). The stated difficulty - the thunk
+   is emitted before you know - is solved with a **one-entry phi**: the scope creation
+   gets a block of its own that stays empty and unterminated while the body is emitted
+   against a phi reading from it, and the phi's incoming value is written afterwards.
+   Everything is an APPEND (the header's terminator goes on last, after the
+   `js_scope_new`), so no instruction is moved or removed. `phi.Incs` is assignable from
+   a tag script under BOTH engines - verified before the change was written.
+
+   Whether the block bound anything is a counter, `declCount`, bumped by every emitted
+   call to a scope-writing extern. The set is the scope-taking externs MINUS the eight
+   proven read-only (`js_scope_get`, `js_scope_typeof`, `js_kget`, `js_ktget`,
+   `js_scope_set` and `js_tset` - which walk the chain and DIE if the name is absent -
+   `js_scope_new`, `js_closure`), so a name nobody listed is counted as declaring, which
+   is the safe direction. The soundness argument is one line: **a scope nothing was
+   bound in is transparent to lookups**, so capturing it and capturing its parent are
+   the same thing. `declCount` is restored when a block or a function ends, because what
+   they bound went into THEIR scope.
+
+   `metajs-to-llvm-ir.abnf` replaces `callExt` (for `-rt-prims` routing), so it calls
+   `noteExt` itself; a grammar that replaces `callExt` and forgets that would lose a
+   scope. Grammars that override `makeBlockStmt` (c, csharp, go) keep the old behaviour
+   and simply do not get the win.
+
+   Effect on the benchmark: 21 -> 14 scope cells. Deleting block scopes ENTIRELY (wrong,
+   but it measures the ceiling) gives 5, so the 9 blocks that remain really do declare.
+
+2. **A numeric literal outside the floor's small-integer cache is boxed once, not once
+   per execution** (`lib/compile-core.js`, `emitNum`). Each distinct constant gets a
+   memoizing getter function of its own - one global holding the handle, filled on first
+   use, handle 0 as the empty marker (never a number, it is `undefined`). A FUNCTION
+   rather than an inline branch because `emitNum` answers a value, not a `{b, v}`, and a
+   hundred call sites cannot take a block split. `-256..1024` stays a direct `js_num_i`:
+   the floor already answers those without allocating.
+
+   This is what the "widen the small-integer cache" item turned into once the
+   distribution was actually measured - see below. Effect: 26 -> 14 number cells.
+
+3. **Lua's numeric `for` stopped throwing away half of its work**
+   (`lua-to-llvm-ir.abnf`, `makeNumFor`). The loop test was
+   `select(stepPos, lua_cmp(<=), lua_cmp(>=))` - and a `select` evaluates both operands,
+   so every iteration made two layer-2 calls and discarded one, twice over (the head
+   test and the wrap test). Both are branches now, with a phi. The sign of the step is
+   also loop INVARIANT (nothing can reassign `$fs`, the name is unspellable in Lua) and
+   was being recomputed twice per iteration through `lua_num`; it is hoisted into the
+   preheader. Four layer-2 calls per iteration removed out of eleven.
+
+4. **A one-target, one-value assignment skips the positional array**
+   (`lua-to-llvm-ir.abnf`, `makeAssign` and `makeLocal`). `lua_first(v)` IS
+   `js_get(appendall([], v), 0)` for every `v`, the empty multi-value included - both
+   answer nil. The array cost an arena cell and a four-slot buffer inside every loop body
+   that assigns.
+
+Cumulative, in order (arena bytes per iteration at i≈100, the figure each step was
+measured against): 6,876 -> 4,892 (3) -> 4,475 (4) -> 4,027 (1) -> 3,616 (2).
+
+### The small-integer cache: measured, and NOT widened
+
+The item said to check the distribution before assuming. The 26 number cells of a
+baseline iteration are:
+
+```
+already in the -256..1024 cache      0.00     (nothing missed it)
+integral, |v| <= 65536               1.14
+integral, |v| <  2^31                6.00
+integral, |v| >= 2^31               18.00     min -2147483649  max 9007199254740992
+non-integral                         0.86
+```
+
+**Eighteen of the twenty-six were not near the window at all** - they are the guard
+constants of layer 2's own fast path, `lv > -2147483649 && lv < 2147483648` and the
+`+-9007199254740992` product test in `js_luarith`, re-boxed on every call. No cache of
+any plausible width would have caught them; change 2 did (18 -> 6). What a wider cache
+could still reach is the 1.14 cells per iteration in the 1,025..65,536 band, and those
+are the genuine live values of `i` and `s`: **at most 73 bytes of 3,616, or 2%, in
+exchange for a 512 KB table in the floor**. Not worth a floor change, and none was made.
+
+### The item that was NOT done, and why
+
+**Inlining the layer-2 arithmetic fast path into the emitted IR was ranked first and is
+not implemented.** The reason is a constraint the ranking did not account for: the
+emitted IR runs in TWO worlds - natively against the C floor, where a handle is a
+`Cell *`, and under `llvm.Run` against `abnf/jsrt.go`, where it is an index into a Go
+table - and they must stay byte-identical. So an inlined fast path may not touch the
+representation; it can only be spelled in externs, and it would need `js_typeof`,
+`js_seq` and four range compares against `+-2^31` per operand. It is still likely a win
+now that change 2 makes those bounds free, but it is a real piece of work in the Lua
+emitter rather than the cheap move it looked like, and it should be costed against
+1b rather than assumed.
+
+What change 3 shows is that the CALLS were half the problem anyway: four of the eleven
+layer-2 calls per iteration were pure waste from a `select` and a loop-invariant read,
+and removing them was 29% of the total on its own.
+
+### Gate and verification (at the working tree, `f19a8ad` + this change)
+
+```
+./test.sh              matrix 325/325, all green
+./test.sh --full       5,504 assertions, 0 languages whose halves disagree
+                       (grep 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF': no hits)
+./test.sh --cross      119 programs compared, 0 divergent
+tests/clang-check.sh   16/16; bash, batch, c, lua, metajs all
+                       "ok, and the clang executable agrees"
+go test ./abnf/        ok
+gen-runtime-ll.sh --check   runtime.ll is up to date (40311 lines)  <- floor untouched
+gen-bash-rt-ll.sh --check   up to date        gen-batch-rt-ll.sh --check  up to date
+gen-lua-rt-ll.sh  --check   up to date (14314 lines, regenerated)
+```
+
+`abnf/jsbootstrap.ll` and `abnf/jsagrammar.go` are **regenerated, not byte-identical** -
+and that is correct rather than a miss: the snapshot inlines `lib/compile-core.js`, so a
+change to the emitter MUST reach it or the frozen half quietly keeps compiling tag
+scripts with the old one. `mec -freeze languages/metajs-to-llvm-ir.abnf` is a fixed
+point afterwards (same MD5 on a re-freeze with the rebuilt binary), and every suite
+above was re-run against the new snapshot.
+
+One trap found on the way, worth the next person's time: `-rt-lib` renumbers
+`funcCount`/`strCount` to 1,000,000 so a library module's symbols cannot collide with
+the program module's. The new `jsnum.` / `jsnumg.` globals are module-level symbols too
+and needed the same treatment - without it `clang` failed with `duplicate symbol
+'_jsnum.1'`, which is a LINK error and therefore loud. Anything else that ever gets a
+generated module-level name needs the same line.
+
+### What is left on this line
+
+The 3,616 bytes still split 42% buffers (14 scope buffers of 96 B + 5 array buffers of
+32 B), 25% scope cells, 25% number cells, 9% arrays. Every scope that exists now
+declares something, so the buffer line and the scope line are the same 14 scopes twice.
+
+**One thing tried and measured at zero, so it is not in the change.** Every MetaJS
+function declares `arguments` whether or not the body mentions it, which looks like a
+free 96 bytes per frame. It is not: a scope buffer starts at capacity 4 and holds three
+parallel arrays, so `js_luarith`'s three parameters plus `arguments` fit in exactly the
+same one allocation that three alone would take. Deleting the `arguments` declaration
+outright (wrong, but it bounds the win) leaves the benchmark at **3,616.00 bytes per
+iteration - identical to the digit**. It would only pay for a function with 4 or more
+parameters, where the extra entry forces the doubling to capacity 8.
+
+The honest next targets are therefore the 14 scopes themselves - which means the
+argument-array-and-frame cost of a MetaJS CALL, i.e. direct IR calls with i64 parameters
+for a known top-level callee instead of `js_arr_new` + `js_call` + a scope of
+`js_tdecl`s - and the inlined arithmetic fast path costed above. Both are larger than
+anything in this phase.
 
 ## 1b. Mark/sweep over the arena
 
@@ -114,16 +302,28 @@ combinations x 32 seeds, then 11 operators x 32 x 32 per combination, plus `giCm
 **Two places it cannot match, stated rather than approximated:**
 
 - `giFromFloat` ends in `int64(m)` on a value that is NaN when the operand is an
-  infinity, and Go leaves that conversion *implementation defined*. Measured here
-  (darwin/arm64) it is `0`; on amd64 the same expression is `-9223372036854775808`.
-  The floor implements `0`, so the two halves agree on arm64 and **both would differ
-  from a Go twin built for amd64**. Same architecture dependence as the float `%` of
+  infinity, and Go leaves that conversion *implementation defined*. **Re-measured
+  2026-08-03 on both architectures**, by building the expression out of `jsrtint.go`
+  twice: `GOARCH=arm64` answers `0`, `GOARCH=amd64` (same machine, under Rosetta)
+  answers `-9223372036854775808`. There are now THREE implementations, not two, and
+  the odd one out is the Go twin: the C floor's `si_from_float` returns `0` from an
+  explicit `if (d_is_inf(b))`, and the interpreter half's `i64FromNum` reaches `0`
+  *structurally* - `Inf - Inf` is NaN and `NaN >>> 0` is `0` - so both are
+  architecture independent by construction and only the Go twin moves. Measured
+  across all five engines here (interpreter goja, interpreter `-frozen`, compiler
+  goja, compiler `-frozen`, native): `sintConv(1/0, 64, 0)` is `0` in every one.
+  **SECTION 24 deliberately asserts nothing about an infinity**, so the ratchet
+  itself stays architecture independent. Same dependence as the float `%` of
   phase 4a.
 - `js_giarith` and `js_giadd` in `jsrtint.go` route a `jsJFlo` (the boxed double of
   `jsrtjvm.go`) to `jvmArith` before reaching `giArith`. `jsJFlo` is a *second*
   primitive type the floor does not have, so those arms are absent. Nothing linked
   natively creates one today, and **the first of java/kotlin/csharp to migrate will
-  need `jsJFlo` given exactly the treatment `jsGInt` just got.**
+  need `jsJFlo` given exactly the treatment `jsGInt` just got.** Checked against the
+  `sint*` work of 2026-08-03 rather than assumed: `sintOp` calls `rt.giArith`
+  **directly**, not `js_giarith`, so it never reaches the `jvmArith` detour, and no
+  `sint*` binding in either half has a float-box arm to be wrong about. Nothing here
+  quietly assumes a `jsJFlo` exists or that it does not.
 
 **The alternative was costed and rejected.** "Stop asking `js_typeof` about a number"
 is not one change: it is a rule every layer-2 file of all eleven languages has to keep
@@ -202,15 +402,154 @@ nonsense - `0 - i` wraps back to `i`, so the top-bit scan ran zero times. Unreac
 until `si_float` passed a raw `int64` in; the probe read `-1` where Go reads
 `-9223372036854775808`.
 
-**The one gate item NOT met.** The sized-integer semantics could not be pinned in
-`tests/metajs-test-full.js`. That file is run by **both** MetaJS halves, and
-`metajs-interpreter.abnf` binds its host globals to **goja natives** (`hostGlobals`),
-so a MetaJS *source* program cannot reach a `jsGInt` there at all; a section using
-`sint(...)` would be a red section and would cost the whole half's 326 assertions -
-precisely the 51-assertion trap recorded under `c-interpreter` below. The fix is a
-handful of lines in `metajs-interpreter.abnf`: a goja-`BigInt` implementation of the
-six `sint*` globals, added to `hostGlobals`. It was outside the file set for this
-change and is the natural first step of the java migration.
+~~**The one gate item NOT met.** The sized-integer semantics could not be pinned in
+`tests/metajs-test-full.js`.~~ **DONE 2026-08-03 - SECTION 24, 71 assertions,
+metajs 326 -> 397.** Both halves run it and agree byte for byte, stdout and stderr,
+under goja and `-frozen`; the clang-built native binary agrees too. `--full` is
+**5,504 assertions, 0 languages whose halves disagree**; matrix 325/325, `--cross`
+119/0, clang-check 16/16 (`metajs ... ok, and the clang executable agrees`),
+`go test ./abnf/` ok.
+
+**It was not the handful of lines this paragraph predicted, and the reason is a
+THIRD implementation nobody had counted.** `sint` did not exist in the Go twin
+either: `abnf/jsrt.go`'s `standardJSBindings` never bound the eleven names, so
+
+```
+$ mec languages/metajs-to-llvm-ir.abnf prog.js
+js runtime error: variable not defined: sint
+```
+
+The C floor seeds them (`seed_root("sint", mk_host(40))` and the ten after it) and
+`llvm.Run` did not, so the *compiler* half was only half converted: a layer-2 file
+written against the floor could be linked natively but not run by `llvm.Run`. Lua
+did not notice because `lua-to-llvm-ir.abnf` emits `js_lu*` externs under
+`llvm.Run` and only reaches `lua-rt.metajs` through `lua-rt.ll` in the `-exe` path.
+So the work is in three files, one per engine:
+
+- **`abnf/jsrtint.go`** - `giBindings`, the eleven `sint*` globals over `jsGInt`,
+  plus `programJSBindings` (= `standardJSBindings` + those), which `runJSModule`
+  now uses. Deliberately NOT `standardJSBindings` itself: that one also backs
+  `frozenBaseBindings`, and the grammar-script hosts (goja's in
+  `commonscript.go` and the frozen one) must keep binding the same names or a tag
+  script can come to depend on one engine.
+- **`languages/metajs-interpreter.abnf`** - the interpreter half. **`BigInt` is
+  the wrong vehicle**, which is worth writing down: the grammar's `:script` runs
+  under goja *and* under the frozen MetaJS engine, and the frozen one has no
+  `BigInt`. The right one was already in the tree - `lib/interp-core.js`'s
+  `{__sz}` box over `{h, l}` 32-bit pairs, itself validated against `go run` over
+  156,490 vectors - so the box is that and the new code is only the floor's
+  `si_*` transliterated onto it.
+- **`tests/metajs-test-full.js`** - SECTION 24.
+
+**The price, and it is the interesting part.** A sized integer answering
+`typeof == "number"` is not a property of a value in this half - values here ARE
+the host engine's - so it is a property of the *interpreter*, and every place a
+program can tell an object from a number had to be routed through the floor's
+answer. There are five, and four are converted:
+
+```
+typeof v         siTypeof, wired into makeTypeof
+the pinned type  siTypeof, wired into typeClass   <- var v = box; v = 7 is legal
+an operator      siBinOp: to_number / to_string / the strict_eq, loose_eq and
+                 js_compare arms of runtime.c, dispatched from binOp behind a
+                 typeof guard (measured: no cost, 2.43s -> 2.41s on a 400k loop)
+println / print  the digit text, as fmt.Fprintln of the int64 gives there
+TRUTHINESS       NOT converted - see below
+```
+
+`truthy()` answers `fa(h) != 0` for tag 13, so **`if (sint(0, 0, 8, 0))` is false
+in the other half and true here**: the condition is the host engine's own `if`,
+and the statement builders live in `lib/interp-core.js`. Stated at the site and
+deliberately not asserted. Two smaller ones for the same reason: `x++` on a box
+(`makeIncDec`'s `v - 0`), and `printf`/`sprintf`, which are left unwrapped on
+purpose because their `%d` takes the Go `int64` in the other half and would print
+`%!d(string=...)` if this one passed the digits.
+
+One faithfully odd thing SECTION 24 pins rather than smooths: `box == 5` is
+**false** while `box === 5` is **true**. `loose_eq`'s
+`(ta == 3 || ta == 4) != (tb == 3 || tb == 4)` line sees a box as neither a number
+nor a string, while `strict_eq` has an explicit tag-13 arm that compares by value.
+The C floor and the Go twin do this independently and identically, so it is the
+specification, not a slip.
+
+**Discriminating power, measured.** Against a clean `git archive` of f19a8ad:
+
+```
+interpreter half   71 of 71   `sint` is not defined - the section cannot run
+llvm.Run half      71 of 71   same
+NATIVE binary       0 of 71   the C floor already implemented all of it
+```
+
+That 0 is the useful number, not a gap: the native column is the *oracle*. The
+binary built by f19a8ad's own untouched grammar and `runtime.c` runs all 71 new
+assertions green, which is what says the two implementations written here match
+the one that already existed rather than matching each other. Mutating one
+behaviour at a time in the new code (ABORT = the half dies outright and costs its
+whole 397, the trap this section had to avoid):
+
+```
+                                                        interp   llvm.Run
+siNorm boxes every value instead of only outside 2^53      4         4
+sint()'s width argument ignored                           13        13
+sint()'s unsigned argument ignored                         -        15
+hi and lo swapped                                         31         -
+siTypeof answers typeof, not "number"                   1 + ABORT    -
+typeClass pins typeof, not siTypeof                          ABORT   -
+binOp does not dispatch to siBinOp                       8 + ABORT   -
+applyOp does not go through binOp (s += box)                 ABORT   -
+siStrictEq is identity                                     4         -
+loose == behaves like ===                                  1         -
+si_trunc always sign-extends                               5         -
+sintConv ignores signedness                                3         3
+siCmp always signed / the RIGHT operand wins the type    2 / 1       -
+siStr uses the signed reading for an unsigned box          3         -
+siNum reads a uint64 signed                                1         -
+signed >> does not clamp the count to w-1                  1         -
+<< ignores the count >= width rule                         1         -
+division always signed / unsigned >> reads signed        2 / 1       -
+sintHi reads the value signed                              -         1
+the + string arm of siBinOp                                1         -
+sintStr's giStr arm / sintNum's giFloat arm                -         0
+print/println box wrappers; siLooseEq's two-box arm;
+  siStr's signed-vs-unsigned split below 64 bits           0         -
+```
+
+The last three rows are the honest zeros. `sintStr`'s `giStr` arm and `sintNum`'s
+`giFloat` arm are **redundant in the Go twin** - `rt.toString` and `rt.toNumber`
+already have `jsGInt` cases that do exactly that - and are kept only because they
+say what they mean, the same call the floor's `if (tag_of(v) == 13)` makes. The
+`println` wrappers are not exercised because the ratchet prints nothing but its
+own summary; they are pinned by hand instead (all five engines print
+`18446744073709551615` for a `println` of a `uint64` box) and left in because the
+alternative is `[object Object]` the first time anyone debugs with one. `siStr`'s
+unsigned reading below 64 bits cannot differ at all - the payload of an unsigned
+box under 64 bits is never negative.
+
+**Four assertions had to be rewritten after the measurement**, which is the whole
+argument for doing it. `>>` clamping to `w-1`, `<<` obeying count >= width,
+unsigned division and the unsigned `>>` all measured **0 of 4** as first written,
+because every one used an 8-bit operand and the truncation to the width hides the
+difference: an 8-bit value shifted right by anything at or above 8 is `0` or `-1`
+whether the count is clamped or taken modulo 64. Respelled at 64 bits
+(`sint66`-`sint70`) they discriminate 1, 1, 2 and 1. **The rule is worth carrying
+into the java migration: a sized-integer rule that only bites at the type's own
+width has to be asserted at 64 bits, or the assertion is decoration.**
+
+**One thing seen on the way that is NOT this change, recorded because a red line
+is information.** One `./test.sh --full` run in four reported
+`js-to-llvm-ir: FULL under goja, BUT -frozen fails or differs` and
+`js MISMATCH: 354 FROZEN-DIFF`. It did not reproduce: the other three `--full`
+runs were clean, and `js-to-llvm-ir.abnf` on `tests/js-test-full.js` hashes
+**identically over eight direct runs, five goja and three `-frozen`** (same
+`579ed36f...`, 1,012,563 bytes, empty stderr, exit 0 every time). The js grammar
+is untouched here and the only vector this change even has into it is eleven more
+entries in the map `newJSRT` seeds the root scope from. The `timeout 120`
+hypothesis was measured and rejected: the entry takes **19.0s wall under a 12-way
+parallel load**, nowhere near the limit. So the mechanism is still unidentified -
+most likely the process being killed, since a truncated `$work.f` is exactly what
+`cmp -s` would report. **`--full` should be treated as having a rare false
+positive on this line until someone catches it**; re-run before believing a lone
+`FROZEN-DIFF` on `js`.
 
 ~~**`c-interpreter.abnf` has no standard library.**~~ **DONE 2026-08-02.** `libcCall` in
 `languages/c-interpreter.abnf` now implements the 18 byte/address names (`strlen strcmp
@@ -319,10 +658,12 @@ php              101   1968
 Two adjustments to plain size order:
 
 1. ~~**The sized-integer floor tag (Part 2) lands before java, csharp, go and kotlin**~~
-   - **done** (tag 13 of `languages/lib/runtime.c`, 2026-08-02). What is left for those
-   four is `jsJFlo`, the boxed double of `abnf/jsrtjvm.go`, which is the same problem
-   one type over; and the six `sint*` globals in `metajs-interpreter.abnf`, without
-   which the MetaJS ratchet cannot pin either of them.
+   - **done** (tag 13 of `languages/lib/runtime.c`, 2026-08-02), and **done in all
+   three engines** since 2026-08-03: the eleven `sint*` globals now exist in the Go
+   twin (`giBindings`) and in the interpreter half (`metajs-interpreter.abnf`) too,
+   pinned by `tests/metajs-test-full.js` SECTION 24. What is left for those four is
+   `jsJFlo`, the boxed double of `abnf/jsrtjvm.go` - the same problem one type over,
+   and now with a worked three-engine example to copy.
 2. **js and typescript go together**, since typescript has no dedicated twin and shares
    js's. Same for ruby and python, whose semantics live in the shared `abnf/jsrt.go` -
    expect those two to drag more of the shared file with them than their extern count
