@@ -661,6 +661,144 @@ function s23()
     check("flo24", math.type("9223372036854775808" + 0), "float")
 end
 
+-- ===== SECTION 24: the sized integer, as a TYPE =====
+-- Section 22 pins the exact 64-bit VALUES; this one pins the TYPE that carries
+-- them. An integer outside +-2^53 cannot live in a double, so both halves put it
+-- in a sized integer: abnf/jsrtint.go's jsGInt in the Go runtime, tag 13 of
+-- languages/lib/runtime.c in the native binary (added 2026-08 - before that the
+-- native half had only an object box, for which js_typeof answered "object"
+-- where the Go twin answers "number").
+--
+-- MEASURED DISCRIMINATING POWER, and it is the finding rather than a weakness:
+-- 0 of these 67 fail against a clean archive of 660c47a, in all three engines.
+-- No LUA-LEVEL program can tell the object box from the tag - which is exactly
+-- the "Lua survived by luck of ordering" result of the phase-4 probe, restated
+-- as a measurement. What they do catch is the conversion's own failure modes:
+-- against a build whose js_lucmp asks `typeof` instead of luPlain, 2 fail;
+-- against one whose js_lutype does, 3 fail. Every one of the 67 is also checked
+-- against the installed lua 5.5.
+function s24()
+    -- The 2^53 boundary. Below it a Lua integer is one double; at and above it
+    -- the runtime carries a SIZED INTEGER (abnf/jsrtint.go's jsGInt in the Go
+    -- half, tag 13 of languages/lib/runtime.c in the native one). Both sides of
+    -- the boundary are the same Lua type, and that is the first thing to pin.
+    local e = 9007199254740992          -- 2^53
+    check("si01", math.type(e - 1), "integer")
+    check("si02", math.type(e), "integer")
+    check("si03", math.type(e + 1), "integer")
+    check("si04", math.type(math.maxinteger), "integer")
+    check("si05", math.type(math.mininteger), "integer")
+    -- ... and the FLOAT of the same magnitude is still a float, so the tag has
+    -- not swallowed the subtype distinction.
+    check("si06", math.type(e + 0.0), "float")
+    check("si07", math.type(9007199254740993.0), "float")
+
+    -- EXACTNESS past 2^53: the neighbours of 2^53 share one double, so an
+    -- implementation that reads a big integer as a double answers these wrong.
+    check("si08", e + 1 == e, false)
+    check("si09", e + 1 == e + 2, false)
+    check("si10", "" .. (e + 1), "9007199254740993")
+    check("si11", "" .. (e * 2 + 1), "18014398509481985")
+    check("si12", (e + 1) - (e - 1), 2)
+    check("si13", (e + 3) // 2 == e // 2 + 1, true)
+    check("si14", (e + 1) % 2, 1)
+    check("si15", (e + 2) % 2, 0)
+
+    -- ORDERED comparison past 2^53. This is the site that reads its operands as
+    -- doubles unless it is told not to: 2^53+1 and 2^53+2 are the SAME double.
+    check("si16", e + 1 < e + 2, true)
+    check("si17", e + 2 <= e + 1, false)
+    check("si18", math.maxinteger - 1 < math.maxinteger, true)
+    check("si19", math.mininteger < math.mininteger + 1, true)
+    check("si20", (e + 1) <= (e + 1), true)
+
+    -- WIDTH and SIGNEDNESS. Lua's integer is 64 bit and SIGNED, and every
+    -- arithmetic operator wraps at that width rather than saturating or
+    -- promoting - which is giTrunc(v, 64, false) in the specification.
+    check("si21", math.maxinteger + 1 == math.mininteger, true)
+    check("si22", math.mininteger - 1 == math.maxinteger, true)
+    check("si23", "" .. (math.maxinteger * 2), "-2")
+    check("si24", "" .. (math.maxinteger + math.maxinteger), "-2")
+    check("si25", math.mininteger // -1 == math.mininteger, true)  -- the one that cannot be represented
+    check("si26", math.mininteger % -1, 0)
+    check("si27", -math.mininteger == math.mininteger, true)       -- unary minus wraps too
+    check("si28", math.maxinteger < 0, false)                      -- SIGNED, not unsigned
+    check("si29", math.mininteger < 0, true)
+    check("si30", math.abs(math.mininteger) == math.mininteger, true)
+
+    -- The bitwise operators read the same 64 bits, and '>>' is LOGICAL (Lua
+    -- shifts an unsigned reading) while the arithmetic is signed.
+    check("si31", -1 >> 1 == math.maxinteger, true)
+    check("si32", 1 << 63 == math.mininteger, true)
+    check("si33", "" .. (1 << 62), "4611686018427387904")
+    check("si34", ~0, -1)
+    check("si35", (math.maxinteger & math.mininteger), 0)
+    check("si36", (math.maxinteger | math.mininteger) == -1, true)
+    check("si37", math.maxinteger ~ math.mininteger == -1, true)
+    check("si38", "" .. (0xffffffffffffffff), "-1")
+
+    -- The STRING form is the exact decimal text, never the double's rounding.
+    check("si39", "" .. math.maxinteger, "9223372036854775807")
+    check("si40", "" .. math.mininteger, "-9223372036854775808")
+    check("si41", #("" .. (e + 1)), 16)
+    check("si42", ("" .. (e + 1)) .. "|", "9007199254740993|")
+
+    -- ORDERING INDEPENDENCE. The runtime renders a value by asking a series of
+    -- type questions. When a big integer was an OBJECT box the "is it a table"
+    -- question had to be asked last or a big integer printed as a table; the
+    -- sized-integer tag answers "number" to the type question, so the order no
+    -- longer matters. These pin the answers the order used to decide.
+    check("si43", math.type(e + 1) ~= nil, true)      -- it IS a number, not a table
+    check("si44", (e + 1) == (e + 1), true)
+    local t = {}
+    t[e + 1] = "a"
+    t[e + 2] = "b"
+    t[e] = "c"
+    check("si45", t[e + 1] .. t[e + 2] .. t[e], "abc")   -- three DISTINCT keys
+    -- t[2^53 + 1.0] is t[2^53]: the float addition rounds back to 2^53 and an
+    -- integral float key NORMALISES to that integer. Both halves of the key rule
+    -- in one line - measured against lua 5.5, which answers "c" here.
+    check("si46", t[e + 1.0], "c")
+    t[math.maxinteger] = "m"
+    check("si47", t[math.maxinteger], "m")
+    check("si48", t[math.maxinteger - 1], nil)
+    -- math.tointeger / math.floor keep the exact value rather than routing it
+    -- through a double.
+    check("si49", math.tointeger(e + 1) == e + 1, true)
+    check("si50", math.floor(math.maxinteger) == math.maxinteger, true)
+    check("si51", math.max(math.maxinteger, e) == math.maxinteger, true)
+    check("si52", math.min(math.mininteger, e) == math.mininteger, true)
+    -- The consumers that genuinely want a DOUBLE - a string index, a repeat
+    -- count, the exponent of '^' - must get one out of a sized integer rather
+    -- than the integer itself.
+    check("si53", string.sub("abcdefgh", math.maxinteger), "")
+    check("si54", string.sub("abcdefgh", 1, math.maxinteger), "abcdefgh")
+    check("si55", string.sub("abcdefgh", math.mininteger), "abcdefgh")
+    check("si56", string.rep("ab", e - e), "")
+    check("si57", 2.0 ^ 53 == e + 0.0, true)
+    local n = 0
+    for i = 1, 3, math.maxinteger do n = n + 1 end
+    check("si58", n, 1)
+    local m = 0
+    for i = math.maxinteger - 1, math.maxinteger do m = m + 1 end
+    check("si59", m, 2)
+
+    -- A NaN operand makes all four ordered comparisons false, and an infinity
+    -- orders against every integer. Both go through the same path a sized
+    -- integer does, so they pin that the fast path's fall-through is a real
+    -- fall-through and not an "equal" answer.
+    local nan = 0 / 0
+    local inf = 1 / 0
+    check("si60", nan < nan or nan <= nan or nan > nan or nan >= nan, false)
+    check("si61", nan < math.maxinteger or nan >= math.maxinteger, false)
+    check("si62", math.maxinteger < inf and math.mininteger > -inf, true)
+    check("si63", math.maxinteger <= math.maxinteger and math.maxinteger >= math.maxinteger, true)
+    check("si64", (e + 1) <= (e + 2) and not ((e + 2) <= (e + 1)), true)
+    check("si65", math.type((e * 2 + 1) // 2), "integer")
+    check("si66", math.type((e * 2 + 1) % 2), "integer")
+    check("si67", "" .. ((e * 2 + 1) // 2), "9007199254740992")
+end
+
 -- ===== END SECTIONS =====
 
 s01() -- SECTION-CALL 01
@@ -686,5 +824,6 @@ s20() -- SECTION-CALL 20
 s21() -- SECTION-CALL 21
 s22() -- SECTION-CALL 22
 s23() -- SECTION-CALL 23
+s24() -- SECTION-CALL 24
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

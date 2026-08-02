@@ -24,14 +24,23 @@
 //     a plain number       ==  a Lua INTEGER whose value is exact in a double
 //                              (|v| <= 2^53, integral), OR a Lua FLOAT whose
 //                              value is not integral (1.5, inf, nan)
-//     an {__li} box        ==  a Lua integer outside that range. The Go twin uses
-//                              jsGInt (abnf/jsrtint.go); a MetaJS value cannot be
-//                              a new primitive TYPE, so this is an object holding
-//                              an exact {h, l} 64 bit pair. That difference is
-//                              observable through js_typeof - "number" in Go,
-//                              "object" here - and it is why lua_str asks
-//                              js_luisnum BEFORE it asks js_typeof: see the
-//                              "reachability" note at js_pystr.
+//     a SIZED INTEGER      ==  a Lua integer outside that range. The Go twin uses
+//                              jsGInt (abnf/jsrtint.go), and since 2026-08 the C
+//                              floor has the same thing as a REAL PRIMITIVE TYPE:
+//                              tag 13 of languages/lib/runtime.c, reached through
+//                              the sint/sintIs/sintHi/sintLo host builtins. It
+//                              used to be an object box {__li: {h, l}}, for which
+//                              js_typeof answered "object" where the Go twin
+//                              answers "number" - a divergence between the halves
+//                              that Lua only survived because lua_str happens to
+//                              ask js_luisnum BEFORE js_typeof. It does not
+//                              depend on that any more: js_typeof answers
+//                              "number" in both halves now.
+//
+//                              THE PRICE, and it is the whole of the work: with
+//                              the box a real number, `typeof v == "number"` is
+//                              TRUE for it, so every site that means "an ordinary
+//                              double" has to say so. Each one below is marked.
 //     an {__f} box         ==  a float whose value IS integral (1.0, 1e100), the
 //                              only case the plain reading could not tell from an
 //                              integer. lua-to-llvm-ir.abnf BUILDS this box in IR
@@ -222,22 +231,30 @@ function luMaxPair() { return i64Make(0x7fffffff, 0xffffffff) }
 function luMinPair() { return i64Make(0x80000000, 0) }
 function luInf() { return Infinity }
 
-// luNorm is giNorm(v, 64, false): a plain number when the value is exact in a
-// double, the {__li} box otherwise.
-function luNorm(p) {
-    if (i64Fits53(p)) { return i64ToNumS(p) }
-    return {__li: p}
-}
-function luIsBox(v) {
-    if (v === undefined) { return false }
-    if (v === null) { return false }
-    if (typeof v != "object") { return false }
-    return v["__li"] !== undefined
+// luNorm is giNorm(v, 64, false) and it is now literally that: sint() is the C
+// floor's si_norm, which answers a PLAIN NUMBER when the value is exact in a
+// double and a sized integer otherwise - the same rule i64Fits53 spelled here.
+// The pair goes over as two unsigned 32 bit halves because a MetaJS number is a
+// double and cannot carry 64 bits exactly.
+function luNorm(p) { return sint(p.h, p.l, 64, 0) }
+// luIsBox is js_giis: the value is a sized integer rather than a plain double.
+// It answers false for undefined, null, a string and a table without a guard,
+// because the floor asks the TAG.
+function luIsBox(v) { return sintIs(v) }
+// luPlain is the predicate the sized-integer tag makes necessary: an ORDINARY
+// double, which `typeof v == "number"` no longer says on its own.
+function luPlain(v) {
+    if (typeof v != "number") { return false }
+    return !sintIs(v)
 }
 // luFloOf reads the {__f} float box: the boxed value, or undefined.
 function luFloOf(v) {
     if (v === undefined) { return undefined }
     if (v === null) { return undefined }
+    // A sized integer answers "number" here, so it leaves through this line -
+    // which is right: it is an integer, never the {__f} float box. The float box
+    // is still an OBJECT in BOTH halves (lua-to-llvm-ir.abnf builds it in IR and
+    // abnf/jsrtlua.go reads the same shape), so it needs no tag of its own.
     if (typeof v != "object") { return undefined }
     return v["__f"]
 }
@@ -268,7 +285,11 @@ function luIsNum(v) {
 // luNumOf is the double reading. It loses precision above 2^53 by construction,
 // so only the consumers that genuinely want a double may use it.
 function luNumOf(v) {
-    if (luIsBox(v)) { return i64ToNumS(v["__li"]) }
+    // sintNum is the floor's si_float, i.e. float64(int64) with exact
+    // round-to-nearest-even bit arithmetic - which is what abnf/jsrtint.go's
+    // giFloat does. Going through i64ToNumS would have gone through the soft
+    // float's d_mul / d_add instead, which truncate.
+    if (luIsBox(v)) { return sintNum(v) }
     if (typeof v == "number") { return v }
     var f = luFloOf(v)
     if (f !== undefined) { return f }
@@ -276,7 +297,7 @@ function luNumOf(v) {
 }
 // luPair is the exact 64 bit payload of a value already known to be an integer.
 function luPair(v) {
-    if (luIsBox(v)) { return v["__li"] }
+    if (luIsBox(v)) { return i64Make(sintHi(v), sintLo(v)) }
     return i64FromNum(luNumOf(v))
 }
 // luI64 turns an integral double into an integer value, or undefined when it does
@@ -538,7 +559,7 @@ function luCmpV(l, r) {
 var LU_EXACT = 9007199254740992      // 2^53
 
 function luIntFast(v) {
-    if (typeof v != "number") { return false }
+    if (!luPlain(v)) { return false }   // a sized integer is NOT a plain double
     // The int32 window costs one ToInt32 (a floor primitive) and no name lookup;
     // outside it, Math.floor is a scope-chain walk plus a host call.
     if (v > -2147483649 && v < 2147483648) { return (v | 0) === v }
@@ -547,10 +568,12 @@ function luIntFast(v) {
 }
 
 function js_luisint(v) {
-    if (typeof v == "number") { return luIntFast(v) }
-    return luIsInt(v)
+    if (luPlain(v)) { return luIntFast(v) }
+    return luIsInt(v)                   // a sized integer lands here and is one
 }
 function js_luisnum(v) {
+    // A sized integer answers "number" now, so this needs no special case at
+    // all - which is the point of the tag.
     if (typeof v == "number") { return true }
     return luIsNum(v)
 }
@@ -559,7 +582,18 @@ function js_luisnum(v) {
 // that genuinely wants a double (an index, a length, a repeat count, a float
 // operand) goes through it; a value that is no number at all reads as NaN.
 function js_lunum(v) {
-    if (typeof v == "number") { return v }
+    // A sized integer must NOT be handed back as itself: every caller here wants
+    // a double, and luNumOf is the double reading.
+    if (typeof v == "number") {
+        // A sized integer answers "number" too and must NOT be handed back as
+        // itself: every caller here wants a DOUBLE. The int32 test rules one
+        // out without a call - luNorm builds a box only for |v| > 2^53, so
+        // ToInt32 of its double can never round-trip. This runs once per
+        // iteration of every numeric `for`.
+        if ((v | 0) === v) { return v }
+        if (luIsBox(v)) { return luNumOf(v) }
+        return v
+    }
     var a = luToNum(v)
     if (a === undefined) { return NaN }
     return luNumOf(a)
@@ -576,6 +610,11 @@ function js_luarith(op_raw, lv, rv) {
     // MetaJS a free name is a scope-chain walk and a call opens a scope and builds
     // an argument array, so a helper here would cost more than the arithmetic. The
     // int32 window is where a Lua loop counter and an index live.
+    // `typeof == "number"` is true for a sized integer too, and that costs
+    // nothing here: luNorm only ever builds one for a magnitude ABOVE 2^53, so
+    // the int32 window below rejects it without a further call. The guard is the
+    // invariant, not luck - if luNorm ever boxed a small value this would need a
+    // luPlain() and would pay for it on every Lua `+`.
     if (op !== 3 && typeof lv == "number" && typeof rv == "number" &&
         lv > -2147483649 && lv < 2147483648 && rv > -2147483649 && rv < 2147483648 &&
         (lv | 0) === lv && (rv | 0) === rv) {
@@ -670,6 +709,10 @@ function js_lubnot(v) { return luNorm(i64Not(luToIntOp(v))) }
 // Two integers compare on the exact 64 bit value, because past 2^53 their double
 // readings are equal for values that are not.
 function js_lueq(l, r) {
+    // Correct for a sized integer too, and that is NEW: `===` on two of them is
+    // the exact 64 bit comparison (runtime.c strict_eq sends tag 13 through
+    // si_eq), and a plain double never equals one because a box exists only
+    // outside 2^53. It used to be reachable only by two plain doubles.
     if (typeof l == "number" && typeof r == "number") { return l === r }
     if (luIsInt(l) && luIsInt(r)) { return i64Eq(luPair(l), luPair(r)) }
     if (luIsNum(l) && luIsNum(r)) { return luNumOf(l) === luNumOf(r) }
@@ -679,13 +722,24 @@ function js_lueq(l, r) {
 // < > <= >=, by index (0..3).
 function js_lucmp(op_raw, l, r) {
     var op = op_raw
+    // A sized integer answers "number" here too, and it does not have to be
+    // excluded: float64() is MONOTONE, so a STRICT double comparison already
+    // gives the right answer for one. Only a TIE can hide a difference - two
+    // integers past 2^53 that share a double - and a tie falls through to the
+    // exact path below, as does a NaN operand (neither comparison holds).
+    // Costing the tie rather than the guard is what keeps this free: a `for`
+    // loop meets its tie once, not once per iteration. Measured on a
+    // 2M-iteration loop: 4.14s this way against 11.9s for a magnitude guard on
+    // both operands and 7.6s for a luPlain() call on each.
     if (typeof l == "number" && typeof r == "number") {
-        // A NaN operand makes every one of the four false, which is what the
-        // direct comparison already answers.
-        if (op === 0) { return l < r }
-        if (op === 1) { return l > r }
-        if (op === 2) { return l <= r }
-        return l >= r
+        if (l < r) { return op === 0 || op === 2 }
+        if (l > r) { return op === 1 || op === 3 }
+        // The tie, settled with ONE call instead of the exact path: `===` is
+        // already exact for a sized integer (runtime.c strict_eq routes tag 13
+        // through si_eq), so two integers past 2^53 that share a double answer
+        // false here and fall through. A NaN operand answers false too, and
+        // luCmpV then makes all four comparisons false, which is right.
+        if (l === r) { return op === 2 || op === 3 }
     }
     var c = luCmpV(l, r)
     if (c === 2) { return false }         // a NaN operand is unordered
@@ -698,13 +752,18 @@ function js_lucmp(op_raw, l, r) {
 // How a Lua number renders: an integer without a fraction, a float always with
 // one, and inf / -inf / nan rather than JavaScript's spellings.
 function js_lustr(v) {
+    // The sized integer is asked about FIRST, and would be answered correctly by
+    // the plain arm below anyway - `"" + v` on a tag 13 value is runtime.c's
+    // si_str, the exact digits. That is the ordering dependence gone: the box
+    // used to be an object, so this arm had to come after every typeof question
+    // or a big integer would have rendered as a table.
+    if (luIsBox(v)) { return i64StrS(luPair(v)) }
     if (typeof v == "number") {
         if (v !== v) { return "nan" }
         if (v === luInf()) { return "inf" }
         if (v === 0 - luInf()) { return "-inf" }
         return "" + v
     }
-    if (luIsBox(v)) { return i64StrS(luPair(v)) }
     var n = luNumOf(v)
     if (n !== n) { return "nan" }         // real Lua prints "nan", not "-nan"
     if (n === luInf()) { return "inf" }
@@ -719,8 +778,11 @@ function js_lustr(v) {
 // integer past 2^53 has to become its exact decimal TEXT, because its double
 // reading would collide with its neighbour's.
 function js_lukey(v) {
-    if (typeof v == "number") { return v }
+    // Before the plain arm: a sized integer handed back as itself would be a key
+    // the object map cannot hold, and its double reading would collide with its
+    // neighbour's - so it addresses the table by its exact decimal TEXT.
     if (luIsBox(v)) { return i64StrS(luPair(v)) }
+    if (typeof v == "number") { return v }
     var f = luFloOf(v)
     if (f !== undefined) {
         if (f === f && f !== luInf() && f !== 0 - luInf() && Math.floor(f) === f) {
@@ -748,7 +810,9 @@ function js_lulit(s, radix) {
 // math.type(x): "integer", "float", or nil for anything that is not a number (a
 // STRING is not, even one that spells a numeral).
 function js_lutype(v) {
-    if (typeof v == "number") {
+    // luPlain: a sized integer is always math.type "integer", and luIntFast
+    // answers about a double.
+    if (luPlain(v)) {
         if (luIntFast(v)) { return "integer" }
         return "float"
     }

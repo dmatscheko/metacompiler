@@ -103,6 +103,12 @@ long d_from_long(long i) {
 	long guard;
 	long sticky;
 	if (i == 0) { return 0; }
+	/* INT64_MIN has no positive counterpart - `0 - i` wraps back to itself and
+	 * the top-bit scan below then runs zero times and builds nonsense. It is
+	 * exactly -2^63, so it is answered directly. Latent until the sized-integer
+	 * tag made si_float pass a raw int64 in: found by the 97,664-line
+	 * differential probe against abnf/jsrtint.go, which read -1. */
+	if (i == (0 - 9223372036854775807 - 1)) { return -4332462841530417152; }   /* -2^63 */
 	if (i < 0) { neg = 1; u = 0 - i; } else { u = i; }
 	t = u;
 	while (t > 1) { t = t >> 1; e = e + 1; }        /* e = index of the top bit */
@@ -1480,9 +1486,17 @@ int truthy(long h);
 long js_call(long callee, long self, long args);
 long type_of(long h);
 
+/* The sized integer (tag 13, abnf/jsrtint.go). Declared here because the five
+ * value operations below have to know about it and it is defined after them. */
+long si_val(long h);
+long si_float(long h);
+long si_str(long h);
+int  si_eq(long a, long b);
+
 long to_number(long h) {
 	long t = tag_of(h);
 	if (t == 3) { return num_bits(h); }
+	if (t == 13) { return si_float(h); }
 	if (t == 0) { return DNAN; }
 	if (t == 1) { return DZERO; }
 	if (t == 2) { return fa(h) ? DONE : DZERO; }
@@ -1495,6 +1509,7 @@ int truthy(long h) {
 	if (t == 0 || t == 1) { return 0; }
 	if (t == 2) { return (int)fa(h); }
 	if (t == 3) { long b = num_bits(h); return !d_is_zero(b) && !d_is_nan(b); }
+	if (t == 13) { return fa(h) != 0; }   /* jsrt.go truthy: `case jsGInt: t.v != 0` */
 	if (t == 4) { return str_len(h) > 0; }
 	return 1;
 }
@@ -1505,6 +1520,7 @@ long to_string(long h) {
 	if (t == 1) { return mk_cstr("null"); }
 	if (t == 2) { return fa(h) ? mk_cstr("true") : mk_cstr("false"); }
 	if (t == 3) { return num_to_str(num_bits(h)); }
+	if (t == 13) { return si_str(h); }    /* jsrt.go toString: `case jsGInt: giStr(t)` */
 	if (t == 4) { return h; }
 	if (t == 5) {
 		long out = mk_cstr("");
@@ -1528,7 +1544,10 @@ long type_of(long h) {
 	long t = tag_of(h);
 	if (t == 0) { return mk_cstr("undefined"); }
 	if (t == 2) { return mk_cstr("boolean"); }
-	if (t == 3) { return mk_cstr("number"); }
+	/* A SIZED INTEGER IS A NUMBER. This is the whole point of the tag: the Go
+	 * twin answers "number" for jsGInt (abnf/jsrt.go typeOf), and an object box
+	 * in layer 2 could only ever have answered "object". */
+	if (t == 3 || t == 13) { return mk_cstr("number"); }
 	if (t == 4) { return mk_cstr("string"); }
 	if (t == 7 || t == 8 || t == 9) { return mk_cstr("function"); }
 	return mk_cstr("object");
@@ -1540,7 +1559,7 @@ long type_class(long h) {
 	long t = tag_of(h);
 	if (t == 0 || t == 1) { return 0; }
 	if (t == 2) { return 2; }
-	if (t == 3) { return 3; }
+	if (t == 3 || t == 13) { return 3; }   /* a sized integer pins as "number" */
 	if (t == 4) { return 4; }
 	if (t == 7 || t == 8 || t == 9) { return 6; }
 	return 5;
@@ -1558,6 +1577,12 @@ long mk_bool(int b) { return b ? 3 : 2; }
 int strict_eq(long a, long b) {
 	long ta = tag_of(a);
 	long tb = tag_of(b);
+	/* A sized integer compares by VALUE, never by identity - jsrt.go strictEq
+	 * puts the two jsGInt arms exactly here, before the type switch, so
+	 * int8(1) === 1 holds and two boxes of the same integer are equal. A box
+	 * against a non-number is false. */
+	if (ta == 13) { return (tb == 13 || tb == 3) && si_eq(a, b); }
+	if (tb == 13) { return ta == 3 && si_eq(a, b); }
 	if (ta == 0) { return tb == 0; }
 	if (ta == 1) { return tb == 1; }
 	if (ta == 2) { return tb == 2 && fa(a) == fa(b); }
@@ -1603,6 +1628,262 @@ long js_add_v(long a, long b) {
 	if (ta == 4 || tb == 4) { return str_cat(to_string(a), to_string(b)); }
 	if (ta == 5 || tb == 5 || ta == 6 || tb == 6) { return str_cat(to_string(a), to_string(b)); }
 	return mk_num(d_add(to_number(a), to_number(b)));
+}
+
+/* -------------------------------------------------------- sized integers - */
+/*
+ * TAG 13 - a SIZED INTEGER. This is a REAL PRIMITIVE TYPE of the C floor and
+ * the twin of abnf/jsrtint.go's jsGInt, which is the authoritative spec: every
+ * function below is named after the giXxx it implements and matches it.
+ *
+ * WHY IT IS HERE AND NOT IN LAYER 2
+ * A MetaJS value cannot be a new primitive type. The best layer 2 can build is
+ * an object box, and js_typeof answers "object" for that where the Go twin
+ * answers "number" - a divergence between the two halves of every language that
+ * carries an integer past 2^53. It is LANGUAGE NEUTRAL: jsGInt already backs
+ * Go, Java, Kotlin and C#, and Lua's integer box (languages/lib/lua-rt.metajs)
+ * is built on it too.
+ *
+ *   cell.a = the 64 bit value, ALREADY truncated to the width: sign extended
+ *            for a signed width, zero extended into the low w bits for an
+ *            unsigned one - except that a uint64 keeps the raw bit pattern and
+ *            is READ as unsigned (si_u / si_float / si_str)
+ *   cell.b = the width in bits: 8, 16, 32 or 64
+ *   cell.c = 1 when the type is unsigned
+ *
+ * THE INVARIANT, identical in both halves (jsrtint.go's header):
+ *   a plain number (tag 3)  ==  a signed 64 bit integer exact in a double
+ *   a tag 13 cell           ==  every other integer: a sized or unsigned type,
+ *                               or a 64 bit value outside +-2^53
+ * si_norm is the ONE place it is applied.
+ */
+
+long si_make(long v, long w, long u) {
+	long h = cell_new(13);
+	sa(h, v); sb(h, w); sc(h, u);
+	return h;
+}
+
+/* giTrunc: wrap a value into w bits with u's signedness, which is what every
+ * arithmetic operator does on overflow in Go, Java, Kotlin and C#. */
+long si_trunc(long v, long w, long u) {
+	if (w == 8)  { v = v & 255;        if (!u && v >= 128) { v = v - 256; }               return v; }
+	if (w == 16) { v = v & 65535;      if (!u && v >= 32768) { v = v - 65536; }           return v; }
+	if (w == 32) { v = v & 4294967295; if (!u && v >= 2147483648) { v = v - 4294967296; } return v; }
+	return v;
+}
+
+/* giU: the value read as unsigned at width w. */
+unsigned long si_u(long v, long w) {
+	if (w == 8)  { return (unsigned long)(v & 255); }
+	if (w == 16) { return (unsigned long)(v & 65535); }
+	if (w == 32) { return (unsigned long)(v & 4294967295); }
+	return (unsigned long)v;
+}
+
+/* float64(uint64(v)), rounded to nearest even. d_from_long already does the
+ * signed reading with bit arithmetic (the soft float's i2d loses the low bits
+ * above 2^53); this is the same routine with the top bit read as a value rather
+ * than as a sign, which only matters for a uint64 at or above 2^63. */
+long d_from_ulong(long i) {
+	long m;
+	long guard;
+	long sticky;
+	long e = 63;
+	long one = 1;
+	if (i >= 0) { return d_from_long(i); }
+	m = (long)(((unsigned long)i) >> 11);
+	guard = (long)((((unsigned long)i) >> 10) & 1);
+	sticky = ((i & ((one << 10) - 1)) != 0);
+	if (guard && (sticky || (m & 1))) {
+		m = m + 1;
+		if (m > 9007199254740991) { m = m >> 1; e = e + 1; }
+	}
+	return ((e + 1023) << 52) | (m & 4503599627370495);
+}
+
+/* giFromFloat: truncate toward zero and wrap modulo 2^64, which is what a
+ * conversion from a floating point value to a 64 bit integer type does.
+ *
+ * NOT EXACTLY MATCHABLE, and the mismatch is in the Go twin rather than here:
+ * giFromFloat's last line is `int64(m)` on a value that is NaN when the operand
+ * is an infinity, and Go leaves that conversion implementation defined. On this
+ * machine (darwin/arm64) it answers 0, measured; on amd64 the same expression
+ * answers -9223372036854775808. 0 is what is implemented here, so the two
+ * halves agree on arm64 and both would differ from a Go twin built for amd64.
+ * The same architecture dependence bit the float %% of phase 4a. */
+long si_from_float(long b) {
+	long m;
+	long lim = 1086;                 /* 2^63  */
+	long two63;
+	long two64;
+	if (d_is_nan(b)) { return 0; }
+	if (d_is_inf(b)) { return 0; }   /* see the note above */
+	two63 = lim << 52;
+	two64 = (lim + 1) << 52;
+	if (!d_lt(b, two63) || d_lt(b, two63 | (0 - 9223372036854775807 - 1))) {
+		m = d_mod_go(d_trunc(b), two64);
+		if (!d_lt(m, two63)) { m = d_sub(m, two64); }
+		else if (d_lt(m, two63 | (0 - 9223372036854775807 - 1))) { m = d_add(m, two64); }
+		if (d_is_nan(m)) { return 0; }
+		return d_to_long(m);
+	}
+	return d_to_long(d_trunc(b));
+}
+
+/* giVal: the 64 bit value of any integral operand. A plain number truncates
+ * toward zero; anything else goes through to_number first. */
+long si_val(long h) {
+	long t = tag_of(h);
+	if (t == 13) { return fa(h); }
+	if (t == 3)  { return si_from_float(num_bits(h)); }
+	return si_from_float(to_number(h));
+}
+
+/* giFloat: the floating point reading, as BITS. A uint64 needs its own path -
+ * int64(-1) read as a uint64 is 1.8446744073709552e19, not -1. */
+long si_float(long h) {
+	if (tag_of(h) == 13) {
+		if (fc(h) && fb(h) == 64) { return d_from_ulong(fa(h)); }
+		return d_from_long(fa(h));
+	}
+	return to_number(h);
+}
+
+/* The decimal text of a 64 bit magnitude. */
+long si_digits(unsigned long v, int neg) {
+	char out[24];
+	long o = 24;
+	if (v == 0) { o = 23; out[23] = 48; }
+	while (v > 0) { o = o - 1; out[o] = (char)(48 + (long)(v % 10)); v = v / 10; }
+	if (neg) { o = o - 1; out[o] = 45; }
+	return mk_str(out + o, 24 - o);
+}
+
+/* giStr: the decimal text of a box - the one place the unsigned reading
+ * matters for output. */
+long si_str(long h) {
+	long v = fa(h);
+	if (fc(h)) { return si_digits(si_u(v, fb(h)), 0); }
+	/* 0 - INT64_MIN wraps back to INT64_MIN, whose UNSIGNED reading is the
+	 * magnitude 9223372036854775808 - so the negation is done unsigned. */
+	if (v < 0) { return si_digits((unsigned long)(0 - v), 1); }
+	return si_digits((unsigned long)v, 0);
+}
+
+/* giNorm: a plain number when the value is a signed 64 bit one a double holds
+ * exactly, a box otherwise. EVERYTHING that produces an integer goes through
+ * it, so the invariant above holds by construction. */
+long si_norm(long v, long w, long u) {
+	v = si_trunc(v, w, u);
+	if (w == 64 && !u && v <= 9007199254740992 && v >= (0 - 9007199254740992)) {
+		return mk_num(d_from_long(v));
+	}
+	return si_make(v, w, u);
+}
+
+/* giWidthOf: the result type of a binary operation. At most one operand is a
+ * box in a well typed program and it decides; where both are, the LEFT wins. */
+long si_width_of(long l, long r) {
+	if (tag_of(l) == 13) { return fb(l); }
+	if (tag_of(r) == 13) { return fb(r); }
+	return 64;
+}
+long si_uns_of(long l, long r) {
+	if (tag_of(l) == 13) { return fc(l); }
+	if (tag_of(r) == 13) { return fc(r); }
+	return 0;
+}
+
+/* giIsNumeric, restricted to what the C floor has: there is no jsChar and no
+ * jsJFlo here, so a number is a plain number or a box. */
+int si_numeric(long h) { long t = tag_of(h); return t == 3 || t == 13; }
+
+/* giEq for two integral operands: they compare by VALUE whatever their widths. */
+int si_eq(long a, long b) { return si_val(a) == si_val(b); }
+
+/* giCmp: -1, 0 or 1, unsigned when the result type is unsigned - so uint64max
+ * is greater than 0 rather than -1 less than 0. */
+int si_cmp(long a, long b) {
+	long w = si_width_of(a, b);
+	long x = si_val(a);
+	long y = si_val(b);
+	if (si_uns_of(a, b)) {
+		unsigned long ux = si_u(x, w);
+		unsigned long uy = si_u(y, w);
+		if (ux < uy) { return -1; }
+		if (ux > uy) { return 1; }
+		return 0;
+	}
+	if (x < y) { return -1; }
+	if (x > y) { return 1; }
+	return 0;
+}
+
+/* giArith: one binary arithmetic or bitwise operator, evaluated at the result
+ * type's full width and wrapped to it. `op` is a string handle, because the
+ * emitters pass the operator as a compile time constant string - one extern per
+ * operator would have been eleven externs. */
+long si_apply(long code, long l, long r) {
+	long w = si_width_of(l, r);
+	long u = si_uns_of(l, r);
+	long a = si_val(l);
+	long b = si_val(r);
+	long x = 0;
+	long s;
+	if (code == 0) { x = a + b; }
+	else if (code == 1) { x = a - b; }
+	else if (code == 2) { x = a * b; }
+	else if (code == 3) {
+		if (b == 0) { die("integer divide by zero"); }
+		if (u) { x = (long)(si_u(a, w) / si_u(b, w)); }
+		else if (a == (0 - 9223372036854775807 - 1) && b == -1) { x = a; }
+		else { x = a / b; }
+	}
+	else if (code == 4) {
+		if (b == 0) { die("integer divide by zero"); }
+		if (u) { x = (long)(si_u(a, w) % si_u(b, w)); }
+		else if (a == (0 - 9223372036854775807 - 1) && b == -1) { x = 0; }
+		else { x = a % b; }
+	}
+	else if (code == 5) { x = a & b; }
+	else if (code == 6) { x = a | b; }
+	else if (code == 7) { x = a ^ b; }
+	else if (code == 8) { x = a & (0 - b - 1); }   /* &^, i.e. a & ~b */
+	else if (code == 9) {
+		/* Go's rule, and unlike C not undefined: a count at or above the width
+		 * shifts everything out. A negative count does too. */
+		s = b;
+		if (s < 0 || s >= w) { x = 0; } else { x = a << s; }
+	}
+	else if (code == 10) {
+		s = b;
+		if (s < 0) { x = 0; }
+		else if (u) {
+			if (s >= w) { x = 0; } else { x = (long)(si_u(a, w) >> s); }
+		}
+		else {
+			if (s >= w) { s = w - 1; }
+			x = a >> s;
+		}
+	}
+	return si_norm(x, w, u);
+}
+
+long si_arith(long op, long l, long r) {
+	if (str_eq_c(op, "+"))  { return si_apply(0, l, r); }
+	if (str_eq_c(op, "-"))  { return si_apply(1, l, r); }
+	if (str_eq_c(op, "*"))  { return si_apply(2, l, r); }
+	if (str_eq_c(op, "/"))  { return si_apply(3, l, r); }
+	if (str_eq_c(op, "%"))  { return si_apply(4, l, r); }
+	if (str_eq_c(op, "&"))  { return si_apply(5, l, r); }
+	if (str_eq_c(op, "|"))  { return si_apply(6, l, r); }
+	if (str_eq_c(op, "^"))  { return si_apply(7, l, r); }
+	if (str_eq_c(op, "&^")) { return si_apply(8, l, r); }
+	if (str_eq_c(op, "<<")) { return si_apply(9, l, r); }
+	if (str_eq_c(op, ">>")) { return si_apply(10, l, r); }
+	die("js_giarith: unknown operator");
+	return H_UNDEF;
 }
 
 /* ---------------------------------------------------------------- scopes - */
@@ -1934,6 +2215,9 @@ long fmt_val(long h) {
 		}
 		return go_float_str(b);
 	}
+	/* A sized integer reaches toGoNatural as an int64 / uint64, so %v is its
+	 * digits (abnf/jsrt.go toGoNatural, `case jsGInt`). */
+	if (t == 13) { return si_str(h); }
 	if (t == 5) {
 		long n = arr_len(h);
 		long i = 0;
@@ -2826,6 +3110,40 @@ long host_call(long id, long self, long args) {
 		return H_UNDEF;
 	}
 	if (id == 35) { return fmt_sprint(args); }             /* sprint */
+	/* ----- the SIZED INTEGER, for layer 2 (docs/runtime-next-plan.md part 2).
+	 * A MetaJS runtime library cannot make a new primitive type, so the floor
+	 * hands it the constructor and the three readers. The value travels as two
+	 * 32 bit halves because a MetaJS number is a double and cannot carry 64 bits
+	 * exactly - the same {h, l} pair languages/lib/interp-core.js already uses.
+	 *   sint(hi, lo, bits, unsigned)  build one, through si_norm: the result is a
+	 *                                 PLAIN NUMBER when the invariant says so
+	 *   sintIs(v)                     is this a sized integer (js_giis)
+	 *   sintHi(v) / sintLo(v)         the two halves back out, unsigned
+	 *   sintWidth(v) / sintUns(v)     the declared width and signedness */
+	if (id == 40) {
+		long hi = d_to_long(d_trunc(arg_num(args, 0))) & 4294967295;
+		long lo = d_to_long(d_trunc(arg_num(args, 1))) & 4294967295;
+		long w = n > 2 ? d_to_long(d_trunc(arg_num(args, 2))) : 64;
+		long u = n > 3 ? truthy(arg_at(args, 3)) : 0;
+		return si_norm((hi << 32) | lo, w, u);
+	}
+	if (id == 41) { return mk_bool(tag_of(arg_at(args, 0)) == 13); }
+	if (id == 42) { return mk_num(d_from_long((long)(si_u(si_val(arg_at(args, 0)), 64) >> 32))); }
+	if (id == 43) { return mk_num(d_from_long(si_val(arg_at(args, 0)) & 4294967295)); }
+	if (id == 44) { long v = arg_at(args, 0); return mk_num(d_from_long(si_width_of(v, v))); }
+	if (id == 45) { long v = arg_at(args, 0); return mk_bool(si_uns_of(v, v) != 0); }
+	/*   sintOp(code, l, r)            one binary operator, by index:
+	 *                                 0 + 1 - 2 * 3 / 4 % 5 & 6 | 7 ^ 8 &^ 9 << 10 >>
+	 *   sintCmp(l, r)                 -1 / 0 / 1, unsigned where the type is
+	 *   sintConv(v, bits, unsigned)   an explicit conversion (js_giconv)
+	 *   sintStr(v) / sintNum(v)       the decimal text and the double reading */
+	if (id == 46) { return si_apply(d_to_long(d_trunc(arg_num(args, 0))), arg_at(args, 1), arg_at(args, 2)); }
+	if (id == 47) { return mk_num(d_from_long(si_cmp(arg_at(args, 0), arg_at(args, 1)))); }
+	if (id == 48) {
+		return si_norm(si_val(arg_at(args, 0)), d_to_long(d_trunc(arg_num(args, 1))), truthy(arg_at(args, 2)));
+	}
+	if (id == 49) { long v = arg_at(args, 0); if (tag_of(v) == 13) { return si_str(v); } return to_string(v); }
+	if (id == 50) { return mk_num(si_float(arg_at(args, 0))); }
 	die("unknown host function");
 	return H_UNDEF;
 }
@@ -3090,6 +3408,90 @@ long js_gt(long a, long b)  { return mk_bool(js_compare(a, b) == 1); }
 long js_le(long a, long b)  { long c = js_compare(a, b); return mk_bool(c == -1 || c == 0); }
 long js_ge(long a, long b)  { long c = js_compare(a, b); return mk_bool(c == 1 || c == 0); }
 
+/* ---- the sized-integer externs (abnf/jsrtint.go's init(), function for
+ * function). They are what languages/go-to-llvm-ir.abnf already emits, and what
+ * java / kotlin / csharp will emit; the C floor implements them so those four
+ * can be linked natively.
+ *
+ * WHERE THIS CANNOT MATCH THE GO TWIN: jsrtint.go's js_giarith and js_giadd
+ * route a jsJFlo (Java's / Kotlin's / C#'s boxed double, abnf/jsrtjvm.go)
+ * to jvmArith before reaching giArith. jsJFlo is a SECOND primitive type that
+ * the floor does not have yet, so those two arms are absent here. Nothing
+ * currently linked natively creates one; the language that does will need the
+ * same treatment this tag just got, and that is stated rather than
+ * approximated. */
+
+int si_integral(long h) { long t = tag_of(h); return t == 3 || t == 13; }
+
+long js_giarith(long op, long l, long r) { return si_arith(op, l, r); }
+long js_gicmp(long l, long r)  { return mk_num(d_from_long(si_cmp(l, r))); }
+long js_gieq(long l, long r) {
+	if (si_numeric(l) && si_numeric(r)) { return mk_bool(si_eq(l, r)); }
+	return mk_bool(strict_eq(l, r));
+}
+long js_giconv(long v, long bits, long uns) {
+	return si_norm(si_val(v), d_to_long(d_trunc(to_number(bits))), truthy(uns));
+}
+/* -x keeps the operand's type and negates at its own width, so -int8(-128)
+ * wraps back to -128. */
+long js_gineg(long v) { return si_norm(0 - si_val(v), si_width_of(v, v), si_uns_of(v, v)); }
+long js_ginot(long v) { return si_norm(0 - si_val(v) - 1, si_width_of(v, v), si_uns_of(v, v)); }
+long js_ginum(long v) { return mk_num(si_float(v)); }
+long js_gistr(long v) { if (tag_of(v) == 13) { return si_str(v); } return to_string(v); }
+long js_giis(long v)  { return mk_bool(tag_of(v) == 13); }
+/* The UNBOXER: a sized integer becomes its plain number, everything else passes
+ * through untouched. */
+long js_gival(long v) { if (tag_of(v) == 13) { return mk_num(si_float(v)); } return v; }
+/* The four ordered comparisons. A box has to go through si_cmp rather than the
+ * shared js_compare, because a uint64 above 2^63 reads as a NEGATIVE int64
+ * there, so uint64max < 0 would hold. */
+long si_rel(long l, long r) {
+	if (tag_of(l) == 13 || tag_of(r) == 13) {
+		if (si_integral(l) && si_integral(r)) { return si_cmp(l, r); }
+	}
+	return js_compare(l, r);
+}
+long js_gilt(long l, long r) { return mk_bool(si_rel(l, r) < 0); }
+long js_gile(long l, long r) { long c = si_rel(l, r); return mk_bool(c == -1 || c == 0); }
+long js_gigt(long l, long r) { long c = si_rel(l, r); return mk_bool(c == 1); }
+long js_gige(long l, long r) { long c = si_rel(l, r); return mk_bool(c == 1 || c == 0); }
+/* '+' is the one arithmetic operator that is not only arithmetic: in Go it also
+ * concatenates strings, and only when BOTH sides are strings. */
+long js_giadd(long l, long r) {
+	if (tag_of(l) == 4 && tag_of(r) == 4) { return str_cat(l, r); }
+	if (!si_numeric(l) || !si_numeric(r)) { return js_add_v(l, r); }
+	return si_apply(0, l, r);
+}
+/* A literal a double cannot hold exactly: the emitter passes its DIGITS,
+ * because emitNum would already have rounded 9223372036854775807 to
+ * 9223372036854776000 on the way into the module. (text, radix, bits,
+ * unsigned); an out-of-range value WRAPS, which is what a Go constant
+ * conversion does. Accumulated by hand rather than through str_to_num: the full
+ * 64 bit range has to round trip and an overflowing literal has to wrap. */
+long js_gilit(long text, long radix, long bits, long uns) {
+	long rx = d_to_long(d_trunc(to_number(radix)));
+	long s = to_string(text);
+	const char *p = (const char *)str_ptr(s);
+	long n = str_len(s);
+	long i = 0;
+	long neg = 0;
+	unsigned long acc = 0;
+	long v;
+	if (n > 0 && p[0] == 45) { neg = 1; i = 1; }
+	while (i < n) {
+		long c = (long)p[i];
+		long d = -1;
+		if (c >= 48 && c <= 57) { d = c - 48; }
+		else if (c >= 97 && c <= 102) { d = c - 97 + 10; }
+		else if (c >= 65 && c <= 70) { d = c - 65 + 10; }
+		if (d >= 0 && d < rx) { acc = acc * (unsigned long)rx + (unsigned long)d; }
+		i = i + 1;
+	}
+	v = (long)acc;
+	if (neg) { v = 0 - v; }
+	return si_norm(v, d_to_long(d_trunc(to_number(bits))), truthy(uns));
+}
+
 long js_band(long a, long b) { return mk_num(d_from_long(to_int32(to_number(a)) & to_int32(to_number(b)))); }
 long js_bor(long a, long b)  { return mk_num(d_from_long(to_int32(to_number(a)) | to_int32(to_number(b)))); }
 long js_bxor(long a, long b) { return mk_num(d_from_long(to_int32(to_number(a)) ^ to_int32(to_number(b)))); }
@@ -3157,6 +3559,17 @@ void boot(void) {
 	seed_root("printf", mk_host(34));
 	seed_root("sprint", mk_host(35));
 	seed_root("fail", mk_host(36));
+	seed_root("sint", mk_host(40));
+	seed_root("sintIs", mk_host(41));
+	seed_root("sintHi", mk_host(42));
+	seed_root("sintLo", mk_host(43));
+	seed_root("sintWidth", mk_host(44));
+	seed_root("sintUns", mk_host(45));
+	seed_root("sintOp", mk_host(46));
+	seed_root("sintCmp", mk_host(47));
+	seed_root("sintConv", mk_host(48));
+	seed_root("sintStr", mk_host(49));
+	seed_root("sintNum", mk_host(50));
 	seed_root("Infinity", mk_num(DINF));
 	seed_root("NaN", mk_num(DNAN));
 	seed_root("anytype", cell_new(12));

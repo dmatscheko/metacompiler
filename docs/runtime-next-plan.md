@@ -90,16 +90,127 @@ Ordered by whether they block the rollout.
 
 ## Blocking the rollout
 
-**Layer 2 cannot create a new primitive TYPE.** The Go twin carries an integer outside
-2^53 as `jsGInt`, for which `js_typeof` answers `"number"`; layer 2's best is an object
-box, and `js_typeof` answers `"object"`. Lua survived on ordering luck (`lua_str` asks
-`js_luisnum` before `js_typeof`). **`jsGInt` is already shared by Go, Java, Kotlin and
-C#**, so the next language will not be lucky.
+~~**Layer 2 cannot create a new primitive TYPE.**~~ **DONE 2026-08-02 - tag 13.**
+`languages/lib/runtime.c` now has a real sized-integer tag, the twin of
+`abnf/jsrtint.go`'s `jsGInt`, which stays the authoritative specification: `js_typeof`
+answers `"number"` for it in **both** halves. It is language neutral by construction -
+the whole `js_gi*` extern family (`js_giarith js_gicmp js_gieq js_giconv js_gineg
+js_ginot js_ginum js_gistr js_giis js_gival js_gilt js_gile js_gigt js_gige js_giadd
+js_gilit`) is implemented, so go/java/kotlin/csharp can be linked natively without
+touching the floor again.
 
-The honest fix is a **language-neutral sized-integer tag in the C floor** - not a
-per-language hack, and it must land before java/csharp/go/kotlin. The alternative
-(change the emitter to stop asking `js_typeof` about a number) is worth costing too.
-Do not paper over it.
+```
+cell.a  the 64 bit value, already truncated to the width and sign extended
+cell.b  the width: 8, 16, 32 or 64        cell.c  1 when unsigned
+```
+
+**Ground truth.** A 97,664-line differential probe - `giNorm` over 8 width/signedness
+combinations x 32 seeds, then 11 operators x 32 x 32 per combination, plus `giCmp`,
+`giEq`, unary minus, `^x`, `giFloat`, and `giConv` between every pair of widths - is
+**byte-identical** between the C floor and a Go oracle compiled straight out of
+`jsrtint.go`. A second 240-case probe covers the float -> sized-integer conversion,
+`+-Inf` and NaN included, and also agrees exactly.
+
+**Two places it cannot match, stated rather than approximated:**
+
+- `giFromFloat` ends in `int64(m)` on a value that is NaN when the operand is an
+  infinity, and Go leaves that conversion *implementation defined*. Measured here
+  (darwin/arm64) it is `0`; on amd64 the same expression is `-9223372036854775808`.
+  The floor implements `0`, so the two halves agree on arm64 and **both would differ
+  from a Go twin built for amd64**. Same architecture dependence as the float `%` of
+  phase 4a.
+- `js_giarith` and `js_giadd` in `jsrtint.go` route a `jsJFlo` (the boxed double of
+  `jsrtjvm.go`) to `jvmArith` before reaching `giArith`. `jsJFlo` is a *second*
+  primitive type the floor does not have, so those arms are absent. Nothing linked
+  natively creates one today, and **the first of java/kotlin/csharp to migrate will
+  need `jsJFlo` given exactly the treatment `jsGInt` just got.**
+
+**The alternative was costed and rejected.** "Stop asking `js_typeof` about a number"
+is not one change: it is a rule every layer-2 file of all eleven languages has to keep
+at every site, forever - `lua-rt.metajs` alone has 22 `typeof` sites. It cannot be
+checked mechanically, the Go twin answers `"number"` at every one of them, and a slip
+is invisible unless a test happens to print the value. The tag is one place, and it
+makes the two halves structurally identical instead of accidentally identical.
+
+**Lua is converted.** `lua-rt.metajs` no longer builds `{__li: {h, l}}`; `luNorm` is
+`sint(p.h, p.l, 64, 0)`, which *is* `giNorm`. The ordering dependence is gone,
+demonstrated by making the same one-line deletion in both trees - remove the
+sized-integer arm from `js_lustr`, so `typeof` decides:
+
+```
+                       660c47a                      HEAD
+math.maxinteger        9223372036854776000          9223372036854775807
+math.mininteger        -9223372036854776000         -9223372036854775808
+9007199254740993       9007199254740992             9007199254740993
+```
+
+The 13,306-line Lua differential probe is byte-identical between `llvm.Run` and the
+native binary, **and** byte-identical to 660c47a's native output - the conversion
+changed no answer. Against the installed `lua 5.5` it differs on 2,087 lines, the same
+2,087 as 660c47a, all in the number formatter.
+
+**Cost, measured** (native, user time, 660c47a -> HEAD): 2M-iteration `s = s + i % 7`
+**4.00 -> 4.16s**, `fib(24)` **0.16 -> 0.16s**, 200k big-integer `(t + big) % p`
+**2.30 -> 2.47s**. Two guards had to be written carefully to get there and the
+intermediate numbers are recorded at their sites: a magnitude guard on both operands of
+`js_lucmp` cost **11.9s** on the first benchmark and a `luPlain()` call **7.6s**,
+against 4.16s for the form that ships - `float64` is monotone, so a *strict* double
+comparison is already right for a sized integer and only a TIE needs the exact path.
+
+**What a layer-2 file has to do to use the tag** - the whole interface, with
+`lua-rt.metajs` as the worked example:
+
+```js
+var b = sint(hi, lo, 64, 0)   // build one: two unsigned 32-bit halves, width,
+                              // unsignedness. Answers a PLAIN NUMBER when the value
+                              // is exact in a double - that is giNorm, and the
+                              // invariant is applied here and nowhere else.
+sintIs(v)                     // js_giis: is this a sized integer
+sintHi(v) / sintLo(v)         // the two halves back out, unsigned
+sintWidth(v) / sintUns(v)     // the declared width and signedness
+sintOp(code, l, r)            // one binary operator, 0..10 = + - * / % & | ^ &^ << >>
+sintCmp(l, r) / sintConv(v, bits, uns) / sintStr(v) / sintNum(v)
+```
+
+and then the one rule the tag imposes: **`typeof v == "number"` is TRUE for a sized
+integer**, so every site that meant "an ordinary double" has to say so.
+`lua-rt.metajs` spells that `luPlain(v)` and uses a cheaper equivalent in the three hot
+paths. In exchange three sites that used to be load-bearing became redundant - measured
+by deleting each and re-running the ratchet: the sized-integer arms of `js_lustr`,
+`js_lukey` and `js_lunum` can all go without one assertion failing, because the floor
+now renders, keys and coerces a sized integer correctly on its own. They are kept
+because they say what they mean.
+
+**Ratchet**: `tests/lua-test-full.lua` SECTION 24, **67 assertions**, every one also
+checked against the installed `lua 5.5`. Its **discriminating power against a clean
+archive of 660c47a is 0 of 67**, in all three engines - and that is the finding, not a
+gap: no Lua-level program can tell the object box from the tag, which is "Lua survived
+by luck of ordering" restated as a measurement. What it does discriminate is the
+conversion's own failure modes; mutating one layer-2 site at a time:
+
+```
+js_lucmp: non-strict '<=', so a box tie answers wrong        2 fail
+js_lucmp: the tie arm treats NaN as equal                    2 fail
+js_lucmp: no exact fall-through at all (660c47a semantics)   3 fail
+js_lutype: typeof instead of luPlain                         3 fail
+luNorm: box every value instead of only outside 2^53        15 fail
+js_luisint / js_lustr / js_lukey / js_lunum arms removed      0 fail  (redundant, above)
+```
+
+**One latent floor defect found on the way, and fixed.** `d_from_long(INT64_MIN)` built
+nonsense - `0 - i` wraps back to `i`, so the top-bit scan ran zero times. Unreachable
+until `si_float` passed a raw `int64` in; the probe read `-1` where Go reads
+`-9223372036854775808`.
+
+**The one gate item NOT met.** The sized-integer semantics could not be pinned in
+`tests/metajs-test-full.js`. That file is run by **both** MetaJS halves, and
+`metajs-interpreter.abnf` binds its host globals to **goja natives** (`hostGlobals`),
+so a MetaJS *source* program cannot reach a `jsGInt` there at all; a section using
+`sint(...)` would be a red section and would cost the whole half's 326 assertions -
+precisely the 51-assertion trap recorded under `c-interpreter` below. The fix is a
+handful of lines in `metajs-interpreter.abnf`: a goja-`BigInt` implementation of the
+six `sint*` globals, added to `hostGlobals`. It was outside the file set for this
+change and is the natural first step of the java migration.
 
 ~~**`c-interpreter.abnf` has no standard library.**~~ **DONE 2026-08-02.** `libcCall` in
 `languages/c-interpreter.abnf` now implements the 18 byte/address names (`strlen strcmp
@@ -207,8 +318,11 @@ php              101   1968
 
 Two adjustments to plain size order:
 
-1. **The sized-integer floor tag (Part 2) lands before java, csharp, go and kotlin** -
-   they are the `jsGInt` users.
+1. ~~**The sized-integer floor tag (Part 2) lands before java, csharp, go and kotlin**~~
+   - **done** (tag 13 of `languages/lib/runtime.c`, 2026-08-02). What is left for those
+   four is `jsJFlo`, the boxed double of `abnf/jsrtjvm.go`, which is the same problem
+   one type over; and the six `sint*` globals in `metajs-interpreter.abnf`, without
+   which the MetaJS ratchet cannot pin either of them.
 2. **js and typescript go together**, since typescript has no dedicated twin and shares
    js's. Same for ruby and python, whose semantics live in the shared `abnf/jsrt.go` -
    expect those two to drag more of the shared file with them than their extern count
