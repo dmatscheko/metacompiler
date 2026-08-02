@@ -1569,6 +1569,10 @@ KwDefault   = "default" KwEnd ;
 
     var i32 = llvm.types.I32
     var i32p = llvm.types.I32Ptr
+    // The narrow CELL types. A char is a real byte and a short a real half-word, so a
+    // string literal is [N x i8] and a char* strides one byte - see ctLTy/machBytes.
+    var i8 = llvm.types.I8
+    var i16 = llvm.types.I16
     var zero = llvm.constant.NewInt(i32, 0)
     var one = llvm.constant.NewInt(i32, 1)
 
@@ -1877,13 +1881,16 @@ KwDefault   = "default" KwEnd ;
         var name = items[0]
         var opt = items[1]
         return function(b) {
-            var ptr = b.NewAlloca(i32)
+            // A _Bool is an unsigned one-byte cell, like every other w==1 integer, so
+            // its slot has to be the same i8 the load and store paths assume.
+            var bct = ctI(1, true)
+            var ptr = b.NewAlloca(ctLTy(bct))
             if (opt != undefined) {
                 var r = opt(b)
                 b = r.b
-                b.NewStore(toInt(b, truthy(b, r.v)), ptr)
+                storeTo(b, bct, ptr, toInt(b, truthy(b, r.v)))
             }
-            declVar(name, {val: ptr, arr: false, load: i32, ct: ctI(1, true)})
+            declVar(name, {val: ptr, arr: false, load: ctLTy(bct), ct: bct})
             return b
         }
     }
@@ -2133,15 +2140,25 @@ KwDefault   = "default" KwEnd ;
         return ct.w
     }
     // The size the IR INTERPRETER's packed layout gives a value, which is what
-    // pointer arithmetic steps by. Every integer is an i32 there, whatever C width
-    // its type carries.
+    // pointer arithmetic steps by. It is exactly the byte size of ctLTy(ct) below,
+    // and the two MUST stay in step: a getelementptr strides by the LLVM element
+    // type while a pointer DIFFERENCE divides by this number, so any disagreement
+    // between them makes 'p + 1 - p' answer something other than 1.
+    // Until 2026-08-02 this returned 4 for every integer narrower than a long, so a
+    // char cell was four bytes wide and "hello" was emitted as [6 x i32]. That made
+    // the whole byte-oriented half of libc (str*/mem*, atoi) unimplementable - see
+    // the measurement at libcExterns in abnf/llvmmap.go. char is now a real byte and
+    // short a real half-word; the only cells that still overstate their C width are a
+    // float (carried as a double's i64 bit pattern) and a function pointer (a funcId
+    // in an i32), both of which are representation choices rather than widths.
     function machBytes(ct) {
-        if (ct.k == "ptr" || ct.k == "flt") return 8
+        if (ct.k == "ptr") return 8
+        if (ct.k == "flt") return 8      // every float is carried at double precision
         if (ct.k == "struct") return structOf(ct.s).bytes
         if (ct.k == "arr") return ct.n * machBytes(ct.e)
-        // A 64-bit integer occupies a whole i64 cell, which is what a pointer
-        // difference over a long array has to divide by.
-        if (ct.k == "int" && ct.w >= 8) return 8
+        if (ct.k == "fnp") return 4      // a funcId, not an address
+        if (ct.k == "void") return 1     // GCC's sizeof(void), and its pointer step
+        if (ct.k == "int") return ct.w >= 8 ? 8 : ct.w
         return 4
     }
     function ctStruct(sname) { return {k: "struct", s: sname} }
@@ -2151,6 +2168,12 @@ KwDefault   = "default" KwEnd ;
         for (var i = 0; i < n; i++) ct = {k: "ptr", p: ct}
         return ct
     }
+    // The LLVM type of a CELL of this C type - an alloca, a global, an array element,
+    // a struct member. Every integer width is spelled honestly, so the storage layout
+    // the module describes IS the C layout (packed, no alignment padding): char is i8,
+    // short i16, int i32, long i64. A VALUE, by contrast, always lives in an i32 or an
+    // i64 register (see ctRTy) - which is C's own integer promotion - so a narrow cell
+    // is extended on every load (loadCt) and truncated on every store (storeTo).
     function ctLTy(ct) {
         // A floating-point value is its IEEE-754 bit pattern in an i64.
         if (ct.k == "flt") return llvm.types.I64
@@ -2158,12 +2181,63 @@ KwDefault   = "default" KwEnd ;
         // width model rides on the LLVM type, so a load, a store, an alloca, a
         // struct field and an array element are all 8 bytes wide without any further
         // arrangement, and the arithmetic below is emitted at i64.
-        if (ct.k == "int" && ct.w >= 8) return llvm.types.I64
-        if (ct.k == "int" || ct.k == "fnp" || ct.k == "void") return i32
+        if (ct.k == "int") {
+            if (ct.w >= 8) return llvm.types.I64
+            if (ct.w == 1) return i8
+            if (ct.w == 2) return i16
+            return i32
+        }
+        // A function-pointer cell holds a funcId, an ordinary i32. `void` is only ever
+        // reached through a pointer, and its cell is a byte so that GCC's sizeof(void)
+        // == 1 and the one-byte step of 'void *p; p + 1' agree with each other.
+        if (ct.k == "fnp") return i32
+        if (ct.k == "void") return i8
         if (ct.k == "ptr") return i32p
         if (ct.k == "arr") return llvm.types.NewArray(ct.n, ctLTy(ct.e))
         return structOf(ct.s).lty
     }
+    // The LLVM REGISTER type a value of this C type is computed in: i64 for a long or
+    // a double, the uniform i32* for a pointer, i32 for everything else. Anything
+    // narrower than int is promoted into an i32 register the moment it is loaded.
+    function ctRTy(ct) {
+        if (ct == undefined) return i32
+        if (ct.k == "ptr" || ct.k == "arr") return i32p
+        if (ct.k == "flt") return llvm.types.I64
+        if (ct.k == "int" && ct.w >= 8) return llvm.types.I64
+        return i32
+    }
+    // The integer promotion applied to a value that has just come out of a narrow
+    // CELL: signed char sign-extends, unsigned char and _Bool zero-extend (C11
+    // 6.3.1.1p2). Wider types, pointers and floats are already in their register.
+    function promoteCell(b, ct, v) {
+        if (ct == undefined || ct.k != "int" || ct.w >= 4) return v
+        return (ct.u == true) ? b.NewZExt(v, i32) : b.NewSExt(v, i32)
+    }
+    // Load one cell and promote it. lty may override the cell type for the places that
+    // record one - a PARAMETER slot is an i32 even for a char, because the signature
+    // passes it promoted - so the extension is driven by the LOADED type rather than
+    // by the C type alone: a char already sitting in an i32 needs no extension, and
+    // emitting one would be a sext from i32 to i32.
+    function loadCt(b, ct, addr, lty) {
+        if (ct != undefined && ct.k == "ptr") return b.NewLoad(i32p, addr)
+        var t = (lty != undefined) ? lty : ctLTy(ct != undefined ? ct : ctInt)
+        var v = b.NewLoad(t, cellAddr(b, t, addr))
+        if (llvm.types.Equal(t, i8) || llvm.types.Equal(t, i16)) return promoteCell(b, ct, v)
+        return v
+    }
+    // An address typed to hold a cell of type t. Most addresses arrive from a
+    // getelementptr and are already right, but a pointer VALUE is the uniform i32*
+    // ('*p = x' through a short*), and llir rejects a store whose operand types do
+    // not match. The bitcast is emitted only when it is actually needed, which keeps
+    // it off the i32 path the model started with.
+    function cellAddr(b, t, addr) {
+        var want = llvm.types.NewPointer(t)
+        if (llvm.types.Equal(addr.Type(), want)) return addr
+        return b.NewBitCast(addr, want)
+    }
+    // An LLVM constant of the CELL width a C type occupies. kct (below) gives the
+    // REGISTER width instead, which is what a return value or an argument needs.
+    function kcell(ct, n) { return llvm.constant.NewInt(ctLTy(ct), n | 0) }
     // A type-specifier run that contains 'unsigned': its bit fields WRAP where a signed
     // one sign-extends. (Plain 'int x : n' is signed here, like the reference compiler.)
     function isUnsignedTy(raw) { return raw != undefined && raw.indexOf("unsigned") >= 0 }
@@ -2428,7 +2502,9 @@ KwDefault   = "default" KwEnd ;
             return b
         }
         if (ct.k != "struct") {
-            b.NewStore(ct.k == "ptr" ? llvm.constant.NewNull(i32p) : (isFlt(ct) ? zero64 : kct(ct, 0)), addr)
+            // kcell, not kct: the zero has to be the width of the CELL, so a char
+            // slot is zeroed with an i8 and not with an i32 that would overrun it.
+            b.NewStore(ct.k == "ptr" ? llvm.constant.NewNull(i32p) : (isFlt(ct) ? zero64 : kcell(ct, 0)), addr)
             return b
         }
         var st = structOf(ct.s)
@@ -2881,7 +2957,7 @@ KwDefault   = "default" KwEnd ;
             var ect = e.ct != undefined ? e.ct : ctInt
             if (ect.k == "arr") return {b: b, v: b.NewGetElementPtr(ctLTy(ect), e.val, [zero, zero]), ct: {k: "ptr", p: ect.e}}
             if (ect.k == "struct") return {b: b, v: e.val, ct: ect}
-            return {b: b, v: b.NewLoad(e.load != undefined ? e.load : ctLTy(ect), e.val), ct: ect}
+            return {b: b, v: loadCt(b, ect, e.val, e.load), ct: ect}
         }
     }
     // A place path: the variable, then indexing and member steps. The walk keeps the
@@ -2950,9 +3026,14 @@ KwDefault   = "default" KwEnd ;
         strSeq = strSeq + 1
         var g = m.NewGlobalDef(".str." + strSeq, llvm.constant.NewZeroInitializer(aty))
         var bytes = d.str
+        var ect = ct.e
         return function(b) {
             for (var i = 0; i < bytes.length; i++) {
-                b.NewStore(kint(bytes[i]), b.NewGetElementPtr(aty, g, [zero, kint(i)]))
+                // The element is a CELL: an i8 for a narrow literal, and the byte is
+                // converted into its declared range first, so \xff in a signed char
+                // array is the -1 that cc stores rather than an out-of-range 255.
+                b.NewStore(kcell(ect, convertNum(ect, bytes[i])),
+                           b.NewGetElementPtr(aty, g, [zero, kint(i)]))
             }
             return {b: b, v: g, ct: ct}
         }
@@ -3030,7 +3111,7 @@ KwDefault   = "default" KwEnd ;
         var ct = r.ct != undefined ? r.ct : ctInt
         if (ct.k == "arr") return {b: r.b, v: r.b.NewGetElementPtr(ctLTy(ct), r.v, [zero, zero]), ct: {k: "ptr", p: ct.e}}
         if (ct.k == "struct") return {b: r.b, v: r.v, ct: ct}
-        return {b: r.b, v: r.b.NewLoad(ct.k == "ptr" ? i32p : ctLTy(ct), r.v), ct: ct}
+        return {b: r.b, v: loadCt(r.b, ct, r.v), ct: ct}
     }
     function makeLoadOf(placeT) {
         return function(b) { return placeValOf(placeT(b)) }
@@ -3291,9 +3372,21 @@ KwDefault   = "default" KwEnd ;
             var rt = items[1](thenB)
             var re = items[2](elseB)
             // Both arms feed one phi, so both are brought to the balanced type first.
-            var ct = arithCt(rt.ct != undefined ? rt.ct : ctInt, re.ct != undefined ? re.ct : ctInt)
+            var tct = rt.ct != undefined ? rt.ct : ctInt
+            var ect = re.ct != undefined ? re.ct : ctInt
+            var ct = arithCt(tct, ect)
             var vt = coerce(rt.b, ct, rt)
             var ve = coerce(re.b, ct, re)
+            // A POINTER arm against a null-constant arm (C11 6.5.15p6, 'p ? p : 0'):
+            // arithCt already answers the pointer type, but coerce leaves the 0 as an
+            // i32, and `phi i32* [ %p, ... ], [ 0, ... ]` is IR llvm.Run accepts and
+            // clang rejects ("integer constant must have integer type"). Both
+            // incomings have to be the uniform i32*.
+            if (isPtrLike(ct) || llvm.types.IsPointer(vt.Type()) || llvm.types.IsPointer(ve.Type())) {
+                vt = ptrOperand(rt.b, vt)
+                ve = ptrOperand(re.b, ve)
+                if (!isPtrLike(ct)) { ct = isPtrLike(tct) ? tct : ect }
+            }
             rt.b.NewBr(mergeB)
             re.b.NewBr(mergeB)
             var phi = mergeB.NewPhi([llvm.ir.NewIncoming(vt, rt.b), llvm.ir.NewIncoming(ve, re.b)])
@@ -3308,6 +3401,10 @@ KwDefault   = "default" KwEnd ;
     // are uniform i32* slots - llir checks store operand types); into a pointer
     // place a plain integer (the 0 of 'p = 0') goes through inttoptr, so the store
     // covers all 8 bytes.
+    // The RESULT is the value in its register width (an assignment is an expression,
+    // and its value has the promoted type), while what reaches memory is truncated to
+    // the cell. The two differ for char and short, which is why the truncation is a
+    // separate local rather than the returned value.
     function storeTo(b, ct, addr, v) {
         if (ct != undefined && isFlt(ct)) { b.NewStore(v, addr); return v }
         if (llvm.types.IsPointer(v.Type())) {
@@ -3317,7 +3414,12 @@ KwDefault   = "default" KwEnd ;
         } else if (ct != undefined) {
             v = emitConv(b, ct, v, ct)
         }
-        b.NewStore(v, addr)
+        var cell = v
+        if (ct != undefined && ct.k == "int" && ct.w < 4 && !llvm.types.IsPointer(v.Type())) {
+            cell = b.NewTrunc(v, ctLTy(ct))
+            addr = cellAddr(b, ctLTy(ct), addr)
+        }
+        b.NewStore(cell, addr)
         return v
     }
     // items = [placeThunk, opString, valueThunk].
@@ -3335,7 +3437,7 @@ KwDefault   = "default" KwEnd ;
             // Assigning a whole struct or union copies its members (C11 6.5.16.1).
             if (op == "=" && isAggCt(p.ct)) { return {b: emitCopy(b, p.ct, p.v, v), v: p.v, ct: p.ct} }
             if (op != "=") {
-                var cur = {b: b, v: b.NewLoad(ctLTy(p.ct != undefined ? p.ct : ctInt), p.v), ct: p.ct}
+                var cur = {b: b, v: loadCt(b, p.ct, p.v), ct: p.ct}
                 var ra = applyOp(b, op, cur, r)
                 b = ra.b
                 v = ra.v
@@ -3360,8 +3462,7 @@ KwDefault   = "default" KwEnd ;
         return function(b) {
             var p = placeT(b)
             b = p.b
-            var lty = ctLTy(p.ct != undefined ? p.ct : ctInt)
-            var old = b.NewLoad(lty, p.v)
+            var old = loadCt(b, p.ct, p.v)
             var nv = bfNormV(b, p.bf, emitStep(b, p.ct, old, op))
             nv = storeTo(b, p.ct, p.v, nv)
             return {b: b, v: nv, ct: p.ct}
@@ -3371,8 +3472,7 @@ KwDefault   = "default" KwEnd ;
         return function(b) {
             var p = placeT(b)
             b = p.b
-            var lty = ctLTy(p.ct != undefined ? p.ct : ctInt)
-            var old = b.NewLoad(lty, p.v)
+            var old = loadCt(b, p.ct, p.v)
             storeTo(b, p.ct, p.v, bfNormV(b, p.bf, emitStep(b, p.ct, old, op)))
             return {b: b, v: old, ct: p.ct}
         }
@@ -3461,7 +3561,15 @@ KwDefault   = "default" KwEnd ;
         b = emitCallArgs(b, args, argValues, paramCtsOf(name))
         var cv = b.NewCall(getFuncByArity(name, args.length), argValues)
         if (sct != undefined) return {b: b, v: dest, ct: sct}
-        return {b: b, v: cv, ct: hasOwn(funcRetCt, name) ? funcRetCt[name] : ctInt}
+        // A POINTER-returning function reports its declared pointer type, not ctInt.
+        // Its LLVM result is already the uniform i32* (retIsPtr drives the signature),
+        // so ctInt was a LIE about a value that is an address, and it made
+        // 'strchr(s, c) - s' take the pointer+integer branch of emitBinC with the two
+        // operands the wrong way round: the emitted `sext i32* %p to i64` is IR that
+        // llvm.Run accepts and clang refuses outright ("invalid cast opcode").
+        var rct = hasOwn(funcRetCt, name) ? funcRetCt[name] : ctInt
+        if (retIsPtr(name)) { rct = funcRetAll[name] }
+        return {b: b, v: cv, ct: rct}
     }
     function emitIndirectCall(b, idv, args) {
         var argValues = []
@@ -3565,7 +3673,7 @@ KwDefault   = "default" KwEnd ;
             var aty = ctLTy(ct)
             var n = opt.str.length < ct.n ? opt.str.length : ct.n
             for (var i = 0; i < n; i++) {
-                b.NewStore(kint(convertNum(ct.e, opt.str[i])), b.NewGetElementPtr(aty, a, [zero, kint(i)]))
+                b.NewStore(kcell(ct.e, convertNum(ct.e, opt.str[i])), b.NewGetElementPtr(aty, a, [zero, kint(i)]))
             }
             return b
         }
@@ -3939,11 +4047,21 @@ KwDefault   = "default" KwEnd ;
                 declVar(params[i].name, {val: a, arr: false, ct: pct})
                 continue
             }
+            // The SIGNATURE passes a narrow integer promoted (i32), because that is
+            // how every call site builds it, but the parameter's own SLOT is a cell of
+            // the declared width - an i8 for a char. Anything else is inconsistent:
+            // a store through the place path truncates to the cell, so an i32 slot
+            // would keep three stale bytes that the next plain read would see.
             var pty = params[i].ptr ? i32p
                       : ((pct != undefined && pct.k == "int" && pct.w >= 8) ? llvm.types.I64 : i32)
-            var ptr = b.NewAlloca(pty)
-            b.NewStore(f.Params[i + off], ptr)
-            declVar(params[i].name, {val: ptr, arr: false, ty: pty, load: pty, ct: pct})
+            var cty = (!params[i].ptr && pct != undefined && pct.k == "int" && pct.w < 4)
+                      ? ctLTy(pct) : pty
+            var ptr = b.NewAlloca(cty)
+            // Narrowing here is also the conversion C11 6.5.2.2p7 requires of an
+            // argument to a declared parameter type: f(300) with 'char c' sees 44.
+            b.NewStore(llvm.types.Equal(cty, pty) ? f.Params[i + off]
+                       : b.NewTrunc(f.Params[i + off], cty), ptr)
+            declVar(params[i].name, {val: ptr, arr: false, ty: cty, load: cty, ct: pct})
         }
         b = bodyT(b)
         // The implicit fall-off-the-end return. It has to match the RESULT TYPE, so a

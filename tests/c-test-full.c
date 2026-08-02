@@ -1389,6 +1389,120 @@ int s43(void) {
     return 0;
 }
 
+// ===== SECTION 44: a char is ONE BYTE =====
+/* The width model, pinned. Until 2026-08-02 the compiler gave every integer narrower
+   than a long a FOUR-byte cell, so "hello" was emitted as [6 x i32] and a char* strode
+   four bytes at a time - which made the whole byte-oriented half of libc (str*, mem*,
+   atoi) impossible to link, and which nothing in this file could see. Verified against
+   cc, which answers every check below identically.
+
+   One deliberate omission: the raw byte distance between two SHORT array elements is
+   not asserted. The compiler packs its cells (that distance is 2, like cc), while the
+   c-interpreter's memory is one CELL per scalar (that distance is 1) - a legitimately
+   different model, not a defect, so 4435 asserts the SCALING instead, which both
+   answer. A char is the one width where the two models coincide, and that is exactly
+   what makes 4410 and 4414 sayable at all. */
+char s44_g[4] = "abc";
+int s44_len(const char *s) { const char *p = s; while (*p) { p++; } return (int)(p - s); }
+int s44(void) {
+    char a[8];
+    char *p;
+    signed char sc;
+    unsigned char uc;
+    short sh;
+    unsigned short us;
+    int i;
+
+    check(4401, sizeof(char) == 1);
+    check(4402, sizeof(signed char) == 1 && sizeof(unsigned char) == 1);
+    check(4403, sizeof(short) == 2 && sizeof(unsigned short) == 2);
+    check(4404, sizeof "hello" == 6);       /* the terminator counts */
+    check(4405, sizeof "" == 1);
+    check(4406, sizeof a == 8);
+    check(4407, sizeof s44_g == 4);
+
+    for (i = 0; i < 8; i++) { a[i] = (char)('a' + i); }
+    check(4408, &a[3] - &a[0] == 3);        /* indexing walks single elements */
+    check(4409, (long)&a[3] - (long)&a[0] == 3);   /* ...and they are single BYTES */
+    p = a;
+    check(4410, (long)(p + 1) - (long)p == 1);     /* a char* steps one byte */
+    check(4411, *p == 'a' && *(p + 1) == 'b' && p[7] == 'h');
+    p++;
+    check(4412, *p == 'b');
+    p = p + 3;
+    check(4413, *p == 'e' && p - a == 4);
+    check(4414, (long)&a[8] - (long)&a[0] == (long)sizeof a);
+
+    a[0] = 'h'; a[1] = 'i'; a[2] = 0;
+    check(4415, s44_len(a) == 2);           /* a byte-oriented scan: what strlen is */
+    check(4416, s44_len("hello") == 5);
+    check(4417, s44_len(s44_g) == 3);
+    check(4418, s44_g[0] == 'a' && s44_g[2] == 'c' && s44_g[3] == 0);
+
+    sc = (signed char)127;  check(4419, sc == 127);
+    sc = (signed char)-128; check(4420, sc == -128);
+    sc = (signed char)128;  check(4421, sc == -128);
+    sc = (signed char)255;  check(4422, sc == -1);
+    sc = (signed char)256;  check(4423, sc == 0);
+    uc = (unsigned char)255; check(4424, uc == 255);
+    uc = (unsigned char)-1;  check(4425, uc == 255);
+    uc = (unsigned char)256; check(4426, uc == 0);
+    check(4427, (char)-1 < 0);              /* plain char is SIGNED here, like cc */
+    for (i = -128; i <= 127; i++) { sc = (signed char)i; if (sc != i) { break; } }
+    check(4428, i == 128);                  /* the whole signed range round-trips */
+    for (i = 0; i <= 255; i++) { uc = (unsigned char)i; if (uc != i) { break; } }
+    check(4429, i == 256);                  /* and the whole unsigned range */
+
+    sh = (short)-32768; check(4430, sh == -32768);
+    sh = (short)32768;  check(4431, sh == -32768);
+    us = (unsigned short)65535; check(4432, us == 65535);
+    us = (unsigned short)-1;    check(4433, us == 65535);
+    { short sa[4]; short *q = sa;
+      check(4434, &sa[3] - &sa[0] == 3);
+      check(4435, (long)&sa[4] - (long)&sa[0] == 4 * ((long)&sa[1] - (long)&sa[0]));
+      sa[0] = 1000; sa[1] = -1000; q = q + 1;
+      check(4436, *q == -1000 && sizeof sa == 8); }
+    /* A string literal's OBJECT holds values of its element type, not raw bytes: a
+       high byte in a signed char array is negative. The interpreter half stored the
+       raw byte and answered 255 here until 2026-08-02. */
+    { const char *w = "\xff\x7f\x80";
+      char lit[4] = "\xff\x7f\x80";
+      check(4437, w[0] == -1 && w[1] == 127 && w[2] == -128);
+      check(4438, (unsigned char)w[0] == 255);
+      check(4439, lit[0] == -1 && lit[2] == -128 && sizeof "\xff\x7f\x80" == 4); }
+    return 0;
+}
+
+// ===== SECTION 45: a function that RETURNS A POINTER =====
+/* The result of such a call is an address, and it has to be typed as one. Until
+   2026-08-02 the compiler half reported it as a plain int (only a 64-bit integer
+   return was recorded), which made 's45_at(a, 2) - a' take the pointer+integer branch
+   of the binary operator with the operands the wrong way round: it answered garbage
+   where cc answers 2, and it emitted 'sext i32* %p to i64', which clang refuses
+   outright. A null-constant arm against a pointer arm ('f ? s : 0') likewise emitted
+   'phi i32* [ %s, ... ], [ 0, ... ]' - clang: "integer constant must have integer
+   type" - so a nine-line C program built a module clang would not accept. Verified
+   against cc. */
+char *s45_at(char *s, int i) { return s + i; }
+char *s45_or0(char *s, int f) { return f ? s : 0; }
+int *s45_ip(int *p, int i) { return p + i; }
+int s45(void) {
+    char a[6]; int m[4]; int i;
+    for (i = 0; i < 6; i++) { a[i] = (char)('a' + i); }
+    for (i = 0; i < 4; i++) { m[i] = i * 10; }
+    check(4501, s45_at(a, 2) - a == 2);          /* the call result IS a pointer */
+    check(4502, *s45_at(a, 3) == 'd');
+    check(4503, s45_at(a, 4) > a && s45_at(a, 0) == a);
+    check(4504, (long)s45_at(a, 2) - (long)a == 2);
+    check(4505, s45_or0(a, 1) == a);             /* the ternary's null arm */
+    check(4506, s45_or0(a, 0) == 0);
+    check(4507, s45_ip(m, 2) - m == 2 && *s45_ip(m, 2) == 20);
+    /* The RAW distance between int cells is 8 in the compiler (and cc) and 1 in the
+       cell-addressed interpreter, so - as in 4435 - what is asserted is the scaling. */
+    check(4508, (long)s45_ip(m, 4) - (long)m == 2 * ((long)s45_ip(m, 2) - (long)m));
+    return 0;
+}
+
 int main() {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
@@ -1433,6 +1547,8 @@ int main() {
     s41(); // SECTION-CALL 41
     s42(); // SECTION-CALL 42
     s43(); // SECTION-CALL 43
+    s44(); // SECTION-CALL 44
+    s45(); // SECTION-CALL 45
     /* summary: "full: <checks> checks, <failures> failures" */
     putchar('f'); putchar('u'); putchar('l'); putchar('l'); putchar(':'); putchar(' ');
     print_num(nchecks);

@@ -188,6 +188,256 @@ string test, `x === x * 1` the number test, `x === x` the NaN test.
 difference. `-rt-prims` is opt-in and off for tag scripts (the frozen tag-script runtime's
 `c` has no `parse`), so the bootstrap does not pay for the measurement.
 
+## Phase 3a - `char` is one byte - DONE (2026-08-02)
+
+A prerequisite for phase 3 that phase 0 uncovered. The floor is written in C and it is
+about **bytes and addresses**: `js_str_mem` takes an `i8*` and a byte length, a string is
+a byte array, a handle is a tagged pointer. `languages/c-to-llvm-ir.abnf` gave `char` a
+**four-byte cell** - `machBytes()` answered 4 for every integer narrower than a long -
+so `"hello"` was emitted as `[6 x i32]` and no byte-oriented code could be expressed at
+all. Commit 43cf14e had already measured this and deliberately kept the whole
+`str*`/`mem*` family, `atoi`, `atol` and `strdup` OUT of `libcExterns`.
+
+### What changed
+
+`languages/c-to-llvm-ir.abnf`. The model now separates a **cell** from a **register**:
+
+- `ctLTy` spells every integer width honestly - `char`/`_Bool` `i8`, `short` `i16`,
+  `int` `i32`, `long` `i64` - and `void` is `i8` so that GCC's `sizeof(void) == 1` and
+  the one-byte step of `void *p; p + 1` finally agree with each other.
+- `machBytes` is now exactly the byte size of `ctLTy`. The two MUST stay in step: a
+  `getelementptr` strides by the LLVM element type while a pointer *difference* divides
+  by `machBytes`, so any disagreement makes `p + 1 - p` answer something other than 1.
+- A **value** still lives in an `i32`/`i64` register - that is C's own integer promotion
+  - so a narrow cell is extended on every load (`loadCt`/`promoteCell`, signed or
+  unsigned by the C type) and truncated on every store (`storeTo`). Function
+  *signatures* keep passing narrow integers promoted, exactly as before; only the
+  parameter's own slot became a cell, and the incoming argument is now converted into
+  the declared width there (`f(300)` with `char c` sees 44, as cc does).
+- `cellAddr` bitcasts an address whose LLVM type does not match the cell. This is
+  **machinery the new model needs, not a defect it fixes**: a pointer *value* is the
+  uniform `i32*`, and once `storeTo` truncates, `short *to; *to++ = x` makes llir refuse
+  the store (`src=i16; dst=i32*`). At HEAD there was no truncation, the store was `i32`
+  into `i32*`, and that construct already answered correctly (4464, same as cc).
+- String-literal objects store **converted** elements (`kcell` + `convertNum`), so
+  `"\xff"[0]` is the `-1` a signed char holds.
+
+Two further defects are fixed in the same file. Both are **pre-existing and reachable at
+HEAD** - they were found while widening `char`, not caused by it, and each produces a
+wrong answer *and* a module clang rejects (measured below, section 45 of the ratchet):
+
+- `emitDirectCall` reported a **pointer-returning** function's result as `ctInt`, though
+  `retIsPtr` already gives it an `i32*` LLVM result. `s45_at(a, 2) - a` therefore took
+  the pointer+integer branch of `emitBinC` with the operands the wrong way round and
+  emitted `sext i32* %p to i64` - IR `llvm.Run` accepts and clang refuses ("invalid cast
+  opcode").
+- `makeCondExpr` left a null-constant arm as an `i32` against a pointer arm, emitting
+  `phi i32* [ %p, ... ], [ 0, ... ]` - "integer constant must have integer type".
+
+`languages/c-interpreter.abnf`: `strLitAddr` wrote **raw bytes** into the literal object
+instead of converting them to the element type, so `"\xff"[0]` answered 255 here while
+the compiler half and cc answered -1. That is now the one-line `convert(ect, ...)` the
+array-initializer branch two lines above already did.
+
+The interpreter is **not** byte-packed, and was deliberately left that way: its memory is
+one cell per scalar, which is a legitimately different model. It already answered
+`sizeof(char) == 1` and `sizeof "hello" == 6` correctly, and no `malloc` was needed for
+the new section, so none was added.
+
+### Measurements (real `cc` is the oracle - Apple clang 21.0.0, arm64-darwin)
+
+**How to reproduce these.** Every "HEAD" figure below comes from a clean archive tree
+with its own binary, never from the working tree:
+
+```
+git archive e81dc94 | (cd /tmp/headco && tar xf -)
+(cd /tmp/headco && go build -o /tmp/mec-head .)
+/tmp/mec-head /tmp/headco/languages/c-to-llvm-ir.abnf <probe>.c -q
+```
+
+Running `mec languages/c-to-llvm-ir.abnf` from the repository root reads the **working
+tree**, so a before/after comparison done that way compares the change against itself
+and reports "identical". It is worth stating because that is exactly how the first
+review of this phase concluded the change was a no-op.
+
+The literal, and the struct:
+
+```
+HEAD e81dc94:  @.str.1 = global [6 x i32] zeroinitializer
+phase3a:       @.str.1 = global [6 x i8] zeroinitializer
+
+struct S { char a; short b; int c; long d; };
+HEAD e81dc94:  %0 = alloca { i32, i32, i32, i64 }
+phase3a:       %0 = alloca { i8, i16, i32, i64 }
+```
+
+HEAD's own `tests/c-test-full.c` through both grammars, module plus program output:
+
+```
+IR+output bytes: HEAD=229251  3a=231290      DIFFERENT
+< @.str.1 = global [4 x i32] zeroinitializer
+> @.str.1 = global [4 x i8] zeroinitializer
+(both still pass it: full: 397 checks, 0 failures)
+```
+
+**The reproducing case.** `char` was the one width where `sizeof` and the actual layout
+disagreed, which is why `sizeof` alone could never see it - `ctBytes` was honest all
+along and only `machBytes`/`ctLTy` were not:
+
+```c
+char a[8]; char *p = a;
+pn((long)&a[1] - (long)&a[0]);       /* 1 : a char array walks single BYTES */
+pn((long)(p + 1) - (long)p);         /* 1 : a char* steps one byte          */
+pn((long)&a[8] - (long)&a[0]);       /* 8 : consistent with sizeof a        */
+pn((long)sizeof a);                  /* 8                                   */
+{ const char *w = "\xff\x7f"; pn(w[0]); pn(w[1]); }   /* -1 127 */
+```
+
+```
+cc (oracle)     1 1  8 8  -1 127
+HEAD e81dc94    4 4 32 8 255 127        <- sizeof says 8, the layout is 32
+phase3a         1 1  8 8  -1 127
+```
+
+The same three-way run over the two pointer-return defects (ratchet section 45):
+
+```
+cc (oracle)     2yn
+HEAD e81dc94    <garbage byte>yn   and clang: "integer constant must have integer type"
+                                   at  %10 = phi i32* [ %7, %6 ], [ 0, %8 ]
+phase3a         2yn                and clang accepts the module
+```
+
+HEAD against the new ratchet file - `cc` answers all 444 correctly:
+
+```
+cc          full: 444 checks, 0 failures
+HEAD        FAIL 4409  FAIL 4410  FAIL 4414  FAIL 4437  FAIL 4501  FAIL 4504  FAIL 4507
+phase3a     full: 444 checks, 0 failures
+```
+
+The probe from the `libcExterns` comment, and 27 more over the whole family
+(`strlen strcmp strncmp strcpy strncpy strcat strncat strchr strrchr strstr memcpy
+memmove memset memcmp memchr atoi atol strdup`), our module linked by clang against the
+real libc versus `cc` on the same source:
+
+```
+cc     5 0 0 -1 1 0 -1 hello 5 world abcd xy123 2 3 4 1 qqqqq abcdef 010123478 -1 0 2 42 -7 1234567890 dup! 4
+clang  5 0 0 -1 1 0 -1 hello 5 world abcd xy123 2 3 4 1 qqqqq abcdef 010123478 -1 0 2 42 -7 1234567890 dup! 4
+```
+
+Byte-identical. The same family **implemented in C and compiled by this grammar** - which
+is what a Go `libcNative` walking the arena would see - agrees under all three engines:
+
+```
+cc         5 0 0 -1 0 -1 hello 5 world 2 4 1 qqqqq abcdef -1 0 42 -7 dup! 4 6 1 2 4 1 -1 255 -32768 32768 3 ABC
+llvm.Run   5 0 0 -1 0 -1 hello 5 world 2 4 1 qqqqq abcdef -1 0 42 -7 dup! 4 6 1 2 4 1 -1 255 -32768 32768 3 ABC
+-exe       5 0 0 -1 0 -1 hello 5 world 2 4 1 qqqqq abcdef -1 0 42 -7 dup! 4 6 1 2 4 1 -1 255 -32768 32768 3 ABC
+```
+
+### The arena is not the bug - it never was
+
+Worth recording, because the first reading of the `strlen("hello") == 1` measurement put
+the four bytes on the Go side. It is not there. `ma.sizeOfUncached`
+(`abnf/llvmmap.go:1942-1959`) derives the whole arena layout from the module's own LLVM
+types and is completely honest about width:
+
+```go
+case *types.IntType:   return (t.BitSize + 7) / 8
+case *types.ArrayType: return t.Len * ma.sizeOf(t.ElemType)
+case *types.StructType: /* packed sum of the fields */
+```
+
+So the arena did exactly what the module told it to. The module said `[6 x i32]`, the
+arena reserved 24 bytes with three padding NULs after each character, and a byte-walking
+Go `strlen` correctly reported **1** for what was actually there. Nothing on the Go side
+needs changing, and no fix should be dispatched to that layer.
+
+The apparent contradiction - "a `char` array reports `&ca[1] - &ca[0] == 1`, which looks
+byte-accurate, yet a byte-walking `strlen` returns 1" - has two separate causes, and
+neither is the arena:
+
+- `&ca[1] - &ca[0]` is a C **pointer difference**, which the grammar emits as
+  `(ptrtoint b - ptrtoint a) / machBytes(char)`. At HEAD that divided a raw distance of 4
+  by 4 and answered 1. The scaling hid the layout; it did not correct it. The unscaled
+  form is what exposes it, and it is why the ratchet now asserts the unscaled form.
+- `&s.d - &s.a == 7` for `struct S { char a; short b; int c; long d; }` is **phase3a's**
+  answer, not HEAD's. Measured three ways (scaled distance, raw distance, `sizeof`):
+
+```
+cc (oracle)     8  8 16     <- aligned layout
+HEAD e81dc94    3 12 15     <- raw 12 disagrees with sizeof 15
+phase3a         7  7 15     <- raw == scaled == the packed sizeof
+```
+
+Neither model matches cc's *aligned* struct size, and that is the pre-existing packed
+layout choice this phase does not touch. What phase3a fixes is the model disagreeing
+with **itself**: at HEAD `sizeof a == 8` while `&a[8] - &a[0] == 32`.
+
+### The libc names that are now safe to add
+
+All 18 pass condition 1 (measured above). All 18 are pure byte/address work over
+`ma.mem` plus, for `strdup`, `ma.heapAlloc`, so condition 2 is satisfiable - each has to
+be **implemented in `libcNative` in the same change**, never listed for clang alone:
+
+```
+strlen  strcmp  strncmp  strcpy  strncpy  strcat  strncat
+strchr  strrchr strstr
+memcpy  memmove memset  memcmp  memchr
+atoi    atol    strdup
+```
+
+One caveat, measured, for `strcmp`/`strncmp`/`memcmp`: the **magnitude** of the result is
+unspecified by C, and Apple's libc returns the unsigned-byte difference. With runtime
+operands `cc` and the real symbol agree exactly:
+
+```
+strcmp(x,"abd") -1   strcmp(y,x) 1   strcmp("a","abc") -98   strncmp/memcmp("abcz","abcd",4) 22
+```
+
+but with **literal** operands `cc` constant-folds to a normalized sign where the linked
+symbol returns the raw difference (`strcmp("\x80","\x01")`: cc 1, libc 127). That is cc
+optimizing an unspecified value, not a memory-model defect - but a `libcNative`
+implementation must return the unsigned-byte difference, not a normalized -1/0/1, or
+`llvm.Run` and `-exe` will disagree on programs that print it.
+
+`puts` stays where it was. Nothing else moves: the varargs `printf` family, `exit`,
+`abort`, `qsort` and `bsearch` are still blocked by condition 2 for the reasons
+`libcNative` already records.
+
+### Pinned
+
+`tests/c-test-full.c` gained **SECTION 45 (8 checks, 4501-4508)** for the two
+pointer-return defects - HEAD fails 4501, 4504 and 4507 - and **SECTION 44 (39 checks,
+ids 4401-4439)**: `sizeof(char)`,
+`sizeof(short)`, `sizeof "hello" == 6`, single-byte indexing and `char*` stepping
+(`(long)(p + 1) - (long)p == 1`), a byte-oriented scan (what `strlen` is), the full
+signed and unsigned `char` ranges round-tripping, the `short` wraps, and the string
+literal's signed high bytes. `cc` answers every one of them identically.
+
+Deliberately **not** asserted: the raw byte distance between two `short` array elements
+(2 in the compiler and cc, 1 in the cell-addressed interpreter). 4435 asserts the
+*scaling* instead, which both halves answer. A `char` is the one width where the two
+models coincide, and that is what makes the byte assertions sayable at all.
+
+### Known defect, out of scope, measured
+
+`_Bool b; b = 5;` holds **5**, where cc holds 1. Both halves agree with each other, so
+neither `--cross` nor the ratchet can see it. It is not a width bug: `_Bool` is modelled
+as `ctI(1, true)` in *both* grammars, which is indistinguishable from `unsigned char`, so
+the store path cannot tell them apart and normalizing needs a new type-descriptor flag
+threaded through `convert`/`emitConv`/`ctEq` in both halves. Only the *initializer* is
+normalized today (`makeBoolDecl`). Unchanged by this phase - it behaves exactly as it did
+at HEAD.
+
+### Ground truth
+
+matrix **315/315** (308 + phase-1's three `-rt-prims` entries + four added concurrently),
+`--full` **4,896 assertions, 0 languages whose halves disagree** (c 397 -> 444),
+`--cross` **119/0**, `clang-check` **15/15** with c reporting *"ok, and the clang
+executable agrees"* - so the new section is checked in a real clang-built binary, not
+only under `llvm.Run`.
+
 ## Phase 2 - the linking feature - DONE (2026-08-02)
 
 `buildExecutable` wrote one temp `.ll` and ran `clang -Wno-override-module -o out tmp.ll`.

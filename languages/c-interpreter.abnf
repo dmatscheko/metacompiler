@@ -2363,7 +2363,7 @@ KwDefault   = "default" KwEnd ;
         var bytes = d.str
         var addr = -1
         return function() {
-            if (addr < 0) { addr = strLitAddr(bytes) }
+            if (addr < 0) { addr = strLitAddr(bytes, ct.e) }
             return {a: addr, ct: ct}
         }
     }
@@ -2735,11 +2735,15 @@ KwDefault   = "default" KwEnd ;
             for (var i = 0; i < n; i++) mem[a + i] = convert(ct.e, opt.str[i])
             return
         }
-        mem[a] = convert(ct, strLitAddr(opt.str))
+        mem[a] = convert(ct, strLitAddr(opt.str, opt.wide == true ? ctInt : ctChar))
     }
-    function strLitAddr(bytes) {
+    // The literal OBJECT's cells hold values of its element type, so each byte goes
+    // through convert() exactly as the array-initializer branch above does. Without
+    // that, '"\xff"[0]' answered 255 here while the compiler half (and cc) answered
+    // the -1 a signed char holds - the two halves disagreeing about one byte.
+    function strLitAddr(bytes, ect) {
         var base = alloc(bytes.length)
-        for (var i = 0; i < bytes.length; i++) mem[base + i] = bytes[i]
+        for (var i = 0; i < bytes.length; i++) mem[base + i] = convert(ect, bytes[i])
         return base
     }
     // A static local: the storage is allocated ONCE and survives across calls; every
