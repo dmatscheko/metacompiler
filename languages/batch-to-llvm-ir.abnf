@@ -530,12 +530,9 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     function ci32(n) { return llvm.constant.NewInt(i32, n) }
 
     var m = llvm.ir.NewModule()
-    var extPutchar = m.NewFunc("putchar", i32, llvm.ir.NewParam("", i32))
 
-    var ARENA = 1 << 21
-    var arenaTy = llvm.types.NewArray(ARENA, i8)
-    var gArena = m.NewGlobalDef("arena", llvm.constant.NewZeroInitializer(arenaTy))
-    var gApos = m.NewGlobalDef("arena_pos", zero)
+    // The arena (rt_bump) and the output capture stack live in languages/lib/batch-rt.c
+    // now, as statics of the runtime module, so nothing here declares or initializes them.
     var gExitCode = m.NewGlobalDef("exit_code", zero)
     var gErrLvl = m.NewGlobalDef("errorlevel", zero)
     var gDelayed = m.NewGlobalDef("delayed_on", zero)
@@ -560,14 +557,6 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     var gArgTail = m.NewGlobalDef("arg_tail", llvm.constant.NewZeroInitializer(frameTy))
     var gArgLbl = m.NewGlobalDef("arg_lbl", llvm.constant.NewZeroInitializer(frameTy))
     var gFrame = m.NewGlobalDef("frame", zero)
-
-    // Output capture: a redirection discards, for /f 'echo ...' parses what it caught.
-    var CAPN = 8, CAPSZ = 8192
-    var capBufTy = llvm.types.NewArray(CAPN, i8ptr)
-    var capLenTy = llvm.types.NewArray(CAPN, i32)
-    var gCapBufs = m.NewGlobalDef("cap_bufs", llvm.constant.NewZeroInitializer(capBufTy))
-    var gCapLens = m.NewGlobalDef("cap_lens", llvm.constant.NewZeroInitializer(capLenTy))
-    var gCapSp = m.NewGlobalDef("cap_sp", zero)
 
     // ===================================================================================
     //  Emitter state.
@@ -656,558 +645,61 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     }
 
     // ===================================================================================
-    //  The string runtime, hand-emitted as IR functions.
+    //  The string runtime: languages/lib/batch-rt.c, compiled by languages/c-to-llvm-ir.abnf
+    //  into languages/lib/batch-rt.ll (tests/gen-batch-rt-ll.sh) and LINKED, not emitted.
+    //
+    //  These were 25 hand-written IR bodies inside this grammar. The ABI is unchanged -
+    //  a string is a char* into the runtime's arena, an integer is an int - so no call
+    //  site below changed; only where the bodies come from. The arena and the output
+    //  capture stack moved with them and are now statics of batch-rt.c, which is why
+    //  main no longer initializes them (a C static starts at zero by itself).
+    //
+    //  rt_expand is the 26th and it did NOT move: it calls bat_lookup, which is
+    //  GENERATED per program below, and a declared-only function's pointer parameter
+    //  comes out of c-to-llvm-ir.abnf as a plain i32. See fillExpand and
+    //  docs/runtime-rework-plan.md.
     // ===================================================================================
 
-    var rtBump = m.NewFunc("rt_bump", i8ptr, llvm.ir.NewParam("n", i32))
-    ;(function() {
-        var n = rtBump.Params[0]
-        var b = rtBump.NewBlock("entry")
-        var p = b.NewLoad(i32, gApos)
-        var ptr = b.NewGetElementPtr(arenaTy, gArena, zero, p)
-        b.NewStore(b.NewAdd(p, n), gApos)
-        b.NewRet(ptr)
-    })()
-
     var rtStrlen = m.NewFunc("rt_strlen", i32, llvm.ir.NewParam("s", i8ptr))
-    ;(function() {
-        var s = rtStrlen.Params[0]
-        var e = rtStrlen.NewBlock("entry"), h = rtStrlen.NewBlock("head")
-        var bd = rtStrlen.NewBlock("body"), x = rtStrlen.NewBlock("exit")
-        var ip = e.NewAlloca(i32)
-        e.NewStore(zero, ip); e.NewBr(h)
-        var i = h.NewLoad(i32, ip)
-        var ch = h.NewLoad(i8, h.NewGetElementPtr(i8, s, i))
-        h.NewCondBr(h.NewICmp(EQ, ch, zero8), x, bd)
-        bd.NewStore(bd.NewAdd(i, one), ip); bd.NewBr(h)
-        x.NewRet(x.NewLoad(i32, ip))
-    })()
-
     var rtStreq = m.NewFunc("rt_streq", i32, [llvm.ir.NewParam("a", i8ptr), llvm.ir.NewParam("b", i8ptr)])
-    ;(function() {
-        var a = rtStreq.Params[0], b2 = rtStreq.Params[1]
-        var e = rtStreq.NewBlock("entry"), h = rtStreq.NewBlock("head"), chk = rtStreq.NewBlock("chk")
-        var ne = rtStreq.NewBlock("ne"), eq = rtStreq.NewBlock("eq"), cont = rtStreq.NewBlock("cont")
-        var ip = e.NewAlloca(i32)
-        e.NewStore(zero, ip); e.NewBr(h)
-        var i = h.NewLoad(i32, ip)
-        var ca = h.NewLoad(i8, h.NewGetElementPtr(i8, a, i))
-        var cb = h.NewLoad(i8, h.NewGetElementPtr(i8, b2, i))
-        h.NewCondBr(h.NewICmp(NE, ca, cb), ne, chk)
-        chk.NewCondBr(chk.NewICmp(EQ, ca, zero8), eq, cont)
-        cont.NewStore(cont.NewAdd(i, one), ip); cont.NewBr(h)
-        ne.NewRet(zero); eq.NewRet(one)
-    })()
-
-    // lower-case one byte (ASCII only, which is what cmd.exe's comparisons do)
-    var rtLc = m.NewFunc("rt_lc", i8, llvm.ir.NewParam("c", i8))
-    ;(function() {
-        var c8 = rtLc.Params[0]
-        var e = rtLc.NewBlock("entry")
-        var v = e.NewSExt(c8, i32)
-        var isUp = e.NewAnd(e.NewICmp(SGE, v, ci32(65)), e.NewICmp(SLE, v, ci32(90)))
-        e.NewRet(e.NewSelect(isUp, e.NewTrunc(e.NewAdd(v, ci32(32)), i8), c8))
-    })()
-
     var rtStreqi = m.NewFunc("rt_streqi", i32, [llvm.ir.NewParam("a", i8ptr), llvm.ir.NewParam("b", i8ptr)])
-    ;(function() {
-        var a = rtStreqi.Params[0], b2 = rtStreqi.Params[1]
-        var e = rtStreqi.NewBlock("entry"), h = rtStreqi.NewBlock("head"), chk = rtStreqi.NewBlock("chk")
-        var ne = rtStreqi.NewBlock("ne"), eq = rtStreqi.NewBlock("eq"), cont = rtStreqi.NewBlock("cont")
-        var ip = e.NewAlloca(i32)
-        e.NewStore(zero, ip); e.NewBr(h)
-        var i = h.NewLoad(i32, ip)
-        var ca = h.NewCall(rtLc, h.NewLoad(i8, h.NewGetElementPtr(i8, a, i)))
-        var cb = h.NewCall(rtLc, h.NewLoad(i8, h.NewGetElementPtr(i8, b2, i)))
-        h.NewCondBr(h.NewICmp(NE, ca, cb), ne, chk)
-        chk.NewCondBr(chk.NewICmp(EQ, ca, zero8), eq, cont)
-        cont.NewStore(cont.NewAdd(i, one), ip); cont.NewBr(h)
-        ne.NewRet(zero); eq.NewRet(one)
-    })()
-
     var rtStrcat = m.NewFunc("rt_strcat", i8ptr, [llvm.ir.NewParam("a", i8ptr), llvm.ir.NewParam("b", i8ptr)])
-    ;(function() {
-        var a = rtStrcat.Params[0], b2 = rtStrcat.Params[1]
-        var e = rtStrcat.NewBlock("entry")
-        var la = e.NewCall(rtStrlen, a), lb = e.NewCall(rtStrlen, b2)
-        var dst = e.NewCall(rtBump, e.NewAdd(e.NewAdd(la, lb), one))
-        var ip = e.NewAlloca(i32), dp = e.NewAlloca(i32)
-        e.NewStore(zero, dp); e.NewStore(zero, ip)
-        var ha = rtStrcat.NewBlock("ha"), bda = rtStrcat.NewBlock("bda"), xa = rtStrcat.NewBlock("xa")
-        e.NewBr(ha)
-        var ia = ha.NewLoad(i32, ip)
-        var cha = ha.NewLoad(i8, ha.NewGetElementPtr(i8, a, ia))
-        ha.NewCondBr(ha.NewICmp(EQ, cha, zero8), xa, bda)
-        var da = bda.NewLoad(i32, dp)
-        bda.NewStore(cha, bda.NewGetElementPtr(i8, dst, da))
-        bda.NewStore(bda.NewAdd(da, one), dp); bda.NewStore(bda.NewAdd(ia, one), ip); bda.NewBr(ha)
-        xa.NewStore(zero, ip)
-        var hb = rtStrcat.NewBlock("hb"), bdb = rtStrcat.NewBlock("bdb"), xb = rtStrcat.NewBlock("xb")
-        xa.NewBr(hb)
-        var ib = hb.NewLoad(i32, ip)
-        var chb = hb.NewLoad(i8, hb.NewGetElementPtr(i8, b2, ib))
-        hb.NewCondBr(hb.NewICmp(EQ, chb, zero8), xb, bdb)
-        var db = bdb.NewLoad(i32, dp)
-        bdb.NewStore(chb, bdb.NewGetElementPtr(i8, dst, db))
-        bdb.NewStore(bdb.NewAdd(db, one), dp); bdb.NewStore(bdb.NewAdd(ib, one), ip); bdb.NewBr(hb)
-        var dn = xb.NewLoad(i32, dp)
-        xb.NewStore(zero8, xb.NewGetElementPtr(i8, dst, dn))
-        xb.NewRet(dst)
-    })()
-
     // rt_sub(s, from, to): the byte range [from, to) as a fresh string. The caller clamps.
     var rtSub = m.NewFunc("rt_sub", i8ptr, [llvm.ir.NewParam("s", i8ptr), llvm.ir.NewParam("f", i32), llvm.ir.NewParam("t", i32)])
-    ;(function() {
-        var s = rtSub.Params[0], f = rtSub.Params[1], t = rtSub.Params[2]
-        var e = rtSub.NewBlock("entry"), h = rtSub.NewBlock("head")
-        var bd = rtSub.NewBlock("body"), x = rtSub.NewBlock("exit")
-        var raw = e.NewSub(t, f)
-        var n = e.NewSelect(e.NewICmp(SLT, raw, zero), zero, raw)
-        var dst = e.NewCall(rtBump, e.NewAdd(n, one))
-        var ip = e.NewAlloca(i32)
-        e.NewStore(zero, ip); e.NewBr(h)
-        var i = h.NewLoad(i32, ip)
-        h.NewCondBr(h.NewICmp(SGE, i, n), x, bd)
-        bd.NewStore(bd.NewLoad(i8, bd.NewGetElementPtr(i8, s, bd.NewAdd(f, i))), bd.NewGetElementPtr(i8, dst, i))
-        bd.NewStore(bd.NewAdd(i, one), ip); bd.NewBr(h)
-        x.NewStore(zero8, x.NewGetElementPtr(i8, dst, n))
-        x.NewRet(dst)
-    })()
-
-    // rt_lastch(s, ch): index of the LAST occurrence of ch, or -1.
-    var rtLastch = m.NewFunc("rt_lastch", i32, [llvm.ir.NewParam("s", i8ptr), llvm.ir.NewParam("c", i32)])
-    ;(function() {
-        var s = rtLastch.Params[0], c8 = rtLastch.Params[1]
-        var e = rtLastch.NewBlock("entry"), h = rtLastch.NewBlock("head")
-        var bd = rtLastch.NewBlock("body"), hit = rtLastch.NewBlock("hit")
-        var nx = rtLastch.NewBlock("nx"), x = rtLastch.NewBlock("exit")
-        var ip = e.NewAlloca(i32), rp = e.NewAlloca(i32)
-        e.NewStore(zero, ip); e.NewStore(minusOne, rp); e.NewBr(h)
-        var i = h.NewLoad(i32, ip)
-        var ch = h.NewSExt(h.NewLoad(i8, h.NewGetElementPtr(i8, s, i)), i32)
-        h.NewCondBr(h.NewICmp(EQ, ch, zero), x, bd)
-        bd.NewCondBr(bd.NewICmp(EQ, ch, c8), hit, nx)
-        hit.NewStore(i, rp); hit.NewBr(nx)
-        nx.NewStore(nx.NewAdd(i, one), ip); nx.NewBr(h)
-        x.NewRet(x.NewLoad(i32, rp))
-    })()
-
     // rt_findch(s, ch, from): index of the first occurrence at or after from, or -1.
     var rtFindch = m.NewFunc("rt_findch", i32, [llvm.ir.NewParam("s", i8ptr), llvm.ir.NewParam("c", i32), llvm.ir.NewParam("f", i32)])
-    ;(function() {
-        var s = rtFindch.Params[0], c8 = rtFindch.Params[1], f = rtFindch.Params[2]
-        var e = rtFindch.NewBlock("entry"), h = rtFindch.NewBlock("h")
-        var bd = rtFindch.NewBlock("bd"), nx = rtFindch.NewBlock("nx")
-        var hit = rtFindch.NewBlock("hit"), x = rtFindch.NewBlock("x")
-        var ip = e.NewAlloca(i32)
-        e.NewStore(f, ip); e.NewBr(h)
-        var i = h.NewLoad(i32, ip)
-        var ch = h.NewSExt(h.NewLoad(i8, h.NewGetElementPtr(i8, s, i)), i32)
-        h.NewCondBr(h.NewICmp(EQ, ch, zero), x, bd)
-        bd.NewCondBr(bd.NewICmp(EQ, ch, c8), hit, nx)
-        hit.NewRet(i)
-        nx.NewStore(nx.NewAdd(i, one), ip); nx.NewBr(h)
-        x.NewRet(minusOne)
-    })()
-
-    // rt_findstr(s, needle, from): case-insensitive index of needle at or after from, or -1.
-    var rtFindstr = m.NewFunc("rt_findstr", i32, [llvm.ir.NewParam("s", i8ptr), llvm.ir.NewParam("nd", i8ptr), llvm.ir.NewParam("f", i32)])
-    ;(function() {
-        var s = rtFindstr.Params[0], nd = rtFindstr.Params[1], f = rtFindstr.Params[2]
-        var e = rtFindstr.NewBlock("entry")
-        var oh = rtFindstr.NewBlock("oh"), ob = rtFindstr.NewBlock("ob")
-        var ih = rtFindstr.NewBlock("ih"), ib = rtFindstr.NewBlock("ib"), ibn = rtFindstr.NewBlock("ibn")
-        var hit = rtFindstr.NewBlock("hit"), miss = rtFindstr.NewBlock("miss"), x = rtFindstr.NewBlock("x")
-        var ls = e.NewCall(rtStrlen, s), ln = e.NewCall(rtStrlen, nd)
-        var ip = e.NewAlloca(i32), jp = e.NewAlloca(i32)
-        e.NewStore(f, ip); e.NewBr(oh)
-        var i = oh.NewLoad(i32, ip)
-        oh.NewCondBr(oh.NewICmp(SGT, oh.NewAdd(i, ln), ls), x, ob)
-        ob.NewStore(zero, jp); ob.NewBr(ih)
-        var j = ih.NewLoad(i32, jp)
-        ih.NewCondBr(ih.NewICmp(SGE, j, ln), hit, ib)
-        var ca = ib.NewCall(rtLc, ib.NewLoad(i8, ib.NewGetElementPtr(i8, s, ib.NewAdd(i, j))))
-        var cb = ib.NewCall(rtLc, ib.NewLoad(i8, ib.NewGetElementPtr(i8, nd, j)))
-        ib.NewCondBr(ib.NewICmp(NE, ca, cb), miss, ibn)
-        ibn.NewStore(ibn.NewAdd(j, one), jp); ibn.NewBr(ih)
-        miss.NewStore(miss.NewAdd(i, one), ip); miss.NewBr(oh)
-        hit.NewRet(i)
-        x.NewRet(minusOne)
-    })()
-
     var rtInt2str = m.NewFunc("rt_int2str", i8ptr, llvm.ir.NewParam("n", i32))
-    ;(function() {
-        var tmpArrTy = llvm.types.NewArray(16, i8)
-        var n = rtInt2str.Params[0]
-        var e = rtInt2str.NewBlock("entry"), isZero = rtInt2str.NewBlock("zero"), nz = rtInt2str.NewBlock("nz")
-        var dst = e.NewCall(rtBump, ci32(16))
-        var tmp = e.NewAlloca(tmpArrTy)
-        e.NewCondBr(e.NewICmp(EQ, n, zero), isZero, nz)
-        isZero.NewStore(llvm.constant.NewInt(i8, 48), isZero.NewGetElementPtr(i8, dst, zero))
-        isZero.NewStore(zero8, isZero.NewGetElementPtr(i8, dst, one))
-        isZero.NewRet(dst)
-        var neg = nz.NewICmp(SLT, n, zero)
-        var absn = nz.NewSelect(neg, nz.NewSub(zero, n), n)
-        var ap = nz.NewAlloca(i32), tp = nz.NewAlloca(i32)
-        nz.NewStore(absn, ap); nz.NewStore(ci32(15), tp)
-        var dh = rtInt2str.NewBlock("dh"), dbd = rtInt2str.NewBlock("dbd"), dx = rtInt2str.NewBlock("dx")
-        nz.NewBr(dh)
-        var av = dh.NewLoad(i32, ap)
-        dh.NewCondBr(dh.NewICmp(SLE, av, zero), dx, dbd)
-        var d = dbd.NewSRem(av, ten)
-        var ti = dbd.NewLoad(i32, tp)
-        dbd.NewStore(dbd.NewTrunc(dbd.NewAdd(d, ci32(48)), i8), dbd.NewGetElementPtr(tmpArrTy, tmp, zero, ti))
-        dbd.NewStore(dbd.NewSub(ti, one), tp); dbd.NewStore(dbd.NewSDiv(av, ten), ap); dbd.NewBr(dh)
-        var dip = dx.NewAlloca(i32)
-        dx.NewStore(zero, dip)
-        var wsign = rtInt2str.NewBlock("wsign"), asm = rtInt2str.NewBlock("asm")
-        dx.NewCondBr(neg, wsign, asm)
-        wsign.NewStore(llvm.constant.NewInt(i8, 45), wsign.NewGetElementPtr(i8, dst, zero))
-        wsign.NewStore(one, dip); wsign.NewBr(asm)
-        var jp = asm.NewAlloca(i32)
-        asm.NewStore(asm.NewAdd(asm.NewLoad(i32, tp), one), jp)
-        var ah = rtInt2str.NewBlock("ah"), abd = rtInt2str.NewBlock("abd"), ax = rtInt2str.NewBlock("ax")
-        asm.NewBr(ah)
-        var j = ah.NewLoad(i32, jp)
-        ah.NewCondBr(ah.NewICmp(SGT, j, ci32(15)), ax, abd)
-        var digit = abd.NewLoad(i8, abd.NewGetElementPtr(tmpArrTy, tmp, zero, j))
-        var di = abd.NewLoad(i32, dip)
-        abd.NewStore(digit, abd.NewGetElementPtr(i8, dst, di))
-        abd.NewStore(abd.NewAdd(di, one), dip); abd.NewStore(abd.NewAdd(j, one), jp); abd.NewBr(ah)
-        ax.NewStore(zero8, ax.NewGetElementPtr(i8, dst, ax.NewLoad(i32, dip)))
-        ax.NewRet(dst)
-    })()
-
     var rtStr2int = m.NewFunc("rt_str2int", i32, llvm.ir.NewParam("s", i8ptr))
-    ;(function() {
-        var s = rtStr2int.Params[0]
-        var e = rtStr2int.NewBlock("entry")
-        var ip = e.NewAlloca(i32), vp = e.NewAlloca(i32), sp = e.NewAlloca(i32)
-        e.NewStore(zero, ip); e.NewStore(zero, vp); e.NewStore(one, sp)
-        var wh = rtStr2int.NewBlock("wh"), wbd = rtStr2int.NewBlock("wbd"), wx = rtStr2int.NewBlock("wx")
-        e.NewBr(wh)
-        var wi = wh.NewLoad(i32, ip)
-        var wc = wh.NewLoad(i8, wh.NewGetElementPtr(i8, s, wi))
-        var isSp = wh.NewICmp(EQ, wc, llvm.constant.NewInt(i8, 32))
-        var isTab = wh.NewICmp(EQ, wc, llvm.constant.NewInt(i8, 9))
-        wh.NewCondBr(wh.NewOr(isSp, isTab), wbd, wx)
-        wbd.NewStore(wbd.NewAdd(wi, one), ip); wbd.NewBr(wh)
-        var cidx = wx.NewLoad(i32, ip)
-        var cc = wx.NewLoad(i8, wx.NewGetElementPtr(i8, s, cidx))
-        var isMinus = wx.NewICmp(EQ, cc, llvm.constant.NewInt(i8, 45))
-        var isPlus = wx.NewICmp(EQ, cc, llvm.constant.NewInt(i8, 43))
-        var signBlk = rtStr2int.NewBlock("sign"), digs = rtStr2int.NewBlock("digs")
-        wx.NewCondBr(wx.NewOr(isMinus, isPlus), signBlk, digs)
-        signBlk.NewStore(signBlk.NewSelect(isMinus, minusOne, one), sp)
-        signBlk.NewStore(signBlk.NewAdd(cidx, one), ip); signBlk.NewBr(digs)
-        var dh = rtStr2int.NewBlock("dh"), dbd = rtStr2int.NewBlock("dbd"), dx = rtStr2int.NewBlock("dx")
-        digs.NewBr(dh)
-        var di = dh.NewLoad(i32, ip)
-        var dc = dh.NewLoad(i8, dh.NewGetElementPtr(i8, s, di))
-        var dc32 = dh.NewSExt(dc, i32)
-        var ge0 = dh.NewICmp(SGE, dc32, ci32(48))
-        var le9 = dh.NewICmp(SLE, dc32, ci32(57))
-        dh.NewCondBr(dh.NewAnd(ge0, le9), dbd, dx)
-        var v = dbd.NewLoad(i32, vp)
-        dbd.NewStore(dbd.NewAdd(dbd.NewMul(v, ten), dbd.NewSub(dc32, ci32(48))), vp)
-        dbd.NewStore(dbd.NewAdd(di, one), ip); dbd.NewBr(dh)
-        dx.NewRet(dx.NewMul(dx.NewLoad(i32, vp), dx.NewLoad(i32, sp)))
-    })()
 
-    var rtPrints = m.NewFunc("rt_prints", i32, llvm.ir.NewParam("s", i8ptr))
-    ;(function() {
-        var s = rtPrints.Params[0]
-        var e = rtPrints.NewBlock("entry"), h = rtPrints.NewBlock("head")
-        var bd = rtPrints.NewBlock("body"), x = rtPrints.NewBlock("exit")
-        var ip = e.NewAlloca(i32)
-        e.NewStore(zero, ip); e.NewBr(h)
-        var i = h.NewLoad(i32, ip)
-        var ch = h.NewLoad(i8, h.NewGetElementPtr(i8, s, i))
-        h.NewCondBr(h.NewICmp(EQ, ch, zero8), x, bd)
-        bd.NewCall(extPutchar, bd.NewZExt(ch, i32))
-        bd.NewStore(bd.NewAdd(i, one), ip); bd.NewBr(h)
-        x.NewRet(zero)
-    })()
-
-    // ----- output capture -----
+    // ----- output capture: a redirection discards, for /f 'echo ...' parses what it caught
     var rtCapStart = m.NewFunc("rt_capstart", i32)
-    ;(function() {
-        var e = rtCapStart.NewBlock("entry")
-        var sp = e.NewLoad(i32, gCapSp)
-        e.NewStore(e.NewCall(rtBump, ci32(CAPSZ)), e.NewGetElementPtr(capBufTy, gCapBufs, zero, sp))
-        e.NewStore(zero, e.NewGetElementPtr(capLenTy, gCapLens, zero, sp))
-        e.NewStore(e.NewAdd(sp, one), gCapSp)
-        e.NewRet(zero)
-    })()
     var rtCapEnd = m.NewFunc("rt_capend", i8ptr)
-    ;(function() {
-        var e = rtCapEnd.NewBlock("entry")
-        var sp = e.NewSub(e.NewLoad(i32, gCapSp), one)
-        e.NewStore(sp, gCapSp)
-        var buf = e.NewLoad(i8ptr, e.NewGetElementPtr(capBufTy, gCapBufs, zero, sp))
-        var len = e.NewLoad(i32, e.NewGetElementPtr(capLenTy, gCapLens, zero, sp))
-        e.NewStore(zero8, e.NewGetElementPtr(i8, buf, len))
-        e.NewRet(buf)
-    })()
     var rtPrintln = m.NewFunc("rt_println", i32, llvm.ir.NewParam("s", i8ptr))
-    ;(function() {
-        var s = rtPrintln.Params[0]
-        var e = rtPrintln.NewBlock("entry"), direct = rtPrintln.NewBlock("direct"), cap = rtPrintln.NewBlock("cap")
-        var sp = e.NewLoad(i32, gCapSp)
-        e.NewCondBr(e.NewICmp(EQ, sp, zero), direct, cap)
-        direct.NewCall(rtPrints, s)
-        direct.NewCall(extPutchar, ci32(10))
-        direct.NewRet(zero)
-        var top = cap.NewSub(sp, one)
-        var buf = cap.NewLoad(i8ptr, cap.NewGetElementPtr(capBufTy, gCapBufs, zero, top))
-        var lenp = cap.NewGetElementPtr(capLenTy, gCapLens, zero, top)
-        var ip = cap.NewAlloca(i32)
-        cap.NewStore(zero, ip)
-        var h = rtPrintln.NewBlock("h"), bd = rtPrintln.NewBlock("bd"), x = rtPrintln.NewBlock("x")
-        cap.NewBr(h)
-        var i = h.NewLoad(i32, ip)
-        var ch = h.NewLoad(i8, h.NewGetElementPtr(i8, s, i))
-        h.NewCondBr(h.NewICmp(EQ, ch, zero8), x, bd)
-        bd.NewStore(ch, bd.NewGetElementPtr(i8, buf, bd.NewAdd(bd.NewLoad(i32, lenp), i)))
-        bd.NewStore(bd.NewAdd(i, one), ip); bd.NewBr(h)
-        var ln = x.NewAdd(x.NewLoad(i32, lenp), x.NewLoad(i32, ip))
-        x.NewStore(llvm.constant.NewInt(i8, 10), x.NewGetElementPtr(i8, buf, ln))
-        x.NewStore(x.NewAdd(ln, one), lenp)
-        x.NewRet(zero)
-    })()
 
     // ----- the %VAR% operators -----
     var rtStripq = m.NewFunc("rt_stripq", i8ptr, llvm.ir.NewParam("s", i8ptr))
-    ;(function() {
-        var s = rtStripq.Params[0]
-        var e = rtStripq.NewBlock("entry")
-        var n = e.NewCall(rtStrlen, s)
-        var big = e.NewICmp(SGE, n, two)
-        var lastIdx = e.NewSelect(big, e.NewSub(n, one), zero)
-        var q = llvm.constant.NewInt(i8, 34)
-        var c0 = e.NewICmp(EQ, e.NewLoad(i8, e.NewGetElementPtr(i8, s, zero)), q)
-        var cl = e.NewICmp(EQ, e.NewLoad(i8, e.NewGetElementPtr(i8, s, lastIdx)), q)
-        var ok = e.NewAnd(big, e.NewAnd(c0, cl))
-        e.NewRet(e.NewCall(rtSub, [s, e.NewSelect(ok, one, zero), e.NewSelect(ok, e.NewSub(n, one), n)]))
-    })()
-
     var rtSubstr = m.NewFunc("rt_substr", i8ptr, [llvm.ir.NewParam("s", i8ptr), llvm.ir.NewParam("st", i32),
                                                   llvm.ir.NewParam("ln", i32), llvm.ir.NewParam("hl", i32)])
-    ;(function() {
-        var s = rtSubstr.Params[0], st0 = rtSubstr.Params[1], ln = rtSubstr.Params[2], hl = rtSubstr.Params[3]
-        var e = rtSubstr.NewBlock("entry")
-        var n = e.NewCall(rtStrlen, s)
-        var st1 = e.NewSelect(e.NewICmp(SLT, st0, zero), e.NewAdd(n, st0), st0)
-        var st2 = e.NewSelect(e.NewICmp(SLT, st1, zero), zero, st1)
-        var st = e.NewSelect(e.NewICmp(SGT, st2, n), n, st2)
-        var endL = e.NewSelect(e.NewICmp(SLT, ln, zero), e.NewAdd(n, ln), e.NewAdd(st, ln))
-        var end0 = e.NewSelect(e.NewICmp(NE, hl, zero), endL, n)
-        var end1 = e.NewSelect(e.NewICmp(SLT, end0, st), st, end0)
-        var end = e.NewSelect(e.NewICmp(SGT, end1, n), n, end1)
-        e.NewRet(e.NewCall(rtSub, [s, st, end]))
-    })()
-
     var rtSubst = m.NewFunc("rt_subst", i8ptr, [llvm.ir.NewParam("s", i8ptr), llvm.ir.NewParam("fr", i8ptr),
                                                 llvm.ir.NewParam("to", i8ptr), llvm.ir.NewParam("star", i32)])
-    ;(function() {
-        var s = rtSubst.Params[0], fr = rtSubst.Params[1], to = rtSubst.Params[2], star = rtSubst.Params[3]
-        var e = rtSubst.NewBlock("entry")
-        var retS = rtSubst.NewBlock("rets"), notEmpty = rtSubst.NewBlock("ne")
-        var starB = rtSubst.NewBlock("bstar"), plainB = rtSubst.NewBlock("bplain")
-        var lf = e.NewCall(rtStrlen, fr), ls = e.NewCall(rtStrlen, s)
-        e.NewCondBr(e.NewICmp(EQ, lf, zero), retS, notEmpty)
-        retS.NewRet(s)
-        notEmpty.NewCondBr(notEmpty.NewICmp(NE, star, zero), starB, plainB)
-        // *from=to : everything up to and including the match is replaced
-        var sp0 = starB.NewCall(rtFindstr, [s, fr, zero])
-        var sHit = rtSubst.NewBlock("shit"), sMiss = rtSubst.NewBlock("smiss")
-        starB.NewCondBr(starB.NewICmp(SLT, sp0, zero), sMiss, sHit)
-        sMiss.NewRet(s)
-        sHit.NewRet(sHit.NewCall(rtStrcat, [to, sHit.NewCall(rtSub, [s, sHit.NewAdd(sp0, lf), ls])]))
-        // from=to : every occurrence
-        var op = plainB.NewAlloca(i8ptr), ip = plainB.NewAlloca(i32)
-        plainB.NewStore(emptyPtr(plainB), op); plainB.NewStore(zero, ip)
-        var h = rtSubst.NewBlock("h"), hit = rtSubst.NewBlock("hit"), done = rtSubst.NewBlock("done")
-        plainB.NewBr(h)
-        var i = h.NewLoad(i32, ip)
-        var p = h.NewCall(rtFindstr, [s, fr, i])
-        h.NewCondBr(h.NewICmp(SLT, p, zero), done, hit)
-        var acc = hit.NewCall(rtStrcat, [hit.NewLoad(i8ptr, op), hit.NewCall(rtSub, [s, i, p])])
-        hit.NewStore(hit.NewCall(rtStrcat, [acc, to]), op)
-        hit.NewStore(hit.NewAdd(p, lf), ip); hit.NewBr(h)
-        done.NewRet(done.NewCall(rtStrcat, [done.NewLoad(i8ptr, op), done.NewCall(rtSub, [s, i, ls])]))
-    })()
-
     // rt_mods(s, mask): the ~ modifiers as pure string arithmetic.
     // mask bits: 1 = drive, 2 = path, 4 = name, 8 = extension (~f is 1|2|4|8).
     var rtMods = m.NewFunc("rt_mods", i8ptr, [llvm.ir.NewParam("s", i8ptr), llvm.ir.NewParam("mask", i32)])
-    ;(function() {
-        var s = rtMods.Params[0], mask = rtMods.Params[1]
-        var e = rtMods.NewBlock("entry")
-        var q = e.NewCall(rtStripq, s)
-        var n = e.NewCall(rtStrlen, q)
-        var colonIdx = e.NewSelect(e.NewICmp(SGE, n, two), one, zero)
-        var hasDrv = e.NewAnd(e.NewICmp(SGE, n, two),
-                              e.NewICmp(EQ, e.NewLoad(i8, e.NewGetElementPtr(i8, q, colonIdx)), llvm.constant.NewInt(i8, 58)))
-        var dEnd = e.NewSelect(hasDrv, two, zero)
-        var drive = e.NewCall(rtSub, [q, zero, dEnd])
-        var rest = e.NewCall(rtSub, [q, dEnd, n])
-        var rn = e.NewCall(rtStrlen, rest)
-        var c1 = e.NewCall(rtLastch, [rest, ci32(92)])
-        var c2 = e.NewCall(rtLastch, [rest, ci32(47)])
-        var cut = e.NewSelect(e.NewICmp(SGT, c1, c2), c1, c2)
-        var path = e.NewCall(rtSub, [rest, zero, e.NewAdd(cut, one)])
-        var base = e.NewCall(rtSub, [rest, e.NewAdd(cut, one), rn])
-        var bn = e.NewCall(rtStrlen, base)
-        var dot = e.NewCall(rtLastch, [base, ci32(46)])
-        var split = e.NewSelect(e.NewICmp(SGT, dot, zero), dot, bn)
-        var nm = e.NewCall(rtSub, [base, zero, split])
-        var ext = e.NewCall(rtSub, [base, split, bn])
-        var emp = emptyPtr(e)
-        function pick(bit, val) { return e.NewSelect(e.NewICmp(NE, e.NewAnd(mask, ci32(bit)), zero), val, emp) }
-        var out = e.NewCall(rtStrcat, [pick(1, drive), pick(2, path)])
-        out = e.NewCall(rtStrcat, [out, pick(4, nm)])
-        out = e.NewCall(rtStrcat, [out, pick(8, ext)])
-        e.NewRet(out)
-    })()
-
-    // There is NO filesystem behind a compiled run either, so `if exist` answers from the same
-    // small MODEL of the standard paths the interpreter uses - the shape bash-to-llvm-ir.abnf
-    // established for its -e/-f/-d predicates. 0 = absent, 1 = exists and is not a directory,
-    // 2 = directory. Both spellings of a directory (with and without the trailing separator)
-    // are in the table, which is cheaper than emitting the strip.
-    var FSMODEL = [
-        {p: "nul", k: 1}, {p: "con", k: 1}, {p: "prn", k: 1}, {p: "aux", k: 1},
-        {p: "com1", k: 1}, {p: "com2", k: 1}, {p: "com3", k: 1}, {p: "com4", k: 1}, {p: "com5", k: 1},
-        {p: "com6", k: 1}, {p: "com7", k: 1}, {p: "com8", k: 1}, {p: "com9", k: 1},
-        {p: "lpt1", k: 1}, {p: "lpt2", k: 1}, {p: "lpt3", k: 1}, {p: "lpt4", k: 1}, {p: "lpt5", k: 1},
-        {p: "lpt6", k: 1}, {p: "lpt7", k: 1}, {p: "lpt8", k: 1}, {p: "lpt9", k: 1},
-        {p: "c:", k: 2}, {p: "c:\x5c", k: 2},
-        {p: "c:\x5cwindows", k: 2}, {p: "c:\x5cwindows\x5c", k: 2},
-        {p: "c:\x5cwindows\x5csystem32", k: 2}, {p: "c:\x5cwindows\x5csystem32\x5c", k: 2},
-        {p: "c:\x5cusers", k: 2}, {p: "c:\x5cusers\x5c", k: 2},
-        {p: "c:\x5cprogram files", k: 2}, {p: "c:\x5cprogram files\x5c", k: 2},
-        {p: "c:\x5cprogramdata", k: 2}, {p: "c:\x5cprogramdata\x5c", k: 2}
-    ]
+    // There is NO filesystem behind a compiled run either, so `if exist` answers from a
+    // small MODEL of the standard paths the interpreter uses (batch-rt.c, rt_fskind):
+    // 0 = absent, 1 = exists and is not a directory, 2 = directory.
     var rtFskind = m.NewFunc("rt_fskind", i32, llvm.ir.NewParam("s", i8ptr))
-    ;(function() {
-        var s = rtFskind.Params[0]
-        var e = rtFskind.NewBlock("entry")
-        var q = e.NewCall(rtStripq, s)
-        var cur = e, i
-        for (i = 0; i < FSMODEL.length; i++) {
-            var hitB = rtFskind.NewBlock(""), missB = rtFskind.NewBlock("")
-            cur.NewCondBr(cur.NewICmp(NE, cur.NewCall(rtStreqi, [q, gepStr(cur, FSMODEL[i].p)]), zero), hitB, missB)
-            hitB.NewRet(ci32(FSMODEL[i].k))
-            cur = missB
-        }
-        cur.NewRet(zero)
-    })()
 
     // ----- for /f: line and token boundaries -----
-    var rtIsdelim = m.NewFunc("rt_isdelim", i32, [llvm.ir.NewParam("c", i32), llvm.ir.NewParam("d", i8ptr)])
-    ;(function() {
-        var c8 = rtIsdelim.Params[0], d = rtIsdelim.Params[1]
-        var e = rtIsdelim.NewBlock("entry"), h = rtIsdelim.NewBlock("h")
-        var bd = rtIsdelim.NewBlock("bd"), nx = rtIsdelim.NewBlock("nx")
-        var yes = rtIsdelim.NewBlock("yes"), no = rtIsdelim.NewBlock("no")
-        var ip = e.NewAlloca(i32)
-        e.NewStore(zero, ip); e.NewBr(h)
-        var i = h.NewLoad(i32, ip)
-        var ch = h.NewSExt(h.NewLoad(i8, h.NewGetElementPtr(i8, d, i)), i32)
-        h.NewCondBr(h.NewICmp(EQ, ch, zero), no, bd)
-        bd.NewCondBr(bd.NewICmp(EQ, ch, c8), yes, nx)
-        nx.NewStore(nx.NewAdd(i, one), ip); nx.NewBr(h)
-        yes.NewRet(one); no.NewRet(zero)
-    })()
-
     // rt_tokb(s, delims, idx, which): boundary of the idx-th (1-based) token.
     //   which 0 = its start, 1 = its end, 2 = the start of the remainder after it.
-    // Answers -1 when there is no such token. The terminating NUL is never a delimiter,
-    // so both scans stop at the end of the string without a separate length check.
+    // Answers -1 when there is no such token.
     var rtTokb = m.NewFunc("rt_tokb", i32, [llvm.ir.NewParam("s", i8ptr), llvm.ir.NewParam("d", i8ptr),
                                             llvm.ir.NewParam("idx", i32), llvm.ir.NewParam("which", i32)])
-    ;(function() {
-        var s = rtTokb.Params[0], d = rtTokb.Params[1], idx = rtTokb.Params[2], which = rtTokb.Params[3]
-        var e = rtTokb.NewBlock("entry")
-        var skipH = rtTokb.NewBlock("skiph"), skipB = rtTokb.NewBlock("skipb"), skipX = rtTokb.NewBlock("skipx")
-        var startT = rtTokb.NewBlock("startt"), noneB = rtTokb.NewBlock("none")
-        var runH = rtTokb.NewBlock("runh"), runB = rtTokb.NewBlock("runb"), runX = rtTokb.NewBlock("runx")
-        var match = rtTokb.NewBlock("match"), retB = rtTokb.NewBlock("retb")
-        var restH = rtTokb.NewBlock("resth"), restB = rtTokb.NewBlock("restb"), restX = rtTokb.NewBlock("restx")
-        var ip = e.NewAlloca(i32), kp = e.NewAlloca(i32), stp = e.NewAlloca(i32)
-        e.NewStore(zero, ip); e.NewStore(zero, kp); e.NewStore(zero, stp); e.NewBr(skipH)
-        var sc = skipH.NewSExt(skipH.NewLoad(i8, skipH.NewGetElementPtr(i8, s, skipH.NewLoad(i32, ip))), i32)
-        skipH.NewCondBr(skipH.NewICmp(NE, skipH.NewCall(rtIsdelim, [sc, d]), zero), skipB, skipX)
-        skipB.NewStore(skipB.NewAdd(skipB.NewLoad(i32, ip), one), ip); skipB.NewBr(skipH)
-        var xc = skipX.NewSExt(skipX.NewLoad(i8, skipX.NewGetElementPtr(i8, s, skipX.NewLoad(i32, ip))), i32)
-        skipX.NewCondBr(skipX.NewICmp(EQ, xc, zero), noneB, startT)
-        noneB.NewRet(minusOne)
-        startT.NewStore(startT.NewLoad(i32, ip), stp); startT.NewBr(runH)
-        var rc = runH.NewSExt(runH.NewLoad(i8, runH.NewGetElementPtr(i8, s, runH.NewLoad(i32, ip))), i32)
-        var alive = runH.NewAnd(runH.NewICmp(NE, rc, zero), runH.NewICmp(EQ, runH.NewCall(rtIsdelim, [rc, d]), zero))
-        runH.NewCondBr(alive, runB, runX)
-        runB.NewStore(runB.NewAdd(runB.NewLoad(i32, ip), one), ip); runB.NewBr(runH)
-        runX.NewStore(runX.NewAdd(runX.NewLoad(i32, kp), one), kp)
-        runX.NewCondBr(runX.NewICmp(EQ, runX.NewLoad(i32, kp), idx), match, skipH)
-        var mStart = match.NewLoad(i32, stp), mEnd = match.NewLoad(i32, ip)
-        match.NewCondBr(match.NewICmp(EQ, which, two), restH, retB)
-        retB.NewRet(retB.NewSelect(retB.NewICmp(EQ, which, zero), mStart, mEnd))
-        var qc = restH.NewSExt(restH.NewLoad(i8, restH.NewGetElementPtr(i8, s, restH.NewLoad(i32, ip))), i32)
-        restH.NewCondBr(restH.NewICmp(NE, restH.NewCall(rtIsdelim, [qc, d]), zero), restB, restX)
-        restB.NewStore(restB.NewAdd(restB.NewLoad(i32, ip), one), ip); restB.NewBr(restH)
-        restX.NewRet(restX.NewLoad(i32, ip))
-    })()
-
     var rtNlines = m.NewFunc("rt_nlines", i32, llvm.ir.NewParam("s", i8ptr))
-    ;(function() {
-        var s = rtNlines.Params[0]
-        var e = rtNlines.NewBlock("entry"), h = rtNlines.NewBlock("h"), bd = rtNlines.NewBlock("bd")
-        var isNl = rtNlines.NewBlock("isnl"), notNl = rtNlines.NewBlock("notnl")
-        var nx = rtNlines.NewBlock("nx"), x = rtNlines.NewBlock("x")
-        var ip = e.NewAlloca(i32), np = e.NewAlloca(i32), pend = e.NewAlloca(i32)
-        e.NewStore(zero, ip); e.NewStore(zero, np); e.NewStore(zero, pend); e.NewBr(h)
-        var i = h.NewLoad(i32, ip)
-        var ch = h.NewSExt(h.NewLoad(i8, h.NewGetElementPtr(i8, s, i)), i32)
-        h.NewCondBr(h.NewICmp(EQ, ch, zero), x, bd)
-        bd.NewCondBr(bd.NewICmp(EQ, ch, ci32(10)), isNl, notNl)
-        isNl.NewStore(isNl.NewAdd(isNl.NewLoad(i32, np), one), np)
-        isNl.NewStore(zero, pend); isNl.NewBr(nx)
-        notNl.NewStore(one, pend); notNl.NewBr(nx)
-        nx.NewStore(nx.NewAdd(i, one), ip); nx.NewBr(h)
-        x.NewRet(x.NewAdd(x.NewLoad(i32, np), x.NewLoad(i32, pend)))
-    })()
-
     // rt_lineat(s, idx): the idx-th newline-separated line, with a trailing CR removed.
     var rtLineat = m.NewFunc("rt_lineat", i8ptr, [llvm.ir.NewParam("s", i8ptr), llvm.ir.NewParam("idx", i32)])
-    ;(function() {
-        var s = rtLineat.Params[0], idx = rtLineat.Params[1]
-        var e = rtLineat.NewBlock("entry"), h = rtLineat.NewBlock("h"), bd = rtLineat.NewBlock("bd")
-        var isNl = rtLineat.NewBlock("isnl"), adv = rtLineat.NewBlock("adv"), nx = rtLineat.NewBlock("nx")
-        var x = rtLineat.NewBlock("x"), setEnd = rtLineat.NewBlock("sete"), setEnd2 = rtLineat.NewBlock("sete2")
-        var empty = rtLineat.NewBlock("empty"), fin = rtLineat.NewBlock("fin")
-        var n = e.NewCall(rtStrlen, s)
-        var ip = e.NewAlloca(i32), kp = e.NewAlloca(i32), stp = e.NewAlloca(i32), enp = e.NewAlloca(i32)
-        e.NewStore(zero, ip); e.NewStore(zero, kp); e.NewStore(zero, stp); e.NewStore(zero, enp); e.NewBr(h)
-        var i = h.NewLoad(i32, ip)
-        h.NewCondBr(h.NewICmp(SGE, i, n), x, bd)
-        var ch = bd.NewSExt(bd.NewLoad(i8, bd.NewGetElementPtr(i8, s, i)), i32)
-        bd.NewCondBr(bd.NewICmp(EQ, ch, ci32(10)), isNl, nx)
-        isNl.NewCondBr(isNl.NewICmp(EQ, isNl.NewLoad(i32, kp), idx), setEnd, adv)
-        setEnd.NewStore(i, enp); setEnd.NewBr(fin)
-        adv.NewStore(adv.NewAdd(adv.NewLoad(i32, kp), one), kp)
-        adv.NewStore(adv.NewAdd(i, one), stp)
-        adv.NewStore(adv.NewAdd(i, one), ip); adv.NewBr(h)
-        nx.NewStore(nx.NewAdd(i, one), ip); nx.NewBr(h)
-        x.NewCondBr(x.NewICmp(EQ, x.NewLoad(i32, kp), idx), setEnd2, empty)
-        setEnd2.NewStore(n, enp); setEnd2.NewBr(fin)
-        empty.NewRet(emptyPtr(empty))
-        var st = fin.NewLoad(i32, stp), en = fin.NewLoad(i32, enp)
-        var nonEmpty = fin.NewICmp(SGT, en, st)
-        var lastI = fin.NewSelect(nonEmpty, fin.NewSub(en, one), st)
-        var isCr = fin.NewAnd(nonEmpty, fin.NewICmp(EQ, fin.NewLoad(i8, fin.NewGetElementPtr(i8, s, lastI)), llvm.constant.NewInt(i8, 13)))
-        fin.NewRet(fin.NewCall(rtSub, [s, st, fin.NewSelect(isCr, fin.NewSub(en, one), en)]))
-    })()
+
 
     // ===================================================================================
     //  Value / word thunks:  {fn: function(b) -> {b, v: i8*}, c: const-string|undefined}
@@ -2015,7 +1507,6 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         entry.NewStore(ep, entry.NewGetElementPtr(frameTy, gArgLbl, zero, zero))
         entry.NewStore(zero, gCsp)
         entry.NewStore(zero, gFrame)
-        entry.NewStore(zero, gCapSp)
         entry.NewStore(zero, gErrLvl)
         entry.NewStore(zero, gDelayed)
         entry.NewBr(items.length > 0 ? Lblocks[0] : exitBlock)
@@ -2023,17 +1514,35 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
 
     c.compile(c.asg)
 
+    // The runtime lives next to THIS grammar, so neither the build nor the run depends
+    // on the working directory. An explicit -rt REPLACES it.
+    function libPath(name) {
+        var mn = moduleName()
+        var cut = -1
+        var i = 0
+        while (i < mn.length) {
+            var ch = mn.charAt(i)
+            if (ch == "/" || ch == "\\") { cut = i }
+            i = i + 1
+        }
+        return mn.substring(0, cut + 1) + "lib/" + name
+    }
+    var rts = c.runtime
+    if (rts == undefined || rts.length == 0) { rts = [libPath("batch-rt.ll")] }
+
     // With -exe PATH, link the module into a native executable (clang) instead of
-    // running it in the built-in IR interpreter.
+    // running it in the built-in IR interpreter. Both paths link the SAME runtime
+    // module: llvm.Run parses it and binds the declarations (abnf/llvmlink.go),
+    // clang links the two objects.
     if (c.exePath != undefined && c.exePath != "") {
-        var buildErr = llvm.BuildExecutable(m, c.exePath)
+        var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
         if (buildErr != "") { println(buildErr); exit(1) }
         println("batch-to-llvm-ir: wrote executable " + c.exePath)
         exit(0)
     }
 
     println(m)
-    var res = llvm.Run(m, "main")
+    var res = llvm.Run(m, "main", "", rts)
     print(res.Out)
     println("batch-to-llvm-ir: exit status " + res.Ret)
     exit(res.Ret)

@@ -1002,6 +1002,14 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 	// -L/-l reach clang too. Supplying any of them switches OFF the zero-stubbing of
 	// undefined symbols - see buildExecutable.
 	"BuildExecutable": buildExecutable,
+	// SpliceIR parses a separately compiled runtime .ll and appends its globals and
+	// functions to the module being built, so that llvm.Run - which links nothing -
+	// still sees real definitions. See abnf/llvmsplice.go for why a grammar whose
+	// runtime has no Go twin needs this and c.runtime alone is not enough.
+	"SpliceIR": spliceIR,
+	// SpliceFunc / SpliceGlobal look a spliced name back up in the module.
+	"SpliceFunc":   spliceFunc,
+	"SpliceGlobal": spliceGlobal,
 }
 
 // libcExterns are the external functions clang resolves from the real C runtime, so
@@ -1920,10 +1928,18 @@ func (ma *machine) callByName(name string, args []uint64) uint64 {
 
 // run executes the function with the given name inside the module and returns
 // its return value together with the produced output.
-func run(m *ir.Module, start string, input string) *RunResult {
+// The optional fourth argument is the grammar's runtime, the same list it hands to
+// llvm.BuildExecutable: every .ll in it is parsed and linked into this run, so a
+// language whose runtime lives in a separately compiled module (lib/batch-rt.ll)
+// answers identically under the interpreter and as a clang-built binary. See
+// abnf/llvmlink.go.
+func run(m *ir.Module, start string, input string, runtime ...string) *RunResult {
 	maybeDumpCFG(m)
 	maybeDumpCallgraph(m)
 	ma := newMachine(m, input)
+	if len(runtime) > 0 {
+		ma.linkRuntimeModules(m, runtime)
+	}
 	f, ok := ma.funcs[start]
 	if !ok {
 		panic("llvm.Run(): function not found in module: " + start)

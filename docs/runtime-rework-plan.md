@@ -1265,6 +1265,363 @@ reclaims it:
    **Do direction 1 first.** It is smaller, it is where the time is as well as the
    memory, and every allocation it removes is one the collector then never has to trace.
 
+## Convergence on the runtime layer - BATCH - DONE (2026-08-02)
+
+This is not phase 4 for batch, and it deliberately is not. `batch-to-llvm-ir.abnf`
+emits **unboxed** self-contained IR - every value is a NUL-terminated byte string in a
+bump arena - and converting it to the handle architecture Lua now uses was considered
+and **rejected on measurement**: a self-contained native batch binary runs a
+200k-iteration benchmark in 0.44s / 5.75 MB where Lua through the handle runtime takes
+2.41s / 3615 MB. Batch's codegen stays exactly as it is.
+
+What converges is the **runtime layer**. Batch hand-wrote 26 `rt_*` helpers as raw LLVM
+text inside the grammar, which was one of the two largest remaining piles of
+hand-written `.ll` in the repository. **25 of the 26 are now C**, in
+`languages/lib/batch-rt.c`, compiled by `languages/c-to-llvm-ir.abnf` into the
+checked-in `languages/lib/batch-rt.ll` by `tests/gen-batch-rt-ll.sh` (`--check` diffs
+instead of writing), and linked - not emitted.
+
+### What moved
+
+`rt_bump` (the 2 MB arena) · `rt_strlen` · `rt_streq` · `rt_lc` · `rt_streqi` ·
+`rt_strcat` · `rt_sub` · `rt_lastch` · `rt_findch` · `rt_findstr` · `rt_int2str` ·
+`rt_str2int` · `rt_prints` · `rt_capstart` · `rt_capend` · `rt_println` (the output
+capture a redirection and `for /f 'echo ...'` need) · `rt_stripq` · `rt_substr` ·
+`rt_subst` · `rt_mods` (the `~dpnx` modifiers) · `rt_fskind` (the filesystem MODEL
+behind `if exist`) · `rt_isdelim` · `rt_tokb` · `rt_nlines` · `rt_lineat`.
+
+The arena and the capture stack moved with them and are now statics of `batch-rt.c`,
+so `main` no longer initializes them - a C static starts at zero by itself. **Not one
+call site changed.** The ABI is the one it always was: a string is a `char*`, an
+integer is an `int`. Six of the 25 (`rt_bump`, `rt_lc`, `rt_lastch`, `rt_findstr`,
+`rt_prints`, `rt_isdelim`) are called only from inside the runtime, so the grammar does
+not even declare them any more; the emitted module went from 30,245 lines to 28,962 and
+declares 19 names.
+
+### What could NOT move, and the defect behind it
+
+**`rt_expand` stays hand-emitted in the grammar, and this is a real finding.** It is the
+one helper coupled to the program: it calls `bat_lookup`, which the grammar GENERATES
+from the variable table of the batch script being compiled. A C file can only call it
+through a prototype, and
+
+```
+$ cat probe.c
+char *ext1(char *nm);
+char *ext3(const char *nm);
+int   ext4(char *a, int b);
+$ mec languages/c-to-llvm-ir.abnf probe.c -q | grep '^declare'
+declare i32* @ext1(i32 %0)
+declare i32* @ext3(i32 %0)
+declare i32  @ext4(i32 %0, i32 %1)
+```
+
+**`c-to-llvm-ir.abnf` emits a declared-only function's POINTER PARAMETER as a plain
+`i32`.** The return type is right (`i32*`); every parameter type is lost. In a native
+binary that truncates a 64-bit pointer to 32 bits. It is invisible to everything we run
+today - `tests/c-test-full.c` never calls an external function that takes a pointer, and
+`llvm.Run` is untyped, so it would answer correctly right up until clang built the
+thing. Not fixed here (another agent is in that grammar); it is the blocker for moving
+any runtime helper that has to call back into its program module, and it is worth
+fixing before the next language tries.
+
+The fallback of passing a function POINTER instead is not available either: the IR
+interpreter refuses an indirect call outright ("function pointers are not supported").
+
+### The linker `llvm.Run` did not have - `abnf/llvmlink.go`
+
+For `-exe` the runtime is just another clang input (`c.runtime`, phase 2). `llvm.Run`
+had no equivalent, so a language whose runtime left the module would have called
+bodiless declarations. `llvm.Run(m, start, input, runtime)` now takes the same list the
+grammar hands `llvm.BuildExecutable`; every `.ll` in it is parsed, its globals get their
+own storage, and **a block-less function object is bound to the definition carrying its
+name, in both directions** - so a runtime may also call back into a function the program
+module generates. Non-`.ll` entries are ignored, since only clang can consume them.
+Everything else in the tree is unaffected: the parameter is variadic and no other
+grammar passes it.
+
+Keeping the two modules SEPARATE rather than merging them is the point. Our C compiler
+carries a pointer value as `i32*` where the batch emitter writes `i8*`, so
+`declare i32 @rt_strlen(i8*)` against `define i32 @rt_strlen(i32*)` is a type mismatch
+that separate compilation erases and a merge would not - exactly the way metajs's
+`js_str_mem(i8*, i64)` has always been resolved against a definition taking `i32*`.
+
+### Performance - measured before and after, and it is NOT free
+
+Both figures come from clean trees with their own binaries (`git archive 4eea0cf` into
+`/tmp/batchhead`, `go build` inside it), per the measurement trap recorded in phase 3a.
+The benchmark is `set /a N=N+1` plus N string comparisons per iteration, 100,000
+iterations - deliberately saturated with runtime calls, which is the worst case for this
+change.
+
+```
+                                                 HEAD 4eea0cf    batch-rt.c
+native binary, 400 cmp/iter (40M rt_streq)          0.071s          0.089s     1.25x
+native binary, 100 cmp/iter (10M rt_streq)          0.022s          0.029s     1.32x
+native peak RSS, same                              3,129,344      3,129,344    same
+llvm.Run,   8 cmp/iter                              0.335s          0.656s     1.96x
+llvm.Run,   tests/batch-test-full.cmd               0.227s          0.222s     none
+mec compile + link only                             0.139s          0.149s
+```
+
+**The convergence costs ~30% natively and ~2x under `llvm.Run` on a benchmark that does
+nothing but call the runtime, and nothing measurable on a real program.** The cause is
+one thing and it is not C: `c-to-llvm-ir.abnf` emits an `alloca`/`store`/`load` for
+every local and every parameter and there is no mem2reg, while the hand-written IR kept
+its loop counters in registers - and `llvm.BuildExecutable` invokes clang with no `-O`
+flag at all, so nothing downstream cleans it up. Two obvious next steps, neither taken
+here because both are outside this change: pass `-O2` for `-exe` builds, and give the C
+compiler a mem2reg pass (which would also speed up the metajs and lua floors).
+
+One consequence worth stating because it can bite a user rather than a test: the
+interpreter's default `-max-steps` budget of 1e8 now covers **about 40% fewer** batch
+runtime operations. The benchmark loop completes 120,000+ iterations at HEAD and trips
+the safety valve above ~75,000 now. `-max-steps 0` lifts it; no file in `tests/` is
+close to the limit.
+
+### Ground truth
+
+```
+matrix                325/325, byte-identical stdout and stderr goja vs -frozen
+--full                5,286 assertions, 0 languages whose halves disagree (batch 139)
+--cross               119 programs, 0 divergent
+clang-check           16/16, batch still "ok, and the clang executable agrees"
+go test ./abnf/       ok
+gen-runtime-ll.sh --check    runtime.ll  is up to date (36656 lines)
+gen-lua-rt-ll.sh --check     lua-rt.ll   is up to date (12067 lines)
+gen-batch-rt-ll.sh --check   batch-rt.ll is up to date (3518 lines)
+```
+
+`tests/batch-test-full.cmd` (139 assertions) and `tests/batch-test-1.bat`, four ways -
+`llvm.Run` and the native binary, before and after - are **byte-identical on stdout and
+on stderr**, and the new native binary is byte-identical to the one built from a clean
+archive of 4eea0cf. `nm -u` on it reports exactly one undefined symbol, `_putchar`.
+
+### One follow-up, not coordinated live
+
+bash is having the same conversion done concurrently (68 helpers to batch's 26) and the
+two almost certainly overlap - both hand-emit an arena and a string layer.
+`languages/lib/batch-rt.c` stands alone on purpose. Once both are in, `rt_bump`,
+`rt_strlen`, `rt_streq`, `rt_strcat` and `rt_sub` are worth diffing for a shared
+`lib/str-rt.c`; the capture stack, the `%VAR%` operators, `rt_mods`, `rt_fskind` and the
+`for /f` boundary helpers are batch's own.
+
+## Convergence on the runtime layer - BASH - DONE (2026-08-02)
+
+Same decision as for batch, and for the same reason. `bash-to-llvm-ir.abnf` emits
+**unboxed** self-contained IR, and converting it to the handle architecture Lua uses was
+considered and **rejected on measurement**. Bash's codegen stays exactly as it is; what
+converges is the runtime layer.
+
+Bash built its whole string runtime with the `llvm.ir.*` builder API - `f.NewBlock`,
+`b.NewLoad`, `b.NewICmp`, block by block - about **3,000 lines of MetaJS whose only
+product was IR**. That is now **`languages/lib/bash-rt.c`** (2,701 lines of C), compiled
+by `languages/c-to-llvm-ir.abnf` into the checked-in **`languages/lib/bash-rt.ll`**
+(13,184 lines, 86 `define`s) by **`tests/gen-bash-rt-ll.sh`** (`--check` diffs instead of
+writing). The grammar went from **6,568 to 3,527 lines**.
+
+### What moved: 62 of the 65 `rt_*` helpers, and all 21 `re_*`
+
+```
+rt_bump rt_strlen rt_charlen rt_charoff rt_streq rt_strcmp rt_strcat rt_int2str
+rt_str2int rt_class rt_substr rt_csubstr rt_egclose rt_egalt rt_glob rt_eg
+rt_matchlen rt_matchend rt_strip rt_replace rt_case rt_shquote rt_ansic rt_haschar
+rt_read_line rt_field rt_pad rt_unescape rt_nfields rt_getfield rt_wordjoin
+rt_splitifs rt_bnd_acc rt_bnd_open rt_arr_find rt_arr_set rt_arr_get rt_arr_has
+rt_arr_del rt_arr_count rt_arr_list rt_arr_nextidx rt_arr_clear rt_arr_append
+rt_slicefields rt_globescape rt_catfields rt_argpush rt_param rt_params
+rt_regex_search rt_regex_error rt_nounset rt_putc rt_cap_begin rt_cap_end rt_prints
+rt_ss_save rt_ss_restore rt_push_local rt_pop_locals rt_fskind
+```
+
+plus the whole POSIX ERE engine behind `[[ =~ ]]` - `re_alt re_cat re_rep re_atom
+re_run re_get re_set re_emit re_mark re_at re_num re_isq re_fold1 re_bit1 re_setbit
+re_clrcls re_negcls re_ctype re_clsname re_bracket re_copy` - and every global the
+runtime keeps: the 4 MB arena, `gvars`, the `local` save stack, the capture stack, the
+subshell snapshot, the positional-parameter frame, the shell-option flags and the
+engine's `re_prog`/`re_cls`/`re_slot` tables.
+
+The task's brief counted **68** `rt_*` names. Three of those are not functions:
+`rt_arr_` is a prefix in a doc comment, `rt_flag` is a substring of `abort_flag`, and
+`rt_read_eof` is a comment referring to the `read_eof` global (there is no such
+function). The real count is **65**.
+
+### What could NOT move: 3 helpers, and the reason is not the C subset
+
+`rt_setvar_byname`, `rt_getvar_byname` and `rt_eval_assign` are still emitted by the
+grammar, and they have to be: each is a **chain over every variable name the program
+mentions**, generated after the walk from `varIdList`. They are program-dependent code
+that happens to be shaped like a runtime helper. They could move if the emitter also
+emitted a `{name, slot}` table for C to loop over; that is a real option, not done here.
+
+### Two defects in `languages/c-to-llvm-ir.abnf`, found by the port, NOT fixed here
+
+Both are reachable from three lines of ordinary C and neither has anything to do with
+bash. The file belongs to another change in flight, so they are reported rather than
+fixed, and `bash-rt.c` works around them.
+
+1. **A call to a not-yet-defined function with a POINTER parameter miscompiles the
+   later definition.**
+
+```c
+int g(char *a);
+int f(char *a) { return g(a); }
+int g(char *a) { return a[0]; }
+```
+```
+Fail: store operands are not compatible: src=i32; dst=i32**
+```
+
+   `getFuncByArity` materializes the callee at the CALL site with `{ptr: false}` for
+   every argument, so `g` becomes `i32 @g(i32)`; the definition then reuses that object
+   and stores an `i32` parameter into the body's `i32**` slot. A prototype does not help
+   - `noteParamCts`/`registerProto` record only types WIDER than i32 and drop
+   pointer-ness. Reordering does not help either when the two functions are **mutually
+   recursive**, which `rt_glob` and `rt_eg` are. The workaround in `bash-rt.c` is a
+   trampoline with INTEGER parameters (`rt_eg_fwd(long, long, int)`), which the default
+   spec already matches. Everything else in the file is ordered callee-before-caller.
+
+2. **A conditional expression whose arms are pointers does not compile.**
+   `p = (x == 0) ? empty : p;` gives the same message. Written as `if`/`else`
+   throughout.
+
+Neither is a wrong ANSWER - both are hard compile failures - so nothing silently drifted.
+
+### The mechanism: SPLICED, not linked, and that is forced
+
+`llvm.BuildExecutable` links `c.runtime` for `-exe`. **`llvm.Run` links nothing**, and
+bash - unlike MetaJS and Lua - has **no Go twin** answering its runtime externs, because
+its runtime has always been part of its own module. A `declare` would therefore be an
+unresolved external in every non-`-exe` run, i.e. the whole matrix.
+
+So `abnf/llvmsplice.go` adds `llvm.SpliceIR(m, path)`, which parses `bash-rt.ll` and
+appends its globals and functions to the module being built, plus `llvm.SpliceFunc` /
+`llvm.SpliceGlobal` to reach a spliced name (a missing name PANICS by name rather than
+returning a null the grammar would have to test). The module stays self-contained
+exactly as it was, `-exe` needs no runtime input at all, and there is ONE implementation
+for both engines.
+
+Two consequences the next grammar to do this will meet:
+
+- **A shim per helper.** Every pointer out of `c-to-llvm-ir.abnf` is an `i32*`, whatever
+  it points at, while bash's strings are `i8*`. Same bytes, different IR type, and one
+  module has to typecheck - `clang -S -x ir` is part of the gate. So the grammar
+  generates a one-block `rtw_<name>` that bitcasts the pointer arguments and the pointer
+  result and tail-calls the C body. It is 12 lines of `rtShim` driven by a `kinds` table,
+  and it is what keeps **every call site in the emitter unchanged**.
+- **`__mec_ginit`.** `c-to-llvm-ir.abnf` does not put a global's initializer in the
+  global; it emits `__mec_ginit()` and has `main` call it. `bash-rt.c`'s own `main` is a
+  placeholder stripped by the generator, so bash's `main` makes the call in its entry
+  block - and it is not bookkeeping: **every string literal in the runtime is
+  materialized there**, so without it the ERE error texts and the `@Q`/`@E` tables are
+  empty.
+
+### Why bash could not use the linker `abnf/llvmlink.go` builds for batch
+
+Batch's concurrent change added a real linker for `llvm.Run`
+(`machine.linkRuntimeModules`), which keeps the runtime a SEPARATE module and binds
+declarations to definitions by name - which erases the `i8*`/`i32*` mismatch for free and
+would make the shims unnecessary. It binds **functions only**. Batch's runtime state is
+private to its runtime; **bash's is shared with the emitted program** - the program loads
+`last_status`, writes `gvars[]`, reads `read_eof`, pushes `argv` - so bash needs
+cross-module GLOBAL binding, which that linker does not do, and our C compiler has no
+`extern` declaration to put the definitions back on the emitter's side. Unifying the two
+mechanisms means teaching `linkRuntimeModules` to bind global declarations too; then bash
+drops 62 shims and the `gvars`/`stdin_buf` bitcasts. Worth doing, not done here.
+
+### Performance - measured before and after, and the brief's baseline was a CRASH
+
+The benchmark in the brief:
+
+```
+s=0; i=1
+while [ $i -le 200000 ]; do s=$((s + i % 7)); i=$((i + 1)); done; echo $s
+```
+
+**It segfaults, at HEAD 4eea0cf and after this change alike, printing nothing and
+exiting 139.** Every iteration allocates from the 4 MB arena and nothing is ever freed,
+so it runs off the end at somewhere between 20,000 and 50,000 iterations. The quoted
+"0.44s real, 5.75 MB max RSS" is the cost of reaching the segfault, not of running the
+loop - `5,750,784` bytes is the arena plus the binary, which is what the process touches
+before it dies. Both binaries crash identically, so this is parity, not a regression, but
+the number cannot be used to compare anything.
+
+Measured on workloads that actually complete (HEAD 4eea0cf built in its own tree from
+`git archive`, per the measurement trap recorded in phase 3a):
+
+```
+                                             HEAD 4eea0cf      after
+20,000-iteration s=$((s+i%7)) loop             18.3 ms/run    15.4 ms/run   -16%
+  (mean of 300 runs; process startup 1.4 ms/run for both)
+  max RSS                                    5,636,096 B    5,701,632 B     +1.2%
+300x ^(a+)+c$ against 30 a's (step cap)         0.58 s         0.74 s       +26%
+  max RSS                                    1,753,088 B    1,802,240 B     +2.8%
+the brief's 200k loop                          segfault       segfault
+  (both: rc 139, no output, 5,750,784 B vs 5,767,168 B)
+```
+
+So the convergence is **not free, and not uniformly a cost**: the string/arithmetic path
+got faster and the regex VM got slower. The direction is what the codegen predicts - the
+C compiler gives every local an `alloca` and reloads it, where the hand-emitted IR kept
+loop state in SSA registers, and the ERE VM is the one helper that is a tight inner loop
+over its own locals. The emitted module grew from **67,654 to 77,441 lines** for
+`bash-test-full.sh` for the same reason.
+
+### Ground truth
+
+```
+tests/bash-test-full.sh   378 checks, 0 failures  under llvm.Run
+                          378 checks, 0 failures  under -frozen
+                          378 checks, 0 failures  as a clang-built -exe binary
+llvm.Run vs the native binary, stdout AND stderr, byte-for-byte:
+  tests/bash-test-1.sh      SAME (2,061 bytes)
+  tests/bash-test-full.sh   SAME (29 bytes)
+matrix                    325/325
+--full                    5,286 assertions, 0 languages whose halves disagree (bash 378)
+--cross                   119 programs, 0 divergent
+clang-check               16 modules, all accepted by clang;
+                          bash 77439  ok, and the clang executable agrees
+go test ./abnf/           ok
+gen-bash-rt-ll.sh --check bash-rt.ll is up to date (13184 lines)
+gen-runtime-ll.sh --check runtime.ll is up to date (36656 lines)
+gen-lua-rt-ll.sh --check  lua-rt.ll  is up to date (12067 lines)
+```
+
+The ERE engine was additionally differentially tested against the grammar's own emitted
+engine over **59 pattern/subject cases** - captures, greedy/leftmost choice,
+`{m}`/`{m,}`/`{m,n}`/`{0}`, per-iteration capture reset, bracket bitmaps, POSIX classes,
+negation, ranges, the `i` flag, all nine compile-error codes, the `RE_PROG` overrun and
+the step cap - before it was integrated. Every case agreed: same verdict, same pair
+count, same `BASH_REMATCH[0..3]`.
+
+### Latent defects the port surfaced, all faithfully reproduced, none fixed
+
+Reading 3,000 lines of IR closely finds things. None of these is a regression and none is
+touched:
+
+- `re_clsname` matches a POSIX class name by **prefix**, so `[[:bogus:]]` is silently
+  `[[:blank:]]` and `[[:lowercase:]]` is `[[:lower:]]`. Real bash rejects both. Verified
+  the hand-emitted engine behaves the same way.
+- `rt_class` does not implement POSIX classes at all: `[[:digit:]]*` treats the bracket
+  as the literal set `[:digit`.
+- No bound check anywhere: `rt_arr_set` writes `arr_nm[arr_n]` with no `arr_n < 4096`
+  test, `rt_argpush` writes `argv[argv_top]` with no `< 4096` test, `rt_cap_begin` never
+  tests `cap_depth < 16`, `rt_push_local` never tests `ls_top < 512`, and `rt_putc` never
+  tests `cap_len < 8192`. The arena itself is the same story, which is what the
+  benchmark's segfault is.
+- `rt_shquote` emits `\xNN` for a control character but `rt_ansic` cannot decode `\xHH`,
+  so `${v@E}` does not invert `${v@Q}`.
+- `rt_case` is byte-wise ASCII while `rt_charlen`/`rt_charoff` in the same runtime are
+  UTF-8 aware.
+- `rt_haschar(s, 0)` can never answer 1: the NUL test runs before the equality test.
+- `rt_arr_nextidx` runs `rt_str2int` over EVERY key including associative ones, so
+  `a+=(x)` on a string-keyed array creates key `"1"`.
+- `re_emit` writes words 0..2 of a 4-word instruction and never touches word 3 - 16 KB of
+  the 64 KB `re_prog` is dead.
+- `rt_eg`'s `*`/`+` arm calls itself at `k == 0` and then discards the result behind a
+  `k > 0` guard, because the IR computes both operands of an `And`. Kept, because the
+  arena offsets are observable through pointer identity.
+
 ## Phase 5 - roll out
 
 Repeat phase 4 per language in the size order above, easiest first, kotlin last. One
