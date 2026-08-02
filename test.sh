@@ -191,6 +191,16 @@ full_probe() {
                         printf '    FULL - %s assertions, goja and -frozen byte-identical\n' "$(cat "$R.checks")"
                     else
                         printf '    FULL under goja, BUT -frozen fails or differs - inspect before celebrating\n'
+                        # And make the SUMMARY say so. The count above was recorded
+                        # from the goja run, so without this the end-of-group report
+                        # compares two goja numbers, finds them equal, and prints "0
+                        # languages with halves that disagree" while this very line
+                        # says otherwise. Found 2026-08-02 by an agent whose frozen
+                        # half was silently losing every store (ASI: a bare `return`
+                        # followed by an expression on the next line) - 17 of 59 new
+                        # assertions red in ONE half, invisible to the summary that
+                        # everyone actually quotes.
+                        echo FROZEN-DIFF > "$R.checks"
                     fi
                 else
                     printf '    (the remaining sections pass)\n'
@@ -303,6 +313,11 @@ if [ "$FULL" -eq 1 ]; then
         function emit(   i, bad) {
             bad = 0
             for (i = 1; i < n; i++) if (v[i] != v[0]) bad = 1
+            # FROZEN-DIFF is not a count: it is the marker written above when a
+            # half is FULL under goja but differs under -frozen. Flag it even when
+            # BOTH halves carry it, because two halves failing the same way is not
+            # agreement - it is two defects.
+            for (i = 0; i < n; i++) if (v[i] == "FROZEN-DIFF") bad = 1
             if (n < 2)      printf "  %-12s %s (only one half ran - filtered?)\n", last, v[0]
             else if (bad)   { printf "  %-12s MISMATCH:", last
                               for (i = 0; i < n; i++) printf " %s", v[i]

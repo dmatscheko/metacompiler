@@ -2162,6 +2162,233 @@ KwDefault   = "default" KwEnd ;
         return funcNameById[v]
     }
 
+    // ----- The C standard library: the byte/address family -----
+    // The eighteen names below are exactly abnf/llvmmap.go's libcExterns byte/address
+    // set, which the compiler half resolves through clang (and through libcNative under
+    // llvm.Run). They are implemented HERE so that both halves of the language can
+    // answer the same question; before this, callFunction knew putchar and getchar and
+    // nothing else, and every one of these was 'function not defined'.
+    //
+    // WHAT MAKES IT SOUND. The interpreter's memory is one cell per SCALAR (see 'The
+    // machine' above) rather than the compiler's packed bytes, and that difference is
+    // deliberate - it is the model, not a defect. It happens to be irrelevant for this
+    // family: sizeof(char) is 1 in both models, so for CHARACTER data a cell IS a byte
+    // and a length in bytes is a length in cells. That equivalence is the whole reason
+    // these can be shared. It does NOT extend to wider elements: memcpy over an int
+    // array would be n/4 cells here and n bytes there, so the mem* group is honest only
+    // over char storage, which is what the ratchet exercises (SECTION 50).
+    //
+    // A cell of char type holds the SIGNED value ('\xff' is -1, as strLitAddr's
+    // convert() pins), so every read masks to an unsigned byte and every write goes back
+    // through convert(ctChar, ...). Out-of-range and null addresses read as 0 and are
+    // not written, matching libcNative's byteAt/memAt tolerance rather than failing.
+    var ctPChar = {k: "ptr", p: ctChar}
+    var ctLong  = ctI(8, false)
+    function cByte(addr) {
+        if (addr <= 0 || addr >= mem.length) return 0
+        return szNum(mem[addr]) & 255
+    }
+    // NOTE the shape: a BARE 'return' followed on the next line by an expression is a
+    // goja-vs-frozen trap. Real JS inserts a semicolon after it (ASI); the frozen
+    // MetaJS parser does not, so 'return \n mem[addr] = ...' parsed as
+    // 'return (mem[addr] = ...)' and the store happened only in the branch that was
+    // supposed to skip it - every write silently lost under -frozen, reads unaffected.
+    // Guard positively instead.
+    function cPut(addr, b) {
+        if (addr > 0 && addr < mem.length) { mem[addr] = convert(ctChar, b & 255) }
+    }
+    // The address of the NUL that terminates the string at addr, clamped to the arena.
+    function cStrEnd(addr) {
+        if (addr <= 0 || addr >= mem.length) return addr
+        var e = addr
+        while (e < mem.length && cByte(e) != 0) e = e + 1
+        return e
+    }
+    // What strcmp/strncmp/memcmp answer for one differing pair. C leaves the MAGNITUDE
+    // unspecified and Apple's libc returns the UNSIGNED byte difference, which is what
+    // abnf/llvmmap.go's byteDiff reproduces - so returning a normalized -1/0/1 here
+    // would make the two halves disagree. Only the SIGN is a property of C, so only the
+    // sign is asserted in the ratchet.
+    function cDiff(x, y) { return x - y }
+    // A whole-arena range check: a copy whose destination does not fit does nothing,
+    // exactly like libcNative's memAt answering nil.
+    function cFits(addr, n) { return addr > 0 && addr < mem.length && addr + n <= mem.length }
+    function cArg(argValues, i) { return szNum(argValues[i].v) }
+    function libcCall(name, argValues) {
+        if (name == "strlen") {
+            var s = cArg(argValues, 0)
+            return val(cStrEnd(s) - s, ctSizeT)
+        }
+        if (name == "strcmp") {
+            var a = cArg(argValues, 0)
+            var b = cArg(argValues, 1)
+            while (true) {
+                var x = cByte(a)
+                var y = cByte(b)
+                if (x != y || x == 0) return val(cDiff(x, y), ctInt)
+                a = a + 1
+                b = b + 1
+            }
+        }
+        if (name == "strncmp") {
+            var na = cArg(argValues, 0)
+            var nb = cArg(argValues, 1)
+            var nn = cArg(argValues, 2)
+            for (var i = 0; i < nn; i++) {
+                var nx = cByte(na + i)
+                var ny = cByte(nb + i)
+                if (nx != ny || nx == 0) return val(cDiff(nx, ny), ctInt)
+            }
+            return val(0, ctInt)
+        }
+        if (name == "strcpy") {
+            var cd = cArg(argValues, 0)
+            var cs = cArg(argValues, 1)
+            var cn = cStrEnd(cs) - cs
+            if (cFits(cd, cn + 1)) {
+                for (var j = 0; j < cn; j++) cPut(cd + j, cByte(cs + j))
+                cPut(cd + cn, 0)
+            }
+            return val(cd, ctPChar)
+        }
+        if (name == "strncpy") {
+            var pd = cArg(argValues, 0)
+            var ps = cArg(argValues, 1)
+            var pn = cArg(argValues, 2)
+            if (!cFits(pd, pn)) return val(pd, ctPChar)
+            var pl = cStrEnd(ps) - ps
+            if (pl > pn) pl = pn
+            for (var k = 0; k < pl; k++) cPut(pd + k, cByte(ps + k))
+            // strncpy PADS the rest of the destination with NUL, it does not stop.
+            for (var k2 = pl; k2 < pn; k2++) cPut(pd + k2, 0)
+            return val(pd, ctPChar)
+        }
+        if (name == "strcat" || name == "strncat") {
+            var ad = cArg(argValues, 0)
+            var as = cArg(argValues, 1)
+            var an = cStrEnd(as) - as
+            // strncat appends at most n bytes AND always terminates.
+            if (name == "strncat" && cArg(argValues, 2) < an) an = cArg(argValues, 2)
+            var ae = cStrEnd(ad)
+            if (cFits(ae, an + 1)) {
+                for (var m = 0; m < an; m++) cPut(ae + m, cByte(as + m))
+                cPut(ae + an, 0)
+            }
+            return val(ad, ctPChar)
+        }
+        if (name == "strchr" || name == "strrchr") {
+            var hs = cArg(argValues, 0)
+            var hc = cArg(argValues, 1) & 255
+            var he = cStrEnd(hs)
+            // Both search the terminator too: strchr(s, 0) is the end of the string.
+            if (name == "strchr") {
+                for (var p = hs; p <= he; p++) { if (cByte(p) == hc) return val(p, ctPChar) }
+                return val(0, ctPChar)
+            }
+            for (var q = he + 1; q > hs; ) {
+                q = q - 1
+                if (cByte(q) == hc) return val(q, ctPChar)
+            }
+            return val(0, ctPChar)
+        }
+        if (name == "strstr") {
+            var sh = cArg(argValues, 0)
+            var sn = cArg(argValues, 1)
+            var hl = cStrEnd(sh) - sh
+            var nl = cStrEnd(sn) - sn
+            if (nl == 0) return val(sh, ctPChar)   // The empty needle matches at the front.
+            if (nl > hl) return val(0, ctPChar)
+            for (var si = 0; si + nl <= hl; si++) {
+                var ok = true
+                for (var sj = 0; sj < nl; sj++) { if (cByte(sh + si + sj) != cByte(sn + sj)) { ok = false; break } }
+                if (ok) return val(sh + si, ctPChar)
+            }
+            return val(0, ctPChar)
+        }
+        if (name == "memcpy" || name == "memmove") {
+            var md = cArg(argValues, 0)
+            var ms = cArg(argValues, 1)
+            var mn = cArg(argValues, 2)
+            if (cFits(md, mn) && cFits(ms, mn)) {
+                // Read the source out first, so that an OVERLAPPING move is still the
+                // move C defines; memcpy over an overlap is undefined, so the two may
+                // share one implementation exactly as libcNative's copy() does.
+                var tmp = []
+                for (var t = 0; t < mn; t++) tmp.push(cByte(ms + t))
+                for (var t2 = 0; t2 < mn; t2++) cPut(md + t2, tmp[t2])
+            }
+            return val(md, ctPChar)
+        }
+        if (name == "memset") {
+            var ed = cArg(argValues, 0)
+            var ec = cArg(argValues, 1) & 255
+            var en = cArg(argValues, 2)
+            if (cFits(ed, en)) { for (var ei = 0; ei < en; ei++) cPut(ed + ei, ec) }
+            return val(ed, ctPChar)
+        }
+        if (name == "memcmp") {
+            var ma = cArg(argValues, 0)
+            var mb = cArg(argValues, 1)
+            var mm = cArg(argValues, 2)
+            for (var mi = 0; mi < mm; mi++) {
+                var mx = cByte(ma + mi)
+                var my = cByte(mb + mi)
+                if (mx != my) return val(cDiff(mx, my), ctInt)
+            }
+            return val(0, ctInt)
+        }
+        if (name == "memchr") {
+            var ks = cArg(argValues, 0)
+            var kc = cArg(argValues, 1) & 255
+            var kn = cArg(argValues, 2)
+            for (var ki = 0; ki < kn; ki++) { if (cByte(ks + ki) == kc) return val(ks + ki, ctPChar) }
+            return val(0, ctPChar)
+        }
+        if (name == "atoi" || name == "atol") {
+            // Optional whitespace, optional sign, then decimal digits, stopping at the
+            // first non-digit. Overflow is undefined in C, so the ratchet asserts only
+            // in-range values.
+            var ap = cArg(argValues, 0)
+            var ax = cStrEnd(ap)
+            var c = 0
+            while (ap < ax) {
+                c = cByte(ap)
+                if (c != 32 && c != 9 && c != 10 && c != 11 && c != 12 && c != 13) break
+                ap = ap + 1
+            }
+            var neg = false
+            if (ap < ax) {
+                c = cByte(ap)
+                if (c == 43 || c == 45) { neg = c == 45; ap = ap + 1 }
+            }
+            var n = 0
+            while (ap < ax) {
+                c = cByte(ap)
+                if (c < 48 || c > 57) break
+                n = n * 10 + (c - 48)
+                ap = ap + 1
+            }
+            if (neg) n = 0 - n
+            return val(convert(name == "atoi" ? ctInt : ctLong, n), name == "atoi" ? ctInt : ctLong)
+        }
+        if (name == "strdup") {
+            var ds = cArg(argValues, 0)
+            var dn = cStrEnd(ds) - ds
+            var dd = alloc(dn + 1)   // NOTE: this GROWS mem, so read the source first.
+            for (var di = 0; di < dn; di++) cPut(dd + di, cByte(ds + di))
+            cPut(dd + dn, 0)
+            return val(dd, ctPChar)
+        }
+        return undefined
+    }
+    // The names libcCall answers, so that a USER function of the same name still wins
+    // (the lookup order in callFunction) and an unknown name still fails loudly.
+    var libcNames = {strlen: true, strcmp: true, strncmp: true,
+        strcpy: true, strncpy: true, strcat: true, strncat: true,
+        strchr: true, strrchr: true, strstr: true,
+        memcpy: true, memmove: true, memset: true, memcmp: true, memchr: true,
+        atoi: true, atol: true, strdup: true}
+
     function callFunction(name, argValues) {
         if (name == "putchar") {
             printf("%c", argValues[0].v & 255)
@@ -2176,6 +2403,9 @@ KwDefault   = "default" KwEnd ;
             // through its own name ('fp(4)').
             var lv = lookupVar(name)
             if (lv != undefined) return callFunction(funcNameOf(load(lv.addr)), argValues)
+            // The standard library comes LAST, so a program that defines its own strlen
+            // (or holds one in a function pointer) still gets its own.
+            if (hasOwn(libcNames, name)) return libcCall(name, argValues)
             fail("function not defined: " + name)
         }
         var callerScopes = scopes

@@ -22,8 +22,9 @@
 // Deliberately out of scope (not core syntax, or unrunnable in this harness):
 // macro EXPANSION (a name standing for its body in ordinary code - a separate
 // c-preprocessor.abnf grammar does that, and is piped in; conditional
-// compilation itself IS in scope, see section 26), the standard library (only the putchar prototype, as
-// in the feature-matrix file), variadic functions (need the stdarg.h macros),
+// compilation itself IS in scope, see section 26), most of the standard library
+// (the byte/address family IS in scope - see SECTION 50 and the note below - and
+// nothing else is), variadic functions (need the stdarg.h macros),
 // VLAs (optional in C11), flexible array members, _Atomic and threads, setjmp,
 // wide-character semantics (wide literals appear via sizeof only), K&R-style
 // declarations, and anything undefined or implementation-defined - except the
@@ -33,30 +34,36 @@
 // set ('A' + 1 == 'B'). Binary 0b literals (a C23-ism) are included because
 // the reference toolchain accepts them warning-free under -std=c11.
 //
-// THE STANDARD LIBRARY CANNOT BE SECTIONED HERE, and it is worth knowing why
-// before trying. On 2026-08-02 eighteen byte/address libc names (strlen strcmp
-// strncmp strcpy strncpy strcat strncat strchr strrchr strstr memcpy memmove
-// memset memcmp memchr atoi atol strdup) became real linked externs in
-// abnf/llvmmap.go, and a section exercising them was written and MEASURED here.
-// The compiler half answers all of it - cc, llvm.Run and the clang-built -exe
-// binary all printed 'full: 495 checks, 0 failures', byte-identical - but
-// languages/c-interpreter.abnf has NO standard library at all (its callFunction
-// knows putchar and getchar and nothing else), so that half stops at the first
+// ONE PART OF THE STANDARD LIBRARY IS SECTIONED HERE: the eighteen byte/address
+// names (strlen strcmp strncmp strcpy strncpy strcat strncat strchr strrchr
+// strstr memcpy memmove memset memcmp memchr atoi atol strdup), in SECTION 50.
+// It is worth knowing what it took, because the rest of the library still cannot
+// follow. On 2026-08-02 those eighteen became real linked externs in
+// abnf/llvmmap.go and a section was written; the compiler half answered all of it
+// (cc, llvm.Run and the clang-built -exe binary byte-identical) but
+// languages/c-interpreter.abnf had NO standard library at all - its callFunction
+// knew putchar and getchar and nothing else - so that half stopped at the first
 // call. test.sh --full records a half's assertion COUNT only when that half has
-// ZERO gaps, so one red section costs the whole count:
+// ZERO gaps, so the one red section cost the whole count and it was reverted:
 //
 //   c-interpreter:  error without a usable position: function not defined: strcpy
-//                   - 46 the libc byte/address family: function not defined: strcpy
 //   c-to-llvm-ir:   FULL - 495 assertions, goja and -frozen byte-identical
 //   c            MISMATCH: - 495
 //
-// That takes '0 languages whose halves disagree' to 1 and drops 444 assertions
-// from the ratchet total, which is a bigger loss than the 51 assertions gained,
-// so the section was reverted. Unlike sections 44 and 45 there is no shared
-// subset to fall back on - not one of the eighteen names has an answer both
-// models can give. What unblocks it is a libc in c-interpreter.abnf, nothing in
-// this file. Until then the natives are pinned by abnf/libcnative_test.go
-// (condition 2) and the clang agreement is recorded at libcExterns (condition 1).
+// What unblocked it was a libc in the INTERPRETER, not a change in this file:
+// libcCall in languages/c-interpreter.abnf now implements the same eighteen over
+// the interpreter's own memory. The two memory models stay different on purpose
+// (one cell per scalar there, packed bytes here); this family is shareable only
+// because sizeof(char) is 1 in both, so over CHARACTER data a cell is a byte.
+// SECTION 50 stays on char storage for exactly that reason.
+//
+// The REST of the library is still out of scope, and for a reason no amount of
+// work on this file changes: the varargs printf family (no varargs ABI in either
+// interpreter), exit/abort (no unwind path out of a call), and qsort/bsearch (a
+// function pointer is a funcId, not a callable address). Those are listed as
+// deliberately absent at abnf/llvmmap.go's libcNative, where they are loud rather
+// than wrong. The natives remain pinned by abnf/libcnative_test.go (condition 2)
+// and the clang agreement is recorded at libcExterns (condition 1).
 //
 // Hand-written for the metacompiler project (Apache-2.0, no copied test-suite
 // code), organized after the ISO C11/C17 standard with the ANTLR grammars-v4
@@ -1740,6 +1747,157 @@ int s49(void) {
     return 0;
 }
 
+// ===== SECTION 50: the libc byte/address family =====
+/* The eighteen byte/address names of <string.h> and <stdlib.h>. They are the one
+   part of the standard library BOTH halves can answer, which is why this section
+   exists and the rest of the library still does not (see the header).
+
+   The compiler half resolves them for real: abnf/llvmmap.go lists them in
+   libcExterns, so clang links the actual libc symbols, and libcNative implements
+   the same eighteen for `llvm.Run`. The interpreter half implements them over its
+   own memory (libcCall in languages/c-interpreter.abnf). The two memory models are
+   NOT the same - the interpreter is one cell per scalar, the compiler is packed
+   bytes - and this family is shareable precisely because sizeof(char) is 1 in
+   both, so for CHARACTER data a cell is a byte and a length in bytes is a length
+   in cells. Everything below therefore stays on char storage; memcpy over an int
+   array would be n/4 cells in one model and n bytes in the other, and is left out
+   deliberately rather than asserted wrongly.
+
+   Only the SIGN of strcmp/strncmp/memcmp is asserted. C leaves the magnitude
+   unspecified, Apple's libc returns the unsigned byte difference (strcmp("xy",
+   "xc") == 22), and cc CONSTANT-FOLDS a call with literal operands to a normalized
+   -1/0/1 - so the magnitude is not a property any of the three engines share.
+   Both runtimes here return the unsigned difference; only the sign is checked.
+
+   Validated against cc (Apple clang 21.0.0, arm64-darwin) at -O0 and -O2 before
+   being written down here. */
+unsigned long strlen(const char *s);
+int strcmp(const char *a, const char *b);
+int strncmp(const char *a, const char *b, unsigned long n);
+char *strcpy(char *d, const char *s);
+char *strncpy(char *d, const char *s, unsigned long n);
+char *strcat(char *d, const char *s);
+char *strncat(char *d, const char *s, unsigned long n);
+char *strchr(const char *s, int c);
+char *strrchr(const char *s, int c);
+char *strstr(const char *h, const char *n);
+void *memcpy(void *d, const void *s, unsigned long n);
+void *memmove(void *d, const void *s, unsigned long n);
+void *memset(void *d, int c, unsigned long n);
+int memcmp(const void *a, const void *b, unsigned long n);
+void *memchr(const void *s, int c, unsigned long n);
+int atoi(const char *s);
+long atol(const char *s);
+char *strdup(const char *s);
+int s50_sgn(int x) { if (x < 0) { return -1; } if (x > 0) { return 1; } return 0; }
+int s50_zero(char *b, int n) { int i; for (i = 0; i < n; i++) { b[i] = 0; } return 0; }
+
+int s50(void) {
+    char buf[32];
+    char tmp[16];
+    char *p;
+    long L;
+
+    /* ---- strlen ---- */
+    s50_zero(buf, 32);
+    buf[0] = 'h'; buf[1] = 'e'; buf[2] = 'l'; buf[3] = 'l'; buf[4] = 'o';
+    check(5001, strlen(buf) == 5);
+    check(5002, strlen("") == 0);
+    check(5003, strlen(buf + 3) == 2);
+    check(5004, (int)strlen("abc") == 3);
+
+    /* ---- strcpy / strncpy ---- */
+    s50_zero(tmp, 16);
+    p = strcpy(tmp, buf);
+    check(5005, p == tmp);
+    check(5006, strlen(tmp) == 5 && tmp[5] == 0);
+    check(5007, tmp[0] == 'h' && tmp[4] == 'o');
+    s50_zero(tmp, 16);
+    tmp[6] = 'Z';
+    check(5008, strncpy(tmp, buf, 3) == tmp);
+    check(5009, tmp[0] == 'h' && tmp[2] == 'l' && tmp[3] == 0);
+    check(5010, tmp[6] == 'Z');                 /* it stopped at n */
+    s50_zero(tmp, 16);
+    tmp[7] = 'Z';
+    strncpy(tmp, buf, 8);
+    check(5011, tmp[5] == 0 && tmp[6] == 0 && tmp[7] == 0);   /* it PADS with NUL */
+
+    /* ---- strcmp / strncmp: only the SIGN is defined ---- */
+    strcpy(tmp, buf);
+    check(5012, strcmp(tmp, buf) == 0);
+    tmp[1] = 'a';
+    check(5013, s50_sgn(strcmp(tmp, buf)) == -1);
+    check(5014, s50_sgn(strcmp(buf, tmp)) == 1);
+    check(5015, strncmp(tmp, buf, 1) == 0);      /* the difference is past n */
+    check(5016, s50_sgn(strncmp(tmp, buf, 2)) == -1);
+    check(5017, strncmp(tmp, buf, 0) == 0);
+    strcpy(tmp, "hell");
+    check(5018, s50_sgn(strcmp(tmp, buf)) == -1);   /* a PREFIX is smaller */
+    check(5019, strncmp(tmp, buf, 4) == 0);
+
+    /* ---- strcat / strncat ---- */
+    s50_zero(tmp, 16);
+    tmp[0] = 'a'; tmp[1] = 'b';
+    check(5020, strcat(tmp, "cd") == tmp);
+    check(5021, strlen(tmp) == 4 && tmp[3] == 'd' && tmp[4] == 0);
+    check(5022, strncat(tmp, "efgh", 2) == tmp);
+    check(5023, strlen(tmp) == 6 && tmp[5] == 'f' && tmp[6] == 0);
+    check(5024, strncat(tmp, "", 3) == tmp && strlen(tmp) == 6);
+
+    /* ---- strchr / strrchr / strstr ---- */
+    check(5025, strchr(buf, 'l') == buf + 2);
+    check(5026, strrchr(buf, 'l') == buf + 3);
+    check(5027, strchr(buf, 'z') == 0);
+    check(5028, strchr(buf, 0) == buf + 5);       /* the terminator is searched too */
+    check(5029, strrchr(buf, 'h') == buf);
+    check(5030, strstr(buf, "ll") == buf + 2);
+    check(5031, strstr(buf, "hello") == buf);
+    check(5032, strstr(buf, "") == buf);          /* the empty needle matches at the front */
+    check(5033, strstr(buf, "lox") == 0);
+    check(5034, strstr(buf, "hellos") == 0);      /* a needle longer than the haystack */
+
+    /* ---- memcpy / memmove / memset / memcmp / memchr, over CHAR storage ---- */
+    s50_zero(tmp, 16);
+    check(5035, memcpy(tmp, buf, 5) == tmp);
+    check(5036, tmp[0] == 'h' && tmp[4] == 'o' && tmp[5] == 0);
+    check(5037, memcmp(tmp, buf, 5) == 0);
+    tmp[2] = 'L';
+    check(5038, s50_sgn(memcmp(tmp, buf, 5)) == -1);   /* 'L' < 'l' */
+    check(5039, memcmp(tmp, buf, 2) == 0);
+    check(5040, memcmp(tmp, buf, 0) == 0);
+    strcpy(tmp, "abcdef");
+    check(5041, memmove(tmp + 1, tmp, 5) == tmp + 1);  /* OVERLAPPING, forward */
+    check(5042, tmp[0] == 'a' && tmp[1] == 'a' && tmp[5] == 'e' && tmp[6] == 0);
+    strcpy(tmp, "abcdef");
+    memmove(tmp, tmp + 1, 5);
+    check(5043, tmp[0] == 'b' && tmp[4] == 'f');       /* OVERLAPPING, backward */
+    check(5044, memset(tmp, 'x', 4) == tmp);
+    check(5045, tmp[0] == 'x' && tmp[3] == 'x' && tmp[4] == 'f');
+    memset(tmp, 0, 16);
+    check(5046, tmp[0] == 0 && tmp[15] == 0);
+    check(5047, memchr(buf, 'l', 5) == buf + 2);
+    check(5048, memchr(buf, 'z', 5) == 0);
+    check(5049, memchr(buf, 'o', 4) == 0);             /* it stops at n */
+
+    /* ---- atoi / atol ---- */
+    check(5050, atoi("42") == 42);
+    check(5051, atoi("-7") == -7);
+    check(5052, atoi("  +19xyz") == 19);               /* whitespace, sign, then stop */
+    check(5053, atoi("abc") == 0);
+    check(5054, atoi("") == 0);
+    L = atol("2147483648");
+    check(5055, L == 2147483648L);                     /* wider than an int */
+    check(5056, atol("-2147483649") == -2147483649L);
+
+    /* ---- strdup ---- */
+    p = strdup(buf);
+    check(5057, p != 0 && p != buf);
+    check(5058, strcmp(p, buf) == 0 && strlen(p) == 5);
+    p[0] = 'j';
+    check(5059, buf[0] == 'h');                        /* it is a COPY, not an alias */
+    return 0;
+}
+
 // ===== END SECTIONS =====
 
 int main() {
@@ -1792,6 +1950,7 @@ int main() {
     s47(); // SECTION-CALL 47
     s48(); // SECTION-CALL 48
     s49(); // SECTION-CALL 49
+    s50(); // SECTION-CALL 50
     /* summary: "full: <checks> checks, <failures> failures" */
     putchar('f'); putchar('u'); putchar('l'); putchar('l'); putchar(':'); putchar(' ');
     print_num(nchecks);

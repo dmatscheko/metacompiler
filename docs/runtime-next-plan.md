@@ -101,14 +101,44 @@ per-language hack, and it must land before java/csharp/go/kotlin. The alternativ
 (change the emitter to stop asking `js_typeof` about a number) is worth costing too.
 Do not paper over it.
 
-**`c-interpreter.abnf` has no standard library.** `callFunction` knows `putchar` and
-`getchar` and nothing else. This already cost a measured 51-assertion ratchet section
-for the 18 libc names, which had to be reverted: the compiler half passed everywhere
-(`cc`, `llvm.Run`, native, all printing `full: 495 checks, 0 failures`) but the
-interpreter half stopped at the first call, and `--full` records a half's count only
-when it has zero gaps - so one red section cost 444 assertions and the
-halves-agree invariant. Adding libc to the interpreter unblocks that section and is
-likely needed for the rollout anyway.
+~~**`c-interpreter.abnf` has no standard library.**~~ **DONE 2026-08-02.** `libcCall` in
+`languages/c-interpreter.abnf` now implements the 18 byte/address names (`strlen strcmp
+strncmp strcpy strncpy strcat strncat strchr strrchr strstr memcpy memmove memset memcmp
+memchr atoi atol strdup`) over the interpreter's own memory, and the reverted ratchet
+section is back as SECTION 50 of `tests/c-test-full.c`. **c: 505 -> 564 assertions**,
+both halves FULL and byte-identical goja/`-frozen`, `--full` total 5,307 -> 5,366 with
+**0 halves disagreeing**; matrix 325/325, `--cross` 119/0, clang-check still
+`c ... ok, and the clang executable agrees`, `go test ./abnf/` ok.
+
+What made it shareable: the interpreter stays **one cell per scalar** (it was NOT made
+byte-packed - that is the model, and 93c814f preserved it deliberately), and
+`sizeof(char) == 1` in both models, so over CHARACTER data a cell *is* a byte and a
+length in bytes *is* a length in cells. SECTION 50 therefore stays on char storage;
+`memcpy` over an `int` array would be n/4 cells here and n bytes there, and is left out
+rather than asserted wrongly. Only the SIGN of `strcmp`/`strncmp`/`memcmp` is asserted -
+C leaves the magnitude unspecified - but the interpreter returns the same **unsigned byte
+difference** `libcNative`'s `byteDiff` does, verified: `cc -O0`, `cc -O2`, the
+interpreter (goja and `-frozen`), `llvm.Run` and the clang-built `-exe` binary all print
+`22 / -22 / 127 / 127 / -127 / 98 / 98` for the same runtime-operand probe.
+
+Two things found on the way, both written down at the site:
+
+- A **bare `return` followed by an expression on the next line** is a goja-vs-frozen
+  trap: real JS applies ASI, the frozen MetaJS parser does not, so `if (bad) return`
+  newline `mem[a] = v` parsed as `return (mem[a] = v)` and **every store was silently
+  lost under `-frozen` while reads were unaffected** - 17 of 59 new assertions red in
+  one half only. Guard positively. Noted at `cPut`.
+- **`test.sh --full` counted `c` at 564 anyway** while `c-interpreter` was reporting
+  `FULL under goja, BUT -frozen fails or differs`. The per-language assertion count and
+  the halves-agree verdict are read from the goja run alone, so a frozen-only divergence
+  does not reach the summary. Not fixed here (out of the files for this task) but it is a
+  real hole in the invariant: the summary is not sufficient, read the per-half lines.
+
+Still deliberately absent from BOTH halves, unchanged and loud rather than wrong: the
+varargs `printf` family (neither interpreter has a varargs ABI), `exit`/`abort` (no
+unwind path out of a call), `qsort`/`bsearch` (a function pointer is a `funcId`, not a
+callable address). The interpreter also still has no `malloc`/`free`; `strdup` uses the
+interpreter's own bump `alloc`, and nothing frees it.
 
 ## Silently wrong, both halves agreeing (the class byte-identity cannot see)
 
