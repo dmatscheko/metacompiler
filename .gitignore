@@ -22,3 +22,6 @@ tests/*.out
 
 # Apple
 .DS_Store
+
+# Temporary files
+temp_*.md
