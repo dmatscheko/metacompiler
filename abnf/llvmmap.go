@@ -1031,41 +1031,57 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 // this project most wants surfaced, and byte-identity between the two engines is exactly
 // the invariant that cannot see it.
 //
-// MEASURED 2026-08-02 - why the whole str*/mem* family is NOT here, and why atoi/atol
-// and strdup are not either. languages/c-to-llvm-ir.abnf gives `char` a FOUR-byte cell:
-// machBytes() returns 4 for every integer narrower than a long, so "hello" is emitted as
-// `[6 x i32]` and a byte-oriented strlen stops at the first padding NUL. For
+// HISTORY, kept short so that nobody re-derives it. Until 2026-08-02 the whole str*/mem*
+// family, atoi/atol and strdup were deliberately absent, because languages/c-to-llvm-ir.abnf
+// gave `char` a FOUR-byte cell: "hello" was emitted as `[6 x i32]`, so a byte-oriented
+// strlen stopped at the first padding NUL and answered 1 where cc answers 5, and atoi("42")
+// read '4', 0 and answered 4 where cc answers 42. Listing them then made BOTH engines agree
+// on a wrong answer, which is strictly worse than both failing loudly, so 43cf14e reverted
+// it. Commit 93c814f removed that obstacle - a `char` is now a real i8 cell and a string
+// literal a real `[n x i8]` - and the family is listed below, RE-MEASURED against cc rather
+// than taken over from the earlier report.
 //
-//	extern unsigned long strlen(const char *s);
-//	int main(void) { putchar('0' + (int)strlen("hello")); putchar('\n'); return 0; }
+// WHERE THE EVIDENCE IS. Condition 2 is pinned by abnf/libcnative_test.go, a differential
+// test of all 18 against Go's own strings/bytes/strconv. Condition 1 was measured by hand
+// against real cc (Apple clang 21.0.0, arm64-darwin) over a 49-line probe covering every
+// name: cc, `llvm.Run` and the clang-built -exe binary printed the same 49 lines. It is
+// NOT in tests/c-test-full.c, and that is deliberate - the ratchet file is run by BOTH
+// halves of the language and languages/c-interpreter.abnf has no standard library at all,
+// so a section calling these names takes that half from FULL to a reported gap and the
+// two halves are then reported as disagreeing. The measurement is written down in the
+// header of tests/c-test-full.c so nobody re-derives it.
 //
-//	llvm.Run   ==> Fail / IR interpreter: call to undefined external function @strlen
-//	-exe       warning: no definition for strlen ...  then prints 0 from the stub
-//	real cc    5                                       <- the oracle
-//
-// Listing strlen (and implementing it in libcNative) made BOTH engines print 1 - silent,
-// agreeing, and wrong. That is strictly worse than the loud state above, so it was
-// reverted. Do not re-derive it. atoi("42") fails the same way: the model reads '4', 0
-// and stops, answering 4 where cc answers 42.
-//
-// Widening `char` to a real byte in c-to-llvm-ir.abnf is the PREREQUISITE for listing
-// this family, and it is a separate change to that grammar - not a change here. Note
-// that `puts` is byte-oriented too and predates this bar; it is left as it was rather
-// than silently narrowed, and it is on the same hook as the rest.
-//
-// Also deliberately absent, condition 2: the varargs printf family (printf, fprintf,
-// sprintf, snprintf, fwrite, fputs, putc, fputc), exit, abort, qsort and bsearch. See
-// libcNative for why the interpreter cannot implement each of them; clang could link
-// them, and that is precisely the divergence condition 2 forbids.
+// Still deliberately absent, and still for condition 2, NOT for the memory model: the
+// varargs printf family (printf, fprintf, sprintf, snprintf, fwrite, fputs, putc, fputc),
+// exit, abort, qsort and bsearch. See libcNative for why the interpreter cannot implement
+// each of them; clang could link them, and that is precisely the divergence condition 2
+// forbids. Re-confirmed 2026-08-02: the interpreter still has no varargs ABI (arguments
+// reach a native already flattened to uint64 with no type tags), still no unwind path out
+// of ma.call for exit/abort, and a C function pointer is still a funcId in an i32 rather
+// than an address, so qsort/bsearch cannot call back through one.
 var libcExterns = map[string]bool{
 	// stdio / stdlib character and integer primitives, all pre-existing.
 	"putchar": true, "getchar": true, "puts": true, "abs": true,
-	// The allocator. Address-based, so the four-byte `char` cell does not reach it:
-	// sizes come from sizeof over structs and wide integers, which ctBytes() and
+	// The allocator. Address-based, so even the old four-byte `char` cell did not reach
+	// it: sizes come from sizeof over structs and wide integers, which ctBytes() and
 	// machBytes() agree on. This is the family Phase 0 exists for.
 	"malloc": true, "calloc": true, "realloc": true, "free": true,
 	// Pure integer arithmetic, so it cannot be affected by the memory model at all.
 	"labs": true,
+	// The byte/address family, unlocked by the one-byte `char` of 93c814f. Every one is
+	// pure work over the flat arena, so libcNative implements it exactly (condition 2)
+	// and clang's real symbol sees the same bytes at the same addresses (condition 1).
+	// All 18 are pinned by abnf/libcnative_test.go; see the note above for why they are
+	// not in tests/c-test-full.c.
+	"strlen": true, "strcmp": true, "strncmp": true,
+	"strcpy": true, "strncpy": true, "strcat": true, "strncat": true,
+	"strchr": true, "strrchr": true, "strstr": true,
+	"memcpy": true, "memmove": true, "memset": true, "memcmp": true, "memchr": true,
+	"atoi": true, "atol": true, "strdup": true,
+	// CAVEAT, measured: for strcmp/strncmp/memcmp the magnitude is unspecified by C and
+	// Apple's libc returns the UNSIGNED byte difference (strcmp("xy","xc") == 22), which
+	// is what byteDiff reproduces. Only the SIGN is portable, so only the sign is
+	// asserted. See byteDiff for the constant-folding trap that goes with it.
 }
 
 // undefinedSymbols lists, sorted, every function the module declares but neither
@@ -2446,9 +2462,6 @@ func (ma *machine) bindExterns() {
 //
 // Names deliberately absent from BOTH, and therefore a loud panic under `llvm.Run`
 // naming the function (externHandler) plus a loud stderr warning under -exe:
-//   - the whole str*/mem* family, atoi/atol, strdup: the four-byte `char` cell. See the
-//     measurement at libcExterns; implementing them here made both engines agree on a
-//     wrong answer, which is worse than either engine failing loudly.
 //   - printf / fprintf / sprintf / snprintf / fwrite / fflush / putc / fputc / fputs:
 //     varargs and FILE* streams. The interpreter has no varargs ABI at all - the
 //     argument list it receives is already flattened to uint64 with no type tags - so a
@@ -2485,9 +2498,247 @@ func (ma *machine) heapAlloc(size uint64) uint64 {
 	return addr
 }
 
+// byteAt reads one byte of the arena, answering 0 (a string terminator) for a null or
+// out-of-range address so that a wild pointer stops a scan instead of panicking.
+func (ma *machine) byteAt(addr uint64) byte {
+	if addr == 0 || addr >= uint64(len(ma.mem)) {
+		return 0
+	}
+	return ma.mem[addr]
+}
+
+// cstrEnd answers the address of the NUL that terminates the string at addr, clamped
+// to the end of the arena. A null or out-of-range address answers addr itself, so every
+// str* native below sees a zero-length string rather than panicking - the same tolerance
+// memAt and rxPtrCStr already apply.
+func (ma *machine) cstrEnd(addr uint64) uint64 {
+	if addr == 0 || addr >= uint64(len(ma.mem)) {
+		return addr
+	}
+	end := addr
+	for end < uint64(len(ma.mem)) && ma.mem[end] != 0 {
+		end++
+	}
+	return end
+}
+
+// byteDiff is what strcmp/strncmp/memcmp answer for one differing byte pair. C leaves
+// the MAGNITUDE unspecified - only the sign is defined - and Apple's libc returns the
+// UNSIGNED byte difference, so that is what these return here.
+//
+// MEASURED 2026-08-02, Apple clang 21.0.0 / arm64-darwin, tests/../tmp probe:
+//
+//	char a[4]="xy", b[4]="xc";  strcmp(a,b)          ==> 22    ('y'-'c')
+//	const char *A="\x80", *B="\x01";  strcmp(A,B)    ==> 127   (0x80-0x01, UNSIGNED)
+//	                                  memcmp(A,B,1)  ==> 127
+//	strcmp("\x80", "\x01")                           ==> 1     <- constant-folded
+//
+// The last line is the trap: with LITERAL operands cc folds the call at compile time and
+// normalizes to a sign, while the linked symbol returns the raw difference. Returning a
+// normalized -1/0/1 here would therefore make `llvm.Run` and the -exe binary disagree on
+// exactly the runtime-operand cases, which is what condition 2 at libcExterns forbids.
+// Only the SIGN is a property of C, so only the sign is compared against an independent
+// oracle in abnf/libcnative_test.go; the magnitudes there are the measured libc ones.
+func byteDiff(x, y byte) uint64 {
+	return uint64(int64(int(x) - int(y)))
+}
+
+// cAtoi is atoi/atol: optional whitespace, optional sign, then decimal digits, stopping
+// at the first non-digit. Overflow is undefined in C, so wrapping is as good an answer
+// as any; the ratchet asserts only in-range values.
+func (ma *machine) cAtoi(addr uint64) int64 {
+	s := ma.mem[ma.min(addr):ma.cstrEnd(addr)]
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\v' || s[i] == '\f' || s[i] == '\r') {
+		i++
+	}
+	neg := false
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		neg = s[i] == '-'
+		i++
+	}
+	var n int64
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		n = n*10 + int64(s[i]-'0')
+		i++
+	}
+	if neg {
+		return -n
+	}
+	return n
+}
+
+// min clamps an address into the arena, so that a null or wild pointer yields an empty
+// slice instead of a panic.
+func (ma *machine) min(addr uint64) uint64 {
+	if addr >= uint64(len(ma.mem)) {
+		return uint64(len(ma.mem))
+	}
+	return addr
+}
+
 // libcNative returns the interpreter's implementation of one libc name, or nil if the
 // name is not one it implements (see the list of exclusions above).
 func libcNative(ma *machine, name string) func(args []uint64) uint64 {
+	switch name {
+	// ----- The byte/address family, unlocked by the one-byte `char` of 93c814f -----
+	// Every one of these is pure work over ma.mem (plus heapAlloc for strdup), which is
+	// laid out exactly as the clang-built binary lays it out now that a char is a byte.
+	case "strlen":
+		return func(args []uint64) uint64 { return ma.cstrEnd(args[0]) - args[0] }
+	case "strcmp":
+		return func(args []uint64) uint64 {
+			a, b := args[0], args[1]
+			for {
+				x, y := ma.byteAt(a), ma.byteAt(b)
+				if x != y || x == 0 {
+					return byteDiff(x, y)
+				}
+				a, b = a+1, b+1
+			}
+		}
+	case "strncmp":
+		return func(args []uint64) uint64 {
+			a, b, n := args[0], args[1], args[2]
+			for i := uint64(0); i < n; i++ {
+				x, y := ma.byteAt(a+i), ma.byteAt(b+i)
+				if x != y || x == 0 {
+					return byteDiff(x, y)
+				}
+			}
+			return 0
+		}
+	case "strcpy":
+		return func(args []uint64) uint64 {
+			d, s := args[0], args[1]
+			n := ma.cstrEnd(s) - s
+			if dst := ma.memAt(d, n+1); dst != nil {
+				copy(dst, ma.mem[s:s+n])
+				dst[n] = 0
+			}
+			return d
+		}
+	case "strncpy":
+		return func(args []uint64) uint64 {
+			d, s, n := args[0], args[1], args[2]
+			dst := ma.memAt(d, n)
+			if dst == nil {
+				return d
+			}
+			l := ma.cstrEnd(s) - s
+			if l > n {
+				l = n
+			}
+			copy(dst, ma.mem[s:s+l])
+			for i := l; i < n; i++ { // strncpy PADS the rest with NUL, it does not stop.
+				dst[i] = 0
+			}
+			return d
+		}
+	case "strcat", "strncat":
+		return func(args []uint64) uint64 {
+			d, s := args[0], args[1]
+			n := ma.cstrEnd(s) - s
+			if name == "strncat" && args[2] < n {
+				n = args[2] // strncat appends at most n bytes AND always terminates.
+			}
+			e := ma.cstrEnd(d)
+			if dst := ma.memAt(e, n+1); dst != nil {
+				copy(dst, ma.mem[s:s+n])
+				dst[n] = 0
+			}
+			return d
+		}
+	case "strchr", "strrchr":
+		return func(args []uint64) uint64 {
+			s, c := args[0], byte(args[1])
+			end := ma.cstrEnd(s)
+			// Both search the terminator too: strchr(s, 0) is the end of the string.
+			if name == "strchr" {
+				for p := s; p <= end; p++ {
+					if ma.byteAt(p) == c {
+						return p
+					}
+				}
+				return 0
+			}
+			for p := end + 1; p > s; {
+				p--
+				if ma.byteAt(p) == c {
+					return p
+				}
+			}
+			return 0
+		}
+	case "strstr":
+		return func(args []uint64) uint64 {
+			h, n := args[0], args[1]
+			hl, nl := ma.cstrEnd(h)-h, ma.cstrEnd(n)-n
+			if nl == 0 {
+				return h // The empty needle matches at the front.
+			}
+			if nl > hl {
+				return 0
+			}
+			for i := uint64(0); i+nl <= hl; i++ {
+				if string(ma.mem[h+i:h+i+nl]) == string(ma.mem[n:n+nl]) {
+					return h + i
+				}
+			}
+			return 0
+		}
+	case "memcpy", "memmove":
+		return func(args []uint64) uint64 {
+			d, s, n := args[0], args[1], args[2]
+			if src := ma.memAt(s, n); src != nil {
+				if dst := ma.memAt(d, n); dst != nil {
+					copy(dst, src) // Go's copy already handles overlap, so memmove is the same.
+				}
+			}
+			return d
+		}
+	case "memset":
+		return func(args []uint64) uint64 {
+			d, c, n := args[0], byte(args[1]), args[2]
+			if dst := ma.memAt(d, n); dst != nil {
+				for i := range dst {
+					dst[i] = c
+				}
+			}
+			return d
+		}
+	case "memcmp":
+		return func(args []uint64) uint64 {
+			a, b, n := args[0], args[1], args[2]
+			for i := uint64(0); i < n; i++ {
+				if x, y := ma.byteAt(a+i), ma.byteAt(b+i); x != y {
+					return byteDiff(x, y)
+				}
+			}
+			return 0
+		}
+	case "memchr":
+		return func(args []uint64) uint64 {
+			s, c, n := args[0], byte(args[1]), args[2]
+			for i := uint64(0); i < n; i++ {
+				if ma.byteAt(s+i) == c {
+					return s + i
+				}
+			}
+			return 0
+		}
+	case "atoi", "atol":
+		return func(args []uint64) uint64 { return uint64(ma.cAtoi(args[0])) }
+	case "strdup":
+		return func(args []uint64) uint64 {
+			s := args[0]
+			n := ma.cstrEnd(s) - s
+			d := ma.heapAlloc(n + 1) // NOTE: this may GROW ma.mem, so re-slice after it.
+			copy(ma.mem[d:d+n], ma.mem[s:s+n])
+			ma.mem[d+n] = 0
+			return d
+		}
+	}
 	switch name {
 	case "malloc":
 		return func(args []uint64) uint64 { return ma.heapAlloc(args[0]) }
