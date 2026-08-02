@@ -1331,6 +1331,24 @@
             "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-link-missing.js", "-q", "-exe", "tests/metajs-link-missing.out", "-rt", "tests/metajs-link-stubrt.c"]
         },
         {
+            "name": "MetaJS native binary, feature matrix (compiler, -exe + the C floor runtime)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-features.js", "-q", "-exe", "tests/metajs-native.out"]
+        },
+        {
+            "name": "MetaJS native binary, full-syntax ratchet (compiler, -exe + the C floor runtime)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-full.js", "-q", "-exe", "tests/metajs-native-full.out"]
+        },
+        {
+            "name": "MetaJS native binary, try/catch/finally (compiler, -exe + the C floor runtime)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-try.js", "-q", "-exe", "tests/metajs-native-try.out"]
+        },
+        {
             "name": "Lisp native link (compiler, -exe, no runtime: stub + warning)",
             "type": "go",
             "request": "launch",

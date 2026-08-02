@@ -55,10 +55,15 @@ integers and raw memory**. C is the one we already have a working native compile
 
 ## Invariants - none of these may regress at any checkpoint
 
-- matrix **308/308**, byte-identical stdout **and stderr** between goja and `-frozen`
-- `--full` ratchet **4,822 assertions**, no language whose halves disagree
+(The figures are the ones current after phase 3; the parenthesised ones are what the
+plan was written against.)
+
+- matrix **318/318** (was 308), byte-identical stdout **and stderr** between goja and
+  `-frozen`
+- `--full` ratchet **5,148 assertions** (was 4,822), no language whose halves disagree
 - `--cross` **119/0**
-- `tests/clang-check.sh` **15/15**
+- `tests/clang-check.sh` **16/16** (was 15/15), with bash, batch, c **and metajs** in the
+  run-it-natively row
 - **Never a green suite over a binary nobody executed.** Any language that becomes
   self-contained must move from clang-check's `ok (module only)` row into the
   run-it-natively row in the same change.
@@ -495,9 +500,195 @@ passthrough permanently.
 Four `launch.json` entries were added (matrix 311 -> 315): the metajs link, the
 unresolved-symbol failure, the lisp stub-and-warn build, and the bogus `-l`.
 
-## Phase 3 - runtime.c, the floor
+## Phase 3 - runtime.c, the floor - DONE (2026-08-02)
 
-Implement the measured floor from phase 1 in C, compiled by `c-to-llvm-ir`.
+**A MetaJS program now compiles to a self-contained native binary whose only
+undefined symbols are six libc names.** `languages/lib/runtime.c` (2,294 lines)
+implements **all 48** externs `metajs-to-llvm-ir.abnf` declares - the 35 of the phase-1
+floor plus the 13 that `-rt-prims` can lift into MetaJS - and it is compiled by
+`languages/c-to-llvm-ir.abnf`, not by clang.
+
+```
+$ nm -u tests/metajs-native-full.out
+_exit  _longjmp  _malloc  _putchar  _setjmp  _write
+$ nm tests/metajs-native-full.out | grep -c ' T _js_'
+52
+```
+
+### What was built
+
+- **`languages/lib/runtime.c`** - the floor. Value representation: a handle is a pointer
+  to a 7-word arena cell with a tag (number/string/array/object/closure/host function/
+  bound method/control signal/scope). Allocation is a bump arena, never freed - the
+  accepted limit under Risks. Strings are UTF-8 byte buffers with the **UTF-16 code unit
+  view** `abnf/jsrt.go` exposes (`.length`, `charCodeAt`, `charAt`, `slice`,
+  `substring`, `indexOf`, `split`), including WTF-8 for a lone surrogate and the seam
+  rejoin in `+` that makes `s[0] + s[1] === s` hold for an astral character. The root
+  scope is pre-seeded with `println`, `print`, `eprintln`, `printf`, `sprintf`, `sprint`,
+  `parseInt`, `parseFloat`, `exit`, `byteLen`, `Math`, `String`, `Array`, `Infinity`,
+  `NaN` and `anytype`.
+- **`languages/lib/runtime.ll`** (22,350 lines, 199 `define`s, 8 `declare`s) - the
+  checked-in output of our own C compiler over that file, regenerated and verified by
+  **`tests/gen-runtime-ll.sh`** (`--check` diffs instead of writing). `llvm.BuildExecutable`
+  hands its runtime inputs straight to clang, so passing the `.c` would have **clang**
+  compile the floor; passing the `.ll` keeps every layer compiled by this repository.
+- **`metajs-to-llvm-ir.abnf`** - two additions, both **in the goja-driver tail**, so
+  `abnf/jsbootstrap.ll` regenerates **byte-identically** (verified; only
+  `abnf/jsagrammar.go` changes, as it embeds the start script):
+  - `emitDispatch()` emits `jsdispatch(idx, env, args)`, the function table a linked
+    binary needs. `js_closure` stores a raw function *index*, and under `llvm.Run` the Go
+    runtime resolves it by looking `jsf_<idx>` up in the module it is attached to - a
+    binary has no such reflection. Emitted **only for `-exe`**, so every other run of the
+    grammar produces the module it always did, byte for byte.
+  - the runtime is `lib/runtime.ll` located **relative to the grammar** (`moduleName()`),
+    so the build does not depend on the working directory. An explicit **`-rt` replaces**
+    it rather than adding to it, which is what keeps `tests/metajs-link-stubrt.c` able to
+    stand in for the whole runtime in the phase-2 link tests - those four matrix entries
+    are unchanged.
+- **`tests/metajs-test-full.js`** - the MetaJS full-syntax ratchet, 21 sections, **252
+  assertions**. It is read three ways: `--full` runs it through both grammars, and
+  `tests/clang-check.sh` builds and RUNS it as a native binary.
+
+### Ground truth
+
+```
+matrix                318/318   (315 + three -exe entries for the native path)
+--full                5,148 assertions, 0 languages whose halves disagree (metajs 252, new)
+--cross               119 programs, 0 divergent
+clang-check           16/16, and metajs is now in the RUN-IT row:
+                        metajs   8809   ok, and the clang executable agrees
+jsbootstrap.ll        regenerates byte-identically from source
+tests/gen-runtime-ll.sh --check   runtime.ll is up to date (22350 lines)
+```
+
+Program output, `llvm.Run` (Go runtime) against the native binary (C floor):
+
+```
+metajs-test-full.js        SAME (rc=0)      metajs-test-2.js          SAME (rc=0)
+metajs-test-features.js    SAME (rc=0)      metajs-test-try.js        SAME (rc=0)
+metajs-test-1.js           SAME (rc=0)      metajs-test-multifile.js  SAME (rc=0)
+                                            metajs-link-hello.js      SAME (rc=7)
+```
+
+An **841-cell differential probe** - `==` `!=` `===` `!==` `<` `>` `<=` `>=` and `+`
+over 29 values (integers, halves, NaN, ±Inf, strings, `" 7 "`, booleans, null, undefined,
+arrays, objects, a function) plus `typeof`, `!`, unary `-`, `*1`, 200 shift/mask cases and
+`charAt`/`substring`/`slice`/`indexOf`/`charCodeAt` over out-of-range indexes - is
+**byte-identical** between the two engines.
+
+Five of the six runtime diagnostics are byte-identical too, and the sixth differs only in
+a trace the C floor does not keep:
+
+```
+go : js runtime error: call of a non function value: 1 (last member lookups: )
+nat: js runtime error: call of a non function value: 1
+```
+
+**Performance (Risk 1, measured here rather than at phase 4).** A loop/recursion/array/
+string benchmark (3M-iteration arithmetic loop, `fib(26)`, 20k array pushes, 2k string
+concatenations):
+
+```
+mec compile + link only            0.17s
+mec compile + llvm.Run (Go)        1.85s   -> ~1.68s of execution
+native binary (C floor)            1.81s
+```
+
+Within noise of each other. The C floor is **not** the slowdown the plan feared; the
+soft float and the linear `jsdispatch` chain cost about what the Go runtime's handle
+table and interface dispatch cost.
+
+### Where the C floor and the Go runtime genuinely differ - measured, not hidden
+
+1. **The last bit of an inexact float.** `c-to-llvm-ir.abnf` emits a soft float that
+   truncates where IEEE-754 rounds to nearest even. Everything exactly representable
+   agrees bit for bit; a non-representable fraction can be one ulp low:
+
+```
+                        llvm.Run (Go)          native (C floor)
+0.1 + 0.2               0.30000000000000004    0.29999999999999991
+10 / 3                  3.3333333333333335     3.333333333333333
+Math.sqrt(2)            1.4142135623730951     1.414213562373095
+0.1 added ten times     0.9999999999999999     0.99999999999999964
+```
+
+   `1/2`, `1/4`, `7/2`, `100.125 * 8`, `1e21`, `1e-7`, `9007199254740993` and every
+   integer product below 2^53 agree exactly. Three conversions had to be taken **away**
+   from the soft float and done in bit arithmetic to get that far, and each was a wrong
+   answer before: the emitted `i2d` loses the low bits above 2^53 (the literal
+   `9007199254740993` came out as `4503599627370496`, half its value), the `d2i` round
+   trip made a large integral double look non-integral (`123456789 * 987654321` printed
+   as `1.2193263111263512e+17`), and `1 << 51` written with an `int` 1 is 0.
+2. **`Math.sqrt` and `Math.pow`.** Newton iteration and repeated multiplication, so the
+   last bit can differ; `pow` with a **non-integer** exponent is not modelled and answers
+   NaN. `sqrt(16)`, `pow(2,10)` and the other exact cases agree.
+3. **`toUpperCase`/`toLowerCase` are ASCII-only.** The Go twin is `strings.ToUpper`,
+   which is full Unicode.
+4. **The host global sets of the two MetaJS halves already differed, and still do.**
+   `metajs-interpreter.abnf` binds exactly `println print printf sprintf eprintln
+   parseInt parseFloat Math String exit anytype`; the compiler half
+   (`standardJSBindings`) also has `Infinity NaN Array Object byteLen sprint rawSet`.
+   The C floor matches the **compiler** half. `tests/metajs-test-full.js` asserts only
+   the intersection, because a check on the difference would fail on one half by
+   construction. This is pre-existing drift the phase surfaced, not drift it caused.
+
+### Defects found in `languages/c-to-llvm-ir.abnf` while writing the floor
+
+All three are **pre-existing** - reproduced from clean archives of `e81dc94` (pre
+phase-3a) and `43cf14e`, so phase 3a did not cause them - and all three are invisible to
+`tests/c-test-full.c`, which never uses the constructs. Each was worked around in
+`runtime.c` rather than fixed here, because that file belongs to another change:
+
+```c
+void ph(double d) { }                 /* a double PARAMETER does not compile:      */
+                                      /* "store operands are not compatible:       */
+                                      /*  src=i64; dst=i32*"                       */
+
+double gd(long x) { return 1.5; }     /* a double RETURN VALUE is SILENTLY WRONG:  */
+                                      /* cc says the caller sees 1.5, we say it    */
+                                      /* does not - the same class as the pointer- */
+                                      /* return defect phase 3a fixed, for doubles */
+
+long a; long *p = &a; *p = 42;        /* does not compile; p[0] = 42 does          */
+```
+
+Measured three ways for the second one (`gd(1) > 1.4`):
+
+```
+cc (oracle)     Y
+e81dc94         N          43cf14e         N          worktree        N
+```
+
+The workaround in `runtime.c` is that **every number travels as its raw IEEE-754 bit
+pattern in a `long`** and a `double` is materialised only inside the function that
+computes with it, through a `union`. Unions of `double` and `long` do work, in both
+directions, and that is what makes the workaround possible.
+
+### Exceptions
+
+`js_throw`/`js_try` are `setjmp`/`longjmp` over a stack of jump buffers - the returned
+control-signal protocol of `lib/compile-core.js` handles `return`/`break`/`continue`,
+but a *throw* still has to unwind C frames, and the emitted IR does not test after a
+call. `setjmp` through our own C compiler, linked by clang, was verified in isolation
+first (`A7`, same as `cc`). The `finally`-overrides-and-swallows rule of the Go twin is
+implemented: a control signal returned by the finally closure clears a pending throw.
+A throw with no enclosing `js_try` prints `js runtime error: uncaught exception: <v>` on
+stderr and exits 1, which is what the Go side does at the program boundary.
+
+### Not done
+
+- **`-rt-prims` and the C floor cannot be combined in one `-exe` build.** With
+  `-rt-prims` the module *defines* the 13 derived primitives and `runtime.ll` defines
+  them too, so the link would fail with duplicate symbols. `-rt-prims` is a measurement
+  flag with no `-exe` entry in the matrix, so nothing regressed; splitting the derived
+  13 into a second `.ll` would fix it when it is wanted.
+- **No GC.** The arena leaks by construction. A long-running MetaJS program will grow
+  without bound; every test program here allocates a few megabytes at most.
+- **`jsdispatch` is a linear compare chain.** O(number of functions) per call. It did not
+  show up in the benchmark above, but a program with thousands of functions would want a
+  binary search or a real table.
+
+### Original plan text, for reference
 
 - **Value representation:** `i64` handle = tagged pointer. The emitted IR is already
   all-`i64` (`js_str_mem(i8*, i64) -> i64` is the only exception), so nothing in any
@@ -508,7 +699,7 @@ Implement the measured floor from phase 1 in C, compiled by `c-to-llvm-ir`.
   global scope the runtime pre-seeds (`abnf/jsrt.go:8231`). The C floor must seed it too.
 
 **Gate:** `tests/metajs-test-full.*` runs as a native binary and agrees byte-for-byte
-with `llvm.Run`. Add metajs to clang-check's run-natively row.
+with `llvm.Run`. Add metajs to clang-check's run-natively row. **Met.**
 
 ## Phase 4 - layer 2, one pilot language
 

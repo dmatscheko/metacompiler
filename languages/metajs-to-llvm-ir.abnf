@@ -922,14 +922,70 @@ KwDefault   = "default" KwEnd ;
     // Build the module out of the parsed program.
     c.compile(c.asg)
 
+    // emitDispatch adds the FUNCTION TABLE a native build needs. js_closure stores a
+    // raw function INDEX (see the js_closure extern), and under llvm.Run the Go runtime
+    // turns that index back into a callee by looking "jsf_<idx>" up in the module it is
+    // attached to. A linked binary has no such reflection, so the module has to carry
+    // the mapping itself: jsdispatch(idx, env, args) compares idx against every emitted
+    // jsf_N and calls it directly. It is emitted ONLY for -exe, so every other run of
+    // this grammar keeps the module it always had, byte for byte.
+    function emitDispatch() {
+        var idxs = []
+        var fns = []
+        var i = 0
+        while (i < m.Funcs.length) {
+            var f = m.Funcs[i]
+            var nm = f.Name()
+            if (nm.length > 4 && nm.substring(0, 4) == "jsf_") {
+                idxs.push(parseInt(nm.substring(4, nm.length)))
+                fns.push(f)
+            }
+            i = i + 1
+        }
+        var d = m.NewFunc("jsdispatch", i64,
+            [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var b = d.NewBlock("entry")
+        i = 0
+        while (i < fns.length) {
+            var hit = d.NewBlock("hit" + idxs[i])
+            var nxt = d.NewBlock("miss" + idxs[i])
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, d.Params[0], llvm.constant.NewInt(i64, idxs[i])), hit, nxt)
+            hit.NewRet(hit.NewCall(fns[i], [d.Params[1], d.Params[2]]))
+            b = nxt
+            i = i + 1
+        }
+        b.NewRet(llvm.constant.NewInt(i64, 0))
+    }
+
+    // runtimePath locates lib/runtime.ll next to THIS grammar, so the build does not
+    // depend on the working directory the metacompiler was started in.
+    function runtimePath() {
+        var mn = moduleName()
+        var cut = -1
+        var i = 0
+        while (i < mn.length) {
+            var ch = mn.charAt(i)
+            if (ch == "/" || ch == "\\") { cut = i }
+            i = i + 1
+        }
+        return mn.substring(0, cut + 1) + "lib/runtime.ll"
+    }
+
     // With -exe PATH, link the module into a native executable (clang) instead of running
     // it here. This module is HANDLE IR: every value is an i64 handle and the js_* externs
     // it declares are the runtime, so the build only produces a working binary when a
-    // runtime that defines them is linked in - c.runtime (the -rt flag) is how it gets
-    // there. Because a runtime is declared, llvm.BuildExecutable does NOT stub what is
-    // left over: a missing js_* is an error naming the symbol, not a silent zero.
+    // runtime that defines them is linked in. That runtime is lib/runtime.ll - the C floor
+    // of docs/runtime-rework-plan.md phase 3, compiled out of lib/runtime.c by
+    // c-to-llvm-ir.abnf (regenerate with tests/gen-runtime-ll.sh). An explicit -rt
+    // REPLACES it rather than adding to it, which is what lets tests/metajs-link-stubrt.c
+    // still stand in for the whole runtime in the link tests. Because a runtime is
+    // declared either way, llvm.BuildExecutable does NOT stub what is left over: a missing
+    // js_* is an error naming the symbol, not a silent zero.
     if (c.exePath != undefined && c.exePath != "") {
-        var buildErr = llvm.BuildExecutable(m, c.exePath, c.runtime)
+        emitDispatch()
+        var rts = c.runtime
+        if (rts == undefined || rts.length == 0) { rts = [runtimePath()] }
+        var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
         if (buildErr != "") { println(buildErr); exit(1) }
         println("js compiler: wrote executable " + c.exePath)
         exit(0)
