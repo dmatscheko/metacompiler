@@ -2559,6 +2559,27 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var phi = mergeB.NewPhi([llvm.ir.NewIncoming(tr.v, tr.b), llvm.ir.NewIncoming(er.v, er.b)])
         return {b: mergeB, v: phi}
     }
+    // js_gounctl, LOWERED INTO THE EMITTER (docs/runtime-next-plan.md part 3, item 1).
+    // The completion value of a body closure: a return signal carries the returned
+    // value, a body that ran off its end yields undefined. A control signal is the
+    // FLOOR's private tag-10 cell and there is no host builtin that opens one, so
+    // layer 2 could not write this extern at all - exactly the position a scope probe
+    // is in, and with the same answer: js_ctl_kind and js_ctl_value ARE floor externs
+    // and an EMITTER may call them. js_ctl_kind answers a RAW INTEGER (mk_ctl's fa
+    // field; 0 for anything that is not a signal), so the test is an icmp against 1
+    // and not truthy(), which would also take kinds 2 and 3.
+    function emitUnctl(b, v) {
+        var kind = callExt(b, "js_ctl_kind", [v])
+        var thenB = curF.NewBlock("")
+        var elseB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, kind, llvm.constant.NewInt(i64, 1)), thenB, elseB)
+        var tv = callExt(thenB, "js_ctl_value", [v])
+        thenB.NewBr(mergeB)
+        elseB.NewBr(mergeB)
+        var phi = mergeB.NewPhi([llvm.ir.NewIncoming(tv, thenB), llvm.ir.NewIncoming(hUndef, elseB)])
+        return {b: mergeB, v: phi}
+    }
     function emitCellGet(b, p) {
         return callExt(b, "js_scope_get", [callExt(b, "js_get", [p, emitStr(b, "o")]),
                                            callExt(b, "js_get", [p, emitStr(b, "k")])])
@@ -3908,7 +3929,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Named results are read back AFTER the defers ran, so a deferred function that
         // assigns one is seen; without them the body's return signal carries the value.
         if (curRets.length > 0) { b.NewRet(readRets(b)) }
-        else { b.NewRet(callExt(b, "js_gounctl", [ctlV])) }
+        else { var ur = emitUnctl(b, ctlV); ur.b.NewRet(ur.v) }
         // Now the body itself, inside the closure. A return in it LEAVES the closure, so
         // it goes out as a control signal (retStmt) that js_gounctl unwraps again.
         var savedFTag = curFTag
@@ -4215,6 +4236,82 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
 
     c.compile(c.asg)
+
+    // ----- the native build (docs/runtime-next-plan.md part 3) -----
+    // jsdispatch(idx, env, args) is the function table a LINKED binary needs: js_closure
+    // stores a raw function index, and under llvm.Run the Go runtime turns that index
+    // back into a callee by looking "jsf_<idx>" up in the module. A binary has no such
+    // reflection, so the module carries the mapping itself. The MISS arm calls
+    // jsdispatch_ext, the same table emitted by the layer-2 runtime library
+    // (lib/go-rt.ll, built by metajs-to-llvm-ir.abnf -rt-lib): its own function indices
+    // are offset by a million, so the two chains cannot overlap and one js_call reaches
+    // either module. Emitted ONLY for -exe, so every other run keeps the module it had.
+    // This is lua-to-llvm-ir.abnf's emitDispatch, unchanged - the mechanism is the
+    // reusable part of phase 4 and nothing here is Go's.
+    function emitDispatch() {
+        var idxs = []
+        var fns = []
+        var i = 0
+        while (i < m.Funcs.length) {
+            var f = m.Funcs[i]
+            var nm = f.Name()
+            if (nm.length > 4 && nm.substring(0, 4) == "jsf_") {
+                idxs.push(parseInt(nm.substring(4, nm.length)))
+                fns.push(f)
+            }
+            i = i + 1
+        }
+        var ext = m.NewFunc("jsdispatch_ext", i64,
+            [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var d = m.NewFunc("jsdispatch", i64,
+            [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var b = d.NewBlock("entry")
+        var extB = d.NewBlock("ext")
+        var ownB = d.NewBlock("own")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredSGE, d.Params[0], llvm.constant.NewInt(i64, 1000000)), extB, ownB)
+        extB.NewRet(extB.NewCall(ext, [d.Params[0], d.Params[1], d.Params[2]]))
+        b = ownB
+        i = 0
+        while (i < fns.length) {
+            var hit = d.NewBlock("hit" + idxs[i])
+            var nxt = d.NewBlock("miss" + idxs[i])
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, d.Params[0], llvm.constant.NewInt(i64, idxs[i])), hit, nxt)
+            hit.NewRet(hit.NewCall(fns[i], [d.Params[1], d.Params[2]]))
+            b = nxt
+            i = i + 1
+        }
+        b.NewRet(b.NewCall(ext, [d.Params[0], d.Params[1], d.Params[2]]))
+    }
+
+    // The two runtime inputs live next to THIS grammar, so the build does not depend on
+    // the working directory: lib/runtime.ll is the C floor and lib/go-rt.ll is Go's own
+    // layer 2. An explicit -rt REPLACES both. This grammar's entry point is ALREADY
+    // named jsmain, which is what the C floor's main() calls, so - unlike every other
+    // language in part 3 - no one-call alias has to be emitted.
+    function libPath(name) {
+        var mn = moduleName()
+        var cut = -1
+        var i = 0
+        while (i < mn.length) {
+            var ch = mn.charAt(i)
+            if (ch == "/" || ch == "\\") { cut = i }
+            i = i + 1
+        }
+        return mn.substring(0, cut + 1) + "lib/" + name
+    }
+
+    if (c.exePath != undefined && c.exePath != "") {
+        emitDispatch()
+        var rts = c.runtime
+        if (rts == undefined || rts.length == 0) { rts = [libPath("runtime.ll"), libPath("go-rt.ll")] }
+        var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
+        if (buildErr != "") {
+            println(buildErr)
+            exit(1)
+        }
+        println("go compiler: wrote executable " + c.exePath)
+        exit(0)
+    }
 
     println(m)
 

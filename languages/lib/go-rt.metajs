@@ -1,0 +1,1823 @@
+// go-rt.metajs -- GO'S OWN SEMANTICS, in MetaJS. Layer 2 of
+// docs/runtime-next-plan.md part 3, for the sixth language after the Lua pilot,
+// PHP, Swift, Java, C# and Dart.
+//
+// languages/go-to-llvm-ir.abnf emits handle IR that calls 82 js_* externs over
+// every go test in tests/ (the same 82 for the full-syntax ratchet alone: the
+// smaller files add nothing). 40 of them are generic primitives
+// languages/lib/runtime.c already provides (the C floor, layer 1). The other 42
+// are here.
+//
+// Compile with:
+//     mec languages/metajs-to-llvm-ir.abnf languages/lib/go-rt.metajs -q -rt-lib
+// which is what tests/gen-go-rt-ll.sh does; the result is the checked-in
+// languages/lib/go-rt.ll that go-to-llvm-ir.abnf links next to runtime.ll.
+// -rt-lib exports every TOP-LEVEL `function js_*` below under its own C symbol,
+// so nothing else in this file is visible to the linker - the helpers are
+// deliberately named go*/gop*.
+//
+// THE AUTHORITATIVE SPECIFICATION IS abnf/jsrtgolang.go (the fmt renderer and
+// the four width-carrying slot writers) plus the shared externs it layers over
+// in abnf/jsrt.go (the js_go* family, js_map_get/js_map_del, js_range_*,
+// js_rundefers, js_is_type, js_jadd, js_dict_new, js_pyin, js_pyset,
+// js_goslice, js_gospread, memberCall) and abnf/jsrtint.go (the sized-integer
+// box, whose externs are all in the floor). This file matches them function for
+// function. Where it CANNOT, the site says so in full.
+//
+// ----- the value model -------------------------------------------------------
+//
+//     null / undefined     ==  nil (a nil interface, pointer, map or slice)
+//     a boolean            ==  bool
+//     a PLAIN NUMBER       ==  an int/int64/rune whose value is exact in a
+//                              double, i.e. |v| <= 2^53. ALSO an untyped
+//                              fractional constant (see js_gotypeis).
+//     a SIZED INTEGER      ==  any other integer: a sized type (int8..uint64) or
+//                              a 64 bit value outside the exact range. The Go
+//                              twin uses jsGInt (abnf/jsrtint.go); the C floor
+//                              has it as a REAL PRIMITIVE TYPE (tag 13).
+//     a BOXED DOUBLE       ==  float64 / float32, style 1 (floGo). The Go twin
+//                              uses jsJFlo (abnf/jsrtjvm.go); the floor has it
+//                              as tag 14.
+//     a string             ==  string. UTF-16 here, as everywhere in this
+//                              runtime; len() is the UTF-8 BYTE count (byteLen).
+//     an array             ==  a Go ARRAY (a value type), and the backing store
+//                              of a slice
+//     a {__dict} object    ==  map: keys/vals parallel arrays, insertion ordered,
+//                              plus `zero` (the value type's zero value)
+//     a {__class: $sl}     ==  a SLICE HEADER: a (backing array), o (offset),
+//                              n (length), c (capacity), et (element type text)
+//     a {__class: $ptr}    ==  a POINTER CELL: o (the SCOPE or object that holds
+//                              the variable) and k (its name)
+//     a {__class: $cx}     ==  a complex: re, im
+//     any other object     ==  a struct instance; its descriptor is __class,
+//                              which carries __isclass, __name, __fields,
+//                              __ftypes and the methods
+//
+// ----- what the FLOOR supplies, so this file does not -------------------------
+//
+// Go's whole sized-integer surface is already in the C floor: js_giarith,
+// js_gicmp / js_gilt / js_gile / js_gigt / js_gige, js_giadd, js_giconv,
+// js_gilit, js_gineg, js_ginot, js_gival, js_giis, and js_gflo / js_jfdiv for
+// the boxed double. That is 40 of the 82 externs and it is why Go's own layer-2
+// surface is small for a language this size.
+//
+// ----- si_norm: Go WANTS it, like Dart and unlike Java ------------------------
+//
+// The plan's question is not "has this language a 64 bit signed type" but "is
+// its unboxed representation the one si_norm produces". abnf/jsrtint.go states
+// Go's invariant at the type: "plain number == a signed 64 bit integer whose
+// value is exact in a double; jsGInt == any other integer". That IS giNorm, and
+// giNorm IS what sint() applies. So Go needs neither Java's marked-unsigned
+// trick nor sintRaw, and there is no pair layer and no box layer in this file.
+//
+// The SECOND-ORDER HAZARD the Java port found - a floor extern reading a tag 13
+// cell numerically and seeing a MAGNITUDE - does not exist for Go either, and
+// the reason is worth writing down because the audit named js_gival as Go's
+// suspect. to_number of a tag 13 cell is si_float, whose 64-bit UNSIGNED arm
+// answers d_from_ulong(fa(h)) - the magnitude. That is not a bug for Go: Go
+// really HAS uint64, an unsigned-marked width-64 cell really IS a uint64, and
+// abnf/jsrtint.go's own js_gival does exactly the same thing
+// (`if b.u && b.w == 64 { return float64(uint64(b.v)) }`). si_float IS Go's
+// js_gival, si_val is NOT, and the two engines agree. Checked, not assumed.
+//
+// ----- what Go did NOT need, checked rather than assumed ----------------------
+//
+//  1. NO `__raw` truthy shim. compile-core's truthy() emits `icmp ne <call>, 0`
+//     on core.truthyExt, so that extern must answer a RAW INTEGER - a shim
+//     handing back a boolean HANDLE gives 2 for false, which is != 0, so every
+//     condition in the program would be taken, silently.
+//     `grep -n truthyExt languages/go-to-llvm-ir.abnf` is EMPTY, so Go keeps
+//     compile-core's default "js_truthy", which is the C FLOOR's own function
+//     and already answers the raw 1/0. Like Swift, Java, C# and Dart, and
+//     unlike Lua and PHP.
+//  2. EXACTLY ONE `_raw` PARAMETER: js_gorest's start index, which the emitter
+//     writes with a bare handle(i + off). Every other handle(k) in the grammar
+//     goes to js_closure or js_arg, which are floor externs, and every operator
+//     selector goes through emitStr/emitNum.
+//  3. NO jsChar. Go has no character type; a rune is an int32, which is the
+//     sized-integer tag, and the emitter emits js_char / js_char_code /
+//     js_kindex zero times.
+//  4. NO COROUTINE PRIMITIVE, and this is the finding the plan asked for.
+//     `grep -c 'js_genfn\|js_yield'` in the grammar is 0. Go's goroutines are
+//     COOPERATIVE and DETERMINISTIC in both halves (the model of
+//     go-interpreter.abnf, shared through the runtime): `go f()` only QUEUES a
+//     nullary closure, and a receive that finds its channel empty RUNS THE
+//     QUEUE - each queued goroutine to completion, in spawn order - until one of
+//     them fills it. There is no suspension point, so there is no second stack
+//     to keep and the floor's pthread-backed tag 15/16 coroutine is not needed.
+//     The whole model is goQueue below: one array and one drain loop.
+//
+// ----- WALL, and it was lowered in the EMITTER --------------------------------
+//
+// js_gounctl used to be an extern that read the completion value out of a
+// CONTROL SIGNAL. A signal is the floor's private tag-10 cell and no host
+// builtin opens one, so layer 2 could never have written it - exactly the
+// position PHP's and Swift's scope probes were in. js_ctl_kind and js_ctl_value
+// ARE floor externs and an EMITTER may call them, so go-to-llvm-ir.abnf's
+// emitUnctl now emits the two-arm select in IR. One extern left layer 2 (43 ->
+// 42) and two floor ones joined the declare list, which is the same accounting
+// correction the Dart port recorded.
+//
+// ----- MetaJS rules that shape the code below --------------------------------
+//
+// docs/abnf-dialect-gotchas.md: a local (or a reassigned parameter) keeps the
+// TYPE CLASS it is first assigned, so a variable that holds a number in one
+// branch and an object in another is declared `var x = anytype`; there is no
+// ASI, so every `return` carries its value on the same line and a value-less
+// early return is BRACED; no for..in, no splice, no split/join/lastIndexOf,
+// indexOf ignores its from-index, array.length is not assignable, and there are
+// no exponent literals.
+
+// ===================================================== value readings =======
+
+// A boxed double (tag 14 / jsJFlo). `typeof v == "number"` is TRUE for one, and
+// for a sized integer too, so every site that meant "an ordinary double" says so.
+function goIsFlo(v) { return floIs(v) }
+
+// giIsInt: the sized-integer box, and nothing else.
+function goIsBox(v) { return sintIs(v) }
+
+// A PLAIN number: neither box.
+function goIsPlain(v) {
+    if (typeof v != "number") { return false }
+    if (floIs(v)) { return false }
+    if (sintIs(v)) { return false }
+    return true
+}
+
+// giNumeric: the two things a declared width may be applied to - a plain number
+// and a sized integer, and NOT a boxed double. A float64 value flowing into a
+// sized slot keeps its box in the Go twin (`case float64, jsGInt` does not list
+// jsJFlo), so the width is not applied to it here either.
+function goNumeric(v) {
+    if (typeof v != "number") { return false }
+    if (floIs(v)) { return false }
+    return true
+}
+
+// giFloat / rt.toNumber of a Go value: the double reading.
+function goNum(v) {
+    if (typeof v == "number") {
+        if (floIs(v)) { return floNum(v) }
+        if (sintIs(v)) { return sintNum(v) }
+        return v
+    }
+    if (typeof v == "string") { return goStrNum(v) }
+    if (v === true) { return 1 }
+    if (v === false) { return 0 }
+    if (v === undefined) { return 0 / 0 }
+    if (v === null) { return 0 }
+    return 0 / 0
+}
+
+// The engine's own string -> number coercion, spelled out because MetaJS has no
+// implicit one and parseFloat stops at the first bad character where JS's
+// ToNumber answers NaN for the whole string.
+function goStrNum(s) {
+    var t = goTrim(s)
+    if (t.length == 0) { return 0 }
+    var f = parseFloat(t)
+    return f
+}
+
+function goTrim(s) {
+    var a = 0
+    var b = s.length
+    while (a < b) {
+        var c = s.charCodeAt(a)
+        if (c != 32 && c != 9 && c != 10 && c != 13) { break }
+        a = a + 1
+    }
+    while (b > a) {
+        var c2 = s.charCodeAt(b - 1)
+        if (c2 != 32 && c2 != 9 && c2 != 10 && c2 != 13) { break }
+        b = b - 1
+    }
+    return s.substring(a, b)
+}
+
+// giVal: the INTEGER reading of a value, as a plain number where it fits and as
+// the box's own value otherwise. Used only where a width is about to be applied.
+function goIntOf(v) {
+    if (sintIs(v)) { return v }
+    if (floIs(v)) { return Math.trunc(floNum(v)) }
+    if (typeof v == "number") { return v }
+    return Math.trunc(goNum(v))
+}
+
+// An index / a length / a count: the plain-number reading.
+function goIdx(v) { return Math.trunc(goNum(v)) }
+
+// ===================================================== the object shapes ====
+
+function goIsObj(v) {
+    if (v === null) { return false }
+    if (v === undefined) { return false }
+    if (typeof v != "object") { return false }
+    if (Array.isArray(v)) { return false }
+    return true
+}
+
+function goIsDict(v) {
+    if (!goIsObj(v)) { return false }
+    if (v.__dict !== true) { return false }
+    if (!Array.isArray(v.keys)) { return false }
+    if (!Array.isArray(v.vals)) { return false }
+    return true
+}
+
+// The __class descriptor of a value, or undefined. goClassOf.
+function goClassOf(v) {
+    if (!goIsObj(v)) { return undefined }
+    var c = v.__class
+    if (!goIsObj(c)) { return undefined }
+    return c
+}
+
+function goClassName(v) {
+    var c = goClassOf(v)
+    if (c === undefined) { return "" }
+    var n = c.__name
+    if (typeof n != "string") { return "" }
+    return n
+}
+
+function goIsSlice(v) { return goClassName(v) == "$sl" }
+
+// rt.dictFind: the index of a key, or -1. Keys compare with Go's == (goValueEq),
+// which is what dictFind's strictEq plus the runtime's number identity does for
+// every key type a Go map may have.
+function goDictFind(keys, k) {
+    var i = 0
+    while (i < keys.length) {
+        if (goKeyEq(keys[i], k)) { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// dictFind's own comparison is rt.strictEq, so a map key needs nothing of its
+// own.
+function goKeyEq(a, b) { return goStrictEq(a, b) }
+
+// rt.strictEq over the value model Go uses. The two number tags compare by
+// VALUE, never by identity: int8(1) == 1 holds and float64(1) == 1 holds.
+//
+// THE SIZED ARM IS NOT the double reading, and the differential probe found it
+// the hard way. giEq is `giVal(l) == giVal(r)` - an EXACT int64 comparison - so
+// 9007199254740992 (a plain number, the largest one giNorm keeps unboxed) and
+// 9007199254740993 (a box, one past it) are DIFFERENT, and real go 1.26.5 says
+// so too. Reading both through a double rounds the second one down and answers
+// true. sintCmp is the exact comparison: two cells with the same payload compare
+// equal whatever the signedness, and two with different payloads never do.
+function goStrictEq(a, b) {
+    if (typeof a == "number" && typeof b == "number") {
+        if (floIs(a)) { return floNum(a) === goNum(b) }
+        if (floIs(b)) { return floNum(b) === goNum(a) }
+        if (sintIs(a) || sintIs(b)) { return sintCmp(a, b) == 0 }
+        return a === b
+    }
+    return a === b
+}
+
+// Go's ==: VALUE equality for structs and arrays (both are value types) and
+// identity for everything else; nil compares equal to an unset slice/map/pointer.
+// abnf/jsrt.go's goValueEq, function for function.
+function goValueEq(a, b) {
+    if (a === undefined || a === null) {
+        if (b === undefined || b === null) { return true }
+        return false
+    }
+    if (b === undefined || b === null) { return false }
+    if (Array.isArray(a)) {
+        if (!Array.isArray(b)) { return false }
+        if (a.length != b.length) { return false }
+        var i = 0
+        while (i < a.length) {
+            if (!goValueEq(a[i], b[i])) { return false }
+            i = i + 1
+        }
+        return true
+    }
+    if (Array.isArray(b)) { return false }
+    var ac = goClassOf(a)
+    var bc = goClassOf(b)
+    if (ac !== undefined && bc !== undefined) {
+        if (goStrOf(ac.__name) != goStrOf(bc.__name)) { return false }
+        var af = ac.__fields
+        var bf = bc.__fields
+        if (!Array.isArray(af) || !Array.isArray(bf) || af.length != bf.length) { return a === b }
+        var j = 0
+        while (j < af.length) {
+            var k = goStrOf(af[j])
+            if (k != goStrOf(bf[j])) { return false }
+            if (!goValueEq(goProp(a, k), goProp(b, k))) { return false }
+            j = j + 1
+        }
+        return true
+    }
+    return goStrictEq(a, b)
+}
+
+// o.props[k] with an absent key answering undefined, which is what the Go twin's
+// map read does. There is no hasOwn in a -rt-lib module (the floor seeds no such
+// builtin), so "present" is spelled "not undefined" - the one difference is a
+// property explicitly HOLDING undefined, which this value model uses for nil and
+// which every caller here treats the same way as an absent one.
+function goProp(o, k) {
+    if (!goIsObj(o)) { return undefined }
+    return o[k]
+}
+
+function goHas(o, k) {
+    if (!goIsObj(o)) { return false }
+    return o[k] !== undefined
+}
+
+function goStrOf(v) {
+    if (typeof v == "string") { return v }
+    if (v === undefined) { return "undefined" }
+    if (v === null) { return "null" }
+    return gopStr(v)
+}
+
+// rt.goCopyVal: a Go VALUE receiver is a copy. An array copies its elements and
+// a struct instance copies its own properties, recursively; everything else is a
+// reference already.
+function goCopyVal(v) {
+    if (Array.isArray(v)) {
+        var out = []
+        var i = 0
+        while (i < v.length) { out.push(v[i]); i = i + 1 }
+        return out
+    }
+    if (goClassOf(v) === undefined) { return v }
+    var o = {}
+    var ks = keysOf(v)
+    var j = 0
+    while (j < ks.length) {
+        o[ks[j]] = goCopyVal(v[ks[j]])
+        j = j + 1
+    }
+    return o
+}
+
+// ===================================================== rendering ============
+//
+// fmt's %v. abnf/jsrtgolang.go's gopStr / gopRender / gopObj, function for
+// function; the interpreter half is gstr in languages/go-interpreter.abnf and
+// ./test.sh --cross diffs the two, so all three must stay in step.
+
+function gopStr(v) { return gopRender(v, 0) }
+
+function gopRender(v, depth) {
+    if (depth > 32) { return "..." }
+    if (v === undefined || v === null) { return "<nil>" }
+    if (typeof v == "string") { return v }
+    if (v === true) { return "true" }
+    if (v === false) { return "false" }
+    if (typeof v == "number") {
+        if (floIs(v)) { return goFloStr(floNum(v)) }
+        if (sintIs(v)) { return sintStr(v) }
+        return gopNumStr(v)
+    }
+    if (Array.isArray(v)) {
+        // A Go ARRAY is a plain host array; a Go SLICE is the {a,o,n,c} header
+        // handled in gopObj. Both print `[e e e]`, space separated.
+        var out = "["
+        var i = 0
+        while (i < v.length) {
+            if (i > 0) { out = out + " " }
+            out = out + gopRender(v[i], depth + 1)
+            i = i + 1
+        }
+        return out + "]"
+    }
+    if (goIsObj(v)) {
+        var r = gopObj(v, depth)
+        if (r !== undefined) { return r }
+    }
+    return goStrOf(v)
+}
+
+// A plain number is an integer in the value model, so its text is the engine's
+// own - which is the shortest round-tripping form and therefore the decimal
+// digits for every value below 2^53. A FRACTIONAL plain number can only be an
+// untyped constant that never met a float64 slot, and Go renders one with the
+// same 'g' rule as a float64.
+function gopNumStr(n) {
+    if (n === Math.trunc(n)) {
+        if (n === 0) { return "0" }
+        return "" + n
+    }
+    return goFloStr(n)
+}
+
+// gopObj renders the object shapes the Go grammars build. It answers undefined
+// for a shape it does not know, which falls back to the generic ToString.
+function gopObj(o, depth) {
+    var cls = goClassOf(o)
+
+    // fmt.Stringer wins over every built-in rendering, exactly as it does in Go.
+    // Guarded by depth so a String() that prints its own receiver terminates.
+    if (cls !== undefined && depth < 32) {
+        if (goHas(cls, "String")) {
+            var mth = cls.String
+            if (goIsFn(mth)) { return gopRender(mth(o), depth + 1) }
+        }
+    }
+
+    // A map: map[k:v k:v], with the keys SORTED, which is what fmt has done
+    // since go 1.12. The value model keeps insertion order, so the order is
+    // computed here.
+    if (goIsDict(o)) {
+        var order = gopKeyOrder(o.keys)
+        var out = "map["
+        var i = 0
+        while (i < order.length) {
+            if (i > 0) { out = out + " " }
+            var ix = order[i]
+            var val = undefined
+            if (ix < o.vals.length) { val = o.vals[ix] }
+            out = out + gopRender(o.keys[ix], depth + 1) + ":" + gopRender(val, depth + 1)
+            i = i + 1
+        }
+        return out + "]"
+    }
+
+    if (cls === undefined) { return undefined }
+    var name = goStrOf(cls.__name)
+
+    // A slice header prints only its own window [o, o+n) of the backing array.
+    if (name == "$sl") {
+        var back = o.a
+        if (!Array.isArray(back)) { return "[]" }
+        var off = goIdx(o.o)
+        var n = goIdx(o.n)
+        var so = "["
+        var si = 0
+        while (si < n) {
+            if (si > 0) { so = so + " " }
+            var e = undefined
+            if (off + si < back.length) { e = back[off + si] }
+            so = so + gopRender(e, depth + 1)
+            si = si + 1
+        }
+        return so + "]"
+    }
+
+    // A complex: Go spells it (re+imi), with the sign always written out. The
+    // twin is cxStr in go-interpreter.abnf, which concatenates the two JS
+    // numbers, so the generic number text is what has to be used here rather
+    // than a float rendering.
+    if (name == "$cx") {
+        var re = goStrOf(gopRender(o.re, depth + 1))
+        var im = goNum(o.im)
+        var sign = "+"
+        if (im < 0) { sign = "-"; im = -im }        // UNARY minus, never 0 - im
+        return "(" + re + sign + gopNumStr(im) + "i)"
+    }
+
+    // A pointer CELL (&n, new(int), &p): printed as & followed by the pointee.
+    //
+    // THE ONE PLACE LAYER 2 CANNOT MATCH THE GO TWIN, and it is stated rather
+    // than hidden. The cell's `o` is the SCOPE that holds the variable, and a
+    // scope is the C floor's private storage: there is no host builtin that
+    // reads one, which is the same reason a scope probe cannot live in layer 2
+    // at all (docs/runtime-next-plan.md part 3, item 1). Unlike a probe this
+    // one CANNOT be lowered into the emitter, because it is reached from
+    // arbitrarily deep inside a value tree at run time, not from a fixed call
+    // site. The object-backed form (new(T) over a one-slot object) IS readable
+    // and is rendered exactly. See the report in the plan; nothing in
+    // tests/go-test-full.go prints a scope-backed pointer.
+    if (name == "$ptr") {
+        var holder = o.o
+        if (goIsObj(holder)) {
+            var key = goStrOf(o.k)
+            if (goHas(holder, key)) { return "&" + gopRender(holder[key], depth + 1) }
+        }
+        return "&<nil>"
+    }
+
+    // A struct instance: its field values in declaration order, space separated.
+    if (cls.__isclass === true) {
+        var flds = cls.__fields
+        if (!Array.isArray(flds)) { return "{}" }
+        var fo = "{"
+        var fi = 0
+        while (fi < flds.length) {
+            if (fi > 0) { fo = fo + " " }
+            var fn = goStrOf(flds[fi])
+            fo = fo + gopRender(goProp(o, fn), depth + 1)
+            fi = fi + 1
+        }
+        return fo + "}"
+    }
+    return undefined
+}
+
+// gopKeyOrder answers the indices of a map's keys in fmt's print order. fmt
+// sorts map keys (go 1.12+): numerically for a numeric key type, bytewise for a
+// string key, false before true for a bool. A Go map has ONE key type, so the
+// kind of the keys decides; anything else falls back to the rendered text.
+// Insertion sort, which keeps the order stable and mirrors the interpreter
+// half's own loop.
+function gopKeyOrder(keys) {
+    var order = []
+    var num = []
+    var txt = []
+    var numeric = keys.length > 0
+    var i = 0
+    while (i < keys.length) {
+        order.push(i)
+        var k = keys[i]
+        var nv = 0
+        var tv = ""
+        if (typeof k == "number") { nv = goNum(k) }
+        else if (k === true) { numeric = false; tv = "1" }
+        else if (k === false) { numeric = false; tv = "0" }
+        else if (typeof k == "string") { numeric = false; tv = k }
+        else { numeric = false; tv = gopStr(k) }
+        num.push(nv)
+        txt.push(tv)
+        i = i + 1
+    }
+    var j = 1
+    while (j < order.length) {
+        var p = j
+        while (p > 0 && gopKeyLess(numeric, num, txt, order[p], order[p - 1])) {
+            var t = order[p]
+            order[p] = order[p - 1]
+            order[p - 1] = t
+            p = p - 1
+        }
+        j = j + 1
+    }
+    return order
+}
+
+function gopKeyLess(numeric, num, txt, a, b) {
+    if (numeric) { return num[a] < num[b] }
+    return txt[a] < txt[b]
+}
+
+// goFloStr is Go's fmt %v for a float64: strconv.FormatFloat(f, 'g', -1, 64) -
+// the SHORTEST round-tripping digits, scientific notation when the decimal
+// exponent is below -4 or at least 6, "+Inf" / "-Inf" for the infinities and
+// "NaN". strconv's shortest form is the same set of digits the engine's own
+// number text carries, so the digits are taken from there and only the LAYOUT
+// is Go's. (The floor's floStr cannot be used: jvmFloText routes style 1 to
+// jvm_flo_str, which is Java's layout, so a boxed double built with floGo
+// renders as Java there. Reported in the plan, not worked around here - this
+// file never calls floStr.)
+function goFloStr(f) {
+    if (f !== f) { return "NaN" }
+    if (f === Infinity) { return "+Inf" }
+    if (f === 0 - Infinity) { return "-Inf" }
+    var neg = goSignBit(f)
+    var a = f
+    if (neg) { a = -f }                              // UNARY minus, never 0 - f
+    var sgn = ""
+    if (neg) { sgn = "-" }
+    if (a === 0) { return sgn + "0" }
+    var d = goDigits(a)
+    return sgn + goLayout(d.digs, d.dp)
+}
+
+// The sign bit, which `f < 0` does not see for -0.0. 1/-0.0 is -Infinity.
+function goSignBit(f) {
+    if (f < 0) { return true }
+    if (f === 0) { return 1 / f === 0 - Infinity }
+    return false
+}
+
+// The shortest round-tripping DIGITS of a positive finite double, plus the
+// decimal point position dp: the value is 0.<digs> x 10^dp. The engine's own
+// number text is already the shortest form (it is num_str / shortest_digits in
+// the floor and Number.prototype.toString in goja), so this only has to take it
+// apart. Trailing zeros are stripped, which makes dp - not the digit count - the
+// carrier of the magnitude.
+function goDigits(a) {
+    var s = "" + a
+    var digs = ""
+    var dp = 0
+    var epos = s.indexOf("e")
+    if (epos < 0) { epos = s.indexOf("E") }
+    var mant = s
+    var ex = 0
+    if (epos >= 0) {
+        mant = s.substring(0, epos)
+        ex = parseInt(s.substring(epos + 1, s.length))
+    }
+    var dot = mant.indexOf(".")
+    var ipart = mant
+    var fpart = ""
+    if (dot >= 0) {
+        ipart = mant.substring(0, dot)
+        fpart = mant.substring(dot + 1, mant.length)
+    }
+    // Leading zeros of the integer part carry no digits; "0.00123" starts its
+    // digits inside the fraction and each skipped zero lowers dp.
+    var lead = 0
+    while (lead < ipart.length && ipart.charAt(lead) == "0") { lead = lead + 1 }
+    ipart = ipart.substring(lead, ipart.length)
+    if (ipart.length > 0) {
+        digs = ipart + fpart
+        dp = ipart.length + ex
+    } else {
+        var z = 0
+        while (z < fpart.length && fpart.charAt(z) == "0") { z = z + 1 }
+        digs = fpart.substring(z, fpart.length)
+        dp = ex - z
+    }
+    var nd = digs.length
+    while (nd > 1 && digs.charAt(nd - 1) == "0") { nd = nd - 1 }
+    digs = digs.substring(0, nd)
+    if (digs.length == 0) { digs = "0"; dp = 1 }
+    return {digs: digs, dp: dp}
+}
+
+// strconv's 'g' layout for shortest digits: %e when the exponent (dp - 1) is
+// below -4 or at least 6 (eprec is fixed at 6 for the shortest form), %f
+// otherwise, and neither ever writes a trailing ".0".
+function goLayout(digs, dp) {
+    var exp = dp - 1
+    if (exp < 0 - 4 || exp >= 6) { return goSci(digs, exp) }
+    if (dp <= 0) {
+        var out = "0."
+        var i = 0
+        while (i < 0 - dp) { out = out + "0"; i = i + 1 }
+        return out + digs
+    }
+    if (dp >= digs.length) {
+        var o2 = digs
+        var j = digs.length
+        while (j < dp) { o2 = o2 + "0"; j = j + 1 }
+        return o2
+    }
+    return digs.substring(0, dp) + "." + digs.substring(dp, digs.length)
+}
+
+// "1e+06" / "1.5e-07" / "1e+100": a point only when there is more than one
+// digit, and an exponent of at least two digits with its sign always written.
+function goSci(digs, exp) {
+    var out = digs.substring(0, 1)
+    if (digs.length > 1) { out = out + "." + digs.substring(1, digs.length) }
+    out = out + "e"
+    var e = exp
+    if (e < 0) { out = out + "-"; e = 0 - e } else { out = out + "+" }
+    var t = "" + e
+    if (t.length < 2) { t = "0" + t }
+    return out + t
+}
+
+// ===================================================== fmt's verbs ==========
+
+// gopFormat is fmt.Sprintf over the verb subset abnf/jsrtgolang.go documents:
+// %v %d %s %t %q %c and %%. Width, precision, flags and the remaining verbs are
+// not implemented; an unhandled verb renders as %!<verb>(<value>) and a missing
+// operand as %!<verb>(MISSING).
+function gopFormat(format, args) {
+    var out = ""
+    var next = 0
+    var i = 0
+    while (i < format.length) {
+        var c = format.charAt(i)
+        if (c != "%" || i + 1 >= format.length) { out = out + c; i = i + 1; continue }
+        i = i + 1
+        var verb = format.charAt(i)
+        i = i + 1
+        if (verb == "%") { out = out + "%"; continue }
+        if (next >= args.length) { out = out + "%!" + verb + "(MISSING)"; continue }
+        var a = args[next]
+        next = next + 1
+        out = out + gopVerb(verb, a)
+    }
+    return out
+}
+
+function gopVerb(verb, a) {
+    if (verb == "v" || verb == "s") { return gopStr(a) }
+    if (verb == "d") { return gopDec(a) }
+    if (verb == "t") {
+        if (a === true) { return "true" }
+        return "false"
+    }
+    if (verb == "c") { return goRuneStr(goIdx(a)) }
+    if (verb == "q") {
+        if (typeof a == "string") { return "\"" + gopQuoteBody(a, "\"") + "\"" }
+        return "'" + gopQuoteBody(goRuneStr(goIdx(a)), "'") + "'"
+    }
+    return "%!" + verb + "(" + gopStr(a) + ")"
+}
+
+// strconv.FormatInt(int64(toNumber(a)), 10). A sized integer keeps its own text
+// - int64(uint64max) truncates to -1 in the Go twin, and sintStr of an unsigned
+// cell would print the magnitude, so the box is read as a signed 64 bit value
+// first.
+function gopDec(a) {
+    if (sintIs(a)) { return sintStr(sintConv(a, 64, 0)) }
+    var n = goNum(a)
+    if (n !== n) { return "0" }
+    return "" + Math.trunc(n)
+}
+
+// gopQuoteBody is the escaping strconv.Quote / strconv.QuoteRune do, minus the
+// \x and \u forms: the letter escapes, the backslash and whichever delimiter is
+// in force. A control character Go would spell \x00 is left verbatim. The twin
+// is gQuoteBody in languages/go-interpreter.abnf; keep the two in step.
+//
+// IT WALKS BYTES, NOT CHARACTERS, and the differential probe found the
+// difference: abnf/jsrtgolang.go's loop is `for i := 0; i < len(s); i++` over a
+// Go string, so a multi-byte rune arrives as its individual UTF-8 bytes and each
+// one becomes the CODE POINT of that byte value (`out += string(c)`). %q of
+// "hello" with an e-acute therefore prints the two bytes C3 A9 as U+00C3 U+00A9
+// and not as the letter. Reproduced here rather than corrected: both halves have
+// to say the same thing, and %q's byte spelling is a question about the Go
+// twin's string model, not about layer 2.
+function gopQuoteBody(s, delim) {
+    var bs = goBytes(s)
+    var dc = delim.charCodeAt(0)
+    var out = ""
+    var i = 0
+    while (i < bs.length) {
+        var k = bs[i]
+        if (k == 92) { out = out + "\\\\" }
+        else if (k == dc) { out = out + "\\" + String.fromCharCode(k) }
+        else if (k == 10) { out = out + "\\n" }
+        else if (k == 9) { out = out + "\\t" }
+        else if (k == 13) { out = out + "\\r" }
+        else if (k == 7) { out = out + "\\a" }
+        else if (k == 8) { out = out + "\\b" }
+        else if (k == 12) { out = out + "\\f" }
+        else if (k == 11) { out = out + "\\v" }
+        else { out = out + String.fromCharCode(k) }
+        i = i + 1
+    }
+    return out
+}
+
+// string(rune): Go writes the code point's UTF-8, which in this runtime's UTF-16
+// strings is the surrogate pair for an astral value. An out-of-range or negative
+// code point is U+FFFD, exactly as Go's conversion is.
+function goRuneStr(cp) {
+    var c = cp
+    if (c !== c) { c = 65533 }
+    if (c < 0 || c > 1114111) { c = 65533 }
+    if (c >= 55296 && c <= 57343) { c = 65533 }
+    if (c < 65536) { return String.fromCharCode(c) }
+    var v = c - 65536
+    return String.fromCharCode(55296 + Math.floor(v / 1024)) + String.fromCharCode(56320 + (v % 1024))
+}
+
+// ===================================================== print composition ====
+
+var GOP_LN = 0      // fmt.Println      space between every pair,      newline
+var GOP_PR = 1      // fmt.Print/Sprint space between two non-strings, no newline
+var GOP_BUILTN = 2  // builtin println  space between every pair,      newline
+var GOP_BUILTP = 3  // builtin print    no space at all,               no newline
+var GOP_FMTF = 4    // fmt.Printf/Sprintf  args[0] is the format,      no newline
+var GOP_ONE = 5     // js_gostr only: render exactly one value
+
+// gopCompose builds the text of one print call. The Go twin also reports whether
+// a newline is appended; here the caller knows its own mode, so the newline is
+// appended by gopOut instead and this returns the text only.
+function gopCompose(args, mode) {
+    if (!Array.isArray(args)) { fail("a Go print extern needs an argument array") }
+    if (mode == GOP_FMTF) {
+        if (args.length == 0) { return "" }
+        var rest = []
+        var k = 1
+        while (k < args.length) { rest.push(args[k]); k = k + 1 }
+        return gopFormat(gopStr(args[0]), rest)
+    }
+    if (mode == GOP_BUILTP) {
+        var o1 = ""
+        var i1 = 0
+        while (i1 < args.length) { o1 = o1 + gopStr(args[i1]); i1 = i1 + 1 }
+        return o1
+    }
+    if (mode == GOP_LN || mode == GOP_BUILTN) {
+        var o2 = ""
+        var i2 = 0
+        while (i2 < args.length) {
+            if (i2 > 0) { o2 = o2 + " " }
+            o2 = o2 + gopStr(args[i2])
+            i2 = i2 + 1
+        }
+        return o2
+    }
+    // gopPr: Go puts a space between two operands when NEITHER is a string.
+    var out = ""
+    var prevStr = true
+    var i = 0
+    while (i < args.length) {
+        var isStr = typeof args[i] == "string"
+        if (i > 0 && !prevStr && !isStr) { out = out + " " }
+        out = out + gopStr(args[i])
+        prevStr = isStr
+        i = i + 1
+    }
+    return out
+}
+
+function gopNewline(mode) {
+    if (mode == GOP_LN) { return true }
+    if (mode == GOP_BUILTN) { return true }
+    return false
+}
+
+// ===================================================== runes and bytes ======
+
+function goIsFn(v) { return typeof v == "function" }
+
+// The UTF-8 byte length of one code point, which is what len() counts and what a
+// `for i, r := range s` index steps by.
+function goUtf8Len(cp) {
+    if (cp < 128) { return 1 }
+    if (cp < 2048) { return 2 }
+    if (cp < 65536) { return 3 }
+    return 4
+}
+
+// The code points of a UTF-16 string, with the UTF-8 BYTE offset of each. A lone
+// surrogate is U+FFFD, which is how Go decodes an invalid byte sequence and what
+// wtf8Clean does on the way out.
+function goRunes(s) {
+    var cps = []
+    var offs = []
+    var off = 0
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        var cp = c
+        if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+            var d = s.charCodeAt(i + 1)
+            if (d >= 56320 && d <= 57343) {
+                cp = 65536 + (c - 55296) * 1024 + (d - 56320)
+                i = i + 1
+            } else { cp = 65533 }
+        } else if (c >= 55296 && c <= 57343) { cp = 65533 }
+        cps.push(cp)
+        offs.push(off)
+        off = off + goUtf8Len(cp)
+        i = i + 1
+    }
+    return {cps: cps, offs: offs, bytes: off}
+}
+
+// ===================================================== the ten NEUTRAL ======
+//
+// Ten of the 42 are not Go's: they live in abnf/jsrt.go, other grammars emit
+// them, and they are here only because the C floor has not got them. The plan's
+// running list of floor candidates gains none that were not already on it -
+// js_goslice / js_gospread have now been written out by csharp and go, and
+// js_dict_new / js_is_type / js_jadd / js_pyin / js_pyset by five languages
+// each.
+
+function js_dict_new() { return {__dict: true, keys: [], vals: []} }
+
+// isTypeName, over the four names go-to-llvm-ir.abnf actually passes: "$sl",
+// "$ptr", "$cx" and "Array". nil is no type; a user struct name falls through
+// to the __class walk, which follows __super the way the shared one does.
+function js_is_type(v, t) {
+    if (v === undefined || v === null) { return false }
+    if (t == "Any" || t == "Object") { return true }
+    if (t == "Array") { return Array.isArray(v) }
+    if (t == "String" || t == "CharSequence") { return typeof v == "string" }
+    if (t == "Boolean") { return v === true || v === false }
+    var cls = goClassOf(v)
+    while (goIsObj(cls)) {
+        if (goStrOf(cls.__name) == t) { return true }
+        cls = cls.__super
+    }
+    return false
+}
+
+// js_jadd: string concat, 32 bit add for two int32-valued operands, float add
+// when either side is boxed. The Go emitter uses it only for INDEX arithmetic
+// (an offset plus a length) and for the two halves of a complex, so the int32
+// arm is the one that runs; it is written out in full anyway, because the shared
+// extern is what llvm.Run compares against.
+function js_jadd(l, r) {
+    if (typeof l == "string" || typeof r == "string") { return goJavaStr(l) + goJavaStr(r) }
+    if (floIs(l) || floIs(r)) { return flo(goNum(l) + goNum(r), goStyleOf(l, r)) }
+    var ln = goNum(l)
+    var rn = goNum(r)
+    if (goIsInt32Value(ln) && goIsInt32Value(rn)) { return goWrap32(ln + rn) }
+    return ln + rn
+}
+
+// jvmStyleOf: the style an operation's result inherits - the one of whichever
+// operand is a box, and the left one when both are.
+function goStyleOf(l, r) {
+    if (floIs(l)) { return floStyle(l) }
+    if (floIs(r)) { return floStyle(r) }
+    return 1
+}
+
+function goJavaStr(v) {
+    if (typeof v == "string") { return v }
+    return gopStr(v)
+}
+
+function goIsInt32Value(n) {
+    if (n !== n) { return false }
+    if (n !== Math.trunc(n)) { return false }
+    if (n > 2147483647) { return false }
+    if (n < 0 - 2147483648) { return false }
+    return true
+}
+
+function goWrap32(x) {
+    var m = x % 4294967296
+    if (m < 0) { m = m + 4294967296 }
+    if (m >= 2147483648) { m = m - 4294967296 }
+    return m
+}
+
+// Python's `x in y`, which the Go emitter uses for the `v, ok := m[k]` probe.
+function js_pyin(x, c) {
+    if (Array.isArray(c)) {
+        var i = 0
+        while (i < c.length) {
+            if (goStrictEq(c[i], x)) { return true }
+            i = i + 1
+        }
+        return false
+    }
+    if (typeof c == "string") { return c.indexOf(goStrOf(x)) >= 0 }
+    if (goIsDict(c)) { return goDictFind(c.keys, x) >= 0 }
+    fail("'in' needs a list, a string or a dict on the right side")
+    return false
+}
+
+// List element (negative wraps) or map entry assignment.
+function js_pyset(c, k, v) {
+    if (goIsDict(c)) {
+        var i = goDictFind(c.keys, k)
+        if (i >= 0) { c.vals[i] = v } else { c.keys.push(k); c.vals.push(v) }
+        return undefined
+    }
+    if (!Array.isArray(c)) { fail("item assignment on a " + typeof c) }
+    var idx = goIdx(k)
+    if (idx < 0) { idx = idx + c.length }
+    if (idx < 0 || idx >= c.length) { fail("list assignment index out of range") }
+    c[idx] = v
+    return undefined
+}
+
+// s[lo:hi]. On a Go STRING the bounds are BYTE offsets and the result is the
+// decoded byte range; on a slice the elements are COPIED. An absent bound
+// arrives as undefined.
+function js_goslice(v, lo0, hi0) {
+    if (typeof v == "string") {
+        var nb = byteLen(v)
+        var slo = goBound(lo0, 0)
+        var shi = goBound(hi0, nb)
+        if (slo < 0 || shi > nb || slo > shi) { fail("slice bounds [" + slo + ":" + shi + "] out of range") }
+        return goSubBytes(v, slo, shi)
+    }
+    if (!Array.isArray(v)) { fail("slicing a " + typeof v) }
+    var lo = goBound(lo0, 0)
+    var hi = goBound(hi0, v.length)
+    if (lo < 0 || hi > v.length || lo > hi) { fail("slice bounds [" + lo + ":" + hi + "] out of range") }
+    var out = []
+    var i = lo
+    while (i < hi) { out.push(v[i]); i = i + 1 }
+    return out
+}
+
+function goBound(h, dflt) {
+    if (h === undefined) { return dflt }
+    return goIdx(h)
+}
+
+// The [lo, hi) BYTE window of a string. The runtime's strings are UTF-16 and Go's
+// are bytes, so the window is taken over the UTF-8 ENCODING and decoded back -
+// with U+FFFD for every byte that is not part of a well-formed sequence, which is
+// exactly what a Go string carrying a partial rune prints once wtf8Clean has seen
+// it. `"日本語"[0:1]` is therefore one replacement character in both halves.
+function goSubBytes(s, lo, hi) {
+    var bs = goBytes(s)
+    var win = []
+    var i = lo
+    while (i < hi) { win.push(bs[i]); i = i + 1 }
+    return goDecodeUtf8(win)
+}
+
+// UTF-8 decoding with the replacement rule: one U+FFFD per byte that cannot
+// begin or continue a well-formed sequence, which is Go's own behaviour when a
+// string is ranged or printed.
+function goDecodeUtf8(bs) {
+    var out = ""
+    var i = 0
+    while (i < bs.length) {
+        var b = bs[i]
+        var need = 0
+        var cp = 0
+        var lo = 0
+        if (b < 128) { out = out + String.fromCharCode(b); i = i + 1; continue }
+        else if (b >= 194 && b <= 223) { need = 1; cp = b - 192; lo = 128 }
+        else if (b >= 224 && b <= 239) { need = 2; cp = b - 224; lo = 2048 }
+        else if (b >= 240 && b <= 244) { need = 3; cp = b - 240; lo = 65536 }
+        else { out = out + goRuneStr(65533); i = i + 1; continue }
+        var ok = i + need < bs.length
+        var k = 1
+        while (ok && k <= need) {
+            var c = bs[i + k]
+            if (c < 128 || c > 191) { ok = false } else { cp = cp * 64 + (c - 128) }
+            k = k + 1
+        }
+        if (!ok || cp < lo || (cp >= 55296 && cp <= 57343) || cp > 1114111) {
+            out = out + goRuneStr(65533)
+            i = i + 1
+            continue
+        }
+        out = out + goRuneStr(cp)
+        i = i + need + 1
+    }
+    return out
+}
+
+// f(xs...): flatten the LAST element of the argument array in place, so the
+// callee sees the slice's elements as separate arguments.
+function js_gospread(args) {
+    if (!Array.isArray(args) || args.length == 0) { return undefined }
+    var last = args.pop()
+    if (Array.isArray(last)) {
+        var i = 0
+        while (i < last.length) { args.push(last[i]); i = i + 1 }
+    } else if (last !== null && last !== undefined) { args.push(last) }
+    return undefined
+}
+
+// The Go range bound: an int is its own bound, otherwise the element/entry count.
+function js_range_len(v) {
+    if (typeof v == "number") { return goNum(v) }
+    if (typeof v == "string") { return v.length }
+    if (Array.isArray(v)) { return v.length }
+    if (goIsDict(v)) { return v.keys.length }
+    fail("range over a " + typeof v)
+    return 0
+}
+
+// The i-th range key: maps yield their key, everything else the index itself.
+function js_range_key(v, i) {
+    if (goIsDict(v)) { return v.keys[goIdx(i)] }
+    return i
+}
+
+// The i-th range value (maps by entry, lists by index).
+function js_range_val(v, i) {
+    if (goIsDict(v)) { return v.vals[goIdx(i)] }
+    if (Array.isArray(v)) {
+        var k = goIdx(i)
+        if (k >= 0 && k < v.length) { return v[k] }
+    }
+    return undefined
+}
+
+// ===================================================== Go's own 32 ==========
+
+// ----- indexing and the map -------------------------------------------------
+
+// Go indexing: maps read their ZERO VALUE for a missing key, slices their
+// element, a string its i-th BYTE, and a generic instantiation f[int] is the
+// identity (generics are ERASED in the Go grammars).
+function js_map_get(c, k) {
+    if (goIsDict(c)) {
+        var i = goDictFind(c.keys, k)
+        if (i >= 0) { return c.vals[i] }
+        return c.zero
+    }
+    if (Array.isArray(c)) {
+        var ai = goIdx(k)
+        if (ai < 0 || ai >= c.length) { fail("index " + ai + " out of range") }
+        return c[ai]
+    }
+    if (typeof c == "string") {
+        var si = goIdx(k)
+        var bs = goBytes(c)
+        if (si < 0 || si >= bs.length) { fail("index " + si + " out of range") }
+        return bs[si]
+    }
+    if (goIsFn(c)) { return c }
+    fail("indexing a " + typeof c)
+    return undefined
+}
+
+// The UTF-8 bytes of a string: s[i] is the i-th BYTE of a Go string, so the
+// encoding has to be spelled out here (the runtime's strings are UTF-16).
+function goBytes(s) {
+    var out = []
+    var r = goRunes(s)
+    var i = 0
+    while (i < r.cps.length) {
+        var cp = r.cps[i]
+        if (cp < 128) { out.push(cp) }
+        else if (cp < 2048) {
+            out.push(192 + Math.floor(cp / 64))
+            out.push(128 + (cp % 64))
+        } else if (cp < 65536) {
+            out.push(224 + Math.floor(cp / 4096))
+            out.push(128 + (Math.floor(cp / 64) % 64))
+            out.push(128 + (cp % 64))
+        } else {
+            out.push(240 + Math.floor(cp / 262144))
+            out.push(128 + (Math.floor(cp / 4096) % 64))
+            out.push(128 + (Math.floor(cp / 64) % 64))
+            out.push(128 + (cp % 64))
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// delete(m, k); missing keys are a no-op.
+function js_map_del(m, k) {
+    if (!goIsDict(m)) { fail("delete() needs a map") }
+    var i = goDictFind(m.keys, k)
+    if (i >= 0) {
+        var nk = []
+        var nv = []
+        var j = 0
+        while (j < m.keys.length) {
+            if (j != i) { nk.push(m.keys[j]); nv.push(m.vals[j]) }
+            j = j + 1
+        }
+        m.keys = nk
+        m.vals = nv
+    }
+    return undefined
+}
+
+// ----- the Go builtins ------------------------------------------------------
+
+// len() on a Go string counts BYTES - len("hello") is 6 and not 5 and not the
+// UTF-16 count; on a slice or map it is the element / entry count. byteLen is
+// the floor's own host builtin, which is exactly this measurement.
+function js_golen(v) {
+    if (typeof v == "string") { return byteLen(v) }
+    if (Array.isArray(v)) { return v.length }
+    if (v === undefined || v === null) { return 0 }   // a nil slice / map
+    if (goIsDict(v)) { return v.keys.length }
+    fail("len() of a " + typeof v)
+    return 0
+}
+
+// `for i, ch := range s` walks a Go string by RUNE: i is the rune's BYTE offset
+// and ch its code point (an int32), NOT a one-character substring. Normalizing
+// the subject into a keys/vals dict lets the single emitted range loop keep
+// reading it through js_range_len/key/val.
+//
+// Ranging a CHANNEL yields one received value per iteration and ends when the
+// channel is closed and drained. Under the cooperative model every producer runs
+// to completion inside the first receive, so the sequence is fully known here:
+// drain it into the same keys/vals shape a map uses, with the received value as
+// BOTH (the single range name is the value in Go).
+function js_gorange(v) {
+    if (goIsChan(v)) {
+        var ck = []
+        var cv = []
+        while (true) {
+            var st = goChanRecv(v)
+            if (!st.ok) { break }
+            ck.push(st.v)
+            cv.push(st.v)
+        }
+        return {__dict: true, keys: ck, vals: cv}
+    }
+    if (typeof v != "string") { return v }
+    var r = goRunes(v)
+    var keys = []
+    var vals = []
+    var i = 0
+    while (i < r.cps.length) {
+        keys.push(r.offs[i])
+        vals.push(r.cps[i])
+        i = i + 1
+    }
+    return {__dict: true, keys: keys, vals: vals}
+}
+
+// One arm of a Go type switch: does v have dynamic type `want`? The value model
+// has a single numeric type, so an integral number is an int and a fractional
+// one a float64; a map, a slice and a struct answer their own spelling, and
+// any / interface{} matches every non-nil value.
+function js_gotypeis(v, want) {
+    var got = "any"
+    if (v === undefined || v === null) { got = "nil" }
+    else if (v === true || v === false) { got = "bool" }
+    else if (typeof v == "string") { got = "string" }
+    else if (typeof v == "number") {
+        // WRITTEN AGAINST THE GO CODE, NOT AGAINST GO. The twin's type switch is
+        // `switch t := v.(type)` with a `case float64` arm and NO arm for either
+        // box, so a jsJFlo and a jsGInt both fall through to the default "any" -
+        // `case float64:` in a type switch of interface{} does not match a
+        // float64 held in a `var f float64` slot, and `case int:` does not match
+        // a uint8. Real go 1.26.5 answers "float64" for the first and "other"
+        // for the second, so the two halves agree with each other and one of
+        // them agrees with go; making layer 2 "right" here would have broken
+        // byte identity, which is the gate. Found by probe C, two lines.
+        if (floIs(v) || sintIs(v)) { got = "any" }
+        else if (v === Math.trunc(v)) { got = "int" }
+        else { got = "float64" }
+    }
+    else if (Array.isArray(v)) { got = "slice" }
+    else if (goIsDict(v)) { got = "map" }
+    else if (goIsObj(v)) {
+        var cls = goClassOf(v)
+        if (cls !== undefined) { got = goStrOf(cls.__name) }
+    }
+    if (want == "any" || want == "interface{}") { return got != "nil" }
+    return got == want
+}
+
+// min()/max(), the Go 1.21 builtins, over the callee's whole argument array.
+function js_gominmax(args, wantMax) {
+    if (!Array.isArray(args) || args.length == 0) { fail("min()/max() needs an argument") }
+    var best = args[0]
+    var i = 1
+    while (i < args.length) {
+        var v = args[i]
+        var less = false
+        if (typeof best == "string" && typeof v == "string") { less = v < best }
+        else { less = goNum(v) < goNum(best) }
+        if (less != wantMax) { best = v }
+        i = i + 1
+    }
+    return best
+}
+
+// clear(m) empties a map; clear(s) zeroes a slice's elements in place.
+function js_goclear(args) {
+    if (!Array.isArray(args) || args.length == 0) { fail("clear() needs an argument") }
+    var x = args[0]
+    if (goIsDict(x)) {
+        x.keys = []
+        x.vals = []
+        return undefined
+    }
+    if (Array.isArray(x)) {
+        var i = 0
+        while (i < x.length) { x[i] = 0; i = i + 1 }
+    }
+    return undefined
+}
+
+// A variadic parameter: the arguments from index i on, as a slice. `from` is the
+// ONE `_raw` parameter of this grammar - the emitter writes it with a bare
+// handle(i + off), so it arrives as a raw integer and not as a value handle.
+function js_gorest(args, from_raw) {
+    if (!Array.isArray(args)) { fail("js_gorest needs the argument array") }
+    var out = []
+    var i = from_raw
+    while (i < args.length) { out.push(args[i]); i = i + 1 }
+    return out
+}
+
+// A Go named-type conversion T(v). One numeric type carries every integer width,
+// so the sized forms truncate and mask; string(r) is the rune spelling and
+// string([]byte{...}) joins the code points. This is the UNSIZED path - the sized
+// one is the floor's js_giconv.
+function js_goconv(to, v) {
+    if (to == "string") {
+        if (typeof v == "number") { return goRuneStr(goIdx(v)) }
+        if (Array.isArray(v)) {
+            var out = ""
+            var i = 0
+            while (i < v.length) { out = out + goRuneStr(goIdx(v[i])); i = i + 1 }
+            return out
+        }
+        return goStrOf(v)
+    }
+    if (to == "[]byte" || to == "[]rune") {
+        // Both spellings decode to CODE POINTS, exactly like the interpreter's
+        // goConvert: the value model has one array type, so a later string(x)
+        // cannot tell bytes from runes apart. Identical for ASCII, which is what
+        // the byte form is used on.
+        var r = goRunes(goStrOf(v))
+        var arr = []
+        var k = 0
+        while (k < r.cps.length) { arr.push(r.cps[k]); k = k + 1 }
+        return arr
+    }
+    if (to == "bool") { return goTruthy(v) }
+    if (to == "float32" || to == "float64") {
+        // float64(x) BOXES: the result is a float64 whatever x was, which is what
+        // makes float64(7)/2 == 3.5.
+        return flo(goNum(v), 1)
+    }
+    var n = Math.trunc(goNum(v))
+    if (to == "byte" || to == "uint8") { return goMask(n, 256) }
+    if (to == "uint16") { return goMask(n, 65536) }
+    if (to == "uint32") { return goMask(n, 4294967296) }
+    if (to == "int8") { return goSignedMask(n, 256) }
+    if (to == "int16") { return goSignedMask(n, 65536) }
+    if (to == "int32" || to == "rune") { return goSignedMask(n, 4294967296) }
+    if (to.indexOf("int") == 0 || to.indexOf("uint") == 0) { return n }
+    return v                    // a named struct / interface type: unchanged
+}
+
+// int64(n) & (m-1), for a power-of-two m. n is exact in a double here (the sized
+// widths are all below 2^53 after the mask), so the remainder is exact too.
+function goMask(n, m) {
+    var r = n % m
+    if (r < 0) { r = r + m }
+    return r
+}
+
+function goSignedMask(n, m) {
+    var r = goMask(n, m)
+    if (r >= m / 2) { r = r - m }
+    return r
+}
+
+// rt.truthy, for the bool(x) conversion only.
+function goTruthy(v) {
+    if (v === undefined || v === null) { return false }
+    if (v === true) { return true }
+    if (v === false) { return false }
+    if (typeof v == "number") {
+        var n = goNum(v)
+        if (n !== n) { return false }
+        return n != 0
+    }
+    if (typeof v == "string") { return v.length > 0 }
+    return true
+}
+
+// Go's == and != (see goValueEq: value equality for structs and arrays).
+function js_goeq(a, b) { return goValueEq(a, b) }
+function js_gone(a, b) { return !goValueEq(a, b) }
+
+// ----- struct fields and methods --------------------------------------------
+
+// A Go field read: the struct's own fields, then the PROMOTED fields of an
+// embedded struct, then a method VALUE, then a method EXPRESSION off the
+// descriptor itself, then the ordinary member lookup.
+function js_gofield(o, kv) {
+    var key = goStrOf(kv)
+    if (goIsObj(o)) {
+        if (goHas(o, key)) { return o[key] }
+        var cls = goClassOf(o)
+        if (cls !== undefined) {
+            var fs = cls.__fields
+            if (Array.isArray(fs)) {
+                var i = 0
+                while (i < fs.length) {
+                    var inner = o[goStrOf(fs[i])]
+                    if (goIsObj(inner) && inner.__class !== undefined) {
+                        if (goHas(inner, key)) { return inner[key] }
+                    }
+                    i = i + 1
+                }
+            }
+        }
+        // A METHOD VALUE: the receiver is bound now (and a value receiver is
+        // COPIED now), so later writes to the variable do not reach it.
+        var mv = goMethod(o, key)
+        if (mv !== undefined) { return goBind(mv.fn, mv.recv) }
+        // A METHOD EXPRESSION: T.m off the descriptor itself. The compiled method
+        // already takes its receiver as the first argument, so the raw function
+        // IS the method expression.
+        if (o.__isclass === true && goHas(o, key)) { return o[key] }
+    }
+    return goGetMember(o, key)
+}
+
+// rt.goMethod: the method named `name` on v's descriptor, with Go's receiver
+// semantics (a value receiver gets a COPY), or undefined. Promotion: a method of
+// an embedded struct is a method of the outer one.
+function goMethod(v, name) {
+    var cls = goClassOf(v)
+    if (cls === undefined) { return undefined }
+    var fn = cls[name]
+    if (goIsFn(fn)) {
+        var recv = v
+        if (cls["__ptr$" + name] !== true) { recv = goCopyVal(v) }
+        return {fn: fn, recv: recv}
+    }
+    var fs = cls.__fields
+    if (Array.isArray(fs)) {
+        var i = 0
+        while (i < fs.length) {
+            var inner = v[goStrOf(fs[i])]
+            if (goClassOf(inner) !== undefined) {
+                var got = goMethod(inner, name)
+                if (got !== undefined) { return got }
+            }
+            i = i + 1
+        }
+    }
+    return undefined
+}
+
+// A bound method: a closure that prepends the receiver, which is what the Go
+// twin's jsHostFunc wrapper is.
+function goBind(fn, recv) {
+    return function() { return fn.apply(undefined, goPrepend(recv, arguments)) }
+}
+
+function goPrepend(v, args) {
+    var out = [v]
+    var i = 0
+    while (i < args.length) { out.push(args[i]); i = i + 1 }
+    return out
+}
+
+// A Go method call: the struct's own methods and the promoted methods of an
+// embedded struct, with Go's receiver semantics. Anything else - a string or
+// slice builtin - falls through to the ordinary member call.
+function js_gomcall(recv, namev, args) {
+    if (!Array.isArray(args)) { fail("js_gomcall args must be an array") }
+    var name = goStrOf(namev)
+    var mv = goMethod(recv, name)
+    if (mv !== undefined) { return mv.fn.apply(undefined, goPrepend(mv.recv, args)) }
+    return goMemberCall(recv, name, args)
+}
+
+// rt.getMember, over what a Go program can reach through it: a package object's
+// exported function, a struct field the field walk above did not find, and the
+// two lengths. Everything Go spells as a method on a builtin type is a package
+// FUNCTION (strings.ToUpper, not "abc".ToUpper), so this surface is small.
+function goGetMember(o, key) {
+    if (o === undefined || o === null) { fail("nil dereference reading ." + key) }
+    if (typeof o == "string") {
+        if (key == "length") { return o.length }
+        return undefined
+    }
+    if (Array.isArray(o)) {
+        if (key == "length") { return o.length }
+        return undefined
+    }
+    if (goIsObj(o)) { return o[key] }
+    return undefined
+}
+
+// rt.memberCall's residue: a callable member, called with the receiver already
+// resolved (goMethod handled every case that prepends one).
+function goMemberCall(recv, name, args) {
+    var f = goGetMember(recv, name)
+    if (goIsFn(f)) { return f.apply(undefined, args) }
+    fail("unknown method '" + name + "'")
+    return undefined
+}
+
+// ----- panic / defer / recover ----------------------------------------------
+//
+// A compiled Go function runs its BODY in a closure that js_gotry calls, so a
+// panic unwinding through the frame is caught HERE: the frame's deferred
+// functions still run afterwards, and a recover() in one of them takes the panic
+// value and stops the unwinding. js_gorepanic (emitted after the defers)
+// re-raises whatever was not recovered.
+//
+// goPanics is the Go twin's []interface{} with nil for "no panic here"; MetaJS
+// has no nil that a Go value cannot also be (a panic(nil) is legal), so the
+// "was there one" bit is a parallel array rather than a sentinel.
+
+var goPanics = []
+var goPanicSet = []
+var goDeferAt = []
+
+function js_gotry(fn) {
+    goPanics.push(undefined)
+    goPanicSet.push(false)
+    var res = anytype
+    res = undefined
+    try {
+        res = fn()
+    } catch (e) {
+        goPanics[goPanics.length - 1] = e
+        goPanicSet[goPanicSet.length - 1] = true
+        res = undefined
+    }
+    return res
+}
+
+function js_gorepanic() {
+    var n = goPanics.length - 1
+    var p = goPanics[n]
+    var had = goPanicSet[n]
+    goPanics.pop()
+    goPanicSet.pop()
+    if (had) { throw p }
+    return undefined
+}
+
+// panic(v): the argument array is the callee's.
+function js_gopanic(args) {
+    var v = anytype
+    v = undefined
+    if (Array.isArray(args) && args.length > 0) { v = args[0] }
+    throw v
+}
+
+// recover(): the pending panic of the frame whose defers are running, or nil.
+// Only a function DEFERRED by that frame may recover its panic: it is one frame
+// deeper (or, for a native callee, none) - which is what the `> at + 2` test says.
+function js_gorecover() {
+    if (goDeferAt.length == 0) { return null }
+    var at = goDeferAt[goDeferAt.length - 1]
+    if (at < 0 || at >= goPanics.length || goPanics.length > at + 2) { return null }
+    if (!goPanicSet[at]) { return null }
+    var p = goPanics[at]
+    goPanics[at] = undefined
+    goPanicSet[at] = false
+    return p
+}
+
+// Runs collected [f, args] pairs LIFO (Go defer). goDeferAt records WHICH frame
+// these defers belong to, for a recover() inside one of them, and is popped even
+// when a defer panics itself - MetaJS has no `finally` here, so the unwinding
+// path pops it explicitly and rethrows.
+function js_rundefers(list) {
+    if (!Array.isArray(list)) { fail("js_rundefers needs the defer list") }
+    goDeferAt.push(goPanics.length - 1)
+    try {
+        var i = list.length - 1
+        while (i >= 0) {
+            var pair = list[i]
+            if (!Array.isArray(pair) || pair.length != 2) { fail("broken defer entry") }
+            var f = pair[0]
+            var as = pair[1]
+            if (!Array.isArray(as)) { as = [] }
+            f.apply(undefined, as)
+            i = i - 1
+        }
+    } catch (e) {
+        goDeferAt.pop()
+        throw e
+    }
+    goDeferAt.pop()
+    return undefined
+}
+
+// ----- goroutines and channels ----------------------------------------------
+//
+// THE ONE GENUINELY NEW QUESTION OF THIS MIGRATION, and the answer is that the
+// floor's coroutine primitive (tags 15/16, a real second stack) is NOT needed.
+// Concurrency in both halves is COOPERATIVE and DETERMINISTIC: `go f(...)` puts
+// an already-bound nullary closure on goQueue and returns, and a receive that
+// finds its channel empty RUNS THE QUEUE - each queued goroutine to completion,
+// in spawn order - until one of them fills the channel. Nothing ever suspends
+// mid-body, so there is no stack to keep. The buffer size of `make(chan T, n)`
+// is not modeled (a send never blocks), the ELEMENT TYPE is, so a receive from a
+// closed channel yields its zero value.
+
+var goQueue = []
+
+function goIsChan(v) {
+    if (!goIsObj(v)) { return false }
+    if (v.__chan !== true) { return false }
+    return Array.isArray(v.buf)
+}
+
+// goDrain runs every queued goroutine to completion, in spawn order. The guard
+// is the Go twin's, and it is what turns a producer that never ends into a
+// bounded failure rather than a hang.
+function goDrain() {
+    var guard = 0
+    while (goQueue.length > 0 && guard < 1000000) {
+        guard = guard + 1
+        var t = goQueue[0]
+        var rest = []
+        var i = 1
+        while (i < goQueue.length) { rest.push(goQueue[i]); i = i + 1 }
+        goQueue = rest
+        t.apply(undefined, [])
+    }
+    return undefined
+}
+
+// goChanRecv takes one value; ok is false exactly when the channel is closed and
+// drained, and the value is then the element type's zero value.
+function goChanRecv(ch) {
+    if (!goIsChan(ch)) { fail("receive from a non-channel") }
+    if (ch.buf.length == 0) { goDrain() }
+    if (ch.buf.length == 0) {
+        if (ch.closed === true) { return {v: goZeroOf(goStrOf(ch.czero)), ok: false} }
+        fail("all goroutines are asleep - deadlock")
+    }
+    var first = ch.buf[0]
+    var rest = []
+    var i = 1
+    while (i < ch.buf.length) { rest.push(ch.buf[i]); i = i + 1 }
+    ch.buf = rest
+    return {v: first, ok: true}
+}
+
+function goZeroOf(ty) {
+    if (ty.indexOf("int") == 0 || ty.indexOf("uint") == 0 || ty.indexOf("byte") == 0
+        || ty.indexOf("rune") == 0 || ty.indexOf("float") == 0) { return 0 }
+    if (ty.indexOf("string") == 0) { return "" }
+    if (ty.indexOf("bool") == 0) { return false }
+    return null
+}
+
+function js_gochan_new(ty) {
+    return {__chan: true, buf: [], closed: false, czero: goStrOf(ty)}
+}
+
+function js_gochan_send(ch, v) {
+    if (!goIsChan(ch)) { fail("send on a non-channel") }
+    if (ch.closed === true) { fail("send on closed channel") }
+    ch.buf.push(v)
+    return undefined
+}
+
+function js_gochan_recv(ch) { return goChanRecv(ch).v }
+
+// v, ok := <-ch: the pair, as a two-element array the emitted code indexes.
+function js_gochan_recvok(ch) {
+    var st = goChanRecv(ch)
+    return [st.v, st.ok]
+}
+
+// Can a receive proceed WITHOUT blocking? What a select's arms ask before
+// falling back to the default arm; it drains the goroutine queue first.
+function js_gochan_ready(ch) {
+    if (!goIsChan(ch)) { fail("receive from a non-channel") }
+    if (ch.buf.length == 0 && ch.closed !== true) { goDrain() }
+    if (ch.buf.length > 0) { return true }
+    return ch.closed === true
+}
+
+// close(ch): the callee's argument array.
+function js_gochan_close(args) {
+    if (!Array.isArray(args) || args.length == 0) { fail("close() needs a channel") }
+    var ch = args[0]
+    if (!goIsChan(ch)) { fail("close() needs a channel") }
+    ch.closed = true
+    return undefined
+}
+
+// go f(...): queue the already-bound call.
+function js_gospawn(fn) {
+    goQueue.push(fn)
+    return undefined
+}
+
+// ----- fmt ------------------------------------------------------------------
+
+function js_goprint(args, mode) {
+    var m = goIdx(mode)
+    var out = gopCompose(args, m)
+    if (gopNewline(m)) { out = out + "\n" }
+    print(out)
+    return undefined
+}
+
+function js_gowrite(args, mode) {
+    var m = goIdx(mode)
+    var out = gopCompose(args, m)
+    if (gopNewline(m)) { out = out + "\n" }
+    print(out)
+    return undefined
+}
+
+function js_gostr(args, mode) {
+    var m = goIdx(mode)
+    if (m == GOP_ONE) { return gopStr(args) }
+    return gopCompose(args, m)
+}
+
+// ----- widths on the SLOTS a Go program declares ----------------------------
+//
+// The sized-integer box carries a width, but a width only exists where the
+// program wrote a type down, and a `var` declaration is not the only place that
+// happens: a struct FIELD, a slice ELEMENT and a map VALUE each have a declared
+// type of their own, and a value flowing into one has to adopt it or the width
+// is lost. A field's type is on the descriptor (__fields / __ftypes); a
+// container element has no type text at the write site at all, but its ZERO
+// VALUE was built from one, so the box already sitting in the slot IS the record
+// of the declared element type.
+
+// giTyBits: the width and signedness of the leading TYPE WORD of a type text.
+// undefined for anything that is not a sized integer type. int/int64 answer here
+// too - si_norm drops the box for them.
+function goTyBits(word) {
+    if (word == "int" || word == "int64") { return {w: 64, u: false} }
+    if (word == "int8") { return {w: 8, u: false} }
+    if (word == "int16") { return {w: 16, u: false} }
+    if (word == "int32" || word == "rune") { return {w: 32, u: false} }
+    if (word == "uint8" || word == "byte") { return {w: 8, u: true} }
+    if (word == "uint16") { return {w: 16, u: true} }
+    if (word == "uint32") { return {w: 32, u: true} }
+    if (word == "uint" || word == "uint64" || word == "uintptr") { return {w: 64, u: true} }
+    return undefined
+}
+
+// giTyWord: the leading TYPE WORD of a type text, which may carry trailing
+// whitespace, a comment or a following name.
+function goTyWord(ty) {
+    var i = 0
+    while (i < ty.length) {
+        var c = ty.charCodeAt(i)
+        var okc = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95
+        if (!okc) { break }
+        i = i + 1
+    }
+    return ty.substring(0, i)
+}
+
+// giAdoptText applies a declared type TEXT to a value. A float64 / float32 slot
+// BOXES, exactly as a `var d float64 = 1` declaration does - without it a
+// float64 struct field assigned a plain 1 divides as an integer.
+function goAdoptText(ty, v) {
+    if (!goNumeric(v)) { return v }
+    var word = goTyWord(ty)
+    if (word == "float64" || word == "float32") { return flo(goNum(v), 1) }
+    var b = goTyBits(word)
+    if (b === undefined) { return v }
+    return sintConv(v, b.w, b.u)
+}
+
+// giAdoptLike applies the width the slot ALREADY carries.
+function goAdoptLike(cur, v) {
+    if (!sintIs(cur)) { return v }
+    if (!goNumeric(v)) { return v }
+    return sintConv(v, sintWidth(cur), sintUns(cur))
+}
+
+// (typeText, value): the declared width of a slot whose type IS written at the
+// site - an append into a []uint8, a parameter binding.
+function js_giadopt(ty, v) {
+    if (typeof ty != "string") { return v }
+    return goAdoptText(ty, v)
+}
+
+// obj.name = v, at the field's declared width. Delegates the store itself.
+function js_gosetfield(o, namev, v) {
+    var name = goStrOf(namev)
+    var ty = goFieldTy(o, name)
+    if (ty == "") {
+        o[name] = v
+        return undefined
+    }
+    o[name] = goAdoptText(ty, v)
+    return undefined
+}
+
+// giFieldTy: the declared type text of one field of a struct value, read off its
+// descriptor. "" when the value is not a struct instance or the name is not one
+// of its fields (an embedded promotion, the slice header's own props).
+function goFieldTy(o, name) {
+    var cls = goClassOf(o)
+    if (cls === undefined) { return "" }
+    var fs = cls.__fields
+    var ft = cls.__ftypes
+    if (!Array.isArray(fs) || !Array.isArray(ft)) { return "" }
+    var i = 0
+    while (i < fs.length) {
+        if (fs[i] === name && i < ft.length) {
+            if (typeof ft[i] == "string") { return ft[i] }
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// s[i] = v THROUGH A SLICE HEADER: one extern instead of the three the emitted
+// IR used (read .a, add .o, js_pyset), so carrying the width here costs less
+// than the store cost before it. The width is the header's recorded element type
+// first - an empty []uint8 has no element to take one from - and the box already
+// in the slot second.
+function js_gisetsl(h, iv, v) {
+    if (!goIsObj(h)) { return js_pyset(h, iv, v) }
+    var arr = h.a
+    if (!Array.isArray(arr)) { return js_pyset(h, iv, v) }
+    var idx = goIdx(h.o) + goIdx(iv)
+    var nv = v
+    if (typeof h.et == "string") { nv = goAdoptText(h.et, v) }
+    else if (idx >= 0 && idx < arr.length) { nv = goAdoptLike(arr[idx], v) }
+    if (idx < 0 || idx >= arr.length) { fail("index " + idx + " out of range") }
+    arr[idx] = nv
+    return undefined
+}
+
+// x[i] = v, at the width the slot already carries. Delegates the store.
+function js_gisetat(c, k, v) {
+    var cur = goSlotOf(c, k)
+    if (cur === undefined) { return js_pyset(c, k, v) }
+    return js_pyset(c, k, goAdoptLike(cur, v))
+}
+
+// giSlotOf: the value a container slot holds right now - a map's entry (or its
+// zero value when the key is absent, which is exactly the boxed zero built from
+// the value type) and an array's element. Never fails: an out of range index or
+// a non-container simply has no width to offer.
+function goSlotOf(x, k) {
+    if (goIsDict(x)) {
+        var i = goDictFind(x.keys, k)
+        if (i >= 0) { return x.vals[i] }
+        return x.zero
+    }
+    if (Array.isArray(x)) {
+        var j = goIdx(k)
+        if (j < 0) { j = j + x.length }
+        if (j >= 0 && j < x.length) { return x[j] }
+    }
+    return undefined
+}
