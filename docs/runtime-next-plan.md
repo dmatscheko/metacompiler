@@ -884,6 +884,290 @@ interpreter's own bump `alloc`, and nothing frees it.
 
 # Part 3 - The remaining eleven languages
 
+## TWO THINGS EVERY ONE OF THE REMAINING NINE NEEDS - read this first
+
+Both came out of the PHP port. Neither is about PHP, both are cheap, and the second
+one is a **silently-wrong build** if it is missed - so it is the more dangerous.
+
+### 1. A scope probe belongs in the EMITTER, not in layer 2
+
+An extern that takes a scope handle and walks the chain - `js_phthis`,
+`js_phclslookup`, and their equivalent in every other language - **cannot be written
+in layer 2 at all.** A scope is the C floor's private storage; that is precisely why
+the Lua pilot moved `js_scope_decl`/`js_scope_set`/`js_scope_typeof` INTO the floor,
+and MetaJS reaches the floor only through host builtins, of which there is no scope
+one.
+
+It does not need a floor addition. Every such extern is a pure PROBE - *the value of
+this name if it is declared anywhere up the chain, else a default* - and an
+**emitter** may call `js_scope_typeof` and `js_scope_get`. So lower it in the
+grammar. `php-to-llvm-ir.abnf` does it with one module-level helper:
+
+```
+php_scope_probe(env, nm, dflt):
+    js_scope_typeof(env, nm) === "undefined" ? dflt : js_scope_get(env, nm)
+```
+
+A single helper FUNCTION rather than an inline branch is the part worth copying: it
+keeps every call site a single-value expression, so none of the twelve PHP ones had
+to be restructured into a block split. The two externs left the module (101 -> 100)
+and `llvm.Run` stayed at 306/306.
+
+The residue is any extern that needs a scope for something other than a probe. PHP
+had one, `js_phrtinit`, which hands the runtime the descriptors its own
+`DivisionByZeroError`/`ArithmeticError` are raised with. The fix is the same idea:
+**pass VALUES, not the scope** - the emitter is the side that may read a scope, so it
+reads it and hands over a plain array of name => descriptor. `abnf/jsrtphp.go`'s
+`phpRaise` accepts either shape, so nothing that was green went red.
+
+### 2. `core.truthyExt` returns a RAW INTEGER, and a `-rt-lib` shim must too
+
+The Lua pilot recorded `_raw` PARAMETERS - an argument that is not a value handle.
+**The mirror image exists, and it is worse.** `compile-core`'s `truthy()` is
+
+```
+b.NewICmp(IPredNE, callExt(b, core.truthyExt, [v]), handle(0))
+```
+
+which compares the extern's result against 0 **as a raw integer**. So `js_truthy` -
+and every language's own spelling of it - answers the integer 1 or 0 and *not a
+handle*. A `-rt-lib` shim hands back whatever `js_call` returned, so a MetaJS
+`false` arrives as the HANDLE of false, which is **2**, and `2 != 0`:
+
+> **Every condition in the program is taken. The build is silently wrong, it
+> compiles, it links, and nothing in the suite looks at it.**
+
+`languages/metajs-to-llvm-ir.abnf`'s export scanner now understands a `__raw` suffix
+on the FUNCTION NAME, symmetric to `_raw` on a parameter: the symbol is exported
+without the suffix and the result is put through the floor's own `js_truthy`, which
+is exactly the raw 1/0 the caller compares. Layer 2 writes
+
+```
+function js_phtruthy__raw(v) { return phTest(v) }
+```
+
+**Every remaining language has a `core.truthyExt`, so all nine need this**, and any
+other extern whose result the emitter consumes as a raw integer rather than a handle
+needs it too - check each emitter for `NewICmp` on a `callExt` result. `lua-rt.ll`
+regenerates byte-identically under the change, and so does `abnf/jsbootstrap.ll`.
+
+Conversely, `_raw` PARAMETERS are **not** universal: `php-to-llvm-ir.abnf` passes
+every operator selector with `emitStr`/`emitNum` and has **zero** of them, where Lua
+had three. Check each emitter rather than assuming either way.
+
+## PHP - PARTIAL (2026-08-03). A native PHP binary exists; three walls are named
+
+**PHP now compiles to a self-contained native binary, and 221 of the 306 ratchet
+assertions run in it byte-identically with `llvm.Run`.** The gate is NOT met: the
+remaining 85 are blocked by three *floor* primitives that do not exist, and those
+three are the result that matters, because they are language-NEUTRAL and every one
+of the remaining nine languages will meet at least one of them.
+
+> **PHP IS NOT IN THE NATIVE ROW OF `tests/clang-check.sh`, AND THAT IS DELIBERATE.**
+> The row builds and runs `tests/php-test-full.php`, which cannot pass until WALL 1
+> and WALL 2 below are closed, so the row would be **permanently red** - and a
+> permanently red row destroys its own signal: readers learn to expect the failure
+> and the next genuine regression hides behind it. The suite is 16/16 and php reads
+>
+> ```
+> php   51085   ok (module only - links natively, row HELD: see the grammar)
+> ```
+>
+> The native path is fully built and reproducible **by hand**:
+>
+> ```
+> mec languages/php-to-llvm-ir.abnf tests/php-test-features.php -q -exe /tmp/php-native.out
+> /tmp/php-native.out                       # features: 127 checks, 0 failures
+> mec -i tests/imports languages/php-to-llvm-ir.abnf tests/php-test-multifile.php \
+>     -q -exe /tmp/php-native-multi.out
+> /tmp/php-native-multi.out                 # php multifile test passed
+> ```
+>
+> **Turning the row on is one line.** `languages/php-to-llvm-ir.abnf` carries a
+> `clang-check: native-row-held` comment immediately above its `-exe` branch;
+> `tests/clang-check.sh` reads it and prints the HELD row instead of building.
+> Delete that comment line and php joins the run-it row.
+>
+> It is a separate marker rather than hiding the `exePath` literal on purpose:
+> `main.go` greps this same file for `exePath` and REFUSES `-exe` without it,
+> precisely so that a grammar which ignores the flag cannot look like a successful
+> native build. Splitting that literal was tried first and it defeated that guard -
+> the "native binary" that then appeared to pass was a stale file from an earlier
+> build. The two greps ask different questions and now have different markers:
+> `exePath` is "does this grammar link natively at all", the held marker is "does
+> its whole ratchet pass natively yet".
+
+PHP was picked because it is the only one of the eleven whose Go twin uses zero
+`jsJFlo`. That held: the 64 bit integer half of PHP needed **no new code at all** -
+`sint`/`sintOp`/`sintCmp`/`sintStr`/`sintNum` (the floor's tag 13, since `f19a8ad`)
+*is* PHP's int, and `languages/lib/php-rt.metajs` has no `i64` pair layer, where
+`lua-rt.metajs` needed ~200 lines of one. **The sized-integer floor tag paid for
+itself the first time it was reused.**
+
+### The extern split
+
+`tests/php-test-full.php` drives **100** externs (was 101; see the emitter lowering
+below). Over every `tests/php-test-*.php` the union is **106**.
+
+| where | count | what |
+|---|---|---|
+| already in the C floor | 29 | the generic primitives of phase 3 plus the five the Lua pilot added |
+| **layer 2**, language-NEUTRAL | 8 | `js_bytelen`, `js_jadd`, `js_mcall`, `js_range_len/key/val`, `js_genfn`, `js_yield` |
+| **layer 2**, PHP's own | 63 | `js_ph*` |
+
+`languages/lib/php-rt.ll` exports **79** symbols (the 77 the union needs, plus two
+loud stubs for the externs the emitter no longer emits).
+
+The eight neutral ones are **not PHP's** and belong in the floor for everyone -
+`js_range_*` is Go's `range`, `js_jadd` is Java/C# `+`, `js_mcall` is the shared
+method dispatcher, `js_bytelen` is `len(string)`. They are implemented here rather
+than in the floor only because the floor is owned by another agent this session.
+Two of them cannot go anywhere: see WALL 1.
+
+### THE THREE WALLS - the finding, and it changes the plan for the other nine
+
+Each is a missing FLOOR primitive, not anything about PHP.
+
+**WALL 1 - coroutines (`js_genfn`, `js_yield`).** A generator suspends a call stack
+and resumes it. The Go twin uses a goroutine and two channels. The C floor has
+`setjmp`/`longjmp` behind `js_throw`/`js_try`, which can UNWIND a stack but cannot
+resume one, and MetaJS has no continuations. **There is no spelling of this in layer
+2 at any effort.** Eager materialisation is not a way out: `tests/php-test-full.php`
+section 19 deliberately drives an *infinite* generator through `yield from`.
+
+The floor needs real stackful coroutines (a second stack plus `makecontext` or hand
+-rolled switching), or the emitter needs a state-machine transform of generator
+bodies. Both are substantial and neither was attempted. Cost here: **section 19, 10
+assertions.** This blocks `js`, `typescript`, `python` and `ruby` too.
+
+**WALL 2 - an object's own keys.** `var_dump` of an object, `==` between two
+objects, `(array)` on an object and `clone` all need the instance's own property
+names in insertion order. **The floor already has this, as the `js_keys` extern** -
+it went in for the Lua pilot. But an extern is only callable from an EMITTER; MetaJS
+has no `for..in` and the floor seeds no `Object`, so layer 2 cannot reach it. The
+fix is small and language-neutral: one `seed_root` for a `keysOf` host builtin over
+the `js_keys` that is already there, plus its twin in `abnf/jsrtint.go`'s
+`giBindings` so `llvm.Run` agrees. **Reported and not made, because the C floor is
+owned by another agent this session.** Cost: **sections 17 and 20 and part of 30,
+~75 assertions.** Every language with reflective objects meets this.
+
+**WALL 3 - the scope chain, and it is NOT a floor change.** `js_phthis`,
+`js_phclslookup` and `js_phrtinit` each took a SCOPE handle and walked it. A scope is
+the floor's private storage - which is exactly why the Lua pilot put
+`js_scope_decl`/`set`/`typeof` INTO the floor - so layer 2 cannot open one.
+
+Two of the three needed nothing: they are pure PROBES, and **an emitter may call
+`js_scope_typeof` and `js_scope_get`**. `php-to-llvm-ir.abnf` now lowers both
+through one module-level `php_scope_probe(env, name, dflt)` helper, which keeps
+every one of the twelve call sites a single-value expression. The externs are gone
+from the module (101 -> 100) and `llvm.Run` is still 306/306.
+
+> **The generalisation: a scope probe belongs in the emitter, not in layer 2.**
+> Expect one per language and expect it to be cheap.
+
+`js_phrtinit` is the residue: it hands the runtime the class descriptors PHP's own
+`DivisionByZeroError`/`ArithmeticError` are raised with. It now receives a **PHP
+array of name => descriptor** - a plain VALUE both halves can read - built by the
+emitter, which is the side that may read the scope. `abnf/jsrtphp.go`'s `phpRaise`
+accepts either shape, so nothing that was green went red.
+
+### A FOURTH trap, fixed: an extern that returns a RAW integer
+
+This is the second of the two cross-cutting findings at the top of this part. PHP's
+`core.truthyExt` is `js_phtruthy`, `compile-core` compares its result against 0 as a
+RAW integer, and a `-rt-lib` shim handing back a boolean HANDLE answers 2 for false -
+so every condition in the program would be taken, silently. Fixed with a `__raw`
+suffix convention in `languages/metajs-to-llvm-ir.abnf`'s export scanner; layer 2
+writes `function js_phtruthy__raw(v)`. **All nine remaining languages need it.**
+See "TWO THINGS EVERY ONE OF THE REMAINING NINE NEEDS" above.
+
+PHP is also a `_raw` PARAMETER *exception*: it passes every operator selector with
+`emitStr`/`emitNum` and has **zero** of them, where Lua had three.
+
+### Ground truth
+
+```
+matrix                325/325
+--full                5,569 assertions, 0 languages whose halves disagree (php 306)
+--cross               119 programs, 0 divergent
+go test ./abnf/       ok
+jsbootstrap.ll        regenerates BYTE-IDENTICALLY from source
+gen-runtime-ll.sh --check   runtime.ll  up to date        gen-lua-rt-ll.sh --check   up to date
+gen-bash-rt-ll.sh --check   up to date                    gen-batch-rt-ll.sh --check up to date
+gen-php-rt-ll.sh  --check   php-rt.ll   up to date (28,843 lines)
+clang-check           16/16, all accepted, suite GREEN. php links natively but its
+                      run-it row is HELD until WALL 1 and WALL 2 close (see above):
+                        php   51085   ok (module only - links natively, row HELD: ...)
+```
+
+Native vs `llvm.Run`, stdout **and** stderr **and** exit code:
+
+```
+php-test-1  php-test-features  php-test-complete  php-test-try  php-test-multifile
+                                                              all SAME (rc=0)
+php-test-undefconst                       SAME (rc=1); the runtime-error line is
+                                          identical, llvm.Run's driver adds one
+                                          "  ==> Fail" line of its own
+php-test-full, sections 17/19/20/30 held back (the walls)
+                                          221 of 306 assertions, BYTE-IDENTICAL, rc=0
+php-test-full, whole file                 aborts in section 17 at `clone`, WALL 2
+```
+
+### The differential probe, and the one defect it found
+
+A **20,255-line** probe - `+ - * / % **` over 51 values (0, +-1, both sides of 2^53,
+`PHP_INT_MAX`/`MIN` and their neighbours, the int32 edges, integral and non-integral
+floats, 1e100, 1e-100, +-INF, NAN, the booleans, null, and eleven numeric and
+non-numeric strings), all six comparisons plus `<=>` over the same 51, the five
+bitwise operators and `intdiv` over 13 integer values, unary minus, `~`, the four
+casts, the seven `is_*` predicates, `gettype`, `get_debug_type`, `var_dump` and the
+array-key normalisation - differs between `llvm.Run` and the native binary on
+**2 lines**, and both have the same cause, which is **not PHP's**:
+
+```
+                                    Go runtime   interpreter   C floor
+Math.pow(-0.5, 2147483647)              -0            -0          +0
+Math.pow(-0.5, 9007199254740991)        -0            -0          +0
+```
+
+**`d_pow` in `languages/lib/runtime.c` loses the sign of an UNDERFLOWED zero when
+the base is negative and the exponent is a large odd integer.** Two of the three
+engines agree with each other and the third does not; the reproduction above is
+plain MetaJS and needs no PHP. Reported rather than fixed - the C floor is owned by
+another agent this session.
+
+There is **no `php` binary on this machine** (`which php` -> not found), so real PHP
+could not be used as the oracle for this run. The probe compares our two engines
+only; `./test.sh --full` separately pins both halves against each other on 306
+hand-written assertions.
+
+### What is still owed for PHP
+
+1. WALL 2's `keysOf` floor primitive (`seed_root` over the `js_keys` that is
+   already in `runtime.c`, plus its `giBindings` twin in `abnf/jsrtint.go`), then
+   `js_phdump`/`js_phclone`/`js_pheq`/`js_phcast("array")` are ~60 lines of MetaJS
+   and sections 17, 20 and 30 close - **221 -> roughly 296 of 306**.
+2. WALL 1's coroutines, then section 19 closes and PHP meets the gate.
+3. Then delete the `clang-check: native-row-held` line from
+   `languages/php-to-llvm-ir.abnf` and php joins the run-it row.
+4. `abnf/jsrtphp.go` stays until then, as the plan requires.
+
+Both of item 1's pieces and the `d_pow` fix were dispatched to the C-floor owner on
+2026-08-03; the `-0` finding was independently confirmed against node.
+
+### launch.json entries wanted (not added - not my file)
+
+```
+"PHP native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["languages/php-to-llvm-ir.abnf", "tests/php-test-features.php", "-q", "-exe", "tests/php-native.out"]
+"PHP native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["-i", "tests/imports", "languages/php-to-llvm-ir.abnf", "tests/php-test-multifile.php", "-q", "-exe", "tests/php-native-multi.out"]
+```
+
+Both of those pass natively today. The full-syntax ratchet entry is deliberately
+**not** requested yet, for the same reason the clang-check row is held: it would be
+red until WALL 1 and WALL 2 are closed, and the matrix is a green-only suite.
+
 ## Order
 
 Sorted by extern count and Go-twin size, which is the best available proxy for effort:
@@ -900,7 +1184,7 @@ ruby              91   -   (semantics live in abnf/jsrt.go)
 go                92   630 (jsrtgolang)
 kotlin            96   5934
 python            99   -   (semantics live in abnf/jsrt.go)
-php              101   1968
+php              101   1968   <- DONE PARTIALLY 2026-08-03, see above
 ```
 
 Two adjustments to plain size order:
@@ -973,6 +1257,480 @@ the only one that is already native.
 29,670 lines, deletable a language at a time, only after that language passes natively.
 `jsrt.go`'s host-function globals (the pre-seeded `println` and friends) become MetaJS
 last, since every language depends on them.
+
+---
+
+# Coroutines - the fifth-language wall
+
+The PHP migration named WALL 1 as the one architectural blocker of the remaining
+rollout: "**Coroutines** (`js_genfn` / `js_yield`). No spelling in layer 2 at any
+effort." This section settles it. Short version:
+
+- **It is four languages, not five.** Ruby needs nothing at all - measured, below.
+- **The C floor can host a real resumable coroutine**, expressible in the C subset
+  `c-to-llvm-ir.abnf` accepts, with no change to any emitter and no change to
+  `abnf/jsrt.go`. A proof of concept runs **byte-identically under `llvm.Run` and
+  as a clang-linked native binary**, in all four collector modes.
+- The emitted IR does not change **at all**, which is the property the two-worlds
+  constraint really asks for: the module below is one file, run in both engines.
+- **The recommendation is option B, and the one thing that worries me is throw.**
+  A `throw` that crosses a yield is currently undefined behaviour, and
+  `MEC_GC=stress` catches it - the evidence, and the fix, are at the end.
+
+Everything here is in NEW files: `tests/coro-poc/` and `abnf/coropoc_test.go`.
+`languages/lib/runtime.c` is never written to - `tests/coro-poc/coro-floor.py`
+reads it (or `git show HEAD:` of it) and patches a COPY.
+
+## 1. The requirement, per language, from the ratchet files
+
+`js_genfn`/`js_yield` in `abnf/jsrt.go` (lines 434-579, 5376-5405) are a
+goroutine plus two unbuffered channels: `js_genfn` wraps a compiled closure so
+that CALLING it runs nothing and answers a `jsGenerator`; `step()` starts the
+body on its own goroutine and hands over on `resume`/`yields`, strictly
+alternating, so exactly one goroutine runs at a time and no runtime state is
+locked. `js_yield` sends out and reads back in one line each.
+
+Which languages reach which part of that, and what their own ratchet actually
+drives:
+
+```
+language     emits js_genfn   ratchet needs                       hardest case
+ruby             NO           nothing                             -
+typescript       yes          one-directional next()              a single .next()
+csharp           yes          one-directional, GENUINELY LAZY     infinite iterator
+php              yes          one-directional, GENUINELY LAZY     infinite generator
+js               yes          BIDIRECTIONAL next(v)               sit.next(21) === 42
+python           yes          BIDIRECTIONAL send(v)               e.send(21) == 42
+```
+
+**Ruby is not blocked and never was.** `Fiber|Enumerator|\.lazy|to_enum|enum_for`
+has no match in any `tests/ruby-test-*.rb`, `ruby-to-llvm-ir.abnf` emits no
+`js_genfn`, and `tests/ruby-test-full.rb:27` puts "threads/fibers/ractors"
+explicitly out of scope. Ruby's `yield` is a **block call** - the callee invokes
+the block synchronously and it returns normally - which is a callback, not a
+coroutine. So WALL 1 blocks **php, js, typescript, python** (and csharp, which
+the PHP report did not list), and the plan should say four rather than five.
+
+**Eager materialisation is dead, and for two independent reasons.** The first is
+the one the PHP report gave - an infinite source:
+
+```php
+tests/php-test-full.php:492  function s19fib() { $a = 1; $b = 1; while (true) { yield $b; ... } }
+tests/php-test-full.php:494  function s19infdel() { $i = 0; while (true) { yield from s19one($i); $i++; } }
+tests/php-test-full.php:475  foreach (s19fib() as $n) { if ($n > 1000) { break; } $fib .= $n . ","; }
+tests/php-test-full.php:489  foreach (s19infdel() as $v) { if ($del === "012") { break; } $del .= $v; }
+```
+
+```csharp
+tests/csharp-test-full.cs:518  // An iterator block is LAZY: S19Endless never terminates on its own, so itr5 and
+tests/csharp-test-full.cs:519  // itr6 only pass if the sequence is produced one value at a time rather than
+tests/csharp-test-full.cs:520  // materialized at the call.
+tests/csharp-test-full.cs:534  { int i = 0; while (true) { yield return i; i = i + 1; } }
+```
+
+The second is **observable interleaving**, which even a finite generator has:
+
+```php
+tests/php-test-full.php:482  $og = function () use (&$order) { $order .= "y1;"; yield 1; $order .= "y2;"; yield 2; };
+tests/php-test-full.php:483  foreach ($og() as $v) { $order .= "c" . $v . ";"; }
+tests/php-test-full.php:484  check("gen9", $order === "y1;c1;y2;c2;");
+```
+
+An eager drain gives `y1;y2;c1;c2;`. Both PHP tests are pinned to php-src's own
+`tests/generators/` expectations, so they are not ours to relax.
+
+**Two languages need the value to travel BACK in**, which rules out anything that
+only produces a sequence:
+
+```js
+tests/js-test-full.js:311  var withSend = function* () { var got = yield 1; yield got * 2 }
+tests/js-test-full.js:314  check("gen5", sit.next(21).value === 42)
+```
+```python
+tests/python-test-full.py:311      def echo():
+tests/python-test-full.py:312          got = yield 1
+tests/python-test-full.py:313          yield got * 2
+tests/python-test-full.py:316      check("gen3", e.send(21) == 42)
+```
+
+Nothing in any of the six ratchets reaches `gen.throw()` or `gen.return()`
+(`jsGenerator.finish` is implemented and dead), and PHP's own header says
+`->send()` is out of scope. So the required surface is: **lazy pull, a value
+sent in, a `{value, done}` record carrying the body's return value**, and PHP's
+inspection half (`current`/`key`/`valid`/`getReturn`).
+
+One thing worth carrying: **js, typescript and python currently DRAIN in their
+loop lowering** (`js_iterable` in `js-to-llvm-ir.abnf:3567,4108`, `js_pyiter`
+in `abnf/jsrt.go`), so their for-loops are already eager and would hang on an
+infinite source. Their ratchets do not test one. That is a latent gap in those
+three, not a new cost of this work - but a real coroutine primitive is what
+makes it fixable at all.
+
+## 2. The options, costed against evidence
+
+### The constraint, stated precisely
+
+The emitted IR runs in two worlds and must stay byte-identical. It already does:
+`php-to-llvm-ir.abnf:4793`, `js-to-llvm-ir.abnf:3525`,
+`typescript-to-llvm-ir.abnf:3072`, `python-to-llvm-ir.abnf:3059` and
+`csharp-to-llvm-ir.abnf:2293` all emit `js_genfn` over a `js_closure` today, and
+`abnf/jsrt.go` implements it. **The only half that is missing is the C floor.**
+That asymmetry is the whole argument for what follows: an option that changes the
+floor changes ONE side of a working pair; an option that changes the emitter
+changes the side that is already correct, in five grammars, forever.
+
+### Option A - a CPS / state-machine transform in the emitter
+
+The generator body becomes a switch over resume points; no runtime stack is
+needed and the result is deterministic, which is what most compilers do.
+
+Costed, and rejected as the FIRST move:
+
+- **Five emitters, not one.** Every `yield` site (`php:2433,2518`,
+  `js:3556,3581`, `typescript:3103,3128`, `python:2488,2505`, `csharp:2278,2316`)
+  becomes a state split, and every one of them has `yield` in EXPRESSION position
+  (`var got = yield 1`), which means the split has to happen inside an expression
+  the emitter has already begun to lower.
+- **It has to survive `try`/`finally`.** The control-signal protocol
+  (`js_ctl_*` / `excDispatch` in `lib/compile-core.js`) is what a `return` out of
+  a `finally` uses today; a yield inside a try body would have to be reachable
+  from the state dispatcher as well, i.e. the exception machinery and the
+  generator machinery become one design instead of two.
+- **`yield from` over another generator** (`php:2518`, `python:2505`,
+  `typescript:3128`) is a loop whose body yields, so the transform has to nest.
+- It would also have to be written in the tag-script dialect. That is possible -
+  part 1a's one-entry phi shows an emitter can restructure blocks after the fact -
+  but it is a large piece of work in five files, and the measurement below says
+  the alternative is 260 lines in one.
+
+Option A stays the right ANSWER eventually (it removes the per-yield cost
+measured in section 3 entirely), but it is not the right FIRST move, and nothing
+in it is wasted by doing option B first: the extern surface is identical.
+
+### Option B - a real second stack in the C floor  <- RECOMMENDED
+
+Two sub-options, both measured on this machine (macOS 15.5, arm64, Apple clang):
+
+**B1, `makecontext`/`swapcontext`.** They work - the probe printed
+`resume 0 / yield 1 / ... / body done`, exit 0 - but they are **deprecated on
+darwin** ("first deprecated in macOS 10.6 - No longer supported") and, decisively,
+`runtime.c` has **no `#include`**: `ucontext_t` would have to be an over-allocated
+buffer whose `uc_stack.ss_sp`, `ss_size` and `uc_link` are written **by
+hard-coded byte offset**, and those offsets differ between darwin and linux.
+A floor that guesses a struct layout is not a floor.
+
+**B2, one pthread per generator with a strict handoff.** Every POSIX object here
+is reached through a POINTER to an over-allocated zeroed buffer that its own
+`*_init` fills in, so **no layout is needed anywhere** - the same source compiles
+on darwin and on linux. And it is a direct transliteration of the Go half: two
+alternating parties, exactly one running, no locking of runtime state.
+
+The one thing neither can do by itself: **`c-to-llvm-ir.abnf` has no real function
+pointers.** Measured rather than assumed -
+
+```
+$ mec languages/c-to-llvm-ir.abnf fp.c     # pthread_create(&t, 0, worker, 0)
+	%5 = sext i32 1 to i64
+	%6 = inttoptr i64 %5 to i32*
+	%9 = call i64 @pthread_create(i32* %2, i32* %4, i32* %6, i32* %8)
+```
+
+`worker` became the **funcId 1**, not an address. `pthread_create` and
+`makecontext` both need a real one. The fix costs no compiler change at all:
+`dlopen(0, 2)` + `dlsym(h, "coro_entry")` answers the address at run time, and it
+is portable (on darwin the main executable's symbols are exported by default; on
+linux the clang line wants `-rdynamic`, one flag in `buildExecutable`).
+
+**B2 ships in the proof of concept.** B1 is 6.3x faster and is the upgrade path;
+see the numbers in section 3.
+
+### Option C - a thread per generator with handoff synchronisation
+
+This IS B2. It is listed separately in the brief; in this architecture the two
+collapse, because a "second stack" obtained portably from C without headers is a
+thread stack.
+
+### Option D - eager draining, and Option E - replay
+
+Both dead, and both worth naming so nobody re-derives them. Eager draining:
+section 1's infinite sources. **Replay** - longjmp out of the body and re-run it
+from the start on the next resume, memoising the yields - is O(n^2) and, worse,
+re-executes side effects: `gen9` above would print `y1;y1;y2;` and the assertion
+that pins interleaving is exactly the one that catches it.
+
+### What each option does about the GC's conservative C-stack scan
+
+This is a real interaction, and it is the part of option B that had to be built
+rather than argued.
+
+Commit `1cd6a41` scans **one** stack: `gc_collect` walks from its own frame to
+`GC_STACK_BASE`, an anchor `main()` records. A suspended generator's stack holds
+handles that live NOWHERE ELSE - the loop counter of an infinite generator, an
+array built before a yield - so it is a root range exactly like the main stack,
+and a collection triggered while a coroutine runs must scan the RESUMER's parked
+stack for the same reason.
+
+The design that works, and is what the PoC implements:
+
+- **The running side owns `GC_STACK_BASE`.** Each side writes its own stack base
+  the moment it gains control, so a collection triggered inside a generator body
+  scans that body's stack and not `main`'s. (Break this and the PoC prints
+  `<nil>` where it should print `42` - see the table in section 3.)
+- **A registry of suspended stacks.** A coroutine publishes `sp` and a `setjmp`
+  of its callee-saved registers immediately BEFORE parking, and the resumer does
+  the same before handing off; `gc_roots` scans `[sp, base)` and the register
+  buffer for each, exactly as it already does for the `JB` `jmp_buf` pool.
+  Handoff is strictly alternating, so a parked side's stack is stable and NO
+  stop-the-world machinery is needed - which is the same reason the Go half needs
+  no locks.
+- **No handle lives in the malloc'd control block.** Everything that travels
+  between the two sides lives in the generator CELL, which is traced; the control
+  block holds raw longs plus the back-reference to that cell.
+- **Nothing moves**, so the conservative-roots-forbid-compaction property of 1b
+  is unaffected.
+
+Option A would need none of this - a state machine keeps its live values in a
+heap frame the ordinary tracer already reaches. That is the strongest technical
+argument for A and it is stated here rather than buried; it is outweighed, for
+now, by five emitters against one floor.
+
+## 3. The proof of concept
+
+```
+tests/coro-poc/gen.ll          ONE hand-written module, run in BOTH engines
+tests/coro-poc/coro-floor.py   patches a COPY of languages/lib/runtime.c
+tests/coro-poc/build.sh        builds, runs both engines, diffs; --gc, --break, --diff
+abnf/coropoc_test.go           the llvm.Run half (runJSModule, no grammar involved)
+```
+
+It is hand-written IR rather than a program in one of the five languages because
+no grammar in the tree both EMITS `js_genfn` and has a layer 2 that links
+natively today - php is the only one with a native layer 2 and its `js_genfn` is
+the loud stub this investigation exists to remove. The shapes are exactly what
+the five emitters already produce: `js_genfn` over a `js_closure`, `js_yield` in
+the body, `js_get(g, "next")` for the cursor.
+
+What it drives: **A** a finite generator, five `next()` calls, so the return
+value lands in the `{value, done}` record and a `next()` past the end answers
+`{undefined, true}`; **B** an INFINITE generator pulled five times with 3,000
+allocations between resumes; **C** a handle reachable only from the suspended
+body's frame, read back after 5,000 more allocations; **D** a body that allocates
+4,000 times before its first yield, so the collection it triggers runs while the
+RESUMER's stack is parked.
+
+### Ground truth
+
+```
+$ tests/coro-poc/build.sh
+=== llvm.Run (abnf/jsrt.go: a goroutine and two channels) ===
+1 false 2 false 3 false 99 true <nil> true          <- A (one value per line)
+0 false 10 false 20 false 30 false 40 false         <- B, the infinite one
+1 false 42 false 7 true                             <- C
+1 false 1234                                        <- D
+=== native (the C floor: a pthread and one condition variable), rc=0 ===
+   ... the same 29 lines ...
+===
+coro PoC: BYTE-IDENTICAL in both engines (29 lines)
+```
+
+Same result against a **clean `git show HEAD:languages/lib/runtime.c`** (1cd6a41)
+as against the working tree, and identical in all four collector modes:
+
+```
+--- the four collector modes, same binary ---
+off      rc=0   SAME       gc: collections=0     live=0      heap=10486656
+auto     rc=0   SAME       gc: collections=2     live=12224  heap=9438080
+stress   rc=0   SAME       gc: collections=58225 live=12208  heap=9438080
+poison   rc=0   SAME       gc: collections=2     live=12224  heap=10486656
+```
+
+### Discriminating power of each new GC root, measured
+
+`tests/coro-poc/build.sh --break` breaks one thing at a time in a fresh copy of
+the floor and re-runs under `MEC_GC=stress` (rc=1 means the binary died on its
+own check; "0 of 29" is an honest zero):
+
+```
+a suspended coroutine stack not scanned        rc=1   DIFFERS on 7 lines
+the parked registers not scanned               rc=0   0 of 29
+the RESUMER stacks not scanned                 rc=0   DIFFERS on 1 lines
+the RESUMER registers not scanned              rc=0   0 of 29
+the generator cell not a root                  rc=0   0 of 29
+tag 15 children not traced                     rc=1   DIFFERS on 29 lines
+tag 16 (the wrapped closure) not traced        rc=1   DIFFERS on 29 lines
+GC_STACK_BASE not switched on resume           rc=0   DIFFERS on 2 lines
+GC_STACK_BASE not switched back on yield       rc=0   0 of 29
+CUR_GEN not a root                             rc=0   0 of 29
+```
+
+The failure MODES are worth as much as the counts:
+
+```
+suspended coroutine stack not scanned   js runtime error: member '0' of undefined
+RESUMER stacks not scanned              prints 1 where it should print 1234   <- SILENT
+GC_STACK_BASE not switched on resume    prints <nil> where it should print 42 <- SILENT
+```
+
+Two of the three are **silently wrong answers**, which is the defect class this
+project cares most about and the reason the PoC has parts C and D at all: without
+part D the resumer-stack row was an honest zero and the root looked optional.
+
+The four honest zeros are stated, not hidden. The parked REGISTERS are zero
+because clang happened to spill every live handle of these bodies to the stack -
+that is a register allocator's habit, not a guarantee, and 1b already refused to
+let a root set depend on one. `CUR_GEN` and the generator-cell root are zero
+because this PoC never ABANDONS a generator; they exist for the program that
+drops one while its thread is parked.
+
+### The price, stated rather than buried
+
+200,000 resumes of an infinite generator, `/usr/bin/time -p`, best of three, every
+run printing the right answer and exiting 0:
+
+```
+                                          real   user   sys     per next()
+llvm.Run   goroutine + two channels        0.15   0.21   0.06     0.75 us
+native     pthread + one condvar (ships)   0.90   0.20   0.71     4.5  us
+```
+
+**The native half is 6x SLOWER than the Go half here**, which is an inversion of
+every other benchmark in this document, and all of it is `sys` - a condvar handoff
+is two kernel round trips. The raw ceiling, measured on the same machine with
+plain clang so the runtime is out of the way:
+
+```
+200,000 round trips   swapcontext      0.14 real   0.08 user   0.06 sys
+                      pthread condvar  0.88 real   0.09 user   0.82 sys
+```
+
+So **B1 would be 6.3x faster than B2 and would match the Go half exactly**, and
+option A would remove the switch altogether. Put in local terms: a generator
+resume costs about four function calls today - part 1b's table puts native
+`fib(26)` at 0.41 s over its ~393,000 calls, so about 1.0 us a call - and would
+cost well under one under B1.
+
+Memory, live suspended generators (each is a parked thread):
+
+```
+   200 generators     5.7 MB RSS        1,000    20 MB
+ 4,000 generators    73   MB RSS       10,000   180 MB      ~18 KB each
+```
+
+Linear, and 10,000 simultaneously suspended generators still exits 0. The PoC's
+`CORO[256]` registry is a fixed array and is the only hard limit; a growable one
+is trivial. A generator the program abandons keeps its thread parked forever -
+**the same cost `abnf/jsrt.go` already documents for its parked goroutine**
+("costs one blocked goroutine and is collected when the program ends").
+
+### The floor patch
+
+**260 added lines and one line rewritten** (`is_callable`), against
+`languages/lib/runtime.c`. Print it
+with `tests/coro-poc/build.sh --diff`; `coro-floor.py --head` produces the same
+patch against 1cd6a41 (it picks the cell field offsets off the tag-11 line of
+`gc_trace`, because the working tree has since dropped the block header). What it
+adds:
+
+```
+ 1  libc prototypes   dlopen dlsym pthread_{create,mutex_init,cond_init,
+                      mutex_lock,mutex_unlock,cond_wait,cond_broadcast}
+ 2  globals           CORO[256]/CORO_N, RES_LO/RES_HI/RES_JB/RES_N, CUR_GEN,
+                      CORO_ENTRY
+ 3  gc_trace          tag 15 (generator: a fn, b args, d lastValue, f sent/ret
+                      are handles; c is a RAW block pointer, e a raw flag) and
+                      tag 16 (generator function: a is the closure)
+ 4  gc_roots          every suspended coroutine stack + its parked registers,
+                      every parked resumer stack + registers, CUR_GEN
+ 5  is_callable       tag 16
+ 6  get_member        a generator's `next`  -> mk_bound(g, 60)
+ 7  js_call           tag 16 -> gen_create;  and the coroutine block itself:
+                      coro_alloc, gen_create, js_genfn, coro_entry, gen_resume,
+                      js_yield, gen_next
+ 8  builtin_method    mid 60 -> gen_next
+```
+
+**`abnf/jsrt.go` needs no change and no emitter needs a change.** That is the
+result: the module is one file and both engines run it.
+
+## 4. What it costs to do this for all four (five with csharp)
+
+The floor addition above is **language-neutral and paid once**. Per language,
+what remains is layer 2, and it is smaller than it looks because `get_member`
+answers `next` on a generator, so **a `-rt-lib` MetaJS file can drive one with
+ordinary member syntax**: `var r = g.next(v); if (r.done) { ... }`. Everything
+else in the generator protocol is layer 2 over that single primitive.
+
+```
+language     what layer 2 owes                                        estimate
+php          delete the two loud stubs from php-rt.metajs (the floor  ~80 lines
+             symbol then wins the link), then foreach-over-generator
+             as a next() loop, the __genkv key split, and a one-slot
+             lookahead buffer for current/key/valid/rewind/getReturn
+js / ts      it.next(v) is already the floor's shape; js_iterable     ~30 lines
+             becomes a next() loop instead of a drain
+python       send(v) = next(v) plus StopIteration carrying the body's ~50 lines
+             return value; close(); the generator-expression lowering
+             already goes through js_genfn
+csharp       MoveNext/Current over next(); yield break               ~40 lines
+ruby         nothing                                                      0
+```
+
+**Only PHP needs something the others do not**: the INSPECTION half
+(`current`/`key`/`valid`/`getReturn`, `tests/php-test-full.php:466-470`) and
+`yield $k => $v` keyed yields. Both are layer 2 over `next()` - a one-slot
+lookahead and an unpack of the `__genkv` record `abnf/jsrt.go:530` already
+defines - so neither is another floor primitive. **Only js and python need the
+value to travel back in**, and the floor's `next(v)` already does that (the PoC's
+`gen_next` passes `arg_at(args, 0)` straight into the suspended `js_yield`).
+
+So the honest total is: **one floor change of ~260 lines, then 30-80 lines of
+MetaJS per language.** That is a small fraction of the per-language extern work
+already costed in Part 3, and WALL 1 stops being the thing that makes four
+migrations wait for each other.
+
+## 5. The one thing that worries me
+
+**A `throw` that crosses a yield is undefined behaviour today, and it is not in
+the PoC.** `js_throw` `longjmp`s to a `jmp_buf` in the `JB` pool that was
+`setjmp`'d on the RESUMER's stack; from a coroutine thread that is a longjmp into
+another thread's frame. It appears to work:
+
+```
+$ ./thr2.out                    # a generator body throws, jsmain catches
+caught!
+after
+rc=0
+```
+
+and that is the trap - it "works" only because the resumer thread stays parked in
+`pthread_cond_wait` forever while the coroutine thread runs on its stack. Turn the
+collector up and it stops working:
+
+```
+$ MEC_GC=auto   ./thr2.out      caught! / after            rc=0
+$ MEC_GC=stress ./thr2.out      js runtime error: call of a non function value: undefined
+                                                            rc=1
+```
+
+The fix is known and is exactly what the Go half already does: `coro_entry`
+`setjmp`s a barrier of its own, a throw inside the body unwinds only to THAT,
+the thrown value is handed back through the generator cell, and `gen_resume`
+re-raises it on the resumer's stack (`abnf/jsrt.go:492-515` is the same three
+steps in `recover()` / re-`panic`). It also needs the `JB` `jmp_buf` pool to
+become per-coroutine rather than one global `JB_DEPTH`, which is the only part of
+the existing floor this touches. Perhaps 40 more lines - but it is 40 lines that
+were NOT written or measured here, and **no language may be migrated on this
+primitive until they are**, because the failure mode is a wrong answer under a
+collector setting rather than a crash.
+
+Two smaller things, recorded at the same standard:
+
+- **The PoC implements `next` only.** `current`/`key`/`valid`/`send`/`getReturn`/
+  `return` are argued above to be layer 2, but that argument is not executed.
+- **`-rdynamic`.** `dlsym` finds `coro_entry` without any link flag on darwin.
+  On linux the executable needs `-rdynamic`, i.e. one word in
+  `abnf/llvmlink.go`'s clang invocation. Not added, because nothing here builds
+  on linux to prove it.
 
 ---
 
