@@ -4646,22 +4646,50 @@ unchanged · `coro-poc/build.sh --gc` all four modes SAME, `--break` the same ro
 DIFFER and the same rows do not, verified against the archive rather than against
 the note.
 
-## KOTLIN - the eighth, the largest, and the row is HELD (2026-08-03)
+## KOTLIN - the eighth, the largest, and the row was RELEASED (2026-08-03)
 
-**`tests/kotlin-test-full.kt` is 979/979 under `llvm.Run` and the native binary
-links and runs, but does NOT yet pass all 979.** `tests/clang-check.sh` therefore
+**`tests/kotlin-test-full.kt` is 979/979 under `llvm.Run` AND in the native
+binary**, byte-identical on stdout, stderr and exit code. `tests/clang-check.sh`
 reads
 
 ```
-kotlin          NNNNN  ok (module only - links natively, row HELD: see the grammar)
+kotlin         179934  ok, and the clang executable agrees
 ```
 
-with the `clang-check: native-row-held` marker at the top of
-`languages/kotlin-to-llvm-ir.abnf`. That is the lifecycle PHP recorded and not a
-euphemism: php held at 221/306, the two missing primitives were built, and it
-released the row at 306/306. Deleting that ONE comment line is the whole of
-turning the row back on. **No suite is red, no assertion was moved, and
-`tests/kotlin-test-full.kt` was not touched.**
+The row WAS held at first, exactly as the text below this heading was written -
+the native binary linked and ran but did not pass all 979. Two defects closed the
+gap, both in `languages/lib/kotlin-rt.metajs` and neither in the emitter:
+
+- **`ktNum` ended in a blanket `return 0`.** Go's `rt.toNumber` maps `undefined`
+  to NaN and `null` to 0, everything else defaulting to NaN. The visible symptom
+  was `size + Unit` in `js_ktadd`'s tail. `ktNum` is used throughout the file, so
+  this is the widest-blast-radius edit in the kotlin port - it is backed by
+  979/979 plus both probes, and it is the first thing to suspect if kotlin ever
+  drifts.
+- **`ktRecvMember`'s accessor arm read `recv[name]` directly**, on a comment's
+  claim that the floor's member read resolves an accessor. It does not - the floor
+  hands back the `{__acc, get, set}` record. The arm was also dead code: the
+  `k4Own` arm above it already answers every own property. Replaced with a port of
+  `rt.findClassAccessor` (`jsrtkotlin.go:4845` -> `jsrt.go:2534`), walking the
+  `__class`/`__super` chain and calling the getter so `js_this()` binds the
+  receiver.
+
+A third finding was a **misdiagnosis corrected by measurement**, and is the more
+useful record: the divergence was first blamed on `ktRecvMember` resolving `size`
+versus `sum()` differently between the halves. A three-line repro showed both
+halves agreed all along - `sum` was the file's own top-level `fun sum(n: Node)`,
+shadowing the receiver in both. Always build the repro before believing the
+diagnosis.
+
+**No suite was red at any point, no assertion was moved, and
+`tests/kotlin-test-full.kt` was not touched.** Deleting the one
+`clang-check: native-row-held` comment line was the whole of releasing the row,
+which is what that mechanism is for. Committed as `8ded328`.
+
+Two kotlin tests still cannot be `-exe` built at all: `kotlin-test-recognize.kt`
+("assignment to a computed target not implemented") and `kotlin-test-widen2.kt`
+("index with more than one argument not implemented"). Both are compile-time
+emitter limits that fail identically under `llvm.Run` and predate this work.
 
 **There is no `kotlinc` and no `kotlin` on this machine** - `command -v kotlinc
 kotlin` is empty, and `/opt/homebrew/bin/kotlin*`, `/usr/local/bin/kotlin*` and
@@ -5308,11 +5336,14 @@ ruby              91   -   (semantics live in abnf/jsrt.go)   <- DONE 2026-08-03
                              layer-2 extern and added one floor one, so 93 stayed 93)
 go                92   630 (jsrtgolang)   <- DONE 2026-08-03, gate MET (84 measured,
                              83 before the js_gounctl lowering added its two floor calls)
-kotlin            96   5934   <- 2026-08-03, layer 2 BUILT and linking, the
-                             native row HELD (96 measured, 95 before the scope
-                             probes were lowered). Largest of the set.
+kotlin            96   5934   <- DONE 2026-08-03, gate MET, 979/979 native (96
+                             measured, 95 before the scope probes were lowered).
+                             Largest of the set; the row was held, then released.
 python            99   -   (semantics live in abnf/jsrt.go)
-php              101   1968   <- DONE PARTIALLY 2026-08-03, see above
+                             <- DONE 2026-08-03, gate MET, 261/261 native. Lowered
+                             SIX externs in the emitter, the most of any language.
+php              101   1968   <- DONE 2026-08-03, gate MET, 306/306 native. Held at
+                             221/306 until keysOf and coroutines landed, then released.
 ```
 
 Two adjustments to plain size order:
