@@ -1451,7 +1451,7 @@ KwContinue  = "continue" KwEnd ;
         var catchBody = null
         if (clauses.length > 0) {
             catchBody = function(b) {
-                var errV = callExt(b, "js_kget", [curScopeV, emitStr(b, "error")])
+                var errV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, "error")])
                 var rethrowB = curF.NewBlock("")
                 var doneB = curF.NewBlock("")
                 for (var k = 0; k < clauses.length; k++) {
@@ -1629,7 +1629,7 @@ KwContinue  = "continue" KwEnd ;
         var args = callExt(b, "js_arr_new", [])
         for (var i = 0; i < argv.length; i++) { callExt(b, "js_arr_push", [args, argv[i]]) }
         if (globalOps[op] == 1) {
-            var fV = callExt(b, "js_kget", [curScopeV, emitStr(b, op)])
+            var fV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, op)])
             return {b: b, v: callExt(b, "js_call", [fV, hUndef, args])}
         }
         // Declared inside a type: dispatch on the first operand.
@@ -2171,7 +2171,7 @@ KwContinue  = "continue" KwEnd ;
             for (var i = 0; i < names.length; i++) {
                 if (names[i] == "_") { continue }
                 var ev = callExt(b, "js_get", [r.v, emitStr(b, "" + i)])
-                callExt(b, "js_kset", [curScopeV, emitStr(b, names[i]), ev])
+                b.NewCall(rtKSet(), [curScopeV, emitStr(b, names[i]), ev])
             }
             return b
         }
@@ -2297,9 +2297,10 @@ KwContinue  = "continue" KwEnd ;
     // receiver's OWN properties. When the name is one some type computes (or one some
     // type declares as a method) and no local of that name is in scope, the read is a
     // dispatch on self instead. Names no type uses this way keep the plain js_kget.
-    var coreMakeVarRef = makeVarRef
+    // The plain read is the lowered sw_kget helper below rather than
+    // core.scopeGetExt: that field names an EXTERN, and js_kget is no longer one.
     makeVarRef = function(name) {
-        var plain = coreMakeVarRef(name)
+        var plain = function(b) { return {b: b, v: b.NewCall(rtKGet(), [curScopeV, emitStr(b, name)])} }
         return function(b) {
             if (!isComputedName(name) && !isMemberMethod(name)) { return plain(b) }
             var t = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
@@ -2307,9 +2308,9 @@ KwContinue  = "continue" KwEnd ;
             var selfB = curF.NewBlock("")
             var joinB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), selfB, localB)
-            var lv = callExt(localB, "js_kget", [curScopeV, emitStr(localB, name)])
+            var lv = localB.NewCall(rtKGet(), [curScopeV, emitStr(localB, name)])
             localB.NewBr(joinB)
-            var selfV = callExt(selfB, "js_kget", [selfB == null ? curScopeV : curScopeV, emitStr(selfB, "self")])
+            var selfV = selfB.NewCall(rtKGet(), [selfB == null ? curScopeV : curScopeV, emitStr(selfB, "self")])
             var sv
             if (isComputedName(name)) { sv = selfB.NewCall(rtGetProp(), [selfV, emitStr(selfB, name)]) }
             else { sv = callExt(selfB, "js_get", [selfV, emitStr(selfB, name)]) }
@@ -2502,6 +2503,72 @@ KwContinue  = "continue" KwEnd ;
             c2.NewCondBr(truthy(c2, callExt(c2, "js_seq", [callExt(c2, "js_typeof", [v]), emitStr(c2, "object")])), okB, noB)
             okB.NewRet(callExt(okB, "js_get", [v, ps[1]]))
             noB.NewRet(hUndef)
+        })
+    }
+    // ----- the scope probe, lowered here rather than left as an extern -----
+    //
+    // js_kget / js_kset used to be externs that took a SCOPE HANDLE and walked the
+    // chain. A scope is the C floor's PRIVATE storage - which is exactly why the Lua
+    // pilot moved js_scope_decl/js_scope_set/js_scope_typeof INTO the floor - so
+    // languages/lib/swift-rt.metajs (layer 2) cannot open one and could never have
+    // implemented either. See "TWO THINGS EVERY ONE OF THE REMAINING NINE NEEDS" in
+    // docs/runtime-next-plan.md part 3: this is the generalisation PHP recorded, and
+    // Swift is its second instance.
+    //
+    // Neither call needs a floor addition, because both are PROBES and an EMITTER may
+    // call js_scope_typeof / js_scope_get / js_scope_set. Two IR helpers rather than
+    // PHP's single-expression helper, because Swift's pair is the `this`-aware Kotlin
+    // shape: a name that is no local resolves against the properties of `self`.
+    //
+    // The one place this cannot be exact is a scope slot that HOLDS undefined:
+    // js_scope_typeof answers "undefined" for it and for an absent name alike, so such
+    // a name takes the self fallback and then, on a miss, the js_scope_get below -
+    // which returns the undefined it held under the Go twin and ABORTS in the C floor
+    // ("variable not defined"). Swift's grammar declares an uninitialised `let v: Int`
+    // as NULL, not undefined (see the `let v: Int` note further down), so no emitted
+    // binding takes that path; it is written out rather than hidden.
+    function rtKGet() {
+        return rtFunc("sw_kget", 2, function(b, ps) {
+            var localB = curF.NewBlock("")
+            var selfB = curF.NewBlock("")
+            var t = callExt(b, "js_scope_typeof", [ps[0], ps[1]])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), selfB, localB)
+            localB.NewRet(callExt(localB, "js_scope_get", [ps[0], ps[1]]))
+            // No local of that name: the FIRST `this` up the chain, if there is one.
+            var probeB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            var tt = callExt(selfB, "js_scope_typeof", [selfB == null ? ps[0] : ps[0], emitStr(selfB, "this")])
+            selfB.NewCondBr(truthy(selfB, callExt(selfB, "js_seq", [tt, emitStr(selfB, "undefined")])), missB, probeB)
+            var selfV = callExt(probeB, "js_scope_get", [ps[0], emitStr(probeB, "this")])
+            var mV = probeB.NewCall(rtSafeGet(), [selfV, ps[1]])
+            var hitB = curF.NewBlock("")
+            probeB.NewCondBr(truthy(probeB, callExt(probeB, "js_sne", [mV, hUndef])), hitB, missB)
+            hitB.NewRet(mV)
+            // Nothing anywhere: js_scope_get is the abort, and it is the SAME abort the
+            // extern used to raise, so a program that read an unknown name still dies.
+            missB.NewRet(callExt(missB, "js_scope_get", [ps[0], ps[1]]))
+        })
+    }
+    function rtKSet() {
+        return rtFunc("sw_kset", 3, function(b, ps) {
+            var localB = curF.NewBlock("")
+            var selfB = curF.NewBlock("")
+            var t = callExt(b, "js_scope_typeof", [ps[0], ps[1]])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), selfB, localB)
+            callExt(localB, "js_scope_set", [ps[0], ps[1], ps[2]])
+            localB.NewRet(handle(0))
+            var probeB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            var tt = callExt(selfB, "js_scope_typeof", [ps[0], emitStr(selfB, "this")])
+            selfB.NewCondBr(truthy(selfB, callExt(selfB, "js_seq", [tt, emitStr(selfB, "undefined")])), missB, probeB)
+            var selfV = callExt(probeB, "js_scope_get", [ps[0], emitStr(probeB, "this")])
+            var mV = probeB.NewCall(rtSafeGet(), [selfV, ps[1]])
+            var hitB = curF.NewBlock("")
+            probeB.NewCondBr(truthy(probeB, callExt(probeB, "js_sne", [mV, hUndef])), hitB, missB)
+            callExt(hitB, "js_set", [selfV, ps[1], ps[2]])
+            hitB.NewRet(handle(0))
+            callExt(missB, "js_scope_set", [ps[0], ps[1], ps[2]])
+            missB.NewRet(handle(0))
         })
     }
     // Finds a member on a value's type, walking the superclass chain, or undefined.
@@ -3147,7 +3214,7 @@ KwContinue  = "continue" KwEnd ;
         if (bt != null) {
             var ta = callExt(b, "js_arr_new", [])
             callExt(b, "js_arr_push", [ta, cur])
-            var tbl = callExt(b, "js_kget", [curScopeV, emitStr(b, "$ext$" + bt)])
+            var tbl = b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$ext$" + bt)])
             return callExt(b, "js_call", [callExt(b, "js_get", [tbl, emitStr(b, "__get_" + name)]), hUndef, ta])
         }
         if (isComputedName(name)) { return b.NewCall(rtGetProp(), [cur, emitStr(b, name)]) }
@@ -3178,9 +3245,9 @@ KwContinue  = "continue" KwEnd ;
             return function(b) {
                 var t = curType()
                 var sname = (t == null || t.superName == null) ? null : t.superName
-                var thisV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
+                var thisV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, "this")])
                 if (sname == null) { return {b: b, v: hUndef} }
-                var sV = callExt(b, "js_kget", [curScopeV, emitStr(b, sname)])
+                var sV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, sname)])
                 var s0 = suffixes[0]
                 var cur
                 if (s0.kind == "mcall") {
@@ -3244,7 +3311,7 @@ KwContinue  = "continue" KwEnd ;
                     callExt(b, "js_arr_push", [eb, cur])
                     var eab = emitArgRecsInto(b, s.args, eb)
                     b = eab.b
-                    var btbl = callExt(b, "js_kget", [curScopeV, emitStr(b, "$ext$" + builtinMethOf(s.name))])
+                    var btbl = b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$ext$" + builtinMethOf(s.name))])
                     cur = callExt(b, "js_call", [callExt(b, "js_get", [btbl, emitStr(b, s.name)]), hUndef, eb])
                     emitWriteBacks(b, eab.boxes)
                 } else if (s.kind == "mcall" && classNames[s.name] == 1) {
@@ -3346,7 +3413,7 @@ KwContinue  = "continue" KwEnd ;
                 env = callExt(b, "js_scope_new", [curScopeV])
                 for (var ci = 0; ci < caps.length; ci++) {
                     callExt(b, "js_scope_decl", [env, emitStr(b, caps[ci]),
-                                                 callExt(b, "js_kget", [curScopeV, emitStr(b, caps[ci])])])
+                                                 b.NewCall(rtKGet(), [curScopeV, emitStr(b, caps[ci])])])
                 }
             }
             var savedEnv = curScopeV
@@ -3447,7 +3514,7 @@ KwContinue  = "continue" KwEnd ;
                 var box = callExt(b, "js_obj_new", [])
                 callExt(b, "js_set", [box, emitStr(b, "__ref"), emitNum(b, 1)])
                 callExt(b, "js_set", [box, emitStr(b, "v"),
-                                      callExt(b, "js_kget", [curScopeV, emitStr(b, recs[i].ref)])])
+                                      b.NewCall(rtKGet(), [curScopeV, emitStr(b, recs[i].ref)])])
                 v = box
                 boxes.push({name: recs[i].ref, box: box})
             } else if (recs[i].dflt != null) {
@@ -3465,7 +3532,7 @@ KwContinue  = "continue" KwEnd ;
     }
     function emitWriteBacks(b, boxes) {
         for (var i = 0; i < boxes.length; i++) {
-            callExt(b, "js_kset", [curScopeV, emitStr(b, boxes[i].name),
+            b.NewCall(rtKSet(), [curScopeV, emitStr(b, boxes[i].name),
                                    callExt(b, "js_get", [boxes[i].box, emitStr(b, "v")])])
         }
     }
@@ -3554,13 +3621,13 @@ KwContinue  = "continue" KwEnd ;
         return function(b) {
             // E(rawValue: r): the failable initializer every raw-value enum gets free.
             if (enumNames[name] == 1) {
-                var eV = callExt(b, "js_kget", [curScopeV, emitStr(b, name)])
+                var eV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, name)])
                 var ear = emitArgRecs(b, args)
                 b = ear.b
                 return {b: b, v: b.NewCall(rtRawCase(), [eV, callExt(b, "js_pyget", [ear.v, emitNum(b, 0)])])}
             }
             if (classNames[name] == 1) {
-                var clsV = callExt(b, "js_kget", [curScopeV, emitStr(b, name)])
+                var clsV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, name)])
                 return emitConstruct(b, name, clsV, args)
             }
             var ea = emitArgRecs(b, args)
@@ -3574,15 +3641,15 @@ KwContinue  = "continue" KwEnd ;
                 var selfB = curF.NewBlock("")
                 var joinB = curF.NewBlock("")
                 b.NewCondBr(truthy(b, callExt(b, "js_seq", [tv, emitStr(b, "undefined")])), selfB, localB)
-                var lv = callExt(localB, "js_call", [callExt(localB, "js_kget", [curScopeV, emitStr(localB, name)]), hUndef, ea.v])
+                var lv = callExt(localB, "js_call", [localB.NewCall(rtKGet(), [curScopeV, emitStr(localB, name)]), hUndef, ea.v])
                 localB.NewBr(joinB)
-                var sv = callExt(selfB, "js_mcall", [callExt(selfB, "js_kget", [curScopeV, emitStr(selfB, "self")]),
+                var sv = callExt(selfB, "js_mcall", [selfB.NewCall(rtKGet(), [curScopeV, emitStr(selfB, "self")]),
                                                     emitStr(selfB, name), ea.v])
                 selfB.NewBr(joinB)
                 emitWriteBacks(joinB, ea.boxes)
                 return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(sv, selfB)])}
             }
-            var fV = callExt(b, "js_kget", [curScopeV, emitStr(b, name)])
+            var fV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, name)])
             var rv = callExt(b, "js_call", [fV, hUndef, ea.v])
             emitWriteBacks(b, ea.boxes)
             return {b: b, v: rv}
@@ -3593,7 +3660,7 @@ KwContinue  = "continue" KwEnd ;
     // properties of self); a .field path targets js_get/js_set; an [i] path
     // targets js_pyget/js_pyset (arrays and dictionaries).
     function emitRefPath(b, ref) {
-        var o = callExt(b, "js_kget", [curScopeV, emitStr(b, ref.name)])
+        var o = b.NewCall(rtKGet(), [curScopeV, emitStr(b, ref.name)])
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) { o = emitFieldRead(b, o, s.key) }
@@ -3617,7 +3684,7 @@ KwContinue  = "continue" KwEnd ;
                 if (ref.name == "_") { return {b: b, v: v} }
                 var nameV = emitStr(b, ref.name)
                 if (op != "=") {
-                    var old = callExt(b, "js_kget", [curScopeV, nameV])
+                    var old = b.NewCall(rtKGet(), [curScopeV, nameV])
                     v = emitBin(b, op, old, v)
                 }
                 // An unqualified write inside a member body may target a computed,
@@ -3629,17 +3696,17 @@ KwContinue  = "continue" KwEnd ;
                     var selfB2 = curF.NewBlock("")
                     var joinB2 = curF.NewBlock("")
                     b.NewCondBr(truthy(b, callExt(b, "js_seq", [tv2, emitStr(b, "undefined")])), selfB2, localB2)
-                    callExt(localB2, "js_kset", [curScopeV, nameV, v])
+                    localB2.NewCall(rtKSet(), [curScopeV, nameV, v])
                     localB2.NewBr(joinB2)
-                    selfB2.NewCall(rtSetProp(), [callExt(selfB2, "js_kget", [curScopeV, emitStr(selfB2, "self")]), nameV, v])
+                    selfB2.NewCall(rtSetProp(), [selfB2.NewCall(rtKGet(), [curScopeV, emitStr(selfB2, "self")]), nameV, v])
                     selfB2.NewBr(joinB2)
                     return {b: joinB2, v: v}
                 }
                 if (ref.name == "self" && hasStructs) {
-                    b.NewCall(rtAssignSelf(), [callExt(b, "js_kget", [curScopeV, emitStr(b, "this")]), v])
+                    b.NewCall(rtAssignSelf(), [b.NewCall(rtKGet(), [curScopeV, emitStr(b, "this")]), v])
                     return {b: b, v: v}
                 }
-                callExt(b, "js_kset", [curScopeV, nameV, v])
+                b.NewCall(rtKSet(), [curScopeV, nameV, v])
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
@@ -4207,7 +4274,7 @@ KwContinue  = "continue" KwEnd ;
         if (superName != undefined && superName != null) {
             var sArgs = callExt(b, "js_arr_new", [])
             callExt(b, "js_arr_push", [sArgs, thisV])
-            var sCls = callExt(b, "js_kget", [curScopeV, emitStr(b, superName)])
+            var sCls = b.NewCall(rtKGet(), [curScopeV, emitStr(b, superName)])
             callExt(b, "js_call", [callExt(b, "js_get", [sCls, emitStr(b, "__ctor")]), hUndef, sArgs])
         }
         for (var f0 = 0; f0 < allFields.length; f0++) {
@@ -4240,8 +4307,8 @@ KwContinue  = "continue" KwEnd ;
         if (inoutStack.length == 0) { return }
         var names = inoutStack[inoutStack.length - 1]
         for (var i = 0; i < names.length; i++) {
-            callExt(b, "js_set", [callExt(b, "js_kget", [curScopeV, emitStr(b, "$box$" + names[i])]),
-                                  emitStr(b, "v"), callExt(b, "js_kget", [curScopeV, emitStr(b, names[i])])])
+            callExt(b, "js_set", [b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$box$" + names[i])]),
+                                  emitStr(b, "v"), b.NewCall(rtKGet(), [curScopeV, emitStr(b, names[i])])])
         }
     }
     // The tuple-return labels of the function whose body is currently being emitted.
@@ -4351,11 +4418,11 @@ KwContinue  = "continue" KwEnd ;
                 haveB.NewCondBr(truthy(haveB, tv), contB, nextB)
                 b = contB
             }
-            var fv = callExt(b, "js_kget", [sc, emitStr(b, name + "$" + (k + 1))])
+            var fv = b.NewCall(rtKGet(), [sc, emitStr(b, name + "$" + (k + 1))])
             b.NewRet(callExt(b, "js_call", [fv, hUndef, argsV]))
             b = nextB
         }
-        var fv0 = callExt(b, "js_kget", [sc, emitStr(b, name + "$1")])
+        var fv0 = b.NewCall(rtKGet(), [sc, emitStr(b, name + "$1")])
         b.NewRet(callExt(b, "js_call", [fv0, hUndef, argsV]))
         curF = savedF
         curScopeV = savedScope
@@ -4564,7 +4631,7 @@ KwContinue  = "continue" KwEnd ;
     function makeWrapperInit(wname, dflt) {
         var recs = dflt == null ? [] : [{lbl: "wrappedValue", t: dflt, ref: null, dflt: null}]
         return function(b) {
-            var clsV = callExt(b, "js_kget", [curScopeV, emitStr(b, wname)])
+            var clsV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, wname)])
             return emitConstruct(b, wname, clsV, recs)
         }
     }
@@ -4669,7 +4736,7 @@ KwContinue  = "continue" KwEnd ;
             b = mem.nested[nt](b)
             if (lastTypeName != null) {
                 callExt(b, "js_set", [statV, emitStr(b, lastTypeName),
-                                      callExt(b, "js_kget", [curScopeV, emitStr(b, lastTypeName)])])
+                                      b.NewCall(rtKGet(), [curScopeV, emitStr(b, lastTypeName)])])
             }
         }
         return b
@@ -4688,7 +4755,7 @@ KwContinue  = "continue" KwEnd ;
                                       callExt(b, "js_closure", [handle(emitFunc([plainParam(cp.didP)], cp.did, true)), curScopeV])])
             }
             var getBody = function(bb) {
-                var thisV = callExt(bb, "js_kget", [curScopeV, emitStr(bb, "this")])
+                var thisV = bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "this")])
                 bb.NewRet(callExt(bb, "js_get", [thisV, emitStr(bb, store)]))
                 return deadBlock()
             }
@@ -4696,8 +4763,8 @@ KwContinue  = "continue" KwEnd ;
             var hasDid = cp.did != null
             var name = cp.name
             var setBody = function(bb) {
-                var thisV = callExt(bb, "js_kget", [curScopeV, emitStr(bb, "this")])
-                var newV = callExt(bb, "js_kget", [curScopeV, emitStr(bb, "$new")])
+                var thisV = bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "this")])
+                var newV = bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "$new")])
                 var oldV = callExt(bb, "js_get", [thisV, emitStr(bb, store)])
                 if (hasWill) {
                     var wa = callExt(bb, "js_arr_new", [])
@@ -4734,7 +4801,7 @@ KwContinue  = "continue" KwEnd ;
     function emitLazy(b, tblV, lz) {
         var store = "__lz_" + lz.name
         var getBody = function(bb) {
-            var thisV = callExt(bb, "js_kget", [curScopeV, emitStr(bb, "this")])
+            var thisV = bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "this")])
             var have = callExt(bb, "js_get", [thisV, emitStr(bb, store)])
             var buildB = curF.NewBlock("")
             var doneB = curF.NewBlock("")
@@ -4746,9 +4813,9 @@ KwContinue  = "continue" KwEnd ;
             return deadBlock()
         }
         var setBody = function(bb) {
-            var thisV = callExt(bb, "js_kget", [curScopeV, emitStr(bb, "this")])
+            var thisV = bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "this")])
             callExt(bb, "js_set", [thisV, emitStr(bb, store),
-                                   callExt(bb, "js_kget", [curScopeV, emitStr(bb, "$new")])])
+                                   bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "$new")])])
             bb.NewRet(hUndef)
             return deadBlock()
         }
@@ -4763,17 +4830,17 @@ KwContinue  = "continue" KwEnd ;
         var store = "_" + wp.name
         var mk = function(prop) {
             return function(bb) {
-                var thisV = callExt(bb, "js_kget", [curScopeV, emitStr(bb, "this")])
+                var thisV = bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "this")])
                 var wV = callExt(bb, "js_get", [thisV, emitStr(bb, store)])
                 bb.NewRet(bb.NewCall(rtGetProp(), [wV, emitStr(bb, prop)]))
                 return deadBlock()
             }
         }
         var setBody = function(bb) {
-            var thisV = callExt(bb, "js_kget", [curScopeV, emitStr(bb, "this")])
+            var thisV = bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "this")])
             var wV = callExt(bb, "js_get", [thisV, emitStr(bb, store)])
             bb.NewCall(rtSetProp(), [wV, emitStr(bb, "wrappedValue"),
-                                     callExt(bb, "js_kget", [curScopeV, emitStr(bb, "$new")])])
+                                     bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "$new")])])
             bb.NewRet(hUndef)
             return deadBlock()
         }
@@ -4841,14 +4908,14 @@ KwContinue  = "continue" KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             if (superName != null) {
                 callExt(b, "js_set", [clsV, emitStr(b, "__super"),
-                                      callExt(b, "js_kget", [curScopeV, emitStr(b, superName)])])
+                                      b.NewCall(rtKGet(), [curScopeV, emitStr(b, superName)])])
             }
             // Every protocol in the clause contributes its default implementations.
             for (var pi = 0; pi < mem.inherits.length; pi++) {
                 var pn = baseTypeName(mem.inherits[pi])
                 if (protoNames[pn] != 1) { continue }
                 callExt(b, "js_set", [clsV, emitStr(b, "__proto_" + pn),
-                                      callExt(b, "js_kget", [curScopeV, emitStr(b, pn)])])
+                                      b.NewCall(rtKGet(), [curScopeV, emitStr(b, pn)])])
                 b = emitAdoptProtocol(b, clsV, pn)
             }
             var ctorIdx = emitCtor(mem.initProps, superName, mem.fields)
@@ -4856,10 +4923,10 @@ KwContinue  = "continue" KwEnd ;
             b = emitInstallMembers(b, clsV, clsV, mem, name)
             if (!mem.hasInit) {
                 var mwBody = function(bb) {
-                    var thisV = callExt(bb, "js_kget", [curScopeV, emitStr(bb, "this")])
+                    var thisV = bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "this")])
                     for (var q = 0; q < mparams.length; q++) {
                         callExt(bb, "js_set", [thisV, emitStr(bb, mparams[q].name),
-                                               callExt(bb, "js_kget", [curScopeV, emitStr(bb, mparams[q].name)])])
+                                               bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, mparams[q].name)])])
                     }
                     return bb
                 }
@@ -4897,7 +4964,7 @@ KwContinue  = "continue" KwEnd ;
     function emitAdoptProtocol(b, clsV, pn) {
         var keys = protoMembers["$" + pn]
         if (keys == undefined) { return b }
-        var pv = callExt(b, "js_kget", [curScopeV, emitStr(b, pn)])
+        var pv = b.NewCall(rtKGet(), [curScopeV, emitStr(b, pn)])
         for (var i = 0; i < keys.length; i++) {
             var have = callExt(b, "js_get", [clsV, emitStr(b, keys[i])])
             var setB = curF.NewBlock("")
@@ -4994,7 +5061,7 @@ KwContinue  = "continue" KwEnd ;
         }
         return function(b) {
             typeStack.push({name: base, superName: rec.superName})
-            var tV = callExt(b, "js_kget", [curScopeV, emitStr(b, base)])
+            var tV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, base)])
             var instV = tV
             if (enumNames[base] == 1) { instV = callExt(b, "js_get", [tV, emitStr(b, "__members")]) }
             if (protoNames[base] == 1) { instV = tV }
@@ -5155,11 +5222,11 @@ KwContinue  = "continue" KwEnd ;
             if (cl != undefined && cl != null && cl != "") { anyAL = true }
         }
         var body = function(b) {
-            var tblV = callExt(b, "js_kget", [curScopeV, emitStr(b, "$etbl$" + ename)])
+            var tblV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$etbl$" + ename)])
             var vals = callExt(b, "js_arr_new", [])
             var key = emitStr(b, cname + "(")
             for (var i = 0; i < n; i++) {
-                var av = callExt(b, "js_kget", [curScopeV, emitStr(b, pnames[i])])
+                var av = b.NewCall(rtKGet(), [curScopeV, emitStr(b, pnames[i])])
                 callExt(b, "js_arr_push", [vals, av])
                 key = callExt(b, "js_jadd", [key, b.NewCall(rtKey(), [av])])
                 key = callExt(b, "js_jadd", [key, emitStr(b, ",")])
@@ -5464,9 +5531,86 @@ KwContinue  = "continue" KwEnd ;
     wraps["&-"] = 1
     wraps["&*"] = 1
 
-    core.scopeGetExt = "js_kget" // Scope read with fallback to the properties of self.
+    // The this-aware scope read is the EMITTED sw_kget helper (see rtKGet above), not
+    // an extern, so core's own name-read path is left on the plain floor primitive;
+    // makeVarRef is overridden to use sw_kget and is the only site that reads a name.
+    core.scopeGetExt = "js_scope_get"
 
     c.compile(c.asg)
+
+    // ----- the native build (docs/runtime-next-plan.md part 3) -----
+    // jsdispatch(idx, env, args) is the function table a LINKED binary needs: js_closure
+    // stores a raw function index, and under llvm.Run the Go runtime turns that index
+    // back into a callee by looking "jsf_<idx>" up in the module. A binary has no such
+    // reflection, so the module carries the mapping itself. The MISS arm calls
+    // jsdispatch_ext, the same table emitted by the layer-2 runtime library
+    // (lib/swift-rt.ll, built by metajs-to-llvm-ir.abnf -rt-lib): its own function
+    // indices are offset by a million, so the two chains cannot overlap and one js_call
+    // reaches either module. Emitted ONLY for -exe, so every other run keeps the module
+    // it had. This is lua-to-llvm-ir.abnf's emitDispatch, unchanged - the mechanism is
+    // the reusable part of phase 4 and nothing here is Swift's.
+    function emitDispatch() {
+        var idxs = []
+        var fns = []
+        var i = 0
+        while (i < m.Funcs.length) {
+            var f = m.Funcs[i]
+            var nm = f.Name()
+            if (nm.length > 4 && nm.substring(0, 4) == "jsf_") {
+                idxs.push(parseInt(nm.substring(4, nm.length)))
+                fns.push(f)
+            }
+            i = i + 1
+        }
+        var ext = m.NewFunc("jsdispatch_ext", i64,
+            [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var d = m.NewFunc("jsdispatch", i64,
+            [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var b = d.NewBlock("entry")
+        var extB = d.NewBlock("ext")
+        var ownB = d.NewBlock("own")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredSGE, d.Params[0], llvm.constant.NewInt(i64, 1000000)), extB, ownB)
+        extB.NewRet(extB.NewCall(ext, [d.Params[0], d.Params[1], d.Params[2]]))
+        b = ownB
+        i = 0
+        while (i < fns.length) {
+            var hit = d.NewBlock("hit" + idxs[i])
+            var nxt = d.NewBlock("miss" + idxs[i])
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, d.Params[0], llvm.constant.NewInt(i64, idxs[i])), hit, nxt)
+            hit.NewRet(hit.NewCall(fns[i], [d.Params[1], d.Params[2]]))
+            b = nxt
+            i = i + 1
+        }
+        b.NewRet(b.NewCall(ext, [d.Params[0], d.Params[1], d.Params[2]]))
+    }
+
+    // The two runtime inputs live next to THIS grammar, so the build does not depend on
+    // the working directory: lib/runtime.ll is the C floor and lib/swift-rt.ll is
+    // Swift's own layer 2. An explicit -rt REPLACES both.
+    function libPath(name) {
+        var mn = moduleName()
+        var cut = -1
+        var i = 0
+        while (i < mn.length) {
+            var ch = mn.charAt(i)
+            if (ch == "/" || ch == "\\") { cut = i }
+            i = i + 1
+        }
+        return mn.substring(0, cut + 1) + "lib/" + name
+    }
+
+    if (c.exePath != undefined && c.exePath != "") {
+        emitDispatch()
+        var rts = c.runtime
+        if (rts == undefined || rts.length == 0) { rts = [libPath("runtime.ll"), libPath("swift-rt.ll")] }
+        var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
+        if (buildErr != "") {
+            println(buildErr)
+            exit(1)
+        }
+        println("swift compiler: wrote executable " + c.exePath)
+        exit(0)
+    }
 
     println(m)
 

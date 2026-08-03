@@ -27,6 +27,19 @@
 ;   C  a handle that lives ONLY in the suspended body's frame across a yield,
 ;      read back after more garbage.  Under MEC_GC=stress this is the
 ;      assertion that the collector scans a suspended coroutine's stack.
+;   D  a body that allocates heavily before its first yield, so the collection
+;      it triggers runs while the RESUMER's stack is parked.
+;   E  THROW ACROSS A YIELD, which is the gate this primitive had to pass before
+;      it could land.  Two throws, both with several thousand allocations
+;      between the resumes that surround them:
+;        - one raised inside the body and caught by a try IN THE BODY that was
+;          entered before a yield, so the try's jmp_buf and the longjmp that
+;          reaches it are both on the coroutine's own stack;
+;        - one raised by the body and caught by a try IN THE RESUMER, which can
+;          only work if the body unwinds to its own barrier and the resumer
+;          RE-RAISES on its own stack.  A longjmp straight across is the
+;          undefined behaviour docs/runtime-next-plan.md named, and it printed
+;          the right answer under MEC_GC=auto and the wrong one under stress.
 
 @str.println = global [7 x i8] c"println"
 @str.next = global [4 x i8] c"next"
@@ -44,6 +57,8 @@ declare i64 @js_get(i64 %0, i64 %1)
 declare i64 @js_closure(i64 %0, i64 %1)
 declare i64 @js_genfn(i64 %0)
 declare i64 @js_yield(i64 %0)
+declare i64 @js_try(i64 %0, i64 %1, i64 %2)
+declare i64 @js_throw(i64 %0)
 
 ; ---------------------------------------------------------------- helpers --
 
@@ -150,6 +165,77 @@ entry:
 	ret i64 %one
 }
 
+; E: the generator body.  It enters a try, yields FROM INSIDE IT, and the throw
+; that follows is caught by that try - on the coroutine's own stack.  Then it
+; yields again and throws a second value, which nothing in the body catches, so
+; it has to surface in the resumer's try.
+define i64 @jsf_5(i64 %env, i64 %args) {
+entry:
+	%t = call i64 @js_closure(i64 6, i64 %env)
+	%c = call i64 @js_closure(i64 7, i64 %env)
+	%r = call i64 @js_try(i64 %t, i64 %c, i64 0)
+	%n2 = call i64 @js_num_i(i64 2)
+	%y = call i64 @js_yield(i64 %n2)
+	%n777 = call i64 @js_num_i(i64 777)
+	%x = call i64 @js_throw(i64 %n777)
+	ret i64 0
+}
+
+; E: the body's own try clause - a yield INSIDE a try, then a throw.
+define i64 @jsf_6(i64 %env, i64 %args) {
+entry:
+	%one = call i64 @js_num_i(i64 1)
+	%y = call i64 @js_yield(i64 %one)
+	%n555 = call i64 @js_num_i(i64 555)
+	%x = call i64 @js_throw(i64 %n555)
+	ret i64 0
+}
+
+; E: the body's own catch clause - it prints the value it caught (555).
+define i64 @jsf_7(i64 %env, i64 %args) {
+entry:
+	%kp = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.println, i64 0, i64 0), i64 7)
+	%pf = call i64 @js_scope_get(i64 %env, i64 %kp)
+	%k0 = call i64 @js_num_i(i64 0)
+	%v = call i64 @js_get(i64 %args, i64 %k0)
+	%p = call i64 @po_println(i64 %pf, i64 %v)
+	ret i64 0
+}
+
+; E: the RESUMER's try clause.  The generator is reachable only from this frame,
+; which the throw unwinds, so parts of it are garbage the moment it leaves.
+define i64 @jsf_8(i64 %env, i64 %args) {
+entry:
+	%kp = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.println, i64 0, i64 0), i64 7)
+	%pf = call i64 @js_scope_get(i64 %env, i64 %kp)
+	%c5 = call i64 @js_closure(i64 5, i64 %env)
+	%gf5 = call i64 @js_genfn(i64 %c5)
+	%a5 = call i64 @js_arr_new()
+	%g5 = call i64 @js_call(i64 %gf5, i64 0, i64 %a5)
+	%r1 = call i64 @po_next(i64 %g5)
+	%s1 = call i64 @po_show(i64 %pf, i64 %r1)
+	%q1 = call i64 @po_garbage(i64 3000)
+	%r2 = call i64 @po_next(i64 %g5)
+	%s2 = call i64 @po_show(i64 %pf, i64 %r2)
+	%q2 = call i64 @po_garbage(i64 3000)
+	; This resume raises 777 in the body.  Nothing below may run.
+	%r3 = call i64 @po_next(i64 %g5)
+	%n9 = call i64 @js_num_i(i64 9999)
+	%s3 = call i64 @po_println(i64 %pf, i64 %n9)
+	ret i64 0
+}
+
+; E: the RESUMER's catch clause - it prints the value the BODY threw (777).
+define i64 @jsf_9(i64 %env, i64 %args) {
+entry:
+	%kp = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.println, i64 0, i64 0), i64 7)
+	%pf = call i64 @js_scope_get(i64 %env, i64 %kp)
+	%k0 = call i64 @js_num_i(i64 0)
+	%v = call i64 @js_get(i64 %args, i64 %k0)
+	%p = call i64 @po_println(i64 %pf, i64 %v)
+	ret i64 0
+}
+
 ; The function table the -exe path needs: js_closure stores a raw index and the
 ; C floor turns it back into a call through here.
 define i64 @jsdispatch(i64 %idx, i64 %env, i64 %args) {
@@ -157,7 +243,12 @@ entry:
 	switch i64 %idx, label %bad [ i64 1, label %f1
 	                              i64 2, label %f2
 	                              i64 3, label %f3
-	                              i64 4, label %f4 ]
+	                              i64 4, label %f4
+	                              i64 5, label %f5
+	                              i64 6, label %f6
+	                              i64 7, label %f7
+	                              i64 8, label %f8
+	                              i64 9, label %f9 ]
 
 f1:
 	%r1 = call i64 @jsf_1(i64 %env, i64 %args)
@@ -174,6 +265,26 @@ f3:
 f4:
 	%r4 = call i64 @jsf_4(i64 %env, i64 %args)
 	ret i64 %r4
+
+f5:
+	%r5 = call i64 @jsf_5(i64 %env, i64 %args)
+	ret i64 %r5
+
+f6:
+	%r6 = call i64 @jsf_6(i64 %env, i64 %args)
+	ret i64 %r6
+
+f7:
+	%r7 = call i64 @jsf_7(i64 %env, i64 %args)
+	ret i64 %r7
+
+f8:
+	%r8 = call i64 @jsf_8(i64 %env, i64 %args)
+	ret i64 %r8
+
+f9:
+	%r9 = call i64 @jsf_9(i64 %env, i64 %args)
+	ret i64 %r9
 
 bad:
 	ret i64 0
@@ -251,6 +362,20 @@ entry:
 	%kh = call i64 @js_num_i(i64 0)
 	%eh = call i64 @js_get(i64 %hold, i64 %kh)
 	%so = call i64 @po_println(i64 %pf, i64 %eh)
+
+	; --- E: a throw across a yield, caught in the body and in the resumer ---
+	; %keep lives only in THIS frame while the try below unwinds a generator's
+	; body, its resumer's frame and 6,000 allocations, so reading it back at the
+	; end is the assertion that the throw path left the root set intact.
+	%keep = call i64 @js_arr_new()
+	%v4321 = call i64 @js_num_i(i64 4321)
+	%pk = call i64 @js_arr_push(i64 %keep, i64 %v4321)
+	%ct = call i64 @js_closure(i64 8, i64 %sc)
+	%cc = call i64 @js_closure(i64 9, i64 %sc)
+	%te = call i64 @js_try(i64 %ct, i64 %cc, i64 0)
+	%kk = call i64 @js_num_i(i64 0)
+	%ek = call i64 @js_get(i64 %keep, i64 %kk)
+	%sp = call i64 @po_println(i64 %pf, i64 %ek)
 
 	ret i64 0
 }

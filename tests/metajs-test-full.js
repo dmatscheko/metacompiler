@@ -447,6 +447,73 @@ function s14() {
     var noBinding = 0
     try { throw "y" } catch (e) { noBinding = 1 }
     check("exc12", noBinding === 1)
+
+    // ----- the try-barrier POOL, which coroutines made per-stack -------------
+    //
+    // languages/lib/runtime.c used to hold one global `long JB[512]` of jmp_bufs
+    // indexed by JB_DEPTH. A generator body runs on its OWN C stack, and a
+    // setjmp is only valid on the stack that took it, so that one pool became a
+    // pointer (JBP) to the pool of whichever stack is RUNNING - main's, or the
+    // coroutine's - swapped by the side that gains control, exactly as
+    // GC_STACK_BASE is. The assertions below are what that refactor has to keep
+    // true, and they run in all three engines.
+    //
+    // WHERE THEY DISCRIMINATE, stated like SECTION 25's: the pool only exists in
+    // the NATIVE binary. In the other two engines a throw is a Go panic or a
+    // host-engine exception, so these are ordinary correctness checks there.
+    // Measured against a floor whose pool is indexed wrongly, the deep nest
+    // below is the one that fails first.
+    function nest(n) {
+        if (n === 0) { throw "floor" }
+        try { return nest(n - 1) } catch (e) { throw e }
+        return "unreached"
+    }
+    var deepCaught = ""
+    try { nest(200) } catch (e) { deepCaught = e }
+    check("exc13", deepCaught === "floor")
+    // A SECOND deep nest: the depth has to have been restored, or the pool is
+    // now indexed past whatever the first one left behind.
+    deepCaught = ""
+    try { nest(200) } catch (e) { deepCaught = e }
+    check("exc14", deepCaught === "floor")
+    // Two sequential try statements at the SAME depth share one jmp_buf buffer
+    // and must each setjmp it again - the reuse the pool was introduced for.
+    var reuse = ""
+    var ri = 0
+    while (ri < 50) {
+        try { throw "r" + ri } catch (e) { reuse = e } finally { reuse = reuse + "!" }
+        ri = ri + 1
+    }
+    check("exc15", reuse === "r49!")
+    // A thrown value that is reachable ONLY through the throw machinery while a
+    // finally clause allocates heavily. In the native binary the pool is scanned
+    // as a root range (gc_scan_jb) for exactly this; run that binary under
+    // MEC_GC=stress to make it a collector assertion rather than a plain one.
+    function throwAcrossGarbage() {
+        var junk = []
+        try {
+            throw { tag: "carried", n: 41 + 1 }
+        } finally {
+            var gi = 0
+            while (gi < 3000) { junk = [gi, gi + 1, "pad"]; gi = gi + 1 }
+        }
+        return null
+    }
+    var carried = anytype
+    try { carried = throwAcrossGarbage() } catch (e) { carried = e }
+    check("exc16", carried.tag === "carried" && carried.n === 42)
+    // The same, one frame further out and with the catch clause allocating too:
+    // the value has to survive a collection triggered INSIDE the handler.
+    var handled = 0
+    try {
+        throw { n: 7 }
+    } catch (e) {
+        var gj = 0
+        var pad = []
+        while (gj < 3000) { pad = [gj]; gj = gj + 1 }
+        handled = e.n
+    }
+    check("exc17", handled === 7)
 }
 
 // ===== SECTION 15: typeof and the type classes =====

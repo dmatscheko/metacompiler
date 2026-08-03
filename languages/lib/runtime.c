@@ -61,6 +61,29 @@ int setjmp(void *env);
 void longjmp(void *env, int v);
 void exit(int code);
 
+/* ---- coroutines: the POSIX names the generator primitive stands on --------
+ * Declared by hand like everything else here.  pthread_t, pthread_mutex_t,
+ * pthread_cond_t and pthread_attr_t are all reached through a POINTER to an
+ * OVER-ALLOCATED zeroed buffer that the matching *_init fills in, so this file
+ * never needs to know their layout or size - which is what makes the same
+ * source work on darwin and on linux.  makecontext/swapcontext were measured
+ * first and rejected for exactly that reason: ucontext_t's uc_stack and uc_link
+ * have to be written by OFFSET, and the offsets differ per platform.
+ *
+ * dlopen/dlsym exist for one reason: c-to-llvm-ir.abnf compiles a function NAME
+ * used as a value to its funcId (measured - `pthread_create(&t, 0, worker, 0)`
+ * emits `inttoptr i32 1`), so there is no way to spell a real code address in
+ * this C subset.  dlsym gives one at run time, with no compiler change at all. */
+void *dlopen(const char *path, int mode);
+void *dlsym(void *h, const char *name);
+long pthread_create(void *th, void *attr, void *fn, void *arg);
+long pthread_mutex_init(void *m, void *a);
+long pthread_cond_init(void *c, void *a);
+long pthread_mutex_lock(void *m);
+long pthread_mutex_unlock(void *m);
+long pthread_cond_wait(void *c, void *m);
+long pthread_cond_broadcast(void *c);
+
 /* The compiled program. jsmain(env, args) is the module's entry point and
  * jsdispatch(idx, env, args) is the function table metajs-to-llvm-ir.abnf emits
  * for -exe: js_closure stores a raw function index, and this is how the runtime
@@ -340,6 +363,39 @@ long GC_THRESH;
 long GC_LIVE;
 long GC_HEAP;
 long GC_STACK_BASE;
+
+/* ---- the coroutine registry, which is what the COLLECTOR needs ------------
+ * A suspended generator's C stack holds handles that live nowhere else, so it
+ * is a root range exactly like the main stack.  Handoff is strictly alternating
+ * (one thread runs at a time), so a suspended side has always published its
+ * stack pointer and a setjmp of its callee-saved registers BEFORE parking, and
+ * the collector reads both without any stop-the-world machinery.
+ *
+ *   CORO[i]   a live coroutine's control block (see coro_alloc for the layout)
+ *   RES_*     the RESUMER's stack while a coroutine runs.  Resumes nest (a
+ *             generator may drive another), so this is a LIFO.  RES_JBP/RES_JBD
+ *             are the resumer's try-barrier pool and depth, parked with it.
+ *
+ * Both are GROWN rather than fixed. A fixed CORO[256] was what the proof of
+ * concept shipped, and it would have been a hard die() at the 257th live
+ * generator - which is not a limit a language can be built on: 10,000 suspended
+ * generators is a measured, working workload (~18 KB each, and the thread stack
+ * is the whole of it). The old array is not freed, so doubling costs less than
+ * one extra copy of the final array in total - the same bargain every other
+ * malloc in this file makes. */
+long CORO;           /* long *: the live coroutines' control blocks */
+long CORO_N;
+long CORO_CAP;
+long RES_LO;         /* long *, five parallel arrays, one entry per nested resume */
+long RES_HI;
+long RES_JB;
+long RES_JBP;
+long RES_JBD;
+long RES_N;
+long RES_CAP;
+long CUR_GEN;        /* the generator whose body is running, for js_yield */
+long CORO_ENTRY;     /* &coro_entry, from dlsym; 0 until the first generator */
+
 long GC_REGS;        /* a jmp_buf used only to spill the callee-saved registers */
 long GC_MSTACK;
 long GC_MTOP;
@@ -658,6 +714,11 @@ void gc_trace(long b, long c) {
 	if (t == 9)  { gc_try(w[1], 1); return; }                   /* bound receiver */
 	if (t == 10) { gc_try(w[2], 1); return; }                   /* signal value */
 	if (t == 11) { gc_try(w[1], 1); gc_try(w[6], 1); return; }  /* names+vals, parent */
+	/* 15 GENERATOR: a fn, b args, d lastValue, f sent/return/thrown value are
+	 * handles; c is the RAW control-block pointer and e a raw flag word.  16
+	 * generator FUNCTION: a is the closure it wraps. */
+	if (t == 15) { gc_try(w[1], 1); gc_try(w[2], 1); gc_try(w[4], 1); gc_try(w[6], 1); return; }
+	if (t == 16) { gc_try(w[1], 1); return; }
 	/* 3 number, 8 host function, 12 anytype, 13 sized integer, 14 boxed double:
 	 * no children - every field of those is a raw long, not a handle. */
 }
@@ -2731,7 +2792,7 @@ long index_of_key(long key) {
 	{ long i = d_to_long(n); if (i < 0) { return -1; } return i; }
 }
 
-int is_callable(long h) { long t = tag_of(h); return t == 7 || t == 8 || t == 9; }
+int is_callable(long h) { long t = tag_of(h); return t == 7 || t == 8 || t == 9 || t == 16; }
 
 long get_member(long obj, long key) {
 	long t = tag_of(obj);
@@ -2743,6 +2804,10 @@ long get_member(long obj, long key) {
 		if (str_eq_c(key, "call"))  { return mk_bound(obj, 41); }
 	}
 	if (t == 6) { return obj_get(obj, to_string(key)); }
+	/* A generator's iterator protocol. The floor owns `next` only; current /
+	 * key / valid / send / getReturn are layer 2 over it (see the cost table in
+	 * docs/runtime-next-plan.md). */
+	if (t == 15 && tag_of(key) == 4 && str_eq_c(key, "next")) { return mk_bound(obj, 60); }
 	if (t == 5) {
 		if (tag_of(key) == 4) {
 			long mid;
@@ -3015,14 +3080,36 @@ long mk_ctl(long kind, long value) { long h = cell_new(10); sa(h, kind); sb(h, v
  * A buffer at depth d is only live while JB_DEPTH > d, and js_try restores
  * JB_DEPTH before it returns, so two try statements at the same depth are
  * sequential and can share the buffer. THE SETJMP MUST STILL BE DONE ONCE PER
- * ENTRY - only the storage is reused. */
-long JB[512];
+ * ENTRY - only the storage is reused.
+ *
+ * THE POOL IS PER STACK, not per process. A generator body runs on its own C
+ * stack, so a setjmp it takes is only valid on that stack and a longjmp to a
+ * buffer the RESUMER filled in would jump into another thread's frame - the
+ * undefined behaviour docs/runtime-next-plan.md named as the gate on this
+ * primitive. JBP therefore points at the pool of the stack that is RUNNING:
+ * main's for main, and cb[9] for a coroutine, swapped by whichever side gains
+ * control (exactly as GC_STACK_BASE is). JB_CAP is that pool's length. */
+long JBP;            /* long *: the running stack's jmp_buf pool */
+long JB_CAP;         /* its length in slots */
+long JB_MAIN;        /* main's own pool, so the swap has something to go back to */
 long JB_DEPTH;
 
 long jb_at(long d) {
-	if (JB[d] == 0) { JB[d] = (long)malloc(512); }
-	return JB[d];
+	long *p = (long *)JBP;
+	if (d >= JB_CAP) { die("try nested too deeply"); }
+	if (p[d] == 0) { p[d] = (long)malloc(512); }
+	return p[d];
 }
+
+/* A jmp_buf pool as a ROOT RANGE: the saved registers in a buffer can be the
+ * only copy of a handle between a setjmp and the longjmp that restores them. */
+void gc_scan_jb(long pool, long depth) {
+	long *p = (long *)pool;
+	long i = 0;
+	if (pool == 0) { return; }
+	while (i < depth) { if (p[i] != 0) { gc_scan_range(p[i], p[i] + 512); } i = i + 1; }
+}
+
 long THROWN;
 
 long js_throw(long v);
@@ -3036,13 +3123,285 @@ long arg_str(long args, long i) { if (i < arr_len(args)) { return to_string(arr_
 long host_call(long id, long self, long args);
 long builtin_method(long recv, long mid, long args);
 
+long gen_create(long gf, long args);
+
 long js_call(long callee, long self, long args) {
 	long t = tag_of(callee);
 	if (t == 7) { return jsdispatch(fa(callee), fb(callee), args); }
 	if (t == 8) { return host_call(fa(callee), self, args); }
 	if (t == 9) { return builtin_method(fa(callee), fb(callee), args); }
+	/* A generator FUNCTION: calling it runs NOTHING and answers a generator. */
+	if (t == 16) { return gen_create(callee, args); }
 	die2("call of a non function value: ", callee);
 	return H_UNDEF;
+}
+
+/* ------------------------------------------------------------- coroutines - */
+/*
+ * TAG 15 is a GENERATOR and TAG 16 a generator FUNCTION, the floor's twins of
+ * abnf/jsrt.go's jsGenerator and the closure js_genfn wraps. The Go half runs
+ * the body on a goroutine and hands over on two unbuffered channels; this half
+ * runs it on a pthread and hands over on one mutex + condition variable. Both
+ * are STRICTLY ALTERNATING - at any moment exactly one side runs - so neither
+ * needs a lock around the runtime's own state.
+ *
+ * WHY A THREAD AND NOT A SECOND STACK. Measured, not assumed:
+ *   - makecontext/swapcontext work on this machine (macOS 15, arm64) but are
+ *     deprecated there, and every field this file would have to write into a
+ *     ucontext_t (uc_stack.ss_sp, ss_size, uc_link) has a PLATFORM-DEPENDENT
+ *     OFFSET. runtime.c has no headers, so it would have to hard-code them.
+ *   - a pthread is reached entirely through opaque pointers plus *_init calls,
+ *     so this source is layout-free.
+ * The price is a parked thread per live generator - exactly the price the Go
+ * half already pays in a parked goroutine - and about 4.5 us a resume against
+ * the Go half's 0.75 us, all of it the condvar's two kernel round trips.
+ *
+ * THE CONTROL BLOCK is a long[16] rather than a struct, so no new type crosses
+ * the C subset, and it is malloc'd rather than allocated on the heap this file
+ * collects - the collector must be able to read it while sweeping. It holds NO
+ * handle except cb[7]; every value that travels between the two sides lives in
+ * the generator CELL, which is traced.
+ *
+ *   cb[0] turn: 1 = the coroutine runs, 0 = the resumer runs
+ *   cb[1] state: 0 not started, 1 SUSPENDED (its stack is a root), 2 done,
+ *                3 running
+ *   cb[2] pthread_mutex_t buffer     cb[3] pthread_cond_t buffer
+ *   cb[4] the suspended stack's low water mark
+ *   cb[5] the coroutine stack's base, published by the thread itself
+ *   cb[6] a jmp_buf buffer: the callee-saved registers it parked with
+ *   cb[7] the generator cell
+ *   cb[8] the pthread_t
+ *   cb[9] its OWN jmp_buf pool (a setjmp is only valid on the stack that took
+ *         it), cb[10] the depth it parked at, cb[12] the pool's length
+ *   cb[11] 1 if the body left by a THROW rather than a return
+ *
+ * THE GENERATOR CELL (tag 15):
+ *   a  the closure of the body        b  the argument array
+ *   c  the control block, RAW         d  the last yielded value
+ *   e  raw: 1 once the body finished  f  the sent value / the return value /
+ *                                        the thrown value
+ */
+
+/* Copy a long array into a bigger zeroed one. The old block is not freed: this
+ * file never frees a malloc (the jmp_buf pools do not either), and doubling
+ * makes the total abandoned smaller than the array that survives. */
+long coro_grow(long arr, long cap, long newcap) {
+	long *n = (long *)malloc(8 * newcap);
+	long *o = (long *)arr;
+	long i = 0;
+	while (i < newcap) { n[i] = 0; i = i + 1; }
+	i = 0;
+	while (i < cap) { n[i] = o[i]; i = i + 1; }
+	return (long)n;
+}
+
+long coro_alloc(long g) {
+	long *cb = (long *)malloc(8 * 16);
+	long i = 0;
+	while (i < 16) { cb[i] = 0; i = i + 1; }
+	cb[2] = (long)malloc(256);
+	cb[3] = (long)malloc(256);
+	cb[6] = (long)malloc(512);
+	i = 0;
+	while (i < 64) { long *jb = (long *)cb[6]; jb[i] = 0; i = i + 1; }
+	cb[9] = (long)malloc(8 * 128);
+	cb[12] = 128;
+	i = 0;
+	while (i < 128) { long *jp = (long *)cb[9]; jp[i] = 0; i = i + 1; }
+	pthread_mutex_init((void *)cb[2], 0);
+	pthread_cond_init((void *)cb[3], 0);
+	cb[7] = g;
+	return (long)cb;
+}
+
+long gen_create(long gf, long args) {
+	long h = cell_new(15);
+	sa(h, fa(gf));
+	sb(h, args);
+	sc(h, 0);
+	sd(h, H_UNDEF);
+	se(h, 0);
+	sf(h, H_UNDEF);
+	return h;
+}
+
+/* js_genfn: wrap a compiled closure so that CALLING it creates a generator
+ * instead of running the body. The twin of abnf/jsrt.go's js_genfn. */
+long js_genfn(long body) { long h = cell_new(16); sa(h, body); return h; }
+
+/* The thread entry. Its ADDRESS is taken with dlsym, never as a C value. */
+void *coro_entry(void *arg) {
+	long *cb = (long *)arg;
+	long anchor = 0;
+	long g;
+	long ret;
+	long barrier;
+	cb[5] = ((long)&anchor) + 256;
+	pthread_mutex_lock((void *)cb[2]);
+	while (cb[0] == 0) { pthread_cond_wait((void *)cb[3], (void *)cb[2]); }
+	pthread_mutex_unlock((void *)cb[2]);
+	/* The running side always owns GC_STACK_BASE and JBP, so a collection
+	 * triggered by an allocation inside the body scans THIS stack and not
+	 * main's, and a try in the body uses THIS stack's barriers. */
+	GC_STACK_BASE = cb[5];
+	JBP = cb[9];
+	JB_CAP = cb[12];
+	JB_DEPTH = 0;
+	g = cb[7];
+	CUR_GEN = g;
+	cb[1] = 3;
+	/* THE THROW BARRIER, and the reason this primitive is safe to build a
+	 * language on. js_throw longjmps to the innermost barrier; without one here
+	 * a throw inside a generator body would jump to a jmp_buf the RESUMER
+	 * setjmp'd - i.e. into another thread's frame, which only appears to work
+	 * while the resumer stays parked and produces a WRONG ANSWER as soon as a
+	 * collection moves the timing (MEC_GC=stress caught it). The body therefore
+	 * unwinds only to here; the value travels back in the cell, and gen_resume
+	 * re-raises it on the resumer's own stack. That is exactly the three steps
+	 * abnf/jsrt.go takes with recover() and a re-panic. */
+	barrier = jb_at(0);
+	JB_DEPTH = 1;
+	ret = H_UNDEF;
+	if (setjmp((void *)barrier) == 0) {
+		ret = js_call(fa(g), H_UNDEF, fb(g));
+		cb = (long *)fc(CUR_GEN);
+		sf(CUR_GEN, ret);
+		cb[11] = 0;
+	} else {
+		cb = (long *)fc(CUR_GEN);
+		sf(CUR_GEN, THROWN);
+		cb[11] = 1;
+	}
+	g = cb[7];
+	JB_DEPTH = 0;
+	se(g, 1);
+	sd(g, H_UNDEF);
+	cb[1] = 2;
+	pthread_mutex_lock((void *)cb[2]);
+	cb[0] = 0;
+	pthread_cond_broadcast((void *)cb[3]);
+	pthread_mutex_unlock((void *)cb[2]);
+	return 0;
+}
+
+/* Resume a generator until its next yield or its return. Answers nothing: the
+ * result is in the cell (d = yielded, e = done, f = returned or thrown), and a
+ * body that threw has its value RE-RAISED here, on the resumer's stack. */
+void gen_resume(long g, long sent) {
+	long *cb;
+	long anchor = 0;
+	long save_gen;
+	long save_jbp;
+	long save_cap;
+	long save_depth;
+	long threw;
+	if (fe(g) != 0) { return; }
+	if (fc(g) == 0) {
+		long blk = coro_alloc(g);
+		long th = 0;
+		if (CORO_N >= CORO_CAP) {
+			long nc = CORO_CAP == 0 ? 64 : CORO_CAP * 2;
+			CORO = coro_grow(CORO, CORO_CAP, nc);
+			CORO_CAP = nc;
+		}
+		sc(g, blk);
+		{ long *cr = (long *)CORO; cr[CORO_N] = blk; }
+		CORO_N = CORO_N + 1;
+		if (CORO_ENTRY == 0) {
+			void *hh = dlopen(0, 2);
+			CORO_ENTRY = (long)dlsym(hh, "coro_entry");
+			if (CORO_ENTRY == 0) { die("coroutines: dlsym of coro_entry failed"); }
+		}
+		pthread_create(&th, 0, (void *)CORO_ENTRY, (void *)blk);
+		{ long *b2 = (long *)blk; b2[8] = th; }
+	}
+	cb = (long *)fc(g);
+	sf(g, sent);
+	if (RES_N >= RES_CAP) {
+		long nr = RES_CAP == 0 ? 64 : RES_CAP * 2;
+		RES_LO  = coro_grow(RES_LO,  RES_CAP, nr);
+		RES_HI  = coro_grow(RES_HI,  RES_CAP, nr);
+		RES_JB  = coro_grow(RES_JB,  RES_CAP, nr);
+		RES_JBP = coro_grow(RES_JBP, RES_CAP, nr);
+		RES_JBD = coro_grow(RES_JBD, RES_CAP, nr);
+		RES_CAP = nr;
+	}
+	{
+		long *lo = (long *)RES_LO; long *hi = (long *)RES_HI;
+		long *jb = (long *)RES_JB; long *jp = (long *)RES_JBP; long *jd = (long *)RES_JBD;
+		if (jb[RES_N] == 0) { jb[RES_N] = (long)malloc(512); }
+		lo[RES_N] = ((long)&anchor) - 256;
+		hi[RES_N] = GC_STACK_BASE;
+		jp[RES_N] = JBP;
+		jd[RES_N] = JB_DEPTH;
+		setjmp((void *)jb[RES_N]);
+	}
+	RES_N = RES_N + 1;
+	save_gen = CUR_GEN;
+	save_jbp = JBP;
+	save_cap = JB_CAP;
+	save_depth = JB_DEPTH;
+	pthread_mutex_lock((void *)cb[2]);
+	cb[0] = 1;
+	pthread_cond_broadcast((void *)cb[3]);
+	while (cb[0] == 1) { pthread_cond_wait((void *)cb[3], (void *)cb[2]); }
+	pthread_mutex_unlock((void *)cb[2]);
+	RES_N = RES_N - 1;
+	{ long *hi = (long *)RES_HI; GC_STACK_BASE = hi[RES_N]; }
+	CUR_GEN = save_gen;
+	JBP = save_jbp;
+	JB_CAP = save_cap;
+	JB_DEPTH = save_depth;
+	threw = cb[11];
+	if (threw != 0) {
+		cb[11] = 0;
+		js_throw(ff(g));
+	}
+}
+
+/* js_yield: suspend the body, hand v to the pending next() and answer the value
+ * the FOLLOWING next(x) sends in. The twin of abnf/jsrt.go's js_yield. */
+long js_yield(long v) {
+	long g = CUR_GEN;
+	long *cb;
+	long anchor = 0;
+	if (g == 0) { die("yield outside of a generator"); }
+	cb = (long *)fc(g);
+	sd(g, v);
+	cb[4] = ((long)&anchor) - 256;
+	cb[10] = JB_DEPTH;
+	setjmp((void *)cb[6]);
+	cb[1] = 1;
+	pthread_mutex_lock((void *)cb[2]);
+	cb[0] = 0;
+	pthread_cond_broadcast((void *)cb[3]);
+	while (cb[0] == 0) { pthread_cond_wait((void *)cb[3], (void *)cb[2]); }
+	pthread_mutex_unlock((void *)cb[2]);
+	cb[1] = 3;
+	GC_STACK_BASE = cb[5];
+	JBP = cb[9];
+	JB_CAP = cb[12];
+	JB_DEPTH = cb[10];
+	CUR_GEN = g;
+	return ff(g);
+}
+
+/* g.next(v) -> {value, done}, byte for byte what abnf/jsrt.go's step() builds. */
+long gen_next(long g, long args) {
+	long val;
+	long done;
+	long res;
+	if (fe(g) != 0) {
+		val = H_UNDEF;
+		done = 1;
+	} else {
+		gen_resume(g, arg_at(args, 0));
+		if (fe(g) != 0) { val = ff(g); done = 1; } else { val = fd(g); done = 0; }
+	}
+	res = mk_obj();
+	obj_put(res, mk_cstr("value"), val);
+	obj_put(res, mk_cstr("done"), done != 0 ? H_TRUE : H_FALSE);
+	return res;
 }
 
 /* clamp_index / slice_range / substring_range mirror abnf/jsrt.go exactly. */
@@ -3102,6 +3461,7 @@ long str_index_of(long h, long sub) {
 
 long builtin_method(long recv, long mid, long args) {
 	long t = tag_of(recv);
+	if (mid == 60) { return gen_next(recv, args); }   /* generator.next(v) */
 	if (mid == 40) {          /* fn.apply(this, argsArray) */
 		long a = arg_at(args, 1);
 		if (tag_of(a) != 5) { a = mk_arr(); }
@@ -3904,7 +4264,7 @@ long js_throw(long v) {
 		o_ch(10);
 		exit(1);
 	}
-	longjmp((void *)JB[JB_DEPTH - 1], 1);
+	{ long *p = (long *)JBP; longjmp((void *)p[JB_DEPTH - 1], 1); }
 	return H_UNDEF;
 }
 
@@ -3986,7 +4346,35 @@ void gc_roots(void) {
 	i = 0;
 	while (i < PIN_N) { gc_try(PINS[i], 1); i = i + 1; }
 	i = 0;
-	while (i < JB_DEPTH) { if (JB[i] != 0) { gc_scan_range(JB[i], JB[i] + 512); } i = i + 1; }
+	gc_scan_jb(JBP, JB_DEPTH);
+	/* Every SUSPENDED coroutine stack, the registers it parked with, and the
+	 * try barriers it parked at. The generator cell itself is a root while its
+	 * coroutine exists: the body's frames refer to it, and a generator the
+	 * program has dropped still owns a parked thread - the same cost
+	 * abnf/jsrt.go's parked goroutine has. */
+	i = 0;
+	while (i < CORO_N) {
+		long *cr = (long *)CORO;
+		long *cb = (long *)cr[i];
+		gc_try(cb[7], 1);
+		if (cb[1] == 1) {
+			gc_scan_range(cb[4], cb[5]);
+			gc_scan_range(cb[6], cb[6] + 512);
+			gc_scan_jb(cb[9], cb[10]);
+		}
+		i = i + 1;
+	}
+	/* and the RESUMER stacks, parked while a coroutine runs. */
+	i = 0;
+	while (i < RES_N) {
+		long *lo = (long *)RES_LO; long *hi = (long *)RES_HI;
+		long *jb = (long *)RES_JB; long *jp = (long *)RES_JBP; long *jd = (long *)RES_JBD;
+		gc_scan_range(lo[i], hi[i]);
+		gc_scan_range(jb[i], jb[i] + 512);
+		gc_scan_jb(jp[i], jd[i]);
+		i = i + 1;
+	}
+	gc_try(CUR_GEN, 1);
 }
 
 /* js_gc_pin answers its argument unchanged, and is IDENTITY in the Go half
@@ -4359,6 +4747,15 @@ void boot(void) {
 	long math;
 	long strobj;
 	long arrobj;
+	long jbi;
+	/* main's own try-barrier pool. It is malloc'd rather than a global array
+	 * because JBP has to be able to point at EITHER it or a coroutine's, and a
+	 * pointer to one thing is simpler than an index into two. */
+	JB_MAIN = (long)malloc(8 * 512);
+	JB_CAP = 512;
+	jbi = 0;
+	while (jbi < 512) { long *jp = (long *)JB_MAIN; jp[jbi] = 0; jbi = jbi + 1; }
+	JBP = JB_MAIN;
 	ar_init();
 	u.d = 0.0; DZERO = u.l;
 	u.d = 1.0; DONE = u.l;

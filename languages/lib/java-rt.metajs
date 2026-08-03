@@ -1,0 +1,1227 @@
+// java-rt.metajs -- JAVA'S OWN SEMANTICS, in MetaJS. Layer 2 of
+// docs/runtime-next-plan.md part 3, for the third language after the Lua pilot
+// and PHP.
+//
+// languages/java-to-llvm-ir.abnf emits handle IR that calls 54 js_* externs over
+// every tests/java-test-*.java; 29 of them are generic primitives
+// languages/lib/runtime.c already provides (the C floor, layer 1). The other 25
+// are here.
+//
+// Compile with:
+//     mec languages/metajs-to-llvm-ir.abnf languages/lib/java-rt.metajs -q -rt-lib
+// which is what tests/gen-java-rt-ll.sh does; the result is the checked-in
+// languages/lib/java-rt.ll that java-to-llvm-ir.abnf links next to runtime.ll.
+// -rt-lib exports every TOP-LEVEL `function js_*` below under its own C symbol,
+// so nothing else in this file is visible to the linker - the helpers are
+// deliberately named jv*/jl*/jp*.
+//
+// THE AUTHORITATIVE SPECIFICATION IS abnf/jsrtjava.go plus abnf/jsrtjvm.go and
+// the js_jadd / js_jband / js_char / js_jchareq / js_jcharat / js_mcall /
+// js_supercall / js_is_type / js_arr_new_n block of abnf/jsrt.go. This file
+// matches them function for function; where it CANNOT, the site says so in full.
+//
+// ----- the value model -------------------------------------------------------
+//
+//     null / undefined     ==  a null reference
+//     a boolean            ==  boolean
+//     a PLAIN NUMBER       ==  an `int`, i.e. a SIGNED 32 BIT value. This is the
+//                              Java invariant and it is deliberately NOT Go's.
+//     a tag 13 box, w 8/16 ==  byte / short. si_norm never unboxes those widths,
+//                              so the floor's sized integer IS the type.
+//     a tag 13 box, w 64,
+//        marked UNSIGNED   ==  long.  <-- SEE "THE LONG PROBLEM" BELOW.
+//     a tag 14 box         ==  double / float, style 0 (Java). flo/floIs/floNum/
+//                              floStr/floOp/floEq/floMax/floMin/floAbs.
+//     a {__char} box       ==  char. The Go twin uses jsChar, a Go TYPE with its
+//                              own js_typeof answer ("char"). Layer 2 cannot make
+//                              a primitive type, so this is an OBJECT box - the
+//                              same {__char: code} languages/java-interpreter.abnf
+//                              already uses, so the shape is not invented here.
+//                              It is SAFE because java-to-llvm-ir.abnf emits
+//                              js_typeof for exactly one test (=== "function")
+//                              and compares chars with js_jchareq / js_jvcmp,
+//                              never with the floor's js_seq. Measured, not
+//                              assumed: see the extern audit in
+//                              docs/runtime-next-plan.md part 3.
+//     an {__isclass} object ==  a class descriptor, built by the emitter
+//     any other object      ==  an instance / an array is a floor array
+//
+// ----- THE LONG PROBLEM, and how it is solved without a floor change ---------
+//
+// Java's `long` must stay DISTINGUISHABLE from `int` at every value, because
+// `1000000L * 1000000L` is 1000000000000 and `1000000 * 1000000` is -727379968.
+// abnf/jsrtjava.go says so directly: jvBox() "is 'read this as a long': always a
+// box, never a plain number".
+//
+// The floor's tag 13 will not do that on its own. si_norm - the ONE place the
+// sized-integer invariant is applied - unboxes a SIGNED 64 bit value a double
+// holds exactly, and every one of the eleven sint* host builtins goes through it.
+// So `sint(0, 5, 64, 0)` is the plain number 5, indistinguishable from `int` 5,
+// and layer 2 has no constructor that answers a small boxed long.
+//
+// It does not need one. si_norm's unboxing arm is `w == 64 && !u`, so a 64 bit
+// box marked UNSIGNED never unboxes and carries the exact 64 bits (si_trunc and
+// si_u are both the identity at width 64). A Java long is therefore represented
+// as {w: 64, u: 1} and layer 2 supplies the six operations whose SIGNED reading
+// the floor would otherwise get wrong:
+//
+//     + - * & | ^ << >>>   bit-identical signed/unsigned - sintOp is used direct
+//     /  %                 jlDiv / jlMod: divide the magnitudes, fix the sign
+//     >>                   jlSar: ~((~a) >>> s) when negative
+//     compare              jlCmp: sign bits first, then the unsigned compare
+//     decimal text         jlStr: "-" + digits of the negation when negative
+//     double reading       jlNum: the unsigned reading minus 2^64 when negative
+//
+// This is a REPRESENTATION choice inside layer 2, not an approximation of Java:
+// every one of the six is exact, and none of them is observable from a Java
+// program. It is recorded here because the next language with a 64 bit signed
+// type (csharp, go, kotlin, swift, dart) meets exactly the same wall, and the
+// alternative - a floor primitive that builds a tag 13 WITHOUT si_norm - is a
+// one-line floor change that would make all six unnecessary.
+//
+// ----- MetaJS rules that shape the code below --------------------------------
+//
+// docs/abnf-dialect-gotchas.md: a local keeps the TYPE CLASS it is first assigned
+// (a variable that holds a number in one branch and a box in another is declared
+// `var x = anytype`); there is no ASI, so every `return` carries its value on the
+// same line and a value-less early return is braced; no for..in, no splice, no
+// split/join/lastIndexOf, indexOf ignores its from-index, array.length is not
+// assignable, and there are no exponent literals.
+
+// ===================================================== long, exactly ========
+
+function jlZero() { return sint(0, 0, 64, 1) }
+function jlOnes() { return sint(4294967295, 4294967295, 64, 1) }
+function jlMaxL() { return sint(2147483647, 4294967295, 64, 1) }
+function jlMinL() { return sint(2147483648, 0, 64, 1) }
+
+// A long is the ONE sized integer of width 64; byte and short are 8 and 16.
+function jvIsLong(v) {
+    if (!sintIs(v)) { return false }
+    return sintWidth(v) == 64
+}
+
+function jlIsNeg(x) { return sintHi(x) >= 2147483648 }
+
+// Two's complement negation, which is 0 - x at 64 bits and therefore maps
+// Long.MIN_VALUE to itself, exactly as Java's unary minus does.
+function jlNeg(x) { return sintOp(1, jlZero(), x) }
+function jlNot(x) { return sintOp(7, x, jlOnes()) }
+
+// An integral double (|v| < 2^63) as a long box. The two halves are what the
+// floor's sint() takes; above 2^53 the double is already inexact and this
+// reproduces that inexactness rather than inventing digits.
+function jlFromNum(v) {
+    var neg = false
+    var a = v
+    if (a < 0) {
+        neg = true
+        a = 0 - a
+    }
+    if (a >= 9223372036854775808) { return neg ? jlMinL() : jlMaxL() }
+    var hi = Math.floor(a / 4294967296)
+    var lo = a - hi * 4294967296
+    var x = sint(hi, lo, 64, 1)
+    if (neg) { x = jlNeg(x) }
+    return x
+}
+
+// jlCmp is the SIGNED compare of two long boxes. sintCmp is the unsigned one
+// (the boxes are marked unsigned to defeat si_norm), and unsigned order agrees
+// with signed order whenever the two sign bits agree - so only the disagreement
+// needs a case of its own.
+function jlCmp(a, b) {
+    var an = jlIsNeg(a)
+    var bn = jlIsNeg(b)
+    if (an != bn) { return an ? 0 - 1 : 1 }
+    return sintCmp(a, b)
+}
+
+// giStr's signed reading. Long.MIN_VALUE negates to itself and its UNSIGNED
+// digits are the magnitude 9223372036854775808, which is what Java prints after
+// the minus sign - the same reasoning si_str records in the C floor.
+function jlStr(x) {
+    if (jlIsNeg(x)) { return "-" + sintStr(jlNeg(x)) }
+    return sintStr(x)
+}
+
+// giFloat's signed reading. sintNum reads an unsigned 64 bit box as a MAGNITUDE,
+// so the negative half has to be read as its own magnitude and negated. NOT
+// `sintNum(x) - 2^64`: the unsigned reading of -1 rounds to 2^64 exactly, so
+// that subtraction answers 0 - measured, it was the second defect the native
+// build found. Rounding to nearest is symmetric about zero, so negating the
+// magnitude gives exactly what d_from_long would have given the signed box.
+function jlNum(x) {
+    if (jlIsNeg(x)) { return 0 - sintNum(jlNeg(x)) }
+    return sintNum(x)
+}
+
+// Signed division and remainder over the magnitudes. Long.MIN_VALUE / -1 wraps
+// back to itself (JLS 15.17.2) and falls out of this without a special case: the
+// magnitude of MIN_VALUE is 2^63, whose bit pattern IS MIN_VALUE.
+function jlDiv(a, b) {
+    var an = jlIsNeg(a)
+    var bn = jlIsNeg(b)
+    var x = an ? jlNeg(a) : a
+    var y = bn ? jlNeg(b) : b
+    var q = sintOp(3, x, y)
+    if (an != bn) { q = jlNeg(q) }
+    return q
+}
+
+function jlMod(a, b) {
+    var an = jlIsNeg(a)
+    var x = an ? jlNeg(a) : a
+    var y = jlIsNeg(b) ? jlNeg(b) : b
+    var r = sintOp(4, x, y)
+    if (an) { r = jlNeg(r) }
+    return r
+}
+
+// >> is the ARITHMETIC shift; the box is marked unsigned, so sintOp gives the
+// logical one and the sign has to be put back. ~((~a) >>> s) is exact for every
+// negative operand and every count, and ~a is non-negative whenever a is not.
+function jlSar(a, s) {
+    if (!jlIsNeg(a)) { return sintOp(10, a, s) }
+    return jlNot(sintOp(10, jlNot(a), s))
+}
+
+// ===================================================== the char box =========
+
+function jvChar(code) {
+    var o = {}
+    o["__char"] = code
+    return o
+}
+
+function jvIsChar(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (typeof v != "object") { return false }
+    return v["__char"] !== undefined
+}
+
+// ===================================================== the value readings ===
+
+// A PLAIN number is an int. A sized integer and a boxed double are both
+// `typeof v == "number"` in the C floor (tag 13 and tag 14), so every site that
+// meant "an ordinary double" has to say so - the rule both tags impose.
+function jvIsPlainNum(v) {
+    if (typeof v != "number") { return false }
+    if (sintIs(v)) { return false }
+    return !floIs(v)
+}
+
+// jvIsIntegral: an operand of INTEGER arithmetic. A char is one (Java's char is
+// an integral type); a double is not.
+function jvIsIntegral(v) {
+    if (jvIsChar(v)) { return true }
+    if (typeof v != "number") { return false }
+    return !floIs(v)
+}
+
+// jvW: JLS 5.6.2 binary numeric promotion for two integral operands - long when
+// either side is long, int otherwise. So byte + byte is an int.
+function jvW(l, r) {
+    if (jvIsLong(l)) { return 64 }
+    if (jvIsLong(r)) { return 64 }
+    return 32
+}
+
+// jvNarrowFloat, the w < 64 half: JLS 5.1.3 SATURATES at the INT range and only
+// then truncates the bits, so (int) 1e20 is Integer.MAX_VALUE and (byte) 1e20 is
+// (byte) Integer.MAX_VALUE == -1.
+function jvSatInt(f) {
+    if (f !== f) { return 0 }
+    if (f >= 2147483648) { return 2147483647 }
+    if (f < 0 - 2147483648) { return 0 - 2147483648 }
+    return Math.trunc(f)
+}
+
+// jvNarrowFloat, the w == 64 half.
+function jvSatLong(f) {
+    if (f !== f) { return jlZero() }
+    if (f >= 9223372036854775808) { return jlMaxL() }
+    if (f < 0 - 9223372036854775808) { return jlMinL() }
+    return jlFromNum(Math.trunc(f))
+}
+
+// jvToLong: the exact 64 bit reading of an INTEGRAL value, as a long box.
+function jvToLongBox(v) {
+    if (jvIsLong(v)) { return v }
+    if (jvIsChar(v)) { return jlFromNum(v["__char"]) }
+    if (floIs(v)) { return jvSatLong(floNum(v)) }
+    if (sintIs(v)) { return jlFromNum(sintNum(v)) }
+    if (typeof v == "number") { return jlFromNum(Math.trunc(v)) }
+    if (v === true) { return jlFromNum(1) }
+    return jlZero()
+}
+
+// The low 32 bits of any value, as an UNSIGNED number - the one reading every
+// narrowing below is built on.
+//
+// A BOXED DOUBLE saturates (jvNarrowFloat, JLS 5.1.3) and a PLAIN NUMBER wraps.
+// That asymmetry is the whole of jvNarrow's `if isFlo` in abnf/jsrtjava.go and
+// it is easy to get wrong: reading a plain 2147483648 through the saturating
+// path answers 2147483647 where the Go twin's int32(giVal(...)) answers
+// -2147483648, and `2147483648 - 1` then differs by one. Measured, not guessed:
+// that was the first defect the native build of tests/java-test-full.java found.
+function jvLow32(v) {
+    if (jvIsChar(v)) { return v["__char"] }
+    if (floIs(v)) {
+        var f = jvSatInt(floNum(v))
+        return f < 0 ? f + 4294967296 : f
+    }
+    if (sintIs(v)) { return sintLo(v) }
+    if (typeof v == "number") {
+        var t = Math.trunc(v)
+        if (t !== t) { return 0 }
+        if (t == Infinity) { return 0 }
+        if (t == 0 - Infinity) { return 0 }
+        if (t >= 0 - 2147483648 && t <= 2147483647) { return t < 0 ? t + 4294967296 : t }
+        return sintLo(jlFromNum(t))
+    }
+    if (v === true) { return 1 }
+    return 0
+}
+
+// jvI: the int reading of an integral operand - the low 32 bits, signed.
+function jvI(v) {
+    var lo = jvLow32(v)
+    if (lo >= 2147483648) { return lo - 4294967296 }
+    return lo
+}
+
+// jvNum: the double reading of anything numeric.
+function jvNum(v) {
+    if (floIs(v)) { return floNum(v) }
+    if (jvIsLong(v)) { return jlNum(v) }
+    if (jvIsChar(v)) { return v["__char"] }
+    if (sintIs(v)) { return sintNum(v) }
+    if (typeof v == "number") { return v }
+    if (v === true) { return 1 }
+    if (v === false) { return 0 }
+    if (typeof v == "string") { return jpStrNum(v) }
+    return 0
+}
+
+// A decimal string as a number, for the one place a string reaches arithmetic.
+function jpStrNum(s) {
+    var t = parseFloat(s)
+    return t
+}
+
+// jvNarrow is (byte) / (short) / (int) / (long) or a declared integral type. An
+// integral source truncates its bits; a floating point one saturates first.
+function jvNarrow(v, w) {
+    if (w == 64) {
+        if (floIs(v)) { return jvSatLong(floNum(v)) }
+        return jvToLongBox(v)
+    }
+    var lo = jvLow32(v)
+    if (w == 32) {
+        if (lo >= 2147483648) { return lo - 4294967296 }
+        return lo
+    }
+    if (w == 16) { return sint(0, lo & 65535, 16, 0) }
+    return sint(0, lo & 255, 8, 0)
+}
+
+// The 32 bit wrap of a double, which is what an int-width result is reduced to.
+function jvWrap32(x) {
+    if (x !== x) { return 0 }
+    if (x == Infinity) { return 0 }
+    if (x == 0 - Infinity) { return 0 }
+    var m = x - Math.floor(x / 4294967296) * 4294967296
+    if (m >= 2147483648) { m = m - 4294967296 }
+    return m
+}
+
+// ===================================================== ArithmeticException ==
+
+// The class descriptor js_jvexc hands over once at module init, so a divide by
+// zero can THROW rather than abort. The arithmetic externs have no access to the
+// program's scope, which is exactly why the emitter passes it in.
+var jvArithExcCls = undefined
+
+function jvThrowArith(msg) {
+    if (jvArithExcCls === undefined) {
+        fail("java: " + msg)
+        return undefined
+    }
+    var o = {}
+    o["__class"] = jvArithExcCls
+    // __msg is the field the emitted builtin exception constructor writes and
+    // getMessage() reads (emitBuiltinExc in java-to-llvm-ir.abnf).
+    o["__msg"] = msg
+    throw o
+}
+
+// ===================================================== the operators ========
+
+// jvArith is one binary arithmetic or bitwise operator on two INTEGRAL operands.
+// The int case is plain 32 bit arithmetic; only a long operand pays for the box.
+function jvArith(op, l, r) {
+    if (jvW(l, r) == 64) {
+        var a = jvToLongBox(l)
+        var b = jvToLongBox(r)
+        if (op == "/") {
+            if (sintCmp(b, jlZero()) == 0) { jvThrowArith("/ by zero") }
+            return jlDiv(a, b)
+        }
+        if (op == "%") {
+            if (sintCmp(b, jlZero()) == 0) { jvThrowArith("/ by zero") }
+            return jlMod(a, b)
+        }
+        if (op == "+") { return sintOp(0, a, b) }
+        if (op == "-") { return sintOp(1, a, b) }
+        if (op == "*") { return sintOp(2, a, b) }
+        if (op == "&") { return sintOp(5, a, b) }
+        if (op == "|") { return sintOp(6, a, b) }
+        if (op == "^") { return sintOp(7, a, b) }
+        fail("js_jvarith: unknown operator '" + op + "'")
+        return undefined
+    }
+    var x = jvI(l)
+    var y = jvI(r)
+    if (op == "+") { return jvWrap32(x + y) }
+    if (op == "-") { return jvWrap32(x - y) }
+    if (op == "*") { return jvMul32(x, y) }
+    if (op == "/") {
+        if (y == 0) { jvThrowArith("/ by zero") }
+        // Integer.MIN_VALUE / -1 overflows back to itself (JLS 15.17.2).
+        if (x == 0 - 2147483648) { if (y == 0 - 1) { return x } }
+        return jvWrap32(Math.trunc(x / y))
+    }
+    if (op == "%") {
+        if (y == 0) { jvThrowArith("/ by zero") }
+        if (x == 0 - 2147483648) { if (y == 0 - 1) { return 0 } }
+        return x - Math.trunc(x / y) * y
+    }
+    if (op == "&") { return x & y }
+    if (op == "|") { return x | y }
+    if (op == "^") { return x ^ y }
+    fail("js_jvarith: unknown operator '" + op + "'")
+    return undefined
+}
+
+// int * int wraps at 32 bits, and the product of two int32 values is up to 62
+// bits - beyond what a double multiplies exactly. Math.imul is the floor's own
+// 32 bit multiply and is exact by construction.
+function jvMul32(x, y) { return Math.imul(x, y) }
+
+// jvShift is << >> >>>. The result type is the LEFT operand's alone (JLS 15.19),
+// and the COUNT is MASKED - & 31 for an int, & 63 for a long. That is why
+// `1 << 32` is 1 rather than 0, and it is the one place Java and Go disagree
+// outright, Go shifting everything out instead.
+function jvShift(op, l, r) {
+    var n = jvI(r)
+    if (jvIsLong(l)) {
+        var s = n & 63
+        var a = jvToLongBox(l)
+        if (op == "<<") { return sintOp(9, a, s) }
+        if (op == ">>") { return jlSar(a, s) }
+        return sintOp(10, a, s)
+    }
+    var x = jvI(l)
+    var t = n & 31
+    if (op == "<<") { return x << t }
+    if (op == ">>") { return x >> t }
+    // `>>>` in MetaJS is JavaScript's, whose result is an UNSIGNED 32 bit value:
+    // -1 >>> 0 is 4294967295 there and -1 in Java, where the result type is still
+    // int. jvShift's Go twin says the same thing as int32(uint32(a) >> s).
+    return jvWrap32(x >>> t)
+}
+
+// jvCmp is the ordered comparison at the PROMOTED width. A byte compares against
+// an int at INT width - 5 < 1000 is not 5 < -24.
+function jvCmp(op, l, r) {
+    var c = 0
+    if (jvW(l, r) == 64) {
+        c = jlCmp(jvToLongBox(l), jvToLongBox(r))
+    } else {
+        var a = jvI(l)
+        var b = jvI(r)
+        if (a < b) { c = 0 - 1 } else if (a > b) { c = 1 }
+    }
+    if (op == "<") { return c < 0 }
+    if (op == ">") { return c > 0 }
+    if (op == "<=") { return c <= 0 }
+    if (op == ">=") { return c >= 0 }
+    if (op == "==") { return c == 0 }
+    return c != 0
+}
+
+// jvmArith (abnf/jsrtjvm.go): a double on either side makes the whole operation
+// floating point and its result a double; two integral operands keep the 32 bit
+// wrap. floOp is the floor's own tag 14 arm of exactly this, by operator INDEX.
+function jvmArith(op, l, r) {
+    var code = 0
+    if (op == "-") { code = 1 } else if (op == "*") { code = 2 } else if (op == "/") { code = 3 } else if (op == "%") { code = 4 }
+    return floOp(code, jvmOperand(l), jvmOperand(r))
+}
+
+// floOp reads its operands with the floor's to_number, which knows tag 13 and
+// tag 14 but not the {__char} box - and reads an UNSIGNED 64 bit box as a
+// magnitude, which a Java long is not. Both are converted here, so what reaches
+// floOp is either a plain double or a tag 14 box.
+function jvmOperand(v) {
+    if (floIs(v)) { return v }
+    return jvNum(v)
+}
+
+// jvmMinMax picks one operand, but the DOUBLE overload of Math.max/min is
+// selected as soon as one side is a double, so the answer is a double then
+// (Math.max(1.5, 2) is 2.0).
+function jvmMinMax(l, r, takeL) {
+    var v = takeL ? l : r
+    if (floIs(l) || floIs(r)) {
+        if (floIs(v)) { return v }
+        return flo(jvNum(v), 0)
+    }
+    return v
+}
+
+// ===================================================== rendering ============
+
+// jvpStr is String.valueOf: what println writes and what `+` concatenates.
+function jpStr(v) { return jpRender(v, 0) }
+
+function jpRender(v, depth) {
+    if (depth > 32) { return "..." }
+    if (v === undefined) { return "null" }
+    if (v === null) { return "null" }
+    if (typeof v == "string") { return v }
+    if (typeof v == "boolean") { return v ? "true" : "false" }
+    if (jvIsLong(v)) { return jlStr(v) }
+    if (floIs(v)) { return floStr(v) }
+    if (sintIs(v)) { return sintStr(v) }
+    if (typeof v == "number") { return "" + v }
+    if (typeof v == "function") { return "" + v }
+    if (Array.isArray(v)) { return jpArrayTag(v) + "@" + jpHash(v) }
+    if (jvIsChar(v)) { return String.fromCharCode(v["__char"]) }
+    return jpObj(v, depth)
+}
+
+// jpObj renders the object shapes the two Java grammars build.
+function jpObj(o, depth) {
+    // A user toString() wins over every built-in rendering, as it does in Java.
+    var f = jpFindMember(o, "toString")
+    if (f !== undefined) { return jpRender(f.apply(undefined, [o]), depth + 1) }
+    // The class descriptor itself.
+    if (o["__isclass"] === true) {
+        var cn = o["__name"]
+        if (typeof cn == "string") { return "class " + cn }
+    }
+    var cls = o["__class"]
+    if (cls === undefined) { return jpPlainObj(o) }
+    if (cls === null) { return jpPlainObj(o) }
+    if (typeof cls != "object") { return jpPlainObj(o) }
+    // An enum constant without an override prints its constant name (the
+    // java.lang.Enum#toString contract).
+    var en = o["__ename"]
+    if (typeof en == "string") { return en }
+    // A record prints its canonical form, P[x=1, y=2] (java.lang.Record). The
+    // name is the SIMPLE one: the generated toString uses getSimpleName, so a
+    // nested record is `P[...]` and not `Main$P[...]`.
+    var comps = cls["__record"]
+    if (comps !== undefined) {
+        if (Array.isArray(comps)) {
+            var out = ""
+            var i = 0
+            while (i < comps.length) {
+                if (i > 0) { out = out + ", " }
+                out = out + comps[i] + "=" + jpRender(o[comps[i]], depth + 1)
+                i = i + 1
+            }
+            var simple = cls["__name"]
+            if (typeof simple != "string") { simple = "Object" }
+            return simple + "[" + out + "]"
+        }
+    }
+    return jpClassName(cls) + "@" + jpHash(o)
+}
+
+// The Go twin's fallthrough for an object with no __class is rt.toString, which
+// is JavaScript's "[object Object]".
+function jpPlainObj(o) { return "[object Object]" }
+
+// jpClassName is the class' BINARY name: a nested type is spelled Outer$Inner,
+// the way java.lang.Class#getName does, and the grammars record that as __bname.
+function jpClassName(cls) {
+    var b = cls["__bname"]
+    if (typeof b == "string") { if (b.length > 0) { return b } }
+    var n = cls["__name"]
+    if (typeof n == "string") { return n }
+    return "Object"
+}
+
+// jpFindMember walks the __class / __super chain for a callable member, the same
+// walk the two grammars' method dispatch does.
+function jpFindMember(o, name) {
+    var cls = o["__class"]
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (cls === undefined) { return undefined }
+        if (cls === null) { return undefined }
+        if (typeof cls != "object") { return undefined }
+        var m = cls[name]
+        if (m !== undefined) { if (typeof m == "function") { return m } }
+        cls = cls["__super"]
+    }
+    return undefined
+}
+
+// jpArrayTag is the array's class name as getName spells it. The element type is
+// INFERRED from the elements: this value model does not carry the declared one,
+// and the Go twin makes the same inference from the same table.
+function jpArrayTag(a) {
+    var tag = ""
+    var i = 0
+    while (i < a.length) {
+        var t = jpElemTag(a[i])
+        if (t == "") { return "[Ljava.lang.Object;" }
+        if (tag != "") { if (t != tag) { return "[Ljava.lang.Object;" } }
+        tag = t
+        i = i + 1
+    }
+    if (tag == "") { return "[Ljava.lang.Object;" }
+    return tag
+}
+
+function jpElemTag(v) {
+    if (jvIsChar(v)) { return "[C" }
+    if (typeof v == "boolean") { return "[Z" }
+    if (typeof v == "string") { return "[Ljava.lang.String;" }
+    if (floIs(v)) { return "[D" }
+    if (sintIs(v)) {
+        var w = sintWidth(v)
+        if (w == 64) { return "[J" }
+        if (w == 16) { return "[S" }
+        return "[B"
+    }
+    if (typeof v == "number") { return "[I" }
+    return ""
+}
+
+// ----- identity hash --------------------------------------------------------
+//
+// Every object rendered with an `@` gets a stable per-run number. Real java
+// prints System.identityHashCode, which is address derived and changes between
+// two runs of the SAME program, so no assertion can depend on the digits; what
+// the halves must agree on is that one object renders the same way twice and
+// that a run is deterministic, which a counter gives. The Go twin keys a map by
+// the value; MetaJS has no such map, so the objects are kept in a parallel array
+// and found by IDENTITY - which is the same test a Go map on a pointer does.
+
+var jpIdObjs = []
+var jpIdNums = []
+
+function jpHash(v) {
+    var i = 0
+    while (i < jpIdObjs.length) {
+        if (jpIdObjs[i] === v) { return jpHex(439041024 + jpIdNums[i]) }
+        i = i + 1
+    }
+    var n = jpIdObjs.length + 1
+    jpIdObjs.push(v)
+    jpIdNums.push(n)
+    return jpHex(439041024 + n)
+}
+
+// %x of a non-negative integer. 439041024 is 0x1a2b3c00, the Go twin's base.
+function jpHex(n) {
+    var digits = "0123456789abcdef"
+    var v = n
+    var out = ""
+    if (v == 0) { return "0" }
+    while (v > 0) {
+        var d = v - Math.floor(v / 16) * 16
+        out = digits.charAt(d) + out
+        v = Math.floor(v / 16)
+    }
+    return out
+}
+
+// ===================================================== java.lang boxes ======
+
+// jvBoxType builds one of java.lang's boxed-primitive types. MIN_VALUE /
+// MAX_VALUE are the whole reason a sized integer had to exist: Long.MAX_VALUE
+// cannot be written as a plain number at all.
+function jvBoxType(name) {
+    var o = {}
+    if (name == "Integer") {
+        o["MAX_VALUE"] = 2147483647
+        o["MIN_VALUE"] = 0 - 2147483648
+        jvAddCommon(o, 32, 32, 4)
+        o["parseInt"] = function(s) { return jvParseInt(jpStr(s), 32) }
+        return o
+    }
+    if (name == "Long") {
+        o["MAX_VALUE"] = jlMaxL()
+        o["MIN_VALUE"] = jlMinL()
+        jvAddCommon(o, 64, 64, 8)
+        o["parseLong"] = function(s) { return jvParseInt(jpStr(s), 64) }
+        return o
+    }
+    if (name == "Byte") {
+        o["MAX_VALUE"] = sint(0, 127, 8, 0)
+        o["MIN_VALUE"] = sint(0, 128, 8, 0)
+        jvAddCommon(o, 8, 8, 1)
+        return o
+    }
+    if (name == "Short") {
+        o["MAX_VALUE"] = sint(0, 32767, 16, 0)
+        o["MIN_VALUE"] = sint(0, 32768, 16, 0)
+        jvAddCommon(o, 16, 16, 2)
+        return o
+    }
+    // jvmMathObject (abnf/jsrtjvm.go): the `Math` a compiled Java program sees.
+    // The handle runtime's own Math is JavaScript's and answers a plain number for
+    // everything, which would make Math.abs(-2.0) print "2" where Java prints
+    // "2.0". Only the three methods the Java subset documents are provided, which
+    // is what java-interpreter.abnf's hostGlobals["Math"] has too.
+    //
+    // In the Go half this object is the HOST GLOBAL __jmath and is reached by a
+    // scope lookup; the C floor seeds no such name, so java-to-llvm-ir.abnf probes
+    // the scope and falls back to this descriptor (see jvScopeProbe there).
+    if (name == "Math") {
+        o["abs"] = function(v) {
+            if (floIs(v)) { return floAbs(v) }
+            return jvWrap32(Math.abs(jvNum(v)))
+        }
+        o["max"] = function(a, b) { return jvmMinMax(a, b, jvNum(a) > jvNum(b)) }
+        o["min"] = function(a, b) { return jvmMinMax(a, b, jvNum(a) < jvNum(b)) }
+        return o
+    }
+    if (name == "Character") {
+        o["MAX_VALUE"] = jvChar(65535)
+        o["MIN_VALUE"] = jvChar(0)
+        o["SIZE"] = 16
+        o["BYTES"] = 2
+        return o
+    }
+    return o
+}
+
+function jvAddCommon(o, width, size, bytes) {
+    o["SIZE"] = size
+    o["BYTES"] = bytes
+    o["valueOf"] = function(v) { return jvNarrow(v, width) }
+    o["toString"] = function(v) { return jpStr(v) }
+    o["compare"] = function(a, b) {
+        if (jvCmp("<", a, b)) { return 0 - 1 }
+        if (jvCmp(">", a, b)) { return 1 }
+        return 0
+    }
+    o["max"] = function(a, b) {
+        if (jvCmp(">", a, b)) { return jvNarrow(a, width) }
+        return jvNarrow(b, width)
+    }
+    o["min"] = function(a, b) {
+        if (jvCmp("<", a, b)) { return jvNarrow(a, width) }
+        return jvNarrow(b, width)
+    }
+}
+
+// Integer.parseInt / Long.parseLong: a decimal digit run with an optional sign,
+// and a NumberFormatException - here a plain abort, since the message is the only
+// part a program reads - on anything else.
+function jvParseInt(s, width) {
+    var t = s.trim()
+    var neg = false
+    var i = 0
+    if (t.length > 0) {
+        var c0 = t.charAt(0)
+        if (c0 == "+") { i = 1 } else if (c0 == "-") {
+            neg = true
+            i = 1
+        }
+    }
+    if (i >= t.length) {
+        fail("java.lang.NumberFormatException: For input string: \"" + s + "\"")
+        return 0
+    }
+    var acc = jlZero()
+    var ten = jlFromNum(10)
+    while (i < t.length) {
+        var d = t.charCodeAt(i) - 48
+        if (d < 0) {
+            fail("java.lang.NumberFormatException: For input string: \"" + s + "\"")
+            return 0
+        }
+        if (d > 9) {
+            fail("java.lang.NumberFormatException: For input string: \"" + s + "\"")
+            return 0
+        }
+        acc = sintOp(0, sintOp(2, acc, ten), jlFromNum(d))
+        i = i + 1
+    }
+    if (neg) { acc = jlNeg(acc) }
+    return jvNarrow(acc, width)
+}
+
+// ===================================================== the exports ==========
+//
+// Everything below is a TOP-LEVEL `function js_*`, which is what -rt-lib exports
+// under its own C symbol. The order follows abnf/jsrtjava.go and the shared block
+// of abnf/jsrt.go.
+
+// ----- the language-NEUTRAL nine --------------------------------------------
+// None of these is Java's. They live in abnf/jsrt.go, several languages emit
+// them, and they are here only because the C floor does not have them - see the
+// extern split in docs/runtime-next-plan.md part 3.
+
+function js_arr_new_n(n, fill) {
+    var out = []
+    var i = 0
+    var c = jvNum(n)
+    while (i < c) {
+        out.push(fill)
+        i = i + 1
+    }
+    return out
+}
+
+// A char from its CODE. The code arrives as a RAW parameter - java-to-llvm-ir
+// writes it with handle(k), so without the _raw suffix the callee would see the
+// handle 0..3, i.e. undefined/null/false/true. The Lua pilot's finding.
+function js_char(code_raw) { return jvChar(code_raw) }
+
+// The shared dynamic type test behind instanceof. abnf/jsrt.go's isTypeName is
+// the spec, including the part that surprises: the Int/Long/Short/Byte arm tests
+// for a PLAIN number, so a boxed long is NOT `instanceof Long` there either.
+function js_is_type(v, t) {
+    var nm = t
+    var lt = nm.indexOf("<")
+    if (lt >= 0) { nm = nm.substring(0, lt) }
+    var opt = false
+    if (nm.length > 0) {
+        if (nm.charAt(nm.length - 1) == "?") {
+            nm = nm.substring(0, nm.length - 1)
+            opt = true
+        }
+    }
+    if (v === undefined) { return opt }
+    if (v === null) { return opt }
+    if (jvIsChar(v)) {
+        if (nm == "Char") { return true }
+        if (nm == "Character") { return true }
+        if (nm == "Any") { return true }
+        return nm == "Comparable"
+    }
+    if (nm == "Any") { return true }
+    if (nm == "Object") { return true }
+    if (nm == "Int" || nm == "Integer" || nm == "Long" || nm == "Short" || nm == "Byte" || nm == "Char" || nm == "Character") {
+        if (!jvIsPlainNum(v)) { return false }
+        return Math.trunc(v) == v
+    }
+    if (nm == "Double" || nm == "Float" || nm == "Number") { return jvIsPlainNum(v) }
+    if (nm == "String" || nm == "CharSequence") { return typeof v == "string" }
+    if (nm == "Boolean") { return typeof v == "boolean" }
+    if (nm == "List" || nm == "MutableList" || nm == "Collection" || nm == "Array") { return Array.isArray(v) }
+    if (typeof v != "object") { return false }
+    if (Array.isArray(v)) { return false }
+    var cls = v["__class"]
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (cls === undefined) { return false }
+        if (cls === null) { return false }
+        if (typeof cls != "object") { return false }
+        if (cls["__name"] === nm) { return true }
+        cls = cls["__super"]
+    }
+    return false
+}
+
+// Java/C# +: string concat, 32 bit add for two int values, float add otherwise.
+// The STRING rendering here is abnf/jsrt.go's javaString, not jsrtjava.go's
+// jvpStr - js_jvadd below is the one that renders through the Java printer.
+function js_jadd(l, r) {
+    if (typeof l == "string" || typeof r == "string") { return jpStr(l) + jpStr(r) }
+    if (floIs(l) || floIs(r)) { return jvmArith("+", l, r) }
+    var ln = jvNum(l)
+    var rn = jvNum(r)
+    if (jvIsInt32Value(ln) && jvIsInt32Value(rn)) { return jvWrap32(ln + rn) }
+    return ln + rn
+}
+
+function jvIsInt32Value(n) {
+    if (n !== n) { return false }
+    if (Math.trunc(n) !== n) { return false }
+    if (n > 2147483647) { return false }
+    return n >= 0 - 2147483648
+}
+
+// Java & | ^: the non-short-circuit boolean operator when both sides are
+// booleans, the int32 bit operation otherwise.
+function js_jband(l, r) {
+    if (typeof l == "boolean") { if (typeof r == "boolean") { return l && r } }
+    return jvI(l) & jvI(r)
+}
+
+// Java's String.charAt: a CHAR, not a one-character String - so s.charAt(1) + 0
+// is 101 and not "e0" (JLS 4.2.1, char is an integral type).
+function js_jcharat(target, args) {
+    if (typeof target == "string") {
+        var i = jvNum(args[0])
+        if (i < 0 || i >= target.length) {
+            fail("string index " + i + " out of range for \"" + target + "\"")
+            return undefined
+        }
+        return jvChar(target.charCodeAt(i))
+    }
+    return js_mcall(target, "charAt", args)
+}
+
+// Java's == when a char may be involved. String.charAt keeps answering a
+// one-character String in the interpreter's world, so a char must compare equal
+// to that too. Without a char operand this is exactly js_seq.
+function js_jchareq(l, r) {
+    if (jvIsChar(l)) {
+        if (typeof r == "string") { return r.length == 1 && r.charCodeAt(0) == l["__char"] }
+        if (jvIsChar(r)) { return l["__char"] === r["__char"] }
+        if (jvIsPlainNum(r)) { return l["__char"] === r }
+        if (sintIs(r)) { return jvCmp("==", l, r) }
+        if (floIs(r)) { return floEq(flo(l["__char"], 0), r) }
+        return false
+    }
+    if (jvIsChar(r)) { return js_jchareq(r, l) }
+    return jvStrictEq(l, r)
+}
+
+// The floor's === with the two boxes taught to it. A sized integer and a boxed
+// double are both `typeof "number"`, and MetaJS's own === on two boxes is
+// identity - so the numeric cases are spelled out. floEq is jvmNumEq, whose
+// jsGInt case is deliberately absent (a box against a SIZED INTEGER is false),
+// and that asymmetry is reproduced rather than smoothed over.
+function jvStrictEq(l, r) {
+    if (floIs(l) || floIs(r)) { return floEq(l, r) }
+    if (sintIs(l) || sintIs(r)) {
+        if (!jvIsIntegral(l)) { return false }
+        if (!jvIsIntegral(r)) { return false }
+        return jvCmp("==", l, r)
+    }
+    return l === r
+}
+
+// (target, method name, args array). The Go twin (rt.memberCall in abnf/jsrt.go)
+// is a LANGUAGE-NEUTRAL dispatcher; only the arms java-to-llvm-ir.abnf can reach
+// are here, and the ones it cannot are named at the fallthrough rather than
+// guessed at.
+function js_mcall(recv, name, args) {
+    if (typeof recv == "string") {
+        if (name == "length") { return recv.length }
+        if (name == "charAt") {
+            var ci = jvNum(args[0])
+            if (ci < 0 || ci >= recv.length) {
+                fail("charAt(" + ci + ") out of range for \"" + recv + "\"")
+                return undefined
+            }
+            return recv.charAt(ci)
+        }
+        if (name == "equals") { return jvStrictEq(recv, args[0]) }
+        if (name == "substring") {
+            var b = args.length > 0 ? jvNum(args[0]) : 0
+            var e = args.length > 1 ? jvNum(args[1]) : recv.length
+            return jpSubstring(recv, b, e)
+        }
+        if (name == "indexOf") { return recv.indexOf(jpStr(args[0])) }
+        if (name == "isEmpty") { return recv.length == 0 }
+        fail("unknown String method: " + name)
+        return undefined
+    }
+    if (recv === undefined || recv === null) {
+        fail("method call '" + name + "' on a " + (recv === null ? "null" : "undefined"))
+        return undefined
+    }
+    if (typeof recv != "object") {
+        fail("method call '" + name + "' on a " + typeof recv)
+        return undefined
+    }
+    if (Array.isArray(recv)) {
+        if (name == "length") { return recv.length }
+        if (name == "size") { return recv.length }
+        if (name == "add") {
+            recv.push(args[0])
+            return true
+        }
+        if (name == "get") {
+            var gi = jvNum(args[0])
+            if (gi < 0 || gi >= recv.length) {
+                fail("list index " + gi + " out of range")
+                return undefined
+            }
+            return recv[gi]
+        }
+        if (name == "contains") {
+            var k = 0
+            while (k < recv.length) {
+                if (jvStrictEq(recv[k], args[0])) { return true }
+                k = k + 1
+            }
+            return false
+        }
+        fail("unknown list method '" + name + "'")
+        return undefined
+    }
+    if (jvIsChar(recv)) {
+        fail("method call '" + name + "' on a char")
+        return undefined
+    }
+    var cls = recv["__class"]
+    if (cls !== undefined) {
+        var c = cls
+        var guard = 0
+        while (guard < 64) {
+            guard = guard + 1
+            if (c === undefined) { guard = 99 } else if (c === null) { guard = 99 } else if (typeof c != "object") { guard = 99 } else {
+                var mm = c[name]
+                if (mm !== undefined && typeof mm == "function") { return mm.apply(undefined, jpPrepend(recv, args)) }
+                c = c["__super"]
+            }
+        }
+        fail("unknown method '" + name + "' on an instance")
+        return undefined
+    }
+    var f = recv[name]
+    if (f !== undefined && typeof f == "function") { return f.apply(undefined, args) }
+    fail("unknown method '" + name + "'")
+    return undefined
+}
+
+function jpPrepend(v, args) {
+    var out = [v]
+    var i = 0
+    while (i < args.length) {
+        out.push(args[i])
+        i = i + 1
+    }
+    return out
+}
+
+// String.substring with the Go twin's substringRange clamping.
+function jpSubstring(s, b, e) {
+    var begin = b
+    var end = e
+    if (begin < 0) { begin = 0 }
+    if (end > s.length) { end = s.length }
+    if (end < begin) { end = begin }
+    return s.substring(begin, end)
+}
+
+// (super class, this, method name, args array). The walk starts AT the given
+// class: the emitter already resolved the superclass of the DEFINING class, so a
+// subclass override never shadows what super.m() means.
+function js_supercall(sup, self, name, args) {
+    var cls = sup
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (cls === undefined) { guard = 99 } else if (cls === null) { guard = 99 } else if (typeof cls != "object") { guard = 99 } else {
+            var m = cls[name]
+            if (m !== undefined && typeof m == "function") { return m.apply(undefined, jpPrepend(self, args)) }
+            cls = cls["__super"]
+        }
+    }
+    fail("unknown super method '" + name + "'")
+    return undefined
+}
+
+// ----- Java's own sixteen ---------------------------------------------------
+
+// The ArithmeticException class descriptor, handed over once at module init so a
+// divide by zero can THROW rather than abort.
+function js_jvexc(cls) {
+    if (cls !== undefined && cls !== null && typeof cls == "object") { jvArithExcCls = cls }
+    return undefined
+}
+
+// One binary integral operator. A double operand keeps the FLOAT path, which is
+// where the two boxes meet.
+function js_jvarith(op, l, r) {
+    if (floIs(l) || floIs(r)) { return jvmArith(op, l, r) }
+    if (!jvIsIntegral(l) || !jvIsIntegral(r)) {
+        // & | ^ on two booleans are Java's non-short-circuit boolean operators;
+        // anything else is not a program javac accepts.
+        if (typeof l == "boolean" && typeof r == "boolean") {
+            if (op == "&") { return l && r }
+            if (op == "|") { return l || r }
+            if (op == "^") { return l !== r }
+        }
+        return jvmArith(op, l, r)
+    }
+    return jvArith(op, l, r)
+}
+
+function js_jvshift(op, l, r) { return jvShift(op, l, r) }
+
+// An ordered comparison. Two integers compare at the promoted width; anything
+// else (a double, a string pair) keeps the shared comparison.
+function js_jvcmp(op, l, r) {
+    if (jvIsIntegral(l) && jvIsIntegral(r) && !floIs(l) && !floIs(r)) { return jvCmp(op, l, r) }
+    var c = jpCompare(l, r)
+    if (op == "<") { return c < 0 }
+    if (op == ">") { return c > 0 }
+    if (op == "<=") { return c <= 0 }
+    return c >= 0
+}
+
+// The shared jsCompare: two strings compare as strings, everything else as
+// numbers, and a NaN answers "not less and not greater", which the callers turn
+// into false for < and > and TRUE for >= - the Go twin's behaviour exactly.
+function jpCompare(l, r) {
+    if (typeof l == "string" && typeof r == "string") {
+        if (l < r) { return 0 - 1 }
+        if (l > r) { return 1 }
+        return 0
+    }
+    var a = jvNum(l)
+    var b = jvNum(r)
+    if (a < b) { return 0 - 1 }
+    if (a > b) { return 1 }
+    return 0
+}
+
+// A cast or a declared integral type: (value, bits).
+function js_jvconv(v, bits) { return jvNarrow(v, jvNum(bits)) }
+
+// A declared type applied to an initializer: only an INTEGRAL value narrows, so
+// `Object o = "s"` and a lambda pass through untouched.
+function js_jvadopt(v, bits) {
+    if (!jvIsIntegral(v)) { return v }
+    return jvNarrow(v, jvNum(bits))
+}
+
+// An integral literal, passed as DIGITS: emitNum would already have rounded
+// 9223372036854775807 to 9223372036854776000 on the way into the module.
+// (text, radix, isLong).
+function js_jvlit(text, radix, isLong) {
+    var rx = jvNum(radix)
+    var acc = jlZero()
+    var rb = jlFromNum(rx)
+    var i = 0
+    while (i < text.length) {
+        var c = text.charCodeAt(i)
+        var d = 0 - 1
+        if (c >= 48 && c <= 57) { d = c - 48 } else if (c >= 97 && c <= 102) { d = c - 97 + 10 } else if (c >= 65 && c <= 70) { d = c - 65 + 10 }
+        if (d >= 0 && d < rx) { acc = sintOp(0, sintOp(2, acc, rb), jlFromNum(d)) }
+        i = i + 1
+    }
+    if (isLong) { return acc }
+    return jvNarrow(acc, 32)
+}
+
+// -x and ~x, both at the PROMOTED width (JLS 5.6.1): a long stays a long,
+// everything integral else becomes an int.
+function js_jvneg(v) {
+    // NOT `flo(0 - floNum(v), 0)`. Unary minus on a double is emitted as
+    // `0.0 - x` by languages/c-to-llvm-ir.abnf, and 0.0 - 0.0 is +0.0 - so the
+    // sign of a NEGATIVE ZERO would be lost and "" + (-0.0) would print "0.0".
+    // The same trap languages/lib/runtime.c's d_ldexp records. Multiplying by
+    // -1.0 computes the sign instead of writing it, and is exact for every
+    // operand including the infinities and NaN.
+    if (floIs(v)) { return floOp(2, v, flo(0 - 1, 0)) }
+    if (jvIsLong(v)) { return jlNeg(v) }
+    return jvWrap32(0 - jvI(v))
+}
+
+function js_jvnot(v) {
+    if (jvIsLong(v)) { return jlNot(v) }
+    return jvWrap32(0 - jvI(v) - 1)
+}
+
+// ++ / -- keep the type of what they step, which is the same implicit narrowing
+// a compound assignment carries (JLS 15.14.2).
+function js_jvstep(v, d) {
+    var n = jvNum(d)
+    if (jvIsChar(v)) { return jvChar((v["__char"] + n) & 65535) }
+    if (floIs(v)) { return flo(floNum(v) + n, 0) }
+    if (sintIs(v)) { return jvNarrow(jvArith("+", v, jvStepDelta(v, n)), sintWidth(v)) }
+    return jvWrap32(jvI(v) + n)
+}
+
+// The step amount at the operand's own width, so a long steps by a long.
+function jvStepDelta(v, n) {
+    if (jvIsLong(v)) { return jlFromNum(n) }
+    return n
+}
+
+// The result of a COMPOUND assignment: the operation, then the implicit
+// narrowing cast back to the LEFT operand's type (JLS 15.26.2). So
+// `byte b = 10; b += 300` is (byte)310 == 54 and `int i = 5; i += 1.5` is
+// (int)6.5 == 6. A String left operand keeps its concatenation.
+function js_jvnarrowlike(l, v) {
+    if (floIs(l)) {
+        if (floIs(v)) { return v }
+        return flo(jvNum(v), 0)
+    }
+    if (jvIsChar(l)) { return jvChar(jvLow32(v) & 65535) }
+    if (sintIs(l)) { return jvNarrow(v, sintWidth(l)) }
+    if (jvIsPlainNum(l)) {
+        if (jvIsIntegral(v) || floIs(v)) { return jvNarrow(v, 32) }
+    }
+    return v
+}
+
+// The boxed-primitive types Integer / Long / Byte / Short / Character.
+function js_jvboxtype(name) { return jvBoxType(name) }
+
+// A (char) cast: narrow to 16 bits and re-box. char is the one integral type
+// that is UNSIGNED, so the mask rather than a sign extension is the whole answer
+// - (char)-1 is 65535 and (char)70000 is 4464.
+function js_jvchar(v) { return jvChar(jvLow32(jvNarrow(v, 64)) & 65535) }
+
+// The plain-number reading a raw consumer needs (an array index, a length, a
+// bound, and the operand of the FLOOR's js_jflo): a box is not a double and
+// every such consumer wants one.
+//
+// The Go twin converts a jsGInt and passes everything else through, because its
+// consumers already understand jsChar and jsJFlo. The C floor does not know the
+// {__char} box at all and reads a 64 bit box marked unsigned as a magnitude, so
+// both are converted here too. Everything that is neither still passes through
+// unchanged, which is what keeps `(double) "1"` reading the same in both halves.
+function js_jvnum(v) {
+    if (sintIs(v)) { return jvNum(v) }
+    if (jvIsChar(v)) { return v["__char"] }
+    if (floIs(v)) { return floNum(v) }
+    return v
+}
+
+// System.out.println(x) / System.out.print(x). The argument ARRAY of the emitted
+// closure arrives whole, so the no-argument println(), which writes just the line
+// terminator, is distinguishable from println(null).
+function js_jvprint(args) {
+    println(jpFirst(args))
+    return undefined
+}
+
+function js_jvwrite(args) {
+    print(jpFirst(args))
+    return undefined
+}
+
+function jpFirst(args) {
+    if (!Array.isArray(args)) { return jpStr(args) }
+    if (args.length == 0) { return "" }
+    return jpStr(args[0])
+}
+
+// String.valueOf(x) and the string form used by `+`.
+function js_jvstr(v) { return jpStr(v) }
+
+// Java's `+`. Identical to js_jadd except that the string case renders through
+// the Java printer, so `"" + arr` and `"" + obj` agree with println instead of
+// falling through to JavaScript's ToString.
+function js_jvadd(l, r) {
+    if (typeof l == "string" || typeof r == "string") { return jpStr(l) + jpStr(r) }
+    if (floIs(l) || floIs(r)) { return jvmArith("+", l, r) }
+    if (jvIsIntegral(l) && jvIsIntegral(r)) { return jvArith("+", l, r) }
+    return jvGenericAdd(l, r)
+}
+
+// The shared jsAdd for the operand pairs Java's own arms do not cover: anything
+// that is not a string and not integral coerces to a number.
+function jvGenericAdd(l, r) { return jvNum(l) + jvNum(r) }

@@ -6,15 +6,17 @@
 # It runs tests/coro-poc/gen.ll in BOTH engines and diffs the two outputs:
 #
 #   llvm.Run   go test ./abnf/ -run TestCoroPoC   (abnf/coropoc_test.go)
-#   native     a clang link of gen.ll with a PATCHED COPY of the C floor
+#   native     a clang link of gen.ll with a COPY of the C floor
 #
-# languages/lib/runtime.c is NEVER written to: coro-floor.py reads it and writes
-# the patched text into a temp directory.  --diff prints the unified patch, which
-# is what the floor's owner would apply.
+# THE PATCH HAS LANDED.  coro-floor.py used to patch a COPY of runtime.c because
+# the floor had no coroutine; the floor owns one now, so coro-floor.py only makes
+# the copy (and fails loudly if the coroutine block ever leaves the floor), and
+# --diff prints nothing.  The copy still matters: --break mutates it, and the
+# real languages/lib/runtime.c is never written to by this script.
 #
 # Usage:
 #   tests/coro-poc/build.sh            build, run both engines, diff
-#   tests/coro-poc/build.sh --diff     print the floor patch and exit
+#   tests/coro-poc/build.sh --diff     the floor patch (empty since it landed)
 #   tests/coro-poc/build.sh --gc       also run all four collector modes
 #   tests/coro-poc/build.sh --break    the discriminating-power table: break one
 #                                      GC root at a time and see whether the PoC
@@ -33,6 +35,8 @@ MODE="${1:-run}"
 if [ "$MODE" = "--diff" ]; then
     python3 "$HERE/coro-floor.py" -o "$WORK/runtime-coro.c" || exit 2
     diff -u languages/lib/runtime.c "$WORK/runtime-coro.c"
+    echo "(empty: the coroutine primitive is IN languages/lib/runtime.c)" >&2
+    python3 "$HERE/coro-floor.py" --check || exit 2
     exit 0
 fi
 
@@ -50,7 +54,7 @@ AWK
 
 go build -o "$WORK/mec" . || { echo "build.sh: go build failed" >&2; exit 2; }
 
-# --- the C floor, patched into a COPY and compiled by OUR OWN C compiler ----
+# --- the C floor, copied and compiled by OUR OWN C compiler ----------------
 build_floor() {   # $1 = output .ll, $2 = optional perl -0 mutation of the C
     python3 "$HERE/coro-floor.py" -o "$WORK/f.c" || return 2
     if [ -n "${2:-}" ]; then perl -0pi -e "$2" "$WORK/f.c" || return 2; fi
@@ -115,9 +119,9 @@ if [ "$MODE" = "--break" ]; then
     brk "the parked registers not scanned" \
         's/gc_scan_range\(cb\[6\], cb\[6\] \+ 512\);/;/'
     brk "the RESUMER stacks not scanned" \
-        's/\t\tgc_scan_range\(RES_LO\[i\], RES_HI\[i\]\);/\t\t;/'
+        's/\t\tgc_scan_range\(lo\[i\], hi\[i\]\);/\t\t;/'
     brk "the RESUMER registers not scanned" \
-        's/\t\tgc_scan_range\(RES_JB\[i\], RES_JB\[i\] \+ 512\);/\t\t;/'
+        's/\t\tgc_scan_range\(jb\[i\], jb\[i\] \+ 512\);/\t\t;/'
     brk "the generator cell not a root" \
         's/\t\tgc_try\(cb\[7\], 1\);/\t\t;/'
     brk "tag 15 children not traced" \
@@ -125,9 +129,18 @@ if [ "$MODE" = "--break" ]; then
     brk "tag 16 (the wrapped closure) not traced" \
         's/if \(t == 16\) \{ gc_try\(w\[1\], 1\); return; \}/if (t == 16) { return; }/'
     brk "GC_STACK_BASE not switched on resume" \
-        's/\tGC_STACK_BASE = cb\[5\];\n\tg = cb\[7\];/\tg = cb[7];/'
+        's/\tGC_STACK_BASE = cb\[5\];\n\tJBP = cb\[9\];\n\tJB_CAP = cb\[12\];\n\tJB_DEPTH = 0;/\tJBP = cb[9];\n\tJB_CAP = cb[12];\n\tJB_DEPTH = 0;/'
     brk "GC_STACK_BASE not switched back on yield" \
-        's/\tGC_STACK_BASE = cb\[5\];\n\tCUR_GEN = g;/\tCUR_GEN = g;/'
+        's/\tGC_STACK_BASE = cb\[5\];\n\tJBP = cb\[9\];\n\tJB_CAP = cb\[12\];\n\tJB_DEPTH = cb\[10\];/\tJBP = cb[9];\n\tJB_CAP = cb[12];\n\tJB_DEPTH = cb[10];/'
     brk "CUR_GEN not a root" \
         's/\tgc_try\(CUR_GEN, 1\);/\t;/'
+    # --- the throw gate: the four things that make a throw across a yield safe -
+    brk "a suspended coroutine's try barriers not scanned" \
+        's/\t\t\tgc_scan_jb\(cb\[9\], cb\[10\]\);/\t\t\t;/'
+    brk "the parked resumer's try barriers not scanned" \
+        's/\t\tgc_scan_jb\(jp\[i\], jd\[i\]\);/\t\t;/'
+    brk "ONE GLOBAL jmp_buf pool (the pre-fix floor)" \
+        's/\tcb\[9\] = \(long\)malloc\(8 \* 128\);\n\tcb\[12\] = 128;\n\ti = 0;\n\twhile \(i < 128\) \{ long \*jp = \(long \*\)cb\[9\]; jp\[i\] = 0; i = i \+ 1; \}/\tcb[9] = JB_MAIN;\n\tcb[12] = 512;/'
+    brk "the body's throw not re-raised on the resumer" \
+        's/\t\tjs_throw\(ff\(g\)\);/\t\t;/'
 fi

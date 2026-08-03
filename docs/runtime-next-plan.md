@@ -1259,6 +1259,45 @@ Conversely, `_raw` PARAMETERS are **not** universal: `php-to-llvm-ir.abnf` passe
 every operator selector with `emitStr`/`emitNum` and has **zero** of them, where Lua
 had three. Check each emitter rather than assuming either way.
 
+### What SWIFT added to both of these (2026-08-03)
+
+**Item 1 held, and it is now the confirmed pattern rather than one data point.**
+`js_kget` / `js_kset` are Swift's scope probes - the `this`-aware Kotlin shape, "a
+name that is no local resolves against the properties of `self`" - and neither
+could be written in layer 2. Both are now the emitted IR helpers `sw_kget` /
+`sw_kset` in `swift-to-llvm-ir.abnf`, over `js_scope_typeof` / `js_scope_get` /
+`js_scope_set`, and the extern count went **68 -> 66** with `llvm.Run` unchanged at
+209/209. Two languages, two lowerings, no floor change either time. **Expect one
+per language and expect it to be cheap.**
+
+Where Swift's differs from PHP's is worth copying too: PHP's probe is a
+single-expression helper, which is what kept its twelve call sites from being
+restructured. Swift's has a `this` FALLBACK and a write side, so it is two IR
+FUNCTIONS instead - 43 read sites and 4 write sites became one call each, and the
+one site that was not a plain `callExt` (compile-core's `makeVarRef`, reached
+through `core.scopeGetExt`) was overridden in the grammar, since that field names
+an extern and `js_kget` is no longer one.
+
+> The one inexactness, stated at the helper: `js_scope_typeof` answers
+> `"undefined"` for a slot that HOLDS undefined and for an absent name alike, so
+> such a name would take the self fallback and then the final `js_scope_get`,
+> which returns undefined in the Go twin and ABORTS in the C floor. Swift's
+> emitter declares an uninitialised `let v: Int` as NULL, so no emitted binding
+> takes that path - but the next language must check its own.
+
+**Item 2 has a first EXCEPTION, and it is the cheapest possible one.** Swift never
+sets `core.truthyExt`, so it stays at compile-core's default `"js_truthy"` - which
+is **the C floor's own function**, already answering the raw 1/0 the `icmp` wants.
+There is no shim to get wrong. So the rule is not "all nine need `__raw`" but:
+
+> **A language needs the `__raw` suffix exactly when it OVERRIDES
+> `core.truthyExt` with an extern of its own.** Lua and PHP do; Swift does not.
+> `grep -n 'truthyExt' languages/<lang>-to-llvm-ir.abnf` answers it in one line,
+> and an empty result means the floor already has you covered.
+
+Swift also has **zero** `_raw` parameters, like PHP and unlike Lua - so that count
+is now 3 / 0 / 0 across the three ported languages.
+
 ## PHP - PARTIAL (2026-08-03). A native PHP binary exists; three walls are named
 
 **PHP now compiles to a self-contained native binary, and 221 of the 306 ratchet
@@ -1472,6 +1511,491 @@ Both of those pass natively today. The full-syntax ratchet entry is deliberately
 **not** requested yet, for the same reason the clang-check row is held: it would be
 red until WALL 1 and WALL 2 are closed, and the matrix is a green-only suite.
 
+## SWIFT - DONE (2026-08-03). The gate is MET: 209/209 natively, byte-identical
+
+**`tests/swift-test-full.swift` runs as a self-contained native binary, all 209
+assertions pass in it, and its stdout, its stderr and its exit code are
+byte-identical with `llvm.Run`.** Swift is in `tests/clang-check.sh`'s run-it row:
+
+```
+swift           26139  ok, and the clang executable agrees
+```
+
+No row is held, no assertion is held back, and no floor change was needed or made.
+`abnf/jsrtswift.go` is **kept**, as the plan requires: `llvm.Run` still uses it,
+the native binary uses layer 2, and the two are now differentially compared over
+20,296 probe lines.
+
+Swift was unblocked by **both** floor tags at once and needed no new code for
+either. This is the result that matters for the remaining eight:
+
+> PHP could go second only because its Go twin uses zero `jsJFlo`, and it still
+> needed a hand-written `{__pf}` object box for its float; Lua needed ~200 lines
+> of `i64` pair arithmetic for its integer. **Swift needed NEITHER.** `sint*` IS
+> Swift's `Int8...UInt64` and `flo*` IS Swift's `Double`, so
+> `languages/lib/swift-rt.metajs` has no pair layer and no box layer at all - the
+> two tags are simply used. Both tags paid for themselves the first time a
+> language reached for them together.
+
+### The extern split
+
+`tests/swift-test-full.swift` drives **66** externs (was 68; see the scope-probe
+lowering above). Over every `tests/swift-test-*.swift` the union is **also 66** -
+the smaller files add nothing.
+
+| where | count | what |
+|---|---|---|
+| already in the C floor | 35 | the generic primitives of phase 3, the five the Lua pilot added, `js_truthy`, and the `sint`/`flo` machinery behind `js_gilit` |
+| **layer 2**, language-NEUTRAL | 10 | `js_char`, `js_char_code`, `js_kindex`, `js_dict_new`, `js_is_type`, `js_jadd`, `js_mcall`, `js_pyget`, `js_pyset`, `js_pylen` |
+| **layer 2**, Swift's own | 21 | `js_sw*` |
+
+`languages/lib/swift-rt.ll` (17,718 lines, from a 1,366-line `.metajs`) exports
+exactly those 31 symbols and nothing else - checked, not assumed. The layer-2
+source compiles **byte-identically under `-frozen`** as well as under goja, which
+is the check that says the dialect rules at the head of the file were actually
+obeyed rather than accidentally satisfied by the host engine.
+
+The split against the two done before it:
+
+```
+             floor   neutral   own      pair/box layer needed in layer 2
+lua            23        5      26      ~200 lines of i64 pairs
+php            29        8      63      a {__pf} float box
+swift          35       10      21      NONE
+```
+
+**Swift's own 21 is the smallest language-specific surface of the three**, and the
+reason is the value model, not the language: Swift's runtime semantics are
+rendering (`js_swdesc`/`js_swstr`/`js_swprint`), value equality (`js_sweq`),
+arithmetic selection between the two number tags, and four comparisons. There is
+no collection library and no string library in it - `js_mcall`, `js_pyget` and
+friends carry those, and they are neutral.
+
+### `js_jadd` is now COMPLETE in layer 2, and `jsChar` did NOT block Swift
+
+Two things the floor is missing came up and neither cost anything:
+
+**`js_jadd`.** `php-rt.metajs` had to leave its float arm unwritten (that arm needs
+`jsJFlo`, which PHP's layer 2 could not make). Swift's is complete: the boxed
+double is a floor tag, so the arm is three lines of `flo`/`floIs`/`floStyle`. **Any
+language that emits `js_jadd` on real user values can now have the whole thing.**
+
+**`jsChar`.** The plan says to REPORT rather than add if Swift needs it, and the
+honest answer is that **Swift does not**, for a reason worth writing down because
+the next language may not get it for free. `js_char`, `js_char_code` and
+`js_kindex` are Kotlin's Char externs and the floor has no such tag - but Swift
+reaches all three from exactly two places, both inside the emitter's own
+grapheme-cluster walk (`sw_gcount` and `sw_nfd`), and in both the `jsChar` is
+consumed immediately:
+
+```
+js_jadd(acc, js_char(cp))          Go: jsChar -> rt.toString  -> the character
+js_char_code(js_kindex(s, i))      Go: jsChar -> rt.toNumber  -> the code point
+```
+
+A one-character STRING makes both of those round trips identically, so layer 2
+answers a string and nothing observable changes. `js_kindex` additionally has to
+map a LONE SURROGATE to U+FFFD, because the Go twin builds its Char from
+`[]rune(strAt(s,i))[0]` and `sw_gcount` recognises a surrogate pair by exactly
+that value - the engine would otherwise hand back the surrogate itself. **No floor
+change requested.** A language that puts a Char in a variable, compares two of
+them, or asks `js_typeof` about one will not be able to do this, and then the tag
+is a real gap.
+
+### Ground truth
+
+Oracles: **real `swift` / `swiftc` 6.1.2 (Apple Swift, arm64-apple-macosx16.0)**,
+present on this machine, and **Apple clang 17.0.0** for the native link.
+
+```
+matrix                325/325
+--full                5,590 assertions, 0 languages whose halves disagree (swift 209)
+                      grep 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF' -> empty
+--cross               119 programs, 0 divergent
+go test ./abnf/       ok
+jsbootstrap.ll        regenerates BYTE-IDENTICALLY (md5 1e7c3ffc... before and after)
+gen-runtime-ll.sh --check   up to date        gen-lua-rt-ll.sh   --check  up to date
+gen-bash-rt-ll.sh --check   up to date        gen-batch-rt-ll.sh --check  up to date
+gen-php-rt-ll.sh  --check   up to date        gen-java-rt-ll.sh  --check  up to date
+gen-swift-rt-ll.sh --check  swift-rt.ll is up to date (17,718 lines)
+clang-check           swift joins the RUN-IT row (see above). The one finding in the
+                      table is `java`, which is another agent's work in progress in
+                      this tree and is not touched here.
+```
+
+**Verified from a CLEAN ARCHIVE, not the working tree** - `git archive d30629f | tar
+x`, then only the four Swift files copied in, `go build` INSIDE, run there:
+
+```
+tests/gen-swift-rt-ll.sh --check    swift-rt.ll is up to date
+./sw.exe                            full: 209 checks, 0 failures   (rc=0)
+tests/clang-check.sh swift          ok, and the clang executable agrees
+```
+
+That matters here for the reason the Swift history gives it: `js_swtuple` /
+`js_swtuparr` were once committed while `abnf/jsrtswift.go` was not, and a clean
+checkout failed three matrix entries. Nothing in this change depends on the
+concurrent `runtime.c` edits in the working tree.
+
+Every Swift program in `tests/`, `llvm.Run` against the native binary, stdout AND
+stderr AND exit code:
+
+```
+swift-test-1  swift-test-complete  swift-test-features  swift-test-full
+swift-test-multifile  swift-test-try                              all SAME (rc=0)
+swift-test-recognize   NOT COMPARABLE - both halves refuse it identically
+                       ("await expression not implemented", a pre-existing gap)
+```
+
+### The differential probe - two probes, 20,296 lines, and what they found
+
+**Probe A, 1,910 lines**: `Double.description` over 57 values (both zeros, the
+subnormal minimum, `Double.greatestFiniteMagnitude`, 1e±100, the 1e15/1e16
+boundary, 2^53 and its neighbours), the four arithmetic operators and
+`truncatingRemainder` over pairs of them, all five comparisons, the eight Double
+predicates, `&+ &- &* & | ^` and the six comparisons over 28 integers,
+`/ %` guarded, shifts including Swift's NEGATIVE counts, `~`, the failable
+`Int(String)` / `Double(String)` over 28 strings, `max`/`min`, and the rendering
+and `==` of struct, class, enum (bare, associated, labelled, raw-valued), tuple
+(labelled and nested), Array, Dictionary, Optional and `CustomStringConvertible`.
+
+**Probe B, 18,386 lines**: the integer and Double halves again with every operand
+read out of an ARRAY at run time, so `swiftc -O` cannot fold it. 31x31 integer
+pairs times `&+ &- &* & | ^ ~ / % << >>` at thirteen shift counts plus seven
+comparisons, and 32x32 Double pairs.
+
+```
+llvm.Run vs the native binary      BYTE-IDENTICAL on both, 20,296 of 20,296 lines
+```
+
+It found **one real defect**, in probe A, on one line: `(-0.0).rounded()` answered
+`0.0` natively and `-0.0` under `llvm.Run` and under real swift. `Math.round` is JS
+half-UP, not Go's `math.Round` half-away-from-zero, so layer 2 spells the rounding
+itself - and `x < 0` is FALSE for `-0.0`, so the sign was lost. Fixed, with two
+further guards the same site needs (`|x| >= 2^52`, where `x + 0.5` rounds up to the
+next double, and the infinities). The same class bit the float renderer: **unary
+minus has to be written `-x` and not `0 - x`**, because `0.0 - 0.0` is `+0.0` while
+the floor's `d_neg` flips the sign bit. That is the plan's own "a negative floating
+point literal does not survive the C floor's compiler" trap, met from the other
+side, and every remaining language with a float will meet it.
+
+### Where our Swift and REAL swift differ - measured, and NOT fixed here
+
+With both probes run through `swiftc -O` 6.1.2, **84 lines of 20,296 differ**, and
+`llvm.Run` and the native binary agree with each other on ALL of them - so every
+one is pre-existing behaviour of both halves, unchanged by this port.
+
+```
+  36 + 6   the Double FORMATTER, at one boundary (below)
+      21   Optional(x) - the deliberate no-Optional-box simplification
+      14   NOT OURS: swiftc constant-folded `&*` on literals at arbitrary
+           precision (9007199254740991 &* itself printed as 8.1e31). The
+           opaque-operand probe has ZERO integer differences in 18,386 lines,
+           which is what proves the arithmetic and not the first probe.
+       3   max/min tie-breaking between +0.0 and -0.0
+       4   module qualification (main.C) and a non-conforming `description`
+```
+
+**The formatter boundary, measured exactly.** Both halves switch to scientific
+notation at `e10 >= 16`; real Swift switches at **|v| > 2^53**:
+
+```
+                        ours                      swift 6.1.2
+9007199254740991.0      9007199254740991.0        9007199254740991.0
+9007199254740992.0      9007199254740992.0        9007199254740992.0     <- 2^53
+9007199254740994.0      9007199254740994.0        9.007199254740994e+15  <- first
+9999999999999000.0      9999999999999000.0        9.999999999999e+15
+1234567890123456.0      1234567890123456.0        1234567890123456.0
+1e16                    1e+16                     1e+16
+```
+
+Not fixed, for the same reason the Lua formatter was not: the rule lives in THREE
+halves at once (`swFloDigits` in `abnf/jsrtswift.go`, `swFloStr` in
+`swift-interpreter.abnf`, `swFloDigits` here) and `--full` SECTION 25 pins the
+current one, so changing it is a self-contained job of its own and is not this
+gate. It is a rendering difference only - the arithmetic agrees on all 18,386
+opaque-operand lines.
+
+**`min` between +0.0 and -0.0.** Swift's `min(x, y)` is `y < x ? y : x`, so
+`min(0.0, -0.0)` is the LEFT operand `0.0`; the Go twin's `swPick` answers the
+right one on a tie. 3 lines, both halves agree, pre-existing.
+
+**A separate probe of the string model** - grapheme-cluster `.count`, canonical
+`==` between `"café"` and `"cafe\u{301}"`, and `for c in s` over a non-ASCII string
+- agrees with `swift 6.1.2` line for line, and `llvm.Run` and the native binary are
+byte-identical on it. One difference: an ASTRAL character prints as **two U+FFFD
+replacement characters** where swift prints its four UTF-8 bytes (`aé😀b` ->
+`aé\xef\xbf\xbd\xef\xbf\xbdb`). That is `wtf8Clean` on the Go side and the same
+answer in the C floor, and it is **PRE-EXISTING**: verified by running the same
+program under a pristine `git archive d30629f` build, whose output is byte-identical
+to this one. Recorded, not fixed - it is an emitter/floor question about surrogate
+pairs and not a layer-2 one.
+
+The other three groups are documented at the top of `abnf/jsrtswift.go` as
+deliberate and shared by both halves, and this port reproduces them rather than
+diverging: there is no Optional box in the value model, a class prints its bare
+name because the runtime has no module concept, and a `description` PROPERTY is
+honoured whether or not the type conforms to `CustomStringConvertible`.
+
+### launch.json entries wanted (not added - not my file)
+
+Both pass natively today, at the working tree and from the clean archive:
+
+```
+"Swift native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-features.swift", "-q", "-exe", "tests/swift-native.out"]
+"Swift native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["-i", "tests/imports", "languages/swift-to-llvm-ir.abnf", "tests/swift-test-multifile.swift", "-q", "-exe", "tests/swift-native-multi.out"]
+```
+
+Unlike PHP's, a full-syntax entry would be green too - `tests/swift-test-full.swift`
+passes 209/209 natively - but it stays out of the matrix for the same reason every
+other `*-test-full.*` does: the ratchet lives in `./test.sh --full`, and
+`tests/clang-check.sh` already runs the native one on every sweep.
+
+### What is still owed for Swift
+
+1. Nothing for the gate. `abnf/jsrtswift.go` stays until the change is committed,
+   as the plan requires, and then it is the first Go twin that can actually go.
+2. The formatter boundary above, if and when someone does the three-halves job.
+3. `min`/`max` on a signed-zero tie, same shape, 3 probe lines.
+
+## JAVA - DONE (2026-08-03). The gate is MET, and one floor primitive is owed
+
+**`tests/java-test-full.java` runs as a self-contained native binary and agrees with
+`llvm.Run` byte for byte, stdout and stderr and exit code, on all 278 assertions**;
+`tests/clang-check.sh` reads
+
+```
+java   31460   ok, and the clang executable agrees
+```
+
+so java left the `ok (module only)` row for the run-it row and NO row is held. The
+oracle was a **real `javac`/`java`, openjdk 24.0.2 (`/usr/bin/java`)**, and
+`java tests/java-test-full.java` prints the same `full: 278 checks, 0 failures` line
+both halves print - the ratchet file is a valid Java program, which is what makes
+that check possible at all.
+
+`abnf/jsrtjava.go` and `abnf/jsrtjvm.go` are **kept**, as the plan requires: they are
+what `llvm.Run` still uses, and they are now differentially compared against layer 2.
+
+### The extern split
+
+`tests/java-test-full.java` drives **54** externs, and so does the union over every
+`tests/java-test-*.java` - java's emitter has no test-specific arm.
+
+| where | count | what |
+|---|---|---|
+| already in the C floor | 29 | the generic primitives of phase 3 plus the five the Lua pilot added, plus `js_jflo` |
+| **layer 2**, language-NEUTRAL | 9 | `js_arr_new_n`, `js_char`, `js_is_type`, `js_jadd`, `js_jband`, `js_jcharat`, `js_jchareq`, `js_mcall`, `js_supercall` |
+| **layer 2**, Java's own | 16 | the `js_jv*` family |
+
+Lua was 23/5/26 and PHP 29/8/63, so **java is the smallest surface of the eleven and
+it measured that way.** The nine neutral ones are not Java's - they live in
+`abnf/jsrt.go`, csharp/kotlin/go/swift/dart emit most of them, and they are in layer
+2 only because the floor has not got them. `languages/lib/java-rt.ll` exports **27**
+symbols (the 25 the union needs plus `js_jvnum` and `js_jvstr`, which
+`abnf/jsrtjava.go` registers and no test reaches).
+
+### THE ONE WALL, and how it was closed WITHOUT a floor change
+
+**`si_norm` unboxes a signed 64 bit value a double holds exactly, and Java's `long`
+must not.** `abnf/jsrtjava.go` says it outright - `jvBox` "is 'read this as a long':
+always a box, never a plain number" - because `1000000L * 1000000L` is
+1000000000000 and `1000000 * 1000000` is -727379968. Every one of the eleven `sint*`
+host builtins goes through `si_norm`, so **layer 2 has no constructor that answers a
+small boxed long**, and roughly half of SECTION 25 would have failed silently on the
+32 bit wrap.
+
+It did not need a floor addition. `si_norm`'s unboxing arm is `w == 64 && !u`, so a
+64 bit box **marked UNSIGNED** never unboxes and carries the exact 64 bits
+(`si_trunc` and `si_u` are both the identity at width 64). A Java long is
+represented that way, and layer 2 supplies the six operations whose SIGNED reading
+the floor would then get wrong:
+
+```
++ - * & | ^ << >>>   bit-identical signed/unsigned - sintOp direct, no wrapper
+/  %                 jlDiv / jlMod: divide the magnitudes, put the sign back.
+                     Long.MIN_VALUE / -1 falls out with no special case, because
+                     the magnitude of MIN_VALUE has MIN_VALUE's own bit pattern
+>>                   jlSar: ~((~a) >>> s) when negative
+compare              jlCmp: sign bits first, then sintCmp's unsigned compare -
+                     unsigned order IS signed order once the signs agree
+decimal text         jlStr: "-" + sintStr(negation), and MIN_VALUE negates to
+                     itself whose unsigned digits are exactly the magnitude
+double reading       jlNum: negate the MAGNITUDE's reading
+```
+
+Each is exact and none is observable from a Java program; the 630 KB probe below
+pins all six. **The generalisation for csharp, go, kotlin, swift and dart** - every
+one of which has a 64 bit signed type - is that this trick works, and that the
+alternative is one floor line:
+
+> **FLOOR REQUEST (reported, not made - the floor is another agent's this session):
+> a constructor that builds a tag 13 cell WITHOUT `si_norm`.** `si_make` already
+> exists; it needs a host id, e.g. `sintRaw(hi, lo, bits, unsigned)`, plus its twin
+> in `giBindings` and `metajs-interpreter.abnf`. With it, `jlDiv`/`jlMod`/`jlSar`/
+> `jlCmp`/`jlStr`/`jlNum` all collapse into plain `sintOp`/`sintCmp`/`sintStr`/
+> `sintNum` calls and the next five languages skip this section entirely. Cost of
+> NOT having it, measured: ~90 lines of `languages/lib/java-rt.metajs`.
+
+The **second-order cost** is the part worth reading, because it is what the next
+language will trip over: a long carried as an unsigned box is misread by any FLOOR
+extern that reads it numerically. Exactly one of Java's does - `js_jflo`, the
+(double)/(float) cast and the `double`-declared initializer - and `(double) -1L`
+answered `1.8446744073709552E19`. Fixed in the EMITTER, not the floor:
+`java-to-llvm-ir.abnf` now emits `js_jflo(js_jvnum(v))`, and `js_jvnum` is Java's
+own "read this as a plain double". In the Go twin `js_jvnum` converts a `jsGInt` and
+passes everything else through, so `llvm.Run` is unchanged - verified byte for byte.
+
+### The two cross-cutting findings, checked and MEASURED for java
+
+1. **`core.truthyExt`.** `java-to-llvm-ir.abnf` sets no `core.truthyExt` at all, so
+   it uses the default `js_truthy`, **which is in the floor**. Java therefore needs
+   **no `__raw` export**. Checked the way the plan asks - `grep NewICmp` over
+   `lib/compile-core.js` and the grammar - and `js_truthy` is the only extern whose
+   result is compared as a raw integer.
+2. **`_raw` PARAMETERS: java has exactly one**, `js_char`, whose code the emitter
+   writes with `handle(code)`. Lua had three, PHP none. `function js_char(code_raw)`.
+   Every other `handle(k)` argument in the grammar goes to `js_closure` or `js_arg`,
+   which are floor externs.
+3. **The scope probe.** Java's is not a language feature at all: `__jmath` (the Java
+   `Math` with the double-aware abs/max/min) is a HOST GLOBAL of the Go runtime and
+   `runtime.c` seeds no such name, so the emitter probes for it and falls back to
+   layer 2's own descriptor. One `java_scope_probe(env, nm, dflt)` helper, PHP's
+   shape unchanged. **Expect one per language, and expect it to be cheap.**
+
+### `jsChar` was NOT needed, and that was measured rather than assumed
+
+The floor has no `jsChar`, and adding one would have been the third primitive type.
+It is not needed: `languages/java-interpreter.abnf` already models a char as a boxed
+`{__char: code}`, so the shape is not invented, and the box is SAFE because of what
+the emitter does with it -
+
+```
+js_typeof      2 sites, both `=== "function"`   an object box answers "object",
+                                                which is not "function" either
+== and !=      js_jchareq / js_not              layer 2
+< > <= >=      js_jvcmp                          layer 2
+switch case    js_jchareq                        layer 2
+```
+
+`js_seq` is emitted only on lengths, on `typeof` results and on class descriptors -
+never on a char. So no floor extern ever sees the box. **This is the answer to
+"measure whether Java truly needs it": it does not.** The residue is one honest
+difference, recorded rather than hidden: a `record R(char c)`'s generated `equals`
+compares fields with `js_seq`, where the Go twin's `jsChar` is a comparable struct
+and the box is not. No test in `tests/` declares a char record component, so it is
+unmeasured rather than wrong; `js_jchareq` is the one-line fix if one ever does.
+
+### Ground truth
+
+```
+matrix                325/325
+--full                java 278, goja and -frozen byte-identical, 0 halves disagree
+--cross               119 programs, 0 divergent
+go test ./abnf/       ok
+clang-check           16/16, and java joins the RUN-IT row
+gen-java-rt-ll.sh --check   java-rt.ll is up to date
+jsbootstrap.ll        untouched (metajs-to-llvm-ir.abnf was not edited)
+real java 24.0.2      `java tests/java-test-full.java` -> full: 278 checks, 0 failures
+```
+
+Every Java program in `tests/`, `llvm.Run` against the native binary, stdout **and**
+stderr **and** exit code:
+
+```
+java-test-full  java-test-1  java-test-features  java-test-complete  java-test-try
+java-test-annotations  java-test-widen  java-test-multifile      all SAME (rc=0)
+an uncaught ArithmeticException                                   SAME message,
+    rc=1 in both; llvm.Run's driver adds one "  ==> Fail" line of its own, the
+    same difference php-test-undefconst records
+java-test-recognize    fails to COMPILE in both (it is a recognition-only file)
+```
+
+### The differential probe, and the three defects it found
+
+A **17,674-line / 630,291-byte** probe - `+ - * / % & | ^` over 26 int values and
+over 27 long values (0, +-1, the int32 and int64 edges and their neighbours, the
+2^53 boundary, 2^32, 3e9, 1e12), the three shifts over 16 counts spanning both the
+&31 and &63 mask boundaries and the negative ones, all six comparisons int/int,
+long/long and int/long, `+ - * / %` over 23 doubles (including both zeros, both
+infinities, NaN, 1e20, 1e-20, the smallest subnormal and DBL_MAX), the mixed
+int/double promotion, every cast between byte/short/int/long/char/double in both
+directions, unary `-` and `~`, `++` on all six types, compound assignment on all six,
+`Math.abs/max/min`, the `Integer`/`Long` statics, `MAX_VALUE`/`MIN_VALUE`/`SIZE`/
+`BYTES` for all five box types, `parseInt`/`parseLong`, char arithmetic and
+rendering over 13 code points, `String.charAt/length/substring/indexOf/equals/
+isEmpty`, and the four integer division-by-zero throws - is **BYTE-IDENTICAL between
+`llvm.Run` and the native binary**, and differs from **real java 24** on 254 lines
+with ONE cause (below).
+
+Three defects, all in layer 2, all invisible to `./test.sh` because it compares each
+engine with itself and the Go twin was right in every one:
+
+1. **A plain number narrowed through the SATURATING path.** `jvNarrow`'s Go twin
+   saturates only for a `jsJFlo` (JLS 5.1.3) and WRAPS everything else; reading a
+   plain `2147483648` through the saturating path answers 2147483647 where
+   `int32(giVal(...))` answers -2147483648, so `2147483648 - 1` was off by one and
+   `-2147483648` printed as `-2147483647`. **4 of the 278 ratchet assertions caught
+   this one** (num10, int1, int10 - and flt11 for the next item), which is the
+   ratchet doing its job at the native boundary.
+2. **`-0.0` was lost.** `flo(0 - floNum(v), 0)` for unary minus: `0.0 - 0.0` is
+   `+0.0`, the same trap `d_ldexp` records in `runtime.c` and the reason a negative
+   floating point LITERAL does not survive the C floor's own compiler. Multiplying
+   by -1.0 computes the sign instead of writing it.
+3. **`>>>` answered an unsigned 32 bit value.** MetaJS's `>>>` is JavaScript's, so
+   `-1 >>> 0` is 4294967295 there and -1 in Java, whose result type is still `int`.
+   The Go twin says `int32(uint32(a) >> s)`. **Only the probe saw this** - the
+   ratchet's `>>>` assertions all use operands whose top bit is clear after the
+   shift.
+
+A fourth, `jlNum`, never shipped: `sintNum(x) - 2^64` for the negative half answers
+**0** for -1L, because the unsigned reading of -1 rounds to 2^64 exactly. Negating
+the magnitude's reading is exact, and rounding to nearest is symmetric about zero.
+
+**The 254 lines where we differ from real java are all one thing**: the smallest
+positive subnormal renders as `5.0E-324` where `Double.toString` gives `4.9E-324`
+(and `1.0E-323` against `9.9E-324`). It is the shortest-round-trip form against
+Java's own subnormal policy, it is **pre-existing in all three of our engines** -
+`java-interpreter.abnf`, `llvm.Run` and the native binary all print `5.0E-324` - and
+it is the same class as the Lua formatter difference already recorded above. Not
+fixed here: it is a three-halves job in `jvmFloStr`, `java-interpreter.abnf` and
+`runtime.c`, and it is not this task's gate.
+
+### What is owed, and what generalises
+
+1. **The floor request above** (`sintRaw`, a tag 13 without `si_norm`). It is worth
+   ~90 lines EACH for csharp, go, kotlin, swift and dart, and it is the single
+   highest-leverage floor line left on this line of work.
+2. `abnf/jsrtjava.go` and `abnf/jsrtjvm.go` stay until the change is committed.
+3. The subnormal formatter, if and when someone does the three-halves job.
+
+What **generalises to the remaining eight**, in order of how much it saves:
+
+- The unsigned-box trick for a 64 bit signed type, and the emitter-side `js_*num`
+  wrapper that keeps a FLOOR extern from reading it as a magnitude. Any language
+  whose emitter hands a sized integer to a floor primitive needs the second half.
+- A scope probe in the emitter (three languages now, three shapes, one helper).
+- `_raw` parameters: check each emitter; the count was 3 / 0 / 1 for lua / php / java.
+- `core.truthyExt`: java needed no `__raw` because it never overrides the default.
+  **Check before writing one**; the grep is `core.truthyExt` in the grammar.
+- An object box for a value type the floor has not got is safe exactly when no floor
+  extern ever receives it. That is a grep over the emitter, not a judgement call.
+
+### launch.json entries wanted (not added - not my file)
+
+```
+"Java native binary, full syntax (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["languages/java-to-llvm-ir.abnf", "tests/java-test-full.java", "-q", "-exe", "tests/java-native-full.out"]
+"Java native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["languages/java-to-llvm-ir.abnf", "tests/java-test-features.java", "-q", "-exe", "tests/java-native.out"]
+"Java native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["-i", "tests/imports", "languages/java-to-llvm-ir.abnf", "tests/java-test-multifile.java", "-q", "-exe", "tests/java-native-multi.out"]
+```
+
+All three pass natively today, so unlike PHP the full-syntax entry is requested too.
+
 ## Order
 
 Sorted by extern count and Go-twin size, which is the best available proxy for effort:
@@ -1480,7 +2004,7 @@ Sorted by extern count and Go-twin size, which is the best available proxy for e
 language     externs   dedicated Go twin
 java              61   804
 csharp            67   813
-swift             68   986
+swift             68   986   <- DONE 2026-08-03, gate MET (66 after the scope-probe lowering)
 dart              72   896
 js                88   (jsrtjsprint 1320 + jsrtjsbig 505)
 typescript        89   shares js's
@@ -1511,6 +2035,17 @@ Two adjustments to plain size order:
 Suggested first: **java**. Smallest surface, a self-contained 804-line twin, and it
 exercises the sized-integer tag immediately - which is exactly what you want the first
 post-Lua language to prove.
+
+**Swift's evidence, for whoever picks the next one (2026-08-03).** Swift's 68 was
+the third-largest number in this table and it took the LEAST work of the three
+ported so far, because extern COUNT is a poor proxy once the floor has both number
+tags: 35 of the 68 were already in the floor and 10 more were language-neutral, so
+the language-specific surface was 21. **Re-sort by "how much of this language's
+value model is a tag the floor already has", not by extern count.** On that measure
+`csharp` and `dart` are the obvious next two - both have a dedicated twin under 900
+lines and both are `sint`+`flo` languages exactly like Swift - and `js`,
+`typescript`, `python` and `ruby` are the hard ones, because they need WALL 1
+(coroutines) and share `abnf/jsrt.go` rather than owning a twin.
 
 ## Per language, the shape (from the Lua pilot)
 
@@ -1567,7 +2102,42 @@ last, since every language depends on them.
 
 ---
 
-# Coroutines - the fifth-language wall
+# Coroutines - the fifth-language wall - LANDED 2026-08-03
+
+**The primitive is in `languages/lib/runtime.c`.** It stopped being a proof of
+concept in a temp directory: tags 15/16, the growable coroutine registry, the
+per-coroutine `jmp_buf` pool and the throw barrier are in the floor itself, and
+`languages/lib/runtime.ll` is regenerated from it. `tests/coro-poc/build.sh`
+still runs `gen.ll` in both engines and diffs them - what changed is that
+`--diff` now prints nothing, because there is no patch left to apply.
+
+**The gate is met.** A `throw` across a yield was undefined behaviour and was
+named here as the thing that had to be fixed before any language could be
+migrated onto this. It is fixed, by the design this section named: the body
+unwinds only to a barrier `coro_entry` sets on its OWN stack, the value travels
+back in the generator cell, and `gen_resume` re-raises it on the resumer's
+stack - `recover()` and a re-`panic`, transliterated. The `JB` pool became
+per-stack at the same time, which is what makes a `try` INSIDE a body legal.
+The measurements are in section 5.
+
+**ONE THING THE NEXT PERSON MUST DO FIRST, and it is a hard link error rather
+than a warning.** `languages/lib/php-rt.metajs` still defines the two loud stubs
+`js_genfn` and `js_yield`, and the floor now defines them too. Nothing links the
+two together today - php's `tests/clang-check.sh` row is "module only - links
+natively, row HELD" - so the matrix is green at 325/325. The moment a php native
+binary links `php-rt.ll` next to `runtime.ll` it is:
+
+```
+$ clang php-rt.ll runtime.ll <a jsmain/jsdispatch>
+duplicate symbol '_js_genfn' in: runtime.o / php-rt.o
+duplicate symbol '_js_yield' in: runtime.o / php-rt.o
+ld: 2 duplicate symbols
+```
+
+The fix is the one section 4 already prescribed - **delete those two functions
+from `php-rt.metajs`** and the floor's own win the link. It is two deletions, but
+it is not optional any more. `grep -l 'define i64 @js_genfn' languages/lib/*-rt.ll`
+answers php and nothing else, so php is the only language affected.
 
 The PHP migration named WALL 1 as the one architectural blocker of the remaining
 rollout: "**Coroutines** (`js_genfn` / `js_yield`). No spelling in layer 2 at any
@@ -1584,9 +2154,11 @@ effort." This section settles it. Short version:
   A `throw` that crosses a yield is currently undefined behaviour, and
   `MEC_GC=stress` catches it - the evidence, and the fix, are at the end.
 
-Everything here is in NEW files: `tests/coro-poc/` and `abnf/coropoc_test.go`.
-`languages/lib/runtime.c` is never written to - `tests/coro-poc/coro-floor.py`
-reads it (or `git show HEAD:` of it) and patches a COPY.
+Sections 1 to 4 below are the investigation as it stood before the primitive
+landed, and they are kept because the ARGUMENT is what justifies the shape - why
+a thread and not `ucontext`, why the floor and not five emitters, why eager
+draining and replay are dead. Section 5 is the throw gate and now records how it
+was closed rather than what it would cost.
 
 ## 1. The requirement, per language, from the ratchet files
 
@@ -1801,11 +2373,12 @@ heap frame the ordinary tracer already reaches. That is the strongest technical
 argument for A and it is stated here rather than buried; it is outweighed, for
 now, by five emitters against one floor.
 
-## 3. The proof of concept
+## 3. The two-engine ratchet (was: the proof of concept)
 
 ```
 tests/coro-poc/gen.ll          ONE hand-written module, run in BOTH engines
-tests/coro-poc/coro-floor.py   patches a COPY of languages/lib/runtime.c
+tests/coro-poc/coro-floor.py   copies languages/lib/runtime.c, and --check fails
+                               loudly if any of the 14 coroutine pieces is gone
 tests/coro-poc/build.sh        builds, runs both engines, diffs; --gc, --break, --diff
 abnf/coropoc_test.go           the llvm.Run half (runJSModule, no grammar involved)
 ```
@@ -1823,7 +2396,11 @@ value lands in the `{value, done}` record and a `next()` past the end answers
 allocations between resumes; **C** a handle reachable only from the suspended
 body's frame, read back after 5,000 more allocations; **D** a body that allocates
 4,000 times before its first yield, so the collection it triggers runs while the
-RESUMER's stack is parked.
+RESUMER's stack is parked; **E** THROW ACROSS A YIELD - one raised in the body
+and caught by a `try` in the BODY that was entered before a yield, one raised by
+the body and caught by a `try` in the RESUMER, with 3,000 allocations between
+every resume and a handle held only in the resumer's frame read back after the
+whole thing unwinds.
 
 ### Ground truth
 
@@ -1834,40 +2411,51 @@ $ tests/coro-poc/build.sh
 0 false 10 false 20 false 30 false 40 false         <- B, the infinite one
 1 false 42 false 7 true                             <- C
 1 false 1234                                        <- D
+1 false 555 2 false 777 4321                        <- E, the throw gate
 === native (the C floor: a pthread and one condition variable), rc=0 ===
-   ... the same 29 lines ...
+   ... the same 36 lines ...
 ===
-coro PoC: BYTE-IDENTICAL in both engines (29 lines)
+coro PoC: BYTE-IDENTICAL in both engines (36 lines)
 ```
 
-Same result against a **clean `git show HEAD:languages/lib/runtime.c`** (1cd6a41)
-as against the working tree, and identical in all four collector modes:
+Read part E's line: `1 false` is the value yielded from inside the body's own
+`try`; `555` is that try's CATCH clause printing what the body threw to ITSELF
+across a yield; `2 false` is the yield after it; `777` is the resumer's catch
+clause printing what the BODY threw out; `4321` is a handle that lived only in
+the resumer's frame while all of that unwound.
+
+Identical in all four collector modes - which is the gate, since the pre-fix
+version printed the right answer under `auto` and the wrong one under `stress`:
 
 ```
 --- the four collector modes, same binary ---
-off      rc=0   SAME       gc: collections=0     live=0      heap=10486656
-auto     rc=0   SAME       gc: collections=2     live=12224  heap=9438080
-stress   rc=0   SAME       gc: collections=58225 live=12208  heap=9438080
-poison   rc=0   SAME       gc: collections=2     live=12224  heap=10486656
+off      rc=0   SAME       gc: collections=0     live=0      heap=12583808
+auto     rc=0   SAME       gc: collections=3     live=12976  heap=9438080
+stress   rc=0   SAME       gc: collections=70286 live=12560  heap=9438080
+poison   rc=0   SAME       gc: collections=3     live=12976  heap=12583808
 ```
 
 ### Discriminating power of each new GC root, measured
 
 `tests/coro-poc/build.sh --break` breaks one thing at a time in a fresh copy of
 the floor and re-runs under `MEC_GC=stress` (rc=1 means the binary died on its
-own check; "0 of 29" is an honest zero):
+own check; "0 of 36" is an honest zero):
 
 ```
-a suspended coroutine stack not scanned        rc=1   DIFFERS on 7 lines
-the parked registers not scanned               rc=0   0 of 29
-the RESUMER stacks not scanned                 rc=0   DIFFERS on 1 lines
-the RESUMER registers not scanned              rc=0   0 of 29
-the generator cell not a root                  rc=0   0 of 29
-tag 15 children not traced                     rc=1   DIFFERS on 29 lines
-tag 16 (the wrapped closure) not traced        rc=1   DIFFERS on 29 lines
-GC_STACK_BASE not switched on resume           rc=0   DIFFERS on 2 lines
-GC_STACK_BASE not switched back on yield       rc=0   0 of 29
-CUR_GEN not a root                             rc=0   0 of 29
+a suspended coroutine stack not scanned          rc=1   DIFFERS on 14 lines
+the parked registers not scanned                 rc=0   0 of 36
+the RESUMER stacks not scanned                   rc=0   DIFFERS on 2 lines
+the RESUMER registers not scanned                rc=0   0 of 36
+the generator cell not a root                    rc=0   0 of 36
+tag 15 children not traced                       rc=1   DIFFERS on 36 lines
+tag 16 (the wrapped closure) not traced          rc=1   DIFFERS on 36 lines
+GC_STACK_BASE not switched on resume             rc=1   DIFFERS on 9 lines
+GC_STACK_BASE not switched back on yield         rc=1   DIFFERS on 5 lines
+CUR_GEN not a root                               rc=0   0 of 36
+a suspended coroutine's try barriers not scanned rc=1   DIFFERS on 5 lines
+the parked resumer's try barriers not scanned    rc=0   0 of 36
+ONE GLOBAL jmp_buf pool (the pre-fix floor)      rc=139 DIFFERS on 36 lines
+the body's throw not re-raised on the resumer    rc=0   DIFFERS on 1 lines
 ```
 
 The failure MODES are worth as much as the counts:
@@ -1876,18 +2464,25 @@ The failure MODES are worth as much as the counts:
 suspended coroutine stack not scanned   js runtime error: member '0' of undefined
 RESUMER stacks not scanned              prints 1 where it should print 1234   <- SILENT
 GC_STACK_BASE not switched on resume    prints <nil> where it should print 42 <- SILENT
+ONE GLOBAL jmp_buf pool                 SIGSEGV - a longjmp into a dead frame
+the throw not re-raised on the resumer  prints nothing where it should print 777
 ```
 
-Two of the three are **silently wrong answers**, which is the defect class this
-project cares most about and the reason the PoC has parts C and D at all: without
-part D the resumer-stack row was an honest zero and the root looked optional.
+Two of the first three are **silently wrong answers**, which is the defect class
+this project cares most about and the reason the PoC has parts C and D at all:
+without part D the resumer-stack row was an honest zero and the root looked
+optional. **Part E raised three rows off zero** that the four-part PoC could not
+see: both `GC_STACK_BASE` switches and the resumer-stack row all got stronger,
+because a throw is the only thing in the file that unwinds a coroutine frame.
 
 The four honest zeros are stated, not hidden. The parked REGISTERS are zero
 because clang happened to spill every live handle of these bodies to the stack -
 that is a register allocator's habit, not a guarantee, and 1b already refused to
 let a root set depend on one. `CUR_GEN` and the generator-cell root are zero
-because this PoC never ABANDONS a generator; they exist for the program that
-drops one while its thread is parked.
+because this file never ABANDONS a generator; they exist for the program that
+drops one while its thread is parked. The parked resumer's try barriers are zero
+for the same reason as the parked registers: at the depth this file reaches, the
+handles a resumer's `jmp_buf` holds are all also on its stack, which IS scanned.
 
 ### The price, stated rather than buried
 
@@ -1897,8 +2492,13 @@ run printing the right answer and exiting 0:
 ```
                                           real   user   sys     per next()
 llvm.Run   goroutine + two channels        0.15   0.21   0.06     0.75 us
-native     pthread + one condvar (ships)   0.90   0.20   0.71     4.5  us
+native     pthread + one condvar (ships)   0.82   0.18   0.65     4.1  us
 ```
+
+(Re-measured 2026-08-03 against the LANDED floor: 0.82 real, best of three, and
+the module printed 199999 and exited 0 each time. The per-resume cost did not
+move when the throw barrier went in, which is what one `setjmp` per body START -
+not per yield - should cost.)
 
 **The native half is 6x SLOWER than the Go half here**, which is an inversion of
 every other benchmark in this document, and all of it is `sys` - a condvar handoff
@@ -1919,45 +2519,91 @@ cost well under one under B1.
 Memory, live suspended generators (each is a parked thread):
 
 ```
-   200 generators     5.7 MB RSS        1,000    20 MB
- 4,000 generators    73   MB RSS       10,000   180 MB      ~18 KB each
+   200 generators     5.8 MB RSS        1,000    20.8 MB
+ 4,000 generators    76.5 MB RSS       10,000   187.8 MB     ~18.8 KB each
 ```
 
-Linear, and 10,000 simultaneously suspended generators still exits 0. The PoC's
-`CORO[256]` registry is a fixed array and is the only hard limit; a growable one
-is trivial. A generator the program abandons keeps its thread parked forever -
-**the same cost `abnf/jsrt.go` already documents for its parked goroutine**
-("costs one blocked goroutine and is collected when the program ends").
+Linear, and 10,000 simultaneously suspended generators exits 0 (re-measured
+2026-08-03 against the landed floor: `maximum resident set size` from
+`/usr/bin/time -l`, each generator created, resumed once and kept in a live
+array).
 
-### The floor patch
+**The `CORO[256]` fixed array is gone.** It was the PoC's only hard limit and it
+would have been a `die("too many live generators")` at the 257th - the 10,000
+measurement above cannot even be TAKEN with it. `CORO` and the five `RES_*`
+arrays are now malloc'd and doubled (`coro_grow`), starting at 64. The old block
+is not freed, which is what every other allocation in this file does too, so the
+total abandoned is under one copy of the final array.
 
-**260 added lines and one line rewritten** (`is_callable`), against
-`languages/lib/runtime.c`. Print it
-with `tests/coro-poc/build.sh --diff`; `coro-floor.py --head` produces the same
-patch against 1cd6a41 (it picks the cell field offsets off the tag-11 line of
-`gc_trace`, because the working tree has since dropped the block header). What it
-adds:
+A generator the program abandons keeps its thread parked forever - **the same
+cost `abnf/jsrt.go` already documents for its parked goroutine** ("costs one
+blocked goroutine and is collected when the program ends").
+
+### What the floor gained (applied, not a patch any more)
+
+`tests/coro-poc/build.sh --diff` prints nothing; `coro-floor.py --check` lists
+the 14 pieces and fails if one of them ever leaves `languages/lib/runtime.c`:
 
 ```
  1  libc prototypes   dlopen dlsym pthread_{create,mutex_init,cond_init,
                       mutex_lock,mutex_unlock,cond_wait,cond_broadcast}
- 2  globals           CORO[256]/CORO_N, RES_LO/RES_HI/RES_JB/RES_N, CUR_GEN,
-                      CORO_ENTRY
- 3  gc_trace          tag 15 (generator: a fn, b args, d lastValue, f sent/ret
-                      are handles; c is a RAW block pointer, e a raw flag) and
-                      tag 16 (generator function: a is the closure)
- 4  gc_roots          every suspended coroutine stack + its parked registers,
-                      every parked resumer stack + registers, CUR_GEN
+ 2  globals           CORO/CORO_N/CORO_CAP, RES_LO/RES_HI/RES_JB/RES_JBP/
+                      RES_JBD/RES_N/RES_CAP, CUR_GEN, CORO_ENTRY
+ 3  gc_trace          tag 15 (generator: a fn, b args, d lastValue, f sent/ret/
+                      thrown are handles; c is a RAW block pointer, e a raw
+                      flag) and tag 16 (generator function: a is the closure)
+ 4  gc_roots          every suspended coroutine stack + its parked registers +
+                      its parked try barriers, every parked resumer stack +
+                      registers + try barriers, CUR_GEN
  5  is_callable       tag 16
  6  get_member        a generator's `next`  -> mk_bound(g, 60)
  7  js_call           tag 16 -> gen_create;  and the coroutine block itself:
-                      coro_alloc, gen_create, js_genfn, coro_entry, gen_resume,
-                      js_yield, gen_next
+                      coro_grow, coro_alloc, gen_create, js_genfn, coro_entry,
+                      gen_resume, js_yield, gen_next
  8  builtin_method    mid 60 -> gen_next
+ 9  the JB pool       JB[512] -> JBP/JB_CAP/JB_MAIN, one pool per STACK, swapped
+                      by whichever side gains control (see section 5)
 ```
 
 **`abnf/jsrt.go` needs no change and no emitter needs a change.** That is the
 result: the module is one file and both engines run it.
+
+### The concrete lines a layer 2 needs to drive one
+
+`get_member` answers `next` on a generator, so a `-rt-lib` MetaJS file drives one
+with ordinary member syntax. These are the whole of the primitive's surface:
+
+```js
+// The generator arrives from the PROGRAM module: the target-language emitter
+// already emits js_genfn over a js_closure, and CALLING that answers a tag-15
+// cell. Layer 2 never creates one - it only pulls.
+var r = g.next(undefined)          // start / advance;  r = {value, done}
+var r = g.next(v)                  // the value travels BACK IN (js, python)
+if (r.done) { ret = r.value }      // the body's RETURN value lands in .value
+                                   // a next() past the end answers {undefined, true}
+```
+
+Per language, on top of that one call:
+
+```
+php       foreach ($g as $v)  ->  var r = g.next(undefined); while (!r.done) { ...; r = g.next(undefined) }
+          current/key/valid   ->  keep the last r in a one-slot lookahead; valid = !r.done
+          keyed yield         ->  r.value is the {__genkv:true, k, v} record abnf/jsrt.go:530 defines
+          getReturn()         ->  the r.value of the step whose r.done was true
+js/ts     it.next(v)          ->  g.next(v) unchanged; js_iterable stops draining and
+                                  becomes the while loop above (which also un-hangs
+                                  a for-of over an infinite source)
+python    e.send(v)           ->  g.next(v);  a done step raises StopIteration(r.value)
+          close()             ->  drop the reference; the thread stays parked, as in Go
+csharp    MoveNext()          ->  r = g.next(undefined); return !r.done
+          Current             ->  the r.value of the last MoveNext
+          yield break         ->  an ordinary return from the body; r.done becomes true
+```
+
+**A throw is now part of that surface.** `g.next()` raises on the caller's stack
+whatever the body threw, so a layer-2 `foreach`/`MoveNext` needs no special case:
+an exception out of a generator body is an exception out of `next()`, which is
+what all four languages specify.
 
 ## 4. What it costs to do this for all four (five with csharp)
 
@@ -1969,8 +2615,9 @@ else in the generator protocol is layer 2 over that single primitive.
 
 ```
 language     what layer 2 owes                                        estimate
-php          delete the two loud stubs from php-rt.metajs (the floor  ~80 lines
-             symbol then wins the link), then foreach-over-generator
+php          delete the two loud stubs from php-rt.metajs - MEASURED as a  ~80 lines
+             hard `ld: duplicate symbol '_js_genfn'` now that the floor
+             defines them, not a shadow - then foreach-over-generator
              as a next() loop, the __genkv key split, and a one-slot
              lookahead buffer for current/key/valid/rewind/getReturn
 js / ts      it.next(v) is already the floor's shape; js_iterable     ~30 lines
@@ -1995,10 +2642,12 @@ MetaJS per language.** That is a small fraction of the per-language extern work
 already costed in Part 3, and WALL 1 stops being the thing that makes four
 migrations wait for each other.
 
-## 5. The one thing that worries me
+## 5. The one thing that worried me - CLOSED 2026-08-03
 
-**A `throw` that crosses a yield is undefined behaviour today, and it is not in
-the PoC.** `js_throw` `longjmp`s to a `jmp_buf` in the `JB` pool that was
+### What it was
+
+**A `throw` that crossed a yield was undefined behaviour.** `js_throw` `longjmp`ed
+to a `jmp_buf` in the `JB` pool that was
 `setjmp`'d on the RESUMER's stack; from a coroutine thread that is a longjmp into
 another thread's frame. It appears to work:
 
@@ -2019,25 +2668,107 @@ $ MEC_GC=stress ./thr2.out      js runtime error: call of a non function value: 
                                                             rc=1
 ```
 
-The fix is known and is exactly what the Go half already does: `coro_entry`
-`setjmp`s a barrier of its own, a throw inside the body unwinds only to THAT,
-the thrown value is handed back through the generator cell, and `gen_resume`
-re-raises it on the resumer's stack (`abnf/jsrt.go:492-515` is the same three
-steps in `recover()` / re-`panic`). It also needs the `JB` `jmp_buf` pool to
-become per-coroutine rather than one global `JB_DEPTH`, which is the only part of
-the existing floor this touches. Perhaps 40 more lines - but it is 40 lines that
-were NOT written or measured here, and **no language may be migrated on this
-primitive until they are**, because the failure mode is a wrong answer under a
-collector setting rather than a crash.
+### What shipped
+
+Exactly what was named, and what the Go half already does. Two halves, both in
+`languages/lib/runtime.c`:
+
+**1. The `JB` pool became per STACK.** `long JB[512]` is now `JBP` (a pointer to
+the pool of whichever stack is RUNNING), `JB_CAP` (its length) and `JB_MAIN`
+(main's own, malloc'd in `boot`). A coroutine's pool is `cb[9]`, 128 deep, with
+`cb[10]` the depth it parked at; the side that gains control swaps `JBP`, exactly
+as it already swapped `GC_STACK_BASE`. This is what makes a `try` INSIDE a
+generator body legal at all - the estimate said "the only part of the existing
+floor this touches", and that held: four call sites (`jb_at`, `js_throw`,
+`gc_roots`, `boot`).
+
+**2. `coro_entry` sets a barrier.** `barrier = jb_at(0); JB_DEPTH = 1;` and the
+body runs under `setjmp(barrier)`. A throw the body does not catch itself unwinds
+only to there; `sf(g, THROWN)` puts the value in the traced generator cell and
+`cb[11]` marks it; `gen_resume`, after it has restored `RES_N`, `GC_STACK_BASE`,
+`CUR_GEN`, `JBP`, `JB_CAP` and `JB_DEPTH`, calls `js_throw(ff(g))` **on the
+resumer's own stack**. That is `recover()` / re-`panic` transliterated.
+
+The estimate was ~40 lines and was told to be treated with suspicion. Measured:
+about 55 lines of new code plus the four rewritten call sites - close enough that
+the suspicion was not needed, and the reason is that the DESIGN was already
+right; only the writing was missing.
+
+### The evidence
+
+`tests/coro-poc/gen.ll` part E throws from inside a generator body twice - once
+caught by a `try` in the body that was entered before a yield, once caught by a
+`try` in the resumer - with 3,000 allocations between every resume. Both engines
+print the same 36 lines, and the four collector modes are `SAME` with `rc=0`
+(section 3). Under the PRE-FIX shape the same file segfaults:
+
+```
+ONE GLOBAL jmp_buf pool (the pre-fix floor)   rc=139  DIFFERS on 36 lines
+the body's throw not re-raised on the resumer rc=0    DIFFERS on 1 lines
+```
+
+The exception machinery the pool refactor touched has its own ratchet in
+`tests/metajs-test-full.js` SECTION 14 (`exc13`..`exc17`: a 200-deep nest thrown
+through and caught, twice in a row so the depth must be restored, 50 sequential
+try/catch/finally at one depth, and two throws whose value is only reachable
+through the machinery while 3,000 allocations run). Measured against a
+deliberately broken pool, `MEC_GC=stress`, native binary:
+
+```
+js_throw off by one in the new indirection    rc=139  (SIGSEGV, no output)
+the jmp_buf pool not scanned as a root        rc=1    call of a non function value
+jb_at reads main's pool instead of JBP        rc=0    476 checks, 0 failures  <- honest zero
+main's pool only 8 deep (the nest overflows)  rc=1    try nested too deeply
+```
+
+The third row is an honest zero and says something true: a MetaJS program has one
+stack, so `JBP` and `JB_MAIN` are the same pool there. Only a coroutine can tell
+them apart, and that row is the `ONE GLOBAL jmp_buf pool` line of the `--break`
+table above, where it is a segfault. Against a clean `git archive d30629f`, all
+five assertions pass in all four collector modes - **`exc13`..`exc17` have zero
+discriminating power against the pre-coroutine floor**, which they should: they
+are a ratchet on the refactor, not a test for a feature d30629f lacks.
+
+### Not done, and why - a generator ratchet in a LANGUAGE file
+
+`tests/metajs-test-full.js` was the obvious home for a `throw` across a `yield`
+driven from a real program rather than hand-written IR. **It cannot go there**,
+and the reason is structural rather than effort:
+
+- MetaJS has no `function*` or `yield` syntax, and `metajs-to-llvm-ir.abnf` emits
+  no `js_genfn` (`grep -c 'yield' languages/metajs-to-llvm-ir.abnf` = 0). A
+  generator would have to arrive as a HOST BUILTIN, the way `keysOf` did in
+  d30629f - which needs no emitter change, only a `seed_root`.
+- But `./test.sh --full` runs that file through BOTH halves, and the other half
+  is `languages/metajs-interpreter.abnf`, a TREE-WALKING interpreter whose
+  `:script` runs under goja AND under the frozen engine. Suspending a
+  MetaJS-level call there means suspending the interpreter's own eval recursion,
+  i.e. a goja call stack. goja cannot be suspended mid-call and resumed from
+  another goroutine, so the interpreter half would have to implement generators
+  by eager draining or by replay - **both of which section 2 killed**, and the
+  half would then disagree with the compiler half's assertion count.
+
+So the honest statement is: the floor primitive is ratcheted by `gen.ll` in both
+engines (the two engines are the point), the exception machinery it rewrote is
+ratcheted in `metajs-test-full.js`, and the first LANGUAGE-level generator
+ratchet belongs to whichever of php / js / ts / python / csharp migrates first -
+their `-test-full` files already contain the assertions, quoted in section 1.
 
 Two smaller things, recorded at the same standard:
 
-- **The PoC implements `next` only.** `current`/`key`/`valid`/`send`/`getReturn`/
-  `return` are argued above to be layer 2, but that argument is not executed.
+- **The floor implements `next` only.** `current`/`key`/`valid`/`send`/
+  `getReturn`/`return` are layer 2 over it, spelled out at the end of section 3,
+  but that spelling is not yet executed by any language.
 - **`-rdynamic`.** `dlsym` finds `coro_entry` without any link flag on darwin.
   On linux the executable needs `-rdynamic`, i.e. one word in
   `abnf/llvmlink.go`'s clang invocation. Not added, because nothing here builds
-  on linux to prove it.
+  on linux to prove it. **This is the one thing that will break the first linux
+  build of a native binary that uses a generator.**
+- **B1 (`swapcontext`) was NOT taken.** The measurement stands unchanged: 6.3x
+  faster, and rejected because `runtime.c` has no `#include` and `ucontext_t`'s
+  field offsets differ per platform. Correctness came first; the resume cost did
+  not move when the barrier went in (4.1 us, section 3), so nothing about the
+  throw fix makes B1 harder later.
 
 ---
 

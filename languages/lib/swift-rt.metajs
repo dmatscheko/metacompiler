@@ -1,0 +1,1366 @@
+// swift-rt.metajs -- SWIFT'S OWN SEMANTICS, in MetaJS. Layer 2 of
+// docs/runtime-next-plan.md part 3, for the third language after the Lua pilot
+// and PHP.
+//
+// languages/swift-to-llvm-ir.abnf emits handle IR that calls 66 js_* externs for
+// its own full-syntax ratchet (66 over every swift test in tests/ as well - the
+// union adds nothing). 35 of them are generic primitives languages/lib/runtime.c
+// already provides (the C floor, layer 1). The other 31 are here.
+//
+// Compile with:
+//     mec languages/metajs-to-llvm-ir.abnf languages/lib/swift-rt.metajs -q -rt-lib
+// which is what tests/gen-swift-rt-ll.sh does; the result is the checked-in
+// languages/lib/swift-rt.ll that swift-to-llvm-ir.abnf links next to runtime.ll.
+// -rt-lib exports every TOP-LEVEL `function js_*` below under its own C symbol,
+// so nothing else in this file is visible to the linker - the helpers are
+// deliberately named sw*.
+//
+// THE AUTHORITATIVE SPECIFICATION IS abnf/jsrtswift.go plus the shared externs it
+// layers over in abnf/jsrt.go (memberCall, js_pyget/js_pyset/js_pylen,
+// js_is_type, js_jadd, js_char/js_char_code/js_kindex, js_dict_new), and this
+// file matches them function for function. Where it CANNOT, the site says so in
+// full.
+//
+// ----- the value model -------------------------------------------------------
+//
+//     null / undefined     ==  Swift nil. There is no Optional BOX in this
+//                              model, deliberately and in both halves: Int? is
+//                              just the value or nil.
+//     a boolean            ==  Bool
+//     a PLAIN NUMBER       ==  an Int whose value is exact in a double
+//     a SIZED INTEGER      ==  an Int outside [-2^53, 2^53], or any value of a
+//                              declared width (Int8 ... UInt64). The Go twin uses
+//                              jsGInt (abnf/jsrtint.go); the C floor has the same
+//                              thing as a REAL PRIMITIVE TYPE (tag 13) reached
+//                              through the sint/sintOp/sintCmp/... host builtins.
+//     a BOXED DOUBLE       ==  Double (and Float, which this subset aliases to
+//                              Double at 64 bit precision - see jsrtswift.go).
+//                              The Go twin uses jsJFlo (abnf/jsrtjvm.go); the C
+//                              floor has it as tag 14, reached through
+//                              flo/floIs/floNum/... Swift builds it with STYLE 0
+//                              and never renders through floStr: every Swift
+//                              print path goes through swRender, whose float arm
+//                              is swFloStr, Swift's own SwiftDtoa rules.
+//     a string             ==  String
+//     an array             ==  Array
+//     a {__dict} object    ==  Dictionary: keys/vals parallel arrays, INSERTION
+//                              ordered (Swift's own order is the hash order and
+//                              is unspecified, so any fixed order is as correct).
+//     a {__tuple: n} obj   ==  a tuple; the slots are "0".."n-1" and the labels,
+//                              when it has any, ride along as __tlabels.
+//     a {__ecase} object   ==  an enum case: __ename, __vals, __labels.
+//     a {__set} object     ==  a Set literal.
+//     a {__isclass} /
+//       {__isenum} object  ==  a TYPE DESCRIPTOR: __name, __super, __struct,
+//                              __fields.
+//     any other object     ==  an instance; its descriptor is __class.
+//
+// ----- BOTH tags were already in the floor, and that is the whole story -------
+//
+// PHP was picked second because it is the one language whose Go twin uses zero
+// jsJFlo. Swift is the FIRST language to need both floor primitives at once -
+// tag 13 for Int8...UInt64 and tag 14 for Double - and it needed no new code for
+// either: sint*/flo* ARE Swift's two numeric types. There is no i64 pair layer in
+// this file, where lua-rt.metajs needed ~200 lines of one, and no {__flo} object
+// box, where php-rt.metajs needed a {__pf} one. That is the sized-integer and
+// boxed-double tags paying for themselves the second and first time respectively.
+//
+// ----- what Swift did NOT need, which is a finding of its own -----------------
+//
+//  1. NO `__raw` truthy shim. compile-core's truthy() emits `icmp ne <call>, 0`
+//     on core.truthyExt, so that extern must answer a RAW INTEGER - and a shim
+//     handing back a boolean HANDLE gives 2 for false, which is != 0, so every
+//     condition in the program would be taken, silently. Swift is the first of
+//     the remaining languages that is IMMUNE: it leaves core.truthyExt at its
+//     default "js_truthy", which is the C FLOOR'S OWN function and already
+//     answers the raw 1/0. Nothing here needs the suffix. Checked, not assumed:
+//     `js_truthy` is in the module's declare list and in runtime.c.
+//  2. NO `_raw` PARAMETERS. Every operator selector the swift emitter passes -
+//     js_swarith's and js_swshift's op, js_swintconv's width and signedness - is
+//     emitted with emitStr/emitNum or as a real boolean handle, never with a bare
+//     handle(k). Like PHP and unlike Lua, Swift has zero of them.
+//  3. NO jsChar. js_char / js_char_code / js_kindex are Kotlin's Char externs and
+//     the floor has no jsChar, which is why js_jadd and js_jfstep were left out
+//     of it. Swift reaches all three, but ONLY inside the emitter's own
+//     grapheme-cluster walk (sw_gcount / sw_nfd), where the value produced by
+//     js_char is immediately handed to js_jadd for CONCATENATION and the value
+//     produced by js_kindex is immediately handed to js_char_code. In Go that
+//     round trip is jsChar -> rt.toString -> the character, and jsChar ->
+//     rt.toNumber -> the code point. A one-character STRING makes exactly the
+//     same two round trips, so Swift needs no new floor tag. Written out because
+//     the next language may reach js_char somewhere this equivalence does not
+//     hold, and then it is a real floor gap.
+//
+// ----- WALL 3, the scope chain: lowered in the EMITTER, not here --------------
+//
+// js_kget and js_kset used to be externs that took a SCOPE HANDLE and walked the
+// chain with a `this` fallback. A scope is the floor's private storage - which is
+// why the Lua pilot put js_scope_decl/set/typeof INTO the floor - so layer 2
+// cannot open one, and neither could ever have been written here. Both are pure
+// PROBES, and an EMITTER may call js_scope_typeof / js_scope_get / js_scope_set,
+// so swift-to-llvm-ir.abnf now emits them as the IR helpers sw_kget / sw_kset.
+// The extern count went 68 -> 66 and llvm.Run stayed at 209/209. This is the
+// generalisation PHP recorded, and Swift is its second confirmation.
+//
+// ----- MetaJS rules that shape the code below --------------------------------
+//
+// docs/abnf-dialect-gotchas.md: a local (or a reassigned parameter) keeps the
+// TYPE CLASS it is first assigned, so a variable that holds a number in one
+// branch and an object in another is declared `var x = anytype`; there is no ASI,
+// so every `return` carries its value on the same line and a value-less early
+// return is BRACED; no for..in, no splice, no split/join/lastIndexOf, indexOf
+// ignores its from-index, array.length is not assignable, and there are no
+// exponent literals.
+
+// ===================================================== the two number tags ==
+//
+// swWhole is jsrtswift.go's swIsWhole: a sized-integer box, or a Double whose
+// value is a whole number. `typeof v == "number"` is TRUE for BOTH tags, so
+// every site that meant "an ordinary double" has to say so - which is what the
+// floIs test below is for.
+function swWhole(v) {
+    if (sintIs(v)) { return true }
+    if (floIs(v)) { return false }
+    if (typeof v != "number") { return false }
+    if (v !== v) { return false }
+    if (v === Infinity) { return false }
+    if (0 - v === Infinity) { return false }
+    return v === Math.trunc(v)
+}
+
+// swIsNumeric: does this value take part in numeric equality at all, so that
+// 1.0 == "x" is false rather than 1.0 == 0.
+function swIsNumeric(v) {
+    return typeof v == "number"
+}
+
+// giIsIntegral: the narrower test the ordered comparisons need - a float operand
+// must NOT be truncated into an integer comparison.
+function swIntegral(v) {
+    if (sintIs(v)) { return true }
+    if (floIs(v)) { return false }
+    return typeof v == "number"
+}
+
+// swNum is giFloat, the plain-number reading of any operand: sintNum is the
+// UNSIGNED-aware one an UInt64 box needs (int64(-1) read as a uint64 is 1.8e19),
+// and it falls through to to_number for everything else.
+function swNum(v) { return sintNum(v) }
+
+// swMkFlo is jsJFlo{f: x}: style 0, which is never consulted - see the header.
+function swMkFlo(x) { return flo(x, 0) }
+
+// Double.rounded(), i.e. .toNearestOrAwayFromZero, which is Go's math.Round and
+// NOT JS's Math.round: (-2.5).rounded() is -3 and Math.round(-2.5) is -2.
+// Three guards, all of them measured rather than assumed (see the probe in
+// docs/runtime-next-plan.md part 3):
+//   - a ZERO returns itself, so (-0.0).rounded() keeps its sign. `x < 0` is FALSE
+//     for -0.0, so without this the value would come back through
+//     Math.floor(0.5) as +0.0 and print "0.0" where swift prints "-0.0". This was
+//     the ONE line of a 1,910 line probe on which the native binary and llvm.Run
+//     disagreed.
+//   - |x| >= 2^52: every double that large is already an integer, and x + 0.5
+//     would round UP to the next one.
+//   - NaN and the infinities return themselves.
+function swRound(x) {
+    if (x !== x) { return x }
+    if (x === 0) { return x }
+    if (x === Infinity) { return x }
+    if (-x === Infinity) { return x }
+    var a = x
+    if (a < 0) { a = -a }
+    if (a >= 4503599627370496) { return x }
+    if (x < 0) { return -Math.floor(a + 0.5) }
+    return Math.floor(a + 0.5)
+}
+
+// ===================================================== float rendering ======
+//
+// swFloStr is Swift's Double.description (SwiftDtoa): the shortest decimal that
+// round-trips, written as a plain decimal when the scientific exponent is in
+// -4 ... 15 and in computerized scientific notation - two digit minimum exponent,
+// always signed - outside it, with the integral case always carrying a ".0". So
+// 1e15 prints 1000000000000000.0 and 1e16 prints 1e+16. The infinities are
+// "inf"/"-inf" and the NaN is "nan". This is the twin of swFloStr in
+// abnf/jsrtswift.go and of the same name in swift-interpreter.abnf.
+function swFloStr(d) {
+    if (d !== d) { return "nan" }
+    if (d === Infinity) { return "inf" }
+    if (0 - d === Infinity) { return "-inf" }
+    var neg = swSignBit(d)
+    var a = d
+    // UNARY minus, not `0 - d`: the floor's d_neg flips the SIGN BIT, where
+    // 0.0 - 0.0 is +0.0. This is the "a negative floating point literal does not
+    // survive" trap of docs/runtime-next-plan.md, met from the other side.
+    if (neg) { a = -d }
+    var s = swFloDigits(a)
+    if (neg) { return "-" + s }
+    return s
+}
+
+// The sign of a zero, which a comparison cannot see: -0.0 prints "-0.0" in Swift.
+// 1/x is -Infinity for -0 and +Infinity for +0.
+function swSignBit(d) {
+    if (d < 0) { return true }
+    if (d === 0) { return 1 / d < 0 }
+    return false
+}
+
+// swFloDigits renders a >= 0. The Go twin formats from strconv's 'e' form, which
+// hands it the shortest round-tripping digit run and the scientific exponent
+// directly. MetaJS has no such formatter, so the same pair is recovered from the
+// engine's own shortest-round-trip rendering ("" + a) - which is jsNumString in
+// the Go half and d_num_str in the floor, and both are the SAME shortest form
+// strconv produces. swSplit10 below is the recovery.
+function swFloDigits(a) {
+    if (a === 0) { return "0.0" }
+    var p = swSplit10(a)
+    var digits = p.d
+    var e10 = p.e
+    if (e10 < 0 - 4 || e10 >= 16) {
+        var out = digits.substring(0, 1)
+        if (digits.length > 1) { out = out + "." + digits.substring(1, digits.length) }
+        var sign = "+"
+        var ex = e10
+        if (ex < 0) {
+            sign = "-"
+            ex = 0 - ex
+        }
+        if (ex < 10) { return out + "e" + sign + "0" + ex }
+        return out + "e" + sign + ex
+    }
+    var pt = e10 + 1                       // digits before the decimal point
+    if (pt <= 0) { return "0." + swZeros(0 - pt) + digits }
+    if (pt >= digits.length) { return digits + swZeros(pt - digits.length) + ".0" }
+    return digits.substring(0, pt) + "." + digits.substring(pt, digits.length)
+}
+
+function swZeros(n) {
+    var out = ""
+    var i = 0
+    while (i < n) {
+        out = out + "0"
+        i = i + 1
+    }
+    return out
+}
+
+// swSplit10 turns a > 0 into {d: the significant digits with no point and no
+// leading or trailing zero, e: the SCIENTIFIC exponent} - i.e. the value is
+// 0.d1d2... * 10^(e+1), the same pair strconv.FormatFloat(a, 'e', -1, 64) hands
+// the Go twin. The input is the engine's own shortest rendering, which is either
+// a plain decimal ("1234.5", "0.00012") or an exponent form ("1e+21", "1.5e-7").
+function swSplit10(a) {
+    var s = "" + a
+    var mant = s
+    var e10 = 0
+    var ei = s.indexOf("e")
+    if (ei >= 0) {
+        mant = s.substring(0, ei)
+        var es = s.substring(ei + 1, s.length)
+        var eneg = false
+        if (es.charAt(0) == "+") { es = es.substring(1, es.length) }
+        else if (es.charAt(0) == "-") {
+            eneg = true
+            es = es.substring(1, es.length)
+        }
+        e10 = parseInt(es)
+        if (eneg) { e10 = 0 - e10 }
+    }
+    // Split the mantissa at its point; `pt` is how many digits precede it.
+    var pt = mant.length
+    var di = mant.indexOf(".")
+    var digits = mant
+    if (di >= 0) {
+        pt = di
+        digits = mant.substring(0, di) + mant.substring(di + 1, mant.length)
+    }
+    // A leading zero run does not count as significant, and each one shifts the
+    // point right by one place.
+    var lead = 0
+    while (lead < digits.length && digits.charAt(lead) == "0") { lead = lead + 1 }
+    digits = digits.substring(lead, digits.length)
+    pt = pt - lead
+    // A trailing zero run is not significant either, and does not move the point.
+    var end = digits.length
+    while (end > 1 && digits.charAt(end - 1) == "0") { end = end - 1 }
+    digits = digits.substring(0, end)
+    if (digits.length == 0) { return {d: "0", e: 0} }
+    return {d: digits, e: e10 + pt - 1}
+}
+
+// swFloText reports whether the WHOLE string is a decimal float, for the failable
+// Double("3.5"): swift answers nil for "3.5x", where a lenient parse would stop
+// at the first bad character and answer 3.5.
+function swFloText(s) {
+    var i = 0
+    if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) { i = i + 1 }
+    var d0 = i
+    while (i < s.length && swIsDigit(s.charAt(i))) { i = i + 1 }
+    var seen = i > d0
+    if (i < s.length && s.charAt(i) == ".") {
+        i = i + 1
+        var d1 = i
+        while (i < s.length && swIsDigit(s.charAt(i))) { i = i + 1 }
+        if (i > d1) { seen = true }
+    }
+    if (!seen) { return false }
+    if (i < s.length && (s.charAt(i) == "e" || s.charAt(i) == "E")) {
+        i = i + 1
+        if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) { i = i + 1 }
+        var d2 = i
+        while (i < s.length && swIsDigit(s.charAt(i))) { i = i + 1 }
+        if (i == d2) { return false }
+    }
+    return i == s.length
+}
+
+function swIsDigit(c) { return c >= "0" && c <= "9" }
+
+// ===================================================== integer conversion ===
+//
+// swIntFromStr is Int("17") / UInt8("300"): the failable string initializer. It
+// answers undefined for anything that is not a complete, in-range decimal
+// integer. The Go twin accumulates in a uint64 and rejects past 2^64; MetaJS has
+// only the double, so the accumulation runs through sintOp (the floor's exact 64
+// bit multiply-add, which WRAPS) and the range check below - the value read back
+// as text must equal the canonical input - catches every wrap, exactly as it
+// catches an out-of-width truncation. So one check does both jobs.
+function swIntFromStr(s, w, u) {
+    var i = 0
+    var neg = false
+    if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) {
+        neg = s.charAt(i) == "-"
+        i = i + 1
+    }
+    if (i >= s.length) { return undefined }
+    var acc = 0
+    var k = i
+    var digits = 0
+    while (k < s.length) {
+        var c = s.charAt(k)
+        if (!swIsDigit(c)) { return undefined }
+        acc = sintOp(0, sintOp(2, acc, 10), c.charCodeAt(0) - 48)
+        digits = digits + 1
+        // 20 digits is the most a 64 bit value can have; past that the wrap the
+        // Go twin rejects outright has certainly happened, and the canonical
+        // check below would still catch it - this only keeps the loop honest.
+        if (digits > 20) { return undefined }
+        k = k + 1
+    }
+    var v = acc
+    if (neg) { v = sintOp(1, 0, acc) }
+    var out = sintConv(v, w, u)
+    var back = sintStr(out)
+    if (back !== swIntCanon(s, neg)) { return undefined }
+    return out
+}
+
+// The canonical decimal text of a digit run - the sign and the leading zeros
+// removed - for the range check above.
+function swIntCanon(s, neg) {
+    var i = 0
+    while (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) { i = i + 1 }
+    while (i < s.length - 1 && s.charAt(i) == "0") { i = i + 1 }
+    var d = s.substring(i, s.length)
+    while (d.length > 1 && d.charAt(0) == "0") { d = d.substring(1, d.length) }
+    if (d.length == 0) { return "0" }
+    if (d === "0") { return "0" }
+    if (neg) { return "-" + d }
+    return d
+}
+
+// ===================================================== object shapes ========
+
+function swIsObj(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    return typeof v == "object"
+}
+
+// A MetaJS list. A Dictionary/tuple/instance box is an object without a numeric
+// `length`, so this is the same discrimination php-rt.metajs's phIsList makes.
+function swIsArr(v) {
+    if (!swIsObj(v)) { return false }
+    if (v["__dict"] === true) { return false }
+    return typeof v["length"] == "number"
+}
+
+function swIsDict(v) {
+    if (!swIsObj(v)) { return false }
+    if (v["__dict"] !== true) { return false }
+    if (!swIsArr(v["keys"])) { return false }
+    return swIsArr(v["vals"])
+}
+
+// swNumProp is the Go twin's swNumProp: the value of a numeric internal slot, or
+// -1 for a shape that does not have one. (-1 rather than a second return value,
+// which MetaJS has no tuple for; no slot is ever legitimately negative.)
+function swNumProp(o, key) {
+    var f = o[key]
+    if (typeof f != "number") { return 0 - 1 }
+    return f
+}
+
+function swStrArray(v) {
+    if (!swIsArr(v)) { return [] }
+    return v
+}
+
+// dictFind: the index of a key, or -1. The Go twin hashes; a linear scan with the
+// same strictEq is observationally identical and is what layer 2 can write.
+function swDictFind(keys, k) {
+    var i = 0
+    while (i < keys.length) {
+        if (keys[i] === k) { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// swFindMember walks the __class / __super chain for a CALLABLE member, the same
+// walk classFind does in swift-interpreter.abnf and swFindMember in the Go twin.
+function swFindMember(v, name) {
+    if (!swIsObj(v)) { return undefined }
+    var c = v["__class"]
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (!swIsObj(c)) { return undefined }
+        var mth = c[name]
+        if (typeof mth == "function") { return mth }
+        c = c["__super"]
+    }
+    return undefined
+}
+
+// ===================================================== rendering ============
+
+// swQuote is Swift's debugDescription of a String: double quotes and the four
+// escapes Swift itself emits.
+function swQuote(s) {
+    var out = "\""
+    var i = 0
+    while (i < s.length) {
+        var c = s.charAt(i)
+        if (c == "\\") { out = out + "\\\\" }
+        else if (c == "\"") { out = out + "\\\"" }
+        else if (c == "\n") { out = out + "\\n" }
+        else if (c == "\t") { out = out + "\\t" }
+        else if (c == "\r") { out = out + "\\r" }
+        else if (c.charCodeAt(0) === 0) { out = out + "\\0" }
+        else { out = out + c }
+        i = i + 1
+    }
+    return out + "\""
+}
+
+// swDesc is Swift's String(describing:): the TOP-LEVEL form, in which a String
+// renders as itself. `nested` selects the quoted form, used for an element inside
+// a collection, a tuple, an enum case or a struct. `depth` only guards against a
+// cyclic object graph so the renderer cannot recurse forever.
+function swDesc(v) { return swRender(v, false, 0) }
+
+function swRender(v, nested, depth) {
+    if (depth > 32) { return "..." }
+    if (v === undefined) { return "nil" }
+    if (v === null) { return "nil" }
+    if (sintIs(v)) { return sintStr(v) }
+    if (floIs(v)) { return swFloStr(floNum(v)) }
+    if (typeof v == "string") {
+        if (nested) { return swQuote(v) }
+        return v
+    }
+    if (swIsArr(v)) {
+        var out = "["
+        var i = 0
+        while (i < v.length) {
+            if (i > 0) { out = out + ", " }
+            out = out + swRender(v[i], true, depth + 1)
+            i = i + 1
+        }
+        return out + "]"
+    }
+    if (swIsObj(v)) {
+        var d = swObjDesc(v, depth)
+        if (d !== undefined) { return d }
+    }
+    return "" + v
+}
+
+// swObjDesc renders the object shapes the two Swift grammars build. It answers
+// undefined for a shape it does not know, which falls back to the generic
+// ToString. The arm ORDER is the Go twin's and matters: a user description wins
+// over every built-in rendering, exactly as CustomStringConvertible does.
+function swObjDesc(o, depth) {
+    var g = swFindMember(o, "__get_description")
+    if (g !== undefined) { return swDesc(g.apply(undefined, [o])) }
+    var dd = o["description"]
+    if (dd !== undefined && typeof dd != "function") { return swDesc(dd) }
+
+    // Dictionary: ["k": v, ...], and the empty one is [:].
+    if (swIsDict(o)) {
+        var keys = o["keys"]
+        var vals = o["vals"]
+        if (keys.length == 0) { return "[:]" }
+        var out = "["
+        var i = 0
+        while (i < keys.length) {
+            if (i > 0) { out = out + ", " }
+            var val = undefined
+            if (i < vals.length) { val = vals[i] }
+            out = out + swRender(keys[i], true, depth + 1) + ": " + swRender(val, true, depth + 1)
+            i = i + 1
+        }
+        return out + "]"
+    }
+
+    // Tuple: (1, "two") / (x: 1, y: "s"). The element labels ride along as
+    // __tlabels when the tuple has any (an unlabelled slot is "").
+    var tn = swNumProp(o, "__tuple")
+    if (tn >= 0) {
+        var labels = swStrArray(o["__tlabels"])
+        var tout = "("
+        var t = 0
+        while (t < tn) {
+            if (t > 0) { tout = tout + ", " }
+            var ts = swRender(o["" + t], true, depth + 1)
+            if (t < labels.length && labels[t] !== "") { ts = labels[t] + ": " + ts }
+            tout = tout + ts
+            t = t + 1
+        }
+        return tout + ")"
+    }
+
+    // An enum case: `c`, `a(1, "x")`, `b(n: 2)`. A raw-value enum still prints the
+    // CASE NAME, not the raw value.
+    if (o["__ecase"] === true) {
+        var ename = o["__ename"]
+        var evals = o["__vals"]
+        if (!swIsArr(evals)) { return ename }
+        if (evals.length == 0) { return ename }
+        var elabels = swStrArray(o["__labels"])
+        var eout = ename + "("
+        var e = 0
+        while (e < evals.length) {
+            if (e > 0) { eout = eout + ", " }
+            var es = swRender(evals[e], true, depth + 1)
+            if (e < elabels.length && elabels[e] !== "") { es = elabels[e] + ": " + es }
+            eout = eout + es
+            e = e + 1
+        }
+        return eout + ")"
+    }
+
+    // A Set literal, where the grammars build one.
+    if (o["__set"] === true) {
+        var el = o["elems"]
+        if (swIsArr(el)) {
+            var sout = "["
+            var q = 0
+            while (q < el.length) {
+                if (q > 0) { sout = sout + ", " }
+                sout = sout + swRender(el[q], true, depth + 1)
+                q = q + 1
+            }
+            return sout + "]"
+        }
+    }
+
+    // The type descriptor itself (`print(P.self)`) is its name.
+    if (o["__isclass"] !== undefined) {
+        if (typeof o["__name"] == "string") { return o["__name"] }
+    }
+    if (o["__isenum"] !== undefined) {
+        if (typeof o["__name"] == "string") { return o["__name"] }
+    }
+
+    // An instance. A STRUCT prints memberwise - P(x: 1, y: 2) - because Swift
+    // synthesizes that reflection-based description for every struct; a CLASS
+    // prints its bare type name (real Swift qualifies it with the module, which
+    // this runtime does not have - see the Go twin's header).
+    var cls = o["__class"]
+    if (!swIsObj(cls)) { return undefined }
+    var name = cls["__name"]
+    if (typeof name != "string") { return undefined }
+    if (name === "") { return undefined }
+    if (cls["__struct"] !== true) { return name }
+    var flds = swStrArray(cls["__fields"])
+    var fout = name + "("
+    var k = 0
+    while (k < flds.length) {
+        if (k > 0) { fout = fout + ", " }
+        fout = fout + flds[k] + ": " + swRender(o[flds[k]], true, depth + 1)
+        k = k + 1
+    }
+    return fout + ")"
+}
+
+// ===================================================== equality =============
+//
+// swEqual is Swift's ==. Array, Dictionary and tuple are VALUE types in Swift, so
+// they compare element by element; js_seq compares them by IDENTITY and answered
+// false for every one. An enum case compares by name plus associated values.
+function swEqual(l, r, depth) {
+    if (depth > 32) { return false }
+    if (l === undefined || l === null || r === undefined || r === null) {
+        var ln = l === undefined || l === null
+        var rn = r === undefined || r === null
+        return ln && rn
+    }
+    // A float box compares BY VALUE and ACROSS the box boundary: `1.0 == 1` holds
+    // in Swift (the untyped literal takes the Double type). It has to be spelled
+    // before the integer path, which would compare 1.5 against Int8(1) as the
+    // truncated 1.
+    if (floIs(l) || floIs(r)) {
+        if (!swIsNumeric(l)) { return false }
+        if (!swIsNumeric(r)) { return false }
+        return swNum(l) === swNum(r)
+    }
+    // A sized-integer box is a value of its own, so two integers compare BY VALUE
+    // here rather than falling through to strictEq, which would call a box and a
+    // plain number different. This is giEq.
+    if (sintIs(l) || sintIs(r)) {
+        if (swIsNumeric(l) && swIsNumeric(r)) { return sintCmp(l, r) === 0 }
+        return l === r
+    }
+    if (swIsArr(l)) {
+        if (!swIsArr(r)) { return false }
+        if (l.length !== r.length) { return false }
+        var i = 0
+        while (i < l.length) {
+            if (!swEqual(l[i], r[i], depth + 1)) { return false }
+            i = i + 1
+        }
+        return true
+    }
+    if (swIsObj(l) && swIsObj(r)) {
+        if (l === r) { return true }
+        if (swIsDict(l)) {
+            if (!swIsDict(r)) { return false }
+            var lk = l["keys"]
+            var lv = l["vals"]
+            var rk = r["keys"]
+            var rv = r["vals"]
+            if (lk.length !== rk.length) { return false }
+            // A Dictionary is unordered, so every entry of the left must have a
+            // matching entry somewhere in the right.
+            var a = 0
+            while (a < lk.length) {
+                var found = false
+                var b = 0
+                while (b < rk.length) {
+                    if (swEqual(lk[a], rk[b], depth + 1) && swEqual(lv[a], rv[b], depth + 1)) { found = true }
+                    b = b + 1
+                }
+                if (!found) { return false }
+                a = a + 1
+            }
+            return true
+        }
+        var ln2 = swNumProp(l, "__tuple")
+        if (ln2 >= 0) {
+            var rn2 = swNumProp(r, "__tuple")
+            if (rn2 !== ln2) { return false }
+            var t = 0
+            while (t < ln2) {
+                if (!swEqual(l["" + t], r["" + t], depth + 1)) { return false }
+                t = t + 1
+            }
+            return true
+        }
+        if (l["__ecase"] === true) {
+            if (r["__ecase"] !== true) { return false }
+            if (l["__ename"] !== r["__ename"]) { return false }
+            var lvals = l["__vals"]
+            var rvals = r["__vals"]
+            if (!swIsArr(lvals) || !swIsArr(rvals)) { return !swIsArr(lvals) && !swIsArr(rvals) }
+            if (lvals.length !== rvals.length) { return false }
+            var e = 0
+            while (e < lvals.length) {
+                if (!swEqual(lvals[e], rvals[e], depth + 1)) { return false }
+                e = e + 1
+            }
+            return true
+        }
+        return false
+    }
+    return l === r
+}
+
+// ===================================================== the exports ==========
+//
+// Everything below is a TOP-LEVEL `function js_*`, which is what -rt-lib exports
+// under its own C symbol. The order follows abnf/jsrtswift.go, with the
+// language-NEUTRAL externs of abnf/jsrt.go first.
+
+// ----- the language-NEUTRAL ten ---------------------------------------------
+// None of these is Swift's. They live in abnf/jsrt.go, several languages emit
+// them, and they are here only because the C floor does not have them yet - see
+// the extern split in docs/runtime-next-plan.md part 3.
+
+// Kotlin's Char from its code. THE FLOOR HAS NO jsChar (which is why js_jadd and
+// js_jfstep were left out of it), and Swift does not need one: see point 3 of the
+// header. The only two call sites are the emitter's sw_nfd, which hands the
+// result straight to js_jadd, where the Go twin's jsChar goes through
+// rt.toString - and that is the character. So a one-character string is the same
+// value at every point Swift can observe.
+function js_char(cp) {
+    if (cp < 65536) { return String.fromCharCode(cp) }
+    var v = cp - 65536
+    return String.fromCharCode(55296 + Math.floor(v / 1024)) + String.fromCharCode(56320 + (v % 1024))
+}
+
+// The code of a Char, and the identity for everything else. The Go twin is
+// rt.toNumber, which reads a jsChar's code point; here the argument is the
+// one-character string js_kindex answered, so the code point is read off it.
+function js_char_code(v) {
+    if (typeof v != "string") { return sintNum(v) }
+    if (v.length == 0) { return 0 / 0 }
+    return v.charCodeAt(0)
+}
+
+// Kotlin's indexed read s[i]: a String yields the character at that CODE UNIT
+// index, everything else reads the member like js_get. The Go twin answers a
+// jsChar built from []rune(strAt(s,i))[0], so a LONE SURROGATE - half of an
+// astral pair - becomes U+FFFD, which is exactly how the emitter's sw_gcount
+// recognises a pair. That mapping is reproduced here rather than left to the
+// engine, which would hand back the surrogate itself.
+function js_kindex(s, i) {
+    if (typeof s != "string") { return s[i] }
+    if (i < 0 || i >= s.length) { fail("string index out of range") }
+    var c = s.charCodeAt(i)
+    if (c >= 55296 && c <= 57343) { return String.fromCharCode(65533) }
+    return String.fromCharCode(c)
+}
+
+// An empty Python dict / Go map / Swift Dictionary handle.
+function js_dict_new() { return {__dict: true, keys: [], vals: []} }
+
+// Sequence indexing (negative wraps) and dict lookup. Swift's emitter routes
+// every subscript through this (core.indexExt).
+function js_pyget(c, k) {
+    if (swIsDict(c)) {
+        var i = swDictFind(c["keys"], k)
+        if (i < 0) { fail("KeyError: " + swDesc(k)) }
+        return c["vals"][i]
+    }
+    var idx = swNum(k)
+    if (swIsArr(c)) {
+        if (idx < 0) { idx = idx + c.length }
+        if (idx < 0 || idx >= c.length) { fail("list index out of range") }
+        return c[idx]
+    }
+    if (typeof c == "string") {
+        if (idx < 0) { idx = idx + c.length }
+        if (idx < 0 || idx >= c.length) { fail("string index out of range") }
+        return c.charAt(idx)
+    }
+    fail("indexing a " + typeof c)
+    return undefined
+}
+
+// List element (negative wraps) or dict entry assignment.
+function js_pyset(c, k, v) {
+    if (swIsDict(c)) {
+        var keys = c["keys"]
+        var i = swDictFind(keys, k)
+        if (i >= 0) { c["vals"][i] = v } else {
+            keys.push(k)
+            c["vals"].push(v)
+        }
+        return undefined
+    }
+    if (!swIsArr(c)) { fail("item assignment on a " + typeof c) }
+    var idx = swNum(k)
+    if (idx < 0) { idx = idx + c.length }
+    if (idx < 0 || idx >= c.length) { fail("list assignment index out of range") }
+    c[idx] = v
+    return undefined
+}
+
+// len() for strings, lists, sets and dicts. Python counts CODE POINTS in a
+// string, not UTF-16 code units - but Swift's own .count goes through the
+// emitter's sw_gcount (grapheme clusters), so the only strings that reach this
+// arm are the ones the emitter measures in code UNITS on purpose.
+function js_pylen(v) {
+    if (typeof v == "string") { return v.length }
+    if (swIsDict(v)) { return v["keys"].length }
+    if (swIsObj(v) && v["__set"] !== undefined) {
+        var el = v["elems"]
+        if (swIsArr(el)) { return el.length }
+    }
+    if (swIsArr(v)) { return v.length }
+    fail("len() of a " + typeof v)
+    return 0
+}
+
+// e is T. The Go twin is rt.isTypeName, and the SET OF NAMES it knows is what is
+// reproduced here - including the two facts a reader would not guess: an
+// Int8...UInt64 box is NOT an "Int" (the arm tests a plain float64) and a boxed
+// Double is NOT a "Double". Swift's emitter handles its own enum and class names
+// through the descriptor walk at the bottom, which is where `x is MyType` lands.
+function js_is_type(v, t) {
+    var lt = t
+    var ai = lt.indexOf("<")
+    if (ai >= 0) { lt = lt.substring(0, ai) }
+    var opt = false
+    if (lt.length > 0 && lt.charAt(lt.length - 1) == "?") {
+        lt = lt.substring(0, lt.length - 1)
+        opt = true
+    }
+    if (v === undefined || v === null) { return opt }
+    if (lt === "Any" || lt === "Object") { return true }
+    var plain = typeof v == "number" && !sintIs(v) && !floIs(v)
+    if (lt === "Int" || lt === "Integer" || lt === "Long" || lt === "Short" ||
+        lt === "Byte" || lt === "Char" || lt === "Character") {
+        if (!plain) { return false }
+        return v === Math.trunc(v)
+    }
+    if (lt === "Double" || lt === "Float" || lt === "Number") { return plain }
+    if (lt === "String" || lt === "CharSequence") { return typeof v == "string" }
+    if (lt === "Boolean") { return typeof v == "boolean" }
+    if (lt === "List" || lt === "MutableList" || lt === "Collection" || lt === "Array") { return swIsArr(v) }
+    if (!swIsObj(v)) { return false }
+    var cls = v["__class"]
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (!swIsObj(cls)) { return false }
+        if (cls["__name"] === lt) { return true }
+        cls = cls["__super"]
+    }
+    return false
+}
+
+// Java/C# +: string concat, 32 bit add for two int values, float add otherwise.
+// swift-to-llvm-ir.abnf emits it for &+ (Swift's wrapping add) AND for its own
+// loop counters and string builders. The float arm needs the boxed double, which
+// the floor HAS - so unlike php-rt.metajs's, this one is complete.
+function js_jadd(l, r) {
+    if (typeof l == "string" || typeof r == "string") { return swJavaStr(l) + swJavaStr(r) }
+    if (floIs(l) || floIs(r)) { return flo(swNum(l) + swNum(r), floStyle(floIs(l) ? l : r)) }
+    var ln = swNum(l)
+    var rn = swNum(r)
+    if (swIsInt32(ln) && swIsInt32(rn)) { return swWrap32(ln + rn) }
+    return ln + rn
+}
+
+function swJavaStr(v) {
+    if (typeof v == "string") { return v }
+    if (v === null) { return "null" }
+    if (v === undefined) { return "null" }
+    if (typeof v == "boolean") { return v ? "true" : "false" }
+    if (sintIs(v)) { return sintStr(v) }
+    if (floIs(v)) { return floStr(v) }
+    return "" + v
+}
+
+function swIsInt32(n) {
+    if (n !== n) { return false }
+    if (Math.floor(n) !== n) { return false }
+    if (n > 2147483647) { return false }
+    return n >= 0 - 2147483648
+}
+
+function swWrap32(n) {
+    var m = n - Math.floor(n / 4294967296) * 4294967296
+    if (m > 2147483647) { m = m - 4294967296 }
+    return m
+}
+
+// (target, method name, args array). The Go twin (rt.memberCall in abnf/jsrt.go)
+// is a LANGUAGE-NEUTRAL dispatcher over strings, dicts, lists, generators and
+// instances. Every arm swift-to-llvm-ir.abnf can reach is here; the GENERATOR arm
+// is the one that is not, and it cannot be - a generator needs a coroutine
+// primitive the floor does not have (WALL 1 of docs/runtime-next-plan.md). Swift
+// emits no js_genfn/js_yield at all (`grep -c` is 0 in the grammar), so nothing
+// in this language can reach it.
+function js_mcall(recv, name, args) {
+    if (typeof recv == "string") {
+        if (name === "length") { return recv.length }
+        if (name === "charAt") {
+            var ci = swNum(args[0])
+            if (ci < 0 || ci >= recv.length) { fail("charAt out of range") }
+            return recv.charAt(ci)
+        }
+        if (name === "equals") { return recv === args[0] }
+        if (name === "substring") {
+            var bg = 0
+            var en = recv.length
+            if (args.length > 0) { bg = swNum(args[0]) }
+            if (args.length > 1) { en = swNum(args[1]) }
+            if (bg < 0) { bg = 0 }
+            if (en > recv.length) { en = recv.length }
+            if (bg > en) { return "" }
+            return recv.substring(bg, en)
+        }
+        if (name === "indexOf") { return recv.indexOf("" + args[0]) }
+        if (name === "isEmpty") { return recv.length == 0 }
+        fail("unknown String method: " + name)
+    }
+    if (swIsArr(recv)) { return swListMethod(recv, name, args) }
+    if (swIsDict(recv)) {
+        if (name === "keys") { return swCopyArr(recv["keys"]) }
+        if (name === "values") { return swCopyArr(recv["vals"]) }
+        if (name === "get") {
+            var gi = swDictFind(recv["keys"], args[0])
+            if (gi >= 0) { return recv["vals"][gi] }
+            if (args.length > 1) { return args[1] }
+            return undefined
+        }
+        fail("unknown dict method '" + name + "'")
+    }
+    if (swIsObj(recv)) {
+        var cls = recv["__class"]
+        if (cls !== undefined) {
+            var c = cls
+            var guard = 0
+            while (guard < 64) {
+                guard = guard + 1
+                if (!swIsObj(c)) { guard = 99 } else {
+                    var mm = c[name]
+                    if (typeof mm == "function") {
+                        var av = [recv]
+                        var i = 0
+                        while (i < args.length) {
+                            av.push(args[i])
+                            i = i + 1
+                        }
+                        return mm.apply(undefined, av)
+                    }
+                    c = c["__super"]
+                }
+            }
+            fail("unknown method '" + name + "' on an instance")
+        }
+        var f = recv[name]
+        if (typeof f == "function") { return f.apply(undefined, args) }
+        fail("unknown method '" + name + "'")
+    }
+    fail("method call '" + name + "' on a " + typeof recv)
+    return undefined
+}
+
+function swCopyArr(a) {
+    var out = []
+    var i = 0
+    while (i < a.length) {
+        out.push(a[i])
+        i = i + 1
+    }
+    return out
+}
+
+// The Kotlin/Python list methods of rt.memberCall, in its order.
+function swListMethod(o, name, args) {
+    if (name === "add") {
+        o.push(args[0])
+        return true
+    }
+    if (name === "append") {
+        o.push(args[0])
+        return undefined
+    }
+    if (name === "pop" || name === "removeLast") {
+        if (o.length == 0) { fail("pop from empty list") }
+        return o.pop()
+    }
+    if (name === "size") { return o.length }
+    if (name === "get") {
+        var gi = swNum(args[0])
+        if (gi < 0 || gi >= o.length) { fail("list index out of range") }
+        return o[gi]
+    }
+    if (name === "contains") {
+        var ci = 0
+        while (ci < o.length) {
+            if (o[ci] === args[0]) { return true }
+            ci = ci + 1
+        }
+        return false
+    }
+    if (name === "map") {
+        var mo = []
+        var mi = 0
+        while (mi < o.length) {
+            mo.push(args[0].apply(undefined, [o[mi]]))
+            mi = mi + 1
+        }
+        return mo
+    }
+    if (name === "filter") {
+        var fo = []
+        var fi = 0
+        while (fi < o.length) {
+            if (args[0].apply(undefined, [o[fi]])) { fo.push(o[fi]) }
+            fi = fi + 1
+        }
+        return fo
+    }
+    if (name === "sumOf") {
+        var sum = 0
+        var si = 0
+        while (si < o.length) {
+            sum = swWrap32(sum + Math.trunc(swNum(args[0].apply(undefined, [o[si]]))))
+            si = si + 1
+        }
+        return sum
+    }
+    if (name === "forEach") {
+        var ei = 0
+        while (ei < o.length) {
+            args[0].apply(undefined, [o[ei]])
+            ei = ei + 1
+        }
+        return undefined
+    }
+    if (name === "count") {
+        if (args.length == 0) { return o.length }
+        var n = 0
+        var ni = 0
+        while (ni < o.length) {
+            if (args[0].apply(undefined, [o[ni]])) { n = n + 1 }
+            ni = ni + 1
+        }
+        return n
+    }
+    if (name === "any") {
+        var ai = 0
+        while (ai < o.length) {
+            if (args[0].apply(undefined, [o[ai]])) { return true }
+            ai = ai + 1
+        }
+        return false
+    }
+    fail("unknown list method '" + name + "'")
+    return undefined
+}
+
+// ----- Swift's own twenty-one ------------------------------------------------
+
+// String(describing:) / "\(v)" / the thing print writes.
+function js_swdesc(v) { return swDesc(v) }
+
+// String(x) / String(describing: x): the same text.
+function js_swstr(v) { return swDesc(v) }
+
+// Swift's print(_:separator:terminator:). args is the argument ARRAY, sep the
+// separator and term the terminator; nil means the default (" " and "\n").
+function js_swprint(args, sep, term) {
+    var s = " "
+    if (sep !== undefined && sep !== null) { s = swDesc(sep) }
+    var t = "\n"
+    if (term !== undefined && term !== null) { t = swDesc(term) }
+    var out = ""
+    var i = 0
+    while (i < args.length) {
+        if (i > 0) { out = out + s }
+        out = out + swDesc(args[i])
+        i = i + 1
+    }
+    print(out + t)
+    return undefined
+}
+
+// Swift's ==. js_seq compares an Array, a Dictionary and a tuple by IDENTITY; in
+// Swift all three are value types and compare element by element.
+function js_sweq(l, r) { return swEqual(l, r, 0) }
+
+// ----- parameter packs (SE-0393) -----
+// A `repeat E` expansion produces a TUPLE of the per-element results, and
+// `for x in repeat each p` is the one place a tuple is walked as a sequence.
+function js_swtuple(arr) {
+    var o = {__tuple: arr.length}
+    var i = 0
+    while (i < arr.length) {
+        o["" + i] = arr[i]
+        i = i + 1
+    }
+    return o
+}
+
+function js_swtuparr(o) {
+    if (!swIsObj(o)) { return o }
+    var n = swNumProp(o, "__tuple")
+    if (n < 0) { return o }
+    var out = []
+    var i = 0
+    while (i < n) {
+        out.push(o["" + i])
+        i = i + 1
+    }
+    return out
+}
+
+// ----- Swift's arithmetic -----
+// One binary arithmetic or bitwise operator: (op, left, right). Two INTEGRAL
+// operands go to the sized-integer tag, which evaluates at the result type's
+// width and wraps to it; an operand that is a FLOAT BOX pulls the whole operation
+// into floating point and the result is a box again.
+function swOpCode(op) {
+    if (op === "+") { return 0 }
+    if (op === "-") { return 1 }
+    if (op === "*") { return 2 }
+    if (op === "/") { return 3 }
+    if (op === "%") { return 4 }
+    if (op === "&") { return 5 }
+    if (op === "|") { return 6 }
+    if (op === "^") { return 7 }
+    if (op === "&^") { return 8 }
+    if (op === "<<") { return 9 }
+    if (op === ">>") { return 10 }
+    return 0 - 1
+}
+
+// giArith, through the floor's tag: an operator the table does not have answers
+// sintOp's own zero, which is what the Go twin's `rt.fail` guard would not reach
+// from an emitter that only ever passes the eleven.
+function swGiArith(op, l, r) {
+    var c = swOpCode(op)
+    if (c < 0) { fail("js_swarith: unknown operator " + op) }
+    if ((c == 3 || c == 4) && swNum(r) === 0) { fail("integer divide by zero") }
+    return sintOp(c, l, r)
+}
+
+function js_swarith(op, l, r) {
+    if (swWhole(l) && swWhole(r)) { return swGiArith(op, l, r) }
+    if (op === "+") {
+        if (typeof l == "string" || typeof r == "string") { return swDesc(l) + swDesc(r) }
+        // Array + Array is CONCATENATION in Swift, where the shared jsAdd coerced
+        // both to text and answered "1,23".
+        if (swIsArr(l) && swIsArr(r)) {
+            var out = swCopyArr(l)
+            var i = 0
+            while (i < r.length) {
+                out.push(r[i])
+                i = i + 1
+            }
+            return out
+        }
+    }
+    var x = swNum(l)
+    var y = swNum(r)
+    if (op === "+") { return swMkFlo(x + y) }
+    if (op === "-") { return swMkFlo(x - y) }
+    if (op === "*") { return swMkFlo(x * y) }
+    if (op === "/") { return swMkFlo(x / y) }
+    if (op === "%") { return swMkFlo(x % y) }
+    return swGiArith(op, l, r)
+}
+
+// Swift's Double: a float literal, Double(x) and Float(x) all arrive here. A
+// String source is FAILABLE, like Int("x").
+function js_swflo(v) {
+    if (typeof v == "string") {
+        if (!swFloText(v)) { return null }
+        var f = parseFloat(v)
+        if (f !== f && v.indexOf("nan") < 0 && v.indexOf("NaN") < 0) { return null }
+        return swMkFlo(f)
+    }
+    if (v === undefined || v === null) { fail("Double conversion of nil") }
+    if (v === true) { return swMkFlo(1) }
+    if (v === false) { return swMkFlo(0) }
+    return swMkFlo(swNum(v))
+}
+
+// abs/max/min, Double-aware: a boxed operand keeps its box (abs(-1.5) is 1.5, not
+// the 1 an integer truncation gives) and compares by VALUE.
+function js_swabs(v) {
+    if (floIs(v)) { return swMkFlo(floAbsRaw(floNum(v))) }
+    if (sintIs(v)) {
+        var n = sintOp(1, 0, v)
+        if (sintCmp(v, 0) < 0) { return sintConv(n, sintWidth(v), sintUns(v)) }
+        return v
+    }
+    var d = swNum(v)
+    return floAbsRaw(Math.trunc(d))
+}
+
+// math.Abs, which keeps -0.0 -> 0.0 and never truncates. Math.abs is the floor's
+// own and does the same thing; spelled once so the intent is readable.
+function floAbsRaw(x) { return Math.abs(x) }
+
+function swPick(l, r, wantGt) {
+    if (floIs(l) || floIs(r)) {
+        var c = 0
+        var x = swNum(l)
+        var y = swNum(r)
+        if (x < y) { c = 0 - 1 } else if (x > y) { c = 1 }
+        if (wantGt) {
+            if (c > 0) { return l }
+            return r
+        }
+        if (c < 0) { return l }
+        return r
+    }
+    if (swIntegral(l) && swIntegral(r)) {
+        var ic = sintCmp(l, r)
+        if (wantGt) {
+            if (ic > 0) { return l }
+            return r
+        }
+        if (ic < 0) { return l }
+        return r
+    }
+    var jc = swLoose(l, r)
+    if (wantGt) {
+        if (jc > 0) { return l }
+        return r
+    }
+    if (jc < 0) { return l }
+    return r
+}
+
+// jsCompare, the shared relational comparison, for the operands neither number
+// tag covers: two strings compare lexicographically, anything else numerically.
+function swLoose(l, r) {
+    if (typeof l == "string" && typeof r == "string") {
+        if (l < r) { return 0 - 1 }
+        if (l > r) { return 1 }
+        return 0
+    }
+    var x = swNum(l)
+    var y = swNum(r)
+    if (x < y) { return 0 - 1 }
+    if (x > y) { return 1 }
+    return 0
+}
+
+function js_swmax(l, r) { return swPick(l, r, true) }
+function js_swmin(l, r) { return swPick(l, r, false) }
+
+// The Double methods this subset carries, in front of the runtime's own js_mcall
+// (a float box is not a shape memberCall knows). Verified against swift 6.1.2:
+// 2.0.rounded() is 2.0, 2.5.squareRoot() is 1.5811388300841898 and
+// 7.0.truncatingRemainder(dividingBy: 2.0) is 1.0.
+function js_swmcall(recv, name, args) {
+    if (!floIs(recv)) { return js_mcall(recv, name, args) }
+    var f = floNum(recv)
+    var a0 = 0
+    if (args.length > 0) { a0 = swNum(args[0]) }
+    if (name === "rounded") { return swMkFlo(swRound(f)) }
+    if (name === "squareRoot") { return swMkFlo(Math.sqrt(f)) }
+    if (name === "truncatingRemainder") { return swMkFlo(f % a0) }
+    if (name === "isMultiple") { return (f % a0) === 0 }
+    if (name === "description") { return swFloStr(f) }
+    fail("unknown Double method: " + name)
+    return undefined
+}
+
+// Swift's SMART SHIFT: an over-shift answers 0 (or the sign, for a signed >>) and
+// a NEGATIVE count shifts the other way - `256 >> -2` is 1024, verified against
+// swift 6. sintOp already gets the over-shift right; only the negative count is
+// Swift specific.
+function js_swshift(op, l, r) {
+    var o = op
+    var n = swNum(r)
+    if (sintIs(r)) { n = swNum(sintConv(r, 64, false)) }
+    if (n < 0) {
+        if (o === "<<") { o = ">>" } else { o = "<<" }
+        n = 0 - n
+    }
+    return swGiArith(o, l, sintConv(n, 64, false))
+}
+
+// -x and ~x, both at the operand's own width. A fractional Double keeps the
+// floating point negation, so -0.0 keeps its sign and -1.0/0.0 is -inf.
+function js_swneg(v) {
+    // UNARY minus: `0 - x` would answer +0.0 for -0.0 and lose the sign Swift
+    // prints. The floor's d_neg flips the sign bit; see swFloStr.
+    if (!swWhole(v)) { return swMkFlo(-swNum(v)) }
+    return sintConv(sintOp(1, 0, v), sintWidth(v), sintUns(v))
+}
+
+function js_swnot(v) {
+    return sintConv(sintOp(7, v, sintConv(0 - 1, 64, false)), sintWidth(v), sintUns(v))
+}
+
+// Int(x) / Int8(x) / UInt64(x): (value, bits, unsigned). A String source is
+// FAILABLE - Swift answers nil for anything that is not a complete, in-range
+// integer - and is the one conversion that does not wrap.
+function js_swintconv(v, bits, uns) {
+    if (typeof v == "string") {
+        var r = swIntFromStr(v, bits, uns)
+        if (r === undefined) { return null }
+        return r
+    }
+    if (v === undefined || v === null) { fail("integer conversion of nil") }
+    return sintConv(v, bits, uns)
+}
+
+// The four ordered comparisons. A box has to go through sintCmp rather than the
+// shared jsCompare, because a UInt64 above 2^63 reads as a NEGATIVE int64 there,
+// so UInt64.max < 0 would hold.
+function swRel(l, r) {
+    // A float box is an object to the shared comparison, so it has to be unboxed
+    // first: `1.5 < 2.0` between two boxes is not a numeric comparison at all.
+    // -2 is the NaN answer, on which every ordering is false.
+    if (floIs(l) || floIs(r)) {
+        var x = swNum(l)
+        var y = swNum(r)
+        if (x < y) { return 0 - 1 }
+        if (x > y) { return 1 }
+        if (x !== y) { return 0 - 2 }
+        return 0
+    }
+    if (sintIs(l) || sintIs(r)) {
+        if (swIntegral(l) && swIntegral(r)) { return sintCmp(l, r) }
+    }
+    return swLoose(l, r)
+}
+
+function js_swlt(l, r) {
+    var c = swRel(l, r)
+    if (c === 0 - 2) { return false }
+    return c < 0
+}
+
+function js_swle(l, r) {
+    var c = swRel(l, r)
+    if (c === 0 - 2) { return false }
+    return c <= 0
+}
+
+function js_swgt(l, r) {
+    var c = swRel(l, r)
+    if (c === 0 - 2) { return false }
+    return c > 0
+}
+
+function js_swge(l, r) {
+    var c = swRel(l, r)
+    if (c === 0 - 2) { return false }
+    return c >= 0
+}
+
+// The members a sized integer or a Double answers for itself. Everything else
+// falls straight through to the plain member read the grammar already emitted, so
+// this is only ever a type switch in front of it.
+function js_swget(v, k) {
+    if (floIs(v)) {
+        var f = floNum(v)
+        if (k === "isNaN") { return f !== f }
+        if (k === "isInfinite") { return f === Infinity || 0 - f === Infinity }
+        if (k === "isFinite") { return f === f && f !== Infinity && 0 - f !== Infinity }
+        if (k === "isZero") { return f === 0 }
+        if (k === "description") { return swFloStr(f) }
+        if (k === "magnitude") { return swMkFlo(Math.abs(f)) }
+    }
+    if (sintIs(v)) {
+        if (k === "description") { return sintStr(v) }
+        if (k === "bitWidth") { return sintWidth(v) }
+        if (k === "magnitude") {
+            if (!sintUns(v) && sintCmp(v, 0) < 0) { return sintConv(sintOp(1, 0, v), sintWidth(v), sintUns(v)) }
+            return v
+        }
+    }
+    // The same three on a value that stayed a plain number, which is where every
+    // integer inside +/- 2^53 lives.
+    if (typeof v == "number") {
+        if (k === "description") { return swDesc(v) }
+        if (k === "bitWidth") { return 64 }
+        if (k === "magnitude") { return Math.abs(v) }
+    }
+    return v[k]
+}
