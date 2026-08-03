@@ -5418,11 +5418,265 @@ capture `""`, and unifying them would break three languages. Whether bash's C en
 folds into this or stays is an open question worth costing rather than assuming - it is
 the only one that is already native.
 
-## Retiring the Go runtime
+## Retiring the Go runtime - MEASURED AND DECLINED 2026-08-03. NOTHING WAS DELETED.
 
-29,670 lines, deletable a language at a time, only after that language passes natively.
-`jsrt.go`'s host-function globals (the pre-seeded `println` and friends) become MetaJS
-last, since every language depends on them.
+The item as written said: *29,670 lines, deletable a language at a time, only after
+that language passes natively.* All sixteen languages now pass natively, so the
+precondition is met and the question came due. It was measured rather than assumed,
+and **the answer is KEEP - not one line was deleted.** The evidence is below; every
+number in it was produced at `d64776a` with a clean working tree.
+
+The short version, in the order the brief asked:
+
+1. **`llvm.Run` CANNOT link and execute `runtime.ll` + `<lang>-rt.ll` the way `-exe`
+   does.** `linkRuntimeModules` is not enough, and the gap is not small - it is
+   `setjmp`/`longjmp`, four pthread primitives, `dlopen`/`dlsym`, and a conservative
+   stack scan that has nothing to scan. Measured, below.
+2. **There is therefore no "cost" to quote**, because there is no working
+   configuration to time. What CAN be timed is the only alternative route - moving
+   the suite onto the native binaries - and that is a **2.6x per-entry** cost that
+   also does not reach the interpreter halves at all.
+3. **What would be lost** is the exact mechanism that found ~15 real layer-2 defects
+   in the last two weeks, none of which `./test.sh` could see. Named, below.
+4. **What cannot go** is enumerated at the end, and it is much more than
+   `jsrt.go`'s host globals: `abnf/jsrt.go` is the engine `-frozen` itself runs on.
+
+### 1. Can `llvm.Run` run layer 2? No, and here is the measurement
+
+A probe module supplying only `jsmain`/`jsdispatch`, handed to `run()` with
+`languages/lib/runtime.ll` as the runtime input - i.e. exactly what
+`linkRuntimeModules` is for - dies immediately:
+
+```
+$ go test ./abnf/ -run TestFloorUnderInterpreter -v
+FLOOR-PROBE PANIC: IR interpreter: call to undefined external function @getenv
+```
+
+**The link itself is fine.** That is worth stating plainly, because it is the good
+news and it is what `linkRuntimeModules` already buys: parsing every `*-rt.ll`
+against `runtime.ll` shows the pair is CLOSED over the floor for every language.
+
+```
+bash-rt.ll     unsatisfied-by-floor(0)=[]      java-rt.ll     unsatisfied-by-floor(0)=[]
+batch-rt.ll    unsatisfied-by-floor(1)=[bat_lookup]   js-rt.ll  unsatisfied-by-floor(0)=[]
+csharp-rt.ll   unsatisfied-by-floor(0)=[]      kotlin-rt.ll   unsatisfied-by-floor(0)=[]
+dart-rt.ll     unsatisfied-by-floor(0)=[]      lua-rt.ll      unsatisfied-by-floor(0)=[]
+go-rt.ll       unsatisfied-by-floor(0)=[]      php-rt.ll      unsatisfied-by-floor(0)=[]
+python-rt.ll   unsatisfied-by-floor(0)=[]      ruby-rt.ll     unsatisfied-by-floor(0)=[]
+swift-rt.ll    unsatisfied-by-floor(0)=[]
+```
+
+Every `js_*` a layer-2 file leaves undefined is defined by the floor's 309 function
+bodies. So the whole obstacle is the floor's OWN 16 undefined externs, of which the
+interpreter can resolve exactly **two**:
+
+```
+runtime.ll  defs=309  resolvable by llvm.Run = [malloc putchar]
+            UNRESOLVABLE(16) = dlopen dlsym exit getenv jsdispatch jsmain longjmp
+                               pthread_cond_broadcast pthread_cond_init
+                               pthread_cond_wait pthread_create pthread_mutex_init
+                               pthread_mutex_lock pthread_mutex_unlock setjmp write
+```
+
+`jsmain` and `jsdispatch` come from the program module, so they are free. The other
+fourteen split three ways:
+
+- **`getenv` / `write` / `exit` are easy.** Stubbing them in the probe took nine
+  lines and moved the failure one step:
+
+  ```
+  FLOOR-PROBE PANIC: IR interpreter: call to undefined external function @setjmp
+  ```
+
+  `main()` calls `setjmp` before it calls anything else, so this is the first
+  instruction of every program in every language.
+
+- **`setjmp` / `longjmp` are a real project, not a stub.** The interpreter has no
+  unwind path out of `ma.call` at all - that is already why `exit` and `abort` are
+  deliberately absent from `libcExterns` (see the header there). A correct
+  implementation is possible in principle: `setjmp` records the interpreted frame
+  plus block/instruction index and `longjmp` panics with a token that the recorded
+  frame's `ma.call` recovers and resumes at. It is perhaps 100 lines - and every
+  `throw` in every one of the sixteen languages goes through it, so a subtle bug in
+  it is a subtle bug in all sixteen at once.
+
+- **`pthread_create` + `dlopen`/`dlsym` are the coroutine machinery, and they are
+  worse.** `ma.mem` is a `[]byte` grown by `append` in `ma.alloc`; two goroutines
+  mutating it race and reallocate under each other. `dlsym("coro_entry")` has to
+  answer a real code address, and the interpreter's answer to a function-as-value is
+  a funcId in an `i32` - the exact limitation `c-to-llvm-ir.abnf` has and that
+  `dlopen` exists in the floor to work around.
+
+**AND THE ONE THAT CANNOT BE FIXED AT ALL: the collector has nothing to scan.**
+This is the finding that settles it, and it is a silently wrong answer rather than a
+crash. With `setjmp` stubbed to 0 the probe DOES run - a `js_arr_new`, 20,000
+`js_arr_push`, then `js_get(arr, 0) + 2`:
+
+```
+PROBE_GC unset / o / p     FLOOR-PROBE ok: ret=9    gc: collections=0
+PROBE_GC=s   (stress)      FLOOR-PROBE ok: ret=0    gc: collections=23 live=10432 pinned=
+```
+
+**9 becomes 0** - the array was collected while it was live, and the stats line's own
+`pinned=` field came back empty because the string it was built from was collected
+too. The cause is structural: `gc_collect` scans `[sp, GC_STACK_BASE)` of the C
+stack, but under `llvm.Run` an SSA value lives in `fr.regs`, a **Go slice outside the
+interpreted address space**, and an `alloca` is `ma.alloc(...)` - bump-allocated
+UPWARD from the same arena as the globals and never freed, so there is no stack to
+walk and the walk would run the wrong way if there were. Part 1b's design - "the
+running side owns `GC_STACK_BASE`", conservative roots, nothing moves - is written
+against a real machine stack and has no image in this interpreter.
+
+Giving the interpreter a real spilled, downward-growing, reclaimed stack in `ma.mem`
+is not a fix to `linkRuntimeModules`; it is a second machine.
+
+### 2. The cost, since there is no configuration to time
+
+The gates at `d64776a`, timed on this machine (`-j 8`, warm script cache):
+
+```
+matrix        325/325       23.1s wall    186.3s user
+--full        5,686 assertions, 0 halves disagree    83.1s wall   314.2s user
+--cross       119 compared, 0 divergent               9.6s wall    64.0s user
+clang-check   16/16 "ok, and the clang executable agrees"   95.9s wall  111.9s user
+```
+
+The only way the suite could run on layer 2 is through the native binaries, which is
+what `clang-check.sh` already does for one program per language. Per entry, measured
+on the largest ratchet file there is:
+
+```
+$ mec languages/php-to-llvm-ir.abnf tests/php-test-full.php -q          1.42s   (llvm.Run, Go twin)
+$ mec languages/php-to-llvm-ir.abnf tests/php-test-full.php -q -exe P   3.70s   (build, layer 2)
+$ P                                                                     0.05s   (run)
+```
+
+**2.6x per entry**, and it buys less than it costs, for three reasons:
+
+- It reaches only the COMPILER halves. An `<lang>-interpreter.abnf` is a tag script;
+  it has no `-exe` and never will. Half of the 325-entry matrix and both sides of
+  `--cross` stay on `abnf/jsrt.go` no matter what.
+- It makes clang a hard dependency of `./test.sh`, which today only
+  `tests/clang-check.sh` needs.
+- It breaks the tool's primary invocation. `mec languages/kotlin-to-llvm-ir.abnf
+  prog.kt` with no `-exe` prints the module and runs it; that path IS the Go twin.
+
+### 3. What would be LOST, named precisely
+
+`./test.sh` in all three groups compares an engine **with itself**: goja against
+`-frozen` is one implementation under two script hosts, and `--cross` is an
+interpreter half against a compiler half, both hosted by `abnf/jsrt.go`. None of the
+three has ever compared the two IMPLEMENTATIONS of a language's semantics.
+
+The thing that does is the **per-language differential probe**: one large generated
+program, run under `llvm.Run` (Go twin) and as the native binary (layer 2), diffed
+byte for byte. Every language section in Part 3 has one, and their findings are the
+answer to this question:
+
+```
+ruby    36,378 lines   4 defects   incl. the arm64 FMA fusion: 9007199254740991 % -3
+                                   is -2 under llvm.Run and -1 natively, and real
+                                   ruby says -2 - so the TWIN was right
+go      16,550 lines   3 defects   incl. js_gotypeis: the twin's type switch has no
+                                   arm for either number box, layer 2 answered
+                                   "float64"/"int"; broke byte identity either way
+java    20,296+ lines  3 defects   python  34,813 lines  1 defect (jsAdd's bigint arm,
+dart    31,675 lines   2 defects           which answered a CONCATENATED string)
+swift   20,296 lines   1 defect     csharp  1 defect      php  1 divergence left
+lua     13,306 lines   0 (byte-identical) - but the float `%` formula was wrong in
+                                   ALL THREE halves and the twin's was FMA-dependent,
+                                   so the two GO halves disagreed on 128 of 12,557
+```
+
+Every one of those sections says the same sentence in its own words: **"invisible to
+`./test.sh`, because it compares each engine with itself."** That is the class of
+defect that becomes invisible if the twin goes:
+
+> **A semantic error that layer 2 and the ratchet agree on.** A ratchet assertion is
+> written by the same person, at the same time, from the same reading of the language
+> as the layer-2 code it pins. When that reading is wrong, the assertion pins the
+> wrong answer and every engine agrees. The Go twin is the only artifact in the tree
+> that was written from an INDEPENDENT reading, at a different time, in a different
+> language, against a different value model - and Part 3 records fifteen occasions on
+> which that independence paid.
+
+Part 3's own rollout recipe already says it, at step 3: *"`abnf/jsrt<lang>.go` is the
+authoritative spec. Match it."* Deleting the spec after building the implementation
+from it is exactly backwards. There is also a THIRD differential inside the matrix
+that would go with it: `abnf/jsrtregex.go` is a line-by-line Go port of
+`languages/lib/regex.js`, and the matrix runs an interpreter half (which uses the JS)
+against a compiler half (which uses the port) on the same input - see that file's
+header.
+
+**And the honest counter-argument, stated rather than buried.** The twin is not free:
+it is a second implementation that must be kept in step, and Part 3 records defects
+that were in the TWIN (Lua's `%` in all three halves, Go's `js_gotypeis`) as well as
+in layer 2. A wrong oracle costs real time. The judgement here is that a wrong oracle
+that DISAGREES is still strictly better than no oracle, because disagreement is what
+sends someone to the real toolchain; the Ruby FMA row is the clean example, where the
+diff is what produced the question and real `ruby 2.6.10` produced the answer.
+
+### 4. What must be KEPT regardless - the enumeration
+
+This is the part the brief asked for precisely, and it is larger than the original
+item assumed. `abnf/jsrt*.go` is 29,825 lines (plus 185 of test), and it splits:
+
+```
+SHARED CORE - cannot go under ANY answer                         12,713 lines
+  jsrt.go         9,837  the MetaJS runtime itself. newJSRT is called from
+                         frozen.go:220, :530 and :813 - this is the engine
+                         `-frozen` RUNS ON. Every tag script of every grammar,
+                         goja-free, executes through it. It is not "the language
+                         runtimes"; it is the compiler's own interpreter.
+  jsrtjsprint.go  1,320  the String/Array/Number method table reached through
+                         js_get - tag scripts live on it
+  jsrtint.go        682  giBindings: sint/sintRaw/sintHi/sintLo/sintOp/sintNum,
+                         the sized-integer host bindings a LAYER-2 file calls
+                         (floor host ids 62 etc.) - deleting these breaks the
+                         NATIVE path, not the Go one. Also programJSBindings and
+                         keysBindings (keysOf/delKey, floor host ids 61 and 63).
+  jsrtjsbig.go      505  arbitrary-precision integers, reached from the core
+  jsrtjvm.go        369  jfBindings: the boxed double (flo*), same argument
+
+PER-LANGUAGE TWINS - the only candidates, and the ones being kept   12,839 lines
+  jsrtkotlin 5,934 · jsrtphp 1,989 · jsrtswift 986 · jsrtdart 896
+  jsrtcsharp 813 · jsrtjava 804 · jsrtlua 787 · jsrtgolang 630
+  Reachable ONLY from a compiled module's extern table (each registers itself
+  additively through rxExtraExterns + init(), touching nothing else), i.e. only
+  from `<lang>-to-llvm-ir.abnf` under llvm.RunJS. Also the differential oracle.
+
+REGEX - Part 4's other half, unchanged by this decision              4,273 lines
+  jsrtregex 2,164 · jsrtregexpy 692 · jsrtregexkt 623 · jsrtregexjs 575
+  jsrtregexptr 219
+```
+
+Note what the first block means for the original item's plan. It said *"`jsrt.go`'s
+host-function globals become MetaJS last, since every language depends on them."*
+They cannot become MetaJS at all: the thing that would execute that MetaJS is
+`jsrt.go`. The dependency is not "every language" - it is the toolchain.
+
+`libcNative` (`llvmmap.go`) also stays, unconditionally: it serves `-exe`'s
+correctness contract (condition 2 at `libcExterns`) and the C, bash and batch
+grammars, none of which have a handle runtime at all.
+
+### The decision, and what a future person should do instead
+
+**Keep the Go runtime. The second implementation is worth more than the 29,825
+lines.** If the goal is to shrink the tree, the honest targets are elsewhere and each
+is independently checkable:
+
+- **Regex** (Part 4's first half): three implementations of ONE thing, and unlike the
+  language twins two of them - `jsrtregex*.go` and `lib/regex.js` - are already
+  compared by the matrix. Folding bash's C ERE engine in is the costable question.
+- **A native differential in the suite.** The probes are ad hoc and run by hand. A
+  `./test.sh --probe` that runs each language's existing probe through both engines
+  and diffs would make the fifteen defects above a RATCHET instead of an archaeology
+  exercise - which is the highest-value work this section can point at, and it
+  requires the Go twin to exist.
+
+The measurement scripts for this section were temporary (`abnf/floorprobe_test.go`,
+deleted; its two probe modules are quoted above in full) - re-derive them from the
+three code blocks in section 1 if the question is reopened.
 
 ---
 
