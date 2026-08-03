@@ -111,9 +111,12 @@ case guards. A capture binds an ordinary variable.
 Still missing: nothing the full-syntax ratchet (tests/python-test-full.py) covers -
 it parses and passes in full.
 
-Functions become IR functions jsf_N(env, args); Python scoping goes through the
-js_pyset_var external: a def, a lambda, a class body and the module top level are
-BINDING BOUNDARIES (js_pyfnscope), so an assignment binds locally even when an
+Functions become IR functions jsf_N(env, args); Python scoping is LOWERED IN THIS
+EMITTER - py_setvar, py_getvar, py_delvar, py_global, and the pyfn/pyup/pymod/pydel
+marks pyOpenBoundary declares - rather than carried on the scope
+object the way abnf/jsrt.go carries it - a scope is the C floor's private storage
+and a MetaJS layer 2 cannot open one. A def, a lambda, a class body and the module
+top level are BINDING BOUNDARIES, so an assignment binds locally even when an
 enclosing function binds the same name, while global / nonlocal send it to the
 module scope or the enclosing binding. A try, except, with or finally body is its
 own IR closure but NOT a boundary, so what it assigns belongs to the function
@@ -449,11 +452,12 @@ WithBody    <~~ push({withbody: pop()}) ~~>
 Assert      <~~ push(makeAssert(takeAll())) ~~>
             = "assert" KwEnd Expression [ "," Expression ] ;
 
-// global / nonlocal: the declaration guarantees a binding in the right scope,
-// then plain assignment (js_pyset_var: update where the chain resolves the
-// name) lands there. Deviation: a nearer binding of the same name still wins
-// over the declared scope (real Python forces it); nonlocal is checked when
-// the call reaches it, not at compile time. del stays unsupported.
+// global / nonlocal: the declaration leaves a g-marker or an n-marker for the name
+// in the scope it stands in - which is exactly where abnf/jsrt.go puts its pyDecl entry -
+// and py_setvar consults them by the same chain walk the Go arm does. Deviation: a
+// nearer binding of the same name still wins over the declared scope (real Python
+// forces it), and a `nonlocal` naming nothing is not diagnosed here (see
+// pyNonlocal). `del` IS supported, through py_delvar and the "pydel*" sentinel.
 Global      <~~ push(makeGlobal(takeAll(), up.pos)) ~~>
             = "global" KwEnd Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ;
 Nonlocal    <~~ push(makeNonlocal(takeAll(), up.pos)) ~~>
@@ -468,12 +472,13 @@ Del         <~~ push(makeDel(takeAll())) ~~>
 DelTarget   = "(" :whitespace(WhitespaceNL) [ Target { "," Target } [ "," ] ] ")" :whitespace(Whitespace) | Target ;
 
 
-// name: Type [= value]: the annotation is parsed and ignored; with a value it is a
-// plain assignment, without one it is a no-op declaration.
+// name: Type [= value]: the annotation is recorded in the enclosing body's
+// __annotations__ (pyAnnot, lowered here - js_pyannot took a scope handle); with a
+// value it is a plain assignment as well.
 AnnAssign   <~~ push(makeAnnAssign(takeAll())) ~~>
             = Target ":" AnnType [ "=" Expression ] ;
 // The annotation of an annotated assignment, kept as its source text: it is what
-// the enclosing class or module body records in __annotations__ (js_pyannot).
+// the enclosing class or module body records in __annotations__ (pyAnnot).
 AnnType     <~~ push({atype: stripWs(up.in)}) ~~>
             = DiscardType ;
 
@@ -1195,6 +1200,290 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // defines it. Bare early returns are braced (MetaJS has no ASI).
     function fail(msg) { println("python compiler error: " + msg); exit(1) }
 
+    // ======================================================================
+    // PYTHON SCOPING, LOWERED IN THE EMITTER (docs/runtime-next-plan.md part 3,
+    // "a PRIVATE-REPRESENTATION probe belongs in the EMITTER")
+    // ======================================================================
+    //
+    // abnf/jsrt.go carries Python's binding rule on the SCOPE OBJECT ITSELF: a
+    // jsScope has a `pyFn` flag (this scope is a BINDING BOUNDARY - a def, a
+    // lambda, a class body or the module top level) and a `pyDecl` map (the names
+    // a `global` / `nonlocal` statement sent elsewhere). js_pyfnscope, js_pyglobal,
+    // js_pynonlocal and js_pyset_var read and write them.
+    //
+    // A scope is the C floor's PRIVATE storage. runtime.c says so itself at
+    // js_pyset_var: "a scope here carries no such mark, so those arms are
+    // unreachable and are NOT modelled. A Python layer 2 will have to add them."
+    // Layer 2 CANNOT: a MetaJS runtime library never receives a scope it can open.
+    // That is the wall php, swift, java, dart, go and ruby each met, and the answer
+    // is the same one for the seventh time - find the floor externs that DO answer
+    // the question and lower the call in the emitter. Everything below is written
+    // over js_scope_new / js_scope_decl / js_scope_get / js_scope_set /
+    // js_scope_typeof / js_pyset_var, which the C floor and abnf/jsrt.go BOTH have,
+    // so the two halves execute the same program.
+    //
+    // The marks are carried as ORDINARY BINDINGS, in a scope of their own:
+    //
+    //     parent  ->  MID  ->  the boundary scope S
+    //
+    // MID holds "pyfn*" -> S, "pyup*" -> MID, "pymod*" -> S (module only) and
+    // "pydel*" -> the del sentinel (module only). None of those is a possible
+    // Python identifier, and putting them in MID rather than in S keeps S clean -
+    // which matters because a class body's bindings become the class's members.
+    // js_scope_get already walks the chain, so from ANY nested scope "pyfn*"
+    // resolves to the nearest enclosing boundary and "pyup*" to a scope that holds
+    // no user name of that function - which is what makes "is this name bound at or
+    // below the boundary" answerable with two js_scope_typeof calls.
+    //
+    // A `global x` / `nonlocal x` statement declares the marker "g*x" / "n*x" in
+    // the scope it stands in, which is exactly where abnf/jsrt.go puts its pyDecl
+    // entry, and py_setvar consults them by the same chain walk the Go arm does.
+    //
+    // THE ONE INEXACTNESS, stated rather than buried: py_setvar decides "is this
+    // name bound at or below the boundary" as "it resolves from here AND it does
+    // not resolve from MID". A name bound BOTH strictly below the boundary (a
+    // `with ... as w` / `except ... as e` target, which the emitter declares in the
+    // ctl closure's own scope) AND above it would be re-bound at the boundary here
+    // where abnf/jsrt.go assigns the inner holder. Nothing in tests/ does that; the
+    // exact fix needs a per-scope containment test, which is the one thing the
+    // floor's scope API does not expose.
+    var pySetVarF = undefined
+    var pyGetVarF = undefined
+    var pyDelVarF = undefined
+    var pyGlobalF = undefined
+
+    // Open a binding boundary: the MID scope with the marks, then the scope the
+    // body runs in. Answers the body scope.
+    function pyOpenBoundary(b, parentV, isModule) {
+        var mid = callExt(b, "js_scope_new", [parentV])
+        var s = callExt(b, "js_scope_new", [mid])
+        callExt(b, "js_scope_decl", [mid, emitStr(b, "pyfn*"), s])
+        callExt(b, "js_scope_decl", [mid, emitStr(b, "pyup*"), mid])
+        if (isModule) {
+            callExt(b, "js_scope_decl", [mid, emitStr(b, "pymod*"), s])
+            // The `del x` sentinel: one unique value for the whole program, which a
+            // later read compares against by IDENTITY. abnf/jsrt.go uses a Go type of
+            // its own (pyDeletedT) for the same reason - nothing a program can
+            // produce ever compares equal to it. A fresh empty array is that here.
+            callExt(b, "js_scope_decl", [mid, emitStr(b, "pydel*"), callExt(b, "js_arr_new", [])])
+        }
+        return s
+    }
+
+    // Every name a CLASS BODY binds, recorded while the body is emitted, so the
+    // fill below can copy them onto the class object without enumerating a scope.
+    var pyBindSink = null
+    var pyAnnotHere = false
+
+    // Names the emitter DECLARED in a scope of the current function that is not a
+    // binding boundary - a comprehension's own scope, an `except ... as e` handler,
+    // a `with ... as w` target. abnf/jsrt.go's js_pyset_var finds such a binding on
+    // its way up and assigns THERE, and that is the one case the two-typeof probe
+    // below cannot see (a slot that HOLDS undefined answers "undefined" exactly like
+    // an absent name, which is what declCompNames leaves behind). The emitter knows
+    // these names statically, so it says so: the floor's own js_pyset_var walk is
+    // exactly right for them and is emitted straight.
+    var pyInnerNames = {}
+    function pyDeclInner(nameStr) { pyInnerNames["$" + nameStr] = true }
+
+    // js_pyset_var's four arms, in the order abnf/jsrt.go takes them. The name
+    // arrives as a STRING (not an emitted value) so the class-body sink can see it.
+    function pySetVar(b, envV, nameStr, v) {
+        if (pyBindSink != null) { pyBindSink.push(nameStr) }
+        var nameV = emitStr(b, nameStr)
+        if (pyInnerNames["$" + nameStr] == true) {
+            return callExt(b, "js_pyset_var", [envV, nameV, v])
+        }
+        if (pySetVarF == undefined) {
+            pySetVarF = m.NewFunc("py_setvar", i64,
+                                  [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("nm", i64),
+                                   llvm.ir.NewParam("v", i64)])
+            var envP = pySetVarF.Params[0]
+            var nmP = pySetVarF.Params[1]
+            var vP = pySetVarF.Params[2]
+            var eb = pySetVarF.NewBlock("entry")
+            var gB = pySetVarF.NewBlock("global")
+            var notG = pySetVarF.NewBlock("notglobal")
+            var nB = pySetVarF.NewBlock("nonlocal")
+            var notN = pySetVarF.NewBlock("notnonlocal")
+            var innerB = pySetVarF.NewBlock("inner")
+            var declB = pySetVarF.NewBlock("declare")
+            var undefS = emitStr(eb, "undefined")
+            // global x
+            var gk = callExt(eb, "js_add", [emitStr(eb, "g*"), nmP])
+            var gt = callExt(eb, "js_scope_typeof", [envP, gk])
+            eb.NewCondBr(truthy(eb, callExt(eb, "js_sne", [gt, undefS])), gB, notG)
+            var modV = callExt(gB, "js_scope_get", [envP, emitStr(gB, "pymod*")])
+            callExt(gB, "js_scope_set", [modV, nmP, vP])
+            gB.NewRet(handle(0))
+            // nonlocal x
+            var nk = callExt(notG, "js_add", [emitStr(notG, "n*"), nmP])
+            var nt = callExt(notG, "js_scope_typeof", [envP, nk])
+            notG.NewCondBr(truthy(notG, callExt(notG, "js_sne", [nt, emitStr(notG, "undefined")])), nB, notN)
+            callExt(nB, "js_scope_set", [envP, nmP, vP])
+            nB.NewRet(handle(0))
+            // Bound at or below the boundary? Then the floor's own walk lands on the
+            // holder, which is what abnf/jsrt.go's `if s.has(name)` arm does.
+            var here = callExt(notN, "js_scope_typeof", [envP, nmP])
+            var upV = callExt(notN, "js_scope_get", [envP, emitStr(notN, "pyup*")])
+            var above = callExt(notN, "js_scope_typeof", [upV, nmP])
+            var isHere = callExt(notN, "js_sne", [here, emitStr(notN, "undefined")])
+            var notAbove = callExt(notN, "js_seq", [above, emitStr(notN, "undefined")])
+            notN.NewCondBr(notN.NewAnd(truthy(notN, isHere), truthy(notN, notAbove)), innerB, declB)
+            callExt(innerB, "js_pyset_var", [envP, nmP, vP])
+            innerB.NewRet(handle(0))
+            // Otherwise it binds in the boundary scope: jsrt.go's `if s.pyFn` arm.
+            var bsV = callExt(declB, "js_scope_get", [envP, emitStr(declB, "pyfn*")])
+            callExt(declB, "js_scope_decl", [bsV, nmP, vP])
+            declB.NewRet(handle(0))
+        }
+        return b.NewCall(pySetVarF, [envV, nameV, v])
+    }
+
+    // A variable READ. abnf/jsrt.go's scopeGet raises a catchable UnboundLocalError
+    // when the slot holds the `del` sentinel; the floor's scope_get knows nothing
+    // about it, so the test is emitted here. Both halves then behave the same, and
+    // the raised value is built with js_pycall on the module's own
+    // UnboundLocalError class so it derives from Exception exactly like a raised
+    // one (js_pyexc's shortcut shape does NOT, and `except Exception` would miss).
+    function pyGetVar(b, envV, nameV) {
+        if (pyGetVarF == undefined) {
+            pyGetVarF = m.NewFunc("py_getvar", i64,
+                                  [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("nm", i64)])
+            var envP = pyGetVarF.Params[0]
+            var nmP = pyGetVarF.Params[1]
+            var eb = pyGetVarF.NewBlock("entry")
+            var goneB = pyGetVarF.NewBlock("deleted")
+            var okB = pyGetVarF.NewBlock("live")
+            var vv = callExt(eb, "js_scope_get", [envP, nmP])
+            var dd = callExt(eb, "js_scope_get", [envP, emitStr(eb, "pydel*")])
+            eb.NewCondBr(truthy(eb, callExt(eb, "js_seq", [vv, dd])), goneB, okB)
+            var msg = callExt(goneB, "js_add",
+                              [callExt(goneB, "js_add", [emitStr(goneB, "local variable '"), nmP]),
+                               emitStr(goneB, "' referenced before assignment")])
+            var ar = callExt(goneB, "js_arr_new", [])
+            callExt(goneB, "js_arr_push", [ar, msg])
+            var clsV = callExt(goneB, "js_scope_get", [envP, emitStr(goneB, "UnboundLocalError")])
+            callExt(goneB, "js_throw", [callExt(goneB, "js_pycall", [clsV, ar, handle(0)])])
+            goneB.NewRet(handle(0))
+            okB.NewRet(vv)
+        }
+        return b.NewCall(pyGetVarF, [envV, nameV])
+    }
+
+    // `del x`: abnf/jsrt.go walks for the scope that HAS the name and leaves the
+    // sentinel in the slot, raising NameError when no scope has it.
+    function pyDelVar(b, envV, nameV) {
+        if (pyDelVarF == undefined) {
+            pyDelVarF = m.NewFunc("py_delvar", i64,
+                                  [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("nm", i64)])
+            var envP = pyDelVarF.Params[0]
+            var nmP = pyDelVarF.Params[1]
+            var eb = pyDelVarF.NewBlock("entry")
+            var missB = pyDelVarF.NewBlock("missing")
+            var hitB = pyDelVarF.NewBlock("present")
+            var tv = callExt(eb, "js_scope_typeof", [envP, nmP])
+            eb.NewCondBr(truthy(eb, callExt(eb, "js_seq", [tv, emitStr(eb, "undefined")])), missB, hitB)
+            var msg = callExt(missB, "js_add",
+                              [callExt(missB, "js_add", [emitStr(missB, "name '"), nmP]),
+                               emitStr(missB, "' is not defined")])
+            var ar = callExt(missB, "js_arr_new", [])
+            callExt(missB, "js_arr_push", [ar, msg])
+            var clsV = callExt(missB, "js_scope_get", [envP, emitStr(missB, "NameError")])
+            callExt(missB, "js_throw", [callExt(missB, "js_pycall", [clsV, ar, handle(0)])])
+            missB.NewRet(handle(0))
+            var dd = callExt(hitB, "js_scope_get", [envP, emitStr(hitB, "pydel*")])
+            callExt(hitB, "js_scope_set", [envP, nmP, dd])
+            hitB.NewRet(handle(0))
+        }
+        return b.NewCall(pyDelVarF, [envV, nameV])
+    }
+
+    // `global x`: mark the scope, and make sure the module scope binds the name so
+    // the later assignment lands there (jsrt.go's js_pyglobal, one for one).
+    function pyGlobal(b, envV, nameV) {
+        if (pyGlobalF == undefined) {
+            pyGlobalF = m.NewFunc("py_global", i64,
+                                  [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("nm", i64)])
+            var envP = pyGlobalF.Params[0]
+            var nmP = pyGlobalF.Params[1]
+            var eb = pyGlobalF.NewBlock("entry")
+            var seedB = pyGlobalF.NewBlock("seed")
+            var doneB = pyGlobalF.NewBlock("done")
+            callExt(eb, "js_scope_decl", [envP, callExt(eb, "js_add", [emitStr(eb, "g*"), nmP]), handle(3)])
+            var modV = callExt(eb, "js_scope_get", [envP, emitStr(eb, "pymod*")])
+            var tv = callExt(eb, "js_scope_typeof", [modV, nmP])
+            eb.NewCondBr(truthy(eb, callExt(eb, "js_seq", [tv, emitStr(eb, "undefined")])), seedB, doneB)
+            callExt(seedB, "js_scope_decl", [modV, nmP, handle(0)])
+            seedB.NewBr(doneB)
+            doneB.NewRet(handle(0))
+        }
+        return b.NewCall(pyGlobalF, [envV, nameV])
+    }
+
+    // `nonlocal x`: the mark alone. abnf/jsrt.go ALSO validates that an enclosing
+    // non-root scope binds the name and aborts when none does; that arm is not
+    // emitted, so a `nonlocal` naming nothing falls through to the assignment,
+    // which then aborts in js_scope_set instead. No file in tests/ writes one.
+    function pyNonlocal(b, envV, nameV) {
+        callExt(b, "js_scope_decl", [envV, callExt(b, "js_add", [emitStr(b, "n*"), nameV]), handle(3)])
+        return b
+    }
+
+    // `x: T` records the annotation in the enclosing body's __annotations__ dict.
+    // abnf/jsrt.go's js_pyannot looks the dict up in the scope's OWN names
+    // (sc.find, not the chain) and creates one there when it is missing; an EMITTER
+    // has no own-names probe, so the "is there one already" question is answered
+    // statically instead - pyAnnotHere, saved and restored with curScopeV. The two
+    // answers differ only for an annotation the program does not reach, which would
+    // create the dict here and not in the Go twin.
+    function pyAnnot(b, envV, nameStr, annStr) {
+        if (pyBindSink != null) { pyBindSink.push("__annotations__") }
+        if (!pyAnnotHere) {
+            callExt(b, "js_scope_decl", [envV, emitStr(b, "__annotations__"),
+                                         callExt(b, "js_dict_new", [])])
+            pyAnnotHere = true
+        }
+        var d = callExt(b, "js_scope_get", [envV, emitStr(b, "__annotations__")])
+        callExt(b, "js_arr_push", [callExt(b, "js_get", [d, emitStr(b, "keys")]), emitStr(b, nameStr)])
+        callExt(b, "js_arr_push", [callExt(b, "js_get", [d, emitStr(b, "vals")]), emitStr(b, annStr)])
+        return b
+    }
+
+    // js_pyclass_fill took a SCOPE HANDLE and enumerated its names - the floor's
+    // private storage again. The names a class body binds are known at emit time
+    // (pyBindSink), so the copy is emitted name by name over js_scope_get / js_set,
+    // both of which the C floor and abnf/jsrt.go have. The typeof guard is what
+    // keeps a binding the body did not REACH (`if c: x = 1`) off the class, which
+    // is what enumerating the scope gave for free.
+    var pyFill1F = undefined
+    function pyClassFill(b, clsV, scopeV, names) {
+        if (pyFill1F == undefined) {
+            pyFill1F = m.NewFunc("py_clsfill1", i64,
+                                 [llvm.ir.NewParam("cls", i64), llvm.ir.NewParam("sc", i64),
+                                  llvm.ir.NewParam("nm", i64)])
+            var cP = pyFill1F.Params[0]
+            var sP = pyFill1F.Params[1]
+            var nP = pyFill1F.Params[2]
+            var eb = pyFill1F.NewBlock("entry")
+            var missB = pyFill1F.NewBlock("absent")
+            var hitB = pyFill1F.NewBlock("present")
+            var tv = callExt(eb, "js_scope_typeof", [sP, nP])
+            eb.NewCondBr(truthy(eb, callExt(eb, "js_seq", [tv, emitStr(eb, "undefined")])), missB, hitB)
+            missB.NewRet(handle(0))
+            callExt(hitB, "js_set", [cP, nP, callExt(hitB, "js_scope_get", [sP, nP])])
+            hitB.NewRet(handle(0))
+        }
+        var seen = {}
+        for (var i = 0; i < names.length; i++) {
+            var k = "$" + names[i]
+            if (seen[k] == true) { continue }
+            seen[k] = true
+            b.NewCall(pyFill1F, [clsV, scopeV, emitStr(b, names[i])])
+        }
+        return b
+    }
+
     var hidCount = 0
     // sawYield is set while the CURRENT function body is being emitted, by every
     // yield in it; emitClosure hands the answer to makeDef through genClosure, so
@@ -1745,6 +2034,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (t.startgt != undefined) { return declCompNames(b, t.startgt) }
         if (t.path != undefined && t.path.length == 0) {
+            pyDeclInner(t.name)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, t.name), hUndef])
         }
         return b
@@ -1937,7 +2227,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {b: r.b, v: callExt(r.b, "js_pyget", [o, r.v])}
     }
     function emitRefRead(b, ref) {
-        var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+        // py_getvar, not js_scope_get: a name that `del` emptied has to raise here
+        // too (an augmented assignment READS first), which is what abnf/jsrt.go's
+        // scopeGet does for every read.
+        var o = pyGetVar(b, curScopeV, emitStr(b, ref.name))
         for (var i = 0; i < ref.path.length; i++) {
             var r = emitPathStep(b, o, ref.path[i])
             b = r.b
@@ -1958,7 +2251,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyNoBase(b) { return {b: b, v: hUndef} }
     function emitRefWrite(b, ref, v) {
         if (ref.path.length == 0) {
-            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.name), v])
+            pySetVar(b, curScopeV, ref.name, v)
             return b
         }
         var o = hUndef
@@ -2001,7 +2294,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // whole point of allowing it there. walrusScopeV carries that scope while a
             // comprehension is being emitted (see makeListComp) and is null elsewhere.
             var target = (walrusScopeV != null) ? walrusScopeV : curScopeV
-            callExt(b, "js_pyset_var", [target, emitStr(b, name), r.v])
+            pySetVar(b, target, name, r.v)
             return {b: b, v: r.v}
         }
     }
@@ -2255,7 +2548,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function emitBind(b, name, v) {
         if (name == "_") { return b }
-        callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), v])
+        pySetVar(b, curScopeV, name, v)
         return b
     }
     // Branch to failB unless okV is truthy; the returned block is the "matched so
@@ -2519,7 +2812,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var i = 0; i < refs.length; i++) {
                 var ref = refs[i]
                 if (ref.path.length == 0) {
-                    callExt(b, "js_pydel_var", [curScopeV, emitStr(b, ref.name)])
+                    pyDelVar(b, curScopeV, emitStr(b, ref.name))
                     continue
                 }
                 var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
@@ -2624,7 +2917,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return function(b) {
             if (ann != null && ref.path.length == 0) {
-                callExt(b, "js_pyannot", [curScopeV, emitStr(b, ref.name), emitStr(b, ann)])
+                b = pyAnnot(b, curScopeV, ref.name, ann)
             }
             if (valT == null) { return b }
             var r = valT(b)
@@ -2646,7 +2939,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var r = valT(b)
             b = r.b
             callExt(b, "js_set", [alias, emitStr(b, "__value__"), r.v])
-            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), alias])
+            pySetVar(b, curScopeV, name, alias)
             return b
         }
     }
@@ -2719,6 +3012,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     open = false
                 }
                 if (cl.hname != undefined) {
+                    pyDeclInner(cl.hname)
                     callExt(bodyB, "js_scope_decl", [curScopeV, emitStr(bodyB, cl.hname), caught])
                 }
                 handlerDepth++
@@ -2758,6 +3052,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             cur.NewCondBr(truthy(cur, callExt(cur, "js_seq", [subV, hUndef])), missB, hitB)
             callExt(hitB, "js_scope_decl", [curScopeV, emitStr(hitB, "__ehit"), hTrue])
             if (cl.hname != undefined) {
+                pyDeclInner(cl.hname)
                 callExt(hitB, "js_scope_decl", [curScopeV, emitStr(hitB, cl.hname), subV])
             }
             handlerDepth++
@@ -2873,6 +3168,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var eName = "$we" + hidCount
             var r = mgr.ctxitem(b)
             b = r.b
+            pyDeclInner(wName)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, wName), r.v])
             var entV = callExt(b, "js_pyenter", [r.v])
             // writeTarget, not emitRefWrite: `as` takes a full target item, so
@@ -2984,12 +3280,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         loopStack = []
         if (isCtl) { ctlEnter(idx) }
         var fb = f.NewBlock("entry")
-        curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
         // A def or lambda body is a Python BINDING BOUNDARY: an assignment in it
         // makes a local, even when an enclosing function binds the same name. A
         // try/except/with body closure (isCtl) is NOT one - its assignments belong
-        // to the function around it - so only the real functions are marked.
-        if (!isCtl) { callExt(fb, "js_pyfnscope", [curScopeV]) }
+        // to the function around it - so only the real functions open one.
+        var savedSink = pyBindSink
+        var savedAnnot = pyAnnotHere
+        var savedInner = pyInnerNames
+        pyBindSink = null
+        pyAnnotHere = false
+        if (!isCtl) { pyInnerNames = {} }
+        if (isCtl) {
+            curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
+        } else {
+            curScopeV = pyOpenBoundary(fb, f.Params[0], false)
+        }
         for (var i = 0; i < params.length; i++) {
             var argV = callExt(fb, "js_arg", [f.Params[1], handle(i)])
             if (i < dflts.length && dflts[i] != null) {
@@ -3019,6 +3324,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         endB.NewRet(hUndef)
         genClosure = sawYield
         sawYield = savedYield
+        pyBindSink = savedSink
+        pyAnnotHere = savedAnnot
+        pyInnerNames = savedInner
         if (isCtl) { ctlLeave() }
         curF = savedF
         curScopeV = savedScope
@@ -3059,7 +3367,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (isGen) { clo = callExt(b, "js_genfn", [clo]) }
             clo = emitSig(b, clo, plist)
             clo = callExt(b, "js_pyfnname", [clo, emitStr(b, name)])
-            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), clo])
+            pySetVar(b, curScopeV, name, clo)
             return b
         }}
     }
@@ -3084,15 +3392,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             var cls = callExt(b, "js_pyclass_new", [emitStr(b, name), basesV])
             var saved = curScopeV
-            curScopeV = callExt(b, "js_scope_new", [saved])
             // A class body is a namespace of its own: what it binds becomes a
             // class member and never leaks into the scope around it.
-            callExt(b, "js_pyfnscope", [curScopeV])
+            curScopeV = pyOpenBoundary(b, saved, false)
             var bodyScope = curScopeV
+            var savedSink2 = pyBindSink
+            var savedAnnot2 = pyAnnotHere
+            var savedInner2 = pyInnerNames
+            pyBindSink = []
+            pyAnnotHere = false
+            pyInnerNames = {}
             b = bodyT(b)
-            callExt(b, "js_pyclass_fill", [cls, bodyScope])
+            b = pyClassFill(b, cls, bodyScope, pyBindSink)
+            pyBindSink = savedSink2
+            pyAnnotHere = savedAnnot2
+            pyInnerNames = savedInner2
             curScopeV = saved
-            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), cls])
+            pySetVar(b, curScopeV, name, cls)
             return b
         }}
     }
@@ -3113,8 +3429,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var cur = callExt(b, "js_scope_get", [curScopeV, emitStr(b, target.dname)])
                 var av = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [av, cur])
-                callExt(b, "js_pyset_var", [curScopeV, emitStr(b, target.dname),
-                                            callExt(b, "js_pycall", [rd.v, av, hUndef])])
+                pySetVar(b, curScopeV, target.dname,
+                                            callExt(b, "js_pycall", [rd.v, av, hUndef]))
             }
             return b
         }
@@ -3126,7 +3442,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeGlobal(names, pos) {
         return function(b) {
             for (var i = 0; i < names.length; i++) {
-                callExt(b, "js_pyglobal", [curScopeV, emitStr(b, names[i])])
+                pyGlobal(b, curScopeV, emitStr(b, names[i]))
             }
             return b
         }
@@ -3134,7 +3450,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeNonlocal(names, pos) {
         return function(b) {
             for (var i = 0; i < names.length; i++) {
-                callExt(b, "js_pynonlocal", [curScopeV, emitStr(b, names[i])])
+                pyNonlocal(b, curScopeV, emitStr(b, names[i]))
             }
             return b
         }
@@ -3190,10 +3506,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         curF = f
         var b = f.NewBlock("entry")
-        curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         // The module top level is a binding boundary too, so a global name never
-        // reaches past it into the host runtime's own scope.
-        callExt(b, "js_pyfnscope", [curScopeV])
+        // reaches past it into the host runtime's own scope. It is also where the
+        // "pymod*" and "pydel*" marks live (pyOpenBoundary).
+        curScopeV = pyOpenBoundary(b, f.Params[0], true)
         // print(...): hand the argument array to the Python renderer.
         funcCount++
         var prIdx = funcCount
@@ -3310,6 +3626,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ----- Core library config (see lib/compile-core.js) -----
     core.truthyExt = "js_pytruthy" // Python truthiness: empty containers are false.
+    // A variable READ goes through py_getvar, not straight through js_scope_get:
+    // `del x` leaves a sentinel in the slot and a later read has to raise
+    // UnboundLocalError, which abnf/jsrt.go does inside scopeGet and the C floor's
+    // scope_get knows nothing about. core.scopeGetExt names an EXTERN and py_getvar
+    // is an emitted IR function, so makeVarRef (lib/compile-core.js) is overridden
+    // here instead - the same move swift and dart made for js_kget.
+    makeVarRef = function(name) {
+        return function(b) {
+            return {b: b, v: pyGetVar(b, curScopeV, emitStr(b, name))}
+        }
+    }
     // Python stdlib modules the runtime provides (prefix match, so os.path
     // resolves against "os").
     core.stdlibImports = ["sys", "os", "math", "collections", "itertools", "functools", "re", "json", "typing", "random", "string", "time", "dataclasses", "abc"]
@@ -3348,6 +3675,82 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     c.compile(c.asg)
+
+    // ----- the native build (docs/runtime-next-plan.md part 3) -----
+    // jsdispatch(idx, env, args) is the function table a LINKED binary needs: js_closure
+    // stores a raw function index, and under llvm.Run the Go runtime turns that index
+    // back into a callee by looking "jsf_<idx>" up in the module. A binary has no such
+    // reflection, so the module carries the mapping itself. The MISS arm calls
+    // jsdispatch_ext, the same table emitted by the layer-2 runtime library
+    // (lib/python-rt.ll, built by metajs-to-llvm-ir.abnf -rt-lib): its own function
+    // indices are offset by a million, so the two chains cannot overlap and one js_call
+    // reaches either module. Emitted ONLY for -exe, so every other run keeps the module
+    // it had. This is lua-to-llvm-ir.abnf's emitDispatch, unchanged - the mechanism is
+    // the reusable part of phase 4 and nothing here is Python's.
+    function emitDispatch() {
+        var idxs = []
+        var fns = []
+        var i = 0
+        while (i < m.Funcs.length) {
+            var f = m.Funcs[i]
+            var nm = f.Name()
+            if (nm.length > 4 && nm.substring(0, 4) == "jsf_") {
+                idxs.push(parseInt(nm.substring(4, nm.length)))
+                fns.push(f)
+            }
+            i = i + 1
+        }
+        var ext = m.NewFunc("jsdispatch_ext", i64,
+            [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var d = m.NewFunc("jsdispatch", i64,
+            [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var b = d.NewBlock("entry")
+        var extB = d.NewBlock("ext")
+        var ownB = d.NewBlock("own")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredSGE, d.Params[0], llvm.constant.NewInt(i64, 1000000)), extB, ownB)
+        extB.NewRet(extB.NewCall(ext, [d.Params[0], d.Params[1], d.Params[2]]))
+        b = ownB
+        i = 0
+        while (i < fns.length) {
+            var hit = d.NewBlock("hit" + idxs[i])
+            var nxt = d.NewBlock("miss" + idxs[i])
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, d.Params[0], llvm.constant.NewInt(i64, idxs[i])), hit, nxt)
+            hit.NewRet(hit.NewCall(fns[i], [d.Params[1], d.Params[2]]))
+            b = nxt
+            i = i + 1
+        }
+        b.NewRet(b.NewCall(ext, [d.Params[0], d.Params[1], d.Params[2]]))
+    }
+
+    // The two runtime inputs live next to THIS grammar, so the build does not depend on
+    // the working directory: lib/runtime.ll is the C floor and lib/python-rt.ll is
+    // Python's own layer 2. An explicit -rt REPLACES both.
+    function libPath(name) {
+        var mn = moduleName()
+        var cut = -1
+        var i = 0
+        while (i < mn.length) {
+            var ch = mn.charAt(i)
+            if (ch == "/" || ch == "\\") { cut = i }
+            i = i + 1
+        }
+        return mn.substring(0, cut + 1) + "lib/" + name
+    }
+
+    // Python's entry point is already called jsmain (buildMain above), which is the
+    // name the C floor's own main() calls, so no alias function is needed here.
+    if (c.exePath != undefined && c.exePath != "") {
+        emitDispatch()
+        var rts = c.runtime
+        if (rts == undefined || rts.length == 0) { rts = [libPath("runtime.ll"), libPath("python-rt.ll")] }
+        var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
+        if (buildErr != "") {
+            println(buildErr)
+            exit(1)
+        }
+        println("python compiler: wrote executable " + c.exePath)
+        exit(0)
+    }
 
     println(m)
 

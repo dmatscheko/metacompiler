@@ -1,0 +1,4979 @@
+// python-rt.metajs -- PYTHON'S OWN SEMANTICS, in MetaJS. Layer 2 of
+// docs/runtime-next-plan.md part 3, for the NINTH and last language after the Lua
+// pilot, PHP, Swift, Java, C#, Dart, Go and Ruby.
+//
+// languages/python-to-llvm-ir.abnf emits handle IR that calls 86 js_* externs over
+// the full-syntax ratchet. 32 of them are generic primitives languages/lib/runtime.c
+// already provides (the C floor, layer 1). The other 54 are here.
+//
+// Compile with:
+//     mec languages/metajs-to-llvm-ir.abnf languages/lib/python-rt.metajs -q -rt-lib
+// which is what tests/gen-python-rt-ll.sh does; the result is the checked-in
+// languages/lib/python-rt.ll that python-to-llvm-ir.abnf links next to runtime.ll.
+// -rt-lib exports every TOP-LEVEL `function js_*` below under its own C symbol, so
+// nothing else in this file is visible to the linker - the helpers are deliberately
+// named py*, pyA*..pyF*.
+//
+// THE AUTHORITATIVE SPECIFICATION IS abnf/jsrt.go (Python has NO dedicated Go twin:
+// its semantics live in the shared file, in the js_py* extern table and the py*
+// helper functions - pyString / pyRepr / pyTypeName / pyEqual / pyMRO / pyLookup /
+// pyGetAttr / pySetAttr / pyMethodCall / pyBindCall / pyArith / pyFormat / memberCall)
+// plus abnf/jsrtregexpy.go for the `re` module. This file matches them function for
+// function; where it CANNOT, the site says so in full.
+//
+// ----- the value model -------------------------------------------------------
+//
+//     null / undefined            ==  None
+//     true / false                ==  True / False
+//     a PLAIN NUMBER              ==  int when it is integral and finite, else float.
+//                                     There is no box: pyTypeName decides by
+//                                     Math.trunc, exactly like abnf/jsrt.go:9332.
+//     {__pybig, neg, limbs}       ==  an arbitrary precision int (js_bigint). Go uses
+//                                     math/big; the base-10000 limbs are chunk A's.
+//     a string                    ==  str
+//     an array                    ==  list AND tuple (Python's tuple has no separate
+//                                     representation in either half)
+//     {__dict, keys, vals}        ==  dict, INSERTION ordered, parallel arrays
+//     {__set, elems}              ==  set, duplicate free by pyEqual
+//     {__cplx, real, imag}        ==  complex
+//     {__mro, __name, __super}    ==  a class object; __mro is the C3 linearization
+//     {__class: <class>}          ==  an instance
+//     a function                  ==  a function (typeof "function"; tag 16, a
+//                                     generator FUNCTION, answers that too since the
+//                                     floor's type_of learned t == 16)
+//     a tag-15 cell               ==  a generator. There is NO tag test in layer 2,
+//                                     so pyIsGen below is STRUCTURAL - the floor
+//                                     answers exactly one member on a generator,
+//                                     "next" (runtime.c:2868), and a cursor cannot be
+//                                     stored on one, which is php's finding.
+//
+// ----- what Python needed from the floor, and what it did NOT ----------------
+//
+//  1. NO sized-integer tag and NO boxed double. Python's int and float are the same
+//     plain double, discriminated by Math.trunc, so neither tag 13 nor tag 14 is
+//     reached from this file. The si_norm question ("is the language's unboxed
+//     representation the one si_norm produces") does not arise. Python's ARBITRARY
+//     PRECISION int does, and the answer is a base-10000 bignum in MetaJS rather
+//     than a floor tag: Go reaches math/big through *jsBigInt and the floor has no
+//     equivalent, so chunk A's pyABig* is the whole of it.
+//  2. `__raw` IS needed, and Python is only the third language that needs it (lua
+//     and php are the others). `grep -n truthyExt languages/python-to-llvm-ir.abnf`
+//     answers `core.truthyExt = "js_pytruthy"`, so compile-core's truthy() emits
+//     `icmp ne <call>, 0` on THIS FILE's function and consumes the result as a RAW
+//     INTEGER. js_pytruthy is therefore written as js_pytruthy__raw.
+//  3. A coroutine primitive IS used: `grep -c 'js_genfn\|js_yield'
+//     languages/python-to-llvm-ir.abnf` is 6. Python is the first language on the
+//     floor's generators that needed layer-2 lines for them - the emitter drives
+//     js_genfn/js_yield itself (csharp's zero-line finding), but the INSPECTION
+//     surface (next / send / close / drain / len) is Python's own and is here.
+//  4. NO jsChar. Python has no character type and the emitter emits js_char /
+//     js_char_code / js_kindex zero times.
+//
+// ----- the scope chain: lowered in the EMITTER, not here ---------------------
+//
+// SIX externs took a scope handle - js_pyfnscope, js_pyglobal, js_pynonlocal,
+// js_pyset_var, js_pydel_var and js_pyannot - plus js_pyclass_fill, which enumerated
+// one. A scope is the C floor's PRIVATE storage, so none of them could be written
+// here, and runtime.c says so itself at js_pyset_var ("A Python layer 2 will have to
+// add them"). They are lowered in python-to-llvm-ir.abnf instead, over
+// js_scope_new / js_scope_decl / js_scope_get / js_scope_set / js_scope_typeof,
+// which BOTH engines have. That is the seventh confirmation of the
+// private-representation rule and by far the largest: six externs left the module,
+// where php lowered 2, swift 2, java 1, csharp 0, dart 2, go 1 and ruby 1.
+//
+// ----- the regular-expression engine is IMPORTED, not copied ------------------
+//
+// languages/lib/regex.js is the shared backtracking engine that every INTERPRETER
+// grammar includes into its tag script, and abnf/jsrtregex.go is its line-by-line Go
+// port. It is written in the same MetaJS this file is, so layer 2 needs no third
+// copy - ruby found this and python is the language it was found FOR.
+//
+// ----- MetaJS rules that shape the code below --------------------------------
+//
+// docs/abnf-dialect-gotchas.md: a local (or a reassigned parameter) keeps the TYPE
+// CLASS it is first assigned, so a variable that holds a number in one branch and an
+// object in another is declared `var x = anytype`; there is no ASI, so every
+// `return` carries its value on the same line and a value-less early return is
+// BRACED; no for..in, no splice, no split/join/lastIndexOf, indexOf ignores its
+// from-index, array.length is not assignable, and there are no exponent literals.
+// There is no hasOwn in a -rt-lib module, so Go's `v, ok := o.props[n]` is spelled
+// `o[n] !== undefined` throughout; at RUNTIME an object is a floor cell with no
+// prototype, so the Object.prototype hazard of the compiler's own goja objects does
+// not arise here.
+
+import "./regex.js"
+
+// ===================================================== the value model ======
+
+function pyIsObj(v) {
+    if (v === null) { return false }
+    if (v === undefined) { return false }
+    if (typeof v != "object") { return false }
+    return !Array.isArray(v)
+}
+
+function pyIsArr(v) { return Array.isArray(v) }
+function pyIsStr(v) { return typeof v == "string" }
+function pyIsNum(v) { return typeof v == "number" }
+function pyIsBool(v) { return typeof v == "boolean" }
+function pyIsFn(v) { return typeof v == "function" }
+function pyIsCallable(v) { return typeof v == "function" }
+
+function pyIsNone(v) {
+    if (v === null) { return true }
+    return v === undefined
+}
+
+function pyTag(v, name) {
+    if (!pyIsObj(v)) { return false }
+    return v[name] === true
+}
+
+function pyIsDict(v) { return pyTag(v, "__dict") }
+function pyIsSet(v) { return pyTag(v, "__set") }
+function pyIsCplx(v) { return pyTag(v, "__cplx") }
+function pyIsBig(v) { return pyTag(v, "__pybig") }
+
+// A class object carries its C3 linearization; an instance carries its class.
+function pyIsClass(v) {
+    if (!pyIsObj(v)) { return false }
+    return v["__mro"] !== undefined
+}
+
+function pyIsInst(v) {
+    if (!pyIsObj(v)) { return false }
+    if (v["__mro"] !== undefined) { return false }
+    return pyIsObj(v["__class"])
+}
+
+// A GENERATOR is a floor cell (tag 15). Layer 2 has no tag test, so the question is
+// answered structurally: the floor answers exactly ONE member on a generator, "next"
+// (runtime.c:2868), and none of the objects this value model builds carries a
+// callable "next" of its own.
+function pyIsGen(v) {
+    if (v === null) { return false }
+    if (v === undefined) { return false }
+    if (typeof v != "object") { return false }
+    if (Array.isArray(v)) { return false }
+    if (v["__dict"] === true) { return false }
+    if (v["__set"] === true) { return false }
+    if (v["__cplx"] === true) { return false }
+    if (v["__pybig"] === true) { return false }
+    if (v["__mro"] !== undefined) { return false }
+    if (v["__class"] !== undefined) { return false }
+    return typeof v["next"] == "function"
+}
+
+function pyIsIntVal(v) {
+    if (pyIsBig(v)) { return true }
+    if (typeof v != "number") { return false }
+    if (v !== v) { return false }
+    if (v - v !== 0) { return false }
+    return v == Math.trunc(v)
+}
+
+function pyFail(msg) { fail(msg) }
+
+// ===================================================== dict =================
+//
+// abnf/jsrt.go's dictParts / dictFind / dictAppend. A dict KEY is compared with
+// STRICT equality (Go's strictEq through dictFind), not with Python ==; that is the
+// Go twin's choice and it is reproduced rather than repaired.
+
+function pyNewDict() { return {__dict: true, keys: [], vals: []} }
+
+function pyDictFind(keys, k) {
+    for (var i = 0; i < keys.length; i++) {
+        if (keys[i] === k) { return i }
+    }
+    return 0 - 1
+}
+
+function pyDictHas(d, k) {
+    if (!pyIsDict(d)) { return false }
+    return pyDictFind(d["keys"], k) >= 0
+}
+
+function pyDictGet(d, k) {
+    if (!pyIsDict(d)) { return undefined }
+    var i = pyDictFind(d["keys"], k)
+    if (i < 0) { return undefined }
+    return d["vals"][i]
+}
+
+function pyDictSet(d, k, v) {
+    var keys = d["keys"]
+    var i = pyDictFind(keys, k)
+    if (i >= 0) {
+        d["vals"][i] = v
+        return d
+    }
+    keys.push(k)
+    d["vals"].push(v)
+    return d
+}
+
+// ===================================================== set ==================
+//
+// abnf/jsrt.go's newPySet / pySetElems / pySetHas / pySetAdd. MEMBERSHIP is Python
+// ==, so 1 and 1.0 are the same member - which is not the strict equality the dict
+// keys above use, and that asymmetry is the Go twin's.
+
+function pyNewSet(elems) { return {__set: true, elems: elems} }
+
+function pySetElemsOf(v) {
+    if (!pyTag(v, "__set")) { return null }
+    var e = v["elems"]
+    if (!Array.isArray(e)) { return null }
+    return e
+}
+
+function pySetHas(els, v) {
+    for (var i = 0; i < els.length; i++) {
+        if (pyEqual(els[i], v)) { return true }
+    }
+    return false
+}
+
+function pySetAdd(els, v) {
+    if (!pySetHas(els, v)) { els.push(v) }
+    return els
+}
+
+// ===================================================== complex ==============
+//
+// abnf/jsrt.go's newPyComplex / pyComplexParts: a plain number reads as (n, 0), so
+// mixed arithmetic needs no second code path.
+
+function pyNewCplx(re, im) { return {__cplx: true, real: re, imag: im} }
+
+function pyCplxRe(v) {
+    if (pyIsCplx(v)) { return pyNum(v["real"]) }
+    return pyNum(v)
+}
+
+function pyCplxIm(v) {
+    if (pyIsCplx(v)) { return pyNum(v["imag"]) }
+    return 0
+}
+
+// ===================================================== conversions ==========
+
+// rt.toNumber. `v * 1` IS ToNumber: the floor's js_mul coerces both operands the
+// same way abnf/jsrt.go's toNumber does, so undefined answers NaN, null 0, a bool
+// 1/0, a string its parse and EVERY object (a __pybig and a __cplx included) NaN -
+// which is what Go's `default:` arm gives, and what `**`, `//` and `%` on a big or a
+// complex depend on.
+function pyNum(v) { return v * 1 }
+
+// rt.toString. The one arm `"" + v` does not give is the bignum, whose Go twin
+// answers big.Int.String(); pyABigStr (chunk A) is that, and top-level function
+// declarations hoist, so it is reachable from here.
+function pyToStr(v) {
+    if (pyIsBig(v)) { return pyABigStr(v) }
+    return "" + v
+}
+
+// pyStrLen counts CODE POINTS (abnf/jsrt.go:9773), where the string indexing of
+// js_pyget counts UTF-16 code units. That inconsistency is the Go twin's and is
+// reproduced rather than repaired.
+function pyStrLen(s) {
+    var n = 0
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        if (c >= 55296 && c <= 56319 && i + 1 < s.length) { i = i + 1 }
+        i = i + 1
+        n = n + 1
+    }
+    return n
+}
+
+function pyStrAt(s, i) {
+    var n = 0
+    var k = 0
+    while (k < s.length) {
+        var c = s.charCodeAt(k)
+        var w = 1
+        if (c >= 55296 && c <= 56319 && k + 1 < s.length) { w = 2 }
+        if (n == i) { return s.substring(k, k + w) }
+        k = k + w
+        n = n + 1
+    }
+    return ""
+}
+
+// ===================================================== rendering ============
+//
+// abnf/jsrt.go's pyString (2467) and pyRepr (2458), one for one.
+
+function pyStr(v) {
+    if (v === null) { return "None" }
+    if (v === undefined) { return "None" }
+    if (typeof v == "boolean") {
+        if (v) { return "True" }
+        return "False"
+    }
+    if (Array.isArray(v)) {
+        var out = "["
+        for (var i = 0; i < v.length; i++) {
+            if (i > 0) { out = out + ", " }
+            out = out + pyRepr(v[i])
+        }
+        return out + "]"
+    }
+    if (pyIsObj(v)) {
+        var els = pySetElemsOf(v)
+        if (els != null) {
+            var so = "{"
+            for (var j = 0; j < els.length; j++) {
+                if (j > 0) { so = so + ", " }
+                so = so + pyRepr(els[j])
+            }
+            return so + "}"
+        }
+        if (pyIsDict(v)) {
+            var ks = v["keys"]
+            var vs = v["vals"]
+            var d = "{"
+            for (var k = 0; k < ks.length; k++) {
+                if (k > 0) { d = d + ", " }
+                d = d + pyRepr(ks[k]) + ": " + pyRepr(vs[k])
+            }
+            return d + "}"
+        }
+    }
+    return pyToStr(v)
+}
+
+// pyString is the Go NAME of the function above; some ported blocks call it that.
+function pyString(v) { return pyStr(v) }
+
+function pyRepr(v) {
+    if (typeof v == "string") { return "'" + v + "'" }
+    return pyStr(v)
+}
+
+// abnf/jsrt.go's pyTypeName (9324). A __pybig is an int, which is why the arm is
+// ahead of the object arms - Go reaches it earlier because *jsBigInt is not a
+// *jsObject and here it IS one.
+function pyTypeName(v) {
+    if (v === null) { return "NoneType" }
+    if (v === undefined) { return "NoneType" }
+    if (typeof v == "boolean") { return "bool" }
+    if (typeof v == "string") { return "str" }
+    if (pyIsBig(v)) { return "int" }
+    if (typeof v == "number") {
+        if (v !== v) { return "float" }
+        if (v - v !== 0) { return "float" }
+        if (v == Math.trunc(v)) { return "int" }
+        return "float"
+    }
+    if (Array.isArray(v)) { return "list" }
+    if (typeof v == "function") { return "function" }
+    if (pyIsObj(v)) {
+        if (pySetElemsOf(v) != null) { return "set" }
+        if (pyIsDict(v)) { return "dict" }
+        return "object"
+    }
+    return "object"
+}
+
+// ===================================================== equality and order ===
+//
+// abnf/jsrt.go's pyEqual (8580). The bigint arms are chunk A's pyABigCmp /
+// pyABigEqFloat; they are called from here so every caller of pyEqual gets them.
+
+function pyEqual(x, y) {
+    var xs = pySetElemsOf(x)
+    if (xs != null) {
+        var ys = pySetElemsOf(y)
+        if (ys == null) { return false }
+        if (xs.length != ys.length) { return false }
+        for (var i = 0; i < xs.length; i++) {
+            if (!pySetHas(ys, xs[i])) { return false }
+        }
+        return true
+    }
+    if (pySetElemsOf(y) != null) { return false }
+    if (Array.isArray(x)) {
+        if (!Array.isArray(y)) { return false }
+        if (x.length != y.length) { return false }
+        for (var j = 0; j < x.length; j++) {
+            if (!pyEqual(x[j], y[j])) { return false }
+        }
+        return true
+    }
+    if (pyIsDict(x)) {
+        if (!pyIsDict(y)) { return false }
+        var xk = x["keys"]
+        var yk = y["keys"]
+        if (xk.length != yk.length) { return false }
+        for (var k = 0; k < xk.length; k++) {
+            var p = pyDictFind(yk, xk[k])
+            if (p < 0) { return false }
+            if (!pyEqual(x["vals"][k], y["vals"][p])) { return false }
+        }
+        return true
+    }
+    if (pyIsBig(x)) {
+        if (pyIsBig(y)) { return pyABigCmp(x, y) == 0 }
+        if (typeof y == "number") { return pyABigEqFloat(x, y) }
+    }
+    if (pyIsBig(y)) {
+        if (typeof x == "number") { return pyABigEqFloat(y, x) }
+    }
+    if (pyIsCplx(x)) {
+        if (pyIsCplx(y)) {
+            if (pyCplxRe(x) != pyCplxRe(y)) { return false }
+            return pyCplxIm(x) == pyCplxIm(y)
+        }
+        if (pyCplxIm(x) != 0) { return false }
+        return pyCplxRe(x) == pyNum(y)
+    }
+    if (pyIsCplx(y)) {
+        if (pyCplxIm(y) != 0) { return false }
+        return pyCplxRe(y) == pyNum(x)
+    }
+    return x === y
+}
+
+// abnf/jsrt.go's jsCompare: -1 / 0 / 1, and 2 for a NaN operand, which is what makes
+// <, >, <= and >= all false at once. The bigint pair arm lives in chunk A's
+// pyACompare, which wraps this one.
+function pyCompare(l, r) {
+    if (typeof l == "string") {
+        if (typeof r == "string") {
+            if (l < r) { return 0 - 1 }
+            if (l > r) { return 1 }
+            return 0
+        }
+    }
+    var a = pyNum(l)
+    var b = pyNum(r)
+    if (a !== a) { return 2 }
+    if (b !== b) { return 2 }
+    if (a < b) { return 0 - 1 }
+    if (a > b) { return 1 }
+    return 0
+}
+
+// ===================================================== classes =============
+//
+// abnf/jsrt.go's pyClassObj / pyInstance / pyMRO / pyLookup / pyIsDescriptor /
+// pyGetAttr / pyInstanceDict / pySetAttr / pySlotAllows / pyAttrError.
+
+function pyClassOf(v) {
+    if (pyIsClass(v)) { return v }
+    return null
+}
+
+function pyInstClassOf(v) {
+    if (!pyIsObj(v)) { return null }
+    if (v["__mro"] !== undefined) { return null }
+    var c = v["__class"]
+    if (!pyIsObj(c)) { return null }
+    return c
+}
+
+// The resolution order of a class, itself first. A class object that predates the
+// MRO (an older {__name, __super} exception descriptor) answers with its __super
+// chain, so the two shapes stay interchangeable.
+function pyMRO(c) {
+    var out = []
+    var m = c["__mro"]
+    if (Array.isArray(m)) {
+        for (var i = 0; i < m.length; i++) {
+            if (pyIsObj(m[i])) { out.push(m[i]) }
+        }
+        return out
+    }
+    var k = c
+    while (pyIsObj(k)) {
+        out.push(k)
+        k = k["__super"]
+    }
+    return out
+}
+
+function pyLookupHas(c, name) {
+    if (name == "") { return false }
+    var mro = pyMRO(c)
+    for (var i = 0; i < mro.length; i++) {
+        if (mro[i][name] !== undefined) { return true }
+    }
+    return false
+}
+
+function pyLookupVal(c, name) {
+    if (name == "") { return undefined }
+    var mro = pyMRO(c)
+    for (var i = 0; i < mro.length; i++) {
+        if (mro[i][name] !== undefined) { return mro[i][name] }
+    }
+    return undefined
+}
+
+// pyIsDescriptor: an instance whose class defines the given hook.
+function pyDescriptor(v, hook) {
+    var cls = pyInstClassOf(v)
+    if (cls == null) { return undefined }
+    var m = pyLookupVal(cls, hook)
+    if (typeof m != "function") { return undefined }
+    return m
+}
+
+// An instance's own attributes as a Python dict (pyInstanceDict). The __-prefixed
+// slots are internal and are skipped, which is what Go does with inst.keys.
+function pyInstanceDict(inst) {
+    var d = pyNewDict()
+    var ks = keysOf(inst)
+    for (var i = 0; i < ks.length; i++) {
+        var k = ks[i]
+        if (k.length >= 2 && k.charAt(0) == "_" && k.charAt(1) == "_") { continue }
+        d["keys"].push(k)
+        d["vals"].push(inst[k])
+    }
+    return d
+}
+
+function pyGetAttr(obj, name) {
+    if (pyIsClass(obj)) {
+        if (name == "__name__") { return obj["__name"] }
+        if (name == "__mro__") { return obj["__mro"] }
+        if (pyLookupHas(obj, name)) { return pyLookupVal(obj, name) }
+        fail("type object '" + pyToStr(obj["__name"]) + "' has no attribute '" + name + "'")
+    }
+    var cls = pyInstClassOf(obj)
+    if (cls != null) {
+        if (name == "__class__") { return cls }
+        if (name == "__dict__") { return pyInstanceDict(obj) }
+        if (obj[name] !== undefined) { return obj[name] }
+        if (pyLookupHas(cls, name)) {
+            var v = pyLookupVal(cls, name)
+            var get = pyDescriptor(v, "__get__")
+            if (get !== undefined) { return get.apply(undefined, [v, obj, cls]) }
+            return v
+        }
+        fail("'" + pyToStr(cls["__name"]) + "' object has no attribute '" + name + "'")
+    }
+    if (name == "__name__") {
+        // A synthetic class object for a BUILTIN type (what type(3) hands out)
+        // carries only its name, and a function carries none of its own - the name
+        // its def bound it under was recorded by js_pyfnname (chunk B).
+        if (pyIsObj(obj)) {
+            if (obj["__name"] !== undefined) { return obj["__name"] }
+        }
+        var fn = pyBFuncName(obj)
+        if (fn !== undefined) { return fn }
+    }
+    return pyGetMember(obj, name)
+}
+
+// rt.getMember for the shapes this value model builds. A dict answers its own
+// members, an array its length, a string its length, and anything else the plain
+// property.
+function pyGetMember(obj, name) {
+    if (typeof obj == "string") {
+        if (name == "length") { return obj.length }
+        return undefined
+    }
+    if (Array.isArray(obj)) {
+        if (name == "length") { return obj.length }
+        return undefined
+    }
+    if (obj === null) { fail("cannot read '" + name + "' of None") }
+    if (obj === undefined) { fail("cannot read '" + name + "' of None") }
+    return obj[name]
+}
+
+function pySlotAllows(slots, name) {
+    if (Array.isArray(slots)) {
+        for (var i = 0; i < slots.length; i++) {
+            if (pyToStr(slots[i]) == name) { return true }
+        }
+        return false
+    }
+    if (typeof slots == "string") { return slots == name }
+    return true
+}
+
+function pySetAttr(obj, name, v) {
+    var cls = pyInstClassOf(obj)
+    if (cls != null) {
+        if (pyLookupHas(cls, name)) {
+            var cur = pyLookupVal(cls, name)
+            var set = pyDescriptor(cur, "__set__")
+            if (set !== undefined) {
+                set.apply(undefined, [cur, obj, v])
+                return v
+            }
+        }
+        if (pyLookupHas(cls, "__slots__")) {
+            if (!pySlotAllows(pyLookupVal(cls, "__slots__"), name)) {
+                throw pyExcInstance("AttributeError",
+                                    "'" + pyToStr(cls["__name"]) + "' object has no attribute '" + name + "'")
+            }
+        }
+        obj[name] = v
+        return v
+    }
+    if (pyIsClass(obj)) {
+        obj[name] = v
+        return v
+    }
+    if (pyIsObj(obj)) {
+        obj[name] = v
+        return v
+    }
+    fail("cannot set '" + name + "' on a " + pyTypeName(obj))
+    return v
+}
+
+// ===================================================== builtin classes ======
+//
+// pyBuiltinClass hands out ONE stable class object per builtin type name, so
+// type(x) is type(y) holds for two values of the same builtin type. The table key is
+// "$"-prefixed, which is the intern-key rule of docs/abnf-dialect-gotchas.md.
+
+var pyTypeTable = {}
+
+function pyBuiltinClass(name) {
+    var k = "$" + name
+    var got = pyTypeTable[k]
+    if (got !== undefined) { return got }
+    var c = {__name: name}
+    pyTypeTable[k] = c
+    return c
+}
+
+// abnf/jsrt.go's pyExcInstance: the class is a stable per-name object deriving from
+// one called Exception, so the name walk of pyIsInstance answers `except Exception`
+// (and `except <ThatName>`) for a StopIteration / UnboundLocalError / AttributeError
+// the RUNTIME raised, exactly like for one the program raised.
+function pyExcInstance(name, msg) {
+    var cls = pyBuiltinClass(name)
+    if (name != "Exception") {
+        if (cls["__super"] === undefined) { cls["__super"] = pyBuiltinClass("Exception") }
+    }
+    return {__class: cls, args: [msg]}
+}
+
+function pyRaiseExc(name, msg) { throw pyExcInstance(name, msg) }
+
+// ===================================================== calling ==============
+
+function pyCall(f, args) { return f.apply(undefined, args) }
+
+function pyCallSelf(f, self, args) {
+    var a = [self]
+    for (var i = 0; i < args.length; i++) { a.push(args[i]) }
+    return f.apply(undefined, a)
+}
+
+// ===================================================== sequences ============
+//
+// abnf/jsrt.go's pySeqElems (8759): the element list of anything a slice assignment
+// may take on its right hand side. A GENERATOR is DRAINED, which is the one arm that
+// has to be written structurally here (see pyIsGen).
+
+function pyDrainGen(g) {
+    var out = []
+    var nx = g["next"]
+    while (true) {
+        var st = nx.apply(g, [])
+        if (st === undefined) { return out }
+        if (st["done"] === true) { return out }
+        out.push(st["value"])
+    }
+    return out
+}
+
+function pySeqElems(v) {
+    var els = pySetElemsOf(v)
+    if (els != null) {
+        var c = []
+        for (var i = 0; i < els.length; i++) { c.push(els[i]) }
+        return c
+    }
+    if (Array.isArray(v)) {
+        var a = []
+        for (var j = 0; j < v.length; j++) { a.push(v[j]) }
+        return a
+    }
+    if (pyIsGen(v)) { return pyDrainGen(v) }
+    if (typeof v == "string") {
+        var s = []
+        var n = pyStrLen(v)
+        for (var k = 0; k < n; k++) { s.push(pyStrAt(v, k)) }
+        return s
+    }
+    fail("cannot assign a " + pyTypeName(v) + " to a slice")
+    return []
+}
+
+// ===================================================== slices ===============
+//
+// abnf/jsrt.go's pySliceRange (2432), pyClampIndex (8729) and pySliceIndices (8699).
+
+function pySliceClamp(v, dflt, n) {
+    if (v === undefined) { return dflt }
+    if (v === null) { return dflt }
+    var i = Math.trunc(pyNum(v))
+    if (i < 0) { i = i + n }
+    if (i < 0) { i = 0 }
+    if (i > n) { i = n }
+    return i
+}
+
+function pySliceRange(lo, hi, n) {
+    var from = pySliceClamp(lo, 0, n)
+    var to = pySliceClamp(hi, n, n)
+    if (to < from) { to = from }
+    return [from, to]
+}
+
+function pyClampIndex(i, n, step) {
+    var k = i
+    if (k < 0) {
+        k = k + n
+        if (k < 0) {
+            if (step < 0) { return 0 - 1 }
+            return 0
+        }
+        return k
+    }
+    if (k >= n) {
+        if (step < 0) { return n - 1 }
+        return n
+    }
+    return k
+}
+
+function pySliceIndices(n, loV, hiV, stepV) {
+    var step = 1
+    if (!pyIsNone(stepV)) {
+        step = Math.trunc(pyNum(stepV))
+        if (step == 0) { fail("slice step cannot be zero") }
+    }
+    var lo = 0
+    var hi = n
+    if (step < 0) {
+        lo = n - 1
+        hi = (0 - n) - 1
+    }
+    if (!pyIsNone(loV)) { lo = pyClampIndex(Math.trunc(pyNum(loV)), n, step) }
+    if (!pyIsNone(hiV)) { hi = pyClampIndex(Math.trunc(pyNum(hiV)), n, step) }
+    var out = []
+    var i = lo
+    while (true) {
+        if (step > 0) {
+            if (!(i < hi)) { return out }
+        } else {
+            if (!(i > hi)) { return out }
+        }
+        if (i >= 0 && i < n) { out.push(i) }
+        i = i + step
+    }
+    return out
+}
+// chunkA.metajs -- CHUNK A of languages/lib/python-rt.metajs: NUMBERS,
+// OPERATORS and CONVERSIONS, plus the arbitrary precision integer.
+//
+// THE AUTHORITATIVE SPECIFICATION IS abnf/jsrt.go, not its comments. Every block
+// below names the Go function it ports. Where the port CANNOT be exact the site
+// says so in full.
+//
+// Ported here:
+//     js_pybin      abnf/jsrt.go:7540   (reaching pySetBin, pyComplexBin,
+//                                        pyDunderBin, pyArith, pyFloorMod,
+//                                        pyContains, pySeqRepeat, jsAdd,
+//                                        jsCompare, pyEqual, toInt32)
+//     js_pyunary    abnf/jsrt.go:7757
+//     js_pyint      abnf/jsrt.go:7741
+//     js_pyfloat    abnf/jsrt.go:7994
+//     js_pybool     abnf/jsrt.go:7981
+//     js_pycomplex  abnf/jsrt.go:7359
+//     js_pysum      abnf/jsrt.go:8000
+//     js_pymax / js_pymin   abnf/jsrt.go:7651 -> pyMinMax (jsrt.go:9557)
+//     js_pyrange    abnf/jsrt.go:7142
+//     js_pyeq       abnf/jsrt.go:7179
+//     js_jadd       abnf/jsrt.go:5151
+//     js_bigint     abnf/jsrt.go:5366
+//
+// js_lt is a FLOOR extern and is deliberately absent.
+
+// ============================================================================
+// The arbitrary precision integer   (Go: *jsBigInt over math/big, jsrt.go:2561,
+// bigPair jsrt.go:2710, bigArith jsrt.go:2724, bigEqFloat jsrt.go:8650)
+// ============================================================================
+//
+// The representation is {__pybig: true, neg: <bool>, limbs: [...]}: the
+// MAGNITUDE as a LITTLE-ENDIAN array of base-10000 limbs and a separate sign, so
+// every intermediate of the schoolbook algorithms below stays under 10^8 and a
+// double holds it EXACTLY. The shape of the limb arithmetic is lifted from
+// languages/lib/ruby-rt.metajs (rbBigFromNum / rbBigMulSmall / rbBigStr).
+//
+// Zero is canonical: limbs == [0] and neg == false, so pyABigCmp needs no
+// negative-zero case.
+//
+// WHAT IS DELIBERATELY NOT IMPLEMENTED, and why:
+//
+//   * A bignum SHIFT and a bignum BITWISE and/or/xor. Go never has one either:
+//     js_pybin's "|" "&" "^" "<<" ">>" arms run rt.toInt32, and toInt32 goes
+//     through rt.toNumber, whose *jsBigInt arm does not exist - it falls into
+//     the default and answers NaN, hence 0. A big meeting a bit operator is 0 in
+//     Go and is 0 here.
+//
+//   * A bignum <-> double CONVERSION. Same reason: Go's rt.toNumber has NO
+//     *jsBigInt case, so `bigval // 2`, `bigval % 2`, `bigval ** 2`, float(big)
+//     and int(float) of a big all see NaN in Go. Reproducing that only needs the
+//     PRELUDE's pyNum to answer NaN for a plain object, which it does; nothing
+//     is needed here. pyABigFromNum below is the one direction that IS needed
+//     (bigEqFloat), and it is exact.
+//
+//   * Base-0 literal parsing. Go's js_bigint calls big.Int.SetString(s, 0),
+//     which also accepts 0x / 0o / 0b prefixes and a leading-zero OCTAL. The one
+//     caller, makeIntLit in languages/python-to-llvm-ir.abnf:1216, reaches
+//     js_bigint ONLY on the radix-10 branch with the '_' separators already
+//     stripped, so pyABigFromStr accepts a sign and decimal digits only and
+//     fails loudly on anything else - exactly where Go's `!ok` fails.
+//
+//   * Karatsuba / Knuth-D. The multiplication is O(n*m) schoolbook and the
+//     division is a per-limb BINARY SEARCH for the quotient digit (14 compares a
+//     limb). The reachable operands are Python integer literals, so this is
+//     small and exact rather than fast.
+
+function pyABigNorm(limbs) {
+    var out = limbs
+    while (out.length > 1 && out[out.length - 1] == 0) { out.pop() }
+    if (out.length == 0) { out.push(0) }
+    return out
+}
+
+function pyABigNew(neg, limbs) {
+    var ls = pyABigNorm(limbs)
+    var n = neg
+    if (ls.length == 1 && ls[0] == 0) { n = false }
+    return {__pybig: true, neg: n, limbs: ls}
+}
+
+function pyABigIsZero(v) {
+    var ls = v["limbs"]
+    return ls.length == 1 && ls[0] == 0
+}
+
+// |a| <=> |b| over two NORMALIZED limb arrays.
+function pyABigCmpMag(a, b) {
+    if (a.length != b.length) { return a.length < b.length ? -1 : 1 }
+    var i = a.length - 1
+    while (i >= 0) {
+        if (a[i] != b[i]) { return a[i] < b[i] ? -1 : 1 }
+        i = i - 1
+    }
+    return 0
+}
+
+// The signed comparison - Go's big.Int.Cmp, which jsCompare and pyEqual use.
+function pyABigCmp(x, y) {
+    if (x["neg"] != y["neg"]) { return x["neg"] ? -1 : 1 }
+    var c = pyABigCmpMag(x["limbs"], y["limbs"])
+    if (x["neg"]) { return -c }
+    return c
+}
+
+function pyABigAddMag(a, b) {
+    var out = []
+    var carry = 0
+    var n = a.length
+    if (b.length > n) { n = b.length }
+    var i = 0
+    while (i < n) {
+        var av = i < a.length ? a[i] : 0
+        var bv = i < b.length ? b[i] : 0
+        var s = av + bv + carry
+        if (s >= 10000) {
+            carry = 1
+            s = s - 10000
+        } else {
+            carry = 0
+        }
+        out.push(s)
+        i = i + 1
+    }
+    if (carry > 0) { out.push(carry) }
+    return out
+}
+
+// |a| - |b|, and the caller guarantees |a| >= |b|.
+function pyABigSubMag(a, b) {
+    var out = []
+    var borrow = 0
+    var i = 0
+    while (i < a.length) {
+        var bv = i < b.length ? b[i] : 0
+        var s = a[i] - bv - borrow
+        if (s < 0) {
+            s = s + 10000
+            borrow = 1
+        } else {
+            borrow = 0
+        }
+        out.push(s)
+        i = i + 1
+    }
+    return pyABigNorm(out)
+}
+
+// A magnitude times a single limb (0..9999), as a FRESH array: the division
+// below needs the multiplicand left alone, unlike ruby-rt's in-place rbBigMulSmall.
+function pyABigMulSmall(limbs, k) {
+    var out = []
+    var carry = 0
+    var i = 0
+    while (i < limbs.length) {
+        var v = limbs[i] * k + carry
+        carry = Math.floor(v / 10000)
+        out.push(v - carry * 10000)
+        i = i + 1
+    }
+    while (carry > 0) {
+        var c2 = Math.floor(carry / 10000)
+        out.push(carry - c2 * 10000)
+        carry = c2
+    }
+    return pyABigNorm(out)
+}
+
+function pyABigNeg(x) {
+    var ls = []
+    var i = 0
+    while (i < x["limbs"].length) {
+        ls.push(x["limbs"][i])
+        i = i + 1
+    }
+    return pyABigNew(!x["neg"], ls)
+}
+
+function pyABigAdd(x, y) {
+    if (x["neg"] == y["neg"]) { return pyABigNew(x["neg"], pyABigAddMag(x["limbs"], y["limbs"])) }
+    var c = pyABigCmpMag(x["limbs"], y["limbs"])
+    if (c == 0) { return pyABigNew(false, [0]) }
+    if (c > 0) { return pyABigNew(x["neg"], pyABigSubMag(x["limbs"], y["limbs"])) }
+    return pyABigNew(y["neg"], pyABigSubMag(y["limbs"], x["limbs"]))
+}
+
+function pyABigSub(x, y) { return pyABigAdd(x, pyABigNeg(y)) }
+
+function pyABigMul(x, y) {
+    var a = x["limbs"]
+    var b = y["limbs"]
+    var out = []
+    var z = 0
+    while (z < a.length + b.length) {
+        out.push(0)
+        z = z + 1
+    }
+    var i = 0
+    while (i < a.length) {
+        var carry = 0
+        var j = 0
+        while (j < b.length) {
+            var cur = out[i + j] + a[i] * b[j] + carry
+            carry = Math.floor(cur / 10000)
+            out[i + j] = cur - carry * 10000
+            j = j + 1
+        }
+        var k = i + b.length
+        while (carry > 0) {
+            var cur2 = out[k] + carry
+            carry = Math.floor(cur2 / 10000)
+            out[k] = cur2 - carry * 10000
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return pyABigNew(x["neg"] != y["neg"], pyABigNorm(out))
+}
+
+// |a| divided by |b| -> {q, r}, both NORMALIZED limb arrays. Schoolbook long
+// division a limb at a time; the quotient limb is found by binary search over
+// 0..9999 because there is no wide-multiply primitive to estimate it with.
+// The caller has already rejected a zero divisor.
+function pyABigDivMag(a, b) {
+    var qms = []
+    var rem = [0]
+    var i = a.length - 1
+    while (i >= 0) {
+        // rem = rem * 10000 + a[i], which in little-endian is a PREPENDED limb.
+        var shifted = [a[i]]
+        if (!(rem.length == 1 && rem[0] == 0)) {
+            var t = 0
+            while (t < rem.length) {
+                shifted.push(rem[t])
+                t = t + 1
+            }
+        }
+        rem = pyABigNorm(shifted)
+        var lo = 0
+        var hi = 9999
+        var d = 0
+        while (lo <= hi) {
+            var mid = Math.floor((lo + hi) / 2)
+            if (pyABigCmpMag(pyABigMulSmall(b, mid), rem) <= 0) {
+                d = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        qms.push(d)
+        rem = pyABigSubMag(rem, pyABigMulSmall(b, d))
+        i = i - 1
+    }
+    // qms came out most-significant first; the representation is little-endian.
+    var q = []
+    var m = qms.length - 1
+    while (m >= 0) {
+        q.push(qms[m])
+        m = m - 1
+    }
+    return {q: pyABigNorm(q), r: pyABigNorm(rem)}
+}
+
+// Go's big.Int.Quo: TRUNCATED toward zero, so the sign is the sign of the product.
+function pyABigQuo(x, y) {
+    return pyABigNew(x["neg"] != y["neg"], pyABigDivMag(x["limbs"], y["limbs"])["q"])
+}
+
+// Go's big.Int.Rem: the remainder takes the sign of the DIVIDEND.
+function pyABigRem(x, y) {
+    return pyABigNew(x["neg"], pyABigDivMag(x["limbs"], y["limbs"])["r"])
+}
+
+// Go: big.Int.String().
+function pyABigStr(v) {
+    var limbs = v["limbs"]
+    var out = "" + limbs[limbs.length - 1]
+    var i = limbs.length - 2
+    while (i >= 0) {
+        var s = "" + limbs[i]
+        while (s.length < 4) { s = "0" + s }
+        out = out + s
+        i = i - 1
+    }
+    if (v["neg"]) { return "-" + out }
+    return out
+}
+
+// Go: big.Int.SetString(text, 0) - see the note above on why only base 10 with
+// an optional sign (and the '_' separators Python allows, which the emitter has
+// already stripped) is accepted.
+function pyABigFromStr(text) {
+    var s = text
+    var neg = false
+    var i = 0
+    if (s.charAt(0) == "-") {
+        neg = true
+        i = 1
+    } else {
+        if (s.charAt(0) == "+") { i = 1 }
+    }
+    var digits = ""
+    while (i < s.length) {
+        var c = s.charAt(i)
+        if (c != "_") {
+            if (c < "0" || c > "9") { pyFail("invalid BigInt literal " + text) }
+            digits = digits + c
+        }
+        i = i + 1
+    }
+    if (digits.length == 0) { pyFail("invalid BigInt literal " + text) }
+    var limbs = []
+    var end = digits.length
+    while (end > 0) {
+        var from = end - 4
+        if (from < 0) { from = 0 }
+        limbs.push(parseInt(digits.substring(from, end), 10))
+        end = from
+    }
+    return pyABigNew(neg, limbs)
+}
+
+// An INTEGRAL, FINITE double as an exact bignum - Go's big.NewFloat(f).Int(nil),
+// which bigEqFloat uses. An integral double above 2^53 is a multiple of 2, so
+// halving it down to a 53 bit mantissa and doubling the bignum back up loses
+// nothing (the same argument ruby-rt.metajs's rbExactDec makes).
+function pyABigFromNum(n) {
+    var neg = n < 0
+    var m = Math.abs(n)
+    var e = 0
+    while (m > 9007199254740992) {
+        m = m / 2
+        e = e + 1
+    }
+    var limbs = []
+    var x = m
+    while (x > 0) {
+        var q = Math.floor(x / 10000)
+        limbs.push(x - q * 10000)
+        x = q
+    }
+    if (limbs.length == 0) { limbs.push(0) }
+    var ls = limbs
+    var k = 0
+    while (k < e) {
+        ls = pyABigMulSmall(ls, 2)
+        k = k + 1
+    }
+    return pyABigNew(neg, ls)
+}
+
+// Go: bigEqFloat (jsrt.go:8650). Only an integral, finite double can equal an
+// arbitrary precision int. `f - f != 0` is the finiteness test: it is NaN for
+// both an infinity and a NaN and exactly 0 for everything else - there is no
+// isFinite and no exponent literal in this dialect.
+function pyABigEqFloat(x, f) {
+    if (f - f != 0) { return false }
+    if (f != Math.trunc(f)) { return false }
+    return pyABigCmp(x, pyABigFromNum(f)) == 0
+}
+
+// Go: bigArith (jsrt.go:2724), including bigPair's rule that BOTH operands must
+// be bigs - a big meeting a double falls back to the double path, where the big
+// converts to NaN. Answers null for "not applicable", never a value, so the
+// caller can tell it apart from a legitimate result.
+function pyABigArith(op, l, r) {
+    if (!pyIsBig(l)) { return null }
+    if (!pyIsBig(r)) { return null }
+    if (op == "+") { return pyABigAdd(l, r) }
+    if (op == "-") { return pyABigSub(l, r) }
+    if (op == "*") { return pyABigMul(l, r) }
+    if (op == "/") {
+        if (pyABigIsZero(r)) { return null } // Let the double path produce Inf/NaN.
+        return pyABigQuo(l, r)
+    }
+    if (op == "%") {
+        // Unreachable from Python (js_pybin's "%" is pyFloorMod on doubles), but
+        // bigArith has the arm and the division already answers both halves.
+        if (pyABigIsZero(r)) { return null }
+        return pyABigRem(l, r)
+    }
+    return null
+}
+
+// ============================================================================
+// The shared scalar helpers  (Go: rt.truthy, rt.typeOf, rt.strictEq, jsCompare,
+// pyEqual, pyFloorMod)
+// ============================================================================
+
+// Go: rt.truthy (jsrt.go:~910). A big is truthy when its sign is not 0.
+function pyATruthy(v) {
+    if (v === null) { return false }
+    if (v === undefined) { return false }
+    if (typeof v == "boolean") { return v }
+    if (typeof v == "number") { return v != 0 && v == v }
+    if (typeof v == "string") { return v.length > 0 }
+    if (pyIsBig(v)) { return !pyABigIsZero(v) }
+    return true
+}
+
+// Go: rt.typeOf (jsrt.go:1523) - the JAVASCRIPT typeof, which is what the two
+// failure messages of js_pybin and js_pysum interpolate. It is NOT pyTypeName.
+function pyAJsTypeOf(v) {
+    if (v === undefined) { return "undefined" }
+    if (v === null) { return "object" }
+    if (pyIsBig(v)) { return "bigint" }
+    if (typeof v == "boolean") { return "boolean" }
+    if (typeof v == "number") { return "number" }
+    if (typeof v == "string") { return "string" }
+    if (typeof v == "function") { return "function" }
+    return "object"
+}
+
+// Go: rt.strictEq (jsrt.go:1164), narrowed to the Python value model - none of
+// the Char / boxed-double / sized-integer arms is reachable from Python. Two
+// DISTINCT bigs of the same value are equal (Go compares them with Cmp), so
+// `x is y` on two big literals of the same value is true in both engines.
+function pyAStrictEq(a, b) {
+    if (pyIsBig(a) || pyIsBig(b)) {
+        if (pyIsBig(a) && pyIsBig(b)) { return pyABigCmp(a, b) == 0 }
+        return false
+    }
+    return a === b
+}
+
+// Go: rt.jsCompare (jsrt.go:1490). This is a deliberate SECOND copy of the
+// prelude's pyCompare, for two reasons the prelude cannot be assumed to have:
+// the bigPair arm (both operands big -> Cmp; a big against a double falls into
+// toNumber, which is NaN for a big, so EVERY ordering against a mixed pair is
+// false in Go) and the answer 2 for NaN, which is what makes <, >, <= and >=
+// all false at once.
+function pyACompare(a, b) {
+    if (typeof a == "string" && typeof b == "string") {
+        if (a < b) { return -1 }
+        if (a > b) { return 1 }
+        return 0
+    }
+    if (pyIsBig(a) && pyIsBig(b)) { return pyABigCmp(a, b) }
+    var an = pyNum(a)
+    var bn = pyNum(b)
+    if (an !== an || bn !== bn) { return 2 }
+    if (an < bn) { return -1 }
+    if (an > bn) { return 1 }
+    return 0
+}
+
+// Go: rt.pyEqual (jsrt.go:8580). The set / list / dict arms are the prelude's
+// pyEqual; the two bigint arms come FIRST here only because a __pybig is a plain
+// object and the prelude's pyEqual has no reason to know about it. A big against
+// anything that is neither a big nor a number falls through to strictEq in Go,
+// which is false, so this answers false directly.
+function pyAEqual(x, y) {
+    if (pyIsBig(x)) {
+        if (pyIsBig(y)) { return pyABigCmp(x, y) == 0 }
+        if (pyIsNum(y)) { return pyABigEqFloat(x, y) }
+        return false
+    }
+    if (pyIsBig(y)) {
+        if (pyIsNum(x)) { return pyABigEqFloat(y, x) }
+        return false
+    }
+    return pyEqual(x, y)
+}
+
+// Go: pyFloorMod (jsrt.go:9403). Python's % takes the SIGN OF THE DIVISOR.
+// math.Mod is fmod, which JavaScript's % is exactly - and, unlike
+// `x - math.Floor(x/y)*y`, it is not the expression clang refuses to fuse, so
+// this is a byte-for-byte match rather than an approximation.
+function pyAFloorMod(x, y) {
+    var r = x % y
+    if (r != 0 && (r < 0) != (y < 0)) { return r + y }
+    return r
+}
+
+// ============================================================================
+// Go: rt.jsAdd (jsrt.go:1124)
+// ============================================================================
+function pyAJsAdd(l, r) {
+    if (typeof l == "string" || typeof r == "string") { return pyToStr(l) + pyToStr(r) }
+    // THE ONE REORDERING, and the exclusion that goes with it. Go reaches
+    // bigArith AFTER the array/object arms because a *jsBigInt is a value of its
+    // own and never a *jsObject; here a big IS a plain object, so the bigint arm
+    // is taken FIRST (a big + a big has to answer a big, not a concatenation)
+    // and the object arms then have to EXCLUDE one, or a MIXED pair would
+    // concatenate where Go falls through.
+    //
+    // Falling through is the whole point: bigArith needs BOTH operands to be
+    // bigints (bigPair, jsrt.go:2710), and rt.toNumber has no *jsBigInt arm, so
+    // `0 + 10000000000000000000000000001` is NaN in the Go twin. Measured on the
+    // differential probe, where this file answered the concatenation
+    // '010000000000000000000000000001' instead.
+    var big = pyABigArith("+", l, r)
+    if (big !== null) { return big }
+    if (pyIsArr(l) || pyIsArr(r)) { return pyToStr(l) + pyToStr(r) }
+    if (pyIsBig(l) || pyIsBig(r)) { return pyNum(l) + pyNum(r) }
+    if (pyIsObj(l) || pyIsObj(r)) { return pyToStr(l) + pyToStr(r) }
+    return pyNum(l) + pyNum(r)
+}
+
+// Go: rt.pyArith (jsrt.go:9412) - the -, * and / that take the bigint path.
+function pyAArith(op, l, r) {
+    var big = pyABigArith(op, l, r)
+    if (big !== null) { return big }
+    if (op == "-") { return pyNum(l) - pyNum(r) }
+    if (op == "*") { return pyNum(l) * pyNum(r) }
+    return pyNum(l) / pyNum(r)
+}
+
+// ============================================================================
+// Go: pySeqRepeat (jsrt.go:9810)
+// ============================================================================
+// Answers {v: ...} or null, because Go's second result is a separate ok.
+function pyASeqRepeat(seq, n) {
+    var cnt = 0
+    if (pyIsNum(n)) {
+        cnt = n
+    } else {
+        if (typeof n == "boolean") { // True * "ab" is "ab" in Python.
+            cnt = n ? 1 : 0
+        } else {
+            return null
+        }
+    }
+    var k = Math.trunc(cnt)
+    if (k < 0) { k = 0 }
+    if (typeof seq == "string") {
+        var s = ""
+        var i = 0
+        while (i < k) {
+            s = s + seq
+            i = i + 1
+        }
+        return {v: s}
+    }
+    if (pyIsArr(seq)) {
+        var out = []
+        var a = 0
+        while (a < k) {
+            var b = 0
+            while (b < seq.length) {
+                out.push(seq[b])
+                b = b + 1
+            }
+            a = a + 1
+        }
+        return {v: out}
+    }
+    return null
+}
+
+// ============================================================================
+// Go: rt.pySetBin (jsrt.go:8824)
+// ============================================================================
+// Answers {v: ...} or null. The wrapper is required and not cosmetic: the
+// subset orderings answer the BOOLEAN false, which null cannot stand in for.
+function pyASetBin(op, l, r) {
+    var le = pySetElemsOf(l)
+    if (le === null) { return null }
+    var re = pySetElemsOf(r)
+    if (re === null) { return null }
+    var out = []
+    if (op == "|") {
+        var i = 0
+        while (i < le.length) { // Already duplicate-free, so Go appends without a check.
+            out.push(le[i])
+            i = i + 1
+        }
+        var j = 0
+        while (j < re.length) {
+            pySetAdd(out, re[j])
+            j = j + 1
+        }
+        return {v: pyNewSet(out)}
+    }
+    if (op == "&") {
+        var a = 0
+        while (a < le.length) {
+            if (pySetHas(re, le[a])) { pySetAdd(out, le[a]) }
+            a = a + 1
+        }
+        return {v: pyNewSet(out)}
+    }
+    if (op == "-") {
+        var b = 0
+        while (b < le.length) {
+            if (!pySetHas(re, le[b])) { pySetAdd(out, le[b]) }
+            b = b + 1
+        }
+        return {v: pyNewSet(out)}
+    }
+    if (op == "^") {
+        var c = 0
+        while (c < le.length) {
+            if (!pySetHas(re, le[c])) { pySetAdd(out, le[c]) }
+            c = c + 1
+        }
+        var d = 0
+        while (d < re.length) {
+            if (!pySetHas(le, re[d])) { pySetAdd(out, re[d]) }
+            d = d + 1
+        }
+        return {v: pyNewSet(out)}
+    }
+    if (op == "<=" || op == "<" || op == ">=" || op == ">") {
+        var sub = le
+        var sup = re
+        if (op == ">=" || op == ">") {
+            sub = re
+            sup = le
+        }
+        var k = 0
+        while (k < sub.length) {
+            if (!pySetHas(sup, sub[k])) { return {v: false} }
+            k = k + 1
+        }
+        if (op == "<" || op == ">") { return {v: sub.length < sup.length} }
+        return {v: true}
+    }
+    return null
+}
+
+// ============================================================================
+// Go: rt.pyComplexBin (jsrt.go:8918)
+// ============================================================================
+// A real operand is promoted to (n, 0). Python has NO ordering on complex
+// numbers, so < > <= >= answer null and js_pybin falls through to its usual
+// path - which is what produces the error the two engines share.
+function pyAComplexBin(op, l, r) {
+    var lr = 0
+    var li = 0
+    if (pyIsCplx(l)) {
+        lr = pyCplxRe(l)
+        li = pyCplxIm(l)
+    } else {
+        lr = pyNum(l)
+    }
+    var rr = 0
+    var ri = 0
+    if (pyIsCplx(r)) {
+        rr = pyCplxRe(r)
+        ri = pyCplxIm(r)
+    } else {
+        rr = pyNum(r)
+    }
+    if (op == "+") { return {v: pyNewCplx(lr + rr, li + ri)} }
+    if (op == "-") { return {v: pyNewCplx(lr - rr, li - ri)} }
+    if (op == "*") { return {v: pyNewCplx(lr * rr - li * ri, lr * ri + li * rr)} }
+    if (op == "/") {
+        var d = rr * rr + ri * ri
+        if (d == 0) { return null }
+        return {v: pyNewCplx((lr * rr + li * ri) / d, (li * rr - lr * ri) / d)}
+    }
+    if (op == "==") { return {v: lr == rr && li == ri} }
+    if (op == "!=") { return {v: lr != rr || li != ri} }
+    return null
+}
+
+// ============================================================================
+// Go: pyBinDunder / pyBinReflected / rt.pyDunderBin (jsrt.go:9429-9462)
+// ============================================================================
+// The two maps are written as functions because there is no for..in and an
+// object used as a table would need the "$" interning the dialect demands. An
+// operator with no dunder answers "", which no class can define.
+function pyABinDunder(op) {
+    if (op == "+") { return "__add__" }
+    if (op == "-") { return "__sub__" }
+    if (op == "*") { return "__mul__" }
+    if (op == "/") { return "__truediv__" }
+    if (op == "//") { return "__floordiv__" }
+    if (op == "%") { return "__mod__" }
+    if (op == "@") { return "__matmul__" }
+    if (op == "**") { return "__pow__" }
+    if (op == "==") { return "__eq__" }
+    if (op == "!=") { return "__ne__" }
+    if (op == "<") { return "__lt__" }
+    if (op == ">") { return "__gt__" }
+    if (op == "<=") { return "__le__" }
+    if (op == ">=") { return "__ge__" }
+    return ""
+}
+
+function pyABinReflected(op) {
+    if (op == "+") { return "__radd__" }
+    if (op == "-") { return "__rsub__" }
+    if (op == "*") { return "__rmul__" }
+    if (op == "/") { return "__rtruediv__" }
+    if (op == "//") { return "__rfloordiv__" }
+    if (op == "%") { return "__rmod__" }
+    if (op == "@") { return "__rmatmul__" }
+    if (op == "**") { return "__rpow__" }
+    if (op == "==") { return "__eq__" }
+    if (op == "!=") { return "__ne__" }
+    if (op == "<") { return "__gt__" }
+    if (op == ">") { return "__lt__" }
+    if (op == "<=") { return "__ge__" }
+    if (op == ">=") { return "__le__" }
+    return ""
+}
+
+// The left operand's dunder first, then the right operand's reflected form.
+// Answers {v: ...} or null.
+function pyADunderBin(op, l, r) {
+    var lc = pyInstClassOf(l)
+    if (lc !== null) {
+        var n1 = pyABinDunder(op)
+        if (n1 != "" && pyLookupHas(lc, n1)) {
+            var m1 = pyLookupVal(lc, n1)
+            if (pyIsCallable(m1)) { return {v: pyCallSelf(m1, l, [r])} }
+        }
+    }
+    var rc = pyInstClassOf(r)
+    if (rc !== null) {
+        var n2 = pyABinReflected(op)
+        if (n2 != "" && pyLookupHas(rc, n2)) {
+            var m2 = pyLookupVal(rc, n2)
+            if (pyIsCallable(m2)) { return {v: pyCallSelf(m2, r, [l])} }
+        }
+    }
+    if (op == "!=") { // Python's default __ne__ is the negation of __eq__.
+        var e = pyADunderBin("==", l, r)
+        if (e !== null) { return {v: !pyATruthy(e["v"])} }
+    }
+    return null
+}
+
+// ============================================================================
+// Go: rt.pyContains (jsrt.go:9375)
+// ============================================================================
+function pyAContains(x, y) {
+    var els = pySetElemsOf(y)
+    if (els !== null) {
+        var i = 0
+        while (i < els.length) {
+            if (pyAEqual(els[i], x)) { return true }
+            i = i + 1
+        }
+        return false
+    }
+    if (pyIsArr(y)) {
+        var j = 0
+        while (j < y.length) {
+            if (pyAEqual(y[j], x)) { return true }
+            j = j + 1
+        }
+        return false
+    }
+    if (typeof y == "string") { return y.indexOf(pyToStr(x)) >= 0 }
+    if (pyIsDict(y)) { return pyDictFind(y["keys"], x) >= 0 }
+    pyFail("'in' needs a list, a string, a dict or an object with __contains__")
+    return false
+}
+
+// ============================================================================
+// EXPORTS
+// ============================================================================
+
+// Go: js_pybin (jsrt.go:7540). Every user visible binary operator of the Python
+// compiler goes through here so an instance of a user class can answer it with a
+// dunder. THE ORDER OF THE ARMS IS THE SPECIFICATION: the bit operators are
+// tested BEFORE the complex and dunder paths, so a class defining __or__ never
+// sees "|" - matching Go exactly, including that.
+function js_pybin(opv, l, r) {
+    var op = pyToStr(opv)
+    if (op == "is") { return pyAStrictEq(l, r) }
+    if (op == "is not") { return !pyAStrictEq(l, r) }
+    if (op == "in" || op == "not in") {
+        var want = op == "in"
+        var rc = pyInstClassOf(r)
+        if (rc !== null && pyLookupHas(rc, "__contains__")) {
+            var cm = pyLookupVal(rc, "__contains__")
+            if (pyIsCallable(cm)) { return pyATruthy(pyCallSelf(cm, r, [l])) == want }
+        }
+        return pyAContains(l, r) == want
+    }
+    var sb = pyASetBin(op, l, r)
+    if (sb !== null) { return sb["v"] }
+    // The 32 bit integer operators. The floor's |, &, ^, << and >> ARE
+    // ECMAScript's ToInt32 / ToUint32&31 (runtime.c's js_band..js_shr), which is
+    // what rt.toInt32 is, so no explicit truncation is needed - and a big, whose
+    // pyNum is NaN, reduces to 0 in both engines.
+    if (op == "|") { return pyNum(l) | pyNum(r) }
+    if (op == "&") { return pyNum(l) & pyNum(r) }
+    if (op == "^") { return pyNum(l) ^ pyNum(r) }
+    if (op == "<<") { return pyNum(l) << pyNum(r) }
+    if (op == ">>") { return pyNum(l) >> pyNum(r) }
+    if (pyIsCplx(l) || pyIsCplx(r)) {
+        var cb = pyAComplexBin(op, l, r)
+        if (cb !== null) { return cb["v"] }
+    }
+    var db = pyADunderBin(op, l, r)
+    if (db !== null) { return db["v"] }
+    if (op == "+") {
+        // Two sequences CONCATENATE in Python ([1] + [2] is [1, 2], and bytes
+        // are a list of byte numbers here), which is not what jsAdd does.
+        if (pyIsArr(l) && pyIsArr(r)) {
+            var out = []
+            var i = 0
+            while (i < l.length) {
+                out.push(l[i])
+                i = i + 1
+            }
+            var j = 0
+            while (j < r.length) {
+                out.push(r[j])
+                j = j + 1
+            }
+            return out
+        }
+        return pyAJsAdd(l, r)
+    }
+    if (op == "*") {
+        // Python's SEQUENCE REPETITION: "ab" * 3 and [0] * 3, either way round.
+        var s1 = pyASeqRepeat(l, r)
+        if (s1 !== null) { return s1["v"] }
+        var s2 = pyASeqRepeat(r, l)
+        if (s2 !== null) { return s2["v"] }
+        return pyAArith("*", l, r)
+    }
+    if (op == "-") { return pyAArith("-", l, r) }
+    if (op == "/") { return pyAArith("/", l, r) }
+    if (op == "//") { return Math.floor(pyNum(l) / pyNum(r)) }
+    if (op == "%") { return pyAFloorMod(pyNum(l), pyNum(r)) }
+    // Python's exponentiation. Only js_pybin ever passes this operator, and a
+    // user class already had its __pow__ / __rpow__ chance above.
+    if (op == "**") { return Math.pow(pyNum(l), pyNum(r)) }
+    if (op == "==") { return pyAEqual(l, r) }
+    if (op == "!=") { return !pyAEqual(l, r) }
+    if (op == "<") { return pyACompare(l, r) == -1 }
+    if (op == ">") { return pyACompare(l, r) == 1 }
+    if (op == "<=") {
+        var c1 = pyACompare(l, r)
+        return c1 == -1 || c1 == 0
+    }
+    if (op == ">=") {
+        var c2 = pyACompare(l, r)
+        return c2 == 1 || c2 == 0
+    }
+    pyFail("unsupported operand type for " + op + ": " + pyAJsTypeOf(l) + " and " + pyAJsTypeOf(r))
+    return false
+}
+
+// Go: js_pyunary (jsrt.go:7757). Unary - / ~ with the __neg__ / __invert__
+// fallback. Go guards the bigint arm with rt.hasBigInt, a flag js_bigint sets;
+// the test here is structural instead, which is the same answer because the flag
+// can only be false when no big value exists to test.
+function js_pyunary(opv, v) {
+    var op = pyToStr(opv)
+    var name = "__neg__"
+    if (op == "~") { name = "__invert__" }
+    var cls = pyInstClassOf(v)
+    if (cls !== null && pyLookupHas(cls, name)) {
+        var m = pyLookupVal(cls, name)
+        if (pyIsCallable(m)) { return pyCallSelf(m, v, []) }
+    }
+    if (op == "~") { return ~pyNum(v) }
+    if (pyIsCplx(v)) { return pyNewCplx(-pyCplxRe(v), -pyCplxIm(v)) }
+    if (pyIsBig(v)) { return pyABigNeg(v) }
+    return -pyNum(v)
+}
+
+// Go: js_pyint (jsrt.go:7741). int(v): Python's truncation toward zero, and a
+// bigint stays exact.
+function js_pyint(v) {
+    if (pyIsBig(v)) { return v }
+    return Math.trunc(pyNum(v))
+}
+
+// Go: js_pyfloat (jsrt.go:7994). A STRING goes through jsParseFloat, which is
+// JavaScript's parseFloat (a PREFIX parse: "1.5abc" is 1.5), not toNumber.
+function js_pyfloat(v) {
+    if (typeof v == "string") { return parseFloat(v) }
+    return pyNum(v)
+}
+
+// Go: js_pybool (jsrt.go:7981). An empty container is false; everything else is
+// the ordinary truthiness.
+function js_pybool(v) {
+    var els = pySetElemsOf(v)
+    if (els !== null) { return els.length > 0 }
+    if (pyIsArr(v)) { return v.length > 0 }
+    if (pyIsDict(v)) { return v["keys"].length > 0 }
+    return pyATruthy(v)
+}
+
+// Go: js_pycomplex (jsrt.go:7359).
+function js_pycomplex(re, im) { return pyNewCplx(pyNum(re), pyNum(im)) }
+
+// A generator drained to a list - Go's (*jsGenerator).drain, which js_pysum
+// calls before summing. There is no tag test in layer 2, so the generator is
+// driven structurally, as the brief prescribes.
+function pyADrainGen(g) {
+    var out = []
+    var step = g["next"].apply(g, [])
+    while (!pyATruthy(step["done"])) {
+        out.push(step["value"])
+        step = g["next"].apply(g, [])
+    }
+    return out
+}
+
+// Go: js_pysum (jsrt.go:8000). Note that the failure message interpolates
+// rt.typeOf - the JAVASCRIPT type name - and reports it for the ORIGINAL
+// argument, not for the drained one.
+function js_pysum(v) {
+    var it = anytype
+    it = v
+    if (pyIsGen(it)) { it = pyADrainGen(it) }
+    var els = pySetElemsOf(it)
+    if (els !== null) { it = els }
+    var total = 0
+    if (pyIsArr(it)) {
+        var i = 0
+        while (i < it.length) {
+            total = total + pyNum(it[i])
+            i = i + 1
+        }
+    } else {
+        pyFail("sum() of a " + pyAJsTypeOf(v))
+    }
+    return total
+}
+
+// Go: rt.pyMinMax (jsrt.go:9557). want is +1 for max, -1 for min. A SINGLE
+// argument that is a list is iterated; anything else is the argument list itself.
+function pyAMinMax(argsV, want) {
+    if (!pyIsArr(argsV)) { pyFail("max/min needs an argument array") }
+    var elems = argsV
+    if (elems.length == 1 && pyIsArr(elems[0])) { elems = elems[0] }
+    if (elems.length == 0) { pyFail("max/min of an empty sequence") }
+    var best = anytype
+    best = elems[0]
+    var i = 1
+    while (i < elems.length) {
+        if (pyACompare(elems[i], best) == want) { best = elems[i] }
+        i = i + 1
+    }
+    return best
+}
+
+// Go: js_pymax / js_pymin (jsrt.go:7651). declBuiltin passes the WHOLE argument
+// array (languages/python-to-llvm-ir.abnf:3165, argc 0).
+function js_pymax(args) { return pyAMinMax(args, 1) }
+function js_pymin(args) { return pyAMinMax(args, -1) }
+
+// Go: js_pyrange (jsrt.go:7142). range(a) or range(a, b) as a MATERIALIZED list.
+// Only a genuinely missing second argument means range(0, a): Go tests jsUndefT,
+// so an explicit None still reaches toNumber and answers 0.
+function js_pyrange(a, b) {
+    var from = Math.trunc(pyNum(a))
+    var to = from
+    if (b === undefined) {
+        from = 0
+    } else {
+        to = Math.trunc(pyNum(b))
+    }
+    var out = []
+    var i = from
+    while (i < to) {
+        out.push(i)
+        i = i + 1
+    }
+    return out
+}
+
+// Go: js_pyeq (jsrt.go:7179). Python's == compares CONTAINERS BY VALUE, unlike
+// JavaScript's. 'is' keeps using js_seq, because that one really is identity.
+function js_pyeq(x, y) { return pyAEqual(x, y) }
+
+// Go: js_jadd (jsrt.go:5151). Java/C# +: string concat, 32 bit add for two int
+// values, float add otherwise. The Python emitter reaches it only through
+// makeStrConcat / makeFString / emitSpecText (python-to-llvm-ir.abnf:1385,
+// 1462, 1478), each of which seeds the chain with emitStr(b, ""), so the STRING
+// arm always wins and the numeric arms below are dead - they are ported anyway
+// because the extern is shared. Go's jvmIsFlo arm (a boxed double) has no
+// counterpart at all: Python has no boxed double in this value model.
+function js_jadd(l, r) {
+    if (typeof l == "string" || typeof r == "string") { return pyAJavaStr(l) + pyAJavaStr(r) }
+    var ln = pyNum(l)
+    var rn = pyNum(r)
+    if (pyAIsInt32(ln) && pyAIsInt32(rn)) { return (ln + rn) | 0 }
+    return ln + rn
+}
+
+// Go: rt.javaString (jsrt.go:2523) - null and undefined render as "null" here,
+// NOT as Python's "None". That is what Go does and the difference is
+// unobservable: every value the emitter hands to js_jadd has already been
+// rendered by js_pyrxstr / js_pyrepr / js_pyformat.
+function pyAJavaStr(v) {
+    if (v === null) { return "null" }
+    if (v === undefined) { return "null" }
+    return pyToStr(v)
+}
+
+// Go: isInt32Value (jsrt.go:8420).
+function pyAIsInt32(n) {
+    if (n !== n) { return false }
+    if (n != Math.trunc(n)) { return false }
+    if (n > 2147483647) { return false }
+    return n >= -2147483648
+}
+
+// Go: js_bigint (jsrt.go:5366). The digits of a decimal integer literal too
+// large for a double, as an arbitrary precision integer.
+function js_bigint(text) { return pyABigFromStr(pyToStr(text)) }
+// ============================================================================
+// CHUNK B - strings, printing and formatting.
+//
+// Ports, function for function:
+//   js_pyprint   (jsrt.go:8025)
+//   js_pyrepr    (jsrt.go:7974)
+//   js_pyformat  (jsrt.go:8022) over rt.pyFormat (jsrt.go:9682),
+//                rt.pyFormatBody (jsrt.go:9737) and pyIsAlign (jsrt.go:9680)
+//   js_pyfnname  (jsrt.go:7749) plus its reader pyBFuncName
+//
+// and it owns the float/int RENDERING primitives (pyBFixed / pyBSci /
+// pyBBaseStr / pyBByteCut and the exact-decimal bignum under them), copied
+// from languages/lib/ruby-rt.metajs lines ~508-800 where they were written
+// language-neutrally. They are exported for the other chunks.
+//
+// js_num_str is a FLOOR extern (languages/lib/rt-prims.metajs:192) and is not
+// written here.
+// ============================================================================
+
+
+// ===================================================== the side table =======
+//
+// js_pyfnname (jsrt.go:7749) records the name a `def` bound a closure under, so
+// that f.__name__ can answer it (a closure carries no name of its own). The Go
+// twin keys rt.pyFuncNames by the closure VALUE (map[interface{}]string), and a
+// MetaJS object cannot be keyed by a function, so this is the identity-keyed
+// SIDE TABLE shape rbLambdas uses in languages/lib/ruby-rt.metajs: two parallel
+// arrays and a linear `===` scan.
+var pyBFnObjs = []       // the closures a def bound (identity scan)
+var pyBFnNames = []      // the name each one was bound under, same index
+
+// The recorded name of fn, or undefined when no def ever bound it. pyGetAttr
+// (jsrt.go:9134) and the other chunks read the table through this.
+function pyBFuncName(fn) {
+    var i = 0
+    while (i < pyBFnObjs.length) {
+        if (pyBFnObjs[i] === fn) { return pyBFnNames[i] }
+        i = i + 1
+    }
+    return undefined
+}
+
+// (closure, name) -> closure. A Go map assignment REPLACES an existing entry, so
+// a second def that binds the same closure object under another name overwrites
+// rather than shadowing; the scan below does the same.
+function js_pyfnname(fn, name) {
+    var nm = pyToStr(name)
+    var i = 0
+    while (i < pyBFnObjs.length) {
+        if (pyBFnObjs[i] === fn) {
+            pyBFnNames[i] = nm
+            return fn
+        }
+        i = i + 1
+    }
+    pyBFnObjs.push(fn)
+    pyBFnNames.push(nm)
+    return fn
+}
+
+
+// ===================================================== print / repr =========
+//
+// js_pyprint (jsrt.go:8025): print(...) with Python's rendering - the argument
+// array joined with a single space and written with a trailing newline.
+//
+// The Go twin runs the joined line through wtf8Clean before Fprintln, which
+// replaces the lone surrogates a WTF-8 string can carry with U+FFFD. The floor's
+// println does its own encoding of the string it is handed and there is no
+// wtf8Clean primitive in layer 2, so that one step is NOT reproduced here; it is
+// only observable for a string built out of an unpaired surrogate.
+function js_pyprint(args) {
+    if (!pyIsArr(args)) { fail("js_pyprint needs an argument array") }
+    var out = ""
+    var i = 0
+    while (i < args.length) {
+        if (i > 0) { out = out + " " }
+        out = out + pyStr(args[i])
+        i = i + 1
+    }
+    println(out)
+    return undefined
+}
+
+// js_pyrepr (jsrt.go:7974): repr(x).
+function js_pyrepr(v) { return pyRepr(v) }
+
+
+// ===================================================== float rendering ======
+//
+// Copied verbatim from languages/lib/ruby-rt.metajs (rbDigitAt / rbBigFromNum /
+// rbBigMulSmall / rbBigStr / rbExactDec / rbRoundHalfEven / rbFixed / rbSci /
+// rbBaseStr / rbByteCut), renamed to the pyB prefix. The comments are theirs.
+
+function pyBDigitAt(s, i) {
+    var c = s.charCodeAt(i)
+    if (c < 48 || c > 57) { return 0 - 1 }
+    return c - 48
+}
+
+// ----- EXACT decimal expansion of a double ---------------------------------
+//
+// strconv.FormatFloat prints the EXACT value of the double and rounds HALF TO
+// EVEN, which the naive `Math.floor(a * 10^prec + 0.5)` gets wrong twice over:
+// it rounds half AWAY from zero (Go's %.0f of 2.5 is "2", not "3") and it loses
+// every digit past 2^53 ("%f" of 1e100 has to print all 101 of them). Both were
+// measured on the differential probe.
+//
+// A finite double is m * 2^e with m an integer below 2^53, so its exact decimal
+// is a bignum: for e >= 0 it is m doubled e times, and for e < 0 it is m
+// multiplied by 5 exactly -e times with the point placed -e digits from the
+// right (because 2^-e == 5^-e / 10^-e). The bignum is a little-endian array of
+// base-10000 limbs; multiplying by 2 or by 5 keeps every intermediate under
+// 50000 + 10000, which a double holds exactly.
+
+function pyBBigFromNum(n) {
+    var limbs = []
+    var x = n
+    while (x > 0) {
+        var q = Math.floor(x / 10000)
+        limbs.push(x - q * 10000)
+        x = q
+    }
+    if (limbs.length == 0) { limbs.push(0) }
+    return limbs
+}
+
+function pyBBigMulSmall(limbs, k) {
+    var carry = 0
+    var i = 0
+    while (i < limbs.length) {
+        var v = limbs[i] * k + carry
+        carry = Math.floor(v / 10000)
+        limbs[i] = v - carry * 10000
+        i = i + 1
+    }
+    while (carry > 0) {
+        var c2 = Math.floor(carry / 10000)
+        limbs.push(carry - c2 * 10000)
+        carry = c2
+    }
+    return limbs
+}
+
+function pyBBigStr(limbs) {
+    var out = "" + limbs[limbs.length - 1]
+    var i = limbs.length - 2
+    while (i >= 0) {
+        var s = "" + limbs[i]
+        while (s.length < 4) { s = "0" + s }
+        out = out + s
+        i = i - 1
+    }
+    return out
+}
+
+// The exact decimal of |x| as {i: <integer digits>, f: <fraction digits>}.
+function pyBExactDec(a) {
+    if (a == 0) { return {i: "0", f: ""} }
+    var m = a
+    var e = 0
+    // Down to an integer mantissa. Every step is exact, and a subnormal needs at
+    // most 1074 of them.
+    while (m != Math.floor(m)) {
+        m = m * 2
+        e = e - 1
+    }
+    // And back under 2^53, which only an already-integral value can be above.
+    while (m > 9007199254740992) {
+        m = m / 2
+        e = e + 1
+    }
+    var limbs = pyBBigFromNum(m)
+    if (e >= 0) {
+        var k = 0
+        while (k < e) {
+            pyBBigMulSmall(limbs, 2)
+            k = k + 1
+        }
+        return {i: pyBBigStr(limbs), f: ""}
+    }
+    var n = 0 - e
+    var j = 0
+    while (j < n) {
+        pyBBigMulSmall(limbs, 5)
+        j = j + 1
+    }
+    var all = pyBBigStr(limbs)
+    while (all.length <= n) { all = "0" + all }
+    return {i: all.substring(0, all.length - n), f: all.substring(all.length - n, all.length)}
+}
+
+// Round the digit string `digits` (an integer written out) to `keep` digits,
+// half to EVEN, and answer the kept digits - one longer when the rounding
+// carried all the way (999 -> 1000), which the caller detects by the length.
+function pyBRoundHalfEven(digits, keep) {
+    if (keep >= digits.length) {
+        var out = digits
+        while (out.length < keep) { out = out + "0" }
+        return out
+    }
+    var head = digits.substring(0, keep)
+    var d = digits.charCodeAt(keep) - 48
+    var up = false
+    if (d > 5) { up = true }
+    if (d == 5) {
+        var rest = false
+        var i = keep + 1
+        while (i < digits.length) {
+            if (digits.charAt(i) != "0") {
+                rest = true
+                break
+            }
+            i = i + 1
+        }
+        if (rest) { up = true } else if (keep > 0) {
+            var last = head.charCodeAt(keep - 1) - 48
+            up = last - Math.floor(last / 2) * 2 == 1
+        }
+    }
+    if (!up) {
+        if (head == "") { return "0" }
+        return head
+    }
+    // Propagate the carry through the kept digits.
+    var codes = []
+    var k = 0
+    while (k < head.length) {
+        codes.push(head.charCodeAt(k) - 48)
+        k = k + 1
+    }
+    var at = codes.length - 1
+    var carry = 1
+    while (at >= 0 && carry == 1) {
+        var v = codes[at] + 1
+        if (v == 10) {
+            codes[at] = 0
+        } else {
+            codes[at] = v
+            carry = 0
+        }
+        at = at - 1
+    }
+    var res = ""
+    var q = 0
+    while (q < codes.length) {
+        res = res + ("" + codes[q])
+        q = q + 1
+    }
+    if (carry == 1) { res = "1" + res }
+    return res
+}
+
+// strconv.FormatFloat(v, 'f', prec, 64), exactly: the true decimal of the double,
+// cut to prec fraction digits with half-to-even rounding.
+function pyBFixed(x, prec) {
+    if (x !== x) { return "NaN" }
+    if (x - x !== 0) {
+        if (x > 0) { return "+Inf" }
+        return "-Inf"
+    }
+    // The sign of a zero has to be READ rather than compared: -0.0 < 0 is false
+    // and Go prints "-0.000000". 1 / -0.0 is the only test that sees it.
+    var neg = x < 0
+    if (x == 0 && 1 / x < 0) { neg = true }
+    var a = neg ? -x : x
+    var dec = pyBExactDec(a)
+    var ip = dec["i"]
+    var fp = dec["f"]
+    var joined = ip + fp
+    var kept = pyBRoundHalfEven(joined, ip.length + prec)
+    // A carry out of the leading digit lengthens the integer part by one.
+    var ilen = ip.length
+    if (kept.length > ip.length + prec) { ilen = ilen + 1 }
+    var ints = kept.substring(0, ilen)
+    var fracs = kept.substring(ilen, kept.length)
+    if (ints == "") { ints = "0" }
+    var body = ints
+    if (prec > 0) { body = ints + "." + fracs }
+    return (neg ? "-" : "") + body
+}
+
+// strconv.FormatFloat(v, 'e', prec, 64): d.dddde+XX, at least two exponent digits.
+//
+// No path in Python's format mini-language reaches this one - pyFormatBody has no
+// 'e' or 'g' case, so `{x:e}` falls into the default branch and prints pyString.
+// It is kept here, exported, because chunk B owns the float rendering and any
+// other chunk that needs Go's 'e' verb must not re-derive it.
+function pyBSci(x, prec) {
+    if (x !== x) { return "NaN" }
+    if (x - x !== 0) {
+        if (x > 0) { return "+Inf" }
+        return "-Inf"
+    }
+    var neg = x < 0
+    if (x == 0 && 1 / x < 0) { neg = true }
+    var a = neg ? -x : x
+    if (a == 0) {
+        var z = "0"
+        if (prec > 0) {
+            z = z + "."
+            var zi = 0
+            while (zi < prec) {
+                z = z + "0"
+                zi = zi + 1
+            }
+        }
+        return (neg ? "-" : "") + z + "e+00"
+    }
+    var dec = pyBExactDec(a)
+    var ip = dec["i"]
+    var fp = dec["f"]
+    var all = ip + fp
+    // The exponent of the first significant digit, relative to the point.
+    var lead = 0
+    while (lead < all.length && all.charAt(lead) == "0") { lead = lead + 1 }
+    var e = ip.length - 1 - lead
+    var sig = all.substring(lead, all.length)
+    var kept = pyBRoundHalfEven(sig, prec + 1)
+    if (kept.length > prec + 1) {
+        // 9.99 -> 10.0: one digit fell out of the mantissa.
+        e = e + 1
+        kept = kept.substring(0, prec + 1)
+    }
+    var m = kept.substring(0, 1)
+    if (prec > 0) { m = m + "." + kept.substring(1, kept.length) }
+    var es = "" + (e < 0 ? 0 - e : e)
+    if (es.length < 2) { es = "0" + es }
+    return (neg ? "-" : "") + m + "e" + (e < 0 ? "-" : "+") + es
+}
+
+// ----- strconv.FormatInt(int64(x), base) ------------------------------------
+//
+// Two things the naive loop got wrong, both measured: the digit alphabet is 36
+// long and not 16 (to_s(36) of 100 is "2s"), and Go converts through int64,
+// which SATURATES on arm64 - `int64(1e100)` is 0x7fffffffffffffff and its hex is
+// "7fffffffffffffff", not the 84 digits a float loop produces. The digits are
+// taken with the floor's sized-integer tag (tag 13), which is exact int64
+// arithmetic, on the UNSIGNED reading of the magnitude - the one shape whose
+// negation is exact for int64's minimum too, which is the trick java-rt.metajs
+// records.
+//
+// Python's own callers always hand this an int32 (pyFormatBody converts with
+// rt.toInt32 first), so the saturating branches are unreachable from js_pyformat;
+// they are kept because this is the general helper the other chunks share.
+var PYB_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+function pyBBaseStr(n, base) {
+    var v = Math.trunc(n)
+    if (v !== v) { v = 0 }
+    if (v == 0) { return "0" }
+    var neg = false
+    var mag = sintRaw(0, 0, 64, true)
+    if (v >= 9223372036854775808) {
+        mag = sintRaw(2147483647, 4294967295, 64, true)   // int64 max
+    } else if (v <= 0 - 9223372036854775808) {
+        neg = true
+        mag = sintRaw(2147483648, 0, 64, true)            // |int64 min|
+    } else {
+        neg = v < 0
+        var a = neg ? -v : v
+        mag = sintRaw(sintHi(a), sintLo(a), 64, true)
+    }
+    var b = sintRaw(0, base, 64, true)
+    var zero = sintRaw(0, 0, 64, true)
+    var out = ""
+    while (sintCmp(mag, zero) != 0) {
+        var d = sintNum(sintOp(4, mag, b))
+        out = PYB_DIGITS.charAt(d) + out
+        mag = sintOp(3, mag, b)
+    }
+    return (neg ? "-" : "") + out
+}
+
+// strings.ToUpper / strings.ToLower - the full Unicode SIMPLE mapping. The C
+// floor's own toUpperCase / toLowerCase are exactly that (runtime.c generated its
+// 328 ranges from the Go runtime's own answers), so an ASCII loop here would be a
+// third, worse, copy: it printed "CAFé" for "café".
+function pyBUpper(s) { return s.toUpperCase() }
+function pyBLower(s) { return s.toLowerCase() }
+
+// The first `n` BYTES of a string, as Go's body[:n] takes them. Every string the
+// %s directive can be handed is valid UTF-8 here, and a cut that would land inside
+// a multi-byte character stops before it - which is what a Go slice of a valid
+// string does to the RUNES, and the corpus has no case that reaches it.
+//
+// Python's format mini-language never reaches this either: pyFormatBody uses
+// `prec` ONLY as the fraction-digit count of the 'f' verb and never truncates a
+// string, so `{s:.3}` on a str is a no-op in the Go twin. Exported for the
+// other chunks' printf-style paths, where precision does count bytes.
+function pyBByteCut(s, n) {
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+        var next = out + s.charAt(i)
+        if (byteLen(next) > n) { return out }
+        out = next
+        i = i + 1
+    }
+    return out
+}
+
+
+// ===================================================== format ===============
+//
+// rt.pyFormat (jsrt.go:9682) and rt.pyFormatBody (jsrt.go:9737):
+// [[fill]align][sign][0][width][.precision][type], which is the slice of the
+// format mini-language an f-string replacement field in practice writes.
+//
+// What the Go twin does NOT implement, and therefore neither does this port:
+//   - the ',' and '_' thousands separators. Neither is a digit, so the width
+//     scan stops before it and `.` is not next, which leaves it sitting at the
+//     TYPE position: `{n:,}` takes pyFormatBody's default branch and prints
+//     pyString(n) with no grouping at all. Reproduced exactly.
+//   - the 'e', 'E', 'g', 'G', '%', 'c', 'n' and 's' verbs, which likewise fall
+//     into the default branch and print pyString / pyRepr.
+//   - the '!a' conversion: only conv == "r" is distinguished, so "!s" and "!a"
+//     both take the pyString path.
+//   - '=' alignment does not put the padding after the sign the way CPython
+//     does; the Go twin treats '=' as a synonym for '>'.
+
+// pyIsAlign (jsrt.go:9680).
+function pyBIsAlign(ch) { return ch == "<" || ch == ">" || ch == "^" || ch == "=" }
+
+function pyBRepeat(s, n) {
+    var out = ""
+    var i = 0
+    while (i < n) {
+        out = out + s
+        i = i + 1
+    }
+    return out
+}
+
+// pyFormatBody (jsrt.go:9737). `prec` is -1 when the spec carried no `.`.
+function pyBFormatBody(v, typ, prec, sign, conv) {
+    var body = ""
+    if (typ == "f" || typ == "F") {
+        var p = prec
+        if (p < 0) { p = 6 }
+        body = pyBFixed(pyNum(v), p)
+    } else if (typ == "d") {
+        body = pyBBaseStr(pyNum(v) | 0, 10)
+    } else if (typ == "x") {
+        body = pyBBaseStr(pyNum(v) | 0, 16)
+    } else if (typ == "X") {
+        body = pyBUpper(pyBBaseStr(pyNum(v) | 0, 16))
+    } else if (typ == "b") {
+        body = pyBBaseStr(pyNum(v) | 0, 2)
+    } else if (typ == "o") {
+        body = pyBBaseStr(pyNum(v) | 0, 8)
+    } else {
+        if (conv == "r") { body = pyRepr(v) } else { body = pyStr(v) }
+    }
+    // The Go twin's guard is `if n, isNum := v.(float64); isNum && n >= 0`, a
+    // type assertion on float64: a bool, a bignum and a string are all excluded,
+    // and -0.0 >= 0 is TRUE, so `format(-0.0, "+f")` really does answer
+    // "+-0.000000" there. Reproduced rather than repaired.
+    if (sign == "+") {
+        if (pyIsNum(v) && v >= 0) { body = "+" + body }
+    }
+    return body
+}
+
+// js_pyformat (jsrt.go:8022) over rt.pyFormat (jsrt.go:9682).
+// format(v, spec, conv); conv is "", "r", "s" or "a" (the !conversion).
+function js_pyformat(v, specV, convV) {
+    var spec = pyToStr(specV)
+    var conv = pyToStr(convV)
+    if (spec == "") {
+        if (conv == "r") { return pyRepr(v) }
+        return pyStr(v)
+    }
+    var i = 0
+    var fill = " "
+    var align = ""
+    // The Go twin indexes the spec by BYTE (spec[0:1], spec[1]). This port
+    // indexes by UTF-16 unit, which is the same thing for every ASCII spec; a
+    // non-ASCII FILL character differs - Go would take only its first byte and
+    // pad with that broken fragment, and this pads with the whole character.
+    if (spec.length > 1 && pyBIsAlign(spec.charAt(1))) {
+        fill = spec.substring(0, 1)
+        align = spec.charAt(1)
+        i = 2
+    } else if (spec.length > 0 && pyBIsAlign(spec.charAt(0))) {
+        align = spec.charAt(0)
+        i = 1
+    }
+    var sign = ""
+    if (i < spec.length && (spec.charAt(i) == "+" || spec.charAt(i) == "-" || spec.charAt(i) == " ")) {
+        sign = spec.charAt(i)
+        i = i + 1
+    }
+    if (i < spec.length && spec.charAt(i) == "0" && align == "") {
+        fill = "0"
+        align = "="
+        i = i + 1
+    }
+    var width = 0
+    while (i < spec.length && pyBDigitAt(spec, i) >= 0) {
+        width = width * 10 + pyBDigitAt(spec, i)
+        i = i + 1
+    }
+    var prec = 0 - 1
+    if (i < spec.length && spec.charAt(i) == ".") {
+        i = i + 1
+        prec = 0
+        while (i < spec.length && pyBDigitAt(spec, i) >= 0) {
+            prec = prec * 10 + pyBDigitAt(spec, i)
+            i = i + 1
+        }
+    }
+    var typ = ""
+    if (i < spec.length) { typ = spec.charAt(i) }
+    var body = pyBFormatBody(v, typ, prec, sign, conv)
+    // rt.strLen is the UTF-16 code-unit length, NOT the byte length: the width
+    // of this directive counts units, unlike the printf-style width the other
+    // languages have. `.length` is exactly rt.strLen.
+    var pad = width - body.length
+    if (pad <= 0) { return body }
+    // A number right-aligns by default, everything else left-aligns. `isNum` is
+    // Go's float64 assertion, so a bool and a bignum left-align.
+    var isNum = pyIsNum(v)
+    if (align == ">" || align == "=" || (align == "" && isNum)) {
+        return pyBRepeat(fill, pad) + body
+    }
+    if (align == "^") {
+        var left = Math.floor(pad / 2)
+        return pyBRepeat(fill, left) + body + pyBRepeat(fill, pad - left)
+    }
+    return body + pyBRepeat(fill, pad)
+}
+// ============================================================================
+// CHUNK C - containers, indexing, slicing and destructuring
+//
+// Ports, function for function, from abnf/jsrt.go:
+//
+//   js_pyget      6297   js_pyset      6339   js_dict_new   6369
+//   js_pylen      6974   js_pylist     6997   js_pyiter     7020
+//   js_pyrest     7105   js_pyspread   7300   js_pykwspread 7325
+//   js_pyset_new  7386   js_pyset_spread 7397 js_pyslice3   7420
+//   js_pysetslice 7443   js_pydelslice 7477   js_pydict     7639
+//   js_pyellipsis 7677   js_pydel_item 7699   js_pymatchseq 7794
+//   js_pymatchmap 7806   js_pymaprest  7827   js_pymatchargs 7856
+//   js_is_type    5266  (rt.isTypeName, jsrt.go:8432)
+//
+// plus the helpers those need that the prelude does not carry:
+// rt.pyGenericAlias (8662), rt.pyClampIndex (8728) and rt.pySliceStart (8750).
+//
+// `js_pyget` / `js_pyset` / `js_pylen` / `js_dict_new` / `js_is_type` were
+// already written twice in layer 2 - languages/lib/dart-rt.metajs (1301-1485)
+// and languages/lib/ruby-rt.metajs (2111-2216). Those two are the base here;
+// what BOTH of them deleted as unreachable from their language is added back:
+//
+//   - the `__getitem__` / `__setitem__` / `__len__` dunder arms (a Python class
+//     may define them; a Dart or Ruby class cannot name a member that way),
+//   - the generic-alias arm of js_pyget (list[int] is a VALUE in Python),
+//   - the set arm of js_pylen (Ruby's twin has no Python set),
+//   - the code-POINT string length of js_pylen (Ruby counted code units).
+//
+// ---- one Go inconsistency that is ported as it stands -----------------------
+// Go indexes and slices a string by UTF-16 CODE UNIT (rt.strLen / rt.strAt /
+// rt.strRange) but measures it with `len()` in CODE POINTS (pyStrLen). So
+// s[0] of an emoji string is half a surrogate pair while len(s) is 1. That is
+// what abnf/jsrt.go does, the brief says the Go code is the specification, and
+// so `.length` / `.charAt` (code units) are used everywhere Go used strLen /
+// strAt, and the prelude's pyStrLen (code points) only in js_pylen.
+// ============================================================================
+
+
+// ----- module state ---------------------------------------------------------
+
+// rt.pyAliases: the memo table of pyGenericAlias. Keyed by the rendered
+// "origin[param]" text with the mandatory "$" prefix, so a user type called
+// "constructor" or "toString" cannot collide with an Object.prototype member
+// and make goja and -frozen disagree about which keys exist.
+var pyCAliases = {}
+
+// rt.pyEllipsis: the ONE ellipsis object of the runtime, so `x is ...` holds.
+var pyCEllipsis = null
+
+
+// ----- small shared helpers -------------------------------------------------
+
+// rt.truthy, for the flag arguments the pattern externs take. The emitter only
+// ever writes hTrue / hFalse into them, but Go really does call rt.truthy.
+function pyCTruthy(v) {
+    if (v === true) { return true }
+    if (v === false) { return false }
+    if (pyIsNone(v)) { return false }
+    if (typeof v == "number") { return v !== 0 && v === v }
+    if (typeof v == "string") { return v.length > 0 }
+    return true
+}
+
+// A fresh copy of an array (Go's `append([]interface{}{}, xs...)`).
+function pyCCopyArr(xs) {
+    var out = []
+    var i = 0
+    var n = xs.length
+    while (i < n) {
+        out.push(xs[i])
+        i = i + 1
+    }
+    return out
+}
+
+// The characters of a string as a list, by CODE UNIT - Go's
+// `for i, n := 0, rt.strLen(o); i < n; i++ { out = append(out, rt.strAt(o, i)) }`.
+function pyCStrChars(s) {
+    var out = []
+    var i = 0
+    var n = s.length
+    while (i < n) {
+        out.push(s.charAt(i))
+        i = i + 1
+    }
+    return out
+}
+
+// jsGenerator.drain (jsrt.go:566): materialize what is left of a generator.
+// There is no tag test in layer 2, so the caller decides with pyIsGen and this
+// only drives the protocol: next() -> {value, done} until done.
+function pyCDrain(g) {
+    var out = []
+    var next = g["next"]
+    if (!pyIsFn(next)) { return out }
+    while (true) {
+        var st = next.apply(g, [])
+        if (!pyIsObj(st)) { break }
+        if (st["done"] === true) { break }
+        out.push(st["value"])
+    }
+    return out
+}
+
+// rt.pyClampIndex (jsrt.go:8728): one written slice bound as a position -
+// negative counts from the end, out of range clamps to the edge the step runs
+// towards. Only pyCSliceStart below needs it; the full index list comes from
+// the prelude's pySliceIndices.
+function pyCClampIndex(i_in, n, step) {
+    var i = i_in
+    if (i < 0) {
+        i = i + n
+        if (i < 0) {
+            if (step < 0) { return -1 }
+            return 0
+        }
+        return i
+    }
+    if (i >= n) {
+        if (step < 0) { return n - 1 }
+        return n
+    }
+    return i
+}
+
+// rt.pySliceStart (jsrt.go:8750): where an EMPTY step-1 slice splices at.
+function pyCSliceStart(n, lo) {
+    if (pyIsNone(lo)) { return 0 }
+    return pyCClampIndex(Math.trunc(pyNum(lo)), n, 1)
+}
+
+// Replace an array's contents in place with those of `src`. Go assigns
+// arr.elems, which every alias of the handle sees; `array.length` is not
+// assignable in this dialect, so the truncation is a pop loop.
+function pyCReplaceArr(arr, src) {
+    var i = 0
+    var n = src.length
+    while (i < n) {
+        if (i < arr.length) { arr[i] = src[i] } else { arr.push(src[i]) }
+        i = i + 1
+    }
+    while (arr.length > n) { arr.pop() }
+    return undefined
+}
+
+// Remove index i from an array in place (Go's
+// `append(xs[:i], xs[i+1:]...)`); there is no Array.prototype.splice here.
+function pyCRemoveAt(arr, i) {
+    var j = i
+    while (j < arr.length - 1) {
+        arr[j] = arr[j + 1]
+        j = j + 1
+    }
+    arr.pop()
+    return undefined
+}
+
+// rt.pyGenericAlias (jsrt.go:8662): the memoized list[int]-style alias of a
+// type object. Keyed by the origin's NAME and the rendered parameter, so the
+// same written alias is the same value twice and `type X = list[int]` compares
+// equal.
+//
+// NOT EXACT in one place, and it cannot be: Go recovers a closure's name from
+// rt.pyFuncNames, the side table js_pyfnname fills, which lives in another
+// chunk of this file. The name is read back through the prelude's pyGetAttr,
+// whose "__name__" arm reads that same table (jsrt.go:9134) - the same answer
+// by a different route, and the __name arm of a class object below is Go's
+// literally.
+function pyCGenericAlias(origin, param) {
+    var isObj = pyIsObj(origin)
+    if (!isObj && !pyIsFn(origin)) { return undefined }
+    // Go's switch admits *jsObject / *jsClosure / *hostFunc / *boundMethod;
+    // an array is neither (Array.isArray is excluded by pyIsObj).
+    if (pyIsDict(origin)) { return undefined }
+    var name = pyStr(origin)
+    if (isObj && origin["__name"] !== undefined) {
+        name = pyToStr(origin["__name"])
+    } else if (!isObj) {
+        var fnName = pyGetAttr(origin, "__name__")
+        if (typeof fnName == "string") { name = fnName }
+    }
+    var key = "$" + name + "[" + pyStr(param) + "]"
+    var got = pyCAliases[key]
+    if (got !== undefined) { return got }
+    var alias = {__name: name + "[" + pyStr(param) + "]", __origin__: origin, __args__: [param]}
+    pyCAliases[key] = alias
+    return alias
+}
+
+
+// ================================================== the externs =============
+
+// ----- js_dict_new (jsrt.go:6369) -------------------------------------------
+// An empty Python dict handle. Identical to the dart-rt.metajs twin.
+function js_dict_new() { return pyNewDict() }
+
+
+// ----- js_pyget (jsrt.go:6297) ----------------------------------------------
+// Sequence indexing (negative wraps), dict lookup, and - the arm Ruby and Dart
+// both deleted - the __getitem__ dunder of a user class plus the generic-alias
+// reading of `list[int]`.
+function js_pyget(c, k) {
+    var cls = pyInstClassOf(c) // A user class may define __getitem__.
+    if (cls !== null && cls !== undefined) {
+        if (pyLookupHas(cls, "__getitem__")) {
+            var m = pyLookupVal(cls, "__getitem__")
+            if (pyIsCallable(m)) { return pyCallSelf(m, c, [k]) }
+        }
+    }
+    if (pyIsDict(c)) {
+        var di = pyDictFind(c["keys"], k)
+        if (di < 0) { fail("KeyError: " + pyStr(k)) }
+        return c["vals"][di]
+    }
+    var idx = Math.trunc(pyNum(k))
+    if (pyIsArr(c)) {
+        if (idx < 0) { idx = idx + c.length }
+        if (idx < 0 || idx >= c.length) { fail("list index out of range: " + Math.trunc(pyNum(k))) }
+        return c[idx]
+    }
+    if (typeof c == "string") {
+        // Go: rt.strLen / rt.strAt - UTF-16 code units. See the banner.
+        var n = c.length
+        if (idx < 0) { idx = idx + n }
+        if (idx < 0 || idx >= n) { fail("string index out of range: " + Math.trunc(pyNum(k))) }
+        return c.charAt(idx)
+    }
+    // list[int] / dict[str, int]: subscripting a TYPE (a class object or a
+    // builtin like list) is a generic alias, not an indexing. One object per
+    // (origin, parameter) pair, so 'list[int] == list[int]' holds.
+    var alias = pyCGenericAlias(c, k)
+    if (alias !== undefined) { return alias }
+    fail("indexing a " + typeof c)
+    return undefined
+}
+
+
+// ----- js_pyset (jsrt.go:6339) ----------------------------------------------
+// List element (negative wraps) or dict entry assignment, with the __setitem__
+// dunder arm restored.
+function js_pyset(c, k, v) {
+    var cls = pyInstClassOf(c) // A user class may define __setitem__.
+    if (cls !== null && cls !== undefined) {
+        if (pyLookupHas(cls, "__setitem__")) {
+            var m = pyLookupVal(cls, "__setitem__")
+            if (pyIsCallable(m)) {
+                pyCallSelf(m, c, [k, v])
+                return undefined
+            }
+        }
+    }
+    if (pyIsDict(c)) {
+        pyDictSet(c, k, v)
+        return undefined
+    }
+    if (!pyIsArr(c)) { fail("item assignment on a " + typeof c) }
+    var idx = Math.trunc(pyNum(k))
+    if (idx < 0) { idx = idx + c.length }
+    if (idx < 0 || idx >= c.length) { fail("list assignment index out of range") }
+    c[idx] = v
+    return undefined
+}
+
+
+// ----- js_pylen (jsrt.go:6974) ----------------------------------------------
+// len() for strings, lists, sets and dicts, with the __len__ dunder arm and the
+// set arm restored. The string arm counts CODE POINTS (Go: pyStrLen), so len of
+// a single astral character is 1 and not 2 - this is the ONE place Go measures
+// a string that way.
+//
+// Go has NO generator arm here: a generator reaches neither the set, the string,
+// the array nor the dict test and lands on the failure. Ported as it stands -
+// `len(g)` is an error in real Python too.
+function js_pylen(v) {
+    var cls = pyInstClassOf(v)
+    if (cls !== null && cls !== undefined) {
+        if (pyLookupHas(cls, "__len__")) {
+            var m = pyLookupVal(cls, "__len__")
+            if (pyIsCallable(m)) { return pyCallSelf(m, v, []) }
+        }
+    }
+    var els = pySetElemsOf(v)
+    if (els !== null && els !== undefined) { return els.length }
+    if (typeof v == "string") { return pyStrLen(v) }
+    if (pyIsArr(v)) { return v.length }
+    if (pyIsDict(v)) { return v["keys"].length }
+    fail("len() of a " + typeof v)
+    return 0
+}
+
+
+// ----- js_pylist (jsrt.go:6997) ---------------------------------------------
+// list(x): ALWAYS a fresh list. A generator is drained.
+function js_pylist(v) {
+    if (pyIsGen(v)) { return pyCDrain(v) }
+    var els = pySetElemsOf(v)
+    if (els !== null && els !== undefined) { return pyCCopyArr(els) }
+    if (pyIsArr(v)) { return pyCCopyArr(v) }
+    if (typeof v == "string") { return pyCStrChars(v) }
+    if (pyIsDict(v)) { return pyCCopyArr(v["keys"]) }
+    fail("list() of a " + typeof v)
+    return []
+}
+
+
+// ----- js_pyiter (jsrt.go:7020) ---------------------------------------------
+// The list a for loop runs over: a generator is drained first, a set gives a
+// COPY of its elements, a dict its keys, a string its characters, and a list
+// ITSELF - the Go twin returns the handle it was given, not a copy, so a loop
+// that mutates the list it walks sees the mutation.
+function js_pyiter(v) {
+    if (pyIsGen(v)) { return pyCDrain(v) }
+    var els = pySetElemsOf(v)
+    if (els !== null && els !== undefined) { return pyCCopyArr(els) }
+    if (pyIsArr(v)) { return v }
+    if (typeof v == "string") { return pyCStrChars(v) }
+    if (pyIsDict(v)) { return pyCCopyArr(v["keys"]) }
+    fail("iteration over a " + typeof v)
+    return []
+}
+
+
+// ----- js_pyrest (jsrt.go:7105) ---------------------------------------------
+// *args: the call arguments from index N on, as a list. N is a RAW parameter -
+// the emitter writes it with a bare handle(k) (see the js_pyrest entry in the
+// raw-argument mask at jsrt.go:679), which is what the i_raw name tells
+// -rt-lib to box.
+function js_pyrest(args, i_raw) {
+    var out = []
+    if (!pyIsArr(args)) { return out }
+    var i = i_raw
+    while (i < args.length) {
+        out.push(args[i])
+        i = i + 1
+    }
+    return out
+}
+
+
+// ----- js_pyspread (jsrt.go:7300) -------------------------------------------
+// (positional array, iterable): append every element of the iterable.
+// The source length is read ONCE, which is what Go's `append(dst, src...)` does
+// when dst and src are the same handle.
+function js_pyspread(arr, it) {
+    if (!pyIsArr(arr)) { fail("js_pyspread needs an array") }
+    if (pyIsArr(it)) {
+        var i = 0
+        var n = it.length
+        while (i < n) {
+            arr.push(it[i])
+            i = i + 1
+        }
+        return undefined
+    }
+    if (typeof it == "string") {
+        var si = 0
+        var sn = it.length
+        while (si < sn) {
+            arr.push(it.charAt(si))
+            si = si + 1
+        }
+        return undefined
+    }
+    if (pyIsDict(it)) {
+        var ks = it["keys"]
+        var ki = 0
+        var kn = ks.length
+        while (ki < kn) {
+            arr.push(ks[ki])
+            ki = ki + 1
+        }
+        return undefined
+    }
+    fail("cannot unpack a " + typeof it + " with *")
+    return undefined
+}
+
+
+// ----- js_pykwspread (jsrt.go:7325) -----------------------------------------
+// (keyword dict, mapping): merge the mapping in, an existing key OVERWRITTEN in
+// place so the insertion order of the destination survives.
+function js_pykwspread(dst, src) {
+    if (!pyIsDict(dst)) { fail("js_pykwspread needs a dict") }
+    if (!pyIsDict(src)) { fail("cannot unpack a " + typeof src + " with **") }
+    var keys = dst["keys"]
+    var vals = dst["vals"]
+    var sk = src["keys"]
+    var sv = src["vals"]
+    var i = 0
+    var n = sk.length // Read once: Go ranges over the slice header it started with.
+    while (i < n) {
+        var j = pyDictFind(keys, sk[i])
+        if (j >= 0) { vals[j] = sv[i] } else {
+            keys.push(sk[i])
+            vals.push(sv[i])
+        }
+        i = i + 1
+    }
+    return undefined
+}
+
+
+// ----- js_pyset_new (jsrt.go:7386) ------------------------------------------
+// {a, b, c} / {e for x in it}: a real set from the candidate list the literal or
+// the comprehension collected, deduplicated with Python's == (pySetAdd), NOT
+// with ===. A non-array argument yields the empty set.
+function js_pyset_new(src) {
+    var out = []
+    if (pyIsArr(src)) {
+        var i = 0
+        while (i < src.length) {
+            pySetAdd(out, src[i])
+            i = i + 1
+        }
+    }
+    return pyNewSet(out)
+}
+
+
+// ----- js_pyset_spread (jsrt.go:7397) ---------------------------------------
+// (candidate list, iterable): add every element of an iterable to the list a set
+// literal is being built from. NO deduplication here - js_pyset_new does that.
+// A non-array destination is silently ignored, exactly as in Go.
+//
+// Go has NO string arm and NO generator arm: `{*"ab"}` and `{*gen()}` fail with
+// "cannot unpack a string into a set". Ported as it stands.
+function js_pyset_spread(dst, src) {
+    if (!pyIsArr(dst)) { return undefined }
+    var els = pySetElemsOf(src)
+    if (els !== null && els !== undefined) {
+        var i = 0
+        var n = els.length
+        while (i < n) {
+            dst.push(els[i])
+            i = i + 1
+        }
+        return undefined
+    }
+    if (pyIsArr(src)) {
+        var ai = 0
+        var an = src.length
+        while (ai < an) {
+            dst.push(src[ai])
+            ai = ai + 1
+        }
+        return undefined
+    }
+    if (pyIsDict(src)) {
+        var ks = src["keys"]
+        var ki = 0
+        var kn = ks.length
+        while (ki < kn) {
+            dst.push(ks[ki])
+            ki = ki + 1
+        }
+        return undefined
+    }
+    fail("cannot unpack a " + typeof src + " into a set")
+    return undefined
+}
+
+
+// ----- js_pyslice3 (jsrt.go:7420) -------------------------------------------
+// s[lo:hi:step] on lists and strings. The open ends arrive as undefined and mean
+// what Python's defaults mean for the DIRECTION of the step, so xs[::-1] is the
+// reversal.
+function js_pyslice3(c, lo, hi, step) {
+    if (pyIsArr(c)) {
+        var idx = pySliceIndices(c.length, lo, hi, step)
+        var out = []
+        var i = 0
+        while (i < idx.length) {
+            out.push(c[idx[i]])
+            i = i + 1
+        }
+        return out
+    }
+    if (typeof c == "string") {
+        // Go: rt.strLen / rt.strAt - UTF-16 code units.
+        var sidx = pySliceIndices(c.length, lo, hi, step)
+        var s = ""
+        var si = 0
+        while (si < sidx.length) {
+            s = s + c.charAt(sidx[si])
+            si = si + 1
+        }
+        return s
+    }
+    fail("slicing a " + typeof c)
+    return undefined
+}
+
+
+// ----- js_pysetslice (jsrt.go:7443) -----------------------------------------
+// xs[lo:hi:step] = values. A step of 1 SPLICES (the replacement may have a
+// different length, so xs[1:3] = [9] shortens the list); an extended step
+// assigns element by element and needs exactly as many values as it selects.
+function js_pysetslice(arr, lo, hi, step, values) {
+    if (!pyIsArr(arr)) {
+        fail("slice assignment to a " + typeof arr)
+        return undefined
+    }
+    var vals = pySeqElems(values)
+    if (pyIsNone(step) || pyNum(step) == 1) {
+        var idx = pySliceIndices(arr.length, lo, hi, step)
+        var from = arr.length
+        var to = from
+        if (idx.length > 0) {
+            from = idx[0]
+            to = idx[idx.length - 1] + 1
+        } else {
+            from = pyCSliceStart(arr.length, lo)
+            to = from
+        }
+        var out = []
+        var i = 0
+        while (i < from) {
+            out.push(arr[i])
+            i = i + 1
+        }
+        var v = 0
+        while (v < vals.length) {
+            out.push(vals[v])
+            v = v + 1
+        }
+        var t = to
+        while (t < arr.length) {
+            out.push(arr[t])
+            t = t + 1
+        }
+        return pyCReplaceArr(arr, out)
+    }
+    var xidx = pySliceIndices(arr.length, lo, hi, step)
+    if (xidx.length != vals.length) {
+        fail("attempt to assign sequence of size " + vals.length +
+             " to extended slice of size " + xidx.length)
+    }
+    var k = 0
+    while (k < xidx.length) {
+        arr[xidx[k]] = vals[k]
+        k = k + 1
+    }
+    return undefined
+}
+
+
+// ----- js_pydelslice (jsrt.go:7477) -----------------------------------------
+// del xs[lo:hi:step]: drop every selected element. Go builds the drop set as a
+// map[int]bool and then compacts; a boolean array over the same range is the
+// same thing without a map.
+function js_pydelslice(arr, lo, hi, step) {
+    if (!pyIsArr(arr)) {
+        fail("deleting a slice of a " + typeof arr)
+        return undefined
+    }
+    var idx = pySliceIndices(arr.length, lo, hi, step)
+    var drop = []
+    var d = 0
+    while (d < arr.length) {
+        drop.push(false)
+        d = d + 1
+    }
+    var i = 0
+    while (i < idx.length) {
+        if (idx[i] >= 0 && idx[i] < drop.length) { drop[idx[i]] = true }
+        i = i + 1
+    }
+    var w = 0
+    var r = 0
+    var n = arr.length
+    while (r < n) {
+        if (!drop[r]) {
+            arr[w] = arr[r]
+            w = w + 1
+        }
+        r = r + 1
+    }
+    while (arr.length > w) { arr.pop() }
+    return undefined
+}
+
+
+// ----- js_pydict (jsrt.go:7639) ---------------------------------------------
+// dict(x): a fresh dict copying the entries of a dict argument, in its
+// insertion order. Anything else - including a list of pairs, which real Python
+// accepts - yields the EMPTY dict, which is what the Go twin does.
+function js_pydict(src) {
+    var out = pyNewDict()
+    if (pyIsDict(src)) {
+        var keys = out["keys"]
+        var vals = out["vals"]
+        var sk = src["keys"]
+        var sv = src["vals"]
+        var i = 0
+        var n = sk.length
+        while (i < n) {
+            // Go calls dictAppend, which APPENDS without a duplicate check.
+            keys.push(sk[i])
+            vals.push(sv[i])
+            i = i + 1
+        }
+    }
+    return out
+}
+
+
+// ----- js_pyellipsis (jsrt.go:7677) -----------------------------------------
+// The Ellipsis singleton: `...` is a value of its own and `x is ...` has to
+// hold, so there is exactly one of it per runtime.
+function js_pyellipsis() {
+    if (pyCEllipsis === null) { pyCEllipsis = {__name: "ellipsis"} }
+    return pyCEllipsis
+}
+
+
+// ----- js_pydel_item (jsrt.go:7699) -----------------------------------------
+// del obj[k]. Unlike js_pyget, whose miss is an rt.fail, this one RAISES a
+// catchable KeyError / IndexError - the Go twin panics with a jsThrown.
+function js_pydel_item(c, k) {
+    if (pyIsDict(c)) {
+        var keys = c["keys"]
+        var vals = c["vals"]
+        var i = pyDictFind(keys, k)
+        if (i < 0) { pyRaiseExc("KeyError", pyStr(k)) }
+        pyCRemoveAt(keys, i)
+        pyCRemoveAt(vals, i)
+        return undefined
+    }
+    if (!pyIsArr(c)) { fail("del on a " + typeof c) }
+    var ai = Math.trunc(pyNum(k))
+    if (ai < 0) { ai = ai + c.length }
+    if (ai < 0 || ai >= c.length) { pyRaiseExc("IndexError", "list index out of range") }
+    pyCRemoveAt(c, ai)
+    return undefined
+}
+
+
+// ----- js_pymatchseq (jsrt.go:7794) -----------------------------------------
+// A sequence pattern matches lists and tuples (one type here), never a string
+// and never a dict: (value, count before the *rest, count after it, is there a
+// *rest) -> does the shape fit.
+function js_pymatchseq(v, before, after, hasRest) {
+    if (!pyIsArr(v)) { return false }
+    var b = Math.trunc(pyNum(before))
+    var a = Math.trunc(pyNum(after))
+    if (pyCTruthy(hasRest)) { return v.length >= b + a }
+    return v.length == b
+}
+
+
+// ----- js_pymatchmap (jsrt.go:7806) -----------------------------------------
+// A mapping pattern matches a dict (not a set) that holds every listed key.
+// Membership is pyDictFind, which compares keys with === - Go's rt.dictFind.
+function js_pymatchmap(v, want) {
+    var els = pySetElemsOf(v)
+    if (els !== null && els !== undefined) { return false }
+    if (!pyIsDict(v)) { return false }
+    if (!pyIsArr(want)) { return false }
+    var keys = v["keys"]
+    var i = 0
+    while (i < want.length) {
+        if (pyDictFind(keys, want[i]) < 0) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+
+// ----- js_pymaprest (jsrt.go:7827) ------------------------------------------
+// The **rest of a mapping pattern: a fresh dict of every entry whose key the
+// pattern did not name, in the subject's insertion order. The skip test is
+// pyEqual - Python's == - and NOT the === of pyDictFind that js_pymatchmap
+// above uses. That asymmetry is Go's.
+function js_pymaprest(v, want) {
+    if (!pyIsDict(v)) { fail("js_pymaprest needs a dict") }
+    var keys = v["keys"]
+    var vals = v["vals"]
+    var out = pyNewDict()
+    var ok = out["keys"]
+    var ov = out["vals"]
+    var i = 0
+    var n = keys.length
+    while (i < n) {
+        var skip = false
+        if (pyIsArr(want)) {
+            var j = 0
+            while (j < want.length) {
+                if (pyEqual(want[j], keys[i])) { skip = true }
+                j = j + 1
+            }
+        }
+        if (!skip) {
+            ok.push(keys[i])
+            ov.push(vals[i])
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+// ----- js_pymatchargs (jsrt.go:7856) ----------------------------------------
+// The POSITIONAL sub-values of a class pattern: (value, class, count) -> the n
+// attributes __match_args__ names, or undefined when the class cannot provide
+// them. A class WITHOUT __match_args__ accepts exactly one positional pattern
+// and hands the value itself over, which is what makes `case str(sv):` capture
+// the string.
+function js_pymatchargs(v, cls, count) {
+    var n = Math.trunc(pyNum(count))
+    var out = []
+    var hasMa = false
+    if (pyIsObj(cls)) { hasMa = pyLookupHas(cls, "__match_args__") }
+    if (!hasMa) {
+        if (n == 1) {
+            out.push(v)
+            return out
+        }
+        return undefined
+    }
+    var elems = pySeqElems(pyLookupVal(cls, "__match_args__"))
+    if (n > elems.length) { return undefined }
+    var i = 0
+    while (i < n) {
+        out.push(pyGetAttr(v, pyToStr(elems[i])))
+        i = i + 1
+    }
+    return out
+}
+
+
+// ----- js_is_type (jsrt.go:5266 -> rt.isTypeName, jsrt.go:8432) -------------
+// `v is T`, the language-neutral spelling. The jsChar arm of the Go twin is
+// Kotlin's and is unreachable from Python, which has no character type; the
+// rest is the Go function line for line. The name switch is the JVM/Kotlin
+// vocabulary, not Python's - the Python grammars do not emit this extern at
+// all, and it is here because -rt-lib must export every language-neutral
+// symbol of the table.
+function js_is_type(v, t) {
+    var nm = t
+    var lt = nm.indexOf("<")
+    if (lt >= 0) { nm = nm.substring(0, lt) }
+    var opt = false
+    if (nm.length > 0 && nm.charAt(nm.length - 1) == "?") {
+        nm = nm.substring(0, nm.length - 1)
+        opt = true
+    }
+    if (pyIsNone(v)) { return opt }
+    if (nm == "Any" || nm == "Object") { return true }
+    if (nm == "Int" || nm == "Integer" || nm == "Long" || nm == "Short" || nm == "Byte" || nm == "Char" || nm == "Character") {
+        if (typeof v != "number") { return false }
+        return v == Math.trunc(v)
+    }
+    if (nm == "Double" || nm == "Float" || nm == "Number") { return typeof v == "number" }
+    if (nm == "String" || nm == "CharSequence") { return typeof v == "string" }
+    if (nm == "Boolean") { return typeof v == "boolean" }
+    if (nm == "List" || nm == "MutableList" || nm == "Collection" || nm == "Array") { return pyIsArr(v) }
+    if (pyIsObj(v)) {
+        // Go walks __class / __super, NOT the Python MRO: this is the shape the
+        // Kotlin and Java emitters build. A Python class object carries __super
+        // (the first base) too, so the walk still terminates on one.
+        var cls = v["__class"]
+        while (pyIsObj(cls)) {
+            if (cls["__name"] === nm) { return true }
+            cls = cls["__super"]
+        }
+    }
+    return false
+}
+// ============================================================================
+// CHUNK D -- classes, attributes, calls and exceptions.
+//
+// Ports, function for function, from abnf/jsrt.go:
+//     js_pyclass_new  (7193)   js_pyclass_fill (7220)   js_pygetattr   (7234)
+//     js_pysetattr    (7239)   js_pycall       (7256)   js_pysig       (7284)
+//     js_pytype       (7345)   js_pyisinst     (7353)   js_pybuiltincls(7788)
+//     js_pyexc        (5273)   js_pyexcmatch   (7501)   js_pyexcsplit  (7515)
+//     js_pyenter      (7657)   js_pyexit       (7666)   js_pytruthy    (6273)
+// plus the helpers rt.pyBindCall (9486), rt.pyMethodCall (9207),
+// rt.callPyValue (9260), rt.pyIsInstance (9280), pyLinearize (9010),
+// pyRootExcType (9593) and rt.pyExcGroupLeaves (9620).
+//
+// js_pyannot is LOWERED IN THE EMITTER and is deliberately absent.
+// js_supercall is NOT emitted by languages/python-to-llvm-ir.abnf
+// (`grep -n js_supercall` on it is empty), so it is deliberately absent too.
+//
+// Every helper carries the `pyD` prefix, EXCEPT `pyBindCall`, which the other
+// chunks call by that exact name.
+//
+// ONE DIVERGENCE THAT APPLIES TO THIS WHOLE FILE, stated once here rather than
+// at forty sites: the Go twin distinguishes "the property is ABSENT" from "the
+// property HOLDS undefined" (`v, ok := o.props[name]`). A -rt-lib module has no
+// hasOwn - the floor seeds no such builtin - so "present" is spelled
+// `!== undefined` throughout. The only value that behaves differently is an
+// attribute explicitly holding undefined, and undefined is Python's None in
+// this value model, which every caller here treats the same way as an absent
+// attribute anyway.
+// ============================================================================
+
+// ----- Python truthiness (Go: js_pytruthy, jsrt.go:6273) --------------------
+
+// A RAW RETURN. languages/python-to-llvm-ir.abnf sets
+// `core.truthyExt = "js_pytruthy"` (line 3312) and compile-core's truthy()
+// emits `icmp ne <call>, 0` straight on that extern's result, so it must answer
+// a RAW INTEGER rather than a handle. The `__raw` suffix is what tells
+// languages/metajs-to-llvm-ir.abnf's export scanner to export the symbol as
+// `js_pytruthy` and put this function's result through the floor's own
+// js_truthy first. Without it a MetaJS `false` would come back as the HANDLE of
+// false, which is 2, and 2 != 0, so EVERY condition in the program would be
+// taken - silently. See docs/runtime-next-plan.md part 3, item 2.
+function js_pytruthy__raw(v) {
+    var els = pySetElemsOf(v)
+    if (els !== null) { return els.length > 0 }
+    if (pyIsArr(v)) { return v.length > 0 }
+    if (pyIsDict(v)) { return v["keys"].length > 0 }
+    return pyDTruthy(v)
+}
+
+// Go's rt.truthy (jsrt.go:909) for the Python value model. The boxed float /
+// sized-integer / Java-double arms of the Go switch are unreachable from
+// Python (its int and float are both the plain number), and the *jsBigInt arm
+// is `t.v.Sign() != 0` - which here has to be read off the {__pybig} shape
+// chunk A owns, because a plain object would otherwise take the `default: true`
+// arm and `if 0n:` would be taken. The prelude has no big-sign helper, so the
+// limbs are scanned directly.
+function pyDTruthy(v) {
+    if (pyIsNone(v)) { return false }
+    if (pyIsBool(v)) { return v }
+    // Go's `t != 0 && t == t` - the second half is the NaN test.
+    if (pyIsNum(v)) { return v != 0 && v == v }
+    // Go's `len(t) > 0` is a BYTE length, and byteLen(s) == 0 exactly when the
+    // code-unit length is 0, so the two agree on emptiness.
+    if (pyIsStr(v)) { return v.length > 0 }
+    if (pyIsBig(v)) {
+        var limbs = v["limbs"]
+        var i = 0
+        while (i < limbs.length) {
+            if (limbs[i] != 0) { return true }
+            i = i + 1
+        }
+        return false
+    }
+    // Go's default arm. A complex - even complex(0,0) - is an object and is
+    // therefore TRUE here, exactly as in the Go twin (Python itself would say
+    // false; the twin is the specification).
+    return true
+}
+
+// ----- class objects (Go: js_pyclass_new / pyLinearize / js_pyclass_fill) ---
+
+// pyLinearize (jsrt.go:9010) is the C3 merge of the bases' MROs with the base
+// list itself - the order Python computes, minus the class itself (the caller
+// prepends it). A hierarchy C3 cannot resolve consistently falls back to
+// first-seen order rather than aborting the program. Go consumes each sequence
+// by re-slicing it (`seqs[i] = s[1:]`); there is no splice here, so a parallel
+// array of cursors does the same job.
+function pyDLinearize(bases) {
+    var out = []
+    if (bases.length == 0) { return out }
+    var seqs = []
+    var cur = []
+    var i = 0
+    var j = 0
+    var k = 0
+    var head = anytype
+    var pick = anytype
+    var inTail = false
+    var empty = false
+    while (i < bases.length) {
+        seqs.push(pyMRO(bases[i]))
+        i = i + 1
+    }
+    cur = []
+    i = 0
+    while (i < bases.length) {
+        cur.push(bases[i])
+        i = i + 1
+    }
+    seqs.push(cur)
+    var pos = []
+    i = 0
+    while (i < seqs.length) {
+        pos.push(0)
+        i = i + 1
+    }
+    while (true) {
+        empty = true
+        i = 0
+        while (i < seqs.length) {
+            if (pos[i] < seqs[i].length) { empty = false }
+            i = i + 1
+        }
+        if (empty) { return out }
+        pick = null
+        i = 0
+        while (i < seqs.length) {
+            if (pos[i] < seqs[i].length) {
+                head = seqs[i][pos[i]]
+                inTail = false
+                j = 0
+                while (j < seqs.length) {
+                    k = pos[j] + 1
+                    while (k < seqs[j].length) {
+                        if (seqs[j][k] === head) { inTail = true }
+                        k = k + 1
+                    }
+                    j = j + 1
+                }
+                if (!inTail) {
+                    pick = head
+                    break
+                }
+            }
+            i = i + 1
+        }
+        if (pick === null) { // Inconsistent hierarchy: take the first head there is.
+            i = 0
+            while (i < seqs.length) {
+                if (pos[i] < seqs[i].length) {
+                    pick = seqs[i][pos[i]]
+                    break
+                }
+                i = i + 1
+            }
+        }
+        out.push(pick)
+        i = 0
+        while (i < seqs.length) {
+            if (pos[i] < seqs[i].length) {
+                if (seqs[i][pos[i]] === pick) { pos[i] = pos[i] + 1 }
+            }
+            i = i + 1
+        }
+    }
+    return out
+}
+
+// A class object: its own name, its first base as "__super" and the FULL
+// linearized MRO as "__mro" (itself first). Multiple inheritance is resolved
+// ONCE, here, so every later lookup is a flat walk of "__mro".
+function js_pyclass_new(name, bases) {
+    var n = pyToStr(name)
+    var cls = {}
+    cls["__name"] = n
+    var baseObjs = []
+    if (pyIsArr(bases)) {
+        var i = 0
+        while (i < bases.length) {
+            // Go tests `b.(*jsObject)` - any object, not necessarily a class.
+            if (!pyIsObj(bases[i])) { fail("class " + n + ": base is not a class") }
+            baseObjs.push(bases[i])
+            i = i + 1
+        }
+    }
+    if (baseObjs.length > 0) { cls["__super"] = baseObjs[0] }
+    var mro = [cls]
+    var lin = pyDLinearize(baseObjs)
+    var j = 0
+    while (j < lin.length) {
+        mro.push(lin[j])
+        j = j + 1
+    }
+    cls["__mro"] = mro
+    return cls
+}
+
+// The class body is a suite: every name it bound (methods, class attributes,
+// __slots__) becomes a class member.
+//
+// DELIBERATE SHAPE CHANGE FROM THE GO TWIN: in Go this takes a SCOPE HANDLE and
+// enumerates the scope's names (`sc := rt.scopeOf(a[1])`). A scope is the
+// floor's private storage and layer 2 cannot open one, so
+// languages/python-to-llvm-ir.abnf hands us a DICT of the class body's bindings
+// instead - the ordinary {__dict:true, keys, vals} shape - and this copies
+// every key/value pair of that dict onto the class object. The enumeration
+// order is the dict's insertion order, which is the scope's binding order, so
+// the observable result is the same.
+function js_pyclass_fill(cls, bodyDict) {
+    if (!pyIsObj(cls)) { fail("js_pyclass_fill: not a class object") }
+    if (!pyIsDict(bodyDict)) { fail("js_pyclass_fill: class body is not a dict") }
+    var keys = bodyDict["keys"]
+    var vals = bodyDict["vals"]
+    var i = 0
+    while (i < keys.length) {
+        cls[pyToStr(keys[i])] = vals[i]
+        i = i + 1
+    }
+    return undefined
+}
+
+// ----- attributes (Go: js_pygetattr / js_pysetattr) -------------------------
+
+// obj.name: an instance checks its own attributes, then the MRO of its class
+// (running a __get__ descriptor found there); a class checks its own MRO.
+// Anything else takes the ordinary member read. The whole lookup order is
+// rt.pyGetAttr (jsrt.go:9094), which the prelude provides.
+function js_pygetattr(obj, name) { return pyGetAttr(obj, pyToStr(name)) }
+
+// obj.name = v: a __set__ descriptor on the class wins; __slots__ (when the
+// class declares it) rejects an unknown name by raising, like Python.
+// rt.pySetAttr is jsrt.go:9158, in the prelude.
+function js_pysetattr(obj, name, v) {
+    pySetAttr(obj, pyToStr(name), v)
+    return undefined
+}
+
+// ----- the signature registry (Go: pySig / js_pysig, jsrt.go:9479) ----------
+
+// Go keys rt.pySigs by the callee VALUE (a Go map over interface{}). A closure
+// here is a floor cell: nothing can be stored on it and there is no Map in the
+// frozen subset, so the registry is an identity-keyed side table - four
+// parallel arrays and a `===` scan, the shape rbLambdas uses in ruby-rt.metajs.
+// It is O(n) in the defs a program has ever registered, which is a constant per
+// module.
+var pyDSigFn = []
+var pyDSigNames = []
+var pyDSigKwOnly = []
+var pyDSigExt = []
+
+function pyDSigIndex(callee) {
+    var i = 0
+    while (i < pyDSigFn.length) {
+        if (pyDSigFn[i] === callee) { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+// Register a def's parameter shape, so a keyword call can be bound to it.
+// The LAST nkwonly names are keyword-only; `ext` selects prologue layout B
+// ([p0..pn-1, *args list, **kwargs dict]) over layout A (a flat positional
+// array). Go overwrites a duplicate map entry; so does this.
+function js_pysig(clo, names, nkwonly, ext) {
+    var ns = []
+    if (pyIsArr(names)) {
+        var i = 0
+        while (i < names.length) {
+            ns.push(pyToStr(names[i]))
+            i = i + 1
+        }
+    }
+    var at = pyDSigIndex(clo)
+    if (at < 0) {
+        pyDSigFn.push(clo)
+        pyDSigNames.push(ns)
+        pyDSigKwOnly.push(pyNum(nkwonly))
+        pyDSigExt.push(pyDTruthy(ext))
+    } else {
+        pyDSigNames[at] = ns
+        pyDSigKwOnly[at] = pyNum(nkwonly)
+        pyDSigExt[at] = pyDTruthy(ext)
+    }
+    return clo
+}
+
+// pyBindCall turns (positional, keyword dict) into the callee's argument array.
+// Go: rt.pyBindCall, jsrt.go:9486. NAMED WITHOUT THE CHUNK PREFIX because the
+// other chunks call it by this exact name.
+function pyBindCall(callee, pos, kw) {
+    var hasKw = pyIsDict(kw)
+    var kwKeys = anytype
+    var kwVals = anytype
+    kwKeys = null
+    kwVals = null
+    if (hasKw) {
+        kwKeys = kw["keys"]
+        kwVals = kw["vals"]
+        if (kwKeys.length == 0) { hasKw = false }
+    }
+    var i = 0
+    var j = 0
+    var out = []
+    var si = pyDSigIndex(callee)
+    if (si < 0) {
+        // A builtin (no declared signature) takes the keyword dict as one extra
+        // trailing argument - which is exactly what dict(a=1) / dict(**m) want.
+        if (hasKw) {
+            i = 0
+            while (i < pos.length) {
+                out.push(pos[i])
+                i = i + 1
+            }
+            out.push(kw)
+            return out
+        }
+        return pos
+    }
+    var names = pyDSigNames[si]
+    var nkwonly = pyDSigKwOnly[si]
+    var ext = pyDSigExt[si]
+    if (!ext && !hasKw) { return pos }
+    var n = names.length
+    var npos = n - nkwonly
+    i = 0
+    while (i < n) {
+        out.push(undefined)
+        i = i + 1
+    }
+    i = 0
+    while (i < npos && i < pos.length) {
+        out[i] = pos[i]
+        i = i + 1
+    }
+    // Go's `used` is a map[string]bool of parameter names that were filled from
+    // the keyword dict; here it is a list of those names, scanned linearly.
+    var used = []
+    // Go's fromKw(i) closure, inlined at both of its call sites: the LAST
+    // matching keyword wins, because Go keeps assigning as it scans.
+    i = 0
+    while (i < npos) {
+        if (i >= pos.length) {
+            if (hasKw) {
+                j = 0
+                while (j < kwKeys.length) {
+                    if (pyToStr(kwKeys[j]) == names[i]) {
+                        out[i] = kwVals[j]
+                        used.push(names[i])
+                    }
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    i = npos
+    while (i < n) {
+        if (hasKw) {
+            j = 0
+            while (j < kwKeys.length) {
+                if (pyToStr(kwKeys[j]) == names[i]) {
+                    out[i] = kwVals[j]
+                    used.push(names[i])
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    var extra = []
+    i = npos
+    while (i < pos.length) {
+        extra.push(pos[i])
+        i = i + 1
+    }
+    if (!ext) {
+        i = 0
+        while (i < extra.length) {
+            out.push(extra[i])
+            i = i + 1
+        }
+        return out
+    }
+    var left = pyNewDict()
+    if (hasKw) {
+        j = 0
+        while (j < kwKeys.length) {
+            if (!pyDUsed(used, pyToStr(kwKeys[j]))) {
+                // Go calls dictAppend directly - an unconditional append. The
+                // keys of a keyword dict are distinct by construction, so
+                // pyDictSet (which overwrites an existing key) is the same map.
+                pyDictSet(left, kwKeys[j], kwVals[j])
+            }
+            j = j + 1
+        }
+    }
+    out.push(extra)
+    out.push(left)
+    return out
+}
+
+function pyDUsed(used, name) {
+    var i = 0
+    while (i < used.length) {
+        if (used[i] == name) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// ----- calling (Go: js_pycall / rt.callPyValue / rt.pyMethodCall) -----------
+
+// f(args, kwargs): calling a CLASS instantiates it (allocate, then __init__
+// with self prepended); calling an instance runs its __call__. The keyword dict
+// is mapped onto the callee's parameters by pyBindCall.
+function js_pycall(callee, pos, kw) {
+    if (!pyIsArr(pos)) { fail("js_pycall args must be an array") }
+    var cls = pyClassOf(callee)
+    if (cls !== null) { return pyDInstantiate(cls, pos, kw) }
+    var icls = pyInstClassOf(callee)
+    if (icls !== null) {
+        if (pyLookupHas(icls, "__call__")) {
+            var m = pyLookupVal(icls, "__call__")
+            if (pyIsCallable(m)) {
+                var self = pyDPrepend(callee, pos)
+                return pyCall(m, pyBindCall(m, self, kw))
+            }
+        }
+    }
+    var bound = pyBindCall(callee, pos, kw)
+    // Go takes the ORIGINAL argument array (rt.callH with the incoming handle)
+    // whenever binding did not change its length, and the bound one otherwise.
+    // Kept literally, even though the two arrays cannot differ in content when
+    // their lengths agree.
+    if (bound.length == pos.length) { return pyCall(callee, pos) }
+    return pyCall(callee, bound)
+}
+
+// [v, ...args] - the receiver-prepending Python's `self` needs.
+function pyDPrepend(v, args) {
+    var out = [v]
+    var i = 0
+    while (i < args.length) {
+        out.push(args[i])
+        i = i + 1
+    }
+    return out
+}
+
+// Allocate an instance of cls and run its __init__ with self prepended.
+function pyDInstantiate(cls, args, kw) {
+    var inst = {}
+    inst["__class"] = cls
+    if (pyLookupHas(cls, "__init__")) {
+        var init = pyLookupVal(cls, "__init__")
+        if (pyIsCallable(init)) {
+            var self = pyDPrepend(inst, args)
+            pyCall(init, pyBindCall(init, self, kw))
+        }
+    }
+    return inst
+}
+
+// callPyValue (jsrt.go:9260) calls a value that may itself be a class or a
+// __call__ instance.
+function pyDCallPyValue(v, args, kw) {
+    var cls = pyClassOf(v)
+    if (cls !== null) { return pyDInstantiate(cls, args, kw) }
+    var icls = pyInstClassOf(v)
+    if (icls !== null) {
+        if (pyLookupHas(icls, "__call__")) {
+            var m = pyLookupVal(icls, "__call__")
+            if (pyIsCallable(m)) {
+                var self = pyDPrepend(v, args)
+                return pyCall(m, pyBindCall(m, self, kw))
+            }
+        }
+    }
+    return pyCall(v, pyBindCall(v, args, kw))
+}
+
+// ----- the generator side table --------------------------------------------
+
+// A generator is a floor CELL: nothing can be stored on it, so `close()` - which
+// in Go is g.finish(), setting g.done on the generator itself - is recorded in
+// an identity-keyed side table instead (two parallel arrays and a `===` scan,
+// as rbLambdas does in ruby-rt.metajs). Exhaustion needs no entry: the floor's
+// own generator answers {value: undefined, done: true} for every step after the
+// body returned, exactly as (*jsGenerator).step does (jsrt.go:483).
+var pyDGenCell = []
+var pyDGenClosed = []
+
+function pyDGenIsClosed(g) {
+    var i = 0
+    while (i < pyDGenCell.length) {
+        if (pyDGenCell[i] === g) { return pyDGenClosed[i] }
+        i = i + 1
+    }
+    return false
+}
+
+function pyDGenClose(g) {
+    var i = 0
+    while (i < pyDGenCell.length) {
+        if (pyDGenCell[i] === g) {
+            pyDGenClosed[i] = true
+            return undefined
+        }
+        i = i + 1
+    }
+    pyDGenCell.push(g)
+    pyDGenClosed.push(true)
+    return undefined
+}
+
+// pyMethodCall (jsrt.go:9207) is obj.name(args) with Python's binding rule: an
+// instance prepends itself, a class object does not (so Base.m(self) works).
+//
+// NOTE FOR THE CHUNK THAT OWNS js_pymcall: call this as
+// pyDMethodCall(target, name, args, kw). Its final fall-through is Go's
+// rt.memberCall - the builtin method table for strings / lists / dicts - which
+// this chunk does not own; it is spelled pyMemberCall(target, name, args) here.
+function pyDMethodCall(target, name, args, kw) {
+    // A generator's own protocol. Python's send()/next() answer the YIELDED
+    // value and raise StopIteration - carrying the body's return value - at the
+    // end, where JavaScript's next() answers a {value, done} record. There is no
+    // tag test in layer 2, so "is this a generator" is pyIsGen's structural one.
+    if (pyIsGen(target)) {
+        if (name == "send" || name == "next" || name == "__next__") {
+            var sent = anytype
+            sent = undefined
+            if (args.length > 0) { sent = args[0] }
+            var st = anytype
+            if (pyDGenIsClosed(target)) {
+                // Go's step returns {undefined, true} for a generator whose done
+                // flag is set, and close() set it. The floor cell has no such
+                // flag reachable from here, so the side table stands in.
+                st = {}
+                st["value"] = undefined
+                st["done"] = true
+            } else {
+                st = target["next"].apply(target, [sent])
+            }
+            if (st === undefined || st === null) { fail("generator step failed") }
+            if (st["done"] === true) {
+                var exc = pyExcInstance("StopIteration", "")
+                exc["value"] = st["value"]
+                throw exc
+            }
+            return st["value"]
+        }
+        if (name == "close") {
+            // g.finish(undefined): abandon the body without resuming it and
+            // answer the {value, done} record it builds.
+            pyDGenClose(target)
+            var res = {}
+            res["value"] = undefined
+            res["done"] = true
+            return res
+        }
+    }
+    var cls = pyClassOf(target)
+    if (cls !== null) {
+        if (pyLookupHas(cls, name)) {
+            var cm = pyLookupVal(cls, name)
+            if (pyIsCallable(cm)) { return pyCall(cm, pyBindCall(cm, args, kw)) }
+            return pyDCallPyValue(cm, args, kw)
+        }
+        fail("type object '" + pyToStr(cls["__name"]) + "' has no method '" + name + "'")
+    }
+    var icls = pyInstClassOf(target)
+    if (icls !== null) {
+        // Go reads inst.props[name] - the instance's OWN property map. A bare
+        // member read here also sees Object.prototype under goja, so a method
+        // call literally named "toString" / "valueOf" / "constructor" on an
+        // instance would take this arm instead of the MRO one. The prelude's
+        // pyGetAttr / pySetAttr store instance attributes under their plain
+        // names, so guarding with a "$" prefix here would desynchronize the two;
+        // the collision is left standing, exactly as it is in pyGetAttr.
+        var own = target[name]
+        // A plain function in an attribute: called WITHOUT self.
+        if (own !== undefined && pyIsCallable(own)) {
+            return pyCall(own, pyBindCall(own, args, kw))
+        }
+        if (pyLookupHas(icls, name)) {
+            var m = pyLookupVal(icls, name)
+            if (pyIsCallable(m)) {
+                var self = pyDPrepend(target, args)
+                return pyCall(m, pyBindCall(m, self, kw))
+            }
+            return pyDCallPyValue(m, args, kw)
+        }
+        // A dict that also carries a __class falls through to the builtin dict
+        // methods instead of aborting.
+        if (target["__dict"] === undefined) {
+            fail("'" + pyToStr(icls["__name"]) + "' object has no method '" + name + "'")
+        }
+    }
+    return pyMemberCall(target, name, args)
+}
+
+// ----- type(), isinstance() and the builtin class objects -------------------
+
+// type(v): the class object of an instance, else a synthetic class object
+// naming the builtin type (so type(x).__name__ answers for everything).
+function js_pytype(v) {
+    var cls = pyInstClassOf(v)
+    if (cls !== null) { return cls }
+    return pyBuiltinClass(pyTypeName(v))
+}
+
+// isinstance(v, C) / isinstance(v, (A, B)): a walk of the instance's MRO.
+// Go: rt.pyIsInstance, jsrt.go:9280.
+function pyDIsInstance(v, target) {
+    var i = 0
+    if (pyIsArr(target)) {
+        while (i < target.length) {
+            if (pyDIsInstance(v, target[i])) { return true }
+            i = i + 1
+        }
+        return false
+    }
+    var cls = pyInstClassOf(v)
+    if (cls === null) {
+        // A builtin value against a builtin class object (int, str, ...): one
+        // that carries a __name but NO __mro.
+        if (pyIsObj(target)) {
+            if (target["__name"] !== undefined && target["__mro"] === undefined) {
+                return pyTypeName(v) == pyToStr(target["__name"])
+            }
+        }
+        return false
+    }
+    var mro = pyMRO(cls)
+    i = 0
+    while (i < mro.length) {
+        if (mro[i] === target) { return true }
+        i = i + 1
+    }
+    // Builtin exception classes are matched by NAME, the way js_is_type does -
+    // which is what lets `except ValueError` catch the fresh, unrelated class
+    // object js_pyexc builds.
+    if (pyIsObj(target)) {
+        var want = target["__name"]
+        if (want !== undefined) {
+            i = 0
+            while (i < mro.length) {
+                if (mro[i]["__name"] !== undefined) {
+                    if (pyToStr(mro[i]["__name"]) == pyToStr(want)) { return true }
+                }
+                i = i + 1
+            }
+        }
+    }
+    return false
+}
+
+function js_pyisinst(v, target) { return pyDIsInstance(v, target) }
+
+// The class object of a BUILTIN type name, so `case str():` can ask isinstance
+// about a value that is not an instance of a user class. One stable object per
+// name, so `type(x) is type(y)` holds for two values of the same builtin type.
+function js_pybuiltincls(name) { return pyBuiltinClass(pyToStr(name)) }
+
+// ----- exceptions (Go: js_pyexc / js_pyexcmatch / js_pyexcsplit) ------------
+
+// The older {__class, args} shortcut. Note that the class object it builds is
+// FRESH on every call and carries only a __name - it is NOT pyBuiltinClass's
+// stable one and it has no __mro - so an except clause reaches it only through
+// pyDIsInstance's name walk. Ported exactly; Go's `name, _ := u(a[0]).(string)`
+// leaves the name EMPTY when the argument is not a string.
+function js_pyexc(name, args) {
+    var n = ""
+    if (pyIsStr(name)) { n = name }
+    var cls = {}
+    cls["__name"] = n
+    var arr = []
+    if (pyIsArr(args)) {
+        var i = 0
+        while (i < args.length) {
+            arr.push(args[i])
+            i = i + 1
+        }
+    }
+    var inst = {}
+    inst["__class"] = cls
+    inst["args"] = arr
+    return inst
+}
+
+// pyRootExcType (jsrt.go:9593): is the except clause's type the ROOT of the
+// exception hierarchy - the only one that catches a raised non-instance value?
+// A tuple of types (written as a list here) counts when any element is a root.
+function pyDRootExcType(target) {
+    var i = 0
+    if (pyIsArr(target)) {
+        while (i < target.length) {
+            if (pyDRootExcType(target[i])) { return true }
+            i = i + 1
+        }
+        return false
+    }
+    if (!pyIsObj(target)) { return false }
+    var n = target["__name"]
+    if (n === undefined) { return false }
+    // Go's `name, _ := n.(string)`: a non-string __name yields "" and fails.
+    if (!pyIsStr(n)) { return false }
+    return n == "Exception" || n == "BaseException"
+}
+
+// The type test of an except clause. It is isinstance, PLUS the one thing an
+// except clause has to answer that isinstance must not: this subset lets a
+// program raise a value that is no class instance at all (raise "boom"), and
+// only the ROOT type - Exception / BaseException - catches such a value.
+function js_pyexcmatch(v, target) {
+    if (pyDIsInstance(v, target)) { return true }
+    if (pyInstClassOf(v) !== null) { return false }
+    return pyDRootExcType(target)
+}
+
+// pyExcGroupLeaves (jsrt.go:9620) flattens an ExceptionGroup instance into its
+// leaf exceptions and answers its message alongside. `ok` is false for anything
+// that is not an instance of a class called ExceptionGroup, which is what makes
+// 'except*' fall through to a re-raise on an ordinary exception. The nested
+// exceptions live in "exceptions" when the group was split, and otherwise in
+// args[1] - where ExceptionGroup(msg, [errs]) puts them through the inherited
+// Exception.__init__. Go's multiple return becomes a record here.
+function pyDExcGroupLeaves(v) {
+    var r = {}
+    r["leaves"] = []
+    r["msg"] = undefined
+    r["ok"] = false
+    var cls = pyInstClassOf(v)
+    if (cls === null) { return r }
+    var mro = pyMRO(cls)
+    var isGroup = false
+    var i = 0
+    while (i < mro.length) {
+        if (mro[i]["__name"] !== undefined) {
+            if (pyToStr(mro[i]["__name"]) == "ExceptionGroup") { isGroup = true }
+        }
+        i = i + 1
+    }
+    if (!isGroup) { return r }
+    r["ok"] = true
+    var args = v["args"]
+    if (pyIsArr(args)) {
+        if (args.length > 0) { r["msg"] = args[0] }
+    }
+    var src = anytype
+    src = v["exceptions"]
+    if (src === undefined) {
+        if (pyIsArr(args)) {
+            if (args.length > 1) { src = args[1] }
+        }
+    }
+    if (!pyIsArr(src)) { return r }
+    var leaves = []
+    i = 0
+    while (i < src.length) {
+        var sub = pyDExcGroupLeaves(src[i])
+        if (sub["ok"]) {
+            var inner = sub["leaves"]
+            var j = 0
+            while (j < inner.length) {
+                leaves.push(inner[j])
+                j = j + 1
+            }
+        } else {
+            leaves.push(src[i])
+        }
+        i = i + 1
+    }
+    r["leaves"] = leaves
+    return r
+}
+
+// PEP 654 'except* T' dispatch: (ExceptionGroup instance, type, ExceptionGroup
+// class) -> a FRESH group over the leaves of the first that the type accepts, or
+// undefined when the value is not a group or nothing in it matches.
+function js_pyexcsplit(grp, typ, cls) {
+    var r = pyDExcGroupLeaves(grp)
+    if (!r["ok"]) { return undefined }
+    var leaves = r["leaves"]
+    var matched = []
+    var i = 0
+    while (i < leaves.length) {
+        if (pyDIsInstance(leaves[i], typ)) { matched.push(leaves[i]) }
+        i = i + 1
+    }
+    if (matched.length == 0) { return undefined }
+    var sub = {}
+    sub["__class"] = cls
+    // Go puts the SAME jsArray into args[1] and "exceptions"; kept aliased.
+    sub["args"] = [r["msg"], matched]
+    sub["exceptions"] = matched
+    return sub
+}
+
+// ----- the context-manager protocol (Go: js_pyenter / js_pyexit) ------------
+
+// A context expression that is NOT a context manager (no __enter__) binds its
+// own value and runs the body: that is the approximation `with` had before the
+// protocol existed, kept as the fallback so a plain value still works instead
+// of aborting.
+function js_pyenter(v) {
+    var cls = pyInstClassOf(v)
+    if (cls !== null) {
+        if (pyLookupHas(cls, "__enter__")) {
+            var m = pyLookupVal(cls, "__enter__")
+            if (pyIsCallable(m)) { return pyCall(m, [v]) }
+        }
+    }
+    return v
+}
+
+// __exit__(type, value, traceback) -> truthy swallows the exception. Go passes
+// the caught value as BOTH the type and the value argument, and undefined as
+// the traceback; kept exactly.
+function js_pyexit(mgr, e) {
+    var cls = pyInstClassOf(mgr)
+    if (cls !== null) {
+        if (pyLookupHas(cls, "__exit__")) {
+            var m = pyLookupVal(cls, "__exit__")
+            if (pyIsCallable(m)) { return pyCall(m, [mgr, e, e, undefined]) }
+        }
+    }
+    return false
+}
+// ============================================================ CHUNK E ======
+//
+// The `re` module: the Python half of the shared regular-expression subsystem.
+// This is the line-by-line port of the WHOLE of abnf/jsrtregexpy.go.
+//
+// The ENGINE is NOT here. languages/lib/regex.js is the shared backtracking
+// matcher (the Go twin of which is abnf/jsrtregex.go), python-rt.metajs imports
+// it, and every match, group, replacement and split below goes through it -
+// exactly as Ruby's rbRx* block does. Nothing in this chunk forks it.
+//
+// Three externs come out of this file:
+//   js_pyre_module()                    Go rxPyModule
+//   js_pyrxmcall(target, name, a, kw)   Go's js_pyrxmcall wrapper over js_pymcall
+//   js_pyrxstr(v)                       Go's js_pyrxstr wrapper over js_pystr
+//
+// ONE unavoidable divergence, shared with every other language that drives this
+// engine (ruby-rt.metajs records it at rbRxMatchOf): the Go twin indexes []rune
+// where regex.js indexes UTF-16 code units. The two agree for the whole Basic
+// Multilingual Plane, and therefore for every pattern and subject in the corpus.
+// Every `text[i]` / `len(text)` in the Go bodies below is a .charAt / .length
+// here for that reason, and is called out nowhere else.
+
+// ----- CPython's re constants (sre_constants) -----
+//
+// Go spells these as untyped consts; MetaJS has no const, and the values are
+// small enough that the bitmask below stays inside the int32 & / | the floor
+// gives us.
+var pyEReI = 2
+var pyEReL = 4
+var pyEReM = 8
+var pyEReS = 16
+var pyEReU = 32
+var pyEReX = 64
+var pyEReA = 256
+
+// pyEReFlagStr is Go pyReFlagStr: the bitmask onto the engine's four neutral
+// letters. re.A is the engine's only behaviour and re.U is the py3 default, so
+// both are accepted and ignored; re.L has no locale to read.
+function pyEReFlagStr(n) {
+    var s = ""
+    if ((n & pyEReI) != 0) { s = s + "i" }
+    if ((n & pyEReS) != 0) { s = s + "s" }
+    if ((n & pyEReM) != 0) { s = s + "m" }
+    if ((n & pyEReX) != 0) { s = s + "x" }
+    return s
+}
+
+// pyERePat is Go pyRePat: Python's P-spellings onto the neutral engine's.
+// (?P<name>...) is (?<name>...) and (?P=name) is the named backreference
+// \k<name>. Escapes and character classes are stepped over, so `[(?P<]` is left
+// alone. An unknown name is the ENGINE's error to report, which is why nothing
+// is counted here.
+//
+// Go returns (string, string); MetaJS has one return, so the pair travels in a
+// record {out, err}.
+function pyERePat(src) {
+    var out = ""
+    var inCls = false
+    var i = 0
+    while (i < src.length) {
+        var ch = src.charAt(i)
+        if (ch == "\\") {
+            var end = i + 2
+            if (end > src.length) { end = src.length }
+            out = out + src.substring(i, end)
+            i = end
+            continue
+        }
+        if (inCls) {
+            if (ch == "]") { inCls = false }
+            out = out + ch
+            i = i + 1
+            continue
+        }
+        if (ch == "[") {
+            inCls = true
+            out = out + ch
+            i = i + 1
+            continue
+        }
+        if (ch != "(") {
+            out = out + ch
+            i = i + 1
+            continue
+        }
+        // Go's strings.HasPrefix(src[i:], "(?P<"); substring clamps at the end
+        // of the string, so a short tail simply fails to compare equal.
+        if (src.substring(i, i + 4) == "(?P<") {
+            var j = i + 4
+            while (j < src.length && src.charAt(j) != ">") { j = j + 1 }
+            if (j >= src.length) { return {out: "", err: "unterminated group name"} }
+            out = out + "(?<" + src.substring(i + 4, j) + ">"
+            i = j + 1
+            continue
+        }
+        if (src.substring(i, i + 4) == "(?P=") {
+            var k = i + 4
+            while (k < src.length && src.charAt(k) != ")") { k = k + 1 }
+            if (k >= src.length) { return {out: "", err: "unterminated group name"} }
+            out = out + "\\k<" + src.substring(i + 4, k) + ">"
+            i = k + 1
+            continue
+        }
+        out = out + ch
+        i = i + 1
+    }
+    return {out: out, err: ""}
+}
+
+// ----- The compile cache -----
+//
+// Go's rxGet keys a package-level map by flags + "\x00" + pattern. The neutral
+// flag string is only ever drawn from "ismx", so a space is an unambiguous
+// separator here, and the "$" prefix keeps a pattern that happens to spell an
+// Object.prototype member out of the intern table (docs/abnf-dialect-gotchas.md).
+var pyERxCache = {}
+
+function pyERxGet(pattern, flags) {
+    var key = "$" + flags + " " + pattern
+    var got = pyERxCache[key]
+    if (got !== undefined) { return got }
+    var re = rxCompile(pattern, flags)
+    pyERxCache[key] = re
+    return re
+}
+
+// ----- The three value shapes (Go rxPyIsMod / rxPyIsRe / rxPyIsMatch) -----
+//
+// All three are plain objects, so pyGetAttr already answers re.I, p.pattern,
+// p.flags, m.re and m.string without a wrapper of its own. A match additionally
+// carries the __rx* slots the engine's group machinery reads, which is what lets
+// it share Ruby's shape unchanged.
+
+function pyERxIsMod(v) {
+    if (!pyIsObj(v)) { return false }
+    return v["__pymod"] === "re"
+}
+
+function pyERxIsRe(v) {
+    if (!pyIsObj(v)) { return false }
+    return v["__pyre"] === true
+}
+
+function pyERxIsMatch(v) {
+    if (!pyIsObj(v)) { return false }
+    return v["__pymatch"] === true
+}
+
+// js_pyre_module is Go rxPyModule. `import re` binds no module object in this
+// flat import model, so the grammar declares this one into the global scope; it
+// is a plain object, which js_pygetattr reads re.I / re.DOTALL out of.
+function js_pyre_module() {
+    return {
+        __pymod: "re",
+        NOFLAG: 0,
+        A: 256, ASCII: 256,
+        I: 2, IGNORECASE: 2,
+        L: 4, LOCALE: 4,
+        M: 8, MULTILINE: 8,
+        S: 16, DOTALL: 16,
+        U: 32, UNICODE: 32,
+        X: 64, VERBOSE: 64
+    }
+}
+
+// pyERxCompile is Go (*jsrt).rxPyCompile.
+function pyERxCompile(pat, flags) {
+    var tr = pyERePat(pat)
+    if (tr["err"] != "") { fail("re.error: " + tr["err"]) }
+    var src = tr["out"]
+    var neutral = pyEReFlagStr(flags)
+    var re = pyERxGet(src, neutral)
+    if (!re["ok"]) { fail("re.error: " + re["err"]) }
+    // Python's own .flags always reports re.UNICODE for a str pattern.
+    return {__pyre: true, pattern: pat, flags: flags | pyEReU, __src: src, __nf: neutral}
+}
+
+// pyERxSlotStr reads a string slot off one of the three shapes, defaulting to ""
+// - Go's `s, _ := o.props[k].(string)` comma-ok assertion.
+function pyERxSlotStr(v, k) {
+    var s = v[k]
+    if (typeof s != "string") { s = "" }
+    return s
+}
+
+// pyERxReOf is Go rxPyReOf: the program behind a compiled PATTERN object.
+function pyERxReOf(v) {
+    return pyERxGet(pyERxSlotStr(v, "__src"), pyERxSlotStr(v, "__nf"))
+}
+
+// pyERxMkMatch is Go rxPyMkMatch composed with rxNewMatchObj: the __rx* slots of
+// the neutral match object plus Python's own __pymatch / re / string.
+function pyERxMkMatch(rv, anchoredSrc, flags, s, m) {
+    var caps = []
+    var mc = m["caps"]
+    var i = 0
+    while (i < mc.length) {
+        caps.push(mc[i])
+        i = i + 1
+    }
+    return {
+        __pymatch: true, __rxmd: true,
+        __rxsrc: anchoredSrc, __rxflags: flags, __rxtext: s, __rxcaps: caps,
+        "re": rv, "string": s
+    }
+}
+
+// pyERxMatchOf is Go rxMatchOf. Go answers three values; MetaJS has one return,
+// so the three travel in a record. The program is recovered from the match's own
+// __rxsrc/__rxflags (Go rxObjRe), NOT from the pattern object's __src/__nf: a
+// match made by re.match carries the ANCHORED source, and the two must not be
+// confused.
+function pyERxMatchOf(v) {
+    var re = pyERxGet(pyERxSlotStr(v, "__rxsrc"), pyERxSlotStr(v, "__rxflags"))
+    var text = v["__rxtext"]
+    if (typeof text != "string") { text = "" }
+    var arr = v["__rxcaps"]
+    var caps = []
+    var i = 0
+    while (i < arr.length) {
+        caps.push(Math.trunc(pyNum(arr[i])))
+        i = i + 1
+    }
+    var begin = 0
+    var end = 0
+    if (caps.length >= 2) {
+        begin = caps[0]
+        end = caps[1]
+    }
+    return {re: re, text: text, m: {begin: begin, end: end, caps: caps}}
+}
+
+// pyERxSearch is Go (*jsrt).rxPySearch. The Go body checks the engine's second
+// return and fails with "regexp: step limit exceeded"; regex.js raises that
+// itself out of rxAttempt (via the rxFail knob), so there is no second return to
+// test here and the failure text is the engine's own.
+function pyERxSearch(rv, s, from) {
+    var re = pyERxReOf(rv)
+    var m = rxSearch(re, s, from)
+    if (m === null) { return undefined }
+    return pyERxMkMatch(rv, rv["__src"], re["flags"], s, m)
+}
+
+// pyERxAnchored is Go (*jsrt).rxPyAnchoredMatch - re.match / re.fullmatch. These
+// are NOT a search plus a position check: a fullmatch has to BACKTRACK into an
+// alternation, so re.fullmatch("a|ab", "ab") is "ab" and not None. The engine's
+// own anchored entry points express both, including Python's `pos` argument -
+// and unlike the \A(?:...)\z wrapper this used to build, they have no quarrel
+// with the x flag's trailing comments.
+function pyERxAnchored(rv, s, from, whole) {
+    // The two arms are spelled out rather than assigning into one local: a local
+    // keeps the TYPE CLASS it is first assigned, so `var m = null` followed by a
+    // match object is the dialect's classic trap.
+    var re = pyERxReOf(rv)
+    if (whole) {
+        var mw = rxMatchWhole(re, s, from)
+        if (mw === null) { return undefined }
+        return pyERxMkMatch(rv, rv["__src"], re["flags"], s, mw)
+    }
+    var ma = rxMatchAt(re, s, from)
+    if (ma === null) { return undefined }
+    return pyERxMkMatch(rv, rv["__src"], re["flags"], s, ma)
+}
+
+// ----- Match accessors -----
+
+// pyERxGroupIdx is Go (*jsrt).rxPyGroupIdx. Go calls rt.fail here rather than
+// raising a Python IndexError, so this does too - the message is the Go text.
+function pyERxGroupIdx(md, key) {
+    var mo = pyERxMatchOf(md)
+    var re = mo["re"]
+    if (typeof key == "number") {
+        var i = Math.trunc(key)
+        if (i < 0 || i > re["ngroups"]) { fail("IndexError: no such group") }
+        return i
+    }
+    var gi = rxIndexOfName(re, pyToStr(key))
+    if (gi < 0) { fail("IndexError: no such group") }
+    return gi
+}
+
+// pyERxGroup is Go (*jsrt).rxPyGroup.
+function pyERxGroup(md, key) {
+    var mo = pyERxMatchOf(md)
+    var g = rxGroup(mo["re"], mo["text"], mo["m"], pyERxGroupIdx(md, key))
+    if (g === null) { return undefined }
+    return g
+}
+
+// pyERxSpan is Go (*jsrt).rxPySpan.
+function pyERxSpan(md, key, which) {
+    var mo = pyERxMatchOf(md)
+    var slot = 2 * pyERxGroupIdx(md, key) + which
+    var caps = mo["m"]["caps"]
+    if (slot >= caps.length) { return -1 }
+    return caps[slot]
+}
+
+// pyERxAppendGroups is Go rxPyAppendGroups.
+//
+// Python's None is `undefined` in this value model, and it is NOT the same value
+// as null - so every non-participating group answers undefined. That is why this
+// cannot simply be the engine's own capture array, which fills Ruby's nil.
+function pyERxAppendGroups(parts, re, text, m) {
+    var g = 1
+    while (g <= re["ngroups"]) {
+        var v = rxGroup(re, text, m, g)
+        if (v === null) { parts.push(undefined) } else { parts.push(v) }
+        g = g + 1
+    }
+}
+
+// pyERxGroups is Go rxPyGroups.
+function pyERxGroups(md) {
+    var mo = pyERxMatchOf(md)
+    var out = []
+    pyERxAppendGroups(out, mo["re"], mo["text"], mo["m"])
+    return out
+}
+
+// pyERxGroupDict is Go rxPyGroupDict. Go appends straight onto the two parallel
+// arrays (dictAppend) rather than going through a find-then-set, and group names
+// are unique, so this pushes directly too.
+function pyERxGroupDict(md) {
+    var mo = pyERxMatchOf(md)
+    var re = mo["re"]
+    var d = pyNewDict()
+    var keys = d["keys"]
+    var vals = d["vals"]
+    var names = re["names"]
+    var idx = re["nameGroups"]
+    var i = 0
+    while (i < names.length) {
+        var g = rxGroup(re, mo["text"], mo["m"], idx[i])
+        keys.push(names[i])
+        if (g === null) { vals.push(undefined) } else { vals.push(g) }
+        i = i + 1
+    }
+    return d
+}
+
+// pyERxTemplate is Go rxPyTemplate: Python's \g<1> / \g<name> onto the \1 /
+// \k<name> the engine's expander understands. The plain \1 form is already the
+// engine's own.
+function pyERxTemplate(repl) {
+    var out = ""
+    var i = 0
+    while (i < repl.length) {
+        if (repl.substring(i, i + 3) == "\\g<") {
+            var j = i + 3
+            while (j < repl.length && repl.charAt(j) != ">") { j = j + 1 }
+            var nm = repl.substring(i + 3, j)
+            var allDigit = nm.length > 0
+            var q = 0
+            while (q < nm.length) {
+                var c = nm.charCodeAt(q)
+                if (c < 48 || c > 57) { allDigit = false }
+                q = q + 1
+            }
+            if (allDigit) { out = out + "\\" + nm } else { out = out + "\\k<" + nm + ">" }
+            i = j + 1
+            continue
+        }
+        if (repl.charAt(i) == "\\") {
+            var end = i + 2
+            if (end > repl.length) { end = repl.length }
+            out = out + repl.substring(i, end)
+            i = end
+            continue
+        }
+        out = out + repl.charAt(i)
+        i = i + 1
+    }
+    return out
+}
+
+// ----- The pattern-taking operations -----
+
+// pyERxSub is Go (*jsrt).rxPySub - re.sub / re.subn. `repl` may be a CALLABLE,
+// which is why this cannot simply be the engine's rxReplace: the closure has to
+// be run per match. Go returns (string, int); the pair travels in a record here.
+//
+// Note the isFn test: Go asks "not undefined/null AND not a string", so a
+// non-callable non-string replacement is handed to the caller as a call, which
+// is what CPython does too (it raises). Ported as written.
+function pyERxSub(rv, repl, s, count) {
+    var re = pyERxReOf(rv)
+    var src = rv["__src"]
+    var out = ""
+    var isFn = !pyIsNone(repl) && typeof repl != "string"
+    var tpl = ""
+    if (!isFn) { tpl = pyERxTemplate(pyToStr(repl)) }
+    var at = 0
+    var last = 0
+    var n = 0
+    while (at <= s.length) {
+        if (count > 0 && n >= count) { break }
+        var m = rxSearch(re, s, at)
+        if (m === null) { break }
+        out = out + s.substring(last, m["begin"])
+        if (isFn) {
+            var md = pyERxMkMatch(rv, src, re["flags"], s, m)
+            out = out + pyToStr(pyCall(repl, [md]))
+        } else {
+            out = out + rxExpand(re, s, m, tpl)
+        }
+        n = n + 1
+        last = m["end"]
+        at = m["end"]
+        if (m["end"] == m["begin"]) {
+            // An empty match must still make progress or this loop never ends.
+            if (m["end"] < s.length) { out = out + s.charAt(m["end"]) }
+            last = m["end"] + 1
+            at = m["end"] + 1
+        }
+    }
+    if (last <= s.length) { out = out + s.substring(last, s.length) }
+    return {text: out, n: n}
+}
+
+// pyERxSplit is Go (*jsrt).rxPySplit - re.split. Unlike the engine's neutral
+// rxSplit, Python SPLICES the capture groups of each separator into the result,
+// so this walks the matches itself.
+function pyERxSplit(rv, s, maxsplit) {
+    var re = pyERxReOf(rv)
+    var parts = []
+    var at = 0
+    var last = 0
+    var n = 0
+    while (at <= s.length) {
+        if (maxsplit > 0 && n >= maxsplit) { break }
+        var m = rxSearch(re, s, at)
+        if (m === null) { break }
+        if (m["end"] == m["begin"]) {
+            if (m["begin"] >= s.length) { break }
+            parts.push(s.substring(last, m["begin"]))
+            pyERxAppendGroups(parts, re, s, m)
+            // Go leaves `last` at the match's own begin here, NOT begin+1.
+            last = m["begin"]
+            at = m["begin"] + 1
+            n = n + 1
+            continue
+        }
+        parts.push(s.substring(last, m["begin"]))
+        pyERxAppendGroups(parts, re, s, m)
+        last = m["end"]
+        at = m["end"]
+        n = n + 1
+    }
+    parts.push(s.substring(last, s.length))
+    return parts
+}
+
+// pyERxFindAll is Go (*jsrt).rxPyFindAll - re.findall / re.finditer: no group ->
+// the whole matches, one group -> that group, more -> the capture tuple of each
+// match (a tuple is a list in this value model).
+function pyERxFindAll(rv, s, asMatch) {
+    var re = pyERxReOf(rv)
+    var src = rv["__src"]
+    var out = []
+    var at = 0
+    while (at <= s.length) {
+        var m = rxSearch(re, s, at)
+        if (m === null) { break }
+        if (asMatch) {
+            out.push(pyERxMkMatch(rv, src, re["flags"], s, m))
+        } else if (re["ngroups"] == 0) {
+            // Go's `g, _ := re.group(...)` drops the ok here, so a null answers
+            // as "" and not as None. Group 0 always participates, so this arm is
+            // unreachable in practice; it is spelled Go's way anyway.
+            var g0 = rxGroup(re, s, m, 0)
+            if (g0 === null) { out.push("") } else { out.push(g0) }
+        } else if (re["ngroups"] == 1) {
+            var g1 = rxGroup(re, s, m, 1)
+            if (g1 === null) { out.push(undefined) } else { out.push(g1) }
+        } else {
+            var t = []
+            pyERxAppendGroups(t, re, s, m)
+            out.push(t)
+        }
+        if (m["end"] == m["begin"]) { at = m["end"] + 1 } else { at = m["end"] }
+    }
+    return out
+}
+
+// pyERxIsSpecial is the membership test of Go rxPyEscape's `special` constant,
+// "()[]{}?*+-|^$\\.&~# \t\n\r\v\f", written by code point because \v and \f are
+// not spellable as string escapes in this dialect.
+function pyERxIsSpecial(c) {
+    if (c == 40 || c == 41) { return true }        // ( )
+    if (c == 91 || c == 93) { return true }        // [ ]
+    if (c == 123 || c == 125) { return true }      // { }
+    if (c == 63 || c == 42 || c == 43) { return true }  // ? * +
+    if (c == 45 || c == 124) { return true }       // - |
+    if (c == 94 || c == 36) { return true }        // ^ $
+    if (c == 92 || c == 46) { return true }        // \ .
+    if (c == 38 || c == 126 || c == 35) { return true } // & ~ #
+    if (c == 32) { return true }                   // space
+    if (c >= 9 && c <= 13) { return true }         // \t \n \v \f \r
+    return false
+}
+
+// pyERxEscape is Go rxPyEscape - re.escape, CPython 3.7+: exactly the characters
+// in _special_chars_map.
+function pyERxEscape(s) {
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        if (c < 128 && pyERxIsSpecial(c)) { out = out + "\\" }
+        out = out + s.charAt(i)
+        i = i + 1
+    }
+    return out
+}
+
+// ----- Dispatch -----
+
+function pyEArgAt(args, i) {
+    if (i < args.length) { return args[i] }
+    return undefined
+}
+
+// pyERxArgRe is Go (*jsrt).rxPyArgRe.
+function pyERxArgRe(v, flags) {
+    if (pyERxIsRe(v)) { return v }
+    return pyERxCompile(pyToStr(v), flags)
+}
+
+// pyERxIntArg is Go rxPyIntArg: a missing or non-numeric argument is 0.
+function pyERxIntArg(args, i) {
+    if (i < args.length) {
+        if (typeof args[i] == "number") { return Math.trunc(args[i]) }
+    }
+    return 0
+}
+
+// pyERxKeyArg is Go rxPyKeyArg.
+function pyERxKeyArg(a) {
+    if (a.length > 0) { return a[0] }
+    return 0
+}
+
+// pyERxModCall is Go (*jsrt).rxPyModCall - re.f(pattern, ...). Every one of those
+// is the compiled pattern's own method with the pattern dropped, so the two entry
+// points share one body; the only difference is where the optional flags argument
+// sits.
+function pyERxModCall(name, args) {
+    if (name == "escape") { return pyERxEscape(pyToStr(pyEArgAt(args, 0))) }
+    if (name == "purge") { return undefined }
+    if (name == "compile") { return pyERxArgRe(pyEArgAt(args, 0), pyERxIntArg(args, 1)) }
+    var flpos = -1
+    if (name == "search" || name == "match" || name == "fullmatch" ||
+        name == "findall" || name == "finditer") {
+        flpos = 2
+    } else if (name == "sub" || name == "subn") {
+        flpos = 4
+    } else if (name == "split") {
+        flpos = 3
+    } else {
+        fail("unknown re function: " + name)
+    }
+    var rv = pyERxArgRe(pyEArgAt(args, 0), pyERxIntArg(args, flpos))
+    var rest = []
+    var i = 1
+    while (i < args.length && i < flpos) {
+        rest.push(args[i])
+        i = i + 1
+    }
+    return pyERxReMethod(rv, name, rest)
+}
+
+// pyERxReMethod is Go (*jsrt).rxPyReMethod.
+function pyERxReMethod(rv, name, a) {
+    if (name == "search") { return pyERxSearch(rv, pyToStr(pyEArgAt(a, 0)), pyERxIntArg(a, 1)) }
+    if (name == "match") { return pyERxAnchored(rv, pyToStr(pyEArgAt(a, 0)), pyERxIntArg(a, 1), false) }
+    if (name == "fullmatch") { return pyERxAnchored(rv, pyToStr(pyEArgAt(a, 0)), pyERxIntArg(a, 1), true) }
+    if (name == "findall") { return pyERxFindAll(rv, pyToStr(pyEArgAt(a, 0)), false) }
+    if (name == "finditer") { return pyERxFindAll(rv, pyToStr(pyEArgAt(a, 0)), true) }
+    if (name == "sub" || name == "subn") {
+        var r = pyERxSub(rv, pyEArgAt(a, 0), pyToStr(pyEArgAt(a, 1)), pyERxIntArg(a, 2))
+        if (name == "sub") { return r["text"] }
+        return [r["text"], r["n"]]
+    }
+    if (name == "split") { return pyERxSplit(rv, pyToStr(pyEArgAt(a, 0)), pyERxIntArg(a, 1)) }
+    fail("unknown Pattern method: " + name)
+    return undefined
+}
+
+// pyERxMatchMethod is Go (*jsrt).rxPyMatchMethod.
+function pyERxMatchMethod(md, name, a) {
+    if (name == "group") {
+        if (a.length == 0) { return pyERxGroup(md, 0) }
+        if (a.length == 1) { return pyERxGroup(md, a[0]) }
+        var out = []
+        var i = 0
+        while (i < a.length) {
+            out.push(pyERxGroup(md, a[i]))
+            i = i + 1
+        }
+        return out
+    }
+    if (name == "groups") { return pyERxGroups(md) }
+    if (name == "groupdict") { return pyERxGroupDict(md) }
+    if (name == "start") { return pyERxSpan(md, pyERxKeyArg(a), 0) }
+    if (name == "end") { return pyERxSpan(md, pyERxKeyArg(a), 1) }
+    if (name == "span") {
+        var k = pyERxKeyArg(a)
+        return [pyERxSpan(md, k, 0), pyERxSpan(md, k, 1)]
+    }
+    if (name == "expand") {
+        var mo = pyERxMatchOf(md)
+        return rxExpand(mo["re"], mo["text"], mo["m"], pyERxTemplate(pyToStr(pyEArgAt(a, 0))))
+    }
+    fail("unknown Match method: " + name)
+    return undefined
+}
+
+// pyERxRepr is Go rxPyRepr: a pattern and a match the way CPython's repr does,
+// so str(m)/print(m) agree with the interpreter grammar. Go returns
+// (string, bool); the pair travels in a record here.
+function pyERxRepr(v) {
+    if (pyERxIsRe(v)) {
+        var pat = v["pattern"]
+        if (typeof pat != "string") { pat = "" }
+        return {ok: true, s: "re.compile('" + pat + "')"}
+    }
+    if (pyERxIsMatch(v)) {
+        var mo = pyERxMatchOf(v)
+        var w = rxGroup(mo["re"], mo["text"], mo["m"], 0)
+        // Go's `g, _ := re.group(...)` leaves g as "" when the group did not
+        // participate; regex.js answers null there.
+        return {ok: true, s: "<re.Match object; span=(" + pyStr(mo["m"]["begin"]) + ", " +
+                             pyStr(mo["m"]["end"]) + "), match='" + (w === null ? "" : w) + "'>"}
+    }
+    return {ok: false, s: ""}
+}
+
+// ----- The externs -----
+
+// js_pyrxmcall is the method-call wrapper: the re module, a compiled pattern and
+// a match dispatch here, everything else goes straight on to js_pymcall. The
+// keyword dict is carried through untouched, exactly as the Go twin does - no re
+// method takes a keyword argument in this dialect.
+function js_pyrxmcall(target, name, args, kw) {
+    if (pyERxIsMod(target) || pyERxIsRe(target) || pyERxIsMatch(target)) {
+        if (!pyIsArr(args)) { fail("js_pyrxmcall args must be an array") }
+        var nm = pyToStr(name)
+        if (pyERxIsMod(target)) { return pyERxModCall(nm, args) }
+        if (pyERxIsRe(target)) { return pyERxReMethod(target, nm, args) }
+        return pyERxMatchMethod(target, nm, args)
+    }
+    return js_pymcall(target, name, args, kw)
+}
+
+// js_pyrxstr is str()/print() of a pattern or a match. The Go twin falls through
+// to the js_pystr extern; here it falls through to the prelude's pyStr, which is
+// that extern's whole body (Go rt.pyString).
+function js_pyrxstr(v) {
+    var r = pyERxRepr(v)
+    if (r["ok"]) { return r["s"] }
+    return pyStr(v)
+}
+
+// ===================================================== js_pymcall ===========
+//
+// abnf/jsrt.go's js_pymcall: a METHOD CALL. python-to-llvm-ir.abnf never emits it
+// directly - js_pyrxmcall (chunk E) intercepts the `re` module, a Pattern and a
+// Match first and falls through to here - so it is not in the export list the
+// emitter needs, but it IS the entry point of the whole method surface.
+function js_pymcall(target, name, args, kw) { return pyDMethodCall(target, name, args, kw) }
+
+// ============================================================================
+// CHUNK F - the builtin method table.
+//
+// Ports abnf/jsrt.go:2761  func (rt *jsrt) memberCall(target, name, args)
+// and the helpers it reaches that the prelude does not already provide:
+//   argAt            (jsrt.go:4311)
+//   rt.strictEq      (jsrt.go:1164)
+//   rt.truthy        (jsrt.go:909)
+//   rt.typeOf        (jsrt.go:1523)
+//   substringRange / clampSubstringIndex (jsrt.go:4661 / 4683)
+//   jsToInt          (jsrt.go:8486)
+//   dictParts        (jsrt.go:2322)
+//
+// The entry point is deliberately NOT prefixed: chunk D's pyDMethodCall calls
+// it by exactly this name as its final fall-through
+// (js_pyrxmcall -> js_pymcall -> pyDMethodCall -> pyMemberCall).
+//
+// A note on scope, because it looks alarmingly small for "the builtin method
+// table": Go's memberCall is the LANGUAGE-NEUTRAL dispatcher shared by Java,
+// Kotlin, Go, Dart and Python, and the only Python-reachable names in it are
+// the dict trio (keys / values / get), the list pair (append / pop) and the
+// generator protocol. Python's `.upper()`, `.split()`, `.startswith()`,
+// `.join()`, `.format()`, `.strip()`, `.replace()`, `.sort()`, `.index()`,
+// `.count()` DO NOT EXIST anywhere in abnf/jsrt.go - the Python subset does not
+// have them, and a program using one fails today with
+// "unknown String method: upper". `.items()` is not here either: the compiler
+// lowers `d.items()` to a loop over the keys before it ever emits a call
+// (languages/python-to-llvm-ir.abnf, foldCallMember), and the interpreter
+// answers it in its own grammar-level mcall. The regex methods (.group,
+// .search, .match, .sub, .findall, .span, ...) are intercepted one layer up by
+// js_pyrxmcall (abnf/jsrtregexpy.go) and never reach here.
+// ============================================================================
+
+// argAt (jsrt.go:4311): the i'th argument, or undefined past the end. Go's
+// jsUndef is spelled `undefined` here.
+function pyFArgAt(args, i) {
+    if (i < args.length) { return args[i] }
+    return undefined
+}
+
+// rt.strictEq (jsrt.go:1164), reduced to the cases a Python value can take.
+// The boxed-number arms of the Go twin (Kotlin's Char, Java's jsJFlo, the sized
+// integer jsGInt, Dart's jsDartFlo) are other languages' and cannot occur in a
+// Python heap, so they are left out rather than guessed at.
+//
+// Go's *jsBigInt arm compares by VALUE (at.v.Cmp(bt.v) == 0) and requires BOTH
+// sides to be big, so a big is never strictly equal to a plain number - that is
+// reproduced here. Everything else - undefined, null, bool, number, string, and
+// objects/arrays/closures by identity - is exactly JavaScript's ===, including
+// undefined !== null (Go's jsUndefT and jsNullT are distinct types).
+function pyFStrictEq(a, b) {
+    if (pyIsBig(a)) {
+        if (!pyIsBig(b)) { return false }
+        return pyFBigEq(a, b)
+    }
+    if (pyIsBig(b)) { return false }
+    return a === b
+}
+
+// at.v.Cmp(bt.v) == 0 over chunk A's NORMALIZED representation: two bigs are
+// equal exactly when their signs and their limb arrays match (normalization
+// pins zero to neg == false, so -0 cannot arise). Done structurally rather than
+// through pyCompare so that strict equality does not depend on the comparison
+// path having a bignum arm.
+function pyFBigEq(a, b) {
+    if (a["neg"] !== b["neg"]) { return false }
+    var x = a["limbs"]
+    var y = b["limbs"]
+    if (x.length != y.length) { return false }
+    var i = 0
+    while (i < x.length) {
+        if (x[i] != y[i]) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// rt.truthy (jsrt.go:909) - JAVASCRIPT truthiness, not Python's. This is what
+// the shared filter/count/any predicates below use, so 0, "" and NaN are falsy
+// here even though an empty list is truthy (Python would disagree about the
+// empty list; the Go twin is the specification).
+function pyFTruthy(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (typeof v == "boolean") { return v }
+    if (typeof v == "number") {
+        if (v == 0) { return false }
+        return v == v
+    }
+    if (typeof v == "string") { return byteLen(v) > 0 }
+    // A __pybig is truthy unless it is zero (Go: t.v.Sign() != 0). Tested
+    // structurally against the NORMALIZED limb array (chunk A's invariant: zero
+    // is exactly the single limb 0) rather than through pyCompare, so this does
+    // not depend on the comparison path knowing about bignums.
+    if (pyIsBig(v)) { return !pyFBigIsZero(v) }
+    return true
+}
+
+// Zero over chunk A's normalized {__pybig, neg, limbs} representation.
+function pyFBigIsZero(v) {
+    var ls = v["limbs"]
+    if (ls.length == 0) { return true }
+    return ls.length == 1 && ls[0] == 0
+}
+
+// rt.typeOf (jsrt.go:1523), for the final failure message only. The one place
+// it differs from the floor's own `typeof` is the arbitrary-precision integer:
+// Go's *jsBigInt answers "bigint", while layer 2 represents it as a plain
+// object, which `typeof` would call "object".
+function pyFTypeOf(v) {
+    if (pyIsBig(v)) { return "bigint" }
+    return typeof v
+}
+
+// clampSubstringIndex (jsrt.go:4683): NaN and negatives clamp to 0, anything
+// past the length clamps to the length.
+function pyFClampSub(f, length) {
+    if (f != f) { return 0 }
+    if (f < 0) { return 0 }
+    if (f > length) { return length }
+    return Math.trunc(f)
+}
+
+// jsToInt (jsrt.go:8486): NaN becomes 0, everything else truncates toward zero.
+// The MaxInt64/MinInt64 saturation of the Go original is unreachable here - the
+// only consumer is charAt, whose result is an out-of-range failure either way.
+function pyFToInt(f) {
+    if (f != f) { return 0 }
+    return Math.trunc(f)
+}
+
+// A fresh copy of an array - Go's append([]interface{}{}, xs...), which the
+// dict keys/values arms use so the caller cannot mutate the dict through the
+// answer. There is no Array.prototype.slice in this dialect.
+function pyFCopyArr(a) {
+    var out = []
+    var i = 0
+    while (i < a.length) {
+        out.push(a[i])
+        i = i + 1
+    }
+    return out
+}
+
+// rt.call(f, jsUndef, [e]) - the one-argument lambda call the higher-order list
+// methods make.
+function pyFCall1(f, a) { return f.apply(undefined, [a]) }
+
+// int32 truncation, which MetaJS's own `| 0` already is.
+function pyFWrap32(n) { return n | 0 }
+
+// ---------------------------------------------------------------- strings ---
+
+// The string arm of memberCall (jsrt.go:2763-2784) - the "Java style builtins".
+//
+// Go's rt.strLen / rt.strAt / rt.strRange / rt.strIndexOf all index by UTF-16
+// CODE UNIT, and the floor's own .length / .charAt / .substring / .indexOf (the
+// js_str_mem extern) are precisely those, so they are used directly rather than
+// rebuilt. Note that the prelude's pyStrLen / pyStrAt count CODE POINTS - they
+// are Go's pyStrLen, a different function - and must not be substituted here.
+//
+// gojaCharAt (jsrt.go:4527), which repairs a lone surrogate that older goja
+// hands back from charAt, is likewise already inside the floor's charAt.
+function pyFStrMethod(o, name, args) {
+    if (name == "length") { return o.length }
+    if (name == "charAt") {
+        var i = pyFToInt(pyNum(pyFArgAt(args, 0)))
+        var ch = o.charAt(i)
+        if (ch == "") { fail("charAt(" + i + ") out of range for " + pyToStr(o)) }
+        return ch
+    }
+    if (name == "equals") { return pyFStrictEq(o, pyFArgAt(args, 0)) }
+    if (name == "substring") {
+        // substringRange (jsrt.go:4661): both ends clamp, and begin > end SWAPS
+        // (unlike slice, which wraps a negative index from the end).
+        var n = o.length
+        var begin = pyFClampSub(pyNum(pyFArgAt(args, 0)), n)
+        var end = n
+        if (args.length > 1) {
+            if (args[1] !== undefined) { end = pyFClampSub(pyNum(args[1]), n) }
+        }
+        if (begin > end) {
+            var t = begin
+            begin = end
+            end = t
+        }
+        return o.substring(begin, end)
+    }
+    if (name == "indexOf") { return o.indexOf(pyToStr(pyFArgAt(args, 0))) }
+    // Go's isEmpty is len(o) == 0 - the BYTE length, which is zero exactly when
+    // the code-unit length is, so the two agree; byteLen keeps it literal.
+    if (name == "isEmpty") { return byteLen(o) == 0 }
+    fail("unknown String method: " + name)
+    return null
+}
+
+// ------------------------------------------------------------------ lists ---
+
+// The *jsArray arm (jsrt.go:2834-2913), in its original order: the Kotlin and
+// Python style list methods. Go's o.dropIdx() invalidates the array's dict
+// index cache before a mutation; layer 2 has no such cache, so those calls have
+// no counterpart and are simply absent.
+function pyFListMethod(o, name, args) {
+    if (name == "add") {
+        o.push(pyFArgAt(args, 0))
+        return true
+    }
+    if (name == "append") {
+        // Python: returns None.
+        o.push(pyFArgAt(args, 0))
+        return undefined
+    }
+    if (name == "pop" || name == "removeLast") {
+        // Python / Dart: both remove and return the last element. Go's arm takes
+        // NO index argument, so `xs.pop(0)` silently pops the last element -
+        // reproduced rather than corrected, since the Go twin is the pin.
+        if (o.length == 0) { fail("pop from empty list") }
+        return o.pop()
+    }
+    if (name == "size") { return o.length }
+    if (name == "get") {
+        var gi = Math.trunc(pyNum(pyFArgAt(args, 0)))
+        if (gi < 0 || gi >= o.length) { fail("list index " + gi + " out of range") }
+        return o[gi]
+    }
+    if (name == "contains") {
+        var ci = 0
+        while (ci < o.length) {
+            if (pyFStrictEq(o[ci], pyFArgAt(args, 0))) { return true }
+            ci = ci + 1
+        }
+        return false
+    }
+    // The Kotlin higher order methods; the argument is a lambda (closure handle).
+    if (name == "map") {
+        var mo = []
+        var mi = 0
+        while (mi < o.length) {
+            mo.push(pyFCall1(pyFArgAt(args, 0), o[mi]))
+            mi = mi + 1
+        }
+        return mo
+    }
+    if (name == "filter") {
+        var fo = []
+        var fi = 0
+        while (fi < o.length) {
+            if (pyFTruthy(pyFCall1(pyFArgAt(args, 0), o[fi]))) { fo.push(o[fi]) }
+            fi = fi + 1
+        }
+        return fo
+    }
+    if (name == "sumOf") {
+        // The Go twin accumulates through an int32, so the sum WRAPS at 32 bits.
+        var sum = 0
+        var si = 0
+        while (si < o.length) {
+            sum = pyFWrap32(sum + pyFWrap32(Math.trunc(pyNum(pyFCall1(pyFArgAt(args, 0), o[si])))))
+            si = si + 1
+        }
+        return sum
+    }
+    if (name == "forEach") {
+        var ei = 0
+        while (ei < o.length) {
+            pyFCall1(pyFArgAt(args, 0), o[ei])
+            ei = ei + 1
+        }
+        return undefined
+    }
+    if (name == "count") {
+        if (args.length == 0) { return o.length }
+        var n = 0
+        var ni = 0
+        while (ni < o.length) {
+            if (pyFTruthy(pyFCall1(pyFArgAt(args, 0), o[ni]))) { n = n + 1 }
+            ni = ni + 1
+        }
+        return n
+    }
+    if (name == "any") {
+        var ai = 0
+        while (ai < o.length) {
+            if (pyFTruthy(pyFCall1(pyFArgAt(args, 0), o[ai]))) { return true }
+            ai = ai + 1
+        }
+        return false
+    }
+    fail("unknown list method '" + name + "'")
+    return null
+}
+
+// ------------------------------------------------------------------ dicts ---
+
+// The dict prefix of the *jsObject arm (jsrt.go:2786-2803). dictParts requires
+// __dict === true AND both keys and vals to be arrays; the prelude's pyIsDict
+// is that test.
+//
+// `items` is NOT here because it is not in the Go twin: the compiler lowers
+// `d.items()` to a loop before emitting anything (python-to-llvm-ir.abnf), and
+// the interpreter answers it in its own mcall.
+function pyFDictMethod(o, name, args) {
+    if (name == "keys") { return pyFCopyArr(o["keys"]) }
+    if (name == "values") { return pyFCopyArr(o["vals"]) }
+    if (name == "get") {
+        var i = pyDictFind(o["keys"], pyFArgAt(args, 0))
+        if (i >= 0) { return o["vals"][i] }
+        if (args.length > 1) { return args[1] }
+        return undefined
+    }
+    fail("unknown dict method '" + name + "'")
+    return null
+}
+
+// ------------------------------------------------------- memberCall itself ---
+
+// memberCall (jsrt.go:2761). The method call convention the class based
+// language subsets share: instances are objects with a "__class" property
+// pointing to their class descriptor object, whose properties hold the method
+// closures (called with the instance prepended to the arguments); the lookup
+// follows the descriptor's "__super" chain, which gives single inheritance.
+// Objects without __class (class descriptors with static methods, plain objects
+// with function properties) call the property directly. Strings get the Java
+// style builtins.
+//
+// ORDER: Go dispatches on the Go TYPE, so its arms are disjoint and their order
+// is immaterial. Layer 2 has no tags, so the order here is load bearing - a
+// generator cell and a __pybig would both answer pyIsObj, and both must be
+// taken out of the way before the plain-object arm. That is the only structural
+// departure from the Go.
+function pyMemberCall(target, name, args) {
+    if (pyIsStr(target)) { return pyFStrMethod(target, name, args) }
+    if (pyIsArr(target)) { return pyFListMethod(target, name, args) }
+    if (pyIsDict(target)) { return pyFDictMethod(target, name, args) }
+    if (pyIsGen(target)) {
+        // A generator's protocol (next, return, ...) lives in its MEMBER TABLE -
+        // the *jsGenerator case of getMember - and not in a property map, so a
+        // method call resolves the member and calls it. Delegating rather than
+        // repeating the member names here keeps the two in step and stays
+        // language neutral: every member getMember exposes is callable as a
+        // method, in every grammar that emits js_mcall.
+        //
+        // Layer 2's equivalent of getMember on a generator is a member read off
+        // the floor cell, and the closure it answers is bound to the cell, so it
+        // is applied WITH the cell as its receiver (Go's getMember hands back an
+        // already-bound *boundMethod and then calls it with jsUndef; the two are
+        // the same call). Note that Python's own send/next/__next__/close never
+        // arrive here - chunk D's pyDMethodCall answers them first, with the
+        // StopIteration protocol - so this arm covers only the raw JS-shaped
+        // members such as `return`.
+        var gm = target[name]
+        if (gm !== undefined && pyIsCallable(gm)) { return gm.apply(target, args) }
+        fail("unknown method '" + name + "' on a generator")
+        return null
+    }
+    // An arbitrary-precision integer is a *jsBigInt in Go - NOT a *jsObject - so
+    // it must skip the object arm and land on the final failure, which reports
+    // its type as "bigint".
+    if (!pyIsBig(target) && pyIsObj(target)) {
+        var cls = target["__class"]
+        if (cls !== undefined) {
+            // The lookup follows the __super chain (single inheritance).
+            while (cls !== undefined && cls !== null) {
+                if (!pyIsObj(cls)) { break }
+                var m = cls[name]
+                if (m !== undefined && pyIsCallable(m)) {
+                    var argv = [target]
+                    var i = 0
+                    while (i < args.length) {
+                        argv.push(args[i])
+                        i = i + 1
+                    }
+                    return m.apply(undefined, argv)
+                }
+                cls = cls["__super"]
+            }
+            fail("unknown method '" + name + "' on an instance")
+            return null
+        }
+        // Go reads o.props[name] - the object's OWN property map. A bare member
+        // read here also sees Object.prototype under goja, so a method call
+        // literally named "toString" / "valueOf" / "constructor" on a plain
+        // object would find an inherited function and call it instead of
+        // failing. The same collision is left standing in chunk D's instance arm
+        // and in pyGetAttr, because guarding it with a "$" prefix here would
+        // desynchronize this lookup from the one that stores the attributes.
+        var own = target[name]
+        if (own !== undefined && pyIsCallable(own)) { return own.apply(undefined, args) }
+        fail("unknown method '" + name + "'")
+        return null
+    }
+    fail("method call '" + name + "' on a " + pyFTypeOf(target))
+    return null
+}
