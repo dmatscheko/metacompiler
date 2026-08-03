@@ -1,10 +1,12 @@
 // php-rt.metajs -- PHP'S OWN SEMANTICS, in MetaJS. Layer 2 of
 // docs/runtime-next-plan.md part 3, for the second language after the Lua pilot.
 //
-// languages/php-to-llvm-ir.abnf emits handle IR that calls 101 js_* externs for
-// its own full-syntax ratchet (107 over every php test in tests/). 28 of them are
+// languages/php-to-llvm-ir.abnf emits handle IR that calls 100 js_* externs for
+// its own full-syntax ratchet (106 over every php test in tests/). 31 of them are
 // generic primitives languages/lib/runtime.c already provides (the C floor,
-// layer 1). The rest are here.
+// layer 1) - js_genfn and js_yield joined that list on 2026-08-03, which is why
+// they are no longer defined here. The other 75 are, plus two loud stubs for
+// js_phthis / js_phclslookup, which the emitter lowers itself now.
 //
 // Compile with:
 //     mec languages/metajs-to-llvm-ir.abnf languages/lib/php-rt.metajs -q -rt-lib
@@ -54,30 +56,36 @@
 //     a {__isclass} object ==  a class descriptor, built by the emitter.
 //     any other object     ==  a PHP object instance.
 //
-// ----- THE THREE WALLS -------------------------------------------------------
+// ----- THE THREE WALLS, ALL THREE CLOSED --------------------------------------
 //
-// Three groups of extern CANNOT be written here at all, and each is a missing
-// FLOOR primitive rather than anything about PHP. They are the finding this port
-// exists to produce, because they apply to the remaining nine languages too.
+// Three groups of extern could not be written here at all when this file was
+// first written, and each was a missing FLOOR primitive rather than anything
+// about PHP. That was the finding the port existed to produce, and it is why
+// they are still described: the remaining nine languages meet the same three.
+// All three are closed now, and the answer to each is recorded at the site.
 //
 //  1. COROUTINES - js_genfn / js_yield. A generator suspends a call stack and
-//     resumes it later. The Go twin does it with a goroutine and two channels.
-//     The C floor has setjmp/longjmp (js_throw/js_try), which can UNWIND a stack
-//     but cannot resume one, and MetaJS has no continuations. There is no
-//     spelling of this in layer 2. The stubs below make DECLARING a generator
-//     harmless and make USING one abort with a named message, so the failure can
-//     never be silent.
+//     resumes it later. The Go twin does it with a goroutine and two channels;
+//     setjmp/longjmp (js_throw/js_try) can UNWIND a stack but cannot resume one,
+//     and MetaJS has no continuations, so there was NO spelling of this in layer
+//     2 at any effort. CLOSED IN THE FLOOR (2026-08-03): languages/lib/runtime.c
+//     has real stackful coroutines as tags 15 and 16, and js_genfn / js_yield are
+//     therefore NOT defined here - defining them again is a hard
+//     `ld: duplicate symbol '_js_genfn'`. The floor exposes one member, next(v),
+//     and PHP's whole Generator class is layer 2 over it: see phGenCall.
 //
 //  2. AN OBJECT'S OWN KEYS - needed by var_dump of an object (js_phdump), by
 //     `==` between two objects (js_pheq/js_phne/js_phcmp), by (array) on an
-//     object (js_phcast) and by clone (js_phclone). The floor ALREADY HAS this
-//     as the js_keys extern - it went in for the Lua pilot - but an extern is
-//     only callable from an EMITTER. MetaJS has no for..in and the floor seeds no
-//     `Object`, so layer 2 cannot reach it. The fix is one line of
-//     languages/lib/runtime.c (a seed_root for a `keysOf` host builtin over the
-//     js_keys that is already there) plus its twin in abnf/jsrtint.go's
-//     giBindings, and it is language-NEUTRAL. Reported rather than made: the C
-//     floor is owned by another agent this session.
+//     object (js_phcast) and by clone (js_phclone). The floor always HAD this as
+//     the js_keys extern - it went in for the Lua pilot - but an extern is only
+//     callable from an EMITTER, MetaJS has no for..in and the floor seeded no
+//     `Object`, so layer 2 could not reach it. CLOSED (2026-08-03) by the
+//     language-NEUTRAL fix this file asked for: `keysOf` is a host builtin in all
+//     three engines now (seed_root id 61 in runtime.c over the same js_keys,
+//     keysBindings in abnf/jsrtint.go, metajs-interpreter.abnf). It answers an
+//     object's own keys in INSERTION order and already skips the __-prefixed
+//     slots, which is phpHiddenProp's rule exactly - so the four sites read it
+//     straight, and only js_phclone has to put __class back by hand.
 //
 //  3. THE SCOPE CHAIN - js_phthis, js_phclslookup and js_phrtinit each take a
 //     SCOPE handle and walk it. A scope is the floor's private storage; the Lua
@@ -307,6 +315,10 @@ function phIsObj(v) {
     if (v["__isclass"] !== undefined) { return false }
     if (phFloOf(v) !== undefined) { return false }
     if (phIsList(v)) { return false }
+    // A generator is not a *jsObject in the Go twin either (phpIsObj takes only
+    // that type), and it has no own properties to enumerate - so it must not
+    // reach keysOf, which refuses anything that is not tag 6.
+    if (phIsGen(v)) { return false }
     return true
 }
 
@@ -1445,19 +1457,53 @@ function phDump(v, ind) {
         return out + pad + "}\n"
     }
     if (phIsObj(v)) {
-        // WALL 2. var_dump of an object has to list the instance properties in
-        // insertion order, and layer 2 cannot enumerate an object's own keys: the
-        // floor HAS js_keys, but an extern is only callable from an emitter, and
-        // MetaJS has neither for..in nor an Object global. See the header.
-        fail("php layer 2: var_dump of an object needs an object-key enumeration primitive in the C floor (js_keys is there but MetaJS cannot reach it) - see languages/lib/php-rt.metajs, WALL 2")
+        // WALL 2 IS CLOSED. keysOf is a host builtin in all three engines now (host
+        // id 61 of languages/lib/runtime.c over the js_keys that was always there,
+        // keysBindings in abnf/jsrtint.go, metajs-interpreter.abnf), and it answers
+        // an object's OWN keys in INSERTION order, already skipping the internal
+        // __-prefixed slots - which is exactly phpHiddenProp's rule in the Go twin,
+        // so no filtering is needed here.
+        var names = keysOf(v)
+        var oout = pad + "object(" + phClassName(v) + ")#" + phStr(phDumpID(v)) +
+                   " (" + phStr(names.length) + ") {\n"
+        var j = 0
+        while (j < names.length) {
+            oout = oout + pad + "  [\"" + names[j] + "\"]=>\n"
+            oout = oout + phDump(phDeref(v[names[j]]), ind + 2)
+            j = j + 1
+        }
+        return oout + pad + "}\n"
     }
     return pad + "NULL\n"
 }
 
-// phObjPropsEq compares two instances property by property with ==. It needs the
-// same enumeration WALL 2 records, and for the same reason.
+// phObjPropsEq compares two instances property by property with ==: every own
+// non-hidden key of a has to be present in b and loosely equal there, and the two
+// counts have to match. keysOf drops the hidden keys for us, so the count test is
+// the two lengths.
 function phObjPropsEq(a, b) {
-    fail("php layer 2: == between two objects needs an object-key enumeration primitive in the C floor - see languages/lib/php-rt.metajs, WALL 2")
+    var ka = keysOf(a)
+    var kb = keysOf(b)
+    if (ka.length != kb.length) { return false }
+    var i = 0
+    while (i < ka.length) {
+        var k = ka[i]
+        // b.props[k] has to be PRESENT, not merely undefined: the Go twin's
+        // `bv, has := b.props[k]` answers false on a missing key even when a's
+        // value is null. The key lists are the only membership test layer 2 has.
+        if (!phNameIn(kb, k)) { return false }
+        if (!phLoose(a[k], b[k])) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+function phNameIn(names, k) {
+    var i = 0
+    while (i < names.length) {
+        if (names[i] === k) { return true }
+        i = i + 1
+    }
     return false
 }
 
@@ -1473,7 +1519,14 @@ function phCast(kind, v) {
         var out = phNewArr()
         if (phIsNull(v)) { return out }
         if (phIsObj(v)) {
-            fail("php layer 2: (array) on an object needs an object-key enumeration primitive in the C floor - see languages/lib/php-rt.metajs, WALL 2")
+            // (array) $obj is the instance's own non-hidden properties, in
+            // insertion order - keysOf's exact answer.
+            var ks = keysOf(v)
+            var i = 0
+            while (i < ks.length) {
+                phArrSet(out, ks[i], v[ks[i]])
+                i = i + 1
+            }
             return out
         }
         phArrPush(out, v)
@@ -1486,21 +1539,159 @@ function phCast(kind, v) {
 
 // ===================================================== generators ===========
 //
-// WALL 1. A generator suspends a call stack; the C floor can unwind one
-// (setjmp/longjmp, behind js_throw/js_try) but cannot resume one, and MetaJS has
-// no continuations. js_genfn therefore still WRAPS the body - so merely declaring
-// a generator function costs nothing and a program that never runs one links and
-// runs unchanged - and the marker it produces aborts the moment it is used.
+// WALL 1 IS CLOSED. The C floor has real stackful coroutines (tags 15 and 16 of
+// languages/lib/runtime.c: js_genfn wraps a closure into a generator FUNCTION,
+// calling that makes a generator, js_yield suspends the body and gen_next
+// resumes it), so js_genfn and js_yield are NOT defined here - defining them
+// again is a hard `ld: duplicate symbol '_js_genfn'`, not a shadow.
+//
+// What the floor owns is the SUSPENSION and exactly one member on a generator:
+//
+//     g.next(v)  ->  {value, done}
+//
+// Everything PHP's Generator class adds on top of that - current / key / valid /
+// rewind / send / getReturn, and the auto-keys a keyless `yield` gets - is the
+// INSPECTION half of the iterator protocol, which answers from the LAST
+// handshake instead of performing one. That half is language-specific and it
+// lives here, function for function with the *jsGenerator case of getMember in
+// abnf/jsrt.go.
 
+// A generator is a floor CELL, not an object: nothing can be stored on it,
+// `typeof` answers "object" (type_of in runtime.c), and `next` is the only
+// member get_member answers on it - every other key reads back undefined. That
+// is the probe, and it is exact because every other shape layer 2 can see is
+// excluded first: an array box (__dict), a reference cell, a class descriptor,
+// a raw MetaJS list and an instance (whose methods live on its __class and never
+// as own properties, so an instance never has a callable own `next`).
 function phIsGen(v) {
     if (v === undefined) { return false }
     if (v === null) { return false }
     if (typeof v != "object") { return false }
-    return v["__phgen"] === true
+    if (v["__dict"] === true) { return false }
+    if (v["__refcell"] !== undefined) { return false }
+    if (v["__isclass"] !== undefined) { return false }
+    if (v["__class"] !== undefined) { return false }
+    if (typeof v["length"] == "number") { return false }
+    return typeof v["next"] == "function"
 }
 
-function phGenFail() {
-    fail("php layer 2: generators need a coroutine primitive the C floor does not have (js_yield suspends and resumes a call stack; setjmp/longjmp can only unwind) - see languages/lib/php-rt.metajs, WALL 1")
+// The per-generator cursor cannot be stored ON the generator, so it is kept in
+// one side table keyed by IDENTITY - the same shape phDumpSeen uses, because the
+// frozen subset has no Map. A step is O(n) in the generators a program has ever
+// created; the Go twin leaks one parked goroutine per generator in exactly the
+// same way, and nothing in tests/ makes more than a handful.
+var phGenCell = []
+var phGenSt = []
+
+function phGenState(g) {
+    var i = 0
+    while (i < phGenCell.length) {
+        if (phGenCell[i] === g) { return phGenSt[i] }
+        i = i + 1
+    }
+    var st = {}
+    st["started"] = false
+    st["done"] = false
+    st["last"] = null      // the value of the last handshake (current())
+    st["key"] = null       // its key (key()): the yielded one, or the auto index
+    st["ret"] = null       // the body's return value, once done (getReturn())
+    st["auto"] = 0
+    phGenCell.push(g)
+    phGenSt.push(st)
+    return st
+}
+
+// One handshake. The record the floor answers is returned UNCHANGED, because the
+// emitter reads .value and .done off it (and unpacks the __genkv record itself);
+// what happens here is only the bookkeeping the inspection half reads.
+function phGenStep(g, sent) {
+    var st = phGenState(g)
+    if (st["done"]) {
+        var end = {}
+        end["value"] = undefined
+        end["done"] = true
+        return end
+    }
+    st["started"] = true
+    var r = g.next(sent)
+    if (phTest(r["done"])) {
+        st["done"] = true
+        st["ret"] = r["value"]
+        st["last"] = null
+        st["key"] = null
+        return r
+    }
+    // 'yield k => v' hands its key over inside the {__genkv, k, v} record the
+    // emitter builds (genSplitKV in abnf/jsrt.go); anything else is the value
+    // itself, keyed by the running index - which is what a keyless yield means.
+    var raw = anytype
+    raw = r["value"]
+    var kv = false
+    if (raw !== undefined && raw !== null && typeof raw == "object") { kv = raw["__genkv"] === true }
+    if (kv) {
+        st["key"] = raw["k"]
+        st["last"] = raw["v"]
+    } else {
+        st["key"] = st["auto"]
+        st["last"] = raw
+    }
+    st["auto"] = st["auto"] + 1
+    return r
+}
+
+// current() and key() on a generator nobody has stepped yet run the body up to
+// its first yield first - PHP's Generator does exactly this.
+function phGenPrime(g) {
+    var st = phGenState(g)
+    if (!st["started"]) {
+        if (!st["done"]) { phGenStep(g, undefined) }
+    }
+}
+
+// The whole of PHP's Generator surface, over that one primitive.
+function phGenCall(g, name, args) {
+    var a0 = anytype
+    a0 = undefined
+    if (args !== undefined && args !== null) {
+        if (args.length > 0) { a0 = args[0] }
+    }
+    if (name == "next") { return phGenStep(g, a0) }
+    if (name == "send") {
+        // send(v) resumes with v and answers the value yielded NEXT, which is the
+        // shape PHP and Python share; the {value, done} record is next()'s. A send
+        // to a fresh generator primes it first.
+        var sst = phGenState(g)
+        if (!sst["started"]) { phGenStep(g, undefined) }
+        phGenStep(g, a0)
+        if (sst["done"]) { return null }
+        return sst["last"]
+    }
+    if (name == "return") {
+        // generator.return(v): abandon the body without resuming it.
+        var fst = phGenState(g)
+        fst["done"] = true
+        fst["ret"] = a0
+        fst["last"] = null
+        fst["key"] = null
+        var fin = {}
+        fin["value"] = a0
+        fin["done"] = true
+        return fin
+    }
+    phGenPrime(g)
+    var st = phGenState(g)
+    if (name == "current") {
+        if (st["done"]) { return null }
+        return st["last"]
+    }
+    if (name == "key") {
+        if (st["done"]) { return null }
+        return st["key"]
+    }
+    if (name == "valid") { return !st["done"] }
+    if (name == "rewind") { return null }
+    if (name == "getReturn") { return st["ret"] }
+    fail("unknown method '" + name + "' on a generator")
     return null
 }
 
@@ -1561,7 +1752,7 @@ function phWrap32(n) {
 // __class/__super chain, and call the method with the TARGET as its first
 // argument and `this` undefined, which is how the emitter compiles a method.
 function js_mcall(recv, name, args) {
-    if (phIsGen(recv)) { return phGenFail() }
+    if (phIsGen(recv)) { return phGenCall(recv, name, args) }
     if (recv !== undefined && recv !== null && typeof recv == "object") {
         var cls = recv["__class"]
         if (cls !== undefined) {
@@ -1905,11 +2096,33 @@ function js_phcatch(v, types) {
 }
 
 // PHP's `clone`: a shallow copy of the instance (array properties are values, so
-// they copy) whose __clone hook runs on the COPY. WALL 2 again.
+// they copy) whose __clone hook runs on the COPY.
+//
+// The one place keysOf is not enough on its own: it SKIPS the __-prefixed slots,
+// and the copy has to keep its class. __class is the only hidden slot the emitter
+// ever puts on an instance (php-to-llvm-ir.abnf writes it at object creation and
+// at enum-case creation; everything else __-prefixed lives on the class
+// DESCRIPTOR), so restoring that one is the whole difference from the Go twin's
+// walk over o.keys.
 function js_phclone(v) {
     if (!phIsObj(v)) { return v }
-    fail("php layer 2: clone needs an object-key enumeration primitive in the C floor - see languages/lib/php-rt.metajs, WALL 2")
-    return v
+    var out = {}
+    var ks = keysOf(v)
+    var i = 0
+    while (i < ks.length) {
+        out[ks[i]] = phArrCopy(v[ks[i]])
+        i = i + 1
+    }
+    var cls = v["__class"]
+    if (cls !== undefined) {
+        out["__class"] = cls
+        var owner = phOwner(cls, "__clone")
+        if (owner !== undefined) {
+            var m = owner["__clone"]
+            if (typeof m == "function") { m.apply(undefined, [out]) }
+        }
+    }
+    return out
 }
 
 // The 'static::' class inside a method body: the runtime class of $this when
@@ -2087,18 +2300,10 @@ function js_phpfa(bound, supplied, forward) {
     return out
 }
 
-// ----- generators: WALL 1 ---------------------------------------------------
-
-// Wrap a compiled closure into a generator FUNCTION: calling the result does not
-// run the body but hands back a generator object over it. The wrapper is real, so
-// DECLARING a generator function is free; the object it makes aborts on use.
-function js_genfn(body) {
-    return function () {
-        var g = {}
-        g["__phgen"] = true
-        return g
-    }
-}
-
-// 'yield v' from inside a generator body.
-function js_yield(v) { return phGenFail() }
+// ----- generators -----------------------------------------------------------
+//
+// js_genfn and js_yield are NOT here. They are the C floor's (tags 15 and 16 of
+// languages/lib/runtime.c) and defining them again is a hard
+// `ld: duplicate symbol '_js_genfn'`. PHP's Generator class is layer 2 over the
+// floor's one member - see the generators section above, and phGenCall, which
+// js_mcall dispatches to.

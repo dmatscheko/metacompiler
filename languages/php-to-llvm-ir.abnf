@@ -5411,30 +5411,31 @@ KwInstanceof = "instanceof" KwEnd ;
         return mn.substring(0, cut + 1) + "lib/" + name
     }
 
-    // ----- the native build is REAL, but its SUITE ROW is held back -------------
+    // ----- the native build -----------------------------------------------------
     //
-    // `-exe PATH` below works and produces a self-contained native binary out of
+    // `-exe PATH` below produces a self-contained native binary out of
     // lib/runtime.ll (the C floor) and lib/php-rt.ll (PHP's layer 2). Reproduce it
     // by hand with:
     //
-    //     mec languages/php-to-llvm-ir.abnf tests/php-test-features.php -q \
+    //     mec languages/php-to-llvm-ir.abnf tests/php-test-full.php -q \
     //         -exe /tmp/php-native.out && /tmp/php-native.out
     //
-    // What is NOT ready is the whole-language row in tests/clang-check.sh, which
-    // builds and runs tests/php-test-full.php natively. Two runtime primitives the
-    // C floor does not have keep that file from passing: object-key enumeration
-    // (var_dump of an object, `==` between objects, `(array)`, `clone`) and
-    // coroutines (generators). Those are WALL 2 and WALL 1 of
-    // docs/runtime-next-plan.md part 3, and 221 of the ratchet's 306 assertions do
-    // pass natively today.
+    // which prints `full: 306 checks, 0 failures` - byte-identical with llvm.Run
+    // on stdout, on stderr and in its exit code.
     //
-    // Holding the row is deliberate. A permanently RED suite destroys its own
-    // signal: every reader has to remember that this one is expected to fail, and
-    // the first genuine regression hides behind it. The marker on the line below
-    // is what clang-check.sh reads, and REMOVING THAT ONE LINE is the whole change
-    // once the floor has both primitives.
-    //
-    // clang-check: native-row-held
+    // This grammar CARRIED the row-held marker tests/clang-check.sh greps for
+    // (see the comment at its call site; the literal is deliberately not repeated
+    // here, because repeating it would hold the row again) until 2026-08-03, so
+    // that the suite printed a HELD row instead of building and running
+    // tests/php-test-full.php natively: two floor primitives were missing -
+    // object-key enumeration and coroutines, WALL 2 and WALL 1 of
+    // docs/runtime-next-plan.md part 3 - and 85 of the 306 assertions could not
+    // pass, so the row would have been permanently RED, which destroys its own
+    // signal because the next genuine regression hides behind a failure readers
+    // have learned to expect. Both primitives landed in languages/lib/runtime.c
+    // (keysOf as host id 61, and the tag-15/16 coroutines behind js_genfn /
+    // js_yield / gen_next), layer 2 was written over them in lib/php-rt.metajs,
+    // and the marker is deleted: php is an ordinary run-it row now.
     if (c.exePath != undefined && c.exePath != "") {
         emitJsMain()
         emitDispatch()

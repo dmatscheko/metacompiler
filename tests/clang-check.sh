@@ -126,13 +126,19 @@ for f in tests/*-test-full.*; do
         # -exe without it, so a silent no-op cannot look like a native build),
         # while this row answers "does its whole ratchet PASS natively yet".
         #
-        # php is the first language where those diverge: it links, and 221 of its
-        # 306 ratchet assertions agree byte-for-byte with llvm.Run, but the rest
-        # need two primitives the C floor does not have (object-key enumeration and
-        # coroutines - WALL 2 and WALL 1 of docs/runtime-next-plan.md part 3). The
-        # row would therefore be permanently RED, and a permanently red row destroys
-        # its own signal: readers learn to expect the failure and the next genuine
-        # regression hides behind it.
+        # php was the first language where those diverged, and is also the proof
+        # that holding the row is the right move rather than a euphemism for
+        # failure. It linked, and 221 of its 306 ratchet assertions agreed
+        # byte-for-byte with llvm.Run, but the rest needed two primitives the C
+        # floor did not have (object-key enumeration and coroutines - WALL 2 and
+        # WALL 1 of docs/runtime-next-plan.md part 3). Leaving the row RED would
+        # have destroyed its own signal: readers learn to expect the failure and
+        # the next genuine regression hides behind it. So the row was held, the
+        # two primitives were built, and php now passes 306/306 with the marker
+        # deleted - which is all that turning a held row back on ever takes.
+        #
+        # No language holds the row today. The mechanism stays because the next
+        # migration will need it: js, typescript and python are still to come.
         #
         # A grammar opts out with one comment line, `clang-check: native-row-held`,
         # and the row below says so rather than going quiet. Deleting that line from
