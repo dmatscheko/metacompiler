@@ -301,31 +301,38 @@ long to_uint32(long bits) {
  * allocator here must keep is: between an ar_alloc and the store of its result
  * into a reachable object, do not allocate again. Checked at every site.
  *
- * A candidate word is accepted only when it is the EXACT payload address of a
- * live block, which the per-chunk start bitmap answers in constant time. An
- * INTERIOR pointer (scope_put's `vals = names + nc`) is therefore not a root on
- * its own - and does not need to be: its block is always also owned by a cell
- * that is itself reachable, and the block is marked from there.
+ * INTERIOR POINTERS ARE ROOTS. The first version required an exact block
+ * address and that was unsound at -O2 - see gc_try. Resolving one is exact and
+ * constant time here: a block's address is base + idx * bsize, so the index is a
+ * division.
  *
- * LAYOUT. Every allocation is a BLOCK: a 16 byte header and a 16 byte aligned
- * payload. The handle of a cell is the address of its PAYLOAD, so nothing
- * outside this section ever sees a header.
- *     w[0]  total size of the block in bytes, header included
- *     w[1]  bit 0 "on a free list", bit 1 "the payload is a Cell",
- *           and the MARK EPOCH in bits 8 and up (so a collection never has to
- *           walk the heap to CLEAR marks - it just bumps the epoch)
- *     w[2]  while free: the next free block
- * A chunk is a malloc'd slab: [0] next chunk, [1] payload capacity, [2] payload
- * bytes handed out, [3] the start bitmap (one bit per 16 bytes, set when a block
- * is carved). Blocks are never coalesced and never moved, so a bit once set
- * stays true and the bitmap needs no rebuilding.
+ * LAYOUT: SIZE-CLASS REGIONS WITH THE METADATA IN SIDE BITMAPS, AND NO PER-BLOCK
+ * HEADER AT ALL. The first collector (1cd6a41) gave every allocation a 16 byte
+ * header holding its size, two flags and a mark epoch, and that header cost
+ * +25.4% of allocation - 4,557 bytes per iteration of the Lua benchmark against
+ * 3,633 without a collector. It is gone: a CHUNK serves exactly one size class
+ * and one kind, so the size and the kind are properties of the chunk, and the
+ * "allocated" and "marked" flags are one bit each in two side bitmaps indexed by
+ * the block's slot number. A handle IS the block address; there is nothing in
+ * front of it.
+ *
+ *   chunk: [0] next chunk   [1] block size   [2] slot count   [3] slots bumped
+ *          [4] alloc bitmap [5] mark bitmap  [6] kind (1 = cells)  [7] unused
+ *          then 128 bytes of header padding, and the blocks
+ *
+ * A block over 1024 bytes gets a chunk of its own (one slot), so the scheme is
+ * uniform and the sweep has no special case. Blocks are never moved, never
+ * coalesced and never split, so a slot number means the same thing for ever.
+ *
+ * The mark bitmap is CLEARED at the start of a collection rather than carrying
+ * an epoch, which is what the header used to buy: clearing is heap/bsize/8
+ * bytes - 6 KB for a 3 MB heap of cells - against 16 bytes on every object.
  */
 
 long AR_CHUNKS;      /* head of the chunk list */
-long AR_CUR;         /* the chunk bump allocation is running in */
-long GC_FREE[65];    /* free lists by size class = size / 16, classes 2..64 */
-long GC_BIG;         /* free blocks over 1024 bytes, first fit */
-long GC_EPOCH;
+long AR_PART[130];   /* the current bump chunk per partition = class * 2 + kind */
+long GC_FREE[130];   /* free lists by partition; the next pointer is in the payload */
+long GC_BIG;         /* free blocks over 1024 bytes: [0] next, [1] size, first fit */
 long GC_ON;          /* 0 during boot and inside a collection */
 long GC_MODE;        /* 0 auto, 1 never, 2 at every allocation, 3 = 2 + poison */
 long GC_ALLOCED;
@@ -343,133 +350,150 @@ long PIN_N;
 
 void gc_collect(void);
 
-long chunk_new(long payload) {
-	long c = (long)malloc(payload + 32);
-	long nb = payload / 128 + 8;
+/* One bit per slot, in a malloc'd side array. */
+void bit_set(long bm, long i) {
+	char *b = (char *)bm;
+	long one = 1;
+	b[i >> 3] = (char)(((long)b[i >> 3] & 255) | (one << (i & 7)));
+}
+void bit_clr(long bm, long i) {
+	char *b = (char *)bm;
+	long one = 1;
+	b[i >> 3] = (char)(((long)b[i >> 3] & 255) & (255 - (one << (i & 7))));
+}
+int bit_get(long bm, long i) {
+	char *b = (char *)bm;
+	return (int)(((((long)b[i >> 3]) & 255) >> (i & 7)) & 1);
+}
+long bm_new(long nblk) {
+	long nb = (nblk + 7) / 8 + 1;
 	long bm = (long)malloc(nb);
-	long *w = (long *)c;
 	char *b = (char *)bm;
 	long i = 0;
 	while (i < nb) { b[i] = 0; i = i + 1; }
+	return bm;
+}
+
+/* A chunk of `nblk` blocks of `bsize` bytes each, all of one kind. */
+long chunk_new(long bsize, long nblk, long kind) {
+	long c = (long)malloc(bsize * nblk + 128);
+	long *w = (long *)c;
 	w[0] = AR_CHUNKS;
-	w[1] = payload;
-	w[2] = 0;
-	w[3] = bm;
+	w[1] = bsize;
+	w[2] = nblk;
+	w[3] = 0;
+	w[4] = bm_new(nblk);
+	w[5] = bm_new(nblk);
+	w[6] = kind;
+	w[7] = 0;
 	AR_CHUNKS = c;
-	GC_HEAP = GC_HEAP + payload;
+	GC_HEAP = GC_HEAP + bsize * nblk;
 	return c;
 }
 
-void bm_set(long c, long off) {
-	long *w = (long *)c;
-	char *b = (char *)w[3];
-	long idx = off >> 4;
-	long by = idx >> 3;
-	long one = 1;
-	b[by] = (char)(((long)b[by] & 255) | (one << (idx & 7)));
-}
-int bm_get(long c, long off) {
-	long *w = (long *)c;
-	char *b = (char *)w[3];
-	long idx = off >> 4;
-	return (int)(((((long)b[idx >> 3]) & 255) >> (idx & 7)) & 1);
+/* Which chunk holds address v, or 0. The chunk list is walked linearly, as it
+ * was before: a heap of a few megabytes is a handful of chunks. */
+long chunk_of(long v) {
+	long c = AR_CHUNKS;
+	while (c != 0) {
+		long *w = (long *)c;
+		long off = v - c - 128;
+		if (off >= 0 && off < w[1] * w[2]) { return c; }
+		c = w[0];
+	}
+	return 0;
 }
 
-/* A block of exactly `need` bytes: the free list of its size class, then the
- * big-block list, then a bump out of the current chunk, then a new chunk. */
-long ar_block(long need) {
+/* A block of exactly `need` bytes and kind `kind`: the partition's free list,
+ * then a bump in the partition's current chunk, then a new chunk. A block over
+ * 1024 bytes comes from the big free list or a chunk of its own. */
+long ar_block(long need, long kind) {
 	long cls = need >> 4;
 	long b;
-	long *w;
-	if (cls <= 64) {
-		b = GC_FREE[cls];
-		if (b != 0) { w = (long *)b; GC_FREE[cls] = w[2]; return b; }
-	} else {
+	if (cls > 64) {
 		long prev = 0;
 		b = GC_BIG;
 		while (b != 0) {
-			w = (long *)b;
-			if (w[0] >= need) {
-				if (prev == 0) { GC_BIG = w[2]; }
-				else { long *pw = (long *)prev; pw[2] = w[2]; }
+			long *w = (long *)b;
+			if (w[1] >= need) {
+				long c = chunk_of(b);
+				long *cw = (long *)c;
+				if (prev == 0) { GC_BIG = w[0]; }
+				else { long *pw = (long *)prev; pw[0] = w[0]; }
+				bit_set(cw[4], 0);
 				return b;
 			}
 			prev = b;
-			b = w[2];
+			{ long *nw = (long *)b; b = nw[0]; }
 		}
-	}
-	if (AR_CUR != 0) {
-		long *cw = (long *)AR_CUR;
-		long off = cw[2];
-		long tail;
-		if (off + need <= cw[1]) {
-			cw[2] = off + need;
-			b = AR_CUR + 32 + off;
-			bm_set(AR_CUR, off);
-			w = (long *)b;
-			w[0] = need;
-			return b;
-		}
-		/* The tail is too small for THIS request, and AR_CUR is about to move on.
-		 * Carve it as a free block rather than losing it: one large allocation
-		 * would otherwise abandon up to its own size of a perfectly good chunk,
-		 * every time, which is a leak again by another name. */
-		tail = cw[1] - off;
-		if (tail >= 32) {
-			long tb = AR_CUR + 32 + off;
-			long *tw = (long *)tb;
-			long tcls = tail >> 4;
-			cw[2] = cw[1];
-			bm_set(AR_CUR, off);
-			tw[0] = tail;
-			tw[1] = 1;
-			if (tcls <= 64) { tw[2] = GC_FREE[tcls]; GC_FREE[tcls] = tb; }
-			else { tw[2] = GC_BIG; GC_BIG = tb; }
+		{
+			long c = chunk_new(need, 1, kind);
+			long *cw = (long *)c;
+			cw[3] = 1;
+			bit_set(cw[4], 0);
+			return c + 128;
 		}
 	}
 	{
-		long want = 1048576;
-		long c;
-		long *cw;
-		while (want < need) { want = want * 2; }
-		c = chunk_new(want);
-		AR_CUR = c;
-		cw = (long *)c;
-		cw[2] = need;
-		bm_set(c, 0);
-		b = c + 32;
-		w = (long *)b;
-		w[0] = need;
-		return b;
+		long part = cls * 2 + kind;
+		long cur;
+		b = GC_FREE[part];
+		if (b != 0) {
+			long c = chunk_of(b);
+			long *cw = (long *)c;
+			{ long *fw = (long *)b; GC_FREE[part] = fw[0]; }
+			bit_set(cw[4], (b - c - 128) / need);
+			return b;
+		}
+		cur = AR_PART[part];
+		if (cur != 0) {
+			long *cw = (long *)cur;
+			if (cw[3] < cw[2]) {
+				long idx = cw[3];
+				cw[3] = idx + 1;
+				bit_set(cw[4], idx);
+				return cur + 128 + idx * need;
+			}
+		}
+		{
+			/* 1 MB of blocks per partition. The pages are only touched as the
+			 * bump pointer reaches them, so an unused class costs address space
+			 * and no resident memory. */
+			long nblk = 1048576 / need;
+			long c = chunk_new(need, nblk, kind);
+			long *cw = (long *)c;
+			AR_PART[part] = c;
+			cw[3] = 1;
+			bit_set(cw[4], 0);
+			return c + 128;
+		}
 	}
 }
 
 /* kind 1 = the payload is a Cell (traced by its tag), 0 = a raw buffer. */
 char *ar_alloc_k(long n, long kind) {
-	long need = ((n + 15) & (0 - 16)) + 16;
+	long need = (n + 15) & (0 - 16);
 	long b;
-	long *w;
+	if (need < 16) { need = 16; }
 	if (GC_ON != 0) {
 		if (GC_MODE == 2) { gc_collect(); }
 		else if (GC_MODE != 1 && GC_ALLOCED > GC_THRESH) { gc_collect(); }
 	}
-	b = ar_block(need);
-	w = (long *)b;
-	w[1] = kind * 2;
-	GC_ALLOCED = GC_ALLOCED + w[0];
-	return (char *)(b + 16);
+	b = ar_block(need, kind);
+	GC_ALLOCED = GC_ALLOCED + need;
+	return (char *)b;
 }
 char *ar_alloc(long n) { return ar_alloc_k(n, 0); }
 
 void ar_init(void) {
 	long i = 0;
-	AR_CHUNKS = 0; AR_CUR = 0; GC_BIG = 0; GC_EPOCH = 1; GC_ON = 0;
+	AR_CHUNKS = 0; GC_BIG = 0; GC_ON = 0;
 	GC_ALLOCED = 0; GC_LIVE = 0; GC_HEAP = 0; GC_COUNT = 0; PIN_N = 0;
 	/* The same floor a collection leaves behind, so a short program still gets
 	 * one collection instead of running the whole matrix without ever entering
 	 * the collector. */
 	GC_THRESH = 1048576;
-	while (i < 65) { GC_FREE[i] = 0; i = i + 1; }
+	while (i < 130) { GC_FREE[i] = 0; AR_PART[i] = 0; i = i + 1; }
 	GC_MSTACK = (long)malloc(65536 * 8);
 	GC_MTOP = 0;
 	GC_MCAP = 65536;
@@ -558,18 +582,22 @@ void gc_grow(void) {
 	GC_MCAP = nc;
 }
 
-void gc_mark(long b, int deep) {
-	long *w = (long *)b;
+/* Mark slot `idx` of chunk `c`. The mark stack holds PAIRS - the block address
+ * and its chunk - because the chunk is what says how big the block is and
+ * whether it is a cell, and finding it again would be a second chunk walk. */
+void gc_mark(long c, long idx, int deep) {
+	long *cw = (long *)c;
 	long *ms;
-	if ((w[1] & 1) != 0) { return; }                  /* on a free list: garbage */
-	if ((w[1] >> 8) == GC_EPOCH) { return; }          /* already marked */
-	w[1] = (w[1] & 255) | (GC_EPOCH << 8);
-	GC_LIVE = GC_LIVE + w[0];
+	if (bit_get(cw[4], idx) == 0) { return; }         /* not allocated: garbage */
+	if (bit_get(cw[5], idx) != 0) { return; }         /* already marked */
+	bit_set(cw[5], idx);
+	GC_LIVE = GC_LIVE + cw[1];
 	if (deep == 0) { return; }                        /* no children to look at */
-	if (GC_MTOP >= GC_MCAP) { gc_grow(); }
+	if (GC_MTOP + 2 > GC_MCAP) { gc_grow(); }
 	ms = (long *)GC_MSTACK;
-	ms[GC_MTOP] = b;
-	GC_MTOP = GC_MTOP + 1;
+	ms[GC_MTOP] = c + 128 + idx * cw[1];
+	ms[GC_MTOP + 1] = c;
+	GC_MTOP = GC_MTOP + 2;
 }
 
 /* Does v point into a block, and if so, which one?
@@ -587,87 +615,58 @@ void gc_mark(long b, int deep) {
  * pointers is a standing bet that no optimiser will ever keep only a derived
  * pointer, and that bet does not hold.
  *
- * The start bitmap answers the containing block: scan back to the nearest set
- * bit at or below the offset. The exact-payload case is checked first, because
- * that is what almost every candidate is. */
+ * Resolving one is now EXACT and needs no start bitmap: a chunk holds one size
+ * class, so the slot is `(v - base) / bsize` and the block is that slot. */
 void gc_try(long v, int deep) {
 	long c;
 	long *w;
 	long off;
-	long idx;
-	long by;
-	long bit;
-	long msk;
-	char *bmp;
-	long one = 1;
 	if (v < 4096) { return; }
 	c = AR_CHUNKS;
 	while (c != 0) {
 		w = (long *)c;
-		off = v - c - 32;
-		if (off >= 0 && off < w[2]) {
-			bmp = (char *)w[3];
-			if ((off & 15) == 0 && off >= 16) {
-				idx = (off - 16) >> 4;
-				if (((((long)bmp[idx >> 3]) & 255) >> (idx & 7) & 1) != 0) {
-					gc_mark(v - 16, deep);            /* an exact payload address */
-					return;
-				}
-			}
-			idx = off >> 4;
-			by = idx >> 3;
-			bit = idx & 7;
-			msk = ((long)bmp[by] & 255) & ((one << (bit + 1)) - 1);
-			while (msk == 0) {
-				by = by - 1;
-				if (by < 0) { return; }
-				msk = (long)bmp[by] & 255;
-			}
-			bit = 0;
-			while (msk > 1) { msk = msk >> 1; bit = bit + 1; }
-			idx = (by << 3) + bit;
-			{
-				long start = idx << 4;
-				long *bw = (long *)(c + 32 + start);
-				/* Inside the payload, not inside the 16 byte header: a word that
-				 * happens to address a header is not a reference to the object. */
-				if (off >= start + 16 && off < start + bw[0]) { gc_mark(c + 32 + start, deep); }
-			}
+		off = v - c - 128;
+		if (off >= 0 && off < w[1] * w[2]) {
+			long idx = off / w[1];
+			if (idx < w[3]) { gc_mark(c, idx, deep); }
 			return;
 		}
 		c = w[0];
 	}
 }
 
-void gc_trace(long b) {
+void gc_trace(long b, long c) {
+	long *cw = (long *)c;
 	long *w = (long *)b;
 	long t;
-	if (((w[1] >> 1) & 1) == 0) {
+	if (cw[6] == 0) {
 		/* A raw buffer reached from the C stack. Its shape is not known here
 		 * (a scope's names/values/type-classes share one block, a string's
 		 * unit array holds code points), so every word in it is a candidate. */
-		long q = b + 16;
-		long end = b + w[0];
+		long q = b;
+		long end = b + cw[1];
 		while (q + 8 <= end) { long *x = (long *)q; gc_try(x[0], 1); q = q + 8; }
 		return;
 	}
-	/* w[2..8] IS the Cell: tag, a, b, c, d, e, f. */
-	t = w[2];
-	if (t == 4)  { gc_try(w[3], 0); gc_try(w[5], 0); return; }  /* bytes, units */
-	if (t == 5)  { gc_try(w[3], 1); return; }                   /* array elements */
-	if (t == 6)  { gc_try(w[3], 1); gc_try(w[4], 1); return; }  /* keys, values */
-	if (t == 7)  { gc_try(w[4], 1); return; }                   /* closure env */
-	if (t == 9)  { gc_try(w[3], 1); return; }                   /* bound receiver */
-	if (t == 10) { gc_try(w[4], 1); return; }                   /* signal value */
-	if (t == 11) { gc_try(w[3], 1); gc_try(w[8], 1); return; }  /* names+vals, parent */
-	/* 3 number, 8 host function, 12 anytype, 13 sized integer: no children. */
+	/* w[0..6] IS the Cell: tag, a, b, c, d, e, f - the block address is the
+	 * cell address now that there is no header in front of it. */
+	t = w[0];
+	if (t == 4)  { gc_try(w[1], 0); gc_try(w[3], 0); return; }  /* bytes, units */
+	if (t == 5)  { gc_try(w[1], 1); return; }                   /* array elements */
+	if (t == 6)  { gc_try(w[1], 1); gc_try(w[2], 1); return; }  /* keys, values */
+	if (t == 7)  { gc_try(w[2], 1); return; }                   /* closure env */
+	if (t == 9)  { gc_try(w[1], 1); return; }                   /* bound receiver */
+	if (t == 10) { gc_try(w[2], 1); return; }                   /* signal value */
+	if (t == 11) { gc_try(w[1], 1); gc_try(w[6], 1); return; }  /* names+vals, parent */
+	/* 3 number, 8 host function, 12 anytype, 13 sized integer, 14 boxed double:
+	 * no children - every field of those is a raw long, not a handle. */
 }
 
 void gc_drain(void) {
 	while (GC_MTOP > 0) {
 		long *ms = (long *)GC_MSTACK;
-		GC_MTOP = GC_MTOP - 1;
-		gc_trace(ms[GC_MTOP]);
+		GC_MTOP = GC_MTOP - 2;
+		gc_trace(ms[GC_MTOP], ms[GC_MTOP + 1]);
 	}
 }
 
@@ -680,34 +679,50 @@ void gc_scan_range(long lo, long hi) {
 	}
 }
 
+/* The marks are CLEARED here rather than carried in a per-block epoch: it is one
+ * pass over (slots bumped)/8 bytes per chunk, which is what the 16 byte header
+ * used to be paying for. */
+void gc_clear_marks(void) {
+	long c = AR_CHUNKS;
+	while (c != 0) {
+		long *cw = (long *)c;
+		long nb = (cw[3] + 7) / 8 + 1;
+		char *b = (char *)cw[5];
+		long i = 0;
+		while (i < nb) { b[i] = 0; i = i + 1; }
+		c = cw[0];
+	}
+}
+
 void gc_sweep(void) {
 	long c = AR_CHUNKS;
 	while (c != 0) {
 		long *cw = (long *)c;
-		long used = cw[2];
-		long off = 0;
-		while (off < used) {
-			long b = c + 32 + off;
-			long *w = (long *)b;
-			long sz = w[0];
-			if ((w[1] & 1) == 0 && (w[1] >> 8) != GC_EPOCH) {
+		long n = cw[3];
+		long bs = cw[1];
+		long part = (bs >> 4) * 2 + cw[6];
+		long i = 0;
+		while (i < n) {
+			if (bit_get(cw[4], i) != 0 && bit_get(cw[5], i) == 0) {
+				long b = c + 128 + i * bs;
+				long *pw = (long *)b;
+				bit_clr(cw[4], i);
 				if (GC_MODE == 3) {
-					/* Poison mode: the block is retired for good and its payload
-					 * filled with a value that is neither a tag nor a handle, so a
-					 * root the mark pass FAILED to reach shows up as a deterministic
-					 * wrong answer instead of a rare use-after-free. */
-					long *pw = (long *)(b + 16);
+					/* Poison mode: the block is RETIRED - its allocation bit stays
+					 * clear and it goes on no free list, so it is never handed out
+					 * again - and its payload is filled with a value that is neither
+					 * a tag nor a handle, so a root the mark pass FAILED to reach
+					 * shows up as a deterministic wrong answer instead of a rare
+					 * use-after-free. */
 					long q = 0;
-					while (q * 8 + 16 < sz) { pw[q] = 195948557; q = q + 1; }
-					w[1] = 1;
+					while (q * 8 < bs) { pw[q] = 195948557; q = q + 1; }
+				} else if (bs > 1024) {
+					pw[0] = GC_BIG; pw[1] = bs; GC_BIG = b;
 				} else {
-					long cls = sz >> 4;
-					w[1] = 1;
-					if (cls <= 64) { w[2] = GC_FREE[cls]; GC_FREE[cls] = b; }
-					else { w[2] = GC_BIG; GC_BIG = b; }
+					pw[0] = GC_FREE[part]; GC_FREE[part] = b;
 				}
 			}
-			off = off + sz;
+			i = i + 1;
 		}
 		c = cw[0];
 	}
@@ -721,7 +736,7 @@ void gc_collect(void) {
 	long i;
 	if (GC_ON == 0) { return; }
 	GC_ON = 0;
-	GC_EPOCH = GC_EPOCH + 1;
+	gc_clear_marks();
 	GC_MTOP = 0;
 	GC_LIVE = 0;
 	gc_roots();
@@ -1901,10 +1916,16 @@ long si_float(long h);
 long si_str(long h);
 int  si_eq(long a, long b);
 
+/* The boxed double (tag 14, abnf/jsrtjvm.go's jsJFlo). Declared here for the
+ * same reason: the value operations below have to know about it. */
+long jf_text(long h);
+int  jf_num_eq(long f, long other);
+
 long to_number(long h) {
 	long t = tag_of(h);
 	if (t == 3) { return num_bits(h); }
 	if (t == 13) { return si_float(h); }
+	if (t == 14) { return fa(h); }        /* jsrt.go toNumber: `case jsJFlo: t.f` */
 	if (t == 0) { return DNAN; }
 	if (t == 1) { return DZERO; }
 	if (t == 2) { return fa(h) ? DONE : DZERO; }
@@ -1918,6 +1939,9 @@ int truthy(long h) {
 	if (t == 2) { return (int)fa(h); }
 	if (t == 3) { long b = num_bits(h); return !d_is_zero(b) && !d_is_nan(b); }
 	if (t == 13) { return fa(h) != 0; }   /* jsrt.go truthy: `case jsGInt: t.v != 0` */
+	/* jsrt.go truthy: `case jsJFlo: t.f != 0 && t.f == t.f` - a NaN box is falsy
+	 * and so is -0.0, exactly as for a plain number. */
+	if (t == 14) { long b = fa(h); return !d_is_zero(b) && !d_is_nan(b); }
 	if (t == 4) { return str_len(h) > 0; }
 	return 1;
 }
@@ -1929,6 +1953,7 @@ long to_string(long h) {
 	if (t == 2) { return fa(h) ? mk_cstr("true") : mk_cstr("false"); }
 	if (t == 3) { return num_to_str(num_bits(h)); }
 	if (t == 13) { return si_str(h); }    /* jsrt.go toString: `case jsGInt: giStr(t)` */
+	if (t == 14) { return jf_text(h); }   /* jsrt.go toString: `case jsJFlo: jvmFloText(t)` */
 	if (t == 4) { return h; }
 	if (t == 5) {
 		long out = mk_cstr("");
@@ -1955,7 +1980,7 @@ long type_of(long h) {
 	/* A SIZED INTEGER IS A NUMBER. This is the whole point of the tag: the Go
 	 * twin answers "number" for jsGInt (abnf/jsrt.go typeOf), and an object box
 	 * in layer 2 could only ever have answered "object". */
-	if (t == 3 || t == 13) { return mk_cstr("number"); }
+	if (t == 3 || t == 13 || t == 14) { return mk_cstr("number"); }
 	if (t == 4) { return mk_cstr("string"); }
 	if (t == 7 || t == 8 || t == 9) { return mk_cstr("function"); }
 	return mk_cstr("object");
@@ -1967,7 +1992,7 @@ long type_class(long h) {
 	long t = tag_of(h);
 	if (t == 0 || t == 1) { return 0; }
 	if (t == 2) { return 2; }
-	if (t == 3 || t == 13) { return 3; }   /* a sized integer pins as "number" */
+	if (t == 3 || t == 13 || t == 14) { return 3; }   /* a sized integer and a boxed double pin as "number" */
 	if (t == 4) { return 4; }
 	if (t == 7 || t == 8 || t == 9) { return 6; }
 	return 5;
@@ -1985,6 +2010,13 @@ long mk_bool(int b) { return b ? 3 : 2; }
 int strict_eq(long a, long b) {
 	long ta = tag_of(a);
 	long tb = tag_of(b);
+	/* A boxed double compares by VALUE too, and jsrt.go strictEq checks it
+	 * BEFORE the sized integer - so the order of these four lines is the Go
+	 * twin's order, not a preference. jvmNumEq accepts only another box or a
+	 * plain number, so a float box against a SIZED INTEGER is false in both
+	 * halves (Go's jvmNumEq has no jsGInt case). */
+	if (ta == 14) { return jf_num_eq(fa(a), b); }
+	if (tb == 14) { return jf_num_eq(fa(b), a); }
 	/* A sized integer compares by VALUE, never by identity - jsrt.go strictEq
 	 * puts the two jsGInt arms exactly here, before the type switch, so
 	 * int8(1) === 1 holds and two boxes of the same integer are equal. A box
@@ -2203,9 +2235,9 @@ long si_uns_of(long l, long r) {
 	return 0;
 }
 
-/* giIsNumeric, restricted to what the C floor has: there is no jsChar and no
- * jsJFlo here, so a number is a plain number or a box. */
-int si_numeric(long h) { long t = tag_of(h); return t == 3 || t == 13; }
+/* giIsNumeric: there is no jsChar in the C floor, so a number is a plain
+ * number, a sized integer (tag 13) or a boxed double (tag 14). */
+int si_numeric(long h) { long t = tag_of(h); return t == 3 || t == 13 || t == 14; }
 
 /* giEq for two integral operands: they compare by VALUE whatever their widths. */
 int si_eq(long a, long b) { return si_val(a) == si_val(b); }
@@ -2292,6 +2324,239 @@ long si_arith(long op, long l, long r) {
 	if (str_eq_c(op, ">>")) { return si_apply(10, l, r); }
 	die("js_giarith: unknown operator");
 	return H_UNDEF;
+}
+
+/* ---------------------------------------------------------- boxed doubles - */
+/*
+ * TAG 14 - a BOXED DOUBLE, the twin of abnf/jsrtjvm.go's jsJFlo, which is the
+ * authoritative spec: every function below is named after the jvmXxx it
+ * implements and matches it.
+ *
+ * WHY IT IS HERE AND NOT IN LAYER 2, and why it is a SECOND primitive rather
+ * than a case of tag 13. A statically typed language has to tell `1.0 / 3.0`
+ * from `1 / 3`, which are the same two operands in a value model where every
+ * number is one double: Java answers 0.3333333333333333 for the first and 0 for
+ * the second. So floatness goes ON the value. Tag 13 cannot carry it - its
+ * payload is an integer and si_norm's whole job is to UNBOX a value a double
+ * holds exactly, which is the opposite of what a double needs. jsrtint.go says
+ * the same thing from the other side: giVal reads a jsJFlo by truncating it.
+ *
+ *   cell.a = the double's BITS (the floor's doubles are bit patterns in a long)
+ *   cell.b = the print STYLE, because that is the only thing the statically
+ *            typed languages differ in and it is what jvmFloText switches on:
+ *              0 floJava  1.0 -> "1.0"   1e20 -> "1.0E20"  inf -> "Infinity"
+ *              1 floGo    1.0 -> "1"     1e20 -> "1e+20"   inf -> "+Inf"
+ *              2 floCS    1.0 -> "1"     1e20 -> "1E+20"   inf -> "Infinity"
+ *
+ * THE INVARIANT, identical in both halves (jsrtint.go's header):
+ *   a plain number (tag 3)  ==  an INTEGRAL type (int / long / short / byte)
+ *   a tag 14 cell           ==  a double / float
+ * and every operator that meets one evaluates in floating point and answers
+ * one (JLS 5.6.2, binary numeric promotion). There is no normalization step:
+ * unlike si_norm, a double NEVER unboxes, because 1.0 and 1 must stay
+ * distinguishable - that is the entire point of the type.
+ */
+
+long go_float_str(long bits);            /* defined with the other renderings */
+
+long jf_make(long bits, long sty) {
+	long h = cell_new(14);
+	sa(h, bits); sb(h, sty);
+	return h;
+}
+int jf_is(long h) { return tag_of(h) == 14; }
+
+/* jvmStyleOf: the style an operation's result inherits - the one of whichever
+ * operand is a float, the LEFT one when both are. */
+long jf_style_of(long l, long r) {
+	if (tag_of(l) == 14) { return fb(l); }
+	if (tag_of(r) == 14) { return fb(r); }
+	return 0;
+}
+
+/* jvmFloStr: java.lang.Double.toString. Always a decimal point, the shortest
+ * digit run that round-trips, plain decimal for 1e-3 <= |d| < 1e7 and
+ * computerized scientific notation ("1.0E20") outside that range. The two
+ * bounds are compared as DOUBLES, the way Go's `a >= 1e-3 && a < 1e7` does.
+ *
+ * MEASURED, not assumed: testing the decimal exponent instead (e10 >= -3 &&
+ * e10 < 7) is INDISTINGUISHABLE - 0 of 51 ratchet assertions and 0 of 10,149
+ * probe lines, over 24 mantissas x 61 exponents x both signs. The shortest form
+ * of a double at or above 1e-3 always has e10 >= -3, so the two formulations
+ * agree everywhere the probe could reach. The value test is kept because it is
+ * what the Go source says, not because it was shown to matter. */
+long JF_1EM3 = 4562254508917369340;      /* the bits of 1e-3 */
+long JF_1EM5 = 4532020583610935537;      /* the bits of 1e-5 */
+
+long jvm_flo_str(long bits) {
+	char digs[24];
+	char out[64];
+	long e10;
+	long nd;
+	long o = 0;
+	long i;
+	long a;
+	if (d_is_nan(bits)) { return mk_cstr("NaN"); }
+	if (d_is_inf(bits)) { return d_sign(bits) ? mk_cstr("-Infinity") : mk_cstr("Infinity"); }
+	if (d_is_zero(bits)) { return d_sign(bits) ? mk_cstr("-0.0") : mk_cstr("0.0"); }
+	a = d_abs(bits);
+	e10 = shortest_digits(a, digs);
+	nd = g_ndig;
+	if (d_sign(bits)) { out[o] = 45; o = o + 1; }
+	if (!d_lt(a, JF_1EM3) && d_lt(a, d_from_long(10000000))) {
+		if (e10 >= 0) {
+			i = 0;
+			while (i <= e10) { out[o] = i < nd ? digs[i] : 48; o = o + 1; i = i + 1; }
+			out[o] = 46; o = o + 1;
+			if (nd > e10 + 1) {
+				i = e10 + 1;
+				while (i < nd) { out[o] = digs[i]; o = o + 1; i = i + 1; }
+			} else { out[o] = 48; o = o + 1; }   /* the forced ".0" */
+		} else {
+			out[o] = 48; o = o + 1;
+			out[o] = 46; o = o + 1;
+			i = -1;
+			while (i > e10) { out[o] = 48; o = o + 1; i = i - 1; }
+			i = 0;
+			while (i < nd) { out[o] = digs[i]; o = o + 1; i = i + 1; }
+		}
+	} else {
+		/* "1.0E20" / "1.5E-8": a mantissa that always has a point, and an
+		 * exponent with no leading zeros, no '+' and no minimum width. */
+		long ex = e10;
+		long en;
+		char er[8];
+		out[o] = digs[0]; o = o + 1;
+		out[o] = 46; o = o + 1;
+		if (nd > 1) {
+			i = 1;
+			while (i < nd) { out[o] = digs[i]; o = o + 1; i = i + 1; }
+		} else { out[o] = 48; o = o + 1; }
+		out[o] = 69; o = o + 1;               /* 'E' */
+		if (ex < 0) { out[o] = 45; o = o + 1; ex = 0 - ex; }
+		en = 0;
+		if (ex == 0) { er[0] = 48; en = 1; }
+		while (ex > 0) { er[en] = (char)(48 + (ex % 10)); ex = ex / 10; en = en + 1; }
+		i = en - 1;
+		while (i >= 0) { out[o] = er[i]; o = o + 1; i = i - 1; }
+	}
+	return mk_str(out, o);
+}
+
+/* csFloStr: C#'s double.ToString() under the invariant culture - the shortest
+ * round-tripping digits, no trailing ".0" for an integral value, and scientific
+ * notation with a capital E and a two-digit minimum exponent outside
+ * [1e-5, 1e15). */
+long cs_flo_str(long bits) {
+	char digs[24];
+	char out[64];
+	long e10;
+	long nd;
+	long o = 0;
+	long i;
+	long a;
+	if (d_is_nan(bits)) { return mk_cstr("NaN"); }
+	if (d_is_inf(bits)) { return d_sign(bits) ? mk_cstr("-Infinity") : mk_cstr("Infinity"); }
+	if (d_is_zero(bits)) { return d_sign(bits) ? mk_cstr("-0") : mk_cstr("0"); }
+	a = d_abs(bits);
+	e10 = shortest_digits(a, digs);
+	nd = g_ndig;
+	if (d_sign(bits)) { out[o] = 45; o = o + 1; }
+	if (!d_lt(a, JF_1EM5) && d_lt(a, d_from_long(1000000000000000))) {
+		if (e10 >= 0) {
+			i = 0;
+			while (i <= e10) { out[o] = i < nd ? digs[i] : 48; o = o + 1; i = i + 1; }
+			if (nd > e10 + 1) {
+				out[o] = 46; o = o + 1;
+				i = e10 + 1;
+				while (i < nd) { out[o] = digs[i]; o = o + 1; i = i + 1; }
+			}
+		} else {
+			out[o] = 48; o = o + 1;
+			out[o] = 46; o = o + 1;
+			i = -1;
+			while (i > e10) { out[o] = 48; o = o + 1; i = i - 1; }
+			i = 0;
+			while (i < nd) { out[o] = digs[i]; o = o + 1; i = i + 1; }
+		}
+	} else {
+		long ex = e10;
+		out[o] = digs[0]; o = o + 1;
+		if (nd > 1) {
+			out[o] = 46; o = o + 1;
+			i = 1;
+			while (i < nd) { out[o] = digs[i]; o = o + 1; i = i + 1; }
+		}
+		out[o] = 69; o = o + 1;               /* 'E' */
+		if (ex < 0) { out[o] = 45; o = o + 1; ex = 0 - ex; } else { out[o] = 43; o = o + 1; }
+		if (ex < 10) { out[o] = 48; o = o + 1; out[o] = (char)(48 + ex); o = o + 1; }
+		else {
+			char er[8];
+			long en = 0;
+			while (ex > 0) { er[en] = (char)(48 + (ex % 10)); ex = ex / 10; en = en + 1; }
+			i = en - 1;
+			while (i >= 0) { out[o] = er[i]; o = o + 1; i = i - 1; }
+		}
+	}
+	return mk_str(out, o);
+}
+
+/* jvmFloText: a boxed float rendered in ITS OWN language's style. */
+long jf_text(long h) {
+	long sty = fb(h);
+	if (sty == 1) { return go_float_str(fa(h)); }
+	if (sty == 2) { return cs_flo_str(fa(h)); }
+	return jvm_flo_str(fa(h));
+}
+
+/* jvmNumEq: Java's == with a double on one side. The other side has to be a
+ * number too - another box or a plain number (there is no jsChar here) - and
+ * then the comparison is numeric, so 1.0 == 1 is true and NaN == NaN is
+ * false. Anything else, a SIZED INTEGER included, is false. */
+int jf_num_eq(long f, long other) {
+	long t = tag_of(other);
+	if (t == 14) { return d_eq(f, fa(other)); }
+	if (t == 3)  { return d_eq(f, num_bits(other)); }
+	return 0;
+}
+
+/* jvmArith: one binary arithmetic operator. A double on either side makes the
+ * whole operation floating point and its result a double; two integral operands
+ * keep the 32 bit wrap the compiler emits for them. The operator arrives as the
+ * same 0..4 index si_apply uses for its first five, so the two boxes take one
+ * number rather than an operator string across the boundary. */
+long jf_arith(long code, long l, long r) {
+	long a = to_number(l);
+	long b = to_number(r);
+	long x = 0;                    /* +0.0: jvmArith's `var x float64` with no
+	                                * arm taken, so an operator index the table
+	                                * does not have answers 0 in both halves */
+	if (code == 0) { x = d_add(a, b); }
+	else if (code == 1) { x = d_sub(a, b); }
+	else if (code == 2) { x = d_mul(a, b); }
+	else if (code == 3) { x = d_div(a, b); }
+	else if (code == 4) { x = d_mod_go(a, b); }
+	if (tag_of(l) == 14 || tag_of(r) == 14) { return jf_make(x, jf_style_of(l, r)); }
+	return mk_num(d_from_long(to_int32(x)));
+}
+
+/* jvmMinMax: the operand this picked, but the DOUBLE overload of
+ * Math.max/min is selected as soon as one side is a double, so the answer is a
+ * double then - Math.max(1.5, 2) is 2.0. */
+long jf_minmax(long l, long r, int take_l) {
+	long v = take_l ? l : r;
+	if (tag_of(l) == 14 || tag_of(r) == 14) {
+		if (tag_of(v) == 14) { return v; }
+		return jf_make(to_number(v), jf_style_of(l, r));
+	}
+	return v;
+}
+
+/* jvmMathObject's abs: a double keeps its box (and its style), everything else
+ * wraps to 32 bits the way the compiler's integer arithmetic does. */
+long jf_abs(long v) {
+	if (tag_of(v) == 14) { return jf_make(d_abs(fa(v)), fb(v)); }
+	return mk_num(d_from_long(to_int32(d_abs(to_number(v)))));
 }
 
 /* ---------------------------------------------------------------- scopes - */
@@ -2626,6 +2891,10 @@ long fmt_val(long h) {
 	/* A sized integer reaches toGoNatural as an int64 / uint64, so %v is its
 	 * digits (abnf/jsrt.go toGoNatural, `case jsGInt`). */
 	if (t == 13) { return si_str(h); }
+	/* A boxed double reaches toGoNatural as its own language's float text
+	 * (abnf/jsrt.go toGoNatural, `case jsJFlo: jvmFloText(t)`), so print and
+	 * println show "1.0" for a Java double and "1" for a Go one. */
+	if (t == 14) { return jf_text(h); }
 	if (t == 5) {
 		long n = arr_len(h);
 		long i = 0;
@@ -3168,7 +3437,17 @@ double d_ldexp(double frac, long exp) {
 		exp = exp - 52;
 	}
 	exp = exp + ((u.l >> 52) & 2047) - 1023;
-	if (exp < -1075) { return frac < 0.0 ? -0.0 : 0.0; }
+	/* UNDERFLOW KEEPS THE SIGN. Spelled with the sign BIT rather than as the
+	 * literal `-0.0`, because unary minus on a double is emitted as `0.0 - x` by
+	 * languages/c-to-llvm-ir.abnf and `0.0 - 0.0` is +0.0 - so the literal
+	 * silently lost the sign here and `Math.pow(-0.5, 2147483647)` was +0
+	 * natively against -0 in node and in the Go twin. The infinity below is
+	 * unaffected: `-1.0 / 0.0` computes the sign rather than writing it. */
+	if (exp < -1075) {
+		union DB z;
+		z.l = frac < 0.0 ? (0 - 9223372036854775807L - 1L) : 0L;
+		return z.d;
+	}
 	if (exp > 1023) { return frac < 0.0 ? -1.0 / 0.0 : 1.0 / 0.0; }
 	if (exp < -1022) { exp = exp + 53; m = 1.0 / 9007199254740992.0; }
 	u.l = (u.l & (0 - 9218868437227405313L)) | ((exp + 1023) << 52);
@@ -3205,8 +3484,14 @@ long d_mod_go(long x, long y) {
 		if (rfr < yfr) { rexp = rexp - 1; }
 		r = r - d_ldexp(ya, rexp - yexp);
 	}
-	if (neg) { r = 0.0 - r; }
 	ur.d = r;
+	/* The sign is put back by FLIPPING THE BIT, not by `0.0 - r`: Go's math.Mod
+	 * negates x itself, so a zero remainder keeps x's sign and Mod(-1, 1) is
+	 * -0.0 - where `0.0 - 0.0` is +0.0 and loses it. Invisible until the boxed
+	 * double arrived, because the JS rendering of -0.0 is "0" while Java's is
+	 * "-0.0"; found by the 10,149 line jsJFlo probe against jsrtjvm.go, 18 lines
+	 * of which read "0.0" here and "-0.0" in the Go twin. */
+	if (neg) { return d_neg(ur.l); }
 	return ur.l;
 }
 
@@ -3436,6 +3721,8 @@ long js_parse_float(long h) {
 	return str_to_num(str_slice(h, start, end));
 }
 
+long js_keys(long o);          /* the keysOf builtin below is exactly this */
+
 long host_call(long id, long self, long args) {
 	long n = arr_len(args);
 	long i = 0;
@@ -3552,6 +3839,55 @@ long host_call(long id, long self, long args) {
 	}
 	if (id == 49) { long v = arg_at(args, 0); if (tag_of(v) == 13) { return si_str(v); } return to_string(v); }
 	if (id == 50) { return mk_num(si_float(arg_at(args, 0))); }
+	/* ----- the BOXED DOUBLE, for layer 2 (tag 14, abnf/jsrtjvm.go). The same
+	 * shape as the sint* family above: layer 2 cannot make a primitive type, so
+	 * the floor hands it the constructor and the readers. A double travels as
+	 * ONE MetaJS number, unlike a sized integer's two halves - a double is
+	 * exactly what a MetaJS number already is.
+	 *   flo(v, style)        build one: style 0 java (default), 1 go, 2 c#
+	 *   floIs(v)             is this a boxed double (jvmIsFlo)
+	 *   floNum(v)            the double back out (to_number)
+	 *   floStyle(v)          the style, 0 for anything that is not a box
+	 *   floStr(v)            the language's own float text (jvmFloText)
+	 *   floOp(code, l, r)    one binary operator, 0 + 1 - 2 * 3 / 4 % (jvmArith)
+	 *   floEq(l, r)          strict_eq's two tag-14 arms (jvmNumEq)
+	 *   floMax / floMin      Math.max / Math.min (jvmMinMax)
+	 *   floAbs(v)            Math.abs */
+	if (id == 51) {
+		long sty = n > 1 ? d_to_long(d_trunc(arg_num(args, 1))) : 0;
+		return jf_make(to_number(arg_at(args, 0)), sty);
+	}
+	if (id == 52) { return mk_bool(tag_of(arg_at(args, 0)) == 14); }
+	if (id == 53) { return mk_num(to_number(arg_at(args, 0))); }
+	if (id == 54) { long v = arg_at(args, 0); return mk_num(d_from_long(jf_style_of(v, v))); }
+	if (id == 55) { long v = arg_at(args, 0); if (tag_of(v) == 14) { return jf_text(v); } return to_string(v); }
+	if (id == 56) { return jf_arith(d_to_long(d_trunc(arg_num(args, 0))), arg_at(args, 1), arg_at(args, 2)); }
+	if (id == 57) {
+		long l = arg_at(args, 0);
+		long r = arg_at(args, 1);
+		if (tag_of(l) == 14) { return mk_bool(jf_num_eq(fa(l), r)); }
+		if (tag_of(r) == 14) { return mk_bool(jf_num_eq(fa(r), l)); }
+		return mk_bool(strict_eq(l, r));
+	}
+	if (id == 58 || id == 59) {
+		long l = arg_at(args, 0);
+		long r = arg_at(args, 1);
+		long ln = to_number(l);
+		long rn = to_number(r);
+		/* jvmMathObject's max/min: `rt.toNumber(l) > rt.toNumber(r)` and `<`,
+		 * so a NaN operand makes the test false and the RIGHT one is taken. */
+		return jf_minmax(l, r, (id == 58) ? d_lt(rn, ln) : d_lt(ln, rn));
+	}
+	if (id == 60) { return jf_abs(arg_at(args, 0)); }
+	/* keysOf(o): an object's OWN keys, in insertion order. It is js_keys, and
+	 * it is here for the reason the sint* and flo* families are: an EXTERN is
+	 * only callable from an emitter, so a layer-2 file could not enumerate an
+	 * object at all - MetaJS has neither for..in nor Object.keys. Every language
+	 * whose runtime has to render, compare or copy an object needs it (PHP's
+	 * var_dump, `==` on objects, the (array) cast and clone are the first four).
+	 * A dict box ({__dict,keys,vals}) yields its key array; a plain object
+	 * yields its string keys, skipping the internal __-prefixed slots. */
+	if (id == 61) { return js_keys(arg_at(args, 0)); }
 	die("unknown host function");
 	return H_UNDEF;
 }
@@ -3860,20 +4196,38 @@ long js_ge(long a, long b)  { long c = js_compare(a, b); return mk_bool(c == 1 |
  * java / kotlin / csharp will emit; the C floor implements them so those four
  * can be linked natively.
  *
- * WHERE THIS CANNOT MATCH THE GO TWIN: jsrtint.go's js_giarith and js_giadd
- * route a jsJFlo (Java's / Kotlin's / C#'s boxed double, abnf/jsrtjvm.go)
- * to jvmArith before reaching giArith. jsJFlo is a SECOND primitive type that
- * the floor does not have yet, so those two arms are absent here. Nothing
- * currently linked natively creates one; the language that does will need the
- * same treatment this tag just got, and that is stated rather than
- * approximated. */
+ * THE jsJFlo ARMS ARE HERE NOW (they were the one stated gap of f19a8ad):
+ * jsrtint.go's js_giarith and js_giadd route a boxed double to jvmArith before
+ * reaching giArith, and tag 14 is that box. giIsIntegral deliberately does NOT
+ * include it - si_integral is still {3, 13} - so a float operand keeps
+ * js_compare in the four ordered comparisons instead of being truncated into
+ * si_cmp. */
 
 int si_integral(long h) { long t = tag_of(h); return t == 3 || t == 13; }
 
-long js_giarith(long op, long l, long r) { return si_arith(op, l, r); }
+/* jsrtint.go's js_giarith: a float operand takes the FLOAT path. Only '- * / %'
+ * are listed there, deliberately - '+' arrives at js_giadd instead, because in
+ * Go it also concatenates strings - so a '+' that reached HERE with a float
+ * operand falls through to si_arith exactly as it does in the Go twin. */
+long js_giarith(long op, long l, long r) {
+	if (tag_of(l) == 14 || tag_of(r) == 14) {
+		if (str_eq_c(op, "-")) { return jf_arith(1, l, r); }
+		if (str_eq_c(op, "*")) { return jf_arith(2, l, r); }
+		if (str_eq_c(op, "/")) { return jf_arith(3, l, r); }
+		if (str_eq_c(op, "%")) { return jf_arith(4, l, r); }
+	}
+	return si_arith(op, l, r);
+}
 long js_gicmp(long l, long r)  { return mk_num(d_from_long(si_cmp(l, r))); }
+/* giEq: two numeric operands compare by value, and a float operand makes the
+ * comparison a FLOAT one (giFloat on the other side) rather than truncating
+ * both to integers. */
 long js_gieq(long l, long r) {
-	if (si_numeric(l) && si_numeric(r)) { return mk_bool(si_eq(l, r)); }
+	if (si_numeric(l) && si_numeric(r)) {
+		if (tag_of(l) == 14) { return mk_bool(d_eq(fa(l), si_float(r))); }
+		if (tag_of(r) == 14) { return mk_bool(d_eq(fa(r), si_float(l))); }
+		return mk_bool(si_eq(l, r));
+	}
 	return mk_bool(strict_eq(l, r));
 }
 long js_giconv(long v, long bits, long uns) {
@@ -3881,7 +4235,11 @@ long js_giconv(long v, long bits, long uns) {
 }
 /* -x keeps the operand's type and negates at its own width, so -int8(-128)
  * wraps back to -128. */
-long js_gineg(long v) { return si_norm(0 - si_val(v), si_width_of(v, v), si_uns_of(v, v)); }
+long js_gineg(long v) {
+	/* A double negates as a double, so -0.0 and -1.0/0.0 stay real. */
+	if (tag_of(v) == 14) { return jf_make(d_neg(fa(v)), fb(v)); }
+	return si_norm(0 - si_val(v), si_width_of(v, v), si_uns_of(v, v));
+}
 long js_ginot(long v) { return si_norm(0 - si_val(v) - 1, si_width_of(v, v), si_uns_of(v, v)); }
 long js_ginum(long v) { return mk_num(si_float(v)); }
 long js_gistr(long v) { if (tag_of(v) == 13) { return si_str(v); } return to_string(v); }
@@ -3906,9 +4264,31 @@ long js_gige(long l, long r) { long c = si_rel(l, r); return mk_bool(c == 1 || c
  * concatenates strings, and only when BOTH sides are strings. */
 long js_giadd(long l, long r) {
 	if (tag_of(l) == 4 && tag_of(r) == 4) { return str_cat(l, r); }
+	/* A float operand adds as a float and keeps its box - checked BEFORE the
+	 * numeric test, as in jsrtint.go, so `1.5 + "x"` is not a concatenation. */
+	if (tag_of(l) == 14 || tag_of(r) == 14) { return jf_arith(0, l, r); }
 	if (!si_numeric(l) || !si_numeric(r)) { return js_add_v(l, r); }
 	return si_apply(0, l, r);
 }
+
+/* ---- the boxed-double externs of abnf/jsrt.go's big extern table (js_jflo,
+ * js_gflo, js_csflo, js_jfsub/mul/div/mod, js_jfneg, js_jfint), which are what
+ * languages/java-to-llvm-ir.abnf, kotlin- and csharp- already emit. They are
+ * the LANGUAGE NEUTRAL ones: js_jfstep and js_jadd are left out because their
+ * Go arms turn on jsChar, a type the floor does not have, and approximating
+ * them silently is how this project gets silently wrong answers. */
+long js_jflo(long v)  { return jf_make(to_number(v), 0); }
+long js_gflo(long v)  { return jf_make(to_number(v), 1); }
+long js_csflo(long v) { return jf_make(to_number(v), 2); }
+long js_jfsub(long l, long r) { return jf_arith(1, l, r); }
+long js_jfmul(long l, long r) { return jf_arith(2, l, r); }
+long js_jfdiv(long l, long r) { return jf_arith(3, l, r); }
+long js_jfmod(long l, long r) { return jf_arith(4, l, r); }
+long js_jfneg(long v) {
+	if (tag_of(v) == 14) { return jf_make(d_neg(fa(v)), fb(v)); }
+	return mk_num(d_from_long(to_int32(d_neg(to_number(v)))));
+}
+long js_jfint(long v) { return mk_num(d_from_long(to_int32(to_number(v)))); }
 /* A literal a double cannot hold exactly: the emitter passes its DIGITS,
  * because emitNum would already have rounded 9223372036854775807 to
  * 9223372036854776000 on the way into the module. (text, radix, bits,
@@ -4017,6 +4397,17 @@ void boot(void) {
 	seed_root("sintConv", mk_host(48));
 	seed_root("sintStr", mk_host(49));
 	seed_root("sintNum", mk_host(50));
+	seed_root("flo", mk_host(51));
+	seed_root("floIs", mk_host(52));
+	seed_root("floNum", mk_host(53));
+	seed_root("floStyle", mk_host(54));
+	seed_root("floStr", mk_host(55));
+	seed_root("floOp", mk_host(56));
+	seed_root("floEq", mk_host(57));
+	seed_root("floMax", mk_host(58));
+	seed_root("floMin", mk_host(59));
+	seed_root("floAbs", mk_host(60));
+	seed_root("keysOf", mk_host(61));
 	seed_root("Infinity", mk_num(DINF));
 	seed_root("NaN", mk_num(DNAN));
 	seed_root("anytype", cell_new(12));

@@ -222,6 +222,90 @@ func jvmMathObject() *jsObject {
 // The js_jf* externals live in the big extern table in jsrt.go, next to
 // js_jadd and js_jchareq; only the Java and Kotlin compiler grammars emit them.
 
+// jfBindings adds the TEN flo* host globals that languages/lib/runtime.c seeds
+// (host ids 51..60, `seed_root("flo", mk_host(51))` and the nine after it) to a
+// program's global set. It is the jsJFlo twin of jsrtint.go's giBindings and it
+// exists for the same reason, which f19a8ad's sint* work found the hard way: a
+// layer-2 file written against the C floor could otherwise be linked natively
+// but not run by llvm.Run, because `flo` would be "variable not defined" in the
+// Go half. programJSBindings (jsrtint.go) calls both.
+//
+// Every function below is the jvmXxx above, so the three engines - the
+// interpreter grammar's {__fl} box, llvm.Run through here, and tag 14 of the C
+// floor - implement one specification.
+func jfBindings(b map[string]interface{}) {
+	// flo(v, style): a double from any numeric value, in one of the three print
+	// styles. ONE argument, not the sint* pair - a MetaJS number already IS a
+	// double, so nothing has to be carried in halves.
+	b["flo"] = jsHostFunc("flo", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		sty := uint8(floJava)
+		if len(args) > 1 {
+			sty = uint8(jsToInt(rt.toNumber(args[1])))
+		}
+		return jsJFlo{f: rt.toNumber(argAt(args, 0)), sty: sty}
+	})
+	b["floIs"] = jsHostFunc("floIs", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return jvmIsFlo(argAt(args, 0))
+	})
+	b["floNum"] = jsHostFunc("floNum", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return rt.toNumber(argAt(args, 0))
+	})
+	b["floStyle"] = jsHostFunc("floStyle", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		v := argAt(args, 0)
+		return float64(jvmStyleOf(v, v))
+	})
+	b["floStr"] = jsHostFunc("floStr", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		if f, ok := argAt(args, 0).(jsJFlo); ok {
+			return jvmFloText(f)
+		}
+		return rt.toString(argAt(args, 0))
+	})
+	// One binary operator by INDEX - 0 + 1 - 2 * 3 / 4 % - which is the same
+	// numbering si_apply / sintOp use for its first five. An index the table
+	// does not have answers jvmArith's `var x float64` untouched, i.e. 0,
+	// boxed when an operand is; stated rather than approximated so that the
+	// halves agree even on a caller's mistake.
+	b["floOp"] = jsHostFunc("floOp", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		ops := []byte{'+', '-', '*', '/', '%'}
+		c := jsToInt(rt.toNumber(argAt(args, 0)))
+		op := byte(0)
+		if c >= 0 && c < len(ops) {
+			op = ops[c]
+		}
+		return rt.jvmArith(op, argAt(args, 1), argAt(args, 2))
+	})
+	// strictEq's two jsJFlo arms, which is what a program can otherwise only
+	// reach through ===: 1.0 === 1 holds, and a box against a SIZED INTEGER is
+	// false because jvmNumEq has no jsGInt case.
+	b["floEq"] = jsHostFunc("floEq", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		l, r := argAt(args, 0), argAt(args, 1)
+		if f, ok := l.(jsJFlo); ok {
+			return jvmNumEq(f.f, r)
+		}
+		if f, ok := r.(jsJFlo); ok {
+			return jvmNumEq(f.f, l)
+		}
+		return rt.strictEq(l, r)
+	})
+	// Math.max / Math.min / Math.abs of jvmMathObject, whose double overload is
+	// selected as soon as one side is a double (Math.max(1.5, 2) is 2.0).
+	b["floMax"] = jsHostFunc("floMax", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		l, r := argAt(args, 0), argAt(args, 1)
+		return rt.jvmMinMax(l, r, rt.toNumber(l) > rt.toNumber(r))
+	})
+	b["floMin"] = jsHostFunc("floMin", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		l, r := argAt(args, 0), argAt(args, 1)
+		return rt.jvmMinMax(l, r, rt.toNumber(l) < rt.toNumber(r))
+	})
+	b["floAbs"] = jsHostFunc("floAbs", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		v := argAt(args, 0)
+		if f, ok := v.(jsJFlo); ok {
+			return jsJFlo{f: math.Abs(f.f), sty: f.sty}
+		}
+		return float64(rt.toInt32(math.Abs(rt.toNumber(v))))
+	})
+}
+
 // goFloStr is Go's fmt %v for a float64: strconv.FormatFloat(f, 'g', -1, 64),
 // which uses scientific notation when the decimal exponent is below -4 or at
 // least 6, and spells the infinities "+Inf" / "-Inf".

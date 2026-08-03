@@ -484,6 +484,7 @@ KwDefault   = "default" KwEnd ;
     // is js_typeof's answer in both engines of the other half.
     function siTypeof(v) {
         if (szIs(v)) return "number"
+        if (flIs(v)) return "number"   /* tag 14 is a number too - type_of / typeOf */
         return typeof v
     }
     // print/println render a box as its digits, which is what fmt.Fprintln of
@@ -493,7 +494,11 @@ KwDefault   = "default" KwEnd ;
     // %!d(string=...).
     function siPrintArgs(a) {
         var out = []
-        for (var i = 0; i < a.length; i++) out.push(szIs(a[i]) ? siStr(a[i]) : a[i])
+        for (var i = 0; i < a.length; i++) {
+            if (szIs(a[i])) { out.push(siStr(a[i])) }
+            else if (flIs(a[i])) { out.push(flStr(a[i])) }
+            else { out.push(a[i]) }
+        }
         return out
     }
     function siPrintln() { return println.apply(undefined, siPrintArgs(arguments)) }
@@ -505,6 +510,291 @@ KwDefault   = "default" KwEnd ;
     function siHost(hi, lo, bits, uns) {
         var w = (bits === undefined) ? 64 : bits
         return siNorm(i64Make(i64FromNum(hi).l, i64FromNum(lo).l), w, uns ? true : false)
+    }
+
+    // ----- The BOXED DOUBLE, the second primitive the other half has -----
+    //
+    // Tag 14 of languages/lib/runtime.c natively, jsJFlo of abnf/jsrtjvm.go
+    // under llvm.Run, and both bind the ten flo* globals below (seed_root ids
+    // 51..60 / jfBindings). It exists because a statically typed language has to
+    // tell `1.0 / 3.0` from `1 / 3`, which are the same two operands when every
+    // number is one double.
+    //
+    // The box here is {__fl: true, f: <a plain number>, sty: <0 java 1 go 2 c#>},
+    // the same shape and the same five observations as the {__sz} box above:
+    // typeof, the pinned type, the operators, and print/println are routed to
+    // the floor's answer; TRUTHINESS is not, for the same reason (the condition
+    // is the host engine's own `if`, and the statement builders live in
+    // lib/interp-core.js). runtime.c's truthy() answers `!d_is_zero && !d_is_nan`
+    // for tag 14, so `if (flo(0))` and `if (flo(0/0))` are FALSE there and true
+    // here. Stated at the site and deliberately not asserted.
+    //
+    // Every function is named after the jf_* of runtime.c / the jvmXxx of
+    // jsrtjvm.go it transliterates.
+    function flMake(f, sty) { return {__fl: true, f: f, sty: sty} }
+    function flIs(v) { return v != undefined && v != null && typeof v == "object" && v.__fl === true }
+    // to_number of a box, and of anything else.
+    function flNum(v) {
+        if (flIs(v)) return v.f
+        return v * 1
+    }
+    // jvmStyleOf: the style the result of an operation inherits, the LEFT
+    // operand's when both are boxes.
+    function flStyleOf(l, r) {
+        if (flIs(l)) return l.sty
+        if (flIs(r)) return r.sty
+        return 0
+    }
+    // The shortest round-tripping decimal digits of a finite non-zero magnitude,
+    // and the decimal exponent of the first one - runtime.c's shortest_digits,
+    // read off the host engine's own rendering. A JS number prints in exactly
+    // that shortest form (and the frozen engine's jsNumString does the same), so
+    // this parses "1.5" / "1e+21" / "1.2e-7" rather than re-deriving them.
+    function flDigits(a) {
+        var s = "" + a
+        var e = 0
+        var i = s.indexOf("e")
+        if (i >= 0) {
+            e = parseInt(s.substring(i + 1, s.length), 10)
+            s = s.substring(0, i)
+        }
+        var d = s.indexOf(".")
+        var digits = s
+        if (d >= 0) {
+            digits = s.substring(0, d) + s.substring(d + 1, s.length)
+            e = e + d - 1
+        } else {
+            e = e + s.length - 1
+        }
+        var k = 0
+        while (k < digits.length - 1 && digits.charAt(k) == "0") { k = k + 1; e = e - 1 }
+        digits = digits.substring(k, digits.length)
+        var n = digits.length
+        while (n > 1 && digits.charAt(n - 1) == "0") { n = n - 1 }
+        return {d: digits.substring(0, n), e: e}
+    }
+    // The digits laid out in plain decimal. point = true forces a ".0" where
+    // there is no fraction, which is what Java's rendering does and Go's and
+    // C#'s do not.
+    function flPlain(dg, point) {
+        var d = dg.d
+        var e = dg.e
+        var out = ""
+        var i
+        if (e >= 0) {
+            for (i = 0; i <= e; i = i + 1) { out = out + (i < d.length ? d.charAt(i) : "0") }
+            if (d.length > e + 1) {
+                out = out + "."
+                for (i = e + 1; i < d.length; i = i + 1) { out = out + d.charAt(i) }
+            } else if (point) { out = out + ".0" }
+            return out
+        }
+        out = "0."
+        for (i = -1; i > e; i = i - 1) { out = out + "0" }
+        return out + d
+    }
+    // The digits in scientific notation. point forces the mantissa's ".0";
+    // sign writes a '+' for a positive exponent; pad2 writes at least two
+    // exponent digits.
+    function flSci(dg, letter, point, sign, pad2) {
+        var d = dg.d
+        var ex = dg.e
+        var out = d.charAt(0)
+        var i
+        if (d.length > 1) {
+            out = out + "."
+            for (i = 1; i < d.length; i = i + 1) { out = out + d.charAt(i) }
+        } else if (point) { out = out + ".0" }
+        out = out + letter
+        if (ex < 0) { out = out + "-"; ex = 0 - ex } else if (sign) { out = out + "+" }
+        var t = "" + ex
+        if (pad2 && t.length < 2) { t = "0" + t }
+        return out + t
+    }
+    // jvmFloStr: java.lang.Double.toString - always a decimal point, plain
+    // decimal for 1e-3 <= |d| < 1e7, "1.0E20" outside it. The window is tested
+    // on the VALUE, as Go's `a >= 1e-3 && a < 1e7` does; measured, the decimal
+    // exponent form of the same test (dg.e >= -3 && dg.e < 7) is
+    // indistinguishable - 0 of 51 assertions and 0 of 10,149 probe lines.
+    function flJava(f) {
+        if (f != f) return "NaN"
+        if (f == 1 / 0) return "Infinity"
+        if (f == 0 - 1 / 0) return "-Infinity"
+        if (f == 0) return flNegZero(f) ? "-0.0" : "0.0"
+        var neg = f < 0
+        var a = neg ? 0 - f : f
+        var dg = flDigits(a)
+        var body = (a >= 0.001 && a < 10000000) ? flPlain(dg, true) : flSci(dg, "E", true, false, false)
+        return neg ? "-" + body : body
+    }
+    // goFloStr: Go's %v of a float64 - the exponent form when the decimal
+    // exponent is below -4 or at least 6, and "+Inf" / "-Inf".
+    function flGo(f) {
+        if (f != f) return "NaN"
+        if (f == 1 / 0) return "+Inf"
+        if (f == 0 - 1 / 0) return "-Inf"
+        if (f == 0) return flNegZero(f) ? "-0" : "0"
+        var neg = f < 0
+        var a = neg ? 0 - f : f
+        var dg = flDigits(a)
+        var body = (dg.e < -4 || dg.e >= 6) ? flSci(dg, "e", false, true, true) : flPlain(dg, false)
+        return neg ? "-" + body : body
+    }
+    // csFloStr: C#'s double.ToString() under the invariant culture.
+    function flCS(f) {
+        if (f != f) return "NaN"
+        if (f == 1 / 0) return "Infinity"
+        if (f == 0 - 1 / 0) return "-Infinity"
+        if (f == 0) return flNegZero(f) ? "-0" : "0"
+        var neg = f < 0
+        var a = neg ? 0 - f : f
+        var dg = flDigits(a)
+        var body = (a >= 0.00001 && a < 1000000000000000) ? flPlain(dg, false) : flSci(dg, "E", false, true, true)
+        return neg ? "-" + body : body
+    }
+    // The sign bit of a zero, which no comparison can see: 1/-0.0 is -Infinity.
+    function flNegZero(f) { return 1 / f < 0 }
+    // jvmFloText, and to_string for anything that is not a box.
+    function flStr(v) {
+        if (!flIs(v)) return "" + v
+        if (v.sty == 1) return flGo(v.f)
+        if (v.sty == 2) return flCS(v.f)
+        return flJava(v.f)
+    }
+    // jvmArith by the same 0..4 operator index the floor uses. An index the
+    // table does not have answers 0, which is jvmArith's `var x float64` with no
+    // arm taken. A float operand makes the result a BOX; two integral ones keep
+    // the 32 bit wrap the statically typed compilers emit.
+    function flOp(code, l, r) {
+        var a = flNum(l)
+        var b = flNum(r)
+        var x = 0
+        if (code == 0) { x = a + b }
+        else if (code == 1) { x = a - b }
+        else if (code == 2) { x = a * b }
+        else if (code == 3) { x = a / b }
+        else if (code == 4) { x = a % b }
+        if (flIs(l) || flIs(r)) return flMake(x, flStyleOf(l, r))
+        return x | 0
+    }
+    // jvmNumEq: the other side has to be a number too - another box or a plain
+    // number - and then the comparison is numeric, so 1.0 == 1 is true and
+    // NaN == NaN is false. A box against a SIZED INTEGER is false, because
+    // jvmNumEq has no jsGInt case.
+    function flNumEq(f, other) {
+        if (flIs(other)) return f == other.f
+        if (typeof other == "number") return f == other
+        return false
+    }
+    // strict_eq's two tag-14 arms, which sit BEFORE the tag-13 ones there.
+    function flStrictEq(l, r) {
+        if (flIs(l)) return flNumEq(l.f, r)
+        if (flIs(r)) return flNumEq(r.f, l)
+        return l === r
+    }
+    // loose_eq, where a box is NEITHER a number nor a string: `box == 1` is
+    // FALSE while `box === 1` is true, the same faithfully odd answer the sized
+    // integer gives, and for the same line of runtime.c.
+    function flLooseEq(l, r) {
+        if (l == undefined || r == undefined) return false
+        if (typeof l == "boolean" || typeof r == "boolean") return false
+        if (flIs(l) && flIs(r)) return flStrictEq(l, r)
+        return false
+    }
+    // The ORDINARY operators when an operand is a box. Note what `+` does NOT
+    // do: js_add_v answers a PLAIN number for a boxed operand, because only
+    // js_giadd and the js_jf* externs of the statically typed compilers box a
+    // result. flOp is the boxing one.
+    function flBinOp(op, l, r) {
+        if (op == "+") {
+            if (typeof l == "string" || typeof r == "string") return flStr(l) + flStr(r)
+            if (typeof l == "object" && !flIs(l)) return flStr(l) + flStr(r)
+            if (typeof r == "object" && !flIs(r)) return flStr(l) + flStr(r)
+            return flNum(l) + flNum(r)
+        }
+        if (op == "-") return flNum(l) - flNum(r)
+        if (op == "*") return flNum(l) * flNum(r)
+        if (op == "/") return flNum(l) / flNum(r)
+        if (op == "%") return flNum(l) % flNum(r)
+        if (op == "==") return flLooseEq(l, r)
+        if (op == "!=") return !flLooseEq(l, r)
+        if (op == "===") return flStrictEq(l, r)
+        if (op == "!==") return !flStrictEq(l, r)
+        if (op == "<")  return flNum(l) < flNum(r)
+        if (op == ">")  return flNum(l) > flNum(r)
+        if (op == "<=") return flNum(l) <= flNum(r)
+        if (op == ">=") return flNum(l) >= flNum(r)
+        if (op == "|")  return flNum(l) | flNum(r)
+        if (op == "^")  return flNum(l) ^ flNum(r)
+        if (op == "&")  return flNum(l) & flNum(r)
+        if (op == "<<") return flNum(l) << flNum(r)
+        if (op == ">>") return flNum(l) >> flNum(r)
+        if (op == ">>>") return flNum(l) >>> flNum(r)
+    }
+    // jvmMinMax: the operand picked, but the DOUBLE overload of Math.max/min is
+    // selected as soon as one side is a double, so Math.max(1.5, 2) is 2.0.
+    function flMinMax(l, r, takeL) {
+        var v = takeL ? l : r
+        if (flIs(l) || flIs(r)) {
+            if (flIs(v)) return v
+            return flMake(flNum(v), flStyleOf(l, r))
+        }
+        return v
+    }
+    function flHost(v, sty) { return flMake(flNum(v), sty === undefined ? 0 : sty) }
+
+    // ----- keysOf: an object's own keys, in insertion order -----
+    //
+    // js_keys of languages/lib/runtime.c (host id 61) and of abnf/jsrt.go
+    // (keysBindings) is the specification. It is a BUILTIN rather than an extern
+    // because an extern is only callable from an emitter, and a layer-2 file has
+    // no other way to walk an object: MetaJS has neither for..in nor Object.keys.
+    //
+    // THIS HALF CANNOT ASK THE HOST ENGINE, and that is the whole reason for the
+    // bookkeeping below: the grammar's :script runs under goja, which has
+    // Object.keys, AND under the frozen MetaJS engine, whose `Object` carries
+    // only `prototype`. A keysOf written against Object.keys would work in one
+    // engine and not the other. So the interpreter REMEMBERS the insertion order
+    // itself, in a hidden own property written with rawSet - which both script
+    // hosts bind - and getMember hides the name again. The other two halves skip
+    // every __-prefixed key by the same rule, so it is invisible there too.
+    //
+    // The array test is `typeof o.length == "number"`, the one lib/interp-core.js
+    // already uses in rtIsType: an ARRAY must not collect keys (its indices are
+    // not object keys, and js_keys refuses an array outright).
+    function objIsArr(o) { return typeof o.length == "number" }
+    function objNote(o, k) {
+        // Braced, all three: a value-less `return` with an `if` on the next line
+        // is read as `return (if ...)` by the frozen MetaJS parser, which does no
+        // ASI (docs/abnf-dialect-gotchas.md).
+        if (o == undefined || o == null) { return }
+        if (typeof o != "object") { return }
+        if (objIsArr(o)) { return }
+        var ks = o.__ik
+        if (ks == undefined) { ks = []; rawSet(o, "__ik", ks) }
+        var s = "" + k
+        for (var i = 0; i < ks.length; i++) { if (ks[i] === s) { return } }
+        ks.push(s)
+    }
+    function keysOfHost(o) {
+        if (o == undefined || o == null || typeof o != "object" || objIsArr(o)) {
+            fail("js_keys: not an object (got " + siTypeof(o) + ")")
+        }
+        var out = []
+        var i = 0
+        if (o.__dict) {
+            var dk = o.keys
+            for (i = 0; i < dk.length; i++) { out.push(dk[i]) }
+            return out
+        }
+        var ks = o.__ik
+        if (ks == undefined) return out
+        for (i = 0; i < ks.length; i++) {
+            var k = ks[i]
+            if (k.length >= 2 && k.charAt(0) == "_" && k.charAt(1) == "_") { continue }
+            out.push(k)
+        }
+        return out
     }
 
     var hostGlobals = {
@@ -522,7 +812,23 @@ KwDefault   = "default" KwEnd ;
         "sintUns": function(v) { return siUnsOf(v, v) ? true : false },
         "sintOp": siOp, "sintCmp": siCmp,
         "sintConv": function(v, bits, uns) { return siNorm(siPair(v), bits, uns ? true : false) },
-        "sintStr": siStr, "sintNum": siNum
+        "sintStr": siStr, "sintNum": siNum,
+        "keysOf": keysOfHost,
+        // The ten boxed-double names, the same set languages/lib/runtime.c
+        // seeds (ids 51..60) and abnf/jsrtjvm.go's jfBindings adds.
+        "flo": flHost,
+        "floIs": function(v) { return flIs(v) },
+        "floNum": flNum,
+        "floStyle": function(v) { return flStyleOf(v, v) },
+        "floStr": flStr,
+        "floOp": flOp,
+        "floEq": flStrictEq,
+        "floMax": function(l, r) { return flMinMax(l, r, flNum(l) > flNum(r)) },
+        "floMin": function(l, r) { return flMinMax(l, r, flNum(l) < flNum(r)) },
+        "floAbs": function(v) {
+            if (flIs(v)) return flMake(v.f < 0 || flNegZero(v.f) ? 0 - v.f : v.f, v.sty)
+            return (flNum(v) < 0 ? 0 - flNum(v) : flNum(v)) | 0
+        }
     }
 
     // The type class that pins a variable: undefined and null pin nothing.
@@ -589,6 +895,10 @@ KwDefault   = "default" KwEnd ;
 
     function getMember(o, k) {
         if (o == undefined) fail("member '" + k + "' of " + o) // Catches null and undefined.
+        // The key list keysOf keeps is not a property of the program's object:
+        // the other two halves have no such slot, and js_keys skips every
+        // __-prefixed key, so it must not be readable here either.
+        if (k === "__ik") return undefined
         return o[k]
     }
 
@@ -613,7 +923,10 @@ KwDefault   = "default" KwEnd ;
     function makeObject(props) {
         return function() {
             var o = {}
-            for (var i = 0; i < props.length; i++) o[props[i].k] = props[i].t()
+            for (var i = 0; i < props.length; i++) {
+                o[props[i].k] = props[i].t()
+                objNote(o, props[i].k)          // keysOf: remember the insertion order
+            }
             return o
         }
     }
@@ -629,6 +942,7 @@ KwDefault   = "default" KwEnd ;
         // object operand can possibly be a box.
         if (typeof l == "object" || typeof r == "object") {
             if (szIs(l) || szIs(r)) return siBinOp(op, l, r)
+            if (flIs(l) || flIs(r)) return flBinOp(op, l, r)
         }
         if (op == "+") return l + r
         if (op == "-") return l - r
@@ -758,6 +1072,7 @@ KwDefault   = "default" KwEnd ;
                 var p = resolveRef(ref)
                 if (op != "=") v = applyOp(op, p.obj[p.key], v)
                 p.obj[p.key] = v
+                objNote(p.obj, p.key)
             }
             return v
         }
@@ -775,6 +1090,7 @@ KwDefault   = "default" KwEnd ;
             var p = resolveRef(ref)
             var m = p.obj[p.key] - 0
             p.obj[p.key] = m + delta
+            objNote(p.obj, p.key)
             return m
         }
     }
@@ -790,6 +1106,7 @@ KwDefault   = "default" KwEnd ;
             var p = resolveRef(ref)
             var m = p.obj[p.key] - 0 + delta
             p.obj[p.key] = m
+            objNote(p.obj, p.key)
             return m
         }
     }

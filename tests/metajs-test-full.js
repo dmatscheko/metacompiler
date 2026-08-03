@@ -1047,6 +1047,196 @@ function s25() {
     check("gc07", f() === 7)
 }
 
+// ===== SECTION 26: boxed doubles (the flo* host globals) =====
+// The SECOND primitive type MetaJS itself does not have, and the one ten of the
+// eleven remaining languages need: tag 14 of languages/lib/runtime.c natively,
+// jsJFlo of abnf/jsrtjvm.go under llvm.Run, and the {__fl} box of
+// metajs-interpreter.abnf in the interpreter half. See docs/runtime-next-plan.md
+// part 2.
+//
+// It exists because a statically typed language has to tell `1.0 / 3.0` from
+// `1 / 3`, which are the SAME two operands when every number is one double.
+// The invariant is the mirror image of the sized integer's: a plain number is an
+// INTEGRAL type and a box is a double, and unlike si_norm a double NEVER
+// unboxes - flo(1) stays a box, or 1.0 and 1 would stop being distinguishable.
+//
+// Two things this section deliberately does NOT assert, because they differ by
+// construction rather than by defect:
+//   - TRUTHINESS. runtime.c's truthy() answers `!zero && !nan` for tag 14, so
+//     `if (flo(0))` is false there and true in the interpreter half, where the
+//     condition is the host engine's own `if`. The sized integer has the same
+//     hole for the same reason.
+//   - THE SIGN OF A ZERO PRODUCT. goja represents an integral number as an
+//     int64, so `0 * -2718281` is +0 under the goja interpreter and -0 in real
+//     JS, in the frozen engine and in the C floor. Measured: `1 / (0 * -2718281)`
+//     is +Inf under goja and -Inf in the other three. A -0.0 that comes from a
+//     SMALL product (flo00 below) is safe and is asserted.
+function s26() {
+    // ----- the box, and typeof -----
+    check("flo01", floIs(flo(1, 0)) === true && floIs(1) === false)
+    check("flo02", typeof flo(1, 0) === "number")     // NOT "object" - the point
+    check("flo03", floNum(flo(1.5, 0)) === 1.5 && floNum(2.5) === 2.5)
+    check("flo04", floStyle(flo(1, 1)) === 1 && floStyle(flo(1, 2)) === 2 && floStyle(7) === 0)
+    // A double NEVER unboxes, which is where it parts company with sint():
+    // sint(0, 5, 64, 0) IS the plain 5, and flo(5) is not.
+    check("flo05", floIs(flo(5, 0)) === true)
+    // So a box pins the type class "number" and the variable may hold a plain
+    // one afterwards - the assertion that fails if typeof does not.
+    var pin = flo(1, 0)
+    pin = 7
+    check("flo06", pin === 7)
+
+    // ----- the three renderings (jvmFloText), which are the only thing the
+    // statically typed languages differ in -----
+    var e20 = 100000000000000000000
+    check("flo07", floStr(flo(1, 0)) === "1.0")
+    check("flo08", floStr(flo(1, 1)) === "1" && floStr(flo(1, 2)) === "1")
+    check("flo09", floStr(flo(1.5, 0)) === "1.5" && floStr(flo(1.5, 1)) === "1.5")
+    check("flo10", floStr(flo(e20, 0)) === "1.0E20")
+    check("flo11", floStr(flo(e20, 1)) === "1e+20")
+    check("flo12", floStr(flo(e20, 2)) === "1E+20")
+    check("flo13", floStr(flo(1 / 0, 0)) === "Infinity" && floStr(flo(1 / 0, 1)) === "+Inf")
+    check("flo14", floStr(flo(0 - 1 / 0, 1)) === "-Inf" && floStr(flo(0 - 1 / 0, 2)) === "-Infinity")
+    check("flo15", floStr(flo(0 / 0, 0)) === "NaN" && floStr(flo(0 / 0, 1)) === "NaN")
+    check("flo16", floStr(flo(0, 0)) === "0.0" && floStr(flo(0, 1)) === "0")
+    check("flo00", floStr(flo(0 * (0 - 1), 0)) === "-0.0" && floStr(flo(0 * (0 - 1), 2)) === "-0")
+    // The bounds of Java's plain-decimal window, 1e-3 <= |d| < 1e7. Asserted AT
+    // the boundary in both directions, because a rendering that used the decimal
+    // exponent instead of the value would still pass a test taken from the
+    // middle of the range.
+    check("flo17", floStr(flo(0.001, 0)) === "0.001" && floStr(flo(0.0001, 0)) === "1.0E-4")
+    check("flo18", floStr(flo(9999999, 0)) === "9999999.0" && floStr(flo(10000000, 0)) === "1.0E7")
+    // Go's window is the decimal exponent, -4 <= e < 6 - a different rule, so
+    // 1e6 renders plain in Java and scientific in Go.
+    check("flo19", floStr(flo(1000000, 1)) === "1e+06" && floStr(flo(100000, 1)) === "100000")
+    check("flo20", floStr(flo(0.0001, 1)) === "0.0001" && floStr(flo(0.00001, 1)) === "1e-05")
+    // C#'s is [1e-5, 1e15), and its exponent carries a sign and two digits.
+    check("flo21", floStr(flo(0.00001, 2)) === "0.00001" && floStr(flo(0.000001, 2)) === "1E-06")
+    check("flo22", floStr(flo(1000000000000000, 2)) === "1E+15")
+    check("flo23", floStr(flo(999999999999999, 2)) === "999999999999999")
+    // A non-box goes through the ordinary to_string.
+    check("flo24", floStr(1.5) === "1.5" && floStr("x") === "x")
+
+    // ----- THE REASON THE TYPE EXISTS: the same two operands, two answers -----
+    check("flo25", floStr(floOp(3, flo(1, 0), 3)) === "0.3333333333333333")
+    check("flo26", floOp(3, 1, 3) === 0 && floIs(floOp(3, 1, 3)) === false)
+    check("flo27", floIs(floOp(3, flo(1, 0), 3)) === true)
+    // Two integral operands keep the 32 bit wrap the statically typed compilers
+    // emit; one double makes the whole operation floating point.
+    check("flo28", floOp(2, 2.5, 1.5) === 3 && floStr(floOp(2, flo(2.5, 0), 1.5)) === "3.75")
+    check("flo29", floStr(floOp(4, flo(7, 0), 2)) === "1.0")     // % is a float %
+    check("flo30", floStr(floOp(1, flo(1, 0), 1)) === "0.0" && floStr(floOp(0, flo(1, 0), 1)) === "2.0")
+    // jvmStyleOf: the style of whichever operand is a box, the LEFT one when
+    // both are.
+    check("flo31", floStyle(floOp(0, flo(1, 1), flo(2, 2))) === 1)
+    check("flo32", floStyle(floOp(0, 1, flo(2, 2))) === 2)
+    // An operator index the table does not have answers 0, boxed when an
+    // operand is - jvmArith's `var x float64` with no arm taken.
+    check("flo33", floStr(floOp(9, flo(1, 0), 2)) === "0.0")
+
+    // ----- equality: jvmNumEq, which is strict_eq's two tag-14 arms -----
+    check("flo34", floEq(flo(1, 0), 1) === true && floEq(1, flo(1, 0)) === true)
+    check("flo35", floEq(flo(1, 0), flo(1, 2)) === true)         // the style is not part of the value
+    check("flo36", floEq(flo(0 / 0, 0), flo(0 / 0, 0)) === false)
+    check("flo37", floEq(flo(1, 0), "1") === false && floEq(flo(1, 0), true) === false)
+    // A boxed double against a SIZED INTEGER is false, because jvmNumEq has no
+    // jsGInt case - stated in the Go twin, and matched rather than smoothed.
+    check("flo38", floEq(flo(1, 0), sint(0, 1, 8, 0)) === false)
+    // === is the same two arms, reached through the operator; == is NOT, because
+    // loose_eq sees a box as neither a number nor a string. Faithfully odd, and
+    // the sized integer does exactly the same thing.
+    check("flo39", (flo(1, 0) === 1) === true && (1 === flo(1, 0)) === true)
+    check("flo40", (flo(1, 0) == 1) === false)
+    check("flo41", (flo(1, 0) === flo(1, 0)) === true && (flo(1, 0) === 2) === false)
+
+    // ----- the ORDINARY operators, which do not box: js_add_v answers a plain
+    // number, and only floOp / the js_jf* externs of a compiler box a result ---
+    check("flo42", flo(1.5, 0) + 1 === 2.5 && floIs(flo(1.5, 0) + 1) === false)
+    check("flo43", flo(1.5, 0) * 2 === 3 && flo(3, 0) - flo(1, 0) === 2)
+    check("flo44", flo(1.5, 0) < 2 && flo(1.5, 0) > 1 && flo(1.5, 0) <= 1.5)
+    // A string operand concatenates through the box's own rendering.
+    check("flo45", "x" + flo(1, 0) === "x1.0" && "x" + flo(1, 1) === "x1")
+
+    // ----- Math.max / Math.min / Math.abs: the DOUBLE overload is selected as
+    // soon as one side is a double, so Math.max(1.5, 2) is 2.0 -----
+    check("flo46", floStr(floMax(flo(1.5, 0), 2)) === "2.0" && floIs(floMax(flo(1.5, 0), 2)) === true)
+    check("flo47", floStr(floMin(flo(1.5, 0), 2)) === "1.5")
+    check("flo48", floMax(1, 2) === 2 && floIs(floMax(1, 2)) === false)
+    check("flo49", floStr(floAbs(flo(0 - 2.5, 0))) === "2.5" && floAbs(0 - 3) === 3)
+    check("flo50", floIs(floAbs(flo(0 - 2.5, 0))) === true && floIs(floAbs(0 - 3)) === false)
+}
+
+// ===== SECTION 27: keysOf, and the sign of an underflowed power =====
+// Two floor builtins that the eleven-language rollout needs and that no earlier
+// section could reach.
+//
+// keysOf(o) is js_keys - an object's own keys in INSERTION order, skipping the
+// internal __-prefixed slots. It is a builtin and not an extern because an
+// extern is only callable from an emitter: MetaJS has neither for..in nor
+// Object.keys, so a layer-2 runtime library could not walk an object at all,
+// which blocks var_dump, `==` between objects, an (array) cast and clone in PHP
+// and their equivalents in the other nine. Three implementations again: host id
+// 61 of languages/lib/runtime.c, keysBindings of abnf/jsrtint.go, and - because
+// the interpreter's script has no key enumeration under BOTH of its engines - a
+// hidden insertion-order list kept by metajs-interpreter.abnf itself.
+function s27() {
+    var o = {b: 1, a: 2}
+    o.c = 3
+    o.b = 9                                       // a rewrite does NOT reorder
+    var k = keysOf(o)
+    check("keys01", k.length === 3)
+    check("keys02", k[0] === "b" && k[1] === "a" && k[2] === "c")
+    check("keys03", keysOf({}).length === 0)
+    // The keys are usable as keys, which is the whole point for layer 2.
+    var sum = 0
+    var i = 0
+    while (i < k.length) { sum = sum + o[k[i]]; i = i + 1 }
+    check("keys04", sum === 14)                   // 9 + 2 + 3
+    // A computed member write registers its key too.
+    var c = {}
+    c["x" + 1] = "v"
+    check("keys05", keysOf(c).length === 1 && keysOf(c)[0] === "x1")
+    // The internal slots are skipped, in every half.
+    var d = {__class: 1, n: 2}
+    check("keys06", keysOf(d).length === 1 && keysOf(d)[0] === "n")
+    // A nested object keeps its own list.
+    var n = {outer: {inner: 1, second: 2}}
+    check("keys07", keysOf(n).length === 1 && keysOf(n.outer).length === 2)
+    check("keys08", keysOf(n.outer)[1] === "second")
+    // The list is a fresh array each call: mutating it does not edit the object.
+    var f = keysOf(o)
+    f.push("zz")
+    check("keys09", keysOf(o).length === 3)
+    // An object a function built, and one with many keys (the list grows).
+    function mk(count) {
+        var out = {}
+        var j = 0
+        while (j < count) { out["k" + j] = j; j = j + 1 }
+        return out
+    }
+    var big = mk(40)
+    var bk = keysOf(big)
+    check("keys10", bk.length === 40 && bk[0] === "k0" && bk[39] === "k39")
+    // ++ on a member counts as a write of that key.
+    var p = {}
+    p.n = 0
+    p.n++
+    check("keys11", keysOf(p).length === 1 && p.n === 1)
+
+    // ----- the sign of a power that underflows to zero -----
+    // Math.pow(-0.5, a large odd integer) is -0, not +0: d_ldexp has to put the
+    // sign back on the underflowed zero. The native floor answered +0 until
+    // 2026-08-03 while node and the Go twin answered -0 - and only
+    // tests/clang-check.sh runs the native binary, so nothing else would see it.
+    // Spelled as a division because -0 === 0 is true and MetaJS has no Infinity
+    // global in both halves: 1 / -0 is -Infinity, which IS negative.
+    check("pow01", 1 / Math.pow(0 - 0.5, 2147483647) < 0)
+    check("pow02", 1 / Math.pow(0 - 0.5, 9007199254740991) < 0)
+    check("pow03", 1 / Math.pow(0.5, 2147483647) > 0)      // the positive base stays +0
+    check("pow04", Math.pow(0 - 0.5, 3) === 0 - 0.125)
+    check("pow05", Math.pow(0 - 0.5, 0 - 2147483647) < 0)  // overflow keeps it too
+}
+
 function main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -1073,6 +1263,8 @@ function main() {
     s23() // SECTION-CALL 23
     s24() // SECTION-CALL 24
     s25() // SECTION-CALL 25
+    s26() // SECTION-CALL 26
+    s27() // SECTION-CALL 27
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

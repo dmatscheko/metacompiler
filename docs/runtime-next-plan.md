@@ -7,7 +7,7 @@ forward plan. HEAD when it was written: `e8bf2c3`.
 ## Where things stand
 
 ```
-matrix 325/325 · --full 5,518 assertions, 0 halves disagree · --cross 119/0
+matrix 325/325 · --full 5,585 assertions, 0 halves disagree · --cross 119/0
 clang-check 16/16 - bash, batch, c, lua, metajs all "the clang executable agrees"
 ```
 
@@ -518,6 +518,104 @@ mec -freeze languages/metajs-to-llvm-ir.abnf    fixed point (same MD5 on a re-fr
   interpreter's memory have their own arenas and no collector; only `runtime.c`, which
   is what MetaJS and Lua (and the eleven languages after them) stand on, got one.
 
+## 1c. The block header given back - DONE 2026-08-03
+
+**The 16 byte per-object header of 1b is gone, and 92% of what it cost is back:**
+
+```
+                        8c396c4      1cd6a41       HEAD
+bytes/iter (400,000)      3,633        4,557       3,711
+against no collector          -       +25.4%       +2.1%
+```
+
+Same binary, `MEC_GC=off`, `tests/bench-alloc.sh`. Memory is still **BOUNDED and flat**
+with the collector on - and flat over a 40x range of iteration counts, not just two
+points:
+
+```
+iters=  250,000   no-gc rss   928,464,896  3,713 B/it    gc rss 3,358,720
+iters=  500,000   no-gc rss 1,855,520,768  3,711 B/it    gc rss 3,391,488
+iters=1,000,000   no-gc rss 3,709,681,664  3,709 B/it    gc rss 3,342,336
+iters=2,000,000   no-gc rss 7,417,987,072  3,708 B/it    gc rss 3,342,336
+```
+
+### What replaced the header
+
+1b gave every allocation a header holding its size, a free bit, a cell bit and a mark
+epoch. The remedy named at the site was "cells are all one size, so a cell-only region
+with mark bits in a side array" - and that is only *half* of the saving, because the
+benchmark's 52 allocations an iteration are 33 cells and 19 buffers. What ships is the
+general form of the same idea: **a chunk serves exactly one size class AND one kind**, so
+BOTH the size and the cell/buffer bit are properties of the chunk, and the two remaining
+flags are one bit each in side bitmaps indexed by the block's slot number.
+
+```
+chunk: [0] next  [1] block size  [2] slots  [3] slots bumped
+       [4] alloc bitmap  [5] mark bitmap  [6] kind   then 128 bytes of header, then blocks
+```
+
+Three things fell out that are worth more than the bytes:
+
+- **Interior pointers are resolved by a division**, `idx = (v - base) / bsize`, instead of
+  by scanning a start bitmap backwards. Shorter, exact, and it cannot be got wrong.
+- **The free lists no longer need a header word.** A free block's own payload holds the
+  next pointer; the "is it free" question is the alloc bitmap.
+- **The tail-of-chunk waste of 1b's defect 2 cannot happen**: a chunk is a whole number of
+  equal blocks.
+
+The mark epoch is gone with the header: the mark bitmap is CLEARED at the start of a
+collection, which is `slots/8` bytes per chunk - 6 KB for a 3 MB heap of cells - against
+16 bytes on every object for ever. `MEC_GC=poison` got simpler too: a retired block just
+keeps its alloc bit clear and goes on no free list.
+
+**The residual +2.1% is the side arrays themselves**, 2 bits per block, plus the 128 byte
+chunk header and one bitmap pair per 1 MB chunk. It is stated rather than rounded away:
+78 bytes an iteration is what the metadata of a walkable heap costs here.
+
+### The collector still catches what it caught, measured the same way
+
+Every mutation of 1b's table re-run against the new collector, plus two the new design
+needs. `MEC_GC=stress`, native binaries, ABORT = the binary died or never reached its own
+summary. `lua-test-features` (142 checks) replaces `lua-test-full` in this run because it
+is the file the interior-pointer defect showed up in:
+
+```
+                                              metajs (471)   lua-features (142)
+the C stack not scanned                       ABORT          ABORT
+js_gc_pin's roots not scanned                 ABORT          ABORT
+a scope's PARENT not traced                   ABORT          ABORT
+a closure's ENV not traced                    ABORT          ABORT
+NIC / SMC_VAL (the two caches) not roots      ABORT          ABORT
+an object's VALUE buffer not traced           ABORT          ABORT
+an array's element buffer not traced          ABORT          ABORT
+a raw buffer's contents not scanned           ABORT          ABORT
+the JB jmp_buf pool not scanned               ABORT           0
+a string's UTF-16 UNIT buffer not traced        14            2
+G_ROOT not an explicit root                      0            0
+THROWN not an explicit root                      0            0
+gc_try takes EXACT block addresses only          0            9   <- the -O2 defect
+the mark bitmap is not cleared between GCs    ABORT          ABORT
+the callee-saved registers not scanned           0            0   <- WEAKER, see below
+```
+
+**The interior-pointer row is the one that mattered and it is unchanged: 9 failures**, all
+in `string.sub`, exactly as when 1b found it. The last row is a LOSS of discriminating
+power and is reported rather than buried: at 1cd6a41 not scanning the callee-saved
+registers aborted both ratchets, and with this allocator neither notices. Nothing about
+the register scan changed - what changed is which handles the C compiler chooses to keep
+in a callee-saved register across `ar_alloc`, which is a property of the code shape, not
+of the collector. The scan stays, for the same reason `G_ROOT` and `THROWN` stay: a root
+set that depends on a register allocator's habits is not a root set.
+
+### Every suite, again
+
+`MEC_GC=off / auto / stress / poison` compared byte for byte on stdout, stderr and exit
+status, over every Lua and MetaJS program in `tests/` built as a native binary:
+
+```
+native GC sweep: 20 programs built, 20 identical across off/auto/stress/poison, 0 divergent
+```
+
 ---
 
 # Part 2 - The open defects
@@ -563,15 +661,10 @@ combinations x 32 seeds, then 11 operators x 32 x 32 per combination, plus `giCm
   **SECTION 24 deliberately asserts nothing about an infinity**, so the ratchet
   itself stays architecture independent. Same dependence as the float `%` of
   phase 4a.
-- `js_giarith` and `js_giadd` in `jsrtint.go` route a `jsJFlo` (the boxed double of
-  `jsrtjvm.go`) to `jvmArith` before reaching `giArith`. `jsJFlo` is a *second*
-  primitive type the floor does not have, so those arms are absent. Nothing linked
-  natively creates one today, and **the first of java/kotlin/csharp to migrate will
-  need `jsJFlo` given exactly the treatment `jsGInt` just got.** Checked against the
-  `sint*` work of 2026-08-03 rather than assumed: `sintOp` calls `rt.giArith`
-  **directly**, not `js_giarith`, so it never reaches the `jvmArith` detour, and no
-  `sint*` binding in either half has a float-box arm to be wrong about. Nothing here
-  quietly assumes a `jsJFlo` exists or that it does not.
+- ~~`js_giarith` and `js_giadd` route a `jsJFlo` to `jvmArith` before reaching
+  `giArith`, and the floor has no such type, so those arms are absent.~~
+  **CLOSED 2026-08-03 - tag 14, below.** Both arms exist, and a 845 line probe that
+  calls the externs themselves says they agree with the Go twin exactly.
 
 **The alternative was costed and rejected.** "Stop asking `js_typeof` about a number"
 is not one change: it is a rule every layer-2 file of all eleven languages has to keep
@@ -798,6 +891,217 @@ most likely the process being killed, since a truncated `$work.f` is exactly wha
 `cmp -s` would report. **`--full` should be treated as having a rare false
 positive on this line until someone catches it**; re-run before believing a lone
 `FROZEN-DIFF` on `js`.
+
+~~**`jsJFlo`, the boxed double, is a SECOND primitive the floor does not have.**~~
+**DONE 2026-08-03 - tag 14.** Ten of the eleven remaining languages need it (`grep -c
+jsJFlo abnf/jsrt*.go`: kotlin 32, jvm 18, csharp 12, java 11, swift 9, golang 4, dart 1,
+jsrt.go 15; only php does not), so it was the last prerequisite for the rollout.
+`abnf/jsrtjvm.go` stays the authoritative specification and every function of the floor
+is named after the `jvmXxx` it implements.
+
+```
+cell.a  the double's BITS        cell.b  the print style: 0 java, 1 go, 2 c#
+```
+
+**Why it is a second type and not a case of tag 13**, stated because the two look alike:
+a sized integer's payload is an integer and `si_norm`'s whole job is to UNBOX a value a
+double holds exactly, which is the opposite of what a double needs - `1.0` and `1` must
+stay distinguishable or `1.0 / 3.0` and `1 / 3` are the same two operands. A boxed double
+therefore NEVER unboxes. `jsrtint.go` says the same thing from the other side: `giVal`
+reads a `jsJFlo` by truncating it.
+
+**Ground truth: two differential probes against a Go oracle built out of the real
+functions, not a copy of them.**
+
+```
+                                            lines   vs the Go oracle
+jfprobe.js, llvm.Run (goja and -frozen)    10,149   BYTE-IDENTICAL
+jfprobe.js, the frozen interpreter         10,149   BYTE-IDENTICAL
+jfprobe.js, the NATIVE binary              10,149   63 lines differ (see below)
+jfprobe.js, the goja interpreter           10,149    6 lines differ (see below)
+giprobe.c, the js_gi* EXTERNS, native         845   BYTE-IDENTICAL
+```
+
+The first probe walks 24 mantissas x 61 decimal exponents x both signs through all three
+renderings, then 5 operators x 16 values x 16 values x 4 boxedness combinations, then the
+same grid for `floEq`, `floMax`/`floMin` and `floAbs`. The oracle is a Go test that calls
+`jvmFloText` / `rt.jvmArith` / `jvmNumEq` / `rt.jvmMinMax` directly. The second reaches
+what no MetaJS program can - `js_giarith`, `js_giadd`, `js_gineg`, `js_gieq`, `js_gilt`,
+`js_giconv` and the rest with a boxed-double operand - by compiling `runtime.c` with `cc`
+against a driver that defines `jsmain`/`jsdispatch`, and its oracle calls the same externs
+out of `rt.externs()`. **That is the only coverage the `jvmArith` routing in `js_giarith`
+and `js_giadd` has**, and it is why it exists: SECTION 26 measures 0 for those two arms,
+because a MetaJS operator never reaches them.
+
+**The two places it does not match, stated rather than approximated:**
+
+- **63 native lines: `to_int32` of a value outside the int64 range.** Reachable only
+  through `jvmArith`'s INTEGER arm, `float64(rt.toInt32(x))`, with both operands
+  unboxed - so no boxed double is involved. Three implementations, three answers, and the
+  odd one out is again the Go twin: `rt.toInt32` ends in `int32(int64(f))`, which Go
+  leaves implementation defined out of range and which answers `-1` here on arm64; the C
+  floor answers `0` from an explicit `d_in_long` test; real JS `ToInt32` would answer
+  `1661992960`. Pre-existing (it is `js_band`'s reading too), architecture independent on
+  the floor's side by construction, and the same class as `giFromFloat`'s infinity.
+- **6 goja-interpreter lines: the sign of a zero PRODUCT.** goja represents an integral
+  number as an int64, so `0 * -2718281` is `+0` there and `-0` in real JS, in the frozen
+  engine and in the C floor. Measured directly: `1 / (0 * -2718281)` is `+Inf` under goja
+  and `-Inf` in the other three. A property of the host engine, not of this type; SECTION
+  26 asserts a `-0.0` that comes from a small product, which is safe in all four.
+
+**One floor defect the probe found and fixed on the way.** `d_mod_go` put the sign back on
+a negative remainder with `r = 0.0 - r`, which turns `-0.0` into `+0.0`, so `Mod(-1, 1)`
+was `+0` where Go's `math.Mod` gives `-0`. Invisible before, because the JS rendering of
+`-0.0` is `"0"` - Java's is `"-0.0"`. 18 of the probe's lines. The sign is flipped as a
+BIT now.
+
+**What a layer-2 file has to do to use the tag** - the whole interface, ten host globals
+in the style of the `sint*` family (`seed_root` ids 51..60 in `runtime.c`, `jfBindings` in
+`abnf/jsrtjvm.go`, `hostGlobals` in `metajs-interpreter.abnf`):
+
+```js
+var d = flo(1.5, 0)      // build one: the VALUE and the print style
+                         //   0 java  1.0 -> "1.0"   1e20 -> "1.0E20"  inf -> "Infinity"
+                         //   1 go    1.0 -> "1"     1e20 -> "1e+20"   inf -> "+Inf"
+                         //   2 c#    1.0 -> "1"     1e20 -> "1E+20"   inf -> "Infinity"
+                         // ONE argument, unlike sint()'s two halves: a MetaJS
+                         // number already IS a double. It never unboxes.
+floIs(v)                 // jvmIsFlo
+floNum(v)                // the double back out (to_number)
+floStyle(v)              // the style; 0 for anything that is not a box
+floStr(v)                // jvmFloText - the box's own language's rendering
+floOp(code, l, r)        // one binary operator, 0 + 1 - 2 * 3 / 4 %  (jvmArith):
+                         // a float operand makes the result a BOX, two integral
+                         // ones keep the 32 bit wrap
+floEq(l, r)              // jvmNumEq: 1.0 == 1 holds, NaN never does, and a box
+                         // against a SIZED INTEGER is false
+floMax(l, r) / floMin(l, r) / floAbs(v)    // jvmMathObject's three
+```
+
+and the three rules the tag imposes, all pinned by SECTION 26:
+
+1. **`typeof v == "number"` is TRUE for a boxed double**, as for a sized integer, so a
+   site that meant "an ordinary double" has to say so.
+2. **The ORDINARY operators do not box.** `flo(1.5,0) + 1` is the plain `2.5`, because
+   `js_add_v` answers a plain number; only `floOp` and the `js_jf*` externs of a compiler
+   box a result. `flo(1,0) === 1` is true and `flo(1,0) == 1` is FALSE - the same
+   faithfully odd pair the sized integer has, from the same line of `loose_eq`.
+3. **Truthiness is not converted in the interpreter half.** `runtime.c`'s `truthy()`
+   answers `!zero && !nan` for tag 14, so `if (flo(0))` is false there and true in the
+   interpreter, where the condition is the host engine's own `if`. Same hole as tag 13,
+   stated at both sites and deliberately not asserted.
+
+The floor also implements the language-neutral `js_jf*` externs the java / kotlin / csharp
+emitters already emit - `js_jflo`, `js_gflo`, `js_csflo`, `js_jfsub/mul/div/mod`,
+`js_jfneg`, `js_jfint` - so those three can be linked natively without touching the floor
+again. `js_jfstep` and `js_jadd` are deliberately absent: their Go arms turn on `jsChar`,
+a type the floor does not have, and approximating one silently is how this project gets
+silently wrong answers.
+
+**Ratchet**: `tests/metajs-test-full.js` SECTION 26, **51 assertions**, all five engines
+(interpreter goja and `-frozen`, `llvm.Run` goja and `-frozen`, the clang-built native
+binary) green and byte-identical. metajs 404 -> 455.
+
+**Discriminating power, measured.** Against a clean `git archive` of `1cd6a41` the answer
+is **51 of 51 in every engine** - `flo` is not defined in ANY of the three, so the file
+dies. There is no oracle column this time, and that is the difference from the `sint*`
+work: the C floor was already the oracle there, and here nothing implemented `jsJFlo` at
+all. So the evidence is the two probes above plus mutating one behaviour at a time:
+
+```
+                                                        native   llvm.Run   interp
+jf_text ignores the style                                 13         -         -
+to_number: tag 14 falls through to NaN                     9         -         -
+jvm_flo_str drops the forced ".0"                          6         -         -
+jf_arith boxes only when BOTH operands are boxes           7         -         -
+strict_eq's tag-14 arms removed                            2         -         -
+jf_num_eq accepts any operand                              2         -         -
+type_of: tag 14 is not a number                            1         -         -
+jf_style_of: the RIGHT operand wins                        1         1         1
+jf_minmax never re-boxes                                   1         1         -
+the C# exponent is not padded to two digits                1         -         -
+flo() ignores the style argument                           -        16         -
+floOp always uses '+'                                      -         6         -
+floAbs does not keep the box                               -         2         -
+jfBindings not added to programJSBindings                  -      ABORT        -
+siTypeof: a box is not a number                            -         -      ABORT
+flOp does not box its result                               -         -         8
+flDigits keeps the trailing zeros                          -         -         7
+binOp does not dispatch to flBinOp                         -         -         6
+flPlain never forces the ".0"                              -         -         6
+flStrictEq is identity                                     -         -         4
+flSci: Java gets a signed padded exponent                  -         -         3
+flNegZero always false                                     -         -         1
+flLooseEq behaves like ===                                 -         -         1
+js_giadd / js_giarith float arms removed                   0         -         -
+Java's window by the decimal exponent                      0         -         0
+floEq is rt.strictEq only                                  -         0         -
+floStr uses rt.toString for a box too                      -         0         -
+print/println box wrappers                                 -         -         0
+```
+
+**Five honest zeros, and each one says something.** The `js_giadd`/`js_giarith` arms are
+unreachable from a MetaJS operator - that is what `giprobe.c` is for, and it puts them at
+845 of 845. `floEq` and `floStr` are **redundant in the Go twin**: `rt.strictEq` and
+`rt.toString` already have `jsJFlo` cases doing exactly that, and they are kept because
+they say what they mean, the same call the floor's `if (tag_of(v) == 14)` makes. The
+`println` wrappers are not exercised because the ratchet prints only its own summary; they
+are pinned by hand instead - all five engines print `1.0 1 1` for a `println` of the three
+styles. And **Java's plain-decimal window is measured indistinguishable** whether it is
+tested on the VALUE (`a >= 1e-3 && a < 1e7`, what Go's source says) or on the decimal
+exponent (`e10 >= -3 && e10 < 7`): 0 of 51 assertions AND 0 of 10,149 probe lines. The
+value test is kept because it is what the twin does, not because it was shown to matter -
+recorded at the site in both files so nobody "fixes" it back.
+
+**One rule worth carrying into the java migration**, the float twin of the sized integer's
+64-bit rule: **a rendering rule that only bites at a window boundary has to be asserted AT
+the boundary in both directions**, or the assertion is decoration. `flo17` and `flo18`
+pair `0.001` with `0.0001` and `9999999` with `10000000` for exactly that reason.
+
+## Two builtins the PHP migration needed, and the floor owed
+
+**`keysOf`, and why an extern was not enough.** The floor has had `js_keys` all along, but
+**an extern is only callable from an emitter**, and MetaJS has neither `for..in` nor
+`Object.keys` - so a layer-2 file could not enumerate an object's own keys AT ALL. That
+blocks `var_dump` of an object, `==` between two objects, the `(array)` cast and `clone`
+in PHP, and the same four in the nine after it. `keysOf` is now a builtin in all three
+engines (`seed_root` id 61, `keysBindings` in `abnf/jsrtint.go`,
+`metajs-interpreter.abnf`), with `js_keys`'s exact semantics: a dict box yields its key
+array, a plain object yields its string keys in INSERTION order, skipping the internal
+`__`-prefixed slots.
+
+The interpreter half is the interesting one. **It cannot ask the host engine, because
+there is no answer in BOTH of its engines**: the grammar's `:script` runs under goja,
+which has `Object.keys`, and under the frozen MetaJS engine, whose `Object` carries only
+`prototype`. So the interpreter remembers the insertion order itself, in a hidden own
+property written with `rawSet` (which both script hosts bind) and hidden again in
+`getMember` - the other two halves skip every `__`-prefixed key by the same rule, so the
+name is invisible there too. The write sites are `makeObject`, `makeAssign`, `makeIncDec`
+and `makePreIncDec`, all in `metajs-interpreter.abnf`, and an ARRAY is excluded by the
+`typeof o.length == "number"` test `lib/interp-core.js` already uses.
+
+**`d_pow` lost the sign of an underflowed zero**, and only the native binary was wrong -
+the class that byte-identity cannot see, because `./test.sh` compares each engine against
+itself and only `tests/clang-check.sh` runs the native one at all:
+
+```
+                                    node    llvm.Run    the C floor
+Math.pow(-0.5, 2147483647)           -0        -0            0     <- fixed
+Math.pow(-0.5, 3)                  -0.125    -0.125      -0.125
+```
+
+`d_ldexp` returned the literal `-0.0` on underflow, and **unary minus on a double is
+emitted as `0.0 - x` by `languages/c-to-llvm-ir.abnf`**, where `0.0 - 0.0` is `+0.0`. It
+is written as the sign BIT now. The infinity one line below is unaffected: `-1.0 / 0.0`
+computes its sign rather than writing it. Worth remembering as a general trap in this
+file: **a negative floating point LITERAL does not survive the C floor's own compiler.**
+
+**Ratchet**: SECTION 27, **16 assertions** (11 `keysOf`, 5 `pow`), metajs 455 -> 471, all
+five engines green. Discriminating power: `keysOf` is ABORT in all three engines against a
+clean `1cd6a41` (the name does not exist), and the five `pow` assertions, extracted into a
+standalone probe so they can run there at all, measure **2 of 5 in the native binary and 0
+of 5 under `llvm.Run` and the interpreter** - which is the finding: the two Go-side halves
+were already right and only the floor was wrong.
 
 ~~**`c-interpreter.abnf` has no standard library.**~~ **DONE 2026-08-02.** `libcCall` in
 `languages/c-interpreter.abnf` now implements the 18 byte/address names (`strlen strcmp
@@ -1193,9 +1497,12 @@ Two adjustments to plain size order:
    - **done** (tag 13 of `languages/lib/runtime.c`, 2026-08-02), and **done in all
    three engines** since 2026-08-03: the eleven `sint*` globals now exist in the Go
    twin (`giBindings`) and in the interpreter half (`metajs-interpreter.abnf`) too,
-   pinned by `tests/metajs-test-full.js` SECTION 24. What is left for those four is
-   `jsJFlo`, the boxed double of `abnf/jsrtjvm.go` - the same problem one type over,
-   and now with a worked three-engine example to copy.
+   pinned by `tests/metajs-test-full.js` SECTION 24. **`jsJFlo`, which was what those
+   four still needed, is DONE too** (tag 14, 2026-08-03, SECTION 26): both primitives
+   exist in all three engines, so **nothing in the floor blocks java, kotlin, csharp,
+   go, swift or dart any more**. The layer-2 interface of each is written out in
+   part 2 - `sint*` for the integer, `flo*` for the double - and `keysOf` is there for
+   the object walking every runtime library needs.
 2. **js and typescript go together**, since typescript has no dedicated twin and shares
    js's. Same for ruby and python, whose semantics live in the shared `abnf/jsrt.go` -
    expect those two to drag more of the shared file with them than their extern count

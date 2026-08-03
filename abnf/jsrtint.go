@@ -419,7 +419,7 @@ func giBindings(b map[string]interface{}) {
 	})
 }
 
-// programJSBindings is standardJSBindings plus the sint* family: the host set of
+// programJSBindings is standardJSBindings plus the sint* and flo* families: the host set of
 // a RUNNING program (runJSModule), which is the only place a sized integer can
 // appear. The GRAMMAR script hosts deliberately keep the standard set, so that
 // goja (commonscript.go) and the frozen engine still bind the same names and a
@@ -427,7 +427,44 @@ func giBindings(b map[string]interface{}) {
 func programJSBindings() map[string]interface{} {
 	b := standardJSBindings()
 	giBindings(b)
+	jfBindings(b)   // the boxed double, jsrtjvm.go - the same argument, one type over.
+	keysBindings(b) // keysOf, below - the same argument again, for object enumeration.
 	return b
+}
+
+// keysBindings adds keysOf, which languages/lib/runtime.c seeds as host id 61.
+//
+// WHY A BUILTIN AND NOT THE js_keys EXTERN. An extern is only callable from an
+// emitter, and MetaJS has neither for..in nor Object.keys - so a layer-2 file
+// could not enumerate an object's own keys AT ALL. That blocks every runtime
+// operation that has to walk an object: PHP's var_dump, `==` between two
+// objects, the (array) cast and clone are the first four, and the remaining nine
+// languages have the same four.
+//
+// The body is the js_keys extern's (jsrt.go, the big extern table) restated for
+// the host-call path: a dict box yields its key array, a plain object yields its
+// string keys in INSERTION order, skipping the internal __-prefixed slots. The
+// two must stay in step; the ratchet in tests/metajs-test-full.js runs the same
+// program through this, through the C floor's host id 61 and through the
+// interpreter grammar's own answer.
+func keysBindings(b map[string]interface{}) {
+	b["keysOf"] = jsHostFunc("keysOf", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		o, ok := argAt(args, 0).(*jsObject)
+		if !ok {
+			rt.fail("js_keys: not an object (got %s)", rt.typeOf(argAt(args, 0)))
+		}
+		if keys, _, isDict := dictParts(o); isDict {
+			return &jsArray{elems: append([]interface{}{}, keys.elems...)}
+		}
+		out := &jsArray{}
+		for _, k := range o.keys {
+			if len(k) >= 2 && k[0] == '_' && k[1] == '_' {
+				continue
+			}
+			out.elems = append(out.elems, k)
+		}
+		return out
+	})
 }
 
 func init() {
