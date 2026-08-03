@@ -746,13 +746,13 @@ NotSuffix   = :script(~~
     })()
 ~~) ;
 
-Neg         <~~ push(makeUnary(pop(), "js_neg")) ~~>
+Neg         <~~ push(makeUnary(pop(), negExt())) ~~>
             = "-" UnaryExpr ;
 // Unary plus is ToNumber, not a no-op: '+"3"' is the number 3. It is tried after
 // PreIncDec so that '++x' stays an increment instead of '+(+x)'.
 Plus        <~~ push(makeUnary(pop(), "js_jstonumber")) ~~>
             = "+" UnaryExpr ;
-Not         <~~ push(makeUnary(pop(), "js_not")) ~~>
+Not         <~~ push(makeUnary(pop(), notExt())) ~~>
             = "!" UnaryExpr ;
 BitNot      <~~ push(makeBitNot(pop())) ~~>
             = "~" UnaryExpr ;
@@ -765,7 +765,7 @@ BitNot      <~~ push(makeBitNot(pop())) ~~>
 Typeof      = TypeofName | TypeofExpr ;
 TypeofName  <~~ push(makeTypeofName(pop())) ~~>
             = KwTypeof NotReserved Id <~~ push(idName(up.in)) ~~> NotChain ;
-TypeofExpr  <~~ push(makeUnary(pop(), "js_typeof")) ~~>
+TypeofExpr  <~~ push(makeUnary(pop(), typeofExt())) ~~>
             = KwTypeof UnaryExpr ;
 
 // The postfix forms: i++ evaluates to the old value.
@@ -2501,6 +2501,130 @@ NotFuncHead = :script(~~
     // for constructs that parse but cannot be lowered).
     function fail(msg) { println("typescript compiler error: " + msg); exit(1) }
 
+    // ----- the dynamic `this`, for a NATIVE build only -------------------------
+    // docs/runtime-next-plan.md part 3: js_this reads abnf/jsrt.go's OWN CALL STACK
+    // (rt.thisStack), which the C floor does not keep - runtime.c's js_call drops the
+    // receiver for a tag-7 closure. There is no floor extern that answers it, so
+    // unlike PHP's scope probe and Go's control signal this one cannot be lowered by
+    // finding one; it is kept in LAYER 2 instead (languages/lib/js-rt.metajs), whose
+    // module has globals of its own. The emitter's whole half is this: hand the
+    // receiver over immediately before each js_call. No restore is needed, because a
+    // function reads `this` exactly once, at entry, before any nested call can run.
+    //
+    // Emitted ONLY when -exe is building a binary, so the module llvm.Run sees is
+    // byte-for-byte the one it always was and nothing in the matrix moves.
+    var nativeBuild = (c.exePath != undefined && c.exePath != "")
+    function jsCall(b, fnV, thisV, argsV) {
+        if (nativeBuild) { callExt(b, "js_jssetthis", [thisV]) }
+        return callExt(b, "js_call", [fnV, thisV, argsV])
+    }
+
+    // js_scope_set_or_create is abnf/jsrt.go's, not the C floor's: it walks the chain
+    // and, when the name is nowhere on it, creates the binding in the ROOT scope -
+    // JavaScript's non-strict implicit global. Layer 2 cannot write it (a scope is the
+    // floor's private storage) and no floor extern answers it exactly. The closest one
+    // that IS in the floor is js_pyset_var, which walks the chain the same way and,
+    // when the name is nowhere, binds it in the scope the assignment STANDS IN rather
+    // than in the root. So under -exe the store is lowered to js_pyset_var and the ONE
+    // difference left is WHERE a never-declared name lands - measured in
+    // docs/runtime-next-plan.md part 3, where the floor request for a js_scope_has
+    // probe (which would make the lowering exact) is filed.
+    function storeExt(nm) {
+        if (nativeBuild && nm == "js_scope_set_or_create") { return "js_pyset_var" }
+        return nm
+    }
+
+    // Member reads and writes under -exe. abnf/jsrt.go's js_get / js_set know the
+    // ACCESSOR box a `get x()` / `set x(v)` member is stored as (jsAccessor, a Go
+    // type); the C floor's get_member / set_member cannot - an accessor is layer 2's
+    // own object there, so a read would answer the box itself and a write would
+    // replace it. Both are therefore routed through layer 2 for a native build, where
+    // js_jsmget / js_jsmset unwrap the accessor and delegate everything else straight
+    // back to the floor. js_jsmget already exists on both sides; js_jsmset is emitted
+    // only under -exe, so it needs no Go twin.
+    // The same hand-over for the three call externs that are LAYER 2'S rather than
+    // the floor's: js_jsxcall (the regex wrapper around js_call), js_jsmcall (the
+    // String/Array/Object method surface) and js_supercall. Doing it in the emitter
+    // rather than inside each of them keeps the receiver rule in ONE place.
+    function jsThisSet(b, thisV) {
+        if (nativeBuild) { callExt(b, "js_jssetthis", [thisV]) }
+        return b
+    }
+
+
+    // `typeof` under -exe. A BigInt is a Go TYPE in abnf/jsrtjsbig.go, so js_typeof
+    // answers "bigint" there; in layer 2 it is an ordinary object box and the floor's
+    // type_of can only say "object". The user-visible `typeof` is therefore routed
+    // through layer 2 for a native build. The two INTERNAL js_typeof probes below
+    // (makeNewFrom and the method-call arm) are left alone deliberately: both ask
+    // only "is this a function", which the floor answers correctly for every value
+    // including a tag-16 generator function.
+
+    // The FLOOR externs a BigInt has to be taken away from, under -exe only. In
+    // abnf/jsrt.go a BigInt is a Go TYPE, so `truthy`, `strictEq`, `js_neg`, `js_not`
+    // and `typeof` all carry an arm for it; in layer 2 it is an object box and the C
+    // floor's own versions would answer "truthy", "identity", "NaN" and "object".
+    // Each is therefore routed to a layer-2 twin for a native build - the same move
+    // as memGetExt/memSetExt above, and for the same reason it is safe: the module
+    // llvm.Run executes is untouched.
+    //
+    // js_jstruthy is the one place js/ts need the `__raw` SUFFIX of part 3's item 2
+    // (languages/lib/js-rt.metajs spells it js_jstruthy__raw), because compile-core's
+    // truthy() compares core.truthyExt's result with `icmp ne ..., 0` as a RAW
+    // integer. So the honest answer to "does this language need __raw" is: NOT for
+    // llvm.Run, where the default js_truthy is the floor's own, but YES for the
+    // native build, where BigInt forces the override. No other language in part 3 has
+    // had the answer differ between the two.
+    function seqExt() {
+        if (nativeBuild) { return "js_jsseq" }
+        return "js_seq"
+    }
+    function sneExt() {
+        if (nativeBuild) { return "js_jssne" }
+        return "js_sne"
+    }
+    function negExt() {
+        if (nativeBuild) { return "js_jsneg" }
+        return "js_neg"
+    }
+    function notExt() {
+        if (nativeBuild) { return "js_jsnot" }
+        return "js_not"
+    }
+    if (nativeBuild) { core.truthyExt = "js_jstruthy" }
+
+
+    // The template-literal concatenation. It is the C floor's js_add and NOT js_jsadd,
+    // deliberately and against appearances - see the measurement in
+    // docs/runtime-next-plan.md part 3: `${obj}` renders "[object Object]" in BOTH
+    // Go-backed engines for an object with a toString of its own, where node runs the
+    // method, so switching this site to js_jsadd would FIX a defect and by doing so
+    // break byte-identity with llvm.Run, which is the gate. What the native build does
+    // need is the ONE thing rt.jsAdd does here that the floor's js_add cannot: render a
+    // BigInt as its digits. js_jstpl is exactly that and nothing more.
+    function tplAddExt() {
+        if (nativeBuild) { return "js_jstpl" }
+        return "js_add"
+    }
+
+    function typeofExt() {
+        if (nativeBuild) { return "js_jstypeof" }
+        return "js_typeof"
+    }
+
+    function memGetExt() {
+        if (nativeBuild) { return "js_jsmget" }
+        return "js_get"
+    }
+    function memSetExt() {
+        if (nativeBuild) { return "js_jsmset" }
+        return "js_set"
+    }
+
+    if (nativeBuild) { core.indexExt = "js_jsmget" }
+
+
+
     // ----- Numeric literal values -----
 
     // The value of a radix-prefixed literal (0x.., 0b.., 0o..). Numeric separators are
@@ -2769,7 +2893,7 @@ NotFuncHead = :script(~~
         curScopeV = callExt(b, "js_scope_new", [saved])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0sp"), r.v])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0spi"), callExt(b, "js_num_i", [handle(0)])])
-        var lenV = callExt(b, "js_tonum", [callExt(b, "js_get", [r.v, emitStr(b, "length")])])
+        var lenV = callExt(b, "js_tonum", [callExt(b, memGetExt(), [r.v, emitStr(b, "length")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0splen"), lenV])
         var headB = curF.NewBlock("")
         var bodyB = curF.NewBlock("")
@@ -2780,7 +2904,7 @@ NotFuncHead = :script(~~
         headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iH, lH])), bodyB, exitB)
         var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0spi")])
         var srcB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0sp")])
-        callExt(bodyB, "js_arr_push", [arrV, callExt(bodyB, "js_get", [srcB, iB])])
+        callExt(bodyB, "js_arr_push", [arrV, callExt(bodyB, memGetExt(), [srcB, iB])])
         callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0spi"),
                                    callExt(bodyB, "js_add", [iB, callExt(bodyB, "js_num_i", [handle(1)])])])
         bodyB.NewBr(headB)
@@ -2799,7 +2923,7 @@ NotFuncHead = :script(~~
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0osk"), keysV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0osrc"), r.v])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0osi"), callExt(b, "js_num_i", [handle(0)])])
-        var lenV = callExt(b, "js_tonum", [callExt(b, "js_get", [keysV, emitStr(b, "length")])])
+        var lenV = callExt(b, "js_tonum", [callExt(b, memGetExt(), [keysV, emitStr(b, "length")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0oslen"), lenV])
         var headB = curF.NewBlock("")
         var bodyB = curF.NewBlock("")
@@ -2811,8 +2935,8 @@ NotFuncHead = :script(~~
         var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0osi")])
         var ksB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0osk")])
         var srcB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0osrc")])
-        var keyB = callExt(bodyB, "js_get", [ksB, iB])
-        callExt(bodyB, "js_set", [objV, keyB, callExt(bodyB, "js_get", [srcB, keyB])])
+        var keyB = callExt(bodyB, memGetExt(), [ksB, iB])
+        callExt(bodyB, memSetExt(), [objV, keyB, callExt(bodyB, memGetExt(), [srcB, keyB])])
         callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0osi"),
                                    callExt(bodyB, "js_add", [iB, callExt(bodyB, "js_num_i", [handle(1)])])])
         bodyB.NewBr(headB)
@@ -2983,7 +3107,7 @@ NotFuncHead = :script(~~
     // shared one the moment neither operand is a BigInt, which is every program that
     // writes no BigInt literal.
     binExt = {"+": "js_jsadd", "-": "js_jssub", "*": "js_jsmul", "/": "js_jsdiv", "%": "js_jsmod",
-                  "==": "js_jseq", "!=": "js_jsne", "===": "js_seq", "!==": "js_sne",
+                  "==": "js_jseq", "!=": "js_jsne", "===": seqExt(), "!==": sneExt(),
                   "<": "js_jslt", ">": "js_jsgt", "<=": "js_jsle", ">=": "js_jsge",
                   "|": "js_jsbor", "^": "js_jsbxor", "&": "js_jsband",
                   "<<": "js_jsshl", ">>": "js_jsshr", ">>>": "js_jsushr",
@@ -3054,7 +3178,7 @@ NotFuncHead = :script(~~
                 }
                 var vr = props[i].t(b)
                 b = vr.b
-                callExt(b, "js_set", [obj, kr.v, vr.v])
+                callExt(b, memSetExt(), [obj, kr.v, vr.v])
             }
             return {b: b, v: obj}
         }
@@ -3115,7 +3239,7 @@ NotFuncHead = :script(~~
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ysrc"), seqV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0yi"), callExt(b, "js_num_i", [handle(0)])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ylen"),
-                                    callExt(b, "js_tonum", [callExt(b, "js_get", [seqV, emitStr(b, "length")])])])
+                                    callExt(b, "js_tonum", [callExt(b, memGetExt(), [seqV, emitStr(b, "length")])])])
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
@@ -3125,7 +3249,7 @@ NotFuncHead = :script(~~
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iH, lH])), bodyB, exitB)
             var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0yi")])
             var sB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0ysrc")])
-            callExt(bodyB, "js_yield", [callExt(bodyB, "js_get", [sB, iB])])
+            callExt(bodyB, "js_yield", [callExt(bodyB, memGetExt(), [sB, iB])])
             callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0yi"),
                                        callExt(bodyB, "js_add", [iB, callExt(bodyB, "js_num_i", [handle(1)])])])
             bodyB.NewBr(headB)
@@ -3229,11 +3353,11 @@ NotFuncHead = :script(~~
                         // extern they wrap for every receiver that is not a RegExp and
                         // every string call whose argument is not a pattern, so a program
                         // that uses no regular expression behaves exactly as before.
-                        var tv = callExt(thenB, "js_jsxcall", [fV, objV, argsV])
+                        var tv = callExt(jsThisSet(thenB, objV), "js_jsxcall", [fV, objV, argsV])
                         thenB.NewBr(mergeB)
                         // js_jsmcall is js_jsxmcall plus JavaScript's String / Array /
                         // Number / Object method surface (abnf/jsrtjsprint.go).
-                        var ev = callExt(elseB, "js_jsmcall", [objV, keyV, argsV])
+                        var ev = callExt(jsThisSet(elseB, objV), "js_jsmcall", [objV, keyV, argsV])
                         elseB.NewBr(mergeB)
                         cur = mergeB.NewPhi([llvm.ir.NewIncoming(tv, thenB), llvm.ir.NewIncoming(ev, elseB)])
                         b = mergeB
@@ -3241,7 +3365,7 @@ NotFuncHead = :script(~~
                         i = i + 2
                     } else {
                         curThis = cur
-                        cur = callExt(b, "js_get", [cur, kr.v])
+                        cur = callExt(b, memGetExt(), [cur, kr.v])
                         i = i + 1
                     }
                 } else if (s.kind == "tag") {
@@ -3253,7 +3377,7 @@ NotFuncHead = :script(~~
                 } else {
                     var argsV2 = callExt(b, "js_arr_new", [])
                     b = pushArgs(b, argsV2, s.args)
-                    cur = callExt(b, "js_call", [cur, curThis, argsV2])
+                    cur = jsCall(b, cur, curThis, argsV2)
                     curThis = hUndef
                     i = i + 1
                 }
@@ -3298,11 +3422,11 @@ NotFuncHead = :script(~~
                 curThis = cur
                 var kr = s.key(b)
                 b = kr.b
-                cur = callExt(b, "js_get", [cur, kr.v])
+                cur = callExt(b, memGetExt(), [cur, kr.v])
             } else {
                 var argsV = callExt(b, "js_arr_new", [])
                 b = pushArgs(b, argsV, s.args)
-                cur = callExt(b, "js_call", [cur, curThis, argsV])
+                cur = jsCall(b, cur, curThis, argsV)
                 curThis = hUndef
             }
         }
@@ -3336,15 +3460,15 @@ NotFuncHead = :script(~~
                     v = emitBinOp(b, op, old, v)
                     setExt = "js_scope_set"
                 }
-                callExt(b, setExt, [curScopeV, nameV, v])
+                callExt(b, storeExt(setExt), [curScopeV, nameV, v])
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
                 if (op != "=") {
-                    var oldM = callExt(b, "js_get", [p.obj, p.key])
+                    var oldM = callExt(b, memGetExt(), [p.obj, p.key])
                     v = emitBinOp(b, op, oldM, v)
                 }
-                callExt(b, "js_set", [p.obj, p.key, v])
+                callExt(b, memSetExt(), [p.obj, p.key, v])
             }
             return {b: b, v: v}
         }
@@ -3369,7 +3493,7 @@ NotFuncHead = :script(~~
                 b = p.b
                 objV = p.obj
                 keyV = p.key
-                oldV = callExt(b, "js_get", [objV, keyV])
+                oldV = callExt(b, memGetExt(), [objV, keyV])
             }
             var assignB = curF.NewBlock("")
             var mergeB = curF.NewBlock("")
@@ -3382,7 +3506,7 @@ NotFuncHead = :script(~~
             var r = valT(assignB)
             var ab = r.b
             if (nameV != null) { callExt(ab, "js_scope_set", [curScopeV, emitStr(ab, ref.name), r.v]) }
-            else { callExt(ab, "js_set", [objV, keyV, r.v]) }
+            else { callExt(ab, memSetExt(), [objV, keyV, r.v]) }
             ab.NewBr(mergeB)
             var phi = mergeB.NewPhi([llvm.ir.NewIncoming(r.v, ab), llvm.ir.NewIncoming(oldV, fromB)])
             return {b: mergeB, v: phi}
@@ -3406,8 +3530,8 @@ NotFuncHead = :script(~~
             }
             var p = emitRefPath(b, ref)
             b = p.b
-            var oldM = callExt(b, "js_jstonumeric", [callExt(b, "js_get", [p.obj, p.key])])
-            callExt(b, "js_set", [p.obj, p.key, callExt(b, "js_jsstep", [oldM, oneV])])
+            var oldM = callExt(b, "js_jstonumeric", [callExt(b, memGetExt(), [p.obj, p.key])])
+            callExt(b, memSetExt(), [p.obj, p.key, callExt(b, "js_jsstep", [oldM, oneV])])
             return {b: b, v: oldM}
         }
     }
@@ -3425,9 +3549,9 @@ NotFuncHead = :script(~~
             }
             var p = emitRefPath(b, ref)
             b = p.b
-            var oldM = callExt(b, "js_jstonumeric", [callExt(b, "js_get", [p.obj, p.key])])
+            var oldM = callExt(b, "js_jstonumeric", [callExt(b, memGetExt(), [p.obj, p.key])])
             var newM = callExt(b, "js_jsstep", [oldM, oneV])
-            callExt(b, "js_set", [p.obj, p.key, newM])
+            callExt(b, memSetExt(), [p.obj, p.key, newM])
             return {b: b, v: newM}
         }
     }
@@ -3492,10 +3616,10 @@ NotFuncHead = :script(~~
         var exitB = curF.NewBlock("")
         b.NewBr(headB)
         var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0rest")])
-        var lenV = callExt(headB, "js_get", [argsV, emitStr(headB, "length")])
+        var lenV = callExt(headB, memGetExt(), [argsV, emitStr(headB, "length")])
         headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
         var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0rest")])
-        callExt(bodyB, "js_arr_push", [arrV, callExt(bodyB, "js_get", [argsV, iB])])
+        callExt(bodyB, "js_arr_push", [arrV, callExt(bodyB, memGetExt(), [argsV, iB])])
         callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0rest"),
                                    callExt(bodyB, "js_add", [iB, callExt(bodyB, "js_num_i", [handle(1)])])])
         bodyB.NewBr(headB)
@@ -3581,7 +3705,7 @@ NotFuncHead = :script(~~
                     b = r.b
                     pv = r.v
                 }
-                v = callExt(b, "js_add", [v, pv])
+                v = callExt(b, tplAddExt(), [v, pv])
             }
             return {b: b, v: v}
         }
@@ -3617,12 +3741,12 @@ NotFuncHead = :script(~~
         var stringsV = callExt(b, "js_obj_new", [])
         var rawV = callExt(b, "js_obj_new", [])
         for (var j = 0; j < cooked.length; j++) {
-            callExt(b, "js_set", [stringsV, emitStr(b, "" + j), emitStr(b, cooked[j])])
-            callExt(b, "js_set", [rawV, emitStr(b, "" + j), emitStr(b, raws[j])])
+            callExt(b, memSetExt(), [stringsV, emitStr(b, "" + j), emitStr(b, cooked[j])])
+            callExt(b, memSetExt(), [rawV, emitStr(b, "" + j), emitStr(b, raws[j])])
         }
-        callExt(b, "js_set", [stringsV, emitStr(b, "length"), callExt(b, "js_num_i", [handle(cooked.length)])])
-        callExt(b, "js_set", [rawV, emitStr(b, "length"), callExt(b, "js_num_i", [handle(raws.length)])])
-        callExt(b, "js_set", [stringsV, emitStr(b, "raw"), rawV])
+        callExt(b, memSetExt(), [stringsV, emitStr(b, "length"), callExt(b, "js_num_i", [handle(cooked.length)])])
+        callExt(b, memSetExt(), [rawV, emitStr(b, "length"), callExt(b, "js_num_i", [handle(raws.length)])])
+        callExt(b, memSetExt(), [stringsV, emitStr(b, "raw"), rawV])
         var argsV = callExt(b, "js_arr_new", [])
         callExt(b, "js_arr_push", [argsV, stringsV])
         for (var k = 0; k < exprs.length; k++) {
@@ -3630,7 +3754,7 @@ NotFuncHead = :script(~~
             b = r.b
             callExt(b, "js_arr_push", [argsV, r.v])
         }
-        return {b: b, v: callExt(b, "js_call", [fnV, thisV, argsV])}
+        return {b: b, v: jsCall(b, fnV, thisV, argsV)}
     }
 
     // for-of / for-in. items = [name, "of"|"in", iterThunk, bodyThunk].
@@ -3662,7 +3786,7 @@ NotFuncHead = :script(~~
             // a generator, so a for-of over one works with the same index loop.
             var seqV = callExt(b, "js_iterable", [ir.v])
             if (isIn) { seqV = callExt(b, "js_keys", [seqV]) }
-            var lenV = callExt(b, "js_tonum", [callExt(b, "js_get", [seqV, emitStr(b, "length")])])
+            var lenV = callExt(b, "js_tonum", [callExt(b, memGetExt(), [seqV, emitStr(b, "length")])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0it"), seqV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0len"), lenV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0i"), callExt(b, "js_num_i", [handle(0)])])
@@ -3677,7 +3801,7 @@ NotFuncHead = :script(~~
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iC, lC])), bodyB, exitB)
             var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0i")])
             var itB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0it")])
-            var elemV = callExt(bodyB, "js_get", [itB, iB])
+            var elemV = callExt(bodyB, memGetExt(), [itB, iB])
             // A pattern target is re-bound per iteration (its leaves are fresh
             // declarations in the loop scope); a plain name reuses its single slot.
             if (isPat) { bodyB = bindPattern(bodyB, name, elemV, patExt) }
@@ -3746,11 +3870,11 @@ NotFuncHead = :script(~~
     // whose leaves may be member targets ('[a.b] = c').
     function assignRef(b, ref, valueH) {
         if (ref.path.length == 0 && ref.base == undefined) {
-            callExt(b, "js_scope_set_or_create", [curScopeV, emitStr(b, ref.name), valueH])
+            callExt(b, storeExt("js_scope_set_or_create"), [curScopeV, emitStr(b, ref.name), valueH])
             return b
         }
         var p = emitRefPath(b, ref)
-        callExt(p.b, "js_set", [p.obj, p.key, valueH])
+        callExt(p.b, memSetExt(), [p.obj, p.key, valueH])
         return p.b
     }
     function bindPattern(b, pat, valueH, declExt) {
@@ -3780,14 +3904,14 @@ NotFuncHead = :script(~~
         b = d.b
         valueH = d.v
         if (pat.dtype == "id") {
-            callExt(b, declExt, [curScopeV, emitStr(b, pat.name), valueH])
+            callExt(b, storeExt(declExt), [curScopeV, emitStr(b, pat.name), valueH])
             return b
         }
         if (pat.dtype == "arr") {
             for (var i = 0; i < pat.elems.length; i++) {
                 var e = pat.elems[i]
                 if (e.dtype == "rest") { return emitArrRest(b, e.pat, valueH, i, declExt) }
-                b = bindPattern(b, e, callExt(b, "js_get", [valueH, callExt(b, "js_num_i", [handle(i)])]), declExt)
+                b = bindPattern(b, e, callExt(b, memGetExt(), [valueH, callExt(b, "js_num_i", [handle(i)])]), declExt)
             }
             return b
         }
@@ -3809,7 +3933,7 @@ NotFuncHead = :script(~~
                 keyV = emitStr(b, f.dkey)
                 taken.push(f.dkey)
             }
-            b = bindPattern(b, f.pat, callExt(b, "js_get", [valueH, keyV]), declExt)
+            b = bindPattern(b, f.pat, callExt(b, memGetExt(), [valueH, keyV]), declExt)
         }
         return b
     }
@@ -3823,7 +3947,7 @@ NotFuncHead = :script(~~
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0rsrc"), valueH])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ri"), callExt(b, "js_num_i", [handle(start)])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0rlen"),
-                                callExt(b, "js_tonum", [callExt(b, "js_get", [valueH, emitStr(b, "length")])])])
+                                callExt(b, "js_tonum", [callExt(b, memGetExt(), [valueH, emitStr(b, "length")])])])
         var headB = curF.NewBlock("")
         var bodyB = curF.NewBlock("")
         var exitB = curF.NewBlock("")
@@ -3833,7 +3957,7 @@ NotFuncHead = :script(~~
         headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iH, lH])), bodyB, exitB)
         var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0ri")])
         var sB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0rsrc")])
-        callExt(bodyB, "js_arr_push", [arrV, callExt(bodyB, "js_get", [sB, iB])])
+        callExt(bodyB, "js_arr_push", [arrV, callExt(bodyB, memGetExt(), [sB, iB])])
         callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0ri"),
                                    callExt(bodyB, "js_add", [iB, callExt(bodyB, "js_num_i", [handle(1)])])])
         bodyB.NewBr(headB)
@@ -3852,7 +3976,7 @@ NotFuncHead = :script(~~
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0orsrc"), valueH])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ori"), callExt(b, "js_num_i", [handle(0)])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0orlen"),
-                                callExt(b, "js_tonum", [callExt(b, "js_get", [keysV, emitStr(b, "length")])])])
+                                callExt(b, "js_tonum", [callExt(b, memGetExt(), [keysV, emitStr(b, "length")])])])
         var headB = curF.NewBlock("")
         var bodyB = curF.NewBlock("")
         var setB = curF.NewBlock("")
@@ -3865,7 +3989,7 @@ NotFuncHead = :script(~~
         var ksB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0ork")])
         var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0ori")])
         var srcB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0orsrc")])
-        var keyB = callExt(bodyB, "js_get", [ksB, iB])
+        var keyB = callExt(bodyB, memGetExt(), [ksB, iB])
         var cb = bodyB
         for (var t = 0; t < taken.length; t++) {
             var nextB = curF.NewBlock("")
@@ -3873,14 +3997,14 @@ NotFuncHead = :script(~~
             cb = nextB
         }
         cb.NewBr(setB)
-        callExt(setB, "js_set", [restV, keyB, callExt(setB, "js_get", [srcB, keyB])])
+        callExt(setB, memSetExt(), [restV, keyB, callExt(setB, memGetExt(), [srcB, keyB])])
         setB.NewBr(contB)
         var iC = callExt(contB, "js_scope_get", [curScopeV, emitStr(contB, "0ori")])
         callExt(contB, "js_scope_set", [curScopeV, emitStr(contB, "0ori"),
                                    callExt(contB, "js_add", [iC, callExt(contB, "js_num_i", [handle(1)])])])
         contB.NewBr(headB)
         curScopeV = saved
-        callExt(exitB, declExt, [curScopeV, emitStr(exitB, name), restV])
+        callExt(exitB, storeExt(declExt), [curScopeV, emitStr(exitB, name), restV])
         return exitB
     }
     // items = [patternNode, initThunk]. Evaluate the initializer once, then bind.
@@ -4063,10 +4187,10 @@ NotFuncHead = :script(~~
         b = bindParams(b, params, f.Params[1], off)
         if (implicitSuper != undefined && implicitSuper != null) {
             var supCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, implicitSuper)])
-            var supCtor = callExt(b, "js_get", [supCls, emitStr(b, "__ctor")])
+            var supCtor = callExt(b, memGetExt(), [supCls, emitStr(b, "__ctor")])
             var sargsV = callExt(b, "js_arr_new", [])
             callExt(b, "js_arr_push", [sargsV, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])])
-            callExt(b, "js_call", [supCtor, hUndef, sargsV])
+            jsCall(b, supCtor, hUndef, sargsV)
         }
         if (initFields != null) {
             var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
@@ -4077,7 +4201,7 @@ NotFuncHead = :script(~~
                     b = r.b
                     fv = r.v
                 }
-                callExt(b, "js_set", [thisV, emitStr(b, initFields[k].name), fv])
+                callExt(b, memSetExt(), [thisV, emitStr(b, initFields[k].name), fv])
             }
         }
         // The TypeScript parameter properties: 'this.x = x' for every modifier-carrying
@@ -4085,7 +4209,7 @@ NotFuncHead = :script(~~
         if (propNames != undefined && propNames != null) {
             var thisP = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
             for (var pi = 0; pi < propNames.length; pi++) {
-                callExt(b, "js_set", [thisP, emitStr(b, propNames[pi]),
+                callExt(b, memSetExt(), [thisP, emitStr(b, propNames[pi]),
                                       callExt(b, "js_scope_get", [curScopeV, emitStr(b, propNames[pi])])])
             }
         }
@@ -4139,10 +4263,10 @@ NotFuncHead = :script(~~
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.superName), hr.v])
         }
         var clsV = callExt(b, "js_obj_new", [])
-        callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
-        callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, info.name)])
+        callExt(b, memSetExt(), [clsV, emitStr(b, "__isclass"), hTrue])
+        callExt(b, memSetExt(), [clsV, emitStr(b, "__name"), emitStr(b, info.name)])
         if (info.superName != null) {
-            callExt(b, "js_set", [clsV, emitStr(b, "__super"),
+            callExt(b, memSetExt(), [clsV, emitStr(b, "__super"),
                                   callExt(b, "js_scope_get", [curScopeV, emitStr(b, info.superName)])])
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.name), clsV])
@@ -4155,7 +4279,7 @@ NotFuncHead = :script(~~
                 b = rs.b
                 sv = rs.v
             }
-            callExt(b, "js_set", [clsV, kr.v, sv])
+            callExt(b, memSetExt(), [clsV, kr.v, sv])
         }
         var ctorIdx = anytype
         if (info.ctor != null) {
@@ -4163,7 +4287,7 @@ NotFuncHead = :script(~~
         } else {
             ctorIdx = emitClassFunc([], null, true, info.fields, info.superName)
         }
-        callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
+        callExt(b, memSetExt(), [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
         for (var mi = 0; mi < info.methods.length; mi++) {
             var mm = info.methods[mi]
             var mk = emitMemberKey(b, mm)
@@ -4177,12 +4301,12 @@ NotFuncHead = :script(~~
                 // A generator method: the same body, wrapped so that calling it produces a
                 // generator object instead of running it.
                 idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
-                callExt(b, "js_set", [clsV, mk.v,
+                callExt(b, memSetExt(), [clsV, mk.v,
                     callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])])
                 continue
             }
             idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
-            callExt(b, "js_set", [clsV, mk.v, callExt(b, "js_closure", [handle(idx), curScopeV])])
+            callExt(b, memSetExt(), [clsV, mk.v, callExt(b, "js_closure", [handle(idx), curScopeV])])
         }
         for (var ai = 0; ai < info.accessors.length; ai++) {
             var aa = info.accessors[ai]
@@ -4200,8 +4324,8 @@ NotFuncHead = :script(~~
         }
         for (var bi = 0; bi < info.sblocks.length; bi++) {
             var bidx = emitFunction([], info.sblocks[bi].body, false, false)
-            callExt(b, "js_call", [callExt(b, "js_closure", [handle(bidx), curScopeV]), clsV,
-                                   callExt(b, "js_arr_new", [])])
+            jsCall(b, callExt(b, "js_closure", [handle(bidx), curScopeV]), clsV,
+                                   callExt(b, "js_arr_new", []))
         }
         return {b: b, v: clsV}
     }
@@ -4265,18 +4389,18 @@ NotFuncHead = :script(~~
             // [[Construct]]'s last step: an OBJECT the constructor returns wins over
             // the fresh receiver.
             var oF0 = callExt(fnB, "js_obj_new", [])
-            callExt(fnB, "js_set", [oF0, emitStr(fnB, "__class"), callExt(fnB, "js_jsctordesc", [clsV])])
+            callExt(fnB, memSetExt(), [oF0, emitStr(fnB, "__class"), callExt(fnB, "js_jsctordesc", [clsV])])
             var retF = callExt(fnB, "js_call_new", [clsV, oF0, argsV])
             var oF = callExt(fnB, "js_jsnewres", [retF, oF0])
             fnB.NewBr(mergeB)
             // The class form: the constructor convention prepends the instance.
             var oC = callExt(clsB, "js_obj_new", [])
-            callExt(clsB, "js_set", [oC, emitStr(clsB, "__class"), clsV])
+            callExt(clsB, memSetExt(), [oC, emitStr(clsB, "__class"), clsV])
             var cargs = callExt(clsB, "js_arr_new", [])
             callExt(clsB, "js_arr_push", [cargs, oC])
             var cb = emitSpreadInto(clsB, cargs, function(bb) { return {b: bb, v: argsV} })
-            var ctorV = callExt(cb, "js_get", [clsV, emitStr(cb, "__ctor")])
-            callExt(cb, "js_call", [ctorV, hUndef, cargs])
+            var ctorV = callExt(cb, memGetExt(), [clsV, emitStr(cb, "__ctor")])
+            jsCall(cb, ctorV, hUndef, cargs)
             cb.NewBr(mergeB)
             return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(oF, fnB), llvm.ir.NewIncoming(oC, cb)])}
         }
@@ -4290,23 +4414,23 @@ NotFuncHead = :script(~~
         if (name == "") {
             return function(b) {
                 var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defName)])
-                var supV = callExt(b, "js_get", [clsV, emitStr(b, "__super")])
-                var supCtor = callExt(b, "js_get", [supV, emitStr(b, "__ctor")])
+                var supV = callExt(b, memGetExt(), [clsV, emitStr(b, "__super")])
+                var supCtor = callExt(b, memGetExt(), [supV, emitStr(b, "__ctor")])
                 var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
                 var argsV = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [argsV, thisV])
                 b = pushArgs(b, argsV, argThunks)
-                callExt(b, "js_call", [supCtor, hUndef, argsV])
+                jsCall(b, supCtor, hUndef, argsV)
                 return {b: b, v: hUndef}
             }
         }
         return function(b) {
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defName)])
-            var supV = callExt(b, "js_get", [clsV, emitStr(b, "__super")])
+            var supV = callExt(b, memGetExt(), [clsV, emitStr(b, "__super")])
             var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
             var argsV = callExt(b, "js_arr_new", [])
             b = pushArgs(b, argsV, argThunks)
-            return {b: b, v: callExt(b, "js_supercall", [supV, thisV, emitStr(b, name), argsV])}
+            return {b: b, v: callExt(jsThisSet(b, thisV), "js_supercall", [supV, thisV, emitStr(b, name), argsV])}
         }
     }
 
@@ -4317,7 +4441,7 @@ NotFuncHead = :script(~~
     // and the receiver, which travels separately so a getter/setter sees the right 'this'.
     function emitSuperBase(b, defName) {
         var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defName)])
-        return {sup: callExt(b, "js_get", [clsV, emitStr(b, "__super")]),
+        return {sup: callExt(b, memGetExt(), [clsV, emitStr(b, "__super")]),
                 self: callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])}
     }
     function emitSuperStore(b, defName, keyT, valueH) {
@@ -4455,7 +4579,7 @@ NotFuncHead = :script(~~
         var thenB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
         b.NewCondBr(isNum, thenB, mergeB)
-        callExt(thenB, "js_set", [obj, valV, keyV])
+        callExt(thenB, memSetExt(), [obj, valV, keyV])
         thenB.NewBr(mergeB)
         return mergeB
     }
@@ -4488,7 +4612,7 @@ NotFuncHead = :script(~~
                     b = vr.b
                     valV = vr.v
                 }
-                callExt(b, "js_set", [obj, keyV, valV])
+                callExt(b, memSetExt(), [obj, keyV, valV])
                 if (mm.name != undefined) {
                     callExt(b, "js_scope_decl", [curScopeV, emitStr(b, mm.name), valV])
                 }
@@ -4569,17 +4693,17 @@ NotFuncHead = :script(~~
                     }
                 } else if (fresh[p]) {
                     var inner = callExt(b, "js_obj_new", [])
-                    callExt(b, "js_set", [obj, emitStr(b, path[p]), inner])
+                    callExt(b, memSetExt(), [obj, emitStr(b, path[p]), inner])
                     obj = inner
                 } else {
-                    obj = callExt(b, "js_get", [obj, emitStr(b, path[p])])
+                    obj = callExt(b, memGetExt(), [obj, emitStr(b, path[p])])
                 }
             }
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [saved])
             for (var i = 0; i < stmts.length; i++) { b = stmts[i](b) }
             for (var e = 0; e < exports.length; e++) {
-                callExt(b, "js_set", [obj, emitStr(b, exports[e]),
+                callExt(b, memSetExt(), [obj, emitStr(b, exports[e]),
                     callExt(b, "js_scope_get", [curScopeV, emitStr(b, exports[e])])])
             }
             curScopeV = saved
@@ -4607,7 +4731,7 @@ NotFuncHead = :script(~~
         var argsV = callExt(runB, "js_arr_new", [])
         callExt(runB, "js_arr_push", [argsV, valueV])
         callExt(runB, "js_arr_push", [argsV, hUndef])
-        var res = callExt(runB, "js_call", [dr.v, hUndef, argsV])
+        var res = jsCall(runB, dr.v, hUndef, argsV)
         var keepB = curF.NewBlock("")
         var repB = curF.NewBlock("")
         runB.NewCondBr(truthy(runB, callExt(runB, "js_seq", [res, hUndef])), keepB, repB)
@@ -4718,7 +4842,7 @@ NotFuncHead = :script(~~
         var slot = "0deco" + decoSeq
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, slot), cur])
         var widx = emitDecoTrampoline(slot, mm.statik)
-        callExt(b, "js_set", [clsV, keyV, callExt(b, "js_closure", [handle(widx), curScopeV])])
+        callExt(b, memSetExt(), [clsV, keyV, callExt(b, "js_closure", [handle(widx), curScopeV])])
         return b
     }
     // jsf_N(env, args): args[0] is the receiver js_mcall prepended (for a static member
@@ -4745,15 +4869,15 @@ NotFuncHead = :script(~~
         var exitB = curF.NewBlock("")
         b.NewBr(headB)
         var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0dt")])
-        var lenV = callExt(headB, "js_get", [f.Params[1], emitStr(headB, "length")])
+        var lenV = callExt(headB, memGetExt(), [f.Params[1], emitStr(headB, "length")])
         headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
         var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0dt")])
-        callExt(bodyB, "js_arr_push", [restV, callExt(bodyB, "js_get", [f.Params[1], iB])])
+        callExt(bodyB, "js_arr_push", [restV, callExt(bodyB, memGetExt(), [f.Params[1], iB])])
         callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0dt"),
                                         callExt(bodyB, "js_add", [iB, callExt(bodyB, "js_num_i", [handle(1)])])])
         bodyB.NewBr(headB)
         var fnV = callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, slot)])
-        exitB.NewRet(callExt(exitB, "js_call", [fnV, thisV, restV]))
+        exitB.NewRet(jsCall(exitB, fnV, thisV, restV))
         curF = savedF
         curScopeV = savedScope
         loopStack = savedLoops
@@ -4981,7 +5105,7 @@ NotFuncHead = :script(~~
                 var rc = cases[i].v(b)
                 b = rc.b
                 var nextB = curF.NewBlock("")
-                b.NewCondBr(truthy(b, callExt(b, "js_seq", [r.v, rc.v])), bodyBs[i], nextB)
+                b.NewCondBr(truthy(b, callExt(b, seqExt(), [r.v, rc.v])), bodyBs[i], nextB)
                 b = nextB
             }
             b.NewBr(dfltB)
@@ -5075,7 +5199,7 @@ NotFuncHead = :script(~~
         } else {
             var mainV = callExt(bm, "js_scope_get", [sc, emitStr(bm, entry)])
             var argsV = callExt(bm, "js_arr_new", [])
-            bm.NewRet(callExt(bm, "js_call", [mainV, hUndef, argsV]))
+            bm.NewRet(jsCall(bm, mainV, hUndef, argsV))
         }
     }
 
@@ -5086,6 +5210,82 @@ NotFuncHead = :script(~~
 
     // Build the module out of the parsed program.
     c.compile(c.asg)
+
+    // ----- the native build (docs/runtime-next-plan.md part 3) -----
+    // jsdispatch(idx, env, args) is the function table a LINKED binary needs: js_closure
+    // stores a raw function index, and under llvm.Run the Go runtime turns that index
+    // back into a callee by looking "jsf_<idx>" up in the module. A binary has no such
+    // reflection, so the module carries the mapping itself. The MISS arm calls
+    // jsdispatch_ext, the same table emitted by the layer-2 runtime library
+    // (lib/js-rt.ll, built by metajs-to-llvm-ir.abnf -rt-lib): its own function indices
+    // are offset by a million, so the two chains cannot overlap and one js_call reaches
+    // either module. Emitted ONLY for -exe, so every other run keeps the module it had.
+    // This is lua-to-llvm-ir.abnf's emitDispatch, unchanged - the mechanism is the
+    // reusable part of phase 4 and nothing here is TypeScript's.
+    function emitDispatch() {
+        var idxs = []
+        var fns = []
+        var i = 0
+        while (i < m.Funcs.length) {
+            var f = m.Funcs[i]
+            var nm = f.Name()
+            if (nm.length > 4 && nm.substring(0, 4) == "jsf_") {
+                idxs.push(parseInt(nm.substring(4, nm.length)))
+                fns.push(f)
+            }
+            i = i + 1
+        }
+        var ext = m.NewFunc("jsdispatch_ext", i64,
+            [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var d = m.NewFunc("jsdispatch", i64,
+            [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var b = d.NewBlock("entry")
+        var extB = d.NewBlock("ext")
+        var ownB = d.NewBlock("own")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredSGE, d.Params[0], llvm.constant.NewInt(i64, 1000000)), extB, ownB)
+        extB.NewRet(extB.NewCall(ext, [d.Params[0], d.Params[1], d.Params[2]]))
+        b = ownB
+        i = 0
+        while (i < fns.length) {
+            var hit = d.NewBlock("hit" + idxs[i])
+            var nxt = d.NewBlock("miss" + idxs[i])
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, d.Params[0], llvm.constant.NewInt(i64, idxs[i])), hit, nxt)
+            hit.NewRet(hit.NewCall(fns[i], [d.Params[1], d.Params[2]]))
+            b = nxt
+            i = i + 1
+        }
+        b.NewRet(b.NewCall(ext, [d.Params[0], d.Params[1], d.Params[2]]))
+    }
+
+    // The two runtime inputs live next to THIS grammar, so the build does not depend on
+    // the working directory: lib/runtime.ll is the C floor and lib/js-rt.ll is layer 2 -
+    // JavaScript's own semantics, shared VERBATIM with js-to-llvm-ir.abnf: typescript needs no layer 2 of its own. An
+    // explicit -rt REPLACES both. This grammar's entry point is ALREADY named jsmain,
+    // which is what the C floor's main() calls, so no one-call alias has to be emitted.
+    function libPath(name) {
+        var mn = moduleName()
+        var cut = -1
+        var i = 0
+        while (i < mn.length) {
+            var ch = mn.charAt(i)
+            if (ch == "/" || ch == "\\") { cut = i }
+            i = i + 1
+        }
+        return mn.substring(0, cut + 1) + "lib/" + name
+    }
+
+    if (c.exePath != undefined && c.exePath != "") {
+        emitDispatch()
+        var rts = c.runtime
+        if (rts == undefined || rts.length == 0) { rts = [libPath("runtime.ll"), libPath("js-rt.ll")] }
+        var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
+        if (buildErr != "") {
+            println(buildErr)
+            exit(1)
+        }
+        println("typescript compiler: wrote executable " + c.exePath)
+        exit(0)
+    }
 
     // Show the compiler output (the LLVM IR module).
     println(m)

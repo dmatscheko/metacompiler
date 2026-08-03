@@ -1,0 +1,3643 @@
+// js-rt.metajs -- JAVASCRIPT'S (AND TYPESCRIPT'S) OWN SEMANTICS, in MetaJS.
+// Layer 2 of docs/runtime-next-plan.md part 3, for the eighth and ninth languages
+// after the Lua pilot, PHP, Swift, Java, C#, Dart and Go.
+//
+// ONE FILE FOR BOTH LANGUAGES. languages/js-to-llvm-ir.abnf drives 87 js_* externs
+// over every tests/js-test-*.js and languages/typescript-to-llvm-ir.abnf drives 86
+// over every tests/typescript-test-*.ts. The two sets differ by three names:
+//
+//     js_jstonumber   js only  (Number(v), which is TypeScript's too but its
+//                               ratchet does not reach it)
+//     js_newtarget    js only
+//     js_sub          ts only, and it is the C FLOOR'S OWN
+//
+// so TypeScript's layer 2 is a SUBSET of JavaScript's and typescript-to-llvm-ir.abnf
+// links THIS module verbatim. There is no typescript-rt.metajs and there should not
+// be one: the two grammars share abnf/jsrt.go + abnf/jsrtjsprint.go +
+// abnf/jsrtjsbig.go on the Go side for exactly the same reason.
+//
+// Compile with:
+//     mec languages/metajs-to-llvm-ir.abnf languages/lib/js-rt.metajs -q -rt-lib
+// which is what tests/gen-js-rt-ll.sh does; the result is the checked-in
+// languages/lib/js-rt.ll that both grammars link next to lib/runtime.ll. -rt-lib
+// exports every TOP-LEVEL `function js_*` below under its own C symbol, so nothing
+// else in this file is visible to the linker - the helpers are deliberately named
+// jv*/jx*/jb*.
+//
+// THE AUTHORITATIVE SPECIFICATION IS abnf/jsrtjsprint.go (the js_js* value surface),
+// abnf/jsrtjsbig.go (BigInt), abnf/jsrtregexjs.go plus abnf/jsrtregex.go (the js_jsx*
+// regular expressions), and the js_has / js_defprop / js_iterable / js_supercall /
+// js_supget / js_supset / js_call_new / js_this / js_newtarget block of abnf/jsrt.go.
+// This file matches them function for function; where it CANNOT, the site says so in
+// full. Written against the Go CODE, not the Go comments (docs/runtime-next-plan.md,
+// "What DART added").
+//
+// ----- the extern split ------------------------------------------------------
+//
+//     the C floor            39   the generic primitives, js_truthy, js_genfn /
+//                                 js_yield / js_ctl_*, js_keys, js_scope_*
+//     layer 2, NEUTRAL       10   js_has, js_defprop, js_iterable, js_supercall,
+//                                 js_supget, js_supset, js_call_new, js_this,
+//                                 js_newtarget, js_scope_set_or_create
+//     layer 2, JS's own      38   js_js* and js_jsx*
+//
+// ----- what js/ts did NOT need, checked rather than assumed -------------------
+//
+//  1. NO `__raw` truthy shim. `grep -n 'truthyExt *=' languages/js-to-llvm-ir.abnf`
+//     and the typescript one are EMPTY (the two hits are READS of core.truthyExt in
+//     the ||= arm), so both keep compile-core's default "js_truthy", which is the C
+//     FLOOR'S OWN function and already answers the raw 1/0 the emitted
+//     `icmp ne ..., 0` compares. Swift, Java, C#, Dart and Go were the same; Lua and
+//     PHP are the only two that override it.
+//  2. ZERO `_raw` PARAMETERS. Every `handle(k)` in either grammar feeds js_num_i,
+//     js_closure or js_arg, all three of them floor externs.
+//  3. Generators cost this file NOTHING for the DRIVING half, exactly as C# found:
+//     both grammars emit js_genfn(js_closure(...)) and then reach the generator
+//     through js_get(g, "next") + js_call, which the floor's get_member answers with
+//     a bound gen_next. `yield` is js_yield, a floor extern. What js DOES owe, and C#
+//     did not, is the INSPECTION half - `.return()` and `.throw()` - and the for-of
+//     drain (js_iterable).
+//
+// ----- MetaJS rules that shape the code below --------------------------------
+//
+// docs/abnf-dialect-gotchas.md: a local (or a reassigned parameter) keeps the TYPE
+// CLASS it is first assigned, so a variable that holds a number in one branch and an
+// object in another is declared `var x = anytype`; there is no ASI, so every `return`
+// carries its value on the same line and a value-less early return is BRACED; no
+// for..in, no splice, no split/join/lastIndexOf, indexOf ignores its from-index,
+// array.length is not assignable, and there are no exponent literals.
+
+// ===================================================== the dynamic `this` ===
+//
+// WALL 1, and it is a NEW SHAPE of the private-representation probe. `js_this` and
+// `js_newtarget` read abnf/jsrt.go's thisStack / newTargetStack - the Go runtime's
+// own CALL STACK. That is not a scope and not a control signal; it is state the
+// floor's js_call does not keep at all (runtime.c's js_call drops `self` for a
+// tag-7 closure and hands jsdispatch only (env, args)).
+//
+// So this is the first wall in part 3 that could NOT be lowered by finding a floor
+// extern that already answers it - there is none. What it CAN be is kept HERE, in
+// layer 2, because layer 2 is a module with globals of its own and because every
+// call that carries a receiver goes through a function in THIS file (js_jsmcall,
+// js_supercall, js_call_new) or through a js_call site the emitter owns.
+//
+// The emitter's half is one extern call, emitted ONLY under -exe (see jsCall in
+// js-to-llvm-ir.abnf): `js_jssetthis(receiver)` immediately before each js_call. No
+// restore is needed and that is worth stating, because it looks like a bug: `this`
+// is read exactly ONCE per function, at ENTRY, where the emitter binds it into the
+// scope (`js_scope_decl(scope, "this", js_this())`). A nested call that overwrites
+// the cell therefore cannot be observed by the caller, which already copied it.
+//
+// The module under llvm.Run is UNCHANGED - it still declares js_this/js_newtarget
+// and abnf/jsrt.go still answers them from its own stacks - so nothing in the
+// matrix moves. The two modules differ, which is already true of emitDispatch.
+
+// `anytype` and not `undefined`: a MetaJS local pins the TYPE CLASS of its first
+// assignment, and these two hold every value in the language.
+var jvThis = anytype
+var jvNewTarget = anytype
+
+function js_jssetthis(v) {
+    jvThis = v
+    jvNewTarget = undefined
+    return undefined
+}
+
+// js_jssetnew(ctor, receiver): the js_call_new arming, split out so that the emitter
+// can use it directly for `new F()` and layer 2 for a super() chain.
+function js_jssetnew(ctor, v) {
+    jvThis = v
+    jvNewTarget = ctor
+    return undefined
+}
+
+function js_this() { return jvThis }
+
+function js_newtarget() { return jvNewTarget }
+
+// ===================================================== value predicates =====
+
+function jvIsObjLike(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (Array.isArray(v)) { return true }
+    return typeof v == "object"
+}
+
+function jvIsObj(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (Array.isArray(v)) { return false }
+    return typeof v == "object"
+}
+
+function jvIsCallable(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    return typeof v == "function"
+}
+
+// An internal slot: abnf/jsrtjsprint.go's jsvInternalKey, "__"-prefixed.
+function jvInternalKey(k) {
+    if (k.length < 2) { return false }
+    return k.charAt(0) == "_" && k.charAt(1) == "_"
+}
+
+// ===================================================== stubs still owed =====
+//
+// Everything below this line is a LOUD STUB. See docs/runtime-next-plan.md part 3,
+// the JS/TS section, for what is measured and what is not.
+
+function jvTodo(name) {
+    fail("js layer 2: " + name + " is not implemented yet (docs/runtime-next-plan.md part 3, JS/TS)")
+    return undefined
+}
+
+// `typeof` for a native build. The emitter routes the user-visible `typeof` here
+// under -exe only (js-to-llvm-ir.abnf's typeofExt): abnf/jsrtjsbig.go's BigInt is a
+// Go TYPE whose js_typeof answers "bigint", and layer 2's is an ordinary object box
+// that the floor's type_of can only call "object". Everything else is the floor's
+// own answer, tag 16 ("function") included.
+function js_jstypeof(v) {
+    if (jbIsBig(v)) { return "bigint" }
+    return typeof v
+}
+
+// ================================ the floor externs a BigInt is taken from ===
+//
+// Under -exe the emitter routes `===`, `!==`, unary `-`, `!`, `typeof` and
+// compile-core's truthy() here (see seqExt / sneExt / negExt / notExt / typeofExt /
+// core.truthyExt in js-to-llvm-ir.abnf). Every one of them exists because
+// abnf/jsrt.go's BigInt is a Go TYPE with an arm in strictEq / truthy / js_neg /
+// typeOf, and layer 2's is an ordinary object box the C floor would answer
+// "truthy", "identity", NaN and "object" for. Each delegates to the floor's own
+// operator for every value that is not a BigInt, so a program without one pays a
+// call and nothing else.
+
+function js_jsseq(a, b) {
+    if (jbIsBig(a)) {
+        if (jbIsBig(b)) { return jbCmp(a, b) == 0 }
+        return false
+    }
+    if (jbIsBig(b)) { return false }
+    return a === b
+}
+
+function js_jssne(a, b) { return !js_jsseq(a, b) }
+
+function js_jsneg(v) {
+    if (jbIsBig(v)) { return jbNeg(v) }
+    return -v   // NEVER `0 - v`: the signed-zero trap of part 3.
+}
+
+function js_jsnot(v) {
+    if (jbIsBig(v)) { return !jbTruthy(v) }
+    return !v
+}
+
+// The `__raw` SUFFIX: -rt-lib exports this as js_jstruthy and puts the result
+// through the floor's own js_truthy, which is the raw 1/0 compile-core's
+// `icmp ne ..., 0` compares. Answering the HANDLE of a MetaJS boolean would answer
+// 2 for false, and 2 != 0, so every condition in the program would be taken.
+function js_jstruthy__raw(v) {
+    if (jbIsBig(v)) { return jbTruthy(v) }
+    return v
+}
+
+// js_jstpl (the template-literal concatenation of a native build) is in PART A,
+// next to the rest of the string surface.
+
+// The template-literal concatenation of a NATIVE build (js-to-llvm-ir.abnf's
+// tplAddExt). It is NOT js_jsadd, deliberately: BOTH Go-backed engines render
+// `${obj}` for an object with a user toString as "[object Object]" where node runs
+// the method - measured, recorded in docs/runtime-next-plan.md part 3, and a
+// three-halves job rather than this gate - and byte-identity with llvm.Run is what
+// the gate asks for. The ONE thing abnf/jsrt.go's js_add does here that the C
+// floor's cannot is render a BigInt as its digits, so that is all this adds.
+function js_jstpl(a, b) {
+    var l = anytype
+    var r = anytype
+    l = a
+    r = b
+    if (jbIsBig(l)) { l = jbStr(l) }
+    if (jbIsBig(r)) { r = jbStr(r) }
+    return l + r
+}
+
+// js_scope_set_or_create walks a SCOPE, which layer 2 cannot open - the C floor's
+// scope is its private storage and no floor extern creates a binding in the ROOT.
+// js-to-llvm-ir.abnf and typescript-to-llvm-ir.abnf lower it in the EMITTER instead
+// (storeExt -> js_pyset_var, which is in the floor and differs only in WHERE a
+// never-declared name lands). See docs/runtime-next-plan.md part 3, WALL 3, for the
+// measurement and for the floor request that would make the lowering exact.
+function js_scope_set_or_create(env, name, v) {
+    fail("js layer 2: js_scope_set_or_create walks a SCOPE, which layer 2 cannot open - js-to-llvm-ir.abnf lowers it in the emitter instead. See languages/lib/js-rt.metajs, WALL 3")
+    return undefined
+}
+
+
+// ##########################################################################
+// # LAYER 2, PART A - the JavaScript VALUE SURFACE (abnf/jsrtjsprint.go)
+// ##########################################################################
+
+// ===========================================================================
+// jsrt-value.metajs -- JavaScript's VALUE SURFACE in MetaJS.
+//
+// The Go twin, function for function, is abnf/jsrtjsprint.go (1320 lines) plus the
+// js_has / js_defprop / js_iterable / js_supercall / js_supget / js_supset /
+// js_call_new block of abnf/jsrt.go. Written against the Go CODE.
+//
+// Helper prefix: jv. Every top-level `function js_*` below is an exported C symbol.
+//
+// ----- what layer 2 has to supply that the Go runtime got for free ----------
+//
+//  1. There is NO js_mcall in the C floor (runtime.c exports js_get/js_set and a
+//     small bound-method table, nothing that dispatches a method on an instance).
+//     abnf/jsrt.go's js_jsmcall falls back to js_mcall -> rt.memberCall; here that
+//     fallback is written out at the end of js_jsmcall (jvFallbackCall).
+//  2. There is NO js_del either. The floor cannot REMOVE a key from an object -
+//     obj_put/obj_get are all layer 2 can reach - so js_jsdel blanks the slot and
+//     records the deletion in a side table (jvDelO/jvDelK) that js_has and
+//     jsvOwnKeys consult. `delete o.a` + `"a" in o` + Object.keys(o) therefore all
+//     answer as node does; a for-in over the same object (the floor's js_keys)
+//     still lists the key. See the report: a floor `js_del` would remove this.
+//  3. An ACCESSOR is a Go type (*jsAccessor) there and an object box here:
+//     {__acc: 1, g: getter, s: setter}. js_jsmget / js_jsmset / js_supget /
+//     js_supset / js_has are the five places that know the box.
+//  4. accessorCount is jvAccN: while no accessor has ever been defined, js_jsmget
+//     and js_jsmset are a straight delegation to js_get / js_set, which matters
+//     because the emitter routes EVERY member and index read through js_jsmget.
+//
+// The MetaJS subset rules apply throughout (docs/abnf-dialect-gotchas.md): no ASI,
+// a local keeps the type class it is first assigned, no for..in, no splice/split/
+// join/lastIndexOf of our own, array.length is not assignable, no exponent literals.
+
+// ===================================================== small utilities =====
+
+// The "this method / this receiver is not ours" sentinel, the shape jxMiss has.
+// A UNIQUE object, so no user value can ever be mistaken for it.
+var jvMiss = {}
+
+// The accessor-property count. abnf/jsrt.go's rt.accessorCount: while it is 0 the
+// member paths cannot meet an accessor and skip the whole lookup.
+var jvAccN = 0
+
+// The `String` global js_jsstringfn handed out, kept so that js_jsmcall can
+// recognize the receiver of String.fromCharCode (the Go twin tests hf.name).
+var jvStringFn = anytype
+
+function jvIsAcc(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (Array.isArray(v)) { return false }
+    if (typeof v != "object") { return false }
+    return v["__acc"] === 1
+}
+
+// Call a user function with an explicit `this`. There is no emitter call site
+// between layer 2 and a callback, so the receiver has to be armed here.
+function jvCallT(f, self, args) {
+    js_jssetthis(self)
+    return f.apply(self, args)
+}
+
+function jvPrepend(recv, args) {
+    var out = []
+    out.push(recv)
+    var i = 0
+    while (i < args.length) {
+        out.push(args[i])
+        i = i + 1
+    }
+    return out
+}
+
+function jvArg(args, i) {
+    if (i < args.length) { return args[i] }
+    return undefined
+}
+
+function jvUndefOrNull(v) {
+    if (v === undefined) { return true }
+    return v === null
+}
+
+// ===================================================== ToString ============
+//
+// jsvCallMethod (abnf/jsrtjsprint.go): run o's own `name` method if it has one.
+// The two places a method can live take DIFFERENT calling conventions - a class
+// method sits on the __class descriptor and gets the receiver PREPENDED, an
+// object-literal method is an ordinary closure that reads `this`. Answers jvMiss
+// when there is no such method, so the "handled" flag needs no global.
+
+function jvCallMethod(o, name) {
+    var cls = o["__class"]
+    while (jvIsObj(cls)) {
+        var m = cls[name]
+        if (jvIsCallable(m)) { return jvCallT(m, undefined, [o]) }
+        cls = cls["__super"]
+    }
+    var own = o[name]
+    if (jvIsCallable(own)) { return jvCallT(own, o, []) }
+    return jvMiss
+}
+
+// jsvString: String(v) with a user toString. The BigInt and RegExp arms are the
+// other two agents' (jbStr / jxStr), asked FIRST because both of their values are
+// carried in an object box that jvIsObj would otherwise claim.
+function jvStr(v) {
+    if (typeof v == "string") { return v }
+    if (jbIsBig(v)) { return jbStr(v) }
+    if (jxIsRe(v)) { return jxStr(v) }
+    if (jvIsObj(v)) {
+        var r = jvCallMethod(v, "toString")
+        if (r !== jvMiss) {
+            if (typeof r == "string") { return r }
+            return jvStr(r)
+        }
+        return "[object Object]"
+    }
+    if (Array.isArray(v)) {
+        var out = ""
+        var i = 0
+        while (i < v.length) {
+            if (i > 0) { out = out + "," }
+            var e = v[i]
+            // undefined and null join as the empty string.
+            if (!jvUndefOrNull(e)) { out = out + jvStr(e) }
+            i = i + 1
+        }
+        return out
+    }
+    return v + ""
+}
+
+// ============================ ToPrimitive, == and the relational operators ==
+
+function jvToNumber(v) {
+    return v * 1
+}
+
+// jsvToPrimitive: valueOf first, then toString.
+function jvToPrimitive(v) {
+    if (jbIsBig(v)) { return v }
+    if (jvIsObj(v)) {
+        var r = jvCallMethod(v, "valueOf")
+        if (r !== jvMiss) {
+            if (!jvIsObjLike(r)) { return r }
+        }
+        return jvStr(v)
+    }
+    if (Array.isArray(v)) { return jvStr(v) }
+    return v
+}
+
+// The primitive form of an operand of ==, <, > or +. A BigInt box is already a
+// primitive and must NOT be run through jvStr.
+function jvPrim(v) {
+    if (jbIsBig(v)) { return v }
+    return jvToPrimitive(v)
+}
+
+// jsvLooseEq: the abstract equality comparison.
+function jvLooseEq(a, b) {
+    if (typeof a != "object") {
+        if (typeof b != "object") { return a == b }   // see js_jsadd's fast path
+    }
+    if (jbIsBig(a) || jbIsBig(b)) { return jbEq(jvPrim(a), jvPrim(b)) }
+    if (jvUndefOrNull(a) || jvUndefOrNull(b)) {
+        if (jvUndefOrNull(a)) { return jvUndefOrNull(b) }
+        return false
+    }
+    var ao = jvIsObjLike(a)
+    var bo = jvIsObjLike(b)
+    if (ao) {
+        if (bo) { return a === b }
+        return jvLooseEq(jvToPrimitive(a), b)
+    }
+    if (bo) { return jvLooseEq(a, jvToPrimitive(b)) }
+    return a == b
+}
+
+// jsCompare over two PRIMITIVES: -1 / 0 / 1, and 2 when a NaN was involved (every
+// relation is then false).
+function jvCmpPrim(a, b) {
+    if (typeof a == "string") {
+        if (typeof b == "string") {
+            if (a < b) { return -1 }
+            if (a > b) { return 1 }
+            return 0
+        }
+    }
+    var x = jvToNumber(a)
+    var y = jvToNumber(b)
+    if (x !== x) { return 2 }
+    if (y !== y) { return 2 }
+    if (x < y) { return -1 }
+    if (x > y) { return 1 }
+    return 0
+}
+
+// jsvCompare: ToPrimitive on both sides, then the shared ordering.
+function jvCompare(a, b) {
+    if (typeof a != "object") {
+        if (typeof b != "object") { return jvCmpPrim(a, b) }   // see js_jsadd
+    }
+    var pa = jvPrim(a)
+    var pb = jvPrim(b)
+    if (jbIsBig(pa) || jbIsBig(pb)) { return jbCmp(pa, pb) }
+    return jvCmpPrim(pa, pb)
+}
+
+// ===================================================== the operators =======
+
+// '+' WITH ToPrimitive. Two primitive operands go straight to the floor's own
+// js_add, which is every addition a program that adds no objects performs.
+function js_jsadd(a, b) {
+    // The FAST PATH, and the reason it is a typeof test rather than four calls:
+    // every value this function has anything of its own to do with - an object, an
+    // array, a BigInt box, a RegExp box - is `typeof "object"` on the floor, so two
+    // non-objects are exactly the case the floor's own js_add already answers.
+    if (typeof a != "object") {
+        if (typeof b != "object") { return a + b }
+    }
+    if (jbIsBig(a) || jbIsBig(b)) { return jbAdd(jvPrim(a), jvPrim(b)) }
+    if (!jvIsObjLike(a)) {
+        if (!jvIsObjLike(b)) { return a + b }
+    }
+    var lp = jvToPrimitive(a)
+    var rp = jvToPrimitive(b)
+    if (typeof lp == "string") { return lp + jvStr(rp) }
+    if (typeof rp == "string") { return jvStr(lp) + rp }
+    if (jbIsBig(lp) || jbIsBig(rp)) { return jbAdd(lp, rp) }
+    return jvToNumber(lp) + jvToNumber(rp)
+}
+
+function js_jseq(a, b) { return jvLooseEq(a, b) }
+
+function js_jsne(a, b) {
+    if (jvLooseEq(a, b)) { return false }
+    return true
+}
+
+function js_jslt(a, b) { return jvCompare(a, b) === -1 }
+
+function js_jsgt(a, b) { return jvCompare(a, b) === 1 }
+
+function js_jsle(a, b) {
+    var c = jvCompare(a, b)
+    if (c === -1) { return true }
+    return c === 0
+}
+
+function js_jsge(a, b) {
+    var c = jvCompare(a, b)
+    if (c === 1) { return true }
+    return c === 0
+}
+
+// ===================================================== delete =============
+//
+// The floor has no way to REMOVE a key from an object, so a deleted key is blanked
+// and remembered here. jvDelO holds the objects, jvDelK the parallel array of the
+// key arrays; jvDelN is the fast-path guard (a program that never deletes pays one
+// integer compare).
+
+var jvDelO = []
+var jvDelK = []
+var jvDelN = 0
+
+function jvDelIdx(o) {
+    var i = 0
+    while (i < jvDelO.length) {
+        if (jvDelO[i] === o) { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+function jvIsDeleted(o, k) {
+    if (jvDelN === 0) { return false }
+    var i = jvDelIdx(o)
+    if (i < 0) { return false }
+    var ks = jvDelK[i]
+    var j = 0
+    while (j < ks.length) {
+        if (ks[j] === k) { return true }
+        j = j + 1
+    }
+    return false
+}
+
+function jvMarkDel(o, k) {
+    var i = jvDelIdx(o)
+    if (i < 0) {
+        jvDelO.push(o)
+        jvDelK.push([])
+        i = jvDelO.length - 1
+    }
+    var ks = jvDelK[i]
+    var j = 0
+    while (j < ks.length) {
+        if (ks[j] === k) { return undefined }
+        j = j + 1
+    }
+    ks.push(k)
+    jvDelN = jvDelN + 1
+    return undefined
+}
+
+// A store to a deleted key brings it back.
+function jvUnmarkDel(o, k) {
+    if (jvDelN === 0) { return undefined }
+    var i = jvDelIdx(o)
+    if (i < 0) { return undefined }
+    var ks = jvDelK[i]
+    var j = 0
+    var keep = []
+    while (j < ks.length) {
+        if (ks[j] === k) { jvDelN = jvDelN - 1 } else { keep.push(ks[j]) }
+        j = j + 1
+    }
+    jvDelK[i] = keep
+    return undefined
+}
+
+// 'delete a[i]' on an ARRAY: the length is unchanged and the slot reads as
+// undefined (a real JS hole cannot be modelled - the interpreter half's arrays
+// carry no side data, so both halves blank the slot).
+function js_jsdel(o, key) {
+    if (Array.isArray(o)) {
+        var idx = jvToNumber(key)
+        if (idx === Math.trunc(idx)) {
+            if (idx >= 0) {
+                if (idx < o.length) { o[idx] = undefined }
+            }
+        }
+        return true
+    }
+    if (jvIsObj(o)) {
+        var k = jvStr(key)
+        o[k] = undefined
+        jvMarkDel(o, k)
+    }
+    return true
+}
+
+// ===================================================== accessors ==========
+
+// findClassAccessor (abnf/jsrt.go): an instance does not carry its class's
+// accessors; they live on the __class descriptor and its __super chain.
+function jvFindClassAcc(o, name) {
+    var cls = o["__class"]
+    while (jvIsObj(cls)) {
+        var v = cls[name]
+        if (v !== undefined) {
+            if (jvIsAcc(v)) { return v }
+            return undefined
+        }
+        cls = cls["__super"]
+    }
+    return undefined
+}
+
+function jvAccGet(acc, self) {
+    var g = acc["g"]
+    if (!jvIsCallable(g)) { return undefined }
+    return jvCallT(g, self, [])
+}
+
+function jvAccSet(acc, self, v) {
+    var s = acc["s"]
+    if (jvIsCallable(s)) { jvCallT(s, self, [v]) }
+    return undefined
+}
+
+// js_defprop: (obj, key, getter|undef, setter|undef). Two calls for the same key
+// merge, so 'get x' and 'set x' meet on one record.
+function js_defprop(o, key, getter, setter) {
+    if (!jvIsObj(o)) { fail("js_defprop needs an object") }
+    var k = jvStr(key)
+    var acc = anytype
+    var cur = o[k]
+    if (jvIsAcc(cur)) {
+        acc = cur
+    } else {
+        acc = {}
+        acc["__acc"] = 1
+        acc["g"] = undefined
+        acc["s"] = undefined
+    }
+    if (jvIsCallable(getter)) { acc["g"] = getter }
+    if (jvIsCallable(setter)) { acc["s"] = setter }
+    o[k] = acc
+    jvAccN = jvAccN + 1
+    return undefined
+}
+
+// ===================================================== member read/write ===
+//
+// jsvStringMethods / jsvArrayMethods are the names js_jsmget HIDES from js_get, so
+// that a call on a string or an array reaches js_jsmcall instead of the floor's
+// bound-method path - which implements a different (Java flavoured) semantics for
+// several of them.
+
+var jvStrM = {}
+var jvArrM = {}
+
+function jvSeedMethodNames() {
+    jvStrM["charAt"] = 1
+    jvStrM["charCodeAt"] = 1
+    jvStrM["codePointAt"] = 1
+    jvStrM["at"] = 1
+    jvStrM["indexOf"] = 1
+    jvStrM["lastIndexOf"] = 1
+    jvStrM["includes"] = 1
+    jvStrM["startsWith"] = 1
+    jvStrM["endsWith"] = 1
+    jvStrM["slice"] = 1
+    jvStrM["substring"] = 1
+    jvStrM["substr"] = 1
+    jvStrM["split"] = 1
+    jvStrM["toUpperCase"] = 1
+    jvStrM["toLowerCase"] = 1
+    jvStrM["trim"] = 1
+    jvStrM["trimStart"] = 1
+    jvStrM["trimEnd"] = 1
+    jvStrM["padStart"] = 1
+    jvStrM["padEnd"] = 1
+    jvStrM["repeat"] = 1
+    jvStrM["concat"] = 1
+    jvStrM["replace"] = 1
+    jvStrM["replaceAll"] = 1
+    jvStrM["toString"] = 1
+    jvStrM["valueOf"] = 1
+    jvStrM["localeCompare"] = 1
+
+    jvArrM["push"] = 1
+    jvArrM["pop"] = 1
+    jvArrM["shift"] = 1
+    jvArrM["unshift"] = 1
+    jvArrM["slice"] = 1
+    jvArrM["splice"] = 1
+    jvArrM["indexOf"] = 1
+    jvArrM["lastIndexOf"] = 1
+    jvArrM["includes"] = 1
+    jvArrM["join"] = 1
+    jvArrM["concat"] = 1
+    jvArrM["reverse"] = 1
+    jvArrM["sort"] = 1
+    jvArrM["map"] = 1
+    jvArrM["filter"] = 1
+    jvArrM["forEach"] = 1
+    jvArrM["reduce"] = 1
+    jvArrM["reduceRight"] = 1
+    jvArrM["some"] = 1
+    jvArrM["every"] = 1
+    jvArrM["find"] = 1
+    jvArrM["findIndex"] = 1
+    jvArrM["findLast"] = 1
+    jvArrM["findLastIndex"] = 1
+    jvArrM["flat"] = 1
+    jvArrM["flatMap"] = 1
+    jvArrM["fill"] = 1
+    jvArrM["at"] = 1
+    jvArrM["toString"] = 1
+    return undefined
+}
+
+var jvSeeded = jvSeedMethodNames()
+
+function jvHides(target, name) {
+    if (typeof target == "string") { return jvStrM[name] === 1 }
+    if (Array.isArray(target)) { return jvArrM[name] === 1 }
+    return false
+}
+
+// js_jsmget is js_get plus the accessor box plus the hidden method names. The
+// emitter routes EVERY member and index read through it under -exe, so the common
+// case has to be a straight delegation.
+// f.call(thisArg, ...) / f.apply(thisArg, argsArray). getMember (abnf/jsrt.go)
+// answers a boundMethod for both, and rt.call then pushes argAt(args, 0) on the
+// thisStack - so the callee's `this` is the FIRST ARGUMENT. The C floor answers
+// them too (mk_bound 40/41), but its js_call DROPS the receiver for a tag-7
+// closure, so nothing would arm js_this() and a decorated method reading
+// `this.bonus` through `original.call(this, n)` answered NaN natively where
+// llvm.Run answered 10. These two shims are the arming, and they are the only
+// place a native build can do it: the dispatch happens inside the floor.
+function jvCallShim(f) {
+    return function () {
+        var rest = []
+        var i = 1
+        while (i < arguments.length) {
+            rest.push(arguments[i])
+            i = i + 1
+        }
+        return jvCallT(f, arguments[0], rest)
+    }
+}
+
+function jvApplyShim(f) {
+    return function () {
+        var a = anytype
+        a = arguments[1]
+        if (!Array.isArray(a)) { a = [] }
+        return jvCallT(f, arguments[0], a)
+    }
+}
+
+function js_jsmget(o, key) {
+    if (typeof key == "string") {
+        if (key == "call" || key == "apply") {
+            if (jvIsCallable(o)) {
+                if (key == "call") { return jvCallShim(o) }
+                return jvApplyShim(o)
+            }
+        }
+        if (jvAccN > 0) {
+            if (jvIsObj(o)) {
+                var cur = o[key]
+                if (jvIsAcc(cur)) { return jvAccGet(cur, o) }
+                if (cur === undefined) {
+                    var acc = jvFindClassAcc(o, key)
+                    if (acc !== undefined) { return jvAccGet(acc, o) }
+                }
+                return cur
+            }
+        }
+        if (jvHides(o, key)) { return undefined }
+    }
+    return o[key]
+}
+
+// js_jsmset has NO Go twin: it is emitted only under -exe, because the C floor's
+// set_member cannot see the accessor box js_defprop stores. js_set plus "if the
+// slot (or a slot on the __class/__super chain) holds an accessor, call its setter
+// with the receiver".
+function js_jsmset(o, key, v) {
+    if (jvAccN > 0) {
+        if (jvIsObj(o)) {
+            var k = jvStr(key)
+            var cur = o[k]
+            if (jvIsAcc(cur)) { return jvAccSet(cur, o, v) }
+            if (cur === undefined) {
+                var acc = jvFindClassAcc(o, k)
+                if (acc !== undefined) { return jvAccSet(acc, o, v) }
+            }
+        }
+    }
+    if (jvDelN > 0) {
+        if (jvIsObj(o)) { jvUnmarkDel(o, jvStr(key)) }
+    }
+    o[key] = v
+    return undefined
+}
+
+// ===================================================== 'in' ===============
+
+function jvIndexIn(key, n) {
+    var idx = jvToNumber(key)
+    if (idx !== idx) { return false }
+    if (idx !== Math.trunc(idx)) { return false }
+    if (idx < 0) { return false }
+    return idx < n
+}
+
+// 'key in obj' / Object.prototype.hasOwnProperty: own properties of an object,
+// index and 'length' of an array or string.
+function js_has(o, key) {
+    if (jvIsObj(o)) {
+        var k = jvStr(key)
+        if (jvIsDeleted(o, k)) { return false }
+        if (o[k] !== undefined) { return true }
+        // A present slot holding undefined: keysOf answers the own keys and
+        // already skips the __-prefixed internal ones.
+        var ks = keysOf(o)
+        var i = 0
+        while (i < ks.length) {
+            if (ks[i] === k) { return true }
+            i = i + 1
+        }
+        return jvFindClassAcc(o, k) !== undefined
+    }
+    if (Array.isArray(o)) {
+        if (key === "length") { return true }
+        return jvIndexIn(key, o.length)
+    }
+    if (typeof o == "string") {
+        if (key === "length") { return true }
+        return jvIndexIn(key, o.length)
+    }
+    fail("'in' needs an object on the right side")
+    return false
+}
+
+// ===================================================== for-of ==============
+//
+// The sequence a for-of loop iterates. Arrays, strings and objects are their own;
+// a GENERATOR is materialized, because the subset iterates by index. Layer 2 has
+// no tag test, so "is this a generator" is structural: not an array, and its
+// `next` member is callable (the floor's tag-15 cell exposes exactly that one).
+function js_iterable(v) {
+    if (jvIsObj(v)) {
+        var nx = v["next"]
+        if (jvIsCallable(nx)) {
+            var out = []
+            var step = nx.apply(v, [])
+            while (!step["done"]) {
+                out.push(step["value"])
+                step = nx.apply(v, [])
+            }
+            return out
+        }
+    }
+    return v
+}
+
+// ===================================================== new / super =========
+
+// Like js_call, but the callee is invoked AS A CONSTRUCTOR, so new.target inside it
+// is the callee instead of undefined. js_jssetnew arms both `this` and new.target.
+function js_call_new(callee, self, args) {
+    js_jssetnew(callee, self)
+    return callee.apply(self, args)
+}
+
+// [[Construct]]'s last step: an OBJECT the constructor RETURNS wins over the fresh
+// receiver.
+function js_jsnewres(res, obj) {
+    if (jvIsObjLike(res)) { return res }
+    if (jvIsCallable(res)) { return res }
+    return obj
+}
+
+// super.m(args): walk the __super chain starting AT the given class (the caller
+// already resolved the superclass of the DEFINING class).
+function js_supercall(sup, self, name, args) {
+    var k = jvStr(name)
+    var cls = sup
+    while (jvIsObj(cls)) {
+        var m = cls[k]
+        if (jvIsCallable(m)) { return jvCallT(m, self, jvPrepend(self, args)) }
+        cls = cls["__super"]
+    }
+    fail("unknown super method '" + k + "'")
+    return undefined
+}
+
+// 'super.x' as a VALUE. A getter found on the way is invoked with the RECEIVER,
+// which is why `this` travels separately. Nothing on the class chain is undefined,
+// and deliberately NOT a read of the receiver: node prints NaN for 'super.zz += 4'
+// after 'super.zz = 3'.
+function js_supget(sup, self, key) {
+    var k = jvStr(key)
+    var cls = sup
+    while (jvIsObj(cls)) {
+        var v = cls[k]
+        if (v !== undefined) {
+            if (jvIsAcc(v)) { return jvAccGet(v, self) }
+            return v
+        }
+        cls = cls["__super"]
+    }
+    return undefined
+}
+
+// 'super.x = v'. A setter on the chain wins; otherwise this is an ordinary [[Set]]
+// whose RECEIVER is `this`, so the own property lands there.
+function js_supset(sup, self, key, v) {
+    var k = jvStr(key)
+    var cls = sup
+    while (jvIsObj(cls)) {
+        var cur = cls[k]
+        if (cur !== undefined) {
+            if (jvIsAcc(cur)) { return jvAccSet(cur, self, v) }
+            break
+        }
+        cls = cls["__super"]
+    }
+    // The plain [[Set]] on the receiver, deliberately NOT js_jsmset: the Go twin
+    // calls o.set directly, so an accessor of the RECEIVER's own is not consulted.
+    self[k] = v
+    return undefined
+}
+
+// ===================================================== instanceof =========
+//
+// 'new F()' for a plain constructor FUNCTION: its instances need a class descriptor
+// to answer instanceof with. Memoized on the function's identity (two parallel
+// arrays plus a === scan: there is no Map in the subset), so two instances of the
+// same constructor share a descriptor.
+
+var jvCtorFn = []
+var jvCtorD = []
+
+function js_jsctordesc(fn) {
+    var i = 0
+    while (i < jvCtorFn.length) {
+        if (jvCtorFn[i] === fn) { return jvCtorD[i] }
+        i = i + 1
+    }
+    var d = {}
+    d["__isclass"] = true
+    d["__ctorfn"] = fn
+    jvCtorFn.push(fn)
+    jvCtorD.push(d)
+    return d
+}
+
+function jvCtorDescOf(fn) {
+    var i = 0
+    while (i < jvCtorFn.length) {
+        if (jvCtorFn[i] === fn) { return jvCtorD[i] }
+        i = i + 1
+    }
+    return undefined
+}
+
+// The `Object` global is a bare marked object; the `Array` global is the root
+// binding, recognized by its ONE member.
+function jvIsObjectGlobal(v) {
+    if (!jvIsObj(v)) { return false }
+    return v["__jsobject"] !== undefined
+}
+
+function jvIsArrayGlobal(v) {
+    if (!jvIsObj(v)) { return false }
+    if (v["isArray"] === undefined) { return false }
+    return keysOf(v).length === 1
+}
+
+function jvChainHas(v, d) {
+    if (!jvIsObj(v)) { return false }
+    var cls = v["__class"]
+    while (jvIsObj(cls)) {
+        if (cls === d) { return true }
+        cls = cls["__super"]
+    }
+    return false
+}
+
+function js_jsinstanceof(v, c) {
+    if (jvIsObjectGlobal(c)) {
+        if (jvIsObjLike(v)) { return true }
+        return jvIsCallable(v)
+    }
+    if (jvIsArrayGlobal(c)) { return Array.isArray(v) }
+    if (jvIsCallable(c)) {
+        var d = jvCtorDescOf(c)
+        if (d === undefined) { return false }
+        return jvChainHas(v, d)
+    }
+    // The shared js_instanceof: walk the __class/__super chain of the instance and
+    // compare with the class descriptor.
+    return jvChainHas(v, c)
+}
+
+// ===================================================== the globals ========
+
+// String(v). abnf/jsrtjsprint.go registers it as m["js_jsstr"].
+function js_jsstr(v) { return jvStr(v) }
+
+// js_jstpl (the template-literal concatenation under -exe) lives in the BASE file.
+
+// The `Object` global, declared by the grammar in the PROGRAM's own scope so no
+// other language sees it.
+function js_jsobject() {
+    var o = {}
+    o["__jsobject"] = true
+    return o
+}
+
+// The `String` global. The runtime root binds an OBJECT (it carries fromCharCode),
+// so a bare String(v) call aborted with "call of a non function value"; this is a
+// real function, and String.fromCharCode is answered by js_jsmcall.
+function js_jsstringfn() {
+    if (jvStringFn === undefined) {
+        jvStringFn = function () {
+            if (arguments.length === 0) { return "" }
+            return jvStr(arguments[0])
+        }
+    }
+    return jvStringFn
+}
+
+// js_jsprintfn("println"|"print") answers the host FUNCTION VALUE the grammar
+// declares over the root scope's binding of the same name. Going through a binding
+// rather than a call-site rewrite is what keeps shadowing honest.
+function js_jsprintfn(name) {
+    if (name == "println") {
+        return function () {
+            var out = ""
+            var i = 0
+            while (i < arguments.length) {
+                if (i > 0) { out = out + " " }
+                out = out + jvStr(arguments[i])
+                i = i + 1
+            }
+            println(out)
+            return undefined
+        }
+    }
+    return function () {
+        var out = ""
+        var i = 0
+        while (i < arguments.length) {
+            out = out + jvStr(arguments[i])
+            i = i + 1
+        }
+        print(out)
+        return undefined
+    }
+}
+
+// ===================================================== own keys ===========
+
+// jsvOwnKeys: an object's own enumerable keys in insertion order, WITHOUT the
+// __-prefixed internal slots (keysOf already skips those).
+function jvOwnKeys(v) {
+    if (jvIsObj(v)) {
+        var ks = keysOf(v)
+        if (jvDelN === 0) { return ks }
+        var out = []
+        var i = 0
+        while (i < ks.length) {
+            if (!jvIsDeleted(v, ks[i])) { out.push(ks[i]) }
+            i = i + 1
+        }
+        return out
+    }
+    if (Array.isArray(v)) {
+        var oa = []
+        var j = 0
+        while (j < v.length) {
+            oa.push(j + "")
+            j = j + 1
+        }
+        return oa
+    }
+    if (typeof v == "string") {
+        var os = []
+        var k = 0
+        while (k < v.length) {
+            os.push(k + "")
+            k = k + 1
+        }
+        return os
+    }
+    return []
+}
+
+// ===================================================== string helpers ======
+
+// indexOf WITH a from-index (the floor's own ignores it).
+function jvIndexFrom(s, sub, from) {
+    if (from <= 0) { return s.indexOf(sub) }
+    if (from > s.length) { return -1 }
+    var at = s.substring(from, s.length).indexOf(sub)
+    if (at < 0) { return -1 }
+    return at + from
+}
+
+// jsvSpace, the character set String#trim removes (WhiteSpace + LineTerminator).
+function jvIsSpaceCode(c) {
+    if (c === 32) { return true }
+    if (c >= 9) {
+        if (c <= 13) { return true }
+    }
+    if (c === 160) { return true }
+    if (c === 5760) { return true }
+    if (c >= 8192) {
+        if (c <= 8202) { return true }
+    }
+    if (c === 8232) { return true }
+    if (c === 8233) { return true }
+    if (c === 8239) { return true }
+    if (c === 8287) { return true }
+    if (c === 12288) { return true }
+    return c === 65279
+}
+
+function jvTrim(s, left, right) {
+    var i = 0
+    var j = s.length
+    if (left) {
+        while (i < j && jvIsSpaceCode(s.charCodeAt(i))) { i = i + 1 }
+    }
+    if (right) {
+        while (j > i && jvIsSpaceCode(s.charCodeAt(j - 1))) { j = j - 1 }
+    }
+    return s.substring(i, j)
+}
+
+// clampIndex / sliceRange / substringRange, the twins of abnf/jsrt.go's. The two
+// results travel in globals, the way runtime.c's slice_range does.
+var jvBegin = 0
+var jvEnd = 0
+
+function jvClampIndex(i, length) {
+    var v = i
+    if (v < 0) { v = v + length }
+    if (v < 0) { return 0 }
+    if (v > length) { return length }
+    return v
+}
+
+function jvSliceRange(length, args) {
+    jvBegin = 0
+    jvEnd = length
+    if (args.length > 0) {
+        var n = jvToNumber(args[0])
+        if (n !== n) { n = 0 }
+        jvBegin = jvClampIndex(Math.trunc(n), length)
+    }
+    if (args.length > 1) {
+        if (args[1] !== undefined) {
+            var e = jvToNumber(args[1])
+            if (e !== e) { e = 0 }
+            jvEnd = jvClampIndex(Math.trunc(e), length)
+        }
+    }
+    if (jvEnd < jvBegin) { jvEnd = jvBegin }
+    return undefined
+}
+
+function jvClampSub(f, length) {
+    if (f !== f) { return 0 }
+    if (f < 0) { return 0 }
+    if (f > length) { return length }
+    return Math.trunc(f)
+}
+
+function jvSubstringRange(length, args) {
+    jvBegin = jvClampSub(jvToNumber(jvArg(args, 0)), length)
+    jvEnd = length
+    if (args.length > 1) {
+        if (args[1] !== undefined) { jvEnd = jvClampSub(jvToNumber(args[1]), length) }
+    }
+    if (jvBegin > jvEnd) {
+        var t = jvBegin
+        jvBegin = jvEnd
+        jvEnd = t
+    }
+    return undefined
+}
+
+// jsvRelIndex: a possibly negative / out-of-range index against a length, the way
+// slice/splice/fill resolve one (ECMA RelativeIndex).
+function jvRelIndex(v, length) {
+    var x = v
+    if (x !== x) { x = 0 }
+    if (x < 0) {
+        var i = length + Math.trunc(x)
+        if (i < 0) { return 0 }
+        return i
+    }
+    var j = Math.trunc(x)
+    if (j > length) { return length }
+    return j
+}
+
+function jvNumArg(args, i, dflt) {
+    if (i >= args.length) { return dflt }
+    if (jvUndefOrNull(args[i])) { return dflt }
+    return jvToNumber(args[i])
+}
+
+function jvToInt(f) {
+    if (f !== f) { return 0 }
+    return Math.trunc(f)
+}
+
+// ===================================================== replace ============
+
+// jsvExpandDollar: $& the match, $` the prefix, $' the suffix, $$ a literal dollar.
+function jvExpandDollar(repl, match, before, after) {
+    if (repl.indexOf("$") < 0) { return repl }
+    var out = ""
+    var i = 0
+    while (i < repl.length) {
+        var c = repl.charAt(i)
+        if (c != "$" || i + 1 >= repl.length) {
+            out = out + c
+            i = i + 1
+        } else {
+            var d = repl.charAt(i + 1)
+            if (d == "$") {
+                out = out + "$"
+                i = i + 2
+            } else if (d == "&") {
+                out = out + match
+                i = i + 2
+            } else if (d == "`") {
+                out = out + before
+                i = i + 2
+            } else if (d == "'") {
+                out = out + after
+                i = i + 2
+            } else {
+                out = out + c
+                i = i + 1
+            }
+        }
+    }
+    return out
+}
+
+// The replacer-FUNCTION form: the callback gets (match, offset, whole).
+function jvReplaceFn(s, pat, fn, limit) {
+    if (pat == "") { return jvStr(jvCallT(fn, undefined, ["", 0, s])) + s }
+    var out = ""
+    var at = 0
+    var done = 0
+    while (true) {
+        if (limit >= 0) {
+            if (done >= limit) { break }
+        }
+        var i = jvIndexFrom(s, pat, at)
+        if (i < 0) { break }
+        out = out + s.substring(at, i)
+        out = out + jvStr(jvCallT(fn, undefined, [pat, i, s]))
+        at = i + pat.length
+        done = done + 1
+    }
+    return out + s.substring(at, s.length)
+}
+
+function jvReplaceTemplate(s, pat, repl, limit) {
+    if (pat == "") { return jvExpandDollar(repl, "", "", s) + s }
+    var out = ""
+    var at = 0
+    var done = 0
+    while (true) {
+        if (limit >= 0) {
+            if (done >= limit) { break }
+        }
+        var i = jvIndexFrom(s, pat, at)
+        if (i < 0) { break }
+        out = out + s.substring(at, i)
+        out = out + jvExpandDollar(repl, pat, s.substring(0, i), s.substring(i + pat.length, s.length))
+        at = i + pat.length
+        done = done + 1
+    }
+    return out + s.substring(at, s.length)
+}
+
+// ===================================================== String methods ======
+
+function jvArgS(args, i) {
+    if (i < args.length) { return jvStr(args[i]) }
+    return "undefined"
+}
+
+function jvStrMethod(s, name, args) {
+    var units = s.length
+    if (name == "toString" || name == "valueOf") { return s }
+    if (name == "charAt") { return s.charAt(jvToInt(jvNumArg(args, 0, 0))) }
+    if (name == "charCodeAt") { return s.charCodeAt(jvToInt(jvNumArg(args, 0, 0))) }
+    if (name == "codePointAt") {
+        var ci = jvToInt(jvNumArg(args, 0, 0))
+        if (ci < 0) { return undefined }
+        if (ci >= units) { return undefined }
+        var hi = s.charCodeAt(ci)
+        // A surrogate PAIR is one code point; the string is measured in UTF-16 code
+        // units, so the low half has to be folded in by hand.
+        if (hi >= 55296) {
+            if (hi <= 56319) {
+                if (ci + 1 < units) {
+                    var lo = s.charCodeAt(ci + 1)
+                    if (lo >= 56320) {
+                        if (lo <= 57343) { return (hi - 55296) * 1024 + (lo - 56320) + 65536 }
+                    }
+                }
+            }
+        }
+        return hi
+    }
+    if (name == "at") {
+        var ai = jvToInt(jvNumArg(args, 0, 0))
+        if (ai < 0) { ai = ai + units }
+        if (ai < 0) { return undefined }
+        if (ai >= units) { return undefined }
+        return s.substring(ai, ai + 1)
+    }
+    if (name == "indexOf") {
+        var from = jvToInt(jvNumArg(args, 1, 0))
+        if (from < 0) { from = 0 }
+        if (from > units) { from = units }
+        return jvIndexFrom(s, jvArgS(args, 0), from)
+    }
+    if (name == "lastIndexOf") {
+        var sub = jvArgS(args, 0)
+        var best = -1
+        var li = 0
+        while (li + sub.length <= units) {
+            if (s.substring(li, li + sub.length) == sub) { best = li }
+            li = li + 1
+        }
+        return best
+    }
+    if (name == "includes") { return s.indexOf(jvArgS(args, 0)) >= 0 }
+    if (name == "startsWith") {
+        var sw = jvArgS(args, 0)
+        var at = jvToInt(jvNumArg(args, 1, 0))
+        if (at < 0) { at = 0 }
+        if (at + sw.length > units) { return false }
+        return s.substring(at, at + sw.length) == sw
+    }
+    if (name == "endsWith") {
+        var ew = jvArgS(args, 0)
+        var end = units
+        if (args.length > 1) {
+            if (!jvUndefOrNull(args[1])) { end = jvToInt(jvToNumber(args[1])) }
+        }
+        var start = end - ew.length
+        if (start < 0) { return false }
+        if (end > units) { return false }
+        return s.substring(start, end) == ew
+    }
+    if (name == "slice") {
+        jvSliceRange(units, args)
+        return s.substring(jvBegin, jvEnd)
+    }
+    if (name == "substring") {
+        jvSubstringRange(units, args)
+        return s.substring(jvBegin, jvEnd)
+    }
+    if (name == "substr") {
+        var st = jvToInt(jvNumArg(args, 0, 0))
+        if (st < 0) {
+            st = st + units
+            if (st < 0) { st = 0 }
+        }
+        if (st > units) { st = units }
+        var n = units - st
+        if (args.length > 1) {
+            if (!jvUndefOrNull(args[1])) { n = jvToInt(jvToNumber(args[1])) }
+        }
+        if (n < 0) { n = 0 }
+        if (st + n > units) { n = units - st }
+        return s.substring(st, st + n)
+    }
+    if (name == "split") {
+        var out = []
+        var limit = -1
+        if (args.length > 1) {
+            if (!jvUndefOrNull(args[1])) { limit = jvToInt(jvToNumber(args[1])) }
+        }
+        if (args.length === 0 || jvUndefOrNull(jvArg(args, 0))) {
+            if (limit != 0) { out.push(s) }
+            return out
+        }
+        var sep = jvStr(args[0])
+        if (sep == "") {
+            var pi = 0
+            while (pi < units) {
+                if (limit >= 0) {
+                    if (out.length >= limit) { return out }
+                }
+                out.push(s.substring(pi, pi + 1))
+                pi = pi + 1
+            }
+            return out
+        }
+        var at2 = 0
+        while (true) {
+            if (limit >= 0) {
+                if (out.length >= limit) { return out }
+            }
+            var hit = jvIndexFrom(s, sep, at2)
+            if (hit < 0) {
+                out.push(s.substring(at2, units))
+                return out
+            }
+            out.push(s.substring(at2, hit))
+            at2 = hit + sep.length
+        }
+        return out
+    }
+    if (name == "toUpperCase") { return s.toUpperCase() }
+    if (name == "toLowerCase") { return s.toLowerCase() }
+    if (name == "trim") { return jvTrim(s, true, true) }
+    if (name == "trimStart") { return jvTrim(s, true, false) }
+    if (name == "trimEnd") { return jvTrim(s, false, true) }
+    if (name == "padStart" || name == "padEnd") {
+        var want = jvToInt(jvNumArg(args, 0, 0))
+        var fill = " "
+        if (args.length > 1) {
+            if (!jvUndefOrNull(args[1])) { fill = jvStr(args[1]) }
+        }
+        if (want <= units) { return s }
+        if (fill == "") { return s }
+        var pad = ""
+        while (pad.length < want - units) { pad = pad + fill }
+        pad = pad.substring(0, want - units)
+        if (name == "padStart") { return pad + s }
+        return s + pad
+    }
+    if (name == "repeat") {
+        var rn = jvToInt(jvNumArg(args, 0, 0))
+        if (rn < 0) { fail("Invalid count value: " + rn) }
+        var ro = ""
+        var rk = 0
+        while (rk < rn) {
+            ro = ro + s
+            rk = rk + 1
+        }
+        return ro
+    }
+    if (name == "concat") {
+        var co = s
+        var ci2 = 0
+        while (ci2 < args.length) {
+            co = co + jvArgS(args, ci2)
+            ci2 = ci2 + 1
+        }
+        return co
+    }
+    if (name == "replace" || name == "replaceAll") {
+        var pat = jvArgS(args, 0)
+        var lim = 1
+        if (name == "replaceAll") { lim = -1 }
+        var rep = jvArg(args, 1)
+        if (jvIsCallable(rep)) { return jvReplaceFn(s, pat, rep, lim) }
+        return jvReplaceTemplate(s, pat, jvArgS(args, 1), lim)
+    }
+    if (name == "localeCompare") {
+        var other = jvArgS(args, 0)
+        if (s < other) { return -1 }
+        if (s > other) { return 1 }
+        return 0
+    }
+    return jvMiss
+}
+
+// ===================================================== Array methods =======
+
+function jvSortLess(x, y, cmp) {
+    if (jvIsCallable(cmp)) { return jvToNumber(jvCallT(cmp, undefined, [x, y])) < 0 }
+    return jvStr(x) < jvStr(y)
+}
+
+// Array#sort: undefined sorts last and every other element compares as its STRING
+// form. V8's sort is stable, so a stable sort (insertion) is what this is.
+function jvSort(a, cmp) {
+    var vals = []
+    var i = 0
+    while (i < a.length) {
+        if (a[i] !== undefined) { vals.push(a[i]) }
+        i = i + 1
+    }
+    var j = 1
+    while (j < vals.length) {
+        var key = vals[j]
+        var k = j - 1
+        while (k >= 0) {
+            if (!jvSortLess(key, vals[k], cmp)) { break }
+            vals[k + 1] = vals[k]
+            k = k - 1
+        }
+        vals[k + 1] = key
+        j = j + 1
+    }
+    var w = 0
+    while (w < vals.length) {
+        a[w] = vals[w]
+        w = w + 1
+    }
+    while (w < a.length) {
+        a[w] = undefined
+        w = w + 1
+    }
+    return undefined
+}
+
+function jvFlatten(out, elems, depth) {
+    var i = 0
+    while (i < elems.length) {
+        var e = elems[i]
+        if (Array.isArray(e) && depth > 0) {
+            jvFlatten(out, e, depth - 1)
+        } else {
+            out.push(e)
+        }
+        i = i + 1
+    }
+    return undefined
+}
+
+// Replace a's contents with next's, in place (there is no splice and length is not
+// assignable, so the floor's pop/push are the only tools).
+function jvReplaceAll(a, next) {
+    while (a.length > 0) { a.pop() }
+    var i = 0
+    while (i < next.length) {
+        a.push(next[i])
+        i = i + 1
+    }
+    return undefined
+}
+
+function jvArrMethod(a, name, args) {
+    var n = a.length
+    var cb = jvArg(args, 0)
+    if (name == "toString") { return jvStr(a) }
+    if (name == "at") {
+        var ai = jvToInt(jvNumArg(args, 0, 0))
+        if (ai < 0) { ai = ai + n }
+        if (ai < 0) { return undefined }
+        if (ai >= n) { return undefined }
+        return a[ai]
+    }
+    if (name == "push") {
+        var pi = 0
+        while (pi < args.length) {
+            a.push(args[pi])
+            pi = pi + 1
+        }
+        return a.length
+    }
+    if (name == "pop") { return a.pop() }
+    if (name == "shift") { return a.shift() }
+    if (name == "unshift") {
+        var next = []
+        var ui = 0
+        while (ui < args.length) {
+            next.push(args[ui])
+            ui = ui + 1
+        }
+        var uj = 0
+        while (uj < n) {
+            next.push(a[uj])
+            uj = uj + 1
+        }
+        jvReplaceAll(a, next)
+        return a.length
+    }
+    if (name == "reverse") { return a.reverse() }
+    if (name == "slice") {
+        jvSliceRange(n, args)
+        var so = []
+        var sk = jvBegin
+        while (sk < jvEnd) {
+            so.push(a[sk])
+            sk = sk + 1
+        }
+        return so
+    }
+    if (name == "splice") {
+        var start = n
+        if (args.length > 0) { start = jvRelIndex(jvToNumber(args[0]), n) }
+        var del = n - start
+        if (args.length > 1) { del = jvToInt(jvToNumber(args[1])) }
+        if (del < 0) { del = 0 }
+        if (start + del > n) { del = n - start }
+        var removed = []
+        var si = start
+        while (si < start + del) {
+            removed.push(a[si])
+            si = si + 1
+        }
+        var nx = []
+        var k = 0
+        while (k < start) {
+            nx.push(a[k])
+            k = k + 1
+        }
+        var ii = 2
+        while (ii < args.length) {
+            nx.push(args[ii])
+            ii = ii + 1
+        }
+        k = start + del
+        while (k < n) {
+            nx.push(a[k])
+            k = k + 1
+        }
+        jvReplaceAll(a, nx)
+        return removed
+    }
+    if (name == "indexOf") {
+        var from = 0
+        if (args.length > 1) { from = jvRelIndex(jvToNumber(args[1]), n) }
+        var qi = from
+        while (qi < n) {
+            if (a[qi] === cb) { return qi }
+            qi = qi + 1
+        }
+        return -1
+    }
+    if (name == "lastIndexOf") {
+        var li = n - 1
+        while (li >= 0) {
+            if (a[li] === cb) { return li }
+            li = li - 1
+        }
+        return -1
+    }
+    if (name == "includes") {
+        var ci = 0
+        while (ci < n) {
+            var e = a[ci]
+            if (e === cb) { return true }
+            // includes, unlike indexOf, finds NaN.
+            if (typeof e == "number") {
+                if (typeof cb == "number") {
+                    if (e !== e && cb !== cb) { return true }
+                }
+            }
+            ci = ci + 1
+        }
+        return false
+    }
+    if (name == "join") {
+        var sep = ","
+        if (args.length > 0) {
+            if (!jvUndefOrNull(args[0])) { sep = jvStr(args[0]) }
+        }
+        var jo = ""
+        var ji = 0
+        while (ji < n) {
+            if (ji > 0) { jo = jo + sep }
+            if (!jvUndefOrNull(a[ji])) { jo = jo + jvStr(a[ji]) }
+            ji = ji + 1
+        }
+        return jo
+    }
+    if (name == "concat") {
+        var co = []
+        var xi = 0
+        while (xi < n) {
+            co.push(a[xi])
+            xi = xi + 1
+        }
+        var yi = 0
+        while (yi < args.length) {
+            var x = args[yi]
+            if (Array.isArray(x)) {
+                var zi = 0
+                while (zi < x.length) {
+                    co.push(x[zi])
+                    zi = zi + 1
+                }
+            } else {
+                co.push(x)
+            }
+            yi = yi + 1
+        }
+        return co
+    }
+    if (name == "sort") {
+        jvSort(a, cb)
+        return a
+    }
+    if (name == "map") {
+        var mo = []
+        var mi = 0
+        while (mi < n && mi < a.length) {
+            mo.push(jvCallT(cb, jvArg(args, 1), [a[mi], mi, a]))
+            mi = mi + 1
+        }
+        return mo
+    }
+    if (name == "filter") {
+        var fo = []
+        var fi = 0
+        while (fi < n && fi < a.length) {
+            if (jvCallT(cb, jvArg(args, 1), [a[fi], fi, a])) { fo.push(a[fi]) }
+            fi = fi + 1
+        }
+        return fo
+    }
+    if (name == "forEach") {
+        var ei = 0
+        while (ei < n && ei < a.length) {
+            jvCallT(cb, jvArg(args, 1), [a[ei], ei, a])
+            ei = ei + 1
+        }
+        return undefined
+    }
+    if (name == "some") {
+        var oi = 0
+        while (oi < n && oi < a.length) {
+            if (jvCallT(cb, jvArg(args, 1), [a[oi], oi, a])) { return true }
+            oi = oi + 1
+        }
+        return false
+    }
+    if (name == "every") {
+        var vi = 0
+        while (vi < n && vi < a.length) {
+            if (!jvCallT(cb, jvArg(args, 1), [a[vi], vi, a])) { return false }
+            vi = vi + 1
+        }
+        return true
+    }
+    if (name == "find") {
+        var di = 0
+        while (di < n && di < a.length) {
+            if (jvCallT(cb, jvArg(args, 1), [a[di], di, a])) { return a[di] }
+            di = di + 1
+        }
+        return undefined
+    }
+    if (name == "findIndex") {
+        var gi = 0
+        while (gi < n && gi < a.length) {
+            if (jvCallT(cb, jvArg(args, 1), [a[gi], gi, a])) { return gi }
+            gi = gi + 1
+        }
+        return -1
+    }
+    if (name == "findLast") {
+        var hi = n - 1
+        while (hi >= 0) {
+            if (jvCallT(cb, jvArg(args, 1), [a[hi], hi, a])) { return a[hi] }
+            hi = hi - 1
+        }
+        return undefined
+    }
+    if (name == "findLastIndex") {
+        var ki = n - 1
+        while (ki >= 0) {
+            if (jvCallT(cb, jvArg(args, 1), [a[ki], ki, a])) { return ki }
+            ki = ki - 1
+        }
+        return -1
+    }
+    if (name == "reduce" || name == "reduceRight") {
+        var idx = []
+        if (name == "reduce") {
+            var ri = 0
+            while (ri < n) {
+                idx.push(ri)
+                ri = ri + 1
+            }
+        } else {
+            var rj = n - 1
+            while (rj >= 0) {
+                idx.push(rj)
+                rj = rj - 1
+            }
+        }
+        var at = 0
+        var acc = anytype
+        if (args.length > 1) {
+            acc = args[1]
+        } else {
+            if (n === 0) { fail("Reduce of empty array with no initial value") }
+            acc = a[idx[0]]
+            at = 1
+        }
+        while (at < idx.length) {
+            var ix = idx[at]
+            acc = jvCallT(cb, undefined, [acc, a[ix], ix, a])
+            at = at + 1
+        }
+        return acc
+    }
+    if (name == "flat") {
+        var depth = 1
+        if (args.length > 0) {
+            if (!jvUndefOrNull(args[0])) {
+                var d = jvToNumber(args[0])
+                if (d === Infinity) { depth = 1073741824 } else { depth = jvToInt(d) }
+            }
+        }
+        var lo = []
+        jvFlatten(lo, a, depth)
+        return lo
+    }
+    if (name == "flatMap") {
+        var mo2 = []
+        var mi2 = 0
+        while (mi2 < n && mi2 < a.length) {
+            var v = jvCallT(cb, jvArg(args, 1), [a[mi2], mi2, a])
+            if (Array.isArray(v)) {
+                var wi = 0
+                while (wi < v.length) {
+                    mo2.push(v[wi])
+                    wi = wi + 1
+                }
+            } else {
+                mo2.push(v)
+            }
+            mi2 = mi2 + 1
+        }
+        return mo2
+    }
+    if (name == "fill") {
+        var fv = jvArg(args, 0)
+        var fb = 0
+        var fe = n
+        if (args.length > 1) {
+            if (!jvUndefOrNull(args[1])) { fb = jvRelIndex(jvToNumber(args[1]), n) }
+        }
+        if (args.length > 2) {
+            if (!jvUndefOrNull(args[2])) { fe = jvRelIndex(jvToNumber(args[2]), n) }
+        }
+        while (fb < fe) {
+            a[fb] = fv
+            fb = fb + 1
+        }
+        return a
+    }
+    return jvMiss
+}
+
+// ===================================================== Number methods ======
+
+// jsvToFixed. The rounding is spelled the way the interpreter half spells it (scale
+// by 10^digits, add a half, floor), and on every value tested that IS node's answer:
+// the spec rounds the EXACT binary value half up, and 1.005 * 100 is 100.4999... in
+// binary, so both say "1.00".
+function jvToFixed(x, digits) {
+    if (x !== x) { return "NaN" }
+    if (x === Infinity) { return "Infinity" }
+    if (x === -Infinity) { return "-Infinity" }
+    if (Math.abs(x) >= Math.pow(10, 21)) { return x + "" }
+    var sign = ""
+    var v = x
+    if (v < 0) {
+        sign = "-"
+        v = -v
+    }
+    var scale = Math.pow(10, digits)
+    var n = Math.floor(v * scale + 0.5)
+    var s = n + ""
+    if (digits > 0) {
+        while (s.length <= digits) { s = "0" + s }
+        s = s.substring(0, s.length - digits) + "." + s.substring(s.length - digits, s.length)
+    }
+    if (sign == "-") {
+        if (n === 0) { return s }
+    }
+    return sign + s
+}
+
+// jsvRadixString: Number#toString(radix) for a radix other than 10. The integer part
+// is exact; the fraction is emitted to 52 digits and trailing zeros dropped.
+function jvRadixString(x, radix) {
+    if (x !== x) { return "NaN" }
+    if (x === Infinity) { return "Infinity" }
+    if (x === -Infinity) { return "-Infinity" }
+    var sign = ""
+    var v = x
+    if (v < 0) {
+        sign = "-"
+        v = -v
+    }
+    var ip = Math.floor(v)
+    var frac = v - ip
+    var digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    var intPart = ""
+    if (ip === 0) { intPart = "0" }
+    while (ip >= 1) {
+        var d = Math.trunc(ip % radix)
+        intPart = digits.charAt(d) + intPart
+        ip = Math.floor(ip / radix)
+    }
+    if (frac === 0) { return sign + intPart }
+    var out = intPart + "."
+    var i = 0
+    while (i < 52 && frac > 0) {
+        frac = frac * radix
+        var fd = Math.floor(frac)
+        out = out + digits.charAt(fd)
+        frac = frac - fd
+        i = i + 1
+    }
+    var end = out.length
+    while (end > 0) {
+        if (out.charAt(end - 1) != "0") { break }
+        end = end - 1
+    }
+    if (end > 0) {
+        if (out.charAt(end - 1) == ".") { end = end - 1 }
+    }
+    return sign + out.substring(0, end)
+}
+
+// (255n).toString(16). The seam list gives agent A only jbStr, so the conversion
+// runs on the DECIMAL TEXT: repeated long division of the digit string by the radix.
+// Exact for any magnitude, which is the whole point of a BigInt.
+function jvBigRadix(dec, radix) {
+    var sign = ""
+    var s = dec
+    if (s.charAt(0) == "-") {
+        sign = "-"
+        s = s.substring(1, s.length)
+    }
+    var digs = "0123456789abcdefghijklmnopqrstuvwxyz"
+    var n = []
+    var i = 0
+    while (i < s.length) {
+        n.push(s.charCodeAt(i) - 48)
+        i = i + 1
+    }
+    var out = ""
+    while (true) {
+        var q = []
+        var rem = 0
+        var j = 0
+        while (j < n.length) {
+            var cur = rem * 10 + n[j]
+            var d = Math.floor(cur / radix)
+            rem = cur - d * radix
+            if (q.length > 0 || d > 0) { q.push(d) }
+            j = j + 1
+        }
+        out = digs.charAt(rem) + out
+        if (q.length === 0) { break }
+        n = q
+    }
+    if (out == "") { out = "0" }
+    return sign + out
+}
+
+function jvNumMethod(x, name, args) {
+    if (name == "toFixed") { return jvToFixed(x, jvToInt(jvNumArg(args, 0, 0))) }
+    if (name == "toString") {
+        var radix = jvToInt(jvNumArg(args, 0, 10))
+        if (radix === 10) { return x + "" }
+        if (radix < 2 || radix > 36) { fail("toString() radix must be between 2 and 36") }
+        return jvRadixString(x, radix)
+    }
+    if (name == "valueOf") { return x }
+    return jvMiss
+}
+
+// ===================================================== the Object statics ==
+
+function jvObjectGlobalMethod(name, args) {
+    var src = jvArg(args, 0)
+    if (name == "keys" || name == "getOwnPropertyNames") {
+        var out = []
+        var ks = jvOwnKeys(src)
+        var i = 0
+        while (i < ks.length) {
+            out.push(ks[i])
+            i = i + 1
+        }
+        return out
+    }
+    if (name == "values") {
+        var vo = []
+        var vk = jvOwnKeys(src)
+        var vi = 0
+        while (vi < vk.length) {
+            vo.push(js_jsmget(src, vk[vi]))
+            vi = vi + 1
+        }
+        return vo
+    }
+    if (name == "entries") {
+        var eo = []
+        var ek = jvOwnKeys(src)
+        var ei = 0
+        while (ei < ek.length) {
+            var pair = []
+            pair.push(ek[ei])
+            pair.push(js_jsmget(src, ek[ei]))
+            eo.push(pair)
+            ei = ei + 1
+        }
+        return eo
+    }
+    if (name == "assign") {
+        if (!jvIsObj(src)) { fail("Object.assign needs an object target") }
+        var ai = 1
+        while (ai < args.length) {
+            var s = args[ai]
+            if (!jvUndefOrNull(s)) {
+                var sk = jvOwnKeys(s)
+                var sj = 0
+                while (sj < sk.length) {
+                    js_jsmset(src, sk[sj], js_jsmget(s, sk[sj]))
+                    sj = sj + 1
+                }
+            }
+            ai = ai + 1
+        }
+        return src
+    }
+    if (name == "fromEntries") {
+        var fo = {}
+        if (Array.isArray(src)) {
+            var fi = 0
+            while (fi < src.length) {
+                var e = src[fi]
+                if (Array.isArray(e)) {
+                    if (e.length > 0) { js_jsmset(fo, jvStr(e[0]), jvArg(e, 1)) }
+                }
+                fi = fi + 1
+            }
+        }
+        return fo
+    }
+    if (name == "freeze" || name == "seal") { return src }
+    if (name == "is") { return jvArg(args, 0) === jvArg(args, 1) }
+    return jvMiss
+}
+
+// ===================================================== the method call =====
+//
+// The fallback for a receiver none of the arms claims: abnf/jsrt.go's memberCall,
+// which the C floor does not have. A class instance dispatches on the __class /
+// __super chain with the receiver PREPENDED; anything else resolves the member and
+// calls it.
+function jvFallbackCall(recv, name, args) {
+    if (jvIsObj(recv)) {
+        var cls = recv["__class"]
+        if (cls !== undefined) {
+            while (jvIsObj(cls)) {
+                var m = cls[name]
+                if (jvIsCallable(m)) { return jvCallT(m, recv, jvPrepend(recv, args)) }
+                cls = cls["__super"]
+            }
+            // An accessor whose value is callable is still reachable as a method.
+            var acc = jvFindClassAcc(recv, name)
+            if (acc !== undefined) {
+                var av = jvAccGet(acc, recv)
+                if (jvIsCallable(av)) { return jvCallT(av, recv, args) }
+            }
+            fail("unknown method '" + name + "' on an instance")
+        }
+    }
+    var own = js_jsmget(recv, name)
+    if (jvIsCallable(own)) { return jvCallT(own, recv, args) }
+    fail("unknown method '" + name + "' on " + typeof recv)
+    return undefined
+}
+
+// js_jsmcall: JavaScript's String / Array / Number / Object method surface, the
+// regular-expression surface (agent C's jxMcall, asked FIRST) and the class-method
+// dispatch. A receiver none of them claims lands in jvFallbackCall.
+function js_jsmcall(recv, key, args) {
+    var name = jvStr(key)
+    var r = jxMcall(recv, name, args)
+    if (r !== jxMiss) { return r }
+    // BigInt.prototype: (255n).toString(16), (1n).valueOf().
+    if (jbIsBig(recv)) {
+        if (name == "valueOf") { return recv }
+        if (name == "toString") {
+            var radix = jvToInt(jvNumArg(args, 0, 10))
+            // The RANGE CHECK is abnf/jsrtjsbig.go's jsvBigIntMethod, and it was
+            // MEASURED missing: (255n).toString(40) answered "6f" natively where node
+            // and llvm.Run both raise. An unknown method name deliberately falls
+            // THROUGH rather than failing, because the Go twin answers (nil, false).
+            if (radix < 2 || radix > 36) { fail("RangeError: toString() radix must be between 2 and 36") }
+            if (radix === 10) { return jbStr(recv) }
+            return jvBigRadix(jbStr(recv), radix)
+        }
+    }
+    // Object.keys / values / entries / assign / freeze / fromEntries.
+    if (jvIsObjectGlobal(recv)) {
+        var og = jvObjectGlobalMethod(name, args)
+        if (og !== jvMiss) { return og }
+        return jvFallbackCall(recv, name, args)
+    }
+    // String.fromCharCode on the `String` global (a function value, so js_get finds
+    // no member of that name and the call lands here).
+    if (recv === jvStringFn) {
+        if (name == "fromCharCode") {
+            var out = ""
+            var i = 0
+            while (i < args.length) {
+                out = out + String.fromCharCode(jvToInt(jvToNumber(args[i])))
+                i = i + 1
+            }
+            return out
+        }
+        fail("unknown String method: " + name)
+    }
+    if (typeof recv == "string") {
+        var sm = jvStrMethod(recv, name, args)
+        if (sm !== jvMiss) { return sm }
+    }
+    if (Array.isArray(recv)) {
+        var am = jvArrMethod(recv, name, args)
+        if (am !== jvMiss) { return am }
+    }
+    if (typeof recv == "number") {
+        var nm = jvNumMethod(recv, name, args)
+        if (nm !== jvMiss) { return nm }
+    }
+    return jvFallbackCall(recv, name, args)
+}
+
+// ##########################################################################
+// # LAYER 2, PART B - BIGINT and the arithmetic operators (abnf/jsrtjsbig.go)
+// ##########################################################################
+
+// ===========================================================================
+// BigInt and the arithmetic operators - layer 2's port of abnf/jsrtjsbig.go.
+//
+// THE REPRESENTATION
+//
+//     {__bigint: 1, s: -1|0|1, d: [limb, ...], t: "<cached decimal>"}
+//
+// magnitude little endian in base 2^24, no leading zero limb, so s is 0 exactly
+// when d is empty. 24 bits is the widest limb whose SQUARE (2^48) plus carries
+// still lands exactly in a double, which is what makes the schoolbook multiply
+// correct with no 64-bit help. This is languages/js-interpreter.abnf's shape
+// (its "BigInt" section) function for function, so the interpreter and the
+// compiled binary answer alike; abnf/jsrtjsbig.go's math/big is the third twin.
+//
+// INTERNING, and it is not an optimisation - it is the ONLY way `10n === 10n`
+// can hold. `===` lowers to js_seq, the C FLOOR's own extern, and the floor's
+// strict_eq has no BigInt case: for a tag 6 object it falls through to
+//     return a == b;             /* identity for everything else */
+// so two structurally equal BigInts would compare false. jbIntern keeps ONE
+// canonical object per value in a 251-bucket table, which turns identity into
+// value equality for free. abnf/jsrt.go's strictEq has a *jsBigInt case
+// instead, so the two halves agree without the floor having to change.
+//
+// WHAT INTERNING CANNOT REACH is written up at the end of this file: the C
+// floor's type_of, truthy and js_neg have no BigInt case either, and unlike
+// strict_eq they cannot be bent from layer 2.
+// ===========================================================================
+
+var jbBASE = 16777216
+var jbMASK = 16777215
+var jbDIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+// The strict rules are ARMED by a BigInt literal (js_jsbigint) or by BigInt(v),
+// exactly as abnf/jsrtjsbig.go's `strict` bool is: until a program evaluates
+// one, every wrapper below is a straight pass-through to the plain operator, so
+// python-to-llvm-ir.abnf's doubles keep the behaviour they had.
+var jbStrict = false
+
+// The miss sentinel of the cross-file seams. jbAdd / jbEq / jbCmp / jbMcall
+// answer it when they do not claim the call; it is `undefined`, which none of
+// them can produce as a real answer.
+var jbMiss = undefined
+
+var jbPool = []
+
+// ----------------------------------------------------- the interning table -
+
+function jbHash(s, d) {
+    var h = s + 2
+    h = h * 31 + d.length
+    if (d.length > 0) { h = h * 31 + d[0] }
+    if (d.length > 1) { h = h * 31 + d[d.length - 1] }
+    if (h < 0) { h = -h }
+    return h % 251
+}
+
+function jbIntern(s, d) {
+    if (jbPool.length === 0) {
+        var n = 0
+        while (n < 251) { jbPool.push([]); n = n + 1 }
+    }
+    var bucket = jbPool[jbHash(s, d)]
+    var j = 0
+    while (j < bucket.length) {
+        var c = bucket[j]
+        if (c.s === s && jbCmpD(c.d, d) === 0) { return c }
+        j = j + 1
+    }
+    var v = {__bigint: 1, s: s, d: d, t: ""}
+    bucket.push(v)
+    return v
+}
+
+function jbIsBig(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (Array.isArray(v)) { return false }
+    if (typeof v != "object") { return false }
+    return v.__bigint === 1
+}
+
+// ------------------------------------- magnitude helpers: plain limb arrays -
+
+function jbTrim(d) {
+    while (d.length > 0 && d[d.length - 1] === 0) { d.pop() }
+    return d
+}
+
+function jbCopy(d) {
+    var o = []
+    var i = 0
+    while (i < d.length) { o.push(d[i]); i = i + 1 }
+    return o
+}
+
+function jbMake(s, d) {
+    var dd = jbTrim(d)
+    var sg = s
+    if (dd.length === 0) { sg = 0 }
+    return jbIntern(sg, dd)
+}
+
+function jbZero() { return jbMake(0, []) }
+
+// The BigInt arm of unary minus, which the base file's js_jsneg reaches under
+// -exe. It is `-v.s`, NEVER `0 - v.s`: the signed-zero trap of part 3. It needs
+// no special case for zero either, because jbMake forces the sign of an empty
+// magnitude to 0, so -0n is 0n and stays the ONE interned zero.
+function jbNeg(v) { return jbMake(-v.s, jbCopy(v.d)) }
+
+// The BigInt arm of ToBoolean, which the base file's js_jsnot and
+// js_jstruthy__raw reach under -exe. 0n is the one falsy BigInt.
+function jbTruthy(v) { return v.s !== 0 }
+
+function jbCmpD(a, b) {
+    if (a.length !== b.length) {
+        if (a.length < b.length) { return -1 }
+        return 1
+    }
+    var i = a.length - 1
+    while (i >= 0) {
+        if (a[i] !== b[i]) {
+            if (a[i] < b[i]) { return -1 }
+            return 1
+        }
+        i = i - 1
+    }
+    return 0
+}
+
+function jbAddD(a, b) {
+    var out = []
+    var carry = 0
+    var n = a.length
+    if (b.length > n) { n = b.length }
+    var i = 0
+    while (i < n) {
+        var s = carry
+        if (i < a.length) { s = s + a[i] }
+        if (i < b.length) { s = s + b[i] }
+        if (s >= jbBASE) { out.push(s - jbBASE); carry = 1 } else { out.push(s); carry = 0 }
+        i = i + 1
+    }
+    if (carry > 0) { out.push(carry) }
+    return out
+}
+
+// Requires |a| >= |b|; the signed layer picks the operands so that it holds.
+function jbSubD(a, b) {
+    var out = []
+    var borrow = 0
+    var i = 0
+    while (i < a.length) {
+        var s = a[i] - borrow
+        if (i < b.length) { s = s - b[i] }
+        if (s < 0) { s = s + jbBASE; borrow = 1 } else { borrow = 0 }
+        out.push(s)
+        i = i + 1
+    }
+    return jbTrim(out)
+}
+
+// Schoolbook multiply. The carry is folded INSIDE the inner loop, so the widest
+// intermediate is (B-1)^2 + 2(B-1) < 2^48 and stays exact in a double; a version
+// that accumulated a whole column first would not.
+function jbMulD(a, b) {
+    if (a.length === 0 || b.length === 0) { return [] }
+    var out = []
+    var z = 0
+    while (z < a.length + b.length) { out.push(0); z = z + 1 }
+    var i = 0
+    while (i < a.length) {
+        var carry = 0
+        var ai = a[i]
+        var j = 0
+        while (j < b.length) {
+            var t = out[i + j] + ai * b[j] + carry
+            carry = Math.floor(t / jbBASE)
+            out[i + j] = t - carry * jbBASE
+            j = j + 1
+        }
+        var k = i + b.length
+        while (carry > 0) {
+            var t2 = out[k] + carry
+            carry = Math.floor(t2 / jbBASE)
+            out[k] = t2 - carry * jbBASE
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return jbTrim(out)
+}
+
+function jbMulSmallD(a, m) {
+    var out = []
+    var carry = 0
+    var i = 0
+    while (i < a.length) {
+        var t = a[i] * m + carry
+        carry = Math.floor(t / jbBASE)
+        out.push(t - carry * jbBASE)
+        i = i + 1
+    }
+    while (carry > 0) {
+        var c2 = Math.floor(carry / jbBASE)
+        out.push(carry - c2 * jbBASE)
+        carry = c2
+    }
+    return jbTrim(out)
+}
+
+// m must be <= 2^24 so that rem * jbBASE + limb stays below 2^48.
+function jbDivModSmallD(a, m) {
+    var q = []
+    var z = 0
+    while (z < a.length) { q.push(0); z = z + 1 }
+    var rem = 0
+    var i = a.length - 1
+    while (i >= 0) {
+        var cur = rem * jbBASE + a[i]
+        var dv = Math.floor(cur / m)
+        q[i] = dv
+        rem = cur - dv * m
+        i = i - 1
+    }
+    return {q: jbTrim(q), r: rem}
+}
+
+function jbTopBits(x) {
+    var n = 0
+    var v = x
+    while (v > 0) { n = n + 1; v = Math.floor(v / 2) }
+    return n
+}
+
+function jbBitsD(d) {
+    if (d.length === 0) { return 0 }
+    return (d.length - 1) * 24 + jbTopBits(d[d.length - 1])
+}
+
+function jbBitD(a, k) {
+    var i = Math.floor(k / 24)
+    if (i >= a.length) { return 0 }
+    return (a[i] >> (k - i * 24)) & 1
+}
+
+function jbShl1D(a) {
+    var out = []
+    var carry = 0
+    var i = 0
+    while (i < a.length) {
+        var t = a[i] * 2 + carry
+        if (t >= jbBASE) { out.push(t - jbBASE); carry = 1 } else { out.push(t); carry = 0 }
+        i = i + 1
+    }
+    if (carry > 0) { out.push(carry) }
+    return out
+}
+
+// Division of magnitudes. A single limb divisor takes the O(n) path; anything
+// wider goes through plain binary long division, which is O(bits x limbs) and
+// needs none of Knuth D's quotient-digit estimation.
+function jbDivModD(a, b) {
+    if (jbCmpD(a, b) < 0) { return {q: [], r: jbCopy(a)} }
+    if (b.length === 1) {
+        var s = jbDivModSmallD(a, b[0])
+        var rr = []
+        if (s.r !== 0) { rr.push(s.r) }
+        return {q: s.q, r: rr}
+    }
+    var nbits = jbBitsD(a)
+    var q = []
+    var z = 0
+    while (z < a.length) { q.push(0); z = z + 1 }
+    var r = []
+    var k = nbits - 1
+    while (k >= 0) {
+        r = jbShl1D(r)
+        if (jbBitD(a, k) === 1) {
+            if (r.length === 0) { r.push(1) } else { r[0] = r[0] + 1 }
+        }
+        if (jbCmpD(r, b) >= 0) {
+            r = jbSubD(r, b)
+            var qi = Math.floor(k / 24)
+            q[qi] = q[qi] + (1 << (k - qi * 24))
+        }
+        k = k - 1
+    }
+    return {q: jbTrim(q), r: jbTrim(r)}
+}
+
+// ------------------------------------------------------ the signed operators -
+
+function jbAddB(a, b) {
+    if (a.s === 0) { return b }
+    if (b.s === 0) { return a }
+    if (a.s === b.s) { return jbMake(a.s, jbAddD(a.d, b.d)) }
+    var c = jbCmpD(a.d, b.d)
+    if (c === 0) { return jbZero() }
+    if (c > 0) { return jbMake(a.s, jbSubD(a.d, b.d)) }
+    return jbMake(b.s, jbSubD(b.d, a.d))
+}
+
+function jbSubB(a, b) { return jbAddB(a, jbNeg(b)) }
+
+function jbMulB(a, b) {
+    if (a.s === 0 || b.s === 0) { return jbZero() }
+    return jbMake(a.s * b.s, jbMulD(a.d, b.d))
+}
+
+// BigInt division TRUNCATES toward zero and the remainder takes the sign of the
+// dividend, so -7n / 2n is -3n and -7n % 3n is -1n (node agrees).
+function jbDivB(a, b) {
+    if (b.s === 0) { fail("RangeError: Division by zero") }
+    return jbMake(a.s * b.s, jbDivModD(a.d, b.d).q)
+}
+
+function jbRemB(a, b) {
+    if (b.s === 0) { fail("RangeError: Division by zero") }
+    return jbMake(a.s, jbDivModD(a.d, b.d).r)
+}
+
+// -1 / 0 / 1 for two BigInts.
+function jbCmpB(a, b) {
+    if (a.s !== b.s) {
+        if (a.s < b.s) { return -1 }
+        return 1
+    }
+    if (a.s === 0) { return 0 }
+    var c = jbCmpD(a.d, b.d)
+    if (a.s > 0) { return c }
+    return -c
+}
+
+function jbPowB(a, e) {
+    if (e.s < 0) { fail("RangeError: Exponent must be non-negative") }
+    var r = jbFromNum(1)
+    var base = a
+    var nbits = jbBitsD(e.d)
+    if (nbits > 32) { fail("RangeError: BigInt exponent is too large") }
+    var k = 0
+    while (k < nbits) {
+        if (jbBitD(e.d, k) === 1) { r = jbMulB(r, base) }
+        if (k + 1 < nbits) { base = jbMulB(base, base) }
+        k = k + 1
+    }
+    return r
+}
+
+function jbShlB(a, k) {
+    if (a.s === 0 || k === 0) { return a }
+    if (k < 0) { return jbShrB(a, -k) }
+    if (k > 1048576) { fail("RangeError: BigInt shift count is too large") }
+    var d = jbCopy(a.d)
+    var limbs = Math.floor(k / 24)
+    var bits = k - limbs * 24
+    if (bits > 0) { d = jbMulSmallD(d, Math.pow(2, bits)) }
+    var out = []
+    var i = 0
+    while (i < limbs) { out.push(0); i = i + 1 }
+    var j = 0
+    while (j < d.length) { out.push(d[j]); j = j + 1 }
+    return jbMake(a.s, out)
+}
+
+// >> on a BigInt is an ARITHMETIC (floor) shift, so -1n >> 1n is -1n, not 0n:
+// a negative value that lost any bit rounds away from zero by one.
+function jbShrB(a, k) {
+    if (a.s === 0 || k === 0) { return a }
+    if (k < 0) { return jbShlB(a, -k) }
+    if (k > 1048576) { fail("RangeError: BigInt shift count is too large") }
+    var limbs = Math.floor(k / 24)
+    var bits = k - limbs * 24
+    var lost = false
+    var d = []
+    var i = 0
+    while (i < limbs && i < a.d.length) {
+        if (a.d[i] !== 0) { lost = true }
+        i = i + 1
+    }
+    var j = limbs
+    while (j < a.d.length) { d.push(a.d[j]); j = j + 1 }
+    if (bits > 0) {
+        var s = jbDivModSmallD(d, Math.pow(2, bits))
+        if (s.r !== 0) { lost = true }
+        d = s.q
+    }
+    d = jbTrim(d)
+    if (a.s < 0 && lost) { d = jbAddD(d, [1]) }
+    if (d.length === 0) {
+        if (a.s < 0) { return jbFromNum(-1) }
+        return jbZero()
+    }
+    return jbMake(a.s, d)
+}
+
+// & | ^ are defined on the infinite two's complement bit string. One extra limb
+// of sign extension is enough for any pair, because the sign of the result is
+// decided by the operator applied to the two sign bits.
+function jbTwos(v, w) {
+    var out = []
+    var i = 0
+    while (i < w) {
+        if (i < v.d.length) { out.push(v.d[i]) } else { out.push(0) }
+        i = i + 1
+    }
+    if (v.s < 0) {
+        var carry = 1
+        var j = 0
+        while (j < w) {
+            var t = (jbMASK - out[j]) + carry
+            if (t >= jbBASE) { out[j] = t - jbBASE; carry = 1 } else { out[j] = t; carry = 0 }
+            j = j + 1
+        }
+    }
+    return out
+}
+
+function jbFromTwos(limbs, neg) {
+    if (!neg) { return jbMake(1, limbs) }
+    var out = []
+    var carry = 1
+    var i = 0
+    while (i < limbs.length) {
+        var t = (jbMASK - limbs[i]) + carry
+        if (t >= jbBASE) { out.push(t - jbBASE); carry = 1 } else { out.push(t); carry = 0 }
+        i = i + 1
+    }
+    return jbMake(-1, out)
+}
+
+function jbBitOp(op, a, b) {
+    var w = a.d.length
+    if (b.d.length > w) { w = b.d.length }
+    w = w + 1
+    var x = jbTwos(a, w)
+    var y = jbTwos(b, w)
+    var out = []
+    var i = 0
+    while (i < w) {
+        if (op === "&") { out.push(x[i] & y[i]) }
+        else if (op === "|") { out.push(x[i] | y[i]) }
+        else { out.push(x[i] ^ y[i]) }
+        i = i + 1
+    }
+    var an = a.s < 0
+    var bn = b.s < 0
+    var neg = false
+    if (op === "&") { neg = an && bn }
+    else if (op === "|") { neg = an || bn }
+    else { neg = an !== bn }
+    return jbFromTwos(out, neg)
+}
+
+// ~x is exactly -x - 1 in every precision, so it needs no bit machinery at all.
+function jbNotB(a) { return jbSubB(jbNeg(a), jbFromNum(1)) }
+
+// ---------------------------------------------------------- conversions ----
+
+function jbFromNum(n) {
+    if (n !== n) { fail("RangeError: cannot convert NaN to a BigInt") }
+    if (n === Infinity || n === -Infinity) { fail("RangeError: cannot convert Infinity to a BigInt") }
+    if (Math.floor(n) !== n) { fail("RangeError: The number " + n + " cannot be converted to a BigInt because it is not an integer") }
+    if (n === 0) { return jbZero() }
+    var neg = n < 0
+    var a = n
+    if (neg) { a = -n }
+    var d = []
+    while (a > 0) {
+        var q = Math.floor(a / jbBASE)
+        d.push(a - q * jbBASE)
+        a = q
+    }
+    if (neg) { return jbMake(-1, d) }
+    return jbMake(1, d)
+}
+
+// The double a BigInt denotes - exact up to 2^53, the nearest double above it.
+function jbToNum(v) {
+    var a = 0
+    var i = v.d.length - 1
+    while (i >= 0) { a = a * jbBASE + v.d[i]; i = i - 1 }
+    if (v.s < 0) { return -a }
+    return a
+}
+
+// Reads a digit run in the given radix: an optional sign, '_' separators
+// skipped, and the scan stops at the first character that is not a digit of the
+// radix. Digits go in CHUNKS so the big multiply runs once per 24 bits of input
+// rather than once per digit.
+function jbFromDigits(src, radix) {
+    var s = "" + src
+    var d = []
+    var neg = false
+    var i = 0
+    if (i < s.length) {
+        var c0 = s.charAt(i)
+        if (c0 === "-" || c0 === "+") {
+            neg = c0 === "-"
+            i = i + 1
+        }
+    }
+    var chunk = 1
+    var chunkN = 0
+    while (chunk * radix <= jbBASE) { chunk = chunk * radix; chunkN = chunkN + 1 }
+    var acc = 0
+    var accN = 0
+    var stop = false
+    while (i < s.length && !stop) {
+        var cc = s.charCodeAt(i)
+        if (cc !== 95) {
+            var dg = 99
+            if (cc >= 48 && cc <= 57) { dg = cc - 48 }
+            else if (cc >= 97 && cc <= 122) { dg = cc - 87 }
+            else if (cc >= 65 && cc <= 90) { dg = cc - 55 }
+            if (dg >= radix) {
+                stop = true
+            } else {
+                acc = acc * radix + dg
+                accN = accN + 1
+                if (accN === chunkN) {
+                    d = jbTrim(jbAddD(jbMulSmallD(d, chunk), [acc]))
+                    acc = 0
+                    accN = 0
+                }
+            }
+        }
+        if (!stop) { i = i + 1 }
+    }
+    if (accN > 0) {
+        var m = 1
+        var k = 0
+        while (k < accN) { m = m * radix; k = k + 1 }
+        d = jbTrim(jbAddD(jbMulSmallD(d, m), [acc]))
+    }
+    if (neg) { return jbMake(-1, d) }
+    return jbMake(1, d)
+}
+
+function jbToStr(v, radix) {
+    if (v.s === 0) { return "0" }
+    var chunk = 1
+    var chunkN = 0
+    while (chunk * radix <= jbBASE) { chunk = chunk * radix; chunkN = chunkN + 1 }
+    var parts = []
+    var d = jbCopy(v.d)
+    while (d.length > 0) {
+        var m = jbDivModSmallD(d, chunk)
+        d = m.q
+        parts.push(m.r)
+    }
+    var out = ""
+    var i = parts.length - 1
+    while (i >= 0) {
+        var piece = ""
+        var x = parts[i]
+        while (x > 0) {
+            var q = Math.floor(x / radix)
+            piece = jbDIGITS.charAt(x - q * radix) + piece
+            x = q
+        }
+        if (piece === "") { piece = "0" }
+        if (i < parts.length - 1) {
+            while (piece.length < chunkN) { piece = "0" + piece }
+        }
+        out = out + piece
+        i = i - 1
+    }
+    if (v.s < 0) { return "-" + out }
+    return out
+}
+
+// The seam agent A's jvStr calls FIRST: a BigInt prints as its digits with no
+// 'n' suffix, so String(10n) is "10". The decimal text is cached on the value,
+// which is safe precisely because the value is interned and immutable.
+function jbStr(v) {
+    if (v.t === "") { v.t = jbToStr(v, 10) }
+    return v.t
+}
+
+// The whitespace StringToBigInt trims. \v is 11 and \f is 12; 0xa0 is NBSP and
+// 0xfeff the BOM, both of which node's trim removes too.
+function jbIsSpace(cc) {
+    if (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) { return true }
+    if (cc === 160 || cc === 65279) { return true }
+    return false
+}
+
+function jbTrimStr(s) {
+    var a = 0
+    var b = s.length
+    while (a < b && jbIsSpace(s.charCodeAt(a))) { a = a + 1 }
+    while (b > a && jbIsSpace(s.charCodeAt(b - 1))) { b = b - 1 }
+    return s.substring(a, b)
+}
+
+// StringToBigInt: the WHOLE string must be an integer literal (with an optional
+// sign and an optional 0x/0b/0o prefix), otherwise the conversion has no value
+// at all - which is how `1n == "1.0"` comes out false in node while
+// `1n == "1"` is true. An empty (or blank) string is 0n. Answers null on a
+// string with no value.
+function jbFromStrStrict(src) {
+    var s = jbTrimStr("" + src)
+    if (s === "") { return jbZero() }
+    var sign = ""
+    var body = s
+    var c0 = body.charAt(0)
+    if (c0 === "-" || c0 === "+") {
+        sign = c0
+        body = body.substring(1, body.length)
+    }
+    var radix = 10
+    if (body.length > 2 && body.charAt(0) === "0") {
+        var p = body.charAt(1)
+        if (p === "x" || p === "X") { radix = 16 }
+        else if (p === "b" || p === "B") { radix = 2 }
+        else if (p === "o" || p === "O") { radix = 8 }
+        if (radix !== 10) {
+            if (sign !== "") { return null }
+            body = body.substring(2, body.length)
+        }
+    }
+    if (body.length === 0) { return null }
+    var i = 0
+    while (i < body.length) {
+        var cc = body.charCodeAt(i)
+        var dg = 99
+        if (cc >= 48 && cc <= 57) { dg = cc - 48 }
+        else if (cc >= 97 && cc <= 122) { dg = cc - 87 }
+        else if (cc >= 65 && cc <= 90) { dg = cc - 55 }
+        if (dg >= radix) { return null }
+        i = i + 1
+    }
+    return jbFromDigits(sign + body, radix)
+}
+
+// ToBigInt, the conversion the BigInt(v) global performs.
+function jbOf(v) {
+    if (jbIsBig(v)) { return v }
+    if (typeof v == "boolean") {
+        if (v) { return jbFromNum(1) }
+        return jbFromNum(0)
+    }
+    if (typeof v == "string") {
+        var r = jbFromStrStrict(v)
+        if (r === null) { fail("SyntaxError: Cannot convert " + v + " to a BigInt") }
+        return r
+    }
+    if (typeof v == "number") { return jbFromNum(v) }
+    fail("TypeError: Cannot convert " + jvStr(v) + " to a BigInt")
+    return jbZero()
+}
+
+// ------------------------------------------------- the mixed-operand rule ---
+
+function jbMixFail(op) {
+    fail("TypeError: Cannot mix BigInt and other types, use explicit conversions (operator '" + op + "')")
+    return undefined
+}
+
+// The BigInt arm of a binary operator, or jbMiss when NEITHER operand is one.
+// When exactly one is, the spec's mixed-operand TypeError is raised instead.
+function jbBinary(op, l, r) {
+    var lb = jbIsBig(l)
+    var rb = jbIsBig(r)
+    if (!lb && !rb) { return jbMiss }
+    if (!lb || !rb) { return jbMixFail(op) }
+    if (op === "+") { return jbAddB(l, r) }
+    if (op === "-") { return jbSubB(l, r) }
+    if (op === "*") { return jbMulB(l, r) }
+    if (op === "/") { return jbDivB(l, r) }
+    if (op === "%") { return jbRemB(l, r) }
+    if (op === "**") { return jbPowB(l, r) }
+    if (op === "&") { return jbBitOp("&", l, r) }
+    if (op === "|") { return jbBitOp("|", l, r) }
+    if (op === "^") { return jbBitOp("^", l, r) }
+    if (op === "<<") { return jbShlB(l, jbToNum(r)) }
+    if (op === ">>") { return jbShrB(l, jbToNum(r)) }
+    if (op === ">>>") { fail("TypeError: BigInts have no unsigned right shift, use >> instead") }
+    return jbMiss
+}
+
+// =================================================== the cross-file seams ===
+//
+// jbIsBig and jbStr are above. The three below answer jbMiss (undefined) when
+// they do not claim the operand pair, which is the same protocol jxMcall uses:
+//
+//     var r = jbAdd(a, b)
+//     if (r !== jbMiss) { return r }
+//
+// Each of them runs jvToPrimitive itself, so agent A may hand over the RAW
+// operands; ToPrimitive is idempotent on a primitive, so calling it first does
+// no harm either. Running it FIRST is what makes `1n == [1n]` true in node: the
+// array stringifies to "1" and StringToBigInt reads it back.
+
+// The BigInt arm of '+'. '+' is the one arithmetic operator a BigInt shares
+// with strings, so string concatenation is settled BEFORE the mixed-operand
+// rule can fire: `1n + []` is the string "1", not a TypeError.
+function jbAdd(l, r) {
+    if (!jbIsBig(l) && !jbIsBig(r)) { return jbMiss }
+    var lp = jvToPrimitive(l)
+    var rp = jvToPrimitive(r)
+    // The concatenation is finished HERE rather than handed back as a miss: once
+    // either operand is a BigInt this arm owns the answer, and a caller that
+    // treats every jbAdd result as final (agent A's js_jsadd does) would
+    // otherwise turn `"" + 10n` into undefined.
+    if (typeof lp == "string" || typeof rp == "string") { return jvStr(lp) + jvStr(rp) }
+    return jbBinary("+", lp, rp)
+}
+
+// The BigInt arm of '=='. It compares MATHEMATICALLY across the type line:
+// 1n == 1 and 1n == "1" hold, 1n == "1.0" does not.
+function jbEq(a, b) {
+    var ap = jvToPrimitive(a)
+    var bp = jvToPrimitive(b)
+    var abig = jbIsBig(ap)
+    var bbig = jbIsBig(bp)
+    if (!abig && !bbig) { return jbMiss }
+    if (abig && bbig) { return jbCmpB(ap, bp) === 0 }
+    var n = ap
+    var other = bp
+    if (!abig) { n = bp; other = ap }
+    if (typeof other == "string") {
+        var p = jbFromStrStrict(other)
+        if (p === null) { return false }
+        return jbCmpB(n, p) === 0
+    }
+    if (typeof other == "boolean") {
+        if (other) { return jbCmpB(n, jbFromNum(1)) === 0 }
+        return jbCmpB(n, jbFromNum(0)) === 0
+    }
+    if (typeof other == "number") {
+        if (other !== other) { return false }
+        if (other === Infinity || other === -Infinity) { return false }
+        if (Math.floor(other) !== other) { return false }
+        return jbCmpB(n, jbFromNum(other)) === 0
+    }
+    return false
+}
+
+// One relational operand as a double: a BigInt through its value, a string
+// through parseFloat (NaN makes every relation false), anything else through
+// the floor's ToNumber.
+function jbRelNum(v) {
+    if (jbIsBig(v)) { return jbToNum(v) }
+    if (typeof v == "string") {
+        if (jbTrimStr(v) === "") { return 0 }
+        return parseFloat(v)
+    }
+    if (typeof v == "boolean") {
+        if (v) { return 1 }
+        return 0
+    }
+    if (v === null) { return 0 }
+    if (v === undefined) { return NaN }
+    return v - 0
+}
+
+// The relational ordering with a BigInt on at least one side: -1 / 0 / 1, or 2
+// when NaN was involved. Two BigInts compare exactly; a BigInt against a number
+// goes through the double value, the one place a value past 2^53 could round -
+// languages/js-interpreter.abnf's biRel does the same, so both halves agree.
+function jbCmp(a, b) {
+    var ap = jvToPrimitive(a)
+    var bp = jvToPrimitive(b)
+    var abig = jbIsBig(ap)
+    var bbig = jbIsBig(bp)
+    if (!abig && !bbig) { return jbMiss }
+    if (abig && bbig) { return jbCmpB(ap, bp) }
+    var af = jbRelNum(ap)
+    var bf = jbRelNum(bp)
+    if (af !== af || bf !== bf) { return 2 }
+    if (af < bf) { return -1 }
+    if (af > bf) { return 1 }
+    return 0
+}
+
+// BigInt.prototype: toString([radix]) and valueOf, the two that make sense
+// without a wrapper object (abnf/jsrtjsbig.go's jsvBigIntMethod). Agent A's
+// js_jsmcall must offer every call to this before it decides the receiver has
+// no such method - it answers jbMiss when the receiver is not a BigInt.
+function jbMcall(recv, name, args) {
+    if (!jbIsBig(recv)) { return jbMiss }
+    if (name === "toString") {
+        var radix = 10
+        if (args.length > 0 && args[0] !== undefined) { radix = Math.floor(args[0] - 0) }
+        if (radix < 2 || radix > 36) { fail("RangeError: toString() radix must be between 2 and 36") }
+        return jbToStr(recv, radix)
+    }
+    if (name === "valueOf") { return recv }
+    if (name === "toLocaleString") { return jbStr(recv) }
+    fail("TypeError: " + jbStr(recv) + "n." + name + " is not a function")
+    return jbMiss
+}
+
+// ======================================================= the js_* externs ===
+
+// The BigInt literal of languages/js-to-llvm-ir.abnf. The grammar's makeBigInt
+// has already dropped the '_' separators and the trailing 'n' but KEPT the
+// 0x/0b/0o prefix, which is read here. It differs from the shared js_bigint
+// only in arming the strict rules.
+function js_jsbigint(src) {
+    jbStrict = true
+    var body = "" + src
+    var radix = 10
+    if (body.length > 1 && body.charAt(0) === "0") {
+        var p = body.charAt(1)
+        if (p === "x" || p === "X") { radix = 16 }
+        else if (p === "b" || p === "B") { radix = 2 }
+        else if (p === "o" || p === "O") { radix = 8 }
+        if (radix !== 10) { body = body.substring(2, body.length) }
+    }
+    return jbFromDigits(body, radix)
+}
+
+// The BigInt(v) global, declared into the program scope by the grammar the way
+// String / Object / println already are.
+function js_jsbigintfn() {
+    return function(v) {
+        if (v === undefined) { fail("TypeError: Cannot convert undefined to a BigInt") }
+        jbStrict = true
+        return jbOf(v)
+    }
+}
+
+// Number(v): the only way back OUT of a BigInt, since unary '+' refuses it.
+function js_jsnumberfn() {
+    return function(v) {
+        if (jbIsBig(v)) { return jbToNum(v) }
+        if (v === undefined) { return NaN }
+        return jvToNumber(v)
+    }
+}
+
+// Unary '+' is the ONE operator a BigInt refuses outright: there is no number
+// to coerce it to without losing precision.
+function js_jstonumber(v) {
+    if (jbStrict && jbIsBig(v)) { fail("TypeError: Cannot convert a BigInt value to a number") }
+    return v - 0
+}
+
+// ++ and -- are ToNumeric-then-step: a BigInt stays a BigInt and steps by 1n,
+// everything else becomes a number and steps by 1. js_jstonumeric answers the
+// value ++ reports (the OLD one, for the postfix form) and js_jsstep applies
+// the delta to it.
+function js_jstonumeric(v) {
+    if (jbStrict && jbIsBig(v)) { return v }
+    return v - 0
+}
+
+function js_jsstep(v, d) {
+    if (jbStrict && jbIsBig(v)) { return jbAddB(v, jbFromNum(d - 0)) }
+    return (v - 0) + (d - 0)
+}
+
+// ~x on a BigInt is exactly -x - 1 in arbitrary precision. The grammar used to
+// lower it to `x ^ -1` on the shared xor, which the mixed-operand rule would
+// now (correctly) refuse, so it gets an external of its own.
+function js_jsbnot(a) {
+    if (jbStrict && jbIsBig(a)) { return jbNotB(a) }
+    return ~a
+}
+
+// The binary arithmetic and bitwise operators. The NON-BigInt arm of each is
+// the plain MetaJS operator, which compiles to the C floor's own extern -
+// `return a * b` IS js_mul - so a program with no BigInt in it gets bit for bit
+// the answer it got before.
+
+function js_jssub(a, b) {
+    if (jbStrict) {
+        var r = jbBinary("-", a, b)
+        if (r !== jbMiss) { return r }
+    }
+    return a - b
+}
+
+function js_jsmul(a, b) {
+    if (jbStrict) {
+        var r = jbBinary("*", a, b)
+        if (r !== jbMiss) { return r }
+    }
+    return a * b
+}
+
+function js_jsdiv(a, b) {
+    if (jbStrict) {
+        var r = jbBinary("/", a, b)
+        if (r !== jbMiss) { return r }
+    }
+    return a / b
+}
+
+function js_jsmod(a, b) {
+    if (jbStrict) {
+        var r = jbBinary("%", a, b)
+        if (r !== jbMiss) { return r }
+    }
+    return a % b
+}
+
+function js_jsband(a, b) {
+    if (jbStrict) {
+        var r = jbBinary("&", a, b)
+        if (r !== jbMiss) { return r }
+    }
+    return a & b
+}
+
+function js_jsbor(a, b) {
+    if (jbStrict) {
+        var r = jbBinary("|", a, b)
+        if (r !== jbMiss) { return r }
+    }
+    return a | b
+}
+
+function js_jsbxor(a, b) {
+    if (jbStrict) {
+        var r = jbBinary("^", a, b)
+        if (r !== jbMiss) { return r }
+    }
+    return a ^ b
+}
+
+function js_jsshl(a, b) {
+    if (jbStrict) {
+        var r = jbBinary("<<", a, b)
+        if (r !== jbMiss) { return r }
+    }
+    return a << b
+}
+
+function js_jsshr(a, b) {
+    if (jbStrict) {
+        var r = jbBinary(">>", a, b)
+        if (r !== jbMiss) { return r }
+    }
+    return a >> b
+}
+
+function js_jsushr(a, b) {
+    if (jbStrict) {
+        var r = jbBinary(">>>", a, b)
+        if (r !== jbMiss) { return r }
+    }
+    return a >>> b
+}
+
+// '**' has no shared external: it lowers to Math.pow, which only has doubles.
+// The double arm below IS Math.pow over ToNumber.
+function js_jspow(a, b) {
+    if (jbStrict) {
+        var r = jbBinary("**", a, b)
+        if (r !== jbMiss) { return r }
+    }
+    return Math.pow(a - 0, b - 0)
+}
+
+// ##########################################################################
+// # LAYER 2, PART C - REGULAR EXPRESSIONS (abnf/jsrtregexjs.go over lib/regex.js)
+// ##########################################################################
+
+// ===================================================== regular expressions ==
+//
+// The JavaScript / TypeScript half of the shared regular-expression subsystem, in
+// MetaJS. The authoritative specification is abnf/jsrtregexjs.go (575 lines) on top
+// of abnf/jsrtregex.go (2164 lines); this file matches jsrtregexjs.go function for
+// function, and it does NOT restate the engine.
+//
+// ----- the engine is IMPORTED, not copied ------------------------------------
+//
+// languages/lib/regex.js is the shared backtracking engine that every INTERPRETER
+// grammar includes into its tag script, and abnf/jsrtregex.go is its line-by-line
+// Go port. It is already written in the MetaJS subset - languages/lib/ruby-rt.metajs
+// imports it exactly like this - so layer 2 needs no third copy. `import "./regex.js"`
+// compiles it into js-rt.ll with everything else, and the whole parser + backtracking
+// VM (rxCompile / rxSearch / rxMatchAt / rxGroup / rxReplace) costs this file nothing.
+//
+// The names below are the jsx* helpers of abnf/jsrtregexjs.go, renamed to the jx
+// prefix this file owns. rx* is the engine's own prefix and comes from the import.
+//
+// ----- positions --------------------------------------------------------------
+//
+// abnf/jsrtregexjs.go indexes RUNES; regex.js indexes UTF-16 code units, because its
+// `text` is a plain string. The two agree over the whole Basic Multilingual Plane,
+// which is every test in this tree, and it is the same trade languages/lib/ruby-rt.metajs
+// already makes.
+
+import "./regex.js"
+
+// ----- flags ------------------------------------------------------------------
+//
+// Three of JavaScript's letters are match modes and map straight onto the engine's
+// neutral set: i (fold case), s (dot matches newline) and m (^ and $ are line
+// anchors). Unlike Ruby, 'm' must NOT be forced on - without it JavaScript's ^ and $
+// are string anchors. g (lastIndex iteration), y (sticky), d (hasIndices), u and v
+// (the strict parse-time grammar, checked by the ReStrictU guard in the grammar) are
+// not match modes at all.
+
+function jxHasFlag(flags, letter) {
+    var i = 0
+    while (i < flags.length) {
+        if (flags.charAt(i) == letter) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// jxCanonFlags is RegExp#flags: the canonical order, not the written one.
+function jxCanonFlags(flags) {
+    var order = "dgimsuvy"
+    var out = ""
+    var i = 0
+    while (i < order.length) {
+        var c = order.charAt(i)
+        if (jxHasFlag(flags, c)) { out = out + c }
+        i = i + 1
+    }
+    return out
+}
+
+// jxNeutral maps them onto the engine's letters.
+//
+// "o" is unconditional: in a non-unicode pattern a backslash-digit escape with no
+// such group is a LEGACY OCTAL character escape (Annex B), not a backreference -
+// /\1/.test("") is false in node because \1 is U+0001. Under u/v that spelling is a
+// SyntaxError, which the ReStrictU parse guard already refuses before anything
+// reaches the engine.
+// "j" is unconditional too: JavaScript has the POSIX-style loop reading. An iteration
+// of an unbounded repeat that consumed nothing is DISCARDED rather than kept, so
+// /^(a*)*$/.exec("aaa") reports "aaa" for group 1 (node), not "" (Perl, Python, Ruby,
+// Java). It also clears the captures inside a repeated atom at the start of every
+// iteration, so /(?:(a)|b)+/.exec("ab") leaves group 1 undefined.
+function jxNeutral(flags) {
+    var out = "oj"
+    if (jxHasFlag(flags, "i")) { out = out + "i" }
+    if (jxHasFlag(flags, "s")) { out = out + "s" }
+    if (jxHasFlag(flags, "m")) { out = out + "m" }
+    return out
+}
+
+// ----- the RegExp value --------------------------------------------------------
+//
+// A RegExp is an ordinary object carrying the JavaScript-visible properties plus one
+// __-prefixed slot the engine side reads (keysOf hides it, exactly as the Go twin's
+// __rx slots are hidden). lastIndex is per-OBJECT state, so a literal inside a loop
+// must build a fresh one on every evaluation - which is what the emitted js_jsxnew
+// does.
+
+var jxCache = {}     // "$<neutral flags> <pattern>" -> a compiled program
+
+function jxGetProg(pattern, flags) {
+    var key = "$" + flags + " " + pattern
+    var got = jxCache[key]
+    if (got !== undefined) { return got }
+    var re = rxCompile(pattern, flags)
+    jxCache[key] = re
+    return re
+}
+
+function jxNewRegex(src, jsFlags) {
+    var fl = jxCanonFlags(jsFlags)
+    var o = {}
+    o["__jxsrc"] = src
+    o["__jxneutral"] = jxNeutral(fl)
+    o["source"] = src
+    o["flags"] = fl
+    o["global"] = jxHasFlag(fl, "g")
+    o["sticky"] = jxHasFlag(fl, "y")
+    o["ignoreCase"] = jxHasFlag(fl, "i")
+    o["multiline"] = jxHasFlag(fl, "m")
+    o["dotAll"] = jxHasFlag(fl, "s")
+    o["unicode"] = jxHasFlag(fl, "u")
+    o["unicodeSets"] = jxHasFlag(fl, "v")
+    o["hasIndices"] = jxHasFlag(fl, "d")
+    o["lastIndex"] = 0
+    return o
+}
+
+// jxIsRe is the cross-file seam: agent A's jvStr and js_jsmcall ask this first.
+function jxIsRe(v) {
+    if (!jvIsObj(v)) { return false }
+    return v["__jxsrc"] !== undefined
+}
+
+// jxStr is RegExp#toString, which is also what String(re) and "" + re answer.
+function jxStr(v) {
+    var src = v["source"]
+    var fl = v["flags"]
+    if (typeof src != "string") { src = "" }
+    if (typeof fl != "string") { fl = "" }
+    return "/" + src + "/" + fl
+}
+
+// jxProg is the compiled program behind a RegExp value. A pattern the shared engine
+// refuses is NOT reported at construction: the engine is deliberately one permissive
+// dialect for four languages, so it rejects a few patterns JavaScript accepts
+// (lookbehind, [[:alpha:]]). The failure is raised when the pattern is actually
+// MATCHED, exactly as js-interpreter.abnf's reProgOf does.
+function jxProg(o) {
+    var src = o["__jxsrc"]
+    var fl = o["__jxneutral"]
+    if (typeof src != "string") { src = "" }
+    if (typeof fl != "string") { fl = "oj" }
+    var re = jxGetProg(src, fl)
+    if (!re["ok"]) {
+        fail("invalid regular expression: /" + src + "/: " + re["err"])
+    }
+    return re
+}
+
+function jxBool(o, key) {
+    var b = o[key]
+    if (typeof b != "boolean") { return false }
+    return b
+}
+
+function jxLastIndex(o) {
+    var f = o["lastIndex"]
+    if (typeof f != "number") { return 0 }
+    return Math.trunc(f)
+}
+
+// ----- small local conversions -------------------------------------------------
+//
+// jvStr / jvToNumber live in agent A's half of this module. The two wrappers below
+// short-circuit the case that is already the right type, which is every call the
+// regular-expression ratchet makes, and only then reach across the seam.
+
+function jxToStr(v) {
+    if (typeof v == "string") { return v }
+    return jvStr(v)
+}
+
+function jxToNum(v) {
+    if (typeof v == "number") { return v }
+    return jvToNumber(v)
+}
+
+function jxArg(args, i) {
+    if (i < args.length) { return args[i] }
+    return undefined
+}
+
+function jxNullish(v) {
+    if (v === undefined) { return true }
+    return v === null
+}
+
+// ----- the match record --------------------------------------------------------
+//
+// JavaScript models it as an Array carrying three extra properties; neither runtime
+// here allows a non-index property on an array (both report "invalid array index"),
+// so it is an array-LIKE object instead - m[0], m.length, m.index, m.input and
+// m.groups all read back, and only Array.isArray(m) tells the difference. The
+// interpreter side and abnf/jsrtregexjs.go build exactly the same shape.
+
+function jxNameAt(re, i) {
+    var names = re["names"]
+    var idx = re["nameGroups"]
+    var k = 0
+    while (k < names.length) {
+        if (idx[k] == i) { return names[k] }
+        k = k + 1
+    }
+    return ""
+}
+
+function jxResult(re, text, m, input) {
+    var o = {}
+    var n = re["ngroups"]
+    var i = 0
+    while (i <= n) {
+        var g = rxGroup(re, text, m, i)
+        if (g === null) { o["" + i] = undefined } else { o["" + i] = g }
+        i = i + 1
+    }
+    o["length"] = n + 1
+    o["index"] = m["begin"]
+    o["input"] = input
+    var groups = anytype
+    groups = undefined
+    if (re["names"].length > 0) {
+        var gg = {}
+        var j = 1
+        while (j <= n) {
+            var name = jxNameAt(re, j)
+            if (name != "") {
+                var v = rxGroup(re, text, m, j)
+                if (v === null) { gg[name] = undefined } else { gg[name] = v }
+            }
+            j = j + 1
+        }
+        groups = gg
+    }
+    o["groups"] = groups
+    return o
+}
+
+// ----- exec / test -------------------------------------------------------------
+//
+// jxExec is RegExp#exec: g and y both read the search start out of lastIndex and
+// reset it to 0 on failure, and y additionally refuses a match that does not BEGIN
+// there. Sticky is the engine's own anchored entry point: rxMatchAt tries ONE
+// position instead of searching forward and then throwing the answer away.
+
+function jxExec(o, s) {
+    var re = jxProg(o)
+    var useLast = jxBool(o, "global") || jxBool(o, "sticky")
+    var at = 0
+    if (useLast) { at = jxLastIndex(o) }
+    if (at < 0 || at > s.length) {
+        if (useLast) { o["lastIndex"] = 0 }
+        return null
+    }
+    var m = anytype
+    if (jxBool(o, "sticky")) { m = rxMatchAt(re, s, at) } else { m = rxSearch(re, s, at) }
+    if (m === null) {
+        if (useLast) { o["lastIndex"] = 0 }
+        return null
+    }
+    if (useLast) { o["lastIndex"] = m["end"] }
+    return jxResult(re, s, m, s)
+}
+
+function jxTest(o, s) {
+    if (jxBool(o, "global") || jxBool(o, "sticky")) { return jxExec(o, s) !== null }
+    return rxSearch(jxProg(o), s, 0) !== null
+}
+
+// jxMatchAll walks every match. whole=true collects just the matched text
+// (String#match with g), whole=false the full match records (String#matchAll).
+// JavaScript's matchAll hands back an iterator; this hands back the array a spread
+// would build, which is what a for-of over it needs anyway - the interpreter and the
+// Go twin do the same.
+function jxMatchAll(o, s, whole) {
+    var re = jxProg(o)
+    var out = []
+    var at = 0
+    while (at <= s.length) {
+        var m = rxSearch(re, s, at)
+        if (m === null) { break }
+        if (whole) {
+            var g = rxGroup(re, s, m, 0)
+            if (g === null) { out.push("") } else { out.push(g) }
+        } else {
+            out.push(jxResult(re, s, m, s))
+        }
+        if (m["end"] == m["begin"]) { at = m["end"] + 1 } else { at = m["end"] }
+    }
+    o["lastIndex"] = 0
+    return out
+}
+
+// jxSplit follows SplitMatcher: the match is ANCHORED at the scan position, an empty
+// match at the current segment start does not split, and the separator's capture
+// groups are part of the output.
+function jxSplit(o, s, limit) {
+    var re = jxProg(o)
+    var out = []
+    if (s.length == 0) {
+        if (rxSearch(re, s, 0) === null) { out.push("") }
+        return out
+    }
+    if (limit == 0) { return out }
+    var p = 0
+    var q = 0
+    while (q < s.length) {
+        var m = rxSearch(re, s, q)
+        if (m === null || m["begin"] != q || m["end"] == p) {
+            q = q + 1
+            continue
+        }
+        out.push(s.substring(p, q))
+        if (limit >= 0 && out.length >= limit) { return out }
+        var i = 1
+        while (i <= re["ngroups"]) {
+            var g = rxGroup(re, s, m, i)
+            if (g === null) { out.push(undefined) } else { out.push(g) }
+            if (limit >= 0 && out.length >= limit) { return out }
+            i = i + 1
+        }
+        p = m["end"]
+        q = p
+    }
+    out.push(s.substring(p, s.length))
+    return out
+}
+
+// jxTemplate rewrites JavaScript's replacement template into the one rxReplace reads.
+// The engine expands \1 / \k<name>, which is what Ruby and Python write; JavaScript
+// writes $1 / $<name> / $& / $$. The rewrite belongs to the language, not to the
+// engine - the interpreter's jsReTemplate is the same function.
+// Two forms are NOT covered, because the engine has nothing to rewrite them to: the
+// prefix $` and the suffix $' stay the two characters they are written with, and $10
+// and up read as $1 followed by a '0', since the expander takes one digit. The
+// interpreter side and abnf/jsrtregexjs.go have exactly the same two gaps.
+function jxTemplate(t) {
+    var out = ""
+    var i = 0
+    while (i < t.length) {
+        var c = t.charCodeAt(i)
+        if (c == 92) {                          // a literal backslash must survive rxExpand
+            out = out + "\\\\"
+            i = i + 1
+            continue
+        }
+        if (c != 36 || i + 1 >= t.length) {     // $
+            out = out + t.charAt(i)
+            i = i + 1
+            continue
+        }
+        var d = t.charCodeAt(i + 1)
+        if (d == 36) {                          // $$
+            out = out + "$"
+            i = i + 2
+            continue
+        }
+        if (d == 38) {                          // $&
+            out = out + "\\0"
+            i = i + 2
+            continue
+        }
+        if (d >= 49 && d <= 57) {               // $1 .. $9
+            out = out + "\\" + t.charAt(i + 1)
+            i = i + 2
+            continue
+        }
+        if (d == 60) {                          // $<name>
+            var j = i + 2
+            while (j < t.length && t.charCodeAt(j) != 62) { j = j + 1 }
+            out = out + "\\k<" + t.substring(i + 2, j) + ">"
+            i = j + 1
+            continue
+        }
+        out = out + "$"
+        i = i + 1
+    }
+    return out
+}
+
+// jxReplace is String#replace / #replaceAll with a pattern. A STRING replacement goes
+// through the engine's own expander after the template rewrite; a FUNCTION replacement
+// is called once per match, with the whole match, the groups, the offset and the input.
+function jxReplace(o, s, repl, forceAll) {
+    var re = jxProg(o)
+    var all = forceAll || jxBool(o, "global")
+    if (typeof repl != "function") {
+        var res = rxReplace(re, s, jxTemplate(jxToStr(repl)), all)
+        if (jxBool(o, "global")) { o["lastIndex"] = 0 }
+        return res
+    }
+    var out = ""
+    var at = 0
+    var last = 0
+    while (at <= s.length) {
+        var m = rxSearch(re, s, at)
+        if (m === null) { break }
+        out = out + s.substring(last, m["begin"])
+        var args = []
+        var i = 0
+        while (i <= re["ngroups"]) {
+            var g = rxGroup(re, s, m, i)
+            if (g === null) { args.push(undefined) } else { args.push(g) }
+            i = i + 1
+        }
+        args.push(m["begin"])
+        args.push(s)
+        out = out + jxToStr(repl.apply(undefined, args))
+        last = m["end"]
+        at = m["end"]
+        if (m["end"] == m["begin"]) {
+            if (m["end"] < s.length) { out = out + s.charAt(m["end"]) }
+            last = m["end"] + 1
+            at = m["end"] + 1
+        }
+        if (!all) { break }
+    }
+    if (last <= s.length) { out = out + s.substring(last, s.length) }
+    if (jxBool(o, "global")) { o["lastIndex"] = 0 }
+    return out
+}
+
+// jxRegexArg turns the first argument of String#match / #matchAll / #search into a
+// pattern: a RegExp is used as it is, anything else is its SOURCE, exactly as in
+// JavaScript ("a1".match("\\d") matches a digit).
+function jxRegexArg(v) {
+    if (jxIsRe(v)) { return v }
+    if (jxNullish(v)) { return jxNewRegex("", "") }
+    return jxNewRegex(jxToStr(v), "")
+}
+
+// ----- the dispatcher ----------------------------------------------------------
+//
+// jxMcall is the cross-file seam abnf/jsrtregexjs.go spells jsxMethod: a RegExp
+// receiver, or a string receiver whose argument is a pattern. It answers the sentinel
+// jxMiss for everything else, which is every call in a program that uses no regular
+// expression at all. Agent A's js_jsmcall asks this before anything else.
+
+var jxMiss = {}
+
+function jxMcall(recv, name, args) {
+    if (jxIsRe(recv)) {
+        if (name == "test") { return jxTest(recv, jxToStr(jxArg(args, 0))) }
+        if (name == "exec") { return jxExec(recv, jxToStr(jxArg(args, 0))) }
+        if (name == "toString") { return jxStr(recv) }
+        fail("unknown RegExp method: " + name)
+    }
+    if (typeof recv != "string") { return jxMiss }
+    if (name == "search") {
+        var sre = jxProg(jxRegexArg(jxArg(args, 0)))
+        var sm = rxSearch(sre, recv, 0)
+        if (sm === null) { return -1 }
+        return sm["begin"]
+    }
+    if (name == "matchAll") { return jxMatchAll(jxRegexArg(jxArg(args, 0)), recv, false) }
+    if (name == "match") {
+        var mre = jxRegexArg(jxArg(args, 0))
+        if (jxBool(mre, "global")) {
+            var all = jxMatchAll(mre, recv, true)
+            if (all.length == 0) { return null }
+            return all
+        }
+        return jxExec(mre, recv)
+    }
+    if (name == "replace" || name == "replaceAll" || name == "split") {
+        // A plain-string argument keeps the base behaviour.
+        if (!jxIsRe(jxArg(args, 0))) { return jxMiss }
+        var re = jxArg(args, 0)
+        if (name == "replace") { return jxReplace(re, recv, jxArg(args, 1), false) }
+        if (name == "replaceAll") { return jxReplace(re, recv, jxArg(args, 1), true) }
+        var limit = -1
+        var lv = jxArg(args, 1)
+        if (!jxNullish(lv)) { limit = Math.trunc(jxToNum(lv)) }
+        return jxSplit(re, recv, limit)
+    }
+    return jxMiss
+}
+
+// jxCtorArgs is new RegExp(src, flags) / RegExp(src, flags): the same construction as
+// a literal, with the flags arriving at run time.
+function jxCtorArgs(args) {
+    var a0 = jxArg(args, 0)
+    var src = ""
+    var fl = ""
+    if (jxIsRe(a0)) {
+        var s0 = a0["source"]
+        var f0 = a0["flags"]
+        if (typeof s0 == "string") { src = s0 }
+        if (typeof f0 == "string") { fl = f0 }
+    } else if (!jxNullish(a0)) {
+        src = jxToStr(a0)
+    }
+    var a1 = jxArg(args, 1)
+    if (!jxNullish(a1)) { fl = jxToStr(a1) }
+    return jxNewRegex(src, fl)
+}
+
+// ----- the externs -------------------------------------------------------------
+
+// A regexp literal: /src/flags, with the JavaScript flag letters. Every EVALUATION
+// builds a fresh object, because lastIndex is per-object state.
+function js_jsxnew(src, flags) { return jxNewRegex(src, flags) }
+
+// new RegExp(...): the argument array of the emitted call site. makeNew in
+// js-to-llvm-ir.abnf special-cases the name, so js_call_new never sees it.
+function js_jsxregexp(lit) { return jxCtorArgs(lit) }
+
+// The global binding, so a bare RegExp(...) call and `typeof RegExp` work. The
+// grammar declares it in the program's OWN scope, so no other language sees it.
+function jxRegExpFn(src, flags) {
+    var a = []
+    a.push(src)
+    a.push(flags)
+    return jxCtorArgs(a)
+}
+
+function js_jsxctor() { return jxRegExpFn }
+
+// The call wrapper. `replace` and `split` DO have a native for a string receiver, so
+// they arrive through js_jsxcall as a BOUND METHOD instead of through js_jsmcall;
+// only those two, and only with a pattern argument, are taken over here.
+//
+// ONE DEVIATION FROM abnf/jsrtregexjs.go, and it is forced. The Go twin reads
+// bm.name off its *boundMethod; the C floor's bound method (runtime.c mk_bound, tag 9)
+// carries only a receiver handle and a numeric method id, and no floor extern answers
+// either - `typeof` says "function", to_string says "[function]" and === is identity,
+// so a fresh js_get(s, "replace") never compares equal. What IS observable is the
+// RESULT TYPE: String#replace always answers a string and String#split always answers
+// an array, for every input, so one probe call on a pure native separates them. The
+// probe argument is a plain string, so the probe cannot reach the regexp path and
+// cannot recurse. A floor extern that answered a bound method's name would remove
+// this; the measurement is in the agent report.
+function js_jsxcall(fn, self, args) {
+    if (typeof self == "string" && jxIsRe(jxArg(args, 0))) {
+        var probe = fn.apply(self, ["x"])
+        var nm = ""
+        if (Array.isArray(probe)) { nm = "split" }
+        else if (typeof probe == "string") { nm = "replace" }
+        if (nm != "") {
+            var r = jxMcall(self, nm, args)
+            if (r !== jxMiss) { return r }
+        }
+    }
+    // Everything else is an ORDINARY call, and that is the common case: the emitter
+    // routes EVERY `obj.m(...)` whose member resolved to a function through here.
+    // The dynamic `this` is already armed - the emitter emits js_jssetthis(receiver)
+    // immediately before this call - so nothing has to be set up first.
+    return fn.apply(self, args)
+}
+
