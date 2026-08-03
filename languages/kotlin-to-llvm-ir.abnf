@@ -2512,6 +2512,611 @@ KwContract  = "contract" KwEnd ;
     // protocol, expression/statement builders); see the `core` knobs below.
     include("lib/compile-core.js")
 
+    // ===== THE SCOPE PROBES, LOWERED HERE RATHER THAN LEFT AS EXTERNS =====
+    //
+    // js_ktget / js_kset / js_ktvarset and their relatives used to be externs that
+    // took a SCOPE HANDLE and walked the chain. A scope is the C floor's PRIVATE
+    // storage - which is exactly why the Lua pilot moved js_scope_decl /
+    // js_scope_set / js_scope_typeof INTO the floor - so languages/lib/kotlin-rt.metajs
+    // (layer 2) cannot open one and could never implement any of them. See "TWO
+    // THINGS EVERY ONE OF THE REMAINING NINE NEEDS" in docs/runtime-next-plan.md
+    // part 3: php lowered 2, swift 2, java 1 helper, csharp 0, dart 2, go 1, and
+    // KOTLIN HAS THE LARGEST SET OF THE EIGHT - ten externs read a scope here.
+    //
+    // No floor addition is needed for the probes, because an EMITTER may call
+    // js_scope_typeof / js_scope_get / js_scope_set. What the emitter CANNOT do is
+    // walk PAST the innermost binding: the floor seeds no scope-parent accessor, so
+    // a helper sees the innermost `name`, the innermost `this` and the innermost
+    // `__dispatch` and no more. Every place that costs exactness is written out at
+    // the helper concerned.
+    var rtFuncs = {}
+    function rtFunc(name, nparams, bodyFn) {
+        if (rtFuncs["$" + name] != undefined) { return rtFuncs["$" + name] }
+        var ps = []
+        for (var i = 0; i < nparams; i++) { ps.push(llvm.ir.NewParam("p" + i, i64)) }
+        var f = m.NewFunc(name, i64, ps)
+        rtFuncs["$" + name] = f
+        var savedF = curF
+        var savedScope = curScopeV
+        var savedLoops = loopStack
+        var savedTag = curFTag
+        curF = f
+        loopStack = []
+        var b = f.NewBlock("entry")
+        bodyFn(b, f.Params)
+        curF = savedF
+        curScopeV = savedScope
+        loopStack = savedLoops
+        curFTag = savedTag
+        return f
+    }
+    // A property read that cannot abort: undefined for anything that is not a plain
+    // object (js_get fails on nil and answers an index on an array). swift's
+    // sw_safeget and dart's dt_safeget, transferred verbatim - the third and fourth
+    // language to use exactly this guard.
+    function rtSafeGet() {
+        return rtFunc("kt_safeget", 2, function(b, ps) {
+            var v = ps[0]
+            var noB = curF.NewBlock("")
+            var c1 = curF.NewBlock("")
+            var c2 = curF.NewBlock("")
+            var okB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [v, hNull])), noB, c1)
+            c1.NewCondBr(truthy(c1, callExt(c1, "js_seq", [v, hUndef])), noB, c2)
+            c2.NewCondBr(truthy(c2, callExt(c2, "js_seq", [callExt(c2, "js_typeof", [v]), emitStr(c2, "object")])), okB, noB)
+            okB.NewRet(callExt(okB, "js_get", [v, ps[1]]))
+            noB.NewRet(hUndef)
+        })
+    }
+    // A LOCAL or top-level DELEGATED property binds a BOX, not a value, so every read
+    // goes through the delegate's getValue - jsrtkotlin.go's js_ktget does it inline
+    // with ktPDeleg. The box is an ordinary object ({__pdeleg, d, owner, pname}), so
+    // the test and the unwrap are both ordinary externs and neither needs a scope.
+    function rtDelegRead() {
+        return rtFunc("kt_dread", 1, function(b, ps) {
+            var boxB = curF.NewBlock("")
+            var plainB = curF.NewBlock("")
+            var mark = b.NewCall(rtSafeGet(), [ps[0], emitStr(b, "__pdeleg")])
+            b.NewCondBr(truthy(b, mark), boxB, plainB)
+            boxB.NewRet(callExt(boxB, "js_ktdget", [callExt(boxB, "js_get", [ps[0], emitStr(boxB, "d")]),
+                callExt(boxB, "js_get", [ps[0], emitStr(boxB, "owner")]),
+                callExt(boxB, "js_get", [ps[0], emitStr(boxB, "pname")])]))
+            plainB.NewRet(ps[0])
+        })
+    }
+    // kt_ktget(env, name) is jsrtkotlin.go's js_ktget: a local (delegate-unwrapped),
+    // then the properties of the innermost `this`, then the innermost `__dispatch`
+    // (the DISPATCH receiver a member extension carries), then the same abort
+    // js_scope_get raises.
+    //
+    // TWO INEXACTNESSES, both from the missing scope-parent accessor and both
+    // measured rather than assumed (see the KOTLIN section of the plan):
+    //   * the Go twin walks the WHOLE chain looking for a `this` and for a
+    //     `__dispatch`; this sees the innermost of each.
+    //   * js_scope_typeof answers "undefined" for a slot that HOLDS undefined and
+    //     for an absent name alike, so such a name takes the `this` fallback and
+    //     then the final js_scope_get. That is swift's recorded inexactness, met
+    //     again.
+    // js_ktfget is the probe rather than js_get because it is Kotlin's field read -
+    // a StringBuilder's properties, a Map miss as null, the Regex/MatchResult
+    // properties - and because it is the one an accessor pair (js_defprop on the
+    // DESCRIPTOR, i.e. every `val c get() = ...` and every delegated property)
+    // resolves through.
+    function rtKtGet() {
+        return rtFunc("kt_ktget", 2, function(b, ps) {
+            var localB = curF.NewBlock("")
+            var thisB = curF.NewBlock("")
+            var t = callExt(b, "js_scope_typeof", [ps[0], ps[1]])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), thisB, localB)
+            localB.NewRet(localB.NewCall(rtDelegRead(), [callExt(localB, "js_scope_get", [ps[0], ps[1]])]))
+            var probeB = curF.NewBlock("")
+            var dispB = curF.NewBlock("")
+            var tt = callExt(thisB, "js_scope_typeof", [ps[0], emitStr(thisB, "this")])
+            thisB.NewCondBr(truthy(thisB, callExt(thisB, "js_seq", [tt, emitStr(thisB, "undefined")])), dispB, probeB)
+            var thV = callExt(probeB, "js_scope_get", [ps[0], emitStr(probeB, "this")])
+            var mV = probeB.NewCall(rtSafeGet(), [thV, ps[1]])
+            var hitB = curF.NewBlock("")
+            var p2B = curF.NewBlock("")
+            // NULL and undefined both fall THROUGH rather than hit, which is not an
+            // approximation but the exact reading of the Go twin: js_ktget runs
+            // ktLateinitCheck on the value it found, and an uninitialised `lateinit
+            // var` is exactly the null/undefined case, so it must reach the extern
+            // to raise UninitializedPropertyAccessException. Measured: assertion
+            // lat3 of tests/kotlin-test-full.kt fails without this arm.
+            var nonObjB = curF.NewBlock("")
+            probeB.NewCondBr(truthy(probeB, callExt(probeB, "js_sne", [mV, hUndef])), p2B, nonObjB)
+            // A NULL is not a miss: js_get answers undefined for an ABSENT property
+            // and null for one that HOLDS null, so the two are distinguishable here -
+            // and the difference is exactly ktLateinitCheck's case. jsrtkotlin.go
+            // raises UninitializedPropertyAccessException for a null-valued property
+            // the class chain declares `lateinit`, and answers the null otherwise.
+            // Measured: assertion lat3 of tests/kotlin-test-full.kt.
+            var latB = curF.NewBlock("")
+            p2B.NewCondBr(truthy(p2B, callExt(p2B, "js_sne", [mV, hNull])), hitB, latB)
+            var liV = latB.NewCall(rtClsFind(), [latB.NewCall(rtSafeGet(), [thV, emitStr(latB, "__class")]),
+                emitStr(latB, "__lateinit")])
+            var raiseB = curF.NewBlock("")
+            var okB = curF.NewBlock("")
+            latB.NewCondBr(truthy(latB, latB.NewCall(rtSafeGet(), [liV, ps[1]])), raiseB, okB)
+            callExt(raiseB, "js_throw", [callExt(raiseB, "js_ktnewexc",
+                [emitStr(raiseB, "UninitializedPropertyAccessException"),
+                 callExt(raiseB, "js_jadd", [callExt(raiseB, "js_jadd",
+                     [emitStr(raiseB, "lateinit property "), ps[1]]),
+                     emitStr(raiseB, " has not been initialized")])])])
+            raiseB.NewRet(hNull)
+            okB.NewRet(mV)
+            hitB.NewRet(mV)
+            // A receiver that is NOT a plain object still has members: a String has
+            // length, a List has size and its indexes. Inside an extension function
+            // (`fun String.f() = length`) the unqualified name has to reach them,
+            // which is the `else if !isUndefOrNull(t)` / rt.getMember arm of
+            // jsrt.go's js_kget and of jsrtkotlin.go's js_ktget. js_ktfget IS that
+            // read. It is applied ONLY to a non-object receiver, because on an
+            // INSTANCE it would also answer a method off the descriptor, where the
+            // Go twin's obj.props[name] does not - the difference the first
+            // measurement of this helper found (`add` inside `apply { add(3) }`
+            // answered the enclosing class's member instead of the list's).
+            //
+            // An INSTANCE takes the accessor-only probe below instead: `val trebled
+            // get() = raw * 3` read UNQUALIFIED from inside a member of the same
+            // class. The pair lives on the DESCRIPTOR (js_defprop), so js_get above
+            // missed it. rt.getMember answers such a read through findClassAccessor,
+            // so under llvm.Run js_get already hit and this arm is unreachable;
+            // natively the C floor's member read knows nothing of an accessor pair,
+            // so the chain has to be walked here. The probe fires ONLY when
+            // kt_clsfind finds an actual {__acc} record, which is why it cannot
+            // answer a METHOD off the descriptor the way a bare js_ktfget would.
+            var fgB = curF.NewBlock("")
+            var accB = curF.NewBlock("")
+            nonObjB.NewCondBr(truthy(nonObjB, callExt(nonObjB, "js_seq",
+                [callExt(nonObjB, "js_typeof", [thV]), emitStr(nonObjB, "object")])), accB, fgB)
+            var accV = accB.NewCall(rtClsFind(), [accB.NewCall(rtSafeGet(),
+                [thV, emitStr(accB, "__class")]), ps[1]])
+            var accHitB = curF.NewBlock("")
+            accB.NewCondBr(truthy(accB, accB.NewCall(rtSafeGet(), [accV, emitStr(accB, "__acc")])),
+                accHitB, dispB)
+            accHitB.NewRet(callExt(accHitB, "js_ktfget", [thV, ps[1]]))
+            var fV = callExt(fgB, "js_ktfget", [thV, ps[1]])
+            var f2B = curF.NewBlock("")
+            var fhitB = curF.NewBlock("")
+            fgB.NewCondBr(truthy(fgB, callExt(fgB, "js_sne", [fV, hUndef])), f2B, dispB)
+            f2B.NewCondBr(truthy(f2B, callExt(f2B, "js_sne", [fV, hNull])), fhitB, dispB)
+            fhitB.NewRet(fV)
+            var dprobeB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            var dt = callExt(dispB, "js_scope_typeof", [ps[0], emitStr(dispB, "__dispatch")])
+            dispB.NewCondBr(truthy(dispB, callExt(dispB, "js_seq", [dt, emitStr(dispB, "undefined")])), missB, dprobeB)
+            var dV = callExt(dprobeB, "js_scope_get", [ps[0], emitStr(dprobeB, "__dispatch")])
+            var dmV = dprobeB.NewCall(rtSafeGet(), [dV, ps[1]])
+            var dhitB = curF.NewBlock("")
+            dprobeB.NewCondBr(truthy(dprobeB, callExt(dprobeB, "js_sne", [dmV, hUndef])), dhitB, missB)
+            dhitB.NewRet(dmV)
+            // THE RESIDUE, and the one thing this lowering does NOT close. Kotlin's
+            // implicit receivers form a STACK that ktWithRecv (with / run / apply /
+            // buildString / buildList / buildMap, and every T.() -> R lambda) pushes
+            // INSIDE the runtime, and js_ktget walks it after the two probes above.
+            // An emitter cannot see that stack, and it cannot walk PAST the innermost
+            // `this` either, because the floor seeds no scope-parent accessor. So the
+            // last arm stays the extern: under llvm.Run it is jsrtkotlin.go's own
+            // js_ktget and nothing changes; natively it is the one call layer 2 cannot
+            // answer. See the KOTLIN section of docs/runtime-next-plan.md for the
+            // measurement and for the two floor primitives that would close it.
+            //
+            // What CAN be reached is layer 2 itself, through an extern that takes no
+            // scope. js_ktglobal(name) is that extern - it is already emitted for a
+            // stdlib global - and languages/lib/kotlin-rt.metajs answers it from
+            // ktRecvStack FIRST, so `with(list) { size }` and `apply { add(3) }`
+            // resolve natively. In the Go twin js_ktglobal is ktGlobalFn, which
+            // answers undefined for a name it does not know, so this arm is a no-op
+            // under llvm.Run and the extern below still decides - measured: the
+            // ratchet stays at 979 with the probe in place.
+            var gB = curF.NewBlock("")
+            var lastB = curF.NewBlock("")
+            var gV = callExt(missB, "js_ktglobal", [ps[1]])
+            missB.NewCondBr(truthy(missB, callExt(missB, "js_sne", [gV, hUndef])), gB, lastB)
+            gB.NewRet(gV)
+            lastB.NewRet(callExt(lastB, "js_ktget", [ps[0], ps[1]]))
+        })
+    }
+    // kt_clsfind(cls, name) is jsrtkotlin.go's ktClsFind: the member of that name on a
+    // class descriptor or on any of its __super chain, else undefined. swift's
+    // sw_findm is the same loop; the mutable cursor lives in a throwaway scope,
+    // because an IR block has no mutable local.
+    function rtClsFind() {
+        return rtFunc("kt_clsfind", 2, function(b, ps) {
+            var sc = callExt(b, "js_scope_new", [handle(0)])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "c"), ps[0]])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            b.NewBr(headB)
+            var cV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "c")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_seq",
+                [callExt(headB, "js_typeof", [cV]), emitStr(headB, "object")])), bodyB, missB)
+            var mV = bodyB.NewCall(rtSafeGet(), [cV, ps[1]])
+            var hitB = curF.NewBlock("")
+            var stepB = curF.NewBlock("")
+            bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_sne", [mV, hUndef])), hitB, stepB)
+            hitB.NewRet(mV)
+            callExt(stepB, "js_scope_set", [sc, emitStr(stepB, "c"),
+                stepB.NewCall(rtSafeGet(), [cV, emitStr(stepB, "__super")])])
+            stepB.NewBr(headB)
+            missB.NewRet(hUndef)
+        })
+    }
+    // kt_mextwalk(start, mangled) is the RECEIVER half of ktMemberExtFind: own
+    // property, then the class chain, then __outer, up to 64 levels. It answers a
+    // {f, d} pair object (the function and the dispatch receiver it was found on) or
+    // null, because an IR helper returns one value.
+    function rtMextWalk() {
+        return rtFunc("kt_mextwalk", 2, function(b, ps) {
+            var sc = callExt(b, "js_scope_new", [handle(0)])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "o"), ps[0]])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "n"), emitNum(b, 0)])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            b.NewBr(headB)
+            var oV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "o")])
+            var nV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "n")])
+            var okB = curF.NewBlock("")
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [nV, emitNum(headB, 64)])), okB, missB)
+            okB.NewCondBr(truthy(okB, callExt(okB, "js_seq",
+                [callExt(okB, "js_typeof", [oV]), emitStr(okB, "object")])), bodyB, missB)
+            // The receiver's OWN properties first: a companion object's member
+            // extension hangs on the descriptor itself.
+            var fV = bodyB.NewCall(rtSafeGet(), [oV, ps[1]])
+            var hit1B = curF.NewBlock("")
+            var clsB = curF.NewBlock("")
+            bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_seq",
+                [callExt(bodyB, "js_typeof", [fV]), emitStr(bodyB, "function")])), hit1B, clsB)
+            var r1 = callExt(hit1B, "js_obj_new", [])
+            callExt(hit1B, "js_set", [r1, emitStr(hit1B, "f"), fV])
+            callExt(hit1B, "js_set", [r1, emitStr(hit1B, "d"), oV])
+            hit1B.NewRet(r1)
+            var cfV = clsB.NewCall(rtClsFind(), [clsB.NewCall(rtSafeGet(), [oV, emitStr(clsB, "__class")]), ps[1]])
+            var hit2B = curF.NewBlock("")
+            var stepB = curF.NewBlock("")
+            clsB.NewCondBr(truthy(clsB, callExt(clsB, "js_sne", [cfV, hUndef])), hit2B, stepB)
+            var r2 = callExt(hit2B, "js_obj_new", [])
+            callExt(hit2B, "js_set", [r2, emitStr(hit2B, "f"), cfV])
+            callExt(hit2B, "js_set", [r2, emitStr(hit2B, "d"), oV])
+            hit2B.NewRet(r2)
+            var nxV = stepB.NewCall(rtSafeGet(), [oV, emitStr(stepB, "__outer")])
+            var contB = curF.NewBlock("")
+            var s2B = curF.NewBlock("")
+            stepB.NewCondBr(truthy(stepB, callExt(stepB, "js_sne", [nxV, hUndef])), s2B, missB)
+            s2B.NewCondBr(truthy(s2B, callExt(s2B, "js_sne", [nxV, hNull])), contB, missB)
+            callExt(contB, "js_scope_set", [sc, emitStr(contB, "o"), nxV])
+            callExt(contB, "js_scope_set", [sc, emitStr(contB, "n"), callExt(contB, "js_add", [nV, emitNum(contB, 1)])])
+            contB.NewBr(headB)
+            missB.NewRet(hNull)
+        })
+    }
+    // kt_mextfind(env, mangled) is the whole of ktMemberExtFind. Its SCOPE half is
+    // exactly two innermost reads - the Go twin breaks at the first frame carrying
+    // `this` and at the first carrying `__dispatch` - so unlike js_ktget's walk this
+    // lowering is EXACT.
+    function rtMextFind() {
+        return rtFunc("kt_mextfind", 2, function(b, ps) {
+            var t1B = curF.NewBlock("")
+            var d0B = curF.NewBlock("")
+            var tt = callExt(b, "js_scope_typeof", [ps[0], emitStr(b, "this")])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [tt, emitStr(b, "undefined")])), d0B, t1B)
+            var rV = t1B.NewCall(rtMextWalk(), [callExt(t1B, "js_scope_get", [ps[0], emitStr(t1B, "this")]), ps[1]])
+            var hitB = curF.NewBlock("")
+            t1B.NewCondBr(truthy(t1B, callExt(t1B, "js_sne", [rV, hNull])), hitB, d0B)
+            hitB.NewRet(rV)
+            var d1B = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            var dt = callExt(d0B, "js_scope_typeof", [ps[0], emitStr(d0B, "__dispatch")])
+            d0B.NewCondBr(truthy(d0B, callExt(d0B, "js_seq", [dt, emitStr(d0B, "undefined")])), missB, d1B)
+            d1B.NewRet(d1B.NewCall(rtMextWalk(), [callExt(d1B, "js_scope_get", [ps[0], emitStr(d1B, "__dispatch")]), ps[1]]))
+            missB.NewRet(hNull)
+        })
+    }
+    // The three member-extension externs, over kt_mextfind. Each reproduces its Go
+    // twin exactly, including the fallback: an ordinary method call, an ordinary
+    // field read and an ordinary member write when nothing declares the extension.
+    function rtMextCall() {
+        return rtFunc("kt_mextcall", 4, function(b, ps) {
+            var rV = b.NewCall(rtMextFind(), [ps[0], callExt(b, "js_jadd", [emitStr(b, "ext$"), ps[2]])])
+            var hitB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_sne", [rV, hNull])), hitB, missB)
+            // [dispatchReceiver, extensionReceiver, ...args]
+            var arr = callExt(hitB, "js_arr_new", [])
+            callExt(hitB, "js_arr_push", [arr, callExt(hitB, "js_get", [rV, emitStr(hitB, "d")])])
+            callExt(hitB, "js_arr_push", [arr, ps[1]])
+            var sc = callExt(hitB, "js_scope_new", [handle(0)])
+            callExt(hitB, "js_scope_decl", [sc, emitStr(hitB, "i"), emitNum(hitB, 0)])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            hitB.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, callExt(headB, "js_get", [ps[3], emitStr(headB, "length")])])), bodyB, doneB)
+            callExt(bodyB, "js_arr_push", [arr, callExt(bodyB, "js_get", [ps[3], iV])])
+            callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"), callExt(bodyB, "js_add", [iV, emitNum(bodyB, 1)])])
+            bodyB.NewBr(headB)
+            doneB.NewRet(callExt(doneB, "js_call", [callExt(doneB, "js_get", [rV, emitStr(doneB, "f")]), hUndef, arr]))
+            // Nothing the innermost `this` or `__dispatch` can see. The extern still
+            // decides: under llvm.Run it is jsrtkotlin.go's own js_ktmextcall (which
+            // redoes the same miss and dispatches ordinarily), and natively it is
+            // layer 2's, which walks the IMPLICIT-RECEIVER STACK first - `with(i)
+            // { 7.scaled() }` binds its receiver there and nowhere the emitter can see.
+            missB.NewRet(callExt(missB, "js_ktmextcall", [ps[0], ps[1], ps[2], ps[3]]))
+        })
+    }
+    function rtMextGet() {
+        return rtFunc("kt_mextget", 3, function(b, ps) {
+            var rV = b.NewCall(rtMextFind(), [ps[0], callExt(b, "js_jadd", [emitStr(b, "extget$"), ps[2]])])
+            var hitB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_sne", [rV, hNull])), hitB, missB)
+            var arr = callExt(hitB, "js_arr_new", [])
+            callExt(hitB, "js_arr_push", [arr, callExt(hitB, "js_get", [rV, emitStr(hitB, "d")])])
+            callExt(hitB, "js_arr_push", [arr, ps[1]])
+            hitB.NewRet(callExt(hitB, "js_call", [callExt(hitB, "js_get", [rV, emitStr(hitB, "f")]), hUndef, arr]))
+            missB.NewRet(callExt(missB, "js_ktmextget", [ps[0], ps[1], ps[2]]))
+        })
+    }
+    function rtMextSet() {
+        return rtFunc("kt_mextset", 4, function(b, ps) {
+            var rV = b.NewCall(rtMextFind(), [ps[0], callExt(b, "js_jadd", [emitStr(b, "extset$"), ps[2]])])
+            var hitB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_sne", [rV, hNull])), hitB, missB)
+            var arr = callExt(hitB, "js_arr_new", [])
+            callExt(hitB, "js_arr_push", [arr, callExt(hitB, "js_get", [rV, emitStr(hitB, "d")])])
+            callExt(hitB, "js_arr_push", [arr, ps[1]])
+            callExt(hitB, "js_arr_push", [arr, ps[3]])
+            callExt(hitB, "js_call", [callExt(hitB, "js_get", [rV, emitStr(hitB, "f")]), hUndef, arr])
+            hitB.NewRet(ps[3])
+            missB.NewRet(callExt(missB, "js_ktmextset", [ps[0], ps[1], ps[2], ps[3]]))
+        })
+    }
+    // ktTypeNames, copied from abnf/jsrtkotlin.go:5926 (whose own comment says the
+    // list is shared with kTypeNames in kotlin-interpreter.abnf and that the copies
+    // must stay in step - this is the THIRD copy and it is here because the emitter
+    // has to make the same decision the extern used to make). A `::` in front of one
+    // of these is an UNBOUND reference, and that arm runs BEFORE the scope walk, so
+    // a same-named builder in scope must not win.
+    var ktTypeNameSet = {}
+    var ktTypeNameList = ["String", "CharSequence", "Int", "Long", "Short", "Byte",
+        "UInt", "ULong", "UShort", "UByte", "Double", "Float", "Boolean", "Char",
+        "Any", "Unit", "Number", "Nothing", "List", "MutableList", "Set",
+        "MutableSet", "Map", "MutableMap", "Array", "Collection", "Iterable",
+        "Comparable", "IntRange", "CharRange", "LongRange", "Regex", "StringBuilder"]
+    for (var ktTNI = 0; ktTNI < ktTypeNameList.length; ktTNI++) { ktTypeNameSet["$" + ktTypeNameList[ktTNI]] = true }
+    // kt_refbase(env, name) is js_ktrefbase MINUS its ktTypeNames arm, which the
+    // emitter decides statically at the call site (the base name is a literal there).
+    // A scope binding is the value; a name the enclosing `this` carries answers the
+    // `this`; anything else is the type marker, which is what the extern still
+    // builds - a ktTypeName is a Go TYPE and layer 2 has no way to make one, so that
+    // one arm is the residue.
+    function rtRefBase() {
+        return rtFunc("kt_refbase", 2, function(b, ps) {
+            var localB = curF.NewBlock("")
+            var thisB = curF.NewBlock("")
+            var t = callExt(b, "js_scope_typeof", [ps[0], ps[1]])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), thisB, localB)
+            localB.NewRet(callExt(localB, "js_scope_get", [ps[0], ps[1]]))
+            var probeB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            var tt = callExt(thisB, "js_scope_typeof", [ps[0], emitStr(thisB, "this")])
+            thisB.NewCondBr(truthy(thisB, callExt(thisB, "js_seq", [tt, emitStr(thisB, "undefined")])), missB, probeB)
+            var thV = callExt(probeB, "js_scope_get", [ps[0], emitStr(probeB, "this")])
+            var mV = probeB.NewCall(rtSafeGet(), [thV, ps[1]])
+            var hitB = curF.NewBlock("")
+            probeB.NewCondBr(truthy(probeB, callExt(probeB, "js_sne", [mV, hUndef])), hitB, missB)
+            hitB.NewRet(thV)
+            missB.NewRet(callExt(missB, "js_ktrefbase", [ps[0], ps[1]]))
+        })
+    }
+    // kt_isclass(o, name) - does o's class chain declare a class of that name?
+    // js_ktouter's inner test, over the __class / __super walk.
+    function rtIsClass() {
+        return rtFunc("kt_isclass", 2, function(b, ps) {
+            var sc = callExt(b, "js_scope_new", [handle(0)])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "c"), b.NewCall(rtSafeGet(), [ps[0], emitStr(b, "__class")])])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            b.NewBr(headB)
+            var cV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "c")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_seq",
+                [callExt(headB, "js_typeof", [cV]), emitStr(headB, "object")])), bodyB, missB)
+            var hitB = curF.NewBlock("")
+            var stepB = curF.NewBlock("")
+            bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_seq",
+                [bodyB.NewCall(rtSafeGet(), [cV, emitStr(bodyB, "__name")]), ps[1]])), hitB, stepB)
+            hitB.NewRet(hTrue)
+            callExt(stepB, "js_scope_set", [sc, emitStr(stepB, "c"),
+                stepB.NewCall(rtSafeGet(), [cV, emitStr(stepB, "__super")])])
+            stepB.NewBr(headB)
+            missB.NewRet(hFalse)
+        })
+    }
+    // kt_outer(env, name) is js_ktouter: `this@Outer`. The Go twin walks the SCOPE
+    // chain for a `this` whose class chain carries that name; an emitter sees only
+    // the innermost `this`, so it walks that instance's __outer chain instead -
+    // which is the same answer whenever the qualified receiver is an enclosing
+    // INSTANCE, and falls back to the extern otherwise.
+    function rtOuter() {
+        return rtFunc("kt_outer", 2, function(b, ps) {
+            var haveB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            var tt = callExt(b, "js_scope_typeof", [ps[0], emitStr(b, "this")])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [tt, emitStr(b, "undefined")])), missB, haveB)
+            var sc = callExt(haveB, "js_scope_new", [handle(0)])
+            callExt(haveB, "js_scope_decl", [sc, emitStr(haveB, "o"),
+                callExt(haveB, "js_scope_get", [ps[0], emitStr(haveB, "this")])])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            haveB.NewBr(headB)
+            var oV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "o")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_seq",
+                [callExt(headB, "js_typeof", [oV]), emitStr(headB, "object")])), bodyB, missB)
+            var hitB = curF.NewBlock("")
+            var stepB = curF.NewBlock("")
+            bodyB.NewCondBr(truthy(bodyB, bodyB.NewCall(rtIsClass(), [oV, ps[1]])), hitB, stepB)
+            hitB.NewRet(oV)
+            var nxV = stepB.NewCall(rtSafeGet(), [oV, emitStr(stepB, "__outer")])
+            var contB = curF.NewBlock("")
+            stepB.NewCondBr(truthy(stepB, callExt(stepB, "js_sne", [nxV, hUndef])), contB, missB)
+            callExt(contB, "js_scope_set", [sc, emitStr(contB, "o"), nxV])
+            contB.NewBr(headB)
+            missB.NewRet(callExt(missB, "js_ktouter", [ps[0], ps[1]]))
+        })
+    }
+    // kt_bareref(env, name) is js_ktbareref: a bare `::name`. A scope binding is the
+    // value itself (a CLASS descriptor becomes a constructor reference, which is what
+    // js_ktctorref decides); a name the scope does not carry but the enclosing `this`
+    // DOES becomes a BOUND property reference, which is exactly what js_ktref builds
+    // for a non-class base; anything else falls through to the ordinary name
+    // resolution. js_ktnameval is how the Go twin records ktFuncNames[v] = name, so
+    // KFunction.name still answers.
+    function rtBareRef() {
+        return rtFunc("kt_bareref", 2, function(b, ps) {
+            var localB = curF.NewBlock("")
+            var thisB = curF.NewBlock("")
+            var t = callExt(b, "js_scope_typeof", [ps[0], ps[1]])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), thisB, localB)
+            localB.NewRet(callExt(localB, "js_ktctorref", [callExt(localB, "js_ktnameval",
+                [callExt(localB, "js_scope_get", [ps[0], ps[1]]), ps[1]])]))
+            var probeB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            var tt = callExt(thisB, "js_scope_typeof", [ps[0], emitStr(thisB, "this")])
+            thisB.NewCondBr(truthy(thisB, callExt(thisB, "js_seq", [tt, emitStr(thisB, "undefined")])), missB, probeB)
+            var thV = callExt(probeB, "js_scope_get", [ps[0], emitStr(probeB, "this")])
+            var mV = probeB.NewCall(rtSafeGet(), [thV, ps[1]])
+            var hitB = curF.NewBlock("")
+            probeB.NewCondBr(truthy(probeB, callExt(probeB, "js_sne", [mV, hUndef])), hitB, missB)
+            hitB.NewRet(callExt(hitB, "js_ktref", [thV, ps[1]]))
+            missB.NewRet(callExt(missB, "js_ktctorref", [callExt(missB, "js_ktnameval",
+                [missB.NewCall(rtKtGet(), [ps[0], ps[1]]), ps[1]])]))
+        })
+    }
+    // kt_dthis(env) is js_ktdthis: the thisRef a delegated property is declared
+    // against. Its Go twin walks the chain for the FIRST `this` and answers null when
+    // there is none - and "the first one up the chain" is precisely what
+    // js_scope_get answers, so this lowering is EXACT rather than approximate.
+    function rtDThis() {
+        return rtFunc("kt_dthis", 1, function(b, ps) {
+            var hasB = curF.NewBlock("")
+            var noB = curF.NewBlock("")
+            var t = callExt(b, "js_scope_typeof", [ps[0], emitStr(b, "this")])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), noB, hasB)
+            hasB.NewRet(callExt(hasB, "js_scope_get", [ps[0], emitStr(hasB, "this")]))
+            noB.NewRet(hNull)
+        })
+    }
+    // kt_kset(env, name, v) is abnf/jsrt.go's js_kset: the innermost binding, else a
+    // property of the innermost `this`, else the abort js_scope_set raises. This IS
+    // swift's sw_kset and dart's dt_kset, unchanged.
+    function rtKSet() {
+        return rtFunc("kt_kset", 3, function(b, ps) {
+            var localB = curF.NewBlock("")
+            var thisB = curF.NewBlock("")
+            var t = callExt(b, "js_scope_typeof", [ps[0], ps[1]])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), thisB, localB)
+            callExt(localB, "js_scope_set", [ps[0], ps[1], ps[2]])
+            localB.NewRet(handle(0))
+            var probeB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            var tt = callExt(thisB, "js_scope_typeof", [ps[0], emitStr(thisB, "this")])
+            thisB.NewCondBr(truthy(thisB, callExt(thisB, "js_seq", [tt, emitStr(thisB, "undefined")])), missB, probeB)
+            var thV = callExt(probeB, "js_scope_get", [ps[0], emitStr(probeB, "this")])
+            var mV = probeB.NewCall(rtSafeGet(), [thV, ps[1]])
+            var hitB = curF.NewBlock("")
+            var kaccB = curF.NewBlock("")
+            probeB.NewCondBr(truthy(probeB, callExt(probeB, "js_sne", [mV, hUndef])), hitB, kaccB)
+            callExt(hitB, "js_set", [thV, ps[1], ps[2]])
+            hitB.NewRet(handle(0))
+            // The same accessor-pair probe kt_varset carries: the pair lives on the
+            // DESCRIPTOR, which the floor's member read cannot see. Unreachable under
+            // llvm.Run, where rt.getMember already answered through the getter.
+            var kaccV = kaccB.NewCall(rtClsFind(), [kaccB.NewCall(rtSafeGet(),
+                [thV, emitStr(kaccB, "__class")]), ps[1]])
+            var kaccHitB = curF.NewBlock("")
+            kaccB.NewCondBr(truthy(kaccB, kaccB.NewCall(rtSafeGet(), [kaccV, emitStr(kaccB, "__acc")])),
+                kaccHitB, missB)
+            callExt(kaccHitB, "js_ktset", [thV, ps[1], ps[2]])
+            kaccHitB.NewRet(handle(0))
+            // Not a local and not a property of the innermost `this`: the extern.
+            // jsrt.go's js_kset walks the WHOLE chain for a `this` and jsrtkotlin.go's
+            // js_ktvarset adds the accessor-setter and __dispatch write arms on top of
+            // it, and an emitter can reach neither - see kt_ktget above.
+            missB.NewRet(callExt(missB, "js_kset", [ps[0], ps[1], ps[2]]))
+        })
+    }
+    // kt_varset(env, name, v) is js_ktvarset: kt_kset made DELEGATE-aware. A binding
+    // holding a delegate box is WRITTEN through its setValue (js_ktdset), which is an
+    // ordinary extern over an ordinary object, so only the scope read is lowered.
+    function rtVarSet() {
+        return rtFunc("kt_varset", 3, function(b, ps) {
+            var boxB = curF.NewBlock("")
+            var plainB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            var localB = curF.NewBlock("")
+            var t = callExt(b, "js_scope_typeof", [ps[0], ps[1]])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), missB, localB)
+            var curV = callExt(localB, "js_scope_get", [ps[0], ps[1]])
+            var mark = localB.NewCall(rtSafeGet(), [curV, emitStr(localB, "__pdeleg")])
+            localB.NewCondBr(truthy(localB, mark), boxB, plainB)
+            callExt(boxB, "js_ktdset", [callExt(boxB, "js_get", [curV, emitStr(boxB, "d")]),
+                callExt(boxB, "js_get", [curV, emitStr(boxB, "owner")]),
+                callExt(boxB, "js_get", [curV, emitStr(boxB, "pname")]), ps[2]])
+            boxB.NewRet(handle(0))
+            // A plain local: the innermost binding, which is exactly what the Go
+            // twin's first loop finds.
+            callExt(plainB, "js_scope_set", [ps[0], ps[1], ps[2]])
+            plainB.NewRet(handle(0))
+            // No local of that name. jsrtkotlin.go's js_ktvarset then tries the
+            // enclosing `this` - its own properties AND its accessor SETTER, which
+            // the floor's js_set already reaches, since an accessor is a js_defprop
+            // pair on the DESCRIPTOR and set_member honours it - then the
+            // __dispatch receiver of a member extension, then js_kset. The first
+            // two are the innermost frame and are lowered; the walk PAST it is not
+            // reachable from an emitter and stays the extern.
+            var t2B = curF.NewBlock("")
+            var d2B = curF.NewBlock("")
+            var tt = callExt(missB, "js_scope_typeof", [ps[0], emitStr(missB, "this")])
+            missB.NewCondBr(truthy(missB, callExt(missB, "js_seq", [tt, emitStr(missB, "undefined")])), d2B, t2B)
+            var thV2 = callExt(t2B, "js_scope_get", [ps[0], emitStr(t2B, "this")])
+            var mV2 = t2B.NewCall(rtSafeGet(), [thV2, ps[1]])
+            var hit2B = curF.NewBlock("")
+            var acc2B = curF.NewBlock("")
+            t2B.NewCondBr(truthy(t2B, callExt(t2B, "js_sne", [mV2, hUndef])), hit2B, acc2B)
+            callExt(hit2B, "js_set", [thV2, ps[1], ps[2]])
+            hit2B.NewRet(handle(0))
+            // The write twin of kt_ktget's accessor probe: `mirrored = v` written
+            // UNQUALIFIED inside a member, where the setter is a js_defprop pair on
+            // the DESCRIPTOR. rt.getMember runs the GETTER above, so under llvm.Run
+            // mV2 is already a hit and this arm is unreachable; natively the floor's
+            // member read cannot see the pair. js_ktset is the write that honours it.
+            var acc2V = acc2B.NewCall(rtClsFind(), [acc2B.NewCall(rtSafeGet(),
+                [thV2, emitStr(acc2B, "__class")]), ps[1]])
+            var accHit2B = curF.NewBlock("")
+            acc2B.NewCondBr(truthy(acc2B, acc2B.NewCall(rtSafeGet(), [acc2V, emitStr(acc2B, "__acc")])),
+                accHit2B, d2B)
+            callExt(accHit2B, "js_ktset", [thV2, ps[1], ps[2]])
+            accHit2B.NewRet(handle(0))
+            var d3B = curF.NewBlock("")
+            var lastB = curF.NewBlock("")
+            var dt2 = callExt(d2B, "js_scope_typeof", [ps[0], emitStr(d2B, "__dispatch")])
+            d2B.NewCondBr(truthy(d2B, callExt(d2B, "js_seq", [dt2, emitStr(d2B, "undefined")])), lastB, d3B)
+            var dV2 = callExt(d3B, "js_scope_get", [ps[0], emitStr(d3B, "__dispatch")])
+            var dmV2 = d3B.NewCall(rtSafeGet(), [dV2, ps[1]])
+            var dhit2B = curF.NewBlock("")
+            d3B.NewCondBr(truthy(d3B, callExt(d3B, "js_sne", [dmV2, hUndef])), dhit2B, lastB)
+            callExt(dhit2B, "js_set", [dV2, ps[1], ps[2]])
+            dhit2B.NewRet(handle(0))
+            lastB.NewRet(callExt(lastB, "js_ktvarset", [ps[0], ps[1], ps[2]]))
+        })
+    }
+
     var hidCount = 0     // Names hidden loop counters.
     var classNames = {}  // Known class names (constructor calls).
     var interfaceNames = {}   // Known interface names ("$" prefixed): descriptors without a __ctor.
@@ -3478,7 +4083,7 @@ KwContract  = "contract" KwEnd ;
                     // emitter uses, and it runs at EMIT time, so an extension declared
                     // further down the file counts.
                     if (extResolves(op)) {
-                        var ifV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "ext$" + op)])
+                        var ifV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "ext$" + op)])
                         var iaV = callExt(b, "js_arr_new", [])
                         callExt(b, "js_arr_push", [iaV, v])
                         callExt(b, "js_arr_push", [iaV, r2.v])
@@ -3758,11 +4363,11 @@ KwContract  = "contract" KwEnd ;
                 // the ordinary method dispatch when nothing declares it.
                 if (memberExtNames["$" + s.name] == true && builtinMethodNames["$" + s.name] != true) {
                     var mxa = emitArgs(b, orderArgs(s.args, undefined))
-                    return {b: mxa.b, v: callExt(mxa.b, "js_ktmextcall",
+                    return {b: mxa.b, v: mxa.b.NewCall(rtMextCall(),
                                                  [curScopeV, cur, emitStr(mxa.b, s.name), mxa.v])}
                 }
                 if (extResolves(s.name)) {
-                    var efV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "ext$" + s.name)])
+                    var efV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "ext$" + s.name)])
                     var eargsV = callExt(b, "js_arr_new", [])
                     callExt(b, "js_arr_push", [eargsV, cur])
                     var eargs = orderArgs(s.args, funParams["$" + s.name])
@@ -3810,7 +4415,7 @@ KwContract  = "contract" KwEnd ;
                     b = emitConcatArgs(lb, callArgsV, lea.v)
                     var mcls = methodClasses["$" + s.name]
                     if (mcls == undefined) {
-                        var lamV0 = callExt(b, "js_ktget", [curScopeV, emitStr(b, s.name)])
+                        var lamV0 = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, s.name)])
                         return {b: b, v: callExt(b, "js_call", [lamV0, hUndef, callArgsV])}
                     }
                     var margsV = lea.v
@@ -3828,7 +4433,7 @@ KwContract  = "contract" KwEnd ;
                     // js_ktget ran (and threw) before the probe could pick the method. The
                     // interpreter half always answered correctly; found while pinning the
                     // super surface, where a class method happened to be called `f`.
-                    var lamV = callExt(lamB, "js_ktget", [curScopeV, emitStr(lamB, s.name)])
+                    var lamV = lamB.NewCall(rtKtGet(), [curScopeV, emitStr(lamB, s.name)])
                     var lv2 = callExt(lamB, "js_call", [lamV, hUndef, callArgsV])
                     lamB.NewBr(mrg)
                     return {b: mrg, v: mrg.NewPhi([llvm.ir.NewIncoming(mv, objB2), llvm.ir.NewIncoming(lv2, lamB)])}
@@ -3885,12 +4490,12 @@ KwContract  = "contract" KwEnd ;
                 // emit-time question) and falls back to the ordinary field read when
                 // nothing declares it, exactly as js_ktmextcall does for a call.
                 if (memberExtPropResolves(s.name)) {
-                    return {b: b, v: callExt(b, "js_ktmextget", [curScopeV, cur, emitStr(b, s.name)])}
+                    return {b: b, v: b.NewCall(rtMextGet(), [curScopeV, cur, emitStr(b, s.name)])}
                 }
                 // An extension property wins only when no builtin and no class property
                 // uses the name: call its getter with the receiver as `this`.
                 if (extPropResolves(s.name)) {
-                    var gV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "extp$" + s.name)])
+                    var gV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "extp$" + s.name)])
                     var gargsV = callExt(b, "js_arr_new", [])
                     callExt(b, "js_arr_push", [gargsV, cur])
                     return {b: b, v: callExt(b, "js_call", [gV, hUndef, gargsV])}
@@ -4520,7 +5125,7 @@ KwContract  = "contract" KwEnd ;
             // level, where it is an ordinary call on a value of that name.
             if (emitClassTop() != null && classNames[name] == undefined
                 && funNames["$" + name] != true && classMethodNames["$" + name] == true) {
-                var selfV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
+                var selfV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "this")])
                 var ma = emitArgs(b, orderArgs(args, paramsFor(name, args)))
                 return {b: ma.b, v: callExt(ma.b, "js_ktsmcall", [selfV, emitStr(ma.b, name), ma.v])}
             }
@@ -4535,7 +5140,7 @@ KwContract  = "contract" KwEnd ;
                 var ownerN = innerOwner["$" + name]
                 if (ownerN != undefined) {
                     callExt(b, "js_set", [objV, emitStr(b, "__outer"),
-                                          callExt(b, "js_ktouter", [curScopeV, emitStr(b, ownerN)])])
+                                          b.NewCall(rtOuter(), [curScopeV, emitStr(b, ownerN)])])
                 }
                 var cargs = orderArgs(args, ctorParamNames["$" + name])
                 var argsV = callExt(b, "js_arr_new", [])
@@ -4550,7 +5155,7 @@ KwContract  = "contract" KwEnd ;
                 callExt(b, "js_call", [ctorV, hUndef, argsV])
                 return {b: b, v: objV}
             }
-            var fV = callExt(b, "js_ktget", [curScopeV, emitStr(b, name)])
+            var fV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, name)])
             var ea = emitArgs(b, orderArgs(args, funParams["$" + name]))
             b = ea.b
             // `v(args)` where v holds an instance of a class declaring the invoke
@@ -4566,7 +5171,7 @@ KwContract  = "contract" KwEnd ;
     }
 
     function emitRefPath(b, ref) {
-        var o = callExt(b, "js_ktget", [curScopeV, emitStr(b, ref.name)])
+        var o = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, ref.name)])
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) {
@@ -4607,7 +5212,7 @@ KwContract  = "contract" KwEnd ;
             var v = r.v
             if (ref.name == "field" && ref.path.length == 0 && emitBackingField != null) {
                 // `field = v` inside an accessor writes the backing field of its property.
-                var fThisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
+                var fThisV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "this")])
                 var fNameV = emitStr(b, emitBackingField)
                 if (op != "=") {
                     var oldF = callExt(b, "js_get", [fThisV, fNameV])
@@ -4619,44 +5224,44 @@ KwContract  = "contract" KwEnd ;
             } else if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
                 if (op != "=") {
-                    var old = callExt(b, "js_ktget", [curScopeV, nameV])
+                    var old = b.NewCall(rtKtGet(), [curScopeV, nameV])
                     var ro = emitOpBin(b, op, old, v)
                     b = ro.b
                     v = ro.v
                 }
                 // js_ktvarset, not js_kset: a binding holding a delegate box is written
                 // through the delegate's setValue (see RealDelegateDecl).
-                callExt(b, "js_ktvarset", [curScopeV, nameV, v])
+                b.NewCall(rtVarSet(), [curScopeV, nameV, v])
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
                 if (mxWrite != null) {
                     if (op != "=") {
-                        var oldX = callExt(b, "js_ktmextget", [curScopeV, p.obj, p.key])
+                        var oldX = b.NewCall(rtMextGet(), [curScopeV, p.obj, p.key])
                         var rx = emitOpBin(b, op, oldX, v)
                         b = rx.b
                         v = rx.v
                     }
-                    callExt(b, "js_ktmextset", [curScopeV, p.obj, p.key, v])
+                    b.NewCall(rtMextSet(), [curScopeV, p.obj, p.key, v])
                 } else if (epWrite != null) {
                     // A top-level extension property's setter (computed or delegated):
                     // the twin of the extPropResolves READ arm in the suffix emitter.
                     if (op != "=") {
-                        var gEV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "extp$" + epWrite)])
+                        var gEV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "extp$" + epWrite)])
                         var gEA = callExt(b, "js_arr_new", [])
                         callExt(b, "js_arr_push", [gEA, p.obj])
                         var rE = emitOpBin(b, op, callExt(b, "js_call", [gEV, hUndef, gEA]), v)
                         b = rE.b
                         v = rE.v
                     }
-                    var sEV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "extps$" + epWrite)])
+                    var sEV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "extps$" + epWrite)])
                     var sEA = callExt(b, "js_arr_new", [])
                     callExt(b, "js_arr_push", [sEA, p.obj])
                     callExt(b, "js_arr_push", [sEA, v])
                     callExt(b, "js_call", [sEV, hUndef, sEA])
                 } else {
                     if (op != "=") {
-                        var oldM = callExt(b, "js_get", [p.obj, p.key])
+                        var oldM = callExt(b, "js_ktfget", [p.obj, p.key])
                         var rm = emitOpBin(b, op, oldM, v)
                         b = rm.b
                         v = rm.v
@@ -4697,11 +5302,11 @@ KwContract  = "contract" KwEnd ;
                 }
                 if (isField && memberExtPropResolves(fname)) {
                     if (op != "=") {
-                        var rx2 = emitOpBin(bb, op, callExt(bb, "js_ktmextget", [curScopeV, objV, keyV]), v)
+                        var rx2 = emitOpBin(bb, op, bb.NewCall(rtMextGet(), [curScopeV, objV, keyV]), v)
                         bb = rx2.b
                         v = rx2.v
                     }
-                    callExt(bb, "js_ktmextset", [curScopeV, objV, keyV, v])
+                    bb.NewCall(rtMextSet(), [curScopeV, objV, keyV, v])
                     return {b: bb, v: v}
                 }
                 // A top-level extension property's SETTER - a computed `set(v) { ... }`
@@ -4711,14 +5316,14 @@ KwContract  = "contract" KwEnd ;
                 // it, through extPropSetters).
                 if (isField && extPropSetResolves(fname)) {
                     if (op != "=") {
-                        var gV0 = callExt(bb, "js_ktget", [curScopeV, emitStr(bb, "extp$" + fname)])
+                        var gV0 = bb.NewCall(rtKtGet(), [curScopeV, emitStr(bb, "extp$" + fname)])
                         var ga0 = callExt(bb, "js_arr_new", [])
                         callExt(bb, "js_arr_push", [ga0, objV])
                         var rx3 = emitOpBin(bb, op, callExt(bb, "js_call", [gV0, hUndef, ga0]), v)
                         bb = rx3.b
                         v = rx3.v
                     }
-                    var sV = callExt(bb, "js_ktget", [curScopeV, emitStr(bb, "extps$" + fname)])
+                    var sV = bb.NewCall(rtKtGet(), [curScopeV, emitStr(bb, "extps$" + fname)])
                     var sargsV = callExt(bb, "js_arr_new", [])
                     callExt(bb, "js_arr_push", [sargsV, objV])
                     callExt(bb, "js_arr_push", [sargsV, v])
@@ -4726,7 +5331,7 @@ KwContract  = "contract" KwEnd ;
                     return {b: bb, v: v}
                 }
                 if (op != "=") {
-                    var ro = emitOpBin(bb, op, callExt(bb, "js_get", [objV, keyV]), v)
+                    var ro = emitOpBin(bb, op, callExt(bb, "js_ktfget", [objV, keyV]), v)
                     bb = ro.b
                     v = ro.v
                 }
@@ -4758,13 +5363,13 @@ KwContract  = "contract" KwEnd ;
             var oneV = emitNum(b, step)
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
-                var newV = callExt(b, "js_ktstep", [callExt(b, "js_ktget", [curScopeV, nameV]), oneV])
-                callExt(b, "js_kset", [curScopeV, nameV, newV])
+                var newV = callExt(b, "js_ktstep", [b.NewCall(rtKtGet(), [curScopeV, nameV]), oneV])
+                b.NewCall(rtKSet(), [curScopeV, nameV, newV])
                 return {b: b, v: newV}
             }
             var p = emitRefPath(b, ref)
             b = p.b
-            var newM = callExt(b, "js_ktstep", [callExt(b, "js_get", [p.obj, p.key]), oneV])
+            var newM = callExt(b, "js_ktstep", [callExt(b, "js_ktfget", [p.obj, p.key]), oneV])
             callExt(b, "js_ktset", [p.obj, p.key, newM])
             return {b: b, v: newM}
         }
@@ -4776,13 +5381,13 @@ KwContract  = "contract" KwEnd ;
             var oneV = emitNum(b, step)
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
-                var oldV = callExt(b, "js_ktget", [curScopeV, nameV])
-                callExt(b, "js_kset", [curScopeV, nameV, callExt(b, "js_ktstep", [oldV, oneV])])
+                var oldV = b.NewCall(rtKtGet(), [curScopeV, nameV])
+                b.NewCall(rtKSet(), [curScopeV, nameV, callExt(b, "js_ktstep", [oldV, oneV])])
                 return {b: b, v: oldV}
             }
             var p = emitRefPath(b, ref)
             b = p.b
-            var oldM = callExt(b, "js_get", [p.obj, p.key])
+            var oldM = callExt(b, "js_ktfget", [p.obj, p.key])
             callExt(b, "js_ktset", [p.obj, p.key, callExt(b, "js_ktstep", [oldM, oneV])])
             return {b: b, v: oldM}
         }
@@ -4811,10 +5416,17 @@ KwContract  = "contract" KwEnd ;
 
     // ----- Statement thunks -----
 
+    // `val bare1: Int` with no initializer, assigned later. The slot is declared
+    // NULL rather than undefined, and that is not cosmetic: js_scope_typeof answers
+    // "undefined" for a slot that HOLDS undefined and for an absent name alike, so
+    // the emitted kt_varset helper would take such a name for a non-local and hunt
+    // it up the `this` chain. Swift's port records exactly this trap and declares an
+    // uninitialised `let v: Int` as NULL for the same reason; Kotlin now does too.
+    // Measured: assertion blk1 of tests/kotlin-test-full.kt.
     function makeBareDecl(items) {
         var name = items[0]
         return function(b) {
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hNull])
             return b
         }
     }
@@ -5732,18 +6344,18 @@ KwContract  = "contract" KwEnd ;
             callExt(b, "js_set", [boxV, emitStr(b, "done"), hFalse])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, slot), boxV])
             var gi = emitFunc(["__dispatch", "this"], function(bb) {
-                bb.NewRet(callExt(bb, "js_ktdget", [callExt(bb, "js_ktdmemo", [callExt(bb, "js_ktget", [curScopeV, emitStr(bb, slot)])]),
-                                                    callExt(bb, "js_ktget", [curScopeV, emitStr(bb, "this")]),
+                bb.NewRet(callExt(bb, "js_ktdget", [callExt(bb, "js_ktdmemo", [bb.NewCall(rtKtGet(), [curScopeV, emitStr(bb, slot)])]),
+                                                    bb.NewCall(rtKtGet(), [curScopeV, emitStr(bb, "this")]),
                                                     emitStr(bb, nm)]))
                 return deadBlock()
             }, false, false, undefined, true)
             callExt(b, "js_set", [clsV, emitStr(b, "extget$" + nm),
                                   callExt(b, "js_closure", [handle(gi), curScopeV])])
             var si = emitFunc(["__dispatch", "this", "value"], function(bb) {
-                callExt(bb, "js_ktdset", [callExt(bb, "js_ktdmemo", [callExt(bb, "js_ktget", [curScopeV, emitStr(bb, slot)])]),
-                                          callExt(bb, "js_ktget", [curScopeV, emitStr(bb, "this")]),
+                callExt(bb, "js_ktdset", [callExt(bb, "js_ktdmemo", [bb.NewCall(rtKtGet(), [curScopeV, emitStr(bb, slot)])]),
+                                          bb.NewCall(rtKtGet(), [curScopeV, emitStr(bb, "this")]),
                                           emitStr(bb, nm),
-                                          callExt(bb, "js_ktget", [curScopeV, emitStr(bb, "value")])])
+                                          bb.NewCall(rtKtGet(), [curScopeV, emitStr(bb, "value")])])
                 bb.NewRet(hUndef)
                 return deadBlock()
             }, false, false, undefined, true)
@@ -5792,7 +6404,7 @@ KwContract  = "contract" KwEnd ;
             var bb = r.b
             return {b: bb, v: callExt(bb, "js_ktdcheck",
                                       [r.v, emitStr(bb, where), c.warnUnsupported ? hTrue : hFalse,
-                                       callExt(bb, "js_ktdthis", [curScopeV]), emitStr(bb, rec.name)])}
+                                       bb.NewCall(rtDThis(), [curScopeV]), emitStr(bb, rec.name)])}
         }
     }
     // The js_defprop pair of a delegated member property.
@@ -5886,15 +6498,15 @@ KwContract  = "contract" KwEnd ;
             if (emitOuterProps != null && emitOuterProps["$" + name] == true
                 && !(emitClassTop() != null && classOwnProps["$" + emitClassTop()] != undefined
                      && classOwnProps["$" + emitClassTop()]["$" + name] == true)) {
-                var itV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
+                var itV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "this")])
                 return {b: b, v: callExt(b, "js_get", [callExt(b, "js_get", [itV, emitStr(b, "__outer")]),
                                                        emitStr(b, name)])}
             }
             if (name == "field" && emitBackingField != null) {
-                var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
+                var thisV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "this")])
                 return {b: b, v: callExt(b, "js_get", [thisV, emitStr(b, emitBackingField)])}
             }
-            return {b: b, v: callExt(b, core.scopeGetExt, [curScopeV, emitStr(b, name)])}
+            return {b: b, v: b.NewCall(rtKtGet(), [curScopeV, emitStr(b, name)])}
         }
     }
     // An EXTENSION property: the getter becomes an IR function with the receiver in the
@@ -5995,18 +6607,18 @@ KwContract  = "contract" KwEnd ;
                                                 hNull, emitStr(b, name)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, slot), dV])
             var gi = emitFunc([], function(bb) {
-                bb.NewRet(callExt(bb, "js_ktdget", [callExt(bb, "js_ktget", [curScopeV, emitStr(bb, slot)]),
-                                                    callExt(bb, "js_ktget", [curScopeV, emitStr(bb, "this")]),
+                bb.NewRet(callExt(bb, "js_ktdget", [bb.NewCall(rtKtGet(), [curScopeV, emitStr(bb, slot)]),
+                                                    bb.NewCall(rtKtGet(), [curScopeV, emitStr(bb, "this")]),
                                                     emitStr(bb, name)]))
                 return deadBlock()
             }, true)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "extp$" + name),
                                          callExt(b, "js_closure", [handle(gi), curScopeV])])
             var si = emitFunc(["value"], function(bb) {
-                callExt(bb, "js_ktdset", [callExt(bb, "js_ktget", [curScopeV, emitStr(bb, slot)]),
-                                          callExt(bb, "js_ktget", [curScopeV, emitStr(bb, "this")]),
+                callExt(bb, "js_ktdset", [bb.NewCall(rtKtGet(), [curScopeV, emitStr(bb, slot)]),
+                                          bb.NewCall(rtKtGet(), [curScopeV, emitStr(bb, "this")]),
                                           emitStr(bb, name),
-                                          callExt(bb, "js_ktget", [curScopeV, emitStr(bb, "value")])])
+                                          bb.NewCall(rtKtGet(), [curScopeV, emitStr(bb, "value")])])
                 bb.NewRet(hUndef)
                 return deadBlock()
             }, true)
@@ -6528,7 +7140,7 @@ KwContract  = "contract" KwEnd ;
     var innerOwner = {}
     function makeThisAt(lbl) {
         return function(b) {
-            var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
+            var thisV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "this")])
             var top = emitClassTop()
             // A label naming an ENCLOSING class is the inner instance's outer receiver.
             // js_ktthisat walks the __outer chain BY NAME and falls back to the receiver
@@ -6537,7 +7149,7 @@ KwContract  = "contract" KwEnd ;
             // Inside a MEMBER extension, `this` is the EXTENSION receiver, so
             // `this@DeclaringClass` is the dispatch receiver rather than `this`.
             if (emitMemberExtOf != null && emitMemberExtOf == lbl) {
-                return {b: b, v: callExt(b, "js_ktget", [curScopeV, emitStr(b, "__dispatch")])}
+                return {b: b, v: b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "__dispatch")])}
             }
             if (top != null && top != lbl) {
                 return {b: b, v: callExt(b, "js_ktthisat", [thisV, emitStr(b, lbl)])}
@@ -6559,7 +7171,7 @@ KwContract  = "contract" KwEnd ;
             return notImplExpr("isInitialized on a property that is not lexically accessible here", pos)
         }
         return function(b) {
-            var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
+            var thisV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "this")])
             return {b: b, v: callExt(b, "js_sne", [callExt(b, "js_get", [thisV, emitStr(b, name)]), hNull])}
         }
     }
@@ -6570,7 +7182,7 @@ KwContract  = "contract" KwEnd ;
     // kCtorRefOf in kotlin-interpreter.abnf, so the two halves cannot drift apart.
     function makeBareRef(name) {
         return function(b) {
-            return {b: b, v: callExt(b, "js_ktbareref", [curScopeV, emitStr(b, name)])}
+            return {b: b, v: b.NewCall(rtBareRef(), [curScopeV, emitStr(b, name)])}
         }
     }
     // `base::name` and `base::class`. Whether the base is a VALUE (a bound reference) or
@@ -6580,7 +7192,13 @@ KwContract  = "contract" KwEnd ;
     // work without a String descriptor.
     function makeQualRef(baseName, name) {
         return function(b) {
-            var baseV = callExt(b, "js_ktrefbase", [curScopeV, emitStr(b, baseName)])
+            // A builtin TYPE name is decided HERE, at emit time, because the base is
+            // a literal: the extern's ktTypeNames arm runs before its scope walk, so
+            // it cannot be lowered under the walk. Everything else goes through the
+            // kt_refbase helper (see rtRefBase).
+            var baseV = ktTypeNameSet["$" + baseName] == true
+                ? callExt(b, "js_ktrefbase", [curScopeV, emitStr(b, baseName)])
+                : b.NewCall(rtRefBase(), [curScopeV, emitStr(b, baseName)])
             if (name == "class") { return {b: b, v: callExt(b, "js_ktclasslit", [baseV])} }
             return {b: b, v: emitRefValue(b, baseV, name)}
         }
@@ -6593,7 +7211,7 @@ KwContract  = "contract" KwEnd ;
     // program that declares no extension emits the same call it did before.
     function emitRefValue(b, baseV, name) {
         var extV = hUndef
-        if (extResolves(name)) { extV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "ext$" + name)]) }
+        if (extResolves(name)) { extV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "ext$" + name)]) }
         return callExt(b, "js_ktref", [baseV, emitStr(b, name), extV])
     }
 
@@ -7097,7 +7715,7 @@ KwContract  = "contract" KwEnd ;
                 return {b: b, v: hUndef}
             }
             var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, target)])
-            var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
+            var thisV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "this")])
             var ea = emitArgs(b, args)
             b = ea.b
             return {b: b, v: callExt(b, "js_supercall", [supV, thisV, emitStr(b, mname), ea.v])}
@@ -7123,7 +7741,7 @@ KwContract  = "contract" KwEnd ;
                 return {b: b, v: hUndef}
             }
             var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, target)])
-            var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
+            var thisV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "this")])
             return {b: b, v: callExt(b, "js_ktsupget", [supV, thisV, emitStr(b, fname)])}
         }
     }
@@ -7150,7 +7768,7 @@ KwContract  = "contract" KwEnd ;
             b = r.b
             var v = r.v
             var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, target)])
-            var thisV = callExt(b, "js_ktget", [curScopeV, emitStr(b, "this")])
+            var thisV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "this")])
             var nameV = emitStr(b, fname)
             if (op != "=") {
                 var ro = emitOpBin(b, op, callExt(b, "js_ktsupget", [supV, thisV, nameV]), v)
@@ -7299,9 +7917,89 @@ KwContract  = "contract" KwEnd ;
     }
 
     // ----- Core library config (see lib/compile-core.js) -----
-    core.scopeGetExt = "js_ktget" // Scope read with fallback to properties of this.
+    // core.scopeGetExt stays the FLOOR's own js_scope_get: the this-aware read is the
+    // emitted kt_ktget helper above (makeVarRef is overridden to call it), because
+    // js_ktget took a SCOPE HANDLE and layer 2 cannot open one. This field names an
+    // EXTERN, and js_ktget is no longer one.
+    core.scopeGetExt = "js_scope_get"
 
     c.compile(c.asg)
+
+    // ----- the native build (docs/runtime-next-plan.md part 3) -----
+    // jsdispatch(idx, env, args) is the function table a LINKED binary needs: js_closure
+    // stores a raw function index, and under llvm.Run the Go runtime turns that index
+    // back into a callee by looking "jsf_<idx>" up in the module. A binary has no such
+    // reflection, so the module carries the mapping itself. The MISS arm calls
+    // jsdispatch_ext, the same table emitted by the layer-2 runtime library
+    // (lib/kotlin-rt.ll, built by metajs-to-llvm-ir.abnf -rt-lib): its own function
+    // indices are offset by a million, so the two chains cannot overlap and one js_call
+    // reaches either module. Emitted ONLY for -exe, so every other run keeps the module
+    // it had. This is lua-to-llvm-ir.abnf's emitDispatch, unchanged - the mechanism is
+    // the reusable part of phase 4 and nothing here is Kotlin's.
+    function emitDispatch() {
+        var idxs = []
+        var fns = []
+        var i = 0
+        while (i < m.Funcs.length) {
+            var f = m.Funcs[i]
+            var nm = f.Name()
+            if (nm.length > 4 && nm.substring(0, 4) == "jsf_") {
+                idxs.push(parseInt(nm.substring(4, nm.length)))
+                fns.push(f)
+            }
+            i = i + 1
+        }
+        var ext = m.NewFunc("jsdispatch_ext", i64,
+            [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var d = m.NewFunc("jsdispatch", i64,
+            [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var b = d.NewBlock("entry")
+        var extB = d.NewBlock("ext")
+        var ownB = d.NewBlock("own")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredSGE, d.Params[0], llvm.constant.NewInt(i64, 1000000)), extB, ownB)
+        extB.NewRet(extB.NewCall(ext, [d.Params[0], d.Params[1], d.Params[2]]))
+        b = ownB
+        i = 0
+        while (i < fns.length) {
+            var hit = d.NewBlock("hit" + idxs[i])
+            var nxt = d.NewBlock("miss" + idxs[i])
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, d.Params[0], llvm.constant.NewInt(i64, idxs[i])), hit, nxt)
+            hit.NewRet(hit.NewCall(fns[i], [d.Params[1], d.Params[2]]))
+            b = nxt
+            i = i + 1
+        }
+        b.NewRet(b.NewCall(ext, [d.Params[0], d.Params[1], d.Params[2]]))
+    }
+
+    // The two runtime inputs live next to THIS grammar, so the build does not depend on
+    // the working directory: lib/runtime.ll is the C floor and lib/kotlin-rt.ll is
+    // Kotlin's own layer 2. An explicit -rt REPLACES both. This grammar's entry point is
+    // ALREADY named jsmain, which is what the C floor's main() calls, so - like go and
+    // unlike most of part 3 - no one-call alias has to be emitted.
+    function libPath(name) {
+        var mn = moduleName()
+        var cut = -1
+        var i = 0
+        while (i < mn.length) {
+            var ch = mn.charAt(i)
+            if (ch == "/" || ch == "\\") { cut = i }
+            i = i + 1
+        }
+        return mn.substring(0, cut + 1) + "lib/" + name
+    }
+
+    if (c.exePath != undefined && c.exePath != "") {
+        emitDispatch()
+        var rts = c.runtime
+        if (rts == undefined || rts.length == 0) { rts = [libPath("runtime.ll"), libPath("kotlin-rt.ll")] }
+        var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
+        if (buildErr != "") {
+            println(buildErr)
+            exit(1)
+        }
+        println("kotlin compiler: wrote executable " + c.exePath)
+        exit(0)
+    }
 
     println(m)
 
