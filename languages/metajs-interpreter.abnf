@@ -863,6 +863,33 @@ KwDefault   = "default" KwEnd ;
         return out
     }
 
+    // ----- delKey: remove an own property, key-order entry and all -----
+    //
+    // js_del of languages/lib/runtime.c (host id 63) and of abnf/jsrt.go is the
+    // specification, and it is a BUILTIN for the same reason keysOf is: MetaJS has
+    // no `delete` operator at all, so a layer-2 file could only BLANK a slot and
+    // keep a side table of what it had blanked. Answers true either way.
+    //
+    // THIS HALF CANNOT USE `delete` EITHER - there is no such operator in the
+    // MetaJS the :script is written in - so it does what the other two halves do
+    // observably: drops the key from the insertion-order record keysOf reads, and
+    // writes the slot back to undefined. A later store re-notes the key, so it
+    // lands at the END of the order exactly as it does in C and in Go.
+    function delKeyHost(o, key) {
+        if (o == undefined || o == null) { return true }
+        if (typeof o != "object") { return true }
+        if (objIsArr(o)) { return true }
+        var s = "" + key
+        var ks = o.__ik
+        if (ks != undefined) {
+            var keep = []
+            for (var i = 0; i < ks.length; i++) { if (ks[i] !== s) { keep.push(ks[i]) } }
+            rawSet(o, "__ik", keep)
+        }
+        rawSet(o, s, undefined)
+        return true
+    }
+
     var hostGlobals = {
         "println": siPrintln, "print": siPrint, "printf": printf, "sprintf": sprintf,
         "eprintln": siEprintln,
@@ -881,6 +908,7 @@ KwDefault   = "default" KwEnd ;
         "sintConv": function(v, bits, uns) { return siNorm(siPair(v), bits, uns ? true : false) },
         "sintStr": siStr, "sintNum": siNum,
         "keysOf": keysOfHost,
+        "delKey": delKeyHost,
         // The ten boxed-double names, the same set languages/lib/runtime.c
         // seeds (ids 51..60) and abnf/jsrtjvm.go's jfBindings adds.
         "flo": flHost,

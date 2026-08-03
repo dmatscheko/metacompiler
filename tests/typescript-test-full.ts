@@ -957,6 +957,93 @@ function s32(): void {
     check("sa10", y.f === 5 && n === 0);
 }
 
+// ===== SECTION 33: delete, key order, and template-literal ToString =====
+// Two defects that were invisible to every suite in the repo until this section
+// existed, both measured against node v24 and both fixed in all three engines.
+// TypeScript shares js's layer 2 and carries its own makeTemplate, so it needed both
+// fixes and gets its own copy of the ratchet.
+//
+// DELETE. The C floor had no js_del at all, so layer 2 blanked the slot and kept a
+// side table of what it had blanked. `delete` + `in` + Object.keys were right; key
+// ORDER after a delete-then-reinsert, for-in and object spread were not, and the
+// table was quadratic and leaked. The floor exports js_del now.
+//
+// TEMPLATE LITERAL. `${v}` is ToString(v) - ToPrimitive with hint STRING - so an
+// object's own `toString` runs, an object with only a `valueOf` still spells
+// "[object Object]", and a BigInt spells its digits. Both halves route every
+// interpolated PART through it now instead of concatenating the raw values.
+function s33(): void {
+    const o: any = { a: 1, b: 2, c: 3 };
+    check("del1", (delete o.b) === true && o.b === undefined);
+    check("del2", Object.keys(o).join(",") === "a,c");
+    // A key that comes back is a NEW key: it lands at the end of the order.
+    o.b = 9;
+    check("del3", Object.keys(o).join(",") === "a,c,b");
+    let fi: string = "";
+    for (const k in o) { fi = fi + k; }
+    check("del4", fi === "acb");
+    check("del5", keyStr33({ ...o }) === "a:1;c:3;b:9;");
+    check("del6", keyStr33(Object.assign({}, o)) === "a:1;c:3;b:9;");
+    const d: any = { x: 1, y: 2 };
+    delete d.x;
+    check("del7", !("x" in d) && ("y" in d) && Object.keys(d).length === 1);
+    check("del8", keyStr33({ ...d }) === "y:2;");
+    // Deleting what is not there answers true, exactly like deleting what is.
+    check("del9", (delete d.nope) === true && (delete d.y) === true && Object.keys(d).length === 0);
+    // On an ARRAY the length is unchanged and the slot reads as undefined.
+    const arr: any = [1, 2, 3];
+    check("del10", (delete arr[1]) === true && arr.length === 3 && arr[1] === undefined);
+    // The shape that was quadratic, and one that checks the surviving ORDER.
+    const big: any = {};
+    for (let i: number = 0; i < 300; i++) { big["k" + i] = i; delete big["k" + i]; }
+    check("del11", Object.keys(big).length === 0);
+    for (let j: number = 0; j < 300; j++) { big["m" + j] = j; }
+    for (let m: number = 0; m < 300; m = m + 2) { delete big["m" + m]; }
+    check("del12", Object.keys(big).length === 150 && Object.keys(big)[0] === "m1");
+
+    check("tpl1", `${{ toString: function (): string { return "T"; } }}` === "T");
+    check("tpl2", `${new (class { toString(): string { return "D!"; } })()}` === "D!");
+    // valueOf alone is NOT consulted: a template is hint string, not hint default.
+    check("tpl3", `${{ valueOf: function (): number { return 7; } }}` === "[object Object]");
+    check("tpl4", `${{ valueOf: function (): number { return 7; }, toString: function (): string { return "B"; } }}` === "B");
+    check("tpl5", `${10n}` === "10" && `${2n ** 100n}` === "1267650600228229401496703205376");
+    check("tpl6", `${1} ${"s"} ${true} ${undefined} ${null} ${({})}` === "1 s true undefined null [object Object]");
+    check("tpl7", `${[1, 2]}` === "1,2" && `${[]}` === "");
+    const t: any = { toString: function (): string { return "T"; } };
+    check("tpl8", `a${t}b${t}c` === "aTbTc");
+
+    // The implicit global, which is the third floor addition of this change.
+    // A plain `=` to a name that is on NO scope of the chain creates the binding in
+    // the ROOT scope (js_scope_set_or_create), so it outlives the function that
+    // wrote it. js_scope_typeof cannot be used to build this in an emitter - it
+    // answers "undefined" for an absent name and for a slot HOLDING undefined
+    // alike - which is why the C floor now carries the walk itself.
+    check("ig1", mkGlobal33() === 100);
+    check("ig2", implicitGlobal33 === 100);
+    implicitGlobal33 = implicitGlobal33 + 1;
+    check("ig3", bumpGlobal33() === 102 && implicitGlobal33 === 102);
+    // An assignment that DOES find the name on the chain must not shadow it in the
+    // root: this is the arm js_pyset_var and js_scope_set_or_create agree on.
+    let outer: number = 1;
+    function inner33(): void { outer = 42; }
+    inner33();
+    check("ig4", outer === 42 && typeof outer === "number");
+}
+function mkGlobal33(): number {
+    implicitGlobal33 = 100;
+    return implicitGlobal33;
+}
+function bumpGlobal33(): number {
+    implicitGlobal33 = implicitGlobal33 + 1;
+    return implicitGlobal33;
+}
+function keyStr33(o: any): string {
+    const ks: any = Object.keys(o);
+    let s: string = "";
+    for (let i: number = 0; i < ks.length; i++) { s = s + ks[i] + ":" + o[ks[i]] + ";"; }
+    return s;
+}
+
 function main(): number {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
@@ -990,6 +1077,7 @@ function main(): number {
     s30(); // SECTION-CALL 30
     s31(); // SECTION-CALL 31
     s32(); // SECTION-CALL 32
+    s33(); // SECTION-CALL 33
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

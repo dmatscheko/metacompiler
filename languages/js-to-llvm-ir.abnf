@@ -2985,20 +2985,14 @@ NotFuncHead = :script(~~
         return callExt(b, "js_call", [fnV, thisV, argsV])
     }
 
-    // js_scope_set_or_create is abnf/jsrt.go's, not the C floor's: it walks the chain
-    // and, when the name is nowhere on it, creates the binding in the ROOT scope -
-    // JavaScript's non-strict implicit global. Layer 2 cannot write it (a scope is the
-    // floor's private storage) and no floor extern answers it exactly. The closest one
-    // that IS in the floor is js_pyset_var, which walks the chain the same way and,
-    // when the name is nowhere, binds it in the scope the assignment STANDS IN rather
-    // than in the root. So under -exe the store is lowered to js_pyset_var and the ONE
-    // difference left is WHERE a never-declared name lands - measured in
-    // docs/runtime-next-plan.md part 3, where the floor request for a js_scope_has
-    // probe (which would make the lowering exact) is filed.
-    function storeExt(nm) {
-        if (nativeBuild && nm == "js_scope_set_or_create") { return "js_pyset_var" }
-        return nm
-    }
+    // js_scope_set_or_create - JavaScript's non-strict implicit global: the store
+    // walks the chain and, when the name is nowhere on it, creates the binding in the
+    // ROOT scope. It used to be abnf/jsrt.go's alone, so a native build lowered it to
+    // the floor's js_pyset_var, which is the same walk with the ENCLOSING scope as
+    // its fallback - exact for every declared name and wrong only for an implicit
+    // global created in a function and read outside it (tests/js-test-implicit-global.js
+    // and nothing else). The C floor exports the real function now (runtime.c, next to
+    // js_pyset_var), so BOTH engines call the same name and the lowering is gone.
 
     // Member reads and writes under -exe. abnf/jsrt.go's js_get / js_set know the
     // ACCESSOR box a `get x()` / `set x(v)` member is stored as (jsAccessor, a Go
@@ -3059,19 +3053,6 @@ NotFuncHead = :script(~~
     }
     if (nativeBuild) { core.truthyExt = "js_jstruthy" }
 
-
-    // The template-literal concatenation. It is the C floor's js_add and NOT js_jsadd,
-    // deliberately and against appearances - see the measurement in
-    // docs/runtime-next-plan.md part 3: `${obj}` renders "[object Object]" in BOTH
-    // Go-backed engines for an object with a toString of its own, where node runs the
-    // method, so switching this site to js_jsadd would FIX a defect and by doing so
-    // break byte-identity with llvm.Run, which is the gate. What the native build does
-    // need is the ONE thing rt.jsAdd does here that the floor's js_add cannot: render a
-    // BigInt as its digits. js_jstpl is exactly that and nothing more.
-    function tplAddExt() {
-        if (nativeBuild) { return "js_jstpl" }
-        return "js_add"
-    }
 
     function typeofExt() {
         if (nativeBuild) { return "js_jstypeof" }
@@ -3913,7 +3894,7 @@ NotFuncHead = :script(~~
                     v = emitBinOp(b, op, old, v)
                     setExt = "js_scope_set"
                 }
-                callExt(b, storeExt(setExt), [curScopeV, nameV, v])
+                callExt(b, setExt, [curScopeV, nameV, v])
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
@@ -4139,8 +4120,18 @@ NotFuncHead = :script(~~
         }
     }
 
-    // Template literal: items = [{str:"chunk"} | {expr: thunk}...]. Seeding with ""
-    // forces JS string coercion on every interpolated part (js_add).
+    // Template literal: items = [{str:"chunk"} | {expr: thunk}...].
+    //
+    // Every interpolated PART goes through js_jsstr - JavaScript's ToString, which is
+    // ToPrimitive with hint STRING, so an object's own `toString` runs and a BigInt
+    // spells its digits. The parts are strings by the time they meet, so the join is
+    // the floor's plain js_add in BOTH engines.
+    //
+    // Seeding with "" and letting js_add coerce (what this used to do) is wrong twice
+    // over, and both were measured against node: the floor's js_add stringifies an
+    // object as "[object Object]" whatever `toString` it carries, and routing the ADD
+    // through js_jsadd instead - the other candidate - renders `${boxedNumber}` as `5`,
+    // because a template does ToString and not ToPrimitive-with-hint-default.
     function makeTemplate(items) {
         return function(b) {
             var v = emitStr(b, "")
@@ -4150,9 +4141,9 @@ NotFuncHead = :script(~~
                 else {
                     var r = items[i].expr(b)
                     b = r.b
-                    pv = r.v
+                    pv = callExt(b, "js_jsstr", [r.v])
                 }
-                v = callExt(b, tplAddExt(), [v, pv])
+                v = callExt(b, "js_add", [v, pv])
             }
             return {b: b, v: v}
         }
@@ -4317,7 +4308,7 @@ NotFuncHead = :script(~~
     // whose leaves may be member targets ('[a.b] = c').
     function assignRef(b, ref, valueH) {
         if (ref.path.length == 0 && ref.base == undefined) {
-            callExt(b, storeExt("js_scope_set_or_create"), [curScopeV, emitStr(b, ref.name), valueH])
+            callExt(b, "js_scope_set_or_create", [curScopeV, emitStr(b, ref.name), valueH])
             return b
         }
         var p = emitRefPath(b, ref)
@@ -4351,7 +4342,7 @@ NotFuncHead = :script(~~
         b = d.b
         valueH = d.v
         if (pat.dtype == "id") {
-            callExt(b, storeExt(declExt), [curScopeV, emitStr(b, pat.name), valueH])
+            callExt(b, declExt, [curScopeV, emitStr(b, pat.name), valueH])
             return b
         }
         if (pat.dtype == "arr") {
@@ -4451,7 +4442,7 @@ NotFuncHead = :script(~~
                                    callExt(contB, "js_add", [iC, callExt(contB, "js_num_i", [handle(1)])])])
         contB.NewBr(headB)
         curScopeV = saved
-        callExt(exitB, storeExt(declExt), [curScopeV, emitStr(exitB, name), restV])
+        callExt(exitB, declExt, [curScopeV, emitStr(exitB, name), restV])
         return exitB
     }
     // items = [patternNode, initThunk]. Evaluate the initializer once, then bind.

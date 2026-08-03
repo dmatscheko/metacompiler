@@ -1378,6 +1378,82 @@ function s27() {
     check("pow05", Math.pow(0 - 0.5, 0 - 2147483647) < 0)  // overflow keeps it too
 }
 
+// ===== SECTION 28: delKey (the floor's js_del under its MetaJS name) =====
+// The other half of SECTION 27's argument. keysOf lets a layer-2 runtime WALK an
+// object; delKey lets it PRUNE one. It is a builtin and not an extern for the same
+// reason - an extern is only callable from an emitter - and MetaJS has no `delete`
+// operator at all, so without it a runtime library can only BLANK a slot and keep a
+// side table of what it blanked. JavaScript's layer 2 did exactly that, and it was
+// quadratic (61 s for 4,000 delete-in-a-loop iterations, 0.05 s now), it leaked, and
+// it could not repair key ORDER after a delete-then-reinsert.
+//
+// Three implementations again, and this section is what keeps them in step: host id
+// 63 of languages/lib/runtime.c, keysBindings of abnf/jsrtint.go, and - because the
+// interpreter's script has no `delete` either - the insertion-order list of
+// metajs-interpreter.abnf, rewritten without the key.
+function s28() {
+    var o = {a: 1, b: 2, c: 3}
+    check("del01", delKey(o, "b") === true)
+    check("del02", o.b === undefined)
+    var k = keysOf(o)
+    check("del03", k.length === 2 && k[0] === "a" && k[1] === "c")
+    // A key that comes BACK lands at the END of the order - it is a new key now.
+    o.b = 9
+    var k2 = keysOf(o)
+    check("del04", k2.length === 3 && k2[0] === "a" && k2[1] === "c" && k2[2] === "b")
+    check("del05", o.b === 9 && o.a === 1 && o.c === 3)
+    // Deleting a key that was never there is a no-op that still answers true.
+    check("del06", delKey(o, "zz") === true && keysOf(o).length === 3)
+    // Anything that is not an object is a no-op, and so is an empty object.
+    check("del07", delKey(5, "a") === true && delKey("s", "a") === true)
+    check("del08", delKey({}, "a") === true)
+    // Every key of an object, one at a time, first and last included.
+    var p = {x: 1, y: 2, z: 3}
+    delKey(p, "x")
+    delKey(p, "z")
+    check("del09", keysOf(p).length === 1 && keysOf(p)[0] === "y" && p.y === 2)
+    delKey(p, "y")
+    check("del10", keysOf(p).length === 0)
+    // The internal __-prefixed slots are reachable by name even though keysOf hides
+    // them: layer 2 stores its own bookkeeping there.
+    var d = {__class: 1, n: 2}
+    check("del11", delKey(d, "__class") === true && d.__class === undefined)
+    check("del12", keysOf(d).length === 1 && keysOf(d)[0] === "n")
+    // Many keys, deleted in a loop: this is the shape that was quadratic.
+    var big = {}
+    var i = 0
+    while (i < 400) { big["k" + i] = i; delKey(big, "k" + i); i = i + 1 }
+    check("del13", keysOf(big).length === 0)
+    // Every other key of 400, so the surviving order is checked rather than assumed.
+    var j = 0
+    while (j < 400) { big["m" + j] = j; j = j + 1 }
+    var m = 0
+    while (m < 400) { delKey(big, "m" + m); m = m + 2 }
+    var bk = keysOf(big)
+    check("del14", bk.length === 200 && bk[0] === "m1" && bk[199] === "m399")
+    check("del15", big.m1 === 1 && big.m0 === undefined && big.m399 === 399)
+    // A computed key, and a numeric one (delKey takes the key as a string).
+    var c = {}
+    c["x" + 1] = "v"
+    check("del16", delKey(c, "x1") === true && keysOf(c).length === 0)
+    var n = {}
+    n[7] = "seven"
+    check("del17", delKey(n, "7") === true && keysOf(n).length === 0 && n[7] === undefined)
+    // A nested object keeps its own list, and deleting the OUTER key does not
+    // disturb the inner one.
+    var nest = {outer: {inner: 1, second: 2}}
+    var inner = nest.outer
+    delKey(nest, "outer")
+    check("del18", keysOf(nest).length === 0 && keysOf(inner).length === 2)
+    check("del19", inner.inner === 1 && inner.second === 2)
+    // The slot is really gone rather than blanked: an object whose only key was
+    // deleted enumerates as empty, and re-adding does not duplicate the entry.
+    var r = {only: 1}
+    delKey(r, "only")
+    r.only = 2
+    check("del20", keysOf(r).length === 1 && keysOf(r)[0] === "only" && r.only === 2)
+}
+
 function main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -1406,6 +1482,7 @@ function main() {
     s25() // SECTION-CALL 25
     s26() // SECTION-CALL 26
     s27() // SECTION-CALL 27
+    s28() // SECTION-CALL 28
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

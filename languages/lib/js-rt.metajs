@@ -204,36 +204,20 @@ function js_jstruthy__raw(v) {
     return v
 }
 
-// js_jstpl (the template-literal concatenation of a native build) is in PART A,
-// next to the rest of the string surface.
+// There is no js_jstpl any more. A native build used to join a template literal with
+// a BigInt-aware `+` of its own, because the emitter joined the RAW parts and the
+// floor's js_add cannot spell a BigInt. Both emitters now push every interpolated
+// PART through js_jsstr (ToString, hint STRING) and join the strings with the floor's
+// js_add, which is one function instead of two and is what makes a user `toString`,
+// a class instance and a BigInt come out right in ALL THREE engines at once.
 
-// The template-literal concatenation of a NATIVE build (js-to-llvm-ir.abnf's
-// tplAddExt). It is NOT js_jsadd, deliberately: BOTH Go-backed engines render
-// `${obj}` for an object with a user toString as "[object Object]" where node runs
-// the method - measured, recorded in docs/runtime-next-plan.md part 3, and a
-// three-halves job rather than this gate - and byte-identity with llvm.Run is what
-// the gate asks for. The ONE thing abnf/jsrt.go's js_add does here that the C
-// floor's cannot is render a BigInt as its digits, so that is all this adds.
-function js_jstpl(a, b) {
-    var l = anytype
-    var r = anytype
-    l = a
-    r = b
-    if (jbIsBig(l)) { l = jbStr(l) }
-    if (jbIsBig(r)) { r = jbStr(r) }
-    return l + r
-}
-
-// js_scope_set_or_create walks a SCOPE, which layer 2 cannot open - the C floor's
-// scope is its private storage and no floor extern creates a binding in the ROOT.
-// js-to-llvm-ir.abnf and typescript-to-llvm-ir.abnf lower it in the EMITTER instead
-// (storeExt -> js_pyset_var, which is in the floor and differs only in WHERE a
-// never-declared name lands). See docs/runtime-next-plan.md part 3, WALL 3, for the
-// measurement and for the floor request that would make the lowering exact.
-function js_scope_set_or_create(env, name, v) {
-    fail("js layer 2: js_scope_set_or_create walks a SCOPE, which layer 2 cannot open - js-to-llvm-ir.abnf lowers it in the emitter instead. See languages/lib/js-rt.metajs, WALL 3")
-    return undefined
-}
+// WALL 3 IS CLOSED, and nothing of it is left here. js_scope_set_or_create walks a
+// SCOPE, which layer 2 cannot open, and the emitter used to lower it to the floor's
+// js_pyset_var - exact for every DECLARED name and wrong only for an implicit global
+// created inside a function and read outside it. The C floor now exports the real
+// thing (runtime.c, next to js_pyset_var), so both emitters call it under either
+// engine and this file must NOT define a twin: a top-level `function js_*` here is
+// an exported C symbol and would be a redefinition at link time.
 
 
 // ##########################################################################
@@ -255,12 +239,12 @@ function js_scope_set_or_create(env, name, v) {
 //     small bound-method table, nothing that dispatches a method on an instance).
 //     abnf/jsrt.go's js_jsmcall falls back to js_mcall -> rt.memberCall; here that
 //     fallback is written out at the end of js_jsmcall (jvFallbackCall).
-//  2. There is NO js_del either. The floor cannot REMOVE a key from an object -
-//     obj_put/obj_get are all layer 2 can reach - so js_jsdel blanks the slot and
-//     records the deletion in a side table (jvDelO/jvDelK) that js_has and
-//     jsvOwnKeys consult. `delete o.a` + `"a" in o` + Object.keys(o) therefore all
-//     answer as node does; a for-in over the same object (the floor's js_keys)
-//     still lists the key. See the report: a floor `js_del` would remove this.
+//  2. DELETE was the one floor gap this file paid for, and it is CLOSED: the floor
+//     now exports js_del, reachable from MetaJS as the host builtin `delKey`
+//     (runtime.c host id 63, abnf/jsrtint.go, metajs-interpreter.abnf). js_jsdel is
+//     four lines again and the side table of blanked keys is gone with all its
+//     consumers - so key ORDER after delete-then-reinsert, for-in and object spread
+//     are node's answers now, not just `delete` + `in` + Object.keys.
 //  3. An ACCESSOR is a Go type (*jsAccessor) there and an object box here:
 //     {__acc: 1, g: getter, s: setter}. js_jsmget / js_jsmset / js_supget /
 //     js_supset / js_has are the five places that know the box.
@@ -498,70 +482,16 @@ function js_jsge(a, b) {
 
 // ===================================================== delete =============
 //
-// The floor has no way to REMOVE a key from an object, so a deleted key is blanked
-// and remembered here. jvDelO holds the objects, jvDelK the parallel array of the
-// key arrays; jvDelN is the fast-path guard (a program that never deletes pays one
-// integer compare).
-
-var jvDelO = []
-var jvDelK = []
-var jvDelN = 0
-
-function jvDelIdx(o) {
-    var i = 0
-    while (i < jvDelO.length) {
-        if (jvDelO[i] === o) { return i }
-        i = i + 1
-    }
-    return -1
-}
-
-function jvIsDeleted(o, k) {
-    if (jvDelN === 0) { return false }
-    var i = jvDelIdx(o)
-    if (i < 0) { return false }
-    var ks = jvDelK[i]
-    var j = 0
-    while (j < ks.length) {
-        if (ks[j] === k) { return true }
-        j = j + 1
-    }
-    return false
-}
-
-function jvMarkDel(o, k) {
-    var i = jvDelIdx(o)
-    if (i < 0) {
-        jvDelO.push(o)
-        jvDelK.push([])
-        i = jvDelO.length - 1
-    }
-    var ks = jvDelK[i]
-    var j = 0
-    while (j < ks.length) {
-        if (ks[j] === k) { return undefined }
-        j = j + 1
-    }
-    ks.push(k)
-    jvDelN = jvDelN + 1
-    return undefined
-}
-
-// A store to a deleted key brings it back.
-function jvUnmarkDel(o, k) {
-    if (jvDelN === 0) { return undefined }
-    var i = jvDelIdx(o)
-    if (i < 0) { return undefined }
-    var ks = jvDelK[i]
-    var j = 0
-    var keep = []
-    while (j < ks.length) {
-        if (ks[j] === k) { jvDelN = jvDelN - 1 } else { keep.push(ks[j]) }
-        j = j + 1
-    }
-    jvDelK[i] = keep
-    return undefined
-}
+// `delKey` is the floor's js_del under its host-builtin name (runtime.c host id 63,
+// abnf/jsrtint.go's keysBindings). It REMOVES the key and its key-order entry, so
+// key order after a delete-then-reinsert, for-in, object spread and Object.keys are
+// all the floor's own answers and need no bookkeeping here.
+//
+// What this replaced: a side table of blanked keys (jvDelO/jvDelK/jvDelN), which
+// every own-keys walk and every js_has had to consult. It was linear in the number
+// of DISTINCT deleted-from objects per delete - quadratic over a loop, measured at
+// 61 s for 4000 iterations against 0.03 s now - it never freed an entry, and it
+// could not repair key order at all.
 
 // 'delete a[i]' on an ARRAY: the length is unchanged and the slot reads as
 // undefined (a real JS hole cannot be modelled - the interpreter half's arrays
@@ -576,11 +506,7 @@ function js_jsdel(o, key) {
         }
         return true
     }
-    if (jvIsObj(o)) {
-        var k = jvStr(key)
-        o[k] = undefined
-        jvMarkDel(o, k)
-    }
+    if (jvIsObj(o)) { delKey(o, jvStr(key)) }
     return true
 }
 
@@ -786,9 +712,6 @@ function js_jsmset(o, key, v) {
             }
         }
     }
-    if (jvDelN > 0) {
-        if (jvIsObj(o)) { jvUnmarkDel(o, jvStr(key)) }
-    }
     o[key] = v
     return undefined
 }
@@ -808,7 +731,6 @@ function jvIndexIn(key, n) {
 function js_has(o, key) {
     if (jvIsObj(o)) {
         var k = jvStr(key)
-        if (jvIsDeleted(o, k)) { return false }
         if (o[k] !== undefined) { return true }
         // A present slot holding undefined: keysOf answers the own keys and
         // already skips the __-prefixed internal ones.
@@ -999,7 +921,8 @@ function js_jsinstanceof(v, c) {
 // String(v). abnf/jsrtjsprint.go registers it as m["js_jsstr"].
 function js_jsstr(v) { return jvStr(v) }
 
-// js_jstpl (the template-literal concatenation under -exe) lives in the BASE file.
+// js_jsstr IS the template-literal path now: both emitters route every interpolated
+// part through it. See the note where js_jstpl used to be, in the BASE file.
 
 // The `Object` global, declared by the grammar in the PROGRAM's own scope so no
 // other language sees it.
@@ -1056,17 +979,7 @@ function js_jsprintfn(name) {
 // jsvOwnKeys: an object's own enumerable keys in insertion order, WITHOUT the
 // __-prefixed internal slots (keysOf already skips those).
 function jvOwnKeys(v) {
-    if (jvIsObj(v)) {
-        var ks = keysOf(v)
-        if (jvDelN === 0) { return ks }
-        var out = []
-        var i = 0
-        while (i < ks.length) {
-            if (!jvIsDeleted(v, ks[i])) { out.push(ks[i]) }
-            i = i + 1
-        }
-        return out
-    }
+    if (jvIsObj(v)) { return keysOf(v) }
     if (Array.isArray(v)) {
         var oa = []
         var j = 0

@@ -1150,6 +1150,14 @@ pair `0.001` with `0.0001` and `9999999` with `10000000` for exactly that reason
 
 ## Two builtins the PHP migration needed, and the floor owed
 
+> **A THIRD one, `delKey`, landed 2026-08-03 for the same reason** - see "The two
+> floor requests granted, and the template literal that needed FOUR halves" in part
+> 3. `keysOf` (id 61) lets a layer-2 file WALK an object; `delKey` (id 63, the
+> floor's new `js_del`) lets it PRUNE one, which MetaJS has no operator for either.
+> The interpreter half solves it the same way `keysOf` does, with the hidden `__ik`
+> insertion-order list, and the ratchet is `tests/metajs-test-full.js` SECTION 28.
+
+
 **`keysOf`, and why an extern was not enough.** The floor has had `js_keys` all along, but
 **an extern is only callable from an emitter**, and MetaJS has neither `for..in` nor
 `Object.keys` - so a layer-2 file could not enumerate an object's own keys AT ALL. That
@@ -1278,7 +1286,13 @@ interpreter's own bump `alloc`, and nothing frees it.
 
 # Part 3 - The remaining eleven languages
 
-## TWO THINGS EVERY ONE OF THE REMAINING NINE NEEDS - read this first
+## FIVE THINGS EVERY REMAINING LANGUAGE NEEDS - read this first
+
+*(It was TWO when php wrote it. Swift, java, csharp, dart, go, ruby, kotlin and
+python each added one or corrected one, and the additions are appended in date
+order below. As of 2026-08-03 PYTHON, the last language this plan was written for,
+is done; see "What PYTHON added, as the LAST of the nine" below and the PYTHON
+section further down.)*
 
 Both came out of the PHP port. Neither is about PHP, both are cheap, and the second
 one is a **silently-wrong build** if it is missed - so it is the more dangerous.
@@ -1451,6 +1465,285 @@ so it would refuse a tag-16 generator natively - but
 ever reaches the dispatcher. **Run that grep before deciding whether the
 `is_callable` spelling is needed** - it is the difference between a defensive
 rewrite and a measured "cannot happen".
+
+### What GO added to all three (2026-08-03)
+
+**Item 1 has a NEW SHAPE, and it is the generalisation the first five were
+circling.** Go has no scope-taking extern at all - like csharp, its emitter
+already calls `js_scope_get`/`js_scope_set`/`js_scope_decl` directly. What it had
+instead was `js_gounctl`, which reads the completion value out of a CONTROL
+SIGNAL: a **tag-10** cell, the floor's private storage, with no `seed_root`
+accessor - so layer 2 could not have written it either. Same answer:
+`js_ctl_kind` and `js_ctl_value` ARE floor externs, an EMITTER may call them, and
+`go-to-llvm-ir.abnf`'s `emitUnctl` emits the two-arm select at the one call site.
+
+> **The rule to carry forward is not "expect a scope probe" but "expect a
+> PRIVATE-REPRESENTATION probe".** A scope is one such representation; a control
+> signal is another; a coroutine cell would be a third. The question is *does
+> this extern have to open a cell only the floor knows?* - and the answer is
+> always to find the floor extern that already answers it and lower the call.
+> Six languages, five lowerings, still no floor change.
+
+**And item 2 fires INSIDE that lowering, from the result side.** `js_ctl_kind`
+answers a **RAW INTEGER** (`mk_ctl`'s `fa` field: 0 not-a-signal, 1 return, 2
+break, 3 continue), so the emitted test must be `NewICmp(IPredEQ, kind, 1)`.
+`truthy(b, kind)` compiles, links, and silently takes kinds 2 and 3 as well. The
+`__raw` finding is not only about a `-rt-lib` shim: **any emitter that consumes a
+`callExt` result as a number needs the same check**, and `grep NewICmp` over the
+grammar is still how to find them.
+
+**Item 2 itself: go is the fifth exception.** `grep -n truthyExt
+languages/go-to-llvm-ir.abnf` is empty, so the default `js_truthy` - the floor's
+own - applies. The tally over six ported languages is **lua and php need it;
+swift, java, csharp, dart and go do not**. `_raw` PARAMETERS are now
+**3 / 0 / 0 / 1 / 1 / 0 / 1** for lua / php / swift / java / csharp / dart / go;
+go's one is `js_gorest`'s start index.
+
+**Item 3 could not bite go either, for dart's reason and one more.**
+`grep -c 'js_genfn\|js_yield' languages/go-to-llvm-ir.abnf` is **0** - and in
+go's case that is not a lowering but the CONCURRENCY MODEL: goroutines are
+cooperative and run to completion, so nothing suspends and no tag 16 exists.
+See the go section for the full finding.
+
+**A FOURTH thing, and it corrects the Java audit rather than extending it.** The
+second-order hazard table in the java section names `js_gival` as go's suspect
+(row 6: "it unboxes via `si_float` where `si_val` is right"). **It is not a
+hazard.** `si_float`'s unsigned-width-64 arm answers the MAGNITUDE, and that is
+exactly what go wants, because go really has `uint64` and `abnf/jsrtint.go`'s own
+`js_gival` writes the same two lines. The hazard needs a language that carries a
+SIGNED value in an UNSIGNED-MARKED cell - Java's trick, which `sintRaw` has made
+unnecessary. **Read the table as "check the signedness claim", not as "wrap every
+call".**
+
+### What RUBY added to all four (2026-08-03)
+
+**Item 1 is now SIX lowerings and the private-representation rule holds.** Ruby's
+was `js_rdefined(scope, name, kind)` - `defined?(x)`, a pure scope probe - lowered
+into the emitted IR helper `rb_defined` in PHP's single-helper shape. `llvm.Run`
+stayed at 267/267 and no floor change was needed. The running count is php 2
+externs lowered, swift 2, java 1 helper, csharp 0, dart 2, go 1, ruby 1.
+
+**Item 2 has a SEVENTH answer, and it is the cheapest of all: no extern at all.**
+`grep -n truthyExt languages/ruby-to-llvm-ir.abnf` is empty, and ruby goes further
+than the languages that merely keep compile-core's default - it overrides
+`truthy()` itself with `NewICmp(IPredUGE, v, handle(3))`, because the value handles
+0/1/2 are `undefined`/`null`/`false` and 3 is `true`, so "`>= 3`" IS Ruby
+truthiness with no call in the path. **Check whether the grammar overrides
+`truthy()` as well as `core.truthyExt`** - the first is the cheaper place and the
+second language that wants "everything except a fixed set of singletons is true"
+should copy it. It is sound natively only because `runtime.c` seeds the same four
+handles as `abnf/jsrt.go`; that is one grep (`H_UNDEF = 0`) and it is worth doing.
+
+**Item 3 (tag 16) is absent again**, `grep -c 'js_genfn\|js_yield'` = 0: Ruby's
+`yield` is a block call, not a generator.
+
+**A FOURTH thing joins them, it is silently wrong, and every remaining language
+that computes a remainder has it.**
+
+> **`x - math.Floor(x/y)*y` in the Go twin is FUSED into an FMSUB on arm64.** The
+> product and the subtraction happen at infinite precision and only the result is
+> rounded; clang does not fuse the C floor's equivalent, so the two halves diverge
+> the moment `q*y` leaves the exactly-representable range.
+> `9007199254740991 % -3` is **-2 under `llvm.Run` and -1 natively**, and real
+> ruby says -2 - the fused answer is the CORRECT one, so this is layer 2's defect
+> every time. It is invisible to `./test.sh` (each engine is compared with itself)
+> and to a small ratchet (the operands have to be large). The check is
+> `grep -n 'math.Floor(.*)\*' abnf/jsrt*.go`; the fix is a Dekker two-product /
+> two-sum emulation of the FMA, written out in `languages/lib/ruby-rt.metajs` as
+> `rbFmaSub` and language-neutral. **Scale the operands down by a power of two
+> before the split** - a Float remainder legitimately has `|q|` near DBL_MAX.
+
+**A FIFTH, in the same family: `strconv.FormatFloat` is EXACT and rounds HALF TO
+EVEN.** `Math.floor(a * 10^prec + 0.5)` is wrong in both halves of that sentence -
+it rounds half AWAY from zero (Go's `%.0f` of 2.5 is "2") and it cannot reach the
+digits past 2^53 that `%f` of 1e100 needs. The exact decimal of a double is a
+bignum (`m * 2^e` is `m` doubled `e` times, or `m * 5^-e` with the point moved),
+and `ruby-rt.metajs` has it in 70 language-neutral lines. **`printf` width and
+precision also count BYTES**, not characters, because Go's are `len(body)` and
+`body[:prec]` - `byteLen` is the floor's own answer.
+
+### What KOTLIN added to all three, and it is the LIMIT case (2026-08-03)
+
+**Item 1 stops being cheap, and the number is the news.** php lowered 2 externs,
+swift 2, java 1 helper, csharp 0, dart 2, go 1 - and **kotlin has TEN**
+(`js_ktget`, `js_kset`, `js_ktvarset`, `js_ktmextget`, `js_ktmextset`,
+`js_ktmextcall`, `js_ktouter`, `js_ktrefbase`, `js_ktdthis`, `js_ktbareref`),
+with `core.scopeGetExt = "js_ktget"`, so EVERY variable read went through one.
+Nine are lowered in the emitter the usual way and `sw_safeget` transferred
+verbatim for the fourth time. What the earlier seven never hit is the ceiling:
+
+> **An emitter can read the INNERMOST binding, the INNERMOST `this` and the
+> INNERMOST `__dispatch`, and no further.** `languages/lib/runtime.c` seeds no
+> scope-PARENT accessor, so a chain WALK - which is what `js_ktget` and
+> `ktMemberExtFind` do - cannot be expressed in IR at all. Every one of the nine
+> helpers therefore ends in the extern it replaced.
+
+**And item 1 has a MIRROR IMAGE here, which is new.** Kotlin's implicit-receiver
+stack (`with` / `run` / `apply` / `buildString` / `buildList` / `buildMap`, and
+every `T.() -> R` lambda) lives inside the RUNTIME, so this time it is the
+EMITTER that cannot see the private representation. Go's rule - "find the floor
+extern that already answers it and lower the call" - has no answer, because no
+such extern exists. The way through costs nothing and generalises: **find the
+extern with the right SHAPE and give layer 2 the extra arm.**
+`js_ktglobal(name)` takes one NAME and no scope, so the emitted `kt_ktget` asks
+it before giving up, and `kotlin-rt.metajs`'s `js_ktglobal` answers from the
+receiver stack first. In the Go twin `ktGlobalFn` answers `jsUndef` for an
+unknown name, so the probe is a **no-op under `llvm.Run`** - measured, the
+ratchet stayed at 979 - and it is what makes `with(list) { size }` and
+`mutableListOf(1, 2).apply { add(3) }` work natively.
+
+**Item 2: kotlin is the sixth exception.** `grep -n truthyExt
+languages/kotlin-to-llvm-ir.abnf` is EMPTY. The tally over seven ported
+languages is **lua and php need `__raw`; swift, java, csharp, dart, go and
+kotlin do not**. `_raw` PARAMETERS are now **3 / 0 / 0 / 1 / 1 / 0 / 1 / 1** for
+lua / php / swift / java / csharp / dart / go / kotlin; kotlin's one is
+`js_char`'s code point.
+
+**Item 3 cannot bite kotlin either, and that is now four in a row.**
+`grep -c 'js_genfn\|js_yield' languages/kotlin-to-llvm-ir.abnf` is **0**:
+`suspend` is lowered by the emitter and `launch`/`runBlocking` run their block
+eagerly. Dart, go, csharp's emitter and kotlin have all answered zero here -
+**run the grep before costing a coroutine**.
+
+**A FIFTH thing, and it sharpens the `si_norm` question the Dart section
+posed.** Dart asks "is the language's unboxed representation the one `si_norm`
+produces?" and answers yes for itself, no for Java. **Kotlin is a THIRD answer:
+its boundary is 32 bits.** `abnf/jsrtkotlin.go`'s `ktNorm` says so in its own
+comment - "It is deliberately not giNorm" - and unboxes only a signed 32 bit
+value, so a Kotlin `Long` is a box at EVERY magnitude even though it is honestly
+SIGNED. `sintConv` ends in `si_norm` and would unbox a small Long, and `ktWU`
+reads the result type off the operand boxes, so `1000000L * 1000000L` would
+become a 32 bit multiply - Java's wall reached without Java's trick. `sintRaw`
+is the fix, C#'s `csNorm` recipe unchanged. **Ask the next language WHERE its
+unboxing boundary is, not whether it has a 64 bit type: go and dart say 64,
+kotlin says 32, java says nowhere, and `sintRaw` answers all three of the
+non-go cases.**
+
+### What PYTHON added, as the LAST of the nine (2026-08-03)
+
+**Item 1 scales, and python is the proof: SIX externs lowered, not one.** The
+running count is php 2, swift 2, java 1, csharp 0, dart 2, go 1, ruby 1, kotlin 1
+- and **python 6**: `js_pyfnscope`, `js_pyset_var`, `js_pyglobal`,
+`js_pynonlocal`, `js_pydel_var` and `js_pyannot`, plus `js_pyclass_fill`, which
+ENUMERATED a scope rather than probing one. `runtime.c` had already written the
+prediction at its own `js_pyset_var` - *"A Python layer 2 will have to add
+them"* - and layer 2 could not. What made six affordable rather than six times
+the work is a mechanism the first eight did not need:
+
+> **Carry the private mark as an ORDINARY BINDING, in a scope of its own.**
+> Insert a `MID` scope above every binding boundary and declare
+> `"pyfn*" -> the boundary scope` and `"pyup*" -> MID` in it. `js_scope_get`
+> already walks the chain, so from any nested scope `"pyfn*"` resolves to the
+> nearest enclosing boundary - which turns "which scope does this bind in" from a
+> floor question into two `js_scope_typeof` calls. A name that cannot be a source
+> identifier (`*` in it) is the whole trick, and it generalises to any per-scope
+> flag a future language wants.
+
+Two warnings that came out of doing it at that scale, both MEASURED:
+
+* **A slot that HOLDS undefined reads as "undefined".** Swift and Ruby recorded
+  this as a footnote; at six lowerings it is a hard failure. Python's
+  `declCompNames` declares a comprehension target holding undefined, and the
+  first version of `py_setvar` therefore bound it in the wrong scope -
+  `[i*i for i in range(4)]` answered `[NaN, NaN, NaN, NaN]`. The fix is that
+  **the emitter already knows those names statically**: record every name the
+  emitter DECLARES into a non-boundary scope of the current function and emit the
+  floor's own walk for those. If you lower a scope rule, enumerate what your own
+  emitter puts in scopes before you trust a `typeof` probe.
+* **A value the floor cannot represent needs a SENTINEL and a guarded READ.**
+  `del x` leaves a private Go value in the slot and `abnf/jsrt.go` raises from
+  inside `scopeGet`. One unique array created at module start, compared with
+  `js_seq`, and EVERY read routed through an IR helper. There were TWO read
+  paths, not one - `makeVarRef` and `emitRefRead` (an augmented assignment reads
+  first) - and routing only the first left two assertions red, which is how the
+  second was found.
+
+**Item 2: python is the THIRD language that needs `__raw`**, after lua and php,
+and the first since. The tally over nine is **lua, php and python need it;
+swift, java, csharp, dart, go, ruby and kotlin do not.** Python needs it because
+its truthiness is genuinely its own (an empty container is false), so the floor's
+`js_truthy` cannot serve. It also has a SECOND `NewICmp` on the same extern's
+result, for `not x` - `grep NewICmp` over the grammar is still how to find them,
+and both sites are covered by the one `__raw` suffix.
+
+**Item 3 is answered YES for the first time, and the split is what matters.**
+`grep -c 'js_genfn\|js_yield' languages/python-to-llvm-ir.abnf` is **6**, after
+five languages in a row answered 0. C#'s "layer 2 owes zero lines" held for the
+DRIVING side - the emitter lowers it over floor externs - but the INSPECTION
+surface (`send` / `next` / `close` / draining) is the language's own and does
+cost layer-2 lines. PHP's two findings both applied unchanged: the close flag
+lives in an identity-keyed side table because a generator is a floor CELL, and
+"is this a generator" is STRUCTURAL because layer 2 has no tag test - the floor
+answers exactly one member on a tag-15 cell, `"next"` (`runtime.c:2868`).
+
+**Ruby's FMA warning: run it, and accept a NO.** `grep -n 'math.Floor(.*)\*'
+abnf/jsrt*.go` finds three sites and all three are Ruby's. Python's `%` is
+`pyFloorMod` over `math.Mod`, which is not the fusable expression, so no Dekker
+emulation is owed. The grep is cheap and the answer is not always yes.
+
+**A SIXTH thing, and it is the last genuinely new question this plan had left:
+an ARBITRARY PRECISION integer.** Every previous language's number fitted a
+double, a sized-integer tag or a box. `10000000000000000000000000001` fits none
+of them, and the floor has no bignum. The answer is a base-10000 little-endian
+bignum in MetaJS (~330 lines with division), and the two things that generalise
+are: a Go TYPE SWITCH ported into this value model changes ARM ORDER, because a
+`*jsBigInt` is never a `*jsObject` and a `{__pybig}` IS a plain object (the
+bigint arm has to move ahead of the array/object arms of `jsAdd` or `10**28 + 1`
+string-concatenates); and `rt.toNumber` has no bigint arm, so every path that
+coerces one must answer NaN - which is why `pyNum(v)` is written `v * 1` and not
+a hand-written cascade.
+
+### What JS and TYPESCRIPT added to all three (2026-08-03)
+
+**Item 1 has a FOURTH shape, and it is the one that runs out of floor.** php/swift/
+dart/ruby lowered a SCOPE probe and go lowered a CONTROL-SIGNAL probe; both worked
+because the floor already had an extern that opened the private cell. `js_this` /
+`js_newtarget` read `abnf/jsrt.go`'s **CALL STACK**, and the floor keeps no such
+state at all - `runtime.c`'s `js_call` drops `self` for a tag-7 closure. There was
+nothing to lower onto. The answer that replaces "find the floor extern":
+
+> **If the floor keeps no such state, LAYER 2 keeps it and the EMITTER hands it
+> over.** Layer 2 is a module with globals of its own. One extern call,
+> `js_jssetthis(receiver)`, emitted immediately before every call site the emitter
+> owns. No restore is needed, because `this` is read exactly once per function, at
+> entry.
+
+The same move then closed three more walls of a different kind - the accessor box
+(`js_defprop`), `typeof` on a BigInt, and the whole `===`/`!==`/unary-`-`/`!`/truthy
+family - all of them cases of *the Go runtime represents this as a Go TYPE and layer
+2 can only represent it as an object*. Generalised:
+
+> **Route the OPERATOR through layer 2, in the EMITTER, under `-exe` ONLY.** It
+> needs no floor change and no Go twin (the module that declares the new extern is
+> only ever built by `-exe`), and because it is gated on `c.exePath` the module
+> `llvm.Run` executes never moves. **Diff the non-native module against a clean
+> `git archive` of the base commit before and after** - that turns "will the matrix
+> survive this" from a hope into a measurement and costs one `diff`.
+
+**Item 2 gets a clause.** js/ts are the first language where the `__raw` answer
+DIFFERS between the two engines: `grep 'truthyExt *='` is empty, so `llvm.Run` keeps
+the floor's own `js_truthy` and needs no shim - but the NATIVE build overrides
+`core.truthyExt` for BigInt and that shim needs the suffix. **Grep for the
+assignment, not the read, and grep inside the `-exe` arm too.** `_raw` PARAMETERS:
+js and ts have **zero**.
+
+**Item 3 (generators) cost layer 2 nothing on the driving side, as C# predicted** -
+both grammars emit `js_genfn` / `js_yield` seven times and step the generator with
+`js_get(g, "next")` + `js_call`, all floor externs. What they DID owe is
+`js_iterable`, the for-of drain, which has to loop `next()` until `done` because the
+floor has no `g.drain`; and "is this a generator" is still the STRUCTURAL probe php
+described, because layer 2 has no tag test.
+
+**A FOURTH thing, and it is the biggest lever in part 3.** Ruby found that a layer-2
+file may `import` a shared MetaJS source. The general form, proved here, is:
+**every language in this repo already has a complete MetaJS implementation of its
+own semantics, in `languages/<lang>-interpreter.abnf`'s start script.** js's
+`jsStr` / `jsToPrim` / `jsLooseEq` / `jsBuiltin` / `jsStringMethod` / the whole `bi*`
+BigInt family / the entire regex glue over `lib/regex.js` were all already there, in
+the same frozen subset, kept in agreement with the Go twin by the matrix for a long
+time. **Grep the interpreter grammar before porting a Go twin.** What cannot be
+lifted is only what touches the VALUE MODEL - the interpreter's objects are its own,
+layer 2's are the floor's handles.
 
 ## PHP - DONE (2026-08-03). The gate is MET: 306/306 natively, byte-identical
 
@@ -2907,6 +3200,2092 @@ A full-syntax entry would be green too - `tests/dart-test-full.dart` passes
 `*-test-full.*` does: the ratchet lives in `./test.sh --full`, and
 `tests/clang-check.sh` already runs the native one on every sweep.
 
+## GO - DONE (2026-08-03). The gate is MET: 311/311 natively, byte-identical
+
+**`tests/go-test-full.go` runs as a self-contained native binary, all 311
+assertions pass in it, and its stdout, its stderr and its exit code are
+byte-identical with `llvm.Run`.** `tests/clang-check.sh` reads
+
+```
+go              32106  ok, and the clang executable agrees
+```
+
+so go left the `ok (module only)` row for the run-it row, **no row is held, no
+assertion is held back, and no floor change was needed or made.**
+`abnf/jsrtgolang.go` is **kept**, as the plan requires: `llvm.Run` still uses it,
+the native binary uses layer 2, and the two are now differentially compared over
+16,550 probe lines plus the ratchet.
+
+Oracles: **real `go` 1.26.5 darwin/arm64** (`go version`), present on this
+machine and used on all three probes, and **Apple clang 17.0.0** for the native
+link.
+
+### THE COROUTINE QUESTION, which is what this migration was asked to answer
+
+> **Go's goroutines and channels need NO coroutine primitive, and the reason
+> generalises to nothing else in the set.** `grep -c 'js_genfn\|js_yield'` in
+> `go-to-llvm-ir.abnf` is **0**. Concurrency in both halves is COOPERATIVE and
+> DETERMINISTIC - `go-to-llvm-ir.abnf` says so at `GoStmt` and `abnf/jsrt.go`'s
+> `goDrain` implements it: `go f(...)` puts an already-bound NULLARY CLOSURE on a
+> run queue and returns, and a receive that finds its channel empty RUNS THE
+> QUEUE, each queued goroutine to completion in spawn order, until one of them
+> fills it. **Nothing ever suspends mid-body**, so there is no second stack to
+> keep, and the floor's pthread-backed tag 15/16 is not reached.
+
+The whole model in `languages/lib/go-rt.metajs` is **one module-level array and
+one drain loop**, about 40 lines including the channel buffer:
+
+```
+var goQueue = []
+js_gospawn(fn)      goQueue.push(fn)
+goDrain()           while (goQueue.length > 0 && guard < 1000000) { shift; call }
+goChanRecv(ch)      if buf empty -> goDrain(); if still empty -> zero value / deadlock
+js_gochan_ready     drain first, then "is there one".  <- what a select arm asks
+js_gorange(chan)    drain the WHOLE channel into a keys/vals dict, because under
+                    this model the sequence is fully known at the first receive
+```
+
+Measured, not assumed: probe B drives a buffered producer closed from inside the
+goroutine, two unbuffered senders, a receive from a closed channel, and both
+arms of a `select` with a `default`, and `llvm.Run` and the native binary agree
+line for line. **The cost estimate the coroutine section carried for `go` can be
+struck.**
+
+The one place our model and real go differ is exactly the one the ratchet file
+already declares out of scope: with two goroutines racing on an unbuffered
+channel, `<-c2, <-c2` yields `one two` here and `two one` under go 1.26.5, since
+our order is spawn order and go's is the scheduler's. 1 line of 5,237.
+
+### The extern split
+
+`tests/go-test-full.go` drives **84** externs, and so does the union over every
+`tests/go-test-*.go` - go's emitter has no test-specific arm.
+
+| where | count | what |
+|---|---|---|
+| already in the C floor | 42 | the generic primitives of phase 3, the five the Lua pilot added, `js_truthy`, the WHOLE sized-integer family (`js_giarith`, `js_gicmp`/`js_gilt`/`js_gile`/`js_gigt`/`js_gige`, `js_giadd`, `js_giconv`, `js_gilit`, `js_gineg`, `js_gival`), `js_gflo`/`js_jfdiv` for the boxed double, and the two the lowered `js_gounctl` now calls (`js_ctl_kind`, `js_ctl_value`) |
+| **layer 2**, language-NEUTRAL | 10 | `js_dict_new`, `js_goslice`, `js_gospread`, `js_is_type`, `js_jadd`, `js_pyin`, `js_pyset`, `js_range_key`, `js_range_len`, `js_range_val` |
+| **layer 2**, Go's own | 32 | the `js_go*` family, `js_map_get`/`js_map_del`, `js_rundefers`, and the four width-carrying slot writers (`js_giadopt`, `js_gosetfield`, `js_gisetsl`, `js_gisetat`) |
+
+`languages/lib/go-rt.ll` (22,313 lines, from an 1,823-line `.metajs`) exports
+exactly those 42 symbols and nothing else - checked with `comm`, not assumed. The
+layer-2 source compiles **byte-identically under `-frozen`** as well as under
+goja.
+
+The split against the five done before it:
+
+```
+             floor   neutral   own      pair/box layer needed in layer 2
+lua            23        5      26      ~200 lines of i64 pairs
+php            29        8      63      a {__pf} float box
+swift          35       10      21      NONE
+java           29        9      16      ~90 lines, the unsigned-box long
+csharp         35       15      18      NONE  <- sintRaw
+dart           37       13      17      NONE
+go             42       10      32      NONE
+```
+
+**Go has the largest FLOOR column of the seven and it is not close**, because
+the sized-integer tag was specified against `abnf/jsrtint.go`, which is Go's:
+every one of the eleven `js_gi*` externs is already a C function, so the
+language whose value model drove the tag pays nothing for it. Go's own 32 is
+second-largest after php's 63, and it is honest work rather than a value model -
+`fmt`'s renderer, the map, panic/defer/recover, the channel, and the field and
+method dispatch of a language with embedding.
+
+### `si_norm` is what Go WANTS, and `js_gival` is NOT the hazard the audit named
+
+Go is Dart's answer, not Java's. `abnf/jsrtint.go` states the invariant at the
+type - "plain number == a signed 64 bit integer whose value is exact in a
+double; jsGInt == any other integer" - which IS `giNorm`, which IS what `sint()`
+applies. **There is no pair layer, no box layer, no `sintRaw` and no `jl*`
+family in `go-rt.metajs`.**
+
+**The second-order hazard is ABSENT, and the audit's own candidate is the proof
+rather than the counter-example.** Part 3's Java table lists `js_gival` as row 6:
+"go uses it as the unboxer for slice/index expressions, and it unboxes via
+`si_float`. `si_val` is the right one for a Java-style box." Checked at the code:
+`si_float`'s 64-bit UNSIGNED arm answers `d_from_ulong(fa(h))`, the magnitude -
+and **that is correct for Go**, because Go really has `uint64`, an
+unsigned-marked width-64 cell really IS a `uint64`, and `abnf/jsrtint.go`'s own
+`js_gival` does literally the same thing:
+
+```
+if b.u && b.w == 64 { return float64(uint64(b.v)) }
+return float64(b.v)
+```
+
+So `si_float` IS Go's `js_gival` and `si_val` is not. The row is a hazard only
+for a language that carries a SIGNED value in an unsigned-marked cell, which is
+Java's trick and nobody else's; with `sintRaw` landed, no further language will.
+**The generalisation to correct in the plan: the hazard is not "a floor extern
+reads tag 13 numerically", it is "a floor extern reads tag 13 numerically AND
+the language lied about the signedness".** Same for rows 1, 4, 5 and 7 - go's
+`js_gflo` needed no `js_gvnum` wrapper, and `js_gicmp`/`js_gilt`/... are the
+floor's own and take the unsigned order exactly where Go wants it.
+
+### THE ONE WALL, and it was lowered in the EMITTER - a NEW shape of the same idea
+
+`js_gounctl` reads the completion value out of a CONTROL SIGNAL: a return signal
+carries its value, a body that ran off its end yields undefined. A signal is the
+floor's private **tag-10** cell and `seed_root` seeds no accessor for one, so
+**layer 2 could not have written this extern at all** - the same position PHP's
+and Swift's scope probes were in, reached from a different direction.
+
+The answer is the same one: `js_ctl_kind` and `js_ctl_value` **are floor
+externs**, and an EMITTER may call them. `go-to-llvm-ir.abnf`'s `emitUnctl` now
+emits the two-arm select in IR at the single call site.
+
+> **The detail that is worth copying, because truthy() would have been wrong
+> here**: `js_ctl_kind` answers a **RAW INTEGER** (`mk_ctl`'s `fa` field; 0 for
+> anything that is not a signal, 1 return, 2 break, 3 continue). The test has to
+> be `NewICmp(IPredEQ, kind, 1)` and not `truthy(b, kind)`, which would also take
+> kinds 2 and 3. That is the `__raw` finding of Part 3's item 2 met from the
+> RESULT side inside an emitter rather than inside a shim, and it is the same
+> silent-wrongness class.
+
+Accounting, in Dart's corrected form: the lowering removes **one** extern from
+layer 2 (43 -> 42) and adds **two** to the declare list, both already in the
+floor, so the union went 83 -> 84. **The running count of item 1 is now php 2
+externs lowered, swift 2, java 1 helper, csharp 0, dart 2, go 1 - six languages,
+five lowerings, still no floor change.**
+
+### The two cross-cutting findings, checked and MEASURED for go
+
+1. **`core.truthyExt`.** `grep -n truthyExt languages/go-to-llvm-ir.abnf` is
+   EMPTY, so go keeps compile-core's default `js_truthy`, which is the C floor's
+   own function and already answers the raw 1/0 the emitted `icmp ne ..., 0`
+   compares. **No `__raw` export.** The count over six ported languages is now:
+   Lua and PHP need it; Swift, Java, C#, Dart and Go do not.
+2. **`_raw` PARAMETERS: go has exactly one**, `js_gorest`'s START INDEX, which
+   the emitter writes with a bare `handle(i + off)` at
+   `go-to-llvm-ir.abnf:3877`. Every other `handle(k)` in the grammar goes to
+   `js_closure` or `js_arg`, which are floor externs, and every operator selector
+   goes through `emitStr`/`emitNum`. The count is now **3 / 0 / 0 / 1 / 1 / 0 / 1**
+   for lua / php / swift / java / csharp / dart / go.
+3. **The scope probe.** Go has NO scope-taking extern - `js_scope_get`,
+   `js_scope_set`, `js_scope_decl` and `js_scope_new` are floor externs the
+   emitter already calls directly, exactly as csharp's did. Nothing was owed.
+   What Go had instead was the tag-10 probe above, which is the same idea over a
+   different private representation.
+4. **`jsChar`.** Not needed and not emitted: Go has no character type, a rune is
+   an `int32`, and `grep -c 'js_char\|js_char_code\|js_kindex'` is 0.
+5. **Item 3, the tag-16 `typeof` divergence.** Cannot bite: `js_genfn` and
+   `js_yield` are emitted zero times (see the coroutine finding above), so no tag
+   16 ever reaches `js_gomcall`'s dispatcher, and `typeof v == "function"` is
+   written plainly there.
+
+### The one thing layer 2 CANNOT do, stated rather than hidden
+
+A Go **pointer cell** (`&n`, `new(int)`, `&p`) is a `{__class: $ptr}` object
+whose `o` is **the SCOPE that holds the variable** and whose `k` is its name
+(`go-to-llvm-ir.abnf`'s `emitPtrCell`). `abnf/jsrtgolang.go`'s renderer prints
+`&` followed by the POINTEE, which it reads with `rt.scopeGet`. Layer 2 has no
+such reader.
+
+**Unlike a scope probe this one cannot be lowered into the emitter**, because it
+is reached from arbitrarily deep inside a value tree at RUN TIME (`fmt.Println`
+of a struct that holds a pointer that holds a struct), not from a fixed call
+site. The object-backed form - `new(T)` over a one-slot object - IS readable and
+is rendered exactly; the scope-backed form renders `&<nil>`.
+
+Nothing in `tests/go-test-full.go` or in the three probes prints a scope-backed
+pointer, so it is **unmeasured rather than wrong**. The one-line floor fix if a
+program ever does is a `scopeGet(scope, name)` host builtin - which is also what
+would let a scope PROBE go back into layer 2 for every language. **Reported, not
+made.**
+
+### Ground truth
+
+```
+matrix                325/325
+--full                5,618 assertions, 0 languages whose halves disagree (go 311)
+                      grep 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF' -> empty
+--cross               119 programs, 0 divergent
+go test ./abnf/       ok
+clang-check           16/16, and go joins the RUN-IT row
+gen-go-rt-ll.sh --check      go-rt.ll is up to date (22,313 lines)
+-frozen recompile            go-rt.ll byte-identical to the goja build
+every other gen-*-rt-ll.sh --check   up to date
+jsbootstrap.ll        untouched (metajs-to-llvm-ir.abnf was not edited)
+real go 1.26.5        darwin/arm64, used as the oracle on all three probes
+```
+
+**Verified from a CLEAN ARCHIVE, not the working tree** - `git archive 65a443b |
+tar x`, then only the four Go files copied in, `go build` INSIDE, run there:
+
+```
+tests/gen-go-rt-ll.sh --check    go-rt.ll is up to date (22313 lines)
+./go.exe                         full: 311 checks, 0 failures   (rc=0)
+tests/clang-check.sh go          ok, and the clang executable agrees
+probes A and C                   BYTE-IDENTICAL with llvm.Run
+probe B                          the ONE known line (below)
+```
+
+Every Go program in `tests/`, `llvm.Run` against the native binary, stdout AND
+stderr AND exit code:
+
+```
+go-test-1  go-test-complete  go-test-features  go-test-full  go-test-widen
+go-test-multifile (-i tests/imports)                          all SAME (rc=0)
+go-test-recognize   NOT COMPARABLE - both halves refuse it identically
+                    ("grouped type declaration not implemented", a
+                    recognition-only file)
+```
+
+### The differential probe - three probes, 16,550 lines, and the three defects
+
+**Probe A, 11,231 lines**: every operand read out of a SLICE at run time, so
+`go build` cannot fold it. 32x32 `int64` pairs times `+ - * & | ^ &^ / %` and all
+six comparisons; each operand times `- ^` and times `<< >>` at thirteen shift
+counts spanning 31, 32, 63, 64 and 65 through opaque `uint`-parameter functions;
+then every conversion to `int8/int16/int32/uint8/uint16/uint32/uint64/uint/int`,
+`++` and `*3` at the wrap point of all seven sized types, `uint64` division,
+remainder, shifts, masking and comparison, and `float64(v)` of both the signed
+and the unsigned reading. The operand bag carries both int64 edges, the int32 and
+int16 and int8 edges and their neighbours, 2^32, and 2^53 with BOTH neighbours.
+
+**Probe B, 5,237 lines**: 32x32 `float64` pairs times `+ - * /` and the six
+comparisons (both zeros, 5e-324, DBL_MAX, 1e±100, 1e±20, the 1e15/1e16 and
+1e5/1e6/1e7 `%v` boundaries, 0.49999999999999994, 2^53 and 2^53+1), the whole
+`fmt` surface (nil, bools, arrays, slices, nested slices, maps with string, int
+and bool keys - which fmt SORTS - structs, a `fmt.Stringer`, `Print`'s
+space-between-two-non-strings rule, `Println`, `Printf` over `%v %d %s %t %c %q
+%%`, an unknown verb and a MISSING operand, and `Sprint`/`Sprintf`), the string
+surface (`len` in bytes, `range` by rune with byte offsets, `[]byte`/`[]rune`
+round trips, byte slicing, `%q`) over seven strings including non-ASCII and an
+astral one, the channel and select battery above, and panic/defer/recover
+(recover of a string and of an int, LIFO defer order, a named result a defer
+doubles).
+
+**Probe C, 82 lines**: the four width-carrying SLOT writers, which the two big
+probes do not reach - a `uint8`/`int16` struct field incremented past its wrap
+point, a `map[string]uint8` and a `map[int]int8` entry, a `[]uint8` element and
+an `[4]int32` array element, embedding and promoted methods, an interface value,
+a type switch over ten dynamic types, pointer cells, and struct/array value
+equality.
+
+```
+llvm.Run vs the native binary   BYTE-IDENTICAL on A and C, 11,313 of 11,313
+                                lines; 5,236 of 5,237 on B (the one line below)
+```
+
+Three real defects, all in layer 2, all invisible to `./test.sh` because it
+compares each engine with itself and the Go twin was right in every one:
+
+1. **`strictEq` read the sized box as a DOUBLE.** `9007199254740992` is the
+   largest integer `giNorm` keeps UNBOXED and `9007199254740993` is one past it,
+   so `a == b` on that pair is a plain number against a box. `giEq` is
+   `giVal(l) == giVal(r)`, an exact int64 comparison, and real go 1.26.5 agrees
+   that they differ - reading both through a double rounds the second one down
+   and answers TRUE. `sintCmp(a, b) == 0` is the exact test and is what the file
+   now uses (two cells with the same payload compare equal whatever the
+   signedness; two with different payloads never do). **2 probe lines out of
+   11,231, and neither engine's own self-comparison could have seen it.**
+2. **`js_gotypeis` was written against GO and not against the GO CODE**, which
+   is the Dart lesson in its sharpest form. The twin's type switch has a
+   `case float64` arm and **no arm for either number box**, so a `jsJFlo` and a
+   `jsGInt` both fall through to the default `"any"`. Layer 2 answered
+   `"float64"` for the first and `"int"` for the second - which is what REAL GO
+   says for the first and is wrong for the second, and which broke byte identity
+   either way. Reproduced exactly; the site says so at length. 2 probe lines.
+3. **`%q` and byte slicing walk BYTES, not characters.** `gopQuoteBody`'s loop is
+   `for i := 0; i < len(s); i++` over a Go string, so a multi-byte rune arrives
+   as its individual UTF-8 bytes and each becomes the CODE POINT of that byte
+   value: `%q` of `"héllo"` prints C3 A9 as U+00C3 U+00A9 and not as the letter.
+   Layer 2 walked UTF-16 units. Fixed by encoding to UTF-8 first, which also
+   fixed `s[lo:hi]` on a non-ASCII string. 6 probe lines.
+
+**The ONE line that still differs, and it needs a floor change or nothing.**
+`"日本語"[0:1]` is a Go string holding ONE byte of a three-byte rune. The Go twin
+keeps the raw byte and prints it, and so does real go 1.26.5 - the two AGREE, and
+the native binary cannot join them: **the C floor's strings are UTF-16 and cannot
+represent a partial UTF-8 sequence at all.** Layer 2 decodes the byte window with
+U+FFFD per unpaired byte, which is what the print pipeline would show for garbage
+anyway. 1 line of 5,237, in the only construct that can produce it (a byte slice
+cutting a rune in half). Recorded, not worked around.
+
+### Where our Go and REAL go differ - measured, and NOT fixed here
+
+With all three probes run under `go` 1.26.5, **559 lines of 16,550 differ**, and
+`llvm.Run` and the native binary agree with each other on ALL of them, so every
+one is pre-existing behaviour of BOTH halves. **Verified against a pristine
+`git archive 65a443b` build, whose `llvm.Run` output is byte-identical to this
+one on all three probes** - nothing here made or moved any of them.
+
+```
+ 303   `&^` (AND NOT) is emitted as a 32-BIT bitwise pair. -1 &^ 4294967295 is
+       -4294967296 in go and 0 here: the emitter reaches js_band over a 32 bit
+       complement instead of the sized-integer tag's own op code 8.
+ 244   `<<` / `>>` through a `uint`-typed parameter take the RESULT's signedness
+       from the SHIFT COUNT. `int64(-1) << 0` prints 18446744073709551615: the
+       count is a uint64 cell and giWidthOf lets it decide the result's
+       signedness, where Go fixes the result type as the LEFT operand's.
+   6   `len([]byte(s))` counts RUNES. The value model has one array type, so
+       []byte and []rune decode identically - documented at js_goconv in both
+       halves and in abnf/jsrt.go itself.
+   3   `%q` prints the UTF-8 BYTES of a non-ASCII rune (defect 3 above,
+       reproduced deliberately) and `%!z(9)` where go writes `%!z(int=9)` -
+       both already documented in abnf/jsrtgolang.go's header.
+   2   an ASTRAL character is two U+FFFD, the same wtf8Clean difference the
+       Swift port measured and recorded.
+   1   goroutine scheduling order (see the coroutine finding).
+```
+
+The first two are the interesting ones and both are **emitter/floor questions,
+not layer-2 ones** - they are wrong under `llvm.Run` too, and neither is in
+`tests/go-test-full.go`, which is why a green ratchet did not see them. Fixing
+either means `go-to-llvm-ir.abnf` plus `go-interpreter.abnf` plus a new ratchet
+assertion, i.e. a self-contained job of its own; it is not this gate.
+
+### What is owed, and what generalises
+
+1. Nothing for the gate. `abnf/jsrtgolang.go` stays until the change is
+   committed, and `abnf/jsrtint.go` stays regardless - kotlin still needs it.
+2. **`&^` and the shift result type**, above: two real defects in both halves,
+   found only by the probe, each a three-halves job.
+3. **A `scopeGet(name)` host builtin** would let layer 2 render a scope-backed
+   pointer AND would let every language's scope probe go back into layer 2. Not
+   needed by any current test.
+4. The floor's `floStr` routes style 1 (floGo) to `jvm_flo_str`, which is JAVA's
+   layout - so a tag-14 box built with the Go style renders as Java there.
+   `go-rt.metajs` therefore never calls `floStr` and spells `strconv`'s
+   `'g', -1, 64` itself (`goFloStr`, over the engine's own shortest digits).
+   One `if (sty == 1) { return go_flo_str(...); }` in `jvmFloText` would remove
+   it. Reported, not made.
+
+What **generalises to the remaining five** (kotlin, js, typescript, python,
+ruby):
+
+- **A "private representation" probe is not always a SCOPE probe.** Go's was a
+  control signal. The test is the same: does the extern have to open a cell only
+  the floor knows? If so, look for a floor extern that answers the question and
+  lower it into the emitter. **Six languages, five lowerings, still no floor
+  change.** And check whether the floor extern answers a RAW integer before
+  reaching for `truthy()`.
+- **The second-order hazard is narrower than the Java audit implied.** It needs a
+  language that carries a SIGNED value in an unsigned-marked cell. With `sintRaw`
+  landed, no remaining language will, so rows 1-7 of that table can be read as
+  "check the signedness claim", not "wrap every call".
+- **Cooperative concurrency needs no coroutine.** Before costing a second stack,
+  read the grammar's own model: `go` queues and drains, and that is one array.
+- **Write layer 2 against the Go CODE, not against Go**, and not against the Go
+  comments either. Defect 2 is a case where being RIGHT about the language broke
+  the gate.
+
+### launch.json entries wanted (not added - not my file)
+
+All three pass natively today, at the working tree and from the clean archive:
+
+```
+"Go native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["languages/go-to-llvm-ir.abnf", "tests/go-test-features.go", "-q", "-exe", "tests/go-native.out"]
+"Go native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["-i", "tests/imports", "languages/go-to-llvm-ir.abnf", "tests/go-test-multifile.go", "-q", "-exe", "tests/go-native-multi.out"]
+"Go native binary, widened syntax (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["languages/go-to-llvm-ir.abnf", "tests/go-test-widen.go", "-q", "-exe", "tests/go-native-widen.out"]
+```
+
+A full-syntax entry would be green too - `tests/go-test-full.go` passes 311/311
+natively - but it stays out of the matrix for the same reason every other
+`*-test-full.*` does: the ratchet lives in `./test.sh --full`, and
+`tests/clang-check.sh` already runs the native one on every sweep.
+
+## RUBY - DONE (2026-08-03). The gate is MET: 267/267 natively, byte-identical
+
+**`tests/ruby-test-full.rb` runs as a self-contained native binary, all 267
+assertions pass in it, and its stdout, its stderr and its exit code are
+byte-identical with `llvm.Run`.** `tests/clang-check.sh` reads
+
+```
+ruby            20303  ok, and the clang executable agrees
+```
+
+so ruby left the `ok (module only)` row for the run-it row, **no row is held, no
+assertion is held back, and no floor change was needed or made.**
+
+Ruby is the first of the four languages with **no dedicated Go twin** - its
+semantics live in the shared `abnf/jsrt.go` (`rubyNumBin` / `rubyBin` / `rubyStr` /
+`rubyInspect` / `rubyEq` / `rubySpaceship` / `rubyFormat` / `rubyMethod` /
+`rubyArrayMethod` / `rubyIsA` / `rubyExc` / `memberCall` and the `js_r*` extern
+table) plus `abnf/jsrtregex.go` for Regexp and MatchData. **The prediction that
+this would drag more of the shared file along than the extern count suggests was
+correct, and the mitigation is the finding that matters for python.**
+
+### THE FINDING FOR PYTHON: a layer-2 file may IMPORT a shared source
+
+`languages/lib/regex.js` is the 1,559-line backtracking regex engine that every
+INTERPRETER grammar `include`s into its tag script, and `abnf/jsrtregex.go` is its
+line-by-line Go port. It is written in the same MetaJS a layer-2 file is - so layer
+2 needs no third copy:
+
+```js
+import "./regex.js"
+```
+
+compiles it into `ruby-rt.ll` with everything else. `metajs-to-llvm-ir.abnf`
+already resolves `import "./x"` relative to the file, `-rt-lib`'s lazy boot runs
+the imported top-level declarations into the same pinned scope, and the six
+`js_rx*` externs then cost only their ~460 lines of Ruby-specific glue instead of
+~2,000. **This is the first time a layer-2 library has imported a shared source
+rather than restating it, and python/js/typescript/kotlin all emit regex externs
+over the same engine.** Check for an existing MetaJS twin before writing anything.
+
+### The extern split
+
+`tests/ruby-test-full.rb` drives **93** externs, and so does the union over every
+`tests/ruby-test-*.rb` - ruby's emitter has no test-specific arm.
+
+| where | count | what |
+|---|---|---|
+| already in the C floor | 31 | the generic primitives of phase 3, the five the Lua pilot added, `js_truthy`'s replacement (see below), the scope externs, and the three the lowered `defined?` probe now calls |
+| **layer 2**, language-NEUTRAL | 8 | `js_dict_new`, `js_is_type`, `js_jadd`, `js_pyexc`, `js_pyget`, `js_pylen`, `js_pyset`, `js_supercall` |
+| **layer 2**, Ruby's own | 54 | the `js_r*` family (49) and the `js_rx*` regex wrappers (5) |
+
+`languages/lib/ruby-rt.ll` (54,046 lines, from a 2,665-line `.metajs` PLUS the
+1,559-line imported `regex.js`) exports exactly the 62 symbols the union needs plus
+`js_rformat` and `js_rprint`, which other ruby programs reach - checked, not
+assumed. The layer-2 source compiles **byte-identically under `-frozen`** as well
+as under goja.
+
+The split against the five done before it:
+
+```
+             floor   neutral   own      pair/box layer needed in layer 2
+lua            23        5      26      ~200 lines of i64 pairs
+php            29        8      63      a {__pf} float box
+swift          35       10      21      NONE
+java           29        9      16      ~90 lines, the unsigned-box long
+csharp         35       15      18      NONE  <- sintRaw
+dart           37       13      17      NONE
+ruby           31        8      54      NONE - but a whole numeric TOWER
+```
+
+**Ruby's own 54 is the second-largest surface after PHP's 63, and the reason is not
+the value model but the SURFACE**: Ruby spells its operators, its parameter forms
+(`*rest`, `**kwrest`, `&blk`, keyword args, block auto-splat), its `$globals`, its
+`@@class` variables, its `defined?`, its `raise`, its class objects and its whole
+builtin method library as separate externs. None of them is hard; there are simply
+a lot of them.
+
+### The `si_norm` question does not arise, and neither does tag 14
+
+Dart asked "is the language's unboxed representation the one `si_norm` produces".
+**For Ruby the question has no meaning: Ruby never builds a tag-13 cell at all.**
+Its Integer is the plain, un-truncated double and its Float is a `{__flo: true, f}`
+OBJECT box - the same representation `abnf/jsrt.go` uses (`jsFlo`/`jsRat`/`jsCpx`
+are Go value structs whose fields this file mirrors one for one) - because Ruby
+needs `7 / 2 == 3` and `7.0 / 2 == 3.5` to hold at the same time and one double
+cannot carry both. So neither floor number tag is reached from `ruby-rt.metajs`
+except in one place, and that place is worth reading (below).
+
+**The consequence the ratchet does NOT see**: those four boxes are Go COMPARABLE
+value structs, so two of them with equal fields are `===` equal and hash to one
+dict key; here they are objects compared by IDENTITY. **Symbols are therefore
+INTERNED** - `rbSym` hands out one object per name, keyed `"$" + name` - which
+restores `===` and Hash keying exactly for the one of the four a Ruby program
+actually uses as a key. Float/Rational/Complex are not interned and are compared by
+VALUE everywhere layer 2 does the comparing (`rbEq`, `rbDictFind`); the only way to
+see the difference would be a floor `js_seq` on a number, and the emitter emits
+`js_seq` on exactly three things - `x === nil`, a `typeof` result and a class
+descriptor. Audited, not assumed - the same grep Java and C# ran for their
+`{__char}` box.
+
+### The three cross-cutting findings, checked and MEASURED for ruby
+
+1. **`core.truthyExt`.** `grep -n truthyExt languages/ruby-to-llvm-ir.abnf` is
+   EMPTY - and ruby goes one step further than the four languages that merely keep
+   compile-core's default. It **overrides `truthy()` itself** with a single
+   unsigned handle compare:
+
+   ```
+   truthy = function(b, v) { return b.NewICmp(IPredUGE, v, handle(3)) }
+   ```
+
+   because the value handles 0/1/2 are `undefined`/`null`/`false` and 3 is `true`,
+   so "`>= 3`" IS Ruby truthiness (only nil and false are falsy) with **no extern
+   in the path at all**. That is sound natively for a reason worth checking rather
+   than assuming: `runtime.c` seeds `H_UNDEF`/`H_NULL`/`H_FALSE`/`H_TRUE` as
+   0/1/2/3, the same four handles `abnf/jsrt.go` uses. The `__raw` tally over six
+   ported languages is now **lua and php need it; swift, java, csharp, dart and
+   ruby do not**.
+2. **`_raw` PARAMETERS: ruby has THREE, in two functions** - `js_rargrest(args,
+   i_raw)` and `js_rblockarg(args, i_raw, n_raw)`, whose counts the emitter writes
+   with a bare `handle(k)` and whose Go arms read `int(a[1])` off the raw word.
+   Every other selector goes through `emitStr`/`emitNum`. The count is now
+   **3 / 0 / 0 / 1 / 1 / 0 / 3** for lua / php / swift / java / csharp / dart /
+   ruby, which is the plan's own advice: check each emitter, do not assume.
+3. **The scope probe, the FIFTH lowering.** `js_rdefined(scope, name, kind)` walked
+   the chain for `defined?(x)` and could never have been written in layer 2. It is
+   now the emitted IR helper `rb_defined` in `ruby-to-llvm-ir.abnf`, in PHP's
+   single-helper shape, over `js_scope_typeof`. `llvm.Run` stayed at 267/267 and no
+   floor change was needed for the fifth time. The accounting Dart asked for:
+   **one extern left layer 2 and one floor extern (`js_scope_typeof`) joined the
+   declare list**, so 93 stayed 93 and what layer 2 has to WRITE fell by one.
+
+   > The same inexactness Swift recorded: `js_scope_typeof` answers `"undefined"`
+   > for a slot that HOLDS undefined and for an absent name alike. A Ruby local is
+   > created-on-assign and a declared one holds nil, so the only slot that can hold
+   > undefined is an OPTIONAL PARAMETER the caller omitted - `defined?(p)` on such
+   > a parameter would answer nil here and its kind in the Go twin. Nothing in
+   > `tests/` does that (the four `defined?` uses are a constant, a `$global`, a
+   > bound local and an absent name); the fix, if one ever does, is to declare the
+   > parameter slot with `hNull` before `js_arg` overwrites it.
+
+4. **Tag 16 / generators: measured absent.** `grep -c 'js_genfn\|js_yield'
+   languages/ruby-to-llvm-ir.abnf` is **0**. Ruby's `yield` is a call of the block
+   the caller passed, not a generator, and no file in `tests/` uses `Fiber` or
+   `Enumerator`, so WALL 1 does not touch this language and the tag-16 `typeof`
+   divergence cannot be reached. Verified rather than inherited from the
+   investigation note.
+5. **`jsChar` was not needed.** Ruby has no character type - `?a` is a
+   one-character String - and the emitter emits `js_char` / `js_char_code` /
+   `js_kindex` zero times.
+
+### The ONE place a floor tag IS used, and the FMA defect it fixed
+
+Ruby's `& | ^` on Integers are `float64(int64(x) op int64(y))` in the Go twin,
+which MetaJS's own `&`/`|`/`^` cannot reproduce because they are ToInt32 and would
+wrap at 32 bits. The floor's sized-integer tag does exactly that arithmetic, so
+`rbBits64` is four calls - `sintRaw(sintHi(v), sintLo(v), 64, false)` on each side,
+`sintOp(5|6|7, ...)`, `sintNum` back. The same tag then paid for itself a second
+time in `rbBaseStr` (below).
+
+**And then the probe found the defect this whole exercise exists to find.**
+
+> **The Go compiler FUSES `x - math.Floor(x/y)*y` into an FMSUB on arm64**, so the
+> product and the subtraction are done at infinite precision and only the result is
+> rounded. clang does not fuse the C floor's equivalent. `9007199254740991 % -3`
+> is therefore **-2 under `llvm.Run` and -1 natively** - and real ruby 2.6.10 says
+> **-2**, so the fused answer is also the CORRECT one and this was layer 2's
+> defect, not the Go twin's. It is the same expression in Ruby's Integer `%`, its
+> Float `%`, `divmod` and `rubyGcd`, and the last of those was reducing
+> `90071992547409900/3` to `30023997515803300/1`.
+>
+> `rbFmaSub(x, q, y)` reproduces the fused result exactly with the standard Dekker
+> two-product / two-sum emulation of an FMA. The one subtlety is that a Float
+> remainder legitimately has `|q|` near DBL_MAX (`1e308 % 2.5`), where the `2^27`
+> split overflows, so each operand is first scaled DOWN by a power of two (exact)
+> and the exact product scaled back (also exact, because `|p * scale|` is about
+> `|x|`). 424 probe lines, and the first guard at `2^512` was too tight and left 34
+> of them - the measurement is what caught that too.
+>
+> **Every remaining language whose runtime computes a remainder as
+> `x - floor(x/y)*y` in Go has this.** It is invisible to `./test.sh`, which
+> compares each engine with itself, and invisible to a small ratchet, because it
+> only shows once `q*y` leaves the exactly-representable range. `grep -n 'math.Floor(.*)\*' abnf/jsrt*.go`
+> is the one-line check.
+
+### Ground truth
+
+Oracle: **`/usr/bin/ruby` 2.6.10 (2018)**, which is the only ruby on this machine.
+The plan's own caution applies and is respected: 2.6 rejects the Ruby-3 forms the
+CORPUS uses, so it is **not** used on `tests/ruby-test-full.rb` at all - only on the
+differential probe, which is written in the 2.6-compatible subset, and the two
+places it refused even that (`(..9)`, a beginless range, is 2.7; `0.0 % 0.0` raises
+`ZeroDivisionError`) are stated below rather than worked around silently.
+
+```
+matrix                325/325
+--full                5,618 assertions, 0 languages whose halves disagree (ruby 267)
+                      grep -E 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF' -> empty
+--cross               119 programs, 0 divergent
+go test ./abnf/       ok
+clang-check           16/16, and ruby joins the RUN-IT row
+gen-ruby-rt-ll.sh --check    ruby-rt.ll is up to date (54,046 lines)
+every other gen-*-rt-ll.sh --check   up to date (11 of them)
+-frozen recompile     ruby-rt.ll byte-identical to the goja build
+jsbootstrap.ll        untouched (metajs-to-llvm-ir.abnf was not edited)
+```
+
+**Verified from a CLEAN ARCHIVE, not the working tree** - `git archive <rev> | tar
+x`, then only the four Ruby files copied in, `go build` INSIDE, run there. That
+matters here because `languages/lib/runtime.c` and four other languages' files were
+other agents' concurrent edits while this ran. Done TWICE: at `65a443b`, and again
+at `3f91d7b` after go and the tag-16 `type_of` floor change landed under it -
+identical results both times, so nothing here depends on either:
+
+```
+tests/gen-ruby-rt-ll.sh --check    ruby-rt.ll is up to date (54,046 lines)
+./rb.exe                           full: 267 checks, 0 failures   (rc=0)
+tests/clang-check.sh ruby          ok, and the clang executable agrees
+the 36,378-line probe              BYTE-IDENTICAL to the working tree's run
+```
+
+Every Ruby program in `tests/`, `llvm.Run` against the native binary, stdout AND
+stderr AND exit code:
+
+```
+ruby-test-1  ruby-test-2  ruby-test-4  ruby-test-complete  ruby-test-features
+ruby-test-full  ruby-test-try  ruby-test-multifile (-i tests/imports)
+                                                            all SAME (rc=0)
+ruby-test-recognize   NOT COMPARABLE - both halves refuse it identically
+                      ("conditional assignment (||=) not implemented", a
+                      recognition-only file)
+an uncaught raise     SAME message, rc=1 in both; llvm.Run's driver adds one
+                      "  ==> Fail" line of its own, the same difference
+                      php-test-undefconst, java and dart record
+```
+
+### The differential probe - 36,378 lines, and the four defects it found
+
+Every operand is read out of an ARRAY at run time, so nothing can be folded: 32x32
+integer pairs times `+ - * / % & | ^ <=> == < >=`; 32 integers times the full unary
+and method set (`- ~ abs to_s to_s(2) to_s(16) to_s(36) to_f to_r even? odd? zero?
+positive? negative? succ pred floor ceil round inspect class`) times 16 shift
+counts for `<< >> **`; 32x32 double pairs times `+ - * / % <=> == < <=`; the double
+unary and predicate set and the 32x32 mixed Integer/Float promotion grid; 8x8
+Rational pairs and 4x4 Complex pairs with their renderings; 20x20 string pairs
+(`+ == <=> < include?`) and per-string `length upcase downcase to_sym * [] [-]`;
+**22 printf directives times 84 arguments**; the Array/Hash/Range method set; 11
+regexps against 10 subjects times `=~ match? match m[0] captures scan sub gsub
+split pre_match post_match begin end case/when`; the class, module, `is_a?` and
+`case`-equality matrix over 10 values and 14 class objects; 10x10 raise/rescue
+pairs; blocks, procs, lambdas and `&:sym`. The operand bags carry both zeros, both
+int53 edges, 2^31/2^32/2^53 and their neighbours, 1e±100, DBL_MAX, 5e-324,
+0.49999999999999994 and non-ASCII strings.
+
+```
+llvm.Run vs the native binary      BYTE-IDENTICAL, 36,378 of 36,378 lines
+```
+
+It found **four real defects, all in layer 2, all invisible to `./test.sh`**:
+
+1. **The FMA remainder**, above. 424 lines.
+2. **`to_s(36)` and the saturating `int64` cast.** The digit alphabet was 16 long,
+   so `100.to_s(36)` printed "2" and not "2s"; and Go's `strconv.FormatInt(int64(x),
+   base)` converts through int64, which SATURATES on arm64 - `int64(1e100)` is
+   `0x7fffffffffffffff` and its hex is `7fffffffffffffff`, not the 84 digits a
+   float loop produces. Both fixed with the sized-integer tag on the UNSIGNED
+   reading of the magnitude, which is the one shape whose negation is exact for
+   int64's minimum too - `java-rt.metajs`'s trick, reused. 45 lines.
+3. **`strconv.FormatFloat` is EXACT and rounds HALF TO EVEN.** `Math.floor(a *
+   10^prec + 0.5)` is wrong twice over: it rounds half AWAY from zero (Go's `%.0f`
+   of 2.5 is "2", not "3") and it loses every digit past 2^53, where `%f` of 1e100
+   has to print all 101 of them. Replaced with the exact decimal expansion of the
+   double - a finite double is `m * 2^e`, so its exact decimal is `m` doubled `e`
+   times for `e >= 0` and `m * 5^-e` with the point `-e` digits from the right for
+   `e < 0`, on a little-endian base-10000 bignum - plus a half-to-even rounder.
+   `-0.0` needed its sign READ (`1 / x < 0`) rather than compared, which is the
+   signed-zero trap arriving for the SIXTH language. 70 lines.
+4. **Width and precision in `format` count BYTES.** Go pads to `len(body)` and cuts
+   with `body[:prec]`, both of which are UTF-8 byte counts, so `"%10s" % "café"`
+   gets FIVE spaces and not six. The floor's own `byteLen` is the answer, and it is
+   the same primitive `lib/compile-core.js` already uses in `emitStr`.
+
+A fifth was avoided rather than fixed: `strings.ToUpper` is the full Unicode SIMPLE
+mapping and an ASCII loop printed "CAFé". **`runtime.c`'s own `toUpperCase` /
+`toLowerCase` are already that mapping** - its 328 ranges were generated from the Go
+runtime's own answers - so layer 2 calls the builtin instead of carrying a third,
+worse copy.
+
+### Against REAL ruby - measured, with the version caveat stated
+
+`/usr/bin/ruby` 2.6.10 ran the probe to line 32,983 before its own
+`ZeroDivisionError` on `0.0 % 0.0` (which is MRI behaviour, not a defect of ours).
+
+```
+the 14,436-line INTEGER prefix ruby reached first        0 of 14,436 differ
+the 32,983 lines it reached after % by zero was guarded  2,415 differ
+```
+
+**Zero differences over the whole integer surface** - arithmetic, all six
+comparisons, `<=>`, the three shifts at 16 counts, `**`, `to_s` in bases 2/16/36,
+`to_f`, `to_r`, every predicate. That is the strongest single piece of evidence in
+this port, and it covers the FMA fix directly.
+
+The 2,415 are **four pre-existing classes, and `llvm.Run` and the native binary
+agree with each other on every one of them**, so none is this port's:
+
+```
+  1,556   the FLOAT FORMATTER at its boundary: ours renders 9007199254740991.0
+          plainly where ruby writes 9.007199254740991e+15. Ruby's Float#to_s goes
+          scientific one decade earlier than ours. Three halves at once
+          (rubyFloStr in jsrt.go, floStr in ruby-interpreter.abnf, rbFloStr here)
+          and --full pins the current one, so it is a job of its own - exactly the
+          reason the Lua and Swift formatter boundaries were not fixed either.
+    530   INTEGER EXACTNESS past 2^53: `-3 * 9007199254740991` and `100 ** 11` are
+          BIGNUMS in ruby and doubles here. That is the documented value model of
+          both halves (abnf/jsrt.go says so at the jsFlo type) and not a defect.
+    309   -0.0 THROUGH A REMAINDER: `-0.0 % 1.0` is -0.0 in ruby and +0.0 in BOTH
+          our halves. This is the signed-zero trap in its Dart shape, and the Go
+          twin has it too - so it is a three-halves fix and not this gate.
+     20   Rational/Complex rendering and Float#round at a tie.
+```
+
+### What is owed, and what generalises to PYTHON
+
+1. Nothing for the gate. `abnf/jsrt.go`'s Ruby half stays until the change is
+   committed - unlike the five languages before it, it is NOT a file that can ever
+   go, because python, js, typescript, kotlin and go share it.
+2. The float formatter boundary above, if and when someone does the three-halves
+   job; `-0.0 % 1.0`, same shape, both halves currently agree.
+3. `Integer#%` on a value past 2^53 is now EXACT where the Go twin is exact by
+   accident (arm64 fusion). If the Go twin is ever built for an architecture
+   without FMA, `abnf/jsrt.go` and this file diverge again - the fix would be to
+   spell the exact subtraction in Go too, which is three lines of `math.FMA`.
+
+What **generalises to python**, which shares Ruby's position of having no dedicated
+twin:
+
+- **`import "./regex.js"` from layer 2.** Python emits `js_pyre*` externs over the
+  same shared engine, and the whole engine is now known to compile under
+  `metajs-to-llvm-ir.abnf -rt-lib` and to link. That is the single biggest saving
+  available to it, and the same trick applies to any shared `languages/lib/*.js`.
+- **The `js_py*` family is now written twice in layer 2** (dart's thirteen and
+  ruby's eight), and python is the language they are NAMED for - `js_pyget`,
+  `js_pyset`, `js_pylen`, `js_pyexc`, `js_dict_new`, `js_is_type`, `js_supercall`
+  transfer with only their `__getitem__` / `__setitem__` / `__len__` arms to add
+  back, which Ruby and Dart both deleted as unreachable.
+- **The FMA remainder.** `abnf/jsrt.go`'s python arms compute `%` the same way.
+  Grep before writing.
+- **`strconv.FormatFloat` exactness and half-to-even**, and **`byteLen` for printf
+  width** - python's `%`-formatting and `format()` go through the same Go
+  primitives, and the exact-decimal bignum in `ruby-rt.metajs` is language-neutral.
+- **The scope probe**, sixth confirmation. Python's `js_pyglobal`-shaped externs are
+  the same pure probe; check the emitter before writing anything into layer 2.
+- **No dedicated twin does NOT mean more work in layer 2** - it means the
+  SPECIFICATION is spread out. The extern split was the usual shape; what cost time
+  was reading `abnf/jsrt.go` in five places instead of one. Budget for the reading,
+  not for the writing.
+
+### launch.json entries wanted (not added - not my file)
+
+All three pass natively today, at the working tree and from the clean archive:
+
+```
+"Ruby native binary, full syntax (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-full.rb", "-q", "-exe", "tests/ruby-native-full.out"]
+"Ruby native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-features.rb", "-q", "-exe", "tests/ruby-native.out"]
+"Ruby native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["-i", "tests/imports", "languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-multifile.rb", "-q", "-exe", "tests/ruby-native-multi.out"]
+```
+
+## JS and TYPESCRIPT - DONE (2026-08-03). The gate is MET for BOTH, on ONE layer 2
+
+**`tests/js-test-full.js` runs as a self-contained native binary and prints
+`full: 354 checks, 0 failures`, and `tests/typescript-test-full.ts` prints
+`full: 276 checks, 0 failures`. Both are byte-identical with `llvm.Run` on stdout,
+on stderr and in their exit code.** `tests/clang-check.sh` reads
+
+```
+js              23097  ok, and the clang executable agrees
+typescript      21790  ok, and the clang executable agrees
+```
+
+so both left the `ok (module only)` row for the run-it row, **no row is held, no
+assertion is held back, and no floor change was needed or made.**
+`abnf/jsrt.go` + `abnf/jsrtjsprint.go` + `abnf/jsrtjsbig.go` + `abnf/jsrtregexjs.go`
+are **kept**, as the plan requires: `llvm.Run` still uses them, the native binaries
+use layer 2, and the two are differentially compared below.
+
+The reproducible native command, for both languages:
+
+```
+mec languages/js-to-llvm-ir.abnf         tests/js-test-full.js         -q -exe /tmp/js-native.out
+mec languages/typescript-to-llvm-ir.abnf tests/typescript-test-full.ts -q -exe /tmp/ts-native.out
+/tmp/js-native.out ; echo $?      # full: 354 checks, 0 failures / 0
+/tmp/ts-native.out ; echo $?      # full: 276 checks, 0 failures / 0
+```
+
+Oracles: **node v24.18.0** (present on this machine, used throughout) and Apple
+clang for the native link. `tsc` is not on this machine.
+
+The row WAS held for part of the session, with the `clang-check: native-row-held`
+marker, and released the moment the last assertion went green - which is what the
+mechanism is for.
+
+### ONE layer 2 for BOTH languages, and that was decided by measurement
+
+The union of externs over every `tests/js-test-*.js` is **87** and over every
+`tests/typescript-test-*.ts` is **86**. The two sets differ by exactly three names:
+
+```
+js_jstonumber   js only     Number(v) - typescript's ratchet never reaches it
+js_newtarget    js only
+js_sub          ts only, and it is the C FLOOR'S OWN
+```
+
+So **TypeScript's layer 2 is a strict SUBSET of JavaScript's**, there is no
+`typescript-rt.metajs`, and `typescript-to-llvm-ir.abnf` links `lib/js-rt.ll`
+verbatim - the same arrangement the two grammars already have on the Go side, where
+they share `abnf/jsrt.go` + `abnf/jsrtjsprint.go` + `abnf/jsrtjsbig.go` and
+typescript has no dedicated twin at all. That question was the first one this
+migration was asked to answer and the answer is: **share it outright, no overlay.**
+
+### The extern split
+
+`tests/js-test-full.js` drives **83** externs and the union over every
+`tests/js-test-*.js` is **87**; typescript's union is **86**.
+
+| where | count | what |
+|---|---|---|
+| already in the C floor | 39 | the generic primitives, `js_truthy`, `js_keys`, the scope externs, and `js_genfn` / `js_yield` / `js_ctl_*` |
+| **layer 2**, language-NEUTRAL | 10 | `js_has`, `js_defprop`, `js_iterable`, `js_supercall`, `js_supget`, `js_supset`, `js_call_new`, `js_this`, `js_newtarget`, `js_scope_set_or_create` |
+| **layer 2**, JS's own | 38 | the `js_js*` family (34) and the `js_jsx*` regex wrappers (4) |
+
+`languages/lib/js-rt.metajs` exports **59** symbols rather than 48, and the eleven
+extra are the whole of what the `-exe`-only lowerings needed - `js_jssetthis`,
+`js_jssetnew`, `js_jsmset`, `js_jstypeof`, `js_jsseq`, `js_jssne`, `js_jsneg`,
+`js_jsnot`, `js_jstruthy` (exported from `js_jstruthy__raw`), `js_jstpl` and
+`js_jsstr`. **None of them has a Go twin and none needs one**, because the module
+that declares them is only ever built by `-exe`. `js_scope_set_or_create` is present
+as a LOUD STUB, php-style: the emitter lowers it and it is never called.
+
+The split against the seven done before it:
+
+```
+             floor   neutral   own      pair/box layer needed in layer 2
+lua            23        5      26      ~200 lines of i64 pairs
+php            29        8      63      a {__pf} float box
+swift          35       10      21      NONE
+java           29        9      16      ~90 lines, the unsigned-box long
+csharp         35       15      18      NONE  <- sintRaw
+dart           37       13      17      NONE
+ruby           31        8      54      NONE - but a whole numeric TOWER
+go             42       10      32      NONE
+js / ts        39       10      38      NONE - but a BigInt tower and a regex engine
+```
+
+The prediction in the brief - "expect the floor column to be the largest yet,
+because these are the languages closest to MetaJS itself" - is **half right and
+worth correcting**. 39 is the second-largest floor column after go's 42, but the
+reason is not closeness to MetaJS: it is that JavaScript needs neither the sized
+integer tag nor the boxed double, so the floor primitives it does use are the plain
+ones every language uses. What closeness to MetaJS actually buys is elsewhere and
+it is much bigger than a column of the table - see "the MetaJS twin already exists"
+below.
+
+### THE FINDING THAT DOMINATES THIS MIGRATION: the MetaJS twin already exists
+
+Ruby found, this same session, that a layer-2 file may `import` a shared MetaJS
+source rather than restate it (`import "./regex.js"`). **For js and ts that finding
+generalises from one file to the whole port.**
+
+`languages/js-interpreter.abnf`'s start script is written in the SAME MetaJS subset
+a layer-2 file is, and it already carries, function for function, the answers
+`abnf/jsrtjsprint.go` and `abnf/jsrtjsbig.go` give:
+
+```
+jsIsObjLike  ~2924   jsStr      ~2942   jsToPrim    ~2971   jsLooseEq  ~2984
+jsTruthy     ~3014   jsBuiltin  ~3236   jsStringMethod ~3292
+jsStringFn   ~3593   jsBigIntFn ~3597   isBigInt / biToStr / biCmp / the bi* family
+include("lib/regex.js") ~2894, and the whole JS regex glue at ~4416-4700
+```
+
+`abnf/jsrtjsprint.go`'s own header says so in as many words: *"The interpreter
+halves carry the SAME answers written in their own tag script - jsStr, jsLooseEq,
+jsRelate, jsBuiltin, jsObjectGlobal. The two files must be read together."* The
+matrix has kept those two in agreement for a long time, so the MetaJS half is not
+merely available, it is **better ground truth than a fresh translation from Go**,
+and it is already inside the frozen subset (no `for..in`, no `split`, no exponent
+literals - exactly the things a fresh translation gets wrong).
+
+> **The rule to carry to python and kotlin: before porting a Go twin, grep the
+> LANGUAGE'S OWN INTERPRETER GRAMMAR for the same function.** Ruby's version of
+> this rule was about one shared library; the general form is that every language
+> in this repo has a complete MetaJS implementation of its own semantics sitting in
+> `languages/<lang>-interpreter.abnf`, and layer 2 is the same language. What
+> differs is only the VALUE MODEL - the interpreter has its own object
+> representation, layer 2 works on the floor's handles - so the port is an
+> adaptation, not a translation.
+
+### WALL 1 - the dynamic `this`, and it is a NEW SHAPE of the private-representation probe
+
+`js_this` and `js_newtarget` read `abnf/jsrt.go`'s `thisStack` / `newTargetStack` -
+**the Go runtime's own CALL STACK.** That is not a scope (php, swift, dart, ruby)
+and not a control signal (go); it is state the C floor **does not keep at all**:
+`runtime.c`'s `js_call` drops `self` for a tag-7 closure and hands `jsdispatch` only
+`(env, args)`.
+
+So this is the first wall in part 3 that could NOT be closed by finding a floor
+extern that already answers it - **there is none, and the "find the floor extern
+and lower the call" rule runs out here.** The answer that replaces it:
+
+> **If the floor keeps no such state, layer 2 can keep it, provided the EMITTER
+> hands it over.** Layer 2 is a module with globals of its own. The emitter's whole
+> half is one extern call, `js_jssetthis(receiver)`, emitted immediately before
+> every `js_call`, `js_jsxcall`, `js_jsmcall` and `js_supercall`.
+
+Two details make it cheap, and both are worth copying:
+
+1. **No restore is needed**, which looks like a bug and is not. `this` is read
+   exactly ONCE per function, at ENTRY, where the emitter binds it into the scope
+   (`js_scope_decl(scope, "this", js_this())`). A nested call that overwrites the
+   cell cannot be observed by the caller, which already copied it.
+2. **The lowering is emitted ONLY under `-exe`** (`nativeBuild = c.exePath != ""`).
+   The module `llvm.Run` sees is byte-for-byte the one it always was - verified by
+   diffing the emitted module for `tests/js-test-full.js` and
+   `tests/typescript-test-full.ts` against a clean `git archive` of the base commit
+   - so **nothing in the matrix can move**, which is the property that made this
+   change safe to make at all. Two modules that differ is already true of
+   `emitDispatch`.
+
+Measured natively, against `llvm.Run`, on a program with an object-literal method
+reading `this.n` and a plain function reading `typeof this`:
+
+```
+                      llvm.Run      native
+o.get2()  (this.n)       7             7
+plain()   (typeof this)  undefined     undefined      rc=0 both
+```
+
+### WALL 2 - the ACCESSOR, and the same answer a second time
+
+`js_defprop` stores a `*jsAccessor` - another Go TYPE. The floor's `get_member` /
+`set_member` have never heard of it, so a `get x()` member read through the floor
+would answer the box and a write would replace it. Layer 2 can represent the box
+(it is an ordinary object here) but only if **every member read and write goes
+through layer 2**, and by default they do not: the emitter emits the floor's
+`js_get` / `js_set` at 30 and 23 sites plus `core.indexExt`.
+
+Same answer as wall 1, and it cost the emitter three lines: under `-exe` only,
+`js_get` -> `js_jsmget` (which already existed on both sides) and `js_set` ->
+`js_jsmset` (a NEW extern that needs no Go twin, because it is emitted only for a
+native build), plus `core.indexExt = "js_jsmget"`. Layer 2 delegates straight back
+to the floor for every receiver that carries no accessor.
+
+### WALL 4 - the BigInt is a Go TYPE, and it reaches SIX floor externs
+
+`abnf/jsrtjsbig.go`'s BigInt is a Go type, and `abnf/jsrt.go` therefore carries an
+arm for it in `truthy` (927), `toString` (1061), `strictEq` (1214), `typeOf` (1547)
+and `js_neg` (5255). In layer 2 a BigInt can only be an object box, so the C floor's
+own versions of those answer **"truthy", "identity", "object" and NaN** - and the
+ratchet sees it immediately: `typeof 10n === "bigint"` (`num7`, `big1`),
+`10n === 10n` (`big13`), `-(2n ** 100n)` (`big10`, `big19`), `!0n` (`big20`,
+`big21`) and every `while (c < 3n)`.
+
+Same answer as walls 1 and 2, and it cost the emitter six small functions. Under
+`-exe` ONLY, these are routed to layer-2 twins that delegate to the floor for every
+value that is not a BigInt:
+
+```
+`===`   js_seq     -> js_jsseq        `!==`  js_sne   -> js_jssne
+unary - js_neg     -> js_jsneg        `!`    js_not   -> js_jsnot
+typeof  js_typeof  -> js_jstypeof     truthy core.truthyExt -> js_jstruthy
+```
+
+Two details are worth copying.
+
+**The INTERNAL probes are deliberately left on the floor.** Either grammar emits
+`js_typeof` twice and `js_seq` five times for its own bookkeeping - "is the callee a
+function", "is this argument undefined", "does this key match" - and every one of
+those is a question `type_of` and `strict_eq` answer correctly for a BigInt box
+anyway. Only the USER-VISIBLE operators are routed. Routing all of them would have
+worked too and would have been slower for no gain.
+
+**`__raw` fires here, and js/ts are the first language where the answer DIFFERS
+between the two engines.** `grep -n 'truthyExt *=' languages/js-to-llvm-ir.abnf` is
+empty in the source sense the rule means - the default `js_truthy` is the floor's
+own and needs no shim - **but the native build sets `core.truthyExt = "js_jstruthy"`
+and that shim absolutely needs the suffix**, because compile-core's `truthy()`
+compares its result with `icmp ne ..., 0` as a RAW integer and a MetaJS `false`
+would arrive as handle 2. `languages/lib/js-rt.metajs` spells it
+`function js_jstruthy__raw(v)`. So the rule of part 3's item 2 wants one more
+clause:
+
+> **A language needs `__raw` exactly when it OVERRIDES `core.truthyExt` - and the
+> override may be introduced by the NATIVE BUILD ALONE.** Grep the grammar for the
+> assignment, not for the read, and grep it inside the `-exe` arm too.
+
+> **Four walls, one shape.** `this`, the accessor box, `typeof` and the whole BigInt
+> operator family are all cases of *the Go runtime represents something as a Go
+> TYPE, and layer 2 can only represent it as an object*. The general answer this
+> migration adds to part 3 is: **route the OPERATOR through layer 2, in the emitter,
+> under `-exe` only.** It needs no floor change and no Go twin, and because it is
+> gated on `c.exePath` the module `llvm.Run` executes never moves - which is what
+> makes it safe to do late in a session on two grammars the matrix depends on.
+
+### WALL 3 - `js_scope_set_or_create`, and the ONE floor request this port files
+
+JavaScript's non-strict implicit global: a plain `=` to a name that is nowhere on
+the scope chain creates the binding in the ROOT scope. `abnf/jsrt.go` does it in
+`scopeSetOrCreate`; **the C floor has no such function and layer 2 cannot write one**
+- a scope is the floor's private storage.
+
+Unlike walls 1 and 2 this one has no exact emitter lowering either, and the reason
+is precise:
+
+> The only probe the floor exposes is `js_scope_typeof`, which answers
+> `"undefined"` for a slot that HOLDS undefined and for an ABSENT name alike -
+> the inexactness swift recorded and ruby re-recorded. `var x; x = 5` and
+> `x = 5` with no `x` anywhere are therefore indistinguishable, and they need
+> opposite answers.
+
+What IS in the floor is `js_pyset_var` - "bind where the chain already holds it,
+otherwise in the scope the assignment stands in" - which is the same walk with a
+different fallback. So under `-exe` the store is lowered to `js_pyset_var` and the
+one difference left is WHERE a never-declared name lands: the enclosing scope
+instead of the root. That is exact for every declared name, including the
+`var x; x = 5` case the `js_scope_typeof` probe would have got wrong, and it is
+wrong only for an implicit global created inside a function and read outside it -
+which is `tests/js-test-implicit-global.js` and nothing else. Measured, and it is
+the ONE native-vs-`llvm.Run` divergence left over all thirteen js and ts test files:
+
+```
+tests/js-test-implicit-global.js   native: js runtime error: variable not defined: counter (rc=1)
+                                   llvm.Run: rc=0, no output
+```
+
+The file assigns `counter = 100` inside `makeGlobal()` and reads it from `main()`.
+It is not in the gate (`tests/clang-check.sh` runs only `*-test-full.*`), and it is
+not in the matrix as an `-exe` entry for that reason.
+
+> **FLOOR REQUEST (reported, not made - the floor is another agent's this
+> session).** Either of these closes it exactly, and both are small:
+>
+> * `long js_scope_has(long s, long name)` - `js_scope_typeof`'s loop answering a
+>   BOOLEAN handle instead of `type_of(v)`. Six lines. The emitter then lowers
+>   `set_or_create` to a two-arm select exactly as php lowered its scope probe.
+> * or `js_scope_set_or_create` itself - `js_scope_set`'s loop with
+>   `scope_put(G_ROOT, ...)` instead of `die2` at the end. Twelve lines, and it
+>   removes the extern from layer 2's list entirely.
+>
+> The second is the better one: `js_scope_set_or_create` is not JavaScript's alone
+> (it is `abnf/jsrt.go`'s generic name and python's `js_pyset_var` is its sibling,
+> already in the floor next to where it would go).
+
+### The three cross-cutting findings, checked and MEASURED for js and ts
+
+1. **`core.truthyExt`: js and ts are the first language where the answer DIFFERS
+   between the two engines.** At the base commit `grep -n 'truthyExt *='` was EMPTY
+   in both grammars (the two hits either grep finds are READS in the `||=` arm), so
+   `llvm.Run` keeps compile-core's default `js_truthy` - the C floor's own function,
+   already the raw 1/0 the emitted `icmp ne ..., 0` compares, **no `__raw`**. The
+   NATIVE build now sets `core.truthyExt = "js_jstruthy"` for BigInt (wall 4), and
+   that shim **does** need the suffix. The tally over eight ported languages is
+   **lua and php need it; swift, java, csharp, dart, go and ruby do not; js and ts
+   need it in the native build only.**
+2. **`_raw` PARAMETERS: js and ts have ZERO.** Every `handle(k)` in either grammar
+   feeds `js_num_i`, `js_closure` or `js_arg`, all three floor externs. The count is
+   now **3 / 0 / 0 / 1 / 1 / 0 / 3 / 1 / 0 / 0** for lua / php / swift / java /
+   csharp / dart / ruby / go / js / ts.
+3. **Generators (tag 15/16): the DRIVING half costs layer 2 zero lines, exactly as
+   C# predicted, and the INSPECTION half is not owed either.**
+   `grep -c 'js_genfn\|js_yield'` is **7** in each grammar - both languages really
+   do build tag-16 cells - but the whole protocol is already emitted over floor
+   externs: `js_genfn(js_closure(...))` to make the generator function, and
+   `js_get(g, "next")` + `js_call` to step it, which `runtime.c`'s `get_member`
+   answers with a bound `gen_next`. `tests/js-test-full.js` section on generators
+   uses `.next()` and `.next(v)` and nothing else - no `.return()`, no `.throw()` -
+   so the side table php needed for its `current`/`key`/`valid` surface is NOT
+   owed here. What js DOES owe that C# did not is `js_iterable`, the for-of drain,
+   which has to loop `next()` until `done` because the floor has no `g.drain`.
+   And the tag-16 `typeof` fix that landed for C# is inherited: `typeof m ==
+   "function"` is the correct callable test.
+
+### Ground truth
+
+Measured in the working tree. Other agents were landing kotlin and python in the
+same tree during this sweep; the numbers below are the whole-suite ones at the end.
+
+```
+matrix                325/325
+--full                5,618 assertions, 0 languages whose halves disagree
+                      (js 354, typescript 276)
+                      grep -E 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF'  ->  no hits
+--cross               119 programs, 0 divergent, 0 differing only in warnings
+go test ./abnf/       ok
+clang-check           16 modules, ALL accepted, suite GREEN and - with kotlin and
+                      python landing in the same sweep - ALL SIXTEEN languages now
+                      read "ok, and the clang executable agrees", NONE held:
+                        js          23097  ok, and the clang executable agrees
+                        typescript  21790  ok, and the clang executable agrees
+every gen-*-rt-ll.sh --check clean, js-rt.ll (60,764 lines) included
+languages/lib/js-rt.metajs compiles byte-identically under -frozen
+```
+
+Native vs `llvm.Run`, **stdout AND stderr AND exit code**, over every js and ts
+test file:
+
+```
+js-test-1  js-test-2  js-test-3  js-test-classes  js-test-complete
+js-test-features  js-test-full                            all SAME (rc=0)
+typescript-test-1  typescript-test-annotations  typescript-test-complete
+typescript-test-features  typescript-test-try  typescript-test-full
+                                                          all SAME (rc=0)
+js-test-multifile (-i tests/imports)                      passes natively
+js-test-implicit-global                     the ONE divergence: WALL 3, above
+```
+
+### The differential probes
+
+Three, all generated rather than hand-written, all run in all three engines.
+
+1. **BigInt, 3,318 output lines.** Every pair from
+   `{0n, 1n, -1n, 2n, -2n, 10n, 255n, -255n, 2^64, -(2^64), 2^100,
+   9007199254740993n, -9007199254740993n, 1000000007n}` over
+   `+ - * / % < > <= >= == != === !== & | ^`, plus `<< >>` by
+   `{0n,1n,3n,10n,64n}`, plus unary `-`, `~`, `!`, `typeof` and `.toString()` in
+   radix 2/8/16/36. **Native output is byte-identical with node on all 3,318
+   lines.**
+2. **The method surface, 230 lines.** Every String method (23 of them over five
+   receivers), every Array method (15 over four receivers), `toFixed`/`toString`/
+   `valueOf` over ten numeric edge values including `-0`, `1e21`, `1e-7` and `NaN`,
+   `Object.keys/values/entries`, `delete` + `in`, `reduce`, a generator drained by
+   `for-of`, and a class with a getter, a `toString` and an `instanceof`.
+   **Native == `llvm.Run` byte for byte. Against node, 2 of 230 lines differ**, both
+   the fraction-digit count of a non-integral `toString(2)` (`(1e-7).toString(2)`
+   and `(0.1).toString(2)`) - `abnf/jsrtjsprint.go`'s answer, faithfully reproduced,
+   and divergence 5 below.
+3. **A randomized BigInt/number probe, 2,638 lines** (agent-run, described in
+   divergences 2 and 3 below): 220 random signed pairs of 1-39 decimal digits over
+   every operator and four radices.
+
+### The size of layer 2, and where it came from
+
+`languages/lib/js-rt.metajs` is **3,643 lines** and compiles to a **60,764-line**
+`languages/lib/js-rt.ll`, which is the second-largest layer 2 after ruby's - and
+that number is misleading in the way that matters: it includes the **1,559-line
+`lib/regex.js` engine, IMPORTED rather than restated**, so the regex extern family
+cost 548 lines of glue rather than the ~2,700 lines `abnf/jsrtregex.go` +
+`abnf/jsrtregexjs.go` would have been. The three parts are
+
+```
+part A  the VALUE surface (abnf/jsrtjsprint.go)   1,880 lines   24 externs
+part B  BIGINT + arithmetic (abnf/jsrtjsbig.go)     957 lines   18 externs
+part C  REGULAR EXPRESSIONS (jsrtregexjs.go)        548 lines    4 externs + import
+base    this / newtarget / the routed operators     254 lines   12 externs
+```
+
+The layer-2 source compiles **byte-identically under `-frozen`** as well as under
+goja, and `tests/gen-js-rt-ll.sh --check` is clean.
+
+### Floor requests, both MEASURED rather than guessed - BOTH GRANTED 2026-08-03
+
+**Both are in the floor now, and the `${obj}` job of divergence 1 below is done
+with them. See "The two floor requests granted, and the template literal that
+needed three halves" at the end of this section for the measurements.** The two
+requests as they were filed:
+
+1. **`js_del(o, key)` - the largest single win available.** The C floor exports no
+   delete at all, so `js_jsdel` blanks the slot and records the key in a side table
+   that `js_has` and the own-keys walk consult. `delete o.a`, `"a" in o` and
+   `Object.keys` are correct; three things are not - key ORDER after
+   delete-then-reinsert (`a|b|c`, node `a|c|b`), `for-in` after a delete, and object
+   spread after a delete - and the table is **quadratic and leaks**: measured on
+   `delete` inside a loop, n=1000 -> 1.35 s, n=2000 -> 7.9 s, n=4000 -> 36 s, where
+   the identical loop without the delete is linear (n=60000 -> 5.1 s). About
+   **fifteen lines in the floor would fix all four and delete ~60 lines of layer 2**.
+2. **`js_scope_has(s, name)` or `js_scope_set_or_create` itself** - WALL 3 above.
+
+### Divergences MEASURED and NOT fixed here
+
+Every one of these is invisible to the suites - the ratchet passes 354/354 and
+276/276 with all of them present - and every one is written down so the next reader
+does not have to rediscover it.
+
+1. ~~**`${obj}` renders `[object Object]` in BOTH Go-backed engines**~~ **FIXED
+   2026-08-03 - the second candidate below is what shipped, in FOUR halves, and the
+   extern it needed already existed on both sides (`js_jsstr`). See "The two floor
+   requests granted, and the template literal that needed FOUR halves" at the end of
+   this section.** As it stood: node runs
+   the object's `toString`, and the INTERPRETER half is wrong for a class instance
+   and right for an object literal. Measured three ways:
+
+   ```
+                       node    js-interpreter   js-to-llvm-ir (llvm.Run AND native)
+   "" + new D()        D!      D!               D!
+   `${new D()}`        D!      [object Object]  [object Object]
+   `${ {toString} }`   O!      O!               [object Object]
+   ```
+
+   The compiler half is `makeTemplate` emitting the shared `js_add`. Fixing it is a
+   THREE-HALVES job (emitter + `js-interpreter.abnf` + a ratchet assertion) and it
+   would break byte-identity with `llvm.Run`, which is this gate - so the native
+   build gets `js_jstpl`, which is the floor's `js_add` plus the BigInt rendering
+   and nothing else. Two candidate fixes were measured on a scratch grammar:
+   routing `makeTemplate` through `js_jsadd` gets `${obj}` right but makes
+   `${boxedNumber}` render `5` where node says `[object Object]` (a template does
+   ToString, not ToPrimitive); routing each interpolated PART through a ToString
+   extern gets all three cases right in both engines. **The second is the fix; it is
+   not this change.**
+2. **A BigInt compared with a NUMBER goes through the double.** 220 random signed
+   pairs of 1-39 digits over every operator and four radices, 2,638 output lines:
+   **57 lines differ from node, all of the shape `bigint < hugeNumberLiteral` past
+   2^53**, where node compares mathematically exact. `abnf/jsrtjsbig.go`'s
+   `bigCompare` and `js-interpreter.abnf`'s `biRel` both go through the double, so
+   all three halves are wrong together. Zero divergence on arithmetic, bitwise,
+   shifts, `**` or any radix.
+3. **One line of those 2,638 differs from the GO TWIN, and on it layer 2 matches
+   node and Go does not**: `44018417530742584732345529662984672837n < 4401...837`.
+   Go's `bigToFloat` is `big.Float -> Float64` (round-to-nearest); layer 2's
+   `jbToNum`, like the interpreter's `biToNum`, accumulates `a*BASE + limb` and
+   rounds at each step. **The compiler half and the interpreter half were already
+   capable of disagreeing here before this port** - a latent matrix crack, recorded.
+4. **A BigInt is INTERNED and therefore never freed.** `jbMake` keeps one canonical
+   object per value in a 251-bucket table, and that is load-bearing rather than an
+   optimisation: the floor's `strict_eq` has no BigInt case and falls through to
+   identity, so without interning `10n === 10n` would be false at every site the
+   emitter does NOT route (the `switch` dispatch chain, `makeNewFrom`, the floor's
+   `indexOf`). The pool is a GC root and grows monotonically.
+5. **`(-0.4).toFixed(0)`** is `"0"` in `abnf/jsrtjsprint.go` and `"-0"` in node;
+   **`(0.1).toString(3)`** emits 52 fraction digits where node emits 34. Layer 2
+   reproduces the Go answer in both - faithful to the port target, divergent from
+   node.
+6. **`js_jsobject` has no `prototype` slot.** Go copies it from the root scope's
+   `Object` binding; the C floor seeds `String`, `Array` and `Math` but no `Object`
+   and has no prototype concept, so the `Object.prototype.hasOwnProperty` idiom
+   cannot resolve natively. Neither ratchet reaches it.
+7. **`js_jsxcall` cannot read a bound method's NAME.** Go's version recognises
+   `"...".replace` / `"...".split` off a `*boundMethod`; the floor's equivalent is a
+   tag-9 cell that `typeof` calls `"function"` and no extern opens. Layer 2
+   separates the two by RESULT TYPE with one probe call (`replace` always answers a
+   string, `split` always an array). Correct for both; the one loss is another
+   string native called with a regexp first argument (`"abc".slice(/x/)`), which
+   would be read as `replace`. A floor extern answering a bound method's id would
+   remove the probe.
+8. **`f.call` / `f.apply` had to be taken over in `js_jsmget`.** The floor answers
+   both with a bound method whose `js_call` DROPS the receiver, so nothing armed
+   `js_this()`. Measured: the TypeScript decorator assertion `dec1`
+   (`original.call(this, n)`) answered `NaN` natively against `10` under `llvm.Run`
+   before the fix. **This is the fourth face of WALL 1 and the one that would have
+   been easiest to miss**, because it is a divergence inside a library method rather
+   than at a call site the emitter owns.
+9. **`new RegExp("").source`** is `""` here and `"(?:)"` in node; the `d` flag builds
+   no `m.indices`; `Object.keys(re)` exposes the real slots. All three are the Go
+   twin's answers, inherited deliberately.
+
+### What is still owed
+
+1. `abnf/jsrtjsprint.go`, `abnf/jsrtjsbig.go` and `abnf/jsrtregexjs.go` can be
+   deleted the day `llvm.Run` is retired, as the plan requires. They are kept now
+   because `llvm.Run` is what the matrix runs.
+2. ~~The two floor requests above.~~ **DONE 2026-08-03**, both of them.
+3. ~~The `${obj}` three-halves job.~~ **DONE 2026-08-03**, and it was four halves.
+4. Divergences 2-9, each recorded at its site.
+
+### What generalises to PYTHON (which landed in parallel) and to KOTLIN
+
+1. **Grep the language's own INTERPRETER GRAMMAR before porting anything.**
+   `languages/python-interpreter.abnf` is written in the same MetaJS a layer-2 file
+   is, it already `include`s `lib/regex.js` (~1088) and it already carries python's
+   own `%`-formatting, its numeric tower and its builtin surface. Ruby's finding was
+   "a layer-2 file may import a shared source"; the general form this port proves is
+   **"the language's whole semantics already exist in MetaJS - adapt them to the
+   handle value model instead of translating the Go twin."** That is the single
+   biggest lever available and it is available to every remaining language.
+2. **The private-representation probe has a THIRD answer now.** php/swift/dart/ruby
+   lowered a SCOPE probe, go lowered a CONTROL SIGNAL probe, and both worked because
+   the floor already had an extern that opened the cell. `js_this` had none - the
+   floor keeps no call stack at all - so the answer became: **layer 2 keeps the
+   state and the EMITTER hands it over**, under `-exe` only, so the module `llvm.Run`
+   sees does not move. Python's `js_pyglobal` / `js_pynonlocal` / `js_pyfnscope` are
+   the same shape (`runtime.c` says at `js_pyset_var` that "a scope here carries no
+   mark, so those arms are NOT modelled. A Python layer 2 will have to add them"),
+   and this is the pattern to reach for when the floor has nothing to lower onto.
+3. **`js_scope_set_or_create` is python's problem too**, from the other side:
+   python's assignment rule IS `js_pyset_var`, which is in the floor, so python gets
+   for free the thing js had to approximate. But python's `global`/`nonlocal` need
+   the scope MARK the floor does not keep, which is the same wall by a different
+   name - and the same two answers apply (a floor probe, or emitter-carried state).
+4. **The `-exe`-only emitter change is the safety property that made all of this
+   possible.** Every lowering here is gated on `c.exePath != ""` and the emitted
+   module for the non-native path was diffed against a clean archive of the base
+   commit and found byte-identical for both `tests/js-test-full.js` and
+   `tests/typescript-test-full.ts`. **Do that diff first, before touching a
+   grammar** - it converts "will the matrix survive this" from a hope into a
+   measurement, and it costs one `git archive` plus one `diff`.
+5. **Generators: js and ts are the third and fourth languages on the landed
+   coroutine primitive and they owe the DRIVING half zero lines**, like C#. Python
+   is the one language left that will owe the INSPECTION half, because `send()`,
+   `close()` and `throw()` are part of its protocol - php's `phGenCall` (an
+   identity-keyed side table, because a generator is a floor CELL and a cursor
+   cannot be stored ON it) is the model, and php's own report warns that its
+   `send()` is covered by neither engine's tests and should be re-derived rather
+   than trusted.
+6. **A duplicate symbol is still reported as an unresolved one** (php's fifth trap).
+   This port hit the OTHER half of the same class: two top-level `function js_*`
+   with the same name in one layer-2 source is `error: redefinition of global
+   '@jsrtlib_f_js_<name>'`, which at least says what it means - but it is worth
+   knowing before splitting a layer-2 file across contributors.
+
+### launch.json entries wanted (not added - not my file)
+
+All four pass natively today, at the working tree:
+
+```
+"JS native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["languages/js-to-llvm-ir.abnf", "tests/js-test-features.js", "-q", "-exe", "tests/js-native.out"]
+"JS native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["-i", "tests/imports", "languages/js-to-llvm-ir.abnf", "tests/js-test-multifile.js", "-q", "-exe", "tests/js-native-multi.out"]
+"TypeScript native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-features.ts", "-q", "-exe", "tests/ts-native.out"]
+"TypeScript native binary, complete (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-complete.ts", "-q", "-exe", "tests/ts-native-complete.out"]
+```
+
+A full-syntax entry would be green too - both ratchets pass natively - but it stays
+out of the matrix for the same reason every other `*-test-full.*` does: the ratchet
+lives in `./test.sh --full`, and `tests/clang-check.sh` already runs the native one
+on every sweep.
+
+### The two floor requests granted, and the template literal that needed FOUR halves (2026-08-03)
+
+Three items, all measured against `node` v24 and against a clean `git archive` of
+`ff74465` built and run in its own tree.
+
+**1. `js_del` is in the floor.** 21 lines of `runtime.c` next to `js_keys`
+(`obj_find`, shift the keys/vals pair down, blank the last slot, `sc(o, n-1)`),
+plus one host-dispatch arm and one `seed_root`. It is reachable from MetaJS as the
+host builtin **`delKey`, host id 63** - the same argument `keysOf` (id 61) made one
+operation earlier and the one to reach for again: *an extern is only callable from
+an emitter, and MetaJS has no `delete` operator at all*, so without a builtin a
+layer-2 file cannot remove a key, only blank it. Bound in all three engines, which
+is the gap `f19a8ad` left for `sint` and `8c396c4` had to repair:
+
+```
+languages/lib/runtime.c        host id 63 + seed_root("delKey")   native
+abnf/jsrtint.go                keysBindings, next to keysOf       llvm.Run + the frozen host
+languages/metajs-interpreter.abnf  delKeyHost in hostGlobals      the interpreter
+```
+
+The interpreter half cannot use `delete` either (there is no such operator in the
+MetaJS its `:script` is written in), so it does observably what the other two do:
+drops the key from the hidden `__ik` insertion-order list `keysOf` reads and writes
+the slot back to `undefined`. A later store re-notes the key, so it lands at the
+END of the order in all three.
+
+Layer 2 lost the side table and everything that consulted it - **-87 lines of
+`js-rt.metajs`, -1,071 lines of `js-rt.ll`**, against +70 lines of C. The estimate
+filed above was "about fifteen lines in the floor would fix all four and delete ~60
+lines of layer 2"; the floor cost 35 lines of code and 35 of comment, and layer 2
+lost 87.
+
+What it bought, `tests/js-test-full.js` SECTION 36 run natively at `ff74465` and at
+the working tree:
+
+```
+                                   ff74465 native      now (all three engines)   node
+Object.keys after del+reinsert     a,b,c               a,c,b                     a,c,b
+for-in after a delete              a,b,c               a,c,b                     a,c,b
+{...o} after a delete              x:undefined kept    key gone                  key gone
+Object.assign after a delete       b in the old slot   b at the end              b at the end
+```
+
+and the cost, `delete` inside a loop, native binary, `/usr/bin/time -l`:
+
+```
+n         ff74465                     now
+1000      1.24 s   RSS 4,456,448      0.34 s   RSS 3,571,712
+2000      7.27 s   RSS 5,259,264      0.32 s   RSS 3,588,096
+4000     39.19 s   RSS 7,012,352      0.40 s   RSS 3,588,096
+60000        -                        1.04 s   RSS 3,588,096
+```
+
+Quadratic and leaking, to linear and flat. (A first measurement on the working tree
+before the change read 61 s at n=4000; 39.19 s is the clean-archive number and is
+the honest one.)
+
+**2. `js_scope_set_or_create` is in the floor**, 11 lines next to `js_pyset_var` -
+the same walk with `scope_put(G_ROOT, ...)` instead of `die2`. The lowering WALL 3
+described (`storeExt` rewriting the name to `js_pyset_var` under `-exe`) is gone
+from both emitters, and layer 2's `fail()` stub is gone with it - it had to go,
+because a top-level `function js_*` in a layer-2 file is an exported C symbol and
+would now be a redefinition. **This was worth doing and the alternative was not:**
+the lowering was exact for every declared name, but `tests/js-test-implicit-global.js`
+aborted natively with `variable not defined: counter` (rc=1) and passes now, and
+`php-to-llvm-ir.abnf` emits the same extern for `define()` - which had no native
+implementation at all until this.
+
+**3. The `${obj}` divergence, which is FOUR halves and not three.** Divergence 1
+above recorded it as `makeTemplate` emitting the floor's `js_add`; the fix it named
+("route each interpolated PART through a ToString extern") is what shipped, and the
+extern already existed on both sides: **`js_jsstr`**, whose Go twin is
+`rt.jsvString` and whose layer-2 twin is `jvStr`. Both compiler grammars now emit
+`js_jsstr` per PART and join the strings with the floor's plain `js_add`;
+`js_jstpl` is deleted, from the emitters and from layer 2, because once every part
+is already a string there is nothing BigInt-specific left to do.
+
+The interpreter halves were wrong too, differently and in the same place - they
+concatenated with the HOST's `+`, which is ToPrimitive with hint DEFAULT - so
+`js-interpreter.abnf` and `typescript-interpreter.abnf` now call `jsStr`, which is
+the same function `js_jsstr` is. Four halves, one line each:
+
+```
+                                node   ff74465 interp   ff74465 llvm.Run/native   now, all three
+`${ {toString} }`               T      T                [object Object]           T
+`${ new D() }`   (class)        D!     [object Object]  [object Object]           D!
+`${ {valueOf: ()=>7} }`         [object Object]  7      [object Object]           [object Object]
+`${ {valueOf, toString} }`      B      7                [object Object]           B
+`${10n}`, `${2n**100n}`         digits digits           digits                    digits
+`${1} ${"s"} ${[1,2]} ${({})}`  ok     ok               ok                        ok
+```
+
+The peer report that claimed the BigInt template fix would cover the user-`toString`
+case as well was WRONG, and it was worth measuring rather than inheriting: routing
+`makeTemplate` through `js_jsadd` fixes `${obj}` and breaks a boxed number, because
+a template does ToString and not ToPrimitive-with-hint-default. `${ {valueOf} }`
+in the table above is exactly that trap, and it is the assertion that catches it.
+
+**Ratchet, and its discriminating power measured rather than asserted.** Three new
+sections, run through the NEW test files against the clean `ff74465` archive:
+
+```
+tests/js-test-full.js SECTION 36   (354 -> 378 assertions)
+  interpreter half   3 FAIL   tpl2 tpl3 tpl4
+  llvm.Run           4 FAIL   tpl1 tpl2 tpl4 tpl8
+  native             9 FAIL   del3 del4 del5 del6 del8 tpl1 tpl2 tpl4 tpl8,
+                              then ABORTS rc=1, `variable not defined: implicitGlobal36`
+tests/typescript-test-full.ts SECTION 33   (276 -> 300)   identical, id for id
+tests/metajs-test-full.js SECTION 28   (501 -> 521)
+  all three engines  does not run at all: `variable not defined: delKey`
+```
+
+**Verification at the working tree.** matrix **325/325** · `--full` **5,686
+assertions, 0 halves disagree**, and the grep for `BUT -frozen|VACUOUS|MISMATCH|
+FROZEN-DIFF` is empty · `--cross` **119/0** · `clang-check` **16/16, all sixteen
+`ok, and the clang executable agrees`** · `go test ./abnf/` ok · every
+`gen-*-rt-ll.sh --check` up to date · `-freeze` a fixed point · every js and ts
+test file **byte-identical between `llvm.Run` and the native binary**, stdout,
+stderr and exit code (the two `*-test-recognize.*` are compiler errors in both
+engines, as before) · `bench-alloc.sh` **3,734 / 3,721 / 3,715 / 3,711 B/iter** at
+50k/100k/200k/400k with `MEC_GC=off`, RSS flat at 3.3 MB with the collector, both
+unchanged · `coro-poc/build.sh --gc` all four modes SAME, `--break` the same rows
+DIFFER and the same rows do not, verified against the archive rather than against
+the note.
+
+## KOTLIN - the eighth, the largest, and the row is HELD (2026-08-03)
+
+**`tests/kotlin-test-full.kt` is 979/979 under `llvm.Run` and the native binary
+links and runs, but does NOT yet pass all 979.** `tests/clang-check.sh` therefore
+reads
+
+```
+kotlin          NNNNN  ok (module only - links natively, row HELD: see the grammar)
+```
+
+with the `clang-check: native-row-held` marker at the top of
+`languages/kotlin-to-llvm-ir.abnf`. That is the lifecycle PHP recorded and not a
+euphemism: php held at 221/306, the two missing primitives were built, and it
+released the row at 306/306. Deleting that ONE comment line is the whole of
+turning the row back on. **No suite is red, no assertion was moved, and
+`tests/kotlin-test-full.kt` was not touched.**
+
+**There is no `kotlinc` and no `kotlin` on this machine** - `command -v kotlinc
+kotlin` is empty, and `/opt/homebrew/bin/kotlin*`, `/usr/local/bin/kotlin*` and
+`/opt/homebrew/opt/*kotlin*` do not exist. So, exactly as C# and Dart recorded of
+themselves, **`abnf/jsrtkotlin.go` is the specification and nothing here was
+confirmed by a real toolchain.** `clang` is Apple clang 17.0.0.
+`abnf/jsrtkotlin.go`, `abnf/jsrtregexkt.go` and `abnf/jsrtint.go` are all **kept**.
+
+### The extern split, and what the SIZE actually cost
+
+`tests/kotlin-test-full.kt` drives **96** externs, and so does the union over
+every `tests/kotlin-test-*.kt` - kotlin's emitter has no test-specific arm. It
+was 95 before the scope probes were lowered; the lowering added `js_scope_typeof`
+and removed nothing, for the reason Dart's correction gives.
+
+| where | count | what |
+|---|---|---|
+| already in the C floor | 36 | the generic primitives of phase 3, the five the Lua pilot added, `js_truthy`, `js_jflo`, the `js_ctl_*` family, and `js_scope_typeof` |
+| **layer 2**, language-NEUTRAL | 12 | `js_char`, `js_char_code`, `js_char_like`, `js_defprop`, `js_is_type`, `js_jadd`, `js_jband`, `js_kindex`, `js_kset`, `js_pyrest`, `js_supercall`, `js_this` |
+| **layer 2**, Kotlin's own | 48 | 46 `js_kt*` plus `js_rxktnew` / `js_rxktglobal` |
+
+```
+             floor   neutral   own      pair/box layer needed in layer 2
+lua            23        5      26      ~200 lines of i64 pairs
+php            29        8      63      a {__pf} float box
+swift          35       10      21      NONE
+java           29        9      16      ~90 lines, the unsigned-box long
+csharp         35       15      18      NONE  <- sintRaw
+dart           37       13      17      NONE
+go             42       10      32      NONE
+kotlin         36       12      48      NONE  <- sintRaw, for a NEW reason
+```
+
+**What the size cost, since that is the number the next big grammar wants.**
+`languages/lib/kotlin-rt.metajs` is **~10,100 lines** from a 5,934-line Go twin
+plus a 623-line regex twin - roughly 1.5 lines of MetaJS per line of Go, which is
+the same ratio dart (1,652 from 896) and go (1,823 from 630) paid, so the ratio
+did NOT degrade with size. What DID change is that the work stopped fitting in
+one head: it was written as **seven independent sections against a written
+contract** (a sentinel `KT_MISS` for "this dispatcher did not handle it", one
+private name prefix per section, and a single owner for every shared helper) and
+concatenated into one flat MetaJS scope. Exactly **one** name collided across
+9,900 lines. **That contract, not the porting, is the transferable part.**
+
+The regular-expression engine is the one place size was free:
+`languages/lib/regex.js` is already written in this MetaJS subset, so its 1,559
+lines went in **verbatim** and only the 537-line Kotlin dispatcher had to be
+written. Ruby reaches the same text with `import "./regex.js"`; either works.
+
+### THE WALL, and it is the one every earlier language avoided
+
+> **Kotlin has TEN scope-taking externs. Every earlier language had at most two.**
+
+php lowered 2, swift 2, java added 1 helper, csharp 0, dart 2, go 1. Kotlin's
+`js_ktget`, `js_kset`, `js_ktvarset`, `js_ktmextget`, `js_ktmextset`,
+`js_ktmextcall`, `js_ktouter`, `js_ktrefbase`, `js_ktdthis` and `js_ktbareref`
+all take a SCOPE HANDLE, and `core.scopeGetExt` was `js_ktget`, so **every
+variable read in a Kotlin program went through one.**
+
+Nine of the ten are now lowered into IR in `languages/kotlin-to-llvm-ir.abnf`
+(`rtKtGet`, `rtKSet`, `rtVarSet`, `rtMextCall`/`rtMextGet`/`rtMextSet` over
+`rtMextFind`/`rtMextWalk`/`rtClsFind`, `rtOuter`/`rtIsClass`, `rtBareRef`,
+`rtRefBase`, `rtDThis`), over `js_scope_typeof` / `js_scope_get` /
+`js_scope_set`, which an EMITTER may call. `sw_safeget` transferred verbatim for
+the fourth time. `llvm.Run` stayed at 979/979 through every one of them.
+
+**But the lowering is only PARTIAL, and the reason is a real gap in the floor:**
+
+> An emitter can read the INNERMOST binding of a name, the INNERMOST `this` and
+> the INNERMOST `__dispatch`. It cannot walk PAST them, because
+> `languages/lib/runtime.c` seeds no scope-PARENT accessor - the whole
+> `seed_root` list is println/print/eprintln/parseInt/parseFloat/exit/byteLen/
+> sprintf/printf/sprint/fail/`sint*`/`flo*`/keysOf/sintRaw/Infinity/NaN/anytype/
+> Math/String/Array. jsrtkotlin.go's `js_ktget` walks the WHOLE chain for a
+> `this` and again for a `__dispatch`, and `ktMemberExtFind` collects both.
+
+Each helper therefore ends in the extern it replaced, which is exact under
+`llvm.Run` and is the one call layer 2 cannot answer natively.
+
+**The second half of the wall is Kotlin's IMPLICIT-RECEIVER STACK**, and it is a
+NEW shape of go's "private representation" rule read from the other side:
+
+> `with` / `run` / `apply` / `buildString` / `buildList` / `buildMap` and every
+> `T.() -> R` lambda push their receiver inside the RUNTIME (`ktWithRecv` ->
+> `ktRecvStack`), and `js_ktget` consults that stack after its scope walk. The
+> stack is layer 2's own storage, so this time it is the EMITTER that cannot see
+> it. Go's rule - "find the floor extern that already answers it and lower the
+> call" - has no answer, because there is no such extern.
+
+The way through is worth copying, because it needs no floor change and no new
+extern: **`js_ktglobal(name)` is the one extern of the right shape - one NAME, no
+scope** - so the emitted `kt_ktget` asks it before falling back, and
+`kotlin-rt.metajs`'s `js_ktglobal` answers from `ktRecvStack` FIRST and only then
+from the stdlib table. In the Go twin `ktGlobalFn` answers `jsUndef` for a name it
+does not know, so **the probe is a no-op under `llvm.Run`** and the ratchet stayed
+at 979. The same trick carries the WRITE side (`js_kset` / `js_ktvarset` walk the
+stack for a receiver that owns the property) and the member-extension lookup
+(`js_ktmext*` walk it with `k4bMextWalk`).
+
+**THE FLOOR REQUEST, reported and not made** (the floor is another agent's this
+session), and it is the same one go's section already predicted:
+
+> **`scopeParent(scope)` and `scopeGet(scope, name)` as host builtins.** With
+> those two, `js_ktget` and all nine of its relatives go back into LAYER 2
+> whole - no emitter lowering, no `js_ktglobal` probe, no residue - and go's
+> scope-backed pointer renders as well. Cost of not having them, measured: nine
+> IR helpers (~250 lines of emitter), plus the residue that keeps the native row
+> held.
+
+### `si_norm`: KOTLIN IS A THIRD ANSWER, and this is the finding to carry forward
+
+Dart's section poses the question as "is the language's unboxed representation
+the one `si_norm` produces?", with Dart yes and Java no. **Kotlin is neither, and
+the plan's own instruction to take C#'s `sintRaw` route was right for the wrong
+reason.** `abnf/jsrtkotlin.go:103` says it in code and in its own comment:
+
+```
+// ktNorm ... It is deliberately not giNorm, which unboxes at 64 bits because a
+// plain number means int64 for Go.
+if w == 32 && !u { return float64(int32(x)) }
+return jsGInt{v: x, w: w, u: u}
+```
+
+So **Kotlin's normalisation boundary is 32 bits**: an `Int` unboxes and a `Long`
+is a box AT EVERY MAGNITUDE. Its Long is honestly SIGNED, so no `jl*` layer is
+owed and plain `sintOp` / `sintCmp` / `sintStr` / `sintNum` are exact on it - but
+`sintConv` ends in `si_norm`, which unboxes a signed 64 bit value a double holds
+exactly, and `ktWU` reads the result type off the operand BOXES. An unboxed small
+Long would make `1000000L * 1000000L` a 32 bit multiply and answer `-727379968`,
+which is **Java's wall met from the other side**. `ktNorm` therefore ends in
+`sintRaw`, C#'s `csNorm` recipe unchanged.
+
+> **The question to ask the next language is not "does it have a 64 bit signed
+> type" and not even "is its unboxed form `giNorm`'s" - it is "WHERE is its
+> unboxing boundary". Go and Dart say 64, Kotlin says 32, Java says nowhere.
+> `sintRaw` answers all three of the non-Go cases**, and it is now needed by a
+> language whose integers were never dishonest about their signedness.
+
+That also settles the hazard **the floor audit named specifically for Kotlin** -
+"kotlin calls `js_jflo` directly with no `js_jvnum` equivalent and re-inherits the
+already-diagnosed bug". Go's correction is the right reading: the hazard needs a
+language that carries a SIGNED value in an UNSIGNED-MARKED cell. **Kotlin never
+marks a cell unsigned unless it really is a `UInt`/`ULong`**, so `to_number` of a
+tag 13 cell is the signed reading and `js_jflo` needs no wrapper. Checked at the
+code, not assumed.
+
+### The cross-cutting findings, checked and MEASURED for kotlin
+
+1. **`core.truthyExt`.** `grep -n truthyExt languages/kotlin-to-llvm-ir.abnf` is
+   EMPTY, so kotlin keeps compile-core's default `js_truthy`, the C floor's own,
+   which already answers the raw 1/0 the emitted `icmp ne ..., 0` compares. **No
+   `__raw` export.** The tally over seven ported languages: **lua and php need it;
+   swift, java, csharp, dart, go and kotlin do not.**
+2. **`_raw` PARAMETERS: kotlin has exactly one**, `js_char`'s code point, written
+   with a bare `handle(k)`. The count is now **3 / 0 / 0 / 1 / 1 / 0 / 1 / 1** for
+   lua / php / swift / java / csharp / dart / go / kotlin.
+3. **Coroutines: none.** `grep -c 'js_genfn\|js_yield'
+   languages/kotlin-to-llvm-ir.abnf` is **0** - `suspend` is lowered by the
+   emitter into ordinary calls and `launch`/`runBlocking` run their block eagerly
+   (`ktCoroRun`) - so WALL 1 does not touch this language and **the tag-16
+   `typeof` divergence cannot bite it either**. Run that grep before costing a
+   second stack: it is the fourth language in a row for which the answer is zero.
+4. **`jsChar` IS needed here, unlike swift / java / csharp / dart / go.** Kotlin
+   has a real `Char`: it is compared, put in a variable, asked its `code`, and
+   `js_typeof`'d. The floor still has no char tag, so layer 2 uses the
+   `{__char: code}` object box `languages/kotlin-interpreter.abnf` already uses.
+   Java's audit rule applies - the box is safe exactly when no FLOOR extern
+   receives one - and Kotlin's emitter routes every char operation through
+   `js_kteq`/`js_ktne`/`js_ktcmp`/`js_ktarith`/`js_char_code`, all of which are
+   layer 2's. The one thing the box cannot reproduce is the Go twin's own
+   `js_typeof` answer `"char"`, and `ktBoxTypeName` is what covers it.
+
+### The two engines, and what is NOT yet identical
+
+`llvm.Run` (the Go twin) is at **979/979** and every other kotlin program in
+`tests/` is unchanged - `kotlin-test-1`, `-complete`, `-features` (187),
+`-object-expr`, `-annotations`, the three BOM files and `-try` all behave exactly
+as they did at `3f91d7b`. The native binary runs the whole file and still
+disagrees on a residue; the failures are ordinary layer-2 semantics (each one a
+function of `abnf/jsrtkotlin.go` that has not been matched arm for arm yet) plus
+the scope residue above, NOT a structural problem: the module links, the two
+dispatch tables meet, the collector runs, and the regex engine, the sized-integer
+arithmetic, the class model, the delegates and the callable references are all
+exercised natively before the first disagreement.
+
+### launch.json entries wanted (not added - not my file)
+
+Not yet. A kotlin `-exe` entry belongs in the matrix only once the row is
+released; until then `tests/clang-check.sh` is the right place, and it already
+builds the native binary on every sweep.
+
+### What is owed
+
+1. **The residue of the ratchet**, native only. `llvm.Run` is unaffected.
+2. **`scopeParent` / `scopeGet` host builtins** - the floor request above. They
+   are what turns nine emitter helpers back into ordinary layer-2 functions, for
+   every language and not only Kotlin.
+3. `abnf/jsrtkotlin.go`, `abnf/jsrtregexkt.go` and `abnf/jsrtint.go` stay.
+
+## PYTHON - DONE (2026-08-03). The gate is MET: 261/261 natively, byte-identical
+
+**`tests/python-test-full.py` runs as a self-contained native binary, all 261
+assertions pass in it, and its stdout, its stderr and its exit code are
+byte-identical with `llvm.Run`.** `tests/clang-check.sh` reads
+
+```
+python          20676  ok, and the clang executable agrees
+```
+
+so python left the `ok (module only)` row for the run-it row, **no row is held, no
+assertion is held back, and no floor change was needed or made.** That is the
+ninth language and the last one this plan was written for.
+
+Python is the second of the languages with **no dedicated Go twin** - its semantics
+live in the shared `abnf/jsrt.go` (the `js_py*` extern table at 6900-8100 and the
+`py*` helpers at 8580-9840: `pyString` / `pyRepr` / `pyTypeName` / `pyEqual` /
+`pyMRO` / `pyLinearize` / `pyLookup` / `pyGetAttr` / `pySetAttr` / `pyMethodCall` /
+`pyBindCall` / `pyArith` / `pyFormat` / `pySliceIndices` / `memberCall`) plus
+`abnf/jsrtregexpy.go` for the `re` module. Ruby's advice - *budget for the reading,
+not for the writing* - held exactly.
+
+### THE HEADLINE: SIX externs were lowered in the emitter, not written in layer 2
+
+Every previous language lowered one or two private-representation probes. Python
+lowered **six**, and they were not optional: `runtime.c` says so itself, in a
+comment at `js_pyset_var`.
+
+> *"The `global`/`nonlocal` and binding-boundary arms of the Go twin need
+> js_pyfnscope/js_pyglobal, which only the Python compilers emit; a scope here
+> carries no such mark, so those arms are unreachable and are NOT modelled.
+> **A Python layer 2 will have to add them.**"*
+
+It cannot. `abnf/jsrt.go` carries Python's binding rule **on the scope object
+itself**: `jsScope.pyFn` (this scope is a def / lambda / class body / module top
+level, so an assignment binds locally) and `jsScope.pyDecl` (the names a `global`
+or `nonlocal` statement sent elsewhere). A scope is the C floor's private storage
+and a MetaJS runtime library never receives one it can open - the wall php, swift,
+java, dart, go and ruby each met. The answer was the same for the seventh time and
+it scaled: find the floor externs that DO answer the question and lower the call.
+
+| extern | what it did | how it is emitted now |
+|---|---|---|
+| `js_pyfnscope` | mark a binding boundary | two `js_scope_decl`s of a MARK (below) |
+| `js_pyset_var` | Python's whole assignment rule | the IR helper `py_setvar`, four arms |
+| `js_pyglobal` | `global x` | the IR helper `py_global` |
+| `js_pynonlocal` | `nonlocal x` | one `js_scope_decl` of a mark |
+| `js_pydel_var` | `del x` | the IR helper `py_delvar` + a sentinel |
+| `js_pyannot` | `x: T` into `__annotations__` | `pyAnnot`, over `js_dict_new`/`js_get`/`js_arr_push` |
+| `js_pyclass_fill` | copy a class body's scope onto the class | `py_clsfill1`, one call per statically-known name |
+
+**The mechanism is worth copying and is new.** The marks are carried as ORDINARY
+BINDINGS, in a scope of their own inserted above each boundary:
+
+```
+    parent  ->  MID  ->  the boundary scope S
+```
+
+`MID` holds `"pyfn*" -> S`, `"pyup*" -> MID`, and at the module top level
+`"pymod*" -> S` and `"pydel*" -> a unique array`. None of those is a possible
+Python identifier. `js_scope_get` already walks the chain, so from ANY nested scope
+`"pyfn*"` resolves to the nearest enclosing boundary and `"pyup*"` to a scope that
+holds no user name of that function - which is exactly what makes *"is this name
+bound at or below the boundary"* answerable with two `js_scope_typeof` calls and no
+floor change. Putting the marks in `MID` rather than in `S` is what keeps `S`
+clean, and that matters because a class body's bindings become the class's members.
+
+`global x` / `nonlocal x` declare the marker `"g*x"` / `"n*x"` in the scope the
+statement stands in - which is exactly where `abnf/jsrt.go` puts its `pyDecl`
+entry - and `py_setvar` consults them with the same chain walk the Go arm does.
+
+The union went **91 -> 86** and what layer 2 has to WRITE fell by six.
+
+> **THE ONE INEXACTNESS, and the one it was NOT.** `py_setvar` decides "bound at or
+> below the boundary" as *"it resolves from here AND it does not resolve from
+> MID"*. A name bound BOTH strictly below the boundary and above it would be
+> re-bound at the boundary where `abnf/jsrt.go` assigns the inner holder.
+>
+> The naive version of that test was **measured wrong immediately** and the fix is
+> the transferable part: `declCompNames` declares a comprehension target holding
+> **undefined**, and `js_scope_typeof` cannot tell a slot that HOLDS undefined from
+> an absent name - Swift's and Ruby's recorded inexactness, arriving as a hard
+> failure rather than a footnote (`[i*i for i in range(4)]` answered
+> `[NaN, NaN, NaN, NaN]`). The answer is that **the emitter already knows those
+> names statically**: `pyInnerNames` records every name the emitter DECLARES in a
+> non-boundary scope of the current function - a comprehension target, an
+> `except ... as e`, a `with ... as w` - and for those the floor's own
+> `js_pyset_var` walk is emitted straight, because it is exactly right. Reset at
+> every real function boundary, inherited across a ctl closure (which is the same
+> function). With that, the residue is a name bound strictly below the boundary
+> AND above it, which nothing in `tests/` does.
+
+**`del` needed a sentinel AND a guarded read, and that is a second reusable
+shape.** `abnf/jsrt.go` leaves a private Go value (`pyDeletedT`) in the slot and
+raises `UnboundLocalError` from inside `scopeGet`; the floor's `scope_get` knows
+nothing about it. So `"pydel*"` is one unique array created at module start, and
+EVERY variable read goes through the IR helper `py_getvar`, which compares against
+it with `js_seq` and raises. Both `makeVarRef` (overridden in the grammar, since
+`core.scopeGetExt` names an EXTERN and `py_getvar` is an emitted function - swift's
+and dart's move) and `emitRefRead` (an augmented assignment READS first) had to be
+routed through it; routing only the first left `stm5`/`stm6` red, which is how the
+second site was found.
+
+The raised value is built with `js_pycall` on the module's own
+`UnboundLocalError` class, NOT with `js_pyexc`: `js_pyexc`'s shortcut shape carries
+a fresh class with no `__super`, so `except Exception` would not catch it.
+
+### The extern split
+
+`tests/python-test-full.py` drives **86** externs, and so does the union over every
+`tests/python-test-*.py`.
+
+| where | count | what |
+|---|---|---|
+| already in the C floor | 32 | the generic primitives of phase 3, the scope externs, `js_pyset_var` (which the floor already had), `js_genfn`/`js_yield`, `js_truthy` |
+| **layer 2**, language-NEUTRAL | 6 | `js_dict_new`, `js_jadd`, `js_pyeq`, `js_pyget`, `js_pylen`, `js_pyset` |
+| **layer 2**, Python's own | 48 | everything else `js_py*`, plus `js_bigint` and the three `js_pyre*`/`js_pyrx*` regex wrappers |
+
+`languages/lib/python-rt.metajs` is 4,979 lines (PLUS the 1,559-line imported
+`regex.js`) and compiles to `languages/lib/python-rt.ll` (70,847 lines)
+**byte-identically under `-frozen` as well as under goja**. It exports the 54 symbols the union needs plus
+`js_pymcall`, `js_pyexc` and `js_is_type`, which the grammar can reach on other
+inputs.
+
+The split against the eight done before it:
+
+```
+             floor   neutral   own      pair/box layer needed in layer 2
+lua            23        5      26      ~200 lines of i64 pairs
+php            29        8      63      a {__pf} float box
+swift          35       10      21      NONE
+java           29        9      16      ~90 lines, the unsigned-box long
+csharp         35       15      18      NONE  <- sintRaw
+dart           37       13      17      NONE
+go             42       10      32      NONE
+ruby           31        8      54      NONE - but a whole numeric TOWER
+python         32        6      48      NONE - but an ARBITRARY PRECISION int
+```
+
+### The `si_norm` question, and the one genuinely new answer
+
+Dart asked *"is the language's unboxed representation the one `si_norm`
+produces"*. For Python, as for Ruby, the question has no meaning in the ordinary
+direction: **int and float are the SAME plain double**, discriminated by
+`Math.trunc` (`abnf/jsrt.go:9332` decides `pyTypeName` that way and nothing else
+does), so no tag-13 or tag-14 cell is built for an ordinary number.
+
+What Python has that no previous language had is an **arbitrary precision int**.
+`js_bigint` is backed by Go's `math/big`, and the floor has no equivalent - a
+sized-integer tag is 64 bits and `10000000000000000000000000001` is not. The answer
+is a base-10000 little-endian bignum in MetaJS, `{__pybig, neg, limbs}`, with
+schoolbook add / sub / mul and per-limb long division; `pyABigFromNum` is exact for
+any integral double (halve to a 53-bit mantissa, double the bignum back), and
+`pyABigEqFloat` is Go's `bigEqFloat`. Cross-checked against native `BigInt` over
+3,000 random +-30-digit pairs times `+ - * / % cmp`.
+
+Two things about it are worth carrying:
+
+* **Go reaches `bigArith` AFTER the array/object arms of `jsAdd`,** because a
+  `*jsBigInt` is never a `*jsObject`. Here a `__pybig` IS a plain object, so the
+  bigint arm had to move AHEAD of them or `10**28 + 1` would string-concatenate.
+  Every port of a Go type switch into this value model has that hazard.
+* **`rt.toNumber` has NO `*jsBigInt` arm**, so `big|1`, `big//2`, `big%2`,
+  `big**2` and `float(big)` are all NaN or 0 in the Go twin. They must stay so
+  here, which is why `pyNum(v)` is written `v * 1` - the floor's `js_mul` coerces
+  exactly the way `toNumber` does, including NaN for every object.
+
+**Tag 13 IS reached, in exactly one place**, and it is Ruby's find reused:
+`pyBBaseStr` converts to a base with `sintRaw`/`sintOp`/`sintNum` on the UNSIGNED
+reading of the magnitude, because Go's `strconv.FormatInt(int64(x), base)`
+SATURATES on arm64.
+
+### The four cross-cutting findings, checked and MEASURED for python
+
+1. **`core.truthyExt`: python is the THIRD language that needs `__raw`**, after
+   lua and php - and the tally over nine is now **lua, php and python need it;
+   swift, java, csharp, dart, go and ruby do not**.
+   `grep -n truthyExt languages/python-to-llvm-ir.abnf` answers
+   `core.truthyExt = "js_pytruthy"` (Python truthiness: an empty container is
+   false, so the floor's own `js_truthy` cannot serve). compile-core's `truthy()`
+   emits `icmp ne <call>, 0` on it, and `languages/python-to-llvm-ir.abnf:1536`
+   emits a SECOND `NewICmp` on the same extern's result for `not x`. Both are
+   covered by writing the function `js_pytruthy__raw`. A shim handing back the
+   boolean HANDLE would have given 2 for `false`, and `2 != 0` - **every condition
+   in the program taken, silently.**
+2. **`_raw` PARAMETERS: python has ONE**, `js_pyrest(args, i_raw)`, whose start
+   index the emitter writes with a bare `handle(k)` (and which `jsrt.go:679` marks
+   in its own raw-argument mask). The count over nine is
+   **3 / 0 / 0 / 1 / 1 / 0 / 1 / 3 / 1** for lua / php / swift / java / csharp /
+   dart / go / ruby / python.
+3. **Tag 16 / generators: PRESENT, and python is the first language that needed
+   layer-2 lines for them.** `grep -c 'js_genfn\|js_yield'
+   languages/python-to-llvm-ir.abnf` is **6**. C#'s finding held for the DRIVING
+   side - the emitter already lowers `js_genfn(js_closure(...))` and `js_yield`
+   over floor externs, and layer 2 owes that zero lines - but Python's
+   **inspection** surface is its own: `send` / `next` / `__next__` / `close` with
+   `StopIteration` carrying the body's return value, plus draining a generator in
+   `js_pyiter`, `pySeqElems` and a `for`. PHP's two findings both applied:
+   a generator is a floor **cell**, so `close()`'s flag lives in an identity-keyed
+   side table (a `===` scan over two parallel arrays, `rbLambdas`'s shape), and
+   layer 2 has **no tag test**, so `pyIsGen` is STRUCTURAL - the floor answers
+   exactly one member on a tag-15 cell, `"next"` (`runtime.c:2868`), and nothing
+   this value model builds carries a callable `next` of its own.
+4. **The FMA remainder does NOT apply to python, and that is measured rather than
+   assumed.** `grep -n 'math.Floor(.*)\*' abnf/jsrt*.go` finds three sites -
+   `jsrt.go:2985`, `3008` and `3223` - and all three are **Ruby's** (`jsFlo`,
+   `rubyToF`). Python's `%` is `pyFloorMod` (`jsrt.go:9403`), which is built on
+   `math.Mod`; `math.Mod` is an exact scaled-subtraction loop and JS `%` is the
+   same operation, so there is no fusable `x - q*y` in the path and no Dekker
+   emulation is owed. Ruby's warning was worth running and the answer was no.
+
+### What was reused rather than rewritten, and what it saved
+
+* **`import "./regex.js"`** - ruby's finding, and python is the language it was
+  found FOR. The 1,559-line shared engine compiles into `python-rt.ll` with
+  everything else, and the three `js_pyre*` / `js_pyrx*` externs cost ~660 lines of
+  Python-specific glue (`abnf/jsrtregexpy.go` is 692 lines) instead of ~2,200.
+* **The exact float formatter.** `strconv.FormatFloat` is EXACT and rounds HALF TO
+  EVEN; `ruby-rt.metajs`'s `rbExactDec` / `rbRoundHalfEven` / `rbFixed` / `rbSci` /
+  `rbBaseStr` / `rbByteCut` are language-neutral and transferred verbatim as
+  `pyB*`, comments included. Ruby's own diff-against-Go-`FormatFloat` recipe was
+  re-run over 12 values x 5 precisions and matched.
+* **`js_dict_new` / `js_pyget` / `js_pyset` / `js_pylen` / `js_pyeq` / `js_jadd`** -
+  the `js_py*` family dart wrote language-neutral and ruby reused. It came back
+  home: what had to be ADDED were the `__getitem__` / `__setitem__` / `__len__`
+  dunder arms both had deleted as unreachable, the generic-alias arm of
+  `js_pyget` (`list[int]` is a value in Python), the set arm of `js_pylen`, and
+  `js_pylen`'s code-POINT string length.
+
+**One inconsistency in `abnf/jsrt.go` had to be reproduced rather than repaired:**
+`js_pylen` counts CODE POINTS (`pyStrLen`, 9773) where `js_pyget`'s string
+indexing counts UTF-16 CODE UNITS (`rt.strAt`). Both are ported as they are.
+
+### Ground truth
+
+Oracle: **`/opt/homebrew/bin/python3`, Python 3.14.6**.
+
+```
+matrix                325/325
+--full                5,618 assertions, 0 languages whose halves disagree (python 261)
+                      grep -E 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF' -> empty
+--cross               119 programs, 0 divergent, 0 differing only in warnings
+go test ./abnf/       ok
+clang-check           16/16, and python joins the RUN-IT row
+gen-python-rt-ll.sh --check   python-rt.ll is up to date (70,847 lines)
+every other gen-*-rt-ll.sh --check   up to date (12 of them)
+-frozen recompile     python-rt.ll byte-identical to the goja build
+jsbootstrap.ll        untouched (metajs-to-llvm-ir.abnf was not edited)
+```
+
+**Verified from a CLEAN ARCHIVE, not the working tree** - `git archive HEAD | tar
+x`, then only the four Python files copied in, `go build` INSIDE, run there. That
+matters because js, typescript and kotlin were other agents' concurrent edits while
+this ran:
+
+```
+tests/gen-python-rt-ll.sh --check   python-rt.ll is up to date (70,847 lines)
+./py.exe                            full: 261 checks, 0 failures   (rc=0)
+tests/clang-check.sh python         ok, and the clang executable agrees
+```
+
+Every Python program in `tests/`, `llvm.Run` against the native binary, stdout AND
+stderr AND exit code:
+
+```
+python-test-1  python-test-complete  python-test-features  python-test-full
+python-test-multifile (-i tests/imports)  python-test-recognize  python-test-try
+python-test-widen                                           all SAME (rc=0)
+```
+
+### The differential probe - 34,813 lines, and the one defect it found
+
+Every operand is read out of a LIST at run time, so nothing can be folded: NxN
+integer pairs and NxN float pairs and the mixed grid over
+`+ - * / // % ** == != < <= > >= & | ^ << >>`; the unary and predicate set;
+string indexing, slicing (negative bounds and steps), `in`, repetition,
+concatenation and ordering; list / tuple / dict / set construction, indexing,
+slicing, `in`, equality, `del`, slice assignment, unpacking and starred
+unpacking; dict insertion order and key equality; set algebra `| & - ^ <= < >= >`;
+complex arithmetic and rendering; `format()` and f-string replacement fields over
+many specs times many arguments; comprehensions (list, set, dict, nested, with
+`if`); generators (`yield`, `send`, `close`, a `for` over one); classes,
+MULTIPLE inheritance and the MRO order, `__init__ __repr__ __eq__ __add__
+__radd__ __len__ __getitem__ __setitem__ __contains__ __call__ __slots__`,
+descriptors, `isinstance`, `type()`; a raise/except matrix over the builtin
+hierarchy with `else` / `finally` / re-raise; `global` / `nonlocal` / `del` /
+closures / default arguments / `*args`; the `re` surface (many patterns times
+many subjects times `search match fullmatch sub subn split findall finditer
+escape group groups groupdict start end span expand`); `with` and context
+managers. The operand bags carry both zeros, the int53 edges, 2^31 / 2^32 / 2^53,
+1e+-100, DBL_MAX, 5e-324, 0.49999999999999994, an arbitrary-precision literal
+past 2^53, and non-ASCII strings.
+
+```
+llvm.Run vs the native binary      BYTE-IDENTICAL, 34,813 of 34,813 lines
+                                   (stdout, stderr and exit code)
+```
+
+It found **one real defect, in layer 2, invisible to `./test.sh`**:
+
+> **`jsAdd`'s bigint arm, and the arm-ORDER hazard behind it.** Go's `jsAdd`
+> reaches `bigArith` after the array and object arms because a `*jsBigInt` is
+> never a `*jsObject`; here a `{__pybig}` IS a plain object, so the bigint arm
+> was moved to the front - correctly, or `10**28 + 10**28` would concatenate two
+> renderings. What that missed is that `bigArith` needs BOTH operands to be
+> bigints (`bigPair`, `jsrt.go:2710`) and `rt.toNumber` has no bigint arm at all,
+> so a MIXED pair falls all the way through to `NaN` in the Go twin. Here it fell
+> into the object arm instead and answered the string
+> `'010000000000000000000000000001'`. The fix is one line - the object arms
+> EXCLUDE a `{__pybig}` - and the lesson generalises to every Go TYPE SWITCH
+> ported into this value model: **moving an arm forward is not enough, the arms
+> it jumped over have to be narrowed by the same predicate.**
+
+**A SECOND "difference" was reported and is an ARTIFACT OF THE MEASUREMENT, which
+is worth more than the finding would have been.** The probe prints a string
+containing a **NUL**, and the comparison showed `llvm.Run` truncating the line
+there while the native binary printed it whole. It does not: **`awk` truncates a
+string at a NUL**, and both this plan's comparison script and the probe's own
+`strip.awk` use awk to cut the emitted module off the front of `llvm.Run`'s
+stdout. Dumped with `od -c`, the RAW bytes of both halves are
+`esc|5|'<NUL>'|1` - identical. The cut is now computed on a NUL-free copy and
+applied to the raw bytes with `tail -n +K`. **Any future language whose probe
+prints a control character has to do the same**, or it will report a defect in
+`js_pyprint` / `wtf8Clean` that is not there.
+
+**And the emitter lowering was proved observably neutral, which is the check that
+matters most for six lowered externs.** The same 34,813-line probe run under
+`llvm.Run` against the grammar at `8588257` - the one that still calls
+`js_pyfnscope` / `js_pyset_var` / `js_pyglobal` / `js_pynonlocal` /
+`js_pydel_var` / `js_pyannot` / `js_pyclass_fill` and carries Python's binding
+rule on the Go scope object - is **byte-identical** to the lowered grammar's
+`llvm.Run` output. Built from a clean `git archive HEAD` in its own directory.
+
+```
+HEAD's Go-scope grammar vs the lowered grammar, both under llvm.Run
+                                   BYTE-IDENTICAL, 34,813 of 34,813 lines
+```
+
+### Against REAL python3 - measured, and NOT this migration's
+
+Oracle: **`/opt/homebrew/bin/python3`, Python 3.14.6**. 11,184 of 34,796 aligned
+lines differ, and **`llvm.Run` and the native binary agree with each other on every one
+of them** - the gate above says so - so not one is this port's. They are the
+documented value model of both halves, and they fall into a handful of classes:
+
+```
+  3,956   AN INTEGRAL FLOAT RENDERS AS AN INT. int and float are the same plain
+          double (pyTypeName decides by Math.trunc), so 1/1 prints 0, not 0.0.
+  2,362   THE float64 VALUE MODEL: 2^53 of precision, and & | ^ are ToInt32, so
+          `0 | 2147483648` is -2147483648.
+  1,562   inf / nan are spelled Infinity / NaN / -Infinity.
+    439   NO ZeroDivisionError for / // % by zero - NaN or Infinity instead.
+    395   -0.0 renders as 0 (and 42 more inside a container).
+    548   THE `re` RESULTS AND TUPLES GENERALLY: groups() / span() / subn() /
+          e.args / dict.items() / *args are ARRAYS, so ('', 0) prints [0, 5].
+    361   THE FORMAT MINI-LANGUAGE IS A SUBSET. pyFormatBody (jsrt.go:9737) has
+          f/F/d/x/X/b/o and nothing else - no e, E, g, G, %, c, n, no `,`/`_`
+          grouping - and x/X/o/b/d truncate to 32 bits.
+    350   << and >> are 32-bit; 53 more where a negative shift does not raise.
+    240   COMPLEX, INSTANCES AND TYPE OBJECTS render [object Object]: repr /
+          str / an f-string do NOT dispatch __repr__, though x.__repr__() works.
+          Pre-existing at 8588257, checked directly from a clean archive.
+    216   repr never ESCAPES: no \ ' \t \n \x.. escaping.
+    196   THE ARBITRARY-PRECISION SURFACE beyond + - * / %: ordering against a
+          bignum is always False and `float == bignum` always True, because
+          rt.toNumber has no bigint arm at all.
+    ~200  the long tail: isinstance against a builtin type object is False (the
+          builtin types are not real classes), the builtin exception hierarchy
+          is flat, True and 1 are not the same dict key, `is` on equal scalars,
+          set() renders {}, no TypeError for mixed operands, no OverflowError,
+          last-ulp drift in ** and sqrt.
+```
+
+Sections that matched CPython **exactly**: classes / MRO / dunders / descriptors /
+`__slots__`, generators, `with`, comprehensions, unpacking, closures / `global` /
+`nonlocal` / defaults, dict mutation, `range`, and ten of the fourteen regex
+groups. Those are the parts this migration actually rewrote.
+
+None of these is new, and each one is a FEATURE decision rather than a defect of
+the runtime split: fixing any of them means changing both halves and the
+interpreter grammar together, which is the same conclusion the Lua, Swift and
+Ruby formatter boundaries reached.
+
+### What is owed, and what generalises
+
+1. Nothing for the gate. `abnf/jsrt.go`'s Python half stays until the change is
+   committed - and, like Ruby's, it is NOT a file that can ever go, because
+   `llvm.Run` is still the non-`-exe` engine for every language.
+2. The `py_setvar` residue named above (a name bound strictly below a binding
+   boundary AND above it). The exact fix needs a per-scope containment test, which
+   is the one thing the floor's scope API does not expose; a `js_scope_has(s, n)`
+   that does NOT walk the chain would close it in three lines of `runtime.c` and
+   three of `abnf/jsrt.go`. **Reported, not made** - the floor is another agent's
+   this session, and nothing in `tests/` reaches it.
+3. `pyAnnot` decides "is there an `__annotations__` dict in THIS scope already"
+   statically, where `abnf/jsrt.go` asks `sc.find` at run time. The two differ only
+   for an annotation the program does not REACH, which would create the dict here
+   and not in the Go twin.
+4. **`*args` overbinds when the positional count equals the declared slot
+   count**, and `**kwargs` then holds a scalar rather than a dict:
+   `def f(a, *rest, **kw)` called as `f(1, 2, 3)` binds `rest` to a number, and a
+   later `len(rest)` or `kw.keys()` ABORTS. Found by the probe, present in BOTH
+   halves, and verified unchanged at `8588257` from a clean archive - a
+   pre-existing emitter bug, not this migration's, and out of scope for a
+   runtime split.
+5. Python's `str` has **no method library at all** in either half - no `upper`,
+   `strip`, `join`, `split`, `startswith`. `"abc".upper()` fails identically in
+   both engines with `unknown String method: upper`, from `jsrt.go:2784` and from
+   its port. Adding one is a new FEATURE in three places (the interpreter grammar,
+   the compiler grammar and this file), not part of this migration, and it was
+   deliberately not invented here.
+
+### launch.json entries wanted (not added - not my file)
+
+All three pass natively today, at the working tree and from the clean archive:
+
+```
+"Python native binary, full syntax (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["languages/python-to-llvm-ir.abnf", "tests/python-test-full.py", "-q", "-exe", "tests/python-native-full.out"]
+"Python native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["languages/python-to-llvm-ir.abnf", "tests/python-test-features.py", "-q", "-exe", "tests/python-native.out"]
+"Python native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["-i", "tests/imports", "languages/python-to-llvm-ir.abnf", "tests/python-test-multifile.py", "-q", "-exe", "tests/python-native-multi.out"]
+```
+
 ## Order
 
 Sorted by extern count and Go-twin size, which is the best available proxy for effort:
@@ -2918,11 +5297,20 @@ csharp            67   813   <- DONE 2026-08-03, gate MET (68 measured, not 67)
 swift             68   986   <- DONE 2026-08-03, gate MET (66 after the scope-probe lowering)
 dart              72   896   <- DONE 2026-08-03, gate MET (67 measured; 64 before
                              the scope-probe lowering added its three floor calls)
-js                88   (jsrtjsprint 1320 + jsrtjsbig 505)
-typescript        89   shares js's
-ruby              91   -   (semantics live in abnf/jsrt.go)
-go                92   630 (jsrtgolang)
-kotlin            96   5934
+js                88   (jsrtjsprint 1320 + jsrtjsbig 505)   <- DONE 2026-08-03,
+                             gate MET (87 measured over every test file; 83 for the
+                             full ratchet, and 59 exported by layer 2 once the
+                             -exe-only operator routings are counted)
+typescript        89   shares js's   <- DONE 2026-08-03, gate MET (86 measured),
+                             and it shares layer 2 as well: lib/js-rt.ll, verbatim
+ruby              91   -   (semantics live in abnf/jsrt.go)   <- DONE 2026-08-03,
+                             gate MET (93 measured; the defined? lowering removed one
+                             layer-2 extern and added one floor one, so 93 stayed 93)
+go                92   630 (jsrtgolang)   <- DONE 2026-08-03, gate MET (84 measured,
+                             83 before the js_gounctl lowering added its two floor calls)
+kotlin            96   5934   <- 2026-08-03, layer 2 BUILT and linking, the
+                             native row HELD (96 measured, 95 before the scope
+                             probes were lowered). Largest of the set.
 python            99   -   (semantics live in abnf/jsrt.go)
 php              101   1968   <- DONE PARTIALLY 2026-08-03, see above
 ```
@@ -2965,7 +5353,20 @@ csharp's own surface was 24 and dart's 17, against extern counts of 67 and 72.
 sort that now matters most is a different one again: `go` and `kotlin` still own a
 twin and are `sint`+`flo` languages, so they are the last two easy ones; the other
 four share `abnf/jsrt.go`, which means a layer-2 file for any of them drags in the
-NEUTRAL column rather than a language-specific one. Dart's port already wrote six
+NEUTRAL column rather than a language-specific one.
+
+**Go was then done, and it is the counter-example to the extern-count sort in the
+other direction (2026-08-03).** Its 92 was the second-largest number in the table
+and its FLOOR column came out at 42, the largest of the seven - because the sized
+integer tag was specified against `abnf/jsrtint.go`, which is Go's own file, so
+the language that drove the tag pays nothing for it. Its layer-2 surface was 42,
+of which 32 are genuinely Go's (`fmt`, the map, panic/defer/recover, channels,
+embedding). **The remaining four are kotlin, js, typescript, python and ruby**;
+kotlin still owns a twin and is a `sint`+`flo` language, and the other four share
+`abnf/jsrt.go`. Six of dart's neutral externs and go's ten (`js_dict_new`,
+`js_goslice`, `js_gospread`, `js_is_type`, `js_jadd`, `js_pyin`, `js_pyset`,
+`js_range_key`, `js_range_len`, `js_range_val`) are now written out, so those four
+start further ahead again. Dart's port already wrote six
 of those neutral externs (`js_pyeq`, `js_pyin`, `js_pyiter`, `js_pyset_new`,
 `js_pyslice`, `js_pyspread`), so python and ruby start ahead of where this table
 suggests.

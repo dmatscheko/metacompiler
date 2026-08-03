@@ -4140,6 +4140,7 @@ long js_parse_float(long h) {
 }
 
 long js_keys(long o);          /* the keysOf builtin below is exactly this */
+long js_del(long o, long key); /* and delKey is exactly this */
 
 long host_call(long id, long self, long args) {
 	long n = arr_len(args);
@@ -4333,6 +4334,13 @@ long host_call(long id, long self, long args) {
 		long u = n > 3 ? truthy(arg_at(args, 3)) : 0;
 		return si_make(si_trunc((hi << 32) | lo, w, u), w, u);
 	}
+	/* delKey(o, key): remove an own property, key-order entry and all. It is
+	 * js_del, and it is here for the reason keysOf is: an EXTERN is only callable
+	 * from an emitter, and MetaJS has no `delete`, so a layer-2 file could not
+	 * remove a key AT ALL - it had to blank the slot and keep a side table. Every
+	 * language whose runtime models `delete`, `unset`, `remove` or a map erase
+	 * needs it. Answers true whether or not the key was there, like the twin. */
+	if (id == 63) { return js_del(arg_at(args, 0), arg_at(args, 1)); }
 	die("unknown host function");
 	return H_UNDEF;
 }
@@ -4538,6 +4546,27 @@ long js_scope_set(long s, long name, long v) {
 	return 0;
 }
 
+/* js_scope_set_or_create: JavaScript's non-strict implicit global. The name binds
+ * where the chain already holds it, and otherwise in the ROOT scope - NOT in the
+ * scope the assignment stands in, which is what js_pyset_var below does.
+ *
+ * The two differ in exactly one case and it is the one that has no other answer:
+ * `function f() { counter = 100 } f(); print(counter)`. js_scope_typeof cannot be
+ * used to build this in an emitter, because it answers "undefined" for a slot that
+ * HOLDS undefined and for an ABSENT name alike, and `var x; x = 5` and a bare
+ * `x = 5` need opposite answers. So the walk belongs here, next to its sibling.
+ * The twin is abnf/jsrt.go's scopeSetOrCreate. */
+long js_scope_set_or_create(long s, long name, long v) {
+	long cur = scope_of(s);
+	while (cur != 0) {
+		long i = scope_find(cur, name);
+		if (i >= 0) { long *vals = (long *)fb(cur); vals[i] = v; return 0; }
+		cur = ff(cur);
+	}
+	scope_put(G_ROOT, name, v);
+	return 0;
+}
+
 long js_scope_typeof(long s, long name) {
 	long cur = scope_of(s);
 	while (cur != 0) {
@@ -4563,6 +4592,46 @@ long js_pyset_var(long s, long name, long v) {
 	}
 	scope_put(scope_of(s), name, v);
 	return 0;
+}
+
+/* js_del(o, key): REMOVE an own property, key-order entry and all. Like the
+ * `delete` operator it answers true even when there was nothing to remove, and
+ * anything that is not an object is a no-op. The twin is abnf/jsrt.go's js_del.
+ *
+ * Why it is in the floor rather than in a layer 2: obj_put/obj_get are all a
+ * layer-2 file can reach, so without this a runtime has to BLANK the slot and
+ * remember the key in a side table that every own-keys walk then consults. That
+ * table is quadratic in the number of deletions and never freed - JavaScript's
+ * measured 61 s for 4000 delete-in-a-loop iterations against 0.03 s here - and it
+ * still cannot repair key ORDER after a delete-then-reinsert, for-in, or object
+ * spread, because those walk the floor's own key array.
+ *
+ * The last slot is BLANKED as well as unlinked: the keys/vals buffers are traced
+ * conservatively (gc_trace's raw-buffer arm reads every word of the block, not
+ * just the first fc(o)), so a stale handle left past the end would keep its
+ * object alive for as long as the owner lives. */
+long js_del(long o, long key) {
+	long k;
+	long i;
+	long n;
+	long *keys;
+	long *vals;
+	if (tag_of(o) != 6) { return H_TRUE; }
+	k = to_string(key);
+	i = obj_find(o, k);
+	if (i < 0) { return H_TRUE; }
+	keys = (long *)fa(o);
+	vals = (long *)fb(o);
+	n = fc(o);
+	while (i + 1 < n) {
+		keys[i] = keys[i + 1];
+		vals[i] = vals[i + 1];
+		i = i + 1;
+	}
+	keys[n - 1] = 0;
+	vals[n - 1] = 0;
+	sc(o, n - 1);
+	return H_TRUE;
 }
 
 /* An object's own keys in INSERTION ORDER (obj_put appends), skipping the
@@ -4891,6 +4960,7 @@ void boot(void) {
 	seed_root("floAbs", mk_host(60));
 	seed_root("keysOf", mk_host(61));
 	seed_root("sintRaw", mk_host(62));
+	seed_root("delKey", mk_host(63));
 	seed_root("Infinity", mk_num(DINF));
 	seed_root("NaN", mk_num(DNAN));
 	seed_root("anytype", cell_new(12));

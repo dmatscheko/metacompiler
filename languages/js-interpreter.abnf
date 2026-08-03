@@ -5058,7 +5058,15 @@ NotFuncHead = :script(~~
     }
 
     // Template literal: items = [{str:"chunk"} | {expr: thunk}...] -> string thunk.
-    // Starting from "" forces JS string coercion on every interpolated part.
+    //
+    // Every interpolated PART goes through jsStr - JavaScript's ToString, which is
+    // ToPrimitive with hint STRING. Host concatenation is not that and was wrong three
+    // ways, all measured against node: a class instance spells "[object Object]"
+    // (its `toString` lives on the __class descriptor, where the host cannot see it),
+    // an object with only a `valueOf` spells its NUMBER where node spells
+    // "[object Object]" (host `+` is hint default, a template is hint string), and a
+    // BigInt is a record here so it spells "[object Object]" too. jsStr answers all
+    // three, and the compiler half emits js_jsstr, which is the same function.
     function makeTemplate(items) {
         return function() {
             var out = anytype // The running value is a string after the first "" seed.
@@ -5068,9 +5076,7 @@ NotFuncHead = :script(~~
                 else {
                     var v = anytype // A substitution is an arbitrary expression.
                     v = items[i].expr()
-                    // A BigInt is a record here, so host concatenation would spell it
-                    // "[object Object]"; ToString gives its digits.
-                    if (isBigInt(v)) { out = out + biToStr(v, 10) } else { out = out + v }
+                    out = out + jsStr(v)
                 }
             }
             return out

@@ -453,7 +453,9 @@ func programJSBindings() map[string]interface{} {
 	return b
 }
 
-// keysBindings adds keysOf, which languages/lib/runtime.c seeds as host id 61.
+// keysBindings adds keysOf and delKey, which languages/lib/runtime.c seeds as
+// host ids 61 and 63 - the pair a layer-2 file needs to WALK and to PRUNE an
+// object, neither of which MetaJS itself can express.
 //
 // WHY A BUILTIN AND NOT THE js_keys EXTERN. An extern is only callable from an
 // emitter, and MetaJS has neither for..in nor Object.keys - so a layer-2 file
@@ -485,6 +487,36 @@ func keysBindings(b map[string]interface{}) {
 			out.elems = append(out.elems, k)
 		}
 		return out
+	})
+	// delKey(o, key), which languages/lib/runtime.c seeds as host id 63.
+	//
+	// The same argument as keysOf, one operation over: MetaJS has no `delete`, so
+	// without this a layer-2 file cannot REMOVE a key at all - it has to blank the
+	// slot and keep a side table of what it blanked, which is quadratic in the
+	// number of deletions, leaks, and still gets key ORDER after a
+	// delete-then-reinsert, for-in and object spread wrong, because all three walk
+	// the runtime's own key array.
+	//
+	// The body is the js_del extern's (jsrt.go, the big extern table): drop the
+	// property and its key-order entry, answering true whether or not it was
+	// there. tests/metajs-test-full.js runs the same program through this, through
+	// the C floor's host id 63 and through the interpreter grammar's own answer.
+	b["delKey"] = jsHostFunc("delKey", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		o, ok := argAt(args, 0).(*jsObject)
+		if !ok {
+			return true
+		}
+		key := rt.toString(argAt(args, 1))
+		if _, had := o.props[key]; had {
+			delete(o.props, key)
+			for i, k := range o.keys {
+				if k == key {
+					o.keys = append(o.keys[:i], o.keys[i+1:]...)
+					break
+				}
+			}
+		}
+		return true
 	})
 }
 

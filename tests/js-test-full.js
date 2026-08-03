@@ -893,6 +893,94 @@ function s35() {
 
 // ===== END SECTIONS =====
 
+// ===== SECTION 36: delete, key order, and template-literal ToString =====
+// Two defects that were invisible to every suite in the repo until this section
+// existed, both measured against node v24 and both fixed in all three engines.
+//
+// DELETE. The C floor had no js_del at all, so JavaScript's layer 2 blanked the slot
+// and kept a side table of what it had blanked. `delete` + `in` + Object.keys were
+// right; key ORDER after a delete-then-reinsert, for-in and object spread were not,
+// and the table was quadratic and leaked (61 s for 4,000 deletions, 0.05 s now).
+// The floor exports js_del now, so all four walk the same key array.
+//
+// TEMPLATE LITERAL. `${v}` is ToString(v), which is ToPrimitive with hint STRING -
+// so an object's own `toString` runs, an object with only a `valueOf` still spells
+// "[object Object]", and a BigInt spells its digits. The compiler halves joined the
+// RAW parts with the floor's js_add ("[object Object]" for every object), and the
+// interpreter halves used host concatenation, which is hint DEFAULT and calls
+// `valueOf` first. Both emit / call ToString per PART now.
+function s36() {
+    var o = { a: 1, b: 2, c: 3 }
+    check("del1", (delete o.b) === true && o.b === undefined)
+    check("del2", Object.keys(o).join(",") === "a,c")
+    // A key that comes back is a NEW key: it lands at the end of the order.
+    o.b = 9
+    check("del3", Object.keys(o).join(",") === "a,c,b")
+    var fi = ""
+    for (var k in o) { fi = fi + k }
+    check("del4", fi === "acb")
+    check("del5", keyStr36({ ...o }) === "a:1;c:3;b:9;")
+    check("del6", keyStr36(Object.assign({}, o)) === "a:1;c:3;b:9;")
+    var d = { x: 1, y: 2 }
+    delete d.x
+    check("del7", !("x" in d) && ("y" in d) && Object.keys(d).length === 1)
+    check("del8", keyStr36({ ...d }) === "y:2;")
+    // Deleting what is not there answers true, exactly like deleting what is.
+    check("del9", (delete d.nope) === true && (delete d.y) === true && Object.keys(d).length === 0)
+    // On an ARRAY the length is unchanged and the slot reads as undefined.
+    var arr = [1, 2, 3]
+    check("del10", (delete arr[1]) === true && arr.length === 3 && arr[1] === undefined)
+    // The shape that was quadratic, and one that checks the surviving ORDER.
+    var big = {}
+    for (var i = 0; i < 300; i++) { big["k" + i] = i; delete big["k" + i] }
+    check("del11", Object.keys(big).length === 0)
+    for (var j = 0; j < 300; j++) { big["m" + j] = j }
+    for (var m = 0; m < 300; m = m + 2) { delete big["m" + m] }
+    check("del12", Object.keys(big).length === 150 && Object.keys(big)[0] === "m1")
+
+    check("tpl1", `${{ toString: function () { return "T" } }}` === "T")
+    check("tpl2", `${new (class { toString() { return "D!" } })()}` === "D!")
+    // valueOf alone is NOT consulted: a template is hint string, not hint default.
+    check("tpl3", `${{ valueOf: function () { return 7 } }}` === "[object Object]")
+    check("tpl4", `${{ valueOf: function () { return 7 }, toString: function () { return "B" } }}` === "B")
+    check("tpl5", `${10n}` === "10" && `${2n ** 100n}` === "1267650600228229401496703205376")
+    check("tpl6", `${1} ${"s"} ${true} ${undefined} ${null} ${({})}` === "1 s true undefined null [object Object]")
+    check("tpl7", `${[1, 2]}` === "1,2" && `${[]}` === "")
+    var t = { toString: function () { return "T" } }
+    check("tpl8", `a${t}b${t}c` === "aTbTc")
+
+    // The implicit global, which is the third floor addition of this change.
+    // A plain `=` to a name that is on NO scope of the chain creates the binding in
+    // the ROOT scope (js_scope_set_or_create), so it outlives the function that
+    // wrote it. js_scope_typeof cannot be used to build this in an emitter - it
+    // answers "undefined" for an absent name and for a slot HOLDING undefined
+    // alike - which is why the C floor now carries the walk itself.
+    check("ig1", mkGlobal36() === 100)
+    check("ig2", implicitGlobal36 === 100)
+    implicitGlobal36 = implicitGlobal36 + 1
+    check("ig3", bumpGlobal36() === 102 && implicitGlobal36 === 102)
+    // An assignment that DOES find the name on the chain must not shadow it in the
+    // root: this is the arm js_pyset_var and js_scope_set_or_create agree on.
+    var outer = 1
+    function inner36() { outer = 42 }
+    inner36()
+    check("ig4", outer === 42 && typeof outer === "number")
+}
+function mkGlobal36() {
+    implicitGlobal36 = 100
+    return implicitGlobal36
+}
+function bumpGlobal36() {
+    implicitGlobal36 = implicitGlobal36 + 1
+    return implicitGlobal36
+}
+function keyStr36(o) {
+    var ks = Object.keys(o)
+    var s = ""
+    for (var i = 0; i < ks.length; i++) { s = s + ks[i] + ":" + o[ks[i]] + ";" }
+    return s
+}
+
 function main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -929,6 +1017,7 @@ function main() {
     s33() // SECTION-CALL 33
     s34() // SECTION-CALL 34
     s35() // SECTION-CALL 35
+    s36() // SECTION-CALL 36
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }
