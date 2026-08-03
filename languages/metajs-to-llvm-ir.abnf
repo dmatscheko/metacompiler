@@ -985,7 +985,25 @@ KwDefault   = "default" KwEnd ;
                         } else if (pc != " " && pc != "\t") { cur = cur + pc }
                         pi = pi + 1
                     }
-                    exports.push({n: nm, p: pnames})
+                    // A RAW RETURN. The mirror image of the _raw parameter below,
+                    // and the trap the PHP port found that the Lua pilot did not:
+                    // not every extern ANSWERS a value handle either. compile-core's
+                    // truthy() emits `icmp ne <call>, 0` straight on the result of
+                    // core.truthyExt, so js_truthy - and every language's own spelling
+                    // of it, php's js_phtruthy among them - answers the raw integer 1
+                    // or 0. A shim that handed back the HANDLE of a MetaJS boolean
+                    // would answer 3 for true and 2 for FALSE, and 2 != 0, so every
+                    // condition in the program would be taken. A top-level function
+                    // whose name ends in __raw is exported under the name WITHOUT that
+                    // suffix and its result is put through the floor's own js_truthy,
+                    // which is exactly the raw 1/0 the caller is comparing against.
+                    var rawRet = false
+                    var sym = nm
+                    if (nm.length > 5 && nm.substring(nm.length - 5, nm.length) == "__raw") {
+                        rawRet = true
+                        sym = nm.substring(0, nm.length - 5)
+                    }
+                    exports.push({n: sym, s: nm, p: pnames, r: rawRet})
                 }
                 line = ""
             } else { line = line + ch }
@@ -1056,7 +1074,7 @@ KwDefault   = "default" KwEnd ;
             // Pinned for the same reason as jsrtlib_env: the resolved closure is cached
             // in a module global and is otherwise invisible to the collector.
             lkB.NewStore(callExt(lkB, "js_gc_pin",
-                [callExt(lkB, "js_scope_get", [lkB.NewLoad(i64, envG), emitStr(lkB, ex.n)])]), fG)
+                [callExt(lkB, "js_scope_get", [lkB.NewLoad(i64, envG), emitStr(lkB, ex.s)])]), fG)
             lkB.NewBr(goB)
             sb = goB
             var fV = sb.NewLoad(i64, fG)
@@ -1079,7 +1097,9 @@ KwDefault   = "default" KwEnd ;
                 callExt(sb, "js_arr_push", [aV, pv])
                 pj = pj + 1
             }
-            sb.NewRet(callExt(sb, "js_call", [fV, hUndef, aV]))
+            var rv = callExt(sb, "js_call", [fV, hUndef, aV])
+            if (ex.r) { rv = callExt(sb, "js_truthy", [rv]) }
+            sb.NewRet(rv)
             ei = ei + 1
         }
     }

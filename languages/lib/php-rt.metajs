@@ -1,0 +1,2104 @@
+// php-rt.metajs -- PHP'S OWN SEMANTICS, in MetaJS. Layer 2 of
+// docs/runtime-next-plan.md part 3, for the second language after the Lua pilot.
+//
+// languages/php-to-llvm-ir.abnf emits handle IR that calls 101 js_* externs for
+// its own full-syntax ratchet (107 over every php test in tests/). 28 of them are
+// generic primitives languages/lib/runtime.c already provides (the C floor,
+// layer 1). The rest are here.
+//
+// Compile with:
+//     mec languages/metajs-to-llvm-ir.abnf languages/lib/php-rt.metajs -q -rt-lib
+// which is what tests/gen-php-rt-ll.sh does; the result is the checked-in
+// languages/lib/php-rt.ll that php-to-llvm-ir.abnf links next to runtime.ll.
+// -rt-lib exports every TOP-LEVEL `function js_*` below under its own C symbol,
+// so nothing else in this file is visible to the linker - the helpers are
+// deliberately named ph*.
+//
+// THE AUTHORITATIVE SPECIFICATION IS abnf/jsrtphp.go plus the js_ph* block of
+// abnf/jsrt.go, and this file matches them function for function. Where it
+// CANNOT, the site says so in full: see "THE THREE WALLS" below.
+//
+// ----- the value model -------------------------------------------------------
+//
+//     null / undefined     ==  PHP null
+//     a boolean            ==  PHP bool
+//     a PLAIN NUMBER       ==  a PHP int whose value is exact in a double
+//     a SIZED INTEGER      ==  a PHP int outside [-2^53, 2^53]. The Go twin uses
+//                              jsGInt{w:64,u:false} (abnf/jsrtint.go); the C
+//                              floor has the same thing as a REAL PRIMITIVE TYPE
+//                              (tag 13 of languages/lib/runtime.c) reached
+//                              through the sint/sintOp/sintCmp/... host
+//                              builtins. This is why PHP could go second: it is
+//                              the ONE of the eleven remaining languages whose Go
+//                              twin uses zero jsJFlo, so the only sized type it
+//                              needs is the one the floor already has.
+//     a {__pf} box         ==  a PHP float. The Go twin uses jsPhpFlo, a Go TYPE.
+//                              Layer 2 has no way to make a new primitive type
+//                              (the finding the Lua pilot recorded), so this is
+//                              an OBJECT box - and unlike Lua's {__f}, which the
+//                              emitter builds in IR, this shape is built and read
+//                              ONLY here, because every float in a PHP program
+//                              enters through js_phflo / js_phlit / arithmetic.
+//                              It is observationally equivalent as long as no
+//                              value ever reaches a FLOOR generic that asks its
+//                              type: js_typeof would answer "object" where the Go
+//                              twin answers "double". php-to-llvm-ir.abnf emits
+//                              no js_typeof, which is what makes the box safe -
+//                              stated here so a future emitter change cannot
+//                              quietly break it.
+//     a {__dict} object    ==  a PHP array: ONE ordered map, keys/vals parallel
+//                              arrays plus __next, the next automatic int key.
+//                              Built by js_pharr and by the emitter alike.
+//     a {__refcell} object ==  a PHP reference cell. Built by the EMITTER
+//                              (js_obj_new + js_set), so its shape is fixed.
+//     a {__isclass} object ==  a class descriptor, built by the emitter.
+//     any other object     ==  a PHP object instance.
+//
+// ----- THE THREE WALLS -------------------------------------------------------
+//
+// Three groups of extern CANNOT be written here at all, and each is a missing
+// FLOOR primitive rather than anything about PHP. They are the finding this port
+// exists to produce, because they apply to the remaining nine languages too.
+//
+//  1. COROUTINES - js_genfn / js_yield. A generator suspends a call stack and
+//     resumes it later. The Go twin does it with a goroutine and two channels.
+//     The C floor has setjmp/longjmp (js_throw/js_try), which can UNWIND a stack
+//     but cannot resume one, and MetaJS has no continuations. There is no
+//     spelling of this in layer 2. The stubs below make DECLARING a generator
+//     harmless and make USING one abort with a named message, so the failure can
+//     never be silent.
+//
+//  2. AN OBJECT'S OWN KEYS - needed by var_dump of an object (js_phdump), by
+//     `==` between two objects (js_pheq/js_phne/js_phcmp), by (array) on an
+//     object (js_phcast) and by clone (js_phclone). The floor ALREADY HAS this
+//     as the js_keys extern - it went in for the Lua pilot - but an extern is
+//     only callable from an EMITTER. MetaJS has no for..in and the floor seeds no
+//     `Object`, so layer 2 cannot reach it. The fix is one line of
+//     languages/lib/runtime.c (a seed_root for a `keysOf` host builtin over the
+//     js_keys that is already there) plus its twin in abnf/jsrtint.go's
+//     giBindings, and it is language-NEUTRAL. Reported rather than made: the C
+//     floor is owned by another agent this session.
+//
+//  3. THE SCOPE CHAIN - js_phthis, js_phclslookup and js_phrtinit each take a
+//     SCOPE handle and walk it. A scope is the floor's private storage; the Lua
+//     pilot put js_scope_decl/set/typeof INTO the floor precisely because layer 2
+//     cannot open one. Two of the three do not need the floor at all - they are
+//     lowered in php-to-llvm-ir.abnf itself now, out of js_scope_typeof and
+//     js_scope_get, which the emitter CAN call - and that is the general answer
+//     for the remaining nine: a scope probe belongs in the emitter, not in layer
+//     2. js_phrtinit is the one that still needs a floor primitive, and it is the
+//     same one as wall 2 would not solve: see js_phrtinit below.
+//
+// ----- MetaJS rules that shape the code below --------------------------------
+//
+// docs/abnf-dialect-gotchas.md: a local keeps the TYPE CLASS it is first assigned
+// (a variable that holds a number in one branch and a box in another is declared
+// `var x = anytype`); there is no ASI, so every `return` carries its value on the
+// same line and a value-less early return is braced; no for..in, no splice, no
+// split/join/lastIndexOf, indexOf ignores its from-index, array.length is not
+// assignable, and there are no exponent literals.
+
+// ===================================================== exact 64 bit =========
+//
+// PHP's int is 64 bit two's complement, and the whole of that arithmetic is the
+// floor's sized-integer tag: sint() is giNorm(v, 64, false), sintOp() is one
+// binary operator by INDEX (0:+ 1:- 2:* 3:/ 4:% 5:& 6:| 7:^ 8:&^ 9:<< 10:>>) and
+// sintCmp() is the signed compare. A value that fits exactly in a double comes
+// back a PLAIN NUMBER, which is the same invariant the Go twin's giNorm keeps -
+// so an "int operand" below is always just the value itself, never a pair.
+//
+// What is PHP'S OWN, and the reason this section exists at all, is that PHP does
+// NOT wrap on overflow: it silently promotes to a float computed in double
+// precision. sintOp wraps and reports nothing, so every operator that can leave
+// 64 bits detects the overflow here, from the SIGNS of the operands and the
+// wrapped result - which is exactly what ZEND_SIGNED_ADD_OVERFLOW does.
+
+function phTwo32() { return 4294967296 }
+function phTwo64() { return 18446744073709551616 }
+function phTwo63() { return 9223372036854775808 }
+function phInf() { return Infinity }
+
+// The two extremes, as values. A digit literal above 2^53 would already have been
+// rounded by the compiler that reads this file, so they are built from halves.
+function phIntMax() { return sint(2147483647, 4294967295, 64, 0) }
+function phIntMin() { return sint(2147483648, 0, 64, 0) }
+
+// phFromNum turns a double into a 64 bit int VALUE: truncation toward zero and a
+// WRAP modulo 2^64, which is giFromFloat / the hardware conversion. NaN is 0.
+function phFromNum(n) {
+    if (n !== n) { return 0 }
+    var neg = n < 0
+    var a = neg ? 0 - n : n
+    a = Math.floor(a)
+    if (a >= phTwo64()) { a = a - Math.floor(a / phTwo64()) * phTwo64() }
+    var h = Math.floor(a / phTwo32())
+    var l = a - h * phTwo32()
+    var v = sint(h, l, 64, 0)
+    if (neg) { v = sintOp(1, 0, v) }
+    return v
+}
+
+// phSignNeg: is this 64 bit int value negative? The top bit of the high half.
+function phSignNeg(v) { return sintHi(v) >= 2147483648 }
+function phIsZero(v) { return sintCmp(v, 0) == 0 }
+
+// The three operators that can leave 64 bits. Each answers {v, o}: the WRAPPED
+// 64 bit result and whether it overflowed.
+function phAddOv(x, y) {
+    var r = sintOp(0, x, y)
+    var sx = phSignNeg(x)
+    var sy = phSignNeg(y)
+    var sr = phSignNeg(r)
+    return {v: r, o: sx == sy && sr != sx}
+}
+
+function phSubOv(x, y) {
+    var r = sintOp(1, x, y)
+    var sx = phSignNeg(x)
+    var sy = phSignNeg(y)
+    var sr = phSignNeg(r)
+    return {v: r, o: sx != sy && sr != sx}
+}
+
+function phMulOv(x, y) {
+    if (phIsZero(x)) { return {v: 0, o: false} }
+    if (phIsZero(y)) { return {v: 0, o: false} }
+    var mone = 0 - 1
+    if (sintCmp(x, mone) == 0 && sintCmp(y, phIntMin()) == 0) { return {v: phIntMin(), o: true} }
+    if (sintCmp(y, mone) == 0 && sintCmp(x, phIntMin()) == 0) { return {v: phIntMin(), o: true} }
+    var r = sintOp(2, x, y)
+    // r / x != y is the overflow test the Go twin uses, and x is known non-zero.
+    return {v: r, o: sintCmp(sintOp(3, r, x), y) != 0}
+}
+
+// ===================================================== the value model ======
+
+// phFloOf reads the {__pf} float box: the boxed double, or undefined.
+function phFloOf(v) {
+    if (v === undefined) { return undefined }
+    if (v === null) { return undefined }
+    // A sized integer answers "number" here (the floor's tag 13 IS a number), so
+    // it leaves through this line, which is right: it is never the float box.
+    if (typeof v != "object") { return undefined }
+    return v["__pf"]
+}
+
+function phMkFlo(f) { return {__pf: f} }
+function phIsFlo(v) { return phFloOf(v) !== undefined }
+
+// phIsInt: every plain number in this model is an int, and a sized integer is one
+// that left the exact range.
+function phIsInt(v) {
+    if (sintIs(v)) { return true }
+    return typeof v == "number"
+}
+
+function phIsNum(v) {
+    if (phIsInt(v)) { return true }
+    return phIsFlo(v)
+}
+
+// phNumOf is the double reading of a number of either subtype.
+function phNumOf(v) {
+    if (sintIs(v)) { return sintNum(v) }
+    if (typeof v == "number") { return v }
+    var f = phFloOf(v)
+    if (f !== undefined) { return f }
+    return 0
+}
+
+function phIsNull(v) {
+    if (v === undefined) { return true }
+    return v === null
+}
+
+function phIsBool(v) { return typeof v == "boolean" }
+function phIsStr(v) { return typeof v == "string" }
+
+// phTrunc rounds toward zero: PHP's (int) cast and intdiv().
+function phTrunc(n) {
+    if (n !== n) { return 0 }
+    if (n === phInf()) { return 0 }
+    if (n === 0 - phInf()) { return 0 }
+    if (n < 0) { return 0 - Math.floor(0 - n) }
+    return Math.floor(n)
+}
+
+// phFloToLong is the (int) reading of a float: truncation, then a WRAP modulo
+// 2^64 rather than a saturation - (int)(PHP_INT_MAX * 2 + 4) is int(0).
+function phFloToLong(f) {
+    if (f !== f) { return 0 }
+    if (f === phInf()) { return 0 }
+    if (f === 0 - phInf()) { return 0 }
+    return phFromNum(f)
+}
+
+// ----- a PHP array is ONE ordered map ---------------------------------------
+
+function phIsDict(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (typeof v != "object") { return false }
+    return v["__dict"] === true
+}
+
+// phKeysOfArr / phValsOfArr are phpArrParts: a __dict yields its own two arrays,
+// and a raw MetaJS list reads as the map 0=>e0, 1=>e1, ... which is exactly what
+// it means in PHP. phArrParts answers undefined when the value is neither.
+function phArrParts(v) {
+    if (phIsDict(v)) { return {k: v["keys"], v: v["vals"], d: true} }
+    if (phIsList(v)) {
+        var ks = []
+        var i = 0
+        while (i < v.length) {
+            ks.push(i)
+            i = i + 1
+        }
+        return {k: ks, v: v, d: false}
+    }
+    return undefined
+}
+
+// phIsList: a raw MetaJS array rather than an object. `typeof` answers "object"
+// for both in this dialect, so the probe is a length that is a number on a value
+// that is not one of the tagged shapes.
+function phIsList(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (typeof v != "object") { return false }
+    if (v["__dict"] === true) { return false }
+    if (v["__refcell"] === true) { return false }
+    return typeof v["length"] == "number"
+}
+
+function phIsArr(v) { return phArrParts(v) !== undefined }
+
+// ----- references: one storage CELL shared by two names ---------------------
+
+function phCellOf(v) {
+    if (v === undefined) { return undefined }
+    if (v === null) { return undefined }
+    if (typeof v != "object") { return undefined }
+    if (v["__refcell"] === true) { return v }
+    return undefined
+}
+
+function phDeref(v) {
+    var c = phCellOf(v)
+    if (c !== undefined) { return c["v"] }
+    return v
+}
+
+function phIsClass(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (typeof v != "object") { return false }
+    return v["__isclass"] !== undefined
+}
+
+// phIsObj: an instance. Not a cell, not an array, not a class descriptor, not a
+// float box, not a plain list.
+function phIsObj(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (typeof v != "object") { return false }
+    if (v["__refcell"] !== undefined) { return false }
+    if (v["__dict"] === true) { return false }
+    if (v["__isclass"] !== undefined) { return false }
+    if (phFloOf(v) !== undefined) { return false }
+    if (phIsList(v)) { return false }
+    return true
+}
+
+// ===================================================== truthiness ===========
+// false, 0, 0.0, "", "0", [] and null are falsy; everything else is truthy.
+
+function phTest(v) {
+    if (phIsNull(v)) { return false }
+    if (typeof v == "boolean") { return v }
+    if (sintIs(v)) { return true }  // outside the exact range, so never 0
+    if (typeof v == "number") { return v != 0 }
+    // 0.0 is falsy, and the float BOX is an object - so it has to be read here and
+    // not left to fall through to the "an object is truthy" tail.
+    var f = phFloOf(v)
+    if (f !== undefined) { return f != 0 }
+    if (typeof v == "string") {
+        if (v == "") { return false }
+        return v != "0"
+    }
+    var p = phArrParts(v)
+    if (p !== undefined) { return p.k.length > 0 }
+    return true
+}
+
+// ===================================================== float rendering ======
+//
+// PHP has TWO float renderers and they differ: echo / (string) / interpolation
+// use precision=14, while var_dump / var_export / json use serialize_precision=-1
+// (the shortest round-tripping digits laid out at ndigit=17). The same value is
+// 9.2233720368548E+18 to echo and 9.223372036854776E+18 to var_dump, and
+// confusing the two is the classic PHP float trap. Both are
+// zend_gcvt(value, ndigit, '.', 'E'). This is the byte-for-byte twin of
+// phpFloStr / phpFloDump in abnf/jsrtphp.go and of floStr / floDump in
+// languages/php-interpreter.abnf, which is where the spelling comes from.
+
+function phFloStr(n) { return phFloFormat(n, 14) }
+function phFloDump(n) { return phFloFormat(n, 17) }
+
+// The shortest decimal digits of a positive finite double, with the position of
+// the decimal point: value == 0.<d> * 10^<e>. The digits come from the floor's
+// own number renderer, which is the shortest round-tripping form.
+function phFloSplit(a) {
+    var s = "" + a
+    var mant = s
+    var exp = 0
+    var ei = 0 - 1
+    var i = 0
+    while (i < s.length) {
+        var c = s.charAt(i)
+        if (c == "e" || c == "E") { ei = i }
+        i = i + 1
+    }
+    if (ei >= 0) {
+        mant = s.substring(0, ei)
+        var et = s.substring(ei + 1, s.length)
+        var eneg = false
+        if (et.charAt(0) == "+") { et = et.substring(1, et.length) }
+        else if (et.charAt(0) == "-") {
+            eneg = true
+            et = et.substring(1, et.length)
+        }
+        exp = parseInt(et, 10)
+        if (eneg) { exp = 0 - exp }
+    }
+    var dot = 0 - 1
+    var j = 0
+    while (j < mant.length) {
+        if (mant.charAt(j) == ".") { dot = j }
+        j = j + 1
+    }
+    var digs = mant
+    var intLen = mant.length
+    if (dot >= 0) {
+        digs = mant.substring(0, dot) + mant.substring(dot + 1, mant.length)
+        intLen = dot
+    }
+    var decpt = intLen + exp
+    var k = 0
+    while (k < digs.length && digs.charAt(k) == "0") {
+        k = k + 1
+        decpt = decpt - 1
+    }
+    digs = digs.substring(k, digs.length)
+    var m = digs.length
+    while (m > 0 && digs.charAt(m - 1) == "0") { m = m - 1 }
+    digs = digs.substring(0, m)
+    if (digs.length == 0) { return {d: "0", e: 1} }
+    return {d: digs, e: decpt}
+}
+
+// Round a digit string to `nd` significant digits, half up, and drop the trailing
+// zeros the way dtoa's mode 2 does.
+function phFloRound(d, decpt, nd) {
+    var keep = d
+    var pt = decpt
+    if (d.length > nd) {
+        keep = d.substring(0, nd)
+        if (d.charCodeAt(nd) - 48 >= 5) {
+            var i = nd - 1
+            var carry = 1
+            var tail = ""
+            while (i >= 0 && carry == 1) {
+                var v = keep.charCodeAt(i) - 48 + 1
+                if (v == 10) { tail = "0" + tail } else {
+                    tail = "" + v + tail
+                    carry = 0
+                }
+                i = i - 1
+            }
+            keep = keep.substring(0, i + 1) + tail
+            if (carry == 1) {
+                keep = ("1" + keep).substring(0, nd)
+                pt = pt + 1
+            }
+        }
+    }
+    var m = keep.length
+    while (m > 1 && keep.charAt(m - 1) == "0") { m = m - 1 }
+    keep = keep.substring(0, m)
+    if (keep == "0") { pt = 1 }
+    return {d: keep, e: pt}
+}
+
+function phZeros(n) {
+    var z = ""
+    var i = 0
+    while (i < n) {
+        z = z + "0"
+        i = i + 1
+    }
+    return z
+}
+
+function phFloFormat(n, nd) {
+    if (n !== n) { return "NAN" }
+    if (n === phInf()) { return "INF" }
+    if (n === 0 - phInf()) { return "-INF" }
+    var sign = ""
+    var a = n
+    if (n < 0) {
+        sign = "-"
+        a = 0 - n
+    } else if (n === 0 && 1 / n < 0) { sign = "-" }
+    if (a === 0) { return sign + "0" }
+    var sp = phFloSplit(a)
+    var r = phFloRound(sp.d, sp.e, nd)
+    var d = r.d
+    var decpt = r.e
+    var expo = decpt > nd
+    if (decpt < 0) { expo = decpt < 0 - 3 }
+    if (expo) {
+        var e2 = decpt - 1
+        var frac = d.length > 1 ? d.substring(1, d.length) : "0"
+        var es = "+"
+        var ea = e2
+        if (e2 < 0) {
+            es = "-"
+            ea = 0 - e2
+        }
+        return sign + d.charAt(0) + "." + frac + "E" + es + ea
+    }
+    if (decpt <= 0) { return sign + "0." + phZeros(0 - decpt) + d }
+    if (decpt >= d.length) { return sign + d + phZeros(decpt - d.length) }
+    return sign + d.substring(0, decpt) + "." + d.substring(decpt, d.length)
+}
+
+// ===================================================== string coercion ======
+
+function phStr(v) {
+    if (phIsNull(v)) { return "" }
+    if (typeof v == "boolean") { return v ? "1" : "" }
+    if (typeof v == "string") { return v }
+    if (sintIs(v)) { return sintStr(v) }
+    if (typeof v == "number") { return "" + v }
+    var f = phFloOf(v)
+    if (f !== undefined) { return phFloStr(f) }
+    if (phIsArr(v)) { return "Array" }
+    if (phIsObj(v)) {
+        var cls = v["__class"]
+        if (cls !== undefined) {
+            var mm = phClassFind(cls, "__toString")
+            if (mm !== undefined) { return phStr(mm.apply(undefined, [v])) }
+        }
+        return "Object"
+    }
+    return "" + v
+}
+
+// phClassFind walks the __super chain of a class descriptor for one member.
+function phClassFind(cls, name) {
+    var c = cls
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (c === undefined) { return undefined }
+        if (c === null) { return undefined }
+        if (typeof c != "object") { return undefined }
+        var mm = c[name]
+        if (mm !== undefined && typeof mm == "function") { return mm }
+        c = c["__super"]
+        if (c === undefined) { return undefined }
+    }
+    return undefined
+}
+
+// ===================================================== numeric strings ======
+
+function phIsDigit(c) {
+    if (c < 48) { return false }
+    return c <= 57
+}
+
+function phIsSpace(c) {
+    if (c == 32) { return true }
+    if (c == 9) { return true }
+    if (c == 10) { return true }
+    if (c == 13) { return true }
+    if (c == 11) { return true }
+    return c == 12
+}
+
+// phNumStrVal answers the number a FULLY numeric string denotes (an int, or a
+// float box), or undefined when the string is not numeric. Leading and trailing
+// whitespace is allowed (PHP 8).
+function phNumStrVal(s) {
+    var i = 0
+    while (i < s.length && phIsSpace(s.charCodeAt(i))) { i = i + 1 }
+    var st = i
+    if (i < s.length) {
+        var c0 = s.charAt(i)
+        if (c0 == "+" || c0 == "-") { i = i + 1 }
+    }
+    var digits = 0
+    while (i < s.length && phIsDigit(s.charCodeAt(i))) {
+        i = i + 1
+        digits = digits + 1
+    }
+    var isF = false
+    if (i < s.length && s.charAt(i) == ".") {
+        isF = true
+        i = i + 1
+        while (i < s.length && phIsDigit(s.charCodeAt(i))) {
+            i = i + 1
+            digits = digits + 1
+        }
+    }
+    if (digits == 0) { return undefined }
+    if (i < s.length && (s.charAt(i) == "e" || s.charAt(i) == "E")) {
+        var save = i
+        i = i + 1
+        if (i < s.length) {
+            var ce = s.charAt(i)
+            if (ce == "+" || ce == "-") { i = i + 1 }
+        }
+        var ed = 0
+        while (i < s.length && phIsDigit(s.charCodeAt(i))) {
+            i = i + 1
+            ed = ed + 1
+        }
+        if (ed == 0) { i = save } else { isF = true }
+    }
+    var en = i
+    while (i < s.length && phIsSpace(s.charCodeAt(i))) { i = i + 1 }
+    if (i != s.length) { return undefined }
+    var body = s.substring(st, en)
+    if (isF) { return phMkFlo(phParseFlo(body)) }
+    return phIntStrVal(body)
+}
+
+// The double a decimal text denotes. parseFloat is a floor host builtin and is
+// the same strtod both other halves use.
+function phParseFlo(t) { return parseFloat(t) }
+
+// phIntStrVal is the value a signed DIGIT RUN denotes, promoted to a FLOAT when
+// it does not fit in 64 bits: is_numeric_string reports IS_DOUBLE for
+// "9223372036854775808", so that string + 0 is a float and not a saturated int.
+function phIntStrVal(txt) {
+    var neg = false
+    var body = txt
+    if (body.charAt(0) == "+") { body = body.substring(1, body.length) }
+    else if (body.charAt(0) == "-") {
+        neg = true
+        body = body.substring(1, body.length)
+    }
+    // Strip the leading zeros so the digit count below is the significant one.
+    var z = 0
+    while (z < body.length - 1 && body.charAt(z) == "0") { z = z + 1 }
+    body = body.substring(z, body.length)
+    if (body.length == 0) { return 0 }
+    // The range test is done on the DIGIT STRING, not on the accumulator. Doing it
+    // by watching for arithmetic overflow gets exactly one value wrong, and it is
+    // the one that matters: -9223372036854775808 IS representable while
+    // +9223372036854775808 is not, so the magnitude overflows on its last digit and
+    // a signed-overflow test would call PHP_INT_MIN a float. This is strconv's own
+    // rule (ParseInt's cutoff), and it is what the Go twin gets for free.
+    var lim = neg ? "9223372036854775808" : "9223372036854775807"
+    if (body.length > lim.length) { return phMkFlo(phParseFlo(txt)) }
+    if (body.length == lim.length && body > lim) { return phMkFlo(phParseFlo(txt)) }
+    // In range, so the accumulation below cannot overflow except in the one
+    // deliberate case of PHP_INT_MIN, whose magnitude wraps to MIN and is then
+    // already the answer.
+    var acc = 0
+    var i = 0
+    while (i < body.length) {
+        acc = sintOp(0, sintOp(2, acc, 10), body.charCodeAt(i) - 48)
+        i = i + 1
+    }
+    if (neg) {
+        if (sintCmp(acc, phIntMin()) == 0) { return acc }
+        return sintOp(1, 0, acc)
+    }
+    return acc
+}
+
+// phLeadingNum: a non-numeric string still contributes its numeric PREFIX
+// ("12abc" is 12 in an arithmetic context).
+function phLeadingNum(s) {
+    var i = 0
+    if (i < s.length) {
+        var c0 = s.charAt(i)
+        if (c0 == "+" || c0 == "-") { i = i + 1 }
+    }
+    var d = 0
+    while (i < s.length && phIsDigit(s.charCodeAt(i))) {
+        i = i + 1
+        d = d + 1
+    }
+    var isF = false
+    if (i < s.length && s.charAt(i) == ".") {
+        var j = i + 1
+        var fd = 0
+        while (j < s.length && phIsDigit(s.charCodeAt(j))) {
+            j = j + 1
+            fd = fd + 1
+        }
+        if (fd > 0 || d > 0) {
+            isF = true
+            i = j
+            d = d + fd
+        }
+    }
+    if (d == 0) { return 0 }
+    if (isF) { return phMkFlo(phParseFlo(s.substring(0, i))) }
+    return phIntStrVal(s.substring(0, i))
+}
+
+// phToNum is the arithmetic coercion: everything becomes an int or a float box.
+function phToNum(v) {
+    if (phIsInt(v)) { return v }
+    if (phIsFlo(v)) { return v }
+    if (typeof v == "boolean") { return v ? 1 : 0 }
+    if (phIsNull(v)) { return 0 }
+    if (typeof v == "string") {
+        var n = phNumStrVal(v)
+        if (n !== undefined) { return n }
+        return phLeadingNum(v)
+    }
+    if (phIsArr(v)) { fail("unsupported operand type: array used as a number") }
+    return 0
+}
+
+// phToLong is the (int) reading of ANY value, as a 64 bit int VALUE.
+function phToLong(v) {
+    var n = phToNum(v)
+    var f = phFloOf(n)
+    if (f !== undefined) { return phFloToLong(f) }
+    return n
+}
+
+// ===================================================== arithmetic ===========
+
+// The engine's own arithmetic errors. PHP made division by zero and a negative
+// shift count CATCHABLE in 8.0, and the ratchet tests exactly that. The class
+// DESCRIPTORS live in the emitted module and are handed over once - see
+// js_phrtinit, and the wall recorded there.
+var phRtClasses = undefined
+
+function phRaise(clsName, msg) {
+    if (phRtClasses === undefined) { fail(msg) }
+    var cls = phRtClasses[clsName]
+    if (cls === undefined) { fail(msg) }
+    if (cls === null) { fail(msg) }
+    var o = {}
+    o["__class"] = cls
+    o["message"] = msg
+    o["code"] = 0
+    throw o
+}
+
+// phArith: an int stays an int unless the exact 64 bit answer does not FIT, and
+// any float operand makes the result a float.
+function phArith(op, l, r) {
+    var a = phToNum(l)
+    var b = phToNum(r)
+    // '%' is the one arithmetic operator that is INTEGER only: PHP casts both
+    // operands to int first, so 7.5 % 2 is 1 and not 1.5.
+    if (op == "%") {
+        var y = phToLong(b)
+        if (phIsZero(y)) { phRaise("DivisionByZeroError", "Modulo by zero") }
+        // MIN % -1 traps on the hardware; PHP answers 0.
+        if (sintCmp(y, 0 - 1) == 0) { return 0 }
+        return sintOp(4, phToLong(a), y)
+    }
+    if (phIsFlo(a) || phIsFlo(b)) { return phFloArith(op, phNumOf(a), phNumOf(b)) }
+    return phIntArith(op, a, b)
+}
+
+function phFloArith(op, x, y) {
+    if (op == "+") { return phMkFlo(x + y) }
+    if (op == "-") { return phMkFlo(x - y) }
+    if (op == "*") { return phMkFlo(x * y) }
+    if (op == "/") {
+        if (y == 0) { phRaise("DivisionByZeroError", "Division by zero") }
+        return phMkFlo(x / y)
+    }
+    if (op == "**") { return phMkFlo(Math.pow(x, y)) }
+    fail("unknown arithmetic operator " + op)
+    return 0
+}
+
+// phIntArith: the three overflowing operators promote to a float computed in
+// DOUBLE precision, which is what ZEND_SIGNED_ADD_OVERFLOW's slow path does - so
+// PHP_INT_MAX + 1 is float(9.2233720368548E+18) and not a wrapped int.
+function phIntArith(op, x, y) {
+    if (op == "+") {
+        var a = phAddOv(x, y)
+        if (!a.o) { return a.v }
+        return phMkFlo(phNumOf(x) + phNumOf(y))
+    }
+    if (op == "-") {
+        var s = phSubOv(x, y)
+        if (!s.o) { return s.v }
+        return phMkFlo(phNumOf(x) - phNumOf(y))
+    }
+    if (op == "*") {
+        var m = phMulOv(x, y)
+        if (!m.o) { return m.v }
+        return phMkFlo(phNumOf(x) * phNumOf(y))
+    }
+    if (op == "/") {
+        // Division stays an int only when it comes out EXACT: 6/3 is int(2) where
+        // 7/2 is float(3.5). intdiv() is the truncating one.
+        if (phIsZero(y)) { phRaise("DivisionByZeroError", "Division by zero") }
+        if (sintCmp(y, 0 - 1) == 0 && sintCmp(x, phIntMin()) == 0) {
+            return phMkFlo(0 - phNumOf(phIntMin()))
+        }
+        if (phIsZero(sintOp(4, x, y))) { return sintOp(3, x, y) }
+        return phMkFlo(phNumOf(x) / phNumOf(y))
+    }
+    if (op == "**") {
+        if (phSignNeg(y)) { return phMkFlo(Math.pow(phNumOf(x), phNumOf(y))) }
+        // Squaring, with the same overflow test every multiplication gets: the
+        // first product that leaves 64 bits makes the WHOLE result a float.
+        var acc = 1
+        var base = x
+        var e = y
+        while (sintCmp(e, 0) > 0) {
+            if (!phIsZero(sintOp(5, e, 1))) {
+                var p = phMulOv(acc, base)
+                if (p.o) { return phMkFlo(Math.pow(phNumOf(x), phNumOf(y))) }
+                acc = p.v
+            }
+            e = sintOp(10, e, 1)
+            if (sintCmp(e, 0) > 0) {
+                var q = phMulOv(base, base)
+                if (q.o) { return phMkFlo(Math.pow(phNumOf(x), phNumOf(y))) }
+                base = q.v
+            }
+        }
+        return acc
+    }
+    fail("unknown arithmetic operator " + op)
+    return 0
+}
+
+// The bitwise operators are exact 64 bit and cast their operands to int. Unlike
+// the arithmetic ones they WRAP - PHP_INT_MAX << 1 is int(-2), not a float - and
+// a negative shift count is an ArithmeticError rather than a shift the other way.
+function phBit(op, l, r) {
+    var x = phToLong(l)
+    if (op == "&") { return sintOp(5, x, phToLong(r)) }
+    if (op == "|") { return sintOp(6, x, phToLong(r)) }
+    if (op == "^") { return sintOp(7, x, phToLong(r)) }
+    if (op == "<<" || op == ">>") {
+        var n = phToLong(r)
+        if (phSignNeg(n)) { phRaise("ArithmeticError", "Bit shift by negative number") }
+        if (sintCmp(n, 64) >= 0) {
+            if (op == "<<") { return 0 }
+            if (!phSignNeg(x)) { return 0 }
+            return 0 - 1
+        }
+        if (op == "<<") { return sintOp(9, x, n) }
+        return sintOp(10, x, n)
+    }
+    fail("unknown bit operator " + op)
+    return 0
+}
+
+// phNeg is unary minus. It keeps the operand's TYPE (so -0.0 stays -0), and the
+// one int that cannot be negated, PHP_INT_MIN, promotes like any other overflow.
+function phNeg(v) {
+    var a = phToNum(v)
+    var f = phFloOf(a)
+    // `f * -1` and NOT `0 - f`: they differ on ZERO, and PHP keeps the sign, so
+    // (string)(-0.0) is "-0". `0 - 0` is +0 in IEEE 754 while `0 * -1` is -0.
+    if (f !== undefined) { return phMkFlo(f * (0 - 1)) }
+    if (sintCmp(a, phIntMin()) == 0) { return phMkFlo(0 - phNumOf(phIntMin())) }
+    return sintOp(1, 0, a)
+}
+
+// ===================================================== comparison ===========
+
+// phNumEq / phNumCmp compare two numbers the way PHP does: int against int at 64
+// bits (a double would collapse 2^63 and 2^63 - 1 onto the same value), anything
+// else as doubles, which is the LONG-to-DOUBLE widening compare_function does.
+function phNumEq(a, b) {
+    if (phIsInt(a) && phIsInt(b)) { return sintCmp(a, b) == 0 }
+    return phNumOf(a) == phNumOf(b)
+}
+
+function phCmpNum(a, b) {
+    if (a < b) { return 0 - 1 }
+    if (a > b) { return 1 }
+    return 0
+}
+
+function phNumCmp(a, b) {
+    if (phIsInt(a) && phIsInt(b)) { return sintCmp(a, b) }
+    return phCmpNum(phNumOf(a), phNumOf(b))
+}
+
+function phCmpStr(a, b) {
+    if (a < b) { return 0 - 1 }
+    if (a > b) { return 1 }
+    return 0
+}
+
+// phKeyEq compares two normalized array keys (an int or a string).
+function phKeyEq(a, b) {
+    var ai = phIsInt(a)
+    var bi = phIsInt(b)
+    if (ai || bi) {
+        if (!ai) { return false }
+        if (!bi) { return false }
+        return sintCmp(a, b) == 0
+    }
+    if (typeof a == "string" && typeof b == "string") { return a == b }
+    return a === b
+}
+
+// phIdentical is ===: the same type, and for arrays the same keys in the same
+// ORDER. A boxed float is only identical to another boxed float.
+function phIdentical(l, r) {
+    if (phIsFlo(l) || phIsFlo(r)) {
+        if (!phIsFlo(l)) { return false }
+        if (!phIsFlo(r)) { return false }
+        return phFloOf(l) == phFloOf(r)
+    }
+    var lp = phArrParts(l)
+    var rp = phArrParts(r)
+    if (lp !== undefined || rp !== undefined) {
+        if (lp === undefined) { return false }
+        if (rp === undefined) { return false }
+        if (lp.k.length != rp.k.length) { return false }
+        var i = 0
+        while (i < lp.k.length) {
+            if (!phKeyEq(lp.k[i], rp.k[i])) { return false }
+            if (!phIdentical(phDeref(lp.v[i]), phDeref(rp.v[i]))) { return false }
+            i = i + 1
+        }
+        return true
+    }
+    if (phIsNull(l) || phIsNull(r)) {
+        if (!phIsNull(l)) { return false }
+        return phIsNull(r)
+    }
+    // Two ints compare by VALUE: above 2^53 one of them is a box.
+    if (phIsInt(l) || phIsInt(r)) {
+        if (!phIsInt(l)) { return false }
+        if (!phIsInt(r)) { return false }
+        return sintCmp(l, r) == 0
+    }
+    return l === r
+}
+
+function phLooseNull(v) {
+    if (typeof v == "string") { return v == "" }
+    var p = phArrParts(v)
+    if (p !== undefined) { return p.k.length == 0 }
+    if (phIsNum(v)) { return phNumOf(v) == 0 }
+    return false
+}
+
+function phStrNumLoose(s, n) {
+    var ns = phNumStrVal(s)
+    if (ns !== undefined) { return phNumEq(ns, n) }
+    return s == phStr(n)
+}
+
+// phKeyIndex is a linear lookup by normalized key. It stays linear on purpose:
+// PHP's 5 / "5" folding makes an identity-keyed index answer for the wrong key.
+function phKeyIndex(keys, k) {
+    var nk = phNormKey(k)
+    var i = 0
+    while (i < keys.length) {
+        if (phKeyEq(keys[i], nk)) { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// phLoose is PHP 8's ==: a bool on either side compares truthiness, null compares
+// as "empty", two strings compare numerically only when BOTH are numeric, and a
+// number against a NON-numeric string compares as strings (the PHP 8 change that
+// made 0 == "a" false).
+function phLoose(l, r) {
+    var lb = phIsBool(l)
+    var rb = phIsBool(r)
+    if (lb || rb) { return phTest(l) == phTest(r) }
+    var ln = phIsNull(l)
+    var rn = phIsNull(r)
+    if (ln && rn) { return true }
+    if (ln) { return phLooseNull(r) }
+    if (rn) { return phLooseNull(l) }
+    var lp = phArrParts(l)
+    var rp = phArrParts(r)
+    if (lp !== undefined || rp !== undefined) {
+        if (lp === undefined) { return false }
+        if (rp === undefined) { return false }
+        if (lp.k.length != rp.k.length) { return false }
+        var i = 0
+        while (i < lp.k.length) {
+            var j = phKeyIndex(rp.k, lp.k[i])
+            if (j < 0) { return false }
+            if (!phLoose(phDeref(lp.v[i]), phDeref(rp.v[j]))) { return false }
+            i = i + 1
+        }
+        return true
+    }
+    if (phIsObj(l) || phIsObj(r)) {
+        if (!phIsObj(l)) { return false }
+        if (!phIsObj(r)) { return false }
+        if (l === r) { return true }
+        if (l["__class"] !== r["__class"]) { return false }
+        return phObjPropsEq(l, r)
+    }
+    var ls = phIsStr(l)
+    var rs = phIsStr(r)
+    if (ls && rs) {
+        var nl = phNumStrVal(l)
+        var nr = phNumStrVal(r)
+        if (nl !== undefined && nr !== undefined) { return phNumEq(nl, nr) }
+        return l == r
+    }
+    if (ls && phIsNum(r)) { return phStrNumLoose(l, r) }
+    if (rs && phIsNum(l)) { return phStrNumLoose(r, l) }
+    return phNumEq(phToNum(l), phToNum(r))
+}
+
+// phCmp is the spaceship, and the engine behind < > <= >=.
+function phCmp(l, r) {
+    var ln = phIsNull(l)
+    var rn = phIsNull(r)
+    if (phIsBool(l) || phIsBool(r) || ln || rn) {
+        var lt = phTest(l) ? 1 : 0
+        var rt2 = phTest(r) ? 1 : 0
+        return phCmpNum(lt, rt2)
+    }
+    var lp = phArrParts(l)
+    var rp = phArrParts(r)
+    if (lp !== undefined && rp !== undefined) {
+        if (lp.k.length != rp.k.length) { return phCmpNum(lp.k.length, rp.k.length) }
+        var i = 0
+        while (i < lp.k.length) {
+            var j = phKeyIndex(rp.k, lp.k[i])
+            if (j < 0) { return 1 }
+            var cv = phCmp(phDeref(lp.v[i]), phDeref(rp.v[j]))
+            if (cv != 0) { return cv }
+            i = i + 1
+        }
+        return 0
+    }
+    var ls = phIsStr(l)
+    var rs = phIsStr(r)
+    if (ls && rs) {
+        var nl = phNumStrVal(l)
+        var nr = phNumStrVal(r)
+        if (nl !== undefined && nr !== undefined) { return phNumCmp(nl, nr) }
+        return phCmpStr(l, r)
+    }
+    if (ls && phIsNum(r)) {
+        var x = phNumStrVal(l)
+        if (x === undefined) { return phCmpStr(l, phStr(r)) }
+        return phNumCmp(x, r)
+    }
+    if (rs && phIsNum(l)) {
+        var y = phNumStrVal(r)
+        if (y === undefined) { return phCmpStr(phStr(l), r) }
+        return phNumCmp(l, y)
+    }
+    return phNumCmp(phToNum(l), phToNum(r))
+}
+
+// ===================================================== arrays ===============
+
+// phNormKey turns a subscript into PHP's stored key: an integer stays an integer,
+// a canonical decimal string folds to one ("01" does NOT), a bool is 0/1, null is
+// "" and a float truncates.
+function phNormKey(v) {
+    if (phIsInt(v)) { return v }
+    var f = phFloOf(v)
+    if (f !== undefined) { return phFloToLong(f) }
+    if (typeof v == "boolean") { return v ? 1 : 0 }
+    if (phIsNull(v)) { return "" }
+    if (typeof v == "string") {
+        // A canonical decimal folds to an int key only while it FITS: PHP keeps
+        // "9223372036854775808" a STRING key.
+        if (phIsCanonInt(v)) {
+            var n = phIntStrVal(v)
+            if (phIsInt(n)) { return n }
+        }
+        return v
+    }
+    return v
+}
+
+function phIsCanonInt(s) {
+    if (s == "") { return false }
+    var i = 0
+    if (s.charAt(0) == "-") {
+        if (s.length == 1) { return false }
+        i = 1
+    }
+    if (s.charAt(i) == "0" && s.length > i + 1) { return false }
+    var j = i
+    while (j < s.length) {
+        if (!phIsDigit(s.charCodeAt(j))) { return false }
+        j = j + 1
+    }
+    return true
+}
+
+// phNumericKey answers whether a subscript addresses a string OFFSET: PHP indexes
+// a string by an integer (or an integer-ish string) only.
+function phNumericKey(k) {
+    if (phIsInt(k)) { return true }
+    if (phIsFlo(k)) { return true }
+    if (typeof k == "boolean") { return true }
+    if (typeof k == "string") { return phNumStrVal(k) !== undefined }
+    return false
+}
+
+// phNewArr builds an empty PHP array: the ordered map shape js_range_* iterate,
+// plus __next, the next automatic integer key.
+function phNewArr() {
+    var o = {}
+    o["__dict"] = true
+    o["keys"] = []
+    o["vals"] = []
+    o["__next"] = 0
+    return o
+}
+
+function phArrNext(o) {
+    var n = o["__next"]
+    if (typeof n == "number") { return n }
+    return 0
+}
+
+function phArrSet(av, k, v) {
+    if (!phIsDict(av)) {
+        if (phIsList(av)) {
+            var i = phNumOf(phToLong(k))
+            while (av.length <= i) { av.push(null) }
+            av[i] = v
+            return undefined
+        }
+        fail("cannot use this value as an array")
+    }
+    var keys = av["keys"]
+    var vals = av["vals"]
+    var nk = phNormKey(k)
+    var at = phKeyIndex(keys, nk)
+    if (at >= 0) {
+        var c = phCellOf(vals[at])
+        if (c !== undefined && phCellOf(v) === undefined) { c["v"] = v } else { vals[at] = v }
+    } else {
+        keys.push(nk)
+        vals.push(v)
+    }
+    // Only a PLAIN int key moves __next; a sized-integer key is outside the
+    // exact range and PHP's next-free-slot never reaches it.
+    if (typeof nk == "number" && !sintIs(nk)) {
+        if (nk >= phArrNext(av)) { av["__next"] = nk + 1 }
+    }
+    return undefined
+}
+
+function phArrPush(av, v) {
+    if (phIsDict(av)) {
+        phArrSet(av, phArrNext(av), v)
+        return undefined
+    }
+    if (phIsList(av)) {
+        av.push(v)
+        return undefined
+    }
+    fail("cannot append to this value")
+    return undefined
+}
+
+// phArrGet reads $a[k]. A missing key is null, a string indexes its BYTES.
+function phArrGet(av, k) {
+    var p = phArrParts(av)
+    if (p !== undefined) {
+        var i = phKeyIndex(p.k, k)
+        if (i >= 0) { return phDeref(p.v[i]) }
+        return null
+    }
+    if (typeof av == "string") {
+        var j = phNumOf(phToLong(k))
+        if (j < 0) { j = j + av.length }
+        if (j < 0) { return "" }
+        if (j >= av.length) { return "" }
+        return av.charAt(j)
+    }
+    if (phIsNull(av)) { return null }
+    if (typeof av == "object") {
+        var pv = av[phStr(k)]
+        if (pv !== undefined) { return pv }
+        return null
+    }
+    return null
+}
+
+function phArrHas(av, k) {
+    var p = phArrParts(av)
+    if (p !== undefined) {
+        var i = phKeyIndex(p.k, k)
+        if (i < 0) { return false }
+        return !phIsNull(phDeref(p.v[i]))
+    }
+    if (typeof av == "string") {
+        if (!phNumericKey(k)) { return false }
+        var j = phNumOf(phToLong(k))
+        if (j < 0) { return false }
+        return j < av.length
+    }
+    // `typeof null` is "object" here as it is in JS, and the Go twin's arm is a
+    // *jsObject assertion, which null is not - so the null has to be shed first or
+    // the floor dies with "member '...' of null". The emitter probes
+    // js_phisset(v, "__refcell") on EVERY variable read of a program that writes a
+    // '&' anywhere, so this arm sees a null constantly.
+    if (phIsNull(av)) { return false }
+    if (typeof av == "object") {
+        var pv = av[phStr(k)]
+        if (pv === undefined) { return false }
+        return !phIsNull(pv)
+    }
+    return false
+}
+
+// The frozen subset has no splice, so a removal REBUILDS both arrays. They are
+// the two the __dict object holds, so the new ones are stored back.
+function phArrUnset(av, k) {
+    if (!phIsDict(av)) { return undefined }
+    var keys = av["keys"]
+    var vals = av["vals"]
+    var at = phKeyIndex(keys, k)
+    if (at < 0) { return undefined }
+    var nk = []
+    var nv = []
+    var i = 0
+    while (i < keys.length) {
+        if (i != at) {
+            nk.push(keys[i])
+            nv.push(vals[i])
+        }
+        i = i + 1
+    }
+    av["keys"] = nk
+    av["vals"] = nv
+    return undefined
+}
+
+// phElemCell is the storage CELL of an array element, created on demand. It must
+// answer the SAME cell for the same element every time: building a fresh one per
+// '&' silently detaches every alias taken earlier.
+function phElemCell(av, k) {
+    var p = phArrParts(av)
+    if (p === undefined) { return null }
+    var nk = phNormKey(k)
+    var i = phKeyIndex(p.k, nk)
+    if (i < 0) {
+        phArrSet(av, nk, null)
+        p = phArrParts(av)
+        if (p === undefined) { return null }
+        i = phKeyIndex(p.k, nk)
+        if (i < 0) { return null }
+    }
+    var c = phCellOf(p.v[i])
+    if (c !== undefined) { return c }
+    var cell = {}
+    cell["__refcell"] = true
+    cell["v"] = p.v[i]
+    p.v[i] = cell
+    return cell
+}
+
+// phArrCopy is PHP's value assignment: an array is copied (deeply, since a nested
+// array is a value too), an object is not.
+function phArrCopy(v) {
+    var p = phArrParts(v)
+    if (p === undefined) { return v }
+    var out = phNewArr()
+    var ok2 = out["keys"]
+    var ov = out["vals"]
+    var i = 0
+    while (i < p.k.length) {
+        ok2.push(p.k[i])
+        ov.push(phArrCopy(phDeref(p.v[i])))
+        i = i + 1
+    }
+    if (p.d) { out["__next"] = phArrNext(v) } else { out["__next"] = p.k.length }
+    return out
+}
+
+function phLen(v) {
+    var p = phArrParts(v)
+    if (p !== undefined) { return p.k.length }
+    if (typeof v == "string") { return byteLen(v) }
+    if (phIsNull(v)) { return 0 }
+    return 1
+}
+
+// ===================================================== classes ==============
+//
+// A class descriptor is the same object the compiler builds (__name, __super, one
+// property per method). Two prefixed key spaces sit on top, because PHP keeps
+// constants, static properties and methods in SEPARATE namespaces: "k:" for a
+// class constant and "s:" for a static property.
+
+function phClassOf(v) {
+    if (v === undefined) { fail(":: on undefined") }
+    if (v === null) { fail(":: on null") }
+    if (typeof v != "object") { fail(":: on a non-object") }
+    if (v["__isclass"] !== undefined) { return v }
+    var cls = v["__class"]
+    if (cls !== undefined) { return cls }
+    fail(":: on a value that is not an object or a class")
+    return undefined
+}
+
+// phOwner walks the __super chain for the class that actually declares `key`.
+function phOwner(cls, key) {
+    var c = cls
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (c === undefined) { return undefined }
+        if (c === null) { return undefined }
+        if (typeof c != "object") { return undefined }
+        if (c[key] !== undefined) { return c }
+        c = c["__super"]
+        if (c === undefined) { return undefined }
+    }
+    return undefined
+}
+
+// phConstIn walks a class's own chain and then its interfaces: PHP inherits a
+// constant from a base class AND from every implemented interface.
+function phConstIn(cls, name, depth) {
+    if (cls === undefined) { return undefined }
+    if (cls === null) { return undefined }
+    if (depth > 16) { return undefined }
+    var o = phOwner(cls, "k:" + name)
+    if (o !== undefined) { return {v: o["k:" + name]} }
+    var k = cls
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (k === undefined) { return undefined }
+        if (k === null) { return undefined }
+        if (typeof k != "object") { return undefined }
+        var ifs = k["__ifaces"]
+        if (ifs !== undefined) {
+            var p = phArrParts(ifs)
+            if (p !== undefined) {
+                var i = 0
+                while (i < p.v.length) {
+                    var iv = p.v[i]
+                    if (iv !== undefined && iv !== null && typeof iv == "object") {
+                        var f = phConstIn(iv, name, depth + 1)
+                        if (f !== undefined) { return f }
+                    }
+                    i = i + 1
+                }
+            }
+        }
+        k = k["__super"]
+        if (k === undefined) { return undefined }
+    }
+    return undefined
+}
+
+// phIsA is the runtime type test behind instanceof and a typed catch: a name
+// matches the class itself, any base class, and any implemented interface.
+function phIsA(v, name) {
+    if (phIsGen(v)) {
+        if (name == "Generator") { return true }
+        if (name == "Traversable") { return true }
+        return name == "Iterator"
+    }
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (typeof v != "object") { return false }
+    var cls = anytype
+    if (v["__isclass"] !== undefined) { cls = v } else { cls = v["__class"] }
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (cls === undefined) { return false }
+        if (cls === null) { return false }
+        if (typeof cls != "object") { return false }
+        if (phStr(cls["__name"]) == name) { return true }
+        var ifs = cls["__ifaces"]
+        if (ifs !== undefined) {
+            var p = phArrParts(ifs)
+            if (p !== undefined) {
+                var i = 0
+                while (i < p.v.length) {
+                    var iv = p.v[i]
+                    // An entry is a descriptor (so an interface that extends other
+                    // interfaces matches those too) or, for the built-in exception
+                    // classes, a bare name.
+                    if (iv !== undefined && iv !== null && typeof iv == "object") {
+                        if (phIsA(iv, name)) { return true }
+                    } else if (phStr(iv) == name) { return true }
+                    i = i + 1
+                }
+            }
+        }
+        cls = cls["__super"]
+        if (cls === undefined) { return false }
+    }
+    return false
+}
+
+function phClassName(v) {
+    if (v !== undefined && v !== null && typeof v == "object") {
+        var cls = v["__class"]
+        if (cls !== undefined && cls !== null && typeof cls == "object") { return phStr(cls["__name"]) }
+    }
+    return "stdClass"
+}
+
+// ===================================================== type names ===========
+
+function phTypeName(v) {
+    if (phIsNull(v)) { return "NULL" }
+    if (typeof v == "boolean") { return "boolean" }
+    if (phIsFlo(v)) { return "double" }
+    if (phIsInt(v)) { return "integer" }
+    if (typeof v == "string") { return "string" }
+    if (phIsArr(v)) { return "array" }
+    if (phIsObj(v)) { return "object" }
+    return "unknown type"
+}
+
+function phDebugType(v) {
+    if (phIsNull(v)) { return "null" }
+    if (typeof v == "boolean") { return "bool" }
+    if (phIsFlo(v)) { return "float" }
+    if (phIsInt(v)) { return "int" }
+    if (typeof v == "string") { return "string" }
+    if (phIsArr(v)) { return "array" }
+    if (phIsObj(v)) { return phClassName(v) }
+    return "unknown"
+}
+
+// ===================================================== var_dump =============
+//
+// A float goes through phFloDump (serialize_precision=-1), NOT through the
+// precision=14 renderer echo uses - that is the trap the two renderers exist to
+// keep apart.
+
+function phSpaces(n) {
+    var s = ""
+    var i = 0
+    while (i < n) {
+        s = s + " "
+        i = i + 1
+    }
+    return s
+}
+
+// var_dump's object handles (#1, #2, ...) are handed out on first sight, which is
+// enough for a single run's transcript to be stable. Object IDENTITY is the key,
+// and the frozen subset has no Map, so the seen objects are kept in one list and
+// looked up by ===. A dump-heavy program is O(n^2) in the objects it has dumped;
+// no test in tests/ dumps more than a handful.
+var phDumpSeen = []
+
+function phDumpID(o) {
+    var i = 0
+    while (i < phDumpSeen.length) {
+        if (phDumpSeen[i] === o) { return i + 1 }
+        i = i + 1
+    }
+    phDumpSeen.push(o)
+    return phDumpSeen.length
+}
+
+function phDumpKey(k, ind) {
+    if (typeof k == "string") { return phSpaces(ind) + "[\"" + k + "\"]=>\n" }
+    return phSpaces(ind) + "[" + phStr(k) + "]=>\n"
+}
+
+function phDump(v, ind) {
+    var pad = phSpaces(ind)
+    if (phIsNull(v)) { return pad + "NULL\n" }
+    if (typeof v == "boolean") { return pad + (v ? "bool(true)\n" : "bool(false)\n") }
+    var f = phFloOf(v)
+    if (f !== undefined) { return pad + "float(" + phFloDump(f) + ")\n" }
+    if (phIsInt(v)) { return pad + "int(" + phStr(v) + ")\n" }
+    if (typeof v == "string") { return pad + "string(" + byteLen(v) + ") \"" + v + "\"\n" }
+    var p = phArrParts(v)
+    if (p !== undefined) {
+        var out = pad + "array(" + p.k.length + ") {\n"
+        var i = 0
+        while (i < p.k.length) {
+            out = out + phDumpKey(p.k[i], ind + 2)
+            out = out + phDump(phDeref(p.v[i]), ind + 2)
+            i = i + 1
+        }
+        return out + pad + "}\n"
+    }
+    if (phIsObj(v)) {
+        // WALL 2. var_dump of an object has to list the instance properties in
+        // insertion order, and layer 2 cannot enumerate an object's own keys: the
+        // floor HAS js_keys, but an extern is only callable from an emitter, and
+        // MetaJS has neither for..in nor an Object global. See the header.
+        fail("php layer 2: var_dump of an object needs an object-key enumeration primitive in the C floor (js_keys is there but MetaJS cannot reach it) - see languages/lib/php-rt.metajs, WALL 2")
+    }
+    return pad + "NULL\n"
+}
+
+// phObjPropsEq compares two instances property by property with ==. It needs the
+// same enumeration WALL 2 records, and for the same reason.
+function phObjPropsEq(a, b) {
+    fail("php layer 2: == between two objects needs an object-key enumeration primitive in the C floor - see languages/lib/php-rt.metajs, WALL 2")
+    return false
+}
+
+// ===================================================== casts ================
+
+function phCast(kind, v) {
+    if (kind == "int" || kind == "integer") { return phToLong(v) }
+    if (kind == "float" || kind == "double" || kind == "real") { return phMkFlo(phNumOf(phToNum(v))) }
+    if (kind == "string" || kind == "binary") { return phStr(v) }
+    if (kind == "bool" || kind == "boolean") { return phTest(v) }
+    if (kind == "array") {
+        if (phIsArr(v)) { return v }
+        var out = phNewArr()
+        if (phIsNull(v)) { return out }
+        if (phIsObj(v)) {
+            fail("php layer 2: (array) on an object needs an object-key enumeration primitive in the C floor - see languages/lib/php-rt.metajs, WALL 2")
+            return out
+        }
+        phArrPush(out, v)
+        return out
+    }
+    if (kind == "object") { return v }
+    if (kind == "unset") { return null }
+    return v
+}
+
+// ===================================================== generators ===========
+//
+// WALL 1. A generator suspends a call stack; the C floor can unwind one
+// (setjmp/longjmp, behind js_throw/js_try) but cannot resume one, and MetaJS has
+// no continuations. js_genfn therefore still WRAPS the body - so merely declaring
+// a generator function costs nothing and a program that never runs one links and
+// runs unchanged - and the marker it produces aborts the moment it is used.
+
+function phIsGen(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (typeof v != "object") { return false }
+    return v["__phgen"] === true
+}
+
+function phGenFail() {
+    fail("php layer 2: generators need a coroutine primitive the C floor does not have (js_yield suspends and resumes a call stack; setjmp/longjmp can only unwind) - see languages/lib/php-rt.metajs, WALL 1")
+    return null
+}
+
+// ===================================================== the exports ==========
+//
+// Everything below is a TOP-LEVEL `function js_*`, which is what -rt-lib exports
+// under its own C symbol. The order follows abnf/jsrtphp.go and the js_ph* block
+// of abnf/jsrt.go.
+
+// ----- the language-NEUTRAL six ---------------------------------------------
+// None of these is PHP's. They live in abnf/jsrt.go, every language can emit
+// them, and they are here only because the C floor does not have them yet - see
+// the extern split in docs/runtime-next-plan.md part 3.
+
+// PHP's strings are BYTE strings, so strlen("h<e-acute>llo") is 6 and not 5.
+// byteLen is a floor host builtin and is the exact twin of the Go len(string).
+function js_bytelen(s) { return byteLen(s) }
+
+// Java/C# +: string concat, 32 bit add for two int values, float add otherwise.
+// php-to-llvm-ir.abnf emits it ONLY for its own loop counters, so the float arm -
+// which would need jsJFlo, the boxed double layer 2 cannot make - is unreachable
+// from PHP and is spelled as the plain double add here. Any language that emits
+// js_jadd on real user values needs that box first.
+function js_jadd(l, r) {
+    if (typeof l == "string" || typeof r == "string") { return phJavaStr(l) + phJavaStr(r) }
+    var ln = phNumOf(phToNum(l))
+    var rn = phNumOf(phToNum(r))
+    if (phIsInt32(ln) && phIsInt32(rn)) { return phWrap32(ln + rn) }
+    return ln + rn
+}
+
+function phJavaStr(v) {
+    if (typeof v == "string") { return v }
+    if (v === null) { return "null" }
+    if (v === undefined) { return "null" }
+    if (typeof v == "boolean") { return v ? "true" : "false" }
+    return "" + v
+}
+
+function phIsInt32(n) {
+    if (n !== n) { return false }
+    if (Math.floor(n) !== n) { return false }
+    if (n > 2147483647) { return false }
+    return n >= 0 - 2147483648
+}
+
+function phWrap32(n) {
+    var m = n - Math.floor(n / 4294967296) * 4294967296
+    if (m > 2147483647) { m = m - 4294967296 }
+    return m
+}
+
+// (target, method name, args array). The Go twin (rt.memberCall in abnf/jsrt.go)
+// is a LANGUAGE-NEUTRAL dispatcher over strings, dicts, lists, generators and
+// instances; only the arms php-to-llvm-ir.abnf can actually reach are here, and
+// the arms it cannot are named at the fallthrough rather than guessed at. The
+// instance arm is the one that matters and it is the Go twin's exactly: walk the
+// __class/__super chain, and call the method with the TARGET as its first
+// argument and `this` undefined, which is how the emitter compiles a method.
+function js_mcall(recv, name, args) {
+    if (phIsGen(recv)) { return phGenFail() }
+    if (recv !== undefined && recv !== null && typeof recv == "object") {
+        var cls = recv["__class"]
+        if (cls !== undefined) {
+            var c = cls
+            var guard = 0
+            while (guard < 64) {
+                guard = guard + 1
+                if (c === undefined) { guard = 99 } else if (c === null) { guard = 99 } else if (typeof c != "object") { guard = 99 } else {
+                    var mm = c[name]
+                    if (mm !== undefined && typeof mm == "function") {
+                        var av = [recv]
+                        var i = 0
+                        while (i < args.length) {
+                            av.push(args[i])
+                            i = i + 1
+                        }
+                        return mm.apply(undefined, av)
+                    }
+                    c = c["__super"]
+                }
+            }
+            fail("unknown method '" + name + "' on an instance")
+        }
+    }
+    var f = recv[name]
+    return f.apply(recv, args)
+}
+
+// The Go range bound: an int is its own bound, otherwise the element/entry count.
+function js_range_len(v) {
+    if (typeof v == "number" && !sintIs(v)) { return v }
+    if (typeof v == "string") { return v.length }
+    var p = phArrParts(v)
+    if (p !== undefined) { return p.k.length }
+    fail("range over a " + phDebugType(v))
+    return 0
+}
+
+// The i-th range key: maps yield their key, everything else the index itself.
+function js_range_key(v, i) {
+    if (phIsDict(v)) { return v["keys"][i] }
+    return i
+}
+
+// The i-th range value (maps by entry, lists by index).
+function js_range_val(v, i) {
+    if (phIsDict(v)) { return v["vals"][i] }
+    if (phIsList(v)) {
+        if (i >= 0 && i < v.length) { return v[i] }
+        return undefined
+    }
+    return undefined
+}
+
+// ----- PHP: truthiness, coercion and the operators --------------------------
+
+// A RAW RETURN. compile-core's truthy() emits `icmp ne <call>, 0` straight on
+// core.truthyExt's result, so this answers the integer 1 or 0 rather than a
+// handle - which is what the __raw suffix tells -rt-lib to arrange. Without it a
+// MetaJS `false` would come back as the HANDLE of false, which is 2, and 2 != 0,
+// so every condition in the program would be taken. See the header of
+// languages/metajs-to-llvm-ir.abnf's export scanner.
+function js_phtruthy__raw(v) { return phTest(v) }
+
+function js_phbool(v) { return phTest(v) }
+function js_phnot(v) { return !phTest(v) }
+function js_phstr(v) { return phStr(v) }
+function js_phcat(l, r) { return phStr(l) + phStr(r) }
+function js_phflo(n) { return phMkFlo(phNumOf(phToNum(n))) }
+function js_phnum(v) { return phToNum(v) }
+
+function js_pheq(l, r) { return phLoose(l, r) }
+function js_phne(l, r) { return !phLoose(l, r) }
+function js_phseq(l, r) { return phIdentical(l, r) }
+function js_phsne(l, r) { return !phIdentical(l, r) }
+function js_phcmp(l, r) { return phCmp(l, r) }
+function js_phlt(l, r) { return phCmp(l, r) < 0 }
+function js_phgt(l, r) { return phCmp(l, r) > 0 }
+function js_phle(l, r) { return phCmp(l, r) <= 0 }
+function js_phge(l, r) { return phCmp(l, r) >= 0 }
+
+function js_phadd(l, r) { return phArith("+", l, r) }
+function js_phsub(l, r) { return phArith("-", l, r) }
+function js_phmul(l, r) { return phArith("*", l, r) }
+function js_phdiv(l, r) { return phArith("/", l, r) }
+function js_phmod(l, r) { return phArith("%", l, r) }
+function js_phpow(l, r) { return phArith("**", l, r) }
+function js_phneg(v) { return phNeg(v) }
+
+function js_phband(l, r) { return phBit("&", l, r) }
+function js_phbor(l, r) { return phBit("|", l, r) }
+function js_phbxor(l, r) { return phBit("^", l, r) }
+function js_phshl(l, r) { return phBit("<<", l, r) }
+function js_phshr(l, r) { return phBit(">>", l, r) }
+function js_phbnot(v) { return sintOp(7, phToLong(v), 0 - 1) }
+
+function js_phintdiv(l, r) {
+    var y = phToLong(r)
+    if (phIsZero(y)) { phRaise("DivisionByZeroError", "Division by zero") }
+    var x = phToLong(l)
+    if (sintCmp(y, 0 - 1) == 0 && sintCmp(x, phIntMin()) == 0) {
+        phRaise("ArithmeticError", "Division of PHP_INT_MIN by -1 is not an integer")
+    }
+    return sintOp(3, x, y)
+}
+
+function js_phabs(v) {
+    var n = phToNum(v)
+    var f = phFloOf(n)
+    if (f !== undefined) {
+        if (f < 0) { return phMkFlo(0 - f) }
+        return n
+    }
+    if (phSignNeg(n)) { return phNeg(n) }
+    return n
+}
+
+function js_phmax(a, b) {
+    if (phCmp(a, b) > 0) { return a }
+    return b
+}
+
+function js_phmin(a, b) {
+    if (phCmp(a, b) < 0) { return a }
+    return b
+}
+
+function js_phcast(kind, v) { return phCast(kind, v) }
+
+// A literal the grammar's own JS numbers cannot carry: (digits, radix). A literal
+// that does not FIT in 64 bits is a float, not a wrapped int -
+// 0xFFFFFFFFFFFFFFFF is float(1.8446744073709552E+19).
+function js_philit(text, radix) {
+    if (radix == 10) { return phIntStrVal(text) }
+    // A power-of-two radix ACCUMULATES in double precision, exactly as
+    // php-interpreter.abnf's radixFloat does, which is what zend_hex_strtod
+    // amounts to - but only once the exact 64 bit accumulation has overflowed.
+    var acc = 0
+    var i = 0
+    var over = false
+    while (i < text.length) {
+        var d = phHexDigit(text.charCodeAt(i))
+        if (d >= 0) {
+            var m = phMulOv(acc, radix)
+            if (m.o) { over = true }
+            var a = phAddOv(m.v, d)
+            if (a.o) { over = true }
+            acc = a.v
+        }
+        i = i + 1
+    }
+    if (!over && !phSignNeg(acc)) { return acc }
+    var v = 0
+    var j = 0
+    while (j < text.length) {
+        var d2 = phHexDigit(text.charCodeAt(j))
+        if (d2 >= 0) { v = v * radix + d2 }
+        j = j + 1
+    }
+    return phMkFlo(v)
+}
+
+function phHexDigit(c) {
+    if (c >= 48 && c <= 57) { return c - 48 }
+    if (c >= 97 && c <= 102) { return c - 97 + 10 }
+    if (c >= 65 && c <= 70) { return c - 65 + 10 }
+    return 0 - 1
+}
+
+// The type predicates: the whole point of the boxes is that the int / float
+// distinction is OBSERVABLE.
+function js_phis(kind, v) {
+    if (kind == "int") { return phIsInt(v) }
+    if (kind == "float") { return phIsFlo(v) }
+    if (kind == "string") { return typeof v == "string" }
+    if (kind == "bool") { return typeof v == "boolean" }
+    if (kind == "array") { return phIsArr(v) }
+    if (kind == "object") { return phIsObj(v) }
+    if (kind == "null") { return phIsNull(v) }
+    if (kind == "numeric") {
+        if (typeof v == "string") { return phNumStrVal(v) !== undefined }
+        return phIsNum(v)
+    }
+    return false
+}
+
+function js_phtype(v) { return phTypeName(v) }
+function js_phdtype(v) { return phDebugType(v) }
+function js_phdump(v) { return phDump(v, 0) }
+
+function js_phgetclass(v) {
+    if (phIsObj(v)) { return phClassName(v) }
+    return false
+}
+
+// ----- PHP: arrays ----------------------------------------------------------
+
+function js_pharr() { return phNewArr() }
+function js_phset(a, k, v) { return phArrSet(a, k, v) }
+function js_phpush(a, v) { return phArrPush(a, v) }
+function js_phget(a, k) { return phArrGet(a, k) }
+function js_phisset(a, k) { return phArrHas(a, k) }
+function js_phcell(a, k) { return phElemCell(a, k) }
+function js_phderef(v) { return phDeref(v) }
+function js_phunset(a, k) { return phArrUnset(a, k) }
+function js_phcopy(v) { return phArrCopy(v) }
+function js_phlen(v) { return phLen(v) }
+
+// [...$a]: integer keys renumber, string keys stay.
+function js_phmerge(dst, src) {
+    var p = phArrParts(src)
+    if (p === undefined) { return undefined }
+    var i = 0
+    while (i < p.k.length) {
+        if (typeof p.k[i] == "number") { phArrPush(dst, p.v[i]) } else { phArrSet(dst, p.k[i], p.v[i]) }
+        i = i + 1
+    }
+    return undefined
+}
+
+function js_phkeys(v) {
+    var out = phNewArr()
+    var p = phArrParts(v)
+    if (p !== undefined) {
+        var i = 0
+        while (i < p.k.length) {
+            phArrPush(out, p.k[i])
+            i = i + 1
+        }
+    }
+    return out
+}
+
+function js_phvals(v) {
+    var out = phNewArr()
+    var p = phArrParts(v)
+    if (p !== undefined) {
+        var i = 0
+        while (i < p.v.length) {
+            phArrPush(out, phDeref(p.v[i]))
+            i = i + 1
+        }
+    }
+    return out
+}
+
+function js_phin(needle, hay) {
+    var p = phArrParts(hay)
+    if (p !== undefined) {
+        var i = 0
+        while (i < p.v.length) {
+            if (phLoose(phDeref(p.v[i]), needle)) { return true }
+            i = i + 1
+        }
+    }
+    return false
+}
+
+// AUTO-VIVIFICATION. `$a[0]["k"] = 1` creates the intermediate array. These three
+// run only on an INTERMEDIATE step of an assignment target, and they create only
+// when the container really is a PHP array.
+function js_phviv(cont, key) {
+    var cur = phArrGet(cont, key)
+    if (phIsNull(cur) && phIsDict(cont)) {
+        var na = phNewArr()
+        phArrSet(cont, key, na)
+        return na
+    }
+    return cur
+}
+
+// The `[]` step: `$c[]["p"] = 7` appends a fresh array and descends into it.
+function js_phvivpush(cont) {
+    if (phIsDict(cont)) {
+        var na = phNewArr()
+        phArrPush(cont, na)
+        return na
+    }
+    return null
+}
+
+// The ROOT of the walk: `$e = null; $e["x"]["y"] = 5` makes $e an array.
+function js_phvivroot(cur) {
+    if (!phIsNull(cur)) { return cur }
+    return phNewArr()
+}
+
+// ----- PHP: classes ---------------------------------------------------------
+
+function js_phconst(target, name) {
+    var cls = phClassOf(target)
+    var f = phConstIn(cls, name, 0)
+    if (f !== undefined) { return f.v }
+    fail("undefined constant " + phStr(cls["__name"]) + "::" + name)
+    return null
+}
+
+function js_phsget(target, name) {
+    var cls = phClassOf(target)
+    var o = phOwner(cls, "s:" + name)
+    if (o !== undefined) { return o["s:" + name] }
+    return null
+}
+
+function js_phsset(target, name, v) {
+    var cls = phClassOf(target)
+    var o = phOwner(cls, "s:" + name)
+    if (o === undefined) { o = cls }
+    o["s:" + name] = v
+    return undefined
+}
+
+// C::class / $o::class
+function js_phcname(v) {
+    if (typeof v == "string") { return v }
+    return phClassOf(v)["__name"]
+}
+
+function js_phisa(v, t) {
+    var name = ""
+    if (t !== undefined && t !== null && typeof t == "object") {
+        name = phStr(phClassOf(t)["__name"])
+    } else { name = phStr(t) }
+    return phIsA(v, name)
+}
+
+// Does the caught value match one of a catch clause's types? \Throwable catches
+// everything, exactly as php-interpreter.abnf's excMatches has it.
+function js_phcatch(v, types) {
+    var p = phArrParts(types)
+    if (p !== undefined) {
+        var i = 0
+        while (i < p.v.length) {
+            var n = phStr(p.v[i])
+            if (n == "Throwable") { return true }
+            if (phIsA(v, n)) { return true }
+            i = i + 1
+        }
+    }
+    return false
+}
+
+// PHP's `clone`: a shallow copy of the instance (array properties are values, so
+// they copy) whose __clone hook runs on the COPY. WALL 2 again.
+function js_phclone(v) {
+    if (!phIsObj(v)) { return v }
+    fail("php layer 2: clone needs an object-key enumeration primitive in the C floor - see languages/lib/php-rt.metajs, WALL 2")
+    return v
+}
+
+// The 'static::' class inside a method body: the runtime class of $this when
+// there is one, else the class the static call named, else the fallback.
+var phLsb = undefined
+
+function js_phlsb(self, fallback) {
+    if (self !== undefined && self !== null && typeof self == "object") {
+        var cls = self["__class"]
+        if (cls !== undefined) { return cls }
+    }
+    if (phLsb !== undefined) { return phLsb }
+    return fallback
+}
+
+// C::m($this, args): the method is resolved through the __super chain, and the
+// class the CALL named becomes the late-static-binding class for the duration -
+// which is what makes `static::who()` inside an inherited static method dispatch
+// to the subclass.
+function js_phscall(target, name, self, args) {
+    var cls = phClassOf(target)
+    var owner = phOwner(cls, name)
+    var saved = phLsb
+    phLsb = cls
+    var out = anytype
+    if (owner === undefined) {
+        // __callStatic($name, $args) is PHP's fallback for a missing static
+        // method, exactly as __call is for an instance method.
+        var cs = phOwner(cls, "__callStatic")
+        if (cs === undefined) {
+            phLsb = saved
+            fail("undefined method " + phStr(cls["__name"]) + "::" + name)
+            return null
+        }
+        var ar = []
+        var p0 = phArrParts(args)
+        if (p0 !== undefined) {
+            var i0 = 0
+            while (i0 < p0.v.length) {
+                ar.push(p0.v[i0])
+                i0 = i0 + 1
+            }
+        }
+        try {
+            out = cs["__callStatic"].apply(undefined, [self, name, ar])
+        } finally {
+            phLsb = saved
+        }
+        return out
+    }
+    var av = [self]
+    var p = phArrParts(args)
+    if (p !== undefined) {
+        var i = 0
+        while (i < p.v.length) {
+            av.push(p.v[i])
+            i = i + 1
+        }
+    }
+    try {
+        out = owner[name].apply(undefined, av)
+    } finally {
+        phLsb = saved
+    }
+    return out
+}
+
+// A class descriptor by name, or null when nothing of that name is declared yet -
+// an interface list must not abort on a forward reference. The SCOPE walk it used
+// to be is now lowered in php-to-llvm-ir.abnf itself, out of js_scope_typeof and
+// js_scope_get; this entry remains so a module that still emits the extern links.
+// WALL 3: a scope is the floor's private storage and layer 2 cannot open one.
+function js_phclslookup(env, name) {
+    fail("php layer 2: js_phclslookup walks a SCOPE, which layer 2 cannot open - php-to-llvm-ir.abnf lowers it in the emitter instead. See languages/lib/php-rt.metajs, WALL 3")
+    return null
+}
+
+// $this inside a method, or undefined in a static one. Lowered in the emitter for
+// the same reason as js_phclslookup.
+function js_phthis(env) {
+    fail("php layer 2: js_phthis walks a SCOPE, which layer 2 cannot open - php-to-llvm-ir.abnf lowers it in the emitter instead. See languages/lib/php-rt.metajs, WALL 3")
+    return undefined
+}
+
+// phpmain hands over the class descriptors the engine's own arithmetic errors
+// need. The Go twin is handed the SCOPE and looks names up in it; layer 2 cannot
+// open a scope (WALL 3), so php-to-llvm-ir.abnf hands over a PHP ARRAY of
+// name => descriptor instead, which is a value both halves can read. The Go twin
+// accepts either.
+function js_phrtinit(reg) {
+    var out = {}
+    var p = phArrParts(reg)
+    if (p !== undefined) {
+        var i = 0
+        while (i < p.k.length) {
+            out[phStr(p.k[i])] = p.v[i]
+            i = i + 1
+        }
+    }
+    phRtClasses = out
+    return undefined
+}
+
+// ----- PHP 8.5 partial function application ---------------------------------
+//
+// `foo(1, ?, 3)` binds what is there and leaves a hole per `?`; the compiler
+// stores the bound run in one PHP array with the sentinel below in each hole, and
+// js_phpfa fills the holes - in source order - from the arguments the partial
+// closure is finally called with.
+
+var phHoleV = undefined
+
+function js_phhole() {
+    if (phHoleV === undefined) {
+        var o = {}
+        o["__pfahole"] = true
+        phHoleV = o
+    }
+    return phHoleV
+}
+
+function phIsHole(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (typeof v != "object") { return false }
+    return v["__pfahole"] === true
+}
+
+function js_phpfa(bound, supplied, forward) {
+    var out = phNewArr()
+    var bp = phArrParts(bound)
+    if (bp === undefined) { return out }
+    var sup = []
+    var supKeys = []
+    var supVals = []
+    var sp = phArrParts(supplied)
+    if (sp !== undefined) {
+        var si = 0
+        while (si < sp.k.length) {
+            if (typeof sp.k[si] == "number") { sup.push(phDeref(sp.v[si])) } else {
+                supKeys.push(sp.k[si])
+                supVals.push(phDeref(sp.v[si]))
+            }
+            si = si + 1
+        }
+    }
+    var k = 0
+    var i = 0
+    while (i < bp.k.length) {
+        // anytype: a hole is replaced by whatever the caller supplied, which may be
+        // of a different type class than the bound value the slot started with, and
+        // a MetaJS local keeps the type class of its FIRST assignment.
+        var v = anytype
+        v = bp.v[i]
+        if (phIsHole(v)) {
+            v = null
+            if (k < sup.length) { v = sup[k] }
+            k = k + 1
+        }
+        if (typeof bp.k[i] == "number") { phArrPush(out, v) } else { phArrSet(out, bp.k[i], v) }
+        i = i + 1
+    }
+    // Only the trailing-`...` form forwards what is left over.
+    if (phTest(forward)) {
+        while (k < sup.length) {
+            phArrPush(out, sup[k])
+            k = k + 1
+        }
+    }
+    var j = 0
+    while (j < supKeys.length) {
+        phArrSet(out, supKeys[j], supVals[j])
+        j = j + 1
+    }
+    return out
+}
+
+// ----- generators: WALL 1 ---------------------------------------------------
+
+// Wrap a compiled closure into a generator FUNCTION: calling the result does not
+// run the body but hands back a generator object over it. The wrapper is real, so
+// DECLARING a generator function is free; the object it makes aborts on use.
+function js_genfn(body) {
+    return function () {
+        var g = {}
+        g["__phgen"] = true
+        return g
+    }
+}
+
+// 'yield v' from inside a generator body.
+function js_yield(v) { return phGenFail() }

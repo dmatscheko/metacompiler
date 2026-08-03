@@ -1472,11 +1472,48 @@ KwInstanceof = "instanceof" KwEnd ;
         if (!usesRefs) { return {b: b, v: v} }
         return {b: b, v: callExt(b, "js_phderef", [v])}
     }
+    // ----- scope PROBES, lowered here instead of in a runtime -------------------
+    //
+    // js_phthis and js_phclslookup were externs that WALKED THE SCOPE CHAIN, and a
+    // scope is the C floor's private storage: layer 2 (languages/lib/php-rt.metajs,
+    // docs/runtime-next-plan.md part 3, WALL 3) has no way to open one, because
+    // MetaJS reaches the floor only through host builtins and there is no scope
+    // builtin - by design, since the Lua pilot put js_scope_decl/set/typeof into the
+    // floor for exactly that reason.
+    //
+    // Both are pure PROBES - "the value of this name if it is declared anywhere up
+    // the chain, else a default" - and an EMITTER may call js_scope_typeof and
+    // js_scope_get, which is all a probe needs. So they are spelled out here. ONE
+    // module-level helper does it, rather than an inline branch, so that every call
+    // site stays a single-value expression and none of the twelve of them has to be
+    // restructured. The generalisation for the remaining nine languages: a scope
+    // probe belongs in the emitter, not in layer 2.
+    var probeF = undefined
+    function scopeProbe(b, nameV, dfltV) {
+        if (probeF == undefined) {
+            probeF = m.NewFunc("php_scope_probe", i64,
+                               [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("nm", i64),
+                                llvm.ir.NewParam("dflt", i64)])
+            var eb = probeF.NewBlock("entry")
+            var hitB = probeF.NewBlock("hit")
+            var missB = probeF.NewBlock("miss")
+            var tv = callExt(eb, "js_scope_typeof", [probeF.Params[0], probeF.Params[1]])
+            eb.NewCondBr(truthy(eb, callExt(eb, "js_seq", [tv, emitStr(eb, "undefined")])), missB, hitB)
+            missB.NewRet(probeF.Params[2])
+            hitB.NewRet(callExt(hitB, "js_scope_get", [probeF.Params[0], probeF.Params[1]]))
+        }
+        return b.NewCall(probeF, [curScopeV, nameV, dfltV])
+    }
+    // $this inside a method, or undefined in a static one. A plain js_scope_get
+    // would abort on the name.
+    function phThis(b) { return scopeProbe(b, emitStr(b, "$this"), hUndef) }
+    // A class descriptor by name, or null when nothing of that name is declared
+    // yet - an interface list must not abort on a forward reference.
+    function phClsLookup(b, nameV) { return scopeProbe(b, nameV, hNull) }
     // The RAW slot of a variable - the cell itself when there is one - without
-    // aborting on a name that was never assigned (js_phclslookup walks the scope
-    // chain and answers null instead, which js_scope_get does not).
+    // aborting on a name that was never assigned.
     function rawVarV(b, nameV) {
-        return callExt(b, "js_phclslookup", [curScopeV, nameV])
+        return phClsLookup(b, nameV)
     }
     function rawVar(b, name) { return rawVarV(b, emitStr(b, name)) }
     // The NAME a target denotes, as a handle: a literal for '$x', and the run-time
@@ -1648,7 +1685,7 @@ KwInstanceof = "instanceof" KwEnd ;
         }
         return function(b) {
             var nameV = emitStr(b, name)
-            var v = callExt(b, "js_phclslookup", [curScopeV, nameV])
+            var v = phClsLookup(b, nameV)
             var missB = curF.NewBlock("")
             var haveB = curF.NewBlock("")
             var mergeB = curF.NewBlock("")
@@ -3159,7 +3196,7 @@ KwInstanceof = "instanceof" KwEnd ;
         return function(b) {
             var r = valT(b)
             b = r.b
-            callExt(b, "js_set", [callExt(b, "js_phthis", [curScopeV]), emitStr(b, name), r.v])
+            callExt(b, "js_set", [phThis(b), emitStr(b, name), r.v])
             return b
         }
     }
@@ -3465,7 +3502,7 @@ KwInstanceof = "instanceof" KwEnd ;
                 if (args != null) {
                     var ea8 = emitPhArgs(b, args, null)
                     b = ea8.b
-                    var th8 = callExt(b, "js_phthis", [curScopeV])
+                    var th8 = phThis(b)
                     return {b: b, v: callExt(b, "js_phscall", [rb.v, rn8.v, th8, ea8.v])}
                 }
                 if (memprop) { return {b: b, v: callExt(b, "js_phsget", [rb.v, rn8.v])} }
@@ -3478,7 +3515,7 @@ KwInstanceof = "instanceof" KwEnd ;
                 if (hasPlace(args)) { return emitPartialFor(b, rb.v, mem, "scall", "\x00pfacls", args, null) }
                 var ea = emitPhArgs(b, args, null)
                 b = ea.b
-                var thisV = callExt(b, "js_phthis", [curScopeV])
+                var thisV = phThis(b)
                 return {b: b, v: callExt(b, "js_phscall", [rb.v, emitStr(b, mem), thisV, ea.v])}
             }
             if (mem.charAt(0) == "$") {
@@ -3659,7 +3696,7 @@ KwInstanceof = "instanceof" KwEnd ;
         if (names.length == 0) { return b }
         var ifV = callExt(b, "js_pharr", [])
         for (var q = 0; q < names.length; q++) {
-            callExt(b, "js_phpush", [ifV, callExt(b, "js_phclslookup", [curScopeV, emitStr(b, names[q])])])
+            callExt(b, "js_phpush", [ifV, phClsLookup(b, emitStr(b, names[q]))])
         }
         callExt(b, "js_set", [clsV, emitStr(b, "__ifaces"), ifV])
         return b
@@ -3774,7 +3811,7 @@ KwInstanceof = "instanceof" KwEnd ;
         }
         var rd = target.cdyn(b)
         b = rd.b
-        return {b: b, v: callExt(b, "js_phclslookup", [curScopeV, callExt(b, "js_phcname", [rd.v])])}
+        return {b: b, v: phClsLookup(b, callExt(b, "js_phcname", [rd.v]))}
     }
     // An argument record (from ArgList) as opposed to a class-member record.
     function isArgRec(it) {
@@ -4495,7 +4532,7 @@ KwInstanceof = "instanceof" KwEnd ;
         var strB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
         b.NewCondBr(isStr, strB, mergeB)
-        var looked = callExt(strB, "js_phclslookup", [curScopeV, v])
+        var looked = phClsLookup(strB, v)
         strB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(v, b), llvm.ir.NewIncoming(looked, strB)])}
     }
@@ -4558,11 +4595,11 @@ KwInstanceof = "instanceof" KwEnd ;
             return {b: b, v: hTrue}
         }
         if (name == "defined") {
-            var probe = callExt(b, "js_phclslookup", [curScopeV, callExt(b, "js_phstr", [vs[0]])])
+            var probe = phClsLookup(b, callExt(b, "js_phstr", [vs[0]]))
             return {b: b, v: callExt(b, "js_phnot", [callExt(b, "js_seq", [probe, hNull])])}
         }
         if (name == "constant") {
-            return {b: b, v: callExt(b, "js_phclslookup", [curScopeV, callExt(b, "js_phstr", [vs[0]])])}
+            return {b: b, v: phClsLookup(b, callExt(b, "js_phstr", [vs[0]]))}
         }
         // The diagnostics level is not modelled (every engine error here is fatal
         // or a thrown Error), so error_reporting() reports a level without acting.
@@ -4624,7 +4661,7 @@ KwInstanceof = "instanceof" KwEnd ;
             var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, selfName)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("self")), selfV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("static")),
-                                         callExt(b, "js_phlsb", [callExt(b, "js_phthis", [curScopeV]), selfV])])
+                                         callExt(b, "js_phlsb", [phThis(b), selfV])])
         }
         for (var i = 0; i < params.length; i++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
@@ -4710,7 +4747,7 @@ KwInstanceof = "instanceof" KwEnd ;
     function makePromote(nm) {
         var pn = nm.substring(1)
         return function(b) {
-            var thisV = callExt(b, "js_phthis", [curScopeV])
+            var thisV = phThis(b)
             callExt(b, "js_set", [thisV, emitStr(b, pn),
                                   callExt(b, "js_scope_get", [curScopeV, emitStr(b, nm)])])
             return b
@@ -4833,9 +4870,9 @@ KwInstanceof = "instanceof" KwEnd ;
             if (ext != "") {
                 var sup = callExt(bb, "js_get", [frameCls(bb, "self"), emitStr(bb, "__super")])
                 callExt(bb, "js_phscall", [sup, emitStr(bb, "__initprops"),
-                                           callExt(bb, "js_phthis", [curScopeV]), callExt(bb, "js_pharr", [])])
+                                           phThis(bb), callExt(bb, "js_pharr", [])])
             }
-            var thisV = callExt(bb, "js_phthis", [curScopeV])
+            var thisV = phThis(bb)
             for (var k = 0; k < props.length; k++) {
                 var pv = hNull
                 if (props[k].init != null) {
@@ -5271,9 +5308,22 @@ KwInstanceof = "instanceof" KwEnd ;
         b = emitExcClasses(b) // Exception / Error and their subclasses
         // The engine's own arithmetic errors (division by zero, a negative shift
         // count) are THROWN, and the class descriptors live in this scope - so the
-        // runtime is handed the scope to look them up in. See phpRaise in
-        // abnf/jsrtphp.go and phpRaise in php-interpreter.abnf.
-        callExt(b, "js_phrtinit", [curScopeV])
+        // runtime is handed them to raise with. See phpRaise in abnf/jsrtphp.go and
+        // phpRaise in php-interpreter.abnf.
+        //
+        // It used to be handed the SCOPE, and could not be any more: layer 2 cannot
+        // open one (WALL 3, docs/runtime-next-plan.md part 3). What goes over now is
+        // a PHP ARRAY of name => descriptor, which is a plain VALUE both halves can
+        // read - and the emitter, which may call js_scope_get, is the one that reads
+        // the scope. abnf/jsrtphp.go accepts either shape, so llvm.Run is unchanged
+        // for a module built before this.
+        var regV = callExt(b, "js_pharr", [])
+        var rtCls = ["DivisionByZeroError", "ArithmeticError"]
+        for (var rc = 0; rc < rtCls.length; rc++) {
+            callExt(b, "js_phset", [regV, emitStr(b, rtCls[rc]),
+                                    callExt(b, "js_scope_get", [curScopeV, emitStr(b, rtCls[rc])])])
+        }
+        callExt(b, "js_phrtinit", [regV])
         b = emitStaticSlots(b) // one reference cell per 'static $x' declaration site
         b = emitImported(b)   // imported files' items, each under its own source
         b = makeSeq(items)(b)
@@ -5283,6 +5333,121 @@ KwInstanceof = "instanceof" KwEnd ;
     core.scopeGetExt = "js_scope_get"
 
     c.compile(c.asg)
+
+    // ----- the native build (docs/runtime-next-plan.md part 3) -----
+    // jsdispatch(idx, env, args) is the function table a LINKED binary needs: js_closure
+    // stores a raw function index, and under llvm.Run the Go runtime turns that index
+    // back into a callee by looking "jsf_<idx>" up in the module. A binary has no such
+    // reflection, so the module carries the mapping itself. The MISS arm calls
+    // jsdispatch_ext, the same table emitted by the layer-2 runtime library
+    // (lib/php-rt.ll, built by metajs-to-llvm-ir.abnf -rt-lib): its own function indices
+    // are offset by a million, so the two chains cannot overlap and one js_call reaches
+    // either module. Emitted ONLY for -exe, so every other run keeps the module it had.
+    // This is lua-to-llvm-ir.abnf's emitDispatch, unchanged - the mechanism is the
+    // reusable part of phase 4 and nothing here is PHP's.
+    function emitDispatch() {
+        var idxs = []
+        var fns = []
+        var i = 0
+        while (i < m.Funcs.length) {
+            var f = m.Funcs[i]
+            var nm = f.Name()
+            if (nm.length > 4 && nm.substring(0, 4) == "jsf_") {
+                idxs.push(parseInt(nm.substring(4, nm.length)))
+                fns.push(f)
+            }
+            i = i + 1
+        }
+        var ext = m.NewFunc("jsdispatch_ext", i64,
+            [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var d = m.NewFunc("jsdispatch", i64,
+            [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var b = d.NewBlock("entry")
+        var extB = d.NewBlock("ext")
+        var ownB = d.NewBlock("own")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredSGE, d.Params[0], llvm.constant.NewInt(i64, 1000000)), extB, ownB)
+        extB.NewRet(extB.NewCall(ext, [d.Params[0], d.Params[1], d.Params[2]]))
+        b = ownB
+        i = 0
+        while (i < fns.length) {
+            var hit = d.NewBlock("hit" + idxs[i])
+            var nxt = d.NewBlock("miss" + idxs[i])
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, d.Params[0], llvm.constant.NewInt(i64, idxs[i])), hit, nxt)
+            hit.NewRet(hit.NewCall(fns[i], [d.Params[1], d.Params[2]]))
+            b = nxt
+            i = i + 1
+        }
+        b.NewRet(b.NewCall(ext, [d.Params[0], d.Params[1], d.Params[2]]))
+    }
+
+    // runtime.c's main() calls jsmain(env, args); PHP's top level is phpmain, which has
+    // the same signature. One forwarding definition rather than a rename, so the module
+    // llvm.Run is handed keeps the entry point it always had.
+    function emitJsMain() {
+        var i = 0
+        var pm = undefined
+        while (i < m.Funcs.length) {
+            if (m.Funcs[i].Name() == "phpmain") { pm = m.Funcs[i] }
+            i = i + 1
+        }
+        if (pm == undefined) { fail("-exe: no phpmain in the module") }
+        var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var b = f.NewBlock("entry")
+        b.NewRet(b.NewCall(pm, [f.Params[0], f.Params[1]]))
+    }
+
+    // The two runtime inputs live next to THIS grammar, so the build does not depend on
+    // the working directory: lib/runtime.ll is the C floor and lib/php-rt.ll is PHP's
+    // own layer 2. An explicit -rt REPLACES both.
+    function libPath(name) {
+        var mn = moduleName()
+        var cut = -1
+        var i = 0
+        while (i < mn.length) {
+            var ch = mn.charAt(i)
+            if (ch == "/" || ch == "\\") { cut = i }
+            i = i + 1
+        }
+        return mn.substring(0, cut + 1) + "lib/" + name
+    }
+
+    // ----- the native build is REAL, but its SUITE ROW is held back -------------
+    //
+    // `-exe PATH` below works and produces a self-contained native binary out of
+    // lib/runtime.ll (the C floor) and lib/php-rt.ll (PHP's layer 2). Reproduce it
+    // by hand with:
+    //
+    //     mec languages/php-to-llvm-ir.abnf tests/php-test-features.php -q \
+    //         -exe /tmp/php-native.out && /tmp/php-native.out
+    //
+    // What is NOT ready is the whole-language row in tests/clang-check.sh, which
+    // builds and runs tests/php-test-full.php natively. Two runtime primitives the
+    // C floor does not have keep that file from passing: object-key enumeration
+    // (var_dump of an object, `==` between objects, `(array)`, `clone`) and
+    // coroutines (generators). Those are WALL 2 and WALL 1 of
+    // docs/runtime-next-plan.md part 3, and 221 of the ratchet's 306 assertions do
+    // pass natively today.
+    //
+    // Holding the row is deliberate. A permanently RED suite destroys its own
+    // signal: every reader has to remember that this one is expected to fail, and
+    // the first genuine regression hides behind it. The marker on the line below
+    // is what clang-check.sh reads, and REMOVING THAT ONE LINE is the whole change
+    // once the floor has both primitives.
+    //
+    // clang-check: native-row-held
+    if (c.exePath != undefined && c.exePath != "") {
+        emitJsMain()
+        emitDispatch()
+        var rts = c.runtime
+        if (rts == undefined || rts.length == 0) { rts = [libPath("runtime.ll"), libPath("php-rt.ll")] }
+        var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
+        if (buildErr != "") {
+            println(buildErr)
+            exit(1)
+        }
+        println("php compiler: wrote executable " + c.exePath)
+        exit(0)
+    }
 
     println(m)
 

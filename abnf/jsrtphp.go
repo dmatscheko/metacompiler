@@ -741,6 +741,27 @@ func (rt *jsrt) phpRaise(clsName, msg string) {
 	if !has {
 		rt.fail("%s", msg)
 	}
+	// TWO shapes, because layer 2 cannot open a scope (WALL 3 of
+	// docs/runtime-next-plan.md part 3). php-to-llvm-ir.abnf now hands over a PHP
+	// ARRAY of name => descriptor, which is a plain value the MetaJS runtime
+	// library can read too; a module built before that change still hands over the
+	// SCOPE, and is still accepted.
+	if keys, vals, ok := phpArrParts(rt.unwrap(h)); ok {
+		var found interface{}
+		for i := range keys.elems {
+			if rt.phpStr(keys.elems[i]) == clsName {
+				found = phpDeref(vals.elems[i])
+			}
+		}
+		if found == nil || isNullish(found) {
+			rt.fail("%s", msg)
+		}
+		o := newJSObject()
+		o.set("__class", found)
+		o.set("message", msg)
+		o.set("code", float64(0))
+		panic(&jsThrown{value: o})
+	}
 	cls := rt.scopeGet(rt.scopeOf(h), clsName)
 	if cls == nil || isNullish(cls) {
 		rt.fail("%s", msg)
