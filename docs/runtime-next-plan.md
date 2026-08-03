@@ -7,13 +7,15 @@ forward plan. HEAD when it was written: `e8bf2c3`.
 ## Where things stand
 
 ```
-matrix 325/325 · --full 5,585 assertions, 0 halves disagree · --cross 119/0
-clang-check 16/16 - bash, batch, c, lua, metajs all "the clang executable agrees"
+matrix 325/325 · --full 5,615 assertions, 0 halves disagree · --cross 119/0
+clang-check 16/16 - bash, batch, c, lua, metajs, php, swift, java, csharp and dart
+all "the clang executable agrees"
 ```
 
-Five languages produce self-contained native binaries. Two of them (metajs, lua) got
-there through the GENERAL architecture - C floor, MetaJS layer 2, language grammar -
-which is what makes the remaining eleven a rollout rather than eleven rewrites.
+Ten languages produce self-contained native binaries. Seven of them (metajs, lua,
+php, swift, java, csharp, dart) got there through the GENERAL architecture - C
+floor, MetaJS layer 2, language grammar - which is what makes the remaining six a
+rollout rather than six rewrites.
 
 Still on the Go runtime: **29,670 lines across `abnf/jsrt*.go`**, backing eleven
 languages.
@@ -711,7 +713,72 @@ sintHi(v) / sintLo(v)         // the two halves back out, unsigned
 sintWidth(v) / sintUns(v)     // the declared width and signedness
 sintOp(code, l, r)            // one binary operator, 0..10 = + - * / % & | ^ &^ << >>
 sintCmp(l, r) / sintConv(v, bits, uns) / sintStr(v) / sintNum(v)
+sintRaw(hi, lo, bits, uns)    // the same as sint(), WITHOUT si_norm: ALWAYS a
+                              // box, never a plain number. si_trunc is still
+                              // applied, so the cell keeps its own invariant.
 ```
+
+### `sintRaw` - the one door past `si_norm`, DONE 2026-08-03
+
+`si_norm` UNBOXES a signed 64 bit value a double holds exactly, and that is exactly
+what a statically typed language's 64 bit signed type must NOT do: Java's
+`1000000L * 1000000L` is 1000000000000 where `1000000 * 1000000` is -727379968.
+Every one of the eleven `sint*` builtins went through `si_norm`, so **layer 2 had no
+constructor for a small BOXED value at all**. Java worked around it by marking the
+box UNSIGNED - the one shape `si_norm` will not unbox - and re-supplying the six
+operations whose signed reading the floor then gets wrong (`/ % >>`, compare,
+decimal text, double reading) in ~90 lines of `java-rt.metajs`. **csharp, go,
+kotlin, swift and dart each have a 64 bit signed type and would each owe that same
+workaround**, which is why the constructor is cheaper than five copies of it.
+
+`sintRaw(hi, lo, bits, unsigned)` is `si_make(si_trunc(v, w, u), w, u)`: everything
+`sint()` does except the unboxing arm. **`si_trunc` is deliberately kept** so a
+caller asking for 8 bits gets a well formed `int8` box rather than 300 wearing an
+`int8` label - only `si_norm`'s plain-number arm is dropped. Bound in **all three
+engines**, which is the gap `f19a8ad` shipped for `sint` and `8c396c4` had to
+repair:
+
+```
+languages/lib/runtime.c          seed_root("sintRaw", mk_host(62)), host id 62
+abnf/jsrtint.go                  giBindings - now TWELVE names, not eleven
+languages/metajs-interpreter.abnf siRawHost, in hostGlobals
+```
+
+**Ground truth.** A MetaJS probe reaches `sintRaw` and answers identically in all
+five engines (interpreter goja and `-frozen`, `llvm.Run` goja and `-frozen`, the
+clang-built native binary) - byte for byte, including `si_trunc` at 8 bits, the
+64 bit unsigned box, the signed `/ % >>` and compare on a raw signed box, and
+`sintConv` normalising back to a plain number.
+
+**Ratchet**: `tests/metajs-test-full.js` SECTION 24, `sint72`-`sint89`, **18
+assertions**; metajs 476 -> 494 (501 with the `to_int32` assertions below).
+
+**Discriminating power.** Against a clean `git archive` of `94ac7b8` it is
+**18 of 18 in every engine, by ABORT** - `sintRaw` is not defined in any of the
+three, so the file dies. That is the weak measurement, and it only says the name is
+new; the useful one is mutating a single behaviour at a time, which is **identical
+in all three engines** and is the evidence that the three implementations match each
+other rather than one of them:
+
+```
+                                                  interp   llvm.Run   native
+sintRaw goes through si_norm (== sint)               3         3         3
+si_trunc not applied                                 2         2         2
+the width argument ignored                           2         2         2
+the unsigned argument ignored                        3         3         3
+hi and lo swapped                                   10        10        10
+```
+
+**Two assertions had to be rewritten after the measurement**, the same lesson
+`sint66`-`sint71` record: "`si_trunc` not applied" and "the unsigned argument
+ignored" each measured **1** as first written, because an 8 bit operand hides both -
+an unsigned box under 64 bits never has a negative payload, and 200 masked to 8 bits
+is 200 either way. Respelled at 32 and 64 bits (`sint88`, `sint89`) they measure 2
+and 3. **A sized-integer rule has to be asserted at a width where it can bite.**
+
+**NOT done here, and owed to whoever converts them**: `java-rt.metajs` is another
+agent's file and is untouched, so java still carries the unsigned-box workaround.
+The API above is what collapses it.
 
 and then the one rule the tag imposes: **`typeof v == "number"` is TRUE for a sized
 integer**, so every site that meant "an ordinary double" has to say so.
@@ -935,14 +1002,37 @@ because a MetaJS operator never reaches them.
 
 **The two places it does not match, stated rather than approximated:**
 
-- **63 native lines: `to_int32` of a value outside the int64 range.** Reachable only
-  through `jvmArith`'s INTEGER arm, `float64(rt.toInt32(x))`, with both operands
-  unboxed - so no boxed double is involved. Three implementations, three answers, and the
-  odd one out is again the Go twin: `rt.toInt32` ends in `int32(int64(f))`, which Go
-  leaves implementation defined out of range and which answers `-1` here on arm64; the C
-  floor answers `0` from an explicit `d_in_long` test; real JS `ToInt32` would answer
-  `1661992960`. Pre-existing (it is `js_band`'s reading too), architecture independent on
-  the floor's side by construction, and the same class as `giFromFloat`'s infinity.
+- ~~**63 native lines: `to_int32` of a value outside the int64 range.**~~ **FIXED
+  2026-08-03, in all five engines, against node as the oracle.** It was three
+  implementations and three answers, none of them JS: `rt.toInt32` ended in
+  `int32(int64(f))`, which Go leaves implementation defined out of range and which
+  answered `-1` here on arm64; the C floor answered `0` from an explicit `d_in_long`
+  test; goja's own operator did the same int64 conversion as the Go twin. **ToInt32
+  is a MODULO, not a range test** - `1e20 | 0` is 1661992960 and `1e19 | 0` is
+  -1981284352 - and all four sites now say so:
+
+  ```
+  languages/lib/runtime.c   to_int32   the significand shifted into place by
+                                       e-52, masked BEFORE the shift; a shift at
+                                       or above 32 is a multiple of 2^32, so 0
+  abnf/jsrt.go              rt.toInt32 math.Mod, which is fmod and exact
+  languages/metajs-interpreter.abnf     siI32, guarded by four comparisons in the
+                                        six bitwise arms of binOp - goja's own
+                                        operator is the wrong one, so the guard is
+                                        there to keep the goja half from being the
+                                        only engine of the five that is wrong
+  ```
+
+  **45 vectors** (both signs, 2^63/2^64/2^84, the `1e19`..`1e300` decade walk, the
+  int64 boundary from below, the low-32-bits-are-zero cases) are **byte-identical to
+  node in all five engines**. Ratchet: SECTION 04 `bit16`-`bit22`, 7 assertions,
+  every constant taken from node. Discriminating power against a clean archive of
+  `94ac7b8`: **6 of 7** in the goja interpreter, the frozen interpreter and
+  `llvm.Run`, **5 of 7** native. The two honest zeros are deliberate - `bit21` pins
+  that the *fast path below 2^63 is unchanged*, and `bit20`'s "the low 32 bits are
+  genuinely zero, so 0 is the right answer" case is what the floor already said, so
+  it cannot discriminate there. It is kept because without it a fix that replaced
+  one wrong constant with another would pass.
 - **6 goja-interpreter lines: the sign of a zero PRODUCT.** goja represents an integral
   number as an int64, so `0 * -2718281` is `+0` there and `-0` in real JS, in the frozen
   engine and in the C floor. Measured directly: `1 / (0 * -2718281)` is `+Inf` under goja
@@ -1298,205 +1388,293 @@ There is no shim to get wrong. So the rule is not "all nine need `__raw`" but:
 Swift also has **zero** `_raw` parameters, like PHP and unlike Lua - so that count
 is now 3 / 0 / 0 across the three ported languages.
 
-## PHP - PARTIAL (2026-08-03). A native PHP binary exists; three walls are named
+### What JAVA and CSHARP added (2026-08-03)
 
-**PHP now compiles to a self-contained native binary, and 221 of the 306 ratchet
-assertions run in it byte-identically with `llvm.Run`.** The gate is NOT met: the
-remaining 85 are blocked by three *floor* primitives that do not exist, and those
-three are the result that matters, because they are language-NEUTRAL and every one
-of the remaining nine languages will meet at least one of them.
+**Item 1 is now four for four, and csharp is the cheapest possible case: NOTHING TO
+LOWER.** Java's probe was not a language feature at all (`__jmath`, a host global of
+the Go runtime that `runtime.c` does not seed), one `java_scope_probe` helper in
+PHP's shape. `csharp-to-llvm-ir.abnf` already probed the scope in IR
+(`js_scope_typeof` against `"undefined"`, line 4109) and never had a scope-taking
+extern, so there was nothing left to do. **Check for the probe before assuming one is
+owed** - the running count is php 2 externs lowered, swift 2, java 1 helper added,
+csharp 0.
 
-> **PHP IS NOT IN THE NATIVE ROW OF `tests/clang-check.sh`, AND THAT IS DELIBERATE.**
-> The row builds and runs `tests/php-test-full.php`, which cannot pass until WALL 1
-> and WALL 2 below are closed, so the row would be **permanently red** - and a
-> permanently red row destroys its own signal: readers learn to expect the failure
-> and the next genuine regression hides behind it. The suite is 16/16 and php reads
+**Item 2 is now three exceptions to one rule.** Swift, Java and C# all leave
+`core.truthyExt` at compile-core's default, which is the floor's own `js_truthy`.
+Only Lua and PHP override it, and only they need the `__raw` suffix. The grep is one
+line and it is worth running before writing anything.
+
+`_raw` PARAMETERS across the five: **lua 3, php 0, swift 0, java 1, csharp 1**. Both
+of the ones is `js_char`, whose code point the emitter writes with `handle(k)`.
+
+**A THIRD thing joined them, and it is CLOSED (2026-08-03).** Every remaining
+language can put a GENERATOR on an object, and the floor's `type_of` used to answer
+`"object"` for a generator function (tag 16) where `abnf/jsrt.go` answers
+`"function"`. Any layer-2 `js_mcall` written with `typeof m == "function"` therefore
+refused to call an iterator method NATIVELY while calling it happily under
+`llvm.Run`. Measured in the csharp section below, where it was the first native
+failure and hid the other 246 assertions behind it. **`type_of`, `type_class` and
+`to_string` in `languages/lib/runtime.c` now list `t == 16` next to 7/8/9**, so
+`typeof m == "function"` is the correct test in every layer 2 and no `apply` probe
+is owed. The four languages that follow (js, ts, python, and any go/kotlin/dart
+generator) inherit the fix and should not re-invent the workaround.
+
+### What DART added to all three (2026-08-03)
+
+**Item 1 is now COPYABLE CODE rather than a pattern.** Dart's `js_kget`/`js_kset`
+are not merely the same SHAPE as Swift's - `abnf/jsrt.go` implements them with the
+same two functions - so `sw_kget`/`sw_kset`/`sw_safeget` transferred to
+`dt_kget`/`dt_kset`/`dt_safeget` verbatim, along with the
+`core.scopeGetExt = "js_scope_get"` override. 31 read sites and 3 write sites,
+`llvm.Run` unchanged at 228/228, third language, still no floor change. **Look up the extern in
+`abnf/jsrt.go` before writing a new lowering: if it is one of the two above, the
+lowering already exists.**
+
+One correction to the accounting, which Swift's `68 -> 66` did not make: the
+lowering **removes two externs and introduces three** - `js_scope_typeof`,
+`js_typeof` and `js_sne`, which the emitter did not previously reach. All three
+are already in the floor, so what LAYER 2 has to write falls by two and the
+declare list grows by one. Dart's union went 66 -> 67 for exactly that reason.
+
+**Item 2: dart is the third exception.** It sets no `core.truthyExt`, so the
+default `js_truthy` - the floor's own - applies and no `__raw` suffix exists in
+`languages/lib/dart-rt.metajs`. The tally over five ported languages is **lua and
+php need it; swift, java and dart do not**, and the `grep` still answers it in one
+line. `_raw` PARAMETERS are now **3 / 0 / 0 / 1 / 0** for lua / php / swift / java
+/ dart.
+
+**Item 3 did not bite dart, and the reason is checkable in one grep.**
+`languages/lib/dart-rt.metajs`'s `dtMember` does test `typeof mm == "function"`,
+so it would refuse a tag-16 generator natively - but
+`grep -c 'js_genfn\|js_yield' languages/dart-to-llvm-ir.abnf` is **0**: Dart's
+`sync*`/`async*` are lowered by the emitter into ordinary closures, so no tag 16
+ever reaches the dispatcher. **Run that grep before deciding whether the
+`is_callable` spelling is needed** - it is the difference between a defensive
+rewrite and a measured "cannot happen".
+
+## PHP - DONE (2026-08-03). The gate is MET: 306/306 natively, byte-identical
+
+**`tests/php-test-full.php` runs as a self-contained native binary and prints
+`full: 306 checks, 0 failures`, byte-identical with `llvm.Run` on stdout, on
+stderr and in its exit code.** The row in `tests/clang-check.sh` is no longer
+held: php reads `ok, and the clang executable agrees`.
+
+```
+mec languages/php-to-llvm-ir.abnf tests/php-test-full.php -q -exe /tmp/php-native.out
+/tmp/php-native.out ; echo $?          # full: 306 checks, 0 failures / 0
+```
+
+This finishes the migration that stopped at 221/306 earlier the same day. Nothing
+about PHP changed to get the other 85: **the two walls that blocked them were
+FLOOR walls, both of them landed in the floor, and layer 2 over each is small** -
+which is the result that carries to the remaining nine, since every one of them
+meets at least one of the two.
+
+| what closed it | ratchet | layer 2 cost |
+|---|---|---|
+| `keysOf`, host id 61 (commit `d30629f`) | sections 17, 20, part of 30 - ~75 assertions | 4 sites, ~45 lines |
+| stackful coroutines, tags 15/16 (commit `94ac7b8`) | section 19 - 10 assertions | 1 predicate + 1 side table + `phGenCall`, ~120 lines |
+
+The estimate in the cost table below said ~80 lines for php's coroutine half and
+"~60 lines of MetaJS" for `keysOf`'s. Both were about right; the total diff to
+`languages/lib/php-rt.metajs` is +263/-58 lines including its comments.
+
+### THE THREE WALLS ARE ALL CLOSED, and what each one taught
+
+**WALL 1 - coroutines.** The floor owns the suspension and exposes exactly ONE
+member on a generator, `next(v) -> {value, done}`. Everything PHP's `Generator`
+class adds is the INSPECTION half of the protocol - `current` / `key` / `valid` /
+`rewind` / `send` / `getReturn`, plus the auto-key a keyless `yield` gets - and it
+answers from the LAST handshake instead of performing one, so reading a generator
+twice must not advance it. That half is `phGenCall` in `php-rt.metajs`, written
+function for function against the `*jsGenerator` case of `getMember` in
+`abnf/jsrt.go`. Three findings, and all three are language-neutral:
+
+1. **A generator is a floor CELL, not an object, so the cursor cannot be stored ON
+   it.** `set_member` refuses tag 15 and `get_member` answers only `next`. The
+   per-generator state therefore lives in one side table keyed by IDENTITY (two
+   parallel arrays and a `===` scan, the shape `phDumpSeen` already used, because
+   the frozen subset has no `Map`). **Every language whose generator exposes an
+   inspection surface needs this table**: php's `current`/`key`/`valid`/
+   `getReturn`, C#'s `Current`/`MoveNext`, python's `send`. Only js/ts escape it,
+   because `next()` IS their whole protocol. Cost: ~25 lines, and a step is O(n)
+   in the generators the program has ever made - the same leak shape as the Go
+   twin's parked goroutine.
+2. **Layer 2 has to RECOGNISE a generator, and there is no tag primitive for it.**
+   `php-to-llvm-ir.abnf` emits `js_phisa(v, "Generator")` for every `foreach` and
+   every `yield from`, so `phIsA` must answer for a value whose `typeof` is
+   `"object"`. The probe that works is structural: exclude the array box
+   (`__dict`), the reference cell, the class descriptor, a raw list (`length` is a
+   number) and an instance (`__class`), and then ask whether `v["next"]` is
+   callable - which on tag 15 is the bound `gen_next` and on a tag-6 object is
+   `undefined`, because a PHP method lives on the class descriptor and never as an
+   own property. It is exact for PHP, but it is a STRUCTURAL probe standing in for
+   a type test. **A floor `js_tag(h)` (or an `isGenerator` host builtin) would
+   make it a one-liner and would remove the one place this port guesses**, and the
+   next language whose instances can carry a callable own property named `next`
+   will need it. Reported, not made: the floor is another agent's.
+3. **A throw across a yield needed NOTHING here.** `g.next()` raises on the
+   caller's stack, so `foreach` has no special case - as the floor section
+   promised. Verified in the probe: a generator that throws after its first yield
+   behaves identically under `llvm.Run` and natively, whether it is driven by
+   `foreach` or by an explicit `->next()`.
+
+**WALL 2 - an object's own keys.** `keysOf` answers an object's own keys in
+INSERTION order and already skips the `__`-prefixed slots, which is
+`phpHiddenProp`'s rule in the Go twin exactly - so `js_phdump`, `phObjPropsEq`,
+`js_phcast("array")` all read it straight, with no filtering of their own. **One
+site is not straight, and it is the generalisable trap:** `clone` has to keep the
+instance's class, and `__class` is precisely the kind of slot `keysOf` hides. The
+Go twin walks `o.keys` raw and copies it by accident; layer 2 has to put it back
+by hand. `__class` is the only hidden slot `php-to-llvm-ir.abnf` ever writes on an
+INSTANCE (everything else `__`-prefixed lives on the class DESCRIPTOR), so one
+line covers it - but **every language that clones or copies an object through
+`keysOf` has to ask itself which hidden slots the copy must keep.**
+
+**WALL 3 - the scope chain.** Unchanged and still the general answer: **a scope
+probe belongs in the EMITTER, not in layer 2.** `php-to-llvm-ir.abnf` lowers
+`js_phthis` and `js_phclslookup` through one module-level
+`php_scope_probe(env, name, dflt)` over `js_scope_typeof` / `js_scope_get`, and
+`js_phrtinit` receives a plain VALUE (a PHP array of name => descriptor) built by
+the emitter, which is the side that may read the scope.
+
+### A FOURTH trap, and a FIFTH - the diagnostic that lies
+
+The fourth is unchanged: **an extern that returns a RAW integer** needs the
+`__raw` suffix (`function js_phtruthy__raw(v)`), or every condition in the program
+is taken. See "TWO THINGS EVERY ONE OF THE REMAINING NINE NEEDS".
+
+The fifth was measured here and **will hit all four remaining coroutine
+languages**, because each of them has loud stubs in layer 2 today for exactly the
+symbols the floor has since defined:
+
+> **A DUPLICATE symbol is reported as an UNRESOLVED one.** With `js_genfn` and
+> `js_yield` defined in BOTH `lib/runtime.ll` and `lib/php-rt.ll`, the build
+> printed
 >
 > ```
-> php   51085   ok (module only - links natively, row HELD: see the grammar)
+> error: 2 unresolved symbol(s), and this build links a runtime, so they are NOT stubbed:
+> error:     js_genfn
+> error:     js_yield
 > ```
 >
-> The native path is fully built and reproducible **by hand**:
->
-> ```
-> mec languages/php-to-llvm-ir.abnf tests/php-test-features.php -q -exe /tmp/php-native.out
-> /tmp/php-native.out                       # features: 127 checks, 0 failures
-> mec -i tests/imports languages/php-to-llvm-ir.abnf tests/php-test-multifile.php \
->     -q -exe /tmp/php-native-multi.out
-> /tmp/php-native-multi.out                 # php multifile test passed
-> ```
->
-> **Turning the row on is one line.** `languages/php-to-llvm-ir.abnf` carries a
-> `clang-check: native-row-held` comment immediately above its `-exe` branch;
-> `tests/clang-check.sh` reads it and prints the HELD row instead of building.
-> Delete that comment line and php joins the run-it row.
->
-> It is a separate marker rather than hiding the `exePath` literal on purpose:
-> `main.go` greps this same file for `exePath` and REFUSES `-exe` without it,
-> precisely so that a grammar which ignores the flag cannot look like a successful
-> native build. Splitting that literal was tried first and it defeated that guard -
-> the "native binary" that then appeared to pass was a stale file from an earlier
-> build. The two greps ask different questions and now have different markers:
-> `exePath` is "does this grammar link natively at all", the held marker is "does
-> its whole ratchet pass natively yet".
+> while the actual `ld` error was `2 duplicate symbols`. `buildExecutable` in
+> `abnf/llvmmap.go` builds its report from the MODULE's undefined declarations
+> filtered by `mentionsSymbol(clang output, name)` - and a duplicate-symbol error
+> mentions the very same names, so every one of them passes the filter. The report
+> is deliberately built from the module rather than the linker text (the linker
+> text carries temp file names and this path is in the byte-compared matrix), so
+> the fix is not obvious; the cheap one would be to say "unresolved OR duplicate".
+> **Until then: when layer 2 and the floor both define a symbol, the message says
+> the opposite of what is wrong.** Not fixed here - `abnf/` is another agent's.
 
-PHP was picked because it is the only one of the eleven whose Go twin uses zero
-`jsJFlo`. That held: the 64 bit integer half of PHP needed **no new code at all** -
-`sint`/`sintOp`/`sintCmp`/`sintStr`/`sintNum` (the floor's tag 13, since `f19a8ad`)
-*is* PHP's int, and `languages/lib/php-rt.metajs` has no `i64` pair layer, where
-`lua-rt.metajs` needed ~200 lines of one. **The sized-integer floor tag paid for
-itself the first time it was reused.**
+### The extern split, after the two walls
 
-### The extern split
-
-`tests/php-test-full.php` drives **100** externs (was 101; see the emitter lowering
-below). Over every `tests/php-test-*.php` the union is **106**.
+`tests/php-test-full.php` drives **100** externs; over every `tests/php-test-*.php`
+the union is **106**.
 
 | where | count | what |
 |---|---|---|
-| already in the C floor | 29 | the generic primitives of phase 3 plus the five the Lua pilot added |
-| **layer 2**, language-NEUTRAL | 8 | `js_bytelen`, `js_jadd`, `js_mcall`, `js_range_len/key/val`, `js_genfn`, `js_yield` |
-| **layer 2**, PHP's own | 63 | `js_ph*` |
+| the C floor | 31 | the generic primitives, **plus `js_genfn` and `js_yield`** |
+| **layer 2**, language-NEUTRAL | 6 | `js_bytelen`, `js_jadd`, `js_mcall`, `js_range_len/key/val` |
+| **layer 2**, PHP's own | 69 | `js_ph*` |
 
-`languages/lib/php-rt.ll` exports **79** symbols (the 77 the union needs, plus two
-loud stubs for the externs the emitter no longer emits).
-
-The eight neutral ones are **not PHP's** and belong in the floor for everyone -
-`js_range_*` is Go's `range`, `js_jadd` is Java/C# `+`, `js_mcall` is the shared
-method dispatcher, `js_bytelen` is `len(string)`. They are implemented here rather
-than in the floor only because the floor is owned by another agent this session.
-Two of them cannot go anywhere: see WALL 1.
-
-### THE THREE WALLS - the finding, and it changes the plan for the other nine
-
-Each is a missing FLOOR primitive, not anything about PHP.
-
-**WALL 1 - coroutines (`js_genfn`, `js_yield`).** A generator suspends a call stack
-and resumes it. The Go twin uses a goroutine and two channels. The C floor has
-`setjmp`/`longjmp` behind `js_throw`/`js_try`, which can UNWIND a stack but cannot
-resume one, and MetaJS has no continuations. **There is no spelling of this in layer
-2 at any effort.** Eager materialisation is not a way out: `tests/php-test-full.php`
-section 19 deliberately drives an *infinite* generator through `yield from`.
-
-The floor needs real stackful coroutines (a second stack plus `makecontext` or hand
--rolled switching), or the emitter needs a state-machine transform of generator
-bodies. Both are substantial and neither was attempted. Cost here: **section 19, 10
-assertions.** This blocks `js`, `typescript`, `python` and `ruby` too.
-
-**WALL 2 - an object's own keys.** `var_dump` of an object, `==` between two
-objects, `(array)` on an object and `clone` all need the instance's own property
-names in insertion order. **The floor already has this, as the `js_keys` extern** -
-it went in for the Lua pilot. But an extern is only callable from an EMITTER; MetaJS
-has no `for..in` and the floor seeds no `Object`, so layer 2 cannot reach it. The
-fix is small and language-neutral: one `seed_root` for a `keysOf` host builtin over
-the `js_keys` that is already there, plus its twin in `abnf/jsrtint.go`'s
-`giBindings` so `llvm.Run` agrees. **Reported and not made, because the C floor is
-owned by another agent this session.** Cost: **sections 17 and 20 and part of 30,
-~75 assertions.** Every language with reflective objects meets this.
-
-**WALL 3 - the scope chain, and it is NOT a floor change.** `js_phthis`,
-`js_phclslookup` and `js_phrtinit` each took a SCOPE handle and walked it. A scope is
-the floor's private storage - which is exactly why the Lua pilot put
-`js_scope_decl`/`set`/`typeof` INTO the floor - so layer 2 cannot open one.
-
-Two of the three needed nothing: they are pure PROBES, and **an emitter may call
-`js_scope_typeof` and `js_scope_get`**. `php-to-llvm-ir.abnf` now lowers both
-through one module-level `php_scope_probe(env, name, dflt)` helper, which keeps
-every one of the twelve call sites a single-value expression. The externs are gone
-from the module (101 -> 100) and `llvm.Run` is still 306/306.
-
-> **The generalisation: a scope probe belongs in the emitter, not in layer 2.**
-> Expect one per language and expect it to be cheap.
-
-`js_phrtinit` is the residue: it hands the runtime the class descriptors PHP's own
-`DivisionByZeroError`/`ArithmeticError` are raised with. It now receives a **PHP
-array of name => descriptor** - a plain VALUE both halves can read - built by the
-emitter, which is the side that may read the scope. `abnf/jsrtphp.go`'s `phpRaise`
-accepts either shape, so nothing that was green went red.
-
-### A FOURTH trap, fixed: an extern that returns a RAW integer
-
-This is the second of the two cross-cutting findings at the top of this part. PHP's
-`core.truthyExt` is `js_phtruthy`, `compile-core` compares its result against 0 as a
-RAW integer, and a `-rt-lib` shim handing back a boolean HANDLE answers 2 for false -
-so every condition in the program would be taken, silently. Fixed with a `__raw`
-suffix convention in `languages/metajs-to-llvm-ir.abnf`'s export scanner; layer 2
-writes `function js_phtruthy__raw(v)`. **All nine remaining languages need it.**
-See "TWO THINGS EVERY ONE OF THE REMAINING NINE NEEDS" above.
-
-PHP is also a `_raw` PARAMETER *exception*: it passes every operator selector with
-`emitStr`/`emitNum` and has **zero** of them, where Lua had three.
+`languages/lib/php-rt.ll` exports **77** symbols: the 75 the union needs plus two
+loud stubs for `js_phthis` / `js_phclslookup`, which the emitter lowers itself.
+The six neutral ones still belong in the floor for everyone and are here only
+because the floor is another agent's this session.
 
 ### Ground truth
 
+Measured in the working tree at `94ac7b8` plus this change, and re-measured after
+the floor moved under it (`runtime.ll` was regenerated by another agent
+mid-session; the whole sweep below is the SECOND run, against that floor).
+
 ```
 matrix                325/325
---full                5,569 assertions, 0 languages whose halves disagree (php 306)
---cross               119 programs, 0 divergent
+--full                5,615 assertions, 0 languages whose halves disagree (php 306)
+                      grep -E 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF'  ->  no hits
+--cross               119 programs, 0 divergent, 0 differing only in warnings
 go test ./abnf/       ok
-jsbootstrap.ll        regenerates BYTE-IDENTICALLY from source
-gen-runtime-ll.sh --check   runtime.ll  up to date        gen-lua-rt-ll.sh --check   up to date
-gen-bash-rt-ll.sh --check   up to date                    gen-batch-rt-ll.sh --check up to date
-gen-php-rt-ll.sh  --check   php-rt.ll   up to date (28,843 lines)
-clang-check           16/16, all accepted, suite GREEN. php links natively but its
-                      run-it row is HELD until WALL 1 and WALL 2 close (see above):
-                        php   51085   ok (module only - links natively, row HELD: ...)
+clang-check           16 modules, ALL accepted, suite GREEN:
+                        php   51085   ok, and the clang executable agrees
+every gen-*-rt-ll.sh --check clean: runtime, bash, batch, csharp, dart, java,
+                      lua, php (php-rt.ll, 30,488 lines) and swift
 ```
 
-Native vs `llvm.Run`, stdout **and** stderr **and** exit code:
+Native vs `llvm.Run`, stdout **and** stderr **and** exit code, over every php test:
 
 ```
 php-test-1  php-test-features  php-test-complete  php-test-try  php-test-multifile
-                                                              all SAME (rc=0)
+php-test-full                                                 all SAME (rc=0)
 php-test-undefconst                       SAME (rc=1); the runtime-error line is
                                           identical, llvm.Run's driver adds one
                                           "  ==> Fail" line of its own
-php-test-full, sections 17/19/20/30 held back (the walls)
-                                          221 of 306 assertions, BYTE-IDENTICAL, rc=0
-php-test-full, whole file                 aborts in section 17 at `clone`, WALL 2
 ```
 
-### The differential probe, and the one defect it found
+### The differential probe, and the ONE divergence left
 
-A **20,255-line** probe - `+ - * / % **` over 51 values (0, +-1, both sides of 2^53,
-`PHP_INT_MAX`/`MIN` and their neighbours, the int32 edges, integral and non-integral
-floats, 1e100, 1e-100, +-INF, NAN, the booleans, null, and eleven numeric and
-non-numeric strings), all six comparisons plus `<=>` over the same 51, the five
-bitwise operators and `intdiv` over 13 integer values, unary minus, `~`, the four
-casts, the seven `is_*` predicates, `gettype`, `get_debug_type`, `var_dump` and the
-array-key normalisation - differs between `llvm.Run` and the native binary on
-**2 lines**, and both have the same cause, which is **not PHP's**:
+The probe was regenerated and WIDENED to the surface the two walls opened: on top
+of `+ - * / % **` over 51 values (0, +-1, both sides of 2^53, `PHP_INT_MAX`/`MIN`
+and their neighbours, the int32 edges, integral and non-integral floats, 1e100,
+1e-100, +-INF, NAN, the booleans, null and sixteen numeric and non-numeric
+strings), all nine comparisons including `<=>` over the same 51, the five bitwise
+operators and `intdiv` over 13 integers, the unary operators, the five casts, the
+seven `is_*` predicates, `gettype`, `get_debug_type` and array-key normalisation,
+it now also drives **`var_dump` of objects, `==` / `===` between objects, `(array)`
+on an object, `clone` with a `__clone` hook, and eighteen generator programs** -
+keyed and auto-keyed yields, `yield from` over an array and over a generator, an
+infinite generator broken out of, a generator that throws after its first yield,
+the whole `current`/`key`/`valid`/`getReturn` cursor, and a generator driven both
+by `foreach` and by hand.
+
+**40,948 lines of PHP, 41,409 lines of output, and the two engines differ on 431
+hunks - 687 output lines - with exactly ONE cause: the numeric string `"1e400"`.** Every diverging
+expression has `"1e400"` as an operand and none of the 687 has any other; nothing
+in the object or generator surface diverges at all.
 
 ```
-                                    Go runtime   interpreter   C floor
-Math.pow(-0.5, 2147483647)              -0            -0          +0
-Math.pow(-0.5, 9007199254740991)        -0            -0          +0
+                              php-interpreter.abnf   llvm.Run (jsrtphp.go)   native
+var_dump(0 + "1e400")            float(INF)               int(1)            float(INF)
+var_dump((float)"1e400")         float(INF)               float(1)          float(INF)
+var_dump(is_numeric("1e400"))    bool(true)               bool(false)       bool(true)
 ```
 
-**`d_pow` in `languages/lib/runtime.c` loses the sign of an UNDERFLOWED zero when
-the base is negative and the exponent is a large odd integer.** Two of the three
-engines agree with each other and the third does not; the reproduction above is
-plain MetaJS and needs no PHP. Reported rather than fixed - the C floor is owned by
-another agent this session.
+**Two of the three engines agree, and they are the two that agree with real PHP**
+(`(float)"1e400"` is `INF`, and `is_numeric` is true for any numeric string
+regardless of range). The odd one out is `abnf/jsrtphp.go`, whose numeric-string
+reader rejects an out-of-double-range exponent and falls back to the leading-digit
+parse, giving `1`. **This is invisible to every existing suite**: `./test.sh`
+compares each engine against itself, `--cross` compares the two Go-backed halves
+on programs in `tests/` and no test file contains such a literal, and the ratchet
+is 306/306 in both halves. Reported rather than fixed - `abnf/jsrt*.go` is another
+agent's this session, and `jsrtphp.go` is scheduled for deletion anyway (item 4
+below), which would make the defect vanish with it.
 
-There is **no `php` binary on this machine** (`which php` -> not found), so real PHP
-could not be used as the oracle for this run. The probe compares our two engines
-only; `./test.sh --full` separately pins both halves against each other on 306
-hand-written assertions.
+**The `d_pow` `-0` defect this probe found in the morning is FIXED**: `**` over
+all 51x51 pairs, which includes `Math.pow(-0.5, 2147483647)`'s PHP spelling, is
+now identical in both engines.
+
+There is still **no `php` binary on this machine** (`which php` -> not found), so
+real PHP could not be the oracle for the run itself; the `"1e400"` reading above
+is settled against the language specification and against the third engine.
 
 ### What is still owed for PHP
 
-1. WALL 2's `keysOf` floor primitive (`seed_root` over the `js_keys` that is
-   already in `runtime.c`, plus its `giBindings` twin in `abnf/jsrtint.go`), then
-   `js_phdump`/`js_phclone`/`js_pheq`/`js_phcast("array")` are ~60 lines of MetaJS
-   and sections 17, 20 and 30 close - **221 -> roughly 296 of 306**.
-2. WALL 1's coroutines, then section 19 closes and PHP meets the gate.
-3. Then delete the `clang-check: native-row-held` line from
-   `languages/php-to-llvm-ir.abnf` and php joins the run-it row.
-4. `abnf/jsrtphp.go` stays until then, as the plan requires.
-
-Both of item 1's pieces and the `d_pow` fix were dispatched to the C-floor owner on
-2026-08-03; the `-0` finding was independently confirmed against node.
+1. **`abnf/jsrtphp.go` can be deleted**, as the plan requires once the native path
+   is the real one. It is what `llvm.Run` uses today, so deleting it means the
+   compiler half runs through the same `php-rt.ll` the native binary does. That
+   also retires the `"1e400"` divergence above.
+2. The **six language-neutral externs** in `php-rt.metajs` (`js_bytelen`,
+   `js_jadd`, `js_mcall`, `js_range_len/key/val`) belong in the C floor, where
+   every language can reach them.
+3. A floor **`js_tag` / `isGenerator`** primitive, so WALL 1's finding 2 stops
+   being a structural probe.
+4. `send()` is implemented here and the ratchet does not exercise it (section 19
+   says so at the site): PHP's `send` primes a fresh generator, resumes it and
+   answers the value yielded NEXT. It is written against the Go twin and is
+   covered by neither engine's tests - the first language that needs it (python)
+   should re-derive it rather than trust it.
 
 ### launch.json entries wanted (not added - not my file)
 
@@ -1505,11 +1683,13 @@ Both of item 1's pieces and the `d_pow` fix were dispatched to the C-floor owner
   args: ["languages/php-to-llvm-ir.abnf", "tests/php-test-features.php", "-q", "-exe", "tests/php-native.out"]
 "PHP native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)"
   args: ["-i", "tests/imports", "languages/php-to-llvm-ir.abnf", "tests/php-test-multifile.php", "-q", "-exe", "tests/php-native-multi.out"]
+"PHP native binary, FULL ratchet (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["languages/php-to-llvm-ir.abnf", "tests/php-test-full.php", "-q", "-exe", "tests/php-native-full.out"]
 ```
 
-Both of those pass natively today. The full-syntax ratchet entry is deliberately
-**not** requested yet, for the same reason the clang-check row is held: it would be
-red until WALL 1 and WALL 2 are closed, and the matrix is a green-only suite.
+All three pass natively today. The full-syntax one was deliberately NOT requested
+before, because it would have been red; it is green now, and it is the entry that
+would keep the whole native path in a green-only suite.
 
 ## SWIFT - DONE (2026-08-03). The gate is MET: 209/209 natively, byte-identical
 
@@ -1831,13 +2011,14 @@ pins all six. **The generalisation for csharp, go, kotlin, swift and dart** - ev
 one of which has a 64 bit signed type - is that this trick works, and that the
 alternative is one floor line:
 
-> **FLOOR REQUEST (reported, not made - the floor is another agent's this session):
-> a constructor that builds a tag 13 cell WITHOUT `si_norm`.** `si_make` already
-> exists; it needs a host id, e.g. `sintRaw(hi, lo, bits, unsigned)`, plus its twin
-> in `giBindings` and `metajs-interpreter.abnf`. With it, `jlDiv`/`jlMod`/`jlSar`/
-> `jlCmp`/`jlStr`/`jlNum` all collapse into plain `sintOp`/`sintCmp`/`sintStr`/
-> `sintNum` calls and the next five languages skip this section entirely. Cost of
-> NOT having it, measured: ~90 lines of `languages/lib/java-rt.metajs`.
+> ~~**FLOOR REQUEST (reported, not made - the floor is another agent's this session):
+> a constructor that builds a tag 13 cell WITHOUT `si_norm`.**~~ **DONE 2026-08-03 -
+> `sintRaw(hi, lo, bits, unsigned)`, host id 62.** See "sintRaw" under tag 13 in
+> part 2 for the API and the measurement. `java-rt.metajs` is NOT converted here
+> (it is another agent's file); with it, `jlDiv`/`jlMod`/`jlSar`/`jlCmp`/`jlStr`/
+> `jlNum` collapse into plain `sintOp`/`sintCmp`/`sintStr`/`sintNum` calls and the
+> next five languages skip this section entirely. Cost of NOT having it, measured:
+> ~90 lines of `languages/lib/java-rt.metajs`.
 
 The **second-order cost** is the part worth reading, because it is what the next
 language will trip over: a long carried as an unsigned box is misread by any FLOOR
@@ -1954,22 +2135,119 @@ A fourth, `jlNum`, never shipped: `sintNum(x) - 2^64` for the negative half answ
 **0** for -1L, because the unsigned reading of -1 rounds to 2^64 exactly. Negating
 the magnitude's reading is exact, and rounding to nearest is symmetric about zero.
 
-**The 254 lines where we differ from real java are all one thing**: the smallest
-positive subnormal renders as `5.0E-324` where `Double.toString` gives `4.9E-324`
-(and `1.0E-323` against `9.9E-324`). It is the shortest-round-trip form against
-Java's own subnormal policy, it is **pre-existing in all three of our engines** -
-`java-interpreter.abnf`, `llvm.Run` and the native binary all print `5.0E-324` - and
-it is the same class as the Lua formatter difference already recorded above. Not
-fixed here: it is a three-halves job in `jvmFloStr`, `java-interpreter.abnf` and
-`runtime.c`, and it is not this task's gate.
+~~**The 254 lines where we differ from real java are all one thing**: the smallest
+positive subnormal renders as `5.0E-324` where `Double.toString` gives
+`4.9E-324`.~~ **FIXED 2026-08-03, in all engines, against real java 24.0.2.**
+
+**The rule, which is not "shortest".** `Double.toString` never uses fewer than TWO
+significant digits, and where the shortest round-tripping form has ONE, the second
+digit is **not a zero** but the closest two digit decimal to the ACTUAL value. For
+every NORMAL double those are the same thing - the value is within ~1e-16 of its one
+digit form, a thousandth of a two digit step - so it shows only among the
+SUBNORMALS, where the gap between neighbours is comparable to the value itself:
+`Double.MIN_VALUE` is 4.9406564584124654E-324, so java writes `4.9E-324` where
+appending `".0"` writes `5.0E-324`. `2 * MIN_VALUE` is 9.88e-324, so java writes
+`9.9E-324` where the shortest form is `1e-323`.
+
+**The trap, and it is the reason a naive "always two digits" is wrong**: the second
+digit belongs to the SIGNIFICAND, and the PLAIN form prints the NUMBER. `0.001` is
+`"0.001"`, not `"0.0010"`; `100.0` still gets its forced `".0"` from the
+already-existing rule. Only the scientific form ever shows the forced digit.
+
+**The second trap**: the scaling exponent is the VALUE's, not the shortest form's.
+`1e-322` is really 9.88e-323, whose two digit form is `9.9E-323` and NOT `1.0E-322`,
+so a scaled value below ten steps down one decade first; a carry to 100 steps back
+up. Four halves, not three:
+
+```
+languages/lib/runtime.c            g_mindig = 2 around shortest_digits, which
+                                   starts the search at k = 2 - the candidate for
+                                   k digits IS the exact value rounded to k
+                                   digits, nearest with ties to even, so no new
+                                   arithmetic was needed. The plain branch strips
+                                   the padding zero again.
+abnf/jsrtjvm.go   jvmFloStr        FormatFloat(a, 'E', 1, 64) when the shortest
+                                   mantissa has no '.', which IS "the closest two
+                                   digit decimal", carry included
+languages/metajs-interpreter.abnf  flTwo + flScale: the host engine's "" + a is
+                                   the shortest form, so the second digit is
+                                   computed by scaling and rounding. 10^325 is an
+                                   infinity, so the scaling is done in chunks.
+languages/java-interpreter.abnf    jFloSci, the same two steps
+```
+
+**Ground truth: 613 values** - every subnormal bit pattern from 1 to 59 plus the
+2^52 edges, a 6-mantissa x 92-decade grid from 1e-330 to 1e308, and both plain
+window boundaries in both directions - **byte-identical to `java` 24.0.2 in all five
+MetaJS engines** (`floStr(flo(v, 0))` under the interpreter goja and `-frozen`,
+`llvm.Run` goja and `-frozen`, and the native binary). The java-language halves are
+checked on the 379 of those whose plain decimal literal the java grammar accepts
+(its literal rule is bounded, which is a separate and pre-existing limit): the java
+interpreter under both engines, `llvm.Run` and the native binary are **379 of 379
+identical to real java**.
 
 ### What is owed, and what generalises
 
-1. **The floor request above** (`sintRaw`, a tag 13 without `si_norm`). It is worth
-   ~90 lines EACH for csharp, go, kotlin, swift and dart, and it is the single
-   highest-leverage floor line left on this line of work.
+1. ~~**The floor request above** (`sintRaw`, a tag 13 without `si_norm`).~~ **LANDED
+   2026-08-03** in all three engines. What is still owed is the CONSUMER side:
+   `java-rt.metajs`'s `jlDiv`/`jlMod`/`jlSar`/`jlCmp`/`jlStr`/`jlNum` collapse into
+   plain `sintOp`/`sintCmp`/`sintStr`/`sintNum` once the long is a raw SIGNED box,
+   and csharp/go/kotlin/swift/dart never write them at all.
 2. `abnf/jsrtjava.go` and `abnf/jsrtjvm.go` stay until the change is committed.
-3. The subnormal formatter, if and when someone does the three-halves job.
+3. ~~The subnormal formatter~~ **DONE 2026-08-03**, all four halves, 613 values
+   against real java.
+
+### The second-order hazard, audited across the whole floor
+
+Java found ONE floor extern that misreads a long carried as an unsigned-marked box
+(`js_jflo`) and fixed it in its emitter with `js_jvnum`. The mechanism generalises,
+and the audit below is the complete list for the five languages that follow, because
+**it is silently wrong rather than loud**.
+
+**The mechanism, in one line**: `to_number` of a tag 13 cell IS `si_float`
+(`runtime.c`, `to_number`'s `if (t == 13)` arm), and `si_float`'s
+`if (fc(h) && fb(h) == 64) return d_from_ulong(fa(h))` is the magnitude. So **every
+extern that calls `to_number` on a possibly-tag-13 operand is exactly as hazardous as
+`js_jflo`**. `si_val` (`return fa(h)`) is the signed-correct reader and is SAFE.
+
+**Reachable the moment csharp / go / kotlin / swift / dart copy Java's trick**, in
+priority order:
+
+| # | externs | why |
+|---|---|---|
+| 1 | **`js_gflo`, `js_csflo`** | literally `js_jflo`'s line with a different style byte. go emits `js_gflo`, csharp `js_csflo`, and **kotlin calls `js_jflo` directly with no `js_jvnum` equivalent** - it re-inherits the already-diagnosed bug |
+| 2 | **`js_jfsub` / `js_jfmul` / `js_jfdiv` / `js_jfmod`** | all reach `jf_arith`, whose first two lines are `to_number(l)` / `to_number(r)`. These are the MIXED int/float operators, i.e. exactly `longValue * 2.0` |
+| 3 | **`js_jfint`, `js_jfneg`** | `to_int32(to_number(v))`: a `-1L` box answers 0, not -1 |
+| 4 | **`js_sub` / `js_mul` / `js_le` / `js_ge`** in kotlin's and swift's RANGE loops, on user-supplied bounds, via `js_compare`'s `to_number` |
+| 5 | **swift's `binExt` table** - `& \| ^ << >>` map straight to the floor's `js_band`/`js_bor`/`js_bxor`/`js_shl`/`js_shr` on USER operands, and Swift's `Int` is 64 bit |
+| 6 | **`js_gival`** | go uses it as the unboxer for slice/index expressions, and it unboxes via `si_float`. `si_val` is the right one for a Java-style box |
+| 7 | **`js_gicmp` / `js_gilt` / `js_gile` / `js_gigt` / `js_gige`** | not the magnitude but the same root cause: `si_cmp` takes the UNSIGNED order, so a `-1L` box sorts ABOVE `0`. This is what `java-rt.metajs`'s `jlCmp` re-supplies |
+
+**Theoretically reachable only, and each says why**: `js_get`/`js_set` with a tag 13
+key (the magnitude fails `d_in_long` and returns -1, which is what a negative index
+does too - no observable divergence); `js_add`'s string arm and `js_throw`'s
+`to_string` (they render `si_str`'s unsigned digits, which IS the documented
+rendering for a genuinely unsigned box, and layer 2 intercepts them first);
+`js_eq`/`js_ne` (their `to_number` calls fire only when one side is a BOOLEAN - box
+vs box and box vs plain number go to `strict_eq`'s safe `si_eq`).
+
+**SAFE by construction, checked**: `js_truthy` and `js_not` (`fa(h) != 0`, the raw
+payload), `js_typeof`, `js_seq`/`js_sne` (`si_eq` -> `si_val`), `js_giconv`,
+`js_gineg`, `js_ginot`, `js_giis`, `js_gilit`, `js_tdecl`/`js_tset`, and every
+handle-passing extern.
+
+**Not externs but the same class**, and the layer-2 mirror of row 2 above: host ids
+`sintNum` (50, `si_float`), `sintStr` (49, `si_str`), and the whole `flo*` family -
+`flo` (51), `floNum` (53), `floOp` (56), `floMax`/`floMin` (58/59), `floAbs` (60) -
+all read through `to_number`. `java-rt.metajs`'s `jlNum` already compensates for id
+50; **nothing compensates for the `flo*` family**, so a language that hands a
+Java-style long to `floOp` gets the magnitude.
+
+**The general rule for the next five**: a sized integer handed to a FLOOR primitive
+needs an emitter-side `js_*num` unwrap, and the check is a grep over the emitter for
+the externs in the table above - not a judgement call. **`sintRaw` removes the need
+for the trick entirely**, which is the cheaper answer: a raw SIGNED box is read
+correctly by every one of them.
 
 What **generalises to the remaining eight**, in order of how much it saves:
 
@@ -1996,16 +2274,650 @@ What **generalises to the remaining eight**, in order of how much it saves:
 
 All three pass natively today, so unlike PHP the full-syntax entry is requested too.
 
+## CSHARP - DONE (2026-08-03). The gate is MET, generators included
+
+**`tests/csharp-test-full.cs` runs as a self-contained native binary and agrees
+with `llvm.Run` byte for byte - stdout, stderr and exit code - on all 250
+assertions (247 at the time of writing, plus the three `itr7`/`itr8`/`itr9` the
+floor fix below made it possible to pin), INCLUDING the SECTION 19 iterator
+ones**, which is the point of doing
+C# now. `tests/clang-check.sh` reads
+
+```
+csharp          36854  ok, and the clang executable agrees
+```
+
+so csharp left the `ok (module only)` row for the run-it row and NO row is held.
+`abnf/jsrtcsharp.go` is **kept**, as the plan requires: it is what `llvm.Run` still
+uses, and the two are now differentially compared over a 19,387-line probe.
+
+**There is no C# toolchain on this machine** - `dotnet`, `csc`, `mono` and `mcs`
+are all absent from `PATH`, and there is no `/usr/local/share/dotnet`, no
+`/opt/homebrew/bin/dotnet` and no `/Library/Frameworks/Mono.framework`. So unlike
+Java, whose oracle was a real `javac`/`java` 24.0.2, **every C# rule here is CITED
+rather than executed**, exactly as `abnf/jsrtcsharp.go`'s own header already says of
+itself. The ground truth available was: the two halves against each other over the
+whole probe, plus the 250 assertions of a ratchet file that was written against
+ECMA-334 clause numbers. That is weaker than Java's and it is stated rather than
+implied.
+
+### The extern split
+
+`tests/csharp-test-full.cs` drives **68** externs, and so does the union over every
+`tests/csharp-test-*.cs`.
+
+| where | count | what |
+|---|---|---|
+| already in the C floor | 35 | the generic primitives of phase 3, the five the Lua pilot added, `js_truthy`, `js_csflo`, and **`js_genfn` / `js_yield` / `js_ctl_*`** |
+| **layer 2**, language-NEUTRAL | 15 | `js_arr_new_n`, `js_char`, `js_char_code`, `js_dict_new`, `js_goslice`, `js_gospread`, `js_has`, `js_is_type`, `js_jadd`, `js_jchareq`, `js_mcall`, `js_pyget`, `js_pyset`, `js_pylen`, `js_supercall` |
+| **layer 2**, C#'s own | 18 | the `js_cs*` family |
+
+`languages/lib/csharp-rt.ll` (19,607 lines, from a 1,430-line `.metajs`) exports
+exactly those 33 symbols and nothing else - checked with `comm`, not assumed. The
+layer-2 source compiles **byte-identically under `-frozen`** as well as under goja.
+
+The split against the four done before it:
+
+```
+             floor   neutral   own      pair/box layer needed in layer 2
+lua            23        5      26      ~200 lines of i64 pairs
+php            29        8      63      a {__pf} float box
+swift          35       10      21      NONE
+java           29        9      16      ~90 lines of signed-long workarounds
+csharp         35       15      18      NONE  <- sintRaw
+```
+
+C#'s neutral 15 is the largest of the five, and that is a fact about the FLOOR
+rather than about C#: `js_goslice`, `js_gospread` and `js_has` are Go's and
+JavaScript's, they are in `abnf/jsrt.go`, and three languages have now written them
+out independently. They are the next floor candidates on this line.
+
+### `sintRaw` paid for itself the first time it was used, and it removed a HAZARD
+
+The floor request Java filed - "a constructor that builds a tag 13 cell WITHOUT
+`si_norm`" - landed as `sintRaw(hi, lo, bits, unsigned)`, host id 62. C# is the
+first user and the result is better than the ~90 lines the request predicted:
+
+1. **The 90 lines are gone.** `csharp-rt.metajs` has NO `jl*` layer. A C# `long` is
+   an honest `{w: 64, u: 0}` cell, so `sintOp`'s `/` `%` `>>`, `sintCmp`, `sintStr`
+   and `sintNum` are all used DIRECT - each of the six operations Java had to
+   re-supply is the floor's own, already branching on the cell's signedness.
+2. **The second-order hazard went with them, and that is the bigger half.** Java's
+   report warned that any FLOOR extern reading a tag 13 cell numerically sees a
+   MAGNITUDE when the cell is the marked-unsigned shape, and had to fix `js_jflo`
+   in its emitter with a `js_jvnum` wrapper. C# has exactly one such extern -
+   `js_csflo`, the `(double)` cast and the `double`-declared initializer - and it
+   needed **no wrapper at all**, because `to_number` of a signed cell is the signed
+   reading. `go`, `kotlin` and `dart` should take this route and not Java's.
+
+The one rule the layer-2 code has to keep is that `sintConv` (and every other
+`sint*` builtin) still ends in `si_norm`, so a 64-bit SIGNED result can come back
+unboxed. `csNorm(v, w, u)` is the single place that is repaired - `sintHi`/`sintLo`
+read a plain number exactly, so the re-box through `sintRaw` is lossless - and
+every other function in the file goes through it.
+
+> **`sintRaw` is complete in all THREE engines**, which was checked at the end
+> rather than assumed: the floor seeds it (`seed_root("sintRaw", mk_host(62))`),
+> `abnf/jsrtint.go` binds it in `giBindings`, and `languages/metajs-interpreter.abnf`
+> has `siRawHost`. (Mid-task it was floor-only, which would have meant
+> `csharp-rt.metajs` could not be run under `llvm.Run` for debugging; the floor
+> agent landed the two twins in the same session.)
+
+### DRIVING THE FLOOR'S GENERATORS - what js / ts / python need to know
+
+**C# is the first language on the landed coroutine primitive, and layer 2 owes it
+ZERO LINES.** The cost table in the coroutine section estimated ~40 lines of MetaJS
+for csharp's `MoveNext`/`Current`/`yield break`. The measured answer is 0, and the
+reason generalises:
+
+> **`csharp-to-llvm-ir.abnf` already lowered the whole iterator protocol in the
+> EMITTER, over externs the floor already has.** Nothing had to move to layer 2
+> because nothing was ever in layer 2.
+
+The five lines that do it, all pre-existing (`csharp-to-llvm-ir.abnf:2272-2392`):
+
+```
+js_genfn(js_closure(idx, scope))                     the iterator method itself
+js_seq(js_typeof(js_get(v, "next")), "function")     "is this a generator?"
+js_call(js_get(g, "next"), undefined, [])            MoveNext()
+js_get(step, "value")  /  js_get(step, "done")       the step record
+an ordinary ret                                      yield break
+```
+
+`get_member` answers `next` on a tag 15 cell with `mk_bound(g, 60)`, and `.Current`
+is a field the emitter parks on its own `{__csenum, g, cur}` cursor, so **every one
+of those is a floor extern**. A `throw` out of a generator body needed no case
+either: `gen_resume` re-raises on the resumer's stack, so it arrives at the `next()`
+call site like any other exception - measured, probe line `it4`, which throws from
+inside a body after one `yield` and catches it around the `foreach`.
+
+**The one thing that DID bite, and js/ts/python will hit it too:**
+
+> `js_genfn`'s result is a `*hostFunc` in the Go twin, so `typeof` answers
+> **"function"**. In the C floor it is a tag 16 cell: `is_callable(16)` is TRUE but
+> `type_of` falls through to **"object"** (`runtime.c:2061`, `2819`). A static
+> iterator method is therefore a class member that `js_mcall` refuses to call
+> natively while calling it happily under `llvm.Run`. Measured: it was the FIRST
+> native failure of `tests/csharp-test-full.cs`, `js runtime error: unknown method
+> 'S19UpTo'`, with the other 246 assertions never reached.
+>
+> ~~**FLOOR REQUEST (reported, not made - the floor is another agent's this
+> session): `type_of` and `type_class` should answer "function" for tag 16**~~
+> **LANDED (2026-08-03).** `type_of`, `type_class` **and `to_string`** now carry
+> `t == 16` next to 7/8/9, matching `is_callable` one line below them and matching
+> `abnf/jsrt.go` (`*jsClosure, *hostFunc, *boundMethod` -> `"function"` at 1545 and
+> `"[function]"` at 1065; `js_genfn` returns a `*hostFunc`). Three lines, not two.
+>
+> ~~Until it lands, `csharp-rt.metajs`'s `csIsFn` asks the question the way
+> `is_callable` answers it~~ - **the workaround is GONE**: `csIsFn` is now
+> `return typeof v == "function"`, and the `typeof v["apply"] == "function"` probe,
+> with the four guard lines it needed, is deleted.
+
+**The latent EMITTER divergence: MEASURED, it WAS broken, and it is now pinned.**
+
+The site was mis-attributed above: `csharp-to-llvm-ir.abnf:2521` is inside
+**`emitCompound`**, not `emitDelegCall`. `emitDelegCall` discriminates on
+`js_is_type(fV, "List")` and never asks `typeof`, so it was never affected.
+`emitCompound` is: `f += g` / `f -= g` on a delegate decides combine-vs-arithmetic
+at run time by testing `js_typeof(v) === "function"` on the RIGHT operand, so the
+divergence needs an **iterator method as the right operand of a delegate compound**.
+
+Constructed and run in all three engines, against a clean `git archive` of
+`65a443b` built in its own directory:
+
+```csharp
+delegate IEnumerable<int> Seq(int n);
+static IEnumerable<int> UpTo(int n)  { for (int i = 1; i <= n; i++) { yield return i; } }
+static IEnumerable<int> Tens(int n)  { yield return n * 10; yield return n * 100; }
+Seq a = Program.UpTo;   a += Program.Tens;   // <- the arm choice
+```
+
+| | interpreter | `llvm.Run` | native |
+|---|---|---|---|
+| at `65a443b` | `call 6 / combined 330 / removed 6` | same | **`call 6`, then `js runtime error: call of a non function value: 0`, rc=1** |
+| with the floor fix | same | same | **same, rc=0** |
+
+So it was BROKEN, not merely unmeasured: the native half took the arithmetic arm,
+`js_csarith` handed back a non-callable, and the next invocation died.
+
+**Pinned** as `itr7`/`itr8`/`itr9` in `tests/csharp-test-full.cs` section 19
+(`S19Seq`, `S19Tens`, `S19Sum`; the ratchet goes 247 -> 250). Discriminating
+power, measured twice:
+
+* the same file dropped into the clean `65a443b` archive - interpreter 250/250,
+  `llvm.Run` 250/250, and `tests/clang-check.sh csharp` flips from
+  `ok, and the clang executable agrees` to **`ok (module), BUT THE NATIVE RUN
+  DISAGREES`**; the native binary produces NO output at all and exits 1, so all
+  250 assertions are lost, not just the three.
+* mutating the fix back out of `runtime.c` in the CURRENT tree (with the
+  simplified `csIsFn`) and regenerating `runtime.ll` - same red row. Restored and
+  `gen-runtime-ll.sh --check` re-verified.
+
+**`tests/metajs-test-full.js` gets an honest ZERO.** MetaJS has no generator
+syntax and `metajs-to-llvm-ir.abnf` never emits `js_genfn` (`grep -n
+'genfn\|yield' languages/metajs-*.abnf` is empty of both), so MetaJS cannot
+construct a tag 16 cell and there is nothing there to assert. The pin is C#'s
+alone until js/ts/python arrive.
+
+### The two cross-cutting findings, checked and MEASURED for csharp
+
+1. **`core.truthyExt`.** `grep -n truthyExt languages/csharp-to-llvm-ir.abnf` is
+   EMPTY, so csharp keeps compile-core's default `js_truthy`, which is the C floor's
+   own function and already answers the raw 1/0 the emitted `icmp ne ..., 0`
+   compares. **No `__raw` export.** The running count is lua YES, php YES, swift NO,
+   java NO, csharp NO.
+2. **`_raw` PARAMETERS: csharp has exactly one**, `js_char`, whose code point the
+   emitter writes with `handle(code)` at two sites. Same as java. Count so far:
+   lua 3, php 0, swift 0, java 1, csharp 1.
+3. **The scope probe.** csharp needed NO lowering: its emitter already probes with
+   `js_scope_typeof` against `"undefined"` in IR (`csharp-to-llvm-ir.abnf:4109`) and
+   never had a scope-taking extern. Four languages, three lowerings, one already
+   done - the pattern holds and it is cheap or free.
+4. **`jsChar`.** The floor still has no char tag and C# still does not need one, for
+   Java's reason: the `{__char}` object box is safe exactly because no FLOOR extern
+   ever receives it. Audited: the emitter's `js_csflo` sites are guarded by
+   `js_char_code` or fed a literal; `js_seq` is emitted only on lengths, `typeof`
+   results and class descriptors; `==`/`!=`/`switch` go through `js_jchareq`; the
+   ordered comparisons through `js_cscmp`. The one unguarded site is the list-pattern
+   `js_seq` at `csharp-to-llvm-ir.abnf:2470`, which would compare two chars by
+   IDENTITY natively and by value in Go - no test declares a `char[]` list pattern
+   with a rest, so it is unmeasured rather than wrong, and `js_jchareq` is the
+   one-line fix.
+
+### Ground truth
+
+```
+matrix                  325/325
+--full                  csharp 247; 5615 assertions in total, goja and -frozen
+                        byte-identical, 0 languages with halves that disagree
+                        (5615 rather than the 5590 of 94ac7b8: dart's ratchet grew
+                        in the same session, in another agent's files)
+                        grep -E 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF'  -> empty
+--cross                 119 programs, 0 divergent
+go test ./abnf/         ok
+clang-check             16/16, and csharp joins the RUN-IT row
+gen-csharp-rt-ll.sh --check   csharp-rt.ll is up to date (19607 lines)
+-frozen recompile       csharp-rt.ll byte-identical to the goja build
+jsbootstrap.ll          untouched (metajs-to-llvm-ir.abnf was not edited)
+a real C# toolchain     NONE ON THIS MACHINE - see the note at the top
+```
+
+RE-MEASURED after the tag-16 floor fix, the `csIsFn` removal and the three new
+iterator-delegate assertions (working tree on `b7fdc4d`, shared with the go / ruby
+migrations):
+
+```
+matrix                  325/325
+--full                  csharp 250; 5618 assertions in total, 0 languages whose
+                        halves disagree; the grep is empty
+--cross                 119 programs, 0 divergent, 0 differing only in warnings
+go test ./abnf/         ok
+clang-check             16 modules, csharp `ok, and the clang executable agrees`
+                        (36854 lines). Two findings, BOTH other agents' in-flight
+                        work and neither caused by this change: go and ruby say
+                        `ok (module), BUT -exe FAILED TO BUILD` - both -exe
+                        branches are being written this session and neither
+                        existed at 65a443b.
+gen-*-rt-ll.sh --check  runtime (47963), csharp (19490), bash, batch, dart, java,
+                        lua, php, swift all up to date. gen-ruby-rt-ll.sh fails
+                        ("only 0 lines"); it is untracked and another agent's.
+-freeze fixed point     `mec -freeze languages/metajs-to-llvm-ir.abnf` leaves
+                        abnf/jsagrammar.go and abnf/jsbootstrap.ll unchanged
+coro-poc build.sh       BYTE-IDENTICAL in both engines (36 lines); --gc all four
+                        collector modes SAME; --break unchanged, the same eight
+                        broken roots DIFFER and the same six do not
+bench-alloc.sh          RSS FLAT under the collector (3,309,568 B at 100k, 200k
+                        and 400k iterations, i.e. bounded). MEC_GC=off is
+                        3,734 / 3,721 / 3,715 / 3,711 bytes per iteration at
+                        50k / 100k / 200k / 400k - the gate is ~3,713 and the
+                        number is unchanged by this edit
+```
+
+`csharp-rt.ll` SHRANK, 19,607 -> 19,490 lines: the `csIsFn` workaround's four
+guard lines and the `apply` lookup are gone and nothing replaced them.
+
+Every C# program in `tests/`, `llvm.Run` against the native binary, stdout **and**
+stderr **and** exit code:
+
+```
+csharp-test-full  csharp-test-1  csharp-test-features  csharp-test-complete
+csharp-test-try   csharp-test-recognize  csharp-test-main (rc=1 in both)
+csharp-test-multifile (-i tests/imports)                    all SAME
+```
+
+### The differential probe, and the one defect it found
+
+A **19,387-line / 523 KB** probe - `+ - * / % & | ^` over 26 int values, 20 long
+values, 10 ulong values and 9 uint values pairwise, the mixed int/long, int/uint and
+int/ulong promotions, the six comparisons across int/long/uint, `<<` and `>>` over
+13 counts spanning both the `&31` and `&63` mask boundaries and a negative one,
+unary `-` and `~` over all 75 integer values, every cast from 52 sources to all 11
+target types, `+ - * / %` over 20 doubles (both zeros, both infinities, NaN,
+DBL_MAX, the smallest subnormal, 1e20, 1e-20) pairwise and mixed with ints, the six
+comparisons over doubles, `ToString` of every double, `MinValue`/`MaxValue` for all
+nine integral types, `int.Parse`/`long.Parse` over 8 inputs, `++`/`--` at the wrap
+point of all ten types, four compound assignments at the wrap point of nine, char
+arithmetic and rendering over 6 code points including U+0000 and U+FFFF, string
+`Length` and indexing over an astral-free non-ASCII string, array `ToString`, five
+iterator drives (finite, ENDLESS-and-broken-early, explicit
+`GetEnumerator`/`MoveNext`/`Current`, a THROW out of a body caught around the
+`foreach`, and nested generators) and both integer divide-by-zero throws - is
+**BYTE-IDENTICAL between `llvm.Run` and the native binary**.
+
+One defect, found only by the probe and invisible to `./test.sh` because both
+engines were compared with themselves:
+
+> **`jsCompare`'s NaN SENTINEL is 2, and `js_cscmp` compares it like an ordering.**
+> `abnf/jsrt.go:1510` answers `2` for a NaN operand, commented "every relation is
+> false" - but `jsrtcsharp.go`'s `js_cscmp` does `c > 0` for `>` and `c >= 0` for
+> `>=`, so under `llvm.Run` **`double.NaN > 0.0` is TRUE** and `NaN <= 0.0` is
+> false. Layer 2 first returned the obvious 0, which makes `>` false and `<=` TRUE -
+> wrong in a DIFFERENT way. 16 probe lines. The fix was to reproduce the sentinel
+> exactly, and the site says so at length.
+>
+> **Both halves now agree and BOTH ARE WRONG against real C#**, where ECMA-334
+> 12.12.1 makes all four of `< > <= >=` false for a NaN operand. This is the defect
+> class the rules name - "both halves agreeing and both being wrong" - and byte
+> identity cannot see it. It is NOT fixable from layer 2 alone: `js_cscmp` in
+> `abnf/jsrtcsharp.go` and this file both have to test for the sentinel in the same
+> commit, and `js_swlt`/`js_jvcmp` should be checked for the same shape at the same
+> time (`java-rt.metajs`'s `jpCompare` returns 0 where `jsCompare` returns 2, so
+> Java may have the mirror-image mismatch on the `>=` arm).
+
+### What is owed, and what generalises
+
+1. **The floor line above**: `type_of`/`type_class` should answer `"function"` for
+   tag 16 (blocking nothing today only because of a layer-2 workaround, and latent
+   in `emitDelegCall`). `sintRaw`'s `giBindings` and interpreter twins landed in the
+   same session and are NOT owed.
+2. **The NaN sentinel**, which needs the Go twin and layer 2 changed together.
+3. `js_goslice` / `js_gospread` / `js_has` in the floor - three languages have now
+   written them out.
+4. `abnf/jsrtcsharp.go` stays until the change is committed.
+5. `>>>` is **not in the recognised C# subset**: `Shift` (grammar line 833) accepts
+   only `<<` and `>>`, although `emitBin` handles `>>>` and `>>>=`. So
+   `js_csshift(">>>")` is written in both halves and reachable from neither. Noted,
+   not changed - widening the grammar is not this task's gate.
+
+What **generalises to the remaining five**, in order of how much it saves:
+
+- **`sintRaw`, not Java's marked-unsigned trick.** It removes ~90 lines AND the
+  second-order hazard that cost Java an emitter change. go / kotlin / dart all have a
+  64 bit signed type and should all take this route.
+- **Generators may cost layer 2 nothing.** Check whether the emitter already drives
+  `next()` in IR before writing any MetaJS: csharp's did, and js / typescript /
+  python emit the same `js_genfn` shape. What they DO owe is the `js_iterable`
+  drain - `js-to-llvm-ir.abnf:3567,4108` and `js_pyiter` materialise a generator, so
+  their for-loops are eager and would hang on an infinite source. That is the one
+  place those three differ from csharp, and it is an EMITTER change (a `next()`
+  loop), not a layer-2 one.
+- **The tag 16 `typeof` divergence hits every one of them**, because every one of
+  them can put an iterator method on an object.
+- `core.truthyExt` and `_raw` parameters: check, do not assume; the counts are in
+  the two-things section at the head of Part 3.
+- An object box for a value type the floor has not got is safe exactly when no floor
+  extern receives it - a grep over the emitter, and csharp's is written out above
+  including the one site that is unmeasured.
+
+### launch.json entries wanted (not added - not my file)
+
+```
+"C# native binary, full syntax (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["languages/csharp-to-llvm-ir.abnf", "tests/csharp-test-full.cs", "-q", "-exe", "tests/csharp-native-full.out"]
+"C# native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["languages/csharp-to-llvm-ir.abnf", "tests/csharp-test-features.cs", "-q", "-exe", "tests/csharp-native.out"]
+"C# native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["-i", "tests/imports", "languages/csharp-to-llvm-ir.abnf", "tests/csharp-test-multifile.cs", "-q", "-exe", "tests/csharp-native-multi.out"]
+```
+
+All three pass natively today.
+
+## DART - DONE (2026-08-03). The gate is MET: 228/228 natively, byte-identical
+
+**`tests/dart-test-full.dart` runs as a self-contained native binary, all 228
+assertions pass in it, and its stdout, its stderr and its exit code are
+byte-identical with `llvm.Run`.** `tests/clang-check.sh` reads
+
+```
+dart            42374  ok, and the clang executable agrees
+```
+
+so dart left the `ok (module only)` row for the run-it row, **no row is held, no
+assertion is held back, and no floor change was needed or made.**
+`abnf/jsrtdart.go` is **kept**, as the plan requires: `llvm.Run` still uses it,
+the native binary uses layer 2, and the two are now differentially compared over
+31,675 probe lines.
+
+**No oracle: there is no `dart` on this machine** - `command -v dart`, `flutter`,
+`/usr/local/bin/dart`, `/opt/homebrew/bin/dart` and `/opt/homebrew/opt/dart-sdk`
+are all absent, and `tests/dart-test-full.dart` says so in its own header. The
+ground truth here is therefore **`abnf/jsrtdart.go` against layer 2**, which is
+the byte-identity gate, plus the corpus citations already carried in the Go twin
+and in the ratchet file. `clang` is Apple clang 17.0.0. Every statement below
+about "Dart" is a statement about our two halves agreeing, not about the VM.
+
+### The extern split
+
+`tests/dart-test-full.dart` drives **62** externs; over every `tests/dart-test-*.dart`
+the union is **67**, the five extra being `js_ctl_break`/`js_ctl_continue` (floor)
+and `js_darteq`/`js_dartle`/`js_dartne` (Dart's own).
+
+| where | count | what |
+|---|---|---|
+| already in the C floor | 37 | the generic primitives of phase 3, the five the Lua pilot added, `js_truthy`, the `sint`/`flo` machinery, `js_keys`, and the three the lowered scope probe now calls (`js_scope_typeof`, `js_typeof`, `js_sne`) |
+| **layer 2**, language-NEUTRAL | 13 | `js_dict_new`, `js_is_type`, `js_jadd`, `js_mcall`, `js_pyeq`, `js_pyget`, `js_pyin`, `js_pyiter`, `js_pylen`, `js_pyset`, `js_pyset_new`, `js_pyslice`, `js_pyspread` |
+| **layer 2**, Dart's own | 17 | the `js_dart*` family |
+
+`languages/lib/dart-rt.ll` (21,372 lines, from a 1,652-line `.metajs`) exports
+exactly those 30 symbols and nothing else - checked, not assumed. The layer-2
+source compiles **byte-identically under `-frozen`** as well as under goja.
+
+The split against the four done before it:
+
+```
+             floor   neutral   own      pair/box layer needed in layer 2
+lua            23        5      26      ~200 lines of i64 pairs
+php            29        8      63      a {__pf} float box
+swift          35       10      21      NONE
+java           29        9      16      ~90 lines, the unsigned-box long
+dart           37       13      17      NONE
+```
+
+**The trend the last four recorded holds, and the NEUTRAL column is now the one
+that grows.** Dart's own 17 is second-smallest, and it is the same shape Swift's
+was: rendering (`js_dartprint`/`js_dartstr`), value equality (`js_darteq`/
+`js_dartne`/`js_dartident`), arithmetic and the four comparisons, the two
+literal constructors, the type test, the const canonicaliser, and one method
+dispatcher. But its neutral column is the largest of the five, because Dart's
+emitter routes the whole collection library through the `js_py*` family. Six of
+those thirteen (`js_pyeq`, `js_pyin`, `js_pyiter`, `js_pyset_new`, `js_pyslice`,
+`js_pyspread`) had never been written in layer 2 before and are now available to
+python, ruby, go and kotlin unchanged.
+
+### `si_norm` is what Dart WANTS, which is the mirror image of the Java wall
+
+Java's `long` must not unbox, so `java-rt.metajs` carries a 64 bit box marked
+UNSIGNED and reimplements six operators - ~90 lines, and the reason the plan
+asks for a floor `sintRaw`. **Dart needs none of it, and the reason is worth
+stating because three of the remaining six will be on one side or the other.**
+`abnf/jsrtdart.go`'s own invariant is
+
+```
+plain number   ==  an int whose value is exact in a double (|v| <= 2^53)
+jsGInt         ==  an int outside that range (w = 64, u = false, always)
+```
+
+which is `giNorm` verbatim - and `giNorm` is exactly what `sint()` applies. So
+Dart's int is a plain `sintOp` / `sintCmp` / `sintStr` / `sintNum` at the default
+width and there is no wrapper anywhere. **The question to ask a new language is
+not "does it have a 64 bit signed type" but "is its unboxed representation the
+one `si_norm` produces".** Dart's is; Java's is not.
+
+`sintRaw` would still be worth having for java/go/kotlin - this is not an
+argument against it, only a measurement that Dart is not one of the five it was
+costed for.
+
+### The one thing the tag could NOT supply, and it cost three lines
+
+**`>>>`.** Dart's int is always signed, and the sized-integer tag's `>>` is
+arithmetic at the box's own signedness, so there is no op code for a LOGICAL
+64 bit shift. `dtLsr` is written over the codes there are - shift right one,
+clear the sign bit, shift right the rest - and every step is exact because the
+mask is built with the tag's own `<<` and `^`:
+
+```
+(x >> 1) & 0x7fff_ffff_ffff_ffff   then  >> (n - 1)
+```
+
+Not a floor request: three lines is cheaper than an eleventh op code, and the
+same trick is what `dtRadixMag` uses to read a negative 64 bit value as unsigned
+(`strconv.FormatUint`'s job) without a `sintRaw`.
+
+### The two cross-cutting findings, checked and MEASURED for dart
+
+1. **`core.truthyExt`.** `dart-to-llvm-ir.abnf` sets none, so it uses the default
+   `js_truthy`, **which is in the floor**. Dart therefore needs **no `__raw`
+   export**. The count over the five ported languages is now: Lua and PHP need
+   it, Swift, Java and Dart do not. `grep -n truthyExt` in the grammar remains
+   the one-line answer.
+2. **`_raw` PARAMETERS: dart has ZERO.** Every selector its emitter passes -
+   `js_dartarith`'s operator name, `js_dartlit`'s digits and radix - goes through
+   `emitStr`/`emitNum`. Every bare `handle(k)` in the grammar goes to
+   `js_closure` or `js_arg`, which are floor externs. The count is now
+   3 / 0 / 0 / 1 / 0 for lua / php / swift / java / dart.
+3. **The scope probe, third confirmation and the FIRST verbatim reuse.** Dart's
+   `js_kget`/`js_kset` are the same `this`-aware Kotlin pair Swift has - the Go
+   arms in `abnf/jsrt.go` are literally the same two functions - so
+   `swift-to-llvm-ir.abnf`'s `sw_kget`/`sw_kset` lowering transferred to
+   `dt_kget`/`dt_kset` unchanged, together with the `dt_safeget` guard and the
+   `core.scopeGetExt = "js_scope_get"` override that keeps compile-core's
+   `makeVarRef` off a name that is no longer an extern. 31 read sites and 3 write
+   sites became one call each, `llvm.Run` stayed at 228/228, and no floor change
+   was needed for the third time.
+
+> **The lowering is not free in the extern COUNT, and the plan should say so.**
+> It removes two externs and introduces three (`js_scope_typeof`, `js_typeof`,
+> `js_sne`) that the emitter did not previously reach. All three are already in
+> the floor, so the number that matters - what layer 2 has to write - fell by
+> two; the declare list grew by one. Swift's 68 -> 66 was measured before those
+> three were counted.
+
+### `jsChar` was not needed, and neither was a coroutine
+
+Dart has no character type: a "character" is a one-character String, and the
+emitter emits `js_char` / `js_char_code` / `js_kindex` **zero** times. And
+`grep -c 'js_genfn\|js_yield' languages/dart-to-llvm-ir.abnf` is **0** - Dart's
+`sync*` / `async*` are lowered by the emitter itself, so WALL 1 does not touch
+this language at all. Dart is the first of the eleven for which both of the
+floor's two known type gaps are simply absent.
+
+### Ground truth
+
+```
+matrix                325/325
+--full                5,615 assertions, 0 languages whose halves disagree (dart 228)
+                      grep 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF' -> empty
+--cross               119 programs, 0 divergent
+go test ./abnf/       ok
+clang-check           16/16, and dart joins the RUN-IT row
+jsbootstrap.ll        untouched (metajs-to-llvm-ir.abnf was not edited)
+gen-dart-rt-ll.sh --check   dart-rt.ll is up to date (21,372 lines)
+every other gen-*-rt-ll.sh --check   up to date
+real dart             NONE ON THIS MACHINE - see above
+```
+
+`tests/gen-runtime-ll.sh --check` reports `runtime.ll DIFFERS` in this working
+tree. That is **not this change**: `languages/lib/runtime.c` and `runtime.ll` are
+another agent's concurrent edit and were already out of step before any Dart file
+was touched. Nothing here depends on it - see the clean-archive run below.
+
+**Verified from a CLEAN ARCHIVE, not the working tree** - `git archive 94ac7b8 |
+tar x`, then only the four Dart files copied in, `go build` INSIDE, run there:
+
+```
+tests/gen-dart-rt-ll.sh --check     dart-rt.ll is up to date (21,372 lines)
+./dt.exe                            full: 228 checks, 0 failures   (rc=0)
+tests/clang-check.sh dart           ok, and the clang executable agrees
+the three probes below               all BYTE-IDENTICAL, 31,675 of 31,675 lines
+```
+
+Every Dart program in `tests/`, `llvm.Run` against the native binary, stdout AND
+stderr AND exit code:
+
+```
+dart-test-1  dart-test-complete  dart-test-features  dart-test-full
+dart-test-multifile  dart-test-try                            all SAME (rc=0)
+dart-test-recognize   NOT COMPARABLE - both halves refuse it identically
+                      ("library directive not implemented", recognition-only file)
+an uncaught throw     SAME message, rc=1 in both; llvm.Run's driver adds one
+                      "  ==> Fail" line of its own, the same difference
+                      php-test-undefconst and java record
+```
+
+### The differential probe - three probes, 31,675 lines, and the two defects
+
+**Probe A, 30,625 lines**: every operand read out of a LIST at run time, so
+nothing folds. 32x32 integer pairs times `+ - * & | ^ ~/ % remainder /` and all
+six comparisons plus `identical` and `compareTo`; 32 integers x 13 shift counts
+(spanning 31, 32, 63, 64, 65) times `<< >> >>>`; the full unary/member set per
+integer (`- ~ abs sign isEven toDouble toInt truncate floor ceil round
+*ToDouble toRadixString` at radix 2/8/16/36, `clamp`, the four `is` tests);
+32x32 double pairs times `+ - * / % remainder ~/` and the comparisons; the double
+unary and predicate set; and the 32x32 mixed int/double promotion grid. The
+operand bags carry both zeros, both int64 edges, the 2^53 boundary and its
+neighbours, 5e-324, 1e±100, DBL_MAX, 1e15/1e16 and 0.49999999999999994.
+
+**Probe B, 131 lines** and **Probe C, 919 lines**: the rendering, keying and
+dispatch surface - `Object.toString()` over every scalar and every container
+kind nested three deep, the self-referential `[...]`/`{...}` cycle guards, a
+user `toString()` on a superclass, enums (bare and enhanced), Types, records
+(positional, named and nested), const canonicalization across two constructors
+and across list/map/set/nested-const, `identical` over 26x26 pairs, Map and Set
+keying over the same grid (where `1` and `1.0` must key alike), the string
+methods, and the `is` matrix over 13 type names.
+
+```
+llvm.Run vs the native binary      BYTE-IDENTICAL on all three, 31,675 of 31,675
+```
+
+It found **two real defects**, both in layer 2, both invisible to `./test.sh`:
+
+1. **`math.Mod` twice over.** `dtFmod` started as `a - Math.trunc(a / b) * b`,
+   which is wrong in two independent ways. It loses the sign of a zero result -
+   `-0.0 % 1.0` is `-0.0` in Go and came out `+0.0`, because `-0.0 - (-0.0)` is
+   `+0.0` - which is **the fifth language in which the signed-zero trap has now
+   bitten, and the first in which it arrived through a REMAINDER rather than a
+   negation**. And it is not even approximately right across a wide exponent
+   range: `1e100 / 5e-324` is not representable, where Go's `math.Mod` is exact.
+   Both are fixed by the algorithm `math.Mod` itself uses, written without
+   `Frexp`/`Ldexp`: scale the divisor up by powers of two while `d <= r / 2` (the
+   guard that cannot overflow), then walk back down. Every `d * 2` and `d / 2` is
+   exact, every `r = r - d` is exact by Sterbenz because the loop keeps
+   `d <= r < 2*d`, and the sign is carried outside and put back with a unary
+   minus. 111 probe lines.
+2. **`[1, 2] + [3]` was "concatenated".** `abnf/jsrtdart.go`'s comment at
+   `js_dartarith` says "'+' on two Lists concatenates them, so a non-numeric pair
+   keeps the runtime's own rule", and layer 2 was written to that comment.
+   `rt.jsAdd` does **not** do that: a list or an object on either side renders
+   BOTH sides with `rt.toString` and concatenates the TEXT, so the answer is the
+   string `"1,23"`. The Go twin is the specification and layer 2 now reproduces
+   it. Recorded rather than corrected - making `+` concatenate lists is a change
+   to `rt.jsAdd`, to `dart-interpreter.abnf` and to a ratchet assertion, and it
+   is not this gate. It also forced `dtToStr` to become a faithful `rt.toString`
+   (the comma join, `[object Object]`, and the boxed-double arm) rather than the
+   three-line approximation it was.
+
+### What is owed, and what generalises
+
+1. Nothing for the gate. `abnf/jsrtdart.go` stays until the change is committed.
+2. `[1, 2] + [3]`, above: a three-halves job, both halves currently agree.
+3. `js_pyget` on a MISSING Map key ABORTS (`KeyError`) in both halves rather than
+   answering null, which is what Dart does. Pre-existing in `rt.dictFind`'s
+   caller, unchanged here, and no ratchet assertion reaches it.
+
+What **generalises to the remaining six**:
+
+- **The `si_norm` question has two answers and the language picks one.** Ask
+  whether the language's unboxed integer representation IS `giNorm`'s. Dart's is,
+  Java's is not; that one question is the difference between zero lines and
+  ninety.
+- **The scope-probe lowering is now copyable code, not just a pattern.** Two
+  languages with the same Go arms (`js_kget`/`js_kset`) share the same three IR
+  helpers verbatim. Check `abnf/jsrt.go` for the extern's implementation before
+  writing a new one.
+- **The neutral column is where the remaining work is.** Six new neutral externs
+  landed here; python, ruby, go and kotlin emit most of them and now inherit them.
+- A layer-2 file must be written against **the Go CODE**, not against the Go
+  comments. Defect 2 above was a faithful implementation of a comment that its
+  own function does not honour.
+
+### launch.json entries wanted (not added - not my file)
+
+Both pass natively today, at the working tree and from the clean archive:
+
+```
+"Dart native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["languages/dart-to-llvm-ir.abnf", "tests/dart-test-features.dart", "-q", "-exe", "tests/dart-native.out"]
+"Dart native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)"
+  args: ["-i", "tests/imports", "languages/dart-to-llvm-ir.abnf", "tests/dart-test-multifile.dart", "-q", "-exe", "tests/dart-native-multi.out"]
+```
+
+A full-syntax entry would be green too - `tests/dart-test-full.dart` passes
+228/228 natively - but it stays out of the matrix for the same reason every other
+`*-test-full.*` does: the ratchet lives in `./test.sh --full`, and
+`tests/clang-check.sh` already runs the native one on every sweep.
+
 ## Order
 
 Sorted by extern count and Go-twin size, which is the best available proxy for effort:
 
 ```
 language     externs   dedicated Go twin
-java              61   804
-csharp            67   813
+java              61   804   <- DONE 2026-08-03, gate MET (54 measured)
+csharp            67   813   <- DONE 2026-08-03, gate MET (68 measured, not 67)
 swift             68   986   <- DONE 2026-08-03, gate MET (66 after the scope-probe lowering)
-dart              72   896
+dart              72   896   <- DONE 2026-08-03, gate MET (67 measured; 64 before
+                             the scope-probe lowering added its three floor calls)
 js                88   (jsrtjsprint 1320 + jsrtjsbig 505)
 typescript        89   shares js's
 ruby              91   -   (semantics live in abnf/jsrt.go)
@@ -2046,6 +2958,17 @@ value model is a tag the floor already has", not by extern count.** On that meas
 lines and both are `sint`+`flo` languages exactly like Swift - and `js`,
 `typescript`, `python` and `ruby` are the hard ones, because they need WALL 1
 (coroutines) and share `abnf/jsrt.go` rather than owning a twin.
+
+**Both of those two were then done the same day, and the prediction held**:
+csharp's own surface was 24 and dart's 17, against extern counts of 67 and 72.
+**The five remaining are go, kotlin, js, typescript, python and ruby**, and the
+sort that now matters most is a different one again: `go` and `kotlin` still own a
+twin and are `sint`+`flo` languages, so they are the last two easy ones; the other
+four share `abnf/jsrt.go`, which means a layer-2 file for any of them drags in the
+NEUTRAL column rather than a language-specific one. Dart's port already wrote six
+of those neutral externs (`js_pyeq`, `js_pyin`, `js_pyiter`, `js_pyset_new`,
+`js_pyslice`, `js_pyspread`), so python and ruby start ahead of where this table
+suggests.
 
 ## Per language, the shape (from the Lua pilot)
 
@@ -2121,11 +3044,9 @@ per-stack at the same time, which is what makes a `try` INSIDE a body legal.
 The measurements are in section 5.
 
 **ONE THING THE NEXT PERSON MUST DO FIRST, and it is a hard link error rather
-than a warning.** `languages/lib/php-rt.metajs` still defines the two loud stubs
-`js_genfn` and `js_yield`, and the floor now defines them too. Nothing links the
-two together today - php's `tests/clang-check.sh` row is "module only - links
-natively, row HELD" - so the matrix is green at 325/325. The moment a php native
-binary links `php-rt.ll` next to `runtime.ll` it is:
+than a warning - DONE FOR PHP 2026-08-03, and still owed by the other three.**
+A layer-2 file that defines `js_genfn` / `js_yield` as loud stubs now collides
+with the floor:
 
 ```
 $ clang php-rt.ll runtime.ll <a jsmain/jsdispatch>
@@ -2135,9 +3056,17 @@ ld: 2 duplicate symbols
 ```
 
 The fix is the one section 4 already prescribed - **delete those two functions
-from `php-rt.metajs`** and the floor's own win the link. It is two deletions, but
-it is not optional any more. `grep -l 'define i64 @js_genfn' languages/lib/*-rt.ll`
-answers php and nothing else, so php is the only language affected.
+from the `-rt-lib` file** and the floor's own win the link. `php-rt.metajs` has
+had them deleted; `grep -l 'define i64 @js_genfn' languages/lib/*-rt.ll` answered
+php and nothing else at the time, so no other layer-2 file is affected yet, but
+the next one written must not add them back.
+
+**AND THE ERROR MESSAGE POINTS THE WRONG WAY.** Measured while doing it: the
+build reported `2 unresolved symbol(s): js_genfn, js_yield` when the real `ld`
+error was the duplicate above, because `buildExecutable` (`abnf/llvmmap.go`)
+builds its report from the module's undefined declarations filtered by whether
+the linker text mentions each name - and a duplicate-symbol error mentions
+exactly those names. Expect to read "unresolved" and find "duplicate".
 
 The PHP migration named WALL 1 as the one architectural blocker of the remaining
 rollout: "**Coroutines** (`js_genfn` / `js_yield`). No spelling in layer 2 at any
@@ -2615,11 +3544,18 @@ else in the generator protocol is layer 2 over that single primitive.
 
 ```
 language     what layer 2 owes                                        estimate
-php          delete the two loud stubs from php-rt.metajs - MEASURED as a  ~80 lines
-             hard `ld: duplicate symbol '_js_genfn'` now that the floor
-             defines them, not a shadow - then foreach-over-generator
-             as a next() loop, the __genkv key split, and a one-slot
-             lookahead buffer for current/key/valid/rewind/getReturn
+php          DONE 2026-08-03, and it came in at ~120 lines rather than    ~80 lines
+             80. The two loud stubs were deleted (measured as the hard
+             `ld: duplicate symbol '_js_genfn'` the section above
+             describes); foreach-over-generator was ALREADY a next()
+             loop in the emitter and needed nothing; the __genkv split
+             is in the emitter too. What layer 2 actually owed was the
+             INSPECTION half - and the extra 40 lines are the two
+             findings it produced: the cursor cannot be stored on a
+             generator cell (an identity-keyed SIDE TABLE, which every
+             language with current/valid/MoveNext will need) and layer
+             2 has no tag test, so recognising a generator is a
+             STRUCTURAL probe. See the PHP section of part 3.
 js / ts      it.next(v) is already the floor's shape; js_iterable     ~30 lines
              becomes a next() loop instead of a drain
 python       send(v) = next(v) plus StopIteration carrying the body's ~50 lines
@@ -2753,6 +3689,22 @@ engines (the two engines are the point), the exception machinery it rewrote is
 ratcheted in `metajs-test-full.js`, and the first LANGUAGE-level generator
 ratchet belongs to whichever of php / js / ts / python / csharp migrates first -
 their `-test-full` files already contain the assertions, quoted in section 1.
+
+> **CSHARP MIGRATED FIRST, 2026-08-03, and that ratchet now exists.** SECTION 19
+> of `tests/csharp-test-full.cs` runs in a NATIVE BINARY byte-identically with
+> `llvm.Run` - including `itr5`/`itr6`, the endless iterator a `foreach` leaves
+> early, which is the assertion an eager drain cannot pass. **Layer 2 cost: ZERO
+> LINES**, against the ~40 estimated in section 4's table: `csharp-to-llvm-ir.abnf`
+> already lowered `MoveNext`/`Current`/`yield break` in the EMITTER over
+> `js_get(g, "next")` + `js_call`, so every piece was already a floor extern.
+> The probe additionally pins a `throw` out of a generator body caught around the
+> `foreach`, which needed no case at all - `gen_resume` re-raises on the resumer's
+> stack, exactly as section 5 designed it.
+>
+> The one cost that WAS real is not in this file: the floor's `type_of` answers
+> `"object"` for a tag 16 cell where `abnf/jsrt.go` answers `"function"`. See the
+> csharp section of Part 3 - it is two characters in `type_of` and two in
+> `type_class`, and js / typescript / python will all hit it.
 
 Two smaller things, recorded at the same standard:
 

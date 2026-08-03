@@ -2065,7 +2065,7 @@ long to_string(long h) {
 		return out;
 	}
 	if (t == 6) { return mk_cstr("[object Object]"); }
-	if (t == 7 || t == 8 || t == 9) { return mk_cstr("[function]"); }
+	if (t == 7 || t == 8 || t == 9 || t == 16) { return mk_cstr("[function]"); }   /* tag 16 too: the Go twin's js_genfn result is a *hostFunc */
 	if (t == 11) { return mk_cstr("[scope]"); }
 	return mk_cstr("[value]");
 }
@@ -2079,7 +2079,12 @@ long type_of(long h) {
 	 * in layer 2 could only ever have answered "object". */
 	if (t == 3 || t == 13 || t == 14) { return mk_cstr("number"); }
 	if (t == 4) { return mk_cstr("string"); }
-	if (t == 7 || t == 8 || t == 9) { return mk_cstr("function"); }
+	/* Tag 16 is a GENERATOR FUNCTION and it is callable: is_callable() below
+	 * answers true for it, the Go twin's js_genfn returns a *hostFunc whose
+	 * typeOf is "function" (abnf/jsrt.go), and a caller that asks
+	 * `typeof m == "function"` before calling a member must get the same
+	 * answer in both halves. */
+	if (t == 7 || t == 8 || t == 9 || t == 16) { return mk_cstr("function"); }
 	return mk_cstr("object");
 }
 
@@ -2091,7 +2096,7 @@ long type_class(long h) {
 	if (t == 2) { return 2; }
 	if (t == 3 || t == 13 || t == 14) { return 3; }   /* a sized integer and a boxed double pin as "number" */
 	if (t == 4) { return 4; }
-	if (t == 7 || t == 8 || t == 9) { return 6; }
+	if (t == 7 || t == 8 || t == 9 || t == 16) { return 6; }   /* a generator function pins as "function", like type_of */
 	return 5;
 }
 const char *class_name(long tc) {

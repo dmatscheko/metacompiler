@@ -534,6 +534,27 @@ b";                                                   // verbatim keeps the newl
             while (true) { yield return i; i = i + 1; }
         }
         static async void S19Fire() { Program.S19Ran = true; }
+        // An iterator method behind a DELEGATE. This is the one shape that asks the
+        // runtime whether an iterator method IS a function, rather than just calling
+        // it: a compound '+=' / '-=' on a delegate decides combine-vs-arithmetic at
+        // run time by testing `typeof v == "function"` on the right operand, and an
+        // iterator method is the C floor's tag 16 - callable, but answering "object"
+        // from type_of until the floor was taught otherwise. Under that behaviour the
+        // native binary took the ARITHMETIC arm and died on the next call with
+        // "call of a non function value: 0", while llvm.Run and the interpreter both
+        // combined. itr8/itr9 are the pin.
+        delegate IEnumerable<int> S19Seq(int n);
+        static IEnumerable<int> S19Tens(int n)
+        {
+            yield return n * 10;
+            yield return n * 100;
+        }
+        static int S19Sum(IEnumerable<int> seq)
+        {
+            int t = 0;
+            foreach (var v in seq) { t += v; }
+            return t;
+        }
         static void S19()
         {
             int sum = 0;
@@ -556,6 +577,12 @@ b";                                                   // verbatim keeps the newl
             var ie = Program.S19Endless().GetEnumerator();
             Program.Check("itr6", ie.MoveNext() && ie.Current == 0
                                   && ie.MoveNext() && ie.Current == 1);
+            S19Seq sq = Program.S19UpTo;              // method group conversion of an ITERATOR
+            Program.Check("itr7", Program.S19Sum(sq(3)) == 6);
+            sq += Program.S19Tens;                    // multicast: last result wins
+            Program.Check("itr8", Program.S19Sum(sq(3)) == 330);
+            sq -= Program.S19Tens;
+            Program.Check("itr9", Program.S19Sum(sq(3)) == 6);
         }
 
         // ===== SECTION 20: using declarations and disposal =====

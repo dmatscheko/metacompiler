@@ -1095,29 +1095,15 @@ function csCopyArr(a) {
     return out
 }
 
-// csIsFn: "may this member be called". It is NOT `typeof v == "function"`, and the
-// reason is a MEASURED divergence between the two halves that C# is the first
-// language to reach:
-//
-//     js_genfn's result   Go twin (abnf/jsrt.go:5376)   a *hostFunc, typeOf "function"
-//                         C floor (runtime.c)           tag 16; is_callable(16) is
-//                                                       TRUE but type_of(16) falls
-//                                                       through to "object"
-//
-// So `static IEnumerable<int> S19UpTo(int n) { yield return ...; }` is a class member
-// whose typeof is "function" under llvm.Run and "object" natively, and js_mcall
-// would refuse to call it - measured, it was the FIRST native failure of
-// tests/csharp-test-full.cs ("unknown method 'S19UpTo'"). The one-line floor fix is
-// reported in docs/runtime-next-plan.md; until it lands, callability is asked for
-// the way is_callable answers it: get_member gives every CALLABLE cell - tag 16
-// included - a bound `apply`, and gives a plain object undefined.
+// csIsFn: "may this member be called". `typeof v == "function"` is the whole
+// test, in both halves: a generator function (the C floor's tag 16, a *hostFunc
+// in the Go twin) answers "function" as of the floor fix, so a static iterator
+// method is callable through js_mcall natively exactly as it is under llvm.Run.
+// This used to probe `typeof v["apply"] == "function"` instead, because the C
+// floor's type_of fell through to "object" for tag 16 while is_callable was
+// already true - that WORKAROUND is gone with the floor line that caused it.
 function csIsFn(v) {
-    if (typeof v == "function") { return true }
-    if (v === undefined) { return false }
-    if (v === null) { return false }
-    if (typeof v != "object") { return false }
-    if (Array.isArray(v)) { return false }
-    return typeof v["apply"] == "function"
+    return typeof v == "function"
 }
 
 function csPrepend(v, args) {
