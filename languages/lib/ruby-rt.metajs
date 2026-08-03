@@ -1,0 +1,2665 @@
+// ruby-rt.metajs -- RUBY'S OWN SEMANTICS, in MetaJS. Layer 2 of
+// docs/runtime-next-plan.md part 3, for the sixth language after the Lua pilot,
+// PHP, Swift, Java, C# and Dart.
+//
+// languages/ruby-to-llvm-ir.abnf emits handle IR that calls 93 js_* externs over
+// the full-syntax ratchet. 30 of them are generic primitives languages/lib/runtime.c
+// already provides (the C floor, layer 1). The other 63 are here.
+//
+// Compile with:
+//     mec languages/metajs-to-llvm-ir.abnf languages/lib/ruby-rt.metajs -q -rt-lib
+// which is what tests/gen-ruby-rt-ll.sh does; the result is the checked-in
+// languages/lib/ruby-rt.ll that ruby-to-llvm-ir.abnf links next to runtime.ll.
+// -rt-lib exports every TOP-LEVEL `function js_*` below under its own C symbol,
+// so nothing else in this file is visible to the linker - the helpers are
+// deliberately named rb*.
+//
+// THE AUTHORITATIVE SPECIFICATION IS abnf/jsrt.go (Ruby has NO dedicated Go twin:
+// its semantics live in the shared file, in rubyNumBin / rubyBin / rubyStr /
+// rubyInspect / rubyEq / rubySpaceship / rubyFormat / rubyMethod /
+// rubyArrayMethod / rubyIsA / rubyExc / memberCall and the js_r* extern table)
+// plus abnf/jsrtregex.go for the Regexp and MatchData halves. This file matches
+// them function for function; where it CANNOT, the site says so in full.
+//
+// ----- the value model -------------------------------------------------------
+//
+//     null / undefined     ==  nil
+//     a boolean            ==  true / false
+//     a PLAIN NUMBER       ==  Integer. Exact and NEVER truncated to 32 bit.
+//     {__flo: true, f}     ==  Float          (Go: jsFlo)
+//     {__rat: true, n, d}  ==  Rational       (Go: jsRat, sign in n, reduced)
+//     {__cpx: true, re, im} == Complex        (Go: jsCpx)
+//     {__sym: true, s}     ==  Symbol         (Go: jsSym)
+//     a string             ==  String
+//     an array             ==  Array
+//     a {__dict} object    ==  Hash: keys/vals parallel arrays, INSERTION ordered
+//     {__rrange, begin, end, excl}  == a Range with an OPEN end. A range with BOTH
+//                              bounds is MATERIALIZED as an array by js_rrangearr,
+//                              which is what the whole lowering expects.
+//     {__isclass, __name, __super, ...}   == a class / module descriptor. A BUILTIN
+//                              class additionally carries __rbuiltin.
+//     {__rxsrc, __rxflags}            == a Regexp
+//     {__rxmd, __rxsrc, __rxflags, __rxtext, __rxcaps}  == a MatchData
+//     any other object     ==  an instance; its descriptor is __class. An exception
+//                              instance additionally carries `args`.
+//
+// THE ONE PLACE THIS DIVERGES FROM THE GO TWIN, stated rather than buried:
+// jsFlo / jsRat / jsCpx / jsSym are Go value STRUCTS, so two of them with the same
+// contents are `===` equal and hash to the same dict key. Here they are OBJECTS,
+// which are compared by IDENTITY. SYMBOLS are therefore INTERNED (rbSym below
+// hands out one object per name), which restores === and dict keying exactly for
+// the one of the four that a Ruby program actually uses as a hash key and compares
+// with ==. Float/Rational/Complex are not interned: a Float used as a HASH KEY, or
+// compared with the floor's js_seq rather than through rbEq, would compare by
+// identity here and by value in Go. The emitter never emits js_seq on a number
+// (checked: its js_seq sites are `x === nil`, typeof results and class
+// descriptors), and rbEq/rbDictFind below compare the tower BY VALUE, so no
+// reachable path sees the difference.
+//
+// ----- what Ruby needed from the floor, and what it did NOT ------------------
+//
+//  1. NO sized-integer tag and NO boxed double. Ruby's Integer is the plain,
+//     un-truncated double and its Float is the {__flo} box above - the same
+//     representation abnf/jsrt.go uses - so neither tag 13 nor tag 14 is reached
+//     from this file at all. The si_norm question the plan asks ("is the
+//     language's unboxed representation the one si_norm produces") does not arise:
+//     Ruby never builds a tag-13 cell.
+//  2. NO `__raw` truthy shim. compile-core's truthy() emits `icmp ne <call>, 0` on
+//     core.truthyExt, so that extern must answer a RAW INTEGER - and a shim handing
+//     back a boolean HANDLE gives 2 for false, which is != 0, so every condition in
+//     the program would be taken, silently. `grep -n truthyExt
+//     languages/ruby-to-llvm-ir.abnf` is EMPTY, and Ruby goes further than the four
+//     languages that merely keep the default: it overrides truthy() itself with a
+//     single unsigned handle compare `v >= 3` (only 0/1/2 - undefined/null/false -
+//     are falsy, which IS Ruby truthiness). There is no extern in the path at all.
+//     The compare is sound natively because runtime.c seeds H_UNDEF/H_NULL/
+//     H_FALSE/H_TRUE as 0/1/2/3, the same four handles abnf/jsrt.go uses.
+//  3. NO `_raw` PARAMETERS. Every selector the ruby emitter passes goes through
+//     emitStr / emitNum; the bare handle(k) arguments go to js_closure, js_arg,
+//     js_rargrest, js_rblockarg and js_rrangearr - the first two are floor externs
+//     and the last three take a plain COUNT, so they are declared `_raw` below.
+//  4. NO coroutine primitive. `grep -c 'js_genfn\|js_yield'
+//     languages/ruby-to-llvm-ir.abnf` is 0: Ruby's `yield` is a call of the block
+//     the caller passed, not a generator, and no test file uses Fiber or
+//     Enumerator. WALL 1 does not touch this language.
+//  5. NO jsChar. Ruby has no character type; `?a` is a one-character String and the
+//     emitter never emits js_char / js_char_code / js_kindex.
+//
+// ----- WALL 3, the scope chain: lowered in the EMITTER, not here --------------
+//
+// js_rdefined took a SCOPE HANDLE and walked the chain. A scope is the floor's
+// private storage, so layer 2 cannot open one and this could never have been
+// written here. It is a pure PROBE, and an EMITTER may call js_scope_typeof, so
+// ruby-to-llvm-ir.abnf now emits it as the IR helper rb_defined. PHP recorded the
+// generalisation, Swift/Java/Dart confirmed it, Ruby is the fifth lowering.
+//
+// ----- the regular-expression engine is IMPORTED, not copied ------------------
+//
+// languages/lib/regex.js is the shared backtracking engine that every INTERPRETER
+// grammar includes into its tag script, and abnf/jsrtregex.go is its line-by-line
+// Go port. It is written in the same MetaJS this file is, so layer 2 does not need
+// a third copy: `import "./regex.js"` below compiles it into ruby-rt.ll with
+// everything else. That is the first time a layer-2 library has imported a shared
+// source rather than restating it, and it is worth copying - the whole Regexp /
+// MatchData surface cost 1,559 lines of nothing.
+//
+// ----- MetaJS rules that shape the code below --------------------------------
+//
+// docs/abnf-dialect-gotchas.md: a local (or a reassigned parameter) keeps the TYPE
+// CLASS it is first assigned, so a variable that holds a number in one branch and
+// an object in another is declared `var x = anytype`; there is no ASI, so every
+// `return` carries its value on the same line and a value-less early return is
+// BRACED; no for..in, no splice, no split/join/lastIndexOf, indexOf ignores its
+// from-index, array.length is not assignable, and there are no exponent literals.
+
+import "./regex.js"
+
+// ===================================================== module state =========
+//
+// Four tables the Go twin keeps on the jsrt struct (rubyClasses, rubyGlobals,
+// rubyLambdas, rubyCurExc). Every key is "$"-prefixed, which is the intern-key
+// rule of docs/abnf-dialect-gotchas.md: a bare user name could collide with an
+// Object.prototype member and the goja and frozen halves disagree about which
+// ones exist.
+
+var rbSymTable = {}      // "$name" -> the ONE symbol object of that name
+var rbClassTable = {}    // "$Name" -> the ONE builtin class object of that name
+var rbGlobals = {}       // "$name" -> the value of Ruby's $name
+var rbGlobalNames = {}   // "$name" -> true once assigned (defined? needs presence)
+var rbLambdas = []       // the closures a lambda literal produced (identity scan)
+var rbCurExc = null      // what the innermost rescue caught, for a bare `raise`
+
+// ===================================================== the value model ======
+
+function rbIsObj(v) {
+    if (v === null) { return false }
+    if (v === undefined) { return false }
+    if (typeof v != "object") { return false }
+    return !Array.isArray(v)
+}
+
+function rbTag(v, name) {
+    if (!rbIsObj(v)) { return false }
+    return v[name] === true
+}
+
+function rbIsSym(v) { return rbTag(v, "__sym") }
+function rbIsFlo(v) { return rbTag(v, "__flo") }
+function rbIsRat(v) { return rbTag(v, "__rat") }
+function rbIsCpx(v) { return rbTag(v, "__cpx") }
+function rbIsDict(v) { return rbTag(v, "__dict") }
+function rbIsRange(v) { return rbTag(v, "__rrange") }
+function rbIsClass(v) { return rbTag(v, "__isclass") }
+function rbIsArr(v) { return Array.isArray(v) }
+function rbIsNil(v) {
+    if (v === null) { return true }
+    return v === undefined
+}
+function rbIsFn(v) { return typeof v == "function" }
+
+// A user object: an instance carrying a __class descriptor (never a class itself).
+function rbUserObj(v) {
+    if (!rbIsObj(v)) { return false }
+    if (v["__isclass"] === true) { return false }
+    return v["__class"] !== undefined
+}
+
+// A symbol is INTERNED, so two :names are the same handle and === / dict keying
+// answer what the Go twin's comparable jsSym struct answers.
+function rbSym(name) {
+    var k = "$" + name
+    var got = rbSymTable[k]
+    if (got !== undefined) { return got }
+    var s = {__sym: true, s: name}
+    rbSymTable[k] = s
+    return s
+}
+
+// ===================================================== the numeric tower ====
+//
+// abnf/jsrt.go's rubyNumRank / rubyToF / rubyGcd / rubyMkRat / rubyReOf /
+// rubyImOf / rubyAsRat, in that order. Integer < Rational < Float < Complex;
+// every arithmetic step promotes both operands to the higher rank.
+
+function rbNumRank(v) {
+    if (typeof v == "number") { return 0 }
+    if (rbIsRat(v)) { return 1 }
+    if (rbIsFlo(v)) { return 2 }
+    if (rbIsCpx(v)) { return 3 }
+    return 0 - 1
+}
+
+function rbIsNum(v) { return rbNumRank(v) >= 0 }
+
+function rbToF(v) {
+    if (typeof v == "number") { return v }
+    if (rbIsFlo(v)) { return v["f"] }
+    if (rbIsRat(v)) { return v["n"] / v["d"] }
+    if (rbIsCpx(v)) { return v["re"] }
+    return 0
+}
+
+function rbMkFlo(x) { return {__flo: true, f: x} }
+function rbMkCpx(re, im) { return {__cpx: true, re: re, im: im} }
+
+// ----- EXACT integer arithmetic on doubles, and why every one of these exists ---
+//
+// The Go twin computes Ruby's Integer `/` and `%` and rubyGcd's math.Mod in
+// float64 - and on arm64 the Go compiler FUSES `x - q*y` into an FMSUB, so the
+// product and the subtraction are done at INFINITE precision and only the final
+// result is rounded. The C floor's clang does not fuse, so the same source gives a
+// different answer the moment |q*y| leaves the exactly-representable range:
+// `9007199254740991 % -3` is -2 under llvm.Run and -1 without the fusion. Measured
+// on the 36,000-line probe; real ruby 2.6.10 says -2, so the FUSED answer is also
+// the CORRECT one and this is layer 2's defect, not the Go twin's.
+//
+// rbFmaSub reproduces the fused `x - q*y` exactly, with the standard Dekker
+// two-product / two-sum emulation of an FMA. It is used by BOTH the Integer and
+// the Float remainder, which is where the Go source has the fusable expression.
+var RB_SPLIT = 134217729              // 2^27 + 1, Dekker's splitting constant
+var RB_SAFE = Math.pow(2, 500)        // an operand above this would overflow the
+                                      // split, so it is SCALED first (below).
+                                      // Written as a pow because the MetaJS dialect
+                                      // has no exponent literals.
+var RB_DOWN = Math.pow(2, 0 - 256)    // the scaling step, and its inverse
+var RB_UP = Math.pow(2, 256)
+
+// The high half of a, exactly representable in 26 bits.
+function rbSplitHi(a) {
+    var c = RB_SPLIT * a
+    return c - (c - a)
+}
+
+// x - q*y, correctly rounded as if ONE fused multiply-add had computed it.
+//
+// The two-product needs both operands under 2^500 or the 2^27 split overflows, and
+// a Float remainder legitimately has |q| near DBL_MAX (1e308 % 2.5). Scaling by a
+// POWER OF TWO is exact, so each operand is brought down first and the exact
+// product (p1 + e1) is scaled back by the same amount - |p1 * scale| is about |x|,
+// so the scale-back cannot overflow.
+function rbFmaSub(x, q, y) {
+    var p = q * y
+    if (p !== p) { return x - p }
+    if (p - p !== 0) { return x - p }
+    var qq = q
+    var yy = y
+    var scale = 1
+    while (Math.abs(qq) > RB_SAFE) {
+        qq = qq * RB_DOWN
+        scale = scale * RB_UP
+    }
+    while (Math.abs(yy) > RB_SAFE) {
+        yy = yy * RB_DOWN
+        scale = scale * RB_UP
+    }
+    var p1 = qq * yy
+    var qh = rbSplitHi(qq)
+    var ql = qq - qh
+    var yh = rbSplitHi(yy)
+    var yl = yy - yh
+    var e1 = ((qh * yh - p1) + qh * yl + ql * yh) + ql * yl
+    var P = p1 * scale
+    var E = e1 * scale
+    // TwoSum of x and -P, then the correction by the product's own error term.
+    var sm = x - P
+    var bb = sm - x
+    var d = (x - (sm - bb)) + (-P - bb)
+    return sm + (d - E)
+}
+
+function rbGcd(a, b) {
+    var x = Math.abs(a)
+    var y = Math.abs(b)
+    while (y != 0) {
+        // math.Mod is EXACT in the Go twin (it is not the fusable expression, it is
+        // a scaled subtraction loop), so the naive x - floor(x/y)*y was wrong for a
+        // numerator past 2^53 and reduced 90071992547409900/3 to 30023997515803300/1.
+        var t = rbFmaSub(x, Math.trunc(x / y), y)
+        x = y
+        y = t
+    }
+    return x
+}
+
+// The sign lives in the numerator and the pair is reduced, so two equal Rationals
+// have equal fields - which is what makes the Go twin's value equality reachable
+// through rbEq here.
+function rbMkRat(n, d) {
+    var nn = n
+    var dd = d
+    if (dd < 0) {
+        nn = 0 - nn
+        dd = 0 - dd
+    }
+    var g = rbGcd(nn, dd)
+    if (g > 1) {
+        nn = nn / g
+        dd = dd / g
+    }
+    return {__rat: true, n: nn, d: dd}
+}
+
+function rbReOf(v) {
+    if (rbIsCpx(v)) { return v["re"] }
+    return rbToF(v)
+}
+
+function rbImOf(v) {
+    if (rbIsCpx(v)) { return v["im"] }
+    return 0
+}
+
+function rbAsRat(v) {
+    if (rbIsRat(v)) { return v }
+    return rbMkRat(rbToF(v), 1)
+}
+
+// Integer division and modulo FLOOR in Ruby (-7 / 2 is -4, -7 % 3 is 2).
+function rbIDiv(a, b) {
+    if (b == 0) { fail("divided by 0") }
+    return Math.floor(a / b)
+}
+
+function rbIMod(a, b) {
+    if (b == 0) { fail("divided by 0") }
+    return rbFmaSub(a, Math.floor(a / b), b)
+}
+
+// rubyNumBin: one arithmetic step over the tower.
+function rbNumBin(op, l, r) {
+    var rk = rbNumRank(l)
+    var rr = rbNumRank(r)
+    if (rk < 0 || rr < 0) { fail("not a number in '" + op + "'") }
+    if (rr > rk) { rk = rr }
+    if (rk == 3) {
+        var ar = rbReOf(l)
+        var ai = rbImOf(l)
+        var br = rbReOf(r)
+        var bi = rbImOf(r)
+        if (op == "+") { return rbMkCpx(ar + br, ai + bi) }
+        if (op == "-") { return rbMkCpx(ar - br, ai - bi) }
+        if (op == "*") { return rbMkCpx(ar * br - ai * bi, ar * bi + ai * br) }
+        if (op == "/") {
+            var den = br * br + bi * bi
+            return rbMkCpx((ar * br + ai * bi) / den, (ai * br - ar * bi) / den)
+        }
+        fail("Complex does not support '" + op + "'")
+    }
+    if (rk == 1) {
+        var p = rbAsRat(l)
+        var q = rbAsRat(r)
+        if (op == "+") { return rbMkRat(p["n"] * q["d"] + q["n"] * p["d"], p["d"] * q["d"]) }
+        if (op == "-") { return rbMkRat(p["n"] * q["d"] - q["n"] * p["d"], p["d"] * q["d"]) }
+        if (op == "*") { return rbMkRat(p["n"] * q["n"], p["d"] * q["d"]) }
+        if (op == "/") { return rbMkRat(p["n"] * q["d"], p["d"] * q["n"]) }
+    }
+    if (rk >= 1) {
+        var x = rbToF(l)
+        var y = rbToF(r)
+        if (op == "+") { return rbMkFlo(x + y) }
+        if (op == "-") { return rbMkFlo(x - y) }
+        if (op == "*") { return rbMkFlo(x * y) }
+        if (op == "/") { return rbMkFlo(x / y) }
+        if (op == "%") { return rbMkFlo(rbFmaSub(x, Math.floor(x / y), y)) }
+        if (op == "**") { return rbMkFlo(Math.pow(x, y)) }
+        fail("Float does not support '" + op + "'")
+    }
+    var a = rbToF(l)
+    var b = rbToF(r)
+    if (op == "+") { return a + b }
+    if (op == "-") { return a - b }
+    if (op == "*") { return a * b }
+    if (op == "/") { return rbIDiv(a, b) }
+    if (op == "%") { return rbIMod(a, b) }
+    if (op == "**") {
+        if (b < 0) { return rbMkFlo(Math.pow(a, b)) }
+        return Math.pow(a, b)
+    }
+    // & | ^ are int64 in Go (`float64(int64(x) & int64(y))`). MetaJS's own & | ^
+    // are ToInt32, so they would wrap at 32 bits where the Go twin does not; the
+    // 64 bit halves are computed with the floor's sized-integer arithmetic below.
+    if (op == "&") { return rbBits64(op, a, b) }
+    if (op == "|") { return rbBits64(op, a, b) }
+    if (op == "^") { return rbBits64(op, a, b) }
+    if (op == "<<") { return a * Math.pow(2, b) }
+    if (op == ">>") { return Math.floor(a / Math.pow(2, b)) }
+    fail("Integer does not support '" + op + "'")
+    return 0
+}
+
+// & | ^ over the full int64 range, which is what `float64(int64(x) op int64(y))`
+// is in the Go twin. The floor's sized-integer tag (tag 13, docs part 2) does
+// exactly that arithmetic, and sintNum reads the signed 64 bit result back as a
+// double - so the whole of it is four calls and no 32 bit wrap. sint() applies
+// si_norm, which is precisely right here: an Integer IS "a value exact in a
+// double" until it leaves the tower, so a result inside +-2^53 comes back unboxed
+// and one outside it stays a cell that sintNum reads.
+function rbBits64(op, a, b) {
+    var x = sintRaw(sintHi(Math.trunc(a)), sintLo(Math.trunc(a)), 64, false)
+    var y = sintRaw(sintHi(Math.trunc(b)), sintLo(Math.trunc(b)), 64, false)
+    var code = 5
+    if (op == "|") { code = 6 }
+    if (op == "^") { code = 7 }
+    return sintNum(sintOp(code, x, y))
+}
+
+function rbNumCmp(l, r) {
+    var a = rbToF(l)
+    var b = rbToF(r)
+    if (a < b) { return 0 - 1 }
+    if (a > b) { return 1 }
+    return 0
+}
+
+// rubyNeg: unary minus over the tower. Written `0 - x` NOWHERE - the signed-zero
+// trap the plan records has bitten five languages, and `0 - 0.0` is `+0.0` where
+// the sign has to survive. MetaJS's own unary minus compiles to js_neg, which is
+// the floor's sign flip.
+function rbNeg(v) {
+    if (typeof v == "number") { return -v }
+    if (rbIsFlo(v)) { return rbMkFlo(-v["f"]) }
+    if (rbIsRat(v)) { return {__rat: true, n: -v["n"], d: v["d"]} }
+    if (rbIsCpx(v)) { return rbMkCpx(-v["re"], -v["im"]) }
+    if (rbUserObj(v)) { return rbMethod(v, "-@", []) }
+    fail("cannot negate a " + typeof v)
+    return 0
+}
+
+// ===================================================== rendering ============
+
+// rubyFloStr: a Float keeps its decimal point even when it is whole (1000.0),
+// which is what tells it apart from the Integer 1000.
+function rbFloStr(x) {
+    if (x !== x) { return "NaN" }
+    // The infinities without naming the Infinity global, which the interpreter half
+    // spells 1 / 0 too (languages/metajs-interpreter.abnf): Inf - Inf is NaN.
+    if (x - x !== 0) {
+        if (x > 0) { return "Infinity" }
+        return "-Infinity"
+    }
+    if (x == Math.trunc(x) && Math.abs(x) < 10000000000000000) { return ("" + x) + ".0" }
+    return "" + x
+}
+
+// Ruby's #to_s. A Float keeps its point, a Symbol is its bare name, and an Array
+// or Hash renders like #inspect (which is what interpolating a collection gives).
+function rbStr(v) {
+    if (rbIsNil(v)) { return "" }
+    if (typeof v == "string") { return v }
+    if (typeof v == "number") { return "" + v }
+    if (rbIsFlo(v)) { return rbFloStr(v["f"]) }
+    if (rbIsRat(v)) { return ("" + v["n"]) + "/" + ("" + v["d"]) }
+    if (rbIsCpx(v)) { return ("" + v["re"]) + "+" + ("" + v["im"]) + "i" }
+    if (rbIsSym(v)) { return v["s"] }
+    if (rbIsArr(v)) { return rbInspect(v) }
+    if (rbIsDict(v)) { return rbInspect(v) }
+    if (rbIsObj(v)) {
+        // A CLASS object stringifies as its name (`Foo.to_s` / "#{Foo}" == "Foo").
+        if (v["__isclass"] === true) {
+            var nm = v["__name"]
+            if (typeof nm == "string") { return nm }
+        }
+        var m = rbFindMethod(v, "to_s")
+        if (m !== undefined) { return rbStr(m.apply(undefined, [v])) }
+        // An exception instance renders as its message, like Exception#to_s.
+        if (v["args"] !== undefined) {
+            var msg = rbExcMessage(v)
+            if (msg !== undefined) { return "" + msg }
+        }
+    }
+    return "" + v
+}
+
+// Ruby's #inspect: nil, quoted strings, :symbols, and the bracketed collections.
+function rbInspect(v) {
+    if (rbIsNil(v)) { return "nil" }
+    if (typeof v == "string") { return "\"" + v + "\"" }
+    if (rbIsSym(v)) { return ":" + v["s"] }
+    if (rbIsArr(v)) {
+        var out = "["
+        var i = 0
+        while (i < v.length) {
+            if (i > 0) { out = out + ", " }
+            out = out + rbInspect(v[i])
+            i = i + 1
+        }
+        return out + "]"
+    }
+    if (rbIsDict(v)) {
+        var keys = v["keys"]
+        var vals = v["vals"]
+        var s = "{"
+        var j = 0
+        while (j < keys.length) {
+            if (j > 0) { s = s + ", " }
+            s = s + rbInspect(keys[j]) + " => " + rbInspect(vals[j])
+            j = j + 1
+        }
+        return s + "}"
+    }
+    return rbStr(v)
+}
+
+// ===================================================== format ===============
+//
+// rubyFormat: the printf directives Ruby shares with C,
+// %[-][0][+][ ][width][.prec](d|i|f|s|x|X|o|b|e|%).
+
+function rbDigitAt(s, i) {
+    var c = s.charCodeAt(i)
+    if (c < 48 || c > 57) { return 0 - 1 }
+    return c - 48
+}
+
+// ----- EXACT decimal expansion of a double ---------------------------------
+//
+// strconv.FormatFloat prints the EXACT value of the double and rounds HALF TO
+// EVEN, which the naive `Math.floor(a * 10^prec + 0.5)` gets wrong twice over:
+// it rounds half AWAY from zero (Go's %.0f of 2.5 is "2", not "3") and it loses
+// every digit past 2^53 ("%f" of 1e100 has to print all 101 of them). Both were
+// measured on the differential probe.
+//
+// A finite double is m * 2^e with m an integer below 2^53, so its exact decimal
+// is a bignum: for e >= 0 it is m doubled e times, and for e < 0 it is m
+// multiplied by 5 exactly -e times with the point placed -e digits from the
+// right (because 2^-e == 5^-e / 10^-e). The bignum is a little-endian array of
+// base-10000 limbs; multiplying by 2 or by 5 keeps every intermediate under
+// 50000 + 10000, which a double holds exactly.
+
+function rbBigFromNum(n) {
+    var limbs = []
+    var x = n
+    while (x > 0) {
+        var q = Math.floor(x / 10000)
+        limbs.push(x - q * 10000)
+        x = q
+    }
+    if (limbs.length == 0) { limbs.push(0) }
+    return limbs
+}
+
+function rbBigMulSmall(limbs, k) {
+    var carry = 0
+    var i = 0
+    while (i < limbs.length) {
+        var v = limbs[i] * k + carry
+        carry = Math.floor(v / 10000)
+        limbs[i] = v - carry * 10000
+        i = i + 1
+    }
+    while (carry > 0) {
+        var c2 = Math.floor(carry / 10000)
+        limbs.push(carry - c2 * 10000)
+        carry = c2
+    }
+    return limbs
+}
+
+function rbBigStr(limbs) {
+    var out = "" + limbs[limbs.length - 1]
+    var i = limbs.length - 2
+    while (i >= 0) {
+        var s = "" + limbs[i]
+        while (s.length < 4) { s = "0" + s }
+        out = out + s
+        i = i - 1
+    }
+    return out
+}
+
+// The exact decimal of |x| as {i: <integer digits>, f: <fraction digits>}.
+function rbExactDec(a) {
+    if (a == 0) { return {i: "0", f: ""} }
+    var m = a
+    var e = 0
+    // Down to an integer mantissa. Every step is exact, and a subnormal needs at
+    // most 1074 of them.
+    while (m != Math.floor(m)) {
+        m = m * 2
+        e = e - 1
+    }
+    // And back under 2^53, which only an already-integral value can be above.
+    while (m > 9007199254740992) {
+        m = m / 2
+        e = e + 1
+    }
+    var limbs = rbBigFromNum(m)
+    if (e >= 0) {
+        var k = 0
+        while (k < e) {
+            rbBigMulSmall(limbs, 2)
+            k = k + 1
+        }
+        return {i: rbBigStr(limbs), f: ""}
+    }
+    var n = 0 - e
+    var j = 0
+    while (j < n) {
+        rbBigMulSmall(limbs, 5)
+        j = j + 1
+    }
+    var all = rbBigStr(limbs)
+    while (all.length <= n) { all = "0" + all }
+    return {i: all.substring(0, all.length - n), f: all.substring(all.length - n, all.length)}
+}
+
+// Round the digit string `digits` (an integer written out) to `keep` digits,
+// half to EVEN, and answer the kept digits - one longer when the rounding
+// carried all the way (999 -> 1000), which the caller detects by the length.
+function rbRoundHalfEven(digits, keep) {
+    if (keep >= digits.length) {
+        var out = digits
+        while (out.length < keep) { out = out + "0" }
+        return out
+    }
+    var head = digits.substring(0, keep)
+    var d = digits.charCodeAt(keep) - 48
+    var up = false
+    if (d > 5) { up = true }
+    if (d == 5) {
+        var rest = false
+        var i = keep + 1
+        while (i < digits.length) {
+            if (digits.charAt(i) != "0") {
+                rest = true
+                break
+            }
+            i = i + 1
+        }
+        if (rest) { up = true } else if (keep > 0) {
+            var last = head.charCodeAt(keep - 1) - 48
+            up = last - Math.floor(last / 2) * 2 == 1
+        }
+    }
+    if (!up) {
+        if (head == "") { return "0" }
+        return head
+    }
+    // Propagate the carry through the kept digits.
+    var codes = []
+    var k = 0
+    while (k < head.length) {
+        codes.push(head.charCodeAt(k) - 48)
+        k = k + 1
+    }
+    var at = codes.length - 1
+    var carry = 1
+    while (at >= 0 && carry == 1) {
+        var v = codes[at] + 1
+        if (v == 10) {
+            codes[at] = 0
+        } else {
+            codes[at] = v
+            carry = 0
+        }
+        at = at - 1
+    }
+    var res = ""
+    var q = 0
+    while (q < codes.length) {
+        res = res + ("" + codes[q])
+        q = q + 1
+    }
+    if (carry == 1) { res = "1" + res }
+    return res
+}
+
+// strconv.FormatFloat(v, 'f', prec, 64), exactly: the true decimal of the double,
+// cut to prec fraction digits with half-to-even rounding.
+function rbFixed(x, prec) {
+    if (x !== x) { return "NaN" }
+    if (x - x !== 0) {
+        if (x > 0) { return "+Inf" }
+        return "-Inf"
+    }
+    // The sign of a zero has to be READ rather than compared: -0.0 < 0 is false
+    // and Go prints "-0.000000". 1 / -0.0 is the only test that sees it.
+    var neg = x < 0
+    if (x == 0 && 1 / x < 0) { neg = true }
+    var a = neg ? -x : x
+    var dec = rbExactDec(a)
+    var ip = dec["i"]
+    var fp = dec["f"]
+    var joined = ip + fp
+    var kept = rbRoundHalfEven(joined, ip.length + prec)
+    // A carry out of the leading digit lengthens the integer part by one.
+    var ilen = ip.length
+    if (kept.length > ip.length + prec) { ilen = ilen + 1 }
+    var ints = kept.substring(0, ilen)
+    var fracs = kept.substring(ilen, kept.length)
+    if (ints == "") { ints = "0" }
+    var body = ints
+    if (prec > 0) { body = ints + "." + fracs }
+    return (neg ? "-" : "") + body
+}
+
+// strconv.FormatFloat(v, 'e', prec, 64): d.dddde+XX, at least two exponent digits.
+function rbSci(x, prec) {
+    if (x !== x) { return "NaN" }
+    if (x - x !== 0) {
+        if (x > 0) { return "+Inf" }
+        return "-Inf"
+    }
+    var neg = x < 0
+    if (x == 0 && 1 / x < 0) { neg = true }
+    var a = neg ? -x : x
+    if (a == 0) {
+        var z = "0"
+        if (prec > 0) {
+            z = z + "."
+            var zi = 0
+            while (zi < prec) {
+                z = z + "0"
+                zi = zi + 1
+            }
+        }
+        return (neg ? "-" : "") + z + "e+00"
+    }
+    var dec = rbExactDec(a)
+    var ip = dec["i"]
+    var fp = dec["f"]
+    var all = ip + fp
+    // The exponent of the first significant digit, relative to the point.
+    var lead = 0
+    while (lead < all.length && all.charAt(lead) == "0") { lead = lead + 1 }
+    var e = ip.length - 1 - lead
+    var sig = all.substring(lead, all.length)
+    var kept = rbRoundHalfEven(sig, prec + 1)
+    if (kept.length > prec + 1) {
+        // 9.99 -> 10.0: one digit fell out of the mantissa.
+        e = e + 1
+        kept = kept.substring(0, prec + 1)
+    }
+    var m = kept.substring(0, 1)
+    if (prec > 0) { m = m + "." + kept.substring(1, kept.length) }
+    var es = "" + (e < 0 ? 0 - e : e)
+    if (es.length < 2) { es = "0" + es }
+    return (neg ? "-" : "") + m + "e" + (e < 0 ? "-" : "+") + es
+}
+
+// ----- strconv.FormatInt(int64(x), base) ------------------------------------
+//
+// Two things the naive loop got wrong, both measured: the digit alphabet is 36
+// long and not 16 (to_s(36) of 100 is "2s"), and Go converts through int64,
+// which SATURATES on arm64 - `int64(1e100)` is 0x7fffffffffffffff and its hex is
+// "7fffffffffffffff", not the 84 digits a float loop produces. The digits are
+// taken with the floor's sized-integer tag (tag 13), which is exact int64
+// arithmetic, on the UNSIGNED reading of the magnitude - the one shape whose
+// negation is exact for int64's minimum too, which is the trick java-rt.metajs
+// records.
+var RB_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+function rbBaseStr(n, base) {
+    var v = Math.trunc(n)
+    if (v !== v) { v = 0 }
+    if (v == 0) { return "0" }
+    var neg = false
+    var mag = sintRaw(0, 0, 64, true)
+    if (v >= 9223372036854775808) {
+        mag = sintRaw(2147483647, 4294967295, 64, true)   // int64 max
+    } else if (v <= 0 - 9223372036854775808) {
+        neg = true
+        mag = sintRaw(2147483648, 0, 64, true)            // |int64 min|
+    } else {
+        neg = v < 0
+        var a = neg ? -v : v
+        mag = sintRaw(sintHi(a), sintLo(a), 64, true)
+    }
+    var b = sintRaw(0, base, 64, true)
+    var zero = sintRaw(0, 0, 64, true)
+    var out = ""
+    while (sintCmp(mag, zero) != 0) {
+        var d = sintNum(sintOp(4, mag, b))
+        out = RB_DIGITS.charAt(d) + out
+        mag = sintOp(3, mag, b)
+    }
+    return (neg ? "-" : "") + out
+}
+
+// strings.ToUpper / strings.ToLower - the full Unicode SIMPLE mapping. The C
+// floor's own toUpperCase / toLowerCase are exactly that (runtime.c generated its
+// 328 ranges from the Go runtime's own answers), so an ASCII loop here would be a
+// third, worse, copy: it printed "CAFé" for "café".
+function rbUpper(s) { return s.toUpperCase() }
+function rbLower(s) { return s.toLowerCase() }
+
+// The first `n` BYTES of a string, as Go's body[:n] takes them. Every string the
+// %s directive can be handed is valid UTF-8 here, and a cut that would land inside
+// a multi-byte character stops before it - which is what a Go slice of a valid
+// string does to the RUNES, and the corpus has no case that reaches it.
+function rbByteCut(s, n) {
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+        var next = out + s.charAt(i)
+        if (byteLen(next) > n) { return out }
+        out = next
+        i = i + 1
+    }
+    return out
+}
+
+function rbFormat(spec, arg) {
+    var args = [arg]
+    if (rbIsArr(arg)) { args = arg }
+    var ai = 0
+    var out = ""
+    var i = 0
+    while (i < spec.length) {
+        if (spec.charAt(i) != "%") {
+            out = out + spec.charAt(i)
+            i = i + 1
+            continue
+        }
+        i = i + 1
+        if (i >= spec.length) {
+            out = out + "%"
+            i = i + 1
+            continue
+        }
+        if (spec.charAt(i) == "%") {
+            out = out + "%"
+            i = i + 1
+            continue
+        }
+        var left = false
+        var zero = false
+        while (i < spec.length) {
+            var fc = spec.charAt(i)
+            if (fc != "-" && fc != "0" && fc != "+" && fc != " ") { break }
+            if (fc == "-") { left = true }
+            if (fc == "0") { zero = true }
+            i = i + 1
+        }
+        var width = 0
+        while (i < spec.length) {
+            var wd = rbDigitAt(spec, i)
+            if (wd < 0) { break }
+            width = width * 10 + wd
+            i = i + 1
+        }
+        var prec = 0 - 1
+        if (i < spec.length && spec.charAt(i) == ".") {
+            i = i + 1
+            prec = 0
+            while (i < spec.length) {
+                var pd = rbDigitAt(spec, i)
+                if (pd < 0) { break }
+                prec = prec * 10 + pd
+                i = i + 1
+            }
+        }
+        if (i >= spec.length) { break }
+        var conv = spec.charAt(i)
+        i = i + 1
+        var nx = null
+        if (ai < args.length) { nx = args[ai] }
+        var body = ""
+        if (conv == "d" || conv == "i") {
+            ai = ai + 1
+            body = "" + Math.trunc(rbToF(nx))
+        } else if (conv == "f") {
+            ai = ai + 1
+            body = rbFixed(rbToF(nx), prec < 0 ? 6 : prec)
+        } else if (conv == "e") {
+            ai = ai + 1
+            body = rbSci(rbToF(nx), prec < 0 ? 6 : prec)
+        } else if (conv == "s") {
+            ai = ai + 1
+            body = rbStr(nx)
+            // body[:prec] in Go is a BYTE slice; the cut has to count bytes too.
+            if (prec >= 0 && prec < byteLen(body)) { body = rbByteCut(body, prec) }
+        } else if (conv == "x") {
+            ai = ai + 1
+            body = rbBaseStr(rbToF(nx), 16)
+        } else if (conv == "X") {
+            ai = ai + 1
+            body = rbUpper(rbBaseStr(rbToF(nx), 16))
+        } else if (conv == "o") {
+            ai = ai + 1
+            body = rbBaseStr(rbToF(nx), 8)
+        } else if (conv == "b") {
+            ai = ai + 1
+            body = rbBaseStr(rbToF(nx), 2)
+        } else {
+            body = conv
+        }
+        var pad = " "
+        if (zero && !left) { pad = "0" }
+        // Go pads to `len(body)`, which is the BYTE length of the UTF-8 string, not
+        // the number of characters: "%10s" of "café" gets FIVE spaces, not six.
+        // byteLen is the floor's own answer to that and it is what the emitters
+        // already use (lib/compile-core.js emitStr).
+        while (byteLen(body) < width) {
+            if (left) {
+                body = body + " "
+            } else if (pad == "0" && body.length > 0 && body.charAt(0) == "-") {
+                body = "-" + pad + body.substring(1, body.length)
+            } else {
+                body = pad + body
+            }
+        }
+        out = out + body
+    }
+    return out
+}
+
+// ===================================================== truthiness ===========
+//
+// rubyTruthy: only nil and false are falsy (0, "" and the empty collections are
+// all truthy). It backs the select/reject predicates so js_rxmcall agrees with
+// the emitter's own `handle >= 3` compare, and NOT with JS truthiness.
+function rbTruthy(v) {
+    if (rbIsNil(v)) { return false }
+    if (v === false) { return false }
+    return true
+}
+
+// ===================================================== dicts ================
+//
+// dictFind / dictScan / dictAppend of abnf/jsrt.go. The Go side keeps an index
+// alongside the keys array as a pure ACCELERATOR (a hit is confirmed against the
+// array before it is used), so a linear scan answers exactly what it answers.
+function rbDictFind(keys, k) {
+    var i = 0
+    while (i < keys.length) {
+        if (keys[i] === k) { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+function rbDictSet(d, k, v) {
+    var keys = d["keys"]
+    var i = rbDictFind(keys, k)
+    if (i >= 0) {
+        d["vals"][i] = v
+        return undefined
+    }
+    keys.push(k)
+    d["vals"].push(v)
+    return undefined
+}
+
+function rbNewDict() { return {__dict: true, keys: [], vals: []} }
+
+function rbCopyArr(a) {
+    var out = []
+    var i = 0
+    while (i < a.length) {
+        out.push(a[i])
+        i = i + 1
+    }
+    return out
+}
+
+// ===================================================== equality =============
+
+// pyEqual: structural for Array and Hash, === for everything else.
+function rbPyEqual(x, y) {
+    if (rbIsArr(x)) {
+        if (!rbIsArr(y)) { return false }
+        if (x.length != y.length) { return false }
+        var i = 0
+        while (i < x.length) {
+            if (!rbPyEqual(x[i], y[i])) { return false }
+            i = i + 1
+        }
+        return true
+    }
+    if (rbIsDict(x)) {
+        if (!rbIsDict(y)) { return false }
+        var xk = x["keys"]
+        var xv = x["vals"]
+        var yk = y["keys"]
+        var yv = y["vals"]
+        if (xk.length != yk.length) { return false }
+        var j = 0
+        while (j < xk.length) {
+            var at = rbDictFind(yk, xk[j])
+            if (at < 0) { return false }
+            if (!rbPyEqual(xv[j], yv[at])) { return false }
+            j = j + 1
+        }
+        return true
+    }
+    return x === y
+}
+
+// An exception instance: a user object carrying the `args` slot every raise path
+// fills in. A class descriptor is not one.
+function rbExcObj(v) {
+    if (!rbIsObj(v)) { return false }
+    if (v["__isclass"] === true) { return false }
+    if (v["args"] === undefined) { return false }
+    return v["__class"] !== undefined
+}
+
+// rubyEq: numeric across the whole tower (2.0 == 2, 1r/2r == 0.5), a user class's
+// own == when it defines one, and the structural comparison otherwise.
+function rbEq(l, r) {
+    if (rbIsNum(l) && rbIsNum(r)) {
+        if (rbIsCpx(l) || rbIsCpx(r)) {
+            if (rbReOf(l) != rbReOf(r)) { return false }
+            return rbImOf(l) == rbImOf(r)
+        }
+        return rbToF(l) == rbToF(r)
+    }
+    if (rbUserObj(l)) {
+        var m = rbFindMethod(l, "==")
+        if (m !== undefined) { return rbTruthy(m.apply(undefined, [l, r])) }
+    }
+    // An exception compares equal to its own message - the same deliberate
+    // divergence rubyEq of ruby-interpreter.abnf makes, so a program that raises a
+    // plain string still reads its rescue value as that string.
+    if (typeof r == "string" && rbExcObj(l)) { return rbStr(l) === r }
+    if (typeof l == "string" && rbExcObj(r)) { return rbStr(r) === l }
+    return rbPyEqual(l, r)
+}
+
+// rubySpaceship: null when the two cannot be compared, which is Ruby's answer.
+function rbSpaceship(l, r) {
+    if (rbUserObj(l)) {
+        var m = rbFindMethod(l, "<=>")
+        if (m !== undefined) { return Math.trunc(rbToF(m.apply(undefined, [l, r]))) }
+        return null
+    }
+    if (rbIsNum(l) && rbIsNum(r)) { return rbNumCmp(l, r) }
+    if (typeof l == "string" && typeof r == "string") {
+        if (l < r) { return 0 - 1 }
+        if (r < l) { return 1 }
+        return 0
+    }
+    if (rbIsArr(l) && rbIsArr(r)) {
+        var i = 0
+        while (i < l.length && i < r.length) {
+            var c = rbSpaceship(l[i], r[i])
+            if (c !== null && c != 0) { return c }
+            i = i + 1
+        }
+        return l.length - r.length
+    }
+    return null
+}
+
+// < > <= >= raise in Ruby when the values cannot be compared.
+function rbCmp(l, r) {
+    var c = rbSpaceship(l, r)
+    if (c === null) { fail("comparison of incompatible values") }
+    return c
+}
+
+// ===================================================== classes ==============
+
+// rubyFindMethod: walk the __class / __super chain of an INSTANCE for a method.
+function rbFindMethod(v, name) {
+    if (!rbIsObj(v)) { return undefined }
+    var cls = v["__class"]
+    while (cls !== undefined && cls !== null) {
+        if (!rbIsObj(cls)) { return undefined }
+        var m = cls[name]
+        if (m !== undefined && rbIsFn(m)) { return m }
+        cls = cls["__super"]
+    }
+    return undefined
+}
+
+// rubyClassName: the builtin class a runtime value belongs to ("" when none).
+function rbClassName(v) {
+    if (v === true) { return "TrueClass" }
+    if (v === false) { return "FalseClass" }
+    if (rbIsNil(v)) { return "NilClass" }
+    if (typeof v == "number") { return "Integer" }
+    if (typeof v == "string") { return "String" }
+    if (rbIsFlo(v)) { return "Float" }
+    if (rbIsRat(v)) { return "Rational" }
+    if (rbIsCpx(v)) { return "Complex" }
+    if (rbIsSym(v)) { return "Symbol" }
+    if (rbIsArr(v)) { return "Array" }
+    if (rbIsDict(v)) { return "Hash" }
+    return ""
+}
+
+// rubyBuiltinClass: ONE object per name, so `1.class == Integer` and
+// `case v when Integer` compare identities.
+function rbBuiltinClass(name) {
+    var k = "$" + name
+    var got = rbClassTable[k]
+    if (got !== undefined) { return got }
+    var c = {__isclass: true, __rbuiltin: name, __name: name}
+    rbClassTable[k] = c
+    return c
+}
+
+// rubyExcParent: the ancestry of the builtin exception classes - the part of
+// Ruby's class tree a rescue clause has to know about. Exception is the root.
+var rbExcParent = {
+    $StandardError: "Exception",
+    $RuntimeError: "StandardError",
+    $ArgumentError: "StandardError",
+    $TypeError: "StandardError",
+    $NameError: "StandardError",
+    $NoMethodError: "NameError",
+    $IndexError: "StandardError",
+    $KeyError: "IndexError",
+    $RangeError: "StandardError",
+    $ZeroDivisionError: "StandardError",
+    $StopIteration: "IndexError",
+    $FrozenError: "RuntimeError",
+    $NotImplementedError: "StandardError"
+}
+
+function rbExcParentOf(name) {
+    var p = rbExcParent["$" + name]
+    if (typeof p == "string") { return p }
+    return ""
+}
+
+// rubyExcIsA: "v is an exception of the builtin class named bn". It walks the
+// value's own __class/__super chain (so a user subclass counts) and, once that
+// reaches a BUILTIN class, continues up rbExcParent by name.
+function rbExcIsA(v, bn) {
+    if (bn != "Exception" && rbExcParentOf(bn) == "") { return false }
+    if (!rbIsObj(v)) { return false }
+    var c = v["__class"]
+    while (c !== undefined && c !== null) {
+        if (!rbIsObj(c)) { return false }
+        var name = c["__name"]
+        if (typeof name != "string") { name = "" }
+        if (typeof c["__rbuiltin"] == "string") {
+            var n = name
+            while (n != "") {
+                if (n == bn) { return true }
+                n = rbExcParentOf(n)
+            }
+            return false
+        }
+        if (name == bn) { return true }
+        c = c["__super"]
+    }
+    return false
+}
+
+// rubyIsA: `v.is_a?(cls)` / `cls === v`. A builtin class matches by the value's
+// runtime kind (Integer/Float also count as Numeric and Comparable), a compiled
+// class by walking the instance's __class / __super chain.
+function rbIsA(v, cls) {
+    if (!rbIsObj(cls)) { return false }
+    var bn = cls["__rbuiltin"]
+    if (typeof bn == "string") {
+        var kind = rbClassName(v)
+        if (kind == bn) { return true }
+        if (rbExcIsA(v, bn)) { return true }
+        if (bn == "Numeric") { return rbIsNum(v) }
+        if (bn == "Comparable") {
+            if (rbIsNum(v)) { return true }
+            return kind == "String"
+        }
+        if (bn == "Object") { return true }
+        if (bn == "BasicObject") { return true }
+        if (bn == "Kernel") { return true }
+        if (bn == "Enumerable") {
+            if (kind == "Array") { return true }
+            return kind == "Hash"
+        }
+        return false
+    }
+    if (!rbIsObj(v)) { return false }
+    var c = v["__class"]
+    while (c !== undefined && c !== null) {
+        if (c === cls) { return true }
+        if (!rbIsObj(c)) { return false }
+        c = c["__super"]
+    }
+    return false
+}
+
+// rubyExc: {__class: <class>, args: [message]}, the shape the message reader and
+// the rescue type test both understand.
+function rbExc(cls, args) {
+    return {__class: cls, args: rbCopyArr(args)}
+}
+
+// Exception#message / #to_s: the first constructor argument, or the class name.
+function rbExcMessage(o) {
+    var arr = o["args"]
+    if (rbIsArr(arr) && arr.length > 0) { return rbStr(arr[0]) }
+    var cls = o["__class"]
+    if (rbIsObj(cls)) {
+        var n = cls["__name"]
+        if (typeof n == "string") { return n }
+    }
+    return undefined
+}
+
+// rubyMakeExc turns the operand of Ruby's `raise` into the object to throw:
+//   a class object   -> a fresh instance, the message as its single argument
+//                       (its own initialize still runs when it defines one)
+//   a string         -> a RuntimeError carrying that message, as in MRI
+//   nil / undefined  -> a BARE raise: re-raise what the running rescue caught
+//   anything else    -> raised unchanged (raise ArgumentError.new("arg"))
+function rbMakeExc(v, msg) {
+    if (rbIsNil(v)) {
+        if (rbCurExc !== null) { return rbCurExc }
+        return rbExc(rbBuiltinClass("RuntimeError"), [])
+    }
+    if (typeof v == "string") { return rbExc(rbBuiltinClass("RuntimeError"), [v]) }
+    if (rbIsObj(v) && v["__isclass"] === true) {
+        var argv = []
+        if (!rbIsNil(msg)) { argv = [msg] }
+        var inst = rbExc(v, argv)
+        if (rbFindMethod(inst, "initialize") !== undefined) { rbMethod(inst, "initialize", argv) }
+        return inst
+    }
+    return v
+}
+
+// The class a @@class variable belongs to: the class of an instance, or `self`
+// itself when the code runs in a class method or a class body.
+function rbClassOfSelf(self) {
+    if (!rbIsObj(self)) { return null }
+    if (self["__isclass"] === true) { return self }
+    var c = self["__class"]
+    if (c === undefined) { return null }
+    return c
+}
+
+// ===================================================== ranges ===============
+
+// String#succ for the alphanumeric case: the last character is incremented,
+// carrying into the one before it when it wraps ("az" -> "ba").
+function rbStrSucc(s) {
+    if (s == "") { return "" }
+    var codes = []
+    var i = 0
+    while (i < s.length) {
+        codes.push(s.charCodeAt(i))
+        i = i + 1
+    }
+    var j = codes.length - 1
+    while (j >= 0) {
+        var c = codes[j]
+        var done = false
+        if (c >= 97 && c < 122) {
+            codes[j] = c + 1
+            done = true
+        } else if (c >= 65 && c < 90) {
+            codes[j] = c + 1
+            done = true
+        } else if (c >= 48 && c < 57) {
+            codes[j] = c + 1
+            done = true
+        } else if (c == 122) {
+            codes[j] = 97
+        } else if (c == 90) {
+            codes[j] = 65
+        } else if (c == 57) {
+            codes[j] = 48
+        } else {
+            codes[j] = c + 1
+            done = true
+        }
+        if (done) { return rbFromCodes(codes) }
+        j = j - 1
+    }
+    // Every position wrapped: Go prepends the FIRST byte of the wrapped string.
+    var out = rbFromCodes(codes)
+    return out.charAt(0) + out
+}
+
+function rbFromCodes(codes) {
+    var out = ""
+    var i = 0
+    while (i < codes.length) {
+        out = out + String.fromCharCode(codes[i])
+        i = i + 1
+    }
+    return out
+}
+
+// rubyRangeArr materializes lo..hi (excl: the three-dot form) as an array. The
+// step caps keep a nonsensical range from hanging the program - the same two
+// constants the Go twin uses.
+function rbRangeArr(lo, hi, excl) {
+    var out = []
+    if (typeof lo == "string") {
+        var hs = rbStr(hi)
+        var s = lo
+        var n = 0
+        while (n < 1000000) {
+            if (excl && s == hs) { break }
+            if (s.length > hs.length) { break }
+            out.push(s)
+            if (s == hs) { break }
+            s = rbStrSucc(s)
+            n = n + 1
+        }
+        return out
+    }
+    var l = rbToF(lo)
+    var h = rbToF(hi)
+    if (excl) { h = h - 1 }
+    var k = 0
+    var i = l
+    while (i <= h && k < 10000000) {
+        out.push(i)
+        i = i + 1
+        k = k + 1
+    }
+    return out
+}
+
+// rubyOpenRangeCover: `r.cover?(v)` / `r === v` for a range with a missing bound,
+// where the missing side never constrains.
+function rbOpenRangeCover(o, v) {
+    var lo = o["begin"]
+    if (!rbIsNil(lo)) {
+        var c = rbSpaceship(v, lo)
+        if (c === null) { return false }
+        if (c < 0) { return false }
+    }
+    var hi = o["end"]
+    if (!rbIsNil(hi)) {
+        var d = rbSpaceship(v, hi)
+        if (d === null) { return false }
+        if (o["excl"] === true) { return d < 0 }
+        return d <= 0
+    }
+    return true
+}
+
+// ===================================================== binary operators =====
+
+function rbRepeat(s, n) {
+    var out = ""
+    var i = 0
+    while (i < n) {
+        out = out + s
+        i = i + 1
+    }
+    return out
+}
+
+// rubyBin: the one binary operator step. A user object dispatches to its own
+// operator method, strings and arrays get their Ruby operators, everything else
+// is the numeric tower.
+function rbBin(op, l, r) {
+    if (rbUserObj(l)) {
+        // An exception instance that defines no + of its own concatenates as its
+        // message, so `raise e + "er"` inside a rescue keeps working.
+        if (op == "+" && l["args"] !== undefined && rbFindMethod(l, "+") === undefined) {
+            return rbStr(l) + rbStr(r)
+        }
+        return rbMethod(l, op, [r])
+    }
+    if (op == "+") {
+        if (typeof l == "string") { return rbStr(l) + rbStr(r) }
+        if (typeof r == "string") { return rbStr(l) + rbStr(r) }
+        if (rbIsArr(l) && rbIsArr(r)) {
+            var out = rbCopyArr(l)
+            var i = 0
+            while (i < r.length) {
+                out.push(r[i])
+                i = i + 1
+            }
+            return out
+        }
+    }
+    if (op == "*") {
+        if (typeof l == "string") {
+            var n = Math.trunc(rbToF(r))
+            if (n < 0) { n = 0 }
+            return rbRepeat(l, n)
+        }
+        if (rbIsArr(l)) {
+            var rep = []
+            var t = 0
+            var times = Math.trunc(rbToF(r))
+            while (t < times) {
+                var j = 0
+                while (j < l.length) {
+                    rep.push(l[j])
+                    j = j + 1
+                }
+                t = t + 1
+            }
+            return rep
+        }
+    }
+    if (op == "-") {
+        if (rbIsArr(l) && rbIsArr(r)) {
+            var diff = []
+            var a = 0
+            while (a < l.length) {
+                var drop = false
+                var b = 0
+                while (b < r.length) {
+                    if (rbPyEqual(l[a], r[b])) {
+                        drop = true
+                        break
+                    }
+                    b = b + 1
+                }
+                if (!drop) { diff.push(l[a]) }
+                a = a + 1
+            }
+            return diff
+        }
+    }
+    if (op == "%") {
+        if (typeof l == "string") { return rbFormat(l, r) }
+    }
+    if (op == "<<") {
+        if (rbIsArr(l)) {
+            l.push(r)
+            return l
+        }
+        if (typeof l == "string") { return l + rbStr(r) }
+    }
+    return rbNumBin(op, l, r)
+}
+
+// ===================================================== Regexp / MatchData ===
+//
+// abnf/jsrtregex.go's Ruby half. The ENGINE is languages/lib/regex.js, imported
+// at the top of this file, so only the value model and the method tables are
+// here. Both values are ordinary objects carrying __rx-prefixed slots, exactly
+// as the Go twin has them, so nothing else in this file has to learn a new type.
+
+var rbRxCache = {}   // "$<flags> <pattern>" -> a compiled program
+
+function rbRxGet(pattern, flags) {
+    var key = "$" + flags + " " + pattern
+    var got = rbRxCache[key]
+    if (got !== undefined) { return got }
+    var re = rxCompile(pattern, flags)
+    rbRxCache[key] = re
+    return re
+}
+
+function rbRxIsRegex(v) {
+    if (!rbIsObj(v)) { return false }
+    if (v["__rxsrc"] === undefined) { return false }
+    return rbIsNil(v["__rxmd"])
+}
+
+function rbRxIsMatch(v) {
+    if (!rbIsObj(v)) { return false }
+    return !rbIsNil(v["__rxmd"])
+}
+
+function rbRxObjRe(v) {
+    var src = v["__rxsrc"]
+    var flags = v["__rxflags"]
+    if (typeof src != "string") { src = "" }
+    if (typeof flags != "string") { flags = "" }
+    return rbRxGet(src, flags)
+}
+
+function rbRxNewRegex(src, flags) { return {__rxsrc: src, __rxflags: flags} }
+
+function rbRxNewMatch(src, flags, text, m) {
+    var caps = []
+    var i = 0
+    var mc = m["caps"]
+    while (i < mc.length) {
+        caps.push(mc[i])
+        i = i + 1
+    }
+    return {__rxmd: true, __rxsrc: src, __rxflags: flags, __rxtext: text, __rxcaps: caps}
+}
+
+// The Go twin's rxMatchOf answers three values; MetaJS has one return, so the
+// three travel in a record. text stays a STRING: regex.js indexes UTF-16 code
+// units where the Go engine indexes runes, which agree for everything in the
+// Basic Multilingual Plane and therefore for every pattern in the corpus.
+function rbRxMatchOf(v) {
+    var re = rbRxObjRe(v)
+    var text = v["__rxtext"]
+    if (typeof text != "string") { text = "" }
+    var arr = v["__rxcaps"]
+    var caps = []
+    var i = 0
+    while (i < arr.length) {
+        caps.push(Math.trunc(rbToF(arr[i])))
+        i = i + 1
+    }
+    var begin = 0
+    var end = 0
+    if (caps.length >= 2) {
+        begin = caps[0]
+        end = caps[1]
+    }
+    return {re: re, text: text, m: {begin: begin, end: end, caps: caps}}
+}
+
+// rxSetGlobals publishes $~, $& and $1..$9 after a match attempt. A FAILED match
+// clears them.
+function rbRxSetGlobals(md) {
+    var i = 1
+    if (md === null) {
+        rbGset("~", null)
+        rbGset("&", null)
+        while (i <= 9) {
+            rbGset("" + i, null)
+            i = i + 1
+        }
+        return undefined
+    }
+    var mo = rbRxMatchOf(md)
+    rbGset("~", md)
+    var whole = rxGroup(mo["re"], mo["text"], mo["m"], 0)
+    rbGset("&", whole === null ? null : whole)
+    while (i <= 9) {
+        var g = rxGroup(mo["re"], mo["text"], mo["m"], i)
+        rbGset("" + i, g === null ? null : g)
+        i = i + 1
+    }
+    return undefined
+}
+
+// rxRunMatch searches and publishes the globals; null for no match.
+function rbRxRunMatch(reObj, s, from) {
+    var re = rbRxObjRe(reObj)
+    if (!re["ok"]) { fail("invalid regexp /" + re["src"] + "/: " + re["err"]) }
+    var m = rxSearch(re, s, from)
+    if (m === null) {
+        rbRxSetGlobals(null)
+        return null
+    }
+    var o = rbRxNewMatch(re["src"], re["flags"], s, m)
+    rbRxSetGlobals(o)
+    return o
+}
+
+// MatchData#[]: an Integer reads a group by number, a Symbol or a String by name.
+function rbRxMdIndex(md, key) {
+    var mo = rbRxMatchOf(md)
+    if (typeof key == "number") {
+        var g = rxGroup(mo["re"], mo["text"], mo["m"], Math.trunc(key))
+        if (g === null) { return null }
+        return g
+    }
+    var name = ""
+    if (rbIsSym(key)) { name = key["s"] } else if (typeof key == "string") { name = key } else { return null }
+    var gi = rxIndexOfName(mo["re"], name)
+    if (gi >= 0) {
+        var gv = rxGroup(mo["re"], mo["text"], mo["m"], gi)
+        if (gv !== null) { return gv }
+    }
+    return null
+}
+
+function rbRxCaptureArray(re, text, m, withWhole) {
+    var out = []
+    var i = withWhole ? 0 : 1
+    while (i <= re["ngroups"]) {
+        var g = rxGroup(re, text, m, i)
+        out.push(g === null ? null : g)
+        i = i + 1
+    }
+    return out
+}
+
+// String#scan: with no group it collects the whole matches, with groups the
+// capture list of each match.
+function rbRxScan(reObj, s) {
+    var re = rbRxObjRe(reObj)
+    var out = []
+    var at = 0
+    while (at <= s.length) {
+        var m = rxSearch(re, s, at)
+        if (m === null) { break }
+        if (re["ngroups"] == 0) {
+            var g = rxGroup(re, s, m, 0)
+            out.push(g === null ? "" : g)
+        } else {
+            out.push(rbRxCaptureArray(re, s, m, false))
+        }
+        if (m["end"] == m["begin"]) { at = m["end"] + 1 } else { at = m["end"] }
+    }
+    return out
+}
+
+// The =~ operator: either operand may be the pattern, and the answer is the
+// INDEX of the match (not a boolean) or nil.
+function rbRxMatchOp(l, r) {
+    var reObj = null
+    var subj = null
+    if (rbRxIsRegex(l)) {
+        reObj = l
+        subj = r
+    } else if (rbRxIsRegex(r)) {
+        reObj = r
+        subj = l
+    } else {
+        fail("=~ needs a Regexp on one side")
+    }
+    if (rbIsNil(subj)) {
+        rbRxSetGlobals(null)
+        return null
+    }
+    var md = rbRxRunMatch(reObj, rbStr(subj), 0)
+    if (md === null) { return null }
+    var mo = rbRxMatchOf(md)
+    return mo["m"]["begin"]
+}
+
+// rxRegexMethod answers a method call whose RECEIVER is a Regexp or a MatchData
+// (or a String with a pattern argument), and `undefined` when the name is none of
+// theirs - `undefined` is a safe miss sentinel because a Ruby method answers nil,
+// which is null here and never undefined.
+function rbRxMethod(target, name, args) {
+    if (rbRxIsRegex(target)) {
+        var re = rbRxObjRe(target)
+        if (name == "match?") { return rxSearch(re, rbStr(rbArgAt(args, 0)), 0) !== null }
+        if (name == "match") {
+            var from = 0
+            if (args.length > 1 && typeof args[1] == "number") { from = Math.trunc(args[1]) }
+            var md = rbRxRunMatch(target, rbStr(rbArgAt(args, 0)), from)
+            if (md === null) { return null }
+            return md
+        }
+        if (name == "=~") { return rbRxMatchOp(target, rbArgAt(args, 0)) }
+        if (name == "===") { return rbRxMatchOp(target, rbArgAt(args, 0)) !== null }
+        if (name == "source") { return re["src"] }
+        if (name == "options") { return 0 }
+        if (name == "names") { return rbCopyArr(re["names"]) }
+        if (name == "to_s") { return "(?-mix:" + re["src"] + ")" }
+        if (name == "inspect") { return "/" + re["src"] + "/" + re["flags"] }
+        if (name == "class") { return "Regexp" }
+        fail("unknown Regexp method: " + name)
+    }
+    if (rbRxIsMatch(target)) {
+        var mo = rbRxMatchOf(target)
+        var mre = mo["re"]
+        var text = mo["text"]
+        var m = mo["m"]
+        if (name == "[]") { return rbRxMdIndex(target, rbArgAt(args, 0)) }
+        if (name == "to_a") { return rbRxCaptureArray(mre, text, m, true) }
+        if (name == "captures") { return rbRxCaptureArray(mre, text, m, false) }
+        if (name == "named_captures") {
+            var d = rbNewDict()
+            var ni = 0
+            var nms = mre["names"]
+            while (ni < nms.length) {
+                var gv = rxGroup(mre, text, m, rxIndexOfName(mre, nms[ni]))
+                d["keys"].push(nms[ni])
+                d["vals"].push(gv === null ? null : gv)
+                ni = ni + 1
+            }
+            return d
+        }
+        if (name == "names") { return rbCopyArr(mre["names"]) }
+        if (name == "pre_match") { return text.substring(0, m["begin"]) }
+        if (name == "post_match") { return text.substring(m["end"], text.length) }
+        if (name == "begin" || name == "end") {
+            var g = 0
+            if (args.length > 0 && typeof args[0] == "number") { g = Math.trunc(args[0]) }
+            var slot = 2 * g
+            if (name == "end") { slot = slot + 1 }
+            var caps = m["caps"]
+            if (slot < caps.length) { return caps[slot] }
+            return null
+        }
+        if (name == "size" || name == "length") { return mre["ngroups"] + 1 }
+        if (name == "to_s") {
+            var w = rxGroup(mre, text, m, 0)
+            return w === null ? "" : w
+        }
+        if (name == "inspect") {
+            var w2 = rxGroup(mre, text, m, 0)
+            return "#<MatchData \"" + (w2 === null ? "" : w2) + "\">"
+        }
+        if (name == "class") { return "MatchData" }
+        fail("unknown MatchData method: " + name)
+    }
+    // A String receiver whose argument is a pattern: the pattern-taking half of
+    // Ruby's String methods, which the base dispatch knows nothing about.
+    if (typeof target == "string" && args.length > 0) {
+        var wants = false
+        if (name == "match" || name == "match?" || name == "=~" || name == "scan") { wants = true }
+        if (name == "sub" || name == "gsub" || name == "sub!" || name == "gsub!") { wants = true }
+        if (name == "split" || name == "index") { wants = true }
+        if (!wants) { return undefined }
+        var pat = args[0]
+        if (!rbRxIsRegex(pat)) {
+            if (name == "split" || name == "index") { return undefined }
+            pat = rbRxNewRegex(rbStr(args[0]), "m")
+        }
+        if (name == "match") {
+            var smd = rbRxRunMatch(pat, target, 0)
+            if (smd === null) { return null }
+            return smd
+        }
+        if (name == "match?") { return rxSearch(rbRxObjRe(pat), target, 0) !== null }
+        if (name == "=~") { return rbRxMatchOp(pat, target) }
+        if (name == "scan") { return rbRxScan(pat, target) }
+        if (name == "sub" || name == "sub!") { return rxReplace(rbRxObjRe(pat), target, rbStr(rbArgAt(args, 1)), false) }
+        if (name == "gsub" || name == "gsub!") { return rxReplace(rbRxObjRe(pat), target, rbStr(rbArgAt(args, 1)), true) }
+        if (name == "split") { return rxSplit(rbRxObjRe(pat), target) }
+        if (name == "index") { return rbRxMatchOp(pat, target) }
+    }
+    return undefined
+}
+
+// ===================================================== method dispatch ======
+
+function rbArgAt(args, i) {
+    if (i < args.length) { return args[i] }
+    return undefined
+}
+
+function rbCall1(f, a) { return f.apply(undefined, [a]) }
+function rbCall2(f, a, b) { return f.apply(undefined, [a, b]) }
+
+// rubyNumMethod: the Integer / Float / Rational / Complex method set. It answers
+// `undefined` for a name it does not know, so the caller carries on with the
+// generic dispatch (and its error message).
+function rbNumMethod(t, name, args) {
+    var x = rbToF(t)
+    var isInt = typeof t == "number"
+    if (name == "to_s" || name == "inspect") {
+        if (isInt && args.length > 0) { return rbBaseStr(x, Math.trunc(rbToF(args[0]))) }
+        return rbStr(t)
+    }
+    if (name == "to_i" || name == "to_int" || name == "truncate") { return Math.trunc(x) }
+    if (name == "to_f") {
+        if (rbIsFlo(t)) { return t }
+        return rbMkFlo(x)
+    }
+    if (name == "to_r") { return rbAsRat(t) }
+    if (name == "abs" || name == "magnitude") {
+        if (rbIsFlo(t)) { return rbMkFlo(Math.abs(x)) }
+        return Math.abs(x)
+    }
+    if (name == "floor") { return Math.floor(x) }
+    if (name == "ceil") { return Math.ceil(x) }
+    if (name == "round") {
+        if (args.length > 0) {
+            var p = Math.pow(10, rbToF(args[0]))
+            return rbMkFlo(Math.floor(x * p + 0.5) / p)
+        }
+        if (x < 0) { return -Math.floor(-x + 0.5) }
+        return Math.floor(x + 0.5)
+    }
+    if (name == "zero?") { return x == 0 }
+    if (name == "positive?") { return x > 0 }
+    if (name == "negative?") { return x < 0 }
+    if (name == "even?") { return x - Math.floor(x / 2) * 2 == 0 }
+    if (name == "odd?") { return x - Math.floor(x / 2) * 2 != 0 }
+    if (name == "succ" || name == "next") { return x + 1 }
+    if (name == "pred") { return x - 1 }
+    if (name == "chr") { return String.fromCharCode(Math.trunc(x)) }
+    if (name == "integer?") { return isInt }
+    if (name == "numerator") { return rbAsRat(t)["n"] }
+    if (name == "denominator") { return rbAsRat(t)["d"] }
+    if (name == "times") {
+        var i = 0
+        while (i < x) {
+            rbCall1(rbArgAt(args, 0), i)
+            i = i + 1
+        }
+        return t
+    }
+    if (name == "upto") {
+        var u = x
+        var hi = rbToF(rbArgAt(args, 0))
+        while (u <= hi) {
+            rbCall1(rbArgAt(args, 1), u)
+            u = u + 1
+        }
+        return t
+    }
+    if (name == "downto") {
+        var d = x
+        var lo = rbToF(rbArgAt(args, 0))
+        while (d >= lo) {
+            rbCall1(rbArgAt(args, 1), d)
+            d = d - 1
+        }
+        return t
+    }
+    if (name == "divmod") {
+        var y = rbToF(rbArgAt(args, 0))
+        return [Math.floor(x / y), rbFmaSub(x, Math.floor(x / y), y)]
+    }
+    if (name == "fdiv") { return rbMkFlo(x / rbToF(rbArgAt(args, 0))) }
+    if (name == "pow" || name == "**") { return rbBin("**", t, rbArgAt(args, 0)) }
+    if (name == "gcd") { return rbGcd(x, rbToF(rbArgAt(args, 0))) }
+    if (name == "between?") {
+        if (x < rbToF(rbArgAt(args, 0))) { return false }
+        return x <= rbToF(rbArgAt(args, 1))
+    }
+    if (name == "clamp") {
+        var clo = rbToF(rbArgAt(args, 0))
+        var chi = rbToF(rbArgAt(args, 1))
+        if (x < clo) { return args[0] }
+        if (x > chi) { return args[1] }
+        return t
+    }
+    if (name == "real") { return rbReOf(t) }
+    if (name == "imaginary" || name == "imag") { return rbImOf(t) }
+    if (name == "+" || name == "-" || name == "*" || name == "/" || name == "%") { return rbBin(name, t, rbArgAt(args, 0)) }
+    if (name == "&" || name == "|" || name == "^" || name == "<<" || name == ">>") { return rbBin(name, t, rbArgAt(args, 0)) }
+    if (name == "==") { return rbEq(t, rbArgAt(args, 0)) }
+    if (name == "<=>") {
+        var c = rbSpaceship(t, rbArgAt(args, 0))
+        if (c === null) { return null }
+        return c
+    }
+    return undefined
+}
+
+// rubyArrayMethod. select and reject use RUBY truthiness, and pop/first/last
+// answer nil (not an error) on an empty array.
+function rbArrayMethod(t, name, args) {
+    if (name == "size" || name == "length") { return t.length }
+    if (name == "push" || name == "append" || name == "add") {
+        var i = 0
+        while (i < args.length) {
+            t.push(args[i])
+            i = i + 1
+        }
+        return t
+    }
+    if (name == "pop") {
+        if (t.length == 0) { return null }
+        return t.pop()
+    }
+    if (name == "first") {
+        if (t.length == 0) { return null }
+        return t[0]
+    }
+    if (name == "last") {
+        if (t.length == 0) { return null }
+        return t[t.length - 1]
+    }
+    if (name == "include?" || name == "contains") { return rbDictFind(t, rbArgAt(args, 0)) >= 0 }
+    if (name == "to_a") { return rbCopyArr(t) }
+    if (name == "each") {
+        var e = 0
+        while (e < t.length) {
+            rbCall1(rbArgAt(args, 0), t[e])
+            e = e + 1
+        }
+        return t
+    }
+    if (name == "each_with_index") {
+        var w = 0
+        while (w < t.length) {
+            rbCall2(rbArgAt(args, 0), t[w], w)
+            w = w + 1
+        }
+        return t
+    }
+    if (name == "map" || name == "collect") {
+        var out = []
+        var m = 0
+        while (m < t.length) {
+            out.push(rbCall1(rbArgAt(args, 0), t[m]))
+            m = m + 1
+        }
+        return out
+    }
+    if (name == "select" || name == "filter") {
+        var sel = []
+        var s = 0
+        while (s < t.length) {
+            if (rbTruthy(rbCall1(rbArgAt(args, 0), t[s]))) { sel.push(t[s]) }
+            s = s + 1
+        }
+        return sel
+    }
+    if (name == "reject") {
+        var rej = []
+        var r = 0
+        while (r < t.length) {
+            if (!rbTruthy(rbCall1(rbArgAt(args, 0), t[r]))) { rej.push(t[r]) }
+            r = r + 1
+        }
+        return rej
+    }
+    if (name == "sum") {
+        // The Go twin accumulates through toInt32 at every step, so the sum WRAPS
+        // at 32 bits. Reproduced rather than corrected: both halves have to agree
+        // and the ratchet pins it.
+        var acc = 0
+        var k = 0
+        while (k < t.length) {
+            acc = rbToInt32(acc + rbToF(t[k]))
+            k = k + 1
+        }
+        return acc
+    }
+    fail("unknown Array method: " + name)
+    return null
+}
+
+// ToInt32, which MetaJS's own `| 0` already is (js_bor runs it on both sides).
+function rbToInt32(n) { return n | 0 }
+
+// memberCall, reduced to the arms a Ruby program can reach: an INSTANCE walks its
+// __class chain, a plain object calls its own callable property. The string, list
+// and dict arms of the Go twin's memberCall are Kotlin's and Python's and are
+// shadowed by rbMethod below, which answers every Ruby name first.
+function rbMemberCall(target, name, args) {
+    if (rbIsObj(target)) {
+        var cls = target["__class"]
+        if (cls !== undefined) {
+            while (cls !== undefined && cls !== null) {
+                if (!rbIsObj(cls)) { break }
+                var m = cls[name]
+                if (m !== undefined && rbIsFn(m)) {
+                    var argv = [target]
+                    var i = 0
+                    while (i < args.length) {
+                        argv.push(args[i])
+                        i = i + 1
+                    }
+                    return m.apply(undefined, argv)
+                }
+                cls = cls["__super"]
+            }
+            fail("unknown method '" + name + "' on an instance")
+        }
+        var own = target[name]
+        if (own !== undefined && rbIsFn(own)) { return own.apply(undefined, args) }
+        fail("unknown method '" + name + "'")
+    }
+    fail("method call '" + name + "' on a " + typeof target)
+    return null
+}
+
+// rubyMethod is the direct method dispatch (js_rmcall in the Go twin; here it is
+// reached only through js_rxmcall, which is the one the ruby emitter emits).
+function rbMethod(target, name, args) {
+    // Ruby's universal reflective methods, answered for every kind of value.
+    if (name == "class") {
+        var kind = rbClassName(target)
+        if (kind != "") { return rbBuiltinClass(kind) }
+    }
+    if (name == "is_a?" || name == "kind_of?" || name == "instance_of?") {
+        if (rbClassName(target) != "" && !rbUserObj(target)) { return rbIsA(target, rbArgAt(args, 0)) }
+    }
+    if (name == "nil?") { return rbIsNil(target) }
+    if (name == "message" || name == "full_message") {
+        // Exception#message, only for an INSTANCE that defines no message method
+        // of its own, so a user class named message stays in charge.
+        if (rbIsObj(target) && target["__isclass"] !== true) {
+            if (rbFindMethod(target, name) === undefined) {
+                var msg = rbExcMessage(target)
+                if (msg !== undefined) { return msg }
+            }
+        }
+    }
+    if (name == "frozen?") {
+        if (typeof target == "string") { return true }
+        return rbIsNum(target)
+    }
+    if (name == "call" || name == "()" || name == "yield" || name == "[]" || name == "===") {
+        if (rbIsFn(target)) { return target.apply(undefined, args) }
+    }
+    if (name == "lambda?") {
+        if (rbIsFn(target)) { return rbIsLambda(target) }
+    }
+    if (name == "to_proc") {
+        if (rbIsFn(target)) { return target }
+    }
+    // NilClass's conversions. MRI answers "" / "nil" / [] / 0 / 0.0, so they must
+    // not reach the "method .x on nil" abort at the bottom.
+    if (rbIsNil(target)) {
+        if (name == "to_s") { return "" }
+        if (name == "inspect") { return "nil" }
+        if (name == "to_a") { return [] }
+        if (name == "to_i") { return 0 }
+        if (name == "to_f") { return rbMkFlo(0) }
+    }
+    if (rbIsNum(target)) {
+        var nv = rbNumMethod(target, name, args)
+        if (nv !== undefined) { return nv }
+    }
+    if (rbIsSym(target)) {
+        var sn = target["s"]
+        if (name == "to_s" || name == "id2name" || name == "name") { return sn }
+        if (name == "to_sym") { return target }
+        if (name == "length" || name == "size") { return sn.length }
+        if (name == "inspect") { return ":" + sn }
+        if (name == "upcase") { return rbSym(rbUpper(sn)) }
+        if (name == "downcase") { return rbSym(rbLower(sn)) }
+        fail("unknown Symbol method: " + name)
+    }
+    if (typeof target == "string") {
+        if (name == "length" || name == "size") { return target.length }
+        if (name == "to_s") { return target }
+        if (name == "to_sym" || name == "intern") { return rbSym(target) }
+        if (name == "upcase") { return rbUpper(target) }
+        if (name == "downcase") { return rbLower(target) }
+        if (name == "include?") { return target.indexOf(rbStr(rbArgAt(args, 0))) >= 0 }
+        if (name == "dup" || name == "clone" || name == "freeze") { return target }
+        if (name == "to_str" || name == "+@" || name == "-@" || name == "itself") { return target }
+        fail("unknown String method: " + name)
+    }
+    if (rbIsArr(target)) { return rbArrayMethod(target, name, args) }
+    if (rbIsObj(target)) {
+        if (rbIsRange(target)) {
+            if (name == "cover?" || name == "include?" || name == "member?" || name == "===") {
+                return rbOpenRangeCover(target, rbArgAt(args, 0))
+            }
+            if (name == "begin" || name == "first") { return target["begin"] }
+            if (name == "end" || name == "last") { return target["end"] }
+            if (name == "exclude_end?") { return target["excl"] }
+            fail("unknown method on an endless Range: " + name)
+        }
+        if (rbIsDict(target)) {
+            var keys = target["keys"]
+            var vals = target["vals"]
+            if (name == "size" || name == "length") { return keys.length }
+            if (name == "keys") { return rbCopyArr(keys) }
+            if (name == "values") { return rbCopyArr(vals) }
+            if (name == "to_a" || name == "entries") {
+                var pairs = []
+                var p = 0
+                while (p < keys.length) {
+                    pairs.push([keys[p], vals[p]])
+                    p = p + 1
+                }
+                return pairs
+            }
+            if (name == "include?" || name == "has_key?" || name == "key?") { return rbDictFind(keys, rbArgAt(args, 0)) >= 0 }
+            if (name == "each") {
+                var e = 0
+                while (e < keys.length) {
+                    rbCall2(rbArgAt(args, 0), keys[e], vals[e])
+                    e = e + 1
+                }
+                return target
+            }
+            fail("unknown Hash method: " + name)
+        }
+        // Ruby's type predicates on an INSTANCE.
+        if (name == "class") {
+            var c0 = target["__class"]
+            if (c0 !== undefined) { return c0 }
+        }
+        if (name == "instance_of?") { return target["__class"] === rbArgAt(args, 0) }
+        if (name == "is_a?" || name == "kind_of?") {
+            var want = rbArgAt(args, 0)
+            var cls = target["__class"]
+            while (cls !== undefined && cls !== null) {
+                if (cls === want) { return true }
+                if (!rbIsObj(cls)) { break }
+                cls = cls["__super"]
+            }
+            return false
+        }
+        // A singleton (class) method: `def self.m` / `class << self` stores the
+        // method on the class descriptor under a "$s$" prefixed key, so it cannot
+        // collide with the INSTANCE method of the same name.
+        if (target["__isclass"] === true) {
+            var sc = target
+            while (sc !== undefined && sc !== null) {
+                if (!rbIsObj(sc)) { break }
+                var sm = sc["$s$" + name]
+                if (sm !== undefined && rbIsFn(sm)) {
+                    var sargv = [target]
+                    var si = 0
+                    while (si < args.length) {
+                        sargv.push(args[si])
+                        si = si + 1
+                    }
+                    return sm.apply(undefined, sargv)
+                }
+                sc = sc["__super"]
+            }
+        }
+        return rbMemberCall(target, name, args)
+    }
+    if (rbIsNil(target)) { fail("method ." + name + " on nil") }
+    return rbMemberCall(target, name, args)
+}
+
+function rbIsLambda(f) {
+    var i = 0
+    while (i < rbLambdas.length) {
+        if (rbLambdas[i] === f) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// ===================================================== $globals =============
+
+function rbGset(name, v) {
+    rbGlobals["$" + name] = v
+    rbGlobalNames["$" + name] = true
+    return undefined
+}
+
+// ===================================================== the exports ==========
+//
+// Everything below is a TOP-LEVEL `function js_*`, which is what -rt-lib exports
+// under its own C symbol. The language-NEUTRAL externs of abnf/jsrt.go come
+// first, then Ruby's own, in the order of the extern table at the end of
+// abnf/jsrt.go.
+
+// ----- the language-NEUTRAL eight -------------------------------------------
+// None of these is Ruby's. They live in abnf/jsrt.go, several languages emit
+// them, and they are here only because the C floor does not have them yet.
+
+// An empty Hash / Python dict / Go map handle.
+function js_dict_new() { return rbNewDict() }
+
+// isTypeName: `v is T`. The jsChar arm of the Go twin is Kotlin's and is
+// unreachable from Ruby, which has no character type.
+function js_is_type(v, t) {
+    var nm = t
+    var lt = nm.indexOf("<")
+    if (lt >= 0) { nm = nm.substring(0, lt) }
+    var opt = false
+    if (nm.length > 0 && nm.charAt(nm.length - 1) == "?") {
+        nm = nm.substring(0, nm.length - 1)
+        opt = true
+    }
+    if (rbIsNil(v)) { return opt }
+    if (nm == "Any" || nm == "Object") { return true }
+    if (nm == "Int" || nm == "Integer" || nm == "Long" || nm == "Short" || nm == "Byte" || nm == "Char" || nm == "Character") {
+        if (typeof v != "number") { return false }
+        return v == Math.trunc(v)
+    }
+    if (nm == "Double" || nm == "Float" || nm == "Number") { return typeof v == "number" }
+    if (nm == "String" || nm == "CharSequence") { return typeof v == "string" }
+    if (nm == "Boolean") { return typeof v == "boolean" }
+    if (nm == "List" || nm == "MutableList" || nm == "Collection" || nm == "Array") { return rbIsArr(v) }
+    if (rbIsObj(v)) {
+        var cls = v["__class"]
+        while (rbIsObj(cls)) {
+            if (cls["__name"] === nm) { return true }
+            cls = cls["__super"]
+        }
+    }
+    return false
+}
+
+// Java/C# +: string concat, 32 bit add for two int values, float add otherwise.
+// The ruby emitter reaches it only for the internal loop counters it increments
+// (js_jadd(i, 1)), never on a user value, so no {__flo} arm is needed.
+function js_jadd(l, r) {
+    if (typeof l == "string" || typeof r == "string") { return rbJStr(l) + rbJStr(r) }
+    var a = rbToF(l)
+    var b = rbToF(r)
+    if (rbIsInt32(a) && rbIsInt32(b)) { return (a + b) | 0 }
+    return a + b
+}
+
+function rbJStr(v) {
+    if (typeof v == "string") { return v }
+    if (rbIsNil(v)) { return "null" }
+    return "" + v
+}
+
+function rbIsInt32(n) {
+    if (n !== n) { return false }
+    if (Math.floor(n) !== n) { return false }
+    if (n > 2147483647) { return false }
+    return n >= 0 - 2147483648
+}
+
+// A builtin exception instance for the Python pair. The ruby emitter uses it for
+// its own control signals (the block-break and retry markers), which is why the
+// class descriptor carries only __name.
+function js_pyexc(name, args) {
+    var arr = []
+    if (rbIsArr(args)) { arr = rbCopyArr(args) }
+    return {__class: {__name: name}, args: arr}
+}
+
+// Sequence indexing (negative wraps) and dict lookup. The __getitem__ arm of the
+// Go twin is Python's and is unreachable from Ruby.
+function js_pyget(c, k) {
+    if (rbIsDict(c)) {
+        var i = rbDictFind(c["keys"], k)
+        if (i < 0) { fail("KeyError: " + rbStr(k)) }
+        return c["vals"][i]
+    }
+    var idx = Math.trunc(rbToF(k))
+    if (rbIsArr(c)) {
+        if (idx < 0) { idx = idx + c.length }
+        if (idx < 0 || idx >= c.length) { fail("list index out of range: " + Math.trunc(rbToF(k))) }
+        return c[idx]
+    }
+    if (typeof c == "string") {
+        if (idx < 0) { idx = idx + c.length }
+        if (idx < 0 || idx >= c.length) { fail("string index out of range: " + Math.trunc(rbToF(k))) }
+        return c.charAt(idx)
+    }
+    fail("indexing a " + typeof c)
+    return undefined
+}
+
+// List element (negative wraps) or dict entry assignment.
+function js_pyset(c, k, v) {
+    if (rbIsDict(c)) { return rbDictSet(c, k, v) }
+    if (!rbIsArr(c)) { fail("item assignment on a " + typeof c) }
+    var idx = Math.trunc(rbToF(k))
+    if (idx < 0) { idx = idx + c.length }
+    if (idx < 0 || idx >= c.length) { fail("list assignment index out of range") }
+    c[idx] = v
+    return undefined
+}
+
+// len() for strings, lists and dicts. Ruby never reaches the Python set arm.
+function js_pylen(v) {
+    if (typeof v == "string") { return v.length }
+    if (rbIsArr(v)) { return v.length }
+    if (rbIsDict(v)) { return v["keys"].length }
+    fail("len() of a " + typeof v)
+    return 0
+}
+
+// (super class, this, method name, args array). The walk starts AT the given
+// class - the caller already resolved the superclass of the defining class.
+function js_supercall(cls, self, name, args) {
+    var c = cls
+    while (c !== undefined && c !== null) {
+        if (!rbIsObj(c)) { break }
+        var m = c[name]
+        if (m !== undefined && rbIsFn(m)) {
+            var argv = [self]
+            var i = 0
+            while (i < args.length) {
+                argv.push(args[i])
+                i = i + 1
+            }
+            return m.apply(undefined, argv)
+        }
+        c = c["__super"]
+    }
+    fail("unknown super method '" + name + "'")
+    return undefined
+}
+
+// ----- Ruby's own -----------------------------------------------------------
+
+// :name from its name - INTERNED, see the note at rbSym.
+function js_sym(name) { return rbSym(rbStr(name)) }
+
+// The three boxes of the numeric tower.
+function js_rflo(v) { return rbMkFlo(rbToF(v)) }
+function js_rrat(n, d) { return rbMkRat(rbToF(n), rbToF(d)) }
+function js_rcpx(re, im) { return rbMkCpx(rbToF(re), rbToF(im)) }
+
+// The binary operators.
+function js_radd(l, r) { return rbBin("+", l, r) }
+function js_rsub(l, r) { return rbBin("-", l, r) }
+function js_rmul(l, r) { return rbBin("*", l, r) }
+function js_rdiv(l, r) { return rbBin("/", l, r) }
+function js_rmod(l, r) { return rbBin("%", l, r) }
+function js_rpow(l, r) { return rbBin("**", l, r) }
+
+// & | ^ are the NON-short-circuit boolean operators when the left side is a
+// boolean, and the numeric ones otherwise - one operator, two meanings, like Ruby.
+function js_rband(l, r) {
+    if (typeof l == "boolean") {
+        if (!l) { return false }
+        return rbTruthy(r)
+    }
+    return rbBin("&", l, r)
+}
+
+function js_rbor(l, r) {
+    if (typeof l == "boolean") {
+        if (l) { return true }
+        return rbTruthy(r)
+    }
+    return rbBin("|", l, r)
+}
+
+function js_rbxor(l, r) {
+    if (typeof l == "boolean") { return l !== rbTruthy(r) }
+    return rbBin("^", l, r)
+}
+
+// << appends to an Array (in place, so `a << b << c` chains), concatenates a
+// String and shifts an Integer.
+function js_rshl(l, r) { return rbBin("<<", l, r) }
+function js_rshr(l, r) { return rbBin(">>", l, r) }
+function js_rneg(v) { return rbNeg(v) }
+function js_rbnot(v) { return -rbToF(v) - 1 }
+
+function js_req(l, r) { return rbEq(l, r) }
+function js_rne(l, r) { return !rbEq(l, r) }
+function js_rlt(l, r) { return rbCmp(l, r) < 0 }
+function js_rgt(l, r) { return rbCmp(l, r) > 0 }
+function js_rle(l, r) { return rbCmp(l, r) <= 0 }
+function js_rge(l, r) { return rbCmp(l, r) >= 0 }
+
+// <=>: nil when the two cannot be compared.
+function js_rcmp(l, r) {
+    var c = rbSpaceship(l, r)
+    if (c === null) { return null }
+    return c
+}
+
+// lo..hi / lo...hi with BOTH bounds: the array the lowering iterates and indexes.
+function js_rrangearr(lo, hi, excl) { return rbRangeArr(lo, hi, rbTruthy(excl)) }
+
+// (5..) / (..9): no array to build, so the range stays an object that answers
+// cover? / include? / ===.
+function js_rrangeopen(lo, hi, excl) {
+    return {__rrange: true, begin: lo, end: hi, excl: rbTruthy(excl)}
+}
+
+// === (case equality): a Range matches by membership, an Array by membership,
+// a class object by is_a?, everything else by ==.
+function js_rcase(l, r) {
+    if (rbIsRange(l)) { return rbOpenRangeCover(l, r) }
+    if (rbIsArr(l)) {
+        var i = 0
+        while (i < l.length) {
+            if (rbEq(l[i], r)) { return true }
+            i = i + 1
+        }
+        return false
+    }
+    if (rbIsObj(l) && l["__isclass"] === true) { return rbIsA(r, l) }
+    return rbEq(l, r)
+}
+
+// A plain `when V` value: a class matches by is_a?, everything else by == (an
+// Array compares STRUCTURALLY here - only a RANGE means membership, which is what
+// js_rcase above is for). Not exported: only the regex-aware js_rxwhen is emitted.
+function rbWhen(l, r) {
+    if (rbIsObj(l) && l["__isclass"] === true) { return rbIsA(r, l) }
+    return rbEq(l, r)
+}
+
+// The builtin class objects: one object per name, so `1.class == Integer` and
+// `when Integer` compare identities.
+function js_rclass(name) { return rbBuiltinClass(rbStr(name)) }
+
+// Ruby's to_s, for string interpolation and puts.
+function js_rstr(v) { return rbStr(v) }
+
+// Kernel#puts with RUBY rendering: an array is walked recursively (one element
+// per line), an EMPTY array prints nothing, everything else prints its to_s.
+function js_rputs(v) {
+    if (rbIsArr(v)) {
+        var i = 0
+        while (i < v.length) {
+            js_rputs(v[i])
+            i = i + 1
+        }
+        return undefined
+    }
+    println(rbStr(v))
+    return undefined
+}
+
+function js_rprint(v) {
+    print(rbStr(v))
+    return undefined
+}
+
+// Kernel#format / sprintf: the argument array is [format, args...].
+function js_rformat(args) {
+    if (!rbIsArr(args) || args.length == 0) { return "" }
+    var rest = []
+    var i = 1
+    while (i < args.length) {
+        rest.push(args[i])
+        i = i + 1
+    }
+    return rbFormat(rbStr(args[0]), rest)
+}
+
+// %W[..] / %I[..]: split an interpolated body on whitespace into an array of
+// strings (or of symbols when the flag is set). strings.Fields drops empties.
+function js_rsplitw(v, asSym) {
+    var s = rbStr(v)
+    var sym = rbTruthy(asSym)
+    var out = []
+    var cur = ""
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        var isSp = false
+        if (c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12) { isSp = true }
+        if (isSp) {
+            if (cur != "") {
+                out.push(sym ? rbSym(cur) : cur)
+                cur = ""
+            }
+        } else {
+            cur = cur + s.charAt(i)
+        }
+        i = i + 1
+    }
+    if (cur != "") { out.push(sym ? rbSym(cur) : cur) }
+    return out
+}
+
+// Ruby indexing: a Proc calls itself, a user class dispatches `def [](i)`, a Hash
+// answers nil for a missing key and an Array answers nil out of range.
+function js_rget(o, k) {
+    if (rbIsFn(o)) { return o.apply(undefined, [k]) }
+    if (rbUserObj(o)) { return rbMethod(o, "[]", [k]) }
+    if (rbIsDict(o)) {
+        var i = rbDictFind(o["keys"], k)
+        if (i < 0) { return null }
+        return o["vals"][i]
+    }
+    var idx = Math.trunc(rbToF(k))
+    if (rbIsArr(o)) {
+        if (idx < 0) { idx = idx + o.length }
+        if (idx < 0 || idx >= o.length) { return null }
+        return o[idx]
+    }
+    if (typeof o == "string") {
+        if (idx < 0) { idx = idx + o.length }
+        if (idx < 0 || idx >= o.length) { return null }
+        return o.charAt(idx)
+    }
+    if (rbIsNil(o)) { fail("indexing nil") }
+    return o[k]
+}
+
+// Ruby index assignment: a user class dispatches `def []=`, a missing Hash key is
+// APPENDED and an Array GROWS, filling the gap with nil.
+function js_rset(o, k, v) {
+    if (rbUserObj(o)) {
+        rbMethod(o, "[]=", [k, v])
+        return undefined
+    }
+    if (rbIsDict(o)) { return rbDictSet(o, k, v) }
+    if (!rbIsArr(o)) { fail("item assignment on a " + typeof o) }
+    var idx = Math.trunc(rbToF(k))
+    if (idx < 0) { idx = idx + o.length }
+    if (idx < 0) { fail("index " + idx + " too small for array") }
+    while (o.length <= idx) { o.push(null) }
+    o[idx] = v
+    return undefined
+}
+
+// C.new(args): build an instance of a compiled class and run its initialize. Two
+// builtin classes are constructed directly: Proc.new { } is its block, and an
+// exception class makes the {__class, args} shape the rescue clauses read.
+function js_rnew(cls, args) {
+    var argv = []
+    if (rbIsArr(args)) { argv = args }
+    if (rbIsObj(cls)) {
+        var bn = cls["__rbuiltin"]
+        if (typeof bn == "string") {
+            if (bn == "Proc") {
+                if (argv.length > 0 && rbIsFn(argv[argv.length - 1])) { return argv[argv.length - 1] }
+                return null
+            }
+            return rbExc(cls, argv)
+        }
+    }
+    var inst = {__class: cls}
+    rbMethod(inst, "initialize", argv)
+    return inst
+}
+
+// Ruby's `raise` in one step. rbMakeExc turns a class / a string / a bare
+// re-raise into the exception object, which is then thrown exactly as js_throw
+// does - MetaJS's own `throw` compiles to the floor's js_throw.
+function js_rraise(v, msg) {
+    throw rbMakeExc(v, msg)
+}
+
+// Whether an argument was ABSENT (js_arg answers undefined for one that was not
+// passed). Ruby's nil is a VALUE and must not trigger a default.
+function js_rundef(v) { return v === undefined }
+
+// *rest: the arguments from index i on, as an array (a trailing block closure is
+// not one of them). i is a RAW parameter: the emitter writes it with handle(pos).
+function js_rargrest(args, i_raw) {
+    var out = []
+    if (!rbIsArr(args)) { return out }
+    var i = i_raw
+    while (i < args.length) {
+        if (i == args.length - 1 && rbIsFn(args[i])) { break }
+        out.push(args[i])
+        i = i + 1
+    }
+    return out
+}
+
+// The keyword arguments a call passed: the trailing Hash of the argument list (a
+// block closure may sit behind it), or an empty Hash.
+function js_rkwargs(args) {
+    if (rbIsArr(args)) {
+        var i = args.length - 1
+        while (i >= 0 && i >= args.length - 2) {
+            if (rbIsDict(args[i])) { return args[i] }
+            i = i - 1
+        }
+    }
+    return rbNewDict()
+}
+
+// **rest: the keyword hash minus the keys the named keyword parameters took.
+function js_rkwrest(kwh, taken) {
+    var out = rbNewDict()
+    if (!rbIsDict(kwh)) { return out }
+    var keys = kwh["keys"]
+    var vals = kwh["vals"]
+    var i = 0
+    while (i < keys.length) {
+        var drop = false
+        if (rbIsArr(taken)) {
+            var t = 0
+            while (t < taken.length) {
+                if (rbEq(taken[t], keys[i])) {
+                    drop = true
+                    break
+                }
+                t = t + 1
+            }
+        }
+        if (!drop) {
+            out["keys"].push(keys[i])
+            out["vals"].push(vals[i])
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// &blk: the block a call was given - the trailing callable of the argument list -
+// or nil when it was called without one.
+function js_rblock(args) {
+    if (rbIsArr(args) && args.length > 0 && rbIsFn(args[args.length - 1])) { return args[args.length - 1] }
+    return null
+}
+
+// A BLOCK parameter read: Ruby auto-splats a single Array argument over a block
+// that declares more than one parameter. Both counts are RAW parameters.
+function js_rblockarg(args, i_raw, n_raw) {
+    if (!rbIsArr(args)) { return undefined }
+    var i = i_raw
+    var n = n_raw
+    if (n > 1 && args.length == 1 && rbIsArr(args[0])) {
+        var inner = args[0]
+        if (i < inner.length) { return inner[i] }
+        return undefined
+    }
+    if (i < args.length) { return args[i] }
+    return undefined
+}
+
+// A lambda literal (->) / Kernel#lambda: an ordinary closure, remembered here so
+// `lambda?` can tell it from a proc.
+function js_rlambda(f) {
+    rbLambdas.push(f)
+    return f
+}
+
+// &:sym as a block argument: the "call this method on each element" proc. A Proc
+// is passed straight through.
+function js_rsymproc(v) {
+    if (!rbIsSym(v)) { return v }
+    var name = v["s"]
+    // The Go twin builds a variadic hostFunc; MetaJS has no `arguments`, so the
+    // proc is written with the three parameters a Ruby block is ever called with
+    // (map/each pass one, Hash#each two) and the ABSENT ones are trimmed. That is
+    // exact rather than approximate: a Ruby value is never `undefined` - nil is
+    // null here - so a trailing undefined can only mean "not passed".
+    return function(recv, a1, a2) {
+        var rest = []
+        if (a1 !== undefined) { rest.push(a1) }
+        if (a2 !== undefined) { rest.push(a2) }
+        return rbMethod(recv, name, rest)
+    }
+}
+
+// A $global lives outside every scope and reads as nil until first assigned.
+function js_rgget(name) {
+    var v = rbGlobals["$" + rbStr(name)]
+    if (v === undefined) { return null }
+    return v
+}
+
+function js_rgset(name, v) { return rbGset(rbStr(name), v) }
+
+// defined?($x): the KIND of the name, or nil. The shape of the name decided the
+// kind at compile time; this only tests presence.
+function js_rgdefined(name, kind) {
+    if (rbGlobalNames["$" + rbStr(name)] === true) { return kind }
+    return null
+}
+
+// A @@class variable belongs to the CLASS, shared by every instance and by the
+// subclasses: the lookup starts at the class of `self` (or at self when it
+// already IS a class) and walks __super.
+function js_rcvget(self, name) {
+    var key = "@@" + rbStr(name)
+    var cls = rbClassOfSelf(self)
+    while (cls !== undefined && cls !== null) {
+        if (!rbIsObj(cls)) { break }
+        var v = cls[key]
+        if (v !== undefined) { return v }
+        cls = cls["__super"]
+    }
+    return null
+}
+
+function js_rcvset(self, name, v) {
+    var key = "@@" + rbStr(name)
+    var start = rbClassOfSelf(self)
+    var cls = start
+    while (cls !== undefined && cls !== null) {
+        if (!rbIsObj(cls)) { break }
+        if (cls[key] !== undefined) {
+            cls[key] = v
+            return undefined
+        }
+        cls = cls["__super"]
+    }
+    if (rbIsObj(start)) { start[key] = v }
+    return undefined
+}
+
+// ----- the regex-aware wrappers ---------------------------------------------
+// The ruby emitter emits these EVERYWHERE it would otherwise emit the plain
+// js_rmcall / js_rcase / js_rwhen / js_rget, so the plain ones are never
+// declared and rbMethod / js_rcase / rbWhen / js_rget above carry the base
+// behaviour.
+
+// A regexp literal: /src/flags, validated here so a bad pattern is a clean
+// runtime error rather than a wrong match.
+function js_rxnew(src, flags) {
+    var s = rbStr(src)
+    var f = rbStr(flags)
+    var re = rbRxGet(s, f)
+    if (!re["ok"]) { fail("invalid regexp /" + s + "/: " + re["err"]) }
+    return rbRxNewRegex(s, f)
+}
+
+function js_rxmcall(target, name, args) {
+    if (rbRxIsRegex(target) || rbRxIsMatch(target) || (rbIsArr(args) && args.length > 0 && rbRxIsRegex(args[0]))) {
+        var v = rbRxMethod(target, rbStr(name), args)
+        if (v !== undefined) { return v }
+    }
+    return rbMethod(target, rbStr(name), args)
+}
+
+function js_rxcase(l, r) {
+    if (rbRxIsRegex(l)) { return rbRxMatchOp(l, r) !== null }
+    return js_rcase(l, r)
+}
+
+function js_rxwhen(l, r) {
+    if (rbRxIsRegex(l)) { return rbRxMatchOp(l, r) !== null }
+    return rbWhen(l, r)
+}
+
+function js_rxget(o, k) {
+    if (rbRxIsMatch(o)) { return rbRxMdIndex(o, k) }
+    return js_rget(o, k)
+}
+
+// The =~ operator.
+function js_rxmatch(l, r) { return rbRxMatchOp(l, r) }

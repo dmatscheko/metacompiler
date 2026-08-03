@@ -4001,8 +4001,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function makeRaise(items, pos) {
         var t = items.length > 0 ? items[0] : null
         var msgT = items.length > 1 ? items[1] : null
+        // A BARE `raise` re-raises what the running rescue clause caught. The Go
+        // twin reads that from rt.rubyCurExc, which js_try fills in - and js_try is
+        // the C FLOOR's here, so layer 2 has no hook to fill anything in. It does
+        // not need one: inside a rescue clause the caught value is already bound to
+        // $exc on the scope chain, and the emitter is the side that may read a
+        // scope. Passing the VALUE rather than relying on runtime state is the same
+        // move the php port made with js_phrtinit, and it is exact in BOTH halves -
+        // rubyMakeExc hands an exception object straight back.
+        var bare = t == null
         return function(b) {
             var v = hNull
+            if (bare && curInRescue) { v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$exc")]) }
             if (t != null) { var r = t(b); b = r.b; v = r.v }
             var msgV = hUndef
             if (msgT != null) { var rm = msgT(b); b = rm.b; msgV = rm.v }
@@ -4688,6 +4698,41 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function makeGvarRef(name) {
         return function(b) { return {b: b, v: callExt(b, "js_rgget", [emitStr(b, name)])} }
     }
+    // ----- the scope probe, lowered HERE and not into layer 2 -----
+    // js_rdefined used to be an extern that took a SCOPE HANDLE and walked the
+    // chain. A scope is the C floor's PRIVATE storage, so a MetaJS runtime library
+    // cannot open one and that extern could never have been written in layer 2 -
+    // the same wall php, swift, java and dart met (docs/runtime-next-plan.md part
+    // 3, "a scope probe belongs in the EMITTER"). It is a pure PROBE - "the kind of
+    // this name if it is declared anywhere up the chain, else nil" - and an EMITTER
+    // may call js_scope_typeof, so it is spelled out here. ONE module-level helper
+    // rather than an inline branch, so the call site stays a single-value
+    // expression, which is PHP's shape unchanged.
+    //
+    // The one inexactness, the same one swift-to-llvm-ir.abnf records:
+    // js_scope_typeof answers "undefined" for a slot that HOLDS undefined and for
+    // an absent name alike. A Ruby local is created-on-assign and a declared one
+    // holds nil (js_scope_decl with hNull), so the only slot that can hold
+    // undefined is an OPTIONAL PARAMETER the caller omitted - and defined? on such
+    // a parameter would answer nil here where the Go twin answers its kind. No
+    // program in tests/ does that; the fix, if one ever does, is to declare the
+    // parameter slot with hNull before js_arg overwrites it.
+    var definedF = undefined
+    function rbScopeProbe(b, nameV, kindV) {
+        if (definedF == undefined) {
+            definedF = m.NewFunc("rb_defined", i64,
+                                 [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("nm", i64),
+                                  llvm.ir.NewParam("kind", i64)])
+            var eb = definedF.NewBlock("entry")
+            var hitB = definedF.NewBlock("hit")
+            var missB = definedF.NewBlock("miss")
+            var tv = callExt(eb, "js_scope_typeof", [definedF.Params[0], definedF.Params[1]])
+            eb.NewCondBr(truthy(eb, callExt(eb, "js_seq", [tv, emitStr(eb, "undefined")])), missB, hitB)
+            missB.NewRet(hNull)
+            hitB.NewRet(definedF.Params[2])
+        }
+        return b.NewCall(definedF, [curScopeV, nameV, kindV])
+    }
     function makeCvarRef(name) {
         return function(b) {
             var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
@@ -4729,7 +4774,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function(b) {
             // A def of that name is a method, whatever else the scope holds.
             var k = rubyAllMethods["$" + txt] === true ? "method" : kind
-            return {b: b, v: callExt(b, "js_rdefined", [curScopeV, emitStr(b, txt), emitStr(b, k)])}
+            return {b: b, v: rbScopeProbe(b, emitStr(b, txt), emitStr(b, k))}
         }
     }
     // Whether the text is a single plain identifier (so defined? can classify it).
@@ -5502,6 +5547,82 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     core.scopeGetExt = "js_scope_get"
 
     c.compile(c.asg)
+
+    // ----- the native build (docs/runtime-next-plan.md part 3) -----
+    // jsdispatch(idx, env, args) is the function table a LINKED binary needs: js_closure
+    // stores a raw function index, and under llvm.Run the Go runtime turns that index
+    // back into a callee by looking "jsf_<idx>" up in the module. A binary has no such
+    // reflection, so the module carries the mapping itself. The MISS arm calls
+    // jsdispatch_ext, the same table emitted by the layer-2 runtime library
+    // (lib/ruby-rt.ll, built by metajs-to-llvm-ir.abnf -rt-lib): its own function
+    // indices are offset by a million, so the two chains cannot overlap and one js_call
+    // reaches either module. Emitted ONLY for -exe, so every other run keeps the module
+    // it had. This is lua-to-llvm-ir.abnf's emitDispatch, unchanged - the mechanism is
+    // the reusable part of phase 4 and nothing here is Ruby's.
+    function emitDispatch() {
+        var idxs = []
+        var fns = []
+        var i = 0
+        while (i < m.Funcs.length) {
+            var f = m.Funcs[i]
+            var nm = f.Name()
+            if (nm.length > 4 && nm.substring(0, 4) == "jsf_") {
+                idxs.push(parseInt(nm.substring(4, nm.length)))
+                fns.push(f)
+            }
+            i = i + 1
+        }
+        var ext = m.NewFunc("jsdispatch_ext", i64,
+            [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var d = m.NewFunc("jsdispatch", i64,
+            [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var b = d.NewBlock("entry")
+        var extB = d.NewBlock("ext")
+        var ownB = d.NewBlock("own")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredSGE, d.Params[0], llvm.constant.NewInt(i64, 1000000)), extB, ownB)
+        extB.NewRet(extB.NewCall(ext, [d.Params[0], d.Params[1], d.Params[2]]))
+        b = ownB
+        i = 0
+        while (i < fns.length) {
+            var hit = d.NewBlock("hit" + idxs[i])
+            var nxt = d.NewBlock("miss" + idxs[i])
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, d.Params[0], llvm.constant.NewInt(i64, idxs[i])), hit, nxt)
+            hit.NewRet(hit.NewCall(fns[i], [d.Params[1], d.Params[2]]))
+            b = nxt
+            i = i + 1
+        }
+        b.NewRet(b.NewCall(ext, [d.Params[0], d.Params[1], d.Params[2]]))
+    }
+
+    // The two runtime inputs live next to THIS grammar, so the build does not depend on
+    // the working directory: lib/runtime.ll is the C floor and lib/ruby-rt.ll is Ruby's
+    // own layer 2. An explicit -rt REPLACES both.
+    function libPath(name) {
+        var mn = moduleName()
+        var cut = -1
+        var i = 0
+        while (i < mn.length) {
+            var ch = mn.charAt(i)
+            if (ch == "/" || ch == "\\") { cut = i }
+            i = i + 1
+        }
+        return mn.substring(0, cut + 1) + "lib/" + name
+    }
+
+    // Ruby's entry point is already called jsmain (buildMain above), which is the
+    // name the C floor's own main() calls, so no alias function is needed here.
+    if (c.exePath != undefined && c.exePath != "") {
+        emitDispatch()
+        var rts = c.runtime
+        if (rts == undefined || rts.length == 0) { rts = [libPath("runtime.ll"), libPath("ruby-rt.ll")] }
+        var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
+        if (buildErr != "") {
+            println(buildErr)
+            exit(1)
+        }
+        println("ruby compiler: wrote executable " + c.exePath)
+        exit(0)
+    }
 
     println(m)
 
