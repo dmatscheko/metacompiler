@@ -311,8 +311,8 @@ KwDefault   = "default" KwEnd ;
     //
     // The other half has a real primitive type for it: tag 13 of
     // languages/lib/runtime.c natively, jsGInt of abnf/jsrtint.go under
-    // llvm.Run, and both bind the eleven sint* globals below (seed_root ids
-    // 40..50 / giBindings). This half cannot make a new primitive type at all -
+    // llvm.Run, and both bind the twelve sint* globals below (seed_root ids
+    // 40..50 and 62 / giBindings). This half cannot make a new primitive type at all -
     // its values ARE goja/frozen-engine values - so the box is the {__sz} object
     // of lib/interp-core.js, which already implements giNorm/giTrunc/giArith on
     // exact 64 bit pairs and is validated against `go run` over 156,490 vectors.
@@ -504,12 +504,38 @@ KwDefault   = "default" KwEnd ;
     function siPrintln() { return println.apply(undefined, siPrintArgs(arguments)) }
     function siPrint() { return print.apply(undefined, siPrintArgs(arguments)) }
     function siEprintln() { return eprintln.apply(undefined, siPrintArgs(arguments)) }
+    // to_int32 for a value outside the int64 range, the twin of runtime.c's
+    // to_int32 and abnf/jsrt.go's rt.toInt32. `%` is fmod, which is exact for an
+    // integral operand, so the reduction loses nothing; an infinity reduces to
+    // NaN, and `NaN | r` is ToInt32(NaN) = 0, which is the JS answer too.
+    // Anything that is not a wide number is handed straight back.
+    function siI32(v) {
+        var m = 0
+        if (typeof v != "number") { return v }
+        if (v < 9223372036854775808 && v > 0 - 9223372036854775808) { return v }
+        m = v % 4294967296
+        if (m < 0) { m = m + 4294967296 }
+        if (m >= 2147483648) { m = m - 4294967296 }
+        return m
+    }
+
     // sint(hi, lo, bits, unsigned): two UNSIGNED 32 bit halves, because a MetaJS
     // number is a double and cannot carry 64 bits exactly. bits defaults to 64
     // and unsigned to false, matching the floor's `n > 2` / `n > 3`.
     function siHost(hi, lo, bits, uns) {
         var w = (bits === undefined) ? 64 : bits
         return siNorm(i64Make(i64FromNum(hi).l, i64FromNum(lo).l), w, uns ? true : false)
+    }
+    // sintRaw(hi, lo, bits, unsigned): siHost WITHOUT siNorm - always a box,
+    // never a plain number. si_make of runtime.c (host id 62) and the jsGInt
+    // literal of giBindings; the argument for it is written out in full at the
+    // floor's site. siTrunc is still applied, so the box keeps the invariant
+    // that its value is already truncated to the width; only siNorm's unboxing
+    // arm is dropped.
+    function siRawHost(hi, lo, bits, uns) {
+        var w = (bits === undefined) ? 64 : bits
+        var u = uns ? true : false
+        return szMake(siTrunc(i64Make(i64FromNum(hi).l, i64FromNum(lo).l), w, u), w, u)
     }
 
     // ----- The BOXED DOUBLE, the second primitive the other half has -----
@@ -573,6 +599,43 @@ KwDefault   = "default" KwEnd ;
         while (n > 1 && digits.charAt(n - 1) == "0") { n = n - 1 }
         return {d: digits.substring(0, n), e: e}
     }
+    // v * 10^k, in chunks, because 10^325 is an infinity and 10^-325 is zero -
+    // and the value this is wanted for is a SUBNORMAL, so both ends are live.
+    // Each chunk is a single multiplication by an exactly named power of ten.
+    function flScale(v, k) {
+        while (k > 200) { v = v * 100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000; k = k - 200 }
+        while (k < 0 - 200) { v = v / 100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000; k = k + 200 }
+        var p = 1
+        var i = 0
+        var n = k < 0 ? 0 - k : k
+        for (i = 0; i < n; i = i + 1) { p = p * 10 }
+        return k < 0 ? v / p : v * p
+    }
+    // java's Double.toString never uses fewer than TWO significant digits, and
+    // where the shortest form has one the second is not a zero but the closest
+    // two digit decimal to the ACTUAL value. For a normal double those are the
+    // same (the value is within ~1e-16 of its one digit form, a thousandth of a
+    // two digit step); it shows among the SUBNORMALS, where the gap between
+    // neighbours is comparable to the value: Double.MIN_VALUE is
+    // 4.9406564584124654E-324, so java writes "4.9E-324" where appending ".0"
+    // to the shortest form writes "5.0E-324". Measured against real java
+    // 24.0.2 - 254 lines of the java probe, docs/runtime-next-plan.md part 3.
+    //
+    // The host engine's own "" + a is the SHORTEST form, so the second digit
+    // has to be computed: scale the value so that its two significant digits
+    // are the integer part and round. The scaling exponent is the VALUE's, not
+    // the shortest form's - 1e-322 is really 9.88e-323, whose two digit form is
+    // 9.9E-323 and not 1.0E-322 - so a scaled value below ten is stepped down
+    // one decade first. A carry to 100 steps back up.
+    function flTwo(a, dg) {
+        if (dg.d.length > 1) return dg
+        var e = dg.e
+        var r = flScale(a, 1 - e)
+        if (r < 10) { r = flScale(a, 2 - e); e = e - 1 }
+        var n = (r + 0.5) | 0            // r is under 100, so | 0 is a floor
+        if (n >= 100) { n = 10; e = e + 1 }
+        return {d: "" + n, e: e}
+    }
     // The digits laid out in plain decimal. point = true forces a ".0" where
     // there is no fraction, which is what Java's rendering does and Go's and
     // C#'s do not.
@@ -624,7 +687,10 @@ KwDefault   = "default" KwEnd ;
         var neg = f < 0
         var a = neg ? 0 - f : f
         var dg = flDigits(a)
-        var body = (a >= 0.001 && a < 10000000) ? flPlain(dg, true) : flSci(dg, "E", true, false, false)
+        // The plain form prints the NUMBER, so 0.001 is "0.001" and not "0.0010";
+        // only the scientific form ever shows the forced second digit.
+        if (a >= 0.001 && a < 10000000) return neg ? "-" + flPlain(dg, true) : flPlain(dg, true)
+        var body = flSci(flTwo(a, dg), "E", true, false, false)
         return neg ? "-" + body : body
     }
     // goFloStr: Go's %v of a float64 - the exponent form when the decimal
@@ -805,6 +871,7 @@ KwDefault   = "default" KwEnd ;
         // The eleven sized-integer names, the same set languages/lib/runtime.c
         // seeds and abnf/jsrtint.go's giBindings adds.
         "sint": siHost,
+        "sintRaw": siRawHost,
         "sintIs": function(v) { return szIs(v) },
         "sintHi": function(v) { return siPair(v).h >>> 0 },
         "sintLo": function(v) { return siPair(v).l >>> 0 },
@@ -957,6 +1024,20 @@ KwDefault   = "default" KwEnd ;
         if (op == ">")  return l > r
         if (op == "<=") return l <= r
         if (op == ">=") return l >= r
+        // ToInt32 of an operand that has LEFT the int64 range, where goja's own
+        // bitwise operators are wrong: goja converts through `int32(int64(f))`,
+        // which Go leaves implementation defined and which answers -1 for every
+        // positive value above 2^63 and 0 for every negative one. Real JS wraps
+        // MODULO 2^32 (`1e20 | 0` is 1661992960), and so now do the C floor's
+        // to_int32 and abnf/jsrt.go's rt.toInt32 - so without this the goja half
+        // would be the only engine of the five that is wrong. The guard is four
+        // comparisons and is reached only by the six bitwise operators; a
+        // non-number operand makes every one of them false.
+        if (l >= 9223372036854775808 || l <= 0 - 9223372036854775808 ||
+            r >= 9223372036854775808 || r <= 0 - 9223372036854775808) {
+            l = siI32(l)
+            r = siI32(r)
+        }
         if (op == "|")  return l | r
         if (op == "^")  return l ^ r
         if (op == "&")  return l & r

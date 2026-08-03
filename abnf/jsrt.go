@@ -8502,7 +8502,25 @@ func (rt *jsrt) toInt32(v interface{}) int32 {
 	if f != f || math.IsInf(f, 0) {
 		return 0
 	}
-	return int32(int64(f))
+	f = math.Trunc(f)
+	if f >= -9223372036854775808 && f < 9223372036854775808 {
+		return int32(int64(f))
+	}
+	// Outside the int64 range `int64(f)` is IMPLEMENTATION DEFINED in Go (it
+	// answered -1 here on arm64 and math.MinInt64 on amd64), and ToInt32 is a
+	// MODULO rather than a range test, so neither that nor the C floor's old
+	// `return 0` is the JS answer: `1e20 | 0` is 1661992960 and `1e19 | 0` is
+	// -1981284352. math.Mod is fmod, which is exact for an integral operand, so
+	// the reduction loses nothing. languages/lib/runtime.c's to_int32 does the
+	// same thing with bit arithmetic. See docs/runtime-next-plan.md part 2.
+	m := math.Mod(f, 4294967296)
+	if m < 0 {
+		m += 4294967296
+	}
+	if m >= 2147483648 {
+		m -= 4294967296
+	}
+	return int32(m)
 }
 
 // jsProgramPanic marks a failure of the RUNNING PROGRAM (llvm.RunJS) as opposed

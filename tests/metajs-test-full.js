@@ -149,6 +149,29 @@ function s04() {
     check("bit13", (2147483647 + 1 | 0) === -2147483648)
     check("bit14", (0xffffffff | 0) === -1)
     check("bit15", (5 << 33) === 10)
+    // ToInt32 OUTSIDE the int64 range. It is a MODULO, not a range test, and
+    // all three engines used to get it wrong in three different ways: the C
+    // floor answered 0 from an explicit `d_in_long` test, abnf/jsrt.go's
+    // rt.toInt32 ended in `int32(int64(f))` - implementation defined in Go, -1
+    // here on arm64 - and goja's own operator does the same int64 conversion.
+    // Every value below is checked against node; see docs/runtime-next-plan.md
+    // part 2. Written as decimal literals because MetaJS has no exponent form.
+    check("bit16", (10000000000000000000 | 0) === -1981284352)
+    check("bit17", (100000000000000000000 | 0) === 1661992960)
+    check("bit18", ((0 - 10000000000000000000) | 0) === 1981284352)
+    check("bit19", ((0 - 100000000000000000000) | 0) === -1661992960)
+    // A value whose low 32 bits are genuinely zero, so 0 is the RIGHT answer -
+    // the assertion that says the fix did not just replace one constant with
+    // another. 2^63 exactly, and a value far above the 2^84 cutoff.
+    check("bit20", (9223372036854775808 | 0) === 0 &&
+        (1000000000000000019884624838656 | 0) === 0)
+    // The int64 boundary from below is unchanged, which is what says the fast
+    // path still runs: 2^63 - 1024 is the largest double under 2^63.
+    check("bit21", (9223372036854774784 | 0) === -1024 && (4294967295 | 0) === -1)
+    // The other five operators take the same reading.
+    check("bit22", (10000000000000000000 & 4294967295) === -1981284352 &&
+        (10000000000000000000 >> 4) === -123830272 &&
+        (10000000000000000000 >>> 28) === 8)
 }
 
 // ===== SECTION 05: comparison and equality =====
@@ -1007,6 +1030,57 @@ function s24() {
     // pair compares unsigned one way round and signed the other - and answers 1
     // both times, for two different reasons.
     check("sint71", sintCmp(um, mx) === 1 && sintCmp(mx, um) === 1)
+
+    // ----- sintRaw: the one door past si_norm -----
+    // si_norm UNBOXES a signed 64 bit value a double holds exactly, and that is
+    // exactly what a statically typed language's `long` must not do: Java's
+    // `1000000L * 1000000L` is 1000000000000 where `1000000 * 1000000` is
+    // -727379968. Every other sint* builtin goes through si_norm, so until this
+    // existed layer 2 had NO constructor for a small boxed value, and java
+    // worked around it by marking the box UNSIGNED - the one shape si_norm will
+    // not unbox - and re-supplying the six operations whose signed reading the
+    // floor then got wrong, in ~90 lines. See docs/runtime-next-plan.md part 3.
+    var r5 = sintRaw(0, 5, 64, 0)
+    check("sint72", sintIs(r5) === true && sintIs(sint(0, 5, 64, 0)) === false)
+    check("sint73", typeof r5 === "number" && sintStr(r5) === "5" && sintNum(r5) === 5)
+    // SIGNED and small, the shape sint() cannot build at all. The six
+    // operations java had to re-supply are asserted on a raw SIGNED box below,
+    // and every one of them is the plain sint* builtin.
+    check("sint74", sintWidth(r5) === 64 && sintUns(r5) === false)
+    var rn1 = sintRaw(4294967295, 4294967295, 64, 0)        // -1, as a signed box
+    check("sint75", sintStr(rn1) === "-1" && sintNum(rn1) === -1)
+    check("sint76", sintOp(3, rn1, 2) === 0 && sintStr(sintOp(4, rn1, 2)) === "-1")
+    check("sint77", sintStr(sintOp(10, rn1, 1)) === "-1")
+    check("sint78", sintCmp(rn1, r5) === -1 && sintCmp(r5, rn1) === 1)
+    // si_trunc IS still applied, so the cell keeps the invariant its own header
+    // states: 200 at 8 bits signed is -56, not 200 wearing an int8 label.
+    check("sint79", sintNum(sintRaw(0, 200, 8, 0)) === -56 && sintWidth(sintRaw(0, 200, 8, 0)) === 8)
+    check("sint80", sintNum(sintRaw(0, 200, 8, 1)) === 200 && sintUns(sintRaw(0, 200, 8, 1)) === true)
+    // The defaults are sint()'s: 64 bits, signed.
+    check("sint81", sintWidth(sintRaw(0, 7)) === 64 && sintUns(sintRaw(0, 7)) === false &&
+        sintIs(sintRaw(0, 7)) === true)
+    check("sint82", sintHi(r5) === 0 && sintLo(r5) === 5)
+    check("sint83", sintStr(sintRaw(2147483647, 4294967295, 64, 0)) === "9223372036854775807")
+    // A box, so === compares by value and == is false - the same faithfully odd
+    // pair sint23 pins, now reachable at a value a double holds exactly.
+    check("sint84", (r5 === 5) === true && (r5 == 5) === false)
+    var rmin = sintRaw(2147483648, 0, 64, 0)
+    check("sint85", sintStr(rmin) === "-9223372036854775808" && sintIs(rmin) === true)
+    check("sint86", sintStr(sintOp(3, rmin, -1)) === "-9223372036854775808" && sintOp(4, rmin, -1) === 0)
+    // sintConv still normalises: sintRaw is the ONLY door past si_norm, and a
+    // raw box converted back to signed 64 bits is a plain number again.
+    check("sint87", sintConv(r5, 64, 0) === 5 && sintIs(sintConv(r5, 64, 0)) === false)
+    // Measured: the two rules above have to be asserted where the width is WIDE
+    // enough for the truncation to change the value, and at 64 bits for the
+    // signedness - the same rule sint66-sint71 record. At 8 bits an unsigned
+    // box's payload is never negative, so "unsigned ignored" hides; at 64 bits
+    // it is the whole difference between -1 and 18446744073709551615.
+    check("sint88", sintNum(sintRaw(0, 4294967295, 32, 0)) === -1 &&
+        sintNum(sintRaw(0, 4294967295, 32, 1)) === 4294967295 &&
+        sintWidth(sintRaw(0, 4294967295, 32, 0)) === 32)
+    var ru = sintRaw(4294967295, 4294967295, 64, 1)
+    check("sint89", sintStr(ru) === "18446744073709551615" && sintUns(ru) === true &&
+        sintCmp(ru, 0) === 1 && sintNum(ru) > 0)
 }
 
 // ===== SECTION 25: the garbage collector (mark/sweep over the heap) =====

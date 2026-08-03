@@ -275,10 +275,34 @@ long d_abs(long x) { return x & 9223372036854775807; }
 /* ToInt32, exactly like the JS abstract operation: truncate, then wrap modulo
  * 2^32 into the signed range. */
 long to_int32(long bits) {
-	long t; long v;
+	long t; long v; long e; long m; long sh; long one = 1;
 	if (d_is_nan(bits) || d_is_inf(bits)) { return 0; }
 	t = d_trunc(bits);
-	if (d_in_long(t) == 0) { return 0; }
+	if (d_in_long(t) == 0) {
+		/* |t| >= 2^63, and ToInt32 is a MODULO, not a range test. This used to
+		 * answer 0, which is wrong: real JS says `1e20 | 0` is 1661992960 and
+		 * `1e19 | 0` is -1981284352. Measured against node; recorded in
+		 * docs/runtime-next-plan.md part 2 as 63 lines of the jsJFlo probe,
+		 * where the Go twin's `int32(int64(f))` answered -1 on arm64 and this
+		 * answered 0 - three implementations, three answers, none of them JS.
+		 * abnf/jsrt.go's rt.toInt32 is fixed to match.
+		 *
+		 * t is an exact integer here, so the low 32 bits are exact too: the
+		 * value is m * 2^(e-52) with m the 53 bit significand, so the shift
+		 * carries the significand's low bits into place and everything at or
+		 * above a shift of 32 is a multiple of 2^32 and contributes nothing.
+		 * The significand is masked BEFORE the shift so the product never
+		 * leaves 32 bits - `m << 31` would overflow. */
+		e = ((t >> 52) & 2047) - 1023;
+		sh = e - 52;
+		if (sh >= 32) { return 0; }
+		m = (t & 4503599627370495) | (one << 52);
+		v = (m & ((one << (32 - sh)) - 1)) << sh;
+		if (t < 0) { v = 0 - v; }
+		v = v & 4294967295;
+		if (v >= 2147483648) { v = v - 4294967296; }
+		return v;
+	}
 	v = d_to_long(t);
 	v = v & 4294967295;
 	if (v >= 2147483648) { v = v - 4294967296; }
@@ -1560,6 +1584,14 @@ long g_ndig;
  * everything by four keeps those halves whole too, so the whole decision is an
  * integer comparison: 2P and (below a power of two) P are the bounds, 4N is the
  * value, and 4*M*10^(L-k) is the candidate. */
+/* g_mindig is the MINIMUM number of digits the search may answer with. It is 1
+ * for every caller but java's Double.toString, which never uses fewer than two
+ * significant digits - and when the shortest form has one, the second digit is
+ * not a zero but the closest two digit decimal to the actual value. Starting the
+ * search at k = 2 IS that decimal, because the candidate for k digits is the
+ * exact value rounded to k digits, nearest with ties to even. See jvm_flo_str. */
+long g_mindig = 1;
+
 long shortest_digits(long bits, char *digs) {
 	long E;
 	long F;
@@ -1618,7 +1650,8 @@ long shortest_digits(long bits, char *digs) {
 	nLO = nP;
 	if (m != 4503599627370496L || E <= 1) { nLO = dec_mul(G_DLO, nP, 2); }
 	lim = L < 17 ? L : 17;
-	k = 1;
+	k = g_mindig < 1 ? 1 : g_mindig;
+	if (k > lim) { k = lim; }
 	while (k <= lim && best == 0) {
 		round = 0;
 		while (round < 2 && best == 0) {
@@ -1674,7 +1707,10 @@ long shortest_digits(long bits, char *digs) {
 	i = 0;
 	while (i < dm) { digs[i] = rev[dm - 1 - i]; i = i + 1; }
 	e10 = L - bestK + p + dm - 1;
-	while (dm > 1 && digs[dm - 1] == 48) { dm = dm - 1; }
+	/* A trailing zero is dropped, but never below g_mindig digits: a forced
+	 * two digit form is exactly "1.0E20" / "4.9E-324", and stripping the zero
+	 * would put the first one back to "1E20". */
+	while (dm > 1 && dm > g_mindig && digs[dm - 1] == 48) { dm = dm - 1; }
 	g_ndig = dm;
 	return e10;
 }
@@ -2461,10 +2497,27 @@ long jvm_flo_str(long bits) {
 	if (d_is_inf(bits)) { return d_sign(bits) ? mk_cstr("-Infinity") : mk_cstr("Infinity"); }
 	if (d_is_zero(bits)) { return d_sign(bits) ? mk_cstr("-0.0") : mk_cstr("0.0"); }
 	a = d_abs(bits);
+	/* TWO significant digits at least, and where the shortest form has one the
+	 * second is the closest two digit decimal to the value rather than a zero.
+	 * It shows only among the SUBNORMALS, where the gap between neighbours is
+	 * comparable to the value itself: Double.MIN_VALUE is 4.9406564584124654E
+	 * -324, which java renders "4.9E-324" and the shortest-plus-".0" rule
+	 * renders "5.0E-324". Measured against real java 24.0.2; it was 254 lines
+	 * of the 17,674 line java probe (docs/runtime-next-plan.md part 3). Every
+	 * NORMAL double is within about 1e-16 of its one digit form, a thousandth
+	 * of a two digit step, so the two rules agree everywhere else. */
+	g_mindig = 2;
 	e10 = shortest_digits(a, digs);
+	g_mindig = 1;
 	nd = g_ndig;
 	if (d_sign(bits)) { out[o] = 45; o = o + 1; }
 	if (!d_lt(a, JF_1EM3) && d_lt(a, d_from_long(10000000))) {
+		/* The PLAIN form prints the number, not the two digit significand:
+		 * 0.001 is "0.001" and not "0.0010", while 100.0 still gets its forced
+		 * ".0" from the branch below. So the padding zero is dropped again
+		 * here - the minimum is about the SIGNIFICAND, and only the scientific
+		 * form shows one. */
+		while (nd > 1 && digs[nd - 1] == 48) { nd = nd - 1; }
 		if (e10 >= 0) {
 			i = 0;
 			while (i <= e10) { out[o] = i < nd ? digs[i] : 48; o = o + 1; i = i + 1; }
@@ -4248,6 +4301,33 @@ long host_call(long id, long self, long args) {
 	 * A dict box ({__dict,keys,vals}) yields its key array; a plain object
 	 * yields its string keys, skipping the internal __-prefixed slots. */
 	if (id == 61) { return js_keys(arg_at(args, 0)); }
+	/* sintRaw(hi, lo, bits, unsigned): sint() WITHOUT si_norm - always a tag 13
+	 * cell, never a plain number.
+	 *
+	 * WHY IT EXISTS (docs/runtime-next-plan.md part 3, the java migration).
+	 * si_norm's whole job is to UNBOX a signed 64 bit value a double holds
+	 * exactly, and that is precisely what a statically typed language's 64 bit
+	 * signed type must NOT do: Java's `1000000L * 1000000L` is 1000000000000
+	 * while `1000000 * 1000000` is -727379968, so a small long has to stay a
+	 * long. Every one of the eleven sint* builtins goes through si_norm, so
+	 * layer 2 had no constructor for a small BOXED value at all. Java worked
+	 * around it by marking the box UNSIGNED - the one shape si_norm will not
+	 * unbox - and then re-supplying six signed operations (/ % >>, compare,
+	 * decimal text, double reading) in about 90 lines of java-rt.metajs. That
+	 * workaround is owed once per language, and csharp, go, kotlin, swift and
+	 * dart all have a 64 bit signed type.
+	 *
+	 * si_trunc IS still applied, so the cell keeps the invariant its header
+	 * states (`the value already truncated to the width and sign extended`) -
+	 * a caller asking for 8 bits gets a well formed int8 box, not 300 labelled
+	 * as one. The ONLY thing dropped is si_norm's unboxing arm. */
+	if (id == 62) {
+		long hi = d_to_long(d_trunc(arg_num(args, 0))) & 4294967295;
+		long lo = d_to_long(d_trunc(arg_num(args, 1))) & 4294967295;
+		long w = n > 2 ? d_to_long(d_trunc(arg_num(args, 2))) : 64;
+		long u = n > 3 ? truthy(arg_at(args, 3)) : 0;
+		return si_make(si_trunc((hi << 32) | lo, w, u), w, u);
+	}
 	die("unknown host function");
 	return H_UNDEF;
 }
@@ -4805,6 +4885,7 @@ void boot(void) {
 	seed_root("floMin", mk_host(59));
 	seed_root("floAbs", mk_host(60));
 	seed_root("keysOf", mk_host(61));
+	seed_root("sintRaw", mk_host(62));
 	seed_root("Infinity", mk_num(DINF));
 	seed_root("NaN", mk_num(DNAN));
 	seed_root("anytype", cell_new(12));

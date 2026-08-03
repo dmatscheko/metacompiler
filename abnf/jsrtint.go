@@ -332,9 +332,9 @@ func (rt *jsrt) giConv(x interface{}, w uint8, u bool) interface{} {
 // rather than an operator string across the boundary.
 var giOpNames = []string{"+", "-", "*", "/", "%", "&", "|", "^", "&^", "<<", ">>"}
 
-// giBindings adds the ELEVEN sint* host globals that languages/lib/runtime.c
+// giBindings adds the TWELVE sint* host globals that languages/lib/runtime.c
 // seeds (host ids 40..50, `seed_root("sint", mk_host(40))` and the ten after
-// it) to a program's global set.
+// it, plus sintRaw at id 62) to a program's global set.
 //
 // WHY IT IS HERE. A natively linked program reaches a sized integer through
 // those names; a program run by llvm.Run reaches the very same runtime through
@@ -363,6 +363,27 @@ func giBindings(b map[string]interface{}) {
 			u = rt.truthy(args[3])
 		}
 		return giNorm(int64(hi<<32|lo), w, u)
+	})
+	// sintRaw(hi, lo, bits, unsigned): sint() WITHOUT giNorm - ALWAYS a jsGInt,
+	// never a plain float64. languages/lib/runtime.c seeds it as host id 62 and
+	// the comment there carries the argument in full; the short version is that
+	// giNorm unboxes a signed 64 bit value a double holds exactly, which is
+	// exactly what a statically typed language's `long` must not do, and every
+	// other sint* builtin goes through giNorm. giTrunc is still applied, so the
+	// box keeps jsGInt's own invariant ("v holds the value already truncated to
+	// w bits"); only the unboxing arm is dropped.
+	b["sintRaw"] = jsHostFunc("sintRaw", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		hi := uint64(giFromFloat(rt.toNumber(argAt(args, 0)))) & 0xffffffff
+		lo := uint64(giFromFloat(rt.toNumber(argAt(args, 1)))) & 0xffffffff
+		w := uint8(64)
+		if len(args) > 2 {
+			w = uint8(jsToInt(rt.toNumber(args[2])))
+		}
+		u := false
+		if len(args) > 3 {
+			u = rt.truthy(args[3])
+		}
+		return jsGInt{v: giTrunc(int64(hi<<32|lo), w, u), w: w, u: u}
 	})
 	b["sintIs"] = jsHostFunc("sintIs", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return giIsInt(argAt(args, 0))

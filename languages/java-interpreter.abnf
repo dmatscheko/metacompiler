@@ -2470,9 +2470,45 @@ HasStatic   = :script(~~
         var endz = digits.length
         while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
         digits = digits.substring(0, endz)
+        var e10 = pt + exp - 1
+        // Double.toString never uses fewer than TWO significant digits, and
+        // where the shortest form has ONE the second is not a zero but the
+        // closest two digit decimal to the ACTUAL value. For every normal
+        // double those are the same (the value is within ~1e-16 of its one
+        // digit form, a thousandth of a two digit step); it shows among the
+        // SUBNORMALS, where the gap between neighbours is comparable to the
+        // value: Double.MIN_VALUE is 4.9406564584124654E-324, so java writes
+        // "4.9E-324" where appending ".0" writes "5.0E-324". Measured against
+        // real java 24.0.2 - it was 254 lines of the 17,674 line java probe.
+        // The same fix is in languages/lib/runtime.c (g_mindig), in
+        // abnf/jsrtjvm.go (FormatFloat precision 1) and in
+        // languages/metajs-interpreter.abnf (flTwo); all four are checked
+        // against `java` over 613 values. docs/runtime-next-plan.md part 3.
+        if (digits.length == 1) {
+            // The scaling exponent is the VALUE's, not the shortest form's -
+            // 1e-322 is really 9.88e-323, whose two digit form is 9.9E-323 -
+            // so a scaled value below ten steps down one decade. 10^325 is an
+            // infinity, so the scaling is done in chunks.
+            var r = jFloScale(a, 1 - e10)
+            if (r < 10) { r = jFloScale(a, 2 - e10); e10 = e10 - 1 }
+            var n2 = (r + 0.5) | 0            // r is under 100, so | 0 floors
+            if (n2 >= 100) { n2 = 10; e10 = e10 + 1 }
+            digits = "" + n2
+        }
         var frac = digits.substring(1)
         if (frac == "") { frac = "0" }
-        return digits.charAt(0) + "." + frac + "E" + (pt + exp - 1)
+        return digits.charAt(0) + "." + frac + "E" + e10
+    }
+    // a * 10^k, in chunks: 10^325 is an infinity and 10^-325 is zero, and the
+    // value this is wanted for is a subnormal, so both ends are live.
+    function jFloScale(a, k) {
+        var e200 = 100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+        while (k > 200) { a = a * e200; k = k - 200 }
+        while (k < 0 - 200) { a = a / e200; k = k + 200 }
+        var p = 1
+        var n = k < 0 ? 0 - k : k
+        for (var z = 0; z < n; z++) { p = p * 10 }
+        return k < 0 ? a / p : a * p
     }
     // Java's escape set, shared by char literals, string literals and text blocks:
     // the single letters, \s (a space that survives text-block trailing-space

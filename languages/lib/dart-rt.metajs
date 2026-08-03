@@ -1,0 +1,1652 @@
+// dart-rt.metajs -- DART'S OWN SEMANTICS, in MetaJS. Layer 2 of
+// docs/runtime-next-plan.md part 3, for the fifth language after the Lua pilot,
+// PHP, Swift and Java.
+//
+// languages/dart-to-llvm-ir.abnf emits handle IR that calls 67 js_* externs over
+// every dart test in tests/ (64 for the full-syntax ratchet alone). 37 of them
+// are generic primitives languages/lib/runtime.c already provides (the C floor,
+// layer 1). The other 30 are here.
+//
+// Compile with:
+//     mec languages/metajs-to-llvm-ir.abnf languages/lib/dart-rt.metajs -q -rt-lib
+// which is what tests/gen-dart-rt-ll.sh does; the result is the checked-in
+// languages/lib/dart-rt.ll that dart-to-llvm-ir.abnf links next to runtime.ll.
+// -rt-lib exports every TOP-LEVEL `function js_*` below under its own C symbol,
+// so nothing else in this file is visible to the linker - the helpers are
+// deliberately named dt*.
+//
+// THE AUTHORITATIVE SPECIFICATION IS abnf/jsrtdart.go plus the shared externs it
+// layers over in abnf/jsrt.go (memberCall, js_pyget/js_pyset/js_pylen/js_pyiter/
+// js_pyslice/js_pyin/js_pyeq/js_pyspread/js_pyset_new, js_is_type, js_jadd,
+// js_dict_new), and this file matches them function for function. Where it
+// CANNOT, the site says so in full.
+//
+// ----- the value model -------------------------------------------------------
+//
+//     null / undefined     ==  Dart null.
+//     a boolean            ==  bool
+//     a PLAIN NUMBER       ==  an int whose value is exact in a double
+//     a SIZED INTEGER      ==  an int outside [-2^53, 2^53]. ALWAYS width 64,
+//                              signed. The Go twin uses jsGInt (abnf/jsrtint.go);
+//                              the C floor has it as a REAL PRIMITIVE TYPE
+//                              (tag 13) reached through sint/sintOp/sintCmp/...
+//     a BOXED DOUBLE       ==  double. The Go twin has a type of its own,
+//                              jsDartFlo (abnf/jsrtdart.go); the floor has the
+//                              boxed double as tag 14, reached through
+//                              flo/floIs/floNum/floStyle. THE STYLE IS NEVER
+//                              READ: Dart builds every box with style 0 and
+//                              renders through dtFloStr, Dart's own
+//                              double.toString, so the tag's own floStr is not
+//                              called anywhere in this file. jsJFlo and
+//                              jsDartFlo differ only in that rendering, and
+//                              jsrtdart.go says so at the type.
+//     a string             ==  String
+//     an array             ==  List
+//     a {__dict} object    ==  Map: keys/vals parallel arrays, INSERTION ordered
+//     a {__set} object     ==  Set; its members are the `elems` array
+//     a {__isclass} object ==  a TYPE DESCRIPTOR: __name, __super, and the
+//                              methods. Printing one prints its __name, because
+//                              a Type in Dart prints as its name.
+//     any other object     ==  an instance; its descriptor is __class. An enum
+//                              value additionally carries __enumName, and a
+//                              record is an instance of the class named "Record"
+//                              whose __f is the field dict ("$1", "$2", labels).
+//
+// ----- what Dart needed from the floor, and what it did NOT -------------------
+//
+// BOTH number tags, and no pair layer and no object box for either - the same
+// result Swift got, for the same reason: sint* IS Dart's int and tag 14 IS
+// Dart's double.
+//
+// The one place Dart differs from Java is the direction of the si_norm question.
+// Java's `long` must NOT unbox, so java-rt.metajs carries a 64 bit box marked
+// UNSIGNED and reimplements six operators. Dart's invariant is the OPPOSITE and
+// is stated at the end of abnf/jsrtdart.go: "plain number == an int whose value
+// is exact in a double; jsGInt == an int outside that range (w = 64, u = false,
+// always)". That IS giNorm, and giNorm IS what sint() applies. So Dart needs no
+// workaround and no sintRaw: every integer operation below is a plain sintOp /
+// sintCmp / sintStr / sintNum call at the default width.
+//
+// ----- what Dart did NOT need, checked rather than assumed --------------------
+//
+//  1. NO `__raw` truthy shim. compile-core's truthy() emits `icmp ne <call>, 0`
+//     on core.truthyExt, so that extern must answer a RAW INTEGER - and a shim
+//     handing back a boolean HANDLE gives 2 for false, which is != 0, so every
+//     condition in the program would be taken, silently. Dart sets no
+//     core.truthyExt at all (`grep -n truthyExt languages/dart-to-llvm-ir.abnf`
+//     is empty), so it keeps compile-core's default "js_truthy", which is the C
+//     FLOOR'S OWN function and already answers the raw 1/0. Like Swift and Java,
+//     and unlike Lua and PHP.
+//  2. NO `_raw` PARAMETERS. Every selector the dart emitter passes -
+//     js_dartarith's and js_dartlit's - is emitted with emitStr/emitNum, never
+//     with a bare handle(k). Checked over the grammar: every handle(k) argument
+//     goes to js_closure or js_arg, which are floor externs.
+//  3. NO jsChar. Dart has no character type; a Dart "character" is a one
+//     character String, and the emitter never emits js_char / js_char_code /
+//     js_kindex at all.
+//  4. NO coroutine primitive. `grep -c 'js_genfn\|js_yield'` in the grammar is 0
+//     - Dart's sync*/async* are lowered by the emitter - so WALL 1 of
+//     docs/runtime-next-plan.md part 3 does not touch this language.
+//
+// ----- WALL 3, the scope chain: lowered in the EMITTER, not here --------------
+//
+// js_kget and js_kset used to be externs that took a SCOPE HANDLE and walked the
+// chain with a `this` fallback. A scope is the floor's private storage, so layer
+// 2 cannot open one and neither could ever have been written here. Both are pure
+// PROBES, and an EMITTER may call js_scope_typeof / js_scope_get / js_scope_set,
+// so dart-to-llvm-ir.abnf now emits them as the IR helpers dt_kget / dt_kset.
+// PHP recorded the generalisation, Swift confirmed it, Dart is the third.
+//
+// ----- MetaJS rules that shape the code below --------------------------------
+//
+// docs/abnf-dialect-gotchas.md: a local (or a reassigned parameter) keeps the
+// TYPE CLASS it is first assigned, so a variable that holds a number in one
+// branch and an object in another is declared `var x = anytype`; there is no
+// ASI, so every `return` carries its value on the same line and a value-less
+// early return is BRACED; no for..in, no splice, no split/join/lastIndexOf,
+// indexOf ignores its from-index, array.length is not assignable, and there are
+// no exponent literals.
+
+// ===================================================== the two number tags ==
+//
+// `typeof v == "number"` is TRUE for a sized integer AND for a boxed double, so
+// every site that meant "an ordinary double" has to say so. These three are the
+// Go twin's dartIsFlo / dartIsInt / dartIsNum, in that order.
+
+function dtIsFlo(v) { return floIs(v) }
+
+function dtIsInt(v) {
+    if (typeof v != "number") { return false }
+    return !floIs(v)
+}
+
+function dtIsNum(v) { return typeof v == "number" }
+
+// dtNumOf is the Go twin's dartNumOf: the double reading of any Dart number.
+function dtNumOf(v) {
+    if (floIs(v)) { return floNum(v) }
+    if (sintIs(v)) { return sintNum(v) }
+    if (typeof v == "number") { return v }
+    return 0 / 0
+}
+
+// dtNum is the plain-number reading an index, a length or a count needs. It is
+// dtNumOf for a number and the engine's own coercion otherwise.
+function dtNum(v) {
+    if (typeof v == "number") { return dtNumOf(v) }
+    if (typeof v == "string") { return parseInt(v) }
+    if (v === true) { return 1 }
+    return 0
+}
+
+// dtToInt is the Go twin's dartToInt: a double truncates toward zero into the
+// int representation (WRAPPING modulo 2^64, which is what giFromFloat does), an
+// int passes through. It is toInt(), truncate(), and the operand coercion every
+// bitwise operator performs.
+function dtToInt(v) {
+    if (!floIs(v)) { return v }
+    return dtIntFromFloat(floNum(v))
+}
+
+// giFromFloat, in MetaJS: truncate toward zero, then reduce modulo 2^64 into the
+// signed range. sintConv would be the one-liner, but its argument is read
+// through the floor's own operand reader and this is the one conversion whose
+// out-of-range behaviour has to be spelled out rather than inherited.
+function dtIntFromFloat(f) {
+    if (f !== f) { return 0 }
+    var t = Math.trunc(f)
+    if (t >= 9223372036854775808 || t < 0 - 9223372036854775808) {
+        var m = dtFmod(t, 18446744073709551616)
+        if (m >= 9223372036854775808) { m = m - 18446744073709551616 }
+        else if (m < 0 - 9223372036854775808) { m = m + 18446744073709551616 }
+        return dtSintOfFloat(m)
+    }
+    return dtSintOfFloat(t)
+}
+
+// A double that is already an exact integer in [-2^63, 2^63) as the int
+// representation: below 2^53 that IS the plain number, above it the two unsigned
+// 32 bit halves the sint constructor takes.
+function dtSintOfFloat(t) {
+    if (t <= 9007199254740992 && t >= 0 - 9007199254740992) { return t }
+    var neg = t < 0
+    var a = t
+    if (neg) { a = -t }               // UNARY minus, never 0 - t (see dtFloStr)
+    var hi = Math.floor(a / 4294967296)
+    var lo = a - hi * 4294967296
+    var v = sint(hi, lo, 64, 0)
+    if (neg) { return sintOp(1, 0, v) }
+    return v
+}
+
+// The remainder Go's math.Mod computes: TRUNCATED, keeping the DIVIDEND's sign.
+//
+// Two things this must not be, both found by the differential probe:
+//
+//  1. NOT `a - Math.trunc(a / b) * b`. That loses the sign of a zero result -
+//     `-0.0 % 1.0` is -0.0 in Go and came out +0.0, because -0.0 - (-0.0) is
+//     +0.0. It is the same signed-zero trap the plan records for unary minus,
+//     met a third way. The sign is therefore carried OUTSIDE the computation and
+//     put back with a unary minus.
+//  2. NOT the quotient at all. `1e100 / 5e-324` is not representable, so a
+//     quotient-based remainder is nonsense across a wide exponent range, where
+//     Go's math.Mod is EXACT. The exact algorithm is the same one math.Mod uses,
+//     written without Frexp/Ldexp: scale the divisor up by powers of two until
+//     one more doubling would pass the dividend, then walk back down. Every
+//     `d * 2` and `d / 2` is exact (a power-of-two scaling), and every
+//     `r = r - d` is exact by Sterbenz, because the loop keeps d <= r < 2*d.
+//     `d <= r / 2` rather than `d * 2 <= r` is the guard that keeps the doubling
+//     from overflowing to Infinity for a huge dividend.
+function dtFmod(a, b) {
+    if (a !== a) { return a }
+    if (b !== b) { return b }
+    if (a === Infinity || a === 0 - Infinity) { return 0 / 0 }
+    if (b === 0) { return 0 / 0 }
+    if (b === Infinity || b === 0 - Infinity) { return a }
+    if (a === 0) { return a }          // keeps -0.0
+    var neg = dtSignBit(a)
+    var r = a
+    if (neg) { r = -a }
+    var y = b
+    if (dtSignBit(b)) { y = -b }
+    if (r >= y) {
+        var d = y
+        while (d <= r / 2) { d = d * 2 }
+        while (d >= y) {
+            if (r >= d) { r = r - d }
+            d = d / 2
+        }
+    }
+    if (neg) { return -r }
+    return r
+}
+
+// ===================================================== float rendering ======
+//
+// dtFloStr is the Go twin's dartFloStr: ECMAScript's number-to-string with ".0"
+// appended when the result carries neither a point nor an exponent, so 1.0 is
+// "1.0", 1e21 is "1e+21" and 1e-7 is "1e-7". -0.0 keeps its sign although
+// ECMAScript spells it "0". Cited there:
+// tests/reference/dart/dart-language-tests/language/double/to_string_test.dart
+// lines 9-11 (NaN / Infinity / -Infinity), 26 ("1e-7"), 33 ("-0.0"), 56 ("1e+21").
+//
+// `"" + f` is jsNumString in the Go half and d_num_str in the floor, and both
+// are the SAME shortest round-tripping form, so nothing has to be re-derived
+// here the way swift-rt.metajs's swSplit10 does.
+function dtFloStr(f) {
+    if (f !== f) { return "NaN" }
+    if (f === Infinity) { return "Infinity" }
+    if (f === 0 - Infinity) { return "-Infinity" }
+    var s = "" + f
+    if (f === 0 && dtSignBit(f)) { s = "-0" }
+    if (s.indexOf(".") < 0 && s.indexOf("e") < 0) { s = s + ".0" }
+    return s
+}
+
+// The sign of a zero, which a comparison cannot see. 1/x is -Infinity for -0.
+function dtSignBit(d) {
+    if (d < 0) { return true }
+    if (d === 0) { return 1 / d < 0 }
+    return false
+}
+
+// ===================================================== object shapes ========
+
+function dtIsObj(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    return typeof v == "object"
+}
+
+// A MetaJS list. A Map / instance box is an object without a numeric `length`.
+function dtIsArr(v) {
+    if (!dtIsObj(v)) { return false }
+    if (v["__dict"] === true) { return false }
+    return typeof v["length"] == "number"
+}
+
+function dtIsDict(v) {
+    if (!dtIsObj(v)) { return false }
+    if (v["__dict"] !== true) { return false }
+    if (!dtIsArr(v["keys"])) { return false }
+    return dtIsArr(v["vals"])
+}
+
+// pySetElems: the element array of a {__set} object, or undefined.
+function dtSetElems(v) {
+    if (!dtIsObj(v)) { return undefined }
+    if (v["__set"] === undefined) { return undefined }
+    var el = v["elems"]
+    if (!dtIsArr(el)) { return undefined }
+    return el
+}
+
+function dtIsClass(v) {
+    if (!dtIsObj(v)) { return false }
+    return v["__isclass"] === true
+}
+
+// dictFind: the index of a key, or -1. The Go twin hashes; a linear scan with
+// the same strictEq is observationally identical and is what layer 2 can write.
+// `===` is the floor's own strict equality, which compares a BOXED DOUBLE and a
+// SIZED INTEGER by VALUE against any other number - so 1 and 1.0 key alike, which
+// is exactly the reason core.keyId / core.keyEq exist in lib/interp-core.js for
+// the interpreter half of this same language.
+function dtDictFind(keys, k) {
+    var i = 0
+    while (i < keys.length) {
+        if (keys[i] === k) { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+function dtCopyArr(a) {
+    var out = []
+    var i = 0
+    while (i < a.length) {
+        out.push(a[i])
+        i = i + 1
+    }
+    return out
+}
+
+// The number of CODE POINTS in a string: pyStrLen in the Go twin, so a surrogate
+// pair counts once.
+function dtStrLen(s) {
+    var n = 0
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+            var d = s.charCodeAt(i + 1)
+            if (d >= 56320 && d <= 57343) { i = i + 1 }
+        }
+        n = n + 1
+        i = i + 1
+    }
+    return n
+}
+
+// The code POINT at code-point index i, as a string: rt.strAt.
+function dtStrAt(s, at) {
+    var n = 0
+    var i = 0
+    while (i < s.length) {
+        var w = 1
+        var c = s.charCodeAt(i)
+        if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+            var d = s.charCodeAt(i + 1)
+            if (d >= 56320 && d <= 57343) { w = 2 }
+        }
+        if (n === at) { return s.substring(i, i + w) }
+        n = n + 1
+        i = i + w
+    }
+    return ""
+}
+
+function dtStrRange(s, from, to) {
+    var out = ""
+    var i = from
+    while (i < to) {
+        out = out + dtStrAt(s, i)
+        i = i + 1
+    }
+    return out
+}
+
+// ===================================================== rendering ============
+//
+// dtStr is the Go twin's dartStr / dartStrIn: Dart's Object.toString() and its
+// overrides. Strings are NOT quoted inside a collection (print(['a']) is "[a]"),
+// which is what makes this different from Python's repr-based rendering.
+//
+// The depth cap is jsrtdart.go's dartCycleDepth: Dart itself renders a
+// self-referential collection as "[...]", and the cap is the belt to that brace.
+
+function dtStr(v) { return dtStrIn(v, [], 0) }
+
+function dtSeen(seen, v) {
+    var i = 0
+    while (i < seen.length) {
+        if (seen[i] === v) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+function dtStrIn(v, seen, depth) {
+    if (depth > 64) { return "..." }
+    if (v === undefined) { return "null" }
+    if (v === null) { return "null" }
+    if (v === true) { return "true" }
+    if (v === false) { return "false" }
+    if (typeof v == "string") { return v }
+    if (floIs(v)) { return dtFloStr(floNum(v)) }
+    if (sintIs(v)) { return sintStr(v) }
+    if (typeof v == "number") { return "" + v }
+    if (typeof v == "function") { return "Closure" }
+    if (dtIsArr(v)) {
+        if (dtSeen(seen, v)) { return "[...]" }
+        seen.push(v)
+        var out = "["
+        var i = 0
+        while (i < v.length) {
+            if (i > 0) { out = out + ", " }
+            out = out + dtStrIn(v[i], seen, depth + 1)
+            i = i + 1
+        }
+        seen.pop()
+        return out + "]"
+    }
+    if (dtIsObj(v)) {
+        if (dtSeen(seen, v)) { return "{...}" }
+        seen.push(v)
+        var os = dtObjStr(v, seen, depth)
+        seen.pop()
+        return os
+    }
+    return "" + v
+}
+
+function dtObjStr(o, seen, depth) {
+    // A class descriptor used as a value is a Type, and Dart prints a Type as its
+    // name. This case has to come first: the descriptor's own members would
+    // otherwise be walked, and it points back at itself through every instance.
+    if (dtIsClass(o)) {
+        var cn = o["__name"]
+        if (typeof cn == "string") { return cn }
+    }
+    var els = dtSetElems(o)
+    if (els !== undefined) {
+        var so = "{"
+        var si = 0
+        while (si < els.length) {
+            if (si > 0) { so = so + ", " }
+            so = so + dtStrIn(els[si], seen, depth + 1)
+            si = si + 1
+        }
+        return so + "}"
+    }
+    if (dtIsDict(o)) {
+        var ks = o["keys"]
+        var vs = o["vals"]
+        var mo = "{"
+        var mi = 0
+        while (mi < ks.length) {
+            if (mi > 0) { mo = mo + ", " }
+            mo = mo + dtStrIn(ks[mi], seen, depth + 1) + ": " + dtStrIn(vs[mi], seen, depth + 1)
+            mi = mi + 1
+        }
+        return mo + "}"
+    }
+    var cls = o["__class"]
+    if (cls === undefined) { return "[object Object]" }
+    // A user toString() anywhere on the __super chain wins, for a plain class and
+    // for an enum alike.
+    var c = cls
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (!dtIsObj(c)) { guard = 99 } else {
+            var mth = c["toString"]
+            if (typeof mth == "function") { return dtToStr(mth.apply(undefined, [o])) }
+            c = c["__super"]
+        }
+    }
+    var name = "Object"
+    if (dtIsObj(cls)) {
+        var nm = cls["__name"]
+        if (typeof nm == "string") { name = nm }
+    }
+    // An enum value prints as EnumName.valueName. __enumName is written by the
+    // enum emitter beside the public `name`, so an ordinary class that happens to
+    // declare a field called `name` is not mistaken for one.
+    var en = o["__enumName"]
+    if (typeof en == "string") { return name + "." + en }
+    // A record renders as its field list: positional fields (keyed "$1", "$2",
+    // ...) as bare values, named ones as "name: value".
+    if (name === "Record") {
+        var f = o["__f"]
+        if (dtIsDict(f)) {
+            var fk = f["keys"]
+            var fv = f["vals"]
+            var ro = "("
+            var ri = 0
+            while (ri < fk.length) {
+                if (ri > 0) { ro = ro + ", " }
+                var kt = dtToStr(fk[ri])
+                var val = dtStrIn(fv[ri], seen, depth + 1)
+                if (kt.charAt(0) == "$") { ro = ro + val } else { ro = ro + kt + ": " + val }
+                ri = ri + 1
+            }
+            return ro + ")"
+        }
+    }
+    return "Instance of '" + name + "'"
+}
+
+// rt.toString: the ENGINE's rendering, which is NOT dtStr - a list joins with
+// bare commas here and an object is "[object Object]". It is what the Go twin
+// applies to a user toString()'s result, to a record's key, and - the case the
+// differential probe caught - to BOTH sides of a `+` whose operands are not
+// numbers and not strings. `[1, 2] + [3]` is therefore "1,23" and not a
+// concatenated list, in both halves.
+function dtToStr(v) {
+    if (typeof v == "string") { return v }
+    if (v === undefined) { return "undefined" }
+    if (v === null) { return "null" }
+    if (v === true) { return "true" }
+    if (v === false) { return "false" }
+    if (floIs(v)) { return dtFloStr(floNum(v)) }
+    if (sintIs(v)) { return sintStr(v) }
+    if (typeof v == "number") { return "" + v }
+    if (typeof v == "function") { return "[function]" }
+    if (dtIsArr(v)) {
+        var out = ""
+        var i = 0
+        while (i < v.length) {
+            if (i > 0) { out = out + "," }
+            var e = v[i]
+            // undefined and null join as EMPTY strings, as in JavaScript.
+            if (e !== undefined && e !== null) { out = out + dtToStr(e) }
+            i = i + 1
+        }
+        return out
+    }
+    if (dtIsObj(v)) { return "[object Object]" }
+    return "" + v
+}
+
+// ===================================================== const canonicalization
+//
+// dtCanon returns the canonical instance for a const value: the first value
+// registered under its structural key. Children are canonicalized FIRST, so a
+// nested const creation is canonical too and the key of the parent is built out
+// of values that are already shared. A value the language cannot make const (a
+// closure, a plain host object) is returned unchanged and never enters the cache.
+//
+// One canonical-const table per PROCESS, where the Go twin has one per runtime.
+// A native binary runs one program, so the two are the same thing.
+
+var dtConsts = {}
+
+// The identity of a value the key builder cannot describe structurally, where
+// the Go twin writes fmt.Sprintf("O:%p"). MetaJS has no address, so identities
+// are handed out on first sight and remembered. Reached only for a CHILD of a
+// const container that is itself not const-able (a closure, a host object), so
+// the table stays tiny.
+var dtIdObjs = []
+
+function dtObjId(v) {
+    var i = 0
+    while (i < dtIdObjs.length) {
+        if (dtIdObjs[i] === v) { return i }
+        i = i + 1
+    }
+    dtIdObjs.push(v)
+    return dtIdObjs.length - 1
+}
+
+function dtCanon(v, depth) {
+    if (depth > 64) { return v }
+    if (dtIsArr(v)) {
+        var i = 0
+        while (i < v.length) {
+            v[i] = dtCanon(v[i], depth + 1)
+            i = i + 1
+        }
+    } else if (dtIsObj(v)) {
+        if (dtIsClass(v)) { return v }        // a Type is already canonical
+        var els = dtSetElems(v)
+        if (els !== undefined) {
+            var si = 0
+            while (si < els.length) {
+                els[si] = dtCanon(els[si], depth + 1)
+                si = si + 1
+            }
+        } else if (dtIsDict(v)) {
+            var ks = v["keys"]
+            var vs = v["vals"]
+            var mi = 0
+            while (mi < ks.length) {
+                ks[mi] = dtCanon(ks[mi], depth + 1)
+                vs[mi] = dtCanon(vs[mi], depth + 1)
+                mi = mi + 1
+            }
+        } else if (v["__class"] !== undefined) {
+            var nms = keysOf(v)
+            var ni = 0
+            while (ni < nms.length) {
+                var k = nms[ni]
+                if (k.substring(0, 2) != "__") { v[k] = dtCanon(v[k], depth + 1) }
+                ni = ni + 1
+            }
+            var fd = v["__f"]                  // a record's field dict
+            if (fd !== undefined) { dtCanon(fd, depth + 1) }
+        } else { return v }
+    } else { return v }
+    var key = "$" + dtConstKey(v, 0)
+    var hit = dtConsts[key]
+    if (hit !== undefined) { return hit }
+    dtConsts[key] = v
+    return v
+}
+
+// dtConstKey is the structural identity of a const value. It is never printed;
+// it only has to separate values that are not identical and join values that are.
+function dtConstKey(v, depth) {
+    if (depth > 64) { return "!" }
+    if (v === undefined) { return "n" }
+    if (v === null) { return "n" }
+    if (v === true) { return "b1" }
+    if (v === false) { return "b0" }
+    // int and double are different types, so const [1] and const [1.0] are NOT
+    // the same const - the two key prefixes have to differ.
+    if (floIs(v)) { return "d" + dtFloStr(floNum(v)) }
+    if (sintIs(v)) { return "i" + sintStr(v) }
+    if (typeof v == "number") { return "i" + v }
+    if (typeof v == "string") { return "s" + v.length + ":" + v }
+    if (dtIsArr(v)) {
+        var out = "L("
+        var i = 0
+        while (i < v.length) {
+            if (i > 0) { out = out + "," }
+            out = out + dtConstKey(v[i], depth + 1)
+            i = i + 1
+        }
+        return out + ")"
+    }
+    if (!dtIsObj(v)) { return "X:" + dtObjId(v) }
+    if (dtIsClass(v)) { return "T:" + dtToStr(v["__name"]) }
+    var els = dtSetElems(v)
+    if (els !== undefined) {
+        var so = "S("
+        var si = 0
+        while (si < els.length) {
+            if (si > 0) { so = so + "," }
+            so = so + dtConstKey(els[si], depth + 1)
+            si = si + 1
+        }
+        return so + ")"
+    }
+    if (dtIsDict(v)) {
+        var ks = v["keys"]
+        var vs = v["vals"]
+        var mo = "M("
+        var mi = 0
+        while (mi < ks.length) {
+            if (mi > 0) { mo = mo + "," }
+            mo = mo + dtConstKey(ks[mi], depth + 1) + "=>" + dtConstKey(vs[mi], depth + 1)
+            mi = mi + 1
+        }
+        return mo + ")"
+    }
+    var cls = v["__class"]
+    if (cls !== undefined) {
+        var name = ""
+        if (dtIsObj(cls)) { name = dtToStr(cls["__name"]) }
+        // The field ORDER of an instance depends on which constructor ran, and two
+        // different constructors must produce the same key, so the names are sorted.
+        var all = keysOf(v)
+        var names = []
+        var ai = 0
+        while (ai < all.length) {
+            if (all[ai].substring(0, 2) != "__") { names.push(all[ai]) }
+            ai = ai + 1
+        }
+        names = dtSortStr(names)
+        var co = "C:" + name + "("
+        var ci = 0
+        while (ci < names.length) {
+            if (ci > 0) { co = co + "," }
+            co = co + names[ci] + "=" + dtConstKey(v[names[ci]], depth + 1)
+            ci = ci + 1
+        }
+        return co + ")"
+    }
+    return "O:" + dtObjId(v)
+}
+
+// sort.Strings, as an insertion sort - MetaJS has no sort and no splice.
+function dtSortStr(a) {
+    var out = []
+    var i = 0
+    while (i < a.length) {
+        var x = a[i]
+        var j = 0
+        while (j < out.length && out[j] < x) { j = j + 1 }
+        var nxt = []
+        var k = 0
+        while (k < j) {
+            nxt.push(out[k])
+            k = k + 1
+        }
+        nxt.push(x)
+        while (k < out.length) {
+            nxt.push(out[k])
+            k = k + 1
+        }
+        out = nxt
+        i = i + 1
+    }
+    return out
+}
+
+// ===================================================== arithmetic ===========
+//
+// dtArith is the Go twin's dartArith: one binary operator on two Dart numbers.
+//
+//     /    ALWAYS a double, for two ints as well (7 / 2 is 3.5, 1 / 1 is 1.0)
+//     ~/   truncating division, and its result is an int even for two doubles
+//     %    EUCLIDEAN on both types: 0 <= r < b.abs(), so -7 % 3 is 2
+//          (remainder() is the truncating one and answers -1)
+//     the rest  floating point as soon as either operand is a double, exact
+//          64-bit integer arithmetic otherwise (sintOp, the floor's tag 13)
+
+// The sintOp codes: 0 + 1 - 2 * 3 / 4 % 5 & 6 | 7 ^ 8 &^ 9 << 10 >>.
+function dtOpCode(op) {
+    if (op == "+") { return 0 }
+    if (op == "-") { return 1 }
+    if (op == "*") { return 2 }
+    if (op == "/") { return 3 }
+    if (op == "%") { return 4 }
+    if (op == "&") { return 5 }
+    if (op == "|") { return 6 }
+    if (op == "^") { return 7 }
+    if (op == "<<") { return 9 }
+    if (op == ">>") { return 10 }
+    fail("dart: unknown integer operator '" + op + "'")
+    return 0
+}
+
+function dtIntOp(op, l, r) { return sintOp(dtOpCode(op), l, r) }
+
+function dtArith(op, l, r) {
+    if (op == "/") { return flo(dtNumOf(l) / dtNumOf(r), 0) }
+    if (op == "~/") {
+        if (dtIsFlo(l) || dtIsFlo(r)) {
+            var q = dtNumOf(l) / dtNumOf(r)
+            if (q !== q || q === Infinity || q === 0 - Infinity) {
+                throw "Unsupported operation: Result of truncating division is " + dtFloStr(q)
+            }
+            return dtIntFromFloat(q)
+        }
+        return dtIntOp("/", dtToInt(l), dtToInt(r))
+    }
+    if (op == ">>>") {
+        var n = dtNumOf(r)
+        if (n < 0) { throw "Unsupported operation: negative shift amount" }
+        if (n >= 64) { return 0 }
+        return dtLsr(dtToInt(l), n)
+    }
+    if (dtIsFlo(l) || dtIsFlo(r)) {
+        var a = dtNumOf(l)
+        var b = dtNumOf(r)
+        if (op == "+") { return flo(a + b, 0) }
+        if (op == "-") { return flo(a - b, 0) }
+        if (op == "*") { return flo(a * b, 0) }
+        if (op == "%") { return flo(dtModF(a, b), 0) }
+    }
+    var li = dtToInt(l)
+    var ri = dtToInt(r)
+    if (op == "%") {
+        var m = dtIntOp("%", li, ri)
+        if (sintCmp(m, 0) < 0) {
+            var absr = ri
+            if (sintCmp(ri, 0) < 0) { absr = sintOp(1, 0, ri) }
+            m = dtIntOp("+", m, absr)
+        }
+        return m
+    }
+    return dtIntOp(op, li, ri)
+}
+
+// The Euclidean remainder of two doubles: math.Mod, then lifted by |b|.
+function dtModF(a, b) {
+    var m = dtFmod(a, b)
+    if (m < 0) { m = m + Math.abs(b) }
+    return m
+}
+
+// A LOGICAL right shift of the 64 bit value: >>> in Dart, which the sized
+// integer tag has no code for (its ">>" is arithmetic at the box's signedness,
+// and Dart's int is always signed). x >>> n is (x >> n) with the n high bits
+// cleared, computed as ((x >> 1) & ~(1<<63)) >> (n-1) so the sign bit is dropped
+// before it can propagate. n is in 1..63 here; 0 and >= 64 are handled above.
+function dtLsr(x, n) {
+    if (n === 0) { return x }
+    var one = dtIntOp(">>", x, 1)
+    var mask = dtIntOp("^", 0 - 1, dtIntOp("<<", 1, 63))   // 0x7fff_ffff_ffff_ffff
+    var top = dtIntOp("&", one, mask)
+    return dtIntOp(">>", top, n - 1)
+}
+
+// dtCmp is the ordered comparison: -1, 0, 1, or 2 for the unordered NaN case.
+function dtCmp(l, r) {
+    if (dtIsFlo(l) || dtIsFlo(r)) {
+        var a = dtNumOf(l)
+        var b = dtNumOf(r)
+        if (a < b) { return 0 - 1 }
+        if (a > b) { return 1 }
+        if (a === b) { return 0 }
+        return 2
+    }
+    return sintCmp(l, r)
+}
+
+// dtNumEq is Dart's == between numbers: value equality ACROSS the two types, so
+// 1 == 1.0 holds even though `1 is double` is false.
+function dtNumEq(l, r) {
+    if (dtIsFlo(l) || dtIsFlo(r)) { return dtNumOf(l) === dtNumOf(r) }
+    return sintCmp(l, r) === 0
+}
+
+// The engine's own comparison for two NON-numbers, which is what the Go twin
+// falls back to (rt.jsCompare): strings compare lexicographically and everything
+// else through its number reading.
+function dtJsCompare(l, r) {
+    if (typeof l == "string" && typeof r == "string") {
+        if (l < r) { return 0 - 1 }
+        if (l > r) { return 1 }
+        return 0
+    }
+    var a = dtNum(l)
+    var b = dtNum(r)
+    if (a < b) { return 0 - 1 }
+    if (a > b) { return 1 }
+    return 0
+}
+
+// ===================================================== num's own members ====
+//
+// dtNumMember answers num's own members - the getters and methods dart:core
+// declares on num / int / double. floor, ceil, round and truncate answer an INT
+// even on a double; abs keeps the operand's type. The Go twin is dartNumMember,
+// whose citations are kept there.
+
+function dtRoundPos(a) {
+    var fl = Math.floor(a)
+    if (a - fl >= 0.5) { return fl + 1 }
+    return fl
+}
+
+// TIES AWAY FROM ZERO, and deliberately not Math.floor(x + 0.5): the corpus has
+// a test for exactly that formula, because 0.49999999999999994 + 0.5 is 1.0.
+// The negative operand rounds by SYMMETRY, and the negation is UNARY so a -0.0
+// keeps its sign.
+function dtRound(f) {
+    if (f !== f) { return f }
+    if (f === Infinity) { return f }
+    if (f === 0 - Infinity) { return f }
+    if (f < 0) { return -dtRoundPos(-f) }
+    return dtRoundPos(f)
+}
+
+function dtRadixStr(v, radix) {
+    var rx = radix
+    if (rx < 2 || rx > 36) { rx = 10 }
+    if (sintCmp(v, 0) < 0) { return "-" + dtRadixMag(sintOp(1, 0, v), rx) }
+    return dtRadixMag(v, rx)
+}
+
+// The digits of a 64 bit value read as UNSIGNED - strconv.FormatUint's job, and
+// the reason it cannot simply be a signed loop: int64min negates to itself, so
+// the magnitude of the most negative int still has the sign bit set.
+//
+// The first step therefore divides UNSIGNED, once, and every later one is an
+// ordinary signed division because the quotient has lost the top bit:
+//     u = 2*h + s   with h = u >>> 1 (never negative) and s the low bit
+//     q0 = h / rx           so u = q0*2*rx + rem   with rem in [0, 2*rx)
+// and rem is computed with the wrapping 64 bit subtract, which is exact modulo
+// 2^64 and therefore exact for a value that small.
+function dtRadixMag(v, rx) {
+    if (sintCmp(v, 0) === 0) { return "0" }
+    var digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    var out = ""
+    var n = v
+    if (sintCmp(n, 0) < 0) {
+        var half = dtLsr(n, 1)
+        var q0 = dtIntOp("/", half, rx)
+        var rem = dtNumOf(dtIntOp("-", n, dtIntOp("*", q0, 2 * rx)))
+        var carry = Math.floor(rem / rx)
+        out = digits.charAt(rem - carry * rx)
+        n = dtIntOp("+", dtIntOp("*", q0, 2), carry)
+    }
+    while (sintCmp(n, 0) > 0) {
+        var d = dtNumOf(dtIntOp("%", n, rx))
+        out = digits.charAt(d) + out
+        n = dtIntOp("/", n, rx)
+    }
+    return out
+}
+
+function dtArgAt(args, i) {
+    if (i < args.length) { return args[i] }
+    return null
+}
+
+// Answers {hit: true, v: value} or {hit: false, v: undefined}: MetaJS has no
+// two-value return, and the Go twin's second result is exactly this flag.
+function dtNumMember(v, name, args) {
+    var miss = {hit: false, v: undefined}
+    var f = dtNumOf(v)
+    var isF = dtIsFlo(v)
+    if (name === "toDouble") { return {hit: true, v: flo(f, 0)} }
+    if (name === "toInt" || name === "truncate") { return {hit: true, v: dtToInt(v)} }
+    if (name === "floor") {
+        if (isF) { return {hit: true, v: dtIntFromFloat(Math.floor(f))} }
+        return {hit: true, v: v}
+    }
+    if (name === "ceil") {
+        if (isF) { return {hit: true, v: dtIntFromFloat(Math.ceil(f))} }
+        return {hit: true, v: v}
+    }
+    if (name === "round") {
+        if (isF) { return {hit: true, v: dtIntFromFloat(dtRound(f))} }
+        return {hit: true, v: v}
+    }
+    if (name === "floorToDouble") { return {hit: true, v: flo(Math.floor(f), 0)} }
+    if (name === "ceilToDouble") { return {hit: true, v: flo(Math.ceil(f), 0)} }
+    if (name === "truncateToDouble") { return {hit: true, v: flo(Math.trunc(f), 0)} }
+    if (name === "roundToDouble") { return {hit: true, v: flo(dtRound(f), 0)} }
+    if (name === "abs") {
+        if (isF) { return {hit: true, v: flo(Math.abs(f), 0)} }
+        if (sintCmp(v, 0) < 0) { return {hit: true, v: sintOp(1, 0, v)} }
+        return {hit: true, v: v}
+    }
+    if (name === "isNaN") { return {hit: true, v: f !== f} }
+    if (name === "isFinite") {
+        var fin = f === f && f !== Infinity && f !== 0 - Infinity
+        return {hit: true, v: fin}
+    }
+    if (name === "isInfinite") { return {hit: true, v: f === Infinity || f === 0 - Infinity} }
+    if (name === "isNegative") { return {hit: true, v: f < 0 || (f === 0 && dtSignBit(f))} }
+    if (name === "isEven") {
+        if (!dtIsInt(v)) { return {hit: true, v: false} }
+        return {hit: true, v: sintCmp(dtIntOp("%", v, 2), 0) === 0}
+    }
+    if (name === "isOdd") {
+        if (!dtIsInt(v)) { return {hit: true, v: false} }
+        return {hit: true, v: sintCmp(dtIntOp("%", v, 2), 0) !== 0}
+    }
+    if (name === "sign") {
+        if (isF) {
+            if (f !== f) { return {hit: true, v: flo(f, 0)} }
+            if (f > 0) { return {hit: true, v: flo(1, 0)} }
+            if (f < 0) { return {hit: true, v: flo(0 - 1, 0)} }
+            return {hit: true, v: flo(f, 0)}
+        }
+        return {hit: true, v: sintCmp(v, 0)}
+    }
+    if (name === "remainder") {
+        var ra = dtArgAt(args, 0)
+        if (isF || dtIsFlo(ra)) { return {hit: true, v: flo(dtFmod(f, dtNumOf(ra)), 0)} }
+        return {hit: true, v: dtIntOp("%", v, ra)}
+    }
+    if (name === "compareTo") {
+        var c = dtCmp(v, dtArgAt(args, 0))
+        if (c === 2) { c = 0 }
+        return {hit: true, v: c}
+    }
+    if (name === "clamp") {
+        if (dtCmp(v, dtArgAt(args, 0)) < 0) { return {hit: true, v: dtArgAt(args, 0)} }
+        if (dtCmp(v, dtArgAt(args, 1)) === 1) { return {hit: true, v: dtArgAt(args, 1)} }
+        return {hit: true, v: v}
+    }
+    if (name === "toRadixString") {
+        return {hit: true, v: dtRadixStr(dtToInt(v), Math.trunc(dtNum(dtArgAt(args, 0))))}
+    }
+    return miss
+}
+
+// ===================================================== types ================
+//
+// dtIsType is the Go twin's dartIsType, itself the twin of dartIsType in
+// languages/dart-interpreter.abnf. The type ARGUMENTS are handled by the caller
+// (the reified List<int> check lives in the grammar), so only the base name
+// reaches here.
+function dtIsType(v, t) {
+    var lt = t
+    var ai = lt.indexOf("<")
+    if (ai >= 0) { lt = lt.substring(0, ai) }
+    var opt = false
+    if (lt.length > 0 && lt.charAt(lt.length - 1) == "?") {
+        lt = lt.substring(0, lt.length - 1)
+        opt = true
+    }
+    if (v === undefined || v === null) { return opt || lt === "Null" }
+    if (lt === "dynamic" || lt === "Object" || lt === "var") { return true }
+    // int and double are DISJOINT types in Dart: `1 is double` is false and
+    // `1.0 is int` is false, even though 1 == 1.0. The answer comes from the BOX,
+    // not from the value.
+    if (lt === "int") { return dtIsInt(v) }
+    if (lt === "double") { return dtIsFlo(v) }
+    if (lt === "num") { return dtIsNum(v) }
+    if (lt === "String") { return typeof v == "string" }
+    if (lt === "bool") { return typeof v == "boolean" }
+    if (lt === "List" || lt === "Iterable") { return dtIsArr(v) }
+    if (lt === "Map") {
+        // A Map is the shared dict object; a Set is a dict-shaped object carrying
+        // __set, and it is NOT a Map.
+        if (dtIsObj(v) && v["__set"] !== undefined) { return false }
+        return dtIsDict(v)
+    }
+    if (lt === "Set") {
+        if (!dtIsObj(v)) { return false }
+        return v["__set"] !== undefined
+    }
+    if (lt === "Function") { return typeof v == "function" }
+    return dtTypeName(v, lt)
+}
+
+// rt.isTypeName, the language-neutral fallback: the JVM spellings, then the
+// __class / __super walk that answers a user class name.
+function dtTypeName(v, t) {
+    var lt = t
+    var ai = lt.indexOf("<")
+    if (ai >= 0) { lt = lt.substring(0, ai) }
+    var opt = false
+    if (lt.length > 0 && lt.charAt(lt.length - 1) == "?") {
+        lt = lt.substring(0, lt.length - 1)
+        opt = true
+    }
+    if (v === undefined || v === null) { return opt }
+    if (lt === "Any" || lt === "Object") { return true }
+    // The arms below test a PLAIN float64 in the Go twin, so a sized integer is
+    // NOT an "Int" and a boxed double is NOT a "Double" there either.
+    var plain = typeof v == "number" && !sintIs(v) && !floIs(v)
+    if (lt === "Int" || lt === "Integer" || lt === "Long" || lt === "Short" ||
+        lt === "Byte" || lt === "Char" || lt === "Character") {
+        if (!plain) { return false }
+        return v === Math.trunc(v)
+    }
+    if (lt === "Double" || lt === "Float" || lt === "Number") { return plain }
+    if (lt === "String" || lt === "CharSequence") { return typeof v == "string" }
+    if (lt === "Boolean") { return typeof v == "boolean" }
+    if (lt === "List" || lt === "MutableList" || lt === "Collection" || lt === "Array") { return dtIsArr(v) }
+    if (!dtIsObj(v)) { return false }
+    var cls = v["__class"]
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (!dtIsObj(cls)) { return false }
+        if (cls["__name"] === lt) { return true }
+        cls = cls["__super"]
+    }
+    return false
+}
+
+// ===================================================== equality =============
+//
+// dtPyEqual is rt.pyEqual: containers compare BY VALUE, recursively; everything
+// else falls back to strict equality. The dart emitter reaches it from exactly
+// one place, a record's field-dict comparison.
+function dtPyEqual(x, y) {
+    var xs = dtSetElems(x)
+    var ys = dtSetElems(y)
+    if (xs !== undefined) {
+        if (ys === undefined) { return false }
+        if (xs.length != ys.length) { return false }
+        var si = 0
+        while (si < xs.length) {
+            if (!dtSetHas(ys, xs[si])) { return false }
+            si = si + 1
+        }
+        return true
+    }
+    if (ys !== undefined) { return false }
+    if (dtIsArr(x)) {
+        if (!dtIsArr(y)) { return false }
+        if (x.length != y.length) { return false }
+        var ai = 0
+        while (ai < x.length) {
+            if (!dtPyEqual(x[ai], y[ai])) { return false }
+            ai = ai + 1
+        }
+        return true
+    }
+    if (dtIsDict(x)) {
+        if (!dtIsDict(y)) { return false }
+        var xk = x["keys"]
+        var xv = x["vals"]
+        var yk = y["keys"]
+        var yv = y["vals"]
+        if (xk.length != yk.length) { return false }
+        var di = 0
+        while (di < xk.length) {
+            var j = dtDictFind(yk, xk[di])
+            if (j < 0) { return false }
+            if (!dtPyEqual(xv[di], yv[j])) { return false }
+            di = di + 1
+        }
+        return true
+    }
+    return x === y
+}
+
+function dtSetHas(els, v) {
+    var i = 0
+    while (i < els.length) {
+        if (dtPyEqual(els[i], v)) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// dtIdentical is identical(): numbers have no identity apart from their value
+// and their type.
+function dtIdentical(a, b) {
+    if (dtIsNum(a) || dtIsNum(b)) {
+        if (!dtIsNum(a)) { return false }
+        if (!dtIsNum(b)) { return false }
+        if (dtIsFlo(a) !== dtIsFlo(b)) { return false }
+        if (dtIsFlo(a)) {
+            var x = floNum(a)
+            var y = floNum(b)
+            if (x !== x && y !== y) { return true }
+            if (x === 0 && y === 0) { return dtSignBit(x) === dtSignBit(y) }
+            return x === y
+        }
+        return sintCmp(a, b) === 0
+    }
+    return a === b
+}
+
+// ===================================================== member dispatch ======
+//
+// dtMember is rt.memberCall of abnf/jsrt.go: the LANGUAGE-NEUTRAL dispatcher
+// over strings, dicts, lists and instances. The GENERATOR arm is the one that is
+// not here, and it cannot be - a generator needs a coroutine primitive the floor
+// does not have. Dart emits no js_genfn / js_yield at all, so nothing in this
+// language can reach it.
+function dtMember(recv, name, args) {
+    if (typeof recv == "string") {
+        if (name === "length") { return dtStrLen(recv) }
+        if (name === "charAt") {
+            var ci = Math.trunc(dtNum(dtArgAt(args, 0)))
+            var ch = dtStrAt(recv, ci)
+            if (ch === "") { fail("charAt out of range") }
+            return ch
+        }
+        if (name === "equals") { return recv === dtArgAt(args, 0) }
+        if (name === "substring") {
+            var n = dtStrLen(recv)
+            var bg = 0
+            var en = n
+            if (args.length > 0) { bg = Math.trunc(dtNum(args[0])) }
+            if (args.length > 1) { en = Math.trunc(dtNum(args[1])) }
+            if (bg < 0) { bg = 0 }
+            if (en > n) { en = n }
+            if (bg > en) { return "" }
+            return dtStrRange(recv, bg, en)
+        }
+        if (name === "indexOf") { return recv.indexOf(dtToStr(dtArgAt(args, 0))) }
+        if (name === "isEmpty") { return recv.length == 0 }
+        fail("unknown String method: " + name)
+    }
+    if (dtIsDict(recv)) {
+        if (name === "keys") { return dtCopyArr(recv["keys"]) }
+        if (name === "values") { return dtCopyArr(recv["vals"]) }
+        if (name === "get") {
+            var gi = dtDictFind(recv["keys"], dtArgAt(args, 0))
+            if (gi >= 0) { return recv["vals"][gi] }
+            if (args.length > 1) { return args[1] }
+            return undefined
+        }
+        fail("unknown dict method '" + name + "'")
+    }
+    if (dtIsArr(recv)) { return dtListMethod(recv, name, args) }
+    if (dtIsObj(recv)) {
+        var cls = recv["__class"]
+        if (cls !== undefined) {
+            var c = cls
+            var guard = 0
+            while (guard < 64) {
+                guard = guard + 1
+                if (!dtIsObj(c)) { guard = 99 } else {
+                    var mm = c[name]
+                    if (typeof mm == "function") {
+                        var av = [recv]
+                        var i = 0
+                        while (i < args.length) {
+                            av.push(args[i])
+                            i = i + 1
+                        }
+                        return mm.apply(undefined, av)
+                    }
+                    c = c["__super"]
+                }
+            }
+            fail("unknown method '" + name + "' on an instance")
+        }
+        var f = recv[name]
+        if (typeof f == "function") { return f.apply(undefined, args) }
+        fail("unknown method '" + name + "'")
+    }
+    fail("method call '" + name + "' on a " + typeof recv)
+    return undefined
+}
+
+// The Kotlin/Python list methods of rt.memberCall, in its order.
+function dtListMethod(o, name, args) {
+    if (name === "add") {
+        o.push(dtArgAt(args, 0))
+        return true
+    }
+    if (name === "append") {
+        o.push(dtArgAt(args, 0))
+        return undefined
+    }
+    if (name === "pop" || name === "removeLast") {
+        if (o.length == 0) { fail("pop from empty list") }
+        return o.pop()
+    }
+    if (name === "size") { return o.length }
+    if (name === "get") {
+        var gi = Math.trunc(dtNum(dtArgAt(args, 0)))
+        if (gi < 0 || gi >= o.length) { fail("list index out of range") }
+        return o[gi]
+    }
+    if (name === "contains") {
+        var ci = 0
+        while (ci < o.length) {
+            if (o[ci] === dtArgAt(args, 0)) { return true }
+            ci = ci + 1
+        }
+        return false
+    }
+    if (name === "map") {
+        var mo = []
+        var mi = 0
+        while (mi < o.length) {
+            mo.push(args[0].apply(undefined, [o[mi]]))
+            mi = mi + 1
+        }
+        return mo
+    }
+    if (name === "filter") {
+        var fo = []
+        var fi = 0
+        while (fi < o.length) {
+            if (args[0].apply(undefined, [o[fi]])) { fo.push(o[fi]) }
+            fi = fi + 1
+        }
+        return fo
+    }
+    if (name === "sumOf") {
+        var sum = 0
+        var si = 0
+        while (si < o.length) {
+            sum = dtWrap32(sum + Math.trunc(dtNum(args[0].apply(undefined, [o[si]]))))
+            si = si + 1
+        }
+        return sum
+    }
+    if (name === "forEach") {
+        var ei = 0
+        while (ei < o.length) {
+            args[0].apply(undefined, [o[ei]])
+            ei = ei + 1
+        }
+        return undefined
+    }
+    if (name === "count") {
+        if (args.length == 0) { return o.length }
+        var n = 0
+        var ni = 0
+        while (ni < o.length) {
+            if (args[0].apply(undefined, [o[ni]])) { n = n + 1 }
+            ni = ni + 1
+        }
+        return n
+    }
+    if (name === "any") {
+        var ai = 0
+        while (ai < o.length) {
+            if (args[0].apply(undefined, [o[ai]])) { return true }
+            ai = ai + 1
+        }
+        return false
+    }
+    fail("unknown list method '" + name + "'")
+    return undefined
+}
+
+function dtWrap32(n) {
+    var m = n - Math.floor(n / 4294967296) * 4294967296
+    if (m > 2147483647) { m = m - 4294967296 }
+    return m
+}
+
+function dtIsInt32(n) {
+    if (n !== n) { return false }
+    if (Math.floor(n) !== n) { return false }
+    if (n > 2147483647) { return false }
+    return n >= 0 - 2147483648
+}
+
+// ===================================================== the exports ==========
+//
+// Everything below is a TOP-LEVEL `function js_*`, which is what -rt-lib exports
+// under its own C symbol. The language-NEUTRAL externs of abnf/jsrt.go come
+// first, then Dart's own seventeen in the order of abnf/jsrtdart.go.
+
+// ----- the language-NEUTRAL thirteen ----------------------------------------
+// None of these is Dart's. They live in abnf/jsrt.go, several languages emit
+// them, and they are here only because the C floor does not have them yet.
+
+// An empty Map / Python dict / Go map handle.
+function js_dict_new() { return {__dict: true, keys: [], vals: []} }
+
+// Sequence indexing (negative wraps) and Map lookup: core.indexExt.
+// The __getitem__ arm of the Go twin is PYTHON's and is unreachable from Dart -
+// a Dart class cannot declare a member of that name.
+function js_pyget(c, k) {
+    if (dtIsDict(c)) {
+        var i = dtDictFind(c["keys"], k)
+        if (i < 0) { fail("KeyError: " + dtStr(k)) }
+        return c["vals"][i]
+    }
+    var idx = Math.trunc(dtNum(k))
+    if (dtIsArr(c)) {
+        if (idx < 0) { idx = idx + c.length }
+        if (idx < 0 || idx >= c.length) { fail("list index out of range: " + Math.trunc(dtNum(k))) }
+        return c[idx]
+    }
+    if (typeof c == "string") {
+        var n = dtStrLen(c)
+        if (idx < 0) { idx = idx + n }
+        if (idx < 0 || idx >= n) { fail("string index out of range: " + Math.trunc(dtNum(k))) }
+        return dtStrAt(c, idx)
+    }
+    fail("indexing a " + typeof c)
+    return undefined
+}
+
+// List element (negative wraps) or Map entry assignment.
+function js_pyset(c, k, v) {
+    if (dtIsDict(c)) {
+        var keys = c["keys"]
+        var i = dtDictFind(keys, k)
+        if (i >= 0) { c["vals"][i] = v } else {
+            keys.push(k)
+            c["vals"].push(v)
+        }
+        return undefined
+    }
+    if (!dtIsArr(c)) { fail("item assignment on a " + typeof c) }
+    var idx = Math.trunc(dtNum(k))
+    if (idx < 0) { idx = idx + c.length }
+    if (idx < 0 || idx >= c.length) { fail("list assignment index out of range") }
+    c[idx] = v
+    return undefined
+}
+
+// len() for strings, lists, sets and Maps. The string arm counts CODE POINTS,
+// which is what pyStrLen does in the Go twin.
+function js_pylen(v) {
+    var els = dtSetElems(v)
+    if (els !== undefined) { return els.length }
+    if (typeof v == "string") { return dtStrLen(v) }
+    if (dtIsArr(v)) { return v.length }
+    if (dtIsDict(v)) { return v["keys"].length }
+    fail("len() of a " + typeof v)
+    return 0
+}
+
+// The list a for loop runs over: a Set its elements, a Map its keys, a string
+// its characters, a list itself (NOT a copy - the Go twin returns the handle).
+function js_pyiter(v) {
+    var els = dtSetElems(v)
+    if (els !== undefined) { return dtCopyArr(els) }
+    if (dtIsArr(v)) { return v }
+    if (typeof v == "string") {
+        var out = []
+        var i = 0
+        var n = dtStrLen(v)
+        while (i < n) {
+            out.push(dtStrAt(v, i))
+            i = i + 1
+        }
+        return out
+    }
+    if (dtIsDict(v)) { return dtCopyArr(v["keys"]) }
+    fail("iteration over a " + typeof v)
+    return []
+}
+
+// s[lo:hi] on lists and strings; open ends arrive as undefined.
+function js_pyslice(c, lo, hi) {
+    if (dtIsArr(c)) {
+        var r = dtSliceRange(lo, hi, c.length)
+        var out = []
+        var i = r.from
+        while (i < r.to) {
+            out.push(c[i])
+            i = i + 1
+        }
+        return out
+    }
+    if (typeof c == "string") {
+        var n = dtStrLen(c)
+        var sr = dtSliceRange(lo, hi, n)
+        return dtStrRange(c, sr.from, sr.to)
+    }
+    fail("slicing a " + typeof c)
+    return undefined
+}
+
+function dtSliceClamp(v, dflt, n) {
+    if (v === undefined) { return dflt }
+    var i = Math.trunc(dtNum(v))
+    if (i < 0) { i = i + n }
+    if (i < 0) { i = 0 }
+    if (i > n) { i = n }
+    return i
+}
+
+function dtSliceRange(lo, hi, n) {
+    var from = dtSliceClamp(lo, 0, n)
+    var to = dtSliceClamp(hi, n, n)
+    if (to < from) { to = from }
+    return {from: from, to: to}
+}
+
+// 'x in y' for lists, strings and Map keys.
+function js_pyin(x, y) {
+    if (dtIsArr(y)) {
+        var i = 0
+        while (i < y.length) {
+            if (y[i] === x) { return true }
+            i = i + 1
+        }
+        return false
+    }
+    if (typeof y == "string") { return y.indexOf(dtToStr(x)) >= 0 }
+    if (dtIsDict(y)) { return dtDictFind(y["keys"], x) >= 0 }
+    fail("'in' needs a list, a string or a dict on the right side")
+    return false
+}
+
+// Containers compare BY VALUE; everything else by strict equality.
+function js_pyeq(l, r) { return dtPyEqual(l, r) }
+
+// (positional array, iterable): append every element of the iterable.
+function js_pyspread(arr, it) {
+    if (!dtIsArr(arr)) { fail("js_pyspread needs an array") }
+    if (dtIsArr(it)) {
+        var i = 0
+        while (i < it.length) {
+            arr.push(it[i])
+            i = i + 1
+        }
+        return undefined
+    }
+    if (typeof it == "string") {
+        var si = 0
+        var n = dtStrLen(it)
+        while (si < n) {
+            arr.push(dtStrAt(it, si))
+            si = si + 1
+        }
+        return undefined
+    }
+    if (dtIsDict(it)) {
+        var ks = it["keys"]
+        var ki = 0
+        while (ki < ks.length) {
+            arr.push(ks[ki])
+            ki = ki + 1
+        }
+        return undefined
+    }
+    fail("cannot unpack a " + typeof it + " with *")
+    return undefined
+}
+
+// A Set from a candidate list, de-duplicated with the VALUE equality above.
+function js_pyset_new(src) {
+    var out = []
+    if (dtIsArr(src)) {
+        var i = 0
+        while (i < src.length) {
+            if (!dtSetHas(out, src[i])) { out.push(src[i]) }
+            i = i + 1
+        }
+    }
+    return {__set: true, elems: out}
+}
+
+// e is T, the language-neutral spelling. The dart emitter reaches this one for
+// "String", for a catch clause's type and for a class-name probe; DART's own
+// type names go through js_dartis below.
+function js_is_type(v, t) { return dtTypeName(v, t) }
+
+// Java/C# +: string concat, 32 bit add for two int values, float add otherwise.
+// The dart emitter emits it for its own string builders and index arithmetic.
+// The float arm needs the boxed double, which the floor HAS - so unlike
+// php-rt.metajs's, this one is complete.
+function js_jadd(l, r) {
+    if (typeof l == "string" || typeof r == "string") { return dtJavaStr(l) + dtJavaStr(r) }
+    if (floIs(l) || floIs(r)) { return flo(dtNumOf(l) + dtNumOf(r), floStyle(floIs(l) ? l : r)) }
+    var ln = dtNumOf(l)
+    var rn = dtNumOf(r)
+    if (dtIsInt32(ln) && dtIsInt32(rn)) { return dtWrap32(ln + rn) }
+    return ln + rn
+}
+
+function dtJavaStr(v) {
+    if (typeof v == "string") { return v }
+    if (v === null) { return "null" }
+    if (v === undefined) { return "null" }
+    if (typeof v == "boolean") { return v ? "true" : "false" }
+    if (sintIs(v)) { return sintStr(v) }
+    if (floIs(v)) { return floStr(v) }
+    return "" + v
+}
+
+// (target, method name, args array): the neutral dispatcher.
+function js_mcall(recv, name, args) { return dtMember(recv, name, args) }
+
+// ----- Dart's own seventeen --------------------------------------------------
+
+// print(x): Dart's print writes x.toString() followed by a newline.
+function js_dartprint(v) {
+    print(dtStr(v) + "\n")
+    return undefined
+}
+
+// The same rendering as a value: string interpolation and an explicit
+// .toString() both go through it.
+function js_dartstr(v) { return dtStr(v) }
+
+// const e: the canonical value for e.
+function js_dartcanon(v) { return dtCanon(v, 0) }
+
+// `v is T` for Dart's OWN type names. The shared js_is_type knows only the JVM
+// spelling and answers false for int / num / Map / Set, so this is the Dart one.
+// A user class name still falls through to the shared __class walk.
+function js_dartis(v, t) { return dtIsType(v, t) }
+
+// A double literal, and the value of a `.toDouble()`-shaped conversion.
+function js_dartflo(v) { return flo(dtNum(v), 0) }
+
+// An int literal a double cannot hold exactly: the emitter passes its DIGITS,
+// because emitNum would already have rounded 9223372036854775807 to
+// 9223372036854776000 on the way into the module. (text, radix); a literal past
+// the 64-bit range wraps, which is how the VM reads 0x8000000000000000.
+function js_dartlit(text, radix) {
+    var s = dtToStr(text)
+    var rx = Math.trunc(dtNum(radix))
+    var acc = 0
+    var i = 0
+    while (i < s.length) {
+        var c = s.charAt(i)
+        var d = 0 - 1
+        if (c >= "0" && c <= "9") { d = c.charCodeAt(0) - 48 }
+        else if (c >= "a" && c <= "f") { d = c.charCodeAt(0) - 97 + 10 }
+        else if (c >= "A" && c <= "F") { d = c.charCodeAt(0) - 65 + 10 }
+        if (d >= 0 && d < rx) { acc = dtIntOp("+", dtIntOp("*", acc, rx), d) }
+        i = i + 1
+    }
+    return acc
+}
+
+// One binary operator: (op name, left, right). The operator is a compile time
+// constant string, so this is one call per operator in the emitted IR. '+' also
+// concatenates strings, and '+' on two Lists concatenates them, so a non-numeric
+// pair keeps the runtime's own rule.
+function js_dartarith(op, l, r) {
+    if (op == "+") {
+        if (typeof l == "string" || typeof r == "string") { return dtStr(l) + dtStr(r) }
+        if (!dtIsNum(l) || !dtIsNum(r)) { return dtJsAdd(l, r) }
+    }
+    return dtArith(op, l, r)
+}
+
+// rt.jsAdd for the non-numeric pair, and it is JavaScript's + and not Dart's:
+// a list or an object on EITHER side renders both sides with rt.toString and
+// concatenates the text, so `[1, 2] + [3]` is the string "1,23". The comment at
+// js_dartarith in abnf/jsrtdart.go says two Lists concatenate; rt.jsAdd does not
+// do that, and the Go twin is the specification, so this reproduces rt.jsAdd.
+// Recorded rather than corrected: fixing it is a change to BOTH halves and to
+// dart-interpreter.abnf, and it is not this gate.
+function dtJsAdd(l, r) {
+    if (typeof l == "string" || typeof r == "string") { return dtToStr(l) + dtToStr(r) }
+    if (dtIsObj(l) || dtIsObj(r)) { return dtToStr(l) + dtToStr(r) }
+    return dtNum(l) + dtNum(r)
+}
+
+function js_dartlt(l, r) {
+    if (dtIsNum(l) && dtIsNum(r)) {
+        var c = dtCmp(l, r)
+        return c !== 2 && c < 0
+    }
+    return dtJsCompare(l, r) < 0
+}
+
+function js_dartle(l, r) {
+    if (dtIsNum(l) && dtIsNum(r)) {
+        var c = dtCmp(l, r)
+        return c !== 2 && c <= 0
+    }
+    return dtJsCompare(l, r) <= 0
+}
+
+function js_dartgt(l, r) {
+    if (dtIsNum(l) && dtIsNum(r)) {
+        var c = dtCmp(l, r)
+        return c !== 2 && c > 0
+    }
+    return dtJsCompare(l, r) > 0
+}
+
+function js_dartge(l, r) {
+    if (dtIsNum(l) && dtIsNum(r)) {
+        var c = dtCmp(l, r)
+        return c !== 2 && c >= 0
+    }
+    return dtJsCompare(l, r) >= 0
+}
+
+// == : value equality across int and double, then the runtime's own ===.
+function js_darteq(l, r) {
+    if (dtIsNum(l) && dtIsNum(r)) { return dtNumEq(l, r) }
+    return l === r
+}
+
+function js_dartne(l, r) {
+    if (dtIsNum(l) && dtIsNum(r)) { return !dtNumEq(l, r) }
+    return l !== r
+}
+
+// identical(a, b).
+function js_dartident(l, r) { return dtIdentical(l, r) }
+
+// -x keeps the operand's TYPE: a double negates as a double (so -0.0 and
+// -1.0/0.0 stay real), an int at 64 bits (so -int64min wraps back to itself).
+// UNARY minus, never 0 - x: 0.0 - 0.0 is +0.0 where the floor's d_neg flips the
+// sign BIT. That trap has now bitten five languages.
+function js_dartneg(v) {
+    if (floIs(v)) { return flo(-floNum(v), 0) }
+    if (!dtIsNum(v)) { return 0 - dtNum(v) }
+    return sintOp(1, 0, v)
+}
+
+// ~x flips all 64 bits (Dart's int is 64-bit two's complement).
+function js_dartnot(v) { return dtIntOp("^", dtToInt(v), 0 - 1) }
+
+// A METHOD CALL, in the shape js_mcall has: (receiver, name, args array). It
+// answers num's own members (toInt, round, isEven, ...) when the receiver is a
+// number and the name is one of them, and otherwise hands the call straight to
+// the runtime's ordinary member dispatch.
+function js_dartnm(recv, name, args) {
+    if (!dtIsArr(args)) { fail("js_dartnm args must be an array") }
+    if (dtIsNum(recv)) {
+        var hit = dtNumMember(recv, name, args)
+        if (hit.hit) { return hit.v }
+    }
+    return dtMember(recv, name, args)
+}

@@ -111,6 +111,23 @@ func jvmFloStr(d float64) string {
 		}
 	} else {
 		s = strconv.FormatFloat(a, 'E', -1, 64)
+		// Java's Double.toString takes the SHORTEST decimal that round-trips,
+		// except that it never uses fewer than TWO significant digits - and
+		// when the shortest has one, the second digit is not a zero but the
+		// closest two digit decimal to the actual value. For every normal
+		// double those are the same thing (the value is within ~1e-16 of the
+		// one digit form, a thousandth of a two digit step), so it shows only
+		// among the SUBNORMALS, where the gap between neighbours is comparable
+		// to the value: Double.MIN_VALUE is 4.9406564584124654E-324, so Java
+		// renders it "4.9E-324" where appending ".0" to the shortest gives
+		// "5.0E-324". Measured against real java 24.0.2; 254 lines of the
+		// 17,674 line java probe (docs/runtime-next-plan.md part 3).
+		// FormatFloat with precision 1 IS "the closest two digit decimal",
+		// carry included (9.99e-321 -> "1.0E-320"), so the one digit case is
+		// simply re-formatted rather than padded.
+		if i := strings.IndexByte(s, 'E'); i >= 0 && !strings.ContainsRune(s[:i], '.') {
+			s = strconv.FormatFloat(a, 'E', 1, 64)
+		}
 		// Go writes "1E+20" / "1.5E-08"; Java writes "1.0E20" / "1.5E-8".
 		mant, exp := s, ""
 		if i := strings.IndexByte(s, 'E'); i >= 0 {

@@ -1,0 +1,1430 @@
+// csharp-rt.metajs -- C#'S OWN SEMANTICS, in MetaJS. Layer 2 of
+// docs/runtime-next-plan.md part 3, for the fifth language after the Lua pilot,
+// PHP, Swift and Java.
+//
+// languages/csharp-to-llvm-ir.abnf emits handle IR that calls 68 js_* externs for
+// tests/csharp-test-full.cs. 35 of them are generic primitives
+// languages/lib/runtime.c already provides (the C floor, layer 1). The other 33
+// are here.
+//
+// Compile with:
+//     mec languages/metajs-to-llvm-ir.abnf languages/lib/csharp-rt.metajs -q -rt-lib
+// which is what tests/gen-csharp-rt-ll.sh does; the result is the checked-in
+// languages/lib/csharp-rt.ll that csharp-to-llvm-ir.abnf links next to runtime.ll.
+// -rt-lib exports every TOP-LEVEL `function js_*` below under its own C symbol, so
+// nothing else in this file is visible to the linker - the helpers are
+// deliberately named cs*/cp*.
+//
+// THE AUTHORITATIVE SPECIFICATION IS abnf/jsrtcsharp.go, plus abnf/jsrtjvm.go for
+// the boxed double and the js_csadd / js_cslen / js_char / js_char_code /
+// js_jchareq / js_jadd / js_mcall / js_supercall / js_is_type / js_arr_new_n /
+// js_dict_new / js_pyget / js_pyset / js_pylen / js_has / js_goslice /
+// js_gospread block of abnf/jsrt.go. This file matches them function for
+// function; where it CANNOT, the site says so in full.
+//
+// ----- the value model (abnf/jsrtcsharp.go's own header) ---------------------
+//
+//     null / undefined     ==  a null reference
+//     a PLAIN NUMBER       ==  an `int`, i.e. a SIGNED 32 BIT value. This is C#'s
+//                              invariant and it is deliberately NOT Go's, where a
+//                              plain number is a 64 bit int.
+//     a tag 13 box         ==  EVERY other integral type: long, ulong, uint,
+//                              short, ushort, byte (UNSIGNED in C#) and sbyte.
+//     a tag 14 box         ==  double / float / decimal, STYLE 2 (C#).
+//     a {__char} box       ==  char. The Go twin uses jsChar, a Go TYPE. Layer 2
+//                              cannot make a primitive type, so this is the same
+//                              OBJECT box languages/csharp-interpreter.abnf and
+//                              languages/lib/java-rt.metajs already use.
+//     a {__dict} object    ==  Dictionary<K,V>: keys/vals parallel arrays.
+//     an array             ==  int[] / List<T> alike (this runtime has one).
+//     an {__isclass} obj   ==  a type descriptor: __name, __super, __isrecord.
+//     any other object     ==  an instance; its descriptor is __class.
+//
+// ----- THE LONG PROBLEM, and how `sintRaw` removed it ------------------------
+//
+// C#'s `long` must stay DISTINGUISHABLE from `int` at every value, because
+// `1000000L * 1000000L` is 1000000000000 while `1000000 * 1000000` wraps to
+// -727379968. The floor's si_norm - the ONE place the sized-integer invariant is
+// applied - UNBOXES a signed 64 bit value a double holds exactly, so
+// `sint(0, 5, 64, 0)` is the plain number 5, indistinguishable from `int` 5.
+//
+// languages/lib/java-rt.metajs met that wall first and worked around it by
+// marking a long box UNSIGNED - the one shape si_norm will not unbox - and then
+// re-supplying six SIGNED operations (/ % >>, compare, decimal text, double
+// reading) in about 90 lines. C# does NOT do that, because the floor now has
+//
+//     sintRaw(hi, lo, bits, unsigned)   si_trunc, then si_make: a tag 13 cell
+//                                       ALWAYS, never si_norm's unboxing arm
+//
+// so a C# long is an honest {w: 64, u: 0} box. Every one of the six operations is
+// then the floor's own: sintOp's `/` and `%` and `>>` already branch on the cell's
+// signedness, sintCmp already compares signed when the type is, sintStr already
+// prints the minus sign and sintNum already reads the negative half. csharp-rt has
+// no jl* layer at all. THAT IS THE MEASUREMENT the floor request asked for:
+// ~90 lines saved, and - the part that matters more - the JAVA SECOND-ORDER HAZARD
+// IS GONE WITH IT. A floor extern that reads a tag 13 cell numerically (js_csflo
+// is C#'s one) sees a MAGNITUDE when the cell is the marked-unsigned shape; with
+// sintRaw the cell is signed, so to_number reads it correctly and no js_*num
+// wrapper is owed. go / kotlin / dart should all take this route.
+//
+// ----- generators: the floor drives them, and layer 2 owes NOTHING -----------
+//
+// C# is the first language to reach the coroutine primitive that landed in the
+// floor (tags 15/16). It costs this file zero lines, and the reason is worth
+// copying for js / ts / python, which follow: csharp-to-llvm-ir.abnf lowers the
+// WHOLE iterator protocol in the EMITTER, over the floor's own member syntax -
+//
+//     js_genfn(js_closure(...))                 the iterator method
+//     js_typeof(js_get(g, "next")) === "function"   "is this a generator?"
+//     js_call(js_get(g, "next"), [])            MoveNext()
+//     js_get(step, "value") / js_get(step, "done")
+//
+// The floor's get_member answers `next` on a tag 15 cell with a bound method, so
+// every one of those is already a floor extern. `yield break` is an ordinary
+// return and `.Current` is a field the emitter parks on its own cursor object.
+// A THROW out of a generator body needs no case either: gen_resume re-raises it on
+// the RESUMER's stack, so it comes out of the `next()` call site like any other.
+//
+// ----- what C# did NOT need, checked rather than assumed ---------------------
+//
+//  1. NO `__raw` truthy shim. `grep -n truthyExt languages/csharp-to-llvm-ir.abnf`
+//     is empty, so core.truthyExt keeps compile-core's default "js_truthy", which
+//     is the C FLOOR'S OWN function and already answers the raw 1/0 the emitted
+//     `icmp ne ..., 0` compares. Swift and Java were the same; Lua and PHP are the
+//     two that override it.
+//  2. ONE `_raw` PARAMETER, js_char's, exactly like Java. csharp-to-llvm-ir.abnf
+//     writes the code point with handle(k), and 0..3 are the handles of
+//     undefined/null/false/true - so without the suffix the callee would see one of
+//     those. Every other handle(k) in that grammar goes to js_closure or js_arg,
+//     which are floor externs.
+//  3. NO scope-probe extern to lower. C#'s emitter already probes the scope
+//     in IR (js_scope_typeof against "undefined" at csharp-to-llvm-ir.abnf:4109);
+//     PHP's and Swift's lowering is already done here, so there was nothing left.
+//
+// ----- MetaJS rules that shape the code below --------------------------------
+//
+// docs/abnf-dialect-gotchas.md: a local (or a reassigned parameter) keeps the TYPE
+// CLASS it is first assigned, so a variable that holds a number in one branch and
+// an object in another is declared `var x = anytype`; there is no ASI, so every
+// `return` carries its value on the same line and a value-less early return is
+// BRACED; no for..in, no splice, no split/join/lastIndexOf, indexOf ignores its
+// from-index, array.length is not assignable, and there are no exponent literals.
+
+// ===================================================== the char box =========
+
+function csChar(code) {
+    var o = {}
+    o["__char"] = code
+    return o
+}
+
+function csIsChar(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (typeof v != "object") { return false }
+    return v["__char"] !== undefined
+}
+
+// ===================================================== value readings =======
+
+// A PLAIN number is an `int`. A sized integer (tag 13) and a boxed double (tag 14)
+// are both `typeof v == "number"` in the C floor, so every site that meant "an
+// ordinary double" has to say so.
+function csIsPlainNum(v) {
+    if (typeof v != "number") { return false }
+    if (sintIs(v)) { return false }
+    return !floIs(v)
+}
+
+// csIsIntegral (jsrtcsharp.go): an operand of INTEGER arithmetic. A char is one,
+// C#'s char being an integral type; a double is not.
+function csIsIntegral(v) {
+    if (csIsChar(v)) { return true }
+    if (typeof v != "number") { return false }
+    return !floIs(v)
+}
+
+// csRaw hands the sint* builtins something they can read. si_val knows tag 3, tag
+// 13 and tag 14 - it does NOT know the {__char} object box, which would read as
+// NaN, so the code point is taken off it here and nowhere else.
+function csRaw(v) {
+    if (csIsChar(v)) { return v["__char"] }
+    return v
+}
+
+// csSzW / csSzU: the declared width and signedness of an operand. A plain number
+// and a char both answer "signed 32", which is what jsrtcsharp.go's csSzW/csSzU do
+// by falling through their jsGInt case.
+function csSzW(v) {
+    if (sintIs(v)) { return sintWidth(v) }
+    return 32
+}
+
+function csSzU(v) {
+    if (sintIs(v)) { return sintUns(v) }
+    return false
+}
+
+// csNorm applies the C# invariant: a signed 32 bit result is a PLAIN NUMBER,
+// everything else is a box. sintConv would unbox a signed 64 bit value that a
+// double holds exactly (si_norm), so the result is re-boxed with sintRaw whenever
+// the invariant says it must stay one - which is the whole of what java-rt.metajs
+// needed ninety lines to avoid.
+function csNorm(v, w, u) {
+    var t = sintConv(csRaw(v), w, u)
+    if (w == 32) { if (!u) { return sintNum(t) } }
+    if (sintIs(t)) { return t }
+    return sintRaw(sintHi(t), sintLo(t), w, u)
+}
+
+// csBox is jsrtcsharp.go's csBox: read a value at a given width and signedness,
+// ALWAYS as a box (never a plain number, whatever the invariant would say).
+function csBox(v, w, u) {
+    var t = sintConv(csRaw(v), w, u)
+    if (sintIs(t)) { return t }
+    return sintRaw(sintHi(t), sintLo(t), w, u)
+}
+
+// The double reading of anything numeric.
+function csNum(v) {
+    if (floIs(v)) { return floNum(v) }
+    if (csIsChar(v)) { return v["__char"] }
+    if (sintIs(v)) { return sintNum(v) }
+    if (typeof v == "number") { return v }
+    if (v === true) { return 1 }
+    if (v === false) { return 0 }
+    if (typeof v == "string") { return parseFloat(v) }
+    return 0
+}
+
+// The int32 reading of an integral operand.
+function csI(v) {
+    var n = csNorm(v, 32, false)
+    return n
+}
+
+// ===================================================== BCL exceptions =======
+
+// csThrow (jsrtcsharp.go): the BCL exception types are plain objects carrying
+// __excname and Message in BOTH halves - the shape `new DivideByZeroException(msg)`
+// builds (csharp-to-llvm-ir.abnf:3138) and a catch clause reads.
+function csThrow(name, msg) {
+    var o = {}
+    o["__excname"] = name
+    o["Message"] = msg
+    throw o
+}
+
+// ===================================================== the operators ========
+
+// csPromote is ECMA-334 12.4.7.3 binary numeric promotion for two integral
+// operands. The surprising rule is the uint one: `uint + int` is a LONG, because
+// int does not fit in uint and uint does not fit in int. It is the only place C#
+// differs from Java's much simpler "long if either is long, else int".
+function csPromote(l, r) {
+    var lw = csSzW(l)
+    var lu = csSzU(l)
+    var rw = csSzW(r)
+    var ru = csSzU(r)
+    if (lw == 64 && lu) { return {w: 64, u: true} }
+    if (rw == 64 && ru) { return {w: 64, u: true} }
+    if (lw == 64 || rw == 64) { return {w: 64, u: false} }
+    if ((lw == 32 && lu) || (rw == 32 && ru)) {
+        var other = l
+        if (lw == 32 && lu) { other = r }
+        // A char, a byte and a ushort convert to uint and stay there; a plain
+        // number is an `int` and forces the pair up to long.
+        if (csIsChar(other)) { return {w: 32, u: true} }
+        if (sintIs(other)) {
+            if (sintUns(other)) { return {w: 32, u: true} }
+            if (sintWidth(other) > 32) { return {w: 32, u: true} }
+            return {w: 64, u: false}
+        }
+        return {w: 64, u: false}
+    }
+    return {w: 32, u: false}
+}
+
+// The sintOp index of one arithmetic or bitwise operator.
+function csOpCode(op) {
+    if (op == "+") { return 0 }
+    if (op == "-") { return 1 }
+    if (op == "*") { return 2 }
+    if (op == "/") { return 3 }
+    if (op == "%") { return 4 }
+    if (op == "&") { return 5 }
+    if (op == "|") { return 6 }
+    if (op == "^") { return 7 }
+    return 0 - 1
+}
+
+// csArith: one binary arithmetic or bitwise operator on two INTEGRAL operands, at
+// the promoted type and wrapping to it. ARITHMETIC IS UNCHECKED, C#'s default
+// (ECMA-334 12.8.20): every operator wraps. Division by zero DOES throw (12.9.3).
+function csArith(op, l, r) {
+    var p = csPromote(l, r)
+    var w = p.w
+    var un = p.u
+    var code = csOpCode(op)
+    if (code < 0) {
+        fail("js_csarith: unknown operator '" + op + "'")
+        return undefined
+    }
+    if (w != 32 || un) {
+        var a = csBox(l, w, un)
+        var b = csBox(r, w, un)
+        if (op == "/" || op == "%") {
+            if (sintCmp(b, csBox(0, w, un)) == 0) {
+                csThrow("DivideByZeroException", "Attempted to divide by zero.")
+            }
+        }
+        return csNorm(sintOp(code, a, b), w, un)
+    }
+    var x = csRaw(l)
+    var y = csRaw(r)
+    var xi = csNorm(x, 32, false)
+    var yi = csNorm(y, 32, false)
+    if (op == "+") { return csWrap32(xi + yi) }
+    if (op == "-") { return csWrap32(xi - yi) }
+    if (op == "*") { return Math.imul(xi, yi) }
+    if (op == "/") {
+        if (yi == 0) { csThrow("DivideByZeroException", "Attempted to divide by zero.") }
+        // int.MinValue / -1 overflows. ECMA-334 12.9.3 leaves the UNCHECKED outcome
+        // implementation-defined between a System.OverflowException and "the
+        // resulting value being that of the left operand"; the second is what BOTH
+        // halves answer, and it is what Java specifies outright.
+        if (xi == 0 - 2147483648) { if (yi == 0 - 1) { return xi } }
+        return csWrap32(Math.trunc(xi / yi))
+    }
+    if (op == "%") {
+        if (yi == 0) { csThrow("DivideByZeroException", "Attempted to divide by zero.") }
+        if (xi == 0 - 2147483648) { if (yi == 0 - 1) { return 0 } }
+        return xi - Math.trunc(xi / yi) * yi
+    }
+    if (op == "&") { return xi & yi }
+    if (op == "|") { return xi | yi }
+    return xi ^ yi
+}
+
+// The 32 bit signed wrap of a double, which is what an int-width result reduces to.
+function csWrap32(x) {
+    if (x !== x) { return 0 }
+    if (x == Infinity) { return 0 }
+    if (x == 0 - Infinity) { return 0 }
+    var m = x - Math.floor(x / 4294967296) * 4294967296
+    if (m >= 2147483648) { m = m - 4294967296 }
+    return m
+}
+
+// csShift is << >> >>>. The result type is the LEFT operand's alone after unary
+// promotion (ECMA-334 12.11: sbyte/byte/short/ushort/char all become int), and the
+// COUNT is MASKED - & 31 for an int/uint, & 63 for a long/ulong, so `1 << 32` is 1.
+// `>>` on an UNSIGNED type is the LOGICAL shift, which is how C# spells what Java
+// writes as `>>>`; C# 11's own `>>>` is that same operation on a signed type.
+//
+// Every arm goes through sintOp on a BOX rather than through MetaJS's own 32 bit
+// operators, so the signed/unsigned choice is made once, by the cell's own flag.
+function csShift(op, l, r) {
+    var w = 32
+    if (csSzW(l) == 64) { w = 64 }
+    var un = false
+    if (csSzW(l) >= 32) { un = csSzU(l) }
+    var s = csShiftCount(r, w)
+    if (op == ">>>") {
+        // The logical shift whatever the declared signedness is: read the same bits
+        // through an UNSIGNED cell of the same width.
+        return csNorm(sintOp(10, csBox(l, w, true), s), w, un)
+    }
+    var a = csBox(l, w, un)
+    if (op == "<<") { return csNorm(sintOp(9, a, s), w, un) }
+    return csNorm(sintOp(10, a, s), w, un)
+}
+
+// giVal(r) & 31 / & 63. The count is read at 32 bits first, which is what every
+// count in a C# program is, and then masked.
+function csShiftCount(r, w) {
+    var n = csNorm(r, 32, false)
+    if (w == 64) { return n & 63 }
+    return n & 31
+}
+
+// csCmp is the ordered comparison at the PROMOTED type. sintCmp on its own is not
+// usable: it compares at the widest operand's width, so `byte b = 5; b < 1000`
+// would truncate 1000 to a byte and answer false.
+function csCmp(op, l, r) {
+    var p = csPromote(l, r)
+    var c = sintCmp(csBox(l, p.w, p.u), csBox(r, p.w, p.u))
+    if (op == "<") { return c < 0 }
+    if (op == ">") { return c > 0 }
+    if (op == "<=") { return c <= 0 }
+    if (op == ">=") { return c >= 0 }
+    if (op == "==") { return c == 0 }
+    return c != 0
+}
+
+// csConvTo is an explicit conversion to an integral type. An INTEGRAL source is a
+// pure bit truncation (unchecked); a FLOATING POINT one whose value does not fit is
+// "undefined behaviour" in ECMA-334 12.3.2, so this SATURATES - deterministic, and
+// identical in both halves.
+function csConvTo(v, w, u) {
+    if (floIs(v)) {
+        var n = floNum(v)
+        if (n !== n) { n = 0 }
+        if (n >= 18446744073709551616) { return csNorm(csAllOnes(), w, u) }
+        if (n >= 9223372036854775808) {
+            if (u) { return csNorm(csFromUDouble(n), w, u) }
+            return csNorm(csMaxI64(), w, u)
+        }
+        if (n < 0 - 9223372036854775808) { return csNorm(csMinI64(), w, u) }
+        return csNorm(csFromDouble(Math.trunc(n)), w, u)
+    }
+    return csNorm(v, w, u)
+}
+
+// ulong.MaxValue's bit pattern, i.e. Go's `p = -1`.
+function csAllOnes() { return sintRaw(4294967295, 4294967295, 64, true) }
+function csMaxI64() { return sintRaw(2147483647, 4294967295, 64, false) }
+function csMinI64() { return sintRaw(2147483648, 0, 64, false) }
+
+// An integral double in [-2^63, 2^63) as a 64 bit cell. Above 2^53 the double is
+// already inexact and this reproduces that inexactness rather than inventing
+// digits, which is what int64(math.Trunc(n)) does in the Go twin.
+function csFromDouble(v) {
+    var neg = false
+    var a = v
+    if (a < 0) {
+        neg = true
+        a = 0 - a
+    }
+    var hi = Math.floor(a / 4294967296)
+    var lo = a - hi * 4294967296
+    var x = sintRaw(hi, lo, 64, false)
+    if (neg) { x = sintOp(1, sintRaw(0, 0, 64, false), x) }
+    return x
+}
+
+// uint64(n) for the [2^63, 2^64) half, where the signed reading would overflow.
+function csFromUDouble(v) {
+    var hi = Math.floor(v / 4294967296)
+    var lo = v - hi * 4294967296
+    return sintRaw(hi, lo, 64, true)
+}
+
+// ===================================================== the boxed double =====
+
+// jvmArith (abnf/jsrtjvm.go), reached whenever a double is on either side. floOp is
+// the floor's own tag 14 arm of exactly this, by operator INDEX: 0 + 1 - 2 * 3 / 4 %.
+function csFloArith(op, l, r) {
+    var code = 0
+    if (op == "-") { code = 1 } else if (op == "*") { code = 2 } else if (op == "/") { code = 3 } else if (op == "%") { code = 4 }
+    return floOp(code, csFloOperand(l), csFloOperand(r))
+}
+
+// floOp reads its operands with the floor's to_number, which knows tag 13 and tag
+// 14 but NOT the {__char} object box. A tag 13 cell is read correctly - a C# long
+// is an honest signed cell, unlike java-rt.metajs's marked-unsigned one - so only
+// the char needs converting here.
+function csFloOperand(v) {
+    if (floIs(v)) { return v }
+    if (csIsChar(v)) { return v["__char"] }
+    return v
+}
+
+// The shared jsCompare (abnf/jsrt.go:1490): two strings compare as strings,
+// everything else as numbers.
+//
+// THE `2` IS NOT A TYPO AND IT MUST NOT BE SMOOTHED TO 0. jsCompare answers the
+// SENTINEL 2 for a NaN operand, commented there as "every relation is false" -
+// but js_cscmp, which is the only caller C# reaches, does not test for it and
+// compares the sentinel like an ordinary ordering:
+//
+//     <   c < 0    false      <=  c <= 0   false
+//     >   c > 0    TRUE       >=  c >= 0   TRUE
+//
+// so `double.NaN > 0.0` is TRUE under llvm.Run and `double.NaN <= 0.0` is false.
+// Real C# (ECMA-334 12.12.1) says every one of the four is FALSE. Returning 0
+// here instead - the obvious reading - makes `>` false and `<=` TRUE, which is
+// wrong in a DIFFERENT way and breaks byte-identity: measured, 16 lines of the
+// 19,388-line probe below. The two halves have to agree first; the shared
+// sentinel bug is recorded in docs/runtime-next-plan.md and is not fixable from
+// layer 2 alone.
+function csCompare(l, r) {
+    if (typeof l == "string") {
+        if (typeof r == "string") {
+            if (l < r) { return 0 - 1 }
+            if (l > r) { return 1 }
+            return 0
+        }
+    }
+    var a = csNum(l)
+    var b = csNum(r)
+    if (a !== a) { return 2 }
+    if (b !== b) { return 2 }
+    if (a < b) { return 0 - 1 }
+    if (a > b) { return 1 }
+    return 0
+}
+
+// ===================================================== rendering ============
+
+// cspBoolStr is System.Boolean.ToString(): Boolean.TrueString / Boolean.FalseString,
+// which are the strings "True" and "False" (the LITERALS true / false are unchanged
+// - only the string CONVERSION is capitalised).
+function cpBoolStr(b) {
+    if (b) { return "True" }
+    return "False"
+}
+
+// cspStr: the full C# string conversion, the twin of csStr in
+// csharp-interpreter.abnf and of cspRender in abnf/jsrtcsharp.go.
+function cpStr(v) { return cpRender(v, 0) }
+
+function cpRender(v, depth) {
+    if (depth > 32) { return "..." }
+    // Console.WriteLine(null) writes an empty line (ECMA-334 12.4.7).
+    if (v === undefined) { return "" }
+    if (v === null) { return "" }
+    if (typeof v == "boolean") { return cpBoolStr(v) }
+    if (typeof v == "string") { return v }
+    if (csIsChar(v)) { return String.fromCharCode(v["__char"]) }
+    if (floIs(v)) { return floStr(v) }
+    if (sintIs(v)) { return sintStr(v) }
+    if (typeof v == "number") { return "" + v }
+    if (typeof v == "function") { return "" + v }
+    if (Array.isArray(v)) { return cpArrayName(v) }
+    var s = cpObjStr(v, depth)
+    if (s !== undefined) { return s }
+    return cpPlainObj(v)
+}
+
+// The Go twin's fallthrough for an object shape it does not know is rt.toString,
+// which is JavaScript's "[object Object]" - a Dictionary and a tuple land here, and
+// both halves already agreed there.
+function cpPlainObj(o) { return "[object Object]" }
+
+// cpObjStr renders the object shapes the two C# grammars build, and answers
+// undefined for one it does not know.
+function cpObjStr(o, depth) {
+    // A user ToString() override wins over every built-in rendering, exactly as the
+    // virtual System.Object.ToString() does in C#.
+    var m = cpFindToString(o)
+    if (m !== undefined) { return cpRender(m.apply(undefined, [o]), depth + 1) }
+    // The type descriptor itself.
+    if (o["__isclass"] !== undefined) {
+        var n = o["__name"]
+        if (typeof n == "string") { return n }
+    }
+    // An instance: its type's BARE name (see the header of abnf/jsrtcsharp.go -
+    // real C# prints the fully qualified name, which this runtime has no concept of).
+    var cls = o["__class"]
+    if (cls === undefined) { return undefined }
+    if (cls === null) { return undefined }
+    if (typeof cls != "object") { return undefined }
+    var cn = cls["__name"]
+    if (typeof cn == "string") { if (cn.length > 0) { return cn } }
+    return undefined
+}
+
+// cpFindToString walks the __class / __super chain for a user-declared ToString,
+// the same walk the method dispatch does in both C# grammars.
+function cpFindToString(o) {
+    var cls = o["__class"]
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (cls === undefined) { return undefined }
+        if (cls === null) { return undefined }
+        if (typeof cls != "object") { return undefined }
+        var m = cls["ToString"]
+        if (m !== undefined) { if (typeof m == "function") { return m } }
+        cls = cls["__super"]
+    }
+    return undefined
+}
+
+// cspArrayName is Object.ToString() of an array: the element type's full name plus
+// "[]". The DECLARED element type is not carried by this value model, so it is
+// INFERRED from the elements - see the header of abnf/jsrtcsharp.go for the rule
+// and for what real C# would answer instead.
+function cpArrayName(a) {
+    if (a.length == 0) { return "System.Object[]" }
+    var name = ""
+    var i = 0
+    while (i < a.length) {
+        var n = cpElemName(a[i])
+        if (n == "") { return "System.Object[]" }
+        if (name != "") { if (n != name) { return "System.Object[]" } }
+        name = n
+        i = i + 1
+    }
+    return name + "[]"
+}
+
+function cpElemName(e) {
+    if (csIsChar(e)) { return "System.Char" }
+    if (typeof e == "boolean") { return "System.Boolean" }
+    if (typeof e == "string") { return "System.String" }
+    if (floIs(e)) { return "System.Double" }
+    if (sintIs(e)) {
+        // A sized integer carries its own type, so long[] / uint[] / byte[] are the
+        // one array kind whose element type is not a guess.
+        var w = sintWidth(e)
+        var u = sintUns(e)
+        if (w == 64) { return u ? "System.UInt64" : "System.Int64" }
+        if (w == 32) { return u ? "System.UInt32" : "System.Int32" }
+        if (w == 16) { return u ? "System.UInt16" : "System.Int16" }
+        return u ? "System.Byte" : "System.SByte"
+    }
+    if (typeof e == "number") { return "System.Int32" }
+    return ""
+}
+
+// csString (abnf/jsrt.go): the rendering js_csadd / js_csadd2 apply to an operand of
+// '+'. A null operand contributes the EMPTY STRING (ECMA-334 12.4.7), everything
+// else goes through the shared toString - which for the values js_csstr has already
+// let through is the number, the sized integer, the boxed double or the char.
+function cpAddStr(v) {
+    if (v === undefined) { return "" }
+    if (v === null) { return "" }
+    return cpToString(v)
+}
+
+// The shared runtime's own toString, which is what rt.toString answers for each of
+// the shapes that can still reach it here.
+function cpToString(v) {
+    if (typeof v == "string") { return v }
+    if (typeof v == "boolean") { return v ? "true" : "false" }
+    if (csIsChar(v)) { return String.fromCharCode(v["__char"]) }
+    if (floIs(v)) { return floStr(v) }
+    if (sintIs(v)) { return sintStr(v) }
+    if (typeof v == "number") { return "" + v }
+    if (Array.isArray(v)) { return cpJoin(v) }
+    return "" + v
+}
+
+// rt.toString of an array is its elements joined with a comma. There is no join in
+// this dialect, so it is written out.
+function cpJoin(a) {
+    var out = ""
+    var i = 0
+    while (i < a.length) {
+        if (i > 0) { out = out + "," }
+        out = out + cpToString(a[i])
+        i = i + 1
+    }
+    return out
+}
+
+// ===================================================== the integral types ===
+
+// csTypeW / csTypeU: C#'s `byte` is UNSIGNED (0..255) and `sbyte` is the signed one
+// - the opposite of Java, and the single most common way to get this wrong. The
+// names are prefixed so that no property of Object.prototype can be hit by mistake.
+function csTypeW(name) {
+    if (name == "sbyte") { return 8 }
+    if (name == "byte") { return 8 }
+    if (name == "short") { return 16 }
+    if (name == "ushort") { return 16 }
+    if (name == "int") { return 32 }
+    if (name == "uint") { return 32 }
+    if (name == "long") { return 64 }
+    if (name == "ulong") { return 64 }
+    if (name == "nint") { return 64 }
+    if (name == "nuint") { return 64 }
+    return 0
+}
+
+function csTypeU(name) {
+    if (name == "byte") { return true }
+    if (name == "ushort") { return true }
+    if (name == "uint") { return true }
+    if (name == "ulong") { return true }
+    if (name == "nuint") { return true }
+    return false
+}
+
+function csTypeAlias(name) {
+    if (name == "SByte") { return "sbyte" }
+    if (name == "Byte") { return "byte" }
+    if (name == "Int16") { return "short" }
+    if (name == "UInt16") { return "ushort" }
+    if (name == "Int32") { return "int" }
+    if (name == "UInt32") { return "uint" }
+    if (name == "Int64") { return "long" }
+    if (name == "UInt64") { return "ulong" }
+    return name
+}
+
+// csParseInt is int.Parse / long.Parse / uint.Parse: a decimal digit run with an
+// optional sign, and a System.FormatException on anything else.
+function csParseInt(s, w, u) {
+    var t = s.trim()
+    var neg = false
+    var i = 0
+    if (t.length > 0) {
+        var c0 = t.charAt(0)
+        if (c0 == "+") { i = 1 } else if (c0 == "-") {
+            neg = true
+            i = 1
+        }
+    }
+    if (i >= t.length) {
+        csThrow("FormatException", "The input string was not in a correct format.")
+    }
+    var acc = sintRaw(0, 0, 64, true)
+    var ten = sintRaw(0, 10, 64, true)
+    while (i < t.length) {
+        var d = t.charCodeAt(i) - 48
+        if (d < 0 || d > 9) {
+            csThrow("FormatException", "The input string was not in a correct format.")
+        }
+        acc = sintOp(0, sintOp(2, acc, ten), sintRaw(0, d, 64, true))
+        i = i + 1
+    }
+    // The Go twin accumulates in a uint64 and then reads the result as int64, so the
+    // negation is the two's complement one at 64 bits.
+    if (neg) { acc = sintOp(1, sintRaw(0, 0, 64, true), acc) }
+    return csNorm(acc, w, u)
+}
+
+// csTypeObject: one of the integral type NAMES as an expression primary, so that
+// `int.MaxValue`, `ulong.MaxValue` and `int.Parse(s)` resolve.
+function csTypeObject(name0) {
+    var o = {}
+    if (name0 == "char" || name0 == "Char") {
+        o["MinValue"] = csChar(0)
+        o["MaxValue"] = csChar(65535)
+        return o
+    }
+    var name = csTypeAlias(name0)
+    var w = csTypeW(name)
+    if (w == 0) { return o }
+    var un = csTypeU(name)
+    var lo = sintRaw(0, 0, 64, false)
+    var hi = sintRaw(0, 0, 64, false)
+    if (un) {
+        // int64(-1) at width 64, i.e. every bit set; the narrower widths mask it.
+        hi = csAllOnes()
+    } else {
+        // 2^(w-1) - 1 and its negation, built from the all-ones pattern so that no
+        // exponent literal is needed.
+        hi = sintOp(10, sintRaw(2147483647, 4294967295, 64, false), 64 - w)
+        lo = sintOp(1, sintRaw(0, 0, 64, false), sintOp(0, hi, sintRaw(0, 1, 64, false)))
+    }
+    o["MinValue"] = csNorm(lo, w, un)
+    o["MaxValue"] = csNorm(hi, w, un)
+    o["Parse"] = function(s) { return csParseInt(cpStr(s), w, un) }
+    return o
+}
+
+// ===================================================== the exports ==========
+//
+// Everything below is a TOP-LEVEL `function js_*`, which is what -rt-lib exports
+// under its own C symbol. The order follows abnf/jsrtcsharp.go and the shared block
+// of abnf/jsrt.go.
+
+// ----- the language-NEUTRAL fifteen -----------------------------------------
+// None of these is C#'s. They live in abnf/jsrt.go, several languages emit them,
+// and they are here only because the C floor does not have them - see the extern
+// split in docs/runtime-next-plan.md part 3.
+
+function js_arr_new_n(n, fill) {
+    var out = []
+    var i = 0
+    var c = csNum(n)
+    while (i < c) {
+        out.push(fill)
+        i = i + 1
+    }
+    return out
+}
+
+// A char from its CODE. The code arrives as a RAW parameter - csharp-to-llvm-ir
+// writes it with handle(k), so without the _raw suffix the callee would see the
+// handle 0..3, i.e. undefined/null/false/true. The Lua pilot's finding.
+function js_char(code_raw) { return csChar(code_raw) }
+
+// The code of a char, and rt.toNumber for everything else. csharp-to-llvm-ir uses
+// it as the operand guard in front of the FLOOR's js_csflo, which is the one place
+// a floor extern would otherwise meet the {__char} box.
+function js_char_code(v) {
+    if (csIsChar(v)) { return v["__char"] }
+    return csNum(v)
+}
+
+// An empty Dictionary<K,V> / Python dict / Go map handle.
+function js_dict_new() { return {__dict: true, keys: [], vals: []} }
+
+function csIsDict(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (typeof v != "object") { return false }
+    if (Array.isArray(v)) { return false }
+    return v["__dict"] !== undefined
+}
+
+// The dict's key lookup, by VALUE - two boxes holding 5 are one key.
+function csDictFind(keys, k) {
+    var i = 0
+    while (i < keys.length) {
+        if (csValueEq(keys[i], k)) { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// rt.dictFind's equality: strict for everything the floor knows, by value for the
+// two number tags and the char box.
+function csValueEq(a, b) {
+    if (csIsChar(a) || csIsChar(b)) { return js_jchareq(a, b) }
+    if (floIs(a) || floIs(b)) { return floEq(a, b) }
+    if (sintIs(a) || sintIs(b)) {
+        if (!csIsIntegral(a)) { return false }
+        if (!csIsIntegral(b)) { return false }
+        return csCmp("==", a, b)
+    }
+    return a === b
+}
+
+// Sequence indexing and dict lookup. C#'s emitter routes every subscript through
+// this (core.indexExt).
+function js_pyget(c, k) {
+    if (csIsDict(c)) {
+        var i = csDictFind(c["keys"], k)
+        if (i < 0) { fail("KeyError: " + cpStr(k)) }
+        return c["vals"][i]
+    }
+    var idx = csNum(k)
+    if (Array.isArray(c)) {
+        if (idx < 0) { idx = idx + c.length }
+        if (idx < 0 || idx >= c.length) { fail("list index out of range") }
+        return c[idx]
+    }
+    if (typeof c == "string") {
+        if (idx < 0) { idx = idx + c.length }
+        if (idx < 0 || idx >= c.length) { fail("string index out of range") }
+        return c.charAt(idx)
+    }
+    fail("indexing a " + typeof c)
+    return undefined
+}
+
+function js_pyset(c, k, v) {
+    if (csIsDict(c)) {
+        var keys = c["keys"]
+        var i = csDictFind(keys, k)
+        if (i >= 0) { c["vals"][i] = v } else {
+            keys.push(k)
+            c["vals"].push(v)
+        }
+        return undefined
+    }
+    if (!Array.isArray(c)) { fail("item assignment on a " + typeof c) }
+    var idx = csNum(k)
+    if (idx < 0) { idx = idx + c.length }
+    if (idx < 0 || idx >= c.length) { fail("list assignment index out of range") }
+    c[idx] = v
+    return undefined
+}
+
+function js_pylen(v) {
+    if (typeof v == "string") { return v.length }
+    if (csIsDict(v)) { return v["keys"].length }
+    if (Array.isArray(v)) { return v.length }
+    fail("len() of a " + typeof v)
+    return 0
+}
+
+// 'key in obj' / hasOwnProperty: own properties of an object, index and 'length' of
+// an array or string. csharp-to-llvm-ir emits it for exactly one probe, "does this
+// receiver carry a __class", so the object arm is the only one it reaches.
+function js_has(o, key) {
+    var k = cpToString(key)
+    if (typeof o == "string") {
+        if (k == "length") { return true }
+        var si = csNum(key)
+        if (si !== si) { return false }
+        return si == Math.trunc(si) && si >= 0 && si < o.length
+    }
+    if (Array.isArray(o)) {
+        if (k == "length") { return true }
+        var ai = csNum(key)
+        if (ai !== ai) { return false }
+        return ai == Math.trunc(ai) && ai >= 0 && ai < o.length
+    }
+    if (o === undefined || o === null) { return false }
+    if (typeof o != "object") { return false }
+    if (o[k] !== undefined) { return true }
+    return csFindAccessor(o, k)
+}
+
+// findClassAccessor: a getter/setter lives on the __class descriptor chain, not on
+// the instance, so `key in instance` has to walk it.
+function csFindAccessor(o, k) {
+    var cls = o["__class"]
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (cls === undefined) { return false }
+        if (cls === null) { return false }
+        if (typeof cls != "object") { return false }
+        if (cls["__get_" + k] !== undefined) { return true }
+        if (cls["__set_" + k] !== undefined) { return true }
+        cls = cls["__super"]
+    }
+    return false
+}
+
+// The dynamic type test behind `is` / a type pattern. abnf/jsrt.go's isTypeName is
+// the spec, including the part that surprises: the Int/Long/Short/Byte arm tests for
+// a PLAIN number, so a boxed long is NOT `is Int` there either.
+function js_is_type(v, t) {
+    var nm = t
+    var lt = nm.indexOf("<")
+    if (lt >= 0) { nm = nm.substring(0, lt) }
+    var opt = false
+    if (nm.length > 0) {
+        if (nm.charAt(nm.length - 1) == "?") {
+            nm = nm.substring(0, nm.length - 1)
+            opt = true
+        }
+    }
+    if (v === undefined) { return opt }
+    if (v === null) { return opt }
+    if (csIsChar(v)) {
+        if (nm == "Char") { return true }
+        if (nm == "Character") { return true }
+        if (nm == "Any") { return true }
+        return nm == "Comparable"
+    }
+    if (nm == "Any" || nm == "Object") { return true }
+    if (nm == "Int" || nm == "Integer" || nm == "Long" || nm == "Short" || nm == "Byte" || nm == "Char" || nm == "Character") {
+        if (!csIsPlainNum(v)) { return false }
+        return Math.trunc(v) == v
+    }
+    if (nm == "Double" || nm == "Float" || nm == "Number") { return csIsPlainNum(v) }
+    if (nm == "String" || nm == "CharSequence") { return typeof v == "string" }
+    if (nm == "Boolean") { return typeof v == "boolean" }
+    if (nm == "List" || nm == "MutableList" || nm == "Collection" || nm == "Array") { return Array.isArray(v) }
+    if (typeof v != "object") { return false }
+    if (Array.isArray(v)) { return false }
+    var cls = v["__class"]
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (cls === undefined) { return false }
+        if (cls === null) { return false }
+        if (typeof cls != "object") { return false }
+        if (cls["__name"] === nm) { return true }
+        cls = cls["__super"]
+    }
+    return false
+}
+
+// The shared '+' (abnf/jsrt.go's js_jadd): string concat with Java's null
+// rendering, 32 bit add for two int values, float add otherwise. The C# emitter
+// reaches it only for index and length arithmetic it generates itself.
+function js_jadd(l, r) {
+    if (typeof l == "string" || typeof r == "string") { return csJavaStr(l) + csJavaStr(r) }
+    if (floIs(l) || floIs(r)) { return csFloArith("+", l, r) }
+    var ln = csNum(l)
+    var rn = csNum(r)
+    if (csIsInt32Value(ln) && csIsInt32Value(rn)) { return csWrap32(ln + rn) }
+    return ln + rn
+}
+
+// javaString: null/undefined print as "null" here, unlike C#'s own csString.
+function csJavaStr(v) {
+    if (v === undefined) { return "null" }
+    if (v === null) { return "null" }
+    return cpToString(v)
+}
+
+function csIsInt32Value(n) {
+    if (n !== n) { return false }
+    if (Math.trunc(n) !== n) { return false }
+    if (n > 2147483647) { return false }
+    return n >= 0 - 2147483648
+}
+
+// C#'s == when a char may be involved. A char must compare equal to the
+// one-character string the interpreter's String indexing answers, too. Without a
+// char operand this is exactly js_seq.
+function js_jchareq(l, r) {
+    if (csIsChar(l)) {
+        if (typeof r == "string") {
+            if (r.length != 1) { return false }
+            return r.charCodeAt(0) == l["__char"]
+        }
+        if (csIsChar(r)) { return l["__char"] === r["__char"] }
+        if (csIsPlainNum(r)) { return l["__char"] === r }
+        if (sintIs(r)) { return csCmp("==", l, r) }
+        if (floIs(r)) { return floEq(flo(l["__char"], 2), r) }
+        return false
+    }
+    if (csIsChar(r)) { return js_jchareq(r, l) }
+    return csStrictEq(l, r)
+}
+
+// The floor's === with the two number boxes taught to it. floEq is jvmNumEq, whose
+// jsGInt case is deliberately absent (a boxed double against a SIZED INTEGER is
+// false), and that asymmetry is reproduced rather than smoothed over.
+function csStrictEq(l, r) {
+    if (floIs(l) || floIs(r)) { return floEq(l, r) }
+    if (sintIs(l) || sintIs(r)) {
+        if (!csIsIntegral(l)) { return false }
+        if (!csIsIntegral(r)) { return false }
+        return csCmp("==", l, r)
+    }
+    return l === r
+}
+
+// (target, method name, args array). The Go twin (rt.memberCall in abnf/jsrt.go) is
+// a LANGUAGE-NEUTRAL dispatcher; only the arms csharp-to-llvm-ir.abnf can reach are
+// here, and the ones it cannot are named at the fallthrough rather than guessed at.
+function js_mcall(recv, name, args) {
+    if (typeof recv == "string") {
+        if (name == "length") { return recv.length }
+        if (name == "charAt") { return recv.charAt(csNum(args[0])) }
+        if (name == "equals") { return csStrictEq(recv, args[0]) }
+        if (name == "substring") {
+            var b = args.length > 0 ? csNum(args[0]) : 0
+            var e = args.length > 1 ? csNum(args[1]) : recv.length
+            return csSubstring(recv, b, e)
+        }
+        if (name == "indexOf") { return recv.indexOf(cpToString(args[0])) }
+        if (name == "contains") { return recv.indexOf(cpToString(args[0])) >= 0 }
+        if (name == "toUpperCase" || name == "ToUpper") { return recv.toUpperCase() }
+        if (name == "toLowerCase" || name == "ToLower") { return recv.toLowerCase() }
+        if (name == "trim" || name == "Trim") { return recv.trim() }
+        if (name == "isEmpty") { return recv.length == 0 }
+        fail("unknown String method: " + name)
+        return undefined
+    }
+    if (recv === undefined || recv === null) {
+        fail("method call '" + name + "' on a " + (recv === null ? "null" : "undefined"))
+        return undefined
+    }
+    if (typeof recv != "object") {
+        fail("method call '" + name + "' on a " + typeof recv)
+        return undefined
+    }
+    if (Array.isArray(recv)) { return csListMethod(recv, name, args) }
+    if (csIsDict(recv)) { return csDictMethod(recv, name, args) }
+    if (csIsChar(recv)) {
+        fail("method call '" + name + "' on a char")
+        return undefined
+    }
+    var cls = recv["__class"]
+    if (cls !== undefined) {
+        var c = cls
+        var guard = 0
+        while (guard < 64) {
+            guard = guard + 1
+            if (c === undefined) { guard = 99 } else if (c === null) { guard = 99 } else if (typeof c != "object") { guard = 99 } else {
+                var mm = c[name]
+                if (csIsFn(mm)) { return mm.apply(undefined, csPrepend(recv, args)) }
+                c = c["__super"]
+            }
+        }
+        fail("unknown method '" + name + "' on an instance")
+        return undefined
+    }
+    var f = recv[name]
+    if (csIsFn(f)) { return f.apply(undefined, args) }
+    fail("unknown method '" + name + "'")
+    return undefined
+}
+
+function csListMethod(recv, name, args) {
+    if (name == "length" || name == "size" || name == "count") { return recv.length }
+    if (name == "add" || name == "push" || name == "append") {
+        recv.push(args[0])
+        return true
+    }
+    if (name == "get") {
+        var gi = csNum(args[0])
+        if (gi < 0 || gi >= recv.length) {
+            fail("list index " + gi + " out of range")
+            return undefined
+        }
+        return recv[gi]
+    }
+    if (name == "contains" || name == "includes") {
+        var k = 0
+        while (k < recv.length) {
+            if (csValueEq(recv[k], args[0])) { return true }
+            k = k + 1
+        }
+        return false
+    }
+    if (name == "indexOf") {
+        var j = 0
+        while (j < recv.length) {
+            if (csValueEq(recv[j], args[0])) { return j }
+            j = j + 1
+        }
+        return 0 - 1
+    }
+    fail("unknown list method '" + name + "'")
+    return undefined
+}
+
+// A Dictionary's keys / values / contains, which csharp-to-llvm-ir emits for
+// '.Keys', '.Values' and '.ContainsKey'.
+function csDictMethod(recv, name, args) {
+    if (name == "keys") { return csCopyArr(recv["keys"]) }
+    if (name == "values") { return csCopyArr(recv["vals"]) }
+    if (name == "length" || name == "size" || name == "count") { return recv["keys"].length }
+    if (name == "contains" || name == "containsKey") { return csDictFind(recv["keys"], args[0]) >= 0 }
+    if (name == "add") {
+        js_pyset(recv, args[0], args[1])
+        return undefined
+    }
+    fail("unknown dictionary method '" + name + "'")
+    return undefined
+}
+
+function csCopyArr(a) {
+    var out = []
+    var i = 0
+    while (i < a.length) {
+        out.push(a[i])
+        i = i + 1
+    }
+    return out
+}
+
+// csIsFn: "may this member be called". It is NOT `typeof v == "function"`, and the
+// reason is a MEASURED divergence between the two halves that C# is the first
+// language to reach:
+//
+//     js_genfn's result   Go twin (abnf/jsrt.go:5376)   a *hostFunc, typeOf "function"
+//                         C floor (runtime.c)           tag 16; is_callable(16) is
+//                                                       TRUE but type_of(16) falls
+//                                                       through to "object"
+//
+// So `static IEnumerable<int> S19UpTo(int n) { yield return ...; }` is a class member
+// whose typeof is "function" under llvm.Run and "object" natively, and js_mcall
+// would refuse to call it - measured, it was the FIRST native failure of
+// tests/csharp-test-full.cs ("unknown method 'S19UpTo'"). The one-line floor fix is
+// reported in docs/runtime-next-plan.md; until it lands, callability is asked for
+// the way is_callable answers it: get_member gives every CALLABLE cell - tag 16
+// included - a bound `apply`, and gives a plain object undefined.
+function csIsFn(v) {
+    if (typeof v == "function") { return true }
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (typeof v != "object") { return false }
+    if (Array.isArray(v)) { return false }
+    return typeof v["apply"] == "function"
+}
+
+function csPrepend(v, args) {
+    var out = [v]
+    var i = 0
+    while (i < args.length) {
+        out.push(args[i])
+        i = i + 1
+    }
+    return out
+}
+
+// String.Substring with the Go twin's substringRange clamping.
+function csSubstring(s, b, e) {
+    var begin = b
+    var end = e
+    if (begin < 0) { begin = 0 }
+    if (end > s.length) { end = s.length }
+    if (end < begin) { end = begin }
+    return s.substring(begin, end)
+}
+
+// (super class, this, method name, args array). The walk starts AT the given class:
+// the emitter already resolved the superclass of the DEFINING class, so a subclass
+// override never shadows what a hidden-name call means.
+function js_supercall(sup, self, name, args) {
+    var cls = sup
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (cls === undefined) { guard = 99 } else if (cls === null) { guard = 99 } else if (typeof cls != "object") { guard = 99 } else {
+            var m = cls[name]
+            if (csIsFn(m)) { return m.apply(undefined, csPrepend(self, args)) }
+            cls = cls["__super"]
+        }
+    }
+    fail("unknown super method '" + name + "'")
+    return undefined
+}
+
+// s[lo..hi] on a string or an array: the elements are COPIED. An absent bound
+// arrives as undefined and reads as 0 / the length.
+function js_goslice(v, lo0, hi0) {
+    if (typeof v == "string") {
+        var slo = lo0 === undefined ? 0 : csNum(lo0)
+        var shi = hi0 === undefined ? v.length : csNum(hi0)
+        if (slo < 0 || shi > v.length || slo > shi) { fail("slice bounds [" + slo + ":" + shi + "] out of range") }
+        return v.substring(slo, shi)
+    }
+    if (!Array.isArray(v)) {
+        fail("slicing a " + typeof v)
+        return undefined
+    }
+    var lo = lo0 === undefined ? 0 : csNum(lo0)
+    var hi = hi0 === undefined ? v.length : csNum(hi0)
+    if (lo < 0 || hi > v.length || lo > hi) { fail("slice bounds [" + lo + ":" + hi + "] out of range") }
+    var out = []
+    var i = lo
+    while (i < hi) {
+        out.push(v[i])
+        i = i + 1
+    }
+    return out
+}
+
+// f(xs...): flatten the LAST element of the argument array IN PLACE, so the callee
+// sees the array's elements as separate arguments. The Go twin re-slices; this
+// dialect has no splice, so the tail is popped and pushed back one element at a
+// time - the same array object, which is what the caller holds.
+function js_gospread(args) {
+    if (!Array.isArray(args)) { return undefined }
+    if (args.length == 0) { return undefined }
+    var last = args.pop()
+    if (Array.isArray(last)) {
+        var i = 0
+        while (i < last.length) {
+            args.push(last[i])
+            i = i + 1
+        }
+        return undefined
+    }
+    if (last === null) { return undefined }
+    if (last === undefined) { return undefined }
+    args.push(last)
+    return undefined
+}
+
+// ----- C#'s own eighteen ----------------------------------------------------
+
+// One binary integral operator: (op, left, right). A double operand keeps the FLOAT
+// path of abnf/jsrtjvm.go, which is where the two number tags meet; two bools take
+// C#'s non-short-circuit & | ^.
+function js_csarith(op, l, r) {
+    if (floIs(l) || floIs(r)) { return csFloArith(op, l, r) }
+    if (typeof l == "boolean") {
+        if (typeof r == "boolean") {
+            if (op == "&") { return l && r }
+            if (op == "|") { return l || r }
+            if (op == "^") { return l !== r }
+        }
+    }
+    if (!csIsIntegral(l) || !csIsIntegral(r)) { return csFloArith(op, l, r) }
+    return csArith(op, l, r)
+}
+
+function js_csshift(op, l, r) { return csShift(op, l, r) }
+
+function js_cscmp(op, l, r) {
+    if (csIsIntegral(l) && csIsIntegral(r) && !floIs(l) && !floIs(r)) { return csCmp(op, l, r) }
+    var c = csCompare(l, r)
+    if (op == "<") { return c < 0 }
+    if (op == ">") { return c > 0 }
+    if (op == "<=") { return c <= 0 }
+    return c >= 0
+}
+
+// A cast or a declared integral type: (value, bits, unsigned).
+function js_csconv(v, bits, uns) { return csConvTo(v, csNum(bits), uns === true) }
+
+// A declared type applied to an initializer: only an INTEGRAL value converts, so
+// `object o = "s"` and a lambda pass through untouched.
+function js_csadopt(v, bits, uns) {
+    if (!csIsIntegral(v)) { return v }
+    return csConvTo(v, csNum(bits), uns === true)
+}
+
+// An integer literal, passed as DIGITS because emitNum would already have rounded
+// 9223372036854775807 to 9223372036854776000 on the way into the module. Its TYPE
+// follows its suffix and its value (ECMA-334 6.4.5.3): with no suffix it is the
+// first of int, uint, long, ulong that holds it; U makes it uint or ulong; L long or
+// ulong; UL ulong.
+function js_cslit(text, radix, hasU, hasL) {
+    var rx = csNum(radix)
+    var acc = sintRaw(0, 0, 64, true)
+    var rb = sintRaw(0, rx, 64, true)
+    var i = 0
+    while (i < text.length) {
+        var c = text.charCodeAt(i)
+        var d = 0 - 1
+        if (c >= 48 && c <= 57) { d = c - 48 } else if (c >= 97 && c <= 102) { d = c - 97 + 10 } else if (c >= 65 && c <= 70) { d = c - 65 + 10 }
+        if (d >= 0 && d < rx) { acc = sintOp(0, sintOp(2, acc, rb), sintRaw(0, d, 64, true)) }
+        i = i + 1
+    }
+    var hi = sintHi(acc)
+    var lo = sintLo(acc)
+    var fitsUInt = hi == 0
+    var fitsInt = hi == 0 && lo <= 2147483647
+    var fitsLong = hi <= 2147483647
+    var u = hasU === true
+    var el = hasL === true
+    if (u && el) { return sintRaw(hi, lo, 64, true) }
+    if (u) {
+        if (fitsUInt) { return sintRaw(hi, lo, 32, true) }
+        return sintRaw(hi, lo, 64, true)
+    }
+    if (el) {
+        if (fitsLong) { return sintRaw(hi, lo, 64, false) }
+        return sintRaw(hi, lo, 64, true)
+    }
+    if (fitsInt) { return lo }
+    if (fitsUInt) { return sintRaw(hi, lo, 32, true) }
+    if (fitsLong) { return sintRaw(hi, lo, 64, false) }
+    return sintRaw(hi, lo, 64, true)
+}
+
+// -x, at the UNARY promoted type (ECMA-334 12.4.7.2): a long keeps its type, a uint
+// becomes a LONG (because -uint.MaxValue does not fit in a uint) and everything
+// narrower becomes an int.
+function js_csneg(v) {
+    // NOT `flo(0 - floNum(v), 2)`. Unary minus on a double is emitted as `0.0 - x`
+    // by languages/c-to-llvm-ir.abnf, and 0.0 - 0.0 is +0.0 - so the sign of a
+    // NEGATIVE ZERO would be lost. Multiplying by -1.0 computes the sign instead of
+    // writing it, and is exact for every operand including the infinities and NaN.
+    if (floIs(v)) { return floOp(2, v, flo(0 - 1, 2)) }
+    if (csSzW(v) == 64) { return csNorm(csNegate(v, 64, csSzU(v)), 64, csSzU(v)) }
+    if (csSzW(v) == 32 && csSzU(v)) { return csNorm(csNegate(v, 64, false), 64, false) }
+    return csWrap32(0 - csNorm(v, 32, false))
+}
+
+// Two's complement negation at a given width, which maps MinValue to itself exactly
+// as C#'s unchecked unary minus does.
+function csNegate(v, w, u) {
+    return sintOp(1, csBox(0, w, u), csBox(v, w, u))
+}
+
+// ~x, at the same unary promoted type.
+function js_csnot(v) {
+    if (csSzW(v) == 64) { return csNorm(csComplement(v, 64, csSzU(v)), 64, csSzU(v)) }
+    if (csSzW(v) == 32 && csSzU(v)) { return csNorm(csComplement(v, 32, true), 32, true) }
+    return csWrap32(0 - csNorm(v, 32, false) - 1)
+}
+
+function csComplement(v, w, u) {
+    return sintOp(7, csBox(v, w, u), csBox(csAllOnes(), w, u))
+}
+
+// ++ / -- step at the operand's OWN type and wrap there (ECMA-334 12.8.15: `x++` is
+// `x = (T)(x + 1)`), so `byte b = 255; b++` is 0.
+function js_csstep(v, d) {
+    var n = csNum(d)
+    if (csIsChar(v)) { return csChar((v["__char"] + n) & 65535) }
+    if (floIs(v)) { return flo(floNum(v) + n, floStyle(v)) }
+    if (sintIs(v)) { return csConvTo(csArith("+", v, n), sintWidth(v), sintUns(v)) }
+    return csWrap32(csNorm(v, 32, false) + n)
+}
+
+// The result of a COMPOUND assignment: the operation, then the implicit cast back to
+// the LEFT operand's type (ECMA-334 12.21.4: `x op= y` is `x = (T)(x op y)`), so
+// `byte b = 250; b += 10` is (byte)260 == 4.
+function js_csnarrowlike(l, v) {
+    if (floIs(l)) {
+        if (floIs(v)) { return v }
+        return flo(csNum(v), floStyle(l))
+    }
+    if (csIsChar(l)) { return csChar(csNorm(v, 16, true)) }
+    if (sintIs(l)) { return csConvTo(v, sintWidth(l), sintUns(l)) }
+    if (csIsPlainNum(l)) {
+        if (csIsIntegral(v) || floIs(v)) { return csConvTo(v, 32, false) }
+    }
+    return v
+}
+
+// A (char) cast: narrow to 16 UNSIGNED bits and re-box.
+function js_cschar(v) {
+    if (floIs(v)) { return csChar(csNorm(csConvTo(v, 16, true), 16, true)) }
+    return csChar(csNorm(v, 16, true))
+}
+
+// C#'s '+'. Identical to the shared js_csadd - string concat with C#'s null rule,
+// float add when a double is involved - except that two INTEGRAL operands add at
+// their promoted type and wrap to it, instead of through a double that rounds above
+// 2^53.
+function js_csadd2(l, r) {
+    if (typeof l == "string" || typeof r == "string") { return cpAddStr(l) + cpAddStr(r) }
+    if (floIs(l) || floIs(r)) { return flo(csNum(l) + csNum(r), csFloStyle(l, r)) }
+    if (csIsIntegral(l) && csIsIntegral(r)) { return csArith("+", l, r) }
+    return csNum(l) + csNum(r)
+}
+
+// jvmStyleOf: the style of whichever operand is a box, C# (2) when neither is.
+function csFloStyle(l, r) {
+    if (floIs(l)) { return floStyle(l) }
+    if (floIs(r)) { return floStyle(r) }
+    return 2
+}
+
+// The shared js_csadd (abnf/jsrt.go): the emitter uses it for `"" + x`, which is
+// what .ToString() lowers to.
+function js_csadd(l, r) {
+    if (typeof l == "string" || typeof r == "string") { return cpAddStr(l) + cpAddStr(r) }
+    if (floIs(l) || floIs(r)) { return flo(csNum(l) + csNum(r), csFloStyle(l, r)) }
+    var ln = csNum(l)
+    var rn = csNum(r)
+    if (csIsInt32Value(ln) && csIsInt32Value(rn)) { return csWrap32(ln + rn) }
+    return ln + rn
+}
+
+// == / != with a sized integer on either side: two integers compare BY VALUE at
+// their promoted type, so a uint and a long holding the same number are equal and
+// two boxes holding 5 are not two distinct objects. The third argument is the
+// js_jchareq / $valeq answer the caller already computed.
+function js_cseq(l, r, pre) {
+    if (csIsIntegral(l) && csIsIntegral(r) && !floIs(l) && !floIs(r)) {
+        if (sintIs(l)) { return csCmp("==", l, r) }
+        if (sintIs(r)) { return csCmp("==", l, r) }
+    }
+    return pre
+}
+
+// One of the integral type NAMES as an expression primary.
+function js_cstype(name) { return csTypeObject(name) }
+
+// C#'s .Length / .Count. A string's Length counts UTF-16 CODE UNITS (System.String
+// is a UTF-16 sequence, so "😀".Length is 2) - which is what a MetaJS
+// string's .length already counts. Everything else is js_pylen.
+function js_cslen(v) {
+    if (typeof v == "string") { return v.length }
+    if (Array.isArray(v)) { return v.length }
+    if (csIsDict(v)) { return v["keys"].length }
+    fail("Length/Count of a " + typeof v)
+    return 0
+}
+
+// The whole Console object, built here rather than in the grammar so that WriteLine
+// / Write render through cpStr instead of through the shared println host function.
+function js_csconsole() {
+    var o = {}
+    o["WriteLine"] = function(v) { println(cpStr(v)) }
+    o["Write"] = function(v) { print(cpStr(v)) }
+    return o
+}
+
+// The rendering step of a string CONVERSION, used by '+', by an interpolation hole
+// and by .ToString(). It converts only the values whose C# string form differs from
+// the shared runtime's - a bool, an array and a class instance - and passes
+// everything else through UNCHANGED, so that `1 + 2` stays an integer addition and a
+// boxed double stays a double. The caller wraps the result in js_csadd, which
+// supplies C#'s null rule and the numeric cases.
+function js_csstr(v) {
+    if (typeof v == "boolean") { return cpBoolStr(v) }
+    if (Array.isArray(v)) { return cpArrayName(v) }
+    if (v === undefined) { return v }
+    if (v === null) { return v }
+    if (typeof v == "object") {
+        if (csIsChar(v)) { return v }
+        var s = cpObjStr(v, 0)
+        if (s !== undefined) { return s }
+    }
+    return v
+}
