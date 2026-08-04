@@ -7,8 +7,36 @@
 # the questions that get asked here: with other work on the machine, a
 # 40,000-iteration kotlin loop varies +-8% between runs of THE SAME BINARY, which
 # is larger than most effects being argued about. `/usr/bin/time -l`'s
-# "instructions retired" reproduces to ~0.02% across rebuilds and does not care
-# what else is running. So: instructions, always, min of N runs.
+# "instructions retired" does not care what else is running: re-running ONE
+# BINARY reproduces to ~0.02%. So: instructions, always, min of N runs.
+#
+# AND WHY THAT IS NOT ENOUGH - THE PART THAT COST TWO AGENTS AND ME A WRONG
+# ANSWER EACH. A binary's INSTRUCTION COUNT DEPENDS ON ITS CODE LAYOUT, and the
+# layout is perturbed by things that change no semantics at all. Measured here on
+# ONE unchanged kotlin source, varying nothing but the length of the -exe output
+# path:
+#
+#   17.353  17.494  17.620  17.911  17.915  17.916  17.916  18.018  18.023  18.182  G
+#
+# A 4.8% spread, visibly bimodal, from a file NAME. The module's own content
+# perturbs layout the same way and by the same magnitude, so holding the output
+# path fixed does NOT cancel it - changing the module draws a fresh sample
+# either way. There is no pairing that cancels layout.
+#
+# Two consequences, and they are the whole reason this file works the way it does:
+#
+#   1. A SINGLE BUILD CANNOT MEASURE A SUB-2% EFFECT. Two agents and I each
+#      A/B'd one build against one build and got +0.04%, +0.65% and -1.72% for
+#      the same change. All three were draws from the distribution above.
+#   2. The only sound estimator is a STATISTIC OVER MANY LAYOUT DRAWS. This
+#      script builds each program to several different output paths and reports
+#      the MEDIAN, with the observed spread next to it so you can see the width
+#      of the lottery you are sampling.
+#
+# So the default tolerance is 2.5%, not 1%: below that, this instrument cannot
+# tell you anything, and a gate that fires below its own noise floor is worse
+# than no gate. If you need to resolve something smaller, raise --draws until the
+# interval is tight enough, and quote the interval and not the point.
 #
 # The programs in tests/bench/ are deliberately the same loop in every language
 # (`s = s + i % 7`, 40,000 iterations, no float, no regexp, no allocation in the
@@ -21,8 +49,10 @@
 #   tests/bench.sh                 run every program, diff against the baseline
 #   tests/bench.sh kotlin python   run only these
 #   tests/bench.sh --record        overwrite the baseline with today's numbers
-#   tests/bench.sh --runs N        min of N runs per program (default 3)
-#   tests/bench.sh --tol P         flag a delta beyond P percent (default 1.0)
+#   tests/bench.sh --runs N        min of N runs per BUILD (default 3)
+#   tests/bench.sh --draws N       N layout draws per program (default 5) - see
+#                                  the note below; 1 draw measures nothing
+#   tests/bench.sh --tol P         flag a delta beyond P percent (default 2.5)
 #
 # Exit 0 iff nothing regressed beyond the tolerance. A row that IMPROVES is
 # reported and does not fail the gate - but re-record the baseline when you land
@@ -32,11 +62,12 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
 BASE=tests/bench/baseline.txt
-RECORD=0; RUNS=3; TOL=1.0; WANT=()
+RECORD=0; RUNS=3; DRAWS=5; TOL=2.5; WANT=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --record) RECORD=1 ;;
         --runs)   RUNS="$2"; shift ;;
+        --draws)  DRAWS="$2"; shift ;;
         --tol)    TOL="$2"; shift ;;
         -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
         -*) echo "bench.sh: unknown flag $1" >&2; exit 2 ;;
@@ -50,13 +81,11 @@ done
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# THE BINARY IS BUILT TO A FIXED ABSOLUTE PATH, and this is not a detail.
-# The -exe path string ends up IN the binary, so building the same .ll to
-# /tmp/bench and to /tmp/out-head-bench differs by ~0.7% in instructions retired
-# - larger than most effects anyone measures here, and enough on its own to make
-# a change look like a regression. A per-run mktemp directory reintroduces that
-# every time, and comparing two CHECKOUTS needs the path to be identical in both,
-# so it cannot live under the tree either.
+# The draws are taken by building to output paths of DIFFERENT LENGTHS. That is
+# the cheapest available handle on layout: it changes no semantics, and the
+# spread it produces is the same spread a real module edit produces. The absolute
+# directory is fixed so that two CHECKOUTS draw from the same set of paths and
+# their medians are comparable.
 EXEDIR=/tmp/mec-bench
 mkdir -p "$EXEDIR"
 
@@ -84,7 +113,7 @@ instructions_of() {
 
 declare -a NAMES VALUES
 rc=0
-printf '%-10s %16s %16s %9s\n' language instructions baseline delta
+printf '%-10s %16s %16s %9s  %s\n' language median baseline delta 'spread over draws'
 
 for f in tests/bench/mod.*; do
     [ -f "$f" ] || continue
@@ -96,36 +125,66 @@ for f in tests/bench/mod.*; do
         [ "$hit" = 1 ] || continue
     fi
 
-    exe="$EXEDIR/$lang.exe"
-    if ! ./mec "languages/$lang-to-llvm-ir.abnf" "$f" -q -exe "$exe" >/dev/null 2>"$work/$lang.err"; then
-        printf '%-10s %16s\n' "$lang" "BUILD FAILED"
-        sed -n '1,3p' "$work/$lang.err" | sed 's/^/           /'
-        rc=1; continue
-    fi
-    # A crashing binary looks FAST: /usr/bin/time reports happily on a process
-    # that died. Check the exit code before believing any number below it.
-    "$exe" >"$work/$lang.out" 2>&1; erc=$?
-    if [ "$erc" != 0 ]; then
-        printf '%-10s %16s (exit %d) - the timing of a crash is not a measurement\n' \
-            "$lang" "RAN AND FAILED" "$erc"
-        rc=1; continue
-    fi
+    # One draw per output-path length. Each is a separate build of the SAME
+    # source and a legitimate sample of the layout distribution.
+    : > "$work/$lang.draws"
+    bad_draw=0
+    d=1
+    while [ "$d" -le "$DRAWS" ]; do
+        pad=$(printf 'x%.0s' $(seq 1 "$d"))
+        exe="$EXEDIR/$lang$pad"
+        if ! ./mec "languages/$lang-to-llvm-ir.abnf" "$f" -q -exe "$exe" >/dev/null 2>"$work/$lang.err"; then
+            printf '%-10s %16s\n' "$lang" "BUILD FAILED"
+            sed -n '1,3p' "$work/$lang.err" | sed 's/^/           /'
+            bad_draw=1; break
+        fi
+        # A crashing binary looks FAST: /usr/bin/time reports happily on a
+        # process that died. Check the exit code before believing any number.
+        "$exe" >"$work/$lang.out" 2>&1; erc=$?
+        if [ "$erc" != 0 ]; then
+            printf '%-10s %16s (exit %d) - the timing of a crash is not a measurement\n' \
+                "$lang" "RAN AND FAILED" "$erc"
+            bad_draw=1; break
+        fi
+        n=$(instructions_of "$exe")
+        if [ -z "$n" ]; then
+            printf '%-10s %16s - /usr/bin/time -l reported no counter\n' "$lang" "NO COUNTER"
+            bad_draw=1; break
+        fi
+        echo "$n" >> "$work/$lang.draws"
+        d=$((d + 1))
+    done
+    if [ "$bad_draw" = 1 ]; then rc=1; continue; fi
 
-    n=$(instructions_of "$exe")
-    if [ -z "$n" ]; then
-        printf '%-10s %16s - /usr/bin/time -l reported no counter\n' "$lang" "NO COUNTER"
-        rc=1; continue
-    fi
+    # The MEDIAN over draws, not the min: the min chases the luckiest layout and
+    # is exactly as unstable as a single build.
+    read -r n lo hi < <(sort -n "$work/$lang.draws" | awk '
+        {v[NR] = $1}
+        END {
+            m = (NR % 2) ? v[(NR+1)/2] : int((v[NR/2] + v[NR/2+1]) / 2)
+            printf "%d %d %d\n", m, v[1], v[NR]
+        }')
+    spread=$(awk -v a="$lo" -v b="$hi" 'BEGIN {printf "%.2f", (b-a)*100.0/a}')
     NAMES+=("$lang"); VALUES+=("$n")
 
     old=$(awk -v l="$lang" '$1 == l {print $2}' "$BASE" 2>/dev/null)
     if [ -z "$old" ]; then
-        printf '%-10s %16s %16s %9s\n' "$lang" "$n" "-" "new"
+        printf '%-10s %16s %16s %9s  %s%% over %d draws\n' "$lang" "$n" "-" "new" "$spread" "$DRAWS"
     else
-        d=$(awk -v a="$n" -v b="$old" 'BEGIN {printf "%+.2f", (a-b)*100.0/b}')
-        printf '%-10s %16s %16s %8s%%\n' "$lang" "$n" "$old" "$d"
-        over=$(awk -v d="$d" -v t="$TOL" 'BEGIN {print (d > t) ? 1 : 0}')
-        [ "$over" = 1 ] && rc=1
+        delta=$(awk -v a="$n" -v b="$old" 'BEGIN {printf "%+.2f", (a-b)*100.0/b}')
+        printf '%-10s %16s %16s %8s%%  %s%% over %d draws\n' "$lang" "$n" "$old" "$delta" "$spread" "$DRAWS"
+        # A delta smaller than THIS PROGRAM'S OWN layout spread is not evidence
+        # of anything, whichever way it points and however big it looks. It must
+        # not fail the gate: java has been seen at +3.20% with a 3.21% spread,
+        # which is a coin landing heads, not a regression. Failing on it would
+        # train everyone to ignore this gate, which is the worst outcome.
+        noise=$(awk -v d="$delta" -v s="$spread" 'BEGIN {d = (d < 0) ? -d : d; print (d < s) ? 1 : 0}')
+        over=$(awk -v d="$delta" -v t="$TOL" 'BEGIN {print (d > t) ? 1 : 0}')
+        if [ "$noise" = 1 ]; then
+            printf '           (delta is inside the layout spread - not evidence either way)\n'
+        elif [ "$over" = 1 ]; then
+            rc=1
+        fi
     fi
 done
 
