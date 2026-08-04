@@ -144,6 +144,35 @@ function pyIsDict(v) { return pyTag(v, "__dict") }
 function pyIsCplx(v) { return pyTag(v, "__cplx") }
 function pyIsBig(v) { return pyTag(v, "__pybig") }
 
+// Python's float: a boxed double (abnf/jsrt.go's jsPyFlo, python-interpreter.abnf's
+// pyFlo). int and float are two DIFFERENT Python types - they print differently
+// (1 vs 1.0), answer different type()s, and `/` makes a float even out of two
+// ints - and one double cannot carry that, because 2.0 and 2 ARE the same double.
+// So the float is the boxed one and the int stays the plain number, which leaves
+// the common integer path untouched. The field is not `=== true` like the tags
+// above, so pyTag cannot answer it.
+function pyIsFlo(v) {
+    if (!pyIsObj(v)) { return false }
+    return v["__flo"] !== undefined
+}
+function pyMkFlo(f) { return {__flo: f} }
+
+// "this value has a double in it": a float box, a plain int, a bool (True is 1)
+// or an arbitrary precision integer. Go: pyIsNumeric.
+function pyIsNumeric(v) {
+    if (typeof v == "number") { return true }
+    if (typeof v == "boolean") { return true }
+    if (pyIsFlo(v)) { return true }
+    return pyIsBig(v)
+}
+
+// The result type of // and %: an int from two ints (7 // 2 is 3) and a float as
+// soon as either operand is one (7.5 // 2 is 3.0). Go: pyIntOrFlo.
+function pyIntOrFlo(f, l, r) {
+    if (pyIsFlo(l) || pyIsFlo(r)) { return pyMkFlo(f) }
+    return f
+}
+
 // A class object carries its C3 linearization; an instance carries its class.
 function pyIsClass(v) {
     if (!pyIsObj(v)) { return false }
@@ -196,6 +225,7 @@ function pyNewDict() { return js_dict_new() }
 function pyKeyAlias(k) {
     if (k === true) { return 1 }
     if (k === false) { return 0 }
+    if (pyIsFlo(k)) { return k["__flo"] }
     if (typeof k == "number") {
         if (k == 1) { return true }
         if (k == 0) { return false }
@@ -203,15 +233,32 @@ function pyKeyAlias(k) {
     return undefined
 }
 
+// The scan's === plus the float rule: a float box keys with the int of the same
+// value ({1.0: "a"}[1] is a hit), and two boxes holding the same double are one
+// key though they are two objects. Go: rt.dictKeyEq.
+function pyKeyEq(a, b) {
+    if (pyIsFlo(a) || pyIsFlo(b)) {
+        if (!pyIsNumeric(a) || !pyIsNumeric(b)) { return false }
+        return pyNum(a) == pyNum(b)
+    }
+    return a === b
+}
+
+// The alias is tried TWICE: a float box's alias is the plain number and the
+// plain number's is the bool, so {True: "t"}[1.0] takes two steps.
 function pyDictFind(keys, k) {
     for (var i = 0; i < keys.length; i++) {
-        if (keys[i] === k) { return i }
+        if (pyKeyEq(keys[i], k)) { return i }
     }
     var alias = pyKeyAlias(k)
-    if (alias !== undefined) {
-        for (var j = 0; j < keys.length; j++) {
-            if (keys[j] === alias) { return j }
-        }
+    if (alias === undefined) { return 0 - 1 }
+    for (var j = 0; j < keys.length; j++) {
+        if (pyKeyEq(keys[j], alias)) { return j }
+    }
+    var alias2 = pyKeyAlias(alias)
+    if (alias2 === undefined) { return 0 - 1 }
+    for (var q = 0; q < keys.length; q++) {
+        if (pyKeyEq(keys[q], alias2)) { return q }
     }
     return 0 - 1
 }
@@ -280,7 +327,10 @@ function pyCplxIm(v) {
 // 1/0, a string its parse and EVERY object (a __pybig and a __cplx included) NaN -
 // which is what Go's `default:` arm gives, and what `**`, `//` and `%` on a big or a
 // complex depend on.
-function pyNum(v) { return v * 1 }
+function pyNum(v) {
+    if (pyIsFlo(v)) { return v["__flo"] } // rt.toNumber's jsPyFlo arm.
+    return v * 1
+}
 
 // rt.toString. The one arm `"" + v` does not give is the bignum, whose Go twin
 // answers big.Int.String(); pyABigStr (chunk A) is that, and top-level function
@@ -330,6 +380,11 @@ function pyStr(v) {
         if (v) { return "True" }
         return "False"
     }
+    if (pyIsFlo(v)) { return pyBFloStr(v["__flo"]) }
+    // A TYPE object renders as CPython's <class 'name'>, so print(type(1.0))
+    // reads <class 'float'>. rt.pyClassName in the Go twin.
+    var cn = pyClassName(v)
+    if (cn !== null) { return "<class '" + cn + "'>" }
     if (Array.isArray(v)) {
         var out = "["
         for (var i = 0; i < v.length; i++) {
@@ -376,12 +431,11 @@ function pyTypeName(v) {
     if (typeof v == "boolean") { return "bool" }
     if (typeof v == "string") { return "str" }
     if (pyIsBig(v)) { return "int" }
-    if (typeof v == "number") {
-        if (v !== v) { return "float" }
-        if (v - v !== 0) { return "float" }
-        if (v == Math.trunc(v)) { return "int" }
-        return "float"
-    }
+    if (pyIsFlo(v)) { return "float" }
+    // A plain number is an INT: 2.0 and 2 are the same double, so nothing about
+    // the value can tell the two Python types apart - which is why the float is
+    // boxed in the first place.
+    if (typeof v == "number") { return "int" }
     if (Array.isArray(v)) { return "list" }
     if (typeof v == "function") { return "function" }
     if (pyIsObj(v)) {
@@ -402,6 +456,7 @@ function pyTypeName(v) {
 // in the same order, so the two halves answer the same thing for every operand.
 function pyEqBoolVal(other, b) {
     var n = b ? 1 : 0
+    if (pyIsFlo(other)) { return pyNum(other) == n }
     if (pyIsBig(other)) { return pyABigEqFloat(other, n) }
     if (pyIsCplx(other)) {
         if (pyCplxIm(other) != 0) { return false }
@@ -474,6 +529,12 @@ function pyEqual(x, y) {
     if (pyIsCplx(y)) {
         if (pyCplxIm(y) != 0) { return false }
         return pyCplxRe(y) == pyNum(x)
+    }
+    // A float equals the int of the same value (1.0 == 1) and two boxes holding
+    // the same double are equal though they are two objects.
+    if (pyIsFlo(x) || pyIsFlo(y)) {
+        if (!pyIsNumeric(x) || !pyIsNumeric(y)) { return false }
+        return pyNum(x) == pyNum(y)
     }
     return x === y
 }
@@ -657,6 +718,19 @@ function pySetAttr(obj, name, v) {
 // "$"-prefixed, which is the intern-key rule of docs/abnf-dialect-gotchas.md.
 
 var pyTypeTable = {}
+
+// The name of a TYPE object - a user class (it carries an __mro) or one of the
+// interned builtin type objects. The Ellipsis singleton also carries a __name
+// and is deliberately not one. Go: rt.pyClassName.
+function pyClassName(v) {
+    if (!pyIsObj(v)) { return null }
+    var n = v["__name"]
+    if (n === undefined) { return null }
+    var nm = pyToStr(n)
+    if (v["__mro"] !== undefined) { return nm }
+    if (pyTypeTable["$" + nm] === v) { return nm }
+    return null
+}
 
 function pyBuiltinClass(name) {
     var k = "$" + name
@@ -1182,6 +1256,9 @@ function pyATruthy(v) {
     if (typeof v == "number") { return v != 0 && v == v }
     if (typeof v == "string") { return v.length > 0 }
     if (pyIsBig(v)) { return !pyABigIsZero(v) }
+    // 0.0 is falsy and NaN is TRUTHY (Go's truthy has no `t.f == t.f` on the
+    // Python box); every other object is truthy.
+    if (pyIsFlo(v)) { return v["__flo"] != 0 }
     return true
 }
 
@@ -1191,6 +1268,7 @@ function pyAJsTypeOf(v) {
     if (v === undefined) { return "undefined" }
     if (v === null) { return "object" }
     if (pyIsBig(v)) { return "bigint" }
+    if (pyIsFlo(v)) { return "number" } // Go: rt.typeOf's jsPyFlo arm.
     if (typeof v == "boolean") { return "boolean" }
     if (typeof v == "number") { return "number" }
     if (typeof v == "string") { return "string" }
@@ -1206,6 +1284,16 @@ function pyAStrictEq(a, b) {
     if (pyIsBig(a) || pyIsBig(b)) {
         if (pyIsBig(a) && pyIsBig(b)) { return pyABigCmp(a, b) == 0 }
         return false
+    }
+    // A float box compares by VALUE against ANOTHER FLOAT only - this is what
+    // `is` reads, and in Python a float is never `is` an int even when the two
+    // are ==. The SAME box is itself even when it holds NaN (`x is x`), and two
+    // different boxes are the same value when their doubles are === (CPython
+    // folds 1.0 is 1.0 to true).
+    if (pyIsFlo(a) || pyIsFlo(b)) {
+        if (a === b) { return true }
+        if (!pyIsFlo(a) || !pyIsFlo(b)) { return false }
+        return a["__flo"] === b["__flo"]
     }
     return a === b
 }
@@ -1243,10 +1331,12 @@ function pyAEqual(x, y) {
     if (typeof x == "boolean" || typeof y == "boolean") { return pyEqual(x, y) }
     if (pyIsBig(x)) {
         if (pyIsBig(y)) { return pyABigCmp(x, y) == 0 }
+        if (pyIsFlo(y)) { return pyABigEqFloat(x, pyNum(y)) }
         if (pyIsNum(y)) { return pyABigEqFloat(x, y) }
         return false
     }
     if (pyIsBig(y)) {
+        if (pyIsFlo(x)) { return pyABigEqFloat(y, pyNum(x)) }
         if (pyIsNum(x)) { return pyABigEqFloat(y, x) }
         return false
     }
@@ -1257,6 +1347,14 @@ function pyAEqual(x, y) {
 // math.Mod is fmod, which JavaScript's % is exactly - and, unlike
 // `x - math.Floor(x/y)*y`, it is not the expression clang refuses to fuse, so
 // this is a byte-for-byte match rather than an approximation.
+// Go: rt.pyToF. toNumber for the operands of `/`: a Python bigint is an
+// arbitrary precision INT, so 10**28 / 1 has to be the float 1e+28 where pyNum
+// (rt.toNumber) answers NaN for one.
+function pyAToF(v) {
+    if (pyIsBig(v)) { return parseFloat(pyABigStr(v)) }
+    return pyNum(v)
+}
+
 function pyAFloorMod(x, y) {
     var r = x % y
     if (r != 0 && (r < 0) != (y < 0)) { return r + y }
@@ -1282,6 +1380,9 @@ function pyAJsAdd(l, r) {
     // '010000000000000000000000000001' instead.
     var big = pyABigArith("+", l, r)
     if (big !== null) { return big }
+    // The float box ahead of the object arms, which would otherwise CONCATENATE
+    // it as a string (it is a plain object here, where Go's jsPyFlo is not).
+    if (pyIsFlo(l) || pyIsFlo(r)) { return pyMkFlo(pyNum(l) + pyNum(r)) }
     if (pyIsArr(l) || pyIsArr(r)) { return pyToStr(l) + pyToStr(r) }
     if (pyIsBig(l) || pyIsBig(r)) { return pyNum(l) + pyNum(r) }
     if (pyIsObj(l) || pyIsObj(r)) { return pyToStr(l) + pyToStr(r) }
@@ -1292,6 +1393,11 @@ function pyAJsAdd(l, r) {
 function pyAArith(op, l, r) {
     var big = pyABigArith(op, l, r)
     if (big !== null) { return big }
+    if (pyIsFlo(l) || pyIsFlo(r)) {
+        if (op == "-") { return pyMkFlo(pyNum(l) - pyNum(r)) }
+        if (op == "*") { return pyMkFlo(pyNum(l) * pyNum(r)) }
+        return pyMkFlo(pyNum(l) / pyNum(r))
+    }
     if (op == "-") { return pyNum(l) - pyNum(r) }
     if (op == "*") { return pyNum(l) * pyNum(r) }
     return pyNum(l) / pyNum(r)
@@ -1608,12 +1714,19 @@ function js_pybin(opv, l, r) {
         return pyAArith("*", l, r)
     }
     if (op == "-") { return pyAArith("-", l, r) }
-    if (op == "/") { return pyAArith("/", l, r) }
-    if (op == "//") { return Math.floor(pyNum(l) / pyNum(r)) }
-    if (op == "%") { return pyAFloorMod(pyNum(l), pyNum(r)) }
+    // Python's `/` is TRUE division: it answers a float even from two ints, so
+    // 4 / 2 is 2.0 and 10**30 / 1 is 1e+30.
+    if (op == "/") { return pyMkFlo(pyAToF(l) / pyAToF(r)) }
+    if (op == "//") { return pyIntOrFlo(Math.floor(pyNum(l) / pyNum(r)), l, r) }
+    if (op == "%") { return pyIntOrFlo(pyAFloorMod(pyNum(l), pyNum(r)), l, r) }
     // Python's exponentiation. Only js_pybin ever passes this operator, and a
-    // user class already had its __pow__ / __rpow__ chance above.
-    if (op == "**") { return Math.pow(pyNum(l), pyNum(r)) }
+    // user class already had its __pow__ / __rpow__ chance above. int ** NEGATIVE
+    // int is a float (2 ** -1 is 0.5); every other pair of ints stays an int.
+    if (op == "**") {
+        var pw = Math.pow(pyNum(l), pyNum(r))
+        if (pyNum(r) < 0) { return pyMkFlo(pw) }
+        return pyIntOrFlo(pw, l, r)
+    }
     if (op == "==") { return pyAEqual(l, r) }
     if (op == "!=") { return !pyAEqual(l, r) }
     if (op == "<") { return pyACompare(l, r) == -1 }
@@ -1646,6 +1759,7 @@ function js_pyunary(opv, v) {
     if (op == "~") { return ~pyNum(v) }
     if (pyIsCplx(v)) { return pyNewCplx(-pyCplxRe(v), -pyCplxIm(v)) }
     if (pyIsBig(v)) { return pyABigNeg(v) }
+    if (pyIsFlo(v)) { return pyMkFlo(pyFloNegate(v["__flo"])) }
     return -pyNum(v)
 }
 
@@ -1659,8 +1773,30 @@ function js_pyint(v) {
 // Go: js_pyfloat (jsrt.go:7994). A STRING goes through jsParseFloat, which is
 // JavaScript's parseFloat (a PREFIX parse: "1.5abc" is 1.5), not toNumber.
 function js_pyfloat(v) {
-    if (typeof v == "string") { return parseFloat(v) }
-    return pyNum(v)
+    if (typeof v == "string") { return pyMkFlo(parseFloat(v)) }
+    return pyMkFlo(pyNum(v))
+}
+
+// js_pyflo: the float LITERAL builder. Constant folding cannot carry a box, so
+// languages/python-to-llvm-ir.abnf emits this call for 1.0 and 1e3.
+function js_pyflo(v) { return pyMkFlo(pyNum(v)) }
+
+// js_pyabs: abs(), which used to be bound straight from JS Math and would answer
+// NaN on a box. It keeps the type: abs(-2) is the int 2, abs(-1.5) the float 1.5,
+// and abs() of an arbitrary precision int stays exact.
+function js_pyabs(v) {
+    if (pyIsFlo(v)) {
+        var f = v["__flo"]
+        if (f < 0) { return pyMkFlo(pyFloNegate(f)) }
+        return pyMkFlo(f)
+    }
+    if (pyIsBig(v)) {
+        if (pyABigCmp(v, pyABigFromNum(0)) < 0) { return pyABigNeg(v) }
+        return v
+    }
+    var n = pyNum(v)
+    if (n < 0) { return 0 - n }
+    return n
 }
 
 // Go: js_pybool (jsrt.go:7981). An empty container is false; everything else is
@@ -1699,15 +1835,18 @@ function js_pysum(v) {
     var els = pySetElemsOf(it)
     if (els !== null) { it = els }
     var total = 0
+    var anyFlo = false
     if (pyIsArr(it)) {
         var i = 0
         while (i < it.length) {
+            if (pyIsFlo(it[i])) { anyFlo = true }
             total = total + pyNum(it[i])
             i = i + 1
         }
     } else {
         pyFail("sum() of a " + pyAJsTypeOf(v))
     }
+    if (anyFlo) { return pyMkFlo(total) }
     return total
 }
 
@@ -1874,6 +2013,112 @@ function js_pyrepr(v) { return pyRepr(v) }
 // Copied verbatim from languages/lib/ruby-rt.metajs (rbDigitAt / rbBigFromNum /
 // rbBigMulSmall / rbBigStr / rbExactDec / rbRoundHalfEven / rbFixed / rbSci /
 // rbBaseStr / rbByteCut), renamed to the pyB prefix. The comments are theirs.
+
+// ----- repr(float), which in Python 3 is also str(float) --------------------
+//
+// abnf/jsrt.go's pyFloStr / pyFloDigits and python-interpreter.abnf's floStr /
+// floDigits, byte for byte. Take the SHORTEST round-tripping digit string and
+// the decimal point position `decpt`, then use exponential form iff
+// `decpt <= -4 || decpt > 16`. In exponential form there is NO forced ".0"
+// (2e16 is "2e+16", unlike ruby's rbFloStr, whose splitter this is), the
+// exponent is signed and zero padded to two digits ("1e-05"), and ONE
+// significant digit is allowed ("5e-324"). Non-finite is lowercase, and
+// repr(-float('nan')) is "nan". Probed against CPython 3.14.6.
+//
+// pyBSplit10 turns a > 0 into {d: the significant digits with no point and no
+// leading or trailing zero, e: the SCIENTIFIC exponent}, out of the engine's own
+// shortest rendering ("1234.5", "0.00012", "1e+21", "1.5e-7").
+function pyBSplit10(a) {
+    var s = "" + a
+    var mant = s
+    var e10 = 0
+    var ei = s.indexOf("e")
+    if (ei >= 0) {
+        mant = s.substring(0, ei)
+        var es = s.substring(ei + 1, s.length)
+        var eneg = false
+        if (es.charAt(0) == "+") { es = es.substring(1, es.length) }
+        else if (es.charAt(0) == "-") {
+            eneg = true
+            es = es.substring(1, es.length)
+        }
+        e10 = parseInt(es)
+        if (eneg) { e10 = 0 - e10 }
+    }
+    var pt = mant.length
+    var di = mant.indexOf(".")
+    var digits = mant
+    if (di >= 0) {
+        pt = di
+        digits = mant.substring(0, di) + mant.substring(di + 1, mant.length)
+    }
+    var lead = 0
+    while (lead < digits.length && digits.charAt(lead) == "0") { lead = lead + 1 }
+    digits = digits.substring(lead, digits.length)
+    pt = pt - lead
+    var end = digits.length
+    while (end > 1 && digits.charAt(end - 1) == "0") { end = end - 1 }
+    digits = digits.substring(0, end)
+    if (digits.length == 0) { return {d: "0", e: 0} }
+    return {d: digits, e: e10 + pt - 1}
+}
+
+function pyBZeros(n) {
+    var out = ""
+    var i = 0
+    while (i < n) {
+        out = out + "0"
+        i = i + 1
+    }
+    return out
+}
+
+function pyBFloDigits(a) {
+    var p = pyBSplit10(a)
+    var digits = p["d"]
+    var e10 = p["e"]
+    var decpt = e10 + 1
+    if (decpt <= 0 - 4 || decpt > 16) {
+        var out = digits.substring(0, 1)
+        if (digits.length > 1) { out = out + "." + digits.substring(1, digits.length) }
+        var sign = "+"
+        var ex = e10
+        if (ex < 0) {
+            sign = "-"
+            ex = 0 - ex
+        }
+        if (ex < 10) { return out + "e" + sign + "0" + ex }
+        return out + "e" + sign + ex
+    }
+    if (decpt <= 0) { return "0." + pyBZeros(0 - decpt) + digits }
+    if (decpt >= digits.length) { return digits + pyBZeros(decpt - digits.length) + ".0" }
+    return digits.substring(0, decpt) + "." + digits.substring(decpt, digits.length)
+}
+
+function pyBFloStr(x) {
+    if (x !== x) { return "nan" }
+    // The infinities without naming the Infinity global: Inf - Inf is NaN.
+    if (x - x !== 0) {
+        if (x > 0) { return "inf" }
+        return "-inf"
+    }
+    if (x == 0) {
+        if (1 / x < 0) { return "-0.0" }
+        return "0.0"
+    }
+    if (x < 0) { return "-" + pyBFloDigits(0 - x) }
+    return pyBFloDigits(x)
+}
+
+// Negation that keeps IEEE's signed zero, for repr(-0.0). `0 - 0.0` is +0.0, so
+// dividing a zero by -1 is the only spelling that produces the negative one.
+function pyFloNegate(f) {
+    if (f == 0) {
+        if (1 / f < 0) { return 0 }
+        return 0 / (0 - 1)
+    }
+    return 0 - f
+}
 
 function pyBDigitAt(s, i) {
     var c = s.charCodeAt(i)
@@ -2180,7 +2425,9 @@ function pyBFormatBody(v, typ, prec, sign, conv) {
     // and -0.0 >= 0 is TRUE, so `format(-0.0, "+f")` really does answer
     // "+-0.000000" there. Reproduced rather than repaired.
     if (sign == "+") {
-        if (pyIsNum(v) && v >= 0) { body = "+" + body }
+        if (pyIsNum(v) || pyIsFlo(v)) {
+            if (pyNum(v) >= 0) { body = "+" + body }
+        }
     }
     return body
 }
@@ -2243,7 +2490,7 @@ function js_pyformat(v, specV, convV) {
     if (pad <= 0) { return body }
     // A number right-aligns by default, everything else left-aligns. `isNum` is
     // Go's float64 assertion, so a bool and a bignum left-align.
-    var isNum = pyIsNum(v)
+    var isNum = pyIsNum(v) || pyIsFlo(v)
     if (align == ">" || align == "=" || (align == "" && isNum)) {
         return pyBRepeat(fill, pad) + body
     }
@@ -3052,6 +3299,9 @@ function pyDTruthy(v) {
     if (pyIsBool(v)) { return v }
     // Go's `t != 0 && t == t` - the second half is the NaN test.
     if (pyIsNum(v)) { return v != 0 && v == v }
+    // The boxed float: 0.0 is falsy, and every other object is TRUE below.
+    // Go's arm is `t.f != 0` with no NaN test, so a NaN float is truthy.
+    if (pyIsFlo(v)) { return v["__flo"] != 0 }
     // Go's `len(t) > 0` is a BYTE length, and byteLen(s) == 0 exactly when the
     // code-unit length is 0, so the two agree on emptiness.
     if (pyIsStr(v)) { return v.length > 0 }

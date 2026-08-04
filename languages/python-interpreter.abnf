@@ -1148,7 +1148,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v === undefined || v === null) { return hostGlobals["NoneType"] }
         if (typeof v == "string") { return hostGlobals["str"] }
         if (typeof v == "boolean") { return hostGlobals["bool"] }
-        if (typeof v == "number") { return (Math.floor(v) == v) ? hostGlobals["int"] : hostGlobals["float"] }
+        // A plain number is an int and a boxed one is a float: the two are
+        // different Python types and 2.0 and 2 are the same double, so nothing
+        // about the VALUE can tell them apart.
+        if (typeof v == "number") { return hostGlobals["int"] }
+        if (isFlo(v)) { return hostGlobals["float"] }
+        if (bigIsBig(v)) { return hostGlobals["int"] }
+        if (isCplx(v)) { return hostGlobals["complex"] }
         if (Array.isArray(v)) { return hostGlobals["list"] }
         if (isSet(v)) { return hostGlobals["set"] }
         if (isDict(v)) { return hostGlobals["dict"] }
@@ -1161,8 +1167,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyConvert(name, args) {
         var v = args.length > 0 ? args[0] : undefined
         if (name == "str") { return args.length == 0 ? "" : pstr(v) }
-        if (name == "int") { return typeof v == "string" ? parseInt(v) : (v | 0) }
-        if (name == "float") { return typeof v == "string" ? parseFloat(v) : v }
+        if (name == "int") { return pyToInt(v) }
+        if (name == "float") { return pyFlo(typeof v == "string" ? parseFloat(v) : floVal(v)) }
         if (name == "bool") { return pytruthy(v) }
         if (name == "list") { return args.length == 0 ? [] : iterToList(v).slice(0) }
         if (name == "tuple") { return args.length == 0 ? [] : iterToList(v).slice(0) }
@@ -1175,15 +1181,27 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "type") { return pyTypeOf(v) }
         fail("TypeError: cannot construct " + name)
     }
+    // int(x): a string is parsed, an arbitrary precision integer stays itself and
+    // every other number TRUNCATES towards zero (int(-2.9) is -2).
+    function pyToInt(v) {
+        if (typeof v == "string") { return parseInt(v) }
+        if (bigIsBig(v)) { return v }
+        var f = floVal(v)
+        if (f < 0) { return 0 - Math.floor(0 - f) }
+        return Math.floor(f)
+    }
     function pyMinMax(args, sign) {
         var vals = []
         var i
         if (args.length == 1) { vals = iterToList(args[0]) }
         else { for (i = 0; i < args.length; i++) { vals.push(args[i]) } }
         if (vals.length == 0) { fail("ValueError: max() arg is an empty sequence") }
-        var best = vals[0]
+        var best = anytype
+        best = vals[0]
+        // Through binOp so a boxed operand (a float, a bigint) compares by VALUE
+        // rather than as an object: max(1, 2.5) is 2.5.
         for (i = 1; i < vals.length; i++) {
-            if (sign > 0 ? (vals[i] > best) : (vals[i] < best)) { best = vals[i] }
+            if (pytruthy(binOp(sign > 0 ? ">" : "<", vals[i], best))) { best = vals[i] }
         }
         return best
     }
@@ -1195,11 +1213,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     hostGlobals["isinstance"] = function(v, cls) { return pyIsInstance(v, cls) }
     hostGlobals["issubclass"] = function(c1, c2) { return clsIsSub(c1, c2) }
     hostGlobals["repr"] = function(v) { return prepr(v) }
-    hostGlobals["sum"] = function(v) { var a = iterToList(v); var t = 0; for (var i = 0; i < a.length; i++) { t += a[i] }; return t }
+    // sum() adds through binOp so a float in the sequence makes the total a
+    // float (sum([1.0, 2]) is 3.0). The accumulator is `anytype` because MetaJS
+    // is TYPED: a local that started as the number 0 could not later hold a box.
+    hostGlobals["sum"] = function(v) {
+        var a = iterToList(v)
+        var t = anytype
+        t = 0
+        for (var i = 0; i < a.length; i++) { t = binOp("+", t, a[i]) }
+        return t
+    }
     hostGlobals["exit"] = function(code) { exit(code | 0) }
     // println is the harness\'s own one-value printer, used by the ratchet files.
     hostGlobals["println"] = function(x) { println(pstr(x)) }
-    hostGlobals["abs"] = function(v) { return v < 0 ? -v : v }
+    // abs() keeps the type: abs(-2) is the int 2, abs(-1.5) the float 1.5.
+    hostGlobals["abs"] = function(v) {
+        if (isFlo(v)) { var f = v.__flo; return pyFlo(f < 0 ? floNegate(f) : f) }
+        if (pyBoxed(v)) { return pytruthy(binOp("<", v, 0)) ? binOp("-", 0, v) : v }
+        return v < 0 ? -v : v
+    }
     // max/min over the arguments, or over a single iterable one - the same shape
     // js_pymax / js_pymin give the COMPILER, which had them while this grammar
     // did not (so max(1, 2) worked in one half and raised NameError in the other).
@@ -1235,25 +1267,44 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the set algebra and `in` with it, since all of them go through it.
     //
     // Overridden by ASSIGNMENT, not by a second declaration: see makeTargetRef.
+    // The float box adds the third spelling: {1.0: "a"}[1] and {1: "a"}[1.0] are
+    // both hits, and so is {True: "a"}[1.0]. The chain is tried TWICE, because
+    // the float box's alias is the plain number and the plain number's is the
+    // bool - two steps to get from 1.0 to True.
     var coreDictFind = dictFind
     dictFind = function(d, k) {
         var i = coreDictFind(d, k)
         if (i >= 0) { return i }
         var alias = pyKeyAlias(k)
-        if (alias !== undefined) { return coreDictFind(d, alias) }
-        return 0 - 1
+        if (alias === undefined) { return 0 - 1 }
+        var j = coreDictFind(d, alias)
+        if (j >= 0) { return j }
+        var alias2 = pyKeyAlias(alias)
+        if (alias2 === undefined) { return 0 - 1 }
+        return coreDictFind(d, alias2)
     }
-    // The other spelling of a key Python considers equal to this one. Only the
-    // bool/int pair can differ: an int and a float are the same plain number here.
-    // -0.0 == 0, so a negative zero lands in the False arm, as CPython puts it.
+    // The other spelling of a key Python considers equal to this one: a bool is
+    // the int it IS, an int that is 0 or 1 is also the bool, and a float box is
+    // the plain number it holds. -0.0 == 0, so a negative zero lands in the
+    // False arm, as CPython puts it.
     function pyKeyAlias(k) {
         if (k === true) { return 1 }
         if (k === false) { return 0 }
+        if (isFlo(k)) { return k.__flo }
         if (typeof k == "number") {
             if (k == 1) { return true }
             if (k == 0) { return false }
         }
         return undefined
+    }
+    // The other half of the key rule, for the direction the alias cannot take:
+    // a dict that HOLDS a float box cannot be indexed (dictKeyId answers null for
+    // an object), so its lookups fall back to interp-core's scan - and the scan
+    // confirms with dictKeyEq, which is this hook. Numbers only: everything else
+    // keeps === and the behaviour it had.
+    core.keyEq = function(a, b) {
+        if (!pyNumeric(a) || !pyNumeric(b)) { return false }
+        return floVal(a) == floVal(b)
     }
     // Structural equality, Python\'s ==: sequences element-wise, dicts and sets by
     // their contents (a set ignores order), everything else by identity. A user class
@@ -1273,6 +1324,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     function pyEq(a, b) {
         if (a === b) { return true }
+        // A float equals the int of the same value (1.0 == 1) and two boxes
+        // holding the same double are equal though they are not ===.
+        if (isFlo(a) || isFlo(b)) { return floEq(a, b) }
         // A bool IS an int, so True == 1, True == 1.0, False == 0 and every
         // container equality built on them ([True] == [1], {True: 1} == {1: 1}).
         // Ahead of everything else because a bool is never a container, never a
@@ -1332,7 +1386,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v === undefined || v === null) return "None"
         if (v === true) return "True"
         if (v === false) return "False"
+        if (isFlo(v)) { return floStr(v.__flo) }
         if (pyBoxed(v)) { return isCplx(v) ? cplxStr(v) : bigStr(v) }
+        // A TYPE object renders as CPython's <class 'name'>, so print(type(1.0))
+        // reads <class 'float'> rather than the default object rendering.
+        if (v !== null && v !== undefined && typeof v == "object" && v.__isclass == true) {
+            return "<class '" + v.__name + "'>"
+        }
         // A compiled pattern and a match render the way CPython's repr does.
         if (isPyRe(v)) { return "re.compile(" + prepr(v.pattern) + ")" }
         if (isPyMatch(v)) {
@@ -1398,6 +1458,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (Array.isArray(v)) return v.length > 0
         if (isDict(v)) return v.keys.length > 0
         if (v === undefined || v === null) return false
+        // 0.0 is falsy, and every OBJECT is truthy - so the float box has to be
+        // read before the generic !!v, which would answer true for it.
+        if (isFlo(v)) return v.__flo != 0
         return !!v
     }
 
@@ -1838,6 +1901,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var f = clsFind(v.__class, "__neg__")
                 if (f != null) { return f(v) }
             }
+            if (isFlo(v)) { return pyFlo(floNegate(v.__flo)) }
             if (pyBoxed(v)) { return boxOp("-", 0, v).v }
             return -v
         }
@@ -1932,6 +1996,193 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyBoxed(v) {
         if (v === null || v === undefined || typeof v != "object") { return false }
         return v.__cplx === true || v.__int === true
+    }
+    // ----- Python's float: a plain-object box, {__flo: a double} --------------
+    //
+    // int and float are two DIFFERENT Python types: they print differently (1 vs
+    // 1.0), answer different type()s, and `/` always produces a float even from
+    // two ints. One double cannot carry that, because 2.0 and 2 ARE the same
+    // double - so the float is the boxed one and the int stays the plain number,
+    // which leaves the common integer path untouched. This is dart's {__flo} and
+    // ruby's Float box, not the tag-14 floor box: the floor's rule is "either
+    // operand boxed => the result is boxed", and Python's 4 / 2 has to make a
+    // float out of two ints.
+    //
+    // The box is deliberately NOT pyBoxed(): pyBoxed gates the bigint/complex
+    // tower, whose promotion rules are not the float's (a Python bigint is an
+    // arbitrary precision INT, so 10**30 / 1 is the float 1e+30).
+    function pyFlo(f) { return {__flo: f} }
+    function isFlo(v) {
+        return v !== null && v !== undefined && typeof v == "object" && v.__flo !== undefined
+    }
+    // The double inside any numeric value: a float box, a bool (True is 1), an
+    // arbitrary precision integer, or an ordinary number.
+    function floVal(v) {
+        if (isFlo(v)) { return v.__flo }
+        if (v === true) { return 1 }
+        if (v === false) { return 0 }
+        if (bigIsBig(v)) { return bigToNum(v) }
+        return v
+    }
+    function pyNumeric(v) {
+        if (typeof v == "number" || typeof v == "boolean") { return true }
+        return isFlo(v) || bigIsBig(v)
+    }
+    // Negation that keeps IEEE's signed zero, for `-0.0`. `0 - 0.0` is +0.0, and
+    // the script dialect's tag engine keeps an integral value as an INTEGER, so
+    // neither `0 - x` nor `x * -1` can ever produce -0.0; dividing a zero by -1
+    // can (docs/abnf-dialect-gotchas.md).
+    function floNegate(f) {
+        if (f == 0) {
+            if (1 / f < 0) { return 0 }
+            return 0 / (0 - 1)
+        }
+        return 0 - f
+    }
+    // ----- repr(float), which in Python 3 is also str(float) ------------------
+    //
+    // Take the SHORTEST round-tripping digit string and the decimal point
+    // position `decpt`, then use exponential form iff `decpt <= -4 || decpt > 16`.
+    // In exponential form there is NO forced ".0" (2e16 is "2e+16", unlike ruby
+    // and java), the exponent is signed and zero padded to two digits ("1e-05"),
+    // and a single significant digit is allowed ("5e-324"). Non-finite is
+    // lowercase, and repr(-float('nan')) is "nan". Probed against CPython 3.14.6.
+    //
+    // Byte-identical copies live in languages/lib/python-rt.metajs (pyBFloStr)
+    // and abnf/jsrt.go (pyFloStr) - ./test.sh --cross diffs the three, so they
+    // change together or not at all.
+    //
+    // floSplit10 turns a > 0 into {d: the significant digits with no point and no
+    // leading or trailing zero, e: the SCIENTIFIC exponent}, out of the engine's
+    // own shortest rendering ("1234.5", "0.00012", "1e+21", "1.5e-7").
+    function floSplit10(a) {
+        var s = "" + a
+        var mant = s
+        var e10 = 0
+        var ei = s.indexOf("e")
+        if (ei >= 0) {
+            mant = s.substring(0, ei)
+            var es = s.substring(ei + 1, s.length)
+            var eneg = false
+            if (es.charAt(0) == "+") { es = es.substring(1, es.length) }
+            else if (es.charAt(0) == "-") {
+                eneg = true
+                es = es.substring(1, es.length)
+            }
+            e10 = parseInt(es)
+            if (eneg) { e10 = 0 - e10 }
+        }
+        var pt = mant.length
+        var di = mant.indexOf(".")
+        var digits = mant
+        if (di >= 0) {
+            pt = di
+            digits = mant.substring(0, di) + mant.substring(di + 1, mant.length)
+        }
+        var lead = 0
+        while (lead < digits.length && digits.charAt(lead) == "0") { lead = lead + 1 }
+        digits = digits.substring(lead, digits.length)
+        pt = pt - lead
+        var end = digits.length
+        while (end > 1 && digits.charAt(end - 1) == "0") { end = end - 1 }
+        digits = digits.substring(0, end)
+        if (digits.length == 0) { return {d: "0", e: 0} }
+        return {d: digits, e: e10 + pt - 1}
+    }
+    function floZeros(n) {
+        var out = ""
+        var i = 0
+        while (i < n) {
+            out = out + "0"
+            i = i + 1
+        }
+        return out
+    }
+    function floDigits(a) {
+        var p = floSplit10(a)
+        var digits = p.d
+        var e10 = p.e
+        var decpt = e10 + 1
+        if (decpt <= 0 - 4 || decpt > 16) {
+            var out = digits.substring(0, 1)
+            if (digits.length > 1) { out = out + "." + digits.substring(1, digits.length) }
+            var sign = "+"
+            var ex = e10
+            if (ex < 0) {
+                sign = "-"
+                ex = 0 - ex
+            }
+            if (ex < 10) { return out + "e" + sign + "0" + ex }
+            return out + "e" + sign + ex
+        }
+        if (decpt <= 0) { return "0." + floZeros(0 - decpt) + digits }
+        if (decpt >= digits.length) { return digits + floZeros(decpt - digits.length) + ".0" }
+        return digits.substring(0, decpt) + "." + digits.substring(decpt, digits.length)
+    }
+    function floStr(x) {
+        if (x !== x) { return "nan" }
+        // The infinities without naming the Infinity global: Inf - Inf is NaN.
+        if (x - x !== 0) {
+            if (x > 0) { return "inf" }
+            return "-inf"
+        }
+        if (x == 0) {
+            if (1 / x < 0) { return "-0.0" }
+            return "0.0"
+        }
+        if (x < 0) { return "-" + floDigits(0 - x) }
+        return floDigits(x)
+    }
+    // The one dispatch binOp needs for a float operand, shaped like boxOp: a
+    // wrapper so a real `false` is distinguishable from "not mine", and null when
+    // the other operand belongs to a user class (which gets its dunder chance) or
+    // to the container operators.
+    function floOp(op, l, r) {
+        if (pyUser(l) || pyUser(r)) { return null }
+        if (op == "in" || op == "not in") { return null }
+        if (!pyNumeric(l) || !pyNumeric(r)) {
+            // A float is simply not equal to a string, a list or None; anything
+            // else falls back to the plain double, exactly as boxOp does.
+            if (op == "==") { return {v: false} }
+            if (op == "!=") { return {v: true} }
+            if (op == "is") { return {v: false} }
+            if (op == "is not") { return {v: true} }
+            return {v: binOp(op, floVal(l), floVal(r))}
+        }
+        var x = floVal(l)
+        var y = floVal(r)
+        // `is` by VALUE between two floats, the rule boxOp already uses for two
+        // bigs: x = 1.0; y = x; x is y must stay true, and CPython's constant
+        // folding makes 1.0 is 1.0 true too. A float is never `is` an int, and
+        // NaN is never `is` itself, both of which fall out of === on the doubles.
+        if (op == "is") { return {v: (l === r) || (isFlo(l) && isFlo(r) && x === y)} }
+        if (op == "is not") { return {v: !((l === r) || (isFlo(l) && isFlo(r) && x === y))} }
+        if (op == "==") { return {v: x == y} }
+        if (op == "!=") { return {v: x != y} }
+        if (op == "<")  { return {v: x < y} }
+        if (op == ">")  { return {v: x > y} }
+        if (op == "<=") { return {v: x <= y} }
+        if (op == ">=") { return {v: x >= y} }
+        if (op == "+") { return {v: pyFlo(x + y)} }
+        if (op == "-") { return {v: pyFlo(x - y)} }
+        if (op == "*") { return {v: pyFlo(x * y)} }
+        if (op == "/") { return {v: pyFlo(x / y)} }
+        // Python's // and % answer an int from two ints and a float as soon as
+        // either side is one - and one side always is, to be here at all.
+        if (op == "//") { return {v: pyFlo(fdiv(x, y))} }
+        if (op == "%") { return {v: pyFlo(fmod(x, y))} }
+        if (op == "**") { return {v: pyFlo(Math.pow(x, y))} }
+        if (op == "|") { return {v: x | y} }
+        if (op == "&") { return {v: x & y} }
+        if (op == "^") { return {v: x ^ y} }
+        if (op == "<<") { return {v: x << y} }
+        if (op == ">>") { return {v: x >> y} }
+        return null
+    }
+    // Python's ==, for the pairs where at least one side is a float box.
+    function floEq(a, b) {
+        if (!pyNumeric(a) || !pyNumeric(b)) { return false }
+        return floVal(a) == floVal(b)
     }
     // --- complex ---
     // The fields are named `real` and `imag` on purpose: pyattr already answers an
@@ -2182,10 +2433,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "*") { return {v: bigOut(bigOb(a.sign * b.sign, magMul(a.limbs, b.limbs)))} }
         if (op == "//") { return {v: bigOut(bigDivMod(a, b).q)} }
         if (op == "%") { return {v: bigOut(bigDivMod(a, b).r)} }
-        if (op == "/") { return {v: bigToNum(l) / bigToNum(r)} }
+        // A Python bigint is an arbitrary precision INT, so `/` on it is still
+        // true division: 10**30 / 1 is the float 1e+30.
+        if (op == "/") { return {v: pyFlo(bigToNum(l) / bigToNum(r))} }
         if (op == "**") {
             var e = bigToNum(r)
-            if (e < 0 || e > 4096) { return {v: Math.pow(bigToNum(l), e)} }
+            if (e < 0) { return {v: pyFlo(Math.pow(bigToNum(l), e))} }
+            if (e > 4096) { return {v: Math.pow(bigToNum(l), e)} }
             return {v: bigOut(bigPow(a, e))}
         }
         var c = bigCmp(a, b)
@@ -2203,7 +2457,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyDigits(txt) { return txt.split("_").join("") }
     function pyReal(txt) {
         if (pyIsBigText(txt)) { return bigOut(bigFromDec(txt)) }
+        if (pyIsFloText(txt)) { return pyFlo(parseFloat(txt)) }
         return parseFloat(txt)
+    }
+    // A literal is a FLOAT exactly when it has a point or an exponent - 1 is an
+    // int and 1., 1.0, .5 and 1e3 are floats - which is a property of the TEXT,
+    // not of the value (1.0 and 1 are the same double).
+    function pyIsFloText(txt) {
+        for (var i = 0; i < txt.length; i++) {
+            var ch = txt.charAt(i)
+            if (ch == "." || ch == "e" || ch == "E") { return true }
+        }
+        return false
     }
     function pyImag(txt) { return pyCplx(0, parseFloat(txt.substring(0, txt.length - 1))) }
     // An integer literal is boxed only when it cannot be a double exactly: 16 digits
@@ -2223,6 +2488,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // object. An ordinary number therefore pays two comparisons and no call at
         // all, where it used to pay two calls.
         if (typeof l == "object" || typeof r == "object") {
+            // The float box first: it is not pyBoxed, and a float against a big
+            // or a complex has to be settled by the FLOAT rules, not the tower's.
+            if (isFlo(l) || isFlo(r)) {
+                var fo = floOp(op, l, r)
+                if (fo != null) { return fo.v }
+            }
             if (pyBoxed(l) || pyBoxed(r)) { return boxOp(op, l, r).v }
             if (pyUser(l) || pyUser(r)) {
                 var uo = userOp(op, l, r)
@@ -2240,10 +2511,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (typeof l == "string" && typeof r == "number") return strRepeat(l, r)
             return l * r
         }
-        if (op == "/") return l / r
+        // Python's `/` is TRUE division: it answers a float even from two ints,
+        // so 4 / 2 is 2.0 and not 2. `//` and `%` keep the int.
+        if (op == "/") return pyFlo(l / r)
         if (op == "//") return fdiv(l, r)
         if (op == "%") return fmod(l, r)
-        if (op == "**") return Math.pow(l, r)
+        // int ** negative int is a float in Python (2 ** -1 is 0.5); every other
+        // pair of ints stays an int.
+        if (op == "**") { if (r < 0) { return pyFlo(Math.pow(l, r)) } ; return Math.pow(l, r) }
         if (op == "==") return pyEq(l, r)
         if (op == "!=") return !pyEq(l, r)
         if (op == "is") return l === r
@@ -2516,7 +2791,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var pad = w - pyLen(body)
         if (pad <= 0) { return body }
         // A number right-aligns by default, everything else left-aligns.
-        if (align == ">" || align == "=" || (align == "" && typeof v == "number")) { return strRepeat(fill, pad) + body }
+        if (align == ">" || align == "=" || (align == "" && (typeof v == "number" || isFlo(v)))) { return strRepeat(fill, pad) + body }
         if (align == "^") {
             var left = pad >> 1
             return strRepeat(fill, left) + body + strRepeat(fill, pad - left)
@@ -2541,17 +2816,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return (neg && t > 0) ? ("-" + s) : s
     }
+    // The numeric presentation types read the DOUBLE, so a float box unwraps here
+    // (one line, floVal) - while the default arms still see the box, because that
+    // is what makes f"{1.0}" read 1.0 rather than 1.
     function pyFormatBody(v, typ, prec, sign, conv) {
         var body = anytype
-        if (typ == "f" || typ == "F") { body = pyFixed(v, prec < 0 ? 6 : prec) }
-        else if (typ == "d") { body = "" + (v | 0) }
-        else if (typ == "x") { body = (v | 0).toString(16) }
-        else if (typ == "X") { body = (v | 0).toString(16).toUpperCase() }
-        else if (typ == "b") { body = (v | 0).toString(2) }
-        else if (typ == "o") { body = (v | 0).toString(8) }
+        var n = floVal(v)
+        if (typ == "f" || typ == "F") { body = pyFixed(n, prec < 0 ? 6 : prec) }
+        else if (typ == "d") { body = "" + (n | 0) }
+        else if (typ == "x") { body = (n | 0).toString(16) }
+        else if (typ == "X") { body = (n | 0).toString(16).toUpperCase() }
+        else if (typ == "b") { body = (n | 0).toString(2) }
+        else if (typ == "o") { body = (n | 0).toString(8) }
         else if (conv == "r") { body = prepr(v) }
         else { body = pstr(v) }
-        if (sign == "+" && typeof v == "number" && v >= 0) { body = "+" + body }
+        if (sign == "+" && (typeof v == "number" || isFlo(v)) && n >= 0) { body = "+" + body }
         return body
     }
     // and/or return the deciding operand, with Python truthiness.

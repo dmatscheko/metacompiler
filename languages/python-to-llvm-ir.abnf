@@ -1565,7 +1565,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return makeConst(v)
     }
-    function makeFloatLit(t) { return makeConst(parseFloat(numText(t))) }
+    // A float literal builds the {__flo} BOX, so 1.0 stays a float and prints as
+    // 1.0. It cannot be a folded constant: a constant carries a double, and 1.0
+    // and 1 are the same double - the whole reason the float is boxed.
+    function makeFloatLit(t) {
+        var f = parseFloat(numText(t))
+        return function(b) { return {b: b, v: callExt(b, "js_pyflo", [emitNum(b, f)])} }
+    }
     // 1j / 2.5j: an imaginary literal is the complex number (0, x). js_pycomplex
     // builds the value the complex arithmetic in js_pybin and the .real / .imag
     // reads understand.
@@ -3599,9 +3605,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var rB = rb.NewCall(getExtern("js_arg", 2), [rf.Params[1], handle(1)])
         rb.NewRet(rb.NewCall(getExtern("js_pyrange", 2), [rA, rB]))
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "range"), callExt(b, "js_closure", [handle(rgIdx), curScopeV])])
-        // abs from Math.
-        var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
+        // abs(). Bound straight from JS Math it answered NaN on a boxed float
+        // and lost precision on an arbitrary precision int; js_pyabs keeps both.
+        b = declBuiltin(b, "abs", "js_pyabs", 1)
         // type(v), str(v), int(v) and isinstance(v, C).
         b = declBuiltin(b, "type", "js_pytype", 1)
         // The `re` module. `import re` binds no module object in this flat import

@@ -1065,6 +1065,88 @@ def s25():
     check("bki16", len({True: 1, 2: 2}) == 2 and 2 in {True: 1, 2: 2})
     check("bki17", not (True == "1") and not (True == None) and not (True == [1]))
 
+# ===== SECTION 26: float is a TYPE, not a value =====
+# Python's int and float are two different types: they print differently (1 vs
+# 1.0), answer different type()s, and `/` makes a float out of two ints. One
+# double cannot carry that (2.0 and 2 ARE the same double), so the float is a
+# BOXED value in all three engines - and every check here was wrong in ALL THREE
+# at 913bd95, which is why this sits next to 25 rather than in 23: the halves
+# agreed with each other and disagreed with CPython. Expected values are
+# CPython 3.14.6's, and the renderer window (exponential iff
+# decpt <= -4 or decpt > 16, no forced ".0" in that form) is Python's own -
+# ruby, java and dart each use a different one.
+def s26():
+    # The type, and the literal forms that produce it. type() is compared
+    # through str() because binding the builtin type OBJECTS is a separate
+    # compiler-half gap (isinstance(x, str) is False there too).
+    check("flo1", str(type(1.0)) == "<class 'float'>" and str(type(1)) == "<class 'int'>")
+    check("flo2", str(type(1e3)) == "<class 'float'>" and str(type(5.)) == "<class 'float'>")
+    check("flo3", str(type(.5)) == "<class 'float'>" and str(type(0xff)) == "<class 'int'>")
+    # repr/str, which are the same function for a float in Python 3.
+    check("flo4", str(1.0) == "1.0" and repr(1.0) == "1.0" and str(1) == "1")
+    check("flo5", str(2500.0) == "2500.0" and str(-0.0) == "-0.0" and str(0.5) == "0.5")
+    # The exponent window: decpt <= -4 or decpt > 16, and NO forced ".0" there.
+    check("flo6", str(1e15) == "1000000000000000.0" and str(1e16) == "1e+16")
+    check("flo7", str(2e16) == "2e+16" and str(1.5e16) == "1.5e+16")
+    check("flo8", str(1e-4) == "0.0001" and str(1e-5) == "1e-05")
+    check("flo9", str(5e-324) == "5e-324" and str(1e100) == "1e+100")
+    check("flo10", str(0.1 + 0.2) == "0.30000000000000004" and str(1 / 3) == "0.3333333333333333")
+    # Non-finite is LOWERCASE, and -nan renders as nan.
+    # The infinity by OVERFLOW, not by the 1e400 literal: parseFloat("1e400") is
+    # NaN in the frozen tag engine and Infinity under goja, which is a FROZEN-DIFF
+    # of its own and not this section's subject.
+    inf = 1e308 * 10
+    check("flo11", str(inf) == "inf" and str(-inf) == "-inf" and str(inf - inf) == "nan")
+    check("flo12", str(-(inf - inf)) == "nan")
+    # `/` is TRUE division and never answers an int; // and % keep the int.
+    check("flo13", str(4 / 2) == "2.0" and str(5 / 2) == "2.5" and 4 / 2 == 2)
+    check("flo14", str(7 // 2) == "3" and str(7.5 // 2) == "3.0" and str(-7.5 // 2) == "-4.0")
+    check("flo15", str(7 % 2) == "1" and str(7.5 % 2) == "1.5" and str(-7.5 % 2) == "0.5")
+    # ** keeps the int except for a negative integer exponent.
+    check("flo16", str(2 ** 3) == "8" and str(2.0 ** 3) == "8.0" and str(2 ** -1) == "0.5")
+    check("flo17", str(2 ** 0.5) == "1.4142135623730951")
+    # Mixed arithmetic promotes, and the int side stays an int.
+    check("flo18", str(1 + 2.0) == "3.0" and str(3 - 1.0) == "2.0" and str(2 * 1.5) == "3.0")
+    check("flo19", str(1 + 2) == "3" and str(abs(-2)) == "2" and str(abs(-1.5)) == "1.5")
+    # == crosses the int/float line by VALUE; `is` does not.
+    check("flo20", 1.0 == 1 and 1 == 1.0 and 0.0 == 0 and not (1.0 == 2))
+    check("flo21", 1.0 < 2 and 2 > 1.5 and 1.5 <= 1.5 and not (1.0 != 1))
+    x = 1.0
+    y = x
+    check("flo22", (x is y) and (1.0 is 1.0) and not (1.0 is 1))
+    nan = inf - inf
+    check("flo23", not (nan == nan) and (nan is nan) and not (nan < 1) and not (nan > 1))
+    # Containers render their elements with repr, so a float keeps its point.
+    check("flo24", str([1.0, 2]) == "[1.0, 2]" and str({"k": 1.0}) == "{'k': 1.0}")
+    check("flo25", str([1.0, [2.0, 3]]) == "[1.0, [2.0, 3]]")
+    # A dict and a set key a float with the int of the same value, and the FIRST
+    # key object is the one that stays - the bool/int rule of section 25, now
+    # three-way.
+    d = {1.0: "a"}
+    d[1] = "b"
+    check("flo26", len(d) == 1 and d[1] == "b" and str(d) == "{1.0: 'b'}")
+    e = {}
+    e[2.0] = "x"
+    check("flo27", e[2] == "x" and 2 in e and 2.0 in e)
+    check("flo28", len({1, 1.0, 2.0, 2}) == 2 and 1.0 in {1} and 1 in {1.0})
+    check("flo29", {True: "t"}[1.0] == "t" and {1.0: "f"}[True] == "f")
+    check("flo30", len({True: 1, 1.0: 2}) == 1)
+    # Conversions and the reducers.
+    check("flo31", str(float(1)) == "1.0" and str(float("2.5")) == "2.5")
+    check("flo32", str(int(2.9)) == "2" and str(int(-2.9)) == "-2")
+    check("flo33", bool(1.0) and not bool(0.0) and not bool(-0.0))
+    check("flo34", str(sum([1.0, 2])) == "3.0" and str(sum([1, 2])) == "3")
+    check("flo35", str(max(1, 2.5)) == "2.5" and str(min(1.0, 2)) == "1.0")
+    # f-strings: the default rendering is str(), !r is repr(), and the numeric
+    # presentation types read the double inside the box.
+    v = 2.5
+    check("flo36", f"{v}" == "2.5" and f"{v!r}" == "2.5" and f"{1.0}" == "1.0")
+    check("flo37", f"{v:.2f}" == "2.50" and f"{1 / 3:.4f}" == "0.3333")
+    check("flo38", f"{v:>6}" == "   2.5" and f"{1.0:<5}" == "1.0  ")
+    # An arbitrary precision int is still an INT, so `/` on it is a float too.
+    check("flo39", str(10000000000000000000000000000 / 1) == "1e+28")
+    check("flo40", str(10000000000000000000000000001 - 10000000000000000000000000000) == "1")
+
 # ===== END SECTIONS =====
 
 def main():
@@ -1093,5 +1175,6 @@ def main():
     s23() # SECTION-CALL 23
     s24() # SECTION-CALL 24
     s25() # SECTION-CALL 25
+    s26() # SECTION-CALL 26
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

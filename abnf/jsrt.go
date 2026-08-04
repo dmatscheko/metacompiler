@@ -938,6 +938,8 @@ func (rt *jsrt) truthy(v interface{}) bool {
 		return t.v != 0
 	case jsDartFlo: // Dart's boxed double (see jsrtdart.go).
 		return t.f != 0 && t.f == t.f
+	case *jsPyFlo: // Python's boxed float: 0.0 is falsy, NaN is TRUTHY (unlike JS).
+		return t.f != 0
 	case string:
 		return len(t) > 0
 	case *jsBigInt:
@@ -963,6 +965,8 @@ func (rt *jsrt) toNumber(v interface{}) float64 {
 		}
 		return float64(t.v)
 	case jsDartFlo: // Dart's boxed double.
+		return t.f
+	case *jsPyFlo: // Python's boxed float.
 		return t.f
 	case jsRat:
 		return t.n / t.d
@@ -1045,6 +1049,8 @@ func (rt *jsrt) toString(v interface{}) string {
 		return giStr(t)
 	case jsDartFlo: // Dart's double keeps its point: 1.0, not 1 (jsrtdart.go).
 		return dartFloStr(t.f)
+	case *jsPyFlo: // Python's float keeps its point too, in CPython's own window.
+		return pyFloStr(t.f)
 	case jsRat:
 		return jsNumString(t.n) + "/" + jsNumString(t.d)
 	case jsCpx:
@@ -1107,6 +1113,8 @@ func (rt *jsrt) toGoNatural(v interface{}) interface{} {
 		return t.v
 	case jsDartFlo: // print/println show Dart's double rendering (jsrtdart.go).
 		return dartFloStr(t.f)
+	case *jsPyFlo: // print/println show Python's float rendering.
+		return pyFloStr(t.f)
 	case jsUndefT, jsNullT:
 		return nil
 	case float64:
@@ -1210,6 +1218,22 @@ func (rt *jsrt) strictEq(a, b interface{}) bool {
 	}
 	if bf, isFlo := b.(jsDartFlo); isFlo {
 		return dartIsNum(a) && bf.f == rt.toNumber(a)
+	}
+	// Python's boxed float compares by VALUE against ANOTHER FLOAT only. This is
+	// what `is` reads (js_pybin), and in Python a float is never `is` an int even
+	// when the two are ==, so the cross-type answer here is false rather than a
+	// numeric comparison. pyEqual has the == rule.
+	if af, isFlo := a.(*jsPyFlo); isFlo {
+		bf, ok := b.(*jsPyFlo)
+		// The same box is the same value even when it holds NaN (`x is x`), and
+		// two different boxes are the same value when their doubles are ===
+		// (CPython folds 1.0 is 1.0 to true). A float is never `is` an INT even
+		// when the two are ==, so the cross-type answer is false rather than a
+		// numeric comparison; pyEqual has the == rule.
+		return ok && (af == bf || af.f == bf.f)
+	}
+	if _, isFlo := b.(*jsPyFlo); isFlo {
+		return false
 	}
 	switch at := a.(type) {
 	case jsUndefT:
@@ -1545,6 +1569,8 @@ func (rt *jsrt) typeOf(v interface{}) string {
 	case jsGInt: // A sized integer is a number like any other (jsrtint.go).
 		return "number"
 	case jsDartFlo: // Dart's boxed double is a number like any other (jsrtdart.go).
+		return "number"
+	case *jsPyFlo: // Python's boxed float is a number like any other.
 		return "number"
 	case jsSym:
 		return "symbol"
@@ -2422,19 +2448,29 @@ func (rt *jsrt) pyDictFind(keys *jsArray, k interface{}) int {
 	if !rt.pyLang {
 		return -1
 	}
-	if alias, ok := pyKeyAlias(k); ok {
-		return rt.dictFind(keys, alias)
+	// Tried TWICE: a float box's alias is the plain number and the plain
+	// number's is the bool, so {True: "t"}[1.0] takes two steps.
+	alias, ok := pyKeyAlias(k)
+	if !ok {
+		return -1
+	}
+	if i := rt.dictFind(keys, alias); i >= 0 {
+		return i
+	}
+	if alias2, ok2 := pyKeyAlias(alias); ok2 {
+		return rt.dictFind(keys, alias2)
 	}
 	return -1
 }
 
 // pyKeyAlias answers the OTHER spelling of a key that Python considers equal to
-// this one, which for this value model is only ever the bool/int pair: an int and
-// a float are already the same plain double here (pyTypeName tells them apart with
-// Math.trunc), so `1` and `1.0` need no alias at all. -0.0 == 0 in Go, so the
+// this one: a bool is the int it IS, an int that is 0 or 1 is also the bool, and
+// a float box (jsPyFlo) is the plain number it holds. -0.0 == 0 in Go, so the
 // negative zero falls into the False arm exactly as CPython puts it there.
 func pyKeyAlias(k interface{}) (interface{}, bool) {
 	switch v := k.(type) {
+	case *jsPyFlo:
+		return v.f, true
 	case bool:
 		if v {
 			return float64(1), true
@@ -2453,11 +2489,25 @@ func pyKeyAlias(k interface{}) (interface{}, bool) {
 
 func (rt *jsrt) dictScan(keys *jsArray, k interface{}) int {
 	for i, e := range keys.elems {
-		if rt.strictEq(e, k) {
+		if rt.dictKeyEq(e, k) {
 			return i
 		}
 	}
 	return -1
+}
+
+// dictKeyEq is the scan's confirmation step: === everywhere, except that under
+// PYTHON a float box keys with the int of the same value (1.0 and 1 are one
+// key). The alias chain in pyDictFind cannot cover that direction, because a
+// float box is not a Go map key and so is never IN the index - a dict that holds
+// one has dictIdxAll false and every lookup in it already comes through here.
+func (rt *jsrt) dictKeyEq(a, b interface{}) bool {
+	if rt.pyLang {
+		if pyIsFlo(a) || pyIsFlo(b) {
+			return rt.pyNumEq(a, b)
+		}
+	}
+	return rt.strictEq(a, b)
 }
 
 // reindex rebuilds the key index. Only the first position of a key is indexed,
@@ -2566,6 +2616,11 @@ func (rt *jsrt) pyString(v interface{}) string {
 		}
 		return out + "]"
 	case *jsObject:
+		// A TYPE object renders as CPython's <class 'name'>, so print(type(1.0))
+		// reads <class 'float'> rather than the default object rendering.
+		if name, ok := rt.pyClassName(t); ok {
+			return "<class '" + name + "'>"
+		}
 		if els, ok := pySetElems(t); ok {
 			out := "{"
 			for i, e := range els.elems {
@@ -7786,6 +7841,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 						return w(out)
 					}
 				}
+				if pyIsFlo(l) || pyIsFlo(r) {
+					return w(&jsPyFlo{f: rt.toNumber(l) + rt.toNumber(r)})
+				}
 				return w(rt.jsAdd(l, r))
 			case "*":
 				// Python's SEQUENCE REPETITION: "ab" * 3 and [0] * 3 (either way
@@ -7799,18 +7857,31 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				if v, ok := pySeqRepeat(r, l); ok {
 					return w(v)
 				}
+				if pyIsFlo(l) || pyIsFlo(r) {
+					return w(&jsPyFlo{f: rt.toNumber(l) * rt.toNumber(r)})
+				}
 				return w(rt.pyArith(op[0], l, r))
-			case "-", "/":
+			case "-":
 				return w(rt.pyArith(op[0], l, r))
+			case "/":
+				// Python's `/` is TRUE division: it answers a float even from two
+				// ints, so 4 / 2 is 2.0 and 10**30 / 1 is 1e+30.
+				return w(&jsPyFlo{f: rt.pyToF(l) / rt.pyToF(r)})
 			case "//":
-				return rt.wrapNum(math.Floor(rt.toNumber(l) / rt.toNumber(r)))
+				return w(pyIntOrFlo(math.Floor(rt.toNumber(l)/rt.toNumber(r)), l, r))
 			case "%":
-				return rt.wrapNum(pyFloorMod(rt.toNumber(l), rt.toNumber(r)))
+				return w(pyIntOrFlo(pyFloorMod(rt.toNumber(l), rt.toNumber(r)), l, r))
 			case "**":
 				// Python's exponentiation. Only js_pybin (the Python compilers and
 				// nothing else) ever passes this operator, and a user class already
 				// had its __pow__ / __rpow__ chance above.
-				return rt.wrapNum(math.Pow(rt.toNumber(l), rt.toNumber(r)))
+				// int ** NEGATIVE int is a float (2 ** -1 is 0.5); every other
+				// pair of ints stays an int.
+				p := math.Pow(rt.toNumber(l), rt.toNumber(r))
+				if rt.toNumber(r) < 0 {
+					return w(&jsPyFlo{f: p})
+				}
+				return w(pyIntOrFlo(p, l, r))
 			case "==":
 				return boolH(rt.pyEqual(l, r))
 			case "!=":
@@ -7971,6 +8042,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				if bi, ok := v.(*jsBigInt); ok {
 					return w(&jsBigInt{v: new(big.Int).Neg(bi.v)})
 				}
+			}
+			if f, ok := v.(*jsPyFlo); ok {
+				return w(&jsPyFlo{f: -f.f}) // -0.0 keeps its sign, for repr(-0.0).
 			}
 			return rt.wrapNum(-rt.toNumber(v))
 		},
@@ -8188,9 +8262,27 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		"js_pyfloat": func(a []uint64) uint64 {
 			if s, isStr := u(a[0]).(string); isStr {
-				return rt.wrapNum(jsParseFloat(s))
+				return w(&jsPyFlo{f: jsParseFloat(s)})
 			}
-			return rt.wrapNum(rt.toNumber(u(a[0])))
+			return w(&jsPyFlo{f: rt.toNumber(u(a[0]))})
+		},
+		// The float LITERAL builder: constant folding cannot carry a box, so
+		// languages/python-to-llvm-ir.abnf emits this call for 1.0 and 1e3.
+		"js_pyflo": func(a []uint64) uint64 {
+			return w(&jsPyFlo{f: rt.toNumber(u(a[0]))})
+		},
+		// abs(), which used to be bound straight from JS Math and would answer
+		// NaN on a box. It keeps the type: abs(-2) is the int 2, abs(-1.5) the
+		// float 1.5, and abs() of an arbitrary precision int stays exact.
+		"js_pyabs": func(a []uint64) uint64 {
+			v := u(a[0])
+			if f, ok := v.(*jsPyFlo); ok {
+				return w(&jsPyFlo{f: math.Abs(f.f)})
+			}
+			if bi, ok := v.(*jsBigInt); ok {
+				return w(&jsBigInt{v: new(big.Int).Abs(bi.v)})
+			}
+			return rt.wrapNum(math.Abs(rt.toNumber(v)))
 		},
 		"js_pysum": func(a []uint64) uint64 {
 			v := u(a[0])
@@ -8201,12 +8293,19 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				v = els
 			}
 			total := float64(0)
+			anyFlo := false
 			if arr, ok := v.(*jsArray); ok {
 				for _, e := range arr.elems {
+					anyFlo = anyFlo || pyIsFlo(e)
 					total += rt.toNumber(e)
 				}
 			} else {
 				rt.fail("sum() of a %s", rt.typeOf(u(a[0])))
+			}
+			// One float in the sequence makes the total a float: sum([1.0, 2])
+			// is 3.0.
+			if anyFlo {
+				return w(&jsPyFlo{f: total})
 			}
 			return rt.wrapNum(total)
 		},
@@ -8765,6 +8864,157 @@ func runJSModule(m *ir.Module, entry string) *RunResult {
 	return &RunResult{Ret: uint32(rt.toInt32(rt.unwrap(h))), Out: ""}
 }
 
+// ----------------------------------------------------------------------------
+// Python's float: a boxed double, so that int and float stay two types
+//
+// Python's int and float print differently (1 vs 1.0), answer different type()s,
+// and `/` always makes a float even out of two ints - and one double cannot
+// carry that, because 2.0 and 2 ARE the same double. So the float is the boxed
+// one (like dart's jsDartFlo and ruby's jsFlo) and the int stays the plain
+// float64, which leaves the common integer path untouched.
+//
+// Only languages/python-to-llvm-ir.abnf ever creates one (js_pyflo), so every
+// branch added for this type is unreachable from the other fifteen languages.
+// The twin implementations are pyFlo/floStr in languages/python-interpreter.abnf
+// and pyBFlo/pyBFloStr in languages/lib/python-rt.metajs; ./test.sh --cross
+// diffs the three, so they change together or not at all.
+// A POINTER, so that the box has IDENTITY: `x = nan; x is x` is true in CPython
+// (it is one object) while `float('nan') is float('nan')` is false, and a value
+// struct could express neither, since NaN != NaN. python-interpreter.abnf and
+// python-rt.metajs get the same rule for free, their box being an object.
+type jsPyFlo struct{ f float64 }
+
+func pyIsFlo(v interface{}) bool { _, ok := v.(*jsPyFlo); return ok }
+
+// pyToF is toNumber for the operands of `/`. A Python bigint is an arbitrary
+// precision INT, so 10**28 / 1 has to be the float 1e+28 - where rt.toNumber
+// answers NaN for one, matching JavaScript, in which a BigInt is not a number.
+func (rt *jsrt) pyToF(v interface{}) float64 {
+	if bi, ok := v.(*jsBigInt); ok {
+		f, _ := new(big.Float).SetInt(bi.v).Float64()
+		return f
+	}
+	return rt.toNumber(v)
+}
+
+// pyIntOrFlo is the result type of // and %: an int from two ints (7 // 2 is 3)
+// and a float as soon as either operand is one (7.5 // 2 is 3.0).
+func pyIntOrFlo(f float64, l, r interface{}) interface{} {
+	if pyIsFlo(l) || pyIsFlo(r) {
+		return &jsPyFlo{f: f}
+	}
+	return f
+}
+
+// pyIsNumeric is "this value has a double in it": a float box, a plain int, a
+// bool (True is 1) or an arbitrary precision integer.
+func pyIsNumeric(v interface{}) bool {
+	switch v.(type) {
+	case *jsPyFlo, float64, bool, *jsBigInt:
+		return true
+	}
+	return false
+}
+
+// pyNumEq compares two numeric values BY VALUE across the int/float/bool split,
+// which is what Python's == and its dict keys need (1 == 1.0 == True).
+func (rt *jsrt) pyNumEq(a, b interface{}) bool {
+	if !pyIsNumeric(a) || !pyIsNumeric(b) {
+		return false
+	}
+	return rt.toNumber(a) == rt.toNumber(b)
+}
+
+// pyClassName answers the name of a Python TYPE object - a user class (it
+// carries an __mro) or one of the builtin type objects pyBuiltinClass hands out.
+// The Ellipsis singleton also carries a __name and is deliberately not one.
+func (rt *jsrt) pyClassName(v interface{}) (string, bool) {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return "", false
+	}
+	name, ok := o.props["__name"].(string)
+	if !ok {
+		return "", false
+	}
+	if _, has := o.props["__mro"]; has {
+		return name, true
+	}
+	if rt.pyTypes != nil && rt.pyTypes[name] == o {
+		return name, true
+	}
+	return "", false
+}
+
+// ----- repr(float), which in Python 3 is also str(float) -----
+//
+// Take the SHORTEST round-tripping digit string and the decimal point position
+// `decpt`, then use exponential form iff `decpt <= -4 || decpt > 16`. In
+// exponential form there is NO forced ".0" (2e16 is "2e+16", unlike ruby's
+// rubyFloStr and java's jvmFloStr), the exponent is signed and zero padded to
+// two digits ("1e-05"), and ONE significant digit is allowed ("5e-324", where
+// java forces two). Non-finite is lowercase, and repr(-float('nan')) is "nan".
+// Probed against the installed CPython 3.14.6:
+//
+//	1e15 -> 1000000000000000.0    1e16 -> 1e+16      2e16   -> 2e+16
+//	1e-4 -> 0.0001                1e-5 -> 1e-05      5e-324 -> 5e-324
+//	1.0  -> 1.0                   -0.0 -> -0.0       1e400  -> inf
+//
+// strconv.FormatFloat(f, 'e', -1, 64) is exactly the shortest-round-trip pair
+// (digits, exponent) the two script engines get out of their number-to-string.
+func pyFloStr(f float64) string {
+	if math.IsNaN(f) {
+		return "nan"
+	}
+	if math.IsInf(f, 1) {
+		return "inf"
+	}
+	if math.IsInf(f, -1) {
+		return "-inf"
+	}
+	if f == 0 {
+		if math.Signbit(f) {
+			return "-0.0"
+		}
+		return "0.0"
+	}
+	if f < 0 {
+		return "-" + pyFloDigits(-f)
+	}
+	return pyFloDigits(f)
+}
+
+// pyFloDigits renders f > 0.
+func pyFloDigits(f float64) string {
+	s := strconv.FormatFloat(f, 'e', -1, 64)
+	ei := strings.IndexByte(s, 'e')
+	mant, exp := s[:ei], s[ei+1:]
+	e10, _ := strconv.Atoi(exp)
+	digits := strings.Replace(mant, ".", "", 1)
+	decpt := e10 + 1
+	if decpt <= -4 || decpt > 16 {
+		out := digits[0:1]
+		if len(digits) > 1 {
+			out += "." + digits[1:]
+		}
+		sign, ex := "+", e10
+		if ex < 0 {
+			sign, ex = "-", -ex
+		}
+		if ex < 10 {
+			return out + "e" + sign + "0" + strconv.Itoa(ex)
+		}
+		return out + "e" + sign + strconv.Itoa(ex)
+	}
+	if decpt <= 0 {
+		return "0." + strings.Repeat("0", -decpt) + digits
+	}
+	if decpt >= len(digits) {
+		return digits + strings.Repeat("0", decpt-len(digits)) + ".0"
+	}
+	return digits[:decpt] + "." + digits[decpt:]
+}
+
 // pyEqual is Python's ==: containers compare by VALUE, recursively. A list equals a
 // list of the same length whose elements are all equal; a dict equals a dict with the
 // same key set and equal values for every key (insertion order does not matter, as in
@@ -8825,6 +9075,12 @@ func (rt *jsrt) pyEqual(x, y interface{}) bool {
 	}
 	if b, ok := y.(bool); ok {
 		y = pyBoolInt(b)
+	}
+	// A float equals the int of the same value (1.0 == 1) and two boxes holding
+	// the same double are equal though they are not the same box. Above the
+	// bigint and complex arms, which read the box through rt.toNumber anyway.
+	if pyIsFlo(x) || pyIsFlo(y) {
+		return rt.pyNumEq(x, y)
 	}
 	// Python compares an int to a float BY VALUE, and an arbitrary precision int
 	// (a literal too large for a double, see js_bigint) is still an int.
@@ -9547,11 +9803,13 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 		return "str"
 	case *jsBigInt:
 		return "int"
-	case float64:
-		if t == math.Trunc(t) && !math.IsInf(t, 0) {
-			return "int"
-		}
+	case *jsPyFlo:
 		return "float"
+	case float64:
+		// A plain number is an INT: 2.0 and 2 are the same double, so nothing
+		// about the value can tell the two Python types apart - which is why the
+		// float is boxed (jsPyFlo) in the first place.
+		return "int"
 	case *jsArray:
 		return "list"
 	case *jsObject:
@@ -9630,6 +9888,15 @@ func (rt *jsrt) pyArith(op byte, l, r interface{}) interface{} {
 		if v, ok := bigArith(op, l, r); ok {
 			return v
 		}
+	}
+	if pyIsFlo(l) || pyIsFlo(r) {
+		switch op {
+		case '-':
+			return &jsPyFlo{f: rt.toNumber(l) - rt.toNumber(r)}
+		case '*':
+			return &jsPyFlo{f: rt.toNumber(l) * rt.toNumber(r)}
+		}
+		return &jsPyFlo{f: rt.toNumber(l) / rt.toNumber(r)}
 	}
 	switch op {
 	case '-':
@@ -9952,6 +10219,7 @@ func (rt *jsrt) pyFormat(v interface{}, spec, conv string) string {
 		return body
 	}
 	_, isNum := v.(float64)
+	isNum = isNum || pyIsFlo(v)
 	// A number right-aligns by default, everything else left-aligns.
 	if align == '>' || align == '=' || (align == 0 && isNum) {
 		return strings.Repeat(fill, pad) + body
@@ -9990,8 +10258,10 @@ func (rt *jsrt) pyFormatBody(v interface{}, typ byte, prec int, sign byte, conv 
 		}
 	}
 	if sign == '+' {
-		if n, isNum := v.(float64); isNum && n >= 0 {
-			body = "+" + body
+		if _, isNum := v.(float64); isNum || pyIsFlo(v) {
+			if rt.toNumber(v) >= 0 {
+				body = "+" + body
+			}
 		}
 	}
 	return body

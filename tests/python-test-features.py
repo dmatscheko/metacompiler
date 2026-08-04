@@ -39,6 +39,25 @@ check("arith-float", 0.5 * 4, 2)
 check_true("arith-float-imprecision", 0.1 + 0.2 != 0.3)
 check("arith-chain", 20 - 5 - 3, 12)
 
+# float is a TYPE of its own, not just a value: it prints with a point, `/`
+# always makes one, and `//` / `%` / `**` keep the int. The full window of the
+# renderer and the dict-key rule are section 26 of tests/python-test-full.py.
+check("float-type", str(type(1.0)), "<class 'float'>")
+check("int-type", str(type(1)), "<class 'int'>")
+check("float-repr", str(1.0), "1.0")
+check("float-repr-exp", str(1e16), "1e+16")
+check("float-repr-small", str(1e-5), "1e-05")
+check("float-true-div", str(4 / 2), "2.0")
+check("float-floor-div-int", str(7 // 2), "3")
+check("float-floor-div-flo", str(7.5 // 2), "3.0")
+check("float-pow-int", str(2 ** 3), "8")
+check("float-pow-neg", str(2 ** -1), "0.5")
+check("float-promote", str(1 + 2.0), "3.0")
+check("float-abs", str(abs(-1.5)), "1.5")
+check("float-eq-int", 1.0 == 1, True)
+check("float-in-list", str([1.0, 2]), "[1.0, 2]")
+check("float-dict-key", len({1.0: "a", 1: "b"}), 1)
+
 x = 5
 x += 3
 x -= 2
