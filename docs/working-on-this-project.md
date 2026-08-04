@@ -269,18 +269,38 @@ Verified at `ee51718`. The authoritative per-item write-ups are in
 
 **Merge residue:**
 
-3. **14 shape groups, ~131 recoverable lines.** Declined on mixed grounds. Dart's
-   compare is genuinely blocked (a third coercion on a path only invalid Dart
-   reaches, no toolchain). The csharp/java pairs and the 2-language tail were
-   declined on *lines saved*, which is the wrong test — re-judge them on their
-   difference lists. The 4-way regex memo belongs in `regex.js` but the Go port makes
-   one 24-line saving a three-place edit.
+3. ~~14 shape groups, ~131 recoverable lines.~~ **Down to 8 groups / ~84
+   recoverable** (`2d3e6f5`), and seven of the eight need a file another agent held.
+   Dart's `dtJsCompare` is genuinely blocked (a third coercion on a path only invalid
+   Dart reaches, no toolchain). `luChar`/`js_char` cannot share a name —
+   `runtime.metajs` already exports `js_char` for a *different contract* — and both
+   sites now cross-reference each other.
 4. **kotlin carries the whole of `regex.js` verbatim** — 51 of 57 functions
-   byte-identical, 1,217 lines, zero divergences. `import "./regex.js"` works and
-   costs **+18–23% on a kotlin loop containing no regexp**. **The open question is
-   whether the live-body tax tracks DATA size or CODE size**: the decimal bignum's
-   tax was ~2 KB of live data per collection, and regex is mostly code. If it tracks
-   data, a `runtime-regex.metajs` split makes this free. Measurable, not arguable.
+   byte-identical, 1,217 lines, zero divergences. ~~+18-23%~~ **+10.7% measured
+   properly** (the first figure was wall clock on a loaded machine). ~~The open
+   question is whether the tax tracks DATA size or CODE size.~~ **ANSWERED
+   (`098db61`): NEITHER. It tracks top-level DECLARATIONS, and it is not the
+   collector** - it is `scope_find` (`runtime.c:2755`), a linear scan of the module
+   scope. 244x the code at a fixed declaration count costs the same to 0.01%, with
+   byte-identical `live`. And `import` **PREPENDS**, so an imported body also delays
+   every hit:
+
+   ```
+   0.13% per top-level declaration added        (lengthens every miss)
+   0.11% per declaration if placed FIRST        (delays every hit)
+   = 0.24% per declaration for an IMPORTED body
+   + 0.2% per 100 lines of layout;  0 per byte of live data
+   ```
+
+   **Size a shared body in DECLARATIONS, never lines.** <=10 decls (~2.4%): merge.
+   >40 (~10%): do not import it into a language that cannot call it. A
+   `runtime-regex.metajs` split would NOT have helped; no split was written.
+   Corollary: decimal+bignum cost **+2.2%**, not the +7-11% recorded earlier, so the
+   small pairs declined by the shape pass were declined on a number ~4x too big.
+
+   **Measure with `/usr/bin/time -l` instructions retired, not wall clock.** With
+   agents running, a 40k-iteration loop varies +-8% between runs of the same binary;
+   instructions reproduce to 0.02%.
 
 **Recorded, larger, and deliberately not started:**
 
@@ -340,6 +360,23 @@ archaeology exercise.
 **7. Make MetaJS's dialect gaps loud.** No exponent literal, no `toPrecision`, typed
 locals, ASI differences: each is discovered by a confusing failure. A `-verify` pass
 over `lib/*.metajs` that names them would pay for itself immediately.
+
+**0. `scope_find` is the single hottest line in the runtime, and nobody had looked.**
+Measured 2026-08-04 (`098db61`): on a kotlin loop, the *collector* is 5.09 G of 30.5 G
+instructions and `scope_find` (`runtime.c:2755`) — a **linear scan of the module
+scope** — is worth more than that. Two changes follow directly, and both are cheap:
+
+- **Make `import` APPEND rather than PREPEND.** It currently prepends the imported
+  file's declarations to `jsrun`, so every imported body delays every scope hit for
+  the whole program. Measured: the same regex text at declaration index 0 costs
+  +9.3%, at index 150 it costs **−0.1%**. This one change would drop kotlin's
+  `regex.js` import from +10.7% to ~+1.1% AND zero the cost of the
+  decimal/bignum/jvm/dartswift splits.
+- **Give `scope_find` a hash index.** It is the mutator's largest single cost and it
+  is a linear scan.
+
+Do these before any further merge work — they change the arithmetic of every
+shared-body decision in §7.
 
 **8. Per-language coverage of the floor.** The instrumentation that found 24
 unreached floor bodies was written once and thrown away. Keeping it as
