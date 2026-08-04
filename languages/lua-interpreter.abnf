@@ -1015,14 +1015,44 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return "" + k
     }
+    // luaFloText finishes an INTEGRAL float's rendering. Lua's own rule
+    // (lobject.c tostringbuff) appends ".0" only when the text is nothing but a
+    // sign and digits, so an exponent form must NOT get one - the old body wrote
+    // "1e+21.0". In exponent form Lua goes through C's %g, whose exponent is always
+    // signed and at least two digits ("1e-07", not "1e-7"), and -0.0 keeps its sign
+    // where JavaScript's String(-0) is "0". Verified against lua 5.5.0. WHICH form
+    // Lua picks is still wrong and is recorded, not guessed - see luFloText in
+    // abnf/jsrtlua.go, which this must stay in step with.
+    function luaFloText(s, n) {
+        if (n == 0 && 1 / n < 0) { s = "-0" }
+        if (s.indexOf("e") < 0) { return s + ".0" }
+        return luaExpFix(s)
+    }
+    // JavaScript's exponent form rewritten into C's %g one - always signed, at least
+    // two digits. Applied to the UNBOXED path too, because the box wraps only the
+    // INTEGRAL floats: 1e-7 never reaches luaFloText and still has to print "1e-07".
+    // An integer's text is digits only, so this is the identity on it.
+    function luaExpFix(s) {
+        var ei = s.indexOf("e")
+        if (ei < 0) { return s }
+        var mant = s.substring(0, ei)
+        var exp = s.substring(ei + 1)
+        var sign = "+"
+        if (exp.charAt(0) == "+" || exp.charAt(0) == "-") {
+            sign = exp.substring(0, 1)
+            exp = exp.substring(1)
+        }
+        if (exp.length < 2) { exp = "0" + exp }
+        return mant + "e" + sign + exp
+    }
     // How a number renders: an integer without a fraction, a float always with one.
     function luaNumStr(v) {
         if (szIs(v)) { return szStr(v) }
         var n = numOf(v)
         if (n !== n) { return "nan" }   // real Lua prints "nan", not "-nan"
         if (n - n !== 0) { return n > 0 ? "inf" : "-inf" }
-        if (isFlt(v)) { return "" + n + ".0" }
-        return "" + n
+        if (isFlt(v)) { return luaFloText("" + n, n) }
+        return luaExpFix("" + n)
     }
     function luaToStr(v) {
         if (v === undefined || v === null) { return "nil" }

@@ -2234,8 +2234,15 @@ one is pre-existing behaviour of both halves, unchanged by this port.
        4   module qualification (main.C) and a non-conforming `description`
 ```
 
-**The formatter boundary, measured exactly.** Both halves switch to scientific
-notation at `e10 >= 16`; real Swift switches at **|v| > 2^53**:
+**The formatter boundary, measured exactly - CLOSED 2026-08-04.** Both halves used
+to switch to scientific notation at `e10 >= 16`; real Swift switches at
+**|v| > 2^53**, and all three halves now test `a > 9007199254740992`
+(`swFloDigits` in `abnf/jsrtswift.go`, `swFloStr` in `swift-interpreter.abnf`,
+`swFloDigits` in `languages/lib/swift-rt.metajs`). A 22-value probe is
+byte-identical to `swiftc 6.1.2` from the interpreter AND the native binary, and
+`flo5b`/`flo5c` in `tests/swift-test-full.swift` pin it (both FAIL against a clean
+`33923d4`). The "not fixed" paragraph under the table is struck; the table itself
+is the ground truth it was fixed against:
 
 ```
                         ours                      swift 6.1.2
@@ -2247,11 +2254,11 @@ notation at `e10 >= 16`; real Swift switches at **|v| > 2^53**:
 1e16                    1e+16                     1e+16
 ```
 
-Not fixed, for the same reason the Lua formatter was not: the rule lives in THREE
-halves at once (`swFloDigits` in `abnf/jsrtswift.go`, `swFloStr` in
-`swift-interpreter.abnf`, `swFloDigits` here) and `--full` SECTION 25 pins the
-current one, so changing it is a self-contained job of its own and is not this
-gate. It is a rendering difference only - the arithmetic agrees on all 18,386
+~~Not fixed, for the same reason the Lua formatter was not: the rule lives in THREE
+halves at once and `--full` SECTION 25 pins the current one.~~ **FIXED 2026-08-04**
+- all three halves in one change, and SECTION 25 turned out to pin nothing in the
+disputed range, which is why `flo5b`/`flo5c` had to be ADDED to give the fix any
+discriminating power at all. It is a rendering difference only - the arithmetic agrees on all 18,386
 opaque-operand lines.
 
 **`min` between +0.0 and -0.0.** Swift's `min(x, y)` is `y < x ? y : x`, so
@@ -4307,8 +4314,13 @@ agree with each other on every one of them**, so none is this port's:
    The "not a file that can ever go" reading was right for the wrong reason: it is
    not only that python, js, typescript, kotlin and go share it, it is that the
    whole retirement was measured and declined.
-2. **OPEN.** The float formatter boundary above, if and when someone does the
-   three-halves job; `-0.0 % 1.0`, same shape, both halves currently agree.
+2. ~~**OPEN.** The float formatter boundary above~~ **- THE FORMATTER IS DONE
+   (2026-08-04).** All three halves rewritten to Ruby's own window
+   (`decpt < -3 || decpt > 15`), byte-identical to real `ruby` on a 28-value probe
+   from the interpreter, `llvm.Run` and the native binary, pinned by
+   `n16b`..`n16e`. The interpreter's `-0.0` sign loss (`makeNeg`'s `0 - x`) went
+   with it. **`-0.0 % 1.0` is STILL OPEN** and is now VISIBLE rather than masked by
+   the formatter - see item 5 of "WHAT IS STILL OPEN".
 3. `Integer#%` on a value past 2^53 is now EXACT where the Go twin is exact by
    accident (arm64 fusion). If the Go twin is ever built for an architecture
    without FMA, `abnf/jsrt.go` and this file diverge again - the fix would be to
@@ -7846,7 +7858,16 @@ Automating that is three `-exe` rows plus an expect-nonzero mode, in
 `.vscode/launch.json` and `test.sh` - neither of which is this agent's file, so
 it is reported rather than done.
 
-**One real divergence was found while doing it, and is NOT fixed here.** A member
+**One real divergence was found while doing it, and is NOT fixed here.**
+> **FIXED 2026-08-04 in `abnf/jsrt.go`.** The Go twin now prints the floor's
+> wording, `member assignment 'foo' on 5`, from both engines. The site was the last
+> `rt.fail` of `setGoMember` - which is `setMember`'s `default:` arm, not the Go
+> bridge - and the two real bridge failures above it keep `rv.Type()`. A THIRD
+> engine was found to disagree while checking: the metajs INTERPRETER emits a raw
+> goja `TypeError: Value is not an object: 5` here. Both are recorded at item 6 of
+> "WHAT IS STILL OPEN".
+
+A member
 assignment on a non-object reports different text in the two engines:
 
 ```
@@ -7941,6 +7962,18 @@ tests/coro-poc/build.sh       BYTE-IDENTICAL in both engines
 
 # Part B, move 1: `case_map` CANNOT MOVE - and neither can any other candidate
 
+> **THE CONCLUSION HELD; THE REASON DID NOT (2026-08-04).** The structural block
+> below - "MetaJS itself has no layer 2" - was removed in `33923d4`. `case_map` was
+> then moved for real, passed every gate, and was REVERTED on measurement: 15x on a
+> 1M-`toUpperCase` loop, 135x on a mixed-script one, 2x on a lua loop that never
+> uppercases, +156,000 lines of IR to delete 104 lines of C. An identity-body probe
+> split the cost: the floor -> layer-2 CALL is **120 ns**, the MetaJS binary search
+> over boxed arrays is **3.2 us**. So the rule is not "nothing can move" but "DATA-
+> STRUCTURE work cannot move". Full table: item 11 of "WHAT IS STILL OPEN" below,
+> and `runtime-merge-plan.md`, "Move 1, `case_map` - EXECUTED IN FULL, MEASURED,
+> AND REVERTED". Everything from here to the end of the section is kept because the
+> per-body call counts and the dispatch argument are still correct.
+
 The measurement named `case_map` plus the 328-range Unicode tables as the best
 first move: 114 corpus calls, zero on both benches, pure table lookup, handle
 level throughout. The MetaJS text was not written, because the move is blocked -
@@ -8024,7 +8057,8 @@ has no first move**, and that is a measured statement rather than a delay.
 
 ---
 
-# WHAT IS STILL OPEN - the consolidated list (2026-08-04, verified at `c1bc760`)
+# WHAT IS STILL OPEN - the consolidated list
+# (2026-08-04, verified at `c1bc760`; items 11 and 1/swift re-verified at `33923d4`)
 
 Every "What is owed" / "Still owed" / "Not fixed here" / "BLOCKED" item in this
 file, in `runtime-merge-plan.md` and in `runtime-rework-plan.md` was walked and
@@ -8046,20 +8080,83 @@ the strength of an uncommitted diff.
 
 ## Defects - a measured difference from an oracle, in code that runs
 
-1. **The float-formatter boundaries - four languages, each a three-halves job.**
-   The rule lives in the Go twin, the interpreter grammar and the layer-2 file at
-   once, and `--full` pins the current answer, so each is a change of its own.
-   - swift: ours goes scientific at `e10 >= 16`, real swift at `|v| > 2^53`.
-     "The formatter boundary, measured exactly", and "What is still owed for Swift" item 2.
-   - ruby: 1,556 differing lines; `Float#to_s` goes scientific one decade earlier
-     than ours (`rubyFloStr` in `abnf/jsrt.go:2753`, `floStr` in
-     `ruby-interpreter.abnf`, `rbFloStr` in `ruby-rt.metajs`). "What is owed, and
-     what generalises to PYTHON" item 2.
-   - python: the same family, recorded with ruby's - "None of these is new, and
-     each one is a FEATURE decision".
-   - lua: 3,822 differing lines against real `lua 5.5`, all formatter - the ".0"
-     on an integral float in exponent form, negative zero, and `%.17g` vs shortest
-     round-trip. `runtime-rework-plan.md`, "Where our Lua and REAL lua still differ".
+1. **The float-formatter boundaries - TWO ROWS CLOSED, one narrowed, one
+   RECLASSIFIED (2026-08-04).** Each is a three-halves job: the Go twin, the
+   interpreter grammar and the layer-2 file, all changed together or `--cross`
+   breaks.
+   - ~~swift: ours goes scientific at `e10 >= 16`, real swift at `|v| > 2^53`.~~
+     **CLOSED.** The boundary is on the VALUE: `swFloDigits` in `abnf/jsrtswift.go`,
+     `swFloStr` in `swift-interpreter.abnf` and `swFloDigits` in
+     `languages/lib/swift-rt.metajs` now test `a > 9007199254740992` instead of
+     `e10 >= 16`. A 22-value probe (2^53 and its neighbours, 1e15/1e16/1e17,
+     9999999999999000, negatives, denormals, DBL_MAX) is byte-identical to
+     `swiftc 6.1.2` from BOTH the interpreter and the native binary. Pinned by
+     `flo5b`/`flo5c` in `tests/swift-test-full.swift`, which FAIL 2/2 against a
+     clean `33923d4` archive; swift 209 -> 211 assertions.
+   - ~~ruby: `Float#to_s` goes scientific one decade earlier than ours.~~
+     **CLOSED, and it was more than a decade.** Ruby's window is `numeric.c`
+     flo_to_s: exponential when `decpt < -3 || decpt > DBL_DIG` (15), the mantissa
+     always carrying a fraction digit ("1.0e+15") and the exponent always signed
+     and at least two digits ("1.0e-05"). Ours was JavaScript's window (plain below
+     1e21) with a bare `+ ".0"`. Rewritten in all three halves: `rubyFloStr` +
+     the new `rubyFloDigits` (`abnf/jsrt.go`), `floStr` + `floSplit10`/`floDigits`
+     (`ruby-interpreter.abnf`), `rbFloStr` + `rbSplit10`/`rbFloDigits`
+     (`languages/lib/ruby-rt.metajs`). A 28-value probe is byte-identical to real
+     `ruby` from the interpreter, `llvm.Run` and the native binary. **GROUND TRUTH
+     NOTE:** the local ruby is 2.6.10p210, which rejects Ruby-3 syntax - but
+     `Float#to_s` is unchanged between 2.6 and 3.x and the probe needs no Ruby-3
+     syntax, so this row IS settled against a real toolchain. Pinned by
+     `n16b`..`n16e` in `tests/ruby-test-full.rb` (4/4 fail against a clean
+     `33923d4`); ruby 267 -> 271.
+     - **A second defect fell out of it**: `-0.0` rendered as `0.0` in the
+       INTERPRETER only, because `makeNeg`'s float arm was `0 - x` and `0 - 0.0` is
+       `+0.0`. Both compiled halves were already right, and the divergence was
+       invisible while the formatter dropped the sign anyway. Now
+       `mkFlo(v.f * (0 - 1))`, `ruby-interpreter.abnf:2465`.
+   - **python: NOT this family at all - RECLASSIFIED, and it is much bigger.**
+     Our Python has no float TYPE: `print(1.0)` writes `1`, `print(4/2)` writes
+     `2`, `type(1.0)` writes `[object Object]`, where CPython 3.14 writes `1.0`,
+     `2.0` and `<class 'float'>`. So there is no boundary to move - the box that
+     ruby, swift, java, kotlin, dart, lua and C# all carry does not exist for
+     python, and adding it is a value-model job touching the emitter, every
+     arithmetic path and `/` vs `//`. Both halves agree, so `--cross` is blind to
+     it and only a real-CPython diff sees it. **Newly measured, still open.**
+   - **lua: NARROWED. The two malformed shapes are FIXED; the precision window is
+     recorded exactly rather than guessed.**
+     - FIXED: `".0"` was appended unconditionally to an integral float, so
+       `1e21` printed **`1e+21.0`** and DBL_MAX printed
+       `1.7976931348623157e+308.0` - not a number in any notation. Lua's own rule
+       (`lobject.c` tostringbuff) appends it only when the text is nothing but a
+       sign and digits. FIXED: the exponent now goes through C's `%g` shape,
+       always signed and at least two digits, so `1e-7` prints `1e-07`. Both in
+       `luFloText`/`luExpFix` (`abnf/jsrtlua.go`), `luaFloText`/`luaExpFix`
+       (`lua-interpreter.abnf`) and `luFloText`/`luExpFix`
+       (`languages/lib/lua-rt.metajs`) - note `luExpFix` is applied to the UNBOXED
+       arm too, because the `{__f}` box wraps only the INTEGRAL floats. Pinned by
+       `ift10`..`ift12` in `tests/lua-test-full.lua` (3/3 fail against a clean
+       `33923d4`); lua 317 -> 320.
+     - STILL OPEN, and now specified: WHICH form Lua picks. `lua 5.5.0` tries
+       `"%.15g"`, then `"%.16g"`, then `"%.17g"` and takes the first that
+       round-trips - derived from a sweep of 10^10..10^18 and their neighbours:
+       `1e14` -> `100000000000000.0`, `1e15` -> `1e+15`, `1e15+1` ->
+       `1000000000000001.0`, `999999999999999.0` -> `999999999999999.0`,
+       `1234567890123456.0` -> `1234567890123456.0`, `5e-324` ->
+       `4.94065645841247e-324` (15 digits, not the shortest `5e-324`). Ours uses
+       the shortest round-tripping form throughout. Fixing it needs rounding the
+       EXACT value of a double to 15 significant digits: Go has that as
+       `strconv.FormatFloat(n, 'g', 15, 64)`, and **neither JS-dialect half has it
+       at all** - `toPrecision` appears nowhere in `metajs-to-llvm-ir.abnf`,
+       `metajs-interpreter.abnf` or `abnf/jsrt.go` - so doing the Go half alone
+       would CREATE a `--cross` divergence. It needs a hand-written 15-digit
+       decimal rounding routine in MetaJS first.
+     - ALSO STILL OPEN, same file: lua's unary minus is `0 - x`
+       (`makeNeg`, `lua-interpreter.abnf:1255`, and `lua_arith(SUB, 0, x)` at
+       `lua-to-llvm-ir.abnf:1328`), so `-0.0` and `-(0.0)` print `0.0` where lua
+       prints `-0.0`. `0.0 * -1.0` is already right in both halves. Not fixed HERE
+       because the compiler half spells it as a SUB through `lua_arith`, and
+       switching it to a MUL would change which metamethod a table operand reaches
+       (`__sub` -> `__mul`); both halves agree today, so `--cross` is green either
+       way and the change must be made in both at once.
 
 2. **`[1, 2] + [3]` in dart** renders and concatenates ("1,23") where dart:core
    concatenates the lists. Both halves agree, so it is invisible to the suites;
@@ -8088,14 +8185,36 @@ the strength of an uncommitted diff.
 
 5. **`ruby`'s `-0.0 % 1.0`** is `-0.0` in ruby and `+0.0` in both our halves - 309
    lines, the signed-zero trap in its Dart shape, and the Go twin has it too.
+   **STILL OPEN, and now VISIBLE (2026-08-04):** the Float#to_s rewrite in item 1
+   made `-0.0` render as `-0.0`, so `puts (-0.0 % 1.0)` now prints a wrong `0.0`
+   where it used to print a wrong `0.0` for two reasons at once. Re-measured
+   against `ruby 2.6.10p210`: real ruby answers `-0.0` for both `-0.0 % 1.0` and
+   `-4.0 % 2.0`, both our halves answer `0.0`.
 
-6. **The `die3` error-message divergence.** A member assignment on a non-object:
-   `llvm.Run` says `cannot set member 'foo' on float64` (`abnf/jsrt.go:2105`, the
-   TYPE), the native floor says `member assignment 'foo' on 5`
-   (`languages/lib/runtime.c:2952/2971`, the VALUE). `die2`'s wording matches
-   exactly, so this is a real gap against the floor's own stated rule. Needs
-   whoever owns `abnf/jsrt.go` and `runtime.c` at the same time. "Settling the 24",
-   "One real divergence was found while doing it".
+6. ~~**The `die3` error-message divergence.**~~ **CLOSED 2026-08-04, in the Go
+   twin.** `llvm.Run` said `cannot set member 'foo' on float64` (the Go reflect
+   TYPE, in a diagnostic for a language that has no float64); the floor says
+   `member assignment 'foo' on 5` (the VALUE). The floor was right and the fix went
+   into `abnf/jsrt.go` alone: the site was the LAST arm of `setGoMember`, which is
+   not the Go bridge's at all but `setMember`'s `default:`, reached by any JS
+   primitive. It now reads `rt.fail("member assignment '%s' on %s", name,
+   rt.toString(obj))` - the same wording as `setMember`'s own undefined/null arm
+   eleven lines above (`jsrt.go:2029`, which already matched the floor's
+   `runtime.c:2952`) and the same VALUE-not-TYPE shape as the sibling get
+   diagnostic (`member 'foo' of undefined`, `jsrt.go:1771`). The two genuinely
+   Go-bridge failures above it keep `rv.Type()`, because there the Go type IS what
+   the user has to fix. Verified: `var x = 5; x.foo = 1` now prints
+   `js runtime error: member assignment 'foo' on 5` from BOTH `llvm.Run` and the
+   native binary.
+   - **A THIRD engine disagrees, and it is worse - newly measured, OPEN.** The
+     metajs INTERPRETER does not produce a controlled diagnostic here at all: it
+     lets the host through, printing
+     `TypeError: Value is not an object: 5 at languages/metajs-interpreter.abnf:...`
+     with a goja stack trace. `languages/metajs-interpreter.abnf:1274` guards only
+     the undefined/null target (`member assignment on undefined`, itself missing
+     the key that the other two print). The matrix cannot see it - the three
+     `tests/metajs-fail-test*.js` entries are the only ones that exercise this
+     path and none asserts the message text (item 10).
 
 ## Structural - work that is understood and unstarted
 
@@ -8129,24 +8248,50 @@ the strength of an uncommitted diff.
     expect-nonzero mode in `.vscode/launch.json` and `test.sh`; re-checked here,
     `test.sh` still has no such mode. "Settling the 24".
 
-11. **Part B has no first move, and it is BLOCKED on MetaJS having no layer 2.**
-    Every movable floor body is reached through the host-builtin dispatch that IS
-    MetaJS's own standard library, and `metajs-to-llvm-ir.abnf` links exactly one
-    runtime input (`if (rts == undefined || rts.length == 0) { rts = [runtimePath()] }`,
-    line 1226) - so a body that leaves the floor for `runtime.metajs` disappears
-    from MetaJS's own native build. Re-checked here: no `languages/lib/metajs-rt.*`
-    exists in git, and `tests/gen-*.sh` is still fourteen scripts at `c1bc760`. The
-    unblock is option 1 of "What would unblock it, and who owns it" - a
-    `metajs-rt.metajs` and a fifteenth generator. **This is the single item that
-    gates the most other work.**
+11. **Part B is UNBLOCKED and still has no landed move - now on MEASUREMENT, not
+    structure (2026-08-04).** The door landed in `33923d4`:
+    `languages/lib/metajs-rt.metajs`, `tests/gen-metajs-rt-ll.sh` (the fifteenth
+    generator) and `metajs-to-llvm-ir.abnf` linking
+    `[libPath("runtime.ll"), libPath("metajs-rt.ll")]`, so "MetaJS has no layer 2"
+    is no longer true and the movable set is no longer structurally empty.
 
-    **THE DOOR IS IN FLIGHT** - untracked in the working tree at the time of
-    writing: `languages/lib/metajs-rt.metajs` (56 lines), `lib/metajs-rt.ll`,
-    `tests/gen-metajs-rt-ll.sh`, and `metajs-to-llvm-ir.abnf`'s default changed from
-    `rts = [runtimePath()]` to `rts = [libPath("runtime.ll"), libPath("metajs-rt.ll")]`.
-    **Opening the door is not the same as moving a body**: `case_map` and the 328
-    Unicode ranges were still in the floor when this was written, so the "movable set
-    is empty" finding closes only when a body actually moves. Re-check both halves.
+    **Move 1, `case_map`, was then executed WHOLE and REVERTED.** All four files
+    together (`runtime.c` -104, `runtime.metajs` +145, plus the missing
+    `import "./runtime.metajs"` in `js-rt.metajs` and `lua-rt.metajs`), plus a
+    FIFTH nobody had named - `tests/coro-poc/gen.ll`, which links the floor with no
+    layer 2 at all and dies on `Undefined symbols: _js_case_map`. Every gate passed
+    (matrix 325/325, `--full` 5,834 / 0 disagreeing, `--cross` 119/0, clang-check
+    16/16 agreeing, `-freeze` a fixed point, `MEC_GC=off` 3,709-3,713 B/iter, coro
+    `--gc`/`--break` unchanged, `metajs-test-full -exe` 513K -> 589K still 557/0).
+    It was reverted anyway:
+
+    | native `-exe`, best of 3 | floor | layer 2 |
+    |---|---|---|
+    | 1M `"a".toUpperCase()` | 0.23 s | 3.46 s (**15x**) |
+    | 200k x up+low of a 17-char mixed-script string | 0.24 s | 32.40 s (**135x**) |
+    | lua 400k `s = s + i % 7`, never uppercases | 0.93 s | 1.82 s (**2.0x**) |
+
+    The lua row is a SECOND, independent cost: five top-level array literals are
+    ~1,640 boxed cells plus **321 PINNED interned constants**
+    (`lib/compile-core.js:254` pins every distinct numeric constant outside
+    [-256, 1024]), permanently live and walked on each of 1,378 collections -
+    `pinned` 13 -> 334, live 93,760 -> 147,632 B. A lazy `rtCaseInit()` removes that
+    row and nothing else. And the IR bill: -5,079 lines of `runtime.ll` bought
+    +12,400 in EACH of thirteen `<lang>-rt.ll`, i.e. **+156,000 lines to delete 104
+    lines of C**.
+
+    **THE NUMBER THAT MATTERS FOR EVERY FUTURE MOVE**, from an identity-body probe
+    (same move, same prototypes, same imports,
+    `function js_case_map(c, up) { if (up) { return c } return c }`): the floor ->
+    layer-2 CALL - shim, `jsrtlib_boot`, `js_arr_new`, `js_call`, the `jsdispatch`
+    compare chain - costs **120 ns**, and the nine-iteration binary search over
+    BOXED ARRAYS costs **3.2 us, 26x the whole call**. So upcalls are affordable and
+    **MetaJS data-structure work is not**. `case_map` and the Unicode ranges join
+    the `d_*` family on the can-never-move list. `fmt_apply`/`fmt_sprint`/`fmt_top`/
+    `fmt_val`/`js_num_str` remain open but are reached by EVERY print, so each needs
+    a print-loop benchmark BEFORE it is written, not after. Full write-up:
+    `runtime-merge-plan.md`, "Move 1, `case_map` - EXECUTED IN FULL, MEASURED, AND
+    REVERTED".
 
 12. **`-rt-prims` and the C floor still cannot be combined in one `-exe` build**
     (both define the 13 derived primitives, so the link would fail with a duplicate

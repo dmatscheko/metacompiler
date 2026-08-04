@@ -871,6 +871,17 @@ func s25() {
     // description / interpolation: a whole Double keeps its ".0".
     check("flo4", "\(1.0)" == "1.0" && "\(3.5)" == "3.5" && (1.0).description == "1.0")
     check("flo5", "\(1e15)" == "1000000000000000.0" && "\(1e16)" == "1e+16")
+    // THE UPPER BOUNDARY IS 2^53, NOT 1e16. Both halves used to switch to
+    // scientific at a decimal exponent of 16; SwiftDtoa switches above 2^53, and
+    // the two rules part between 9007199254740992 and 1e16. Every literal below is
+    // swift 6.1.2's own answer. flo5 above cannot see the difference (both rules
+    // agree at 1e15 and 1e16), so this is the line with the discriminating power:
+    // under the old rule flo5b's first term rendered 9007199254740994.0.
+    check("flo5b", "\(9007199254740992.0)" == "9007199254740992.0" &&
+                   "\(9007199254740994.0)" == "9.007199254740994e+15")
+    check("flo5c", "\(9999999999999000.0)" == "9.999999999999e+15" &&
+                   "\(1234567890123456.0)" == "1234567890123456.0" &&
+                   "\(-9007199254740994.0)" == "-9.007199254740994e+15")
     check("flo6", "\(1e-4)" == "0.0001" && "\(1e-5)" == "1e-05")
     check("flo7", "\(0.1 + 0.2)" == "0.30000000000000004" && "\(1.0 / 3.0)" == "0.3333333333333333")
     // The infinities and the NaN - none of which existed before the box.

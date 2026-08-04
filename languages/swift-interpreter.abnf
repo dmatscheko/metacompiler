@@ -1990,7 +1990,11 @@ KwContinue  = "continue" KwEnd ;
         while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
         digits = digits.substring(0, endz)
         var e10 = pt - 1
-        if (e10 < 0 - 4 || e10 >= 16) {
+        // The upper boundary is on the VALUE, not the exponent: SwiftDtoa goes
+        // scientific above 2^53, and the two rules part between 2^53 and 1e16.
+        // 9007199254740992.0 is the last plain value and 9007199254740994.0 the
+        // first scientific one, read off swift 6.1.2. See abnf/jsrtswift.go.
+        if (e10 < 0 - 4 || a > 9007199254740992) {
             var frac = digits.substring(1)
             var es = e10 < 0 ? (0 - e10) : e10
             var etx = "" + es

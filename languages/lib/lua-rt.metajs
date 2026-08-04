@@ -745,15 +745,49 @@ function js_lustr(v) {
         if (v !== v) { return "nan" }
         if (v === luInf()) { return "inf" }
         if (v === 0 - luInf()) { return "-inf" }
-        return "" + v
+        // luExpFix and not a bare "" + v: this arm carries the UNBOXED floats (the
+        // {__f} box wraps only the integral ones), so 1e-7 arrives here and Lua
+        // writes it "1e-07". The Go twin does the same at the end of luNumStr.
+        return luExpFix("" + v)
     }
     var n = luNumOf(v)
     if (n !== n) { return "nan" }         // real Lua prints "nan", not "-nan"
     if (n === luInf()) { return "inf" }
     if (n === 0 - luInf()) { return "-inf" }
     var s = "" + n
-    if (luFloOf(v) !== undefined) { return s + ".0" }
-    return s
+    if (luFloOf(v) !== undefined) { return luFloText(s, n) }
+    return luExpFix(s)
+}
+
+// luFloText finishes an INTEGRAL float's rendering. Lua's own rule (lobject.c
+// tostringbuff) appends ".0" only when the text is nothing but a sign and digits, so
+// an exponent form must NOT get one - the old body wrote "1e+21.0". In exponent form
+// Lua goes through C's %g, whose exponent is always signed and at least two digits
+// ("1e-07", not "1e-7"), and -0.0 keeps its sign where MetaJS's "" + -0 is "0".
+// Verified against lua 5.5.0. WHICH form Lua picks is still wrong and is recorded,
+// not guessed - see luFloText in abnf/jsrtlua.go, which this must stay in step with.
+function luFloText(s, n) {
+    if (n == 0 && 1 / n < 0) { s = "-0" }
+    if (s.indexOf("e") < 0) { return s + ".0" }
+    return luExpFix(s)
+}
+
+// JavaScript's exponent form rewritten into C's %g one - always signed, at least two
+// digits. Applied to the UNBOXED path too, because the box wraps only the INTEGRAL
+// floats: 1e-7 never reaches luFloText and still has to print "1e-07". An integer's
+// text is digits only, so this is the identity on it.
+function luExpFix(s) {
+    var ei = s.indexOf("e")
+    if (ei < 0) { return s }
+    var mant = s.substring(0, ei)
+    var exp = s.substring(ei + 1, s.length)
+    var sign = "+"
+    if (exp.charAt(0) == "+" || exp.charAt(0) == "-") {
+        sign = exp.substring(0, 1)
+        exp = exp.substring(1, exp.length)
+    }
+    if (exp.length < 2) { exp = "0" + exp }
+    return mant + "e" + sign + exp
 }
 
 // A table key. Numbers and strings address the map the way js_get does; a float

@@ -499,10 +499,11 @@ func swIsNumeric(v interface{}) bool {
 func swRoundHalfAway(f float64) float64 { return math.Round(f) }
 
 // swFloStr is Swift's Double.description (SwiftDtoa): the shortest decimal that
-// round-trips, written as a plain decimal when the scientific exponent is in
-// -4 ... 15 and in computerized scientific notation - two digit minimum exponent,
-// always signed - outside it, with the integral case always carrying a ".0". So
-// 1e15 prints 1000000000000000.0 and 1e16 prints 1e+16. The infinities are
+// round-trips, written as a plain decimal when the scientific exponent is >= -4
+// AND the value is <= 2^53, and in computerized scientific notation - two digit
+// minimum exponent, always signed - outside that, with the integral case always
+// carrying a ".0". So 1e15 prints 1000000000000000.0, 1e16 prints 1e+16, and the
+// upper boundary is 2^53 rather than 1e16 - see swFloDigits. The infinities are
 // "inf"/"-inf" and the NaN is "nan". Every boundary here was read off swift 6.1.2
 // rather than remembered. The JS twin is swFloStr in swift-interpreter.abnf and
 // the two MUST stay in step, because ./test.sh --cross diffs them.
@@ -537,7 +538,15 @@ func swFloDigits(a float64) string {
 	mant, exp := s[:i], s[i+1:]
 	e10, _ := strconv.Atoi(exp)
 	digits := strings.Replace(mant, ".", "", 1)
-	if e10 < -4 || e10 >= 16 {
+	// THE UPPER BOUNDARY IS ON THE VALUE, NOT THE EXPONENT. SwiftDtoa switches to
+	// scientific when |v| exceeds 2^53, not when the decimal exponent reaches 16, and
+	// the two rules part between 2^53 and 1e16. Read off swift 6.1.2:
+	//   9007199254740992.0 (2^53) -> 9007199254740992.0   plain, the last plain value
+	//   9007199254740994.0        -> 9.007199254740994e+15 the first scientific one
+	//   9999999999999000.0        -> 9.999999999999e+15
+	//   1234567890123456.0        -> 1234567890123456.0
+	// `e10 >= 16` is subsumed: any |v| with e10 >= 16 is >= 1e16 > 2^53.
+	if e10 < -4 || a > 9007199254740992 {
 		out := digits[:1]
 		if len(digits) > 1 {
 			out += "." + digits[1:]

@@ -1,8 +1,16 @@
 # Merging the runtime: a shared MetaJS layer, and a smaller C floor
 
-> **STATUS 2026-08-04. Part A is DONE. Part B is BLOCKED, and the blocker is named.**
-> Part B's movable set is currently empty because MetaJS has no layer 2 of its own - see
-> "Part B - BLOCKED, and the blocker is not a candidate's" below. The single consolidated
+> **STATUS 2026-08-04. Part A is DONE. Part B is OPEN AND UNBLOCKED, and its first
+> candidate has been TRIED AND REJECTED ON MEASUREMENT.** The structural blocker is
+> gone - `lib/metajs-rt.metajs` and the fifteenth generator landed in `33923d4`, so
+> MetaJS has a layer 2 like the other fifteen. Move 1 (`case_map`) was then executed
+> whole, passed every gate, and was **reverted**: 15x on a 1M-`toUpperCase` loop, 135x
+> on a mixed-script one, 2x on a lua loop that never uppercases at all, and +156,000
+> lines of checked-in IR to delete 104 lines of C. The decomposition is the useful
+> part - the floor -> layer-2 CALL costs **120 ns**, the MetaJS binary search costs
+> **3.2 us** - so what does not move is DATA-STRUCTURE work, not upcalls. See
+> "Move 1, `case_map` - EXECUTED IN FULL, MEASURED, AND REVERTED" below.
+> The single consolidated
 > list of everything still open across all three plan documents is at the end of
 > [runtime-next-plan.md](runtime-next-plan.md), under "WHAT IS STILL OPEN".
 
@@ -509,54 +517,114 @@ layer-2 extern yet, so the runtime cost is zero by construction), `MEC_GC=off`
 `BUT -frozen`/`VACUOUS`/`MISMATCH`/`FROZEN-DIFF`, `--cross` **119/0**, clang-check
 **16/16 all agreeing**, all fifteen `gen-*.sh --check` clean.
 
-## Move 1, `case_map` — MEASURED END TO END, and it needs two more files than expected
+## Move 1, `case_map` — EXECUTED IN FULL, MEASURED, AND **REVERTED**. It is a LOSS,
+## and the number that says so also unblocks the rest of Part B (2026-08-04)
 
-Executed whole in a scratch tree, because `runtime.c`, `runtime.metajs`, `js-rt.metajs`
-and `lua-rt.metajs` belong to other agents. It works, and the numbers are these:
+The move was landed whole this time — all four files together, plus a fifth nobody
+had named — every gate in the Part B list was met, and it was then **reverted**,
+because the two benchmarks that had never been pointed at it say it costs between
+**65x and 130x** on any program that uppercases text. The plan's own criterion is
+"revert anything that costs more than a few percent and record the measurement at
+the site". This is that record.
 
-| | before | after |
+### What was built, and it all worked
+
+`runtime.c` 5,238 → 5,134 (−104: five `static long[328]` tables, the search,
+`NCASE`) · `runtime.ll` 48,487 → **43,408** (−5,079) · `runtime.metajs` 605 → 750
+(the 328 ranges + a 20-line binary search) · `js-rt.metajs` and `lua-rt.metajs`
++1 import each. The floor half was the three lines the previous write-up predicted,
+including the two prototypes (`long to_number(long h);` and `long mk_bool(int b);`)
+without which the floor emits an i32 return and the module fails to verify with
+`store operands are not compatible: src=i32; dst=i64*`.
+
+**Every gate passed.** matrix **325/325** · `--full` **5,834 assertions, 0
+languages whose halves disagree**, no `BUT -frozen`/`VACUOUS`/`MISMATCH`/
+`FROZEN-DIFF` · `--cross` **119/0** · clang-check **16/16, all sixteen agreeing,
+none held** · `go test ./abnf/` ok · all fifteen `gen-*.sh --check` clean ·
+`-freeze` a fixed point · `MEC_GC=off` **3,709–3,713 B/iter** with gc RSS flat at
+3.37 MB over 250k/500k/1M/2M · `coro-poc/build.sh` `--gc` byte-identical in all
+four collector modes and `--break` line-for-line identical to `33923d4`.
+`tests/metajs-test-full.js -exe` **513K → 589K**, still 557 checks, 0 failures,
+with `toUpperCase`/`toLowerCase` running a MetaJS binary search called from the C
+floor. A 21-code-point probe (Latin, Greek, Cyrillic, İ/ı, ǅ/ǈ, ẞ, ᾈ, Ⅰ/ⅰ,
+Deseret) gave byte-identical answers from `llvm.Run` and the native binary.
+
+### A FIFTH file, which the four-file finding did not reach
+
+`tests/coro-poc/build.sh` links `tests/coro-poc/gen.ll` against the C floor **with
+no layer 2 at all** — gen.ll *is* the module — so the upcall broke it with
+`Undefined symbols: _js_case_map, referenced from _case_map`. `./test.sh`,
+`--cross` and even `clang-check.sh` are all blind to that; only the coro PoC sees
+it. It is fixable in one stanza (a `define i64 @js_case_map` identity stub in
+gen.ll, which is exactly what `tests/metajs-link-stubrt.c` does for the link test),
+but **every future floor → layer-2 upcall touches five files, not four.**
+
+### The measurement that killed it
+
+The step-0 instrumentation had said `case_map` was cold: 114 corpus calls, zero on
+`bench-alloc.sh` and zero on `metajs-bench-try.js`. That is a statement about the
+BENCHMARKS, not about the function. Two programs that do what `case_map` is for:
+
+| program (native `-exe`, best of 3) | floor (`33923d4`) | layer 2 | factor |
+|---|---|---|---|
+| metajs: 1M × `"a".toUpperCase()` | **0.23 s** | 3.46 s | **15x** |
+| metajs: 200k × up+low of a 17-char mixed-script string (6.8M mappings) | **0.24 s** | 32.40 s | **135x** |
+| lua: 400k `s = s + i % 7` (never uppercases) | 0.93 s | 1.82 s | **2.0x** |
+
+The lua row is the one that shows the second, independent cost. It has nothing to
+do with calling `case_map` — that program never does. Five top-level array
+literals are ~1,640 boxed number cells **plus 321 PINNED interned constants**
+(`lib/compile-core.js:254` pins every distinct numeric constant outside
+[-256, 1024] into a module global that `js_gc_pin` roots for ever), all
+permanently live, and the collector walks them on every one of the run's 1,378
+collections: live bytes 93,760 → 147,632, `pinned` 13 → 334, heap 9.44 → 12.62 MB.
+Putting the five literals behind a lazy `rtCaseInit()` removes that row completely
+(0.88 s, live 97,312, pinned 13, heap unchanged) and does nothing for the other
+two.
+
+**THE GENERAL FINDING, and it is the useful part: the floor → layer-2 CALL is
+CHEAP; the MetaJS BODY is not.** Decomposed with an identity upcall — the same
+four-file move, same prototypes, same imports, but with
+`function js_case_map(c, up) { if (up) { return c } return c }` as the whole of
+layer 2's half:
+
+| 1M `"a".toUpperCase()` | s | delta / call |
 |---|---|---|
-| `runtime.c` | 5,224 lines | **5,118** (−106: five `static long[328]` tables, the search, `NCASE`) |
-| `lib/runtime.ll` | 48,467 lines | **43,388** (−5,079) |
-| `lib/runtime.metajs` | | +125 (the 328 ranges + a 20-line binary search) |
-| `metajs-rt.ll` | 3,048 | 12,599 · `js-rt.ll` 59,285 → 71,696 · `lua-rt.ll` 14,115 → 26,519 · `kotlin-rt.ll` 112,366 → 121,891 |
-| `metajs-test-full -exe` | 474K (513K with the door) | **589K** |
-| lua 400k `s = s + i % 7` | 1.87 s | 1.89 s (+1%, inside the noise band) |
-| `MEC_GC=off` 400k | 3,711 B/iter | 3,712 B/iter · gc RSS 3,309,568 → 3,588,096, still flat |
-| suite | | matrix **325/325**, `--full` **5,834 / 0 disagreeing**, clang-check **16/16 agreeing** |
+| C floor: static tables + binary search | 0.23 | — |
+| upcall + IDENTITY layer-2 body | **0.36** | **+0.12 µs** |
+| upcall + the real MetaJS binary search | 3.46 | +3.23 µs |
 
-`tests/metajs-test-full.js` passes **557 checks natively** with `toUpperCase`/`toLowerCase`
-running a MetaJS binary search called *from the C floor* — which is the door proving
-itself, not a plumbing test.
+So the shim, `jsrtlib_boot`, `js_arr_new`, `js_call` and the `jsdispatch` compare
+chain together cost **120 ns**, which is affordable. The nine iterations of a
+binary search over BOXED ARRAYS cost **3.1 µs — 26x the entire call** — about
+345 ns per loop iteration, because every `t[mid]` is a handle op and every
+comparison is a boxed compare into a collected arena.
 
-The floor half is three lines, and the boxing is the honest part of the price: the call
-site is in the raw code-point domain and layer 2 speaks handles.
+### What this means for the rest of Part B
 
-```c
-/* to_number and mk_bool are defined further down; case_map is the first site above
- * them that needs either, so both are declared here. */
-long to_number(long h);
-long mk_bool(int b);
-long js_case_map(long c, long up);
-long case_map(long c, int up) {
-	return d_to_long(to_number(js_case_map(mk_num(d_from_long(c)), mk_bool(up))));
-}
-```
+The criterion in "The criterion, and the counter-pressure" below is now sharper
+and can be applied before writing any code:
 
-**THE FINDING THAT COSTS TWO MORE FILES.** Only ten `<lang>-rt.metajs` import
-`runtime.metajs`. `js-rt.metajs` and `lua-rt.metajs` do not — so with the move in place
-`js`, `typescript` and `lua` linked `runtime.ll` (which now upcalls `js_case_map`) next to
-a layer 2 that does not define it, and `tests/clang-check.sh` read
-**"ok (module), BUT -exe FAILED TO BUILD"** three times while `./test.sh` and `--cross`
-stayed green — neither builds an `-exe`. Adding `import "./runtime.metajs"` to those two
-files fixes all three and restores 16/16. **Every floor→layer-2 upcall pays this**: the
-declaration is in `runtime.ll`, which all thirteen handle-IR languages link, so the body
-has to be in `runtime.metajs` AND `runtime.metajs` has to be imported by all thirteen.
-`bash`, `batch` and `c` are exempt — their IR is self-contained.
+- **Data-structure work does not move.** A body whose cost is indexing a table or
+  walking an array pays ~345 ns per element touched, against a few ns in C, and
+  its table pays a permanent GC tax in all thirteen layer-2 modules. `case_map`
+  and the Unicode ranges are the worked example; they are hereby on the
+  can-never-move list next to the `d_*` family.
+- **The IR bill is the other half of it, and it is per-language.** −5,079 lines of
+  `runtime.ll` bought +12,400 lines in EACH of the thirteen `<lang>-rt.ll`
+  (metajs-rt 3,048 → 12,622, js-rt 59,285 → 71,798, lua-rt 14,115 → 26,621,
+  kotlin-rt 112,366 → 121,993, …). Net **+156,000 lines of checked-in IR to delete
+  104 lines of C.** Any candidate carrying a table pays this shape.
+- **A small, arithmetic, genuinely cold body could still move**, because 120 ns of
+  call overhead is not what stops it. That is the honest remaining opening, and it
+  is narrower than the candidate list below implies: `fmt_apply` / `fmt_sprint` /
+  `fmt_top` / `fmt_val` and `js_num_str` are reached by **every print**, so each of
+  them needs a print-loop benchmark of its own before, not after.
 
-So the move is a **four-file pair**, not two: `runtime.c` (−106) + `runtime.metajs` (+125)
-+ `js-rt.metajs` and `lua-rt.metajs` (+1 import each). None of the four is committable
-alone, and none of them is the metajs grammar's — the grammar's contribution was the door.
+**Part B has still moved no body, and this is now a measured verdict rather than a
+structural block.** The door (`lib/metajs-rt.metajs`, the fifteenth generator) is
+open and correct and cost 474K → 513K on `metajs-test-full -exe` with zero runtime
+cost; what is missing is a candidate whose MetaJS body is cheap enough.
 
 ## What is actually irreducible
 
@@ -607,7 +675,16 @@ Same suite gates as Part A, plus: `tests/coro-poc/build.sh` with `--gc` and `--b
 unchanged, memory still bounded (rss flat at 250k/1M/2M), and a before/after table for
 every body moved.
 
-## Part B - BLOCKED, and the blocker is not a candidate's (2026-08-04)
+## Part B - was BLOCKED; the block is GONE and the answer changed (2026-08-04)
+
+> **STRUCK, and kept for the argument.** The door landed in `33923d4`
+> (`lib/metajs-rt.metajs` + `tests/gen-metajs-rt-ll.sh` + `metajs-to-llvm-ir.abnf`
+> linking two runtime inputs), so "MetaJS has no layer 2" is no longer true and the
+> movable set is no longer empty for structural reasons. `case_map` was then moved
+> for real and REVERTED on measurement - see "Move 1, `case_map` - EXECUTED IN FULL,
+> MEASURED, AND REVERTED" above. The sentence below that has NOT aged is
+> "**it cannot move**": the conclusion survived, with a completely different reason
+> and a number attached.
 
 Step 0 was done: the floor was instrumented and the hot/cold split MEASURED, which
 corrected the candidate list above in one place and put the whole `d_*` family on a

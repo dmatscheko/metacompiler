@@ -235,7 +235,11 @@ function swFloDigits(a) {
     var p = swSplit10(a)
     var digits = p.d
     var e10 = p.e
-    if (e10 < 0 - 4 || e10 >= 16) {
+    // The upper boundary is on the VALUE, not the exponent: SwiftDtoa goes
+    // scientific above 2^53, and the two rules part between 2^53 and 1e16.
+    // 9007199254740992.0 is the last plain value and 9007199254740994.0 the first
+    // scientific one, read off swift 6.1.2. See abnf/jsrtswift.go.
+    if (e10 < 0 - 4 || a > 9007199254740992) {
         var out = digits.substring(0, 1)
         if (digits.length > 1) { out = out + "." + digits.substring(1, digits.length) }
         var sign = "+"

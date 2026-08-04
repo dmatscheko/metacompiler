@@ -41,6 +41,7 @@ package abnf
 import (
 	"math"
 	"strconv"
+	"strings"
 )
 
 // luMinIntF is 2^63 exactly - the first magnitude that is NOT a Lua integer.
@@ -573,9 +574,64 @@ func luNumStr(v interface{}) string {
 	}
 	s := jsNumString(n)
 	if _, isFlo := luFloBox(v); isFlo {
+		return luFloText(s, n)
+	}
+	return luExpFix(s)
+}
+
+// luFloText finishes an INTEGRAL float's rendering. Lua's own rule (lobject.c
+// tostringbuff) is `if (buff[strspn(buff, "-0123456789")] == '\0')` - append ".0"
+// only when the text is nothing but a sign and digits - and the box this is called
+// for wraps exactly the integral floats, so the text is either all digits or in
+// exponent form. Appending ".0" unconditionally produced "1e+21.0" and
+// "1.7976931348623157e+308.0", which is not a number in any notation. In exponent
+// form Lua goes through C's %g instead, whose exponent is always signed and at
+// least two digits, so "1e-7" is written "1e-07"; and -0.0 keeps its sign, which
+// jsNumString drops because JavaScript's String(-0) is "0". Verified against
+// lua 5.5.0.
+//
+// STILL WRONG, and recorded rather than guessed: WHICH form Lua picks. Lua tries
+// "%.15g", then "%.16g", then "%.17g", and takes the first that round-trips - so
+// 1e15 is "1e+15" while 1e15+1 is "1000000000000001.0" and 1e14 is
+// "100000000000000.0". Ours uses the shortest round-tripping form throughout, which
+// is JavaScript's window (plain below 1e21) and gets the large integral floats
+// plain where Lua writes them scientific. Fixing that needs rounding the EXACT
+// value of the double to 15 significant digits, which Go has as
+// strconv.FormatFloat(n, 'g', 15, 64) and neither JS-dialect half has at all (no
+// toPrecision anywhere in metajs-to-llvm-ir.abnf), so doing it here alone would
+// CREATE a --cross divergence. See docs/runtime-next-plan.md, "WHAT IS STILL OPEN"
+// item 1.
+func luFloText(s string, n float64) string {
+	if n == 0 && math.Signbit(n) {
+		s = "-0"
+	}
+	if !strings.ContainsRune(s, 'e') {
 		return s + ".0"
 	}
-	return s
+	return luExpFix(s)
+}
+
+// luExpFix rewrites JavaScript's exponent form into C's %g one - always signed, at
+// least two digits - and leaves anything without an exponent alone. It is applied to
+// the UNBOXED path too, because the box wraps only the INTEGRAL floats: a
+// non-integral float like 1e-7 never reaches luFloText and still has to print
+// "1e-07" rather than "1e-7". An integer's text is digits only, so this is the
+// identity on it.
+func luExpFix(s string) string {
+	i := strings.IndexByte(s, 'e')
+	if i < 0 {
+		return s
+	}
+	mant, exp := s[:i], s[i+1:]
+	sign := "+"
+	if len(exp) > 0 && (exp[0] == '+' || exp[0] == '-') {
+		sign = exp[:1]
+		exp = exp[1:]
+	}
+	if len(exp) < 2 {
+		exp = "0" + exp
+	}
+	return mant + "e" + sign + exp
 }
 
 // luKey normalises a table key. Numbers and strings address the map the way the

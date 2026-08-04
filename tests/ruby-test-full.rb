@@ -891,6 +891,20 @@ def s32
   # Ruby to_s rendering of the container types.
   check("n15", [1, 2].to_s == "[1, 2]")
   check("n16", 1.0.to_s == "1.0")
+  # Float#to_s uses RUBY'S exponent window, not JavaScript's: numeric.c flo_to_s
+  # goes exponential when decpt < -3 or decpt > 15, the mantissa always carries a
+  # fraction digit and the exponent is always signed and at least two digits. Every
+  # literal below is ruby 2.6.10p210's own answer. Before the fix the right-hand
+  # sides read 1000000000000000.0 / 1234567890123456.0 / 0.00001 / 100000000000000000000.
+  check("n16b", 1e15.to_s == "1.0e+15" && 999999999999999.0.to_s == "999999999999999.0")
+  check("n16c", 1234567890123456.0.to_s == "1.234567890123456e+15" &&
+                1e20.to_s == "1.0e+20")
+  check("n16d", 1e-5.to_s == "1.0e-05" && 0.0001.to_s == "0.0001" &&
+                5.0e-324.to_s == "5.0e-324")
+  # -0.0 keeps its sign. The compiled half already answered this; the interpreter's
+  # unary minus was `0 - x`, which returns +0.0 for a zero operand.
+  check("n16e", (-0.0).to_s == "-0.0" && 0.0.to_s == "0.0" &&
+                (-1e16).to_s == "-1.0e+16")
   check("n17", true.to_s == "true")
   check("n18", :sym.to_s == "sym")
 end

@@ -2462,7 +2462,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function rneg(v) {
         if (typeof v == "number") { return 0 - v }
-        if (isFlo(v)) { return mkFlo(0 - v.f) }
+        // `x * (0 - 1)` and NOT `0 - x`: the two agree everywhere except on zero,
+        // where `0 - 0.0` is +0.0 and Ruby's -0.0 keeps its sign ((-0.0).to_s is
+        // "-0.0"). Both compiled halves already answered -0.0 here; only this one
+        // did not, and it was invisible until floStr started rendering the sign.
+        if (isFlo(v)) { return mkFlo(v.f * (0 - 1)) }
         if (isRat(v)) { return mkRat(0 - v.n, v.d) }
         if (isCpx(v)) { return mkCpx(0 - v.re, 0 - v.im) }
         if (isUserObj(v)) { return mcall(v, "-@", [], null) }
@@ -2651,11 +2655,76 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Dictionaries (isDict/dictFind/dictSet) are shared - see lib/interp-core.js.
 
     // Ruby to_s / interpolation and inspect.
-    // A Float prints with a decimal point even when its value is whole (1000.0).
+    // A Float prints with a decimal point even when its value is whole (1000.0), and
+    // goes to exponent form outside RUBY'S window rather than JavaScript's:
+    // numeric.c flo_to_s is exponential when `decpt < -3 || decpt > DBL_DIG` (15),
+    // with the mantissa always carrying a fraction digit ("1.0e+15") and the exponent
+    // always signed and at least two digits ("e-05"). The before / after table and the
+    // ground truth (ruby 2.6.10p210) are at rubyFloStr in abnf/jsrt.go, which this
+    // must stay in step with - ./test.sh --cross diffs the two.
+    // floSplit10 turns a > 0 into {d: significant digits, e: scientific exponent}.
+    function floSplit10(a) {
+        var s = "" + a
+        var mant = s
+        var e10 = 0
+        var ei = s.indexOf("e")
+        if (ei >= 0) {
+            mant = s.substring(0, ei)
+            var es = s.substring(ei + 1)
+            var eneg = false
+            if (es.charAt(0) == "+") { es = es.substring(1) }
+            else if (es.charAt(0) == "-") { eneg = true; es = es.substring(1) }
+            e10 = parseInt(es, 10)
+            if (eneg) { e10 = 0 - e10 }
+        }
+        var pt = mant.length
+        var di = mant.indexOf(".")
+        var digits = mant
+        if (di >= 0) {
+            pt = di
+            digits = mant.substring(0, di) + mant.substring(di + 1)
+        }
+        var lead = 0
+        while (lead < digits.length && digits.charAt(lead) == "0") { lead++ }
+        digits = digits.substring(lead)
+        pt = pt - lead
+        var end = digits.length
+        while (end > 1 && digits.charAt(end - 1) == "0") { end-- }
+        digits = digits.substring(0, end)
+        if (digits.length == 0) { return {d: "0", e: 0} }
+        return {d: digits, e: e10 + pt - 1}
+    }
+    function floZeros(n) {
+        var out = ""
+        for (var i = 0; i < n; i++) { out = out + "0" }
+        return out
+    }
+    function floDigits(a) {
+        var p = floSplit10(a)
+        var digits = p.d
+        var e10 = p.e
+        var decpt = e10 + 1
+        if (decpt < 0 - 3 || decpt > 15) {
+            var out = digits.substring(0, 1)
+            if (digits.length > 1) { out = out + "." + digits.substring(1) }
+            else { out = out + ".0" }
+            var sign = "+"
+            var ex = e10
+            if (ex < 0) { sign = "-"; ex = 0 - ex }
+            if (ex < 10) { return out + "e" + sign + "0" + ex }
+            return out + "e" + sign + ex
+        }
+        if (decpt <= 0) { return "0." + floZeros(0 - decpt) + digits }
+        if (decpt >= digits.length) { return digits + floZeros(decpt - digits.length) + ".0" }
+        return digits.substring(0, decpt) + "." + digits.substring(decpt)
+    }
     function floStr(x) {
         if (x != x) { return "NaN" }
-        if (x == Math.floor(x) && x < 10000000000000000 && x > -10000000000000000) { return "" + x + ".0" }
-        return "" + x
+        if (x - x != 0) { return x > 0 ? "Infinity" : "-Infinity" }
+        // -0.0 keeps its sign, which the old body dropped.
+        if (x == 0) { return 1 / x < 0 ? "-0.0" : "0.0" }
+        if (x < 0) { return "-" + floDigits(0 - x) }
+        return floDigits(x)
     }
     function rstr(v) {
         if (v === null || v === undefined) { return "" }

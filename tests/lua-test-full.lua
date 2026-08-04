@@ -268,6 +268,14 @@ function s11()
     check("ift7", 7.5 % 2 == 1.5 and -0.5 % 2 == 1.5, true)
     check("ift8", "" .. (1 + 0.0), "1.0") -- mixed arithmetic goes float
     check("ift9", (1 / 0 > 1e308) and (0 / 0 ~= 0 / 0), true) -- inf and NaN
+    -- Lua appends ".0" only when the text is nothing but a sign and digits
+    -- (lobject.c tostringbuff runs strspn over "-0123456789"), so an EXPONENT form
+    -- must not get one: this used to print "1e+21.0", which is not a number in any
+    -- notation. And the exponent goes through C's %g, so it is always signed and at
+    -- least two digits - "1e-07", never JavaScript's "1e-7". lua 5.5.0's own answers.
+    check("ift10", "" .. 1e21, "1e+21")
+    check("ift11", "" .. 1e100, "1e+100")
+    check("ift12", "" .. 1e-7, "1e-07")
 end
 
 -- ===== SECTION 12: bitwise operators =====

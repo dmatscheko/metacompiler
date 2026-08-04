@@ -2102,7 +2102,18 @@ func (rt *jsrt) setGoMember(obj interface{}, name string, val interface{}) {
 		rv.SetMapIndex(reflect.ValueOf(name), rt.convertToType(val, rv.Type().Elem()))
 		return
 	}
-	rt.fail("cannot set member '%s' on %s", name, rv.Type())
+	// THE LAST ARM IS NOT THE GO BRIDGE'S - it is setMember's `default:`, reached by
+	// any JS PRIMITIVE (`var x = 5; x.foo = 1`), and it used to say
+	// "cannot set member 'foo' on float64": the Go reflect TYPE, in a diagnostic for a
+	// language that has no float64. The C floor says "member assignment 'foo' on 5"
+	// (languages/lib/runtime.c:2971, die3), and so does setMember's own
+	// undefined/null arm eleven lines above (jsrt.go:2029) - which is the invariant
+	// die3's comment states and this was the one site breaking it. Aligned on the
+	// floor's wording, which is also the VALUE-not-TYPE shape the sibling get
+	// diagnostic already uses ("member 'foo' of undefined", jsrt.go:1771). The two
+	// genuinely Go-bridge failures above keep rv.Type(), because there the Go type IS
+	// the thing the user has to fix.
+	rt.fail("member assignment '%s' on %s", name, rt.toString(obj))
 }
 
 // ----------------------------------------------------------------------------
@@ -2751,7 +2762,28 @@ func rubyAsRat(v interface{}) jsRat {
 }
 
 // rubyFloStr renders a Float the way Ruby does: with a decimal point even when the
-// value is whole (1000.0), which is what tells it apart from the Integer 1000.
+// value is whole (1000.0), which is what tells it apart from the Integer 1000, and
+// in exponent form OUTSIDE ITS OWN WINDOW - which is not JavaScript's window and was
+// the defect this replaced. Ruby's rule is numeric.c flo_to_s: take the shortest
+// round-tripping digit run and its decimal point position `decpt`, and go
+// exponential when `decpt < -3 || decpt > DBL_DIG` (15). Read off ruby 2.6.10p210;
+// Float#to_s has not changed between 2.6 and 3.x, and needs no Ruby-3 syntax to
+// probe, so the local 2.6 interpreter settles this row:
+//
+//	                    ruby                    was (JavaScript's window)
+//	1e15                1.0e+15                 1000000000000000.0
+//	999999999999999.0   999999999999999.0       999999999999999.0
+//	1234567890123456.0  1.234567890123456e+15   1234567890123456.0
+//	1e20                1.0e+20                 100000000000000000000
+//	1e-5                1.0e-05                 0.00001
+//	0.0001              0.0001                  0.0001
+//	-0.0                -0.0                    0.0     <- the sign was dropped
+//
+// Note the two shapes JavaScript never writes: the mantissa always carries at least
+// one fraction digit ("1.0e+15", not "1e+15") and the exponent is at least two
+// digits and always signed ("e-05"). The JS twin is floStr in ruby-interpreter.abnf
+// and rbFloStr in languages/lib/ruby-rt.metajs; all three MUST stay in step,
+// because ./test.sh --cross diffs them.
 func rubyFloStr(x float64) string {
 	if x != x {
 		return "NaN"
@@ -2762,10 +2794,49 @@ func rubyFloStr(x float64) string {
 	if math.IsInf(x, -1) {
 		return "-Infinity"
 	}
-	if x == math.Trunc(x) && math.Abs(x) < 1e16 {
-		return jsNumString(x) + ".0"
+	if math.Signbit(x) {
+		return "-" + rubyFloDigits(math.Abs(x))
 	}
-	return jsNumString(x)
+	return rubyFloDigits(x)
+}
+
+// rubyFloDigits renders a >= 0. strconv's 'e' form gives the shortest round-tripping
+// digit run and the scientific exponent directly; `decpt` below is Ruby's own name
+// for the decimal point position, which is that exponent plus one.
+func rubyFloDigits(a float64) string {
+	if a == 0 {
+		return "0.0"
+	}
+	s := strconv.FormatFloat(a, 'e', -1, 64)
+	i := strings.IndexByte(s, 'e')
+	mant, exp := s[:i], s[i+1:]
+	e10, _ := strconv.Atoi(exp)
+	digits := strings.Replace(mant, ".", "", 1)
+	decpt := e10 + 1
+	if decpt < -3 || decpt > 15 {
+		out := digits[:1]
+		if len(digits) > 1 {
+			out += "." + digits[1:]
+		} else {
+			out += ".0"
+		}
+		sign := "+"
+		if e10 < 0 {
+			sign = "-"
+			e10 = -e10
+		}
+		if e10 < 10 {
+			return out + "e" + sign + "0" + strconv.Itoa(e10)
+		}
+		return out + "e" + sign + strconv.Itoa(e10)
+	}
+	if decpt <= 0 {
+		return "0." + strings.Repeat("0", -decpt) + digits
+	}
+	if decpt >= len(digits) {
+		return digits + strings.Repeat("0", decpt-len(digits)) + ".0"
+	}
+	return digits[:decpt] + "." + digits[decpt:]
 }
 
 // charCode unboxes a Char to its code and leaves every other value alone, so the

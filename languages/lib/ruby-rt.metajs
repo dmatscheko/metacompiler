@@ -443,8 +443,89 @@ function rbNeg(v) {
 
 // ===================================================== rendering ============
 
-// rubyFloStr: a Float keeps its decimal point even when it is whole (1000.0),
-// which is what tells it apart from the Integer 1000.
+// rubyFloStr: a Float keeps its decimal point even when it is whole (1000.0), which
+// is what tells it apart from the Integer 1000, and goes to exponent form outside
+// RUBY'S window rather than JavaScript's. numeric.c flo_to_s: exponential when
+// `decpt < -3 || decpt > DBL_DIG` (15), the mantissa always carrying a fraction
+// digit and the exponent always signed and at least two digits. The full before /
+// after table and the ground truth (ruby 2.6.10p210 - Float#to_s is unchanged in
+// 3.x and needs no Ruby-3 syntax to probe) are at rubyFloStr in abnf/jsrt.go.
+
+// rbSplit10 turns a > 0 into {d: the significant digits with no point and no leading
+// or trailing zero, e: the SCIENTIFIC exponent} - i.e. the value is 0.d1d2... *
+// 10^(e+1), the same pair strconv.FormatFloat(a, 'e', -1, 64) hands the Go twin. The
+// input is the engine's own shortest rendering, which is either a plain decimal
+// ("1234.5", "0.00012") or an exponent form ("1e+21", "1.5e-7").
+function rbSplit10(a) {
+    var s = "" + a
+    var mant = s
+    var e10 = 0
+    var ei = s.indexOf("e")
+    if (ei >= 0) {
+        mant = s.substring(0, ei)
+        var es = s.substring(ei + 1, s.length)
+        var eneg = false
+        if (es.charAt(0) == "+") { es = es.substring(1, es.length) }
+        else if (es.charAt(0) == "-") {
+            eneg = true
+            es = es.substring(1, es.length)
+        }
+        e10 = parseInt(es)
+        if (eneg) { e10 = 0 - e10 }
+    }
+    var pt = mant.length
+    var di = mant.indexOf(".")
+    var digits = mant
+    if (di >= 0) {
+        pt = di
+        digits = mant.substring(0, di) + mant.substring(di + 1, mant.length)
+    }
+    var lead = 0
+    while (lead < digits.length && digits.charAt(lead) == "0") { lead = lead + 1 }
+    digits = digits.substring(lead, digits.length)
+    pt = pt - lead
+    var end = digits.length
+    while (end > 1 && digits.charAt(end - 1) == "0") { end = end - 1 }
+    digits = digits.substring(0, end)
+    if (digits.length == 0) { return {d: "0", e: 0} }
+    return {d: digits, e: e10 + pt - 1}
+}
+
+function rbZeros(n) {
+    var out = ""
+    var i = 0
+    while (i < n) {
+        out = out + "0"
+        i = i + 1
+    }
+    return out
+}
+
+// rbFloDigits renders a > 0. `decpt` is Ruby's own name for the decimal point
+// position, which is the scientific exponent plus one.
+function rbFloDigits(a) {
+    var p = rbSplit10(a)
+    var digits = p.d
+    var e10 = p.e
+    var decpt = e10 + 1
+    if (decpt < 0 - 3 || decpt > 15) {
+        var out = digits.substring(0, 1)
+        if (digits.length > 1) { out = out + "." + digits.substring(1, digits.length) }
+        else { out = out + ".0" }
+        var sign = "+"
+        var ex = e10
+        if (ex < 0) {
+            sign = "-"
+            ex = 0 - ex
+        }
+        if (ex < 10) { return out + "e" + sign + "0" + ex }
+        return out + "e" + sign + ex
+    }
+    if (decpt <= 0) { return "0." + rbZeros(0 - decpt) + digits }
+    if (decpt >= digits.length) { return digits + rbZeros(decpt - digits.length) + ".0" }
+    return digits.substring(0, decpt) + "." + digits.substring(decpt, digits.length)
+}
+
 function rbFloStr(x) {
     if (x !== x) { return "NaN" }
     // The infinities without naming the Infinity global, which the interpreter half
@@ -453,8 +534,14 @@ function rbFloStr(x) {
         if (x > 0) { return "Infinity" }
         return "-Infinity"
     }
-    if (x == Math.trunc(x) && Math.abs(x) < 10000000000000000) { return ("" + x) + ".0" }
-    return "" + x
+    // -0.0 keeps its sign, which the old body dropped: Math.abs of it is +0.0 and
+    // "" + -0.0 is "0" in every engine here.
+    if (x == 0) {
+        if (1 / x < 0) { return "-0.0" }
+        return "0.0"
+    }
+    if (x < 0) { return "-" + rbFloDigits(0 - x) }
+    return rbFloDigits(x)
 }
 
 // Ruby's #to_s. A Float keeps its point, a Symbol is its bare name, and an Array
