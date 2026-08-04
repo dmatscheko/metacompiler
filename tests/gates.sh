@@ -20,8 +20,8 @@
 #                               NOT sufficient for a layer-2 change - it says so.
 #   tests/gates.sh --gen        also re-check all fifteen checked-in .ll files
 #                               reproduce from source (MANDATORY after any
-#                               runtime.c / *-rt.metajs edit; slow, kotlin-rt.ll
-#                               alone is ~120k lines)
+#                               runtime.c / *-rt.metajs edit; via tests/gen-all.sh,
+#                               which shares one binary and runs them in parallel)
 #   tests/gates.sh --freeze     also check `-freeze` is a fixed point (MANDATORY
 #                               after any metajs-to-llvm-ir.abnf / compile-core.js
 #                               edit)
@@ -100,13 +100,13 @@ else
 fi
 
 if [ "$GEN" = 1 ]; then
-    dirty=""; ngen=0
-    for g in tests/gen-*.sh; do
-        [ -f "$g" ] || continue
-        ngen=$((ngen + 1))
-        "$g" --check >/dev/null 2>&1 || dirty="$dirty $(basename "$g")"
-    done
-    if [ -z "$dirty" ]; then pass "gen --check" "all $ngen clean"; else fail "gen --check" "dirty:$dirty"; fi
+    # tests/gen-all.sh builds mec once, exports MEC_BIN so the fifteen generators
+    # skip their own go build, and fans them out. Same fifteen checks, ~6x faster.
+    # Its exit status is the verdict; the summary line is the last line.
+    tests/gen-all.sh --check >"$log/gen" 2>&1; grc=$?
+    gs=$(grep -E '^gen-all: ' "$log/gen" | tail -1)
+    if [ "$grc" = 0 ]; then pass "gen --check" "${gs:-ok}"
+    else fail "gen --check" "${gs:-no summary} - copied to /tmp/gates-gen.log"; cp "$log/gen" /tmp/gates-gen.log; fi
 fi
 
 if [ "$FREEZE" = 1 ]; then

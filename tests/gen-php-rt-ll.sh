@@ -25,16 +25,35 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# A shared binary, if the caller built one. tests/gen-all.sh builds mec ONCE and
+# exports MEC_BIN so the fifteen generators do not each pay for a go build. This
+# is opt-in and it fails safe: MEC_BIN unset, empty, or not executable means this
+# script builds its own private temp binary exactly as it always has, so running
+# this script by hand with no environment set up still does the right thing.
+# Resolved to an absolute path BEFORE the cd, so a relative MEC_BIN also works.
+MEC_BIN_ABS=""
+if [ -n "${MEC_BIN:-}" ]; then
+    case "$MEC_BIN" in
+        /*) [ -x "$MEC_BIN" ] && MEC_BIN_ABS="$MEC_BIN" ;;
+        *)  [ -x "$PWD/$MEC_BIN" ] && MEC_BIN_ABS="$PWD/$MEC_BIN" ;;
+    esac
+fi
+
 cd "$ROOT" || exit 2
 
 CHECK=0
 [ "${1:-}" = "--check" ] && CHECK=1
 
-BIN="$(mktemp -t mec-genphp.XXXXXX)"
-OUT="$(mktemp -t mec-phprt.XXXXXX)"
-trap 'rm -f "$BIN" "$OUT"' EXIT
-
-go build -o "$BIN" . || { echo "gen-php-rt-ll.sh: build failed" >&2; exit 2; }
+if [ -n "$MEC_BIN_ABS" ]; then
+    BIN="$MEC_BIN_ABS"
+    OUT="$(mktemp -t mec-phprt.XXXXXX)"
+    trap 'rm -f "$OUT"' EXIT
+else
+    BIN="$(mktemp -t mec-genphp.XXXXXX)"
+    OUT="$(mktemp -t mec-phprt.XXXXXX)"
+    trap 'rm -f "$BIN" "$OUT"' EXIT
+    go build -o "$BIN" . || { echo "gen-php-rt-ll.sh: build failed" >&2; exit 2; }
+fi
 
 module_only() {
     awk '
