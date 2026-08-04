@@ -385,6 +385,11 @@ KwDefault   = "default" KwEnd ;
     function siOp(code, l, r) {
         var w = siWidthOf(l, r)
         var u = siUnsOf(l, r)
+        // A SHIFT takes its result type from the LEFT operand ALONE - the count is
+        // a separate operand with a type of its own. si_apply carries the same two
+        // lines and the measurement that says why they are a guard rather than a
+        // repair; keep the two in step.
+        if (code == 9 || code == 10) { w = siWidthOf(l, l); u = siUnsOf(l, l) }
         var a = siPair(l)
         var b = siPair(r)
         var x = i64Make(0, 0)

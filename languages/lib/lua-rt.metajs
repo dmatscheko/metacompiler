@@ -72,14 +72,6 @@ function i64FromNum(n) {
     return v
 }
 
-function i64ToNumS(x) {
-    if ((x.h & 0x80000000) !== 0) {
-        var n = i64Neg(x)
-        return 0 - (n.h * 4294967296 + n.l)
-    }
-    return x.h * 4294967296 + x.l
-}
-
 function i64Add(a, b) {
     var l = a.l + b.l
     var carry = l >= 4294967296 ? 1 : 0
@@ -213,15 +205,6 @@ function i64StrU(a) {
 function i64StrS(a) {
     if (i64IsNeg(a)) { return "-" + i64StrU(i64Neg(a)) }
     return i64StrU(a)
-}
-
-// i64Fits53 reads the PAIR, not its double: converting first would round
-// 2^53 + 1 down to 2^53 and answer yes for a value that does not fit.
-function i64Fits53(p) {
-    var q = i64IsNeg(p) ? i64Neg(p) : p
-    if (i64IsNeg(q)) { return false }      // only -2^63 negates to itself
-    if (q.h < 0x200000) { return true }
-    return q.h === 0x200000 && q.l === 0
 }
 
 // ================================================================= the model ==

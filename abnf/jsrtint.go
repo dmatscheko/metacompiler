@@ -154,6 +154,20 @@ func giWidthOf(l, r interface{}) (uint8, bool) {
 // type's full width and wrapped to it.
 func (rt *jsrt) giArith(op string, l, r interface{}) interface{} {
 	w, u := giWidthOf(l, r)
+	// A SHIFT is the one operator whose result type is the LEFT operand's ALONE:
+	// the count is a separate operand with a type of its own. Go says so outright
+	// ("the result type of a shift is the type of the left operand", Arithmetic
+	// operators), and so do JLS 15.19, ECMA-334 12.11, Kotlin's shl/shr/ushr
+	// signatures (the count is always an Int) and Swift's
+	// `>> <RHS: BinaryInteger>` (the count is any integer type, the result is
+	// Self). giWidthOf reads the type off WHICHEVER operand is boxed, so a plain
+	// `int` shifted by a `uint8` count would come out 8 bits UNSIGNED. Every
+	// language's layer 2 normalises the count before it gets here - measured, see
+	// the note in si_apply - so this is a guard on the primitive, not a repair of
+	// an observable bug.
+	if op == "<<" || op == ">>" {
+		w, u = giWidthOf(l, l)
+	}
 	a, b := giVal(rt, l), giVal(rt, r)
 	var x int64
 	switch op {

@@ -145,6 +145,13 @@ function rtkStr(v) { return k1JStr(v) }
 function rtkNum(v) { return ktNum(v) }
 function rtkIsChar(v) { return ktIsChar(v) }
 function rtkIsArr(v) { return Array.isArray(v) }
+// js_supercall's one knob, and Kotlin is the language that forced it: k4bCallAcc
+// sets the k4bThis global around the call so a superclass accessor sees its
+// receiver. The other three spell it f.apply(undefined, argv).
+function rtkCall(f, self, argv) { return k4bCallAcc(f, self, argv) }
+// js_pyset's two knobs.
+function rtkIsDict(v) { return rtIsDictObj(v) }
+function rtkDictFind(keys, k) { return rtDictFind(keys, k) }
 
 // ===================================================== the miss sentinel ====
 
@@ -157,11 +164,7 @@ function ktMiss(v) { return v === KT_MISS }
 
 // ===================================================== the shape tests ======
 
-function ktIsObj(v) {
-    if (v === undefined) { return false }
-    if (v === null) { return false }
-    return typeof v == "object"
-}
+function ktIsObj(v) { return rtIsObj(v) }
 
 // A floor array. The map and set handles are objects WITHOUT a numeric length,
 // and they are excluded by tag as well so a caller cannot confuse the two.
@@ -191,20 +194,15 @@ function ktIsNullish(v) {
     return v === null
 }
 
-function ktIsBool(v) { return typeof v == "boolean" }
-
 // ===================================================== the Char box =========
+//
+// rtCharBox / rtIsCharBox are lib/runtime.metajs's. ktChar was byte-identical to
+// csharp's and java's; ktIsChar was the STRICT spelling of the same predicate and
+// is the one the merged body took.
 
-function ktChar(code) {
-    var o = {}
-    o["__char"] = code
-    return o
-}
+function ktChar(code) { return rtCharBox(code) }
 
-function ktIsChar(v) {
-    if (!ktIsObj(v)) { return false }
-    return typeof v["__char"] == "number"
-}
+function ktIsChar(v) { return rtIsCharBox(v) }
 
 function ktCharCode(v) {
     if (ktIsChar(v)) { return v["__char"] }
@@ -233,8 +231,6 @@ function ktIsInt(v) {
     if (typeof v != "number") { return false }
     return !floIs(v)
 }
-
-function ktIsFlo(v) { return floIs(v) }
 
 // k0IsNumeric is giIsNumeric (jsrtint.go 292) over this value model: the {__char}
 // box stands for the Go jsChar the switch there lists.
@@ -367,15 +363,6 @@ function k0IntLess(l, r) {
     return sintCmp(a, b) < 0
 }
 
-// ktNumLess (jsrtkotlin.go 621): integral operands compare at the promoted
-// width, anything with a Double in it as floating point.
-function ktNumLess(l, r) {
-    if (ktIsInt(l)) {
-        if (ktIsInt(r)) { return k0IntLess(l, r) }
-    }
-    return ktNum(l) < ktNum(r)
-}
-
 // ktDblHash (jsrtkotlin.go 583) is java.lang.Double.hashCode: the 64 bit pattern
 // XOR its own high half, read as an Int. MetaJS has no math.Float64bits, so the
 // bits are derived arithmetically - which is exactly what the twin kDblHash in
@@ -491,17 +478,6 @@ function ktMapPut(m, k, v) {
     return true
 }
 
-// The value under a key, or undefined when there is none. The Go twin's map
-// `get` answers jsNull for a miss; both spellings are Kotlin null here, and the
-// caller that has to answer a Kotlin expression picks the one it needs.
-function ktMapGet(m, k) {
-    var keys = ktMapKeys(m)
-    if (keys === undefined) { return undefined }
-    var i = ktMapFind(keys, k)
-    if (i < 0) { return undefined }
-    return ktMapVals(m)[i]
-}
-
 // ===================================================== the set handle =======
 
 // ktMakeSet (jsrtkotlin.go 2947): the map handle WITHOUT the parallel vals
@@ -538,39 +514,6 @@ function ktSetAdd(s, e) {
     return true
 }
 
-// ktSetFrom (jsrtkotlin.go 3026): a set from an array, deduplicating in
-// first-seen order.
-function ktSetFrom(es) {
-    var s = ktMakeSet()
-    var i = 0
-    while (i < es.length) {
-        ktSetAdd(s, es[i])
-        i = i + 1
-    }
-    return s
-}
-
-// ktSetOfDistinct (jsrtkotlin.go 4536): a set from elements that are ALREADY
-// distinct (a map's keys, its entries), skipping the quadratic uniqueness scan.
-function ktSetOfDistinct(es) {
-    var s = ktMakeSet()
-    var keys = ktSetElems(s)
-    var i = 0
-    while (i < es.length) {
-        keys.push(es[i])
-        i = i + 1
-    }
-    return s
-}
-
-// ktIsCollection (jsrtkotlin.go 4434): the shapes plus/minus treat as a SEQUENCE
-// of elements rather than as one element.
-function ktIsCollection(v) {
-    if (ktIsArr(v)) { return true }
-    if (ktIsSet(v)) { return true }
-    return ktIsMap(v)
-}
-
 // ===================================================== entries and pairs ====
 
 // ktMapEntry (jsrtkotlin.go 4515): key/value for the Kotlin member names and
@@ -591,14 +534,6 @@ function ktMapEntry(k, v) {
 function ktIsEntry(v) {
     if (!ktIsObj(v)) { return false }
     return v["__entry"] === true
-}
-
-// The {first, second} shape `to` and Pair() build.
-function ktPair(a, b) {
-    var o = {}
-    o["first"] = a
-    o["second"] = b
-    return o
 }
 
 // ktIsPair (jsrtkotlin.go 3171). The compiler half's `to` builds a real Pair
@@ -677,8 +612,6 @@ function ktCall(f, args) {
 function ktCall1(f, a) { return ktCall(f, [a]) }
 
 function ktCall2(f, a, b) { return ktCall(f, [a, b]) }
-
-function ktCall3(f, a, b, c) { return ktCall(f, [a, b, c]) }
 
 // ktRecvStack (jsrtkotlin.go 4801) is the implicit-receiver channel: Kotlin's
 // with / run / apply push their receiver here, and the name resolution walks it
@@ -770,31 +703,6 @@ function ktThrowArith(msg) {
     o["__class"] = ktExcClass()
     o["message"] = msg
     throw o
-}
-
-// ktLateinitCheck (jsrtkotlin.go 202) is the read of a `lateinit var`. A lateinit
-// property cannot hold null in Kotlin, so "the field is still null" IS "not
-// initialized yet". __lateinit is the name table the class emitter installs on
-// the descriptor (emitLateinit in kotlin-to-llvm-ir.abnf).
-function ktLateinitCheck(o, name, v) {
-    if (!ktIsNullish(v)) { return v }
-    if (!k0IsRec(o)) { return v }
-    var cls = anytype
-    cls = o["__class"]
-    var guard = 0
-    while (guard < 64) {
-        if (!ktIsObj(cls)) { return v }
-        var li = cls["__lateinit"]
-        if (ktIsObj(li)) {
-            if (li[name] === true) {
-                ktRaise("UninitializedPropertyAccessException",
-                    "lateinit property " + name + " has not been initialized")
-            }
-        }
-        cls = cls["__super"]
-        guard = guard + 1
-    }
-    return v
 }
 
 // ===================================================== equality =============
@@ -949,12 +857,6 @@ function ktKeyLess(a, b) {
     return ktNum(a) < ktNum(b)
 }
 
-// ktKeyEqual (jsrtkotlin.go 4591).
-function ktKeyEqual(a, b) {
-    if (ktKeyLess(a, b)) { return false }
-    return !ktKeyLess(b, a)
-}
-
 // ktCmpKeys (jsrtkotlin.go 5557): one comparator step over two selector keys,
 // reversed for compareByDescending.
 function ktCmpKeys(a, b, desc) {
@@ -1086,8 +988,14 @@ function ktElemHash(v) {
 // ktCmpVals, ktClsFind, ktClassChainHas, ktClassOf, ktCall2, ktIsObj/Arr/Fn,
 // ktIsSet, ktIsMap, ktMiss/KT_MISS) are defined by section 0 and only CALLED.
 // ktRender is section 2's; ktSeqMethod / ktSetMethod / ktMapMethod are
-// section 3's. This section OWNS ktNumMethod, ktAdoptTy, ktFieldTy, ktFormat,
-// ktParseNum and ktFixed.
+// section 3's. This section OWNS ktNumMethod.
+//
+// It USED to own ktAdoptTy, ktFieldTy, ktFormat, ktParseNum and ktFixed as well,
+// and those five bodies were DELETED (docs/runtime-merge-plan.md part A, the
+// reachability sweep): each had a second, LIVE implementation elsewhere in this
+// file - k4bAdoptTy, k4bFieldTy, k2Format, k2ParseNum, k2Fixed - and no js_*
+// extern of this file could reach the copies here. The Go originals they name
+// are still in abnf/jsrtkotlin.go; only the dead second reading is gone.
 //
 // ----- THE REPRESENTATION QUESTION, checked against ktNorm ------------------
 //
@@ -1183,39 +1091,6 @@ function k1OpCode(op) {
 // 1 << 63 is Long.MIN_VALUE and MIN_VALUE - 1 wraps to Long.MAX_VALUE.
 function k1MinI64() { return sintOp(9, 1, 63) }
 function k1MaxI64() { return sintOp(1, k1MinI64(), 1) }
-
-// The decimal text of a value's 64 bit reading - fmt.Sprintf("%d", giVal(v)).
-// The magnitude is printed through an UNSIGNED box, which is what si_str does
-// internally and is the only spelling that is exact at Long.MIN_VALUE (whose
-// negation wraps back to itself and whose unsigned reading IS the magnitude).
-function k1Dec(v) {
-    var x = sintConv(k1Val(v), 64, 0)
-    if (sintCmp(x, 0) < 0) { return "-" + sintStr(sintConv(sintOp(1, 0, x), 64, 1)) }
-    return sintStr(sintConv(x, 64, 1))
-}
-
-// The same value in another radix, Go's %x / %X / %o: a NEGATIVE operand prints
-// as a minus in front of the magnitude's digits (Go does not print two's
-// complement for a signed integer).
-function k1Radix(v, radix, upper) {
-    var x = sintConv(k1Val(v), 64, 0)
-    var sign = ""
-    if (sintCmp(x, 0) < 0) {
-        sign = "-"
-        x = sintOp(1, 0, x)
-    }
-    var m = sintConv(x, 64, 1)
-    var digits = "0123456789abcdef"
-    if (upper) { digits = "0123456789ABCDEF" }
-    if (sintCmp(m, 0) == 0) { return sign + "0" }
-    var out = ""
-    while (sintCmp(m, 0) != 0) {
-        var d = sintNum(sintOp(4, m, radix))
-        out = digits.charAt(d) + out
-        m = sintOp(3, m, radix)
-    }
-    return sign + out
-}
 
 // ----- the operators --------------------------------------------------------
 
@@ -1519,376 +1394,9 @@ function ktNumMethod(recv, name, args) {
 
 // ----- the declared-type adoption pair, OWNED by this section ---------------
 
-// jsrtkotlin.go ktFieldTy (4954): the declared type of a property, walking the
-// __class / __super chain for the __ptypes table the class emitter installs. ""
-// when nothing declares one, which makes the adoption a no-op.
-function ktFieldTy(o, name) {
-    if (!ktIsObj(o)) { return "" }
-    var cls = o["__class"]
-    var i = 0
-    while (i < 64) {
-        if (cls === undefined) { return "" }
-        if (cls === null) { return "" }
-        if (typeof cls != "object") { return "" }
-        var pt = cls["__ptypes"]
-        if (typeof pt == "object") {
-            if (pt !== null) {
-                var ty = pt[name]
-                if (typeof ty == "string") {
-                    if (ty != "") { return ty }
-                }
-            }
-        }
-        cls = cls["__super"]
-        i = i + 1
-    }
-    return ""
-}
-
-// jsrtkotlin.go ktAdoptTy (4969): retypes a value by a declared type name, or
-// answers undefined (the Go twin's nil) when the type carries no width. The
-// width table is the one ktDeclWidth spells in both grammars.
-function ktAdoptTy(v, ty) {
-    var t = ty
-    if (t.length > 0) {
-        if (t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1) }
-    }
-    if (!k1Integral(v)) { return undefined }
-    if (t == "Double" || t == "Float") { return flo(ktNum(v), 0) }
-    if (t == "Int") { return k1Conv(v, 32, 0) }
-    if (t == "Long") { return k1Conv(v, 64, 0) }
-    if (t == "Byte") { return k1Conv(v, 8, 0) }
-    if (t == "Short") { return k1Conv(v, 16, 0) }
-    if (t == "UInt") { return k1Conv(v, 32, 1) }
-    if (t == "ULong") { return k1Conv(v, 64, 1) }
-    if (t == "UByte") { return k1Conv(v, 8, 1) }
-    if (t == "UShort") { return k1Conv(v, 16, 1) }
-    return undefined
-}
-
 // ----- String.toInt() / toLong() / toDouble(), OWNED by this section --------
 
-// jsrtkotlin.go ktParseNum (2461). `name` is one of toInt / toLong / toDouble /
-// toIntOrNull, and it is the CALLER (section 2's ktStrMethod) that decides those
-// four names reach here. Kotlin throws a NumberFormatException for text that is
-// not a number, and java.lang's message is the one both halves report.
-function ktParseNum(s, name) {
-    var t = k1Trim(s)
-    if (name == "toDouble") {
-        // The Go twin is fmt.Sscanf("%g"), which parses a LEADING float and
-        // errors only when there is none; parseFloat has the same rule. The
-        // named values %g also accepts are spelled out, because parseFloat
-        // answers NaN for all three and NaN is how the failure is detected.
-        if (t == "NaN") { return flo(0 / 0, 0) }
-        if (t == "Inf" || t == "+Inf" || t == "Infinity" || t == "+Infinity") { return flo(Infinity, 0) }
-        if (t == "-Inf" || t == "-Infinity") { return flo(0 - Infinity, 0) }
-        var f = parseFloat(t)
-        if (t == "" || f !== f) { ktRaise("NumberFormatException", "For input string: \"" + s + "\"") }
-        return flo(f, 0)
-    }
-    var neg = false
-    var body = t
-    if (body.length > 0) {
-        if (body.charAt(0) == "-") {
-            neg = true
-            body = body.substring(1, body.length)
-        } else if (body.charAt(0) == "+") {
-            body = body.substring(1, body.length)
-        }
-    }
-    if (body == "") {
-        if (name == "toIntOrNull") { return null }
-        ktRaise("NumberFormatException", "For input string: \"" + s + "\"")
-    }
-    // The Go twin accumulates in an int64 and lets it wrap, so the digits go
-    // through the tag rather than through a double.
-    var acc = sintConv(0, 64, 0)
-    var i = 0
-    while (i < body.length) {
-        var c = body.charCodeAt(i)
-        if (c < 48 || c > 57) {
-            if (name == "toIntOrNull") { return null }
-            ktRaise("NumberFormatException", "For input string: \"" + s + "\"")
-        }
-        acc = sintOp(0, sintOp(2, acc, 10), c - 48)
-        i = i + 1
-    }
-    if (neg) { acc = sintOp(1, 0, acc) }
-    if (name == "toLong") { return ktNorm(acc, 64, 0) }
-    return ktNorm(acc, 32, 0)
-}
-
-// strings.TrimSpace over the characters a Kotlin program can put in a numeric
-// literal's surroundings. MetaJS has no trim.
-function k1Trim(s) {
-    var a = 0
-    var b = s.length
-    var going = true
-    while (going && a < b) {
-        if (k1IsSpace(s.charCodeAt(a))) { a = a + 1 } else { going = false }
-    }
-    going = true
-    while (going && b > a) {
-        if (k1IsSpace(s.charCodeAt(b - 1))) { b = b - 1 } else { going = false }
-    }
-    return s.substring(a, b)
-}
-
-function k1IsSpace(c) {
-    if (c == 32) { return true }
-    if (c == 9) { return true }
-    if (c == 10) { return true }
-    if (c == 13) { return true }
-    if (c == 11) { return true }
-    if (c == 12) { return true }
-    return false
-}
-
 // ----- String.format, OWNED by this section --------------------------------
-
-// jsrtkotlin.go ktFixed (5688): a float with `prec` decimals, rounding HALF UP
-// the way java's %f does (Go's Sprintf rounds half to even, so
-// String.format("%5.1f", 1.25) is "  1.3" on java and "  1.2" through Sprintf).
-// The twin is kFixed in kotlin-interpreter.abnf.
-function ktFixed(f, prec) {
-    // `f < 0` is FALSE for -0.0, which is what the Go twin's own test does, so
-    // -0.0 formats as "0.00" in both halves.
-    var neg = f < 0
-    var x = f
-    if (neg) { x = -f }
-    var scale = 1
-    var i = 0
-    while (i < prec) {
-        scale = scale * 10
-        i = i + 1
-    }
-    var scaled = Math.floor(x * scale + 0.5)
-    var whole = Math.floor(scaled / scale)
-    var fs = k1Dec(scaled - whole * scale)
-    while (fs.length < prec) { fs = "0" + fs }
-    var out = k1Dec(whole)
-    if (prec > 0) { out = out + "." + fs }
-    if (neg) { out = "-" + out }
-    return out
-}
-
-// The padding Go's fmt applies to a STRING operand: spaces, or ZEROS in front of
-// the whole string when the '0' flag is set and the field is right-justified.
-// (Routing %f through Sprintf(spec+"s", ...) is what the Go twin does, so a
-// "%08.2f" of -1.25 really does answer "000-1.25" in both halves.)
-function k1PadS(s, width, left, zero) {
-    var out = s
-    var pad = "0"
-    if (!zero) { pad = " " }
-    if (left) {
-        while (out.length < width) { out = out + " " }
-        return out
-    }
-    while (out.length < width) { out = pad + out }
-    return out
-}
-
-// The padding Go's fmt applies to an INTEGER: the precision is a minimum digit
-// count, the '0' flag pads with zeros AFTER the sign, and a precision turns the
-// '0' flag off.
-function k1PadNum(sign, digits, width, left, zero, prec) {
-    var ds = digits
-    if (prec >= 0) {
-        while (ds.length < prec) { ds = "0" + ds }
-    }
-    var body = sign + ds
-    if (left) {
-        while (body.length < width) { body = body + " " }
-        return body
-    }
-    if (zero && prec < 0) {
-        while (sign.length + ds.length < width) { ds = "0" + ds }
-        return sign + ds
-    }
-    while (body.length < width) { body = " " + body }
-    return body
-}
-
-// The sign prefix Go writes for an integer verb: '+' always, ' ' for the space
-// flag, nothing otherwise. (The digits carry their own '-'.)
-function k1SignOf(text, plus, space) {
-    if (text.length > 0) {
-        if (text.charAt(0) == "-") { return "-" }
-    }
-    if (plus) { return "+" }
-    if (space) { return " " }
-    return ""
-}
-
-function k1Unsigned(text) {
-    if (text.length > 0) {
-        if (text.charAt(0) == "-") { return text.substring(1, text.length) }
-    }
-    return text
-}
-
-// Go's %e for a float64: a mantissa with `prec` decimals and an exponent of at
-// least two digits. THE ONE APPROXIMATION IN THIS FILE - the mantissa is scaled
-// and then rounded HALF UP through ktFixed, where Go rounds the exact decimal
-// half to even, so a value exactly on a rounding boundary can differ in the last
-// digit. %e does not appear in any Kotlin test program; it is here because the
-// Go twin has the arm.
-function k1Sci(f, prec) {
-    if (f !== f) { return "NaN" }
-    if (f === Infinity) { return "+Inf" }
-    if (f === 0 - Infinity) { return "-Inf" }
-    var neg = f < 0
-    var a = f
-    if (neg) { a = -f }
-    var e = 0
-    if (a !== 0) {
-        while (a >= 10) {
-            a = a / 10
-            e = e + 1
-        }
-        while (a < 1) {
-            a = a * 10
-            e = e - 1
-        }
-    }
-    var mant = ktFixed(a, prec)
-    // A carry out of the rounding ("9.99" -> "10.00") steps the exponent.
-    if (mant.length > 0) {
-        if (mant.charAt(0) == "1") {
-            if (mant.length > 1) {
-                if (mant.charAt(1) != ".") {
-                    e = e + 1
-                    mant = ktFixed(a / 10, prec)
-                }
-            }
-        }
-    }
-    var es = "+"
-    var ev = e
-    if (ev < 0) {
-        es = "-"
-        ev = 0 - ev
-    }
-    var ed = k1Dec(ev)
-    if (ed.length < 2) { ed = "0" + ed }
-    var out = mant + "e" + es + ed
-    if (neg) { out = "-" + out }
-    return out
-}
-
-// jsrtkotlin.go ktFormat (2504): the subset of java.util.Formatter a test
-// program actually writes - %s, %d, %f with an optional precision, %x, %%, and a
-// width. The flag/width run is collected exactly as the Go twin collects it
-// (',' is dropped), and then applied here, because the floor's own sprintf
-// supports NO width or precision at all.
-function ktFormat(f, args) {
-    var out = ""
-    var ai = 0
-    var i = 0
-    var n = f.length
-    while (i < n) {
-        var ch = f.charAt(i)
-        if (ch != "%") {
-            out = out + ch
-            i = i + 1
-        } else if (i + 1 < n && f.charAt(i + 1) == "%") {
-            out = out + "%"
-            i = i + 2
-        } else {
-            i = i + 1
-            var left = false
-            var plus = false
-            var space = false
-            var zero = false
-            var flagging = true
-            while (i < n && flagging) {
-                var fc = f.charAt(i)
-                if (fc == "-") { left = true; i = i + 1 }
-                else if (fc == "+") { plus = true; i = i + 1 }
-                else if (fc == " ") { space = true; i = i + 1 }
-                else if (fc == "0") { zero = true; i = i + 1 }
-                else if (fc == ",") { i = i + 1 }
-                else { flagging = false }
-            }
-            var width = 0
-            var wgoing = true
-            while (i < n && wgoing) {
-                var wc = f.charCodeAt(i)
-                if (wc == 44) { i = i + 1 }
-                else if (wc >= 48 && wc <= 57) {
-                    width = width * 10 + (wc - 48)
-                    i = i + 1
-                } else { wgoing = false }
-            }
-            var prec = 0 - 1
-            if (i < n) {
-                if (f.charAt(i) == ".") {
-                    i = i + 1
-                    prec = 0
-                    var pgoing = true
-                    while (i < n && pgoing) {
-                        var pc = f.charCodeAt(i)
-                        if (pc >= 48 && pc <= 57) {
-                            prec = prec * 10 + (pc - 48)
-                            i = i + 1
-                        } else if (pc == 44) { i = i + 1 }
-                        else { pgoing = false }
-                    }
-                }
-            }
-            if (i >= n) { i = n }
-            else {
-                var verb = f.charAt(i)
-                var a = anytype
-                if (ai < args.length) { a = args[ai] } else { a = undefined }
-                ai = ai + 1
-                if (verb == "s") {
-                    var sv = ktRender(a)
-                    if (prec >= 0) {
-                        if (sv.length > prec) { sv = sv.substring(0, prec) }
-                    }
-                    out = out + k1PadS(sv, width, left, zero)
-                } else if (verb == "d") {
-                    var dt = k1Dec(k1Val(a))
-                    out = out + k1PadNum(k1SignOf(dt, plus, space), k1Unsigned(dt), width, left, zero, prec)
-                } else if (verb == "f") {
-                    var fp = prec
-                    if (fp < 0) { fp = 6 }
-                    // The Go twin strips the precision from the spec and then
-                    // applies the REST of it to ktFixed's STRING, so the padding
-                    // is the %s one.
-                    out = out + k1PadS(ktFixed(ktNum(a), fp), width, left, zero)
-                } else if (verb == "e") {
-                    var ep = prec
-                    if (ep < 0) { ep = 6 }
-                    out = out + k1PadS(k1Sci(ktNum(a), ep), width, left, zero)
-                } else if (verb == "g") {
-                    // Go's %g is its own shortest float rendering, which is the
-                    // tag's floGo style.
-                    out = out + k1PadS(floStr(flo(ktNum(a), 1)), width, left, zero)
-                } else if (verb == "x" || verb == "X" || verb == "o") {
-                    var radix = 16
-                    if (verb == "o") { radix = 8 }
-                    var xt = k1Radix(k1Val(a), radix, verb == "X")
-                    out = out + k1PadNum(k1SignOf(xt, plus, space), k1Unsigned(xt), width, left, zero, prec)
-                } else if (verb == "c") {
-                    if (ktIsChar(a)) { out = out + String.fromCharCode(ktCharCode(a)) }
-                    else { out = out + ktRender(a) }
-                } else if (verb == "b") {
-                    var bt = "false"
-                    if (a) { bt = "true" }
-                    out = out + k1PadS(bt, width, left, zero)
-                } else {
-                    // An unknown verb is written back and consumes NO argument.
-                    out = out + verb
-                    ai = ai - 1
-                }
-                i = i + 1
-            }
-        }
-    }
-    return out
-}
 
 // ----- the externs ----------------------------------------------------------
 
@@ -2133,7 +1641,6 @@ function js_ktstep(v, delta) {
 // dart-rt.metajs all carry.
 // js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
 
-
 // abnf/jsrt.go js_jband (5170). Java & | ^: the non-short-circuit boolean
 // operator when both sides are booleans, the int32 bit operation otherwise.
 function js_jband(l, r) {
@@ -2184,7 +1691,6 @@ function js_jband(l, r) {
 // top-level `function js_*` is exported by -rt-lib.
 //
 // ============================================================================
-
 
 // ---------------------------------------------------------------- rendering
 
@@ -3285,13 +2791,15 @@ function ktSbMethod(o, name, args) {
 // and never a one-character string: languages/kotlin-to-llvm-ir.abnf:3443 feeds
 // the result straight into the value model, and js_char_code / js_char_like /
 // js_kindex all read that box back.
-function js_char(code_raw) { return ktChar(code_raw) }
+// js_char itself is SHARED - lib/runtime.metajs; the three copies were the same
+// one-line delegation, and the _raw suffix travels with it.
 
 // js_char_code (abnf/jsrt.go:6080): the code of a Char, and rt.toNumber for
 // everything else - so a caller can drive a counter with it without knowing
 // whether it holds a Char. kotlin-to-llvm-ir.abnf:3553 and :5058 use it exactly
 // that way, as a range's numeric bound.
-function js_char_code(v) { return ktNum(v) }
+// js_char_code is SHARED - lib/runtime.metajs, as rtkNum, which is exactly this
+// body: kotlin's copy was the oracle spelled directly.
 
 // js_char_like (abnf/jsrt.go:6085): box `v` back into a Char when `model` is
 // one, else hand `v` back unchanged. This is how a range keeps its element
@@ -4878,7 +4386,6 @@ function js_ktiter(v) {
 
 // ============================================================ small values ==
 
-
 // ktIsIntegral (jsrtkotlin.go:135): an operand of INTEGER arithmetic - a Char is
 // one, a Double is not.
 function k4bIsIntegral(v) {
@@ -5001,18 +4508,8 @@ function k4bLastDot(s) {
 // ---------------------------------------------------------------- arrays ---
 
 // append([]interface{}{v}, rest...) - the receiver in front of the arguments.
-function k4bPrepend(v, args) {
-    var out = []
-    out.push(v)
-    if (args === undefined) { return out }
-    if (args === null) { return out }
-    var i = 0
-    while (i < args.length) {
-        out.push(args[i])
-        i = i + 1
-    }
-    return out
-}
+// SHARED as rtPrepend - lib/runtime.metajs. This copy was the only one of the
+// five that guarded a null/undefined `args`, and the merged body kept the guard.
 
 // The variadic tail of a closure, as a plain array.
 function k4bArgArr(a) {
@@ -5026,100 +4523,6 @@ function k4bArgArr(a) {
 }
 
 // ================================================== the number type objects ==
-
-// ktTypeObj (jsrtkotlin.go:383) builds one of Kotlin's number types as a VALUE,
-// for its companion constants: Int.MAX_VALUE was `unknown name: Int` in both
-// halves before, and Long.MAX_VALUE cannot be written as a plain number at all.
-// SECTION 4a's js_kttype is this function.
-function ktTypeObj(name) {
-    var o = {}
-    if (name == "Int") {
-        o["MAX_VALUE"] = 2147483647
-        o["MIN_VALUE"] = -2147483648
-        o["SIZE_BITS"] = 32
-        o["SIZE_BYTES"] = 4
-        return o
-    }
-    if (name == "Long") {
-        o["MAX_VALUE"] = ktNorm(k4bMaxI64(), 64, false)
-        o["MIN_VALUE"] = ktNorm(k4bMinI64(), 64, false)
-        o["SIZE_BITS"] = 64
-        o["SIZE_BYTES"] = 8
-        return o
-    }
-    if (name == "Byte") {
-        o["MAX_VALUE"] = ktNorm(127, 8, false)
-        o["MIN_VALUE"] = ktNorm(-128, 8, false)
-        o["SIZE_BITS"] = 8
-        o["SIZE_BYTES"] = 1
-        return o
-    }
-    if (name == "Short") {
-        o["MAX_VALUE"] = ktNorm(32767, 16, false)
-        o["MIN_VALUE"] = ktNorm(-32768, 16, false)
-        o["SIZE_BITS"] = 16
-        o["SIZE_BYTES"] = 2
-        return o
-    }
-    if (name == "UInt") {
-        o["MAX_VALUE"] = ktNorm(4294967295, 32, true)
-        o["MIN_VALUE"] = ktNorm(0, 32, true)
-        o["SIZE_BITS"] = 32
-        o["SIZE_BYTES"] = 4
-        return o
-    }
-    if (name == "ULong") {
-        o["MAX_VALUE"] = ktNorm(-1, 64, true)
-        o["MIN_VALUE"] = ktNorm(0, 64, true)
-        o["SIZE_BITS"] = 64
-        o["SIZE_BYTES"] = 8
-        return o
-    }
-    if (name == "UByte") {
-        o["MAX_VALUE"] = ktNorm(255, 8, true)
-        o["MIN_VALUE"] = ktNorm(0, 8, true)
-        o["SIZE_BITS"] = 8
-        o["SIZE_BYTES"] = 1
-        return o
-    }
-    if (name == "UShort") {
-        o["MAX_VALUE"] = ktNorm(65535, 16, true)
-        o["MIN_VALUE"] = ktNorm(0, 16, true)
-        o["SIZE_BITS"] = 16
-        o["SIZE_BYTES"] = 2
-        return o
-    }
-    if (name == "Char") {
-        o["MAX_VALUE"] = ktChar(65535)
-        o["MIN_VALUE"] = ktChar(0)
-        o["SIZE_BITS"] = 16
-        o["SIZE_BYTES"] = 2
-        return o
-    }
-    if (name == "Double" || name == "Float") {
-        // The float companions, BOXED so that Double.NaN is a Double rather than
-        // an Int: kotlin.Double declares MIN_VALUE as the smallest POSITIVE
-        // value, the way java.lang.Double does. No exponent literals in this
-        // dialect - see docs/abnf-dialect-gotchas.md.
-        var mx = parseFloat("1.7976931348623157e308")
-        var mn = parseFloat("4.9e-324")
-        var bits = 64
-        if (name == "Float") {
-            mx = parseFloat("3.4028234663852886e38")
-            mn = parseFloat("1.4e-45")
-            bits = 32
-        }
-        o["MAX_VALUE"] = flo(mx, 0)
-        o["MIN_VALUE"] = flo(mn, 0)
-        o["NaN"] = flo(NaN, 0)
-        o["POSITIVE_INFINITY"] = flo(Infinity, 0)
-        o["NEGATIVE_INFINITY"] = flo(-Infinity, 0)
-        o["SIZE_BITS"] = bits
-        o["SIZE_BYTES"] = bits / 8
-        return o
-    }
-    return o
-}
 
 // ================================================ the neutral jsrt.go externs ==
 
@@ -5272,26 +4675,8 @@ function k4bSetMember(o, key, val) {
 
 // ------------------------------------------------------------ supercall ----
 
-// (super class, this, method name, args array). The walk starts AT the given
-// class: the emitter already resolved the superclass of the DEFINING class, so a
-// subclass override never shadows what super.m() means. The shape is the one
-// languages/lib/csharp-rt.metajs and java-rt.metajs already carry (js_supercall)
-// for the same Go function; the receiver is prepended AND bound as the dynamic
-// `this`, which is what abnf/jsrt.go's memberCall does.
-function js_supercall(sup, self, name, args) {
-    var cls = sup
-    var guard = 0
-    while (guard < 64) {
-        guard = guard + 1
-        if (!ktIsObj(cls)) { guard = 99 } else {
-            var m = cls[name]
-            if (ktIsFn(m)) { return k4bCallAcc(m, self, k4bPrepend(self, args)) }
-            cls = cls["__super"]
-        }
-    }
-    fail("unknown super method '" + name + "'")
-    return undefined
-}
+// js_supercall is SHARED - lib/runtime.metajs (four languages, one knob: rtkCall,
+// which Kotlin is the language that forced).
 
 // ------------------------------------------------------------- js_pyrest ---
 
@@ -5515,7 +4900,7 @@ function ktRefApply(info, args) {
     }
     var ext = info["ext"]
     if (ext !== undefined && ext !== null) {
-        return ktCall(ext, k4bPrepend(recv, k4bRefRest(info, args)))
+        return ktCall(ext, rtPrepend(recv, k4bRefRest(info, args)))
     }
     return ktRefRead(recv, info["name"])
 }
@@ -5539,7 +4924,7 @@ function ktConstruct(cls, args) {
     var obj = {}
     obj["__class"] = cls
     var ctor = cls["__ctor"]
-    if (ktIsFn(ctor)) { ktCall(ctor, k4bPrepend(obj, args)) }
+    if (ktIsFn(ctor)) { ktCall(ctor, rtPrepend(obj, args)) }
     return obj
 }
 
@@ -5667,18 +5052,6 @@ function js_ktnameval(v, name) {
         k4bNamedNames.push(name)
     }
     return v
-}
-
-// The reader SECTION 4a's js_ktfget needs for KFunction.name; "" when the
-// closure never went through a `::`.
-function k4bFuncName(v) {
-    if (!ktIsFn(v)) { return "" }
-    var i = 0
-    while (i < k4bNamedFns.length) {
-        if (k4bNamedFns[i] === v) { return k4bNamedNames[i] }
-        i = i + 1
-    }
-    return ""
 }
 
 // ========================================= property writes and super access ==
@@ -5839,25 +5212,6 @@ function ktDelegKind(v) {
     if (ktIsMap(v)) { return "map" }
     if (ktHasMethod(v, "getValue")) { return "obj" }
     return ""
-}
-
-// ktDelegBox (jsrtkotlin.go:2926) builds one kotlin.properties.Delegates
-// delegate.
-function ktDelegBox(kind, initial, cb) {
-    var o = {}
-    o["__ktdeleg"] = kind
-    o["v"] = initial
-    o["cb"] = cb
-    o["set"] = kind != "notNull"
-    return o
-}
-
-// ktPDeleg (jsrtkotlin.go:2936) recognizes the box a LOCAL or top-level
-// delegated property binds. undefined when v is not one.
-function ktPDeleg(v) {
-    if (!ktIsObj(v)) { return undefined }
-    if (v["__pdeleg"] === true) { return v }
-    return undefined
 }
 
 // ktLazyValue (jsrtkotlin.go:5678): the lazy {} delegate's cached value.
@@ -6094,7 +5448,6 @@ function js_ktset(o, key, val) {
 //   (jsrtkotlin.go:1337).
 // ============================================================================
 
-
 // ----- small local utilities -------------------------------------------------
 
 // argAt(args, i) of the Go twin: out of range is undefined, never an abort.
@@ -6216,7 +5569,6 @@ function k4Unsigned(v) {
     return n == "ULong"
 }
 
-
 // ----- ktKeyLess / ktCmpKeys (jsrtkotlin.go 4567, 5553) ----------------------
 //
 // Section 0's ktCmpVals is the total order these two are the Go twin's private
@@ -6229,7 +5581,6 @@ function k4CmpKeys(a, b, desc) {
     if (desc) { return -c }
     return c
 }
-
 
 // ============================================================================
 // THE SCOPE FUNCTIONS
@@ -6278,7 +5629,6 @@ function ktScopeMethod(target, name, args) {
     }
     return KT_MISS
 }
-
 
 // ============================================================================
 // THE IMPLICIT RECEIVER
@@ -6357,7 +5707,6 @@ function ktRecvMember(recv, name) {
     return k4Bound(recv, name)
 }
 
-
 // ============================================================================
 // THE MAP BUILDER
 // ============================================================================
@@ -6385,7 +5734,6 @@ function ktMapOf(args) {
     }
     return mp
 }
-
 
 // ============================================================================
 // THE QUALIFIED STDLIB PATHS
@@ -6435,7 +5783,6 @@ function ktPkgMember(pkg, name) {
     return undefined
 }
 
-
 // ============================================================================
 // THE COROUTINE SUBSET
 // ============================================================================
@@ -6483,7 +5830,6 @@ function ktJobMethod(j, name) {
     return KT_MISS
 }
 
-
 // ============================================================================
 // Pair / Triple
 // ============================================================================
@@ -6513,7 +5859,6 @@ function ktPairMethod(o, name) {
     }
     return KT_MISS
 }
-
 
 // ============================================================================
 // kotlin.Result
@@ -6599,30 +5944,9 @@ function ktLazyValue(o) {
     return o["v"]
 }
 
-
 // ============================================================================
 // KClass.simpleName
 // ============================================================================
-
-// ktSimpleName (jsrtkotlin.go:5851) is the simple name of a value's class.
-function ktSimpleName(v) {
-    if (v === undefined) { return null }
-    if (v === null) { return null }
-    if (ktIsChar(v)) { return "Char" }
-    if (floIs(v)) { return "Double" }
-    if (sintIs(v)) { return ktBoxTypeName(v) }
-    if (typeof v == "number") { return "Int" }
-    if (typeof v == "string") { return "String" }
-    if (typeof v == "boolean") { return "Boolean" }
-    if (ktIsArr(v)) { return "ArrayList" }
-    if (ktIsObj(v)) {
-        if (v["__isclass"] === true) { return v["__name"] }
-        var cls = v["__class"]
-        if (ktIsObj(cls)) { return cls["__name"] }
-    }
-    return null
-}
-
 
 // ============================================================================
 // THE `is` TEST, for KClass.isInstance only
@@ -6703,7 +6027,6 @@ function k4IsType(v, tname) {
     if (qt.length > 0) { return false }
     return false
 }
-
 
 // ============================================================================
 // THE STDLIB GLOBALS
@@ -7223,7 +6546,6 @@ function k4MinMax(wantMax) {
     }
 }
 
-
 // ============================================================================
 // THE `::` NAME TABLE
 // ============================================================================
@@ -7243,7 +6565,6 @@ function k4NameOf(f) {
     }
     return undefined
 }
-
 
 // ============================================================================
 // THE NEUTRAL TAIL: rt.memberCall (abnf/jsrt.go:2761)
@@ -7331,7 +6652,6 @@ function k4BaseMcall(recv, name, args) {
     fail("method call '" + name + "' on a " + typeof recv)
     return undefined
 }
-
 
 // ============================================================================
 // THE HUB
@@ -7557,7 +6877,6 @@ function k4RefEq(l, r) {
     }
     return false
 }
-
 
 // ============================================================================
 // THE EXPORTS
@@ -7971,16 +7290,26 @@ function k4NameVal(v, name) {
 //   rxSearch(re, text, start) -> m | null    m.begin, m.end, m.caps (2*(n+1) ints,
 //                                            -1 when the group did not take part)
 //   rxMatchAt(re, text, at) -> m | null       the match must BEGIN at `at` (sticky)
+//                                            (DELETED here as unreachable, see below)
 //   rxMatchWhole(re, text, at) -> m | null    the match must run from `at` (0 for
 //                                            the ordinary case) to the very END.
 //                                            NOT a search plus a length check: an
 //                                            alternation has to backtrack into its
 //                                            longer branch.
-//   rxTest(re, text) -> bool
+//   rxTest(re, text) -> bool                 (DELETED here as unreachable)
 //   rxGroup(re, text, m, i) -> string|null   i is 0 for the whole match
 //   rxGroupNamed(re, text, m, name)
 //   rxGroupCount(re) -> n                    capturing groups, not counting 0
+//                                            (DELETED here as unreachable)
 //   rxNameAt(re, i) -> string                "" when group i has no name
+//                                            (DELETED here as unreachable)
+//
+// SIX of the entry points above - rxMatchAt, rxMatchWhole, rxTest, rxReplace,
+// rxSplit, rxGroupCount, rxNameAt - were deleted from THIS copy of the engine by
+// the reachability sweep (docs/runtime-merge-plan.md part A): kotlin's grammar
+// reaches the engine only through js_ktrx* and never asks for them. They are all
+// still in lib/regex.js, which js, python and ruby import, and this list stays
+// here because it is the ENGINE's contract rather than kotlin's subset of it.
 //   rxIndexOfName(re, name) -> i or -1
 
 // rxFail reports a runtime regexp error. It is a KNOB, not a function declaration:
@@ -8028,7 +7357,6 @@ var RX_SNH = 8     // \H
 // Step cap for one rxSearch attempt. A pathological pattern reports
 // "regexp: step limit exceeded" rather than hanging the whole run.
 var RX_STEPS = 400000
-
 
 // ===== Character classes =====
 //
@@ -8163,7 +7491,6 @@ function rxClsMatch(cls, c, icase) {
     if (cls.neg) { return !hit }
     return hit
 }
-
 
 // ===== The pattern parser =====
 //
@@ -8816,7 +8143,6 @@ function rxParseAlt(st) {
     return alt
 }
 
-
 // ===== The emitter =====
 //
 // prog is four parallel arrays: ops[], as[], bs[] and clss[]. Same reason as the
@@ -9020,7 +8346,6 @@ function rxEmitRep(pg, node) {
     }
 }
 
-
 // ===== Compilation =====
 
 function rxCompile(pattern, flags) {
@@ -9106,7 +8431,6 @@ function rxCompile(pattern, flags) {
         src: pattern, flags: flags
     }
 }
-
 
 // ===== The matcher =====
 
@@ -9319,15 +8643,6 @@ function rxSearch(re, text, start) {
     return null
 }
 
-// rxMatchAt: the match must BEGIN at `at` - no scanning forward. This is what a
-// sticky (JavaScript /y/) match and Python's re.match(pattern, s, pos) want, and
-// it is strictly cheaper than searching and then rejecting begin != at.
-function rxMatchAt(re, text, at) {
-    if (!re.ok) { rxFail("invalid regexp: " + re.err) }
-    if (at < 0 || at > text.length) { return null }
-    return rxAttempt(re, text, at, -1)
-}
-
 // rxMatchWhole: the match must cover the WHOLE input. This cannot be a search plus
 // a length check - `(a|ab)` against "ab" has to BACKTRACK into the alternation,
 // and a leftmost search answers "a" and would wrongly report no match. Python's
@@ -9338,12 +8653,6 @@ function rxMatchWhole(re, text, at) {
     if (at < 0 || at > text.length) { return null }
     return rxAttempt(re, text, at, text.length)
 }
-
-function rxTest(re, text) {
-    return rxSearch(re, text, 0) != null
-}
-
-function rxGroupCount(re) { return re.ngroups }
 
 function rxGroup(re, text, m, i) {
     if (i < 0 || i > re.ngroups) { return null }
@@ -9365,46 +8674,10 @@ function rxIndexOfName(re, name) {
     return -1
 }
 
-function rxNameAt(re, i) {
-    var names = re.names
-    var idx = re.nameGroups
-    var k = 0
-    while (k < names.length) {
-        if (idx[k] == i) { return names[k] }
-        k = k + 1
-    }
-    return ""
-}
-
 function rxGroupNamed(re, text, m, name) {
     var i = rxIndexOfName(re, name)
     if (i < 0) { return null }
     return rxGroup(re, text, m, i)
-}
-
-// rxReplace substitutes every match (or only the first when `all` is false).
-// The replacement is expanded: \0 / \1 .. \9 and \k<name> stand for a group,
-// and a doubled backslash for one backslash. Languages spell their template
-// differently ($1 in JS, \1 in Ruby); a grammar that wants another spelling
-// rewrites the template before calling this.
-function rxReplace(re, text, repl, all) {
-    var out = ""
-    var at = 0
-    while (at <= text.length) {
-        var m = rxSearch(re, text, at)
-        if (m == null) { break }
-        out = out + text.substring(at, m.begin) + rxExpand(re, text, m, repl)
-        if (m.end == m.begin) {
-            // An empty match must still make progress or this loop never ends.
-            if (m.end < text.length) { out = out + text.charAt(m.end) }
-            at = m.end + 1
-        } else {
-            at = m.end
-        }
-        if (!all) { break }
-    }
-    if (at <= text.length) { out = out + text.substring(at, text.length) }
-    return out
 }
 
 function rxExpand(re, text, m, repl) {
@@ -9437,30 +8710,6 @@ function rxExpand(re, text, m, repl) {
         i = i + 2
     }
     return out
-}
-
-// rxSplit cuts `text` at every match. A zero-width match advances by one character,
-// so /x*/ on "abc" answers the individual letters rather than looping.
-function rxSplit(re, text) {
-    var parts = []
-    var at = 0
-    var last = 0
-    while (at <= text.length) {
-        var m = rxSearch(re, text, at)
-        if (m == null) { break }
-        if (m.end == m.begin) {
-            if (m.begin >= text.length) { break }
-            parts.push(text.substring(last, m.begin + 1))
-            last = m.begin + 1
-            at = m.begin + 1
-        } else {
-            parts.push(text.substring(last, m.begin))
-            last = m.end
-            at = m.end
-        }
-    }
-    parts.push(text.substring(last, text.length))
-    return parts
 }
 
 // ===================================================== the Kotlin layer =====

@@ -2302,6 +2302,12 @@ symbols (the 25 the union needs plus `js_jvnum` and `js_jvstr`, which
 
 ### THE ONE WALL, and how it was closed WITHOUT a floor change
 
+> **SUPERSEDED 2026-08-04 - read this as history.** The unsigned-box representation
+> described below is gone: `sintRaw` landed, and `java-rt.metajs` now carries a
+> long as an honest SIGNED cell with no `jl*` layer. See "THE COLLAPSE ONTO
+> `sintRaw`" further down for what the swap traded and what it measured. The
+> section is kept because the reasoning is what the next language will re-derive.
+
 **`si_norm` unboxes a signed 64 bit value a double holds exactly, and Java's `long`
 must not.** `abnf/jsrtjava.go` says it outright - `jvBox` "is 'read this as a long':
 always a box, never a plain number" - because `1000000L * 1000000L` is
@@ -2511,14 +2517,116 @@ identical to real java**.
 
 ### What is owed, and what generalises
 
-1. ~~**The floor request above** (`sintRaw`, a tag 13 without `si_norm`).~~ **LANDED
-   2026-08-03** in all three engines. What is still owed is the CONSUMER side:
-   `java-rt.metajs`'s `jlDiv`/`jlMod`/`jlSar`/`jlCmp`/`jlStr`/`jlNum` collapse into
-   plain `sintOp`/`sintCmp`/`sintStr`/`sintNum` once the long is a raw SIGNED box,
-   and csharp/go/kotlin/swift/dart never write them at all.
+1. ~~**The floor request above** (`sintRaw`, a tag 13 without `si_norm`), and the
+   CONSUMER side after it.~~ **BOTH DONE** - the floor 2026-08-03, the collapse
+   2026-08-04. See "THE COLLAPSE ONTO `sintRaw`" below.
 2. `abnf/jsrtjava.go` and `abnf/jsrtjvm.go` stay until the change is committed.
 3. ~~The subnormal formatter~~ **DONE 2026-08-03**, all four halves, 613 values
    against real java.
+4. **`Math.abs` of a `long` answers an `int`**, found by the collapse's own probe
+   and NOT introduced by it - `Math.abs(3000000000L)` is -1294967296 where real
+   java 24 says 3000000000, and `Math.abs(Long.MAX_VALUE)` is 0. **20 of the
+   26 lines** on which our java differs from real java over the whole long
+   surface are this one cause. It is one expression in each of TWO halves -
+   `jvmMathObject`'s `abs` in `abnf/jsrtjvm.go` (`rt.toNumber` then a 32 bit wrap)
+   and `jvBoxType("Math")`'s `abs` in `languages/lib/java-rt.metajs`
+   (`rtWrap32(Math.abs(jvNum(v)))`) - plus a ratchet assertion, and the three must
+   land together or the two engines stop agreeing. **`abnf/jsrtjvm.go` is another
+   agent's file this session, so this is reported rather than made.** The other
+   6 of the 26 are `(float)`, which is a no-op in both halves: our java has no
+   32 bit float type at all, which is a value-model decision and not a defect.
+
+### THE COLLAPSE ONTO `sintRaw` - DONE 2026-08-04, and what it actually traded
+
+The unsigned-box workaround above is **gone**. A Java long is now an honest
+`{w: 64, u: 0}` cell built with `sintRaw`, exactly as `csharp-rt.metajs` has
+carried one from the start, and `jlDiv` / `jlMod` / `jlSar` / `jlCmp` / `jlStr` /
+`jlNum` / `jlIsNeg` are deleted: `sintOp` code 3, 4 and 10 branch on the cell's
+own signedness, `sintCmp` compares signed when the type is, `sintStr` prints the
+minus sign and `sintNum` (`si_float`) reads the negative half with `d_from_long`.
+
+**It is a REPRESENTATION SWAP, not a deletion, and the two things it bought have
+to be paid for** - the merge agent's reason for declining was right about both:
+
+1. **`>>>` is no longer free.** An unsigned cell shifts logically, so `>>>` was
+   `sintOp(10, ...)` direct; a signed cell shifts arithmetically. `jlSar` is
+   traded for **`jlShr`**, which re-marks the same bits unsigned for the one
+   call and signs the result back. One helper for one helper, four lines.
+2. **`si_apply` ends in `si_norm`**, which UNBOXES a signed 64 bit result a
+   double holds exactly - so `2L + 3L` comes back as the plain number 5, i.e.
+   as an `int`. Every long-producing `sintOp` therefore goes through **`jlOp`**,
+   which re-boxes with `sintRaw(sintHi(t), sintLo(t), 64, false)` (`sintHi` /
+   `sintLo` read a plain number's two's-complement halves as readily as a
+   cell's). `csharp-rt.metajs` spells the same rule `csNorm`. **This is the
+   invariant to get right**, and it is silent when missed: a long that leaks out
+   as a plain number is an int to everything downstream.
+
+After the swap `sintOp` appears in `java-rt.metajs` at exactly TWO sites, both
+inside `jlOp` and `jlShr`.
+
+**The line delta, stated honestly.** The plan quoted ~90 lines saved. Measured:
+`java-rt.metajs` **1,166 -> 1,097** lines (**-69**), and **754 -> 676** lines of
+code with comments and blanks stripped (**-78**). Six helpers and their rationale
+went; `jlOp` and `jlShr` and their rationale came, plus `jlOp(...)` in place of
+`sintOp(...)` at twelve call sites and `sintRaw` at five constructors.
+
+**What it also removed, which is worth more than the lines**: the second-order
+hazard class audited below is gone from layer 2 - a signed cell is read correctly
+by every floor extern that calls `to_number`. It does NOT remove the emitter's
+`js_jvnum` unwrap, and cannot: `llvm.Run` runs `abnf/jsrtjava.go`, whose `jvBox`
+is unchanged, so `java-to-llvm-ir.abnf` still has to emit it. **The saving is in
+layer 2 only for as long as the Go twin exists.**
+
+**Ground truth.** `tests/java-test-full.java` is **278 checks, 0 failures**
+natively, and a **16,477-line differential probe** - `+ - * / % & | ^` and all six
+comparisons over 32x32 long pairs (0, +-1, +-2, +-3, +-7, +-10, both int32 edges
+and their neighbours, 2^32 and its negation, +-2^53 and +-(2^53+1), +-1e12, 3e9,
+both int64 edges and their neighbours, 0x5555...), the three shifts over 14 counts
+spanning 0/31/32/33/62/63/64/65/100 and the negative ones, unary `-` and `~`,
+rendering, concatenation, the `(double)` / `(float)` / `(int)` / `(short)` /
+`(byte)` / `(char)` casts, `Math.abs` / `Math.max` / `Math.min`, `Long.parseLong`,
+`++` / `--` / `+=` / `-=` / `*=` / `>>=` / `>>>=`, the mixed int/long and
+long/double grids, and `Long.MAX_VALUE` / `MIN_VALUE` / `SIZE` / `BYTES` - is
+
+```
+the native binary vs llvm.Run                    BYTE-IDENTICAL, 16,477 lines
+the native binary vs a clean archive of 44bb09a  BYTE-IDENTICAL, 16,477 lines
+                                                 (the SAME binary output, so the
+                                                 swap is observably neutral)
+real java 24.0.2                                 26 lines differ, ALL pre-existing
+                                                 (identical at 44bb09a): 20 are
+                                                 Math.abs(long), 6 are (float)
+```
+
+**Discriminating power**, measured the way the plan asks - one behaviour mutated
+at a time, against the existing 278 assertions, in the native binary (the only
+engine that runs layer 2):
+
+```
+jlOp does NOT re-box (si_norm's plain number kept)          7 fail
+>>> uses the signed (arithmetic) shift                      3 fail
+the cell marked UNSIGNED again, with no jl* layer           4 fail
+```
+
+So no new ratchet assertions were owed: `int14` (`1000000L * 1000000L`), `int15`,
+`int21`/`int22`/`int48` (long `>>>` on negatives), `int24`/`int26`
+(`Long.MIN_VALUE / -1`) and `int7` already pin every arm of the swap. **A refactor
+that adds no assertion has to prove that by mutation, and that is what the three
+rows above are.**
+
+**The floor's pending shift-result-type fix does not change this calculus.**
+`giArith` / `si_apply` codes 9 and 10 / `szArithSlow` should take `w`/`u` from
+the LEFT operand only; Java already passes a PLAIN NUMBER count to every shift
+(`jvShift` masks it with `& 63` first), so `si_width_of(l, s)` picks the left cell
+today and will pick it after. Checked, not assumed - `si_apply` already carries a
+`die("PROBE-C >>")` asserting exactly that.
+
+**The generalisation, now that both representations have been built and measured**:
+`sintRaw` wins, and the reason is not the line count. `>>>` costs one helper
+either way (`jlSar` or `jlShr`), and `jlOp` is the same three lines `csNorm` is.
+What the unsigned box costs that the signed one does not is the SECOND-ORDER
+hazard - every floor extern reading `to_number` on the cell sees a magnitude -
+and that is a whole-emitter audit per language rather than a helper.
 
 ### The second-order hazard, audited across the whole floor
 
@@ -5246,6 +5354,7 @@ Oracle: **`/opt/homebrew/bin/python3`, Python 3.14.6**.
 matrix                325/325
 --full                5,618 assertions, 0 languages whose halves disagree (python 261)
                       grep -E 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF' -> empty
+                      (2026-08-04: python 269, the eight sig9-sig16 below)
 --cross               119 programs, 0 divergent, 0 differing only in warnings
 go test ./abnf/       ok
 clang-check           16/16, and python joins the RUN-IT row
@@ -5434,34 +5543,41 @@ Ruby formatter boundaries reached.
    (`python-interpreter.abnf` binds parameters itself), so this is `llvm.Run` and
    the native binary only - which is why `--cross` cannot see it either.
 
-   The fix is one condition in two places, and **both files are other agents' this
-   session, so it is reported rather than made**:
+   **FIXED 2026-08-04, both halves and the assertions in ONE change.** The fix is
+   one condition in two places, and it is decided by IDENTITY, never by length:
 
-   - `abnf/jsrt.go`, `js_pycall`: decide by IDENTITY rather than by length -
-     `pyBindCall` returns the caller's own `pos` slice in each of its three no-op
-     arms, so `if len(bound) == len(pos) && (len(bound) == 0 || &bound[0] == &pos[0])`
-     is exact. Cleanest is to have `pyBindCall` return a second `rebound bool`.
-   - `languages/lib/python-rt.metajs`, `js_pycall` (about line 3517): the same
-     test, kept "literally, even though the two arrays cannot differ in content when
-     their lengths agree" - a comment that is false, and the counter-example is
-     `f(1, 2, 3)`. Layer 2 has no pointer identity, so `pyBindCall` there should
-     answer `null` (or a flag) when it did not rebind.
+   - `abnf/jsrt.go`: `pyBindCall` is now a wrapper over **`pyBindCallR`, which
+     returns `([]interface{}, bool)`** - the bool is "binding built a NEW array".
+     `js_pycall` asks that instead of comparing lengths, and only then keeps the
+     caller's own argument handle (`rt.callH` with `a[1]`, an identity
+     optimisation and not a semantic choice). The other eight `pyBindCall` call
+     sites are untouched.
+   - `languages/lib/python-rt.metajs`: `pyBindCall` returns `pos` ITSELF in each
+     of its no-op arms, so `pyCall(callee, bound)` covers both cases and the test
+     disappears entirely. The false comment - "the two arrays cannot differ in
+     content when their lengths agree" - is replaced by the counter-example.
 
-   The ratchet assertion to add to `tests/python-test-full.py` in the same commit -
-   it is red today in the compiled half and green in the interpreter, so it was
-   deliberately NOT added here (it would take `tests/clang-check.sh` from 16/16 to
-   15/16 and put a language in the `--full` "halves disagree" column):
+   **Ratchet**: `tests/python-test-full.py` SECTION 09, `sig9`-`sig16`, **8
+   assertions** (python 261 -> 269). Written against the layout directly: a
+   `*args`/`**kwargs` def binds to `names.length + 2` slots, so `sig11`
+   (`st_args(1, 2, 3)` on one declared name) and `sig16` (`st_args2(1, 2, 3, 4)`
+   on two) are the calls whose POSITIONAL count hits that same number. All eight
+   were checked against **`python3` 3.14.6** standalone first.
 
-   ```python
-   def st_args(a, *rest, **kw):
-       return (a, len(rest), len(kw))
-   check("arg1", st_args(1) == (1, 0, 0))
-   check("arg2", st_args(1, 2) == (1, 1, 0))
-   check("arg3", st_args(1, 2, 3) == (1, 2, 0))      # <- the failing count
-   check("arg4", st_args(1, 2, 3, 4) == (1, 3, 0))
-   check("arg5", st_args(1, x=5) == (1, 0, 1))
-   check("arg6", st_args(1, 2, x=5) == (1, 1, 1))
+   **Discriminating power, from a clean `git archive` of `44bb09a` with ONLY the
+   ratchet file copied in and `go build` run inside**: **2 of 8, by ABORT**, and
+   the abort is what makes it worth reporting - at `44bb09a` the whole file dies
+   with `len() of a number`, so the compiled half loses all of section 09 while
+   the INTERPRETER half is green at 269. That is the "halves disagree" column the
+   assertion was held back to avoid. Per assertion, at `44bb09a`, compiled half:
+
    ```
+   sig9  sig10  sig12  sig13  sig14  sig15   True     (the guard rails)
+   sig11                                     ABORT    len(pos) == 1 + 2
+   sig16                                     ABORT    len(pos) == 2 + 2
+   ```
+
+   With the fix, all three engines answer 269 checks / 0 failures.
 5. Python's `str` has **no method library at all** in either half - no `upper`,
    `strip`, `join`, `split`, `startswith`. `"abc".upper()` fails identically in
    both engines with `unknown String method: upper`, from `jsrt.go:2784` and from
@@ -6873,15 +6989,13 @@ abnf/linkdiag_test.go does not COMPILE (duplicateSymbols did not exist)
    after `var c = csCompare(l, r)`. Until it lands the two C# engines disagree on a
    NaN comparison and the ratchet assertion for it cannot be added (the text is
    written out at the C# site above).
-2. `js_pycall` in `abnf/jsrt.go` AND in `languages/lib/python-rt.metajs`: stop
-   deciding "binding was a no-op" by comparing LENGTHS. The exact condition, the
-   reason the length test is wrong, and the ratchet assertion are written out at the
-   Python site above.
-3. The SHIFT result type in the floor - `giArith` in `abnf/jsrtint.go`, `si_apply`
-   codes 9 and 10 in `languages/lib/runtime.c`, `szArithSlow` in
-   `languages/lib/interp-core.js`. Go was closed at the emitter instead; Java,
-   Kotlin, C#, Swift and Dart specify the same rule and are still latently wrong,
-   invisibly, because both of their halves agree.
+2. ~~`js_pycall` in `abnf/jsrt.go` AND in `languages/lib/python-rt.metajs`~~
+   **DONE 2026-08-04**: decided by IDENTITY (`pyBindCallR`'s `rebound` bool in the
+   twin, `pos` returned by identity in layer 2), pinned by `sig9`-`sig16` in
+   `tests/python-test-full.py` - 2 of 8 red by ABORT from a clean archive of
+   `44bb09a`. Written out at the Python site above.
+3. ~~The SHIFT result type in the floor~~ - **CLOSED 2026-08-04, and the claim it
+   rested on was FALSE. See the section below.**
 
 **One thing this pass changed that nobody asked for, and why.** The C return-type
 fix (item 5) is broader than `_Bool`: the compiled half never converted a returned
@@ -6891,3 +7005,305 @@ half's 44. It was in the same three lines and it is the same C11 clause family, 
 it landed with them. It moved `languages/lib/batch-rt.ll` by four lines of sign
 extension in one `char`-returning function, and that file was regenerated with
 `tests/gen-batch-rt-ll.sh` as its own header instructs.
+
+---
+
+# The shift result type, closed in the FLOOR - and the claim was false (2026-08-04)
+
+## What was owed, and what was actually true
+
+The standing claim was: "the shift result type is the LEFT operand's alone, but
+`js_giarith` reads width and signedness off whichever operand is BOXED. Go was
+closed at the emitter; **Java, Kotlin, C#, Swift and Dart specify the same rule and
+are still latently wrong, invisibly, because both of their halves agree.**"
+
+**Three of those five are not wrong, one cannot be wrong, and the fifth was already
+right.** The rule was fixed in the floor anyway, because the primitive should hold
+it, but it is a GUARD and not a repair, and saying otherwise would be inventing a
+defect that this session's own measurement disproves.
+
+## There are FOUR sites, not three
+
+The owed item named three. There is a fourth, and it is the one the MetaJS
+interpreter runs on:
+
+| site | file |
+|---|---|
+| `giArith` | `abnf/jsrtint.go` (the Go twin's `js_giarith`) |
+| `si_apply` codes 9/10 | `languages/lib/runtime.c` (the C floor's `sintOp`) |
+| `szArithSlow` | `languages/lib/interp-core.js` (the `*-interpreter.abnf` grammars) |
+| **`siOp` codes 9/10** | **`languages/metajs-interpreter.abnf`** (the `sintOp` host builtin) |
+
+All four now carry the same two lines, with the same comment:
+
+```c
+if (code == 9 || code == 10) { w = si_width_of(l, l); u = si_uns_of(l, l); }
+```
+
+## The measurement: a FATAL probe at all four sites, fired ZERO times
+
+A probe was placed at each of the four sites that aborts when the `(w, u)` computed
+from `(l, r)` differs from the `(w, u)` computed from `(l, l)` - i.e. exactly when
+the old code and the new one would disagree. `runtime.ll` was regenerated so the
+native binaries carried it too. It did not fire once:
+
+```
+matrix        325 entries run - 325 passed, 0 failed
+--full        5,800 assertions in total; 0 languages with halves that disagree
+--cross       119 programs compared, 0 divergent
+clang-check   16 modules, all accepted by clang; all sixteen executables agree
+```
+
+The reason is that **every language's layer 2 normalises the count before it
+reaches the floor**, which is what the code says when it is read rather than
+assumed:
+
+| language | where the count is normalised |
+|---|---|
+| Java | `jvShift` masks with `& 31` / `& 63` - a plain number |
+| Kotlin | `k1Shift`: `k1I32(r) & mask` - a plain number, and `shl/shr/ushr` only take an `Int` anyway |
+| C# | `csShift` -> `csShiftCount(r, w)`, and the left operand is always `csBox(l, w, un)`, so the left is the only box |
+| Swift | `js_swshift` ends in `swGiArith(o, l, sintConv(n, 64, false))` - 64-bit signed, which IS the default |
+| Dart | every Dart `int` is 64-bit signed, so a Dart box can only ever be `(64, signed)` |
+| Go | the emitter wraps the count in `js_gival` (`go-to-llvm-ir.abnf`, `giShift`) |
+
+## Ground truth: `java` 24.0.2 and `swiftc` 6.1.2, on the shapes those two can express
+
+Kotlin, C# and Dart **cannot express a non-`int` shift count at all** - Kotlin's
+`shl/shr/ushr` are declared over `Int`, ECMA-334 12.11 converts every count to
+`int`, and Dart's `<<`/`>>` take an `int`. So there is nothing to measure there and
+no toolchain here to measure it with; that rests on the specifications.
+
+Java (JLS 15.19: the count is unary-promoted independently, the result type is the
+promoted LEFT operand) and Swift (`static func >> <RHS: BinaryInteger>(lhs: Self,
+rhs: RHS) -> Self`) both CAN, and both are installed. Both halves already answered
+what the real toolchain answers, before the fix and after it:
+
+```
+java Sh.java                   both metacompiler halves
+  int(-8)   >> byte(1)    -4              -4
+  long(-1024) >> short(3) -128            -128
+  int(1)    << long(40)   256             256      (Java masks 40 & 31)
+  int(-1)   >>> char(1)   2147483647      2147483647
+  long(-8)  >> int(1)     -4              -4
+  int(0xF0) >> long(1)    120             120
+  long(1)   << byte(40)   1099511627776   1099511627776
+
+swiftc -O sh.swift             both metacompiler halves
+  Int(-8)    >> UInt8(1)   -4             -4
+  Int64(-1024) >> UInt16(3) -128          -128
+  Int(1)     << UInt32(40) 1099511627776  1099511627776
+  UInt8(240) >> Int(1)     120            120
+  Int8(-8)   >> UInt64(1)  -4             -4
+```
+
+## Discriminating power: ZERO, and that was the predicted answer
+
+No ratchet assertion was added, because there is nothing an assertion could
+discriminate. Go's `int34`-`int38` in `tests/go-test-full.go` already pin the rule
+end to end; they were red before the emitter fix in `9ee6fcc` and they pass with
+the emitter fix, with the floor fix, and with both. An assertion for Java or Swift
+would pass against a clean archive of `44bb09a` too - the seven Java lines and five
+Swift lines above were run there in effect, since neither half's code path changed.
+**Assertions that pass either way are decoration**; the probe result IS the
+evidence, and it is written into `si_apply`'s comment where the next reader meets
+it.
+
+## What the fix is actually worth
+
+The floor's primitive now holds the rule on its own, so the next language that
+wires a shift straight to `sintOp` without a `csShift`-style wrapper gets it right
+instead of getting a silent 8-bit unsigned result. It also makes Go's emitter fix
+redundant rather than load-bearing - `js_gival` on the count is now belt and
+braces, and it was left in place because removing it is a change with no measured
+benefit.
+
+---
+
+# Part B, step 0: WHICH FLOOR BODIES ARE HOT - measured, not guessed
+
+`runtime.c` has **301 bodies** (counted by the injector below, and it agrees with
+the plan's figure exactly). Before moving any of them the question "which are hot"
+was answered by instrumenting every single one.
+
+## Method
+
+`tests/`-adjacent, throwaway, run in a scratch tree: a script injects
+`RTHIT[n]++;` as the first statement of all 301 top-level definitions (both the
+`f(...) {`-on-its-own-line form and the one-line `f(...) { ...; }` form), adds a
+`long RTHIT[]` table and a dumper that writes `index<TAB>count` to stderr under
+`MEC_RTHIT=1`, from `main()` after `jsmain` returns AND from the `exit()` path so
+that programs which end via `exit` are counted too. `runtime.ll` is regenerated,
+and the native `-exe` binaries then carry exact per-body call counts. **Counts, not
+samples** - a `sample(1)` profile was taken as well and agrees on the ordering, but
+call counts also answer "was it called AT ALL", which is the question that makes a
+move safe.
+
+## The hot end - the two benches named in the plan
+
+`tests/lua-bench-alloc.lua` shape at 200,000 iterations, plus
+`tests/metajs-bench-try.js` at 20,000:
+
+```
+fa            148,052,694     bit_get        26,281,624     ar_alloc_k    10,694,999
+fb            138,302,818     num_bits       22,126,085     ar_block      10,694,989
+str_len       103,072,868     scope_get      17,449,657     bit_clr       10,666,295
+str_eq         76,759,420     js_scope_get   17,449,657     chunk_of      10,659,919
+tag_of         74,645,709     fc             16,493,830     sb             9,807,325
+fd             53,468,528     ff             14,878,218     sa             9,647,966
+str_ptr        51,215,230     to_number      12,885,823     sd             9,500,267
+scope_find     46,754,913     mk_bool        12,354,360     gc_try         7,630,686
+str_intern     29,963,334     truthy         12,240,077     strict_eq      6,971,462
+scope_of       28,009,831     js_truthy      12,240,074     cell_new       6,801,205
+js_str_mem     27,363,174     bit_set        11,759,491     sc             6,740,154
+d_is_nan       26,793,540     d_is_inf       11,027,736     fe/scope_put   6,713,58x
+```
+
+Every one of these is a cell accessor, an interner, a scope operation, the
+allocator or the collector. **None of them is a candidate and none of them was ever
+proposed as one** - which is the reassuring half of the result.
+
+## The candidates the plan named, measured - and the plan's list is WRONG in one place
+
+```
+                       lua bench    try bench    whole native corpus (34 programs)
+d_pow                          0            0      69
+d_exp                          0            0       4
+d_log                          0            0       4
+d_sqrt                         0            0      10
+d_sqrt_d                       0            0       1
+d_modf_int                     0            0      60
+d_odd_int                      0            0       0
+d_floor                        0            0   9,387
+d_ceil                         0            0       6
+d_frexp                        0      143,792   2,947        <-- HOT
+d_ldexp                        0      123,793   2,219        <-- HOT
+d_mod                          0       20,000     737        <-- HOT
+d_mod_go                       0       20,000     741        <-- HOT
+dec_mul                        7            0  35,491
+dec_norm                       6            0   4,518
+dec_to_double                  1            0      84
+dec_cmp                        0            0   6,281
+dec_absdiff                    0            0   2,047
+fmt_top                        1            1      53
+fmt_val                        0            1       0
+fmt_apply                      0            0       6
+fmt_sprint                     0            0       0
+js_num_str                     1            0     306
+case_map (+ the 328-range tables)
+                               0            0     114
+```
+
+**`d_frexp`, `d_ldexp`, `d_mod` and `d_mod_go` are on the `%` hot path and the plan
+groups them with the cold ones.** `metajs-bench-try.js` does `i % 3` once per
+iteration; `d_mod` and `d_mod_go` are 20,000 calls each and each one costs about
+7.2 `d_frexp`/`d_ldexp` pairs. Moving those four to MetaJS would put a
+software-float remainder loop behind every `%` in every language. **They are not
+candidates. Strike them from the list.**
+
+## And a harder finding: `d_pow`/`d_exp`/`d_log`/`d_sqrt`/`d_frexp`/`d_ldexp`/`d_modf_int` CANNOT MOVE AT ALL
+
+Not "should not" - cannot. They are not helpers written on top of doubles; they
+**are** the double. Each one takes or returns a raw `double` or a raw bit pattern
+(`long xb`), and each reads and writes the IEEE-754 layout directly through
+`union DB` - `u.l = u.l & (0 - (1L << (52 - e)))` in `d_modf_int`,
+`((u.l >> 52) & 2047) - 1023` for the exponent, `uy.l ^ INT64_MIN` for a sign flip
+in `d_pow`. MetaJS has no union, no access to a double's bits, and its own numbers
+ARE these doubles: a MetaJS `pow` would be written on `*` and `/`, which the
+compiled output lowers to `__mec_dmul` / `__mec_ddiv` **in this same file**. The
+move would be circular. They belong with `setjmp`, the pthread block, the collector
+and the libc surface on the "can never move" list, and that list is hereby extended
+to say so.
+
+`d_mod`, `d_mod_go`, `d_is_nan`, `d_is_inf`, `d_is_zero`, `d_sign`, `d_neg`,
+`d_abs`, `d_from_long`, `d_to_long`, `d_trunc` and `d_floor` are the same layer and
+the same argument, and `d_floor` is 9,387 corpus calls on top of it.
+
+## What is left, and it is a much shorter list than the plan's
+
+Genuinely cold, genuinely handle-level, genuinely expressible in MetaJS:
+
+| body | corpus calls | note |
+|---|---|---|
+| `case_map` + `CASE_LO/HI/MODE/DU/DL` | 114 | 328 ranges, ~110 lines of data + a 20-line binary search. Pure table lookup. **The best first move.** |
+| `fmt_apply` / `fmt_sprint` / `fmt_top` / `fmt_val` | 6 / 0 / 53 / 0 | format-string machinery, handle level throughout |
+| `dec_*` (`dec_mul` 35,491, `dec_cmp` 6,281, `dec_norm` 4,518, `dec_absdiff` 2,047, `dec_to_double` 84) | | the decimal bignum, reached from `shortest_digits` on the number-to-string path. Handle level, but NOT cold in the corpus - measure per move |
+| `js_num_str` | 306 | |
+
+Note where they go: `languages/lib/runtime.metajs`, which is the merge agent's
+file, so the text has to be handed over rather than edited in. And before moving
+any `js_*` name in either direction, `grep -l 'function js_<name>'
+languages/lib/*.metajs` first - see the `js_bytelen` rule below.
+
+## Coverage, which is a finding of its own
+
+| | bodies called | never called |
+|---|---|---|
+| the two benches | 175 / 301 | 126 |
+| the whole native corpus (34 `-exe` builds of `tests/*-test-features.*` + `tests/*-test-full.*`) | 277 / 301 | **24** |
+
+The 24 that **no native test reaches at all**:
+
+```
+gc_grow  wr  wrn  werr  die  die2  die3  wstr  class_name  jf_is  fmt_sprint
+d_odd_int  js_gicmp  js_gieq  js_ginot  js_ginum  js_gistr  js_giis  js_jfsub
+js_jfmul  js_jfmod  js_jfneg  js_jfint
+```
+
+`wr`/`wrn`/`werr`/`wstr`/`die2`/`die3`/`class_name` are debug and error paths.
+`d_odd_int` is only reachable through `d_pow` with a zero or infinite base.
+**The eleven `js_gi*` / `js_jf*` externs are declared, emitted into every module,
+and called by no test in the repository** - `js_gicmp`, `js_gieq`, `js_ginot`,
+`js_ginum`, `js_gistr`, `js_giis`, `js_jfsub`, `js_jfmul`, `js_jfmod`, `js_jfneg`,
+`js_jfint`. That is either dead surface to delete or a hole in the Go/Java/C#
+ratchet files, and it should be settled before Part B moves anything, because a
+body no test reaches is a body no move can be validated against.
+
+## Gate readings, unchanged by everything in this section
+
+```
+MEC_GC=off  400,000 iters   3,711 B/iter     (was 3,711)
+gc          400,000 iters   rss 3,309,568    (flat at 50k/100k/200k/400k)
+lua native  200,000 iters   0.78s            (was 0.78s)
+metajs try  200,000 iters   0.58s            (was 0.56s, run to run noise)
+```
+
+The instrumentation lives in the scratch tree only; nothing in `languages/lib/`
+carries a counter.
+
+---
+
+# `js_bytelen` - LANDED, as a pair (2026-08-04)
+
+The floor half is `long js_bytelen(long v) { return mk_num(d_from_long(str_len(
+to_string(v)))); }` in `runtime.c`, and the layer-2 half is the DELETION of
+`languages/lib/php-rt.metajs`'s `function js_bytelen(s) { return byteLen(s) }`
+plus a regenerated `lib/php-rt.ll`. **Neither half is committable alone**, and both
+directions were measured rather than predicted:
+
+```
+$ # floor half only, php-rt.metajs untouched
+$ ./mec languages/php-to-llvm-ir.abnf tests/php-test-features.php -q -exe php.out
+error:     js_bytelen
+error: each name above is defined by two or more of the emitted module and the
+error: linked inputs (c.runtime / -rt, -L, -l). Remove one definition; this is NOT
+error: an unresolved symbol, and adding a definition would make it worse.
+clang could not link the executable: 1 duplicate symbol(s), named on stderr
+
+$ # both halves
+$ ./mec languages/php-to-llvm-ir.abnf tests/php-test-features.php -q -exe php.out
+php compiler: wrote executable php.out
+$ ./php.out
+features: 127 checks, 0 failures
+$ ./test.sh -f php          14 entries run - 14 passed, 0 failed
+$ tests/clang-check.sh      php: ok, and the clang executable agrees
+```
+
+Note that the diagnostic is now correct - it says DUPLICATE and says so in the
+right words. That is item 6 of the closed-defects table doing its job; before
+`abnf/linkdiag_test.go` the same failure read "1 unresolved symbol(s)" and sent the
+last reader looking for a missing definition instead of an extra one.
+
+**The general rule, restated because it will bite again:** every extern a layer-2
+file DEFINES is a name the floor may not also define. Before moving any `js_*` body
+into `runtime.c`, run `grep -l 'function js_<name>' languages/lib/*.metajs`.

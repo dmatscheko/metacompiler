@@ -7274,8 +7274,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					return w(rt.call(m, jsUndef, rt.pyBindCall(m, self, kw)))
 				}
 			}
-			bound := rt.pyBindCall(callee, args.elems, kw)
-			if len(bound) == len(args.elems) {
+			bound, rebound := rt.pyBindCallR(callee, args.elems, kw)
+			if !rebound {
 				return w(rt.callH(callee, jsUndef, args.elems, a[1]))
 			}
 			return w(rt.call(callee, jsUndef, bound))
@@ -9484,6 +9484,19 @@ type pySig struct {
 
 // pyBindCall turns (positional, keyword dict) into the callee's argument array.
 func (rt *jsrt) pyBindCall(callee interface{}, pos []interface{}, kw interface{}) []interface{} {
+	out, _ := rt.pyBindCallR(callee, pos, kw)
+	return out
+}
+
+// pyBindCallR is pyBindCall plus the answer to "did binding actually build a
+// NEW array". A caller that wants to pass its own argument handle straight
+// through (js_pycall) must ask THAT question and not "did the length change":
+// the extended layout is [p0..pn-1, *args, **kwargs], so a call whose
+// positional count is exactly len(names)+2 produces a rebound array of the very
+// same length - `def f(a, *rest, **kw)` called `f(1, 2, 3)`. Passing the
+// original array there bound `rest` to a number and `kw` to another, and the
+// first `len(rest)` aborted.
+func (rt *jsrt) pyBindCallR(callee interface{}, pos []interface{}, kw interface{}) ([]interface{}, bool) {
 	kwKeys, kwVals, hasKw := dictParts(kw)
 	if hasKw && len(kwKeys.elems) == 0 {
 		hasKw = false
@@ -9496,12 +9509,12 @@ func (rt *jsrt) pyBindCall(callee interface{}, pos []interface{}, kw interface{}
 		// A builtin (no declared signature) takes the keyword dict as one extra
 		// trailing argument - which is exactly what dict(a=1) / dict(**m) want.
 		if hasKw {
-			return append(append([]interface{}{}, pos...), kw)
+			return append(append([]interface{}{}, pos...), kw), true
 		}
-		return pos
+		return pos, false
 	}
 	if !sig.ext && !hasKw {
-		return pos
+		return pos, false
 	}
 	n := len(sig.names)
 	npos := n - sig.nkwonly
@@ -9537,7 +9550,7 @@ func (rt *jsrt) pyBindCall(callee interface{}, pos []interface{}, kw interface{}
 		extra = pos[npos:]
 	}
 	if !sig.ext {
-		return append(out, extra...)
+		return append(out, extra...), true
 	}
 	rest := &jsArray{elems: append([]interface{}{}, extra...)}
 	lk, lv := &jsArray{}, &jsArray{}
@@ -9549,7 +9562,7 @@ func (rt *jsrt) pyBindCall(callee interface{}, pos []interface{}, kw interface{}
 		}
 	}
 	left := &jsObject{props: map[string]interface{}{"__dict": true, "keys": lk, "vals": lv}}
-	return append(out, rest, left)
+	return append(out, rest, left), true
 }
 
 // pyMinMax is the max()/min() builtin: over the call arguments, or over the

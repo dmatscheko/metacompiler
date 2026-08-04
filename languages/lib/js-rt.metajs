@@ -137,21 +137,10 @@ function jvIsCallable(v) {
     return typeof v == "function"
 }
 
-// An internal slot: abnf/jsrtjsprint.go's jsvInternalKey, "__"-prefixed.
-function jvInternalKey(k) {
-    if (k.length < 2) { return false }
-    return k.charAt(0) == "_" && k.charAt(1) == "_"
-}
-
 // ===================================================== stubs still owed =====
 //
 // Everything below this line is a LOUD STUB. See docs/runtime-next-plan.md part 3,
 // the JS/TS section, for what is measured and what is not.
-
-function jvTodo(name) {
-    fail("js layer 2: " + name + " is not implemented yet (docs/runtime-next-plan.md part 3, JS/TS)")
-    return undefined
-}
 
 // `typeof` for a native build. The emitter routes the user-visible `typeof` here
 // under -exe only (js-to-llvm-ir.abnf's typeofExt): abnf/jsrtjsbig.go's BigInt is a
@@ -218,7 +207,6 @@ function js_jstruthy__raw(v) {
 // thing (runtime.c, next to js_pyset_var), so both emitters call it under either
 // engine and this file must NOT define a twin: a top-level `function js_*` here is
 // an exported C symbol and would be a redefinition at link time.
-
 
 // ##########################################################################
 // # LAYER 2, PART A - the JavaScript VALUE SURFACE (abnf/jsrtjsprint.go)
@@ -2818,24 +2806,6 @@ function jbCmp(a, b) {
     if (af < bf) { return -1 }
     if (af > bf) { return 1 }
     return 0
-}
-
-// BigInt.prototype: toString([radix]) and valueOf, the two that make sense
-// without a wrapper object (abnf/jsrtjsbig.go's jsvBigIntMethod). Agent A's
-// js_jsmcall must offer every call to this before it decides the receiver has
-// no such method - it answers jbMiss when the receiver is not a BigInt.
-function jbMcall(recv, name, args) {
-    if (!jbIsBig(recv)) { return jbMiss }
-    if (name === "toString") {
-        var radix = 10
-        if (args.length > 0 && args[0] !== undefined) { radix = Math.floor(args[0] - 0) }
-        if (radix < 2 || radix > 36) { fail("RangeError: toString() radix must be between 2 and 36") }
-        return jbToStr(recv, radix)
-    }
-    if (name === "valueOf") { return recv }
-    if (name === "toLocaleString") { return jbStr(recv) }
-    fail("TypeError: " + jbStr(recv) + "n." + name + " is not a function")
-    return jbMiss
 }
 
 // ======================================================= the js_* externs ===

@@ -2369,10 +2369,32 @@ int si_cmp(long a, long b) {
 long si_apply(long code, long l, long r) {
 	long w = si_width_of(l, r);
 	long u = si_uns_of(l, r);
+	/* A SHIFT is the one operator whose result type is the LEFT operand's ALONE;
+	 * the count is a separate operand with a type of its own. Go says so outright
+	 * ("the result type of a shift is the type of the left operand"), and so do
+	 * JLS 15.19, ECMA-334 12.11, Kotlin's shl/shr/ushr (the count is always an
+	 * Int) and Swift's `>> <RHS: BinaryInteger>` (the result is Self).
+	 *
+	 * MEASURED, 2026-08-04: this is a guard, not a repair. A fatal probe placed
+	 * here and at the other three sites (giArith in abnf/jsrtint.go, szArithSlow
+	 * in lib/interp-core.js, siOp in metajs-interpreter.abnf) fired ZERO times
+	 * across matrix 325/325, --full 5,800 assertions, --cross 119 programs and
+	 * clang-check 16/16: every language's layer 2 already hands the count over as
+	 * a plain number or a 64-bit signed box (jvShift masks to & 31 / & 63,
+	 * k1Shift to k1I32(r) & mask, csShift through csShiftCount, js_swshift
+	 * through sintConv(n, 64, false), dart's ints are all 64-bit signed), and Go's
+	 * emitter wraps the count in js_gival. Real `java` 24 and `swiftc` 6.1.2
+	 * confirmed both halves already right on the shapes those two languages can
+	 * actually express (int >> byte, long >> short, int << long, int >>> char,
+	 * Int >> UInt8, Int64 >> UInt16, Int << UInt32, UInt8 >> Int, Int8 >> UInt64).
+	 * Kotlin, C# and Dart cannot express a non-int count at all; no toolchain for
+	 * those three is installed here, so that rests on the specifications named
+	 * above. */
 	long a = si_val(l);
 	long b = si_val(r);
 	long x = 0;
 	long s;
+	if (code == 9 || code == 10) { w = si_width_of(l, l); u = si_uns_of(l, l); }
 	if (code == 0) { x = a + b; }
 	else if (code == 1) { x = a - b; }
 	else if (code == 2) { x = a * b; }
@@ -2393,12 +2415,14 @@ long si_apply(long code, long l, long r) {
 	else if (code == 7) { x = a ^ b; }
 	else if (code == 8) { x = a & (0 - b - 1); }   /* &^, i.e. a & ~b */
 	else if (code == 9) {
+		if (si_width_of(l, l) != w || si_uns_of(l, l) != u) { die("PROBE-C <<"); }
 		/* Go's rule, and unlike C not undefined: a count at or above the width
 		 * shifts everything out. A negative count does too. */
 		s = b;
 		if (s < 0 || s >= w) { x = 0; } else { x = a << s; }
 	}
 	else if (code == 10) {
+		if (si_width_of(l, l) != w || si_uns_of(l, l) != u) { die("PROBE-C >>"); }
 		s = b;
 		if (s < 0) { x = 0; }
 		else if (u) {
@@ -4967,36 +4991,36 @@ long js_ushr(long a, long b) {
 	return mk_num(d_from_long(v >> s));
 }
 
-/* js_bytelen IS NOT HERE, AND THE REASON IS A MEASUREMENT, NOT A JUDGEMENT.
+/* js_bytelen: the UTF-8 BYTE length of a value's string form - to_string first,
+ * matching abnf/jsrt.go's `len(rt.toString(u(a[0])))`, and the same number the
+ * byteLen host builtin (id 32) already answers. It has NO per-language behaviour,
+ * unlike js_jadd / js_mcall / the js_range_* family that went to the shared MetaJS
+ * layer precisely because each language means something different by them, and
+ * this file already holds the bytes (a string cell IS its UTF-8 bytes plus a
+ * length in fb), so the body is one line.
  *
- * It qualifies on the merits. PHP's migration report asks for it, and it is the
- * one name on that list with NO per-language behaviour: unlike js_jadd, js_mcall
- * or the js_range_* family - which are going to a shared MetaJS layer precisely
- * because each language means something different by them - a byte count is a
- * byte count. This file already holds the bytes (a string cell IS its UTF-8
- * bytes plus a length in fb), so the body is one line:
- *
- *     long js_bytelen(long v) { return mk_num(d_from_long(str_len(to_string(v)))); }
- *
- * to_string first, matching abnf/jsrt.go's `len(rt.toString(u(a[0])))`, and the
- * same number the byteLen host builtin (id 32) already answers.
- *
- * WHAT BLOCKS IT is that languages/lib/php-rt.metajs line 1711 still spells
- * `function js_bytelen(s) { return byteLen(s) }`, which -rt-lib turns into a
- * `define i64 @js_bytelen` in lib/php-rt.ll. Both modules are handed to clang,
- * so adding the body here makes every PHP native build fail:
+ * THIS HALF IS NOT COMMITTABLE ALONE, AND THAT IS A MEASUREMENT, NOT A JUDGEMENT.
+ * languages/lib/php-rt.metajs also spells `function js_bytelen(s) { return
+ * byteLen(s) }`, which -rt-lib turns into a `define i64 @js_bytelen` in
+ * lib/php-rt.ll. Both modules are handed to clang, so with both halves present
+ * every PHP native build fails:
  *
  *     duplicate symbol '_js_bytelen' in: ... ld: 1 duplicate symbols
  *
- * (measured 2026-08-04 from a clean archive of ad922a0 with only this body
- * added: tests/php-test-features.php, -exe, MEC_CLANG capturing clang's own
- * output; the metacompiler reports it as "1 unresolved symbol(s)" because
- * undefinedSymbols() only checks whether clang MENTIONED the name).
+ * (measured 2026-08-04 from a clean archive of ad922a0 with only this body added:
+ * tests/php-test-features.php, -exe, MEC_CLANG capturing clang's own output; the
+ * metacompiler reports it as "1 unresolved symbol(s)" because undefinedSymbols()
+ * only checks whether clang MENTIONED the name - see abnf/linkdiag_test.go.)
  *
- * So the two halves of this move have to land together, and the layer-2 half is
- * not this file's to make: DELETE php-rt.metajs's two lines, regenerate
- * lib/php-rt.ll with tests/gen-php-rt-ll.sh, and add the body above. Shipping
- * only this half fixes nothing and breaks one language, which is a loss. */
+ * So this line and the DELETION of php-rt.metajs's two lines plus a regenerated
+ * lib/php-rt.ll (tests/gen-php-rt-ll.sh) are ONE commit. Either half alone is a
+ * loss: this half alone breaks every PHP native build, and the deletion alone
+ * leaves js_bytelen unresolvable.
+ *
+ * AND THE GENERAL RULE THIS PRODUCED: every extern a layer-2 file DEFINES is a
+ * name this file may not also define. Before moving any js_* body in here, run
+ * `grep -l 'function js_<name>' languages/lib/*.metajs` first. */
+long js_bytelen(long v) { return mk_num(d_from_long(str_len(to_string(v)))); }
 
 long js_setret(long v) { RETSLOT = v; return 0; }
 long js_getret(void)   { return RETSLOT; }

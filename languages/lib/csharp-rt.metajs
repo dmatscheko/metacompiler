@@ -120,24 +120,23 @@ function rtkStr(v) { return csJavaStr(v) }
 function rtkNum(v) { return csNum(v) }
 function rtkIsChar(v) { return csIsChar(v) }
 function rtkIsArr(v) { return Array.isArray(v) }
+// js_supercall's one knob. Only the four languages whose emitter actually emits
+// js_supercall define it; see the note there.
+function rtkCall(f, self, argv) { return f.apply(undefined, argv) }
+// js_pyset's two knobs.
+function rtkIsDict(v) { return csIsDict(v) }
+function rtkDictFind(keys, k) { return csDictFind(keys, k) }
 
 // ===================================================== the char box =========
+//
+// rtCharBox / rtIsCharBox are lib/runtime.metajs's; csChar and csIsChar were
+// byte-identical to java's jvChar / jvIsChar and near-identical to kotlin's.
 
-function csChar(code) {
-    var o = {}
-    o["__char"] = code
-    return o
-}
+function csChar(code) { return rtCharBox(code) }
 
-function csIsChar(v) {
-    if (v === undefined) { return false }
-    if (v === null) { return false }
-    if (typeof v != "object") { return false }
-    return v["__char"] !== undefined
-}
+function csIsChar(v) { return rtIsCharBox(v) }
 
 // ===================================================== value readings =======
-
 
 // csIsIntegral (jsrtcsharp.go): an operand of INTEGER arithmetic. A char is one,
 // C#'s char being an integral type; a double is not.
@@ -198,12 +197,6 @@ function csNum(v) {
     if (v === false) { return 0 }
     if (typeof v == "string") { return parseFloat(v) }
     return 0
-}
-
-// The int32 reading of an integral operand.
-function csI(v) {
-    var n = csNorm(v, 32, false)
-    return n
 }
 
 // ===================================================== BCL exceptions =======
@@ -308,7 +301,6 @@ function csArith(op, l, r) {
     if (op == "|") { return xi | yi }
     return xi ^ yi
 }
-
 
 // csShift is << >> >>>. The result type is the LEFT operand's alone after unary
 // promotion (ECMA-334 12.11: sbyte/byte/short/ushort/char all become int), and the
@@ -730,18 +722,9 @@ function js_arr_new_n(n, fill) {
     return out
 }
 
-// A char from its CODE. The code arrives as a RAW parameter - csharp-to-llvm-ir
-// writes it with handle(k), so without the _raw suffix the callee would see the
-// handle 0..3, i.e. undefined/null/false/true. The Lua pilot's finding.
-function js_char(code_raw) { return csChar(code_raw) }
-
-// The code of a char, and rt.toNumber for everything else. csharp-to-llvm-ir uses
-// it as the operand guard in front of the FLOOR's js_csflo, which is the one place
-// a floor extern would otherwise meet the {__char} box.
-function js_char_code(v) {
-    if (csIsChar(v)) { return v["__char"] }
-    return csNum(v)
-}
+// js_char and js_char_code are SHARED - lib/runtime.metajs. js_char was the same
+// one-line delegation in three languages; js_char_code's leading csIsChar test was
+// dead, because csNum's second arm already unboxes a char.
 
 // An empty Dictionary<K,V> / Python dict / Go map handle.
 // js_dict_new is SHARED - lib/runtime.metajs (six identical copies, no knobs).
@@ -800,23 +783,8 @@ function js_pyget(c, k) {
     return undefined
 }
 
-function js_pyset(c, k, v) {
-    if (csIsDict(c)) {
-        var keys = c["keys"]
-        var i = csDictFind(keys, k)
-        if (i >= 0) { c["vals"][i] = v } else {
-            keys.push(k)
-            c["vals"].push(v)
-        }
-        return undefined
-    }
-    if (!Array.isArray(c)) { fail("item assignment on a " + typeof c) }
-    var idx = csNum(k)
-    if (idx < 0) { idx = idx + c.length }
-    if (idx < 0 || idx >= c.length) { fail("list assignment index out of range") }
-    c[idx] = v
-    return undefined
-}
+// js_pyset is SHARED - lib/runtime.metajs (five languages, knobs rtkIsDict and
+// rtkDictFind; the index coercion now truncates, which is the oracle).
 
 function js_pylen(v) {
     if (typeof v == "string") { return v.length }
@@ -883,7 +851,6 @@ function csJavaStr(v) {
     return cpToString(v)
 }
 
-
 // C#'s == when a char may be involved. A char must compare equal to the
 // one-character string the interpreter's String indexing answers, too. Without a
 // char operand this is exactly js_seq.
@@ -931,10 +898,9 @@ function js_mcall(recv, name, args) {
         }
         if (name == "indexOf") { return recv.indexOf(cpToString(args[0])) }
         if (name == "contains") { return recv.indexOf(cpToString(args[0])) >= 0 }
-        if (name == "toUpperCase" || name == "ToUpper") { return recv.toUpperCase() }
-        if (name == "toLowerCase" || name == "ToLower") { return recv.toLowerCase() }
-        if (name == "trim" || name == "Trim") { return recv.trim() }
-        if (name == "isEmpty") { return recv.length == 0 }
+        if (name == "ToUpper") { return recv.toUpperCase() }
+        if (name == "ToLower") { return recv.toLowerCase() }
+        if (name == "Trim") { return recv.trim() }
         fail("unknown String method: " + name)
         return undefined
     }
@@ -954,16 +920,9 @@ function js_mcall(recv, name, args) {
     }
     var cls = recv["__class"]
     if (cls !== undefined) {
-        var c = cls
-        var guard = 0
-        while (guard < 64) {
-            guard = guard + 1
-            if (c === undefined) { guard = 99 } else if (c === null) { guard = 99 } else if (typeof c != "object") { guard = 99 } else {
-                var mm = c[name]
-                if (csIsFn(mm)) { return mm.apply(undefined, csPrepend(recv, args)) }
-                c = c["__super"]
-            }
-        }
+        // The __class/__super walk is SHARED - rtFindMethod, lib/runtime.metajs.
+        var mm = rtFindMethod(cls, name)
+        if (csIsFn(mm)) { return mm.apply(undefined, rtPrepend(recv, args)) }
         fail("unknown method '" + name + "' on an instance")
         return undefined
     }
@@ -987,7 +946,7 @@ function csListMethod(recv, name, args) {
         }
         return recv[gi]
     }
-    if (name == "contains" || name == "includes") {
+    if (name == "contains") {
         var k = 0
         while (k < recv.length) {
             if (csValueEq(recv[k], args[0])) { return true }
@@ -1013,7 +972,7 @@ function csDictMethod(recv, name, args) {
     if (name == "keys") { return csCopyArr(recv["keys"]) }
     if (name == "values") { return csCopyArr(recv["vals"]) }
     if (name == "length" || name == "size" || name == "count") { return recv["keys"].length }
-    if (name == "contains" || name == "containsKey") { return csDictFind(recv["keys"], args[0]) >= 0 }
+    if (name == "contains") { return csDictFind(recv["keys"], args[0]) >= 0 }
     if (name == "add") {
         js_pyset(recv, args[0], args[1])
         return undefined
@@ -1043,15 +1002,7 @@ function csIsFn(v) {
     return typeof v == "function"
 }
 
-function csPrepend(v, args) {
-    var out = [v]
-    var i = 0
-    while (i < args.length) {
-        out.push(args[i])
-        i = i + 1
-    }
-    return out
-}
+// csPrepend is SHARED as rtPrepend - lib/runtime.metajs.
 
 // String.Substring with the Go twin's substringRange clamping.
 function csSubstring(s, b, e) {
@@ -1063,23 +1014,7 @@ function csSubstring(s, b, e) {
     return s.substring(begin, end)
 }
 
-// (super class, this, method name, args array). The walk starts AT the given class:
-// the emitter already resolved the superclass of the DEFINING class, so a subclass
-// override never shadows what a hidden-name call means.
-function js_supercall(sup, self, name, args) {
-    var cls = sup
-    var guard = 0
-    while (guard < 64) {
-        guard = guard + 1
-        if (cls === undefined) { guard = 99 } else if (cls === null) { guard = 99 } else if (typeof cls != "object") { guard = 99 } else {
-            var m = cls[name]
-            if (csIsFn(m)) { return m.apply(undefined, csPrepend(self, args)) }
-            cls = cls["__super"]
-        }
-    }
-    fail("unknown super method '" + name + "'")
-    return undefined
-}
+// js_supercall is SHARED - lib/runtime.metajs (four languages, one knob: rtkCall).
 
 // s[lo..hi] on a string or an array: the elements are COPIED. An absent bound
 // arrives as undefined and reads as 0 / the length.

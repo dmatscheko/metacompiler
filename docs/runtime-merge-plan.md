@@ -236,7 +236,7 @@ Native == `llvm.Run` == real go on 46 of 47; line 47 is `-0.0`, where Go folds
 the untyped constant to `0` in the front end, a pre-existing difference unrelated
 to rendering.
 
-### `js_bytelen` - verified as a pair, not shipped as a half
+### `js_bytelen` - was verified as a pair here, and has since LANDED as one
 
 `runtime.c` documents that adding the body collides with
 `php-rt.metajs`'s `function js_bytelen(s) { return byteLen(s) }`. Deleting the
@@ -252,17 +252,178 @@ languages/lib/php-rt.metajs   delete `function js_bytelen(s) { return byteLen(s)
 languages/lib/runtime.c       long js_bytelen(long v) { return mk_num(d_from_long(str_len(to_string(v)))); }
 ```
 
-### Not merged, with the difference list already taken
+## Part A, second pass - the remaining families, and 862 lines of dead code
 
-- **`js_pyset` (6)** - the list is recorded at the bottom of `runtime.metajs`.
-  It needs four knobs, and two findings should be settled before merging: key
-  equality is **identity** (`===`) in dart/python/swift but **value equality**
-  in csharp (`csValueEq`) and go (`goKeyEq`), so two languages find keys three
-  others miss; and the index coercion is `int(rt.toNumber(...))` in the oracle -
-  truncating - which dart/python/ruby/go do and **csharp and swift do not**.
-- `js_mcall` (6), `js_supercall` (5), `js_pylen` (5), `js_pyget` (5), `js_char`
-  (4), `js_char_code` (3), the `js_py*` block, the 2-implementation tail.
-- The `*_kget` / `*_kset` / `*_safeget` verbatim transfers.
+```
+                  HEAD    now   delta   (code lines, comments and blanks excluded)
+kotlin            7366   6750    -616
+java               754    678     -76
+csharp             891    827     -64
+swift              906    856     -50
+dart              1182   1138     -44
+go                1120   1080     -40
+ruby              2020   1987     -33
+php               1690   1661     -29
+js                2685   2664     -21
+lua                679    666     -13
+runtime.metajs      68    145     +77
+                                 -----
+                                  -909
+```
+
+`runtime.metajs` is 605 lines, of which **460 are the difference list**.
+
+### Merged this pass
+
+`js_pyset` (5 of 6), `js_supercall` (4 of 5), `js_char` (3 of 4),
+`js_char_code` (2 of 3), and beneath them the helpers the extern table could
+never see: `rtIsObj`, `rtPrepend`, `rtCharBox`, `rtIsCharBox`, `rtIsDictObj`,
+`rtDictFind`, `rtFindMethod`.
+
+### `js_pyset` - both open questions settled, and both against the machine
+
+- **Key equality was NOT a disagreement, and the first pass's reading was
+  wrong.** `===` in layer 2 is not JavaScript identity: it lowers to the floor's
+  `strict_eq` (`runtime.c:2112`), whose first four lines compare a **boxed
+  double (tag 14)** and a **sized integer (tag 13)** BY VALUE, in `rt.strictEq`'s
+  own arm order, and `rt.strictEq` (`jsrt.go:1164`) is what `rt.dictFind`
+  (`jsrt.go:2348`) finds keys with. So dart's, ruby's and swift's bare `===`
+  scan IS the oracle, and `goKeyEq` -> `goStrictEq` is that same function
+  respelled by hand. Measured, because a reading is not a run: a Swift probe
+  keyed by `Int` 10^12 (a tag 13 box), a rebuilt `String`, and a `Double` gave
+  **identical output under real swiftc 6.1.2, the swift interpreter and a native
+  `-exe`**. The one real difference is csharp's `csValueEq`, whose first arm
+  unboxes a `{__char}`: a Char box is an ordinary object to `strict_eq`, so a
+  `Dictionary<char, V>` would miss every key without it, and the oracle has the
+  arm too (`jsrt.go:1167`). That is `rtkDictFind`, and it is a knob about
+  **which languages have a Char**, not about what equal keys are.
+- **The index coercion IS a divergence, and merging fixed it.** The oracle is
+  `int(rt.toNumber(...))`, which truncates; csharp and swift did not truncate.
+  The merged body does. **Discriminating power: zero, and that is the finding** -
+  ECMA-334 12.8.11.3 converts an array-access index to int/uint/long/ulong and
+  Swift's `Array.subscript(index: Int)` takes an `Int`, so neither language can
+  express a fractional index in any program either grammar accepts. (No C# or
+  Dart toolchain exists on this machine; the C# claim rests on the standard, the
+  Swift one on the standard AND on swiftc 6.1.2.)
+- **A Python finding the probe threw off, not fixed and not this function's.**
+  `d[True] = "t"; d[1] = "one"` is ONE entry under CPython 3.13 and **TWO in both
+  metacompiler halves**, because `strict_eq` - and `rt.strictEq` with it - make a
+  bool and a number different types. Both halves agree, so `--cross` is blind to
+  it. It is an unimplemented Python semantic in the value model, under
+  `abnf/jsrt.go`, not a merge defect.
+
+### `js_mcall` does NOT merge, and what merged instead
+
+Six implementations, **four calling conventions and five method tables**: csharp,
+java and swift each open with a String arm over a different method set and then a
+container arm over a different container model; php has neither and opens on
+`phIsGen`; dart is one line into `dtMember`; lua binds the receiver as `self`
+instead of prepending it. Parameterising that costs more knobs than lines.
+
+What they DO share is the `__class`/`__super` walk that resolves a name to a
+callable - **six copies of the same eleven lines**, counting `js_supercall`'s
+four. That is now `rtFindMethod`, and `js_supercall` is three lines on top of it.
+The 29-name table counts implementations; this row's duplication was somewhere
+else entirely.
+
+### The `sumOf` class, hunted systematically
+
+Method-name arms in a layer-2 dispatcher, checked against whether the language
+can even utter the name. **Eleven arms deleted:**
+
+```
+dart-rt      sumOf   filter  size            Kotlin's collection API. Dart has
+                                             where / length, and no sumOf at all.
+swift-rt     sumOf                           Swift has reduce.
+ruby-rt      magnitude                       Swift's Int.magnitude, in Ruby's
+                                             Numeric dispatcher next to abs.
+csharp-rt    toUpperCase toLowerCase trim     the Java/JS spellings, next to the
+             isEmpty includes containsKey     live ToUpper/ToLower/Trim. csMName
+                                             (csharp-to-llvm-ir.abnf:3412)
+                                             TRANSLATES Contains -> contains and
+                                             rewrites ContainsKey into keys +
+                                             contains, so none of the six can be
+                                             emitted at all.
+```
+
+Four more are python's (`sumOf`, `forEach`, `isEmpty`, `removeLast`) and are
+listed for `python-rt.metajs`'s owner rather than cut here.
+
+The heuristic over-reports and the judgement is the work: `isEmpty` and
+`removeLast` are REAL Swift and Dart methods and stay; `toLocaleString` is real
+JavaScript; kotlin's `alnum`/`punct`/`xdigit` are POSIX classes inside the regex
+engine, reachable from any user pattern. A name absent from the grammar is not
+evidence, because the grammar passes the user program's own spelling through -
+the question is whether the LANGUAGE has the method.
+
+### And a bigger class the hunt found: 862 lines of unreachable functions
+
+A call-graph reachability pass over each layer-2 compile unit (roots: every
+top-level `function js_*`, which is the entire `-rt-lib` export surface, plus the
+file's top level) found **60 functions no extern of their own file can reach**:
+
+```
+kotlin  36 fns  741 lines   ktFormat 108, ktTypeObj 89, ktParseNum 45, k1Sci 42,
+                            ktFieldTy 22, ktFixed 21, rxSplit 21, ktLateinitCheck
+                            20, k1Radix 19, rxReplace 19, ktAdoptTy 17,
+                            ktSimpleName 17, k1PadNum 17, + 23 more
+go       7 fns   41 lines   goClassName goIntOf goIsBox goIsFlo goIsPlain
+                            goIsSlice goKeyEq
+js       3 fns   30 lines   jbMcall jvInternalKey jvTodo
+php      4 fns   22 lines   phIntMax phIsClass phTrunc phTwo63
+lua      2 fns   17 lines   i64Fits53 i64ToNumS
+csharp   1 fn     9 lines   csI
+ruby     1 fn     2 lines   rbIsClass
+python  13 fns  132 lines   NOT CUT - python-rt.metajs is another agent's file
+```
+
+Kotlin dominates because the file is **six independent readings stacked in one
+file** (`k0` / `k1` / `k2` / `k3` / `k4` / `kt` sections): `ktFormat` and
+`k2Format` are the same Go function ported twice, and so are `ktParseNum`/
+`k2ParseNum`, `ktFixed`/`k2Fixed`, `ktFieldTy`/`k4bFieldTy`, `ktAdoptTy`/
+`k4bAdoptTy`, `ktSetFrom`/`k4SetFrom`, `ktDelegBox`/`k4DelegBox`,
+`ktIsCollection`/`k3IsCollection`. The dead half of each pair is what went. The
+analysis over-approximates reachability (an identifier anywhere in a live body
+counts, including inside a property access), so everything it calls dead is dead.
+
+### `js_bytelen` - the layer-2 half is DELETED
+
+`php-rt.metajs`'s `function js_bytelen(s) { return byteLen(s) }` is gone, and
+`runtime.c` carries the body. Verified as a pair: clang-check php **"ok, and the
+clang executable agrees"**, PHP matrix 14/14, and `tests/php-test-features.php`
+**127 checks 0 failures byte-identical between `llvm.Run` and a native `-exe`**.
+
+### `*_kget` / `*_kset` / `*_safeget` - the plan mislocated them
+
+They are **not layer-2 functions at all**. `sw_kget` / `sw_safeget` /
+`dt_kget` / `dt_safeget` are IR helper functions EMITTED by
+`swift-to-llvm-ir.abnf:2495,2531` and `dart-to-llvm-ir.abnf:2437,2451` through
+`rtFunc`, with kotlin's copy at `kotlin-to-llvm-ir.abnf:2555` saying "transferred
+verbatim" at the site. `runtime.metajs` cannot hold them: they are emitter
+closures that build basic blocks, not MetaJS runtime bodies. Merging them means a
+shared ABNF module for the three grammars, which is real work in three files this
+pass did not own.
+
+### Not merged, with the difference list taken
+
+- **`js_pylen` (5) and `js_pyget` (5).** Structurally the same, and the knob
+  count is what stops it: `js_pyget` alone needs the dict test, the dict find,
+  the key RENDERER for the KeyError message (`cpStr`/`dtStr`/`pyStr`/`rbStr`/
+  `swDesc` - five different functions), the string length and the string index
+  (dart routes both through `dtStrLen`/`dtStrAt`), plus python's `__getitem__`
+  dunder and generic-alias arms and a message that appends the index in three
+  languages and not in the other two. Six knobs for a twenty-line body across
+  five languages, and every one of the six is a genuine language difference
+  rather than a spelling. `js_pylen` is the same shape with dart's and swift's
+  set arm added.
+- **The 2-implementation tail, all seventeen rows.** Each pair costs two to four
+  knobs to save ~10 lines across two languages, and the pairs are not variants of
+  one function: `js_range_len` is `goNum` vs `phArrParts`; `js_pyin` is `===` vs
+  `goStrictEq` and `dtToStr` vs `goStrOf`; `js_pyiter` is dart's `dtStrAt` loop
+  vs python's generator drain; `js_pyrest` FAILS on a non-array in kotlin and
+  answers `[]` in python; `js_this` reads a different global in each of its two.
+  The one genuinely shared piece across the tail - the `__class`/`__super` walk -
+  is already `rtFindMethod`.
 - **Java's `jl*` collapse, and it is not the ~90-line freebie it looks like.**
   Marking a long box unsigned is what defeats `si_norm`, and `sintOp` opcode 10
   (`>>`) branches on that flag: with an honest `sintRaw` signed box `>>` becomes

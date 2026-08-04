@@ -1074,6 +1074,15 @@ function szArith(op, l, r) {
 function szArithSlow(op, l, r) {
     var w = szWidth(l, r)
     var u = szUns(l, r)
+    // A SHIFT is the one operator whose result type is the LEFT operand's ALONE -
+    // the count is a separate operand with a type of its own (Go, Arithmetic
+    // operators; JLS 15.19; ECMA-334 12.11; Kotlin's shl/shr/ushr take an Int;
+    // Swift's `>> <RHS: BinaryInteger>` answers Self). szWidth/szUns read the type
+    // off whichever operand is a box, so a plain `int` shifted by a `uint8` would
+    // come out 8 bits UNSIGNED. This is the same guard si_apply carries; see the
+    // measurement written out there (it fired zero times across the whole corpus,
+    // because every language normalises the count before it gets here).
+    if (op == "<<" || op == ">>") { w = szWidth(l, l); u = szUns(l, l) }
     var a = szPair(l)
     var b = szPair(r)
     if (op == "+") { return szNorm(i64Add(a, b), w, u) }

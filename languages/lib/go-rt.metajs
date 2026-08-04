@@ -143,23 +143,15 @@ function rtkNum(v) { return goNum(v) }
 // body stays resolvable; they are never reached.
 function rtkIsChar(v) { return false }
 function rtkIsArr(v) { return Array.isArray(v) }
+// js_supercall's one knob. This language's emitter never emits js_supercall, so
+// the shared body is unreachable here; the hook is defined anyway so that the day
+// it IS emitted the answer is the plain one and not a missing name.
+function rtkCall(f, self, argv) { return f.apply(undefined, argv) }
+// js_pyset's two knobs.
+function rtkIsDict(v) { return goIsDict(v) }
+function rtkDictFind(keys, k) { return rtDictFind(keys, k) }
 
 // ===================================================== value readings =======
-
-// A boxed double (tag 14 / jsJFlo). `typeof v == "number"` is TRUE for one, and
-// for a sized integer too, so every site that meant "an ordinary double" says so.
-function goIsFlo(v) { return floIs(v) }
-
-// giIsInt: the sized-integer box, and nothing else.
-function goIsBox(v) { return sintIs(v) }
-
-// A PLAIN number: neither box.
-function goIsPlain(v) {
-    if (typeof v != "number") { return false }
-    if (floIs(v)) { return false }
-    if (sintIs(v)) { return false }
-    return true
-}
 
 // giNumeric: the two things a declared width may be applied to - a plain number
 // and a sized integer, and NOT a boxed double. A float64 value flowing into a
@@ -212,15 +204,6 @@ function goTrim(s) {
     return s.substring(a, b)
 }
 
-// giVal: the INTEGER reading of a value, as a plain number where it fits and as
-// the box's own value otherwise. Used only where a width is about to be applied.
-function goIntOf(v) {
-    if (sintIs(v)) { return v }
-    if (floIs(v)) { return Math.trunc(floNum(v)) }
-    if (typeof v == "number") { return v }
-    return Math.trunc(goNum(v))
-}
-
 // An index / a length / a count: the plain-number reading.
 function goIdx(v) { return Math.trunc(goNum(v)) }
 
@@ -250,31 +233,12 @@ function goClassOf(v) {
     return c
 }
 
-function goClassName(v) {
-    var c = goClassOf(v)
-    if (c === undefined) { return "" }
-    var n = c.__name
-    if (typeof n != "string") { return "" }
-    return n
-}
-
-function goIsSlice(v) { return goClassName(v) == "$sl" }
-
 // rt.dictFind: the index of a key, or -1. Keys compare with Go's == (goValueEq),
 // which is what dictFind's strictEq plus the runtime's number identity does for
 // every key type a Go map may have.
-function goDictFind(keys, k) {
-    var i = 0
-    while (i < keys.length) {
-        if (goKeyEq(keys[i], k)) { return i }
-        i = i + 1
-    }
-    return 0 - 1
-}
-
-// dictFind's own comparison is rt.strictEq, so a map key needs nothing of its
-// own.
-function goKeyEq(a, b) { return goStrictEq(a, b) }
+// SHARED as rtDictFind - lib/runtime.metajs. goKeyEq is goStrictEq, which is a
+// hand respelling of the floor's strict_eq for numbers and therefore `===`.
+function goDictFind(keys, k) { return rtDictFind(keys, k) }
 
 // rt.strictEq over the value model Go uses. The two number tags compare by
 // VALUE, never by identity: int8(1) == 1 holds and float64(1) == 1 holds.
@@ -821,13 +785,10 @@ function js_is_type(v, t) {
 // extern is what llvm.Run compares against.
 // js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
 
-
 function goJavaStr(v) {
     if (typeof v == "string") { return v }
     return gopStr(v)
 }
-
-
 
 // Python's `x in y`, which the Go emitter uses for the `v, ok := m[k]` probe.
 function js_pyin(x, c) {
@@ -846,19 +807,8 @@ function js_pyin(x, c) {
 }
 
 // List element (negative wraps) or map entry assignment.
-function js_pyset(c, k, v) {
-    if (goIsDict(c)) {
-        var i = goDictFind(c.keys, k)
-        if (i >= 0) { c.vals[i] = v } else { c.keys.push(k); c.vals.push(v) }
-        return undefined
-    }
-    if (!Array.isArray(c)) { fail("item assignment on a " + typeof c) }
-    var idx = goIdx(k)
-    if (idx < 0) { idx = idx + c.length }
-    if (idx < 0 || idx >= c.length) { fail("list assignment index out of range") }
-    c[idx] = v
-    return undefined
-}
+// js_pyset is SHARED - lib/runtime.metajs (five languages, knobs rtkIsDict and
+// rtkDictFind; the index coercion now truncates, which is the oracle).
 
 // s[lo:hi]. On a Go STRING the bounds are BYTE offsets and the result is the
 // decoded byte range; on a slice the elements are COPIED. An absent bound

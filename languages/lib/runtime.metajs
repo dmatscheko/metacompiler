@@ -300,35 +300,306 @@ function rtIsPlainNum(v) {
 // disagreements, and a row can be six copies of one line. This one was.
 function js_dict_new() { return {__dict: true, keys: [], vals: []} }
 
-// ===================================================== js_pyset - NOT MERGED
+// ===================================================== the object test ======
 //
-// Go: js_pyset (abnf/jsrt.go:6339). Six implementations - csharp, dart, go,
-// python, ruby, swift. The difference list was taken and is recorded here; the
-// merge itself is not done, because unlike js_dict_new this row is not six
-// copies of one line and it needs four knobs, two of which are genuine
-// disagreements that should be settled against the real toolchains first.
+// "not null, not undefined, and typeof object". dtIsObj / ktIsObj / swIsObj were
+// three byte-identical bodies; csharp, java and php inlined the same three tests
+// at every site. rbIsObj and pyIsObj add `&& !Array.isArray(v)`, and that fourth
+// test is NOT merged in: every caller here walks __class / __super, an array
+// carries neither, so the walk exits on its first step and the answer is the same
+// either way. The name is deliberately rt (shared) and not rtk (knob): there is no
+// language for which this is a different question.
+function rtIsObj(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    return typeof v == "object"
+}
+
+// The receiver-prepend every dispatcher does before `apply`. Was csPrepend,
+// jpPrepend, pyDPrepend (three byte-identical bodies), jvPrepend, k4bPrepend, and
+// an inline `var av = [recv] ...` loop in php-rt and swift-rt. k4bPrepend was the
+// only one that guarded a null/undefined `args`; the guard is kept, because it is
+// the answer a caller with no argument array wants and costs the others two
+// compares on a path that already allocates.
+function rtPrepend(v, args) {
+    var out = []
+    out.push(v)
+    if (args === undefined) { return out }
+    if (args === null) { return out }
+    var i = 0
+    while (i < args.length) {
+        out.push(args[i])
+        i = i + 1
+    }
+    return out
+}
+
+// ===================================================== the Char box =========
 //
-//  1. KNOB - the dict test. csIsDict / dtIsDict / goIsDict / pyIsDict /
-//     rbIsDict / swIsDict.
-//  2. KNOB - the array test. csharp and go use Array.isArray; dart, python,
-//     ruby and swift use their own. This is already rtkIsArr.
-//  3. DISAGREEMENT - KEY EQUALITY, and this is the one that matters. The find
-//     is `keys[i] === k` (IDENTITY) in dart, python and swift, but
-//     csValueEq(keys[i], k) in csharp and goKeyEq(keys[i], k) in go - VALUE
-//     equality. Two languages therefore find a key that three others miss.
-//     The oracle is rt.dictFind and settling this row means reading it and then
-//     asking each real toolchain, because C# Dictionary, Go map, Dart Map,
-//     Python dict, Ruby Hash and Swift Dictionary do NOT all agree about what
-//     equal keys are. Do not merge this until that is answered.
-//  4. DIVERGENCE FROM THE ORACLE - the index coercion. The oracle is
-//     `int(rt.toNumber(...))`, and Go's int() conversion TRUNCATES toward zero.
-//     dart, python and ruby wrote Math.trunc(num(k)) and go wrote goIdx, which
-//     is Math.trunc(goNum(v)) - all four correct. csharp wrote a bare csNum(k)
-//     and swift a bare swNum(k), with NO truncation, so a fractional index
-//     reaches the bounds test and the store unrounded. Reachability is the
-//     reason this is recorded rather than fixed in passing: neither C# nor Swift
-//     can express a fractional array index (the indexer takes an Int), so it
-//     costs nothing today - but it is still not what the oracle does.
+// Go: jsChar (abnf/jsrt.go:6077). C#'s char, Java's char and Kotlin's Char are a
+// type of their own - `c is Char` holds where `c is Int` does not, and `'a' + 1`
+// is an Int while `"" + 'a'` is "a" - so the three languages box one, and they
+// boxed it three times: csChar / jvChar / ktChar were byte-for-byte identical, and
+// so were csIsChar / jvIsChar.
+//
+// ktIsChar was the one that read differently - `ktIsObj(v) && typeof v["__char"]
+// == "number"` against csharp's and java's `v["__char"] !== undefined` - and it is
+// the same predicate: nothing but rtCharBox ever writes __char, and it writes a
+// number. Merged to the strict spelling, which is also the cheaper one to be wrong
+// about.
+//
+// Dart, Go, PHP, Python, Ruby and Swift have no Char in their value model at all;
+// their rtkIsChar answers a constant false and they never call rtCharBox.
+function rtCharBox(code) {
+    var o = {}
+    o["__char"] = code
+    return o
+}
+
+function rtIsCharBox(v) {
+    if (!rtIsObj(v)) { return false }
+    return typeof v["__char"] == "number"
+}
+
+// ===================================================== js_char ==============
+//
+// Go: `js_char` (abnf/jsrt.go:6077) is `jsChar{code: int32(a[0])}`. THREE
+// implementations, and all three were the same one-line delegation to the boxer
+// above: `return csChar(code_raw)` / `jvChar` / `ktChar`.
+//
+// The parameter keeps its `_raw` suffix, which is not cosmetic: -rt-lib reads the
+// signature off this source line and a name ending in _raw marks the argument as
+// an UNBOXED integer, so renaming it would hand the boxer a value handle.
+//
+// NOT MERGED - swift. swift-rt's js_char is a different function: Swift has no
+// Char box (a Character is a String), so it converts a code POINT to UTF-16,
+// emitting a surrogate pair above 0xFFFF. It keeps its own definition, which wins
+// over this one because a layer-2 file's top level runs after its imports.
+//
+// A DIVERGENCE FROM THE ORACLE, recorded not fixed: the oracle truncates the code
+// to int32 and none of the three does. Unreachable - every emitter feeds js_char a
+// character literal's code or a `Char(i)` conversion the front end has already
+// range-checked - and narrowing here would be a guess about which language's
+// overflow rule to apply.
+function js_char(code_raw) { return rtCharBox(code_raw) }
+
+// ===================================================== js_char_code =========
+//
+// Go: `js_char_code` (abnf/jsrt.go:6080) is `rt.wrapNum(rt.toNumber(v))` - plain
+// toNumber, nothing more. THREE implementations:
+//
+//  1. NOT A DIFFERENCE - csharp's `csIsChar(v) ? v["__char"] : csNum(v)`. csNum's
+//     SECOND arm is already `csIsChar(v) -> v["__char"]`, and the arm before it
+//     (floIs) cannot hold for an object, so the leading test is dead: the whole
+//     body is csNum(v).
+//  2. NOT A DIFFERENCE - kotlin's bare `ktNum(v)`, which is the oracle spelled
+//     directly. ktNum's first arm unboxes a Char.
+//  3. NOT MERGED - swift. `typeof v != "string" ? sintNum(v) : v.charCodeAt(0)`,
+//     with NaN for an empty string. Swift has no Char box and swNum on a string is
+//     parseFloat, so rtkNum is the wrong function here; swift keeps its own.
+//
+// So the merged body is rtkNum, which IS each language's rt.toNumber.
+function js_char_code(v) { return rtkNum(v) }
+
+// ===================================================== js_supercall =========
+//
+// Go: js_supercall (abnf/jsrt.go:5058). `super.m(...)`: walk __super from the
+// class the caller already resolved, and call the first callable found with the
+// receiver PREPENDED to the argument list.
+//
+// FOUR of the five implementations merged - csharp, java, kotlin, ruby. The
+// differences found:
+//
+//  1. NOT A DIFFERENCE - the callable test. csIsFn, ktIsFn and rbIsFn are three
+//     byte-identical `typeof v == "function"`, and java inlined
+//     `m !== undefined && typeof m == "function"`, whose first half is implied by
+//     the second (typeof undefined is "undefined"). No knob.
+//
+//  2. NOT A DIFFERENCE - the walk-exit test. csharp/java wrote the three tests
+//     inline, kotlin called ktIsObj and ruby rbIsObj; see rtIsObj above.
+//
+//  3. NOT A DIFFERENCE - the prepend. csPrepend / jpPrepend / k4bPrepend and an
+//     inline loop in ruby; see rtPrepend above.
+//
+//  4. KNOB - the call itself. csharp, java and ruby all spell it
+//     `m.apply(undefined, argv)`: the oracle's `rt.call(m, jsUndef, ...)`, `this`
+//     deliberately undefined because the receiver travels as argv[0]. Kotlin
+//     cannot: k4bCallAcc sets the k4bThis global around the call, which is how a
+//     Kotlin accessor declared in a superclass sees its receiver. rtkCall.
+//
+//  5. DIVERGENCE FROM THE ORACLE, kept - the walk bound. csharp/java/kotlin cap it
+//     at 64 and ruby does not; the oracle walks until nil. Same decision as
+//     js_is_type, for the same reason and with the same cost: a cyclic __super
+//     hangs the oracle and answers "unknown super method" here, and no 65-deep
+//     hierarchy is expressible in a program this tree compiles.
+//
+//  6. NOT MERGED - js. js-rt's js_supercall is the one that must NOT take the 64
+//     cap: a JavaScript `class A extends B` chain of 65 IS constructible, and a
+//     program that builds one is not exotic. It also normalises the method name
+//     through jvStr first, because JS is the only language here whose emitter can
+//     hand js_supercall a computed name. It keeps its own definition.
+function js_supercall(sup, self, name, args) {
+    var m = rtFindMethod(sup, name)
+    if (typeof m == "function") { return rtkCall(m, self, rtPrepend(self, args)) }
+    fail("unknown super method '" + name + "'")
+    return undefined
+}
+
+// ===================================================== the method walk ======
+//
+// The __class / __super walk that resolves a method name to a callable, or to
+// undefined. It is what js_supercall above IS, and it is also the tail of
+// js_mcall in csharp, java, php and swift - SIX copies of the same eleven lines,
+// which is the honest merge that js_mcall's row in the 29-name table conceals.
+//
+// js_mcall itself does NOT merge, and the difference list says why:
+//
+//  - csharp, java and swift each open with a String arm over a DIFFERENT method
+//    set (csharp has contains/ToUpper/ToLower/Trim, java has none of those and
+//    range-checks charAt, swift clamps substring by hand), then a container arm
+//    over a different container model (csListMethod / an inline list dispatcher /
+//    swListMethod + an inline dict dispatcher).
+//  - php has no String or container arm at all and opens on phIsGen.
+//  - dart is `return dtMember(recv, name, args)`, one line into a Dart-specific
+//    member resolver.
+//  - lua is `recv[name].apply(recv, args)` - Lua binds the receiver as `self`
+//    rather than prepending it, which is a different calling convention.
+//
+// Six languages, four calling conventions and five method tables: parameterising
+// that would take more knobs than lines. What they DO share is this walk, and
+// merging the walk is what removes the duplication that is actually there.
+//
+// The 64-step cap and the `typeof m == "function"` test are the ones argued at
+// js_supercall; csIsFn, ktIsFn and rbIsFn were three byte-identical spellings of
+// the test and java, php and swift inlined it.
+function rtFindMethod(cls, name) {
+    var c = cls
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (!rtIsObj(c)) { return undefined }
+        var m = c[name]
+        if (typeof m == "function") { return m }
+        c = c["__super"]
+    }
+    return undefined
+}
+
+// ===================================================== the dict shape ======
+//
+// A dict / Map / Dictionary / Hash / Go map is js_dict_new's object: __dict, and
+// two parallel insertion-ordered arrays. dtIsDict, goIsDict and swIsDict were
+// three spellings of the same four tests; csIsDict wrote `__dict !== undefined`
+// where the others wrote `=== true`, and rbIsDict is rbTag(v, "__dict"), which
+// is `=== true` without the array checks. All five answer the same question and
+// the strict spelling is the shared one; a language whose value model puts a
+// __dict on something that is NOT a dict does not exist here.
+function rtIsDictObj(v) {
+    if (!rtIsObj(v)) { return false }
+    if (v["__dict"] !== true) { return false }
+    if (!rtkIsArr(v["keys"])) { return false }
+    return rtkIsArr(v["vals"])
+}
+
+// THE KEY-EQUALITY QUESTION, SETTLED. dtDictFind, rbDictFind and swDictFind were
+// three byte-identical copies of this scan, and goDictFind is the same function
+// through goKeyEq -> goStrictEq, which is a hand respelling of the floor's own
+// strict_eq for numbers (tag 14 -> jf_num_eq, tag 13 -> si_eq) and therefore
+// equal to `===` at every pair it can be given.
+//
+// docs/runtime-merge-plan.md recorded this row as a DISAGREEMENT - "identity in
+// dart/python/swift, value equality in csharp and go, so two languages find keys
+// three others miss" - and that reading was wrong, for a reason worth writing
+// down. `===` in layer 2 is NOT JavaScript identity: it lowers to the floor's
+// strict_eq (lib/runtime.c:2112), whose first four lines compare a BOXED DOUBLE
+// (tag 14) and a SIZED INTEGER (tag 13) BY VALUE, in the Go twin's own arm order,
+// and the floor says so at the site. rt.strictEq (abnf/jsrt.go:1164) is that
+// same function, and rt.dictFind (jsrt.go:2348) is what the oracle's js_pyset
+// finds keys with. So the bare `===` scan IS the oracle.
+//
+// Measured rather than argued, because a reading is not a run. Under swiftc
+// 6.1.2 (installed), a Swift probe storing at an Int key of 10^12 (a tag 13 box
+// in swift-rt's value model), re-storing at a second Int of the same value, at a
+// built-up String key, and at a Double key of 1.5:
+//
+//     real swiftc -O          1 / big2 / 1 20 / 1 2 / 1 8
+//     swift-interpreter.abnf  1 / big2 / 1 20 / 1 2 / 1 8
+//     swift native -exe       1 / big2 / 1 20 / 1 2 / 1 8
+//
+// all three identical: the box-valued key is FOUND by the identity-looking scan,
+// because the floor compares it by value. The same probe under python3 3.13 and
+// both python halves agrees on the numeric and string rows (see the Python bool
+// finding below for the one row where all three do not).
+//
+// The ONE real difference is csharp's, and it is a knob rather than a defect:
+// csValueEq's FIRST arm unboxes a {__char} through js_jchareq. A Char box IS an
+// ordinary object to strict_eq, so two `'a'` boxes are not `===`, and a C#
+// `Dictionary<char, V>` would miss every key without that arm. The oracle has it
+// too (rt.strictEq's charCode unboxing, jsrt.go:1167). Dart, Go, Python, Ruby and
+// Swift have no Char in their value model, so for them the arm is unreachable and
+// the bare scan is the whole function. That is what rtkDictFind selects.
+function rtDictFind(keys, k) {
+    var i = 0
+    while (i < keys.length) {
+        if (keys[i] === k) { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// ===================================================== js_pyset =============
+//
+// Go: js_pyset (abnf/jsrt.go:6339). `c[k] = v` for a list (a negative index wraps)
+// or a dict (find, else append to the parallel arrays). FIVE of the six merged -
+// csharp, dart, go, ruby, swift. The full difference list:
+//
+//  1. KNOB - the dict test. csIsDict / dtIsDict / goIsDict / rbIsDict / swIsDict,
+//     now rtkIsDict, and five of the six answer it with the shared rtIsDictObj.
+//  2. NOT A DIFFERENCE - the array test, already rtkIsArr.
+//  3. KNOB, and NOT the disagreement it was recorded as - the key equality. The
+//     whole argument is at rtDictFind above. Four of the five spellings are the
+//     same function; csharp's Char arm is the one real knob.
+//  4. DIVERGENCE FROM THE ORACLE, now FIXED by merging - the index coercion. The
+//     oracle is `int(rt.toNumber(...))` and Go's int() truncates toward zero.
+//     dart, go, python and ruby truncated; csharp and swift did NOT, so a
+//     fractional index reached the bounds test and the store unrounded. The
+//     merged body truncates, which is the oracle.
+//     DISCRIMINATING POWER: ZERO, and that is the finding rather than a caveat.
+//     ECMA-334 12.8.11.3 makes an array-access index convert to int/uint/long/
+//     ulong, and Swift's Array subscript is declared `subscript(index: Int)`
+//     (Swift Standard Library, MutableCollection) - so neither language can
+//     express a fractional index at all, in any program either grammar accepts.
+//     Merging removes the divergence; no test can see it go.
 //  5. KNOB, documented - python's __setitem__ dunder arm, which the oracle has
-//     and the other five deleted as unreachable. Same shape as js_pyget's
-//     __getitem__ arm, which dart and ruby also deleted.
+//     (jsrt.go:6340) and the other five deleted as unreachable. python-rt.metajs
+//     keeps its own js_pyset, which overrides this one; the dunder arm is the
+//     reason, and it is the same reason js_pyget's __getitem__ arm is python's
+//     alone. Not a defect in the other five: no other grammar here emits a
+//     user-defined subscript operator through js_pyset.
+//  6. NOT A DIFFERENCE - ruby's dict arm delegating to rbDictSet, which is this
+//     body's find-else-append inlined behind a name.
+//
+// A PYTHON FINDING SURFACED BY THE PROBE, not fixed and not this function's:
+// `d[True] = "t"; d[1] = "one"` is ONE entry in CPython 3.13 (True == 1 and the
+// hashes agree) and TWO in BOTH metacompiler halves, because strict_eq - and
+// rt.strictEq with it - make a bool and a number different types. The two halves
+// AGREE, so --cross is blind to it; it is an unimplemented Python semantic in the
+// value model, not a merge defect, and it sits under abnf/jsrt.go rather than
+// here.
+function js_pyset(c, k, v) {
+    if (rtkIsDict(c)) {
+        var keys = c["keys"]
+        var i = rtkDictFind(keys, k)
+        if (i >= 0) { c["vals"][i] = v } else {
+            keys.push(k)
+            c["vals"].push(v)
+        }
+        return undefined
+    }
+    if (!rtkIsArr(c)) { fail("item assignment on a " + typeof c) }
+    var idx = Math.trunc(rtkNum(k))
+    if (idx < 0) { idx = idx + c.length }
+    if (idx < 0 || idx >= c.length) { fail("list assignment index out of range") }
+    c[idx] = v
+    return undefined
+}

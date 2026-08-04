@@ -214,6 +214,23 @@ def s09():
     def trail(a, b,):
         return a + b
     check("sig8", trail(1, 2,) == 3)
+    # A *args / **kwargs def uses the extended prologue layout
+    # [p0..pn-1, *args, **kwargs], so the bound argument array is
+    # names.length + 2 long whatever the call looks like. sig11 and sig16 are
+    # the calls whose POSITIONAL count hits that same number - the one case a
+    # length test cannot tell from "binding was a no-op".
+    def st_args(a, *rest, **kws):
+        return a * 100 + len(rest) * 10 + len(kws)
+    check("sig9", st_args(1) == 100)
+    check("sig10", st_args(1, 2) == 110)
+    check("sig11", st_args(1, 2, 3) == 120)
+    check("sig12", st_args(1, 2, 3, 4) == 130)
+    check("sig13", st_args(1, x=5) == 101)
+    check("sig14", st_args(1, 2, x=5) == 111)
+    def st_args2(a, b, *rest, **kws):
+        return a + b * 10 + len(rest) * 100 + len(kws) * 1000
+    check("sig15", st_args2(1, 2) == 21)
+    check("sig16", st_args2(1, 2, 3, 4) == 221)
 
 # ===== SECTION 10: closures and scopes =====
 def s10():

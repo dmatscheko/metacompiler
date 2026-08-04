@@ -46,7 +46,7 @@
 //     an {__isclass} object ==  a class descriptor, built by the emitter
 //     any other object      ==  an instance / an array is a floor array
 //
-// ----- THE LONG PROBLEM, and how it is solved without a floor change ---------
+// ----- THE LONG PROBLEM, and how `sintRaw` removed it ------------------------
 //
 // Java's `long` must stay DISTINGUISHABLE from `int` at every value, because
 // `1000000L * 1000000L` is 1000000000000 and `1000000 * 1000000` is -727379968.
@@ -56,28 +56,37 @@
 // The floor's tag 13 will not do that on its own. si_norm - the ONE place the
 // sized-integer invariant is applied - unboxes a SIGNED 64 bit value a double
 // holds exactly, and every one of the eleven sint* host builtins goes through it.
-// So `sint(0, 5, 64, 0)` is the plain number 5, indistinguishable from `int` 5,
-// and layer 2 has no constructor that answers a small boxed long.
+// So `sint(0, 5, 64, 0)` is the plain number 5, indistinguishable from `int` 5.
 //
-// It does not need one. si_norm's unboxing arm is `w == 64 && !u`, so a 64 bit
-// box marked UNSIGNED never unboxes and carries the exact 64 bits (si_trunc and
-// si_u are both the identity at width 64). A Java long is therefore represented
-// as {w: 64, u: 1} and layer 2 supplies the six operations whose SIGNED reading
-// the floor would otherwise get wrong:
+// This file used to answer that by marking the box UNSIGNED - the one shape
+// si_norm will not unbox - and then re-supplying the six operations whose SIGNED
+// reading the floor would get wrong (`/ % >>`, compare, decimal text, double
+// reading) as jlDiv / jlMod / jlSar / jlCmp / jlStr / jlNum. The floor now has
 //
-//     + - * & | ^ << >>>   bit-identical signed/unsigned - sintOp is used direct
-//     /  %                 jlDiv / jlMod: divide the magnitudes, fix the sign
-//     >>                   jlSar: ~((~a) >>> s) when negative
-//     compare              jlCmp: sign bits first, then the unsigned compare
-//     decimal text         jlStr: "-" + digits of the negation when negative
-//     double reading       jlNum: the unsigned reading minus 2^64 when negative
+//     sintRaw(hi, lo, bits, unsigned)   si_trunc, then si_make: a tag 13 cell
+//                                       ALWAYS, never si_norm's unboxing arm
 //
-// This is a REPRESENTATION choice inside layer 2, not an approximation of Java:
-// every one of the six is exact, and none of them is observable from a Java
-// program. It is recorded here because the next language with a 64 bit signed
-// type (csharp, go, kotlin, swift, dart) meets exactly the same wall, and the
-// alternative - a floor primitive that builds a tag 13 WITHOUT si_norm - is a
-// one-line floor change that would make all six unnecessary.
+// so a Java long is an HONEST {w: 64, u: 0} box, exactly as csharp-rt.metajs has
+// carried one from the start, and all six go back to the floor: sintOp's `/`,
+// `%` and `>>` branch on the cell's own signedness, sintCmp compares signed when
+// the type is, sintStr prints the minus sign and sintNum reads the negative half.
+//
+// The swap is not free and the trade is named here rather than buried. What the
+// unsigned box bought was `>>>`, which was sintOp code 10 DIRECT because a
+// logical shift is what an unsigned cell already does; a signed cell shifts
+// arithmetically, so `>>>` now costs jlShr - jlSar traded for jlShr, one helper
+// for one helper. What it cost was every FLOOR extern that reads a tag 13 cell
+// numerically: to_number of an unsigned 64 bit cell is its MAGNITUDE, so
+// `(double) -1L` answered 1.8446744073709552E19 through js_jflo and the emitter
+// owes a js_jvnum unwrap in front of it. With a signed cell that whole hazard
+// class is gone from layer 2. (java-to-llvm-ir.abnf still EMITS js_jvnum,
+// because llvm.Run runs abnf/jsrtjava.go, whose jvBox is unchanged.)
+//
+// THE ONE RULE THE SWAP IMPOSES, and it is the thing to get right: si_apply
+// ends in si_norm, so a signed 64 bit RESULT that a double holds exactly comes
+// back as a PLAIN NUMBER - an int, as far as everything below is concerned.
+// Every long-producing sintOp therefore goes through jlOp, which re-boxes.
+// csharp-rt.metajs spells the same rule csNorm.
 //
 // ----- MetaJS rules that shape the code below --------------------------------
 //
@@ -98,13 +107,19 @@ function rtkStr(v) { return jpStr(v) }
 function rtkNum(v) { return jvNum(v) }
 function rtkIsChar(v) { return jvIsChar(v) }
 function rtkIsArr(v) { return Array.isArray(v) }
+// js_supercall's one knob. Only the four languages whose emitter actually emits
+// js_supercall define it; see the note there.
+function rtkCall(f, self, argv) { return f.apply(undefined, argv) }
+// js_pyset's two knobs.
+function rtkIsDict(v) { return rtIsDictObj(v) }
+function rtkDictFind(keys, k) { return rtDictFind(keys, k) }
 
 // ===================================================== long, exactly ========
 
-function jlZero() { return sint(0, 0, 64, 1) }
-function jlOnes() { return sint(4294967295, 4294967295, 64, 1) }
-function jlMaxL() { return sint(2147483647, 4294967295, 64, 1) }
-function jlMinL() { return sint(2147483648, 0, 64, 1) }
+function jlZero() { return sintRaw(0, 0, 64, false) }
+function jlOnes() { return sintRaw(4294967295, 4294967295, 64, false) }
+function jlMaxL() { return sintRaw(2147483647, 4294967295, 64, false) }
+function jlMinL() { return sintRaw(2147483648, 0, 64, false) }
 
 // A long is the ONE sized integer of width 64; byte and short are 8 and 16.
 function jvIsLong(v) {
@@ -112,105 +127,52 @@ function jvIsLong(v) {
     return sintWidth(v) == 64
 }
 
-function jlIsNeg(x) { return sintHi(x) >= 2147483648 }
+// jlOp is sintOp with the invariant put back. si_apply ends in si_norm, which
+// UNBOXES a signed 64 bit result a double holds exactly - so `2L + 3L` would come
+// back as the plain number 5, i.e. as an int. Every long-producing operation goes
+// through here. sintHi / sintLo read the two 32 bit halves of a plain number's
+// two's complement value just as they read a cell's, so the re-box is exact for
+// the negative half too; csharp-rt.metajs's csNorm is the same three lines.
+function jlOp(code, a, b) {
+    var t = sintOp(code, a, b)
+    if (sintIs(t)) { return t }
+    return sintRaw(sintHi(t), sintLo(t), 64, false)
+}
 
 // Two's complement negation, which is 0 - x at 64 bits and therefore maps
 // Long.MIN_VALUE to itself, exactly as Java's unary minus does.
-function jlNeg(x) { return sintOp(1, jlZero(), x) }
-function jlNot(x) { return sintOp(7, x, jlOnes()) }
+function jlNeg(x) { return jlOp(1, jlZero(), x) }
+function jlNot(x) { return jlOp(7, x, jlOnes()) }
 
-// An integral double (|v| < 2^63) as a long box. The two halves are what the
-// floor's sint() takes; above 2^53 the double is already inexact and this
-// reproduces that inexactness rather than inventing digits.
+// An integral double as a long box, saturating at the two ends the way
+// jvNarrowFloat does. Between them sintHi / sintLo give the exact halves; above
+// 2^53 the double is already inexact and this reproduces that inexactness rather
+// than inventing digits.
 function jlFromNum(v) {
-    var neg = false
-    var a = v
-    if (a < 0) {
-        neg = true
-        a = 0 - a
-    }
-    if (a >= 9223372036854775808) { return neg ? jlMinL() : jlMaxL() }
-    var hi = Math.floor(a / 4294967296)
-    var lo = a - hi * 4294967296
-    var x = sint(hi, lo, 64, 1)
-    if (neg) { x = jlNeg(x) }
-    return x
+    if (v >= 9223372036854775808) { return jlMaxL() }
+    if (v < 0 - 9223372036854775808) { return jlMinL() }
+    return sintRaw(sintHi(v), sintLo(v), 64, false)
 }
 
-// jlCmp is the SIGNED compare of two long boxes. sintCmp is the unsigned one
-// (the boxes are marked unsigned to defeat si_norm), and unsigned order agrees
-// with signed order whenever the two sign bits agree - so only the disagreement
-// needs a case of its own.
-function jlCmp(a, b) {
-    var an = jlIsNeg(a)
-    var bn = jlIsNeg(b)
-    if (an != bn) { return an ? 0 - 1 : 1 }
-    return sintCmp(a, b)
-}
-
-// giStr's signed reading. Long.MIN_VALUE negates to itself and its UNSIGNED
-// digits are the magnitude 9223372036854775808, which is what Java prints after
-// the minus sign - the same reasoning si_str records in the C floor.
-function jlStr(x) {
-    if (jlIsNeg(x)) { return "-" + sintStr(jlNeg(x)) }
-    return sintStr(x)
-}
-
-// giFloat's signed reading. sintNum reads an unsigned 64 bit box as a MAGNITUDE,
-// so the negative half has to be read as its own magnitude and negated. NOT
-// `sintNum(x) - 2^64`: the unsigned reading of -1 rounds to 2^64 exactly, so
-// that subtraction answers 0 - measured, it was the second defect the native
-// build found. Rounding to nearest is symmetric about zero, so negating the
-// magnitude gives exactly what d_from_long would have given the signed box.
-function jlNum(x) {
-    if (jlIsNeg(x)) { return 0 - sintNum(jlNeg(x)) }
-    return sintNum(x)
-}
-
-// Signed division and remainder over the magnitudes. Long.MIN_VALUE / -1 wraps
-// back to itself (JLS 15.17.2) and falls out of this without a special case: the
-// magnitude of MIN_VALUE is 2^63, whose bit pattern IS MIN_VALUE.
-function jlDiv(a, b) {
-    var an = jlIsNeg(a)
-    var bn = jlIsNeg(b)
-    var x = an ? jlNeg(a) : a
-    var y = bn ? jlNeg(b) : b
-    var q = sintOp(3, x, y)
-    if (an != bn) { q = jlNeg(q) }
-    return q
-}
-
-function jlMod(a, b) {
-    var an = jlIsNeg(a)
-    var x = an ? jlNeg(a) : a
-    var y = jlIsNeg(b) ? jlNeg(b) : b
-    var r = sintOp(4, x, y)
-    if (an) { r = jlNeg(r) }
-    return r
-}
-
-// >> is the ARITHMETIC shift; the box is marked unsigned, so sintOp gives the
-// logical one and the sign has to be put back. ~((~a) >>> s) is exact for every
-// negative operand and every count, and ~a is non-negative whenever a is not.
-function jlSar(a, s) {
-    if (!jlIsNeg(a)) { return sintOp(10, a, s) }
-    return jlNot(sintOp(10, jlNot(a), s))
+// `>>>` is the LOGICAL shift, and the box is signed, so sintOp code 10 gives the
+// arithmetic one. Reading the same bits through an UNSIGNED cell is what the
+// floor's own `if (u)` arm of code 10 wants; the result is re-marked signed,
+// because the type of a shift is the left operand's (JLS 15.19) and Java has no
+// unsigned long. This is the ONE operation the unsigned representation got for
+// free, and it is what jlSar traded away.
+function jlShr(a, s) {
+    var t = sintOp(10, sintRaw(sintHi(a), sintLo(a), 64, true), s)
+    return sintRaw(sintHi(t), sintLo(t), 64, false)
 }
 
 // ===================================================== the char box =========
+//
+// rtCharBox / rtIsCharBox are lib/runtime.metajs's; jvChar and jvIsChar were
+// byte-identical to csharp's csChar / csIsChar.
 
-function jvChar(code) {
-    var o = {}
-    o["__char"] = code
-    return o
-}
+function jvChar(code) { return rtCharBox(code) }
 
-function jvIsChar(v) {
-    if (v === undefined) { return false }
-    if (v === null) { return false }
-    if (typeof v != "object") { return false }
-    return v["__char"] !== undefined
-}
+function jvIsChar(v) { return rtIsCharBox(v) }
 
 // ===================================================== the value readings ===
 
@@ -298,8 +260,9 @@ function jvI(v) {
 // jvNum: the double reading of anything numeric.
 function jvNum(v) {
     if (floIs(v)) { return floNum(v) }
-    if (jvIsLong(v)) { return jlNum(v) }
     if (jvIsChar(v)) { return v["__char"] }
+    // sintNum is si_float, which reads a SIGNED 64 bit cell with d_from_long -
+    // the long arm this used to need (jlNum) is the floor's own now.
     if (sintIs(v)) { return sintNum(v) }
     if (typeof v == "number") { return v }
     if (v === true) { return 1 }
@@ -361,18 +324,18 @@ function jvArith(op, l, r) {
         var b = jvToLongBox(r)
         if (op == "/") {
             if (sintCmp(b, jlZero()) == 0) { jvThrowArith("/ by zero") }
-            return jlDiv(a, b)
+            return jlOp(3, a, b)
         }
         if (op == "%") {
             if (sintCmp(b, jlZero()) == 0) { jvThrowArith("/ by zero") }
-            return jlMod(a, b)
+            return jlOp(4, a, b)
         }
-        if (op == "+") { return sintOp(0, a, b) }
-        if (op == "-") { return sintOp(1, a, b) }
-        if (op == "*") { return sintOp(2, a, b) }
-        if (op == "&") { return sintOp(5, a, b) }
-        if (op == "|") { return sintOp(6, a, b) }
-        if (op == "^") { return sintOp(7, a, b) }
+        if (op == "+") { return jlOp(0, a, b) }
+        if (op == "-") { return jlOp(1, a, b) }
+        if (op == "*") { return jlOp(2, a, b) }
+        if (op == "&") { return jlOp(5, a, b) }
+        if (op == "|") { return jlOp(6, a, b) }
+        if (op == "^") { return jlOp(7, a, b) }
         fail("js_jvarith: unknown operator '" + op + "'")
         return undefined
     }
@@ -413,9 +376,9 @@ function jvShift(op, l, r) {
     if (jvIsLong(l)) {
         var s = n & 63
         var a = jvToLongBox(l)
-        if (op == "<<") { return sintOp(9, a, s) }
-        if (op == ">>") { return jlSar(a, s) }
-        return sintOp(10, a, s)
+        if (op == "<<") { return jlOp(9, a, s) }
+        if (op == ">>") { return jlOp(10, a, s) }
+        return jlShr(a, s)
     }
     var x = jvI(l)
     var t = n & 31
@@ -432,7 +395,7 @@ function jvShift(op, l, r) {
 function jvCmp(op, l, r) {
     var c = 0
     if (jvW(l, r) == 64) {
-        c = jlCmp(jvToLongBox(l), jvToLongBox(r))
+        c = sintCmp(jvToLongBox(l), jvToLongBox(r))
     } else {
         var a = jvI(l)
         var b = jvI(r)
@@ -487,8 +450,9 @@ function jpRender(v, depth) {
     if (v === null) { return "null" }
     if (typeof v == "string") { return v }
     if (typeof v == "boolean") { return v ? "true" : "false" }
-    if (jvIsLong(v)) { return jlStr(v) }
     if (floIs(v)) { return floStr(v) }
+    // sintStr is si_str, which prints a SIGNED cell with its minus sign - the
+    // long arm this used to need (jlStr) is the floor's own now.
     if (sintIs(v)) { return sintStr(v) }
     if (typeof v == "number") { return "" + v }
     if (typeof v == "function") { return "" + v }
@@ -749,7 +713,7 @@ function jvParseInt(s, width) {
             fail("java.lang.NumberFormatException: For input string: \"" + s + "\"")
             return 0
         }
-        acc = sintOp(0, sintOp(2, acc, ten), jlFromNum(d))
+        acc = jlOp(0, jlOp(2, acc, ten), jlFromNum(d))
         i = i + 1
     }
     if (neg) { acc = jlNeg(acc) }
@@ -778,10 +742,8 @@ function js_arr_new_n(n, fill) {
     return out
 }
 
-// A char from its CODE. The code arrives as a RAW parameter - java-to-llvm-ir
-// writes it with handle(k), so without the _raw suffix the callee would see the
-// handle 0..3, i.e. undefined/null/false/true. The Lua pilot's finding.
-function js_char(code_raw) { return jvChar(code_raw) }
+// js_char is SHARED - lib/runtime.metajs; it was the same one-line delegation to
+// the char boxer in csharp, java and kotlin, and the _raw suffix travels with it.
 
 // The shared dynamic type test behind instanceof. abnf/jsrt.go's isTypeName is
 // the spec, including the part that surprises: the Int/Long/Short/Byte arm tests
@@ -912,16 +874,9 @@ function js_mcall(recv, name, args) {
     }
     var cls = recv["__class"]
     if (cls !== undefined) {
-        var c = cls
-        var guard = 0
-        while (guard < 64) {
-            guard = guard + 1
-            if (c === undefined) { guard = 99 } else if (c === null) { guard = 99 } else if (typeof c != "object") { guard = 99 } else {
-                var mm = c[name]
-                if (mm !== undefined && typeof mm == "function") { return mm.apply(undefined, jpPrepend(recv, args)) }
-                c = c["__super"]
-            }
-        }
+        // The __class/__super walk is SHARED - rtFindMethod, lib/runtime.metajs.
+        var mm = rtFindMethod(cls, name)
+        if (typeof mm == "function") { return mm.apply(undefined, rtPrepend(recv, args)) }
         fail("unknown method '" + name + "' on an instance")
         return undefined
     }
@@ -931,15 +886,7 @@ function js_mcall(recv, name, args) {
     return undefined
 }
 
-function jpPrepend(v, args) {
-    var out = [v]
-    var i = 0
-    while (i < args.length) {
-        out.push(args[i])
-        i = i + 1
-    }
-    return out
-}
+// jpPrepend is SHARED as rtPrepend - lib/runtime.metajs.
 
 // String.substring with the Go twin's substringRange clamping.
 function jpSubstring(s, b, e) {
@@ -951,23 +898,7 @@ function jpSubstring(s, b, e) {
     return s.substring(begin, end)
 }
 
-// (super class, this, method name, args array). The walk starts AT the given
-// class: the emitter already resolved the superclass of the DEFINING class, so a
-// subclass override never shadows what super.m() means.
-function js_supercall(sup, self, name, args) {
-    var cls = sup
-    var guard = 0
-    while (guard < 64) {
-        guard = guard + 1
-        if (cls === undefined) { guard = 99 } else if (cls === null) { guard = 99 } else if (typeof cls != "object") { guard = 99 } else {
-            var m = cls[name]
-            if (m !== undefined && typeof m == "function") { return m.apply(undefined, jpPrepend(self, args)) }
-            cls = cls["__super"]
-        }
-    }
-    fail("unknown super method '" + name + "'")
-    return undefined
-}
+// js_supercall is SHARED - lib/runtime.metajs (four languages, one knob: rtkCall).
 
 // ----- Java's own sixteen ---------------------------------------------------
 
@@ -1046,7 +977,7 @@ function js_jvlit(text, radix, isLong) {
         var c = text.charCodeAt(i)
         var d = 0 - 1
         if (c >= 48 && c <= 57) { d = c - 48 } else if (c >= 97 && c <= 102) { d = c - 97 + 10 } else if (c >= 65 && c <= 70) { d = c - 65 + 10 }
-        if (d >= 0 && d < rx) { acc = sintOp(0, sintOp(2, acc, rb), jlFromNum(d)) }
+        if (d >= 0 && d < rx) { acc = jlOp(0, jlOp(2, acc, rb), jlFromNum(d)) }
         i = i + 1
     }
     if (isLong) { return acc }
@@ -1119,9 +1050,12 @@ function js_jvchar(v) { return jvChar(jvLow32(jvNarrow(v, 64)) & 65535) }
 //
 // The Go twin converts a jsGInt and passes everything else through, because its
 // consumers already understand jsChar and jsJFlo. The C floor does not know the
-// {__char} box at all and reads a 64 bit box marked unsigned as a magnitude, so
-// both are converted here too. Everything that is neither still passes through
-// unchanged, which is what keeps `(double) "1"` reading the same in both halves.
+// {__char} box at all, so that one is still converted here; the sized-integer
+// arm is now REDUNDANT for correctness - a signed tag 13 cell reads correctly
+// through to_number - and is kept because it is also what js_jflo's Go twin
+// does, and because a raw consumer wants a plain number rather than a cell.
+// Everything else still passes through unchanged, which is what keeps
+// `(double) "1"` reading the same in both halves.
 function js_jvnum(v) {
     if (sintIs(v)) { return jvNum(v) }
     if (jvIsChar(v)) { return v["__char"] }

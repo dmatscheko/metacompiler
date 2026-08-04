@@ -122,6 +122,13 @@ function rtkStr(v) { return swJavaStr(v) }
 function rtkNum(v) { return swNum(v) }
 function rtkIsChar(v) { return false }
 function rtkIsArr(v) { return swIsArr(v) }
+// js_supercall's one knob. This language's emitter never emits js_supercall, so
+// the shared body is unreachable here; the hook is defined anyway so that the day
+// it IS emitted the answer is the plain one and not a missing name.
+function rtkCall(f, self, argv) { return f.apply(undefined, argv) }
+// js_pyset's two knobs.
+function rtkIsDict(v) { return swIsDict(v) }
+function rtkDictFind(keys, k) { return rtDictFind(keys, k) }
 
 // ===================================================== the two number tags ==
 //
@@ -383,11 +390,7 @@ function swIntCanon(s, neg) {
 
 // ===================================================== object shapes ========
 
-function swIsObj(v) {
-    if (v === undefined) { return false }
-    if (v === null) { return false }
-    return typeof v == "object"
-}
+function swIsObj(v) { return rtIsObj(v) }
 
 // A MetaJS list. A Dictionary/tuple/instance box is an object without a numeric
 // `length`, so this is the same discrimination php-rt.metajs's phIsList makes.
@@ -420,14 +423,9 @@ function swStrArray(v) {
 
 // dictFind: the index of a key, or -1. The Go twin hashes; a linear scan with the
 // same strictEq is observationally identical and is what layer 2 can write.
-function swDictFind(keys, k) {
-    var i = 0
-    while (i < keys.length) {
-        if (keys[i] === k) { return i }
-        i = i + 1
-    }
-    return 0 - 1
-}
+// SHARED as rtDictFind - lib/runtime.metajs. This body was byte-identical in
+// dart, ruby and swift, and equal to go's goDictFind; see the argument there.
+function swDictFind(keys, k) { return rtDictFind(keys, k) }
 
 // swFindMember walks the __class / __super chain for a CALLABLE member, the same
 // walk classFind does in swift-interpreter.abnf and swFindMember in the Go twin.
@@ -772,23 +770,8 @@ function js_pyget(c, k) {
 }
 
 // List element (negative wraps) or dict entry assignment.
-function js_pyset(c, k, v) {
-    if (swIsDict(c)) {
-        var keys = c["keys"]
-        var i = swDictFind(keys, k)
-        if (i >= 0) { c["vals"][i] = v } else {
-            keys.push(k)
-            c["vals"].push(v)
-        }
-        return undefined
-    }
-    if (!swIsArr(c)) { fail("item assignment on a " + typeof c) }
-    var idx = swNum(k)
-    if (idx < 0) { idx = idx + c.length }
-    if (idx < 0 || idx >= c.length) { fail("list assignment index out of range") }
-    c[idx] = v
-    return undefined
-}
+// js_pyset is SHARED - lib/runtime.metajs (five languages, knobs rtkIsDict and
+// rtkDictFind; the index coercion now truncates, which is the oracle).
 
 // len() for strings, lists, sets and dicts. Python counts CODE POINTS in a
 // string, not UTF-16 code units - but Swift's own .count goes through the
@@ -876,24 +859,10 @@ function js_mcall(recv, name, args) {
     if (swIsObj(recv)) {
         var cls = recv["__class"]
         if (cls !== undefined) {
-            var c = cls
-            var guard = 0
-            while (guard < 64) {
-                guard = guard + 1
-                if (!swIsObj(c)) { guard = 99 } else {
-                    var mm = c[name]
-                    if (typeof mm == "function") {
-                        var av = [recv]
-                        var i = 0
-                        while (i < args.length) {
-                            av.push(args[i])
-                            i = i + 1
-                        }
-                        return mm.apply(undefined, av)
-                    }
-                    c = c["__super"]
-                }
-            }
+            // The __class/__super walk is SHARED - rtFindMethod, lib/runtime.metajs,
+            // and so is the receiver prepend this used to spell inline.
+            var mm = rtFindMethod(cls, name)
+            if (typeof mm == "function") { return mm.apply(undefined, rtPrepend(recv, args)) }
             fail("unknown method '" + name + "' on an instance")
         }
         var f = recv[name]
@@ -959,15 +928,6 @@ function swListMethod(o, name, args) {
             fi = fi + 1
         }
         return fo
-    }
-    if (name === "sumOf") {
-        var sum = 0
-        var si = 0
-        while (si < o.length) {
-            sum = rtWrap32(sum + Math.trunc(swNum(args[0].apply(undefined, [o[si]]))))
-            si = si + 1
-        }
-        return sum
     }
     if (name === "forEach") {
         var ei = 0

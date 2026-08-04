@@ -3480,11 +3480,15 @@ function js_pycall(callee, pos, kw) {
         }
     }
     var bound = pyBindCall(callee, pos, kw)
-    // Go takes the ORIGINAL argument array (rt.callH with the incoming handle)
-    // whenever binding did not change its length, and the bound one otherwise.
-    // Kept literally, even though the two arrays cannot differ in content when
-    // their lengths agree.
-    if (bound.length == pos.length) { return pyCall(callee, pos) }
+    // Go asks rt.pyBindCallR whether binding built a NEW array, and passes the
+    // caller's own argument HANDLE through when it did not - an identity
+    // optimisation, not a semantic choice. Here pyBindCall returns `pos` itself
+    // in exactly those cases, so handing `bound` on covers both and needs no
+    // test. It must NOT be decided by LENGTH: the extended layout is
+    // [p0..pn-1, *args, **kwargs], so a positional count of names.length + 2
+    // rebinds to an array of the same length - `def f(a, *rest, **kw)` called
+    // `f(1, 2, 3)`, where passing `pos` bound `rest` and `kw` to numbers and
+    // the first len(rest) aborted.
     return pyCall(callee, bound)
 }
 

@@ -121,6 +121,13 @@ function rtkNum(v) { return phNumOf(phToNum(v)) }
 // body stays resolvable; they are never reached.
 function rtkIsChar(v) { return false }
 function rtkIsArr(v) { return Array.isArray(v) }
+// js_supercall's one knob. This language's emitter never emits js_supercall, so
+// the shared body is unreachable here; the hook is defined anyway so that the day
+// it IS emitted the answer is the plain one and not a missing name.
+function rtkCall(f, self, argv) { return f.apply(undefined, argv) }
+// js_pyset's two knobs.
+function rtkIsDict(v) { return rtIsDictObj(v) }
+function rtkDictFind(keys, k) { return rtDictFind(keys, k) }
 
 // ===================================================== exact 64 bit =========
 //
@@ -139,12 +146,8 @@ function rtkIsArr(v) { return Array.isArray(v) }
 
 function phTwo32() { return 4294967296 }
 function phTwo64() { return 18446744073709551616 }
-function phTwo63() { return 9223372036854775808 }
 function phInf() { return Infinity }
 
-// The two extremes, as values. A digit literal above 2^53 would already have been
-// rounded by the compiler that reads this file, so they are built from halves.
-function phIntMax() { return sint(2147483647, 4294967295, 64, 0) }
 function phIntMin() { return sint(2147483648, 0, 64, 0) }
 
 // phFromNum turns a double into a 64 bit int VALUE: truncation toward zero and a
@@ -239,15 +242,6 @@ function phIsNull(v) {
 function phIsBool(v) { return typeof v == "boolean" }
 function phIsStr(v) { return typeof v == "string" }
 
-// phTrunc rounds toward zero: PHP's (int) cast and intdiv().
-function phTrunc(n) {
-    if (n !== n) { return 0 }
-    if (n === phInf()) { return 0 }
-    if (n === 0 - phInf()) { return 0 }
-    if (n < 0) { return 0 - Math.floor(0 - n) }
-    return Math.floor(n)
-}
-
 // phFloToLong is the (int) reading of a float: truncation, then a WRAP modulo
 // 2^64 rather than a saturation - (int)(PHP_INT_MAX * 2 + 4) is int(0).
 function phFloToLong(f) {
@@ -311,13 +305,6 @@ function phDeref(v) {
     var c = phCellOf(v)
     if (c !== undefined) { return c["v"] }
     return v
-}
-
-function phIsClass(v) {
-    if (v === undefined) { return false }
-    if (v === null) { return false }
-    if (typeof v != "object") { return false }
-    return v["__isclass"] !== undefined
 }
 
 // phIsObj: an instance. Not a cell, not an array, not a class descriptor, not a
@@ -1722,9 +1709,8 @@ function phGenCall(g, name, args) {
 // them, and they are here only because the C floor does not have them yet - see
 // the extern split in docs/runtime-next-plan.md part 3.
 
-// PHP's strings are BYTE strings, so strlen("h<e-acute>llo") is 6 and not 5.
-// byteLen is a floor host builtin and is the exact twin of the Go len(string).
-function js_bytelen(s) { return byteLen(s) }
+// js_bytelen is the C FLOOR's now (lib/runtime.c). It was HERE, and having both
+// is a duplicate-symbol link error - the two edits land as one commit.
 
 // Java/C# +: string concat, 32 bit add for two int values, float add otherwise.
 // php-to-llvm-ir.abnf emits it ONLY for its own loop counters, so the float arm -
@@ -1741,8 +1727,6 @@ function phJavaStr(v) {
     return "" + v
 }
 
-
-
 // (target, method name, args array). The Go twin (rt.memberCall in abnf/jsrt.go)
 // is a LANGUAGE-NEUTRAL dispatcher over strings, dicts, lists, generators and
 // instances; only the arms php-to-llvm-ir.abnf can actually reach are here, and
@@ -1755,24 +1739,10 @@ function js_mcall(recv, name, args) {
     if (recv !== undefined && recv !== null && typeof recv == "object") {
         var cls = recv["__class"]
         if (cls !== undefined) {
-            var c = cls
-            var guard = 0
-            while (guard < 64) {
-                guard = guard + 1
-                if (c === undefined) { guard = 99 } else if (c === null) { guard = 99 } else if (typeof c != "object") { guard = 99 } else {
-                    var mm = c[name]
-                    if (mm !== undefined && typeof mm == "function") {
-                        var av = [recv]
-                        var i = 0
-                        while (i < args.length) {
-                            av.push(args[i])
-                            i = i + 1
-                        }
-                        return mm.apply(undefined, av)
-                    }
-                    c = c["__super"]
-                }
-            }
+            // The __class/__super walk is SHARED - rtFindMethod, lib/runtime.metajs,
+            // and so is the receiver prepend this used to spell inline.
+            var mm = rtFindMethod(cls, name)
+            if (typeof mm == "function") { return mm.apply(undefined, rtPrepend(recv, args)) }
             fail("unknown method '" + name + "' on an instance")
         }
     }
