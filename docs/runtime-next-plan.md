@@ -4,6 +4,14 @@ Companion to [runtime-rework-plan.md](runtime-rework-plan.md), which is the reco
 what was BUILT (phases 0-4a, bash/batch convergence, one linker). This document is the
 forward plan. HEAD when it was written: `e8bf2c3`.
 
+> **READ THIS FIRST if you want the to-do list: [WHAT IS STILL OPEN](#what-is-still-open---the-consolidated-list-2026-08-04-verified-at-c1bc760),
+> the last section of this file.** On 2026-08-04 every owed/blocked/not-fixed-here item
+> in all three plan documents was walked and checked against the code; most had landed
+> and are now struck at their own site with the commit and the `file:line` that closed
+> them. The consolidated section is the residue - 13 items - and nothing outside it is
+> open. A struck item keeps its measurement, so the body of this file still reads as the
+> history it is; only the STATUS was corrected.
+
 ## Where things stand
 
 ```
@@ -1231,8 +1239,16 @@ Two things found on the way, both written down at the site:
 - **`test.sh --full` counted `c` at 564 anyway** while `c-interpreter` was reporting
   `FULL under goja, BUT -frozen fails or differs`. The per-language assertion count and
   the halves-agree verdict are read from the goja run alone, so a frozen-only divergence
-  does not reach the summary. Not fixed here (out of the files for this task) but it is a
-  real hole in the invariant: the summary is not sufficient, read the per-half lines.
+  does not reach the summary. ~~Not fixed here (out of the files for this task) but it
+  is a real hole in the invariant: the summary is not sufficient, read the per-half
+  lines.~~ **FIXED IN `test.sh`, and the hole is closed at the summary itself.**
+  Verified 2026-08-04 at `c1bc760`: the `-frozen` mismatch arm now writes
+  `echo FROZEN-DIFF > "$R.checks"` (test.sh:204) instead of leaving the goja count in
+  place, and the check-count awk treats `FROZEN-DIFF` as a MISMATCH even when BOTH
+  halves carry it ("two halves failing the same way is not agreement - it is two
+  defects", test.sh:318-322). So the end-of-group "N languages with halves that
+  disagree" line now counts it. **Reading the per-half lines is still good practice**,
+  and `grep -E 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF'` stays in the rules.
 
 Still deliberately absent from BOTH halves, unchanged and loud rather than wrong: the
 varargs `printf` family (neither interpreter has a varargs ABI), `exit`/`abort` (no
@@ -1984,15 +2000,34 @@ is settled against the language specification and against the third engine.
 
 ### What is still owed for PHP
 
-1. **`abnf/jsrtphp.go` can be deleted**, as the plan requires once the native path
-   is the real one. It is what `llvm.Run` uses today, so deleting it means the
-   compiler half runs through the same `php-rt.ll` the native binary does. That
-   also retires the `"1e400"` divergence above.
+1. ~~**`abnf/jsrtphp.go` can be deleted**, as the plan requires once the native path
+   is the real one.~~ **NOT PENDING - DECIDED 2026-08-03 (`a3baeee`).** Part 4
+   measured retiring the Go runtime and DECLINED it; `llvm.Run` stays the
+   non-`-exe` engine for every language, so `abnf/jsrtphp.go` is PERMANENT, not
+   waiting on a commit. The `"1e400"` divergence above is therefore permanent too
+   and is a recorded difference, not a to-do. See "Retiring the Go runtime -
+   MEASURED AND DECLINED".
 2. The **six language-neutral externs** in `php-rt.metajs` (`js_bytelen`,
    `js_jadd`, `js_mcall`, `js_range_len/key/val`) belong in the C floor, where
    every language can reach them.
-3. A floor **`js_tag` / `isGenerator`** primitive, so WALL 1's finding 2 stops
-   being a structural probe.
+
+   **SETTLED 2026-08-04, and the answer is not "all six to the floor".**
+   - `js_bytelen` **LANDED IN THE FLOOR** (`44bb09a`): `languages/lib/runtime.c:5020`
+     `long js_bytelen(long v) { return mk_num(d_from_long(str_len(to_string(v)))); }`,
+     and `php-rt.metajs:1712` now carries only the comment saying the body is the
+     floor's. See "`js_bytelen` - LANDED, as a pair".
+   - `js_jadd` / `js_range_len/key/val` went to the **shared MetaJS layer**
+     (`languages/lib/runtime.metajs`, Part A), not the floor - they carry
+     per-language behaviour, which is the criterion. See `runtime-merge-plan.md`.
+   - `js_mcall` **does NOT merge**; the difference list is in `runtime-merge-plan.md`
+     under "`js_mcall` does NOT merge, and what merged instead".
+3. ~~A floor **`js_tag` / `isGenerator`** primitive, so WALL 1's finding 2 stops
+   being a structural probe.~~ **LANDED 2026-08-04 (`d9014d7`).** `isGenerator`,
+   host id 69, in all three engines - `seed_root("isGenerator", mk_host(69))` at
+   `languages/lib/runtime.c:5106`, `b["isGenerator"]` at `abnf/jsrtint.go:628`,
+   `"isGenerator": isGeneratorHost` at `languages/metajs-interpreter.abnf:1013`.
+   It shipped as a PREDICATE and deliberately not as a general `js_tag`; see
+   "2. `isGenerator`, host id 69 - LANDED".
 4. `send()` is implemented here and the ratchet does not exercise it (section 19
    says so at the site): PHP's `send` primes a fresh generator, resumes it and
    answers the value yielded NEXT. It is written against the Go twin and is
@@ -2258,10 +2293,14 @@ other `*-test-full.*` does: the ratchet lives in `./test.sh --full`, and
 
 ### What is still owed for Swift
 
-1. Nothing for the gate. `abnf/jsrtswift.go` stays until the change is committed,
-   as the plan requires, and then it is the first Go twin that can actually go.
-2. The formatter boundary above, if and when someone does the three-halves job.
-3. `min`/`max` on a signed-zero tie, same shape, 3 probe lines.
+1. Nothing for the gate. ~~`abnf/jsrtswift.go` stays until the change is committed,
+   as the plan requires, and then it is the first Go twin that can actually go.~~
+   **NOT PENDING - DECIDED 2026-08-03 (`a3baeee`).** No Go twin can go: retiring
+   the Go runtime was measured and DECLINED. `abnf/jsrtswift.go` is permanent.
+2. **OPEN.** The formatter boundary above, if and when someone does the
+   three-halves job (ours switches to scientific at `e10 >= 16`, real Swift at
+   `|v| > 2^53`).
+3. **OPEN.** `min`/`max` on a signed-zero tie, same shape, 3 probe lines.
 
 ## JAVA - DONE (2026-08-03). The gate is MET, and one floor primitive is owed
 
@@ -2520,10 +2559,23 @@ identical to real java**.
 1. ~~**The floor request above** (`sintRaw`, a tag 13 without `si_norm`), and the
    CONSUMER side after it.~~ **BOTH DONE** - the floor 2026-08-03, the collapse
    2026-08-04. See "THE COLLAPSE ONTO `sintRaw`" below.
-2. `abnf/jsrtjava.go` and `abnf/jsrtjvm.go` stay until the change is committed.
+2. ~~`abnf/jsrtjava.go` and `abnf/jsrtjvm.go` stay until the change is committed.~~
+   **NOT PENDING - DECIDED 2026-08-03 (`a3baeee`).** Both are permanent; nothing
+   is waiting on a commit.
 3. ~~The subnormal formatter~~ **DONE 2026-08-03**, all four halves, 613 values
    against real java.
-4. **`Math.abs` of a `long` answers an `int`**, found by the collapse's own probe
+4. ~~**`Math.abs` of a `long` answers an `int`**~~ **ALL THREE HALVES LANDED
+   2026-08-04 (`c1bc760`).** Verified in the tree: `languages/lib/java-rt.metajs:661`
+   (`o["abs"]` with the `jvIsLong` arm), `abnf/jsrtjvm.go:221` (`o.set("abs", ...)`,
+   whose comment now reads "A long is a 64-bit jsGInt box, and toInt32 truncates
+   it... Negate in the box instead"), and `languages/java-interpreter.abnf:2131`
+   (`if (jIsLong(v)) { return szCmp(v, jL(0)) < 0 ? szNeg(v) : v }`). The
+   record below is kept because it is the measurement. **What is NOT closed is the
+   signed-zero tie called out at the end of this item** - `Math.min(-0.0, 0.0)` in
+   all three halves and `Math.abs(-0.0)` in the interpreter - which is carried to
+   "What is still open".
+
+   As it stood - found by the collapse's own probe
    and NOT introduced by it - `Math.abs(3000000000L)` is -1294967296 where real
    java 24 says 3000000000, and `Math.abs(Long.MAX_VALUE)` is 0. **20 of the
    26 lines** on which our java differs from real java over the whole long
@@ -3113,14 +3165,29 @@ engines were compared with themselves:
 
 ### What is owed, and what generalises
 
-1. **The floor line above**: `type_of`/`type_class` should answer `"function"` for
-   tag 16 (blocking nothing today only because of a layer-2 workaround, and latent
-   in `emitDelegCall`). `sintRaw`'s `giBindings` and interpreter twins landed in the
-   same session and are NOT owed.
-2. **The NaN sentinel**, which needs the Go twin and layer 2 changed together.
-3. `js_goslice` / `js_gospread` / `js_has` in the floor - three languages have now
-   written them out.
-4. `abnf/jsrtcsharp.go` stays until the change is committed.
+1. ~~**The floor line above**: `type_of`/`type_class` should answer `"function"` for
+   tag 16~~ **LANDED 2026-08-03 (`10bbca1`).** `languages/lib/runtime.c:2079`
+   `if (t == 7 || t == 8 || t == 9 || t == 16) { return mk_cstr("function"); }` in
+   `type_of`, and `type_class` at 2091 pins tag 16 as class 6 with the comment "a
+   generator function pins as 'function', like type_of". The layer-2 workaround it
+   was blocking, and the latency in `emitDelegCall`, are both retired.
+   `sintRaw`'s `giBindings` and interpreter twins landed in the same session and
+   were never owed.
+2. ~~**The NaN sentinel**, which needs the Go twin and layer 2 changed together.~~
+   **LANDED WHOLE 2026-08-04 (`44bb09a`, "the C-sharp NaN trio lands whole"; the
+   assertions were held back for it by `a5b84ea`/`850ed70`).** `csCompare`'s
+   sentinel 2 is now read as "unordered" rather than as an ordering at
+   `languages/lib/csharp-rt.metajs:1089-1093`, `abnf/jsrtcsharp.go:477` took the
+   same fix, and four assertions in `tests/csharp-test-1.cs` pin it - two of the
+   four discriminate. See `runtime-merge-plan.md` "Defects".
+3. **OPEN.** `js_goslice` / `js_gospread` / `js_has` in the floor - three languages
+   have now written them out. **Re-measured 2026-08-04 at `c1bc760`: still open.**
+   `grep -n 'js_goslice\|js_gospread' languages/lib/runtime.c` is empty; the bodies
+   live in `languages/lib/go-rt.metajs` and `languages/lib/csharp-rt.metajs` (and
+   their `.ll`) only. Note the general rule proved by `js_bytelen`: the floor half
+   and the layer-2 deletions must land in ONE change or the link breaks.
+4. ~~`abnf/jsrtcsharp.go` stays until the change is committed.~~ **NOT PENDING -
+   DECIDED 2026-08-03 (`a3baeee`).** It is permanent.
 5. ~~`>>>` is **not in the recognised C# subset**~~ **RECOGNISED 2026-08-04, not
    deleted.** `Shift` accepted only `<<` and `>>` while `emitBin`, `js_csshift`,
    `csShift` in `lib/csharp-rt.metajs` and `csShift` in `csharp-interpreter.abnf`
@@ -3407,8 +3474,12 @@ It found **two real defects**, both in layer 2, both invisible to `./test.sh`:
 
 ### What is owed, and what generalises
 
-1. Nothing for the gate. `abnf/jsrtdart.go` stays until the change is committed.
-2. `[1, 2] + [3]`, above: a three-halves job, both halves currently agree.
+1. Nothing for the gate. ~~`abnf/jsrtdart.go` stays until the change is committed.~~
+   **NOT PENDING - DECIDED 2026-08-03 (`a3baeee`).** It is permanent.
+2. **OPEN.** `[1, 2] + [3]`, above: a three-halves job, both halves currently agree.
+   **Re-measured 2026-08-04 at `c1bc760`: still open** - `dtJsAdd` in
+   `languages/lib/dart-rt.metajs:1535` still renders both sides and concatenates,
+   under the comment "Recorded rather than corrected".
 3. ~~`js_pyget` on a MISSING Map key ABORTS (`KeyError`)~~ **FIXED 2026-08-04, all
    three halves.** dart:core is the oracle and is cited at both sites - no `dart`
    exists on this machine - and it says of `Map.operator []` that it returns "the
@@ -3832,24 +3903,42 @@ which real `go run` answers identically (319 checks, 0 failures, in all four of
 
 ### What is owed, and what generalises
 
-1. Nothing for the gate. `abnf/jsrtgolang.go` stays until the change is
-   committed, and `abnf/jsrtint.go` stays regardless - kotlin still needs it.
-2. ~~**`&^` and the shift result type**~~ **DONE 2026-08-04** in the emitter and
-   the interpreter grammar, pinned as int31-int38, oracle real `go`. What is STILL
-   owed is the FLOOR half of the shift rule - `giArith` in `abnf/jsrtint.go`,
-   `si_apply` in `languages/lib/runtime.c` and `szArithSlow` in
-   `languages/lib/interp-core.js` should read a shift's width and signedness from
-   the LEFT operand only, which would close the same latent divergence in Java,
-   Kotlin, C#, Swift and Dart. See the measurement above.
-3. **A `scopeGet(name)` host builtin** would let layer 2 render a scope-backed
-   pointer AND would let every language's scope probe go back into layer 2. Not
-   needed by any current test.
-4. The floor's `floStr` routes style 1 (floGo) to `jvm_flo_str`, which is JAVA's
-   layout - so a tag-14 box built with the Go style renders as Java there.
-   `go-rt.metajs` therefore never calls `floStr` and spells `strconv`'s
-   `'g', -1, 64` itself (`goFloStr`, over the engine's own shortest digits).
-   One `if (sty == 1) { return go_flo_str(...); }` in `jvmFloText` would remove
-   it. Reported, not made.
+1. Nothing for the gate. ~~`abnf/jsrtgolang.go` stays until the change is
+   committed~~ **- NOT PENDING, DECIDED 2026-08-03 (`a3baeee`): it is permanent -**
+   and `abnf/jsrtint.go` stays regardless - kotlin still needs it.
+2. ~~**`&^` and the shift result type**~~ **`&^` DONE 2026-08-04 (`9ee6fcc`)** in
+   the emitter and the interpreter grammar, pinned as int31-int38, oracle real `go`
+   (`MulOp = "*" | "/" | "%" | "<<" | ">>" | "&^" | AmpOp` at
+   `languages/go-to-llvm-ir.abnf:687`, `AssignOp` longest-first at 477).
+
+   **The FLOOR half of the shift rule is SUPERSEDED, not owed (2026-08-04,
+   `9689f81`).** The paragraph above says the same divergence is "latent in five
+   more languages". It is not. A FATAL probe was installed at all four `si_apply` /
+   `giArith` / `szArithSlow` / interpreter sites - the sites that would have to
+   change - and over the whole suite it fired **ZERO times**, because every
+   language normalises the shift COUNT before it reaches the floor, so the boxed
+   operand the floor reads is always the left one already. Ground truth was real
+   `java` 24.0.2 and `swiftc` 6.1.2 on the shapes those two can express.
+   Discriminating power of the "fix": zero. **Keep the measurement, drop the
+   item** - see "The shift result type, closed in the FLOOR - and the claim was
+   false".
+3. ~~**A `scopeGet(name)` host builtin**~~ **LANDED 2026-08-04 (`d9014d7`)**, and
+   as five builtins rather than one: `scopeNew` / `scopeParent` / `scopeGet` /
+   `scopeHas` / `scopeDecl`, host ids 64..68, in ALL THREE engines -
+   `seed_root` in `languages/lib/runtime.c:5099+`, `scopeBindings` in
+   `abnf/jsrtint.go:539-608`, `scNew`/`scParent`/`scGet`/`scHas`/`scDecl` in
+   `languages/metajs-interpreter.abnf:898-1013`. See "1. The scope API - LANDED".
+4. ~~The floor's `floStr` routes style 1 (floGo) to `jvm_flo_str`, which is JAVA's
+   layout~~ **THE CLAIM WAS ALREADY FALSE WHEN IT WAS WRITTEN.** All three engines
+   have routed style 1 to Go's layout since `d30629f`, two commits BEFORE go's own
+   migration: `jf_text`'s `if (sty == 1) { return go_float_str(fa(h)); }`,
+   `jvmFloText`'s `case floGo: return goFloStr(v.f)`, `flStr`'s
+   `if (v.sty == 1) return flGo(v.f)`. Re-verified against real go 1.26.5 over 26
+   values. `goFloStr`/`goSignBit`/`goDigits`/`goLayout`/`goSci` were DELETED from
+   `go-rt.metajs` for it in Part A (`44bb09a`); all that is left there is the note
+   at lines 547-549 recording that they went. See
+   "3. `floStr` style 1 - THE CLAIM IS STALE" and `runtime-merge-plan.md`
+   "Go's float rendering moved to the floor".
 
 What **generalises to the remaining five** (kotlin, js, typescript, python,
 ruby):
@@ -4212,11 +4301,14 @@ agree with each other on every one of them**, so none is this port's:
 
 ### What is owed, and what generalises to PYTHON
 
-1. Nothing for the gate. `abnf/jsrt.go`'s Ruby half stays until the change is
-   committed - unlike the five languages before it, it is NOT a file that can ever
-   go, because python, js, typescript, kotlin and go share it.
-2. The float formatter boundary above, if and when someone does the three-halves
-   job; `-0.0 % 1.0`, same shape, both halves currently agree.
+1. Nothing for the gate. ~~`abnf/jsrt.go`'s Ruby half stays until the change is
+   committed~~ **- NOT PENDING, DECIDED 2026-08-03 (`a3baeee`).** No Go half is
+   waiting on a commit; `llvm.Run` stays the non-`-exe` engine for every language.
+   The "not a file that can ever go" reading was right for the wrong reason: it is
+   not only that python, js, typescript, kotlin and go share it, it is that the
+   whole retirement was measured and declined.
+2. **OPEN.** The float formatter boundary above, if and when someone does the
+   three-halves job; `-0.0 % 1.0`, same shape, both halves currently agree.
 3. `Integer#%` on a value past 2^53 is now EXACT where the Go twin is exact by
    accident (arm64 fusion). If the Go twin is ever built for an architecture
    without FMA, `abnf/jsrt.go` and this file diverge again - the fix would be to
@@ -4746,9 +4838,11 @@ does not have to rediscover it.
 
 ### What is still owed
 
-1. `abnf/jsrtjsprint.go`, `abnf/jsrtjsbig.go` and `abnf/jsrtregexjs.go` can be
-   deleted the day `llvm.Run` is retired, as the plan requires. They are kept now
-   because `llvm.Run` is what the matrix runs.
+1. ~~`abnf/jsrtjsprint.go`, `abnf/jsrtjsbig.go` and `abnf/jsrtregexjs.go` can be
+   deleted the day `llvm.Run` is retired, as the plan requires.~~ **THAT DAY WILL
+   NOT COME - DECIDED 2026-08-03 (`a3baeee`).** Retiring `llvm.Run`'s Go runtime
+   was measured and declined; all three files are permanent. They are kept because
+   `llvm.Run` is what the matrix runs, and the matrix is not going anywhere.
 2. ~~The two floor requests above.~~ **DONE 2026-08-03**, both of them.
 3. ~~The `${obj}` three-halves job.~~ **DONE 2026-08-03**, and it was four halves.
 4. Divergences 2-9, each recorded at its site.
@@ -5180,11 +5274,30 @@ builds the native binary on every sweep.
 
 ### What is owed
 
-1. **The residue of the ratchet**, native only. `llvm.Run` is unaffected.
-2. **`scopeParent` / `scopeGet` host builtins** - the floor request above. They
-   are what turns nine emitter helpers back into ordinary layer-2 functions, for
-   every language and not only Kotlin.
-3. `abnf/jsrtkotlin.go`, `abnf/jsrtregexkt.go` and `abnf/jsrtint.go` stay.
+1. ~~**The residue of the ratchet**, native only.~~ **CLOSED - the row was
+   released (`c2e1811`, "every language released its row"), and re-measured here
+   2026-08-04 at `c1bc760`:**
+
+   ```
+   $ ./mec languages/kotlin-to-llvm-ir.abnf tests/kotlin-test-full.kt -q
+   full: 979 checks, 0 failures
+   $ ./tests/clang-check.sh
+   kotlin         179934  ok, and the clang executable agrees
+   ```
+
+   `clang-check.sh` builds the native binary from `tests/kotlin-test-full.kt` and
+   requires exit code 0, i.e. the WHOLE ratchet passing natively - and no
+   `clang-check: native-row-held` marker is left in the grammar. The residue that
+   this section described is gone, and it is worth saying that the assertions were
+   not thinned to get there (979 checks, `git log tests/kotlin-test-full.kt`).
+2. ~~**`scopeParent` / `scopeGet` host builtins** - the floor request above.~~
+   **LANDED 2026-08-04 (`d9014d7`)**, as five: `scopeNew` / `scopeParent` /
+   `scopeGet` / `scopeHas` / `scopeDecl`, host ids 64..68, in all three engines.
+   Turning the nine emitter helpers back into ordinary layer-2 functions is now
+   possible and is a separate, unstarted piece of work - it is NOT blocked any
+   more, and nothing in `tests/` requires it.
+3. ~~`abnf/jsrtkotlin.go`, `abnf/jsrtregexkt.go` and `abnf/jsrtint.go` stay.~~
+   **NOT PENDING - DECIDED 2026-08-03 (`a3baeee`).** All three are permanent.
 
 ## PYTHON - DONE (2026-08-03). The gate is MET: 261/261 natively, byte-identical
 
@@ -5575,16 +5688,23 @@ Ruby formatter boundaries reached.
 
 ### What is owed, and what generalises
 
-1. Nothing for the gate. `abnf/jsrt.go`'s Python half stays until the change is
-   committed - and, like Ruby's, it is NOT a file that can ever go, because
-   `llvm.Run` is still the non-`-exe` engine for every language.
-2. The `py_setvar` residue named above (a name bound strictly below a binding
-   boundary AND above it). The exact fix needs a per-scope containment test, which
-   is the one thing the floor's scope API does not expose; a `js_scope_has(s, n)`
-   that does NOT walk the chain would close it in three lines of `runtime.c` and
-   three of `abnf/jsrt.go`. **Reported, not made** - the floor is another agent's
-   this session, and nothing in `tests/` reaches it.
-3. `pyAnnot` decides "is there an `__annotations__` dict in THIS scope already"
+1. Nothing for the gate. ~~`abnf/jsrt.go`'s Python half stays until the change is
+   committed~~ **- NOT PENDING, DECIDED 2026-08-03 (`a3baeee`).** Like Ruby's, it
+   is NOT a file that can ever go, because `llvm.Run` is still the non-`-exe`
+   engine for every language - and now permanently so.
+2. **OPEN, and the shape of the fix has changed.** The `py_setvar` residue named
+   above (a name bound strictly below a binding boundary AND above it). The exact
+   fix needs a per-scope containment test. **The floor's scope API landed
+   2026-08-04 (`d9014d7`) and DOES expose one - but as a HOST BUILTIN
+   (`scopeHas`, id 67), not as the `js_scope_has(s, n)` EXTERN this item wants.**
+   Re-measured 2026-08-04 at `c1bc760`:
+   `grep -n 'js_scope_has' languages/lib/runtime.c abnf/jsrt.go` is empty, while
+   `js_scope_new` / `js_scope_get` / `js_scope_decl` / `js_scope_set` /
+   `js_scope_set_or_create` / `js_scope_typeof` are all there. So the three lines
+   of `runtime.c` and three of `abnf/jsrt.go` are still to write; the semantics
+   are no longer in doubt, because `scopeHas` already pins "THIS scope only, no
+   chain walk" in all three engines and is asserted.
+3. **OPEN.** `pyAnnot` decides "is there an `__annotations__` dict in THIS scope already"
    statically, where `abnf/jsrt.go` asks `sc.find` at run time. The two differ only
    for an annotation the program does not REACH, which would create the dict here
    and not in the Go twin.
@@ -5654,7 +5774,8 @@ Ruby formatter boundaries reached.
    ```
 
    With the fix, all three engines answer 269 checks / 0 failures.
-5. Python's `str` has **no method library at all** in either half - no `upper`,
+5. **NOT A DEFECT AND NOT OWED - a missing FEATURE, recorded deliberately.**
+   Python's `str` has **no method library at all** in either half - no `upper`,
    `strip`, `join`, `split`, `startswith`. `"abc".upper()` fails identically in
    both engines with `unknown String method: upper`, from `jsrt.go:2784` and from
    its port. Adding one is a new FEATURE in three places (the interpreter grammar,
@@ -6249,7 +6370,13 @@ per-stack at the same time, which is what makes a `try` INSIDE a body legal.
 The measurements are in section 5.
 
 **ONE THING THE NEXT PERSON MUST DO FIRST, and it is a hard link error rather
-than a warning - DONE FOR PHP 2026-08-03, and still owed by the other three.**
+than a warning - DONE FOR PHP 2026-08-03, and CLOSED FOR ALL OF THEM 2026-08-04.**
+Re-measured at `c1bc760`: `grep -ln 'function js_genfn\|function js_yield'
+languages/lib/*.metajs` matches **nothing**, and `grep -n 'define i64 @js_genfn'
+languages/lib/*.ll` matches `runtime.ll` and only `runtime.ll` (lines 31718 and
+32578). No layer-2 file redefines either symbol, so the collision below cannot
+occur today. **The warning stands for the next file written**, which is why it is
+kept rather than deleted.
 A layer-2 file that defines `js_genfn` / `js_yield` as loud stubs now collides
 with the floor:
 
@@ -6266,12 +6393,17 @@ had them deleted; `grep -l 'define i64 @js_genfn' languages/lib/*-rt.ll` answere
 php and nothing else at the time, so no other layer-2 file is affected yet, but
 the next one written must not add them back.
 
-**AND THE ERROR MESSAGE POINTS THE WRONG WAY.** Measured while doing it: the
-build reported `2 unresolved symbol(s): js_genfn, js_yield` when the real `ld`
-error was the duplicate above, because `buildExecutable` (`abnf/llvmmap.go`)
-builds its report from the module's undefined declarations filtered by whether
-the linker text mentions each name - and a duplicate-symbol error mentions
-exactly those names. Expect to read "unresolved" and find "duplicate".
+~~**AND THE ERROR MESSAGE POINTS THE WRONG WAY.**~~ **FIXED 2026-08-04
+(`9ee6fcc`).** As it stood, the build reported `2 unresolved symbol(s): js_genfn,
+js_yield` when the real `ld` error was the duplicate above, because
+`buildExecutable` (`abnf/llvmmap.go`) built its report from the module's undefined
+declarations filtered by whether the linker text mentions each name - and a
+duplicate-symbol error mentions exactly those names. `abnf/llvmmap.go` now has
+`duplicateSymbols(out string) []string` (lines 1180-1215), it is asked FIRST at
+line 1315 ("so asking it second would let a duplicate keep being" reported as
+unresolved), and the report says `duplicate symbol(s), named on stderr`. Covered
+by `abnf/linkdiag_test.go`. The trap is left written down because the wording is
+what a reader of an OLD transcript will meet.
 
 The PHP migration named WALL 1 as the one architectural blocker of the remaining
 rollout: "**Coroutines** (`js_genfn` / `js_yield`). No spelling in layer 2 at any
@@ -6906,10 +7038,12 @@ their `-test-full` files already contain the assertions, quoted in section 1.
 > `foreach`, which needed no case at all - `gen_resume` re-raises on the resumer's
 > stack, exactly as section 5 designed it.
 >
-> The one cost that WAS real is not in this file: the floor's `type_of` answers
-> `"object"` for a tag 16 cell where `abnf/jsrt.go` answers `"function"`. See the
-> csharp section of Part 3 - it is two characters in `type_of` and two in
-> `type_class`, and js / typescript / python will all hit it.
+> The one cost that WAS real is not in this file: ~~the floor's `type_of` answers
+> `"object"` for a tag 16 cell where `abnf/jsrt.go` answers `"function"`~~ **- FIXED
+> 2026-08-03 (`10bbca1`).** `languages/lib/runtime.c:2079`
+> `if (t == 7 || t == 8 || t == 9 || t == 16) { return mk_cstr("function"); }`, and
+> `type_class` at 2091 pins tag 16 as class 6. It was two characters in each, exactly
+> as predicted, so js / typescript / python will NOT hit it.
 
 Two smaller things, recorded at the same standard:
 
@@ -6929,8 +7063,13 @@ Two smaller things, recorded at the same standard:
 
 ---
 
-# The four owed floor primitives - 2026-08-04. TWO LANDED, ONE WAS ALREADY DONE,
-# ONE IS BLOCKED BY A FILE THIS TASK DID NOT OWN
+# The four owed floor primitives - 2026-08-04. ALL FOUR ARE NOW SETTLED:
+# TWO LANDED, ONE WAS ALREADY DONE, AND THE FOURTH LANDED LATER THE SAME DAY
+#
+# (The heading used to end "ONE IS BLOCKED BY A FILE THIS TASK DID NOT OWN". That
+# was `js_bytelen`, section 4 below; it landed as a pair in `44bb09a` once the
+# php-rt.metajs half could go with it. Section 4 is kept for the link-error
+# measurement, and "`js_bytelen` - LANDED, as a pair" records the close.)
 
 Three migration reports asked the floor for a scope API, one asked for a generator
 tag, one for `js_bytelen`, and go's report reported a `floStr` defect. All four are
@@ -7132,7 +7271,13 @@ though the layout does not; and `floStr` is a HOST CALL (argument array + dispat
 where `goFloStr` is a direct call, which matters only if float printing is hot.
 **Reported, not made - `go-rt.metajs` is another file's.**
 
-## 4. `js_bytelen` - QUALIFIES, BLOCKED, AND NOT SHIPPED
+## 4. `js_bytelen` - QUALIFIED, WAS BLOCKED, AND HAS SINCE SHIPPED (`44bb09a`)
+
+> **STATUS 2026-08-04: CLOSED.** Both halves landed together -
+> `languages/lib/runtime.c:5020` defines the body and
+> `languages/lib/php-rt.metajs:1712` now carries only a comment saying the body is
+> the floor's. The section below is the record of WHY it could not ship alone, and
+> the general rule at its end is still live. See "`js_bytelen` - LANDED, as a pair".
 
 It is a pure byte count and carries no per-language behaviour, unlike `js_jadd`,
 `js_mcall` and the `js_range_*` family that are going to the shared MetaJS layer for
@@ -7865,3 +8010,162 @@ One of two things, both outside this agent's files:
 Option 1 is the real one, and it is worth saying that it is also what makes the
 rest of Part B possible rather than just this one body. **Until it lands, Part B
 has no first move**, and that is a measured statement rather than a delay.
+
+> **2026-08-04: option 1 is being built.** Untracked in the working tree at
+> `c1bc760`: `languages/lib/metajs-rt.metajs`, `lib/metajs-rt.ll`,
+> `tests/gen-metajs-rt-ll.sh`, and the `rts` default above changed to
+> `[libPath("runtime.ll"), libPath("metajs-rt.ll")]` - exactly the shape option 1
+> prescribes. **The finding in this section is not closed by that.** It says the
+> movable set is EMPTY; opening the door makes the set non-empty only once a body
+> actually moves, and `case_map` plus the 328 Unicode ranges were still in
+> `runtime.c` when this note was written. Whoever lands the door should re-measure
+> and either move `case_map` or say why not - and the before/after table Part B's
+> gate asks for is the thing that closes this.
+
+---
+
+# WHAT IS STILL OPEN - the consolidated list (2026-08-04, verified at `c1bc760`)
+
+Every "What is owed" / "Still owed" / "Not fixed here" / "BLOCKED" item in this
+file, in `runtime-merge-plan.md` and in `runtime-rework-plan.md` was walked and
+CHECKED AGAINST THE CODE. Most of them had landed and were still reading as debts;
+each of those is now struck at its own site with the commit and the file:line that
+closed it, and the measurement is kept. **This section is the residue: the things
+that are genuinely open.** One line each, with a pointer to the full write-up.
+
+Method, so the next reader can redo it rather than trust it: the classifications
+below come from grepping the implementation files named in each item, from
+`./tests/clang-check.sh` (16/16 "ok, and the clang executable agrees, no row
+held"), and from running the ratchet where the claim was about a ratchet.
+
+**HEAD is `c1bc760`, and three agents had UNCOMMITTED work in the tree while this
+was written.** Every "open" verdict below is a verdict about `c1bc760`. Three of
+them already have a fix in flight and are marked **IN FLIGHT** at their line - do
+not re-derive those; check `git status` first. Nothing in this list was closed on
+the strength of an uncommitted diff.
+
+## Defects - a measured difference from an oracle, in code that runs
+
+1. **The float-formatter boundaries - four languages, each a three-halves job.**
+   The rule lives in the Go twin, the interpreter grammar and the layer-2 file at
+   once, and `--full` pins the current answer, so each is a change of its own.
+   - swift: ours goes scientific at `e10 >= 16`, real swift at `|v| > 2^53`.
+     "The formatter boundary, measured exactly", and "What is still owed for Swift" item 2.
+   - ruby: 1,556 differing lines; `Float#to_s` goes scientific one decade earlier
+     than ours (`rubyFloStr` in `abnf/jsrt.go:2753`, `floStr` in
+     `ruby-interpreter.abnf`, `rbFloStr` in `ruby-rt.metajs`). "What is owed, and
+     what generalises to PYTHON" item 2.
+   - python: the same family, recorded with ruby's - "None of these is new, and
+     each one is a FEATURE decision".
+   - lua: 3,822 differing lines against real `lua 5.5`, all formatter - the ".0"
+     on an integral float in exponent form, negative zero, and `%.17g` vs shortest
+     round-trip. `runtime-rework-plan.md`, "Where our Lua and REAL lua still differ".
+
+2. **`[1, 2] + [3]` in dart** renders and concatenates ("1,23") where dart:core
+   concatenates the lists. Both halves agree, so it is invisible to the suites;
+   `dtJsAdd`, `languages/lib/dart-rt.metajs:1535`, under the comment "Recorded
+   rather than corrected". "What is owed, and what generalises" (DART) item 2.
+
+3. **`min`/`max` on a signed-zero tie. IN FLIGHT** - uncommitted at the time of
+   writing: `jvmTakeL` in `abnf/jsrtjvm.go`, `jTakeL` in `java-interpreter.abnf`,
+   `swPick` rewritten in `languages/lib/swift-rt.metajs`, plus assertions in
+   `tests/java-test-features.java` and `tests/swift-test-features.swift`. The
+   in-flight work also covers the NaN operand, which this item did not name.
+   - java: `Math.min(-0.0, 0.0)` is `0.0` in all three halves, real java `-0.0` -
+     `jvmMinMax` (`abnf/jsrtjvm.go:236`) and `jMinMax`
+     (`java-interpreter.abnf:2244`) order with `>` / `<`, and the two zeros compare
+     equal, so the sign bit is never consulted. The last remaining line of the 53
+     the long probe measured.
+   - swift: the same shape, 3 probe lines. "What is still owed for Swift" item 3.
+
+4. **`Math.abs(-0.0)` in the java INTERPRETER. IN FLIGHT** (same uncommitted change
+   as item 3, the `f < 0 || (f == 0 && 1 / f < 0)` guard at
+   `java-interpreter.abnf:2132`). It answers `-0.0` where real java and
+   both compiled halves answer `0.0`. `java-interpreter.abnf:2131`, the `jIsFlo`
+   arm: `f < 0` is false for `-0.0`. The fix is the sign-bit test
+   `(f < 0 || (f == 0 && 1 / f < 0))`, verified in the archive alongside the long
+   fix. Same root as item 3 - a fourth instance of it.
+
+5. **`ruby`'s `-0.0 % 1.0`** is `-0.0` in ruby and `+0.0` in both our halves - 309
+   lines, the signed-zero trap in its Dart shape, and the Go twin has it too.
+
+6. **The `die3` error-message divergence.** A member assignment on a non-object:
+   `llvm.Run` says `cannot set member 'foo' on float64` (`abnf/jsrt.go:2105`, the
+   TYPE), the native floor says `member assignment 'foo' on 5`
+   (`languages/lib/runtime.c:2952/2971`, the VALUE). `die2`'s wording matches
+   exactly, so this is a real gap against the floor's own stated rule. Needs
+   whoever owns `abnf/jsrt.go` and `runtime.c` at the same time. "Settling the 24",
+   "One real divergence was found while doing it".
+
+## Structural - work that is understood and unstarted
+
+7. **`js_goslice` / `js_gospread` / `js_has` belong in the floor.** Three languages
+   have written them out; today they exist only in `languages/lib/go-rt.metajs` and
+   `languages/lib/csharp-rt.metajs` (e.g. `js_has` at `csharp-rt.metajs:800`) and
+   `grep 'js_goslice\|js_gospread\|long js_has' languages/lib/runtime.c` is empty.
+   **`js_bytelen` is the worked example of how to do it**: the floor body and the
+   layer-2 DELETIONS must be one change, or the link fails with a duplicate symbol.
+   "What is owed, and what generalises" (C#) item 3.
+
+8. **`js_scope_has(s, n)`, and the `py_setvar` residue behind it.** A name bound
+   strictly below a binding boundary AND above it. The floor's scope API landed as
+   HOST BUILTINS (`scopeHas`, id 67, "THIS scope only, no chain walk", asserted in
+   three engines); the EXTERN does not exist -
+   `grep 'js_scope_has' languages/lib/runtime.c abnf/jsrt.go` is empty, while the
+   other six `js_scope_*` are there. Three lines of `runtime.c` and three of
+   `abnf/jsrt.go`. "What is owed, and what generalises" (PYTHON) item 2.
+
+9. **`pyAnnot` is static where the Go twin is dynamic.**
+   `languages/python-to-llvm-ir.abnf:1440` decides "is there an `__annotations__`
+   dict in THIS scope already" at compile time (`pyAnnotHere`), where `abnf/jsrt.go`
+   asks `sc.find` at run time. They differ only for an annotation the program does
+   not REACH. "What is owed, and what generalises" (PYTHON) item 3.
+
+10. **Automating the native fail-tests.** `tests/metajs-fail-test.js`,
+    `-undeclared.js` and `-anytype.js` are in the matrix through the interpreter and
+    `llvm.Run` only, never natively - which is exactly why the floor's abort-path
+    bodies read as untested. Their native halves were run by hand and agree with the
+    Go twin word for word. Automating it is three `-exe` rows plus an
+    expect-nonzero mode in `.vscode/launch.json` and `test.sh`; re-checked here,
+    `test.sh` still has no such mode. "Settling the 24".
+
+11. **Part B has no first move, and it is BLOCKED on MetaJS having no layer 2.**
+    Every movable floor body is reached through the host-builtin dispatch that IS
+    MetaJS's own standard library, and `metajs-to-llvm-ir.abnf` links exactly one
+    runtime input (`if (rts == undefined || rts.length == 0) { rts = [runtimePath()] }`,
+    line 1226) - so a body that leaves the floor for `runtime.metajs` disappears
+    from MetaJS's own native build. Re-checked here: no `languages/lib/metajs-rt.*`
+    exists in git, and `tests/gen-*.sh` is still fourteen scripts at `c1bc760`. The
+    unblock is option 1 of "What would unblock it, and who owns it" - a
+    `metajs-rt.metajs` and a fifteenth generator. **This is the single item that
+    gates the most other work.**
+
+    **THE DOOR IS IN FLIGHT** - untracked in the working tree at the time of
+    writing: `languages/lib/metajs-rt.metajs` (56 lines), `lib/metajs-rt.ll`,
+    `tests/gen-metajs-rt-ll.sh`, and `metajs-to-llvm-ir.abnf`'s default changed from
+    `rts = [runtimePath()]` to `rts = [libPath("runtime.ll"), libPath("metajs-rt.ll")]`.
+    **Opening the door is not the same as moving a body**: `case_map` and the 328
+    Unicode ranges were still in the floor when this was written, so the "movable set
+    is empty" finding closes only when a body actually moves. Re-check both halves.
+
+12. **`-rt-prims` and the C floor still cannot be combined in one `-exe` build**
+    (both define the 13 derived primitives, so the link would fail with a duplicate
+    symbol - now correctly DIAGNOSED as one, `9ee6fcc`, but still a failure).
+    `-rt-prims` is a measurement flag with no `-exe` entry in the matrix, so nothing
+    is regressing; splitting the derived 13 into a second `.ll` would fix it when it
+    is wanted. `runtime-rework-plan.md` phase 4, "Not done".
+
+13. **`jsdispatch` is a linear compare chain**, O(number of functions) per call. Not
+    visible on any benchmark here; a program with thousands of functions would want
+    a binary search or a real table. `runtime-rework-plan.md` phase 4, "Not done".
+
+## Not open, listed here because they read as open somewhere else
+
+- **Nothing is waiting on "the change being committed."** Every
+  "`abnf/jsrt*.go` stays until the change is committed" line in this file is struck
+  at its site. Part 4 MEASURED retiring the Go runtime and DECLINED it (`a3baeee`):
+  `llvm.Run` cannot execute the C floor, so those files are PERMANENT. Phase 7 of
+  `runtime-rework-plan.md` is annotated to the same effect.
+- **The shift result type in the floor** is not a defect to fix. A fatal probe at
+  all four sites fired ZERO times.
+- **The `js_jadd` "float path divergence"** was two spellings of one expression.

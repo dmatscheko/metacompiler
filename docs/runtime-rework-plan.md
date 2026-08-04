@@ -1,5 +1,13 @@
 # Self-hosted runtime: the plan
 
+> **This document is HISTORY, not a to-do list.** Phases 0-4a and the bash/batch
+> convergence are built; phase 7 (retiring the Go runtime) was measured and DECLINED.
+> The single consolidated list of what is genuinely still open lives at the end of
+> [runtime-next-plan.md](runtime-next-plan.md), under "WHAT IS STILL OPEN". Three items
+> in this file feed it: the Lua formatter boundary, `-rt-prims`-with-the-C-floor, and
+> the linear `jsdispatch` chain. Everything else marked "not fixed here" or "not done"
+> was re-checked against the code on 2026-08-04 and is struck at its site.
+
 ## The goal
 
 Every compiled language produces a **self-contained native binary**, and the semantics of
@@ -777,10 +785,16 @@ stderr and exits 1, which is what the Go side does at the program boundary.
   them too, so the link would fail with duplicate symbols. `-rt-prims` is a measurement
   flag with no `-exe` entry in the matrix, so nothing regressed; splitting the derived
   13 into a second `.ll` would fix it when it is wanted.
-- **No GC.** The arena leaks by construction. A long-running MetaJS program will grow
-  without bound; every test program here allocates a few megabytes at most. Phase 4a
-  measured the rate and cut it 2.58x; the residual is still exactly linear, and the
-  design for a collector is recorded there.
+- ~~**No GC.** The arena leaks by construction.~~ **BUILT - the collector is in the
+  floor.** `languages/lib/runtime.c` has `gc_collect` (818), `gc_grow` (654),
+  `GC_STACK_BASE` (389) and the conservative C-stack scan at `gc_scan_range(lo,
+  GC_STACK_BASE)` (839), with four modes (`MEC_GC`, including `stress`) and the
+  allocation-triggered path at 559-560. It is mark/sweep over the arena with a
+  conservative scan, which is the shape phase 4a's design argued for and refcounting
+  was rejected in favour of. RSS is flat at ~3.3 MB over 250k/1M/2M, and
+  `tests/coro-poc/build.sh --gc` is part of every gate. The write-up below is the
+  history that led to it. (Phase 4a's rate measurement - the 2.58x cut, the exactly
+  linear residual - still reads correctly as the reason a collector had to exist.)
 - **`jsdispatch` is a linear compare chain.** O(number of functions) per call. It did not
   show up in the benchmark above, but a program with thousands of functions would want a
   binary search or a real table.
@@ -985,7 +999,12 @@ x=1  y=1e-100             fused -3.5894790912362802e-17  two-step 0
    faithful port of Go's own `math.Mod` on the `Frexp`/`Ldexp` this file already
    carried. A 15,625-case `%` probe over 125 values is now byte-identical.
 
-### Where our Lua and REAL lua still differ - measured, and NOT fixed here
+### Where our Lua and REAL lua still differ - measured, and STILL OPEN
+
+> **Re-checked 2026-08-04 at `c1bc760`: still open**, and it is item 1 of the
+> consolidated "WHAT IS STILL OPEN" list at the end of `runtime-next-plan.md`, where it
+> sits with the swift, ruby and python formatter boundaries - the same three-halves
+> shape, and the reason none of the four has been done.
 
 With the same 12,557-line probe run through the installed `lua 5.5`, 3,822 lines
 differ - and **every one of them is the number FORMATTER, not the arithmetic**;
@@ -1594,11 +1613,25 @@ One stale line corrected while measuring: `nm -u` on the bash native binary repo
 **two** undefined symbols, `_memset` and `_putchar`, not one - and it did at `ad922a0`
 too, so this is a mis-statement in the earlier report, not a change.
 
-### Two defects in `languages/c-to-llvm-ir.abnf`, found by the port, NOT fixed here
+### Two defects in `languages/c-to-llvm-ir.abnf`, found by the port - BOTH FIXED
 
-Both are reachable from three lines of ordinary C and neither has anything to do with
-bash. The file belongs to another change in flight, so they are reported rather than
-fixed, and `bash-rt.c` works around them.
+> **CLOSED 2026-08-02. See "Four defects in c-to-llvm-ir.abnf - all FIXED, all pinned"
+> below**, where they are defects 1 + 2: `noteParamCts` recorded a parameter's width and
+> threw its pointer-ness away, and `funcParamPtrs` is the fix. Re-verified in this tree
+> 2026-08-04 at `c1bc760` - the exact snippet below, plus the pointer-armed `?:`,
+> compiles and runs:
+>
+> ```
+> $ ./mec languages/c-to-llvm-ir.abnf probe.c -q
+> c compiler: main() returned 65
+> ```
+>
+> **The workaround is gone too**: `languages/lib/bash-rt.c` no longer carries
+> `rt_eg_fwd(long, long, int)`. Pinned by `tests/c-test-full.c` SECTION 48.
+
+As they stood: both are reachable from three lines of ordinary C and neither has
+anything to do with bash. The file belonged to another change in flight, so they were
+reported rather than fixed, and `bash-rt.c` worked around them.
 
 1. **A call to a not-yet-defined function with a POINTER parameter miscompiles the
    later definition.**
@@ -2101,9 +2134,23 @@ lines of Go (`jsrtregex.go`, `jsrtregexjs.go`, `jsrtregexkt.go`, `jsrtregexpy.go
 classes. **Those are by design, not bugs:** `^(a*)*$` capturing `"aaa"` is JS+POSIX while
 Python, Java, Perl and Ruby capture `""`. Unifying them would break three languages.
 
-## Phase 7 - retire the Go runtime
+## Phase 7 - retire the Go runtime - MEASURED AND DECLINED 2026-08-03 (`a3baeee`)
 
-29,657 lines deleted. `jsrt.go`'s host-function globals become MetaJS.
+> ~~29,657 lines deleted. `jsrt.go`'s host-function globals become MetaJS.~~
+> **THIS PHASE WILL NOT HAPPEN, and it is not pending.** It was costed properly rather
+> than dropped: `llvm.Run` **cannot execute the C floor** (`setjmp`/`longjmp`,
+> `pthread_create`+`dlsym`, and a collector that scans `[sp, GC_STACK_BASE)` of a C
+> stack that does not exist there - a live array was demonstrated being collected), so
+> a merged layer 2 still bottoms out on C and still cannot back the interpreter.
+> `abnf/jsrt.go` is also the engine `-frozen` itself runs on, and
+> `jsrtint.go`/`jsrtjvm.go` carry bindings layer 2 CALLS. **Nothing was deleted.**
+>
+> The consequence for readers: every "`abnf/jsrt*.go` stays until the change is
+> committed" line in `runtime-next-plan.md` is struck at its site - those files are
+> permanent, not waiting on a commit. The full measurement is
+> `runtime-next-plan.md`, "Retiring the Go runtime - MEASURED AND DECLINED 2026-08-03.
+> NOTHING WAS DELETED", and the argument that this makes the twin MORE valuable is at
+> the end of `runtime-merge-plan.md`.
 
 ---
 

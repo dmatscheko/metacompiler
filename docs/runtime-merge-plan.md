@@ -1,5 +1,11 @@
 # Merging the runtime: a shared MetaJS layer, and a smaller C floor
 
+> **STATUS 2026-08-04. Part A is DONE. Part B is BLOCKED, and the blocker is named.**
+> Part B's movable set is currently empty because MetaJS has no layer 2 of its own - see
+> "Part B - BLOCKED, and the blocker is not a candidate's" below. The single consolidated
+> list of everything still open across all three plan documents is at the end of
+> [runtime-next-plan.md](runtime-next-plan.md), under "WHAT IS STILL OPEN".
+
 Third plan in the series, after [runtime-rework-plan.md](runtime-rework-plan.md) (what
 was built) and [runtime-next-plan.md](runtime-next-plan.md) (GC, the floor primitives,
 and all sixteen language migrations). HEAD when written: `c2e1811`.
@@ -16,6 +22,15 @@ Two things, in order:
 **The real prize is neither.** It is the DIVERGENCES the merge exposes: nine
 implementations of `js_jadd` that are structurally identical and differ in their float
 path is a question nobody has asked, and merging is what forces the answer.
+
+> **2026-08-04: the prize was real, but this example was not.** The merge DID expose
+> defects (the C# NaN sentinel, `rtWrap32`'s NaN/Inf guard, 862 lines of unreachable
+> code) - and `js_jadd`'s "known divergence in the float path" turned out to be **two
+> spellings of one expression**: `jvmArith` is `floOp(0, ...)`, which is
+> `jsrtjvm.go:176`'s `rt.toNumber(l)+rt.toNumber(r)`, i.e. the same thing swift spells
+> directly. The nine-way family reduced to two knobs. See "The plan's headline example
+> was wrong, and the method is what found it". Keep the goal; do not go looking for
+> this particular divergence.
 
 **Explicitly NOT a goal: deleting `abnf/jsrt*.go`.** See "Why this makes the Go twin more
 valuable, not less" at the end. That was measured and declined in
@@ -36,6 +51,18 @@ C floor        languages/lib/runtime.c              5,061 lines, 301 bodies, 86 
 per-language C bash-rt.c 2,696 + batch-rt.c 490     3,186
 MetaJS layer 2 11 files                            32,154
 Go twin (KEPT) abnf/jsrt*.go                       30,010
+```
+
+**Re-measured 2026-08-04 at `c1bc760`** (the table above is the snapshot this plan
+was written against, kept so the deltas are readable):
+
+```
+C floor        languages/lib/runtime.c              5,204 lines   (+143: the scope API,
+                                                                   isGenerator, js_bytelen)
+MetaJS layer 2 languages/lib/*.metajs              31,477         (-677: Part A's merges
+                                                                   and 862 lines of dead code)
+Go twin (KEPT) abnf/jsrt*.go                       30,248
+clang-check    16/16 "ok, and the clang executable agrees", no row held
 ```
 
 ---
@@ -93,9 +120,10 @@ Sixteen languages are green. A single merge commit touching eleven layer-2 files
 produces a red suite nobody can bisect. Do this instead, and **verify all sixteen after
 each step**:
 
-1. **`js_jadd` first** (9 implementations, the widest, and the one with a known
-   divergence in its float path). It is the pilot: it proves the mechanism, and it is
-   small enough that a divergence found is a divergence understood.
+1. **`js_jadd` first** (9 implementations, the widest, and the one with a ~~known
+   divergence in its float path~~ **- SUPERSEDED 2026-08-04: there was no divergence,
+   see the note at the top and "The plan's headline example was wrong"**). It was the
+   pilot anyway, and it proved the mechanism.
 2. `js_is_type` (8), then `js_pyset`/`js_dict_new`/`js_mcall` (6 each).
 3. The `js_py*` family as a block — dart wrote it as language-neutral and ruby reused
    it, so it is already half-merged in spirit.
@@ -424,12 +452,19 @@ pass did not own.
   answers `[]` in python; `js_this` reads a different global in each of its two.
   The one genuinely shared piece across the tail - the `__class`/`__super` walk -
   is already `rtFindMethod`.
-- **Java's `jl*` collapse, and it is not the ~90-line freebie it looks like.**
-  Marking a long box unsigned is what defeats `si_norm`, and `sintOp` opcode 10
-  (`>>`) branches on that flag: with an honest `sintRaw` signed box `>>` becomes
-  arithmetic - which is what `jlSar` was for - but Java's `>>>`, today
+- ~~**Java's `jl*` collapse, and it is not the ~90-line freebie it looks like.**~~
+  **DONE 2026-08-04 (`9689f81`), and the cost analysis was exactly right.** As
+  written: marking a long box unsigned is what defeats `si_norm`, and `sintOp`
+  opcode 10 (`>>`) branches on that flag: with an honest `sintRaw` signed box `>>`
+  becomes arithmetic - which is what `jlSar` was for - but Java's `>>>`, today
   `sintOp(10)` direct, then needs a helper of its own. The collapse trades
   `jlSar` for a `jlShr` rather than removing it, across ~30 call sites.
+
+  That is what shipped. `languages/lib/java-rt.metajs` now builds every long with
+  `sintRaw` (lines 119-122, 139, 154), carries **nine** `jl*` helpers, and says so
+  at line 77: "`>>>` now costs `jlShr` - `jlSar` traded for `jlShr`, one helper".
+  The floor half (`sintRaw`, host id 62) is `runtime.c:5099` +
+  `abnf/jsrtint.go:389`. See `runtime-next-plan.md`, "THE COLLAPSE ONTO `sintRaw`".
 
 ---
 
@@ -484,6 +519,28 @@ Same suite gates as Part A, plus: `tests/coro-poc/build.sh` with `--gc` and `--b
 unchanged, memory still bounded (rss flat at 250k/1M/2M), and a before/after table for
 every body moved.
 
+## Part B - BLOCKED, and the blocker is not a candidate's (2026-08-04)
+
+Step 0 was done: the floor was instrumented and the hot/cold split MEASURED, which
+corrected the candidate list above in one place and put the whole `d_*` family on a
+can-never-move list. `case_map` came out as the best first move - 114 corpus calls,
+zero on both benches, pure table lookup.
+
+**It cannot move, and neither can anything else on the list.**
+`languages/lib/runtime.metajs` is layer 2, and MetaJS itself has no layer 2:
+`metajs-to-llvm-ir.abnf` links exactly one runtime input (`rts = [runtimePath()]`), so
+a body that leaves the floor for `runtime.metajs` disappears from MetaJS's own native
+build - and every remaining candidate is reached through the host-builtin dispatch that
+IS MetaJS's standard library. **Part B's movable set is currently empty.**
+
+The unblock is a `languages/lib/metajs-rt.metajs` plus a fifteenth `tests/gen-*.sh`.
+**Re-checked 2026-08-04: neither exists at `c1bc760`, and both are UNTRACKED in the
+working tree** - the door is being built. Opening it does not by itself close this:
+the finding is that the movable set is empty, and that closes when a body actually
+moves, with the before/after table the gate above asks for. Full write-up, with the
+per-body call counts: `runtime-next-plan.md`, "Part B, move 1: `case_map` CANNOT
+MOVE" and "What would unblock it, and who owns it".
+
 ---
 
 # Why this makes the Go twin MORE valuable, not less
@@ -494,7 +551,10 @@ because it will be proposed again.
 
 **Today there are eleven independent readings** of the shared semantics: eleven files,
 written by eleven separate processes from `abnf/jsrt*.go`. That independence is why the
-`js_jadd` divergence above exists to be found.
+defects above exist to be found - the C# NaN sentinel, which the two halves already
+disagreed on at HEAD and which `--cross` never probed, is the concrete case. (The
+`js_jadd` "divergence" this sentence originally cited was not one; the argument does not
+depend on it.)
 
 **After a successful merge there is one.** The merge improves consistency by destroying
 independence — that is what merging means. The Go twin then becomes the *only* remaining
