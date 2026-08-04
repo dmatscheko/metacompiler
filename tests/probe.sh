@@ -69,30 +69,26 @@ else work=$(mktemp -d); trap 'rm -rf "$work"' EXIT; fi
 INTERP="languages/$LANG_NAME-interpreter.abnf"
 COMPILE="languages/$LANG_NAME-to-llvm-ir.abnf"
 
-# `-q` does NOT get you the program's output on its own. A compiler grammar still
-# prints its whole MODULE first (clang-check.sh passes -q and strips the module
-# anyway - that is why). Separating them by eye is a trap: do not look for "the
-# last line that looks like IR", because var_dump prints a bare `}` and PHP will
-# fool you. Track brace depth forward. This is clang-check.sh's module_only()
-# inverted - it keeps what that one drops.
-strip_module() {
-    awk '
-        BEGIN { depth = 0; done = 0 }
-        {
-            if (done) { print; next }
-            if (depth > 0) { if ($0 ~ /^}/) depth = 0; next }
-            if ($0 ~ /^define /) { depth = 1; if ($0 ~ /}[ \t]*$/) depth = 0; next }
-            if ($0 ~ /^@/ || $0 ~ /^declare / || $0 ~ /^[ \t]*$/ ||
-                $0 ~ /^source_filename/ || $0 ~ /^target / || $0 ~ /^;/ ||
-                $0 ~ /^!/ || $0 ~ /^%[A-Za-z_.$]/ || $0 ~ /^attributes /) { next }
-            done = 1; print
-        }'
-}
+# THE TWO HALVES NEED DIFFERENT QUIET FLAGS, and the asymmetry is not arbitrary.
+#
+# `-q` suppresses the compiler's own stage chatter; `-qq` additionally suppresses
+# the grammar's DEFAULT OUTPUT - the text the grammar itself emits.
+#
+#   interpreter half: the program's output IS the grammar's default output, so
+#                     -qq erases everything and -q is the flag you want.
+#   compiler half:    the grammar's default output is the LLVM MODULE, and the
+#                     program's prints come from llvm.Run on a side channel. So
+#                     -qq drops the module and keeps exactly the program - which
+#                     is what a differential probe wants, with no parsing at all.
+#
+# (Do not try to separate the module from the output by eye instead. "The last
+# line that looks like IR" is a trap: var_dump prints a bare `}` and PHP will fool
+# you. clang-check.sh's module_only() brace-depth scan is the reference for the
+# cases that genuinely need it - here -qq means we never do.)
 
-# Both our engines sign off with `<lang> interpreter:` / `<lang> compiler:
-# program ran to completion`. That is the ENGINE talking, not the program, and no
-# other leg has it - dropping it is what makes our legs comparable to a real
-# toolchain's.
+# Under -q the interpreter half still signs off with `<lang> interpreter: program
+# ran to completion`. That is the ENGINE talking, not the program, and no real
+# toolchain says it.
 strip_engine() { grep -v -E '(interpreter|compiler): program ran to completion$'; }
 
 declare -a RAN
@@ -106,7 +102,7 @@ if want interp && [ -f "$INTERP" ]; then
 fi
 
 if want run && [ -f "$COMPILE" ]; then
-    ./mec "$COMPILE" "$PROG" -q 2>"$work/run.err" | strip_module | strip_engine >"$work/run.out"; r=${PIPESTATUS[0]}
+    ./mec "$COMPILE" "$PROG" -qq 2>"$work/run.err" | strip_engine >"$work/run.out"; r=${PIPESTATUS[0]}
     report run "$r"; RAN+=(run)
 fi
 
