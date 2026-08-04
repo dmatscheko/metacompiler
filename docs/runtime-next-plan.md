@@ -8073,6 +8073,17 @@ has no first move**, and that is a measured statement rather than a delay.
 # Invariants after the pass: matrix **328/328** (was 325), `--full` **5,852**
 # assertions (was 5,843) with 0 languages whose halves disagree, `--cross` 119/0,
 # clang-check 16/16 all agreeing none held.
+#
+# THIRD PASS, 2026-08-04 at `c7a038f`, by the coordinator: the three items this
+# section marked **IN FLIGHT** have all LANDED and are struck below - item 2 (dart
+# `[1,2] + [3]`) and items 3 and 4 (the signed-zero `min`/`max` tie and the java
+# interpreter's `Math.abs(-0.0)`) all shipped in `33923d4`. Verified against the
+# code, not the list: `dtJsAdd` is present in `dart-rt.metajs`, and `jvmTakeL` /
+# `jf_take_l` / `jTakeL` / `flTakeL` are present in `jsrtjvm.go`, `runtime.c`,
+# `java-interpreter.abnf` and `metajs-interpreter.abnf` respectively. THE LESSON,
+# for the fourth pass: this list went stale within two commits of being written,
+# twice. An item's verdict is only as good as the commit it names - always re-grep
+# the implementation before acting on a line here.
 
 Every "What is owed" / "Still owed" / "Not fixed here" / "BLOCKED" item in this
 file, in `runtime-merge-plan.md` and in `runtime-rework-plan.md` was walked and
@@ -8249,9 +8260,16 @@ the strength of an uncommitted diff.
    concatenates the lists. Both halves agree, so it is invisible to the suites;
    `dtJsAdd`, `languages/lib/dart-rt.metajs:1535`, under the comment "Recorded
    rather than corrected". "What is owed, and what generalises" (DART) item 2.
+   **CLOSED in `33923d4`**, all three halves (`abnf/jsrtdart.go`,
+   `languages/lib/dart-rt.metajs`, `languages/dart-interpreter.abnf`): `[1,2]+[3]`
+   is now `[1, 2, 3]` with length 3, both operands untouched, against dart:core's
+   `List<E> operator +` (no `dart` toolchain here, cited in the code). The new
+   assertions FAIL twice and then ABORT with `TypeError: Value is not an object:
+   1,23` on a clean pre-fix archive.
 
-3. **`min`/`max` on a signed-zero tie. IN FLIGHT** - uncommitted at the time of
-   writing: `jvmTakeL` in `abnf/jsrtjvm.go`, `jTakeL` in `java-interpreter.abnf`,
+3. ~~**`min`/`max` on a signed-zero tie.**~~ **CLOSED in `33923d4`** - it was
+   FIVE halves, not the three named here (the floor's `jf_minmax` host ids 58/59
+   and `metajs-interpreter.abnf`'s `floMax`/`floMin` bindings also choose). Was: `jvmTakeL` in `abnf/jsrtjvm.go`, `jTakeL` in `java-interpreter.abnf`,
    `swPick` rewritten in `languages/lib/swift-rt.metajs`, plus assertions in
    `tests/java-test-features.java` and `tests/swift-test-features.swift`. The
    in-flight work also covers the NaN operand, which this item did not name.
@@ -8262,7 +8280,7 @@ the strength of an uncommitted diff.
      the long probe measured.
    - swift: the same shape, 3 probe lines. "What is still owed for Swift" item 3.
 
-4. **`Math.abs(-0.0)` in the java INTERPRETER. IN FLIGHT** (same uncommitted change
+4. ~~**`Math.abs(-0.0)` in the java INTERPRETER.**~~ **CLOSED in `33923d4`** (same uncommitted change
    as item 3, the `f < 0 || (f == 0 && 1 / f < 0)` guard at
    `java-interpreter.abnf:2132`). It answers `-0.0` where real java and
    both compiled halves answer `0.0`. `java-interpreter.abnf:2131`, the `jIsFlo`
