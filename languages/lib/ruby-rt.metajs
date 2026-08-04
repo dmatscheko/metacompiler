@@ -706,6 +706,61 @@ function rbGen(x, prec) {
     return rbGenStrip(rtFixed(x, prec - 1 - ex))
 }
 
+// ----- the # (alternate) flag ----------------------------------------------
+//
+// UNPARSED in all three halves until now, and the two compiled ones did not even
+// reach the directive letter: the flag loop stopped at "#", the width scan stopped
+// there too, and "#" itself became the conversion, so ("%#g" % 1.5) was "#g" with
+// the argument left unconsumed for the NEXT directive. The interpreter swallowed
+// the "#" into its spec string and then ignored it, so it printed plain %g - a
+// live halves divergence that --cross never saw because no test used the flag.
+// MRI: it keeps %g's trailing zeros ("%#g" % 100.0 is "100.000"), it forces a
+// decimal point wherever there would be none ("%#.0f" % 1.0 is "1.", "%#.1g" %
+// 1234.0 is "1.e+03"), and it puts a base prefix on %x/%X/%o/%b - but not on a
+// zero. Measured against ruby 2.6.10 over the whole flag/width/precision matrix.
+
+// A decimal point at the END of the mantissa when there is none, in front of any
+// exponent suffix.
+function rbAltPoint(t) {
+    var at = 0 - 1
+    var k = 0
+    while (k < t.length) {
+        if (t.charAt(k) == "e" || t.charAt(k) == "E") {
+            at = k
+            break
+        }
+        k = k + 1
+    }
+    var mant = at < 0 ? t : t.substring(0, at)
+    var tail = at < 0 ? "" : t.substring(at, t.length)
+    var j = 0
+    while (j < mant.length) {
+        if (mant.charAt(j) == ".") { return t }
+        j = j + 1
+    }
+    return mant + "." + tail
+}
+
+// %g's shape with the trailing zeros KEPT - rbGen without rbGenStrip.
+function rbGenAlt(x, prec) {
+    var e = rbSci(x, prec - 1)
+    var ex = rbSciExp(e)
+    if (ex < 0 - 4 || ex >= prec) { return rbAltPoint(e) }
+    return rbAltPoint(rtFixed(x, prec - 1 - ex))
+}
+
+// "0x", "0X", "0" or "0b" for a NON-ZERO body; "" otherwise ("%#x" % 0 is "0").
+// The caller keeps the length so the 0 flag can pad behind it: "%#010x" % 255 is
+// "0x000000ff".
+function rbBasePrefix(conv, digits) {
+    if (digits == "0" || digits == "") { return "" }
+    if (conv == "x") { return "0x" }
+    if (conv == "X") { return "0X" }
+    if (conv == "o") { return "0" }
+    if (conv == "b") { return "0b" }
+    return ""
+}
+
 // Ruby prints "Inf", "-Inf" and "NaN" for a non-finite float under EVERY float
 // directive, in that case whatever the directive's own case is, and pads them with
 // spaces even under the 0 flag. Go's strconv says "+Inf", which is what reached the
@@ -782,13 +837,15 @@ function rbFormat(spec, arg) {
         var zero = false
         var plus = false
         var space = false
+        var alt = false
         while (i < spec.length) {
             var fc = spec.charAt(i)
-            if (fc != "-" && fc != "0" && fc != "+" && fc != " ") { break }
+            if (fc != "-" && fc != "0" && fc != "+" && fc != " " && fc != "#") { break }
             if (fc == "-") { left = true }
             if (fc == "0") { zero = true }
             if (fc == "+") { plus = true }
             if (fc == " ") { space = true }
+            if (fc == "#") { alt = true }
             i = i + 1
         }
         var width = 0
@@ -816,6 +873,7 @@ function rbFormat(spec, arg) {
         if (ai < args.length) { nx = args[ai] }
         var body = ""
         var nonFinite = false
+        var prefix = ""
         if (conv == "d" || conv == "i") {
             ai = ai + 1
             body = "" + Math.trunc(rbToF(nx))
@@ -828,6 +886,7 @@ function rbFormat(spec, arg) {
                 nonFinite = true
             } else {
                 body = rtFixed(ff, prec < 0 ? 6 : prec)
+                if (alt) { body = rbAltPoint(body) }
             }
         } else if (conv == "e" || conv == "E") {
             ai = ai + 1
@@ -838,6 +897,7 @@ function rbFormat(spec, arg) {
                 nonFinite = true
             } else {
                 body = rbSci(ef, prec < 0 ? 6 : prec)
+                if (alt) { body = rbAltPoint(body) }
                 if (conv == "E") { body = rbUpper(body) }
             }
         } else if (conv == "g" || conv == "G") {
@@ -850,7 +910,7 @@ function rbFormat(spec, arg) {
             } else {
                 var gp = prec < 0 ? 6 : prec
                 if (gp == 0) { gp = 1 }
-                body = rbGen(gf, gp)
+                body = alt ? rbGenAlt(gf, gp) : rbGen(gf, gp)
                 if (conv == "G") { body = rbUpper(body) }
             }
         } else if (conv == "s") {
@@ -861,17 +921,28 @@ function rbFormat(spec, arg) {
         } else if (conv == "x") {
             ai = ai + 1
             body = rtBaseStr(rbToF(nx), 16)
+            if (alt) { prefix = rbBasePrefix("x", body) }
         } else if (conv == "X") {
             ai = ai + 1
             body = rbUpper(rtBaseStr(rbToF(nx), 16))
+            if (alt) { prefix = rbBasePrefix("X", body) }
         } else if (conv == "o") {
             ai = ai + 1
             body = rtBaseStr(rbToF(nx), 8)
+            if (alt) { prefix = rbBasePrefix("o", body) }
         } else if (conv == "b") {
             ai = ai + 1
             body = rtBaseStr(rbToF(nx), 2)
+            if (alt) { prefix = rbBasePrefix("b", body) }
         } else {
             body = conv
+        }
+        if (prefix != "") {
+            if (body.charAt(0) == "-") {
+                body = "-" + prefix + body.substring(1, body.length)
+            } else {
+                body = prefix + body
+            }
         }
         // The + and SPACE flags were parsed and thrown away, in every half, so
         // "%+d" % 7 was "7" against MRI's "+7" - both halves agreeing and both
@@ -889,11 +960,16 @@ function rbFormat(spec, arg) {
         // the number of characters: "%10s" of "café" gets FIVE spaces, not six.
         // byteLen is the floor's own answer to that and it is what the emitters
         // already use (lib/compile-core.js emitStr).
+        // The zeros of the 0 flag go BEHIND the sign and behind a # base prefix:
+        // "%05d" % -42 is "-0042" and "%#010x" % 255 is "0x000000ff".
+        var skip = 0
+        if (body.length > 0 && rbIsSignChar(body.charAt(0))) { skip = 1 }
+        skip = skip + prefix.length
         while (byteLen(body) < width) {
             if (left) {
                 body = body + " "
-            } else if (pad == "0" && body.length > 0 && rbIsSignChar(body.charAt(0))) {
-                body = body.substring(0, 1) + pad + body.substring(1, body.length)
+            } else if (pad == "0") {
+                body = body.substring(0, skip) + pad + body.substring(skip, body.length)
             } else {
                 body = pad + body
             }

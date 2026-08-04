@@ -4249,9 +4249,59 @@ func rubyFloatWord(v float64) (string, bool) {
 	return "", false
 }
 
+// rubyAltPoint forces a decimal point into a rendered float that has none - what
+// the # flag asks for ("%#.0f" % 1.0 is "1.", "%#.1g" % 1234.0 is "1.e+03"). The
+// point goes at the END of the mantissa, in front of any exponent suffix.
+func rubyAltPoint(s string) string {
+	at := strings.IndexAny(s, "eE")
+	mant, tail := s, ""
+	if at >= 0 {
+		mant, tail = s[:at], s[at:]
+	}
+	if strings.Contains(mant, ".") {
+		return s
+	}
+	return mant + "." + tail
+}
+
+// rubyGenAlt is %g's shape WITHOUT the trailing-zero stripping - the # flag's
+// "alternate form" ("%#g" % 100.0 is "100.000" where "%g" is "100"). The shape
+// decision is the same one strconv's 'g' makes and has to be read AFTER the
+// rounding, so the %e rendering is what answers it.
+func rubyGenAlt(v float64, prec int) string {
+	e := strconv.FormatFloat(v, 'e', prec-1, 64)
+	at := strings.IndexByte(e, 'e')
+	ex, _ := strconv.Atoi(e[at+1:])
+	if ex < -4 || ex >= prec {
+		return rubyAltPoint(e)
+	}
+	return rubyAltPoint(strconv.FormatFloat(v, 'f', prec-1-ex, 64))
+}
+
+// rubyBasePrefix is the # flag on %x/%X/%o/%b: "0x", "0X", "0" and "0b" in front
+// of the digits, and NOTHING in front of a zero ("%#x" % 0 is "0"). It returns
+// the prefix only; the caller keeps its length so the 0 flag can pad BEHIND it
+// ("%#010x" % 255 is "0x000000ff", not "00000000xff").
+func rubyBasePrefix(conv byte, digits string) string {
+	if digits == "0" || digits == "" {
+		return ""
+	}
+	switch conv {
+	case 'x':
+		return "0x"
+	case 'X':
+		return "0X"
+	case 'o':
+		return "0"
+	case 'b':
+		return "0b"
+	}
+	return ""
+}
+
 // rubyFormat is Kernel#format / String#% - the printf directives Ruby shares with C:
-// %[-][0][width][.prec](d|i|f|s|x|X|o|b|e|E|g|G|%). The right operand is the
-// argument, or an array of them.
+// %[-][0][+][ ][#][width][.prec](d|i|f|s|x|X|o|b|e|E|g|G|%). The right operand is
+// the argument, or an array of them.
 //
 // %g/%G is C's "shortest of the two shapes": the value rounded to P significant
 // digits (P defaults to 6, and P == 0 means 1) is written in %e form when its
@@ -4289,8 +4339,8 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 			out = append(out, '%')
 			continue
 		}
-		left, zero, plus, space := false, false, false, false
-		for i < len(spec) && (spec[i] == '-' || spec[i] == '0' || spec[i] == '+' || spec[i] == ' ') {
+		left, zero, plus, space, alt := false, false, false, false, false
+		for i < len(spec) && (spec[i] == '-' || spec[i] == '0' || spec[i] == '+' || spec[i] == ' ' || spec[i] == '#') {
 			switch spec[i] {
 			case '-':
 				left = true
@@ -4300,6 +4350,8 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 				plus = true
 			case ' ':
 				space = true
+			case '#':
+				alt = true
 			}
 			i++
 		}
@@ -4322,6 +4374,7 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 		}
 		var body string
 		nonFinite := false
+		prefix := ""
 		switch spec[i] {
 		case 'd', 'i':
 			body = jsNumString(math.Trunc(rubyToF(next())))
@@ -4334,6 +4387,9 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 				body, nonFinite = w, true
 			} else {
 				body = strconv.FormatFloat(f, 'f', prec, 64)
+				if alt {
+					body = rubyAltPoint(body)
+				}
 			}
 		case 'e', 'E':
 			if prec < 0 {
@@ -4344,6 +4400,9 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 				body, nonFinite = w, true
 			} else {
 				body = strconv.FormatFloat(f, 'e', prec, 64)
+				if alt {
+					body = rubyAltPoint(body)
+				}
 				if spec[i] == 'E' {
 					body = strings.ToUpper(body)
 				}
@@ -4358,11 +4417,13 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 			f := rubyToF(next())
 			if w, bad := rubyFloatWord(f); bad {
 				body, nonFinite = w, true
+			} else if alt {
+				body = rubyGenAlt(f, prec)
 			} else {
 				body = strconv.FormatFloat(f, 'g', prec, 64)
-				if spec[i] == 'G' {
-					body = strings.ToUpper(body)
-				}
+			}
+			if !nonFinite && spec[i] == 'G' {
+				body = strings.ToUpper(body)
 			}
 		case 's':
 			body = rt.rubyStr(next())
@@ -4371,14 +4432,28 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 			}
 		case 'x':
 			body = strconv.FormatInt(int64(rubyToF(next())), 16)
+			prefix = rubyBasePrefix('x', body)
 		case 'X':
 			body = strings.ToUpper(strconv.FormatInt(int64(rubyToF(next())), 16))
+			prefix = rubyBasePrefix('X', body)
 		case 'o':
 			body = strconv.FormatInt(int64(rubyToF(next())), 8)
+			prefix = rubyBasePrefix('o', body)
 		case 'b':
 			body = strconv.FormatInt(int64(rubyToF(next())), 2)
+			prefix = rubyBasePrefix('b', body)
 		default:
 			body = string(spec[i])
+		}
+		if !alt {
+			prefix = ""
+		}
+		if prefix != "" {
+			if len(body) > 0 && body[0] == '-' {
+				body = "-" + prefix + body[1:]
+			} else {
+				body = prefix + body
+			}
 		}
 		// The + and SPACE flags were parsed and thrown away, in every half, so
 		// "%+d" % 7 was "7" against MRI's "+7" - both halves agreeing and both
@@ -4403,11 +4478,18 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 		if zero && !left && !nonFinite && numeric {
 			pad = "0"
 		}
+		// The zeros of the 0 flag go BEHIND the sign and behind a # base prefix:
+		// "%05d" % -42 is "-0042" and "%#010x" % 255 is "0x000000ff".
+		skip := 0
+		if len(body) > 0 && (body[0] == '-' || body[0] == '+' || body[0] == ' ') {
+			skip = 1
+		}
+		skip += len(prefix)
 		for len(body) < width {
 			if left {
 				body += " "
-			} else if pad == "0" && len(body) > 0 && (body[0] == '-' || body[0] == '+' || body[0] == ' ') {
-				body = body[:1] + pad + body[1:]
+			} else if pad == "0" {
+				body = body[:skip] + pad + body[skip:]
 			} else {
 				body = pad + body
 			}

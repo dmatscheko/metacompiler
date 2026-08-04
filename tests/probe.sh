@@ -86,10 +86,14 @@ COMPILE="languages/$LANG_NAME-to-llvm-ir.abnf"
 # you. clang-check.sh's module_only() brace-depth scan is the reference for the
 # cases that genuinely need it - here -qq means we never do.)
 
-# Under -q the interpreter half still signs off with `<lang> interpreter: program
-# ran to completion`. That is the ENGINE talking, not the program, and no real
-# toolchain says it.
-strip_engine() { grep -v -E '(interpreter|compiler): program ran to completion$'; }
+# Under -q the interpreter half still signs off. That is the ENGINE talking, not
+# the program, and no real toolchain says it. There is NOT one wording: the
+# grammars use four - `interpreter: program ran to completion`, `interpreter:
+# program finished`, `interpreter: program value is ...` and `compiler: program
+# ran to completion`. Matching only the first made ruby's interpreter leg look
+# one line longer than the other three, which reads as a halves divergence and is
+# not one. Match the shape, not the sentence.
+strip_engine() { grep -v -E '(interpreter|compiler): program (ran to completion|finished|value is)'; }
 
 declare -a RAN
 report() { printf '  %-8s %6s lines, exit %s\n' "$1" "$(wc -l <"$work/$1.out" 2>/dev/null | tr -d ' ')" "$2"; }

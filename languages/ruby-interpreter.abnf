@@ -2813,23 +2813,29 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < n; i++) { out += s }
         return out
     }
-    // padTo(s, width, padOnLeft, padChar). A ZERO pad has to go AFTER the sign:
-    // "%05d" % -42 is "-0042" in MRI and in the compiled half, and this used to
-    // answer "00-42" - a LIVE HALVES DIVERGENCE, invisible to --cross because no
-    // test formatted a negative to a width.
-    function padTo(s, width, left, padChar) {
+    // padTo(s, width, padOnLeft, padChar, keep). A ZERO pad has to go AFTER the
+    // sign: "%05d" % -42 is "-0042" in MRI and in the compiled half, and this used
+    // to answer "00-42" - a LIVE HALVES DIVERGENCE, invisible to --cross because no
+    // test formatted a negative to a width. It also has to go after a # base
+    // prefix ("%#010x" % 255 is "0x000000ff"), which is what `keep` carries: the
+    // number of leading characters the zeros must not get in front of.
+    function padTo(s, width, left, padChar, keep) {
         var out = s
         if (!left) {
             while (out.length < width) { out = out + padChar }
             return out
         }
-        var sgn = ""
+        var head = ""
         if (padChar == "0" && out.length > 0 && isSignChar(out.charAt(0))) {
-            sgn = out.charAt(0)
+            head = out.charAt(0)
             out = out.slice(1)
         }
-        while (sgn.length + out.length < width) { out = padChar + out }
-        return sgn + out
+        if (padChar == "0" && keep > 0) {
+            head = head + out.slice(0, keep)
+            out = out.slice(keep)
+        }
+        while (head.length + out.length < width) { out = padChar + out }
+        return head + out
     }
     function isSignChar(c) { return c == "-" || c == "+" || c == " " }
     // The directives that take a SIGN and honour the 0 flag.
@@ -3015,6 +3021,41 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (ex < 0 - 4 || ex >= p) { return genStrip(sciStr(x, p - 1, upper)) }
         return genStrip(fixedStr(x, p - 1 - ex))
     }
+    // ----- the # (alternate) flag -------------------------------------------
+    //
+    // UNPARSED in all three halves until now. Here the "#" was swallowed into the
+    // spec string and then IGNORED, so "%#g" printed plain %g; in the two compiled
+    // halves the flag loop stopped at it and "#" itself became the conversion, so
+    // "%#g" was "#g" AND the argument went to the next directive - a live halves
+    // divergence --cross never saw, because no test used the flag. MRI: %g keeps
+    // its trailing zeros, a decimal point is forced wherever there would be none,
+    // and %x/%X/%o/%b get a base prefix unless the value is zero. Settled against
+    // ruby 2.6.10 over the whole flag/width/precision matrix.
+    // A point at the END of the mantissa when there is none, before any exponent.
+    function altPoint(t) {
+        var at = t.indexOf("e")
+        if (at < 0) { at = t.indexOf("E") }
+        var mant = at < 0 ? t : t.slice(0, at)
+        var tail = at < 0 ? "" : t.slice(at)
+        if (mant.indexOf(".") >= 0) { return t }
+        return mant + "." + tail
+    }
+    // genStr with the trailing zeros KEPT: "%#g" % 100.0 is "100.000".
+    function genAltStr(x, p, upper) {
+        var ex = rbSigDigits(x < 0 ? 0 - x : x, p).e
+        if (ex < 0 - 4 || ex >= p) { return altPoint(sciStr(x, p - 1, upper)) }
+        return altPoint(fixedStr(x, p - 1 - ex))
+    }
+    function altOrNot(t, alt) { return alt ? altPoint(t) : t }
+    // "0x", "0X", "0" or "0b", and nothing at all for a zero ("%#x" % 0 is "0").
+    function basePrefix(conv, digits) {
+        if (digits == "0" || digits == "") { return "" }
+        if (conv == "x") { return "0x" }
+        if (conv == "X") { return "0X" }
+        if (conv == "o") { return "0" }
+        if (conv == "b") { return "0b" }
+        return ""
+    }
     // MRI prints "Inf", "-Inf" and "NaN" for a non-finite float under every float
     // directive, in that directive's own case or not ("%G" % Float::INFINITY is
     // "Inf"), and pads them with SPACES even under the 0 flag. rubyFloatWord in
@@ -3043,6 +3084,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var zero = false
         var plus = false
         var space = false
+        var alt = false
         var i = 0
         while (i < spec.length) {
             var ch = spec.charAt(i)
@@ -3050,6 +3092,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (ch == "0") { zero = true; i = i + 1; continue }
             if (ch == "+") { plus = true; i = i + 1; continue }
             if (ch == " ") { space = true; i = i + 1; continue }
+            if (ch == "#") { alt = true; i = i + 1; continue }
             break
         }
         var width = 0
@@ -3068,17 +3111,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         var body = ""
         var nonFinite = false
-        if (conv == "d" || conv == "i" || conv == "u") { body = "" + Math.floor(toF(v)) }
+        var prefix = ""
+        // TRUNCATE, do not floor. This was Math.floor, and both compiled halves
+        // use Math.trunc: "%d" % -1.5 was "-2" here and "-1" there, and MRI says
+        // "-1" (its %d converts the float with to_i, which truncates). A live
+        // halves divergence --cross never saw, because no test formatted a
+        // negative NON-INTEGER float with %d. Pinned by fmt19.
+        if (conv == "d" || conv == "i" || conv == "u") { body = "" + Math.trunc(toF(v)) }
         else if (conv == "f" || conv == "e" || conv == "E" || conv == "g" || conv == "G") {
             var fv = toF(v)
             var word = floatWord(fv)
             if (word != "") { body = word ; nonFinite = true }
-            else if (conv == "f") { body = fixedStr(fv, prec < 0 ? 6 : prec) }
-            else if (conv == "e" || conv == "E") { body = sciStr(fv, prec < 0 ? 6 : prec, conv == "E") }
+            else if (conv == "f") { body = altOrNot(fixedStr(fv, prec < 0 ? 6 : prec), alt) }
+            else if (conv == "e" || conv == "E") { body = altOrNot(sciStr(fv, prec < 0 ? 6 : prec, conv == "E"), alt) }
             else {
                 var gp = prec < 0 ? 6 : prec
                 if (gp == 0) { gp = 1 }
-                body = genStr(fv, gp, conv == "G")
+                body = alt ? genAltStr(fv, gp, conv == "G") : genStr(fv, gp, conv == "G")
             }
         }
         else if (conv == "x") { body = baseStr(Math.floor(toF(v)), 16) }
@@ -3086,6 +3135,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         else if (conv == "o") { body = baseStr(Math.floor(toF(v)), 8) }
         else if (conv == "b") { body = baseStr(Math.floor(toF(v)), 2) }
         else { body = rstr(v) }
+        if (alt) { prefix = basePrefix(conv, body) }
+        if (prefix != "") {
+            if (body.charAt(0) == "-") { body = "-" + prefix + body.slice(1) }
+            else { body = prefix + body }
+        }
         // The + and SPACE flags were parsed and THROWN AWAY here, and in both
         // compiled halves: "%+d" % 7 was "7" against MRI's "+7". Both halves
         // agreeing and both wrong, so --cross could never have seen it.
@@ -3093,7 +3147,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (numeric && body.charAt(0) != "-") {
             if (plus) { body = "+" + body } else if (space) { body = " " + body }
         }
-        return padTo(body, width, !left, (zero && !left && numeric && !nonFinite) ? "0" : " ")
+        return padTo(body, width, !left, (zero && !left && numeric && !nonFinite) ? "0" : " ", prefix.length)
     }
     function rformat(fmt, arg) {
         var args = Array.isArray(arg) ? arg : [arg]

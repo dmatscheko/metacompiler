@@ -135,6 +135,17 @@ def s06
   check("fmt10", "%e" % 1.5 == "1.500000e+00" && "%.2e" % 1234.5678 == "1.23e+03" && "%E" % 1.5 == "1.500000E+00")
   check("fmt11", "%+d" % 7 == "+7" && "% d" % 7 == " 7" && "%+g" % 1.5 == "+1.5" && "%05d" % -42 == "-0042")
   check("fmt12", "%05s" % "ab" == "   ab" && "%f" % (1.0 / 0.0) == "Inf" && "%.0f" % 2.5 == "2" && "%012.4g" % 0.0 == "000000000000")
+  # The # (alternate) flag: %g keeps its trailing zeros, a decimal point is forced
+  # where there would be none, %x/%X/%o/%b take a base prefix (but a zero does
+  # not), and the 0 flag pads BEHIND that prefix. Read off ruby 2.6.10 as well.
+  check("fmt13", "%#g" % 100.0 == "100.000" && "%#g" % 1.5 == "1.50000" && "%#G" % 1.0e20 == "1.00000E+20")
+  check("fmt14", "%#.3g" % 100.0 == "100." && "%#.1g" % 1234.0 == "1.e+03" && "%#.0g" % 1.5 == "2.")
+  check("fmt15", "%#.3g" % 0.0001 == "0.000100" && "%#12.4g" % 0.0 == "       0.000" && "%#-12.3g" % 1.5 == "1.50        ")
+  check("fmt16", "%#012.3g" % -1.5 == "-00000001.50" && "%#+g" % 1.5 == "+1.50000" && "%#g" % (1.0 / 0.0) == "Inf")
+  check("fmt17", "%#x" % 255 == "0xff" && "%#X" % 255 == "0XFF" && "%#o" % 8 == "010" && "%#b" % 5 == "0b101" && "%#x" % 0 == "0")
+  check("fmt18", "%#010x" % 255 == "0x000000ff" && "%#-10x" % 255 == "0xff      " && ("%#g %d" % [1.5, 7]) == "1.50000 7" && "%#.0f" % 1.0 == "1." && "%#.0e" % 1.0 == "1.e+00")
+  # %d TRUNCATES a negative float, it does not floor it. The interpreter floored.
+  check("fmt19", "%d" % -1.5 == "-1" && "%d" % -0.5 == "0" && "%i" % 2.9 == "2" && "%05d" % -1.5 == "-0001")
 end
 # ===== SECTION 07: variables and scope =====
 S07_LIMIT = 40
