@@ -448,8 +448,10 @@ func giBindings(b map[string]interface{}) {
 func programJSBindings() map[string]interface{} {
 	b := standardJSBindings()
 	giBindings(b)
-	jfBindings(b)   // the boxed double, jsrtjvm.go - the same argument, one type over.
-	keysBindings(b) // keysOf, below - the same argument again, for object enumeration.
+	jfBindings(b)    // the boxed double, jsrtjvm.go - the same argument, one type over.
+	keysBindings(b)  // keysOf, below - the same argument again, for object enumeration.
+	scopeBindings(b) // the scope API and isGenerator - the argument once more, for the
+	// one piece of floor storage layer 2 is HANDED and could not open.
 	return b
 }
 
@@ -517,6 +519,101 @@ func keysBindings(b map[string]interface{}) {
 			}
 		}
 		return true
+	})
+}
+
+// scopeBindings adds the FIVE scope* host globals and isGenerator, which
+// languages/lib/runtime.c seeds as host ids 64..69.
+//
+// WHY THEY EXIST. A scope is the floor's private storage. An emitter hands a
+// layer-2 function a scope handle - js_pyset_var's `s`, and every `defined?` /
+// `isset` / `global` / `nonlocal` probe - and until now layer 2 could do
+// NOTHING with it: MetaJS cannot open a cell, and no extern is callable from a
+// MetaJS source file. Six languages answered that by lowering the probe into
+// their EMITTER instead (docs/runtime-next-plan.md: swift, dart, go, ruby,
+// kotlin's nine helpers, python's six), which is the same IR-building written
+// out once per language for one language-neutral question. Three separate
+// migration reports asked for this API by name.
+//
+//	scopeNew(parent)      a scope whose parent is `parent`; undefined / null /
+//	                      a missing argument means NO parent
+//	scopeParent(s)        the enclosing scope, undefined at the top of a chain
+//	scopeGet(s, name)     the value, walking the CHAIN (js_scope_get); aborts
+//	                      with "variable not defined" when nowhere in it
+//	scopeHas(s, name)     is the name bound in THIS scope - NO chain walk
+//	scopeDecl(s, name, v) bind here, overwriting a binding of this scope
+//
+// scopeHas is the own-scope test on purpose. It is the one question
+// js_scope_typeof cannot answer (that answers "undefined" for an absent name
+// and for a slot holding undefined alike) and it is the one python asked for by
+// name; a chain walk is scopeParent in a loop, and there is no scopeSet because
+// "walk with scopeHas/scopeParent, then scopeDecl" is it.
+//
+// TWO DELIBERATE ASYMMETRIES with the js_scope_* externs, and they are what
+// makes the three engines agree. An absent parent is undefined and NOT the root
+// scope: a builtin's arguments are values, so the handle 0 that means "global"
+// to an emitter never arrives here, and a chain that ran into the host globals
+// would have no twin in metajs-interpreter.abnf, whose host globals are a plain
+// object and not a scope. And the scope argument is TYPE CHECKED rather than
+// coerced, so a caller's mistake is the same abort in all three halves.
+func scopeBindings(b map[string]interface{}) {
+	// scopeOfArg is languages/lib/runtime.c's host_scope: a real scope or an
+	// abort. rt.scopeOf cannot be used - it takes a HANDLE and maps 0 to the
+	// root, and a host builtin receives values.
+	scopeOfArg := func(rt *jsrt, v interface{}) *jsScope {
+		if sc, ok := v.(*jsScope); ok {
+			return sc
+		}
+		rt.fail("not a scope: %s", rt.typeOf(v))
+		return nil
+	}
+	b["scopeNew"] = jsHostFunc("scopeNew", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		p := argAt(args, 0)
+		if p == nil || p == jsUndef || p == jsNull {
+			return &jsScope{}
+		}
+		return &jsScope{parent: scopeOfArg(rt, p)}
+	})
+	b["scopeParent"] = jsHostFunc("scopeParent", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		p := scopeOfArg(rt, argAt(args, 0)).parent
+		if p == nil {
+			return jsUndef
+		}
+		return p
+	})
+	// The CHAIN walk, which is rt.scopeGet and therefore js_scope_get: the same
+	// walk, the same "variable not defined" abort at the end of it.
+	b["scopeGet"] = jsHostFunc("scopeGet", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return rt.scopeGet(scopeOfArg(rt, argAt(args, 0)), rt.toString(argAt(args, 1)))
+	})
+	b["scopeHas"] = jsHostFunc("scopeHas", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return scopeOfArg(rt, argAt(args, 0)).has(rt.toString(argAt(args, 1)))
+	})
+	b["scopeDecl"] = jsHostFunc("scopeDecl", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		scopeOfArg(rt, argAt(args, 0)).put(rt.toString(argAt(args, 1)), argAt(args, 2))
+		return jsUndef
+	})
+	// isGenerator(v): is this the value js_gen_create makes and js_gen_next
+	// drives (tag 15 in the C floor, *jsGenerator here).
+	//
+	// WHY A PREDICATE AND NOT A GENERAL js_tag(v). A numeric tag cannot be the
+	// same in the three engines: js_genfn is a tag 16 CELL in the floor and a
+	// *hostFunc here, so it would be 16 in one half and 8 in the other, and
+	// metajs-interpreter.abnf has no tag numbering at all - its values are the
+	// host engine's, where a closure, a host function and a bound method are
+	// one JS function. Every OTHER distinction a tag would carry already has a
+	// name layer 2 can use: typeof, sintIs, floIs, and `typeof v.length ==
+	// "number"` for an array. A generator is the one shape with no such name,
+	// and languages/lib/php-rt.metajs's phIsGen is the evidence - it excludes
+	// __dict / __refcell / __isclass / __class / length one at a time and then
+	// asks whether v["next"] is callable, which php's own migration report
+	// calls "the one guess in this port".
+	//
+	// A generator is an OBJECT to typeof in all three halves, so this refines
+	// typeof and never contradicts it.
+	b["isGenerator"] = jsHostFunc("isGenerator", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		_, ok := argAt(args, 0).(*jsGenerator)
+		return ok
 	})
 }
 

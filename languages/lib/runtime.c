@@ -2787,6 +2787,23 @@ long scope_get(long s, long name) {
 	return H_UNDEF;
 }
 
+/* host_scope: the scope argument of the scope* HOST BUILTINS (ids 65..68).
+ *
+ * It is deliberately NOT scope_of(). scope_of maps the handle 0 to G_ROOT,
+ * because an emitter writes 0 for "the global scope"; a host builtin never sees
+ * that handle - its arguments are VALUES, so a caller writing scopeNew(0) hands
+ * over a tag 3 number cell, not the handle 0. Anything that is not a tag 11
+ * cell is an error here, which is what the two twins (abnf/jsrtint.go's
+ * scopeBindings and metajs-interpreter.abnf's scHas) do as well; only scopeNew
+ * takes undefined, for "no parent". The one thing a layer-2 file DOES receive
+ * is an emitter's real scope handle, and that is a tag 11 cell and arrives
+ * here unchanged. */
+long host_scope(long h) {
+	if (tag_of(h) == 11) { return h; }
+	die2("not a scope: ", type_of(h));
+	return 0;
+}
+
 /* ---------------------------------------------------------- host builtins */
 
 /* Host function ids. A host function cell carries the id in field a. */
@@ -4341,6 +4358,74 @@ long host_call(long id, long self, long args) {
 	 * language whose runtime models `delete`, `unset`, `remove` or a map erase
 	 * needs it. Answers true whether or not the key was there, like the twin. */
 	if (id == 63) { return js_del(arg_at(args, 0), arg_at(args, 1)); }
+	/* ----- the SCOPE, for layer 2 (tag 11) -----
+	 *
+	 *   scopeNew(parent)      a scope whose parent is `parent`, or NO parent
+	 *                         when the argument is undefined / missing
+	 *   scopeParent(s)        the enclosing scope, undefined at the top
+	 *   scopeGet(s, name)     the value, walking the CHAIN (js_scope_get);
+	 *                         aborts with "variable not defined" if nowhere
+	 *   scopeHas(s, name)     is the name bound in THIS scope - no chain walk
+	 *   scopeDecl(s, name, v) bind here, overwriting a binding of this scope
+	 *
+	 * WHY THEY ARE HERE. A scope is the floor's private storage: an emitter
+	 * hands a layer-2 function a scope handle (js_pyset_var's `s`, every
+	 * `defined?`/`isset`/`global` probe) and layer 2 could do NOTHING with it -
+	 * MetaJS has no way to open a cell. Six languages answered that by lowering
+	 * the probe into their EMITTER instead (docs/runtime-next-plan.md: swift,
+	 * dart, go, ruby, kotlin's nine helpers, python's six), which is IR-building
+	 * duplicated per language for what is one language-neutral question.
+	 * scopeHas is deliberately the OWN-scope test and not a chain walk, because
+	 * that is the one thing js_scope_typeof cannot express (it answers
+	 * "undefined" for an absent name and for a slot holding undefined alike)
+	 * and the one python asked for; the chain walk is scopeParent in a loop.
+	 * There is no scopeSet: `walk with scopeHas/scopeParent, then scopeDecl` is
+	 * it, and js_scope_set stays the emitter's.
+	 *
+	 * NOTE the two deliberate asymmetries with js_scope_new / js_scope_get:
+	 * an ABSENT parent is undefined and not G_ROOT (a builtin's arguments are
+	 * values, so the handle 0 never arrives, and a chain that reached the host
+	 * globals would have no twin in the interpreter half, whose host globals
+	 * are not a scope), and the scope argument is TYPE CHECKED (host_scope).
+	 * The twins are abnf/jsrtint.go's scopeBindings and
+	 * metajs-interpreter.abnf's scNew/scParent/scGet/scHas/scDecl. */
+	if (id == 64) {
+		long p = arg_at(args, 0);
+		return mk_scope(is_undef_or_null(p) ? 0 : host_scope(p));
+	}
+	if (id == 65) {
+		long p = ff(host_scope(arg_at(args, 0)));
+		if (p == 0) { return H_UNDEF; }
+		return p;
+	}
+	if (id == 66) { return scope_get(host_scope(arg_at(args, 0)), to_string(arg_at(args, 1))); }
+	if (id == 67) {
+		return mk_bool(scope_find(host_scope(arg_at(args, 0)), to_string(arg_at(args, 1))) >= 0);
+	}
+	if (id == 68) {
+		scope_put(host_scope(arg_at(args, 0)), to_string(arg_at(args, 1)), arg_at(args, 2));
+		return H_UNDEF;
+	}
+	/* isGenerator(v): is this value a GENERATOR (tag 15), the cell js_gen_create
+	 * makes and js_gen_next drives.
+	 *
+	 * WHY A PREDICATE AND NOT A GENERAL js_tag(v). A numeric tag cannot be the
+	 * same in the three engines: js_genfn is a tag 16 CELL here and a *hostFunc
+	 * in abnf/jsrt.go (so it would be 16 in one half and 8 in the other), and
+	 * metajs-interpreter.abnf has no tag numbering at all - its values are the
+	 * host engine's, and a closure, a host function and a bound method are one
+	 * JS function there. Every OTHER distinction a numeric tag would carry is
+	 * already answered by a name layer 2 has: typeof (undefined / boolean /
+	 * number / string / function / object), sintIs, floIs, and `typeof
+	 * v.length == "number"` for an array. A generator is the one shape with no
+	 * such name, and php-rt.metajs's phIsGen is the evidence: it excludes
+	 * __dict / __refcell / __isclass / __class / length one by one and then
+	 * tests whether v["next"] is callable, which its own report calls "the one
+	 * guess in this port".
+	 *
+	 * A generator is an OBJECT to typeof in all three halves, so this is a
+	 * refinement of typeof and never contradicts it. */
+	if (id == 69) { return mk_bool(tag_of(arg_at(args, 0)) == 15); }
 	die("unknown host function");
 	return H_UNDEF;
 }
@@ -4882,6 +4967,37 @@ long js_ushr(long a, long b) {
 	return mk_num(d_from_long(v >> s));
 }
 
+/* js_bytelen IS NOT HERE, AND THE REASON IS A MEASUREMENT, NOT A JUDGEMENT.
+ *
+ * It qualifies on the merits. PHP's migration report asks for it, and it is the
+ * one name on that list with NO per-language behaviour: unlike js_jadd, js_mcall
+ * or the js_range_* family - which are going to a shared MetaJS layer precisely
+ * because each language means something different by them - a byte count is a
+ * byte count. This file already holds the bytes (a string cell IS its UTF-8
+ * bytes plus a length in fb), so the body is one line:
+ *
+ *     long js_bytelen(long v) { return mk_num(d_from_long(str_len(to_string(v)))); }
+ *
+ * to_string first, matching abnf/jsrt.go's `len(rt.toString(u(a[0])))`, and the
+ * same number the byteLen host builtin (id 32) already answers.
+ *
+ * WHAT BLOCKS IT is that languages/lib/php-rt.metajs line 1711 still spells
+ * `function js_bytelen(s) { return byteLen(s) }`, which -rt-lib turns into a
+ * `define i64 @js_bytelen` in lib/php-rt.ll. Both modules are handed to clang,
+ * so adding the body here makes every PHP native build fail:
+ *
+ *     duplicate symbol '_js_bytelen' in: ... ld: 1 duplicate symbols
+ *
+ * (measured 2026-08-04 from a clean archive of ad922a0 with only this body
+ * added: tests/php-test-features.php, -exe, MEC_CLANG capturing clang's own
+ * output; the metacompiler reports it as "1 unresolved symbol(s)" because
+ * undefinedSymbols() only checks whether clang MENTIONED the name).
+ *
+ * So the two halves of this move have to land together, and the layer-2 half is
+ * not this file's to make: DELETE php-rt.metajs's two lines, regenerate
+ * lib/php-rt.ll with tests/gen-php-rt-ll.sh, and add the body above. Shipping
+ * only this half fixes nothing and breaks one language, which is a loss. */
+
 long js_setret(long v) { RETSLOT = v; return 0; }
 long js_getret(void)   { return RETSLOT; }
 
@@ -4961,6 +5077,12 @@ void boot(void) {
 	seed_root("keysOf", mk_host(61));
 	seed_root("sintRaw", mk_host(62));
 	seed_root("delKey", mk_host(63));
+	seed_root("scopeNew", mk_host(64));
+	seed_root("scopeParent", mk_host(65));
+	seed_root("scopeGet", mk_host(66));
+	seed_root("scopeHas", mk_host(67));
+	seed_root("scopeDecl", mk_host(68));
+	seed_root("isGenerator", mk_host(69));
 	seed_root("Infinity", mk_num(DINF));
 	seed_root("NaN", mk_num(DNAN));
 	seed_root("anytype", cell_new(12));

@@ -1454,6 +1454,118 @@ function s28() {
     check("del20", keysOf(r).length === 1 && keysOf(r)[0] === "only" && r.only === 2)
 }
 
+// ===== SECTION 29: the scope API (scopeNew/Parent/Get/Has/Decl) =====
+// The third instance of SECTION 27's argument, and the largest. A SCOPE is the C
+// floor's private storage: an emitter hands a layer-2 function a scope handle -
+// js_pyset_var's `s`, and every `defined?` / `isset` / `global` / `nonlocal`
+// probe - and layer 2 could do NOTHING with it, because MetaJS cannot open a cell
+// and an extern is not callable from MetaJS source. Six languages answered that
+// by lowering the probe into their EMITTER instead (docs/runtime-next-plan.md:
+// swift, dart, go, ruby, kotlin's nine helpers, python's six), which is the same
+// IR-building written out once per language for one language-neutral question.
+// Three migration reports asked for this API by name.
+//
+// Three implementations, and this section is what keeps them in step: host ids
+// 64..68 of languages/lib/runtime.c (the REAL tag-11 scope, so a layer-2 file
+// gets the emitter's own chain), scopeBindings of abnf/jsrtint.go (*jsScope), and
+// a box of its own in metajs-interpreter.abnf - whose own chain is an array of
+// {v,t} objects with no parent link, so it has no scope to lend.
+//
+// The two asymmetries with the js_scope_* EXTERNS are asserted here, because they
+// are what let the three halves agree at all: an absent parent is undefined and
+// not the root scope (sco05/sco06 - a builtin's arguments are values, so the
+// handle 0 that means "global" to an emitter never arrives, and a chain running
+// into the host globals has no twin in the interpreter half), and scopeHas is the
+// OWN-scope test with no chain walk (sco03/sco04), which is the one question
+// js_scope_typeof cannot answer and the one python asked for by name.
+function s29() {
+    var root = scopeNew()
+    scopeDecl(root, "x", 1)
+    scopeDecl(root, "y", "hi")
+    var inner = scopeNew(root)
+    scopeDecl(inner, "x", 2)
+    // scopeGet walks the CHAIN, and the innermost binding shadows.
+    check("sco01", scopeGet(inner, "x") === 2)
+    check("sco02", scopeGet(inner, "y") === "hi")
+    // scopeHas does NOT walk it. This pair is the whole point of the name.
+    check("sco03", scopeHas(inner, "x") === true && scopeHas(root, "x") === true)
+    check("sco04", scopeHas(inner, "y") === false && scopeHas(root, "y") === true)
+    check("sco05", scopeParent(inner) === root)
+    check("sco06", scopeParent(root) === undefined)
+    // scopeNew(null) and scopeNew(undefined) are the same "no parent".
+    check("sco07", scopeParent(scopeNew(null)) === undefined)
+    // scopeDecl OVERWRITES in this scope and never reaches the parent's binding -
+    // it is scope_put, not js_scope_set.
+    scopeDecl(inner, "x", 7)
+    check("sco08", scopeGet(inner, "x") === 7 && scopeGet(root, "x") === 1)
+    // A name declared only in the inner scope is invisible from the outer one,
+    // which is what makes scopeHas+scopeParent a complete containment test.
+    scopeDecl(inner, "z", 5)
+    check("sco09", scopeHas(inner, "z") === true && scopeHas(root, "z") === false)
+    check("sco10", scopeGet(inner, "z") === 5)
+    check("sco11", scopeDecl(inner, "w", 0) === undefined && scopeGet(inner, "w") === 0)
+    // Three levels: scopeParent in a loop IS the chain walk, and it reaches the
+    // same binding scopeGet does. This is the loop a layer-2 containment probe
+    // writes, so it is asserted rather than described.
+    var deep = scopeNew(inner)
+    var hops = 0
+    var cur = deep
+    while (cur !== undefined && !scopeHas(cur, "y")) { cur = scopeParent(cur); hops = hops + 1 }
+    check("sco12", hops === 2 && cur === root && scopeGet(deep, "y") === "hi")
+    // A slot really holding undefined is BOUND - the distinction js_scope_typeof
+    // cannot make, and the reason scopeHas exists at all.
+    scopeDecl(deep, "u", undefined)
+    check("sco13", scopeHas(deep, "u") === true && scopeGet(deep, "u") === undefined)
+    // Values of every class survive the round trip, keys are strings.
+    scopeDecl(deep, "f", check)
+    scopeDecl(deep, "o", {k: 3})
+    check("sco14", typeof scopeGet(deep, "f") === "function" && scopeGet(deep, "o").k === 3)
+    check("sco15", typeof root === "object" && root !== inner)
+    // A scope is not an object to the program: it has no readable members, and
+    // two distinct scopes never compare equal.
+    check("sco16", scopeNew() !== scopeNew())
+    // The chain is by REFERENCE: a binding added to the parent after the child
+    // was made is visible from the child.
+    scopeDecl(root, "late", 42)
+    check("sco17", scopeGet(deep, "late") === 42 && scopeHas(deep, "late") === false)
+}
+
+// ===== SECTION 30: isGenerator =====
+// The floor's tag-15 test, host id 69 - the value js_gen_create makes and
+// js_gen_next drives. It exists because layer 2 had no way to ask "is this a
+// generator" and languages/lib/php-rt.metajs had to GUESS: exclude __dict,
+// __refcell, __isclass, __class and length one at a time, then test whether
+// v["next"] is callable. PHP's own migration report calls that "the one guess in
+// this port", and it is wrong in principle for any object with a callable `next`.
+//
+// A NUMERIC js_tag(v) was considered and rejected: js_genfn is a tag 16 CELL in
+// the C floor and a *hostFunc in abnf/jsrt.go, so one number would be 16 in one
+// half and 8 in the other, and metajs-interpreter.abnf has no tag numbering at
+// all - a closure, a host function and a bound method are one JS function there.
+// Every other distinction a tag would carry already has a name layer 2 can use
+// (typeof, sintIs, floIs, and `typeof v.length == "number"` for an array).
+//
+// WHAT THIS SECTION CAN AND CANNOT PROVE, stated rather than implied: MetaJS has
+// no generators - no `function*`, and metajs-to-llvm-ir.abnf emits no js_genfn -
+// so no MetaJS program can construct one in ANY engine. The true arm is reachable
+// only from an emitter, i.e. only from a layer-2 file of a language that has
+// generators. What is pinned here is that all three halves answer false for every
+// value a MetaJS program can build, INCLUDING the shape php-rt.metajs's guess
+// gets wrong (gen05: an ordinary object with a callable `next`).
+function s30() {
+    check("gen01", isGenerator(1) === false && isGenerator("s") === false)
+    check("gen02", isGenerator(undefined) === false && isGenerator(null) === false)
+    check("gen03", isGenerator(true) === false && isGenerator([1, 2]) === false)
+    check("gen04", isGenerator({}) === false && isGenerator(check) === false)
+    var fake = {next: function() { return {done: true} }}
+    check("gen05", isGenerator(fake) === false && typeof fake.next === "function")
+    check("gen06", isGenerator(scopeNew()) === false)
+    check("gen07", isGenerator(sint(0, 5)) === false && isGenerator(flo(1.5, 0)) === false)
+    // It is a REFINEMENT of typeof and never contradicts it: everything that
+    // could be a generator answers "object" there.
+    check("gen08", typeof fake === "object" && isGenerator(fake) === false)
+}
+
 function main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -1483,6 +1595,8 @@ function main() {
     s26() // SECTION-CALL 26
     s27() // SECTION-CALL 27
     s28() // SECTION-CALL 28
+    s29() // SECTION-CALL 29
+    s30() // SECTION-CALL 30
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

@@ -890,6 +890,95 @@ KwDefault   = "default" KwEnd ;
         return true
     }
 
+    // ----- the SCOPE: scopeNew / scopeParent / scopeGet / scopeHas / scopeDecl -----
+    //
+    // Host ids 64..68 of languages/lib/runtime.c, and abnf/jsrtint.go's
+    // scopeBindings. A scope is the FLOOR's private storage: an emitter hands a
+    // layer-2 function a scope handle (js_pyset_var's `s`, and every `defined?` /
+    // `isset` / `global` probe) and layer 2 could do nothing with it, because
+    // MetaJS cannot open a cell and an extern is not callable from MetaJS source.
+    // Six languages answered that by lowering the probe into their EMITTER, i.e.
+    // by writing the same IR once per language for one language-neutral question.
+    //
+    //   scopeNew(parent)      undefined / null / missing means NO parent
+    //   scopeParent(s)        undefined at the top of a chain
+    //   scopeGet(s, name)     walks the CHAIN, aborts if the name is nowhere
+    //   scopeHas(s, name)     THIS scope only - no chain walk
+    //   scopeDecl(s, name, v) bind here, overwriting a binding of this scope
+    //
+    // THIS HALF HAS NO SCOPE OBJECT TO LEND. The interpreter's own chain is an
+    // ARRAY of plain objects of {v, t} type boxes (see getVar below) with no
+    // parent link, and its host globals are an object rather than a scope - so a
+    // scope handed to a program here is a box of its own, exactly as the sized
+    // integer and the boxed double are. That is also why an absent parent is
+    // undefined rather than the root scope in ALL THREE halves: a chain that ran
+    // into the host globals could not be reproduced here.
+    //
+    // The names are __-prefixed so that keysOf skips them, which is the closest
+    // this half can come to the other two, where keysOf refuses a scope outright.
+    function scIs(v) {
+        if (v == undefined || v == null) { return false }
+        if (typeof v != "object") { return false }
+        return v.__scn != undefined
+    }
+    // host_scope of the floor: a real scope or an abort. Coercing instead would
+    // hide a caller's mistake in one half only.
+    function scOf(v) {
+        if (scIs(v)) return v
+        fail("not a scope: " + siTypeof(v))
+    }
+    function scNew(parent) {
+        var p = null
+        if (parent != undefined && parent != null) { p = scOf(parent) }
+        return {__scn: [], __scv: [], __scp: p}
+    }
+    function scFind(s, name) {
+        var ks = s.__scn
+        var i = 0
+        while (i < ks.length) {
+            if (ks[i] === name) { return i }
+            i = i + 1
+        }
+        return -1
+    }
+    function scParent(s) {
+        var p = scOf(s).__scp
+        if (p == null) { return undefined }
+        return p
+    }
+    function scGet(s, name) {
+        var k = "" + name
+        var cur = scOf(s)
+        while (cur != null) {
+            var i = scFind(cur, k)
+            if (i >= 0) { return cur.__scv[i] }
+            cur = cur.__scp
+        }
+        fail("variable not defined: " + k)
+    }
+    function scHas(s, name) { return scFind(scOf(s), "" + name) >= 0 }
+    function scDecl(s, name, v) {
+        var sc = scOf(s)
+        var k = "" + name
+        var i = scFind(sc, k)
+        if (i >= 0) { sc.__scv[i] = v }
+        else { sc.__scn.push(k); sc.__scv.push(v) }
+    }
+
+    // isGenerator(v): host id 69. Tag 15 in the C floor, *jsGenerator in
+    // abnf/jsrt.go - the value js_gen_create makes and js_gen_next drives.
+    //
+    // CONSTANT FALSE HERE, and that is not a stub. MetaJS has no generators at
+    // all (this grammar's description says so, and metajs-to-llvm-ir.abnf emits
+    // no js_genfn), so no MetaJS program can construct one in ANY of the three
+    // engines - the predicate's true arm is reachable only from an EMITTER, i.e.
+    // only from a layer-2 file of a language that has generators. What the
+    // ratchet in tests/metajs-test-full.js can therefore prove is that all three
+    // halves answer false for every value a MetaJS program can build, which is
+    // exactly what languages/lib/php-rt.metajs's hand-rolled phIsGen gets wrong
+    // in principle: it says "generator" for any object with a callable `next`.
+    function isGeneratorHost(v) { return false }
+
     var hostGlobals = {
         "println": siPrintln, "print": siPrint, "printf": printf, "sprintf": sprintf,
         "eprintln": siEprintln,
@@ -909,6 +998,14 @@ KwDefault   = "default" KwEnd ;
         "sintStr": siStr, "sintNum": siNum,
         "keysOf": keysOfHost,
         "delKey": delKeyHost,
+        // The five scope names and isGenerator, host ids 64..69 of
+        // languages/lib/runtime.c and abnf/jsrtint.go's scopeBindings.
+        "scopeNew": scNew,
+        "scopeParent": scParent,
+        "scopeGet": scGet,
+        "scopeHas": scHas,
+        "scopeDecl": scDecl,
+        "isGenerator": isGeneratorHost,
         // The ten boxed-double names, the same set languages/lib/runtime.c
         // seeds (ids 51..60) and abnf/jsrtjvm.go's jfBindings adds.
         "flo": flHost,
