@@ -37,6 +37,7 @@
  */
 
 int putchar(int c);
+int bat_shift(int from);
 
 /* ---------------------------------------------------------------- the arena */
 
@@ -51,6 +52,17 @@ char *rt_bump(int n) {
 
 /* A real "" at a nonzero address: the IR interpreter traps a load at address 0. */
 static char EMPTY[1];
+
+/* Call arguments: DEPTH (256) frames of ARGN (10) slots. These are the FIRST
+ * globals batch shares with the emitted program - every other byte of runtime
+ * state here is private. They are shared because bat_shift, which used to be
+ * generated, is not program-coupled at all: it walks two compile-time constants
+ * over a fixed-size array, and the only thing keeping it in the grammar was
+ * that the array lived on the emitter's side. abnf/llvmlink.go binds a global
+ * declaration to its definition by name in both directions, and clang does the
+ * same for -exe, so the array can live here and the emitter can declare it. */
+char *args[2560];
+int frame;
 
 /* ------------------------------------------------------------- byte strings */
 
@@ -488,3 +500,21 @@ char *rt_expand(char *s) {
    module supplies the real one, and tests/gen-batch-rt-ll.sh strips this one out
    of the emitted module. */
 int main(void) { return 0; }
+
+/* `shift /n`: slide args[from..ARGN-2] of the CURRENT frame down by one and
+ * blank the last slot. ARGN is 10 and the frame stride is ARGN, both compile-
+ * time constants, so nothing here depends on the program being compiled - which
+ * is why this moved out of batch-to-llvm-ir.abnf. */
+int bat_shift(int from)
+{
+    int base;
+    int i;
+    base = frame * 10;
+    i = from;
+    while (i < 9) {
+        args[base + i] = args[base + i + 1];
+        i = i + 1;
+    }
+    args[base + 9] = EMPTY;
+    return 0;
+}

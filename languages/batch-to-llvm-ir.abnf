@@ -553,10 +553,16 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     var ARGN = 10
     var argsTy = llvm.types.NewArray(DEPTH * ARGN, i8ptr)
     var frameTy = llvm.types.NewArray(DEPTH, i8ptr)
-    var gArgs = m.NewGlobalDef("args", llvm.constant.NewZeroInitializer(argsTy))
+    // args and frame are DEFINED in languages/lib/batch-rt.c, because bat_shift lives
+    // there now; the linker binds these declarations to those definitions by name
+    // (abnf/llvmlink.go for llvm.Run, clang for -exe). Every other byte of runtime state
+    // is still private to one side or the other.
+    var gArgs = m.NewGlobal("args", argsTy)
+    gArgs.Linkage = llvm.enum.LinkageExternal
     var gArgTail = m.NewGlobalDef("arg_tail", llvm.constant.NewZeroInitializer(frameTy))
     var gArgLbl = m.NewGlobalDef("arg_lbl", llvm.constant.NewZeroInitializer(frameTy))
-    var gFrame = m.NewGlobalDef("frame", zero)
+    var gFrame = m.NewGlobal("frame", i32)
+    gFrame.Linkage = llvm.enum.LinkageExternal
 
     // ===================================================================================
     //  Emitter state.
@@ -1412,21 +1418,6 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         xPop.NewStore(xPop.NewLoad(i32, xPop.NewGetElementPtr(llvm.types.NewArray(LDEPTH, i32), gLy, zero, sp1)), gDelayed)
         xPop.NewRet(zero)
     }
-    function fillShift() {
-        var from = batShift.Params[0]
-        var e = batShift.NewBlock("entry"), h = batShift.NewBlock("h")
-        var bd = batShift.NewBlock("bd"), x = batShift.NewBlock("x")
-        var base = e.NewMul(e.NewLoad(i32, gFrame), ci32(ARGN))
-        var ip = e.NewAlloca(i32)
-        e.NewStore(from, ip); e.NewBr(h)
-        var i = h.NewLoad(i32, ip)
-        h.NewCondBr(h.NewICmp(SGE, i, ci32(ARGN - 1)), x, bd)
-        bd.NewStore(bd.NewLoad(i8ptr, bd.NewGetElementPtr(argsTy, gArgs, zero, bd.NewAdd(bd.NewAdd(base, i), one))),
-                    bd.NewGetElementPtr(argsTy, gArgs, zero, bd.NewAdd(base, i)))
-        bd.NewStore(bd.NewAdd(i, one), ip); bd.NewBr(h)
-        x.NewStore(emptyPtr(x), x.NewGetElementPtr(argsTy, gArgs, zero, x.NewAdd(base, ci32(ARGN - 1))))
-        x.NewRet(zero)
-    }
     // bat_lookup(name) backs the SECOND expansion pass of `call set NAME=%%%indirect%%%`.
     function fillLookup() {
         var nm = batLookup.Params[0]
@@ -1442,6 +1433,9 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     function runProgram(items) {
         batSetlocal = m.NewFunc("bat_setlocal", i32)
         batEndlocal = m.NewFunc("bat_endlocal", i32)
+        // bat_shift is DEFINED in languages/lib/batch-rt.c - it walks ARGN and the frame
+        // stride, both compile-time constants, so unlike the other four it never depended
+        // on the program being compiled.
         batShift = m.NewFunc("bat_shift", i32, llvm.ir.NewParam("from", i32))
         batLookup = m.NewFunc("bat_lookup", i8ptr, llvm.ir.NewParam("nm", i8ptr))
         var main = m.NewFunc("main", i32)
@@ -1476,7 +1470,7 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         Lblocks[items.length].NewBr(exitBlock)
         exitBlock.NewRet(exitBlock.NewLoad(i32, gExitCode))
         fillReturnDispatch()
-        fillLocals(); fillShift(); fillLookup()
+        fillLocals(); fillLookup()
         // entry: initialize every slot, empty the stacks, jump to the first line.
         var ep = emptyPtr(entry)
         var i

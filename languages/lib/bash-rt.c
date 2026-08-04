@@ -44,6 +44,18 @@ char unset_marker[1];
 char *gvars[1024];
 int nvars;
 
+/* Raised when a fixed-size table refused a write rather than running off its
+ * end. Nothing in tests/ comes near any of these; the flag exists so that an
+ * overflow is a bounded, observable event instead of a smashed neighbour. */
+int rt_limit;
+
+/* The {name, slot} table: varnames[i] is the source name of gvars[i]. The
+ * emitter fills it in main's entry block, in the same loop that marks every
+ * slot unset, because only the emitter knows the names. It is what lets
+ * rt_getvar_byname / rt_setvar_byname / rt_eval_assign live HERE rather than
+ * being generated as a chain over every name the program mentions. */
+char *varnames[1024];
+
 /* The `local` save stack: (slot id, previous value) pairs. LSMAX = 512. */
 int ls_id[512];
 char *ls_val[512];
@@ -53,6 +65,7 @@ int ls_top;
  * CAPMAX = 16, CAPSZ = 8192. */
 char *cap_buf[16];
 int cap_len[16];
+int cap_sz[16];      /* how big cap_buf[i] is; rt_putc doubles it when it fills */
 int cap_depth;
 
 /* Subshell isolation: ( LIST ) snapshots the whole variable array. SSDEPTH = 8. */
@@ -94,6 +107,8 @@ char *rt_strcat(char *a, char *b);
 char *rt_int2str(int n);
 int rt_str2int(char *s);
 int rt_class(char *p, int ch);
+int rt_clsid(char *nm);
+int re_ctype(int ctid, int ctch);
 int rt_eg(char *egp, char *egs, int egstar);
 int rt_glob(char *p, char *s);
 char *rt_substr(char *s, int off, int n);
@@ -146,6 +161,9 @@ int rt_ss_restore(int u);
 int rt_push_local(int id);
 int rt_pop_locals(int d);
 int rt_fskind(char *p);
+char *rt_getvar_byname(char *n);
+int rt_setvar_byname(char *n, char *v);
+int rt_eval_assign(char *s);
 int putchar(int c);
 
 /* ---- the string heap ------------------------------------------------------
@@ -270,8 +288,38 @@ int rt_str2int(char *s) {
     return v * sign;
 }
 
+/* The fourteen POSIX class names, WHOLE-matched, shared by the glob bracket
+ * parser (rt_class) and the ERE bracket parser (re_clsname). 0 = not a class
+ * name. The two used to disagree about what a name even was: the ERE side
+ * matched by shortest distinguishing prefix, the glob side did not know classes
+ * existed at all. */
+int rt_clsid(char *nm) {
+    int id = 0;
+    id = rt_streq(nm, "alpha") != 0 ? 1 : id;
+    id = rt_streq(nm, "digit") != 0 ? 2 : id;
+    id = rt_streq(nm, "alnum") != 0 ? 3 : id;
+    id = rt_streq(nm, "upper") != 0 ? 4 : id;
+    id = rt_streq(nm, "lower") != 0 ? 5 : id;
+    id = rt_streq(nm, "space") != 0 ? 6 : id;
+    id = rt_streq(nm, "blank") != 0 ? 7 : id;
+    id = rt_streq(nm, "punct") != 0 ? 8 : id;
+    id = rt_streq(nm, "print") != 0 ? 9 : id;
+    id = rt_streq(nm, "graph") != 0 ? 10 : id;
+    id = rt_streq(nm, "cntrl") != 0 ? 11 : id;
+    id = rt_streq(nm, "xdigit") != 0 ? 12 : id;
+    id = rt_streq(nm, "word") != 0 ? 13 : id;
+    id = rt_streq(nm, "ascii") != 0 ? 14 : id;
+    return id;
+}
+
 /* rt_class: p points at "[". Returns -1 when the bracket expression is
- * unterminated (the "[" is then a literal), else (bytesConsumed << 1) | matched. */
+ * unterminated (the "[" is then a literal), else (bytesConsumed << 1) | matched.
+ *
+ * "[:name:]" inside the brackets is a POSIX class, which this did not implement
+ * at all: `case 5 in [[:digit:]]*)` used to read the bracket as the literal set
+ * {[,:,d,i,g,t} and answer "no". bash 5.3.15 answers "yes". An UNKNOWN name is
+ * not an error in a glob - bash matches nothing, silently - so it simply
+ * contributes no characters. */
 int rt_class(char *p, int ch) {
     int j = 1, neg = 0, m = 0, first = 1;
     int c0 = (int)(unsigned char)p[1];
@@ -281,6 +329,29 @@ int rt_class(char *p, int ch) {
         if (cj == 0) return -1;
         if (cj == 93 && first == 0) break;
         first = 0;
+        if (cj == 91 && (int)(unsigned char)p[j + 1] == 58) {
+            /* [:name:] - find the closing ":]", then look the name up */
+            int d = 0;
+            int closed = 0;
+            while (1) {
+                int hc = (int)(unsigned char)p[j + 2 + d];
+                if (hc == 0) break;
+                if (hc == 58 && (int)(unsigned char)p[j + 3 + d] == 93) { closed = 1; break; }
+                d = d + 1;
+            }
+            if (closed != 0) {
+                char *nm = rt_bump(d + 1);
+                int t = 0;
+                int cid;
+                while (t < d) { nm[t] = p[j + 2 + t]; t = t + 1; }
+                nm[d] = 0;
+                cid = rt_clsid(nm);
+                if (cid != 0 && re_ctype(cid, ch) != 0) m = 1;
+                j = j + d + 4;
+                continue;
+            }
+            /* no ":]" at all: fall through and treat "[" as an ordinary member */
+        }
         int cn = (int)(unsigned char)p[j + 1];
         int cn2 = 0;
         if (cn == 45) cn2 = (int)(unsigned char)p[j + 2];
@@ -753,23 +824,61 @@ char *rt_replace(char *s, char *p, char *r, int mode) {
     return out;
 }
 
-/* rt_case: ${v^} / ${v^^} / ${v,} / ${v,,}; mode 0 = ^, 1 = ^^, 2 = ",", 3 = ",,". */
+/* rt_case: ${v^} / ${v^^} / ${v,} / ${v,,}; mode 0 = ^, 1 = ^^, 2 = ",", 3 = ",,".
+ *
+ * It walks CODEPOINTS, not bytes. It used to walk bytes, in a runtime whose
+ * rt_charlen / rt_charoff were already UTF-8 aware, and that showed twice:
+ * ${v^} touched the first BYTE (so it did nothing at all to a multi-byte first
+ * character), and the Latin-1 supplement was not mapped, where bash 5.3.15 maps
+ * it - ${v^^} on "aeb" with an e-acute is "AEB" with an E-acute. Latin-1 is
+ * 0xC3 followed by 0x80..0xBE in UTF-8, upper and lower 0x20 apart, with the
+ * multiplication and division signs (0x97 / 0xB7) not letters. Codepoints
+ * outside ASCII and Latin-1 are copied through. */
 char *rt_case(char *s, int mode) {
     int len = rt_strlen(s);
     char *dst = rt_bump(len + 1);
     int up = mode < 2;
     int all = (mode == 1) || (mode == 3);
     int i = 0;
+    int first = 1;
     while (i < len) {
         int c0 = (int)(unsigned char)s[i];
-        int isLow = (c0 >= 97) && (c0 <= 122);
-        int isUp = (c0 >= 65) && (c0 <= 90);
-        int raised = isLow ? c0 - 32 : c0;
-        int lowered = isUp ? c0 + 32 : c0;
-        int mapped = up ? raised : lowered;
-        int touch = all || (i == 0);
-        dst[i] = (char)(touch ? mapped : c0);
-        i = i + 1;
+        int touch = all || (first != 0);
+        int n;
+        if (c0 < 128) {
+            int isLow = (c0 >= 97) && (c0 <= 122);
+            int isUp = (c0 >= 65) && (c0 <= 90);
+            int raised = isLow ? c0 - 32 : c0;
+            int lowered = isUp ? c0 + 32 : c0;
+            int mapped = up ? raised : lowered;
+            dst[i] = (char)(touch ? mapped : c0);
+            n = 1;
+        } else if (c0 == 195 && i + 1 < len) {
+            int c1 = (int)(unsigned char)s[i + 1];
+            int isU = (c1 >= 128) && (c1 <= 158) && (c1 != 151);
+            int isL = (c1 >= 160) && (c1 <= 190) && (c1 != 183);
+            int m1 = c1;
+            if (up != 0 && isL != 0) { m1 = c1 - 32; }
+            if (up == 0 && isU != 0) { m1 = c1 + 32; }
+            dst[i] = (char)c0;
+            dst[i + 1] = (char)(touch ? m1 : c1);
+            n = 2;
+        } else {
+            /* any other codepoint: copy its bytes through unchanged */
+            int w = 1;
+            if (c0 >= 240) { w = 4; }
+            else if (c0 >= 224) { w = 3; }
+            else if (c0 >= 192) { w = 2; }
+            if (i + w > len) { w = len - i; }
+            int t = 0;
+            while (t < w) {
+                dst[i + t] = s[i + t];
+                t = t + 1;
+            }
+            n = w;
+        }
+        i = i + n;
+        first = 0;
     }
     dst[len] = 0;
     return dst;
@@ -826,12 +935,13 @@ char *rt_shquote(char *sq) {
                 dst[o] = (char)92; o = o + 1;
                 dst[o] = (char)114; o = o + 1;
             } else if ((c0 < 32) || (c0 == 127)) {
-                int hi = c0 / 16;
-                int lo = c0 % 16;
+                /* bash 5.3.15 writes OCTAL here - ${v@Q} of $'\001' is $'\001',
+                 * not $'\x01'. It used to be \xNN, which rt_ansic could not read
+                 * back, so ${v@E} did not invert ${v@Q}. */
                 dst[o] = (char)92; o = o + 1;
-                dst[o] = (char)120; o = o + 1;
-                dst[o] = (char)(hi < 10 ? hi + 48 : hi + 87); o = o + 1;
-                dst[o] = (char)(lo < 10 ? lo + 48 : lo + 87); o = o + 1;
+                dst[o] = (char)(48 + (c0 / 64)); o = o + 1;
+                dst[o] = (char)(48 + ((c0 / 8) % 8)); o = o + 1;
+                dst[o] = (char)(48 + (c0 % 8)); o = o + 1;
             } else {
                 dst[o] = (char)c0; o = o + 1;
             }
@@ -859,7 +969,20 @@ char *rt_shquote(char *sq) {
     return dst;
 }
 
-/* rt_ansic: the ${v@E} form - the $'...' escapes decoded at RUN time. */
+/* the value of one hex digit, or -1. */
+int rt_hexval(int hc) {
+    if (hc >= 48 && hc <= 57) return hc - 48;
+    if (hc >= 97 && hc <= 102) return hc - 87;
+    if (hc >= 65 && hc <= 70) return hc - 55;
+    return -1;
+}
+
+/* rt_ansic: the ${v@E} form - the $'...' escapes decoded at RUN time.
+ *
+ * \NNN (one to THREE octal digits, total, so $'\0101' is \b then "1") and \xHH
+ * (one or two hex digits) are decoded here now. They were not, which is the
+ * other half of why ${v@E} did not invert ${v@Q}. A \x with no hex digit after
+ * it stays literal, as bash leaves it. */
 char *rt_ansic(char *ac) {
     int len = rt_strlen(ac);
     char *dst = rt_bump(len + 1);
@@ -868,7 +991,35 @@ char *rt_ansic(char *ac) {
     while (i < len) {
         int c0 = (int)(unsigned char)ac[i];
         int c1 = (int)(unsigned char)ac[(i + 1 < len) ? i + 1 : i];
-        if ((c0 == 92) && (i + 1 < len)) {
+        if ((c0 == 92) && (i + 1 < len) && (c1 >= 48) && (c1 <= 55)) {
+            int v = 0;
+            int n = 0;
+            i = i + 1;
+            while (n < 3 && i < len) {
+                int d = (int)(unsigned char)ac[i];
+                if (d < 48 || d > 55) break;
+                v = v * 8 + (d - 48);
+                i = i + 1;
+                n = n + 1;
+            }
+            dst[o] = (char)(v % 256);
+            o = o + 1;
+        } else if ((c0 == 92) && (i + 1 < len) && (c1 == 120) &&
+                   (rt_hexval((int)(unsigned char)ac[(i + 2 < len) ? i + 2 : i]) >= 0) &&
+                   (i + 2 < len)) {
+            int v = 0;
+            int n = 0;
+            i = i + 2;
+            while (n < 2 && i < len) {
+                int d = rt_hexval((int)(unsigned char)ac[i]);
+                if (d < 0) break;
+                v = v * 16 + d;
+                i = i + 1;
+                n = n + 1;
+            }
+            dst[o] = (char)v;
+            o = o + 1;
+        } else if ((c0 == 92) && (i + 1 < len)) {
             int mapped = c1;
             if (c1 == 97) mapped = 7;
             if (c1 == 98) mapped = 8;
@@ -1157,6 +1308,14 @@ int rt_arr_set(char *nm, char *k, char *v) {
         return 0;
     }
     int n = arr_n;
+    /* ARRMAX = 4096. There was no test here at all, so the 4097th distinct
+     * (array, key) pair wrote past arr_nm / arr_k / arr_v into whatever the
+     * linker had put next. A refused write is a bounded loss; the smashed
+     * neighbour was not. */
+    if (n >= 4096) {
+        rt_limit = 1;
+        return 0;
+    }
     arr_nm[n] = nm;
     arr_k[n] = k;
     arr_v[n] = v;
@@ -1349,6 +1508,10 @@ int rt_argpush(char *v) {
     int i = 0;
     while (i < n) {
         int t = argv_top;
+        if (t >= 4096) {           /* ARGVMAX; there was no test here either */
+            rt_limit = 1;
+            return 0;
+        }
         argv[t] = rt_getfield(v, i);
         argv_top = t + 1;
         i = i + 1;
@@ -1417,6 +1580,28 @@ int rt_putc(int c)
         if (d > 0) {
             buf = cap_buf[d - 1];
             l = cap_len[d - 1];
+            /* The buffer rt_cap_begin bumped is 8192 bytes and there was no
+             * test here at all: a command substitution producing more than that
+             * walked out of its buffer and over the rest of the arena. It got
+             * the right answer whenever nothing else had been bumped since,
+             * which is why no test ever caught it. TRUNCATING would be a
+             * regression on exactly those cases, so the buffer GROWS instead -
+             * a fresh, doubled block out of the arena and a copy. */
+            if (l + 1 >= cap_sz[d - 1]) {
+                int nsz;
+                char *nb;
+                int t;
+                nsz = cap_sz[d - 1] * 2;
+                nb = rt_bump(nsz);
+                t = 0;
+                while (t < l) {
+                    nb[t] = buf[t];
+                    t = t + 1;
+                }
+                cap_buf[d - 1] = nb;
+                cap_sz[d - 1] = nsz;
+                buf = nb;
+            }
             buf[l] = (char)c;
             cap_len[d - 1] = l + 1;
         } else {
@@ -1432,8 +1617,13 @@ int rt_cap_begin(int u)
     int d;
     char *buf;
     d = cap_depth;
+    if (d >= 16) {                 /* CAPMAX: 17 nested $( ) used to write past cap_buf */
+        rt_limit = 1;
+        return 0;
+    }
     buf = rt_bump(8192);
     cap_buf[d] = buf;
+    cap_sz[d] = 8192;
     cap_len[d] = 0;
     cap_depth = d + 1;
     return 0;
@@ -1510,6 +1700,10 @@ int rt_push_local(int id)
 {
     int t;
     t = ls_top;
+    if (t >= 512) {                /* LSMAX: deep recursion with `local` used to run off it */
+        rt_limit = 1;
+        return 0;
+    }
     ls_id[t] = id;
     ls_val[t] = gvars[id];
     ls_top = t + 1;
@@ -1526,6 +1720,63 @@ int rt_pop_locals(int d)
         ls_top = t;
         gvars[ls_id[t]] = ls_val[t];
         t = ls_top;
+    }
+    return 0;
+}
+
+/* ---- name -> slot: the three helpers that used to be GENERATED ----------- */
+/* They were a chain over every variable name the program mentions, emitted
+ * after the walk. With varnames[] carrying the {name, slot} table they are
+ * ordinary loops, and the emitted module no longer grows with the number of
+ * distinct variables times three. */
+
+/* ${!name}: the value of the variable whose NAME is `n`, or the unset marker.
+ * Names are distinct, so at most one slot can match. */
+char *rt_getvar_byname(char *n)
+{
+    char *sel;
+    int i;
+    sel = &unset_marker[0];
+    i = 0;
+    while (i < nvars) {
+        if (rt_streq(n, varnames[i]) != 0) {
+            sel = gvars[i];
+        }
+        i = i + 1;
+    }
+    return sel;
+}
+
+/* The same lookup, writing instead of reading. A name the program never
+ * mentions has no slot and is silently dropped - which is what the generated
+ * chain did too, since it only ever selected among the slots it knew. */
+int rt_setvar_byname(char *n, char *v)
+{
+    int i;
+    i = 0;
+    while (i < nvars) {
+        if (rt_streq(n, varnames[i]) != 0) {
+            gvars[i] = v;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/* `NAME=VALUE` as one string (what `export` / `declare` / `eval` hand over):
+ * split at the FIRST '=' and assign. No '=' at all assigns nothing. */
+int rt_eval_assign(char *s)
+{
+    int len;
+    int i;
+    len = rt_strlen(s);
+    i = 0;
+    while (i < len) {
+        if (s[i] == 61) {
+            rt_setvar_byname(rt_substr(s, 0, i), rt_substr(s, i + 1, -1));
+            return 0;
+        }
+        i = i + 1;
     }
     return 0;
 }
@@ -1578,7 +1829,7 @@ int rt_fskind(char *p)
  *
  * Sizes (the grammar's RE_* constants), written as literals because the C
  * subset has no #define:
- *   RE_PROG  4096   instruction slots, 4 words each  -> re_prog[16384]
+ *   RE_PROG  4096   instruction slots, 3 words each  -> re_prog[12288]
  *   RE_NCLS    64   bracket bitmaps, 32 bytes each   -> re_cls[2048]
  *   RE_NCAP   128   capture slots (64 pairs)
  *   RE_NMARK   64   empty-iteration guard slots
@@ -1594,7 +1845,7 @@ int rt_fskind(char *p)
 
 /* ---- engine state -------------------------------------------------------- */
 
-int re_prog[16384];           /* NEW GLOBAL: RE_PROG * 4 words              */
+int re_prog[12288];           /* NEW GLOBAL: RE_PROG * 3 words              */
 unsigned char re_cls[2048];   /* NEW GLOBAL: RE_NCLS * 32 bitmap bytes      */
 int re_slot[192];             /* NEW GLOBAL: RE_SLOTS capture / mark slots  */
 int re_pc;                    /* NEW GLOBAL: next instruction to emit       */
@@ -1632,17 +1883,20 @@ int re_run(int rpc, int rsp);
 /* word k of instruction pc */
 int re_get(int gpc, int gk)
 {
-    return re_prog[gpc * 4 + gk];
+    return re_prog[gpc * 3 + gk];
 }
 
 int re_set(int spc, int sk, int sv)
 {
-    re_prog[spc * 4 + sk] = sv;
+    re_prog[spc * 3 + sk] = sv;
     return 0;
 }
 
 /* append one instruction, answer its pc. An overrun raises re_bad rather than
- * writing past re_prog - the arena would have absorbed that write. */
+ * writing past re_prog - the arena would have absorbed that write.
+ *
+ * An instruction is THREE words (opcode, x, y) and the stride used to be four,
+ * so a quarter of re_prog - 16 KB - was never addressed by anything. */
 int re_emit(int eop, int ex, int ey)
 {
     int pc;
@@ -1828,33 +2082,22 @@ int re_ctype(int ctid, int ctch)
 }
 
 /* the cursor sits just after "[:". Answers the re_ctype id and steps past the
- * closing ":]", or 0 when the name is unknown or the "[:" never closes. */
+ * closing ":]", or 0 when the name is unknown or the "[:" never closes.
+ *
+ * The name is matched WHOLE. It used to be matched by the shortest
+ * distinguishing PREFIX - one to three characters, whatever told the fourteen
+ * names apart - which made every longer string starting with one of those
+ * prefixes a silent alias: [[:bogus:]] was [[:blank:]] and [[:lowercase:]] was
+ * [[:lower:]]. bash 5.3.15 rejects both with "invalid character class" and a
+ * status of 2, and so do we now: an unknown name returns 0, which re_bracket
+ * turns into re_bad = 9. */
 int re_clsname(void)
 {
-    int c0;
-    int c1;
-    int c2;
-    int id;
     int d;
     int hc;
-    c0 = re_at(0);
-    c1 = re_at(1);
-    c2 = re_at(2);
-    id = 0;
-    id = (c0 == 97 && c1 == 108 && c2 == 112) ? 1 : id;   /* alpha  */
-    id = (c0 == 97 && c1 == 108 && c2 == 110) ? 3 : id;   /* alnum  */
-    id = (c0 == 97 && c1 == 115) ? 14 : id;               /* ascii  */
-    id = (c0 == 98) ? 7 : id;                             /* blank  */
-    id = (c0 == 99) ? 11 : id;                            /* cntrl  */
-    id = (c0 == 100) ? 2 : id;                            /* digit  */
-    id = (c0 == 103) ? 10 : id;                           /* graph  */
-    id = (c0 == 108) ? 5 : id;                            /* lower  */
-    id = (c0 == 112 && c1 == 114) ? 9 : id;               /* print  */
-    id = (c0 == 112 && c1 == 117) ? 8 : id;               /* punct  */
-    id = (c0 == 115) ? 6 : id;                            /* space  */
-    id = (c0 == 117) ? 4 : id;                            /* upper  */
-    id = (c0 == 119) ? 13 : id;                           /* word   */
-    id = (c0 == 120) ? 12 : id;                           /* xdigit */
+    char *nm;
+    int id;
+    /* the name runs up to ":]"; an unterminated "[:" is not a name at all. */
     d = 0;
     while (1) {
         hc = re_at(d);
@@ -1862,12 +2105,23 @@ int re_clsname(void)
             return 0;
         }
         if (hc == 58 && re_at(d + 1) == 93) {
-            re_pos = re_pos + (d + 2);
-            return id;
+            break;
         }
         d = d + 1;
     }
-    return 0;
+    nm = rt_bump(d + 1);
+    hc = 0;
+    while (hc < d) {
+        nm[hc] = (char)re_at(hc);
+        hc = hc + 1;
+    }
+    nm[d] = 0;
+    id = rt_clsid(nm);
+    if (id == 0) {
+        return 0;             /* re_bracket raises re_bad = 9 */
+    }
+    re_pos = re_pos + (d + 2);
+    return id;
 }
 
 /* parse [...] at the cursor into a bitmap and emit CLASS.

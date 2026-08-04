@@ -998,6 +998,124 @@ s25() {
 }
 
 
+# ===== SECTION 26: POSIX classes, ANSI-C escapes, case mapping, assoc literals =====
+# Every assertion here pins a defect that the runtime carried silently. Each was
+# settled against GNU bash 5.3.15(1)-release (aarch64-apple-darwin25.4.0), and
+# each FAILS on the runtime as it stood at ad922a0.
+s26() {
+  # -- POSIX class NAMES in an ERE are matched WHOLE, not by prefix. They used to
+  #    be matched by the shortest distinguishing prefix, so [[:bogus:]] was
+  #    [[:blank:]] and [[:lowercase:]] was [[:lower:]]. bash rejects both with
+  #    status 2 ("invalid character class"); the message goes to stderr.
+  s26bogus() { [[ "a b" =~ [[:bogus:]] ]]; }
+  s26bogus 2>/dev/null
+  check cls1 $? 2
+  s26lc() { [[ "a b" =~ [[:lowercase:]] ]]; }
+  s26lc 2>/dev/null
+  check cls2 $? 2
+  s26short() { [[ "a b" =~ [[:al:]] ]]; }
+  s26short 2>/dev/null
+  check cls3 $? 2
+  # the real names still work
+  if [[ "ab" =~ ^[[:alpha:]]+$ ]]; then check cls4 yes yes; else check cls4 no yes; fi
+  if [[ "a b" =~ [[:blank:]] ]]; then check cls5 yes yes; else check cls5 no yes; fi
+  if [[ "9f" =~ ^[[:xdigit:]]+$ ]]; then check cls6 yes yes; else check cls6 no yes; fi
+  if [[ "ab" =~ [[:digit:]] ]]; then check cls7 no yes; else check cls7 ok ok; fi
+
+  # -- POSIX classes inside a GLOB bracket. rt_class did not implement them at
+  #    all: [[:digit:]] used to be read as the literal set { [ : d i g t }.
+  case 5 in [[:digit:]]) check glc1 yes yes ;; *) check glc1 no yes ;; esac
+  case d in [[:alpha:]]) check glc2 yes yes ;; *) check glc2 no yes ;; esac
+  case A in [[:upper:]]) check glc3 yes yes ;; *) check glc3 no yes ;; esac
+  case : in [[:digit:]]) check glc4 no yes ;; *) check glc4 ok ok ;; esac
+  case d in [[:digit:]]) check glc5 no yes ;; *) check glc5 ok ok ;; esac
+  case 5 in [[:digit:]]*) check glc6 yes yes ;; *) check glc6 no yes ;; esac
+  case x in [[:digit:]x]) check glc7 yes yes ;; *) check glc7 no yes ;; esac
+  case - in [[:digit:]-]) check glc8 yes yes ;; *) check glc8 no yes ;; esac
+  case A in [![:digit:]]) check glc9 yes yes ;; *) check glc9 no yes ;; esac
+  case 5 in [![:digit:]]) check glc10 no yes ;; *) check glc10 ok ok ;; esac
+  # an unknown class name in a GLOB is not an error - it just matches nothing
+  case b in [[:bogus:]]) check glc11 no yes ;; *) check glc11 ok ok ;; esac
+  # the same matcher through [[ == ]]
+  if [[ 7 == [[:digit:]] ]]; then check glc12 yes yes; else check glc12 no yes; fi
+
+  # -- ANSI-C escapes: \NNN is one to THREE octal digits IN TOTAL. Only "\0" was
+  #    understood, so $'\001x' was a NUL followed by "01x" - and in the compiler,
+  #    where a NUL ends the string, it was the empty string.
+  o1=$'\101'; check oct1 "$o1" A
+  o2=$'\0101'; check oct4 "${#o2}" 2
+  o3=$'\001x'; check oct5 "${#o3}" 2
+  o4=$'\x41\102'; check oct6 "$o4" AB
+  # a \x with no hex digit after it stays literal
+  o5=$'\xg'; check oct7 "$o5" '\xg'
+
+  # -- ${v@E} decodes what ${v@Q} writes. @Q used to emit \xNN, which @E could
+  #    not read back, so @E did not invert @Q.
+  e1='\101'; check ansi1 "${e1@E}" A
+  e2='\x41\102'; check ansi2 "${e2@E}" AB
+  e3=$'\001x'; q3=${e3@Q}
+  check ansi3 "$q3" "\$'\\001x'"
+  check ansi4 "${q3@E}" "\$'${e3}'"
+  e4=$'\t9'; check ansi5 "${e4@Q}" "\$'\\t9'"
+
+  # -- ${v^^} / ${v,,} walk CODEPOINTS and map the Latin-1 supplement. They used
+  #    to walk BYTES and map ASCII only, so ${v^} did nothing to a multi-byte
+  #    first character and an e-acute never changed case.
+  u1="aéb"
+  check case1 "${u1^^}" "AÉB"
+  check case2 "${u1,,}" "aéb"
+  check case3 "${u1^}" "Aéb"
+  u2="éa"
+  check case4 "${u2^}" "Éa"
+  check case5 "${u2^^}" "ÉA"
+  u3="ÉÀz"
+  check case6 "${u3,,}" "éàz"
+  # a codepoint outside ASCII and Latin-1 is copied through, and still counts as
+  # the FIRST character
+  u4="日a"
+  check case7 "${u4^}" "日a"
+  check case8 "${u4^^}" "日A"
+  check case9 "${#u4}" 2
+
+  # -- bare words in an ASSOCIATIVE array literal are KEY VALUE PAIRS, with a
+  #    trailing odd word taking an empty value. They used to go through the
+  #    indexed path, which asks for the next free INTEGER index and gets one
+  #    because every string key reads as 0: a+=(zz) created a["1"]="zz".
+  declare -A s26a=(one two three four)
+  check aa1 "${s26a[one]}" two
+  check aa2 "${s26a[three]}" four
+  check aa3 "${#s26a[@]}" 2
+  declare -A s26b=(one two three)
+  check aa4 "${s26b[three]}" ""
+  check aa5 "${#s26b[@]}" 2
+  declare -A s26c
+  s26c[z]=9
+  s26c+=(one two)
+  check aa6 "${s26c[z]}" 9
+  check aa7 "${s26c[one]}" two
+  check aa8 "${#s26c[@]}" 2
+  declare -A s26d
+  s26d[z]=9
+  s26d+=(zz)
+  check aa9 "${s26d[zz]}" ""
+  check aa10 "${#s26d[@]}" 2
+  # an INDEXED array is untouched by all of that
+  s26e=(p q)
+  s26e+=(x)
+  check aa11 "${s26e[*]}" "p q x"
+  check aa12 "${#s26e[@]}" 3
+
+  # -- a command substitution larger than the capture buffer. The buffer was a
+  #    fixed 8192-byte arena block with no test on the write, so anything longer
+  #    walked out of it and over the rest of the arena; it only ever gave the
+  #    right answer because nothing else had been bumped since.
+  s26line=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  s26big=$(i=0; while [ $i -lt 120 ]; do printf '%s' "$s26line"; i=$(( i + 1 )); done)
+  check cap1 "${#s26big}" 12000
+  check cap2 "${s26big:11999:1}" a
+}
+
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -1023,5 +1141,6 @@ s22   # SECTION-CALL 22
 s23   # SECTION-CALL 23
 s24   # SECTION-CALL 24
 s25   # SECTION-CALL 25
+s26   # SECTION-CALL 26
 echo "full: $checks checks, $fails failures"
 exit $fails

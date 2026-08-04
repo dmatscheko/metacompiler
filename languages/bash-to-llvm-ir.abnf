@@ -903,14 +903,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 else if (e == "e" || e == "E") { out = out + String.fromCharCode(27) }
                 else if (e == "f") { out = out + String.fromCharCode(12) }
                 else if (e == "v") { out = out + String.fromCharCode(11) }
-                else if (e == "0") { out = out + String.fromCharCode(0) }
                 else if (e == "\\") { out = out + "\\" }
                 else if (e == "'") { out = out + "'" }
                 else if (e == "\"") { out = out + "\"" }
+                // \NNN: one to THREE octal digits IN TOTAL, so $'\0101' is \b then "1" and
+                // $'\101' is "A". "\0" alone used to be the only octal form understood, which
+                // made $'\001x' a NUL followed by "01x" - and in the compiler, where a NUL
+                // terminates the C string, the empty string.
+                else if (e >= "0" && e <= "7") {
+                    var ov = e.charCodeAt(0) - 48, on = 1
+                    while (on < 3 && i < t.length && t.charAt(i) >= "0" && t.charAt(i) <= "7") {
+                        ov = ov * 8 + (t.charCodeAt(i) - 48); i = i + 1; on = on + 1
+                    }
+                    out = out + String.fromCharCode(ov % 256)
+                }
                 else if (e == "x") {
-                    var v = 0, n = 0
-                    while (n < 2 && i < t.length && hexVal(t.charCodeAt(i)) >= 0) { v = v * 16 + hexVal(t.charCodeAt(i)); i = i + 1; n = n + 1 }
-                    out = out + String.fromCharCode(v)
+                    // A \x with no hex digit after it stays literal, as bash leaves it.
+                    if (i >= t.length || hexVal(t.charCodeAt(i)) < 0) { out = out + "\\x" }
+                    else {
+                        var v = 0, n = 0
+                        while (n < 2 && i < t.length && hexVal(t.charCodeAt(i)) >= 0) { v = v * 16 + hexVal(t.charCodeAt(i)); i = i + 1; n = n + 1 }
+                        out = out + String.fromCharCode(v)
+                    }
                 }
                 else { out = out + "\\" + e }
             }
@@ -1071,6 +1085,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var NVARS = 1024
     var gvarsTy = llvm.types.NewArray(NVARS, i8ptr)
     var gVars = rtGlobal("gvars", gvarsTy)
+    // The {name, slot} table beside it: varnames[i] is the source name of gvars[i]. Only
+    // the emitter knows the names, so main's entry block fills it - and that one table is
+    // what lets rt_getvar_byname / rt_setvar_byname / rt_eval_assign live in bash-rt.c
+    // instead of being generated as a three-fold chain over every name in the program.
+    var gVarNames = rtGlobal("varnames", gvarsTy)
 
     var varIds = {}       // "$"+name -> slot index
     var varIdList = []    // index -> name (creation order, for the deterministic init run)
@@ -1156,15 +1175,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return b.NewGetElementPtr(r.ty, r.g, zero, zero)
     }
 
-    // i32 rt_setvar_byname(i8* name, i8* val) and i32 rt_eval_assign(i8* "NAME=VALUE"):
-    // both filled in once the walk is over and every variable name is known.
-    var rtSetByName = m.NewFunc("rt_setvar_byname", i32,
-        [llvm.ir.NewParam("n", i8ptr), llvm.ir.NewParam("v", i8ptr)])
-    var rtEvalAssign = m.NewFunc("rt_eval_assign", i32, llvm.ir.NewParam("s", i8ptr))
-
-    // i8* rt_getvar_byname(i8* name): ${!ptr} indirection. Its body is a chain over every
-    // variable name the program mentions, so it can only be emitted once the walk is over.
-    var rtGetByName = m.NewFunc("rt_getvar_byname", i8ptr, llvm.ir.NewParam("n", i8ptr))
+    // These three used to be EMITTED here, each as a chain over every variable name the
+    // program mentions, built after the walk from varIdList. They are in bash-rt.c now,
+    // as ordinary loops over the {name, slot} table `varnames` (declared above): the
+    // emitter's only remaining job is to fill that table in main's entry block.
+    var rtSetByName = rtDecl("rt_setvar_byname", false, [1, 1])
+    var rtEvalAssign = rtDecl("rt_eval_assign", false, [1])
+    var rtGetByName = rtDecl("rt_getvar_byname", true, [1])
 
     var funcs = {}        // user functions: "$"+name -> IR func (bashfn_NAME)
     var declaredFuncs = {}  // every name the program DEFINES somewhere (collected during the
@@ -2062,6 +2079,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var nm = gepStr(b, name)
         if (!append) { b.NewCall(rtArrClear, nm) }
         var i
+        var pendKey = null    // an assoc literal's bare words pair up; this is the odd one
         for (i = 0; i < litItems.length; i++) {
             var it = litItems[i]
             if (it.kv != undefined) {
@@ -2070,9 +2088,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b.NewCall(rtArrSet, [nm, b.NewCall(rtWordJoin, rk.v), b.NewCall(rtWordJoin, rv.v)])
             } else {
                 var rw = it.fn(b); b = rw.b
-                b.NewCall(rtArrAppend, [nm, rw.v])
+                // Bare words in an ASSOCIATIVE array literal are KEY VALUE PAIRS - bash
+                // 5.3.15 reads `declare -A b=(one two three four)` as b[one]=two
+                // b[three]=four, and a trailing odd word takes an empty value, so
+                // `a+=(zz)` gives a["zz"]="". They used to go through the indexed path,
+                // which asks rt_arr_nextidx for the next free INTEGER index and gets one
+                // because every string key reads as 0: a+=(zz) created a["1"]="zz".
+                if (assoc) {
+                    var w = b.NewCall(rtWordJoin, rw.v)
+                    if (pendKey == null) { pendKey = w }
+                    else { b.NewCall(rtArrSet, [nm, pendKey, w]); pendKey = null }
+                }
+                else { b.NewCall(rtArrAppend, [nm, rw.v]) }
             }
         }
+        if (pendKey != null) { b.NewCall(rtArrSet, [nm, pendKey, emptyPtr(b)]) }
         return b
     }
     function emitAssign(b, a, assoc0) {
@@ -3469,51 +3499,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // may reasonably expect to exist get a fixed, documented default.
         storeVar(entry, "HOME", gepStr(entry, "/home/user"))
         storeVar(entry, "PWD", gepStr(entry, "/home/user"))
+        // varIdList is FINAL only here - storeVar above can still mint a slot for a name the
+        // script never mentioned - so the {name, slot} table is filled last, and it has to
+        // cover every slot rt_getvar_byname will walk (it walks nvars of them, and a null
+        // name would be a load at address 0). Slots the two lines above just created were
+        // missed by the unset loop on purpose; they carry a real value already.
+        for (i = 0; i < varIdList.length; i++) {
+            entry.NewStore(gepStr(entry, varIdList[i]),
+                           entry.NewGetElementPtr(gvarsTy, gVarNames, zero, llvm.constant.NewInt(i32, i)))
+        }
         entry.NewStore(llvm.constant.NewInt(i32, varIdList.length), gNvars)
         entry.NewBr(body)
-        // ${!name}: compare against every known name and load the matching slot.
-        var gb = rtGetByName.NewBlock("entry")
-        var nm = rtGetByName.Params[0]
-        var sel = unsetPtr(gb)
-        for (i = 0; i < varIdList.length; i++) {
-            var hit = gb.NewICmp(llvm.enum.IPredNE, gb.NewCall(rtStreq, [nm, gepStr(gb, varIdList[i])]), zero)
-            var slot = gb.NewLoad(i8ptr, varSlot(gb, llvm.constant.NewInt(i32, i)))
-            sel = gb.NewSelect(hit, slot, sel)
-        }
-        gb.NewRet(sel)
-        // rt_setvar_byname: the same chain, writing instead of reading.
-        var sb = rtSetByName.NewBlock("entry")
-        var snm = rtSetByName.Params[0]
-        var sval = rtSetByName.Params[1]
-        for (i = 0; i < varIdList.length; i++) {
-            var shit = sb.NewICmp(llvm.enum.IPredNE, sb.NewCall(rtStreq, [snm, gepStr(sb, varIdList[i])]), zero)
-            var slot = varSlot(sb, llvm.constant.NewInt(i32, i))
-            var cur = sb.NewLoad(i8ptr, slot)
-            sb.NewStore(sb.NewSelect(shit, sval, cur), slot)
-        }
-        sb.NewRet(zero)
-        // rt_eval_assign: split "NAME=VALUE" at the first "=" and assign.
-        var eb = rtEvalAssign.NewBlock("entry")
-        var eh = rtEvalAssign.NewBlock("head")
-        var ebd = rtEvalAssign.NewBlock("body")
-        var efound = rtEvalAssign.NewBlock("found")
-        var estep = rtEvalAssign.NewBlock("step")
-        var ex2 = rtEvalAssign.NewBlock("exit")
-        var esrc2 = rtEvalAssign.Params[0]
-        var elen = eb.NewCall(rtStrlen, esrc2)
-        var eip = eb.NewAlloca(i32)
-        eb.NewStore(zero, eip)
-        eb.NewBr(eh)
-        var ei2 = eh.NewLoad(i32, eip)
-        eh.NewCondBr(eh.NewICmp(llvm.enum.IPredSLT, ei2, elen), ebd, ex2)
-        var ec = ebd.NewZExt(ebd.NewLoad(i8, ebd.NewGetElementPtr(i8, esrc2, ei2)), i32)
-        ebd.NewCondBr(ebd.NewICmp(llvm.enum.IPredEQ, ec, llvm.constant.NewInt(i32, 61)), efound, estep)
-        efound.NewCall(rtSetByName, [efound.NewCall(rtSubstr, [esrc2, zero, ei2]),
-                                     efound.NewCall(rtSubstr, [esrc2, efound.NewAdd(ei2, one), llvm.constant.NewInt(i32, -1)])])
-        efound.NewBr(ex2)
-        estep.NewStore(estep.NewAdd(ei2, one), eip)
-        estep.NewBr(eh)
-        ex2.NewRet(zero)
     }
 
     c.compile(c.asg)

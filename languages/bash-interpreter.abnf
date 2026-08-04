@@ -1151,10 +1151,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (i < v.length) {
             var ch = chunkAt(v, i)
             i = i + ch.length
+            // ASCII plus the Latin-1 supplement (U+00C0..U+00DE / U+00E0..U+00FE, minus
+            // the two multiplication/division signs, which are not letters). bash 5.3.15
+            // maps those: ${v^^} on "aeb" with an e-acute is "AEB" with an E-acute. Only
+            // ASCII used to be mapped, in a runtime whose ${#s} and ${s:i:n} were already
+            // codepoint-aware.
             if ((all || first) && ch.length == 1) {
                 var cc = ch.charCodeAt(0)
-                if (up) { if (cc >= 97 && cc <= 122) { ch = String.fromCharCode(cc - 32) } }
-                else { if (cc >= 65 && cc <= 90) { ch = String.fromCharCode(cc + 32) } }
+                var isL1u = cc >= 192 && cc <= 222 && cc != 215
+                var isL1l = cc >= 224 && cc <= 254 && cc != 247
+                if (up) { if ((cc >= 97 && cc <= 122) || isL1l) { ch = String.fromCharCode(cc - 32) } }
+                else { if ((cc >= 65 && cc <= 90) || isL1u) { ch = String.fromCharCode(cc + 32) } }
             }
             first = false
             out = out + ch
@@ -1681,7 +1688,39 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return si >= s.length
     }
+    // The fourteen POSIX class names, WHOLE-matched. 0 = not a class name. The compiler's
+    // twin is rt_clsid / re_ctype in languages/lib/bash-rt.c.
+    var globClsIds = {alpha: 1, digit: 2, alnum: 3, upper: 4, lower: 5, space: 6, blank: 7,
+                      punct: 8, print: 9, graph: 10, cntrl: 11, xdigit: 12, word: 13, ascii: 14}
+    function globCtype(id, ch) {
+        var isU = ch >= 65 && ch <= 90
+        var isL = ch >= 97 && ch <= 122
+        var isD = ch >= 48 && ch <= 57
+        var isAl = isU || isL
+        var isAn = isAl || isD
+        var isSp = ch == 32 || (ch >= 9 && ch <= 13)
+        if (id == 1) { return isAl }
+        if (id == 2) { return isD }
+        if (id == 3) { return isAn }
+        if (id == 4) { return isU }
+        if (id == 5) { return isL }
+        if (id == 6) { return isSp }
+        if (id == 7) { return ch == 32 || ch == 9 }
+        if (id == 8) { return ch >= 33 && ch <= 126 && !isAn }
+        if (id == 9) { return ch >= 32 && ch <= 126 }
+        if (id == 10) { return ch >= 33 && ch <= 126 }
+        if (id == 11) { return ch < 32 || ch == 127 }
+        if (id == 12) { return isD || (ch >= 97 && ch <= 102) || (ch >= 65 && ch <= 70) }
+        if (id == 13) { return isAn || ch == 95 }
+        if (id == 14) { return ch >= 0 && ch <= 127 }
+        return false
+    }
+
     // A bracket expression at p[pi] ("["). ok=0 means unterminated (a literal "[").
+    // "[:name:]" inside it is a POSIX class - which this did not implement at all, so
+    // `case 5 in [[:digit:]]*)` read the bracket as the literal set {[,:,d,i,g,t}. bash
+    // 5.3.15 answers "yes". An unknown name is NOT an error in a glob (unlike in an ERE):
+    // bash matches nothing, silently, so it contributes no characters.
     function globClass(p, pi, ch) {
         var j = pi + 1
         var neg = false
@@ -1696,6 +1735,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (j >= p.length) { return {ok: 0, hit: 0, next: pi + 1} }
             var cj = p.charCodeAt(j)
             if (cj == 93 && !first) { done = true }
+            else if (cj == 91 && j + 1 < p.length && p.charCodeAt(j + 1) == 58 &&
+                     p.indexOf(":]", j + 2) >= 0) {
+                first = false
+                var ce = p.indexOf(":]", j + 2)
+                var cnm = p.substring(j + 2, ce)
+                var cid = hasOwn(globClsIds, cnm) ? globClsIds[cnm] : 0
+                if (cid != 0 && globCtype(cid, ch)) { hit = true }
+                j = ce + 2
+            }
             else {
                 first = false
                 var lo = cj
@@ -2058,14 +2106,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 else if (e == "e" || e == "E") { out = out + String.fromCharCode(27) }
                 else if (e == "f") { out = out + String.fromCharCode(12) }
                 else if (e == "v") { out = out + String.fromCharCode(11) }
-                else if (e == "0") { out = out + String.fromCharCode(0) }
                 else if (e == "\\") { out = out + "\\" }
                 else if (e == "'") { out = out + "'" }
                 else if (e == "\"") { out = out + "\"" }
+                // \NNN: one to THREE octal digits IN TOTAL, so $'\0101' is \b then "1" and
+                // $'\101' is "A". "\0" alone used to be the only octal form understood, which
+                // made $'\001x' a NUL followed by "01x" - and in the compiler, where a NUL
+                // terminates the C string, the empty string.
+                else if (e >= "0" && e <= "7") {
+                    var ov = e.charCodeAt(0) - 48, on = 1
+                    while (on < 3 && i < t.length && t.charAt(i) >= "0" && t.charAt(i) <= "7") {
+                        ov = ov * 8 + (t.charCodeAt(i) - 48); i = i + 1; on = on + 1
+                    }
+                    out = out + String.fromCharCode(ov % 256)
+                }
                 else if (e == "x") {
-                    var v = 0, n = 0
-                    while (n < 2 && i < t.length && hexVal(t.charCodeAt(i)) >= 0) { v = v * 16 + hexVal(t.charCodeAt(i)); i = i + 1; n = n + 1 }
-                    out = out + String.fromCharCode(v)
+                    // A \x with no hex digit after it stays literal, as bash leaves it.
+                    if (i >= t.length || hexVal(t.charCodeAt(i)) < 0) { out = out + "\\x" }
+                    else {
+                        var v = 0, n = 0
+                        while (n < 2 && i < t.length && hexVal(t.charCodeAt(i)) >= 0) { v = v * 16 + hexVal(t.charCodeAt(i)); i = i + 1; n = n + 1 }
+                        out = out + String.fromCharCode(v)
+                    }
                 }
                 else { out = out + "\\" + e }
             }
@@ -2275,7 +2337,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (i = 0; i < pairs.length; i++) {
             if (pairs[i].k == null) { plain.push(pairs[i].v) } else { arrSet(name, pairs[i].k, pairs[i].v) }
         }
-        if (plain.length > 0) { arrAppendList(name, plain) }
+        // Bare words in an ASSOCIATIVE array literal are KEY VALUE PAIRS - bash 5.3.15
+        // reads `declare -A b=(one two three four)` as b[one]=two b[three]=four, and a
+        // trailing odd word takes an empty value, so `a+=(zz)` gives a["zz"]="". They
+        // used to go through the indexed path, which asks for the next free INTEGER
+        // index and gets one because every string key reads as 0: a+=(zz) created
+        // a["1"]="zz".
+        if (plain.length > 0) {
+            if (arrs[arrKey(name)].assoc) {
+                for (i = 0; i < plain.length; i = i + 2) {
+                    arrSet(name, plain[i], (i + 1 < plain.length) ? plain[i + 1] : "")
+                }
+            } else { arrAppendList(name, plain) }
+        }
     }
     function makeAssign(items) {
         var a = parseAssign(items)

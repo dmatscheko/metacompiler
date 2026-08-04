@@ -1,6 +1,8 @@
 @AR = global [2097152 x i8] zeroinitializer
 @APOS = global i32 zeroinitializer
 @EMPTY = global [1 x i8] zeroinitializer
+@args = global [2560 x i32*] zeroinitializer
+@frame = global i32 zeroinitializer
 @CAP_BUFS = global [8 x i32*] zeroinitializer
 @CAP_LENS = global [8 x i32] zeroinitializer
 @CAP_SP = global i32 zeroinitializer
@@ -3626,4 +3628,55 @@ dead81:
 
 declare i32* @bat_lookup(i32* %0)
 
+
+define i32 @bat_shift(i32 %0) {
+entry:
+	%1 = alloca i32
+	store i32 %0, i32* %1
+	%2 = alloca i32
+	%3 = alloca i32
+	%4 = load i32, i32* @frame
+	%5 = mul i32 %4, 10
+	store i32 %5, i32* %2
+	%6 = load i32, i32* %1
+	store i32 %6, i32* %3
+	br label %7
+
+7:
+	%8 = load i32, i32* %3
+	%9 = icmp slt i32 %8, 9
+	%10 = zext i1 %9 to i32
+	%11 = icmp ne i32 %10, 0
+	br i1 %11, label %12, label %26
+
+12:
+	%13 = load i32, i32* %2
+	%14 = load i32, i32* %3
+	%15 = add i32 %13, %14
+	%16 = getelementptr [2560 x i32*], [2560 x i32*]* @args, i32 0, i32 %15
+	%17 = load i32, i32* %2
+	%18 = load i32, i32* %3
+	%19 = add i32 %17, %18
+	%20 = add i32 %19, 1
+	%21 = getelementptr [2560 x i32*], [2560 x i32*]* @args, i32 0, i32 %20
+	%22 = load i32*, i32** %21
+	%23 = bitcast i32* %22 to i32*
+	store i32* %23, i32** %16
+	%24 = load i32, i32* %3
+	%25 = add i32 %24, 1
+	store i32 %25, i32* %3
+	br label %7
+
+26:
+	%27 = load i32, i32* %2
+	%28 = add i32 %27, 9
+	%29 = getelementptr [2560 x i32*], [2560 x i32*]* @args, i32 0, i32 %28
+	%30 = getelementptr [1 x i8], [1 x i8]* @EMPTY, i32 0, i32 0
+	%31 = bitcast i8* %30 to i32*
+	store i32* %31, i32** %29
+	ret i32 0
+
+dead83:
+	ret i32 0
+}
 
