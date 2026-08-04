@@ -5,6 +5,16 @@ Written 2026-08-04 at `ee51718`, after taking all sixteen languages from
 and the MetaJS layer 2, adding a garbage collector, and merging the layer-2
 duplication twice (the second time correctly).
 
+**Revised the same day, through `1e1330e`.** Since then: a hash index for
+`scope_find` (20-42% fewer instructions in thirteen languages), a fifth merge pass
+that took the shape residue to two documented declines, kotlin's 1,489-line copy
+of `regex.js` retired, three real defects fixed and **two "open defects" in this
+very chapter found to have been already fixed** — and, running through all of it,
+the discovery that a native binary's instruction count moves 4.8% with nothing but
+the LENGTH OF ITS OUTPUT FILENAME, which invalidated every sub-2% single-build
+measurement in these documents, including several I had quoted back to people as
+facts. That is chapter 4's newest trap and it is the most expensive thing in here.
+
 The three plan documents next to this one are the *record* of that work:
 [runtime-rework-plan.md](runtime-rework-plan.md) (what was built),
 [runtime-next-plan.md](runtime-next-plan.md) (GC, floor primitives, the sixteen
@@ -68,7 +78,7 @@ go build -o mec .
 
 ./mec languages/python-interpreter.abnf prog.py            # tree-walking half
 ./mec languages/python-to-llvm-ir.abnf  prog.py            # emit IR, then run it (llvm.Run)
-./mec languages/python-to-llvm-ir.abnf  prog.py -q         # -q: program output only
+./mec languages/python-to-llvm-ir.abnf  prog.py -qq        # JUST the program's output
 ./mec languages/python-to-llvm-ir.abnf  prog.py -q -exe a.out && ./a.out   # NATIVE
 ```
 
@@ -76,7 +86,7 @@ Flags you will actually use (full list in `main.go`'s header):
 
 | flag | what it does |
 |---|---|
-| `-q` / `-qq` | program output only / errors only. **A compiler grammar prints its module first**, so without `-q` you get thousands of lines of IR before the program's output. |
+| `-q` / `-qq` | suppress the stage chatter / **also suppress the grammar's DEFAULT OUTPUT**. See the note below — which one you want depends on which half you are running, and it is not obvious. |
 | `-exe PATH` | link a native executable. Refuses loudly if the grammar has no `c.exePath`. |
 | `-rt FILE` | link an extra `.c`/`.ll`/`.o`/`.a`. Declaring a runtime also makes an unresolved symbol a **hard error** instead of a zero-returning stub. |
 | `-frozen` | run the tag scripts on the frozen MetaJS bootstrap instead of goja. **The matrix runs everything both ways and demands byte-identical output.** |
@@ -85,15 +95,41 @@ Flags you will actually use (full list in `main.go`'s header):
 | `-max-steps N` | the IR interpreter's endless-loop brake (default 1e8). A big benchmark hits it. |
 | `-freeze F` | regenerate the frozen bootstrap snapshot. Needed after **any** change to `metajs-to-llvm-ir.abnf` or `lib/compile-core.js`. |
 
-**Reading a compiler grammar's output**: the module is a *prefix* of stdout, and the
-program's own output follows. To separate them, scan forward tracking brace depth —
-do **not** look for the last line that looks like IR, because `var_dump` prints a
-bare `}` and PHP will fool you. `tests/clang-check.sh`'s `module_only()` is the
-reference implementation.
+**`-q` versus `-qq`, and why the two halves want different ones.** The module a
+compiler grammar prints is not noise that `-q` failed to strip — **emitting IR is
+that grammar's output**. `-qq` is what suppresses a grammar's own default output,
+and the two halves therefore behave oppositely:
+
+| | what `-q` gives you | what `-qq` gives you |
+|---|---|---|
+| `<lang>-interpreter.abnf` | the program's output (its output IS the default output) | **nothing** |
+| `<lang>-to-llvm-ir.abnf` | the module, then the program's output | **exactly the program** — the module is the default output, and the program's prints arrive from `llvm.Run` on a side channel |
+
+So for a differential probe you want `-q` on the interpreter half and `-qq` on the
+compiler half, and then no parsing at all. `tests/probe.sh` does this.
+
+Both engines also sign off on stdout — `<lang> interpreter: program ran to
+completion`, and **three other wordings** (`program finished`, `program value
+is`, and the `compiler:` form). That is the engine talking, and no real toolchain
+says it, so it has to go before any comparison against an oracle means anything.
+Matching only the first wording once made ruby's interpreter leg read one line
+longer than the other three and look like a halves divergence.
+
+**If you do need the module and the program separated without `-qq`**: scan
+forward tracking brace depth. Do **not** look for the last line that looks like
+IR, because `var_dump` prints a bare `}` and PHP will fool you.
+`tests/clang-check.sh`'s `module_only()` is the reference implementation.
 
 ---
 
 # 3. Testing
+
+**Start here: `tests/gates.sh` runs every gate below in one command** and reports
+one verdict, including the two greps that two of them are only correct *with*.
+`--quick` skips `clang-check` and `native-full`, and says so loudly — those are
+the only two gates that can see layer 2. `--gen` adds the generator check,
+`--freeze` adds the snapshot fixed-point check. Use the individual commands when
+you are iterating on one thing; use `gates.sh` before you believe you are done.
 
 Four groups. They are not interchangeable and each is blind to something.
 
@@ -109,9 +145,15 @@ tests/clang-check.sh         # hand every emitted module to clang; for the langu
 tests/native-full.sh         # build+run all fifteen ratchets natively, reporting the
                              # failure COUNT (clang-check reports a verdict).
 go test ./abnf/              # Go-side unit tests.
-tests/gen-*.sh --check       # fifteen generators: does the checked-in .ll still
+tests/gen-all.sh --check     # the fifteen generators, in parallel over one shared
+                             # binary (25s -> 3s): does each checked-in .ll still
                              # reproduce from its source? MANDATORY after any
-                             # runtime.c / *-rt.metajs change.
+                             # runtime.c / *-rt.metajs change. The individual
+                             # tests/gen-<lang>-rt-ll.sh still work standalone.
+tests/probe.sh L f [--oracle C]   # ONE program, FOUR ways, diffed - see below
+tests/bench.sh [--draws N]   # native perf against checked-in baselines, in
+                             # instructions retired, as a MEDIAN OVER LAYOUT DRAWS
+go run ./tools/shape-scan    # layer-2 bodies that are identical modulo names
 ```
 
 **What each group cannot see** — learn this or you will ship a defect:
@@ -156,6 +198,35 @@ agent its correct 172-line fix was a no-op. To compare versions:
 died. I quoted bash at "0.44 s / 5.75 MB" as an argument against an architecture
 change; it was segfaulting on every run and printing nothing. **Check the exit code
 and the expected output**, not just the timing.
+
+**A SINGLE BUILD CANNOT MEASURE ANYTHING BELOW ~2%, and this is the trap that
+cost the most.** A native binary's instruction count depends on its CODE LAYOUT,
+and layout moves for reasons that change no semantics whatsoever. One unchanged
+kotlin source, varying nothing but the **length of the `-exe` output filename**:
+
+```
+17.353  17.494  17.620  17.911  17.915  17.916  17.916  18.018  18.023  18.182  G
+```
+
+**4.8%, bimodal, from a file name.** It is not the run (re-running one binary
+reproduces to 0.02%) and not codegen (rebuilding one source to one path is
+`md5`-identical). The module's own content perturbs layout the same way and by the
+same magnitude — so **holding the output path fixed cancels nothing**, and there
+is no pairing that does. Three separate attempts to measure ONE change this way
+returned **+0.04%, +0.65% and −1.72%**.
+
+Use `tests/bench.sh --draws N`: it builds each program several ways, reports the
+MEDIAN with the observed spread beside it, and **ignores any delta smaller than
+that row's own spread** — java has been seen at +3.20% against a 3.21% spread.
+Per-row floors: `c` 0.35%, kotlin 1.05%, python 1.31%, lua 2.04%, java 3.21%,
+ruby 4.14%.
+
+**Counters are exempt and are exact**: allocation bytes, `MEC_GC_STATS`, binary
+size, `sample` frame counts. Measure those once. It is instruction counts and
+wall clock that need draws — and the corollary nobody expects: **agreement is not
+confirmation either.** Two builds landing on the same number inside a
+percent-wide lottery is a coin landing heads, and several conclusions in the plan
+documents were drawn from exactly that.
 
 **A fix spanning engines lands with its assertions in ONE commit.** I split a pair —
 the twin half went in without its layer-2 line — and HEAD's native binary failed two
@@ -258,23 +329,54 @@ worked:
 
 # 7. What is still open
 
-Verified at `ee51718`. The authoritative per-item write-ups are in
+Verified at `1e1330e`. The authoritative per-item write-ups are in
 `runtime-next-plan.md`'s "WHAT IS STILL OPEN" and `runtime-merge-plan.md`.
 
 **Defects, with oracles available:**
 
-1. **ruby-rt's `%g` is unimplemented.** Pre-existing; `ruby` 2.6.10 settles it.
-2. **Python's `&` is int32-signed.** `-1 & 0xffffffff` gives `-1`; CPython says
-   `4294967295`. Both halves agree, so `--cross` is blind. `python3` settles it.
+1. ~~**ruby-rt's `%g` is unimplemented.**~~ **CLOSED, and the item was wrong.**
+   `%g` landed in `2d3e6f5`, one commit after this document's verification point,
+   and a 1,393-row four-way probe found every non-`#` row already matching MRI.
+   What *was* missing was the **`#` (alternate) flag**, in all three engines — and
+   the two compiled halves failed it worse than the interpreter: they treated `#`
+   as the *conversion*, emitted a literal `#`, left the argument unconsumed and
+   **shifted every later directive**. Fixed in `1eb31e2`, along with `"%d" % -1.5`
+   (the interpreter floored, MRI truncates).
+2. ~~**Python's `&` is int32-signed.**~~ **CLOSED as a NULL RESULT — it was
+   already fixed.** 50 probe rows over `& | ^ ~ << >>` across sign and word
+   boundaries, *including this item's own `-1 & 0xffffffff` example*, agree with
+   CPython 3.14.6 on all four legs at `e1307f3`. The item was stale, not open.
+   What *was* real and is now fixed (`506000a`): integer **literals** past 2^53,
+   where the boxing predicate called `parseFloat` — which rounds at exactly the
+   boundary it exists to detect — and radix literals, which were never considered
+   for boxing at all.
+
+   **Both of these are the same lesson, and it is the most reliable one in this
+   file: RE-GREP BEFORE ACTING ON ANY LINE OF A PLAN LIST.** Two of the two
+   "defects with oracles available" listed here were not defects. The list has now
+   gone stale within two commits five times.
 
 **Merge residue:**
 
-3. ~~14 shape groups, ~131 recoverable lines.~~ **Down to 8 groups / ~84
-   recoverable** (`2d3e6f5`), and seven of the eight need a file another agent held.
-   Dart's `dtJsCompare` is genuinely blocked (a third coercion on a path only invalid
-   Dart reaches, no toolchain). `luChar`/`js_char` cannot share a name —
-   `runtime.metajs` already exports `js_char` for a *different contract* — and both
-   sites now cross-reference each other.
+3. ~~14 shape groups~~ ~~8 groups / ~84 recoverable~~ — **DOWN TO 2 GROUPS / 9
+   LINES** (`120ba0f`), and both survivors are deliberate declines, not residue.
+   The fifth pass retired 205 lines once the `scope_find` hash index made the
+   declaration tax zero and every tax-based decline re-openable: seven zero-knob
+   groups into `runtime.metajs` (`rtCopyArr` had **seven** copies, two of them in
+   kotlin 993 lines apart) and four into `regex.js`.
+
+   **The finding worth carrying: the regex divergence was between the ENGINES,
+   not among the copies.** `abnf/jsrtregex.go` already had *one* shared
+   `rxCache`/`rxGet`/`rxObjRe`/`rxMatchOf` for all four languages while layer 2
+   had four of each — so layer 2 was the wrong side of the comparison the whole
+   time, and the shared bodies now carry the Go twin's own names so the two files
+   line up when diffed.
+
+   The two declines: java/kotlin `js_jband`, whose single difference sits on a
+   path **neither emitter can produce**; and `luChar`/`js_char`, because `lua-rt`
+   imports *nothing* and `runtime.metajs` would hand it definitions it does not
+   want. Dart's `dtJsCompare` remains genuinely blocked (a third coercion on a
+   path only invalid Dart reaches, and no `dart` toolchain here).
 4. ~~**kotlin carries the whole of `regex.js` verbatim**~~ — **CLOSED,
    2026-08-04. `kotlin-rt.metajs` line 7275 is now `import "./regex.js"` and the
    1,489-line copy is deleted.** Declined at ~~+18-23%~~ then ~~+10.7%~~;
@@ -363,6 +465,22 @@ Verified at `ee51718`. The authoritative per-item write-ups are in
    affordable; MetaJS **data-structure** work costs **3.2 µs** and is not. Every
    remaining candidate (`fmt_*`, `js_num_str`, the `dec_*` family) is reached by
    every print. Each needs its own benchmark before being written.
+8. **Python integer ARITHMETIC does not promote past 2^53** (the literals now do).
+   `9007199254740992 + 1` is unchanged; 54 of 55 differing probe rows against
+   CPython are the `*` column. The site is the plain `l+r`/`l-r`/`l*r` arms in all
+   three engines — the hot path of every Python program, where a naive guard
+   measured +9.5% — and `*` needs the exact product, which is the expensive half.
+9. **Ruby's integer directives**, all three of which BOTH HALVES AGREE ON, so
+   `--cross` is blind by construction: `%d`/`%x`/`%o`/`%b` of a float past 2^53;
+   negatives under `%x`/`%o`/`%b`, which need MRI's infinite two's-complement
+   `..fb` notation; and precision on an integer directive being ignored.
+10. **`gates.sh` runs its seven gates serially at 315% CPU.** Running them
+   concurrently was measured at **291 s → 150 s with all seven verdicts
+   byte-identical** — but it was not shipped, correctly: the matrix entries in
+   `.vscode/launch.json` write **fixed paths inside the repo**, so proving no two
+   concurrent gates collide needs an audit of three more scripts. One green run is
+   not proof, and a false green in `gates.sh` is the worst outcome available here.
+   The conditions to discharge it are recorded.
 
 **Known differences from real toolchains, measured and left:** struct alignment is
 packed (`{char;short;int;long}` is 15 bytes, `cc` says 16); `_Bool b = 5` holds 5;
@@ -376,22 +494,31 @@ verbatim from the hand-emitted engine.
 
 Ordered by how much time each would have saved me.
 
-**1. A layer-2 test gate that runs by default.** `tests/native-full.sh` exists now,
-but it is not part of `./test.sh`. Until it is, the default suite is structurally
-blind to every `*-rt.metajs` change, and a newcomer will not know that. Fold it in as
-a fourth group, or make `./test.sh` refuse to report green without it.
+**1. ~~A layer-2 test gate that runs by default.~~ — DONE, 2026-08-04.**
+`tests/gates.sh` runs all seven gates in one command and cannot report green
+without `clang-check` and `native-full`, the only two that see layer 2. `--quick`
+skips them and says in as many words that a layer-2 change must not be called
+green on it. It also encodes the two greps that two gates are only correct with —
+`--full` exits 0 BY DESIGN, so its summary line was never a verdict.
 
-**2. `./test.sh --probe`.** The differential probe found nearly every real defect and
-is re-invented by hand each time. A group that, per language, generates operand
-matrices from a small spec, runs them under `llvm.Run` and native and the real
-toolchain, and diffs — would turn the most productive technique in the project into
-a command.
+**2. ~~`./test.sh --probe`.~~ — DONE, 2026-08-04, as `tests/probe.sh`.** One
+program, four ways — the interpreter half, `llvm.Run`, a native `-exe` binary, and
+a real toolchain — diffed, and it reports WHICH PAIR disagrees, because that names
+the layer: interp-vs-run is the grammars or the twin, run-vs-native is layer 2 or
+the floor, ours-vs-oracle is a specification gap in however many engines agree.
+It deliberately does NOT generate the programs from a spec: the per-language
+program is the irreducible part, and the plumbing was what got re-invented.
+Two worked templates in `tests/probe/`.
 
-**3. A shape-scan lint.** The duplication that mattered was invisible to every
-name-based view for months. `tools/shape-scan` (normalise identifiers to positional
-tokens, group by body shape, report cross-language groups) is ~40 lines and would
-have caught python and ruby writing the same decimal bignum the day it happened.
-Wire it into CI with a ratchet on the group count.
+**3. ~~A shape-scan lint.~~ — DONE, 2026-08-04, as `tools/shape-scan`.** It
+found on its own, at the permissive threshold, the groups the merge plan had only
+ever found by hand — plus `rtCopyArr`'s seven copies. `-max N` is the CI ratchet;
+the count is **2** at `-min 60` today and both are documented declines.
+It also caught a defect in itself, which is the argument for building it: it
+reported a group of three "identical" bodies of 6, 35 and 41 lines, which cannot
+be true. Finding a function's end by scanning for a `}` in column 0 breaks on the
+one-line form, so every one-liner swallowed everything up to the next column-0
+brace. Brace-counting sees 1,713 bodies where that saw 1,409.
 
 **4. Make the frozen-snapshot rule mechanical.** "Did you `-freeze` after touching
 the emitter?" is a question a script should ask. A pre-commit check that regenerates
@@ -402,10 +529,14 @@ it made every native binary 2.2× faster. **Look for more of those**: the build 
 had never been profiled, and the second-biggest win (the literal cache thrashing) was
 the same shape — nobody had measured, so nobody knew.
 
-**6. A benchmark suite with recorded baselines.** `tests/bench-alloc.sh` and friends
-exist but the numbers live in prose in the plan documents. Machine-readable
-baselines, checked in, would make "is this a regression?" a command instead of an
-archaeology exercise.
+**6. ~~A benchmark suite with recorded baselines.~~ — DONE, 2026-08-04, as
+`tests/bench.sh` + `tests/bench/baseline.txt`.** The same loop in six languages,
+instructions retired, medians over layout draws, with each row's own noise floor
+recorded so "is this a regression?" is a command. Building it is what exposed the
+layout lottery in §4 — and the first version of it had that very bug, comparing
+builds at `mktemp` paths that differed every run. **Every perf number in the plan
+documents was then audited against the finding, and nothing in the 0.1-2% band
+survived anywhere in either file.**
 
 **7. Make MetaJS's dialect gaps loud.** No exponent literal, no `toPrecision`, typed
 locals, ASI differences: each is discovered by a confusing failure. A `-verify` pass
@@ -419,7 +550,15 @@ instructions**: python −42.0, kotlin −40.9, ruby −39.4, swift −33.8, php
 go −30.1, java −29.7, dart −28.7, typescript −28.5, js −26.5, csharp −19.5. `c` is
 the control at −0.1%.
 
-**lua is +4.1% and metajs +0.4%, and that is not the hashing.** Their module scopes
+**lua is ~+4% and metajs +0.4%, and that is not the hashing.** (The lua figure
+was re-measured twice after the layout lottery was understood — 13 draws a side
+and 9 draws a side. The two runs agree the effect is REAL: it exceeds both rows'
+spreads, `c` as a control moved +0.02%, and a 5x longer loop gives the same
+percentage, so it is steady-state loop cost. They disagree 2% on the magnitude,
+and the lower figure reproduced three times, so **the originally recorded +4.1%
+stands.** `metajs +0.4%` is a single build and is not evidence in either
+direction. The two "ways of buying it back, both worse" rows are single builds
+against a 3.3%-wide row and are NOT established.) Their module scopes
 are too small to be indexed at all; the cost is that a second arm makes `scope_find`
 too big for clang to inline into `scope_get`/`scope_put`/`js_tdecl`. A branch that
 can never fire already costs lua +2.8%. Two ways of buying it back were measured and
