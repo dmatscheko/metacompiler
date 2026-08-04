@@ -763,6 +763,11 @@ verbatim `regex.js`: **the tax tracks code, so 1,217 lines of mostly-code predic
 +15% and the measurement was +18-23%.** A `runtime-regex.metajs` split does not
 make that free for kotlin; only not importing it does.
 
+> **The prediction in that last paragraph is DEAD, and so is its reason.** The
+> import shipped on 2026-08-04 at a cost indistinguishable from zero; see "THE
+> THIRD ASKING". The paragraph below is preserved as the record of what was
+> believed at the time.
+>
 > **The prediction in that last paragraph is right; its reason is not.** The
 > section below re-measured it on the actual regex body, in instructions retired
 > rather than wall clock, and the code-vs-declaration confound is disentangled by
@@ -899,6 +904,14 @@ DECLARATIONS, never in lines:
   becomes too big; there is a declaration count.
 
 ### kotlin's `regex.js`: the SECOND revert, and what would change the answer
+
+> **OVERTAKEN. Item 2 below landed, and the import was measured a THIRD time and
+> SHIPPED - `kotlin-rt.metajs` imports `regex.js` today and the verbatim copy is
+> gone. Read "THE THIRD ASKING" instead; it also shows that this section's
+> `impe` experiment, and every other single-build difference below ~2% in this
+> file, is inside a build-layout lottery and cannot be read as a measurement.
+> This section is kept because its decomposition of the cost was correct in the
+> era when the cost was large enough to see.**
 
 The split was measured and **declined again**. A `runtime-regex.metajs` holding
 the shared engine - the exact experiment, `impe` above, an engine-only module
@@ -1045,10 +1058,176 @@ coefficient in "THE RULE" is 0:
   call rather than an obvious no - which is a different answer from the one this
   document has given twice. NOT executed here: it is a `kotlin-rt.metajs` change
   and this round owned `runtime.c`.
+  **Re-measured and EXECUTED the next round - see the section below.**
 
 The `scope_find` scan is no longer the mutator's biggest line. Whatever is
 now, nobody has looked - `sample` on the lua and kotlin binaries is how to find
 out, and `ar_block`, `js_str_mem` and `obj_find` are the names that came up.
+
+### THE THIRD ASKING: the split is EXECUTED, and its cost is INDISTINGUISHABLE
+### FROM ZERO - plus the harness defect that invalidates every +-1% row in this
+### document (2026-08-04)
+
+Two reverts, and now the third measurement retires both. `kotlin-rt.metajs`
+line 7275 is `import "./regex.js"`; the 1,489-line verbatim copy is deleted.
+**No `runtime-regex.metajs` was created**, and the reason is below.
+
+#### READ THIS FIRST: single-build A/B COMPARISON DOES NOT WORK ON THIS TARGET
+
+This section originally reported **+0.04%**. The coordinator, verifying, measured
+**+0.65%** on the same two sources with a harness that looked *more* careful than
+mine. Neither number was wrong and neither was reproducible, because **both were
+single draws from a build-layout lottery about four percent wide.**
+
+The proof, in three steps:
+
+**1. The build is deterministic and the run is quiet.** Same source, same output
+path, six rebuilds: the binary is `md5`-identical every time, and instructions
+retired span 18.018-18.028 G - **0.05%**. So neither codegen nor machine noise is
+the variance.
+
+**2. Changing only the OUTPUT FILENAME moves it by percent.** Take one
+byte-identical `kotlin-rt.ll`, one source, one tree, and vary nothing but the
+`-exe` path's *length*. Twenty draws of the verbatim-copy build:
+
+```
+  17.756 17.779 17.910 17.912 17.912 17.914 17.916 17.920 17.937 17.943
+  18.017 18.018 18.021 18.023 18.029 18.029 18.031 18.035 18.071 18.600  G
+```
+
+**A 4.8% spread from the name of the output file**, clearly bimodal around
+~17.92 and ~18.03. The path string lands in the binary and moves the code layout.
+
+**3. Therefore "same exe path for both variants" cancels NOTHING.** This is the
+trap, and it is the one I fell into and then wrote into this document as the fix.
+Layout is perturbed by the path string *and* by the module's own content, in the
+same way and by the same magnitude. Holding the path fixed while changing the
+module still draws a fresh sample. **There is no pairing that cancels it.** The
+only sound estimator is a mean over many layout draws.
+
+Twenty draws per variant, one run each, non-regex loop; fourteen draws per
+variant on the regexp loop; ten on a near-empty program:
+
+```
+                          old (verbatim)        new (import)        delta
+40,000 x s = s + i % 7    mean 17.989 G         mean 17.976 G      -0.07%
+  (n=20/20)               range 17.756-18.600   range 17.523-18.212
+                          95% CI on the delta [-0.60%, +0.38%]   (bootstrap)
+
+1,000 x regexp ops        mean 15.052 G         mean 15.093 G      +0.28%
+  (n=14/14)               range 14.799-15.312   range 14.695-15.558
+                          95% CI on the delta [-0.60%, +1.17%]
+
+println("hi")             med  27.076 M         med  27.048 M      -0.10%
+  (n=10/10, module init dominates; MEC_GC_STATS byte-identical, pinned=13)
+```
+
+**Both confidence intervals straddle zero.** The distributions overlap almost
+completely. The change is not measurable on this machine by this harness, in
+either direction, on either kind of program.
+
+**Every headline this section first carried was an artifact, and all three are
+withdrawn**: the +0.04%, the -1.72% "straight win" on the calling path, and the
+`impe`-is-slower inversion. So was the coordinator's +0.65%. What survives is
+that the true cost is *smaller than a 4% measurement window*, which the mechanism
+independently predicts: the import adds six top-level declarations to a
+461-entry module scope that **has had a hash index since e1307f3**, so lookups
+are O(1) and the only real work added is six extra `js_tdecl` calls at module
+init - hundreds of instructions against 1.8e10. The near-empty-program row, where
+module init is most of the runtime, is where that would show, and it does not.
+
+**The correction this forces on the rest of this document.** The post-index curve
+two sections up reads `-0.6%` and `+0.6%`; those are single draws and should be
+read as **0 +- 2%**. Nothing in this file that rests on a single-build difference
+below ~2% means anything. **Any future layer-2 sizing decision must average over
+at least ~15 layout draws** (vary the `-exe` filename length; it is free) and
+quote a confidence interval, or it is not a measurement.
+
+#### The decision, re-argued on the honest numbers
+
+The performance argument is now *empty in both directions*, so the split has to
+stand or fall on correctness - and that is where it was always strongest:
+
+- **1,489 lines that had to be kept in step BY HAND**, against a `regex.js` that
+  three other languages already import and that `abnf/jsrtregex.go` line-by-line
+  ports. Three texts, one of them maintained by hand-diffing. The shape scan that
+  found this had to be *run* to notice; nothing else could.
+- The standing precedent declined at **+1.1%**, but that +1.1% was a REAL cost
+  with a mechanism: `scope_find` was a linear scan, and six extra declarations
+  genuinely lengthened every lookup that missed the module scope. **That
+  mechanism no longer exists.** Declining now would be declining at 0.
+- The only thing kotlin gains is six bodies its grammar cannot reach
+  (`rxMatchAt`, `rxTest`, `rxGroupCount`, `rxNameAt`, `rxReplace`, `rxSplit`).
+
+**And it is why no `runtime-regex.metajs` exists.** Such a module would carry
+exactly the copy's declarations and drop those six - but since six declarations
+are worth nothing measurable, it buys nothing, while re-introducing a second
+regex text to keep in step. It was built and measured (`impe`) before this was
+understood; the measurement said "slower", which was noise, and the right reason
+to reject it is that it has no purpose.
+
+If the reviewer's judgement is that an unmeasurable-but-possibly-positive cost on
+every kotlin program is not worth 1,489 lines of de-duplication, **that is a
+defensible call and the working tree is the place to make it** - the change is one
+`git checkout` of two files. What is not defensible is either of the two numbers
+this section first quoted.
+
+#### The 2.2% spread on the coordinator's old rows
+
+Asked about, and **I cannot reproduce it as a rebuild effect.** Six rebuilds of
+one source to one path give `md5`-identical binaries and 0.05% spread, so two
+builds with identical inputs cannot differ by 2.2%. Two explanations fit: the two
+"old" builds did not have identical inputs (a different `-exe` path between them
+puts them 2-4% apart, as above), or machine interference during those runs. It is
+worth `md5`-ing the two binaries to tell which - but either way 2.2% is exactly
+the width of the layout lottery, and it is more evidence for it, not against.
+
+#### What it costs, and what it was tested with
+
+kotlin now carries six bodies its grammar cannot reach: `rxMatchAt`, `rxTest`,
+`rxGroupCount`, `rxNameAt`, `rxReplace`, `rxSplit`. (The deleted copy's own header said
+"SIX of the entry points - rxMatchAt, rxMatchWhole, rxTest, rxReplace, rxSplit,
+rxGroupCount, rxNameAt", which names **seven** and includes `rxMatchWhole`, a
+body that was present in both texts. The list was wrong; the count was right.)
+
+**How it was tested, since §3 of the manual says the matrix cannot see layer 2.**
+A kotlin regexp differential probe - 45 patterns x 37 texts plus named groups,
+group templates, replacement lambdas and the five `RegexOption`s, every operand
+read out of an array so the folder cannot fold it, 1,694 lines of output covering
+matching, groups, named groups, replace, split, anchors, classes, quantifiers,
+alternation, backreferences, lookahead and the lazy forms. Three ways, all
+**byte-identical**: `llvm.Run` (the Go twin) against the native `-exe` after the
+split, and the native `-exe` *before* the split against the native `-exe` after
+it. The last of those is the one that matters - it is the direct statement that
+this deletion changed no answer. The probe also confirmed the engine's own
+limits, which are unchanged: lookbehind, POSIX bracket expressions and inline
+`(?i)` groups are rejected at compile time with their own messages, so those
+patterns are not in it.
+
+**No `kotlinc` on this machine** (manual §5). The ground truth for the behaviour
+being preserved is `java.util.regex`, which Kotlin's `Regex` is specified to
+delegate to - but the split needed no appeal to it, because the before/after
+native outputs are byte-identical and `tests/kotlin-test-full.kt`'s 45 `re*`
+assertions (`re01`..`re44`) run natively in `tests/native-full.sh` at 979 checks,
+0 failures.
+
+**Left for another round, because those files were owned elsewhere this round.**
+All four regexp languages now import `regex.js`, and all four then declare the
+same eight-line memo over it, differing only in the name of the cache object:
+
+```
+    js-rt.metajs:3067      jxGetProg / jxCache
+    python-rt.metajs:4723  pyERxGet  / pyERxCache
+    ruby-rt.metajs:1501    rbRxGet   / rbRxCache
+    kotlin-rt.metajs:7272  k5Get     / k5Cache
+```
+
+Every language maps its own flag letters onto the neutral set *before* calling,
+and `rxCompile` is deterministic and language-neutral, so the four caches do not
+need to be separate at all: one `rxGet(pattern, flags)` over one `rxCache` in
+`regex.js` retires all four (a native binary is one language, so a shared cache
+cannot mix dialects). 32 lines to 8, four call-sites to update, and after this
+section it costs nothing.
 
 ### THE DEFECT: `long == double` was false in BOTH COMPILER ENGINES, in TWO
 ### languages, while both INTERPRETER halves were right

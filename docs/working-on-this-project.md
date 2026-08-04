@@ -275,11 +275,57 @@ Verified at `ee51718`. The authoritative per-item write-ups are in
    Dart reaches, no toolchain). `luChar`/`js_char` cannot share a name —
    `runtime.metajs` already exports `js_char` for a *different contract* — and both
    sites now cross-reference each other.
-4. **kotlin carries the whole of `regex.js` verbatim** — 51 of 57 functions
-   byte-identical, 1,217 lines, zero divergences. ~~+18-23%~~ ~~+10.7%~~ — and
-   ~~the tax tracks top-level DECLARATIONS~~ **THE TAX IS GONE.** `scope_find`
-   (`runtime.c`) has a hash index since 2026-08-04, and the declaration-index
-   curve that governed every merge decision in this project is now flat:
+4. ~~**kotlin carries the whole of `regex.js` verbatim**~~ — **CLOSED,
+   2026-08-04. `kotlin-rt.metajs` line 7275 is now `import "./regex.js"` and the
+   1,489-line copy is deleted.** Declined at ~~+18-23%~~ then ~~+10.7%~~;
+   re-measured after the `scope_find` hash index and shipped at a cost that is
+   **indistinguishable from zero**, on a *correctness* argument, not a
+   performance one:
+
+   ```
+                            old (verbatim)      new (import)     delta
+   40,000 x s = s + i % 7   mean 17.989 G       mean 17.976 G    -0.07%  (n=20)
+                            95% CI on the delta [-0.60%, +0.38%]
+   1,000 x regexp ops       mean 15.052 G       mean 15.093 G    +0.28%  (n=14)
+                            95% CI on the delta [-0.60%, +1.17%]
+   println("hi")            med  27.076 M       med  27.048 M    -0.10%  (n=10)
+   ```
+
+   The cost is six bodies kotlin cannot reach (`rxMatchAt` `rxTest`
+   `rxGroupCount` `rxNameAt` `rxReplace` `rxSplit`) against a scope that is now
+   hash-indexed — six extra `js_tdecl` calls at module init. No
+   `runtime-regex.metajs` was created: it would drop those six, which are worth
+   nothing measurable, and re-introduce a second regex text to hand-synchronise.
+   Full write-up, the probe, and the four-way `jxGetProg`/`pyERxGet`/`rbRxGet`/
+   `k5Get` memo now worth retiring: `runtime-merge-plan.md`, "THE THIRD ASKING".
+
+   **⚠ THE HARNESS DEFECT THIS FOUND, which invalidates a lot of prose in these
+   plan documents.** A single-build A/B on a native binary **cannot resolve
+   anything below about 2%.** Take one byte-identical `.ll`, one source, one
+   tree, and vary nothing but the **length of the `-exe` output filename**:
+
+   ```
+   17.756 17.779 17.910 17.912 17.912 17.914 17.916 17.920 17.937 17.943
+   18.017 18.018 18.021 18.023 18.029 18.029 18.031 18.035 18.071 18.600  G
+   ```
+
+   **A 4.8% spread, bimodal, from the name of the output file.** It is not the
+   run and it is not codegen: six rebuilds of one source to one path give
+   `md5`-identical binaries and 0.05% spread. The path string lands in the binary
+   and moves the code layout — and so does the module's own content, identically.
+   **Therefore holding the `-exe` path fixed across variants cancels NOTHING**
+   (I recorded that as the fix; it is not). There is no pairing that cancels
+   layout. The only sound estimator is a **mean over ≥15 layout draws with a
+   confidence interval** — vary the output filename length, it is free. Two
+   careful people got +0.04% and +0.65% on these same two sources before doing
+   this; both were single draws.
+
+   Also: `gen-*-rt-ll.sh` runs its own `go build`, so another agent's in-flight
+   `abnf/*.go` edit breaks your measurement mid-sweep. Measure in a
+   `git archive <base> | tar x` tree, per §4.
+
+   The declaration-index curve that governed every merge decision in this project
+   is flat, which is why the above reversed:
 
    ```
    regex block at HEAD placement      before 30.970 G      after 18.023 G
@@ -291,9 +337,9 @@ Verified at `ee51718`. The authoritative per-item write-ups are in
    cannot call it 0%, at either end of the module.** Size it however you like.
    Two consequences: the `runtime-decimal` / `runtime-bignum` / `runtime-jvm` /
    `runtime-dartswift` splits exist for a reason that no longer holds, and every
-   small pair the shape pass declined on this tax is worth re-opening. The
-   `runtime-regex.metajs` split is a live question again for the first time
-   (~1.1% for the six bodies kotlin omits, and nothing for placement).
+   small pair the shape pass declined on this tax is worth re-opening — the
+   regex import above is the first of them to be re-opened, and it went the other
+   way. **The remaining ones have not been.**
 
    **Note what `import` APPENDING measured before the index landed: +42.5%, a
    LOSS.** What a declaration's index costs is not how many declarations precede
@@ -301,7 +347,10 @@ Verified at `ee51718`. The authoritative per-item write-ups are in
 
    **Measure with `/usr/bin/time -l` instructions retired, not wall clock.** With
    agents running, a 40k-iteration loop varies +-8% between runs of the same binary;
-   instructions reproduce to 0.02%.
+   instructions reproduce to 0.02% **for one fixed binary** — which is exactly why
+   the layout lottery above went unnoticed for so long. Reproducibility per binary
+   is not reproducibility per build, and the rows just above (`-0.6%`, `+0.6%`)
+   are single builds and should be read as **0 +- 2%**.
 
 **Recorded, larger, and deliberately not started:**
 
@@ -379,6 +428,11 @@ are worse (out-of-line arm +4.7%, name-in-slot +6.1%); both are recorded at the 
 The *other* half of this item — **making `import` APPEND** — was executed and is a
 **LOSS of +42.5%**, reverted, and written up at the `ImportStmt` rule in
 `metajs-to-llvm-ir.abnf` so it is not attempted a third time.
+
+**The first thing the index paid for**: kotlin's 1,489-line verbatim `regex.js`
+copy, declined twice on the tax this item removed, is now `import "./regex.js"`
+at **+0.04%** (§7 item 4). The other merges the tax declined have not been
+re-opened yet.
 
 **What is now the hottest line, nobody has looked.** `sample` on the lua and kotlin
 native binaries is the tool; `ar_block`, `js_str_mem` and `obj_find` are the names
