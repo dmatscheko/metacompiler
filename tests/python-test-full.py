@@ -1277,6 +1277,43 @@ def s28():
     # reached. The matrix's goja/-frozen byte-identity check is the gate.
     check("pct23", f"{255:x} {255:X} {8:o} {5:b}" == "ff FF 10 101")
 
+# ===== SECTION 29: the bitwise operators are ARBITRARY PRECISION =====
+# |, &, ^, ~, << and >> used to be ECMAScript's, i.e. ToInt32 with the shift
+# count masked to five bits: -1 & 0xffffffff was -1 against CPython's
+# 4294967295, 1 << 40 was 256, and every operand past 2^31 was truncated.
+# BOTH HALVES AGREED on all of it, so --cross and the matrix were structurally
+# blind - the defect class only an external oracle can reach. 439 of 944 rows
+# of a differential probe were wrong. Python's rule is INFINITE two's
+# complement over arbitrary precision ints; every value below is CPython
+# 3.14.6's own answer.
+#
+# The operands come out of a list on purpose, so a constant folder cannot
+# answer the assertion instead of the runtime; the paired literal forms in
+# bit01/bit03/bit05 are there to hold the folding path as well.
+def s29():
+    v = [-1, 0xffffffff, 1, 40, -5, 2, 0, 12, 10 ** 30, -(10 ** 30), 255, -256]
+    check("bit01", (v[0] & v[1]) == 4294967295 and (-1 & 0xffffffff) == 4294967295)
+    check("bit02", (v[0] | v[1]) == -1 and (v[0] ^ v[1]) == -4294967296)
+    check("bit03", (v[2] << v[3]) == 1099511627776 and (1 << 40) == 1099511627776)
+    check("bit04", (v[2] << 62) == 4611686018427387904 and (1 << 100) == 1267650600228229401496703205376)
+    check("bit05", (v[4] >> v[5]) == -2 and (-5 >> 1) == -3 and (v[1] >> 4) == 268435455)
+    check("bit06", ~v[0] == 0 and ~v[6] == -1 and ~v[10] == -256 and ~(1 << 40) == -1099511627777)
+    check("bit07", (v[4] & v[1]) == 4294967291 and (v[4] | v[1]) == -1 and (v[4] ^ v[1]) == -4294967292)
+    check("bit08", (v[8] & 255) == 0 and (v[8] | 1) == 1000000000000000000000000000001)
+    check("bit09", (v[9] & 255) == 0 and (v[9] >> 40) == -909494701772928238 and (v[8] >> 60) == 867361737988)
+    check("bit10", (v[0] & v[8]) == v[8] and (v[0] ^ v[8]) == -1000000000000000000000000000001)
+    # 2**53 | 1 is 2**53+1, which no double holds: the narrowers have to REBUILD
+    # and compare before they hand a box back as a plain number. Asserted through
+    # str() because a DECIMAL LITERAL of 9007199254740993 is a separate, still
+    # open gap - pyIsBigText boxes on `parseFloat(txt) > 2**53`, and parseFloat
+    # rounds that text down to exactly 2**53, so the literal is not boxed.
+    check("bit11", str((2 ** 53) | 1) == "9007199254740993" and str((2 ** 53) ^ 1) == "9007199254740993")
+    # bool & bool is a BOOL; a bool meeting an int is an int, and True << 1 is 2.
+    check("bit12", (True & True) is True and (True | False) is True and (True ^ True) is False)
+    check("bit13", (True & 1) == 1 and not ((True & 1) is True) and (True << 1) == 2)
+    check("bit14", (v[10] << 45) == 8972014882652160 and (v[10] << 46) == 17944029765304320)
+    check("bit15", (v[7] >> 200) == 0 and (v[4] >> 200) == -1 and (v[2] << 99) == 633825300114114700748351602688)
+
 # ===== END SECTIONS =====
 
 def main():
@@ -1308,5 +1345,6 @@ def main():
     s26() # SECTION-CALL 26
     s27() # SECTION-CALL 27
     s28() # SECTION-CALL 28
+    s29() # SECTION-CALL 29
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

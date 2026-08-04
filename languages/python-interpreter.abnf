@@ -2311,7 +2311,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (n <= 3) {
             var v = 0
             for (var i = n - 1; i >= 0; i = i - 1) { v = v * bigBase + a.limbs[i] }
-            if (v <= bigMaxNum) { return (a.sign < 0) ? -v : v }
+            // The reconstruction can ROUND: 2^53+1 accumulates to 2^53, which is
+            // <= bigMaxNum, and the box used to leave with the wrong value - so
+            // (2**53) | 1 was 9007199254740992 here and exact in both compiled
+            // halves, whose narrowers rebuild and compare. bigFromNum is exact, so
+            // a mismatch means the double is not the value. (Go: pyBigNarrow's
+            // IsInt64 test; layer 2: pyABigNarrow's own rebuild.)
+            if (v <= bigMaxNum && magCmp(bigFromNum(v).limbs, a.limbs) == 0) { return (a.sign < 0) ? -v : v }
         }
         return a
     }
@@ -2450,6 +2456,208 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return bigOb(b.sign, magSub(b.limbs, a.limbs))
     }
     function bigNeg(a) { return bigOb(-a.sign, a.limbs) }
+    // ----- the BITWISE operators, at arbitrary precision --------------------
+    //
+    // Python's |, &, ^, ~, << and >> are INFINITE TWO'S COMPLEMENT over
+    // arbitrary precision ints. Every half used to run the tag engine's own
+    // ECMAScript operators, which are ToInt32 with the shift count masked to
+    // five bits: `-1 & 0xffffffff` was -1 against CPython's 4294967295, `1 << 40`
+    // was 256, and every operand past 2^31 was truncated. BOTH HALVES AGREED on
+    // all of it, so --cross and the matrix were structurally blind; python3
+    // 3.14.6 is the oracle, and 439 of a 944-row differential probe were wrong.
+    //
+    // Working on MAGNITUDES only, a negative operand is ~(|x| - 1), which gives
+    // four identities per operator over AND / OR / XOR / ANDNOT of non-negative
+    // bit strings:
+    //
+    //   -a & b  == b &~ (a-1)             -a | b  == -(((a-1) &~ b) + 1)
+    //   -a & -b == -(((a-1) | (b-1)) + 1) -a | -b == -(((a-1) & (b-1)) + 1)
+    //   -a ^ b  == -(((a-1) ^ b) + 1)     -a ^ -b == (a-1) ^ (b-1)
+    //
+    // pyABitBin in languages/lib/python-rt.metajs is this same body over that
+    // engine's base-10000 limbs, and abnf/jsrt.go's pyBitBin is math/big's
+    // And/Or/Xor/Lsh/Rsh, which implement exactly this.
+    var bitShiftMax = 1048576
+    // The magnitude as little-endian BITS, by repeated halving of a copy.
+    function bitsOfMag(limbs) {
+        var ls = []
+        for (var i = 0; i < limbs.length; i++) { ls.push(limbs[i]) }
+        var bits = []
+        while (ls.length > 0) {
+            var rem = 0
+            for (var j = ls.length - 1; j >= 0; j = j - 1) {
+                var cur = rem * bigBase + ls[j]
+                var q = Math.floor(cur / 2)
+                ls[j] = q
+                rem = cur - q * 2
+            }
+            ls = magTrim(ls)
+            bits.push(rem)
+        }
+        return bitsTrim(bits)
+    }
+    function bitsTrim(bits) {
+        var n = bits.length
+        while (n > 0 && bits[n - 1] === 0) { n = n - 1 }
+        var out = []
+        for (var i = 0; i < n; i++) { out.push(bits[i]) }
+        return out
+    }
+    // bits - 1; the caller only hands this a magnitude of at least 1.
+    function bitsDec(bits) {
+        var out = []
+        for (var i = 0; i < bits.length; i++) { out.push(bits[i]) }
+        var k = 0
+        while (k < out.length && out[k] == 0) { out[k] = 1 ; k = k + 1 }
+        if (k < out.length) { out[k] = 0 }
+        return bitsTrim(out)
+    }
+    function bitsInc(bits) {
+        var out = []
+        for (var i = 0; i < bits.length; i++) { out.push(bits[i]) }
+        var k = 0
+        while (k < out.length && out[k] == 1) { out[k] = 0 ; k = k + 1 }
+        if (k == out.length) { out.push(1) } else { out[k] = 1 }
+        return out
+    }
+    // kind: 0 AND, 1 OR, 2 XOR, 3 ANDNOT.
+    function bitsOp(kind, a, b) {
+        var n = a.length > b.length ? a.length : b.length
+        var out = []
+        for (var i = 0; i < n; i++) {
+            var x = i < a.length ? a[i] : 0
+            var y = i < b.length ? b[i] : 0
+            var r = 0
+            if (kind == 0) { if (x == 1 && y == 1) { r = 1 } }
+            else if (kind == 1) { if (x == 1 || y == 1) { r = 1 } }
+            else if (kind == 2) { if (x != y) { r = 1 } }
+            else { if (x == 1 && y == 0) { r = 1 } }
+            out.push(r)
+        }
+        return bitsTrim(out)
+    }
+    function bitsShl(bits, k) {
+        if (bits.length == 0) { return [] }
+        var out = []
+        for (var i = 0; i < k; i++) { out.push(0) }
+        for (var j = 0; j < bits.length; j++) { out.push(bits[j]) }
+        return out
+    }
+    function bitsShr(bits, k) {
+        var out = []
+        for (var i = k; i < bits.length; i++) { out.push(bits[i]) }
+        return bitsTrim(out)
+    }
+    // A bit array back to a big, by the schoolbook doubling magMulSmall already is.
+    function bigFromBits(sign, bits) {
+        var limbs = []
+        for (var j = bits.length - 1; j >= 0; j = j - 1) {
+            limbs = magMulSmall(limbs, 2)
+            if (bits[j] == 1) { limbs = magAdd(limbs, [1]) }
+        }
+        return bigOb(sign, limbs)
+    }
+    // A shift count as a plain number; anything absurd answers past the cap.
+    function bitsToNum(bits) {
+        if (bits.length > 40) { return bitShiftMax + 1 }
+        var acc = 0
+        var p = 1
+        for (var i = 0; i < bits.length; i++) {
+            if (bits[i] == 1) { acc = acc + p }
+            p = p * 2
+        }
+        return acc
+    }
+    // Python's |, &, ^, << and >> over two boxed ints; null for a shift count
+    // that is negative (CPython raises ValueError) or past the cap.
+    function bigBitBin(op, x, y) {
+        var an = x.sign < 0 && !bigIsZero(x)
+        var bn = y.sign < 0 && !bigIsZero(y)
+        var a = bitsOfMag(x.limbs)
+        var b = bitsOfMag(y.limbs)
+        if (op == "<<" || op == ">>") {
+            if (bn) { return null }
+            var k = bitsToNum(b)
+            if (k > bitShiftMax) { return null }
+            if (op == "<<") { return bigFromBits(an ? -1 : 1, bitsShl(a, k)) }
+            if (!an) { return bigFromBits(1, bitsShr(a, k)) }
+            // floor(-a / 2^k) is -(((a-1) >> k) + 1): -5 >> 1 is -3.
+            return bigFromBits(-1, bitsInc(bitsShr(bitsDec(a), k)))
+        }
+        if (op == "&") {
+            if (!an && !bn) { return bigFromBits(1, bitsOp(0, a, b)) }
+            if (an && !bn) { return bigFromBits(1, bitsOp(3, b, bitsDec(a))) }
+            if (!an && bn) { return bigFromBits(1, bitsOp(3, a, bitsDec(b))) }
+            return bigFromBits(-1, bitsInc(bitsOp(1, bitsDec(a), bitsDec(b))))
+        }
+        if (op == "|") {
+            if (!an && !bn) { return bigFromBits(1, bitsOp(1, a, b)) }
+            if (an && !bn) { return bigFromBits(-1, bitsInc(bitsOp(3, bitsDec(a), b))) }
+            if (!an && bn) { return bigFromBits(-1, bitsInc(bitsOp(3, bitsDec(b), a))) }
+            return bigFromBits(-1, bitsInc(bitsOp(0, bitsDec(a), bitsDec(b))))
+        }
+        if (op == "^") {
+            if (!an && !bn) { return bigFromBits(1, bitsOp(2, a, b)) }
+            if (an && bn) { return bigFromBits(1, bitsOp(2, bitsDec(a), bitsDec(b))) }
+            if (an) { return bigFromBits(-1, bitsInc(bitsOp(2, bitsDec(a), b))) }
+            return bigFromBits(-1, bitsInc(bitsOp(2, a, bitsDec(b))))
+        }
+        return null
+    }
+    // 2^k as an exact double; the dialect has no exponent literal.
+    function pow2(k) {
+        var v = 1
+        for (var i = 0; i < k; i++) { v = v * 2 }
+        return v
+    }
+    // Inside int32 the tag engine's own |, & and ^ ARE the infinite two's
+    // complement answer - the sign bit stands for exactly the endless run of 1s
+    // above it - so the path a loop takes still costs one range test.
+    // `v | 0` IS ToInt32, so one test covers the int32 range, the integrality, a
+    // NaN and an infinity at once - and it is what a bit-twiddling loop pays per
+    // operation, so it stays a compare and not a Math call.
+    function bitIsSmall(v) {
+        return typeof v == "number" && (v | 0) === v
+    }
+    function bitIsExactInt(v) {
+        return typeof v == "number" && Math.floor(v) == v && v >= -bigMaxNum && v <= bigMaxNum
+    }
+    // The whole family, over any pair of operands. null when the pair is not two
+    // ints at all, so the caller keeps the behaviour it had for those.
+    function pyBitOp(op, l, r) {
+        if (op == "|" || op == "&" || op == "^") {
+            // bool & bool is a BOOL in Python (True & True is True), where a
+            // bool meeting an int is an int; True << 1 is the int 2.
+            if (typeof l == "boolean" && typeof r == "boolean") {
+                if (op == "|") { return {v: l || r} }
+                if (op == "&") { return {v: l && r} }
+                return {v: l != r}
+            }
+            if (bitIsSmall(l) && bitIsSmall(r)) {
+                if (op == "|") { return {v: l | r} }
+                if (op == "&") { return {v: l & r} }
+                return {v: l ^ r}
+            }
+        }
+        if ((op == "<<" || op == ">>") && bitIsExactInt(l) && bitIsExactInt(r) && r >= 0) {
+            if (op == ">>") {
+                if (r > 1024) { return {v: l < 0 ? -1 : 0} }
+                return {v: Math.floor(l / pow2(r))}
+            }
+            if (r <= 53) {
+                var sh = pow2(r)
+                var mag = l < 0 ? -l : l
+                if (mag * sh <= bigMaxNum) { return {v: l * sh} }
+            }
+        }
+        var x = bigOf(l)
+        if (x === null) { return null }
+        var y = bigOf(r)
+        if (y === null) { return null }
+        var out = bigBitBin(op, x, y)
+        if (out === null) { fail("negative shift count") }
+        return {v: bigOut(out)}
+    }
     function bigCmp(a, b) {
         if (bigIsZero(a) && bigIsZero(b)) { return 0 }
         if (a.sign != b.sign) { return (a.sign > b.sign) ? 1 : -1 }
@@ -2496,6 +2704,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (e < 0) { return {v: pyFlo(Math.pow(bigToNum(l), e))} }
             if (e > 4096) { return {v: Math.pow(bigToNum(l), e)} }
             return {v: bigOut(bigPow(a, e))}
+        }
+        // The bit operators at arbitrary precision - a big meeting one used to
+        // fall through to bigToNum and the tag engine's ToInt32.
+        if (op == "|" || op == "&" || op == "^" || op == "<<" || op == ">>") {
+            var bb = bigBitBin(op, a, b)
+            if (bb === null) { fail("negative shift count") }
+            return {v: bigOut(bb)}
         }
         var c = bigCmp(a, b)
         if (op == "==") { return {v: c == 0} }
@@ -2602,11 +2817,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == ">=") return l >= r
         if (op == "in") return pyIn(l, r)
         if (op == "not in") return !pyIn(l, r)
-        if (op == "|") { if (isSet(l)) return setOp("|", l, r); return l | r }
-        if (op == "&") { if (isSet(l)) return setOp("&", l, r); return l & r }
-        if (op == "^") { if (isSet(l)) return setOp("^", l, r); return l ^ r }
-        if (op == "<<") return l << r
-        if (op == ">>") return l >> r
+        // The bit operators are ARBITRARY PRECISION and INFINITE two's complement
+        // (pyBitOp, above bigNeg); the tag engine's own ToInt32 operators are only
+        // the fallback for a pair that is not two ints.
+        if (op == "|" || op == "&" || op == "^" || op == "<<" || op == ">>") {
+            if (isSet(l) && (op == "|" || op == "&" || op == "^")) { return setOp(op, l, r) }
+            var bo = pyBitOp(op, l, r)
+            if (bo != null) { return bo.v }
+            if (op == "|") return l | r
+            if (op == "&") return l & r
+            if (op == "^") return l ^ r
+            if (op == "<<") return l << r
+            return l >> r
+        }
         if (op == "@") return null
         fail("unsupported operator " + op)
     }
@@ -3930,7 +4153,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var e = items[1]
         return function() { return binOp("**", b(), e()) }
     }
-    function makeInvert(t) { return function() { return ~t() } }
+    // ~x is -x-1 in Python's INFINITE two's complement, at arbitrary precision -
+    // not the tag engine's ToInt32 complement, under which ~(2**40) was -257.
+    // Inside int32 the two agree exactly, so the hot path is still the engine's.
+    function pyInvert(v) {
+        if (bitIsSmall(v)) { return ~v }
+        var b = bigOf(v)
+        if (b === null) { return ~v }
+        return bigOut(bigAdd(bigNeg(b), bigFromNum(-1)))
+    }
+    function makeInvert(t) { return function() { return pyInvert(t()) } }
     // items alternates operands and {cop} markers. Each operand is evaluated once and
     // the chain stops at the first false link (Python's semantics exactly).
     function makeCompare(items) {

@@ -703,6 +703,26 @@ b";                                                   // verbatim keeps the newl
             Program.Check("flt9", Program.S23S(inf) == "Infinity" && Program.S23S(-1.0 / 0.0) == "-Infinity");
             Program.Check("flt10", Program.S23S(nan) == "NaN" && nan != nan);
             Program.Check("flt11", 1e300 * 1e300 == inf && 0.0 == -0.0);
+            // ECMA-334 12.12.9 (relational and type-testing operators) applies
+            // BINARY NUMERIC PROMOTION first, so == between a long and a double
+            // converts the long to double and compares two doubles. Both COMPILER
+            // halves answered false - floEq (the floor's jf_num_eq, the twin's
+            // jvmNumEq) had no sized-integer arm and a comment at three sites
+            // called that deliberate - while both INTERPRETER halves answered
+            // true, and nothing in the suite had ever compared a long to a double
+            // so --cross could not see it. Found by the shape merge of csharp's
+            // and java's strict equality into lib/runtime-jvm.metajs; java 24.0.2
+            // settles the identical JLS 15.21.1 rule on the java side. There is no
+            // C# toolchain on this machine, so this row is the SPEC. The operands
+            // come out of arrays so the constant folder cannot answer them.
+            long[] lz = new long[]{0L, 3L};
+            double[] dz = new double[]{0.0, 3.0};
+            Program.Check("flt11a", lz[0] == dz[0] && lz[1] == dz[1] && !(lz[0] != dz[0]));
+            Program.Check("flt11b", dz[0] == lz[0] && lz[0] != dz[1] && lz[1] != dz[0]);
+            // The UNSIGNED reading has its own path: a ulong is promoted as a
+            // magnitude, not as the signed cell its bits would read as.
+            ulong[] uz = new ulong[]{0UL, 3UL};
+            Program.Check("flt11c", uz[0] == dz[0] && uz[1] == dz[1] && uz[0] != dz[1]);
             // A double declaration converts its initializer; ++ and the compound
             // operators keep the variable a double.
             double d = 1;

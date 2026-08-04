@@ -118,11 +118,16 @@
 import "./runtime.metajs"
 import "./runtime-decimal.metajs"
 
+// The two bodies dart and swift share and nobody else does, in their own module
+// so the other importers of runtime.metajs pay nothing for them. Both difference
+// lists were EMPTY; see the head of that file.
+import "./runtime-dartswift.metajs"
+
 // ----- the rtk* hooks the shared runtime calls -------------------------------
-function rtkStr(v) { return swJavaStr(v) }
+function rtkStr(v) { return rtJavaStr(v) }
 function rtkNum(v) { return swNum(v) }
 function rtkIsChar(v) { return false }
-function rtkIsArr(v) { return swIsArr(v) }
+function rtkIsArr(v) { return rtIsArr(v) }
 // js_supercall's one knob. This language's emitter never emits js_supercall, so
 // the shared body is unreachable here; the hook is defined anyway so that the day
 // it IS emitted the answer is the plain one and not a missing name.
@@ -315,13 +320,11 @@ function swIntCanon(s, neg) {
 
 function swIsObj(v) { return rtIsObj(v) }
 
-// A MetaJS list. A Dictionary/tuple/instance box is an object without a numeric
-// `length`, so this is the same discrimination php-rt.metajs's phIsList makes.
-function swIsArr(v) {
-    if (!swIsObj(v)) { return false }
-    if (v["__dict"] === true) { return false }
-    return typeof v["length"] == "number"
-}
+// rtIsArr - a MetaJS list, i.e. an object with a numeric `length` that is not a
+// Dictionary, a tuple or an instance box - is SHARED with dart,
+// lib/runtime-dartswift.metajs. The two copies had ZERO differences (swIsObj and
+// dtIsObj are both rtIsObj). php's phIsList is the same discrimination plus a
+// {__refcell} rejection, which is a third specification and stays where it is.
 
 // swNumProp is the Go twin's swNumProp: the value of a numeric internal slot, or
 // -1 for a shape that does not have one. (-1 rather than a second return value,
@@ -333,7 +336,7 @@ function swNumProp(o, key) {
 }
 
 function swStrArray(v) {
-    if (!swIsArr(v)) { return [] }
+    if (!rtIsArr(v)) { return [] }
     return v
 }
 
@@ -396,7 +399,7 @@ function swRender(v, nested, depth) {
         if (nested) { return swQuote(v) }
         return v
     }
-    if (swIsArr(v)) {
+    if (rtIsArr(v)) {
         var out = "["
         var i = 0
         while (i < v.length) {
@@ -462,7 +465,7 @@ function swObjDesc(o, depth) {
     if (o["__ecase"] === true) {
         var ename = o["__ename"]
         var evals = o["__vals"]
-        if (!swIsArr(evals)) { return ename }
+        if (!rtIsArr(evals)) { return ename }
         if (evals.length == 0) { return ename }
         var elabels = swStrArray(o["__labels"])
         var eout = ename + "("
@@ -480,7 +483,7 @@ function swObjDesc(o, depth) {
     // A Set literal, where the grammars build one.
     if (o["__set"] === true) {
         var el = o["elems"]
-        if (swIsArr(el)) {
+        if (rtIsArr(el)) {
             var sout = "["
             var q = 0
             while (q < el.length) {
@@ -549,8 +552,8 @@ function swEqual(l, r, depth) {
         if (swIsNumeric(l) && swIsNumeric(r)) { return sintCmp(l, r) === 0 }
         return l === r
     }
-    if (swIsArr(l)) {
-        if (!swIsArr(r)) { return false }
+    if (rtIsArr(l)) {
+        if (!rtIsArr(r)) { return false }
         if (l.length !== r.length) { return false }
         var i = 0
         while (i < l.length) {
@@ -599,7 +602,7 @@ function swEqual(l, r, depth) {
             if (l["__ename"] !== r["__ename"]) { return false }
             var lvals = l["__vals"]
             var rvals = r["__vals"]
-            if (!swIsArr(lvals) || !swIsArr(rvals)) { return !swIsArr(lvals) && !swIsArr(rvals) }
+            if (!rtIsArr(lvals) || !rtIsArr(rvals)) { return !rtIsArr(lvals) && !rtIsArr(rvals) }
             if (lvals.length !== rvals.length) { return false }
             var e = 0
             while (e < lvals.length) {
@@ -630,6 +633,12 @@ function swEqual(l, r, depth) {
 // result straight to js_jadd, where the Go twin's jsChar goes through
 // rt.toString - and that is the character. So a one-character string is the same
 // value at every point Swift can observe.
+//
+// BYTE-IDENTICAL to lua-rt.metajs's luChar, and DECLINED as a merge - see the
+// reason recorded at that site. Note that this js_char and lib/runtime.metajs's
+// js_char are two DIFFERENT contracts under one name: swift answers the
+// one-character STRING, the shared one answers a {__char} box. swift-rt.ll
+// carries exactly one `define @js_char` and it is this one.
 function js_char(cp) {
     if (cp < 65536) { return String.fromCharCode(cp) }
     var v = cp - 65536
@@ -671,7 +680,7 @@ function js_pyget(c, k) {
         return c["vals"][i]
     }
     var idx = swNum(k)
-    if (swIsArr(c)) {
+    if (rtIsArr(c)) {
         if (idx < 0) { idx = idx + c.length }
         if (idx < 0 || idx >= c.length) { fail("list index out of range") }
         return c[idx]
@@ -698,9 +707,9 @@ function js_pylen(v) {
     if (rtIsDictObj(v)) { return v["keys"].length }
     if (swIsObj(v) && v["__set"] !== undefined) {
         var el = v["elems"]
-        if (swIsArr(el)) { return el.length }
+        if (rtIsArr(el)) { return el.length }
     }
-    if (swIsArr(v)) { return v.length }
+    if (rtIsArr(v)) { return v.length }
     fail("len() of a " + typeof v)
     return 0
 }
@@ -718,15 +727,8 @@ function js_pylen(v) {
 // the floor HAS - so unlike php-rt.metajs's, this one is complete.
 // js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
 
-function swJavaStr(v) {
-    if (typeof v == "string") { return v }
-    if (v === null) { return "null" }
-    if (v === undefined) { return "null" }
-    if (typeof v == "boolean") { return v ? "true" : "false" }
-    if (sintIs(v)) { return sintStr(v) }
-    if (floIs(v)) { return floStr(v) }
-    return "" + v
-}
+// rtJavaStr is SHARED with dart - lib/runtime-dartswift.metajs. The two copies
+// were byte-identical.
 
 
 
@@ -760,7 +762,7 @@ function js_mcall(recv, name, args) {
         if (name === "isEmpty") { return recv.length == 0 }
         fail("unknown String method: " + name)
     }
-    if (swIsArr(recv)) { return swListMethod(recv, name, args) }
+    if (rtIsArr(recv)) { return swListMethod(recv, name, args) }
     if (rtIsDictObj(recv)) {
         if (name === "keys") { return swCopyArr(recv["keys"]) }
         if (name === "values") { return swCopyArr(recv["vals"]) }
@@ -967,7 +969,7 @@ function js_swarith(op, l, r) {
         if (typeof l == "string" || typeof r == "string") { return swDesc(l) + swDesc(r) }
         // Array + Array is CONCATENATION in Swift, where the shared jsAdd coerced
         // both to text and answered "1,23".
-        if (swIsArr(l) && swIsArr(r)) {
+        if (rtIsArr(l) && rtIsArr(r)) {
             var out = swCopyArr(l)
             var i = 0
             while (i < r.length) {

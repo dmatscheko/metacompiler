@@ -1,0 +1,157 @@
+// runtime-jvm.metajs -- the bodies csharp-rt.metajs and java-rt.metajs share,
+// and NOBODY ELSE DOES.
+//
+// WHY ITS OWN FILE, and not lib/runtime.metajs. A layer-2 body is permanently
+// live: every function in a <lang>-rt.ll is a pinned closure the conservative
+// collector walks on every collection, so a body put in front of ten importers
+// to serve two taxes the other eight. That tax was MEASURED at two scales
+// (2026-08-04, swift, 400,000 x `s = s + i % 7`, native -exe, MEC_GC_STATS,
+// dead code-only bodies added to swift-rt.metajs and never called):
+//
+//     added lines   live objects        wall (min of 3)
+//         0         104,016             3.40 s
+//       182         105,168  (+1,152)   3.52 s   +3.5%
+//       720         109,072  (+5,056)   3.71 s   +9.1%
+//
+// - so it is ~7 pinned objects and ~+1.3% per 100 lines of dead shared CODE,
+// linear, and with heap and collection COUNT unmoved (9,442,688 B and 4,097 in
+// all three runs). The decimal bignum's larger +17-24% came from its DATA as
+// well: it moved heap 9.44 -> 10.49 MB and collections 3,841 -> 4,097. Two
+// components, then: the live walk tracks code, the collection count tracks data.
+//
+// The number that matters here is the SLOPE. The ~50 lines below would cost the
+// eight other importers ~0.6% if they were in runtime.metajs - which is real but
+// under the noise floor of a single timing run, and exactly zero here, because
+// only csharp and java import this file. The tax is an argument about hundreds
+// of lines, not tens; it is not a reason to leave a ten-line body duplicated.
+//
+// WHY MERGE AT ALL, given it is fifty lines. Because of what the duplication has
+// already cost twice at this very site. `js_cscmp` and `js_jvcmp` are one body.
+// The NaN sentinel - rtCompare answers 2 when either operand coerces to NaN, and
+// that means "every relation is false" - was found and fixed in the C# copy in
+// Part A, and the java copy was still wrong MONTHS later, in BOTH engines, in two
+// DIFFERENT directions (see runtime-merge-plan.md, third pass, item 2). The same
+// defect, twice, because the same body was written twice. One body cannot do
+// that again.
+//
+// THE DIFFERENCE LIST, taken before merging, and what it came to:
+//
+//   csNum / jvNum             TWO differences, BOTH IDENTITY. The char test is
+//                             csIsChar / jvIsChar and both are `rtIsCharBox(v)`.
+//                             The string coercion is `parseFloat(v)` / `jpStrNum(v)`
+//                             and jpStrNum's whole body is `var t = parseFloat(s);
+//                             return t`. runtime-merge-plan.md recorded this pair
+//                             as "2 hooks"; the code has ZERO.
+//   csIsIntegral/jvIsIntegral ZERO differences, same reason (rtIsCharBox).
+//   js_arr_new_n              ZERO differences once csNum == jvNum.
+//   csStrictEq / jvStrictEq   ONE: csCmp vs jvCmp.
+//   js_cscmp / js_jvcmp       ONE: the same csCmp vs jvCmp.
+//   csFloArith / jvmArith     ONE: csFloOperand vs jvmOperand.
+//
+// So: two knobs, `rtjkCmp` and `rtjkFloOperand`, and both are REAL.
+//
+//   rtjkCmp - csCmp promotes with csPromote and compares two csBox cells with
+//     sintCmp; jvCmp switches on jvW (JLS 5.6.2: long when either side is long,
+//     int otherwise) and compares two plain int32s below 64 bits. Two integer
+//     models, not one spelled twice.
+//   rtjkFloOperand - csFloOperand converts only the {__char} box and lets a tag
+//     13 cell through, because a C# long is an honest SIGNED cell; jvmOperand
+//     sends everything non-float through jvNum, because Java's long box is marked
+//     UNSIGNED and the floor's to_number would read it as a magnitude. Recorded at
+//     both sites already; the merge did not create the difference, it named it.
+
+// ----- the two knobs, defined by the importer -------------------------------
+//
+//   rtjkCmp(op, l, r)       the ordered/equality comparison of two INTEGRAL
+//                           operands at the promoted type. csharp: csCmp.
+//                           java: jvCmp.
+//   rtjkFloOperand(v)       a value made safe for the floor's floOp.
+//                           csharp: csFloOperand. java: jvmOperand.
+
+// An operand of INTEGER arithmetic. A char is one - it is an integral type in
+// both languages - and a double is not.
+function rtjIsIntegral(v) {
+    if (rtIsCharBox(v)) { return true }
+    if (typeof v != "number") { return false }
+    return !floIs(v)
+}
+
+// The double reading of anything numeric.
+function rtjNum(v) {
+    if (floIs(v)) { return floNum(v) }
+    if (rtIsCharBox(v)) { return v["__char"] }
+    if (sintIs(v)) { return sintNum(v) }
+    if (typeof v == "number") { return v }
+    if (v === true) { return 1 }
+    if (v === false) { return 0 }
+    if (typeof v == "string") { return parseFloat(v) }
+    return 0
+}
+
+// new T[n] / new T[n] with a default element.
+function js_arr_new_n(n, fill) {
+    var out = []
+    var i = 0
+    var c = rtjNum(n)
+    while (i < c) {
+        out.push(fill)
+        i = i + 1
+    }
+    return out
+}
+
+// == / != . A double on either side is compared as a double; two integrals are
+// compared at the promoted type; anything else is identity.
+//
+// THE SIZED INTEGER ARM IS A FIX, and the merge is what found it. floEq is the
+// floor's jf_num_eq / the twin's jvmNumEq, and NEITHER has a tag 13 arm: a
+// `long` against a `double` answered FALSE in both compiler engines, in both
+// languages, while both INTERPRETER halves answered true. `long x = 0; double
+// y = 0.0; x == y` is true - JLS 15.21.1 and ECMA-334 12.12.9 both promote the
+// integral operand to double first - and java 24.0.2 confirms it. --cross could
+// not see it because nothing in the matrix ever compared a long to a double, and
+// the comment that used to stand here called the asymmetry deliberate ("a boxed
+// double against a SIZED INTEGER is false ... reproduced rather than smoothed
+// over"), which is how it survived. rtjNum is the promotion, and it is the same
+// reading rtjArith already gives the very same pair of operands.
+function rtjStrictEq(l, r) {
+    if (floIs(l) || floIs(r)) {
+        if (sintIs(l) || sintIs(r)) { return rtjNum(l) == rtjNum(r) }
+        return floEq(l, r)
+    }
+    if (sintIs(l) || sintIs(r)) {
+        if (!rtjIsIntegral(l)) { return false }
+        if (!rtjIsIntegral(r)) { return false }
+        return rtjkCmp("==", l, r)
+    }
+    return l === r
+}
+
+// < > <= >= . Two integral operands compare at the promoted type; everything
+// else goes through rtCompare (lib/runtime.metajs), which answers the SENTINEL 2
+// when either operand coerces to NaN.
+//
+// THE SENTINEL MEANS "EVERY RELATION IS FALSE", and that is the rule in both
+// languages: ECMA-334 12.12.1 for C#, JLS 15.20.1 for Java. Read as an ORDERING
+// it makes `>` and `>=` true (so `double.NaN > 0.0` answered true), and read as 0
+// it makes `<=` and `>=` true - wrong in the other direction. Both wrong answers
+// have been shipped here. abnf/jsrtcsharp.go:477 and abnf/jsrtjava.go:467 carry
+// the same three lines and have to move with this one, or --cross reports it.
+function rtjRel(op, l, r) {
+    if (rtjIsIntegral(l) && rtjIsIntegral(r) && !floIs(l) && !floIs(r)) { return rtjkCmp(op, l, r) }
+    var c = rtCompare(l, r)
+    if (c == 2) { return false }
+    if (op == "<") { return c < 0 }
+    if (op == ">") { return c > 0 }
+    if (op == "<=") { return c <= 0 }
+    return c >= 0
+}
+
+// Arithmetic with a double on either side: the whole operation is floating point
+// and its result is a double. floOp is the floor's own tag 14 arm of exactly
+// this, by operator INDEX: 0 + 1 - 2 * 3 / 4 %.
+function rtjArith(op, l, r) {
+    var code = 0
+    if (op == "-") { code = 1 } else if (op == "*") { code = 2 } else if (op == "/") { code = 3 } else if (op == "%") { code = 4 }
+    return floOp(code, rtjkFloOperand(l), rtjkFloOperand(r))
+}

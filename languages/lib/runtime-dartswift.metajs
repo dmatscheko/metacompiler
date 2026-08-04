@@ -1,0 +1,50 @@
+// runtime-dartswift.metajs -- the bodies dart-rt.metajs and swift-rt.metajs
+// share, and NOBODY ELSE DOES.
+//
+// Its own module for the reason lib/runtime-jvm.metajs's head measures: a
+// layer-2 body is permanently live, so a body put in front of ten importers to
+// serve two taxes the other eight (~7 pinned objects and ~+1.3% wall per 100
+// lines of shared code that the importer can never call, measured at two scales
+// on swift). Fourteen lines would cost the other eight about 0.2%, which is
+// under the noise floor - the tax is an argument about hundreds of lines, not
+// tens - but here it is exactly zero, because only dart and swift import this.
+//
+// THE DIFFERENCE LIST IS EMPTY FOR BOTH BODIES, which is the whole reason to
+// merge them. Two byte-identical copies with no knobs between them are two
+// places a future fix can land in one and not the other; that has now cost this
+// project twice at one site (the NaN relational, and the sized-integer equality
+// - see runtime-jvm.metajs). swIsArr's own comment already said it was "the same
+// discrimination php-rt.metajs's phIsList makes", so the duplication was known
+// and unnamed.
+//
+//   dtIsArr / swIsArr      ONE apparent difference, dtIsObj vs swIsObj, and BOTH
+//                          are `rtIsObj(v)` (lib/runtime.metajs). ZERO knobs.
+//                          php's phIsList is NOT merged in: it rejects a
+//                          {__refcell} box as well, which is a third
+//                          specification and not a knob.
+//   dtJavaStr / swJavaStr  ZERO differences, byte for byte.
+//
+// go-rt.metajs's goJavaStr shares the NAME and not the body (it delegates to
+// gopStr), and js-rt.metajs's jxToStr is that same two-line shape again; neither
+// belongs here.
+
+// A MetaJS list. A Map / Dictionary / tuple / instance box is an object without
+// a numeric `length`.
+function rtIsArr(v) {
+    if (!rtIsObj(v)) { return false }
+    if (v["__dict"] === true) { return false }
+    return typeof v["length"] == "number"
+}
+
+// The Java-style rendering of a scalar, which both emitters use for their string
+// builders and their index arithmetic. Null and undefined are "null"; the two
+// number boxes render in their own style; anything else is MetaJS's own `+ ""`.
+function rtJavaStr(v) {
+    if (typeof v == "string") { return v }
+    if (v === null) { return "null" }
+    if (v === undefined) { return "null" }
+    if (typeof v == "boolean") { return v ? "true" : "false" }
+    if (sintIs(v)) { return sintStr(v) }
+    if (floIs(v)) { return floStr(v) }
+    return "" + v
+}

@@ -1301,8 +1301,13 @@ function s26() {
     check("flo35", floEq(flo(1, 0), flo(1, 2)) === true)         // the style is not part of the value
     check("flo36", floEq(flo(0 / 0, 0), flo(0 / 0, 0)) === false)
     check("flo37", floEq(flo(1, 0), "1") === false && floEq(flo(1, 0), true) === false)
-    // A boxed double against a SIZED INTEGER is false, because jvmNumEq has no
-    // jsGInt case - stated in the Go twin, and matched rather than smoothed.
+    // A boxed double against a SIZED INTEGER is false: the floor's jf_num_eq has
+    // no tag 13 arm and the twin's floEq host matches it. This is the PRIMITIVE's
+    // contract, not a language's - Java's and C#'s `==` promotes the integral
+    // operand to double first (JLS 15.21.1 / ECMA-334 12.12.9) and so answers
+    // TRUE for `0L == 0.0`, which is why lib/runtime-jvm.metajs's rtjStrictEq
+    // does that promotion BEFORE it calls floEq. Both compiler halves used to get
+    // that wrong; see java-test-full's flt10e-g and csharp-test-full's flt11a-c.
     check("flo38", floEq(flo(1, 0), sint(0, 1, 8, 0)) === false)
     // === is the same two arms, reached through the operator; == is NOT, because
     // loose_eq sees a box as neither a number nor a string. Faithfully odd, and

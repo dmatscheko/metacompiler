@@ -155,8 +155,18 @@ func jvmFloStr(d float64) string {
 }
 
 // jvmNumEq is Java's == with a double on one side: the other side has to be a
-// number too (a plain one, another double or a char), and then the comparison is
-// numeric - so 1.0 == 1 is true and NaN == NaN is false.
+// number too - a plain one, another double, a char, or a SIZED INTEGER - and then
+// the comparison is numeric, so 1.0 == 1 is true and NaN == NaN is false.
+//
+// THE jsGInt ARM IS A FIX. It was missing, and its absence was called
+// deliberate at three sites ("a box against a jsGInt is false"); it is a DEFECT.
+// `long x = 0; double y = 0.0; x == y` is TRUE in both languages - JLS 15.21.1
+// and ECMA-334 12.12.9 promote the integral operand to double first - and java
+// 24.0.2 confirms it. Both COMPILER halves said false (this, and the floor's
+// jf_num_eq through lib/runtime-jvm.metajs's rtjStrictEq, which takes the same
+// fix) while both INTERPRETER halves said true; --cross never saw it because
+// nothing in the matrix compared a long to a double. giEq (jsrtint.go:283)
+// already read the pair this way, and rt.strictEq short-circuited past it.
 func jvmNumEq(f float64, other interface{}) bool {
 	switch t := other.(type) {
 	case jsJFlo:
@@ -165,6 +175,13 @@ func jvmNumEq(f float64, other interface{}) bool {
 		return f == t
 	case jsChar:
 		return f == float64(t.code)
+	case jsGInt:
+		// The unsigned 64 bit reading needs its own path, exactly as giFloat says:
+		// int64(-1) read as a uint64 is 1.8446744073709552e19.
+		if t.u && t.w == 64 {
+			return f == float64(uint64(t.v))
+		}
+		return f == float64(t.v)
 	}
 	return false
 }
@@ -337,15 +354,26 @@ func jfBindings(b map[string]interface{}) {
 		}
 		return rt.jvmArith(op, argAt(args, 1), argAt(args, 2))
 	})
-	// strictEq's two jsJFlo arms, which is what a program can otherwise only
-	// reach through ===: 1.0 === 1 holds, and a box against a SIZED INTEGER is
-	// false because jvmNumEq has no jsGInt case.
+	// floEq IS THE FLOOR'S jf_num_eq (languages/lib/runtime.c), and the two have
+	// to answer the same thing on every input or layer 2 and the twin diverge.
+	// jf_num_eq has NO tag 13 arm, so a box against a SIZED INTEGER is false
+	// here as well - even though jvmNumEq gained one, because that arm belongs to
+	// the LANGUAGE's `==` (which promotes the integral operand to double first,
+	// JLS 15.21.1 / ECMA-334 12.12.9) and not to the primitive. The promotion is
+	// the CALLER's: lib/runtime-jvm.metajs's rtjStrictEq does it before it gets
+	// here. tests/metajs-test-full.js's flo38 pins this contract.
 	b["floEq"] = jsHostFunc("floEq", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		l, r := argAt(args, 0), argAt(args, 1)
 		if f, ok := l.(jsJFlo); ok {
+			if giIsInt(r) {
+				return false
+			}
 			return jvmNumEq(f.f, r)
 		}
 		if f, ok := r.(jsJFlo); ok {
+			if giIsInt(l) {
+				return false
+			}
 			return jvmNumEq(f.f, l)
 		}
 		return rt.strictEq(l, r)

@@ -1007,6 +1007,13 @@ function js_luminint() { return luNorm(luMinPair()) }
 // program prints the byte sequence it holds. A byte that starts no valid sequence
 // is passed through as its own code point, which is what utf8.DecodeRune's
 // (RuneError, 1) answer makes the Go twin do.
+//
+// BYTE-IDENTICAL to swift-rt.metajs's js_char, and DECLINED as a merge (fourth
+// pass, docs/runtime-merge-plan.md): the two would need a {lua, swift} module of
+// their own - lua-rt.metajs imports nothing at all today - and the shared body
+// could not be called js_char, because lib/runtime.metajs already exports that
+// name for a DIFFERENT contract (the {__char} box, not a one-character string).
+// Five lines is not worth lua's first import; keep the two texts in step by hand.
 function luChar(cp) {
     if (cp < 65536) { return String.fromCharCode(cp) }
     var v = cp - 65536

@@ -3045,6 +3045,49 @@ func pyBigPair(a, b interface{}) (*big.Int, *big.Int, bool) {
 	return x, y, true
 }
 
+// pyBitShiftMax is the largest shift count the bitwise arm will honour. CPython
+// answers a MemoryError somewhere above this; a cap keeps `1 << 10**9` from
+// asking for a gigabyte instead of aborting.
+const pyBitShiftMax = 1 << 20
+
+// pyBitBin is Python's BITWISE arithmetic, which is INFINITE TWO'S COMPLEMENT over
+// arbitrary precision ints - exactly what math/big's And/Or/Xor/Lsh/Rsh implement.
+//
+// It used to be rt.toInt32 on both sides: `-1 & 0xffffffff` was -1 where CPython
+// says 4294967295, `1 << 40` was 256 because ECMAScript masks the count to 5 bits,
+// and every operand past 2^31 was truncated. BOTH HALVES agreed on all of it, so
+// --cross and the matrix were structurally blind; python3 3.14.6 is the oracle
+// that settles it. Measured on a 944-row differential probe: 439 rows wrong.
+//
+// ok is false for a shift count that is negative (CPython raises ValueError) or
+// past the cap, so the caller can fail rather than answer a wrong number.
+func pyBitBin(op string, x, y *big.Int) (*big.Int, bool) {
+	out := new(big.Int)
+	switch op {
+	case "&":
+		out.And(x, y)
+	case "|":
+		out.Or(x, y)
+	case "^":
+		out.Xor(x, y)
+	case "<<", ">>":
+		if y.Sign() < 0 || !y.IsInt64() || y.Int64() > pyBitShiftMax {
+			return nil, false
+		}
+		n := uint(y.Int64())
+		if op == "<<" {
+			out.Lsh(x, n)
+		} else {
+			// big.Int.Rsh is an ARITHMETIC shift on the two's complement value,
+			// which is Python's floor: -5 >> 1 is -3.
+			out.Rsh(x, n)
+		}
+	default:
+		return nil, false
+	}
+	return out, true
+}
+
 // pyBigBin is Python's integer arithmetic in arbitrary precision. `//` and `%`
 // FLOOR, as Python's do: Go's Quo/Rem truncate and Go's Div/Mod are Euclidean, and
 // neither is Python's answer for a negative divisor (1e30 % -7 is -6, not +1).
@@ -4187,9 +4230,35 @@ func (rt *jsrt) rubyCmp(l, r interface{}) int {
 	return c
 }
 
+// rubyFloatWord is Ruby's rendering of a NON-FINITE double under %f/%e/%E/%g/%G:
+// MRI prints "Inf", "-Inf" and "NaN" for every one of them, in that case whatever
+// the directive's own case is ("%G" % Float::INFINITY is "Inf", not "INF"), and it
+// pads them with SPACES even when the 0 flag is set ("%010f" % inf is "       Inf").
+// strconv's own "+Inf" reached the output before this. Measured against ruby 2.6.10,
+// whose float formatting is unchanged in 3.x.
+func rubyFloatWord(v float64) (string, bool) {
+	if math.IsNaN(v) {
+		return "NaN", true
+	}
+	if math.IsInf(v, 1) {
+		return "Inf", true
+	}
+	if math.IsInf(v, -1) {
+		return "-Inf", true
+	}
+	return "", false
+}
+
 // rubyFormat is Kernel#format / String#% - the printf directives Ruby shares with C:
-// %[-][0][width][.prec](d|i|f|s|x|X|o|b|e|%). The right operand is the argument, or
-// an array of them.
+// %[-][0][width][.prec](d|i|f|s|x|X|o|b|e|E|g|G|%). The right operand is the
+// argument, or an array of them.
+//
+// %g/%G is C's "shortest of the two shapes": the value rounded to P significant
+// digits (P defaults to 6, and P == 0 means 1) is written in %e form when its
+// decimal exponent is below -4 or at least P, and in %f form otherwise, with the
+// trailing zeros of the fraction - and a bare trailing point - removed. That is
+// exactly strconv.FormatFloat(v, 'g', P, 64), verified digit for digit against
+// ruby 2.6.10 over 14 values x 4 precisions.
 func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 	args := []interface{}{arg}
 	if a, ok := arg.(*jsArray); ok {
@@ -4220,13 +4289,17 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 			out = append(out, '%')
 			continue
 		}
-		left, zero := false, false
+		left, zero, plus, space := false, false, false, false
 		for i < len(spec) && (spec[i] == '-' || spec[i] == '0' || spec[i] == '+' || spec[i] == ' ') {
-			if spec[i] == '-' {
+			switch spec[i] {
+			case '-':
 				left = true
-			}
-			if spec[i] == '0' {
+			case '0':
 				zero = true
+			case '+':
+				plus = true
+			case ' ':
+				space = true
 			}
 			i++
 		}
@@ -4248,6 +4321,7 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 			break
 		}
 		var body string
+		nonFinite := false
 		switch spec[i] {
 		case 'd', 'i':
 			body = jsNumString(math.Trunc(rubyToF(next())))
@@ -4255,12 +4329,41 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 			if prec < 0 {
 				prec = 6
 			}
-			body = strconv.FormatFloat(rubyToF(next()), 'f', prec, 64)
-		case 'e':
+			f := rubyToF(next())
+			if w, bad := rubyFloatWord(f); bad {
+				body, nonFinite = w, true
+			} else {
+				body = strconv.FormatFloat(f, 'f', prec, 64)
+			}
+		case 'e', 'E':
 			if prec < 0 {
 				prec = 6
 			}
-			body = strconv.FormatFloat(rubyToF(next()), 'e', prec, 64)
+			f := rubyToF(next())
+			if w, bad := rubyFloatWord(f); bad {
+				body, nonFinite = w, true
+			} else {
+				body = strconv.FormatFloat(f, 'e', prec, 64)
+				if spec[i] == 'E' {
+					body = strings.ToUpper(body)
+				}
+			}
+		case 'g', 'G':
+			if prec < 0 {
+				prec = 6
+			}
+			if prec == 0 {
+				prec = 1
+			}
+			f := rubyToF(next())
+			if w, bad := rubyFloatWord(f); bad {
+				body, nonFinite = w, true
+			} else {
+				body = strconv.FormatFloat(f, 'g', prec, 64)
+				if spec[i] == 'G' {
+					body = strings.ToUpper(body)
+				}
+			}
 		case 's':
 			body = rt.rubyStr(next())
 			if prec >= 0 && prec < len(body) {
@@ -4277,15 +4380,34 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 		default:
 			body = string(spec[i])
 		}
+		// The + and SPACE flags were parsed and thrown away, in every half, so
+		// "%+d" % 7 was "7" against MRI's "+7" - both halves agreeing and both
+		// wrong, the one class byte-identity cannot see. They apply to the NUMERIC
+		// directives only (a string never grows a sign), and they apply to Inf and
+		// NaN too ("%+f" % Float::INFINITY is "+Inf").
+		numeric := false
+		switch spec[i] {
+		case 'd', 'i', 'f', 'e', 'E', 'g', 'G', 'x', 'X', 'o', 'b':
+			numeric = true
+		}
+		if numeric && (len(body) == 0 || body[0] != '-') {
+			if plus {
+				body = "+" + body
+			} else if space {
+				body = " " + body
+			}
+		}
+		// The 0 flag is for NUMBERS: MRI's "%05s" % "ab" is "   ab", where this
+		// used to pad with zeros. A non-finite float is never zero-padded either.
 		pad := " "
-		if zero && !left {
+		if zero && !left && !nonFinite && numeric {
 			pad = "0"
 		}
 		for len(body) < width {
 			if left {
 				body += " "
-			} else if pad == "0" && len(body) > 0 && (body[0] == '-') {
-				body = "-" + pad + body[1:]
+			} else if pad == "0" && len(body) > 0 && (body[0] == '-' || body[0] == '+' || body[0] == ' ') {
+				body = body[:1] + pad + body[1:]
 			} else {
 				body = pad + body
 			}
@@ -8001,15 +8123,48 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return w(v)
 			}
 			switch op {
-			case "|":
-				return rt.wrapNum(float64(rt.toInt32(l) | rt.toInt32(r)))
-			case "&":
-				return rt.wrapNum(float64(rt.toInt32(l) & rt.toInt32(r)))
-			case "^":
-				return rt.wrapNum(float64(rt.toInt32(l) ^ rt.toInt32(r)))
-			case "<<":
-				return rt.wrapNum(float64(rt.toInt32(l) << (uint32(rt.toInt32(r)) & 31)))
-			case ">>":
+			case "|", "&", "^", "<<", ">>":
+				// bool & bool is a BOOL in Python (True & True is True, and
+				// repr says so), where a bool meeting an int is an int. Only
+				// the three logical operators; True << 1 is the int 2.
+				if lb, ok := l.(bool); ok {
+					if rb, ok2 := r.(bool); ok2 && (op == "|" || op == "&" || op == "^") {
+						switch op {
+						case "|":
+							return boolH(lb || rb)
+						case "&":
+							return boolH(lb && rb)
+						}
+						return boolH(lb != rb)
+					}
+				}
+				// Two exact Python ints answer in ARBITRARY PRECISION two's
+				// complement (pyBitBin). Anything else - a float, a string, an
+				// instance - keeps the old ToInt32 behaviour, after the user class
+				// has had its __and__ / __lshift__ chance, which the int32 arm used
+				// to swallow because it sat in front of pyDunderBin.
+				if x, xok := pyBigOperand(l); xok {
+					if y, yok := pyBigOperand(r); yok {
+						v, ok := pyBitBin(op, x, y)
+						if !ok {
+							rt.fail("negative shift count")
+						}
+						return w(rt.pyBigNarrow(v))
+					}
+				}
+				if v, ok := rt.pyDunderBin(op, l, r); ok {
+					return w(v)
+				}
+				switch op {
+				case "|":
+					return rt.wrapNum(float64(rt.toInt32(l) | rt.toInt32(r)))
+				case "&":
+					return rt.wrapNum(float64(rt.toInt32(l) & rt.toInt32(r)))
+				case "^":
+					return rt.wrapNum(float64(rt.toInt32(l) ^ rt.toInt32(r)))
+				case "<<":
+					return rt.wrapNum(float64(rt.toInt32(l) << (uint32(rt.toInt32(r)) & 31)))
+				}
 				return rt.wrapNum(float64(rt.toInt32(l) >> (uint32(rt.toInt32(r)) & 31)))
 			}
 			if isPyComplex(l) || isPyComplex(r) {
@@ -8269,6 +8424,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 			}
 			if op == "~" {
+				// ~x is -x-1 in Python's infinite two's complement, at arbitrary
+				// precision; the ToInt32 fallback is only for a non-int operand.
+				if x, ok := pyBigOperand(v); ok {
+					out := new(big.Int).Not(x)
+					return w(rt.pyBigNarrow(out))
+				}
 				return rt.wrapNum(float64(^rt.toInt32(v)))
 			}
 			if re, im, ok := pyComplexParts(v); ok {

@@ -1,5 +1,17 @@
 # Merging the runtime: a shared MetaJS layer, and a smaller C floor
 
+> **STATUS 2026-08-04, FOURTH PASS.** The third pass's residue - 14 shape groups,
+> 259 lines - was re-judged on its DIFFERENCE LISTS rather than on lines saved,
+> and is now **8 groups, 154 lines, 84 recoverable**; seven of the eight need a
+> file another agent owned that round. Two two-language modules landed
+> (`runtime-jvm.metajs`, 2 knobs; `runtime-dartswift.metajs`, 0 knobs), the
+> live-body tax was measured ON ITS OWN and turns out to have two components -
+> the live walk tracks CODE (~7 pinned objects and ~+1.3% per 100 lines), heap
+> and collection count track DATA - so it is an argument about hundreds of lines
+> and not tens, and the merge found **`long == double` answering FALSE in both
+> COMPILER engines in BOTH java and csharp** while both interpreter halves were
+> right. See "Part A, FOURTH pass" below.
+>
 > **STATUS 2026-08-04, THIRD PASS. Part A was declared done at ~0.5% unified and
 > that was WRONG** - every earlier pass worked from the extern-name table, which the
 > plan itself warned UNDERSTATES the duplication. A shape scan (normalise every
@@ -695,6 +707,370 @@ clean - `-freeze` a fixed point (`jsagrammar.go` and `jsbootstrap.ll` byte-ident
 after re-running it) - `MEC_GC=off` **3,711 B/iter** at 400k with gc RSS flat at
 3.34 MB across 50k/100k/200k/400k - and the fifteen native `-exe` full-test runs
 above.
+
+---
+
+## Part A, FOURTH pass - the residue re-judged on its DIFFERENCE LISTS, the tax
+## measured on its own, and a cross-engine defect in TWO languages (2026-08-04)
+
+The third pass left **14 shape groups, 259 lines, 131 recoverable** and declined
+them on the tax argument. This pass re-judged each group on its DIFFERENCE LIST
+and merged what the lists justified.
+
+```
+                                groups   lines occupied   recoverable
+after the third pass                14              259           131
+after this pass                      8              154            84
+```
+
+(The scan is the third pass's, reproduced exactly: normalise every identifier to
+a positional token, group by the resulting string, keep cross-language groups
+whose normalised body is at least **140 characters**. That threshold reproduces
+14/259/131 at `702dc68` to the line. At a permissive 60 characters the same scan
+reads 42/638/381 before and 35/508/319 after, and the extra groups it sees at
+that threshold are named below.)
+
+### THE TAX HAS TWO COMPONENTS, and only one of them tracks code
+
+The third pass declined every small pair on the live-body tax, having measured it
+**once, on a 267-line body with data in it**. Measured on its own, with dead
+code-only bodies (no module-level data, no string literals) appended to
+`swift-rt.metajs` and never called - swift, 400,000 x `s = s + i % 7`, native
+`-exe`, `MEC_GC_STATS`, min of three runs:
+
+```
+added lines   live objects        heap        collections   wall
+      0       104,016             9,442,688   4,097         3.40 s
+    182       105,168  (+1,152)   9,442,688   4,097         3.52 s   +3.5%
+    720       109,072  (+5,056)   9,442,688   4,097         3.71 s   +9.1%
+```
+
+So the **live walk tracks CODE**, linearly, at ~7 pinned objects and ~+1.3% wall
+per 100 lines; **heap and collection COUNT track DATA** and did not move at all.
+The decimal bignum's +17-24% was both together (it moved heap 9.44 -> 10.49 MB
+and collections 3,841 -> 4,097 as well as live +1,536).
+
+**That changes the verdict on the small pairs.** A ten-line body shared by 2 of
+10 importers costs the other eight ~70 live objects each, ~0.13% - under the
+noise floor of a single timing run. The tax is an argument about *hundreds* of
+lines; using it against *tens* was the same inversion, one heuristic later, that
+made the first Part A pass stop at 0.5% unified. What it IS an argument for is
+the split module, which costs the non-importers exactly zero - so both merges
+below are new two-language files rather than additions to `runtime.metajs`.
+
+It also answers, negatively, the open question the manual records about kotlin's
+verbatim `regex.js`: **the tax tracks code, so 1,217 lines of mostly-code predicts
++15% and the measurement was +18-23%.** A `runtime-regex.metajs` split does not
+make that free for kotlin; only not importing it does.
+
+> **The prediction in that last paragraph is right; its reason is not.** The
+> section below re-measured it on the actual regex body, in instructions retired
+> rather than wall clock, and the code-vs-declaration confound is disentangled by
+> a 2x2. The verdict on kotlin's copy is unchanged - the split is still declined -
+> and the coefficient to use is per DECLARATION, not per line.
+
+### THE TAX IS DECLARATIONS, NOT DATA AND NOT CODE - and it is not the collector
+
+**Wall clock cannot settle this question on this machine.** Two agents were
+running beside this one; a 40,000-iteration kotlin loop varies **+-8% between
+runs of the same binary**, which is larger than every effect being argued about.
+`/usr/bin/time -l` reports **instructions retired**, which reproduces to **0.02%**
+across rebuilds, and every number below is that. Harness: kotlin,
+`40,000 x s = s + i % 7` (no regexp, no float), native `-exe`, base **30.506 G
+instructions**, `MEC_GC_STATS` quoted where it moves.
+
+**1. The one measurement that has to be made first: relocate, changing nothing.**
+Take `kotlin-rt.metajs`, leave every byte of it alone, and move the 1,489-line
+verbatim `regex.js` block to a different point in the file. Same text, same 461
+top-level declarations, same emitted `.ll` line count, `MEC_GC_STATS` identical to
+the byte (collections 1,880, live 222,080, heap 9,465,728) in every row:
+
+```
+regex block at declaration index    0      50     150     250   ~330 (HEAD)
+instructions                    33.401  31.818  30.521  30.366  30.506 G
+                                 +9.3%   +4.3%   -0.1%   -0.6%     --
+```
+
+**A +9.3% swing from moving text.** That number is the whole of what the third
+pass attributed to live data, because `import` PREPENDS an imported file's
+top-level declarations to `jsrun` (`metajs-to-llvm-ir.abnf` ~590 / ~1011), so
+`import "./regex.js"` *is* the index-0 row.
+
+**2. The regex import, decomposed.** `impe` imports an engine-only `regex.js`
+with exactly the declarations kotlin's copy already has; `imp` imports the whole
+file, six declarations more (`rxMatchAt` `rxTest` `rxGroupCount` `rxNameAt`
+`rxReplace` `rxSplit`).
+
+```
+                          instructions   vs HEAD   live      heap
+HEAD, verbatim copy         30.506 G       --      222,080   9,465,728
+relocate the copy to 0      33.401 G      +9.3%    222,080   9,465,728
+import engine-only (impe)   33.401 G      +9.5%    222,080   9,465,728
+import "./regex.js" (imp)   33.760 G     +10.7%    222,752   9,465,728
+```
+
+`impe` == `move` to three decimal places. **The import mechanism itself is free**
+(importing a two-line module: +0.2%). The 1,217 duplicated lines are worth
+**+1.1%**, and the other +9.5% is placement, which no split can move.
+
+**3. IT IS NOT THE COLLECTOR.** Subtract a `MEC_GC=off` run from each:
+
+```
+                     total      MEC_GC=off   collector's share
+HEAD                 30.508 G     25.415 G      5.092 G
+relocated            33.401 G     28.309 G      5.093 G
+import engine-only   33.401 G     28.338 G      5.063 G
+import regex.js      33.760 G     28.689 G      5.071 G
+```
+
+The collector's share **does not move**. Every one of these differences is
+MUTATOR work, in `runtime.c`'s `scope_find` (2755) - a **linear scan** of the
+module scope's name array, over 461 entries for kotlin. A declaration costs twice
+over: it delays every lookup that resolves after it, and it lengthens every
+lookup that MISSES the module scope and falls through to `G_ROOT`. That is why
+prepending costs about twice what appending costs, and why the collector is
+innocent.
+
+**4. The 2x2 that separates lines from declarations.** The swift filler above
+varied line count and function count TOGETHER, which is the confound. Hold one
+fixed and move the other (all appended, so placement is constant):
+
+```
+                    decls  code lines    live      instructions   vs HEAD
+HEAD                   0        0      222,080      30.506 G        --
+A                      4      728      222,464      31.091 G       +1.9%
+B                     40      760      240,672      32.722 G       +7.3%
+C                     40       80      240,672      32.161 G       +5.4%
+tiny5                  5        5      222,608      31.128 G       +2.0%
+fat5                   5    1,220      222,608      31.122 G       +2.0%
+```
+
+- **`tiny5` vs `fat5`: 244x the code, byte-identical `live`, and the same cost to
+  0.01%.** Code size does not enter the live set at all.
+- **A vs B: the same ~730 lines, 4 declarations against 40 - +1.9% against
+  +7.3%.** Declarations, not lines.
+- **B vs C: the same 40 declarations, 760 lines against 80 - identical `live`,
+  +1.8% apart.** So there IS a code-size component, but it is ~0.2% per 100 lines
+  and it is NOT in `live` (i-cache and code layout, not the marker), an order of
+  magnitude below the +1.3%/100 lines the swift filler suggested.
+
+The swift rows are consistent with this once read the other way: `+1,152` and
+`+5,056` live BYTES (`GC_LIVE` is bytes, not objects - `runtime.c:674`) over
+filler whose function count grew with its line count, which is ~120 bytes per
+DECLARATION, the same figure kotlin gives. Part of kotlin's jump at 40 extra
+declarations is the scope array's capacity doubling (512 -> 1024 slots x 3 arrays
+x 8 bytes = 12,288 bytes in one step), which is a step, not a slope.
+
+### THE RULE, so the next person does not re-measure
+
+**A shared layer-2 body taxes a non-calling importer by roughly**
+
+```
+    0.13%  per top-level declaration it adds          (it lengthens every miss)
+  + 0.11%  per top-level declaration, if PLACED FIRST (it delays every hit)
+  = 0.24%  per top-level declaration for an IMPORTED body, because import prepends
+  + 0.2%   per 100 lines of code, from layout - not from the collector
+  + 0        per byte of live data beyond the declaration's own cell
+```
+
+on a kotlin-sized module (461 declarations) with a hot loop that calls layer 2.
+The model closes on the case it was derived from: regex.js is 86 declarations, of
+which kotlin already has 80, so 86 x 0.11 (placement) + 6 x 0.24 (new) = **9.9%**
+against **10.7%** measured.
+
+**The threshold, stated as the deliverable asked.** Size a shared body in
+DECLARATIONS, never in lines:
+
+- **Up to ~10 declarations (~2.4% imported): merge it.** That is the decimal
+  bignum and `runtime-decimal.metajs` together - 14 declarations, measured at
+  **+2.2%** on kotlin (30.506 -> 31.193 G), not the +7-11% the third pass
+  recorded. The splits stay, because they cost nothing and are the right shape,
+  but the number to quote is the small one, and the small pairs the third pass
+  declined on this tax were declined on a number that was too big.
+- **Beyond ~40 declarations (~10%): do not import it into a language that cannot
+  call it**, whatever it saves in source. There is no line count at which a body
+  becomes too big; there is a declaration count.
+
+### kotlin's `regex.js`: the SECOND revert, and what would change the answer
+
+The split was measured and **declined again**. A `runtime-regex.metajs` holding
+the shared engine - the exact experiment, `impe` above, an engine-only module
+carrying precisely the declarations kotlin's copy carries - costs kotlin
+**+9.5%** against the verbatim copy it would replace. It is not a wash: today's
+copy sits at declaration index ~330, and an import lands at index 0. Only the six
+bodies kotlin omits, **+1.1%**, are on the table, and 1,217 lines of duplication
+is not worth 1.1% of every kotlin program.
+
+**What would have to change**, and neither is in this file:
+
+1. **`import` appending rather than prepending.** An import placed at declaration
+   index 150 or beyond measures at or below the noise floor (-0.1%, -0.6%). If
+   `metajs-to-llvm-ir.abnf` emitted an imported module's top-level declarations
+   AFTER the importing file's own, kotlin's `import "./regex.js"` would cost
+   ~+1.1% instead of ~+10.7%, these 1,217 lines could be deleted, and the
+   `runtime-decimal` / `runtime-bignum` / `runtime-jvm` / `runtime-dartswift`
+   splits would stop costing their non-callers anything at all. It is one
+   ordering decision in the stash-and-prepend path (~590 / ~1011).
+2. **A hash or sorted index on `scope_find`.** The whole of this tax is a linear
+   scan over a 461-entry array that never changes after boot. It is also worth
+   more than this item: the collector is only 17% of these runs (5.09 G of
+   30.5 G), and the mutator's biggest single line is that scan.
+
+Until one of those lands, the two texts stay in step BY HAND; the shape scan in
+`kotlin-rt.metajs` at the copy is how to check that a change to `lib/regex.js`
+arrived here too.
+
+### THE DEFECT: `long == double` was false in BOTH COMPILER ENGINES, in TWO
+### languages, while both INTERPRETER halves were right
+
+Merging java's and csharp's strict equality is what found it.
+
+```
+                       long == double   double == long   long != double
+JLS 15.21.1 / real java 24.0.2   true         true            false
+ECMA-334 12.12.9 (C#, no toolchain)  true     true            false
+llvm.Run (the Go twin)          FALSE        FALSE            TRUE
+native -exe (layer 2)           FALSE        FALSE            TRUE
+both interpreter halves         true         true            false
+```
+
+`floEq` is the floor's `jf_num_eq` and the twin's `jvmNumEq`, and NEITHER has a
+tag 13 arm - a boxed double against a sized integer answered false. A comment at
+**three** sites called that deliberate ("matched rather than smoothed"), which is
+how it survived; what it actually matched was the other engine's copy of the same
+mistake. `--cross` could not report it because nothing in 5,954 assertions had
+ever compared a long to a double.
+
+Both halves of `==` promote first, so the fix is in the LANGUAGE layer and not in
+the primitive:
+
+- `lib/runtime-jvm.metajs`'s `rtjStrictEq` reads both operands with `rtjNum` when
+  a sized integer meets a boxed double - the same reading `rtjArith` already
+  gives that very pair of operands.
+- `abnf/jsrtjvm.go`'s `jvmNumEq` gains the `jsGInt` arm (with the unsigned-64
+  path `giFloat` documents). `giEq` in `jsrtint.go:283` already read the pair
+  this way and `rt.strictEq` short-circuited past it.
+- `floEq`'s host binding in `jsrtjvm.go` now rejects a `jsGInt` EXPLICITLY, so
+  the primitive stays byte-identical to the floor's `jf_num_eq`, which is
+  untouched. `tests/metajs-test-full.js`'s `flo38` pins that contract and says
+  which layer promotes.
+
+**Pinned by six assertions, and all six DISCRIMINATE**: `flt10e`/`flt10f`/`flt10g`
+in `tests/java-test-full.java` and `flt11a`/`flt11b`/`flt11c` in
+`tests/csharp-test-full.cs` fail in the Go twin AND in the native `-exe` from a
+clean `git archive 702dc68` tree, and pass in both interpreters. Real
+`javac`/`java` 24.0.2 runs the java ratchet: **291 checks, 0 failures**. A 259-row
+java differential probe (doubles x doubles, longs x doubles, ints x chars, chars
+x doubles, read out of arrays so the folder cannot fold them) is now byte-identical
+across `llvm.Run`, the native binary, the interpreter and real java; before the
+fix the two compiler engines were wrong on 2 rows. dart and go were probed for the
+same shape and are correct.
+
+### Merged 1: `lib/runtime-jvm.metajs` - csharp + java, TWO knobs, six bodies
+
+The difference list, taken before merging:
+
+```
+csNum / jvNum              TWO differences, BOTH IDENTITY. csIsChar and jvIsChar
+                           are each rtIsCharBox(v); jpStrNum's whole body is
+                           `var t = parseFloat(s); return t`, i.e. csharp's
+                           parseFloat. The third pass recorded this pair as
+                           "2 hooks"; the code has ZERO. jpStrNum is deleted.
+csIsIntegral/jvIsIntegral  ZERO differences, same reason.
+js_arr_new_n               ZERO differences once csNum == jvNum.
+csStrictEq / jvStrictEq    ONE: csCmp vs jvCmp.
+js_cscmp / js_jvcmp        ONE: the same csCmp vs jvCmp.
+csFloArith / jvmArith      ONE: csFloOperand vs jvmOperand.
+```
+
+Two knobs, and both are REAL. `rtjkCmp` - csCmp promotes with `csPromote` and
+compares two `csBox` cells with `sintCmp`, while jvCmp switches on `jvW` (JLS
+5.6.2) and compares two plain int32s below 64 bits: two integer models, not one
+spelled twice. `rtjkFloOperand` - csharp converts only the char box and lets a
+tag 13 cell through (a C# long is an honest signed cell), java sends everything
+non-float through `jvNum` (its long box is marked unsigned and the floor's
+`to_number` would read it as a magnitude).
+
+**Why merge fifty lines at all**: because `js_cscmp` and `js_jvcmp` are one body,
+and this is the SECOND defect the pair has shipped at that one site. The NaN
+sentinel was fixed in the C# copy in Part A and java's was still wrong months
+later, in both engines, in two different directions; the sized-integer equality
+above was wrong in both languages at once. One body cannot do that a third time.
+The line count is not the argument and never was.
+
+### Merged 2: `lib/runtime-dartswift.metajs` - dart + swift, ZERO knobs
+
+```
+dtIsArr / swIsArr        ONE apparent difference, dtIsObj vs swIsObj, and BOTH
+                         are rtIsObj(v). ZERO knobs.
+dtJavaStr / swJavaStr    ZERO differences, byte for byte.
+```
+
+Fourteen lines, both lists empty. php's `phIsList` is the same discrimination
+plus a `{__refcell}` rejection - a third specification, not a knob - and stays
+where it is. go's `goJavaStr` and js's `jxToStr` share the shape only at the
+permissive threshold and are two-line delegations to a different renderer.
+
+### Declined, each on a property of the code
+
+- **`luChar` (lua) / `js_char` (swift)** - byte-identical, and still declined:
+  the shared body could not be called `js_char`, because `lib/runtime.metajs`
+  already exports that name for a DIFFERENT contract (the `{__char}` box, where
+  swift's answers a one-character STRING), and `lua-rt.metajs` imports nothing at
+  all today. Five lines is not worth lua's first import. **Both sites now carry a
+  cross-reference** naming the other copy, which is the part that actually
+  addresses the risk.
+- **Dart's `dtJsCompare`** - unchanged from the third pass and still a genuine
+  block: a third coercion (`dtNum`) on a path `js_dartlt`/`le`/`gt`/`ge` reach
+  only for NON-number operands, i.e. for programs Dart rejects, and no `dart`
+  toolchain exists here to settle which coercion is right.
+- **The 4-way regex memo** (`jxGetProg` / `k5Get` / `pyERxGet` / `rbRxGet`, 24
+  recoverable) and the kotlin+ruby regex trio - unchanged, and this round they
+  are also **another agent's files**. Reported, not edited. Their home is
+  `lib/regex.js`, and the three-place edit (`regex.js`, `abnf/jsrtregex.go`'s
+  line-by-line port, kotlin's verbatim copy) is the standing cost.
+- **`dtStrLen` / `k2RuneLen`**, **`pyIsObj` / `rbIsObj`**, **java/kotlin
+  `js_jband`** - each needs a file another agent owns this round.
+
+### The 21 duplicated extern NAMES, re-judged - and the name view retired
+
+24 `js_*` names are defined in more than one layer-2 file. **Only two of them
+(`js_jband`, `js_char`) have bodies that the shape scan groups at all**, at any
+threshold. The other 22 are name collisions over genuinely different code, and
+`js_pylen` is the clearest illustration: its five copies are 7, 9, 11, 16 and 7
+lines, and python's begins with a `__len__` dunder lookup that no other language
+has. `js_mcall`'s six are 45, 1, 73, 4, 15 and 51 lines.
+
+**So the extern-name table should not be used to plan merges again.** It
+understated the duplication (which is what the third pass found) AND it
+overstates it (which is what this one found): it is measuring names, and the
+thing being merged is bodies. The shape scan is the measure; the residual above
+is the number.
+
+### Where things stand after this pass
+
+```
+                        3rd pass    now   delta   (code lines, comments/blanks excluded)
+csharp-rt                    772    728     -44
+java-rt                      659    611     -48
+dart-rt                     1139   1126     -13
+swift-rt                     765    752     -13
+runtime-jvm.metajs             0     51     +51
+runtime-dartswift.metajs       0     14     +14
+                                          -----
+                                            -53     65 shared lines replace 118
+```
+
+Gates, all re-run in a tree built from `git archive 702dc68` plus only this
+pass's files: matrix **329/329** - `--full` **5,960 assertions** (5,954 + the six
+new ratchets), **0 languages whose halves disagree**, no
+`BUT -frozen`/`VACUOUS`/`MISMATCH`/`FROZEN-DIFF` - `--cross` **119/0** -
+clang-check **16/16, all sixteen "ok, and the clang executable agrees", none
+held** - `tests/native-full.sh` **15/15, every binary exit 0 with 0 failures** -
+`go test ./abnf/` ok - all fifteen `gen-*.sh --check` clean - `-freeze` a fixed
+point - `MEC_GC=off` **3,711 B/iter** at 400k with gc RSS flat at 3.34 MB. The
+dart and swift native ratchet outputs are byte-identical to `702dc68`'s; csharp's
+and java's differ only in the six new assertions.
 
 ---
 

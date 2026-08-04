@@ -115,9 +115,19 @@
 // hooks below. Same mechanism ruby uses for `import "./regex.js"`.
 import "./runtime.metajs"
 
+// The bodies csharp and java share and NOBODY ELSE DOES, in their own module so
+// the other eight importers of runtime.metajs pay nothing for them. The measured
+// slope of the live-body tax, and the difference list that made the merge two
+// knobs, are both at the head of that file.
+import "./runtime-jvm.metajs"
+
+// ----- runtime-jvm.metajs's two knobs ----------------------------------------
+function rtjkCmp(op, l, r) { return csCmp(op, l, r) }
+function rtjkFloOperand(v) { return csFloOperand(v) }
+
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return csJavaStr(v) }
-function rtkNum(v) { return csNum(v) }
+function rtkNum(v) { return rtjNum(v) }
 function rtkIsChar(v) { return csIsChar(v) }
 function rtkIsArr(v) { return Array.isArray(v) }
 // js_supercall's one knob. Only the four languages whose emitter actually emits
@@ -138,13 +148,9 @@ function csIsChar(v) { return rtIsCharBox(v) }
 
 // ===================================================== value readings =======
 
-// csIsIntegral (jsrtcsharp.go): an operand of INTEGER arithmetic. A char is one,
-// C#'s char being an integral type; a double is not.
-function csIsIntegral(v) {
-    if (csIsChar(v)) { return true }
-    if (typeof v != "number") { return false }
-    return !floIs(v)
-}
+// rtjIsIntegral (jsrtcsharp.go): an operand of INTEGER arithmetic. A char is one,
+// C#'s char being an integral type; a double is not. SHARED with java -
+// lib/runtime-jvm.metajs; the two copies had ZERO differences.
 
 // csRaw hands the sint* builtins something they can read. si_val knows tag 3, tag
 // 13 and tag 14 - it does NOT know the {__char} object box, which would read as
@@ -187,17 +193,10 @@ function csBox(v, w, u) {
     return sintRaw(sintHi(t), sintLo(t), w, u)
 }
 
-// The double reading of anything numeric.
-function csNum(v) {
-    if (floIs(v)) { return floNum(v) }
-    if (csIsChar(v)) { return v["__char"] }
-    if (sintIs(v)) { return sintNum(v) }
-    if (typeof v == "number") { return v }
-    if (v === true) { return 1 }
-    if (v === false) { return 0 }
-    if (typeof v == "string") { return parseFloat(v) }
-    return 0
-}
+// The double reading of anything numeric is rtjNum - SHARED with java,
+// lib/runtime-jvm.metajs. The two copies differed in the char test and the string
+// coercion and BOTH differences were identity: csIsChar and jvIsChar are each
+// `rtIsCharBox(v)`, and java's jpStrNum was a one-line wrapper on parseFloat.
 
 // ===================================================== BCL exceptions =======
 
@@ -398,13 +397,9 @@ function csFromUDouble(v) {
 
 // ===================================================== the boxed double =====
 
-// jvmArith (abnf/jsrtjvm.go), reached whenever a double is on either side. floOp is
-// the floor's own tag 14 arm of exactly this, by operator INDEX: 0 + 1 - 2 * 3 / 4 %.
-function csFloArith(op, l, r) {
-    var code = 0
-    if (op == "-") { code = 1 } else if (op == "*") { code = 2 } else if (op == "/") { code = 3 } else if (op == "%") { code = 4 }
-    return floOp(code, csFloOperand(l), csFloOperand(r))
-}
+// jvmArith (abnf/jsrtjvm.go), reached whenever a double is on either side, is
+// rtjArith - SHARED with java, lib/runtime-jvm.metajs. Its ONE knob is the
+// operand mapper below, reached through rtjkFloOperand.
 
 // floOp reads its operands with the floor's to_number, which knows tag 13 and tag
 // 14 but NOT the {__char} object box. A tag 13 cell is read correctly - a C# long
@@ -669,20 +664,12 @@ function csTypeObject(name0) {
 // and they are here only because the C floor does not have them - see the extern
 // split in docs/runtime-next-plan.md part 3.
 
-function js_arr_new_n(n, fill) {
-    var out = []
-    var i = 0
-    var c = csNum(n)
-    while (i < c) {
-        out.push(fill)
-        i = i + 1
-    }
-    return out
-}
+// js_arr_new_n is SHARED with java - lib/runtime-jvm.metajs. Once csNum and jvNum
+// turned out to be the same function, the two copies had zero differences.
 
 // js_char and js_char_code are SHARED - lib/runtime.metajs. js_char was the same
 // one-line delegation in three languages; js_char_code's leading csIsChar test was
-// dead, because csNum's second arm already unboxes a char.
+// dead, because rtjNum's second arm already unboxes a char.
 
 // An empty Dictionary<K,V> / Python dict / Go map handle.
 // js_dict_new is SHARED - lib/runtime.metajs (six identical copies, no knobs).
@@ -711,8 +698,8 @@ function csValueEq(a, b) {
     if (csIsChar(a) || csIsChar(b)) { return js_jchareq(a, b) }
     if (floIs(a) || floIs(b)) { return floEq(a, b) }
     if (sintIs(a) || sintIs(b)) {
-        if (!csIsIntegral(a)) { return false }
-        if (!csIsIntegral(b)) { return false }
+        if (!rtjIsIntegral(a)) { return false }
+        if (!rtjIsIntegral(b)) { return false }
         return csCmp("==", a, b)
     }
     return a === b
@@ -726,7 +713,7 @@ function js_pyget(c, k) {
         if (i < 0) { fail("KeyError: " + cpStr(k)) }
         return c["vals"][i]
     }
-    var idx = csNum(k)
+    var idx = rtjNum(k)
     if (Array.isArray(c)) {
         if (idx < 0) { idx = idx + c.length }
         if (idx < 0 || idx >= c.length) { fail("list index out of range") }
@@ -759,13 +746,13 @@ function js_has(o, key) {
     var k = cpToString(key)
     if (typeof o == "string") {
         if (k == "length") { return true }
-        var si = csNum(key)
+        var si = rtjNum(key)
         if (si !== si) { return false }
         return si == Math.trunc(si) && si >= 0 && si < o.length
     }
     if (Array.isArray(o)) {
         if (k == "length") { return true }
-        var ai = csNum(key)
+        var ai = rtjNum(key)
         if (ai !== ai) { return false }
         return ai == Math.trunc(ai) && ai >= 0 && ai < o.length
     }
@@ -825,21 +812,18 @@ function js_jchareq(l, r) {
         return false
     }
     if (csIsChar(r)) { return js_jchareq(r, l) }
-    return csStrictEq(l, r)
+    return rtjStrictEq(l, r)
 }
 
-// The floor's === with the two number boxes taught to it. floEq is jvmNumEq, whose
-// jsGInt case is deliberately absent (a boxed double against a SIZED INTEGER is
-// false), and that asymmetry is reproduced rather than smoothed over.
-function csStrictEq(l, r) {
-    if (floIs(l) || floIs(r)) { return floEq(l, r) }
-    if (sintIs(l) || sintIs(r)) {
-        if (!csIsIntegral(l)) { return false }
-        if (!csIsIntegral(r)) { return false }
-        return csCmp("==", l, r)
-    }
-    return l === r
-}
+// The floor's === with the two number boxes taught to it is rtjStrictEq - SHARED
+// with java, lib/runtime-jvm.metajs, its ONE knob being rtjkCmp. Its sized-integer
+// arm is a FIX the merge found: floEq (jf_num_eq / jvmNumEq) has no tag 13 case,
+// so `long == double` answered false in BOTH compiler engines while both
+// interpreter halves answered true. See the note at the shared body.
+//
+// csValueEq above deliberately does NOT take that arm: it is rt.dictFind's
+// equality, i.e. object identity for a dictionary KEY, and neither language calls
+// a boxed long and a boxed double the same key.
 
 // (target, method name, args array). The Go twin (rt.memberCall in abnf/jsrt.go) is
 // a LANGUAGE-NEUTRAL dispatcher; only the arms csharp-to-llvm-ir.abnf can reach are
@@ -847,11 +831,11 @@ function csStrictEq(l, r) {
 function js_mcall(recv, name, args) {
     if (typeof recv == "string") {
         if (name == "length") { return recv.length }
-        if (name == "charAt") { return recv.charAt(csNum(args[0])) }
-        if (name == "equals") { return csStrictEq(recv, args[0]) }
+        if (name == "charAt") { return recv.charAt(rtjNum(args[0])) }
+        if (name == "equals") { return rtjStrictEq(recv, args[0]) }
         if (name == "substring") {
-            var b = args.length > 0 ? csNum(args[0]) : 0
-            var e = args.length > 1 ? csNum(args[1]) : recv.length
+            var b = args.length > 0 ? rtjNum(args[0]) : 0
+            var e = args.length > 1 ? rtjNum(args[1]) : recv.length
             return rtSubstring(recv, b, e)
         }
         if (name == "indexOf") { return recv.indexOf(cpToString(args[0])) }
@@ -897,7 +881,7 @@ function csListMethod(recv, name, args) {
         return true
     }
     if (name == "get") {
-        var gi = csNum(args[0])
+        var gi = rtjNum(args[0])
         if (gi < 0 || gi >= recv.length) {
             fail("list index " + gi + " out of range")
             return undefined
@@ -978,8 +962,8 @@ function csIsFn(v) {
 // js_csslice in abnf/jsrtcsharp.go.
 function js_csslice(v, lo0, hi0) {
     if (typeof v == "string") {
-        var slo = lo0 === undefined ? 0 : csNum(lo0)
-        var shi = hi0 === undefined ? v.length : csNum(hi0)
+        var slo = lo0 === undefined ? 0 : rtjNum(lo0)
+        var shi = hi0 === undefined ? v.length : rtjNum(hi0)
         if (slo < 0 || shi > v.length || slo > shi) { fail("slice bounds [" + slo + ":" + shi + "] out of range") }
         return v.substring(slo, shi)
     }
@@ -987,8 +971,8 @@ function js_csslice(v, lo0, hi0) {
         fail("slicing a " + typeof v)
         return undefined
     }
-    var lo = lo0 === undefined ? 0 : csNum(lo0)
-    var hi = hi0 === undefined ? v.length : csNum(hi0)
+    var lo = lo0 === undefined ? 0 : rtjNum(lo0)
+    var hi = hi0 === undefined ? v.length : rtjNum(hi0)
     if (lo < 0 || hi > v.length || lo > hi) { fail("slice bounds [" + lo + ":" + hi + "] out of range") }
     var out = []
     var i = lo
@@ -1012,7 +996,7 @@ function js_csslice(v, lo0, hi0) {
 // path of abnf/jsrtjvm.go, which is where the two number tags meet; two bools take
 // C#'s non-short-circuit & | ^.
 function js_csarith(op, l, r) {
-    if (floIs(l) || floIs(r)) { return csFloArith(op, l, r) }
+    if (floIs(l) || floIs(r)) { return rtjArith(op, l, r) }
     if (typeof l == "boolean") {
         if (typeof r == "boolean") {
             if (op == "&") { return l && r }
@@ -1020,39 +1004,28 @@ function js_csarith(op, l, r) {
             if (op == "^") { return l !== r }
         }
     }
-    if (!csIsIntegral(l) || !csIsIntegral(r)) { return csFloArith(op, l, r) }
+    if (!rtjIsIntegral(l) || !rtjIsIntegral(r)) { return rtjArith(op, l, r) }
     return csArith(op, l, r)
 }
 
 function js_csshift(op, l, r) { return csShift(op, l, r) }
 
-function js_cscmp(op, l, r) {
-    if (csIsIntegral(l) && csIsIntegral(r) && !floIs(l) && !floIs(r)) { return csCmp(op, l, r) }
-    var c = rtCompare(l, r)
-    // rtCompare (languages/lib/runtime.metajs) answers the SENTINEL 2 for a NaN
-    // operand - it is the fourth copy of csCompare's body, merged - and
-    // that sentinel means "every relation is false", which is exactly C#'s rule:
-    // ECMA-334 12.12.1 says that for the floating point relational operators, if
-    // either operand is NaN the result is false for all of them except !=. Read
-    // as an ordering the sentinel made `>` and `>=` TRUE, so `double.NaN > 0.0`
-    // answered true in BOTH halves. It is not 0 either - 0 would make `<=` and
-    // `>=` true, wrong in the other direction. abnf/jsrtcsharp.go:477 is the same
-    // three lines; the two halves have to move together or --cross reports it.
-    if (c == 2) { return false }
-    if (op == "<") { return c < 0 }
-    if (op == ">") { return c > 0 }
-    if (op == "<=") { return c <= 0 }
-    return c >= 0
-}
+// The body is rtjRel - SHARED with java's js_jvcmp, lib/runtime-jvm.metajs. The
+// NaN sentinel it carries (ECMA-334 12.12.1: every floating point relation with a
+// NaN operand is false) was fixed HERE in Part A and was still wrong in java's
+// copy months later, in both engines, in two different directions. That is why
+// the two are one body now. abnf/jsrtcsharp.go:477 is the same three lines; the
+// two halves have to move together or --cross reports it.
+function js_cscmp(op, l, r) { return rtjRel(op, l, r) }
 
 // A cast or a declared integral type: (value, bits, unsigned).
-function js_csconv(v, bits, uns) { return csConvTo(v, csNum(bits), uns === true) }
+function js_csconv(v, bits, uns) { return csConvTo(v, rtjNum(bits), uns === true) }
 
 // A declared type applied to an initializer: only an INTEGRAL value converts, so
 // `object o = "s"` and a lambda pass through untouched.
 function js_csadopt(v, bits, uns) {
-    if (!csIsIntegral(v)) { return v }
-    return csConvTo(v, csNum(bits), uns === true)
+    if (!rtjIsIntegral(v)) { return v }
+    return csConvTo(v, rtjNum(bits), uns === true)
 }
 
 // An integer literal, passed as DIGITS because emitNum would already have rounded
@@ -1061,7 +1034,7 @@ function js_csadopt(v, bits, uns) {
 // first of int, uint, long, ulong that holds it; U makes it uint or ulong; L long or
 // ulong; UL ulong.
 function js_cslit(text, radix, hasU, hasL) {
-    var rx = csNum(radix)
+    var rx = rtjNum(radix)
     var acc = sintRaw(0, 0, 64, true)
     var rb = sintRaw(0, rx, 64, true)
     var i = 0
@@ -1128,7 +1101,7 @@ function csComplement(v, w, u) {
 // ++ / -- step at the operand's OWN type and wrap there (ECMA-334 12.8.15: `x++` is
 // `x = (T)(x + 1)`), so `byte b = 255; b++` is 0.
 function js_csstep(v, d) {
-    var n = csNum(d)
+    var n = rtjNum(d)
     if (csIsChar(v)) { return csChar((v["__char"] + n) & 65535) }
     if (floIs(v)) { return flo(floNum(v) + n, floStyle(v)) }
     if (sintIs(v)) { return csConvTo(csArith("+", v, n), sintWidth(v), sintUns(v)) }
@@ -1141,12 +1114,12 @@ function js_csstep(v, d) {
 function js_csnarrowlike(l, v) {
     if (floIs(l)) {
         if (floIs(v)) { return v }
-        return flo(csNum(v), floStyle(l))
+        return flo(rtjNum(v), floStyle(l))
     }
     if (csIsChar(l)) { return csChar(csNorm(v, 16, true)) }
     if (sintIs(l)) { return csConvTo(v, sintWidth(l), sintUns(l)) }
     if (rtIsPlainNum(l)) {
-        if (csIsIntegral(v) || floIs(v)) { return csConvTo(v, 32, false) }
+        if (rtjIsIntegral(v) || floIs(v)) { return csConvTo(v, 32, false) }
     }
     return v
 }
@@ -1163,9 +1136,9 @@ function js_cschar(v) {
 // 2^53.
 function js_csadd2(l, r) {
     if (typeof l == "string" || typeof r == "string") { return cpAddStr(l) + cpAddStr(r) }
-    if (floIs(l) || floIs(r)) { return flo(csNum(l) + csNum(r), csFloStyle(l, r)) }
-    if (csIsIntegral(l) && csIsIntegral(r)) { return csArith("+", l, r) }
-    return csNum(l) + csNum(r)
+    if (floIs(l) || floIs(r)) { return flo(rtjNum(l) + rtjNum(r), csFloStyle(l, r)) }
+    if (rtjIsIntegral(l) && rtjIsIntegral(r)) { return csArith("+", l, r) }
+    return rtjNum(l) + rtjNum(r)
 }
 
 // jvmStyleOf: the style of whichever operand is a box, C# (2) when neither is.
@@ -1179,9 +1152,9 @@ function csFloStyle(l, r) {
 // what .ToString() lowers to.
 function js_csadd(l, r) {
     if (typeof l == "string" || typeof r == "string") { return cpAddStr(l) + cpAddStr(r) }
-    if (floIs(l) || floIs(r)) { return flo(csNum(l) + csNum(r), csFloStyle(l, r)) }
-    var ln = csNum(l)
-    var rn = csNum(r)
+    if (floIs(l) || floIs(r)) { return flo(rtjNum(l) + rtjNum(r), csFloStyle(l, r)) }
+    var ln = rtjNum(l)
+    var rn = rtjNum(r)
     if (rtIsInt32(ln) && rtIsInt32(rn)) { return rtWrap32(ln + rn) }
     return ln + rn
 }
@@ -1191,7 +1164,7 @@ function js_csadd(l, r) {
 // two boxes holding 5 are not two distinct objects. The third argument is the
 // js_jchareq / $valeq answer the caller already computed.
 function js_cseq(l, r, pre) {
-    if (csIsIntegral(l) && csIsIntegral(r) && !floIs(l) && !floIs(r)) {
+    if (rtjIsIntegral(l) && rtjIsIntegral(r) && !floIs(l) && !floIs(r)) {
         if (sintIs(l)) { return csCmp("==", l, r) }
         if (sintIs(r)) { return csCmp("==", l, r) }
     }

@@ -2813,22 +2813,216 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < n; i++) { out += s }
         return out
     }
+    // padTo(s, width, padOnLeft, padChar). A ZERO pad has to go AFTER the sign:
+    // "%05d" % -42 is "-0042" in MRI and in the compiled half, and this used to
+    // answer "00-42" - a LIVE HALVES DIVERGENCE, invisible to --cross because no
+    // test formatted a negative to a width.
     function padTo(s, width, left, padChar) {
         var out = s
-        while (out.length < width) { if (left) { out = padChar + out } else { out = out + padChar } }
+        if (!left) {
+            while (out.length < width) { out = out + padChar }
+            return out
+        }
+        var sgn = ""
+        if (padChar == "0" && out.length > 0 && isSignChar(out.charAt(0))) {
+            sgn = out.charAt(0)
+            out = out.slice(1)
+        }
+        while (sgn.length + out.length < width) { out = padChar + out }
+        return sgn + out
+    }
+    function isSignChar(c) { return c == "-" || c == "+" || c == " " }
+    // The directives that take a SIGN and honour the 0 flag.
+    function fmtNumeric(conv) {
+        if (conv == "d" || conv == "i" || conv == "u" || conv == "f") { return true }
+        if (conv == "e" || conv == "E" || conv == "g" || conv == "G") { return true }
+        return conv == "x" || conv == "X" || conv == "o" || conv == "b"
+    }
+    // ----- the EXACT decimal of a double ------------------------------------
+    //
+    // fixedStr used to be `Math.floor(v * 10^prec + 0.5)`, which is wrong twice
+    // over: it rounds a tie HALF UP where MRI (and strconv, and therefore both
+    // compiled halves) round half to EVEN - "%.0f" % 2.5 was "3" here and "2"
+    // everywhere else - and past 2^53 it has no digits left to print at all.
+    // A LIVE HALVES DIVERGENCE that no test reached, so --cross was silent.
+    //
+    // The replacement is the same body languages/lib/runtime-bignum.metajs runs
+    // for the compiled halves (rtExactDec / rtRoundHalfEven / rtFixed), over a
+    // little-endian base-10000 limb array: a finite double is an integer mantissa
+    // times a power of two, so scaling by 2^e - or by 5^(-e) with the point moved
+    // -e digits - is EXACT, and every intermediate stays under 50000, which a
+    // double holds exactly. This grammar has no bignum of its own to borrow.
+    function rbLimbsFromNum(n) {
+        var limbs = []
+        var v = n
+        while (v > 0) {
+            var q = Math.floor(v / 10000)
+            limbs.push(v - q * 10000)
+            v = q
+        }
+        if (limbs.length == 0) { limbs.push(0) }
+        return limbs
+    }
+    function rbLimbsMulSmall(limbs, k) {
+        var carry = 0
+        for (var i = 0; i < limbs.length; i++) {
+            var v = limbs[i] * k + carry
+            carry = Math.floor(v / 10000)
+            limbs[i] = v - carry * 10000
+        }
+        while (carry > 0) {
+            var c2 = Math.floor(carry / 10000)
+            limbs.push(carry - c2 * 10000)
+            carry = c2
+        }
+        return limbs
+    }
+    function rbLimbsStr(limbs) {
+        var out = "" + limbs[limbs.length - 1]
+        for (var i = limbs.length - 2; i >= 0; i--) {
+            var s = "" + limbs[i]
+            while (s.length < 4) { s = "0" + s }
+            out = out + s
+        }
         return out
     }
+    // The exact decimal of a non-negative finite double, as {i, f}.
+    function rbExactDec(a) {
+        if (a == 0) { return {i: "0", f: ""} }
+        var m = a
+        var e = 0
+        while (m != Math.floor(m)) { m = m * 2 ; e = e - 1 }
+        while (m > 9007199254740992) { m = m / 2 ; e = e + 1 }
+        var limbs = rbLimbsFromNum(m)
+        if (e >= 0) {
+            for (var k = 0; k < e; k++) { rbLimbsMulSmall(limbs, 2) }
+            return {i: rbLimbsStr(limbs), f: ""}
+        }
+        var n = 0 - e
+        for (var j = 0; j < n; j++) { rbLimbsMulSmall(limbs, 5) }
+        var all = rbLimbsStr(limbs)
+        while (all.length <= n) { all = "0" + all }
+        return {i: all.slice(0, all.length - n), f: all.slice(all.length - n)}
+    }
+    // Round the digit string to `keep` digits, half to EVEN, and answer the kept
+    // digits - one longer when the rounding carried all the way (999 -> 1000),
+    // which the caller detects by the length.
+    function rbRoundHalfEven(digits, keep) {
+        if (keep >= digits.length) {
+            var out = digits
+            while (out.length < keep) { out = out + "0" }
+            return out
+        }
+        var head = digits.slice(0, keep)
+        var d = digits.charCodeAt(keep) - 48
+        var up = false
+        if (d > 5) { up = true }
+        if (d == 5) {
+            var rest = false
+            for (var i2 = keep + 1; i2 < digits.length; i2++) {
+                if (digits.charAt(i2) != "0") { rest = true ; break }
+            }
+            if (rest) { up = true }
+            else if (keep > 0) {
+                var last = head.charCodeAt(keep - 1) - 48
+                up = last - Math.floor(last / 2) * 2 == 1
+            }
+        }
+        if (!up) {
+            if (head == "") { return "0" }
+            return head
+        }
+        var codes = []
+        for (var k2 = 0; k2 < head.length; k2++) { codes.push(head.charCodeAt(k2) - 48) }
+        var at = codes.length - 1
+        var carry = 1
+        while (at >= 0 && carry == 1) {
+            var v2 = codes[at] + 1
+            if (v2 == 10) { codes[at] = 0 } else { codes[at] = v2 ; carry = 0 }
+            at = at - 1
+        }
+        var res = ""
+        for (var q = 0; q < codes.length; q++) { res = res + ("" + codes[q]) }
+        if (carry == 1) { res = "1" + res }
+        return res
+    }
+    // |a| rounded to nd SIGNIFICANT digits, half to even, as {d, e}: exactly nd
+    // digit characters and the decimal exponent of the first of them.
+    function rbSigDigits(a, nd) {
+        if (a == 0) {
+            var z = ""
+            while (z.length < nd) { z = z + "0" }
+            return {d: z, e: 0}
+        }
+        var dec = rbExactDec(a)
+        var joined = dec.i + dec.f
+        var lead = 0
+        while (lead < joined.length && joined.charAt(lead) == "0") { lead = lead + 1 }
+        var ex = dec.i.length - 1 - lead
+        var kept = rbRoundHalfEven(joined.slice(lead), nd)
+        if (kept.length > nd) { ex = ex + 1 ; kept = kept.slice(0, nd) }
+        while (kept.length < nd) { kept = kept + "0" }
+        return {d: kept, e: ex}
+    }
+    // strconv.FormatFloat(v, 'f', prec, 64) - what the Go twin's %f runs.
     function fixedStr(x, prec) {
         var neg = x < 0
-        var v = neg ? 0 - x : x
-        var scale = Math.pow(10, prec)
-        var r = Math.floor(v * scale + 0.5)
-        var ip = Math.floor(r / scale)
-        var fp = "" + (r - ip * scale)
-        while (fp.length < prec) { fp = "0" + fp }
-        var out = "" + ip
-        if (prec > 0) { out = out + "." + fp }
+        if (x == 0 && 1 / x < 0) { neg = true }
+        var a = neg ? 0 - x : x
+        var dec = rbExactDec(a)
+        var joined = dec.i + dec.f
+        var kept = rbRoundHalfEven(joined, dec.i.length + prec)
+        var ilen = dec.i.length
+        if (kept.length > dec.i.length + prec) { ilen = ilen + 1 }
+        var ints = kept.slice(0, ilen)
+        var fracs = kept.slice(ilen)
+        if (ints == "") { ints = "0" }
+        var out = ints
+        if (prec > 0) { out = ints + "." + fracs }
         return neg ? "-" + out : out
+    }
+    // |n| to p+1 significant digits in C's %e shape: one digit, a point, p digits,
+    // and an exponent that is signed and at least two digits.
+    function sciStr(x, p, upper) {
+        var neg = x < 0
+        if (x == 0 && 1 / x < 0) { neg = true }
+        var a = neg ? 0 - x : x
+        var sig = rbSigDigits(a, p + 1)
+        var mant = sig.d.charAt(0)
+        if (p > 0) { mant = mant + "." + sig.d.slice(1, p + 1) }
+        var es = "" + (sig.e < 0 ? 0 - sig.e : sig.e)
+        if (es.length < 2) { es = "0" + es }
+        var out = mant + (upper ? "E" : "e") + (sig.e < 0 ? "-" : "+") + es
+        return neg ? "-" + out : out
+    }
+    // %g strips the trailing zeros of the fraction in BOTH shapes, and the bare
+    // point with them: 1.00000e+06 is 1e+06 and 100.000 is 100.
+    function genStrip(t) {
+        var at = t.indexOf("e")
+        if (at < 0) { at = t.indexOf("E") }
+        var mant = at < 0 ? t : t.slice(0, at)
+        var tail = at < 0 ? "" : t.slice(at)
+        if (mant.indexOf(".") < 0) { return t }
+        while (mant.charAt(mant.length - 1) == "0") { mant = mant.slice(0, mant.length - 1) }
+        if (mant.charAt(mant.length - 1) == ".") { mant = mant.slice(0, mant.length - 1) }
+        return mant + tail
+    }
+    // strconv.FormatFloat(x, 'g', p, 64), for p >= 1: round to p SIGNIFICANT
+    // digits, then pick the shape on the exponent that ROUNDING produced (999999.5
+    // at p=6 becomes 1000000, so it is "1e+06" and not "999999").
+    function genStr(x, p, upper) {
+        var ex = rbSigDigits(x < 0 ? 0 - x : x, p).e
+        if (ex < 0 - 4 || ex >= p) { return genStrip(sciStr(x, p - 1, upper)) }
+        return genStrip(fixedStr(x, p - 1 - ex))
+    }
+    // MRI prints "Inf", "-Inf" and "NaN" for a non-finite float under every float
+    // directive, in that directive's own case or not ("%G" % Float::INFINITY is
+    // "Inf"), and pads them with SPACES even under the 0 flag. rubyFloatWord in
+    // abnf/jsrt.go and rbFloatWord in languages/lib/ruby-rt.metajs are the twins.
+    function floatWord(x) {
+        if (x !== x) { return "NaN" }
+        if (x - x !== 0) { return x > 0 ? "Inf" : "-Inf" }
+        return ""
     }
     function baseStr(n, base) {
         if (n == 0) { return "0" }
@@ -2847,12 +3041,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function fmtOne(spec, conv, v) {
         var left = false
         var zero = false
+        var plus = false
+        var space = false
         var i = 0
         while (i < spec.length) {
             var ch = spec.charAt(i)
             if (ch == "-") { left = true; i = i + 1; continue }
             if (ch == "0") { zero = true; i = i + 1; continue }
-            if (ch == "+" || ch == " ") { i = i + 1; continue }
+            if (ch == "+") { plus = true; i = i + 1; continue }
+            if (ch == " ") { space = true; i = i + 1; continue }
             break
         }
         var width = 0
@@ -2870,14 +3067,33 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
         }
         var body = ""
+        var nonFinite = false
         if (conv == "d" || conv == "i" || conv == "u") { body = "" + Math.floor(toF(v)) }
-        else if (conv == "f") { body = fixedStr(toF(v), prec < 0 ? 6 : prec) }
+        else if (conv == "f" || conv == "e" || conv == "E" || conv == "g" || conv == "G") {
+            var fv = toF(v)
+            var word = floatWord(fv)
+            if (word != "") { body = word ; nonFinite = true }
+            else if (conv == "f") { body = fixedStr(fv, prec < 0 ? 6 : prec) }
+            else if (conv == "e" || conv == "E") { body = sciStr(fv, prec < 0 ? 6 : prec, conv == "E") }
+            else {
+                var gp = prec < 0 ? 6 : prec
+                if (gp == 0) { gp = 1 }
+                body = genStr(fv, gp, conv == "G")
+            }
+        }
         else if (conv == "x") { body = baseStr(Math.floor(toF(v)), 16) }
         else if (conv == "X") { body = baseStr(Math.floor(toF(v)), 16).toUpperCase() }
         else if (conv == "o") { body = baseStr(Math.floor(toF(v)), 8) }
         else if (conv == "b") { body = baseStr(Math.floor(toF(v)), 2) }
         else { body = rstr(v) }
-        return padTo(body, width, !left, (zero && !left && conv != "s") ? "0" : " ")
+        // The + and SPACE flags were parsed and THROWN AWAY here, and in both
+        // compiled halves: "%+d" % 7 was "7" against MRI's "+7". Both halves
+        // agreeing and both wrong, so --cross could never have seen it.
+        var numeric = fmtNumeric(conv)
+        if (numeric && body.charAt(0) != "-") {
+            if (plus) { body = "+" + body } else if (space) { body = " " + body }
+        }
+        return padTo(body, width, !left, (zero && !left && numeric && !nonFinite) ? "0" : " ")
     }
     function rformat(fmt, arg) {
         var args = Array.isArray(arg) ? arg : [arg]

@@ -8172,6 +8172,154 @@ has no first move**, and that is a measured statement rather than a delay.
 # `gen-*.sh --check` clean, `-freeze` a fixed point, `MEC_GC=off` 3,711 B/iter
 # with gc RSS flat, coro-poc `--gc`/`--break` unchanged.
 # ============================================================================
+# SIXTH PASS, 2026-08-04 from `702dc68`. The two DEFECTS-WITH-ORACLES that
+# `docs/working-on-this-project.md` section 7 lists are both CLOSED, in every
+# half, with their assertions and their measured discriminating power.
+#
+# --- 1. ruby-rt's `%g` (settled against `ruby 2.6.10p210`) -------------------
+#
+# It was not a layer-2 defect. `%g`, `%G` and `%E` were missing from ALL THREE
+# implementations - `rt.rubyFormat` (`abnf/jsrt.go`), `rbFormat`
+# (`languages/lib/ruby-rt.metajs`) and `fmtOne`
+# (`languages/ruby-interpreter.abnf`) - and the two compiled halves did not even
+# CONSUME the argument on the default arm, so `"%g %d" % [1.5, 7]` shifted every
+# following directive. The interpreter had no `%e` either.
+#
+# The rule is C's: round to P significant digits (P defaults to 6, P == 0 means
+# 1), write the `%e` shape when the resulting exponent is below -4 or at least P
+# and the `%f` shape otherwise, then strip the fraction's trailing zeros and a
+# bare trailing point. That is `strconv.FormatFloat(v, 'g', P, 64)` exactly -
+# verified digit for digit against MRI over 14 values x 4 precisions - so the Go
+# twin is four lines and the two script halves spell it out over the exact
+# decimal they already had (`rbSci` + `rtFixed`; `rbGen`/`genStr`).
+#
+# THE EXPONENT MUST BE READ AFTER THE ROUNDING. `"%g" % 999999.5` is `1e+06`,
+# not `999999` and not `1000000`: rounding to 6 digits carries it to 1000000, so
+# the exponent is 6, which is >= P, which selects the `%e` shape.
+#
+# THREE MORE DEFECTS the probe found in the same function, all of them settled
+# against MRI, all of them fixed in all three halves in this pass:
+#   - `+` and SPACE were PARSED AND THROWN AWAY in every half. `"%+d" % 7` was
+#     `"7"` against MRI's `"+7"`. Both halves agreed and both were wrong - the
+#     one class byte-identity cannot see.
+#   - the twin and layer 2 ZERO-PADDED A STRING (`"%05s" % "ab"` was `"000ab"`,
+#     MRI says `"   ab"`), and the INTERPRETER put the zeros in front of the
+#     sign (`"%05d" % -42` was `"00-42"`, MRI and the compiled half say
+#     `"-0042"`). That second one is a LIVE HALVES DIVERGENCE that `--cross`
+#     never saw because no test formatted a negative to a width.
+#   - a non-finite float printed Go's `+Inf`. MRI prints `Inf` / `-Inf` / `NaN`
+#     under every float directive, in that directive's own case or not (`"%G" %
+#     Float::INFINITY` is `Inf`), and pads them with SPACES even under `0`.
+#
+# AND ONE MORE, found by the same work and fixed here: the ruby INTERPRETER's
+# `fixedStr` was `Math.floor(v * 10^p + 0.5)` - half UP where MRI, strconv and
+# both compiled halves round half to EVEN, and with no digits at all past 2^53.
+# `"%.0f" % 2.5` was `"3"` here and `"2"` everywhere else. It is now the exact
+# decimal (`rbExactDec`/`rbRoundHalfEven`, the body
+# `languages/lib/runtime-bignum.metajs` runs for the compiled halves, over a
+# base-10000 limb array - this grammar has no bignum of its own to borrow).
+#
+# PROBE: 178 rows (`%g %G %e %E %.Ng %N.Mg` over 14 finite values plus -0.0,
+# both infinities, NaN, 5e-324, 1e-320, 1.797e308, 1e100, and the flag/width
+# matrix) from the interpreter, `llvm.Run`, a native `-exe` binary and MRI.
+# All four agree on all 178.
+# ASSERTIONS: `tests/ruby-test-full.rb` SECTION 06 `fmt7`..`fmt12`, ruby
+# 279 -> 285. DISCRIMINATING POWER: 6 of 6 fail against a clean archive of
+# `702dc68`, in all three engines. Zero decoration.
+#
+# --- 2. Python's bitwise family (settled against `python3` 3.14.6) ----------
+#
+# The item named `&`; the whole family was wrong, and identically so in both
+# halves. `|`, `&`, `^`, `~`, `<<` and `>>` all ran the engine's ECMAScript
+# operators, which are ToInt32 with the shift count masked to five bits:
+#
+#     -1 & 0xffffffff  ==  -1           CPython: 4294967295
+#     1 << 40          ==  256          CPython: 1099511627776
+#     ~(1 << 40)       ==  -257         CPython: -1099511627777
+#     (10**30) & 255   ==  0            CPython: 0, but by accident - a big
+#                                       reduced to NaN and then to 0
+#
+# A 944-row differential probe (16 operands x the full family, every operand
+# read out of a LIST so the folder could not answer it) had **439 rows wrong**,
+# and the interpreter, `llvm.Run` and the native binary agreed on every one of
+# them. `--cross` and the matrix are structurally blind to this by construction.
+#
+# The fix is Python's real rule: INFINITE TWO'S COMPLEMENT over arbitrary
+# precision ints. In Go that is `math/big`'s `And`/`Or`/`Xor`/`Lsh`/`Rsh`/`Not`
+# (`pyBitBin`, `abnf/jsrt.go`). In the two script engines there is no binary
+# bignum - the representation is DECIMAL limbs - so the magnitude is converted
+# to a bit array by repeated halving and the sign is handled by four identities
+# per operator, all in terms of AND/OR/XOR/ANDNOT over non-negative bit strings:
+#
+#     -a & b  == b &~ (a-1)              -a | b  == -(((a-1) &~ b) + 1)
+#     -a & -b == -(((a-1) | (b-1)) + 1)  -a | -b == -(((a-1) & (b-1)) + 1)
+#     -a ^ b  == -(((a-1) ^ b) + 1)      -a ^ -b == (a-1) ^ (b-1)
+#     ~x      == -x - 1                  -a >> k == -(((a-1) >> k) + 1)
+#
+# `pyABitBin` in `languages/lib/python-rt.metajs` and `bigBitBin` in
+# `languages/python-interpreter.abnf` are that body twice.
+#
+# PERFORMANCE, measured, not assumed. A bignum on the hot path is not
+# affordable, so there are three tiers. INSIDE int32 the engine's own `|`, `&`
+# and `^` ALREADY ARE the infinite two's complement answer - the sign bit of an
+# int32 stands for exactly the endless run of 1s above it - so the fast path is
+# the old code behind one guard. The guard has to be cheap: the first version
+# used `typeof v == "number" && v == Math.trunc(v) && range`, and a loop of
+# nothing but bit operations paid **+9.5%** for it. `(v | 0) === v` IS ToInt32
+# and settles the range, the integrality, the NaN and the infinity in one
+# compare; with that, the same loop is 2.72s against the base's 2.70s over three
+# runs each - inside the noise. A SHIFT whose exact answer fits in a double is a
+# multiply or a floored divide, which is the second tier; only the third
+# allocates.
+#
+# A negative shift count is `ValueError` in CPython; all three halves now fail
+# loudly rather than answer a masked number, and a count past 2^20 is capped so
+# `1 << 10**9` cannot ask for a gigabyte.
+#
+# THREE MORE DEFECTS the probes found in the same family, all fixed here:
+#   - the bit arm sat IN FRONT OF the dunder dispatch in both compiled halves,
+#     so a class defining `__and__` / `__lshift__` never saw its operator. It is
+#     behind it now, for the operand pairs that are not two ints.
+#   - `True & True` was `1`; in Python it is `True`. Only the three logical
+#     operators preserve `bool` - `True & 1` is the int `1` and `True << 1` is
+#     the int `2`, and both are asserted.
+#   - the INTERPRETER's `bigOut` narrowed a box by accumulating its limbs into a
+#     double and testing `v <= 2^53` - and the accumulation ROUNDS, so
+#     `(2**53) | 1` came back as `9007199254740992`. Both compiled halves
+#     rebuild and compare before narrowing; the interpreter does now too.
+#
+# PROBES: 944 rows (the int32 family) + 1092 rows (bignums, `10**30`, `1 << 100`,
+# 27-digit values, shifts to 200, `~`, bools) from the interpreter, the FROZEN
+# interpreter, `llvm.Run`, a native `-exe` binary and CPython 3.14.6. All five
+# agree on all 2036.
+# ASSERTIONS: `tests/python-test-full.py` SECTION 29 `bit01`..`bit15`, python
+# 375 -> 390. DISCRIMINATING POWER: 14 of 15 fail against a clean archive of
+# `702dc68`, in all three engines. `bit13` (`True & 1` is the int 1, not True)
+# passes either way and is kept deliberately, as the regression guard on the
+# `bool & bool` change - it is decoration by the measurement and is named as
+# such rather than dressed up.
+#
+# TWO GAPS THE PROBES FOUND AND THIS PASS DID **NOT** CLOSE, both in the integer
+# LITERAL path rather than in the operators, both reported rather than fixed:
+#   - a DECIMAL literal of 9007199254740993 is not boxed. `pyIsBigText` boxes on
+#     `parseFloat(txt) > 2**53`, and `parseFloat` rounds that text down to
+#     exactly 2**53, so the literal becomes the double below it. `bit11` is
+#     asserted through `str()` for exactly this reason.
+#   - a HEX/OCTAL/BINARY literal past 2^53 is not boxed at all
+#     (`0x7fffffffffffffff` is 0). `makeIntLit` reaches `js_bigint` only on the
+#     radix-10 branch, which `languages/lib/python-rt.metajs` already documents
+#     as a deliberate limit of `pyABigFromStr`. Both halves agree, so only an
+#     oracle can see it - it is the same defect class as this item.
+#
+# Invariants after the pass: matrix **329/329**, `--full` **5,975** assertions
+# (ruby 279 -> 285, python 375 -> 390) with 0 languages whose halves disagree and
+# no `BUT -frozen`/`VACUOUS`/`MISMATCH`/`FROZEN-DIFF` line, `--cross` 119/0,
+# clang-check 16/16 all agreeing none held, `tests/native-full.sh` 15/15,
+# `go test ./abnf/` ok, all fifteen `gen-*.sh --check` clean, `-freeze` a fixed
+# point, `MEC_GC=off` 3,711 B/iter with gc RSS flat at 3,391,488. Verified in an
+# isolated archive of `702dc68` with only this agent's files copied in, because
+# two other agents were editing the tree.
+# ============================================================================
 
 Every "What is owed" / "Still owed" / "Not fixed here" / "BLOCKED" item in this
 file, in `runtime-merge-plan.md` and in `runtime-rework-plan.md` was walked and

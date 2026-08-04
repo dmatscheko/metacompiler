@@ -759,6 +759,23 @@ class S23 {
         Main.check("flt10c", !(nan <= nan) && !(nan >= nan) && !(nan < nan) && !(nan > nan));
         float fnan = 0.0f / 0.0f;
         Main.check("flt10d", !(fnan >= 1.0f) && !(fnan <= 1.0f) && !(fnan > 1.0f) && !(fnan < 1.0f));
+        // JLS 15.21.1: == between two numeric operands applies binary numeric
+        // promotion (5.6.2) first, so a long is compared against a double AS a
+        // double. Both COMPILER halves answered false - floEq (the floor's
+        // jf_num_eq, the twin's jvmNumEq) had no sized-integer arm and a comment
+        // at three sites called that deliberate - while both INTERPRETER halves
+        // answered true. Nothing in the suite had ever compared a long to a
+        // double, so --cross could not see it either. Found by the shape merge of
+        // java's and csharp's strict equality into lib/runtime-jvm.metajs, and
+        // confirmed against real java 24.0.2. The operands come out of arrays so
+        // the constant folder cannot answer at compile time.
+        long[] lz = {0L, 3L, 9007199254740993L};
+        double[] dz = {0.0, 3.0, 9007199254740992.0};
+        Main.check("flt10e", lz[0] == dz[0] && lz[1] == dz[1] && !(lz[0] != dz[0]));
+        Main.check("flt10f", dz[0] == lz[0] && lz[0] != dz[1] && lz[1] != dz[0]);
+        // The long converts FIRST, so a value past 2^53 compares as its rounded
+        // double: 9007199254740993L == 9007199254740992.0 is true.
+        Main.check("flt10g", lz[2] == dz[2] && dz[2] == lz[2]);
         Main.check("flt11", S23.s(-0.0).equals("-0.0") && 0.0 == -0.0);
         Main.check("flt12", 1e300 * 1e300 == inf);
         // Double.toString switches to scientific notation outside [1e-3, 1e7).

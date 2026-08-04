@@ -112,8 +112,13 @@
 // file defines further down. Same mechanism ruby uses for `import "./regex.js"`.
 import "./runtime.metajs"
 
+// The two bodies dart and swift share and nobody else does, in their own module
+// so the other importers of runtime.metajs pay nothing for them. Both difference
+// lists were EMPTY; see the head of that file.
+import "./runtime-dartswift.metajs"
+
 // ----- the rtk* hooks the shared runtime calls -------------------------------
-function rtkStr(v) { return dtJavaStr(v) }
+function rtkStr(v) { return rtJavaStr(v) }
 function rtkNum(v) { return dtNumOf(v) }
 // This file keeps its OWN js_is_type, which SHADOWS the shared one: both are
 // top-level declarations in one pinned scope, and -rt-lib's lazy boot runs the
@@ -277,19 +282,16 @@ function dtSignBit(d) {
 
 function dtIsObj(v) { return rtIsObj(v) }
 
-// A MetaJS list. A Map / instance box is an object without a numeric `length`.
-function dtIsArr(v) {
-    if (!dtIsObj(v)) { return false }
-    if (v["__dict"] === true) { return false }
-    return typeof v["length"] == "number"
-}
+// rtIsArr - a MetaJS list, i.e. an object with a numeric `length` that is not a
+// Map or an instance box - is SHARED with swift, lib/runtime-dartswift.metajs.
+// The two copies had ZERO differences (dtIsObj and swIsObj are both rtIsObj).
 
 // pySetElems: the element array of a {__set} object, or undefined.
 function dtSetElems(v) {
     if (!dtIsObj(v)) { return undefined }
     if (v["__set"] === undefined) { return undefined }
     var el = v["elems"]
-    if (!dtIsArr(el)) { return undefined }
+    if (!rtIsArr(el)) { return undefined }
     return el
 }
 
@@ -394,7 +396,7 @@ function dtStrIn(v, seen, depth) {
     if (sintIs(v)) { return sintStr(v) }
     if (typeof v == "number") { return "" + v }
     if (typeof v == "function") { return "Closure" }
-    if (dtIsArr(v)) {
+    if (rtIsArr(v)) {
         if (dtSeen(seen, v)) { return "[...]" }
         seen.push(v)
         var out = "["
@@ -510,7 +512,7 @@ function dtToStr(v) {
     if (sintIs(v)) { return sintStr(v) }
     if (typeof v == "number") { return "" + v }
     if (typeof v == "function") { return "[function]" }
-    if (dtIsArr(v)) {
+    if (rtIsArr(v)) {
         var out = ""
         var i = 0
         while (i < v.length) {
@@ -558,7 +560,7 @@ function dtObjId(v) {
 
 function dtCanon(v, depth) {
     if (depth > 64) { return v }
-    if (dtIsArr(v)) {
+    if (rtIsArr(v)) {
         var i = 0
         while (i < v.length) {
             v[i] = dtCanon(v[i], depth + 1)
@@ -615,7 +617,7 @@ function dtConstKey(v, depth) {
     if (sintIs(v)) { return "i" + sintStr(v) }
     if (typeof v == "number") { return "i" + v }
     if (typeof v == "string") { return "s" + v.length + ":" + v }
-    if (dtIsArr(v)) {
+    if (rtIsArr(v)) {
         var out = "L("
         var i = 0
         while (i < v.length) {
@@ -993,7 +995,7 @@ function dtIsType(v, t) {
     if (lt === "num") { return dtIsNum(v) }
     if (lt === "String") { return typeof v == "string" }
     if (lt === "bool") { return typeof v == "boolean" }
-    if (lt === "List" || lt === "Iterable") { return dtIsArr(v) }
+    if (lt === "List" || lt === "Iterable") { return rtIsArr(v) }
     if (lt === "Map") {
         // A Map is the shared dict object; a Set is a dict-shaped object carrying
         // __set, and it is NOT a Map.
@@ -1032,7 +1034,7 @@ function dtTypeName(v, t) {
     if (lt === "Double" || lt === "Float" || lt === "Number") { return plain }
     if (lt === "String" || lt === "CharSequence") { return typeof v == "string" }
     if (lt === "Boolean") { return typeof v == "boolean" }
-    if (lt === "List" || lt === "MutableList" || lt === "Collection" || lt === "Array") { return dtIsArr(v) }
+    if (lt === "List" || lt === "MutableList" || lt === "Collection" || lt === "Array") { return rtIsArr(v) }
     if (!dtIsObj(v)) { return false }
     var cls = v["__class"]
     var guard = 0
@@ -1064,8 +1066,8 @@ function dtPyEqual(x, y) {
         return true
     }
     if (ys !== undefined) { return false }
-    if (dtIsArr(x)) {
-        if (!dtIsArr(y)) { return false }
+    if (rtIsArr(x)) {
+        if (!rtIsArr(y)) { return false }
         if (x.length != y.length) { return false }
         var ai = 0
         while (ai < x.length) {
@@ -1164,7 +1166,7 @@ function dtMember(recv, name, args) {
         }
         fail("unknown dict method '" + name + "'")
     }
-    if (dtIsArr(recv)) { return dtListMethod(recv, name, args) }
+    if (rtIsArr(recv)) { return dtListMethod(recv, name, args) }
     if (dtIsObj(recv)) {
         var cls = recv["__class"]
         if (cls !== undefined) {
@@ -1287,7 +1289,7 @@ function js_pyget(c, k) {
         return c["vals"][i]
     }
     var idx = Math.trunc(dtNum(k))
-    if (dtIsArr(c)) {
+    if (rtIsArr(c)) {
         if (idx < 0) { idx = idx + c.length }
         if (idx < 0 || idx >= c.length) { fail("list index out of range: " + Math.trunc(dtNum(k))) }
         return c[idx]
@@ -1312,7 +1314,7 @@ function js_pylen(v) {
     var els = dtSetElems(v)
     if (els !== undefined) { return els.length }
     if (typeof v == "string") { return dtStrLen(v) }
-    if (dtIsArr(v)) { return v.length }
+    if (rtIsArr(v)) { return v.length }
     if (rtIsDictObj(v)) { return v["keys"].length }
     fail("len() of a " + typeof v)
     return 0
@@ -1323,7 +1325,7 @@ function js_pylen(v) {
 function js_pyiter(v) {
     var els = dtSetElems(v)
     if (els !== undefined) { return dtCopyArr(els) }
-    if (dtIsArr(v)) { return v }
+    if (rtIsArr(v)) { return v }
     if (typeof v == "string") {
         var out = []
         var i = 0
@@ -1341,7 +1343,7 @@ function js_pyiter(v) {
 
 // s[lo:hi] on lists and strings; open ends arrive as undefined.
 function js_pyslice(c, lo, hi) {
-    if (dtIsArr(c)) {
+    if (rtIsArr(c)) {
         var r = dtSliceRange(lo, hi, c.length)
         var out = []
         var i = r.from
@@ -1378,7 +1380,7 @@ function dtSliceRange(lo, hi, n) {
 
 // 'x in y' for lists, strings and Map keys.
 function js_pyin(x, y) {
-    if (dtIsArr(y)) {
+    if (rtIsArr(y)) {
         var i = 0
         while (i < y.length) {
             if (y[i] === x) { return true }
@@ -1397,8 +1399,8 @@ function js_pyeq(l, r) { return dtPyEqual(l, r) }
 
 // (positional array, iterable): append every element of the iterable.
 function js_pyspread(arr, it) {
-    if (!dtIsArr(arr)) { fail("js_pyspread needs an array") }
-    if (dtIsArr(it)) {
+    if (!rtIsArr(arr)) { fail("js_pyspread needs an array") }
+    if (rtIsArr(it)) {
         var i = 0
         while (i < it.length) {
             arr.push(it[i])
@@ -1431,7 +1433,7 @@ function js_pyspread(arr, it) {
 // A Set from a candidate list, de-duplicated with the VALUE equality above.
 function js_pyset_new(src) {
     var out = []
-    if (dtIsArr(src)) {
+    if (rtIsArr(src)) {
         var i = 0
         while (i < src.length) {
             if (!dtSetHas(out, src[i])) { out.push(src[i]) }
@@ -1449,15 +1451,8 @@ function js_is_type(v, t) { return dtTypeName(v, t) }
 // js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
 // The dart emitter emits it for its own string builders and index arithmetic.
 
-function dtJavaStr(v) {
-    if (typeof v == "string") { return v }
-    if (v === null) { return "null" }
-    if (v === undefined) { return "null" }
-    if (typeof v == "boolean") { return v ? "true" : "false" }
-    if (sintIs(v)) { return sintStr(v) }
-    if (floIs(v)) { return floStr(v) }
-    return "" + v
-}
+// rtJavaStr is SHARED with swift - lib/runtime-dartswift.metajs. The two copies
+// were byte-identical.
 
 // (target, method name, args array): the neutral dispatcher.
 function js_mcall(recv, name, args) { return dtMember(recv, name, args) }
@@ -1607,7 +1602,7 @@ function js_dartnot(v) { return dtIntOp("^", dtToInt(v), 0 - 1) }
 // number and the name is one of them, and otherwise hands the call straight to
 // the runtime's ordinary member dispatch.
 function js_dartnm(recv, name, args) {
-    if (!dtIsArr(args)) { fail("js_dartnm args must be an array") }
+    if (!rtIsArr(args)) { fail("js_dartnm args must be an array") }
     if (dtIsNum(recv)) {
         var hit = dtNumMember(recv, name, args)
         if (hit.hit) { return hit.v }

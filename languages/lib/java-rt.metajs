@@ -102,9 +102,19 @@
 // hooks below. Same mechanism ruby uses for `import "./regex.js"`.
 import "./runtime.metajs"
 
+// The bodies java and csharp share and NOBODY ELSE DOES, in their own module so
+// the other eight importers of runtime.metajs pay nothing for them. The measured
+// slope of the live-body tax, and the difference list that made the merge two
+// knobs, are both at the head of that file.
+import "./runtime-jvm.metajs"
+
+// ----- runtime-jvm.metajs's two knobs ----------------------------------------
+function rtjkCmp(op, l, r) { return jvCmp(op, l, r) }
+function rtjkFloOperand(v) { return jvmOperand(v) }
+
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return jpStr(v) }
-function rtkNum(v) { return jvNum(v) }
+function rtkNum(v) { return rtjNum(v) }
 function rtkIsChar(v) { return jvIsChar(v) }
 function rtkIsArr(v) { return Array.isArray(v) }
 // js_supercall's one knob. Only the four languages whose emitter actually emits
@@ -177,13 +187,9 @@ function jvIsChar(v) { return rtIsCharBox(v) }
 // ===================================================== the value readings ===
 
 
-// jvIsIntegral: an operand of INTEGER arithmetic. A char is one (Java's char is
-// an integral type); a double is not.
-function jvIsIntegral(v) {
-    if (jvIsChar(v)) { return true }
-    if (typeof v != "number") { return false }
-    return !floIs(v)
-}
+// rtjIsIntegral - an operand of INTEGER arithmetic; a char is one (Java's char is
+// an integral type) and a double is not - is SHARED with csharp,
+// lib/runtime-jvm.metajs. The two copies had ZERO differences.
 
 // jvW: JLS 5.6.2 binary numeric promotion for two integral operands - long when
 // either side is long, int otherwise. So byte + byte is an int.
@@ -257,25 +263,13 @@ function jvI(v) {
     return lo
 }
 
-// jvNum: the double reading of anything numeric.
-function jvNum(v) {
-    if (floIs(v)) { return floNum(v) }
-    if (jvIsChar(v)) { return v["__char"] }
-    // sintNum is si_float, which reads a SIGNED 64 bit cell with d_from_long -
-    // the long arm this used to need (jlNum) is the floor's own now.
-    if (sintIs(v)) { return sintNum(v) }
-    if (typeof v == "number") { return v }
-    if (v === true) { return 1 }
-    if (v === false) { return 0 }
-    if (typeof v == "string") { return jpStrNum(v) }
-    return 0
-}
-
-// A decimal string as a number, for the one place a string reaches arithmetic.
-function jpStrNum(s) {
-    var t = parseFloat(s)
-    return t
-}
+// rtjNum, the double reading of anything numeric, is SHARED with csharp -
+// lib/runtime-jvm.metajs. The two copies differed in the char test and the string
+// coercion and BOTH differences were identity: jvIsChar and csIsChar are each
+// `rtIsCharBox(v)`, and jpStrNum - deleted with this merge - was a one-line
+// wrapper on parseFloat. Its sintIs arm reads a SIGNED 64 bit cell with sintNum
+// (si_float / d_from_long); the long arm this used to need (jlNum) is the
+// floor's own now.
 
 // jvNarrow is (byte) / (short) / (int) / (long) or a declared integral type. An
 // integral source truncates its bits; a floating point one saturates first.
@@ -409,14 +403,10 @@ function jvCmp(op, l, r) {
     return c != 0
 }
 
-// jvmArith (abnf/jsrtjvm.go): a double on either side makes the whole operation
-// floating point and its result a double; two integral operands keep the 32 bit
-// wrap. floOp is the floor's own tag 14 arm of exactly this, by operator INDEX.
-function jvmArith(op, l, r) {
-    var code = 0
-    if (op == "-") { code = 1 } else if (op == "*") { code = 2 } else if (op == "/") { code = 3 } else if (op == "%") { code = 4 }
-    return floOp(code, jvmOperand(l), jvmOperand(r))
-}
+// rtjArith (abnf/jsrtjvm.go) - a double on either side makes the whole operation
+// floating point and its result a double, two integral operands keep the 32 bit
+// wrap - is SHARED with csharp, lib/runtime-jvm.metajs. Its ONE knob is the
+// operand mapper below, reached through rtjkFloOperand.
 
 // floOp reads its operands with the floor's to_number, which knows tag 13 and
 // tag 14 but not the {__char} box - and reads an UNSIGNED 64 bit box as a
@@ -424,7 +414,7 @@ function jvmArith(op, l, r) {
 // floOp is either a plain double or a tag 14 box.
 function jvmOperand(v) {
     if (floIs(v)) { return v }
-    return jvNum(v)
+    return rtjNum(v)
 }
 
 // jvmTakeL is the OPERAND CHOICE of Math.max / Math.min, and the two cases a
@@ -457,7 +447,7 @@ function jvmMinMax(l, r, takeL) {
     var v = takeL ? l : r
     if (floIs(l) || floIs(r)) {
         if (floIs(v)) { return v }
-        return flo(jvNum(v), 0)
+        return flo(rtjNum(v), 0)
     }
     return v
 }
@@ -661,7 +651,7 @@ function jvBoxType(name) {
         // must therefore not take the int overload's 32 bit wrap - it made
         // Math.abs(3000000000L) answer -1294967296 where java 24 says
         // 3000000000, and Math.abs(Long.MAX_VALUE) answer 0 - and it cannot go
-        // through jvNum either, which is a double and loses the low bits past
+        // through rtjNum either, which is a double and loses the low bits past
         // 2^53. Negating in 64 bit two's complement is exact and maps
         // Long.MIN_VALUE to ITSELF, which is Java's answer and not an error
         // (JLS 15.15.4: there is no positive long of that magnitude).
@@ -675,10 +665,10 @@ function jvBoxType(name) {
                 if (sintCmp(v, jlZero()) < 0) { return jlNeg(v) }
                 return v
             }
-            return rtWrap32(Math.abs(jvNum(v)))
+            return rtWrap32(Math.abs(rtjNum(v)))
         }
-        o["max"] = function(a, b) { return jvmMinMax(a, b, jvmTakeL(jvNum(a), jvNum(b), true)) }
-        o["min"] = function(a, b) { return jvmMinMax(a, b, jvmTakeL(jvNum(a), jvNum(b), false)) }
+        o["max"] = function(a, b) { return jvmMinMax(a, b, jvmTakeL(rtjNum(a), rtjNum(b), true)) }
+        o["min"] = function(a, b) { return jvmMinMax(a, b, jvmTakeL(rtjNum(a), rtjNum(b), false)) }
         return o
     }
     if (name == "Character") {
@@ -759,16 +749,8 @@ function jvParseInt(s, width) {
 // them, and they are here only because the C floor does not have them - see the
 // extern split in docs/runtime-next-plan.md part 3.
 
-function js_arr_new_n(n, fill) {
-    var out = []
-    var i = 0
-    var c = jvNum(n)
-    while (i < c) {
-        out.push(fill)
-        i = i + 1
-    }
-    return out
-}
+// js_arr_new_n is SHARED with csharp - lib/runtime-jvm.metajs. Once jvNum and
+// csNum turned out to be the same function, the two copies had zero differences.
 
 // js_char is SHARED - lib/runtime.metajs; it was the same one-line delegation to
 // the char boxer in csharp, java and kotlin, and the _raw suffix travels with it.
@@ -795,7 +777,7 @@ function js_jband(l, r) {
 // is 101 and not "e0" (JLS 4.2.1, char is an integral type).
 function js_jcharat(target, args) {
     if (typeof target == "string") {
-        var i = jvNum(args[0])
+        var i = rtjNum(args[0])
         if (i < 0 || i >= target.length) {
             fail("string index " + i + " out of range for \"" + target + "\"")
             return undefined
@@ -818,23 +800,16 @@ function js_jchareq(l, r) {
         return false
     }
     if (jvIsChar(r)) { return js_jchareq(r, l) }
-    return jvStrictEq(l, r)
+    return rtjStrictEq(l, r)
 }
 
-// The floor's === with the two boxes taught to it. A sized integer and a boxed
+// The floor's === with the two boxes taught to it - a sized integer and a boxed
 // double are both `typeof "number"`, and MetaJS's own === on two boxes is
-// identity - so the numeric cases are spelled out. floEq is jvmNumEq, whose
-// jsGInt case is deliberately absent (a box against a SIZED INTEGER is false),
-// and that asymmetry is reproduced rather than smoothed over.
-function jvStrictEq(l, r) {
-    if (floIs(l) || floIs(r)) { return floEq(l, r) }
-    if (sintIs(l) || sintIs(r)) {
-        if (!jvIsIntegral(l)) { return false }
-        if (!jvIsIntegral(r)) { return false }
-        return jvCmp("==", l, r)
-    }
-    return l === r
-}
+// identity, so the numeric cases are spelled out - is rtjStrictEq, SHARED with
+// csharp in lib/runtime-jvm.metajs, its ONE knob being rtjkCmp. Its sized-integer
+// arm is a FIX the merge found: floEq (jf_num_eq / jvmNumEq) has no tag 13 case,
+// so `long == double` answered false in BOTH compiler engines while both
+// interpreter halves answered true. See the note at the shared body.
 
 // (target, method name, args array). The Go twin (rt.memberCall in abnf/jsrt.go)
 // is a LANGUAGE-NEUTRAL dispatcher; only the arms java-to-llvm-ir.abnf can reach
@@ -844,17 +819,17 @@ function js_mcall(recv, name, args) {
     if (typeof recv == "string") {
         if (name == "length") { return recv.length }
         if (name == "charAt") {
-            var ci = jvNum(args[0])
+            var ci = rtjNum(args[0])
             if (ci < 0 || ci >= recv.length) {
                 fail("charAt(" + ci + ") out of range for \"" + recv + "\"")
                 return undefined
             }
             return recv.charAt(ci)
         }
-        if (name == "equals") { return jvStrictEq(recv, args[0]) }
+        if (name == "equals") { return rtjStrictEq(recv, args[0]) }
         if (name == "substring") {
-            var b = args.length > 0 ? jvNum(args[0]) : 0
-            var e = args.length > 1 ? jvNum(args[1]) : recv.length
+            var b = args.length > 0 ? rtjNum(args[0]) : 0
+            var e = args.length > 1 ? rtjNum(args[1]) : recv.length
             return rtSubstring(recv, b, e)
         }
         if (name == "indexOf") { return recv.indexOf(jpStr(args[0])) }
@@ -878,7 +853,7 @@ function js_mcall(recv, name, args) {
             return true
         }
         if (name == "get") {
-            var gi = jvNum(args[0])
+            var gi = rtjNum(args[0])
             if (gi < 0 || gi >= recv.length) {
                 fail("list index " + gi + " out of range")
                 return undefined
@@ -888,7 +863,7 @@ function js_mcall(recv, name, args) {
         if (name == "contains") {
             var k = 0
             while (k < recv.length) {
-                if (jvStrictEq(recv[k], args[0])) { return true }
+                if (rtjStrictEq(recv[k], args[0])) { return true }
                 k = k + 1
             }
             return false
@@ -931,8 +906,8 @@ function js_jvexc(cls) {
 // One binary integral operator. A double operand keeps the FLOAT path, which is
 // where the two boxes meet.
 function js_jvarith(op, l, r) {
-    if (floIs(l) || floIs(r)) { return jvmArith(op, l, r) }
-    if (!jvIsIntegral(l) || !jvIsIntegral(r)) {
+    if (floIs(l) || floIs(r)) { return rtjArith(op, l, r) }
+    if (!rtjIsIntegral(l) || !rtjIsIntegral(r)) {
         // & | ^ on two booleans are Java's non-short-circuit boolean operators;
         // anything else is not a program javac accepts.
         if (typeof l == "boolean" && typeof r == "boolean") {
@@ -940,7 +915,7 @@ function js_jvarith(op, l, r) {
             if (op == "|") { return l || r }
             if (op == "^") { return l !== r }
         }
-        return jvmArith(op, l, r)
+        return rtjArith(op, l, r)
     }
     return jvArith(op, l, r)
 }
@@ -971,31 +946,26 @@ function js_jvshift(op, l, r) { return jvShift(op, l, r) }
 // it and was not looked at. abnf/jsrtjava.go:467 takes the same three lines.
 // Smoothing the 2 to 0 in rtCompare is still wrong and still must not be done:
 // 0 makes `<=` and `>=` true.
-function js_jvcmp(op, l, r) {
-    if (jvIsIntegral(l) && jvIsIntegral(r) && !floIs(l) && !floIs(r)) { return jvCmp(op, l, r) }
-    var c = rtCompare(l, r)
-    if (c == 2) { return false }
-    if (op == "<") { return c < 0 }
-    if (op == ">") { return c > 0 }
-    if (op == "<=") { return c <= 0 }
-    return c >= 0
-}
+// The body is rtjRel - SHARED with csharp's js_cscmp, lib/runtime-jvm.metajs, so
+// that the fix below cannot be made in one language and not the other a third
+// time.
+function js_jvcmp(op, l, r) { return rtjRel(op, l, r) }
 
 // A cast or a declared integral type: (value, bits).
-function js_jvconv(v, bits) { return jvNarrow(v, jvNum(bits)) }
+function js_jvconv(v, bits) { return jvNarrow(v, rtjNum(bits)) }
 
 // A declared type applied to an initializer: only an INTEGRAL value narrows, so
 // `Object o = "s"` and a lambda pass through untouched.
 function js_jvadopt(v, bits) {
-    if (!jvIsIntegral(v)) { return v }
-    return jvNarrow(v, jvNum(bits))
+    if (!rtjIsIntegral(v)) { return v }
+    return jvNarrow(v, rtjNum(bits))
 }
 
 // An integral literal, passed as DIGITS: emitNum would already have rounded
 // 9223372036854775807 to 9223372036854776000 on the way into the module.
 // (text, radix, isLong).
 function js_jvlit(text, radix, isLong) {
-    var rx = jvNum(radix)
+    var rx = rtjNum(radix)
     var acc = jlZero()
     var rb = jlFromNum(rx)
     var i = 0
@@ -1032,7 +1002,7 @@ function js_jvnot(v) {
 // ++ / -- keep the type of what they step, which is the same implicit narrowing
 // a compound assignment carries (JLS 15.14.2).
 function js_jvstep(v, d) {
-    var n = jvNum(d)
+    var n = rtjNum(d)
     if (jvIsChar(v)) { return jvChar((v["__char"] + n) & 65535) }
     if (floIs(v)) { return flo(floNum(v) + n, 0) }
     if (sintIs(v)) { return jvNarrow(jvArith("+", v, jvStepDelta(v, n)), sintWidth(v)) }
@@ -1052,12 +1022,12 @@ function jvStepDelta(v, n) {
 function js_jvnarrowlike(l, v) {
     if (floIs(l)) {
         if (floIs(v)) { return v }
-        return flo(jvNum(v), 0)
+        return flo(rtjNum(v), 0)
     }
     if (jvIsChar(l)) { return jvChar(jvLow32(v) & 65535) }
     if (sintIs(l)) { return jvNarrow(v, sintWidth(l)) }
     if (rtIsPlainNum(l)) {
-        if (jvIsIntegral(v) || floIs(v)) { return jvNarrow(v, 32) }
+        if (rtjIsIntegral(v) || floIs(v)) { return jvNarrow(v, 32) }
     }
     return v
 }
@@ -1083,7 +1053,7 @@ function js_jvchar(v) { return jvChar(jvLow32(jvNarrow(v, 64)) & 65535) }
 // Everything else still passes through unchanged, which is what keeps
 // `(double) "1"` reading the same in both halves.
 function js_jvnum(v) {
-    if (sintIs(v)) { return jvNum(v) }
+    if (sintIs(v)) { return rtjNum(v) }
     if (jvIsChar(v)) { return v["__char"] }
     if (floIs(v)) { return floNum(v) }
     return v
@@ -1116,11 +1086,11 @@ function js_jvstr(v) { return jpStr(v) }
 // falling through to JavaScript's ToString.
 function js_jvadd(l, r) {
     if (typeof l == "string" || typeof r == "string") { return jpStr(l) + jpStr(r) }
-    if (floIs(l) || floIs(r)) { return jvmArith("+", l, r) }
-    if (jvIsIntegral(l) && jvIsIntegral(r)) { return jvArith("+", l, r) }
+    if (floIs(l) || floIs(r)) { return rtjArith("+", l, r) }
+    if (rtjIsIntegral(l) && rtjIsIntegral(r)) { return jvArith("+", l, r) }
     return jvGenericAdd(l, r)
 }
 
 // The shared jsAdd for the operand pairs Java's own arms do not cover: anything
 // that is not a string and not integral coerces to a number.
-function jvGenericAdd(l, r) { return jvNum(l) + jvNum(r) }
+function jvGenericAdd(l, r) { return rtjNum(l) + rtjNum(r) }

@@ -625,6 +625,100 @@ function rbSci(x, prec) {
     return (neg ? "-" : "") + m + "e" + (e < 0 ? "-" : "+") + es
 }
 
+// ----- %g / %G -------------------------------------------------------------
+//
+// UNIMPLEMENTED in every half until now: "g" reached rbFormat's default arm, which
+// emitted the letter itself and did not even consume its argument, so
+// ("%g" % 1.5) was "g". The twin (rt.rubyFormat in abnf/jsrt.go) has
+// strconv.FormatFloat(v, 'g', P, 64); this is that function spelled out, and the
+// two were diffed digit for digit against ruby 2.6.10 over 14 values x 4
+// precisions (Float#% is unchanged in 3.x, so the row is settleable there).
+//
+// The rule: P is the precision, defaulting to 6, and P == 0 means 1. Round to P
+// SIGNIFICANT digits; if the resulting decimal exponent X is below -4 or at least
+// P, write the %e shape with P-1 fraction digits, otherwise the %f shape with
+// P-1-X of them. Then strip the fraction's trailing zeros, and a bare trailing
+// point with them. 999999.5 at P=6 is the row that proves the exponent has to be
+// read AFTER the rounding: it becomes 1000000, so X is 6 and the answer is
+// "1e+06", not "999999" or "1000000".
+
+// The trailing zeros of a fraction, and a trailing point, removed. `t` may carry
+// an exponent suffix; only the mantissa is touched.
+function rbGenStrip(t) {
+    var at = 0 - 1
+    var k = 0
+    while (k < t.length) {
+        if (t.charAt(k) == "e" || t.charAt(k) == "E") {
+            at = k
+            break
+        }
+        k = k + 1
+    }
+    var mant = at < 0 ? t : t.substring(0, at)
+    var tail = at < 0 ? "" : t.substring(at, t.length)
+    var dot = false
+    var j = 0
+    while (j < mant.length) {
+        if (mant.charAt(j) == ".") { dot = true }
+        j = j + 1
+    }
+    if (!dot) { return t }
+    while (mant.charAt(mant.length - 1) == "0") { mant = mant.substring(0, mant.length - 1) }
+    if (mant.charAt(mant.length - 1) == ".") { mant = mant.substring(0, mant.length - 1) }
+    return mant + tail
+}
+
+// The decimal exponent of `t`, which rbSci wrote as [-]d[.ddd]e[+-]XX.
+function rbSciExp(t) {
+    var at = 0 - 1
+    var k = 0
+    while (k < t.length) {
+        if (t.charAt(k) == "e") {
+            at = k
+            break
+        }
+        k = k + 1
+    }
+    if (at < 0) { return 0 }
+    var sign = 1
+    var i = at + 1
+    if (t.charAt(i) == "-") {
+        sign = 0 - 1
+        i = i + 1
+    } else if (t.charAt(i) == "+") {
+        i = i + 1
+    }
+    var v = 0
+    while (i < t.length) {
+        var d = rtDigitAt(t, i)
+        if (d < 0) { break }
+        v = v * 10 + d
+        i = i + 1
+    }
+    return sign * v
+}
+
+// strconv.FormatFloat(x, 'g', prec, 64), for prec >= 1.
+function rbGen(x, prec) {
+    var e = rbSci(x, prec - 1)
+    var ex = rbSciExp(e)
+    if (ex < 0 - 4 || ex >= prec) { return rbGenStrip(e) }
+    return rbGenStrip(rtFixed(x, prec - 1 - ex))
+}
+
+// Ruby prints "Inf", "-Inf" and "NaN" for a non-finite float under EVERY float
+// directive, in that case whatever the directive's own case is, and pads them with
+// spaces even under the 0 flag. Go's strconv says "+Inf", which is what reached the
+// output before. rubyFloatWord in abnf/jsrt.go is the twin.
+function rbFloatWord(x) {
+    if (x !== x) { return "NaN" }
+    if (x - x !== 0) {
+        if (x > 0) { return "Inf" }
+        return "-Inf"
+    }
+    return ""
+}
+
 // strconv.FormatInt(int64(x), base) is rtBaseStr, in
 // languages/lib/runtime.metajs. Ruby's Integer#to_s(base) is what reaches its
 // int64-saturating branches: 1e100.to_i.to_s(16) is "7fffffffffffffff".
@@ -652,6 +746,15 @@ function rbByteCut(s, n) {
     return out
 }
 
+// The directives that take a SIGN and honour the 0 flag.
+function rbFmtNumeric(conv) {
+    if (conv == "d" || conv == "i" || conv == "f") { return true }
+    if (conv == "e" || conv == "E" || conv == "g" || conv == "G") { return true }
+    return conv == "x" || conv == "X" || conv == "o" || conv == "b"
+}
+
+function rbIsSignChar(c) { return c == "-" || c == "+" || c == " " }
+
 function rbFormat(spec, arg) {
     var args = [arg]
     if (rbIsArr(arg)) { args = arg }
@@ -677,11 +780,15 @@ function rbFormat(spec, arg) {
         }
         var left = false
         var zero = false
+        var plus = false
+        var space = false
         while (i < spec.length) {
             var fc = spec.charAt(i)
             if (fc != "-" && fc != "0" && fc != "+" && fc != " ") { break }
             if (fc == "-") { left = true }
             if (fc == "0") { zero = true }
+            if (fc == "+") { plus = true }
+            if (fc == " ") { space = true }
             i = i + 1
         }
         var width = 0
@@ -708,15 +815,44 @@ function rbFormat(spec, arg) {
         var nx = null
         if (ai < args.length) { nx = args[ai] }
         var body = ""
+        var nonFinite = false
         if (conv == "d" || conv == "i") {
             ai = ai + 1
             body = "" + Math.trunc(rbToF(nx))
         } else if (conv == "f") {
             ai = ai + 1
-            body = rtFixed(rbToF(nx), prec < 0 ? 6 : prec)
-        } else if (conv == "e") {
+            var ff = rbToF(nx)
+            var fw = rbFloatWord(ff)
+            if (fw != "") {
+                body = fw
+                nonFinite = true
+            } else {
+                body = rtFixed(ff, prec < 0 ? 6 : prec)
+            }
+        } else if (conv == "e" || conv == "E") {
             ai = ai + 1
-            body = rbSci(rbToF(nx), prec < 0 ? 6 : prec)
+            var ef = rbToF(nx)
+            var ew = rbFloatWord(ef)
+            if (ew != "") {
+                body = ew
+                nonFinite = true
+            } else {
+                body = rbSci(ef, prec < 0 ? 6 : prec)
+                if (conv == "E") { body = rbUpper(body) }
+            }
+        } else if (conv == "g" || conv == "G") {
+            ai = ai + 1
+            var gf = rbToF(nx)
+            var gw = rbFloatWord(gf)
+            if (gw != "") {
+                body = gw
+                nonFinite = true
+            } else {
+                var gp = prec < 0 ? 6 : prec
+                if (gp == 0) { gp = 1 }
+                body = rbGen(gf, gp)
+                if (conv == "G") { body = rbUpper(body) }
+            }
         } else if (conv == "s") {
             ai = ai + 1
             body = rbStr(nx)
@@ -737,8 +873,18 @@ function rbFormat(spec, arg) {
         } else {
             body = conv
         }
+        // The + and SPACE flags were parsed and thrown away, in every half, so
+        // "%+d" % 7 was "7" against MRI's "+7" - both halves agreeing and both
+        // wrong, the one class byte-identity cannot see. They apply to the NUMERIC
+        // directives only, Inf and NaN included ("%+f" % Float::INFINITY is "+Inf").
+        var numeric = rbFmtNumeric(conv)
+        if (numeric && body.charAt(0) != "-") {
+            if (plus) { body = "+" + body } else if (space) { body = " " + body }
+        }
+        // The 0 flag is for NUMBERS: MRI's "%05s" % "ab" is "   ab", where this used
+        // to pad with zeros. A non-finite float is never zero-padded either.
         var pad = " "
-        if (zero && !left) { pad = "0" }
+        if (zero && !left && !nonFinite && numeric) { pad = "0" }
         // Go pads to `len(body)`, which is the BYTE length of the UTF-8 string, not
         // the number of characters: "%10s" of "café" gets FIVE spaces, not six.
         // byteLen is the floor's own answer to that and it is what the emitters
@@ -746,8 +892,8 @@ function rbFormat(spec, arg) {
         while (byteLen(body) < width) {
             if (left) {
                 body = body + " "
-            } else if (pad == "0" && body.length > 0 && body.charAt(0) == "-") {
-                body = "-" + pad + body.substring(1, body.length)
+            } else if (pad == "0" && body.length > 0 && rbIsSignChar(body.charAt(0))) {
+                body = body.substring(0, 1) + pad + body.substring(1, body.length)
             } else {
                 body = pad + body
             }
