@@ -8300,7 +8300,9 @@ has no first move**, and that is a measured statement rather than a delay.
 # such rather than dressed up.
 #
 # TWO GAPS THE PROBES FOUND AND THIS PASS DID **NOT** CLOSE, both in the integer
-# LITERAL path rather than in the operators, both reported rather than fixed:
+# LITERAL path rather than in the operators, both reported rather than fixed
+# -- **BOTH CLOSED 2026-08-04 from `e1307f3`; see "PYTHON'S INTEGER LITERALS"
+# below** --:
 #   - a DECIMAL literal of 9007199254740993 is not boxed. `pyIsBigText` boxes on
 #     `parseFloat(txt) > 2**53`, and `parseFloat` rounds that text down to
 #     exactly 2**53, so the literal becomes the double below it. `bit11` is
@@ -9344,3 +9346,313 @@ gen-*.sh --check      15/15 up to date
 MEC_GC=off            3,711 B/iter at 400k; gc RSS flat at 3,309,568
 coro-poc --gc/--break unchanged
 ```
+
+---
+
+# PYTHON'S INTEGER LITERALS, and the bitwise item that was ALREADY CLOSED (2026-08-04, from `e1307f3`)
+
+Three defects were handed over as one task because they share a file set. **One of
+the three was already fixed and is a NULL RESULT; the other two are fixed here.**
+Nothing outside the two Python grammars had to change - not the Go twin, not layer
+2, not the C floor - and that is the finding that shaped the pass.
+
+## 1. "Python's `&` is int32-signed" - ALREADY FIXED at `e1307f3`. Null result.
+
+The item is still listed in `docs/working-on-this-project.md` §7 as an open defect
+with an oracle available. It is not open: the bitwise-family pass recorded above
+(*"Python's bitwise family (settled against `python3` 3.14.6)"*) landed it, and the
+manual's §7 list is one of the "stale within two commits" cases it warns about.
+
+Re-measured rather than inherited. A **1,363-row** probe - `~` and `& | ^ << >>`
+over 18 operands (0, +-1, +-2, +-255, `0xffffffff`, +-`2**31`, `2**32`, `2**53`,
+`2**53+1`, `2**70`, a 30-digit value) crossed with 10 shift counts (0..100) and the
+`bool` matrix, **every operand read out of a list** so the folder cannot answer -
+run five ways: `python-interpreter.abnf`, the same under `-frozen`,
+`python-to-llvm-ir.abnf` under `llvm.Run`, a native `-exe` binary, and CPython
+3.14.6.
+
+```
+                                   differing rows vs CPython 3.14.6
+                                   before this pass      after
+interpreter                        246                   0
+interpreter -frozen                246                   0
+llvm.Run                           246                   0
+native -exe                        246                   0
+```
+
+**And all 246 of those were the LITERAL defect, not an operator defect** - every
+one of them had `9007199254740993` in the row. The result type (`int` for every
+operator, `bool` only for `bool op bool`) was already right everywhere too.
+
+## 2 + 3. The literal-boxing predicate, and the radix literals - FIXED
+
+Both live in the lexer/emitter, exactly as predicted, and both are the
+"both halves agree and both are wrong" class that byte-identity cannot see.
+
+| | before | CPython |
+|---|---|---|
+| `9007199254740993` | `9007199254740992` | `9007199254740993` |
+| `-9007199254740993` | `-9007199254740992` | `-9007199254740993` |
+| `0x20000000000001` | `9007199254740992` | `9007199254740993` |
+| `0x7fffffffffffffff` | `9223372036854776000` | `9223372036854775807` |
+| `0xffffffffffffffff` | `18446744073709552000` | `18446744073709551615` |
+| `0o400000000000000001` | `9007199254740992` | `9007199254740993` |
+| `0b1` + 52 zeros + `1` | `9007199254740992` | `9007199254740993` |
+| `0x10000000000000000000` | `7.555786372591432e+22` | `75557863725914323419136` |
+
+The second column is a **`float`-looking `str()` on a value whose `type()` still
+said `int`** - the last row is the shape that makes it obvious.
+
+**The predicate must be decided on the TEXT.** `parseFloat("9007199254740993")` and
+`parseInt("9007199254740993", 10)` both round to exactly 2^53, so the very first
+value that needs the box answered *"not big"*. `pyDecOver53(txt)` strips leading
+zeros, compares digit COUNT against `"9007199254740992"` and then compares
+lexicographically - no float is involved anywhere. 2^53 itself is exact and is
+deliberately NOT boxed; the boundary is strictly `>`.
+
+**The radix forms needed a base conversion, and it belongs in the grammar.**
+`js_bigint` reads DECIMAL text - `pyABigFromStr` in `languages/lib/python-rt.metajs`
+says so at its own site, and the Go twin's `math/big` arm parses decimal too. Rather
+than widen that contract in three engines, `pyRadixToDec(digits, radix)` converts
+the literal's digits to exact decimal text in the grammar (a schoolbook multiply-add
+`d = d*radix + v` over a little-endian array of decimal digits, ~20 lines), and the
+existing decimal path takes it from there. **Consequence: layer 2, the Go twin and
+the C floor are untouched, and the fix is two files.** That is the whole reason to
+prefer this shape over extending `js_bigint` with a radix argument.
+
+It runs at COMPILE time, once per literal, so it costs the runtime nothing.
+
+### Per-file
+
+| file | change |
+|---|---|
+| `languages/python-interpreter.abnf` | `pyIsBigText` now ends in `pyDecOver53(txt)` instead of `parseFloat(txt) > bigMaxNum`; new `pyDecOver53`, `pyRadixToDec`, `pyRadixLit`; `PyHexLit`/`PyBinLit`/`PyOctLit` call `pyRadixLit(pyDigits(up.in), R)` instead of `parseInt(..., R)` |
+| `languages/python-to-llvm-ir.abnf` | `makeIntLit` gates on `pyDecOver53` on both branches and emits `js_bigint(decimal-text)` for a big radix literal; new `pyDecOver53`, `pyRadixToDec` (the twin of the interpreter's) |
+| `tests/python-test-full.py` | new **SECTION 30** `lit01`..`lit15`; `bit11`'s comment no longer records the decimal gap as open |
+| `tests/python-test-features.py` | 9 checks, `lit-dec-2p53p1` .. `lit-small-radix` - the DEFAULT matrix, so the hard gate |
+
+`abnf/jsrt*.go`, `languages/lib/python-rt.metajs`, `languages/lib/python-rt.ll`,
+`languages/lib/runtime-bignum.metajs`, `runtime.c`: **not edited, and none was
+needed**. `-freeze` was not needed either (no `metajs-to-llvm-ir.abnf` /
+`lib/compile-core.js` change).
+
+### The probes
+
+Three, all with every operand read out of a list, all run five ways
+(interpreter, interpreter `-frozen`, `llvm.Run`, native `-exe`, CPython 3.14.6):
+
+1. **1,363 rows**, the bitwise family (above). **246 -> 0** differing rows.
+2. **43 rows**, hand-picked literals at and around every boundary
+   (2^53+-2, 2^54, 2^63, 2^64, hex/octal/binary forms, `_` separators, negatives)
+   crossed with `+1 -1 *2 &255 >>3`. **22 -> 1** differing rows.
+3. **626 randomly generated literals** (seeded, bit widths 20/40/53/54/60/64/80/
+   128/200, each emitted in a randomly chosen radix and again negated) crossed with
+   `type()`, `str()`, `&0xff`, `>>7`, `*3`, `+1`, `abs()`. **55 differing rows**,
+   and the four of our engines are byte-identical to each other on all 626.
+
+### The residue probe 3 found, NOT this defect and NOT fixed
+
+All 55 remaining rows are **one further gap: ordinary int ARITHMETIC does not
+promote past 2^53.** 54 are the `v*3` column and 1 is `2**53 + 1`; the literals,
+the types, `&`, `>>` and `abs` are all exact.
+
+```
+    9007199254740992 + 1      here 9007199254740992    CPython 9007199254740993
+    4203410011491465 * 3      here 12610230034474396   CPython 12610230034474395
+```
+
+A Python `int` is unbounded, so `a + b` on two *unboxed* ints has to detect that
+the exact result exceeds 2^53 and redo the operation in the bignum. This is a
+different defect from the literal one and a much larger one: the site is the plain
+`l + r` / `l - r` / `l * r` arms of `binOp`/`pyArith`, which is **the hot path of
+every Python program in the suite**, in all three engines (interpreter, `jsrt.go`,
+`python-rt.metajs`), and the bitwise pass above already measured what a naive guard
+there costs (+9.5% before it was rewritten as `(v|0) === v`). Reported, not
+attempted. The cheap-looking guard for `+`/`-` is `Math.abs(r) > 2**53`, but `*`
+needs the exact product, which is the expensive half.
+
+### Discriminating power, measured against a clean archive of `e1307f3`
+
+`git archive e1307f3 | tar x -C /private/tmp/dmpylit`, `go build` **inside** it,
+only the two test files copied in, run there.
+
+```
+tests/python-test-full.py  SECTION 30   13 of 15 fail   in all three engines
+tests/python-test-features.py           7 of  9 fail    in all three engines
+```
+
+The four that pass either way are named rather than dressed up: `lit11` /
+`lit-2p53-exact` (2^53 is exact and must stay unboxed) and `lit12` /
+`lit-small-radix` (`0xff`, `0o17`, `0b1011` stay plain numbers) are the
+regression guards on the two ways this fix could over-reach. They are decoration
+by the measurement and are kept for that reason.
+
+The bitwise assertions were not re-added: `bit01`..`bit15` already exist and
+already carry their own measurement.
+
+### Gate readings
+
+```
+go build -o mec .                     ok
+tests/gen-python-rt-ll.sh --check     python-rt.ll is up to date (86330 lines)
+all fifteen gen-*.sh --check          up to date
+./test.sh                             329/329, all green
+./test.sh --full                      5,996 assertions (python 390 -> 405),
+                                      0 languages whose halves disagree,
+                                      grep 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF' EMPTY
+./test.sh --cross                     119 programs, 0 divergent, 0 warning-only
+tests/clang-check.sh                  16/16, all agreeing, none held
+tests/native-full.sh                  15/15, every binary exits 0 with 0 failures
+go test ./abnf/                       ok
+```
+
+`tests/python-test-features.py` is byte-identical across all four legs
+(interpreter/compiler x goja/`-frozen`) and the native binary agrees.
+
+---
+
+# Ruby's `%` formatting: the `#` flag, 2026-08-04 from `e1307f3`
+
+The brief was `docs/working-on-this-project.md` §7 item 1, *"ruby-rt's `%g` is
+unimplemented"*. **That line is STALE and the item is CLOSED**: §7 says it was
+verified at `ee51718`, and `%g`/`%G`/`%E` landed one commit later in `2d3e6f5`
+(`rbGen`/`rbGenStrip`/`rbSciExp` in `languages/lib/ruby-rt.metajs`, `genStr` in
+`languages/ruby-interpreter.abnf`, `strconv.FormatFloat(v,'g',P,64)` in
+`rt.rubyFormat`). Re-grepping before acting - manual §6 - is what caught it.
+
+What the probe DID find still open in all three halves is the **`#` (alternate)
+flag**, which the brief named as one of the rows to cover.
+
+## Measurement: a 1,393-row four-way probe
+
+`%g %G %.0g %.1g %.2g %.3g %.6g %.10g %.17g %.20g %12g %-12g %012g %+g "% g"
+%+.3g %-15.4G %015.4g %+015.3g "% 015.3g" %1g %.4G %e %.3e %E %f %.0f %.2f` over
+26 values (1.5, 100.0, 1e-4, 1e-5, 1e20, **999999.5**, 0.0, **-0.0**, 1.0,
+123456789.0, 0.1, 0.0009999, 1e100, **5e-324**, 1e-320, 1.797e308, **Inf**,
+**-Inf**, **NaN**, -1.5, 0.5, 1234.0, 9.999999, 1e-5, 2.5, 1048576.0), plus the
+same matrix under `#`, plus `%#x %#X %#o %#b` with widths and flags over seven
+integers, plus five multi-directive rows that check argument consumption. Every
+operand is read out of an array, so the constant folder cannot answer any of it.
+
+Run under **MRI 2.6.10**, `ruby-interpreter.abnf` (goja **and** `-frozen`),
+`ruby-to-llvm-ir.abnf` under `llvm.Run` (the Go twin) and as a native `-exe`
+binary (layer 2).
+
+```
+                          BEFORE (vs MRI)      AFTER
+interpreter (goja)        461 rows wrong       0
+interpreter (-frozen)     461 rows wrong       0     (needs -max-steps 0: the
+llvm.Run / Go twin        533 rows wrong       0      probe is ~1.4e8 steps)
+native -exe / layer 2     533 rows wrong       0
+```
+
+**Every one of the 1,393 non-`#` rows was already correct in all four legs.**
+`%g`'s exponent threshold, the trailing-zero stripping, `%G`, the width/flag
+matrix, `-0.0`, the two infinities, NaN, 5e-324 and 1.797e308 all match MRI at
+`e1307f3`. The 461-vs-533 gap is itself a **live halves divergence** the matrix
+and `--cross` could not see: the interpreter swallowed the `#` into its spec
+string and then ignored it (so `%#g` printed plain `%g`), while both compiled
+halves stopped their flag loop at `#`, made `#` the *conversion*, emitted a
+literal `#`, left the argument unconsumed **and shifted every later directive**.
+
+## The rule, settled against MRI
+
+* `%g`/`%G`: the trailing-zero stripping is **suppressed** (`"%#g" % 100.0` is
+  `100.000`), and a point is forced when the shape leaves none
+  (`"%#.1g" % 1234.0` is `1.e+03`, `"%#.0g" % 1.5` is `2.`).
+* `%f`/`%e`/`%E`: a point is forced at precision 0 (`"%#.0f" % 1.0` is `1.`,
+  `"%#.0e" % 1.0` is `1.e+00`).
+* `%x`/`%X`/`%o`/`%b`: the prefix `0x` / `0X` / `0` / `0b`, and **nothing at all
+  in front of a zero** (`"%#x" % 0` is `0`).
+* The zeros of the `0` flag go **behind** that prefix, as they already went
+  behind the sign: `"%#010x" % 255` is `0x000000ff`, not `00000000xff`.
+* `%d`, `%i`, `%s` ignore `#`. A non-finite float ignores it too (`"%#g"` of
+  Infinity is `Inf`).
+
+## Where it landed - five files, one change
+
+| file | what |
+|---|---|
+| `abnf/jsrt.go` | `rubyAltPoint`, `rubyGenAlt`, `rubyBasePrefix`; `#` in `rubyFormat`'s flag loop; the pad loop takes a `skip` offset |
+| `languages/lib/ruby-rt.metajs` | `rbAltPoint`, `rbGenAlt`, `rbBasePrefix`, the same three edits to `rbFormat` |
+| `languages/lib/ruby-rt.ll` | regenerated, `tests/gen-ruby-rt-ll.sh --check` clean |
+| `languages/ruby-interpreter.abnf` | `altPoint`, `altOrNot`, `genAltStr`, `basePrefix`; `#` in `fmtOne`'s flag loop; `padTo` grew a `keep` parameter |
+| `tests/ruby-test-full.rb` | SECTION 06 `fmt13`..`fmt19` |
+
+`languages/ruby-to-llvm-ir.abnf` needed **no** change - it emits `js_rformat`,
+which is the twin/layer-2 pair. `languages/lib/runtime.metajs` and
+`languages/lib/runtime.c` needed no change either.
+
+**Is the formatter shared?** No, and it should not be. The *digit machinery* is
+already shared and `rbGenAlt` reuses it unchanged (`rtExactDec`,
+`rtRoundHalfEven`, `rtFixed` in `runtime.metajs`; `rbSigDigits`/`fixedStr` are
+the interpreter's own copy because that grammar has no bignum to borrow). What
+is per-language is the *directive assembly*, and it genuinely differs:
+`python-rt.metajs:2837` **rejects** `#` outright (`pyFail("unsupported format
+flag '#'")`), Ruby's non-finite words are `Inf`/`-Inf`/`NaN` where C prints
+`inf`/`nan`, Ruby pads to the **byte** length, and Ruby's `%#o` merges the
+prefix with the zero padding. There is no shared alternate-flag body anywhere in
+`languages/lib/*.metajs` or `runtime.c` to extend - grepping for `'#'` across
+all of layer 2 and the C floor returns exactly the one python line above.
+
+## Discriminating power, measured
+
+`git archive e1307f3 | tar x`, `go build` **inside** it, only
+`tests/ruby-test-full.rb` copied in, run there:
+
+```
+ruby-interpreter    7 of 7 new assertions FAIL
+ruby-to-llvm-ir     6 of 7 new assertions FAIL   (llvm.Run)
+native -exe binary  6 of 7 new assertions FAIL   (layer 2)
+```
+
+Zero decoration. Ruby's ratchet is **285 -> 292**. The seventh is `fmt19`, which
+fails in the interpreter ONLY - it is the `%d` divergence below, and the two
+compiled halves were already right.
+
+## Gate readings
+
+```
+go build -o mec .                     ok
+tests/gen-ruby-rt-ll.sh --check       ruby-rt.ll is up to date (59808 lines)
+./test.sh                             329/329, all green
+./test.sh --full                      6,003 assertions (ruby 285 -> 292),
+                                      0 languages whose halves disagree,
+                                      grep 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF' EMPTY
+./test.sh --cross                     119 programs, 0 divergent, 0 warning-only
+tests/clang-check.sh                  16/16, all accepted, all agreeing
+tests/native-full.sh                  15/15, every binary exits 0 with 0 failures
+go test ./abnf/                       ok (uncached)
+```
+
+The working tree carried two other agents' in-flight edits (kotlin-rt, the
+python literal-int pass) while these ran, so the totals above are the joint
+tree's; the ruby column and all four probe legs are this change alone.
+
+`docs/working-on-this-project.md` §7 item 1 still says `%g` is unimplemented and
+should be struck when this lands - that file was held by another agent this
+round, so it was left alone.
+
+## Found and NOT fixed
+
+1. **`%d` of a float past 2^53 is the double's shortest form, not the exact
+   integer.** `"%d" % 1e100` is `1e+100` here; MRI prints all 101 digits, because
+   its `%d` converts to an exact `Integer` first. The same for `1.797e308`. All
+   three halves agree, so it is a both-halves-wrong row, not a divergence. The
+   fix is the `rtExactDec` bignum on the `d`/`i` arm (and `%x`/`%o`/`%b`, which
+   saturate at int64 today) in three places; it is not a `%g` question and was
+   left alone. `"%d" % Float::INFINITY` is `FloatDomainError` in MRI and prints
+   `Inf` here.
+2. ~~The interpreter's `%d` floors where the compiled halves truncate.~~ **FOUND
+   BY THE SAME PROBE AND FIXED HERE.** `fmtOne` used `Math.floor(toF(v))` where
+   `rbFormat` and `rt.rubyFormat` use `Math.trunc`: `"%d" % -1.5` was `-2` in the
+   interpreter and `-1` in both compiled halves, and **MRI says `-1`** (its `%d`
+   converts with `to_i`, which truncates). A live halves divergence that
+   `--cross` never saw because no test formatted a negative NON-INTEGER float
+   with `%d`. One word in `languages/ruby-interpreter.abnf`, pinned by `fmt19`.
+3. **A negative under `%x`/`%o`/`%b` is not MRI's.** MRI writes the infinite
+   two's complement (`"%#x" % -5` is `0x..fb`); every half here writes `-5`.
+   Pre-existing, out of the probe's asserted range (the integer rows are
+   non-negative for exactly this reason).
+4. **Precision on an integer directive is ignored.** `"%.0x" % 0` is `""` in MRI
+   and `0` here. Pre-existing.
