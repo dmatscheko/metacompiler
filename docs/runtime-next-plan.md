@@ -38,6 +38,403 @@ languages.
 
 ---
 
+# HOW TO MEASURE PERFORMANCE IN THIS PROJECT (standing rules, `e8edc89`)
+
+**Read this before you quote a number, and before you believe one written here.**
+This section is the standing procedure; the audit of every claim in these documents
+against it is in "THE PERFORMANCE-CLAIM AUDIT" immediately below.
+
+### 1. The instrument is instructions retired, never wall clock
+
+`/usr/bin/time -l <binary>` reports `instructions retired`. Re-running **one binary**
+reproduces to **0.02%**; wall clock on this machine, with agents running beside you,
+moves **+-8%** between runs of that same binary. Any argument settled in wall clock
+below ~10% was not settled. Use wall clock only for effects that are factors.
+
+### 2. But instructions per BUILD are a lottery, and this is the part that bites
+
+A native binary's instruction count depends on its **code layout**, and layout is
+perturbed by things that change no semantics whatsoever. One unchanged kotlin
+source, varying nothing but the LENGTH OF THE `-exe` OUTPUT PATH:
+
+```
+17.353 17.494 17.620 17.911 17.915 17.916 17.916 18.018 18.023 18.182  G
+```
+
+**4.8%, visibly bimodal, from a file NAME.** Six rebuilds of one source to one path
+are `md5`-identical, so this is neither machine noise nor codegen non-determinism.
+A module edit perturbs layout the same way and by the same magnitude, so **no
+pairing cancels it**: building both variants to the same path does not help, and
+neither does interleaving the runs. Three separate single-build attempts to measure
+ONE change returned +0.04%, +0.65% and -1.72%.
+
+### 3. The rules that follow
+
+- **Never a single A/B build.** One build against one build measures nothing below
+  about 2%, however carefully the runs are done.
+- **Take layout draws and report a MEDIAN with the SPREAD beside it.**
+  `tests/bench.sh --draws N` does this (it varies the output-path length, which is
+  free). Say the draw count. Quote the interval, not the point.
+- **A delta smaller than that row's own spread is not evidence, whichever way it
+  points and however large it looks.** java has been observed at +3.20% against a
+  3.21% spread; that is a coin landing heads.
+- **AGREEMENT inside the spread is not evidence either.** Two single builds that
+  match to 0.01% have not been shown to be equal - that is the same coin. This is
+  the direction the older prose in these documents gets wrong most often, because
+  a coincidence reads as a confirmation.
+- **Per-row spread at 5 draws, measured** (`tests/bench/baseline.txt`) - this is the
+  floor below which each row can say nothing:
+
+  ```
+  c 0.35%   kotlin 1.05%   python 1.31%   lua 2.04%   java 3.21%   ruby 4.14%
+  ```
+
+  A single draw is wider than this: lua's 13-draw range is ~3.3%. To resolve
+  something smaller, raise `--draws` until the interval is tight, and if the
+  distribution is bimodal (lua and kotlin both are) say so, because a median can
+  then jump a whole mode on one extra draw. The honest report is
+  **min / median / max on both sides**; if the two ranges do not overlap at all,
+  the effect is real regardless of the width.
+- **`c` is the control.** Self-contained IR, no `js_*` extern, the tightest row: if
+  a floor or layer-2 change moves `c`, it is measuring the machine.
+
+### 4. What is NOT subject to the lottery, and should be measured exactly once
+
+These are counters, not timings, and they are exact - a difference of one is real:
+
+- allocation bytes/iteration (`tests/bench-alloc.sh`, `MEC_GC=off`)
+- `MEC_GC_STATS`: live bytes, heap bytes, collections, pinned
+- binary size, emitted `.ll` line counts, extern counts, assertion counts
+- `sample` profiles: "this body does not appear in 3,878 frames" is a real
+  statement about the program, and it does not need draws
+
+**Prefer these.** Most questions asked in these documents ("does this body cost a
+language that cannot call it anything?") are answerable by a counter that does not
+move, plus a mechanism, and the instruction count is only the confirmation.
+
+### 5. Measure in an isolated tree
+
+`git archive <rev> | tar x -C /tmp/x`, `go build` **inside** it, run it there.
+`mec` reads its grammar from the path you give it, so an old binary run from this
+repo silently uses THIS tree's grammar (the manual's §4). Other agents editing
+`languages/lib/*` mid-sweep will otherwise change your base under you, and
+`gen-*-rt-ll.sh` runs its own `go build`.
+
+### 6. Record the measurement, not the conclusion
+
+Write the draw count, the median, the spread and the workload at the site. "It is
+2% faster" is not re-checkable; "median 18.02 G over 9 draws, range 17.75-18.60,
+against 18.14 G over 9 draws, range 17.90-18.65" is.
+
+---
+
+# THE PERFORMANCE-CLAIM AUDIT (2026-08-04, from `9c7ac05`)
+
+Every quantitative performance claim in this file and in
+[runtime-merge-plan.md](runtime-merge-plan.md) walked against the rules above.
+Three verdicts: **STANDS** (outside the floor, or a counter, which the lottery does
+not touch), **UNSUPPORTED** (a single-build instruction or wall-clock difference
+below ~2%, which is a layout draw and not a measurement), **UNCLEAR** (near the
+line; it would take draws to say).
+
+Nothing is deleted. These documents are a record, and the reasoning around a
+withdrawn number is usually still the useful part - the `impe` decomposition below
+is a good example of correct reasoning attached to a number that cannot be read.
+The claims in this file are marked **at their own sites**; runtime-merge-plan.md was
+owned by another agent this round, so its markings are a **patch list** at the end
+of this section.
+
+## What was audited in THIS file
+
+| where | claim | verdict |
+|---|---|---|
+| 1a allocation table (`-50.0%`, the per-line `-36%`..`-100%`), `bench-alloc.sh` agreeing within 0.5% | allocation COUNTERS | **STANDS** - exact, not a timing |
+| 1a `lua s=s+i%7` **-34% wall clock**, `-50%` / `-23%` memory | -34% is many times any noise floor; memory is a counter | **STANDS** |
+| 1a `fib(26)` **-8%** wall clock, "try/catch inside the noise" | two builds, three runs, wall clock | **UNSUPPORTED** (marked at site; the memory beside it stands) |
+| 1b `+25.4%` bytes/iter for the block header | counter, and it closes arithmetically (52 x 16 B) | **STANDS** |
+| 1b `+17% / +14%` user time for the collector | above the wall-clock floor and the layout floor | **STANDS** |
+| 1b `+7%` user, and the `+6% / +8% / +3%` wall row | at or under the floor | **UNSUPPORTED** (marked at site) |
+| 1b RSS `2,300x / 460x / 940x` smaller | counter | **STANDS** |
+| 1b collector floor: "4 MB is **5% faster**" | three separate BUILDS, user seconds | **UNSUPPORTED** (marked at site; the decision was made on coverage anyway) |
+| 1b ratchet `off / auto / stress / poison` timings (0.43 / 0.01 / 4.41 / 0.01 s) | factors, not percents | **STANDS** |
+| 1c `+2.1%` residual, and flat RSS over a 40x range | allocation counter | **STANDS** - marked at the site explaining *why* a sub-2.5% number can stand |
+| Part 3 coroutines: `swapcontext` 0.14 s vs `pthread` condvar 0.88 s, **B1 6.3x**, memory per generator | plain clang, a factor of 6, and RSS counters | **STANDS** |
+| Part 3 "a generator resume costs about 1.0 us", derived from `fib(26)` at 0.41 s / 393,000 calls | derived from a wall-clock row | **UNCLEAR** as a precise figure; sound as an order of magnitude, which is all it is used for |
+| python bitwise guard: the `typeof && trunc && range` guard cost **+9.5%** | ~7x the python row's own 1.31% spread | **STANDS** |
+| the same site's "2.72 s against 2.70 s over three runs each - inside the noise" | correctly *declines* to claim anything | **STANDS** as written |
+| `js_gospread` down-move: "the MetaJS body cost about 1.0 s", **3.7%** of the program | wall clock over two builds | timing **UNSUPPORTED**, marked - but the `sample` evidence (**0 of 3,878 frames**, "at least 30x") is independent of any timing and **STANDS**, and it is what the conclusion rests on |
+| Part 4 / manual cross-references: `case_map` 15x / 135x / 2.0x, floor-upcall 120 ns vs MetaJS 3.2 us, `-O2` 2.2x, layer 2 ~5.5x slower than the Go path | factors | **STANDS** |
+| the hash index's **20-42%** across nine languages | 10x to 40x the widest row spread | **STANDS** |
+
+## What was audited in runtime-merge-plan.md
+
+| where (line at `9c7ac05`) | claim | verdict |
+|---|---|---|
+| 606-613 | the live-body tax: kotlin **+7..11%**, swift **+17..24%** wall, with `live`/`heap` counters | **STANDS in magnitude** - the counters move too, and the effect is above the wall-clock floor. The *attribution* was already revised twice in the file itself |
+| 28, 633 | kotlin's verbatim `regex.js` import measured at **+18-23%** and reverted | **STANDS in magnitude** (it was placement, and placement was then real) |
+| 742-750 | swift filler: **+3.5%** and **+9.1%** wall | **+3.5% UNSUPPORTED**; **+9.1% UNCLEAR**. The `live objects` column is a counter and carries the finding ("the walk tracks CODE"); the derived **~+1.3% wall per 100 lines** rests on the two timings and is **UNSUPPORTED** - the file's own 2x2 later puts the code component an order of magnitude lower |
+| 754 | "~70 live objects each, ~0.13% - under the noise floor of a single timing run" | **STANDS as written**: it is a statement that nothing is measurable there, which is the correct reading |
+| 795-796 | the declaration-index curve `+9.3% / +4.3% / -0.1% / -0.6%` | **+9.3% and +4.3% STAND** (several times the widest kotlin single-draw range); **-0.1% and -0.6% UNSUPPORTED** |
+| 810-819 | `relocate +9.3%`, `impe +9.5%`, `imp +10.7%` | the three headline numbers **STAND**. Everything DERIVED from their differences does not: "`impe` == `move` to three decimal places", "the import mechanism itself is free (+0.2%)" and "the 1,217 duplicated lines are worth **+1.1%**" are each a single-build difference of ~1% or less. **UNSUPPORTED** - and note that the *agreement* to three decimals is a coin landing heads, not a confirmation |
+| 823-833 | "IT IS NOT THE COLLECTOR": 5.092 / 5.093 / 5.063 / 5.071 G collector share | the 0.6% spread between those four means nothing, but the conclusion **STANDS** on the counter beside it - `MEC_GC_STATS` is byte-identical across the rows, and collections/live/heap are exact |
+| 844-861 | the 2x2: A **+1.9%**, B **+7.3%**, C **+5.4%**, tiny5/fat5 **+2.0%/+2.0%** | **B and C STAND**. **A is UNCLEAR.** "tiny5 vs fat5 ... the same cost to **0.01%**" is **UNSUPPORTED** - two single builds agreeing inside a lottery is not evidence of equality. "B vs C **+1.8%** apart", and therefore the **~0.2% per 100 lines** code-size coefficient drawn from it, is **UNCLEAR at best**. The `live` column is a counter, so "code size does not enter the live set at all" **STANDS** |
+| 881-891 | THE RULE: **0.13% / 0.11% / 0.24%** per declaration, **+0.2%** per 100 lines | already struck as DEAD because the hash index removed the tax. **That marking is right, and it now needs a second reason**: the two per-declaration coefficients were fitted to rows that *do* stand (+9.3%, +7.3%, +5.4%), so the model was reasonable, but the **+0.2%/100 lines** term never had support at all, and "9.9% predicted against 10.7% measured" is a fit to single builds - the closure of the model to 0.8% was never resolvable |
+| 994-1004 | the hash index: **-19.5% to -42.0%** across nine languages | **STANDS**, overwhelmingly |
+| 994 | `c 11.04 M -> 11.03 M  -0.1%` | inside `c`'s 0.35% spread, which is the **correct reading of a control**: the control did not move. **STANDS as a null result** |
+| 995 | `metajs 1.198 -> 1.203 G  +0.4%` | single build, 0.4% | **UNSUPPORTED** |
+| 994 | `lua 7.982 -> 8.308 G  +4.1%` | **RE-MEASURED TWICE - see below. The effect is REAL (it exceeds both rows' spreads); the magnitude ~+4% as originally recorded STANDS.** |
+| 1009-1021 | lua's sub-claims: a never-firing branch **+2.8%**, out-of-line arm **+4.7%**, name-in-slot **+6.1%** | each a single build against a row whose 13-draw range is 3.3%: **UNCLEAR**, and the two "worse" alternatives would need draws before anyone re-tries them. The `sample` shift (**33.5% of the profile in the scope family against 23%**) is not a timing and **STANDS**, and the re-measurement below supports the direction |
+| 1030-1032 | the post-index placement curve **-0.6%** and **+0.6%** | **UNSUPPORTED** - single draws. Already cross-referenced from "THE THIRD ASKING" but not marked at its own site; patch below |
+| 1039-1042 | the zeroed coefficient list, including "the same ~0.2% per 100 lines of layout" | the three zeros **STAND** as "nothing measurable remains"; the retained ~0.2%/100 lines term is inherited from row 844-861 and is **UNSUPPORTED** |
+| 1113-1122 | THE THIRD ASKING: means over 20/14/10 draws with bootstrap CIs straddling zero | **STANDS, and it is the model to copy.** The only upgrade is to report the median and whether the ranges overlap, since these distributions are bimodal |
+| 1418-1419 | the metajs door: **474K -> 513K (+8%)** binary size, **36.5 -> 37.5 ms/process**, warm hello-world 1.9 -> 1.9 ms, 3,711 B/iter unchanged | size and B/iter are **counters, STANDS**; the **+2.7% ms/process is UNSUPPORTED** |
+| 1479-1481 | `case_map`: **15x**, **135x**, **2.0x** | factors | **STANDS** |
+| 1560 | layer 2 runs roughly **5.5x slower** than the Go path | factor | **STANDS** |
+
+Two whole-document remarks:
+
+- **Every claim that survives is either a factor, a counter, or a percentage in the
+  high single digits and up.** Nothing in the 0.1-2% band survived anywhere in
+  either document. That band should simply not be written again without draws.
+- **The one systematic error worth naming** is treating *agreement* as evidence:
+  `impe` == `move` "to three decimal places", tiny5 == fat5 "to 0.01%", and the
+  model closing at 9.9% against 10.7% were all read as confirmations. Inside a
+  lottery this wide, two numbers landing on top of each other is exactly as
+  informative as two numbers landing 1% apart, which is to say not at all.
+
+## The one re-measurement: lua's `+4.1%` from the hash index
+
+It was the only recorded DOWNSIDE of the hash index and it sat close to lua's own
+floor, so it was re-taken properly - TWICE, independently, and the two runs agree
+that the effect is real while disagreeing on its size. **It survives at ~+4%, the
+figure originally recorded.** Both datasets are below, because the disagreement
+between them is itself the most useful thing here.
+
+Method: `git archive e1307f3^` (the parent, `85f3409`) and `git archive e1307f3`
+(the hash index) into two isolated trees, `go build` **inside** each, no working-tree
+files involved. `tests/bench/mod.lua` (40,000 x `s = s + i % 7`) copied into both,
+plus a 200,000-iteration variant to check that the effect is loop work and not module
+init. **13 layout draws per tree per workload** (output-path lengths 1..13, the same
+13 paths for both trees), instructions retired, min of 3 runs per build.
+
+```
+                     n    min      median    max      mean     spread
+lua, 40,000 iterations
+  85f3409 (parent)  13   1.3990 G  1.4439 G  1.4453 G  1.4235 G  3.31%
+  e1307f3 (index)   13   1.4929 G  1.5303 G  1.5380 G  1.5164 G  3.02%
+                                   +5.98% median   +6.53% mean
+
+lua, 200,000 iterations
+  85f3409 (parent)  13   6.9660 G  7.1946 G  7.2110 G  7.1113 G  3.52%
+  e1307f3 (index)   13   7.4728 G  7.6271 G  7.6319 G  7.5593 G  2.13%
+                                   +6.01% median   +6.30% mean
+
+c (the control, same two trees, 7 draws each)
+  85f3409           7   11.1049 M 11.1354 M 11.2090 M            0.94%
+  e1307f3           7   11.1010 M 11.1391 M 11.2907 M            1.71%
+                                   +0.03% median  - the control did not move
+```
+
+**The two ranges do not overlap at all**, on either workload: the parent's slowest
+draw (1.4453 G) is still 3.2% faster than the index's fastest (1.4929 G). Median,
+mean, min-to-min and max-to-max all agree at +6.0% to +6.7%, and the two workloads -
+which differ 5x in loop count - give the same percentage, so this is steady-state
+loop cost and not module init. `c` moving +0.03% says the two trees are not
+systematically biased against each other.
+
+### THE MAGNITUDE ABOVE DID NOT REPLICATE. The EFFECT did. Carry ~+4%.
+
+The coordinator re-took this independently, 9 draws per side, `tests/bench.sh
+--draws 9`, same two archives:
+
+```
+                     n    median     spread
+85f3409 (parent)     9   1.44377 G   3.21%
+e1307f3 (index)      9   1.49971 G   2.05%
+                         +3.87% median
+c (control)          9   11.111 M -> 11.114 M   +0.02%
+```
+
+**The two runs agree on the PARENT to four digits (1.4439 vs 1.4438 G) and
+disagree on the INDEX by 2% (1.5303 vs 1.4997 G).** The index figure of ~1.4997 G
+has now been measured on three separate occasions with three different draw counts
+(5, 5 and 9) and landed at 1.499637, 1.499717 and 1.499710 G every time, so the
+1.5303 G median above is the outlier - almost certainly a draw set that fell
+disproportionately into the slow mode of a bimodal distribution, which is exactly
+the failure mode this whole section is about. **A median over draws is a much
+better estimator than a single build; it is not a guarantee, and two honest
+13-draw and 9-draw medians can still differ by 2%.**
+
+**So the conclusion stands with the ORIGINAL number: the hash index does have a
+real recorded downside for lua, it is ~+4%, and `+4.1%` as first recorded was
+right.** What the re-measurement genuinely establishes is that the effect is real
+rather than noise - +3.87% exceeds both rows' spreads, the control moved +0.02%,
+and the 200,000-iteration variant gives the same percentage as the 40,000 one, so
+it is steady-state loop cost and not module init.
+
+The mechanism recorded at the site (a second arm makes `scope_find` too big for
+clang to inline into `scope_get`/`scope_put`/`js_tdecl`) is unaffected and is
+still the best explanation. Nothing here argues for reverting the index - nine
+languages are -19.5% to -42.0%, an order of magnitude outside this noise floor -
+but the "two ways of buying it back, both worse" experiments (+4.7%, +6.1%) are
+single builds against a 3.3%-wide row and would have to be re-taken before anyone
+concludes the cost cannot be bought back.
+
+`metajs +0.4%` was NOT re-measured and remains unsupported in either direction.
+
+## Patch list for runtime-merge-plan.md (another agent owns that file this round)
+
+Insertions only; nothing is to be deleted or reworded. Line numbers are at
+`9c7ac05`; each is anchored to the unique line it goes above so the patch survives
+drift.
+
+**1. Above line 741**, the ``` fence opening the `added lines   live objects ...`
+table in "THE TAX HAS TWO COMPONENTS" (immediately after the "min of three runs:"
+line):
+
+```
+> **⚠ AUDITED 2026-08-04 (`e8edc89`): the two wall-clock deltas here are not
+> measurements.** `+3.5%` is inside this machine's wall-clock noise (+-8% on one
+> binary) and inside the build-layout lottery (a native binary's instruction count
+> moves up to 4.8% with nothing but the LENGTH of its `-exe` path); `+9.1%` is on
+> the line. The `live objects` column is a COUNTER and is exact - it is what says
+> the live walk tracks CODE, and the finding survives on it alone. The derived
+> "~+1.3% wall per 100 lines" does NOT survive: it is a slope through two
+> unsupported points, and the kotlin 2x2 further down puts the code component an
+> order of magnitude lower. See runtime-next-plan.md, "How to measure performance
+> in this project".
+```
+
+**2. Above line 817**, the paragraph beginning ``` `impe` == `move` to three decimal
+places.```:
+
+```
+> **⚠ AUDITED 2026-08-04 (`e8edc89`): the three headline rows stand; every number
+> derived from their DIFFERENCES does not.** `+9.3%`, `+9.5%` and `+10.7%` are far
+> outside the noise floor. But "`impe` == `move` to three decimal places", "the
+> import mechanism itself is free (+0.2%)" and "the 1,217 duplicated lines are
+> worth +1.1%" are single-build differences of ~1% or less, and a single build
+> cannot resolve anything below ~2% on this target. Two builds landing on the same
+> number is a coin landing heads, not a confirmation of equality. The +1.1% was
+> later re-measured over 20 draws and its confidence interval straddles zero (see
+> "THE THIRD ASKING").
+```
+
+**3. Above line 843**, the ``` fence opening the `decls / code lines / live /
+instructions` table in "The 2x2 that separates lines from declarations"
+(immediately after the "placement is constant):" line):
+
+```
+> **⚠ AUDITED 2026-08-04 (`e8edc89`).** `B (+7.3%)` and `C (+5.4%)` are outside the
+> floor and STAND; `A (+1.9%)` is on the line. The two readings BELOW the table that
+> rest on sub-2% differences do not stand: "tiny5 vs fat5 ... the same cost to
+> 0.01%" is two single builds agreeing inside a percent-wide lottery, which is not
+> evidence of equality, and "B vs C +1.8% apart", with the ~0.2%-per-100-lines
+> coefficient drawn from it, is inside the same window. What DOES stand is the
+> `live` column, a counter: code size does not enter the live set at all.
+```
+
+**4. Above line 1028**, the ``` fence of the re-measured placement curve
+(the table whose first row is `regex block at HEAD placement`):
+
+```
+> **⚠ AUDITED 2026-08-04 (`e8edc89`): the right-hand column is single draws and
+> says nothing.** `-0.6%` and `+0.6%` are well inside the build-layout lottery -
+> re-running ONE binary reproduces to 0.02%, but re-BUILDING the same source to a
+> differently-named output moves the instruction count by up to 4.8%. Read both as
+> **0 +- 2%**. The claim they support - that placement no longer costs anything
+> after the hash index - is believed for the MECHANISM (an O(1) index replaced a
+> 461-entry linear scan) and because the left-hand column's +7.8% and +42.5% are
+> large enough to be real; it is not established by these two numbers. Any future
+> placement decision needs `tests/bench.sh --draws 9` or better.
+```
+
+**5. Above line 1038**, the ``` fence of the zeroed coefficient list (immediately
+after `coefficient in "THE RULE" is 0:`):
+
+```
+> **⚠ The three zeros are "nothing measurable remains", which is right. The
+> retained "~0.2% per 100 lines of layout" is inherited from the 2x2 above and was
+> never supported** - see the marking there. There is no evidence for a code-size
+> coefficient of any particular size; there is evidence that layout matters, which
+> is exactly why single builds cannot be read.
+```
+
+**6. Above line 880**, the ``` fence under "A shared layer-2 body taxes a
+non-calling importer by roughly" (that block already carries a DEAD banner; this
+adds the second reason):
+
+```
+> **⚠ AND A SECOND REASON, 2026-08-04 (`e8edc89`): this model was never resolvable
+> to the precision it is quoted at.** The rows it was fitted to (+9.3%, +7.3%,
+> +5.4%) are real, so the shape of the model was reasonable - but the +0.2%/100
+> lines term rests on a sub-2% single-build difference, and "9.9% predicted against
+> 10.7% measured" is a fit to single builds, which cannot close to 0.8% on this
+> target. The coefficients are dead because the hash index removed the tax; they
+> were also never measured to three significant figures.
+```
+
+**7. Above line 993**, the ``` fence of the hash-index results table (immediately
+after "against the same clean base:"):
+
+```
+> **⚠ AUDITED AND PARTLY RE-MEASURED 2026-08-04 (`e8edc89`).** The nine rows from
+> -19.5% to -42.0% are ten to forty times any noise floor and STAND. `c -0.1%` is
+> inside `c`'s own 0.35% spread, which is the correct reading of a control: it did
+> not move. `metajs +0.4%` is a single build and is not evidence in either
+> direction. **`lua +4.1%` WAS re-measured twice, over 13 and 9 layout draws per side in
+> isolated `git archive` trees of `85f3409` and `e1307f3`, and the effect is REAL:
+> it exceeds both rows' spreads, `c` as a control moved +0.02/+0.03%, and a 5x
+> longer loop gives the same percentage, so it is steady-state loop cost.** The two
+> runs agree on the parent to four digits and differ 2% on the index (1.5303 vs
+> 1.4997 G, the latter reproduced on three separate occasions), so **the figure to
+> carry is ~+4% - the originally recorded +4.1% stands.** That disagreement between
+> two honest medians is itself worth reading. Full numbers:
+> runtime-next-plan.md, "THE PERFORMANCE-CLAIM AUDIT".
+```
+
+**8. Above line 1009**, the paragraph beginning `**lua is a real regression and it
+is NOT the hashing.**`:
+
+```
+> **⚠ AUDITED 2026-08-04 (`e8edc89`): the regression is real (re-measured at ~+6%
+> over 13 draws a side), but the three numbers in this paragraph are single builds
+> against a row whose 13-draw range is 3.3%.** `+2.8%` for a branch that can never
+> fire, `+4.7%` for the out-of-line arm and `+6.1%` for the name-in-slot slot are
+> each inside or barely outside that window, so "both ways of buying it back are
+> worse" is NOT established - it would need draws before anyone accepts that the
+> cost cannot be bought back. The `sample` shift (33.5% of the profile in the scope
+> family against 23%, the extra samples on the LINEAR path) is not a timing and
+> stands.
+```
+
+**9. Above line 1417**, the paragraph beginning `**Cost of the door alone**`:
+
+```
+> **⚠ AUDITED 2026-08-04 (`e8edc89`): binary size (+8%) and 3,711 B/iter are
+> COUNTERS and are exact; the 36.5 -> 37.5 ms/process (+2.7%) is a single-build
+> wall-clock difference and is not evidence in either direction.**
+```
+
+**10. Optional, above line 605** (the ``` fence of the live-body tax table, kotlin/swift +7..11% and
++17..24%): these stand in magnitude and their `live`/`heap` counters move too, so no
+warning is owed. If anything is added, it should say that - that the rows stand,
+that the *ranges* quoted are not resolvable to a percent, and that the file itself
+later re-attributes the mechanism twice.
+
+## One claim outside both files, for whoever owns the manual
+
+`docs/working-on-this-project.md` §8 item 0 carries **"lua is +4.1% and metajs
++0.4%, and that is not the hashing"**, and §8 item 0's follow-ups quote the
+`+2.8% / +4.7% / +6.1%` rows. Per the re-measurement above, **lua's figure should
+read ~+6% (13 draws a side, non-overlapping ranges)** and metajs's `+0.4%` is a
+single build. The manual was not edited here - it is not this round's file - but the
+number in it is the one most likely to be quoted back to someone. §7 item 4's
+`+0.04%` is already withdrawn in the merge plan and the manual's own ⚠ block says
+so; the CI table beside it (n=20/n=14/n=10 with bootstrap intervals) is sound.
+
+---
+
 # Part 1 - Memory, which gates everything else
 
 **CLOSED 2026-08-03.** Allocation was down 5.0x since phase 4a (18,072 -> 3,616 bytes
@@ -110,6 +507,14 @@ lua  s = s + i%7, 2M      4.28 4.38 4.37     2.83 2.89 2.87   13,849 -> 6,925 MB
 lua  fib(26)              0.38 0.39 0.39     0.35 0.35 0.36    1,157 ->   929 MB
 metajs try/catch, 2M      1.98 2.02 2.01     1.92 1.99 1.96    2,453 -> 1,881 MB
 ```
+
+> **⚠ AUDITED 2026-08-04 (`e8edc89`).** The `-50%` memory row is a COUNTER and is
+> exact. The `-34%` on the Lua loop is far outside anything wall clock or layout can
+> manufacture and **STANDS**. `fib(26)`'s `-8%` and the try/catch row are wall clock
+> across two builds at three runs each: at that size they are inside the wall-clock
+> noise this machine has (+-8% on one binary) AND inside the build-layout lottery,
+> so **read them as directional at best**. The memory figures beside them are exact.
+> See "How to measure performance in this project" above.
 
 The Lua loop is **-34% wall clock and -50% memory**. `fib(26)` is -8%: it is call and
 scope bound, and its calls are the ones that really do declare. The try/catch benchmark
@@ -484,6 +889,14 @@ lua  fib(26)            0.38 0.36 0.35  0.41 0.42 0.41   0.39  0.42     928 ->  
 metajs try/catch, 2M    1.99 1.98 1.96  2.12 2.11 2.10   2.48  2.56   1,880 ->    2 MB
 ```
 
+> **⚠ AUDITED 2026-08-04 (`e8edc89`).** The RSS column is a counter and is exact -
+> 2,300x is not a measurement anyone can argue with. The time columns are wall/user
+> clock across two BUILDS: `+17%` and `+14%` are large enough to survive both the
+> +-8% wall-clock noise and the build-layout lottery and **STAND**; `+7%`, and the
+> whole `+6% / +8% / +3%` row, are at or under that floor and are **not evidence**
+> in either direction. The conclusion - a collector costs some mutator time and buys
+> a bounded heap - does not rest on the small numbers.
+
 **+17% / +14% / +7% of user time, against a resident set 2,300x / 460x / 940x smaller.**
 Wall clock moves much less (+6% / +8% / +3%) because the arena's own page faults were
 paying part of the difference already. The collector's work is the sweep, which walks
@@ -498,6 +911,14 @@ floor  1 MB   3.36 3.33 3.32 user    3 MB RSS    <- shipped
 floor  4 MB   3.16 3.20 3.20 user    6 MB RSS
 floor 16 MB   3.22 3.20 3.18 user   18 MB RSS
 ```
+
+> **⚠ AUDITED 2026-08-04 (`e8edc89`).** The three rows are three separate BUILDS
+> (the floor is a compile-time constant), timed in user seconds. `5%` is inside the
+> build-layout lottery and inside wall-clock noise, so **"4 MB is 5% faster" is
+> unsupported as written** - what the rows do show, from the exact RSS counter
+> beside them, is that the floor buys resident set and that no floor is dramatically
+> faster. The decision was made on test coverage anyway, which is why this does not
+> change it. Re-measure with `tests/bench.sh --draws 9` if it ever matters.
 
 4 MB is 5% faster for twice the resident set, and 16 MB buys nothing beyond it. **1 MB
 ships anyway**, and the reason is test coverage rather than memory: at 1 MB every short
@@ -585,6 +1006,14 @@ The mark epoch is gone with the header: the mark bitmap is CLEARED at the start 
 collection, which is `slots/8` bytes per chunk - 6 KB for a 3 MB heap of cells - against
 16 bytes on every object for ever. `MEC_GC=poison` got simpler too: a retired block just
 keeps its alloc bit clear and goes on no free list.
+
+> **⚠ AUDITED 2026-08-04 (`e8edc89`): this one STANDS even though it is under 2.5%.**
+> `+2.1%` here is **bytes per iteration**, an allocation COUNTER read off
+> `tests/bench-alloc.sh` with `MEC_GC=off` - not an instruction count, so the
+> build-layout lottery does not touch it, and 3,711 against 3,633 is arithmetic. The
+> same goes for the `+25.4%` beside it and for every `MEC_GC_STATS` figure in this
+> document. Counters are exact; only timings and instruction counts draw from the
+> lottery.
 
 **The residual +2.1% is the side arrays themselves**, 2 bits per block, plus the 128 byte
 chunk header and one bitmap pair per 1 MB chunk. It is stated rather than rounded away:
@@ -8707,6 +9136,14 @@ the strength of an uncommitted diff.
      all in 3,878 `sample` frames of the after binary - under 35 ms for the same
      2,000,000 elements, at least 30x. The `case_map` ratio, with its sign
      flipped.
+   - > **⚠ AUDITED 2026-08-04 (`e8edc89`).** The `1.0 s of 27 s` (3.7%) is wall
+     > clock over two BUILDS, six runs, and 3.7% is inside what the build-layout
+     > lottery plus this machine's wall-clock noise can produce on its own - as a
+     > standalone number it would be **unsupported**. It is kept as it stands
+     > because the conclusion does not rest on it: the `sample` evidence is
+     > independent and is not a timing at all (**0 of 3,878 frames** in the after
+     > binary, against a body that is plainly there before), and it is the frame
+     > count that says "at least 30x". Read the 30x, not the 3.7%.
    - **AND THE MORE USEFUL NUMBER: it is only 3.7% of that program.** `sample`
      says the spread-heaviest Go program one can write is dominated by
      `scope_get` and `ar_block` - the VARIADIC CALLEE's prologue, which packs the
