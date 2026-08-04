@@ -50,6 +50,16 @@ done
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
+# THE BINARY IS BUILT TO A FIXED ABSOLUTE PATH, and this is not a detail.
+# The -exe path string ends up IN the binary, so building the same .ll to
+# /tmp/bench and to /tmp/out-head-bench differs by ~0.7% in instructions retired
+# - larger than most effects anyone measures here, and enough on its own to make
+# a change look like a regression. A per-run mktemp directory reintroduces that
+# every time, and comparing two CHECKOUTS needs the path to be identical in both,
+# so it cannot live under the tree either.
+EXEDIR=/tmp/mec-bench
+mkdir -p "$EXEDIR"
+
 # ext -> language, i.e. which grammar compiles it.
 lang_of() {
     case "$1" in
@@ -86,7 +96,7 @@ for f in tests/bench/mod.*; do
         [ "$hit" = 1 ] || continue
     fi
 
-    exe="$work/$lang.exe"
+    exe="$EXEDIR/$lang.exe"
     if ! ./mec "languages/$lang-to-llvm-ir.abnf" "$f" -q -exe "$exe" >/dev/null 2>"$work/$lang.err"; then
         printf '%-10s %16s\n' "$lang" "BUILD FAILED"
         sed -n '1,3p' "$work/$lang.err" | sed 's/^/           /'

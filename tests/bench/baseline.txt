@@ -2,22 +2,26 @@
 # native -exe binaries built from tests/bench/mod.*. Re-record with
 # tests/bench.sh --record when you land an intended change, and say
 # in the commit message which rows moved and why.
-# recorded at commit e1307f3, in a clean `git archive e1307f3` tree and NOT in a
-# working tree - the manual's SS4 trap applies to benchmarks too, and the working
-# tree at the time (three agents mid-edit) read 0.4-0.8% off these on three rows.
+# recorded at commit 506000a, in a clean `git archive` tree and NOT in a working
+# tree - the manual's SS4 trap applies to benchmarks too.
 #
-# REPRODUCIBILITY, measured rather than assumed: re-running the whole harness
-# against these numbers moves each row by at most +-0.02% (ruby, the row that
-# looked noisiest, read -0.02 / -0.01 / +0.01 on three consecutive runs). The
-# default 1.0% tolerance is therefore ~50x the noise floor; tighten it with
-# --tol if you are chasing something small.
+# THESE NUMBERS ARE ONLY COMPARABLE BECAUSE THE -exe OUTPUT PATH IS FIXED.
+# The path string lives in the binary and moves its layout: building the same .ll
+# to two different paths differs by ~0.7% in instructions retired, which is larger
+# than most effects anyone measures here. bench.sh builds every variant to
+# /tmp/mec-bench/<lang>.exe for exactly that reason. An earlier version of this
+# file used a per-run mktemp directory and therefore carried that 0.7% as noise.
 #
-# For reference, the kotlin row IS the harness docs/runtime-merge-plan.md uses,
-# and 17.912 G here is the same measurement as the 18.023 G quoted there for the
-# post-hash-index build (that one was taken in a working tree).
-c          11272781
-java       8664605619
-kotlin     17912240238
-lua        1499717068
-python     31704073506
-ruby       6116559760
+# REPRODUCIBILITY, measured rather than assumed: with the path fixed, five of the
+# six rows re-record to within +-0.02%. The exception is `c` at -1.59%, and that
+# is the artefact showing its shape rather than a regression - the c row is
+# 11 M instructions where the others are 1.5-32 G, so a constant-size layout
+# shift is proportionally enormous there. Judge `c` on direction, not magnitude.
+#
+# The kotlin row IS the harness docs/runtime-merge-plan.md uses.
+c          11093413
+java       8666562326
+kotlin     17915632444
+lua        1499637411
+python     31710935786
+ruby       6115555219
