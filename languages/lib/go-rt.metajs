@@ -128,6 +128,22 @@
 // indexOf ignores its from-index, array.length is not assignable, and there are
 // no exponent literals.
 
+// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). It supplies
+// the externs every language implements identically, parameterised by the rtk*
+// hooks below. Same mechanism ruby uses for `import "./regex.js"`.
+import "./runtime.metajs"
+
+// ----- the rtk* hooks the shared runtime calls -------------------------------
+function rtkStr(v) { return goJavaStr(v) }
+function rtkNum(v) { return goNum(v) }
+// This file keeps its OWN js_is_type, which SHADOWS the shared one: both are
+// top-level declarations in one pinned scope, and -rt-lib's lazy boot runs the
+// imported file's top level BEFORE this file's, so the later declaration - this
+// one - is what the name resolves to. The hooks below exist only so the shared
+// body stays resolvable; they are never reached.
+function rtkIsChar(v) { return false }
+function rtkIsArr(v) { return Array.isArray(v) }
+
 // ===================================================== value readings =======
 
 // A boxed double (tag 14 / jsJFlo). `typeof v == "number"` is TRUE for one, and
@@ -377,7 +393,7 @@ function gopRender(v, depth) {
     if (v === true) { return "true" }
     if (v === false) { return "false" }
     if (typeof v == "number") {
-        if (floIs(v)) { return goFloStr(floNum(v)) }
+        if (floIs(v)) { return floStr(v) }
         if (sintIs(v)) { return sintStr(v) }
         return gopNumStr(v)
     }
@@ -410,7 +426,7 @@ function gopNumStr(n) {
         if (n === 0) { return "0" }
         return "" + n
     }
-    return goFloStr(n)
+    return floStr(flo(n, 1))
 }
 
 // gopObj renders the object shapes the Go grammars build. It answers undefined
@@ -561,115 +577,19 @@ function gopKeyLess(numeric, num, txt, a, b) {
     return txt[a] < txt[b]
 }
 
-// goFloStr is Go's fmt %v for a float64: strconv.FormatFloat(f, 'g', -1, 64) -
-// the SHORTEST round-tripping digits, scientific notation when the decimal
-// exponent is below -4 or at least 6, "+Inf" / "-Inf" for the infinities and
-// "NaN". strconv's shortest form is the same set of digits the engine's own
-// number text carries, so the digits are taken from there and only the LAYOUT
-// is Go's. (The floor's floStr cannot be used: jvmFloText routes style 1 to
-// jvm_flo_str, which is Java's layout, so a boxed double built with floGo
-// renders as Java there. Reported in the plan, not worked around here - this
-// file never calls floStr.)
-function goFloStr(f) {
-    if (f !== f) { return "NaN" }
-    if (f === Infinity) { return "+Inf" }
-    if (f === 0 - Infinity) { return "-Inf" }
-    var neg = goSignBit(f)
-    var a = f
-    if (neg) { a = -f }                              // UNARY minus, never 0 - f
-    var sgn = ""
-    if (neg) { sgn = "-" }
-    if (a === 0) { return sgn + "0" }
-    var d = goDigits(a)
-    return sgn + goLayout(d.digs, d.dp)
-}
-
-// The sign bit, which `f < 0` does not see for -0.0. 1/-0.0 is -Infinity.
-function goSignBit(f) {
-    if (f < 0) { return true }
-    if (f === 0) { return 1 / f === 0 - Infinity }
-    return false
-}
-
-// The shortest round-tripping DIGITS of a positive finite double, plus the
-// decimal point position dp: the value is 0.<digs> x 10^dp. The engine's own
-// number text is already the shortest form (it is num_str / shortest_digits in
-// the floor and Number.prototype.toString in goja), so this only has to take it
-// apart. Trailing zeros are stripped, which makes dp - not the digit count - the
-// carrier of the magnitude.
-function goDigits(a) {
-    var s = "" + a
-    var digs = ""
-    var dp = 0
-    var epos = s.indexOf("e")
-    if (epos < 0) { epos = s.indexOf("E") }
-    var mant = s
-    var ex = 0
-    if (epos >= 0) {
-        mant = s.substring(0, epos)
-        ex = parseInt(s.substring(epos + 1, s.length))
-    }
-    var dot = mant.indexOf(".")
-    var ipart = mant
-    var fpart = ""
-    if (dot >= 0) {
-        ipart = mant.substring(0, dot)
-        fpart = mant.substring(dot + 1, mant.length)
-    }
-    // Leading zeros of the integer part carry no digits; "0.00123" starts its
-    // digits inside the fraction and each skipped zero lowers dp.
-    var lead = 0
-    while (lead < ipart.length && ipart.charAt(lead) == "0") { lead = lead + 1 }
-    ipart = ipart.substring(lead, ipart.length)
-    if (ipart.length > 0) {
-        digs = ipart + fpart
-        dp = ipart.length + ex
-    } else {
-        var z = 0
-        while (z < fpart.length && fpart.charAt(z) == "0") { z = z + 1 }
-        digs = fpart.substring(z, fpart.length)
-        dp = ex - z
-    }
-    var nd = digs.length
-    while (nd > 1 && digs.charAt(nd - 1) == "0") { nd = nd - 1 }
-    digs = digs.substring(0, nd)
-    if (digs.length == 0) { digs = "0"; dp = 1 }
-    return {digs: digs, dp: dp}
-}
-
-// strconv's 'g' layout for shortest digits: %e when the exponent (dp - 1) is
-// below -4 or at least 6 (eprec is fixed at 6 for the shortest form), %f
-// otherwise, and neither ever writes a trailing ".0".
-function goLayout(digs, dp) {
-    var exp = dp - 1
-    if (exp < 0 - 4 || exp >= 6) { return goSci(digs, exp) }
-    if (dp <= 0) {
-        var out = "0."
-        var i = 0
-        while (i < 0 - dp) { out = out + "0"; i = i + 1 }
-        return out + digs
-    }
-    if (dp >= digs.length) {
-        var o2 = digs
-        var j = digs.length
-        while (j < dp) { o2 = o2 + "0"; j = j + 1 }
-        return o2
-    }
-    return digs.substring(0, dp) + "." + digs.substring(dp, digs.length)
-}
-
-// "1e+06" / "1.5e-07" / "1e+100": a point only when there is more than one
-// digit, and an exponent of at least two digits with its sign always written.
-function goSci(digs, exp) {
-    var out = digs.substring(0, 1)
-    if (digs.length > 1) { out = out + "." + digs.substring(1, digs.length) }
-    out = out + "e"
-    var e = exp
-    if (e < 0) { out = out + "-"; e = 0 - e } else { out = out + "+" }
-    var t = "" + e
-    if (t.length < 2) { t = "0" + t }
-    return out + t
-}
+// Go's float rendering is the FLOOR's, not this file's. `flo(x, 1)` is a boxed
+// double with style 1 (floGo) and floStr renders a box in ITS OWN language's
+// style: languages/lib/runtime.c's jf_text sends style 1 to go_float_str,
+// abnf/jsrtjvm.go's jvmFloText sends floGo to goFloStr, and the interpreter half
+// reaches the same code. This file used to carry its own goFloStr / goSignBit /
+// goDigits / goLayout / goSci - about 85 lines - under a comment claiming
+// "the floor's floStr cannot be used: jvmFloText routes style 1 to jvm_flo_str,
+// which is Java's layout". THAT COMMENT WAS STALE when it was written: the go
+// arm had landed two commits earlier, in d30629f. Verified before deleting, with
+// a 47-value probe (0, the infinities, -0.0, 1e-5 and 1e-4 either side of the
+// %e/%f switch, 1e6/1e7, 1e20, 5e-324, MaxFloat64, 1.0/3.0) run under real go
+// 1.26.5, the go interpreter and the go compiler: the two halves agree with each
+// other and with real go on every value both before and after.
 
 // ===================================================== fmt's verbs ==========
 
@@ -875,7 +795,7 @@ function goRunes(s) {
 // js_dict_new / js_is_type / js_jadd / js_pyin / js_pyset by five languages
 // each.
 
-function js_dict_new() { return {__dict: true, keys: [], vals: []} }
+// js_dict_new is SHARED - lib/runtime.metajs (six identical copies, no knobs).
 
 // isTypeName, over the four names go-to-llvm-ir.abnf actually passes: "$sl",
 // "$ptr", "$cx" and "Array". nil is no type; a user struct name falls through
@@ -899,42 +819,15 @@ function js_is_type(v, t) {
 // (an offset plus a length) and for the two halves of a complex, so the int32
 // arm is the one that runs; it is written out in full anyway, because the shared
 // extern is what llvm.Run compares against.
-function js_jadd(l, r) {
-    if (typeof l == "string" || typeof r == "string") { return goJavaStr(l) + goJavaStr(r) }
-    if (floIs(l) || floIs(r)) { return flo(goNum(l) + goNum(r), goStyleOf(l, r)) }
-    var ln = goNum(l)
-    var rn = goNum(r)
-    if (goIsInt32Value(ln) && goIsInt32Value(rn)) { return goWrap32(ln + rn) }
-    return ln + rn
-}
+// js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
 
-// jvmStyleOf: the style an operation's result inherits - the one of whichever
-// operand is a box, and the left one when both are.
-function goStyleOf(l, r) {
-    if (floIs(l)) { return floStyle(l) }
-    if (floIs(r)) { return floStyle(r) }
-    return 1
-}
 
 function goJavaStr(v) {
     if (typeof v == "string") { return v }
     return gopStr(v)
 }
 
-function goIsInt32Value(n) {
-    if (n !== n) { return false }
-    if (n !== Math.trunc(n)) { return false }
-    if (n > 2147483647) { return false }
-    if (n < 0 - 2147483648) { return false }
-    return true
-}
 
-function goWrap32(x) {
-    var m = x % 4294967296
-    if (m < 0) { m = m + 4294967296 }
-    if (m >= 2147483648) { m = m - 4294967296 }
-    return m
-}
 
 // Python's `x in y`, which the Go emitter uses for the `v, ok := m[k]` probe.
 function js_pyin(x, c) {

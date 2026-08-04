@@ -103,6 +103,17 @@
 
 import "./regex.js"
 
+// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). It supplies
+// the externs every language implements identically, parameterised by the rtk*
+// hooks below. Same mechanism ruby uses for `import "./regex.js"`.
+import "./runtime.metajs"
+
+// ----- the rtk* hooks the shared runtime calls -------------------------------
+function rtkStr(v) { return pyAJavaStr(v) }
+function rtkNum(v) { return pyNum(v) }
+function rtkIsChar(v) { return false }
+function rtkIsArr(v) { return pyIsArr(v) }
+
 // ===================================================== the value model ======
 
 function pyIsObj(v) {
@@ -180,7 +191,7 @@ function pyFail(msg) { fail(msg) }
 // STRICT equality (Go's strictEq through dictFind), not with Python ==; that is the
 // Go twin's choice and it is reproduced rather than repaired.
 
-function pyNewDict() { return {__dict: true, keys: [], vals: []} }
+function pyNewDict() { return js_dict_new() }
 
 function pyDictFind(keys, k) {
     for (var i = 0; i < keys.length; i++) {
@@ -1753,13 +1764,7 @@ function js_pyeq(x, y) { return pyAEqual(x, y) }
 // arm always wins and the numeric arms below are dead - they are ported anyway
 // because the extern is shared. Go's jvmIsFlo arm (a boxed double) has no
 // counterpart at all: Python has no boxed double in this value model.
-function js_jadd(l, r) {
-    if (typeof l == "string" || typeof r == "string") { return pyAJavaStr(l) + pyAJavaStr(r) }
-    var ln = pyNum(l)
-    var rn = pyNum(r)
-    if (pyAIsInt32(ln) && pyAIsInt32(rn)) { return (ln + rn) | 0 }
-    return ln + rn
-}
+// js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
 
 // Go: rt.javaString (jsrt.go:2523) - null and undefined render as "null" here,
 // NOT as Python's "None". That is what Go does and the difference is
@@ -1771,13 +1776,6 @@ function pyAJavaStr(v) {
     return pyToStr(v)
 }
 
-// Go: isInt32Value (jsrt.go:8420).
-function pyAIsInt32(n) {
-    if (n !== n) { return false }
-    if (n != Math.trunc(n)) { return false }
-    if (n > 2147483647) { return false }
-    return n >= -2147483648
-}
 
 // Go: js_bigint (jsrt.go:5366). The digits of a decimal integer literal too
 // large for a double, as an arbitrary precision integer.
@@ -2508,7 +2506,7 @@ function pyCGenericAlias(origin, param) {
 
 // ----- js_dict_new (jsrt.go:6369) -------------------------------------------
 // An empty Python dict handle. Identical to the dart-rt.metajs twin.
-function js_dict_new() { return pyNewDict() }
+// js_dict_new is SHARED - lib/runtime.metajs (six identical copies, no knobs).
 
 
 // ----- js_pyget (jsrt.go:6297) ----------------------------------------------
@@ -3051,37 +3049,7 @@ function js_pymatchargs(v, cls, count) {
 // vocabulary, not Python's - the Python grammars do not emit this extern at
 // all, and it is here because -rt-lib must export every language-neutral
 // symbol of the table.
-function js_is_type(v, t) {
-    var nm = t
-    var lt = nm.indexOf("<")
-    if (lt >= 0) { nm = nm.substring(0, lt) }
-    var opt = false
-    if (nm.length > 0 && nm.charAt(nm.length - 1) == "?") {
-        nm = nm.substring(0, nm.length - 1)
-        opt = true
-    }
-    if (pyIsNone(v)) { return opt }
-    if (nm == "Any" || nm == "Object") { return true }
-    if (nm == "Int" || nm == "Integer" || nm == "Long" || nm == "Short" || nm == "Byte" || nm == "Char" || nm == "Character") {
-        if (typeof v != "number") { return false }
-        return v == Math.trunc(v)
-    }
-    if (nm == "Double" || nm == "Float" || nm == "Number") { return typeof v == "number" }
-    if (nm == "String" || nm == "CharSequence") { return typeof v == "string" }
-    if (nm == "Boolean") { return typeof v == "boolean" }
-    if (nm == "List" || nm == "MutableList" || nm == "Collection" || nm == "Array") { return pyIsArr(v) }
-    if (pyIsObj(v)) {
-        // Go walks __class / __super, NOT the Python MRO: this is the shape the
-        // Kotlin and Java emitters build. A Python class object carries __super
-        // (the first base) too, so the walk still terminates on one.
-        var cls = v["__class"]
-        while (pyIsObj(cls)) {
-            if (cls["__name"] === nm) { return true }
-            cls = cls["__super"]
-        }
-    }
-    return false
-}
+// js_is_type is SHARED - lib/runtime.metajs, via the rtkIsChar/rtkIsArr hooks.
 // ============================================================================
 // CHUNK D -- classes, attributes, calls and exceptions.
 //

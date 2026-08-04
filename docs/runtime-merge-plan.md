@@ -127,6 +127,149 @@ For each family, in order:
 - **A written list of every difference found, each classified knob or defect**, with the
   defects fixed and pinned by a ratchet assertion whose discriminating power is measured.
 
+## Part A - what has been done
+
+The shared file is **`languages/lib/runtime.metajs`**, imported by nine layer-2
+files. Three families are merged, two emitter bugs are fixed, and every gate is
+green.
+
+### The two emitter bugs, both fixed in `metajs-to-llvm-ir.abnf`
+
+- **`core.importFile` appended `".js"` to any path not already ending in it**, so
+  `import "./runtime.metajs"` searched for `runtime.metajs.js`. It now appends
+  only when the path has NO extension at all, scanned backwards to the first `.`
+  or `/` by hand (no `lastIndexOf`, no `break` in the tag script). Measured: the
+  probe `import "./mjslib"` + `import "./other.metajs"` resolves under BOTH goja
+  and `-frozen` after, and at HEAD fails with
+  `unresolved import './other.metajs'`. `importFile` is above the
+  `// ===== goja driver =====` marker, so this needed a re-freeze;
+  `abnf/jsagrammar.go` and `abnf/jsbootstrap.ll` are regenerated and `-freeze` is
+  a verified fixed point.
+- **`-rt-lib` read its export surface from the MAIN file's source text only**
+  (`c.readFile(c.file)`), so a `function js_*` in an IMPORTED file compiled, ran
+  correctly under `llvm.Run`, and was **undefined at link time**. `./test.sh` and
+  `--cross` are both blind to it - neither builds an `-exe` - and
+  `tests/clang-check.sh` was the only gate that reported it, nine times at once.
+  The scan now covers every imported file, deduplicated by symbol so a name
+  declared in both cannot emit two definitions. **This removed the nine one-line
+  forwarders and, more importantly, the trap for every family merged from here
+  on.**
+
+### Merged
+
+`js_jadd` (9 languages), `js_is_type` (6), `js_dict_new` (6), plus `rtIsInt32`,
+`rtWrap32` and `rtIsPlainNum` underneath them.
+
+```
+                    HEAD    now   delta        (code lines, comments excluded)
+go                  1224   1120    -104
+java                 819    754     -65
+csharp               955    891     -64
+kotlin              7416   7366     -50
+swift                953    906     -47
+python              3447   3410     -37
+ruby                2057   2020     -37
+dart                1197   1182     -15
+php                 1703   1690     -13
+runtime.metajs         0     68     +68
+                                   ----
+                                   -364     68 shared lines replace 364
+```
+
+`runtime.metajs` is 334 lines, of which **266 are the difference list**.
+
+### The plan's headline example was wrong, and the method is what found it
+
+`js_jadd`'s "known divergence in the float path" - java's `jvmArith("+", l, r)`
+against swift's `flo(swNum(l) + swNum(r), floStyle(...))` - **is not a
+divergence**. `jvmArith` is `floOp(0, ...)`, `floOp` is `jsrtjvm.go:285` calling
+`rt.jvmArith`, and `rt.jvmArith` (`jsrtjvm.go:176`) is
+`jsJFlo{f: rt.toNumber(l)+rt.toNumber(r), sty: jvmStyleOf(l, r)}` when either
+side is a box: the same expression spelled through the floor. Likewise
+`goStyleOf` and `k1StyleOf` differ only in a final arm the caller has already
+excluded. The whole nine-way family reduced to **two knobs**, `js_is_type` to
+**two**, and `js_dict_new` to **none - six byte-identical copies of one line**,
+which is worth stating because the 29-name table counts implementations, not
+disagreements.
+
+### Defects
+
+- **C# NaN sentinel - fixed, measured, pinned.** `rt.jsCompare` answers the
+  sentinel `2` for a NaN operand and `js_cscmp` compared it as an ordering, so
+  `>` and `>=` came out TRUE where ECMA-334 12.12.1 makes all four false. Fixed
+  in `csharp-rt.metajs`; `abnf/jsrtcsharp.go:477` took the same fix. Measured
+  from a clean `git archive HEAD` tree with the new assertion in place: the
+  compiler half gave `FAIL NaN >` and `FAIL NaN >=` while the interpreter half
+  passed - **the two halves already disagreed at HEAD and `--cross` never probed
+  it.** Pinned by four assertions in `tests/csharp-test-1.cs`; **two of the four
+  discriminate**, and the other two are said at the site to pass either way.
+- **`rtWrap32` NaN/Inf guard.** `rt.toInt32` (`jsrt.go:8502`) answers 0; csharp
+  and java guarded, dart/swift/go/php did not and would answer NaN. Fixed by
+  merging, **zero discriminating power**, and the reason is itself a finding -
+  see below.
+- **`guard < 64` on the `__class`/`__super` walk.** csharp/java/kotlin/swift cap
+  it; python/ruby and the oracle (`jsrt.go:8472`) do not. Kept the cap for all
+  six: the oracle HANGS on a cyclic `__super`, and no language here can express a
+  65-deep hierarchy. Recorded, not fixed.
+
+### Dead code that arrived by copying
+
+The only call site that could reach `rtWrap32`'s NaN guard in dart and swift is
+`sumOf` - and **`sumOf` is a KOTLIN method name**. `dart-to-llvm-ir.abnf`,
+`dart-interpreter.abnf`, `swift-to-llvm-ir.abnf` and `swift-interpreter.abnf`
+mention it zero times. It was transferred verbatim out of `kotlin-rt.metajs` and
+is unreachable in both files. Exactly the invisible duplication the plan
+predicted, invisible to any extern table, and still present.
+
+### Go's float rendering moved to the floor
+
+`go-rt.metajs` carried `goFloStr` / `goSignBit` / `goDigits` / `goLayout` /
+`goSci` - 110 lines - under a comment saying the floor's `floStr` could not be
+used because `jvmFloText` routes style 1 to Java's layout. **That comment was
+stale when it was written**: `jf_text` (`runtime.c`) sends style 1 to
+`go_float_str` and `jvmFloText` (`jsrtjvm.go:65`) sends `floGo` to `goFloStr`,
+landed in `d30629f`. Verified before deleting with a 47-value probe (0, the
+infinities, -0.0, 1e-5 and 1e-4 either side of the %e/%f switch, 1e6/1e7, 1e20,
+5e-324, MaxFloat64, 1.0/3.0) under real go 1.26.5, the go interpreter, the go
+compiler, and - the one that actually links `go-rt.ll` - a **native `-exe`**.
+Native == `llvm.Run` == real go on 46 of 47; line 47 is `-0.0`, where Go folds
+the untyped constant to `0` in the front end, a pre-existing difference unrelated
+to rendering.
+
+### `js_bytelen` - verified as a pair, not shipped as a half
+
+`runtime.c` documents that adding the body collides with
+`php-rt.metajs`'s `function js_bytelen(s) { return byteLen(s) }`. Deleting the
+layer-2 line alone leaves PHP's native `-exe` unresolvable, which is a loss, so
+it is NOT deleted here. Instead the pair was **verified end to end** in a scratch
+tree carrying both halves: PHP matrix 14/14, `tests/php-test-features.php` native
+`-exe` 127 checks 0 failures, `llvm.Run` half agreeing, clang-check php "ok, and
+the clang executable agrees". The two edits, to be made together:
+
+```
+languages/lib/php-rt.metajs   delete `function js_bytelen(s) { return byteLen(s) }`
+                              (and its two comment lines), then tests/gen-php-rt-ll.sh
+languages/lib/runtime.c       long js_bytelen(long v) { return mk_num(d_from_long(str_len(to_string(v)))); }
+```
+
+### Not merged, with the difference list already taken
+
+- **`js_pyset` (6)** - the list is recorded at the bottom of `runtime.metajs`.
+  It needs four knobs, and two findings should be settled before merging: key
+  equality is **identity** (`===`) in dart/python/swift but **value equality**
+  in csharp (`csValueEq`) and go (`goKeyEq`), so two languages find keys three
+  others miss; and the index coercion is `int(rt.toNumber(...))` in the oracle -
+  truncating - which dart/python/ruby/go do and **csharp and swift do not**.
+- `js_mcall` (6), `js_supercall` (5), `js_pylen` (5), `js_pyget` (5), `js_char`
+  (4), `js_char_code` (3), the `js_py*` block, the 2-implementation tail.
+- The `*_kget` / `*_kset` / `*_safeget` verbatim transfers.
+- **Java's `jl*` collapse, and it is not the ~90-line freebie it looks like.**
+  Marking a long box unsigned is what defeats `si_norm`, and `sintOp` opcode 10
+  (`>>`) branches on that flag: with an honest `sintRaw` signed box `>>` becomes
+  arithmetic - which is what `jlSar` was for - but Java's `>>>`, today
+  `sintOp(10)` direct, then needs a helper of its own. The collapse trades
+  `jlSar` for a `jlShr` rather than removing it, across ~30 call sites.
+
 ---
 
 # Part B - a smaller C floor

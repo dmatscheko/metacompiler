@@ -135,6 +135,17 @@
 // split/join/lastIndexOf, array.length is not assignable, indexOf ignores its
 // from-index, no exponent literals; unary minus is `-x`, never `0 - x`.
 
+// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). It supplies
+// the externs every language implements identically, parameterised by the rtk*
+// hooks below. Same mechanism ruby uses for `import "./regex.js"`.
+import "./runtime.metajs"
+
+// ----- the rtk* hooks the shared runtime calls -------------------------------
+function rtkStr(v) { return k1JStr(v) }
+function rtkNum(v) { return ktNum(v) }
+function rtkIsChar(v) { return ktIsChar(v) }
+function rtkIsArr(v) { return Array.isArray(v) }
+
 // ===================================================== the miss sentinel ====
 
 // A dispatcher that did not handle the call answers KT_MISS. undefined cannot
@@ -2120,22 +2131,8 @@ function js_ktstep(v, delta) {
 // values, float add otherwise. The STRING rendering is jsrt.go's javaString, not
 // Kotlin's own printer - the completed shape java-rt.metajs, swift-rt.metajs and
 // dart-rt.metajs all carry.
-function js_jadd(l, r) {
-    if (typeof l == "string" || typeof r == "string") { return k1JStr(l) + k1JStr(r) }
-    if (floIs(l) || floIs(r)) { return flo(ktNum(l) + ktNum(r), k1StyleOf(l, r)) }
-    var ln = ktNum(l)
-    var rn = ktNum(r)
-    if (k1IsInt32Value(ln) && k1IsInt32Value(rn)) { return ktNorm(ln + rn, 32, 0) }
-    return ln + rn
-}
+// js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
 
-// abnf/jsrt.go isInt32Value: an exact integer inside the int32 range.
-function k1IsInt32Value(n) {
-    if (n !== n) { return false }
-    if (Math.trunc(n) !== n) { return false }
-    if (n > 2147483647) { return false }
-    return n >= 0 - 2147483648
-}
 
 // abnf/jsrt.go js_jband (5170). Java & | ^: the non-short-circuit boolean
 // operator when both sides are booleans, the int32 bit operation otherwise.
@@ -4881,13 +4878,6 @@ function js_ktiter(v) {
 
 // ============================================================ small values ==
 
-// A PLAIN number: not a sized-integer box (tag 13) and not a float box (tag 14).
-// The Go twin's `v.(float64)`.
-function k4bIsPlainNum(v) {
-    if (typeof v != "number") { return false }
-    if (sintIs(v)) { return false }
-    return !floIs(v)
-}
 
 // ktIsIntegral (jsrtkotlin.go:135): an operand of INTEGER arithmetic - a Char is
 // one, a Double is not.
@@ -5137,42 +5127,7 @@ function ktTypeObj(name) {
 // VERBATIM from languages/lib/java-rt.metajs (js_is_type, line 795), which is
 // the same Go function: the Int/Long/Short/Byte arm tests for a PLAIN number, so
 // a sized box is NOT `is Long` here either - that is what js_ktis is for.
-function js_is_type(v, t) {
-    var nm = k4bStripAngle(t)
-    var opt = false
-    if (k4bEndsQ(nm)) {
-        nm = k4bStripQ(nm)
-        opt = true
-    }
-    if (v === undefined) { return opt }
-    if (v === null) { return opt }
-    if (ktIsChar(v)) {
-        if (nm == "Char") { return true }
-        if (nm == "Character") { return true }
-        if (nm == "Any") { return true }
-        return nm == "Comparable"
-    }
-    if (nm == "Any") { return true }
-    if (nm == "Object") { return true }
-    if (nm == "Int" || nm == "Integer" || nm == "Long" || nm == "Short" || nm == "Byte" || nm == "Char" || nm == "Character") {
-        if (!k4bIsPlainNum(v)) { return false }
-        return Math.trunc(v) == v
-    }
-    if (nm == "Double" || nm == "Float" || nm == "Number") { return k4bIsPlainNum(v) }
-    if (nm == "String" || nm == "CharSequence") { return typeof v == "string" }
-    if (nm == "Boolean") { return typeof v == "boolean" }
-    if (nm == "List" || nm == "MutableList" || nm == "Collection" || nm == "Array") { return Array.isArray(v) }
-    if (!ktIsObj(v)) { return false }
-    var cls = v["__class"]
-    var guard = 0
-    while (guard < 64) {
-        guard = guard + 1
-        if (!ktIsObj(cls)) { return false }
-        if (cls["__name"] === nm) { return true }
-        cls = cls["__super"]
-    }
-    return false
-}
+// js_is_type is SHARED - lib/runtime.metajs, via the rtkIsChar/rtkIsArr hooks.
 
 // ----------------------------------------------------- accessor properties --
 

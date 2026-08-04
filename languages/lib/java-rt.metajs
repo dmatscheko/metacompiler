@@ -88,6 +88,17 @@
 // split/join/lastIndexOf, indexOf ignores its from-index, array.length is not
 // assignable, and there are no exponent literals.
 
+// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). It supplies
+// the externs every language implements identically, parameterised by the rtk*
+// hooks below. Same mechanism ruby uses for `import "./regex.js"`.
+import "./runtime.metajs"
+
+// ----- the rtk* hooks the shared runtime calls -------------------------------
+function rtkStr(v) { return jpStr(v) }
+function rtkNum(v) { return jvNum(v) }
+function rtkIsChar(v) { return jvIsChar(v) }
+function rtkIsArr(v) { return Array.isArray(v) }
+
 // ===================================================== long, exactly ========
 
 function jlZero() { return sint(0, 0, 64, 1) }
@@ -203,14 +214,6 @@ function jvIsChar(v) {
 
 // ===================================================== the value readings ===
 
-// A PLAIN number is an int. A sized integer and a boxed double are both
-// `typeof v == "number"` in the C floor (tag 13 and tag 14), so every site that
-// meant "an ordinary double" has to say so - the rule both tags impose.
-function jvIsPlainNum(v) {
-    if (typeof v != "number") { return false }
-    if (sintIs(v)) { return false }
-    return !floIs(v)
-}
 
 // jvIsIntegral: an operand of INTEGER arithmetic. A char is one (Java's char is
 // an integral type); a double is not.
@@ -327,15 +330,6 @@ function jvNarrow(v, w) {
     return sint(0, lo & 255, 8, 0)
 }
 
-// The 32 bit wrap of a double, which is what an int-width result is reduced to.
-function jvWrap32(x) {
-    if (x !== x) { return 0 }
-    if (x == Infinity) { return 0 }
-    if (x == 0 - Infinity) { return 0 }
-    var m = x - Math.floor(x / 4294967296) * 4294967296
-    if (m >= 2147483648) { m = m - 4294967296 }
-    return m
-}
 
 // ===================================================== ArithmeticException ==
 
@@ -384,14 +378,14 @@ function jvArith(op, l, r) {
     }
     var x = jvI(l)
     var y = jvI(r)
-    if (op == "+") { return jvWrap32(x + y) }
-    if (op == "-") { return jvWrap32(x - y) }
+    if (op == "+") { return rtWrap32(x + y) }
+    if (op == "-") { return rtWrap32(x - y) }
     if (op == "*") { return jvMul32(x, y) }
     if (op == "/") {
         if (y == 0) { jvThrowArith("/ by zero") }
         // Integer.MIN_VALUE / -1 overflows back to itself (JLS 15.17.2).
         if (x == 0 - 2147483648) { if (y == 0 - 1) { return x } }
-        return jvWrap32(Math.trunc(x / y))
+        return rtWrap32(Math.trunc(x / y))
     }
     if (op == "%") {
         if (y == 0) { jvThrowArith("/ by zero") }
@@ -430,7 +424,7 @@ function jvShift(op, l, r) {
     // `>>>` in MetaJS is JavaScript's, whose result is an UNSIGNED 32 bit value:
     // -1 >>> 0 is 4294967295 there and -1 in Java, where the result type is still
     // int. jvShift's Go twin says the same thing as int32(uint32(a) >> s).
-    return jvWrap32(x >>> t)
+    return rtWrap32(x >>> t)
 }
 
 // jvCmp is the ordered comparison at the PROMOTED width. A byte compares against
@@ -689,7 +683,7 @@ function jvBoxType(name) {
     if (name == "Math") {
         o["abs"] = function(v) {
             if (floIs(v)) { return floAbs(v) }
-            return jvWrap32(Math.abs(jvNum(v)))
+            return rtWrap32(Math.abs(jvNum(v)))
         }
         o["max"] = function(a, b) { return jvmMinMax(a, b, jvNum(a) > jvNum(b)) }
         o["min"] = function(a, b) { return jvmMinMax(a, b, jvNum(a) < jvNum(b)) }
@@ -792,68 +786,13 @@ function js_char(code_raw) { return jvChar(code_raw) }
 // The shared dynamic type test behind instanceof. abnf/jsrt.go's isTypeName is
 // the spec, including the part that surprises: the Int/Long/Short/Byte arm tests
 // for a PLAIN number, so a boxed long is NOT `instanceof Long` there either.
-function js_is_type(v, t) {
-    var nm = t
-    var lt = nm.indexOf("<")
-    if (lt >= 0) { nm = nm.substring(0, lt) }
-    var opt = false
-    if (nm.length > 0) {
-        if (nm.charAt(nm.length - 1) == "?") {
-            nm = nm.substring(0, nm.length - 1)
-            opt = true
-        }
-    }
-    if (v === undefined) { return opt }
-    if (v === null) { return opt }
-    if (jvIsChar(v)) {
-        if (nm == "Char") { return true }
-        if (nm == "Character") { return true }
-        if (nm == "Any") { return true }
-        return nm == "Comparable"
-    }
-    if (nm == "Any") { return true }
-    if (nm == "Object") { return true }
-    if (nm == "Int" || nm == "Integer" || nm == "Long" || nm == "Short" || nm == "Byte" || nm == "Char" || nm == "Character") {
-        if (!jvIsPlainNum(v)) { return false }
-        return Math.trunc(v) == v
-    }
-    if (nm == "Double" || nm == "Float" || nm == "Number") { return jvIsPlainNum(v) }
-    if (nm == "String" || nm == "CharSequence") { return typeof v == "string" }
-    if (nm == "Boolean") { return typeof v == "boolean" }
-    if (nm == "List" || nm == "MutableList" || nm == "Collection" || nm == "Array") { return Array.isArray(v) }
-    if (typeof v != "object") { return false }
-    if (Array.isArray(v)) { return false }
-    var cls = v["__class"]
-    var guard = 0
-    while (guard < 64) {
-        guard = guard + 1
-        if (cls === undefined) { return false }
-        if (cls === null) { return false }
-        if (typeof cls != "object") { return false }
-        if (cls["__name"] === nm) { return true }
-        cls = cls["__super"]
-    }
-    return false
-}
+// js_is_type is SHARED - lib/runtime.metajs, via the rtkIsChar/rtkIsArr hooks.
 
 // Java/C# +: string concat, 32 bit add for two int values, float add otherwise.
 // The STRING rendering here is abnf/jsrt.go's javaString, not jsrtjava.go's
 // jvpStr - js_jvadd below is the one that renders through the Java printer.
-function js_jadd(l, r) {
-    if (typeof l == "string" || typeof r == "string") { return jpStr(l) + jpStr(r) }
-    if (floIs(l) || floIs(r)) { return jvmArith("+", l, r) }
-    var ln = jvNum(l)
-    var rn = jvNum(r)
-    if (jvIsInt32Value(ln) && jvIsInt32Value(rn)) { return jvWrap32(ln + rn) }
-    return ln + rn
-}
+// js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
 
-function jvIsInt32Value(n) {
-    if (n !== n) { return false }
-    if (Math.trunc(n) !== n) { return false }
-    if (n > 2147483647) { return false }
-    return n >= 0 - 2147483648
-}
 
 // Java & | ^: the non-short-circuit boolean operator when both sides are
 // booleans, the int32 bit operation otherwise.
@@ -883,7 +822,7 @@ function js_jchareq(l, r) {
     if (jvIsChar(l)) {
         if (typeof r == "string") { return r.length == 1 && r.charCodeAt(0) == l["__char"] }
         if (jvIsChar(r)) { return l["__char"] === r["__char"] }
-        if (jvIsPlainNum(r)) { return l["__char"] === r }
+        if (rtIsPlainNum(r)) { return l["__char"] === r }
         if (sintIs(r)) { return jvCmp("==", l, r) }
         if (floIs(r)) { return floEq(flo(l["__char"], 0), r) }
         return false
@@ -1125,12 +1064,12 @@ function js_jvneg(v) {
     // operand including the infinities and NaN.
     if (floIs(v)) { return floOp(2, v, flo(0 - 1, 0)) }
     if (jvIsLong(v)) { return jlNeg(v) }
-    return jvWrap32(0 - jvI(v))
+    return rtWrap32(0 - jvI(v))
 }
 
 function js_jvnot(v) {
     if (jvIsLong(v)) { return jlNot(v) }
-    return jvWrap32(0 - jvI(v) - 1)
+    return rtWrap32(0 - jvI(v) - 1)
 }
 
 // ++ / -- keep the type of what they step, which is the same implicit narrowing
@@ -1140,7 +1079,7 @@ function js_jvstep(v, d) {
     if (jvIsChar(v)) { return jvChar((v["__char"] + n) & 65535) }
     if (floIs(v)) { return flo(floNum(v) + n, 0) }
     if (sintIs(v)) { return jvNarrow(jvArith("+", v, jvStepDelta(v, n)), sintWidth(v)) }
-    return jvWrap32(jvI(v) + n)
+    return rtWrap32(jvI(v) + n)
 }
 
 // The step amount at the operand's own width, so a long steps by a long.
@@ -1160,7 +1099,7 @@ function js_jvnarrowlike(l, v) {
     }
     if (jvIsChar(l)) { return jvChar(jvLow32(v) & 65535) }
     if (sintIs(l)) { return jvNarrow(v, sintWidth(l)) }
-    if (jvIsPlainNum(l)) {
+    if (rtIsPlainNum(l)) {
         if (jvIsIntegral(v) || floIs(v)) { return jvNarrow(v, 32) }
     }
     return v

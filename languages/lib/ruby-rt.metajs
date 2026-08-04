@@ -114,6 +114,17 @@
 
 import "./regex.js"
 
+// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). It supplies
+// the externs every language implements identically, parameterised by the rtk*
+// hooks below.
+import "./runtime.metajs"
+
+// ----- the rtk* hooks the shared runtime calls -------------------------------
+function rtkStr(v) { return rbJStr(v) }
+function rtkNum(v) { return rbToF(v) }
+function rtkIsChar(v) { return false }
+function rtkIsArr(v) { return rbIsArr(v) }
+
 // ===================================================== module state =========
 //
 // Four tables the Go twin keeps on the jsrt struct (rubyClasses, rubyGlobals,
@@ -941,7 +952,7 @@ function rbDictSet(d, k, v) {
     return undefined
 }
 
-function rbNewDict() { return {__dict: true, keys: [], vals: []} }
+function rbNewDict() { return js_dict_new() }
 
 function rbCopyArr(a) {
     var out = []
@@ -2108,49 +2119,15 @@ function rbGset(name, v) {
 // them, and they are here only because the C floor does not have them yet.
 
 // An empty Hash / Python dict / Go map handle.
-function js_dict_new() { return rbNewDict() }
+// js_dict_new is SHARED - lib/runtime.metajs (six identical copies, no knobs).
 
-// isTypeName: `v is T`. The jsChar arm of the Go twin is Kotlin's and is
-// unreachable from Ruby, which has no character type.
-function js_is_type(v, t) {
-    var nm = t
-    var lt = nm.indexOf("<")
-    if (lt >= 0) { nm = nm.substring(0, lt) }
-    var opt = false
-    if (nm.length > 0 && nm.charAt(nm.length - 1) == "?") {
-        nm = nm.substring(0, nm.length - 1)
-        opt = true
-    }
-    if (rbIsNil(v)) { return opt }
-    if (nm == "Any" || nm == "Object") { return true }
-    if (nm == "Int" || nm == "Integer" || nm == "Long" || nm == "Short" || nm == "Byte" || nm == "Char" || nm == "Character") {
-        if (typeof v != "number") { return false }
-        return v == Math.trunc(v)
-    }
-    if (nm == "Double" || nm == "Float" || nm == "Number") { return typeof v == "number" }
-    if (nm == "String" || nm == "CharSequence") { return typeof v == "string" }
-    if (nm == "Boolean") { return typeof v == "boolean" }
-    if (nm == "List" || nm == "MutableList" || nm == "Collection" || nm == "Array") { return rbIsArr(v) }
-    if (rbIsObj(v)) {
-        var cls = v["__class"]
-        while (rbIsObj(cls)) {
-            if (cls["__name"] === nm) { return true }
-            cls = cls["__super"]
-        }
-    }
-    return false
-}
-
-// Java/C# +: string concat, 32 bit add for two int values, float add otherwise.
+// js_is_type is SHARED - lib/runtime.metajs, via the rtkIsChar/rtkIsArr hooks.
+// The jsChar arm of the shared body is Kotlin's; rtkIsChar answers false here,
+// because Ruby has no character type.
+//
+// js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
 // The ruby emitter reaches it only for the internal loop counters it increments
-// (js_jadd(i, 1)), never on a user value, so no {__flo} arm is needed.
-function js_jadd(l, r) {
-    if (typeof l == "string" || typeof r == "string") { return rbJStr(l) + rbJStr(r) }
-    var a = rbToF(l)
-    var b = rbToF(r)
-    if (rbIsInt32(a) && rbIsInt32(b)) { return (a + b) | 0 }
-    return a + b
-}
+// (js_jadd(i, 1)), never on a user value, so the shared float arm is dead here.
 
 function rbJStr(v) {
     if (typeof v == "string") { return v }
@@ -2158,12 +2135,6 @@ function rbJStr(v) {
     return "" + v
 }
 
-function rbIsInt32(n) {
-    if (n !== n) { return false }
-    if (Math.floor(n) !== n) { return false }
-    if (n > 2147483647) { return false }
-    return n >= 0 - 2147483648
-}
 
 // A builtin exception instance for the Python pair. The ruby emitter uses it for
 // its own control signals (the block-break and retry markers), which is why the

@@ -1,0 +1,334 @@
+// runtime.metajs -- the SHARED layer-2 runtime, imported by every *-rt.metajs.
+//
+// Layer 2 is the per-language runtime written in MetaJS and compiled by
+// languages/metajs-to-llvm-ir.abnf with -rt-lib into <lang>-rt.ll, which the
+// language's own -exe links next to lib/runtime.ll (the C floor). Eleven such
+// files exist, and docs/runtime-merge-plan.md measured that 29 extern names have
+// between two and nine implementations of the SAME function, costing 1,427 lines.
+// This file is where those merge.
+//
+// The mechanism is the one ruby proved with `import "./regex.js"`: a layer-2 file
+// may import a shared MetaJS source, metajs-to-llvm-ir.abnf resolves the relative
+// path, and -rt-lib's lazy boot runs both into the SAME pinned scope. So a
+// definition here is indistinguishable from one written in the importing file.
+//
+// ----- how a language parameterises a shared body ----------------------------
+//
+// An extern's signature is fixed by the emitter (js_jadd(l, r)), so a shared body
+// cannot take a knob object the way lib/interp-core.js's `core` does. Instead it
+// calls HOOK functions that the importing file defines, all named rtk*:
+//
+//     rtkStr(v)   the language's rt.javaString - how `+` renders an operand once
+//                 the other side is a string. Every language differs here and
+//                 always will; this is the one irreducible knob of js_jadd.
+//     rtkNum(v)   the language's rt.toNumber - how an operand becomes a double.
+//                 Also irreducible: PHP's raises on an array, Dart's answers NaN
+//                 for a non-number, Kotlin's answers 0 for null and NaN for
+//                 undefined because kotlin.Unit arrives as undefined.
+//
+// Top-level function declarations hoist and both files land in one scope, so the
+// hook may be defined after the import and in the other file. Every name here is
+// prefixed rt / rtk so nothing collides with a language's own helpers.
+//
+// ----- MetaJS rules that shape the code below --------------------------------
+//
+// docs/abnf-dialect-gotchas.md: a local keeps the TYPE CLASS it is first assigned;
+// there is no ASI, so every `return` carries its value on the same line and a
+// value-less early return is BRACED; no for..in, no splice, no split/join,
+// array.length is not assignable, and there are no exponent literals.
+
+// ===================================================== int32 ================
+//
+// Go: isInt32Value (abnf/jsrt.go:8420). NINE layer-2 files carried a private copy
+// of this predicate under nine names (csIsInt32Value, dtIsInt32, jvIsInt32Value,
+// goIsInt32Value, phIsInt32, pyAIsInt32, swIsInt32, k1IsInt32Value, rbIsInt32).
+// They differed in three ways, all of them measured to be the same function:
+//   - Math.trunc(n) !== n  vs  Math.floor(n) !== n. They disagree on which value
+//     a non-integer maps to (-1 vs -2 for -1.5) and agree on the only thing asked,
+//     which is whether it equals n.
+//   - `!=` (python) vs `!==` (everyone else). Both operands are numbers, so the
+//     loose compare never coerces.
+//   - the low bound written `n >= 0 - 2147483648` (no negative literals in the
+//     dialect at the time) vs python's `n >= -2147483648`.
+function rtIsInt32(n) {
+    if (n !== n) { return false }
+    if (Math.trunc(n) !== n) { return false }
+    if (n > 2147483647) { return false }
+    return n >= 0 - 2147483648
+}
+
+// Go: float64(int32(x)), i.e. ToInt32. Eight private copies (csWrap32, jvWrap32,
+// goWrap32, dtWrap32, swWrap32, phWrap32, ktNorm(x,32,0), and python/ruby's bare
+// `| 0`). Two shapes existed:
+//   - csharp/java guarded NaN and the infinities to 0 FIRST; the other six did
+//     not. `x - Math.floor(x/2^32)*2^32` on a NaN or an infinity is NaN, so the
+//     guard is a real difference - it is just unreachable from js_jadd, whose
+//     float arm has already taken every non-finite operand. Kept, because it is
+//     the correct answer and costs nothing.
+//   - the fold-down test written `m >= 2147483648` (csharp/java) vs
+//     `m > 2147483647` (the rest). Identical on an integer m, and m is always an
+//     integer here because x is.
+function rtWrap32(x) {
+    if (x !== x) { return 0 }
+    if (x == Infinity) { return 0 }
+    if (x == 0 - Infinity) { return 0 }
+    var m = x - Math.floor(x / 4294967296) * 4294967296
+    if (m >= 2147483648) { m = m - 4294967296 }
+    return m
+}
+
+// ===================================================== js_jadd ==============
+//
+// EXPORTED DIRECTLY. -rt-lib reads its exported surface off the SOURCE TEXT -
+// every line starting in column 0 with `function js_` - because a MetaJS function
+// is a value in a scope and its name is not in the IR. It used to scan only the
+// MAIN file, so a `function js_jadd` written here compiled, ran correctly under
+// llvm.Run, and was UNDEFINED AT LINK TIME; the matrix and --cross are blind to
+// that and tests/clang-check.sh was the only gate that saw it. The scan now
+// covers the imported files too (metajs-to-llvm-ir.abnf, the -rt-lib block), so
+// a shared extern is written here under its real name and needs no forwarder.
+//
+// Go: js_jadd (abnf/jsrt.go:5151). Java/C# `+`: string concat when either side is
+// a string, a 32 bit wrapping add when both sides are int32-valued, a boxed
+// double when either side is one, a plain double add otherwise.
+//
+// NINE implementations merged. The differences found, and how each was classified
+// (docs/runtime-merge-plan.md asks for this list; it is the deliverable):
+//
+//  1. KNOB - the string renderer. csJavaStr / dtJavaStr / jpStr / goJavaStr /
+//     phJavaStr / pyAJavaStr / swJavaStr / k1JStr / rbJStr. Nine genuinely
+//     different functions: java renders an array as `[I@1b6d3586` and recurses
+//     into objects, kotlin renders a Char as its character, ruby spells nil
+//     "null", go delegates to gopStr. Irreducible - this is rtkStr.
+//
+//  2. KNOB - the numeric coercion. csNum / dtNumOf / jvNum / goNum /
+//     phNumOf(phToNum(v)) / pyNum / swNum / ktNum / rbToF. Also genuinely
+//     different, and the differences are load-bearing: dart answers NaN for a
+//     non-number where csharp answers 0; kotlin answers 0 for null and NaN for
+//     undefined (a comment at ktNum records that answering 0 for undefined made
+//     `size + f()` of a Unit-returning f print the size where the Go twin prints
+//     NaN); php's raises "unsupported operand type: array used as a number".
+//     Irreducible - this is rtkNum.
+//
+//  3. NOT A DIFFERENCE - the float arm's two shapes. The plan's headline example
+//     is java's `jvmArith("+", l, r)` against swift's
+//     `flo(swNum(l) + swNum(r), floStyle(floIs(l) ? l : r))`, and asks whether
+//     they agree on every input. They do, and the reason is worth recording:
+//     jvmArith/csFloArith are `floOp(0, operand(l), operand(r))`, floOp is
+//     abnf/jsrtjvm.go:285 which calls rt.jvmArith, and rt.jvmArith (jsrtjvm.go:176)
+//     is `jsJFlo{f: rt.toNumber(l)+rt.toNumber(r), sty: jvmStyleOf(l, r)}` whenever
+//     either side is a box - the same expression, spelled through the floor. The
+//     one place the two spellings could part is the operand mapping: java's
+//     jvmOperand is `floIs(v) ? v : jvNum(v)` and is exactly rtkNum, while
+//     csharp's csFloOperand passes a non-flo operand through UNCHANGED for the
+//     floor's own rt.toNumber to coerce. Those agree on every type csNum and
+//     rt.toNumber both handle (flo, char, sized int, number, bool) and part only
+//     on an object/array/undefined operand, where rt.toNumber says NaN and csNum
+//     says 0 - see the DEFECT below.
+//
+//  4. NOT A DIFFERENCE - the style argument. go wrote goStyleOf(l, r), kotlin
+//     wrote k1StyleOf(l, r), swift and dart wrote floStyle(floIs(l) ? l : r).
+//     goStyleOf and k1StyleOf are the same function EXCEPT for their final arm,
+//     which returns 1 (floGo) in go and 0 (floJava) in kotlin - and that arm is
+//     reachable only when NEITHER side is a box, which is precisely the case the
+//     caller has already excluded. Dead code, correct-for-its-language in both,
+//     never observed. Merged to the swift/dart spelling.
+//
+//  5. KNOB, documented - php, python and ruby have NO float arm at all. Each of
+//     the three carries a comment saying why: php's emitter emits js_jadd only
+//     for its own loop counters, python's reaches it only through
+//     makeStrConcat/makeFString/emitSpecText which seed the chain with
+//     emitStr(b, "") so the string arm always wins, and ruby's emits it only as
+//     js_jadd(i, 1) on an internal counter. The arm is therefore unreachable
+//     rather than wrong, and the merged body simply HAS it: a superset that costs
+//     those three nothing, and that the day one of them starts emitting js_jadd on
+//     a user value will already be right.
+//
+//  6. DEFECT (csharp), fixed here - see point 3. csharp reached the float arm
+//     through the floor's rt.toNumber and now reaches it through csNum, whose
+//     last arm answers 0 where rt.toNumber answers NaN, for an object, an array,
+//     or undefined. The Go twin is the oracle and says NaN. Measured: the only
+//     C# operand that can be a bare object on the double path is a `dynamic` or a
+//     boxed `object`, which csharp-to-llvm-ir.abnf does not emit, so the arm is
+//     unreachable today and neither half changed an answer. Recorded rather than
+//     tuned: csNum's fallback should be NaN, not 0, and that is csharp-rt.metajs's
+//     own bug rather than js_jadd's.
+function js_jadd(l, r) {
+    if (typeof l == "string" || typeof r == "string") { return rtkStr(l) + rtkStr(r) }
+    if (floIs(l) || floIs(r)) { return flo(rtkNum(l) + rtkNum(r), floStyle(floIs(l) ? l : r)) }
+    var ln = rtkNum(l)
+    var rn = rtkNum(r)
+    if (rtIsInt32(ln) && rtIsInt32(rn)) { return rtWrap32(ln + rn) }
+    return ln + rn
+}
+
+// ===================================================== js_is_type ===========
+//
+// Exported directly, for the reason recorded at js_jadd.
+//
+// Go: js_is_type -> rt.isTypeName (abnf/jsrt.go:8432). `x is T` / `x as? T`:
+// strip a generic argument list and a trailing `?`, answer the nullable flag for
+// a null, then a fixed table of well-known type names, then walk __class/__super.
+//
+// SIX of the eight implementations merged here - csharp, java, kotlin, python,
+// ruby, swift. go and dart are deliberately NOT merged; see the end of this note.
+// The differences found, and how each was classified:
+//
+//  1. NOT A DIFFERENCE - the `<` strip and the `?` strip. csharp/java/python/
+//     ruby/swift inlined indexOf/substring; kotlin called k4bStripAngle /
+//     k4bEndsQ / k4bStripQ, which are the same three lines under names. csharp
+//     and java guarded the `?` test with a nested `if (nm.length > 0) {...}`
+//     where python/ruby/swift used `&&`; identical.
+//
+//  2. NOT A DIFFERENCE - the null test. csharp/java/kotlin/swift wrote
+//     `v === undefined || v === null`; python called pyIsNone and ruby rbIsNil,
+//     and BOTH of those are exactly `v === null || v === undefined`. Python's
+//     None and Ruby's nil are the JS null in this value model, so no knob.
+//
+//  3. NOT A DIFFERENCE - the object walk. csharp/java tested
+//     `typeof v != "object"` then `Array.isArray(v)`; python/ruby called
+//     pyIsObj/rbIsObj, which are those two tests; kotlin/swift called
+//     ktIsObj/swIsObj, which admit an array - but an array's `__class` is
+//     undefined, so the walk exits on the first step and the answer is the same
+//     false.
+//
+//  4. KNOB - the Char test. csharp, java and kotlin have a boxed Char
+//     (csIsChar/jvIsChar/ktIsChar; csharp's and java's are byte-for-byte the same
+//     function). python, ruby and swift have no Char in their value model at all
+//     and omitted the arm. rtkIsChar, answering false for those three, restores
+//     the oracle's arm order for the three that have one and costs the others a
+//     predicate call.
+//
+//  5. KNOB - the array test. csharp/java/kotlin/python/ruby all use
+//     Array.isArray; swift's arrays are OBJECTS carrying a length, so swIsArr is
+//     a real difference. rtkIsArr.
+//
+//  6. NOT A DIFFERENCE, though it looked like one - the numeric predicate.
+//     csharp/java/kotlin used isPlainNum (`typeof v == "number"` AND NOT a sized
+//     integer AND NOT a boxed double), swift inlined the same three tests, and
+//     python and ruby used a BARE `typeof v == "number"`. The oracle is
+//     `v.(float64)`, which a jsGInt and a jsJFlo both fail, so the bare test
+//     would be a defect - except that python-rt.metajs and ruby-rt.metajs
+//     mention sintIs/floIs ZERO times each: neither language's value model has a
+//     tagged number, so on their values the two spellings cannot differ. The
+//     strict form is shared, and it is the correct one the day either language
+//     grows a box.
+//
+//  7. DIVERGENCE FROM THE ORACLE, kept deliberately - the walk bound. csharp,
+//     java, kotlin and swift cap the __class/__super walk at 64 steps; python and
+//     ruby loop until the chain ends, which is what jsrt.go:8472 does. The
+//     oracle HANGS on a cyclic __super and the guard answers false, and neither
+//     C#, Java, Kotlin, Swift, Python nor Ruby can express a 65-deep hierarchy in
+//     a program this tree compiles. The guard is taken for all six: it is the
+//     safe answer, and the case that distinguishes them is unconstructible.
+//
+//  8. NOT MERGED - go. go-rt.metajs's js_is_type is a different function, not a
+//     variant: it does not strip `<` or `?`, answers FALSE (not opt) for a null,
+//     has no numeric/Char/nullable arms at all, and reads the class name through
+//     goStrOf. Go's type switch has none of the nullable-generic surface the
+//     other six share, so there is nothing to parameterise - merging it would
+//     mean adding six knobs to skip six arms.
+//
+//  9. NOT MERGED - dart. dart-rt.metajs's js_is_type is
+//     `return dtTypeName(v, t)`, a Dart-specific type-name resolver. Same reason.
+function js_is_type(v, t) {
+    var nm = t
+    var lt = nm.indexOf("<")
+    if (lt >= 0) { nm = nm.substring(0, lt) }
+    var opt = false
+    if (nm.length > 0 && nm.charAt(nm.length - 1) == "?") {
+        nm = nm.substring(0, nm.length - 1)
+        opt = true
+    }
+    if (v === undefined) { return opt }
+    if (v === null) { return opt }
+    // Kotlin's Char is its own type: `c is Char` holds, `c is Int` does not.
+    // Tested before the name switch, exactly as jsrt.go:8448 does.
+    if (rtkIsChar(v)) {
+        if (nm == "Char") { return true }
+        if (nm == "Character") { return true }
+        if (nm == "Any") { return true }
+        return nm == "Comparable"
+    }
+    if (nm == "Any" || nm == "Object") { return true }
+    var plain = rtIsPlainNum(v)
+    if (nm == "Int" || nm == "Integer" || nm == "Long" || nm == "Short" || nm == "Byte" || nm == "Char" || nm == "Character") {
+        if (!plain) { return false }
+        return Math.trunc(v) == v
+    }
+    if (nm == "Double" || nm == "Float" || nm == "Number") { return plain }
+    if (nm == "String" || nm == "CharSequence") { return typeof v == "string" }
+    if (nm == "Boolean") { return typeof v == "boolean" }
+    if (nm == "List" || nm == "MutableList" || nm == "Collection" || nm == "Array") { return rtkIsArr(v) }
+    if (typeof v != "object") { return false }
+    var cls = v["__class"]
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (cls === undefined) { return false }
+        if (cls === null) { return false }
+        if (typeof cls != "object") { return false }
+        if (cls["__name"] === nm) { return true }
+        cls = cls["__super"]
+    }
+    return false
+}
+
+// The oracle's `v.(float64)`: an ordinary double, which a SIZED INTEGER (tag 13)
+// and a BOXED DOUBLE (tag 14) are not, even though `typeof` calls both "number".
+// Was csIsPlainNum / jvIsPlainNum / k4bIsPlainNum (three identical bodies) and
+// swift's inline spelling of the same three tests.
+function rtIsPlainNum(v) {
+    if (typeof v != "number") { return false }
+    if (sintIs(v)) { return false }
+    return !floIs(v)
+}
+
+// ===================================================== js_dict_new ==========
+//
+// Go: js_dict_new (abnf/jsrt.go:6369). The empty dict / map / Map / Dictionary
+// every language builds: a marked object with two PARALLEL, INSERTION-ORDERED
+// arrays. The order is the observable part - Python 3.7+, Ruby, Dart's Map, C#'s
+// Dictionary and Swift's ordered rendering all depend on it - which is why this
+// is not a JS object with real properties.
+//
+// SIX implementations merged, and the difference list for this one is EMPTY.
+// csharp, dart, go and swift each wrote the object literal inline; python and
+// ruby delegated to a pyNewDict / rbNewDict that returns the same literal. All
+// six are byte-for-byte identical, and identical to the oracle. That is worth
+// stating rather than skipping: the 29-name table counts implementations, not
+// disagreements, and a row can be six copies of one line. This one was.
+function js_dict_new() { return {__dict: true, keys: [], vals: []} }
+
+// ===================================================== js_pyset - NOT MERGED
+//
+// Go: js_pyset (abnf/jsrt.go:6339). Six implementations - csharp, dart, go,
+// python, ruby, swift. The difference list was taken and is recorded here; the
+// merge itself is not done, because unlike js_dict_new this row is not six
+// copies of one line and it needs four knobs, two of which are genuine
+// disagreements that should be settled against the real toolchains first.
+//
+//  1. KNOB - the dict test. csIsDict / dtIsDict / goIsDict / pyIsDict /
+//     rbIsDict / swIsDict.
+//  2. KNOB - the array test. csharp and go use Array.isArray; dart, python,
+//     ruby and swift use their own. This is already rtkIsArr.
+//  3. DISAGREEMENT - KEY EQUALITY, and this is the one that matters. The find
+//     is `keys[i] === k` (IDENTITY) in dart, python and swift, but
+//     csValueEq(keys[i], k) in csharp and goKeyEq(keys[i], k) in go - VALUE
+//     equality. Two languages therefore find a key that three others miss.
+//     The oracle is rt.dictFind and settling this row means reading it and then
+//     asking each real toolchain, because C# Dictionary, Go map, Dart Map,
+//     Python dict, Ruby Hash and Swift Dictionary do NOT all agree about what
+//     equal keys are. Do not merge this until that is answered.
+//  4. DIVERGENCE FROM THE ORACLE - the index coercion. The oracle is
+//     `int(rt.toNumber(...))`, and Go's int() conversion TRUNCATES toward zero.
+//     dart, python and ruby wrote Math.trunc(num(k)) and go wrote goIdx, which
+//     is Math.trunc(goNum(v)) - all four correct. csharp wrote a bare csNum(k)
+//     and swift a bare swNum(k), with NO truncation, so a fractional index
+//     reaches the bounds test and the store unrounded. Reachability is the
+//     reason this is recorded rather than fixed in passing: neither C# nor Swift
+//     can express a fractional array index (the indexer takes an Int), so it
+//     costs nothing today - but it is still not what the oracle does.
+//  5. KNOB, documented - python's __setitem__ dunder arm, which the oracle has
+//     and the other five deleted as unreachable. Same shape as js_pyget's
+//     __getitem__ arm, which dart and ruby also deleted.

@@ -858,20 +858,43 @@ KwDefault   = "default" KwEnd ;
     core.stdlibImports = []
     // An imported file is parsed with this grammar and walked with importDepth > 0, so its
     // buildMain stashes its top-level thunks into importedItems; the real buildMain prepends
-    // them to jsrun. Imported once; a leading './' is dropped and a missing '.js' extension
-    // appended before the -i-root search. Declared before buildMain so the vars exist when
-    // the freezer self-compiles the Program tag.
+    // them to jsrun. Imported once; a leading './' is dropped and an extension supplied
+    // before the -i-root search. Declared before buildMain so the vars exist when
+    // the freezer self-compiles the Program tag. importedList is the same set in IMPORT
+    // ORDER, which -rt-lib needs to scan for its exported surface (see there).
     var importedFiles = {}
+    var importedList = []
     var importDepth = 0
     // imported files top-level items: stashImported / emitImported (compile-core)
     core.importFile = function(path, pos) {
         var rel = path
         if (rel.length >= 2 && rel.charAt(0) == "." && rel.charAt(1) == "/") { rel = rel.substring(2) }
-        if (!(rel.length >= 3 && rel.substring(rel.length - 3) == ".js")) { rel = rel + ".js" }
+        // ".js" is appended only when the path has NO EXTENSION AT ALL. It used to be
+        // appended whenever the path did not already END in ".js", which meant
+        // `import "./runtime.metajs"` searched for `runtime.metajs.js` and failed with
+        // `unresolved import` - the reason the shared layer-2 runtime could not be given
+        // the name docs/runtime-merge-plan.md gives it. `import "./mod"` is unchanged, and
+        // so is every path that already carries one. The scan is by hand and backwards to
+        // the first '.' or '/': the frozen subset has no lastIndexOf, its indexOf ignores a
+        // from-index, and the tag script uses no `break` - so the loop ends by driving the
+        // index negative.
+        var hasExt = false
+        var k = rel.length - 1
+        while (k >= 0) {
+            var kc = rel.charAt(k)
+            if (kc == "/") { k = 0 - 1 } else {
+                if (kc == ".") {
+                    hasExt = true
+                    k = 0 - 1
+                } else { k = k - 1 }
+            }
+        }
+        if (!hasExt) { rel = rel + ".js" }
         var file = c.findImport(rel)
         if (file == "") { return false }
         if (importedFiles["$" + file] == true) { return true }
         importedFiles["$" + file] = true
+        importedList.push(file)
         var text = c.readFile(file)
         var asg = c.parse(c.agrammar, text, null, file)
         c.pushSource(file, text)
@@ -960,7 +983,25 @@ KwDefault   = "default" KwEnd ;
         // only jsf_N: a MetaJS function is a value in a scope, and its name lives in the
         // scope, not in the IR. A line starting in column 0 with `function js_` is a
         // top-level declaration in a file the frozen subset already forbids ASI in.
+        //
+        // EVERY IMPORTED FILE IS SCANNED TOO, and that is not a convenience. Layer 2
+        // shares its common externs through lib/runtime.metajs
+        // (docs/runtime-merge-plan.md part A), and while only c.file was scanned a
+        // `function js_jadd` written THERE compiled, ran CORRECTLY under llvm.Run, and
+        // was UNDEFINED AT LINK TIME:
+        //     error: 1 unresolved symbol(s), and this build links a runtime ... js_jadd
+        // ./test.sh and --cross are both blind to that - neither builds an -exe - so
+        // tests/clang-check.sh was the only gate that reported it, and it reported it
+        // nine times at once. Concatenating the sources is enough because the scan is
+        // purely lexical and column-0 anchored; the imported files are appended after
+        // c.file so a name declared in both exports from the main file's spelling.
         var libSrc = c.readFile(c.file)
+        var xi = 0
+        while (xi < importedList.length) {
+            libSrc = libSrc + "\n" + c.readFile(importedList[xi])
+            xi = xi + 1
+        }
+        var seenExport = {}
         var exports = []
         var li = 0
         var line = ""
@@ -1003,7 +1044,14 @@ KwDefault   = "default" KwEnd ;
                         rawRet = true
                         sym = nm.substring(0, nm.length - 5)
                     }
-                    exports.push({n: sym, s: nm, p: pnames, r: rawRet})
+                    // One wrapper per SYMBOL. A name declared in both the main file
+                    // and an imported one would otherwise emit two definitions of the
+                    // same external and the link would fail on a duplicate symbol -
+                    // the mirror of the bug this scan was widened to fix.
+                    if (seenExport["$" + sym] != true) {
+                        seenExport["$" + sym] = true
+                        exports.push({n: sym, s: nm, p: pnames, r: rawRet})
+                    }
                 }
                 line = ""
             } else { line = line + ch }

@@ -1462,6 +1462,52 @@ two almost certainly overlap - both hand-emit an arena and a string layer.
 `lib/str-rt.c`; the capture stack, the `%VAR%` operators, `rt_mods`, `rt_fskind` and the
 `for /f` boundary helpers are batch's own.
 
+### The five that were "program-coupled by construction" were FOUR - 2026-08-04
+
+Re-checked, because the claim above is the kind that ages badly. Four of the five
+hold: `bat_setlocal`, `bat_endlocal` and `bat_lookup` walk `varSlotList` /
+`defSlotList` / `varNameList` - the per-program variable table - and `main` is the
+program. **`bat_shift` was not one of them.** Its body is
+
+```
+base = frame * ARGN;  for (i = from; i < ARGN-1; i++) args[base+i] = args[base+i+1];
+args[base + ARGN-1] = "";
+```
+
+`ARGN` is `10` and `DEPTH` is `256`, both `var` constants in the grammar, and `args`
+/ `frame` are fixed-size globals. Nothing in it depends on the program being
+compiled. The only thing keeping it in the emitter was that `args` lived on the
+emitter's side - and since the linker binds a global DECLARATION to its definition
+by name in both directions (the "One linker, not two" section below), it does not
+have to.
+
+So `args[2560]` and `frame` are now defined in `languages/lib/batch-rt.c`, the
+grammar declares them `external global`, and **`bat_shift` is C**. They are the
+first globals batch shares across the module boundary; every other byte of runtime
+state is still private to one side or the other, and the reason to share these two
+is specific - a helper that was only in the emitter because its data was.
+
+```
+                              before (ad922a0)   after
+batch-to-llvm-ir.abnf              1,532         1,526 lines
+languages/lib/batch-rt.c             490           520 lines
+languages/lib/batch-rt.ll          3,633         3,686 lines
+emitted module, batch-test-full   28,901        28,870 lines
+```
+
+`tests/batch-test-full.cmd` (139 assertions) and `tests/batch-test-1.bat` are
+**byte-identical on stdout AND stderr** under `llvm.Run`, under `-frozen`, and as
+native `-exe` binaries, against the same three built from a clean archive of
+`ad922a0`. `nm -u` on the new binary still reports exactly one undefined symbol,
+`_putchar`, and `clang-check.sh` still rates batch *"ok, and the clang executable
+agrees"* - which, for a grammar whose `goto`/`call` lower to basic blocks, is the
+only thing that would catch a label colliding with a parameter name.
+
+`languages/lib/batch-rt.ll` also picked up a byte-level change this session that is
+NOT from `batch-rt.c` (unmodified): a `(char)` cast now sign-extends through
+`shl`/`ashr`, from a concurrent change to the C compiler. It is behaviour-
+preserving - the four-way byte-identity above is the evidence.
+
 ## Convergence on the runtime layer - BASH - DONE (2026-08-02)
 
 Same decision as for batch, and for the same reason. `bash-to-llvm-ir.abnf` emits
@@ -1502,13 +1548,51 @@ The task's brief counted **68** `rt_*` names. Three of those are not functions:
 `rt_read_eof` is a comment referring to the `read_eof` global (there is no such
 function). The real count is **65**.
 
-### What could NOT move: 3 helpers, and the reason is not the C subset
+### What could NOT move: 3 helpers - and they MOVED, 2026-08-04
 
-`rt_setvar_byname`, `rt_getvar_byname` and `rt_eval_assign` are still emitted by the
-grammar, and they have to be: each is a **chain over every variable name the program
-mentions**, generated after the walk from `varIdList`. They are program-dependent code
-that happens to be shaped like a runtime helper. They could move if the emitter also
-emitted a `{name, slot}` table for C to loop over; that is a real option, not done here.
+`rt_setvar_byname`, `rt_getvar_byname` and `rt_eval_assign` were the last three emitted
+by the grammar. Each was a **chain over every variable name the program mentions**,
+generated after the walk from `varIdList` - program-dependent code shaped like a runtime
+helper. The way out was named at the time and has now been taken: **the emitter emits the
+`{name, slot}` table** and the three are ordinary loops in `languages/lib/bash-rt.c`.
+
+The table is one global beside `gvars`:
+
+```
+@gvars    = external global [1024 x i8*]     the values, indexed by compile-time slot id
+@varnames = external global [1024 x i8*]     varnames[i] is the SOURCE NAME of gvars[i]
+@nvars    = external global i32              how many slots the program actually used
+```
+
+`main`'s entry block fills it in the same pass that marks every slot unset. One ordering
+trap, and it is the whole reason the fill is a second loop rather than the same one:
+**`varIdList` is not final until after `HOME` and `PWD` are stored**, because those two
+`storeVar` calls can mint a slot for a name the script never mentioned. Filling the table
+before them leaves `varnames[i]` null for those slots, and `rt_getvar_byname` walks
+`nvars` of them - a load at address 0, which the IR interpreter traps. That is exactly
+what happened on the first run.
+
+```
+                                  before (ad922a0)   after
+bash-to-llvm-ir.abnf                   3,536         3,505 lines
+languages/lib/bash-rt.c                2,696         2,763 lines
+languages/lib/bash-rt.ll              13,156        13,328 lines
+emitted module, the SAME input        62,826        61,937 lines   -889
+```
+
+The emitted-module figure is measured on `git show ad922a0:tests/bash-test-full.sh`
+through both grammars, so it is like-for-like; `tests/bash-test-full.sh` in the tree has
+grown a section since (below) and compiles to 69,339 lines. The saving is
+program-dependent by construction: it is three chain entries per distinct variable name,
+against one table store.
+
+`tests/bash-test-full.sh` and `tests/bash-test-1.sh` are byte-identical on stdout AND
+stderr under `llvm.Run`, under `-frozen`, and as native `-exe` binaries, against the same
+built from a clean archive of `ad922a0`.
+
+One stale line corrected while measuring: `nm -u` on the bash native binary reports
+**two** undefined symbols, `_memset` and `_putchar`, not one - and it did at `ad922a0`
+too, so this is a mis-statement in the earlier report, not a change.
 
 ### Two defects in `languages/c-to-llvm-ir.abnf`, found by the port, NOT fixed here
 
@@ -1650,33 +1734,130 @@ negation, ranges, the `i` flag, all nine compile-error codes, the `RE_PROG` over
 the step cap - before it was integrated. Every case agreed: same verdict, same pair
 count, same `BASH_REMATCH[0..3]`.
 
-### Latent defects the port surfaced, all faithfully reproduced, none fixed
+### Latent defects the port surfaced - SEVEN FIXED, 2026-08-04
 
-Reading 3,000 lines of IR closely finds things. None of these is a regression and none is
-touched:
+Reading 3,000 lines of IR closely found nine. They were reproduced faithfully at the time
+and left alone deliberately; they are settled now against **GNU bash 5.3.15(1)-release
+(aarch64-apple-darwin25.4.0)**, which was run for every assertion below. Seven are fixed
+in BOTH halves - `languages/lib/bash-rt.c` for the compiler, `languages/bash-interpreter.abnf`
+for the interpreter - and pinned by **SECTION 26 of `tests/bash-test-full.sh`**.
 
-- `re_clsname` matches a POSIX class name by **prefix**, so `[[:bogus:]]` is silently
-  `[[:blank:]]` and `[[:lowercase:]]` is `[[:lower:]]`. Real bash rejects both. Verified
-  the hand-emitted engine behaves the same way.
-- `rt_class` does not implement POSIX classes at all: `[[:digit:]]*` treats the bracket
-  as the literal set `[:digit`.
-- No bound check anywhere: `rt_arr_set` writes `arr_nm[arr_n]` with no `arr_n < 4096`
-  test, `rt_argpush` writes `argv[argv_top]` with no `< 4096` test, `rt_cap_begin` never
-  tests `cap_depth < 16`, `rt_push_local` never tests `ls_top < 512`, and `rt_putc` never
-  tests `cap_len < 8192`. The arena itself is the same story, which is what the
-  benchmark's segfault is.
-- `rt_shquote` emits `\xNN` for a control character but `rt_ansic` cannot decode `\xHH`,
-  so `${v@E}` does not invert `${v@Q}`.
-- `rt_case` is byte-wise ASCII while `rt_charlen`/`rt_charoff` in the same runtime are
-  UTF-8 aware.
-- `rt_haschar(s, 0)` can never answer 1: the NUL test runs before the equality test.
-- `rt_arr_nextidx` runs `rt_str2int` over EVERY key including associative ones, so
-  `a+=(x)` on a string-keyed array creates key `"1"`.
-- `re_emit` writes words 0..2 of a 4-word instruction and never touches word 3 - 16 KB of
-  the 64 KB `re_prog` is dead.
-- `rt_eg`'s `*`/`+` arm calls itself at `k == 0` and then discards the result behind a
-  `k > 0` guard, because the IR computes both operands of an `And`. Kept, because the
-  arena offsets are observable through pointer identity.
+**Discriminating power, measured rather than asserted.** SECTION 26 is 52 assertions.
+Against a clean `git archive` of `ad922a0` with its own `go build`, the new file scores
+**29 failures through `bash-to-llvm-ir.abnf` and 27 through `bash-interpreter.abnf`**;
+in the working tree both are 0, and real `bash` runs the whole 430-assertion file with
+0 failures.
+
+1. **POSIX class names were matched by PREFIX.** `re_clsname` compared the shortest
+   distinguishing one to three characters, so `[[:bogus:]]` was `[[:blank:]]` and
+   `[[:lowercase:]]` was `[[:lower:]]`. bash rejects both with *invalid character class*
+   and status **2**. `re_clsname` now matches the whole name, through a `rt_clsid` table
+   shared with the glob side; an unknown name returns 0 and `re_bracket` raises
+   `re_bad = 9`. The two halves DISAGREED here before the fix and agree now - the
+   interpreter's engine is `languages/lib/regex.js`, which is not this task's file and
+   already rejected these. Pinned: `cls1`..`cls7`.
+   *Left alone, and it is a dialect question not a defect:* both our engines accept
+   `[[:word:]]` and `[[:ascii:]]`, which bash 5.3.15 rejects. Both halves agree, and
+   converging on bash would mean changing `regex.js`, which ten other languages share.
+
+2. **`rt_class` did not implement POSIX classes at all**, so `case 5 in [[:digit:]]*)`
+   read the bracket as the literal set `{[ : d i g t}` and answered "no". Both halves
+   were wrong and agreed. `[:name:]` is now parsed in `rt_class` and in the interpreter's
+   `globClass`, sharing the same fourteen-name table and ctype predicate; an unknown name
+   in a GLOB is not an error - bash matches nothing, silently. Pinned: `glc1`..`glc12`.
+
+3. **`\NNN` was not an ANSI-C escape.** Only `\0` was understood, so `$'\001x'` was a
+   NUL followed by `"01x"` - and in the compiler, where a NUL ends a C string, the EMPTY
+   string. bash reads one to THREE octal digits IN TOTAL (`$'\0101'` is `\b` then `"1"`,
+   `$'\101'` is `A`). Fixed in `rt_ansic` and in both grammars' compile-time `ansiC`.
+   A `\x` with no hex digit after it now stays literal, as bash leaves it. Pinned:
+   `oct1`..`oct7`.
+
+4. **`${v@E}` did not invert `${v@Q}`.** `rt_shquote` wrote `\xNN` for a control
+   character and `rt_ansic` could not read `\xHH` back. bash writes OCTAL - `${v@Q}` of
+   `$'\001'` is `$'\001'` - so `rt_shquote` writes `\NNN` now and `rt_ansic` decodes
+   both forms. Pinned: `ansi1`..`ansi5`.
+
+5. **`rt_case` was byte-wise ASCII** in a runtime whose `rt_charlen` / `rt_charoff` were
+   already UTF-8 aware. That showed twice: `${v^}` touched the first BYTE, so it did
+   nothing to a multi-byte first character, and the Latin-1 supplement never changed case.
+   It walks codepoints now and maps Latin-1 (`0xC3` + `0x80..0xBE`, upper and lower 0x20
+   apart, the multiplication and division signs excluded); anything else is copied
+   through and still counts as one character. The interpreter's `caseMap` already walked
+   codepoints and only needed the Latin-1 ranges. Pinned: `case1`..`case9`.
+
+6. **`rt_arr_nextidx` ran `rt_str2int` over EVERY key**, so `a+=(x)` on a string-keyed
+   array created key `"1"`. The oracle says more than the report did: bash reads bare
+   words in an ASSOCIATIVE array literal as **KEY VALUE PAIRS**, with a trailing odd word
+   taking an empty value - `declare -A b=(one two three four)` is `b[one]=two
+   b[three]=four`, and `a+=(zz)` is `a[zz]=""`. Both halves now do that; an INDEXED array
+   is untouched. Pinned: `aa1`..`aa12`.
+   *Not converged, deliberately:* bash ERRORS on `declare -A f=([k]=v one two)` (mixing
+   an explicit key with bare words) where both our halves accept it, and bash's key
+   ITERATION ORDER is hash order where ours is insertion order. bash's order is
+   unspecified.
+
+7. **`re_emit` wrote words 0..2 of a 4-word instruction** and never touched word 3, so
+   16 KB of the 64 KB `re_prog` was unaddressed. The stride is 3 now and `re_prog` is
+   `int[12288]`. This one is **not pinnable** - it has no observable behaviour, which is
+   why there is no ratchet assertion for it.
+
+**No bound check anywhere** - the eighth - is fixed where fixing it is not a LOSS, and
+that distinction was measured, not assumed:
+
+- `rt_putc` had no test against the 8192-byte block `rt_cap_begin` bumps, so a command
+  substitution longer than that walked out of its buffer and over the arena. It got the
+  right answer whenever nothing else had been bumped since, which is why no test caught
+  it - a 12,000-byte `$( )` answers correctly at `ad922a0`. **Truncating would therefore
+  have been a regression**, and the first attempt at this fix was exactly that and was
+  reverted at the site: `${#big}` went 10000 -> 8191. The buffer GROWS instead, a doubled
+  arena block and a copy. Pinned: `cap1`, `cap2`.
+- `rt_arr_set` (4096 pairs), `rt_argpush` (4096), `rt_cap_begin` (16) and `rt_push_local`
+  (512) now refuse the out-of-range write and raise a new `rt_limit` flag instead of
+  smashing the neighbouring global. These are **not pinnable either**, and the reason is
+  the ninth defect: the 4 MB arena runs out first. A 4,200-element array loop dies with
+  *invalid load* at `ad922a0` AND in the working tree, at the same point, for the same
+  reason - so the table limits are unreachable in practice and the check is pure
+  defence.
+- **The arena itself is untouched.** A real allocator or a GC is the honest fix and it is
+  not this task; the segfault the brief's 200k-iteration benchmark hits is still there,
+  identically, in both trees.
+
+**The ninth is still deliberate.** `rt_eg`'s `*`/`+` arm calls itself at `k == 0` and
+discards the result behind a `k > 0` guard, because the IR computes both operands of an
+`And`. Kept: the arena offsets are observable through pointer identity.
+
+**One item on the list is not a defect and was left alone after checking.**
+`rt_haschar(s, 0)` "can never answer 1" because the NUL test runs before the equality
+test - but a C string does not CONTAIN a NUL byte, it is terminated by one, so 0 is the
+right answer. Its only two call sites pass an IFS character.
+
+**Two pre-existing divergences found while settling these, both out of scope, both
+identical at `ad922a0` and in both halves**, recorded so the next reader does not chase
+them as regressions:
+
+- an unquoted `$v` in a `case` WORD is word-split by both our engines; bash does not
+  split it, so `case $v in [[:space:]])` misses where bash hits;
+- a string whose first byte is `0x02` is read as the in-band field-LIST marker, so
+  `${#v}` of a lone `$'\x02'` is 0 where bash says 1. Fixing that means re-plumbing the
+  field encoding in both grammars.
+
+### Ground truth after the two changes (2026-08-04)
+
+```
+matrix                325 entries run - 325 passed, 0 failed
+--full                5,792 assertions, 0 languages with halves that disagree (bash 430,
+                      batch 139); grep for BUT -frozen / VACUOUS / MISMATCH / FROZEN-DIFF
+                      finds nothing
+--cross               119 programs compared, 0 divergent, 0 differing only in warnings
+clang-check           16 modules, all accepted by clang, all sixteen "ok, and the clang
+                      executable agrees", none held; bash 69,339, batch 28,870
+go test ./abnf/       ok
+all fourteen gen-*.sh --check clean (bash-rt.ll 14,599, batch-rt.ll 3,686)
+tests/bash-test-full.sh   430 checks, 0 failures under llvm.Run, -frozen and as -exe
+                          430 checks, 0 failures under GNU bash 5.3.15
+tests/batch-test-full.cmd 139 checks, 0 failures, byte-identical four ways vs ad922a0
+```
 
 ## One linker, not two - DONE (2026-08-02)
 

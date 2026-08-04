@@ -106,6 +106,22 @@
 // split/join/lastIndexOf, indexOf ignores its from-index, array.length is not
 // assignable, and there are no exponent literals.
 
+// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). It supplies
+// the externs every language implements identically, parameterised by the rtk*
+// hooks below. Same mechanism ruby uses for `import "./regex.js"`.
+import "./runtime.metajs"
+
+// ----- the rtk* hooks the shared runtime calls -------------------------------
+function rtkStr(v) { return phJavaStr(v) }
+function rtkNum(v) { return phNumOf(phToNum(v)) }
+// This file keeps its OWN js_is_type, which SHADOWS the shared one: both are
+// top-level declarations in one pinned scope, and -rt-lib's lazy boot runs the
+// imported file's top level BEFORE this file's, so the later declaration - this
+// one - is what the name resolves to. The hooks below exist only so the shared
+// body stays resolvable; they are never reached.
+function rtkIsChar(v) { return false }
+function rtkIsArr(v) { return Array.isArray(v) }
+
 // ===================================================== exact 64 bit =========
 //
 // PHP's int is 64 bit two's complement, and the whole of that arithmetic is the
@@ -1715,13 +1731,7 @@ function js_bytelen(s) { return byteLen(s) }
 // which would need jsJFlo, the boxed double layer 2 cannot make - is unreachable
 // from PHP and is spelled as the plain double add here. Any language that emits
 // js_jadd on real user values needs that box first.
-function js_jadd(l, r) {
-    if (typeof l == "string" || typeof r == "string") { return phJavaStr(l) + phJavaStr(r) }
-    var ln = phNumOf(phToNum(l))
-    var rn = phNumOf(phToNum(r))
-    if (phIsInt32(ln) && phIsInt32(rn)) { return phWrap32(ln + rn) }
-    return ln + rn
-}
+// js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
 
 function phJavaStr(v) {
     if (typeof v == "string") { return v }
@@ -1731,18 +1741,7 @@ function phJavaStr(v) {
     return "" + v
 }
 
-function phIsInt32(n) {
-    if (n !== n) { return false }
-    if (Math.floor(n) !== n) { return false }
-    if (n > 2147483647) { return false }
-    return n >= 0 - 2147483648
-}
 
-function phWrap32(n) {
-    var m = n - Math.floor(n / 4294967296) * 4294967296
-    if (m > 2147483647) { m = m - 4294967296 }
-    return m
-}
 
 // (target, method name, args array). The Go twin (rt.memberCall in abnf/jsrt.go)
 // is a LANGUAGE-NEUTRAL dispatcher over strings, dicts, lists, generators and

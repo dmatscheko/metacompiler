@@ -110,6 +110,17 @@
 // BRACED; no for..in, no splice, no split/join/lastIndexOf, indexOf ignores its
 // from-index, array.length is not assignable, and there are no exponent literals.
 
+// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). It supplies
+// the externs every language implements identically, parameterised by the rtk*
+// hooks below. Same mechanism ruby uses for `import "./regex.js"`.
+import "./runtime.metajs"
+
+// ----- the rtk* hooks the shared runtime calls -------------------------------
+function rtkStr(v) { return csJavaStr(v) }
+function rtkNum(v) { return csNum(v) }
+function rtkIsChar(v) { return csIsChar(v) }
+function rtkIsArr(v) { return Array.isArray(v) }
+
 // ===================================================== the char box =========
 
 function csChar(code) {
@@ -127,14 +138,6 @@ function csIsChar(v) {
 
 // ===================================================== value readings =======
 
-// A PLAIN number is an `int`. A sized integer (tag 13) and a boxed double (tag 14)
-// are both `typeof v == "number"` in the C floor, so every site that meant "an
-// ordinary double" has to say so.
-function csIsPlainNum(v) {
-    if (typeof v != "number") { return false }
-    if (sintIs(v)) { return false }
-    return !floIs(v)
-}
 
 // csIsIntegral (jsrtcsharp.go): an operand of INTEGER arithmetic. A char is one,
 // C#'s char being an integral type; a double is not.
@@ -284,8 +287,8 @@ function csArith(op, l, r) {
     var y = csRaw(r)
     var xi = csNorm(x, 32, false)
     var yi = csNorm(y, 32, false)
-    if (op == "+") { return csWrap32(xi + yi) }
-    if (op == "-") { return csWrap32(xi - yi) }
+    if (op == "+") { return rtWrap32(xi + yi) }
+    if (op == "-") { return rtWrap32(xi - yi) }
     if (op == "*") { return Math.imul(xi, yi) }
     if (op == "/") {
         if (yi == 0) { csThrow("DivideByZeroException", "Attempted to divide by zero.") }
@@ -294,7 +297,7 @@ function csArith(op, l, r) {
         // resulting value being that of the left operand"; the second is what BOTH
         // halves answer, and it is what Java specifies outright.
         if (xi == 0 - 2147483648) { if (yi == 0 - 1) { return xi } }
-        return csWrap32(Math.trunc(xi / yi))
+        return rtWrap32(Math.trunc(xi / yi))
     }
     if (op == "%") {
         if (yi == 0) { csThrow("DivideByZeroException", "Attempted to divide by zero.") }
@@ -306,15 +309,6 @@ function csArith(op, l, r) {
     return xi ^ yi
 }
 
-// The 32 bit signed wrap of a double, which is what an int-width result reduces to.
-function csWrap32(x) {
-    if (x !== x) { return 0 }
-    if (x == Infinity) { return 0 }
-    if (x == 0 - Infinity) { return 0 }
-    var m = x - Math.floor(x / 4294967296) * 4294967296
-    if (m >= 2147483648) { m = m - 4294967296 }
-    return m
-}
 
 // csShift is << >> >>>. The result type is the LEFT operand's alone after unary
 // promotion (ECMA-334 12.11: sbyte/byte/short/ushort/char all become int), and the
@@ -434,20 +428,17 @@ function csFloOperand(v) {
 // everything else as numbers.
 //
 // THE `2` IS NOT A TYPO AND IT MUST NOT BE SMOOTHED TO 0. jsCompare answers the
-// SENTINEL 2 for a NaN operand, commented there as "every relation is false" -
-// but js_cscmp, which is the only caller C# reaches, does not test for it and
-// compares the sentinel like an ordinary ordering:
+// SENTINEL 2 for a NaN operand, commented there as "every relation is false".
+// js_cscmp used to compare the sentinel like an ordinary ordering:
 //
 //     <   c < 0    false      <=  c <= 0   false
 //     >   c > 0    TRUE       >=  c >= 0   TRUE
 //
-// so `double.NaN > 0.0` is TRUE under llvm.Run and `double.NaN <= 0.0` is false.
-// Real C# (ECMA-334 12.12.1) says every one of the four is FALSE. Returning 0
-// here instead - the obvious reading - makes `>` false and `<=` TRUE, which is
-// wrong in a DIFFERENT way and breaks byte-identity: measured, 16 lines of the
-// 19,388-line probe below. The two halves have to agree first; the shared
-// sentinel bug is recorded in docs/runtime-next-plan.md and is not fixable from
-// layer 2 alone.
+// so `double.NaN > 0.0` was TRUE under llvm.Run and `double.NaN <= 0.0` false,
+// where real C# (ECMA-334 12.12.1) makes all four FALSE. FIXED at js_cscmp,
+// which now tests the sentinel BEFORE the four comparisons; abnf/jsrtcsharp.go
+// took the same fix, so the halves still agree. Smoothing the 2 to 0 HERE is
+// still wrong and still must not be done: 0 makes `<=` and `>=` true.
 function csCompare(l, r) {
     if (typeof l == "string") {
         if (typeof r == "string") {
@@ -753,7 +744,7 @@ function js_char_code(v) {
 }
 
 // An empty Dictionary<K,V> / Python dict / Go map handle.
-function js_dict_new() { return {__dict: true, keys: [], vals: []} }
+// js_dict_new is SHARED - lib/runtime.metajs (six identical copies, no knobs).
 
 function csIsDict(v) {
     if (v === undefined) { return false }
@@ -878,60 +869,12 @@ function csFindAccessor(o, k) {
 // The dynamic type test behind `is` / a type pattern. abnf/jsrt.go's isTypeName is
 // the spec, including the part that surprises: the Int/Long/Short/Byte arm tests for
 // a PLAIN number, so a boxed long is NOT `is Int` there either.
-function js_is_type(v, t) {
-    var nm = t
-    var lt = nm.indexOf("<")
-    if (lt >= 0) { nm = nm.substring(0, lt) }
-    var opt = false
-    if (nm.length > 0) {
-        if (nm.charAt(nm.length - 1) == "?") {
-            nm = nm.substring(0, nm.length - 1)
-            opt = true
-        }
-    }
-    if (v === undefined) { return opt }
-    if (v === null) { return opt }
-    if (csIsChar(v)) {
-        if (nm == "Char") { return true }
-        if (nm == "Character") { return true }
-        if (nm == "Any") { return true }
-        return nm == "Comparable"
-    }
-    if (nm == "Any" || nm == "Object") { return true }
-    if (nm == "Int" || nm == "Integer" || nm == "Long" || nm == "Short" || nm == "Byte" || nm == "Char" || nm == "Character") {
-        if (!csIsPlainNum(v)) { return false }
-        return Math.trunc(v) == v
-    }
-    if (nm == "Double" || nm == "Float" || nm == "Number") { return csIsPlainNum(v) }
-    if (nm == "String" || nm == "CharSequence") { return typeof v == "string" }
-    if (nm == "Boolean") { return typeof v == "boolean" }
-    if (nm == "List" || nm == "MutableList" || nm == "Collection" || nm == "Array") { return Array.isArray(v) }
-    if (typeof v != "object") { return false }
-    if (Array.isArray(v)) { return false }
-    var cls = v["__class"]
-    var guard = 0
-    while (guard < 64) {
-        guard = guard + 1
-        if (cls === undefined) { return false }
-        if (cls === null) { return false }
-        if (typeof cls != "object") { return false }
-        if (cls["__name"] === nm) { return true }
-        cls = cls["__super"]
-    }
-    return false
-}
+// js_is_type is SHARED - lib/runtime.metajs, via the rtkIsChar/rtkIsArr hooks.
 
 // The shared '+' (abnf/jsrt.go's js_jadd): string concat with Java's null
 // rendering, 32 bit add for two int values, float add otherwise. The C# emitter
 // reaches it only for index and length arithmetic it generates itself.
-function js_jadd(l, r) {
-    if (typeof l == "string" || typeof r == "string") { return csJavaStr(l) + csJavaStr(r) }
-    if (floIs(l) || floIs(r)) { return csFloArith("+", l, r) }
-    var ln = csNum(l)
-    var rn = csNum(r)
-    if (csIsInt32Value(ln) && csIsInt32Value(rn)) { return csWrap32(ln + rn) }
-    return ln + rn
-}
+// js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
 
 // javaString: null/undefined print as "null" here, unlike C#'s own csString.
 function csJavaStr(v) {
@@ -940,12 +883,6 @@ function csJavaStr(v) {
     return cpToString(v)
 }
 
-function csIsInt32Value(n) {
-    if (n !== n) { return false }
-    if (Math.trunc(n) !== n) { return false }
-    if (n > 2147483647) { return false }
-    return n >= 0 - 2147483648
-}
 
 // C#'s == when a char may be involved. A char must compare equal to the
 // one-character string the interpreter's String indexing answers, too. Without a
@@ -957,7 +894,7 @@ function js_jchareq(l, r) {
             return r.charCodeAt(0) == l["__char"]
         }
         if (csIsChar(r)) { return l["__char"] === r["__char"] }
-        if (csIsPlainNum(r)) { return l["__char"] === r }
+        if (rtIsPlainNum(r)) { return l["__char"] === r }
         if (sintIs(r)) { return csCmp("==", l, r) }
         if (floIs(r)) { return floEq(flo(l["__char"], 2), r) }
         return false
@@ -1214,6 +1151,15 @@ function js_csshift(op, l, r) { return csShift(op, l, r) }
 function js_cscmp(op, l, r) {
     if (csIsIntegral(l) && csIsIntegral(r) && !floIs(l) && !floIs(r)) { return csCmp(op, l, r) }
     var c = csCompare(l, r)
+    // csCompare answers the SENTINEL 2 for a NaN operand (see its note), and
+    // that sentinel means "every relation is false", which is exactly C#'s rule:
+    // ECMA-334 12.12.1 says that for the floating point relational operators, if
+    // either operand is NaN the result is false for all of them except !=. Read
+    // as an ordering the sentinel made `>` and `>=` TRUE, so `double.NaN > 0.0`
+    // answered true in BOTH halves. It is not 0 either - 0 would make `<=` and
+    // `>=` true, wrong in the other direction. abnf/jsrtcsharp.go:477 is the same
+    // three lines; the two halves have to move together or --cross reports it.
+    if (c == 2) { return false }
     if (op == "<") { return c < 0 }
     if (op == ">") { return c > 0 }
     if (op == "<=") { return c <= 0 }
@@ -1280,7 +1226,7 @@ function js_csneg(v) {
     if (floIs(v)) { return floOp(2, v, flo(0 - 1, 2)) }
     if (csSzW(v) == 64) { return csNorm(csNegate(v, 64, csSzU(v)), 64, csSzU(v)) }
     if (csSzW(v) == 32 && csSzU(v)) { return csNorm(csNegate(v, 64, false), 64, false) }
-    return csWrap32(0 - csNorm(v, 32, false))
+    return rtWrap32(0 - csNorm(v, 32, false))
 }
 
 // Two's complement negation at a given width, which maps MinValue to itself exactly
@@ -1293,7 +1239,7 @@ function csNegate(v, w, u) {
 function js_csnot(v) {
     if (csSzW(v) == 64) { return csNorm(csComplement(v, 64, csSzU(v)), 64, csSzU(v)) }
     if (csSzW(v) == 32 && csSzU(v)) { return csNorm(csComplement(v, 32, true), 32, true) }
-    return csWrap32(0 - csNorm(v, 32, false) - 1)
+    return rtWrap32(0 - csNorm(v, 32, false) - 1)
 }
 
 function csComplement(v, w, u) {
@@ -1307,7 +1253,7 @@ function js_csstep(v, d) {
     if (csIsChar(v)) { return csChar((v["__char"] + n) & 65535) }
     if (floIs(v)) { return flo(floNum(v) + n, floStyle(v)) }
     if (sintIs(v)) { return csConvTo(csArith("+", v, n), sintWidth(v), sintUns(v)) }
-    return csWrap32(csNorm(v, 32, false) + n)
+    return rtWrap32(csNorm(v, 32, false) + n)
 }
 
 // The result of a COMPOUND assignment: the operation, then the implicit cast back to
@@ -1320,7 +1266,7 @@ function js_csnarrowlike(l, v) {
     }
     if (csIsChar(l)) { return csChar(csNorm(v, 16, true)) }
     if (sintIs(l)) { return csConvTo(v, sintWidth(l), sintUns(l)) }
-    if (csIsPlainNum(l)) {
+    if (rtIsPlainNum(l)) {
         if (csIsIntegral(v) || floIs(v)) { return csConvTo(v, 32, false) }
     }
     return v
@@ -1357,7 +1303,7 @@ function js_csadd(l, r) {
     if (floIs(l) || floIs(r)) { return flo(csNum(l) + csNum(r), csFloStyle(l, r)) }
     var ln = csNum(l)
     var rn = csNum(r)
-    if (csIsInt32Value(ln) && csIsInt32Value(rn)) { return csWrap32(ln + rn) }
+    if (rtIsInt32(ln) && rtIsInt32(rn)) { return rtWrap32(ln + rn) }
     return ln + rn
 }
 

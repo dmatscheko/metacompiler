@@ -112,6 +112,17 @@
 // ignores its from-index, array.length is not assignable, and there are no
 // exponent literals.
 
+// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). It supplies
+// the externs every language implements identically, parameterised by the rtk*
+// hooks below. Same mechanism ruby uses for `import "./regex.js"`.
+import "./runtime.metajs"
+
+// ----- the rtk* hooks the shared runtime calls -------------------------------
+function rtkStr(v) { return swJavaStr(v) }
+function rtkNum(v) { return swNum(v) }
+function rtkIsChar(v) { return false }
+function rtkIsArr(v) { return swIsArr(v) }
+
 // ===================================================== the two number tags ==
 //
 // swWhole is jsrtswift.go's swIsWhole: a sized-integer box, or a Double whose
@@ -735,7 +746,7 @@ function js_kindex(s, i) {
 }
 
 // An empty Python dict / Go map / Swift Dictionary handle.
-function js_dict_new() { return {__dict: true, keys: [], vals: []} }
+// js_dict_new is SHARED - lib/runtime.metajs (six identical copies, no knobs).
 
 // Sequence indexing (negative wraps) and dict lookup. Swift's emitter routes
 // every subscript through this (core.indexExt).
@@ -800,51 +811,13 @@ function js_pylen(v) {
 // Int8...UInt64 box is NOT an "Int" (the arm tests a plain float64) and a boxed
 // Double is NOT a "Double". Swift's emitter handles its own enum and class names
 // through the descriptor walk at the bottom, which is where `x is MyType` lands.
-function js_is_type(v, t) {
-    var lt = t
-    var ai = lt.indexOf("<")
-    if (ai >= 0) { lt = lt.substring(0, ai) }
-    var opt = false
-    if (lt.length > 0 && lt.charAt(lt.length - 1) == "?") {
-        lt = lt.substring(0, lt.length - 1)
-        opt = true
-    }
-    if (v === undefined || v === null) { return opt }
-    if (lt === "Any" || lt === "Object") { return true }
-    var plain = typeof v == "number" && !sintIs(v) && !floIs(v)
-    if (lt === "Int" || lt === "Integer" || lt === "Long" || lt === "Short" ||
-        lt === "Byte" || lt === "Char" || lt === "Character") {
-        if (!plain) { return false }
-        return v === Math.trunc(v)
-    }
-    if (lt === "Double" || lt === "Float" || lt === "Number") { return plain }
-    if (lt === "String" || lt === "CharSequence") { return typeof v == "string" }
-    if (lt === "Boolean") { return typeof v == "boolean" }
-    if (lt === "List" || lt === "MutableList" || lt === "Collection" || lt === "Array") { return swIsArr(v) }
-    if (!swIsObj(v)) { return false }
-    var cls = v["__class"]
-    var guard = 0
-    while (guard < 64) {
-        guard = guard + 1
-        if (!swIsObj(cls)) { return false }
-        if (cls["__name"] === lt) { return true }
-        cls = cls["__super"]
-    }
-    return false
-}
+// js_is_type is SHARED - lib/runtime.metajs, via the rtkIsChar/rtkIsArr hooks.
 
 // Java/C# +: string concat, 32 bit add for two int values, float add otherwise.
 // swift-to-llvm-ir.abnf emits it for &+ (Swift's wrapping add) AND for its own
 // loop counters and string builders. The float arm needs the boxed double, which
 // the floor HAS - so unlike php-rt.metajs's, this one is complete.
-function js_jadd(l, r) {
-    if (typeof l == "string" || typeof r == "string") { return swJavaStr(l) + swJavaStr(r) }
-    if (floIs(l) || floIs(r)) { return flo(swNum(l) + swNum(r), floStyle(floIs(l) ? l : r)) }
-    var ln = swNum(l)
-    var rn = swNum(r)
-    if (swIsInt32(ln) && swIsInt32(rn)) { return swWrap32(ln + rn) }
-    return ln + rn
-}
+// js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
 
 function swJavaStr(v) {
     if (typeof v == "string") { return v }
@@ -856,18 +829,7 @@ function swJavaStr(v) {
     return "" + v
 }
 
-function swIsInt32(n) {
-    if (n !== n) { return false }
-    if (Math.floor(n) !== n) { return false }
-    if (n > 2147483647) { return false }
-    return n >= 0 - 2147483648
-}
 
-function swWrap32(n) {
-    var m = n - Math.floor(n / 4294967296) * 4294967296
-    if (m > 2147483647) { m = m - 4294967296 }
-    return m
-}
 
 // (target, method name, args array). The Go twin (rt.memberCall in abnf/jsrt.go)
 // is a LANGUAGE-NEUTRAL dispatcher over strings, dicts, lists, generators and
@@ -1002,7 +964,7 @@ function swListMethod(o, name, args) {
         var sum = 0
         var si = 0
         while (si < o.length) {
-            sum = swWrap32(sum + Math.trunc(swNum(args[0].apply(undefined, [o[si]]))))
+            sum = rtWrap32(sum + Math.trunc(swNum(args[0].apply(undefined, [o[si]]))))
             si = si + 1
         }
         return sum

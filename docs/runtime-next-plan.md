@@ -1242,10 +1242,25 @@ interpreter's own bump `alloc`, and nothing frees it.
 
 ## Silently wrong, both halves agreeing (the class byte-identity cannot see)
 
-- **`_Bool b = 5;` holds 5**; `cc` holds 1. Both halves agree, so `--cross` and the
-  matrix are blind. `_Bool` is `ctI(1,true)` in both grammars, indistinguishable from
-  `unsigned char`, so normalizing needs a new type-descriptor flag threaded through
-  `convert`/`emitConv`/`ctEq` in both halves.
+- ~~**`_Bool b = 5;` holds 5**~~ **FIXED 2026-08-04, both halves, oracle `cc`
+  (clang 17).** The type-descriptor flag is `ctBool = {k:"int", w:1, u:true,
+  bool:true}` in `c-to-llvm-ir.abnf` and `c-interpreter.abnf`; it is read by
+  `emitConv` / `convert` (a TEST against zero, C11 6.3.1.2, not a truncation) and by
+  `ctEq` (`_Bool` is its own standard unsigned integer type, 6.2.5, so `_Generic`
+  separates it from `unsigned char`). Only the DECLARATOR normalized before, so an
+  assignment, an array element, a struct field, a store through a pointer, a cast, a
+  compound assignment, a parameter and a return all kept the raw value. Two more
+  arms were needed for the compiled half: a `_Bool` PARAMETER is tested rather than
+  truncated in the prologue, and - a broader defect found on the way - a function's
+  return value was never converted to a narrow DECLARED return type at all, because
+  `curFnRetCt` only ever held a type 64 bits wide or a float (it drives the module
+  SIGNATURE). `unsigned char f(int n){return n;}` called with 300 answered 300 in the
+  compiled half against 44 in `cc` AND in the interpreter half; `curFnRetNarrow`
+  applies 6.8.6.4p3 without moving the signature. Pinned as `tests/c-test-full.c`
+  checks 2008-2020, which are **11 red in the interpreter half and 12 in the
+  compiled one** from a clean archive of ad922a0. Regenerating
+  `languages/lib/batch-rt.ll` was owed by the return-type fix (four lines of sign
+  extension in one `char`-returning function) and is done.
 - **Struct layout is packed, with no alignment padding.** `{char a; short b; int c;
   long d;}` is 15 bytes here and 16 in `cc`; `&s.d - &s.a` is 7 against 8. Both halves
   agree with each other and neither agrees with `cc`.
@@ -1860,6 +1875,21 @@ symbols the floor has since defined:
 > the fix is not obvious; the cheap one would be to say "unresolved OR duplicate".
 > **Until then: when layer 2 and the floor both define a symbol, the message says
 > the opposite of what is wrong.** Not fixed here - `abnf/` is another agent's.
+>
+> **FIXED 2026-08-04.** `duplicateSymbols(clang output)` in `abnf/llvmmap.go` reads
+> the blamed names out of the two linker spellings - ld64's `duplicate symbol
+> '_name' in:` and GNU ld's `multiple definition of \`name'` - sorted and
+> deduplicated, taking ONLY the quoted symbol so no temp file path can reach the
+> report and this path can keep comparing bytes. It is asked FIRST, before the
+> undefined-symbol report, precisely because that report cannot tell the two apart.
+> The message now says "N symbol(s) are defined MORE THAN ONCE among the linked
+> inputs ... this is NOT an unresolved symbol, and adding a definition would make it
+> worse". Reproduced end to end with two `-rt` inputs both defining `mec_helper`
+> (before: `1 unresolved symbol(s)`), and pinned by `abnf/linkdiag_test.go`, which
+> also asserts that `mentionsSymbol` still matches a duplicate diagnostic - the
+> overlap is what justifies the ordering, and the test fails the day someone
+> "fixes" `mentionsSymbol` instead. From a clean archive of ad922a0 the test does
+> not compile: `duplicateSymbols` did not exist.
 
 ### The extern split, after the two walls
 
@@ -2876,6 +2906,29 @@ engines were compared with themselves:
 > commit, and `js_swlt`/`js_jvcmp` should be checked for the same shape at the same
 > time (`java-rt.metajs`'s `jpCompare` returns 0 where `jsCompare` returns 2, so
 > Java may have the mirror-image mismatch on the `>=` arm).
+>
+> **HALF FIXED 2026-08-04.** `js_cscmp` in `abnf/jsrtcsharp.go` now returns false
+> for all four operators when `jsCompare` answers the sentinel, with ECMA-334
+> 12.12.1 quoted at the site (no C# toolchain exists on this machine, so the SPEC is
+> the oracle and is named as such). Measured on a six-line probe: `llvm.Run` went
+> from `True False True False` to `False False False False` for
+> `NaN > 0.0 / < / >= / <=`, which is what real C# says; `==` and `!=` were already
+> right. **LAYER 2 STILL OWES THE OTHER HALF**, and until it lands the two engines
+> DISAGREE on this one construct - the same probe run natively still prints
+> `True False True True`. The owed change is `js_cscmp` in
+> `languages/lib/csharp-rt.metajs` (about line 1216): after `var c = csCompare(l, r)`
+> add `if (c == 2) { return false }`, and replace the long comment above `csCompare`
+> that currently explains why the sentinel could NOT be fixed. **No ratchet
+> assertion was added, deliberately**: one would be green under `llvm.Run` and red
+> natively, which would take `tests/clang-check.sh` from 16/16 to 15/16. Add this to
+> `tests/csharp-test-full.cs` in the same commit as the layer-2 line:
+>
+> ```csharp
+> double nanZ = 0.0;
+> double nanV = nanZ / nanZ;
+> Program.Check("nan1", !(nanV > nanZ) && !(nanV < nanZ) && !(nanV >= nanZ) && !(nanV <= nanZ));
+> Program.Check("nan2", !(nanV == nanZ) && nanV != nanZ && !(nanV >= nanV));
+> ```
 
 ### What is owed, and what generalises
 
@@ -2887,10 +2940,21 @@ engines were compared with themselves:
 3. `js_goslice` / `js_gospread` / `js_has` in the floor - three languages have now
    written them out.
 4. `abnf/jsrtcsharp.go` stays until the change is committed.
-5. `>>>` is **not in the recognised C# subset**: `Shift` (grammar line 833) accepts
-   only `<<` and `>>`, although `emitBin` handles `>>>` and `>>>=`. So
-   `js_csshift(">>>")` is written in both halves and reachable from neither. Noted,
-   not changed - widening the grammar is not this task's gate.
+5. ~~`>>>` is **not in the recognised C# subset**~~ **RECOGNISED 2026-08-04, not
+   deleted.** `Shift` accepted only `<<` and `>>` while `emitBin`, `js_csshift`,
+   `csShift` in `lib/csharp-rt.metajs` and `csShift` in `csharp-interpreter.abnf`
+   all implemented `>>>` - four halves of dead code reachable from nothing. Deleting
+   the arm would have cost real C# 11 surface AND touched two files this task does
+   not own, so both grammars now accept `>>>` and `>>>=` instead, LONGEST FIRST so
+   `>>` cannot swallow the first two characters. The type args of a generic are
+   parsed by `SkipAngle` over single `<`/`>` characters, so
+   `Dictionary<string, List<int>>` is unaffected - checked. No C# toolchain here:
+   the oracle is ECMA-334's shift-operator clause (the unsigned right shift, zeroes
+   shifted into the high-order bits, at the left operand's promoted width) and the
+   answers are `-8 >>> 1 == 2147483644`, `-8L >>> 1 == 9223372036854775804`,
+   `-16 >>>= 2 == 1073741820`. Pinned as `tests/csharp-test-full.cs` checks
+   urs1-urs4; from a clean archive of ad922a0 the file does not PARSE in either
+   half ("Last good parse position: tests/csharp-test-full.cs:926:40").
 
 What **generalises to the remaining five**, in order of how much it saves:
 
@@ -3164,9 +3228,21 @@ It found **two real defects**, both in layer 2, both invisible to `./test.sh`:
 
 1. Nothing for the gate. `abnf/jsrtdart.go` stays until the change is committed.
 2. `[1, 2] + [3]`, above: a three-halves job, both halves currently agree.
-3. `js_pyget` on a MISSING Map key ABORTS (`KeyError`) in both halves rather than
-   answering null, which is what Dart does. Pre-existing in `rt.dictFind`'s
-   caller, unchanged here, and no ratchet assertion reaches it.
+3. ~~`js_pyget` on a MISSING Map key ABORTS (`KeyError`)~~ **FIXED 2026-08-04, all
+   three halves.** dart:core is the oracle and is cited at both sites - no `dart`
+   exists on this machine - and it says of `Map.operator []` that it returns "the
+   value for the given key, or null if key is not in the map", which is what the
+   whole `m[k] ?? d` / `if (m[k] != null)` idiom rests on. The fix is in the DART
+   halves rather than in `js_pyget`, because `js_pyget` is shared with the Python
+   pair where the `KeyError` is correct: `emitIndexGet` in `dart-to-llvm-ir.abnf`
+   branches on `js_dartis(o, "Map")` (an O(1) type test) and, for a map, on the
+   `js_pyin` over `js_pyiter` pair that `containsKey` was already lowered to, so
+   **no half owes a new extern** and the native build needed no layer-2 change;
+   `dget` in `dart-interpreter.abnf` returns `null` instead of failing. A list and a
+   String keep `js_pyget`'s range error, which is Dart's too. Pinned as
+   `tests/dart-test-full.dart` checks co7-co10; from a clean archive of ad922a0 BOTH
+   halves abort on the file ("map has no key zz" / "KeyError: zz"), so the
+   discriminating power is the whole ratchet.
 
 What **generalises to the remaining six**:
 
@@ -3538,12 +3614,52 @@ not layer-2 ones** - they are wrong under `llvm.Run` too, and neither is in
 either means `go-to-llvm-ir.abnf` plus `go-interpreter.abnf` plus a new ratchet
 assertion, i.e. a self-contained job of its own; it is not this gate.
 
+**BOTH FIXED 2026-08-04, and real `go` is the oracle** - it is installed, and
+`tests/go-test-full.go` is a valid Go program that `go run` executes, which makes
+the ratchet itself the differential test.
+
+- **`&^`**: the expansion `a & (b ^ -1)` over the handle runtime's 32-bit `js_band`
+  / `js_bxor` is gone from `emitBin`; `&^` and `&^=` now go through `giBase` like
+  every other bitwise operator, and `js_giarith` has had a `&^` arm in all three
+  halves the whole time (`abnf/jsrtint.go` `case "&^"`, `runtime.c`'s `si_apply`
+  code 8, and the `si_arith` layer 2 calls). The interpreter half was already right.
+  4 of 7 probe lines were wrong in the compiled half.
+- **The shift result type**: "the result type of a shift is the type of the left
+  operand" (Go spec, Arithmetic operators), but `js_giarith` reads the width and
+  signedness off WHICHEVER operand is a box - `giWidthOf`, and `si_width_of` /
+  `si_uns_of` in the floor. So `x >> s` with `x` a plain `int` of -8 and `s` a
+  `uint8` of 1 was evaluated at 8 bits UNSIGNED and answered 124. The COUNT is now
+  unboxed at the emitter: `js_gival` in front of it in `go-to-llvm-ir.abnf` and
+  `szNum` in front of it in `go-interpreter.abnf`, both of which reduce a sized
+  integer to its plain number and pass everything else through, leaving the left
+  operand alone to decide the type. 4 of 7 probe lines were wrong in BOTH halves.
+
+  **This one is a FLOOR defect that was closed at the emitter, and the floor still
+  owes the general fix.** `giArith`'s `<<` / `>>` arms in `abnf/jsrtint.go`, and
+  `si_apply` codes 9 and 10 in `languages/lib/runtime.c`, should take `w`/`u` from
+  the LEFT operand only; `szArithSlow` in `languages/lib/interp-core.js` has the
+  same shape at `szWidth(l, r)`. Every sized-integer language routes shifts through
+  them - Java, Kotlin, C#, Swift and Dart all specify the same rule - so the same
+  divergence is latent in five more languages, invisible for the same reason it was
+  invisible here: both halves agree. Not made - those three files are other agents'
+  this session.
+
+Pinned as `tests/go-test-full.go` checks int31-int38, which are **4 red in the
+interpreter half and 6 in the compiled one** from a clean archive of ad922a0, and
+which real `go run` answers identically (319 checks, 0 failures, in all four of
+`go`, the interpreter, `llvm.Run` and the native binary).
+
 ### What is owed, and what generalises
 
 1. Nothing for the gate. `abnf/jsrtgolang.go` stays until the change is
    committed, and `abnf/jsrtint.go` stays regardless - kotlin still needs it.
-2. **`&^` and the shift result type**, above: two real defects in both halves,
-   found only by the probe, each a three-halves job.
+2. ~~**`&^` and the shift result type**~~ **DONE 2026-08-04** in the emitter and
+   the interpreter grammar, pinned as int31-int38, oracle real `go`. What is STILL
+   owed is the FLOOR half of the shift rule - `giArith` in `abnf/jsrtint.go`,
+   `si_apply` in `languages/lib/runtime.c` and `szArithSlow` in
+   `languages/lib/interp-core.js` should read a shift's width and signedness from
+   the LEFT operand only, which would close the same latent divergence in Java,
+   Kotlin, C#, Swift and Dart. See the measurement above.
 3. **A `scopeGet(name)` host builtin** would let layer 2 render a scope-backed
    pointer AND would let every language's scope probe go back into layer 2. Not
    needed by any current test.
@@ -5294,6 +5410,58 @@ Ruby formatter boundaries reached.
    halves, and verified unchanged at `8588257` from a clean archive - a
    pre-existing emitter bug, not this migration's, and out of scope for a
    runtime split.
+
+   **DIAGNOSED EXACTLY 2026-08-04, oracle `python3` 3.14.6 - and it is NOT an
+   emitter bug.** `makeParamList`, `emitSig` and `emitClosure` in
+   `python-to-llvm-ir.abnf` are all correct, and so is `pyBindCall`, which for
+   `f(1, 2, 3)` builds `[1, [2, 3], {}]` exactly as prologue layout B wants. The
+   defect is the three lines AFTER it in `js_pycall`:
+
+   ```go
+   bound := rt.pyBindCall(callee, args.elems, kw)
+   if len(bound) == len(args.elems) {
+       return w(rt.callH(callee, jsUndef, args.elems, a[1]))   // <- the ORIGINAL array
+   }
+   ```
+
+   That length test is a stand-in for "binding was a no-op, so pass the incoming
+   handle through and keep its identity". It is wrong whenever the bound array
+   happens to be the same LENGTH as the positional one, which for the extended
+   layout is exactly `len(pos) == len(names) + 2` - i.e. "the positional count
+   equals the declared slot count", which is what the probe saw. The measurement:
+   `f(1)` and `f(1, 2)` are right, `f(1, 2, 3)` aborts with `len() of a number`,
+   `f(1, 2, 3, 4)` is right again. The INTERPRETER half is not affected at all
+   (`python-interpreter.abnf` binds parameters itself), so this is `llvm.Run` and
+   the native binary only - which is why `--cross` cannot see it either.
+
+   The fix is one condition in two places, and **both files are other agents' this
+   session, so it is reported rather than made**:
+
+   - `abnf/jsrt.go`, `js_pycall`: decide by IDENTITY rather than by length -
+     `pyBindCall` returns the caller's own `pos` slice in each of its three no-op
+     arms, so `if len(bound) == len(pos) && (len(bound) == 0 || &bound[0] == &pos[0])`
+     is exact. Cleanest is to have `pyBindCall` return a second `rebound bool`.
+   - `languages/lib/python-rt.metajs`, `js_pycall` (about line 3517): the same
+     test, kept "literally, even though the two arrays cannot differ in content when
+     their lengths agree" - a comment that is false, and the counter-example is
+     `f(1, 2, 3)`. Layer 2 has no pointer identity, so `pyBindCall` there should
+     answer `null` (or a flag) when it did not rebind.
+
+   The ratchet assertion to add to `tests/python-test-full.py` in the same commit -
+   it is red today in the compiled half and green in the interpreter, so it was
+   deliberately NOT added here (it would take `tests/clang-check.sh` from 16/16 to
+   15/16 and put a language in the `--full` "halves disagree" column):
+
+   ```python
+   def st_args(a, *rest, **kw):
+       return (a, len(rest), len(kw))
+   check("arg1", st_args(1) == (1, 0, 0))
+   check("arg2", st_args(1, 2) == (1, 1, 0))
+   check("arg3", st_args(1, 2, 3) == (1, 2, 0))      # <- the failing count
+   check("arg4", st_args(1, 2, 3, 4) == (1, 3, 0))
+   check("arg5", st_args(1, x=5) == (1, 0, 1))
+   check("arg6", st_args(1, 2, x=5) == (1, 1, 1))
+   ```
 5. Python's `str` has **no method library at all** in either half - no `upper`,
    `strip`, `join`, `split`, `startswith`. `"abc".upper()` fails identically in
    both engines with `unknown String method: upper`, from `jsrt.go:2784` and from
@@ -6410,6 +6578,248 @@ Two smaller things, recorded at the same standard:
 
 ---
 
+# The four owed floor primitives - 2026-08-04. TWO LANDED, ONE WAS ALREADY DONE,
+# ONE IS BLOCKED BY A FILE THIS TASK DID NOT OWN
+
+Three migration reports asked the floor for a scope API, one asked for a generator
+tag, one for `js_bytelen`, and go's report reported a `floStr` defect. All four are
+settled below, each with its measurement.
+
+```
+matrix 325/325 · --full 5,711 assertions (was 5,686), 0 halves disagree · --cross 119/0
+clang-check 16/16, all sixteen "ok, and the clang executable agrees", none held
+go test ./abnf/ ok · all fourteen gen-*.sh --check clean · -freeze a fixed point
+bench-alloc 3,711 B/iter at 400k (unchanged) · gc rss flat at 3.3 MB over 250k/1M/2M
+coro-poc, --gc and --break byte-identical to ad922a0
+```
+
+Measured from a clean archive of `ad922a0` plus ONLY the five files this task owns
+(`languages/lib/runtime.c`, `languages/lib/runtime.ll`, `abnf/jsrtint.go`,
+`languages/metajs-interpreter.abnf`, `tests/metajs-test-full.js`) - the working tree
+had three other agents in it at the time, and one of them had `php-rt.ll` mid-flight.
+
+## 1. The scope API - LANDED. Host ids 64..68, in all three engines
+
+`scopeNew` / `scopeParent` / `scopeGet` / `scopeHas` / `scopeDecl`, seeded by
+`seed_root` in `languages/lib/runtime.c`, bound by `scopeBindings` in
+`abnf/jsrtint.go` (called from `programJSBindings`, next to `giBindings`,
+`jfBindings` and `keysBindings`), and implemented as `scNew`/`scParent`/`scGet`/
+`scHas`/`scDecl` in `languages/metajs-interpreter.abnf`. **All three engines from
+the start**, which is the gap `f19a8ad` shipped for `sint` and `8c396c4` had to
+repair.
+
+### The exact lines a layer-2 file writes
+
+This is the whole point of the API, so it is written out rather than described.
+Every one of the six lowered emitter probes is one of these four shapes:
+
+```js
+// "is `name` bound in THIS scope" - python's js_scope_has(s, n), the one thing
+// js_scope_typeof cannot answer (it says "undefined" for an absent name AND for
+// a slot that holds undefined).
+function js_x_bound_here(s, name) { return scopeHas(s, name) }
+
+// "is `name` bound ANYWHERE up the chain" - ruby's defined?, php's isset, swift's
+// and dart's scope probe, kotlin's nine helpers. scopeParent in a loop IS the
+// chain walk, and it terminates on undefined, never on a root scope.
+function js_x_bound_anywhere(s, name) {
+    var cur = s
+    while (cur !== undefined) {
+        if (scopeHas(cur, name)) { return true }
+        cur = scopeParent(cur)
+    }
+    return false
+}
+
+// "read it if it is there" - scopeGet ABORTS on a name that is nowhere, exactly
+// as js_scope_get does, so the guard is the walk above.
+function js_x_read(s, name) {
+    if (js_x_bound_anywhere(s, name)) { return scopeGet(s, name) }
+    return undefined
+}
+
+// "bind here, overwriting a binding of THIS scope" - scope_put, not
+// js_scope_set: it never reaches an enclosing binding of the same name. This is
+// python's py_setvar residue, the case "bound strictly below a binding boundary
+// AND above it", which needed exactly the containment test above.
+function js_x_bind_here(s, name, v) { scopeDecl(s, name, v); return v }
+```
+
+Verified to compile: those four functions in a scratch `.metajs` under
+`metajs-to-llvm-ir.abnf -q -rt-lib` emit `@str "scopeHas" / "scopeParent" /
+"scopeGet" / "scopeDecl"` and four `define i64 @js_probe_*`, i.e. the lazy-boot
+`js_scope_get(jsrtlib_env, "scopeHas")` lookup that `byteLen` and `keysOf` already
+use. **There is no `scopeSet`**: "walk with `scopeHas`/`scopeParent`, then
+`scopeDecl`" is it, and `js_scope_set` stays the emitter's.
+
+**No language's emitter was converted.** That is the next step and it is another
+file's; what is shipped here is the API, its three implementations and its ratchet.
+
+### Two deliberate asymmetries with the `js_scope_*` externs
+
+Both are what let the three halves agree at all, and both are asserted.
+
+1. **An absent parent is `undefined`, not the root scope.** `js_scope_new(0)` means
+   "the global scope" because an EMITTER writes the handle 0; a host builtin's
+   arguments are VALUES, so that handle never arrives - `scopeNew(0)` would hand
+   over a tag 3 number cell. More decisive: a chain that ran into the host globals
+   has no twin in `metajs-interpreter.abnf`, whose host globals are a plain object
+   and not a scope at all. So `scopeNew()` / `scopeNew(null)` build a chain root and
+   `scopeParent` of it is `undefined` in all three engines.
+2. **The scope argument is TYPE CHECKED, not coerced** (`host_scope` in the floor,
+   `scopeOfArg` in the twin, `scOf` in the interpreter). A caller's mistake is the
+   same abort everywhere instead of a silent `G_ROOT`.
+
+The one thing a layer-2 file actually receives - an emitter's scope handle - passes
+through unchanged: the floor's `scopeNew` is literally `mk_scope(...)`, the same
+constructor `js_scope_new` calls, and the twin's is the same `&jsScope{}`.
+
+### Why the interpreter half needs a box of its own
+
+`metajs-interpreter.abnf`'s own chain is an ARRAY of plain objects holding `{v, t}`
+type boxes, with no parent link, and its host globals are an object. It has no scope
+to lend, so a scope handed to a program there is a box of its own -
+`{__scn, __scv, __scp}` - exactly as the sized integer and the boxed double are.
+The names are `__`-prefixed so `keysOf` skips them, which is as close as that half
+can come to the other two, where `keysOf` refuses a scope outright.
+
+### Discriminating power - MEASURED, not asserted
+
+**Against a clean `ad922a0` archive**: the whole file ABORTS at `variable not
+defined: scopeNew`, in the interpreter (goja) and under `llvm.Run` alike. `--full`
+would drop SECTION 29 and SECTION 30 as unsupported: **25 of 25 new assertions
+unreachable there.**
+
+**By mutating one behaviour at a time**, each mutation applied alone and reverted,
+in EACH of the three engines separately (`metajs-interpreter.abnf`, then
+`abnf/jsrtint.go` with a rebuild, then `languages/lib/runtime.c` with a
+`gen-runtime-ll.sh` and a fresh `-exe` binary):
+
+| mutation | interpreter | Go twin | C floor |
+|---|---|---|---|
+| `scopeHas` walks the chain | sco04 sco12 sco17 | sco04 sco12 sco17 | sco04 sco12 sco17 |
+| `scopeParent` answers the scope itself at the top | sco06 sco07 | sco06 sco07 | sco06 sco07 |
+| `scopeGet` does NOT walk the chain | **ABORT** (`variable not defined: y`) | - | **ABORT** |
+| `scopeDecl` always appends | sco08 | sco08 | - |
+| `scopeNew` ignores its parent | **ABORT** | - | - |
+| `isGenerator` = php-rt.metajs's guess | gen05 gen08 | - | - |
+| `isGenerator` true for any object | - | gen04 gen05 gen08 | gen04 gen05 gen08 |
+
+The failing SETS are identical across engines, which is the identity claim measured
+rather than assumed. The three cells marked `-` were not run, not zeroes.
+
+**GC**: the native ratchet passes under `MEC_GC=off`, `auto`, `stress` and `poison`
+alike (546/546 each). A scope is tag 11 and `gc_trace` already traces
+`w[1]` (the names/values/type-classes block) and `w[6]` (the parent).
+
+## 2. `isGenerator`, host id 69 - LANDED. A PREDICATE, and NOT a general `js_tag`
+
+PHP's generator support asks "is this a generator" structurally
+(`php-rt.metajs`'s `phIsGen`: exclude `__dict`, `__refcell`, `__isclass`,
+`__class` and `length`, then test whether `v["next"]` is callable) and its report
+calls that "the one guess in this port". `isGenerator(v)` removes the guess: tag 15
+in the floor, `*jsGenerator` in the twin.
+
+**A numeric `js_tag(v)` was considered and rejected, and the reason is a fact about
+the engines, not a preference.** `js_genfn` is a tag 16 CELL in `runtime.c` and a
+`*hostFunc` in `abnf/jsrt.go`, so one number would be 16 in one half and 8 in the
+other; and `metajs-interpreter.abnf` has NO tag numbering at all - its values are
+the host engine's, where a closure, a host function and a bound method are one JS
+function. A numeric tag therefore cannot be byte-identical in three engines, which
+is the gate. Every OTHER distinction a tag would carry already has a name layer 2
+can use: `typeof`, `sintIs`, `floIs`, and `typeof v.length == "number"` for an
+array. A generator was the one shape with no name, so it got a predicate.
+
+**An honest zero, stated as a zero.** MetaJS has no generators - no `function*`, and
+`metajs-to-llvm-ir.abnf` emits no `js_genfn` - so **no MetaJS program can construct
+one in ANY engine**, and the ratchet cannot exercise the TRUE arm at all. What
+SECTION 30 pins is that all three halves answer false for every value a MetaJS
+program can build, including the shape `phIsGen` gets wrong (`gen05`: an ordinary
+object with a callable `next`). The true arm becomes reachable the moment a layer-2
+file of a language that HAS generators calls it, which is where it will be used.
+
+## 3. `floStr` style 1 - THE CLAIM IS STALE. Nothing to fix, and go-rt.metajs CAN use it
+
+go's report says *"The floor's `floStr` routes style 1 (floGo) to `jvm_flo_str`,
+i.e. Java's layout... One `if (sty == 1)` in `jvmFloText` fixes it."* **It does not,
+and it did not when the report was written.** All three engines have routed style 1
+to Go's layout since `d30629f`, which is two commits BEFORE go's own migration
+(`3f91d7b`):
+
+```
+languages/lib/runtime.c   jf_text:      if (sty == 1) { return go_float_str(fa(h)); }
+abnf/jsrtjvm.go           jvmFloText:   case floGo: return goFloStr(v.f)
+metajs-interpreter.abnf   flStr:        if (v.sty == 1) return flGo(v.f)
+```
+
+verified at `10bbca1` with `git show`, i.e. at the tree go was written against.
+
+Measured against **real go 1.26.5 darwin/arm64** (`fmt.Println` of a `float64`,
+which is `%v` = `strconv.FormatFloat(f,'g',-1,64)`), over 26 values including both
+`'g'` boundaries, both infinities, NaN, a negative zero, the subnormal edge and
+`1/3`:
+
+```
+go       0 1 1.5 0.1 1e+20 1e+21 1e-05 0.0001 123456 1.234567e+06 1e+06 1e-07
+         3.14159 -2.5 100 1e-06 0.3333333333333333 1.2345678901234567e+19
+         2.5e-10 999999.5 NaN +Inf -Inf
+goja     identical    -frozen  identical    llvm.Run  identical    native  identical
+```
+
+and the negative zero separately, where the three styles must differ:
+`floStr(flo(-0.0, 1))` is `-0`, style 0 is `-0.0`, style 2 is `-0` - the same in all
+four halves. **So nothing was changed in this file.** The stale claim now lives in
+`go-rt.metajs`'s own comment above `goFloStr` ("the floor's floStr cannot be
+used..."), which is that file's to correct.
+
+**Could `go-rt.metajs` use `floStr` now?** Yes - `goFloStr` + `goDigits` +
+`goLayout` (~85 lines) is a re-derivation of `go_float_str`, and both agree with
+real go on every value probed above. Two things to check when it is done, neither a
+blocker: `goFloStr` takes its digits from the ENGINE's own number text (`"" + a`)
+while the floor uses `shortest_digits()`, so the shortest-digit source differs even
+though the layout does not; and `floStr` is a HOST CALL (argument array + dispatch)
+where `goFloStr` is a direct call, which matters only if float printing is hot.
+**Reported, not made - `go-rt.metajs` is another file's.**
+
+## 4. `js_bytelen` - QUALIFIES, BLOCKED, AND NOT SHIPPED
+
+It is a pure byte count and carries no per-language behaviour, unlike `js_jadd`,
+`js_mcall` and the `js_range_*` family that are going to the shared MetaJS layer for
+exactly that reason. The floor already holds the bytes (a string cell IS its UTF-8
+bytes plus a length in `fb`), so the body is one line, and it is written out in
+`runtime.c` at the point where it would go.
+
+**What blocks it is a link error, measured rather than predicted.**
+`languages/lib/php-rt.metajs:1711` still spells
+`function js_bytelen(s) { return byteLen(s) }`, which `-rt-lib` turns into a
+`define i64 @js_bytelen` in `lib/php-rt.ll`. Both modules go to clang:
+
+```
+$ # clean archive of ad922a0, ONLY the js_bytelen body added to runtime.c
+$ ./mec languages/php-to-llvm-ir.abnf tests/php-test-features.php -q -exe php.out
+error: 1 unresolved symbol(s), and this build links a runtime, so they are NOT stubbed:
+error:     js_bytelen
+$ # what clang actually said, captured through MEC_CLANG:
+duplicate symbol '_js_bytelen' in:
+ld: 1 duplicate symbols
+```
+
+Note the diagnosis trap for whoever meets this again: the metacompiler reports a
+DUPLICATE as *"unresolved"*, because `undefinedSymbols(m)` only checks whether clang
+mentioned the name (`abnf/llvmmap.go`, `buildExecutable`).
+
+So the two halves have to land together, and the layer-2 half is not this file's:
+delete `php-rt.metajs`'s two lines, regenerate `lib/php-rt.ll` with
+`tests/gen-php-rt-ll.sh`, and add the body. Shipping only the floor half fixes
+nothing and breaks one language, which is a loss - so it was reverted, and the
+argument, the body and the exact failure are recorded at the site instead.
+
+**And the general rule this produced**: every extern a layer-2 file DEFINES is a
+name the floor may not also define. Before moving any `js_*` into `runtime.c`,
+`grep -l 'function js_<name>' languages/lib/*.metajs` first.
+
+---
+
 # Rules (unchanged, and they earned their place this session)
 
 - Never `git stash` / `checkout` / `reset` / `clean` - repo-wide, destroys concurrent
@@ -6427,3 +6837,57 @@ Two smaller things, recorded at the same standard:
 - The defect class that keeps surfacing is **both halves agreeing and both being
   wrong**. Byte-identity cannot see it by construction. Every instance this session was
   caught by an external oracle - `cc`, real `lua`, Go's `math`.
+
+---
+
+# The measured-but-unfixed defects, closed (2026-08-04)
+
+Seven divergences that this document had already measured and recorded at their
+sites, taken in one pass. Each is struck at its own site above with the full
+argument; this is the index and the honest scoreboard.
+
+| # | defect | oracle | state |
+|---|---|---|---|
+| 1 | Go `&^` emitted as a 32-bit pair; shift result type taken from the COUNT | real `go` (installed) | **FIXED**, both halves, pinned `int31`-`int38` |
+| 2 | C# NaN sentinel read as an ordering (`NaN > 0.0` is TRUE) | ECMA-334 12.12.1 (no C# toolchain here) | **HALF FIXED** - Go twin done, **layer 2 owes one line** |
+| 3 | C# `>>>` implemented in four halves, recognised by no grammar | ECMA-334 shift operators | **RECOGNISED**, both grammars, pinned `urs1`-`urs4` |
+| 4 | Python `*args` overbinds when the positional count equals the slot count | `python3` 3.14.6 | **DIAGNOSED, NOT FIXED** - the bug is in `js_pycall`, which is two other agents' files |
+| 5 | C `_Bool` holds the raw value | `cc` / clang 17 | **FIXED**, both halves, pinned `2008`-`2020` |
+| 6 | a DUPLICATE symbol reported as an unresolved one | reproduced end to end with two `-rt` inputs | **FIXED**, pinned `abnf/linkdiag_test.go` |
+| 7 | Dart `m[missing]` aborts instead of answering null | dart:core `Map.operator []` (no `dart` here) | **FIXED**, all three halves, pinned `co7`-`co10` |
+
+Discriminating power, measured by copying each new ratchet file into a clean
+`git archive ad922a0` tree and running it there:
+
+```
+go-test-full.go       4 red (interpreter)   6 red (compiler)
+csharp-test-full.cs   PARSE ERROR in both halves at 926:40
+c-test-full.c        11 red (interpreter)  12 red (compiler)
+dart-test-full.dart   ABORTS in both halves
+abnf/linkdiag_test.go does not COMPILE (duplicateSymbols did not exist)
+```
+
+**Three things another agent still owes, and none of them is optional:**
+
+1. `js_cscmp` in `languages/lib/csharp-rt.metajs`: `if (c == 2) { return false }`
+   after `var c = csCompare(l, r)`. Until it lands the two C# engines disagree on a
+   NaN comparison and the ratchet assertion for it cannot be added (the text is
+   written out at the C# site above).
+2. `js_pycall` in `abnf/jsrt.go` AND in `languages/lib/python-rt.metajs`: stop
+   deciding "binding was a no-op" by comparing LENGTHS. The exact condition, the
+   reason the length test is wrong, and the ratchet assertion are written out at the
+   Python site above.
+3. The SHIFT result type in the floor - `giArith` in `abnf/jsrtint.go`, `si_apply`
+   codes 9 and 10 in `languages/lib/runtime.c`, `szArithSlow` in
+   `languages/lib/interp-core.js`. Go was closed at the emitter instead; Java,
+   Kotlin, C#, Swift and Dart specify the same rule and are still latently wrong,
+   invisibly, because both of their halves agree.
+
+**One thing this pass changed that nobody asked for, and why.** The C return-type
+fix (item 5) is broader than `_Bool`: the compiled half never converted a returned
+value to a DECLARED return type narrower than an int, so `unsigned char f(int n)
+{ return n; }` called with 300 answered 300 against `cc`'s and the interpreter
+half's 44. It was in the same three lines and it is the same C11 clause family, so
+it landed with them. It moved `languages/lib/batch-rt.ll` by four lines of sign
+extension in one `char`-returning function, and that file was regenerated with
+`tests/gen-batch-rt-ll.sh` as its own header instructs.

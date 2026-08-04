@@ -332,6 +332,22 @@ namespace Demo
             // recursion
             Program.Check("fib", Program.Fib(10), 55);
 
+            // NaN and the four relational operators. ECMA-334 12.12.1: when
+            // either operand is NaN every one of < > <= >= is FALSE. The shared
+            // jsCompare answers the SENTINEL 2 for a NaN operand, and js_cscmp
+            // used to compare that sentinel like an ordinary ordering, which made
+            // `>` and `>=` TRUE. Measured against a clean HEAD archive: the
+            // compiler half answered True/False/True/False and the interpreter
+            // half False/False/False/False, so the two halves DISAGREED and
+            // --cross never probed it. These four lines are the pin; two of them
+            // (>, >=) discriminate.
+            double nzero = 0.0;
+            double nan = nzero / nzero;
+            Program.CheckB("NaN >", nan > 0.0, false);
+            Program.CheckB("NaN <", nan < 0.0, false);
+            Program.CheckB("NaN >=", nan >= 0.0, false);
+            Program.CheckB("NaN <=", nan <= 0.0, false);
+
             if (Program.Fails == 0)
             {
                 Console.WriteLine("C# subset self test passed");

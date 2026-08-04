@@ -107,6 +107,22 @@
 // indexOf ignores its from-index, array.length is not assignable, and there are
 // no exponent literals.
 
+// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). It supplies the
+// externs every language implements identically, parameterised by rtk* hooks this
+// file defines further down. Same mechanism ruby uses for `import "./regex.js"`.
+import "./runtime.metajs"
+
+// ----- the rtk* hooks the shared runtime calls -------------------------------
+function rtkStr(v) { return dtJavaStr(v) }
+function rtkNum(v) { return dtNumOf(v) }
+// This file keeps its OWN js_is_type, which SHADOWS the shared one: both are
+// top-level declarations in one pinned scope, and -rt-lib's lazy boot runs the
+// imported file's top level BEFORE this file's, so the later declaration - this
+// one - is what the name resolves to. The hooks below exist only so the shared
+// body stays resolvable; they are never reached.
+function rtkIsChar(v) { return false }
+function rtkIsArr(v) { return Array.isArray(v) }
+
 // ===================================================== the two number tags ==
 //
 // `typeof v == "number"` is TRUE for a sized integer AND for a boxed double, so
@@ -1239,7 +1255,7 @@ function dtListMethod(o, name, args) {
         var sum = 0
         var si = 0
         while (si < o.length) {
-            sum = dtWrap32(sum + Math.trunc(dtNum(args[0].apply(undefined, [o[si]]))))
+            sum = rtWrap32(sum + Math.trunc(dtNum(args[0].apply(undefined, [o[si]]))))
             si = si + 1
         }
         return sum
@@ -1274,18 +1290,7 @@ function dtListMethod(o, name, args) {
     return undefined
 }
 
-function dtWrap32(n) {
-    var m = n - Math.floor(n / 4294967296) * 4294967296
-    if (m > 2147483647) { m = m - 4294967296 }
-    return m
-}
 
-function dtIsInt32(n) {
-    if (n !== n) { return false }
-    if (Math.floor(n) !== n) { return false }
-    if (n > 2147483647) { return false }
-    return n >= 0 - 2147483648
-}
 
 // ===================================================== the exports ==========
 //
@@ -1298,7 +1303,7 @@ function dtIsInt32(n) {
 // them, and they are here only because the C floor does not have them yet.
 
 // An empty Map / Python dict / Go map handle.
-function js_dict_new() { return {__dict: true, keys: [], vals: []} }
+// js_dict_new is SHARED - lib/runtime.metajs (six identical copies, no knobs).
 
 // Sequence indexing (negative wraps) and Map lookup: core.indexExt.
 // The __getitem__ arm of the Go twin is PYTHON's and is unreachable from Dart -
@@ -1484,18 +1489,8 @@ function js_pyset_new(src) {
 // type names go through js_dartis below.
 function js_is_type(v, t) { return dtTypeName(v, t) }
 
-// Java/C# +: string concat, 32 bit add for two int values, float add otherwise.
+// js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
 // The dart emitter emits it for its own string builders and index arithmetic.
-// The float arm needs the boxed double, which the floor HAS - so unlike
-// php-rt.metajs's, this one is complete.
-function js_jadd(l, r) {
-    if (typeof l == "string" || typeof r == "string") { return dtJavaStr(l) + dtJavaStr(r) }
-    if (floIs(l) || floIs(r)) { return flo(dtNumOf(l) + dtNumOf(r), floStyle(floIs(l) ? l : r)) }
-    var ln = dtNumOf(l)
-    var rn = dtNumOf(r)
-    if (dtIsInt32(ln) && dtIsInt32(rn)) { return dtWrap32(ln + rn) }
-    return ln + rn
-}
 
 function dtJavaStr(v) {
     if (typeof v == "string") { return v }
