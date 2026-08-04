@@ -969,11 +969,11 @@ Ellipsis    <~~ push(makeConst(pyEllipsis)) ~~> = "..." ;
 // and `1 j` are not literals. An integer too large for a double becomes a boxed
 // arbitrary precision integer (see bigFromDec); everything else is a plain number.
 PyNumLit    = PyHexLit | PyBinLit | PyOctLit | PyImagLit | PyRealLit ;
-PyHexLit    <~~ push(makeConst(parseInt(pyDigits(up.in).substring(2), 16))) ~~>
+PyHexLit    <~~ push(makeConst(pyRadixLit(pyDigits(up.in), 16))) ~~>
             = "0" :whitespace() PyXCh PyUndRun PyHexDig PyHexRest :whitespace(Whitespace) ;
-PyBinLit    <~~ push(makeConst(parseInt(pyDigits(up.in).substring(2), 2))) ~~>
+PyBinLit    <~~ push(makeConst(pyRadixLit(pyDigits(up.in), 2))) ~~>
             = "0" :whitespace() PyBCh PyUndRun PyBinDig PyBinRest :whitespace(Whitespace) ;
-PyOctLit    <~~ push(makeConst(parseInt(pyDigits(up.in).substring(2), 8))) ~~>
+PyOctLit    <~~ push(makeConst(pyRadixLit(pyDigits(up.in), 8))) ~~>
             = "0" :whitespace() PyOCh PyUndRun PyOctDig PyOctRest :whitespace(Whitespace) ;
 PyImagLit   <~~ push(makeConst(pyImag(pyDigits(up.in)))) ~~>
             = PyDig :whitespace() PyDigRest PyMagOpt PyJCh :whitespace(Whitespace)
@@ -2749,7 +2749,63 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var ch = txt.charAt(i)
             if (ch < "0" || ch > "9") { return false }
         }
-        return parseFloat(txt) > bigMaxNum
+        return pyDecOver53(txt)
+    }
+    // Is the decimal digit string txt worth MORE than 2^53? This has to be decided on
+    // the TEXT. The predicate used to be parseFloat(txt) > bigMaxNum, and parseFloat
+    // rounds 9007199254740993 down to exactly 2^53 - so the very first value that
+    // needs the box answered "not big" and the literal became the double below it.
+    // 2^53 itself is exact and is deliberately NOT boxed.
+    function pyDecOver53(txt) {
+        var s = txt
+        var z = 0
+        while (z < s.length - 1 && s.charAt(z) == "0") { z = z + 1 }
+        if (z > 0) { s = s.substring(z) }
+        var lim = "9007199254740992"
+        if (s.length != lim.length) { return s.length > lim.length }
+        for (var k = 0; k < lim.length; k++) {
+            var a = s.charAt(k)
+            var b = lim.charAt(k)
+            if (a != b) { return a > b }
+        }
+        return false
+    }
+    // 0x / 0o / 0b digits (prefix already stripped) as the EXACT decimal text of the
+    // same value. parseInt rounds past 2^53 - 0x20000000000001 came back as 2^53 -
+    // and bigFromDec reads decimal only, so the conversion is a schoolbook
+    // multiply-add over a little-endian array of decimal digits: d = d * radix + v.
+    function pyRadixToDec(digits, radix) {
+        var d = [0]
+        for (var i = 0; i < digits.length; i++) {
+            var ch = digits.charAt(i)
+            var dv = 0
+            if (ch >= "0" && ch <= "9") { dv = ch.charCodeAt(0) - 48 }
+            if (ch >= "a" && ch <= "f") { dv = ch.charCodeAt(0) - 87 }
+            if (ch >= "A" && ch <= "F") { dv = ch.charCodeAt(0) - 55 }
+            var carry = dv
+            for (var k = 0; k < d.length; k++) {
+                var t = d[k] * radix + carry
+                var lo = t % 10
+                d[k] = lo
+                carry = (t - lo) / 10
+            }
+            while (carry > 0) {
+                var c2 = carry % 10
+                d.push(c2)
+                carry = (carry - c2) / 10
+            }
+        }
+        var out = ""
+        for (var j = d.length - 1; j >= 0; j--) { out = out + String.fromCharCode(48 + d[j]) }
+        return out
+    }
+    // A 0x / 0o / 0b literal. Boxed by the same rule a decimal one is - it used to be
+    // a bare parseInt, so every non-decimal literal past 2^53 was silently rounded.
+    function pyRadixLit(txt, radix) {
+        var digits = txt.substring(2)
+        var dec = pyRadixToDec(digits, radix)
+        if (pyDecOver53(dec)) { return bigOut(bigFromDec(dec)) }
+        return parseInt(digits, radix)
     }
 
     binOp = function(op, l, r) {

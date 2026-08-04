@@ -1303,16 +1303,49 @@ def s29():
     check("bit09", (v[9] & 255) == 0 and (v[9] >> 40) == -909494701772928238 and (v[8] >> 60) == 867361737988)
     check("bit10", (v[0] & v[8]) == v[8] and (v[0] ^ v[8]) == -1000000000000000000000000000001)
     # 2**53 | 1 is 2**53+1, which no double holds: the narrowers have to REBUILD
-    # and compare before they hand a box back as a plain number. Asserted through
-    # str() because a DECIMAL LITERAL of 9007199254740993 is a separate, still
-    # open gap - pyIsBigText boxes on `parseFloat(txt) > 2**53`, and parseFloat
-    # rounds that text down to exactly 2**53, so the literal is not boxed.
+    # and compare before they hand a box back as a plain number. (It is asserted
+    # through str() because a DECIMAL LITERAL of 9007199254740993 used to be a
+    # separate gap; that gap is closed - see SECTION 30 - and the str() form is
+    # kept because it is the sharper assertion.)
     check("bit11", str((2 ** 53) | 1) == "9007199254740993" and str((2 ** 53) ^ 1) == "9007199254740993")
     # bool & bool is a BOOL; a bool meeting an int is an int, and True << 1 is 2.
     check("bit12", (True & True) is True and (True | False) is True and (True ^ True) is False)
     check("bit13", (True & 1) == 1 and not ((True & 1) is True) and (True << 1) == 2)
     check("bit14", (v[10] << 45) == 8972014882652160 and (v[10] << 46) == 17944029765304320)
     check("bit15", (v[7] >> 200) == 0 and (v[4] >> 200) == -1 and (v[2] << 99) == 633825300114114700748351602688)
+
+# ===== SECTION 30: integer literals past 2**53 =====
+# Whether an integer literal needs the arbitrary precision box is decided on the
+# literal TEXT, in the lexer of python-interpreter.abnf and the emitter of
+# python-to-llvm-ir.abnf. Two defects lived there, both invisible to --cross
+# because both halves agreed: the decimal predicate went through parseFloat,
+# which rounds "9007199254740993" down to exactly 2**53 and therefore answered
+# "not big" for the very first value that is; and the 0x / 0o / 0b forms were a
+# bare parseInt and were never boxed at all, so 0x7fffffffffffffff arrived as
+# 9223372036854776000. Every value below is representable only as an arbitrary
+# precision int, so a rounded literal shows up directly in str().
+def s30():
+    lit = [9007199254740993, 0x20000000000001, 0o400000000000000001,
+           0b100000000000000000000000000000000000000000000000000001,
+           0x7fffffffffffffff, 0xffffffffffffffff, -9007199254740993,
+           0x10000000000000000000]
+    check("lit01", str(9007199254740993) == "9007199254740993" and str(lit[0]) == "9007199254740993")
+    check("lit02", lit[0] - 1 == 9007199254740992 and lit[0] != 9007199254740992)
+    check("lit03", str(0x20000000000001) == "9007199254740993" and lit[1] == lit[0])
+    check("lit04", str(0o400000000000000001) == "9007199254740993" and lit[2] == lit[0])
+    check("lit05", str(0b100000000000000000000000000000000000000000000000000001) == "9007199254740993" and lit[3] == lit[0])
+    check("lit06", str(0x7fffffffffffffff) == "9223372036854775807")
+    check("lit07", str(0xffffffffffffffff) == "18446744073709551615" and lit[5] == lit[4] * 2 + 1)
+    check("lit08", str(-9007199254740993) == "-9007199254740993" and lit[6] < -9007199254740992)
+    check("lit09", str(0x10000000000000000000) == "75557863725914323419136")
+    check("lit10", str(lit[7] & 0xff) == "0" and str(lit[7] >> 60) == "65536")
+    # 2**53 itself IS exact and must NOT be boxed - the boundary is strictly `>`.
+    check("lit11", str(9007199254740992) == "9007199254740992" and str(0x20000000000000) == "9007199254740992")
+    check("lit12", str(0xff) == "255" and str(0o17) == "15" and str(0b1011) == "11" and str(0x0) == "0")
+    # '_' separators are stripped before the text is measured.
+    check("lit13", str(0x1F_FF_FF_FF_FF_FF_FF) == "9007199254740991" and str(0x20_0000_0000_0001) == "9007199254740993")
+    check("lit14", (9007199254740993 & 0xff) == 1 and (9007199254740993 >> 1) == 4503599627370496)
+    check("lit15", str(0xFFFFFFFFFFFFFFFFFFFF) == "1208925819614629174706175" and str(type(0x20000000000001).__name__) == "int")
 
 # ===== END SECTIONS =====
 
@@ -1346,5 +1379,6 @@ def main():
     s27() # SECTION-CALL 27
     s28() # SECTION-CALL 28
     s29() # SECTION-CALL 29
+    s30() # SECTION-CALL 30
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

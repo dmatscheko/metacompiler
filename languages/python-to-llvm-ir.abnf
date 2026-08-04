@@ -1581,22 +1581,73 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // numText strips the whitespace the literal rule's trailing skip picked up and
     // the '_' digit separators Python allows.
     function numText(t) { return stripWs(t).split("_").join("") }
-    // An integer literal. A decimal one whose value does not fit a double EXACTLY
-    // becomes a real arbitrary precision integer: js_bigint is backed by Go's
-    // math/big, so 10000000000000000000000000001 - 10000000000000000000000000000
-    // is 1 here. (The interpreter grammar has only doubles and cannot do this - the
-    // one place where the compiled path is strictly more capable.)
+    // An integer literal. One whose value does not fit a double EXACTLY becomes a
+    // real arbitrary precision integer: js_bigint is backed by Go's math/big, so
+    // 10000000000000000000000000001 - 10000000000000000000000000000 is 1 here.
+    // js_bigint reads DECIMAL text (pyABigFromStr says so at its own site), so a
+    // 0x / 0o / 0b literal is converted to exact decimal first rather than being
+    // handed to parseInt, which rounds: 0x20000000000001 used to arrive as 2^53.
     function makeIntLit(t, radix) {
         var txt = numText(t)
         if (radix != 10) {
             var digits = txt.substring(2)
+            var dec = pyRadixToDec(digits, radix)
+            if (pyDecOver53(dec)) {
+                return function(b) { return {b: b, v: callExt(b, "js_bigint", [emitStr(b, dec)])} }
+            }
             return makeConst(parseInt(digits, radix))
         }
-        var v = parseInt(txt, 10)
-        if (v > 9007199254740992 || v < -9007199254740992) {
+        if (pyDecOver53(txt)) {
             return function(b) { return {b: b, v: callExt(b, "js_bigint", [emitStr(b, txt)])} }
         }
-        return makeConst(v)
+        return makeConst(parseInt(txt, 10))
+    }
+    // Is the decimal digit string txt worth MORE than 2^53? Decided on the TEXT: the
+    // gate used to be parseInt(txt, 10) > 2^53, and that rounds 9007199254740993 down
+    // to exactly 2^53 - so the very first value that needs the box answered "not big"
+    // and the literal became the double below it. 2^53 itself is exact, not boxed.
+    // A literal never carries a sign here (NegNumLit applies makeNeg to the value).
+    function pyDecOver53(txt) {
+        var s = txt
+        var z = 0
+        while (z < s.length - 1 && s.charAt(z) == "0") { z = z + 1 }
+        if (z > 0) { s = s.substring(z) }
+        var lim = "9007199254740992"
+        if (s.length != lim.length) { return s.length > lim.length }
+        for (var k = 0; k < lim.length; k++) {
+            var a = s.charAt(k)
+            var b = lim.charAt(k)
+            if (a != b) { return a > b }
+        }
+        return false
+    }
+    // 0x / 0o / 0b digits (prefix already stripped) as the EXACT decimal text of the
+    // same value: a schoolbook multiply-add over a little-endian array of decimal
+    // digits, d = d * radix + v. The twin of pyRadixToDec in python-interpreter.abnf.
+    function pyRadixToDec(digits, radix) {
+        var d = [0]
+        for (var i = 0; i < digits.length; i++) {
+            var ch = digits.charAt(i)
+            var dv = 0
+            if (ch >= "0" && ch <= "9") { dv = ch.charCodeAt(0) - 48 }
+            if (ch >= "a" && ch <= "f") { dv = ch.charCodeAt(0) - 87 }
+            if (ch >= "A" && ch <= "F") { dv = ch.charCodeAt(0) - 55 }
+            var carry = dv
+            for (var k = 0; k < d.length; k++) {
+                var t = d[k] * radix + carry
+                var lo = t % 10
+                d[k] = lo
+                carry = (t - lo) / 10
+            }
+            while (carry > 0) {
+                var c2 = carry % 10
+                d.push(c2)
+                carry = (carry - c2) / 10
+            }
+        }
+        var out = ""
+        for (var j = d.length - 1; j >= 0; j--) { out = out + String.fromCharCode(48 + d[j]) }
+        return out
     }
     // A float literal builds the {__flo} BOX, so 1.0 stays a float and prints as
     // 1.0. It cannot be a folded constant: a constant carries a double, and 1.0

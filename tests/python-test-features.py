@@ -593,6 +593,21 @@ check_true("class-annotations-unreached", len(AnnUnreached.__annotations__) == 0
 # {'am_yes': <class 'int'>}.
 check_true("class-annotations-mixed", len(AnnMixed.__annotations__) == 1 and "am_yes" in AnnMixed.__annotations__ and "am_no" not in AnnMixed.__annotations__)
 
+# Integer literals past 2**53. The box is chosen on the literal TEXT: the decimal
+# predicate used to go through parseFloat (which rounds 9007199254740993 down to
+# exactly 2**53 and answered "not big"), and the 0x / 0o / 0b forms were never
+# boxed at all. Both halves agreed, so only python3 could see it.
+check("lit-dec-2p53p1", str(9007199254740993), "9007199254740993")
+check("lit-hex-2p53p1", str(0x20000000000001), "9007199254740993")
+check("lit-oct-2p53p1", str(0o400000000000000001), "9007199254740993")
+check("lit-bin-2p53p1", str(0b100000000000000000000000000000000000000000000000000001), "9007199254740993")
+check("lit-hex-int64max", str(0x7fffffffffffffff), "9223372036854775807")
+check("lit-hex-uint64max", str(0xffffffffffffffff), "18446744073709551615")
+check("lit-neg-2p53p1", str(-9007199254740993), "-9007199254740993")
+# 2**53 is exact and must NOT be boxed; small radix literals must stay plain.
+check("lit-2p53-exact", str(9007199254740992) + " " + str(0x20000000000000), "9007199254740992 9007199254740992")
+check("lit-small-radix", str(0xff) + " " + str(0o17) + " " + str(0b1011), "255 15 11")
+
 check("combined-pipeline", f"{transform([1, 2, -3])}", "['o1', 'e2', 'x']")
 
 print(f"features: {checks[0]} checks, {fails[0]} failures")
