@@ -1001,10 +1001,19 @@ x=1  y=1e-100             fused -3.5894790912362802e-17  two-step 0
 
 ### Where our Lua and REAL lua still differ - measured, and STILL OPEN
 
-> **Re-checked 2026-08-04 at `c1bc760`: still open**, and it is item 1 of the
-> consolidated "WHAT IS STILL OPEN" list at the end of `runtime-next-plan.md`, where it
-> sits with the swift, ruby and python formatter boundaries - the same three-halves
-> shape, and the reason none of the four has been done.
+> **Re-measured 2026-08-04: the LARGEST row is FIXED and the rest is now SPECIFIED.**
+> The 3,319-line row below - `".0"` appended to an exponent form - was not a policy
+> difference at all but malformed output, and it is fixed in all three halves
+> (`luFloText`/`luExpFix` in `abnf/jsrtlua.go`, `luaFloText`/`luaExpFix` in
+> `lua-interpreter.abnf`, `luFloText`/`luExpFix` in `languages/lib/lua-rt.metajs`),
+> together with the exponent's `%g` shape (`1e-7` -> `1e-07`), and pinned by
+> `ift10`..`ift12` in `tests/lua-test-full.lua`. The 312-line negative-zero row is
+> NOT the formatter's: it is unary minus spelled `0 - x`. The ~190-line digits row
+> is the real remaining one, and the guess below ("%.14g/%.17g policy") is now
+> replaced by a derived rule: lua 5.5.0 tries `%.15g`, then `%.16g`, then `%.17g`
+> and takes the first that round-trips. All three, with the sweep they came from,
+> are item 1 of the consolidated "WHAT IS STILL OPEN" list at the end of
+> `runtime-next-plan.md`, where swift's and ruby's rows are now struck as CLOSED.
 
 With the same 12,557-line probe run through the installed `lua 5.5`, 3,822 lines
 differ - and **every one of them is the number FORMATTER, not the arithmetic**;
@@ -1018,9 +1027,15 @@ pre-existing behaviour of both halves, unchanged by this phase:
         lua prints %.17g (0.33333333333333331), and 1e17 as 1e+17 not 100000000000000000.0
 ```
 
-Fixing these means replacing `luNumStr` and `jsNumString`'s Lua path with Lua's own
-`%.14g`/`%.17g` policy in **three** halves at once. It is a self-contained job and
-it is not phase 4's gate, so it is recorded rather than done.
+~~Fixing these means replacing `luNumStr` and `jsNumString`'s Lua path with Lua's own
+`%.14g`/`%.17g` policy in **three** halves at once.~~ Partly done and partly
+re-specified 2026-08-04, see the note at the head of this section. What is left is
+the DIGITS row, and the policy is not `%.14g`/`%.17g`: it is `%.15g`, then `%.16g`,
+then `%.17g`, first one that round-trips. The blocker on it is that the two
+JS-dialect halves have no way to round a double to 15 significant digits - there is
+no `toPrecision` anywhere in `metajs-to-llvm-ir.abnf`, `metajs-interpreter.abnf` or
+`abnf/jsrt.go` - so the Go half cannot be fixed alone without creating a `--cross`
+divergence.
 
 ### Performance - Risk 1, measured at the gate as the plan asks
 
