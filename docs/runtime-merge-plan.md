@@ -744,6 +744,18 @@ code-only bodies (no module-level data, no string literals) appended to
 `swift-rt.metajs` and never called - swift, 400,000 x `s = s + i % 7`, native
 `-exe`, `MEC_GC_STATS`, min of three runs:
 
+> **⚠ AUDITED 2026-08-04 (`e8edc89`): the two wall-clock deltas here are not
+> measurements.** `+3.5%` is inside this machine's wall-clock noise (+-8% on one
+> binary) and inside the build-layout lottery (a native binary's instruction count
+> moves up to 4.8% with nothing but the LENGTH of its `-exe` path); `+9.1%` is on
+> the line. The `live objects` column is a COUNTER and is exact - it is what says
+> the live walk tracks CODE, and the finding survives on it alone. The derived
+> "~+1.3% wall per 100 lines" does NOT survive: it is a slope through two
+> unsupported points, and the kotlin 2x2 further down puts the code component an
+> order of magnitude lower. See runtime-next-plan.md, "HOW TO MEASURE PERFORMANCE
+> IN THIS PROJECT".
+
+
 ```
 added lines   live objects        heap        collections   wall
       0       104,016             9,442,688   4,097         3.40 s
@@ -820,6 +832,17 @@ import engine-only (impe)   33.401 G      +9.5%    222,080   9,465,728
 import "./regex.js" (imp)   33.760 G     +10.7%    222,752   9,465,728
 ```
 
+
+> **⚠ AUDITED 2026-08-04 (`e8edc89`): the three headline rows stand; every number
+> derived from their DIFFERENCES does not.** `+9.3%`, `+9.5%` and `+10.7%` are far
+> outside the noise floor. But "`impe` == `move` to three decimal places", "the
+> import mechanism itself is free (+0.2%)" and "the 1,217 duplicated lines are
+> worth +1.1%" are single-build differences of ~1% or less, and a single build
+> cannot resolve anything below ~2% on this target. Two builds landing on the same
+> number is a coin landing heads, not a confirmation of equality. The +1.1% was
+> later re-measured over 20 draws and its confidence interval straddles zero (see
+> "THE THIRD ASKING").
+
 `impe` == `move` to three decimal places. **The import mechanism itself is free**
 (importing a two-line module: +0.2%). The 1,217 duplicated lines are worth
 **+1.1%**, and the other +9.5% is placement, which no split can move.
@@ -845,6 +868,15 @@ innocent.
 **4. The 2x2 that separates lines from declarations.** The swift filler above
 varied line count and function count TOGETHER, which is the confound. Hold one
 fixed and move the other (all appended, so placement is constant):
+
+> **⚠ AUDITED 2026-08-04 (`e8edc89`).** `B (+7.3%)` and `C (+5.4%)` are outside the
+> floor and STAND; `A (+1.9%)` is on the line. The two readings BELOW the table that
+> rest on sub-2% differences do not stand: "tiny5 vs fat5 ... the same cost to
+> 0.01%" is two single builds agreeing inside a percent-wide lottery, which is not
+> evidence of equality, and "B vs C +1.8% apart", with the ~0.2%-per-100-lines
+> coefficient drawn from it, is inside the same window. What DOES stand is the
+> `live` column, a counter: code size does not enter the live set at all.
+
 
 ```
                     decls  code lines    live      instructions   vs HEAD
@@ -882,6 +914,15 @@ x 8 bytes = 12,288 bytes in one step), which is a step, not a slope.
 > layer-2 body a language cannot call now costs that language nothing.**
 
 **A shared layer-2 body taxes a non-calling importer by roughly**
+
+> **⚠ AND A SECOND REASON, 2026-08-04 (`e8edc89`): this model was never resolvable
+> to the precision it is quoted at.** The rows it was fitted to (+9.3%, +7.3%,
+> +5.4%) are real, so the shape of the model was reasonable - but the +0.2%/100
+> lines term rests on a sub-2% single-build difference, and "9.9% predicted against
+> 10.7% measured" is a fit to single builds, which cannot close to 0.8% on this
+> target. The coefficients are dead because the hash index removed the tax; they
+> were also never measured to three significant figures.
+
 
 ```
     0.13%  per top-level declaration it adds          (it lengthens every miss)
@@ -996,6 +1037,20 @@ the scan gave. `js_scope_get` / `scopeHas` / `js_scope_has` are unchanged.
 
 The same loop in each language, native `-exe`, against the same clean base:
 
+> **⚠ AUDITED AND PARTLY RE-MEASURED 2026-08-04 (`e8edc89`).** The nine rows from
+> -19.5% to -42.0% are ten to forty times any noise floor and STAND. `c -0.1%` is
+> inside `c`'s own 0.35% spread, which is the correct reading of a control: it did
+> not move. `metajs +0.4%` is a single build and is not evidence in either
+> direction. **`lua +4.1%` WAS re-measured twice, over 13 and 9 layout draws per
+> side in isolated `git archive` trees of `85f3409` and `e1307f3`, and the effect
+> is REAL:** it exceeds both rows' spreads, `c` as a control moved +0.02/+0.03%,
+> and a 5x longer loop gives the same percentage, so it is steady-state loop cost.
+> The two runs agree on the parent to four digits and differ 2% on the index
+> (1.5303 vs 1.4997 G, the latter reproduced on three separate occasions), so
+> **the figure to carry is ~+4% - the originally recorded +4.1% stands.** Full
+> numbers: runtime-next-plan.md, "THE PERFORMANCE-CLAIM AUDIT".
+
+
 ```
   python      133.928 G -> 77.683 G   -42.0%      lua      7.982 G -> 8.308 G  +4.1%
   kotlin       30.502 G -> 18.013 G   -40.9%      metajs   1.198 G -> 1.203 G  +0.4%
@@ -1011,6 +1066,17 @@ The same loop in each language, native `-exe`, against the same clean base:
 ```
 
 `c` is self-contained IR with no scopes at all and is the control.
+
+
+> **⚠ AUDITED 2026-08-04 (`e8edc89`): the regression is real (re-measured twice,
+> ~+4%, see the marking on the results table above), but the three numbers in this
+> paragraph are single builds against a row whose 13-draw range is 3.3%.** `+2.8%`
+> for a branch that can never fire, `+4.7%` for the out-of-line arm and `+6.1%` for
+> the name-in-slot are each inside or barely outside that window, so "both ways of
+> buying it back are worse" is NOT established - it would need draws before anyone
+> accepts that the cost cannot be bought back. The `sample` shift (33.5% of the
+> profile in the scope family against 23%, the extra samples on the LINEAR path) is
+> not a timing and stands.
 
 **lua is a real regression and it is NOT the hashing.** lua's 84-declaration
 module scope is the smallest of the sixteen and its benchmark is dominated by
@@ -1031,6 +1097,16 @@ against -20 to -42% for the other nine.
 The experiment the rule was built on, repeated on the shipped runtime: relocate
 kotlin's 1,489-line verbatim `regex.js` block, changing nothing else.
 
+> **⚠ AUDITED 2026-08-04 (`e8edc89`): the right-hand column is single draws and
+> says nothing.** `-0.6%` and `+0.6%` are well inside the build-layout lottery -
+> re-running ONE binary reproduces to 0.02%, but re-BUILDING the same source to a
+> differently-named output moves the instruction count by up to 4.8%. Read both as
+> **0 +- 2%**. The claim they support - that placement no longer costs anything
+> after the hash index - is believed for the MECHANISM (an O(1) index replaced a
+> 461-entry linear scan) and because the left-hand column's +7.8% and +42.5% are
+> large enough to be real; it is not established by these two numbers. Any future
+> placement decision needs `tests/bench.sh --draws 9` or better.
+
 ```
                                     before (85f3409)      after the hash index
 regex block at HEAD placement          30.970 G                18.023 G
@@ -1040,6 +1116,13 @@ import runtime.metajs APPENDED         44.131 G  +42.5%        18.130 G   +0.6%
 
 **Placement is now +-0.6%, which is the noise floor of the harness.** Every
 coefficient in "THE RULE" is 0:
+
+> **⚠ The three zeros are "nothing measurable remains", which is right. The
+> retained "~0.2% per 100 lines of layout" is inherited from the 2x2 above and was
+> never supported** - see the marking there. There is no evidence for a code-size
+> coefficient of any particular size; there is evidence that layout matters, which
+> is exactly why single builds cannot be read.
+
 
 ```
     0%  per top-level declaration it adds
@@ -1627,6 +1710,11 @@ already had:
   single-table module it always had, byte for byte. The ext declaration rides in a
   one-element array rather than in a local reassigned from `undefined`, because MetaJS is
   typed and `-frozen` is where such a rewrite dies while goja stays green.
+
+
+> **⚠ AUDITED 2026-08-04 (`e8edc89`): binary size (+8%) and 3,711 B/iter are
+> COUNTERS and are exact; the 36.5 -> 37.5 ms/process (+2.7%) is a single-build
+> wall-clock difference and is not evidence in either direction.**
 
 **Cost of the door alone**, everything else unchanged — `tests/metajs-test-full.js -exe`
 **474K → 513K** (+8%), `metajs-bench-try` 20k iterations **36.5 → 37.5 ms/process** and a
