@@ -312,6 +312,19 @@ func main() {
     x %= 5
     check("arith-compound", x == 3)
     check("builtin-abs-max-min", abs(-9) == 9 && max(3, 8) == 8 && min(3, 8) == 3)
+    // The two cases a bare `<` / `>` cannot see, and which -0.0 == 0.0 hides
+    // from an == assertion: compared as TEXT against what swift 6.1.2 prints.
+    // Swift's min/max are `y < x ? y : x` and `y >= x ? y : x`, so a tie keeps
+    // the LEFT operand for min and the right for max, and a NaN operand - every
+    // comparison against which is false - keeps the left one.
+    let zNeg = -0.0, zPos = 0.0
+    let dNaN = zPos / zPos
+    check("builtin-min-negzero", String(min(zNeg, zPos)) == "-0.0" && String(min(zPos, zNeg)) == "0.0")
+    check("builtin-max-negzero", String(max(zNeg, zPos)) == "0.0" && String(max(zPos, zNeg)) == "-0.0")
+    check("builtin-abs-negzero", String(abs(zNeg)) == "0.0")
+    check("builtin-minmax-nan",
+          String(min(dNaN, 1.0)) == "nan" && String(min(1.0, dNaN)) == "1.0"
+       && String(max(dNaN, 1.0)) == "nan" && String(max(1.0, dNaN)) == "1.0")
 
     // ----- let / var -----
     let a = 10

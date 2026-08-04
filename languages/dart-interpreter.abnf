@@ -1609,6 +1609,19 @@ KwDeferred  = "deferred" KwEnd ;
     core.add = function(l, r) {
         if (typeof l == "string" || typeof r == "string") { return dstr(l) + dstr(r) }
         if (dIsNum(l) && dIsNum(r)) { return dArith("+", l, r) }
+        // dart:core, List.operator +: "Returns the concatenation of this list and
+        // other" - a NEW list of this list's elements followed by other's, with
+        // neither operand touched. `l + r` is JavaScript's +, which renders both
+        // sides instead, so `[1, 2] + [3]` was the STRING "1,23" with length 4
+        // rather than the list [1, 2, 3] with length 3. No dart toolchain is
+        // installed here, so the dart:core signature is the oracle. The other
+        // halves are js_dartarith in abnf/jsrtdart.go and lib/dart-rt.metajs.
+        if (Array.isArray(l) && Array.isArray(r)) {
+            var out = []
+            for (var i = 0; i < l.length; i++) { out.push(l[i]) }
+            for (var j = 0; j < r.length; j++) { out.push(r[j]) }
+            return out
+        }
         return l + r
     }
     var dArithOps = {"+": 1, "-": 1, "*": 1, "/": 1, "~/": 1, "%": 1,

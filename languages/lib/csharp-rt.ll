@@ -336,7 +336,7 @@
 @str.1000329 = global [1 x i8] c":"
 @str.1000330 = global [14 x i8] c"] out of range"
 @str.1000331 = global [10 x i8] c"slicing a "
-@str.1000332 = global [10 x i8] c"js_goslice"
+@str.1000332 = global [10 x i8] c"js_csslice"
 @str.1000333 = global [3 x i8] c"pop"
 @str.1000334 = global [4 x i8] c"last"
 @str.1000335 = global [11 x i8] c"js_gospread"
@@ -387,7 +387,7 @@
 @jsrtlib_f_js_has = global i64 0
 @jsrtlib_f_js_jchareq = global i64 0
 @jsrtlib_f_js_mcall = global i64 0
-@jsrtlib_f_js_goslice = global i64 0
+@jsrtlib_f_js_csslice = global i64 0
 @jsrtlib_f_js_gospread = global i64 0
 @jsrtlib_f_js_csarith = global i64 0
 @jsrtlib_f_js_csshift = global i64 0
@@ -18417,9 +18417,9 @@ go:
 	ret i64 %15
 }
 
-define i64 @js_goslice(i64 %0, i64 %1, i64 %2) {
+define i64 @js_csslice(i64 %0, i64 %1, i64 %2) {
 entry:
-	%3 = load i64, i64* @jsrtlib_f_js_goslice
+	%3 = load i64, i64* @jsrtlib_f_js_csslice
 	%4 = icmp eq i64 %3, 0
 	br i1 %4, label %lookup, label %go
 
@@ -18429,11 +18429,11 @@ lookup:
 	%7 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000332, i64 0, i64 0), i64 10)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
-	store i64 %9, i64* @jsrtlib_f_js_goslice
+	store i64 %9, i64* @jsrtlib_f_js_csslice
 	br label %go
 
 go:
-	%10 = load i64, i64* @jsrtlib_f_js_goslice
+	%10 = load i64, i64* @jsrtlib_f_js_csslice
 	%11 = call i64 @js_arr_new()
 	%12 = call i64 @js_arr_push(i64 %11, i64 %0)
 	%13 = call i64 @js_arr_push(i64 %11, i64 %1)

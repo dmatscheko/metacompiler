@@ -194,6 +194,42 @@ func (rt *jsrt) jvmArith(op byte, l, r interface{}) interface{} {
 	return float64(rt.toInt32(x))
 }
 
+// jvmTakeL is the OPERAND CHOICE of Math.max / Math.min, and the two cases a
+// plain `>` / `<` cannot see. java.lang.Math documents both for the double
+// overloads, and java 24.0.2 confirms each:
+//
+//	Math.min(-0.0, 0.0) is -0.0 and Math.max(-0.0, 0.0) is 0.0 - "if one
+//	argument is positive zero and the other negative zero, the result of min
+//	is negative zero" (and of max, positive zero). -0.0 < 0.0 is FALSE, so a
+//	bare comparison took the right operand and answered 0.0 for min.
+//
+//	Math.min(NaN, 1.0) and Math.max(NaN, 1.0) are both NaN - "if either value
+//	is NaN, then the result is NaN". Every comparison against NaN is false, so
+//	a bare `<` took the right operand and answered 1.0.
+//
+// Everything else is the ordinary comparison, tie going to the right operand
+// exactly as before.
+func jvmTakeL(a, b float64, wantMax bool) bool {
+	if a != a {
+		return true // the left one is the NaN
+	}
+	if b != b {
+		return false // the right one is
+	}
+	if a == 0 && b == 0 {
+		// Both zero and only the sign bit tells them apart: min wants the
+		// negative one, max the positive one.
+		if wantMax {
+			return math.Signbit(b)
+		}
+		return math.Signbit(a)
+	}
+	if wantMax {
+		return a > b
+	}
+	return a < b
+}
+
 // jvmMinMax picks one operand, but the DOUBLE overload of Math.max/min is
 // selected as soon as one side is a double, so the answer is a double then
 // (Math.max(1.5, 2) is 2.0).
@@ -237,11 +273,11 @@ func jvmMathObject() *jsObject {
 	}))
 	o.set("max", jsHostFunc("max", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		l, r := argAt(args, 0), argAt(args, 1)
-		return rt.jvmMinMax(l, r, rt.toNumber(l) > rt.toNumber(r))
+		return rt.jvmMinMax(l, r, jvmTakeL(rt.toNumber(l), rt.toNumber(r), true))
 	}))
 	o.set("min", jsHostFunc("min", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		l, r := argAt(args, 0), argAt(args, 1)
-		return rt.jvmMinMax(l, r, rt.toNumber(l) < rt.toNumber(r))
+		return rt.jvmMinMax(l, r, jvmTakeL(rt.toNumber(l), rt.toNumber(r), false))
 	}))
 	return o
 }
@@ -318,11 +354,11 @@ func jfBindings(b map[string]interface{}) {
 	// selected as soon as one side is a double (Math.max(1.5, 2) is 2.0).
 	b["floMax"] = jsHostFunc("floMax", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		l, r := argAt(args, 0), argAt(args, 1)
-		return rt.jvmMinMax(l, r, rt.toNumber(l) > rt.toNumber(r))
+		return rt.jvmMinMax(l, r, jvmTakeL(rt.toNumber(l), rt.toNumber(r), true))
 	})
 	b["floMin"] = jsHostFunc("floMin", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		l, r := argAt(args, 0), argAt(args, 1)
-		return rt.jvmMinMax(l, r, rt.toNumber(l) < rt.toNumber(r))
+		return rt.jvmMinMax(l, r, jvmTakeL(rt.toNumber(l), rt.toNumber(r), false))
 	})
 	b["floAbs"] = jsHostFunc("floAbs", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		v := argAt(args, 0)

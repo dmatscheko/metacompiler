@@ -5548,6 +5548,31 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return rt.wrapStr("undefined")
 		},
+		// Is `name` bound in THIS scope - no chain walk. It is the EXTERN twin of
+		// the scopeHas builtin (host 67 of languages/lib/runtime.c, jsrtint.go's
+		// scBindings), which layer 2 has had since d9014d7 and an EMITTER could
+		// not reach: a builtin is callable from MetaJS, an extern from emitted IR,
+		// and the own-scope question was only ever answerable on one side.
+		//
+		// js_scope_typeof is the chain walk and cannot express it - it answers
+		// "undefined" for an absent name and for a slot holding undefined alike,
+		// and it finds a name an ENCLOSING scope binds. python-to-llvm-ir.abnf's
+		// class fill used it as an own-scope test, so a name the class body did
+		// not reach was copied onto the class FROM THE MODULE:
+		//     w = "module"
+		//     class K:
+		//         if False:
+		//             w = "inner"
+		//     K.w                     -> "module", where CPython raises AttributeError
+		"js_scope_has": func(a []uint64) uint64 {
+			name := rt.toString(u(a[1]))
+			sc := rt.scopeOf(a[0])
+			if sc == nil {
+				return boolH(false)
+			}
+			_, ok := sc.get(name)
+			return boolH(ok)
+		},
 		// 'v instanceof C': walk the __class/__super chain of the instance and compare
 		// with the class descriptor. Anything that is not an instance answers false.
 		"js_instanceof": func(a []uint64) uint64 {

@@ -395,12 +395,27 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 		if op == "+" {
 			// '+' is the one operator that is not only arithmetic: a string operand
 			// concatenates (through the Dart rendering, so "x" + [1, 2] is "x[1, 2]"
-			// and not "x1,2"), and two Lists concatenate through the runtime's own
-			// rule. This mirrors core.add in dart-interpreter.abnf.
+			// and not "x1,2"), and two Lists concatenate.
+			// This mirrors core.add in dart-interpreter.abnf.
 			_, ls := l.(string)
 			_, rs := r.(string)
 			if ls || rs {
 				return rt.wrapStr(strConcat(rt.dartStr(l), rt.dartStr(r)))
+			}
+			// dart:core, List.operator +: "Returns the concatenation of this list
+			// and other" - a NEW list holding this list's elements followed by
+			// other's, neither operand touched. The runtime's own rt.jsAdd is
+			// JavaScript's + and renders both sides instead, so `[1, 2] + [3]`
+			// used to be the STRING "1,23" with length 4 rather than the list
+			// [1, 2, 3] with length 3. No dart toolchain is installed here, so
+			// the dart:core signature is the oracle.
+			if la, ok := l.(*jsArray); ok {
+				if ra, ok2 := r.(*jsArray); ok2 {
+					out := make([]interface{}, 0, len(la.elems)+len(ra.elems))
+					out = append(out, la.elems...)
+					out = append(out, ra.elems...)
+					return w(&jsArray{elems: out})
+				}
 			}
 			if !dartIsNum(l) || !dartIsNum(r) {
 				return w(rt.jsAdd(l, r))

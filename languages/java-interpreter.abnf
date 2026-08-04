@@ -2129,7 +2129,10 @@ HasStatic   = :script(~~
     // an int and a double overload of each).
     hostGlobals["Math"] = {
         abs: function(v) {
-            if (jIsFlo(v)) { var f = v.__flo; return jFlo(f < 0 ? jNegF(f) : f) }
+            // `f < 0` is FALSE for -0.0, so Math.abs(-0.0) answered -0.0 where
+            // java 24.0.2 (and both compiled halves, which negate the raw sign
+            // bit) answer 0.0. The sign of a zero only shows through 1/f.
+            if (jIsFlo(v)) { var f = v.__flo; return jFlo(f < 0 || (f == 0 && 1 / f < 0) ? jNegF(f) : f) }
             // A long is a BOX, so `v < 0` is false for every one of them and
             // `v | 0` then answered 0 - for positive longs too. Compare and
             // negate in the box. Math.abs(Long.MIN_VALUE) is Long.MIN_VALUE
@@ -2137,8 +2140,8 @@ HasStatic   = :script(~~
             if (jIsLong(v)) { return szCmp(v, jL(0)) < 0 ? szNeg(v) : v }
             return v < 0 ? -v | 0 : v | 0
         },
-        max: function(a, b) { return jMinMax(a, b, jNumD(a) > jNumD(b)) },
-        min: function(a, b) { return jMinMax(a, b, jNumD(a) < jNumD(b)) }
+        max: function(a, b) { return jMinMax(a, b, jTakeL(jNumD(a), jNumD(b), true)) },
+        min: function(a, b) { return jMinMax(a, b, jTakeL(jNumD(a), jNumD(b), false)) }
     }
     // The boxed-primitive types' constants and the handful of static methods a
     // program reaches for. MIN_VALUE / MAX_VALUE are the whole reason a sized
@@ -2217,6 +2220,27 @@ HasStatic   = :script(~~
     function jFlo(f) { return {__flo: f} }
     // Math.max/min pick an operand, but the DOUBLE overload is selected as soon as
     // one side is a double, so the answer is a double then (Math.max(1.5, 2) is 2.0).
+    // jTakeL is the OPERAND CHOICE, and the two cases a plain `>` / `<` cannot
+    // see. java.lang.Math documents both for the double overloads and java
+    // 24.0.2 confirms each: Math.min(-0.0, 0.0) is -0.0 and Math.max(-0.0, 0.0)
+    // is 0.0 ("if one argument is positive zero and the other negative zero, the
+    // result of min is negative zero", and of max positive zero), and
+    // Math.min(NaN, 1.0) is NaN ("if either value is NaN, then the result is
+    // NaN"). Both comparisons are FALSE, so a bare `<` took the right operand
+    // and answered 0.0 and 1.0. The twins are abnf/jsrtjvm.go's jvmTakeL,
+    // languages/lib/runtime.c's jf_take_l and java-rt.metajs's jvmTakeL.
+    function jTakeL(a, b, wantMax) {
+        if (a !== a) { return true }
+        if (b !== b) { return false }
+        if (a == 0 && b == 0) {
+            // Only the sign bit tells the two zeros apart, and 1/-0.0 is
+            // -Infinity: min wants the negative one, max the positive one.
+            if (wantMax) { return 1 / b < 0 }
+            return 1 / a < 0
+        }
+        if (wantMax) { return a > b }
+        return a < b
+    }
     function jMinMax(a, b, takeA) {
         var v = anytype
         v = takeA ? a : b

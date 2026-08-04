@@ -535,6 +535,28 @@ def transform(items):
             out.append("x")
     return out
 
+# CPython's SETUP_ANNOTATIONS: a class body that CONTAINS an annotation gets its
+# __annotations__ dict before any of its statements run, so a class whose only
+# annotation sits in a branch the body never takes still has an EMPTY one.
+# Two defects met here, both in the compiled half only:
+#  - the dict was created at the annotation SITE, i.e. inside the branch, so
+#    AnnUnreached.__annotations__ raised AttributeError;
+#  - the class fill's "did the body bind this name" guard was a CHAIN WALK, so
+#    the name was found in the MODULE scope instead and the module's own
+#    annotations dict was copied onto the class - the check below then read
+#    {'mod_ann': 'int'} where python3 and the interpreter read {}.
+mod_ann: int = 1
+
+class AnnReached:
+    ar: int = 1
+
+class AnnUnreached:
+    if False:
+        au: int = 1
+
+check_true("class-annotations-reached", len(AnnReached.__annotations__) == 1 and "ar" in AnnReached.__annotations__)
+check_true("class-annotations-unreached", len(AnnUnreached.__annotations__) == 0)
+
 check("combined-pipeline", f"{transform([1, 2, -3])}", "['o1', 'e2', 'x']")
 
 print(f"features: {checks[0]} checks, {fails[0]} failures")

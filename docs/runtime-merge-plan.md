@@ -470,6 +470,94 @@ pass did not own.
 
 # Part B - a smaller C floor
 
+## THE DOOR IS OPEN: MetaJS has a layer 2 (2026-08-04)
+
+`runtime-next-plan.md` ("Part B, move 1: `case_map` CANNOT MOVE") ended Part B before it
+started: **every** remaining candidate is reached through the C floor's host-builtin
+dispatch, that dispatch **is MetaJS's standard library**, and
+`languages/metajs-to-llvm-ir.abnf` linked `rts = [runtimePath()]` — the C floor and
+nothing else. A body that left `runtime.c` for `lib/runtime.metajs` arrived in fifteen
+languages' `-exe` builds and **vanished from MetaJS's**. Part B's movable set was empty.
+
+It is not empty now. **`languages/lib/metajs-rt.metajs` exists** and
+`metajs-to-llvm-ir.abnf` links `[libPath("runtime.ll"), libPath("metajs-rt.ll")]`, exactly
+as the other fifteen grammars do. Three pieces, all of them the shape the other fifteen
+already had:
+
+- `lib/metajs-rt.metajs` — deliberately THIN: `import "./runtime.metajs"` and no export of
+  its own. MetaJS's semantics are the generic `js_*` externs and the floor answers all of
+  them; what the import buys is the DOOR, and `-rt-lib`'s export scan already reads
+  imported files (the `js_jadd` link bug that widened it).
+- `tests/gen-metajs-rt-ll.sh`, the fifteenth generator, with the mandatory `--check`. It
+  carries a warning the other fourteen do not need: **the grammar that compiles this file
+  is the grammar that links its output**, so a change to `metajs-to-llvm-ir.abnf` can make
+  `metajs-rt.ll` stale on its own.
+- `emitDispatch(dname, chainExt)` — js-to-llvm-ir.abnf's chained function table, verbatim.
+  It is asked for **only when the default runtime list is linked**: with an explicit `-rt`
+  (`tests/metajs-link-stubrt.c`) there is no layer-2 module, and that build keeps the
+  single-table module it always had, byte for byte. The ext declaration rides in a
+  one-element array rather than in a local reassigned from `undefined`, because MetaJS is
+  typed and `-frozen` is where such a rewrite dies while goja stays green.
+
+**Cost of the door alone**, everything else unchanged — `tests/metajs-test-full.js -exe`
+**474K → 513K** (+8%), `metajs-bench-try` 20k iterations **36.5 → 37.5 ms/process** and a
+warm hello-world **1.9 → 1.9 ms** (`jsrtlib_boot` is lazy and no MetaJS program calls a
+layer-2 extern yet, so the runtime cost is zero by construction), `MEC_GC=off`
+**3,711 B/iter unchanged**, RSS flat at 3,309,568. `-freeze` is a fixed point
+(`jsagrammar.go` carries the new driver; `jsbootstrap.ll` byte-identical). Suite: matrix
+**325/325**, `--full` **5,834 assertions, 0 languages whose halves disagree** and no
+`BUT -frozen`/`VACUOUS`/`MISMATCH`/`FROZEN-DIFF`, `--cross` **119/0**, clang-check
+**16/16 all agreeing**, all fifteen `gen-*.sh --check` clean.
+
+## Move 1, `case_map` — MEASURED END TO END, and it needs two more files than expected
+
+Executed whole in a scratch tree, because `runtime.c`, `runtime.metajs`, `js-rt.metajs`
+and `lua-rt.metajs` belong to other agents. It works, and the numbers are these:
+
+| | before | after |
+|---|---|---|
+| `runtime.c` | 5,224 lines | **5,118** (−106: five `static long[328]` tables, the search, `NCASE`) |
+| `lib/runtime.ll` | 48,467 lines | **43,388** (−5,079) |
+| `lib/runtime.metajs` | | +125 (the 328 ranges + a 20-line binary search) |
+| `metajs-rt.ll` | 3,048 | 12,599 · `js-rt.ll` 59,285 → 71,696 · `lua-rt.ll` 14,115 → 26,519 · `kotlin-rt.ll` 112,366 → 121,891 |
+| `metajs-test-full -exe` | 474K (513K with the door) | **589K** |
+| lua 400k `s = s + i % 7` | 1.87 s | 1.89 s (+1%, inside the noise band) |
+| `MEC_GC=off` 400k | 3,711 B/iter | 3,712 B/iter · gc RSS 3,309,568 → 3,588,096, still flat |
+| suite | | matrix **325/325**, `--full` **5,834 / 0 disagreeing**, clang-check **16/16 agreeing** |
+
+`tests/metajs-test-full.js` passes **557 checks natively** with `toUpperCase`/`toLowerCase`
+running a MetaJS binary search called *from the C floor* — which is the door proving
+itself, not a plumbing test.
+
+The floor half is three lines, and the boxing is the honest part of the price: the call
+site is in the raw code-point domain and layer 2 speaks handles.
+
+```c
+/* to_number and mk_bool are defined further down; case_map is the first site above
+ * them that needs either, so both are declared here. */
+long to_number(long h);
+long mk_bool(int b);
+long js_case_map(long c, long up);
+long case_map(long c, int up) {
+	return d_to_long(to_number(js_case_map(mk_num(d_from_long(c)), mk_bool(up))));
+}
+```
+
+**THE FINDING THAT COSTS TWO MORE FILES.** Only ten `<lang>-rt.metajs` import
+`runtime.metajs`. `js-rt.metajs` and `lua-rt.metajs` do not — so with the move in place
+`js`, `typescript` and `lua` linked `runtime.ll` (which now upcalls `js_case_map`) next to
+a layer 2 that does not define it, and `tests/clang-check.sh` read
+**"ok (module), BUT -exe FAILED TO BUILD"** three times while `./test.sh` and `--cross`
+stayed green — neither builds an `-exe`. Adding `import "./runtime.metajs"` to those two
+files fixes all three and restores 16/16. **Every floor→layer-2 upcall pays this**: the
+declaration is in `runtime.ll`, which all thirteen handle-IR languages link, so the body
+has to be in `runtime.metajs` AND `runtime.metajs` has to be imported by all thirteen.
+`bash`, `batch` and `c` are exempt — their IR is self-contained.
+
+So the move is a **four-file pair**, not two: `runtime.c` (−106) + `runtime.metajs` (+125)
++ `js-rt.metajs` and `lua-rt.metajs` (+1 import each). None of the four is committable
+alone, and none of them is the metajs grammar's — the grammar's contribution was the door.
+
 ## What is actually irreducible
 
 Phase 1 of `runtime-next-plan.md` measured the floor at **35 primitives** — the ones that

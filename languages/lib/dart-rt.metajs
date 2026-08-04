@@ -1515,23 +1515,35 @@ function js_dartlit(text, radix) {
 
 // One binary operator: (op name, left, right). The operator is a compile time
 // constant string, so this is one call per operator in the emitted IR. '+' also
-// concatenates strings, and '+' on two Lists concatenates them, so a non-numeric
-// pair keeps the runtime's own rule.
+// concatenates strings, and '+' on two Lists concatenates them, so any other
+// non-numeric pair keeps the runtime's own rule.
 function js_dartarith(op, l, r) {
     if (op == "+") {
         if (typeof l == "string" || typeof r == "string") { return dtStr(l) + dtStr(r) }
+        if (Array.isArray(l) && Array.isArray(r)) { return dtListPlus(l, r) }
         if (!dtIsNum(l) || !dtIsNum(r)) { return dtJsAdd(l, r) }
     }
     return dtArith(op, l, r)
 }
 
-// rt.jsAdd for the non-numeric pair, and it is JavaScript's + and not Dart's:
-// a list or an object on EITHER side renders both sides with rt.toString and
-// concatenates the text, so `[1, 2] + [3]` is the string "1,23". The comment at
-// js_dartarith in abnf/jsrtdart.go says two Lists concatenate; rt.jsAdd does not
-// do that, and the Go twin is the specification, so this reproduces rt.jsAdd.
-// Recorded rather than corrected: fixing it is a change to BOTH halves and to
-// dart-interpreter.abnf, and it is not this gate.
+// dart:core, List.operator +: "Returns the concatenation of this list and
+// other" - a NEW list holding this list's elements followed by other's, with
+// neither operand touched. dtJsAdd below is JavaScript's + and renders both
+// sides instead, so `[1, 2] + [3]` used to be the STRING "1,23" with length 4
+// rather than the list [1, 2, 3] with length 3. No dart toolchain is installed
+// here, so the dart:core signature is the oracle. The twin is js_dartarith in
+// abnf/jsrtdart.go, the third half core.add in dart-interpreter.abnf.
+function dtListPlus(l, r) {
+    var out = []
+    for (var i = 0; i < l.length; i++) { out.push(l[i]) }
+    for (var j = 0; j < r.length; j++) { out.push(r[j]) }
+    return out
+}
+
+// rt.jsAdd for every other non-numeric pair, and it is JavaScript's + and not
+// Dart's: an object on EITHER side renders both sides with rt.toString and
+// concatenates the text. Dart has no `operator +` for those shapes at all, so
+// there is nothing to be faithful to and the two halves simply agree.
 function dtJsAdd(l, r) {
     if (typeof l == "string" || typeof r == "string") { return dtToStr(l) + dtToStr(r) }
     if (dtIsObj(l) || dtIsObj(r)) { return dtToStr(l) + dtToStr(r) }

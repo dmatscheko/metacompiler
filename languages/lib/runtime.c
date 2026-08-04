@@ -2686,6 +2686,26 @@ long jf_minmax(long l, long r, int take_l) {
 	return v;
 }
 
+/* jvmTakeL: the OPERAND CHOICE of Math.max / Math.min, and the two cases a
+ * plain `>` / `<` cannot see. java.lang.Math documents both for the double
+ * overloads and java 24.0.2 confirms each: Math.min(-0.0, 0.0) is -0.0 and
+ * Math.max(-0.0, 0.0) is 0.0 ("if one argument is positive zero and the other
+ * negative zero, the result of min is negative zero", and of max positive
+ * zero), and Math.min(NaN, 1.0) is NaN ("if either value is NaN, then the
+ * result is NaN"). Both comparisons are FALSE, so a bare `<` took the right
+ * operand and answered 0.0 and 1.0. Everything else is the ordinary
+ * comparison, a tie still going to the right operand. */
+int jf_take_l(long a, long b, int want_max) {
+	if (d_is_nan(a)) { return 1; }             /* the left one is the NaN */
+	if (d_is_nan(b)) { return 0; }             /* the right one is */
+	if (d_is_zero(a) && d_is_zero(b)) {
+		/* Both zero and only the sign bit tells them apart: min wants the
+		 * negative one, max the positive one. */
+		return want_max ? d_sign(b) : d_sign(a);
+	}
+	return want_max ? d_lt(b, a) : d_lt(a, b);
+}
+
 /* jvmMathObject's abs: a double keeps its box (and its style), everything else
  * wraps to 32 bits the way the compiler's integer arithmetic does. */
 long jf_abs(long v) {
@@ -4325,9 +4345,9 @@ long host_call(long id, long self, long args) {
 		long r = arg_at(args, 1);
 		long ln = to_number(l);
 		long rn = to_number(r);
-		/* jvmMathObject's max/min: `rt.toNumber(l) > rt.toNumber(r)` and `<`,
-		 * so a NaN operand makes the test false and the RIGHT one is taken. */
-		return jf_minmax(l, r, (id == 58) ? d_lt(rn, ln) : d_lt(ln, rn));
+		/* jvmMathObject's max/min, through jf_take_l - which is `>` / `<` plus
+		 * the signed-zero and NaN cases those two cannot see. */
+		return jf_minmax(l, r, jf_take_l(ln, rn, id == 58));
 	}
 	if (id == 60) { return jf_abs(arg_at(args, 0)); }
 	/* keysOf(o): an object's OWN keys, in insertion order. It is js_keys, and
@@ -4665,6 +4685,20 @@ long js_scope_set_or_create(long s, long name, long v) {
 	}
 	scope_put(G_ROOT, name, v);
 	return 0;
+}
+
+/* Is `name` bound in THIS scope - no chain walk. It is the EXTERN twin of the
+ * scopeHas BUILTIN (host 67 below, and jsrtint.go's scBindings), which layer 2
+ * has had since d9014d7 and an EMITTER could not reach: a builtin is callable
+ * from MetaJS, an extern from emitted IR, and the own-scope question was only
+ * ever answerable on one side.
+ *
+ * js_scope_typeof is the chain walk and cannot express it - it answers
+ * "undefined" for an absent name and for a slot holding undefined alike, and it
+ * finds a name an ENCLOSING scope binds. See abnf/jsrt.go's twin for the class
+ * fill that used it as an own-scope test and copied a module name onto a class. */
+long js_scope_has(long s, long name) {
+	return mk_bool(scope_find(scope_of(s), name) >= 0);
 }
 
 long js_scope_typeof(long s, long name) {

@@ -442,6 +442,20 @@ int main() {
   check("list-spread-collection-if", combined.length == 5 && combined[1] == 10 && combined[3] == 30);
   List<int> labels = [if (false) 1 else 2, ...parts];
   check("collection-if-else", labels.length == 3 && labels[0] == 2);
+  // dart:core, List.operator +: a NEW list of this list's elements followed by
+  // other's, neither operand touched. JavaScript's + would render both sides
+  // and answer the string "1,23" - length 4, not 3 - so the length and the
+  // rendering are both asserted.
+  List<int> plusL = [1, 2] + [3];
+  check("list-operator-plus", plusL.length == 3 && plusL[0] == 1 && plusL[2] == 3);
+  check("list-operator-plus-text", "$plusL" == "[1, 2, 3]");
+  List<int> plusLeft = [1, 2];
+  List<int> plusRight = [3];
+  List<int> plusBoth = plusLeft + plusRight;
+  plusBoth[0] = 9;
+  check("list-operator-plus-copies",
+        plusBoth.length == 3 && plusBoth[0] == 9 && plusLeft[0] == 1 && plusRight[0] == 3);
+  check("list-operator-plus-empty", ([] + [1])[0] == 1 && ([1] + [])[0] == 1);
 
   // ----- maps (insertion-ordered) -----
   Map<String, int> ages = {"alice": 30, "bob": 25};

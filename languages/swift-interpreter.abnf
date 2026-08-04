@@ -2291,15 +2291,24 @@ KwContinue  = "continue" KwEnd ;
     // not the 1 the |0 truncation gave) and compares by its VALUE (two boxes are two
     // objects, and `a > b` between objects is false).
     hostGlobals["abs"] = function(v) {
-        if (isFlo(v)) { return swFlo(v.__flo < 0 ? 0 - v.__flo : v.__flo) }
+        // `< 0` is FALSE for -0.0, so abs(-0.0) answered -0.0 where swift 6.1.2
+        // (and both compiled halves, which go through Math.abs) answer 0.0. The
+        // sign of a zero only shows through 1/v.
+        if (isFlo(v)) { var f = v.__flo; return swFlo(f < 0 || (f == 0 && 1 / f < 0) ? 0 - f : f) }
         return v < 0 ? -v | 0 : v | 0
     }
+    // Swift's own min/max are `y < x ? y : x` and `y >= x ? y : x`, so a TIE
+    // keeps the LEFT operand for min and takes the right for max, and a NaN
+    // operand keeps the left one because every comparison against it is false.
+    // Written the other way round (`a < b ? a : b`) both were lost:
+    // min(-0.0, 0.0) answered 0.0 where swift answers -0.0, min(0.0, -0.0)
+    // answered -0.0, and min(nan, 1.0) answered 1.0 where swift answers nan.
     hostGlobals["max"] = function(a, b) {
-        if (isFlo(a) || isFlo(b)) { return swD(a) > swD(b) ? a : b }
+        if (isFlo(a) || isFlo(b)) { return swD(b) >= swD(a) ? b : a }
         return a > b ? a : b
     }
     hostGlobals["min"] = function(a, b) {
-        if (isFlo(a) || isFlo(b)) { return swD(a) < swD(b) ? a : b }
+        if (isFlo(a) || isFlo(b)) { return swD(b) < swD(a) ? b : a }
         return a < b ? a : b
     }
 

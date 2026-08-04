@@ -1453,9 +1453,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // js_pyclass_fill took a SCOPE HANDLE and enumerated its names - the floor's
     // private storage again. The names a class body binds are known at emit time
     // (pyBindSink), so the copy is emitted name by name over js_scope_get / js_set,
-    // both of which the C floor and abnf/jsrt.go have. The typeof guard is what
-    // keeps a binding the body did not REACH (`if c: x = 1`) off the class, which
-    // is what enumerating the scope gave for free.
+    // both of which the C floor and abnf/jsrt.go have. The guard is what keeps a
+    // binding the body did not REACH (`if c: x = 1`) off the class, which is what
+    // enumerating the scope gave for free.
+    //
+    // That guard used to be js_scope_typeof, which WALKS THE CHAIN, so a name the
+    // body did not reach but an ENCLOSING scope binds was copied onto the class
+    // from there:
+    //     w = "module"
+    //     class K:
+    //         if False:
+    //             w = "inner"
+    //     K.w                  -> "module", where python3 raises AttributeError
+    // and __annotations__ made it visible without any `if` at all, since pyAnnot
+    // records the name whether or not the annotation runs. The question is "does
+    // THIS scope bind it", which js_scope_has answers - the extern twin of the
+    // scopeHas builtin the floor grew at d9014d7, added to languages/lib/runtime.c
+    // and abnf/jsrt.go in this same change because a builtin is callable from
+    // MetaJS and an extern from emitted IR, and this is the emitter's side.
     var pyFill1F = undefined
     function pyClassFill(b, clsV, scopeV, names) {
         if (pyFill1F == undefined) {
@@ -1468,8 +1483,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var eb = pyFill1F.NewBlock("entry")
             var missB = pyFill1F.NewBlock("absent")
             var hitB = pyFill1F.NewBlock("present")
-            var tv = callExt(eb, "js_scope_typeof", [sP, nP])
-            eb.NewCondBr(truthy(eb, callExt(eb, "js_seq", [tv, emitStr(eb, "undefined")])), missB, hitB)
+            eb.NewCondBr(truthy(eb, callExt(eb, "js_scope_has", [sP, nP])), hitB, missB)
             missB.NewRet(handle(0))
             callExt(hitB, "js_set", [cP, nP, callExt(hitB, "js_scope_get", [sP, nP])])
             hitB.NewRet(handle(0))
@@ -1481,6 +1495,45 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             seen[k] = true
             b.NewCall(pyFill1F, [clsV, scopeV, emitStr(b, names[i])])
         }
+        return b
+    }
+
+    // CPython's SETUP_ANNOTATIONS: a class body that CONTAINS an annotated name
+    // is given its __annotations__ dict at the TOP of the body, before any of its
+    // statements run - so a class whose only annotation sits in a branch the body
+    // never takes still has an EMPTY one. An emitter can only reach the annotation
+    // SITE, so the dict was created inside that branch and
+    //
+    //     class A:
+    //         if False:
+    //             z: int = 1
+    //     A.__annotations__
+    //
+    // raised "type object 'A' has no attribute '__annotations__'" in BOTH compiled
+    // halves, where CPython 3.14 and python-interpreter.abnf answer an empty dict.
+    // The body has finished by the time the class is filled, so the guarantee is
+    // restored there instead: pyAnnotHere says the body held an annotation, and
+    // this seeds the dict if the reached statements did not. js_get answers
+    // undefined for a missing key, which is the probe - the emitter has no
+    // own-property test that every language's native runtime also carries.
+    var pyEnsAnnotF = undefined
+    function pyEnsureAnnot(b, clsV) {
+        if (pyEnsAnnotF == undefined) {
+            pyEnsAnnotF = m.NewFunc("py_ensure_annot", i64, [llvm.ir.NewParam("cls", i64)])
+            var cP = pyEnsAnnotF.Params[0]
+            var eb = pyEnsAnnotF.NewBlock("entry")
+            var mkB = pyEnsAnnotF.NewBlock("create")
+            var haveB = pyEnsAnnotF.NewBlock("already")
+            var nameS = emitStr(eb, "__annotations__")
+            var cur = callExt(eb, "js_get", [cP, nameS])
+            eb.NewCondBr(truthy(eb, callExt(eb, "js_seq",
+                                            [callExt(eb, "js_typeof", [cur]), emitStr(eb, "undefined")])),
+                         mkB, haveB)
+            callExt(mkB, "js_set", [cP, emitStr(mkB, "__annotations__"), callExt(mkB, "js_dict_new", [])])
+            mkB.NewRet(handle(0))
+            haveB.NewRet(handle(0))
+        }
+        b.NewCall(pyEnsAnnotF, [clsV])
         return b
     }
 
@@ -3404,6 +3457,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyInnerNames = {}
             b = bodyT(b)
             b = pyClassFill(b, cls, bodyScope, pyBindSink)
+            // SETUP_ANNOTATIONS: the body HELD an annotation, so the class has an
+            // __annotations__ dict whether or not the annotated statement ran.
+            if (pyAnnotHere) { b = pyEnsureAnnot(b, cls) }
             pyBindSink = savedSink2
             pyAnnotHere = savedAnnot2
             pyInnerNames = savedInner2

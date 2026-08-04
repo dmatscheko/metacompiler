@@ -621,6 +621,49 @@ func init() {
 			}
 			return w(jsChar{code: int32(giVal(rt, v) & 65535)})
 		}
+		// `a[lo..hi]`, C#'s range indexer, on a string or an array.
+		//
+		// This used to be emitted as js_goslice, the shared extern, and that is
+		// GO's slice and not C#'s: a Go string is a byte sequence, so js_goslice
+		// takes a BYTE window, while System.Range on a System.String is
+		// Substring - UTF-16 code units (ECMA-334 12.8.12 / String.Substring).
+		// `"日本語"[0..1]` therefore answered a lone replacement character under
+		// llvm.Run and "日" in the interpreter and in the clang-built executable,
+		// which is a disagreement ./test.sh cannot see (each engine matches
+		// itself) and --cross did not reach. One name was carrying two
+		// specifications; C# gets its own, and js_goslice stays Go's.
+		//
+		// The array arm COPIES, and an absent bound arrives as undefined and
+		// reads as 0 / the length. The twin is js_csslice in
+		// languages/lib/csharp-rt.metajs.
+		m["js_csslice"] = func(a []uint64) uint64 {
+			bound := func(h uint64, dflt int) int {
+				v := u(h)
+				if _, isU := v.(jsUndefT); isU {
+					return dflt
+				}
+				return int(rt.toNumber(v))
+			}
+			if str, isStr := u(a[0]).(string); isStr {
+				n := rt.strLen(str)
+				lo, hi := bound(a[1], 0), bound(a[2], n)
+				if lo < 0 || hi > n || lo > hi {
+					rt.fail("slice bounds [%d:%d] out of range", lo, hi)
+				}
+				return w(rt.strRange(str, lo, hi))
+			}
+			arr, isArr := u(a[0]).(*jsArray)
+			if !isArr {
+				rt.fail("slicing a %s", rt.typeOf(u(a[0])))
+			}
+			lo, hi := bound(a[1], 0), bound(a[2], len(arr.elems))
+			if lo < 0 || hi > len(arr.elems) || lo > hi {
+				rt.fail("slice bounds [%d:%d] out of range", lo, hi)
+			}
+			out := &jsArray{}
+			out.elems = append(out.elems, arr.elems[lo:hi]...)
+			return w(out)
+		}
 		// C#'s '+'. Identical to the shared js_csadd - string concat with C#'s
 		// null rule, float add when a double is involved - except that two
 		// INTEGRAL operands add at their promoted type and wrap to it, instead of

@@ -1,0 +1,56 @@
+// metajs-rt.metajs -- MetaJS'S OWN LAYER 2, and the door Part B was blocked on.
+//
+// Every other language already had this file. MetaJS did not, because MetaJS *was*
+// the bootstrap: languages/metajs-to-llvm-ir.abnf linked exactly one runtime input,
+//
+//     if (rts == undefined || rts.length == 0) { rts = [runtimePath()] }
+//
+// lib/runtime.ll - the C floor and nothing else. docs/runtime-next-plan.md
+// ("Part B, move 1: `case_map` CANNOT MOVE") measured what that costs: a floor body
+// that moves out of C and into languages/lib/runtime.metajs arrives in the other
+// fifteen languages' `-exe` builds through their `<lang>-rt.ll`, and DISAPPEARS from
+// MetaJS's. Since every remaining Part B candidate is reached through the floor's
+// host-builtin dispatch - which IS MetaJS's standard library, 46 of `case_map`'s 114
+// corpus calls being MetaJS's own two programs - Part B's movable set was empty.
+//
+// This file is the missing half. It is deliberately THIN: it imports
+// lib/runtime.metajs and exports nothing of its own, because MetaJS's semantics are
+// not a target language's - the metajs compiler emits the generic js_* externs and
+// the C floor answers all of them. What the import buys is the DOOR: once
+// `metajs-rt.ll` is linked next to `runtime.ll`, a body that leaves runtime.c for
+// runtime.metajs is reachable from all SIXTEEN native builds instead of fifteen, and
+// the floor half of the pair (a `js_*` upcall declared in runtime.c) resolves in
+// every link rather than in every link but one.
+//
+// Compile with:
+//     mec languages/metajs-to-llvm-ir.abnf languages/lib/metajs-rt.metajs -q -rt-lib
+// which is what tests/gen-metajs-rt-ll.sh does; the result is the checked-in
+// languages/lib/metajs-rt.ll that metajs-to-llvm-ir.abnf links next to lib/runtime.ll
+// when it builds an -exe. An explicit `-rt` REPLACES both, which is what keeps
+// tests/metajs-link-stubrt.c standing in for the whole runtime in the link tests.
+//
+// -rt-lib exports every TOP-LEVEL `function js_*` of this file AND OF EVERY FILE IT
+// IMPORTS (metajs-to-llvm-ir.abnf, the -rt-lib block; the scan was widened when a
+// `function js_jadd` written in runtime.metajs compiled, ran correctly under
+// llvm.Run, and was undefined at link time). So the seven exports of runtime.metajs -
+// js_jadd, js_is_type, js_dict_new, js_char, js_char_code, js_supercall, js_pyset -
+// are what this module currently offers. NONE of them is emitted by the metajs
+// compiler and none collides with a runtime.c definition; they are the shared
+// layer-2 surface of the OTHER languages, riding along because the import is the
+// point. When a floor body moves into runtime.metajs, it joins them here for free.
+//
+// THE ONE RULE FOR ADDING TO THIS FILE: a body that belongs to more than one
+// language goes in lib/runtime.metajs, not here. This file is for what is MetaJS's
+// alone - and so far that is nothing.
+//
+// The frozen-subset rules of every MetaJS source apply
+// (docs/abnf-dialect-gotchas.md): no ASI, so every `return` carries its value on the
+// same line, and a value-less early return is braced.
+
+// The shared layer-2 runtime (docs/runtime-merge-plan.md part A). Imported, not
+// copied: this is the same text the other fifteen `<lang>-rt.metajs` files import,
+// and the import is the whole reason this file exists.
+import "./runtime.metajs"
+
+// MetaJS's own exports go here. There are none yet, and that is the correct state:
+// see the header. The import above supplies the export surface -rt-lib requires.

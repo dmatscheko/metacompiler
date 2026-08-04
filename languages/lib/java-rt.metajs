@@ -427,6 +427,29 @@ function jvmOperand(v) {
     return jvNum(v)
 }
 
+// jvmTakeL is the OPERAND CHOICE of Math.max / Math.min, and the two cases a
+// plain `>` / `<` cannot see. java.lang.Math documents both for the double
+// overloads and java 24.0.2 confirms each: Math.min(-0.0, 0.0) is -0.0 and
+// Math.max(-0.0, 0.0) is 0.0 ("if one argument is positive zero and the other
+// negative zero, the result of min is negative zero", and of max positive
+// zero), and Math.min(NaN, 1.0) is NaN ("if either value is NaN, then the
+// result is NaN"). Both comparisons are FALSE, so a bare `<` took the right
+// operand and answered 0.0 and 1.0. Everything else is the ordinary
+// comparison, a tie still going to the right operand. The twins are
+// abnf/jsrtjvm.go's jvmTakeL and languages/lib/runtime.c's jf_take_l.
+function jvmTakeL(a, b, wantMax) {
+    if (a !== a) { return true }
+    if (b !== b) { return false }
+    if (a == 0 && b == 0) {
+        // Both zero and only the sign bit tells them apart: min wants the
+        // negative one, max the positive one. 1/-0.0 is -Infinity.
+        if (wantMax) { return 1 / b < 0 }
+        return 1 / a < 0
+    }
+    if (wantMax) { return a > b }
+    return a < b
+}
+
 // jvmMinMax picks one operand, but the DOUBLE overload of Math.max/min is
 // selected as soon as one side is a double, so the answer is a double then
 // (Math.max(1.5, 2) is 2.0).
@@ -666,8 +689,8 @@ function jvBoxType(name) {
             }
             return rtWrap32(Math.abs(jvNum(v)))
         }
-        o["max"] = function(a, b) { return jvmMinMax(a, b, jvNum(a) > jvNum(b)) }
-        o["min"] = function(a, b) { return jvmMinMax(a, b, jvNum(a) < jvNum(b)) }
+        o["max"] = function(a, b) { return jvmMinMax(a, b, jvmTakeL(jvNum(a), jvNum(b), true)) }
+        o["min"] = function(a, b) { return jvmMinMax(a, b, jvmTakeL(jvNum(a), jvNum(b), false)) }
         return o
     }
     if (name == "Character") {

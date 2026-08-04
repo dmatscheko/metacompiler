@@ -18,7 +18,7 @@
 // THE AUTHORITATIVE SPECIFICATION IS abnf/jsrtcsharp.go, plus abnf/jsrtjvm.go for
 // the boxed double and the js_csadd / js_cslen / js_char / js_char_code /
 // js_jchareq / js_jadd / js_mcall / js_supercall / js_is_type / js_arr_new_n /
-// js_dict_new / js_pyget / js_pyset / js_pylen / js_has / js_goslice /
+// js_dict_new / js_pyget / js_pyset / js_pylen / js_has / js_csslice /
 // js_gospread block of abnf/jsrt.go. This file matches them function for
 // function; where it CANNOT, the site says so in full.
 //
@@ -1016,9 +1016,18 @@ function csSubstring(s, b, e) {
 
 // js_supercall is SHARED - lib/runtime.metajs (four languages, one knob: rtkCall).
 
-// s[lo..hi] on a string or an array: the elements are COPIED. An absent bound
-// arrives as undefined and reads as 0 / the length.
-function js_goslice(v, lo0, hi0) {
+// `a[lo..hi]`, C#'s range indexer, on a string or an array: the elements are
+// COPIED and an absent bound arrives as undefined, reading as 0 / the length.
+//
+// It used to be named js_goslice, the SHARED extern, and that is Go's slice and
+// not C#'s: a Go string is a byte sequence, so js_goslice takes a BYTE window
+// while System.Range on a System.String is Substring - UTF-16 code units
+// (ECMA-334 12.8.12 / String.Substring). `"日本語"[0..1]` therefore answered a
+// lone replacement character under llvm.Run, where the Go twin's byte arm ran,
+// and "日" here and in the interpreter. One name was carrying two
+// specifications; C# has its own now and js_goslice stays Go's. The twin is
+// js_csslice in abnf/jsrtcsharp.go.
+function js_csslice(v, lo0, hi0) {
     if (typeof v == "string") {
         var slo = lo0 === undefined ? 0 : csNum(lo0)
         var shi = hi0 === undefined ? v.length : csNum(hi0)

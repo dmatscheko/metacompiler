@@ -453,6 +453,23 @@ public class Main {
         Main.check("fn-recursion", Main.fib(6) == 8);
         Main.check("fn-mutual-recursion", Main.isEven(4) && Main.isOdd(5));
         Main.check("builtin-math", Math.abs(-7) == 7 && Math.max(3, 9) == 9 && Math.min(3, 9) == 3);
+        // The two cases a bare `<` / `>` cannot see, and which -0.0 == 0.0 hides
+        // from an == assertion: compared as TEXT against what java 24.0.2 prints.
+        // java.lang.Math: min of a positive and a negative zero is the negative
+        // one (max the positive one), and either operand NaN makes both NaN.
+        double mzNeg = -0.0, mzPos = 0.0, mNaN = mzPos / mzPos;
+        Main.check("builtin-math-min-negzero",
+                   ("" + Math.min(mzNeg, mzPos)).equals("-0.0")
+                && ("" + Math.min(mzPos, mzNeg)).equals("-0.0"));
+        Main.check("builtin-math-max-negzero",
+                   ("" + Math.max(mzNeg, mzPos)).equals("0.0")
+                && ("" + Math.max(mzPos, mzNeg)).equals("0.0"));
+        Main.check("builtin-math-abs-negzero", ("" + Math.abs(mzNeg)).equals("0.0"));
+        Main.check("builtin-math-minmax-nan",
+                   ("" + Math.min(mNaN, 1.0)).equals("NaN")
+                && ("" + Math.min(1.0, mNaN)).equals("NaN")
+                && ("" + Math.max(mNaN, 1.0)).equals("NaN")
+                && ("" + Math.max(1.0, mNaN)).equals("NaN"));
 
         // ----- lambdas, closures, method references -----
         Function<Integer, Integer> dbl = x -> x * 2;                 // single id, expr body

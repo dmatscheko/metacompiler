@@ -1787,7 +1787,7 @@ KwLet       = "let" KwEnd ;
     function csSliceFn(v, head, tail, sub) {
         return function(b) {
             var hi = callExt(b, "js_sub", [callExt(b, "js_cslen", [v]), emitNum(b, tail)])
-            return emitPat(b, sub, callExt(b, "js_goslice", [v, emitNum(b, head), hi]))
+            return emitPat(b, sub, callExt(b, "js_csslice", [v, emitNum(b, head), hi]))
         }
     }
     function emitPosPat(b, p, v) {
@@ -2495,9 +2495,9 @@ KwLet       = "let" KwEnd ;
         var atV = callExt(doneB, "js_scope_get", [curScopeV, emitStr(doneB, atN)])
         doneB.NewCondBr(truthy(doneB, callExt(doneB, "js_ge", [atV, emitNum(doneB, 0)])), cutB, keepB)
         var outV = callExt(cutB, "js_arr_new", [])
-        callExt(cutB, "js_arr_push", [outV, callExt(cutB, "js_goslice", [srcV, emitNum(cutB, 0), atV])])
+        callExt(cutB, "js_arr_push", [outV, callExt(cutB, "js_csslice", [srcV, emitNum(cutB, 0), atV])])
         callExt(cutB, "js_gospread", [outV])
-        callExt(cutB, "js_arr_push", [outV, callExt(cutB, "js_goslice",
+        callExt(cutB, "js_arr_push", [outV, callExt(cutB, "js_csslice",
             [srcV, callExt(cutB, "js_jadd", [atV, mV]), nV])])
         callExt(cutB, "js_gospread", [outV])
         cutB.NewBr(mergeB)
@@ -2732,7 +2732,7 @@ KwLet       = "let" KwEnd ;
         if (tail == null) { return {kind: "index", idx: lo, fromend: loEnd} }
         return {kind: "slice", lo: lo, loEnd: loEnd, hi: tail.hi, hiEnd: tail.hiEnd}
     }
-    // 'a[lo..hi]': js_goslice reads an undefined bound as 0 / the length, so an omitted
+    // 'a[lo..hi]': js_csslice reads an undefined bound as 0 / the length, so an omitted
     // bound needs no test; a '^n' bound is length - n.
     function emitSlice(b, cur, s) {
         var lv = hUndef
@@ -2749,7 +2749,7 @@ KwLet       = "let" KwEnd ;
             hv = rh.v
             if (s.hiEnd == true) { hv = callExt(b, "js_sub", [callExt(b, "js_cslen", [cur]), hv]) }
         }
-        return {b: b, v: callExt(b, "js_goslice", [cur, lv, hv])}
+        return {b: b, v: callExt(b, "js_csslice", [cur, lv, hv])}
     }
 
     // ----- named arguments -----

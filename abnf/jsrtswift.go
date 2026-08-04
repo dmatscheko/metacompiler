@@ -218,20 +218,31 @@ func init() {
 			}
 			return rt.wrapNum(math.Abs(math.Trunc(rt.toNumber(v))))
 		}
-		swPick := func(want func(int) bool) func(a []uint64) uint64 {
+		// Swift's own min/max are `y < x ? y : x` and `y >= x ? y : x`, so a
+		// TIE keeps the LEFT operand for min and takes the right for max, and
+		// a NaN operand keeps the left one because every comparison against it
+		// is false. Reducing the two doubles to a -1/0/1 comparison threw both
+		// away: min(-0.0, 0.0) answered 0.0 where swift 6.1.2 answers -0.0,
+		// min(0.0, -0.0) answered -0.0 where swift answers 0.0, and
+		// min(nan, 1.0) answered 1.0 where swift answers nan. So the float
+		// branch tests the operands directly. The two branches below cannot
+		// reach either case - a NaN and a signed zero are always a Double here,
+		// hence always a box.
+		swPick := func(wantMax bool, want func(int) bool) func(a []uint64) uint64 {
 			return func(a []uint64) uint64 {
 				l, r := u(a[0]), u(a[1])
 				if swIsFlo(l) || swIsFlo(r) {
-					c := 0
-					if swNum(rt, l) < swNum(rt, r) {
-						c = -1
-					} else if swNum(rt, l) > swNum(rt, r) {
-						c = 1
-					}
-					if want(c) {
+					x, y := swNum(rt, l), swNum(rt, r)
+					if wantMax {
+						if y >= x {
+							return a[1]
+						}
 						return a[0]
 					}
-					return a[1]
+					if y < x {
+						return a[1]
+					}
+					return a[0]
 				}
 				if giIsIntegral(l) && giIsIntegral(r) {
 					if want(rt.giCmp(l, r)) {
@@ -245,8 +256,8 @@ func init() {
 				return a[1]
 			}
 		}
-		m["js_swmax"] = swPick(func(c int) bool { return c > 0 })
-		m["js_swmin"] = swPick(func(c int) bool { return c < 0 })
+		m["js_swmax"] = swPick(true, func(c int) bool { return c > 0 })
+		m["js_swmin"] = swPick(false, func(c int) bool { return c < 0 })
 		// The Double methods this subset carries, in front of the runtime's own
 		// js_mcall (a float box is not a shape memberCall knows). Verified
 		// against swift 6.1.2: 2.0.rounded() is 2.0, 2.5.squareRoot() is

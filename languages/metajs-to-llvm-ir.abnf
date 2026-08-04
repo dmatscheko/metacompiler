@@ -1160,7 +1160,26 @@ KwDefault   = "default" KwEnd ;
     // jsf_N and calls it directly. It is emitted ONLY for -exe (and for -rt-lib, which
     // names it jsdispatch_ext - see there), so every other run of this grammar keeps the
     // module it always had, byte for byte.
-    function emitDispatch(dname) {
+    //
+    // chainExt asks for the SECOND HALF of the table, and it is what gave MetaJS a
+    // layer 2 (lib/metajs-rt.ll, see libPath below). The library module's own function
+    // indices are offset by a million, so an index >= 1000000 belongs to it and nothing
+    // in the program can collide: the miss arm - and the >= test that short-circuits it -
+    // calls jsdispatch_ext, which the library defines. This is js-to-llvm-ir.abnf's
+    // emitDispatch, unchanged; the mechanism is the reusable part of phase 4 and nothing
+    // in it is any one language's.
+    //
+    // It is asked for ONLY when the default runtime list is linked. With an explicit
+    // -rt (tests/metajs-link-stubrt.c) there IS no layer-2 module, so declaring an
+    // uncallable jsdispatch_ext would either fail the link or - worse - resolve to
+    // nothing; that build keeps the single-table module it always had, byte for byte,
+    // and so do -rt-lib and every non-native run.
+    //
+    // The ext declaration is carried in a ONE-ELEMENT ARRAY rather than in a local that
+    // starts undefined and is reassigned: MetaJS is typed and a local keeps its first
+    // type, which under -frozen turns such a rewrite into a hard error while goja stays
+    // green (docs/abnf-dialect-gotchas.md).
+    function emitDispatch(dname, chainExt) {
         var idxs = []
         var fns = []
         var i = 0
@@ -1173,9 +1192,21 @@ KwDefault   = "default" KwEnd ;
             }
             i = i + 1
         }
+        var exts = []
+        if (chainExt) {
+            exts.push(m.NewFunc("jsdispatch_ext", i64,
+                [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)]))
+        }
         var d = m.NewFunc(dname, i64,
             [llvm.ir.NewParam("idx", i64), llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         var b = d.NewBlock("entry")
+        if (exts.length > 0) {
+            var extB = d.NewBlock("ext")
+            var ownB = d.NewBlock("own")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredSGE, d.Params[0], llvm.constant.NewInt(i64, 1000000)), extB, ownB)
+            extB.NewRet(extB.NewCall(exts[0], [d.Params[0], d.Params[1], d.Params[2]]))
+            b = ownB
+        }
         i = 0
         while (i < fns.length) {
             var hit = d.NewBlock("hit" + idxs[i])
@@ -1185,20 +1216,26 @@ KwDefault   = "default" KwEnd ;
             b = nxt
             i = i + 1
         }
-        b.NewRet(llvm.constant.NewInt(i64, 0))
+        if (exts.length > 0) {
+            b.NewRet(b.NewCall(exts[0], [d.Params[0], d.Params[1], d.Params[2]]))
+        } else {
+            b.NewRet(llvm.constant.NewInt(i64, 0))
+        }
     }
 
     // A runtime library is not run and not linked here: it is PRINTED, and the printed
     // module is what the language grammar hands to clang next to lib/runtime.ll.
     if (rtLib) {
-        emitDispatch("jsdispatch_ext")
+        emitDispatch("jsdispatch_ext", false)
         println(m)
         exit(0)
     }
 
-    // runtimePath locates lib/runtime.ll next to THIS grammar, so the build does not
-    // depend on the working directory the metacompiler was started in.
-    function runtimePath() {
+    // libPath locates a runtime input next to THIS grammar, so the build does not
+    // depend on the working directory the metacompiler was started in. It used to be
+    // runtimePath(), hard-wired to "lib/runtime.ll", because MetaJS linked the C floor
+    // and nothing else; it is the same function every other language grammar has.
+    function libPath(name) {
         var mn = moduleName()
         var cut = -1
         var i = 0
@@ -1207,7 +1244,7 @@ KwDefault   = "default" KwEnd ;
             if (ch == "/" || ch == "\\") { cut = i }
             i = i + 1
         }
-        return mn.substring(0, cut + 1) + "lib/runtime.ll"
+        return mn.substring(0, cut + 1) + "lib/" + name
     }
 
     // With -exe PATH, link the module into a native executable (clang) instead of running
@@ -1220,10 +1257,20 @@ KwDefault   = "default" KwEnd ;
     // still stand in for the whole runtime in the link tests. Because a runtime is
     // declared either way, llvm.BuildExecutable does NOT stub what is left over: a missing
     // js_* is an error naming the symbol, not a silent zero.
+    //
+    // SINCE THE PART B UNBLOCK there are TWO default inputs, exactly as in the other
+    // fifteen grammars: lib/runtime.ll (the C floor) and lib/metajs-rt.ll (MetaJS's own
+    // layer 2, built from lib/metajs-rt.metajs by tests/gen-metajs-rt-ll.sh - by this
+    // very grammar, with -rt-lib). Without the second one a floor body that moved into
+    // lib/runtime.metajs reached every language's native build except MetaJS's, which is
+    // what left Part B with an empty movable set (docs/runtime-next-plan.md, "Part B,
+    // move 1"). An explicit -rt still replaces BOTH, and only the default list gets the
+    // chained function table - see emitDispatch's chainExt.
     if (c.exePath != undefined && c.exePath != "") {
-        emitDispatch("jsdispatch")
         var rts = c.runtime
-        if (rts == undefined || rts.length == 0) { rts = [runtimePath()] }
+        var ownRt = (rts == undefined || rts.length == 0)
+        emitDispatch("jsdispatch", ownRt)
+        if (ownRt) { rts = [libPath("runtime.ll"), libPath("metajs-rt.ll")] }
         var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
         if (buildErr != "") { println(buildErr); exit(1) }
         println("js compiler: wrote executable " + c.exePath)

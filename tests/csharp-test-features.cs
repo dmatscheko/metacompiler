@@ -436,6 +436,19 @@ namespace Demo
             int ib = 4;
             Program.Check("str-interpolation", $"{ia}+{ib}={ia + ib}" == "3+4=7" && $"sum={ia * 2 + 1}" == "sum=7");
             Program.Check("str-escapes", "a\tb".Length == 3 && "a\nb".Length == 3 && "\\".Length == 1 && "\"".Length == 1);
+            // The range indexer on a String is Substring, so its bounds are
+            // UTF-16 CODE UNITS (ECMA-334 12.8.12 / String.Substring) - not the
+            // BYTES a Go slice would take. The ASCII row cannot tell the two
+            // apart; the CJK one can, and answered a lone replacement character
+            // while the shared js_goslice extern was carrying both languages.
+            // No dotnet on this machine, so the BCL contract is the oracle.
+            string rngAscii = "abcdef";
+            Program.Check("str-range-ascii", rngAscii[1..3] == "bc" && rngAscii[..2] == "ab" && rngAscii[4..] == "ef");
+            string rngCjk = "日本語";
+            Program.Check("str-range-utf16", rngCjk.Length == 3 && rngCjk[0..1] == "日" && rngCjk[1..3] == "本語");
+            int[] rngArr = { 1, 2, 3, 4 };
+            int[] rngMid = rngArr[1..3];
+            Program.Check("arr-range-copies", rngMid.Length == 2 && rngMid[0] == 2 && rngArr[1] == 2);
 
             // ----- control flow: if / while / do-while / for -----
             Program.Check("if-elseif-else", Program.Grade(11) == "big" && Program.Grade(7) == "mid" && Program.Grade(1) == "small");
