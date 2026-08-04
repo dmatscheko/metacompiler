@@ -7218,14 +7218,45 @@ function k4NameVal(v, name) {
 //           MEC_GC_STATS: collections 18,798 either way, live 222,096 ->
 //           225,104 bytes, heap 9.47 -> 10.51 MB.
 //
-//       The import brings back 20 function bodies this file had DELETED as
-//       unreachable (rxMatchAt, rxTest, rxGroupCount, rxNameAt, rxReplace,
-//       rxSplit and the closures under them), and a layer-2 body is PERMANENTLY
-//       LIVE: the conservative collector walks it on every collection whether the
-//       program can reach it or not. +3 KB of live data x 18,798 collections is
-//       the whole of that 20%. Same shape as the case_map revert in
-//       docs/runtime-merge-plan.md, and the reason runtime-decimal.metajs and
-//       runtime-bignum.metajs are separate files rather than sections.
+//       WHY, re-measured 2026-08-04 with INSTRUCTIONS RETIRED (/usr/bin/time -l)
+//       instead of wall clock - the explanation this note used to give was WRONG,
+//       and the wall clock could not have told anyone so. With other work on the
+//       machine a 40,000-iteration run of the same loop varies +-8% between runs
+//       of the SAME binary; instruction counts reproduce to 0.02%. The corrected
+//       split of the cost (40,000 iterations, base 30.506 G instructions):
+//
+//           import "./regex.js"                            +10.7%
+//             of which: the 6 bodies this file omits        +1.1%
+//                       WHERE the declarations land         +9.5%
+//
+//       The second row is not a metaphor. Take THIS file, change nothing at all,
+//       and merely relocate the verbatim block below to the top: +9.3%, with the
+//       identical text, the identical 461 top-level declarations, and
+//       MEC_GC_STATS identical to the byte (collections 1,880, live 222,080, heap
+//       9,465,728). Relocate it to declaration index 150 or 250 instead: -0.1%
+//       and -0.6%. `import` PREPENDS an imported file's top-level declarations to
+//       jsrun (metajs-to-llvm-ir.abnf ~590/~1011), so importing regex.js IS
+//       relocating it to index 0 - and that, not the six extra bodies, is what
+//       the earlier revert measured.
+//
+//       IT IS NOT A COLLECTOR TAX. With a MEC_GC=off run subtracted, the
+//       collector's share is 5.09 G instructions for the base, for the relocation
+//       and for BOTH imports - equal to three decimal places. The whole
+//       difference is MUTATOR work in runtime.c's `scope_find` (2755), a LINEAR
+//       scan of the module scope's name array: a declaration costs by delaying
+//       every lookup that resolves after it and by lengthening every lookup that
+//       misses and falls through to G_ROOT. CODE SIZE IS EXACTLY FREE - five
+//       appended functions of 1,220 lines and five appended functions of 5 lines
+//       have byte-identical `live` and cost the same to 0.01%.
+//
+//       So the split this was reverted for - a runtime-regex.metajs holding the
+//       shared engine - CANNOT recover the 9.5%; it is worth the 1.1%, and 1,217
+//       lines of duplication are not worth 1.1% of every kotlin program. What
+//       would make the deletion worth it is a change in one of two places,
+//       neither of them here: `import` APPENDING rather than prepending (an
+//       import at declaration index 150+ measures at or below the noise floor),
+//       or a hash index on `scope_find`. See docs/runtime-merge-plan.md, "THE TAX
+//       IS DECLARATIONS, NOT DATA AND NOT CODE".
 //
 //       So: keep the two texts IN STEP BY HAND. A change to lib/regex.js belongs
 //       here as well, and the shape scan above is how to check that it arrived.

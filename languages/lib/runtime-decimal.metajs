@@ -3,21 +3,27 @@
 // (python, ruby, swift). The exact-decimal bignum underneath it is split again,
 // into runtime-bignum.metajs, which only python and ruby import.
 //
-// WHY IT IS A SEPARATE FILE, and this is the load-bearing part: layer 2 is
-// PERMANENTLY LIVE. Every function body in a <lang>-rt.ll is a pinned closure the
-// conservative collector walks on every collection, whether the program can reach
-// it or not. Measured on a kotlin loop that never formats a float
-// (400,000 x `s = s + i % 7`, native -exe, MEC_GC_STATS=1):
+// WHY IT IS A SEPARATE FILE: a body put into runtime.metajs is paid for by all
+// TEN importers, including the seven that cannot call a line of it. Ten files
+// import runtime.metajs; three of them want this. So it is imported, not shared.
 //
-//     runtime.metajs WITHOUT this section   21.6-22.5 s   live 222,096   heap 9.47 MB
-//     runtime.metajs WITH it, kotlin idle   23.5-25.1 s   live 224,400   heap 10.51 MB
+// The ORIGINAL justification here said the cost was the collector walking a
+// permanently-live body, and gave "+7-11% wall, +2,304 live bytes x 18,798
+// collections". THAT EXPLANATION IS WRONG, re-measured 2026-08-04 in instructions
+// retired rather than wall clock (wall clock on this machine varies +-8% between
+// runs of the SAME binary; instruction counts reproduce to 0.02%). The collector's
+// share does not move at all: with MEC_GC=off subtracted it is 5.09 G instructions
+// whether or not the merged bodies are there. The real cost is MUTATOR work in
+// runtime.c's `scope_find` (2755), a LINEAR scan of the module scope's name array,
+// and it is charged PER TOP-LEVEL DECLARATION - not per byte of live data and not
+// per line of code, which is exactly free.
 //
-// +7-11% wall on a program that cannot call a single line of it, from +2,304 live
-// bytes walked on each of the run's 18,798 collections. Ten files import
-// runtime.metajs; three of them want this. So it is imported, not shared - the
-// same lesson docs/runtime-merge-plan.md's case_map revert recorded from the
-// other direction, and the reason a merge that saves source lines still has to be
-// measured on a language that does not use the merged body.
+// The honest number for THIS file plus runtime-bignum.metajs is 14 declarations
+// prepended to a kotlin module: +2.2%, measured (kotlin, 40,000 x `s = s + i % 7`,
+// no float in it, 30.506 G -> 31.193 G instructions). Smaller than was claimed,
+// still real, and still worth the split. The full derivation, the code-vs-data
+// controls and the rule are in docs/runtime-merge-plan.md, "the tax is
+// DECLARATIONS, not data and not code".
 //
 // The MetaJS rules and the rtk* hook convention are runtime.metajs's; this file
 // defines one hook of its own, rtkFloDigits, which renders a strictly positive

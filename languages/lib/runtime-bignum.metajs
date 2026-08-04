@@ -1,15 +1,25 @@
 // runtime-bignum.metajs -- the EXACT decimal expansion of a double, and
 // strconv.FormatInt, shared by python-rt.metajs and ruby-rt.metajs alone.
 //
-// Split out of runtime-decimal.metajs for the reason that file's head records
-// and MEASURES: a layer-2 body is permanently live and the conservative
-// collector walks it on every collection whether the program can reach it or
-// not. swift wants the float RENDERING above (rtSplit10 / rtSciText / rtFixText
-// / rtFloStr) and never calls this bignum, and carrying it cost swift
-// +17-24% wall on a loop that never formats a float
-// (400,000 x `s = s + i % 7`, native -exe: 3.16-3.20 s -> 3.70-3.94 s,
-// live 103,536 -> 105,072, heap 9.44 -> 10.49 MB, collections 3,841 -> 4,097).
-// Two languages want it, so two languages import it.
+// Split out of runtime-decimal.metajs because swift wants the float RENDERING
+// above (rtSplit10 / rtSciText / rtFixText / rtFloStr) and never calls this
+// bignum. Two languages want it, so two languages import it.
+//
+// The cost of NOT splitting was measured as +17-24% wall on a swift loop that
+// never formats a float (400,000 x `s = s + i % 7`, native -exe: 3.16-3.20 s ->
+// 3.70-3.94 s, live 103,536 -> 105,072, heap 9.44 -> 10.49 MB, collections
+// 3,841 -> 4,097) and was ATTRIBUTED to the collector walking a permanently-live
+// body. The attribution is mostly wrong; see runtime-decimal.metajs's head and
+// docs/runtime-merge-plan.md, "the tax is DECLARATIONS, not data and not code",
+// where the same experiment re-run on kotlin in instructions retired shows the
+// collector's share does not move at all and the cost is `scope_find`'s linear
+// scan of the module scope, charged per TOP-LEVEL DECLARATION. The one part of
+// the swift row that is a genuine collector effect is the collection COUNT,
+// 3,841 -> 4,097 (+6.7%): more module-init allocation, more collections. The
+// kotlin control holds its collection count at 1,880 across every variant, so
+// that component is swift's and not a general rule. The split stays either way -
+// it is free, and it is the right shape - but the number to quote for it is the
+// kotlin one, +2.2% for the 14 declarations of decimal+bignum together.
 //
 // python-rt.metajs said at its own copy of this code: "Copied verbatim from
 // languages/lib/ruby-rt.metajs (rbDigitAt / rbBigFromNum / rbBigMulSmall /
