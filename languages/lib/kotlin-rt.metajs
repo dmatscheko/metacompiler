@@ -434,20 +434,13 @@ function ktMakeMap() {
 }
 
 // dictParts (abnf/jsrt.go 2322), split into the three questions layer 2 asks.
-function ktIsMap(v) {
-    if (!ktIsObj(v)) { return false }
-    if (v["__dict"] !== true) { return false }
-    if (!ktIsArr(v["keys"])) { return false }
-    return ktIsArr(v["vals"])
-}
-
 function ktMapKeys(m) {
-    if (!ktIsMap(m)) { return undefined }
+    if (!rtIsDictObj(m)) { return undefined }
     return m["keys"]
 }
 
 function ktMapVals(m) {
-    if (!ktIsMap(m)) { return undefined }
+    if (!rtIsDictObj(m)) { return undefined }
     return m["vals"]
 }
 
@@ -797,8 +790,8 @@ function ktStructEq(a, b) {
         }
         return true
     }
-    var aMap = ktIsMap(a)
-    var bMap = ktIsMap(b)
+    var aMap = rtIsDictObj(a)
+    var bMap = rtIsDictObj(b)
     if (aMap || bMap) {
         if (!aMap) { return false }
         if (!bMap) { return false }
@@ -884,7 +877,7 @@ function ktElems(v) {
     if (typeof v == "string") { return k0Chars(v) }
     var se = ktSetElems(v)
     if (se !== undefined) { return se }
-    if (ktIsMap(v)) {
+    if (rtIsDictObj(v)) {
         var ks = ktMapKeys(v)
         var vs = ktMapVals(v)
         var out = []
@@ -950,7 +943,7 @@ function ktElemHash(v) {
         return sh
     }
     // java.util.AbstractMap.hashCode is the SUM of key XOR value over the entries.
-    if (ktIsMap(v)) {
+    if (rtIsDictObj(v)) {
         var ks = ktMapKeys(v)
         var vs = ktMapVals(v)
         var mh = 0
@@ -986,7 +979,7 @@ function ktElemHash(v) {
 // prefixed k1; the SHARED CONTRACT names (ktNorm, ktWU, ktNum, ktIsInt,
 // ktIsChar, ktChar, ktCharCode, ktRaise, ktThrowArith, ktStructEq, ktIdent,
 // ktCmpVals, ktClsFind, ktClassChainHas, ktClassOf, ktCall2, ktIsObj/Arr/Fn,
-// ktIsSet, ktIsMap, ktMiss/KT_MISS) are defined by section 0 and only CALLED.
+// ktIsSet, rtIsDictObj, ktMiss/KT_MISS) are defined by section 0 and only CALLED.
 // ktRender is section 2's; ktSeqMethod / ktSetMethod / ktMapMethod are
 // section 3's. This section OWNS ktNumMethod.
 //
@@ -1415,7 +1408,7 @@ function js_ktarith(op, l, r) {
             if (ktIsSet(l)) {
                 var sv = ktSetMethod(l, "minus", [r])
                 if (!ktMiss(sv)) { return sv }
-            } else if (ktIsMap(l)) {
+            } else if (rtIsDictObj(l)) {
                 var mv = ktMapMethod(l, "minus", [r])
                 if (!ktMiss(mv)) { return mv }
             }
@@ -1492,7 +1485,7 @@ function js_ktadd(l, r) {
             var sv = ktSetMethod(l, "plus", [r])
             if (!ktMiss(sv)) { return sv }
         }
-        if (ktIsMap(l)) {
+        if (rtIsDictObj(l)) {
             var mv = ktMapMethod(l, "plus", [r])
             if (!ktMiss(mv)) { return mv }
         }
@@ -1774,7 +1767,7 @@ function k2Obj(o, depth) {
     // toString), the same answer kstr gives it in kotlin-interpreter.abnf.
     if (ktIsSb(o)) { return ktSbText(o) }
     // A MAP renders as java.util.AbstractMap.toString does: {a=1, b=2}.
-    if (ktIsMap(o)) {
+    if (rtIsDictObj(o)) {
         var mk = ktMapKeys(o)
         var mv = ktMapVals(o)
         var mo = "{"
@@ -3034,7 +3027,7 @@ function k3SetOfDistinct(es) {
 function k3IsCollection(v) {
     if (ktIsArr(v)) { return true }
     if (ktIsSet(v)) { return true }
-    return ktIsMap(v)
+    return rtIsDictObj(v)
 }
 
 // ----- the sort order ------------------------------------------------------
@@ -4140,7 +4133,7 @@ function ktMapMethod(m, name, args) {
     var v = anytype
     var b = false
     var ent = anytype
-    if (!ktIsMap(m)) { return KT_MISS }
+    if (!rtIsDictObj(m)) { return KT_MISS }
     keys = ktMapKeys(m)
     vals = ktMapVals(m)
     if (name == "get") {
@@ -4266,7 +4259,7 @@ function ktMapMethod(m, name, args) {
         }
         else {
             if (ktIsObj(f)) {
-                if (ktIsMap(f)) {
+                if (rtIsDictObj(f)) {
                     drop = ktMapKeys(f)
                     v = ktMapVals(f)
                     for (i = 0; i < drop.length; i = i + 1) { ktMapPut(out, drop[i], v[i]) }
@@ -4321,7 +4314,7 @@ function k3IsMapFilter(name) {
 
 function js_ktiter(v) {
     if (ktIsObj(v)) {
-        if (ktIsMap(v)) { return ktElems(v) }
+        if (rtIsDictObj(v)) { return ktElems(v) }
         if (ktIsSet(v)) { return ktSetElems(v) }
     }
     return v
@@ -5209,7 +5202,7 @@ function ktDelegKind(v) {
         if (k != "") { return "box" }
     }
     if (v["__lazy"] === true) { return "lazy" }
-    if (ktIsMap(v)) { return "map" }
+    if (rtIsDictObj(v)) { return "map" }
     if (ktHasMethod(v, "getValue")) { return "obj" }
     return ""
 }
@@ -5395,7 +5388,7 @@ function k4bAdoptTy(v, ty) {
 // map kept its old size and the write was invisible to every map operation).
 function js_ktset(o, key, val) {
     if (ktIsObj(o)) {
-        if (ktIsMap(o)) {
+        if (rtIsDictObj(o)) {
             ktMapPut(o, key, val)
             return undefined
         }
@@ -5656,7 +5649,7 @@ function k4IsBuiltinRecv(v) {
     if (!ktIsObj(v)) { return false }
     if (v["__class"] !== undefined) { return false }
     if (v["__isclass"] !== undefined) { return false }
-    if (ktIsMap(v)) { return true }
+    if (rtIsDictObj(v)) { return true }
     return ktIsSb(v)
 }
 
@@ -6597,7 +6590,7 @@ function k4BaseMcall(recv, name, args) {
         fail("unknown String method: " + name)
         return undefined
     }
-    if (ktIsMap(recv)) {
+    if (rtIsDictObj(recv)) {
         // The Python dict methods.
         if (name == "keys") { return k4Copy(ktMapKeys(recv)) }
         if (name == "values") { return k4Copy(ktMapVals(recv)) }
@@ -6769,7 +6762,7 @@ function ktSmcall(recv, name, args) {
             var stv = ktSetMethod(rv, name, as)
             if (!ktMiss(stv)) { return stv }
         }
-        if (ktIsMap(rv)) {
+        if (rtIsDictObj(rv)) {
             var mv = ktMapMethod(rv, name, as)
             if (!ktMiss(mv)) { return mv }
         } else {
@@ -6981,7 +6974,7 @@ function js_ktfget(o, name) {
         // Map.keys is a SET (java.util.Map.keySet) and Map.entries a set of
         // entries. Read as PROPERTIES they used to fall through to js_get, which
         // handed back the raw `keys` array behind the handle.
-        if (ktIsMap(o)) {
+        if (rtIsDictObj(o)) {
             var mname = anytype
             mname = ""
             if (name == "keys") { mname = "keys" }
@@ -7034,7 +7027,7 @@ function js_ktfget(o, name) {
 // shared js_kindex answers undefined - which printed "kotlin.Unit" and made
 // `m[9] == null` false in the compiler while the interpreter said true.
 function js_ktindex(o, k) {
-    if (ktIsMap(o)) {
+    if (rtIsDictObj(o)) {
         // The Go twin falls through to js_kindex, whose getMember carries a
         // dictMemberHit arm that answers vals[i] for a key the handle holds. The C
         // floor's member read knows nothing of the {__dict, keys, vals} handle, so
@@ -7210,6 +7203,32 @@ function k4NameVal(v, name) {
 //       to change; only the rxFail knob is re-pointed, right after the copy, so
 //       a step-limit blowup reports the Go twin's text rather than the engine's
 //       default.
+//
+//       THE COPY IS THE LARGEST DUPLICATION IN LAYER 2 AND IT STAYS. A shape scan
+//       measured it exactly: 51 of regex.js's 57 functions are BYTE-IDENTICAL
+//       here, 1,217 lines, with ZERO divergences. Replacing them with
+//       `import "./regex.js"` was TRIED, WHOLE - it works (kotlin matrix 47/47,
+//       native kotlin-test-full 979 checks 0 failures, source 9,372 -> 7,901) -
+//       and it was REVERTED on measurement:
+//
+//           400,000 x `s = s + i % 7`, a kotlin loop with NO regexp in it,
+//           native -exe, best of 4, interleaved:
+//               verbatim copy (this file)   21.6 - 22.5 s
+//               import "./regex.js"         26.0 - 27.5 s      +18 to +23%
+//           MEC_GC_STATS: collections 18,798 either way, live 222,096 ->
+//           225,104 bytes, heap 9.47 -> 10.51 MB.
+//
+//       The import brings back 20 function bodies this file had DELETED as
+//       unreachable (rxMatchAt, rxTest, rxGroupCount, rxNameAt, rxReplace,
+//       rxSplit and the closures under them), and a layer-2 body is PERMANENTLY
+//       LIVE: the conservative collector walks it on every collection whether the
+//       program can reach it or not. +3 KB of live data x 18,798 collections is
+//       the whole of that 20%. Same shape as the case_map revert in
+//       docs/runtime-merge-plan.md, and the reason runtime-decimal.metajs and
+//       runtime-bignum.metajs are separate files rather than sections.
+//
+//       So: keep the two texts IN STEP BY HAND. A change to lib/regex.js belongs
+//       here as well, and the shape scan above is how to check that it arrived.
 //   (b) the Kotlin layer, under the private prefix k5.
 //   (c) the two externs js_rxktnew and js_rxktglobal.
 //

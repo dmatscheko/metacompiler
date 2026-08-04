@@ -127,7 +127,7 @@ function rtkIsArr(v) { return Array.isArray(v) }
 // it IS emitted the answer is the plain one and not a missing name.
 function rtkCall(f, self, argv) { return f.apply(undefined, argv) }
 // js_pyset's two knobs.
-function rtkIsDict(v) { return dtIsDict(v) }
+function rtkIsDict(v) { return rtIsDictObj(v) }
 function rtkDictFind(keys, k) { return rtDictFind(keys, k) }
 
 // ===================================================== the two number tags ==
@@ -284,13 +284,6 @@ function dtIsArr(v) {
     return typeof v["length"] == "number"
 }
 
-function dtIsDict(v) {
-    if (!dtIsObj(v)) { return false }
-    if (v["__dict"] !== true) { return false }
-    if (!dtIsArr(v["keys"])) { return false }
-    return dtIsArr(v["vals"])
-}
-
 // pySetElems: the element array of a {__set} object, or undefined.
 function dtSetElems(v) {
     if (!dtIsObj(v)) { return undefined }
@@ -443,7 +436,7 @@ function dtObjStr(o, seen, depth) {
         }
         return so + "}"
     }
-    if (dtIsDict(o)) {
+    if (rtIsDictObj(o)) {
         var ks = o["keys"]
         var vs = o["vals"]
         var mo = "{"
@@ -483,7 +476,7 @@ function dtObjStr(o, seen, depth) {
     // ...) as bare values, named ones as "name: value".
     if (name === "Record") {
         var f = o["__f"]
-        if (dtIsDict(f)) {
+        if (rtIsDictObj(f)) {
             var fk = f["keys"]
             var fv = f["vals"]
             var ro = "("
@@ -580,7 +573,7 @@ function dtCanon(v, depth) {
                 els[si] = dtCanon(els[si], depth + 1)
                 si = si + 1
             }
-        } else if (dtIsDict(v)) {
+        } else if (rtIsDictObj(v)) {
             var ks = v["keys"]
             var vs = v["vals"]
             var mi = 0
@@ -645,7 +638,7 @@ function dtConstKey(v, depth) {
         }
         return so + ")"
     }
-    if (dtIsDict(v)) {
+    if (rtIsDictObj(v)) {
         var ks = v["keys"]
         var vs = v["vals"]
         var mo = "M("
@@ -1005,7 +998,7 @@ function dtIsType(v, t) {
         // A Map is the shared dict object; a Set is a dict-shaped object carrying
         // __set, and it is NOT a Map.
         if (dtIsObj(v) && v["__set"] !== undefined) { return false }
-        return dtIsDict(v)
+        return rtIsDictObj(v)
     }
     if (lt === "Set") {
         if (!dtIsObj(v)) { return false }
@@ -1081,8 +1074,8 @@ function dtPyEqual(x, y) {
         }
         return true
     }
-    if (dtIsDict(x)) {
-        if (!dtIsDict(y)) { return false }
+    if (rtIsDictObj(x)) {
+        if (!rtIsDictObj(y)) { return false }
         var xk = x["keys"]
         var xv = x["vals"]
         var yk = y["keys"]
@@ -1160,7 +1153,7 @@ function dtMember(recv, name, args) {
         if (name === "isEmpty") { return recv.length == 0 }
         fail("unknown String method: " + name)
     }
-    if (dtIsDict(recv)) {
+    if (rtIsDictObj(recv)) {
         if (name === "keys") { return dtCopyArr(recv["keys"]) }
         if (name === "values") { return dtCopyArr(recv["vals"]) }
         if (name === "get") {
@@ -1288,7 +1281,7 @@ function dtListMethod(o, name, args) {
 // The __getitem__ arm of the Go twin is PYTHON's and is unreachable from Dart -
 // a Dart class cannot declare a member of that name.
 function js_pyget(c, k) {
-    if (dtIsDict(c)) {
+    if (rtIsDictObj(c)) {
         var i = dtDictFind(c["keys"], k)
         if (i < 0) { fail("KeyError: " + dtStr(k)) }
         return c["vals"][i]
@@ -1320,7 +1313,7 @@ function js_pylen(v) {
     if (els !== undefined) { return els.length }
     if (typeof v == "string") { return dtStrLen(v) }
     if (dtIsArr(v)) { return v.length }
-    if (dtIsDict(v)) { return v["keys"].length }
+    if (rtIsDictObj(v)) { return v["keys"].length }
     fail("len() of a " + typeof v)
     return 0
 }
@@ -1341,7 +1334,7 @@ function js_pyiter(v) {
         }
         return out
     }
-    if (dtIsDict(v)) { return dtCopyArr(v["keys"]) }
+    if (rtIsDictObj(v)) { return dtCopyArr(v["keys"]) }
     fail("iteration over a " + typeof v)
     return []
 }
@@ -1394,7 +1387,7 @@ function js_pyin(x, y) {
         return false
     }
     if (typeof y == "string") { return y.indexOf(dtToStr(x)) >= 0 }
-    if (dtIsDict(y)) { return dtDictFind(y["keys"], x) >= 0 }
+    if (rtIsDictObj(y)) { return dtDictFind(y["keys"], x) >= 0 }
     fail("'in' needs a list, a string or a dict on the right side")
     return false
 }
@@ -1422,7 +1415,7 @@ function js_pyspread(arr, it) {
         }
         return undefined
     }
-    if (dtIsDict(it)) {
+    if (rtIsDictObj(it)) {
         var ks = it["keys"]
         var ki = 0
         while (ki < ks.length) {

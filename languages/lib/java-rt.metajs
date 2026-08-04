@@ -487,7 +487,12 @@ function jpRender(v, depth) {
 // jpObj renders the object shapes the two Java grammars build.
 function jpObj(o, depth) {
     // A user toString() wins over every built-in rendering, as it does in Java.
-    var f = jpFindMember(o, "toString")
+    // The __class/__super walk is SHARED - rtFindMethod, lib/runtime.metajs. This
+    // file called it 400 lines below and STILL carried a second private copy of
+    // the same eleven lines, as csharp-rt.metajs did under the name
+    // cpFindToString. Byte-identical after normalising the identifiers. Zero
+    // knobs.
+    var f = rtFindMethod(o["__class"], "toString")
     if (f !== undefined) { return jpRender(f.apply(undefined, [o]), depth + 1) }
     // The class descriptor itself.
     if (o["__isclass"] === true) {
@@ -535,23 +540,6 @@ function jpClassName(cls) {
     var n = cls["__name"]
     if (typeof n == "string") { return n }
     return "Object"
-}
-
-// jpFindMember walks the __class / __super chain for a callable member, the same
-// walk the two grammars' method dispatch does.
-function jpFindMember(o, name) {
-    var cls = o["__class"]
-    var guard = 0
-    while (guard < 64) {
-        guard = guard + 1
-        if (cls === undefined) { return undefined }
-        if (cls === null) { return undefined }
-        if (typeof cls != "object") { return undefined }
-        var m = cls[name]
-        if (m !== undefined) { if (typeof m == "function") { return m } }
-        cls = cls["__super"]
-    }
-    return undefined
 }
 
 // jpArrayTag is the array's class name as getName spells it. The element type is
@@ -867,7 +855,7 @@ function js_mcall(recv, name, args) {
         if (name == "substring") {
             var b = args.length > 0 ? jvNum(args[0]) : 0
             var e = args.length > 1 ? jvNum(args[1]) : recv.length
-            return jpSubstring(recv, b, e)
+            return rtSubstring(recv, b, e)
         }
         if (name == "indexOf") { return recv.indexOf(jpStr(args[0])) }
         if (name == "isEmpty") { return recv.length == 0 }
@@ -929,15 +917,6 @@ function js_mcall(recv, name, args) {
 // jpPrepend is SHARED as rtPrepend - lib/runtime.metajs.
 
 // String.substring with the Go twin's substringRange clamping.
-function jpSubstring(s, b, e) {
-    var begin = b
-    var end = e
-    if (begin < 0) { begin = 0 }
-    if (end > s.length) { end = s.length }
-    if (end < begin) { end = begin }
-    return s.substring(begin, end)
-}
-
 // js_supercall is SHARED - lib/runtime.metajs (four languages, one knob: rtkCall).
 
 // ----- Java's own sixteen ---------------------------------------------------
@@ -969,30 +948,37 @@ function js_jvarith(op, l, r) {
 function js_jvshift(op, l, r) { return jvShift(op, l, r) }
 
 // An ordered comparison. Two integers compare at the promoted width; anything
-// else (a double, a string pair) keeps the shared comparison.
+// else (a double, a string pair) keeps the shared comparison, rtCompare.
+//
+// A DEFECT WAS HERE, in BOTH ENGINES, and the two halves gave two DIFFERENT
+// wrong answers. rtCompare is abnf/jsrt.go:1530's jsCompare, which answers the
+// SENTINEL 2 when either operand coerces to NaN and says at the site that it
+// means "every relation is false". The old jpCompare - deleted, it was the
+// fourth copy of this body - dropped the sentinel and fell through to `return
+// 0`, i.e. EQUAL, and its comment claimed that was "the Go twin's behaviour
+// exactly". It was not. Read by the four tests below:
+//
+//     sentinel 2 (the Go twin)     <  false   >  TRUE    <= false   >= TRUE
+//     0          (old layer 2)     <  false   >  false   <= TRUE    >= TRUE
+//     JLS 15.20.1 (real java)      <  false   >  false   <= false   >= false
+//
+// Measured against java 24 on a fourteen-row probe (NaN and 1.0 in both orders,
+// NaN against itself, and the float NaN): java 24 says false everywhere except
+// `!=`; the GO TWIN was wrong on 4 rows, LAYER 2 on 6, and the two halves
+// disagreed with EACH OTHER on 6 - which --cross would have caught had it ever
+// probed a NaN relation, and --full has no such assertion. This is the same
+// defect docs/runtime-merge-plan.md fixed for C# in Part A; java was the twin of
+// it and was not looked at. abnf/jsrtjava.go:467 takes the same three lines.
+// Smoothing the 2 to 0 in rtCompare is still wrong and still must not be done:
+// 0 makes `<=` and `>=` true.
 function js_jvcmp(op, l, r) {
     if (jvIsIntegral(l) && jvIsIntegral(r) && !floIs(l) && !floIs(r)) { return jvCmp(op, l, r) }
-    var c = jpCompare(l, r)
+    var c = rtCompare(l, r)
+    if (c == 2) { return false }
     if (op == "<") { return c < 0 }
     if (op == ">") { return c > 0 }
     if (op == "<=") { return c <= 0 }
     return c >= 0
-}
-
-// The shared jsCompare: two strings compare as strings, everything else as
-// numbers, and a NaN answers "not less and not greater", which the callers turn
-// into false for < and > and TRUE for >= - the Go twin's behaviour exactly.
-function jpCompare(l, r) {
-    if (typeof l == "string" && typeof r == "string") {
-        if (l < r) { return 0 - 1 }
-        if (l > r) { return 1 }
-        return 0
-    }
-    var a = jvNum(l)
-    var b = jvNum(r)
-    if (a < b) { return 0 - 1 }
-    if (a > b) { return 1 }
-    return 0
 }
 
 // A cast or a declared integral type: (value, bits).

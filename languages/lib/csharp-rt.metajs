@@ -416,38 +416,6 @@ function csFloOperand(v) {
     return v
 }
 
-// The shared jsCompare (abnf/jsrt.go:1490): two strings compare as strings,
-// everything else as numbers.
-//
-// THE `2` IS NOT A TYPO AND IT MUST NOT BE SMOOTHED TO 0. jsCompare answers the
-// SENTINEL 2 for a NaN operand, commented there as "every relation is false".
-// js_cscmp used to compare the sentinel like an ordinary ordering:
-//
-//     <   c < 0    false      <=  c <= 0   false
-//     >   c > 0    TRUE       >=  c >= 0   TRUE
-//
-// so `double.NaN > 0.0` was TRUE under llvm.Run and `double.NaN <= 0.0` false,
-// where real C# (ECMA-334 12.12.1) makes all four FALSE. FIXED at js_cscmp,
-// which now tests the sentinel BEFORE the four comparisons; abnf/jsrtcsharp.go
-// took the same fix, so the halves still agree. Smoothing the 2 to 0 HERE is
-// still wrong and still must not be done: 0 makes `<=` and `>=` true.
-function csCompare(l, r) {
-    if (typeof l == "string") {
-        if (typeof r == "string") {
-            if (l < r) { return 0 - 1 }
-            if (l > r) { return 1 }
-            return 0
-        }
-    }
-    var a = csNum(l)
-    var b = csNum(r)
-    if (a !== a) { return 2 }
-    if (b !== b) { return 2 }
-    if (a < b) { return 0 - 1 }
-    if (a > b) { return 1 }
-    return 0
-}
-
 // ===================================================== rendering ============
 
 // cspBoolStr is System.Boolean.ToString(): Boolean.TrueString / Boolean.FalseString,
@@ -490,7 +458,14 @@ function cpPlainObj(o) { return "[object Object]" }
 function cpObjStr(o, depth) {
     // A user ToString() override wins over every built-in rendering, exactly as the
     // virtual System.Object.ToString() does in C#.
-    var m = cpFindToString(o)
+    // The __class/__super walk is SHARED - rtFindMethod, lib/runtime.metajs. This
+    // file called it 300 lines below and STILL carried a second private copy of
+    // the same eleven lines with the name hardcoded to "ToString"; jpFindMember
+    // in java-rt.metajs was the third. Byte-identical after normalising the
+    // identifiers: the copies' undefined/null/typeof triple IS rtIsObj, and the
+    // nested `m !== undefined` test is redundant in front of `typeof m ==
+    // "function"`. Zero knobs.
+    var m = rtFindMethod(o["__class"], "ToString")
     if (m !== undefined) { return cpRender(m.apply(undefined, [o]), depth + 1) }
     // The type descriptor itself.
     if (o["__isclass"] !== undefined) {
@@ -505,23 +480,6 @@ function cpObjStr(o, depth) {
     if (typeof cls != "object") { return undefined }
     var cn = cls["__name"]
     if (typeof cn == "string") { if (cn.length > 0) { return cn } }
-    return undefined
-}
-
-// cpFindToString walks the __class / __super chain for a user-declared ToString,
-// the same walk the method dispatch does in both C# grammars.
-function cpFindToString(o) {
-    var cls = o["__class"]
-    var guard = 0
-    while (guard < 64) {
-        guard = guard + 1
-        if (cls === undefined) { return undefined }
-        if (cls === null) { return undefined }
-        if (typeof cls != "object") { return undefined }
-        var m = cls["ToString"]
-        if (m !== undefined) { if (typeof m == "function") { return m } }
-        cls = cls["__super"]
-    }
     return undefined
 }
 
@@ -894,7 +852,7 @@ function js_mcall(recv, name, args) {
         if (name == "substring") {
             var b = args.length > 0 ? csNum(args[0]) : 0
             var e = args.length > 1 ? csNum(args[1]) : recv.length
-            return csSubstring(recv, b, e)
+            return rtSubstring(recv, b, e)
         }
         if (name == "indexOf") { return recv.indexOf(cpToString(args[0])) }
         if (name == "contains") { return recv.indexOf(cpToString(args[0])) >= 0 }
@@ -1005,15 +963,6 @@ function csIsFn(v) {
 // csPrepend is SHARED as rtPrepend - lib/runtime.metajs.
 
 // String.Substring with the Go twin's substringRange clamping.
-function csSubstring(s, b, e) {
-    var begin = b
-    var end = e
-    if (begin < 0) { begin = 0 }
-    if (end > s.length) { end = s.length }
-    if (end < begin) { end = begin }
-    return s.substring(begin, end)
-}
-
 // js_supercall is SHARED - lib/runtime.metajs (four languages, one knob: rtkCall).
 
 // `a[lo..hi]`, C#'s range indexer, on a string or an array: the elements are
@@ -1079,8 +1028,9 @@ function js_csshift(op, l, r) { return csShift(op, l, r) }
 
 function js_cscmp(op, l, r) {
     if (csIsIntegral(l) && csIsIntegral(r) && !floIs(l) && !floIs(r)) { return csCmp(op, l, r) }
-    var c = csCompare(l, r)
-    // csCompare answers the SENTINEL 2 for a NaN operand (see its note), and
+    var c = rtCompare(l, r)
+    // rtCompare (languages/lib/runtime.metajs) answers the SENTINEL 2 for a NaN
+    // operand - it is the fourth copy of csCompare's body, merged - and
     // that sentinel means "every relation is false", which is exactly C#'s rule:
     // ECMA-334 12.12.1 says that for the floating point relational operators, if
     // either operand is NaN the result is false for all of them except !=. Read

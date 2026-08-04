@@ -118,6 +118,8 @@ import "./regex.js"
 // the externs every language implements identically, parameterised by the rtk*
 // hooks below.
 import "./runtime.metajs"
+import "./runtime-decimal.metajs"
+import "./runtime-bignum.metajs"
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return rbJStr(v) }
@@ -476,101 +478,26 @@ function rbNeg(v) {
 // after table and the ground truth (ruby 2.6.10p210 - Float#to_s is unchanged in
 // 3.x and needs no Ruby-3 syntax to probe) are at rubyFloStr in abnf/jsrt.go.
 
-// rbSplit10 turns a > 0 into {d: the significant digits with no point and no leading
-// or trailing zero, e: the SCIENTIFIC exponent} - i.e. the value is 0.d1d2... *
-// 10^(e+1), the same pair strconv.FormatFloat(a, 'e', -1, 64) hands the Go twin. The
-// input is the engine's own shortest rendering, which is either a plain decimal
-// ("1234.5", "0.00012") or an exponent form ("1e+21", "1.5e-7").
-function rbSplit10(a) {
-    var s = "" + a
-    var mant = s
-    var e10 = 0
-    var ei = s.indexOf("e")
-    if (ei >= 0) {
-        mant = s.substring(0, ei)
-        var es = s.substring(ei + 1, s.length)
-        var eneg = false
-        if (es.charAt(0) == "+") { es = es.substring(1, es.length) }
-        else if (es.charAt(0) == "-") {
-            eneg = true
-            es = es.substring(1, es.length)
-        }
-        e10 = parseInt(es)
-        if (eneg) { e10 = 0 - e10 }
-    }
-    var pt = mant.length
-    var di = mant.indexOf(".")
-    var digits = mant
-    if (di >= 0) {
-        pt = di
-        digits = mant.substring(0, di) + mant.substring(di + 1, mant.length)
-    }
-    var lead = 0
-    while (lead < digits.length && digits.charAt(lead) == "0") { lead = lead + 1 }
-    digits = digits.substring(lead, digits.length)
-    pt = pt - lead
-    var end = digits.length
-    while (end > 1 && digits.charAt(end - 1) == "0") { end = end - 1 }
-    digits = digits.substring(0, end)
-    if (digits.length == 0) { return {d: "0", e: 0} }
-    return {d: digits, e: e10 + pt - 1}
+// rtSplit10 (languages/lib/runtime.metajs) turns a > 0 into {d: significant
+// digits, e: the scientific exponent}; python, ruby and swift had three copies of
+// it, byte-identical bar swift's comments. rtSciText and rtFixText are the two
+// halves of the rendering, also shared. What is RUBY'S is the boundary between
+// them and the forced ".0" on a one-digit mantissa - `dot` - which is why
+// 1e+20.to_s is "1.0e+20" where Python and Swift print "1e+20".
+//
+// The low bound is the SAME predicate in all three, spelled two ways: ruby's
+// `decpt < -3` and python's `decpt <= -4` both mean e10 <= -5.
+function rtkFloDigits(a) {
+    var p = rtSplit10(a)
+    var decpt = p.e + 1
+    if (decpt < 0 - 3 || decpt > 15) { return rtSciText(p.d, p.e, true) }
+    return rtFixText(p.d, decpt)
 }
 
-function rbZeros(n) {
-    var out = ""
-    var i = 0
-    while (i < n) {
-        out = out + "0"
-        i = i + 1
-    }
-    return out
-}
+// rtFloStr is the shared body; the three strings are the knob. Float::NAN.to_s
+// is "NaN" and Float::INFINITY.to_s is "Infinity", where Python's are lowercase.
+function rbFloStr(x) { return rtFloStr(x, "NaN", "Infinity", "-Infinity") }
 
-// rbFloDigits renders a > 0. `decpt` is Ruby's own name for the decimal point
-// position, which is the scientific exponent plus one.
-function rbFloDigits(a) {
-    var p = rbSplit10(a)
-    var digits = p.d
-    var e10 = p.e
-    var decpt = e10 + 1
-    if (decpt < 0 - 3 || decpt > 15) {
-        var out = digits.substring(0, 1)
-        if (digits.length > 1) { out = out + "." + digits.substring(1, digits.length) }
-        else { out = out + ".0" }
-        var sign = "+"
-        var ex = e10
-        if (ex < 0) {
-            sign = "-"
-            ex = 0 - ex
-        }
-        if (ex < 10) { return out + "e" + sign + "0" + ex }
-        return out + "e" + sign + ex
-    }
-    if (decpt <= 0) { return "0." + rbZeros(0 - decpt) + digits }
-    if (decpt >= digits.length) { return digits + rbZeros(decpt - digits.length) + ".0" }
-    return digits.substring(0, decpt) + "." + digits.substring(decpt, digits.length)
-}
-
-function rbFloStr(x) {
-    if (x !== x) { return "NaN" }
-    // The infinities without naming the Infinity global, which the interpreter half
-    // spells 1 / 0 too (languages/metajs-interpreter.abnf): Inf - Inf is NaN.
-    if (x - x !== 0) {
-        if (x > 0) { return "Infinity" }
-        return "-Infinity"
-    }
-    // -0.0 keeps its sign, which the old body dropped: Math.abs of it is +0.0 and
-    // "" + -0.0 is "0" in every engine here.
-    if (x == 0) {
-        if (1 / x < 0) { return "-0.0" }
-        return "0.0"
-    }
-    if (x < 0) { return "-" + rbFloDigits(0 - x) }
-    return rbFloDigits(x)
-}
-
-// Ruby's #to_s. A Float keeps its point, a Symbol is its bare name, and an Array
-// or Hash renders like #inspect (which is what interpolating a collection gives).
 function rbStr(v) {
     if (rbIsNil(v)) { return "" }
     if (typeof v == "string") { return v }
@@ -633,12 +560,6 @@ function rbInspect(v) {
 // rubyFormat: the printf directives Ruby shares with C,
 // %[-][0][+][ ][width][.prec](d|i|f|s|x|X|o|b|e|%).
 
-function rbDigitAt(s, i) {
-    var c = s.charCodeAt(i)
-    if (c < 48 || c > 57) { return 0 - 1 }
-    return c - 48
-}
-
 // ----- EXACT decimal expansion of a double ---------------------------------
 //
 // strconv.FormatFloat prints the EXACT value of the double and rounds HALF TO
@@ -654,173 +575,12 @@ function rbDigitAt(s, i) {
 // base-10000 limbs; multiplying by 2 or by 5 keeps every intermediate under
 // 50000 + 10000, which a double holds exactly.
 
-function rbBigFromNum(n) {
-    var limbs = []
-    var x = n
-    while (x > 0) {
-        var q = Math.floor(x / 10000)
-        limbs.push(x - q * 10000)
-        x = q
-    }
-    if (limbs.length == 0) { limbs.push(0) }
-    return limbs
-}
-
-function rbBigMulSmall(limbs, k) {
-    var carry = 0
-    var i = 0
-    while (i < limbs.length) {
-        var v = limbs[i] * k + carry
-        carry = Math.floor(v / 10000)
-        limbs[i] = v - carry * 10000
-        i = i + 1
-    }
-    while (carry > 0) {
-        var c2 = Math.floor(carry / 10000)
-        limbs.push(carry - c2 * 10000)
-        carry = c2
-    }
-    return limbs
-}
-
-function rbBigStr(limbs) {
-    var out = "" + limbs[limbs.length - 1]
-    var i = limbs.length - 2
-    while (i >= 0) {
-        var s = "" + limbs[i]
-        while (s.length < 4) { s = "0" + s }
-        out = out + s
-        i = i - 1
-    }
-    return out
-}
-
 // The exact decimal of |x| as {i: <integer digits>, f: <fraction digits>}.
-function rbExactDec(a) {
-    if (a == 0) { return {i: "0", f: ""} }
-    var m = a
-    var e = 0
-    // Down to an integer mantissa. Every step is exact, and a subnormal needs at
-    // most 1074 of them.
-    while (m != Math.floor(m)) {
-        m = m * 2
-        e = e - 1
-    }
-    // And back under 2^53, which only an already-integral value can be above.
-    while (m > 9007199254740992) {
-        m = m / 2
-        e = e + 1
-    }
-    var limbs = rbBigFromNum(m)
-    if (e >= 0) {
-        var k = 0
-        while (k < e) {
-            rbBigMulSmall(limbs, 2)
-            k = k + 1
-        }
-        return {i: rbBigStr(limbs), f: ""}
-    }
-    var n = 0 - e
-    var j = 0
-    while (j < n) {
-        rbBigMulSmall(limbs, 5)
-        j = j + 1
-    }
-    var all = rbBigStr(limbs)
-    while (all.length <= n) { all = "0" + all }
-    return {i: all.substring(0, all.length - n), f: all.substring(all.length - n, all.length)}
-}
-
 // Round the digit string `digits` (an integer written out) to `keep` digits,
 // half to EVEN, and answer the kept digits - one longer when the rounding
 // carried all the way (999 -> 1000), which the caller detects by the length.
-function rbRoundHalfEven(digits, keep) {
-    if (keep >= digits.length) {
-        var out = digits
-        while (out.length < keep) { out = out + "0" }
-        return out
-    }
-    var head = digits.substring(0, keep)
-    var d = digits.charCodeAt(keep) - 48
-    var up = false
-    if (d > 5) { up = true }
-    if (d == 5) {
-        var rest = false
-        var i = keep + 1
-        while (i < digits.length) {
-            if (digits.charAt(i) != "0") {
-                rest = true
-                break
-            }
-            i = i + 1
-        }
-        if (rest) { up = true } else if (keep > 0) {
-            var last = head.charCodeAt(keep - 1) - 48
-            up = last - Math.floor(last / 2) * 2 == 1
-        }
-    }
-    if (!up) {
-        if (head == "") { return "0" }
-        return head
-    }
-    // Propagate the carry through the kept digits.
-    var codes = []
-    var k = 0
-    while (k < head.length) {
-        codes.push(head.charCodeAt(k) - 48)
-        k = k + 1
-    }
-    var at = codes.length - 1
-    var carry = 1
-    while (at >= 0 && carry == 1) {
-        var v = codes[at] + 1
-        if (v == 10) {
-            codes[at] = 0
-        } else {
-            codes[at] = v
-            carry = 0
-        }
-        at = at - 1
-    }
-    var res = ""
-    var q = 0
-    while (q < codes.length) {
-        res = res + ("" + codes[q])
-        q = q + 1
-    }
-    if (carry == 1) { res = "1" + res }
-    return res
-}
-
 // strconv.FormatFloat(v, 'f', prec, 64), exactly: the true decimal of the double,
 // cut to prec fraction digits with half-to-even rounding.
-function rbFixed(x, prec) {
-    if (x !== x) { return "NaN" }
-    if (x - x !== 0) {
-        if (x > 0) { return "+Inf" }
-        return "-Inf"
-    }
-    // The sign of a zero has to be READ rather than compared: -0.0 < 0 is false
-    // and Go prints "-0.000000". 1 / -0.0 is the only test that sees it.
-    var neg = x < 0
-    if (x == 0 && 1 / x < 0) { neg = true }
-    var a = neg ? -x : x
-    var dec = rbExactDec(a)
-    var ip = dec["i"]
-    var fp = dec["f"]
-    var joined = ip + fp
-    var kept = rbRoundHalfEven(joined, ip.length + prec)
-    // A carry out of the leading digit lengthens the integer part by one.
-    var ilen = ip.length
-    if (kept.length > ip.length + prec) { ilen = ilen + 1 }
-    var ints = kept.substring(0, ilen)
-    var fracs = kept.substring(ilen, kept.length)
-    if (ints == "") { ints = "0" }
-    var body = ints
-    if (prec > 0) { body = ints + "." + fracs }
-    return (neg ? "-" : "") + body
-}
-
 // strconv.FormatFloat(v, 'e', prec, 64): d.dddde+XX, at least two exponent digits.
 function rbSci(x, prec) {
     if (x !== x) { return "NaN" }
@@ -843,7 +603,7 @@ function rbSci(x, prec) {
         }
         return (neg ? "-" : "") + z + "e+00"
     }
-    var dec = rbExactDec(a)
+    var dec = rtExactDec(a)
     var ip = dec["i"]
     var fp = dec["f"]
     var all = ip + fp
@@ -852,7 +612,7 @@ function rbSci(x, prec) {
     while (lead < all.length && all.charAt(lead) == "0") { lead = lead + 1 }
     var e = ip.length - 1 - lead
     var sig = all.substring(lead, all.length)
-    var kept = rbRoundHalfEven(sig, prec + 1)
+    var kept = rtRoundHalfEven(sig, prec + 1)
     if (kept.length > prec + 1) {
         // 9.99 -> 10.0: one digit fell out of the mantissa.
         e = e + 1
@@ -865,44 +625,9 @@ function rbSci(x, prec) {
     return (neg ? "-" : "") + m + "e" + (e < 0 ? "-" : "+") + es
 }
 
-// ----- strconv.FormatInt(int64(x), base) ------------------------------------
-//
-// Two things the naive loop got wrong, both measured: the digit alphabet is 36
-// long and not 16 (to_s(36) of 100 is "2s"), and Go converts through int64,
-// which SATURATES on arm64 - `int64(1e100)` is 0x7fffffffffffffff and its hex is
-// "7fffffffffffffff", not the 84 digits a float loop produces. The digits are
-// taken with the floor's sized-integer tag (tag 13), which is exact int64
-// arithmetic, on the UNSIGNED reading of the magnitude - the one shape whose
-// negation is exact for int64's minimum too, which is the trick java-rt.metajs
-// records.
-var RB_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
-
-function rbBaseStr(n, base) {
-    var v = Math.trunc(n)
-    if (v !== v) { v = 0 }
-    if (v == 0) { return "0" }
-    var neg = false
-    var mag = sintRaw(0, 0, 64, true)
-    if (v >= 9223372036854775808) {
-        mag = sintRaw(2147483647, 4294967295, 64, true)   // int64 max
-    } else if (v <= 0 - 9223372036854775808) {
-        neg = true
-        mag = sintRaw(2147483648, 0, 64, true)            // |int64 min|
-    } else {
-        neg = v < 0
-        var a = neg ? -v : v
-        mag = sintRaw(sintHi(a), sintLo(a), 64, true)
-    }
-    var b = sintRaw(0, base, 64, true)
-    var zero = sintRaw(0, 0, 64, true)
-    var out = ""
-    while (sintCmp(mag, zero) != 0) {
-        var d = sintNum(sintOp(4, mag, b))
-        out = RB_DIGITS.charAt(d) + out
-        mag = sintOp(3, mag, b)
-    }
-    return (neg ? "-" : "") + out
-}
+// strconv.FormatInt(int64(x), base) is rtBaseStr, in
+// languages/lib/runtime.metajs. Ruby's Integer#to_s(base) is what reaches its
+// int64-saturating branches: 1e100.to_i.to_s(16) is "7fffffffffffffff".
 
 // strings.ToUpper / strings.ToLower - the full Unicode SIMPLE mapping. The C
 // floor's own toUpperCase / toLowerCase are exactly that (runtime.c generated its
@@ -961,7 +686,7 @@ function rbFormat(spec, arg) {
         }
         var width = 0
         while (i < spec.length) {
-            var wd = rbDigitAt(spec, i)
+            var wd = rtDigitAt(spec, i)
             if (wd < 0) { break }
             width = width * 10 + wd
             i = i + 1
@@ -971,7 +696,7 @@ function rbFormat(spec, arg) {
             i = i + 1
             prec = 0
             while (i < spec.length) {
-                var pd = rbDigitAt(spec, i)
+                var pd = rtDigitAt(spec, i)
                 if (pd < 0) { break }
                 prec = prec * 10 + pd
                 i = i + 1
@@ -988,7 +713,7 @@ function rbFormat(spec, arg) {
             body = "" + Math.trunc(rbToF(nx))
         } else if (conv == "f") {
             ai = ai + 1
-            body = rbFixed(rbToF(nx), prec < 0 ? 6 : prec)
+            body = rtFixed(rbToF(nx), prec < 0 ? 6 : prec)
         } else if (conv == "e") {
             ai = ai + 1
             body = rbSci(rbToF(nx), prec < 0 ? 6 : prec)
@@ -999,16 +724,16 @@ function rbFormat(spec, arg) {
             if (prec >= 0 && prec < byteLen(body)) { body = rbByteCut(body, prec) }
         } else if (conv == "x") {
             ai = ai + 1
-            body = rbBaseStr(rbToF(nx), 16)
+            body = rtBaseStr(rbToF(nx), 16)
         } else if (conv == "X") {
             ai = ai + 1
-            body = rbUpper(rbBaseStr(rbToF(nx), 16))
+            body = rbUpper(rtBaseStr(rbToF(nx), 16))
         } else if (conv == "o") {
             ai = ai + 1
-            body = rbBaseStr(rbToF(nx), 8)
+            body = rtBaseStr(rbToF(nx), 8)
         } else if (conv == "b") {
             ai = ai + 1
-            body = rbBaseStr(rbToF(nx), 2)
+            body = rtBaseStr(rbToF(nx), 2)
         } else {
             body = conv
         }
@@ -1843,7 +1568,7 @@ function rbNumMethod(t, name, args) {
     var x = rbToF(t)
     var isInt = typeof t == "number"
     if (name == "to_s" || name == "inspect") {
-        if (isInt && args.length > 0) { return rbBaseStr(x, Math.trunc(rbToF(args[0]))) }
+        if (isInt && args.length > 0) { return rtBaseStr(x, Math.trunc(rbToF(args[0]))) }
         return rbStr(t)
     }
     if (name == "to_i" || name == "to_int" || name == "truncate") { return Math.trunc(x) }

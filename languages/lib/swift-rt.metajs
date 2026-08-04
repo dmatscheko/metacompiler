@@ -116,6 +116,7 @@
 // the externs every language implements identically, parameterised by the rtk*
 // hooks below. Same mechanism ruby uses for `import "./regex.js"`.
 import "./runtime.metajs"
+import "./runtime-decimal.metajs"
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return swJavaStr(v) }
@@ -127,7 +128,7 @@ function rtkIsArr(v) { return swIsArr(v) }
 // it IS emitted the answer is the plain one and not a missing name.
 function rtkCall(f, self, argv) { return f.apply(undefined, argv) }
 // js_pyset's two knobs.
-function rtkIsDict(v) { return swIsDict(v) }
+function rtkIsDict(v) { return rtIsDictObj(v) }
 function rtkDictFind(keys, k) { return rtDictFind(keys, k) }
 
 // ===================================================== the two number tags ==
@@ -201,114 +202,32 @@ function swRound(x) {
 // 1e15 prints 1000000000000000.0 and 1e16 prints 1e+16. The infinities are
 // "inf"/"-inf" and the NaN is "nan". This is the twin of swFloStr in
 // abnf/jsrtswift.go and of the same name in swift-interpreter.abnf.
-function swFloStr(d) {
-    if (d !== d) { return "nan" }
-    if (d === Infinity) { return "inf" }
-    if (0 - d === Infinity) { return "-inf" }
-    var neg = swSignBit(d)
-    var a = d
-    // UNARY minus, not `0 - d`: the floor's d_neg flips the SIGN BIT, where
-    // 0.0 - 0.0 is +0.0. This is the "a negative floating point literal does not
-    // survive" trap of docs/runtime-next-plan.md, met from the other side.
-    if (neg) { a = -d }
-    var s = swFloDigits(a)
-    if (neg) { return "-" + s }
-    return s
-}
+// rtFloStr (languages/lib/runtime.metajs) is the shared body; the three strings
+// are the knob, and Swift's are Python's. swSignBit + unary minus were the old
+// spelling of the sign test and reach the same two answers as the shared body's
+// zero arm plus `x < 0`, because the zero arm takes every value whose sign a
+// comparison cannot see. swSignBit went with it: swFloStr was its only caller.
+function swFloStr(d) { return rtFloStr(d, "nan", "inf", "-inf") }
 
-// The sign of a zero, which a comparison cannot see: -0.0 prints "-0.0" in Swift.
-// 1/x is -Infinity for -0 and +Infinity for +0.
-function swSignBit(d) {
-    if (d < 0) { return true }
-    if (d === 0) { return 1 / d < 0 }
-    return false
-}
-
-// swFloDigits renders a >= 0. The Go twin formats from strconv's 'e' form, which
-// hands it the shortest round-tripping digit run and the scientific exponent
-// directly. MetaJS has no such formatter, so the same pair is recovered from the
-// engine's own shortest-round-trip rendering ("" + a) - which is jsNumString in
-// the Go half and d_num_str in the floor, and both are the SAME shortest form
-// strconv produces. swSplit10 below is the recovery.
-function swFloDigits(a) {
-    if (a === 0) { return "0.0" }
-    var p = swSplit10(a)
-    var digits = p.d
-    var e10 = p.e
-    // The upper boundary is on the VALUE, not the exponent: SwiftDtoa goes
-    // scientific above 2^53, and the two rules part between 2^53 and 1e16.
-    // 9007199254740992.0 is the last plain value and 9007199254740994.0 the first
-    // scientific one, read off swift 6.1.2. See abnf/jsrtswift.go.
-    if (e10 < 0 - 4 || a > 9007199254740992) {
-        var out = digits.substring(0, 1)
-        if (digits.length > 1) { out = out + "." + digits.substring(1, digits.length) }
-        var sign = "+"
-        var ex = e10
-        if (ex < 0) {
-            sign = "-"
-            ex = 0 - ex
-        }
-        if (ex < 10) { return out + "e" + sign + "0" + ex }
-        return out + "e" + sign + ex
-    }
-    var pt = e10 + 1                       // digits before the decimal point
-    if (pt <= 0) { return "0." + swZeros(0 - pt) + digits }
-    if (pt >= digits.length) { return digits + swZeros(pt - digits.length) + ".0" }
-    return digits.substring(0, pt) + "." + digits.substring(pt, digits.length)
-}
-
-function swZeros(n) {
-    var out = ""
-    var i = 0
-    while (i < n) {
-        out = out + "0"
-        i = i + 1
-    }
-    return out
-}
-
-// swSplit10 turns a > 0 into {d: the significant digits with no point and no
-// leading or trailing zero, e: the SCIENTIFIC exponent} - i.e. the value is
-// 0.d1d2... * 10^(e+1), the same pair strconv.FormatFloat(a, 'e', -1, 64) hands
-// the Go twin. The input is the engine's own shortest rendering, which is either
-// a plain decimal ("1234.5", "0.00012") or an exponent form ("1e+21", "1.5e-7").
-function swSplit10(a) {
-    var s = "" + a
-    var mant = s
-    var e10 = 0
-    var ei = s.indexOf("e")
-    if (ei >= 0) {
-        mant = s.substring(0, ei)
-        var es = s.substring(ei + 1, s.length)
-        var eneg = false
-        if (es.charAt(0) == "+") { es = es.substring(1, es.length) }
-        else if (es.charAt(0) == "-") {
-            eneg = true
-            es = es.substring(1, es.length)
-        }
-        e10 = parseInt(es)
-        if (eneg) { e10 = 0 - e10 }
-    }
-    // Split the mantissa at its point; `pt` is how many digits precede it.
-    var pt = mant.length
-    var di = mant.indexOf(".")
-    var digits = mant
-    if (di >= 0) {
-        pt = di
-        digits = mant.substring(0, di) + mant.substring(di + 1, mant.length)
-    }
-    // A leading zero run does not count as significant, and each one shifts the
-    // point right by one place.
-    var lead = 0
-    while (lead < digits.length && digits.charAt(lead) == "0") { lead = lead + 1 }
-    digits = digits.substring(lead, digits.length)
-    pt = pt - lead
-    // A trailing zero run is not significant either, and does not move the point.
-    var end = digits.length
-    while (end > 1 && digits.charAt(end - 1) == "0") { end = end - 1 }
-    digits = digits.substring(0, end)
-    if (digits.length == 0) { return {d: "0", e: 0} }
-    return {d: digits, e: e10 + pt - 1}
+// rtkFloDigits renders a > 0, and is the hook rtFloStr calls. The Go twin
+// formats from strconv's 'e' form, which hands it the shortest round-tripping
+// digit run and the scientific exponent directly. MetaJS has no such formatter,
+// so the same pair is recovered from the engine's own shortest-round-trip
+// rendering ("" + a) - which is jsNumString in the Go half and d_num_str in the
+// floor, and both are the SAME shortest form strconv produces. That recovery is
+// rtSplit10 in languages/lib/runtime.metajs, and python and ruby had two more
+// byte-identical copies of it; rtSciText and rtFixText are the two renderings.
+//
+// SWIFT'S OWN PART is the boundary, and it is the one of the three that is on the
+// VALUE rather than the exponent: SwiftDtoa goes scientific above 2^53, and the
+// two rules part between 2^53 and 1e16. 9007199254740992.0 is the last plain
+// value and 9007199254740994.0 the first scientific one, read off swift 6.1.2.
+// See abnf/jsrtswift.go. Swift forces no ".0" onto a one-digit mantissa
+// (1e+20, not ruby's 1.0e+20), which is rtSciText's `dot` argument.
+function rtkFloDigits(a) {
+    var p = rtSplit10(a)
+    if (p.e < 0 - 4 || a > 9007199254740992) { return rtSciText(p.d, p.e, false) }
+    return rtFixText(p.d, p.e + 1)
 }
 
 // swFloText reports whether the WHOLE string is a decimal float, for the failable
@@ -402,13 +321,6 @@ function swIsArr(v) {
     if (!swIsObj(v)) { return false }
     if (v["__dict"] === true) { return false }
     return typeof v["length"] == "number"
-}
-
-function swIsDict(v) {
-    if (!swIsObj(v)) { return false }
-    if (v["__dict"] !== true) { return false }
-    if (!swIsArr(v["keys"])) { return false }
-    return swIsArr(v["vals"])
 }
 
 // swNumProp is the Go twin's swNumProp: the value of a numeric internal slot, or
@@ -512,7 +424,7 @@ function swObjDesc(o, depth) {
     if (dd !== undefined && typeof dd != "function") { return swDesc(dd) }
 
     // Dictionary: ["k": v, ...], and the empty one is [:].
-    if (swIsDict(o)) {
+    if (rtIsDictObj(o)) {
         var keys = o["keys"]
         var vals = o["vals"]
         if (keys.length == 0) { return "[:]" }
@@ -649,8 +561,8 @@ function swEqual(l, r, depth) {
     }
     if (swIsObj(l) && swIsObj(r)) {
         if (l === r) { return true }
-        if (swIsDict(l)) {
-            if (!swIsDict(r)) { return false }
+        if (rtIsDictObj(l)) {
+            if (!rtIsDictObj(r)) { return false }
             var lk = l["keys"]
             var lv = l["vals"]
             var rk = r["keys"]
@@ -753,7 +665,7 @@ function js_kindex(s, i) {
 // Sequence indexing (negative wraps) and dict lookup. Swift's emitter routes
 // every subscript through this (core.indexExt).
 function js_pyget(c, k) {
-    if (swIsDict(c)) {
+    if (rtIsDictObj(c)) {
         var i = swDictFind(c["keys"], k)
         if (i < 0) { fail("KeyError: " + swDesc(k)) }
         return c["vals"][i]
@@ -783,7 +695,7 @@ function js_pyget(c, k) {
 // arm are the ones the emitter measures in code UNITS on purpose.
 function js_pylen(v) {
     if (typeof v == "string") { return v.length }
-    if (swIsDict(v)) { return v["keys"].length }
+    if (rtIsDictObj(v)) { return v["keys"].length }
     if (swIsObj(v) && v["__set"] !== undefined) {
         var el = v["elems"]
         if (swIsArr(el)) { return el.length }
@@ -849,7 +761,7 @@ function js_mcall(recv, name, args) {
         fail("unknown String method: " + name)
     }
     if (swIsArr(recv)) { return swListMethod(recv, name, args) }
-    if (swIsDict(recv)) {
+    if (rtIsDictObj(recv)) {
         if (name === "keys") { return swCopyArr(recv["keys"]) }
         if (name === "values") { return swCopyArr(recv["vals"]) }
         if (name === "get") {
@@ -1135,28 +1047,17 @@ function swPick(l, r, wantGt) {
         if (ic < 0) { return l }
         return r
     }
-    var jc = swLoose(l, r)
+    // rtCompare's NaN sentinel cannot arise here: the two arms above have taken
+    // every float box and every sized integer, so this arm sees strings, and a
+    // string pair never coerces. Folded to 0 so the merge changes no answer.
+    var jc = rtCompare(l, r)
+    if (jc == 2) { jc = 0 }
     if (wantGt) {
         if (jc > 0) { return l }
         return r
     }
     if (jc < 0) { return l }
     return r
-}
-
-// jsCompare, the shared relational comparison, for the operands neither number
-// tag covers: two strings compare lexicographically, anything else numerically.
-function swLoose(l, r) {
-    if (typeof l == "string" && typeof r == "string") {
-        if (l < r) { return 0 - 1 }
-        if (l > r) { return 1 }
-        return 0
-    }
-    var x = swNum(l)
-    var y = swNum(r)
-    if (x < y) { return 0 - 1 }
-    if (x > y) { return 1 }
-    return 0
 }
 
 function js_swmax(l, r) { return swPick(l, r, true) }
@@ -1239,7 +1140,14 @@ function swRel(l, r) {
     if (sintIs(l) || sintIs(r)) {
         if (swIntegral(l) && swIntegral(r)) { return sintCmp(l, r) }
     }
-    return swLoose(l, r)
+    // rtCompare answers the SENTINEL 2 for a NaN operand; swRel's own marker for
+    // "every ordering is false" is -2, which js_swlt/le/gt/ge already test. The
+    // old swLoose - the fourth copy of rtCompare's body - dropped the sentinel
+    // and answered 0, i.e. EQUAL, so a RAW (unboxed) NaN pair reaching this arm
+    // made `<=` and `>=` TRUE. Swift makes all four false, like C# and Java.
+    var c = rtCompare(l, r)
+    if (c == 2) { return 0 - 2 }
+    return c
 }
 
 function js_swlt(l, r) {

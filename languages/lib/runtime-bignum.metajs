@@ -1,0 +1,253 @@
+// runtime-bignum.metajs -- the EXACT decimal expansion of a double, and
+// strconv.FormatInt, shared by python-rt.metajs and ruby-rt.metajs alone.
+//
+// Split out of runtime-decimal.metajs for the reason that file's head records
+// and MEASURES: a layer-2 body is permanently live and the conservative
+// collector walks it on every collection whether the program can reach it or
+// not. swift wants the float RENDERING above (rtSplit10 / rtSciText / rtFixText
+// / rtFloStr) and never calls this bignum, and carrying it cost swift
+// +17-24% wall on a loop that never formats a float
+// (400,000 x `s = s + i % 7`, native -exe: 3.16-3.20 s -> 3.70-3.94 s,
+// live 103,536 -> 105,072, heap 9.44 -> 10.49 MB, collections 3,841 -> 4,097).
+// Two languages want it, so two languages import it.
+//
+// python-rt.metajs said at its own copy of this code: "Copied verbatim from
+// languages/lib/ruby-rt.metajs (rbDigitAt / rbBigFromNum / rbBigMulSmall /
+// rbBigStr / rbExactDec / rbRoundHalfEven / rbFixed / rbSci / rbBaseStr /
+// rbByteCut), renamed to the pyB prefix. The comments are theirs." A shape scan
+// confirmed nine of the ten byte-identical and the tenth different only in the
+// NAME of its digit alphabet (PYB_DIGITS vs RB_DIGITS, same 36 characters), so
+// this merge took ZERO knobs - which is the finding: two rounds of formatter
+// work in two files had not drifted, and nothing was stopping them.
+
+function rtDigitAt(s, i) {
+    var c = s.charCodeAt(i)
+    if (c < 48 || c > 57) { return 0 - 1 }
+    return c - 48
+}
+
+// ----- EXACT decimal expansion of a double ---------------------------------
+//
+// strconv.FormatFloat prints the EXACT value of the double and rounds HALF TO
+// EVEN, which the naive `Math.floor(a * 10^prec + 0.5)` gets wrong twice over:
+// it rounds half AWAY from zero (Go's %.0f of 2.5 is "2", not "3") and it loses
+// every digit past 2^53 ("%f" of 1e100 has to print all 101 of them). Both were
+// measured on the differential probe.
+//
+// A finite double is m * 2^e with m an integer below 2^53, so its exact decimal
+// is a bignum: for e >= 0 it is m doubled e times, and for e < 0 it is m
+// multiplied by 5 exactly -e times with the point placed -e digits from the
+// right (because 2^-e == 5^-e / 10^-e). The bignum is a little-endian array of
+// base-10000 limbs; multiplying by 2 or by 5 keeps every intermediate under
+// 50000 + 10000, which a double holds exactly.
+
+function rtBigFromNum(n) {
+    var limbs = []
+    var x = n
+    while (x > 0) {
+        var q = Math.floor(x / 10000)
+        limbs.push(x - q * 10000)
+        x = q
+    }
+    if (limbs.length == 0) { limbs.push(0) }
+    return limbs
+}
+
+function rtBigMulSmall(limbs, k) {
+    var carry = 0
+    var i = 0
+    while (i < limbs.length) {
+        var v = limbs[i] * k + carry
+        carry = Math.floor(v / 10000)
+        limbs[i] = v - carry * 10000
+        i = i + 1
+    }
+    while (carry > 0) {
+        var c2 = Math.floor(carry / 10000)
+        limbs.push(carry - c2 * 10000)
+        carry = c2
+    }
+    return limbs
+}
+
+function rtBigStr(limbs) {
+    var out = "" + limbs[limbs.length - 1]
+    var i = limbs.length - 2
+    while (i >= 0) {
+        var s = "" + limbs[i]
+        while (s.length < 4) { s = "0" + s }
+        out = out + s
+        i = i - 1
+    }
+    return out
+}
+
+// The exact decimal of |x| as {i: <integer digits>, f: <fraction digits>}.
+function rtExactDec(a) {
+    if (a == 0) { return {i: "0", f: ""} }
+    var m = a
+    var e = 0
+    // Down to an integer mantissa. Every step is exact, and a subnormal needs at
+    // most 1074 of them.
+    while (m != Math.floor(m)) {
+        m = m * 2
+        e = e - 1
+    }
+    // And back under 2^53, which only an already-integral value can be above.
+    while (m > 9007199254740992) {
+        m = m / 2
+        e = e + 1
+    }
+    var limbs = rtBigFromNum(m)
+    if (e >= 0) {
+        var k = 0
+        while (k < e) {
+            rtBigMulSmall(limbs, 2)
+            k = k + 1
+        }
+        return {i: rtBigStr(limbs), f: ""}
+    }
+    var n = 0 - e
+    var j = 0
+    while (j < n) {
+        rtBigMulSmall(limbs, 5)
+        j = j + 1
+    }
+    var all = rtBigStr(limbs)
+    while (all.length <= n) { all = "0" + all }
+    return {i: all.substring(0, all.length - n), f: all.substring(all.length - n, all.length)}
+}
+
+// Round the digit string `digits` (an integer written out) to `keep` digits,
+// half to EVEN, and answer the kept digits - one longer when the rounding
+// carried all the way (999 -> 1000), which the caller detects by the length.
+function rtRoundHalfEven(digits, keep) {
+    if (keep >= digits.length) {
+        var out = digits
+        while (out.length < keep) { out = out + "0" }
+        return out
+    }
+    var head = digits.substring(0, keep)
+    var d = digits.charCodeAt(keep) - 48
+    var up = false
+    if (d > 5) { up = true }
+    if (d == 5) {
+        var rest = false
+        var i = keep + 1
+        while (i < digits.length) {
+            if (digits.charAt(i) != "0") {
+                rest = true
+                break
+            }
+            i = i + 1
+        }
+        if (rest) { up = true } else if (keep > 0) {
+            var last = head.charCodeAt(keep - 1) - 48
+            up = last - Math.floor(last / 2) * 2 == 1
+        }
+    }
+    if (!up) {
+        if (head == "") { return "0" }
+        return head
+    }
+    // Propagate the carry through the kept digits.
+    var codes = []
+    var k = 0
+    while (k < head.length) {
+        codes.push(head.charCodeAt(k) - 48)
+        k = k + 1
+    }
+    var at = codes.length - 1
+    var carry = 1
+    while (at >= 0 && carry == 1) {
+        var v = codes[at] + 1
+        if (v == 10) {
+            codes[at] = 0
+        } else {
+            codes[at] = v
+            carry = 0
+        }
+        at = at - 1
+    }
+    var res = ""
+    var q = 0
+    while (q < codes.length) {
+        res = res + ("" + codes[q])
+        q = q + 1
+    }
+    if (carry == 1) { res = "1" + res }
+    return res
+}
+
+// strconv.FormatFloat(v, 'f', prec, 64), exactly: the true decimal of the double,
+// cut to prec fraction digits with half-to-even rounding.
+function rtFixed(x, prec) {
+    if (x !== x) { return "NaN" }
+    if (x - x !== 0) {
+        if (x > 0) { return "+Inf" }
+        return "-Inf"
+    }
+    // The sign of a zero has to be READ rather than compared: -0.0 < 0 is false
+    // and Go prints "-0.000000". 1 / -0.0 is the only test that sees it.
+    var neg = x < 0
+    if (x == 0 && 1 / x < 0) { neg = true }
+    var a = neg ? -x : x
+    var dec = rtExactDec(a)
+    var ip = dec["i"]
+    var fp = dec["f"]
+    var joined = ip + fp
+    var kept = rtRoundHalfEven(joined, ip.length + prec)
+    // A carry out of the leading digit lengthens the integer part by one.
+    var ilen = ip.length
+    if (kept.length > ip.length + prec) { ilen = ilen + 1 }
+    var ints = kept.substring(0, ilen)
+    var fracs = kept.substring(ilen, kept.length)
+    if (ints == "") { ints = "0" }
+    var body = ints
+    if (prec > 0) { body = ints + "." + fracs }
+    return (neg ? "-" : "") + body
+}
+
+// ----- strconv.FormatInt(int64(x), base) ------------------------------------
+//
+// Two things the naive loop got wrong, both measured: the digit alphabet is 36
+// long and not 16 (to_s(36) of 100 is "2s"), and Go converts through int64,
+// which SATURATES on arm64 - `int64(1e100)` is 0x7fffffffffffffff and its hex is
+// "7fffffffffffffff", not the 84 digits a float loop produces. The digits are
+// taken with the floor's sized-integer tag (tag 13), which is exact int64
+// arithmetic, on the UNSIGNED reading of the magnitude - the one shape whose
+// negation is exact for int64's minimum too, which is the trick java-rt.metajs
+// records.
+//
+// Python's own callers always hand this an int32 (pyFormatBody converts with
+// rt.toInt32 first), so the saturating branches are unreachable from
+// js_pyformat; they are kept because Ruby's Integer#to_s(base) does reach them.
+var RT_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+function rtBaseStr(n, base) {
+    var v = Math.trunc(n)
+    if (v !== v) { v = 0 }
+    if (v == 0) { return "0" }
+    var neg = false
+    var mag = sintRaw(0, 0, 64, true)
+    if (v >= 9223372036854775808) {
+        mag = sintRaw(2147483647, 4294967295, 64, true)   // int64 max
+    } else if (v <= 0 - 9223372036854775808) {
+        neg = true
+        mag = sintRaw(2147483648, 0, 64, true)            // |int64 min|
+    } else {
+        neg = v < 0
+        var a = neg ? -v : v
+        mag = sintRaw(sintHi(a), sintLo(a), 64, true)
+    }
+    var b = sintRaw(0, base, 64, true)
+    var zero = sintRaw(0, 0, 64, true)
+    var out = ""
+    while (sintCmp(mag, zero) != 0) {
+        var d = sintNum(sintOp(4, mag, b))
+        out = RT_DIGITS.charAt(d) + out
+        mag = sintOp(3, mag, b)
+    }
+    return (neg ? "-" : "") + out
+}
+

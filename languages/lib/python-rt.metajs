@@ -107,6 +107,8 @@ import "./regex.js"
 // the externs every language implements identically, parameterised by the rtk*
 // hooks below. Same mechanism ruby uses for `import "./regex.js"`.
 import "./runtime.metajs"
+import "./runtime-decimal.metajs"
+import "./runtime-bignum.metajs"
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return pyAJavaStr(v) }
@@ -2130,7 +2132,7 @@ function js_bigint(text) { return pyABigFromStr(pyToStr(text)) }
 //                rt.pyFormatBody (jsrt.go:9737) and pyIsAlign (jsrt.go:9680)
 //   js_pyfnname  (jsrt.go:7749) plus its reader pyBFuncName
 //
-// and it owns the float/int RENDERING primitives (pyBFixed / pyBBaseStr and the
+// and it owns the float/int RENDERING primitives (rtFixed / rtBaseStr and the
 // exact-decimal bignum under them), copied from languages/lib/ruby-rt.metajs
 // lines ~508-800 where they were written language-neutrally. Ruby's pyBSci
 // ('e' verb), pyBByteCut and pyBLower came across with them and were deleted
@@ -2211,105 +2213,38 @@ function js_pyrepr(v) { return pyRepr(v) }
 
 // ===================================================== float rendering ======
 //
-// Copied verbatim from languages/lib/ruby-rt.metajs (rbDigitAt / rbBigFromNum /
+// The exact-decimal bignum this section carried is now SHARED, in
+// languages/lib/runtime.metajs under "the decimal bignum". This file's copy was
+// a verbatim transfer out of ruby-rt.metajs and the old comment here said so:
+// "Copied verbatim from languages/lib/ruby-rt.metajs (rbDigitAt / rbBigFromNum /
 // rbBigMulSmall / rbBigStr / rbExactDec / rbRoundHalfEven / rbFixed / rbSci /
-// rbBaseStr / rbByteCut), renamed to the pyB prefix. The comments are theirs.
+// rbBaseStr / rbByteCut), renamed to the pyB prefix. The comments are theirs."
+// A shape scan confirmed nine of the ten were byte-identical and the tenth
+// differed only in the NAME of its digit alphabet, so the merge took no knobs.
+//
+// What stays here is the one thing Python does its own way: where repr(float)
+// switches to exponential form.
 
 // ----- repr(float), which in Python 3 is also str(float) --------------------
 //
 // abnf/jsrt.go's pyFloStr / pyFloDigits and python-interpreter.abnf's floStr /
 // floDigits, byte for byte. Take the SHORTEST round-tripping digit string and
-// the decimal point position `decpt`, then use exponential form iff
+// the decimal point position `decpt` (rtSplit10), then use exponential form iff
 // `decpt <= -4 || decpt > 16`. In exponential form there is NO forced ".0"
-// (2e16 is "2e+16", unlike ruby's rbFloStr, whose splitter this is), the
-// exponent is signed and zero padded to two digits ("1e-05"), and ONE
-// significant digit is allowed ("5e-324"). Non-finite is lowercase, and
-// repr(-float('nan')) is "nan". Probed against CPython 3.14.6.
+// (2e16 is "2e+16", unlike ruby, whose splitter this is - that is rtSciText's
+// `dot` argument), the exponent is signed and zero padded to two digits
+// ("1e-05"), and ONE significant digit is allowed ("5e-324"). Non-finite is
+// lowercase, and repr(-float('nan')) is "nan". Probed against CPython 3.14.6.
 //
-// pyBSplit10 turns a > 0 into {d: the significant digits with no point and no
-// leading or trailing zero, e: the SCIENTIFIC exponent}, out of the engine's own
-// shortest rendering ("1234.5", "0.00012", "1e+21", "1.5e-7").
-function pyBSplit10(a) {
-    var s = "" + a
-    var mant = s
-    var e10 = 0
-    var ei = s.indexOf("e")
-    if (ei >= 0) {
-        mant = s.substring(0, ei)
-        var es = s.substring(ei + 1, s.length)
-        var eneg = false
-        if (es.charAt(0) == "+") { es = es.substring(1, es.length) }
-        else if (es.charAt(0) == "-") {
-            eneg = true
-            es = es.substring(1, es.length)
-        }
-        e10 = parseInt(es)
-        if (eneg) { e10 = 0 - e10 }
-    }
-    var pt = mant.length
-    var di = mant.indexOf(".")
-    var digits = mant
-    if (di >= 0) {
-        pt = di
-        digits = mant.substring(0, di) + mant.substring(di + 1, mant.length)
-    }
-    var lead = 0
-    while (lead < digits.length && digits.charAt(lead) == "0") { lead = lead + 1 }
-    digits = digits.substring(lead, digits.length)
-    pt = pt - lead
-    var end = digits.length
-    while (end > 1 && digits.charAt(end - 1) == "0") { end = end - 1 }
-    digits = digits.substring(0, end)
-    if (digits.length == 0) { return {d: "0", e: 0} }
-    return {d: digits, e: e10 + pt - 1}
+// rtkFloDigits is the hook rtFloStr calls; it renders a > 0.
+function rtkFloDigits(a) {
+    var p = rtSplit10(a)
+    var decpt = p.e + 1
+    if (decpt <= 0 - 4 || decpt > 16) { return rtSciText(p.d, p.e, false) }
+    return rtFixText(p.d, decpt)
 }
 
-function pyBZeros(n) {
-    var out = ""
-    var i = 0
-    while (i < n) {
-        out = out + "0"
-        i = i + 1
-    }
-    return out
-}
-
-function pyBFloDigits(a) {
-    var p = pyBSplit10(a)
-    var digits = p["d"]
-    var e10 = p["e"]
-    var decpt = e10 + 1
-    if (decpt <= 0 - 4 || decpt > 16) {
-        var out = digits.substring(0, 1)
-        if (digits.length > 1) { out = out + "." + digits.substring(1, digits.length) }
-        var sign = "+"
-        var ex = e10
-        if (ex < 0) {
-            sign = "-"
-            ex = 0 - ex
-        }
-        if (ex < 10) { return out + "e" + sign + "0" + ex }
-        return out + "e" + sign + ex
-    }
-    if (decpt <= 0) { return "0." + pyBZeros(0 - decpt) + digits }
-    if (decpt >= digits.length) { return digits + pyBZeros(decpt - digits.length) + ".0" }
-    return digits.substring(0, decpt) + "." + digits.substring(decpt, digits.length)
-}
-
-function pyBFloStr(x) {
-    if (x !== x) { return "nan" }
-    // The infinities without naming the Infinity global: Inf - Inf is NaN.
-    if (x - x !== 0) {
-        if (x > 0) { return "inf" }
-        return "-inf"
-    }
-    if (x == 0) {
-        if (1 / x < 0) { return "-0.0" }
-        return "0.0"
-    }
-    if (x < 0) { return "-" + pyBFloDigits(0 - x) }
-    return pyBFloDigits(x)
-}
+function pyBFloStr(x) { return rtFloStr(x, "nan", "inf", "-inf") }
 
 // Negation that keeps IEEE's signed zero, for repr(-0.0). `0 - 0.0` is +0.0, so
 // dividing a zero by -1 is the only spelling that produces the negative one.
@@ -2319,12 +2254,6 @@ function pyFloNegate(f) {
         return 0 / (0 - 1)
     }
     return 0 - f
-}
-
-function pyBDigitAt(s, i) {
-    var c = s.charCodeAt(i)
-    if (c < 48 || c > 57) { return 0 - 1 }
-    return c - 48
 }
 
 // ----- EXACT decimal expansion of a double ---------------------------------
@@ -2342,173 +2271,12 @@ function pyBDigitAt(s, i) {
 // base-10000 limbs; multiplying by 2 or by 5 keeps every intermediate under
 // 50000 + 10000, which a double holds exactly.
 
-function pyBBigFromNum(n) {
-    var limbs = []
-    var x = n
-    while (x > 0) {
-        var q = Math.floor(x / 10000)
-        limbs.push(x - q * 10000)
-        x = q
-    }
-    if (limbs.length == 0) { limbs.push(0) }
-    return limbs
-}
-
-function pyBBigMulSmall(limbs, k) {
-    var carry = 0
-    var i = 0
-    while (i < limbs.length) {
-        var v = limbs[i] * k + carry
-        carry = Math.floor(v / 10000)
-        limbs[i] = v - carry * 10000
-        i = i + 1
-    }
-    while (carry > 0) {
-        var c2 = Math.floor(carry / 10000)
-        limbs.push(carry - c2 * 10000)
-        carry = c2
-    }
-    return limbs
-}
-
-function pyBBigStr(limbs) {
-    var out = "" + limbs[limbs.length - 1]
-    var i = limbs.length - 2
-    while (i >= 0) {
-        var s = "" + limbs[i]
-        while (s.length < 4) { s = "0" + s }
-        out = out + s
-        i = i - 1
-    }
-    return out
-}
-
 // The exact decimal of |x| as {i: <integer digits>, f: <fraction digits>}.
-function pyBExactDec(a) {
-    if (a == 0) { return {i: "0", f: ""} }
-    var m = a
-    var e = 0
-    // Down to an integer mantissa. Every step is exact, and a subnormal needs at
-    // most 1074 of them.
-    while (m != Math.floor(m)) {
-        m = m * 2
-        e = e - 1
-    }
-    // And back under 2^53, which only an already-integral value can be above.
-    while (m > 9007199254740992) {
-        m = m / 2
-        e = e + 1
-    }
-    var limbs = pyBBigFromNum(m)
-    if (e >= 0) {
-        var k = 0
-        while (k < e) {
-            pyBBigMulSmall(limbs, 2)
-            k = k + 1
-        }
-        return {i: pyBBigStr(limbs), f: ""}
-    }
-    var n = 0 - e
-    var j = 0
-    while (j < n) {
-        pyBBigMulSmall(limbs, 5)
-        j = j + 1
-    }
-    var all = pyBBigStr(limbs)
-    while (all.length <= n) { all = "0" + all }
-    return {i: all.substring(0, all.length - n), f: all.substring(all.length - n, all.length)}
-}
-
 // Round the digit string `digits` (an integer written out) to `keep` digits,
 // half to EVEN, and answer the kept digits - one longer when the rounding
 // carried all the way (999 -> 1000), which the caller detects by the length.
-function pyBRoundHalfEven(digits, keep) {
-    if (keep >= digits.length) {
-        var out = digits
-        while (out.length < keep) { out = out + "0" }
-        return out
-    }
-    var head = digits.substring(0, keep)
-    var d = digits.charCodeAt(keep) - 48
-    var up = false
-    if (d > 5) { up = true }
-    if (d == 5) {
-        var rest = false
-        var i = keep + 1
-        while (i < digits.length) {
-            if (digits.charAt(i) != "0") {
-                rest = true
-                break
-            }
-            i = i + 1
-        }
-        if (rest) { up = true } else if (keep > 0) {
-            var last = head.charCodeAt(keep - 1) - 48
-            up = last - Math.floor(last / 2) * 2 == 1
-        }
-    }
-    if (!up) {
-        if (head == "") { return "0" }
-        return head
-    }
-    // Propagate the carry through the kept digits.
-    var codes = []
-    var k = 0
-    while (k < head.length) {
-        codes.push(head.charCodeAt(k) - 48)
-        k = k + 1
-    }
-    var at = codes.length - 1
-    var carry = 1
-    while (at >= 0 && carry == 1) {
-        var v = codes[at] + 1
-        if (v == 10) {
-            codes[at] = 0
-        } else {
-            codes[at] = v
-            carry = 0
-        }
-        at = at - 1
-    }
-    var res = ""
-    var q = 0
-    while (q < codes.length) {
-        res = res + ("" + codes[q])
-        q = q + 1
-    }
-    if (carry == 1) { res = "1" + res }
-    return res
-}
-
 // strconv.FormatFloat(v, 'f', prec, 64), exactly: the true decimal of the double,
 // cut to prec fraction digits with half-to-even rounding.
-function pyBFixed(x, prec) {
-    if (x !== x) { return "NaN" }
-    if (x - x !== 0) {
-        if (x > 0) { return "+Inf" }
-        return "-Inf"
-    }
-    // The sign of a zero has to be READ rather than compared: -0.0 < 0 is false
-    // and Go prints "-0.000000". 1 / -0.0 is the only test that sees it.
-    var neg = x < 0
-    if (x == 0 && 1 / x < 0) { neg = true }
-    var a = neg ? -x : x
-    var dec = pyBExactDec(a)
-    var ip = dec["i"]
-    var fp = dec["f"]
-    var joined = ip + fp
-    var kept = pyBRoundHalfEven(joined, ip.length + prec)
-    // A carry out of the leading digit lengthens the integer part by one.
-    var ilen = ip.length
-    if (kept.length > ip.length + prec) { ilen = ilen + 1 }
-    var ints = kept.substring(0, ilen)
-    var fracs = kept.substring(ilen, kept.length)
-    if (ints == "") { ints = "0" }
-    var body = ints
-    if (prec > 0) { body = ints + "." + fracs }
-    return (neg ? "-" : "") + body
-}
-
 // ----- "fmt" % args, CPython's printf-style formatting -----
 //
 // UNIMPLEMENTED in both halves until now: js_pybin's "%" on a string fell into
@@ -2519,7 +2287,7 @@ function pyBFixed(x, prec) {
 //
 // The float verbs are where the three halves differ in SPELLING and not in
 // answer: Go says strconv.FormatFloat, and this half (like the interpreter's)
-// builds the same text out of pyBFixed and floPrec - host id 70 of
+// builds the same text out of rtFixed and floPrec - host id 70 of
 // languages/lib/runtime.c, the one lua's formatter already leans on.
 function pyBPctCount(f) {
     var n = 0
@@ -2550,7 +2318,7 @@ function pyBPctDigits(v) {
 // The base-N digits of an integral value: exact for every magnitude a double holds
 // exactly, and the SAME loop in all three halves (pyBaseStr in
 // languages/python-interpreter.abnf, pyPctRadix in abnf/jsrt.go) - deliberately
-// not pyBBaseStr, whose int64 SATURATION only the {:x} format spec wants.
+// not rtBaseStr, whose int64 SATURATION only the {:x} format spec wants.
 function pyBPctRadix(v, base, upper) {
     var n = Math.trunc(pyBPctNum(v))
     if (n !== n) { n = 0 }
@@ -2598,12 +2366,12 @@ function pyBPctSig(a, nd) {
         while (z.length < nd) { z = z + "0" }
         return {d: z, e: 0}
     }
-    var dec = pyBExactDec(a)
+    var dec = rtExactDec(a)
     var joined = dec["i"] + dec["f"]
     var lead = 0
     while (lead < joined.length && joined.charAt(lead) == "0") { lead = lead + 1 }
     var ex = dec["i"].length - 1 - lead
-    var kept = pyBRoundHalfEven(joined.slice(lead), nd)
+    var kept = rtRoundHalfEven(joined.slice(lead), nd)
     if (kept.length > nd) {
         ex = ex + 1
         kept = kept.slice(0, nd)
@@ -2645,7 +2413,7 @@ function pyBPctExp(n, typ, prec) {
         if (p == 0) { p = 1 }
         var ge = pyBPctSig(n < 0 ? 0 - n : n, p)["e"]
         if (ge < 0 - 4 || ge >= p) { return pyBPctStrip(pyBPctExpText(n, p - 1, upper)) }
-        var fx = pyBFixed(n, p - 1 - ge)
+        var fx = rtFixed(n, p - 1 - ge)
         if (fx.indexOf(".") >= 0) {
             while (fx.charAt(fx.length - 1) == "0") { fx = fx.slice(0, fx.length - 1) }
             if (fx.charAt(fx.length - 1) == ".") { fx = fx.slice(0, fx.length - 1) }
@@ -2672,7 +2440,7 @@ function pyBPctOne(v, typ, left, zero, plus, space, width, prec) {
     else if (typ == "b") { numeric = true ; body = pyBPctRadix(v, 2, false) }
     else if (typ == "f" || typ == "F") {
         numeric = true
-        body = pyBFixed(pyBPctNum(v), prec < 0 ? 6 : prec)
+        body = rtFixed(pyBPctNum(v), prec < 0 ? 6 : prec)
     } else if (typ == "e" || typ == "E" || typ == "g" || typ == "G") {
         numeric = true
         body = pyBPctExp(pyBPctNum(v), typ, prec)
@@ -2799,48 +2567,11 @@ function pyBPct(f, arg) {
     return out
 }
 
-// ----- strconv.FormatInt(int64(x), base) ------------------------------------
-//
-// Two things the naive loop got wrong, both measured: the digit alphabet is 36
-// long and not 16 (to_s(36) of 100 is "2s"), and Go converts through int64,
-// which SATURATES on arm64 - `int64(1e100)` is 0x7fffffffffffffff and its hex is
-// "7fffffffffffffff", not the 84 digits a float loop produces. The digits are
-// taken with the floor's sized-integer tag (tag 13), which is exact int64
-// arithmetic, on the UNSIGNED reading of the magnitude - the one shape whose
-// negation is exact for int64's minimum too, which is the trick java-rt.metajs
-// records.
-//
-// Python's own callers always hand this an int32 (pyFormatBody converts with
-// rt.toInt32 first), so the saturating branches are unreachable from js_pyformat;
-// they are kept because this is the general helper the other chunks share.
-var PYB_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
-
-function pyBBaseStr(n, base) {
-    var v = Math.trunc(n)
-    if (v !== v) { v = 0 }
-    if (v == 0) { return "0" }
-    var neg = false
-    var mag = sintRaw(0, 0, 64, true)
-    if (v >= 9223372036854775808) {
-        mag = sintRaw(2147483647, 4294967295, 64, true)   // int64 max
-    } else if (v <= 0 - 9223372036854775808) {
-        neg = true
-        mag = sintRaw(2147483648, 0, 64, true)            // |int64 min|
-    } else {
-        neg = v < 0
-        var a = neg ? -v : v
-        mag = sintRaw(sintHi(a), sintLo(a), 64, true)
-    }
-    var b = sintRaw(0, base, 64, true)
-    var zero = sintRaw(0, 0, 64, true)
-    var out = ""
-    while (sintCmp(mag, zero) != 0) {
-        var d = sintNum(sintOp(4, mag, b))
-        out = PYB_DIGITS.charAt(d) + out
-        mag = sintOp(3, mag, b)
-    }
-    return (neg ? "-" : "") + out
-}
+// strconv.FormatInt(int64(x), base) is rtBaseStr, in
+// languages/lib/runtime.metajs. Python's own callers always hand it an int32
+// (pyFormatBody converts with rt.toInt32 first), so the int64-saturating
+// branches there are unreachable from js_pyformat; Ruby's Integer#to_s(base)
+// does reach them, which is why they are in the shared body.
 
 // strings.ToUpper - the full Unicode SIMPLE mapping. The C floor's own
 // toUpperCase is exactly that (runtime.c generated its 328 ranges from the Go
@@ -2890,17 +2621,17 @@ function pyBFormatBody(v, typ, prec, sign, conv) {
     if (typ == "f" || typ == "F") {
         var p = prec
         if (p < 0) { p = 6 }
-        body = pyBFixed(pyNum(v), p)
+        body = rtFixed(pyNum(v), p)
     } else if (typ == "d") {
-        body = pyBBaseStr(pyNum(v) | 0, 10)
+        body = rtBaseStr(pyNum(v) | 0, 10)
     } else if (typ == "x") {
-        body = pyBBaseStr(pyNum(v) | 0, 16)
+        body = rtBaseStr(pyNum(v) | 0, 16)
     } else if (typ == "X") {
-        body = pyBUpper(pyBBaseStr(pyNum(v) | 0, 16))
+        body = pyBUpper(rtBaseStr(pyNum(v) | 0, 16))
     } else if (typ == "b") {
-        body = pyBBaseStr(pyNum(v) | 0, 2)
+        body = rtBaseStr(pyNum(v) | 0, 2)
     } else if (typ == "o") {
-        body = pyBBaseStr(pyNum(v) | 0, 8)
+        body = rtBaseStr(pyNum(v) | 0, 8)
     } else {
         if (conv == "r") { body = pyRepr(v) } else { body = pyStr(v) }
     }
@@ -2951,16 +2682,16 @@ function js_pyformat(v, specV, convV) {
         i = i + 1
     }
     var width = 0
-    while (i < spec.length && pyBDigitAt(spec, i) >= 0) {
-        width = width * 10 + pyBDigitAt(spec, i)
+    while (i < spec.length && rtDigitAt(spec, i) >= 0) {
+        width = width * 10 + rtDigitAt(spec, i)
         i = i + 1
     }
     var prec = 0 - 1
     if (i < spec.length && spec.charAt(i) == ".") {
         i = i + 1
         prec = 0
-        while (i < spec.length && pyBDigitAt(spec, i) >= 0) {
-            prec = prec * 10 + pyBDigitAt(spec, i)
+        while (i < spec.length && rtDigitAt(spec, i) >= 0) {
+            prec = prec * 10 + rtDigitAt(spec, i)
             i = i + 1
         }
     }

@@ -603,3 +603,73 @@ function js_pyset(c, k, v) {
     c[idx] = v
     return undefined
 }
+
+// ============================================ the relational comparison ====
+//
+// Go: rt.jsCompare (abnf/jsrt.go:1530), the body behind `<`, `<=`, `>`, `>=`
+// for every operand pair the language's own number tags do not cover. FOUR
+// layer-2 copies: jpCompare (java), csCompare (csharp), dtJsCompare (dart) and
+// swLoose (swift), plus a fifth in js-rt.metajs (jvCmpPrim) that does not import
+// this file. The shape scan grouped three of the four; the fourth and fifth
+// differ from them by exactly the thing this section is about.
+//
+// THE DIFFERENCE LIST:
+//
+//  1. NOT A DIFFERENCE - the string arm. csharp and js write the pair of `typeof`
+//     tests nested, java/dart/swift write them with `&&`. Same predicate.
+//  2. NOT A DIFFERENCE - the numeric coercion, already rtkNum: csNum / jvNum /
+//     dtNum / swNum / jvToNumber, the same knob js_jadd took.
+//  3. **DEFECT, in java, in BOTH ENGINES, with two DIFFERENT wrong answers.**
+//     The oracle answers the SENTINEL 2 when either operand coerces to NaN, and
+//     says at the site that it means "every relation is false". csCompare and
+//     jvCmpPrim carry the sentinel; jpCompare, dtJsCompare and swLoose do not -
+//     they fall through to `return 0`, i.e. EQUAL. Read by a caller that spells
+//     `c <= 0` and `c >= 0`, 0 makes `<=` and `>=` TRUE for a NaN; the sentinel
+//     read as an ordering makes `>` and `>=` TRUE. Java's two halves were on
+//     opposite sides of that, so they disagreed with each other AND with java 24
+//     on six of fourteen probe rows. JLS 15.20.1 is the same rule as ECMA-334
+//     12.12.1: for <, <=, > and >= a NaN operand makes the result false.
+//     Fixed by merging onto the oracle's sentinel and guarding it in js_jvcmp,
+//     with abnf/jsrtjava.go:467 taking the same three lines. See the measured
+//     table at js_jvcmp in java-rt.metajs.
+//  4. KNOB - what the CALLER does with the sentinel, which is why this body
+//     answers 2 rather than swallowing it. java and csharp turn it into false
+//     for all four operators; dart's js_dart{lt,le,gt,ge} do the same; swift's
+//     swRel has its own NaN marker (0 - 2) and translates. A shared body that
+//     returned false itself could not serve swMinMax, which wants an ordering.
+//  5. DOCUMENTED OMISSION - the oracle's `rt.hasBigInt` arm (bigPair, jsrt.go:
+//     1545) compares two big.Ints before coercing. None of these four languages
+//     turns hasBigInt on in this path; python does have a bignum and does not
+//     reach jsCompare. Not carried, and not a difference between the four.
+function rtCompare(l, r) {
+    if (typeof l == "string" && typeof r == "string") {
+        if (l < r) { return 0 - 1 }
+        if (l > r) { return 1 }
+        return 0
+    }
+    var a = rtkNum(l)
+    var b = rtkNum(r)
+    if (a !== a) { return 2 }
+    if (b !== b) { return 2 }
+    if (a < b) { return 0 - 1 }
+    if (a > b) { return 1 }
+    return 0
+}
+
+// ============================================ the clamped substring ========
+//
+// Go: rt.jpSubstring / rt.csSubstring, the same eight lines twice. java's
+// String.substring and C#'s String.Substring both THROW on an out-of-range
+// index; both grammars clamp instead, so the shared body is the clamp and the
+// difference between the two languages is upstream of it. csSubstring and
+// jpSubstring were byte-identical - ZERO knobs, and both files already import
+// this one, so sharing it taxes no other language (see runtime-decimal.metajs's
+// head for what that tax is and how it was measured).
+function rtSubstring(s, b, e) {
+    var begin = b
+    var end = e
+    if (begin < 0) { begin = 0 }
+    if (end > s.length) { end = s.length }
+    if (end < begin) { end = begin }
+    return s.substring(begin, end)
+}

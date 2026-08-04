@@ -465,6 +465,19 @@ func init() {
 				return boolH(rt.jvCmp(op, l, r))
 			}
 			c := rt.jsCompare(l, r)
+			// jsCompare answers the SENTINEL 2 for a NaN operand, commented
+			// there as "every relation is false" - and that is exactly Java's
+			// rule (JLS 15.20.1: if either operand is NaN then <, <=, > and >=
+			// all produce false). Read as an ordering the sentinel made `>` and
+			// `>=` TRUE here, while layer 2's own copy of jsCompare dropped the
+			// sentinel and answered 0, making `<=` and `>=` true - so the two
+			// halves were wrong in DIFFERENT directions and disagreed with each
+			// other. It is not 0 either. This is the same fix jsrtcsharp.go:477
+			// took; java is its twin and was missed. languages/lib/java-rt.metajs
+			// (js_jvcmp) carries the identical three lines.
+			if c == 2 {
+				return boolH(false)
+			}
 			switch op {
 			case "<":
 				return boolH(c < 0)

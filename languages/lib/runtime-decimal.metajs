@@ -1,0 +1,189 @@
+// runtime-decimal.metajs -- the SHARED float-to-string rendering, split out of
+// runtime.metajs and imported ONLY by the three layer-2 files that use it
+// (python, ruby, swift). The exact-decimal bignum underneath it is split again,
+// into runtime-bignum.metajs, which only python and ruby import.
+//
+// WHY IT IS A SEPARATE FILE, and this is the load-bearing part: layer 2 is
+// PERMANENTLY LIVE. Every function body in a <lang>-rt.ll is a pinned closure the
+// conservative collector walks on every collection, whether the program can reach
+// it or not. Measured on a kotlin loop that never formats a float
+// (400,000 x `s = s + i % 7`, native -exe, MEC_GC_STATS=1):
+//
+//     runtime.metajs WITHOUT this section   21.6-22.5 s   live 222,096   heap 9.47 MB
+//     runtime.metajs WITH it, kotlin idle   23.5-25.1 s   live 224,400   heap 10.51 MB
+//
+// +7-11% wall on a program that cannot call a single line of it, from +2,304 live
+// bytes walked on each of the run's 18,798 collections. Ten files import
+// runtime.metajs; three of them want this. So it is imported, not shared - the
+// same lesson docs/runtime-merge-plan.md's case_map revert recorded from the
+// other direction, and the reason a merge that saves source lines still has to be
+// measured on a language that does not use the merged body.
+//
+// The MetaJS rules and the rtk* hook convention are runtime.metajs's; this file
+// defines one hook of its own, rtkFloDigits, which renders a strictly positive
+// finite double the language's own way and is the only part of float-to-string
+// that is not shared.
+
+// ============================================ the decimal bignum ===========
+//
+// THE LARGEST SINGLE DUPLICATION IN LAYER 2, and the extern table could never
+// see it. python-rt.metajs and ruby-rt.metajs each carry a complete exact-decimal
+// float formatter, reached through pyBFloStr and rbFloStr respectively, and
+// swift-rt.metajs carries the splitter as well. No js_* name collides, so the
+// 29-name extern census counted these as nine separate private helpers in three
+// separate files; a shape scan (normalise every identifier to a positional token,
+// then group by the resulting string) puts them in one bucket, 267 lines of it.
+//
+// python-rt.metajs:2214 SAYS SO at the site - "Copied verbatim from
+// languages/lib/ruby-rt.metajs (rbDigitAt / rbBigFromNum / rbBigMulSmall /
+// rbBigStr / rbExactDec / rbRoundHalfEven / rbFixed / rbSci / rbBaseStr /
+// rbByteCut), renamed to the pyB prefix. The comments are theirs." - which is the
+// honest record of a copy and also the reason no gate could have found it.
+//
+// THE DIFFERENCE LIST, mechanically taken (extract each body, strip the language
+// prefix, diff). Ten functions, and the diff is EMPTY for nine of them:
+//
+//   rtSplit10        py == rb == sw   byte-identical bar swift's three comments
+//   rtZeros          py == rb == sw   byte-identical
+//   rtDigitAt        py == rb         byte-identical
+//   rtBigFromNum     py == rb         byte-identical
+//   rtBigMulSmall    py == rb         byte-identical
+//   rtBigStr         py == rb         byte-identical
+//   rtExactDec       py == rb         byte-identical
+//   rtRoundHalfEven  py == rb         byte-identical (57 lines, twice)
+//   rtFixed          py == rb         byte-identical
+//   rtBaseStr        py == rb         byte-identical bar the name of the digit
+//                                     alphabet constant, PYB_DIGITS vs RB_DIGITS,
+//                                     whose VALUES are the same 36 characters.
+//
+// ZERO KNOBS, and that is itself the finding: the two copies could have drifted
+// at any point in two separate rounds of formatter work and did not, so nothing
+// was hiding here - but nothing was stopping it either, and a fix to one would
+// have missed the other in silence. See js_dict_new for the same outcome at
+// one-tenth the size.
+//
+// The float rendering ABOVE this bignum (FloDigits / FloStr) does NOT merge to a
+// single body and is handled separately at rtSciText below.
+
+// strconv.FormatFloat(a, 'e', -1, 64), recovered from the engine's own shortest
+// rendering: turn a > 0 into {d: the significant digits with no point and no
+// leading or trailing zero, e: the SCIENTIFIC exponent}, so that the value is
+// 0.d1d2... * 10^(e+1). The input "" + a is either a plain decimal ("1234.5",
+// "0.00012") or an exponent form ("1e+21", "1.5e-7"), and both are jsNumString
+// in the Go half and d_num_str in the floor, which are the same shortest form
+// strconv produces.
+function rtSplit10(a) {
+    var s = "" + a
+    var mant = s
+    var e10 = 0
+    var ei = s.indexOf("e")
+    if (ei >= 0) {
+        mant = s.substring(0, ei)
+        var es = s.substring(ei + 1, s.length)
+        var eneg = false
+        if (es.charAt(0) == "+") { es = es.substring(1, es.length) }
+        else if (es.charAt(0) == "-") {
+            eneg = true
+            es = es.substring(1, es.length)
+        }
+        e10 = parseInt(es)
+        if (eneg) { e10 = 0 - e10 }
+    }
+    // Split the mantissa at its point; `pt` is how many digits precede it.
+    var pt = mant.length
+    var di = mant.indexOf(".")
+    var digits = mant
+    if (di >= 0) {
+        pt = di
+        digits = mant.substring(0, di) + mant.substring(di + 1, mant.length)
+    }
+    // A leading zero run does not count as significant, and each one shifts the
+    // point right by one place.
+    var lead = 0
+    while (lead < digits.length && digits.charAt(lead) == "0") { lead = lead + 1 }
+    digits = digits.substring(lead, digits.length)
+    pt = pt - lead
+    // A trailing zero run is not significant either, and does not move the point.
+    var end = digits.length
+    while (end > 1 && digits.charAt(end - 1) == "0") { end = end - 1 }
+    digits = digits.substring(0, end)
+    if (digits.length == 0) { return {d: "0", e: 0} }
+    return {d: digits, e: e10 + pt - 1}
+}
+
+function rtZeros(n) {
+    var out = ""
+    var i = 0
+    while (i < n) {
+        out = out + "0"
+        i = i + 1
+    }
+    return out
+}
+
+// The exponential half of a float rendering, shared by python, ruby and swift:
+// one digit, the rest as a fraction, then a SIGNED exponent zero-padded to two
+// digits. `dot` forces a fraction digit onto a one-digit mantissa, which is
+// Ruby's rule (1.0e+20) and not Python's or Swift's (1e+20).
+//
+// This, and not the whole of FloDigits, is what the three languages share. The
+// BOUNDARY between exponential and plain form is three genuinely different rules
+// and stays in the three files: Python's is `decpt <= -4 || decpt > 16`, Ruby's
+// is numeric.c flo_to_s's `decpt < -3 || decpt > DBL_DIG(15)`, and Swift's is on
+// the VALUE rather than the exponent - SwiftDtoa goes scientific above 2^53, so
+// 9007199254740992.0 is the last plain one. The two low bounds are the SAME
+// predicate spelled twice (decpt <= -4 and decpt < -3 both mean e10 <= -5); only
+// the high bound really differs, and it differs three ways.
+function rtSciText(digits, e10, dot) {
+    var out = digits.substring(0, 1)
+    if (digits.length > 1) { out = out + "." + digits.substring(1, digits.length) }
+    else if (dot) { out = out + ".0" }
+    var sign = "+"
+    var ex = e10
+    if (ex < 0) {
+        sign = "-"
+        ex = 0 - ex
+    }
+    if (ex < 10) { return out + "e" + sign + "0" + ex }
+    return out + "e" + sign + ex
+}
+
+// The plain half, with `decpt` digits before the point and a forced ".0" when
+// there is no fraction left. Byte-identical in all three, down to the spelling.
+function rtFixText(digits, decpt) {
+    if (decpt <= 0) { return "0." + rtZeros(0 - decpt) + digits }
+    if (decpt >= digits.length) { return digits + rtZeros(decpt - digits.length) + ".0" }
+    return digits.substring(0, decpt) + "." + digits.substring(decpt, digits.length)
+}
+
+// The whole of a language's float-to-string, above rtkFloDigits (which renders a
+// strictly positive finite double and is the one part that differs). python and
+// ruby had this body twice and swift a third time; the DIFFERENCE LIST is three
+// string literals and nothing else:
+//
+//   nan / inf / -inf        python (repr(float('nan')) is "nan"), swift
+//   NaN / Infinity / -Inf…  ruby (Float::NAN.to_s is "NaN", INFINITY "Infinity")
+//
+// so they are parameters rather than hooks. KNOB, and a real one: it is what the
+// language prints, not how it computes. Everything else agreed, including the
+// two spellings of the sign test - python's `x < 0` after the zero arm and
+// swift's swSignBit + unary minus reach the same two answers, because the zero
+// arm has already taken every value whose sign a comparison cannot see.
+//
+// -0.0 keeps its sign, which needs 1 / x: `-0.0 < 0` is false, Math.abs of it is
+// +0.0, and `"" + -0.0` is "0" in every engine here.
+function rtFloStr(x, nanS, infS, ninfS) {
+    if (x !== x) { return nanS }
+    // The infinities without naming the Infinity global, which the interpreter
+    // half spells 1 / 0 too (languages/metajs-interpreter.abnf): Inf - Inf is NaN.
+    if (x - x !== 0) {
+        if (x > 0) { return infS }
+        return ninfS
+    }
+    if (x == 0) {
+        if (1 / x < 0) { return "-0.0" }
+        return "0.0"
+    }
+    if (x < 0) { return "-" + rtkFloDigits(0 - x) }
+    return rtkFloDigits(x)
+}

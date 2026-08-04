@@ -1,6 +1,21 @@
 # Merging the runtime: a shared MetaJS layer, and a smaller C floor
 
-> **STATUS 2026-08-04. Part A is DONE. Part B is OPEN AND UNBLOCKED, and its first
+> **STATUS 2026-08-04, THIRD PASS. Part A was declared done at ~0.5% unified and
+> that was WRONG** - every earlier pass worked from the extern-name table, which the
+> plan itself warned UNDERSTATES the duplication. A shape scan (normalise every
+> identifier to a positional token, group by the result) found 24 cross-language
+> groups the name view cannot see, 776 lines, and the largest was python and ruby
+> having independently written the same decimal bignum. See
+> "Part A, THIRD pass - the shape scan, and the tax that reframes the whole
+> exercise" below. It merged 393 code lines away, found and fixed a NaN
+> relational defect in JAVA that was wrong in BOTH engines in DIFFERENT
+> directions, and produced the constraint that governs every future merge:
+> **a layer-2 body is PERMANENTLY LIVE, so a shared body taxes every importer that
+> cannot call it** (+7-24% wall, measured three times). That is why
+> `lib/runtime.metajs` is now three files, and why kotlin's 1,217-line verbatim
+> copy of `regex.js` was merged, measured at +18-23%, and REVERTED.
+>
+> **The rest of Part A is DONE. Part B is OPEN AND UNBLOCKED, and its first
 > candidate has been TRIED AND REJECTED ON MEASUREMENT.** The structural blocker is
 > gone - `lib/metajs-rt.metajs` and the fifteenth generator landed in `33923d4`, so
 > MetaJS has a layer 2 like the other fifteen. Move 1 (`case_map`) was then executed
@@ -473,6 +488,213 @@ pass did not own.
   at line 77: "`>>>` now costs `jlShr` - `jlSar` traded for `jlShr`, one helper".
   The floor half (`sintRaw`, host id 62) is `runtime.c:5099` +
   `abnf/jsrtint.go:389`. See `runtime-next-plan.md`, "THE COLLAPSE ONTO `sintRaw`".
+
+## Part A, THIRD pass - the shape scan, and the tax that reframes the whole exercise
+
+**Part A was declared done at ~0.5% unified and that was wrong**, for the reason
+the plan itself predicted and nobody acted on: every earlier pass worked from the
+EXTERN-NAME table, and internal helpers are language-prefixed so identical logic
+never collides by name. The fix is mechanical - **normalise each function body
+(strip comments and whitespace, replace every identifier with a positional token
+`v0`, `v1`, ... in first-appearance order) and group by the resulting string.**
+Over `languages/lib/*-rt.metajs`, bodies above ~60 normalised characters:
+
+```
+                                groups   lines occupied   recoverable
+before this pass                    24              776           421
+after                               14              259           131
+```
+
+### Merged, largest cluster first
+
+**1. The decimal bignum (python + ruby + swift), 267 lines, ZERO KNOBS.** python
+and ruby each carried a complete exact-decimal float formatter, reached through
+`pyBFloStr` and `rbFloStr`, and swift carried the splitter as well. The extern
+view could never see it. `python-rt.metajs:2214` SAID SO at the site ("Copied
+verbatim from languages/lib/ruby-rt.metajs ... renamed to the pyB prefix"). The
+difference list is EMPTY for nine of the ten functions and the tenth differed
+only in the NAME of its digit alphabet (`PYB_DIGITS` vs `RB_DIGITS`, the same 36
+characters). `rtSplit10` `rtZeros` `rtDigitAt` `rtBigFromNum` `rtBigMulSmall`
+`rtBigStr` `rtExactDec` `rtRoundHalfEven` `rtFixed` `rtBaseStr`.
+
+Two knobs were found ABOVE the bignum, in the float rendering, and both are real:
+
+- `rtSciText(digits, e10, dot)` - the exponential half. `dot` forces a fraction
+  digit onto a one-digit mantissa, which is Ruby's rule (`1.0e+20`) and not
+  Python's or Swift's (`1e+20`).
+- the BOUNDARY between exponential and plain form, which stays in the three files
+  as `rtkFloDigits`: Python `decpt <= -4 || decpt > 16`, Ruby (numeric.c
+  flo_to_s) `decpt < -3 || decpt > DBL_DIG`, Swift on the VALUE rather than the
+  exponent (SwiftDtoa goes scientific above 2^53). **The two LOW bounds are the
+  same predicate spelled twice** - `decpt <= -4` and `decpt < -3` both mean
+  `e10 <= -5` - so only the high bound really differs, and it differs three ways.
+- `rtFloStr(x, nanS, infS, ninfS)` - the non-finite spellings are PARAMETERS, not
+  hooks: python/swift `nan`/`inf`/`-inf`, ruby `NaN`/`Infinity`/`-Infinity`.
+
+Verified three ways per language, not by the suite (see the tax section: the
+suite cannot see layer 2): swift native `-exe` == `llvm.Run` == **real swiftc
+6.1.2 on all 34 probe values**; ruby and python native == `llvm.Run` == HEAD
+byte-for-byte, and against real `ruby 2.6.10` / `python3 3.14.6` on everything
+except two PRE-EXISTING gaps confirmed at HEAD (`%g` unimplemented in ruby-rt;
+Python's `&` is int32-signed, so `-1 & 0xffffffff` is `-1` where CPython says
+`4294967295`).
+
+**2. The relational comparison - and a DEFECT in java, in BOTH engines, with two
+DIFFERENT wrong answers.** `jpCompare` (java), `csCompare` (csharp), `swLoose`
+(swift) and `dtJsCompare` (dart) are four copies of `rt.jsCompare`
+(`abnf/jsrt.go:1530`), which answers the SENTINEL `2` when either operand
+coerces to NaN and says at the site that it means "every relation is false".
+csharp carries the sentinel (Part A fixed it); **java did not, and neither engine
+was right**:
+
+```
+                             NaN<1  NaN>1  NaN<=1  NaN>=1
+sentinel 2, read as ordering  false  TRUE   false   TRUE     <- the Go twin
+0 ("equal"), old layer 2      false  false  TRUE    TRUE     <- native -exe
+JLS 15.20.1 / java 24         false  false  false   false
+```
+
+Measured on a 14-row probe against **java 24**: the Go twin wrong on 4 rows,
+layer 2 wrong on 6, **and the two halves disagreeing with each other on 6**. The
+java INTERPRETER half was right all along (it uses the host's own `<` on
+doubles), so `--cross` would have reported this the day a NaN relation was
+asserted - and nothing in 5,950 assertions ever asserted one. Fixed in ONE change
+across both engines: `rtCompare` in `lib/runtime.metajs` carries the sentinel,
+`js_jvcmp` guards it, and `abnf/jsrtjava.go:467` takes the same three lines -
+literally the fix `jsrtcsharp.go:477` already had. **Pinned by four assertions
+(`flt10a`-`flt10d`) in `tests/java-test-full.java`; all four DISCRIMINATE** -
+from a clean `git archive HEAD` tree they fail in the Go twin AND in the native
+`-exe` and pass in the interpreter. Real `javac`/`java` 24 runs the ratchet file:
+288 checks, 0 failures.
+
+**Dart DECLINED, with the measurement.** `dtJsCompare` coerces with `dtNum`
+(string -> `parseInt`, `true` -> 1, else 0), which is neither `rtkNum`
+(= `dtNumOf`, NaN for a non-number) nor the oracle's `rt.toNumber`. Merging would
+swap one non-oracle coercion for another on a path that `js_dartlt`/`le`/`gt`/`ge`
+only reach for NON-number operands - i.e. for programs Dart rejects - and no dart
+toolchain exists on this machine to settle it. It shares the NaN-through-0 shape
+and is recorded, not fixed.
+
+**3. Three zero-knob merges onto bodies that were ALREADY shared.** `csharp` and
+`java` each called `rtFindMethod` in one place and still carried a *second*
+private copy of the same eleven-line `__class`/`__super` walk (`cpFindToString`,
+`jpFindMember`); `dart`, `kotlin` and `swift` each carried a private copy of
+`rtIsDictObj`. Both are pure deletions at zero cost - the importer already links
+the shared body. Plus `rtSubstring` (`csSubstring` == `jpSubstring`, byte for
+byte).
+
+### THE FINDING THAT REFRAMES PART A: layer 2 is PERMANENTLY LIVE
+
+**A shared body taxes every file that imports it, whether or not that language
+can call a single line of it.** Every function in a `<lang>-rt.ll` is a pinned
+closure the conservative collector walks on every collection. Measured three
+times this pass, each on a program that cannot reach the merged code:
+
+```
+kotlin, 400k x `s = s + i % 7`, native -exe, MEC_GC_STATS
+  HEAD                                    21.6-22.5 s   live 222,096   heap  9.47 MB
+  + the decimal bignum in runtime.metajs  23.5-25.1 s   live 224,400   heap 10.51 MB   +7..11%
+  + it split into its own module          21.0-21.5 s   live 222,432   heap  9.47 MB   none
+
+swift, 400k x `s = s + i % 7`
+  HEAD                                    3.13-3.16 s   live 103,536   heap  9.44 MB
+  + the bignum it never calls             3.70-3.94 s   live 105,072   heap 10.49 MB   +17..24%
+  + the bignum split out again            3.10-3.35 s   live 104,016   heap  9.44 MB   none
+```
+
+So `lib/runtime.metajs` is now **three files**: `runtime.metajs` (imported by
+ten), `runtime-decimal.metajs` (the float rendering - python, ruby, swift) and
+`runtime-bignum.metajs` (the exact decimal and `FormatInt` - python, ruby). This
+is the same lesson the `case_map` revert recorded from the other direction, and
+it is a STANDING CONSTRAINT on every future merge: **a body shared by 2 of 10
+importers is a tax on 8 unless it gets its own module.** That, and not arithmetic
+on lines saved, is why the small two-language pairs below are declined.
+
+### A LOSS, executed whole and REVERTED: kotlin's verbatim copy of regex.js
+
+`kotlin-rt.metajs` contains **the whole of `lib/regex.js` pasted in** - the shape
+scan says **51 of its 57 functions are byte-identical, 1,217 lines, zero
+divergences**, the single largest duplication in layer 2, and the file admits it
+at the site. Replacing it with `import "./regex.js"` was done in full and it
+WORKS: kotlin matrix 47/47, native `kotlin-test-full` 979 checks 0 failures,
+source 9,372 -> 7,901 lines. It was reverted on the measurement above: **+18 to
++23% on a kotlin loop with no regexp in it**, because the import restores 20
+function bodies kotlin had deleted as unreachable and every one of them is
+permanently live. The measurement is recorded at the site in
+`kotlin-rt.metajs`, along with the instruction to keep the two texts in step by
+hand and the scan that checks it.
+
+### THE GATE NOBODY HAD: `./test.sh` CANNOT SEE LAYER 2
+
+`llvm.Run` uses the Go twin and never links `*-rt.ll`, so the matrix, `--full`
+and `--cross` are all blind to `lib/*-rt.metajs`. Measured: with a deliberate
+wrong `dot` knob in ruby's `rtkFloDigits`, `./test.sh --full --filter ruby`
+reports **279 assertions, halves agree, green** - while a native `-exe` of the
+same `tests/ruby-test-full.rb` reports **4 failures** (n16b, n16c, n16d, n16e).
+`tests/clang-check.sh` is the only committed gate that links layer 2 and it runs
+one small program per language. Every group in this pass was therefore verified
+by building `tests/<lang>-test-full.<ext>` as a native `-exe` and running it, for
+all fifteen languages that have one; the counts come out exactly equal to
+`--full`'s (python 375, ruby 279, swift 211, java 288, csharp 254, dart 232,
+kotlin 979, go 319, php 306, lua 330, js 378, metajs 557, typescript 300, c 577,
+bash 430), 0 failures. **That harness belongs in `tests/`; it is the missing
+gate.**
+
+### Declined, with the reason - and the 21 externs re-judged
+
+The prompt for this pass asked for the still-duplicated externs to be re-judged
+"on the difference list rather than the arithmetic". The answer changed, but not
+in the direction expected: **the tax measurement is a stronger argument against
+them than the lines-saved heuristic ever was.** A 10-line body shared by 2 of 10
+importers costs 8 languages live bytes on every collection to save 10 lines, and
+a private module per pair is not a structure anyone can maintain.
+
+- `csNum`/`jvNum` (2 hooks: the char box and the string coercion - csharp
+  `parseFloat`, java `jpStrNum`), `csStrictEq`/`jvStrictEq` (2 hooks),
+  `csFloArith`/`jvmArith` (1 hook, and the operand mappers genuinely differ - see
+  js_jadd note 3), `js_cscmp`/`js_jvcmp` (2 hooks). Four pairs, ~35 lines
+  recoverable, all csharp+java only.
+- `dtStrLen`/`k2RuneLen`, `dtJavaStr`/`swJavaStr`, `dtIsArr`/`swIsArr`,
+  `pyIsObj`/`rbIsObj`, `luChar`/`js_char`, java/kotlin `js_jband`.
+- The regex glue: `jxGetProg`/`k5Get`/`pyERxGet`/`rbRxGet` are FOUR byte-identical
+  eight-line memos differing only in the cache variable. Their natural home is
+  `lib/regex.js` - which js, python and ruby already import at zero tax - but
+  `abnf/jsrtregex.go` is "a line-by-line port of this file" and kotlin holds a
+  verbatim copy, so one 24-line saving costs an edit in three places that must
+  stay in step. Declined on that, not on the arithmetic.
+- `k5MatchOf`/`rbRxMatchOf` + `k5ObjRe`/`rbRxObjRe` + `ktRxIsRegex`/`rbRxIsRegex`
+  (kotlin+ruby, 62 lines, ~35 recoverable) is the best remaining candidate and
+  wants a two-language module of its own. Left open with the difference list
+  taken: the knobs are the numeric coercion (`ktNum` vs `rbToF`, i.e. `rtkNum`)
+  and the nullish test (`ktIsNullish` vs `rbIsNil`).
+
+### Where things stand after this pass
+
+```
+                    HEAD    now   delta   (code lines, comments and blanks excluded)
+python-rt           3892   3644    -248
+ruby-rt             2067   1818    -249
+swift-rt             854    765     -89
+csharp-rt            810    772     -38
+java-rt              692    659     -33
+dart-rt             1145   1139      -6
+kotlin-rt           6750   6744      -6
+runtime.metajs       145    167     +22
+runtime-decimal        0     74     +74
+runtime-bignum         0    180    +180
+                                   -----
+                                    -393     426 shared lines replace 819
+```
+
+Gates, all re-run after every group: matrix **329/329** - `--full` **5,954
+assertions** (5,950 + the four java NaN ratchets), **0 languages whose halves
+disagree**, no `BUT -frozen`/`VACUOUS`/`MISMATCH`/`FROZEN-DIFF` - `--cross`
+**119/0** - clang-check **16/16, all sixteen "ok, and the clang executable
+agrees", none held** - `go test ./abnf/` ok - all fifteen `gen-*.sh --check`
+clean - `-freeze` a fixed point (`jsagrammar.go` and `jsbootstrap.ll` byte-identical
+after re-running it) - `MEC_GC=off` **3,711 B/iter** at 400k with gc RSS flat at
+3.34 MB across 50k/100k/200k/400k - and the fifteen native `-exe` full-test runs
+above.
 
 ---
 

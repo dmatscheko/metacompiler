@@ -746,6 +746,19 @@ class S23 {
         double nan = 0.0 / 0.0;
         Main.check("flt9", S23.s(inf).equals("Infinity") && S23.s(-1.0 / 0.0).equals("-Infinity"));
         Main.check("flt10", S23.s(nan).equals("NaN") && nan != nan);
+        // JLS 15.20.1: if either operand is NaN then <, <=, > and >= are ALL
+        // false. Both halves got this wrong, in DIFFERENT directions, and until
+        // these four lines nothing in the suite asked. The Go twin took the
+        // sentinel 2 that jsCompare answers for a NaN and read it as an ordering,
+        // so `>` and `>=` were true; layer 2's own copy of jsCompare dropped the
+        // sentinel and answered 0, so `<=` and `>=` were true. The same defect
+        // was found and fixed for C# in Part A of docs/runtime-merge-plan.md;
+        // java is its twin and was not looked at.
+        Main.check("flt10a", !(nan < 1.0) && !(nan > 1.0) && !(nan <= 1.0) && !(nan >= 1.0));
+        Main.check("flt10b", !(1.0 < nan) && !(1.0 > nan) && !(1.0 <= nan) && !(1.0 >= nan));
+        Main.check("flt10c", !(nan <= nan) && !(nan >= nan) && !(nan < nan) && !(nan > nan));
+        float fnan = 0.0f / 0.0f;
+        Main.check("flt10d", !(fnan >= 1.0f) && !(fnan <= 1.0f) && !(fnan > 1.0f) && !(fnan < 1.0f));
         Main.check("flt11", S23.s(-0.0).equals("-0.0") && 0.0 == -0.0);
         Main.check("flt12", 1e300 * 1e300 == inf);
         // Double.toString switches to scientific notation outside [1e-3, 1e7).
