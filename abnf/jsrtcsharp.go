@@ -474,9 +474,14 @@ func init() {
 			// `>` and `>=` TRUE, so `double.NaN > 0.0` answered true here and
 			// in layer 2. It is not 0 either: 0 would make `<=` and `>=` true,
 			// which is wrong in the other direction.
-			if c == 2 {
-				return boolH(false)
-			}
+			// HELD BACK, deliberately: the guard `if c == 2 { return boolH(false) }`
+			// belongs here AND in js_cscmp of languages/lib/csharp-rt.metajs, and
+			// the two must land in the SAME commit. Landing this half alone makes
+			// llvm.Run answer False while the native binary still answers True -
+			// a real divergence with no assertion able to catch it, because an
+			// assertion would be green in one engine and red in the other. The
+			// layer-2 half is blocked behind the shared-runtime merge (that file
+			// now imports languages/lib/runtime.metajs). Restore both together.
 			switch op {
 			case "<":
 				return boolH(c < 0)
