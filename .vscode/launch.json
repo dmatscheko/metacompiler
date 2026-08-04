@@ -1325,6 +1325,12 @@
             "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-features.js", "-q", "-rt-prims"]
         },
         {
+            "name": "MetaJS features (compiler, MetaJS runtime primitives + the C floor, -exe)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-features.js", "-q", "-rt-prims", "-exe", "tests/metajs-native-prims.out"]
+        },
+        {
             "name": "MetaJS try/catch (compiler, MetaJS runtime primitives)",
             "type": "go",
             "request": "launch",

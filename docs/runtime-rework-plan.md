@@ -4,8 +4,11 @@
 > convergence are built; phase 7 (retiring the Go runtime) was measured and DECLINED.
 > The single consolidated list of what is genuinely still open lives at the end of
 > [runtime-next-plan.md](runtime-next-plan.md), under "WHAT IS STILL OPEN". Three items
-> in this file feed it: the Lua formatter boundary, `-rt-prims`-with-the-C-floor, and
-> the linear `jsdispatch` chain. Everything else marked "not fixed here" or "not done"
+> in this file used to feed it - the Lua formatter boundary, `-rt-prims`-with-the-C-floor
+> and the linear `jsdispatch` chain - and **all three are closed or struck as of
+> 2026-08-04**: the formatter landed, `-rt-prims` was a one-line rename, and
+> `jsdispatch` was measured and is already a jump table. This file now feeds NOTHING
+> into the open list. Everything else marked "not fixed here" or "not done"
 > was re-checked against the code on 2026-08-04 and is struck at its site.
 
 ## The goal
@@ -780,11 +783,14 @@ stderr and exits 1, which is what the Go side does at the program boundary.
 
 ### Not done
 
-- **`-rt-prims` and the C floor cannot be combined in one `-exe` build.** With
-  `-rt-prims` the module *defines* the 13 derived primitives and `runtime.ll` defines
-  them too, so the link would fail with duplicate symbols. `-rt-prims` is a measurement
-  flag with no `-exe` entry in the matrix, so nothing regressed; splitting the derived
-  13 into a second `.ll` would fix it when it is wanted.
+- ~~**`-rt-prims` and the C floor cannot be combined in one `-exe` build.**~~
+  **CLOSED 2026-08-04, and splitting the floor was NOT the fix.** The colliding
+  definition was the shim `registerPrim` emits, which took the external's name for no
+  reason - nothing looks it up by name, every routed call goes through the `primShim`
+  map. It is now `jsprim_<name>`, `-rt-prims -exe` links and runs (`features: 255
+  checks, 0 failures`), and the emitted `declare` set is byte-identical to before, so
+  the measurement is untouched. Guarded by a new `-rt-prims -exe` row in
+  `.vscode/launch.json`. See `runtime-next-plan.md`, "WHAT IS STILL OPEN" item 12.
 - ~~**No GC.** The arena leaks by construction.~~ **BUILT - the collector is in the
   floor.** `languages/lib/runtime.c` has `gc_collect` (818), `gc_grow` (654),
   `GC_STACK_BASE` (389) and the conservative C-stack scan at `gc_scan_range(lo,
@@ -795,9 +801,14 @@ stderr and exits 1, which is what the Go side does at the program boundary.
   `tests/coro-poc/build.sh --gc` is part of every gate. The write-up below is the
   history that led to it. (Phase 4a's rate measurement - the 2.58x cut, the exactly
   linear residual - still reads correctly as the reason a collector had to exist.)
-- **`jsdispatch` is a linear compare chain.** O(number of functions) per call. It did not
-  show up in the benchmark above, but a program with thousands of functions would want a
-  binary search or a real table.
+- ~~**`jsdispatch` is a linear compare chain.**~~ **STRUCK 2026-08-04 - measured, and
+  it is not linear in the binary.** LLVM lowers the compare chain into a tree of JUMP
+  TABLES (`sub / cmp / ldrb / br x10` in the disassembly), so the callee's position
+  costs nothing: 3,000,000 indirect calls into a module of 800 functions take 0.88 s
+  through the LAST-compared function and 0.89 s through the FIRST. The growth with
+  module size that looked like the chain is the collector walking the extra top-level
+  closures - with `MEC_GC=off`, 20 / 800 / 3000 functions all run in 0.33-0.38 s.
+  Full numbers: `runtime-next-plan.md`, "WHAT IS STILL OPEN" item 13.
 
 ### Original plan text, for reference
 

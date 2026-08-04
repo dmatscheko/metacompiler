@@ -1003,6 +1003,13 @@ KwDefault   = "default" KwEnd ;
         "println": siPrintln, "print": siPrint, "printf": printf, "sprintf": sprintf,
         "eprintln": siEprintln,
         "parseInt": parseInt, "parseFloat": parseFloat, "Math": Math, "String": String,
+        // floPrec(v, n): |v| rounded to n significant digits as DIGITSeEXP. Host
+        // id 70 of languages/lib/runtime.c and floPrecStr in abnf/commonscript.go
+        // (which is what this name resolves to here - the interpreter runs on a
+        // grammar host, and both grammar hosts bind it). A layer-2 file that
+        // renders a float the way C's %g does needs a FIXED digit count, and the
+        // dialect has only the shortest round-tripping form.
+        "floPrec": floPrec,
         "exit": exit, "anytype": anytypeMarker,
         // The eleven sized-integer names, the same set languages/lib/runtime.c
         // seeds and abnf/jsrtint.go's giBindings adds.
@@ -1271,7 +1278,19 @@ KwDefault   = "default" KwEnd ;
         }
         var last = ref.path[ref.path.length - 1]
         if (last.kind != "member") fail("assignment target must end in a member")
-        if (cur == undefined) fail("member assignment on " + cur)
+        // The same diagnostic as the other two engines, and for the same set of
+        // targets. This used to guard only undefined/null, and to name neither the
+        // key: assigning onto a PRIMITIVE (var x = 5; x.foo = 1) fell through to the
+        // host, which answered goja's "TypeError: Value is not an object: 5" with a
+        // stack trace into this grammar file - an uncontrolled failure where
+        // languages/lib/runtime.c's set_member says "member assignment 'foo' on 5"
+        // and abnf/jsrt.go's setMember says the same. set_member accepts exactly two
+        // tags, the object (6) and the array (5), which is `typeof v == "object"`
+        // here; the loose == catches null as well as undefined, both of which the
+        // floor rejects on its first line.
+        if (cur == undefined || typeof cur != "object") {
+            fail("member assignment '" + last.key() + "' on " + cur)
+        }
         return {obj: cur, key: last.key()}
     }
     // A compound assignment is its plain operator, so it goes through binOp and

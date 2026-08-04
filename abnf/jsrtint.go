@@ -466,6 +466,15 @@ func programJSBindings() map[string]interface{} {
 	keysBindings(b)  // keysOf, below - the same argument again, for object enumeration.
 	scopeBindings(b) // the scope API and isGenerator - the argument once more, for the
 	// one piece of floor storage layer 2 is HANDED and could not open.
+	// floPrec, host id 70 of languages/lib/runtime.c: a layer-2 file that renders
+	// a float the way C's %g does needs the value rounded to a FIXED number of
+	// digits, and the dialect has only the shortest form. The grammar hosts bind
+	// it too (frozenBaseBindings in frozen.go, commonscript.go for goja), because
+	// the interpreter half of the same language asks the same question; see
+	// floPrecStr in commonscript.go.
+	b["floPrec"] = jsHostFunc("floPrec", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return floPrecStr(rt.toNumber(argAt(args, 0)), int(jsToInt(rt.toNumber(argAt(args, 1)))))
+	})
 	return b
 }
 

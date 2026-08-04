@@ -572,43 +572,114 @@ func luNumStr(v interface{}) string {
 	if math.IsInf(n, -1) {
 		return "-inf"
 	}
-	s := jsNumString(n)
-	if _, isFlo := luFloBox(v); isFlo {
-		return luFloText(s, n)
+	// The {__f} box wraps only the INTEGRAL floats, so a non-integral value is a
+	// float whether or not it is boxed - and an integer is never non-integral.
+	if _, isFlo := luFloBox(v); isFlo || n != math.Trunc(n) {
+		return luFloStr(n)
 	}
-	return luExpFix(s)
+	return luExpFix(jsNumString(n))
 }
 
-// luFloText finishes an INTEGRAL float's rendering. Lua's own rule (lobject.c
-// tostringbuff) is `if (buff[strspn(buff, "-0123456789")] == '\0')` - append ".0"
-// only when the text is nothing but a sign and digits - and the box this is called
-// for wraps exactly the integral floats, so the text is either all digits or in
-// exponent form. Appending ".0" unconditionally produced "1e+21.0" and
-// "1.7976931348623157e+308.0", which is not a number in any notation. In exponent
-// form Lua goes through C's %g instead, whose exponent is always signed and at
-// least two digits, so "1e-7" is written "1e-07"; and -0.0 keeps its sign, which
-// jsNumString drops because JavaScript's String(-0) is "0". Verified against
-// lua 5.5.0.
+// luFloStr renders a finite Lua float. lobject.c tostringbuff writes it with the
+// float format and then appends ".0" when the text came out as nothing but a sign
+// and digits; the sign is split off first, so -0.0 keeps its sign where
+// JavaScript's String(-0) is "0" and so that %g never sees a negative.
 //
-// STILL WRONG, and recorded rather than guessed: WHICH form Lua picks. Lua tries
-// "%.15g", then "%.16g", then "%.17g", and takes the first that round-trips - so
-// 1e15 is "1e+15" while 1e15+1 is "1000000000000001.0" and 1e14 is
-// "100000000000000.0". Ours uses the shortest round-tripping form throughout, which
-// is JavaScript's window (plain below 1e21) and gets the large integral floats
-// plain where Lua writes them scientific. Fixing that needs rounding the EXACT
-// value of the double to 15 significant digits, which Go has as
-// strconv.FormatFloat(n, 'g', 15, 64) and neither JS-dialect half has at all (no
-// toPrecision anywhere in metajs-to-llvm-ir.abnf), so doing it here alone would
-// CREATE a --cross divergence. See docs/runtime-next-plan.md, "WHAT IS STILL OPEN"
-// item 1.
-func luFloText(s string, n float64) string {
-	if n == 0 && math.Signbit(n) {
-		s = "-0"
+// WHICH form Lua picks: lua 5.5.0 tries "%.15g" and, if the text does not read
+// back as the same double, "%.17g". It never tries 16 - settled against the local
+// lua 5.5.0 over 91 values, 31 hand-picked plus 60 random 64-bit patterns, where a
+// 15/16/17 model differs on 10 of them (1/3 is "0.33333333333333331", not the
+// 16-digit shortest form) and 15-then-17 matches all 91. The round-trip test is
+// "does the shortest form have at most 15 significant digits", which is the same
+// question: a 15-digit text that reads back IS a round-tripping form of at most 15
+// digits, and conversely the correctly rounded 15-digit decimal is no further from
+// the value than the shortest form padded with zeros. The script halves
+// (lua-interpreter.abnf luaFloStr, languages/lib/lua-rt.metajs luFloStr) do this
+// same arithmetic over the floPrec host builtin, which is what strconv is here.
+func luFloStr(n float64) string {
+	neg := n < 0 || (n == 0 && math.Signbit(n))
+	a := math.Abs(n)
+	s := "0"
+	if a != 0 {
+		s = luGStr(a)
 	}
-	if !strings.ContainsRune(s, 'e') {
-		return s + ".0"
+	if luAllDigits(s) {
+		s = s + ".0"
 	}
-	return luExpFix(s)
+	if neg {
+		return "-" + s
+	}
+	return s
+}
+
+func luAllDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// luGStr is C's %g on a positive finite double at the precision Lua picked. %g is
+// exponential exactly when exp < -4 || exp >= P, with P the precision that was
+// USED - which is why 1e15 is "1e+15" (P = 15, exp = 15) while
+// 1234567890123456.0 is not (P = 17, exp = 15) - and it strips the trailing zeros
+// and a bare point in both forms.
+func luGStr(n float64) string {
+	P := 17
+	if luSigCount(jsNumString(n)) <= 15 {
+		P = 15
+	}
+	t := floPrecStr(n, P)
+	i := strings.IndexByte(t, 'e')
+	dig := t[:i]
+	ex, _ := strconv.Atoi(t[i+1:])
+	if ex < -4 || ex >= P {
+		mant := dig
+		if len(dig) > 1 {
+			mant = dig[:1] + "." + dig[1:]
+		}
+		esign, ea := "+", ex
+		if ea < 0 {
+			esign, ea = "-", -ea
+		}
+		es := strconv.Itoa(ea)
+		if len(es) < 2 {
+			es = "0" + es
+		}
+		return mant + "e" + esign + es
+	}
+	if ex < 0 {
+		return "0." + strings.Repeat("0", -ex-1) + dig
+	}
+	if len(dig) > ex+1 {
+		return dig[:ex+1] + "." + dig[ex+1:]
+	}
+	return dig + strings.Repeat("0", ex+1-len(dig))
+}
+
+// luSigCount counts the significant digits of a shortest round-tripping form: the
+// mantissa's digits without its leading and trailing zeros ("0.0001220703125" is
+// ten, "100" is one). The exponent, the point and the sign carry no significance.
+func luSigCount(s string) int {
+	if i := strings.IndexByte(s, 'e'); i >= 0 {
+		s = s[:i]
+	}
+	d := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			d = append(d, s[i])
+		}
+	}
+	a, b := 0, len(d)
+	for a < b-1 && d[a] == '0' {
+		a++
+	}
+	for b > a+1 && d[b-1] == '0' {
+		b--
+	}
+	return b - a
 }
 
 // luExpFix rewrites JavaScript's exponent form into C's %g one - always signed, at

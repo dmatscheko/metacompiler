@@ -3,6 +3,7 @@ package abnf
 import (
 	"fmt"
 	"io/ioutil"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -53,6 +54,45 @@ func UnescapeTilde(s string) string {
 	}
 	buf = append(buf, s...)
 	return string(buf)
+}
+
+// floPrecStr is the host global floPrec(v, n): the correctly rounded n
+// SIGNIFICANT DIGIT decimal of |v|, written DIGITS "e" EXP - the digits with no
+// point and the trailing zeros stripped, and EXP the decimal exponent of the
+// first digit. It is the digit string of C's "%.*e".
+//
+// WHY IT IS A HOST GLOBAL AND NOT SCRIPT CODE. The dialect has no toPrecision and
+// no toExponential: a script can only ask for the host's SHORTEST round-tripping
+// form ("" + n). A %g formatter needs the opposite question - the value rounded
+// to a FIXED number of digits - and Lua's tostring is exactly that caller: it
+// tries "%.15g" and, when that does not read back, "%.17g", so 1e15 prints
+// "1e+15" while 1e15+1 prints "1000000000000001.0". Without this the script
+// halves could only guess, and a guess is a --cross divergence against the Go
+// twin, which has strconv.
+//
+// The twins are host id 70 of languages/lib/runtime.c (over shortest_digits with
+// g_mindig = n) and the floPrec binding of languages/metajs-interpreter.abnf
+// (which is this function, reached through the host globals). n is clamped to
+// [1, 17] in every engine: seventeen digits always round-trip a binary64, so
+// nothing above it can be asked for meaningfully.
+func floPrecStr(v float64, n int) string {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v == 0 {
+		return "0e0"
+	}
+	if n < 1 {
+		n = 1
+	}
+	if n > 17 {
+		n = 17
+	}
+	s := strconv.FormatFloat(math.Abs(v), 'e', n-1, 64)
+	i := strings.IndexByte(s, 'e')
+	mant := strings.Replace(s[:i], ".", "", 1)
+	exp, _ := strconv.Atoi(s[i+1:])
+	for len(mant) > 1 && mant[len(mant)-1] == '0' {
+		mant = mant[:len(mant)-1]
+	}
+	return mant + "e" + strconv.Itoa(exp)
 }
 
 // scriptName is the name of one script module: the file (or grammar module) it
@@ -181,6 +221,13 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 
 	vm.Set("unescape", r.Unescape)
 	vm.Set("unescapeTilde", UnescapeTilde)
+
+	// floPrec: fixed-precision decimal digits. See floPrecStr below - the frozen
+	// grammar host (frozenBaseBindings, frozen.go) and the MetaJS program host
+	// (programJSBindings, jsrtint.go) bind the same name to the same function, and
+	// languages/lib/runtime.c is host id 70. The three must agree or the matrix
+	// goes red.
+	vm.Set("floPrec", func(v float64, n int) string { return floPrecStr(v, n) })
 
 	// The UTF-8 byte length of a string. JS .length counts UTF-16 code units,
 	// but the emitters need the byte count of the char arrays they emit

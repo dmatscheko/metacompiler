@@ -364,6 +364,14 @@ func frozenBaseBindings(preventDefaultOutput bool) map[string]interface{} {
 		time.Sleep(time.Duration(rt.toNumber(argAt(args, 0))) * time.Millisecond)
 		return jsUndef
 	})
+	// floPrec(v, n) - the fixed-precision digit string a %g formatter needs and
+	// the dialect cannot express. commonscript.go binds the identical function
+	// for goja, so the two grammar hosts stay in step; floPrecStr's own comment
+	// carries the argument and names the third engine (host id 70 of
+	// languages/lib/runtime.c).
+	b["floPrec"] = jsHostFunc("floPrec", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return floPrecStr(rt.toNumber(argAt(args, 0)), int(jsToInt(rt.toNumber(argAt(args, 1)))))
+	})
 	return b
 }
 

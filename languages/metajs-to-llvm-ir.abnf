@@ -555,7 +555,18 @@ KwDefault   = "default" KwEnd ;
         }
         var params = []
         for (var i = 0; i < arity; i++) { params.push(llvm.ir.NewParam("", i64)) }
-        var sh = m.NewFunc(name, i64, params)
+        // The shim carries a PRIVATE symbol name, not the external's. Nothing looks
+        // it up by name - every routed call goes through primShim, which holds the IR
+        // function itself - so the name is free, and taking the external's name was a
+        // link-time collision waiting to happen: the C floor defines all thirteen of
+        // these, so `-rt-prims -exe` failed with "13 symbol(s) are defined MORE THAN
+        // ONCE" (js_eq, js_ge, js_gt, js_le, js_ne, js_neg, js_not, js_num_str,
+        // js_sne, js_sub, js_tonum, js_typeof, js_ushr) and the two flags could not be
+        // combined at all - open item 12 of docs/runtime-next-plan.md. It also
+        // collided with the module's OWN declare in the self-use case the warning
+        // above reports. The measurement is untouched: it counts what the module still
+        // `declare`s, and a shimmed name never reaches getExtern.
+        var sh = m.NewFunc("jsprim_" + name, i64, params)
         var b = sh.NewBlock("entry")
         var argsV = b.NewCall(getExtern("js_arr_new", 0), [])
         for (var i = 0; i < arity; i++) { b.NewCall(getExtern("js_arr_push", 2), [argsV, sh.Params[i]]) }

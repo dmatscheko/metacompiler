@@ -286,6 +286,23 @@ function s11()
     check("ift15", ("" .. -0) .. "/" .. ("" .. -(-2.5)) .. "/" .. ("" .. - "5.5"), "0/2.5/-5.5")
     check("ift16", -math.mininteger == math.mininteger, true)
     check("ift17", ("" .. -(1/0)) .. "/" .. ("" .. -(-1/0)), "-inf/inf")
+    -- THE PRECISION WINDOW. lua does not print the shortest round-tripping form:
+    -- it writes "%.15g" and, only if that does not read back as the same double,
+    -- "%.17g". So %g's fixed/exponential threshold (exp < -4 or exp >= P) is
+    -- decided by the precision P that was USED, which is why 1e15 is exponential
+    -- and 1e15+1 - which needs 16 digits, hence P = 17 - is not, at the same
+    -- exponent. Each of the five rows below moves a different piece of that rule.
+    check("ift18", ("" .. 1e14) .. "/" .. ("" .. 1e15), "100000000000000.0/1e+15")
+    check("ift19", ("" .. (1e15 + 1)) .. "/" .. ("" .. 1234567890123456.0),
+                   "1000000000000001.0/1234567890123456.0")
+    check("ift20", ("" .. 999999999999999.0) .. "/" .. ("" .. 1e16), "999999999999999.0/1e+16")
+    -- The 15-digit form of the smallest subnormal is NOT its shortest form: it
+    -- round-trips (it is the only double in reach), so lua never asks for 17.
+    check("ift21", ("" .. 5e-324) .. "/" .. ("" .. 2.2250738585072014e-308),
+                   "4.94065645841247e-324/2.2250738585072014e-308")
+    -- exp = -4 is the last fixed one, and exp = -5 the first exponential.
+    check("ift22", ("" .. 1e-4) .. "/" .. ("" .. 1e-5) .. "/" .. ("" .. 0.0001220703125),
+                   "0.0001/1e-05/0.0001220703125")
 end
 
 -- ===== SECTION 12: bitwise operators =====
@@ -653,12 +670,11 @@ function s23()
     check("flo7", 5.5 % -2, -0.5)
     check("flo8", math.fmod(5.5, -2), 1.5)
     check("flo9", math.type(2^53 % 3), "float")
-    -- The shortest round-tripping spelling, which the C floor's own formatter has
-    -- to reach digit for digit. (Real lua prints %.14g/%.17g, so it spells the
-    -- same VALUES with more digits - a formatter difference both halves share and
-    -- section 23 does not try to hide: 1/3 is 0.33333333333333331 there.)
+    -- REAL lua's spelling, which the C floor's own formatter has to reach digit
+    -- for digit: lua writes "%.15g" and, when that does not read back, "%.17g",
+    -- so 1/3 is 0.33333333333333331 and NOT the 16-digit shortest form.
     check("flo10", "" .. (x % y), "0.57522203923063")
-    check("flo11", "" .. (1 / 3), "0.3333333333333333")
+    check("flo11", "" .. (1 / 3), "0.33333333333333331")
     check("flo12", "" .. (0.1 + 0.2), "0.30000000000000004")
     -- The non-finite spellings are Lua's, not JavaScript's.
     check("flo13", ("" .. (1 / 0)) .. " " .. ("" .. (-1 / 0)) .. " " .. ("" .. (0 / 0)), "inf -inf nan")

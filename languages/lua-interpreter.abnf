@@ -1015,23 +1015,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return "" + k
     }
-    // luaFloText finishes an INTEGRAL float's rendering. Lua's own rule
-    // (lobject.c tostringbuff) appends ".0" only when the text is nothing but a
-    // sign and digits, so an exponent form must NOT get one - the old body wrote
-    // "1e+21.0". In exponent form Lua goes through C's %g, whose exponent is always
-    // signed and at least two digits ("1e-07", not "1e-7"), and -0.0 keeps its sign
-    // where JavaScript's String(-0) is "0". Verified against lua 5.5.0. WHICH form
-    // Lua picks is still wrong and is recorded, not guessed - see luFloText in
-    // abnf/jsrtlua.go, which this must stay in step with.
-    function luaFloText(s, n) {
-        if (n == 0 && 1 / n < 0) { s = "-0" }
-        if (s.indexOf("e") < 0) { return s + ".0" }
-        return luaExpFix(s)
-    }
     // JavaScript's exponent form rewritten into C's %g one - always signed, at least
-    // two digits. Applied to the UNBOXED path too, because the box wraps only the
-    // INTEGRAL floats: 1e-7 never reaches luaFloText and still has to print "1e-07".
-    // An integer's text is digits only, so this is the identity on it.
+    // two digits. Only the INTEGER arm of luaNumStr uses it now (where it is the
+    // identity, an integer's text being digits only); the float arm builds its own
+    // exponent, because it also has to know the PRECISION that produced it.
     function luaExpFix(s) {
         var ei = s.indexOf("e")
         if (ei < 0) { return s }
@@ -1045,13 +1032,119 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (exp.length < 2) { exp = "0" + exp }
         return mant + "e" + sign + exp
     }
+    // ---- the float rendering: lua's "%.14g" is really "%.15g, else %.17g" ------
+    //
+    // lobject.c tostringbuff writes a float with LUAI_NUMFFORMAT and then appends
+    // ".0" when the text came out as nothing but a sign and digits. The format is
+    // "%.14g" in the manual and lua_Number2str in luaconf.h, but 5.5's tostring
+    // goes through lua_number2strx's round-trip loop: it tries "%.15g" and, if the
+    // text does not read back as the same double, "%.17g". It never tries 16.
+    // SETTLED against the local lua 5.5.0 over 91 values - 31 hand-picked plus 60
+    // random 64-bit patterns: a 15/16/17 model differs from lua on 10 of them
+    // (1/3 is "0.33333333333333331", not the 16-digit shortest form), 15-then-17
+    // matches all 91.
+    //
+    // The round-trip test needs no parsing: "%.15g" reads back exactly when the
+    // SHORTEST round-tripping form has at most 15 significant digits. (=>) a
+    // 15-digit text that reads back is a round-tripping form of at most 15 digits,
+    // so the shortest is no longer. (<=) the correctly rounded 15-digit decimal is
+    // no further from the value than the shortest form padded with zeros, which
+    // reads back, so it reads back too. The host gives the shortest form as
+    // "" + n; counting its digits is the whole test.
+    //
+    // The DIGITS then come from floPrec (host id 70 of languages/lib/runtime.c,
+    // floPrecStr in abnf/commonscript.go) - the value rounded to a fixed number of
+    // significant digits, which the dialect cannot express and which is NOT the
+    // shortest form padded: 5e-324's fifteen digits are 4.94065645841247e-324.
+    function luaAtoi(s) {
+        var neg = s.charAt(0) == "-"
+        var i = neg ? 1 : 0
+        var v = 0
+        while (i < s.length) { v = v * 10 + (s.charCodeAt(i) - 48); i = i + 1 }
+        if (neg) { return 0 - v }
+        return v
+    }
+    // The significant digits of the host's shortest form: the mantissa's digits
+    // without its leading and trailing zeros ("0.0001220703125" is ten, "100" is
+    // one). The exponent, the point and the sign carry no significance.
+    function luaSigCount(s) {
+        var ei = s.indexOf("e")
+        var m = ei < 0 ? s : s.substring(0, ei)
+        var d = ""
+        var i = 0
+        while (i < m.length) {
+            var c = m.charAt(i)
+            if (c >= "0" && c <= "9") { d = d + c }
+            i = i + 1
+        }
+        var a = 0
+        while (a < d.length - 1 && d.charAt(a) == "0") { a = a + 1 }
+        var b = d.length
+        while (b > a + 1 && d.charAt(b - 1) == "0") { b = b - 1 }
+        return b - a
+    }
+    // C's %g on a POSITIVE finite double, at the precision lua picked. %g is
+    // exponential exactly when exp < -4 || exp >= P, with P the precision that was
+    // USED - which is the whole reason 1e15 is "1e+15" (P = 15, exp = 15) while
+    // 1234567890123456.0 is not (P = 17, exp = 15) - and it strips the trailing
+    // zeros and a bare point in both forms.
+    function luaGStr(n) {
+        var P = luaSigCount("" + n) <= 15 ? 15 : 17
+        var t = floPrec(n, P)
+        var ei = t.indexOf("e")
+        var dig = t.substring(0, ei)
+        var ex = luaAtoi(t.substring(ei + 1))
+        if (ex < -4 || ex >= P) {
+            var mant = dig.length > 1 ? dig.charAt(0) + "." + dig.substring(1) : dig
+            var esign = "+"
+            var ea = ex
+            if (ea < 0) { esign = "-"; ea = 0 - ea }
+            var es = "" + ea
+            if (es.length < 2) { es = "0" + es }
+            return mant + "e" + esign + es
+        }
+        if (ex < 0) {
+            var z = ""
+            var i = 0
+            while (i < 0 - ex - 1) { z = z + "0"; i = i + 1 }
+            return "0." + z + dig
+        }
+        if (dig.length > ex + 1) { return dig.substring(0, ex + 1) + "." + dig.substring(ex + 1) }
+        var pad = ""
+        var j = dig.length
+        while (j < ex + 1) { pad = pad + "0"; j = j + 1 }
+        return dig + pad
+    }
+    function luaAllDigits(s) {
+        var i = 0
+        while (i < s.length) {
+            var c = s.charAt(i)
+            if (c < "0" || c > "9") { return false }
+            i = i + 1
+        }
+        return true
+    }
+    // A finite float. The sign is split off first, so -0.0 keeps its sign where
+    // JavaScript's String(-0) is "0" - and so that %g never sees a negative. Then
+    // tostringbuff's rule: ".0" only when the text is nothing but digits, which an
+    // exponent form is not (the old body wrote "1e+21.0").
+    function luaFloStr(n) {
+        var neg = n < 0 || (n == 0 && 1 / n < 0)
+        var a = neg ? 0 - n : n
+        var s = a == 0 ? "0" : luaGStr(a)
+        if (luaAllDigits(s)) { s = s + ".0" }
+        if (neg) { return "-" + s }
+        return s
+    }
     // How a number renders: an integer without a fraction, a float always with one.
+    // The {__f} box wraps only the INTEGRAL floats, so a non-integral value is a
+    // float whether or not it is boxed - and an integer is never non-integral.
     function luaNumStr(v) {
         if (szIs(v)) { return szStr(v) }
         var n = numOf(v)
         if (n !== n) { return "nan" }   // real Lua prints "nan", not "-nan"
         if (n - n !== 0) { return n > 0 ? "inf" : "-inf" }
-        if (isFlt(v)) { return luaFloText("" + n, n) }
+        if (isFlt(v) || Math.floor(n) !== n) { return luaFloStr(n) }
         return luaExpFix("" + n)
     }
     function luaToStr(v) {

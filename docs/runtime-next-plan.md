@@ -4319,8 +4319,10 @@ agree with each other on every one of them**, so none is this port's:
    (`decpt < -3 || decpt > 15`), byte-identical to real `ruby` on a 28-value probe
    from the interpreter, `llvm.Run` and the native binary, pinned by
    `n16b`..`n16e`. The interpreter's `-0.0` sign loss (`makeNeg`'s `0 - x`) went
-   with it. **`-0.0 % 1.0` is STILL OPEN** and is now VISIBLE rather than masked by
-   the formatter - see item 5 of "WHAT IS STILL OPEN".
+   with it. `-0.0 % 1.0` was then FIXED in all three halves - but `Float#%` is
+   still wrong wherever `floor(x/y)*y` loses precision (9 of an 18-row probe
+   against real ruby), and the right body is `fmod` plus one correction. See
+   item 5 of "WHAT IS STILL OPEN", which carries the rule and the patch.
 3. `Integer#%` on a value past 2^53 is now EXACT where the Go twin is exact by
    accident (arm64 fusion). If the Go twin is ever built for an architecture
    without FMA, `abnf/jsrt.go` and this file diverge again - the fix would be to
@@ -7863,8 +7865,12 @@ it is reported rather than done.
 > wording, `member assignment 'foo' on 5`, from both engines. The site was the last
 > `rt.fail` of `setGoMember` - which is `setMember`'s `default:` arm, not the Go
 > bridge - and the two real bridge failures above it keep `rv.Type()`. A THIRD
-> engine was found to disagree while checking: the metajs INTERPRETER emits a raw
-> goja `TypeError: Value is not an object: 5` here. Both are recorded at item 6 of
+> engine was found to disagree while checking: the metajs INTERPRETER emitted a raw
+> goja `TypeError: Value is not an object: 5` here. **That third engine was fixed
+> 2026-08-04 too** (`metajs-interpreter.abnf`'s assignment-target guard now tests
+> `typeof cur != "object"`, the two tags `set_member` accepts, and names the key),
+> so all four - interpreter, frozen interpreter, `llvm.Run`, native - say
+> `member assignment 'foo' on 5`. Both are recorded at item 6 of
 > "WHAT IS STILL OPEN".
 
 A member
@@ -8067,7 +8073,9 @@ has no first move**, and that is a measured statement rather than a delay.
 # Item 1's **lua precision window** is re-derived and CORRECTED (lua tries 15 then
 # 17, never 16) with the remaining work costed down to the file and the host id,
 # and item 1's **python** bullet is SCOPED - see "PYTHON HAS NO FLOAT TYPE" at the
-# end of this file. Two NEW defects were found by the probes and are recorded at
+# end of this file, where it is now also LANDED (2026-08-04): python has a float
+# type in all three engines, ~640 lines, zero in the C floor, and the section's
+# closing subsection lists the six defects the probes found and did NOT fix. Two NEW defects were found by the probes and are recorded at
 # item 5: ruby's huge-dividend `Float#%` (both halves wrong AND divergent from each
 # other) and the `x * 0` signed-zero trap in the ABNF script dialect.
 # Invariants after the pass: matrix **328/328** (was 325), `--full` **5,852**
@@ -8084,6 +8092,31 @@ has no first move**, and that is a measured statement rather than a delay.
 # for the fourth pass: this list went stale within two commits of being written,
 # twice. An item's verdict is only as good as the commit it names - always re-grep
 # the implementation before acting on a line here.
+#
+# FOURTH PASS, 2026-08-04 from `913bd95`. FOUR items closed and one struck:
+#   - item 1's **lua precision window** LANDED. `floPrec(v, n)` is a host global in
+#     all three MetaJS engines plus both grammar hosts, and the four lua halves
+#     reshape it into %g's form. 700-value probe byte-identical to lua 5.5.0 from
+#     the interpreter, the frozen interpreter, `llvm.Run` and the native binary;
+#     lua 325 -> 330.
+#   - item **12** (`-rt-prims` + the C floor) CLOSED by a ONE-LINE rename, and the
+#     diagnosis was neither of the two shapes the item guessed at - see its line.
+#   - item **13** (`jsdispatch` is a linear chain) STRUCK, measured: LLVM already
+#     lowers the chain to jump tables, so the callee's POSITION costs nothing.
+#   - item **8** (`js_scope_has`) CLOSED - re-grepped, it is in all three places.
+#   - item **6**'s third-engine bullet CLOSED (the metajs interpreter now produces
+#     the floor's own member-assignment diagnostic instead of a goja stack trace).
+# TWO items are open and could not be touched here, both for the same reason: a
+# concurrent agent held `abnf/jsrt.go` and `languages/python-*` for the python float
+# type. Item **5**'s huge-dividend `Float#%` is SETTLED against real ruby and costed
+# to a five-line body per half, and item **9** was re-probed and is much worse than
+# its line said - a HARD FAILURE, not a corner. Both carry their patch at their line.
+# Invariants after the pass: matrix **329/329** (328 + the new `-rt-prims -exe`
+# row), `--full` 5,897 assertions with 0 languages whose halves disagree (python
+# 286 -> 326 is the concurrent agent's, lua 325 -> 330 is this one's), `--cross`
+# 119/0, clang-check 16/16 all agreeing none held, `-freeze` a fixed point after
+# regenerating the snapshot, `MEC_GC=off` 3,711 B/iter with gc RSS flat at
+# 3,309,568, coro-poc `--gc`/`--break` unchanged against a clean `913bd95`.
 
 Every "What is owed" / "Still owed" / "Not fixed here" / "BLOCKED" item in this
 file, in `runtime-merge-plan.md` and in `runtime-rework-plan.md` was walked and
@@ -8164,8 +8197,61 @@ the strength of an uncommitted diff.
        arm too, because the `{__f}` box wraps only the INTEGRAL floats. Pinned by
        `ift10`..`ift12` in `tests/lua-test-full.lua` (3/3 fail against a clean
        `33923d4`); lua 317 -> 320.
-     - STILL OPEN, and the rule recorded here was WRONG - **re-derived and
-       CORRECTED 2026-08-04. lua 5.5.0 tries `"%.15g"` and, if that does not read
+     - ~~STILL OPEN: the precision window.~~ **CLOSED 2026-08-04, in all four
+       halves, exactly as the costing below said and with nothing added to it.**
+       - `floPrec(v, n)` - "|v| rounded to n SIGNIFICANT DIGITS as `DIGITSeEXP`,
+         trailing zeros stripped" - is now a host global in five places: `floPrecStr`
+         in `abnf/commonscript.go` (the function, over `strconv.FormatFloat(v, 'e',
+         n-1, 64)`), bound for goja there, for the frozen grammar host in
+         `frozenBaseBindings` (`abnf/frozen.go`), for a running MetaJS program in
+         `programJSBindings` (`abnf/jsrtint.go`), as `"floPrec"` in
+         `metajs-interpreter.abnf`'s `hostGlobals`, and as **host id 70** of
+         `languages/lib/runtime.c` (`seed_root("floPrec", mk_host(70))`).
+         `abnf/jsrt.go` was NOT touched - the frozen grammar host reaches
+         `standardJSBindings` through `frozenBaseBindings`, which is the file this
+         binding belongs in anyway, and a concurrent agent held that file.
+       - The floor half is the costing's, unchanged: `g_mindig = n`, one
+         `shortest_digits` call, strip the trailing zeros the `g_mindig` floor kept.
+         **No new digit machinery.** It is correct because every caller asks for an
+         `n` at least as large as the shortest form, where the k = n candidate always
+         reads back, so the search stops at k = n and the answer IS `%.ne`'s digits.
+       - **The round-trip test needed no parsing at all, and that is why the script
+         halves stayed small.** `%.15g` reads back exactly when the SHORTEST form has
+         at most 15 significant digits. (=>) a 15-digit text that reads back IS a
+         round-tripping form of at most 15 digits, so the shortest is no longer.
+         (<=) the correctly rounded 15-digit decimal is no further from the value
+         than the shortest form padded with zeros, which reads back. So `"" + n`
+         and a digit count decide P, and `floPrec` supplies only the DIGITS - which
+         are genuinely not the shortest form padded (`5e-324`'s fifteen are
+         `4.94065645841247e-324`).
+       - Four halves reshape `DIGITSeEXP` into %g's form (`exp < -4 || exp >= P`,
+         with P the precision that was USED): `luaFloStr`/`luaGStr`/`luaSigCount`/
+         `luaAtoi`/`luaAllDigits` in `lua-interpreter.abnf`, the same five in
+         `languages/lib/lua-rt.metajs`, and `luFloStr`/`luGStr`/`luSigCount` in
+         `abnf/jsrtlua.go` (which uses `strconv` and `floPrecStr` directly - the Go
+         twin is what `llvm.Run` executes, and it never links `lua-rt.ll`). The old
+         `luFloText` is gone from all three; `luExpFix` stays for the INTEGER arm,
+         where it is the identity.
+       - `luaNumStr` / `js_lustr` / `luNumStr` also had to change WHICH arm a value
+         takes: the `{__f}` box wraps only the INTEGRAL floats, so a non-integral
+         value is a float whether or not it is boxed. It used to reach `luExpFix`
+         with the integers.
+       - **GROUND TRUTH: 700 values, byte-identical.** 400 random 64-bit patterns
+         plus 1e-320..1e308 by decades, `1.2345678901234567e±k`, `1/i` and `i.i` for
+         i in 1..40 - printed by the local `lua 5.5.0` and by the interpreter, the
+         `-frozen` interpreter, `llvm.Run` and the native `-exe` binary. Zero
+         differences in all four. A 27-value hand probe (the whole table below,
+         `-0.0`, both infinities, NaN) is identical too.
+       - Pinned by `ift18`..`ift22` and the corrected `flo11` in
+         `tests/lua-test-full.lua`; lua 325 -> 330. **Discriminating power measured**
+         against a clean `913bd95` archive: `ift18`, `ift20`, `ift21`, `ift22` and
+         `flo11` fail 2/2 in BOTH halves there. `ift19` PASSES there and is
+         deliberate - it is the regression guard for the P = 17 branch, the two
+         values that must NOT go exponential at exp = 15.
+       - `flo11` had pinned OUR old answer with a comment saying real lua differs.
+         It now pins real lua's `0.33333333333333331`.
+     - The derivation, kept because it is the rule the code implements:
+       **lua 5.5.0 tries `"%.15g"` and, if that does not read
        back as the same double, `"%.17g"`. It never tries `"%.16g"`.** Settled by
        building the 15/16/17 model as a C program against the local `lua 5.5.0`
        over 91 values - 31 hand-picked plus 60 RANDOM 64-bit patterns: the
@@ -8202,7 +8288,12 @@ the strength of an uncommitted diff.
          is `exp < -4 || exp >= P` with **P the precision that was used** - which
          is the whole reason `1e15` is `1e+15` (P = 15, exp = 15) while
          `1234567890123456.0` is not (P = 17, exp = 15).
-       - **NOT DONE HERE, and this is the reason, not an excuse.** It is a
+       - ~~**NOT DONE HERE, and this is the reason, not an excuse.**~~ **DONE
+         2026-08-04 - and the estimate held: the whole thing is one commit, it moved
+         no gate, and the gates it needed (`-freeze` regenerated, `runtime.ll` and
+         `lua-rt.ll` regenerated, matrix / `--full` / `--cross` / clang-check) all
+         came back green.** The paragraph is kept because the SHAPE of the estimate
+         was right and is worth reusing. It was a
          four-file change across two runtimes plus a new global in three engines,
          and every intermediate state is a `--cross` divergence, so it is one
          commit or none - and the remaining session budget was not enough to land
@@ -8310,19 +8401,46 @@ the strength of an uncommitted diff.
      gives `-0`); it is multiplying by ZERO that folds. Both MetaJS halves
      therefore divide a zero by -1; `abnf/jsrt.go` says `math.Copysign(0, x)`,
      because Go is IEEE all the way down.
-   - **AND A NEW DEFECT THE PROBE FOUND - OPEN, and it is a `--cross` divergence
-     that `--cross` cannot see.** `Float#%` on a HUGE dividend is wrong in both
-     halves AND they disagree with each other: real ruby answers `1.0e308 % 3.0`
-     `= 2.0` and `-1.0e308 % 3.0 = 1.0`; the interpreter answers `0.0` and `-0.0`,
-     the compiler `4.9896007738368e+291` and its negation. Present at `56e31c1`
-     and untouched by this change (verified from the clean archive). The cause is
-     that `floor(x/y)*y` is meaningless at that magnitude - the interpreter takes
-     it literally, the layer 2 runs it through `rbFmaSub`'s exact two-product,
-     which is exact about the WRONG expression. The right body is `fmod`, and
-     `%` in this dialect is fmod for `1e308 % 3` (measured: 2 in the interpreter,
-     the frozen interpreter and the native floor) but NOT for `1e308 % 2.5`, where
-     all three say `0` and node says `1`. So it needs its own settling; no test
-     covers a huge-dividend modulo today, which is why the suites are silent.
+   - **AND A NEW DEFECT THE PROBE FOUND - STILL OPEN, now SETTLED and COSTED, and
+     it is bigger than "huge dividend" (2026-08-04).** `Float#%` is wrong in both
+     halves AND they disagree with each other whenever `floor(x/y)*y` loses
+     precision: real ruby answers `1.0e308 % 3.0 = 2.0` and `-1.0e308 % 3.0 = 1.0`;
+     the interpreter answers `0.0` and `-0.0`, the compiler `4.9896007738368e+291`
+     and its negation. **Measured over an 18-row probe against `ruby 2.6.10p210`
+     (`Float#%` is unchanged in 3.x): 9 of the 18 rows are wrong in the
+     interpreter**, and they are not all astronomical -
+     `123456789012345678.0 % 7.0` is `3.0` in real ruby and `0.0` here, and
+     `1.0e300 % 7.3` is `6.570033512034619` and `-0.0` here.
+     - **THE RULE, settled.** numeric.c `flodivmod` is
+       `mod = fmod(x, y); if (y*mod < 0) mod += y;` and nothing else. That gets the
+       divisor's sign, the dividend's sign on a zero (which is why the `-0.0 % 1.0`
+       fix above still holds - it falls out instead of being special-cased) and the
+       huge dividends, all three from one body. Checked against real ruby on all 18
+       rows including `1.0e308 % 2.5 = 1.0` and `-1.0e308 % 2.5 = 1.5`.
+     - **THE DIALECT'S `%` IS FINE, and the claim recorded here that it was not is
+       WITHDRAWN.** This item used to say `1e308 % 2.5` gives `0` in all three
+       engines where node says `1`. It was measured on a value built by multiplying
+       1.0 by ten 308 times, which is `9.999999999999998e+307`, not `1e308` - and
+       for THAT value node also says `0.5`, which is what all four MetaJS engines
+       say. Re-probed properly: MetaJS's `%` is fmod in the interpreter, the frozen
+       interpreter, `llvm.Run` and the native floor. (A side finding from building
+       that probe: **MetaJS has no exponent form in a numeric literal** - `1e308`
+       parses as the identifier `e308`. Not a defect of this item; recorded because
+       it costs a probe every time.)
+     - **NOT FIXED HERE, and the reason is file ownership, not difficulty.** The
+       three halves are `rubyFloMod` in **`abnf/jsrt.go`**, `numBin`'s `%` arm in
+       `ruby-interpreter.abnf` and `rbNumBin`'s `%` arm in
+       `languages/lib/ruby-rt.metajs`. A concurrent agent held `abnf/jsrt.go` for
+       the python float type, and landing two of the three halves is a `--cross`
+       divergence - so it is all three or none. The Go half is:
+       `m := math.Mod(x, y); if m != 0 && y*m < 0 { m += y }; return m` (keep the
+       `math.Copysign(0, x)` guard only if `math.Mod` is found not to carry the
+       dividend's sign onto a zero). The other two are the same four lines over the
+       dialect's own `%`, with `rbZeroSign`/`zeroSigned` still doing the zero.
+       `rbFmaSub`'s exact two-product becomes dead on this path - it was exact about
+       the wrong expression.
+     - No test covers a non-trivial modulo today, which is why the suites are
+       silent; the 18 rows above are the ratchet section to add with the fix.
 
 6. ~~**The `die3` error-message divergence.**~~ **CLOSED 2026-08-04, in the Go
    twin.** `llvm.Run` said `cannot set member 'foo' on float64` (the Go reflect
@@ -8339,15 +8457,22 @@ the strength of an uncommitted diff.
    the user has to fix. Verified: `var x = 5; x.foo = 1` now prints
    `js runtime error: member assignment 'foo' on 5` from BOTH `llvm.Run` and the
    native binary.
-   - **A THIRD engine disagrees, and it is worse - newly measured, OPEN.** The
-     metajs INTERPRETER does not produce a controlled diagnostic here at all: it
-     lets the host through, printing
+   - ~~**A THIRD engine disagrees, and it is worse.**~~ **CLOSED 2026-08-04.** The
+     metajs INTERPRETER produced no controlled diagnostic here at all: it let the
+     host through, printing
      `TypeError: Value is not an object: 5 at languages/metajs-interpreter.abnf:...`
-     with a goja stack trace. `languages/metajs-interpreter.abnf:1274` guards only
-     the undefined/null target (`member assignment on undefined`, itself missing
-     the key that the other two print). The matrix cannot see it - the three
-     `tests/metajs-fail-test*.js` entries are the only ones that exercise this
-     path and none asserts the message text (item 10).
+     with a goja stack trace, because the guard tested only the undefined/null
+     target and named neither the key. It now reads
+     `if (cur == undefined || typeof cur != "object")` and fails with
+     `member assignment '<key>' on <value>` - the loose `==` catching null as well
+     as undefined, and `typeof v == "object"` being exactly the two tags
+     `set_member` accepts (6 object, 5 array, `runtime.c:2949`). Verified:
+     `var x = 5; x.foo = 1` now says `member assignment 'foo' on 5` from the
+     interpreter, the frozen interpreter, `llvm.Run` and the native binary, and
+     an undefined target says `member assignment 'foo' on undefined` in all four.
+     The matrix still cannot see it - the three `tests/metajs-fail-test*.js`
+     entries are the only ones that reach this path and none asserts the message
+     text - so this one is proved by probe, unlike the floor's abort path (item 10).
 
 ## Structural - work that is understood and unstarted
 
@@ -8380,19 +8505,42 @@ the strength of an uncommitted diff.
      rows). The matrix alone would not have caught it - `llvm.Run` uses the Go
      twin's `js_gospread`, not the floor's.
 
-8. **`js_scope_has(s, n)`, and the `py_setvar` residue behind it.** A name bound
-   strictly below a binding boundary AND above it. The floor's scope API landed as
-   HOST BUILTINS (`scopeHas`, id 67, "THIS scope only, no chain walk", asserted in
-   three engines); the EXTERN does not exist -
-   `grep 'js_scope_has' languages/lib/runtime.c abnf/jsrt.go` is empty, while the
-   other six `js_scope_*` are there. Three lines of `runtime.c` and three of
-   `abnf/jsrt.go`. "What is owed, and what generalises" (PYTHON) item 2.
+8. ~~**`js_scope_has(s, n)`, and the `py_setvar` residue behind it.**~~ **CLOSED,
+   and it was already closed when this list was written - re-grepped 2026-08-04 at
+   `913bd95`.** The extern is `languages/lib/runtime.c:4700` and
+   `abnf/jsrt.go:5665`, and `python-to-llvm-ir.abnf:1486` calls it from
+   `pyClassFill`'s `py_clsfill1`. The line above was measured before `d9014d7`
+   landed and never re-checked.
 
-9. **`pyAnnot` is static where the Go twin is dynamic.**
-   `languages/python-to-llvm-ir.abnf:1440` decides "is there an `__annotations__`
+9. **`pyAnnot` is static where the Go twin is dynamic - and this is NOT a corner,
+   it is a HARD FAILURE. Re-probed 2026-08-04 and the line below understated it.**
+   `languages/python-to-llvm-ir.abnf:1442` decides "is there an `__annotations__`
    dict in THIS scope already" at compile time (`pyAnnotHere`), where `abnf/jsrt.go`
-   asks `sc.find` at run time. They differ only for an annotation the program does
-   not REACH. "What is owed, and what generalises" (PYTHON) item 3.
+   asks `sc.find` at run time. The old verdict - "they differ only for an
+   annotation the program does not REACH" - misses that the flag is STICKY: an
+   unreached annotation sets it, so the next REACHED one skips the
+   `js_scope_decl` and the dict is never created at all.
+
+       class A:
+           if False:
+               z: int = 1
+           y: int = 2
+       print(A.__annotations__)
+
+   CPython 3.14 prints `{'y': <class 'int'>}`, `python-interpreter.abnf` prints
+   `{'y': 'int'}` (the string-annotation gap, a different item), and the COMPILER
+   half dies with `js runtime error: variable not defined: __annotations__` -
+   from `llvm.Run` and from the native binary. A `--cross` divergence and a crash,
+   invisible because no test annotates inside an unreached branch.
+   - **It is now a three-line fix, because item 8 supplied the missing piece.**
+     Replace the `if (!pyAnnotHere)` guard with an emitted
+     `js_scope_has(envV, "__annotations__")` test - the runtime question the Go
+     twin already asks, and the extern that did not exist when this was written.
+     `pyEnsureAnnot` (`:1520`) does NOT cover it: that seeds the dict on the CLASS
+     after the body has run, and this failure happens inside the body.
+   - **Not fixed here for the file-ownership reason only** - `languages/python-*`
+     was held by a concurrent agent. "What is owed, and what generalises"
+     (PYTHON) item 3.
 
 10. ~~**Automating the native fail-tests.**~~ **CLOSED 2026-08-04. Matrix 325 ->
     328.** `.vscode/launch.json` gained three `-exe` rows for
@@ -8465,16 +8613,51 @@ the strength of an uncommitted diff.
     `runtime-merge-plan.md`, "Move 1, `case_map` - EXECUTED IN FULL, MEASURED, AND
     REVERTED".
 
-12. **`-rt-prims` and the C floor still cannot be combined in one `-exe` build**
-    (both define the 13 derived primitives, so the link would fail with a duplicate
-    symbol - now correctly DIAGNOSED as one, `9ee6fcc`, but still a failure).
-    `-rt-prims` is a measurement flag with no `-exe` entry in the matrix, so nothing
-    is regressing; splitting the derived 13 into a second `.ll` would fix it when it
-    is wanted. `runtime-rework-plan.md` phase 4, "Not done".
+12. ~~**`-rt-prims` and the C floor still cannot be combined in one `-exe`
+    build.**~~ **CLOSED 2026-08-04 by a ONE-LINE rename, and the diagnosis was
+    NEITHER of the two shapes this item guessed at.** It IS a duplicate-symbol
+    collision - `error: 13 symbol(s) are defined MORE THAN ONCE among the linked
+    inputs: js_eq js_ge js_gt js_le js_ne js_neg js_not js_num_str js_sne js_sub
+    js_tonum js_typeof js_ushr` - but the fix is not splitting the floor. The
+    colliding definition is the SHIM `registerPrim` emits, and **nothing looks that
+    shim up by name**: every routed call goes through the `primShim` map, which
+    holds the IR function itself. It took the external's name for no reason. It is
+    now `m.NewFunc("jsprim_" + name, ...)` (`metajs-to-llvm-ir.abnf`), and
+    `-rt-prims -exe` links and runs: `features: 255 checks, 0 failures`.
+    - **The measurement is provably untouched**, which was the risk: the emitted
+      `declare` set under `-rt-prims` (36 lines) is byte-identical to a clean
+      `913bd95` build's. It counts what the module still declares, and a shimmed
+      name never reaches `getExtern`.
+    - The same rename removes a second latent collision this item did not name: in
+      the self-use case `registerPrim` already warns about, the module carried a
+      `declare` AND a `define` of one name.
+    - Now guarded: `.vscode/launch.json` gained "MetaJS features (compiler, MetaJS
+      runtime primitives + the C floor, -exe)". Matrix 328 -> 329.
 
-13. **`jsdispatch` is a linear compare chain**, O(number of functions) per call. Not
-    visible on any benchmark here; a program with thousands of functions would want
-    a binary search or a real table. `runtime-rework-plan.md` phase 4, "Not done".
+13. ~~**`jsdispatch` is a linear compare chain**, O(number of functions) per
+    call.~~ **STRUCK 2026-08-04, NOT WORTH THE COMPLEXITY - measured first, as the
+    item asked.** The callee's POSITION in the chain costs nothing, because LLVM
+    does not emit the chain: `objdump` of the 800-function binary shows
+    `sub / cmp / ldrb / br x10` - a **jump table**, in a small tree of them.
+    - 3,000,000 indirect calls through a closure, native `-exe`, identical bodies
+      (`function fN(x) { return x + 1 }`) so only the index differs, best of 3:
+
+      | functions in the module | callee | time |
+      |---|---|---|
+      | 800 | index 0 (first compared) | 0.89 s |
+      | 800 | index 799 (last compared) | **0.88 s** |
+
+      First and last are the same to within noise. A linear chain would have cost
+      799 compares per call on the second row.
+    - The growth that IS there with module size - 20 functions 0.54 s, 800 0.89 s,
+      3000 1.55 s - **is the collector, not the dispatch**: with `MEC_GC=off` all
+      three run in 0.33-0.38 s. The extra top-level closures are live roots walked
+      on every collection. Same shape as the `case_map` pinned-constants finding of
+      item 11, and the same lesson: measure the collector before blaming the code.
+    - So the whole indirect-call path costs ~115 ns per call (0.35 s / 3M with the
+      collector off), consistent with item 11's 120 ns floor -> layer-2 call, and
+      none of it is the table. `runtime-rework-plan.md` phase 4's "Not done" entry
+      for this can be struck with it.
 
 ## Not open, listed here because they read as open somewhere else
 
@@ -8598,3 +8781,102 @@ double holding `2**70` prints `1.1805916207174113e+21` where CPython prints
 gates on LITERAL TEXT. It lives at the same `pstr` fallthrough and should be
 scoped alongside. And `print(type(1.0))` will still read `[object Object]` unless
 `pstr` also gains a `__isclass` arm - so the fix will not LOOK fixed without it.
+
+## LANDED, 2026-08-04 - what it actually cost, and what it did not fix
+
+**Done, atomically, and green on every gate.** The scope study above was right
+about the shape and generous about the size: the box, the renderer and the
+promotion rules came to **~640 hand-written lines across four files**, not the
+700-950 estimated, and the C floor really did need **zero**.
+
+| file | what landed |
+|---|---|
+| `languages/python-interpreter.abnf` | `pyFlo`/`isFlo`/`floVal`/`pyNumeric`/`floNegate`, `floSplit10`/`floZeros`/`floDigits`/`floStr`, `floOp`, `floEq`, `pyIsFloText`, and the arms in `binOp`/`boxOp`/`pyEq`/`pstr`/`pyTypeOf`/`pytruthy`/`makeNeg`/`pyConvert`/`pyToInt`/`sum`/`abs`/`pyMinMax`/`pyFormat`/`pyFormatBody`/`dictFind`/`pyKeyAlias`/`core.keyEq` |
+| `abnf/jsrt.go` | `jsPyFlo` (a POINTER - see below), `pyIsFlo`/`pyIntOrFlo`/`pyIsNumeric`/`pyNumEq`/`pyToF`/`pyClassName`, `pyFloStr`/`pyFloDigits`, arms in `truthy`/`toNumber`/`toString`/`toGoNatural`/`typeOf`/`strictEq`/`dictScan`(new `dictKeyEq`)/`pyKeyAlias`/`pyDictFind`/`pyEqual`/`pyTypeName`/`pyString`/`js_pybin`/`js_pyunary`/`js_pyfloat`/`js_pysum`/`pyArith`/`pyFormat`/`pyFormatBody`, and the two new externs `js_pyflo` and `js_pyabs` |
+| `languages/lib/python-rt.metajs` | `pyIsFlo`/`pyMkFlo`/`pyIsNumeric`/`pyIntOrFlo`/`pyKeyEq`/`pyClassName`/`pyAToF`/`pyFloNegate`, `pyBSplit10`/`pyBZeros`/`pyBFloDigits`/`pyBFloStr`, `pyNum` unboxing, and the arms in `pyStr`/`pyTypeName`/`pyEqual`/`pyEqBoolVal`/`pyAEqual`/`pyATruthy`/`pyDTruthy`/`pyAJsTypeOf`/`pyAStrictEq`/`pyAJsAdd`/`pyAArith`/`js_pybin`/`js_pyunary`/`js_pyfloat`/`js_pysum`/`pyBFormatBody`/`js_pyformat`/`pyDictFind`/`pyKeyAlias` |
+| `languages/python-to-llvm-ir.abnf` | `makeFloatLit` emits `js_pyflo` instead of folding a constant; `abs` binds `js_pyabs` instead of JS `Math.abs` (6 lines) |
+| `languages/lib/runtime.c` | **nothing**, as predicted |
+
+### The five ranked risks, as they actually behaved
+
+1. **Dict and set keys** - the alias approach was right and needed one more
+   step: the chain is tried TWICE, because a float box's alias is the plain
+   number and the plain number's is the bool, so `{True: "t"}[1.0]` is two hops.
+   The OTHER direction (a dict that HOLDS a box, looked up with an int) cannot be
+   reached by an alias at all, because a box is never in the key index - so all
+   three engines grew a key-equality hook on the SCAN they already fall back to
+   (`core.keyEq`, `rt.dictKeyEq`, `pyKeyEq`). Cost: no new scan on any path that
+   did not already scan.
+2. **`is` / `strictEq`** - this is the one place the estimate under-read the
+   work. `x = 1.0; y = x; x is y` and `1.0 is 1.0` and `nan is nan` are all true
+   in CPython while `float('nan') is float('nan')` is false, and a VALUE struct
+   can express none of that, since NaN != NaN. **`jsPyFlo` is therefore a
+   pointer**, `*jsPyFlo`, and all three engines run the identical rule
+   `(a === b) || (both are floats && their doubles are ===)`. Found by the
+   ratchet assertion, not by reasoning.
+3. **The `pyBoxed` gate** - a non-event. The box is deliberately NOT `pyBoxed`,
+   and `floOp` sits AHEAD of the bigint/complex tower in `binOp`, so the
+   three-way lattice never had to be written: a float meeting a big is settled by
+   the float rules and a float meeting a complex falls through to the complex
+   ones. `10**28 / 1` needed one helper (`pyToF` / `pyAToF`), because
+   `rt.toNumber` has no `*jsBigInt` arm.
+4. **`//` and `%`** - exactly as scoped, one `pyIntOrFlo` helper per engine.
+5. **Three byte-identical renderers** - held. `--cross` is 119/0.
+
+### The renderer rule, confirmed
+
+`decpt <= -4 || decpt > 16`, no forced `.0` in exponential form, exponent signed
+and zero padded to two digits, one significant digit allowed, lowercase
+`nan`/`inf`. Pinned at both boundaries (`1e15`/`1e16`, `1e-4`/`1e-5`) and at
+`5e-324` and `1.7976931348623157e+308`.
+
+### Where the assertions went, and their discriminating power
+
+`tests/python-test-full.py` **SECTION 26** (40 checks, python 286 -> **326**) and
+15 checks in `tests/python-test-features.py`, which is the DEFAULT matrix and
+therefore the hard gate. Measured against a clean archive of `913bd95`: section
+26 fails **24 of 40** in the old interpreter and **25 of 40** in the old
+compiler, and 0 of 40 in all three engines now (interpreter, `llvm.Run`, and the
+native `-exe` binary, which were diffed byte for byte on three probe files).
+
+### Found while probing, NOT fixed, each measured at `913bd95`
+
+- **The compiler binds no builtin TYPE objects.** `isinstance("a", str)`,
+  `isinstance(1, int)`, `type(1) == int` and `type(1) is int` are all `False`
+  under `python-to-llvm-ir.abnf` and all `True` under the interpreter - six for
+  six on a clean `913bd95`, so this predates the float box and is not its debt.
+  `rt.pyIsInstance` ALREADY accepts a builtin class object as its target
+  (`jsrt.go`); what is missing is that `declBuiltin` binds `float`/`int`/`str`/
+  `list`/`dict`/`set`/`bool` to CONVERSION CLOSURES, so the name never holds the
+  class object. The fix is to bind `js_pybuiltincls` for those names and teach
+  `js_pycall` that calling a builtin class object converts - which touches the
+  call path of every Python program and is a job of its own. It is why SECTION 26
+  asserts the type through `str(type(1.0)) == "<class 'float'>"` rather than
+  through `isinstance`.
+- **The compiler's `print()` does not honour `__repr__`.** A user instance with
+  `__repr__` prints `[object Object]` under `python-to-llvm-ir.abnf` and `V(3)`
+  under the interpreter, at `913bd95` as now.
+- **`%`-string formatting is unimplemented in BOTH halves**: `"%s" % "hi"` is
+  `NaN`, because `binOp("%")` on a string falls into `fmod`. Both halves agree,
+  so `--cross` is blind to it.
+- **`parseFloat("1e400")` is `NaN` under `-frozen` and `Infinity` under goja** -
+  a live FROZEN-DIFF in the script dialect itself, hit the moment a test writes
+  the overflow literal. SECTION 26 builds its infinity as `1e308 * 10` instead
+  and says why at the line.
+- **`10**30` overflows to `5076944270305264000` in the INTERPRETER** (its `**`
+  on two small ints never enters the big path) where the compiler folds it to a
+  double - a pre-existing halves divergence, unchanged. `pyIsBigText` gating on
+  literal TEXT (the `2**70` case named above) is the same defect from the other
+  side.
+- **A tuple prints as a list**: `(1.0, 2)` reads `[1.0, 2]` in both halves.
+
+### The dialect trap that was predicted and did bite
+
+`-0.0`. `0 - 0.0` is `+0.0` and the tag engine keeps an integral value as an
+INTEGER, so neither `0 - x` nor `x * -1` can make a negative zero; every engine
+therefore has a `floNegate` / `pyFloNegate` spelled `0 / (0 - 1)`. `repr(-0.0)`
+is `-0.0` in all three.
+
+`sum()` needed the `var t = anytype` escape hatch in the interpreter for the same
+old reason: MetaJS is TYPED and an accumulator that started as the number 0
+cannot later hold a box.

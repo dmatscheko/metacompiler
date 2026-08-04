@@ -4461,6 +4461,51 @@ long host_call(long id, long self, long args) {
 	 * A generator is an OBJECT to typeof in all three halves, so this is a
 	 * refinement of typeof and never contradicts it. */
 	if (id == 69) { return mk_bool(tag_of(arg_at(args, 0)) == 15); }
+	/* floPrec(v, n): the correctly rounded n SIGNIFICANT DIGIT decimal of |v|,
+	 * written DIGITS "e" EXP - the digits with no point and the trailing zeros
+	 * stripped, and EXP the decimal exponent of the FIRST digit. It is the digit
+	 * string of C's "%.*e", and it is the one thing a shortest-form printer
+	 * cannot answer: a %g formatter has to be able to ask for a FIXED number of
+	 * digits. Lua's tostring is exactly that caller - it tries "%.15g" and, if
+	 * that does not read back, "%.17g" - and neither JS-dialect half has
+	 * toPrecision, so without this the script halves could only guess.
+	 *
+	 * shortest_digits already IS the algorithm: its candidate for k digits is
+	 * the exact value rounded to k, nearest with ties to even, which is what
+	 * "%.ke" writes. g_mindig = n starts the search at k = n, and every caller
+	 * asks for an n at least as large as the shortest form, where the k = n
+	 * candidate always reads back - so the search stops there and the answer IS
+	 * the n digit rounding. The trailing zeros it keeps (g_mindig floors its own
+	 * strip) come off here, because the CALLER decides how many digits to show.
+	 *
+	 * The twins are floPrecStr in abnf/commonscript.go (goja and the frozen
+	 * grammar host) and the floPrec binding of languages/metajs-interpreter.abnf. */
+	if (id == 70) {
+		long v = arg_num(args, 0);
+		long nd = arg_num(args, 1);
+		char digs[32];
+		char out[64];
+		long e10;
+		long nn;
+		long o = 0;
+		long i = 0;
+		long saved;
+		if (d_is_nan(v) || d_is_inf(v) || d_is_zero(v)) { return mk_cstr("0e0"); }
+		nd = d_is_nan(nd) ? 1 : d_to_long(d_trunc(nd));
+		if (nd < 1) { nd = 1; }
+		if (nd > 17) { nd = 17; }
+		saved = g_mindig;
+		g_mindig = nd;
+		e10 = shortest_digits(v, digs);
+		nn = g_ndig;
+		g_mindig = saved;
+		while (nn > 1 && digs[nn - 1] == 48) { nn = nn - 1; }
+		while (i < nn) { out[o] = digs[i]; o = o + 1; i = i + 1; }
+		out[o] = 101; o = o + 1;                         /* 'e' */
+		if (e10 < 0) { out[o] = 45; o = o + 1; e10 = 0 - e10; }
+		o = o + int_digits(d_from_long(e10), out + o);
+		return mk_str(out, o);
+	}
 	die("unknown host function");
 	return H_UNDEF;
 }
@@ -5203,6 +5248,7 @@ void boot(void) {
 	seed_root("scopeHas", mk_host(67));
 	seed_root("scopeDecl", mk_host(68));
 	seed_root("isGenerator", mk_host(69));
+	seed_root("floPrec", mk_host(70));
 	seed_root("Infinity", mk_num(DINF));
 	seed_root("NaN", mk_num(DNAN));
 	seed_root("anytype", cell_new(12));
