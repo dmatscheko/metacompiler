@@ -1017,6 +1017,54 @@ head
     y = 20
     check("corp51", len(f"{2:{y=}}") == 20)
 
+# ===== SECTION 25: a bool IS an int =====
+# `class bool(int)`, so True == 1 and hash(True) == hash(1), and a dict or a set
+# holds ONE entry for the two of them. Every check here was wrong in ALL THREE
+# engines at 9689f81 - the interpreter, llvm.Run and the native binary agreed with
+# each other and disagreed with CPython - so neither the --full halves comparison
+# nor --cross nor the byte-identity matrix could see it. That is the reason for a
+# section of its own next to 23: 23 is "the halves disagreed", this is "the halves
+# agreed and were both wrong". Expected values are CPython 3.14.6's.
+def s25():
+    # Value equality, and every container equality built on it.
+    check("bki1", True == 1 and False == 0 and True == 1.0)
+    check("bki2", not (True == 2) and not (True != 1) and not (False == 1))
+    check("bki3", [True] == [1] and (True,) == (1,) and [False, 1] == [0, True])
+    # Membership in a list is ==, not identity.
+    check("bki4", 1 in [True] and True in [1] and 0 in [False])
+    # A dict: one key, and the FIRST key object is the one that stays - only the
+    # VALUE is overwritten. str() of the key list is what makes that observable;
+    # `== [True]` could not, since [True] == [1] now holds.
+    d = {}
+    d[True] = "t"
+    d[1] = "one"
+    check("bki5", len(d) == 1 and d[True] == "one" and d[1] == "one")
+    check("bki6", str(list(d.keys())) == "[True]")
+    e = {}
+    e[1] = "one"
+    e[True] = "t"
+    check("bki7", len(e) == 1 and e[1] == "t" and str(list(e.keys())) == "[1]")
+    # False / 0, the other half of the pair.
+    g = {}
+    g[False] = "F"
+    g[0] = "z"
+    check("bki8", len(g) == 1 and g[False] == "z")
+    check("bki9", str(list(g.keys())) == "[False]")
+    # The read paths that are not the subscript: `in`, .get, del, dict ==.
+    check("bki10", True in {1: "x"} and 1 in {True: "x"})
+    check("bki11", {1: "a"}.get(True, "miss") == "a")
+    k = {True: "a"}
+    del k[1]
+    check("bki12", len(k) == 0)
+    check("bki13", {True: 1} == {1: 1} and {False: 1} == {0: 1})
+    # A set is the same rule through a different container.
+    check("bki14", len({1, True}) == 1 and len({False, 0}) == 1)
+    check("bki15", 1 in {True} and True in {1})
+    # And the guard rails: an int that is not 0 or 1 is unaffected, and a bool
+    # against a non-number stays false rather than becoming equal to 1.
+    check("bki16", len({True: 1, 2: 2}) == 2 and 2 in {True: 1, 2: 2})
+    check("bki17", not (True == "1") and not (True == None) and not (True == [1]))
+
 # ===== END SECTIONS =====
 
 def main():
@@ -1044,5 +1092,6 @@ def main():
     s22() # SECTION-CALL 22
     s23() # SECTION-CALL 23
     s24() # SECTION-CALL 24
+    s25() # SECTION-CALL 25
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

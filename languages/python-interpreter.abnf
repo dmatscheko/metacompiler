@@ -1215,11 +1215,77 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function newSet() { return {__dict: true, __set: true, keys: [], vals: []} }
     function isSet(v) { return v !== null && v !== undefined && typeof v == "object" && v.__set === true }
     function setAdd(s2, v) { if (dictFind(s2, v) < 0) { s2.keys.push(v); s2.vals.push(true); s2.__idx = null } }
+
+    // ----- Python's key rule: a bool IS an int -------------------------------
+    //
+    //     d = {}; d[True] = "t"; d[1] = "one"
+    //
+    // is ONE entry in CPython 3.14 (bool subclasses int, so True == 1 and
+    // hash(True) == hash(1)); d[True] is "one", and list(d) is [True] - the FIRST
+    // key object stays and only the VALUE is overwritten. So the alias is tried at
+    // LOOKUP and a key is never normalized on the way in, or the dict would print
+    // 1 where CPython prints True.
+    //
+    // core.keyEq cannot carry this. interp-core's dictFind consults an INDEX keyed
+    // by dictKeyId, which gives "btrue" and "n1" two different buckets and then
+    // answers -1 without ever reaching dictKeyEq; core.keyEq works for dart, swift
+    // and php only because THEIR extra-equal keys are boxed objects, whose
+    // dictKeyId is null and which therefore force the scan. Overriding dictFind
+    // itself is the one hook that covers the index too - and it covers dictSet,
+    // the set algebra and `in` with it, since all of them go through it.
+    //
+    // Overridden by ASSIGNMENT, not by a second declaration: see makeTargetRef.
+    var coreDictFind = dictFind
+    dictFind = function(d, k) {
+        var i = coreDictFind(d, k)
+        if (i >= 0) { return i }
+        var alias = pyKeyAlias(k)
+        if (alias !== undefined) { return coreDictFind(d, alias) }
+        return 0 - 1
+    }
+    // The other spelling of a key Python considers equal to this one. Only the
+    // bool/int pair can differ: an int and a float are the same plain number here.
+    // -0.0 == 0, so a negative zero lands in the False arm, as CPython puts it.
+    function pyKeyAlias(k) {
+        if (k === true) { return 1 }
+        if (k === false) { return 0 }
+        if (typeof k == "number") {
+            if (k == 1) { return true }
+            if (k == 0) { return false }
+        }
+        return undefined
+    }
     // Structural equality, Python\'s ==: sequences element-wise, dicts and sets by
     // their contents (a set ignores order), everything else by identity. A user class
     // may override it with __eq__.
+    // The int a bool IS (True is 1, False is 0), against a value that is not a
+    // bool. A boxed number (arbitrary precision int, complex) compares by VALUE
+    // through boxOp, the same call pyEq makes for it; everything else - a string, a
+    // list, None, an instance - is simply not equal to an int.
+    function pyBoolEqVal(other, bv) {
+        var n = bv ? 1 : 0
+        if (typeof other == "number") { return other == n }
+        if (other !== null && other !== undefined && typeof other == "object" && pyBoxed(other)) {
+            return boxOp("==", other, n).v
+        }
+        return false
+    }
+
     function pyEq(a, b) {
         if (a === b) { return true }
+        // A bool IS an int, so True == 1, True == 1.0, False == 0 and every
+        // container equality built on them ([True] == [1], {True: 1} == {1: 1}).
+        // Ahead of everything else because a bool is never a container, never a
+        // boxed number and never a user object, so nothing below can be skipped.
+        // Taken out of line rather than rewriting the operand: MetaJS is TYPED and
+        // a variable that held a boolean cannot hold a number - goja accepts the
+        // assignment and -frozen does not, which is the FROZEN-DIFF this file's
+        // first attempt produced.
+        if (typeof a == "boolean" || typeof b == "boolean") {
+            if (typeof a == "boolean" && typeof b == "boolean") { return false }
+            if (typeof a == "boolean") { return pyBoolEqVal(b, a) }
+            return pyBoolEqVal(a, b)
+        }
         // A boxed number (complex, arbitrary precision integer) compares by VALUE,
         // so a big that happens to hold 1 equals the ordinary number 1. Gated on a
         // typeof test first, like binOp.

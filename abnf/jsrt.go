@@ -399,6 +399,18 @@ type jsrt struct {
 	// what it cost before: one boolean test.
 	trackThis bool
 
+	// pyLang says the module being run came out of a PYTHON grammar, decided the
+	// same way trackThis is: a module declares only the externs it uses, and
+	// js_pytruthy is emitted by python-to-llvm-ir.abnf and by no other grammar
+	// (it is Python's core.truthyExt).
+	//
+	// It exists for ONE rule, and it needs the guard because the externs that
+	// carry the rule are SHARED: js_pyget and js_pyset are the dict subscript of
+	// dart, kotlin, swift, csharp, go, js, typescript, php, lua and ruby as well,
+	// and in every one of those `true` and `1` are two different map keys. In
+	// Python they are one key, because bool subclasses int - see pyDictFind.
+	pyLang bool
+
 	// accessorCount counts the getter/setter properties js_defprop has defined in
 	// this runtime. While it is zero - which it stays for every grammar that never
 	// emits js_defprop, and for every JS program without an accessor - getMember
@@ -634,11 +646,15 @@ func (rt *jsrt) attach(m *ir.Module) *machine {
 	ma.externs = rt.externs(ma)
 	ma.bindExterns() // Resolve every declared function to its handler now, not per call.
 	// A module declares only the externs it uses, so its function list says whether
-	// this program can ever ask for a dynamic `this` (see trackThis).
+	// this program can ever ask for a dynamic `this` (see trackThis) and which
+	// grammar emitted it (see pyLang). Both latch on: a run is one language, and a
+	// multi-module program need not repeat the extern in every module.
 	for _, f := range m.Funcs {
-		if f.GlobalIdent.Name() == "js_this" || f.GlobalIdent.Name() == "js_newtarget" {
+		switch f.GlobalIdent.Name() {
+		case "js_this", "js_newtarget":
 			rt.trackThis = true
-			break
+		case "js_pytruthy":
+			rt.pyLang = true
 		}
 	}
 	ma.relNew, ma.relThru = jsReclaimable, jsThroughArgs
@@ -2368,6 +2384,62 @@ func (rt *jsrt) dictFind(keys *jsArray, k interface{}) int {
 	return rt.dictScan(keys, k)
 }
 
+// pyDictFind is dictFind under PYTHON's key rule, which is not JavaScript's and
+// not any other target language's: `bool` subclasses `int`, so `True` and `1` and
+// `1.0` are ONE key and `False`, `0` and `-0.0` are one key.
+//
+//	d = {}; d[True] = "t"; d[1] = "one"     ->  CPython 3.14: ONE entry, d[True]
+//	                                            is "one", and list(d) is [True] -
+//	                                            the FIRST key object is the one
+//	                                            that stays, only the value is
+//	                                            overwritten.
+//
+// That last part is why this is a lookup alias and not a normalization at
+// insertion: normalizing would store 1 and print `1` where CPython prints `True`.
+// dictFind's index accelerator is keyed by the Go value, so `true` and
+// `float64(1)` sit in it separately and both have to be asked for; the alias is
+// tried only after an exact miss, so the fast path is unchanged.
+//
+// The pyLang guard is load bearing. js_pyget and js_pyset are the dict subscript
+// of ten other grammars, and `mapOf(true to "a", 1 to "b")` is TWO entries in all
+// of them. Scoping it to the dict object instead would need a python-only dict
+// constructor in languages/python-to-llvm-ir.abnf.
+func (rt *jsrt) pyDictFind(keys *jsArray, k interface{}) int {
+	if i := rt.dictFind(keys, k); i >= 0 {
+		return i
+	}
+	if !rt.pyLang {
+		return -1
+	}
+	if alias, ok := pyKeyAlias(k); ok {
+		return rt.dictFind(keys, alias)
+	}
+	return -1
+}
+
+// pyKeyAlias answers the OTHER spelling of a key that Python considers equal to
+// this one, which for this value model is only ever the bool/int pair: an int and
+// a float are already the same plain double here (pyTypeName tells them apart with
+// Math.trunc), so `1` and `1.0` need no alias at all. -0.0 == 0 in Go, so the
+// negative zero falls into the False arm exactly as CPython puts it there.
+func pyKeyAlias(k interface{}) (interface{}, bool) {
+	switch v := k.(type) {
+	case bool:
+		if v {
+			return float64(1), true
+		}
+		return float64(0), true
+	case float64:
+		if v == 1 {
+			return true, true
+		}
+		if v == 0 {
+			return false, true
+		}
+	}
+	return nil, false
+}
+
 func (rt *jsrt) dictScan(keys *jsArray, k interface{}) int {
 	for i, e := range keys.elems {
 		if rt.strictEq(e, k) {
@@ -2791,7 +2863,7 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 			case "values":
 				return &jsArray{elems: append([]interface{}{}, vals.elems...)}
 			case "get":
-				if i := rt.dictFind(keys, argAt(args, 0)); i >= 0 {
+				if i := rt.pyDictFind(keys, argAt(args, 0)); i >= 0 {
 					return vals.elems[i]
 				}
 				if len(args) > 1 {
@@ -6301,7 +6373,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 			}
 			if keys, vals, ok := dictParts(u(a[0])); ok {
-				i := rt.dictFind(keys, u(a[1]))
+				i := rt.pyDictFind(keys, u(a[1]))
 				if i < 0 {
 					rt.fail("KeyError: %s", rt.pyString(u(a[1])))
 				}
@@ -6344,7 +6416,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 			}
 			if keys, vals, ok := dictParts(u(a[0])); ok {
-				if i := rt.dictFind(keys, u(a[1])); i >= 0 {
+				if i := rt.pyDictFind(keys, u(a[1])); i >= 0 {
 					vals.elems[i] = u(a[2])
 				} else {
 					dictAppend(keys, vals, u(a[1]), u(a[2]))
@@ -7166,7 +7238,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return boolH(strings.Contains(c, rt.toString(u(a[0]))))
 			}
 			if keys, _, ok := dictParts(u(a[1])); ok {
-				return boolH(rt.dictFind(keys, u(a[0])) >= 0)
+				return boolH(rt.pyDictFind(keys, u(a[0])) >= 0)
 			}
 			rt.fail("'in' needs a list, a string or a dict on the right side")
 			return boolH(false)
@@ -7332,7 +7404,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				rt.fail("cannot unpack a %s with **", rt.typeOf(u(a[1])))
 			}
 			for i, k := range sk.elems {
-				if j := rt.dictFind(keys, k); j >= 0 {
+				if j := rt.pyDictFind(keys, k); j >= 0 {
 					vals.elems[j] = sv.elems[i]
 				} else {
 					dictAppend(keys, vals, k, sv.elems[i])
@@ -7698,7 +7770,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// del obj[k] / del obj.name.
 		"js_pydel_item": func(a []uint64) uint64 {
 			if keys, vals, ok := dictParts(u(a[0])); ok {
-				i := rt.dictFind(keys, u(a[1]))
+				i := rt.pyDictFind(keys, u(a[1]))
 				if i < 0 {
 					panic(&jsThrown{value: rt.pyExcInstance("KeyError", rt.pyString(u(a[1])))})
 				}
@@ -7816,7 +7888,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return boolH(false)
 			}
 			for _, k := range want.elems {
-				if rt.dictFind(keys, k) < 0 {
+				if rt.pyDictFind(keys, k) < 0 {
 					return boolH(false)
 				}
 			}
@@ -8611,12 +8683,25 @@ func (rt *jsrt) pyEqual(x, y interface{}) bool {
 			return false
 		}
 		for i, k := range xk.elems {
-			j := rt.dictFind(yk, k)
+			j := rt.pyDictFind(yk, k)
 			if j < 0 || !rt.pyEqual(xv.elems[i], yv.elems[j]) {
 				return false
 			}
 		}
 		return true
+	}
+	// A Python bool IS an int - `class bool(int)` - so True == 1, True == 1.0,
+	// False == 0 and False == -0.0 all hold, and so does every container equality
+	// built on them ([True] == [1], {True: 1} == {1: 1}). Reading the bool as its
+	// int value HERE, below the container arms and above the numeric ones, covers
+	// the bigint, the complex and the plain-number arm in one place; True == 2
+	// stays false because 1.0 != 2.0, and True == "x" stays false because
+	// strictEq's last arm sees a number against a string.
+	if b, ok := x.(bool); ok {
+		x = pyBoolInt(b)
+	}
+	if b, ok := y.(bool); ok {
+		y = pyBoolInt(b)
 	}
 	// Python compares an int to a float BY VALUE, and an arbitrary precision int
 	// (a literal too large for a double, see js_bigint) is still an int.
@@ -8643,6 +8728,14 @@ func (rt *jsrt) pyEqual(x, y interface{}) bool {
 		return im == 0 && re == rt.toNumber(x)
 	}
 	return rt.strictEq(x, y)
+}
+
+// pyBoolInt is the int a Python bool IS: True is 1, False is 0.
+func pyBoolInt(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // bigEqFloat is an arbitrary precision int against a double, by value: only an
@@ -9393,7 +9486,7 @@ func (rt *jsrt) pyContains(x, y interface{}) bool {
 		return strings.Contains(c, rt.toString(x))
 	}
 	if keys, _, ok := dictParts(y); ok {
-		return rt.dictFind(keys, x) >= 0
+		return rt.pyDictFind(keys, x) >= 0
 	}
 	rt.fail("'in' needs a list, a string, a dict or an object with __contains__")
 	return false

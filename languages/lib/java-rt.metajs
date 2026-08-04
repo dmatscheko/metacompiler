@@ -645,8 +645,25 @@ function jvBoxType(name) {
     // scope lookup; the C floor seeds no such name, so java-to-llvm-ir.abnf probes
     // the scope and falls back to this descriptor (see jvScopeProbe there).
     if (name == "Math") {
+        // Math.abs is OVERLOADED on the argument type and answers THAT type:
+        // abs(long) is a long, abs(int) an int, abs(double) a double. A long
+        // must therefore not take the int overload's 32 bit wrap - it made
+        // Math.abs(3000000000L) answer -1294967296 where java 24 says
+        // 3000000000, and Math.abs(Long.MAX_VALUE) answer 0 - and it cannot go
+        // through jvNum either, which is a double and loses the low bits past
+        // 2^53. Negating in 64 bit two's complement is exact and maps
+        // Long.MIN_VALUE to ITSELF, which is Java's answer and not an error
+        // (JLS 15.15.4: there is no positive long of that magnitude).
+        //
+        // byte / short / char are NOT excluded here on purpose: Java widens all
+        // three to int before the call, and rtWrap32 of the plain magnitude is
+        // exactly that int.
         o["abs"] = function(v) {
             if (floIs(v)) { return floAbs(v) }
+            if (jvIsLong(v)) {
+                if (sintCmp(v, jlZero()) < 0) { return jlNeg(v) }
+                return v
+            }
             return rtWrap32(Math.abs(jvNum(v)))
         }
         o["max"] = function(a, b) { return jvmMinMax(a, b, jvNum(a) > jvNum(b)) }

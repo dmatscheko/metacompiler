@@ -2130,6 +2130,11 @@ HasStatic   = :script(~~
     hostGlobals["Math"] = {
         abs: function(v) {
             if (jIsFlo(v)) { var f = v.__flo; return jFlo(f < 0 ? jNegF(f) : f) }
+            // A long is a BOX, so `v < 0` is false for every one of them and
+            // `v | 0` then answered 0 - for positive longs too. Compare and
+            // negate in the box. Math.abs(Long.MIN_VALUE) is Long.MIN_VALUE
+            // (JLS 15.15.4), which two's-complement negation gives unaided.
+            if (jIsLong(v)) { return szCmp(v, jL(0)) < 0 ? szNeg(v) : v }
             return v < 0 ? -v | 0 : v | 0
         },
         max: function(a, b) { return jMinMax(a, b, jNumD(a) > jNumD(b)) },

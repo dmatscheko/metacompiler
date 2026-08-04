@@ -141,7 +141,6 @@ function pyTag(v, name) {
 }
 
 function pyIsDict(v) { return pyTag(v, "__dict") }
-function pyIsSet(v) { return pyTag(v, "__set") }
 function pyIsCplx(v) { return pyTag(v, "__cplx") }
 function pyIsBig(v) { return pyTag(v, "__pybig") }
 
@@ -149,12 +148,6 @@ function pyIsBig(v) { return pyTag(v, "__pybig") }
 function pyIsClass(v) {
     if (!pyIsObj(v)) { return false }
     return v["__mro"] !== undefined
-}
-
-function pyIsInst(v) {
-    if (!pyIsObj(v)) { return false }
-    if (v["__mro"] !== undefined) { return false }
-    return pyIsObj(v["__class"])
 }
 
 // A GENERATOR is a floor cell (tag 15). Layer 2 has no tag test, so the question is
@@ -175,41 +168,52 @@ function pyIsGen(v) {
     return typeof v["next"] == "function"
 }
 
-function pyIsIntVal(v) {
-    if (pyIsBig(v)) { return true }
-    if (typeof v != "number") { return false }
-    if (v !== v) { return false }
-    if (v - v !== 0) { return false }
-    return v == Math.trunc(v)
-}
-
 function pyFail(msg) { fail(msg) }
 
 // ===================================================== dict =================
 //
-// abnf/jsrt.go's dictParts / dictFind / dictAppend. A dict KEY is compared with
-// STRICT equality (Go's strictEq through dictFind), not with Python ==; that is the
-// Go twin's choice and it is reproduced rather than repaired.
+// abnf/jsrt.go's dictParts / dictFind / dictAppend (the Go twin's dictFind is an
+// index over the same array; the scan is the same answer). A dict KEY is compared
+// with STRICT equality, not with Python ==, and that IS Python: `1 == 1.0` and
+// `1 == True` are the only equalities `===` misses, the first is free here (int
+// and float are the same plain double) and the second is pyKeyAlias below.
+//
+// The one CPython rule that needs writing down: `bool` subclasses `int`, so
+//
+//     d = {}; d[True] = "t"; d[1] = "one"
+//
+// is ONE entry in CPython 3.14, `d[True]` is "one", and `list(d)` is `[True]` -
+// the FIRST key object stays and only the VALUE is overwritten. That is why the
+// alias is tried at LOOKUP and the key is never normalized on the way in:
+// normalizing would store 1 and print `1` where CPython prints `True`.
 
 function pyNewDict() { return js_dict_new() }
+
+// The other spelling of a key Python considers equal to this one. Only the
+// bool/int pair can differ: an int and a float are already the same plain double
+// here. -0.0 == 0 is true in this comparison, so a negative zero lands in the
+// False arm exactly as CPython puts it there.
+function pyKeyAlias(k) {
+    if (k === true) { return 1 }
+    if (k === false) { return 0 }
+    if (typeof k == "number") {
+        if (k == 1) { return true }
+        if (k == 0) { return false }
+    }
+    return undefined
+}
 
 function pyDictFind(keys, k) {
     for (var i = 0; i < keys.length; i++) {
         if (keys[i] === k) { return i }
     }
+    var alias = pyKeyAlias(k)
+    if (alias !== undefined) {
+        for (var j = 0; j < keys.length; j++) {
+            if (keys[j] === alias) { return j }
+        }
+    }
     return 0 - 1
-}
-
-function pyDictHas(d, k) {
-    if (!pyIsDict(d)) { return false }
-    return pyDictFind(d["keys"], k) >= 0
-}
-
-function pyDictGet(d, k) {
-    if (!pyIsDict(d)) { return undefined }
-    var i = pyDictFind(d["keys"], k)
-    if (i < 0) { return undefined }
-    return d["vals"][i]
 }
 
 function pyDictSet(d, k, v) {
@@ -227,8 +231,9 @@ function pyDictSet(d, k, v) {
 // ===================================================== set ==================
 //
 // abnf/jsrt.go's newPySet / pySetElems / pySetHas / pySetAdd. MEMBERSHIP is Python
-// ==, so 1 and 1.0 are the same member - which is not the strict equality the dict
-// keys above use, and that asymmetry is the Go twin's.
+// ==, which the dict keys above reach the other way round (=== plus pyKeyAlias);
+// the two now answer the same question for every value this model builds, and the
+// remaining difference is which is cheaper.
 
 function pyNewSet(elems) { return {__set: true, elems: elems} }
 
@@ -357,9 +362,6 @@ function pyStr(v) {
     return pyToStr(v)
 }
 
-// pyString is the Go NAME of the function above; some ported blocks call it that.
-function pyString(v) { return pyStr(v) }
-
 function pyRepr(v) {
     if (typeof v == "string") { return "'" + v + "'" }
     return pyStr(v)
@@ -395,6 +397,20 @@ function pyTypeName(v) {
 // abnf/jsrt.go's pyEqual (8580). The bigint arms are chunk A's pyABigCmp /
 // pyABigEqFloat; they are called from here so every caller of pyEqual gets them.
 
+// The int a bool IS (True is 1, False is 0), against a value that is not a bool.
+// The three arms are exactly the three pyEqual takes below for a plain number,
+// in the same order, so the two halves answer the same thing for every operand.
+function pyEqBoolVal(other, b) {
+    var n = b ? 1 : 0
+    if (pyIsBig(other)) { return pyABigEqFloat(other, n) }
+    if (pyIsCplx(other)) {
+        if (pyCplxIm(other) != 0) { return false }
+        return pyCplxRe(other) == n
+    }
+    if (typeof other == "number") { return other == n }
+    return false
+}
+
 function pyEqual(x, y) {
     var xs = pySetElemsOf(x)
     if (xs != null) {
@@ -427,6 +443,19 @@ function pyEqual(x, y) {
         }
         return true
     }
+    // A Python bool IS an int - `class bool(int)` - so True == 1, True == 1.0,
+    // False == 0 and False == -0.0 all hold, and so does every container equality
+    // built on them ([True] == [1], {True: 1} == {1: 1}). The Go twin rewrites the
+    // operand in place at this point; MetaJS is TYPED and a variable that held a
+    // boolean cannot hold a number, so the arm is taken out of line instead and
+    // pyEqBoolVal covers the bigint, the complex and the plain-number case that
+    // follow. True == 2 is false because 1 != 2, True == "x" because a string is
+    // none of the three.
+    if (typeof x == "boolean" || typeof y == "boolean") {
+        if (typeof x == "boolean" && typeof y == "boolean") { return x === y }
+        if (typeof x == "boolean") { return pyEqBoolVal(y, x) }
+        return pyEqBoolVal(x, y)
+    }
     if (pyIsBig(x)) {
         if (pyIsBig(y)) { return pyABigCmp(x, y) == 0 }
         if (typeof y == "number") { return pyABigEqFloat(x, y) }
@@ -447,26 +476,6 @@ function pyEqual(x, y) {
         return pyCplxRe(y) == pyNum(x)
     }
     return x === y
-}
-
-// abnf/jsrt.go's jsCompare: -1 / 0 / 1, and 2 for a NaN operand, which is what makes
-// <, >, <= and >= all false at once. The bigint pair arm lives in chunk A's
-// pyACompare, which wraps this one.
-function pyCompare(l, r) {
-    if (typeof l == "string") {
-        if (typeof r == "string") {
-            if (l < r) { return 0 - 1 }
-            if (l > r) { return 1 }
-            return 0
-        }
-    }
-    var a = pyNum(l)
-    var b = pyNum(r)
-    if (a !== a) { return 2 }
-    if (b !== b) { return 2 }
-    if (a < b) { return 0 - 1 }
-    if (a > b) { return 1 }
-    return 0
 }
 
 // ===================================================== classes =============
@@ -725,24 +734,11 @@ function pySeqElems(v) {
 
 // ===================================================== slices ===============
 //
-// abnf/jsrt.go's pySliceRange (2432), pyClampIndex (8729) and pySliceIndices (8699).
-
-function pySliceClamp(v, dflt, n) {
-    if (v === undefined) { return dflt }
-    if (v === null) { return dflt }
-    var i = Math.trunc(pyNum(v))
-    if (i < 0) { i = i + n }
-    if (i < 0) { i = 0 }
-    if (i > n) { i = n }
-    return i
-}
-
-function pySliceRange(lo, hi, n) {
-    var from = pySliceClamp(lo, 0, n)
-    var to = pySliceClamp(hi, n, n)
-    if (to < from) { to = from }
-    return [from, to]
-}
+// abnf/jsrt.go's pyClampIndex (8729) and pySliceIndices (8699). Go's own
+// pySliceRange (2432) has NO counterpart here: every slice this value model
+// takes goes through pySliceIndices, whose step-aware clamping answers the
+// two-bound case identically, and a second clamper would be a second place to
+// keep in step.
 
 function pyClampIndex(i, n, step) {
     var k = i
@@ -1214,9 +1210,8 @@ function pyAStrictEq(a, b) {
     return a === b
 }
 
-// Go: rt.jsCompare (jsrt.go:1490). This is a deliberate SECOND copy of the
-// prelude's pyCompare, for two reasons the prelude cannot be assumed to have:
-// the bigPair arm (both operands big -> Cmp; a big against a double falls into
+// Go: rt.jsCompare (jsrt.go:1490). Chunk A owns the ONLY comparison path here.
+// It carries two things a plain jsCompare port would not: the bigPair arm (both operands big -> Cmp; a big against a double falls into
 // toNumber, which is NaN for a big, so EVERY ordering against a mixed pair is
 // false in Go) and the answer 2 for NaN, which is what makes <, >, <= and >=
 // all false at once.
@@ -1241,6 +1236,11 @@ function pyACompare(a, b) {
 // anything that is neither a big nor a number falls through to strictEq in Go,
 // which is false, so this answers false directly.
 function pyAEqual(x, y) {
+    // A bool IS an int, and the Go twin normalizes it AHEAD of its *jsBigInt cases
+    // (jsrt.go's pyEqual), so `True == <a big>` has to reach bigEqFloat with 1 and
+    // not answer false in the arm below. The prelude's pyEqual carries exactly
+    // that arm, bigint case included, so a bool operand goes straight there.
+    if (typeof x == "boolean" || typeof y == "boolean") { return pyEqual(x, y) }
     if (pyIsBig(x)) {
         if (pyIsBig(y)) { return pyABigCmp(x, y) == 0 }
         if (pyIsNum(y)) { return pyABigEqFloat(x, y) }
@@ -1790,10 +1790,11 @@ function js_bigint(text) { return pyABigFromStr(pyToStr(text)) }
 //                rt.pyFormatBody (jsrt.go:9737) and pyIsAlign (jsrt.go:9680)
 //   js_pyfnname  (jsrt.go:7749) plus its reader pyBFuncName
 //
-// and it owns the float/int RENDERING primitives (pyBFixed / pyBSci /
-// pyBBaseStr / pyBByteCut and the exact-decimal bignum under them), copied
-// from languages/lib/ruby-rt.metajs lines ~508-800 where they were written
-// language-neutrally. They are exported for the other chunks.
+// and it owns the float/int RENDERING primitives (pyBFixed / pyBBaseStr and the
+// exact-decimal bignum under them), copied from languages/lib/ruby-rt.metajs
+// lines ~508-800 where they were written language-neutrally. Ruby's pyBSci
+// ('e' verb), pyBByteCut and pyBLower came across with them and were deleted
+// again: Python's format mini-language reaches none of the three.
 //
 // js_num_str is a FLOOR extern (languages/lib/rt-prims.metajs:192) and is not
 // written here.
@@ -2062,54 +2063,12 @@ function pyBFixed(x, prec) {
     return (neg ? "-" : "") + body
 }
 
-// strconv.FormatFloat(v, 'e', prec, 64): d.dddde+XX, at least two exponent digits.
-//
-// No path in Python's format mini-language reaches this one - pyFormatBody has no
-// 'e' or 'g' case, so `{x:e}` falls into the default branch and prints pyString.
-// It is kept here, exported, because chunk B owns the float rendering and any
-// other chunk that needs Go's 'e' verb must not re-derive it.
-function pyBSci(x, prec) {
-    if (x !== x) { return "NaN" }
-    if (x - x !== 0) {
-        if (x > 0) { return "+Inf" }
-        return "-Inf"
-    }
-    var neg = x < 0
-    if (x == 0 && 1 / x < 0) { neg = true }
-    var a = neg ? -x : x
-    if (a == 0) {
-        var z = "0"
-        if (prec > 0) {
-            z = z + "."
-            var zi = 0
-            while (zi < prec) {
-                z = z + "0"
-                zi = zi + 1
-            }
-        }
-        return (neg ? "-" : "") + z + "e+00"
-    }
-    var dec = pyBExactDec(a)
-    var ip = dec["i"]
-    var fp = dec["f"]
-    var all = ip + fp
-    // The exponent of the first significant digit, relative to the point.
-    var lead = 0
-    while (lead < all.length && all.charAt(lead) == "0") { lead = lead + 1 }
-    var e = ip.length - 1 - lead
-    var sig = all.substring(lead, all.length)
-    var kept = pyBRoundHalfEven(sig, prec + 1)
-    if (kept.length > prec + 1) {
-        // 9.99 -> 10.0: one digit fell out of the mantissa.
-        e = e + 1
-        kept = kept.substring(0, prec + 1)
-    }
-    var m = kept.substring(0, 1)
-    if (prec > 0) { m = m + "." + kept.substring(1, kept.length) }
-    var es = "" + (e < 0 ? 0 - e : e)
-    if (es.length < 2) { es = "0" + es }
-    return (neg ? "-" : "") + m + "e" + (e < 0 ? "-" : "+") + es
-}
+// Go's strconv.FormatFloat(v, 'e', prec, 64) has NO counterpart here, and that is
+// deliberate: no path in Python's format mini-language reaches the 'e' verb -
+// pyFormatBody has no 'e' or 'g' case, so `{x:e}` falls into the default branch
+// and prints pyStr. A ruby-transferred pyBSci sat here unreachable; the exact
+// decimal it was built on (pyBExactDec / pyBRoundHalfEven) is still here, so the
+// next chunk that needs the 'e' verb re-derives it from those in ten lines.
 
 // ----- strconv.FormatInt(int64(x), base) ------------------------------------
 //
@@ -2154,34 +2113,16 @@ function pyBBaseStr(n, base) {
     return (neg ? "-" : "") + out
 }
 
-// strings.ToUpper / strings.ToLower - the full Unicode SIMPLE mapping. The C
-// floor's own toUpperCase / toLowerCase are exactly that (runtime.c generated its
-// 328 ranges from the Go runtime's own answers), so an ASCII loop here would be a
-// third, worse, copy: it printed "CAFé" for "café".
+// strings.ToUpper - the full Unicode SIMPLE mapping. The C floor's own
+// toUpperCase is exactly that (runtime.c generated its 328 ranges from the Go
+// runtime's own answers), so an ASCII loop here would be a third, worse, copy:
+// it printed "CAFé" for "café". strings.ToLower has no caller in Python's
+// surface and is not carried.
 function pyBUpper(s) { return s.toUpperCase() }
-function pyBLower(s) { return s.toLowerCase() }
 
-// The first `n` BYTES of a string, as Go's body[:n] takes them. Every string the
-// %s directive can be handed is valid UTF-8 here, and a cut that would land inside
-// a multi-byte character stops before it - which is what a Go slice of a valid
-// string does to the RUNES, and the corpus has no case that reaches it.
-//
-// Python's format mini-language never reaches this either: pyFormatBody uses
-// `prec` ONLY as the fraction-digit count of the 'f' verb and never truncates a
-// string, so `{s:.3}` on a str is a no-op in the Go twin. Exported for the
-// other chunks' printf-style paths, where precision does count bytes.
-function pyBByteCut(s, n) {
-    var out = ""
-    var i = 0
-    while (i < s.length) {
-        var next = out + s.charAt(i)
-        if (byteLen(next) > n) { return out }
-        out = next
-        i = i + 1
-    }
-    return out
-}
-
+// Go's body[:n] BYTE cut has no counterpart here either: pyFormatBody uses `prec`
+// ONLY as the fraction-digit count of the 'f' verb and never truncates a string,
+// so `{s:.3}` on a str is a no-op in the Go twin as well.
 
 // ===================================================== format ===============
 //
@@ -4617,7 +4558,7 @@ function pyFStrictEq(a, b) {
 // at.v.Cmp(bt.v) == 0 over chunk A's NORMALIZED representation: two bigs are
 // equal exactly when their signs and their limb arrays match (normalization
 // pins zero to neg == false, so -0 cannot arise). Done structurally rather than
-// through pyCompare so that strict equality does not depend on the comparison
+// through pyACompare so that strict equality does not depend on the comparison
 // path having a bignum arm.
 function pyFBigEq(a, b) {
     if (a["neg"] !== b["neg"]) { return false }
@@ -4647,7 +4588,7 @@ function pyFTruthy(v) {
     if (typeof v == "string") { return byteLen(v) > 0 }
     // A __pybig is truthy unless it is zero (Go: t.v.Sign() != 0). Tested
     // structurally against the NORMALIZED limb array (chunk A's invariant: zero
-    // is exactly the single limb 0) rather than through pyCompare, so this does
+    // is exactly the single limb 0) rather than through pyACompare, so this does
     // not depend on the comparison path knowing about bignums.
     if (pyIsBig(v)) { return !pyFBigIsZero(v) }
     return true

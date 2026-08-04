@@ -985,6 +985,25 @@ class S25 {
         ls[1] = ls[0] - 1;
         Main.check("int57", ls[1] == 9223372036854775806L && ("" + ls[0]).equals("9223372036854775807"));
         Main.check("int58", ("" + (Long.MAX_VALUE - 1)).equals("9223372036854775806"));
+
+        // ----- Math.abs is OVERLOADED, and abs(long) answers a LONG -----
+        // Every engine took the int overload's 32 bit wrap for a long argument, so
+        // Math.abs(3000000000L) was -1294967296 and Math.abs(Long.MAX_VALUE) was 0
+        // (the interpreter answered 0 for EVERY long, its `v < 0` reading a box).
+        // All three agreed with each other, which is why the ratchet had no
+        // assertion here and neither --cross nor the byte-identity matrix could
+        // see it. 20 of the 26 lines on which our java differed from java 24 over
+        // the whole long surface were this one cause.
+        Main.check("int59", Math.abs(3000000000L) == 3000000000L && Math.abs(-3000000000L) == 3000000000L);
+        Main.check("int60", Math.abs(Long.MAX_VALUE) == Long.MAX_VALUE && Math.abs(-1L) == 1L);
+        // JLS 15.15.4: there is no positive long of MIN_VALUE's magnitude, so
+        // abs(MIN_VALUE) is MIN_VALUE itself - a value, not an error.
+        Main.check("int61", Math.abs(Long.MIN_VALUE) == Long.MIN_VALUE);
+        Main.check("int62", Math.abs(Long.MIN_VALUE + 1) == Long.MAX_VALUE);
+        // The guard rails: the int overload still wraps at 32 bits, and the double
+        // overload is untouched.
+        Main.check("int63", Math.abs(Integer.MIN_VALUE) == Integer.MIN_VALUE && Math.abs(-5) == 5);
+        Main.check("int64", ("" + Math.abs(-1234567890123L)).equals("1234567890123"));
     }
 }
 

@@ -2536,6 +2536,79 @@ identical to real java**.
    6 of the 26 are `(float)`, which is a no-op in both halves: our java has no
    32 bit float type at all, which is a value-model decision and not a defect.
 
+   **2026-08-04: it is THREE halves, not two, and only ONE of the three is landed
+   here.** The count was taken over the compiled engines; `java-interpreter.abnf`'s
+   `hostGlobals["Math"].abs` has the same defect and WORSE. Its body is
+   `v < 0 ? -v | 0 : v | 0`, and a long is a sized-integer BOX, so `v < 0` is false
+   and `v | 0` is 0 - **the interpreter answers 0 for EVERY long**, positive ones
+   included, not just for the ones that overflow an int. It was invisible because
+   no test and no `--cross` program calls `Math.abs` on a long.
+
+   **The rule.** `Math.abs` is OVERLOADED on the argument type and answers THAT
+   type; `abs(long)` is a long. `Math.abs(Long.MIN_VALUE)` is `Long.MIN_VALUE` -
+   JLS 15.15.4, a value and not an error, because no positive long has that
+   magnitude - and two's complement negation produces it with no special case.
+   byte / short / char are widened to int by Java before the call, so they keep the
+   32 bit arm.
+
+   **LANDED here: `languages/lib/java-rt.metajs` only.**
+
+   ```
+   if (jvIsLong(v)) {
+       if (sintCmp(v, jlZero()) < 0) { return jlNeg(v) }
+       return v
+   }
+   ```
+
+   **NOT landed, and both verified from a clean `git archive` of `9689f81` with the
+   patch applied and `go build` run inside** (the working tree's `abnf/jsrtjvm.go`
+   is the floor agent's and `languages/java-interpreter.abnf` is nobody's this
+   wave, so neither was edited):
+
+   ```
+   abnf/jsrtjvm.go, jvmMathObject's abs, before the toInt32 line:
+       if b, ok := v.(jsGInt); ok && b.w == 64 {
+           if b.v < 0 {
+               return jvBox(-b.v)
+           }
+           return b
+       }
+   languages/java-interpreter.abnf, hostGlobals["Math"].abs, before the last line:
+       if (jIsLong(v)) { return szCmp(v, jL(0)) < 0 ? szNeg(v) : v }
+   ```
+
+   **`tests/java-test-full.java` SECTION 25 gains `int59`-`int64`** (java 278 ->
+   284), and **the file is RED in the working tree until the two patches above land
+   with it**: the native binary answers 284/0 and both the interpreter and
+   `llvm.Run` answer 284/5. That is stated rather than hidden - the three parts are
+   one change and the split is temporary by instruction.
+
+   **Ground truth**, oracle a real `java` **24.0.2**. A 53-line probe -
+   `Math.abs` / `Math.max` / `Math.min` over 33 longs (both int32 edges and their
+   neighbours, 2^32, +-2^53 and +-(2^53+1), 3e9, 1e12, both int64 edges and their
+   neighbours, 0x5555...), 10 ints and 10 doubles:
+
+   ```
+   the native binary at 9689f81      21 of 53 lines differ from real java
+   the native binary with the fix     1 of 53                       (-20, exactly
+                                      the 20 this item predicted)
+   ```
+
+   The one remaining line is **`Math.min(-0.0, 0.0)`**, which real java answers
+   `-0.0` and every engine answers `0.0`: `jvmMinMax` orders with `>` / `<` and the
+   two zeros compare equal, so the sign bit is never consulted. **Pre-existing at
+   `9689f81`, a separate one-expression defect in the same three halves**, and NOT
+   fixed here so that the pairing stays one cause. The interpreter has a fourth
+   instance of the same root - `Math.abs(-0.0)` answers `-0.0` there where java and
+   both compiled halves answer `0.0`; the fix is to test the sign bit,
+   `(f < 0 || (f == 0 && 1 / f < 0))`, and it was verified in the archive alongside
+   the long fix.
+
+   Note for whoever takes the pairing: `abnf/jsrtjvm.go` has the **same expression
+   twice**, at `jvmMathObject`'s `abs` and at the host builtin `b["floAbs"]`. Only
+   the first is Java's `Math.abs`; `floAbs` is layer 2's float primitive and no long
+   reaches it today, but it carries the identical bug for one.
+
 ### THE COLLAPSE ONTO `sintRaw` - DONE 2026-08-04, and what it actually traded
 
 The unsigned-box workaround above is **gone**. A Java long is now an honest
@@ -5233,6 +5306,9 @@ a fresh class with no `__super`, so `except Exception` would not catch it.
 
 `languages/lib/python-rt.metajs` is 4,979 lines (PLUS the 1,559-line imported
 `regex.js`) and compiles to `languages/lib/python-rt.ll` (70,847 lines)
+- **2026-08-04: measured 4,951 and 70,847 at `9689f81`, now 4,892 and 71,541**,
+after the dead-layer-2 pass below took 123 lines out and the bool-key fix put 64
+back -
 **byte-identically under `-frozen` as well as under goja**. It exports the 54 symbols the union needs plus
 `js_pymcall`, `js_pyexc` and `js_is_type`, which the grammar can reach on other
 inputs.
@@ -5584,6 +5660,165 @@ Ruby formatter boundaries reached.
    its port. Adding one is a new FEATURE in three places (the interpreter grammar,
    the compiler grammar and this file), not part of this migration, and it was
    deliberately not invented here.
+
+### The dead layer 2, RE-MEASURED - 123 lines, and where the heuristic was wrong
+
+Part A's reachability pass handed Python a list of 13 unreachable functions
+(132 lines) plus four dead dispatcher arms. Re-run rooted at the whole `js_*`
+export surface, over the WHOLE import corpus (`python-rt.metajs` +
+`runtime.metajs` + `regex.js` + `rt-prims.metajs`) and with COMMENTS STRIPPED, the
+answer is **12 functions**, and `languages/lib/python-rt.metajs` goes
+**4,951 -> 4,828 lines (-123)** once their stale prose goes with them:
+
+```
+pyIsSet  pyIsInst  pyIsIntVal  pyDictHas  pyDictGet  pyString  pyCompare
+pySliceClamp  pySliceRange  pyBSci  pyBLower  pyBByteCut
+```
+
+**Two ways the heuristic was wrong, and both are worth writing down because the
+next language's pass will hit them:**
+
+1. **`pyAFloorMod` is LIVE.** It is called at `js_pybin`'s `%` arm, which is an
+   exported extern. A reachability pass that misses one call site deletes a
+   working function.
+2. **All four dispatcher arms are LIVE, and Python CAN utter every one of them.**
+   `sumOf`, `forEach`, `isEmpty` and `removeLast` are not Python METHODS, but
+   `pyMemberCall` dispatches on an arbitrary NAME and Python's syntax writes any
+   name it likes. Measured rather than argued - `xs.sumOf(lambda v: v*2)`,
+   `xs.forEach(...)`, `"".isEmpty()` and `xs.removeLast()` all run today and
+   **`llvm.Run` and the native binary give the same answers**. Deleting the arms
+   would have made the native binary disagree with the Go twin on a program the
+   grammar accepts, which is the exact defect class the split is being measured
+   for. There is no `csMName`-style translation layer in either Python grammar;
+   there does not need to be one.
+
+The reverse trap is also worth the line: the first pass (comments left in) reported
+only 6, because a function named in a top-level COMMENT looks like a root.
+`pyBSci`, `pyCompare`, `pyBByteCut` and `pyString` all survived that way.
+
+Two of the twelve carried a comment saying they were *"kept here, exported"* for a
+future chunk. They still went: `pyBSci`'s exact decimal (`pyBExactDec` /
+`pyBRoundHalfEven`) is what the 'e' verb is ten lines away from, and it stays.
+
+### THE BOOL-KEY DEFECT - FIXED 2026-08-04, three engines and the assertions in ONE change
+
+The merge agent's `js_pyset` probe found it and the plan's own long tail had
+recorded it as a feature decision (*"True and 1 are not the same dict key"*). It is
+not one. **`class bool(int)`** - a Python bool IS an int - so `True == 1`,
+`hash(True) == hash(1)`, and
+
+```
+d = {}; d[True] = "t"; d[1] = "one"
+CPython 3.14.6:            ONE entry, d[True] is "one", list(d) is [True]
+all three engines at 9689f81: TWO entries, and True == 1 answered False
+```
+
+**All three engines agreed with each other and disagreed with CPython on 25 of 34
+probe lines**, so `--cross`, the halves comparison and the byte-identity matrix
+were ALL structurally blind. That is the class this project most wants surfaced,
+and it is worth naming what made it findable: an ORACLE run, not an engine
+comparison.
+
+**The rule is `==`, not identity, and the FIRST key object is the one that stays.**
+`d[True]="t"; d[1]="one"` leaves the key `True` and the value `"one"`; the reverse
+order leaves the key `1` and the value `"t"`. That is why the fix is a lookup ALIAS
+and never a normalization at insertion - normalizing would store 1 and print `1`
+where CPython prints `True`. `1` and `1.0` need no alias at all: int and float are
+already the same plain double in this value model. `-0.0` falls into the `False` arm
+because `-0.0 == 0`, which is where CPython puts it too.
+
+Three engines, and the third was NOT in the brief:
+
+```
+languages/python-interpreter.abnf   dictFind overridden by ASSIGNMENT (the
+                                    makeTargetRef idiom), plus pyBoolEqVal in pyEq
+abnf/jsrt.go                        pyDictFind + pyKeyAlias, the bool arm of
+                                    pyEqual, and rt.pyLang
+languages/lib/python-rt.metajs      pyKeyAlias inside pyDictFind, pyEqBoolVal in
+                                    pyEqual, and the bool short-circuit in pyAEqual
+tests/python-test-full.py           SECTION 25, bki1-bki17 (python 269 -> 286)
+```
+
+**`core.keyEq` could NOT carry the interpreter half, and that is the transferable
+finding.** interp-core's `dictFind` consults an INDEX keyed by `dictKeyId`, which
+gives `"btrue"` and `"n1"` two different buckets and then answers -1 through the
+`ix.all` short circuit without ever reaching `dictKeyEq`. `core.keyEq` works for
+dart, swift and php only because THEIR extra-equal keys are boxed OBJECTS, whose
+`dictKeyId` is null and which therefore force the scan. **A hashable key that is
+equal to another hashable key needs the index, not the confirmation step** - either
+a `core.keyId` hook in interp-core.js (not this agent's file) or, as here, an
+assignment override of `dictFind` itself, which covers `dictSet`, the set algebra
+and `in` with it.
+
+**`rt.pyLang` is the scoping, and it is load bearing.** `js_pyget` and `js_pyset`
+are the dict subscript of dart, kotlin, swift, csharp, go, js, typescript, php, lua
+and ruby as well, and `mapOf(true to "a", 1 to "b")` is TWO entries in all of them.
+The guard is decided the way `trackThis` already is - *a module declares only the
+externs it uses*, and `js_pytruthy` is emitted by `python-to-llvm-ir.abnf` and by no
+other grammar. **One line in `attach`, exact scoping, no grammar change.** The
+alternative (a python-only dict constructor) would have needed
+`python-to-llvm-ir.abnf`.
+
+**MetaJS is TYPED, and the first attempt produced a FROZEN-DIFF.** The Go twin
+rewrites the operand in place (`x = pyBoolInt(b)`); the same shape in layer 2 and in
+the interpreter grammar dies with *"variable 'x' has type boolean and cannot hold a
+number"* - and in the interpreter it dies only under `-frozen`, so `./test.sh
+--full` reported `python MISMATCH: 286 FROZEN-DIFF` while goja was green. **Both
+MetaJS halves take the arm out of line instead** (`pyEqBoolVal` / `pyBoolEqVal`),
+whose three cases are the same three, in the same order, that the numeric arms below
+take. Any port of a Go normalize-in-place into MetaJS has this trap.
+
+**Ground truth.** Oracle `/opt/homebrew/bin/python3`, **Python 3.14.6**.
+
+```
+a 34-line hand probe (equality, ordering, arithmetic, dict, set, in, del, get)
+    CPython vs interpreter vs llvm.Run vs native      ALL FOUR IDENTICAL
+                                                     (25 of 34 differed at 9689f81)
+an 8,576-line generated probe, 35x35 value pairs x {==, !=, dict-key identity and
+  order, .get, set size, `in` dict/list/set, [a]==[b], {a:1}=={b:1}, (a,)==(b,),
+  del} over both zeros, the int53 edges, bignums, complex, strings, None and
+  containers
+    llvm.Run vs the native binary                    BYTE-IDENTICAL 8,576/8,576
+a 6,301-line HASHABLE-only variant of it, which CPython will also run
+    llvm.Run vs the native binary                    BYTE-IDENTICAL
+    interpreter vs the native binary                 2 lines (see below)
+    real python3 3.14.6                              498 lines, of which 490 are
+                                                     RENDERING (an integral float
+                                                     prints as an int, 1e-05, a
+                                                     tuple prints as a list) and
+                                                     8 are the tuple-key class
+    the 900 `==` / `!=` answers                      ALL 900 AGREE WITH CPYTHON
+every tests/python-test-*.py, llvm.Run vs the native binary   SAME
+```
+
+**The two residues, both measured PRE-EXISTING at 9689f81 and neither this fix's:**
+
+1. **A tuple as a dict key is compared by IDENTITY.** `d[(1,)]="a"; d[(1,)]="b"` is
+   two entries in both halves at 9689f81 and one in CPython - tuples are ARRAYS in
+   this value model, which the plan already records. It is what the remaining 8
+   CPython lines are; the bool rule does not reach it.
+2. **A set MEMBER that is unhashable is `==` in the compiled halves and `===` in
+   the interpreter.** `a=[1]; b=[1]; {a,b}` is 1 in llvm.Run and the native binary
+   and 2 in the interpreter, at 9689f81 as well - CPython refuses the construct with
+   `TypeError: unhashable type`. The fix widens the set of values that trip it
+   (`[1]` and `[True]` are now equal) without creating the asymmetry. Closing it
+   means giving the interpreter's set its own `==` membership, which is a change to
+   the shared `dictFind` contract, not to Python.
+
+**Discriminating power**, from a clean `git archive` of `9689f81` with ONLY
+`tests/python-test-full.py` copied in and `go build` run inside - **11 of 17 by
+FAILURE plus an ABORT**, identically in all three engines:
+
+```
+bki1 .. bki11   FAIL      equality, list membership, dict key identity, .get
+bki12           ABORT     `del k[1]` on {True: 'a'} -> KeyError: 1, and the
+                          section dies there, so bki13-bki17 never run and the
+                          summary line is never printed
+```
+
+The abort is the same shape `sig11`/`sig16` had, and the same reason to report it:
+at `9689f81` the file loses all of section 25 in EVERY engine, so it is red
+consistently rather than as a halves disagreement.
 
 ### launch.json entries wanted (not added - not my file)
 
@@ -7307,3 +7542,326 @@ last reader looking for a missing definition instead of an extra one.
 **The general rule, restated because it will bite again:** every extern a layer-2
 file DEFINES is a name the floor may not also define. Before moving any `js_*` body
 into `runtime.c`, run `grep -l 'function js_<name>' languages/lib/*.metajs`.
+
+---
+
+# Settling the 24 - the gate on Part B, closed (2026-08-04)
+
+The Part B measurement above ended on a finding that had to be answered before
+anything could move: **24 floor bodies that no native test reaches at all**, on
+the argument that *a body no test reaches is a body no move can be validated
+against*. Every one is now settled. The result is **fourteen deletions, two new
+ratchet assertions, and nine bodies proved reachable by a named probe** - and,
+as a by-product, the discovery that **the first Part B move cannot be made**,
+for a reason that applies to every candidate on the list.
+
+## The instrumentation, re-run
+
+Same method as the section above: a scratch injector puts `RTHIT_HIT(n);` as the
+first statement of every top-level definition of `runtime.c`, adds a malloc'd
+counter table filled in `main()` and dumped under `MEC_RTHIT=1` from `main()` and
+from every `exit()` path, `runtime.ll` is regenerated from the injected copy by
+`languages/c-to-llvm-ir.abnf`, and every corpus program is linked against it with
+`-rt`. Nothing in `languages/lib/` carries a counter.
+
+Two bookkeeping notes so the numbers line up with the section above:
+
+  * this injector counts **303** top-level definitions where the earlier one
+    counted 301. The two disagree on two bodies, not on any body's reachability;
+    every conclusion below is per-body and neither count changes one.
+  * `main` always reports zero because the counter table is allocated *inside*
+    `main`, after the injected increment. It is an instrumentation artifact and
+    is excluded everywhere below.
+
+Reproduced exactly: **277 of 303 reached, 26 never** - the earlier 24, plus
+`o_cstr` and `fmt_val`, which the earlier list omitted and which are the same
+kind of finding.
+
+## The verdicts
+
+| body | verdict | evidence |
+|---|---|---|
+| `js_gicmp` `js_gieq` `js_ginot` `js_ginum` `js_gistr` `js_giis` | **DELETED** - unreachable | no emitter, no `-rt.metajs`, no internal caller, zero calls and zero *declares* in the emitted IR of all 34 corpus programs |
+| `js_jfsub` `js_jfmul` `js_jfmod` `js_jfneg` `js_jfint` | **DELETED** - unreachable | same, and Go's `floExt` map is shadowed by `giBase` |
+| `wr` `wrn` `jf_is` | **DELETED** - unreachable | not externs, and not called from anywhere in `runtime.c` |
+| `d_odd_int` | **ASSERTED** | `pow06`-`pow11` of `tests/metajs-test-full.js` |
+| `fmt_val` | **ASSERTED** | `fmtv01`-`fmtv05` of `tests/metajs-test-full.js` |
+| `gc_grow` `werr` `die` `die2` `die3` `wstr` `o_cstr` `class_name` `fmt_sprint` | reachable, proved by probe, NOT assertable - see below | measured call counts, below |
+
+### The eleven externs: dead surface, and the semantics are pinned elsewhere
+
+The eleven `js_gi*` / `js_jf*` names were the interesting ones, on the theory
+that they were "a hole in the Go/Java/C# ratchets". They are not. **No emitter
+can emit a call to any of them**, which was established three ways and not one:
+
+1. `grep` over every `languages/*-to-llvm-ir.abnf` and `languages/lib/*.metajs`.
+   Each name occurs only in prose comments, plus one map (below).
+2. The emitted IR of all 34 corpus programs: `call ... @<name>(` is **zero** for
+   all eleven, and so is `declare ... @<name>(`. Externs are declared per use, so
+   the earlier claim that they are "declared and emitted into every module" was
+   wrong - deleting them cannot break a link.
+3. Reading the emitters. Go sends `==`/`!=` to the shared `js_seq` (whose
+   `strict_eq` has the tag-13 arm), the ordered comparisons to
+   `js_gilt/js_gile/js_gigt/js_gige`, `^x` to `emitBin("^") + js_band` at the
+   operand's width, `fmt.Sprint` to `js_gostr`, `float64(x)` to `js_giconv`.
+   Java sends `-`/`*`/`/`/`%` to `js_jvarith`, unary minus to `js_jvneg`, `(int)`
+   to `makePrimCast`'s width-exact narrowing.
+
+`languages/go-to-llvm-ir.abnf`'s `floExt` map still names `js_jfsub`, `js_jfmul`,
+`js_jfdiv` and `js_jfmod`, and **it is unreachable code**: `emitBinNum` consults
+`giBase` first, `giBase` already holds every key `floExt` has, so those operators
+leave through `js_giarith` - whose tag-14 arm calls the same `jf_arith` the
+deleted wrappers did. That is an emitter-file finding and the emitter is not this
+agent's file; it is written down here rather than edited. (`js_jfdiv` survives in
+the floor: it has one real `declare`, in go-test-full's module.)
+
+**Ground truth, because a reachability argument alone is not enough.** Every rule
+the six `js_gi*` bodies implemented was run against real `go run` and every rule
+the five `js_jf*` bodies implemented against real `java` 24, in three engines -
+the real toolchain, `llvm.Run`, and a native `-exe` build **with the bodies
+already deleted**. All three agree on all of:
+
+```
+uint64max == uint64max / != uint64max-1      ^uint8(0xF0)   ^uint64(0)   ^int32(5)
+int64 9007199254740993 == 9007199254740992   fmt.Sprint(uint64max), fmt.Sprint(int64)
+float64(uint64max), float64(int64)           NaN == NaN, NaN != NaN
+int8(-128) == -128, uint16 == 65535          float64 ==, float64(i) == c
+2.5-1.5  2.5*1.5  2.5/1.5  -2.5              1.0/0.0  -1.0/0.0  0.0/0.0  -0.0
+float32(1.5)*2  -float32(1.5)                c -= .5; c *= 2; c /= 4; c %= 0.4
+(int)3.9  (int)-3.9  (int)3000000000L  -5L   java 2.5 % 1.5
+```
+
+**Discriminating power of a new assertion for these: ZERO, and that is the right
+answer.** `tests/go-test-full.go` already pins every one of the rules - `int24`
+and `int25` for `^`, `int10` for `fmt.Sprint(uint64)`, `int28` for
+`float64(int64)`, `int1`-`int11` for the equalities - through the paths that
+actually run. No coverage is lost by the deletion, because the bodies were
+duplicates nothing routed to. An assertion added for them would pass against a
+clean archive of `9689f81` too, and **assertions that pass either way are
+decoration**.
+
+### `d_odd_int` and `fmt_val`: reachable, untested, now asserted
+
+Both are in `tests/metajs-test-full.js`, which is the right file because
+`tests/clang-check.sh` builds it into a native binary and requires exit 0 - so
+these are the C floor's own bodies under test, not the Go twin's.
+
+`d_odd_int` is only consulted by `d_pow` when the base is a **signed zero**, and
+the spelling that needs neither a `-0.0` literal nor the `Infinity` global (the
+interpreter half has neither) is `pow(-Inf, y)`: `d_pow` answers that by
+recursing on `1.0/x`, which *is* `-0.0`, with the exponent's sign flipped. The
+six checks walk both arms of `d_sign(xb) && d_odd_int(y)` in both the `y<0` and
+the `y>0` branch, plus a non-integral exponent and one above 2^53. Verified
+identical in all three engines.
+
+`fmt_val` was reached by nothing while `fmt_top` was reached 59 times, because
+every `fmt_top` the corpus takes gets a **string** and returns at the tag-4 test
+one line in. `sprintf("%v", <non-string>)` is the shortest way past it, and
+`sprintf` is one of the eleven host globals **both** halves bind. An array
+operand is deliberately not asserted: the two halves render it differently by
+construction, which is the same rule the file's header states for the host
+globals.
+
+**Discriminating power: these are coverage, not regression detectors.** Neither
+body changed, so an archive of `9689f81` passes both sets. What they buy is that
+the next change to `d_pow`'s zero handling or to `fmt_top`'s dispatch has a test
+under it, natively, which it did not have before.
+
+### The nine that stay unasserted, each proved reachable
+
+None of these can live in a ratchet, and each reason is a measurement rather than
+a shrug. Every one was reached by a probe under the instrumented floor, with the
+exact call counts below (`MEC_RTHIT=1`, native `-exe`):
+
+```
+tests/metajs-fail-test.js              rc=1   class_name=2  o_cstr=5
+tests/metajs-fail-test-undeclared.js   rc=1   werr=3  wstr=1  die2=1
+tests/metajs-fail-test-anytype.js      rc=1   werr=3  die=1
+`var n = 5; n.foo = 1`                 rc=1   werr=4  wstr=2  die3=1
+40,000 live objects in one array       rc=0   gc_grow=1
+`sprint("a","b")` x3                   rc=0   fmt_sprint=3
+```
+
+**`werr` `die` `die2` `die3` `wstr` `o_cstr` `class_name` are the ABORT path.**
+A `*-test-full.*` file ends by printing `full: N checks, 0 failures` and
+returning its failure count; a file that reaches `die` prints nothing and exits
+1, so the abort path and the self-checking ratchet are mutually exclusive by
+construction. The three `tests/metajs-fail-test*.js` files already cover these
+semantics in the matrix - but only through the interpreter and `llvm.Run`, never
+natively, which is exactly why the floor's copies read as untested. Their native
+halves were run by hand here and **agree with the Go twin word for word**:
+
+```
+MetaJS: variable 'x' has type number and cannot hold a string
+assignment to undeclared variable: zzz
+MetaJS: anytype can only initialize a declaration
+```
+
+Automating that is three `-exe` rows plus an expect-nonzero mode, in
+`.vscode/launch.json` and `test.sh` - neither of which is this agent's file, so
+it is reported rather than done.
+
+**One real divergence was found while doing it, and is NOT fixed here.** A member
+assignment on a non-object reports different text in the two engines:
+
+```
+llvm.Run (abnf/jsrt.go)   js runtime error: cannot set member 'foo' on float64
+native   (die3)           js runtime error: member assignment 'foo' on 5
+```
+
+The Go twin names the TYPE, the floor names the VALUE. `die2`'s wording matches
+exactly, so this is a real gap against the comment above `werr` ("the wording is
+that of the Go twin so the two engines report identically"). Fixing it means
+either editing `abnf/jsrt.go` (another agent's file today) or changing `die3`'s
+message with no test under it - an unmeasurable change to error text, which is
+the kind this project reverts. Named here for whoever owns both halves at once.
+
+**`gc_grow` is reachable and cannot be afforded.** It doubles the mark stack when
+the marking frontier outgrows it. Every GC shape in `tests/metajs-test-full.js`
+section 25 has a frontier of a handful of pairs, because `gc_drain` pops as it
+goes; the only shape that fills the stack is a single array whose slots are all
+distinct traced blocks, which drain pushes in one go. `GC_MCAP` starts at 65,536
+longs and the stack holds PAIRS, so the frontier has to pass 32,768 - measured
+natively:
+
+```
+N=20000  gc_grow=0   collections=6   N=33000  gc_grow=1   collections=7
+N=30000  gc_grow=0   collections=7   N=40000  gc_grow=1   collections=8
+```
+
+That assertion was written, measured and **removed again**: 40,000 object
+allocations inside `main()` cost more than the `-frozen` half's
+100,000,000-instruction safety valve allows (the MetaJS *interpreter* is itself a
+MetaJS program running on `abnf/jsrt.go`'s IR interpreter there), and the ratchet
+turned to `FULL under goja, BUT -frozen fails or differs`. It is the step limit
+and not the collector that stops it, and there is no cheaper spelling: the
+frontier IS the count of live traced blocks. The comment now sits where the
+assertion would have been, so the body reads as deliberately unasserted rather
+than accidentally untested.
+
+**`fmt_sprint` is reachable only through an ASYMMETRIC host global.** It is host
+id 35, seeded as `sprint`, and `sprint` is one of the seven globals
+`abnf/jsrt.go` binds and `languages/metajs-interpreter.abnf` does not - the
+difference the header of `tests/metajs-test-full.js` already records. The
+`--full` runner requires both halves of a language to run the SAME file and to
+report the same assertion count, so an assertion on `sprint` fails on the
+interpreter half by construction. Nor can it be guarded: `typeof sprint` is
+`"function"` under the compiler half and `variable not defined: sprint` under the
+interpreter. Go's `fmt.Sprint` does not reach it either - the Go emitter binds
+that to `js_gostr`. It was left in place rather than deleted: deleting it would
+put the floor's seeded-root list out of step with `abnf/jsrt.go`'s bindings,
+which is a real contract, in exchange for a body nothing calls.
+
+## The result
+
+```
+                          bodies    reached    never
+before  (9689f81)            303        277       26
+after                        289        280        9
+```
+
+All nine are named above and each has a probe that reaches it. **289/289
+accounted for.** The fourteen deletions cost `runtime.c` 14 bodies (the file is
+3 lines shorter net, because the reachability arguments were written into it) and
+`runtime.ll` **375 lines / 6,987 bytes**.
+
+## Gates
+
+Measured in a clean archive of `9689f81` plus only this agent's three files, because
+two other agents were editing the shared tree at the time (`abnf/jsrt.go`,
+`java-rt.metajs`, `python-rt.metajs`, `python-interpreter.abnf`,
+`tests/java-test-full.java`, `tests/python-test-full.py` were all dirty and
+`java`'s ratchet was mid-flight red in the shared tree - none of it this change).
+
+```
+./test.sh                     325 entries run - 325 passed, 0 failed
+./test.sh --full              5,811 assertions, 0 languages whose halves disagree
+                              (5,800 at 9689f81, + 11 new; grep for BUT -frozen /
+                               VACUOUS / MISMATCH / FROZEN-DIFF is empty)
+./test.sh --cross             119 compared, 0 divergent, 0 differing only in warnings
+tests/clang-check.sh          16 modules, all accepted by clang, all sixteen
+                              "and the clang executable agrees", none held
+go test ./abnf/               ok
+tests/gen-*.sh --check        14 of 14 up to date
+-freeze                       jsbootstrap.ll and jsagrammar.go byte-identical (fixed point)
+MEC_GC=off  400,000 iters     3,711 B/iter   (was 3,711)
+gc          400,000 iters     rss 3,325,952, flat at 100k/200k/400k/800k
+tests/coro-poc/build.sh       BYTE-IDENTICAL in both engines
+  --gc                        off/auto/stress/poison all SAME
+  --break                     every row identical to 9689f81 (only `live=` moved
+                              14128 -> 14048, which is the 14 deleted bodies)
+```
+
+---
+
+# Part B, move 1: `case_map` CANNOT MOVE - and neither can any other candidate
+
+The measurement named `case_map` plus the 328-range Unicode tables as the best
+first move: 114 corpus calls, zero on both benches, pure table lookup, handle
+level throughout. The MetaJS text was not written, because the move is blocked -
+and the blocker is not `case_map`'s.
+
+**`languages/lib/runtime.metajs` is layer 2, and MetaJS itself has no layer 2.**
+`languages/metajs-to-llvm-ir.abnf` links exactly one runtime input:
+
+```
+if (rts == undefined || rts.length == 0) { rts = [runtimePath()] }
+```
+
+- `lib/runtime.ll` and nothing else. Every other language links `runtime.ll` PLUS
+its own `<lang>-rt.ll`, which is where a `runtime.metajs` body arrives. So a body
+that moves out of the floor and into `runtime.metajs` **disappears from MetaJS's
+own native build**.
+
+`case_map` is not reached through a `js_*` extern. It is reached through the
+floor's own host-builtin dispatch - `"abc".toUpperCase()`, method id 27/28 - and
+that dispatch **is MetaJS's standard library**. The instrumented corpus says so
+directly: of the 114 `case_map` calls, **46 are MetaJS's own two corpus
+programs**, and `tests/metajs-test-full.js` uses `toUpperCase`/`toLowerCase` on
+11 lines.
+
+This is not specific to `case_map`. Every candidate the measurement left on the
+list is reached from the same host-builtin surface, and every one is reached by
+MetaJS itself:
+
+```
+body              metajs calls   corpus calls
+case_map                    46            114
+fmt_apply                   11             11
+fmt_top                     12             59
+fmt_val                      5              5
+int_str                      5              5
+js_num_str                  44            307
+num_to_str              19,476         44,234
+shortest_digits             76            201
+dec_mul                  8,143         35,612
+dec_cmp                  3,337          6,301
+dec_norm                 2,268          4,538
+dec_absdiff              1,092          2,053
+dec_to_double               14             85
+```
+
+**Zero of them can move to `runtime.metajs` as things stand.** The `d_*` family
+was already on the can-never-move list for a different reason (they *are* the
+double, and MetaJS has no union). Between the two rules, Part B's movable set is
+currently empty.
+
+## What would unblock it, and who owns it
+
+One of two things, both outside this agent's files:
+
+1. **Give MetaJS a layer 2.** `metajs-to-llvm-ir.abnf`'s `rts` default becomes
+   `[runtimePath(), libPath("metajs-rt.ll")]`, built from a `metajs-rt.metajs`
+   that imports `runtime.metajs` exactly as the other eleven do. Then the whole
+   host-builtin surface is movable, and `case_map` is a good first body to move
+   through the new door. Cost: every MetaJS `-exe` grows a second module, and
+   `tests/gen-metajs-rt-ll.sh` joins the fourteen generators. That is the
+   metajs grammar's owner plus the merge agent.
+2. **Move the TABLE only and keep the search in the floor.** The 328 ranges are
+   ~110 lines of data and the binary search is 20; the data is the bulk. But the
+   floor cannot read a layer-2 array, so this needs a new floor primitive that
+   layer 2 fills in at boot - which is a bigger change than the body is worth.
+
+Option 1 is the real one, and it is worth saying that it is also what makes the
+rest of Part B possible rather than just this one body. **Until it lands, Part B
+has no first move**, and that is a measured statement rather than a delay.

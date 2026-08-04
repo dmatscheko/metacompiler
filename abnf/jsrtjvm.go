@@ -223,6 +223,16 @@ func jvmMathObject() *jsObject {
 		if f, ok := v.(jsJFlo); ok {
 			return jsJFlo{f: math.Abs(f.f), sty: f.sty}
 		}
+		// A long is a 64-bit jsGInt box, and toInt32 truncates it: Math.abs of
+		// 3000000000L answered -1294967296 and of Long.MAX_VALUE answered 0.
+		// Negate in the box instead. Math.abs(Long.MIN_VALUE) is Long.MIN_VALUE
+		// (JLS 15.15.4) and falls out of two's-complement negation unaided.
+		if b, ok := v.(jsGInt); ok && b.w == 64 {
+			if b.v < 0 {
+				return jvBox(-b.v)
+			}
+			return b
+		}
 		return float64(rt.toInt32(math.Abs(rt.toNumber(v))))
 	}))
 	o.set("max", jsHostFunc("max", func(rt *jsrt, this uint64, args []interface{}) interface{} {

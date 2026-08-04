@@ -1186,6 +1186,27 @@ function s25() {
     var f = gcNest(7)
     gcPad("n", churn)
     check("gc07", f() === 7)
+
+    // ----- WHY gc_grow IS NOT ASSERTED HERE, measured rather than assumed -----
+    // gc_grow doubles the mark stack when the marking frontier outgrows it, and
+    // the Part B coverage instrumentation (docs/runtime-next-plan.md) found it
+    // at ZERO calls across all 34 native corpus builds. Every shape above has a
+    // frontier of a handful of pairs, because gc_drain pops as it goes; the one
+    // shape that fills the stack is a single array whose slots are all distinct
+    // traced blocks, which drain pushes in one go. GC_MCAP starts at 65536 longs
+    // and the stack holds PAIRS, so the frontier has to pass 32,768 - measured
+    // natively, 30,000 elements never call gc_grow and 33,000 always do.
+    //
+    // That assertion cannot live in this file. 33,000+ object allocations inside
+    // main() cost more than the -frozen half's 100,000,000-instruction safety
+    // valve allows (the metajs INTERPRETER is itself a MetaJS program running on
+    // abnf/jsrt.go's IR interpreter there), so the ratchet reports
+    // "FULL under goja, BUT -frozen fails or differs" - tried at 40,000, and it
+    // is the step limit and not the collector that stops it. There is no cheaper
+    // shape: the frontier IS the count of live traced blocks, so any spelling
+    // costs the same 33,000 allocations. gc_grow is therefore proved reachable
+    // by a native probe recorded in docs/runtime-next-plan.md and left unasserted
+    // here on purpose, rather than left looking untested by accident.
 }
 
 // ===== SECTION 26: boxed doubles (the flo* host globals) =====
@@ -1376,6 +1397,45 @@ function s27() {
     check("pow03", 1 / Math.pow(0.5, 2147483647) > 0)      // the positive base stays +0
     check("pow04", Math.pow(0 - 0.5, 3) === 0 - 0.125)
     check("pow05", Math.pow(0 - 0.5, 0 - 2147483647) < 0)  // overflow keeps it too
+
+    // ----- an INFINITE base, which is the only way into d_odd_int -----
+    // The Part B coverage instrumentation (docs/runtime-next-plan.md) counted
+    // every call to every body of the C floor across all 34 native corpus
+    // builds and found d_odd_int at ZERO. It is reachable and nothing reached
+    // it: d_pow only consults it when the base is a signed zero, and the one
+    // spelling of a signed zero that needs no -0.0 literal and no Infinity
+    // global is pow(-Inf, y) - d_pow answers that by recursing on 1.0/x, which
+    // IS -0.0, with the exponent's sign flipped. So the four cases below walk
+    // both arms of `d_sign(xb) && d_odd_int(y)` in both the y<0 and the y>0
+    // branch, and an odd/even mistake in d_odd_int flips a sign in each.
+    // Checked against node and against the native binary; the interpreter half
+    // has neither Infinity nor -0.0 as literals, hence 1/0 and the divisions.
+    var ninf = 0 - 1 / 0
+    check("pow06", Math.pow(ninf, 3) === ninf)             // odd, y>0  -> -Inf
+    check("pow07", Math.pow(ninf, 2) === 1 / 0)            // even, y>0 -> +Inf
+    check("pow08", 1 / Math.pow(ninf, 0 - 3) < 0)          // odd, y<0  -> -0
+    check("pow09", 1 / Math.pow(ninf, 0 - 2) > 0)          // even, y<0 -> +0
+    // A NON-integral exponent is never odd, whichever side of zero it is.
+    check("pow10", 1 / Math.pow(ninf, 0 - 2.5) > 0)
+    // And the exponent above 2^53, where d_odd_int gives up and says "even".
+    check("pow11", Math.pow(ninf, 9007199254740994) === 1 / 0)
+
+    // ----- sprintf %v, which is the only way into fmt_val -----
+    // Same finding, same file: fmt_top was reached by the whole corpus and
+    // fmt_val was not, because every fmt_top the corpus takes gets a STRING and
+    // returns at the tag-4 test one line in. %v on a non-string is the shortest
+    // way past it, and sprintf is one of the eleven host globals BOTH halves
+    // bind (see the header note on sprint, which only the compiler half has).
+    check("fmtv01", sprintf("%v", 42) === "42")
+    check("fmtv02", sprintf("%v", true) === "true")
+    check("fmtv03", sprintf("%v", 1.5) === "1.5")
+    check("fmtv04", sprintf("%v|%v", "hi", 7) === "hi|7")
+    // An ARRAY operand is deliberately NOT asserted: the interpreter half's own
+    // sprintf renders it as JavaScript does and the compiler half as Go's %v
+    // does, so a check on it would fail on one half by construction - the same
+    // rule the header states for the host globals. Go's [1 2 3] rendering is
+    // pinned in tests/go-test-full.go, where it is the language's own answer.
+    check("fmtv05", sprintf("%v", 0 - 0.125) === "-0.125")
 }
 
 // ===== SECTION 28: delKey (the floor's js_del under its MetaJS name) =====

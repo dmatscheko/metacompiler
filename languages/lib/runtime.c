@@ -848,14 +848,6 @@ void gc_collect(void) {
 
 /* --- fatal errors ------------------------------------------------------- */
 
-void wr(const char *s) {
-	long i = 0;
-	while (s[i] != 0) { putchar((int)s[i]); i = i + 1; }
-}
-void wrn(const char *s, long n) {
-	long i = 0;
-	while (i < n) { putchar((int)s[i]); i = i + 1; }
-}
 /* A fatal runtime error goes to STDERR, like abnf/jsrt.go's rt.fail, and the
  * wording is that of the Go twin so the two engines report identically. */
 void werr(const char *s) {
@@ -2490,7 +2482,6 @@ long jf_make(long bits, long sty) {
 	sa(h, bits); sb(h, sty);
 	return h;
 }
-int jf_is(long h) { return tag_of(h) == 14; }
 
 /* jvmStyleOf: the style an operation's result inherits - the one of whichever
  * operand is a float, the LEFT one when both are. */
@@ -4272,7 +4263,7 @@ long host_call(long id, long self, long args) {
 	 * exactly - the same {h, l} pair languages/lib/interp-core.js already uses.
 	 *   sint(hi, lo, bits, unsigned)  build one, through si_norm: the result is a
 	 *                                 PLAIN NUMBER when the invariant says so
-	 *   sintIs(v)                     is this a sized integer (js_giis)
+	 *   sintIs(v)                     is this a sized integer (tag 13)
 	 *   sintHi(v) / sintLo(v)         the two halves back out, unsigned
 	 *   sintWidth(v) / sintUns(v)     the declared width and signedness */
 	if (id == 40) {
@@ -4869,18 +4860,6 @@ long js_giarith(long op, long l, long r) {
 	}
 	return si_arith(op, l, r);
 }
-long js_gicmp(long l, long r)  { return mk_num(d_from_long(si_cmp(l, r))); }
-/* giEq: two numeric operands compare by value, and a float operand makes the
- * comparison a FLOAT one (giFloat on the other side) rather than truncating
- * both to integers. */
-long js_gieq(long l, long r) {
-	if (si_numeric(l) && si_numeric(r)) {
-		if (tag_of(l) == 14) { return mk_bool(d_eq(fa(l), si_float(r))); }
-		if (tag_of(r) == 14) { return mk_bool(d_eq(fa(r), si_float(l))); }
-		return mk_bool(si_eq(l, r));
-	}
-	return mk_bool(strict_eq(l, r));
-}
 long js_giconv(long v, long bits, long uns) {
 	return si_norm(si_val(v), d_to_long(d_trunc(to_number(bits))), truthy(uns));
 }
@@ -4891,10 +4870,22 @@ long js_gineg(long v) {
 	if (tag_of(v) == 14) { return jf_make(d_neg(fa(v)), fb(v)); }
 	return si_norm(0 - si_val(v), si_width_of(v, v), si_uns_of(v, v));
 }
-long js_ginot(long v) { return si_norm(0 - si_val(v) - 1, si_width_of(v, v), si_uns_of(v, v)); }
-long js_ginum(long v) { return mk_num(si_float(v)); }
-long js_gistr(long v) { if (tag_of(v) == 13) { return si_str(v); } return to_string(v); }
-long js_giis(long v)  { return mk_bool(tag_of(v) == 13); }
+/* WHY THERE IS NO js_gicmp / js_gieq / js_ginot / js_ginum / js_gistr / js_giis
+ * HERE, and why adding one back would be a mistake. All six were written for a
+ * sized-integer surface no emitter ever grew: languages/go-to-llvm-ir.abnf sends
+ * `==` and `!=` to the shared js_seq (strict_eq's tag-13 arm at the top of this
+ * file does the width-exact compare), the ordered comparisons to
+ * js_gilt/js_gile/js_gigt/js_gige, `^x` to emitBin("^") + js_band at the
+ * operand's width, fmt.Sprint to the shared to_string, and float64(x) to
+ * js_giconv. Every one of those answers was checked against real `go run`
+ * (uint64max == uint64max, 9007199254740993 == 9007199254740992, ^uint8(0xF0),
+ * ^uint64(0), fmt.Sprint(uint64max), float64(uint64max), NaN != NaN) in
+ * llvm.Run AND in a native -exe build, and all three agree. The bodies were
+ * dead surface - zero calls in the emitted IR of all 34 corpus programs, zero
+ * declares, zero internal callers - and the Part B coverage instrumentation
+ * found them by never reaching them. Deleted 2026-08-04; see the "settling the
+ * 24" section of docs/runtime-next-plan.md. If a language ever DOES need one,
+ * write it then, with the ratchet assertion that reaches it. */
 /* The UNBOXER: a sized integer becomes its plain number, everything else passes
  * through untouched. */
 long js_gival(long v) { if (tag_of(v) == 13) { return mk_num(si_float(v)); } return v; }
@@ -4923,23 +4914,29 @@ long js_giadd(long l, long r) {
 }
 
 /* ---- the boxed-double externs of abnf/jsrt.go's big extern table (js_jflo,
- * js_gflo, js_csflo, js_jfsub/mul/div/mod, js_jfneg, js_jfint), which are what
- * languages/java-to-llvm-ir.abnf, kotlin- and csharp- already emit. They are
- * the LANGUAGE NEUTRAL ones: js_jfstep and js_jadd are left out because their
- * Go arms turn on jsChar, a type the floor does not have, and approximating
- * them silently is how this project gets silently wrong answers. */
+ * js_gflo, js_csflo, js_jfdiv), which are what languages/java-to-llvm-ir.abnf,
+ * kotlin- and csharp- already emit. They are the LANGUAGE NEUTRAL ones:
+ * js_jfstep and js_jadd are left out because their Go arms turn on jsChar, a
+ * type the floor does not have, and approximating them silently is how this
+ * project gets silently wrong answers.
+ *
+ * js_jfsub / js_jfmul / js_jfmod / js_jfneg / js_jfint used to sit here too and
+ * are gone for the same reason the six js_gi* names above are: NOTHING EMITS
+ * THEM. Java routes -, *, / and % through js_jvarith, unary minus through
+ * js_jvneg and (int) through js_jvint / makePrimCast's width-exact narrowing;
+ * Go's own floExt map still names js_jfsub/js_jfmul/js_jfmod but is unreachable,
+ * because emitBinNum consults giBase FIRST and giBase already holds every key
+ * floExt has, so those ops leave through js_giarith - whose tag-14 arm calls the
+ * same jf_arith these wrappers did. js_jfdiv is the one survivor and it IS
+ * emitted (one declare in go-test-full's module). Checked against real `go run`
+ * and real `java` on 2.5-1.5, 2.5*1.5, 2.5/1.5, 2.5%1.5, -2.5, 1.0/0.0, -1.0/0.0,
+ * 0.0/0.0, -0.0, float32 arithmetic, compound -=/*=//=/%=, (int)3.9, (int)-3.9,
+ * (int)3000000000L and -5L: llvm.Run and a native -exe both agree with the real
+ * toolchain, with these bodies deleted. See docs/runtime-next-plan.md. */
 long js_jflo(long v)  { return jf_make(to_number(v), 0); }
 long js_gflo(long v)  { return jf_make(to_number(v), 1); }
 long js_csflo(long v) { return jf_make(to_number(v), 2); }
-long js_jfsub(long l, long r) { return jf_arith(1, l, r); }
-long js_jfmul(long l, long r) { return jf_arith(2, l, r); }
 long js_jfdiv(long l, long r) { return jf_arith(3, l, r); }
-long js_jfmod(long l, long r) { return jf_arith(4, l, r); }
-long js_jfneg(long v) {
-	if (tag_of(v) == 14) { return jf_make(d_neg(fa(v)), fb(v)); }
-	return mk_num(d_from_long(to_int32(d_neg(to_number(v)))));
-}
-long js_jfint(long v) { return mk_num(d_from_long(to_int32(to_number(v)))); }
 /* A literal a double cannot hold exactly: the emitter passes its DIGITS,
  * because emitNum would already have rounded 9223372036854775807 to
  * 9223372036854776000 on the way into the module. (text, radix, bits,
