@@ -444,16 +444,9 @@ function phFloRound(d, decpt, nd) {
     if (keep == "0") { pt = 1 }
     return {d: keep, e: pt}
 }
-
-function phZeros(n) {
-    var z = ""
-    var i = 0
-    while (i < n) {
-        z = z + "0"
-        i = i + 1
-    }
-    return z
-}
+// phZeros is SHARED as rtZeros - lib/runtime.metajs. It lives THERE and not in
+// runtime-decimal.metajs (where the other copy was) because php has no decimal
+// bignum and must not import one for nine lines.
 
 function phFloFormat(n, nd) {
     if (n !== n) { return "NAN" }
@@ -483,8 +476,8 @@ function phFloFormat(n, nd) {
         }
         return sign + d.charAt(0) + "." + frac + "E" + es + ea
     }
-    if (decpt <= 0) { return sign + "0." + phZeros(0 - decpt) + d }
-    if (decpt >= d.length) { return sign + d + phZeros(decpt - d.length) }
+    if (decpt <= 0) { return sign + "0." + rtZeros(0 - decpt) + d }
+    if (decpt >= d.length) { return sign + d + rtZeros(decpt - d.length) }
     return sign + d.substring(0, decpt) + "." + d.substring(decpt, d.length)
 }
 
@@ -1494,21 +1487,15 @@ function phObjPropsEq(a, b) {
         // b.props[k] has to be PRESENT, not merely undefined: the Go twin's
         // `bv, has := b.props[k]` answers false on a missing key even when a's
         // value is null. The key lists are the only membership test layer 2 has.
-        if (!phNameIn(kb, k)) { return false }
+        if (!rtHas(kb, k)) { return false }
         if (!phLoose(a[k], b[k])) { return false }
         i = i + 1
     }
     return true
 }
-
-function phNameIn(names, k) {
-    var i = 0
-    while (i < names.length) {
-        if (names[i] === k) { return true }
-        i = i + 1
-    }
-    return false
-}
+// phNameIn is SHARED as rtHas - lib/runtime.metajs, which is rtDictFind's `===`
+// scan read as a membership test. dart's dtSeen and ruby's rbIsLambda were the
+// same eight lines.
 
 // ===================================================== casts ================
 

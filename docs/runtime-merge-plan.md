@@ -100,6 +100,12 @@ Go twin (KEPT) abnf/jsrt*.go                       30,248
 clang-check    16/16 "ok, and the clang executable agrees", no row held
 ```
 
+**After the FIFTH pass** (2026-08-04, on top of `9c7ac05`): another **-205 code
+lines** across twelve merged shape groups, and `tools/shape-scan -min 60` is down
+from **14 cross-language groups / 198 recoverable** to **2 / 9** - both of which
+are written up as declines with the reason at both sites. See "Part A, FIFTH
+pass" below.
+
 ---
 
 # Part A - the shared MetaJS layer
@@ -1380,6 +1386,214 @@ held** - `tests/native-full.sh` **15/15, every binary exit 0 with 0 failures** -
 point - `MEC_GC=off` **3,711 B/iter** at 400k with gc RSS flat at 3.34 MB. The
 dart and swift native ratchet outputs are byte-identical to `702dc68`'s; csharp's
 and java's differ only in the six new assertions.
+
+---
+
+## Part A, FIFTH pass - the residue re-opened after the tax died, twelve groups
+## merged, three declined on plumbing rather than on size (2026-08-04, at `9c7ac05`)
+
+Every merge in the four passes above was sized against the DECLARATION TAX. That
+tax was removed by the `scope_find` hash index (`e1307f3`) and re-measured at
+zero at both ends of a module (see "THE THIRD ASKING" above, and the flat
+declaration-index curve). **So there is no longer a size rule, and every pair
+those passes declined on the arithmetic was re-opened here.**
+
+The method did not change: **take the difference list first**. It is what says
+whether a group is one function under N names or N specifications under one
+shape, and it is the only thing that still decides. What changed is that "it is
+only nine lines" stopped being an argument in either direction.
+
+`tools/shape-scan -min 60` found 14 cross-language groups, 198 recoverable lines.
+**Twelve merged, two declined, and the count is now 2 groups / 9 recoverable.**
+
+### Merged into `lib/runtime.metajs` (seven groups)
+
+```
+rtCopyArr        7 bodies, 6 languages, EMPTY difference list. csCopyArr,
+                 dtCopyArr, k4bArgArr, k4Copy, pyFCopyArr, rbCopyArr, swCopyArr
+                 - byte-for-byte identical down to the loop variable, and KOTLIN
+                 HAD IT TWICE, 993 lines apart. The three comments above them
+                 ("a fresh array copy", "the variadic tail of a closure", "the
+                 dict keys/values defensive copy") are three CALLERS of one
+                 function, which is exactly how seven copies stayed invisible.
+rtHas            3 bodies, ZERO knobs: dart's dtSeen (cycle-breaking seen-list),
+                 php's phNameIn (key-list membership) and ruby's rbIsLambda
+                 (identity scan of the lambda side table). rbIsLambda read its
+                 array from a FILE GLOBAL instead of a parameter, which is why
+                 even the shape scan needed the normaliser to see it. Implemented
+                 as `rtDictFind(a, v) >= 0` - the dict find IS an indexOf, and
+                 rtDictFind's own head comment already establishes that `===`
+                 here is the floor's strict_eq.
+rtPairGet        3 bodies, ZERO knobs, TWO merged: kotlin's k4NameOf and python's
+                 pyBFuncName (the identity-keyed side table MetaJS needs because
+                 no map can be keyed by a closure). js-rt's jvCtorDescOf is the
+                 same eight lines and is DECLINED - see below.
+rtIsIntegral     3 bodies, ZERO knobs, and TWO OF THEM IN ONE FILE: kotlin-rt
+                 carried ktIsInt at 229 and k4bIsIntegral at 4384, while
+                 runtime-jvm.metajs already exported the same five lines as
+                 rtjIsIntegral. The only apparent difference was ktIsChar against
+                 rtIsCharBox, and ktIsChar's whole body is `rtIsCharBox(v)`.
+                 MOVED UP out of runtime-jvm rather than kotlin importing that
+                 file: kotlin has neither of its two knobs and wants none of its
+                 other bodies. rtjIsIntegral stays as a one-line delegate so
+                 csharp's and java's fifteen call sites do not move.
+rtRuneLen        2 bodies, ZERO knobs: dart's dtStrLen and kotlin's k2RuneLen,
+                 fourteen lines each, differing in the name of one local.
+rtZeros          2 bodies, ZERO knobs: php's phZeros and runtime-decimal's
+                 rtZeros. MOVED OUT of runtime-decimal.metajs into
+                 runtime.metajs, because php has no decimal bignum and importing
+                 one for nine lines is the tax argument in its worst form;
+                 runtime-decimal's own three importers all import runtime.metajs.
+rtIsObjNotArr    2 bodies, ZERO knobs: pyIsObj and rbIsObj, byte-identical, and
+                 exactly the four tests rtIsObj's head comment names - it merged
+                 three and deliberately left the array rejection out because ITS
+                 callers walk __class/__super. Python and Ruby ask the stricter
+                 question in ~30 places each, so the fourth test is real for them.
+rtPrepend        ALREADY SHARED and still copied twice: kotlin's k4Prepend and
+                 python's pyDPrepend. pyDPrepend is recorded as merged in Part A's
+                 FIRST pass and a fourth copy was still in the tree. rtPrepend's
+                 null/undefined guard is a superset of both.
+```
+
+### Merged into `lib/regex.js` (four groups), which is where the GO TWIN ALREADY HAD THEM
+
+This is the finding of the pass. `abnf/jsrtregex.go` has **one** `rxCache` /
+`rxGet` (:1614), **one** `rxIsRegexObj` (:1635), **one** `rxIsMatchObj` (:1644),
+**one** `rxObjRe` (:1652) and **one** `rxMatchOf` (:1680), all shared by js,
+kotlin, python and ruby. This side had **four** caches and **two or three** of
+everything else. The divergence was never among the four copies - it was between
+the two engines, and **this is the side that had it wrong**. The shared bodies
+therefore take the Go twin's own names, so the two files line up when diffed,
+which is the only thing that makes the standing three-place edit (regex.js,
+jsrtregex.go, each grammar's `include`) honest.
+
+The merge became possible at `9c7ac05`, when kotlin's verbatim copy of `regex.js`
+became an `import`: all four languages now import the same engine text.
+
+```
+rxGet / rxCache   4 bodies, EMPTY difference list. jxGetProg/jxCache,
+                  k5Get/k5Cache, pyERxGet/pyERxCache, rbRxGet/rbRxCache - same
+                  key spelling, same rxCompile call, four private caches. The
+                  flag mapping happens in each language BEFORE the call (verified,
+                  not inherited) and rxCompile is language-neutral, so one cache
+                  serves all four. The key stays `"$" + flags + " " + pattern`
+                  rather than Go's `flags + "\x00" + pattern`: the "$" prefix is
+                  what keeps a pattern spelling "toString" out of the intern
+                  table (docs/abnf-dialect-gotchas.md). Each binary holds ONE
+                  language, so nothing can collide across the four.
+rxIsRegexObj      2 bodies (kotlin, ruby), TWO apparent differences and BOTH NIL:
+rxIsMatchObj      ktIsObj against rbIsObj (the latter also rejects arrays - and
+                  an array carries no __rxsrc, so both answer false either way),
+                  and ktIsNullish against rbIsNil, which are the same two lines.
+                  Spelled out rather than delegated, because js-rt.metajs imports
+                  regex.js and does NOT import runtime.metajs. python does NOT
+                  join them: pyERxIsMatch asks __pymatch, because a Python match
+                  and a compiled pattern must be told apart and both carry __rx*.
+rxObjRe           2 bodies, ONE difference: k5Get against rbRxGet, i.e. rxGet.
+rxMatchOf         3 bodies (kotlin, ruby AND python - the name view never grouped
+                  python's, and the shape scan did not either, because it spelled
+                  the two string reads through a helper). ONE difference: the
+                  capture coercion, ktNum / rbToF / pyNum. __rxcaps is written in
+                  exactly THREE places (k5NewMatch, rbRxNewMatch, pyERxMkMatch)
+                  and all three copy the engine's own m.caps, so every value the
+                  coercion can see is a plain integer and all three are the
+                  identity on it. Math.trunc is kept and the language coercion
+                  dropped - which is also what the Go twin does (`f, _ :=
+                  e.(float64)`).
+```
+
+### Declined, each on plumbing that outweighs the body - never on the tax
+
+- **`java` / `kotlin` `js_jband`** - and the difference list is ONE item
+  **nothing can reach**. The bodies differ only in the int32 coercion (`jvI`
+  against `k1I32`, two integer models over two value models) and **neither
+  emitter ever produces a call that reaches it**: `&` lowers to
+  `js_jvarith` / `js_ktarith` (`java-to-llvm-ir.abnf:2606`,
+  `kotlin-to-llvm-ir.abnf:4098`), and the only `js_jband` either grammar emits is
+  the boolean fold of a structural equality (`java:3934`, `kotlin:6682`), which
+  returns from the arm above. Merging four lines whose knob is dead still costs
+  either kotlin's first import of `runtime-jvm.metajs` (six bodies and two knobs
+  it has no use for) or an **eleventh `rtk*` hook declared in all ten importers**.
+  Recorded at both sites, with the note that matters: the Go twin
+  (`abnf/jsrt.go:5781`) has ONE `js_jband` and coerces with `rt.toInt32` for both
+  languages, so the day an emitter routes a non-boolean here, java and kotlin
+  will disagree with their own twin in two directions.
+- **`lua`'s `luChar` / `swift`'s `js_char`** - byte-identical, declined for the
+  third time, and **the tax was never what blocked it**. The shared body cannot
+  be called `js_char` (`runtime.metajs` exports that name for the `{__char}` box;
+  these answer a one-character STRING). Swift could take it from
+  `runtime.metajs` - which now holds `rtRuneLen`, the DECODE half of the same
+  UTF-16 question - but **lua imports nothing at all**, and `runtime.metajs` would
+  hand it `js_char`, `js_jadd`, `js_pyset` and `js_dict_new` definitions it does
+  not want plus seven `rtk*` hooks to write. A `{lua, swift}` module of its own is
+  the remaining option, and at `-min 40` those two languages share exactly one
+  other body (and that one is dart's). **The line this pass drew: a merge is free
+  when the shared home is already imported and it is a new moving part when it is
+  not.** Twelve groups merged here, and all twelve had a home their languages
+  already imported.
+- **`js-rt`'s `jvCtorDescOf`** - the same eight lines as `rtPairGet`, declined on
+  the file rather than the body: `js-rt.metajs` does not import `runtime.metajs`,
+  it defines a `js_supercall` of its own (a straight name collision), and
+  `runtime.metajs` asks its importers for seven `rtk*` hooks. Cross-referenced at
+  the site, together with the copy inlined in `js_jsctordesc` right above it.
+- **Dart's `dtJsCompare`** - unchanged and still genuinely blocked: a third
+  coercion on a path only invalid Dart reaches, and no `dart` toolchain here.
+
+### Where things stand after this pass
+
+```
+                        4th pass    now   delta   (code lines, comments/blanks excluded)
+kotlin-rt                   5590   5493     -97
+ruby-rt                     1978   1916     -62
+python-rt                   3864   3806     -58
+dart-rt                     1126   1096     -30
+php-rt                      1661   1644     -17
+csharp-rt                    728    719      -9
+js-rt                       2664   2655      -9
+swift-rt                     752    743      -9
+runtime-decimal               74     65      -9
+runtime-jvm                   51     47      -4
+runtime.metajs               167    214     +47
+regex.js                    1213   1265     +52
+                                          -----
+                                           -205
+```
+
+`tools/shape-scan -min 60`: **14 groups / 198 recoverable before, 2 groups / 9
+recoverable after** - and both survivors are the two declined above.
+
+**The evidence, and it is the strongest form available for a pure refactor:
+native BEFORE against native AFTER, byte-identical.** `git archive 9c7ac05` into
+a clean tree, `go build` inside it, then build and run the same program through
+both trees as a native `-exe`:
+
+- all **fifteen** `tests/<lang>-test-full.*` ratchets, native, exit 0 both ways
+  and **byte-identical stdout** (kotlin 979 checks, python 405, js 378, go 319,
+  php 306, ruby 292, java 291, csharp 257, dart 232, swift 211, ...);
+- a **regex probe** (six patterns x six subjects x search/match/replace/split/
+  test, plus a repeated compile to exercise the memo, named groups, `$~`,
+  `pre_match`/`post_match`, `.source`) in python, ruby, kotlin and js:
+  **byte-identical** (185 / 302 / 185 / 185 lines);
+- a **merged-body probe** per language - `h.keys`/`d.Keys`/`m.keys` (rtCopyArr),
+  `lambda?` (rtHas over a file global), dart's `[1, [...]]` and `{s: {...}}`
+  cycle rendering (rtHas), `"héllo".length` (rtRuneLen), `foo.__name__` and
+  `::named` (rtPairGet), `long == double` and `5 & 3` (rtIsIntegral), varargs
+  (rtPrepend), php's `1e25` / `1e-320` / `0.1+0.2` rendering (rtZeros):
+  **byte-identical in all nine languages**.
+
+Gates, all seven, at the end of the pass: matrix **329/329** - `--full`
+**6,003 assertions, 0 languages whose halves disagree**, no
+`BUT -frozen`/`VACUOUS`/`MISMATCH`/`FROZEN-DIFF` - `--cross` **119 compared, 0
+divergent** - `go test ./abnf/` ok - clang-check **16/16 agreeing, none held** -
+`tests/native-full.sh` **15 languages, every native binary exit 0 with 0
+failures** - `tests/gen-all.sh --check` clean.
+
+**No performance number is quoted, deliberately.** Every change here is a pure
+refactor with byte-identical output, the two candidate directions (fewer
+declarations in ten files, more declarations in two shared ones) are both inside
+the **4.8% layout lottery** documented above, and `bench.sh --draws 9` would
+spend twenty minutes to answer "unmeasurable". The declaration-index curve is
+flat; that is the measurement this pass rests on, and it was made once already.
 
 ---
 

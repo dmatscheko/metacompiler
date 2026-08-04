@@ -911,8 +911,8 @@ function csListMethod(recv, name, args) {
 // A Dictionary's keys / values / contains, which csharp-to-llvm-ir emits for
 // '.Keys', '.Values' and '.ContainsKey'.
 function csDictMethod(recv, name, args) {
-    if (name == "keys") { return csCopyArr(recv["keys"]) }
-    if (name == "values") { return csCopyArr(recv["vals"]) }
+    if (name == "keys") { return rtCopyArr(recv["keys"]) }
+    if (name == "values") { return rtCopyArr(recv["vals"]) }
     if (name == "length" || name == "size" || name == "count") { return recv["keys"].length }
     if (name == "contains") { return csDictFind(recv["keys"], args[0]) >= 0 }
     if (name == "add") {
@@ -922,16 +922,8 @@ function csDictMethod(recv, name, args) {
     fail("unknown dictionary method '" + name + "'")
     return undefined
 }
-
-function csCopyArr(a) {
-    var out = []
-    var i = 0
-    while (i < a.length) {
-        out.push(a[i])
-        i = i + 1
-    }
-    return out
-}
+// csCopyArr is SHARED as rtCopyArr - lib/runtime.metajs. It was one of SEVEN
+// byte-identical copies in six languages; see the difference list there.
 
 // csIsFn: "may this member be called". `typeof v == "function"` is the whole
 // test, in both halves: a generator function (the C floor's tag 16, a *hostFunc

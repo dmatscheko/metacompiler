@@ -1557,3 +1557,122 @@ function rxSplit(re, text) {
     parts.push(text.substring(last, text.length))
     return parts
 }
+
+// ===== The compiled-pattern cache, and the neutral match value ==============
+//
+// Added 2026-08-04 (docs/runtime-merge-plan.md, Part A fifth pass). Everything
+// below already existed ONCE in abnf/jsrtregex.go - rxCache/rxGet at :1614,
+// rxIsRegexObj at :1635, rxIsMatchObj at :1644, rxObjRe at :1652, rxMatchOf at
+// :1680, all SHARED by js, kotlin, python and ruby there - and FOUR TIMES on
+// this side, once per importing layer-2 file, under four private prefixes
+// (jxGetProg/jxCache, k5Get/k5Cache, pyERxGet/pyERxCache, rbRxGet/rbRxCache).
+// The four were byte-identical; the divergence was between the two engines, not
+// among the four copies, and this is the side that had it wrong. The names here
+// are deliberately the GO TWIN'S names, so the two files line up when they are
+// diffed - which is the only way the three-place edit (regex.js, jsrtregex.go,
+// and each grammar's include) stays honest.
+//
+// THE KEY IS NOT THE GO KEY, and that is deliberate. Go writes
+// `flags + "\x00" + pattern`; here the key is prefixed "$" and separated by a
+// space, because a MetaJS object is a string-keyed map and a pattern that
+// happens to spell an Object.prototype member ("toString", "valueOf") would
+// otherwise read back a function from the prototype instead of undefined. See
+// docs/abnf-dialect-gotchas.md. The neutral flag string is only ever drawn from
+// "ismxqjpe", so the space is an unambiguous separator.
+var rxCache = {}
+
+function rxGet(pattern, flags) {
+    var key = "$" + flags + " " + pattern
+    var got = rxCache[key]
+    if (got !== undefined) { return got }
+    var re = rxCompile(pattern, flags)
+    rxCache[key] = re
+    return re
+}
+
+// ----- The neutral Regexp / MatchData value -----
+//
+// Ruby's Regexp and MatchData, Kotlin's Regex and MatchResult and Python's
+// compiled pattern and match are ONE pair of shapes: a plain object carrying
+// __rxsrc / __rxflags, and, for a match, __rxmd / __rxtext / __rxcaps as well.
+// Each language adds its own marker beside them (__ktsrc, __pymatch), which is
+// why only the bodies that read the SHARED slots live here.
+//
+// The difference list for the four bodies below, taken before merging:
+//
+//   ktRxIsRegex / rbRxIsRegex   TWO apparent differences, both NIL. The object
+//                               test was ktIsObj against rbIsObj (the latter
+//                               also rejects arrays - and an array has no
+//                               __rxsrc, so both answer false either way), and
+//                               the nil test was ktIsNullish against rbIsNil,
+//                               which are the same two lines. Neither may be
+//                               called here: js-rt.metajs imports this file and
+//                               does NOT import runtime.metajs, so the tests are
+//                               spelled out.
+//   ktRxIsMatch / rbRxIsMatch   the same, and python does NOT join them: its
+//                               pyERxIsMatch asks __pymatch, because a Python
+//                               match and a compiled pattern must be told apart
+//                               and both carry __rx* slots.
+//   k5ObjRe / rbRxObjRe         ONE: k5Get against rbRxGet, which is rxGet.
+//   k5MatchOf / rbRxMatchOf /   ONE: the capture coercion, ktNum / rbToF /
+//   pyERxMatchOf                pyNum. __rxcaps is written in exactly three
+//                               places (k5NewMatch, rbRxNewMatch, pyERxMkMatch)
+//                               and all three copy the engine's own m.caps, so
+//                               every value the coercion can see is already a
+//                               plain integer and all three are the identity on
+//                               it. Math.trunc is kept; the language coercion is
+//                               dropped, which is also what the Go twin does
+//                               (`f, _ := e.(float64)`).
+function rxIsRegexObj(v) {
+    if (v === null) { return false }
+    if (v === undefined) { return false }
+    if (typeof v != "object") { return false }
+    if (v["__rxsrc"] === undefined) { return false }
+    var md = v["__rxmd"]
+    if (md === undefined) { return true }
+    return md === null
+}
+
+function rxIsMatchObj(v) {
+    if (v === null) { return false }
+    if (v === undefined) { return false }
+    if (typeof v != "object") { return false }
+    var md = v["__rxmd"]
+    if (md === undefined) { return false }
+    return md !== null
+}
+
+// The program behind a Regexp or a MatchData, out of its own __rxsrc/__rxflags.
+// For a match those are the source the match RAN on - which for Python's
+// re.match is the ANCHORED source, and must not be confused with the pattern
+// object's __src.
+function rxObjRe(v) {
+    var src = v["__rxsrc"]
+    var flags = v["__rxflags"]
+    if (typeof src != "string") { src = "" }
+    if (typeof flags != "string") { flags = "" }
+    return rxGet(src, flags)
+}
+
+// Go's rxMatchOf answers three values; MetaJS has one return, so the three
+// travel in a record. `text` stays a STRING: this engine indexes UTF-16 code
+// units where the Go engine indexes runes, and the two agree throughout the BMP.
+function rxMatchOf(v) {
+    var re = rxObjRe(v)
+    var text = v["__rxtext"]
+    if (typeof text != "string") { text = "" }
+    var arr = v["__rxcaps"]
+    var caps = []
+    var i = 0
+    while (i < arr.length) {
+        caps.push(Math.trunc(arr[i]))
+        i = i + 1
+    }
+    var begin = 0
+    var end = 0
+    if (caps.length >= 2) {
+        begin = caps[0]
+        end = caps[1]
+    }
+    return {re: re, text: text, m: {begin: begin, end: end, caps: caps}}
+}

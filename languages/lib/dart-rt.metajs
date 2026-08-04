@@ -310,32 +310,14 @@ function dtIsClass(v) {
 // dart, ruby and swift, and equal to go's goDictFind; see the argument there.
 function dtDictFind(keys, k) { return rtDictFind(keys, k) }
 
-function dtCopyArr(a) {
-    var out = []
-    var i = 0
-    while (i < a.length) {
-        out.push(a[i])
-        i = i + 1
-    }
-    return out
-}
+// dtCopyArr is SHARED as rtCopyArr - lib/runtime.metajs. Seven byte-identical
+// copies in six languages; the difference list is there.
 
 // The number of CODE POINTS in a string: pyStrLen in the Go twin, so a surrogate
 // pair counts once.
-function dtStrLen(s) {
-    var n = 0
-    var i = 0
-    while (i < s.length) {
-        var c = s.charCodeAt(i)
-        if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
-            var d = s.charCodeAt(i + 1)
-            if (d >= 56320 && d <= 57343) { i = i + 1 }
-        }
-        n = n + 1
-        i = i + 1
-    }
-    return n
-}
+// SHARED as rtRuneLen - lib/runtime.metajs: kotlin's k2RuneLen was the same
+// fourteen lines with one local renamed.
+function dtStrLen(s) { return rtRuneLen(s) }
 
 // The code POINT at code-point index i, as a string: rt.strAt.
 function dtStrAt(s, at) {
@@ -376,14 +358,8 @@ function dtStrRange(s, from, to) {
 
 function dtStr(v) { return dtStrIn(v, [], 0) }
 
-function dtSeen(seen, v) {
-    var i = 0
-    while (i < seen.length) {
-        if (seen[i] === v) { return true }
-        i = i + 1
-    }
-    return false
-}
+// dtSeen is SHARED as rtHas - lib/runtime.metajs: rtDictFind's `===` scan read
+// as a membership test. php's phNameIn and ruby's rbIsLambda were the same body.
 
 function dtStrIn(v, seen, depth) {
     if (depth > 64) { return "..." }
@@ -397,7 +373,7 @@ function dtStrIn(v, seen, depth) {
     if (typeof v == "number") { return "" + v }
     if (typeof v == "function") { return "Closure" }
     if (rtIsArr(v)) {
-        if (dtSeen(seen, v)) { return "[...]" }
+        if (rtHas(seen, v)) { return "[...]" }
         seen.push(v)
         var out = "["
         var i = 0
@@ -410,7 +386,7 @@ function dtStrIn(v, seen, depth) {
         return out + "]"
     }
     if (dtIsObj(v)) {
-        if (dtSeen(seen, v)) { return "{...}" }
+        if (rtHas(seen, v)) { return "{...}" }
         seen.push(v)
         var os = dtObjStr(v, seen, depth)
         seen.pop()
@@ -1156,8 +1132,8 @@ function dtMember(recv, name, args) {
         fail("unknown String method: " + name)
     }
     if (rtIsDictObj(recv)) {
-        if (name === "keys") { return dtCopyArr(recv["keys"]) }
-        if (name === "values") { return dtCopyArr(recv["vals"]) }
+        if (name === "keys") { return rtCopyArr(recv["keys"]) }
+        if (name === "values") { return rtCopyArr(recv["vals"]) }
         if (name === "get") {
             var gi = dtDictFind(recv["keys"], dtArgAt(args, 0))
             if (gi >= 0) { return recv["vals"][gi] }
@@ -1324,7 +1300,7 @@ function js_pylen(v) {
 // its characters, a list itself (NOT a copy - the Go twin returns the handle).
 function js_pyiter(v) {
     var els = dtSetElems(v)
-    if (els !== undefined) { return dtCopyArr(els) }
+    if (els !== undefined) { return rtCopyArr(els) }
     if (rtIsArr(v)) { return v }
     if (typeof v == "string") {
         var out = []
@@ -1336,7 +1312,7 @@ function js_pyiter(v) {
         }
         return out
     }
-    if (rtIsDictObj(v)) { return dtCopyArr(v["keys"]) }
+    if (rtIsDictObj(v)) { return rtCopyArr(v["keys"]) }
     fail("iteration over a " + typeof v)
     return []
 }

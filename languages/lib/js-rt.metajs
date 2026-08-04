@@ -856,6 +856,14 @@ function js_jsctordesc(fn) {
     return d
 }
 
+// THE SAME EIGHT LINES as kotlin's k4NameOf and python's pyBFuncName - the
+// identity-keyed side-table lookup over two parallel arrays - which are SHARED as
+// rtPairGet in lib/runtime.metajs. This copy is DECLINED, and not on the body:
+// this file does not import lib/runtime.metajs, it defines a js_supercall of its
+// own (a straight name collision with that file's), and runtime.metajs asks its
+// importers for seven rtk* hooks. Eight lines do not buy js-rt's first import of
+// the shared runtime. If that import ever happens for another reason, this body
+// and the scan inlined in js_jsctordesc above both go.
 function jvCtorDescOf(fn) {
     var i = 0
     while (i < jvCtorFn.length) {
@@ -3062,16 +3070,10 @@ function jxNeutral(flags) {
 // must build a fresh one on every evaluation - which is what the emitted js_jsxnew
 // does.
 
-var jxCache = {}     // "$<neutral flags> <pattern>" -> a compiled program
-
-function jxGetProg(pattern, flags) {
-    var key = "$" + flags + " " + pattern
-    var got = jxCache[key]
-    if (got !== undefined) { return got }
-    var re = rxCompile(pattern, flags)
-    jxCache[key] = re
-    return re
-}
+// The compile cache is SHARED as rxCache / rxGet - lib/regex.js, which is where
+// abnf/jsrtregex.go has always had it (ONE rxCache for all four languages). This
+// file, kotlin-rt, python-rt and ruby-rt each carried a byte-identical private
+// copy under a private prefix; the four are one body now.
 
 function jxNewRegex(src, jsFlags) {
     var fl = jxCanonFlags(jsFlags)
@@ -3117,7 +3119,7 @@ function jxProg(o) {
     var fl = o["__jxneutral"]
     if (typeof src != "string") { src = "" }
     if (typeof fl != "string") { fl = "oj" }
-    var re = jxGetProg(src, fl)
+    var re = rxGet(src, fl)
     if (!re["ok"]) {
         fail("invalid regular expression: /" + src + "/: " + re["err"])
     }

@@ -673,3 +673,132 @@ function rtSubstring(s, b, e) {
     if (end < begin) { end = begin }
     return s.substring(begin, end)
 }
+
+// ============================================ the FIFTH pass (2026-08-04) ===
+//
+// Everything below was merged after the `scope_find` hash index landed
+// (runtime-next-plan.md item 0) and the DECLARATION TAX that governed every
+// earlier merge decision was re-measured at ZERO. Sizing is no longer an
+// argument: a body a language imports and cannot call costs it nothing at
+// either end of the module (docs/runtime-merge-plan.md, "THE THIRD ASKING").
+// Each merge below carries its difference list, which is the only thing that
+// still decides.
+
+// A fresh copy of an array - Go's `append([]interface{}{}, xs...)`. There is no
+// Array.prototype.slice in this dialect, so everyone wrote the loop.
+//
+// SEVEN bodies, in six languages, and the difference list is EMPTY: csCopyArr,
+// dtCopyArr, k4bArgArr, k4Copy (kotlin had it twice, 993 lines apart),
+// pyFCopyArr, rbCopyArr and swCopyArr were byte-for-byte identical down to the
+// loop variable. The three names they went under - "copy an array", "the
+// variadic tail of a closure", "the dict keys/values arms' defensive copy" -
+// are three CALLERS of one function, which is exactly how seven copies of nine
+// lines went unnoticed by every name-based view for months.
+function rtCopyArr(a) {
+    var out = []
+    var i = 0
+    while (i < a.length) {
+        out.push(a[i])
+        i = i + 1
+    }
+    return out
+}
+
+// Membership in an array, by the floor's strict equality.
+//
+// THREE bodies, ZERO knobs: dart's dtSeen (a cycle-breaking seen-list in the
+// renderer), php's phNameIn (a key-list membership test in loose ==) and ruby's
+// rbIsLambda (an identity scan of the lambda side table). rbIsLambda read its
+// array from a FILE GLOBAL rather than a parameter, which is why the shape scan
+// showed three bodies and the extern-name view showed nothing at all.
+//
+// rtDictFind above is the same scan returning the index, and it is called and
+// not re-spelled here: `===` in layer 2 is the floor's strict_eq, so identity
+// membership and dict-key lookup ARE one question. See its head comment for the
+// measurement that settled that.
+function rtHas(a, v) { return rtDictFind(a, v) >= 0 }
+
+// The identity-keyed SIDE TABLE lookup: two parallel arrays scanned with `===`,
+// answering vals[i] or undefined. MetaJS has no map keyed by a function value,
+// so every language that has to remember something ABOUT a closure builds this.
+//
+// THREE bodies, ZERO knobs: kotlin's k4NameOf (ktFuncNames, jsrtkotlin.go:5764),
+// python's pyBFuncName (the name a def bound a closure under) and js-rt's
+// jvCtorDescOf (the class descriptor of a constructor function). TWO are merged.
+//
+// js-rt's is DECLINED, and not on the body: js-rt.metajs does not import this
+// file, it defines a `js_supercall` of its own (a straight collision), and
+// runtime.metajs requires seven rtk* hooks it would have to grow. Eight lines do
+// not buy js-rt's first import of the shared runtime. Cross-referenced at
+// js-rt.metajs's jvCtorDescOf so a change to one is seen at the other.
+function rtPairGet(keys, vals, k) {
+    var i = rtDictFind(keys, k)
+    if (i < 0) { return undefined }
+    return vals[i]
+}
+
+// An operand of INTEGER arithmetic: a Char box is one - it is an integral type
+// in C#, Java and Kotlin - and a boxed double is not. Both a sized integer
+// (tag 13) and a boxed double (tag 14) answer `typeof v == "number"` in the C
+// floor, which is why the tag 14 test is explicit.
+//
+// THREE bodies, ZERO knobs, and TWO OF THEM WERE IN ONE FILE: kotlin-rt.metajs
+// carried ktIsInt at line 229 and k4bIsIntegral at line 4384, and
+// runtime-jvm.metajs already exported the same five lines as rtjIsIntegral for
+// csharp and java. The only apparent difference was the char test - ktIsChar
+// against rtIsCharBox - and `function ktIsChar(v) { return rtIsCharBox(v) }` is
+// the whole of ktIsChar. Moved UP here from runtime-jvm.metajs rather than
+// kotlin importing that file, because kotlin has neither of runtime-jvm's two
+// knobs (rtjkCmp, rtjkFloOperand) and does not want its other five bodies.
+function rtIsIntegral(v) {
+    if (rtIsCharBox(v)) { return true }
+    if (typeof v != "number") { return false }
+    return !floIs(v)
+}
+
+// The number of CODE POINTS in a string - Go's len([]rune(s)) - so a surrogate
+// pair counts once. TWO bodies, ZERO knobs: dart's dtStrLen and kotlin's
+// k2RuneLen differed in the name of the second local (`d` against `t`) and in
+// nothing else. The value model is UTF-16 code units throughout layer 2 (see
+// docs/abnf-dialect-gotchas.md), so this walk is the only way to ask.
+function rtRuneLen(s) {
+    var n = 0
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+            var d = s.charCodeAt(i + 1)
+            if (d >= 56320 && d <= 57343) { i = i + 1 }
+        }
+        n = n + 1
+        i = i + 1
+    }
+    return n
+}
+
+// A run of n "0"s. TWO bodies, ZERO knobs: php's phZeros and the rtZeros that
+// used to live in runtime-decimal.metajs. It is HERE and not there because php
+// has no decimal bignum and importing runtime-decimal.metajs for nine lines
+// would be the tax argument in its worst form; runtime-decimal's own three
+// importers (python, ruby, swift) all import this file first.
+function rtZeros(n) {
+    var out = ""
+    var i = 0
+    while (i < n) {
+        out = out + "0"
+        i = i + 1
+    }
+    return out
+}
+
+// rtIsObj plus the array rejection. TWO bodies, ZERO knobs: pyIsObj and rbIsObj
+// were byte-identical, and both are the four tests rtIsObj's own head comment
+// names - it merged the first three and deliberately left the fourth out,
+// because ITS callers walk __class/__super and an array carries neither. Python
+// and Ruby ask a stricter question in ~60 places each (`is this a user object
+// rather than a list`), so the fourth test is real for them and the two files
+// keep their own names as one-line delegations to this body.
+function rtIsObjNotArr(v) {
+    if (!rtIsObj(v)) { return false }
+    return !Array.isArray(v)
+}

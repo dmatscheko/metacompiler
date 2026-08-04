@@ -1008,12 +1008,27 @@ function js_luminint() { return luNorm(luMinPair()) }
 // is passed through as its own code point, which is what utf8.DecodeRune's
 // (RuneError, 1) answer makes the Go twin do.
 //
-// BYTE-IDENTICAL to swift-rt.metajs's js_char, and DECLINED as a merge (fourth
-// pass, docs/runtime-merge-plan.md): the two would need a {lua, swift} module of
-// their own - lua-rt.metajs imports nothing at all today - and the shared body
-// could not be called js_char, because lib/runtime.metajs already exports that
-// name for a DIFFERENT contract (the {__char} box, not a one-character string).
-// Five lines is not worth lua's first import; keep the two texts in step by hand.
+// BYTE-IDENTICAL to swift-rt.metajs's js_char, and DECLINED as a merge TWICE -
+// fourth pass, and RE-JUDGED in the fifth after the declaration tax was measured
+// at zero (docs/runtime-merge-plan.md). The tax was never what blocked it:
+//
+//   - the shared body could not be called js_char, because lib/runtime.metajs
+//     already exports that name for a DIFFERENT contract (the {__char} box; this
+//     one answers a one-character STRING);
+//   - swift could take it from runtime.metajs under another name (it imports that
+//     file, and rtRuneLen - the DECODE half of this same UTF-16 question - now
+//     lives there), but lua CANNOT: lua-rt.metajs imports nothing at all, and
+//     runtime.metajs would hand it js_char, js_jadd, js_pyset and js_dict_new
+//     definitions it does not want plus seven rtk* hooks it would have to write;
+//   - a {lua, swift} module of its own is the remaining option, and at -min 40
+//     the shape scan finds these two languages sharing exactly one OTHER body
+//     (dtIsInt/luPlain, and that one is dart's). A new file, a new import in each
+//     of two languages, for five lines.
+//
+// Twelve other groups WERE merged in the fifth pass, and every one of them had a
+// home its languages already imported. That is the line: the merge is free when
+// the shared file is already there and it is a new moving part when it is not.
+// Keep the two texts in step by hand.
 function luChar(cp) {
     if (cp < 65536) { return String.fromCharCode(cp) }
     var v = cp - 65536

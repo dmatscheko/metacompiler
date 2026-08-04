@@ -768,6 +768,27 @@ function jvParseInt(s, width) {
 
 // Java & | ^: the non-short-circuit boolean operator when both sides are
 // booleans, the int32 bit operation otherwise.
+//
+// DUPLICATED, DELIBERATELY, with kotlin-rt.metajs's js_jband, and the difference
+// list is ONE item that NOTHING CAN REACH. The bodies differ only in the int32
+// coercion (jvI here, k1I32 there - two integer models, one per value model),
+// and NEITHER EMITTER EVER PRODUCES A CALL THAT REACHES IT: `&` lowers to
+// js_jvarith / js_ktarith (java-to-llvm-ir.abnf:2606, kotlin-to-llvm-ir.abnf:4098)
+// and the ONLY js_jband either grammar emits is the boolean fold of a structural
+// equality (java:3934, kotlin:6682), which returns from the arm above.
+//
+// So the four lines are shared in every sense but the text, and merging them
+// still costs more than they are worth: kotlin does not import
+// lib/runtime-jvm.metajs (it has neither rtjkCmp nor rtjkFloOperand and wants
+// none of that file's six bodies), and a home in lib/runtime.metajs would need an
+// ELEVENTH rtk* hook declared in all ten importers to carry a coercion that is
+// dead in both callers. Re-judged in the fifth pass, after the declaration tax
+// was measured at zero, and declined on the plumbing rather than on the tax.
+//
+// NOTE FOR WHEN THE ARM WAKES UP: the Go twin (abnf/jsrt.go:5781) has ONE
+// js_jband for both languages and coerces with rt.toInt32 for both. If an
+// emitter ever routes a non-boolean here, THAT is where java and kotlin will
+// disagree with their own twin - and they will disagree in two directions.
 function js_jband(l, r) {
     if (typeof l == "boolean") { if (typeof r == "boolean") { return l && r } }
     return jvI(l) & jvI(r)

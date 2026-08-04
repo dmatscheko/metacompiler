@@ -226,11 +226,11 @@ function k0Chars(s) {
 // one - Kotlin's Char has code arithmetic - and a Double is NOT. Both a sized
 // integer (tag 13) and a boxed double (tag 14) answer `typeof v == "number"` in
 // the C floor, which is why the tag 14 test is explicit.
-function ktIsInt(v) {
-    if (ktIsChar(v)) { return true }
-    if (typeof v != "number") { return false }
-    return !floIs(v)
-}
+// SHARED as rtIsIntegral - lib/runtime.metajs. This file had the body TWICE
+// (k4bIsIntegral was the second copy) and runtime-jvm.metajs already exported it
+// as rtjIsIntegral for csharp and java: THREE bodies, and the only apparent
+// difference was ktIsChar against rtIsCharBox, which is what ktIsChar IS.
+function ktIsInt(v) { return rtIsIntegral(v) }
 
 // k0IsNumeric is giIsNumeric (jsrtint.go 292) over this value model: the {__char}
 // box stands for the Go jsChar the switch there lists.
@@ -1636,6 +1636,27 @@ function js_ktstep(v, delta) {
 
 // abnf/jsrt.go js_jband (5170). Java & | ^: the non-short-circuit boolean
 // operator when both sides are booleans, the int32 bit operation otherwise.
+//
+// DUPLICATED, DELIBERATELY, with java-rt.metajs's js_jband, and the difference
+// list is ONE item that NOTHING CAN REACH. The bodies differ only in the int32
+// coercion (jvI here, k1I32 there - two integer models, one per value model),
+// and NEITHER EMITTER EVER PRODUCES A CALL THAT REACHES IT: `&` lowers to
+// js_jvarith / js_ktarith (java-to-llvm-ir.abnf:2606, kotlin-to-llvm-ir.abnf:4098)
+// and the ONLY js_jband either grammar emits is the boolean fold of a structural
+// equality (java:3934, kotlin:6682), which returns from the arm above.
+//
+// So the four lines are shared in every sense but the text, and merging them
+// still costs more than they are worth: kotlin does not import
+// lib/runtime-jvm.metajs (it has neither rtjkCmp nor rtjkFloOperand and wants
+// none of that file's six bodies), and a home in lib/runtime.metajs would need an
+// ELEVENTH rtk* hook declared in all ten importers to carry a coercion that is
+// dead in both callers. Re-judged in the fifth pass, after the declaration tax
+// was measured at zero, and declined on the plumbing rather than on the tax.
+//
+// NOTE FOR WHEN THE ARM WAKES UP: the Go twin (abnf/jsrt.go:5781) has ONE
+// js_jband for both languages and coerces with rt.toInt32 for both. If an
+// emitter ever routes a non-boolean here, THAT is where java and kotlin will
+// disagree with their own twin - and they will disagree in two directions.
 function js_jband(l, r) {
     if (typeof l == "boolean") {
         if (typeof r == "boolean") { return l && r }
@@ -1942,20 +1963,9 @@ function k2IsLetter(code) {
 
 // The number of CODE POINTS in s (Go's len([]rune(s))), and the code point at a
 // code-point index. Both walk the UTF-16 units and rejoin a surrogate pair.
-function k2RuneLen(s) {
-    var n = 0
-    var i = 0
-    while (i < s.length) {
-        var c = s.charCodeAt(i)
-        if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
-            var t = s.charCodeAt(i + 1)
-            if (t >= 56320 && t <= 57343) { i = i + 1 }
-        }
-        n = n + 1
-        i = i + 1
-    }
-    return n
-}
+// SHARED as rtRuneLen - lib/runtime.metajs: dart's dtStrLen was the same
+// fourteen lines with one local renamed.
+function k2RuneLen(s) { return rtRuneLen(s) }
 
 function k2CodePointAt(s, i) {
     var c = s.charCodeAt(i)
@@ -4380,12 +4390,9 @@ function js_ktiter(v) {
 // ============================================================ small values ==
 
 // ktIsIntegral (jsrtkotlin.go:135): an operand of INTEGER arithmetic - a Char is
-// one, a Double is not.
-function k4bIsIntegral(v) {
-    if (ktIsChar(v)) { return true }
-    if (typeof v != "number") { return false }
-    return !floIs(v)
-}
+// one, a Double is not. SHARED as rtIsIntegral - lib/runtime.metajs. This was the
+// SECOND copy in this one file (ktIsInt, line ~229, is the first) of a body
+// runtime-jvm.metajs also exported.
 
 // A double that is an exact integer in [-2^63, 2^63) as the sized-integer
 // representation: below 2^53 that IS the plain number, above it the two unsigned
@@ -4504,16 +4511,9 @@ function k4bLastDot(s) {
 // SHARED as rtPrepend - lib/runtime.metajs. This copy was the only one of the
 // five that guarded a null/undefined `args`, and the merged body kept the guard.
 
-// The variadic tail of a closure, as a plain array.
-function k4bArgArr(a) {
-    var out = []
-    var i = 0
-    while (i < a.length) {
-        out.push(a[i])
-        i = i + 1
-    }
-    return out
-}
+// The variadic tail of a closure, as a plain array - k4bArgArr, and a second
+// copy 993 lines below it as k4Copy. BOTH are SHARED as rtCopyArr,
+// lib/runtime.metajs, with five more in csharp, dart, python, ruby and swift.
 
 // ================================================== the number type objects ==
 
@@ -4852,7 +4852,7 @@ function ktRefOf(v) {
 // what lets one shape serve both kinds.
 function ktMakeRef(info) {
     var hf = function () {
-        return ktRefApply(info, k4bArgArr(arguments))
+        return ktRefApply(info, rtCopyArr(arguments))
     }
     k4bRefFns.push(hf)
     k4bRefInfos.push(info)
@@ -5179,7 +5179,7 @@ function k4bMextWalk(start, mangled) {
 function js_ktrecvlam(f) {
     if (!ktIsFn(f)) { return f }
     return function () {
-        var a = k4bArgArr(arguments)
+        var a = rtCopyArr(arguments)
         if (a.length == 0) { return ktWithRecv(null, f, []) }
         // The receiver is passed on as the first ARGUMENT as well as bound as
         // `this`: `fun scoped(block: FeatScope.() -> Int) = block(Scope(9))` with
@@ -5370,7 +5370,7 @@ function k4bFieldTy(o, name) {
 // answers undefined when the type carries no width.
 function k4bAdoptTy(v, ty) {
     var t = k4bStripQ(ty)
-    if (!k4bIsIntegral(v)) { return undefined }
+    if (!rtIsIntegral(v)) { return undefined }
     if (t == "Double" || t == "Float") { return flo(ktNum(v), 0) }
     if (t == "Int") { return k4bConv(v, 32, false) }
     if (t == "Long") { return k4bConv(v, 64, false) }
@@ -5497,27 +5497,10 @@ function k4IsRef(info) {
     return !ktMiss(info)
 }
 
-// A fresh array copy.
-function k4Copy(a) {
-    var out = []
-    var i = 0
-    while (i < a.length) {
-        out.push(a[i])
-        i = i + 1
-    }
-    return out
-}
-
-// append([]interface{}{recv}, args...)
-function k4Prepend(recv, args) {
-    var out = [recv]
-    var i = 0
-    while (i < args.length) {
-        out.push(args[i])
-        i = i + 1
-    }
-    return out
-}
+// k4Copy (a fresh array copy) is SHARED as rtCopyArr and k4Prepend
+// (append([]interface{}{recv}, args...)) as rtPrepend - both lib/runtime.metajs.
+// rtPrepend additionally guards a null/undefined `args`, which is a superset of
+// what this copy did.
 
 // args[1:]
 function k4Rest(args, from) {
@@ -6550,14 +6533,8 @@ function k4MinMax(wantMax) {
 var k4NameFns = []
 var k4NameStrs = []
 
-function k4NameOf(f) {
-    var i = 0
-    while (i < k4NameFns.length) {
-        if (k4NameFns[i] === f) { return k4NameStrs[i] }
-        i = i + 1
-    }
-    return undefined
-}
+// The two-parallel-array lookup is SHARED as rtPairGet - lib/runtime.metajs.
+// python's pyBFuncName was the same eight lines over pyBFnObjs/pyBFnNames.
 
 // ============================================================================
 // THE NEUTRAL TAIL: rt.memberCall (abnf/jsrt.go:2761)
@@ -6592,8 +6569,8 @@ function k4BaseMcall(recv, name, args) {
     }
     if (rtIsDictObj(recv)) {
         // The Python dict methods.
-        if (name == "keys") { return k4Copy(ktMapKeys(recv)) }
-        if (name == "values") { return k4Copy(ktMapVals(recv)) }
+        if (name == "keys") { return rtCopyArr(ktMapKeys(recv)) }
+        if (name == "values") { return rtCopyArr(ktMapVals(recv)) }
         if (name == "get") {
             var gi = ktMapFind(ktMapKeys(recv), k4At(args, 0))
             if (gi >= 0) { return ktMapVals(recv)[gi] }
@@ -6630,7 +6607,7 @@ function k4BaseMcall(recv, name, args) {
                 guard = guard + 1
                 if (!ktIsObj(c)) { guard = 99 } else {
                     var mm = c[name]
-                    if (k4Fn(mm)) { return mm.apply(undefined, k4Prepend(recv, args)) }
+                    if (k4Fn(mm)) { return mm.apply(undefined, rtPrepend(recv, args)) }
                     c = c["__super"]
                 }
             }
@@ -6918,7 +6895,7 @@ function js_ktfget(o, name) {
     // none of its own.
     if (k4Fn(o)) {
         if (name == "name") {
-            var fn = k4NameOf(o)
+            var fn = rtPairGet(k4NameFns, k4NameStrs, o)
             if (fn !== undefined) { return fn }
         }
     }
@@ -7278,16 +7255,9 @@ import "./regex.js"
 // reports the pattern the way ktRxCheck does.
 rxFail = function (msg) { fail("regexp: " + msg) }
 
-var k5Cache = {}   // "$<flags> <pattern>" -> a compiled program
-
-function k5Get(pattern, flags) {
-    var key = "$" + flags + " " + pattern
-    var got = k5Cache[key]
-    if (got !== undefined) { return got }
-    var re = rxCompile(pattern, flags)
-    k5Cache[key] = re
-    return re
-}
+// The compile cache is SHARED as rxCache / rxGet - lib/regex.js, where
+// abnf/jsrtregex.go has always had it: ONE cache for js, kotlin, python and
+// ruby. Four byte-identical private copies retired.
 
 function k5Check(re) {
     if (!re["ok"]) { fail("invalid regex '" + re["src"] + "': " + re["err"]) }
@@ -7307,16 +7277,12 @@ function k5Whole(re, text) {
     return rxMatchWhole(re, text, 0)
 }
 
-function ktRxIsRegex(v) {
-    if (!ktIsObj(v)) { return false }
-    if (v["__rxsrc"] === undefined) { return false }
-    return ktIsNullish(v["__rxmd"])
-}
+// The two value tests are SHARED as rxIsRegexObj / rxIsMatchObj - lib/regex.js,
+// the Go twin's own names for them. ruby's rbRxIsRegex / rbRxIsMatch were the
+// same bodies; the difference list is at the shared site.
+function ktRxIsRegex(v) { return rxIsRegexObj(v) }
 
-function ktRxIsMatch(v) {
-    if (!ktIsObj(v)) { return false }
-    return !ktIsNullish(v["__rxmd"])
-}
+function ktRxIsMatch(v) { return rxIsMatchObj(v) }
 
 function k5IsGroups(v) {
     if (!ktIsObj(v)) { return false }
@@ -7329,13 +7295,8 @@ function k5IsCompanion(v) {
     return !ktIsNullish(v["__ktrxco"])
 }
 
-function k5ObjRe(v) {
-    var src = v["__rxsrc"]
-    var flags = v["__rxflags"]
-    if (typeof src != "string") { src = "" }
-    if (typeof flags != "string") { flags = "" }
-    return k5Get(src, flags)
-}
+// SHARED as rxObjRe - lib/regex.js. ruby's rbRxObjRe was the same seven lines.
+function k5ObjRe(v) { return rxObjRe(v) }
 
 // k5NewMatch builds a MatchResult over `prog` (the program the match ran on)
 // while remembering `origSrc`, the pattern of the Regex the match came from.
@@ -7357,31 +7318,16 @@ function k5Orig(md) {
     var flags = md["__rxflags"]
     if (typeof src != "string") { src = "" }
     if (typeof flags != "string") { flags = "" }
-    return k5Get(src, flags)
+    return rxGet(src, flags)
 }
 
 // The Go twin's rxMatchOf answers three values; MetaJS has one return, so the
 // three travel in a record. text stays a STRING: regex.js indexes UTF-16 code
 // units where the Go engine indexes runes, which agree throughout the BMP.
-function k5MatchOf(v) {
-    var re = k5ObjRe(v)
-    var text = v["__rxtext"]
-    if (typeof text != "string") { text = "" }
-    var arr = v["__rxcaps"]
-    var caps = []
-    var i = 0
-    while (i < arr.length) {
-        caps.push(Math.trunc(ktNum(arr[i])))
-        i = i + 1
-    }
-    var begin = 0
-    var end = 0
-    if (caps.length >= 2) {
-        begin = caps[0]
-        end = caps[1]
-    }
-    return {re: re, text: text, m: {begin: begin, end: end, caps: caps}}
-}
+// SHARED as rxMatchOf - lib/regex.js, with ruby's rbRxMatchOf and python's
+// pyERxMatchOf. The one difference was the capture coercion (ktNum here) and it
+// is the identity on every value __rxcaps can hold; see the shared site.
+function k5MatchOf(v) { return rxMatchOf(v) }
 
 // ----- Flags -----
 //
@@ -7651,7 +7597,7 @@ function ktRxNew(src, flags) {
     var fl = k5Flags(flags)
     var pat = ktRender(src)
     if (fl["literal"]) { pat = k5Quote(pat) }
-    k5Check(k5Get(pat, fl["flags"]))
+    k5Check(rxGet(pat, fl["flags"]))
     return {__rxsrc: pat, __rxflags: fl["flags"]}
 }
 

@@ -118,12 +118,11 @@ function rtkIsArr(v) { return pyIsArr(v) }
 
 // ===================================================== the value model ======
 
-function pyIsObj(v) {
-    if (v === null) { return false }
-    if (v === undefined) { return false }
-    if (typeof v != "object") { return false }
-    return !Array.isArray(v)
-}
+// SHARED as rtIsObjNotArr - lib/runtime.metajs. ruby's rbIsObj was byte-identical.
+// It is NOT rtIsObj: that one deliberately leaves the array rejection out, because
+// its own callers walk __class/__super and an array carries neither. Python asks
+// the stricter question in ~30 places, so the name stays here.
+function pyIsObj(v) { return rtIsObjNotArr(v) }
 
 function pyIsArr(v) { return Array.isArray(v) }
 function pyIsStr(v) { return typeof v == "string" }
@@ -698,7 +697,7 @@ function pyGetAttr(obj, name) {
         if (pyIsObj(obj)) {
             if (obj["__name"] !== undefined) { return obj["__name"] }
         }
-        var fn = pyBFuncName(obj)
+        var fn = rtPairGet(pyBFnObjs, pyBFnNames, obj)
         if (fn !== undefined) { return fn }
     }
     return pyGetMember(obj, name)
@@ -2461,14 +2460,8 @@ var pyBFnNames = []      // the name each one was bound under, same index
 
 // The recorded name of fn, or undefined when no def ever bound it. pyGetAttr
 // (jsrt.go:9134) and the other chunks read the table through this.
-function pyBFuncName(fn) {
-    var i = 0
-    while (i < pyBFnObjs.length) {
-        if (pyBFnObjs[i] === fn) { return pyBFnNames[i] }
-        i = i + 1
-    }
-    return undefined
-}
+// The two-parallel-array lookup is SHARED as rtPairGet - lib/runtime.metajs.
+// kotlin's k4NameOf was the same eight lines over k4NameFns/k4NameStrs.
 
 // (closure, name) -> closure. A Go map assignment REPLACES an existing entry, so
 // a second def that binds the same closure object under another name overwrites
@@ -4194,7 +4187,7 @@ function js_pycall(callee, pos, kw) {
         if (pyLookupHas(icls, "__call__")) {
             var m = pyLookupVal(icls, "__call__")
             if (pyIsCallable(m)) {
-                var self = pyDPrepend(callee, pos)
+                var self = rtPrepend(callee, pos)
                 return pyCall(m, pyBindCall(m, self, kw))
             }
         }
@@ -4212,16 +4205,10 @@ function js_pycall(callee, pos, kw) {
     return pyCall(callee, bound)
 }
 
-// [v, ...args] - the receiver-prepending Python's `self` needs.
-function pyDPrepend(v, args) {
-    var out = [v]
-    var i = 0
-    while (i < args.length) {
-        out.push(args[i])
-        i = i + 1
-    }
-    return out
-}
+// [v, ...args], the receiver-prepending Python's `self` needs, is SHARED as
+// rtPrepend - lib/runtime.metajs. pyDPrepend was recorded as merged in Part A's
+// first pass and a fourth copy was still here; rtPrepend's null/undefined guard
+// is a superset of it.
 
 // Allocate an instance of cls and run its __init__ with self prepended.
 function pyDInstantiate(cls, args, kw) {
@@ -4230,7 +4217,7 @@ function pyDInstantiate(cls, args, kw) {
     if (pyLookupHas(cls, "__init__")) {
         var init = pyLookupVal(cls, "__init__")
         if (pyIsCallable(init)) {
-            var self = pyDPrepend(inst, args)
+            var self = rtPrepend(inst, args)
             pyCall(init, pyBindCall(init, self, kw))
         }
     }
@@ -4247,7 +4234,7 @@ function pyDCallPyValue(v, args, kw) {
         if (pyLookupHas(icls, "__call__")) {
             var m = pyLookupVal(icls, "__call__")
             if (pyIsCallable(m)) {
-                var self = pyDPrepend(v, args)
+                var self = rtPrepend(v, args)
                 return pyCall(m, pyBindCall(m, self, kw))
             }
         }
@@ -4361,7 +4348,7 @@ function pyDMethodCall(target, name, args, kw) {
         if (pyLookupHas(icls, name)) {
             var m = pyLookupVal(icls, name)
             if (pyIsCallable(m)) {
-                var self = pyDPrepend(target, args)
+                var self = rtPrepend(target, args)
                 return pyCall(m, pyBindCall(m, self, kw))
             }
             return pyDCallPyValue(m, args, kw)
@@ -4714,20 +4701,9 @@ function pyERePat(src) {
 
 // ----- The compile cache -----
 //
-// Go's rxGet keys a package-level map by flags + "\x00" + pattern. The neutral
-// flag string is only ever drawn from "ismx", so a space is an unambiguous
-// separator here, and the "$" prefix keeps a pattern that happens to spell an
-// Object.prototype member out of the intern table (docs/abnf-dialect-gotchas.md).
-var pyERxCache = {}
-
-function pyERxGet(pattern, flags) {
-    var key = "$" + flags + " " + pattern
-    var got = pyERxCache[key]
-    if (got !== undefined) { return got }
-    var re = rxCompile(pattern, flags)
-    pyERxCache[key] = re
-    return re
-}
+// SHARED as rxCache / rxGet - lib/regex.js, imported at the top of this file,
+// which is where abnf/jsrtregex.go has always kept it: ONE cache for js, kotlin,
+// python and ruby. Four byte-identical private copies retired (fifth pass).
 
 // ----- The three value shapes (Go rxPyIsMod / rxPyIsRe / rxPyIsMatch) -----
 //
@@ -4774,7 +4750,7 @@ function pyERxCompile(pat, flags) {
     if (tr["err"] != "") { fail("re.error: " + tr["err"]) }
     var src = tr["out"]
     var neutral = pyEReFlagStr(flags)
-    var re = pyERxGet(src, neutral)
+    var re = rxGet(src, neutral)
     if (!re["ok"]) { fail("re.error: " + re["err"]) }
     // Python's own .flags always reports re.UNICODE for a str pattern.
     return {__pyre: true, pattern: pat, flags: flags | pyEReU, __src: src, __nf: neutral}
@@ -4790,7 +4766,7 @@ function pyERxSlotStr(v, k) {
 
 // pyERxReOf is Go rxPyReOf: the program behind a compiled PATTERN object.
 function pyERxReOf(v) {
-    return pyERxGet(pyERxSlotStr(v, "__src"), pyERxSlotStr(v, "__nf"))
+    return rxGet(pyERxSlotStr(v, "__src"), pyERxSlotStr(v, "__nf"))
 }
 
 // pyERxMkMatch is Go rxPyMkMatch composed with rxNewMatchObj: the __rx* slots of
@@ -4815,25 +4791,12 @@ function pyERxMkMatch(rv, anchoredSrc, flags, s, m) {
 // __rxsrc/__rxflags (Go rxObjRe), NOT from the pattern object's __src/__nf: a
 // match made by re.match carries the ANCHORED source, and the two must not be
 // confused.
-function pyERxMatchOf(v) {
-    var re = pyERxGet(pyERxSlotStr(v, "__rxsrc"), pyERxSlotStr(v, "__rxflags"))
-    var text = v["__rxtext"]
-    if (typeof text != "string") { text = "" }
-    var arr = v["__rxcaps"]
-    var caps = []
-    var i = 0
-    while (i < arr.length) {
-        caps.push(Math.trunc(pyNum(arr[i])))
-        i = i + 1
-    }
-    var begin = 0
-    var end = 0
-    if (caps.length >= 2) {
-        begin = caps[0]
-        end = caps[1]
-    }
-    return {re: re, text: text, m: {begin: begin, end: end, caps: caps}}
-}
+// SHARED as rxMatchOf - lib/regex.js, with kotlin's k5MatchOf and ruby's
+// rbRxMatchOf. rxObjRe reads __rxsrc/__rxflags with the same "" default this
+// spelled as pyERxSlotStr, and the pyNum coercion is the identity on every value
+// __rxcaps can hold (it is written from the engine's own m.caps in three places
+// and nowhere else).
+function pyERxMatchOf(v) { return rxMatchOf(v) }
 
 // pyERxSearch is Go (*jsrt).rxPySearch. The Go body checks the engine's second
 // return and fails with "regexp: step limit exceeded"; regex.js raises that
@@ -5408,16 +5371,10 @@ function pyFToInt(f) {
 
 // A fresh copy of an array - Go's append([]interface{}{}, xs...), which the
 // dict keys/values arms use so the caller cannot mutate the dict through the
-// answer. There is no Array.prototype.slice in this dialect.
-function pyFCopyArr(a) {
-    var out = []
-    var i = 0
-    while (i < a.length) {
-        out.push(a[i])
-        i = i + 1
-    }
-    return out
-}
+// answer. There is no Array.prototype.slice in this dialect. pyFCopyArr is
+// SHARED as rtCopyArr - lib/runtime.metajs, one of seven copies in six languages.
+// pyFCopyArr is SHARED as rtCopyArr - lib/runtime.metajs (seven copies, six
+// languages, ZERO differences).
 
 // rt.call(f, jsUndef, [e]) - the one-argument lambda call the higher-order list
 // methods make.
@@ -5577,8 +5534,8 @@ function pyFListMethod(o, name, args) {
 // `d.items()` to a loop before emitting anything (python-to-llvm-ir.abnf), and
 // the interpreter answers it in its own mcall.
 function pyFDictMethod(o, name, args) {
-    if (name == "keys") { return pyFCopyArr(o["keys"]) }
-    if (name == "values") { return pyFCopyArr(o["vals"]) }
+    if (name == "keys") { return rtCopyArr(o["keys"]) }
+    if (name == "values") { return rtCopyArr(o["vals"]) }
     if (name == "get") {
         var i = pyDictFind(o["keys"], pyFArgAt(args, 0))
         if (i >= 0) { return o["vals"][i] }

@@ -634,8 +634,12 @@ function swEqual(l, r, depth) {
 // rt.toString - and that is the character. So a one-character string is the same
 // value at every point Swift can observe.
 //
-// BYTE-IDENTICAL to lua-rt.metajs's luChar, and DECLINED as a merge - see the
-// reason recorded at that site. Note that this js_char and lib/runtime.metajs's
+// BYTE-IDENTICAL to lua-rt.metajs's luChar, and DECLINED as a merge twice - see
+// the reason recorded at that site, re-judged in the fifth pass and unchanged:
+// swift could take a shared body from lib/runtime.metajs (which now holds
+// rtRuneLen, the decode half of the same UTF-16 question) but lua imports nothing
+// at all, so the merge would cost a new two-language module and lua's first
+// import to save five lines. Note that this js_char and lib/runtime.metajs's
 // js_char are two DIFFERENT contracts under one name: swift answers the
 // one-character STRING, the shared one answers a {__char} box. swift-rt.ll
 // carries exactly one `define @js_char` and it is this one.
@@ -764,8 +768,8 @@ function js_mcall(recv, name, args) {
     }
     if (rtIsArr(recv)) { return swListMethod(recv, name, args) }
     if (rtIsDictObj(recv)) {
-        if (name === "keys") { return swCopyArr(recv["keys"]) }
-        if (name === "values") { return swCopyArr(recv["vals"]) }
+        if (name === "keys") { return rtCopyArr(recv["keys"]) }
+        if (name === "values") { return rtCopyArr(recv["vals"]) }
         if (name === "get") {
             var gi = swDictFind(recv["keys"], args[0])
             if (gi >= 0) { return recv["vals"][gi] }
@@ -790,16 +794,8 @@ function js_mcall(recv, name, args) {
     fail("method call '" + name + "' on a " + typeof recv)
     return undefined
 }
-
-function swCopyArr(a) {
-    var out = []
-    var i = 0
-    while (i < a.length) {
-        out.push(a[i])
-        i = i + 1
-    }
-    return out
-}
+// swCopyArr is SHARED as rtCopyArr - lib/runtime.metajs (seven copies, six
+// languages, ZERO differences).
 
 // The Kotlin/Python list methods of rt.memberCall, in its order.
 function swListMethod(o, name, args) {
@@ -970,7 +966,7 @@ function js_swarith(op, l, r) {
         // Array + Array is CONCATENATION in Swift, where the shared jsAdd coerced
         // both to text and answered "1,23".
         if (rtIsArr(l) && rtIsArr(r)) {
-            var out = swCopyArr(l)
+            var out = rtCopyArr(l)
             var i = 0
             while (i < r.length) {
                 out.push(r[i])

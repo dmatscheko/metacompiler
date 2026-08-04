@@ -70,11 +70,13 @@
 
 // An operand of INTEGER arithmetic. A char is one - it is an integral type in
 // both languages - and a double is not.
-function rtjIsIntegral(v) {
-    if (rtIsCharBox(v)) { return true }
-    if (typeof v != "number") { return false }
-    return !floIs(v)
-}
+//
+// MOVED UP to lib/runtime.metajs as rtIsIntegral (fifth pass, 2026-08-04): kotlin
+// had the same five lines TWICE (ktIsInt, k4bIsIntegral) and cannot import this
+// file - it has neither of the two knobs above and wants none of the five bodies
+// below. The name stays here so csharp's and java's fifteen call sites do not
+// move.
+function rtjIsIntegral(v) { return rtIsIntegral(v) }
 
 // The double reading of anything numeric.
 function rtjNum(v) {

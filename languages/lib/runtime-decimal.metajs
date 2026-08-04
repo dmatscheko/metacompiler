@@ -117,15 +117,8 @@ function rtSplit10(a) {
     return {d: digits, e: e10 + pt - 1}
 }
 
-function rtZeros(n) {
-    var out = ""
-    var i = 0
-    while (i < n) {
-        out = out + "0"
-        i = i + 1
-    }
-    return out
-}
+// rtZeros MOVED to lib/runtime.metajs (fifth pass): php had the same nine lines
+// as phZeros and has no decimal bignum to import this file for.
 
 // The exponential half of a float rendering, shared by python, ruby and swift:
 // one digit, the rest as a fraction, then a SIGNED exponent zero-padded to two

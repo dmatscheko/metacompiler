@@ -150,12 +150,10 @@ var rbCurExc = null      // what the innermost rescue caught, for a bare `raise`
 
 // ===================================================== the value model ======
 
-function rbIsObj(v) {
-    if (v === null) { return false }
-    if (v === undefined) { return false }
-    if (typeof v != "object") { return false }
-    return !Array.isArray(v)
-}
+// SHARED as rtIsObjNotArr - lib/runtime.metajs. python's pyIsObj was
+// byte-identical. It is NOT rtIsObj: that one deliberately leaves the array
+// rejection out; ~30 sites here need it.
+function rbIsObj(v) { return rtIsObjNotArr(v) }
 
 function rbTag(v, name) {
     if (!rbIsObj(v)) { return false }
@@ -1012,16 +1010,8 @@ function rbDictSet(d, k, v) {
 }
 
 function rbNewDict() { return js_dict_new() }
-
-function rbCopyArr(a) {
-    var out = []
-    var i = 0
-    while (i < a.length) {
-        out.push(a[i])
-        i = i + 1
-    }
-    return out
-}
+// rbCopyArr is SHARED as rtCopyArr - lib/runtime.metajs (seven copies, six
+// languages, ZERO differences).
 
 // ===================================================== equality =============
 
@@ -1247,7 +1237,7 @@ function rbIsA(v, cls) {
 // rubyExc: {__class: <class>, args: [message]}, the shape the message reader and
 // the rescue type test both understand.
 function rbExc(cls, args) {
-    return {__class: cls, args: rbCopyArr(args)}
+    return {__class: cls, args: rtCopyArr(args)}
 }
 
 // Exception#message / #to_s: the first constructor argument, or the class name.
@@ -1426,7 +1416,7 @@ function rbBin(op, l, r) {
         if (typeof l == "string") { return rbStr(l) + rbStr(r) }
         if (typeof r == "string") { return rbStr(l) + rbStr(r) }
         if (rbIsArr(l) && rbIsArr(r)) {
-            var out = rbCopyArr(l)
+            var out = rtCopyArr(l)
             var i = 0
             while (i < r.length) {
                 out.push(r[i])
@@ -1496,35 +1486,15 @@ function rbBin(op, l, r) {
 // here. Both values are ordinary objects carrying __rx-prefixed slots, exactly
 // as the Go twin has them, so nothing else in this file has to learn a new type.
 
-var rbRxCache = {}   // "$<flags> <pattern>" -> a compiled program
+// The compile cache and the two value tests are SHARED - rxCache / rxGet,
+// rxIsRegexObj / rxIsMatchObj and rxObjRe, all lib/regex.js, all under the Go
+// twin's own names. jsrtregex.go has had exactly one of each since it was
+// written; this side had four copies of the cache and two of everything else.
+function rbRxIsRegex(v) { return rxIsRegexObj(v) }
 
-function rbRxGet(pattern, flags) {
-    var key = "$" + flags + " " + pattern
-    var got = rbRxCache[key]
-    if (got !== undefined) { return got }
-    var re = rxCompile(pattern, flags)
-    rbRxCache[key] = re
-    return re
-}
+function rbRxIsMatch(v) { return rxIsMatchObj(v) }
 
-function rbRxIsRegex(v) {
-    if (!rbIsObj(v)) { return false }
-    if (v["__rxsrc"] === undefined) { return false }
-    return rbIsNil(v["__rxmd"])
-}
-
-function rbRxIsMatch(v) {
-    if (!rbIsObj(v)) { return false }
-    return !rbIsNil(v["__rxmd"])
-}
-
-function rbRxObjRe(v) {
-    var src = v["__rxsrc"]
-    var flags = v["__rxflags"]
-    if (typeof src != "string") { src = "" }
-    if (typeof flags != "string") { flags = "" }
-    return rbRxGet(src, flags)
-}
+function rbRxObjRe(v) { return rxObjRe(v) }
 
 function rbRxNewRegex(src, flags) { return {__rxsrc: src, __rxflags: flags} }
 
@@ -1543,25 +1513,10 @@ function rbRxNewMatch(src, flags, text, m) {
 // three travel in a record. text stays a STRING: regex.js indexes UTF-16 code
 // units where the Go engine indexes runes, which agree for everything in the
 // Basic Multilingual Plane and therefore for every pattern in the corpus.
-function rbRxMatchOf(v) {
-    var re = rbRxObjRe(v)
-    var text = v["__rxtext"]
-    if (typeof text != "string") { text = "" }
-    var arr = v["__rxcaps"]
-    var caps = []
-    var i = 0
-    while (i < arr.length) {
-        caps.push(Math.trunc(rbToF(arr[i])))
-        i = i + 1
-    }
-    var begin = 0
-    var end = 0
-    if (caps.length >= 2) {
-        begin = caps[0]
-        end = caps[1]
-    }
-    return {re: re, text: text, m: {begin: begin, end: end, caps: caps}}
-}
+// SHARED as rxMatchOf - lib/regex.js, with kotlin's k5MatchOf and python's
+// pyERxMatchOf. The rbToF coercion was the only difference and it is the
+// identity on every value __rxcaps can hold.
+function rbRxMatchOf(v) { return rxMatchOf(v) }
 
 // rxSetGlobals publishes $~, $& and $1..$9 after a match attempt. A FAILED match
 // clears them.
@@ -1694,7 +1649,7 @@ function rbRxMethod(target, name, args) {
         if (name == "===") { return rbRxMatchOp(target, rbArgAt(args, 0)) !== null }
         if (name == "source") { return re["src"] }
         if (name == "options") { return 0 }
-        if (name == "names") { return rbCopyArr(re["names"]) }
+        if (name == "names") { return rtCopyArr(re["names"]) }
         if (name == "to_s") { return "(?-mix:" + re["src"] + ")" }
         if (name == "inspect") { return "/" + re["src"] + "/" + re["flags"] }
         if (name == "class") { return "Regexp" }
@@ -1720,7 +1675,7 @@ function rbRxMethod(target, name, args) {
             }
             return d
         }
-        if (name == "names") { return rbCopyArr(mre["names"]) }
+        if (name == "names") { return rtCopyArr(mre["names"]) }
         if (name == "pre_match") { return text.substring(0, m["begin"]) }
         if (name == "post_match") { return text.substring(m["end"], text.length) }
         if (name == "begin" || name == "end") {
@@ -1906,7 +1861,7 @@ function rbArrayMethod(t, name, args) {
         return t[t.length - 1]
     }
     if (name == "include?" || name == "contains") { return rbDictFind(t, rbArgAt(args, 0)) >= 0 }
-    if (name == "to_a") { return rbCopyArr(t) }
+    if (name == "to_a") { return rtCopyArr(t) }
     if (name == "each") {
         var e = 0
         while (e < t.length) {
@@ -2031,7 +1986,7 @@ function rbMethod(target, name, args) {
         if (rbIsFn(target)) { return target.apply(undefined, args) }
     }
     if (name == "lambda?") {
-        if (rbIsFn(target)) { return rbIsLambda(target) }
+        if (rbIsFn(target)) { return rtHas(rbLambdas, target) }
     }
     if (name == "to_proc") {
         if (rbIsFn(target)) { return target }
@@ -2085,8 +2040,8 @@ function rbMethod(target, name, args) {
             var keys = target["keys"]
             var vals = target["vals"]
             if (name == "size" || name == "length") { return keys.length }
-            if (name == "keys") { return rbCopyArr(keys) }
-            if (name == "values") { return rbCopyArr(vals) }
+            if (name == "keys") { return rtCopyArr(keys) }
+            if (name == "values") { return rtCopyArr(vals) }
             if (name == "to_a" || name == "entries") {
                 var pairs = []
                 var p = 0
@@ -2149,14 +2104,10 @@ function rbMethod(target, name, args) {
     return rbMemberCall(target, name, args)
 }
 
-function rbIsLambda(f) {
-    var i = 0
-    while (i < rbLambdas.length) {
-        if (rbLambdas[i] === f) { return true }
-        i = i + 1
-    }
-    return false
-}
+// rbIsLambda is SHARED as rtHas - lib/runtime.metajs: an identity scan of an
+// array, which is dart's dtSeen and php's phNameIn and, returning the index
+// instead, rtDictFind. The array was a file global here rather than a parameter,
+// which is the only reason three copies of it were invisible for so long.
 
 // ===================================================== $globals =============
 
@@ -2199,7 +2150,7 @@ function rbJStr(v) {
 // class descriptor carries only __name.
 function js_pyexc(name, args) {
     var arr = []
-    if (rbIsArr(args)) { arr = rbCopyArr(args) }
+    if (rbIsArr(args)) { arr = rtCopyArr(args) }
     return {__class: {__name: name}, args: arr}
 }
 
@@ -2637,7 +2588,7 @@ function js_rcvset(self, name, v) {
 function js_rxnew(src, flags) {
     var s = rbStr(src)
     var f = rbStr(flags)
-    var re = rbRxGet(s, f)
+    var re = rxGet(s, f)
     if (!re["ok"]) { fail("invalid regexp /" + s + "/: " + re["err"]) }
     return rbRxNewRegex(s, f)
 }
