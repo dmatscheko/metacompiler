@@ -2398,6 +2398,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Integer division and modulo FLOOR in Ruby (-7 / 2 is -4, -7 % 3 is 2).
     function idiv(a, b) { if (b == 0) { fail("divided by 0") } return Math.floor(a / b) }
     function imod(a, b) { if (b == 0) { fail("divided by 0") } return a - Math.floor(a / b) * b }
+    // A zero carrying x's sign. `x * 0` is the obvious spelling AND IT IS WRONG
+    // IN THIS DIALECT: the tag engine keeps an integral value as an integer, so
+    // `-4 * 0` is the integer 0 and the sign is gone - measured, `1 / (x * 0)`
+    // is +Infinity for x = -4, where `1 / (z / (0 - 1))` is -Infinity. Dividing
+    // a zero by -1 is a float division in every engine and keeps the sign.
+    // rbZeroSign in languages/lib/ruby-rt.metajs is the same body; abnf/jsrt.go
+    // spells it math.Copysign(0, x), which Go has and this dialect does not.
+    function zeroSigned(x) {
+        var z = 0
+        if (x < 0) { return z / (0 - 1) }
+        if (x == 0 && 1 / x < 0) { return z / (0 - 1) }
+        return z
+    }
     function numBin(op, l, r) {
         var rk = numRank(l)
         var rr = numRank(r)
@@ -2432,7 +2445,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (op == "-") { return mkFlo(x - y) }
             if (op == "*") { return mkFlo(x * y) }
             if (op == "/") { return mkFlo(x / y) }
-            if (op == "%") { return mkFlo(x - Math.floor(x / y) * y) }
+            // Float#% - see rubyFloMod in abnf/jsrt.go for the whole reasoning.
+            // `x - floor(x/y)*y` has the divisor's sign but loses a ZERO's sign,
+            // where ruby's flodivmod starts from fmod and keeps the DIVIDEND's:
+            // -4.0 % 2.0 is -0.0, not 0.0. A zero result is exactly a zero fmod,
+            // so the dividend's sign is put back.
+            if (op == "%") {
+                var fm = x - Math.floor(x / y) * y
+                if (fm == 0) { return mkFlo(zeroSigned(x)) }
+                return mkFlo(fm)
+            }
             if (op == "**") { return mkFlo(Math.pow(x, y)) }
             fail("Float does not support '" + op + "'")
         }

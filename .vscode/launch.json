@@ -179,6 +179,24 @@
             "program": "${workspaceFolder}","args": ["languages/metajs-interpreter.abnf", "tests/metajs-fail-test-anytype.js", "-q"]
         },
         {
+            "name": "MetaJS type violation, native binary SHOULD ABORT (compiler, -exe + the C floor runtime)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-fail-test.js", "-q", "-exe", "tests/metajs-native-fail.out"]
+        },
+        {
+            "name": "MetaJS undeclared assignment, native binary SHOULD ABORT (compiler, -exe + the C floor runtime)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-fail-test-undeclared.js", "-q", "-exe", "tests/metajs-native-fail-undeclared.out"]
+        },
+        {
+            "name": "MetaJS anytype assignment, native binary SHOULD ABORT (compiler, -exe + the C floor runtime)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-fail-test-anytype.js", "-q", "-exe", "tests/metajs-native-fail-anytype.out"]
+        },
+        {
             "name": "C (subset) interpreter",
             "type": "go",
             "request": "launch",

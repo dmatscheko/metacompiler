@@ -8059,6 +8059,20 @@ has no first move**, and that is a measured statement rather than a delay.
 
 # WHAT IS STILL OPEN - the consolidated list
 # (2026-08-04, verified at `c1bc760`; items 11 and 1/swift re-verified at `33923d4`)
+#
+# SECOND PASS, 2026-08-04 from `56e31c1`: items **5** (ruby's `-0.0 % 1.0`), **7**
+# (`js_gospread` into the floor - and `js_has`/`js_goslice` struck as NOT a debt),
+# **10** (the native fail-tests) and the **lua unary minus** half of item 1 are
+# CLOSED, each with its measurement and its discriminating power at its own line.
+# Item 1's **lua precision window** is re-derived and CORRECTED (lua tries 15 then
+# 17, never 16) with the remaining work costed down to the file and the host id,
+# and item 1's **python** bullet is SCOPED - see "PYTHON HAS NO FLOAT TYPE" at the
+# end of this file. Two NEW defects were found by the probes and are recorded at
+# item 5: ruby's huge-dividend `Float#%` (both halves wrong AND divergent from each
+# other) and the `x * 0` signed-zero trap in the ABNF script dialect.
+# Invariants after the pass: matrix **328/328** (was 325), `--full` **5,852**
+# assertions (was 5,843) with 0 languages whose halves disagree, `--cross` 119/0,
+# clang-check 16/16 all agreeing none held.
 
 Every "What is owed" / "Still owed" / "Not fixed here" / "BLOCKED" item in this
 file, in `runtime-merge-plan.md` and in `runtime-rework-plan.md` was walked and
@@ -8120,7 +8134,11 @@ the strength of an uncommitted diff.
      ruby, swift, java, kotlin, dart, lua and C# all carry does not exist for
      python, and adding it is a value-model job touching the emitter, every
      arithmetic path and `/` vs `//`. Both halves agree, so `--cross` is blind to
-     it and only a real-CPython diff sees it. **Newly measured, still open.**
+     it and only a real-CPython diff sees it. **Newly measured, still open** -
+     and now SCOPED rather than guessed at, 2026-08-04: see "PYTHON HAS NO FLOAT
+     TYPE - the scope, measured" at the end of this section. ~100 edit sites,
+     ~700-950 hand-written lines across four source files, atomic (any subset
+     lands as a `--cross` divergence). The C floor needs ZERO lines.
    - **lua: NARROWED. The two malformed shapes are FIXED; the precision window is
      recorded exactly rather than guessed.**
      - FIXED: `".0"` was appended unconditionally to an integral float, so
@@ -8135,28 +8153,97 @@ the strength of an uncommitted diff.
        arm too, because the `{__f}` box wraps only the INTEGRAL floats. Pinned by
        `ift10`..`ift12` in `tests/lua-test-full.lua` (3/3 fail against a clean
        `33923d4`); lua 317 -> 320.
-     - STILL OPEN, and now specified: WHICH form Lua picks. `lua 5.5.0` tries
-       `"%.15g"`, then `"%.16g"`, then `"%.17g"` and takes the first that
-       round-trips - derived from a sweep of 10^10..10^18 and their neighbours:
+     - STILL OPEN, and the rule recorded here was WRONG - **re-derived and
+       CORRECTED 2026-08-04. lua 5.5.0 tries `"%.15g"` and, if that does not read
+       back as the same double, `"%.17g"`. It never tries `"%.16g"`.** Settled by
+       building the 15/16/17 model as a C program against the local `lua 5.5.0`
+       over 91 values - 31 hand-picked plus 60 RANDOM 64-bit patterns: the
+       15/16/17 model differs from lua on 10 of the 91 (`1/3` is
+       `0.33333333333333331`, not the 16-digit `0.3333333333333333`), the
+       15-then-17 model matches on all 91.
+       - **AND THE MACHINERY TO DO IT ALREADY EXISTS IN TWO OF THE THREE HALVES.**
+         The floor's `shortest_digits` (`runtime.c:1587`) takes `g_mindig`, "the
+         MINIMUM number of digits the search may answer with", and its own comment
+         records that the candidate for k digits IS the exact value rounded to k
+         digits, nearest with ties to even - which is exactly `%.kg`'s digits.
+         java's `Double.toString` already uses it with `g_mindig = 2`
+         (`runtime.c:2529`). So the floor half is: `g_mindig = 15`, call it, and
+         if it answers 15 digits that IS `%.15g` and it round-tripped; if it
+         answers more, `%.15g` did not round-trip and the answer is a second call
+         with `g_mindig = 17`. **No new digit machinery, no cap, no change to
+         shortest_digits.** Go has it as `strconv.FormatFloat(v, 'e', n-1, 64)`.
+       - **WHAT IS ACTUALLY MISSING is the SCRIPT engine's half**, and it is one
+         host builtin, not a bignum. `lua-interpreter.abnf` gets its digits from
+         `"" + n`, i.e. the host's own SHORTEST form, and there is no
+         `toPrecision`/`toExponential` in the dialect. But the interpreter never
+         runs on the C floor - its script runs under goja or frozen, and BOTH take
+         their globals from Go (`abnf/commonscript.go:188` for goja,
+         `standardJSBindings` in `abnf/jsrt.go` for frozen, which `frozen.go:356`
+         calls). So a `floPrec(v, n)` global - "the correctly-rounded n
+         significant digit decimal of |v| as `DIGITSeEXP`, trailing zeros
+         stripped" - is THREE implementations: `commonscript.go` (strconv),
+         `standardJSBindings` (strconv, and this is also the one the compiled
+         layer 2 reaches under `llvm.Run`), and one `host_call` id in
+         `runtime.c` (next free id is 70) over `g_mindig` + `shortest_digits`.
+         Then `luaFloText`/`luaNumStr` (`lua-interpreter.abnf`), `luFloText`
+         (`languages/lib/lua-rt.metajs`) and `luFloText` (`abnf/jsrtlua.go`)
+         reshape `DIGITSeEXP` into `%g`'s form, whose fixed/exponential threshold
+         is `exp < -4 || exp >= P` with **P the precision that was used** - which
+         is the whole reason `1e15` is `1e+15` (P = 15, exp = 15) while
+         `1234567890123456.0` is not (P = 17, exp = 15).
+       - **NOT DONE HERE, and this is the reason, not an excuse.** It is a
+         four-file change across two runtimes plus a new global in three engines,
+         and every intermediate state is a `--cross` divergence, so it is one
+         commit or none - and the remaining session budget was not enough to land
+         it AND re-run the gates it would need (`-freeze` moves, `runtime.ll` and
+         `lua-rt.ll` regenerate, and the whole matrix/`--full`/`--cross`/
+         clang-check sweep must be redone). The item is now MECHANICAL rather than
+         open-ended: the rule is settled against the oracle, the floor needs no
+         new algorithm, and the missing piece is named down to the file and the
+         id. What it is NOT is small.
+       - **A cheap PARTIAL was considered and rejected, with the measurement.**
+         The `%g` SHAPE alone (P = 15 when the shortest form has <= 15 digits,
+         else 17) needs no new digits at all, because for every NORMAL double
+         whose shortest form has <= 15 digits, `%.15g`'s DIGITS are exactly that
+         shortest form - the 15-digit grid is about 45 ulp wide, so the only
+         15-digit point within half an ulp of the value is the shortest one.
+         Checked over the same 91 values: of the 22 with <= 15 digits, the digits
+         differ for exactly ONE, `5e-324`, and it is the only SUBNORMAL (below
+         2.2250738585072014e-308 the grid is finer than the doubles and the
+         argument fails). So the partial fixes `1e15`, `1e16`, `1e17` and leaves
+         `1/3` (16 shortest digits, 17th digit non-zero) and the subnormals
+         wrong - a formatter that is right for common values and wrong for `1/3`
+         is worse to live with than one that is uniformly the shortest form,
+         because the second is a rule and the first is a lookup table.
+       The original derivation, still valid as a table of what lua prints:
        `1e14` -> `100000000000000.0`, `1e15` -> `1e+15`, `1e15+1` ->
        `1000000000000001.0`, `999999999999999.0` -> `999999999999999.0`,
        `1234567890123456.0` -> `1234567890123456.0`, `5e-324` ->
        `4.94065645841247e-324` (15 digits, not the shortest `5e-324`). Ours uses
-       the shortest round-tripping form throughout. Fixing it needs rounding the
-       EXACT value of a double to 15 significant digits: Go has that as
-       `strconv.FormatFloat(n, 'g', 15, 64)`, and **neither JS-dialect half has it
-       at all** - `toPrecision` appears nowhere in `metajs-to-llvm-ir.abnf`,
-       `metajs-interpreter.abnf` or `abnf/jsrt.go` - so doing the Go half alone
-       would CREATE a `--cross` divergence. It needs a hand-written 15-digit
-       decimal rounding routine in MetaJS first.
-     - ALSO STILL OPEN, same file: lua's unary minus is `0 - x`
-       (`makeNeg`, `lua-interpreter.abnf:1255`, and `lua_arith(SUB, 0, x)` at
-       `lua-to-llvm-ir.abnf:1328`), so `-0.0` and `-(0.0)` print `0.0` where lua
-       prints `-0.0`. `0.0 * -1.0` is already right in both halves. Not fixed HERE
-       because the compiler half spells it as a SUB through `lua_arith`, and
-       switching it to a MUL would change which metamethod a table operand reaches
-       (`__sub` -> `__mul`); both halves agree today, so `--cross` is green either
-       way and the change must be made in both at once.
+       the shortest round-tripping form throughout.
+     - ~~ALSO STILL OPEN, same file: lua's unary minus is `0 - x`.~~ **CLOSED
+       2026-08-04, and the objection that held it was VOID.** `-0.0` and `-(0.0)`
+       and `-z` all printed `0.0` where lua prints `-0.0`, because `0 - 0.0` is
+       `+0.0` in IEEE. The reason recorded for not fixing it was that changing the
+       compiler's `lua_arith(SUB, 0, x)` to a MUL would send a table operand to
+       `__mul` instead of `__sub` - **but metatables are not in the subset at
+       all**: `setmetatable` is bound in neither half (`lua-interpreter.abnf:28`
+       says so in its own header), so a table operand reaches no metamethod by
+       either spelling and fails with "attempt to perform arithmetic on a table
+       value" both ways. Checking that took one probe. Now `lua_arith(MUL, x, -1)`
+       (`lua-to-llvm-ir.abnf` makeNeg) and `mkFlt(a.v * (0 - 1))`
+       (`lua-interpreter.abnf` makeNeg); MUL by -1 is the same 64-bit WRAPPING
+       negation SUB was, so `-math.mininteger` is still `math.mininteger`. All
+       three halves - interpreter, `-frozen` interpreter and the native binary -
+       are byte-identical to `lua 5.5.0` over a 14-row probe (the three zeros,
+       `-0`, `-2.5`, `-(-2.5)`, `-5`, `- "5"`, `- "5.5"`, both mininteger rows,
+       both infinities, NaN). Pinned by `ift13`..`ift17` in
+       `tests/lua-test-full.lua`; lua 320 -> 325 assertions. Discriminating power
+       measured against a clean `56e31c1` archive: `ift13` and `ift14` fail 2/2 in
+       BOTH halves, and `ift15`/`ift16`/`ift17` pass there - they are the
+       regression guard for the SUB -> MUL swap, which is why they are there.
+       Whichever half implements metatables first must implement `__unm` with it;
+       neither `__sub` nor `__mul` is the right metamethod for a unary minus.
 
 2. **`[1, 2] + [3]` in dart** renders and concatenates ("1,23") where dart:core
    concatenates the lists. Both halves agree, so it is invisible to the suites;
@@ -8183,13 +8270,41 @@ the strength of an uncommitted diff.
    `(f < 0 || (f == 0 && 1 / f < 0))`, verified in the archive alongside the long
    fix. Same root as item 3 - a fourth instance of it.
 
-5. **`ruby`'s `-0.0 % 1.0`** is `-0.0` in ruby and `+0.0` in both our halves - 309
-   lines, the signed-zero trap in its Dart shape, and the Go twin has it too.
-   **STILL OPEN, and now VISIBLE (2026-08-04):** the Float#to_s rewrite in item 1
-   made `-0.0` render as `-0.0`, so `puts (-0.0 % 1.0)` now prints a wrong `0.0`
-   where it used to print a wrong `0.0` for two reasons at once. Re-measured
-   against `ruby 2.6.10p210`: real ruby answers `-0.0` for both `-0.0 % 1.0` and
-   `-4.0 % 2.0`, both our halves answer `0.0`.
+5. ~~**`ruby`'s `-0.0 % 1.0`**~~ **CLOSED 2026-08-04, in all three halves.** Ruby's
+   `Float#%` is numeric.c's `flodivmod`, which starts from `fmod` - whose result
+   carries the DIVIDEND's sign - and only adds `y` when `y*mod < 0`, a correction
+   that cannot fire on a zero. So a ZERO remainder keeps the dividend's sign:
+   `-0.0 % 1.0`, `-4.0 % 2.0`, `-4.0 % -2.0` and `-7.5 % 2.5` are all `-0.0`.
+   Ours computed `x - floor(x/y)*y`, which has the divisor's sign right and loses
+   a zero's, because `-4.0 - (-4.0)` is `+0.0`. Now `rubyFloMod`
+   (`abnf/jsrt.go`), `numBin`'s `%` arm plus `zeroSigned`
+   (`ruby-interpreter.abnf`) and `rbNumBin`'s `%` arm plus `rbZeroSign`
+   (`languages/lib/ruby-rt.metajs`). Byte-identical to `ruby 2.6.10p210` from the
+   interpreter, the frozen interpreter, `llvm.Run` and the native binary over the
+   14 finite rows. Pinned by `n16f`..`n16i` in `tests/ruby-test-full.rb`, which
+   fail 4/4 in BOTH halves against a clean `56e31c1` archive; ruby 271 -> 275.
+   - **A DIALECT TRAP CAME OUT OF IT, and it will bite the next signed-zero fix.**
+     The obvious spelling of "a zero with x's sign" is `x * 0`, and **it does not
+     work in the ABNF script dialect**: the tag engine keeps an integral value as
+     an INTEGER, so `-4 * 0` is the integer `0` and the sign is gone. Measured
+     with `1 / (x * 0)`, which is `+Infinity` for `x = -4`, while
+     `1 / (z / (0 - 1))` is `-Infinity`. Multiplying by `-1` is fine (`fm * (0-1)`
+     gives `-0`); it is multiplying by ZERO that folds. Both MetaJS halves
+     therefore divide a zero by -1; `abnf/jsrt.go` says `math.Copysign(0, x)`,
+     because Go is IEEE all the way down.
+   - **AND A NEW DEFECT THE PROBE FOUND - OPEN, and it is a `--cross` divergence
+     that `--cross` cannot see.** `Float#%` on a HUGE dividend is wrong in both
+     halves AND they disagree with each other: real ruby answers `1.0e308 % 3.0`
+     `= 2.0` and `-1.0e308 % 3.0 = 1.0`; the interpreter answers `0.0` and `-0.0`,
+     the compiler `4.9896007738368e+291` and its negation. Present at `56e31c1`
+     and untouched by this change (verified from the clean archive). The cause is
+     that `floor(x/y)*y` is meaningless at that magnitude - the interpreter takes
+     it literally, the layer 2 runs it through `rbFmaSub`'s exact two-product,
+     which is exact about the WRONG expression. The right body is `fmod`, and
+     `%` in this dialect is fmod for `1e308 % 3` (measured: 2 in the interpreter,
+     the frozen interpreter and the native floor) but NOT for `1e308 % 2.5`, where
+     all three say `0` and node says `1`. So it needs its own settling; no test
+     covers a huge-dividend modulo today, which is why the suites are silent.
 
 6. ~~**The `die3` error-message divergence.**~~ **CLOSED 2026-08-04, in the Go
    twin.** `llvm.Run` said `cannot set member 'foo' on float64` (the Go reflect
@@ -8218,13 +8333,34 @@ the strength of an uncommitted diff.
 
 ## Structural - work that is understood and unstarted
 
-7. **`js_goslice` / `js_gospread` / `js_has` belong in the floor.** Three languages
-   have written them out; today they exist only in `languages/lib/go-rt.metajs` and
-   `languages/lib/csharp-rt.metajs` (e.g. `js_has` at `csharp-rt.metajs:800`) and
-   `grep 'js_goslice\|js_gospread\|long js_has' languages/lib/runtime.c` is empty.
-   **`js_bytelen` is the worked example of how to do it**: the floor body and the
-   layer-2 DELETIONS must be one change, or the link fails with a duplicate symbol.
-   "What is owed, and what generalises" (C#) item 3.
+7. ~~**`js_goslice` / `js_gospread` / `js_has` belong in the floor.**~~ **SETTLED
+   2026-08-04: one of the three moved, and the other two are NOT a debt.**
+   - `js_gospread` is now `languages/lib/runtime.c`, next to `js_bytelen`, and the
+     two layer-2 copies (`go-rt.metajs`, `csharp-rt.metajs`) are deleted in the
+     same change - the duplicate-symbol rule `js_bytelen` produced. The two copies
+     were ONE specification.
+   - `js_has` and `js_goslice`/`js_csslice` **stay split, and that is the answer,
+     not a deferral**: Go counts a string in BYTES and C# in UTF-16 code units, so
+     each carries two specifications. That split landed in `33923d4`.
+   - **MEASURED, because "a downward dedup is free" is a prediction.** 4,000 calls
+     each spreading a 500-element slice - 2,000,000 elements - native `-exe`, six
+     runs interleaved before/after: layer 2 27.3/28.0/27.9 s, floor
+     26.1/26.7/27.3 s, every pair the same way round. So the MetaJS body cost
+     about 1.0 s, i.e. 500 ns per element, and the floor body does not appear at
+     all in 3,878 `sample` frames of the after binary - under 35 ms for the same
+     2,000,000 elements, at least 30x. The `case_map` ratio, with its sign
+     flipped.
+   - **AND THE MORE USEFUL NUMBER: it is only 3.7% of that program.** `sample`
+     says the spread-heaviest Go program one can write is dominated by
+     `scope_get` and `ar_block` - the VARIADIC CALLEE's prologue, which packs the
+     500 arguments back into a slice and is still layer-2 MetaJS in both builds.
+     The caller-side splice was never the expensive half. **A future move should
+     aim at the variadic prologue, not at another `js_*` leaf.**
+   - Discriminating power measured: with the floor body stubbed to `return 0`,
+     `tests/clang-check.sh` reports "BUT THE NATIVE RUN DISAGREES" for BOTH `go`
+     and `csharp` (`go-test-full.go:301` `sum11(nums...)`, and C#'s `params`
+     rows). The matrix alone would not have caught it - `llvm.Run` uses the Go
+     twin's `js_gospread`, not the floor's.
 
 8. **`js_scope_has(s, n)`, and the `py_setvar` residue behind it.** A name bound
    strictly below a binding boundary AND above it. The floor's scope API landed as
@@ -8240,13 +8376,31 @@ the strength of an uncommitted diff.
    asks `sc.find` at run time. They differ only for an annotation the program does
    not REACH. "What is owed, and what generalises" (PYTHON) item 3.
 
-10. **Automating the native fail-tests.** `tests/metajs-fail-test.js`,
-    `-undeclared.js` and `-anytype.js` are in the matrix through the interpreter and
-    `llvm.Run` only, never natively - which is exactly why the floor's abort-path
-    bodies read as untested. Their native halves were run by hand and agree with the
-    Go twin word for word. Automating it is three `-exe` rows plus an
-    expect-nonzero mode in `.vscode/launch.json` and `test.sh`; re-checked here,
-    `test.sh` still has no such mode. "Settling the 24".
+10. ~~**Automating the native fail-tests.**~~ **CLOSED 2026-08-04. Matrix 325 ->
+    328.** `.vscode/launch.json` gained three `-exe` rows for
+    `tests/metajs-fail-test.js`, `-undeclared.js` and `-anytype.js`, and `test.sh`
+    gained the expect-nonzero native mode they need (invariant 3 in its header).
+    - `mec ... -exe PATH` only BUILDS - it links, prints the path and exits 0 - so
+      an `-exe` entry on its own asks "does this link" and nothing more. A row
+      whose NAME says **SHOULD ABORT** now declares: the build must succeed, and
+      then the built BINARY is run and must exit non-zero. The marker deliberately
+      avoids the word "fail", because the existing rule reads any name containing
+      FAIL as "the metacompiler must exit non-zero", which is the opposite of what
+      these rows want.
+    - **The check with the teeth is not the exit code.** The binary's stderr is
+      compared against the SAME program under `llvm.Run` (the entry minus
+      `-exe PATH`), after dropping `llvm.Run`'s own `  ==> Fail` verdict line -
+      so the floor's diagnostic is pinned to the Go runtime's wording, in a place
+      where the two are completely separate code. The goja-built and frozen-built
+      binaries are also compared to each other.
+    - Discriminating power measured, from the tree: change the floor's
+      " and cannot hold a " to " and CANNOT hold a " and its "anytype can only" to
+      "anytype may only" -> 2 of the 3 rows fail on "native binary stderr differs
+      from llvm.Run's". Change `die`'s `exit(1)` to `exit(0)` -> the anytype row
+      fails on "the frozen-built native binary exited 0 but should abort" (1 of 3,
+      because the other two reach `die2`/`die3`, which exit on their own path).
+      So `werr`, `die`, `die2`, `die3`, `wstr`, `o_cstr` and `class_name` are now
+      REACHED BY A TEST rather than proved by probe.
 
 11. **Part B is UNBLOCKED and still has no landed move - now on MEASUREMENT, not
     structure (2026-08-04).** The door landed in `33923d4`:
@@ -8314,3 +8468,115 @@ the strength of an uncommitted diff.
 - **The shift result type in the floor** is not a defect to fix. A fatal probe at
   all four sites fired ZERO times.
 - **The `js_jadd` "float path divergence"** was two spellings of one expression.
+
+# PYTHON HAS NO FLOAT TYPE - the scope, measured (2026-08-04)
+
+Item 1's python bullet says "adding it is a value-model job"; this is what that
+job actually is, walked file by file rather than estimated. Symptoms, confirmed
+live and identical in BOTH halves (so `--cross` is blind to every line of it):
+`print(1.0)` writes `1`, `print(4/2)` writes `2`, `print(type(1.0))` writes
+`[object Object]`, `print([1.0, 2])` writes `[1, 2]`, `print(1e16)` writes
+`10000000000000000`. CPython 3.14.6 writes `1.0`, `2.0`, `<class 'float'>`,
+`[1.0, 2]`, `1e+16`.
+
+## Which box, and what is reusable
+
+There are TWO float mechanisms in this repository and python wants the second.
+
+- **The tag-14 floor box** (java, kotlin, go, csharp): `jf_make`/`jf_style_of`/
+  `jvm_flo_str` in `languages/lib/runtime.c:2449-2532`, `jsJFlo` in
+  `abnf/jsrtjvm.go:53`, the `flo`/`floIs`/`floStr` host ids 51-60. **Wrong
+  vehicle**: its arithmetic rule is "either operand is a box => the result is a
+  box", and Python's `/` must produce a float from two INTs. Using it would also
+  drag a fourth print style into the floor, `jsrtjvm.go` and
+  `metajs-interpreter.abnf`.
+- **The plain-object box** (ruby `{__flo}`, php `{__pf}`, dart `{__flo}`), with a
+  Go twin type per language (`jsFlo` `abnf/jsrt.go:2687`, `jsPhpFlo`, `jsDartFlo`)
+  and **zero lines in the C floor**. **Dart is the precedent to copy** - it is
+  dynamically typed and had exactly this problem.
+
+Reusable AS IS, no edits to those files: the `core.keyId`/`core.keyEq` map-key
+hooks (`languages/lib/interp-core.js:41,590,615`, which exist precisely for a
+boxed number - dart uses them at `dart-interpreter.abnf:3809`); the exact-decimal
+and round-half-even machinery python ALREADY has for `{:.Nf}`
+(`languages/lib/python-rt.metajs:1941,1979,2039`); and the C floor, which needs
+nothing. COPIED rather than reused: ruby's shortest-digit splitter
+(`rbSplit10`/`rbFloDigits`, ~50 lines per engine) - the algorithm is settled but
+python's window is different (below).
+
+## The size
+
+| file | distinct edit sites | hand-written lines |
+|---|---|---|
+| `languages/python-interpreter.abnf` | ~32 | 220-280 |
+| `languages/lib/python-rt.metajs` | ~38 | 230-300 |
+| `abnf/jsrt.go` | ~26 | 180-240 |
+| `languages/python-to-llvm-ir.abnf` | ~6 | 20-35 |
+| `tests/python-test-full.py` (+ features) | 1-2 sections | 40-80 |
+| `languages/lib/runtime.c` | **0** | **0** |
+
+**~100 edit sites, ~700-950 hand-written lines, and it is ATOMIC** - any
+half-landed subset is a `--cross` divergence or a ratchet regression.
+
+The compiler grammar is the small one because every operator already funnels
+through `js_pybin` (`emitPyBin`, `python-to-llvm-ir.abnf:1859`); what it needs is
+`makeFloatLit` (`:1568`) emitting `js_pyflo` instead of `makeConst` (constant
+folding cannot carry a box), `makeImagLit` (`:1572`), and a real `js_pyabs`,
+because `abs` is bound straight from JS `Math` at `:3603` and would answer NaN on
+a box.
+
+Free once the box and the renderer exist: `repr()`, `print`, nested list/tuple/
+set/dict repr, f-strings and their `!r`/`=`/nested specs, `isinstance`,
+`issubclass`, `match` class patterns, `except` matching, and `{:.2f}` (one
+unboxing line). `%`-formatting, `str.format()`, `round()`, `sorted()` and the
+`math` module are **not implemented at all** in either half, so they are neither
+work nor risk here.
+
+Per-site and unavoidable: every `typeof v == "number"` guard (13 in the
+interpreter grammar, ~16 in `python-rt.metajs`, plus the Go `case float64:`
+arms), all 59 `pyNum(` call sites in `python-rt.metajs` (each must be classified
+"unbox and lose floatness" vs "unbox and re-box"), and three copies each of the
+renderer, the literal path and the always-float `/`.
+
+## The five risks, ranked
+
+1. **Dict and set keys** - three identity-based implementations
+   (`python-interpreter.abnf:1238` overriding interp-core's `dictFind`,
+   `python-rt.metajs:206`+`:247`, `abnf/jsrt.go:2418`), which must interlock with
+   the EXISTING `True`/`1` alias and with CPython's rule that the first key object
+   is the one that stays. Two boxes holding `1.0` are `!==`.
+2. **`is` / `strictEq`** - `x = 1.0; y = x; x is y` must stay true.
+3. **The `pyBoxed` gate** (`python-interpreter.abnf:2225`) sends ANY object
+   operand into `boxOp`, which is bigint/complex code. The three-way
+   big x complex x float promotion lattice has no precedent here: ruby's
+   `rubyNumRank` is int<rat<float<complex, but Python's bigint is an
+   arbitrary-precision INT, so `10**30 / 1` must be the float `1e+30`.
+4. **`//` and `%` returning int-or-float** - `7 // 2` is `3`, `7.5 // 2` is `3.0`.
+   `tests/python-test-full.py:75` already pins two of the three cases.
+5. **Three byte-identical renderer copies** - `--cross` diffs them, and a
+   one-character drift in the exponent padding is a red run.
+
+## The renderer CPython actually wants (probed against the installed 3.14.6)
+
+`str(x) == repr(x)` for every float in 3.x. Take the SHORTEST round-tripping
+digit string and `decpt`; **use exponential iff `decpt <= -4 || decpt > 16`**;
+in exponential form there is NO forced `.0` (`2e16` is `2e+16`), the exponent is
+signed and zero-padded to at least two digits (`1e-05`), and one significant
+digit is allowed (`5e-324`, unlike java which forces two). Non-finite is
+lowercase `nan` / `inf` / `-inf`, and `repr(-float('nan'))` is `nan`.
+
+| | exponent window | mantissa in exp form | non-finite | min sig digits |
+|---|---|---|---|---|
+| ruby `rubyFloStr` | `decpt < -3 \|\| decpt > 15` | forces `.0` (`1.0e+15`) | `NaN`/`Infinity` | 1 |
+| java `jvmFloStr` | value window `1e-3 <= \|d\| < 1e7` | forces `.0`, upper `E` | `NaN`/`Infinity` | **2** |
+| dart `dartFloStr` | ECMAScript's | ECMAScript's | `NaN`/`Infinity` | 1 |
+| **python (needed)** | **`decpt <= -4 \|\| decpt > 16`** | **no forced `.0`** | **`nan`/`inf`** | 1 |
+
+Ruby's is the closest structurally and the wrong answer in all three columns.
+
+**One thing that is NOT the float box's problem but shares its site**: a plain
+double holding `2**70` prints `1.1805916207174113e+21` where CPython prints
+`1180591620717411303424`, because `pyIsBigText` (`python-interpreter.abnf:2211`)
+gates on LITERAL TEXT. It lives at the same `pstr` fallthrough and should be
+scoped alongside. And `print(type(1.0))` will still read `[object Object]` unless
+`pstr` also gains a `__isclass` arm - so the fix will not LOOK fixed without it.

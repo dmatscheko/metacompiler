@@ -905,6 +905,19 @@ def s32
   # unary minus was `0 - x`, which returns +0.0 for a zero operand.
   check("n16e", (-0.0).to_s == "-0.0" && 0.0.to_s == "0.0" &&
                 (-1e16).to_s == "-1.0e+16")
+  # Float#% - numeric.c flodivmod. The remainder takes the DIVISOR's sign, but a
+  # ZERO remainder keeps the DIVIDEND's, because flodivmod starts from fmod and
+  # its `mod += y` correction cannot fire on a zero. Ours computed
+  # x - floor(x/y)*y, where -4.0 - (-4.0) is +0.0 and the sign was lost. Every
+  # right-hand side below is ruby 2.6.10p210's own answer.
+  check("n16f", (-0.0 % 1.0).to_s == "-0.0" && (0.0 % 1.0).to_s == "0.0")
+  check("n16g", (-4.0 % 2.0).to_s == "-0.0" && (4.0 % 2.0).to_s == "0.0")
+  check("n16h", (-4.0 % -2.0).to_s == "-0.0" && (4.0 % -2.0).to_s == "0.0" &&
+                (-7.5 % 2.5).to_s == "-0.0")
+  # ...and the non-zero remainders, which the divisor's sign already governed and
+  # which the fix must leave exactly where they were.
+  check("n16i", (-5.0 % 2.0).to_s == "1.0" && (5.0 % -2.0).to_s == "-1.0" &&
+                (-0.0 % -1.0).to_s == "-0.0" && (0.0 % -1.0).to_s == "0.0")
   check("n17", true.to_s == "true")
   check("n18", :sym.to_s == "sym")
 end

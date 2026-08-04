@@ -5053,6 +5053,71 @@ long js_ushr(long a, long b) {
  * `grep -l 'function js_<name>' languages/lib/*.metajs` first. */
 long js_bytelen(long v) { return mk_num(d_from_long(str_len(to_string(v)))); }
 
+/* js_gospread: Go's f(xs...) and C#'s params-array call. Flatten the LAST element
+ * of the argument array IN PLACE, so the callee sees the slice's elements as
+ * separate arguments; a nil/undefined tail contributes nothing.
+ *
+ * THE SECOND FLOOR MOVE, AND THE FIRST DOWNWARD ONE. It is here and not in the
+ * shared MetaJS layer because - unlike js_has and js_goslice, its two neighbours
+ * in that plan item - it carried ONE specification, not two: go-rt.metajs and
+ * csharp-rt.metajs spelled the same body character for character in intent (the
+ * Go twin's "js_gospread" in abnf/jsrt.go is the third copy and the authority).
+ * js_has and js_goslice must STAY split, because Go counts a string in BYTES and
+ * C# in UTF-16 code units - that split landed in 33923d4 and is not a debt.
+ *
+ * MEASURED, because "downward dedup is free" is a prediction and predictions are
+ * not measurements (docs/runtime-merge-plan.md Part B, the case_map result: an
+ * upcall costs 120 ns, MetaJS data-structure work costs 3.2 us). This body IS
+ * MetaJS data-structure work moving the other way, so it should be a gain, and it
+ * is a small one. Probe: 4,000 calls that each spread a 500-element slice into a
+ * variadic callee - 2,000,000 elements moved - native -exe from
+ * go-to-llvm-ir.abnf, six runs interleaved before/after so drift cannot favour
+ * either:
+ *
+ *     layer 2   27.3 / 28.0 / 27.9 s        floor   26.1 / 26.7 / 27.3 s
+ *
+ * every pair the same way round: about 1.0 s, i.e. 500 ns per element for the
+ * MetaJS body. The floor body does not appear AT ALL in 3,878 `sample` frames of
+ * the after binary, so its own share is under 35 ms for the same 2,000,000
+ * elements - at least 30x, and the case_map ratio is confirmed with its sign
+ * flipped.
+ *
+ * IT IS ONLY 3.7% OF THAT PROGRAM, AND THAT IS THE MORE USEFUL NUMBER. `sample`
+ * says the spread-heaviest Go program one can write is dominated by `scope_get`
+ * and `ar_block` - the VARIADIC CALLEE's own prologue, which packs the 500
+ * arguments back into a slice and is still layer-2 MetaJS in both builds. The
+ * caller-side splice was never the expensive half. A future move should aim
+ * there, not here.
+ *
+ * It does NOT upcall, so the five-file rule the
+ * case_map probe found (js-rt.metajs and lua-rt.metajs must import runtime.metajs,
+ * and tests/coro-poc/gen.ll links the floor with NO layer 2 at all) does not bite
+ * here - but tests/coro-poc/gen.ll is exactly why the body may not call back out.
+ *
+ * The deletions in go-rt.metajs and csharp-rt.metajs are part of THIS change: two
+ * definitions of the name is `ld: duplicate symbol '_js_gospread'`, the general
+ * rule js_bytelen produced eleven lines above. */
+long js_gospread(long args) {
+	long n;
+	long m;
+	long last;
+	long i;
+	if (tag_of(args) != 5) { return 0; }
+	n = arr_len(args);
+	if (n == 0) { return 0; }
+	last = arr_get(args, n - 1);
+	sb(args, n - 1);
+	if (tag_of(last) == 5) {
+		m = arr_len(last);
+		i = 0;
+		while (i < m) { arr_push(args, arr_get(last, i)); i = i + 1; }
+		return 0;
+	}
+	if (is_undef_or_null(last)) { return 0; }
+	arr_push(args, last);
+	return 0;
+}
+
 long js_setret(long v) { RETSLOT = v; return 0; }
 long js_getret(void)   { return RETSLOT; }
 

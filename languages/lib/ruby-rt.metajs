@@ -253,6 +253,20 @@ function rbSplitHi(a) {
 // POWER OF TWO is exact, so each operand is brought down first and the exact
 // product (p1 + e1) is scaled back by the same amount - |p1 * scale| is about |x|,
 // so the scale-back cannot overflow.
+// A zero carrying x's sign. `x * 0` is the obvious spelling AND IT IS WRONG IN
+// THIS DIALECT: the tag engine keeps an integral value as an integer, so
+// `-4 * 0` is the integer 0 and the sign is gone - measured, `1 / (x * 0)` is
+// +Infinity for x = -4, where `1 / (z / (0 - 1))` is -Infinity. Dividing a zero
+// by -1 is a float division in every engine and keeps the sign. zeroSigned in
+// languages/ruby-interpreter.abnf is the same body; abnf/jsrt.go spells it
+// math.Copysign(0, x), which Go has and this dialect does not.
+function rbZeroSign(x) {
+    var z = 0
+    if (x < 0) { return z / (0 - 1) }
+    if (x == 0 && 1 / x < 0) { return z / (0 - 1) }
+    return z
+}
+
 function rbFmaSub(x, q, y) {
     var p = q * y
     if (p !== p) { return x - p }
@@ -376,7 +390,15 @@ function rbNumBin(op, l, r) {
         if (op == "-") { return rbMkFlo(x - y) }
         if (op == "*") { return rbMkFlo(x * y) }
         if (op == "/") { return rbMkFlo(x / y) }
-        if (op == "%") { return rbMkFlo(rbFmaSub(x, Math.floor(x / y), y)) }
+        // Float#% - see rubyFloMod in abnf/jsrt.go. rbFmaSub is the precise form
+        // of `x - floor(x/y)*y`, and it has the divisor's sign but loses a
+        // ZERO's: ruby's flodivmod starts from fmod, whose zero carries the
+        // DIVIDEND's sign, so -4.0 % 2.0 is -0.0. rbZeroSign puts it back.
+        if (op == "%") {
+            var fm = rbFmaSub(x, Math.floor(x / y), y)
+            if (fm == 0) { return rbMkFlo(rbZeroSign(x)) }
+            return rbMkFlo(fm)
+        }
         if (op == "**") { return rbMkFlo(Math.pow(x, y)) }
         fail("Float does not support '" + op + "'")
     }

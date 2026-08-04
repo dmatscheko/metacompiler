@@ -1260,7 +1260,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             v = luaFirst(t())
             var a = toNumV(v)
             if (a === undefined) { fail("attempt to perform arithmetic on a " + luaType(v) + " value") }
-            if (isFlt(a)) { return mkFlt(0 - a.v) }
+            // A FLOAT negates by IEEE sign flip, NOT by `0 - v`: `0 - 0.0` is
+            // +0.0, so `-0.0` and `-(0.0)` used to print 0.0 where lua prints
+            // -0.0. `v * (0 - 1)` is exact for every double - zeros, infinities
+            // and NaN included - and is the same shape the compiled half now
+            // emits (lua_arith MUL by -1 instead of SUB from 0). Beware
+            // `v * 0`: this dialect keeps an integral value as an INTEGER, so
+            // that spelling loses the sign; multiplying by -1 does not.
+            if (isFlt(a)) { return mkFlt(a.v * (0 - 1)) }
             // An integer negates at 64 bits and WRAPS: -math.mininteger is
             // math.mininteger, the one value that is its own negation.
             if (isInt(a)) { return szNeg(a) }

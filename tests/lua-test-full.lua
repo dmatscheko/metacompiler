@@ -276,6 +276,16 @@ function s11()
     check("ift10", "" .. 1e21, "1e+21")
     check("ift11", "" .. 1e100, "1e+100")
     check("ift12", "" .. 1e-7, "1e-07")
+    -- Unary minus on a FLOAT is an IEEE sign flip, not `0 - x`: `0 - 0.0` is
+    -- +0.0, so these three used to print "0.0". The integer -0 stays "0" (lua has
+    -- no negative integer zero), and math.mininteger is its own negation because
+    -- the 64-bit negate WRAPS. lua 5.5.0's own answers.
+    local ift13z = 0.0
+    check("ift13", "" .. -0.0, "-0.0")
+    check("ift14", ("" .. -(0.0)) .. "/" .. ("" .. -ift13z), "-0.0/-0.0")
+    check("ift15", ("" .. -0) .. "/" .. ("" .. -(-2.5)) .. "/" .. ("" .. - "5.5"), "0/2.5/-5.5")
+    check("ift16", -math.mininteger == math.mininteger, true)
+    check("ift17", ("" .. -(1/0)) .. "/" .. ("" .. -(-1/0)), "-inf/inf")
 end
 
 -- ===== SECTION 12: bitwise operators =====

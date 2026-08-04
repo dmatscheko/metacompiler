@@ -14,6 +14,10 @@
 #      program's own checks passed). Ordinary entries must exit 0 on both engines;
 #      the by-design failures (names containing "FAIL", plus the smaller-match-first
 #      and infinite-loop grammar guards) must exit non-zero on both engines.
+#   3. expect-nonzero NATIVE rows: `-exe PATH` only builds, so an entry that names
+#      SHOULD ABORT is built (which must succeed), then the built BINARY is run and
+#      must exit non-zero with the same stderr as the same program under llvm.Run.
+#      That is how the C floor's abort path is reached by a test rather than by hand.
 #
 # It exits 0 iff the whole matrix is green.
 #
@@ -66,7 +70,7 @@ while [ $# -gt 0 ]; do
         --timeout=*)  TIMEOUT="${1#*=}" ;;
         --full)       FULL=1 ;;
         --cross)      CROSS=1 ;;
-        -h|--help)    sed -n '2,48p' "$0"; exit 0 ;;
+        -h|--help)    sed -n '2,53p' "$0"; exit 0 ;;
         *) echo "test.sh: unknown option '$1' (try --help)" >&2; exit 2 ;;
     esac
     shift
@@ -551,9 +555,43 @@ run_entry() {
     case "$name" in *[Ff][Aa][Ii][Ll]*) should_fail=1 ;; esac
     case " ${args[*]} " in *smaller-match-first*|*infinite-loop*) should_fail=1 ;; esac
 
+    # EXPECT-NONZERO NATIVE ROWS. `mec ... -exe PATH` only BUILDS: it links the
+    # binary, prints the path and exits 0, so every -exe entry above asks "does
+    # this link" and nothing else. The three tests/metajs-fail-test*.js programs
+    # are the ones whose whole point is the ABORT, and their native halves were
+    # therefore not run by anything - which is exactly why the C floor's abort
+    # path (werr, die, die2, die3, wstr, o_cstr, class_name) read as untested
+    # while the coverage sweep called it "proved by probe".
+    #
+    # An entry whose name says SHOULD ABORT declares: the BUILD must succeed
+    # (rc 0, so it is NOT a "SHOULD FAIL" entry and the word "fail" must stay out
+    # of its name, or the rule above would demand the opposite), and then the
+    # built BINARY must be run and must exit non-zero.
+    #
+    # And the binary's stderr is compared against the SAME program under
+    # llvm.Run - the Go twin, the same entry minus `-exe PATH`. That is the check
+    # with the teeth: it pins the floor's diagnostic wording to the Go runtime's,
+    # in a place where the two implementations are completely separate code. A
+    # bare "it exited non-zero" would pass on a segfault.
+    local abort_exe=0 exe="" i
+    case "$name" in *"SHOULD ABORT"*) abort_exe=1 ;; esac
+    local twin=()
+    if [ "$abort_exe" -eq 1 ]; then
+        i=0
+        while [ "$i" -lt "${#args[@]}" ]; do
+            if [ "${args[$i]}" = "-exe" ]; then exe="${args[$((i + 1))]}"; i=$((i + 2)); continue; fi
+            twin+=("${args[$i]}"); i=$((i + 1))
+        done
+    fi
+    local ng="$RESDIR/$idx.ng" nf="$RESDIR/$idx.nf" nt="$RESDIR/$idx.nt"
+    local rc_ng=0 rc_nf=0
+
     local rc_g rc_f
     RUN "$BIN" "${args[@]}"          >"$og" 2>"$eg"; rc_g=$?
+    [ "$abort_exe" -eq 1 ] && [ -x "$exe" ] && { RUN "$exe" >/dev/null 2>"$ng"; rc_ng=$?; }
     RUN "$BIN" "${args[@]}" -frozen  >"$of" 2>"$ef"; rc_f=$?
+    [ "$abort_exe" -eq 1 ] && [ -x "$exe" ] && { RUN "$exe" >/dev/null 2>"$nf"; rc_nf=$?; }
+    [ "$abort_exe" -eq 1 ] && RUN "$BIN" "${twin[@]}" >/dev/null 2>"$nt"
 
     local problems=()
     if [ "$should_fail" -eq 1 ]; then
@@ -562,6 +600,23 @@ run_entry() {
     else
         [ "$rc_g" -ne 0 ] && problems+=("goja exit $rc_g")
         [ "$rc_f" -ne 0 ] && problems+=("frozen exit $rc_f")
+    fi
+    if [ "$abort_exe" -eq 1 ]; then
+        if [ -z "$exe" ]; then
+            problems+=("SHOULD ABORT entry with no -exe PATH in its args")
+        elif [ ! -x "$exe" ]; then
+            problems+=("-exe produced no executable at $exe")
+        else
+            [ "$rc_ng" -eq 0 ] && problems+=("the goja-built native binary exited 0 but should abort")
+            [ "$rc_nf" -eq 0 ] && problems+=("the frozen-built native binary exited 0 but should abort")
+            cmp -s "$ng" "$nf" || problems+=("goja-built vs frozen-built native stderr differ")
+            # llvm.Run prefixes its own "  ==> Fail" verdict line, which is the
+            # METACOMPILER reporting that the run returned non-zero, not the
+            # PROGRAM's diagnostic. Everything after it is the diagnostic, and
+            # that is what the floor has to reproduce word for word.
+            grep -v '^  ==> Fail$' "$nt" > "$nt.d"
+            cmp -s "$ng" "$nt.d" || problems+=("native binary stderr differs from llvm.Run's")
+        fi
     fi
     if [ "$has_q" -eq 1 ] && ! cmp -s "$og" "$of"; then
         problems+=("goja vs frozen -q output differ")
@@ -608,7 +663,7 @@ run_entry() {
         printf '%s\n' "$block" > "$RESDIR/$idx.fail"
         printf '%s\n' "$block"
     fi
-    rm -f "$og" "$of" "$eg" "$ef"
+    rm -f "$og" "$of" "$eg" "$ef" "$ng" "$nf" "$nt" "$nt.d"
     [ "$VERBOSE" -eq 0 ] && printf '.' >&2
     return 0
 }

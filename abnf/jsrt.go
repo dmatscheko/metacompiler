@@ -3073,6 +3073,33 @@ func rubyTruthy(v interface{}) bool {
 	return true
 }
 
+// rubyFloMod is Ruby's Float#%. `x - floor(x/y)*y` gets the SIGN OF THE DIVISOR
+// right (-5.0 % 2.0 is 1.0, 5.0 % -2.0 is -1.0) and the SIGN OF A ZERO wrong:
+// ruby's numeric.c flodivmod starts from `fmod`, whose result carries the
+// DIVIDEND's sign, and only adds y when `y*mod < 0` - which cannot fire on a
+// zero mod. So `-4.0 % 2.0` is `-0.0` and `-0.0 % 1.0` is `-0.0`, while
+// -4 - (-4) is +0.0 in IEEE and the sign is lost.
+//
+// A zero result happens exactly when fmod is zero, so restoring the dividend's
+// sign on a zero result is the whole difference. The other two halves -
+// zeroSigned in languages/ruby-interpreter.abnf and rbZeroSign in
+// languages/lib/ruby-rt.metajs - spell that sign as `z / (0 - 1)`, NOT as the
+// obvious `x * 0`: the tag engine keeps an integral value as an integer, so
+// `-4 * 0` is the integer 0 there and the sign is gone. Go is IEEE all the way
+// down and has math.Copysign, so this half says what it means.
+//
+// Settled against ruby 2.6.10p210 - Float#% is unchanged in 3.x - over the 14
+// finite rows of the probe: -0.0 % 1.0 and -4.0 % 2.0 and -4.0 % -2.0 and
+// -7.5 % 2.5 are all -0.0, 4.0 % -2.0 is 0.0, -5.0 % 2.0 is 1.0 and
+// 5.0 % -2.0 is -1.0.
+func rubyFloMod(x, y float64) float64 {
+	m := x - math.Floor(x/y)*y
+	if m == 0 {
+		return math.Copysign(0, x)
+	}
+	return m
+}
+
 // rubyNumBin is one arithmetic step of the numeric tower, mirroring numBin of
 // ruby-interpreter.abnf: both operands promote to the higher rank, Integer / and %
 // FLOOR (-7 / 2 == -4, -7 % 3 == 2) and Integer ** stays exact unless the exponent
@@ -3125,7 +3152,7 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 		case "/":
 			return jsFlo{f: x / y}
 		case "%":
-			return jsFlo{f: x - math.Floor(x/y)*y}
+			return jsFlo{f: rubyFloMod(x, y)}
 		case "**":
 			return jsFlo{f: math.Pow(x, y)}
 		}

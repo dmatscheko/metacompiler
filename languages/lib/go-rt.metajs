@@ -883,17 +883,13 @@ function goDecodeUtf8(bs) {
     return out
 }
 
-// f(xs...): flatten the LAST element of the argument array in place, so the
-// callee sees the slice's elements as separate arguments.
-function js_gospread(args) {
-    if (!Array.isArray(args) || args.length == 0) { return undefined }
-    var last = args.pop()
-    if (Array.isArray(last)) {
-        var i = 0
-        while (i < last.length) { args.push(last[i]); i = i + 1 }
-    } else if (last !== null && last !== undefined) { args.push(last) }
-    return undefined
-}
+// js_gospread is the C FLOOR's now (lib/runtime.c, next to js_bytelen). It was
+// HERE and in csharp-rt.metajs, one specification in two copies; having a copy
+// here as well as in the floor is a duplicate-symbol link error, so the floor
+// body and these two deletions are ONE change. Measured on the way in: 2,000,000
+// spread elements cost about 1.0 s here and under 35 ms in the floor - but only
+// 3.7% of the program, because the VARIADIC CALLEE's prologue, which is still
+// MetaJS, dominates. The numbers are at the floor body.
 
 // The Go range bound: an int is its own bound, otherwise the element/entry count.
 function js_range_len(v) {

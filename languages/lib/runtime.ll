@@ -41701,6 +41701,126 @@ dead705:
 	ret i64 0
 }
 
+define i64 @js_gospread(i64 %0) {
+entry:
+	%1 = alloca i64
+	store i64 %0, i64* %1
+	%2 = alloca i64
+	%3 = alloca i64
+	%4 = alloca i64
+	%5 = alloca i64
+	%6 = load i64, i64* %1
+	%7 = call i64 @tag_of(i64 %6)
+	%8 = sext i32 5 to i64
+	%9 = icmp ne i64 %7, %8
+	%10 = zext i1 %9 to i32
+	%11 = icmp ne i32 %10, 0
+	br i1 %11, label %12, label %14
+
+12:
+	%13 = sext i32 0 to i64
+	ret i64 %13
+
+14:
+	%15 = load i64, i64* %1
+	%16 = call i64 @arr_len(i64 %15)
+	store i64 %16, i64* %2
+	%17 = load i64, i64* %2
+	%18 = sext i32 0 to i64
+	%19 = icmp eq i64 %17, %18
+	%20 = zext i1 %19 to i32
+	%21 = icmp ne i32 %20, 0
+	br i1 %21, label %22, label %24
+
+dead706:
+	br label %14
+
+22:
+	%23 = sext i32 0 to i64
+	ret i64 %23
+
+24:
+	%25 = load i64, i64* %1
+	%26 = load i64, i64* %2
+	%27 = sext i32 1 to i64
+	%28 = sub i64 %26, %27
+	%29 = call i64 @arr_get(i64 %25, i64 %28)
+	store i64 %29, i64* %4
+	%30 = load i64, i64* %1
+	%31 = load i64, i64* %2
+	%32 = sext i32 1 to i64
+	%33 = sub i64 %31, %32
+	%34 = call i32 @sb(i64 %30, i64 %33)
+	%35 = load i64, i64* %4
+	%36 = call i64 @tag_of(i64 %35)
+	%37 = sext i32 5 to i64
+	%38 = icmp eq i64 %36, %37
+	%39 = zext i1 %38 to i32
+	%40 = icmp ne i32 %39, 0
+	br i1 %40, label %41, label %45
+
+dead707:
+	br label %24
+
+41:
+	%42 = load i64, i64* %4
+	%43 = call i64 @arr_len(i64 %42)
+	store i64 %43, i64* %3
+	%44 = sext i32 0 to i64
+	store i64 %44, i64* %5
+	br label %49
+
+45:
+	%46 = load i64, i64* %4
+	%47 = call i32 @is_undef_or_null(i64 %46)
+	%48 = icmp ne i32 %47, 0
+	br i1 %48, label %66, label %68
+
+49:
+	%50 = load i64, i64* %5
+	%51 = load i64, i64* %3
+	%52 = icmp slt i64 %50, %51
+	%53 = zext i1 %52 to i32
+	%54 = icmp ne i32 %53, 0
+	br i1 %54, label %55, label %64
+
+55:
+	%56 = load i64, i64* %1
+	%57 = load i64, i64* %4
+	%58 = load i64, i64* %5
+	%59 = call i64 @arr_get(i64 %57, i64 %58)
+	%60 = call i32 @arr_push(i64 %56, i64 %59)
+	%61 = load i64, i64* %5
+	%62 = sext i32 1 to i64
+	%63 = add i64 %61, %62
+	store i64 %63, i64* %5
+	br label %49
+
+64:
+	%65 = sext i32 0 to i64
+	ret i64 %65
+
+dead708:
+	br label %45
+
+66:
+	%67 = sext i32 0 to i64
+	ret i64 %67
+
+68:
+	%69 = load i64, i64* %1
+	%70 = load i64, i64* %4
+	%71 = call i32 @arr_push(i64 %69, i64 %70)
+	%72 = sext i32 0 to i64
+	ret i64 %72
+
+dead709:
+	br label %68
+
+dead710:
+	ret i64 0
+}
+
 define i64 @js_setret(i64 %0) {
 entry:
 	%1 = alloca i64
@@ -41710,7 +41830,7 @@ entry:
 	%3 = sext i32 0 to i64
 	ret i64 %3
 
-dead706:
+dead711:
 	ret i64 0
 }
 
@@ -41719,7 +41839,7 @@ entry:
 	%0 = load i64, i64* @RETSLOT
 	ret i64 %0
 
-dead707:
+dead712:
 	ret i64 0
 }
 
@@ -41732,7 +41852,7 @@ entry:
 	%4 = call i64 @mk_ctl(i64 %2, i64 %3)
 	ret i64 %4
 
-dead708:
+dead713:
 	ret i64 0
 }
 
@@ -41743,7 +41863,7 @@ entry:
 	%2 = call i64 @mk_ctl(i64 %0, i64 %1)
 	ret i64 %2
 
-dead709:
+dead714:
 	ret i64 0
 }
 
@@ -41754,7 +41874,7 @@ entry:
 	%2 = call i64 @mk_ctl(i64 %0, i64 %1)
 	ret i64 %2
 
-dead710:
+dead715:
 	ret i64 0
 }
 
@@ -41779,10 +41899,10 @@ entry:
 	%12 = sext i32 0 to i64
 	ret i64 %12
 
-dead711:
+dead716:
 	br label %11
 
-dead712:
+dead717:
 	ret i64 0
 }
 
@@ -41807,10 +41927,10 @@ entry:
 	%12 = load i64, i64* @H_UNDEF
 	ret i64 %12
 
-dead713:
+dead718:
 	br label %11
 
-dead714:
+dead719:
 	ret i64 0
 }
 
@@ -43538,10 +43658,10 @@ entry:
 	%184 = trunc i64 %183 to i32
 	ret i32 %184
 
-dead715:
+dead720:
 	br label %181
 
-dead716:
+dead721:
 	ret i32 0
 }
 

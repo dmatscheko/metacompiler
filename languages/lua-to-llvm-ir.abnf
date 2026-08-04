@@ -1320,12 +1320,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ----- Expression thunks: function(block) -> {b, v} -----
 
-    // Unary minus is 0 - x, so it keeps the operand's number subtype and coerces a
-    // string exactly like the binary operator does.
+    // Unary minus is x * -1, which keeps the operand's number subtype and coerces
+    // a string exactly like the binary operator does - and, unlike the `0 - x`
+    // this used to be, keeps a ZERO's SIGN: `0 - 0.0` is +0.0 in IEEE, so
+    // `-0.0` and `-(0.0)` printed 0.0 where lua prints -0.0. On the integer side
+    // MUL by -1 is the same 64-bit wrapping negation SUB was, math.mininteger
+    // (its own negation) included, because i64Mul wraps.
+    //
+    // The reason this was recorded and not fixed before was that changing SUB to
+    // MUL would send a TABLE operand to __mul instead of __sub. THAT OBJECTION IS
+    // VOID HERE: metatables are not in the subset at all - `setmetatable` is not
+    // bound in either half (this grammar and lua-interpreter.abnf, whose header
+    // says so at line 28), so a table operand reaches no metamethod by either
+    // spelling and simply fails with "attempt to perform arithmetic on a table
+    // value". Whichever half implements metatables first must implement __unm
+    // with it; neither operator is the right one for that.
     makeNeg = function(t) {
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: callLua(r.b, "lua_arith", [handle(1), emitNum(r.b, 0), r.v])}
+            return {b: r.b, v: callLua(r.b, "lua_arith", [handle(2), r.v, emitNum(r.b, 0 - 1)])}
         }
     }
     // not v: true exactly when v is falsy.
