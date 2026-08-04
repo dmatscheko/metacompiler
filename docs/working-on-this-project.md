@@ -276,27 +276,28 @@ Verified at `ee51718`. The authoritative per-item write-ups are in
    `runtime.metajs` already exports `js_char` for a *different contract* — and both
    sites now cross-reference each other.
 4. **kotlin carries the whole of `regex.js` verbatim** — 51 of 57 functions
-   byte-identical, 1,217 lines, zero divergences. ~~+18-23%~~ **+10.7% measured
-   properly** (the first figure was wall clock on a loaded machine). ~~The open
-   question is whether the tax tracks DATA size or CODE size.~~ **ANSWERED
-   (`098db61`): NEITHER. It tracks top-level DECLARATIONS, and it is not the
-   collector** - it is `scope_find` (`runtime.c:2755`), a linear scan of the module
-   scope. 244x the code at a fixed declaration count costs the same to 0.01%, with
-   byte-identical `live`. And `import` **PREPENDS**, so an imported body also delays
-   every hit:
+   byte-identical, 1,217 lines, zero divergences. ~~+18-23%~~ ~~+10.7%~~ — and
+   ~~the tax tracks top-level DECLARATIONS~~ **THE TAX IS GONE.** `scope_find`
+   (`runtime.c`) has a hash index since 2026-08-04, and the declaration-index
+   curve that governed every merge decision in this project is now flat:
 
    ```
-   0.13% per top-level declaration added        (lengthens every miss)
-   0.11% per declaration if placed FIRST        (delays every hit)
-   = 0.24% per declaration for an IMPORTED body
-   + 0.2% per 100 lines of layout;  0 per byte of live data
+   regex block at HEAD placement      before 30.970 G      after 18.023 G
+   relocated to declaration index 0          33.399 G  +7.8%      17.923 G  -0.6%
+   import runtime.metajs APPENDED            44.131 G +42.5%      18.130 G  +0.6%
    ```
 
-   **Size a shared body in DECLARATIONS, never lines.** <=10 decls (~2.4%): merge.
-   >40 (~10%): do not import it into a language that cannot call it. A
-   `runtime-regex.metajs` split would NOT have helped; no split was written.
-   Corollary: decimal+bignum cost **+2.2%**, not the +7-11% recorded earlier, so the
-   small pairs declined by the shape pass were declined on a number ~4x too big.
+   **The rule is: there is no rule. A shared layer-2 body costs a language that
+   cannot call it 0%, at either end of the module.** Size it however you like.
+   Two consequences: the `runtime-decimal` / `runtime-bignum` / `runtime-jvm` /
+   `runtime-dartswift` splits exist for a reason that no longer holds, and every
+   small pair the shape pass declined on this tax is worth re-opening. The
+   `runtime-regex.metajs` split is a live question again for the first time
+   (~1.1% for the six bodies kotlin omits, and nothing for placement).
+
+   **Note what `import` APPENDING measured before the index landed: +42.5%, a
+   LOSS.** What a declaration's index costs is not how many declarations precede
+   a body — it is where the HOT ones sit, and `runtime.metajs` holds `js_jadd`.
 
    **Measure with `/usr/bin/time -l` instructions retired, not wall clock.** With
    agents running, a 40k-iteration loop varies +-8% between runs of the same binary;
@@ -361,22 +362,27 @@ archaeology exercise.
 locals, ASI differences: each is discovered by a confusing failure. A `-verify` pass
 over `lib/*.metajs` that names them would pay for itself immediately.
 
-**0. `scope_find` is the single hottest line in the runtime, and nobody had looked.**
-Measured 2026-08-04 (`098db61`): on a kotlin loop, the *collector* is 5.09 G of 30.5 G
-instructions and `scope_find` (`runtime.c:2755`) — a **linear scan of the module
-scope** — is worth more than that. Two changes follow directly, and both are cheap:
+**0. ~~`scope_find` is the single hottest line in the runtime~~ — DONE, 2026-08-04.**
+It has a hash index now (an open-addressed `index + 1` table in a fourth part of the
+scope's single buffer block, built at 32 entries and up, keyed on a content hash
+memoised in the string cell's unused field `f`). Nine languages run **20–42% fewer
+instructions**: python −42.0, kotlin −40.9, ruby −39.4, swift −33.8, php −32.4,
+go −30.1, java −29.7, dart −28.7, typescript −28.5, js −26.5, csharp −19.5. `c` is
+the control at −0.1%.
 
-- **Make `import` APPEND rather than PREPEND.** It currently prepends the imported
-  file's declarations to `jsrun`, so every imported body delays every scope hit for
-  the whole program. Measured: the same regex text at declaration index 0 costs
-  +9.3%, at index 150 it costs **−0.1%**. This one change would drop kotlin's
-  `regex.js` import from +10.7% to ~+1.1% AND zero the cost of the
-  decimal/bignum/jvm/dartswift splits.
-- **Give `scope_find` a hash index.** It is the mutator's largest single cost and it
-  is a linear scan.
+**lua is +4.1% and metajs +0.4%, and that is not the hashing.** Their module scopes
+are too small to be indexed at all; the cost is that a second arm makes `scope_find`
+too big for clang to inline into `scope_get`/`scope_put`/`js_tdecl`. A branch that
+can never fire already costs lua +2.8%. Two ways of buying it back were measured and
+are worse (out-of-line arm +4.7%, name-in-slot +6.1%); both are recorded at the site.
 
-Do these before any further merge work — they change the arithmetic of every
-shared-body decision in §7.
+The *other* half of this item — **making `import` APPEND** — was executed and is a
+**LOSS of +42.5%**, reverted, and written up at the `ImportStmt` rule in
+`metajs-to-llvm-ir.abnf` so it is not attempted a third time.
+
+**What is now the hottest line, nobody has looked.** `sample` on the lua and kotlin
+native binaries is the tool; `ar_block`, `js_str_mem` and `obj_find` are the names
+that came up while this was being measured.
 
 **8. Per-language coverage of the floor.** The instrumentation that found 24
 unreached floor bodies was written once and thrown away. Keeping it as

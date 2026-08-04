@@ -63,6 +63,19 @@ Statement   <~~ push(stmtPos(pop())) ~~>
 // import "./mod.js"; loads the referenced file (resolveImport -> core.importFile). Its
 // top-level declarations are stashed by buildMain (importDepth > 0) and prepended to jsrun,
 // so they register in the shared program scope before the main program's statements.
+//
+// APPENDING INSTEAD WAS MEASURED AND IS A LOSS - do not "fix" this ordering.
+// docs/runtime-merge-plan.md predicted a large win from it, on the model that a
+// declaration at index 0 delays every later lookup in runtime.c's linear scope_find.
+// The model is incomplete: what the index costs is not the number of declarations that
+// precede a body, it is where the HOT declarations sit. kotlin-rt.metajs imports
+// runtime.metajs, whose 19 declarations include js_jadd - kotlin's `+`. Prepended they
+// sit at index 0..18 of a 461-entry module scope; appended they sit at 442..460, and
+// every `+` in the program scans the whole array to find one. Measured (kotlin,
+// 40,000 x `s = s + i % 7`, native -exe, instructions retired, min of three):
+// 30.970 G prepended, 44.131 G appended, +42.5%, with byte-identical GC stats.
+// The ordering question is settled properly by the hash index on scope_find
+// (runtime.c), which makes position cost nothing either way.
 ImportStmt  <~~ push(metajsImport(takeAll(), up.pos)) ~~>
             = KwImport ModPath [ ";" ] ;
 ModPath     = ModDq | ModSq ;
@@ -931,6 +944,8 @@ KwDefault   = "default" KwEnd ;
         var b = f.NewBlock("entry")
         curScopeV = f.Params[0]
         callExt(b, "js_setret", [hUndef]) // A program without expression statements completes with undefined.
+        // The imported files' top level goes FIRST. Flipping it to APPEND was measured
+        // and is a LOSS - see the note at the ImportStmt rule.
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(callExt(b, "js_getret", []))

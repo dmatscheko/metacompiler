@@ -2715,11 +2715,80 @@ long jf_abs(long v) {
 
 /* ---------------------------------------------------------------- scopes - */
 
+/* A string's CONTENT hash, memoised in the cell's field f.
+ *
+ * A string uses a = bytes, b = byte length, c = the UTF-16 unit buffer, d = the
+ * unit count and e = the unit kind; f is unused, and gc_trace's tag-4 arm only
+ * ever looks at a and c, so a raw long parked in f is invisible to the
+ * collector. Memoising matters because the caller is scope_find: a name is
+ * hashed once per string CELL for the life of the program, and every module-scope
+ * lookup after that is a load.
+ *
+ * It has to be a CONTENT hash, not the handle. js_str_mem interns one cell per
+ * literal ADDRESS, so within one module every occurrence of a name is the same
+ * handle - but a native build links TWO modules (the program and lib/<lang>-rt.ll),
+ * and the same name spelled in both has two different cells. str_eq compares
+ * bytes for exactly that reason, and so must this.
+ *
+ * FNV-1a, kept inside 32 bits so the value does not depend on how the multiply
+ * overflows, and forced non-zero so that 0 can stay the "not computed" marker. */
+long str_hash(long h) {
+	long v = ff(h);
+	const char *p;
+	long n;
+	long i = 0;
+	if (v != 0) { return v; }
+	p = str_ptr(h);
+	n = str_len(h);
+	v = 2166136261;
+	while (i < n) {
+		v = ((v ^ ((long)p[i] & 255)) * 16777619) & 4294967295;
+		i = i + 1;
+	}
+	if (v == 0) { v = 1; }
+	sf(h, v);
+	return v;
+}
+
 /* A scope cell: a = names buffer (string handles), b = values buffer,
  * c = type-class buffer, d = count, e = capacity, f = parent handle (0 at the
  * root). Handle 0 as a scope argument means the ROOT scope, matching
  * abnf/jsrt.go's scopeOf. */
 long G_ROOT;
+
+/* How many extra words of hash table a scope of capacity `cap` carries, 0 for
+ * none: an open-addressed table of 2*cap slots, each holding an entry's index
+ * plus one, so a 0 means empty.
+ *
+ * SMALL SCOPES ARE DELIBERATELY NOT INDEXED. A call or block scope holds a
+ * handful of names, is allocated by the million, and its whole name array is one
+ * or two cache lines - a scan of it is already as fast as a hash probe. What the
+ * index is for is the MODULE scope: hundreds of entries, searched by every
+ * global reference in the program, and it stops growing after boot.
+ *
+ * cap is always 0 or a power of two >= 4 (scope_put doubles from 4), so the slot
+ * count is a power of two and the mask below is exact. Two slots per capacity
+ * word keeps the load factor at or below 1/2, which is also what guarantees the
+ * probe loop terminates: there is always an empty slot.
+ *
+ * A FATTER SLOT WAS TRIED AND IS WORSE. Carrying the name handle beside the
+ * index makes a hit one memory access instead of two (the slot, then
+ * names[idx]), which looked like the reason a small module lost. Measured: lua
+ * +6.1% against +3.9%, kotlin -40.4% against -42.1%. */
+long scope_hwords(long cap) {
+	if (cap < 32) { return 0; }
+	return cap * 2;
+}
+
+/* Put entry `idx` into the table that follows the three cap-sized thirds of the
+ * block. */
+void scope_hput(long *names, long cap, long idx) {
+	long *tab = names + cap * 3;
+	long m = cap * 2 - 1;
+	long slot = str_hash(names[idx]) & m;
+	while (tab[slot] != 0) { slot = (slot + 1) & m; }
+	tab[slot] = idx + 1;
+}
 
 /* Capacity 4, not 8. A scope is allocated on EVERY function call, so its size is
  * the per-call cost - and it was the growth rate of a long-running program too
@@ -2752,10 +2821,52 @@ long mk_scope(long parent) {
 }
 long scope_of(long h) { if (h == 0) { return G_ROOT; } return h; }
 
+/* THE HOTTEST LOOP IN THE RUNTIME. Every global reference in every one of the
+ * sixteen languages ends here, and until the hash arm it was a LINEAR SCAN of
+ * the module scope: 461 entries for a kotlin program, walked by every `+`.
+ * Measured on kotlin (40,000 x `s = s + i %% 7`, native -exe, instructions
+ * retired) the whole collector was 5.09 G of 30.5 G and this scan was worth more
+ * - and it made the POSITION of a declaration matter, which is what
+ * docs/runtime-merge-plan.md's "live-body tax" turned out to be.
+ *
+ * The answer is unchanged in every case: the table indexes the same array and
+ * the winner is still the FIRST matching entry, because scope_put never inserts
+ * a duplicate (it assigns instead) and nothing ever removes an entry, so at most
+ * one index in the table can match. js_scope_get / scopeHas / js_scope_has
+ * therefore see exactly what they saw before.
+ *
+ * The arm is chosen on n, which the linear scan needs anyway, and NOT on the
+ * capacity: reading fe(s) here as well is another load on the path every small
+ * scope takes, and it measured (lua +2.5% for that alone). n <= cap and cap is a
+ * power of two, so n >= 32 guarantees cap >= 32 and therefore that scope_hwords
+ * gave this scope a table.
+ *
+ * THE ARM IS NOT FREE FOR A LANGUAGE THAT CANNOT USE IT, and the reason is
+ * inlining. At HEAD this function is small enough that clang inlines it into
+ * scope_get, scope_put and js_tdecl; a second arm makes it too big, and lua -
+ * whose 84-declaration module scope is the smallest of the sixteen and whose
+ * benchmark is dominated by SMALL scopes - pays +3.9%. Isolated: a bare
+ * `if (n >= 1000000) return <call>` that never fires already costs it +2.8%, so
+ * it is the shape of the function and not the hashing. Splitting the arm into
+ * its own function was measured and is WORSE (+4.7%), as is carrying the name
+ * handle in the slot (+6.1%). It is kept because the other side of the trade is
+ * -41% on python, ruby and kotlin. */
 long scope_find(long s, long name) {
 	long *names = (long *)fa(s);
 	long n = fd(s);
 	long i = 0;
+	if (n >= 32) {
+		long cap = fe(s);
+		long *tab = names + cap * 3;
+		long m = cap * 2 - 1;
+		long slot = str_hash(name) & m;
+		while (tab[slot] != 0) {
+			long idx = tab[slot] - 1;
+			if (str_eq(names[idx], name)) { return idx; }
+			slot = (slot + 1) & m;
+		}
+		return -1;
+	}
 	while (i < n) { if (str_eq(names[i], name)) { return i; } i = i + 1; }
 	return -1;
 }
@@ -2769,10 +2880,14 @@ void scope_put(long s, long name, long v) {
 	if (i >= 0) { vals[i] = v; return; }
 	if (n >= cap) {
 		long nc = cap * 2;
+		long hc;
 		long *base;
 		long k = 0;
 		if (nc < 4) { nc = 4; }
-		base = buf_new(nc * 3);
+		hc = scope_hwords(nc);
+		/* One allocation for all four arrays. buf_new zeroes, so the table
+		 * arrives empty; nothing else may allocate before the store below. */
+		base = buf_new(nc * 3 + hc);
 		while (k < n) {
 			base[k] = names[k];
 			base[nc + k] = vals[k];
@@ -2786,11 +2901,20 @@ void scope_put(long s, long name, long v) {
 		sb(s, (long)vals);
 		sc(s, (long)tcs);
 		se(s, nc);
+		cap = nc;
+		/* The table is rebuilt from scratch on every growth - the slot of an
+		 * entry depends on the mask, so the old one cannot be copied. It is
+		 * amortised: doubling makes this O(n) total over the scope's life. */
+		if (hc != 0) { k = 0; while (k < n) { scope_hput(names, cap, k); k = k + 1; } }
 	}
 	names[n] = name;
 	vals[n] = v;
 	tcs[n] = 0;
 	sd(s, n + 1);
+	/* Spelled out rather than through scope_hwords: this runs on EVERY
+	 * declaration in every scope in the program, and the overwhelming majority
+	 * of them are small ones that have no table. */
+	if (cap >= 32) { scope_hput(names, cap, n); }
 }
 void scope_pin(long s, long i, long tc) { long *tcs = (long *)fc(s); tcs[i] = tc; }
 long scope_tc(long s, long i) { long *tcs = (long *)fc(s); return tcs[i]; }

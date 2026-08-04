@@ -863,6 +863,13 @@ x 8 bytes = 12,288 bytes in one step), which is a step, not a slope.
 
 ### THE RULE, so the next person does not re-measure
 
+> **THIS RULE IS DEAD. `scope_find` now has a hash index (2026-08-04) and the
+> declaration tax it measures is GONE — every coefficient below is 0 to within
+> the noise floor. It is kept because the reasoning that produced it is right
+> and because the section after next re-measures each row. Do not size a shared
+> body in declarations any more; size it in whatever you like, because a
+> layer-2 body a language cannot call now costs that language nothing.**
+
 **A shared layer-2 body taxes a non-calling importer by roughly**
 
 ```
@@ -919,6 +926,129 @@ is not worth 1.1% of every kotlin program.
 Until one of those lands, the two texts stay in step BY HAND; the shape scan in
 `kotlin-rt.metajs` at the copy is how to check that a change to `lib/regex.js`
 arrived here too.
+
+### BOTH OF THOSE WERE TRIED. ITEM 2 LANDED AND ENDS THE TAX; ITEM 1 IS A LOSS
+
+Same harness throughout: kotlin, `40,000 x s = s + i % 7`, native `-exe`,
+`/usr/bin/time -l` **instructions retired**, min of three, and every comparison
+against a clean `git archive 85f3409` build in its own tree (the manual's §4 trap:
+`mec` reads the grammar from the path you give it, so an old binary run in this
+repo uses THIS repo's grammar).
+
+#### Item 1, `import` APPENDING: measured, and it is a LOSS of +42.5%
+
+The prediction above is wrong, and the reason is worth more than the change would
+have been. **What a declaration's index costs is not how many declarations
+precede a body - it is where the HOT declarations sit.** `kotlin-rt.metajs`
+imports `runtime.metajs`, whose 19 declarations include **`js_jadd`, kotlin's
+`+`**. Prepended they sit at index 0..18 of a 461-entry module scope and every
+`+` in the program finds one almost immediately; appended they sit at 442..460
+and every `+` scans the whole array to get there.
+
+```
+                                  instructions   vs prepend   live      heap
+import PREPENDED (HEAD)             30.970 G         --       222,080   9,465,728
+import APPENDED                     44.131 G       +42.5%     222,080   9,465,728
+```
+
+`MEC_GC_STATS` is **byte-identical** in both rows, so all of it is mutator work
+in `scope_find`, exactly as the section above says - the model of WHICH work was
+just backwards. The flip is also semantically observable (MetaJS does not hoist,
+so a main-file top-level statement calling an imported function would now run
+before its declaration), which was the risk the deliverable asked about; it is
+moot, because the ordering is reverted. `metajs-to-llvm-ir.abnf`'s `ImportStmt`
+rule now records this so nobody "fixes" the order again.
+
+#### Item 2, the hash index on `scope_find`: LANDED, and it is 20-42% off nine languages
+
+`runtime.c`'s scope cell already packs names, values and type classes into the
+three thirds of ONE block. It now carries a fourth part: an open-addressed table
+of `2*cap` slots holding `index + 1`, built only for a scope of 32 entries or
+more, rebuilt on every capacity doubling, and reachable from exactly where the
+names buffer already was - so the conservative collector needs no change and
+`MEC_GC=stress` is clean. The name's hash is FNV-1a over its BYTES (two modules
+are linked in a native build, so the same name is two different interned cells),
+memoised in the string cell's field `f`, which nothing else uses and `gc_trace`'s
+tag-4 arm never reads.
+
+Semantics do not move: `scope_put` never inserts a duplicate and nothing ever
+removes an entry, so at most one index can match and the answer is the same one
+the scan gave. `js_scope_get` / `scopeHas` / `js_scope_has` are unchanged.
+
+The same loop in each language, native `-exe`, against the same clean base:
+
+```
+  python      133.928 G -> 77.683 G   -42.0%      lua      7.982 G -> 8.308 G  +4.1%
+  kotlin       30.502 G -> 18.013 G   -40.9%      metajs   1.198 G -> 1.203 G  +0.4%
+  ruby         25.675 G -> 15.549 G   -39.4%      c       11.04  M -> 11.03 M  -0.1%
+  swift        15.062 G ->  9.965 G   -33.8%
+  php          30.111 G -> 20.366 G   -32.4%
+  go            2.990 G ->  2.090 G   -30.1%
+  java         36.562 G -> 25.702 G   -29.7%
+  typescript    4.577 G ->  3.274 G   -28.5%
+  dart         13.271 G ->  9.466 G   -28.7%
+  js            4.577 G ->  3.363 G   -26.5%
+  csharp       63.628 G -> 51.190 G   -19.5%
+```
+
+`c` is self-contained IR with no scopes at all and is the control.
+
+**lua is a real regression and it is NOT the hashing.** lua's 84-declaration
+module scope is the smallest of the sixteen and its benchmark is dominated by
+SMALL scopes. Isolated by building a runtime whose index can never fire: a bare
+`if (n >= 1000000) return <call>` added to `scope_find` already costs lua
+**+2.8%**, because at HEAD that function is small enough for clang to inline into
+`scope_get`, `scope_put` and `js_tdecl`, and a second arm makes it too big.
+`sample` on a 4M-iteration lua loop puts 33.5% of the profile in the scope family
+against 23% before, with the extra samples on the LINEAR path. Two attempts to
+buy it back were measured and are worse, and both are recorded at the site:
+splitting the arm into its own function costs lua **+4.7%**, and carrying the
+name handle beside the index in a two-word slot costs **+6.1%** (and kotlin
+-40.4% instead of -42.1%). It is kept at +4.1% for lua and +0.4% for metajs
+against -20 to -42% for the other nine.
+
+#### The declaration-index curve, RE-MEASURED - the tax is gone
+
+The experiment the rule was built on, repeated on the shipped runtime: relocate
+kotlin's 1,489-line verbatim `regex.js` block, changing nothing else.
+
+```
+                                    before (85f3409)      after the hash index
+regex block at HEAD placement          30.970 G                18.023 G
+regex block at declaration index 0     33.399 G   +7.8%        17.923 G   -0.6%
+import runtime.metajs APPENDED         44.131 G  +42.5%        18.130 G   +0.6%
+```
+
+**Placement is now +-0.6%, which is the noise floor of the harness.** Every
+coefficient in "THE RULE" is 0:
+
+```
+    0%  per top-level declaration it adds
+  + 0%  per top-level declaration if PLACED FIRST
+  + 0%  for an IMPORTED body, whichever end it lands at
+  + the same ~0.2% per 100 lines of layout, which was never the collector either
+```
+
+**What follows for the merge decisions this document made on the old arithmetic.**
+
+- The `runtime-decimal` / `runtime-bignum` / `runtime-jvm` / `runtime-dartswift`
+  splits cost their non-callers **nothing**. They can be merged back into
+  `runtime.metajs` whenever that is the tidier shape; the reason they were split
+  no longer exists.
+- **The small pairs the third pass declined on the live-body tax were declined on
+  a number that is now zero.** Every one of them is worth re-opening.
+- **kotlin's verbatim `regex.js` copy: the case for a `runtime-regex.metajs`
+  split is now open, and this is the third time of asking.** The +9.5% that
+  declined it was placement, and placement is free; what is left is the +1.1% the
+  six extra bodies cost, measured before the index and worth re-measuring after
+  it. 1,217 lines of hand-synchronised duplication against ~1% is a judgement
+  call rather than an obvious no - which is a different answer from the one this
+  document has given twice. NOT executed here: it is a `kotlin-rt.metajs` change
+  and this round owned `runtime.c`.
+
+The `scope_find` scan is no longer the mutator's biggest line. Whatever is
+now, nobody has looked - `sample` on the lua and kotlin binaries is how to find
+out, and `ar_block`, `js_str_mem` and `obj_find` are the names that came up.
 
 ### THE DEFECT: `long == double` was false in BOTH COMPILER ENGINES, in TWO
 ### languages, while both INTERPRETER halves were right
