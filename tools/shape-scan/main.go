@@ -124,9 +124,48 @@ func normalise(src string) string {
 	return strings.Join(strings.Fields(out.String()), " ")
 }
 
+// braceDelta counts { and } on one line, skipping anything inside a string
+// literal or a comment. Counting raw bytes instead is not good enough: a `"{"`
+// in a format string or a `}` in a comment would end the function early.
+func braceDelta(line string) int {
+	d, i, n := 0, 0, len(line)
+	for i < n {
+		c := line[i]
+		switch {
+		case c == '/' && i+1 < n && line[i+1] == '/':
+			return d
+		case c == '"' || c == '\'':
+			q := c
+			i++
+			for i < n && line[i] != q {
+				if line[i] == '\\' {
+					i++
+				}
+				i++
+			}
+			i++
+		case c == '{':
+			d++
+			i++
+		case c == '}':
+			d--
+			i++
+		default:
+			i++
+		}
+	}
+	return d
+}
+
 // collect pulls every top-level `function name(...) { ... }` out of one file.
 // Top-level means column 0, which is how every lib/*.metajs is written; a nested
 // function is part of its parent's body and is normalised with it.
+//
+// The end of a function is found by BRACE COUNTING, not by looking for a `}` in
+// column 0. The house style mostly puts one there, but the one-line form
+// `function k1I32(v) { return ktNorm(k1Val(v), 32, 0) }` does not - and scanning
+// for the next column-0 brace made that swallow the following 1,800 lines and
+// report a group of three "identical" bodies of 6, 35 and 41 lines.
 func collect(path string) ([]body, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -144,15 +183,27 @@ func collect(path string) ([]body, error) {
 			continue
 		}
 		name := strings.TrimSpace(lines[i][len("function "):open])
-		// Walk to the closing brace at column 0, which the house style guarantees.
-		j := i + 1
-		for j < len(lines) && !strings.HasPrefix(lines[j], "}") {
+		depth := braceDelta(lines[i])
+		j := i
+		for depth > 0 && j+1 < len(lines) {
 			j++
+			depth += braceDelta(lines[j])
 		}
-		if j >= len(lines) {
-			continue
+		if depth != 0 {
+			continue // unbalanced: not something to reason about
 		}
-		text := strings.Join(lines[i+1:j], "\n")
+		// The body is everything between the header and the closing line. For a
+		// one-liner that is empty, so it contributes no shape - which is right:
+		// there is nothing there to be duplicated.
+		var text string
+		if j == i {
+			// One-liner: the body is whatever sits between the outermost braces.
+			if a, b := strings.Index(lines[i], "{"), strings.LastIndex(lines[i], "}"); a >= 0 && b > a {
+				text = lines[i][a+1 : b]
+			}
+		} else {
+			text = strings.Join(lines[i+1:j], "\n")
+		}
 		out = append(out, body{
 			file: filepath.Base(path), name: name, line: i + 1,
 			lines: j - i + 1, norm: normalise(text),
