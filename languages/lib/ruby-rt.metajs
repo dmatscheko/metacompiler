@@ -390,13 +390,16 @@ function rbNumBin(op, l, r) {
         if (op == "-") { return rbMkFlo(x - y) }
         if (op == "*") { return rbMkFlo(x * y) }
         if (op == "/") { return rbMkFlo(x / y) }
-        // Float#% - see rubyFloMod in abnf/jsrt.go. rbFmaSub is the precise form
-        // of `x - floor(x/y)*y`, and it has the divisor's sign but loses a
-        // ZERO's: ruby's flodivmod starts from fmod, whose zero carries the
-        // DIVIDEND's sign, so -4.0 % 2.0 is -0.0. rbZeroSign puts it back.
+        // Float#% - see rubyFloMod in abnf/jsrt.go. Ruby's flodivmod IS
+        // `mod = fmod(x, y); if (y*mod < 0) mod += y`, so this is that body
+        // verbatim; `x - floor(x/y)*y` was an approximation of it that lost
+        // every digit once floor(x/y)*y stopped being exact. rbZeroSign puts
+        // back the DIVIDEND's sign that fmod's zero carries and the tag engine
+        // drops.
         if (op == "%") {
-            var fm = rbFmaSub(x, Math.floor(x / y), y)
+            var fm = x % y
             if (fm == 0) { return rbMkFlo(rbZeroSign(x)) }
+            if (y * fm < 0) { return rbMkFlo(fm + y) }
             return rbMkFlo(fm)
         }
         if (op == "**") { return rbMkFlo(Math.pow(x, y)) }

@@ -414,12 +414,63 @@ function pyStr(v) {
             return d + "}"
         }
     }
+    var ic = pyInstClassOf(v)
+    if (ic !== null && ic !== undefined) { return pyUserRender(v, ic, false) }
     return pyToStr(v)
 }
 
 function pyRepr(v) {
     if (typeof v == "string") { return "'" + v + "'" }
+    var rc = pyInstClassOf(v)
+    if (rc !== null && rc !== undefined) { return pyUserRender(v, rc, true) }
     return pyStr(v)
+}
+
+// pyUserRender renders a USER INSTANCE. This half had no such arm at all, so a
+// class with a __repr__ printed [object Object] under llvm.Run and the native
+// binary where the interpreter and CPython print V(3). It is pyUserRender in
+// languages/python-interpreter.abnf and rt.pyUserRender in abnf/jsrt.go, one for
+// one: str() and print() prefer __str__ and fall back to __repr__, repr() and
+// every CONTAINER element use __repr__ only, an exception falls back to
+// Name(args...), and the <Name object> default omits CPython's `at 0x...`
+// address, which no engine here can reproduce.
+function pyUserRender(v, cls, wantRepr) {
+    if (!wantRepr) {
+        if (pyLookupHas(cls, "__str__")) {
+            var g = pyLookupVal(cls, "__str__")
+            if (pyIsCallable(g)) { return pyToStr(pyCallSelf(g, v, [])) }
+        }
+        // BaseException.__str__, which an exception INHERITS and which therefore
+        // beats a __repr__ the class also defines: no args is "", one arg is
+        // str(that arg), more is the args TUPLE's repr.
+        var ea = v["args"]
+        if (Array.isArray(ea)) {
+            if (ea.length == 0) { return "" }
+            if (ea.length == 1) { return pyStr(ea[0]) }
+            var oe = "("
+            for (var q = 0; q < ea.length; q++) {
+                if (q > 0) { oe = oe + ", " }
+                oe = oe + pyRepr(ea[q])
+            }
+            return oe + ")"
+        }
+    }
+    if (pyLookupHas(cls, "__repr__")) {
+        var f = pyLookupVal(cls, "__repr__")
+        if (pyIsCallable(f)) { return pyToStr(pyCallSelf(f, v, [])) }
+    }
+    var nm = cls["__name"]
+    if (typeof nm != "string") { nm = "object" }
+    var ar = v["args"]
+    if (Array.isArray(ar)) {
+        var out = nm + "("
+        for (var i = 0; i < ar.length; i++) {
+            if (i > 0) { out = out + ", " }
+            out = out + pyRepr(ar[i])
+        }
+        return out + ")"
+    }
+    return "<" + nm + " object>"
 }
 
 // abnf/jsrt.go's pyTypeName (9324). A __pybig is an int, which is why the arm is
@@ -1224,6 +1275,101 @@ function pyABigEqFloat(x, f) {
 // be bigs - a big meeting a double falls back to the double path, where the big
 // converts to NaN. Answers null for "not applicable", never a value, so the
 // caller can tell it apart from a legitimate result.
+// Go: pyBigOperand (jsrt.go). An exact bignum for a Python int operand: a big as
+// itself, an integral double inside the exactly representable range as itself,
+// a bool as 0/1. A float box, a non-integral double and anything past 2^53 - where
+// the double is ALREADY an approximation - answer null, so the caller falls back
+// to the double path rather than inventing precision the operand never had.
+function pyABigOperand(v) {
+    if (pyIsBig(v)) { return v }
+    if (typeof v == "boolean") {
+        if (v) { return pyABigFromNum(1) }
+        return pyABigFromNum(0)
+    }
+    if (typeof v == "number") {
+        if (v == Math.trunc(v) && Math.abs(v) <= 9007199254740992) { return pyABigFromNum(v) }
+    }
+    return null
+}
+
+// Go: rt.pyBigNarrow, and the interpreter grammar's bigOut. A big that still fits
+// in the exactly representable range comes back as a plain number, so only the
+// values that GENUINELY need arbitrary precision carry the {__pybig} shape.
+// The reconstruction can ROUND when the true value is past 2^53, so the answer is
+// checked by rebuilding the limbs from it - pyABigFromNum is exact, so a mismatch
+// means the double is not the value.
+function pyABigNarrow(x) {
+    var limbs = x["limbs"]
+    if (limbs.length > 4) { return x }
+    var v = 0
+    var i = limbs.length - 1
+    while (i >= 0) {
+        v = v * 10000 + limbs[i]
+        i = i - 1
+    }
+    if (v > 9007199254740992) { return x }
+    if (pyABigCmpMag(pyABigFromNum(v)["limbs"], limbs) != 0) { return x }
+    if (x["neg"]) { return 0 - v }
+    return v
+}
+
+// Go: big.Int.Exp with a nil modulus, and the interpreter grammar's bigPow. The
+// exponent is capped by the caller at 4096, so the linear loop is what both other
+// engines use too.
+function pyABigPow(x, n) {
+    var acc = pyABigFromNum(1)
+    var i = 0
+    while (i < n) {
+        acc = pyABigMul(acc, x)
+        i = i + 1
+    }
+    return acc
+}
+
+// Go: pyBigBin (jsrt.go). Python's integer arithmetic in arbitrary precision.
+// `//` and `%` FLOOR, as Python's do: pyABigQuo/pyABigRem truncate (Go's Quo/Rem),
+// which is not Python's answer for a negative divisor - 1e30 % -7 is -6, not +1.
+// null for an operator with no exact integer form, so the caller falls through to
+// the double path it always had.
+function pyABigBin(op, x, y) {
+    if (op == "+") { return pyABigAdd(x, y) }
+    if (op == "-") { return pyABigSub(x, y) }
+    if (op == "*") { return pyABigMul(x, y) }
+    if (op == "//" || op == "%") {
+        if (pyABigIsZero(y)) { return null } // Let the double path raise the usual error.
+        var q = pyABigQuo(x, y)
+        var rm = pyABigRem(x, y)
+        if (!pyABigIsZero(rm) && rm["neg"] != y["neg"]) {
+            if (op == "//") { return pyABigSub(q, pyABigFromNum(1)) }
+            return pyABigAdd(rm, y)
+        }
+        if (op == "//") { return q }
+        return rm
+    }
+    if (op == "**") {
+        if (y["neg"]) { return null }
+        var e = pyABigNarrow(y)
+        if (typeof e != "number") { return null }
+        if (e > 4096) { return null }
+        return pyABigPow(x, e)
+    }
+    return null
+}
+
+// Go: pyBigPair (jsrt.go). Both operands as exact bignums when AT LEAST ONE is a
+// big and the other is an exact Python int. Python has ONE int type and it is
+// arbitrary precision, so an int operand meeting a big PROMOTES - which is why
+// this is not pyABigArith below, whose ECMAScript-shaped rule (BOTH sides big)
+// the generic externals need.
+function pyABigPair(l, r) {
+    if (!pyIsBig(l) && !pyIsBig(r)) { return null }
+    var x = pyABigOperand(l)
+    if (x === null) { return null }
+    var y = pyABigOperand(r)
+    if (y === null) { return null }
+    return {x: x, y: y}
+}
+
 function pyABigArith(op, l, r) {
     if (!pyIsBig(l)) { return null }
     if (!pyIsBig(r)) { return null }
@@ -1686,6 +1832,27 @@ function js_pybin(opv, l, r) {
     }
     var db = pyADunderBin(op, l, r)
     if (db !== null) { return db["v"] }
+    // An int operand meeting an arbitrary precision int PROMOTES, because Python
+    // has one int type. Without this, 10**30 + 1 was NaN here and exact in the
+    // interpreter, and so were //, % and ** on any big at all. Go: the pyBigPair
+    // arm of js_pybin.
+    var bp = pyABigPair(l, r)
+    if (bp !== null) {
+        var bv = pyABigBin(op, bp["x"], bp["y"])
+        if (bv !== null) { return pyABigNarrow(bv) }
+        // The ORDER comparisons need the same promotion: pyACompare's big arm is
+        // pyABigArith's, so a big meeting a plain int reached pyNum, answered NaN
+        // and made every relation false.
+        if (op == "<" || op == ">" || op == "<=" || op == ">=" || op == "==" || op == "!=") {
+            var bc = pyABigCmp(bp["x"], bp["y"])
+            if (op == "<") { return bc < 0 }
+            if (op == ">") { return bc > 0 }
+            if (op == "<=") { return bc <= 0 }
+            if (op == ">=") { return bc >= 0 }
+            if (op == "==") { return bc == 0 }
+            return bc != 0
+        }
+    }
     if (op == "+") {
         // Two sequences CONCATENATE in Python ([1] + [2] is [1, 2], and bytes
         // are a list of byte numbers here), which is not what jsAdd does.
@@ -1718,14 +1885,24 @@ function js_pybin(opv, l, r) {
     // 4 / 2 is 2.0 and 10**30 / 1 is 1e+30.
     if (op == "/") { return pyMkFlo(pyAToF(l) / pyAToF(r)) }
     if (op == "//") { return pyIntOrFlo(Math.floor(pyNum(l) / pyNum(r)), l, r) }
+    // "fmt" % args is printf-style FORMATTING, not a remainder.
+    if (op == "%" && typeof l == "string") { return pyBPct(l, r) }
     if (op == "%") { return pyIntOrFlo(pyAFloorMod(pyNum(l), pyNum(r)), l, r) }
     // Python's exponentiation. Only js_pybin ever passes this operator, and a
     // user class already had its __pow__ / __rpow__ chance above. int ** NEGATIVE
     // int is a float (2 ** -1 is 0.5); every other pair of ints stays an int.
+    // ...and a Python int is ARBITRARY PRECISION, so 10**30 is
+    // 1000000000000000000000000000000, not the double 1e+30 this used to fold.
+    // pyABigNarrow hands back a plain number whenever it still fits, so nothing
+    // below 2^53 changes shape.
     if (op == "**") {
-        var pw = Math.pow(pyNum(l), pyNum(r))
-        if (pyNum(r) < 0) { return pyMkFlo(pw) }
-        return pyIntOrFlo(pw, l, r)
+        var ex = pyNum(r)
+        if (ex < 0) { return pyMkFlo(Math.pow(pyNum(l), ex)) }
+        if (!pyIsFlo(l) && !pyIsFlo(r) && ex == Math.trunc(ex) && ex <= 4096) {
+            var bl = pyABigOperand(l)
+            if (bl !== null) { return pyABigNarrow(pyABigPow(bl, ex)) }
+        }
+        return pyIntOrFlo(Math.pow(pyNum(l), ex), l, r)
     }
     if (op == "==") { return pyAEqual(l, r) }
     if (op == "!=") { return !pyAEqual(l, r) }
@@ -1770,10 +1947,34 @@ function js_pyint(v) {
     return Math.trunc(pyNum(v))
 }
 
-// Go: js_pyfloat (jsrt.go:7994). A STRING goes through jsParseFloat, which is
-// JavaScript's parseFloat (a PREFIX parse: "1.5abc" is 1.5), not toNumber.
+// float("inf") - CPython's float_from_string accepts "inf", "infinity" and "nan"
+// case-insensitively, with an optional sign, after stripping whitespace.
+// JavaScript's parseFloat accepts "Infinity" and none of the rest, so float("inf")
+// was nan in all three engines. pyStrToF in languages/python-interpreter.abnf is
+// the same body; the whole reasoning, including why the infinity is BUILT with
+// Math.pow(2, 1024) and why only the non-finite spellings are handled, is there.
+function pyStrToF(s) {
+    var t = s.trim()
+    var sign = 1
+    if (t.length > 0 && (t.charAt(0) == "+" || t.charAt(0) == "-")) {
+        if (t.charAt(0) == "-") { sign = 0 - 1 }
+        t = t.slice(1)
+    }
+    var low = t.toLowerCase()
+    if (low == "inf" || low == "infinity") {
+        var inf = Math.pow(2, 1024)
+        if (sign < 0) { return inf / (0 - 1) }
+        return inf
+    }
+    if (low == "nan") { return parseFloat("nan") }
+    return parseFloat(s)
+}
+
+// Go: js_pyfloat (jsrt.go:7994). A STRING goes through pyStrToF, which is
+// JavaScript's parseFloat (a PREFIX parse: "1.5abc" is 1.5) plus CPython's three
+// non-finite spellings, not toNumber.
 function js_pyfloat(v) {
-    if (typeof v == "string") { return pyMkFlo(parseFloat(v)) }
+    if (typeof v == "string") { return pyMkFlo(pyStrToF(v)) }
     return pyMkFlo(pyNum(v))
 }
 
@@ -2308,12 +2509,295 @@ function pyBFixed(x, prec) {
     return (neg ? "-" : "") + body
 }
 
-// Go's strconv.FormatFloat(v, 'e', prec, 64) has NO counterpart here, and that is
-// deliberate: no path in Python's format mini-language reaches the 'e' verb -
-// pyFormatBody has no 'e' or 'g' case, so `{x:e}` falls into the default branch
-// and prints pyStr. A ruby-transferred pyBSci sat here unreachable; the exact
-// decimal it was built on (pyBExactDec / pyBRoundHalfEven) is still here, so the
-// next chunk that needs the 'e' verb re-derives it from those in ten lines.
+// ----- "fmt" % args, CPython's printf-style formatting -----
+//
+// UNIMPLEMENTED in both halves until now: js_pybin's "%" on a string fell into
+// pyAFloorMod and answered NaN. The whole reasoning - what is supported, what
+// fails loudly, and the ARGUMENT TUPLE rule an array has to be read under while a
+// tuple is still a list in this value model - is at rt.pyPct in abnf/jsrt.go.
+// pyPct in languages/python-interpreter.abnf is this same body.
+//
+// The float verbs are where the three halves differ in SPELLING and not in
+// answer: Go says strconv.FormatFloat, and this half (like the interpreter's)
+// builds the same text out of pyBFixed and floPrec - host id 70 of
+// languages/lib/runtime.c, the one lua's formatter already leans on.
+function pyBPctCount(f) {
+    var n = 0
+    var i = 0
+    while (i < f.length) {
+        if (f.charAt(i) == "%") {
+            if (i + 1 < f.length && f.charAt(i + 1) == "%") { i = i + 2 ; continue }
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// A conversion operand as a double, unwrapping the float box and a big.
+function pyBPctNum(v) {
+    if (pyIsFlo(v)) { return v["__flo"] }
+    if (pyIsBig(v)) { return parseFloat(pyABigStr(v)) }
+    return pyNum(v)
+}
+
+// %d: the integer part, and an arbitrary precision int stays exact.
+function pyBPctDigits(v) {
+    if (pyIsBig(v)) { return pyABigStr(v) }
+    return "" + Math.trunc(pyBPctNum(v))
+}
+
+// The base-N digits of an integral value: exact for every magnitude a double holds
+// exactly, and the SAME loop in all three halves (pyBaseStr in
+// languages/python-interpreter.abnf, pyPctRadix in abnf/jsrt.go) - deliberately
+// not pyBBaseStr, whose int64 SATURATION only the {:x} format spec wants.
+function pyBPctRadix(v, base, upper) {
+    var n = Math.trunc(pyBPctNum(v))
+    if (n !== n) { n = 0 }
+    if (n == 0) { return "0" }
+    var neg = n < 0
+    if (neg) { n = 0 - n }
+    var out = ""
+    while (n > 0) {
+        var q = Math.floor(n / base)
+        out = "0123456789abcdefghijklmnopqrstuvwxyz".charAt(n - q * base) + out
+        n = q
+    }
+    if (upper) { out = out.toUpperCase() }
+    if (neg) { return "-" + out }
+    return out
+}
+
+// %g strips the trailing zeros of the mantissa in BOTH of its shapes.
+function pyBPctStrip(t) {
+    var at = t.indexOf("e")
+    if (at < 0) { at = t.indexOf("E") }
+    if (at < 0) { return t }
+    var mant = t.slice(0, at)
+    var tail = t.slice(at)
+    if (mant.indexOf(".") < 0) { return t }
+    while (mant.charAt(mant.length - 1) == "0") { mant = mant.slice(0, mant.length - 1) }
+    if (mant.charAt(mant.length - 1) == ".") { mant = mant.slice(0, mant.length - 1) }
+    return mant + tail
+}
+
+// |a| rounded to nd SIGNIFICANT digits, half to even, as {d, e}: exactly nd digit
+// characters and the decimal exponent of the first of them.
+//
+// The obvious source for this is floPrec, and it is the WRONG one here: floPrec's
+// contract is only "at least nd digits" - the floor's implementation (host id 70,
+// g_mindig + shortest_digits) answers the SHORTEST round-tripping form when nd is
+// smaller than that, so %e of 1234.5678 came out 1.234567e+03 from the native
+// binary (a truncation of the 8-digit shortest form) against 1.234568e+03 from Go
+// and from the interpreter. Every existing floPrec caller asks for an nd at least
+// as large as the shortest form, where the two contracts coincide; %e and %g do
+// not. The exact decimal answers it outright and is already here.
+function pyBPctSig(a, nd) {
+    if (a == 0) {
+        var z = ""
+        while (z.length < nd) { z = z + "0" }
+        return {d: z, e: 0}
+    }
+    var dec = pyBExactDec(a)
+    var joined = dec["i"] + dec["f"]
+    var lead = 0
+    while (lead < joined.length && joined.charAt(lead) == "0") { lead = lead + 1 }
+    var ex = dec["i"].length - 1 - lead
+    var kept = pyBRoundHalfEven(joined.slice(lead), nd)
+    if (kept.length > nd) {
+        ex = ex + 1
+        kept = kept.slice(0, nd)
+    }
+    while (kept.length < nd) { kept = kept + "0" }
+    return {d: kept, e: ex}
+}
+
+// |n| to p+1 significant digits in C's %e shape: one digit, a point, p digits, and
+// an exponent that is signed and at least two digits.
+function pyBPctExpText(n, p, upper) {
+    var neg = n < 0
+    if (n == 0 && 1 / n < 0) { neg = true }
+    var a = neg ? 0 - n : n
+    var sig = pyBPctSig(a, p + 1)
+    var digs = sig["d"]
+    var ex = sig["e"]
+    var mant = digs.charAt(0)
+    if (p > 0) { mant = mant + "." + digs.slice(1, p + 1) }
+    var es = "" + (ex < 0 ? 0 - ex : ex)
+    if (es.length < 2) { es = "0" + es }
+    var ech = upper ? "E" : "e"
+    var sgn = ex < 0 ? "-" : "+"
+    var out = mant + ech + sgn + es
+    if (neg) { return "-" + out }
+    return out
+}
+
+function pyBPctExp(n, typ, prec) {
+    var upper = (typ == "E" || typ == "G")
+    var p = (prec < 0) ? 6 : prec
+    if (n !== n) { if (upper) { return "NAN" } ; return "nan" }
+    if (n - n !== 0) {
+        var inf = upper ? "INF" : "inf"
+        if (n < 0) { return "-" + inf }
+        return inf
+    }
+    if (typ == "g" || typ == "G") {
+        if (p == 0) { p = 1 }
+        var ge = pyBPctSig(n < 0 ? 0 - n : n, p)["e"]
+        if (ge < 0 - 4 || ge >= p) { return pyBPctStrip(pyBPctExpText(n, p - 1, upper)) }
+        var fx = pyBFixed(n, p - 1 - ge)
+        if (fx.indexOf(".") >= 0) {
+            while (fx.charAt(fx.length - 1) == "0") { fx = fx.slice(0, fx.length - 1) }
+            if (fx.charAt(fx.length - 1) == ".") { fx = fx.slice(0, fx.length - 1) }
+        }
+        return fx
+    }
+    return pyBPctExpText(n, p, upper)
+}
+
+function pyBPctOne(v, typ, left, zero, plus, space, width, prec) {
+    var body = ""
+    var numeric = false
+    if (typ == "s" || typ == "r" || typ == "a") {
+        if (typ == "s") { body = pyStr(v) } else { body = pyRepr(v) }
+        if (prec >= 0 && pyStrLen(body) > prec) { body = pyStrSlice(body, prec) }
+    } else if (typ == "c") {
+        if (typeof v == "string") { body = v } else { body = pyBCodePoint(Math.trunc(pyBPctNum(v))) }
+    } else if (typ == "d" || typ == "i" || typ == "u") {
+        numeric = true
+        body = pyBPctDigits(v)
+    } else if (typ == "x") { numeric = true ; body = pyBPctRadix(v, 16, false) }
+    else if (typ == "X") { numeric = true ; body = pyBPctRadix(v, 16, true) }
+    else if (typ == "o") { numeric = true ; body = pyBPctRadix(v, 8, false) }
+    else if (typ == "b") { numeric = true ; body = pyBPctRadix(v, 2, false) }
+    else if (typ == "f" || typ == "F") {
+        numeric = true
+        body = pyBFixed(pyBPctNum(v), prec < 0 ? 6 : prec)
+    } else if (typ == "e" || typ == "E" || typ == "g" || typ == "G") {
+        numeric = true
+        body = pyBPctExp(pyBPctNum(v), typ, prec)
+    } else {
+        pyFail("unsupported format character '" + typ + "'")
+    }
+    if (numeric && body.charAt(0) != "-") {
+        if (plus) { body = "+" + body }
+        else if (space) { body = " " + body }
+    }
+    var pad = width - pyStrLen(body)
+    if (pad <= 0) { return body }
+    if (left) { return body + pyBRepeat(" ", pad) }
+    if (zero && numeric) {
+        var sgn = body.charAt(0)
+        if (sgn == "-" || sgn == "+" || sgn == " ") { return sgn + pyBRepeat("0", pad) + body.slice(1) }
+        return pyBRepeat("0", pad) + body
+    }
+    return pyBRepeat(" ", pad) + body
+}
+
+function pyBRepeat(s, n) {
+    var out = ""
+    var i = 0
+    while (i < n) { out = out + s ; i = i + 1 }
+    return out
+}
+
+// The first `n` CODE POINTS of s - what a %.Ns precision truncates to.
+function pyStrSlice(s, n) {
+    var out = ""
+    var k = 0
+    var c = 0
+    while (k < s.length && c < n) {
+        var ch = s.charCodeAt(k)
+        var w = 1
+        if (ch >= 55296 && ch <= 56319 && k + 1 < s.length) { w = 2 }
+        out = out + s.substring(k, k + w)
+        k = k + w
+        c = c + 1
+    }
+    return out
+}
+
+// A code point above the BMP becomes its UTF-16 surrogate pair.
+function pyBCodePoint(n) {
+    if (n <= 65535) { return String.fromCharCode(n) }
+    var v = n - 65536
+    return String.fromCharCode(55296 + Math.floor(v / 1024)) + String.fromCharCode(56320 + (v - Math.floor(v / 1024) * 1024))
+}
+
+function pyBPct(f, arg) {
+    var nconv = pyBPctCount(f)
+    var args = []
+    var dict = null
+    if (pyIsArr(arg) && arg.length == nconv) { args = arg }
+    else if (pyIsDict(arg) && pySetElemsOf(arg) === null) { dict = arg ; args = [arg] }
+    else { args = [arg] }
+    var out = ""
+    var ai = 0
+    var mapped = false
+    var i = 0
+    while (i < f.length) {
+        var c = f.charAt(i)
+        if (c != "%") { out = out + c ; i = i + 1 ; continue }
+        i = i + 1
+        if (i >= f.length) { pyFail("incomplete format") }
+        if (f.charAt(i) == "%") { out = out + "%" ; i = i + 1 ; continue }
+        var key = ""
+        var hasKey = false
+        if (f.charAt(i) == "(") {
+            i = i + 1
+            while (i < f.length && f.charAt(i) != ")") { key = key + f.charAt(i) ; i = i + 1 }
+            hasKey = true
+            mapped = true
+            i = i + 1
+        }
+        var left = false
+        var zero = false
+        var plus = false
+        var space = false
+        var scanning = true
+        while (scanning && i < f.length) {
+            var fl = f.charAt(i)
+            if (fl == "-") { left = true ; i = i + 1 }
+            else if (fl == "0") { zero = true ; i = i + 1 }
+            else if (fl == "+") { plus = true ; i = i + 1 }
+            else if (fl == " ") { space = true ; i = i + 1 }
+            else if (fl == "#") { pyFail("unsupported format flag '#'") }
+            else { scanning = false }
+        }
+        var width = 0
+        while (i < f.length && f.charAt(i) >= "0" && f.charAt(i) <= "9") {
+            width = width * 10 + (f.charCodeAt(i) - 48)
+            i = i + 1
+        }
+        var prec = 0 - 1
+        if (i < f.length && f.charAt(i) == ".") {
+            i = i + 1
+            prec = 0
+            while (i < f.length && f.charAt(i) >= "0" && f.charAt(i) <= "9") {
+                prec = prec * 10 + (f.charCodeAt(i) - 48)
+                i = i + 1
+            }
+        }
+        while (i < f.length && (f.charAt(i) == "l" || f.charAt(i) == "h" || f.charAt(i) == "L")) { i = i + 1 }
+        if (i >= f.length) { pyFail("incomplete format") }
+        var typ = f.charAt(i)
+        i = i + 1
+        var v = anytype
+        if (hasKey) {
+            if (dict === null) { pyFail("format requires a mapping") }
+            var at = pyDictFind(dict["keys"], key)
+            if (at < 0) { pyFail("KeyError: '" + key + "'") }
+            v = dict["vals"][at]
+        } else {
+            if (ai >= args.length) { pyFail("not enough arguments for format string") }
+            v = args[ai]
+            ai = ai + 1
+        }
+        out = out + pyBPctOne(v, typ, left, zero, plus, space, width, prec)
+    }
+    if (!mapped && ai < args.length) { pyFail("not all arguments converted during string formatting") }
+    return out
+}
 
 // ----- strconv.FormatInt(int64(x), base) ------------------------------------
 //
@@ -3658,6 +4142,15 @@ function pyDUsed(used, name) {
 // is mapped onto the callee's parameters by pyBindCall.
 function js_pycall(callee, pos, kw) {
     if (!pyIsArr(pos)) { fail("js_pycall args must be an array") }
+    // A BUILTIN TYPE OBJECT is callable: `int` is the class, and calling it
+    // converts. languages/python-to-llvm-ir.abnf binds int/str/float/bool/list/
+    // dict/set/tuple to js_pybuiltincls's stable class object with the conversion
+    // closure hung on it as __conv, so `type(1) == int` is True (it is the same
+    // object) and int("42") still runs the same IR function it always did.
+    if (pyIsObj(callee)) {
+        var cv = callee["__conv"]
+        if (pyIsCallable(cv)) { return pyCall(cv, pos) }
+    }
     var cls = pyClassOf(callee)
     if (cls !== null) { return pyDInstantiate(cls, pos, kw) }
     var icls = pyInstClassOf(callee)

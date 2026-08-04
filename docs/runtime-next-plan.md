@@ -11,6 +11,14 @@ forward plan. HEAD when it was written: `e8bf2c3`.
 > them. The consolidated section is the residue - 13 items - and nothing outside it is
 > open. A struck item keeps its measurement, so the body of this file still reads as the
 > history it is; only the STATUS was corrected.
+>
+> **UPDATE 2026-08-04, the FIFTH pass (from `f2f8926`): that list is now EMPTY.**
+> All 13 items and all seven of the findings the python-float work left behind are
+> struck at their own lines. Two are struck as COSTED DESIGNS rather than fixes - a
+> real tuple TYPE and a catchable `NameError` under the compiler - and both are
+> written up at the END of this file, with the measurement, the blocker that rules
+> out a cheap version, and the size. Gate readings for that pass are in the closing
+> section, "THE OPEN LIST IS EMPTY".
 
 ## Where things stand
 
@@ -8064,6 +8072,11 @@ has no first move**, and that is a measured statement rather than a delay.
 ---
 
 # WHAT IS STILL OPEN - the consolidated list
+# >>> AS OF THE FIFTH PASS (2026-08-04) THIS LIST IS **EMPTY**. Every item below
+# >>> is struck at its own line. Two things are struck as COSTED DESIGNS rather
+# >>> than fixes - a real tuple TYPE and a catchable NameError under the compiler -
+# >>> and both are written up in full at the END of this file
+# >>> ("A TUPLE TYPE - the scope, measured" and "THE OPEN LIST IS EMPTY").
 # (2026-08-04, verified at `c1bc760`; items 11 and 1/swift re-verified at `33923d4`)
 #
 # SECOND PASS, 2026-08-04 from `56e31c1`: items **5** (ruby's `-0.0 % 1.0`), **7**
@@ -8117,6 +8130,48 @@ has no first move**, and that is a measured statement rather than a delay.
 # 119/0, clang-check 16/16 all agreeing none held, `-freeze` a fixed point after
 # regenerating the snapshot, `MEC_GC=off` 3,711 B/iter with gc RSS flat at
 # 3,309,568, coro-poc `--gc`/`--break` unchanged against a clean `913bd95`.
+#
+# ============================================================================
+# FIFTH PASS, 2026-08-04 from `f2f8926`. **THE OPEN LIST IS NOW EMPTY.** Every
+# item above and every one of the seven findings the python-float work left
+# behind is either LANDED with its assertions and its measured discriminating
+# power, or STRUCK with the measurement that says why. One item - a real tuple
+# TYPE - is struck as a COSTED DESIGN rather than a fix, and the cost is derived
+# from the code (including a hard blocker in the C floor), not estimated.
+#
+# LANDED in this pass:
+#   - item **5**'s huge-dividend `Float#%` - three halves, `mod = fmod(x, y);
+#     if (y*mod < 0) mod += y`, byte-identical to `ruby 2.6.10p210` over 27 rows
+#     from all four engines. ruby 275 -> 279.
+#   - item **9**'s `pyAnnot` - the sticky static flag is an emitted
+#     `js_scope_has` now. It had TWO failure shapes, not the one the item named.
+#   - `float("inf")`, which was `nan` in all three engines (and `"Infinity"`
+#     diverged BETWEEN the halves).
+#   - the builtin TYPE OBJECTS - `type(1) == int` and `isinstance("a", str)`
+#     were False under the compiler, True under the interpreter. It cost ~35
+#     lines, not the call-path rewrite the finding predicted; see its line.
+#   - `__repr__` / `__str__` / `BaseException.__str__` rendering, which the
+#     compiled halves did not have AT ALL ([object Object] for every instance).
+#   - `parseFloat("1e400")`, a live FROZEN-DIFF in the dialect itself.
+#   - `10**30` - a Python int is arbitrary precision, and an int meeting a big
+#     PROMOTES, which the compiled halves did not do at all.
+#   - `%`-string formatting, unimplemented in BOTH halves (`"%s" % "hi"` was
+#     `NaN`), now the s r a d i u x X o b c e E g G f F verbs in three engines.
+# STRUCK, each with its measurement at its line: a tuple TYPE (costed; the C
+# floor cannot carry a marker on an array, so it is a BOX like the float, and
+# the size is derived below).
+# THREE DEFECTS THIS PASS FOUND AND FIXED that nothing had named: the
+# interpreter's `{:.Nf}` rounded half UP where both compiled halves and CPython
+# round half to EVEN; `(255).toString(16)` works under goja and ABORTS under
+# `-frozen`, so `f"{255:x}"` was a live FROZEN-DIFF; and `floPrec`'s contract is
+# "AT LEAST n digits", which is not what `%e` needs (see SECTION 28's line).
+# Invariants after the pass: matrix **329/329**, `--full` **5,950** assertions
+# (python 326 -> 375, ruby 275 -> 279) with 0 languages whose halves disagree and
+# no `BUT -frozen`/`VACUOUS`/`MISMATCH`/`FROZEN-DIFF` line, `--cross` 119/0,
+# clang-check 16/16 all agreeing none held, `go test ./abnf/` ok, all fifteen
+# `gen-*.sh --check` clean, `-freeze` a fixed point, `MEC_GC=off` 3,711 B/iter
+# with gc RSS flat, coro-poc `--gc`/`--break` unchanged.
+# ============================================================================
 
 Every "What is owed" / "Still owed" / "Not fixed here" / "BLOCKED" item in this
 file, in `runtime-merge-plan.md` and in `runtime-rework-plan.md` was walked and
@@ -8401,8 +8456,29 @@ the strength of an uncommitted diff.
      gives `-0`); it is multiplying by ZERO that folds. Both MetaJS halves
      therefore divide a zero by -1; `abnf/jsrt.go` says `math.Copysign(0, x)`,
      because Go is IEEE all the way down.
-   - **AND A NEW DEFECT THE PROBE FOUND - STILL OPEN, now SETTLED and COSTED, and
-     it is bigger than "huge dividend" (2026-08-04).** `Float#%` is wrong in both
+   - ~~**AND A NEW DEFECT THE PROBE FOUND - STILL OPEN, now SETTLED and COSTED, and
+     it is bigger than "huge dividend".**~~ **CLOSED 2026-08-04, in all three
+     halves, and the costing below held exactly - four lines per half and nothing
+     else.** `rubyFloMod` (`abnf/jsrt.go`) is `math.Mod` + the `y*m < 0`
+     correction, and `numBin`'s `%` arm (`ruby-interpreter.abnf`) and `rbNumBin`'s
+     (`languages/lib/ruby-rt.metajs`) are the same body over the dialect's own `%`,
+     with `zeroSigned`/`rbZeroSign` still re-signing the zero (the tag engine keeps
+     an integral value as an INTEGER, so fmod's `-0.0` is lost there; Go has
+     `math.Copysign` and needs no help). `rbFmaSub` is now unused on this path and
+     was left where it is - `rbGcd`, `rbIMod` and `divmod` still call it.
+     - **GROUND TRUTH: 27 rows, byte-identical to `ruby 2.6.10p210`** (`Float#%` is
+       unchanged in 3.x) from the interpreter, the `-frozen` interpreter,
+       `llvm.Run` AND the native `-exe` binary: the four signed-zero rows, the four
+       sign-of-divisor rows, `1e308 % 3.0 = 2.0`, `-1e308 % 3.0 = 1.0`,
+       `1e308 % 2.5 = 1.0`, `-1e308 % 2.5 = 1.5`,
+       `123456789012345678.0 % 7.0 = 3.0`, `1e16 % 3.0 = 1.0`,
+       `-1e300 % 7.3 = 6.570033512034619`, plus a 6-row infinite-divisor probe
+       (`-5.0 % Infinity` is `Infinity`, which falls straight out of the same line
+       and needed no special case).
+     - Pinned by `n16j`..`n16m` in `tests/ruby-test-full.rb`; ruby 275 -> 279.
+       **Discriminating power measured** against a clean `f2f8926` archive: all
+       four fail in BOTH halves there and all four pass in both halves now.
+     - The measurement that motivated it, kept: `Float#%` was wrong in both
      halves AND they disagree with each other whenever `floor(x/y)*y` loses
      precision: real ruby answers `1.0e308 % 3.0 = 2.0` and `-1.0e308 % 3.0 = 1.0`;
      the interpreter answers `0.0` and `-0.0`, the compiler `4.9896007738368e+291`
@@ -8427,20 +8503,8 @@ the strength of an uncommitted diff.
        that probe: **MetaJS has no exponent form in a numeric literal** - `1e308`
        parses as the identifier `e308`. Not a defect of this item; recorded because
        it costs a probe every time.)
-     - **NOT FIXED HERE, and the reason is file ownership, not difficulty.** The
-       three halves are `rubyFloMod` in **`abnf/jsrt.go`**, `numBin`'s `%` arm in
-       `ruby-interpreter.abnf` and `rbNumBin`'s `%` arm in
-       `languages/lib/ruby-rt.metajs`. A concurrent agent held `abnf/jsrt.go` for
-       the python float type, and landing two of the three halves is a `--cross`
-       divergence - so it is all three or none. The Go half is:
-       `m := math.Mod(x, y); if m != 0 && y*m < 0 { m += y }; return m` (keep the
-       `math.Copysign(0, x)` guard only if `math.Mod` is found not to carry the
-       dividend's sign onto a zero). The other two are the same four lines over the
-       dialect's own `%`, with `rbZeroSign`/`zeroSigned` still doing the zero.
-       `rbFmaSub`'s exact two-product becomes dead on this path - it was exact about
-       the wrong expression.
-     - No test covers a non-trivial modulo today, which is why the suites are
-       silent; the 18 rows above are the ratchet section to add with the fix.
+     - ~~No test covers a non-trivial modulo today, which is why the suites are
+       silent~~ - four do now, and they are the 18 rows above plus the infinities.
 
 6. ~~**The `die3` error-message divergence.**~~ **CLOSED 2026-08-04, in the Go
    twin.** `llvm.Run` said `cannot set member 'foo' on float64` (the Go reflect
@@ -8512,9 +8576,30 @@ the strength of an uncommitted diff.
    `pyClassFill`'s `py_clsfill1`. The line above was measured before `d9014d7`
    landed and never re-checked.
 
-9. **`pyAnnot` is static where the Go twin is dynamic - and this is NOT a corner,
-   it is a HARD FAILURE. Re-probed 2026-08-04 and the line below understated it.**
-   `languages/python-to-llvm-ir.abnf:1442` decides "is there an `__annotations__`
+9. ~~**`pyAnnot` is static where the Go twin is dynamic - and this is NOT a corner,
+   it is a HARD FAILURE.**~~ **CLOSED 2026-08-04, and the fix is the three lines
+   the line below predicted - `pyAnnotDecl`, an emitted IR function that tests
+   `js_scope_has(sc, "__annotations__")` and declares the dict only when it is
+   absent, called unconditionally from `pyAnnot`
+   (`languages/python-to-llvm-ir.abnf`). `pyAnnotHere` survives only for
+   `pyEnsureAnnot`, which asks the genuinely static question "did this class BODY
+   contain an annotation anywhere".**
+   - **THE FAILURE HAD TWO SHAPES, and the item named only the loud one.** With no
+     annotation in an enclosing scope the class body dies with
+     `variable not defined: __annotations__`. With one - and
+     `tests/python-test-features.py` has `mod_ann: int = 1` at module level, so
+     this is the ordinary case - the `js_scope_get` WALKS THE CHAIN instead,
+     finds the MODULE's dict, and the reached annotation is recorded there: the
+     class gets `{}` and the module's annotations are silently polluted. Quieter
+     and worse.
+   - Pinned by `class-annotations-mixed` in `tests/python-test-features.py` (the
+     DEFAULT matrix, so a hard gate) and by `an1` in SECTION 27 of
+     `tests/python-test-full.py`. **Discriminating power measured** against a clean
+     `f2f8926` archive: the features file reports `1 failures` under the compiler
+     and `0 failures` under the interpreter (the interpreter was always right), and
+     the standalone `an1` probe ABORTS the compiler there with the "variable not
+     defined" crash.
+   - The diagnosis, kept: `languages/python-to-llvm-ir.abnf:1442` decided "is there an `__annotations__`
    dict in THIS scope already" at compile time (`pyAnnotHere`), where `abnf/jsrt.go`
    asks `sc.find` at run time. The old verdict - "they differ only for an
    annotation the program does not REACH" - misses that the flag is STICKY: an
@@ -8532,15 +8617,19 @@ the strength of an uncommitted diff.
    half dies with `js runtime error: variable not defined: __annotations__` -
    from `llvm.Run` and from the native binary. A `--cross` divergence and a crash,
    invisible because no test annotates inside an unreached branch.
-   - **It is now a three-line fix, because item 8 supplied the missing piece.**
-     Replace the `if (!pyAnnotHere)` guard with an emitted
-     `js_scope_has(envV, "__annotations__")` test - the runtime question the Go
-     twin already asks, and the extern that did not exist when this was written.
+   - **It was a three-line fix, because item 8 supplied the missing piece** - the
+     `js_scope_has` extern, which did not exist when this was written.
      `pyEnsureAnnot` (`:1520`) does NOT cover it: that seeds the dict on the CLASS
      after the body has run, and this failure happens inside the body.
-   - **Not fixed here for the file-ownership reason only** - `languages/python-*`
-     was held by a concurrent agent. "What is owed, and what generalises"
-     (PYTHON) item 3.
+   - **A SECOND, PRE-EXISTING divergence sat at the same site, and it is FIXED
+     too** (measured at a clean `f2f8926` first, so it was not a regression from
+     the fix above): `__annotations__` at MODULE and FUNCTION scope. CPython 3.14
+     (PEP 649) has no such name outside a class body and `python-interpreter.abnf`
+     has none either - they agree - while this half built a dict and handed it out.
+     `pyBindSink` is non-null exactly inside a class body, so `pyAnnot` now returns
+     immediately when it is null. An annotation is kept as its source TEXT, so
+     nothing is left unevaluated. This also removes the last producer of the module
+     dict that `pyClassFill`'s old chain walk used to feed on.
 
 10. ~~**Automating the native fail-tests.**~~ **CLOSED 2026-08-04. Matrix 325 ->
     328.** `.vscode/launch.json` gained three `-exe` rows for
@@ -8840,8 +8929,26 @@ compiler, and 0 of 40 in all three engines now (interpreter, `llvm.Run`, and the
 native `-exe` binary, which were diffed byte for byte on three probe files).
 
 ### Found while probing, NOT fixed, each measured at `913bd95`
+### -- ALL SEVEN SETTLED 2026-08-04 from `f2f8926`; six FIXED, one COSTED AND STRUCK.
+### Each is struck at its own line below with what it cost and where it is pinned.
 
-- **The compiler binds no builtin TYPE objects.** `isinstance("a", str)`,
+- ~~**The compiler binds no builtin TYPE objects.**~~ **CLOSED, and it cost ~35
+  lines, not the call-path rewrite this line predicted.** The finding was right
+  that the name has to hold `js_pybuiltincls`'s stable class object and that
+  `js_pycall` has to make that object callable - and wrong that "teaching
+  `js_pycall` to convert" means writing conversion logic in every runtime. The
+  conversion closure `declBuiltin` already builds RIDES ON the class object as
+  `__conv`: the emitter's new `declBind` binds `str`/`int`/`float`/`bool`/`list`/
+  `dict`/`set`/`tuple` to `js_pybuiltincls(name)` with `js_set(cls, "__conv", clo)`,
+  and `js_pycall` in `abnf/jsrt.go` and `languages/lib/python-rt.metajs` gains a
+  six-line arm that calls `__conv` when the callee carries one. So `int("42")`
+  still runs the exact same IR function it always did - only the value the NAME
+  holds changed. `list` was bound by hand outside `declBuiltin` and had to be
+  routed through `declBind` too, which is why `isinstance([1], list)` was the last
+  row to go green. Pinned by `ty1`..`ty6` in SECTION 27 of
+  `tests/python-test-full.py`; 5 of those 6 fail under the compiler at a clean
+  `f2f8926` and 0 fail in either half now.
+- **The old line, for the record: the compiler binds no builtin TYPE objects.** `isinstance("a", str)`,
   `isinstance(1, int)`, `type(1) == int` and `type(1) is int` are all `False`
   under `python-to-llvm-ir.abnf` and all `True` under the interpreter - six for
   six on a clean `913bd95`, so this predates the float box and is not its debt.
@@ -8853,22 +8960,103 @@ native `-exe` binary, which were diffed byte for byte on three probe files).
   call path of every Python program and is a job of its own. It is why SECTION 26
   asserts the type through `str(type(1.0)) == "<class 'float'>"` rather than
   through `isinstance`.
-- **The compiler's `print()` does not honour `__repr__`.** A user instance with
-  `__repr__` prints `[object Object]` under `python-to-llvm-ir.abnf` and `V(3)`
-  under the interpreter, at `913bd95` as now.
-- **`%`-string formatting is unimplemented in BOTH halves**: `"%s" % "hi"` is
-  `NaN`, because `binOp("%")` on a string falls into `fmod`. Both halves agree,
-  so `--cross` is blind to it.
-- **`parseFloat("1e400")` is `NaN` under `-frozen` and `Infinity` under goja** -
-  a live FROZEN-DIFF in the script dialect itself, hit the moment a test writes
-  the overflow literal. SECTION 26 builds its infinity as `1e308 * 10` instead
-  and says why at the line.
-- **`10**30` overflows to `5076944270305264000` in the INTERPRETER** (its `**`
-  on two small ints never enters the big path) where the compiler folds it to a
-  double - a pre-existing halves divergence, unchanged. `pyIsBigText` gating on
-  literal TEXT (the `2**70` case named above) is the same defect from the other
-  side.
+- ~~**The compiler's `print()` does not honour `__repr__`.**~~ **CLOSED, and it
+  was wider than the line said: the compiled halves had NO user-instance
+  rendering arm at all**, so a plain instance printed `[object Object]` and so did
+  an exception. `pyUserRender` is now the same body in three engines
+  (`languages/python-interpreter.abnf`, `abnf/jsrt.go`,
+  `languages/lib/python-rt.metajs`) and it implements CPython's split, which the
+  INTERPRETER did not have either: `str()`/`print()` prefer `__str__` and fall back
+  to `__repr__`, while `repr()` and every CONTAINER element use `__repr__` only.
+  A class with only a `__str__` printed `<Name object>` in all three before.
+  - **`BaseException.__str__` came with it**, because an exception INHERITS it and
+    it therefore beats a `__repr__` the class also defines: no args is `""`, one
+    arg is `str(that arg)`, more is the args tuple's repr. `str(ValueError("boom"))`
+    was `ValueError('boom')` and is `boom`.
+  - The one deliberate departure from CPython: the default is `<Name object>`,
+    not `<__main__.Name object at 0x...>`. No engine here can reproduce the
+    address, and `rp2`/`rp3` pin OUR answer and say so at the line.
+  - Pinned by `rp1`..`rp6` in SECTION 27; 6 of 6 fail under the compiler and 4 of 6
+    under the interpreter at a clean `f2f8926`.
+- ~~**`%`-string formatting is unimplemented in BOTH halves**~~ **CLOSED - the
+  conversions `s r a d i u x X o b c e E g G f F` and `%%`, the flags `-`, `+`,
+  `0` and space, a width, a `.precision` (which TRUNCATES for `s`/`r`/`a`), and a
+  `%(name)s` mapping key, in all three engines.** The `#` alternate form fails
+  LOUDLY rather than being silently ignored. `pyPct` /`rt.pyPct` / `pyBPct`.
+  38 rows byte-identical to CPython 3.14.6 from the interpreter, the `-frozen`
+  interpreter, `llvm.Run` and the native `-exe` binary; pinned by `pct01`..`pct22`
+  in the new SECTION 28, which fail 22 of 22 (interpreter) and 21 of 22 (compiler)
+  at a clean `f2f8926`.
+  - **THE ARGUMENT TUPLE is the one place the answer is not always CPython's, and
+    it is the tuple item below, not this one.** CPython takes one value per
+    conversion from a TUPLE and treats every other object as a single value; a
+    tuple IS a list here, so an ARRAY is read as the argument tuple exactly when
+    its length equals the conversion count and as one value otherwise. That is
+    CPython's answer for `"%s %s" % (1, 2)` AND for `"%s" % [1, 2]`; the only
+    irreducible case is a ONE-element list meeting a single conversion, where
+    `(1,)` and `[1]` are the same value in this model.
+  - **THREE DEFECTS FELL OUT OF BUILDING IT**, all pre-existing, all measured at a
+    clean `f2f8926`, all fixed here:
+    - the interpreter's `pyFixed` scaled by 10^p and `Math.round`, i.e. rounded a
+      tie HALF UP, where `strconv.FormatFloat(v, 'f', p, 64)` - and therefore both
+      compiled halves, and CPython - round half to EVEN. `f"{2.5:.0f}"` was `3`
+      here and `2` there: a LIVE HALVES DIVERGENCE that no test reached, so
+      `--cross` was silent. It is the exact decimal now (`pyExactDec` +
+      `pyRoundHalfEven`, the same bodies `python-rt.metajs` already carried, over
+      the bignum the arbitrary precision ints brought). Pinned by `pct21`/`pct22`.
+    - `(255).toString(16)` works under goja and ABORTS under `-frozen` ("call of a
+      non function value"), so `f"{255:x}"` was a LIVE FROZEN-DIFF in the python
+      interpreter - the exact thing the matrix's byte-identity check exists for,
+      and no test reached it. `pyBaseStr` is the digit loop instead. Pinned by
+      `pct23`, whose gate is the matrix rather than the ratchet.
+    - **`floPrec`'s contract is "AT LEAST n digits", and `%e` needs "EXACTLY n".**
+      The floor's implementation (host id 70, `g_mindig` + `shortest_digits`)
+      answers the SHORTEST round-tripping form when n is smaller than that, so
+      `%e` of `1234.5678` came out `1.234567e+03` from the native binary - a
+      truncation of the 8-digit shortest form - against `1.234568e+03` from Go and
+      from the interpreter. Every EXISTING caller (lua's formatter) asks for an n
+      at least as large as the shortest form, where the two contracts coincide, so
+      nothing was wrong before and nothing changed in `floPrec`; the two script
+      halves compute `%e`/`%g`'s digits from the exact decimal instead
+      (`pyPctSig` / `pyBPctSig`). **Anyone reaching for `floPrec` with a small n
+      must read this paragraph first.**
+- ~~**`parseFloat("1e400")` is `NaN` under `-frozen` and `Infinity` under goja**~~
+  **CLOSED in `jsParseFloat` (`abnf/jsrt.go`), one branch.** An OUT OF RANGE
+  literal is not a parse failure: Go answers ±Inf on overflow and ±0 on underflow
+  and reports `ErrRange` ALONGSIDE the value, and the code turned that error into
+  NaN. `ErrRange` now returns the value. 8 rows identical to node from goja and
+  from `-frozen`; pinned by `parsefloat-overflow`, `-overflow-neg` and
+  `-underflow` in `tests/metajs-test-features.js`, which is the DEFAULT matrix -
+  3 of the 5 metajs feature entries fail at a clean `f2f8926`.
+- ~~**`10**30` overflows to `5076944270305264000` in the INTERPRETER** where the
+  compiler folds it to a double~~ **CLOSED, and the compiled halves needed more
+  than `**`.** A Python int is arbitrary precision, so past 2^53 the exact answer
+  comes from the big path: the interpreter routes `**` into `boxOp`'s existing
+  `bigPow`, Go uses `big.Int.Exp` behind `pyBigOperand`/`pyBigNarrow`, and
+  `python-rt.metajs` gained `pyABigOperand`/`pyABigNarrow`/`pyABigPow`. All three
+  narrow back to a plain number when the result fits, so nothing below 2^53
+  changes shape.
+  - **The `**` fix alone would have been a LOSS**, and measuring it is what caught
+    the real hole: `10**30 + 1` was `NaN` in the compiled halves, because an int
+    operand meeting a big did not PROMOTE there at all - `bigArith` demands two
+    BigInts (ECMAScript's rule, correctly, since it is shared with `js_add` and the
+    rest of the generic externals) and Python has ONE int type. `//` and `%` on a
+    big were `NaN` too, and every ORDER comparison against a plain int was `False`.
+    `pyBigPair`/`pyBigBin` (Go) and `pyABigPair`/`pyABigBin` (layer 2) are the
+    Python-only promoting pair; `//` and `%` FLOOR, since Go's `Quo`/`Rem`
+    truncate and Go's `Div`/`Mod` are Euclidean and neither is Python's answer for
+    a negative divisor (`1e30 % -7` is `-6`, not `+1`).
+  - 15 rows identical to CPython 3.14.6 from the interpreter, `llvm.Run` and the
+    native binary; pinned by `bi1`..`bi9` in SECTION 27, which fail 6 of 9
+    (interpreter) and 7 of 9 (compiler) at a clean `f2f8926`.
 - **A tuple prints as a list**: `(1.0, 2)` reads `[1.0, 2]` in both halves.
+  **STRUCK 2026-08-04 as a COSTED DESIGN, not a fix** - see "A TUPLE TYPE - the
+  scope, measured, and why it is not in this pass" at the end of this file. The
+  short version: the C floor CANNOT carry a named property on an array (`tag 5`
+  reaches `set_member`'s `die2("invalid array index")`), so a tuple has to be a
+  BOX exactly like the float, and that is the float box's ~640 lines again over a
+  type that every container path touches. 10 of 10 probe rows are wrong in BOTH
+  halves IDENTICALLY, so it is a CPython gap and not a divergence.
 
 ### The dialect trap that was predicted and did bite
 
@@ -8880,3 +9068,131 @@ is `-0.0` in all three.
 `sum()` needed the `var t = anytype` escape hatch in the interpreter for the same
 old reason: MetaJS is TYPED and an accumulator that started as the number 0
 cannot later hold a box.
+
+---
+
+# A TUPLE TYPE - the scope, measured, and why it is not in this pass (2026-08-04)
+
+`(1, 2)` prints `[1, 2]`. This is the last of the seven findings the float-box
+work left behind and the only one struck rather than fixed, so here is the
+measurement the strike rests on rather than an estimate.
+
+## What is actually wrong, measured
+
+An 18-row probe against CPython 3.14.6, run through both halves. Ten rows are
+reachable today and **all ten are wrong in BOTH halves, identically** - so
+`--cross` is blind to every one of them and only a CPython diff sees it:
+
+| expression | CPython | both halves |
+|---|---|---|
+| `str((1, 2))` | `(1, 2)` | `[1, 2]` |
+| `str((1,))` | `(1,)` | `[1]` |
+| `str(())` | `()` | `[]` |
+| `str(type((1, 2)))` | `<class 'tuple'>` | `<class 'list'>` |
+| `str([(1, 2)])` | `[(1, 2)]` | `[[1, 2]]` |
+| `(1, 2) == [1, 2]` | `False` | `True` |
+| `str({(1, 2): "k"})` | `{(1, 2): 'k'}` | `{[1, 2]: 'k'}` |
+| `str((1, 2) + (3,))` | `(1, 2, 3)` | `[1, 2, 3]` |
+| `str(tuple([1, 2]))` | `(1, 2)` | `[1, 2]` |
+| `str(f())` where `f` returns `1, 2` | `(1, 2)` | `[1, 2]` |
+
+`divmod`, `zip`, `enumerate` and `dict.items()` are not bound in either half, so
+their tuple-shaped results are neither work nor risk here - the same note the
+float-box scoping made about `round`/`sorted`/`math`.
+
+## The cheap fix does not exist, and this is the blocker
+
+The obvious move is to keep the array and MARK it - a `tup` field on Go's
+`*jsArray`, a `__tup` property on the script halves' array. **The C floor cannot
+do it.** `set_member` (`languages/lib/runtime.c:2949`) accepts a named key only
+for tag 6 (object); for tag 5 (array) it demands a numeric index and otherwise
+reaches `die2("invalid array index ", key)`. So a marked array is not
+representable in the engine the native binaries run on, and a tuple has to be a
+**BOX** - a tag-6 object wrapping the elements array - exactly like the float.
+
+That is the same vehicle, and therefore the same bill, as "PYTHON HAS NO FLOAT
+TYPE" above: **~640 hand-written lines across the same four files**, zero in the C
+floor. The site counts, grepped rather than guessed:
+
+| file | sites that ask "is this an array" | tuple-shaped builders |
+|---|---|---|
+| `languages/python-interpreter.abnf` | 17 `Array.isArray` | 49 grammar refs to tuple syntax |
+| `languages/lib/python-rt.metajs` | 42 `pyIsArr` | - |
+| `abnf/jsrt.go` | 241 `*jsArray` (not all Python) | - |
+| `languages/python-to-llvm-ir.abnf` | - | 54 tuple refs |
+| `languages/lib/runtime.c` | **0** | **0** |
+
+Every one of those has to be classified "list only", "tuple only" or "either",
+and it is ATOMIC in the same way the float box was: any half-landed subset is a
+`--cross` divergence, because the two halves render and compare through different
+code.
+
+## What it would unblock, so the next reader can price it properly
+
+- The `%`-formatting ARGUMENT TUPLE rule (SECTION 28's line): the arity heuristic
+  disappears and `"%s" % [1]` becomes `[1]` instead of `1`.
+- `BaseException.__str__` with more than one argument, which today builds `('a',
+  1)` by hand at its site because it knows the args are a tuple.
+- Hashability as a REAL rule rather than a convention: a tuple is a valid dict/set
+  key and a list is not, and today both are.
+
+## Why not in this pass
+
+It is a value-model job of the same size as the float box, it is atomic, and it
+would land at the end of a pass whose other eight items are already in the tree -
+so it is the one change that could not be re-gated (matrix, `--full`, `--cross`,
+clang-check, `-freeze`, the collector and the coroutine PoC) inside the same
+session. The float box took its own commit for exactly this reason and the
+estimate held; this one should get the same treatment. **The rule is settled, the
+vehicle is settled (the plain-object box, dart's `{__flo}` precedent), the floor
+is proved to need nothing, and the blocker that rules out the cheap version is
+proved from `runtime.c`.** What is missing is the pass.
+
+## One more thing struck with it, for the same reason and with its own measurement
+
+**An undefined name is not a catchable `NameError` under the compiler.**
+`print(nosuchname)` raises `NameError` in CPython and in
+`python-interpreter.abnf` - `try: print(nosuchname) except NameError:` CATCHES in
+both - while both compiled halves abort with
+`js runtime error: variable not defined: nosuchname`. Found while settling item
+9's module-scope annotation question (which IS fixed); measured at a clean
+`f2f8926`, so it is pre-existing and general, not an annotation defect.
+
+It is struck rather than fixed because the site is `js_scope_get`, which **all
+sixteen languages share**: making it raise a Python exception would change every
+other language's undefined-variable diagnostic, and the sixteen are pinned to that
+wording by `tests/clang-check.sh` and by the three `SHOULD ABORT` matrix rows. The
+honest fix is a Python-only `js_pyscope_get` (or an emitted guarded read), which
+touches **every variable read in every Python program** - the cost the builtin-type
+finding was wrongly predicted to have, and this time it is real. Nothing in the
+suites depends on the current behaviour, so it is a defect with a known site, a
+known blocker and no cheap version.
+
+---
+
+# THE OPEN LIST IS EMPTY (2026-08-04, `f2f8926` + this pass)
+
+Every numbered item of "WHAT IS STILL OPEN" and every one of the seven findings
+recorded under "PYTHON HAS NO FLOAT TYPE" is now struck at its own line, with the
+commit-free measurement that closed it and, where it was fixed, the assertions
+that pin it and their discriminating power against a clean `f2f8926` archive.
+
+Two things are struck as COSTED DESIGNS rather than fixes - a real tuple TYPE and
+a catchable `NameError` under the compiler - and both carry, at their line above,
+the measurement, the blocker that rules out a cheap version, and the size.
+
+Gate readings for this pass:
+
+```
+matrix                329/329
+--full                5,950 assertions, 0 languages whose halves disagree
+                      (python 326 -> 375, ruby 275 -> 279)
+                      no BUT -frozen / VACUOUS / MISMATCH / FROZEN-DIFF line
+--cross               119 programs, 0 divergent
+clang-check           16/16 ok, all sixteen agreeing, none held
+go test ./abnf/       ok
+gen-*.sh --check      15/15 up to date
+-freeze               a fixed point
+MEC_GC=off            3,711 B/iter at 400k; gc RSS flat at 3,309,568
+coro-poc --gc/--break unchanged
+```

@@ -1162,13 +1162,46 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v.__isclass == true) { return hostGlobals["type"] }
         return hostGlobals["object"] 
     }
+    // float("inf") - CPython's float_from_string accepts the three non-finite
+    // SPELLINGS, case-insensitively and with an optional sign, after stripping
+    // whitespace: "inf", "infinity" and "nan". JavaScript's parseFloat accepts
+    // "Infinity" and nothing else of the set, so float("inf") was nan in all three
+    // engines where CPython says inf - and, worse, "Infinity" itself was inf in
+    // THIS half and nan in the compiled one, a live halves divergence.
+    //
+    // Only the non-finite spellings are handled here; everything else still goes
+    // to parseFloat, so float("1.5abc") is still the prefix parse 1.5 where CPython
+    // raises ValueError. That is a separate, pre-existing looseness and is recorded
+    // as such rather than silently half-fixed.
+    //
+    // Infinity has to be BUILT, not written: the ABNF script dialect has no
+    // exponent form in a numeric literal (1e308 parses as the identifier e308), so
+    // Math.pow(2, 1024) is the spelling. The sign is applied by dividing by -1
+    // rather than by `0 - v`, for the same reason the signed zeros are - see
+    // floNegate. float("-nan") is nan in CPython, so the sign is dropped there.
+    function pyStrToF(s) {
+        var t = s.trim()
+        var sign = 1
+        if (t.length > 0 && (t.charAt(0) == "+" || t.charAt(0) == "-")) {
+            if (t.charAt(0) == "-") { sign = 0 - 1 }
+            t = t.slice(1)
+        }
+        var low = t.toLowerCase()
+        if (low == "inf" || low == "infinity") {
+            var inf = Math.pow(2, 1024)
+            if (sign < 0) { return inf / (0 - 1) }
+            return inf
+        }
+        if (low == "nan") { return parseFloat("nan") }
+        return parseFloat(s)
+    }
     // Calling a builtin type object is a CONVERSION - str(x), int(x), list(x) - which
     // pyCall routes here rather than instantiating a class.
     function pyConvert(name, args) {
         var v = args.length > 0 ? args[0] : undefined
         if (name == "str") { return args.length == 0 ? "" : pstr(v) }
         if (name == "int") { return pyToInt(v) }
-        if (name == "float") { return pyFlo(typeof v == "string" ? parseFloat(v) : floVal(v)) }
+        if (name == "float") { return pyFlo(typeof v == "string" ? pyStrToF(v) : floVal(v)) }
         if (name == "bool") { return pytruthy(v) }
         if (name == "list") { return args.length == 0 ? [] : iterToList(v).slice(0) }
         if (name == "tuple") { return args.length == 0 ? [] : iterToList(v).slice(0) }
@@ -1380,6 +1413,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Python style rendering: True/False/None, lists in brackets, dicts in braces.
     function prepr(v) {
         if (typeof v == "string") return "'" + v + "'"
+        if (pyUser(v)) { return pyUserRender(v, true) }
         return pstr(v)
     }
     function pstr(v) {
@@ -1424,20 +1458,41 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return out2 + "}"
         }
-        // A user object renders through its __repr__ / __str__, else like Python's
-        // default <Name object>.
-        if (pyUser(v)) {
-            var f = clsFind(v.__class, "__repr__")
-            if (f != null) { return "" + f(v) }
-            // An exception renders as Name(args...), like Python's default repr.
-            if (hasOwn(v, "args")) {
-                var out4 = v.__class.__name + "("
-                for (var i = 0; i < v.args.length; i++) { if (i > 0) { out4 += ", " }; out4 += prepr(v.args[i]) }
-                return out4 + ")"
-            }
-            return "<" + v.__class.__name + " object>"
-        }
+        if (pyUser(v)) { return pyUserRender(v, false) }
         return "" + v
+    }
+    // A user object renders through its dunders, else like Python's default
+    // <Name object>. CPython splits the two directions: str() and print() prefer
+    // __str__ and fall back to __repr__, while repr() and every CONTAINER element
+    // use __repr__ only. This half had one body for both and consulted __repr__
+    // alone, so a class with a __str__ printed <Name object>; the two compiled
+    // halves had no user arm at all and printed [object Object] - pyUserRender in
+    // languages/lib/python-rt.metajs and abnf/jsrt.go are now this body.
+    function pyUserRender(v, wantRepr) {
+        if (!wantRepr) {
+            var g = clsFind(v.__class, "__str__")
+            if (g != null) { return "" + g(v) }
+            // BaseException.__str__, which an exception INHERITS and which therefore
+            // beats a __repr__ the class also defines: no args is "", one arg is
+            // str(that arg), more is the args TUPLE's repr. str(ValueError("boom"))
+            // is "boom" in CPython and was ValueError('boom') here.
+            if (hasOwn(v, "args")) {
+                if (v.args.length == 0) { return "" }
+                if (v.args.length == 1) { return pstr(v.args[0]) }
+                var oute = "("
+                for (var e = 0; e < v.args.length; e++) { if (e > 0) { oute += ", " }; oute += prepr(v.args[e]) }
+                return oute + ")"
+            }
+        }
+        var f = clsFind(v.__class, "__repr__")
+        if (f != null) { return "" + f(v) }
+        // An exception renders as Name(args...), like Python's default repr.
+        if (hasOwn(v, "args")) {
+            var out4 = v.__class.__name + "("
+            for (var i = 0; i < v.args.length; i++) { if (i > 0) { out4 += ", " }; out4 += prepr(v.args[i]) }
+            return out4 + ")"
+        }
+        return "<" + v.__class.__name + " object>"
     }
     // Walk a class and its bases (left to right, depth first - the MRO this model
     // needs) for a member.
@@ -2483,6 +2538,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     binOp = function(op, l, r) {
+        // "fmt" % args is printf-style FORMATTING, not a remainder, and it has to be
+        // decided BEFORE the boxed-number gate below - a float or an arbitrary
+        // precision int on the right is an ordinary argument, and floOp/boxOp would
+        // otherwise take the pair for arithmetic and answer NaN. It fell into fmod
+        // in both halves before this.
+        if (op == "%" && typeof l == "string") { return pyPct(l, r) }
         // Both overload gates - boxed numbers and user classes - sit behind ONE
         // typeof test, because pyBoxed and pyUser can only ever be true for an
         // object. An ordinary number therefore pays two comparisons and no call at
@@ -2517,8 +2578,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "//") return fdiv(l, r)
         if (op == "%") return fmod(l, r)
         // int ** negative int is a float in Python (2 ** -1 is 0.5); every other
-        // pair of ints stays an int.
-        if (op == "**") { if (r < 0) { return pyFlo(Math.pow(l, r)) } ; return Math.pow(l, r) }
+        // pair of ints stays an int - and a Python int is ARBITRARY PRECISION, so
+        // 10**30 is 1000000000000000000000000000000. Math.pow answers the nearest
+        // DOUBLE, which was 5076944270305264000 here (the int64 the tag engine
+        // wraps it into) and 1e+30 in the compiled halves - wrong twice over and
+        // divergent. Past 2^53 the double has lost digits, so the exact answer is
+        // the big path's: boxOp's `**` arm, which is bigPow and already exists.
+        // bigOut narrows it back to a plain number when it fits, so nothing below
+        // 2^53 changes shape.
+        if (op == "**") {
+            if (r < 0) { return pyFlo(Math.pow(l, r)) }
+            var pw = Math.pow(l, r)
+            if (pw > bigMaxNum || pw < 0 - bigMaxNum) { return boxOp("**", l, r).v }
+            return pw
+        }
         if (op == "==") return pyEq(l, r)
         if (op == "!=") return !pyEq(l, r)
         if (op == "is") return l === r
@@ -2545,6 +2618,259 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function strRepeat(s2, n) {
         var out = ""
         for (var i = 0; i < n; i++) { out += s2 }
+        return out
+    }
+    // ----- "fmt" % args, CPython's printf-style formatting -----
+    //
+    // UNIMPLEMENTED in both halves until now: binOp("%") on a string fell straight
+    // into fmod, so "%s" % "hi" was NaN - the two halves agreed, which is why
+    // --cross was blind to it and only a CPython diff saw it.
+    //
+    // Supported: the conversions s r a d i u x X o b c e E g G f F and %%; the
+    // flags - + 0 and space; a width; and a .precision, which TRUNCATES for s/r/a.
+    // A %(name)s mapping key reads a dict argument. NOT supported, and a LOUD
+    // failure rather than a silent wrong answer: the # alternate form.
+    //
+    // THE ARGUMENT TUPLE. CPython takes one value per conversion from a TUPLE and
+    // treats every other object as a single value - but a tuple IS a list in this
+    // value model (see "a tuple prints as a list" in the open list), so an ARRAY is
+    // read as the argument tuple exactly when its length equals the conversion
+    // count, and as one value otherwise. That is CPython's answer in every case
+    // except a ONE-element list meeting a single conversion, where the two
+    // readings are genuinely indistinguishable here: "%s" % (1,) is "1" and
+    // "%s" % [1] is "[1]" in CPython, and they are the same value in this model.
+    // The base-N digits of an integral value. `(255).toString(16)` works under goja
+    // and ABORTS under -frozen ("call of a non function value"), which made
+    // f"{255:x}" a LIVE FROZEN-DIFF that no test reached - the whole point of the
+    // matrix's byte-identity check. This is the digit loop instead, and it is exact
+    // for every magnitude a double holds exactly. The same loop is inlined in
+    // rt.pyPctRadix (abnf/jsrt.go) and pyBPctRadix (languages/lib/python-rt.metajs)
+    // - deliberately NOT strconv.FormatInt or pyBBaseStr, whose int64 SATURATION
+    // only the {:x} format spec wants - so %x agrees in all four engines.
+    function pyBaseStr(n, base) {
+        var v = Math.trunc(n)
+        if (v !== v) { v = 0 }
+        if (v == 0) { return "0" }
+        var neg = v < 0
+        if (neg) { v = 0 - v }
+        var out = ""
+        while (v > 0) {
+            var q = Math.floor(v / base)
+            out = "0123456789abcdefghijklmnopqrstuvwxyz".charAt(v - q * base) + out
+            v = q
+        }
+        return neg ? ("-" + out) : out
+    }
+    function pyPctCount(fmt) {
+        var n = 0
+        var i = 0
+        while (i < fmt.length) {
+            if (fmt.charAt(i) == "%") {
+                if (i + 1 < fmt.length && fmt.charAt(i + 1) == "%") { i = i + 2 ; continue }
+                n = n + 1
+            }
+            i = i + 1
+        }
+        return n
+    }
+    function pyPctDigits(v) {
+        if (pyBoxed(v) && !isCplx(v)) { return bigStr(v) }
+        var n = isFlo(v) ? floVal(v) : v
+        return "" + Math.trunc(n)
+    }
+    function pyPctRadix(v, base, upper) {
+        var n = isFlo(v) ? floVal(v) : v
+        if (pyBoxed(v) && !isCplx(v)) { n = bigToNum(v) }
+        var s2 = pyBaseStr(n, base)
+        if (upper) { return s2.toUpperCase() }
+        return s2
+    }
+    function pyPctOne(v, typ, left, zero, plus, space, width, prec) {
+        var body = anytype
+        var numeric = false
+        if (typ == "s" || typ == "r" || typ == "a") {
+            body = (typ == "s") ? pstr(v) : prepr(v)
+            if (prec >= 0 && pyLen(body) > prec) { body = body.slice(0, prec) }
+        } else if (typ == "c") {
+            body = (typeof v == "string") ? v : codePoint(Math.trunc(isFlo(v) ? floVal(v) : v))
+        } else if (typ == "d" || typ == "i" || typ == "u") {
+            numeric = true
+            body = pyPctDigits(v)
+        } else if (typ == "x") { numeric = true ; body = pyPctRadix(v, 16, false) }
+        else if (typ == "X") { numeric = true ; body = pyPctRadix(v, 16, true) }
+        else if (typ == "o") { numeric = true ; body = pyPctRadix(v, 8, false) }
+        else if (typ == "b") { numeric = true ; body = pyPctRadix(v, 2, false) }
+        else if (typ == "f" || typ == "F") {
+            numeric = true
+            body = pyFixed(isFlo(v) ? floVal(v) : (pyBoxed(v) ? bigToNum(v) : v), prec < 0 ? 6 : prec)
+        } else if (typ == "e" || typ == "E" || typ == "g" || typ == "G") {
+            numeric = true
+            body = pyPctExp(isFlo(v) ? floVal(v) : (pyBoxed(v) ? bigToNum(v) : v), typ, prec)
+        } else {
+            fail("unsupported format character '" + typ + "'")
+        }
+        if (numeric && body.charAt(0) != "-") {
+            if (plus) { body = "+" + body }
+            else if (space) { body = " " + body }
+        }
+        var pad = width - pyLen(body)
+        if (pad <= 0) { return body }
+        if (left) { return body + strRepeat(" ", pad) }
+        if (zero && numeric) {
+            var sgn = body.charAt(0)
+            if (sgn == "-" || sgn == "+" || sgn == " ") { return sgn + strRepeat("0", pad) + body.slice(1) }
+            return strRepeat("0", pad) + body
+        }
+        return strRepeat(" ", pad) + body
+    }
+    // %e / %g, spelled out because the dialect has no toExponential: floPrec is the
+    // host global lua's formatter already leans on ("|v| to n significant digits as
+    // DIGITSeEXP, trailing zeros stripped"), and %g's own rule picks between the two
+    // shapes on the exponent that was USED.
+    function pyPctExp(n, typ, prec) {
+        var upper = (typ == "E" || typ == "G")
+        var p = (prec < 0) ? 6 : prec
+        if (n !== n) { return upper ? "NAN" : "nan" }
+        if (n - n !== 0) { return (n < 0 ? "-" : "") + (upper ? "INF" : "inf") }
+        if (typ == "g" || typ == "G") {
+            if (p == 0) { p = 1 }
+            var ge = pyPctSig(n < 0 ? 0 - n : n, p).e
+            if (ge < -4 || ge >= p) { return pyPctStrip(pyPctExpText(n, p - 1, upper)) }
+            var fx = pyFixed(n, p - 1 - ge)
+            if (fx.indexOf(".") >= 0) {
+                while (fx.charAt(fx.length - 1) == "0") { fx = fx.slice(0, fx.length - 1) }
+                if (fx.charAt(fx.length - 1) == ".") { fx = fx.slice(0, fx.length - 1) }
+            }
+            return fx
+        }
+        return pyPctExpText(n, p, upper)
+    }
+    // %g strips the trailing zeros of the mantissa in BOTH of its shapes, so
+    // 1.23400e-05 is 1.234e-05 and 1.00000e+06 is 1e+06.
+    function pyPctStrip(t) {
+        var at = t.indexOf("e")
+        if (at < 0) { at = t.indexOf("E") }
+        if (at < 0) { return t }
+        var mant = t.slice(0, at)
+        var tail = t.slice(at)
+        if (mant.indexOf(".") < 0) { return t }
+        while (mant.charAt(mant.length - 1) == "0") { mant = mant.slice(0, mant.length - 1) }
+        if (mant.charAt(mant.length - 1) == ".") { mant = mant.slice(0, mant.length - 1) }
+        return mant + tail
+    }
+    // |a| rounded to nd SIGNIFICANT digits, half to even, as {d, e}: exactly nd
+    // digit characters and the decimal exponent of the first of them.
+    //
+    // The obvious source is floPrec and it is the WRONG one: floPrec's contract is
+    // only "at least nd digits" - the floor's implementation answers the SHORTEST
+    // round-tripping form when nd is smaller, so %e of 1234.5678 came out
+    // 1.234567e+03 from the native binary. Every existing floPrec caller asks for
+    // an nd at least as large as the shortest form, where the two contracts
+    // coincide; %e and %g do not. pyBPctSig in languages/lib/python-rt.metajs is
+    // this same body.
+    function pyPctSig(a, nd) {
+        if (a == 0) {
+            var z = ""
+            while (z.length < nd) { z = z + "0" }
+            return {d: z, e: 0}
+        }
+        var dec = pyExactDec(a)
+        var joined = dec.i + dec.f
+        var lead = 0
+        while (lead < joined.length && joined.charAt(lead) == "0") { lead = lead + 1 }
+        var ex = dec.i.length - 1 - lead
+        var kept = pyRoundHalfEven(joined.slice(lead), nd)
+        if (kept.length > nd) { ex = ex + 1 ; kept = kept.slice(0, nd) }
+        while (kept.length < nd) { kept = kept + "0" }
+        return {d: kept, e: ex}
+    }
+    // |n| to p+1 significant digits in C's %e shape: one digit, a point, p digits,
+    // and an exponent that is signed and at least two digits.
+    function pyPctExpText(n, p, upper) {
+        var neg = n < 0 || (n == 0 && 1 / n < 0)
+        var a = neg ? 0 - n : n
+        var sig = pyPctSig(a, p + 1)
+        var digs = sig.d
+        var ex = sig.e
+        var mant = digs.charAt(0)
+        if (p > 0) { mant = mant + "." + digs.slice(1, p + 1) }
+        var es = "" + (ex < 0 ? 0 - ex : ex)
+        if (es.length < 2) { es = "0" + es }
+        var out = mant + (upper ? "E" : "e") + (ex < 0 ? "-" : "+") + es
+        return neg ? ("-" + out) : out
+    }
+    function pyPct(fmt, arg) {
+        var nconv = pyPctCount(fmt)
+        var args = anytype
+        var dict = null
+        if (Array.isArray(arg) && arg.length == nconv) { args = arg }
+        else if (isDict(arg) && !isSet(arg)) { dict = arg ; args = [arg] }
+        else { args = [arg] }
+        var out = ""
+        var ai = 0
+        var mapped = false
+        var i = 0
+        while (i < fmt.length) {
+            var c = fmt.charAt(i)
+            if (c != "%") { out = out + c ; i = i + 1 ; continue }
+            i = i + 1
+            if (i >= fmt.length) { fail("incomplete format") }
+            if (fmt.charAt(i) == "%") { out = out + "%" ; i = i + 1 ; continue }
+            var key = null
+            if (fmt.charAt(i) == "(") {
+                i = i + 1
+                var k = ""
+                while (i < fmt.length && fmt.charAt(i) != ")") { k = k + fmt.charAt(i) ; i = i + 1 }
+                key = k
+                i = i + 1
+                mapped = true
+            }
+            var left = false
+            var zero = false
+            var plus = false
+            var space = false
+            var scanning = true
+            while (scanning && i < fmt.length) {
+                var fl = fmt.charAt(i)
+                if (fl == "-") { left = true ; i = i + 1 }
+                else if (fl == "0") { zero = true ; i = i + 1 }
+                else if (fl == "+") { plus = true ; i = i + 1 }
+                else if (fl == " ") { space = true ; i = i + 1 }
+                else if (fl == "#") { fail("unsupported format flag '#'") }
+                else { scanning = false }
+            }
+            var width = 0
+            while (i < fmt.length && fmt.charAt(i) >= "0" && fmt.charAt(i) <= "9") {
+                width = width * 10 + (fmt.charCodeAt(i) - 48)
+                i = i + 1
+            }
+            var prec = -1
+            if (i < fmt.length && fmt.charAt(i) == ".") {
+                i = i + 1
+                prec = 0
+                while (i < fmt.length && fmt.charAt(i) >= "0" && fmt.charAt(i) <= "9") {
+                    prec = prec * 10 + (fmt.charCodeAt(i) - 48)
+                    i = i + 1
+                }
+            }
+            while (i < fmt.length && (fmt.charAt(i) == "l" || fmt.charAt(i) == "h" || fmt.charAt(i) == "L")) { i = i + 1 }
+            if (i >= fmt.length) { fail("incomplete format") }
+            var typ = fmt.charAt(i)
+            i = i + 1
+            var v = anytype
+            if (key != null) {
+                if (dict == null) { fail("format requires a mapping") }
+                var di = dictFind(dict, key)
+                if (di < 0) { fail("KeyError: '" + key + "'") }
+                v = dict.vals[di]
+            } else {
+                if (ai >= args.length) { fail("not enough arguments for format string") }
+                v = args[ai]
+                ai = ai + 1
+            }
+            out = out + pyPctOne(v, typ, left, zero, plus, space, width, prec)
+        }
+        if (!mapped && ai < args.length) { fail("not all arguments converted during string formatting") }
         return out
     }
     // Python 'x in y' for lists, strings and dict keys.
@@ -2799,22 +3125,106 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return body + strRepeat(fill, pad)
     }
     function isAlign(ch) { return ch == "<" || ch == ">" || ch == "^" || ch == "=" }
-    // Fixed-point rendering, spelled out because frozen MetaJS has no Number.toFixed:
-    // scale, round once, then split the integer and the (zero padded) fraction.
-    function pyFixed(v, p) {
-        var neg = v < 0
-        var x = neg ? -v : v
-        var f = 1
-        for (var i = 0; i < p; i++) { f = f * 10 }
-        var t = Math.round(x * f)
-        var ip = Math.floor(t / f)
-        var s = "" + ip
-        if (p > 0) {
-            var fs = "" + (t - ip * f)
-            while (fs.length < p) { fs = "0" + fs }
-            s = s + "." + fs
+    // The EXACT decimal of a non-negative finite double, as {i, f}. Every double is
+    // an integer mantissa times a power of two, so scaling by 2^e - or by 5^(-e)
+    // and then placing the point - is exact. pyBExactDec in
+    // languages/lib/python-rt.metajs is the same body over that engine's bignum;
+    // this one uses THIS grammar's, the one the arbitrary precision ints already
+    // brought.
+    function pyExactDec(a) {
+        if (a == 0) { return {i: "0", f: ""} }
+        var m = a
+        var e = 0
+        // Down to an integer mantissa. Every step is exact, and a subnormal needs
+        // at most 1074 of them.
+        while (m != Math.floor(m)) { m = m * 2 ; e = e - 1 }
+        // And back under 2^53, which only an already-integral value can be above.
+        while (m > bigMaxNum) { m = m / 2 ; e = e + 1 }
+        var b = bigFromNum(m)
+        if (e >= 0) {
+            var k = 0
+            while (k < e) { b = bigOb(1, magMulSmall(b.limbs, 2)) ; k = k + 1 }
+            return {i: bigStr(b), f: ""}
         }
-        return (neg && t > 0) ? ("-" + s) : s
+        var n = 0 - e
+        var j = 0
+        while (j < n) { b = bigOb(1, magMulSmall(b.limbs, 5)) ; j = j + 1 }
+        var all = bigStr(b)
+        while (all.length <= n) { all = "0" + all }
+        return {i: all.slice(0, all.length - n), f: all.slice(all.length - n)}
+    }
+    // Round the digit string to `keep` digits, half to EVEN, and answer the kept
+    // digits - one longer when the rounding carried all the way (999 -> 1000),
+    // which the caller detects by the length. pyBRoundHalfEven, one for one.
+    function pyRoundHalfEven(digits, keep) {
+        if (keep >= digits.length) {
+            var out = digits
+            while (out.length < keep) { out = out + "0" }
+            return out
+        }
+        var head = digits.slice(0, keep)
+        var d = digits.charCodeAt(keep) - 48
+        var up = false
+        if (d > 5) { up = true }
+        if (d == 5) {
+            var rest = false
+            var i2 = keep + 1
+            while (i2 < digits.length) {
+                if (digits.charAt(i2) != "0") { rest = true ; break }
+                i2 = i2 + 1
+            }
+            if (rest) { up = true }
+            else if (keep > 0) {
+                var last = head.charCodeAt(keep - 1) - 48
+                up = last - Math.floor(last / 2) * 2 == 1
+            }
+        }
+        if (!up) {
+            if (head == "") { return "0" }
+            return head
+        }
+        var codes = []
+        var k2 = 0
+        while (k2 < head.length) { codes.push(head.charCodeAt(k2) - 48) ; k2 = k2 + 1 }
+        var at = codes.length - 1
+        var carry = 1
+        while (at >= 0 && carry == 1) {
+            var v2 = codes[at] + 1
+            if (v2 == 10) { codes[at] = 0 } else { codes[at] = v2 ; carry = 0 }
+            at = at - 1
+        }
+        var res = ""
+        var q = 0
+        while (q < codes.length) { res = res + ("" + codes[q]) ; q = q + 1 }
+        if (carry == 1) { res = "1" + res }
+        return res
+    }
+    // Fixed-point rendering, spelled out because frozen MetaJS has no
+    // Number.toFixed. It used to scale by 10^p and Math.round, which rounds a tie
+    // HALF UP - so f"{2.5:.0f}" was "3" here and "2" in both compiled halves and in
+    // CPython, and f"{0.125:.2f}" was "0.13" against their "0.12". A LIVE HALVES
+    // DIVERGENCE that no test reached, so --cross was silent about it. It is now
+    // the exact decimal rounded half to EVEN, which is what
+    // strconv.FormatFloat(v, 'f', p, 64) - and therefore both compiled halves - do.
+    function pyFixed(v, p) {
+        if (v !== v) { return "NaN" }
+        if (v - v !== 0) { if (v > 0) { return "+Inf" } ; return "-Inf" }
+        // The sign of a zero has to be READ rather than compared: -0.0 < 0 is false.
+        var neg = v < 0
+        if (v == 0 && 1 / v < 0) { neg = true }
+        var a = neg ? 0 - v : v
+        var dec = pyExactDec(a)
+        var ip = dec.i
+        var joined = ip + dec.f
+        var kept = pyRoundHalfEven(joined, ip.length + p)
+        var ilen = ip.length
+        if (kept.length > ip.length + p) { ilen = ilen + 1 }
+        var ints = kept.slice(0, ilen)
+        var fracs = kept.slice(ilen)
+        if (ints == "") { ints = "0" }
+        var body = ints
+        if (p > 0) { body = ints + "." + fracs }
+        return (neg ? "-" : "") + body
     }
     // The numeric presentation types read the DOUBLE, so a float box unwraps here
     // (one line, floVal) - while the default arms still see the box, because that
@@ -2824,10 +3234,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var n = floVal(v)
         if (typ == "f" || typ == "F") { body = pyFixed(n, prec < 0 ? 6 : prec) }
         else if (typ == "d") { body = "" + (n | 0) }
-        else if (typ == "x") { body = (n | 0).toString(16) }
-        else if (typ == "X") { body = (n | 0).toString(16).toUpperCase() }
-        else if (typ == "b") { body = (n | 0).toString(2) }
-        else if (typ == "o") { body = (n | 0).toString(8) }
+        else if (typ == "x") { body = pyBaseStr(n | 0, 16) }
+        else if (typ == "X") { body = pyBaseStr(n | 0, 16).toUpperCase() }
+        else if (typ == "b") { body = pyBaseStr(n | 0, 2) }
+        else if (typ == "o") { body = pyBaseStr(n | 0, 8) }
         else if (conv == "r") { body = prepr(v) }
         else { body = pstr(v) }
         if (sign == "+" && (typeof v == "number" || isFlo(v)) && n >= 0) { body = "+" + body }

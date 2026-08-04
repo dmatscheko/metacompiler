@@ -918,6 +918,24 @@ def s32
   # which the fix must leave exactly where they were.
   check("n16i", (-5.0 % 2.0).to_s == "1.0" && (5.0 % -2.0).to_s == "-1.0" &&
                 (-0.0 % -1.0).to_s == "-0.0" && (0.0 % -1.0).to_s == "0.0")
+  # ...and the DIVIDENDS BIG ENOUGH THAT floor(x/y)*y IS NO LONGER EXACT, which is
+  # the rest of flodivmod and the reason `%` is now literally
+  # `mod = fmod(x, y); if (y*mod < 0) mod += y`. The old x - floor(x/y)*y answered
+  # 0.0 for all of these in the interpreter and a rounded multiple of y in the
+  # compiler - the two halves did not even agree. 1e16 is the smallest one here:
+  # it is not an astronomical corner. Every right-hand side is ruby 2.6.10p210's.
+  check("n16j", (1.0e308 % 3.0).to_s == "2.0" && (-1.0e308 % 3.0).to_s == "1.0")
+  check("n16k", (1.0e308 % 2.5).to_s == "1.0" && (-1.0e308 % 2.5).to_s == "1.5" &&
+                (1.0e16 % 3.0).to_s == "1.0")
+  check("n16l", (123456789012345678.0 % 7.0).to_s == "3.0" &&
+                (1.0e300 % 7.3).to_s == "0.7299664879653811" &&
+                (-1.0e300 % 7.3).to_s == "6.570033512034619")
+  # An infinite divisor needs no special case: fmod(-5, +Inf) is -5 and
+  # +Inf * -5 is -Inf, so the correction fires and -5.0 % Infinity is Infinity.
+  s32inf = 1.0 / 0.0
+  check("n16m", (5.0 % s32inf).to_s == "5.0" && (-5.0 % s32inf).to_s == "Infinity" &&
+                (5.0 % (0.0 - s32inf)).to_s == "-Infinity" &&
+                (-5.0 % (0.0 - s32inf)).to_s == "-5.0")
   check("n17", true.to_s == "true")
   check("n18", :sym.to_s == "sym")
 end

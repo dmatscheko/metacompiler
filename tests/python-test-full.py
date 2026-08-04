@@ -1147,6 +1147,136 @@ def s26():
     check("flo39", str(10000000000000000000000000000 / 1) == "1e+28")
     check("flo40", str(10000000000000000000000000001 - 10000000000000000000000000000) == "1")
 
+# ===== SECTION 27: the six defects the float-box probes found and left =====
+# Every check here was measured wrong at f2f8926, and each names which half was
+# wrong. Expected values are CPython 3.14.6's.
+def s27():
+    # float(str) is CPython's float_from_string, not JavaScript's parseFloat: it
+    # takes the three non-finite SPELLINGS, case-insensitively and with an
+    # optional sign. float("inf") was nan in ALL THREE engines, and "Infinity"
+    # was inf in the interpreter and nan in the compiler - a halves divergence on
+    # top of the defect. Infinity is BUILT (1e308 * 10) rather than written,
+    # because parseFloat("1e400") used to be a FROZEN-DIFF of its own.
+    inf = 1e308 * 10
+    check("nf1", float("inf") == inf and float("-inf") == 0 - inf)
+    check("nf2", float("INFINITY") == inf and float("infinity") == inf and float("-Inf") == 0 - inf)
+    check("nf3", str(float("nan")) == "nan" and str(float("-nan")) == "nan" and str(float("NaN")) == "nan")
+    check("nf4", float("  inf  ") == inf and str(float("1.5")) == "1.5")
+    # The builtin TYPE OBJECTS. `int` is the class, not a conversion function, so
+    # type(1) IS int - and it was not, under the compiler only: declBuiltin bound
+    # the name to the conversion closure and the class object was reachable only
+    # through type(). Six for six wrong there, all six right in the interpreter.
+    check("ty1", isinstance("a", str) and isinstance(1, int) and isinstance(1.0, float))
+    check("ty2", isinstance([1], list) and isinstance({}, dict) and isinstance(True, bool))
+    check("ty3", type(1) == int and type(1) is int and type("a") is str)
+    check("ty4", type(1.0) is float and type([1]) is list)
+    # ...and calling the name still converts, because the conversion closure rides
+    # on the class object as __conv.
+    check("ty5", int("42") == 42 and str(float("1.5")) == "1.5" and list("ab") == ["a", "b"])
+    check("ty6", str(int) == "<class 'int'>" and str(str) == "<class 'str'>")
+    # __repr__ / __str__ under the COMPILER, which had no user-object rendering
+    # arm at all and printed [object Object] for every instance. CPython prefers
+    # __str__ for str()/print() and __repr__ for repr() and container elements.
+    # rp2 and rp3 pin OUR default, "<Name object>": CPython writes
+    # "<__main__.Name object at 0x...>" and no engine here can reproduce the
+    # address, so those two right-hand sides are deliberately not CPython's.
+    check("rp1", str(S27V(3)) == "V(3)" and repr(S27V(3)) == "V(3)" and str([S27V(3)]) == "[V(3)]")
+    check("rp2", str(S27W(1)) == "W!1" and repr(S27W(1)) == "<S27W object>")
+    check("rp3", str(S27X()) == "<S27X object>" and str([S27X()]) == "[<S27X object>]")
+    # BaseException.__str__, which an exception INHERITS: str(e) is the message,
+    # repr(e) is Name(args...).
+    check("rp4", str(ValueError("boom")) == "boom" and repr(ValueError("boom")) == "ValueError('boom')")
+    check("rp5", str(S27E("m")) == "m" and repr(S27E("m")) == "REPR")
+    check("rp6", str(S27F()) == "" and str(S27F("a")) == "a" and str(S27F("a", 1)) == "('a', 1)")
+    # A Python int is ARBITRARY PRECISION, so ** stays exact. The interpreter
+    # answered 5076944270305264000 for 10**30 (the int64 its tag engine wrapped
+    # the double into) and the compiler folded 1e+30 - wrong twice and divergent.
+    check("bi1", str(10 ** 30) == "1000000000000000000000000000000")
+    check("bi2", str(2 ** 70) == "1180591620717411303424" and str(2 ** 63) == "9223372036854775808")
+    check("bi3", str(3 ** 40) == "12157665459056928801" and 10 ** 18 == 1000000000000000000)
+    check("bi4", str(2 ** -1) == "0.5" and 2 ** 10 == 1024 and str(type(2 ** 10)) == "<class 'int'>")
+    # ...and an int operand meeting a big PROMOTES, which the compiled halves did
+    # not do at all: +, -, *, //, % and every ORDER comparison were NaN or False
+    # there whenever one side was a plain int.
+    check("bi5", str(10 ** 30 + 1) == "1000000000000000000000000000001")
+    check("bi6", str(1 + 10 ** 30) == "1000000000000000000000000000001" and str(10 ** 30 * 3) == "3000000000000000000000000000000")
+    check("bi7", str(10 ** 30 // 7) == "142857142857142857142857142857" and str(10 ** 30 % 7) == "1")
+    check("bi8", str((0 - 10 ** 30) // 7) == "-142857142857142857142857142858" and str((0 - 10 ** 30) % 7) == "6")
+    check("bi9", str(10 ** 30 % (0 - 7)) == "-6" and 10 ** 30 > 1 and 1 < 10 ** 30 and not (10 ** 30 <= 1))
+    # An unreached annotation followed by a reached one: the compiler answered
+    # "is there an __annotations__ dict here" with a STICKY static flag, so the
+    # dict was never created and the class body died with
+    # "variable not defined: __annotations__".
+    check("an1", len(S27Ann.__annotations__) == 1 and "am_yes" in S27Ann.__annotations__)
+
+class S27V:
+    def __init__(self, n):
+        self.n = n
+    def __repr__(self):
+        return "V(" + str(self.n) + ")"
+
+class S27W:
+    def __init__(self, n):
+        self.n = n
+    def __str__(self):
+        return "W!" + str(self.n)
+
+class S27X:
+    pass
+
+class S27E(Exception):
+    def __repr__(self):
+        return "REPR"
+
+class S27F(Exception):
+    pass
+
+class S27Ann:
+    if False:
+        am_no: int = 1
+    am_yes: int = 2
+
+# ===== SECTION 28: printf-style % formatting =====
+# "fmt" % args was UNIMPLEMENTED in both halves - binOp("%") on a string fell into
+# fmod, so "%s" % "hi" was NaN. The halves agreed, so --cross was blind to it.
+# Every right-hand side is CPython 3.14.6's own answer.
+#
+# An ARRAY is read as the argument TUPLE exactly when its length equals the
+# conversion count, and as a single value otherwise - because a tuple IS a list in
+# this value model. pct20 is that rule from the "single value" side.
+def s28():
+    check("pct01", ("%s" % "hi") == "hi" and ("%s and %s" % ("a", "b")) == "a and b")
+    check("pct02", ("%d" % 42) == "42" and ("%5d|" % 42) == "   42|" and ("%-5d|" % 42) == "42   |")
+    check("pct03", ("%05d|" % 42) == "00042|" and ("%05d|" % -42) == "-0042|")
+    check("pct04", ("%+d" % 42) == "+42" and ("% d" % 42) == " 42")
+    check("pct05", ("%x %X %o" % (255, 255, 8)) == "ff FF 10")
+    check("pct06", ("%.2f" % 3.14159) == "3.14" and ("%f" % 1.5) == "1.500000")
+    check("pct07", ("%8.2f|" % 3.14159) == "    3.14|" and ("%-8.2f|" % 3.14159) == "3.14    |")
+    check("pct08", ("%.3s|" % "hello") == "hel|" and ("%r" % "hi") == "'hi'")
+    check("pct09", ("%c%c" % (65, "b")) == "Ab" and ("%d%% done" % 50) == "50% done")
+    check("pct10", ("%(a)s-%(b)d" % {"a": "x", "b": 7}) == "x-7")
+    check("pct11", ("%10s|" % "hi") == "        hi|" and ("%-10s|" % "hi") == "hi        |")
+    check("pct12", ("%s" % 1.0) == "1.0" and ("%s" % True) == "True" and ("%s" % None) == "None")
+    check("pct13", ("%e" % 1234.5678) == "1.234568e+03" and ("%E" % 1234.5678) == "1.234568E+03")
+    check("pct14", ("%.2e" % 1234.5678) == "1.23e+03" and ("%e" % 0.0) == "0.000000e+00")
+    check("pct15", ("%g" % 1234.5678) == "1234.57" and ("%g" % 0.00001234) == "1.234e-05")
+    check("pct16", ("%G" % 1234567890.0) == "1.23457E+09" and ("%.3g" % 1234.5678) == "1.23e+03")
+    check("pct17", ("%g %g" % (100000.0, 1000000.0)) == "100000 1e+06")
+    # An arbitrary precision int is exact through %s and %d.
+    check("pct18", ("%s" % (10 ** 30)) == "1000000000000000000000000000000")
+    check("pct19", ("%d" % (10 ** 30)) == "1000000000000000000000000000000")
+    check("pct20", ("%s" % [1, 2]) == "[1, 2]" and ("%s %d" % ("n", 3.9)) == "n 3")
+    # The .Nf verb rounds HALF TO EVEN, which is strconv.FormatFloat's rule and
+    # CPython's. The interpreter used to scale and Math.round, i.e. half UP, so
+    # f"{2.5:.0f}" was "3" here and "2" in both compiled halves - a live halves
+    # divergence no test reached.
+    check("pct21", f"{2.5:.0f}" == "2" and f"{3.5:.0f}" == "4" and f"{0.125:.2f}" == "0.12")
+    check("pct22", ("%.0f %.1f" % (2.5, 0.05)) == "2 0.1")
+    # ...and the {:x} spec: (255).toString(16) works under goja and ABORTS under
+    # -frozen, so this was a live FROZEN-DIFF in the interpreter that no test
+    # reached. The matrix's goja/-frozen byte-identity check is the gate.
+    check("pct23", f"{255:x} {255:X} {8:o} {5:b}" == "ff FF 10 101")
+
 # ===== END SECTIONS =====
 
 def main():
@@ -1176,5 +1306,7 @@ def main():
     s24() # SECTION-CALL 24
     s25() # SECTION-CALL 25
     s26() # SECTION-CALL 26
+    s27() # SECTION-CALL 27
+    s28() # SECTION-CALL 28
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

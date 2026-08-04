@@ -2592,7 +2592,72 @@ func (rt *jsrt) pyRepr(v interface{}) string {
 	if s, isStr := v.(string); isStr {
 		return "'" + s + "'"
 	}
+	// A CLASS object is not an instance to render: pyString's own <class 'name'>
+	// arm has to win, exactly as it does for str().
+	if _, isCls := rt.pyClassName(v); !isCls {
+		if o, cls, isInst := pyInstance(v); isInst {
+			return rt.pyUserRender(o, cls, true)
+		}
+	}
 	return rt.pyString(v)
+}
+
+// pyUserRender renders a USER INSTANCE. This half had no such arm at all, so a
+// class with a __repr__ printed [object Object] under llvm.Run and the native
+// binary where the interpreter and CPython print V(3) - and so did an exception
+// and a plain instance. It is pyUserRender in languages/python-interpreter.abnf,
+// one for one, including the split CPython makes: str() and print() prefer
+// __str__ and fall back to __repr__, while repr() and every CONTAINER element use
+// __repr__ only. The <Name object> default deliberately omits CPython's
+// `at 0x...` address, which no engine here can reproduce.
+func (rt *jsrt) pyUserRender(o *jsObject, cls *jsObject, wantRepr bool) string {
+	if !wantRepr {
+		if m, found := pyLookup(cls, "__str__"); found && isCallable(m) {
+			return rt.toString(rt.call(m, jsUndef, []interface{}{o}))
+		}
+		// BaseException.__str__, which an exception INHERITS and which therefore
+		// beats a __repr__ the class also defines: no args is "", one arg is
+		// str(that arg), more is the args TUPLE's repr.
+		if args, ok := o.props["args"].(*jsArray); ok {
+			if len(args.elems) == 0 {
+				return ""
+			}
+			if len(args.elems) == 1 {
+				return rt.pyString(args.elems[0])
+			}
+			out := "("
+			for i, e := range args.elems {
+				if i > 0 {
+					out += ", "
+				}
+				out += rt.pyRepr(e)
+			}
+			return out + ")"
+		}
+	}
+	if m, found := pyLookup(cls, "__repr__"); found && isCallable(m) {
+		return rt.toString(rt.call(m, jsUndef, []interface{}{o}))
+	}
+	// An exception renders as Name(args...), like Python's default repr.
+	if args, ok := o.props["args"].(*jsArray); ok {
+		out := rt.pyClsName(cls) + "("
+		for i, e := range args.elems {
+			if i > 0 {
+				out += ", "
+			}
+			out += rt.pyRepr(e)
+		}
+		return out + ")"
+	}
+	return "<" + rt.pyClsName(cls) + " object>"
+}
+
+// pyClsName is a class object's __name, or "object" when it has none.
+func (rt *jsrt) pyClsName(cls *jsObject) string {
+	if n, ok := cls.props["__name"].(string); ok {
+		return n
+	}
+	return "object"
 }
 
 // pyString renders a value like Python's str(): True/False/None capitalized,
@@ -2640,6 +2705,9 @@ func (rt *jsrt) pyString(v interface{}) string {
 				out += rt.pyRepr(keys.elems[i]) + ": " + rt.pyRepr(vals.elems[i])
 			}
 			return out + "}"
+		}
+		if o, cls, isInst := pyInstance(t); isInst {
+			return rt.pyUserRender(o, cls, false)
 		}
 		return rt.toString(v)
 	default:
@@ -2917,6 +2985,106 @@ func bigPair(a, b interface{}) (*big.Int, *big.Int, bool) {
 	return ab.v, bb.v, true
 }
 
+// pyBigOperand answers an EXACT big.Int for a Python int operand: a BigInt as
+// itself, and an integral double inside the exactly representable range as
+// itself. A float box, a non-integral double and anything past 2^53 (where the
+// double is already an approximation) answer false, so `**` falls back to the
+// double path rather than inventing precision the operand never had.
+// pyABigFromNum in languages/lib/python-rt.metajs is the same test.
+func pyBigOperand(v interface{}) (*big.Int, bool) {
+	switch t := v.(type) {
+	case *jsBigInt:
+		return t.v, true
+	case bool:
+		if t {
+			return big.NewInt(1), true
+		}
+		return big.NewInt(0), true
+	case float64:
+		if t == math.Trunc(t) && math.Abs(t) <= 9007199254740992 {
+			return big.NewInt(int64(t)), true
+		}
+	}
+	return nil, false
+}
+
+// pyBigNarrow is the Go twin of the interpreter's bigOut: a big that still fits
+// in the exactly representable range comes back as a plain number, so only the
+// values that GENUINELY need arbitrary precision carry the BigInt shape. Creating
+// one sets hasBigInt, which is what lets the following operators reach bigArith.
+func (rt *jsrt) pyBigNarrow(x *big.Int) interface{} {
+	if x.IsInt64() {
+		if n := x.Int64(); n <= 9007199254740992 && n >= -9007199254740992 {
+			return float64(n)
+		}
+	}
+	rt.hasBigInt = true
+	return &jsBigInt{v: x}
+}
+
+// pyBigPair answers both operands as exact big.Ints when AT LEAST ONE of them is
+// a BigInt and the other is an exact Python int. Python has ONE int type and it is
+// arbitrary precision, so an int operand meeting a big PROMOTES; ECMAScript's
+// BigInt refuses that mix, which is why bigPair above - shared with js_add,
+// js_sub and the rest of the generic externals - demands two BigInts and this
+// Python-only pair does not.
+func pyBigPair(a, b interface{}) (*big.Int, *big.Int, bool) {
+	_, aBig := a.(*jsBigInt)
+	_, bBig := b.(*jsBigInt)
+	if !aBig && !bBig {
+		return nil, nil, false
+	}
+	x, xok := pyBigOperand(a)
+	if !xok {
+		return nil, nil, false
+	}
+	y, yok := pyBigOperand(b)
+	if !yok {
+		return nil, nil, false
+	}
+	return x, y, true
+}
+
+// pyBigBin is Python's integer arithmetic in arbitrary precision. `//` and `%`
+// FLOOR, as Python's do: Go's Quo/Rem truncate and Go's Div/Mod are Euclidean, and
+// neither is Python's answer for a negative divisor (1e30 % -7 is -6, not +1).
+// ok is false for an operator with no exact integer form, so the caller falls
+// through to the double path it always had.
+func pyBigBin(op string, x, y *big.Int) (*big.Int, bool) {
+	out := new(big.Int)
+	switch op {
+	case "+":
+		out.Add(x, y)
+	case "-":
+		out.Sub(x, y)
+	case "*":
+		out.Mul(x, y)
+	case "//", "%":
+		if y.Sign() == 0 {
+			return nil, false // Let the double path raise the usual error.
+		}
+		q, r := new(big.Int), new(big.Int)
+		q.QuoRem(x, y, r)
+		if r.Sign() != 0 && r.Sign() != y.Sign() {
+			q.Sub(q, big.NewInt(1))
+			r.Add(r, y)
+		}
+		if op == "//" {
+			out = q
+		} else {
+			out = r
+		}
+	case "**":
+		if y.Sign() < 0 || !y.IsInt64() || y.Int64() > 4096 {
+			return nil, false
+		}
+		out.Exp(x, y, nil)
+	default:
+		return nil, false
+	}
+	return out, true
+}
+
 // bigArith is the BigInt path of the binary arithmetic externals. ok is false when
 // the operands are not both BigInts, and the caller falls back to double arithmetic.
 func bigArith(op byte, a, b interface{}) (res interface{}, ok bool) {
@@ -3128,29 +3296,43 @@ func rubyTruthy(v interface{}) bool {
 	return true
 }
 
-// rubyFloMod is Ruby's Float#%. `x - floor(x/y)*y` gets the SIGN OF THE DIVISOR
-// right (-5.0 % 2.0 is 1.0, 5.0 % -2.0 is -1.0) and the SIGN OF A ZERO wrong:
-// ruby's numeric.c flodivmod starts from `fmod`, whose result carries the
-// DIVIDEND's sign, and only adds y when `y*mod < 0` - which cannot fire on a
-// zero mod. So `-4.0 % 2.0` is `-0.0` and `-0.0 % 1.0` is `-0.0`, while
-// -4 - (-4) is +0.0 in IEEE and the sign is lost.
+// rubyFloMod is Ruby's Float#%, and it is numeric.c flodivmod's body verbatim:
 //
-// A zero result happens exactly when fmod is zero, so restoring the dividend's
-// sign on a zero result is the whole difference. The other two halves -
-// zeroSigned in languages/ruby-interpreter.abnf and rbZeroSign in
-// languages/lib/ruby-rt.metajs - spell that sign as `z / (0 - 1)`, NOT as the
-// obvious `x * 0`: the tag engine keeps an integral value as an integer, so
-// `-4 * 0` is the integer 0 there and the sign is gone. Go is IEEE all the way
-// down and has math.Copysign, so this half says what it means.
+//	mod = fmod(x, y); if (y*mod < 0) mod += y;
 //
-// Settled against ruby 2.6.10p210 - Float#% is unchanged in 3.x - over the 14
-// finite rows of the probe: -0.0 % 1.0 and -4.0 % 2.0 and -4.0 % -2.0 and
-// -7.5 % 2.5 are all -0.0, 4.0 % -2.0 is 0.0, -5.0 % 2.0 is 1.0 and
-// 5.0 % -2.0 is -1.0.
+// That one line gets all three behaviours at once. The DIVISOR's sign
+// (-5.0 % 2.0 is 1.0, 5.0 % -2.0 is -1.0) comes from the correction; the
+// DIVIDEND's sign on a ZERO (-4.0 % 2.0 is -0.0, -0.0 % 1.0 is -0.0) comes from
+// fmod, because the correction cannot fire when mod is zero; and the huge
+// dividends come from fmod being exact where the older `x - floor(x/y)*y` was
+// not - floor(1e308/3)*3 rounds, so that form answered 0.0 for 1e308 % 3.0
+// where ruby answers 2.0. Measured over an 18-row probe: 9 of 18 were wrong,
+// and not only astronomically - 123456789012345678.0 % 7.0 is 3.0 in ruby and
+// was 0.0 here, and 1e16 % 3.0 is 1.0 and was 0.0.
+//
+// The infinite divisor falls out of the same line and needs no special case:
+// fmod(-5, +Inf) is -5, +Inf * -5 is -Inf, so -5.0 % Infinity is Infinity, as
+// real ruby says.
+//
+// The other two halves - numBin's `%` arm in languages/ruby-interpreter.abnf
+// and rbNumBin's in languages/lib/ruby-rt.metajs - are the same body, plus a
+// re-signing of the zero (`zeroSigned` / `rbZeroSign`, spelled `z / (0 - 1)`)
+// that this half does not need: the tag engine keeps an integral value as an
+// INTEGER and so drops the sign of a zero, where Go is IEEE all the way down
+// and has math.Copysign. That is also why `x * 0` is not the spelling there.
+//
+// Settled against ruby 2.6.10p210 - Float#% is unchanged in 3.x - over a
+// 27-row probe: the four signed-zero rows, the four sign-of-divisor rows,
+// 1e308 % 3.0 = 2.0, -1e308 % 3.0 = 1.0, 1e308 % 2.5 = 1.0,
+// -1e308 % 2.5 = 1.5, 123456789012345678.0 % 7.0 = 3.0, 1e16 % 3.0 = 1.0 and
+// -1e300 % 7.3 = 6.570033512034619.
 func rubyFloMod(x, y float64) float64 {
-	m := x - math.Floor(x/y)*y
+	m := math.Mod(x, y)
 	if m == 0 {
 		return math.Copysign(0, x)
+	}
+	if y*m < 0 {
+		return m + y
 	}
 	return m
 }
@@ -7509,6 +7691,16 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				rt.fail("js_pycall args must be an array")
 			}
 			callee, kw := u(a[0]), u(a[2])
+			// A BUILTIN TYPE OBJECT is callable: `int` is the class, and calling it
+			// converts. The emitter binds int/str/float/bool/list/dict/set/tuple to
+			// js_pybuiltincls's stable class object with the conversion closure
+			// hung on it as __conv, so `type(1) == int` is True (it is the same
+			// object) and int("42") still runs the same IR function it always did.
+			if o, isObj := callee.(*jsObject); isObj {
+				if conv, has := o.props["__conv"]; has && isCallable(conv) {
+					return w(rt.call(conv, jsUndef, args.elems))
+				}
+			}
 			if cls, ok := pyClassObj(callee); ok {
 				inst := newJSObject()
 				inst.set("__class", cls)
@@ -7828,6 +8020,34 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if v, ok := rt.pyDunderBin(op, l, r); ok {
 				return w(v)
 			}
+			// An int operand meeting an arbitrary precision int PROMOTES, because
+			// Python has one int type. Without this, 10**30 + 1 was NaN here and
+			// exact in the interpreter, and so were //, % and ** on any big at all.
+			if x, y, both := pyBigPair(l, r); both {
+				if v, ok := pyBigBin(op, x, y); ok {
+					return w(rt.pyBigNarrow(v))
+				}
+				// The ORDER comparisons need the same promotion: rt.jsCompare's
+				// big arm is bigPair's, so a big meeting a plain int reached
+				// toNumber, answered NaN and made every relation false.
+				switch op {
+				case "<", ">", "<=", ">=", "==", "!=":
+					c := x.Cmp(y)
+					switch op {
+					case "<":
+						return boolH(c < 0)
+					case ">":
+						return boolH(c > 0)
+					case "<=":
+						return boolH(c <= 0)
+					case ">=":
+						return boolH(c >= 0)
+					case "==":
+						return boolH(c == 0)
+					}
+					return boolH(c != 0)
+				}
+			}
 			switch op {
 			case "+":
 				// Two sequences CONCATENATE in Python ([1] + [2] is [1, 2], and
@@ -7870,18 +8090,34 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			case "//":
 				return w(pyIntOrFlo(math.Floor(rt.toNumber(l)/rt.toNumber(r)), l, r))
 			case "%":
+				// "fmt" % args is printf-style FORMATTING, not a remainder.
+				if s, isStr := l.(string); isStr {
+					return w(rt.pyPct(s, r))
+				}
 				return w(pyIntOrFlo(pyFloorMod(rt.toNumber(l), rt.toNumber(r)), l, r))
 			case "**":
 				// Python's exponentiation. Only js_pybin (the Python compilers and
 				// nothing else) ever passes this operator, and a user class already
 				// had its __pow__ / __rpow__ chance above.
-				// int ** NEGATIVE int is a float (2 ** -1 is 0.5); every other
-				// pair of ints stays an int.
-				p := math.Pow(rt.toNumber(l), rt.toNumber(r))
-				if rt.toNumber(r) < 0 {
-					return w(&jsPyFlo{f: p})
+				// int ** NEGATIVE int is a float (2 ** -1 is 0.5); every other pair
+				// of ints stays an int - and a Python int is ARBITRARY PRECISION,
+				// so 10**30 is 1000000000000000000000000000000, not the double
+				// 1e+30 this used to fold. (The interpreter answered
+				// 5076944270305264000, the int64 its tag engine wrapped the same
+				// double into, so the two halves did not even agree.) Past 2^53 the
+				// double has lost digits, so the exact answer comes from math/big;
+				// pyBigNarrow hands back a plain number whenever it still fits, so
+				// nothing below 2^53 changes shape.
+				e := rt.toNumber(r)
+				if e < 0 {
+					return w(&jsPyFlo{f: math.Pow(rt.toNumber(l), e)})
 				}
-				return w(pyIntOrFlo(p, l, r))
+				if !pyIsFlo(l) && !pyIsFlo(r) && e == math.Trunc(e) && e <= 4096 {
+					if bl, ok := pyBigOperand(l); ok {
+						return w(rt.pyBigNarrow(new(big.Int).Exp(bl, big.NewInt(int64(e)), nil)))
+					}
+				}
+				return w(pyIntOrFlo(math.Pow(rt.toNumber(l), e), l, r))
 			case "==":
 				return boolH(rt.pyEqual(l, r))
 			case "!=":
@@ -8262,7 +8498,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		"js_pyfloat": func(a []uint64) uint64 {
 			if s, isStr := u(a[0]).(string); isStr {
-				return w(&jsPyFlo{f: jsParseFloat(s)})
+				return w(&jsPyFlo{f: pyStrToF(s)})
 			}
 			return w(&jsPyFlo{f: rt.toNumber(u(a[0]))})
 		},
@@ -8659,6 +8895,41 @@ func digitValue(c byte) int {
 	}
 }
 
+// pyStrToF is float(str) - CPython's float_from_string, in the one respect where
+// it is not JavaScript's parseFloat: it accepts the three non-finite SPELLINGS
+// "inf", "infinity" and "nan", case-insensitively, with an optional sign, after
+// stripping whitespace. float("inf") was nan in all three engines, and
+// float("Infinity") was inf in the interpreter (whose parseFloat is goja's, which
+// takes it) and nan here (jsParseFloat below does not) - a live halves divergence
+// on top of the defect.
+//
+// Everything else still goes to jsParseFloat, so float("1.5abc") is still the
+// prefix parse 1.5 where CPython raises ValueError. That looseness is
+// pre-existing, is shared by all three engines, and is recorded rather than
+// half-fixed here. float("-nan") is nan in CPython, so the sign is dropped there.
+//
+// pyStrToF in languages/python-interpreter.abnf and languages/lib/python-rt.metajs
+// are the same body, with the infinity BUILT as Math.pow(2, 1024) because the
+// script dialect has no exponent form in a numeric literal.
+func pyStrToF(s string) float64 {
+	t := strings.TrimSpace(s)
+	neg := false
+	if len(t) > 0 && (t[0] == '+' || t[0] == '-') {
+		neg = t[0] == '-'
+		t = t[1:]
+	}
+	switch strings.ToLower(t) {
+	case "inf", "infinity":
+		if neg {
+			return math.Inf(-1)
+		}
+		return math.Inf(1)
+	case "nan":
+		return math.NaN()
+	}
+	return jsParseFloat(s)
+}
+
 // jsParseFloat implements the JS parseFloat() prefix parsing.
 func jsParseFloat(s string) float64 {
 	s = strings.TrimSpace(s)
@@ -8691,6 +8962,15 @@ done:
 	}
 	f, err := strconv.ParseFloat(strings.TrimRight(s[:end], "eE+-."), 64)
 	if err != nil {
+		// An OUT OF RANGE literal is not a parse failure. Go answers ±Inf on
+		// overflow and ±0 on underflow and reports ErrRange alongside; JavaScript
+		// answers exactly those values and reports nothing. Returning NaN here was
+		// a live FROZEN-DIFF in the dialect itself - parseFloat("1e400") was NaN
+		// under -frozen (this function) and Infinity under goja (its own
+		// parseFloat) - which any test writing an overflow literal would hit.
+		if ne, isNum := err.(*strconv.NumError); isNum && ne.Err == strconv.ErrRange {
+			return f
+		}
 		return math.NaN()
 	}
 	return f
@@ -10174,6 +10454,320 @@ func (rt *jsrt) pyExcInstance(name string, msg string) interface{} {
 // [[fill]align][sign][0][width][.precision][type], which is the slice of it an
 // f-string replacement field in practice writes.
 func pyIsAlign(ch byte) bool { return ch == '<' || ch == '>' || ch == '^' || ch == '=' }
+
+// ----- "fmt" % args, CPython's printf-style formatting -----
+//
+// UNIMPLEMENTED in both halves until now: js_pybin's "%" on a string fell into
+// pyFloorMod and answered NaN. The two halves agreed, which is why --cross was
+// blind to it and only a CPython diff saw it.
+//
+// Supported: the conversions s r a d i u x X o b c e E g G f F and %%; the flags
+// - + 0 and space; a width; and a .precision, which TRUNCATES for s/r/a. A
+// %(name)s mapping key reads a dict argument. NOT supported, and a LOUD failure
+// rather than a silent wrong answer: the # alternate form.
+//
+// THE ARGUMENT TUPLE. CPython takes one value per conversion from a TUPLE and
+// treats every other object as a single value - but a tuple IS a list in this
+// value model, so an ARRAY is read as the argument tuple exactly when its length
+// equals the conversion count, and as one value otherwise. That is CPython's
+// answer in every case except a ONE-element list meeting a single conversion,
+// where the two readings are genuinely indistinguishable here.
+//
+// pyPct in languages/python-interpreter.abnf and languages/lib/python-rt.metajs
+// are the same body; those two spell the float verbs out over floPrec because
+// their dialect has no strconv.
+func pyPctCount(f string) int {
+	n, i := 0, 0
+	for i < len(f) {
+		if f[i] == '%' {
+			if i+1 < len(f) && f[i+1] == '%' {
+				i += 2
+				continue
+			}
+			n++
+		}
+		i++
+	}
+	return n
+}
+
+// pyPctNum is a conversion operand as a double, unwrapping the float box and an
+// arbitrary precision int.
+func (rt *jsrt) pyPctNum(v interface{}) float64 {
+	if bi, ok := v.(*jsBigInt); ok {
+		f, _ := new(big.Float).SetInt(bi.v).Float64()
+		return f
+	}
+	return rt.toNumber(v)
+}
+
+// pyPctDigits is %d: the integer part, and an arbitrary precision int stays exact.
+func (rt *jsrt) pyPctDigits(v interface{}) string {
+	if bi, ok := v.(*jsBigInt); ok {
+		return bi.v.String()
+	}
+	return strconv.FormatInt(int64(math.Trunc(rt.pyPctNum(v))), 10)
+}
+
+// pyPctRadix is the base-N digits of an integral value: exact for every magnitude
+// a double holds exactly, and the SAME loop in all three halves (pyBaseStr in
+// languages/python-interpreter.abnf, pyBPctRadix in languages/lib/python-rt.metajs
+// - neither of which has an int64 to convert through, and int64() SATURATES on
+// arm64, so a shared loop over the double is the only spelling that agrees).
+func (rt *jsrt) pyPctRadix(v interface{}, base int, upper bool) string {
+	n := math.Trunc(rt.pyPctNum(v))
+	if math.IsNaN(n) {
+		n = 0
+	}
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	out := ""
+	fb := float64(base)
+	for n > 0 {
+		q := math.Floor(n / fb)
+		out = string("0123456789abcdefghijklmnopqrstuvwxyz"[int(n-q*fb)]) + out
+		n = q
+	}
+	if upper {
+		out = strings.ToUpper(out)
+	}
+	if neg {
+		return "-" + out
+	}
+	return out
+}
+
+func (rt *jsrt) pyPctOne(v interface{}, typ byte, left, zero, plus, space bool, width, prec int) string {
+	var body string
+	numeric := false
+	switch typ {
+	case 's', 'r', 'a':
+		if typ == 's' {
+			body = rt.pyString(v)
+		} else {
+			body = rt.pyRepr(v)
+		}
+		if prec >= 0 {
+			rs := []rune(body)
+			if len(rs) > prec {
+				body = string(rs[:prec])
+			}
+		}
+	case 'c':
+		if s, isStr := v.(string); isStr {
+			body = s
+		} else {
+			body = string(rune(int(math.Trunc(rt.pyPctNum(v)))))
+		}
+	case 'd', 'i', 'u':
+		numeric = true
+		body = rt.pyPctDigits(v)
+	case 'x':
+		numeric, body = true, rt.pyPctRadix(v, 16, false)
+	case 'X':
+		numeric, body = true, rt.pyPctRadix(v, 16, true)
+	case 'o':
+		numeric, body = true, rt.pyPctRadix(v, 8, false)
+	case 'b':
+		numeric, body = true, rt.pyPctRadix(v, 2, false)
+	case 'f', 'F':
+		p := prec
+		if p < 0 {
+			p = 6
+		}
+		numeric, body = true, strconv.FormatFloat(rt.pyPctNum(v), 'f', p, 64)
+	case 'e', 'E', 'g', 'G':
+		numeric, body = true, pyPctExp(rt.pyPctNum(v), typ, prec)
+	default:
+		rt.fail("unsupported format character '%c'", typ)
+	}
+	if numeric && !strings.HasPrefix(body, "-") {
+		if plus {
+			body = "+" + body
+		} else if space {
+			body = " " + body
+		}
+	}
+	pad := width - len([]rune(body))
+	if pad <= 0 {
+		return body
+	}
+	if left {
+		return body + strings.Repeat(" ", pad)
+	}
+	if zero && numeric {
+		if body[0] == '-' || body[0] == '+' || body[0] == ' ' {
+			return body[:1] + strings.Repeat("0", pad) + body[1:]
+		}
+		return strings.Repeat("0", pad) + body
+	}
+	return strings.Repeat(" ", pad) + body
+}
+
+// pyPctExp is %e / %g. strconv's 'e' and 'g' ARE C's shapes - an exponent that is
+// signed and at least two digits, and 'g' choosing between the two on the exponent
+// that was used - so this half needs no digit machinery of its own; the two script
+// halves build the same text out of floPrec.
+func pyPctExp(n float64, typ byte, prec int) string {
+	upper := typ == 'E' || typ == 'G'
+	p := prec
+	if p < 0 {
+		p = 6
+	}
+	if math.IsNaN(n) {
+		if upper {
+			return "NAN"
+		}
+		return "nan"
+	}
+	if math.IsInf(n, 0) {
+		s := "inf"
+		if upper {
+			s = "INF"
+		}
+		if n < 0 {
+			return "-" + s
+		}
+		return s
+	}
+	if typ == 'g' || typ == 'G' {
+		if p == 0 {
+			p = 1
+		}
+		s := strconv.FormatFloat(n, 'g', p, 64)
+		if upper {
+			s = strings.ToUpper(s)
+		}
+		return s
+	}
+	s := strconv.FormatFloat(n, 'e', p, 64)
+	if upper {
+		s = strings.ToUpper(s)
+	}
+	return s
+}
+
+func (rt *jsrt) pyPct(f string, arg interface{}) string {
+	nconv := pyPctCount(f)
+	var args []interface{}
+	var dictK, dictV *jsArray
+	if arr, ok := arg.(*jsArray); ok && len(arr.elems) == nconv {
+		args = arr.elems
+	} else if k, v, ok := dictParts(arg); ok {
+		if _, isSet := pySetElems(arg); !isSet {
+			dictK, dictV = k, v
+		}
+		args = []interface{}{arg}
+	} else {
+		args = []interface{}{arg}
+	}
+	out := ""
+	ai := 0
+	mapped := false
+	i := 0
+	for i < len(f) {
+		if f[i] != '%' {
+			j := i
+			for j < len(f) && f[j] != '%' {
+				j++
+			}
+			out += f[i:j]
+			i = j
+			continue
+		}
+		i++
+		if i >= len(f) {
+			rt.fail("incomplete format")
+		}
+		if f[i] == '%' {
+			out += "%"
+			i++
+			continue
+		}
+		key := ""
+		hasKey := false
+		if f[i] == '(' {
+			i++
+			st := i
+			for i < len(f) && f[i] != ')' {
+				i++
+			}
+			key, hasKey, mapped = f[st:i], true, true
+			i++
+		}
+		left, zero, plus, space := false, false, false, false
+		scanning := true
+		for scanning && i < len(f) {
+			switch f[i] {
+			case '-':
+				left = true
+				i++
+			case '0':
+				zero = true
+				i++
+			case '+':
+				plus = true
+				i++
+			case ' ':
+				space = true
+				i++
+			case '#':
+				rt.fail("unsupported format flag '#'")
+			default:
+				scanning = false
+			}
+		}
+		width := 0
+		for i < len(f) && f[i] >= '0' && f[i] <= '9' {
+			width = width*10 + int(f[i]-'0')
+			i++
+		}
+		prec := -1
+		if i < len(f) && f[i] == '.' {
+			i++
+			prec = 0
+			for i < len(f) && f[i] >= '0' && f[i] <= '9' {
+				prec = prec*10 + int(f[i]-'0')
+				i++
+			}
+		}
+		for i < len(f) && (f[i] == 'l' || f[i] == 'h' || f[i] == 'L') {
+			i++
+		}
+		if i >= len(f) {
+			rt.fail("incomplete format")
+		}
+		typ := f[i]
+		i++
+		var v interface{}
+		if hasKey {
+			if dictK == nil {
+				rt.fail("format requires a mapping")
+			}
+			at := rt.pyDictFind(dictK, key)
+			if at < 0 {
+				rt.fail("KeyError: '%s'", key)
+			}
+			v = dictV.elems[at]
+		} else {
+			if ai >= len(args) {
+				rt.fail("not enough arguments for format string")
+			}
+			v = args[ai]
+			ai++
+		}
+		out += rt.pyPctOne(v, typ, left, zero, plus, space, width, prec)
+	}
+	if !mapped && ai < len(args) {
+		rt.fail("not all arguments converted during string formatting")
+	}
+	return out
+}
 
 func (rt *jsrt) pyFormat(v interface{}, spec, conv string) string {
 	if spec == "" {

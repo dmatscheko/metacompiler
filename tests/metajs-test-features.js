@@ -85,6 +85,14 @@ check("parseint-prefix", parseInt("12px"), 12);
 check("parseint-radix", parseInt("ff", 16), 255);
 check("parsefloat", parseFloat("2.5"), 2.5);
 check("parsefloat-prefix", parseFloat("2.5x"), 2.5);
+// An OUT OF RANGE literal is not a parse failure. Go's strconv.ParseFloat answers
+// +/-Inf on overflow and +/-0 on underflow and reports ErrRange alongside, and
+// jsParseFloat used to turn that error into NaN - so this was a live FROZEN-DIFF
+// in the dialect itself: NaN under -frozen, Infinity under goja, which is what
+// node says. The matrix's goja/-frozen byte-identity check is the gate.
+check("parsefloat-overflow", "" + parseFloat("1e400"), "Infinity");
+check("parsefloat-overflow-neg", "" + parseFloat("-1e400"), "-Infinity");
+check("parsefloat-underflow", "" + parseFloat("1e-400"), "0");
 check("math-floor", Math.floor(2.9), 2);
 check("math-floor-neg", Math.floor(-2.1), -3);
 check("math-abs", Math.abs(-7), 7);

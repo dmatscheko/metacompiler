@@ -1432,18 +1432,51 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // `x: T` records the annotation in the enclosing body's __annotations__ dict.
     // abnf/jsrt.go's js_pyannot looks the dict up in the scope's OWN names
-    // (sc.find, not the chain) and creates one there when it is missing; an EMITTER
-    // has no own-names probe, so the "is there one already" question is answered
-    // statically instead - pyAnnotHere, saved and restored with curScopeV. The two
-    // answers differ only for an annotation the program does not reach, which would
-    // create the dict here and not in the Go twin.
-    function pyAnnot(b, envV, nameStr, annStr) {
-        if (pyBindSink != null) { pyBindSink.push("__annotations__") }
-        if (!pyAnnotHere) {
-            callExt(b, "js_scope_decl", [envV, emitStr(b, "__annotations__"),
-                                         callExt(b, "js_dict_new", [])])
-            pyAnnotHere = true
+    // (sc.find, not the chain) and creates one there when it is missing.
+    //
+    // This used to answer that question STATICALLY, with the pyAnnotHere flag, and
+    // the flag is STICKY: an annotation the program does not REACH still set it, so
+    // the next REACHED annotation skipped the js_scope_decl and the dict was never
+    // created at all. `class A: (if False: z: int = 1); y: int = 2` then died with
+    // "variable not defined: __annotations__" in the compiled halves, from
+    // llvm.Run and from the native binary, where CPython 3.14 prints
+    // {'y': <class 'int'>}. Not a corner - a crash.
+    //
+    // It is the RUNTIME question now, the same one the Go twin asks: js_scope_has
+    // is the own-names probe an emitter did not have when this was written (it
+    // landed with pyClassFill above). pyAnnotHere survives only for pyEnsureAnnot,
+    // which asks a different question - "did this class BODY contain an annotation
+    // anywhere", which is genuinely static.
+    var pyAnnotDeclF = undefined
+    function pyAnnotDecl(b, envV) {
+        if (pyAnnotDeclF == undefined) {
+            pyAnnotDeclF = m.NewFunc("py_annot_decl", i64, [llvm.ir.NewParam("sc", i64)])
+            var sP = pyAnnotDeclF.Params[0]
+            var eb = pyAnnotDeclF.NewBlock("entry")
+            var mkB = pyAnnotDeclF.NewBlock("create")
+            var haveB = pyAnnotDeclF.NewBlock("already")
+            eb.NewCondBr(truthy(eb, callExt(eb, "js_scope_has", [sP, emitStr(eb, "__annotations__")])),
+                         haveB, mkB)
+            callExt(mkB, "js_scope_decl", [sP, emitStr(mkB, "__annotations__"),
+                                           callExt(mkB, "js_dict_new", [])])
+            mkB.NewRet(handle(0))
+            haveB.NewRet(handle(0))
         }
+        b.NewCall(pyAnnotDeclF, [envV])
+        return b
+    }
+    function pyAnnot(b, envV, nameStr, annStr) {
+        // ONLY A CLASS BODY records annotations. pyBindSink is non-null exactly
+        // inside one, and outside one CPython 3.14 (PEP 649) and
+        // python-interpreter.abnf both raise NameError for `__annotations__` while
+        // this half used to build a dict and hand it out - a halves divergence at
+        // module and function scope, and the very dict pyClassFill's old chain walk
+        // fed on. An annotation is kept as its source TEXT, so there is nothing
+        // left to evaluate once it is not recorded.
+        if (pyBindSink == null) { return b }
+        pyBindSink.push("__annotations__")
+        pyAnnotDecl(b, envV)
+        pyAnnotHere = true
         var d = callExt(b, "js_scope_get", [envV, emitStr(b, "__annotations__")])
         callExt(b, "js_arr_push", [callExt(b, "js_get", [d, emitStr(b, "keys")]), emitStr(b, nameStr)])
         callExt(b, "js_arr_push", [callExt(b, "js_get", [d, emitStr(b, "vals")]), emitStr(b, annStr)])
@@ -3533,6 +3566,37 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
+    // The builtin names that are TYPES rather than plain functions. `int` is not a
+    // conversion function in Python, it is the class - so `type(1) == int` and
+    // `isinstance("a", str)` are True, and both were FALSE under this compiler
+    // while the interpreter said True (six for six), because declBuiltin bound the
+    // name to the conversion CLOSURE and the class object was reachable only
+    // through type(). Now the name holds js_pybuiltincls's stable class object -
+    // the very object type() answers with - and the conversion closure rides on it
+    // as __conv, which js_pycall calls when a class object carrying one is called.
+    // That way CALLING the name still runs the same IR function it always did and
+    // nothing about the call path changes shape; only the value the NAME holds
+    // does. rt.pyIsInstance already accepted a builtin class object as its target.
+    var pyTypeBuiltin = {}
+    pyTypeBuiltin["$str"] = true
+    pyTypeBuiltin["$int"] = true
+    pyTypeBuiltin["$float"] = true
+    pyTypeBuiltin["$bool"] = true
+    pyTypeBuiltin["$list"] = true
+    pyTypeBuiltin["$dict"] = true
+    pyTypeBuiltin["$set"] = true
+    pyTypeBuiltin["$tuple"] = true
+    function declBind(b, name, cloV) {
+        if (pyTypeBuiltin["$" + name] == true) {
+            var cls = callExt(b, "js_pybuiltincls", [emitStr(b, name)])
+            callExt(b, "js_set", [cls, emitStr(b, "__conv"), cloV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), cls])
+            return b
+        }
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), cloV])
+        return b
+    }
+
     // A one- or two-argument builtin that is exactly one extern: bind NAME to a
     // small IR function forwarding its arguments to EXT.
     function declBuiltin(b, name, ext, argc) {
@@ -3542,9 +3606,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var fb = f.NewBlock("entry")
         if (argc == 0) { // The whole argument array (max/min take any number).
             fb.NewRet(fb.NewCall(getExtern(ext, 1), [f.Params[1]]))
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name),
-                                         callExt(b, "js_closure", [handle(idx), curScopeV])])
-            return b
+            return declBind(b, name, callExt(b, "js_closure", [handle(idx), curScopeV]))
         }
         var a0 = fb.NewCall(getExtern("js_arg", 2), [f.Params[1], handle(0)])
         if (argc == 1) { fb.NewRet(fb.NewCall(getExtern(ext, 1), [a0])) }
@@ -3552,9 +3614,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var a1 = fb.NewCall(getExtern("js_arg", 2), [f.Params[1], handle(1)])
             fb.NewRet(fb.NewCall(getExtern(ext, 2), [a0, a1]))
         }
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name),
-                                     callExt(b, "js_closure", [handle(idx), curScopeV])])
-        return b
+        return declBind(b, name, callExt(b, "js_closure", [handle(idx), curScopeV]))
     }
 
     // jsmain: declare the builtins, then run the file top to bottom.
@@ -3595,7 +3655,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var tb = tf.NewBlock("entry")
         var tArg = tb.NewCall(getExtern("js_arg", 2), [tf.Params[1], handle(0)])
         tb.NewRet(tb.NewCall(getExtern("js_pylist", 1), [tArg]))
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "list"), callExt(b, "js_closure", [handle(listIdx), curScopeV])])
+        b = declBind(b, "list", callExt(b, "js_closure", [handle(listIdx), curScopeV]))
         // range(a[, b])
         funcCount++
         var rgIdx = funcCount

@@ -573,8 +573,25 @@ class AnnUnreached:
     if False:
         au: int = 1
 
+class AnnMixed:
+    if False:
+        am_no: int = 1
+    am_yes: int = 2
+
 check_true("class-annotations-reached", len(AnnReached.__annotations__) == 1 and "ar" in AnnReached.__annotations__)
 check_true("class-annotations-unreached", len(AnnUnreached.__annotations__) == 0)
+# The THIRD shape, and the one that CRASHED: an unreached annotation FOLLOWED by a
+# reached one. The compiler answered "is there an __annotations__ dict in this
+# scope" with a static flag, and the flag was STICKY - the unreached `am_no` set
+# it, so `am_yes` skipped the js_scope_decl and the dict was never created. On its
+# own that class body DIES with "variable not defined: __annotations__" in both
+# compiled halves; here, where the module above has an annotation of its own, the
+# js_scope_get walks the chain and finds the MODULE's dict instead - so the class
+# gets {} and the module's annotations are silently polluted with am_yes. That
+# quieter shape is the one this check sees. It is js_scope_has at run time now,
+# which is the question abnf/jsrt.go's js_pyannot always asked. python3 says
+# {'am_yes': <class 'int'>}.
+check_true("class-annotations-mixed", len(AnnMixed.__annotations__) == 1 and "am_yes" in AnnMixed.__annotations__ and "am_no" not in AnnMixed.__annotations__)
 
 check("combined-pipeline", f"{transform([1, 2, -3])}", "['o1', 'e2', 'x']")
 

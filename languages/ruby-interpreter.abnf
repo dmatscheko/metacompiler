@@ -2446,13 +2446,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (op == "*") { return mkFlo(x * y) }
             if (op == "/") { return mkFlo(x / y) }
             // Float#% - see rubyFloMod in abnf/jsrt.go for the whole reasoning.
-            // `x - floor(x/y)*y` has the divisor's sign but loses a ZERO's sign,
-            // where ruby's flodivmod starts from fmod and keeps the DIVIDEND's:
-            // -4.0 % 2.0 is -0.0, not 0.0. A zero result is exactly a zero fmod,
-            // so the dividend's sign is put back.
+            // Ruby's flodivmod IS `mod = fmod(x, y); if (y*mod < 0) mod += y`,
+            // and nothing else. The dialect's `%` is fmod, so this is that body
+            // verbatim. The only addition is the ZERO's sign: fmod's zero carries
+            // the DIVIDEND's, which the tag engine drops because it keeps an
+            // integral value as an integer, so -4.0 % 2.0 must be re-signed.
             if (op == "%") {
-                var fm = x - Math.floor(x / y) * y
+                var fm = x % y
                 if (fm == 0) { return mkFlo(zeroSigned(x)) }
+                if (y * fm < 0) { return mkFlo(fm + y) }
                 return mkFlo(fm)
             }
             if (op == "**") { return mkFlo(Math.pow(x, y)) }
