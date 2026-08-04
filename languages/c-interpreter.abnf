@@ -1676,7 +1676,7 @@ KwDefault   = "default" KwEnd ;
         if (isVoid) return ctVoid
         if (isDouble) return ctF(8)
         if (isFloat) return ctF(4)
-        if (isBool) return ctI(1, true)
+        if (isBool) return ctBool
         if (isChar) return ctI(1, uns)
         if (isShort) return ctI(2, uns)
         if (nlong > 0) return ctI(8, uns)
@@ -1723,7 +1723,7 @@ KwDefault   = "default" KwEnd ;
         return function() {
             var a = alloc(1)
             if (opt != undefined) mem[a] = nzv(opt().v) ? 1 : 0
-            declVar(name, a, false, ctI(1, true))
+            declVar(name, a, false, ctBool)
         }
     }
     // sizeof: SizeName items = [{kind}, "*"...] -> {kind, ptr}. makeSizeof turns it
@@ -1789,6 +1789,18 @@ KwDefault   = "default" KwEnd ;
     // {k:"ptr", p} | {k:"arr", n, e} | {k:"struct", s} | {k:"fnp"}
     function ctI(w, u) { return {k: "int", w: w, u: u} }
     function ctF(w) { return {k: "flt", w: w} }
+    // _Bool is an unsigned one-byte integer in EVERY respect except its conversion
+    // rule: C11 6.3.1.2 says a scalar converted to _Bool is 0 if it compares equal
+    // to 0 and 1 otherwise, so `_Bool b; b = 5;` holds 1 and not 5. It used to be
+    // plain ctI(1, true), indistinguishable from an unsigned char, so only the
+    // declarator form (makeBoolDecl, which normalizes its own initializer)
+    // normalized at all - an assignment, an array element, a cast and a compound
+    // assignment all kept the raw value. Measured against cc: `_Bool g = 1; g = g+1`
+    // was 2 here and 1 there. The flag rides on the descriptor and is read by
+    // convert and ctEq; nothing else has to know about it, because a _Bool's WIDTH
+    // and SIGNEDNESS are still those of ctI(1, true). The twin is
+    // c-to-llvm-ir.abnf's ctBool; keep the two in step.
+    var ctBool = {k: "int", w: 1, u: true, bool: true}
     var ctInt  = ctI(4, false)
     var ctUInt = ctI(4, true)
     var ctChar = ctI(1, false)
@@ -1820,6 +1832,10 @@ KwDefault   = "default" KwEnd ;
     // declared width and signedness (C11 6.3.1.3), a float keeps its value.
     function convert(ct, x) {
         if (ct.k == "flt") return szIs(x) ? szNum(x) : x
+        // _Bool first: its conversion is not a truncation but a TEST against zero
+        // (C11 6.3.1.2), so 5, 256 and -3 all become 1. nzv is the same nonzero test
+        // a condition uses, and it is safe on a boxed 64-bit value.
+        if (ct.bool == true) { return nzv(x) ? 1 : 0 }
         if (ct.k == "int") {
             // A 64-bit type goes through the sized-integer box (szConv wraps to the
             // width and answers a plain number whenever a signed 64-bit value fits a
@@ -1855,7 +1871,11 @@ KwDefault   = "default" KwEnd ;
     // Structural type identity, which is what _Generic and a cast comparison need.
     function ctEq(a, b) {
         if (a.k != b.k) return false
+        // _Bool is a DISTINCT type from unsigned char for _Generic, even though the
+        // two share a width and a signedness (C11 6.2.5: _Bool is its own standard
+        // unsigned integer type).
         if (a.k == "int") return a.w == b.w && (a.u == true) == (b.u == true)
+                                 && (a.bool == true) == (b.bool == true)
         if (a.k == "flt") return a.w == b.w
         if (a.k == "ptr") return ctEq(a.p, b.p)
         if (a.k == "arr") return a.n == b.n && ctEq(a.e, b.e)

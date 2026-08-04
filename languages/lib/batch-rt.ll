@@ -202,21 +202,25 @@ entry:
 17:
 	%18 = phi i32 [ %8, %entry ], [ %16, %10 ]
 	%19 = icmp ne i32 %18, 0
-	br i1 %19, label %20, label %24
+	br i1 %19, label %20, label %26
 
 20:
 	%21 = load i8, i8* %1
 	%22 = sext i8 %21 to i32
 	%23 = add i32 %22, 32
-	ret i32 %23
+	%24 = shl i32 %23, 24
+	%25 = ashr i32 %24, 24
+	ret i32 %25
 
-24:
-	%25 = load i8, i8* %1
-	%26 = sext i8 %25 to i32
-	ret i32 %26
+26:
+	%27 = load i8, i8* %1
+	%28 = sext i8 %27 to i32
+	%29 = shl i32 %28, 24
+	%30 = ashr i32 %29, 24
+	ret i32 %30
 
 dead6:
-	br label %24
+	br label %26
 
 dead7:
 	ret i32 0

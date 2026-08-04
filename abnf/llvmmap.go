@@ -1177,6 +1177,78 @@ func isSymByte(b byte) bool {
 	return b == '_' || b == '$' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
+// duplicateSymbols returns the names a link failure blamed for being defined MORE
+// THAN ONCE, sorted and deduplicated, or nil when the failure was not of that kind.
+//
+// It exists because the undefined-symbol report below is built by filtering the
+// module's declared-but-undefined names by whether the linker text MENTIONS them -
+// and a duplicate-symbol error mentions exactly the same names, since a name the
+// module declares as an extern is a name some input defines. So a build whose real
+// problem was two runtime inputs defining `mec_helper` was reported as
+// "1 unresolved symbol(s) ... defined by neither the module nor any linked input",
+// which is the precise opposite of the truth. PHP hit this; every language that
+// links more than one runtime file can.
+//
+// Both linker spellings are recognised:
+//
+//	ld64/lld (Darwin):  duplicate symbol '_mec_helper' in:
+//	GNU ld:             foo.o:(.text+0x0): multiple definition of `mec_helper'
+//
+// The names are read out of the LINKER TEXT rather than the module, because a
+// duplicate need not appear in the module at all (two runtime inputs can collide
+// over a name the program never calls). Only the quoted symbol is taken, never the
+// object-file paths around it, so the report stays free of temp file names and this
+// path can keep comparing bytes.
+func duplicateSymbols(out string) []string {
+	seen := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		var rest string
+		switch {
+		case strings.Contains(line, "duplicate symbol"):
+			rest = line[strings.Index(line, "duplicate symbol")+len("duplicate symbol"):]
+		case strings.Contains(line, "multiple definition of"):
+			rest = line[strings.Index(line, "multiple definition of")+len("multiple definition of"):]
+		default:
+			continue
+		}
+		if n := quotedSymbol(rest); n != "" {
+			seen[n] = true
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(seen))
+	for n := range seen {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// quotedSymbol reads the first 'name', `name' or "name" out of s and strips the
+// platform's leading underscore, so both spellings answer the source-level name.
+func quotedSymbol(s string) string {
+	i := strings.IndexAny(s, "'`\"")
+	if i < 0 {
+		return ""
+	}
+	j := strings.IndexAny(s[i+1:], "'\"")
+	if j < 0 {
+		return ""
+	}
+	name := s[i+1 : i+1+j]
+	if strings.HasPrefix(name, "_") && len(name) > 1 {
+		name = name[1:]
+	}
+	for k := 0; k < len(name); k++ {
+		if !isSymByte(name[k]) {
+			return ""
+		}
+	}
+	return name
+}
+
 // buildExecutable emits m as LLVM IR text and links it into a native executable with
 // clang (override with the MEC_CLANG env var), together with the runtime files the
 // grammar and -rt supply and the -L/-l libraries. It returns "" on success, else an
@@ -1238,6 +1310,22 @@ func buildExecutable(m *ir.Module, outPath string, runtime []string) string {
 	}
 	out, err := exec.Command(clangBin, args...).CombinedOutput()
 	if err != nil {
+		// A DUPLICATE symbol is asked about first, and unconditionally: the
+		// undefined-symbol report below cannot tell the two apart (see
+		// duplicateSymbols), so asking it second would let a duplicate keep being
+		// announced as its own opposite.
+		if dup := duplicateSymbols(string(out)); len(dup) > 0 {
+			fmt.Fprintf(warnWriter, "error: %d symbol(s) are defined MORE THAN ONCE"+
+				" among the linked inputs:\n", len(dup))
+			for _, name := range dup {
+				fmt.Fprintln(warnWriter, "error:     "+name)
+			}
+			fmt.Fprintln(warnWriter, "error: each name above is defined by two or more of the emitted module and the"+
+				"\nerror: linked inputs (c.runtime / -rt, -L, -l). Remove one definition; this is NOT"+
+				"\nerror: an unresolved symbol, and adding a definition would make it worse.")
+			return "clang could not link the executable: " + strconv.Itoa(len(dup)) +
+				" duplicate symbol(s), named on stderr"
+		}
 		if linkingForReal {
 			var missing []string
 			for _, name := range undefinedSymbols(m) {

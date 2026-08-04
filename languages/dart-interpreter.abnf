@@ -2316,8 +2316,14 @@ KwDeferred  = "deferred" KwEnd ;
             if (m != null) { return m.fn.apply(undefined, [o, i]) }
         }
         if (isDict(o)) {
+            // dart:core, Map.operator []: "the value for the given key, or null if
+            // key is not in the map". A miss is not an error - it is what makes
+            // `m[k] ?? d` and `if (m[k] != null)` work at all. This used to abort
+            // with "map has no key", and so did the compiled half through the shared
+            // js_pyget (which is Python's indexing, and there the KeyError is right).
+            // The twin fix is emitIndexGet in dart-to-llvm-ir.abnf.
             var di = dictFind(o, i)
-            if (di < 0) { fail("map has no key " + dstr(i)) }
+            if (di < 0) { return null }
             return o.vals[di]
         }
         if (o === null || o === undefined) { fail("index of null") }

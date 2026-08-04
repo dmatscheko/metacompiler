@@ -1886,7 +1886,7 @@ KwDefault   = "default" KwEnd ;
         if (isVoid) return ctVoid
         if (isDouble) return ctF(8)
         if (isFloat) return ctF(4)
-        if (isBool) return ctI(1, true)
+        if (isBool) return ctBool
         if (isChar) return ctI(1, uns)
         if (isShort) return ctI(2, uns)
         if (nlong > 0) return ctI(8, uns)
@@ -1932,8 +1932,10 @@ KwDefault   = "default" KwEnd ;
         var opt = items[1]
         return function(b) {
             // A _Bool is an unsigned one-byte cell, like every other w==1 integer, so
-            // its slot has to be the same i8 the load and store paths assume.
-            var bct = ctI(1, true)
+            // its slot has to be the same i8 the load and store paths assume. The
+            // descriptor carries the bool flag, so the normalization is now storeTo's
+            // (through emitConv) and no longer only this declarator's.
+            var bct = ctBool
             var ptr = b.NewAlloca(ctLTy(bct))
             if (opt != undefined) {
                 var r = opt(b)
@@ -2030,6 +2032,11 @@ KwDefault   = "default" KwEnd ;
     // register. fct is the type the value HAD, and only its signedness is read.
     function emitConv(b, ct, v, fct) {
         if (ct.k != "int") return v
+        // _Bool first: its conversion is not a truncation but a TEST against zero
+        // (C11 6.3.1.2), so 5, 256 and -3 all become 1. This is the one place an
+        // assignment, a cast and a store all pass through, which is what makes the
+        // single arm enough.
+        if (ct.bool == true) { return toInt(b, truthy(b, v)) }
         var fromU = (fct != undefined && fct.k == "int") ? (fct.u == true) : false
         var v2 = emitWiden(b, v, fromU, ct.w >= 8)
         if (ct.w == 1) return ct.u ? b.NewAnd(v2, kint(255)) : b.NewAShr(b.NewShl(v2, kint(24)), kint(24))
@@ -2073,6 +2080,17 @@ KwDefault   = "default" KwEnd ;
     // conversions, and the choice between the signed and the unsigned instruction.
     function ctI(w, u) { return {k: "int", w: w, u: u} }
     function ctF(w) { return {k: "flt", w: w} }
+    // _Bool is an unsigned one-byte integer in EVERY respect except its conversion
+    // rule: C11 6.3.1.2 says a scalar converted to _Bool is 0 if it compares equal
+    // to 0 and 1 otherwise, so `_Bool b; b = 5;` holds 1 and not 5. It used to be
+    // plain ctI(1, true), indistinguishable from an unsigned char, so only the
+    // declarator form (makeBoolDecl, which normalizes its own initializer)
+    // normalized at all - an assignment, an array element, a cast and a compound
+    // assignment all kept the raw value. Measured against cc: `_Bool g = 1; g = g+1`
+    // was 2 here and 1 there. The flag rides on the descriptor and is read by
+    // emitConv, convertNum and ctEq; nothing else has to know about it, because a
+    // _Bool's WIDTH and SIGNEDNESS are still those of ctI(1, true).
+    var ctBool = {k: "int", w: 1, u: true, bool: true}
     var ctInt  = ctI(4, false)
     var ctUInt = ctI(4, true)
     var ctChar = ctI(1, false)
@@ -2103,6 +2121,7 @@ KwDefault   = "default" KwEnd ;
     // A COMPILE-TIME value given the representation its C type pins.
     function convertNum(ct, x) {
         if (ct.k == "flt") return x
+        if (ct.bool == true) { return x == 0 ? 0 : 1 }
         if (ct.k == "int") {
             var n = trunc0(x)
             if (ct.w == 1) return ct.u ? (n & 255) : ((n << 24) >> 24)
@@ -2128,7 +2147,11 @@ KwDefault   = "default" KwEnd ;
     // Structural type identity, which is what _Generic needs.
     function ctEq(a, b) {
         if (a.k != b.k) return false
+        // _Bool is a DISTINCT type from unsigned char for _Generic, even though the
+        // two share a width and a signedness (C11 6.2.5: _Bool is its own standard
+        // unsigned integer type).
         if (a.k == "int") return a.w == b.w && (a.u == true) == (b.u == true)
+                                 && (a.bool == true) == (b.bool == true)
         if (a.k == "flt") return a.w == b.w
         if (a.k == "ptr") return ctEq(a.p, b.p)
         if (a.k == "arr") return a.n == b.n && ctEq(a.e, b.e)
@@ -4216,6 +4239,12 @@ KwDefault   = "default" KwEnd ;
                            : r.b.NewIntToPtr(emitWiden(r.b, r.v, false, false), i32p))
                 return deadBlock()
             }
+            // The declared narrow type first (6.8.6.4p3), then the register width
+            // the signature wants. emitConv answers an i32 either way, so the second
+            // step is a no-op for everything but a 64-bit or floating return.
+            if (curFnRetNarrow != undefined) {
+                r = {b: r.b, v: coerce(r.b, curFnRetNarrow, r), ct: curFnRetNarrow}
+            }
             r.b.NewRet(coerce(r.b, curFnRetCt, r))
             return deadBlock()
         }
@@ -4349,6 +4378,14 @@ KwDefault   = "default" KwEnd ;
     var curFnRetCt = ctInt
     // Whether the function currently being emitted returns a POINTER (LLVM i32*).
     var curFnRetPtr = false
+    // The DECLARED return type when it is narrower than an int - a char, a short or a
+    // _Bool. It cannot be curFnRetCt: that one drives the module SIGNATURE (and the
+    // fall-off-the-end constant), which stays i32 for every narrow type because that
+    // is what the call sites build. But C11 6.8.6.4p3 converts the returned value to
+    // the declared type exactly as an assignment does, so `unsigned char f(int n)
+    // { return n; }` called with 300 answers 44 - which cc and c-interpreter.abnf both
+    // said and the compiled half did not, since coerce was handed ctInt.
+    var curFnRetNarrow = undefined
     function emitFunctionBody(name, params, bodyT, sretCt) {
         if (sretCt != undefined) { structRet[name] = sretCt }
         userFuncs[name] = params.length
@@ -4356,6 +4393,11 @@ KwDefault   = "default" KwEnd ;
         var f = getFunc(name, params)
         curF = f
         curFnRetCt = hasOwn(funcRetCt, name) ? funcRetCt[name] : ctInt
+        curFnRetNarrow = undefined
+        if (hasOwn(funcRetAll, name)) {
+            var nrc = funcRetAll[name]
+            if (nrc != undefined && nrc.k == "int" && nrc.w < 4) { curFnRetNarrow = nrc }
+        }
         curFnRetPtr = sretCt == undefined && retIsPtr(name)
         labelBlocks = {}   // Labels are function scoped.
         var b = f.NewBlock("entry")
@@ -4390,8 +4432,11 @@ KwDefault   = "default" KwEnd ;
             var ptr = b.NewAlloca(cty)
             // Narrowing here is also the conversion C11 6.5.2.2p7 requires of an
             // argument to a declared parameter type: f(300) with 'char c' sees 44.
-            b.NewStore(llvm.types.Equal(cty, pty) ? f.Params[i + off]
-                       : b.NewTrunc(f.Params[i + off], cty), ptr)
+            // A _Bool parameter is not TRUNCATED but tested against zero, so
+            // f(3) with '_Bool b' sees 1 (C11 6.3.1.2, applied by 6.5.2.2p7).
+            var pv = f.Params[i + off]
+            if (pct != undefined && pct.bool == true) { pv = emitConv(b, pct, pv, pct) }
+            b.NewStore(llvm.types.Equal(cty, pty) ? pv : b.NewTrunc(pv, cty), ptr)
             declVar(params[i].name, {val: ptr, arr: false, ty: cty, load: cty, ct: pct})
         }
         b = bodyT(b)
@@ -4402,6 +4447,7 @@ KwDefault   = "default" KwEnd ;
         curSret = undefined
         curRetCt = undefined
         curFnRetCt = ctInt
+        curFnRetNarrow = undefined
         curFnRetPtr = false
     }
 

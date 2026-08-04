@@ -466,6 +466,17 @@ func init() {
 				return boolH(rt.csCmp(op, l, r))
 			}
 			c := rt.jsCompare(l, r)
+			// jsCompare answers the SENTINEL 2 for a NaN operand, commented
+			// there as "every relation is false" - and that is exactly C#'s
+			// rule (ECMA-334 12.12.1: for the floating point relational
+			// operators, "if either operand is NaN, the result is false for
+			// all operators except !="). Read as an ordering the sentinel made
+			// `>` and `>=` TRUE, so `double.NaN > 0.0` answered true here and
+			// in layer 2. It is not 0 either: 0 would make `<=` and `>=` true,
+			// which is wrong in the other direction.
+			if c == 2 {
+				return boolH(false)
+			}
 			switch op {
 			case "<":
 				return boolH(c < 0)

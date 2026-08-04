@@ -1278,13 +1278,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     binExt["|="] = "js_bor"
     binExt["^="] = "js_bxor"
 
-    // Go's AND NOT has no external of its own: 'a &^ b' is 'a & (b XOR -1)'. The
-    // override is by ASSIGNMENT so both engines agree on which definition is live.
+    // Go's AND NOT used to be expanded here as 'a & (b XOR -1)' over the handle
+    // runtime's js_band / js_bxor, which are 32 BIT. That silently truncated every
+    // &^ on a value wider than an int32: `int64(1<<40) &^ 7` answered 0 where go
+    // answers 1099511627776, and `^uint64(0) &^ 1` answered 0 where go answers
+    // 18446744073709551614. Measured against real `go run` (go is installed), 4 of
+    // 7 probe lines were wrong in the compiler half; the interpreter half was
+    // already right because it routes &^ through szArith. js_giarith HAS a '&^'
+    // arm in all three halves (abnf/jsrtint.go case "&^", runtime.c si_apply code
+    // 8, and the shared si_arith the layer 2 calls), so the expansion is gone and
+    // &^ / &^= go through giBase like every other bitwise operator.
     var coreEmitBin = emitBin
     emitBin = function(b, op, l, r) {
-        if (op == "&^" || op == "&^=") {
-            return coreEmitBin(b, "&", l, coreEmitBin(b, "^", r, emitNum(b, 0 - 1)))
-        }
         // Only a program that mentions a complex value pays for the probe (see
         // usesComplex); every other one emits the same single extern call as before.
         if (usesComplex && cxOps[op] == 1) { return emitCxCall(b, op, l, r) }
@@ -1309,10 +1314,24 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     var giRel = {"<": "js_gilt", "<=": "js_gile", ">": "js_gigt", ">=": "js_gige"}
     // The primitive (non-complex) binary step. Used by emitBin AND by the complex
     // dispatch's fallback arm, which must not fall back to the truncating core path.
+    // A SHIFT takes its result type from the LEFT operand alone - "the shift count
+    // must be an unsigned integer... the result type of a shift is the type of the
+    // left operand" (Go spec, Arithmetic operators). js_giarith reads the result
+    // width and signedness off WHICHEVER operand is a box (giWidthOf in
+    // abnf/jsrtint.go, si_width_of/si_uns_of in the floor), so a plain `int`
+    // shifted by a `uint8` count came out at 8 bits UNSIGNED: `x >> s` with
+    // x = -8, s = uint8(1) answered 124 where go answers -4. js_gival unboxes a
+    // sized integer to its plain number and passes everything else through, so
+    // putting it in front of the COUNT leaves exactly the left operand to decide
+    // the type. Measured against real `go run`: 4 of 7 probe lines were wrong in
+    // BOTH halves. The twin fix is in go-interpreter.abnf, which wraps the count
+    // in szNum for the same reason; keep the two in step.
+    var giShift = {"<<": 1, ">>": 1, "<<=": 1, ">>=": 1}
     function emitBinNum(b, op, l, r) {
         var base = giBase[op]
         if (typeof base == "string") {
             if (base == "+") { return callExt(b, "js_giadd", [l, r]) }
+            if (giShift[op] == 1) { r = callExt(b, "js_gival", [r]) }
             return callExt(b, "js_giarith", [emitStr(b, base), l, r])
         }
         var rel = giRel[op]

@@ -109,6 +109,18 @@ void s03() {
   check("co5", mp.length == 3 && mp["b"] == 2 && mp["c"] == 3);
   var sq = {for (var i in [1, 2, 3]) i: i * i}; // map comprehension
   check("co6", sq[3] == 9 && sq.length == 3);
+  // Map.operator [] answers NULL for a key the map does not hold (dart:core:
+  // "the value for the given key, or null if key is not in the map"), which is
+  // what the whole null-aware idiom below is built on. Both halves used to ABORT
+  // here - the compiled one through the shared js_pyget, which is Python's
+  // indexing and raises a KeyError - so every line of this check was unreachable.
+  check("co7", mp["zz"] == null && sq[99] == null && <int, String>{1: "x"}[9] == null);
+  check("co8", (mp["zz"] ?? 7) == 7 && (mp["a"] ?? 7) == 1);
+  var miss = mp["zz"];
+  check("co9", miss == null && !mp.containsKey("zz") && mp.length == 3);
+  // ...and the guard runs on the MAP arm only: a list and a String index the way
+  // they always did, including the negative-index wrap the sequence path owns.
+  check("co10", xs[0] == 1 && xs[3] == 4 && "abc"[1] == "b");
 }
 
 // ===== SECTION 04: records =====

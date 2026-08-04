@@ -2254,9 +2254,36 @@ KwSuper     = "super" KwEnd ;
         return {b: mrgB, v: mrgB.NewPhi([llvm.ir.NewIncoming(ov, opB), llvm.ir.NewIncoming(pr.v, pr.b)])}
     }
     // o[i] and o[i] = v, with `operator []` / `operator []=` folded in.
+    //
+    // A MAP lookup that misses answers NULL. dart:core says so of Map.operator []:
+    // it returns "the value for the given key, or null if key is not in the map",
+    // and that is what makes `m[k] ?? d`, `if (m[k] != null)` and the whole
+    // null-aware idiom work at all. The shared js_pyget is PYTHON's indexing and
+    // raises a KeyError instead - it aborted the program in every Dart half. The
+    // fix is here rather than in the runtime because js_pyget is shared with the
+    // Python pair, which needs the KeyError; the guard uses only externs Dart
+    // already emits (js_dartis for the type test - O(1) - and the js_pyin over
+    // js_pyiter pair that `containsKey` is lowered to), so no half owes a new one.
+    // A LIST or a String keeps js_pyget's range error, which is Dart's too.
     function emitIndexGet(b, obj, idx) {
-        return emitOpDispatch(b, "[]", obj, [idx],
-                              function(bb) { return {b: bb, v: callExt(bb, "js_pyget", [obj, idx])} })
+        return emitOpDispatch(b, "[]", obj, [idx], function(bb) {
+            var mapB = curF.NewBlock("")
+            var seqB = curF.NewBlock("")
+            var hitB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            var endB = curF.NewBlock("")
+            bb.NewCondBr(truthy(bb, callExt(bb, "js_dartis", [obj, emitStr(bb, "Map")])), mapB, seqB)
+            mapB.NewCondBr(truthy(mapB, callExt(mapB, "js_pyin", [idx, callExt(mapB, "js_pyiter", [obj])])),
+                           hitB, missB)
+            var hv = callExt(hitB, "js_pyget", [obj, idx])
+            hitB.NewBr(endB)
+            missB.NewBr(endB)
+            var sv = callExt(seqB, "js_pyget", [obj, idx])
+            seqB.NewBr(endB)
+            return {b: endB, v: endB.NewPhi([llvm.ir.NewIncoming(hv, hitB),
+                                             llvm.ir.NewIncoming(hNull, missB),
+                                             llvm.ir.NewIncoming(sv, seqB)])}
+        })
     }
     function emitIndexSet(b, obj, idx, val) {
         var r = emitOpDispatch(b, "[]=", obj, [idx, val],

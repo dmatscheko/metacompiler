@@ -503,6 +503,11 @@ int s19(void) {
 }
 
 // ===== SECTION 20: _Bool, _Static_assert, sizeof, alignment =====
+_Bool s20_retb(int n) { return n; }
+int s20_takeb(_Bool b) { return b; }
+unsigned char s20_retuc(int n) { return n; }
+signed char s20_retsc(int n) { return n; }
+short s20_retsh(int n) { return n; }
 int s20(void) {
     _Static_assert(1 + 1 == 2, "constant arithmetic");
     _Static_assert(sizeof(char) == 1, "char is exactly one byte");
@@ -517,6 +522,44 @@ int s20(void) {
     check(2006, _Alignof(char) == 1 && sizeof(int) % _Alignof(int) == 0);
     _Alignas(8) int al = 6;
     check(2007, al == 6);
+    /* 6.3.1.2: a scalar converted to _Bool is 0 when it compares equal to 0 and 1
+       otherwise - and that is a CONVERSION, so it applies wherever one happens and
+       not only in a declarator with an initializer. _Bool used to be the same
+       descriptor as unsigned char, so both halves agreed on the wrong answer and
+       --cross could not see it; cc is the oracle for every line here. */
+    _Bool as;
+    as = 5;
+    check(2008, as == 1);
+    as = -3;
+    check(2009, as == 1);
+    as = 256;                    /* would be 0 if it truncated to a byte */
+    check(2010, as == 1);
+    _Bool ba[3];
+    ba[1] = 12;
+    check(2011, ba[1] == 1);
+    _Bool bi = 1;
+    bi = bi + 1;
+    check(2012, bi == 1);
+    _Bool bc = 0;
+    bc += 4;
+    check(2013, bc == 1);
+    check(2014, (_Bool)9 == 1 && (_Bool)0.5 == 1 && (_Bool)0.0 == 0);
+    struct { _Bool f; int x; } bs;
+    bs.f = 7;
+    check(2015, bs.f == 1);
+    _Bool bp0 = 0;
+    _Bool *bp = &bp0;
+    *bp = 33;
+    check(2016, bp0 == 1);
+    check(2017, s20_retb(42) == 1 && s20_takeb(3) == 1);
+    /* _Bool is its OWN standard unsigned integer type (6.2.5), not a spelling of
+       unsigned char, so _Generic separates the two. */
+    check(2018, _Generic((_Bool)0, _Bool: 1, unsigned char: 2, default: 3) == 1);
+    check(2019, _Generic((unsigned char)0, _Bool: 1, unsigned char: 2, default: 3) == 2);
+    /* 6.8.6.4p3: the returned value is converted to the DECLARED return type, the
+       same way an assignment converts. The compiled half only knew the return type
+       when it was 64 bits wide, so a narrow one came back unconverted. */
+    check(2020, s20_retuc(300) == 44 && s20_retsc(200) == -56 && s20_retsh(70000) == 4464);
     return 0;
 }
 

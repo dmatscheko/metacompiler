@@ -1922,8 +1922,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // box the compiled half uses (abnf/jsrtint.go). See the invariant there: a
     // plain number is a signed 64 bit integer inside 2^53, everything else is boxed.
     function gtrunc(v) { return v < 0 ? Math.ceil(v) : Math.floor(v) }
-    binOps["<<"] = function(l, r) { return szArith("<<", l, r) }
-    binOps[">>"] = function(l, r) { return szArith(">>", l, r) }
+    // A SHIFT takes its result type from the LEFT operand alone - "the result type
+    // of a shift is the type of the left operand" (Go spec, Arithmetic operators).
+    // szArith reads the width and signedness off WHICHEVER operand is boxed
+    // (szWidth / szUns in lib/interp-core.js), so a plain `int` shifted by a
+    // `uint8` count was evaluated at 8 bits UNSIGNED: `x >> s` with x = -8,
+    // s = uint8(1) answered 124 where go answers -4. szNum reduces the count to its
+    // plain number - which is all szArithSlow ever does with it - so the left
+    // operand is left alone to decide the type. Measured against real `go run`.
+    // The twin fix is in go-to-llvm-ir.abnf, which wraps the count in js_gival for
+    // the same reason; keep the two in step.
+    binOps["<<"] = function(l, r) { return szArith("<<", l, szNum(r)) }
+    binOps[">>"] = function(l, r) { return szArith(">>", l, szNum(r)) }
     binOps["&"]  = function(l, r) { return szArith("&", l, r) }
     binOps["|"]  = function(l, r) { return szArith("|", l, r) }
     binOps["^"]  = function(l, r) { return szArith("^", l, r) }
@@ -1932,8 +1942,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     applyOps["|="]  = function(a, b) { return szArith("|", a, b) }
     applyOps["^="]  = function(a, b) { return szArith("^", a, b) }
     applyOps["&^="] = function(a, b) { return szArith("&^", a, b) }
-    applyOps["<<="] = function(a, b) { return szArith("<<", a, b) }
-    applyOps[">>="] = function(a, b) { return szArith(">>", a, b) }
+    applyOps["<<="] = function(a, b) { return szArith("<<", a, szNum(b)) }
+    applyOps[">>="] = function(a, b) { return szArith(">>", a, szNum(b)) }
     // ^x is the bitwise complement, WITHIN the operand's own width - so ^uint8(0xF0)
     // is 0x0F and not -241, and ^1 on an int is -2. The width used to be recovered
     // from the position-keyed conversion table; it now rides on the value, which is

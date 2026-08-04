@@ -609,7 +609,7 @@ ThrowExpr   <~~ push(makeThrowExpr(pop())) ~~>
 // accepted but reported as not implemented (it needs a null test). Longer operators are
 // listed before their prefixes.
 Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
-            = Target ( "<<=" | ">>=" | "??=" | "+=" | "-=" | "*=" | "/=" | "%="
+            = Target ( "<<=" | ">>>=" | ">>=" | "??=" | "+=" | "-=" | "*=" | "/=" | "%="
                      | "&=" | "|=" | "^=" | ( "=" !"=" ) ) <~~ push(stripWs(up.in)) ~~> Expression ;
 
 // An assignable place: a variable (this and class names are variables too), or a
@@ -830,8 +830,14 @@ KwAnd       = "and" KwEnd ;
 KwOr        = "or" KwEnd ;
 KwNot       = "not" KwEnd ;
 
+// C# 11's UNSIGNED right shift. Every runtime half already implemented it -
+// js_csshift's ">>>" arm in abnf/jsrtcsharp.go, in lib/csharp-rt.metajs and in
+// csharp-interpreter.abnf, and the emitter's ">>>" / ">>>=" routings - but no rule
+// recognised the token, so all of it was dead code reachable from nothing. It is
+// recognised rather than deleted because it is real C# surface. LONGEST FIRST:
+// ">>" would otherwise swallow the first two characters and leave a stray ">".
 Shift       <~~ push(foldBinary(takeAll())) ~~>
-            = AddExpr { ( "<<" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
+            = AddExpr { ( "<<" | ">>>" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
 
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;

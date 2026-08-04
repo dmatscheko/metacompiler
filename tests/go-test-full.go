@@ -892,6 +892,42 @@ func s25() {
 	arr[idx] = 9
 	check("int29", arr[2] == 9)
 	check("int30", fmt.Sprintf("%d %v", i8, u8) == "-128 0")
+
+	// AND NOT runs at the full width too. It used to be expanded in the compiler
+	// grammar as `a & (b ^ -1)` over the 32-bit bitwise pair, so every operand
+	// wider than an int32 was truncated; int31/int32 both answered 0 there while
+	// the interpreter half, which routes &^ through the sized box, was right.
+	var an int64 = 1<<40 | 7
+	var am int64 = 7
+	check("int31", fmt.Sprint(an&^am) == "1099511627776")
+	var au uint64 = 18446744073709551615
+	check("int32", fmt.Sprint(au&^1) == "18446744073709551614")
+	var aa int64 = 1 << 40
+	aa &^= 1 << 40
+	check("int33", aa == 0)
+
+	// A shift takes its result type from the LEFT operand alone - the count is a
+	// separate operand with a type of its own. Both halves used to read the width
+	// and signedness off whichever operand was boxed, so a signed value shifted by
+	// an unsigned count came back UNSIGNED and narrowed to the count's width:
+	// int34 answered 124 and int36 answered 0.
+	var sv int = -8
+	var sc8 uint8 = 1
+	check("int34", sv>>sc8 == -4)
+	var sv64 int64 = -1024
+	var sc16 uint16 = 3
+	check("int35", sv64>>sc16 == -128)
+	var sl int = 1
+	var sc32 uint32 = 40
+	check("int36", fmt.Sprint(sl<<sc32) == "1099511627776")
+	var sm int64 = -8
+	sm >>= sc8
+	check("int37", sm == -4)
+	// and the count's own width still does not survive onto an unsigned left
+	// operand: uint8(0xF0) >> int(1) stays a uint8.
+	var su8 uint8 = 0xF0
+	var sci int = 1
+	check("int38", su8>>sci == 120)
 }
 
 // ===== SECTION 26: sized integers in declared slots =====

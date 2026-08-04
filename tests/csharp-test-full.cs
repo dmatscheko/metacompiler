@@ -917,6 +917,22 @@ b";                                                   // verbatim keeps the newl
             // an int (12.11: unary promotion of each operand separately).
             byte b3 = 255;
             Program.Check("num30", b3 << 8 == 65280);
+            // C# 11's '>>>' is the UNSIGNED right shift on a signed type: it fills
+            // with zeroes instead of the sign bit, at the left operand's own width.
+            // Every runtime half already had the operator; no GRAMMAR recognised the
+            // token, so these four lines were a syntax error in both engines and the
+            // ">>>" arms of js_csshift were reachable from nothing.
+            int n3 = -8;
+            Program.Check("urs1", n3 >>> 1 == 2147483644);
+            long n4 = -8L;
+            Program.Check("urs2", n4 >>> 1 == 9223372036854775804L);
+            int n5 = -16;
+            n5 >>>= 2;
+            Program.Check("urs3", n5 == 1073741820);
+            // '>>>' on an unsigned type is the same shift '>>' already was, and the
+            // count is masked like every other shift's.
+            uint u5 = 4294967288;
+            Program.Check("urs4", u5 >>> 1 == 2147483644 && n3 >>> 33 == 2147483644);
 
             // ----- division (12.9.3 / 12.9.4) -----
             Program.Check("num31", -7 / 2 == -3 && 7 / -2 == -3 && -7 % 2 == -1 && 7 % -2 == 1);
