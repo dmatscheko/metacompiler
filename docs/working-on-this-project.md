@@ -15,11 +15,23 @@ the LENGTH OF ITS OUTPUT FILENAME, which invalidated every sub-2% single-build
 measurement in these documents, including several I had quoted back to people as
 facts. That is chapter 4's newest trap and it is the most expensive thing in here.
 
-The three plan documents next to this one are the *record* of that work:
-[runtime-rework-plan.md](runtime-rework-plan.md) (what was built),
-[runtime-next-plan.md](runtime-next-plan.md) (GC, floor primitives, the sixteen
-migrations, and the consolidated open list), [runtime-merge-plan.md](runtime-merge-plan.md)
-(the shared MetaJS layer). **This document is the manual.** Read it first.
+**Consolidated 2026-08-05.** There used to be four more documents beside this one -
+three plan/record files totalling ~14,000 lines plus three concept notes. They were
+read in full, their still-actionable content became [todo.md](todo.md) and the
+mechanics chapter here, and they were deleted; see chapter 8 for how to read them
+in git history. **This
+document is now the only manual.** The one other file that is current and NOT
+superseded is [abnf-dialect-gotchas.md](abnf-dialect-gotchas.md), the reference for
+the ABNF tag dialect, which chapter 4 assumes you have.
+
+How to read this: **chapters 1-3** are what you need to build and test anything.
+**Chapter 4** is the traps, and it is the highest value-per-line in the file.
+**Chapter 7** is the engine mechanics you would otherwise re-derive at some cost.
+
+**What is still to do is NOT in this file.** It is in
+[todo.md](todo.md) next to it, ordered by importance, with every item marked
+either verified-this-pass or inherited-and-unchecked. This file explains how the
+project works; that one says what is left.
 
 ---
 
@@ -52,7 +64,8 @@ The emitted IR comes in two flavours:
 **Two independent implementations of the same semantics.** That is not redundancy to
 be eliminated — it is the instrument. Roughly fifteen real defects this session were
 found because the two disagreed. Retiring the Go twin was measured and **declined**
-(`a3baeee`); see "Why the Go runtime stays" in `runtime-next-plan.md` Part 4.
+(`a3baeee`); the reason is chapter 7.11, and it is stronger than a preference -
+`llvm.Run` structurally *cannot* execute the C floor.
 
 The layers, bottom up:
 
@@ -327,266 +340,446 @@ worked:
 
 ---
 
-# 7. What is still open
+# 7. Engine mechanics you would otherwise re-derive
 
-Verified at `1e1330e`. The authoritative per-item write-ups are in
-`runtime-next-plan.md`'s "WHAT IS STILL OPEN" and `runtime-merge-plan.md`.
+Everything here was paid for once. It is the part of the deleted plan documents
+worth keeping, and most of it is invisible from the code alone.
 
-**Defects, with oracles available:**
+## 7.1 The `__raw` rule — the defect that compiles, links, and passes everything
 
-1. ~~**ruby-rt's `%g` is unimplemented.**~~ **CLOSED, and the item was wrong.**
-   `%g` landed in `2d3e6f5`, one commit after this document's verification point,
-   and a 1,393-row four-way probe found every non-`#` row already matching MRI.
-   What *was* missing was the **`#` (alternate) flag**, in all three engines — and
-   the two compiled halves failed it worse than the interpreter: they treated `#`
-   as the *conversion*, emitted a literal `#`, left the argument unconsumed and
-   **shifted every later directive**. Fixed in `1eb31e2`, along with `"%d" % -1.5`
-   (the interpreter floored, MRI truncates).
-2. ~~**Python's `&` is int32-signed.**~~ **CLOSED as a NULL RESULT — it was
-   already fixed.** 50 probe rows over `& | ^ ~ << >>` across sign and word
-   boundaries, *including this item's own `-1 & 0xffffffff` example*, agree with
-   CPython 3.14.6 on all four legs at `e1307f3`. The item was stale, not open.
-   What *was* real and is now fixed (`506000a`): integer **literals** past 2^53,
-   where the boxing predicate called `parseFloat` — which rounds at exactly the
-   boundary it exists to detect — and radix literals, which were never considered
-   for boxing at all.
+`compile-core`'s `truthy()` reads a `callExt` result as a **raw integer**
+(`NewICmp(IPredNE, …, handle(0))`). A layer-2 shim that returns MetaJS `false`
+returns handle **2**, and `2 != 0` — so **every condition in the program is
+taken.** It compiles, it links, and nothing in the suite looks at it. A `__raw`
+suffix on the layer-2 function name fixes it.
 
-   **Both of these are the same lesson, and it is the most reliable one in this
-   file: RE-GREP BEFORE ACTING ON ANY LINE OF A PLAN LIST.** Two of the two
-   "defects with oracles available" listed here were not defects. The list has now
-   gone stale within two commits five times.
+You need it exactly when the grammar **overrides `core.truthyExt`**, so **grep the
+ASSIGNMENT, not the read, and grep inside the `-exe` arm** — js/ts are the first
+language where the answer differs between engines (`llvm.Run` keeps the floor's
+`js_truthy`; the native build overrides it for BigInt). Tally: lua, php, python
+need it; swift, java, csharp, dart, go, ruby, kotlin do not.
 
-**Merge residue:**
+The general form is broader than truthiness: **any emitter consuming a `callExt`
+result as a number** needs the check, and `grep NewICmp` over the grammar finds
+them. `js_ctl_kind` is the second instance — it answers a raw 0/1/2/3 (0 not a
+signal, 1 return, 2 break, 3 continue), so the test must be `IPredEQ …, 1`,
+because `truthy()` silently accepts break and continue too. Ruby goes furthest and
+overrides `truthy()` itself with `IPredUGE, v, handle(3)`: handles 0/1/2 are
+undefined/null/false and 3 is true, so `>= 3` *is* Ruby truthiness with no call at
+all — sound natively only because `runtime.c` seeds the same four handles.
 
-3. ~~14 shape groups~~ ~~8 groups / ~84 recoverable~~ — **DOWN TO 2 GROUPS / 9
-   LINES** (`120ba0f`), and both survivors are deliberate declines, not residue.
-   The fifth pass retired 205 lines once the `scope_find` hash index made the
-   declaration tax zero and every tax-based decline re-openable: seven zero-knob
-   groups into `runtime.metajs` (`rtCopyArr` had **seven** copies, two of them in
-   kotlin 993 lines apart) and four into `regex.js`.
+## 7.2 Adding or moving anything at the engine boundary
 
-   **The finding worth carrying: the regex divergence was between the ENGINES,
-   not among the copies.** `abnf/jsrtregex.go` already had *one* shared
-   `rxCache`/`rxGet`/`rxObjRe`/`rxMatchOf` for all four languages while layer 2
-   had four of each — so layer 2 was the wrong side of the comparison the whole
-   time, and the shared bodies now carry the Go twin's own names so the two files
-   line up when diffed.
+- **A host global means THREE engines**: `seed_root(...)` in
+  `languages/lib/runtime.c`, the bindings map in `abnf/jsrtint.go`/`jsrtjvm.go`,
+  and `hostGlobals` in `languages/metajs-interpreter.abnf`. A layer-2 file written
+  against the floor alone links natively and dies under `llvm.Run` with
+  *variable not defined: sint*.
+- **Two `function js_*` of the same name in one layer-2 file** → `error:
+  redefinition of global '@jsrtlib_f_js_<name>'`. A duplicate symbol *used to* be
+  reported as an unresolved one, which is why **a floor addition and its layer-2
+  deletions must land in ONE commit**. `grep -l 'function js_<name>'
+  languages/lib/*.metajs` before moving any body into `runtime.c`.
+- **`-rt-lib` renumbers `funcCount`/`strCount` to 1,000,000** — every new
+  generated module-level name owes the same line, or clang says
+  `duplicate symbol '_jsnum.1'`.
+- **Every floor → layer-2 upcall touches FIVE files, not four.**
+  `tests/coro-poc/build.sh` links `tests/coro-poc/gen.ll` against the floor with
+  **no layer 2 at all**, so a new upcall breaks it with `Undefined symbols:
+  _js_case_map`. The matrix, `--cross` and even `clang-check` are all blind to it.
+  A floor body calling into layer 2 also needs `long to_number(long h);` and
+  `long mk_bool(int b);` declared, or the floor emits an **i32** return and the
+  module fails to verify.
+- **`metajs-rt.ll` can go stale on its own** — uniquely, the grammar that compiles
+  `lib/metajs-rt.metajs` is the grammar that links its output.
 
-   The two declines: java/kotlin `js_jband`, whose single difference sits on a
-   path **neither emitter can produce**; and `luChar`/`js_char`, because `lua-rt`
-   imports *nothing* and `runtime.metajs` would hand it definitions it does not
-   want. Dart's `dtJsCompare` remains genuinely blocked (a third coercion on a
-   path only invalid Dart reaches, and no `dart` toolchain here).
-4. ~~**kotlin carries the whole of `regex.js` verbatim**~~ — **CLOSED,
-   2026-08-04. `kotlin-rt.metajs` line 7275 is now `import "./regex.js"` and the
-   1,489-line copy is deleted.** Declined at ~~+18-23%~~ then ~~+10.7%~~;
-   re-measured after the `scope_find` hash index and shipped at a cost that is
-   **indistinguishable from zero**, on a *correctness* argument, not a
-   performance one:
+## 7.3 The private-representation probe — three answers, one safety property
 
-   ```
-                            old (verbatim)      new (import)     delta
-   40,000 x s = s + i % 7   mean 17.989 G       mean 17.976 G    -0.07%  (n=20)
-                            95% CI on the delta [-0.60%, +0.38%]
-   1,000 x regexp ops       mean 15.052 G       mean 15.093 G    +0.28%  (n=14)
-                            95% CI on the delta [-0.60%, +1.17%]
-   println("hi")            med  27.076 M       med  27.048 M    -0.10%  (n=10)
-   ```
+When the Go twin represents something as a Go TYPE that layer 2 can only
+represent as an object:
 
-   The cost is six bodies kotlin cannot reach (`rxMatchAt` `rxTest`
-   `rxGroupCount` `rxNameAt` `rxReplace` `rxSplit`) against a scope that is now
-   hash-indexed — six extra `js_tdecl` calls at module init. No
-   `runtime-regex.metajs` was created: it would drop those six, which are worth
-   nothing measurable, and re-introduce a second regex text to hand-synchronise.
-   Full write-up, the probe, and the four-way `jxGetProg`/`pyERxGet`/`rbRxGet`/
-   `k5Get` memo now worth retiring: `runtime-merge-plan.md`, "THE THIRD ASKING".
+- **(a) lower a SCOPE probe into the emitter** (php, swift, dart, ruby —
+  `js_scope_typeof`/`js_scope_get`). `sw_kget`/`sw_kset`/`sw_safeget` were
+  transferred verbatim to dart and kotlin, so **look the extern up in
+  `abnf/jsrt.go` first — if it is `js_kget`/`js_kset`, the lowering already
+  exists.**
+- **(b) lower a CONTROL-SIGNAL probe** (go, over tag-10 `js_ctl_kind`).
+- **(c) when the floor keeps no such state at all, layer 2 keeps it and the
+  EMITTER hands it over** — `js_this`/`js_newtarget` read the Go runtime's own
+  call stack and `js_call` drops `self`, so the emitter emits
+  `js_jssetthis(receiver)` before every call site it owns. No restore is needed:
+  `this` is read once per function at entry.
 
-   **⚠ THE HARNESS DEFECT THIS FOUND, which invalidates a lot of prose in these
-   plan documents.** A single-build A/B on a native binary **cannot resolve
-   anything below about 2%.** Take one byte-identical `.ll`, one source, one
-   tree, and vary nothing but the **length of the `-exe` output filename**:
+The rule for all four JS walls (`this`, the accessor box, `typeof`, the BigInt
+operators) is **route the OPERATOR through layer 2, in the emitter, under `-exe`
+ONLY** — no floor change, no Go twin change. **Then diff the emitted non-native
+module against a clean `git archive` of the base commit**: one `git archive` plus
+one `diff` turns "will the matrix survive this" into a measurement.
 
-   ```
-   17.756 17.779 17.910 17.912 17.912 17.914 17.916 17.920 17.937 17.943
-   18.017 18.018 18.021 18.023 18.029 18.029 18.031 18.035 18.071 18.600  G
-   ```
+Two ceilings: **there is no scope-PARENT accessor reachable from an emitter** (why
+kotlin's chain walks stayed — though see §7.27, the floor has one now), and
+**`js_scope_typeof` cannot distinguish "holds undefined" from "absent"**, which
+became a hard failure in python (`declCompNames` declares comprehension targets
+holding undefined, so `[i*i for i in range(4)]` answered `[NaN,NaN,NaN,NaN]`).
 
-   **A 4.8% spread, bimodal, from the name of the output file.** It is not the
-   run and it is not codegen: six rebuilds of one source to one path give
-   `md5`-identical binaries and 0.05% spread. The path string lands in the binary
-   and moves the code layout — and so does the module's own content, identically.
-   **Therefore holding the `-exe` path fixed across variants cancels NOTHING**
-   (I recorded that as the fix; it is not). There is no pairing that cancels
-   layout. The only sound estimator is a **mean over ≥15 layout draws with a
-   confidence interval** — vary the output filename length, it is free. Two
-   careful people got +0.04% and +0.65% on these same two sources before doing
-   this; both were single draws.
+## 7.4 Grep the interpreter before porting a Go twin
 
-   Also: `gen-*-rt-ll.sh` runs its own `go build`, so another agent's in-flight
-   `abnf/*.go` edit breaks your measurement mid-sweep. Measure in a
-   `git archive <base> | tar x` tree, per §4.
+**Every language already has a complete MetaJS implementation of its own semantics
+in `languages/<lang>-interpreter.abnf`'s start script** — in the same frozen
+subset a layer-2 file is written in (no `for..in`, no `split`, no exponent
+literals: exactly what a fresh translation gets wrong), kept in agreement with the
+Go twin by the matrix. js lifted `jsStr`/`jsToPrim`/`jsLooseEq`/`jsBuiltin`/
+`jsStringMethod`/the whole BigInt family this way. Only what touches the VALUE
+MODEL cannot be lifted.
 
-   The declaration-index curve that governed every merge decision in this project
-   is flat, which is why the above reversed:
+Related: **a layer-2 file may `import "./regex.js"`** — `metajs-to-llvm-ir.abnf`
+resolves `import "./x"` relative to the file, and `-rt-lib`'s lazy boot runs the
+imported top-level declarations into the same pinned scope. Ruby's regex glue cost
+~460 lines instead of ~2,000; python's ~660 instead of ~2,200; js's 548 instead of
+~2,700.
 
-   ```
-   regex block at HEAD placement      before 30.970 G      after 18.023 G
-   relocated to declaration index 0          33.399 G  +7.8%      17.923 G  -0.6%
-   import runtime.metajs APPENDED            44.131 G +42.5%      18.130 G  +0.6%
-   ```
+Two cheap greps before costing anything: `grep -c 'js_genfn\|js_yield'
+languages/<lang>-to-llvm-ir.abnf` before costing a coroutine (dart, go, csharp,
+kotlin, ruby all answer 0 — their `sync*`/`suspend`/iterators are lowered by the
+emitter), and `grep -n 'math.Floor(.*)\*' abnf/jsrt*.go` before assuming an FMA
+divergence.
 
-   **The rule is: there is no rule. A shared layer-2 body costs a language that
-   cannot call it 0%, at either end of the module.** Size it however you like.
-   Two consequences: the `runtime-decimal` / `runtime-bignum` / `runtime-jvm` /
-   `runtime-dartswift` splits exist for a reason that no longer holds, and every
-   small pair the shape pass declined on this tax is worth re-opening — the
-   regex import above is the first of them to be re-opened, and it went the other
-   way. **The remaining ones have not been.**
+## 7.5 The value model: sized integers, and where each language unboxes
 
-   **Note what `import` APPENDING measured before the index landed: +42.5%, a
-   LOSS.** What a declaration's index costs is not how many declarations precede
-   a body — it is where the HOT ones sit, and `runtime.metajs` holds `js_jadd`.
+**Ask WHERE a language's unboxing boundary sits, not whether it has a 64-bit
+type.** `si_norm` unboxes any signed 64-bit value a double holds exactly. Go and
+Dart want that (plain `sintOp`, zero wrapper lines). **Kotlin says 32** — a `Long`
+is a box at every magnitude, because an unboxed small Long makes
+`1000000L*1000000L` a 32-bit multiply answering `-727379968`. Java says nowhere.
+Ruby and Python say "no meaning" (Ruby's Integer is a plain double and its Float a
+`{__flo}` box, so `7/2==3` and `7.0/2==3.5` both hold).
 
-   **Measure with `/usr/bin/time -l` instructions retired, not wall clock.** With
-   agents running, a 40k-iteration loop varies +-8% between runs of the same binary;
-   instructions reproduce to 0.02% **for one fixed binary** — which is exactly why
-   the layout lottery above went unnoticed for so long. Reproducibility per binary
-   is not reproducibility per build, and the rows just above (`-0.6%`, `+0.6%`)
-   are single builds and should be read as **0 +- 2%**.
+`sintRaw(hi, lo, bits, uns)` answers all three non-Go cases. **The invariant that
+goes with it is SILENT when missed**: `si_apply` ends in `si_norm`, so `2L + 3L`
+comes back as a plain number — as an *int* to everything downstream. Every
+long-producing `sintOp` must go through a re-box (`sintRaw(sintHi(t), sintLo(t),
+64, false)`, spelled `csNorm` in C#, `jlOp`/`jlShr` in java). Mutation-proved: not
+re-boxing fails 7 assertions.
 
-**Recorded, larger, and deliberately not started:**
+## 7.6 The float box — the precedent to copy, and its two surprises
 
-5. **A real tuple type for Python.** `set_member` rejects a named key on tag-5, so a
-   tuple must become a box — the float box's ~640 lines again. 10/10 probe rows wrong
-   *identically* in both halves, so it is a CPython gap, not a divergence.
-6. **A catchable `NameError` under the compiler.** The site is `js_scope_get`, shared
-   by all sixteen languages and pinned by clang-check and the SHOULD-ABORT rows.
-7. **Part B has no landed move.** The floor→layer-2 upcall costs **120 ns** and is
-   affordable; MetaJS **data-structure** work costs **3.2 µs** and is not. Every
-   remaining candidate (`fmt_*`, `js_num_str`, the `dec_*` family) is reached by
-   every print. Each needs its own benchmark before being written.
-8. **Python integer ARITHMETIC does not promote past 2^53** (the literals now do).
-   `9007199254740992 + 1` is unchanged; 54 of 55 differing probe rows against
-   CPython are the `*` column. The site is the plain `l+r`/`l-r`/`l*r` arms in all
-   three engines — the hot path of every Python program, where a naive guard
-   measured +9.5% — and `*` needs the exact product, which is the expensive half.
-9. **Ruby's integer directives**, all three of which BOTH HALVES AGREE ON, so
-   `--cross` is blind by construction: `%d`/`%x`/`%o`/`%b` of a float past 2^53;
-   negatives under `%x`/`%o`/`%b`, which need MRI's infinite two's-complement
-   `..fb` notation; and precision on an integer directive being ignored.
-10. **`gates.sh` runs its seven gates serially at 315% CPU.** Running them
-   concurrently was measured at **291 s → 150 s with all seven verdicts
-   byte-identical** — but it was not shipped, correctly: the matrix entries in
-   `.vscode/launch.json` write **fixed paths inside the repo**, so proving no two
-   concurrent gates collide needs an audit of three more scripts. One green run is
-   not proof, and a false green in `gates.sh` is the worst outcome available here.
-   The conditions to discharge it are recorded.
+Two float mechanisms exist. The **tag-14 floor box** (java/kotlin/go/csharp;
+`runtime.c:2449-2532`, host ids 51-60) is the **wrong** vehicle for a dynamically
+typed language: its rule is "either operand is a box ⇒ result is a box", but
+Python's `/` must make a float from two ints, and it drags a fourth print style
+into the floor, `jsrtjvm.go` and `metajs-interpreter.abnf`. The right vehicle is
+the **plain-object box** (ruby `{__flo}`, php `{__pf}`, dart `{__flo}`) — a Go
+twin type per language, **zero lines in the C floor**. Estimate was 700–950 lines;
+actual ~640 across four files.
 
-**Known differences from real toolchains, measured and left:** struct alignment is
-packed (`{char;short;int;long}` is 15 bytes, `cc` says 16); `_Bool b = 5` holds 5;
-identical string literals are not merged (unspecified in C); lua's `-0.0` unary minus
-in the compiler half; a tuple prints as a list; ~9 latent bash ERE defects carried
-verbatim from the hand-emitted engine.
+Two risks behaved surprisingly, and they are the reusable half:
+
+- **Dict/set key aliasing must be tried TWICE.** A box's alias is the plain
+  number, and the number's alias is the bool, so `{True:"t"}[1.0]` is two hops.
+  The reverse direction is unreachable by alias, so all three engines grew a
+  key-equality hook on the fallback SCAN.
+- **`is`/`strictEq` UNDER-reads.** `1.0 is 1.0` is true in CPython while
+  `float('nan') is float('nan')` is false — which no VALUE struct can express.
+  Hence the box is a POINTER and all three engines run
+  `(a === b) || (both floats && doubles ===)`. Found by a ratchet assertion, not
+  by reasoning.
+
+## 7.7 Numbers, formatting, and what cannot move out of C
+
+**`d_pow`/`d_exp`/`d_log`/`d_sqrt`/`d_frexp`/`d_ldexp`/`d_modf_int` cannot move
+into MetaJS, and the argument is circular rather than a preference**: they are not
+helpers on top of doubles, they ARE the double — each reads or writes the IEEE-754
+layout through `union DB`. MetaJS has no union and no access to a double's bits,
+and its numbers *are* these doubles, so a MetaJS `pow` written on `*` and `/`
+lowers to `__mec_dmul`/`__mec_ddiv` in the same file. Same for `d_mod`,
+`d_mod_go`, `d_is_nan/inf/zero`, `d_sign`, `d_neg`, `d_abs`, `d_from_long`,
+`d_to_long`, `d_trunc`, `d_floor`. Separately, **strike `d_frexp`/`d_ldexp`/
+`d_mod` from any candidate list on hotness**: `metajs-bench-try.js` does `i % 3`
+once per iteration and calls them 143,792 / 123,793 / 20,000 times.
+
+**The exact float formatter, and why the obvious one is wrong twice.**
+`strconv.FormatFloat` is EXACT and rounds **half to even**.
+`Math.floor(a*10^p + 0.5)` is wrong both because it rounds half away from zero
+*and* because it cannot reach digits past 2^53. The replacement is the exact
+decimal expansion of the double (`m*2^e`, or `m*5^-e` with the point moved) on a
+little-endian base-10000 bignum plus a half-to-even rounder — it exists,
+language-neutral, as `rtExactDec`/`rtRoundHalfEven`/`rtFixed` in `runtime.metajs`.
+**Half-up-vs-half-even has been a live divergence three separate times and
+`--cross` was silent every time.** Also: **`printf` width and precision count
+BYTES, not characters** — `"%10s" % "café"` gets five spaces; `byteLen` is the
+floor's answer.
+
+**Only the digit machinery is shared; the renderers are per-language on purpose.**
+CPython: `str == repr`, exponential iff `decpt <= -4 || decpt > 16`, **no** forced
+`.0` in exponential form, exponent zero-padded to ≥2 digits, lowercase
+`nan`/`inf`. Ruby: `decpt < -3 || decpt > 15`, forces `.0`, `NaN`/`Infinity`,
+byte-padded. Java: **value**-window `1e-3 <= |d| < 1e7`, forces `.0`, upper `E`,
+**two** minimum significant digits — and the forced second digit belongs to the
+*significand*, computed against the ACTUAL value (`4.9E-324`, not `5.0E-324`).
+Dart: ECMAScript's.
+
+**lua's `%g` window is 15 then 17, never 16**, and `floPrec`'s contract is "AT
+LEAST n digits". lua 5.5.0 tries `"%.15g"` and, if it does not read back,
+`"%.17g"`; a 15/16/17 model differs on 10 of 91 probe values. The `%g` threshold
+is `exp < -4 || exp >= P` with **P the precision actually used**. The trap on top:
+`floPrec(v, n)` answers the *shortest round-tripping* form when n is smaller than
+that, so `%e` of `1234.5678` came out `1.234567e+03`. Every existing caller asks
+n ≥ shortest, where the contracts coincide.
+
+## 7.8 The garbage collector — decisions, not omissions
+
+It **never moves an object** (conservative roots forbid it), **never returns
+memory to the OS**, is stop-the-world, and **only `runtime.c` has one** —
+`bash-rt.c`, `batch-rt.c` and the C interpreter keep uncollected arenas.
+
+- **Requiring exact payload addresses is unsound at `-O2`.** In `u_slice` the only
+  surviving reference while `str_from_units` allocated was `u + b`, an interior
+  pointer, and clang had already dropped the owning handle — 9 `string.sub`
+  failures under `MEC_GC=stress`, while `off`/`auto`/`poison` saw nothing.
+  Interior pointers resolve by `idx = (v - base) / bsize`.
+- **Any new emitted module-level global holding a handle must be pinned with
+  `js_gc_pin`** — the emitted module has globals the floor cannot see. `js_gc_pin`
+  is the identity in both halves.
+- **`MEC_GC` is the only reason those defects were findable**: `off`, default
+  (collect when bytes-since-last > live set, floor 1 MB), `stress`, `poison`
+  (retire and fill every swept block, so a missed root is a wrong answer rather
+  than lucky bytes), plus `MEC_GC_STATS=1`. `poison` is deliberately **not** also
+  `stress` — that combination is quadratic. **`stress` is a correctness tool, not
+  a benchmark mode**: it collects at every allocation, so size the program in
+  hundreds of iterations, not tens of thousands.
+- **A shadow stack was costed and declined** (IR the Go half carries and ignores,
+  at every temporary, in fifteen emitters, forever), and **refcounting is settled
+  as wrong here**, not a preference: a scope holds its parent and a closure holds
+  its defining scope, so a closure defined inside a function cycles with the scope
+  that names it — the common case.
+- **The coroutine GC contract**: the running side owns `GC_STACK_BASE`; a registry
+  of suspended stacks publishes `sp` plus a `setjmp` of callee-saved registers
+  before parking; no handle lives in the malloc'd control block; nothing moves.
+  **The failure modes are SILENT** — a resumer stack not scanned prints 1 instead
+  of 1234; `GC_STACK_BASE` not switched on resume prints `<nil>` instead of 42. A
+  single global `jmp_buf` pool is a SIGSEGV.
+
+## 7.9 Behaviours that are the specification, not slips — do not "fix" them
+
+- **`box == 5` is false while `box === 5` is true.** `loose_eq` sees a box as
+  neither number nor string; `strict_eq` has an explicit tag-13/14 arm. The C
+  floor and the Go twin do this independently and identically.
+- **`===` in layer 2 is NOT JavaScript identity.** It lowers to the floor's
+  `strict_eq`, whose first four lines compare a boxed double and a sized integer
+  BY VALUE, in `rt.strictEq`'s own arm order — and `rt.strictEq` is what
+  `rt.dictFind` finds keys with. So a bare `===` key scan **is** the oracle. The
+  one exception is a Char box: `{__char}` is an ordinary object to `strict_eq`, so
+  a `Dictionary<char,V>` misses every key without an unboxing arm.
+- **Truthiness of tag 13 and tag 14 is not converted in the interpreter half** —
+  `if (flo(0))` is false natively and true in the interpreter. Deliberately
+  unasserted.
+- **A JS BigInt is INTERNED and never freed, and that is load-bearing**: the
+  floor's `strict_eq` has no BigInt case and falls to identity, so without one
+  canonical object per value `10n === 10n` is false at every unrouted site. Ruby's
+  Symbols are interned for the same reason.
+- **`keysOf` hides `__`-prefixed slots** and answers own keys in insertion order
+  (maintained by hand in `makeObject`/`makeAssign`/`makeIncDec`/`makePreIncDec` —
+  any new object-write site must maintain it), but the Go twin's `clone` walks
+  `o.keys` raw and copies `__class` by accident. **Every language that clones
+  through `keysOf` must ask which hidden slots the copy must keep.**
+- **`giFromFloat` of an infinity is architecture-dependent in the Go twin only**
+  (`int64(NaN)` is 0 on arm64, `math.MinInt64` on amd64), which is why SECTION 24
+  asserts nothing about an infinity.
+- **The `guard < 64` cap on the `__class`/`__super` walk** is kept for all six
+  languages even though the oracle has no cap, **because the oracle HANGS on a
+  cyclic `__super`** and no language here can express a 65-deep hierarchy.
+
+**Deliberate non-convergences with real toolchains, measured and LEFT.** Treat
+these as the specification of this project, not as a backlog — each was probed and
+a decision was taken:
+
+- **C**: struct alignment is packed (`{char;short;int;long}` is 15 bytes where
+  `cc` says 16); `_Bool b = 5` holds 5; identical string literals are not merged
+  (unspecified in C); `c-interpreter.abnf` deliberately lacks the varargs `printf`
+  family, `exit`/`abort`, `qsort`/`bsearch` and `malloc`/`free`.
+- **Bash**: a string whose first byte is `0x02` is read as the in-band field-LIST
+  marker, so `${#v}` of a lone `$'\x02'` is 0 where bash says 1 (fixing it means
+  re-plumbing the field encoding in both grammars); both our engines accept
+  `[[:word:]]` and `[[:ascii:]]` which bash rejects, and converging means changing
+  `regex.js`, shared by ten languages; bash *errors* on
+  `declare -A f=([k]=v one two)` where we accept; bash's associative-array
+  iteration is hash order (unspecified) against our insertion order; and `rt_eg`'s
+  `*`/`+` arm evaluates itself at `k == 0` and discards the result, because the IR
+  computes both operands of an `And` and the arena offsets are observable through
+  pointer identity.
+- **Lua**: `pairs` order is unspecified in Lua itself, so three ratchet assertions
+  cannot match any particular answer; `-0.0` unary minus differs in the compiler
+  half.
+- **Swift**: `Optional(3)` needs an Optional box in the value model (`Int? = 3`
+  *is* `3`), so recovering it needs the declared type at the print site, i.e. a
+  type checker; class instances print a bare type name where real Swift
+  module-qualifies (`sp2.C`), and there is no module concept here.
+- **Go**: `&P{1}` prints `{1}` — in both halves a struct value *is* its own
+  reference, so `P{1}` and `&P{1}` are the same object and `fmt` distinguishes
+  them by static type. A real pointer cell pulls in auto-deref, method dispatch,
+  assignment targets and equality.
+- **PHP**: `Generator::send()` works in the compiler and cannot work in the
+  interpreter without a suspendable body — a model difference, stated in both
+  `:description` blocks.
+- **C#**: no dotnet on this machine, so the spec-cited values are the least
+  confident thing here; the shakiest is that `System.Array` does not *override*
+  `ToString`, which is what makes `int[]` render `System.Int32[]`.
+- **Dart**: `Map`/`Set`/`Record` `toString` is spec-derived rather than
+  corpus-derived, and `Record.toString` is explicitly unspecified in `dart:core`.
+- **Python**: a tuple prints as a list (see todo.md 3.1 for why a real tuple type
+  is atomic and ~640 lines).
+
+Per-language divergences from real toolchains, recorded and permanent: Go byte-
+slicing a rune in half cannot be represented at all (the floor's strings are
+UTF-16); Go counts `len([]byte(s))` in RUNES and prints `%q` as UTF-8 bytes. An
+astral character prints as two U+FFFD in swift. JS: `(-0.4).toFixed(0)` is `"0"`,
+`(0.1).toString(3)` emits 52 fraction digits, the `d` flag builds no `m.indices`.
+Python: integral floats render as int, `&|^` are ToInt32, `inf`/`nan` spell
+`Infinity`/`NaN`, no `ZeroDivisionError`, the format mini-language is a subset,
+and **`js_pylen` counts CODE POINTS while `js_pyget`'s string indexing counts
+UTF-16 CODE UNITS** — an `abnf/jsrt.go` inconsistency reproduced rather than
+repaired. `abnf/jsrtphp.go` misreads `"1e400"` as 1 where both our halves answer
+INF (the PHP spec agrees with us) — sole cause of 431 hunks in a 40,948-line
+probe, and permanent, since retiring the Go twin was declined.
+`c-interpreter.abnf` deliberately lacks the varargs `printf` family,
+`exit`/`abort`, `qsort`/`bsearch` and `malloc`/`free`.
+
+## 7.10 Dialect and tooling snags that cost an afternoon each
+
+- **`(255).toString(16)` works under goja and ABORTS under `-frozen`** ("call of a
+  non function value"). Use an explicit digit loop.
+- **`0 - 0.0` is `+0.0`** and the tag engine keeps integral values as integers, so
+  the working spelling for a negative zero is **`0 / (0 - 1)`**. Same root bug in
+  the floor's `d_ldexp`, because `c-to-llvm-ir.abnf` emits unary minus on a double
+  as `0.0 - x` — write the sign BIT.
+- **`sum()` needs `var t = anytype`** in the interpreter: MetaJS is typed and an
+  accumulator that starts as the number `0` cannot later hold a box.
+- **awk truncates a string at a NUL**, so a probe printing a control character
+  reports a phantom defect — both the comparison script and `strip.awk` cut the
+  module off stdout with awk. Compute the cut on a NUL-free copy and apply it to
+  the raw bytes with `tail -n +K`.
+- **`mec … -exe PATH` only BUILDS** (links, prints the path, exits 0), so a bare
+  `-exe` matrix row asks "does this link" and nothing more. `SHOULD ABORT` means
+  build-then-run-and-require-nonzero. The word "fail" is avoided because any test
+  name containing FAIL means "the metacompiler must exit non-zero" — the opposite.
+- **Assertions must be written at the width where the rule can bite.** `>>`
+  clamping, `<<` at count ≥ width and unsigned division all measured **0 of 4**
+  discriminating power as first written, because every operand was 8-bit.
+- **`select` in an emitter evaluates BOTH operands.** lua's numeric `for` test
+  made two layer-2 calls per iteration and discarded one; fixing that plus
+  hoisting a loop-invariant sign was 4 of 11 layer-2 calls per iteration, **29% of
+  the whole allocation saving**.
+- **`jsdispatch` is not a linear chain in practice** — LLVM lowers it to jump
+  tables, and callee index 0 vs 799 in an 800-function module is 0.89 s vs 0.88 s
+  over 3M indirect calls. The growth with module size was the COLLECTOR.
+- **Widening the small-integer cache is not worth it**: 18 of 26 number cells per
+  iteration are layer 2's own guard constants, and a wider cache reaches at most
+  73 bytes of 3,616 for a 512 KB table.
+
+## 7.11 Why `llvm.Run` can never run layer 2
+
+The link is fine, and `getenv`/`write`/`exit` are 9-line stubs. `setjmp`/`longjmp`
+is ~100 lines and every `throw` in all sixteen languages goes through it;
+`pthread_create` + `dlopen`/`dlsym` are worse, since `dlsym` must answer a real
+code address where the interpreter's function-as-value is a funcId in an i32.
+
+**The unfixable part is the collector: it has nothing to scan.** `gc_collect`
+walks `[sp, GC_STACK_BASE)`, but under `llvm.Run` an SSA value lives in `fr.regs`,
+a Go slice outside the interpreted address space, and an `alloca` is bump-
+allocated upward and never freed. Measured silently wrong: a probe returns 9
+normally and **0 under `PROBE_GC=s`** — an array collected while live.
+
+The only timeable alternative (build with `-exe` inside `./test.sh`) costs 2.6×,
+reaches only the compiler halves, makes clang a hard dependency, and breaks the
+tool's primary invocation. **This is why the Go twin stays**, and if it were ever
+retired, 12,713 lines could not go under any answer — `abnf/jsrt.go` (9,837) **is
+the engine `-frozen` itself runs on**, and `jsrtint.go` (682) holds floor host ids
+61/62/63, so **deleting it breaks the NATIVE path, not the Go one**.
+
+## 7.12 Architecture decisions taken AGAINST, so nobody re-litigates
+
+- **No `lib/kotlin-common.js`, and no `lib/js-core.js` for the js/ts/metajs
+  family.** Helpers byte-identical across a language's two grammars
+  (`splitMembers`, `kCharCode`, the `retLabels` stack) or across the three
+  js-family grammars (`makeAnd`, `makeOr`, `makeCond`, `makeSwitch`, …) are
+  **deliberately left duplicated**: no language pair here has a `*-common.js`,
+  each interpreter/compiler pair is self-contained beyond the generic
+  `interp-core.js`/`compile-core.js`, and a family-only shared file would trade
+  harmless duplication for an inconsistency with fifteen other languages. Most of
+  those names also exist with **different** bodies in c/csharp/java/go/swift, so
+  core is not a legal home either — and the goja-hoist-vs-frozen-textual-position
+  rule would make the two engines pick opposite winners.
+- **`makeThrow` stays per-language**: eight compilers share its shape, but
+  **dart's is a different function** — Dart's `throw` is an *expression*, so it
+  returns `{b, v: hUndef}` instead of terminating the block with `deadBlock()`.
+- **`makeTry`, `makeReturn`, `makeAssign`, `makeArray`, `mcall`, `makeIncDec` look
+  shared and are not** — they encode each language's return-signal protocol,
+  control-signal wiring, handle constants and method dispatch. Do not
+  "consolidate" them.
+- **`js_has` and `js_goslice` stay split permanently**: Go counts a string in
+  BYTES, C# in UTF-16 code units. Two specifications, not a dedup debt.
+- **A shared `lib/str-rt.c` between `bash-rt.c` and `batch-rt.c`** was never built
+  and should not be: the saving is source lines only, across two runtimes whose
+  ABIs and arenas differ.
+- **The duplicated-extern-NAME view must not be used to plan a merge.** It
+  understates (internal helpers are language-prefixed, so identical logic never
+  collides by name — the shape scan found 24 groups / 776 lines invisible to it)
+  **and** overstates (of 24 `js_*` names defined in more than one file, only two
+  have bodies that group at any threshold; `js_mcall`'s six copies are 45, 1, 73,
+  4, 15 and 51 lines). `tools/shape-scan` is the measure.
+
+## 7.13 Who imports what
+
+```
+runtime.metajs (804)      <- csharp go dart java php kotlin ruby python swift metajs-rt
+runtime-decimal (188)     <- python ruby swift
+runtime-bignum  (263)     <- python ruby
+runtime-jvm     (159)     <- csharp java
+runtime-dartswift (50)    <- dart swift
+regex.js       (~1,265)   <- js python ruby kotlin
+lua-rt.metajs             <- imports NOTHING
+js-rt.metajs              <- imports regex.js ONLY
+```
+
+`runtime.metajs` requires seven `rtk*` hooks from each importer (`rtkStr`
+`rtkNum` `rtkIsChar` `rtkIsArr` `rtkCall` `rtkIsDict` `rtkDictFind`), plus
+`rtkFloDigits` for `runtime-decimal`. **That hook contract, not size, is what
+makes a first import expensive** — and it is the real reason the `luChar` and
+`jvCtorDescOf` merges are declined.
+
+**A `regex.js` change costs an edit in more than one place**: `abnf/jsrtregex.go`
+is a line-by-line port of it (the Go twin for the compiler grammars) and must be
+hand-synchronised, while the four importers and the interpreters pick the change
+up automatically. The `rxGet` cache key keeps a `$` prefix on purpose — it is what
+keeps a pattern spelling `"toString"` out of the intern table.
 
 ---
 
-# 8. What would make this project better
+# 8. Where the old plan documents went
 
-Ordered by how much time each would have saved me.
+Until 2026-08-05 there were four more documents here: `runtime-rework-plan.md`
+(the original C-floor/layer-2 plan), `runtime-next-plan.md` (10,095 lines: the GC,
+the floor primitives, the sixteen language migrations), `runtime-merge-plan.md`
+(five passes of de-duplicating layer 2), and three `*-concept-consolidation.md`
+files. They were **removed deliberately**: they were the *record* of finished
+work, they had gone stale within two commits five separate times, and having five
+overlapping sources meant nobody could tell which one was current.
 
-**1. ~~A layer-2 test gate that runs by default.~~ — DONE, 2026-08-04.**
-`tests/gates.sh` runs all seven gates in one command and cannot report green
-without `clang-check` and `native-full`, the only two that see layer 2. `--quick`
-skips them and says in as many words that a layer-2 change must not be called
-green on it. It also encodes the two greps that two gates are only correct with —
-`--full` exits 0 BY DESIGN, so its summary line was never a verdict.
+Everything still actionable from them is in [todo.md](todo.md); the durable
+mechanics are in chapter 7 above. Everything else is in git history, in full:
 
-**2. ~~`./test.sh --probe`.~~ — DONE, 2026-08-04, as `tests/probe.sh`.** One
-program, four ways — the interpreter half, `llvm.Run`, a native `-exe` binary, and
-a real toolchain — diffed, and it reports WHICH PAIR disagrees, because that names
-the layer: interp-vs-run is the grammars or the twin, run-vs-native is layer 2 or
-the floor, ours-vs-oracle is a specification gap in however many engines agree.
-It deliberately does NOT generate the programs from a spec: the per-language
-program is the irreducible part, and the plumbing was what got re-invented.
-Two worked templates in `tests/probe/`.
+```bash
+git log --oneline --diff-filter=D -- docs/          # the commit that removed them
+git show 8316a41:docs/runtime-next-plan.md          # read one, unchanged
+git show 8316a41:docs/runtime-merge-plan.md
+git show 8316a41:docs/runtime-rework-plan.md
+```
 
-**3. ~~A shape-scan lint.~~ — DONE, 2026-08-04, as `tools/shape-scan`.** It
-found on its own, at the permissive threshold, the groups the merge plan had only
-ever found by hand — plus `rtCopyArr`'s seven copies. `-max N` is the CI ratchet;
-the count is **2** at `-min 60` today and both are documented declines.
-It also caught a defect in itself, which is the argument for building it: it
-reported a group of three "identical" bodies of 6, 35 and 41 lines, which cannot
-be true. Finding a function's end by scanning for a `}` in column 0 breaks on the
-one-line form, so every one-liner swallowed everything up to the next column-0
-brace. Brace-counting sees 1,713 bodies where that saw 1,409.
+**Code comments still cite them by name** — 158 references across ~70 files, of
+the form *"per docs/runtime-next-plan.md part 3"*. Those are **provenance**, and
+they were left as written rather than repointed at this file: they name a specific
+part of a specific document, and rewriting them to point here would turn an
+accurate historical citation into a false one. Use the `git show` above.
 
-**4. Make the frozen-snapshot rule mechanical.** "Did you `-freeze` after touching
-the emitter?" is a question a script should ask. A pre-commit check that regenerates
-and diffs would remove a whole class of near-misses.
-
-**5. `-O2` was missing from `buildExecutable` for the entire project's life.** Adding
-it made every native binary 2.2× faster. **Look for more of those**: the build path
-had never been profiled, and the second-biggest win (the literal cache thrashing) was
-the same shape — nobody had measured, so nobody knew.
-
-**6. ~~A benchmark suite with recorded baselines.~~ — DONE, 2026-08-04, as
-`tests/bench.sh` + `tests/bench/baseline.txt`.** The same loop in six languages,
-instructions retired, medians over layout draws, with each row's own noise floor
-recorded so "is this a regression?" is a command. Building it is what exposed the
-layout lottery in §4 — and the first version of it had that very bug, comparing
-builds at `mktemp` paths that differed every run. **Every perf number in the plan
-documents was then audited against the finding, and nothing in the 0.1-2% band
-survived anywhere in either file.**
-
-**7. Make MetaJS's dialect gaps loud.** No exponent literal, no `toPrecision`, typed
-locals, ASI differences: each is discovered by a confusing failure. A `-verify` pass
-over `lib/*.metajs` that names them would pay for itself immediately.
-
-**0. ~~`scope_find` is the single hottest line in the runtime~~ — DONE, 2026-08-04.**
-It has a hash index now (an open-addressed `index + 1` table in a fourth part of the
-scope's single buffer block, built at 32 entries and up, keyed on a content hash
-memoised in the string cell's unused field `f`). Nine languages run **20–42% fewer
-instructions**: python −42.0, kotlin −40.9, ruby −39.4, swift −33.8, php −32.4,
-go −30.1, java −29.7, dart −28.7, typescript −28.5, js −26.5, csharp −19.5. `c` is
-the control at −0.1%.
-
-**lua is ~+4% and metajs +0.4%, and that is not the hashing.** (The lua figure
-was re-measured twice after the layout lottery was understood — 13 draws a side
-and 9 draws a side. The two runs agree the effect is REAL: it exceeds both rows'
-spreads, `c` as a control moved +0.02%, and a 5x longer loop gives the same
-percentage, so it is steady-state loop cost. They disagree 2% on the magnitude,
-and the lower figure reproduced three times, so **the originally recorded +4.1%
-stands.** `metajs +0.4%` is a single build and is not evidence in either
-direction. The two "ways of buying it back, both worse" rows are single builds
-against a 3.3%-wide row and are NOT established.) Their module scopes
-are too small to be indexed at all; the cost is that a second arm makes `scope_find`
-too big for clang to inline into `scope_get`/`scope_put`/`js_tdecl`. A branch that
-can never fire already costs lua +2.8%. Two ways of buying it back were measured and
-are worse (out-of-line arm +4.7%, name-in-slot +6.1%); both are recorded at the site.
-
-The *other* half of this item — **making `import` APPEND** — was executed and is a
-**LOSS of +42.5%**, reverted, and written up at the `ImportStmt` rule in
-`metajs-to-llvm-ir.abnf` so it is not attempted a third time.
-
-**The first thing the index paid for**: kotlin's 1,489-line verbatim `regex.js`
-copy, declined twice on the tax this item removed, is now `import "./regex.js"`
-at **+0.04%** (§7 item 4). The other merges the tax declined have not been
-re-opened yet.
-
-**What is now the hottest line, nobody has looked.** `sample` on the lua and kotlin
-native binaries is the tool; `ar_block`, `js_str_mem` and `obj_find` are the names
-that came up while this was being measured.
-
-**8. Per-language coverage of the floor.** The instrumentation that found 24
-unreached floor bodies was written once and thrown away. Keeping it as
-`tools/floor-coverage` would make "is this body dead or untested?" answerable at any
-time — it is the question that governs Part B.
-
-**9. A `--why` flag for the emitters.** Understanding which extern an emitter chooses
-for an operator meant reading thousands of lines of grammar repeatedly. A flag that
-prints the extern chosen per AST node would make layer-2 work dramatically faster.
-
-**10. Faster iteration.** A full sweep is ~5 minutes; `kotlin-rt.ll` alone is 120k
-lines to regenerate. Incremental `.ll` regeneration keyed on source hash, and a
-`--changed-only` mode for the matrix, would shorten the loop that every one of these
-tasks runs dozens of times.
+`docs/abnf-dialect-gotchas.md` is NOT one of the removed documents. It is current,
+it is the reference for the ABNF tag dialect, and chapter 4 assumes you have it.

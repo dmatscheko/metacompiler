@@ -7,8 +7,11 @@ or the error points somewhere else entirely.** That is what makes them worth a
 document rather than a comment at the site.
 
 Written while widening the language grammars toward full recognition; see
-`README.md` for the dialect itself and `docs/interpreter-concept-consolidation.md`
-/ `docs/compiler-concept-consolidation.md` for how the tags compose.
+`README.md` for the dialect itself and `docs/working-on-this-project.md` for the
+architecture, the traps and the engine mechanics. (The two
+`*-concept-consolidation.md` files this used to cite were consolidated into that
+manual and removed on 2026-08-05; `git show 8316a41:docs/compiler-concept-consolidation.md`
+reads the original.)
 
 
 ## Parsing

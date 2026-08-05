@@ -21,6 +21,7 @@ This system should allow to define and use compiler for arbitrary computer langu
     - [Build / Usage](#build--usage)
     - [Editor support](#editor-support)
     - [Running the tests](#running-the-tests)
+    - [The runtime: two implementations, and native executables](#the-runtime-two-implementations-and-native-executables)
     - [High level overview](#high-level-overview)
       - [Default processing steps](#default-processing-steps)
     - [ABNF Syntax](#abnf-syntax)
@@ -251,6 +252,44 @@ Each entry is run twice - once with the default goja tag engine and once goja fr
 compiler) and a POSIX shell; `timeout`/`gtimeout`/`perl`, if present, guard each run
 against hangs.
 
+**The matrix is one of several gates, and it cannot see everything.** `tests/gates.sh`
+runs all of them in one command and reports a single verdict:
+
+```
+tests/gates.sh              # every gate (~5 minutes)
+tests/gates.sh --quick      # skip the two slowest - see the warning below
+tests/gates.sh --gen        # also: does every checked-in .ll still reproduce?
+tests/gates.sh --freeze     # also: is the frozen snapshot a fixed point?
+```
+
+| gate | what only it can see |
+|---|---|
+| `./test.sh` | the matrix: goja vs `-frozen`, byte-identical |
+| `./test.sh --full` | the full-syntax ratchets (informational; **it exits 0 by design**, so its summary line is not a verdict - the gate is the `BUT -frozen\|VACUOUS\|MISMATCH\|FROZEN-DIFF` grep, which `gates.sh` does for you) |
+| `./test.sh --cross` | each language's two halves diffed against each other |
+| `tests/clang-check.sh` | every emitted module handed to a real clang, then run |
+| `tests/native-full.sh` | all fifteen ratchets built and run as **native binaries** |
+| `tests/gen-all.sh --check` | the fifteen generated `.ll` files still reproduce from source (parallel, one shared binary) |
+| `go test ./abnf/` | the Go core |
+
+**`clang-check.sh` and `native-full.sh` are the only two gates that can see
+`languages/lib/*-rt.metajs`** - everything else runs `llvm.Run`, which resolves the
+`js_*` externals to the Go implementation and never touches the compiled one. That is
+why `--quick`, which skips them, says so loudly.
+
+Two more tools, for the two things that are otherwise re-invented by hand:
+
+```
+tests/probe.sh <lang> <file> [--oracle 'cmd %s']   # one program, four ways, diffed
+tests/bench.sh [--draws N]                         # native performance vs. baselines
+```
+
+`probe.sh` runs a program through the interpreter, `llvm.Run`, a native `-exe` binary
+and a real toolchain, and reports **which pair** disagrees - which names the layer.
+`bench.sh` measures instructions retired as a *median over build layouts*, because a
+native binary's instruction count moves by up to 4.8% with nothing but the length of
+its output filename; see the header of `tests/bench/baseline.txt`.
+
 #### The second test group: full-syntax ratchets (`--full`)
 
 The goal is to support the **full** languages, and `tests/<lang>-test-full.<ext>` is the
@@ -414,7 +453,8 @@ the Go core then executes every annotation script goja free:
 1. The script is parsed with the frozen a-grammar (pure Go).
 2. Its ASG is walked bottom up; each tag of that walk runs a snapshotted compiler closure on
    the built-in IR machine, which emits the IR module of the script.
-3. The emitted module runs on the MetaJS handle runtime (abnf/jsrt.go): every dynamic value
+3. The emitted module runs on the MetaJS handle runtime (abnf/jsrt.go - one of **two**
+   implementations of those externals, see [the runtime](#the-runtime-two-implementations-and-native-executables)): every dynamic value
    is an i64 handle into a Go side table, the js_* externals implement the JS semantics, and
    a reflection bridge exposes the whole host API (up/ltr, the stacks, c.*, abnf.*, and the
    llvm.* builder objects with their methods) - including JS closures that scripts push onto
@@ -606,6 +646,42 @@ A companion flag, `-pretty`, compiles the first file (the grammar) and prints it
 a-grammar as a pretty Go literal (one brace per line, the runtime `:origin()`
 stamp dropped so it matches `abnf/agrammar.go`'s form), then exits - handy for
 inspecting a compiled grammar or regenerating the example dump above.
+
+### The runtime: two implementations, and native executables
+
+A compiler grammar emits IR in one of two flavours. `c`, `bash`, `batch` and the toys
+emit **self-contained IR**: every value is an unboxed machine word, and the module links
+against libc alone. The other thirteen languages emit **handle IR**, where every value is
+an `i64` handle and the semantics live in `js_*` externals - and those externals are
+satisfied **two different ways**:
+
+```
+mec grammar prog.x              ->  llvm.Run interprets the module, and js_* resolve
+                                    to the GO implementation in abnf/jsrt*.go
+
+mec grammar prog.x -exe out     ->  clang links the module with
+                                      languages/lib/runtime.ll   (the C floor)
+                                    + languages/lib/<lang>-rt.ll (the MetaJS layer)
+                                    and you get a native binary
+```
+
+Both are built by this repository, and `nm -u` on a native binary shows libc and
+nothing else:
+
+| layer | what it is | compiled by |
+|---|---|---|
+| `languages/lib/runtime.c` | ~35 irreducible primitives, a mark/sweep GC, coroutines | our own `c-to-llvm-ir.abnf` |
+| `languages/lib/<lang>-rt.metajs` | each language's semantics, written in MetaJS; shared parts in `runtime.metajs` and friends | our own `metajs-to-llvm-ir.abnf`, via `-rt-lib` |
+| `languages/<lang>-to-llvm-ir.abnf` | the emitter | - |
+
+The `.ll` files are generated artifacts, checked in and regenerated by
+`tests/gen-all.sh`. Two independent implementations of one set of semantics is not
+redundancy to be eliminated - it is the project's main instrument, because when they
+disagree, one of them is wrong. Retiring the Go one was measured and declined.
+
+Full detail, including the traps that cost real time:
+[docs/working-on-this-project.md](docs/working-on-this-project.md) — the manual.
+What is still open is [docs/todo.md](docs/todo.md).
 
 ### High level overview
 
