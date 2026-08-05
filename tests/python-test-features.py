@@ -788,5 +788,99 @@ check("int-mul-str-untouched", "ab" * 3, "ababab")
 
 check("combined-pipeline", f"{transform([1, 2, -3])}", "['o1', 'e2', 'x']")
 
+
+# ----- repr() of a str: CPython's unicode_repr (docs/todo.md 1.4) -----
+# repr escapes \ and the quote in force, has short forms for \t \n \r, and
+# renders every non-printable code point as \xNN / \uNNNN / \UNNNNNNNN; the
+# quote is ' unless the string holds a ' and no ". Every operand is read out of
+# an array so the constant folder cannot answer the assertion, and the code
+# points are built with chr() rather than written as literals.
+rs = ["a\tb", "a\nb", "a\rb", "back\\slash", "it's", 'say "hi"', 'both \' and "',
+      "café", "plain", ""]
+check("repr-tab", repr(rs[0]), "'a\\tb'")
+check("repr-newline", repr(rs[1]), "'a\\nb'")
+check("repr-return", repr(rs[2]), "'a\\rb'")
+check("repr-backslash", repr(rs[3]), "'back\\\\slash'")
+check("repr-quote-switch", repr(rs[4]), '"it\'s"')
+check("repr-double-kept", repr(rs[5]), "'say \"hi\"'")
+check("repr-both-quotes", repr(rs[6]), "'both \\' and \"'")
+check("repr-non-ascii-literal", repr(rs[7]), "'café'")
+check("repr-plain", repr(rs[8]), "'plain'")
+check("repr-empty", repr(rs[9]), "''")
+cps = [0, 27, 127, 128, 159, 160, 173, 8232, 8239, 12288, 55296, 65279, 128512, 69821, 233, 8364]
+check("repr-nul", repr(chr(cps[0])), "'\\x00'")
+check("repr-esc-c0", repr(chr(cps[1])), "'\\x1b'")
+check("repr-del", repr(chr(cps[2])), "'\\x7f'")
+check("repr-c1-low", repr(chr(cps[3])), "'\\x80'")
+check("repr-c1-high", repr(chr(cps[4])), "'\\x9f'")
+check("repr-nbsp", repr(chr(cps[5])), "'\\xa0'")
+check("repr-soft-hyphen", repr(chr(cps[6])), "'\\xad'")
+check("repr-line-sep", repr(chr(cps[7])), "'\\u2028'")
+check("repr-narrow-nbsp", repr(chr(cps[8])), "'\\u202f'")
+check("repr-ideographic-space", repr(chr(cps[9])), "'\\u3000'")
+check("repr-bom", repr(chr(cps[11])), "'\\ufeff'")
+check("repr-astral-printable", repr(chr(cps[12])), "'" + chr(cps[12]) + "'")
+check("repr-astral-format", repr(chr(cps[13])), "'\\U000110bd'")
+check("repr-latin1-printable", repr(chr(cps[14])), "'é'")
+check("repr-bmp-printable", repr(chr(cps[15])), "'€'")
+check("repr-in-list", repr([rs[0]]), "['a\\tb']")
+check("repr-in-dict", repr({rs[4]: rs[0]}), '{"it\'s": \'a\\tb\'}')
+check("repr-f-string-conv", f"{rs[0]!r}", "'a\\tb'")
+
+# ----- ord() and chr() (docs/todo.md 2.9) -----
+# They were missing from ALL THREE engines, not just the interpreter.
+ocs = ["A", "z", "0", " ", "é", "中"]
+ons = [65, 122, 48, 32, 233, 20013, 0, 1114111, 128512]
+check("ord-upper", ord(ocs[0]), 65)
+check("ord-lower", ord(ocs[1]), 122)
+check("ord-digit", ord(ocs[2]), 48)
+check("ord-space", ord(ocs[3]), 32)
+check("ord-latin1", ord(ocs[4]), 233)
+check("ord-bmp", ord(ocs[5]), 20013)
+check("chr-upper", chr(ons[0]), "A")
+check("chr-digit", chr(ons[2]), "0")
+check("chr-latin1", chr(ons[4]), "é")
+check("chr-bmp", chr(ons[5]), "中")
+check("chr-nul-len", len(chr(ons[6])), 1)
+# An astral code point is ONE character to Python and a surrogate PAIR to the
+# UTF-16 engines: ord must decode the pair rather than read the high surrogate.
+check("chr-astral-len", len(chr(ons[8])), 1)
+check("ord-chr-astral", ord(chr(ons[8])), 128512)
+check("ord-chr-max", ord(chr(ons[7])), 1114111)
+check("chr-round-trip", chr(ord(ocs[4])), "é")
+check("ord-bool-is-int", chr(True), "\x01")
+
+# ----- the four foreign method arms are gone (docs/todo.md 5.2) -----
+# isEmpty / removeLast / sumOf / forEach were reachable on a str and a list in
+# both COMPILED halves and raise AttributeError in CPython. The denial is by
+# NAME and sits after the user-class arms, so a Python class that defines a
+# method with one of those names must still work - which is what this asserts
+# (the failure itself is not catchable in the interpreter half, so it is
+# verified by tests/probe.sh rather than here).
+class ForeignNames:
+    def __init__(self, xs):
+        self.xs = xs
+    def isEmpty(self):
+        return len(self.xs) == 0
+    def removeLast(self):
+        return self.xs.pop()
+    def sumOf(self, f):
+        t = 0
+        for e in self.xs:
+            t += f(e)
+        return t
+    def forEach(self, f):
+        for e in self.xs:
+            f(e)
+        return None
+
+fn = ForeignNames([1, 2, 3])
+check("foreign-name-isEmpty", fn.isEmpty(), False)
+check("foreign-name-sumOf", fn.sumOf(lambda v: v * 2), 12)
+check("foreign-name-removeLast", fn.removeLast(), 3)
+check("foreign-name-forEach", fn.forEach(lambda v: v), None)
+check("foreign-name-after", str(fn.xs), "[1, 2]")
+check("list-pop-still-there", str([9, 8].pop()), "8")
+
 print(f"features: {checks[0]} checks, {fails[0]} failures")
 exit(fails[0])

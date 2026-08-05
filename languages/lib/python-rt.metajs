@@ -445,8 +445,114 @@ function pyStr(v) {
     return pyToStr(v)
 }
 
+// ----- repr() of a str: CPython's unicode_repr -------------------------------
+//
+// The quote is ' unless the string holds a ' and no " (then it is "), so
+// repr("it's") reads "it's" while repr("both ' and \"") reads 'both \' and "'.
+// Inside, the quote in force and a backslash DOUBLE UP, \t \n \r have their
+// short forms, and every other NON-PRINTABLE code point becomes \xNN (below
+// U+0100), \uNNNN (below U+10000) or \UNNNNNNNN. Everything printable - "café"
+// and an emoji included - is emitted literally.
+//
+// "Printable" is Unicode's: NOT in the categories Cc Cf Cs Co Cn Zl Zp Zs, with
+// U+0020 itself excepted. The Cn (UNASSIGNED) half of that needs the Unicode
+// database, which nothing in this project carries, so pyReprEsc knows the
+// CLOSED sets instead - C0/C1, the two Latin-1 strays U+00A0 and U+00AD, the
+// separators, the format characters, the surrogates and the private-use planes -
+// and leaves an unassigned code point literal. Every ASSIGNED character is
+// exact, and the whole of Latin-1 (the only range \xNN can ever come from) is
+// exact by construction.
+//
+// The same three functions are pyStrRepr / pyReprEsc / pyHexPad in
+// languages/python-interpreter.abnf and pyStrRepr / pyReprEsc in abnf/jsrt.go.
+function pyHexPad(v, n) {
+    var digits = "0123456789abcdef"
+    var out = ""
+    var t = v
+    var i = 0
+    while (i < n) {
+        var q = Math.floor(t / 16)
+        out = digits.charAt(t - q * 16) + out
+        t = q
+        i = i + 1
+    }
+    return out
+}
+
+function pyReprEsc(cp) {
+    if (cp < 32) { return true }
+    if (cp == 127) { return true }
+    if (cp >= 128 && cp <= 160) { return true }         // C1 plus U+00A0 NBSP
+    if (cp == 173) { return true }                      // U+00AD SOFT HYPHEN
+    if (cp < 256) { return false }
+    if (cp >= 1536 && cp <= 1541) { return true }       // U+0600..U+0605
+    if (cp == 1564 || cp == 1757 || cp == 1807) { return true }
+    if (cp == 2192 || cp == 2193 || cp == 2274) { return true }
+    if (cp == 5760 || cp == 6158) { return true }       // U+1680, U+180E
+    if (cp >= 8192 && cp <= 8207) { return true }       // U+2000..U+200F
+    if (cp >= 8232 && cp <= 8239) { return true }       // U+2028..U+202F
+    if (cp >= 8287 && cp <= 8303) { return true }       // U+205F..U+206F
+    if (cp == 12288) { return true }                    // U+3000
+    if (cp >= 55296 && cp <= 57343) { return true }     // surrogates (Cs)
+    if (cp >= 57344 && cp <= 63743) { return true }     // U+E000..U+F8FF (Co)
+    if (cp == 65279) { return true }                    // U+FEFF
+    if (cp >= 65529 && cp <= 65531) { return true }     // U+FFF9..U+FFFB
+    if (cp == 69821 || cp == 69837) { return true }     // U+110BD, U+110CD
+    if (cp >= 78896 && cp <= 78911) { return true }     // U+13430..U+1343F
+    if (cp >= 113824 && cp <= 113827) { return true }   // U+1BCA0..U+1BCA3
+    if (cp >= 119155 && cp <= 119162) { return true }   // U+1D173..U+1D17A
+    if (cp == 917505) { return true }                   // U+E0001
+    if (cp >= 917536 && cp <= 917631) { return true }   // U+E0020..U+E007F
+    if (cp >= 983040 && cp <= 1048573) { return true }  // U+F0000..U+FFFFD
+    if (cp >= 1048576 && cp <= 1114109) { return true } // U+100000..U+10FFFD
+    return false
+}
+
+function pyStrRepr(s) {
+    var quote = "'"
+    var hasSq = false
+    var hasDq = false
+    var i = 0
+    while (i < s.length) {
+        var c0 = s.charAt(i)
+        if (c0 == "'") { hasSq = true }
+        if (c0 == "\"") { hasDq = true }
+        i = i + 1
+    }
+    if (hasSq && !hasDq) { quote = "\"" }
+    var out = quote
+    var k = 0
+    while (k < s.length) {
+        var ch = s.charAt(k)
+        var cc = s.charCodeAt(k)
+        var cp = cc
+        var w = 1
+        // An astral character arrives as a UTF-16 surrogate PAIR and is ONE code
+        // point to CPython, so it is decoded before the printability test -
+        // otherwise every emoji would escape as two lone surrogates.
+        if (cc >= 55296 && cc <= 56319 && k + 1 < s.length) {
+            var lo = s.charCodeAt(k + 1)
+            if (lo >= 56320 && lo <= 57343) {
+                cp = 65536 + (cc - 55296) * 1024 + (lo - 56320)
+                ch = s.substring(k, k + 2)
+                w = 2
+            }
+        }
+        if (ch == quote || cp == 92) { out = out + "\\" + ch }
+        else if (cp == 9) { out = out + "\\t" }
+        else if (cp == 10) { out = out + "\\n" }
+        else if (cp == 13) { out = out + "\\r" }
+        else if (!pyReprEsc(cp)) { out = out + ch }
+        else if (cp < 256) { out = out + "\\x" + pyHexPad(cp, 2) }
+        else if (cp < 65536) { out = out + "\\u" + pyHexPad(cp, 4) }
+        else { out = out + "\\U" + pyHexPad(cp, 8) }
+        k = k + w
+    }
+    return out + quote
+}
+
 function pyRepr(v) {
-    if (typeof v == "string") { return "'" + v + "'" }
+    if (typeof v == "string") { return pyStrRepr(v) }
     var rc = pyInstClassOf(v)
     if (rc !== null && rc !== undefined) { return pyUserRender(v, rc, true) }
     return pyStr(v)
@@ -2479,6 +2585,51 @@ function js_pyrange(a, b) {
     return out
 }
 
+// ord(c) / chr(n). They were missing from ALL THREE engines (docs/todo.md 2.9
+// said the compiled halves had them; a probe at 114fbd5 showed `variable not
+// defined: ord` under llvm.Run too), so they land here, in
+// languages/python-interpreter.abnf and in abnf/jsrt.go together.
+//
+// A string is UTF-16 in every engine here, so a character ABOVE the BMP is a
+// surrogate PAIR of code units and ONE character to Python: js_pyord decodes the
+// pair (ord("\U0001F600") is 128512, not the high surrogate) and js_pychr
+// re-encodes it. Length is pyStrLen, which counts CODE POINTS. The domain errors
+// use `fail` with CPython's own wording, the way pySFail reports one.
+function js_pyord(s) {
+    if (!pyIsStr(s)) {
+        fail("TypeError: ord() expected string of length 1, but " + pyTypeName(s) + " found")
+        return 0
+    }
+    var n = pyStrLen(s)
+    if (n != 1) {
+        fail("TypeError: ord() expected a character, but string of length " + n + " found")
+        return 0
+    }
+    var c = s.charCodeAt(0)
+    if (c >= 55296 && c <= 56319 && s.length > 1) {
+        var t = s.charCodeAt(1)
+        if (t >= 56320 && t <= 57343) { return 65536 + (c - 55296) * 1024 + (t - 56320) }
+    }
+    return c
+}
+
+function js_pychr(n) {
+    var v = 0
+    // A Python bool IS an int, so chr(True) is "\x01" - taken out of line
+    // because MetaJS is TYPED and `n` could not be rewritten in place.
+    if (typeof n == "boolean") { v = n ? 1 : 0 }
+    else if (typeof n == "number") { v = Math.trunc(n) }
+    else {
+        fail("TypeError: '" + pyTypeName(n) + "' object cannot be interpreted as an integer")
+        return ""
+    }
+    if (v < 0 || v > 1114111) {
+        fail("ValueError: chr() arg not in range(0x110000)")
+        return ""
+    }
+    return pyBCodePoint(v)
+}
+
 // Go: js_pyeq (jsrt.go:7179). Python's == compares CONTAINERS BY VALUE, unlike
 // JavaScript's. 'is' keeps using js_seq, because that one really is identity.
 function js_pyeq(x, y) { return pyAEqual(x, y) }
@@ -4455,7 +4606,28 @@ function pyDMethodCall(target, name, args, kw) {
             fail("'" + pyToStr(icls["__name"]) + "' object has no method '" + name + "'")
         }
     }
+    if (pyDForeign(name)) {
+        fail("AttributeError: '" + pyTypeName(target) + "' object has no attribute '" + name + "'")
+    }
     return pyMemberCall(target, name, args)
+}
+
+// docs/todo.md 5.2. pyMemberCall is layer 2's copy of the SHARED member-call
+// table rt.memberCall (abnf/jsrt.go), which nine languages land in, and four of
+// its names are ones Python cannot utter: `xs.sumOf(f)` answered 6 in both
+// compiled halves where CPython raises AttributeError. The names are denied here
+// - AFTER the user-class arms above, so a Python class that DEFINES a method
+// called forEach is unaffected - and the arms themselves are gone from
+// pyFStrMethod / pyFListMethod below. The same four names are denied at the same
+// point in abnf/jsrt.go's pyMethodCall, so the two compiled halves keep
+// agreeing. isEmpty and removeLast stay in lib/swift-rt.metajs and
+// lib/dart-rt.metajs, where they are the language's real methods.
+function pyDForeign(name) {
+    if (name == "isEmpty") { return true }
+    if (name == "removeLast") { return true }
+    if (name == "sumOf") { return true }
+    if (name == "forEach") { return true }
+    return false
 }
 
 // ----- type(), isinstance() and the builtin class objects -------------------
@@ -5517,9 +5689,9 @@ function pyFStrMethod(o, name, args) {
         return o.substring(begin, end)
     }
     if (name == "indexOf") { return o.indexOf(pyToStr(pyFArgAt(args, 0))) }
-    // Go's isEmpty is len(o) == 0 - the BYTE length, which is zero exactly when
-    // the code-unit length is, so the two agree; byteLen keeps it literal.
-    if (name == "isEmpty") { return byteLen(o) == 0 }
+    // The Go twin's isEmpty arm (len(o) == 0) is NOT ported: it is Swift's and
+    // Dart's method, Python cannot utter it, and pyDForeign denies the name
+    // before this table is ever reached. See docs/todo.md 5.2.
     fail("unknown String method: " + name)
     return null
 }
@@ -5540,10 +5712,12 @@ function pyFListMethod(o, name, args) {
         o.push(pyFArgAt(args, 0))
         return undefined
     }
-    if (name == "pop" || name == "removeLast") {
-        // Python / Dart: both remove and return the last element. Go's arm takes
-        // NO index argument, so `xs.pop(0)` silently pops the last element -
-        // reproduced rather than corrected, since the Go twin is the pin.
+    if (name == "pop") {
+        // Python: removes and returns the last element. Go's arm takes NO index
+        // argument, so `xs.pop(0)` silently pops the last element - reproduced
+        // rather than corrected, since the Go twin is the pin. Its `removeLast`
+        // alias is DART's spelling and is not ported: pyDForeign denies the name
+        // before this table is reached (docs/todo.md 5.2).
         if (o.length == 0) { fail("pop from empty list") }
         return o.pop()
     }
@@ -5580,24 +5754,9 @@ function pyFListMethod(o, name, args) {
         }
         return fo
     }
-    if (name == "sumOf") {
-        // The Go twin accumulates through an int32, so the sum WRAPS at 32 bits.
-        var sum = 0
-        var si = 0
-        while (si < o.length) {
-            sum = pyFWrap32(sum + pyFWrap32(Math.trunc(pyNum(pyFCall1(pyFArgAt(args, 0), o[si])))))
-            si = si + 1
-        }
-        return sum
-    }
-    if (name == "forEach") {
-        var ei = 0
-        while (ei < o.length) {
-            pyFCall1(pyFArgAt(args, 0), o[ei])
-            ei = ei + 1
-        }
-        return undefined
-    }
+    // The Go twin's sumOf and forEach arms are KOTLIN's and Dart's methods, not
+    // Python's, and are not ported: pyDForeign denies both names before this
+    // table is reached (docs/todo.md 5.2).
     if (name == "count") {
         if (args.length == 0) { return o.length }
         var n = 0

@@ -2587,10 +2587,91 @@ func (rt *jsrt) pySliceRange(lo, hi interface{}, n int) (int, int) {
 	return from, to
 }
 
+// pyReprEsc answers whether a code point must be ESCAPED by repr(). "Printable"
+// is Unicode's: NOT in the categories Cc Cf Cs Co Cn Zl Zp Zs, with U+0020
+// itself excepted. The Cn (UNASSIGNED) half of that needs the Unicode database,
+// which nothing in this project carries, so this knows the CLOSED sets instead -
+// C0/C1, the two Latin-1 strays U+00A0 and U+00AD, the separators, the format
+// characters, the surrogates and the private-use planes - and leaves an
+// unassigned code point literal. Every ASSIGNED character is exact, and the
+// whole of Latin-1 (the only range \xNN can ever come from) is exact by
+// construction. Same table as pyReprEsc in languages/python-interpreter.abnf and
+// languages/lib/python-rt.metajs.
+func pyReprEsc(cp rune) bool {
+	switch {
+	case cp < 0x20, cp == 0x7f:
+		return true
+	case cp >= 0x80 && cp <= 0xa0, cp == 0xad: // C1, NBSP, SOFT HYPHEN
+		return true
+	case cp < 0x100:
+		return false
+	case cp >= 0x600 && cp <= 0x605, cp == 0x61c, cp == 0x6dd, cp == 0x70f:
+		return true
+	case cp == 0x890, cp == 0x891, cp == 0x8e2:
+		return true
+	case cp == 0x1680, cp == 0x180e:
+		return true
+	case cp >= 0x2000 && cp <= 0x200f, cp >= 0x2028 && cp <= 0x202f:
+		return true
+	case cp >= 0x205f && cp <= 0x206f, cp == 0x3000:
+		return true
+	case cp >= 0xd800 && cp <= 0xdfff, cp >= 0xe000 && cp <= 0xf8ff:
+		return true
+	case cp == 0xfeff, cp >= 0xfff9 && cp <= 0xfffb:
+		return true
+	case cp == 0x110bd, cp == 0x110cd, cp >= 0x13430 && cp <= 0x1343f:
+		return true
+	case cp >= 0x1bca0 && cp <= 0x1bca3, cp >= 0x1d173 && cp <= 0x1d17a:
+		return true
+	case cp == 0xe0001, cp >= 0xe0020 && cp <= 0xe007f:
+		return true
+	case cp >= 0xf0000 && cp <= 0xffffd, cp >= 0x100000 && cp <= 0x10fffd:
+		return true
+	}
+	return false
+}
+
+// pyStrRepr is CPython's unicode_repr. The quote is ' unless the string holds a
+// ' and no " (then it is "), so repr("it's") reads "it's" while
+// repr(`both ' and "`) reads 'both \' and "'. Inside, the quote in force and a
+// backslash DOUBLE UP, \t \n \r have their short forms, and every other
+// non-printable code point becomes \xNN (below U+0100), \uNNNN (below U+10000)
+// or \UNNNNNNNN. Everything printable - "café" and an emoji included - is
+// emitted literally. It is pyStrRepr in languages/python-interpreter.abnf and
+// languages/lib/python-rt.metajs, one for one.
+func pyStrRepr(s string) string {
+	quote := "'"
+	if strings.ContainsRune(s, '\'') && !strings.ContainsRune(s, '"') {
+		quote = "\""
+	}
+	out := quote
+	for _, r := range s {
+		switch {
+		case string(r) == quote || r == '\\':
+			out += "\\" + string(r)
+		case r == '\t':
+			out += "\\t"
+		case r == '\n':
+			out += "\\n"
+		case r == '\r':
+			out += "\\r"
+		case !pyReprEsc(r):
+			out += string(r)
+		case r < 0x100:
+			out += fmt.Sprintf("\\x%02x", r)
+		case r < 0x10000:
+			out += fmt.Sprintf("\\u%04x", r)
+		default:
+			out += fmt.Sprintf("\\U%08x", r)
+		}
+	}
+	return out + quote
+}
+
 // pyRepr renders a container element like Python's repr: strings get quotes.
 func (rt *jsrt) pyRepr(v interface{}) string {
 	if s, isStr := v.(string); isStr {
-		return "'" + s + "'"
+		return pyStrRepr(s)
 	}
 	// A CLASS object is not an instance to render: pyString's own <class 'name'>
 	// arm has to win, exactly as it does for str().
@@ -8945,6 +9026,48 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return rt.wrapNum(math.Abs(rt.toNumber(v)))
 		},
+		// ord(c) / chr(n). They were missing from ALL THREE engines (docs/todo.md
+		// 2.9 said the compiled halves had them; a probe at 114fbd5 answered
+		// `variable not defined: ord` under llvm.Run too), so these land with
+		// hostGlobals["ord"]/["chr"] in languages/python-interpreter.abnf,
+		// js_pyord/js_pychr in languages/lib/python-rt.metajs and the
+		// declBuiltin pair in languages/python-to-llvm-ir.abnf.
+		//
+		// A Go string is UTF-8 here while the other two engines hold UTF-16, so
+		// the CODE POINT is what the three have in common: ord answers the single
+		// rune's value (ord("\U0001F600") is 128512, not a surrogate) and chr
+		// builds the rune. The domain errors use rt.fail with CPython's wording,
+		// as every other builtin here reports one.
+		"js_pyord": func(a []uint64) uint64 {
+			v := u(a[0])
+			s, isStr := v.(string)
+			if !isStr {
+				rt.fail("TypeError: ord() expected string of length 1, but %s found", pyTypeName(rt, v))
+			}
+			if n := utf8.RuneCountInString(s); n != 1 {
+				rt.fail("TypeError: ord() expected a character, but string of length %d found", n)
+			}
+			r, _ := utf8.DecodeRuneInString(s)
+			return rt.wrapNum(float64(r))
+		},
+		"js_pychr": func(a []uint64) uint64 {
+			v := u(a[0])
+			// A Python bool IS an int, so chr(True) is "\x01".
+			if b, isB := v.(bool); isB {
+				if b {
+					return rt.wrapStr("\x01")
+				}
+				return rt.wrapStr("\x00")
+			}
+			if _, isNum := v.(float64); !isNum {
+				rt.fail("TypeError: '%s' object cannot be interpreted as an integer", pyTypeName(rt, v))
+			}
+			n := math.Trunc(rt.toNumber(v))
+			if n < 0 || n > 1114111 {
+				rt.fail("ValueError: chr() arg not in range(0x110000)")
+			}
+			return rt.wrapStr(string(rune(int64(n))))
+		},
 		"js_pysum": func(a []uint64) uint64 {
 			v := u(a[0])
 			if g, ok := v.(*jsGenerator); ok {
@@ -10429,6 +10552,20 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 		if _, isDict := inst.props["__dict"]; !isDict {
 			rt.fail("'%s' object has no method '%s'", rt.toString(cls.props["__name"]), name)
 		}
+	}
+	// docs/todo.md 5.2. rt.memberCall is the SHARED member-call table that nine
+	// languages land in, and four of its names are ones Python cannot utter:
+	// `xs.sumOf(f)` answered 6 in both compiled halves where CPython raises
+	// AttributeError. They are denied HERE, in python's own dispatcher and after
+	// the user-class arms above (so a Python class that DEFINES a method called
+	// forEach is unaffected), rather than in the shared table - isEmpty and
+	// removeLast are real Swift and Dart methods and stay there and in
+	// languages/lib/{swift,dart}-rt.metajs. The same four names are denied at the
+	// same point by pyDForeign in languages/lib/python-rt.metajs, which is what
+	// keeps llvm.Run and the native binary agreeing.
+	switch name {
+	case "isEmpty", "removeLast", "sumOf", "forEach":
+		rt.fail("AttributeError: '%s' object has no attribute '%s'", pyTypeName(rt, target), name)
 	}
 	return rt.memberCall(target, name, args)
 }

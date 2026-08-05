@@ -1270,6 +1270,55 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // did not (so max(1, 2) worked in one half and raised NameError in the other).
     hostGlobals["max"] = function() { return pyMinMax(arguments, 1) }
     hostGlobals["min"] = function() { return pyMinMax(arguments, -1) }
+    // ord(c) / chr(n). They were missing from ALL THREE engines (docs/todo.md
+    // 2.9 said the compiled halves had them; a probe at 114fbd5 showed
+    // `variable not defined: ord` under llvm.Run too), so they land here, in
+    // languages/python-to-llvm-ir.abnf as js_pyord/js_pychr, in
+    // languages/lib/python-rt.metajs and in abnf/jsrt.go together.
+    //
+    // A string is UTF-16 in every engine here, so a character ABOVE the BMP is a
+    // surrogate PAIR of code units and ONE character to Python: ord decodes the
+    // pair (ord("\U0001F600") is 128512, not the high surrogate) and chr
+    // re-encodes it. The domain errors use `fail` with CPython's own wording,
+    // the way every other builtin in this grammar reports one - see pySFail.
+    hostGlobals["ord"] = function(s) { return pyOrdOf(s) }
+    hostGlobals["chr"] = function(n) { return pyChrOf(n) }
+    function pyOrdOf(s) {
+        if (typeof s != "string") {
+            fail("TypeError: ord() expected string of length 1, but " + pyTypeOf(s).__name + " found")
+            return 0
+        }
+        var n = pyLen(s)
+        if (n != 1) {
+            fail("TypeError: ord() expected a character, but string of length " + n + " found")
+            return 0
+        }
+        var c = s.charCodeAt(0)
+        if (c >= 55296 && c <= 56319 && s.length > 1) {
+            var t = s.charCodeAt(1)
+            if (t >= 56320 && t <= 57343) { return 65536 + (c - 55296) * 1024 + (t - 56320) }
+        }
+        return c
+    }
+    function pyChrOf(n) {
+        var v = 0
+        // A Python bool IS an int, so chr(True) is "\x01" - taken out of line
+        // because MetaJS is TYPED and `n` could not be rewritten in place.
+        if (typeof n == "boolean") { v = n ? 1 : 0 }
+        else if (typeof n == "number") { v = Math.trunc(n) }
+        else {
+            fail("TypeError: '" + pyTypeOf(n).__name + "' object cannot be interpreted as an integer")
+            return ""
+        }
+        if (v < 0 || v > 1114111) {
+            fail("ValueError: chr() arg not in range(0x110000)")
+            return ""
+        }
+        if (v <= 65535) { return String.fromCharCode(v) }
+        var d = v - 65536
+        var hi = Math.floor(d / 1024)
+        return String.fromCharCode(55296 + hi) + String.fromCharCode(56320 + (d - hi * 1024))
+    }
 
     // ----- Dicts: {__dict, keys, vals} with two parallel arrays. The arrays keep
     // the insertion order (like Python) and allow any === comparable key. -----
@@ -1410,9 +1459,113 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return false
     }
 
+    // ----- repr() of a str: CPython's unicode_repr ---------------------------
+    //
+    // The quote is ' unless the string holds a ' and no " (then it is "), so
+    // repr("it's") reads "it's" while repr("both ' and \"") reads
+    // 'both \' and "'. Inside, the quote in force and a backslash DOUBLE UP,
+    // \t \n \r have their short forms, and every other NON-PRINTABLE code point
+    // becomes \xNN (below U+0100), \uNNNN (below U+10000) or \UNNNNNNNN.
+    // Everything printable - "café" and an emoji included - is emitted literally.
+    //
+    // "Printable" is Unicode's: NOT in the categories Cc Cf Cs Co Cn Zl Zp Zs,
+    // with U+0020 itself excepted. The Cn (UNASSIGNED) half of that needs the
+    // Unicode database, which nothing in this project carries, so pyReprEsc
+    // knows the CLOSED sets instead - C0/C1, the two Latin-1 strays U+00A0 and
+    // U+00AD, the separators, the format characters, the surrogates and the
+    // private-use planes - and leaves an unassigned code point literal. Every
+    // ASSIGNED character is exact, and the whole of Latin-1 (the only range
+    // \xNN can ever come from) is exact by construction.
+    //
+    // The same three functions are pyStrRepr / pyReprEsc / pyHexPad in
+    // languages/lib/python-rt.metajs and pyStrRepr / pyReprEsc in abnf/jsrt.go.
+    function pyHexPad(v, n) {
+        var digits = "0123456789abcdef"
+        var out = ""
+        var t = v
+        var i = 0
+        while (i < n) {
+            var q = Math.floor(t / 16)
+            out = digits.charAt(t - q * 16) + out
+            t = q
+            i = i + 1
+        }
+        return out
+    }
+    function pyReprEsc(cp) {
+        if (cp < 32) { return true }
+        if (cp == 127) { return true }
+        if (cp >= 128 && cp <= 160) { return true }         // C1 plus U+00A0 NBSP
+        if (cp == 173) { return true }                      // U+00AD SOFT HYPHEN
+        if (cp < 256) { return false }
+        if (cp >= 1536 && cp <= 1541) { return true }       // U+0600..U+0605
+        if (cp == 1564 || cp == 1757 || cp == 1807) { return true }
+        if (cp == 2192 || cp == 2193 || cp == 2274) { return true }
+        if (cp == 5760 || cp == 6158) { return true }       // U+1680, U+180E
+        if (cp >= 8192 && cp <= 8207) { return true }       // U+2000..U+200F
+        if (cp >= 8232 && cp <= 8239) { return true }       // U+2028..U+202F
+        if (cp >= 8287 && cp <= 8303) { return true }       // U+205F..U+206F
+        if (cp == 12288) { return true }                    // U+3000
+        if (cp >= 55296 && cp <= 57343) { return true }     // surrogates (Cs)
+        if (cp >= 57344 && cp <= 63743) { return true }     // U+E000..U+F8FF (Co)
+        if (cp == 65279) { return true }                    // U+FEFF
+        if (cp >= 65529 && cp <= 65531) { return true }     // U+FFF9..U+FFFB
+        if (cp == 69821 || cp == 69837) { return true }     // U+110BD, U+110CD
+        if (cp >= 78896 && cp <= 78911) { return true }     // U+13430..U+1343F
+        if (cp >= 113824 && cp <= 113827) { return true }   // U+1BCA0..U+1BCA3
+        if (cp >= 119155 && cp <= 119162) { return true }   // U+1D173..U+1D17A
+        if (cp == 917505) { return true }                   // U+E0001
+        if (cp >= 917536 && cp <= 917631) { return true }   // U+E0020..U+E007F
+        if (cp >= 983040 && cp <= 1048573) { return true }  // U+F0000..U+FFFFD
+        if (cp >= 1048576 && cp <= 1114109) { return true } // U+100000..U+10FFFD
+        return false
+    }
+    function pyStrRepr(s) {
+        var quote = "'"
+        var hasSq = false
+        var hasDq = false
+        var i = 0
+        while (i < s.length) {
+            var c0 = s.charAt(i)
+            if (c0 == "'") { hasSq = true }
+            if (c0 == "\"") { hasDq = true }
+            i = i + 1
+        }
+        if (hasSq && !hasDq) { quote = "\"" }
+        var out = quote
+        var k = 0
+        while (k < s.length) {
+            var ch = s.charAt(k)
+            var cc = s.charCodeAt(k)
+            var cp = cc
+            var w = 1
+            // An astral character arrives as a UTF-16 surrogate PAIR and is ONE
+            // code point to CPython, so it is decoded before the printability
+            // test - otherwise every emoji would escape as two lone surrogates.
+            if (cc >= 55296 && cc <= 56319 && k + 1 < s.length) {
+                var lo = s.charCodeAt(k + 1)
+                if (lo >= 56320 && lo <= 57343) {
+                    cp = 65536 + (cc - 55296) * 1024 + (lo - 56320)
+                    ch = s.substring(k, k + 2)
+                    w = 2
+                }
+            }
+            if (ch == quote || cp == 92) { out = out + "\\" + ch }
+            else if (cp == 9) { out = out + "\\t" }
+            else if (cp == 10) { out = out + "\\n" }
+            else if (cp == 13) { out = out + "\\r" }
+            else if (!pyReprEsc(cp)) { out = out + ch }
+            else if (cp < 256) { out = out + "\\x" + pyHexPad(cp, 2) }
+            else if (cp < 65536) { out = out + "\\u" + pyHexPad(cp, 4) }
+            else { out = out + "\\U" + pyHexPad(cp, 8) }
+            k = k + w
+        }
+        return out + quote
+    }
+
     // Python style rendering: True/False/None, lists in brackets, dicts in braces.
     function prepr(v) {
-        if (typeof v == "string") return "'" + v + "'"
+        if (typeof v == "string") return pyStrRepr(v)
         if (pyUser(v)) { return pyUserRender(v, true) }
         return pstr(v)
     }

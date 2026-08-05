@@ -3680,6 +3680,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyTypeBuiltin["$dict"] = true
     pyTypeBuiltin["$set"] = true
     pyTypeBuiltin["$tuple"] = true
+    // `type` is a class too, and the same six-for-six argument applies: with the
+    // name bound to the CONVERSION closure `str(type)` read [function] here and
+    // <class 'type'> in the interpreter and in CPython. Calling it still runs the
+    // same js_pytype forwarder, through __conv.
+    pyTypeBuiltin["$type"] = true
     function declBind(b, name, cloV) {
         if (pyTypeBuiltin["$" + name] == true) {
             var cls = callExt(b, "js_pybuiltincls", [emitStr(b, name)])
@@ -3784,6 +3789,27 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBuiltin(b, "set", "js_pyset_new", 1)
         b = declBuiltin(b, "sum", "js_pysum", 1)
         b = declBuiltin(b, "tuple", "js_pylist", 1)
+        // ord(c) / chr(n). docs/todo.md 2.9 recorded these as present in both
+        // compiled halves and missing only from the interpreter; a probe at
+        // 114fbd5 answered `variable not defined: ord` HERE too, so all three
+        // engines grew them at once - hostGlobals in python-interpreter.abnf,
+        // js_pyord/js_pychr in lib/python-rt.metajs and in abnf/jsrt.go.
+        b = declBuiltin(b, "ord", "js_pyord", 1)
+        b = declBuiltin(b, "chr", "js_pychr", 1)
+        // The builtin TYPE names that carry no conversion function. The
+        // interpreter's pyTypeNames has fourteen and declBuiltin/pyTypeBuiltin
+        // only reaches the eight that convert, so `class C(object)`, `type(None)
+        // is NoneType` and `str(complex)` were a name that is not defined HERE
+        // and a class object THERE - the same halves divergence docs/todo.md 2.9
+        // reported for ord/chr, found by the sweep that item asked for.
+        // js_pybuiltincls is name-generic in both compiled engines (rt.pyBuiltinClass
+        // in abnf/jsrt.go, pyBuiltinClass in lib/python-rt.metajs), so no extern,
+        // no layer-2 line and no floor line is needed - only the binding.
+        var pyPlainTypes = ["object", "complex", "bytes", "NoneType", "function"]
+        for (var pt0 = 0; pt0 < pyPlainTypes.length; pt0++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pyPlainTypes[pt0]),
+                                         callExt(b, "js_pybuiltincls", [emitStr(b, pyPlainTypes[pt0])])])
+        }
         // The builtin exception hierarchy, as REAL Python classes: Exception with
         // an __init__ that stores its arguments in .args, and the concrete types
         // deriving from it - so `class AppError(Exception)` and
