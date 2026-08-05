@@ -4303,16 +4303,65 @@ entry:
 
 7:
 	%8 = phi i64 [ %0, %6 ]
-	%9 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000116, i64 0, i64 0), i64 12)
+	%9 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000081, i64 0, i64 0), i64 11)
 	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
 	%11 = call i64 @js_arr_new()
 	%12 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%13 = call i64 @js_scope_get(i64 %8, i64 %12)
 	%14 = call i64 @js_arr_push(i64 %11, i64 %13)
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
-	ret i64 %15
+	%16 = call i64 @js_truthy(i64 %15)
+	%17 = icmp ne i64 %16, 0
+	br i1 %17, label %18, label %19
+
+18:
+	br label %27
+
+19:
+	%20 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%21 = call i64 @js_scope_get(i64 %8, i64 %20)
+	%22 = call i64 @js_typeof(i64 %21)
+	%23 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000065, i64 0, i64 0), i64 6)
+	%24 = call i64 @js_ne(i64 %22, i64 %23)
+	%25 = call i64 @js_truthy(i64 %24)
+	%26 = icmp ne i64 %25, 0
+	br i1 %26, label %30, label %31
+
+27:
+	br label %28
+
+28:
+	%29 = phi i64 [ %8, %27 ]
+	ret i64 3
 
 dead80:
+	br label %19
+
+30:
+	br label %40
+
+31:
+	%32 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000015, i64 0, i64 0), i64 5)
+	%33 = call i64 @js_scope_get(i64 %8, i64 %32)
+	%34 = call i64 @js_arr_new()
+	%35 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%36 = call i64 @js_scope_get(i64 %8, i64 %35)
+	%37 = call i64 @js_arr_push(i64 %34, i64 %36)
+	%38 = call i64 @js_call(i64 %33, i64 0, i64 %34)
+	%39 = call i64 @js_not(i64 %38)
+	ret i64 %39
+
+40:
+	br label %41
+
+41:
+	%42 = phi i64 [ %8, %40 ]
+	ret i64 2
+
+dead81:
+	br label %31
+
+dead82:
 	ret i64 0
 }
 
@@ -4371,7 +4420,7 @@ entry:
 	%38 = call i64 @js_call(i64 %33, i64 0, i64 %34)
 	ret i64 %38
 
-dead81:
+dead83:
 	br label %19
 
 39:
@@ -4400,7 +4449,7 @@ dead81:
 	%56 = call i64 @js_get(i64 %54, i64 %55)
 	ret i64 %56
 
-dead82:
+dead84:
 	br label %40
 
 57:
@@ -4430,7 +4479,7 @@ dead82:
 	%75 = call i64 @js_call(i64 %70, i64 0, i64 %71)
 	ret i64 %75
 
-dead83:
+dead85:
 	br label %58
 
 76:
@@ -4453,7 +4502,7 @@ dead83:
 	%87 = call i64 @js_scope_get(i64 %85, i64 %86)
 	ret i64 %87
 
-dead84:
+dead86:
 	br label %77
 
 88:
@@ -4475,7 +4524,7 @@ dead84:
 	%98 = call i64 @js_num_i(i64 1)
 	ret i64 %98
 
-dead85:
+dead87:
 	br label %89
 
 99:
@@ -4499,7 +4548,7 @@ dead85:
 	%111 = call i64 @js_num_i(i64 0)
 	ret i64 %111
 
-dead86:
+dead88:
 	br label %100
 
 112:
@@ -4523,10 +4572,10 @@ dead86:
 	%124 = call i64 @js_call(i64 %119, i64 0, i64 %120)
 	ret i64 %124
 
-dead87:
+dead89:
 	br label %113
 
-dead88:
+dead90:
 	ret i64 0
 }
 
@@ -4608,7 +4657,7 @@ entry:
 	%59 = call i64 @js_setret(i64 %56)
 	br label %28
 
-dead89:
+dead91:
 	ret i64 0
 }
 
@@ -4742,10 +4791,10 @@ entry:
 	%97 = call i64 @js_eq(i64 %89, i64 %96)
 	ret i64 %97
 
-dead90:
+dead92:
 	br label %69
 
-dead91:
+dead93:
 	br label %34
 
 98:
@@ -4815,7 +4864,7 @@ dead91:
 	%144 = phi i64 [ %119, %142 ]
 	ret i64 2
 
-dead92:
+dead94:
 	br label %131
 
 145:
@@ -4843,13 +4892,13 @@ dead92:
 	%161 = phi i64 [ %119, %159 ]
 	ret i64 2
 
-dead93:
+dead95:
 	br label %146
 
-dead94:
+dead96:
 	br label %111
 
-dead95:
+dead97:
 	ret i64 0
 }
 
@@ -4980,7 +5029,7 @@ entry:
 	%98 = call i64 @js_call(i64 %87, i64 0, i64 %88)
 	ret i64 %98
 
-dead96:
+dead98:
 	br label %64
 
 99:
@@ -5002,7 +5051,7 @@ dead96:
 	%109 = phi i64 [ %15, %107 ]
 	ret i64 2
 
-dead97:
+dead99:
 	br label %100
 
 110:
@@ -5028,7 +5077,7 @@ dead97:
 	%124 = call i64 @js_lt(i64 %122, i64 %123)
 	ret i64 %124
 
-dead98:
+dead100:
 	br label %111
 
 125:
@@ -5054,7 +5103,7 @@ dead98:
 	%139 = call i64 @js_gt(i64 %137, i64 %138)
 	ret i64 %139
 
-dead99:
+dead101:
 	br label %126
 
 140:
@@ -5078,10 +5127,10 @@ dead99:
 	%152 = call i64 @js_le(i64 %150, i64 %151)
 	ret i64 %152
 
-dead100:
+dead102:
 	br label %141
 
-dead101:
+dead103:
 	ret i64 0
 }
 
@@ -5236,7 +5285,7 @@ entry:
 	%104 = call i64 @js_setret(i64 %101)
 	br label %97
 
-dead102:
+dead104:
 	ret i64 0
 }
 
@@ -5276,7 +5325,7 @@ entry:
 	%27 = call i64 @js_call(i64 %16, i64 0, i64 %17)
 	ret i64 %27
 
-dead103:
+dead105:
 	ret i64 0
 }
 
@@ -5304,7 +5353,7 @@ entry:
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %15
 
-dead104:
+dead106:
 	ret i64 0
 }
 
@@ -5332,7 +5381,7 @@ entry:
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %15
 
-dead105:
+dead107:
 	ret i64 0
 }
 
@@ -5360,7 +5409,7 @@ entry:
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %15
 
-dead106:
+dead108:
 	ret i64 0
 }
 
@@ -5388,7 +5437,7 @@ entry:
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %15
 
-dead107:
+dead109:
 	ret i64 0
 }
 
@@ -5418,7 +5467,7 @@ entry:
 	%17 = call i64 @js_call(i64 %12, i64 %10, i64 %13)
 	ret i64 %17
 
-dead108:
+dead110:
 	ret i64 0
 }
 
@@ -5455,7 +5504,7 @@ entry:
 	%24 = call i64 @js_call(i64 %18, i64 %16, i64 %19)
 	ret i64 %24
 
-dead109:
+dead111:
 	ret i64 0
 }
 
@@ -5483,7 +5532,7 @@ entry:
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %15
 
-dead110:
+dead112:
 	ret i64 0
 }
 
@@ -5517,7 +5566,7 @@ entry:
 	%21 = call i64 @js_call(i64 %13, i64 0, i64 %14)
 	ret i64 %21
 
-dead111:
+dead113:
 	ret i64 0
 }
 
@@ -5545,7 +5594,7 @@ entry:
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %15
 
-dead112:
+dead114:
 	ret i64 0
 }
 
@@ -5573,7 +5622,7 @@ entry:
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %15
 
-dead113:
+dead115:
 	ret i64 0
 }
 
@@ -5622,10 +5671,10 @@ entry:
 	%28 = call i64 @js_get(i64 %26, i64 %27)
 	ret i64 %28
 
-dead114:
+dead116:
 	br label %19
 
-dead115:
+dead117:
 	ret i64 0
 }
 
@@ -5676,10 +5725,10 @@ entry:
 	%30 = call i64 @js_call(i64 %25, i64 0, i64 %26)
 	ret i64 %30
 
-dead116:
+dead118:
 	br label %19
 
-dead117:
+dead119:
 	ret i64 0
 }
 
@@ -5729,10 +5778,10 @@ entry:
 	%29 = call i64 @js_call(i64 %24, i64 0, i64 %25)
 	ret i64 %29
 
-dead118:
+dead120:
 	br label %19
 
-dead119:
+dead121:
 	ret i64 0
 }
 
@@ -5833,7 +5882,7 @@ entry:
 	%72 = call i64 @js_call(i64 %67, i64 0, i64 %68)
 	ret i64 %72
 
-dead120:
+dead122:
 	br label %62
 
 73:
@@ -5877,10 +5926,10 @@ dead120:
 	%105 = call i64 @js_scope_get(i64 %103, i64 %104)
 	ret i64 %105
 
-dead121:
+dead123:
 	br label %74
 
-dead122:
+dead124:
 	ret i64 0
 }
 
@@ -5978,10 +6027,10 @@ entry:
 	%77 = call i64 @js_scope_get(i64 %75, i64 %76)
 	ret i64 %77
 
-dead123:
+dead125:
 	br label %46
 
-dead124:
+dead126:
 	ret i64 0
 }
 
@@ -6026,7 +6075,7 @@ entry:
 	%32 = call i64 @js_throw(i64 %31)
 	ret i64 0
 
-dead125:
+dead127:
 	ret i64 0
 }
 
@@ -6131,7 +6180,7 @@ entry:
 	%78 = call i64 @js_set(i64 %73, i64 %77, i64 3)
 	ret i64 %73
 
-dead126:
+dead128:
 	br label %63
 
 79:
@@ -6170,7 +6219,7 @@ dead126:
 	%102 = call i64 @js_set(i64 %97, i64 %101, i64 3)
 	ret i64 %97
 
-dead127:
+dead129:
 	br label %87
 
 103:
@@ -6211,7 +6260,7 @@ dead127:
 	%128 = call i64 @js_set(i64 %123, i64 %127, i64 2)
 	ret i64 %123
 
-dead128:
+dead130:
 	br label %113
 
 129:
@@ -6345,7 +6394,7 @@ dead128:
 	%219 = call i64 @js_set(i64 %214, i64 %218, i64 3)
 	ret i64 %214
 
-dead129:
+dead131:
 	br label %201
 
 220:
@@ -6406,7 +6455,7 @@ dead129:
 	%261 = call i64 @js_set(i64 %256, i64 %260, i64 3)
 	ret i64 %256
 
-dead130:
+dead132:
 	br label %241
 
 262:
@@ -6434,16 +6483,16 @@ dead130:
 	%278 = call i64 @js_set(i64 %273, i64 %277, i64 3)
 	ret i64 %273
 
-dead131:
+dead133:
 	br label %263
 
-dead132:
+dead134:
 	br label %221
 
-dead133:
+dead135:
 	br label %153
 
-dead134:
+dead136:
 	ret i64 0
 }
 
@@ -6490,7 +6539,7 @@ entry:
 	%26 = call i64 @js_num_i(i64 0)
 	ret i64 %26
 
-dead135:
+dead137:
 	br label %16
 
 27:
@@ -6513,7 +6562,7 @@ dead135:
 	%38 = call i64 @js_num_i(i64 1)
 	ret i64 %38
 
-dead136:
+dead138:
 	br label %28
 
 39:
@@ -6536,7 +6585,7 @@ dead136:
 	%50 = call i64 @js_num_i(i64 2)
 	ret i64 %50
 
-dead137:
+dead139:
 	br label %40
 
 51:
@@ -6559,7 +6608,7 @@ dead137:
 	%62 = call i64 @js_num_i(i64 3)
 	ret i64 %62
 
-dead138:
+dead140:
 	br label %52
 
 63:
@@ -6582,7 +6631,7 @@ dead138:
 	%74 = call i64 @js_num_i(i64 4)
 	ret i64 %74
 
-dead139:
+dead141:
 	br label %64
 
 75:
@@ -6605,7 +6654,7 @@ dead139:
 	%86 = call i64 @js_num_i(i64 5)
 	ret i64 %86
 
-dead140:
+dead142:
 	br label %76
 
 87:
@@ -6628,7 +6677,7 @@ dead140:
 	%98 = call i64 @js_num_i(i64 6)
 	ret i64 %98
 
-dead141:
+dead143:
 	br label %88
 
 99:
@@ -6648,10 +6697,10 @@ dead141:
 	%107 = call i64 @js_num_i(i64 7)
 	ret i64 %107
 
-dead142:
+dead144:
 	br label %100
 
-dead143:
+dead145:
 	ret i64 0
 }
 
@@ -6749,7 +6798,7 @@ entry:
 	%77 = call i64 @js_setret(i64 %76)
 	ret i64 0
 
-dead144:
+dead146:
 	br label %56
 
 78:
@@ -6957,7 +7006,7 @@ dead144:
 	%250 = call i64 @js_setret(i64 %249)
 	br label %238
 
-dead145:
+dead147:
 	br label %86
 
 251:
@@ -6989,7 +7038,7 @@ dead145:
 	%271 = call i64 @js_call(i64 %263, i64 0, i64 %264)
 	ret i64 %271
 
-dead146:
+dead148:
 	br label %252
 
 272:
@@ -7021,7 +7070,7 @@ dead146:
 	%292 = call i64 @js_call(i64 %284, i64 0, i64 %285)
 	ret i64 %292
 
-dead147:
+dead149:
 	br label %273
 
 293:
@@ -7055,7 +7104,7 @@ dead147:
 	%315 = call i64 @js_call(i64 %307, i64 %305, i64 %308)
 	ret i64 %315
 
-dead148:
+dead150:
 	br label %294
 
 316:
@@ -7166,10 +7215,10 @@ dead148:
 	%391 = call i64 @js_scope_get(i64 %389, i64 %390)
 	ret i64 %391
 
-dead149:
+dead151:
 	br label %386
 
-dead150:
+dead152:
 	br label %317
 
 392:
@@ -7280,10 +7329,10 @@ dead150:
 	%467 = call i64 @js_num_i(i64 0)
 	ret i64 %467
 
-dead151:
+dead153:
 	br label %463
 
-dead152:
+dead154:
 	br label %393
 
 468:
@@ -7310,7 +7359,7 @@ dead152:
 	%483 = call i64 @js_band(i64 %480, i64 %482)
 	ret i64 %483
 
-dead153:
+dead155:
 	br label %469
 
 484:
@@ -7336,10 +7385,10 @@ dead153:
 	%498 = call i64 @js_bor(i64 %495, i64 %497)
 	ret i64 %498
 
-dead154:
+dead156:
 	br label %485
 
-dead155:
+dead157:
 	ret i64 0
 }
 
@@ -7524,7 +7573,7 @@ entry:
 	%142 = call i64 @js_call(i64 %112, i64 0, i64 %113)
 	ret i64 %142
 
-dead156:
+dead158:
 	br label %86
 
 143:
@@ -7586,10 +7635,10 @@ dead156:
 	%193 = call i64 @js_call(i64 %172, i64 0, i64 %173)
 	ret i64 %193
 
-dead157:
+dead159:
 	br label %144
 
-dead158:
+dead160:
 	ret i64 0
 }
 
@@ -7653,10 +7702,10 @@ entry:
 	%43 = call i64 @js_band(i64 %41, i64 %42)
 	ret i64 %43
 
-dead159:
+dead161:
 	br label %32
 
-dead160:
+dead162:
 	ret i64 0
 }
 
@@ -7767,7 +7816,7 @@ entry:
 	%90 = call i64 @js_lt(i64 %88, i64 %89)
 	ret i64 %90
 
-dead161:
+dead163:
 	br label %77
 
 91:
@@ -7793,7 +7842,7 @@ dead161:
 	%105 = call i64 @js_gt(i64 %103, i64 %104)
 	ret i64 %105
 
-dead162:
+dead164:
 	br label %92
 
 106:
@@ -7819,7 +7868,7 @@ dead162:
 	%120 = call i64 @js_le(i64 %118, i64 %119)
 	ret i64 %120
 
-dead163:
+dead165:
 	br label %107
 
 121:
@@ -7845,7 +7894,7 @@ dead163:
 	%135 = call i64 @js_ge(i64 %133, i64 %134)
 	ret i64 %135
 
-dead164:
+dead166:
 	br label %122
 
 136:
@@ -7869,10 +7918,10 @@ dead164:
 	%148 = call i64 @js_eq(i64 %146, i64 %147)
 	ret i64 %148
 
-dead165:
+dead167:
 	br label %137
 
-dead166:
+dead168:
 	ret i64 0
 }
 
@@ -8008,7 +8057,7 @@ entry:
 	%99 = call i64 @js_call(i64 %86, i64 0, i64 %87)
 	ret i64 %99
 
-dead167:
+dead169:
 	br label %75
 
 100:
@@ -8082,10 +8131,10 @@ dead167:
 	%154 = call i64 @js_call(i64 %138, i64 0, i64 %139)
 	ret i64 %154
 
-dead168:
+dead170:
 	br label %118
 
-dead169:
+dead171:
 	br label %101
 
 155:
@@ -8141,13 +8190,13 @@ dead169:
 	%199 = call i64 @js_call(i64 %186, i64 0, i64 %187)
 	ret i64 %199
 
-dead170:
+dead172:
 	br label %156
 
-dead171:
+dead173:
 	br label %25
 
-dead172:
+dead174:
 	ret i64 0
 }
 
@@ -8214,7 +8263,7 @@ entry:
 	%16 = call i64 @js_call(i64 %7, i64 0, i64 %8)
 	ret i64 %16
 
-dead173:
+dead175:
 	ret i64 0
 }
 
@@ -8260,7 +8309,7 @@ entry:
 	%16 = call i64 @js_call(i64 %7, i64 0, i64 %8)
 	ret i64 %16
 
-dead174:
+dead176:
 	ret i64 0
 }
 
@@ -8289,7 +8338,7 @@ entry:
 	%16 = call i64 @js_call(i64 %7, i64 0, i64 %8)
 	ret i64 %16
 
-dead175:
+dead177:
 	ret i64 0
 }
 
@@ -8426,7 +8475,7 @@ entry:
 	%108 = call i64 @js_setret(i64 %105)
 	br label %79
 
-dead176:
+dead178:
 	ret i64 0
 }
 
@@ -8483,7 +8532,7 @@ entry:
 	%44 = call i64 @js_call(i64 %33, i64 0, i64 %34)
 	ret i64 %44
 
-dead177:
+dead179:
 	ret i64 0
 }
 
@@ -8537,7 +8586,7 @@ entry:
 	%33 = call i64 @js_scope_get(i64 %31, i64 %32)
 	ret i64 %33
 
-dead178:
+dead180:
 	br label %19
 
 34:
@@ -8559,10 +8608,10 @@ dead178:
 	%44 = call i64 @js_get(i64 %42, i64 %43)
 	ret i64 %44
 
-dead179:
+dead181:
 	br label %35
 
-dead180:
+dead182:
 	ret i64 0
 }
 
@@ -8602,10 +8651,10 @@ entry:
 	%19 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000213, i64 0, i64 0), i64 4)
 	ret i64 %19
 
-dead181:
+dead183:
 	br label %14
 
-dead182:
+dead184:
 	ret i64 0
 }
 
@@ -8635,7 +8684,7 @@ entry:
 	%17 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %17
 
-dead183:
+dead185:
 	ret i64 0
 }
 
@@ -8685,7 +8734,7 @@ entry:
 	%29 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000219, i64 0, i64 0), i64 3)
 	ret i64 %29
 
-dead184:
+dead186:
 	br label %20
 
 30:
@@ -8707,7 +8756,7 @@ dead184:
 	%40 = call i64 @js_str_mem(i8* getelementptr ([0 x i8], [0 x i8]* @str.1000120, i64 0, i64 0), i64 0)
 	ret i64 %40
 
-dead185:
+dead187:
 	br label %31
 
 41:
@@ -8731,7 +8780,7 @@ dead185:
 	%53 = call i64 @js_str_mem(i8* getelementptr ([0 x i8], [0 x i8]* @str.1000120, i64 0, i64 0), i64 0)
 	ret i64 %53
 
-dead186:
+dead188:
 	br label %42
 
 54:
@@ -8761,7 +8810,7 @@ dead186:
 	%72 = call i64 @js_call(i64 %67, i64 0, i64 %68)
 	ret i64 %72
 
-dead187:
+dead189:
 	br label %55
 
 73:
@@ -8788,7 +8837,7 @@ dead187:
 	%88 = call i64 @js_scope_get(i64 %86, i64 %87)
 	ret i64 %88
 
-dead188:
+dead190:
 	br label %74
 
 89:
@@ -8824,7 +8873,7 @@ dead188:
 	%113 = call i64 @js_call(i64 %106, i64 %104, i64 %107)
 	ret i64 %113
 
-dead189:
+dead191:
 	br label %90
 
 114:
@@ -8856,7 +8905,7 @@ dead189:
 	%134 = call i64 @js_call(i64 %129, i64 0, i64 %130)
 	ret i64 %134
 
-dead190:
+dead192:
 	br label %115
 
 135:
@@ -8886,7 +8935,7 @@ dead190:
 	%153 = call i64 @js_call(i64 %148, i64 0, i64 %149)
 	ret i64 %153
 
-dead191:
+dead193:
 	br label %136
 
 154:
@@ -8913,7 +8962,7 @@ dead191:
 	%169 = call i64 @js_add(i64 %166, i64 %168)
 	ret i64 %169
 
-dead192:
+dead194:
 	br label %155
 
 170:
@@ -8944,7 +8993,7 @@ dead192:
 	%189 = call i64 @js_add(i64 %186, i64 %188)
 	ret i64 %189
 
-dead193:
+dead195:
 	br label %171
 
 190:
@@ -8984,7 +9033,7 @@ dead193:
 	%218 = call i64 @js_call(i64 %213, i64 0, i64 %214)
 	ret i64 %218
 
-dead194:
+dead196:
 	br label %191
 
 219:
@@ -9009,10 +9058,10 @@ dead194:
 	%232 = call i64 @js_scope_get(i64 %230, i64 %231)
 	ret i64 %232
 
-dead195:
+dead197:
 	br label %220
 
-dead196:
+dead198:
 	ret i64 0
 }
 
@@ -9034,7 +9083,7 @@ entry:
 	%9 = call i64 @js_str_mem(i8* getelementptr ([15 x i8], [15 x i8]* @str.1000226, i64 0, i64 0), i64 15)
 	ret i64 %9
 
-dead197:
+dead199:
 	ret i64 0
 }
 
@@ -9119,7 +9168,7 @@ entry:
 	%64 = call i64 @js_call(i64 %44, i64 0, i64 %45)
 	ret i64 %64
 
-dead198:
+dead200:
 	br label %32
 
 65:
@@ -9175,7 +9224,7 @@ dead198:
 	%101 = call i64 @js_scope_get(i64 %99, i64 %100)
 	ret i64 %101
 
-dead199:
+dead201:
 	br label %96
 
 102:
@@ -9196,7 +9245,7 @@ dead199:
 	%111 = phi i64 [ %12, %109 ]
 	ret i64 0
 
-dead200:
+dead202:
 	br label %103
 
 112:
@@ -9219,7 +9268,7 @@ dead200:
 	%123 = phi i64 [ %12, %121 ]
 	ret i64 0
 
-dead201:
+dead203:
 	br label %113
 
 124:
@@ -9248,7 +9297,7 @@ dead201:
 	%141 = phi i64 [ %12, %139 ]
 	ret i64 0
 
-dead202:
+dead204:
 	br label %125
 
 142:
@@ -9287,10 +9336,10 @@ dead202:
 	%161 = call i64 @js_scope_get(i64 %159, i64 %160)
 	ret i64 %161
 
-dead203:
+dead205:
 	br label %156
 
-dead204:
+dead206:
 	ret i64 0
 }
 
@@ -9340,7 +9389,7 @@ entry:
 	%29 = call i64 @js_str_mem(i8* getelementptr ([15 x i8], [15 x i8]* @str.1000230, i64 0, i64 0), i64 15)
 	ret i64 %29
 
-dead205:
+dead207:
 	br label %19
 
 30:
@@ -9411,7 +9460,7 @@ dead205:
 	%79 = call i64 @js_str_mem(i8* getelementptr ([15 x i8], [15 x i8]* @str.1000230, i64 0, i64 0), i64 15)
 	ret i64 %79
 
-dead206:
+dead208:
 	br label %69
 
 80:
@@ -9460,10 +9509,10 @@ dead206:
 	%109 = call i64 @js_str_mem(i8* getelementptr ([15 x i8], [15 x i8]* @str.1000230, i64 0, i64 0), i64 15)
 	ret i64 %109
 
-dead207:
+dead209:
 	br label %105
 
-dead208:
+dead210:
 	ret i64 0
 }
 
@@ -9514,7 +9563,7 @@ entry:
 	%30 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000233, i64 0, i64 0), i64 11)
 	ret i64 %30
 
-dead209:
+dead211:
 	br label %19
 
 31:
@@ -9538,7 +9587,7 @@ dead209:
 	%43 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000234, i64 0, i64 0), i64 14)
 	ret i64 %43
 
-dead210:
+dead212:
 	br label %32
 
 44:
@@ -9564,7 +9613,7 @@ dead210:
 	%58 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000235, i64 0, i64 0), i64 13)
 	ret i64 %58
 
-dead211:
+dead213:
 	br label %45
 
 59:
@@ -9590,7 +9639,7 @@ dead211:
 	%73 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000236, i64 0, i64 0), i64 13)
 	ret i64 %73
 
-dead212:
+dead214:
 	br label %60
 
 74:
@@ -9673,7 +9722,7 @@ dead212:
 	%131 = phi i64 [ %127, %126 ], [ %129, %128 ]
 	ret i64 %131
 
-dead213:
+dead215:
 	br label %112
 
 132:
@@ -9711,7 +9760,7 @@ dead213:
 	%152 = phi i64 [ %148, %147 ], [ %150, %149 ]
 	ret i64 %152
 
-dead214:
+dead216:
 	br label %133
 
 153:
@@ -9747,7 +9796,7 @@ dead214:
 	%171 = phi i64 [ %167, %166 ], [ %169, %168 ]
 	ret i64 %171
 
-dead215:
+dead217:
 	br label %154
 
 172:
@@ -9762,7 +9811,7 @@ dead215:
 	%177 = phi i64 [ %173, %172 ], [ %175, %174 ]
 	ret i64 %177
 
-dead216:
+dead218:
 	br label %75
 
 178:
@@ -9780,10 +9829,10 @@ dead216:
 	%184 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000240, i64 0, i64 0), i64 12)
 	ret i64 %184
 
-dead217:
+dead219:
 	br label %179
 
-dead218:
+dead220:
 	ret i64 0
 }
 
@@ -9828,7 +9877,7 @@ entry:
 	%24 = call i64 @js_str_mem(i8* getelementptr ([0 x i8], [0 x i8]* @str.1000120, i64 0, i64 0), i64 0)
 	ret i64 %24
 
-dead219:
+dead221:
 	br label %15
 
 25:
@@ -9852,10 +9901,10 @@ dead219:
 	%37 = call i64 @js_str_mem(i8* getelementptr ([0 x i8], [0 x i8]* @str.1000120, i64 0, i64 0), i64 0)
 	ret i64 %37
 
-dead220:
+dead222:
 	br label %26
 
-dead221:
+dead223:
 	ret i64 0
 }
 
@@ -9905,7 +9954,7 @@ entry:
 	%29 = call i64 @js_scope_get(i64 %27, i64 %28)
 	ret i64 %29
 
-dead222:
+dead224:
 	br label %17
 
 30:
@@ -9946,7 +9995,7 @@ dead222:
 	%53 = phi i64 [ %49, %48 ], [ %51, %50 ]
 	ret i64 %53
 
-dead223:
+dead225:
 	br label %31
 
 54:
@@ -9982,7 +10031,7 @@ dead223:
 	%78 = call i64 @js_call(i64 %71, i64 %69, i64 %72)
 	ret i64 %78
 
-dead224:
+dead226:
 	br label %55
 
 79:
@@ -10014,7 +10063,7 @@ dead224:
 	%99 = call i64 @js_call(i64 %94, i64 0, i64 %95)
 	ret i64 %99
 
-dead225:
+dead227:
 	br label %80
 
 100:
@@ -10044,7 +10093,7 @@ dead225:
 	%118 = call i64 @js_call(i64 %113, i64 0, i64 %114)
 	ret i64 %118
 
-dead226:
+dead228:
 	br label %101
 
 119:
@@ -10075,7 +10124,7 @@ dead226:
 	%138 = call i64 @js_add(i64 %135, i64 %137)
 	ret i64 %138
 
-dead227:
+dead229:
 	br label %120
 
 139:
@@ -10102,10 +10151,10 @@ dead227:
 	%154 = call i64 @js_call(i64 %149, i64 0, i64 %150)
 	ret i64 %154
 
-dead228:
+dead230:
 	br label %140
 
-dead229:
+dead231:
 	ret i64 0
 }
 
@@ -10209,7 +10258,7 @@ entry:
 	%73 = call i64 @js_setret(i64 %70)
 	br label %40
 
-dead230:
+dead232:
 	ret i64 0
 }
 
@@ -10256,7 +10305,7 @@ entry:
 	%26 = call i64 @js_num_i(i64 8)
 	ret i64 %26
 
-dead231:
+dead233:
 	br label %16
 
 27:
@@ -10279,7 +10328,7 @@ dead231:
 	%38 = call i64 @js_num_i(i64 8)
 	ret i64 %38
 
-dead232:
+dead234:
 	br label %28
 
 39:
@@ -10302,7 +10351,7 @@ dead232:
 	%50 = call i64 @js_num_i(i64 16)
 	ret i64 %50
 
-dead233:
+dead235:
 	br label %40
 
 51:
@@ -10325,7 +10374,7 @@ dead233:
 	%62 = call i64 @js_num_i(i64 16)
 	ret i64 %62
 
-dead234:
+dead236:
 	br label %52
 
 63:
@@ -10348,7 +10397,7 @@ dead234:
 	%74 = call i64 @js_num_i(i64 32)
 	ret i64 %74
 
-dead235:
+dead237:
 	br label %64
 
 75:
@@ -10371,7 +10420,7 @@ dead235:
 	%86 = call i64 @js_num_i(i64 32)
 	ret i64 %86
 
-dead236:
+dead238:
 	br label %76
 
 87:
@@ -10394,7 +10443,7 @@ dead236:
 	%98 = call i64 @js_num_i(i64 64)
 	ret i64 %98
 
-dead237:
+dead239:
 	br label %88
 
 99:
@@ -10417,7 +10466,7 @@ dead237:
 	%110 = call i64 @js_num_i(i64 64)
 	ret i64 %110
 
-dead238:
+dead240:
 	br label %100
 
 111:
@@ -10440,7 +10489,7 @@ dead238:
 	%122 = call i64 @js_num_i(i64 64)
 	ret i64 %122
 
-dead239:
+dead241:
 	br label %112
 
 123:
@@ -10458,10 +10507,10 @@ dead239:
 	%129 = call i64 @js_num_i(i64 64)
 	ret i64 %129
 
-dead240:
+dead242:
 	br label %124
 
-dead241:
+dead243:
 	ret i64 0
 }
 
@@ -10507,7 +10556,7 @@ entry:
 	%25 = phi i64 [ %8, %23 ]
 	ret i64 3
 
-dead242:
+dead244:
 	br label %16
 
 26:
@@ -10529,7 +10578,7 @@ dead242:
 	%36 = phi i64 [ %8, %34 ]
 	ret i64 3
 
-dead243:
+dead245:
 	br label %27
 
 37:
@@ -10551,7 +10600,7 @@ dead243:
 	%47 = phi i64 [ %8, %45 ]
 	ret i64 3
 
-dead244:
+dead246:
 	br label %38
 
 48:
@@ -10573,7 +10622,7 @@ dead244:
 	%58 = phi i64 [ %8, %56 ]
 	ret i64 3
 
-dead245:
+dead247:
 	br label %49
 
 59:
@@ -10589,10 +10638,10 @@ dead245:
 	%63 = phi i64 [ %8, %61 ]
 	ret i64 3
 
-dead246:
+dead248:
 	br label %60
 
-dead247:
+dead249:
 	ret i64 0
 }
 
@@ -10639,7 +10688,7 @@ entry:
 	%26 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000251, i64 0, i64 0), i64 5)
 	ret i64 %26
 
-dead248:
+dead250:
 	br label %16
 
 27:
@@ -10662,7 +10711,7 @@ dead248:
 	%38 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000252, i64 0, i64 0), i64 4)
 	ret i64 %38
 
-dead249:
+dead251:
 	br label %28
 
 39:
@@ -10685,7 +10734,7 @@ dead249:
 	%50 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000253, i64 0, i64 0), i64 5)
 	ret i64 %50
 
-dead250:
+dead252:
 	br label %40
 
 51:
@@ -10708,7 +10757,7 @@ dead250:
 	%62 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000254, i64 0, i64 0), i64 6)
 	ret i64 %62
 
-dead251:
+dead253:
 	br label %52
 
 63:
@@ -10731,7 +10780,7 @@ dead251:
 	%74 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000255, i64 0, i64 0), i64 3)
 	ret i64 %74
 
-dead252:
+dead254:
 	br label %64
 
 75:
@@ -10754,7 +10803,7 @@ dead252:
 	%86 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000256, i64 0, i64 0), i64 4)
 	ret i64 %86
 
-dead253:
+dead255:
 	br label %76
 
 87:
@@ -10777,7 +10826,7 @@ dead253:
 	%98 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000257, i64 0, i64 0), i64 4)
 	ret i64 %98
 
-dead254:
+dead256:
 	br label %88
 
 99:
@@ -10796,10 +10845,10 @@ dead254:
 	%106 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000258, i64 0, i64 0), i64 5)
 	ret i64 %106
 
-dead255:
+dead257:
 	br label %100
 
-dead256:
+dead258:
 	ret i64 0
 }
 
@@ -11157,7 +11206,7 @@ entry:
 	%281 = call i64 @js_setret(i64 %278)
 	br label %241
 
-dead257:
+dead259:
 	ret i64 0
 }
 
@@ -11262,7 +11311,7 @@ entry:
 	%80 = call i64 @js_scope_get(i64 %56, i64 %79)
 	ret i64 %80
 
-dead258:
+dead260:
 	br label %29
 
 81:
@@ -11319,7 +11368,7 @@ dead258:
 	%126 = call i64 @js_scope_get(i64 %124, i64 %125)
 	ret i64 %126
 
-dead259:
+dead261:
 	br label %82
 
 127:
@@ -11465,7 +11514,7 @@ dead259:
 	%255 = call i64 @js_setret(i64 %252)
 	br label %128
 
-dead261:
+dead263:
 	ret i64 0
 }
 
@@ -11521,7 +11570,7 @@ entry:
 	%26 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %26
 
-dead260:
+dead262:
 	ret i64 0
 }
 
@@ -11565,7 +11614,7 @@ entry:
 	%23 = phi i64 [ %8, %21 ]
 	ret i64 2
 
-dead262:
+dead264:
 	br label %15
 
 24:
@@ -11588,7 +11637,7 @@ dead262:
 	%35 = phi i64 [ %8, %33 ]
 	ret i64 2
 
-dead263:
+dead265:
 	br label %25
 
 36:
@@ -11615,7 +11664,7 @@ dead263:
 	%51 = phi i64 [ %8, %49 ]
 	ret i64 2
 
-dead264:
+dead266:
 	br label %37
 
 52:
@@ -11636,10 +11685,10 @@ dead264:
 	%61 = phi i64 [ %8, %59 ]
 	ret i64 2
 
-dead265:
+dead267:
 	br label %53
 
-dead266:
+dead268:
 	ret i64 0
 }
 
@@ -11732,10 +11781,10 @@ entry:
 	%62 = call i64 @js_scope_get(i64 %60, i64 %61)
 	ret i64 %62
 
-dead267:
+dead269:
 	br label %50
 
-dead268:
+dead270:
 	ret i64 0
 }
 
@@ -11816,7 +11865,7 @@ entry:
 	%56 = call i64 @js_call(i64 %48, i64 0, i64 %49)
 	ret i64 %56
 
-dead269:
+dead271:
 	br label %34
 
 57:
@@ -11867,7 +11916,7 @@ dead269:
 	%92 = call i64 @js_call(i64 %84, i64 0, i64 %85)
 	ret i64 %92
 
-dead270:
+dead272:
 	br label %70
 
 93:
@@ -11937,7 +11986,7 @@ dead270:
 	%139 = phi i64 [ %114, %137 ]
 	ret i64 2
 
-dead271:
+dead273:
 	br label %126
 
 140:
@@ -11965,13 +12014,13 @@ dead271:
 	%156 = phi i64 [ %114, %154 ]
 	ret i64 2
 
-dead272:
+dead274:
 	br label %141
 
-dead273:
+dead275:
 	br label %106
 
-dead274:
+dead276:
 	ret i64 0
 }
 
@@ -12094,7 +12143,7 @@ entry:
 	%94 = call i64 @js_setret(i64 %93)
 	br label %69
 
-dead275:
+dead277:
 	br label %23
 
 95:
@@ -12193,7 +12242,7 @@ dead275:
 	%162 = call i64 @js_setret(i64 %161)
 	br label %147
 
-dead276:
+dead278:
 	br label %96
 
 163:
@@ -12300,10 +12349,10 @@ dead276:
 	%238 = call i64 @js_setret(i64 %237)
 	br label %219
 
-dead277:
+dead279:
 	br label %164
 
-dead278:
+dead280:
 	ret i64 0
 }
 
@@ -12357,7 +12406,7 @@ entry:
 	%33 = call i64 @js_get(i64 %31, i64 %32)
 	ret i64 %33
 
-dead279:
+dead281:
 	br label %17
 
 34:
@@ -12390,7 +12439,7 @@ dead279:
 	%55 = call i64 @js_get(i64 %53, i64 %54)
 	ret i64 %55
 
-dead280:
+dead282:
 	br label %35
 
 56:
@@ -12422,10 +12471,10 @@ dead280:
 	%76 = call i64 @js_get(i64 %74, i64 %75)
 	ret i64 %76
 
-dead281:
+dead283:
 	br label %57
 
-dead282:
+dead284:
 	ret i64 0
 }
 
@@ -12526,7 +12575,7 @@ entry:
 	%72 = phi i64 [ %45, %70 ]
 	ret i64 3
 
-dead283:
+dead285:
 	br label %53
 
 73:
@@ -12556,7 +12605,7 @@ dead283:
 	%91 = phi i64 [ %45, %89 ]
 	ret i64 2
 
-dead284:
+dead286:
 	br label %74
 
 92:
@@ -12586,7 +12635,7 @@ dead284:
 	%110 = phi i64 [ %98, %97 ], [ %108, %101 ]
 	ret i64 %110
 
-dead285:
+dead287:
 	br label %30
 
 111:
@@ -12643,7 +12692,7 @@ dead285:
 	%148 = phi i64 [ %121, %146 ]
 	ret i64 3
 
-dead286:
+dead288:
 	br label %129
 
 149:
@@ -12673,7 +12722,7 @@ dead286:
 	%167 = phi i64 [ %121, %165 ]
 	ret i64 2
 
-dead287:
+dead289:
 	br label %150
 
 168:
@@ -12703,7 +12752,7 @@ dead287:
 	%186 = phi i64 [ %174, %173 ], [ %184, %177 ]
 	ret i64 %186
 
-dead288:
+dead290:
 	br label %112
 
 187:
@@ -12738,7 +12787,7 @@ dead288:
 	%206 = phi i64 [ %12, %204 ]
 	ret i64 2
 
-dead289:
+dead291:
 	br label %196
 
 207:
@@ -12762,7 +12811,7 @@ dead289:
 	%219 = phi i64 [ %12, %217 ]
 	ret i64 2
 
-dead290:
+dead292:
 	br label %208
 
 220:
@@ -12788,10 +12837,10 @@ dead290:
 	%234 = phi i64 [ %12, %232 ]
 	ret i64 3
 
-dead291:
+dead293:
 	br label %221
 
-dead292:
+dead294:
 	ret i64 0
 }
 
@@ -12877,7 +12926,7 @@ entry:
 	%55 = phi i64 [ %33, %53 ]
 	ret i64 2
 
-dead293:
+dead295:
 	br label %47
 
 56:
@@ -12900,7 +12949,7 @@ dead293:
 	%67 = phi i64 [ %33, %65 ]
 	ret i64 2
 
-dead294:
+dead296:
 	br label %57
 
 68:
@@ -12926,7 +12975,7 @@ dead294:
 	%82 = phi i64 [ %33, %80 ]
 	ret i64 2
 
-dead295:
+dead297:
 	br label %69
 
 83:
@@ -12952,7 +13001,7 @@ dead295:
 	%97 = phi i64 [ %33, %95 ]
 	ret i64 3
 
-dead296:
+dead298:
 	br label %84
 
 98:
@@ -12975,10 +13024,10 @@ dead296:
 	%109 = phi i64 [ %33, %107 ]
 	ret i64 3
 
-dead297:
+dead299:
 	br label %99
 
-dead298:
+dead300:
 	ret i64 0
 }
 
@@ -13023,7 +13072,7 @@ entry:
 	%24 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000300, i64 0, i64 0), i64 4)
 	ret i64 %24
 
-dead299:
+dead301:
 	br label %15
 
 25:
@@ -13047,10 +13096,10 @@ dead299:
 	%37 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000300, i64 0, i64 0), i64 4)
 	ret i64 %37
 
-dead300:
+dead302:
 	br label %26
 
-dead301:
+dead303:
 	ret i64 0
 }
 
@@ -13168,10 +13217,10 @@ entry:
 	%81 = phi i64 [ %55, %79 ]
 	ret i64 2
 
-dead302:
+dead304:
 	br label %65
 
-dead303:
+dead305:
 	br label %43
 
 82:
@@ -13205,7 +13254,7 @@ dead303:
 	%104 = call i64 @js_seq(i64 %99, i64 %103)
 	ret i64 %104
 
-dead304:
+dead306:
 	br label %83
 
 105:
@@ -13237,7 +13286,7 @@ dead304:
 	%125 = call i64 @js_seq(i64 %122, i64 %124)
 	ret i64 %125
 
-dead305:
+dead307:
 	br label %106
 
 126:
@@ -13274,7 +13323,7 @@ dead305:
 	%151 = call i64 @js_call(i64 %141, i64 0, i64 %142)
 	ret i64 %151
 
-dead306:
+dead308:
 	br label %127
 
 152:
@@ -13309,10 +13358,10 @@ dead306:
 	%175 = call i64 @js_call(i64 %158, i64 0, i64 %159)
 	ret i64 %175
 
-dead307:
+dead309:
 	br label %153
 
-dead308:
+dead310:
 	br label %22
 
 176:
@@ -13348,10 +13397,10 @@ dead308:
 	%200 = call i64 @js_call(i64 %192, i64 0, i64 %193)
 	ret i64 %200
 
-dead309:
+dead311:
 	br label %177
 
-dead310:
+dead312:
 	ret i64 0
 }
 
@@ -13433,7 +13482,7 @@ entry:
 	%53 = call i64 @js_get(i64 %51, i64 %52)
 	ret i64 %53
 
-dead311:
+dead313:
 	br label %40
 
 54:
@@ -13471,7 +13520,7 @@ dead311:
 	%80 = call i64 @js_call(i64 %68, i64 %66, i64 %69)
 	ret i64 %80
 
-dead312:
+dead314:
 	br label %55
 
 81:
@@ -13505,7 +13554,7 @@ dead312:
 	%103 = call i64 @js_call(i64 %93, i64 0, i64 %94)
 	ret i64 %103
 
-dead313:
+dead315:
 	br label %82
 
 104:
@@ -13604,7 +13653,7 @@ dead313:
 	%179 = call i64 @js_call(i64 %168, i64 0, i64 %169)
 	ret i64 %179
 
-dead314:
+dead316:
 	br label %105
 
 180:
@@ -13642,7 +13691,7 @@ dead314:
 	%206 = call i64 @js_call(i64 %194, i64 %192, i64 %195)
 	ret i64 %206
 
-dead315:
+dead317:
 	br label %181
 
 207:
@@ -13682,7 +13731,7 @@ dead315:
 	%235 = call i64 @js_ge(i64 %233, i64 %234)
 	ret i64 %235
 
-dead316:
+dead318:
 	br label %208
 
 236:
@@ -13710,7 +13759,7 @@ dead316:
 	%252 = call i64 @js_call(i64 %250, i64 %248, i64 %251)
 	ret i64 %252
 
-dead317:
+dead319:
 	br label %237
 
 253:
@@ -13738,7 +13787,7 @@ dead317:
 	%269 = call i64 @js_call(i64 %267, i64 %265, i64 %268)
 	ret i64 %269
 
-dead318:
+dead320:
 	br label %254
 
 270:
@@ -13770,10 +13819,10 @@ dead318:
 	%290 = call i64 @js_call(i64 %288, i64 %286, i64 %289)
 	ret i64 %290
 
-dead319:
+dead321:
 	br label %271
 
-dead320:
+dead322:
 	br label %24
 
 291:
@@ -13838,7 +13887,7 @@ dead320:
 	%334 = call i64 @js_setret(i64 %333)
 	ret i64 0
 
-dead321:
+dead323:
 	br label %300
 
 335:
@@ -13881,7 +13930,7 @@ dead321:
 	%366 = call i64 @js_setret(i64 %365)
 	ret i64 0
 
-dead322:
+dead324:
 	br label %336
 
 367:
@@ -13919,7 +13968,7 @@ dead322:
 	%393 = call i64 @js_call(i64 %382, i64 0, i64 %383)
 	ret i64 %393
 
-dead323:
+dead325:
 	br label %368
 
 394:
@@ -13957,7 +14006,7 @@ dead323:
 	%420 = call i64 @js_call(i64 %409, i64 0, i64 %410)
 	ret i64 %420
 
-dead324:
+dead326:
 	br label %395
 
 421:
@@ -13996,7 +14045,7 @@ dead324:
 	%448 = call i64 @js_setret(i64 %447)
 	ret i64 0
 
-dead325:
+dead327:
 	br label %422
 
 449:
@@ -14093,10 +14142,10 @@ dead325:
 	%526 = call i64 @js_call(i64 %512, i64 %510, i64 %513)
 	ret i64 %526
 
-dead326:
+dead328:
 	br label %493
 
-dead327:
+dead329:
 	br label %450
 
 527:
@@ -14134,10 +14183,10 @@ dead327:
 	%553 = call i64 @js_call(i64 %547, i64 %545, i64 %548)
 	ret i64 %553
 
-dead328:
+dead330:
 	br label %528
 
-dead329:
+dead331:
 	ret i64 0
 }
 
@@ -14219,7 +14268,7 @@ entry:
 	%53 = call i64 @js_get(i64 %51, i64 %52)
 	ret i64 %53
 
-dead330:
+dead332:
 	br label %40
 
 54:
@@ -14279,7 +14328,7 @@ dead330:
 	%94 = call i64 @js_setret(i64 %93)
 	ret i64 3
 
-dead331:
+dead333:
 	br label %73
 
 95:
@@ -14365,10 +14414,10 @@ dead331:
 	%157 = call i64 @js_setret(i64 %156)
 	ret i64 0
 
-dead332:
+dead334:
 	br label %137
 
-dead333:
+dead335:
 	br label %96
 
 158:
@@ -14456,10 +14505,10 @@ dead333:
 	%216 = phi i64 [ %187, %214 ]
 	ret i64 3
 
-dead334:
+dead336:
 	br label %206
 
-dead335:
+dead337:
 	br label %159
 
 217:
@@ -14558,13 +14607,13 @@ dead335:
 	%286 = call i64 @js_scope_get(i64 %284, i64 %285)
 	ret i64 %286
 
-dead336:
+dead338:
 	br label %274
 
-dead337:
+dead339:
 	br label %218
 
-dead338:
+dead340:
 	ret i64 0
 }
 
@@ -14625,7 +14674,7 @@ entry:
 	%40 = call i64 @js_call(i64 %33, i64 0, i64 %34)
 	ret i64 %40
 
-dead339:
+dead341:
 	br label %22
 
 41:
@@ -14656,7 +14705,7 @@ dead339:
 	%60 = call i64 @js_call(i64 %53, i64 0, i64 %54)
 	ret i64 %60
 
-dead340:
+dead342:
 	br label %42
 
 61:
@@ -14710,7 +14759,7 @@ dead340:
 	%95 = call i64 @js_get(i64 %93, i64 %94)
 	ret i64 %95
 
-dead341:
+dead343:
 	br label %80
 
 96:
@@ -14748,7 +14797,7 @@ dead341:
 	%122 = call i64 @js_ge(i64 %120, i64 %121)
 	ret i64 %122
 
-dead342:
+dead344:
 	br label %97
 
 123:
@@ -14794,10 +14843,10 @@ dead342:
 	%157 = call i64 @js_setret(i64 %156)
 	ret i64 0
 
-dead343:
+dead345:
 	br label %124
 
-dead344:
+dead346:
 	ret i64 0
 }
 
@@ -14823,7 +14872,7 @@ entry:
 	%13 = call i64 @js_eq(i64 %11, i64 %12)
 	ret i64 %13
 
-dead345:
+dead347:
 	ret i64 0
 }
 
@@ -15015,7 +15064,7 @@ entry:
 	%143 = call i64 @js_setret(i64 %142)
 	br label %111
 
-dead346:
+dead348:
 	br label %24
 
 144:
@@ -15047,7 +15096,7 @@ dead346:
 	%164 = call i64 @js_setret(i64 %163)
 	ret i64 0
 
-dead347:
+dead349:
 	br label %145
 
 165:
@@ -15216,7 +15265,7 @@ dead347:
 	%292 = call i64 @js_setret(i64 %289)
 	br label %258
 
-dead348:
+dead350:
 	ret i64 0
 }
 
@@ -15301,7 +15350,7 @@ entry:
 	%60 = call i64 @js_call(i64 %49, i64 0, i64 %50)
 	ret i64 %60
 
-dead349:
+dead351:
 	br label %37
 
 61:
@@ -15385,7 +15434,7 @@ dead349:
 	%113 = phi i64 [ %106, %103 ], [ %111, %109 ]
 	ret i64 %113
 
-dead350:
+dead352:
 	br label %95
 
 114:
@@ -15420,7 +15469,7 @@ dead350:
 	%133 = phi i64 [ %126, %123 ], [ %131, %129 ]
 	ret i64 %133
 
-dead351:
+dead353:
 	br label %115
 
 134:
@@ -15441,7 +15490,7 @@ dead351:
 	%143 = call i64 @js_sne(i64 %140, i64 %142)
 	ret i64 %143
 
-dead352:
+dead354:
 	br label %135
 
 144:
@@ -15500,10 +15549,10 @@ dead352:
 	%187 = call i64 @js_call(i64 %176, i64 0, i64 %177)
 	ret i64 %187
 
-dead353:
+dead355:
 	br label %158
 
-dead354:
+dead356:
 	ret i64 0
 }
 
@@ -15543,7 +15592,7 @@ entry:
 	%27 = call i64 @js_call(i64 %16, i64 0, i64 %17)
 	ret i64 %27
 
-dead355:
+dead357:
 	ret i64 0
 }
 
@@ -15583,7 +15632,7 @@ entry:
 	%27 = call i64 @js_call(i64 %16, i64 0, i64 %17)
 	ret i64 %27
 
-dead356:
+dead358:
 	ret i64 0
 }
 
@@ -15629,7 +15678,7 @@ entry:
 	%33 = call i64 @js_call(i64 %16, i64 0, i64 %17)
 	ret i64 %33
 
-dead357:
+dead359:
 	ret i64 0
 }
 
@@ -15700,10 +15749,10 @@ entry:
 	%50 = call i64 @js_scope_get(i64 %48, i64 %49)
 	ret i64 %50
 
-dead358:
+dead360:
 	br label %26
 
-dead359:
+dead361:
 	ret i64 0
 }
 
@@ -16121,7 +16170,7 @@ entry:
 	%327 = call i64 @js_call(i64 %316, i64 0, i64 %317)
 	ret i64 %327
 
-dead360:
+dead362:
 	br label %307
 
 328:
@@ -16184,10 +16233,10 @@ dead360:
 	%371 = call i64 @js_call(i64 %360, i64 0, i64 %361)
 	ret i64 %371
 
-dead361:
+dead363:
 	br label %342
 
-dead362:
+dead364:
 	br label %329
 
 372:
@@ -16250,10 +16299,10 @@ dead362:
 	%415 = call i64 @js_call(i64 %404, i64 0, i64 %405)
 	ret i64 %415
 
-dead363:
+dead365:
 	br label %386
 
-dead364:
+dead366:
 	br label %373
 
 416:
@@ -16275,7 +16324,7 @@ dead364:
 	%426 = call i64 @js_scope_get(i64 %424, i64 %425)
 	ret i64 %426
 
-dead365:
+dead367:
 	br label %417
 
 427:
@@ -16308,7 +16357,7 @@ dead365:
 	%448 = call i64 @js_call(i64 %437, i64 0, i64 %438)
 	ret i64 %448
 
-dead366:
+dead368:
 	br label %428
 
 449:
@@ -16350,10 +16399,10 @@ dead366:
 	%479 = call i64 @js_call(i64 %468, i64 0, i64 %469)
 	ret i64 %479
 
-dead367:
+dead369:
 	br label %450
 
-dead368:
+dead370:
 	ret i64 0
 }
 
@@ -16427,7 +16476,7 @@ entry:
 	%53 = call i64 @js_call(i64 %35, i64 0, i64 %36)
 	ret i64 %53
 
-dead369:
+dead371:
 	br label %19
 
 54:
@@ -16486,7 +16535,7 @@ dead369:
 	%101 = call i64 @js_call(i64 %71, i64 0, i64 %72)
 	ret i64 %101
 
-dead370:
+dead372:
 	br label %55
 
 102:
@@ -16553,10 +16602,10 @@ dead370:
 	%153 = call i64 @js_call(i64 %137, i64 0, i64 %138)
 	ret i64 %153
 
-dead371:
+dead373:
 	br label %115
 
-dead372:
+dead374:
 	ret i64 0
 }
 
@@ -16616,7 +16665,7 @@ entry:
 	%47 = call i64 @js_call(i64 %16, i64 0, i64 %17)
 	ret i64 %47
 
-dead373:
+dead375:
 	ret i64 0
 }
 
@@ -16704,7 +16753,7 @@ entry:
 	%67 = call i64 @js_call(i64 %37, i64 0, i64 %38)
 	ret i64 %67
 
-dead374:
+dead376:
 	br label %21
 
 68:
@@ -16773,10 +16822,10 @@ dead374:
 	%121 = call i64 @js_call(i64 %105, i64 0, i64 %106)
 	ret i64 %121
 
-dead375:
+dead377:
 	br label %81
 
-dead376:
+dead378:
 	ret i64 0
 }
 
@@ -16839,7 +16888,7 @@ entry:
 	%50 = call i64 @js_call(i64 %16, i64 0, i64 %17)
 	ret i64 %50
 
-dead377:
+dead379:
 	ret i64 0
 }
 
@@ -16918,7 +16967,7 @@ entry:
 	%58 = call i64 @js_call(i64 %46, i64 0, i64 %47)
 	ret i64 %58
 
-dead378:
+dead380:
 	br label %32
 
 59:
@@ -16966,7 +17015,7 @@ dead378:
 	%95 = call i64 @js_call(i64 %74, i64 0, i64 %75)
 	ret i64 %95
 
-dead379:
+dead381:
 	br label %60
 
 96:
@@ -17033,10 +17082,10 @@ dead379:
 	%151 = call i64 @js_call(i64 %120, i64 0, i64 %121)
 	ret i64 %151
 
-dead380:
+dead382:
 	br label %97
 
-dead381:
+dead383:
 	ret i64 0
 }
 
@@ -17135,10 +17184,10 @@ entry:
 	%70 = call i64 @js_scope_get(i64 %68, i64 %69)
 	ret i64 %70
 
-dead382:
+dead384:
 	br label %45
 
-dead383:
+dead385:
 	br label %22
 
 71:
@@ -17178,7 +17227,7 @@ dead383:
 	%99 = call i64 @js_call(i64 %86, i64 0, i64 %87)
 	ret i64 %99
 
-dead384:
+dead386:
 	br label %72
 
 100:
@@ -17226,7 +17275,7 @@ dead384:
 	%136 = call i64 @js_call(i64 %115, i64 0, i64 %116)
 	ret i64 %136
 
-dead385:
+dead387:
 	br label %101
 
 137:
@@ -17292,10 +17341,10 @@ dead385:
 	%179 = call i64 @js_call(i64 %171, i64 0, i64 %172)
 	ret i64 %179
 
-dead386:
+dead388:
 	br label %166
 
-dead387:
+dead389:
 	ret i64 0
 }
 
@@ -17376,10 +17425,10 @@ entry:
 	%60 = call i64 @js_call(i64 %39, i64 0, i64 %40)
 	ret i64 %60
 
-dead388:
+dead390:
 	br label %19
 
-dead389:
+dead391:
 	ret i64 0
 }
 
@@ -17461,7 +17510,7 @@ entry:
 	%57 = call i64 @js_add(i64 %49, i64 %56)
 	ret i64 %57
 
-dead390:
+dead392:
 	br label %30
 
 58:
@@ -17533,7 +17582,7 @@ dead390:
 	%114 = call i64 @js_call(i64 %85, i64 0, i64 %86)
 	ret i64 %114
 
-dead391:
+dead393:
 	br label %71
 
 115:
@@ -17592,10 +17641,10 @@ dead391:
 	%158 = call i64 @js_call(i64 %148, i64 0, i64 %149)
 	ret i64 %158
 
-dead392:
+dead394:
 	br label %128
 
-dead393:
+dead395:
 	ret i64 0
 }
 
@@ -17657,7 +17706,7 @@ entry:
 	%41 = call i64 @js_call(i64 %36, i64 0, i64 %37)
 	ret i64 %41
 
-dead394:
+dead396:
 	br label %22
 
 42:
@@ -17681,10 +17730,10 @@ dead394:
 	%54 = call i64 @js_call(i64 %49, i64 0, i64 %50)
 	ret i64 %54
 
-dead395:
+dead397:
 	br label %43
 
-dead396:
+dead398:
 	ret i64 0
 }
 
@@ -17767,7 +17816,7 @@ entry:
 	%58 = call i64 @js_add(i64 %50, i64 %57)
 	ret i64 %58
 
-dead397:
+dead399:
 	br label %31
 
 59:
@@ -17857,7 +17906,7 @@ dead397:
 	%133 = call i64 @js_call(i64 %104, i64 0, i64 %105)
 	ret i64 %133
 
-dead398:
+dead400:
 	br label %72
 
 134:
@@ -17904,10 +17953,10 @@ dead398:
 	%165 = call i64 @js_call(i64 %157, i64 0, i64 %158)
 	ret i64 %165
 
-dead399:
+dead401:
 	br label %147
 
-dead400:
+dead402:
 	ret i64 0
 }
 
@@ -18051,7 +18100,7 @@ entry:
 	%103 = call i64 @js_call(i64 %93, i64 0, i64 %94)
 	ret i64 %103
 
-dead401:
+dead403:
 	br label %79
 
 104:
@@ -18079,10 +18128,10 @@ dead401:
 	%120 = call i64 @js_call(i64 %110, i64 0, i64 %111)
 	ret i64 %120
 
-dead402:
+dead404:
 	br label %105
 
-dead403:
+dead405:
 	ret i64 0
 }
 
@@ -18110,7 +18159,7 @@ entry:
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %15
 
-dead404:
+dead406:
 	ret i64 0
 }
 
@@ -18166,7 +18215,7 @@ entry:
 	%35 = call i64 @js_get(i64 %33, i64 %34)
 	ret i64 %35
 
-dead405:
+dead407:
 	br label %17
 
 36:
@@ -18195,7 +18244,7 @@ dead405:
 	%53 = call i64 @js_get(i64 %51, i64 %52)
 	ret i64 %53
 
-dead406:
+dead408:
 	br label %37
 
 54:
@@ -18229,10 +18278,10 @@ dead406:
 	%76 = call i64 @js_get(i64 %74, i64 %75)
 	ret i64 %76
 
-dead407:
+dead409:
 	br label %55
 
-dead408:
+dead410:
 	ret i64 0
 }
 
@@ -18268,7 +18317,7 @@ entry:
 	%23 = call i64 @js_scope_get(i64 %6, i64 %22)
 	ret i64 %23
 
-dead409:
+dead411:
 	ret i64 0
 }
 
@@ -18389,7 +18438,7 @@ entry:
 	%38 = call i64 @js_call(i64 %33, i64 0, i64 %34)
 	ret i64 %38
 
-dead410:
+dead412:
 	br label %17
 
 39:
@@ -18417,7 +18466,7 @@ dead410:
 	%55 = call i64 @js_call(i64 %50, i64 0, i64 %51)
 	ret i64 %55
 
-dead411:
+dead413:
 	br label %40
 
 56:
@@ -18440,7 +18489,7 @@ dead411:
 	%67 = call i64 @js_scope_get(i64 %65, i64 %66)
 	ret i64 %67
 
-dead412:
+dead414:
 	br label %57
 
 68:
@@ -18465,7 +18514,7 @@ dead412:
 	%81 = call i64 @js_scope_get(i64 %79, i64 %80)
 	ret i64 %81
 
-dead413:
+dead415:
 	br label %69
 
 82:
@@ -18524,7 +18573,7 @@ dead413:
 	%121 = call i64 @js_scope_get(i64 %119, i64 %120)
 	ret i64 %121
 
-dead414:
+dead416:
 	br label %100
 
 122:
@@ -18542,10 +18591,10 @@ dead414:
 	%128 = call i64 @js_scope_get(i64 %126, i64 %127)
 	ret i64 %128
 
-dead415:
+dead417:
 	br label %123
 
-dead416:
+dead418:
 	ret i64 0
 }
 

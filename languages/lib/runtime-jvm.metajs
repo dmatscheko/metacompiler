@@ -71,12 +71,29 @@
 // An operand of INTEGER arithmetic. A char is one - it is an integral type in
 // both languages - and a double is not.
 //
-// MOVED UP to lib/runtime.metajs as rtIsIntegral (fifth pass, 2026-08-04): kotlin
-// had the same five lines TWICE (ktIsInt, k4bIsIntegral) and cannot import this
-// file - it has neither of the two knobs above and wants none of the five bodies
-// below. The name stays here so csharp's and java's fifteen call sites do not
-// move.
-function rtjIsIntegral(v) { return rtIsIntegral(v) }
+// lib/runtime.metajs exports this body as rtIsIntegral, for kotlin, which had it
+// TWICE (ktIsInt, k4bIsIntegral) and cannot import this file. **THIS COPY IS
+// DELIBERATELY NOT A DELEGATION TO IT**, and the fifth pass made it one:
+//
+//   tests/bench.sh --draws 5, java, against the recorded 4b594c1 baseline:
+//     4b594c1 (body here)        8.940 G   +3.16%   spread 3.18%
+//     120ba0f (delegating)       9.448 G   +5.63%   spread 3.99%
+//
+// +5.7% for one extra MetaJS call, because csharp and java ask this at fifteen
+// sites inside their arithmetic dispatch. It is the same mistake, at a second
+// site, as pyIsObj in lib/python-rt.metajs - which cost python 41% - and the rule
+// is written up there: A ZERO-KNOB DIFFERENCE LIST IS NECESSARY AND NOT
+// SUFFICIENT. Size the CALL SITE, not the body.
+//
+// kotlin's ktIsInt is left delegating on purpose: its own row measured -0.64%
+// against a 3.05% spread, so its call sites are not hot and the sharing is free
+// THERE. That asymmetry is the point - the body is identical, the call sites are
+// not, and only the call sites decide.
+function rtjIsIntegral(v) {
+    if (rtIsCharBox(v)) { return true }
+    if (typeof v != "number") { return false }
+    return !floIs(v)
+}
 
 // The double reading of anything numeric.
 function rtjNum(v) {

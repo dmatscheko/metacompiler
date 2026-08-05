@@ -1990,6 +1990,149 @@
             "request": "launch",
             "program": "${workspaceFolder}","args": ["tests/infinite-loop.abnf", "tests/infinite-loop-test-1.txt", "-lb", "-vv2"]
         },
+        // ---- NATIVE (-exe) ROWS FOR THE HANDLE-IR LANGUAGES ----
+        //
+        // Until these existed, EVERY -exe row in this file was metajs, lua or lisp,
+        // so the matrix had no native coverage of a handle-IR language at all - and
+        // the matrix is the only gate that demands goja and -frozen agree byte for
+        // byte. tests/clang-check.sh and tests/native-full.sh already build the
+        // *-test-full ratchets natively, which is why these are the FEATURE-MATRIX
+        // and MULTIFILE programs instead: those were the two shapes nothing built.
+        //
+        // Every row was checked to build AND exit 0 before being added. They write
+        // into tests/, which .gitignore covers.
+        {
+            "name": "Python native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-features.py", "-q", "-exe", "tests/python-native.out"]
+        },
+        {
+            "name": "Python native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/python-to-llvm-ir.abnf", "tests/python-test-multifile.py", "-q", "-exe", "tests/python-native-multi.out"]
+        },
+        {
+            "name": "Ruby native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-features.rb", "-q", "-exe", "tests/ruby-native.out"]
+        },
+        {
+            "name": "Ruby native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-multifile.rb", "-q", "-exe", "tests/ruby-native-multi.out"]
+        },
+        {
+            "name": "JS native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-features.js", "-q", "-exe", "tests/js-native.out"]
+        },
+        {
+            "name": "JS native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/js-to-llvm-ir.abnf", "tests/js-test-multifile.js", "-q", "-exe", "tests/js-native-multi.out"]
+        },
+        {
+            "name": "TypeScript native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-features.ts", "-q", "-exe", "tests/typescript-native.out"]
+        },
+        {
+            "name": "TypeScript native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-multifile.ts", "-q", "-exe", "tests/typescript-native-multi.out"]
+        },
+        {
+            "name": "Java native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-test-features.java", "-q", "-exe", "tests/java-native.out"]
+        },
+        {
+            "name": "Java native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/java-to-llvm-ir.abnf", "tests/java-test-multifile.java", "-q", "-exe", "tests/java-native-multi.out"]
+        },
+        {
+            "name": "C# native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "tests/csharp-test-features.cs", "-q", "-exe", "tests/csharp-native.out"]
+        },
+        {
+            "name": "C# native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/csharp-to-llvm-ir.abnf", "tests/csharp-test-multifile.cs", "-q", "-exe", "tests/csharp-native-multi.out"]
+        },
+        {
+            "name": "Kotlin native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-features.kt", "-q", "-exe", "tests/kotlin-native.out"]
+        },
+        {
+            "name": "Kotlin native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-multifile.kt", "-q", "-exe", "tests/kotlin-native-multi.out"]
+        },
+        {
+            "name": "Dart native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/dart-to-llvm-ir.abnf", "tests/dart-test-features.dart", "-q", "-exe", "tests/dart-native.out"]
+        },
+        {
+            "name": "Dart native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/dart-to-llvm-ir.abnf", "tests/dart-test-multifile.dart", "-q", "-exe", "tests/dart-native-multi.out"]
+        },
+        {
+            "name": "Go native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-test-features.go", "-q", "-exe", "tests/go-native.out"]
+        },
+        {
+            "name": "Go native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/go-to-llvm-ir.abnf", "tests/go-test-multifile.go", "-q", "-exe", "tests/go-native-multi.out"]
+        },
+        {
+            "name": "PHP native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-features.php", "-q", "-exe", "tests/php-native.out"]
+        },
+        {
+            "name": "PHP native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/php-to-llvm-ir.abnf", "tests/php-test-multifile.php", "-q", "-exe", "tests/php-native-multi.out"]
+        },
+        {
+            "name": "Swift native binary, feature matrix (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-features.swift", "-q", "-exe", "tests/swift-native.out"]
+        },
+        {
+            "name": "Swift native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/swift-to-llvm-ir.abnf", "tests/swift-test-multifile.swift", "-q", "-exe", "tests/swift-native-multi.out"]
+        },
         {
             "name": "Speed Test",
             "type": "go",
