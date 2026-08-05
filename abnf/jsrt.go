@@ -441,6 +441,14 @@ type jsrt struct {
 	// strictly alternating), so a single field is enough and step() saves and
 	// restores it around a resume, which makes generators nest.
 	curGen *jsGenerator
+
+	// microQ is the job (microtask) queue promises and async functions schedule
+	// onto; js_jsdrain runs it to exhaustion once the script has finished, which
+	// is the only point at which this runtime has an event loop turn.
+	microQ []func()
+	// promFn is the one `Promise` global value, interned so that `Promise ===
+	// Promise` holds and the statics can be recognized by identity.
+	promFn *hostFunc
 }
 
 // ----------------------------------------------------------------------------
@@ -588,6 +596,430 @@ func (g *jsGenerator) drain(rt *jsrt) *jsArray {
 		out.elems = append(out.elems, st.props["value"])
 	}
 	return out
+}
+
+// ----------------------------------------------------------------------------
+// Promises and the microtask queue (js / typescript)
+//
+// A promise is a PLAIN OBJECT carrying hidden slots only, so the three engines
+// (this twin, languages/lib/js-rt.metajs and the two *-interpreter.abnf start
+// scripts) can run the SAME algorithm over the same value model instead of each
+// inventing a private representation - keysOf hides a '__' slot, so a promise
+// still has no own keys, and typeof answers "object" with no arm of its own.
+//
+//	__prom   true            marks the object
+//	__ps     0 | 1 | 2       pending / fulfilled / rejected
+//	__pv     any             the settled value or the rejection reason
+//	__pcb    array           reactions registered while still pending
+//
+// A reaction is {f, r, p}: the fulfil handler, the reject handler and the
+// derived promise then() answered (undefined for an await, which has none).
+//
+// 'async' is 'awaits as yields': the emitter compiles an async body as an
+// ordinary generator body, `await e` as js_yield, and js_jsasyncfn drives the
+// generator from the microtask queue - so every statement form works inside an
+// async function for exactly the reason it works inside a generator.
+func promNew() *jsObject {
+	p := newJSObject()
+	p.set("__prom", true)
+	p.set("__ps", float64(0))
+	p.set("__pv", jsUndef)
+	p.set("__pcb", &jsArray{})
+	return p
+}
+
+func promIs(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	t, has := o.props["__prom"]
+	return has && t == true
+}
+
+func promState(p *jsObject) int { s, _ := p.props["__ps"].(float64); return int(s) }
+
+// enqueue appends one job to the microtask queue. The queue is drained by
+// js_jsdrain, which the emitter calls once the whole script has run.
+func (rt *jsrt) enqueue(job func()) { rt.microQ = append(rt.microQ, job) }
+
+// promSettle moves a pending promise to its final state and hands every
+// registered reaction to the queue, in registration order.
+func (rt *jsrt) promSettle(p *jsObject, state int, v interface{}) {
+	if promState(p) != 0 {
+		return
+	}
+	p.set("__ps", float64(state))
+	p.set("__pv", v)
+	cbs, _ := p.props["__pcb"].(*jsArray)
+	p.set("__pcb", &jsArray{})
+	if cbs != nil {
+		for _, r := range cbs.elems {
+			reaction, _ := r.(*jsObject)
+			rt.promEnqueueReaction(p, reaction)
+		}
+	}
+}
+
+// promResolve is the spec's resolve procedure: resolving with a THENABLE adopts
+// its state through a job of its own, which is where the two extra ticks that
+// every ordering test measures come from.
+func (rt *jsrt) promResolve(p *jsObject, x interface{}) {
+	if promState(p) != 0 {
+		return
+	}
+	if xo, ok := x.(*jsObject); ok && xo == p {
+		rt.promSettle(p, 2, "TypeError: Chaining cycle detected for promise")
+		return
+	}
+	if xo, ok := x.(*jsObject); ok {
+		then := rt.getMember(xo, "then")
+		if promIs(xo) || isCallable(then) {
+			rt.enqueue(func() {
+				defer func() {
+					if e := recover(); e != nil {
+						if t, ok := e.(*jsThrown); ok {
+							rt.promSettle(p, 2, t.value)
+							return
+						}
+						panic(e)
+					}
+				}()
+				if promIs(xo) {
+					rt.promThen(xo,
+						jsHostFunc("resolve", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+							rt.promResolve(p, argAt(args, 0))
+							return jsUndef
+						}),
+						jsHostFunc("reject", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+							rt.promSettle(p, 2, argAt(args, 0))
+							return jsUndef
+						}), nil)
+						return
+				}
+				rt.call(then, xo, []interface{}{
+					jsHostFunc("resolve", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+						rt.promResolve(p, argAt(args, 0))
+						return jsUndef
+					}),
+					jsHostFunc("reject", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+						rt.promSettle(p, 2, argAt(args, 0))
+						return jsUndef
+					})})
+			})
+			return
+		}
+	}
+	rt.promSettle(p, 1, x)
+}
+
+// promEnqueueReaction is the spec's NewPromiseReactionJob: run the handler for
+// the state the promise settled in, and settle the derived promise with what it
+// answered - or with what it threw.
+func (rt *jsrt) promEnqueueReaction(p *jsObject, reaction *jsObject) {
+	state := promState(p)
+	arg := p.props["__pv"]
+	rt.enqueue(func() {
+		var handler interface{}
+		if state == 1 {
+			handler = reaction.props["f"]
+		} else {
+			handler = reaction.props["r"]
+		}
+		derived, _ := reaction.props["p"].(*jsObject)
+		if !isCallable(handler) {
+			if derived != nil {
+				if state == 1 {
+					rt.promResolve(derived, arg)
+				} else {
+					rt.promSettle(derived, 2, arg)
+				}
+			}
+			return
+		}
+		var out interface{}
+		threw := false
+		var thrown interface{}
+		func() {
+			defer func() {
+				if e := recover(); e != nil {
+					if t, ok := e.(*jsThrown); ok {
+						threw, thrown = true, t.value
+						return
+					}
+					panic(e)
+				}
+			}()
+			out = rt.call(handler, jsUndef, []interface{}{arg})
+		}()
+		if derived == nil {
+			return
+		}
+		if threw {
+			rt.promSettle(derived, 2, thrown)
+		} else {
+			rt.promResolve(derived, out)
+		}
+	})
+}
+
+// promThen registers one reaction. derived is the promise then() answers, or nil
+// for an await, which consumes the result itself.
+func (rt *jsrt) promThen(p *jsObject, onF, onR interface{}, derived *jsObject) {
+	reaction := newJSObject()
+	reaction.set("f", onF)
+	reaction.set("r", onR)
+	if derived != nil {
+		reaction.set("p", derived)
+	} else {
+		reaction.set("p", jsUndef)
+	}
+	if promState(p) == 0 {
+		cbs, _ := p.props["__pcb"].(*jsArray)
+		cbs.elems = append(cbs.elems, reaction)
+		return
+	}
+	rt.promEnqueueReaction(p, reaction)
+}
+
+// promResolveValue is the spec's PromiseResolve: a promise is its own, anything
+// else gets a fresh already-resolving promise. Returning x unchanged is what
+// keeps `await aPromise` one tick rather than three.
+func (rt *jsrt) promResolveValue(x interface{}) *jsObject {
+	if promIs(x) {
+		return x.(*jsObject)
+	}
+	p := promNew()
+	rt.promResolve(p, x)
+	return p
+}
+
+// promMethod answers p.then / p.catch / p.finally. The names are dispatched in
+// memberCall rather than stored on the object so that a promise keeps no own
+// keys at all.
+func (rt *jsrt) promMethod(p *jsObject, name string, args []interface{}) (interface{}, bool) {
+	switch name {
+	case "then":
+		derived := promNew()
+		rt.promThen(p, argAt(args, 0), argAt(args, 1), derived)
+		return derived, true
+	case "catch":
+		derived := promNew()
+		rt.promThen(p, jsUndef, argAt(args, 0), derived)
+		return derived, true
+	case "finally":
+		fn := argAt(args, 0)
+		derived := promNew()
+		pass := jsHostFunc("finally", func(rt *jsrt, this uint64, a []interface{}) interface{} {
+			if isCallable(fn) {
+				rt.call(fn, jsUndef, nil)
+			}
+			return argAt(a, 0)
+		})
+		rethrow := jsHostFunc("finally", func(rt *jsrt, this uint64, a []interface{}) interface{} {
+			if isCallable(fn) {
+				rt.call(fn, jsUndef, nil)
+			}
+			panic(&jsThrown{value: argAt(a, 0)})
+		})
+		rt.promThen(p, pass, rethrow, derived)
+		return derived, true
+	}
+	return nil, false
+}
+
+// asyncStep resumes an async body once and re-arms it. sent is the value the
+// pending await answers with; when isThrow is set the await raises it instead,
+// which is how a rejected promise reaches a try/catch inside the body (the
+// marker record is unpacked by js_jsawaitv at the await site, so neither
+// generator engine needs a throw-in channel of its own).
+func (rt *jsrt) asyncStep(g *jsGenerator, p *jsObject, sent interface{}, isThrow bool) {
+	send := sent
+	if isThrow {
+		m := newJSObject()
+		m.set("__athrow", true)
+		m.set("v", sent)
+		send = m
+	}
+	var res interface{}
+	threw := false
+	var thrown interface{}
+	func() {
+		defer func() {
+			if e := recover(); e != nil {
+				if t, ok := e.(*jsThrown); ok {
+					threw, thrown = true, t.value
+					return
+				}
+				panic(e)
+			}
+		}()
+		res = g.step(rt, send)
+	}()
+	if threw {
+		rt.promSettle(p, 2, thrown)
+		return
+	}
+	st, _ := res.(*jsObject)
+	if d, _ := st.props["done"].(bool); d {
+		rt.promResolve(p, st.props["value"])
+		return
+	}
+	awaited := rt.promResolveValue(st.props["value"])
+	rt.promThen(awaited,
+		jsHostFunc("await", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			rt.asyncStep(g, p, argAt(args, 0), false)
+			return jsUndef
+		}),
+		jsHostFunc("await", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			rt.asyncStep(g, p, argAt(args, 0), true)
+			return jsUndef
+		}), nil)
+}
+
+// promiseGlobal answers the `Promise` binding: a function value, so that
+// `new Promise(executor)` constructs one and `typeof Promise` is "function".
+// The executor runs SYNCHRONOUSLY, as in the specification.
+func (rt *jsrt) promiseGlobal() *hostFunc {
+	if rt.promFn != nil {
+		return rt.promFn
+	}
+	rt.promFn = jsHostFunc("Promise", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		p := promNew()
+		exec := argAt(args, 0)
+		if !isCallable(exec) {
+			rt.fail("TypeError: Promise resolver is not a function")
+		}
+		res := jsHostFunc("resolve", func(rt *jsrt, this uint64, a []interface{}) interface{} {
+			rt.promResolve(p, argAt(a, 0))
+			return jsUndef
+		})
+		rej := jsHostFunc("reject", func(rt *jsrt, this uint64, a []interface{}) interface{} {
+			rt.promSettle(p, 2, argAt(a, 0))
+			return jsUndef
+		})
+		func() {
+			defer func() {
+				if e := recover(); e != nil {
+					if t, ok := e.(*jsThrown); ok {
+						rt.promSettle(p, 2, t.value)
+						return
+					}
+					panic(e)
+				}
+			}()
+			rt.call(exec, jsUndef, []interface{}{res, rej})
+		}()
+		return p
+	})
+	return rt.promFn
+}
+
+// promStatic answers Promise.resolve / reject / all / allSettled / race / any.
+func (rt *jsrt) promStatic(name string, args []interface{}) (interface{}, bool) {
+	switch name {
+	case "resolve":
+		return rt.promResolveValue(argAt(args, 0)), true
+	case "reject":
+		p := promNew()
+		rt.promSettle(p, 2, argAt(args, 0))
+		return p, true
+	case "all", "allSettled", "race", "any":
+		src, ok := argAt(args, 0).(*jsArray)
+		if !ok {
+			rt.fail("Promise.%s needs an array", name)
+		}
+		out := promNew()
+		n := len(src.elems)
+		results := &jsArray{elems: make([]interface{}, n)}
+		for i := range results.elems {
+			results.elems[i] = jsUndef
+		}
+		left := n
+		if n == 0 {
+			switch name {
+			case "all", "allSettled":
+				rt.promResolve(out, results)
+			case "any":
+				rt.promSettle(out, 2, "AggregateError: All promises were rejected")
+			}
+			return out, true
+		}
+		for i, el := range src.elems {
+			idx := i
+			ep := rt.promResolveValue(el)
+			rt.promThen(ep,
+				jsHostFunc("all", func(rt *jsrt, this uint64, a []interface{}) interface{} {
+					v := argAt(a, 0)
+					switch name {
+					case "race", "any":
+						rt.promResolve(out, v)
+						return jsUndef
+					case "allSettled":
+						r := newJSObject()
+						r.set("status", "fulfilled")
+						r.set("value", v)
+						results.elems[idx] = r
+					default:
+						results.elems[idx] = v
+					}
+					left--
+					if left == 0 {
+						rt.promResolve(out, results)
+					}
+					return jsUndef
+				}),
+				jsHostFunc("all", func(rt *jsrt, this uint64, a []interface{}) interface{} {
+					v := argAt(a, 0)
+					switch name {
+					case "race":
+						rt.promSettle(out, 2, v)
+						return jsUndef
+					case "all":
+						rt.promSettle(out, 2, v)
+						return jsUndef
+					case "allSettled":
+						r := newJSObject()
+						r.set("status", "rejected")
+						r.set("reason", v)
+						results.elems[idx] = r
+					default: // any
+						results.elems[idx] = v
+					}
+					left--
+					if left == 0 {
+						if name == "any" {
+							rt.promSettle(out, 2, "AggregateError: All promises were rejected")
+						} else {
+							rt.promResolve(out, results)
+						}
+					}
+					return jsUndef
+				}), nil)
+		}
+		return out, true
+	}
+	return nil, false
+}
+
+// drainMicrotasks runs the job queue to exhaustion. This is the whole event
+// loop: there are no timers or I/O here, so one drain after the script has run
+// is every turn the program will ever get.
+//
+// An UNHANDLED REJECTION is deliberately not reported, in any of the three
+// engines. node terminates the process on one; here the interpreter half drives
+// an async body by REPLAY (see the generator section of js-interpreter.abnf's
+// start script), so a rejected promise the body created is created again on
+// every resume and the copies nothing awaited would be reported as unhandled -
+// spurious aborts on correct programs. Reporting it in the compiler halves only
+// would make the halves disagree on an error path, so no engine reports it and
+// the divergence from node is documented instead.
+func (rt *jsrt) drainMicrotasks() {
+	for len(rt.microQ) > 0 {
+		job := rt.microQ[0]
+		rt.microQ = rt.microQ[1:]
+		job()
+	}
 }
 
 // jsAccessor is a getter/setter property: the value stored under a key when the

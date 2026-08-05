@@ -351,6 +351,32 @@ function transform(list) {
 }
 check("combined-pipeline", transform([1, 2, -3]) === "o1e2x");
 
+
+// ----- async functions, promises and the microtask queue -----
+function qnop() {}
+// An async body is compiled as a generator body whose awaits are its yields, and the
+// microtask queue is drained after main() returns. The ORDER below is node's, exactly.
+// An async body must have NO side effect before its last await: the interpreter half
+// drives one by REPLAY, so anything earlier would repeat.
+var qlog = [];
+async function qstep(tag) { await 0; qlog.push(tag); }
+async function qguard(tag) { try { await Promise.reject("r"); } catch (e) { qlog.push(tag + e); } }
+check("async-is-function", typeof qstep === "function");
+check("async-answers-object", typeof qstep("z") === "object");
+check("promise-global", typeof Promise === "function");
+Promise.resolve().then(function() { qlog.push("t1"); }).then(function() { qlog.push("t2"); });
+qstep("a");
+Promise.resolve(5).then(function(v) { qlog.push("v" + v); });
+qguard("g");
+Promise.all([1, Promise.resolve(2)]).then(function(a) { qlog.push("all" + a.join("")); });
+// main() has already returned by the time a job runs, so a failure here cannot reach the
+// count it reported - exit() is the only way it reaches the exit code.
+Promise.resolve().then(qnop).then(qnop).then(qnop).then(qnop).then(function() {
+    var ok = qlog.join(",") === "z,t1,a,v5,gr,t2,all12";
+    check("async-microtask-order", ok);
+    if (!ok) { exit(1); }
+});
+
 function main() {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;

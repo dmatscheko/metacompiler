@@ -81,13 +81,21 @@ WHAT IS ACCEPTED BUT NOT LOWERED (each aborts with a file:line message, or warns
 skipped under -warn-unsupported): `with`, a logical assignment (&&= ||= ??=) to a bare
 super property, and the assign-nowhere heads the spec calls early errors ('0 = 0',
 'for (0 of 0)'). Deliberate semantic simplifications, because the runtime has no
-model for them: `await` is the identity (there is no promise type and no job queue, so an
-async function is an ordinary function that returns its value), a regular expression is
+model for them: a regular expression is
 matched by the shared engine (abnf/jsrtregex.go plus abnf/jsrtregexjs.go), which is one
 permissive dialect shared by four languages and so has no lookbehind and no property
 escapes, a
 for-of over a generator materializes it first (the loop iterates by index), and the
 string parts of a tagged template are an object with index keys rather than an Array.
+
+ASYNC IS AWAITS-AS-YIELDS: an async function answers a real Promise, `await` suspends,
+and a microtask queue is drained once after the entry point returns, which is the only
+event-loop turn this runtime has. An async BODY is compiled exactly like a generator
+body and js_jsasyncfn drives it from the queue; the ordering is byte-identical to node's
+(the trace asserted in SECTION 19 of tests/typescript-test-full.ts was measured against
+it). `for await` and `async function*` are NOT implemented and ABORT; `await` outside an
+async body stays the identity it was; an unhandled rejection is deliberately not
+reported. See the same paragraph in languages/js-to-llvm-ir.abnf for the full account.
 JSX is out of scope, and so are the Annex B HTML-like comments ('<!--', '-->'), which
 TypeScript rejects and which would shadow the '<' of a type argument list.
 
@@ -703,10 +711,15 @@ DeleteOther <~~ pop(); push(makeConst(true)) ~~>
 // 'void e' evaluates e for its side effects and is always undefined.
 Void        <~~ push(makeVoid(pop())) ~~>
             = KwVoid UnaryExpr ;
-// 'await e' has no event loop behind it: this runtime has no promises and no job queue,
-// so awaiting is the identity on the value. That is exactly right for a non-promise
+// 'await e' SUSPENDS: an async body is compiled as a generator body (see makeAsyncFn),
+// so an await is a yield of the awaited value and js_jsasyncfn's driver resumes it from
+// the microtask queue once that value has settled. js_jsawaitv unpacks what the resume
+// sent back and re-raises a rejection at the await site, which is what puts it inside an
+// enclosing try/catch. The old note follows, for the record:
+// 'await e' had no event loop behind it: this runtime had no promises and no job queue,
+// so awaiting was the identity on the value. That is exactly right for a non-promise
 // operand and a deliberate simplification for a promise one, which cannot exist here.
-Await       <~~ push(pop()) ~~>
+Await       <~~ push(makeAwait(pop())) ~~>
             = KwAwait UnaryExpr ;
 // Prefix ++/--: the expression value is the new one.
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
@@ -885,14 +898,14 @@ SuperKeyIdx <~~ push({skey: pop()}) ~~>
 // ordinary call. makeNew's function form goes through js_call_new, which is what arms it.
 NewTarget   <~~ push(makeNewTarget()) ~~>
             = KwNew "." "target" KwEnd ;
-AsyncArrow  <~~ push(makeArrow(takeAll())) ~~>
+AsyncArrow  <~~ push(makeAsyncArrow(takeAll())) ~~>
             = KwAsync ArrowAhead ArrowParams "=>" ArrowBody ;
 // An async function expression is compiled exactly like a plain one (see Await); an async
 // GENERATOR is compiled as a generator. The optional name is accepted but not bound.
 AsyncFuncExpr = AsyncGenExpr | AsyncPlainExpr ;
-AsyncGenExpr <~~ push(makeGenFuncExpr(takeAll())) ~~>
+AsyncGenExpr <~~ takeAll(); push(notImplExpr("async generator function", up.pos)) ~~>
             = KwAsync KwFunction "*" [ NotBindName Id ] [ TypeParams ] ParamList [ TypeAnnot ] Block ;
-AsyncPlainExpr <~~ push(makeFunctionExpr(pop(), pop())) ~~>
+AsyncPlainExpr <~~ push(makeAsyncFuncExpr(takeAll())) ~~>
             = KwAsync KwFunction [ NotBindName Id ] [ TypeParams ] ParamList [ TypeAnnot ] Block ;
 // 'function* () {}': the body is an ordinary IR function, and js_genfn turns the closure
 // into a generator function, so calling it produces a generator object.
@@ -1052,15 +1065,15 @@ ForOfPat    = ForOfPatDecl | ForOfPatAssign ;
 // The two are separate productions because makeForOf has to know WHICH: the leaves of
 // the assignment form are written, not declared, and the member leaf only exists there.
 ForOfPatDecl <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor [ KwAwait ] "(" KwVar DPattern [ TypeAnnot ] ForOfOp Expression ")" NestedStatement ;
+            = KwFor [ KwAwait <~~ notImpl("for await", up.pos) ~~> ] "(" KwVar DPattern [ TypeAnnot ] ForOfOp Expression ")" NestedStatement ;
 ForOfPatAssign <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor [ KwAwait ] "(" ForOfAPat [ TypeAnnot ] ForOfOp Expression ")" NestedStatement ;
+            = KwFor [ KwAwait <~~ notImpl("for await", up.pos) ~~> ] "(" ForOfAPat [ TypeAnnot ] ForOfOp Expression ")" NestedStatement ;
 ForOfAPat   <~~ push({apat: pop()}) ~~>
             = APattern ;
 // 'for await (x of xs)' iterates the same way: without a job queue an async iterable is
 // just an iterable (see Await).
 ForOfName   <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor [ KwAwait ] "(" ForOfHead Expression ")" NestedStatement ;
+            = KwFor [ KwAwait <~~ notImpl("for await", up.pos) ~~> ] "(" ForOfHead Expression ")" NestedStatement ;
 // The head pushes the loop name and then the operator. A target that starts with 'let'
 // is reachable only through the for-IN alternative: 'for (let x of y)' declares, and
 // 'for (let of y)' / 'for (let.a of 0)' are the syntax errors the spec makes them, while
@@ -1102,7 +1115,7 @@ ForOfTarget <~~ push(makeForOfTarget(takeAll(), up.pos)) ~~>
 // 'this' and a 'let'-headed target are refused outright. Last alternative, after every
 // shape that can actually bind something.
 ForOfNoRef  <~~ takeAll(); push(notImplStmt("for-in/of over a non-reference", up.pos)) ~~>
-            = KwFor [ KwAwait ] "(" [ KwVar ] CondExpr ( KwOf | KwIn ) Expression ")" NestedStatement ;
+            = KwFor [ KwAwait <~~ notImpl("for await", up.pos) ~~> ] "(" [ KwVar ] CondExpr ( KwOf | KwIn ) Expression ")" NestedStatement ;
 
 // A destructuring binding: var [a, b] = xs, var {x, y: alias} = o, and every nesting of
 // the two. The pattern is reified on the stack as a tree of nodes and lowered by
@@ -1497,9 +1510,9 @@ Debugger    <~~ push(function(b) { return b }) ~~>
             = KwDebugger [ ";" ] ;
 // The declaration forms of the same three: async, async generator and generator.
 AsyncFuncDecl = AsyncGenDecl | AsyncPlainDecl ;
-AsyncGenDecl <~~ push(makeGenFuncDecl(takeAll())) ~~>
+AsyncGenDecl <~~ takeAll(); push(notImplStmt("async generator function", up.pos)) ~~>
             = KwAsync KwFunction "*" NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] Block ;
-AsyncPlainDecl <~~ push(makeFuncDeclItems(takeAll())) ~~>
+AsyncPlainDecl <~~ push(makeAsyncFuncDecl(takeAll())) ~~>
             = KwAsync KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] Block ;
 GenFuncDecl <~~ push(makeGenFuncDecl(takeAll())) ~~>
             = KwFunction "*" NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] Block ;
@@ -3177,6 +3190,59 @@ NotFuncHead = :script(~~
             return {b: b, v: callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])}
         }
     }
+    // makeAwait's lexical test: is the body currently being emitted an async function's?
+    // makeAsyncFn arms pendingAsyncFn immediately before its emitFunction call and
+    // emitFunction consumes it, saving and clearing inAsyncFn for every nested function -
+    // so an ordinary function or an arrow inside an async body does not inherit it.
+    var inAsyncFn = false
+    var pendingAsyncFn = false
+    // ----- Async functions -----
+    // An async body is compiled EXACTLY like a generator body - an ordinary IR function
+    // whose awaits are yields - and js_jsasyncfn wraps the generator function into one
+    // that, when called, creates the generator, drives it from the microtask queue and
+    // answers a promise. The generator function is built HERE rather than inside layer 2
+    // because layer 2 cannot reach the floor's coroutines from MetaJS.
+    function makeAsyncFn(params, bodyT, isArrow) {
+        return function(b) {
+            pendingAsyncFn = true // Consumed by the emitFunction call below.
+            var idx = emitFunction(params, bodyT, false, isArrow)
+            return {b: b, v: callExt(b, "js_jsasyncfn",
+                [callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])])}
+        }
+    }
+    // 'await e': yield the operand out to the driver and unpack what it sends back.
+    // OUTSIDE an async function body there is nothing to suspend - `await` there is not
+    // valid JavaScript at all, and both grammars accept it as a widening - so it stays
+    // the identity it was rather than aborting with "yield outside of a generator".
+    // inAsyncFn is the lexical test: emitFunction clears it for every nested function,
+    // so an ordinary function or an arrow inside an async body does not inherit it.
+    function makeAwait(t) {
+        return function(b) {
+            var r = t(b)
+            b = r.b
+            if (!inAsyncFn) { return {b: b, v: r.v} }
+            return {b: b, v: callExt(b, "js_jsawaitv", [callExt(b, "js_yield", [r.v])])}
+        }
+    }
+    // items = [name?, params, bodyThunk] - the optional name is accepted, not bound.
+    function makeAsyncFuncExpr(items) {
+        return makeAsyncFn(items[items.length - 2], items[items.length - 1], false)
+    }
+    // items = [name, params, bodyThunk]: bind the async function under its name.
+    function makeAsyncFuncDecl(items) {
+        var fnT = makeAsyncFn(items[1], items[2], false)
+        var name = items[0]
+        return function(b) {
+            var r = fnT(b)
+            b = r.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), r.v])
+            return b
+        }
+    }
+    // An async arrow: the same items as makeArrow, wrapped by js_jsasyncfn.
+    function makeAsyncArrow(items) {
+        return makeAsyncFn(items[0].aparams, arrowBody(items[1]), true)
+    }
     // items = [name?, params, bodyThunk] - the optional name of a function EXPRESSION is
     // accepted but not bound, so the last two items are what matters.
     function makeGenFuncExpr(items) {
@@ -3276,14 +3342,17 @@ NotFuncHead = :script(~~
     // inside the body (see the Await rule) and a generator method goes through makeGenFn.
     function makeMethodProp(items) {
         var isGen = false
+        var isAsync = false
         var rest = []
         for (var i = 0; i < items.length; i++) {
             if (items[i] != undefined && items[i].gmod == true) { isGen = true }
-            else if (items[i] != undefined && items[i].amod == true) { continue }
+            else if (items[i] != undefined && items[i].amod == true) { isAsync = true }
             else { rest.push(items[i]) }
         }
+        if (isGen && isAsync) { notImpl("async generator method", 0) }
         var fnT = makeFunctionExpr(rest[2], rest[1])
         if (isGen) { fnT = makeGenFn(rest[1], rest[2]) }
+        if (isAsync) { fnT = makeAsyncFn(rest[1], rest[2], false) }
         return {kt: keyThunk(rest[0]), t: fnT}
     }
     // items = [keyThunk, valueThunk] for '{[k]: v}' or [keyThunk, params, bodyThunk] for
@@ -3648,6 +3717,14 @@ NotFuncHead = :script(~~
         var savedScope = curScopeV
         var savedLoops = loopStack
         var savedTag = curFTag
+        // A try/catch/finally BODY is an IR closure too (isCtl), but it is not a
+        // function of the program: an `await` inside a try inside an async body is
+        // still that body's await, so the flag is carried in rather than cleared.
+        // Clearing it made `try { await p } catch` answer the throw-in MARKER as a
+        // value instead of raising - measured, three assertions.
+        var savedAsync = inAsyncFn
+        if (!isCtl) { inAsyncFn = pendingAsyncFn }
+        pendingAsyncFn = false
         curF = f
         curFTag = idx
         loopStack = []
@@ -3668,6 +3745,7 @@ NotFuncHead = :script(~~
         curScopeV = savedScope
         loopStack = savedLoops
         curFTag = savedTag
+        inAsyncFn = savedAsync
         return idx
     }
     function makeFunctionExpr(bodyT, paramNames) {
@@ -3679,16 +3757,16 @@ NotFuncHead = :script(~~
 
     // Arrow function: items = [{aparams:[names]}, {body: stmtThunk} | {ebody: exprThunk}].
     // A block body is a statement thunk; an expression body becomes 'return <expr>'.
+    // The body thunk of an arrow: a block body is a statement thunk, an expression body
+    // becomes 'return <expr>'. Shared with makeAsyncArrow.
+    function arrowBody(bm) {
+        if (bm.body != undefined) { return bm.body }
+        var et = bm.ebody
+        return function(b) { var r = et(b); r.b.NewRet(r.v); return deadBlock() }
+    }
     function makeArrow(items) {
         var params = items[0].aparams
-        var bm = items[1]
-        var bodyT = anytype // Either a block statement thunk or a synthesized return.
-        if (bm.body != undefined) {
-            bodyT = bm.body
-        } else {
-            var et = bm.ebody
-            bodyT = function(b) { var r = et(b); r.b.NewRet(r.v); return deadBlock() }
-        }
+        var bodyT = arrowBody(items[1])
         return function(b) {
             var idx = emitFunction(params, bodyT, false, true)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
@@ -4205,13 +4283,15 @@ NotFuncHead = :script(~~
     function makeClassSpecial(items) {
         var mods = items[0].mods
         var isGen = false
+        var isAsync = false
         var rest = []
         for (var i = 1; i < items.length; i++) {
             if (items[i] != undefined && items[i].gmod == true) { isGen = true }
-            else if (items[i] != undefined && items[i].amod == true) { continue }
+            else if (items[i] != undefined && items[i].amod == true) { isAsync = true }
             else { rest.push(items[i]) }
         }
-        return {kind: "method", statik: isStaticMods(mods), gen: isGen,
+        if (isGen && isAsync) { notImpl("async generator method", 0) }
+        return {kind: "method", statik: isStaticMods(mods), gen: isGen, async: isAsync,
                 name: (typeof rest[0] == "string") ? rest[0] : undefined,
                 nameT: (typeof rest[0] == "string") ? undefined : rest[0],
                 params: rest[1], body: rest[2]}
@@ -4376,6 +4456,14 @@ NotFuncHead = :script(~~
                 idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
                 callExt(b, memSetExt(), [clsV, mk.v,
                     callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])])
+                continue
+            }
+            if (mm.async == true) {
+                // An async method: the same body, driven from the microtask queue and
+                // answering a promise (see makeAsyncFn).
+                idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
+                callExt(b, memSetExt(), [clsV, mk.v, callExt(b, "js_jsasyncfn",
+                    [callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])])])
                 continue
             }
             idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
@@ -5252,6 +5340,9 @@ NotFuncHead = :script(~~
         // back out of a BigInt, since unary '+' refuses it.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "BigInt"), callExt(b, "js_jsbigintfn", [])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Number"), callExt(b, "js_jsnumberfn", [])])
+        // The Promise global: a function value, so `new Promise(exec)` constructs one and
+        // `typeof Promise` is "function"; the statics resolve through js_jsmcall.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Promise"), callExt(b, "js_jspromfn", [])])
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(callExt(b, "js_getret", []))
@@ -5268,11 +5359,17 @@ NotFuncHead = :script(~~
         if (mainIsSnippet(entry)) {
             curScopeV = sc // The snippet resolves names in the populated program scope.
             bm = emitMainSnippet(bm, entry, "Statement")
+            callExt(bm, "js_jsdrain", [])
             bm.NewRet(emitNum(bm, 0))
         } else {
             var mainV = callExt(bm, "js_scope_get", [sc, emitStr(bm, entry)])
             var argsV = callExt(bm, "js_arr_new", [])
-            bm.NewRet(jsCall(bm, mainV, hUndef, argsV))
+            var mainR = jsCall(bm, mainV, hUndef, argsV)
+            // The microtask queue is drained ONCE, after the whole script has run: this
+            // runtime has no timers and no I/O, so that is the only event-loop turn a
+            // program will ever get.
+            callExt(bm, "js_jsdrain", [])
+            bm.NewRet(mainR)
         }
     }
 

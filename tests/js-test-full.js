@@ -367,7 +367,17 @@ function s15() {
 }
 
 // ===== SECTION 16: async syntax =====
-// Defined and type-checked only: running them needs an event loop.
+// Async functions RUN here: an async body is compiled as a generator body whose
+// awaits are its yields, and a microtask queue drained after main() drives them
+// (see makeAsyncFn / js_jsasyncfn). What is asserted is the ORDERING, because
+// that is the only part a wrong implementation can still get right by accident:
+// the whole trace below is byte-identical to node.
+//
+// Two shapes are deliberately avoided. An async body must have NO side effect
+// before its last await - this half drives one by REPLAY (see the generator note
+// at the top of the file), so a print before an await would repeat - and
+// `for await` / `async function*` are not implemented and ABORT, which is why
+// they are no longer written here.
 function s16() {
     async function af() { return 5 }
     check("asy1", typeof af === "function")
@@ -375,17 +385,40 @@ function s16() {
     check("asy2", typeof aArrow === "function")
     async function withAwait(p) { var r = await p; return r + 1 }
     check("asy3", typeof withAwait === "function")
-    async function* agen() { yield 1 }
-    check("asy4", typeof agen === "function")
-    async function loopAwait(xs) {
-        var sum = 0
-        for await (var x of xs) { sum = sum + x }
-        return sum
-    }
-    check("asy5", typeof loopAwait === "function")
     var obj = { async m() { return 1 } }
     check("asy6", typeof obj.m === "function")
+    check("asy7", typeof af() === "object")
+    check("asy8", typeof Promise === "function")
+    var alog = []
+    async function step(tag) { await 0; alog.push(tag) }
+    async function twice(tag) { await 0; await 0; alog.push(tag) }
+    async function bad() { await 0; throw "boom" }
+    async function guard(tag) { try { await Promise.reject("r") } catch (e) { alog.push(tag + e) } }
+    Promise.resolve().then(function() { alog.push("t1") }).then(function() { alog.push("t2") })
+    step("a")
+    Promise.resolve(5).then(function(v) { alog.push("v" + v) })
+    twice("w")
+    guard("g")
+    bad().catch(function(e) { alog.push("c" + e) })
+    new Promise(function(res) { res("n") }).then(function(v) { alog.push(v) })
+    Promise.all([1, Promise.resolve(2)]).then(function(a) { alog.push("all" + a.join("")) })
+    aArrow(1).then(function(v) { alog.push("ar" + v) })
+    obj.m().then(function(v) { alog.push("m" + v) })
+    withAwait(Promise.resolve(6)).then(function(v) { alog.push("wa" + v) })
+    Promise.resolve(7).finally(function() { alog.push("f") }).then(function(v) { alog.push("fv" + v) })
+    // The trace is complete only once the queue has been drained, which happens after
+    // main() has returned - so the assertion runs in a job of its own, six ticks deep,
+    // which is later than anything above can schedule.
+    Promise.resolve().then(nop).then(nop).then(nop).then(nop).then(nop).then(function() {
+        var ok = alog.join(",") === "t1,a,v5,gr,n,ar2,m1,f,t2,w,cboom,all12,wa7,fv7"
+        check("asy9", ok)
+        // main() has already returned by the time a job runs, so a failure here cannot
+        // reach the count it reported - exit() is the only way it reaches the EXIT CODE,
+        // which is what clang-check and native-full read.
+        if (!ok) { exit(1) }
+    })
 }
+function nop() {}
 
 // ===== SECTION 17: regular expression literals =====
 function s17() {

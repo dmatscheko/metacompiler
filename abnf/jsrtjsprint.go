@@ -408,6 +408,20 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 			return v, true
 		}
 	}
+	// Promise.prototype.then / catch / finally. The names are dispatched here rather
+	// than stored on the promise object so that a promise keeps no own keys at all.
+	if promIs(target) {
+		if v, handled := rt.promMethod(target.(*jsObject), name, args); handled {
+			return v, true
+		}
+	}
+	// Promise.resolve / reject / all / allSettled / race / any on the `Promise`
+	// global, which is a function value, so js_get finds no member of that name.
+	if hf, ok := target.(*hostFunc); ok && rt.promFn != nil && hf == rt.promFn {
+		if v, handled := rt.promStatic(name, args); handled {
+			return v, true
+		}
+	}
 	// Object.keys / values / entries / assign / freeze / fromEntries.
 	if jsvIsObjectGlobal(target) {
 		switch name {
@@ -1290,6 +1304,47 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return jsHUndefined
 		}
 		return baseGet(a)
+	}
+
+	// Wrap a compiled closure into an ASYNC function: calling the result runs the
+	// body as a generator whose yields are its awaits, drives it from the microtask
+	// queue and answers a promise for its completion. See asyncStep.
+	m["js_jsasyncfn"] = func(a []uint64) uint64 {
+		// The argument is the GENERATOR FUNCTION the async body compiled to (js_genfn
+		// of its closure), not the closure itself: layer 2 cannot reach the floor's
+		// coroutines from MetaJS, so the emitter builds the generator function and
+		// both engines only ever CALL it. See languages/lib/js-rt.metajs.
+		genFn := u(a[0])
+		return w(jsHostFunc("async", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			g, ok := rt.call(genFn, jsUndef, args).(*jsGenerator)
+			if !ok {
+				rt.fail("js_jsasyncfn needs a generator function")
+			}
+			p := promNew()
+			rt.asyncStep(g, p, jsUndef, false)
+			return p
+		}))
+	}
+	// The value an `await` answers, given what the driver sent back in. A rejection
+	// arrives as a marker record and is re-raised HERE, at the await site, so a
+	// try/catch around the await catches it with no generator support at all.
+	m["js_jsawaitv"] = func(a []uint64) uint64 {
+		if o, ok := u(a[0]).(*jsObject); ok {
+			if t, has := o.props["__athrow"]; has && t == true {
+				panic(&jsThrown{value: o.props["v"]})
+			}
+		}
+		return a[0]
+	}
+	// The `Promise` global: a function value, so `new Promise(exec)` constructs and
+	// `typeof Promise` is "function"; Promise.resolve / reject / all / race are
+	// answered by js_jsmcall (memberCall's hostFunc arm).
+	m["js_jspromfn"] = func(a []uint64) uint64 { return w(rt.promiseGlobal()) }
+	// Run the microtask queue to exhaustion. The emitter calls this once, after the
+	// whole script has run, which is this runtime's single event-loop turn.
+	m["js_jsdrain"] = func(a []uint64) uint64 {
+		rt.drainMicrotasks()
+		return w(jsUndef)
 	}
 
 	// The method-call wrapper. js_jsxmcall is the regular-expression one; it in turn

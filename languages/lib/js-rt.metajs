@@ -1984,6 +1984,17 @@ function jvFallbackCall(recv, name, args) {
 // dispatch. A receiver none of them claims lands in jvFallbackCall.
 function js_jsmcall(recv, key, args) {
     var name = jvStr(key)
+    // Promise.prototype.then / catch / finally, and the Promise statics on the
+    // `Promise` global (a function value, so js_get finds no member of that name).
+    // Asked BEFORE jxMcall: a promise is a plain object and nothing else claims it.
+    if (jpIs(recv)) {
+        var pm = jpMethod(recv, name, args)
+        if (pm !== jvMiss) { return pm }
+    }
+    if (jpFn !== undefined && recv === jpFn) {
+        var ps = jpStatic(name, args)
+        if (ps !== jvMiss) { return ps }
+    }
     var r = jxMcall(recv, name, args)
     if (r !== jxMiss) { return r }
     // BigInt.prototype: (255n).toString(16), (1n).valueOf().
@@ -3526,3 +3537,325 @@ function js_jsxcall(fn, self, args) {
     return fn.apply(self, args)
 }
 
+
+// ===================================================== Promises ============
+//
+// The twin of the promise machinery in abnf/jsrt.go (promNew ... asyncStep) and
+// of the copy in the two *-interpreter.abnf start scripts. The three engines run
+// the SAME algorithm over the same value model on purpose: a promise is a plain
+// object carrying hidden slots only, so it needs no floor tag, no typeof arm and
+// no keysOf exception (keysOf hides a '__' slot, so a promise has no own keys).
+//
+//      __prom  true            marks the object
+//      __ps    0 | 1 | 2       pending / fulfilled / rejected
+//      __pv    any             the settled value or the rejection reason
+//      __pcb   array           reactions registered while still pending
+//
+// A reaction is {f, r, p}: the fulfil handler, the reject handler and the derived
+// promise then() answered (undefined for an await, which consumes the result).
+//
+// 'async' is 'awaits as yields': the emitter compiles an async body as an
+// ORDINARY GENERATOR body, `await e` as js_yield, and js_jsasyncfn drives that
+// generator from the microtask queue. So the floor's coroutines (tag 15/16) carry
+// async functions unchanged and neither engine needs a throw-in channel - a
+// rejection is sent in as a marker record and re-raised by js_jsawaitv at the
+// await site, which is what puts it inside an enclosing try/catch.
+var jpQ = []          // The microtask queue: thunks, drained by js_jsdrain.
+var jpQi = 0          // Read cursor, so draining does not re-slice the queue.
+var jpFn = anytype    // The one `Promise` global value, interned for identity.
+
+function jpNew() {
+    var p = {}
+    p["__prom"] = true
+    p["__ps"] = 0
+    p["__pv"] = undefined
+    p["__pcb"] = []
+    return p
+}
+
+function jpIs(v) {
+    if (!jvIsObj(v)) { return false }
+    return v["__prom"] === true
+}
+
+function jpEnq(job) { jpQ.push(job) }
+
+// Move a pending promise to its final state and hand every reaction registered
+// while it was pending to the queue, in registration order.
+function jpSettle(p, state, v) {
+    if (p["__ps"] !== 0) { return }
+    p["__ps"] = state
+    p["__pv"] = v
+    var cbs = p["__pcb"]
+    p["__pcb"] = []
+    var i = 0
+    while (i < cbs.length) {
+        jpEnqReact(p, cbs[i])
+        i = i + 1
+    }
+}
+
+// The specification's resolve procedure. Resolving with a THENABLE adopts its
+// state through a job of its own, which is where the two extra ticks that every
+// ordering test measures come from - `await` avoids them by going through
+// jpResolveValue, which answers a promise unchanged.
+function jpResolve(p, x) {
+    if (p["__ps"] !== 0) { return }
+    if (x === p) { jpSettle(p, 2, "TypeError: Chaining cycle detected for promise"); return }
+    if (jvIsObj(x)) {
+        if (jpIs(x)) { jpEnq(jpAdoptJob(p, x)); return }
+        if (jvIsCallable(x["then"])) { jpEnq(jpAdoptJob(p, x)); return }
+    }
+    jpSettle(p, 1, x)
+}
+
+function jpResolveFn(p) { return function (v) { jpResolve(p, v) } }
+function jpRejectFn(p) { return function (e) { jpSettle(p, 2, e) } }
+
+function jpAdoptJob(p, x) {
+    return function () {
+        if (jpIs(x)) { jpThen(x, jpResolveFn(p), jpRejectFn(p), undefined); return }
+        try { jvCallT(x["then"], x, [jpResolveFn(p), jpRejectFn(p)]) }
+        catch (e) { jpSettle(p, 2, e) }
+    }
+}
+
+function jpEnqReact(p, reaction) {
+    jpEnq(jpReactJob(p["__ps"], p["__pv"], reaction))
+}
+
+// The specification's NewPromiseReactionJob: run the handler for the state the
+// promise settled in and settle the derived promise with what it answered, or
+// with what it threw. A missing handler passes the value straight through, which
+// is what makes `p.then(f).catch(g)` and `p.catch(g).then(f)` both work.
+function jpReactJob(state, arg, reaction) {
+    return function () {
+        var handler = anytype
+        handler = (state === 1) ? reaction["f"] : reaction["r"]
+        var derived = reaction["p"]
+        if (!jvIsCallable(handler)) {
+            if (jpIs(derived)) {
+                if (state === 1) { jpResolve(derived, arg) }
+                else { jpSettle(derived, 2, arg) }
+            }
+            return
+        }
+        var out = anytype
+        out = undefined
+        var threw = false
+        var thrown = anytype
+        thrown = undefined
+        try { out = jvCallT(handler, undefined, [arg]) }
+        catch (e) { threw = true; thrown = e }
+        if (!jpIs(derived)) { return }
+        if (threw) { jpSettle(derived, 2, thrown) }
+        else { jpResolve(derived, out) }
+    }
+}
+
+// Register one reaction. derived is the promise then() answered, or undefined for
+// an await, which consumes the result itself.
+function jpThen(p, onF, onR, derived) {
+    var reaction = {}
+    reaction["f"] = onF
+    reaction["r"] = onR
+    reaction["p"] = derived
+    if (p["__ps"] === 0) { p["__pcb"].push(reaction); return }
+    jpEnqReact(p, reaction)
+}
+
+// PromiseResolve: a promise is its own, anything else gets a fresh resolved one.
+function jpResolveValue(x) {
+    if (jpIs(x)) { return x }
+    var p = jpNew()
+    jpResolve(p, x)
+    return p
+}
+
+// p.then / p.catch / p.finally. Answered here rather than stored on the object so
+// that a promise keeps no own keys at all.
+function jpMethod(p, name, args) {
+    if (name == "then") {
+        var d1 = jpNew()
+        jpThen(p, jvArg(args, 0), jvArg(args, 1), d1)
+        return d1
+    }
+    if (name == "catch") {
+        var d2 = jpNew()
+        jpThen(p, undefined, jvArg(args, 0), d2)
+        return d2
+    }
+    if (name == "finally") {
+        var fn = jvArg(args, 0)
+        var d3 = jpNew()
+        jpThen(p, jpFinallyPass(fn), jpFinallyRaise(fn), d3)
+        return d3
+    }
+    return jvMiss
+}
+
+function jpFinallyPass(fn) {
+    return function (v) {
+        if (jvIsCallable(fn)) { jvCallT(fn, undefined, []) }
+        return v
+    }
+}
+function jpFinallyRaise(fn) {
+    return function (e) {
+        if (jvIsCallable(fn)) { jvCallT(fn, undefined, []) }
+        throw e
+    }
+}
+
+// Promise.resolve / reject / all / allSettled / race / any. The combinators share
+// one state OBJECT rather than captured locals, because a MetaJS local keeps the
+// type it was first assigned and a counter written from two closures is exactly
+// the shape that trips over.
+function jpStatic(name, args) {
+    if (name == "resolve") { return jpResolveValue(jvArg(args, 0)) }
+    if (name == "reject") {
+        var pr = jpNew()
+        jpSettle(pr, 2, jvArg(args, 0))
+        return pr
+    }
+    if (name == "all") { return jpCombine("all", jvArg(args, 0)) }
+    if (name == "allSettled") { return jpCombine("allSettled", jvArg(args, 0)) }
+    if (name == "race") { return jpCombine("race", jvArg(args, 0)) }
+    if (name == "any") { return jpCombine("any", jvArg(args, 0)) }
+    return jvMiss
+}
+
+function jpCombine(kind, src) {
+    if (!Array.isArray(src)) { fail("Promise." + kind + " needs an array") }
+    var st = {}
+    st["kind"] = kind
+    st["out"] = jpNew()
+    st["results"] = []
+    st["left"] = src.length
+    var i = 0
+    while (i < src.length) {
+        st["results"].push(undefined)
+        i = i + 1
+    }
+    if (src.length === 0) {
+        if (kind == "all") { jpResolve(st["out"], st["results"]) }
+        if (kind == "allSettled") { jpResolve(st["out"], st["results"]) }
+        if (kind == "any") { jpSettle(st["out"], 2, "AggregateError: All promises were rejected") }
+        return st["out"]
+    }
+    var j = 0
+    while (j < src.length) {
+        jpThen(jpResolveValue(src[j]), jpCombineFn(st, j, true), jpCombineFn(st, j, false), undefined)
+        j = j + 1
+    }
+    return st["out"]
+}
+
+function jpCombineFn(st, idx, ok) {
+    return function (v) {
+        var kind = st["kind"]
+        if (kind == "race") {
+            if (ok) { jpResolve(st["out"], v) } else { jpSettle(st["out"], 2, v) }
+            return
+        }
+        if (kind == "any" && ok) { jpResolve(st["out"], v); return }
+        if (kind == "all" && !ok) { jpSettle(st["out"], 2, v); return }
+        if (kind == "allSettled") {
+            var r = {}
+            if (ok) { r["status"] = "fulfilled"; r["value"] = v }
+            else { r["status"] = "rejected"; r["reason"] = v }
+            st["results"][idx] = r
+        } else {
+            st["results"][idx] = v
+        }
+        st["left"] = st["left"] - 1
+        if (st["left"] !== 0) { return }
+        if (st["kind"] == "any") { jpSettle(st["out"], 2, "AggregateError: All promises were rejected") }
+        else { jpResolve(st["out"], st["results"]) }
+    }
+}
+
+// Resume an async body once and re-arm it. sent is the value the pending await
+// answers with; when isThrow is set the await raises it instead.
+function jpAsyncStep(g, p, sent, isThrow) {
+    var send = anytype
+    send = sent
+    if (isThrow) {
+        var m = {}
+        m["__athrow"] = true
+        m["v"] = sent
+        send = m
+    }
+    var res = anytype
+    res = undefined
+    var threw = false
+    var thrown = anytype
+    thrown = undefined
+    try { res = g.next(send) }
+    catch (e) { threw = true; thrown = e }
+    if (threw) { jpSettle(p, 2, thrown); return }
+    if (res["done"] === true) { jpResolve(p, res["value"]); return }
+    var awaited = jpResolveValue(res["value"])
+    jpThen(awaited, jpResumeFn(g, p, false), jpResumeFn(g, p, true), undefined)
+}
+
+function jpResumeFn(g, p, isThrow) {
+    return function (v) { jpAsyncStep(g, p, v, isThrow) }
+}
+
+// js_jsasyncfn(genFn): the emitter hands over the GENERATOR FUNCTION its async
+// body compiled to (js_genfn of the closure), so nothing here has to reach into
+// the floor's coroutines. Calling the result creates the generator, runs it to
+// its first await and answers a promise for its completion.
+function js_jsasyncfn(genFn) {
+    return function () {
+        var args = []
+        var i = 0
+        while (i < arguments.length) {
+            args.push(arguments[i])
+            i = i + 1
+        }
+        var g = genFn.apply(undefined, args)
+        var p = jpNew()
+        jpAsyncStep(g, p, undefined, false)
+        return p
+    }
+}
+
+// The value an `await` answers, given what the driver sent back in.
+function js_jsawaitv(v) {
+    if (jvIsObj(v)) {
+        if (v["__athrow"] === true) { throw v["v"] }
+    }
+    return v
+}
+
+// The `Promise` global: a function value, so `new Promise(exec)` constructs one
+// and `typeof Promise` is "function". The executor runs SYNCHRONOUSLY.
+function js_jspromfn() {
+    if (jpFn === undefined) {
+        jpFn = function (exec) {
+            var p = jpNew()
+            if (!jvIsCallable(exec)) { fail("TypeError: Promise resolver is not a function") }
+            try { jvCallT(exec, undefined, [jpResolveFn(p), jpRejectFn(p)]) }
+            catch (e) { jpSettle(p, 2, e) }
+            return p
+        }
+    }
+    return jpFn
+}
+
+// Run the microtask queue to exhaustion. There are no timers and no I/O here, so
+// the one drain the emitter puts after the whole script is every event-loop turn
+// a program gets. An UNHANDLED REJECTION is deliberately not reported in any of
+// the three engines - see the note in abnf/jsrt.go's drainMicrotasks.
+function js_jsdrain() {
+    while (jpQi < jpQ.length) {
+        var job = jpQ[jpQi]
+        jpQi = jpQi + 1
+        job()
+    }
+    jpQ = []
+    jpQi = 0
+    return undefined
+}

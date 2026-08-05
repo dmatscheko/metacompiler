@@ -465,8 +465,42 @@ function s19() {
     const it = seq();
     const head = it.next();
     check("asy4", head.value === 1 && head.done === false);
-    async function* astream(): AsyncGenerator<number> { yield 1; }
-    check("asy5", typeof astream === "function");
+    // Async functions RUN here: an async body is compiled as a generator body whose
+    // awaits are its yields, and a microtask queue drained after main() drives them
+    // (see makeAsyncFn / js_jsasyncfn). The ORDERING below is byte-identical to node,
+    // which is the only part a wrong implementation cannot get right by accident.
+    // Two shapes are deliberately avoided: an async body must have NO side effect
+    // before its last await (this half drives one by REPLAY, so a print before an
+    // await would repeat), and `for await` / `async function*` are not implemented
+    // and ABORT, which is why an async generator is no longer declared here.
+    check("asy5", typeof Promise === "function");
+    const alog: string[] = [];
+    async function step(tag: string): Promise<void> { await 0; alog.push(tag); }
+    async function twice(tag: string): Promise<void> { await 0; await 0; alog.push(tag); }
+    async function bad(): Promise<void> { await 0; throw "boom"; }
+    async function guard(tag: string): Promise<void> { try { await Promise.reject("r"); } catch (e) { alog.push(tag + e); } }
+    Promise.resolve().then(function () { alog.push("t1"); }).then(function () { alog.push("t2"); });
+    step("a");
+    Promise.resolve(5).then(function (v: any) { alog.push("v" + v); });
+    twice("w");
+    guard("g");
+    bad().catch(function (e: any) { alog.push("c" + e); });
+    new Promise(function (res: any) { res("n"); }).then(function (v: any) { alog.push(v); });
+    Promise.all([1, Promise.resolve(2)]).then(function (a: any) { alog.push("all" + a.join("")); });
+    bump(1).then(function (v: any) { alog.push("ar" + v); });
+    chain(Promise.resolve("z")).then(function (v: any) { alog.push("ch" + v); });
+    Promise.resolve(7).finally(function () { alog.push("f"); }).then(function (v: any) { alog.push("fv" + v); });
+    // The trace is complete only once the queue has been drained, which happens after
+    // main() has returned - so the assertion runs in a job of its own, six ticks deep,
+    // which is later than anything above can schedule.
+    Promise.resolve().then(nop).then(nop).then(nop).then(nop).then(nop).then(function () {
+        const ok: boolean = alog.join(",") === "t1,a,v5,gr,n,ar2,f,t2,w,cboom,all12,chz!,fv7";
+        check("asy14", ok);
+        // main() has already returned by the time a job runs, so a failure here cannot
+        // reach the count it reported - exit() is the only way it reaches the EXIT CODE,
+        // which is what clang-check and native-full read.
+        if (!ok) { exit(1); }
+    });
     // for-of drives an iterator ONE STEP AT A TIME, so the producer's side effects
     // INTERLEAVE with the consumer's instead of all happening first. The check is not
     // the exact log, because the interpreter half's generators REPLAY (every next()
@@ -519,6 +553,8 @@ function s19() {
     for (const xv of delegEndless()) { if (dn.length === 2) { break; } dn.push(xv); }
     check("asy11", dn.join(",") === "0,1" && reached === 2);
 }
+
+function nop(): void {}
 
 // ===== SECTION 20: ambient declaration (the harness print shim) =====
 // println is the metacompiler's built-in output primitive; this single

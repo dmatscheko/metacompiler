@@ -59,8 +59,12 @@ Functions: real closures with an 'arguments' array, default parameters (which ma
 the earlier ones), rest parameters, destructuring parameters, trailing commas, arrow
 functions (which do NOT bind their own 'this'), generator functions (yield and yield*,
 driven by replay - see the generator section of the start script), and async functions,
-where 'await' is the identity because there is no event loop, so an async body runs to
-completion synchronously.
+which answer a Promise and suspend at every 'await', driven by a microtask queue drained
+after the entry point returns. An async body is compiled as a GENERATOR body whose awaits
+are its yields, so in this half it is driven by the same replay: an async body with a side
+effect BEFORE an await repeats that effect on every resume, which the compiler half (a
+real coroutine) does not. 'for await' and 'async function*' are NOT implemented and
+ABORT, and an unhandled rejection is deliberately not reported in any engine.
 
 Objects and classes: object literals with shorthand properties, computed keys, shorthand
 methods, getters and setters and spread; 'this'; 'new' on both a class and a constructor
@@ -800,11 +804,11 @@ SuperKeyIdx <~~ push({skey: pop()}) ~~>
 // with, since it contains a '.'), so reading it is an ordinary scope lookup.
 NewTarget   <~~ push(makeVarRef("new.target")) ~~>
             = KwNew "." "target" KwEnd ;
-AsyncArrow  <~~ push(makeArrow(takeAll())) ~~>
+AsyncArrow  <~~ push(makeAsyncArrow(takeAll())) ~~>
             = KwAsync ArrowParams NoLineBreak "=>" ArrowBody ;
 // 'async function [*] [name](...) {}' as an expression. The optional name is accepted
 // and, like a plain function expression's, not bound.
-AsyncFuncExpr <~~ push(makeGenOrFuncExpr(takeAll())) ~~>
+AsyncFuncExpr <~~ push(makeAsyncFuncExpr(takeAll())) ~~>
             = KwAsync KwFunction [ GenMark ] [ AsyncExprName ] [ TypeParams ] ParamList [ TypeAnnot ] Block ;
 AsyncExprName = NotBindName Id ;
 GenFuncExpr <~~ push(makeGenOrFuncExpr(takeAll())) ~~>
@@ -963,13 +967,13 @@ TplDollar   <~~ push({str: "$", raw: "$"}) ~~>
 // (see makeAwait); the keyword is therefore simply allowed in the header.
 ForOf       = ForOfPattern | ForOfAPattern | ForOfName | ForOfMember | ForOfPath ;
 ForOfPattern <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait ] "(" [ KwVar ] DPattern ForOfOp Expression ")" NestedStatement ;
+            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ notImpl("for await", up.pos) ~~> ] "(" [ KwVar ] DPattern ForOfOp Expression ")" NestedStatement ;
 // The ASSIGNMENT-pattern form: 'for ([o.a] of xs)' writes through places that already
 // exist, so its leaves may be member targets, which a binding DPattern may not have.
 ForOfAPattern <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait ] "(" APattern ForOfOp Expression ")" NestedStatement ;
+            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ notImpl("for await", up.pos) ~~> ] "(" APattern ForOfOp Expression ")" NestedStatement ;
 ForOfName   <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait ] "(" ForOfHead Expression ")" NestedStatement ;
+            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ notImpl("for await", up.pos) ~~> ] "(" ForOfHead Expression ")" NestedStatement ;
 // The head pushes the loop name and then the operator. A target that starts with 'let'
 // is reachable only through the for-IN alternative: 'for (let x of y)' declares, and
 // 'for (let of y)' / 'for (let.a of 0)' are the syntax errors the spec makes them, while
@@ -1000,7 +1004,7 @@ ForInOp     = KwIn <~~ push(up.in) ~~> ;
 // takes the same write path. LhsSuffixes is what makes the path end in a member, so
 // 'for (f() of xs)' stays the syntax error it is and falls through to ForOfPath.
 ForOfMember <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait ] "(" ForOfMemberHead Expression ")" NestedStatement ;
+            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ notImpl("for await", up.pos) ~~> ] "(" ForOfMemberHead Expression ")" NestedStatement ;
 ForOfMemberHead = NotLet ForOfTarget ForOfOp | ForOfTarget ForInOp ;
 ForOfTarget <~~ push({dtype: "ref", ref: makeTargetRef(takeAll())}) ~~>
             = NotReserved Id <~~ push(up.in) ~~> LhsSuffixes ;
@@ -1009,7 +1013,7 @@ ForOfTarget <~~ push({dtype: "ref", ref: makeTargetRef(takeAll())}) ~~>
 // PARSE and only then fail static semantics. There is no place to write, so the loop is
 // accepted and not lowered. Tried after every form that lowers.
 ForOfPath   <~~ takeAll(); push(notImplStmt("for-in/of over an expression target", up.pos)) ~~>
-            = KwFor [ KwAwait ] "(" ForOfPathHead Expression ")" NestedStatement ;
+            = KwFor [ KwAwait <~~ notImpl("for await", up.pos) ~~> ] "(" ForOfPathHead Expression ")" NestedStatement ;
 ForOfPathHead = NotLet CallMember ( KwOf | KwIn ) | CallMember KwIn ;
 
 // A destructuring binding: var [a, b] = xs, var {x, y: alias} = o, and every nested
@@ -1442,7 +1446,7 @@ Debugger    <~~ push(function() {}) ~~>
 // name; the '*' decides whether calling it runs the body (async) or returns a generator
 // object (generator, and async generator - there being no event loop, an async generator
 // is just a generator).
-AsyncFuncDecl <~~ push(makeGenOrFuncDecl(takeAll())) ~~>
+AsyncFuncDecl <~~ push(makeAsyncFuncDecl(takeAll())) ~~>
             = KwAsync KwFunction [ GenMark ] NotBindName Id <~~ push(up.in) ~~> [ TypeParams ] ParamList [ TypeAnnot ] Block ;
 GenFuncDecl <~~ push(makeGenOrFuncDecl(takeAll())) ~~>
             = KwFunction GenMark NotBindName Id <~~ push(up.in) ~~> [ TypeParams ] ParamList [ TypeAnnot ] Block ;
@@ -2835,6 +2839,289 @@ NotFuncHead = :script(~~
         return out
     }
 
+    // ----- Promises and the microtask queue -----
+    // The twin of the promise machinery in abnf/jsrt.go (promNew ... asyncStep) and
+    // in languages/lib/js-rt.metajs (jpNew ... js_jsdrain). The three engines run the
+    // SAME algorithm over the same value model: a promise is a plain object carrying
+    // hidden slots only, so it needs no new value kind, no typeof arm and no own keys.
+    //
+    //      __prom  true            marks the object
+    //      __ps    0 | 1 | 2       pending / fulfilled / rejected
+    //      __pv    any             the settled value or the rejection reason
+    //      __pcb   array           reactions registered while still pending
+    //
+    // A reaction is {f, r, p}: the fulfil handler, the reject handler and the derived
+    // promise then() answered (undefined for an await, which consumes the result).
+    var jpQ = []          // The microtask queue: thunks, drained by jsDrain.
+    var jpQi = 0          // Read cursor, so draining does not re-slice the queue.
+    var jpMiss = {}       // "this table does not answer that name".
+
+    function jpIsObjV(v) {
+        if (v == undefined || v == null) { return false }
+        if (Array.isArray(v)) { return false }
+        return typeof v == "object"
+    }
+    function jpNew() {
+        var p = {}
+        p["__prom"] = true
+        p["__ps"] = 0
+        p["__pv"] = undefined
+        p["__pcb"] = []
+        p["__keys"] = []
+        return p
+    }
+    function jpIs(v) {
+        if (!jpIsObjV(v)) { return false }
+        return v["__prom"] === true
+    }
+    function jpArg(args, i) { return (i < args.length) ? args[i] : undefined }
+    function jpEnq(job) { jpQ.push(job) }
+
+    // Move a pending promise to its final state and hand every reaction registered
+    // while it was pending to the queue, in registration order.
+    function jpSettle(p, state, v) {
+        if (p["__ps"] !== 0) { return }
+        p["__ps"] = state
+        p["__pv"] = v
+        var cbs = p["__pcb"]
+        p["__pcb"] = []
+        for (var i = 0; i < cbs.length; i++) { jpEnqReact(p, cbs[i]) }
+    }
+    // The specification's resolve procedure. Resolving with a THENABLE adopts its
+    // state through a job of its own, which is where the two extra ticks that every
+    // ordering test measures come from - `await` avoids them by going through
+    // jpResolveValue, which answers a promise unchanged.
+    function jpResolve(p, x) {
+        if (p["__ps"] !== 0) { return }
+        if (x === p) { jpSettle(p, 2, "TypeError: Chaining cycle detected for promise"); return }
+        if (jpIsObjV(x)) {
+            if (jpIs(x)) { jpEnq(jpAdoptJob(p, x)); return }
+            if (typeof getMember(x, "then") == "function") { jpEnq(jpAdoptJob(p, x)); return }
+        }
+        jpSettle(p, 1, x)
+    }
+    function jpResolveFn(p) { return function(v) { jpResolve(p, v) } }
+    function jpRejectFn(p) { return function(e) { jpSettle(p, 2, e) } }
+    function jpAdoptJob(p, x) {
+        return function() {
+            if (jpIs(x)) { jpThen(x, jpResolveFn(p), jpRejectFn(p), undefined); return }
+            try { callWithThis(getMember(x, "then"), x, [jpResolveFn(p), jpRejectFn(p)]) }
+            catch (e) {
+                if (!excIsUser(e)) { throw e }
+                jpSettle(p, 2, e.v)
+            }
+        }
+    }
+    function jpEnqReact(p, reaction) { jpEnq(jpReactJob(p["__ps"], p["__pv"], reaction)) }
+    // The specification's NewPromiseReactionJob: run the handler for the state the
+    // promise settled in and settle the derived promise with what it answered, or with
+    // what it threw. A missing handler passes the value straight through, which is what
+    // makes `p.then(f).catch(g)` and `p.catch(g).then(f)` both work.
+    function jpReactJob(state, arg, reaction) {
+        return function() {
+            var handler = anytype // Either half of the reaction, or undefined.
+            handler = (state === 1) ? reaction["f"] : reaction["r"]
+            var derived = reaction["p"]
+            if (typeof handler != "function") {
+                if (jpIs(derived)) {
+                    if (state === 1) { jpResolve(derived, arg) }
+                    else { jpSettle(derived, 2, arg) }
+                }
+                return
+            }
+            var out = anytype   // What the handler answered,
+            var thrown = anytype // or the value it threw.
+            out = undefined
+            thrown = undefined
+            var threw = false
+            try { out = callWithThis(handler, undefined, [arg]) }
+            catch (e) {
+                if (!excIsUser(e)) { throw e }
+                threw = true
+                thrown = e.v
+            }
+            if (!jpIs(derived)) { return }
+            if (threw) { jpSettle(derived, 2, thrown) }
+            else { jpResolve(derived, out) }
+        }
+    }
+    // Register one reaction. derived is the promise then() answered, or undefined for
+    // an await, which consumes the result itself.
+    function jpThen(p, onF, onR, derived) {
+        var reaction = {}
+        reaction["f"] = onF
+        reaction["r"] = onR
+        reaction["p"] = derived
+        if (p["__ps"] === 0) { p["__pcb"].push(reaction); return }
+        jpEnqReact(p, reaction)
+    }
+    // PromiseResolve: a promise is its own, anything else gets a fresh resolved one.
+    function jpResolveValue(x) {
+        if (jpIs(x)) { return x }
+        var p = jpNew()
+        jpResolve(p, x)
+        return p
+    }
+    // p.then / p.catch / p.finally, answered by jsBuiltin rather than stored on the
+    // object, so that a promise keeps no own keys at all.
+    function jpMethod(p, name, args) {
+        if (name == "then") {
+            var d1 = jpNew()
+            jpThen(p, jpArg(args, 0), jpArg(args, 1), d1)
+            return d1
+        }
+        if (name == "catch") {
+            var d2 = jpNew()
+            jpThen(p, undefined, jpArg(args, 0), d2)
+            return d2
+        }
+        if (name == "finally") {
+            var fn = jpArg(args, 0)
+            var d3 = jpNew()
+            jpThen(p, jpFinallyPass(fn), jpFinallyRaise(fn), d3)
+            return d3
+        }
+        return jpMiss
+    }
+    function jpFinallyPass(fn) {
+        return function(v) {
+            if (typeof fn == "function") { callWithThis(fn, undefined, []) }
+            return v
+        }
+    }
+    function jpFinallyRaise(fn) {
+        return function(e) {
+            if (typeof fn == "function") { callWithThis(fn, undefined, []) }
+            throw {__exc: true, v: e}
+        }
+    }
+    // Promise.resolve / reject / all / allSettled / race / any. The combinators share
+    // one state OBJECT rather than captured locals, because a MetaJS local keeps the
+    // type it was first assigned and a counter written from two closures is exactly
+    // the shape that trips over.
+    function jpStatic(name, args) {
+        if (name == "resolve") { return jpResolveValue(jpArg(args, 0)) }
+        if (name == "reject") {
+            var pr = jpNew()
+            jpSettle(pr, 2, jpArg(args, 0))
+            return pr
+        }
+        if (name == "all") { return jpCombine("all", jpArg(args, 0)) }
+        if (name == "allSettled") { return jpCombine("allSettled", jpArg(args, 0)) }
+        if (name == "race") { return jpCombine("race", jpArg(args, 0)) }
+        if (name == "any") { return jpCombine("any", jpArg(args, 0)) }
+        return jpMiss
+    }
+    function jpCombine(kind, src) {
+        if (!Array.isArray(src)) { fail("Promise." + kind + " needs an array") }
+        var st = {}
+        st["kind"] = kind
+        st["out"] = jpNew()
+        st["results"] = []
+        st["left"] = src.length
+        for (var i = 0; i < src.length; i++) { st["results"].push(undefined) }
+        if (src.length === 0) {
+            if (kind == "all") { jpResolve(st["out"], st["results"]) }
+            if (kind == "allSettled") { jpResolve(st["out"], st["results"]) }
+            if (kind == "any") { jpSettle(st["out"], 2, "AggregateError: All promises were rejected") }
+            return st["out"]
+        }
+        for (var j = 0; j < src.length; j++) {
+            jpThen(jpResolveValue(src[j]), jpCombineFn(st, j, true), jpCombineFn(st, j, false), undefined)
+        }
+        return st["out"]
+    }
+    function jpCombineFn(st, idx, ok) {
+        return function(v) {
+            var kind = st["kind"]
+            if (kind == "race") {
+                if (ok) { jpResolve(st["out"], v) } else { jpSettle(st["out"], 2, v) }
+                return
+            }
+            if (kind == "any" && ok) { jpResolve(st["out"], v); return }
+            if (kind == "all" && !ok) { jpSettle(st["out"], 2, v); return }
+            if (kind == "allSettled") {
+                var r = {}
+                if (ok) { r["status"] = "fulfilled"; r["value"] = v }
+                else { r["status"] = "rejected"; r["reason"] = v }
+                st["results"][idx] = r
+            } else {
+                st["results"][idx] = v
+            }
+            st["left"] = st["left"] - 1
+            if (st["left"] !== 0) { return }
+            if (st["kind"] == "any") { jpSettle(st["out"], 2, "AggregateError: All promises were rejected") }
+            else { jpResolve(st["out"], st["results"]) }
+        }
+    }
+    // Resume an async body once and re-arm it. sent is the value the pending await
+    // answers with; when isThrow is set the await raises it instead. The generator
+    // object is this half's REPLAY generator (see newGenObject), so an async body
+    // repeats the side effects that precede an await exactly as a generator body
+    // repeats the ones that precede a yield - the ordering is right, the repetition
+    // is the same documented price.
+    function jpAsyncStep(g, p, sent, isThrow) {
+        var send = anytype // Either the settled value or the throw-in marker.
+        send = sent
+        if (isThrow) {
+            var m = {}
+            m["__athrow"] = true
+            m["v"] = sent
+            send = m
+        }
+        var res = anytype    // The {value, done} record,
+        var thrown = anytype // or the value the body threw.
+        res = undefined
+        thrown = undefined
+        var threw = false
+        try { res = g["next"](send) }
+        catch (e) {
+            if (!excIsUser(e)) { throw e }
+            threw = true
+            thrown = e.v
+        }
+        if (threw) { jpSettle(p, 2, thrown); return }
+        if (res["done"] === true) { jpResolve(p, res["value"]); return }
+        var awaited = jpResolveValue(res["value"])
+        jpThen(awaited, jpResumeFn(g, p, false), jpResumeFn(g, p, true), undefined)
+    }
+    function jpResumeFn(g, p, isThrow) {
+        return function(v) { jpAsyncStep(g, p, v, isThrow) }
+    }
+    // The `Promise` global: a function value, so `new Promise(exec)` constructs one and
+    // `typeof Promise` is "function". The executor runs SYNCHRONOUSLY.
+    var jsPromiseFn = function(exec) {
+        var p = jpNew()
+        if (typeof exec != "function") { fail("TypeError: Promise resolver is not a function") }
+        try { callWithThis(exec, undefined, [jpResolveFn(p), jpRejectFn(p)]) }
+        catch (e) {
+            if (!excIsUser(e)) { throw e }
+            jpSettle(p, 2, e.v)
+        }
+        return p
+    }
+    // Run the microtask queue to exhaustion. There are no timers and no I/O here, so
+    // the one drain after the whole program is every event-loop turn it gets. A promise
+    // An UNHANDLED REJECTION is deliberately not reported in any of the three engines -
+    // see the note in abnf/jsrt.go's drainMicrotasks.
+    function jsDrain() {
+        while (jpQi < jpQ.length) {
+            var job = jpQ[jpQi]
+            jpQi = jpQi + 1
+            job()
+        }
+        jpQ = []
+        jpQi = 0
+    }
+    // The value an `await` answers, given what the driver sent back in: a rejection
+    // arrives as a marker record and is re-raised HERE, at the await site, which is
+    // what puts it inside an enclosing try/catch with no throw-in support in the
+    // generator machinery.
+    function jpAwaitValue(v) {
+        if (jpIsObjV(v) && v["__athrow"] === true) { throw {__exc: true, v: v["v"]} }
+        return v
+    }
+
     // ----- The method surface -----
     // Answers {v: result} for a call this table implements and null for everything
     // else (an instance method, an object-literal method, a class static), which is
@@ -2842,6 +3129,17 @@ NotFuncHead = :script(~~
     function jsBuiltin(target, name, args) {
         if (target === undefined || target === null) { return null }
         if (typeof name != "string") { return null }
+        // Promise.prototype.then / catch / finally, and the Promise statics on the
+        // `Promise` global. A promise carries hidden slots only, so nothing else in
+        // this table can claim one and the test is safe this early.
+        if (jpIs(target)) {
+            var pmr = jpMethod(target, name, args)
+            if (pmr !== jpMiss) { return {v: pmr} }
+        }
+        if (target === jsPromiseFn) {
+            var psr = jpStatic(name, args)
+            if (psr !== jpMiss) { return {v: psr} }
+        }
         if (target === jsObjectGlobal) { return jsObjectStatic(name, args) }
         if (target === jsStringFn) {
             if (name == "fromCharCode") {
@@ -3214,6 +3512,9 @@ NotFuncHead = :script(~~
         // Object is OURS, not the host's: the host's leaked the hidden __keys slot out
         // of Object.keys / entries under goja and had no keys at all under -frozen.
         "Object": jsObjectGlobal, "Array": Array,
+        // The Promise global: a function value, so `new Promise(exec)` constructs one
+        // and `typeof Promise` is "function". The statics resolve through jsBuiltin.
+        "Promise": jsPromiseFn,
         // NaN and Infinity are global BINDINGS in JavaScript; the compiler half has
         // always had them and this one raised "variable not defined".
         "NaN": 0 / 0, "Infinity": 1 / 0, "undefined": undefined,
@@ -4514,7 +4815,20 @@ NotFuncHead = :script(~~
     }
     // 'await x' with no event loop: an async function body already ran to completion, so
     // the operand IS the settled value and await is the identity on it.
-    function makeAwait(t) { return function() { return t() } }
+    // Outside a suspendable body there is nothing to suspend, and `await` there is not
+    // valid JavaScript at all (both grammars accept it as a widening), so it stays the
+    // identity it was rather than aborting with "yield outside a generator". The compiler
+    // half makes the same decision LEXICALLY, at emit time; this one can only ask whether
+    // a replay is in progress, so the two differ for an await inside a plain function
+    // that an async body called - a shape no valid program has.
+    function makeAwait(t) {
+        return function() {
+            var v = anytype // The awaited operand: any value.
+            v = t()
+            if (genRuns.length == 0) { return v }
+            return jpAwaitValue(doYield(false, v))
+        }
+    }
     // 'delete o.k'. There is no host delete in the value model, so the property is
     // blanked and - what actually makes 'k in o' and for-in forget it - its name is
     // dropped from the object's tracked key list.
@@ -4620,7 +4934,9 @@ NotFuncHead = :script(~~
         var key = items[at]
         var params = items[at + 1]
         var body = items[at + 2]
+        if (isGen && isAsync) { notImpl("async generator method", 0) }
         var fn = isGen ? makeGenerator(params, body) : makeFunctionExpr(body, params)
+        if (isAsync) { fn = makeAsyncFn(params, body) }
         if (typeof key == "string") { return {k: key, t: fn} }
         return {kt: key, t: fn}
     }
@@ -4649,17 +4965,21 @@ NotFuncHead = :script(~~
     // Arrow function: items = [{aparams:[names]}, {body: stmtThunk} | {ebody: exprThunk}].
     // A block body is a statement thunk (returns undefined|signal, handled by
     // makeClosure); an expression body becomes an implicit 'return <expr>'.
+    // The body thunk of an arrow: a block body is a statement thunk, an expression body
+    // becomes 'return <expr>'. Shared with makeAsyncArrow.
+    function arrowBodyT(bm) {
+        if (bm.body != undefined) { return bm.body }
+        var et = bm.ebody
+        return function() { return {isRet: true, v: et()} }
+    }
     function makeArrow(items) {
         var params = items[0].aparams
-        var bm = items[1]
-        var bodyT = anytype // Either a block statement thunk or a synthesized return.
-        if (bm.body != undefined) {
-            bodyT = bm.body
-        } else {
-            var et = bm.ebody
-            bodyT = function() { return {isRet: true, v: et()} }
-        }
+        var bodyT = arrowBodyT(items[1])
         return function() { return makeArrowClosure(params, bodyT, scopes) }
+    }
+    // An async arrow. `this` is the defining scope's, exactly as in makeArrow.
+    function makeAsyncArrow(items) {
+        return makeAsyncFn(items[0].aparams, arrowBodyT(items[1]))
     }
 
     // Template literal: items = [{str:"chunk"} | {expr: thunk}...] -> string thunk.
@@ -4869,6 +5189,40 @@ NotFuncHead = :script(~~
                 return newGenObject(params, bodyT, env, self, args)
             }
         }
+    }
+    // The value an ASYNC function is: calling it creates the generator its body compiled
+    // to, runs it to its first await and answers a promise for its completion. The whole
+    // difference from makeGenerator is the driver - the body is compiled identically.
+    function makeAsyncFn(params, bodyT) {
+        return function() {
+            var env = scopes.slice()
+            return function() {
+                var self = pendingThis
+                pendingThis = undefined
+                pendingNewTarget = undefined
+                var args = []
+                for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
+                var g = newGenObject(params, bodyT, env, self, args)
+                var p = jpNew()
+                jpAsyncStep(g, p, undefined, false)
+                return p
+            }
+        }
+    }
+    // items = [{isgen}?, name, params, bodyThunk] - the '*' form is an async GENERATOR,
+    // which would need its yields and its awaits to share one suspension channel and has
+    // no representation here, so it aborts rather than answering a plain generator.
+    function makeAsyncFuncDecl(items) {
+        if (items[0] != undefined && items[0].isgen != undefined) { notImpl("async generator function", 0) }
+        var name = items[items.length - 3]
+        var mk = makeAsyncFn(items[items.length - 2], items[items.length - 1])
+        return function() { declVar(name, mk()) }
+    }
+    // The expression form: the optional name is accepted and, like a plain function
+    // expression's, not bound.
+    function makeAsyncFuncExpr(items) {
+        if (items[0] != undefined && items[0].isgen != undefined) { notImpl("async generator function", 0) }
+        return makeAsyncFn(items[items.length - 2], items[items.length - 1])
     }
     function newGenObject(params, bodyT, env, self, args) {
         var st = {sent: [], count: 0, done: false}
@@ -5204,13 +5558,16 @@ NotFuncHead = :script(~~
         var statik = hasStatic(items[1].mods)
         var i = 2
         var isGen = false
+        var isAsync = false
         while (items[i] != undefined && (items[i].isasync != undefined || items[i].isgen != undefined)) {
             if (items[i].isgen != undefined) { isGen = true }
+            if (items[i].isasync != undefined) { isAsync = true }
             i = i + 1
         }
+        if (isGen && isAsync) { notImpl("async generator method", 0) }
         var key = items[i]
         return {kind: "method", name: key.mk, keyT: key.mkT, statik: statik, isGen: isGen,
-                decs: decs, params: items[i + 1], body: items[i + 2]}
+                isAsync: isAsync, decs: decs, params: items[i + 1], body: items[i + 2]}
     }
     // items = [{decs}, {mods}, params, bodyThunk].
     function makeCtor(items) {
@@ -5358,11 +5715,29 @@ NotFuncHead = :script(~~
             }
         }
         if (m.statik) {
-            var sfn = m.isGen ? makeGenerator(m.params, m.body)() : makeClosure(m.params, m.body, mscopes)
+            var sfn = anytype // The static method's function value.
+            sfn = makeClosure(m.params, m.body, mscopes)
+            if (m.isGen) { sfn = makeGenerator(m.params, m.body)() }
+            if (m.isAsync) { sfn = makeAsyncFn(m.params, m.body)() }
             return applyDecorators(decs, sfn, "method", m.name, true)
         }
         if (m.isGen) { return makeInstanceGenerator(m.params, m.body, mscopes) }
+        if (m.isAsync) { return makeInstanceAsync(m.params, m.body, mscopes) }
         return makeInstanceClosure(m.params, m.body, mscopes)
+    }
+    // An ASYNC method: the receiver arrives as arguments[0] like every other instance
+    // method, and the body is driven exactly as a free async function's is.
+    function makeInstanceAsync(params, bodyT, defScopes) {
+        var env = defScopes.slice()
+        return function() {
+            var self = arguments[0]
+            var args = []
+            for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
+            var g = newGenObject(params, bodyT, env, self, args)
+            var p = jpNew()
+            jpAsyncStep(g, p, undefined, false)
+            return p
+        }
     }
     // A generator as an instance method: the receiver arrives as arguments[0], like for
     // every other instance method, and becomes the generator body's 'this'.
@@ -6290,6 +6665,7 @@ NotFuncHead = :script(~~
     if (mainIsSnippet(entry)) {
         try {
             ret = runMainSnippet(entry, "Statement")
+            jsDrain()
         } catch (e) {
             if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
             throw e
@@ -6301,6 +6677,10 @@ NotFuncHead = :script(~~
         }
         try {
             ret = globalScope[entry]()
+            // The microtask queue is drained ONCE, after the whole program has run: this
+            // runtime has no timers and no I/O, so that is the only event-loop turn a
+            // program gets. The compiler half drains at the same point.
+            jsDrain()
         } catch (e) {
             if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
             throw e
