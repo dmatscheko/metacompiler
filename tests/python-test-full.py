@@ -1349,6 +1349,160 @@ def s30():
 
 # ===== END SECTIONS =====
 
+
+# ===== SECTION 31: str's method library =====
+# `"abc".upper()` failed in BOTH halves with "unknown String method: upper"
+# (docs/todo.md 1.5): Python's str method surface did not exist anywhere - not in
+# the interpreter's mcall, not in abnf/jsrt.go's memberCall, not in layer 2. It
+# is now carried three times (languages/python-interpreter.abnf, the str-methods
+# chapter of languages/lib/python-rt.metajs, and abnf/pystrmethod.go), and what
+# these assertions pin is the SEMANTICS rather than the names. Every value below
+# is CPython 3.14.6's own answer, taken from a 45,064-row differential probe on
+# which the interpreter and python3 agree line for line.
+#
+# The operands are read out of a list so a constant folder cannot answer them.
+def s31():
+    v = ["  Hello World  ", "a,b,,c", "abc", " a  b ", "they're bill's 12ab",
+         "xyxhixy", "-42", "a\nb\r\nc", "Ab Cd", "aaa", "ABC", "MiXeD", "abcabc"]
+    check("str01", v[2].upper() == "ABC" and v[10].lower() == "abc" and v[10].casefold() == "abc")
+    # The two split ALGORITHMS: no argument splits on runs of whitespace and drops
+    # the empties, split(" ") does neither.
+    check("str02", v[3].split() == ["a", "b"] and v[3].split(" ") == ["", "a", "", "b", ""])
+    check("str03", v[1].split(",") == ["a", "b", "", "c"] and v[1].split(",", 1) == ["a", "b,,c"])
+    check("str04", v[1].rsplit(",", 1) == ["a,b,", "c"] and v[3].rsplit(None, 1) == [" a", "b"])
+    check("str05", v[3].split(None, 1) == ["a", "b "] and "".split(",") == [""] and "".split() == [])
+    # strip(chars) is a SET of characters, not a prefix.
+    check("str06", v[0].strip() == "Hello World" and v[5].lstrip("xy") == "hixy" and v[5].rstrip("xy") == "xyxhi")
+    check("str07", "abcba".strip("ab") == "c" and "abab".strip("ab") == "")
+    check("str08", "|".join(["a", "b", "c"]) == "a|b|c" and "|".join([]) == "" and "-".join(v[2]) == "a-b-c")
+    check("str09", v[9].replace("a", "b", 2) == "bba" and v[9].replace("a", "") == "")
+    check("str10", v[2].replace("", "-") == "-a-b-c-" and v[2].replace("", "-", 2) == "-a-bc")
+    # find answers -1 where index raises, and the bounds follow ADJUST_INDICES:
+    # a start past the end is -1 even for the empty needle.
+    check("str11", v[2].find("c") == 2 and v[2].find("z") == -1 and v[2].find("c", 0, 2) == -1)
+    check("str12", v[2].find("", 3) == 3 and v[2].find("", 4) == -1 and v[2].find("c", -1) == 2)
+    check("str13", v[12].rfind("b") == 4 and v[2].rfind("") == 3 and v[12].rindex("a") == 3)
+    check("str14", v[2].index("b") == 1 and "aaa".count("aa") == 1 and v[2].count("") == 4)
+    check("str15", "aaa".count("a", 1) == 2 and v[2].startswith(("x", "a")) and v[2].endswith("bc", 0, 3))
+    check("str16", not v[2].endswith("bc", 0, 2) and v[2].startswith("ab"))
+    # title's word boundary is "the previous character was not cased".
+    check("str17", v[4].title() == "They'Re Bill'S 12Ab" and v[0].capitalize() == "  hello world  ")
+    check("str18", v[11].swapcase() == "mIxEd" and v[8].istitle() and not v[11].istitle())
+    check("str19", "123".isdigit() and not "".isdigit() and v[2].isalpha() and "ab1".isalnum())
+    check("str20", "  ".isspace() and "ab1".islower() and "AB1".isupper() and not "123".islower())
+    # center puts the odd extra pad on the LEFT only when the width is odd too.
+    check("str21", v[2].center(7, "*") == "**abc**" and "ab".center(7, "*") == "***ab**")
+    check("str22", v[2].center(2) == "abc" and v[2].ljust(5, ".") == "abc.." and v[2].rjust(5, ".") == "..abc")
+    check("str23", v[6].zfill(5) == "-0042" and v[6].zfill(1) == "-42" and "".zfill(3) == "000")
+    # splitlines: "\r\n" is ONE break and the boundary set is wider than "\n".
+    check("str24", v[7].splitlines() == ["a", "b", "c"] and "".splitlines() == [])
+    check("str25", "a\nb\n".splitlines(True) == ["a\n", "b\n"])
+    check("str26", list(v[2].partition("b")) == ["a", "b", "c"] and list(v[2].partition("z")) == ["abc", "", ""])
+    check("str27", list(v[2].rpartition("z")) == ["", "", "abc"] and list("abcb".rpartition("b")) == ["abc", "b", ""])
+    check("str28", v[2].removeprefix("ab") == "c" and v[2].removeprefix("z") == "abc" and v[2].removesuffix("bc") == "a")
+    check("str29", "a\tb".expandtabs() == "a       b" and "ab\tc".expandtabs(4) == "ab  c")
+    # format shares the mini-language with the f-strings.
+    check("str30", "{}-{}".format(v[2], 3) == "abc-3" and "{1}{0}{1}".format("a", "b") == "bab")
+    check("str31", "{x}/{y}".format(x=1, y="q") == "1/q" and "{{{0}}}".format(1) == "{1}")
+    check("str32", "{0:>6}".format(v[2]) == "   abc" and "{0:*^7}".format(v[2]) == "**abc**")
+    check("str33", "{0[1]}".format([7, 8]) == "8" and "{0:{1}}".format(v[2], ">5") == "  abc")
+    check("str34", "{0!r}".format(v[2]) == "'abc'")
+
+
+# ===== SECTION 32: integer arithmetic PROMOTES past 2**53 =====
+# SECTION 30 pinned the LITERALS; this is the arithmetic. A plain Python int is a
+# double, so it is exact to 2**53 and silently rounds above it: 9007199254740992
+# + 1 answered 9007199254740992 in all three engines, and 54 of the 55 differing
+# rows of a 626-literal probe against CPython 3.14.6 were the `*` column. BOTH
+# HALVES AGREED on every one of them, so --cross and the matrix were structurally
+# blind - only python3 could see it. The guard is two comparisons on the fast
+# path (see pyOver53 / pyAOver53 / pyPromoteArith); these assertions are what
+# says it fires when it must and stays out of the way when it must not.
+#
+# The operands come out of a list so a constant folder cannot answer them; the
+# paired literal form in ar01 holds the folding path as well.
+def s32():
+    v = [9007199254740992, 1, 2, 3037000500, 94906266, 123456789, -9007199254740992,
+         4503599627370496, 987654321, 65536, 1000000007]
+    check("ar01", str(v[0] + v[1]) == "9007199254740993" and str(9007199254740992 + 1) == "9007199254740993")
+    check("ar02", str(v[6] - v[1]) == "-9007199254740993" and v[0] + v[1] != v[0])
+    check("ar03", str(v[0] * v[2]) == "18014398509481984" and str(v[3] * v[3]) == "9223372037000250000")
+    check("ar04", str(v[4] * v[4]) == "9007199326062756" and str(v[5] * v[8]) == "121932631112635269")
+    check("ar05", str(v[7] + v[7] + v[1]) == "9007199254740993")
+    check("ar06", str(v[6] * v[3]) == "-27354868640248020074496000")
+    check("ar07", str(v[9] * v[9] * v[9]) == "281474976710656" and str(v[10] * v[10]) == "1000000014000000049")
+    # Below the boundary NOTHING changes shape: the answers stay plain ints.
+    check("ar08", v[5] + v[8] == 1111111110 and v[5] * v[2] == 246913578 and v[5] - v[8] == -864197532)
+    check("ar09", (v[0] + v[1]) - v[1] == v[0] and (v[0] + v[1]) % 2 == 1)
+    # A string + and the two sequence repetitions must NOT reach the box.
+    check("ar10", "99999999999999999999" + "9" == "999999999999999999999" and [0] * 3 == [0, 0, 0] and "ab" * 3 == "ababab")
+    # A bool IS an int, and the promotion has to accept it as an operand.
+    check("ar11", str(v[0] + True) == "9007199254740993" and str(v[0] * True) == "9007199254740992")
+
+# ===== SECTION 33: for-of drives a generator LAZILY =====
+# js_pyiter (the compiler) and iterToList (the interpreter) MATERIALIZE, so
+# `for x in endless(): break` never reached the body at all: it hung in the
+# interpreter and hit -max-steps in the compiler (docs/todo.md 1.7). A generator
+# is now STEPPED through the js_get(g, "next") / {value, done} protocol the
+# coroutine primitive already answered - the shape csharp-to-llvm-ir.abnf's
+# foreach has always had, which is why layer 2 owes this nothing. Every other
+# source still goes through js_pyiter, which normalizes a dict to its keys and a
+# string to its characters.
+def s33():
+    def nat():
+        i = 0
+        while True:
+            yield i
+            i = i + 1
+    def upto(n):
+        i = 0
+        while i < n:
+            yield i
+            i = i + 1
+    out = []
+    for x in nat():
+        out.append(x)
+        if x >= 3:
+            break
+    check("lazy01", out == [0, 1, 2, 3])
+    first = -1
+    for x in nat():
+        first = x
+        break
+    check("lazy02", first == 0)
+    check("lazy03", [x for x in upto(3)] == [0, 1, 2] and list(upto(2)) == [0, 1])
+    tot = 0
+    for x in upto(4):
+        tot = tot + x
+    else:
+        tot = tot + 100
+    check("lazy04", tot == 106)
+    kept = []
+    for x in upto(5):
+        if x % 2 == 0:
+            continue
+        kept.append(x)
+    check("lazy05", kept == [1, 3])
+    nested = []
+    for a in upto(2):
+        for b in upto(2):
+            nested.append(a * 10 + b)
+    check("lazy06", nested == [0, 1, 10, 11])
+    # The array path is unchanged: a list, a string, a dict and a range still
+    # iterate exactly as they did.
+    check("lazy07", [c for c in "hi"] == ["h", "i"] and [k for k in {"a": 1, "b": 2}] == ["a", "b"])
+    check("lazy08", [e for e in [1, 2, 3]] == [1, 2, 3] and [i for i in range(3)] == [0, 1, 2])
+    # A generator that is never exhausted must not leave the loop broken for the
+    # next one: two independent endless generators in a row.
+    seen = 0
+    for x in nat():
+        seen = seen + 1
+        break
+    for x in nat():
+        seen = seen + 1
+        break
+    check("lazy09", seen == 2)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -1380,5 +1534,8 @@ def main():
     s28() # SECTION-CALL 28
     s29() # SECTION-CALL 29
     s30() # SECTION-CALL 30
+    s31() # SECTION-CALL 31
+    s32() # SECTION-CALL 32
+    s33() # SECTION-CALL 33
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

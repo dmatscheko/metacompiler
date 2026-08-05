@@ -1777,6 +1777,44 @@ function pyAJsAdd(l, r) {
 }
 
 // Go: rt.pyArith (jsrt.go:9412) - the -, * and / that take the bigint path.
+// ----- PROMOTION PAST 2^53 (docs/todo.md 1.1) --------------------------------
+//
+// A plain Python int is a double, so it is EXACT up to 2^53 and silently rounds
+// above it: 9007199254740992 + 1 answered 9007199254740992 in all three engines.
+// The arbitrary precision box already existed (the literal half landed in
+// 506000a); these two helpers are the TRIGGER, and they sit in the + / - / *
+// arms of js_pybin, which is the hot path of every Python program.
+//
+// pyAOver53 is sound BOTH WAYS, which is what keeps the fast path to two
+// comparisons. By the time an arm runs, both operands are plain and therefore
+// integers of magnitude <= 2^53 (anything larger is a box and was taken by the
+// pyABigPair arm above). If the TRUE result is >= 2^53 then so is the rounded
+// double - rounding to nearest of a value at or above 2^53 cannot land below it,
+// since 2^53 is representable - and if the true result is < 2^53 the double is
+// exact. So no out-of-range answer escapes and no in-range one pays anything
+// beyond the two compares. The typeof, which keeps a numeric-looking STRING
+// concatenation ("9" + "9...") out of the box, is only reached when they pass.
+function pyAOver53(v) {
+    if (v >= 9007199254740992 || v <= -9007199254740992) { return typeof v == "number" }
+    return false
+}
+
+// The EXACT answer for a pair pyAOver53 flagged, or null when the two are not
+// both exact ints after all - in which case the caller keeps the double it
+// already computed.
+function pyAPromote(op, l, r) {
+    var out = anytype
+    out = null
+    var x = pyABigOperand(l)
+    if (x === null) { return out }
+    var y = pyABigOperand(r)
+    if (y === null) { return out }
+    var v = pyABigBin(op, x, y)
+    if (v === null) { return out }
+    out = pyABigNarrow(v)
+    return out
+}
+
 function pyAArith(op, l, r) {
     var big = pyABigArith(op, l, r)
     if (big !== null) { return big }
@@ -2168,7 +2206,12 @@ function js_pybin(opv, l, r) {
             }
             return out
         }
-        return pyAJsAdd(l, r)
+        var sadd = pyAJsAdd(l, r)
+        if (pyAOver53(sadd)) {
+            var padd = pyAPromote("+", l, r)
+            if (padd !== null) { return padd }
+        }
+        return sadd
     }
     if (op == "*") {
         // Python's SEQUENCE REPETITION: "ab" * 3 and [0] * 3, either way round.
@@ -2176,9 +2219,21 @@ function js_pybin(opv, l, r) {
         if (s1 !== null) { return s1["v"] }
         var s2 = pyASeqRepeat(r, l)
         if (s2 !== null) { return s2["v"] }
-        return pyAArith("*", l, r)
+        var smul = pyAArith("*", l, r)
+        if (pyAOver53(smul)) {
+            var pmul = pyAPromote("*", l, r)
+            if (pmul !== null) { return pmul }
+        }
+        return smul
     }
-    if (op == "-") { return pyAArith("-", l, r) }
+    if (op == "-") {
+        var ssub = pyAArith("-", l, r)
+        if (pyAOver53(ssub)) {
+            var psub = pyAPromote("-", l, r)
+            if (psub !== null) { return psub }
+        }
+        return ssub
+    }
     // Python's `/` is TRUE division: it answers a float even from two ints, so
     // 4 / 2 is 2.0 and 10**30 / 1 is 1e+30.
     if (op == "/") { return pyMkFlo(pyAToF(l) / pyAToF(r)) }
@@ -4284,6 +4339,12 @@ function pyDGenClose(g) {
 // rt.memberCall - the builtin method table for strings / lists / dicts - which
 // this chunk does not own; it is spelled pyMemberCall(target, name, args) here.
 function pyDMethodCall(target, name, args, kw) {
+    // str's own method library (the str-methods chapter at the end of this file).
+    // Checked FIRST and by NAME, so a name it does not know still reaches
+    // pyFStrMethod's Java-style builtins exactly as it did before.
+    if (typeof target == "string") {
+        if (pySIsStrMethod(name)) { return pyStrMethod(target, name, args, kw) }
+    }
     // A generator's own protocol. Python's send()/next() answer the YIELDED
     // value and raise StopIteration - carrying the body's return value - at the
     // end, where JavaScript's next() answers a {value, done} record. There is no
@@ -4307,7 +4368,17 @@ function pyDMethodCall(target, name, args, kw) {
             if (st === undefined || st === null) { fail("generator step failed") }
             if (st["done"] === true) {
                 var exc = pyExcInstance("StopIteration", "")
-                exc["value"] = st["value"]
+                // StopIteration carries the body's RETURN value, and a generator
+                // that returned nothing (or that close() abandoned) carries None.
+                // It has to be spelled null and not undefined: pyGetAttr's own test
+                // is `obj[name] !== undefined`, so an undefined-valued attribute
+                // reads as ABSENT and `e.value` died natively with "'StopIteration'
+                // object has no attribute 'value'" while llvm.Run answered None -
+                // a layer-2-only divergence, which only a native probe can see.
+                var sv = anytype
+                sv = st["value"]
+                if (sv === undefined) { sv = null }
+                exc["value"] = sv
                 throw exc
             }
             return st["value"]
@@ -5625,4 +5696,917 @@ function pyMemberCall(target, name, args) {
     }
     fail("method call '" + name + "' on a " + pyFTypeOf(target))
     return null
+}
+
+// ---- the four engine adapters this chapter is written against ----
+function pySFail(msg) { fail(msg) }
+function pySFormat1(v, spec, conv) { return js_pyformat(v, spec, conv) }
+function pySGetAttr(v, nm) { return pyGetAttr(v, nm) }
+function pySGetItem(v, k) { return js_pyget(v, k) }
+function pySIsArr(v) { return pyIsArr(v) }
+function pySTruthy(v) { return pyATruthy(v) }
+function pySKwGet(kw, nm) {
+    var r = anytype
+    r = undefined
+    if (kw !== null && kw !== undefined) {
+        if (pyIsDict(kw)) {
+            var i = pyDictFind(kw["keys"], nm)
+            if (i >= 0) { return kw["vals"][i] }
+        }
+    }
+    fail("KeyError: '" + nm + "'")
+    return r
+}
+// ===================================================== str methods ==========
+//
+// Python's str method library, per docs/todo.md 1.5. Written ONCE and carried in
+// three engines - languages/python-interpreter.abnf, languages/lib/python-rt.metajs
+// (this text, verbatim) and abnf/pystrmethod.go (a line-by-line Go port) - because
+// a Python method call reaches a different implementation in each
+// (interpreter / llvm.Run's Go twin / the native C floor + layer 2).
+//
+// Everything below is built out of the seven string primitives the frozen MetaJS
+// subset has (.length, charAt, charCodeAt, substring, indexOf, toUpperCase,
+// toLowerCase) plus String.fromCharCode, so that the same source compiles in the
+// tag-script host AND through metajs-to-llvm-ir.abnf.
+//
+// INDEXING. CPython counts CODE POINTS; the floor's strings are UTF-16 and
+// js_pyget already indexes a string by CODE UNIT (an inconsistency this project
+// records rather than repairs, see the manual 7.9). The search/slice methods here
+// therefore work in code UNITS and the length-shaped ones (len via center/ljust/
+// rjust/zfill, and the per-character walks of title/swapcase/upper/lower) work in
+// code POINTS. For any string inside the BMP - which is everything the corpus and
+// the suite contain - the two coincide exactly.
+//
+// CASE MAPPING is done per code point WITH A LENGTH GUARD: goja's toUpperCase is
+// ECMAScript's FULL mapping ("ss" from "ß") while the frozen engine's is Go's
+// strings.ToUpper and the C floor's is Go's unicode table, both of which are the
+// SIMPLE mapping. Rejecting any mapping that changes the unit count makes all
+// three engines agree; the price is that "ß".upper() is "ß" here and
+// "SS" in CPython. U+0130 is the one residual: the floor maps it to "i" while the
+// other two answer a two-unit sequence that the guard rejects.
+//
+// CLASSIFICATION (isalpha / isdigit / isspace / isupper / islower) is ASCII-exact.
+// Outside ASCII, "cased" is derived from the case mapping (upper != lower), which
+// covers Latin, Greek and Cyrillic; isdigit is ASCII-only, so CPython's Arabic-Indic
+// digits answer False here. isspace carries the Unicode space code points by hand.
+//
+// NOT CARRIED: bytes. `encode()` answers the string itself, because there is no
+// bytes type in this value model - CPython prints b'abc'.
+
+// ---- the character primitives ----
+
+// The UTF-16 unit width of the code point starting at i.
+function pySCPW(s, i) {
+    var c = s.charCodeAt(i)
+    if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+        var t = s.charCodeAt(i + 1)
+        if (t >= 56320 && t <= 57343) { return 2 }
+    }
+    return 1
+}
+
+// The code points of s, each as a one- or two-unit string.
+function pySChars(s) {
+    var out = []
+    var i = 0
+    while (i < s.length) {
+        var w = pySCPW(s, i)
+        out.push(s.substring(i, i + w))
+        i = i + w
+    }
+    return out
+}
+
+function pySUpCh(ch) {
+    var c = ch.charCodeAt(0)
+    if (c < 128) {
+        if (c >= 97 && c <= 122) { return String.fromCharCode(c - 32) }
+        return ch
+    }
+    var u = ch.toUpperCase()
+    if (u.length != ch.length) { return ch }
+    return u
+}
+
+function pySLoCh(ch) {
+    var c = ch.charCodeAt(0)
+    if (c < 128) {
+        if (c >= 65 && c <= 90) { return String.fromCharCode(c + 32) }
+        return ch
+    }
+    var u = ch.toLowerCase()
+    if (u.length != ch.length) { return ch }
+    return u
+}
+
+function pySIsCased(ch) { return pySUpCh(ch) != pySLoCh(ch) }
+function pySIsUpCh(ch) { return pySIsCased(ch) && ch == pySUpCh(ch) }
+function pySIsLoCh(ch) { return pySIsCased(ch) && ch == pySLoCh(ch) }
+
+function pySIsAlphaCh(ch) {
+    var c = ch.charCodeAt(0)
+    if (c < 128) { return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) }
+    return pySIsCased(ch)
+}
+
+function pySIsDigitCh(ch) {
+    var c = ch.charCodeAt(0)
+    return c >= 48 && c <= 57
+}
+
+// Py_UNICODE_ISSPACE: the ASCII set, the C1 and separator code points, and the
+// three Unicode space blocks.
+function pySIsSpaceCh(ch) {
+    var c = ch.charCodeAt(0)
+    if (c == 32) { return true }
+    if (c >= 9 && c <= 13) { return true }
+    if (c >= 28 && c <= 31) { return true }
+    if (c == 133 || c == 160 || c == 5760) { return true }
+    if (c >= 8192 && c <= 8202) { return true }
+    if (c == 8232 || c == 8233 || c == 8239 || c == 8287 || c == 12288) { return true }
+    return false
+}
+
+// str.splitlines' universal newlines.
+function pySIsBreakCh(c) {
+    if (c == 10 || c == 11 || c == 12 || c == 13) { return true }
+    if (c == 28 || c == 29 || c == 30 || c == 133) { return true }
+    if (c == 8232 || c == 8233) { return true }
+    return false
+}
+
+function pySRepeat(s, n) {
+    var out = ""
+    var i = 0
+    while (i < n) { out = out + s ; i = i + 1 }
+    return out
+}
+
+function pySLen(s) { return pySChars(s).length }
+
+// ---- searching ----
+//
+// CPython's ADJUST_INDICES: a negative bound is relative to the end and floors at
+// 0; only the END is capped at the length, which is what makes "abc".find("", 4)
+// answer -1 while "abc".find("", 3) answers 3.
+function pySAdjStart(v, n) {
+    var i = v
+    if (i < 0) {
+        i = i + n
+        if (i < 0) { i = 0 }
+    }
+    return i
+}
+
+function pySAdjEnd(v, n) {
+    var i = v
+    if (i < 0) {
+        i = i + n
+        if (i < 0) { i = 0 }
+    }
+    if (i > n) { i = n }
+    return i
+}
+
+function pySFind(s, sub, start, end) {
+    if (start > end) { return -1 }
+    var at = s.substring(start, end).indexOf(sub)
+    if (at < 0) { return -1 }
+    return at + start
+}
+
+function pySRFind(s, sub, start, end) {
+    if (start > end) { return -1 }
+    var i = end - sub.length
+    while (i >= start) {
+        if (s.substring(i, i + sub.length) == sub) { return i }
+        i = i - 1
+    }
+    return -1
+}
+
+function pySCount(s, sub, start, end) {
+    if (start > end) { return 0 }
+    if (sub.length == 0) { return pySLen(s.substring(start, end)) + 1 }
+    var n = 0
+    var i = start
+    while (i + sub.length <= end) {
+        if (s.substring(i, i + sub.length) == sub) {
+            n = n + 1
+            i = i + sub.length
+        } else {
+            i = i + 1
+        }
+    }
+    return n
+}
+
+function pySStarts(s, pre, start, end) {
+    if (start > end) { return false }
+    if (start + pre.length > end) { return false }
+    return s.substring(start, start + pre.length) == pre
+}
+
+function pySEnds(s, suf, start, end) {
+    if (start > end) { return false }
+    if (end - suf.length < start) { return false }
+    return s.substring(end - suf.length, end) == suf
+}
+
+// ---- stripping ----
+//
+// `chars` is a SET of characters, not a prefix; `useWS` is the no-argument form.
+function pySStripHit(ch, chars, useWS) {
+    if (useWS) { return pySIsSpaceCh(ch) }
+    return chars.indexOf(ch) >= 0
+}
+
+function pySStrip(s, chars, useWS, doL, doR) {
+    var a = 0
+    var b = s.length
+    if (doL) {
+        while (a < b && pySStripHit(s.charAt(a), chars, useWS)) { a = a + 1 }
+    }
+    if (doR) {
+        while (b > a && pySStripHit(s.charAt(b - 1), chars, useWS)) { b = b - 1 }
+    }
+    return s.substring(a, b)
+}
+
+// ---- splitting ----
+//
+// split() with no argument splits on RUNS of whitespace and drops the leading and
+// trailing empties; split(" ") does neither. They are different algorithms, not one
+// with a default.
+function pySSplitWS(s, maxsplit) {
+    var out = []
+    var i = 0
+    var n = 0
+    while (i < s.length) {
+        while (i < s.length && pySIsSpaceCh(s.charAt(i))) { i = i + 1 }
+        if (i >= s.length) { return out }
+        if (maxsplit >= 0 && n >= maxsplit) {
+            out.push(s.substring(i, s.length))
+            return out
+        }
+        var j = i
+        while (j < s.length && !pySIsSpaceCh(s.charAt(j))) { j = j + 1 }
+        out.push(s.substring(i, j))
+        n = n + 1
+        i = j
+    }
+    return out
+}
+
+function pySSplitSep(s, sep, maxsplit) {
+    var out = []
+    var start = 0
+    var n = 0
+    while (maxsplit < 0 || n < maxsplit) {
+        var at = pySFind(s, sep, start, s.length)
+        if (at < 0) { break }
+        out.push(s.substring(start, at))
+        start = at + sep.length
+        n = n + 1
+    }
+    out.push(s.substring(start, s.length))
+    return out
+}
+
+function pySReverse(a) {
+    var out = []
+    var i = a.length - 1
+    while (i >= 0) {
+        out.push(a[i])
+        i = i - 1
+    }
+    return out
+}
+
+function pySRSplitWS(s, maxsplit) {
+    var out = []
+    var e = s.length
+    var n = 0
+    while (e > 0) {
+        while (e > 0 && pySIsSpaceCh(s.charAt(e - 1))) { e = e - 1 }
+        if (e <= 0) { return pySReverse(out) }
+        if (maxsplit >= 0 && n >= maxsplit) {
+            out.push(s.substring(0, e))
+            return pySReverse(out)
+        }
+        var j = e
+        while (j > 0 && !pySIsSpaceCh(s.charAt(j - 1))) { j = j - 1 }
+        out.push(s.substring(j, e))
+        n = n + 1
+        e = j
+    }
+    return pySReverse(out)
+}
+
+function pySRSplitSep(s, sep, maxsplit) {
+    var out = []
+    var e = s.length
+    var n = 0
+    while (maxsplit < 0 || n < maxsplit) {
+        var at = pySRFind(s, sep, 0, e)
+        if (at < 0) { break }
+        out.push(s.substring(at + sep.length, e))
+        e = at
+        n = n + 1
+    }
+    out.push(s.substring(0, e))
+    return pySReverse(out)
+}
+
+// str.splitlines: the boundary set is wider than "\n" and "\r\n" is ONE break.
+function pySSplitLines(s, keepends) {
+    var out = []
+    var i = 0
+    var start = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        if (pySIsBreakCh(c)) {
+            var w = 1
+            if (c == 13 && i + 1 < s.length && s.charCodeAt(i + 1) == 10) { w = 2 }
+            if (keepends) { out.push(s.substring(start, i + w)) }
+            else { out.push(s.substring(start, i)) }
+            i = i + w
+            start = i
+        } else {
+            i = i + 1
+        }
+    }
+    if (start < s.length) { out.push(s.substring(start, s.length)) }
+    return out
+}
+
+// ---- rewriting ----
+
+function pySReplace(s, old, nw, cnt) {
+    var out = ""
+    var reps = 0
+    if (old.length == 0) {
+        // An empty pattern inserts between every character and at both ends.
+        if (cnt != 0) {
+            out = nw
+            reps = 1
+        }
+        var i = 0
+        while (i < s.length) {
+            var w = pySCPW(s, i)
+            out = out + s.substring(i, i + w)
+            i = i + w
+            if (cnt < 0 || reps < cnt) {
+                out = out + nw
+                reps = reps + 1
+            }
+        }
+        return out
+    }
+    var start = 0
+    while (cnt < 0 || reps < cnt) {
+        var at = pySFind(s, old, start, s.length)
+        if (at < 0) { break }
+        out = out + s.substring(start, at) + nw
+        start = at + old.length
+        reps = reps + 1
+    }
+    return out + s.substring(start, s.length)
+}
+
+// do_title (CPython Objects/unicodeobject.c): a character opens a word unless the
+// PREVIOUS one was cased, which is why "they're" titles to "They'Re".
+function pySTitle(s) {
+    var cs = pySChars(s)
+    var out = ""
+    var prev = false
+    var i = 0
+    while (i < cs.length) {
+        var ch = cs[i]
+        if (prev) { out = out + pySLoCh(ch) }
+        else { out = out + pySUpCh(ch) }
+        prev = pySIsCased(ch)
+        i = i + 1
+    }
+    return out
+}
+
+function pySIsTitle(s) {
+    var cs = pySChars(s)
+    var prev = false
+    var any = false
+    var i = 0
+    while (i < cs.length) {
+        var ch = cs[i]
+        if (pySIsUpCh(ch)) {
+            if (prev) { return false }
+            prev = true
+            any = true
+        } else if (pySIsLoCh(ch)) {
+            if (!prev) { return false }
+            prev = true
+            any = true
+        } else {
+            prev = false
+        }
+        i = i + 1
+    }
+    return any
+}
+
+function pySCapitalize(s) {
+    var cs = pySChars(s)
+    var out = ""
+    var i = 0
+    while (i < cs.length) {
+        if (i == 0) { out = out + pySUpCh(cs[i]) }
+        else { out = out + pySLoCh(cs[i]) }
+        i = i + 1
+    }
+    return out
+}
+
+function pySSwapCase(s) {
+    var cs = pySChars(s)
+    var out = ""
+    var i = 0
+    while (i < cs.length) {
+        var ch = cs[i]
+        if (pySIsUpCh(ch)) { out = out + pySLoCh(ch) }
+        else if (pySIsLoCh(ch)) { out = out + pySUpCh(ch) }
+        else { out = out + ch }
+        i = i + 1
+    }
+    return out
+}
+
+function pySMapCase(s, up) {
+    var cs = pySChars(s)
+    var out = ""
+    var i = 0
+    while (i < cs.length) {
+        if (up) { out = out + pySUpCh(cs[i]) }
+        else { out = out + pySLoCh(cs[i]) }
+        i = i + 1
+    }
+    return out
+}
+
+function pySExpandTabs(s, tab) {
+    var out = ""
+    var col = 0
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        if (c == 9) {
+            if (tab > 0) {
+                var pad = tab - (col - Math.floor(col / tab) * tab)
+                out = out + pySRepeat(" ", pad)
+                col = col + pad
+            }
+        } else if (c == 10 || c == 13) {
+            out = out + s.charAt(i)
+            col = 0
+        } else {
+            var w = pySCPW(s, i)
+            out = out + s.substring(i, i + w)
+            col = col + 1
+            i = i + w - 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// ---- padding ----
+
+function pySCenter(s, width, fill) {
+    var n = pySLen(s)
+    var marg = width - n
+    if (marg <= 0) { return s }
+    // CPython: left = marg / 2 + (marg & width & 1).
+    var left = Math.floor(marg / 2)
+    if (marg % 2 == 1 && width % 2 == 1) { left = left + 1 }
+    return pySRepeat(fill, left) + s + pySRepeat(fill, marg - left)
+}
+
+function pySJust(s, width, fill, right) {
+    var n = pySLen(s)
+    if (width <= n) { return s }
+    if (right) { return pySRepeat(fill, width - n) + s }
+    return s + pySRepeat(fill, width - n)
+}
+
+function pySZfill(s, width) {
+    var n = pySLen(s)
+    if (width <= n) { return s }
+    var sign = ""
+    var rest = s
+    if (s.length > 0) {
+        var c = s.charCodeAt(0)
+        if (c == 43 || c == 45) {
+            sign = s.substring(0, 1)
+            rest = s.substring(1, s.length)
+        }
+    }
+    return sign + pySRepeat("0", width - n) + rest
+}
+
+// ---- str.format ----
+//
+// The replacement-field grammar: {{ and }} are literals, and a field is
+// {name[.attr|[key]]*[!conv][:spec]}. The spec goes to the engine's own
+// pyFormat, so `.format()` and an f-string share one mini-language (and one set
+// of documented gaps - see the format chapter of this file).
+
+function pySAllDigits(t) {
+    if (t.length == 0) { return false }
+    var i = 0
+    while (i < t.length) {
+        var c = t.charCodeAt(i)
+        if (c < 48 || c > 57) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// One replacement field's body, without the braces. `auto` is the automatic
+// field counter, threaded through so that a nested width field ({:{}}) takes the
+// next argument the way CPython's does.
+function pySFmtOne(body, args, kw, auto) {
+    var nm = ""
+    var conv = ""
+    var spec = ""
+    var part = 0
+    var depth = 0
+    var k = 0
+    while (k < body.length) {
+        var c = body.charAt(k)
+        if (part < 2) {
+            if (c == "[") { depth = depth + 1 }
+            else if (c == "]") { depth = depth - 1 }
+            else if (depth == 0 && c == "!" && part == 0 && k + 1 < body.length && body.charAt(k + 1) != "=") {
+                part = 1
+                k = k + 1
+                continue
+            } else if (depth == 0 && c == ":") {
+                part = 2
+                k = k + 1
+                continue
+            }
+        }
+        if (part == 0) { nm = nm + c }
+        else if (part == 1) { conv = conv + c }
+        else { spec = spec + c }
+        k = k + 1
+    }
+    var at = auto
+    // The head: empty (automatic), all digits (positional) or a keyword.
+    var head = ""
+    var p = 0
+    while (p < nm.length && nm.charAt(p) != "." && nm.charAt(p) != "[") {
+        head = head + nm.charAt(p)
+        p = p + 1
+    }
+    var v = anytype
+    if (head == "") {
+        if (at >= args.length) { pySFail("IndexError: Replacement index " + at + " out of range") }
+        v = args[at]
+        at = at + 1
+    } else if (pySAllDigits(head)) {
+        var ix = parseInt(head, 10)
+        if (ix >= args.length) { pySFail("IndexError: Replacement index " + ix + " out of range") }
+        v = args[ix]
+    } else {
+        v = pySKwGet(kw, head)
+    }
+    // .attr and [key] accessors.
+    while (p < nm.length) {
+        var c2 = nm.charAt(p)
+        if (c2 == ".") {
+            var an = ""
+            p = p + 1
+            while (p < nm.length && nm.charAt(p) != "." && nm.charAt(p) != "[") {
+                an = an + nm.charAt(p)
+                p = p + 1
+            }
+            v = pySGetAttr(v, an)
+        } else if (c2 == "[") {
+            var key = ""
+            p = p + 1
+            while (p < nm.length && nm.charAt(p) != "]") {
+                key = key + nm.charAt(p)
+                p = p + 1
+            }
+            p = p + 1
+            if (pySAllDigits(key)) { v = pySGetItem(v, parseInt(key, 10)) }
+            else { v = pySGetItem(v, key) }
+        } else {
+            pySFail("ValueError: Invalid format field: " + nm)
+            p = p + 1
+        }
+    }
+    // A spec may itself carry replacement fields ("{:{w}}").
+    if (spec.indexOf("{") >= 0) {
+        var inner = pySFormatGo(spec, args, kw, at)
+        spec = inner["text"]
+        at = inner["auto"]
+    }
+    var res = {}
+    res["text"] = pySFormat1(v, spec, conv)
+    res["auto"] = at
+    return res
+}
+
+function pySFormatGo(s, args, kw, auto) {
+    var out = ""
+    var i = 0
+    var at = auto
+    while (i < s.length) {
+        var ch = s.charAt(i)
+        if (ch == "{") {
+            if (i + 1 < s.length && s.charAt(i + 1) == "{") {
+                out = out + "{"
+                i = i + 2
+                continue
+            }
+            var depth = 1
+            var j = i + 1
+            while (j < s.length) {
+                var c2 = s.charAt(j)
+                if (c2 == "{") { depth = depth + 1 }
+                else if (c2 == "}") {
+                    depth = depth - 1
+                    if (depth == 0) { break }
+                }
+                j = j + 1
+            }
+            if (depth != 0) { pySFail("ValueError: Single '{' encountered in format string") }
+            var r = pySFmtOne(s.substring(i + 1, j), args, kw, at)
+            out = out + r["text"]
+            at = r["auto"]
+            i = j + 1
+            continue
+        }
+        if (ch == "}") {
+            if (i + 1 < s.length && s.charAt(i + 1) == "}") {
+                out = out + "}"
+                i = i + 2
+                continue
+            }
+            pySFail("ValueError: Single '}' encountered in format string")
+        }
+        out = out + ch
+        i = i + 1
+    }
+    var res = {}
+    res["text"] = out
+    res["auto"] = at
+    return res
+}
+
+// ---- the dispatch table ----
+
+function pySOptInt(args, i, dflt) {
+    if (i >= args.length) { return dflt }
+    var v = args[i]
+    if (v === undefined || v === null) { return dflt }
+    return v | 0
+}
+
+function pySStrArg(v) {
+    if (typeof v == "string") { return v }
+    pySFail("TypeError: a str argument is required")
+    return ""
+}
+
+function pySFillArg(args, i) {
+    if (i >= args.length) { return " " }
+    var v = args[i]
+    if (v === undefined || v === null) { return " " }
+    var f = pySStrArg(v)
+    if (pySLen(f) != 1) { pySFail("TypeError: The fill character must be exactly one character long") }
+    return f
+}
+
+// isdigit / isalpha / isalnum / isspace / isascii, which share "empty is False
+// and every character must qualify".
+function pySAllCh(s, kind) {
+    var cs = pySChars(s)
+    if (cs.length == 0) { return false }
+    var i = 0
+    while (i < cs.length) {
+        var ch = cs[i]
+        var ok = false
+        if (kind == 1) { ok = pySIsDigitCh(ch) }
+        else if (kind == 2) { ok = pySIsAlphaCh(ch) }
+        else if (kind == 3) { ok = pySIsAlphaCh(ch) || pySIsDigitCh(ch) }
+        else { ok = pySIsSpaceCh(ch) }
+        if (!ok) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// islower / isupper: at least one cased character, and no cased character of the
+// other case. An uncased character is ignored, which is why "ab1".islower() is True.
+function pySCaseAll(s, up) {
+    var cs = pySChars(s)
+    var any = false
+    var i = 0
+    while (i < cs.length) {
+        var ch = cs[i]
+        if (pySIsCased(ch)) {
+            if (up) {
+                if (!pySIsUpCh(ch)) { return false }
+            } else {
+                if (!pySIsLoCh(ch)) { return false }
+            }
+            any = true
+        }
+        i = i + 1
+    }
+    return any
+}
+
+function pySIsAscii(s) {
+    var i = 0
+    while (i < s.length) {
+        if (s.charCodeAt(i) > 127) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+function pySJoin(s, seq) {
+    var out = ""
+    var i = 0
+    while (i < seq.length) {
+        if (i > 0) { out = out + s }
+        out = out + pySStrArg(seq[i])
+        i = i + 1
+    }
+    return out
+}
+
+// The names this table answers. The caller checks it FIRST so that a name it does
+// not know keeps whatever behaviour it had (the Go twin's Java-style .length /
+// .charAt / .substring / .indexOf / .equals / .isEmpty, which are not Python and
+// are left reachable rather than removed).
+function pySIsStrMethod(name) {
+    if (name == "upper" || name == "lower" || name == "casefold") { return true }
+    if (name == "title" || name == "capitalize" || name == "swapcase") { return true }
+    if (name == "strip" || name == "lstrip" || name == "rstrip") { return true }
+    if (name == "split" || name == "rsplit" || name == "splitlines") { return true }
+    if (name == "join" || name == "replace") { return true }
+    if (name == "find" || name == "rfind" || name == "index" || name == "rindex") { return true }
+    if (name == "count" || name == "startswith" || name == "endswith") { return true }
+    if (name == "isdigit" || name == "isdecimal" || name == "isnumeric") { return true }
+    if (name == "isalpha" || name == "isalnum" || name == "isspace") { return true }
+    if (name == "islower" || name == "isupper" || name == "istitle" || name == "isascii") { return true }
+    if (name == "center" || name == "ljust" || name == "rjust" || name == "zfill") { return true }
+    if (name == "expandtabs" || name == "encode") { return true }
+    if (name == "partition" || name == "rpartition") { return true }
+    if (name == "removeprefix" || name == "removesuffix") { return true }
+    if (name == "format" || name == "format_map") { return true }
+    return false
+}
+
+function pyStrMethod(s, name, args, kw) {
+    var n = s.length
+    if (name == "upper") { return pySMapCase(s, true) }
+    if (name == "lower" || name == "casefold") { return pySMapCase(s, false) }
+    if (name == "title") { return pySTitle(s) }
+    if (name == "capitalize") { return pySCapitalize(s) }
+    if (name == "swapcase") { return pySSwapCase(s) }
+
+    if (name == "strip" || name == "lstrip" || name == "rstrip") {
+        var chars = ""
+        var useWS = true
+        if (args.length > 0) {
+            if (args[0] !== undefined && args[0] !== null) {
+                chars = pySStrArg(args[0])
+                useWS = false
+            }
+        }
+        return pySStrip(s, chars, useWS, name != "rstrip", name != "lstrip")
+    }
+
+    if (name == "split" || name == "rsplit") {
+        var ms = pySOptInt(args, 1, -1)
+        var noSep = args.length == 0
+        if (!noSep) {
+            if (args[0] === undefined || args[0] === null) { noSep = true }
+        }
+        if (noSep) {
+            if (name == "split") { return pySSplitWS(s, ms) }
+            return pySRSplitWS(s, ms)
+        }
+        var sep = pySStrArg(args[0])
+        if (sep.length == 0) { pySFail("ValueError: empty separator") }
+        if (name == "split") { return pySSplitSep(s, sep, ms) }
+        return pySRSplitSep(s, sep, ms)
+    }
+    if (name == "splitlines") {
+        var ke = false
+        if (args.length > 0) { ke = pySTruthy(args[0]) }
+        return pySSplitLines(s, ke)
+    }
+    if (name == "join") {
+        var seq = args[0]
+        if (typeof seq == "string") { return pySJoin(s, pySChars(seq)) }
+        if (!pySIsArr(seq)) { pySFail("TypeError: can only join an iterable") }
+        return pySJoin(s, seq)
+    }
+    if (name == "replace") {
+        return pySReplace(s, pySStrArg(args[0]), pySStrArg(args[1]), pySOptInt(args, 2, -1))
+    }
+
+    if (name == "find" || name == "index" || name == "rfind" || name == "rindex") {
+        var sub = pySStrArg(args[0])
+        var st = pySAdjStart(pySOptInt(args, 1, 0), n)
+        var en = pySAdjEnd(pySOptInt(args, 2, n), n)
+        var at = -1
+        if (name == "find" || name == "index") { at = pySFind(s, sub, st, en) }
+        else { at = pySRFind(s, sub, st, en) }
+        if (at < 0) {
+            if (name == "index" || name == "rindex") { pySFail("ValueError: substring not found") }
+        }
+        return at
+    }
+    if (name == "count") {
+        return pySCount(s, pySStrArg(args[0]), pySAdjStart(pySOptInt(args, 1, 0), n),
+                        pySAdjEnd(pySOptInt(args, 2, n), n))
+    }
+    if (name == "startswith" || name == "endswith") {
+        var st2 = pySAdjStart(pySOptInt(args, 1, 0), n)
+        var en2 = pySAdjEnd(pySOptInt(args, 2, n), n)
+        var pv = args[0]
+        if (pySIsArr(pv)) {
+            var i2 = 0
+            while (i2 < pv.length) {
+                var one = pySStrArg(pv[i2])
+                if (name == "startswith") {
+                    if (pySStarts(s, one, st2, en2)) { return true }
+                } else {
+                    if (pySEnds(s, one, st2, en2)) { return true }
+                }
+                i2 = i2 + 1
+            }
+            return false
+        }
+        if (name == "startswith") { return pySStarts(s, pySStrArg(pv), st2, en2) }
+        return pySEnds(s, pySStrArg(pv), st2, en2)
+    }
+
+    if (name == "isdigit" || name == "isdecimal" || name == "isnumeric") { return pySAllCh(s, 1) }
+    if (name == "isalpha") { return pySAllCh(s, 2) }
+    if (name == "isalnum") { return pySAllCh(s, 3) }
+    if (name == "isspace") { return pySAllCh(s, 4) }
+    if (name == "islower") { return pySCaseAll(s, false) }
+    if (name == "isupper") { return pySCaseAll(s, true) }
+    if (name == "istitle") { return pySIsTitle(s) }
+    if (name == "isascii") { return pySIsAscii(s) }
+
+    if (name == "center") { return pySCenter(s, pySOptInt(args, 0, 0), pySFillArg(args, 1)) }
+    if (name == "ljust") { return pySJust(s, pySOptInt(args, 0, 0), pySFillArg(args, 1), false) }
+    if (name == "rjust") { return pySJust(s, pySOptInt(args, 0, 0), pySFillArg(args, 1), true) }
+    if (name == "zfill") { return pySZfill(s, pySOptInt(args, 0, 0)) }
+    if (name == "expandtabs") { return pySExpandTabs(s, pySOptInt(args, 0, 8)) }
+    // There is no bytes type in this value model, so encode() is the identity;
+    // CPython answers b'...'. Recorded in the header of this chapter.
+    if (name == "encode") { return s }
+
+    if (name == "partition" || name == "rpartition") {
+        var psep = pySStrArg(args[0])
+        if (psep.length == 0) { pySFail("ValueError: empty separator") }
+        var pat = -1
+        if (name == "partition") { pat = pySFind(s, psep, 0, n) }
+        else { pat = pySRFind(s, psep, 0, n) }
+        if (pat < 0) {
+            if (name == "partition") { return [s, "", ""] }
+            return ["", "", s]
+        }
+        return [s.substring(0, pat), psep, s.substring(pat + psep.length, n)]
+    }
+    if (name == "removeprefix") {
+        var pre = pySStrArg(args[0])
+        if (pre.length > 0 && pySStarts(s, pre, 0, n)) { return s.substring(pre.length, n) }
+        return s
+    }
+    if (name == "removesuffix") {
+        var suf = pySStrArg(args[0])
+        if (suf.length > 0 && pySEnds(s, suf, 0, n)) { return s.substring(0, n - suf.length) }
+        return s
+    }
+
+    if (name == "format") { return pySFormatGo(s, args, kw, 0)["text"] }
+    if (name == "format_map") {
+        var mp = undefined
+        if (args.length > 0) { mp = args[0] }
+        return pySFormatGo(s, [], mp, 0)["text"]
+    }
+    pySFail("unknown String method: " + name)
+    return ""
 }

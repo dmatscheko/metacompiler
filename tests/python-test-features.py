@@ -608,6 +608,184 @@ check("lit-neg-2p53p1", str(-9007199254740993), "-9007199254740993")
 check("lit-2p53-exact", str(9007199254740992) + " " + str(0x20000000000000), "9007199254740992 9007199254740992")
 check("lit-small-radix", str(0xff) + " " + str(0o17) + " " + str(0b1011), "255 15 11")
 
+
+# ----- str's method library (docs/todo.md 1.5) -----
+# Every operand is read out of a list so the constant folder cannot answer these
+# at compile time. The semantics, not just the names, are what these pin: the two
+# split algorithms, strip's character SET, find-vs-index, and title's word rule.
+SS = ["  Hello World  ", "a,b,,c", "abc", " a  b ", "they're bill's 12ab",
+      "xyxhixy", "-42", "a\nb\r\nc", "Ab Cd", "aaa", "ABC", "café", "MiXeD"]
+check("str-upper", SS[2].upper(), "ABC")
+check("str-lower", SS[10].lower(), "abc")
+check("str-upper-latin1", SS[11].upper(), "CAFÉ")
+check("str-casefold", SS[10].casefold(), "abc")
+# split() with NO argument splits on runs of whitespace and drops the empties;
+# split(" ") does neither. Two algorithms, not one with a default.
+check("str-split-none", str(SS[3].split()), "['a', 'b']")
+check("str-split-space", str(SS[3].split(" ")), "['', 'a', '', 'b', '']")
+check("str-split-sep", str(SS[1].split(",")), "['a', 'b', '', 'c']")
+check("str-split-max", str(SS[1].split(",", 1)), "['a', 'b,,c']")
+check("str-rsplit-max", str(SS[1].rsplit(",", 1)), "['a,b,', 'c']")
+check("str-split-none-max", str(SS[3].split(None, 1)), "['a', 'b ']")
+check("str-rsplit-none-max", str(SS[3].rsplit(None, 1)), "[' a', 'b']")
+check("str-split-empty", str("".split(",")), "['']")
+check("str-split-empty-none", str("".split()), "[]")
+# strip(chars) is a SET of characters, not a prefix.
+check("str-strip-ws", SS[0].strip(), "Hello World")
+check("str-lstrip-set", SS[5].lstrip("xy"), "hixy")
+check("str-rstrip-set", SS[5].rstrip("xy"), "xyxhi")
+check("str-strip-set", "abcba".strip("ab"), "c")
+check("str-strip-set-all", "abab".strip("ab"), "")
+check("str-join", "|".join(["a", "b", "c"]), "a|b|c")
+check("str-join-empty", "|".join([]), "")
+check("str-join-str", "-".join(SS[2]), "a-b-c")
+check("str-replace", SS[9].replace("a", "b", 2), "bba")
+check("str-replace-empty-pat", SS[2].replace("", "-"), "-a-b-c-")
+check("str-replace-empty-pat-max", SS[2].replace("", "-", 2), "-a-bc")
+check("str-replace-drop", SS[9].replace("a", ""), "")
+# find answers -1 where index raises; the bounds follow CPython's ADJUST_INDICES,
+# so a start past the end is -1 even for the empty needle.
+check("str-find", SS[2].find("c"), 2)
+check("str-find-miss", SS[2].find("z"), -1)
+check("str-find-bounded", SS[2].find("c", 0, 2), -1)
+check("str-find-empty-at-end", SS[2].find("", 3), 3)
+check("str-find-empty-past-end", SS[2].find("", 4), -1)
+check("str-find-neg-start", SS[2].find("c", -1), 2)
+check("str-rfind", "abcabc".rfind("b"), 4)
+check("str-rfind-empty", SS[2].rfind(""), 3)
+check("str-index", SS[2].index("b"), 1)
+check("str-rindex", "abcabc".rindex("a"), 3)
+check("str-count", "aaa".count("aa"), 1)
+check("str-count-empty", SS[2].count(""), 4)
+check("str-count-bounded", "aaa".count("a", 1), 2)
+check_true("str-startswith", SS[2].startswith("ab"))
+check_true("str-startswith-tuple", SS[2].startswith(("x", "a")))
+check_true("str-endswith-bounded", SS[2].endswith("bc", 0, 3))
+check_true("str-not-endswith-bounded", not SS[2].endswith("bc", 0, 2))
+# title's word boundary is "the previous character was not cased".
+check("str-title", SS[4].title(), "They'Re Bill'S 12Ab")
+check("str-capitalize", SS[0].capitalize(), "  hello world  ")
+check("str-swapcase", SS[12].swapcase(), "mIxEd")
+check_true("str-istitle", SS[8].istitle())
+check_true("str-not-istitle", not SS[12].istitle())
+check_true("str-isdigit", "123".isdigit())
+check_true("str-isdigit-empty", not "".isdigit())
+check_true("str-isalpha", SS[2].isalpha())
+check_true("str-isalpha-latin1", SS[11].isalpha())
+check_true("str-isalnum", "ab1".isalnum())
+check_true("str-isspace", "  ".isspace())
+check_true("str-islower", "ab1".islower())
+check_true("str-isupper", "AB1".isupper())
+check_true("str-islower-uncased-only", not "123".islower())
+check_true("str-isascii", SS[2].isascii())
+check_true("str-not-isascii", not SS[11].isascii())
+# center puts the ODD extra pad on the left only when the width is odd too.
+check("str-center-odd", SS[2].center(7, "*"), "**abc**")
+check("str-center-even", "ab".center(7, "*"), "***ab**")
+check("str-center-narrow", SS[2].center(2), "abc")
+check("str-ljust", SS[2].ljust(5, "."), "abc..")
+check("str-rjust", SS[2].rjust(5, "."), "..abc")
+check("str-zfill", SS[6].zfill(5), "-0042")
+check("str-zfill-narrow", SS[6].zfill(1), "-42")
+check("str-zfill-empty", "".zfill(3), "000")
+# splitlines: \r\n is ONE break and the boundary set is wider than \n.
+check("str-splitlines", str(SS[7].splitlines()), "['a', 'b', 'c']")
+check("str-splitlines-keep", "|".join("a\nb\n".splitlines(True)).replace("\n", "N"), "aN|bN")
+check("str-splitlines-empty", str("".splitlines()), "[]")
+check("str-partition", str(list(SS[2].partition("b"))), "['a', 'b', 'c']")
+check("str-partition-miss", str(list(SS[2].partition("z"))), "['abc', '', '']")
+check("str-rpartition-miss", str(list(SS[2].rpartition("z"))), "['', '', 'abc']")
+check("str-rpartition", str(list("abcb".rpartition("b"))), "['abc', 'b', '']")
+check("str-removeprefix", SS[2].removeprefix("ab"), "c")
+check("str-removeprefix-miss", SS[2].removeprefix("z"), "abc")
+check("str-removesuffix", SS[2].removesuffix("bc"), "a")
+check("str-expandtabs", "a\tb".expandtabs(), "a       b")
+check("str-expandtabs-4", "ab\tc".expandtabs(4), "ab  c")
+# format shares the mini-language with the f-strings.
+check("str-format-auto", "{}-{}".format(SS[2], 3), "abc-3")
+check("str-format-index", "{1}{0}{1}".format("a", "b"), "bab")
+check("str-format-kw", "{x}/{y}".format(x=1, y="q"), "1/q")
+check("str-format-spec", "{0:>6}".format(SS[2]), "   abc")
+check("str-format-fill", "{0:*^7}".format(SS[2]), "**abc**")
+check("str-format-braces", "{{{0}}}".format(1), "{1}")
+check("str-format-item", "{0[1]}".format([7, 8]), "8")
+check("str-format-nested", "{0:{1}}".format(SS[2], ">5"), "  abc")
+check("str-format-conv", "{0!r}".format(SS[2]), "'abc'")
+
+
+# ----- for-of drives a generator LAZILY (docs/todo.md 1.7) -----
+# js_pyiter / iterToList MATERIALIZE, so an endless generator used to hang the
+# interpreter and hit -max-steps in the compiler even when the body broke out of
+# it on the first round. A generator is now STEPPED - the same shape C#'s foreach
+# has always had - and everything else still normalizes as before.
+def nat_lazy():
+    i = 0
+    while True:
+        yield i
+        i = i + 1
+
+def upto_lazy(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+lazy_out = []
+for lz in nat_lazy():
+    lazy_out.append(lz)
+    if lz >= 3:
+        break
+check("gen-for-infinite", str(lazy_out), "[0, 1, 2, 3]")
+lazy_first = -1
+for lz in nat_lazy():
+    lazy_first = lz
+    break
+check("gen-for-first-only", lazy_first, 0)
+check("gen-for-finite", str([lz for lz in upto_lazy(3)]), "[0, 1, 2]")
+lazy_sum = 0
+for lz in upto_lazy(4):
+    lazy_sum = lazy_sum + lz
+else:
+    lazy_sum = lazy_sum + 100
+check("gen-for-else", lazy_sum, 106)
+lazy_cont = []
+for lz in upto_lazy(5):
+    if lz % 2 == 0:
+        continue
+    lazy_cont.append(lz)
+check("gen-for-continue", str(lazy_cont), "[1, 3]")
+# The non-generator sources still take the array path: a dict iterates its keys,
+# a string its characters, a set its elements.
+check("gen-for-dict", str([lz for lz in {"a": 1, "b": 2}]), "['a', 'b']")
+check("gen-for-str", str([lz for lz in "hi"]), "['h', 'i']")
+lazy_nested = []
+for lz in upto_lazy(2):
+    for lz2 in upto_lazy(2):
+        lazy_nested.append(lz * 10 + lz2)
+check("gen-for-nested", str(lazy_nested), "[0, 1, 10, 11]")
+
+# ----- integer arithmetic PROMOTES past 2^53 (docs/todo.md 1.1) -----
+# A plain Python int is a double, exact to 2^53 and silently rounding above it.
+# 54 of the 55 differing rows of a 626-literal probe against CPython 3.14.6 were
+# the `*` column. Every operand is read out of a list so the constant folder
+# cannot answer the assertion instead of the runtime.
+bigv = [9007199254740992, 1, 2, 3037000500, 94906266, 123456789, -9007199254740992,
+        4503599627370496, 987654321]
+check("int-add-2p53", str(bigv[0] + bigv[1]), "9007199254740993")
+check("int-add-2p53-folded", str(9007199254740992 + 1), "9007199254740993")
+check("int-sub-neg-2p53", str(bigv[6] - bigv[1]), "-9007199254740993")
+check("int-mul-2p53", str(bigv[0] * bigv[2]), "18014398509481984")
+check("int-mul-square", str(bigv[3] * bigv[3]), "9223372037000250000")
+check("int-mul-square2", str(bigv[4] * bigv[4]), "9007199326062756")
+check("int-mul-big", str(bigv[5] * bigv[8]), "121932631112635269")
+check("int-add-halves", str(bigv[7] + bigv[7] + bigv[1]), "9007199254740993")
+check("int-mul-neg", str(bigv[6] * bigv[3]), "-27354868640248020074496000")
+check("int-still-exact", str(bigv[5] + bigv[8]) + " " + str(bigv[5] * bigv[2]), "1111111110 246913578")
+check("int-add-str-untouched", "99999999999999999999" + "9", "999999999999999999999")
+check("int-mul-list-untouched", str([0] * 3), "[0, 0, 0]")
+check("int-mul-str-untouched", "ab" * 3, "ababab")
+
+
 check("combined-pipeline", f"{transform([1, 2, -3])}", "['o1', 'e2', 'x']")
 
 print(f"features: {checks[0]} checks, {fails[0]} failures")

@@ -2843,25 +2843,68 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             hidCount++
             var iName = "$i" + hidCount
             var aName = "$a" + hidCount
+            var gName = "$g" + hidCount
+            var vName = "$v" + hidCount
             var r = listT(b)
             b = r.b
-            // js_pyiter normalizes the iterable: dicts iterate their keys, strings their chars.
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), callExt(b, "js_pyiter", [r.v])])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+            // LAZY ITERATION over a generator (docs/todo.md 1.7). js_pyiter
+            // MATERIALIZES its argument, so `for x in endless(): ... break` never
+            // reached the body at all - it hung in the interpreter and hit
+            // -max-steps in the compiler. A GENERATOR is therefore kept raw and
+            // STEPPED, one value per round, through the js_get(g, "next") /
+            // {value, done} protocol the coroutine primitive already answers;
+            // everything else still goes through js_pyiter, which normalizes a
+            // dict to its keys and a string to its characters. C# lowers foreach
+            // the same way and owes layer 2 nothing for it - see
+            // csharp-to-llvm-ir.abnf's makeForEach, which is where this shape is from.
+            //
+            // Which of the two the loop is on is decided ONCE, into a hidden slot,
+            // and the head tests it with an ICmp against the `true` handle - no
+            // extern call and no re-probe per round, so the array path pays one
+            // machine compare more than it did.
+            var isGenV = callExt(b, "js_seq",
+                [callExt(b, "js_typeof", [callExt(b, "js_get", [r.v, emitStr(b, "next")])]),
+                 emitStr(b, "function")])
+            var genB = curF.NewBlock("")
+            var arrB = curF.NewBlock("")
             var headB = curF.NewBlock("")
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, gName), isGenV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, vName), hUndef])
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, isGenV, handle(3)), genB, arrB)
+            callExt(genB, "js_scope_decl", [curScopeV, emitStr(genB, aName), r.v])
+            genB.NewBr(headB)
+            callExt(arrB, "js_scope_decl", [curScopeV, emitStr(arrB, aName), callExt(arrB, "js_pyiter", [r.v])])
+            arrB.NewBr(headB)
+            var gHeadB = curF.NewBlock("")
+            var gSetB = curF.NewBlock("")
+            var aHeadB = curF.NewBlock("")
+            var aSetB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
-            b.NewBr(headB)
             var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
             var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
-            var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
-            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
-            var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
-            var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
+            var gV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, gName)])
+            headB.NewCondBr(headB.NewICmp(llvm.enum.IPredEQ, gV, handle(3)), gHeadB, aHeadB)
+            // g.next(): {value, done}. StopIteration is the generator's own affair -
+            // js_pymcall raises it for an explicit next()/send(); a for loop reads
+            // `done` and leaves.
+            var stV = callExt(gHeadB, "js_call", [callExt(gHeadB, "js_get", [aV, emitStr(gHeadB, "next")]),
+                                                  hUndef, callExt(gHeadB, "js_arr_new", [])])
+            gHeadB.NewCondBr(truthy(gHeadB, callExt(gHeadB, "js_not",
+                [callExt(gHeadB, "js_get", [stV, emitStr(gHeadB, "done")])])), gSetB, exitB)
+            callExt(gSetB, "js_scope_set", [curScopeV, emitStr(gSetB, vName),
+                                            callExt(gSetB, "js_get", [stV, emitStr(gSetB, "value")])])
+            gSetB.NewBr(bodyB)
+            var lenV = callExt(aHeadB, "js_get", [aV, emitStr(aHeadB, "length")])
+            aHeadB.NewCondBr(truthy(aHeadB, callExt(aHeadB, "js_lt", [iV, lenV])), aSetB, exitB)
+            callExt(aSetB, "js_scope_set", [curScopeV, emitStr(aSetB, vName),
+                                            callExt(aSetB, "js_get", [aV, iV])])
+            aSetB.NewBr(bodyB)
             // The loop target is a full target list, so it goes through the same
             // writer an assignment uses (which may unpack, and may add blocks).
-            var tb = writeTarget(bodyB, tgt, callExt(bodyB, "js_get", [aV2, iV2]))
+            var tb = writeTarget(bodyB, tgt, callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, vName)]))
             var afterB = exitB
             if (elseT != null) { afterB = curF.NewBlock("") }
             loopStack.push({cont: postB, brk: afterB})
