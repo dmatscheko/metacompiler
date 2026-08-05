@@ -82,6 +82,32 @@ class Bird extends Animal {
 
 record Pair(int first, int second) { }
 
+// A record's generated equals compares a floating-point component with
+// Double.compare (NaN equals NaN, +0.0 does not equal -0.0) and a reference
+// component with Objects.equals (which dispatches - a nested record compares
+// component-wise, a user-declared equals is called). js_jvaleq is all three.
+record Boxed(double d, long l) { }
+record Holder(Pair p, Eq e) { }
+
+class Eq {
+    final int v;
+
+    Eq(int v) {
+        this.v = v;
+    }
+
+    public boolean equals(Object o) {
+        if (!(o instanceof Eq)) {
+            return false;
+        }
+        return ((Eq) o).v == this.v;
+    }
+
+    public int hashCode() {
+        return this.v;
+    }
+}
+
 class Boom {
     int code;
 
@@ -447,6 +473,24 @@ public class Main {
         Main.check("class-upcast-dispatch", upcast.name().equals("bird"));
         Pair pr = new Pair(6, 7);
         Main.check("record-accessors", pr.first() == 6 && pr.first() * pr.second() == 42);
+        // JLS 8.10.3, every operand read out of an array so the folder cannot
+        // answer it: a NaN component EQUAL, a signed-zero pair UNEQUAL, a boxed
+        // long by value, a nested record component-wise, a user equals CALLED,
+        // and equals(null) false rather than an abort.
+        double[] rz = {0.0, -0.0, 1.0};
+        long[] rl = {5000000000L, 5000000000L};
+        double[] rn = {rz[0] / rz[0], rz[1] / rz[1]};
+        Main.check("record-equals-double",
+                   new Boxed(rn[0], rl[0]).equals(new Boxed(rn[1], rl[1]))
+                && !new Boxed(rz[0], rl[0]).equals(new Boxed(rz[1], rl[1]))
+                && new Boxed(rz[2], rl[0]).equals(new Boxed(rz[2], rl[1])));
+        Pair[] rp = {new Pair(6, 7), new Pair(6, 7), new Pair(6, 8)};
+        Eq[] re = {new Eq(1), new Eq(1), new Eq(2)};
+        Main.check("record-equals-reference",
+                   new Holder(rp[0], re[0]).equals(new Holder(rp[1], re[1]))
+                && !new Holder(rp[0], re[0]).equals(new Holder(rp[2], re[1]))
+                && !new Holder(rp[0], re[0]).equals(new Holder(rp[1], re[2]))
+                && !new Holder(rp[0], re[0]).equals(null));
 
         // ----- statics and recursion -----
         Main.check("fn-early-return", Main.sign(-9) == -1 && Main.sign(9) == 1);

@@ -3947,7 +3947,8 @@ HasStatic   = :script(~~
     }
     // A record's value equality: same class descriptor and every component equal.
     //
-    // The component test is js_jchareq, NOT js_seq. js_jchareq IS js_seq unless a
+    // The component test WAS js_jchareq, not js_seq, and js_jvaleq below keeps
+    // that arm: js_jchareq IS js_seq unless a
     // char meets something, and a char is where the two engines part company: the
     // Go twin's char is a comparable struct that === settles by value, while layer
     // 2's is a {__char} BOX that === settles by identity (chapter 7.9 of the
@@ -3957,32 +3958,57 @@ HasStatic   = :script(~~
     // tests/java-test-full.java rec-char / rec-char2 are the assertions, and both
     // fail natively at df9199a.
     //
-    // Still open at this site, measured against java 24.0.2 and NOT fixed here
-    // because each needs a runtime extern that only abnf/jsrt.go can define:
-    //   - a double / float component is compared by ===, where a record uses
-    //     Double.compare(a,b)==0 - so NaN records compare UNEQUAL here (all three
-    //     of our engines) and +0.0 / -0.0 records compare EQUAL (both compiler
-    //     engines) where real java says the opposite in both directions;
-    //   - a reference component is compared by identity, where a record uses
-    //     Objects.equals - so a record holding a record, or any object with a
-    //     user-declared equals, compares unequal in BOTH compiler engines. The
-    //     interpreter half's jValEq recurses into a nested record and gets that
-    //     one right, so it is an interp-vs-run divergence as well.
-    // csharp-to-llvm-ir.abnf's $valeq (a recursive IR function, emitted once per
-    // program that declares a record) is the shape that answers all of this.
+    // The rest of JLS 8.10.3 is js_jvaleq, ONE new extern (abnf/jsrtjava.go plus
+    // languages/lib/java-rt.metajs), because none of it can be spelled with the
+    // externs that already exist. It replaces the js_jchareq above and answers,
+    // per component:
+    //   - a double / float component with Double.compare(a,b)==0, where === said
+    //     NaN records are UNEQUAL (all three engines) and +0.0 / -0.0 records are
+    //     EQUAL (both compiler engines) - real java 24.0.2 says the opposite in
+    //     both directions, measured;
+    //   - a reference component with Objects.equals, where === said identity - so
+    //     a record holding a record (`record Line(Dot a, Dot b)`) and any object
+    //     with a user-declared equals compared UNEQUAL in both compiler engines.
+    //     A class without an equals, and an array, keep identity: Object.equals
+    //     IS identity and an array does not override it. (java-interpreter.abnf's
+    //     jValEq carries the same three arms; it recursed into a nested record
+    //     already but had every other case wrong, boxed longs included.)
+    // The shape is csharp-to-llvm-ir.abnf's $valeq turned inside out: Java needs
+    // no recursive IR helper, because Objects.equals DISPATCHES - the nested
+    // record's own generated equals is what compares its components, and the
+    // recursion happens through the class descriptor rather than in this file.
+    //
+    // The class test is a branch rather than a js_jband chain because `equals`
+    // takes an Object: `r.equals(null)` is a legal call that must answer false,
+    // and js_get of __class on a null reference ABORTS (it did: "member '__class'
+    // of null" killed the whole program in both compiler engines while the
+    // interpreter half and java answered false).
     function emitRecordEquals(clsName, comps) {
         var body = function(b) {
             var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
             var otherV = callExt(b, "js_arg", [curF.Params[1], handle(1)])
-            var okV = callExt(b, "js_seq", [callExt(b, "js_get", [thisV, emitStr(b, "__class")]),
-                                            callExt(b, "js_get", [otherV, emitStr(b, "__class")])])
+            var noB = curF.NewBlock("")     // the one 'not equal' exit
+            var s1 = curF.NewBlock("")
+            var s2 = curF.NewBlock("")
+            // null (and undefined, which js_eq folds into it), then a non-object
+            // argument - a String, an array, a boxed primitive - then the class.
+            b.NewCondBr(truthy(b, callExt(b, "js_eq", [otherV, hNull])), noB, s1)
+            s1.NewCondBr(truthy(s1, callExt(s1, "js_seq", [callExt(s1, "js_typeof", [otherV]),
+                                                           emitStr(s1, "object")])), s2, noB)
+            var cur = curF.NewBlock("")
+            s2.NewCondBr(truthy(s2, callExt(s2, "js_seq",
+                [callExt(s2, "js_get", [thisV, emitStr(s2, "__class")]),
+                 callExt(s2, "js_get", [otherV, emitStr(s2, "__class")])])), cur, noB)
             for (var i = 0; i < comps.length; i++) {
-                var kV = emitStr(b, comps[i])
-                var eqV = callExt(b, "js_jchareq", [callExt(b, "js_get", [thisV, kV]),
-                                                    callExt(b, "js_get", [otherV, kV])])
-                okV = callExt(b, "js_jband", [okV, eqV])
+                var kV = emitStr(cur, comps[i])
+                var eqV = callExt(cur, "js_jvaleq", [callExt(cur, "js_get", [thisV, kV]),
+                                                     callExt(cur, "js_get", [otherV, kV])])
+                var nxt = curF.NewBlock("")
+                cur.NewCondBr(truthy(cur, eqV), nxt, noB)
+                cur = nxt
             }
-            b.NewRet(okV)
+            cur.NewRet(hTrue)
+            noB.NewRet(hFalse)
             return deadBlock()
         }
         return emitFunc([], body, true, null, undefined, null)

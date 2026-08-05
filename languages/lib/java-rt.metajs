@@ -2,9 +2,9 @@
 // docs/runtime-next-plan.md part 3, for the third language after the Lua pilot
 // and PHP.
 //
-// languages/java-to-llvm-ir.abnf emits handle IR that calls 54 js_* externs over
+// languages/java-to-llvm-ir.abnf emits handle IR that calls 55 js_* externs over
 // every tests/java-test-*.java; 29 of them are generic primitives
-// languages/lib/runtime.c already provides (the C floor, layer 1). The other 25
+// languages/lib/runtime.c already provides (the C floor, layer 1). The other 26
 // are here.
 //
 // Compile with:
@@ -1315,7 +1315,8 @@ function js_jvcmp(op, l, r) {
 
 // js_jchareq with the same promotion. The emitter calls THIS for `==` and `!=`;
 // js_jchareq itself stays as it is, because it is shared with kotlin (which has
-// no float width) and the record-component and switch-label sites still use it.
+// no float width) and the switch-label site still uses it. (The record-component
+// site used to; it calls js_jvaleq below now.)
 function js_jvchareq(l, r) {
     // Two host calls before the delegation, for the same reason js_jvcmp spells
     // its integral arm out: everything that is not a float box must reach
@@ -1324,6 +1325,47 @@ function js_jvchareq(l, r) {
         if (jvFloPromotes(l, r)) { return jvF32Round(rtjNum(l)) == jvF32Round(rtjNum(r)) }
     }
     return js_jchareq(l, r)
+}
+
+// ONE component of a record's canonical equals, per JLS 8.10.3 - and none of the
+// three arms is ===. The twin is m["js_jvaleq"] in abnf/jsrtjava.go, arm for arm.
+//
+//   a double / float component   Double.compare / Float.compare == 0, so NaN
+//                                EQUALS NaN and +0.0 does NOT equal -0.0
+//   any other primitive          == , chars included (js_jchareq)
+//   a reference                  Objects.equals(a, b): identity, then the
+//                                component's OWN equals - which for a nested
+//                                record is the generated one, so the recursion
+//                                is a DISPATCH and this file needs no loop.
+//
+// A class that declares no equals, and an array (which does not override it),
+// keep identity, because Object.equals is identity.
+function js_jvaleq(a, b) {
+    if (floIs(a) && floIs(b)) { return jvDblCmpEq(floNum(a), floNum(b)) }
+    if (js_jchareq(a, b) === true) { return true }
+    if (a === undefined || a === null) { return false }
+    if (typeof a != "object") { return false }
+    if (Array.isArray(a)) { return false }
+    var mm = rtFindMethod(a["__class"], "equals")
+    if (typeof mm != "function") { return false }
+    return mm.apply(undefined, rtPrepend(a, [b])) === true
+}
+
+// Double.compare(x, y) == 0, i.e. doubleToLongBits equality: one NaN, and the
+// sign of a zero is part of the value. ONE body serves both widths - a float box
+// already holds the binary32-rounded value, and two distinct binary32 values are
+// two distinct doubles. The sign of a zero is invisible to a comparison, so it is
+// read the way dart-rt.metajs's dtSignBit reads it.
+function jvDblCmpEq(x, y) {
+    if (x !== x) { return y !== y }
+    if (y !== y) { return false }
+    if (x === 0 && y === 0) { return jvSignBit(x) === jvSignBit(y) }
+    return x === y
+}
+function jvSignBit(d) {
+    if (d < 0) { return true }
+    if (d === 0) { return 1 / d < 0 }
+    return false
 }
 
 // A cast or a declared integral type: (value, bits).

@@ -408,6 +408,22 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 	return o
 }
 
+// Double.compare(x, y) == 0, which is Double.equals and therefore what a record
+// component of type double or float is compared with. It is doubleToLongBits
+// equality: every NaN collapses to one bit pattern, so NaN equals NaN, and the
+// sign of a zero is part of the value, so +0.0 does not equal -0.0. ONE body
+// serves both widths - a float box already holds the binary32-rounded value
+// (jvmFround), and distinct binary32 values are distinct float64 values.
+func jvDoubleCompareEq(x, y float64) bool {
+	if math.IsNaN(x) || math.IsNaN(y) {
+		return math.IsNaN(x) && math.IsNaN(y)
+	}
+	if x == 0 && y == 0 {
+		return math.Signbit(x) == math.Signbit(y)
+	}
+	return x == y
+}
+
 func init() {
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		u := rt.unwrap
@@ -630,6 +646,58 @@ func init() {
 		m["js_jvwrite"] = func(a []uint64) uint64 {
 			fmt.Fprint(outWriter, wtf8Clean(jvpFirst(rt, u(a[0]))))
 			return 0
+		}
+		// ONE record component of two record instances, compared the way JLS
+		// 8.10.3 says a record's canonical equals compares it - which is NOT ===
+		// in either direction:
+		//
+		//   a float / double component  Float.compare / Double.compare == 0, so
+		//                               NaN EQUALS NaN and +0.0 does NOT equal
+		//                               -0.0. Both are the opposite of ===.
+		//   any other primitive         ==  (js_jchareq, chars included)
+		//   a reference                 Objects.equals(a, b), i.e. a == b || (a
+		//                               != null && a.equals(b)) - so a nested
+		//                               record compares component-wise and a
+		//                               class with a user-declared equals uses
+		//                               it, where identity said unequal.
+		//
+		// A class WITHOUT an equals (and an array, which does not override it)
+		// keeps identity, because Object.equals is identity. The layer-2 twin is
+		// js_jvaleq in languages/lib/java-rt.metajs and it matches arm for arm.
+		m["js_jvaleq"] = func(a []uint64) uint64 {
+			x, y := u(a[0]), u(a[1])
+			if fx, ok := x.(jsJFlo); ok {
+				if fy, ok2 := y.(jsJFlo); ok2 {
+					return boolH(jvDoubleCompareEq(fx.f, fy.f))
+				}
+			}
+			if m["js_jchareq"](a) == jsHTrue {
+				return jsHTrue
+			}
+			o, ok := x.(*jsObject)
+			if !ok {
+				return jsHFalse
+			}
+			// The __class / __super walk rt.memberCall uses, with the guard < 64
+			// cap chapter 7.9 of the manual keeps everywhere else (a cyclic
+			// __super hangs the oracle, not us).
+			cls := o.props["__class"]
+			for guard := 0; guard < 64; guard++ {
+				clsObj, isObj := cls.(*jsObject)
+				if !isObj {
+					return jsHFalse
+				}
+				if eq, has := clsObj.props["equals"]; has && isCallable(eq) {
+					// `=== true`, not truthiness: equals is declared boolean and
+					// layer 2's twin cannot spell truthiness on an anytype
+					// without disagreeing with this line for a program the
+					// grammar accepts and javac would not.
+					res, isBool := rt.call(eq, jsUndef, []interface{}{x, y}).(bool)
+					return boolH(isBool && res)
+				}
+				cls = clsObj.props["__super"]
+			}
+			return jsHFalse
 		}
 		// String.valueOf(x) and the string form used by `+`.
 		m["js_jvstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.jvpStr(u(a[0]))) }

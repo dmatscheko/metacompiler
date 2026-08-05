@@ -4324,17 +4324,42 @@ HasStatic   = :script(~~
             return undefined
         }
     }
-    // Value equality: identity, then chars by code, then records component-wise.
+    // ONE component of a record's canonical equals, per JLS 8.10.3. Every value
+    // this language has a box for used to fall off the end of this function and
+    // answer FALSE for two equal values - a double, a float, a long, a byte and a
+    // short all did, measured against java 24.0.2 - because identity is the only
+    // test a box passes. The three arms are the twin of js_jvaleq
+    // (abnf/jsrtjava.go and languages/lib/java-rt.metajs):
+    //   - a double / float component compares with Double.compare(a,b)==0, so NaN
+    //     EQUALS NaN and +0.0 does NOT equal -0.0 (both the opposite of ===);
+    //   - the other primitives compare by value, chars and longs included;
+    //   - a reference compares with Objects.equals, i.e. identity and then the
+    //     component's OWN equals. That is a DISPATCH, so a nested record still
+    //     recurses (this half always got that one case right, through the arm
+    //     that used to walk __record here) and a class with a user-declared
+    //     equals now uses it, which no engine did.
     function jValEq(a, b) {
+        if (jIsFlo(a) && jIsFlo(b)) { return jDblCmpEq(a.__flo, b.__flo) }
         if (a === b) { return true }
         if (a === null || a === undefined || b === null || b === undefined) { return false }
-        if (typeof a != "object" || typeof b != "object") { return false }
+        if (typeof a != "object") { return false }
         if (a.__char !== undefined || b.__char !== undefined) { return jNum(a) === jNum(b) }
-        if (a.__class != undefined && a.__class === b.__class && a.__class.__record != undefined) {
-            var ps = a.__class.__record
-            for (var i = 0; i < ps.length; i++) { if (!jValEq(a[ps[i]], b[ps[i]])) { return false } }
-            return true
-        }
+        if (jIsSz(a) && jIsSz(b)) { return jCmp("==", a, b) === true }
+        var m = jFindMember(a.__class, "equals")
+        if (typeof m == "function") { return m(a, b) === true }
+        return false
+    }
+    // Double.compare(x, y) == 0: one NaN, and the sign of a zero is part of the
+    // value. A comparison cannot see that sign, so 1/x is what reads it.
+    function jDblCmpEq(x, y) {
+        if (x !== x) { return y !== y }
+        if (y !== y) { return false }
+        if (x === 0 && y === 0) { return jZeroNeg(x) === jZeroNeg(y) }
+        return x === y
+    }
+    function jZeroNeg(d) {
+        if (d < 0) { return true }
+        if (d === 0) { return 1 / d < 0 }
         return false
     }
     function makeRecordEquals(params) {

@@ -359,6 +359,31 @@ record Named(String name) {
 }
 record Pair2<T>(T first, T second) {}
 record Glyph(char c, int n) {}
+// The component types the generated equals used to compare with ===, and the
+// three shapes that answers wrongly: a floating-point component (Double.compare,
+// not ==), a boxed integral one (a long is a box at every magnitude, so identity
+// answered false for two equal values in the interpreter half) and a REFERENCE
+// one (Objects.equals dispatches the component's own equals).
+record RNum(double d, float f) {}
+record RWide(long l, byte b, short s) {}
+record Inner12(int a) {}
+record Outer12(Inner12 in) {}
+record REq(Eqv e) {}
+record RPlain(Plain12 p) {}
+record RArr(int[] a) {}
+class Eqv {                       // a user-declared equals, which Objects.equals uses
+    final int v;
+    Eqv(int v) { this.v = v; }
+    public boolean equals(Object o) {
+        if (!(o instanceof Eqv)) { return false; }
+        return ((Eqv) o).v == this.v;
+    }
+    public int hashCode() { return this.v; }
+}
+class Plain12 {                   // no equals, so Object.equals - i.e. identity - stands
+    int v;
+    Plain12(int v) { this.v = v; }
+}
 class S12 {
     static void run() {
         Range r = new Range(9, 2);
@@ -383,6 +408,55 @@ class S12 {
         Main.check("rec7", new Glyph(gs[0], gn[0]).equals(new Glyph(gs[1], gn[1])));
         Main.check("rec8", !new Glyph(gs[0], gn[0]).equals(new Glyph(gs[2], gn[1]))
                         && !new Glyph(gs[0], gn[0]).equals(new Glyph(gs[1], gn[2])));
+        // The rest of JLS 8.10.3, all of it measured against java 24.0.2 and all
+        // of it wrong before js_jvaleq. Every operand is read out of an array.
+        //
+        // A double / float component is Double.compare(a,b)==0, which === is NOT
+        // in either direction: NaN equals NaN, and +0.0 does not equal -0.0.
+        double[] dz = {0.0, -0.0, 1.5, 1.5};
+        float[] fz = {0.0f, -0.0f, 2.5f, 2.5f};
+        double[] nz = {dz[0] / dz[0], dz[1] / dz[1]};
+        float[] fn = {fz[0] / fz[0], fz[1] / fz[1]};
+        Main.check("rec9", new RNum(nz[0], fn[0]).equals(new RNum(nz[1], fn[1])));
+        Main.check("rec10", !new RNum(dz[0], fz[2]).equals(new RNum(dz[1], fz[3]))
+                        && !new RNum(dz[2], fz[0]).equals(new RNum(dz[3], fz[1]))
+                        && new RNum(dz[2], fz[2]).equals(new RNum(dz[3], fz[3])));
+        // long / byte / short are BOXES here, so identity said two equal values
+        // were unequal - in the interpreter half only, which is why --cross saw it
+        // and the two compiler engines did not.
+        long[] lz = {5000000000L, 5000000000L, 5000000001L};
+        byte[] bz = {7, 7, 8};
+        short[] sz = {300, 300, 301};
+        Main.check("rec11", new RWide(lz[0], bz[0], sz[0]).equals(new RWide(lz[1], bz[1], sz[1])));
+        Main.check("rec12", !new RWide(lz[2], bz[0], sz[0]).equals(new RWide(lz[0], bz[0], sz[0]))
+                        && !new RWide(lz[0], bz[2], sz[0]).equals(new RWide(lz[0], bz[0], sz[0]))
+                        && !new RWide(lz[0], bz[0], sz[2]).equals(new RWide(lz[0], bz[0], sz[0])));
+        // A reference component is Objects.equals: a nested record compares
+        // component-wise and a user-declared equals is CALLED, where identity had
+        // both answering false in the two compiler engines.
+        int[] iz = {3, 3, 4};
+        Inner12[] inz = {new Inner12(iz[0]), new Inner12(iz[1]), new Inner12(iz[2])};
+        Main.check("rec13", new Outer12(inz[0]).equals(new Outer12(inz[1]))
+                        && !new Outer12(inz[0]).equals(new Outer12(inz[2])));
+        Eqv[] ez = {new Eqv(iz[0]), new Eqv(iz[1]), new Eqv(iz[2])};
+        Main.check("rec14", new REq(ez[0]).equals(new REq(ez[1]))
+                        && !new REq(ez[0]).equals(new REq(ez[2])));
+        // ... and a class that declares no equals, and an array (which does not
+        // override it either), KEEP identity: Object.equals is identity.
+        Plain12[] pz = {new Plain12(iz[0]), new Plain12(iz[1])};
+        Main.check("rec15", new RPlain(pz[0]).equals(new RPlain(pz[0]))
+                        && !new RPlain(pz[0]).equals(new RPlain(pz[1])));
+        int[][] az = new int[2][];
+        az[0] = new int[] {iz[0]};
+        az[1] = new int[] {iz[0]};
+        Main.check("rec16", new RArr(az[0]).equals(new RArr(az[0]))
+                        && !new RArr(az[0]).equals(new RArr(az[1])));
+        // equals takes an Object, so equals(null) is a legal call that answers
+        // false. Reading __class off it ABORTED the whole program in both
+        // compiler engines.
+        Main.check("rec17", !new Outer12(inz[0]).equals(null)
+                        && !new Outer12(inz[0]).equals("x")
+                        && new Outer12(null).equals(new Outer12(null)));
     }
 }
 
