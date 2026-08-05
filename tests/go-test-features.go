@@ -516,6 +516,17 @@ func main() {
 	var av interface{} = 7
 	check("type-assert", av.(int) == 7 && av.(int)+3 == 10)
 
+	// ----- untyped constants fold at arbitrary precision -----
+	// Go evaluates a constant expression EXACTLY and rounds once, where the value
+	// reaches a typed location. The second row is the contrast that must NOT fold:
+	// a written-out conversion rounds first, so Go answers the unfolded sum there.
+	// The fourth row is why a comparison of two constants must be exact too - both
+	// sides round to the same double and they are still different constants.
+	check("const-fold-float", 0.1+0.2 == 0.3)
+	check("const-fold-conv-contrast", float64(0.1)+float64(0.2) != 0.3)
+	check("const-fold-wide-int", (1<<100)>>98 == 4)
+	check("const-fold-exact-compare", 2.0/3.0 != 0.6666666666666666)
+
 	// ----- combined pipeline -----
 	tag := func(n int) string { return "odd" }
 	check("combined-pipeline", classify([]int{1, 2, -3, 4}, tag) == "oddevennegeven1")

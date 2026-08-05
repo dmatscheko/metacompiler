@@ -1439,6 +1439,51 @@ func s32() {
 	check("cvt13", string([]byte("ok")) == "ok")
 }
 
+// ===== SECTION 33: untyped constants fold at arbitrary precision =====
+// Go evaluates a constant expression EXACTLY and rounds ONCE, where the value
+// reaches a typed location - so 0.1 + 0.2 is the double nearest three tenths and
+// not the sum of the two nearest doubles, and (1 << 100) >> 98 is 4 rather than
+// what a 64 bit accumulator answers. Every expression below is a CONSTANT one on
+// purpose: the subject is the front end, not the runtime. cst5 is the contrast
+// that must NOT fold (a written-out conversion rounds first, which is Go's rule
+// too), and cst16/cst19/cst31/cst32 are the reason a comparison of two constants
+// has to be exact as well - both sides round to the same double and Go still says
+// they are different constants. 16 of these 32 fail before the folder exists.
+func s33() {
+	check("cst1", 0.1+0.2 == 0.3)
+	check("cst2", 0.3-0.1 == 0.2)
+	check("cst3", 1.1*3 == 3.3)
+	check("cst4", 2.675*100 == 267.5)
+	check("cst5", float64(0.1)+float64(0.2) != 0.3)
+	check("cst6", 0.1+0.2+0.3 == 0.6)
+	check("cst7", (0.1+0.2)*3 == 0.9)
+	check("cst8", 1.0/3.0*3.0 == 1.0)
+	check("cst9", -0.1+0.2 == 0.1)
+	check("cst10", 1e16+2 == 1.0000000000000002e16)
+	check("cst11", 0.1*0.1*0.1 == 0.001)
+	check("cst12", 1e308*10/10 == 1e308)
+	check("cst13", 1e-300/1e20 == 1e-320)
+	check("cst14", 1.0/7*7 == 1.0)
+	check("cst15", 123456789012345678901234567890.0*1.0 != 1.2345678901234568e29)
+	check("cst16", 2.0/3.0 != 0.6666666666666666)
+	check("cst17", 0x1p4 == 16.0)
+	check("cst18", 0x1.8p1 == 3.0)
+	check("cst19", 1e22+1 != 1e22)
+	check("cst20", (1<<100)>>98 == 4)
+	check("cst21", 100000000000000000000/10000000000000000000 == 10)
+	check("cst22", 1<<62 == 4611686018427387904)
+	check("cst23", 1<<200>>200 == 1)
+	check("cst24", 0xFFFFFFFFFFFFFFFF/3 == 6148914691236517205)
+	check("cst25", 9007199254740993*3/3 == 9007199254740993)
+	check("cst26", -7/2 == -3 && -7%2 == -1)
+	check("cst27", -9>>2 == -3)
+	check("cst28", ^0 == -1 && ^255 == -256)
+	check("cst29", 255&^15 == 240)
+	check("cst30", 1/3 == 0 && 1/3.0 > 0.33)
+	check("cst31", 9007199254740993.0*1.0 != 9007199254740992.0)
+	check("cst32", 3*0.1 != 0.30000000000000004)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -1472,6 +1517,7 @@ func main() {
 	s30() // SECTION-CALL 30
 	s31() // SECTION-CALL 31
 	s32() // SECTION-CALL 32
+	s33() // SECTION-CALL 33
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
