@@ -1044,9 +1044,33 @@ KwDefault   = "default" KwEnd ;
         "floEq": flStrictEq,
         "floMax": function(l, r) { return flMinMax(l, r, flTakeL(flNum(l), flNum(r), true)) },
         "floMin": function(l, r) { return flMinMax(l, r, flTakeL(flNum(l), flNum(r), false)) },
+        // A SIGNED 64 bit box is negated in the box, exactly as jvmMathObject's
+        // own abs does in abnf/jsrtjvm.go: the `| 0` below is to_int32, which
+        // TRUNCATES a long, so floAbs(3000000000L) answered -1294967296 and
+        // floAbs(Long.MAX_VALUE) answered 0. Two's-complement negation maps
+        // Long.MIN_VALUE to itself, which is the answer JLS 15.15.4 asks for.
+        // Everything narrower widens to int before the call and keeps the wrap,
+        // and an unsigned box is a magnitude already.
+        //
+        // languages/lib/runtime.c's jf_abs (host id 60) is the THIRD engine of
+        // this primitive and carries the same three lines. All three now agree;
+        // tests/metajs-test-full.js's flo51..flo53 pin them, and those rows are
+        // the ONLY thing that reaches this arm - no layer-2 file does, because
+        // java-rt.metajs and kotlin-rt.metajs both handle their long case before
+        // the call. That is why the defect could sit here unnoticed.
+        //
+        // The fallthrough reads the operand with siNum, not flNum: flNum's `v * 1`
+        // of a {__sz} box is NaN and `NaN | 0` is 0, so THIS half answered 0 for
+        // every sized-integer operand at df9199a while llvm.Run and the native
+        // binary both answered the 32-bit wrap of its value. Measured with a
+        // sintRaw probe; nothing in the suite calls floAbs on a box.
         "floAbs": function(v) {
             if (flIs(v)) return flMake(v.f < 0 || flNegZero(v.f) ? 0 - v.f : v.f, v.sty)
-            return (flNum(v) < 0 ? 0 - flNum(v) : flNum(v)) | 0
+            if (szIs(v) && v.w == 64) {
+                if (!v.u && siNum(v) < 0) return szMake(i64Sub(i64Make(0, 0), v.p), 64, false)
+                return v
+            }
+            return (siNum(v) < 0 ? 0 - siNum(v) : siNum(v)) | 0
         }
     }
 

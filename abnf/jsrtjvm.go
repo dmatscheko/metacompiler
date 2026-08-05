@@ -393,6 +393,18 @@ func jfBindings(b map[string]interface{}) {
 		if f, ok := v.(jsJFlo); ok {
 			return jsJFlo{f: math.Abs(f.f), sty: f.sty}
 		}
+		// The same 64-bit arm jvmMathObject's own abs carries, for the same
+		// reason: toInt32 TRUNCATES a long, so the plain wrap answered
+		// -1294967296 for 3000000000L and 0 for Long.MAX_VALUE. Negate in the
+		// box instead; two's-complement negation maps Long.MIN_VALUE to itself,
+		// which is what JLS 15.15.4 asks for. Everything narrower than a long
+		// widens to int before the call and keeps the 32-bit wrap.
+		if bx, ok := v.(jsGInt); ok && bx.w == 64 {
+			if !bx.u && bx.v < 0 {
+				return jvBox(-bx.v)
+			}
+			return bx
+		}
 		return float64(rt.toInt32(math.Abs(rt.toNumber(v))))
 	})
 }

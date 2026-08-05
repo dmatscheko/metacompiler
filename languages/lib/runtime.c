@@ -2710,6 +2710,19 @@ int jf_take_l(long a, long b, int want_max) {
  * wraps to 32 bits the way the compiler's integer arithmetic does. */
 long jf_abs(long v) {
 	if (tag_of(v) == 14) { return jf_make(d_abs(fa(v)), fb(v)); }
+	/* A SIGNED 64 bit box is negated IN THE BOX. The fallthrough's to_int32
+	 * truncates a long, so jf_abs(3000000000L) answered -1294967296 and
+	 * jf_abs(Long.MAX_VALUE) answered 0. Two's-complement negation maps
+	 * Long.MIN_VALUE to itself, which is the answer JLS 15.15.4 asks for, and
+	 * an UNSIGNED box is a magnitude already. This is the third engine of the
+	 * primitive: abnf/jsrtjvm.go's floAbs and languages/metajs-interpreter.abnf's
+	 * "floAbs" carry the same three lines, and si_norm is the shape the floor's
+	 * own negation uses (see js_gineg). */
+	if (tag_of(v) == 13 && fb(v) == 64) {
+		if (fc(v)) { return v; }
+		if (fa(v) < 0) { return si_norm(0 - fa(v), 64, 0); }
+		return v;
+	}
 	return mk_num(d_from_long(to_int32(d_abs(to_number(v)))));
 }
 

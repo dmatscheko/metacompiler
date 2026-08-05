@@ -358,6 +358,7 @@ record Named(String name) {
     public String name() { return "Mr. " + this.name; } // custom accessor
 }
 record Pair2<T>(T first, T second) {}
+record Glyph(char c, int n) {}
 class S12 {
     static void run() {
         Range r = new Range(9, 2);
@@ -371,6 +372,17 @@ class S12 {
         Main.check("rec5", n.name().equals("Mr. x"));
         Pair2<String> p = new Pair2<>("a", "b");
         Main.check("rec6", (p.first() + p.second()).equals("ab"));
+        // A CHAR record component. The generated equals compared components with
+        // js_seq, and a char is the one shape === answers differently in the two
+        // engines: the Go twin's char is a comparable struct, layer 2's is a
+        // {__char} box that === settles by identity. So this held in llvm.Run and
+        // in the interpreter half and FAILED in the native binary. Every operand is
+        // read out of an array so the grammar's constant folder cannot answer it.
+        char[] gs = {'q', 'q', 'r'};
+        int[] gn = {5, 5, 6};
+        Main.check("rec7", new Glyph(gs[0], gn[0]).equals(new Glyph(gs[1], gn[1])));
+        Main.check("rec8", !new Glyph(gs[0], gn[0]).equals(new Glyph(gs[2], gn[1]))
+                        && !new Glyph(gs[0], gn[0]).equals(new Glyph(gs[1], gn[2])));
     }
 }
 

@@ -86,14 +86,23 @@ COMPILE="languages/$LANG_NAME-to-llvm-ir.abnf"
 # you. clang-check.sh's module_only() brace-depth scan is the reference for the
 # cases that genuinely need it - here -qq means we never do.)
 
-# Under -q the interpreter half still signs off. That is the ENGINE talking, not
-# the program, and no real toolchain says it. There is NOT one wording: the
-# grammars use four - `interpreter: program ran to completion`, `interpreter:
-# program finished`, `interpreter: program value is ...` and `compiler: program
-# ran to completion`. Matching only the first made ruby's interpreter leg look
-# one line longer than the other three, which reads as a halves divergence and is
-# not one. Match the shape, not the sentence.
-strip_engine() { grep -v -E '(interpreter|compiler): program (ran to completion|finished|value is)'; }
+# Under -q an engine still signs off on stdout. That is the ENGINE talking, not
+# the program, and no real toolchain says it - so it has to go before comparing
+# against an oracle, or a leg reads one line longer than the others and looks like
+# a halves divergence when it is not.
+#
+# ENUMERATING THE WORDINGS DOES NOT WORK, and I tried twice. `grep` over
+# languages/*.abnf finds at least: `program ran to completion`, `program
+# finished`, `program value is`, `main() returned N`, `phpmain() returned N`,
+# `wrote executable ...`. Each attempt to list them missed one and the miss showed
+# up as a fake divergence in a real investigation.
+#
+# So match the SHAPE: a line beginning `<lang> interpreter:` or `<lang> compiler:`
+# at column 0. Every grammar's sign-off has that prefix and nothing else on any
+# leg does. A program that deliberately prints such a line is the only false
+# positive available, and it would have to start the line with its own language's
+# name to collide.
+strip_engine() { grep -v -E '^[a-z0-9#+-]+ (interpreter|compiler): '; }
 
 declare -a RAN
 report() { printf '  %-8s %6s lines, exit %s\n' "$1" "$(wc -l <"$work/$1.out" 2>/dev/null | tr -d ' ')" "$2"; }

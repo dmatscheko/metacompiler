@@ -703,6 +703,24 @@ b";                                                   // verbatim keeps the newl
             Program.Check("flt9", Program.S23S(inf) == "Infinity" && Program.S23S(-1.0 / 0.0) == "-Infinity");
             Program.Check("flt10", Program.S23S(nan) == "NaN" && nan != nan);
             Program.Check("flt11", 1e300 * 1e300 == inf && 0.0 == -0.0);
+            // ECMA-334 12.12.1: for the floating point relational operators "if
+            // either operand is NaN, the result is false for all operators except
+            // !=, for which the result is true". js_cscmp delegates to rtjRel
+            // (lib/runtime-jvm.metajs, shared with java's js_jvcmp), whose
+            // rtCompare answers the SENTINEL 2 for a NaN operand; read as an
+            // ordering that sentinel made > and >= TRUE, and 0 would have made <=
+            // and >= true instead. Both engines special-case it -
+            // abnf/jsrtcsharp.go's js_cscmp is the same three lines. There is no C#
+            // toolchain on this machine, so this row is the SPEC; java 24.0.2
+            // settles the identical JLS 15.20.1 rule on the java side
+            // (tests/java-test-full.java flt10a-flt10d). Operands come out of an
+            // array so the constant folder cannot answer them.
+            double[] nz = new double[]{0.0 / 0.0, 1.0};
+            Program.Check("flt10a", !(nz[0] < nz[1]) && !(nz[0] > nz[1]) && !(nz[0] <= nz[1]) && !(nz[0] >= nz[1]));
+            Program.Check("flt10b", !(nz[1] < nz[0]) && !(nz[1] > nz[0]) && !(nz[1] <= nz[0]) && !(nz[1] >= nz[0]));
+            Program.Check("flt10c", !(nz[0] <= nz[0]) && !(nz[0] >= nz[0]) && nz[0] != nz[0]);
+            float[] fz = new float[]{0.0f / 0.0f, 1.0f};
+            Program.Check("flt10d", !(fz[0] >= fz[1]) && !(fz[0] <= fz[1]) && !(fz[0] > fz[1]) && !(fz[0] < fz[1]));
             // ECMA-334 12.12.9 (relational and type-testing operators) applies
             // BINARY NUMERIC PROMOTION first, so == between a long and a double
             // converts the long to double and compares two doubles. Both COMPILER

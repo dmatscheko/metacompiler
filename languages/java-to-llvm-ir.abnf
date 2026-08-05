@@ -3920,7 +3920,31 @@ HasStatic   = :script(~~
         curFTag = savedTag
         return idx
     }
-    // A record's value equality: same class descriptor and every component ===.
+    // A record's value equality: same class descriptor and every component equal.
+    //
+    // The component test is js_jchareq, NOT js_seq. js_jchareq IS js_seq unless a
+    // char meets something, and a char is where the two engines part company: the
+    // Go twin's char is a comparable struct that === settles by value, while layer
+    // 2's is a {__char} BOX that === settles by identity (chapter 7.9 of the
+    // manual: the floor's strict_eq has no char arm). So `record R(char c)`
+    // compared two equal chars as UNEQUAL in the native binary while llvm.Run, the
+    // interpreter half and java 24.0.2 all answered true. Measured, not reasoned:
+    // tests/java-test-full.java rec-char / rec-char2 are the assertions, and both
+    // fail natively at df9199a.
+    //
+    // Still open at this site, measured against java 24.0.2 and NOT fixed here
+    // because each needs a runtime extern that only abnf/jsrt.go can define:
+    //   - a double / float component is compared by ===, where a record uses
+    //     Double.compare(a,b)==0 - so NaN records compare UNEQUAL here (all three
+    //     of our engines) and +0.0 / -0.0 records compare EQUAL (both compiler
+    //     engines) where real java says the opposite in both directions;
+    //   - a reference component is compared by identity, where a record uses
+    //     Objects.equals - so a record holding a record, or any object with a
+    //     user-declared equals, compares unequal in BOTH compiler engines. The
+    //     interpreter half's jValEq recurses into a nested record and gets that
+    //     one right, so it is an interp-vs-run divergence as well.
+    // csharp-to-llvm-ir.abnf's $valeq (a recursive IR function, emitted once per
+    // program that declares a record) is the shape that answers all of this.
     function emitRecordEquals(clsName, comps) {
         var body = function(b) {
             var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
@@ -3929,8 +3953,8 @@ HasStatic   = :script(~~
                                             callExt(b, "js_get", [otherV, emitStr(b, "__class")])])
             for (var i = 0; i < comps.length; i++) {
                 var kV = emitStr(b, comps[i])
-                var eqV = callExt(b, "js_seq", [callExt(b, "js_get", [thisV, kV]),
-                                                callExt(b, "js_get", [otherV, kV])])
+                var eqV = callExt(b, "js_jchareq", [callExt(b, "js_get", [thisV, kV]),
+                                                    callExt(b, "js_get", [otherV, kV])])
                 okV = callExt(b, "js_jband", [okV, eqV])
             }
             b.NewRet(okV)

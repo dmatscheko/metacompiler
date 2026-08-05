@@ -1331,6 +1331,23 @@ function s26() {
     check("flo48", floMax(1, 2) === 2 && floIs(floMax(1, 2)) === false)
     check("flo49", floStr(floAbs(flo(0 - 2.5, 0))) === "2.5" && floAbs(0 - 3) === 3)
     check("flo50", floIs(floAbs(flo(0 - 2.5, 0))) === true && floIs(floAbs(0 - 3)) === false)
+    // floAbs of a SIGNED 64 bit box, which is the one arm of this primitive that
+    // NO LAYER-2 FILE REACHES - java-rt.metajs and kotlin-rt.metajs both handle
+    // their long case before the call - so it carried a to_int32 wrap in all
+    // THREE engines for as long as it existed. These rows are the only thing that
+    // reaches it, and they are here because a primitive with no caller is exactly
+    // the kind that goes wrong quietly. sintRaw is the one door past si_norm, so
+    // it is how a big signed box is built at all (see sint72 above).
+    var absBig = sintRaw(0, 3000000000, 64, 0)               // 3e9, past int32
+    var absNeg = sintRaw(4294967295, 1294967296, 64, 0)      // -3e9, as a signed box
+    check("flo51", sintStr(floAbs(absNeg)) === "3000000000" && sintStr(floAbs(absBig)) === "3000000000")
+    // Long.MIN_VALUE maps to ITSELF under two's-complement negation, which is the
+    // answer JLS 15.15.4 asks for rather than an accident.
+    var absMin = sintRaw(2147483648, 0, 64, 0)               // -9223372036854775808
+    check("flo52", sintStr(floAbs(absMin)) === "-9223372036854775808")
+    // An UNSIGNED box is a magnitude already and must come back untouched.
+    var absU = sintRaw(4294967295, 4294967295, 64, 1)        // 2^64-1
+    check("flo53", sintStr(floAbs(absU)) === "18446744073709551615")
 }
 
 // ===== SECTION 27: keysOf, and the sign of an underflowed power =====
