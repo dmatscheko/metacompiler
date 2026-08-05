@@ -4720,16 +4720,25 @@ NotFuncHead = :script(~~
             it = iterT()
             scopes.push({}) // The loop header/variable get their own scope.
             var res = undefined
-            // A GENERATOR is not indexable, so it is driven through next() until done.
-            if (it != undefined && it != null && it.__gen == true) {
-                var step = it.next()
+            // An ITERATOR is not indexable, so it is driven through next() until done,
+            // ONE STEP PER ITERATION - which is also what makes a for-of over an endless
+            // generator with a break in its body terminate. The test is the same
+            // STRUCTURAL one the compiler half emits (typescript-to-llvm-ir.abnf's makeForOf): a
+            // callable `next` member, which a generator object has and an array, a string
+            // and a plain object have not. There are no symbols in this subset, so
+            // Symbol.iterator cannot be the test; the receiver is passed explicitly so a
+            // hand-written next() reading `this` works.
+            var nx = anytype // The `next` member, of any type at all.
+            nx = (it != undefined && it != null && typeof it == "object") ? getMember(it, "next") : undefined
+            if (typeof nx == "function") {
+                var step = callWithThis(nx, it, [])
                 while (!step.done) {
                     bindLoopTarget(target, step.value)
                     var gr = bodyT()
                     var ga = loopAction(gr, label)
                     if (ga == "break") break
                     if (ga == "propagate") { res = gr; break }
-                    step = it.next()
+                    step = callWithThis(nx, it, [])
                 }
                 scopes.pop()
                 return res
@@ -4808,6 +4817,24 @@ NotFuncHead = :script(~~
             var last = anytype // The delegated yields answer with whatever was sent.
             last = undefined
             if (v != undefined && v != null) {
+                // A delegate that is an ITERATOR is driven through next() - the same
+                // structural test the for-of loops use - and one that is an array or a
+                // string by index. Driving it lazily is what makes 'yield* endless()'
+                // work: the doYield below throws out of the replay at the yield being
+                // produced, so the delegate is only ever stepped as far as it is needed.
+                // Before this a generator delegate answered no 'length' and contributed
+                // NOTHING, which is what the compiler half's js_iterable drain hid.
+                var dnx = anytype // The delegate's `next` member, of any type.
+                dnx = (typeof v == "object") ? getMember(v, "next") : undefined
+                if (typeof dnx == "function") {
+                    var dst = anytype // One {value, done} record.
+                    dst = callWithThis(dnx, v, [])
+                    while (!dst.done) {
+                        last = doYield(false, dst.value)
+                        dst = callWithThis(dnx, v, [])
+                    }
+                    return last
+                }
                 for (var i = 0; i < v.length; i++) { last = doYield(false, v[i]) }
             }
             return last

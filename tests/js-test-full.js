@@ -312,6 +312,58 @@ function s15() {
     var sit = withSend()
     sit.next()
     check("gen5", sit.next(21).value === 42)
+    // for-of drives an iterator ONE STEP AT A TIME, so the producer's side effects
+    // INTERLEAVE with the consumer's instead of all happening first. The check is not
+    // the exact log, because the interpreter half's generators REPLAY (every next()
+    // re-runs the body, so a producer's effects repeat) - it is the one thing the two
+    // halves share and a drain-first loop cannot have: the first value is CONSUMED
+    // before the second is ever PRODUCED.
+    var log = ""
+    function* logged() { log = log + "p1 "; yield 1; log = log + "p2 "; yield 2 }
+    for (var lv of logged()) { log = log + "c" + lv + " " }
+    check("gen6", log.indexOf("c1") < log.lastIndexOf("p2"))
+    // A loop that BREAKS never asks for the values it did not reach. 'endless' is
+    // written as an endless generator and then bounded at 1000, so that a regression
+    // to a drain-first for-of FAILS this check instead of hanging the suite.
+    var reached = -1
+    function* endless() { var i = 0; while (i < 1000) { reached = i; yield i; i = i + 1 } }
+    var taken = []
+    for (var ev of endless()) { if (taken.length === 3) { break } taken[taken.length] = ev }
+    check("gen7", taken.length === 3 && taken[2] === 2 && reached === 3)
+    // A HAND-WRITTEN iterator: an object whose next() answers {value, done}. There are
+    // no symbols in this subset, so a callable `next` is the whole protocol - node
+    // needs a [Symbol.iterator] beside it and throws "cursor is not iterable" without
+    // one, and this line is the deliberate divergence that buys hand-written iterators
+    // a spelling here at all. Every OTHER check in this section passes under node
+    // verbatim, this one with a one-line [Symbol.iterator] shim added.
+    var cursor = {
+        i: 0,
+        next: function () {
+            this.i = this.i + 1
+            if (this.i > 3) { return {value: undefined, done: true} }
+            return {value: this.i * 10, done: false}
+        }
+    }
+    var cs = []
+    for (var cv of cursor) { cs[cs.length] = cv }
+    check("gen8", cs.length === 3 && cs[0] === 10 && cs[2] === 30)
+    // A destructuring loop head over a generator.
+    function* pairs() { yield [1, "a"]; yield [2, "b"] }
+    var flat = ""
+    for (var [pn, ps] of pairs()) { flat = flat + pn + ps }
+    check("gen9", flat === "1a2b")
+    // 'yield*' delegates to a GENERATOR, not only to an array, and lazily: the second
+    // loop stops the delegate after two values, 998 short of its bound.
+    function* inner15() { yield 7; yield 8 }
+    function* deleg() { yield 0; yield* inner15(); yield 9 }
+    var ds = []
+    for (var dv of deleg()) { ds[ds.length] = dv }
+    check("gen10", ds.length === 4 && ds[0] === 0 && ds[1] === 7 && ds[3] === 9)
+    reached = -1
+    function* delegEndless() { yield* endless() }
+    var dn = []
+    for (var xv of delegEndless()) { if (dn.length === 2) { break } dn[dn.length] = xv }
+    check("gen11", dn.length === 2 && dn[1] === 1 && reached === 2)
 }
 
 // ===== SECTION 16: async syntax =====

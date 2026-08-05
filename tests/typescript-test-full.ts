@@ -467,6 +467,57 @@ function s19() {
     check("asy4", head.value === 1 && head.done === false);
     async function* astream(): AsyncGenerator<number> { yield 1; }
     check("asy5", typeof astream === "function");
+    // for-of drives an iterator ONE STEP AT A TIME, so the producer's side effects
+    // INTERLEAVE with the consumer's instead of all happening first. The check is not
+    // the exact log, because the interpreter half's generators REPLAY (every next()
+    // re-runs the body, so a producer's effects repeat) - it is the one thing the two
+    // halves share and a drain-first loop cannot have: the first value is CONSUMED
+    // before the second is ever PRODUCED.
+    let log: string = "";
+    function* logged(): Generator<number, void, void> { log = log + "p1 "; yield 1; log = log + "p2 "; yield 2; }
+    for (const lv of logged()) { log = log + "c" + lv + " "; }
+    check("asy6", log.indexOf("c1") < log.lastIndexOf("p2"));
+    // A loop that BREAKS never asks for the values it did not reach. 'endless' is
+    // written as an endless generator and then bounded at 1000, so that a regression
+    // to a drain-first for-of FAILS this check instead of hanging the suite.
+    let reached: number = -1;
+    function* endless(): Generator<number, void, void> { let i: number = 0; while (i < 1000) { reached = i; yield i; i = i + 1; } }
+    const taken: number[] = [];
+    for (const ev of endless()) { if (taken.length === 3) { break; } taken.push(ev); }
+    check("asy7", taken.join(",") === "0,1,2" && reached === 3);
+    // A HAND-WRITTEN iterator: an object whose next() answers {value, done}. There are
+    // no symbols in this subset, so a callable `next` is the whole protocol - node
+    // needs a [Symbol.iterator] beside it and throws "cursor is not iterable" without
+    // one, and this line is the deliberate divergence that buys hand-written iterators
+    // a spelling here at all.
+    const cursor = {
+        i: 0,
+        next: function (): any {
+            this.i = this.i + 1;
+            if (this.i > 3) { return {value: undefined, done: true}; }
+            return {value: this.i * 10, done: false};
+        }
+    };
+    const cs: number[] = [];
+    for (const cv of cursor) { cs.push(cv); }
+    check("asy8", cs.join(",") === "10,20,30");
+    // A destructuring loop head over a generator.
+    function* pairs(): Generator<any, void, void> { yield [1, "a"]; yield [2, "b"]; }
+    let flat: string = "";
+    for (const [pn, ps] of pairs()) { flat = flat + pn + ps; }
+    check("asy9", flat === "1a2b");
+    // 'yield*' delegates to a GENERATOR, not only to an array, and lazily: the second
+    // loop stops the delegate after two values, 998 short of its bound.
+    function* inner19(): Generator<number, void, void> { yield 7; yield 8; }
+    function* deleg(): Generator<number, void, void> { yield 0; yield* inner19(); yield 9; }
+    const ds: number[] = [];
+    for (const dv of deleg()) { ds.push(dv); }
+    check("asy10", ds.join(",") === "0,7,8,9");
+    reached = -1;
+    function* delegEndless(): Generator<number, void, void> { yield* endless(); }
+    const dn: number[] = [];
+    for (const xv of delegEndless()) { if (dn.length === 2) { break; } dn.push(xv); }
+    check("asy11", dn.join(",") === "0,1" && reached === 2);
 }
 
 // ===== SECTION 20: ambient declaration (the harness print shim) =====

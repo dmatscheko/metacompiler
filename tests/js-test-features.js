@@ -207,6 +207,32 @@ check("arr-iterate", arrSum === 6);
 var ofSum = 0;
 for (var v of [4, 5, 6]) { ofSum = ofSum + v; }
 check("for-of", ofSum === 15);
+var ofStr = "";
+for (var sc of "abc") { ofStr = ofStr + sc + "."; }
+check("for-of-string", ofStr === "a.b.c.");
+
+// ----- for-of over an ITERATOR: lazy, one next() per iteration -----
+// The generator is written endless and then bounded at 100, so a regression to a
+// drain-first loop FAILS these instead of hanging the suite. lazyReached is how far
+// the producer got: three values consumed must mean four produced, not a hundred.
+var lazyReached = -1;
+function* lazyCounter() { var i = 0; while (i < 100) { lazyReached = i; yield i; i = i + 1; } }
+var lazyTaken = [];
+for (var lv of lazyCounter()) { if (lazyTaken.length === 3) { break; } lazyTaken.push(lv); }
+check("for-of-lazy-break", lazyTaken.join(",") === "0,1,2" && lazyReached === 3);
+// A hand-written iterator - a callable `next` answering {value, done} - is the whole
+// protocol here: the subset has no symbols, so Symbol.iterator cannot be it. node
+// requires that symbol and throws without it; this is the deliberate divergence.
+var lazyCursor = { i: 0, next: function() { this.i = this.i + 1; if (this.i > 3) { return {value: undefined, done: true}; } return {value: this.i * 10, done: false}; } };
+var lazyOut = [];
+for (var cv of lazyCursor) { lazyOut.push(cv); }
+check("for-of-iterator-object", lazyOut.join(",") === "10,20,30");
+// 'yield*' delegates to a generator lazily too.
+lazyReached = -1;
+function* lazyDeleg() { yield* lazyCounter(); }
+var lazyDn = [];
+for (var dv of lazyDeleg()) { if (lazyDn.length === 2) { break; } lazyDn.push(dv); }
+check("yield-star-lazy", lazyDn.join(",") === "0,1" && lazyReached === 2);
 
 // ----- objects -----
 var obj = { a: 1, "b-key": 2 };

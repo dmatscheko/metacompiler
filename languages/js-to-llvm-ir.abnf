@@ -3669,23 +3669,45 @@ NotFuncHead = :script(~~
             b = r.b
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [saved])
-            var seqV = callExt(b, "js_iterable", [r.v])
+            // The delegate is driven exactly the way for-of drives one (makeForOf): an
+            // ITERATOR one next() at a time, so 'yield* endless()' is a legal generator
+            // rather than a hang inside js_iterable's drain, and anything else - an array,
+            // a string - by index.
+            var seqV = r.v
+            var ynxV = callExt(b, memGetExt(), [seqV, emitStr(b, "next")])
+            var yisItV = callExt(b, "js_seq", [callExt(b, "js_typeof", [ynxV]), emitStr(b, "function")])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ysrc"), seqV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0yi"), callExt(b, "js_num_i", [handle(0)])])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ylen"),
-                                    callExt(b, "js_tonum", [callExt(b, memGetExt(), [seqV, emitStr(b, "length")])])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ylen"), hUndef])
             var headB = curF.NewBlock("")
+            var ystepB = curF.NewBlock("")
+            var yidxB = curF.NewBlock("")
+            var ylenB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
-            b.NewBr(headB)
-            var iH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0yi")])
-            var lH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0ylen")])
-            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iH, lH])), bodyB, exitB)
-            var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0yi")])
-            var sB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0ysrc")])
-            callExt(bodyB, "js_yield", [callExt(bodyB, memGetExt(), [sB, iB])])
-            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0yi"),
-                                       callExt(bodyB, "js_add", [iB, callExt(bodyB, "js_num_i", [handle(1)])])])
+            var yisItC = truthy(b, yisItV)
+            b.NewCondBr(yisItC, headB, ylenB)
+            callExt(ylenB, "js_scope_set", [curScopeV, emitStr(ylenB, "0ylen"),
+                    callExt(ylenB, "js_tonum", [callExt(ylenB, memGetExt(), [seqV, emitStr(ylenB, "length")])])])
+            ylenB.NewBr(headB)
+            headB.NewCondBr(yisItC, ystepB, yidxB)
+            var ystV = callExt(jsThisSet(ystepB, seqV), "js_call",
+                               [ynxV, seqV, callExt(ystepB, "js_arr_new", [])])
+            var ystepElemV = callExt(ystepB, memGetExt(), [ystV, emitStr(ystepB, "value")])
+            ystepB.NewCondBr(truthy(ystepB, callExt(ystepB, memGetExt(), [ystV, emitStr(ystepB, "done")])),
+                             exitB, bodyB)
+            var iH = callExt(yidxB, "js_scope_get", [curScopeV, emitStr(yidxB, "0yi")])
+            var lH = callExt(yidxB, "js_scope_get", [curScopeV, emitStr(yidxB, "0ylen")])
+            var yelemB = curF.NewBlock("")
+            yidxB.NewCondBr(truthy(yidxB, callExt(yidxB, "js_lt", [iH, lH])), yelemB, exitB)
+            var iB = callExt(yelemB, "js_scope_get", [curScopeV, emitStr(yelemB, "0yi")])
+            var sB = callExt(yelemB, "js_scope_get", [curScopeV, emitStr(yelemB, "0ysrc")])
+            var yidxElemV = callExt(yelemB, memGetExt(), [sB, iB])
+            callExt(yelemB, "js_scope_set", [curScopeV, emitStr(yelemB, "0yi"),
+                                       callExt(yelemB, "js_add", [iB, callExt(yelemB, "js_num_i", [handle(1)])])])
+            yelemB.NewBr(bodyB)
+            callExt(bodyB, "js_yield", [bodyB.NewPhi([llvm.ir.NewIncoming(yidxElemV, yelemB),
+                                                     llvm.ir.NewIncoming(ystepElemV, ystepB)])])
             bodyB.NewBr(headB)
             curScopeV = saved
             return {b: exitB, v: hUndef}
@@ -4196,9 +4218,13 @@ NotFuncHead = :script(~~
     }
 
     // for-of / for-in. items = [name, "of"|"in", iterThunk, bodyThunk].
-    // for-of genuinely iterates by index over an array/string: it opens its own scope
-    // holding the iterable, the length, and the index (hidden 0-prefixed names that no
-    // JS identifier can collide with), then loops name = iter[i] while i < length.
+    // for-of has TWO arms, chosen at run time by one structural probe:
+    //   * an ITERATOR - a generator, or any object whose `next` member is callable - is
+    //     driven LAZILY, one next() per iteration through the {value, done} record;
+    //   * everything else (an array, a string, an object) iterates BY INDEX: the loop
+    //     opens its own scope holding the iterable, the length and the index (hidden
+    //     0-prefixed names that no JS identifier can collide with) and runs
+    //     name = iter[i] while i < length.
     // for-in iterates the object's own keys: js_keys yields them (insertion order,
     // deterministic, __-prefixed slots skipped), and the same index loop walks that key
     // array, binding name to each key string.
@@ -4220,26 +4246,82 @@ NotFuncHead = :script(~~
             curScopeV = callExt(b, "js_scope_new", [saved])
             var ir = iterT(b)
             b = ir.b
-            // js_iterable is the identity on arrays, strings and objects and materializes
-            // a generator, so a for-of over one works with the same index loop.
-            var seqV = callExt(b, "js_iterable", [ir.v])
-            if (isIn) { seqV = callExt(b, "js_keys", [seqV]) }
-            var lenV = callExt(b, "js_tonum", [callExt(b, memGetExt(), [seqV, emitStr(b, "length")])])
+            var seqV = ir.v
+            // for-in materializes: js_iterable is the identity on arrays, strings and
+            // objects and drains a generator, and js_keys wants the whole sequence.
+            if (isIn) { seqV = callExt(b, "js_keys", [callExt(b, "js_iterable", [seqV])]) }
+            // for-of does NOT, because js_iterable's drain is what made
+            // 'for (const x of endless()) { ...; break }' hang and what put every one of
+            // the producer's side effects before the first of the consumer's. The probe
+            // for "drive this lazily" is STRUCTURAL - a callable `next` member. There are
+            // no symbols in this subset, so Symbol.iterator cannot be consulted; and an
+            // array, a string and a plain object answer no `next`, so they keep the index
+            // arm below, unchanged. What this deliberately does NOT do is call the
+            // iterator's `return()` on an early exit: the floor's generator cell exposes
+            // `next` ALONE (runtime.c's get_member, tag 15) and the Go twin's finish()
+            // does not run the body's `finally` either, so emitting the call would buy a
+            // divergence between the two engines and no behaviour in either.
+            var lazy = !isIn
+            var isItV = anytype // A handle: the probe's result, or the constant false.
+            var nxV = anytype   // A handle: the `next` member, or undefined.
+            isItV = hFalse
+            nxV = hUndef
+            if (lazy) {
+                nxV = callExt(b, memGetExt(), [seqV, emitStr(b, "next")])
+                isItV = callExt(b, "js_seq", [callExt(b, "js_typeof", [nxV]), emitStr(b, "function")])
+            }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0it"), seqV])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0len"), lenV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0len"), hUndef])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0i"), callExt(b, "js_num_i", [handle(0)])])
             if (!isPat) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef]) }
             var headB = curF.NewBlock("")
+            var stepB = headB               // the lazy arm: one next() call, when there is one
+            if (lazy) { stepB = curF.NewBlock("") }
+            var idxB = curF.NewBlock("")    // the index arm: i < length
+            var elemB = curF.NewBlock("")   // the index arm's element read
+            var lenB = curF.NewBlock("")    // the index arm's one-time length read
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
-            b.NewBr(headB)
-            var iC = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0i")])
-            var lC = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0len")])
-            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iC, lC])), bodyB, exitB)
-            var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0i")])
-            var itB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0it")])
-            var elemV = callExt(bodyB, memGetExt(), [itB, iB])
+            // The length is read on the INDEX arm only: a generator has no 'length'
+            // member, and the two runtimes need not agree on what asking for one means.
+            // The probe is truthy-tested ONCE, in the entry block that dominates the
+            // whole loop, so the arm test in the head costs a branch and not a call -
+            // an index loop over an array makes exactly the externs it made before.
+            var isItC = anytype // The i1 the two arm tests branch on.
+            isItC = handle(0)
+            if (lazy) {
+                isItC = truthy(b, isItV)
+                b.NewCondBr(isItC, headB, lenB)
+            } else { b.NewBr(lenB) }
+            callExt(lenB, "js_scope_set", [curScopeV, emitStr(lenB, "0len"),
+                    callExt(lenB, "js_tonum", [callExt(lenB, memGetExt(), [seqV, emitStr(lenB, "length")])])])
+            lenB.NewBr(headB)
+            if (lazy) { headB.NewCondBr(isItC, stepB, idxB) }
+            else      { headB.NewBr(idxB) }
+            // The lazy arm. js_call is given the iterator as its receiver, so a
+            // hand-written 'next()' that reads `this` works; a generator's own next is a
+            // bound method and ignores it.
+            var stepElemV = anytype // A handle: the yielded value.
+            stepElemV = hUndef
+            if (lazy) {
+                var stV = callExt(jsThisSet(stepB, seqV), "js_call",
+                                  [nxV, seqV, callExt(stepB, "js_arr_new", [])])
+                stepElemV = callExt(stepB, memGetExt(), [stV, emitStr(stepB, "value")])
+                stepB.NewCondBr(truthy(stepB, callExt(stepB, memGetExt(), [stV, emitStr(stepB, "done")])),
+                                exitB, bodyB)
+            }
+            // The index arm.
+            var iC = callExt(idxB, "js_scope_get", [curScopeV, emitStr(idxB, "0i")])
+            var lC = callExt(idxB, "js_scope_get", [curScopeV, emitStr(idxB, "0len")])
+            idxB.NewCondBr(truthy(idxB, callExt(idxB, "js_lt", [iC, lC])), elemB, exitB)
+            var iB = callExt(elemB, "js_scope_get", [curScopeV, emitStr(elemB, "0i")])
+            var itB = callExt(elemB, "js_scope_get", [curScopeV, emitStr(elemB, "0it")])
+            var idxElemV = callExt(elemB, memGetExt(), [itB, iB])
+            elemB.NewBr(bodyB)
+            var elemIn = [llvm.ir.NewIncoming(idxElemV, elemB)]
+            if (lazy) { elemIn.push(llvm.ir.NewIncoming(stepElemV, stepB)) }
+            var elemV = bodyB.NewPhi(elemIn)
             // A pattern target is re-bound per iteration (its leaves are fresh
             // declarations in the loop scope); a plain name reuses its single slot.
             if (isPat) { bodyB = bindPattern(bodyB, name, elemV, patExt) }
