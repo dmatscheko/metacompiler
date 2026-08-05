@@ -2132,7 +2132,7 @@ HasStatic   = :script(~~
             // `f < 0` is FALSE for -0.0, so Math.abs(-0.0) answered -0.0 where
             // java 24.0.2 (and both compiled halves, which negate the raw sign
             // bit) answer 0.0. The sign of a zero only shows through 1/f.
-            if (jIsFlo(v)) { var f = v.__flo; return jFlo(f < 0 || (f == 0 && 1 / f < 0) ? jNegF(f) : f) }
+            if (jIsFlo(v)) { var f = v.__flo; var af = f < 0 || (f == 0 && 1 / f < 0) ? jNegF(f) : f; return jIsF32(v) ? {__flo: af, __f32: true} : jFlo(af) }
             // A long is a BOX, so `v < 0` is false for every one of them and
             // `v | 0` then answered 0 - for positive longs too. Compare and
             // negate in the box. Math.abs(Long.MIN_VALUE) is Long.MIN_VALUE
@@ -2218,6 +2218,85 @@ HasStatic   = :script(~~
     var jZeroF = 0
     var jInf = 1 / jZeroF
     function jFlo(f) { return {__flo: f} }
+    // ----- the float WIDTH -----
+    // A Java `float` is a binary32, not a double spelled differently: 1.0f/3.0f
+    // is 0.33333334 where the double is 0.3333333333333333, so every arithmetic
+    // result rounds back to 24 significant bits and the printer uses the
+    // shortest decimal that round-trips AS A FLOAT. The value still travels as a
+    // double (every float is exactly one) and only the WIDTH goes on the box.
+    // The compiled world's twin is style 3 of the tag 14 box - abnf/jsrtjvm.go's
+    // floJavaF and languages/lib/java-rt.metajs - and the three implement one
+    // specification.
+    function jFlo32(f) { return {__flo: jF32Round(f), __f32: true} }
+    function jIsF32(v) { return v !== null && v !== undefined && typeof v == "object" && v.__f32 === true }
+    // The box a binary operation on two float-ish operands answers: JLS 5.6.2
+    // promotes to the WIDER type, so `float op double` is a double and only
+    // `float op float` (or float with an integral operand) stays a float.
+    function jF32Res(l, r) {
+        if (jIsFlo(l) && !jIsF32(l)) { return false }
+        if (jIsFlo(r) && !jIsF32(r)) { return false }
+        return jIsF32(l) || jIsF32(r)
+    }
+    function jFloRes(f, f32) { return f32 ? jFlo32(f) : jFlo(f) }
+    // THE SIGN OF A ZERO PRODUCT OR QUOTIENT, put back by hand. The tag engine
+    // keeps an integral value as an INTEGER, so `-14447655.0 * 0.0` comes back
+    // +0 where IEEE-754, both compiler halves and java 24.0.2 all say -0.0 (the
+    // `x * 0` trap of docs/working-on-this-project.md chapter 4). It is a
+    // PRE-EXISTING interpreter-vs-run divergence for `double`, present at
+    // 114fbd5 and measurable there with three lines of java; the float work only
+    // made it show up 44 times in a 1,231-value probe. The rule is IEEE-754's:
+    // the sign of a zero product or quotient is the XOR of the operand signs.
+    function jZeroSign(p, a, b) {
+        if (p !== 0) { return p }
+        if (a !== a) { return p }
+        if (b !== b) { return p }
+        var an = a < 0 || (a == 0 && 1 / a < 0)
+        var bn = b < 0 || (b == 0 && 1 / b < 0)
+        return an !== bn ? jNegZeroF() : 0
+    }
+    function jFloBox(f, l, r) { return jFloRes(f, jF32Res(l, r)) }
+    // x * 2^k, EXACTLY - every factor is a power of two. The chunking by 2^30
+    // keeps the loop short for the ~280 halvings a subnormal float needs.
+    function jScale2(x, k) {
+        var v = x
+        var n = k
+        while (n >= 30) { v = v * 1073741824; n = n - 30 }
+        while (n <= 0 - 30) { v = v / 1073741824; n = n + 30 }
+        while (n > 0) { v = v * 2; n = n - 1 }
+        while (n < 0) { v = v / 2; n = n + 1 }
+        return v
+    }
+    // Math.fround: the double nearest x that a binary32 holds, round half to
+    // EVEN, subnormals and both overflows included. Written on `*` and `/` by
+    // powers of two because the dialect has no access to a double's bits (the
+    // same argument that keeps d_frexp in the C floor). The twin natively is
+    // jvF32Round in lib/java-rt.metajs, and float64(float32(x)) in the Go twin.
+    function jF32Round(x) {
+        if (x !== x) { return x }
+        if (x === 0) { return x }
+        var neg = x < 0
+        var a = neg ? jNegF(x) : x
+        if (a === jInf) { return x }
+        var maxf = jScale2(16777215, 104)
+        if (a >= jScale2(1, 128)) { return neg ? jNegF(jInf) : jInf }
+        if (a <= jScale2(1, 0 - 150)) { return neg ? jNegZeroF() : 0 }
+        var e = 0
+        var t = a
+        while (t >= 2) { t = t / 2; e = e + 1 }
+        while (t < 1) { t = t * 2; e = e - 1 }
+        var q = e - 23
+        if (q < 0 - 149) { q = 0 - 149 }
+        var sc = jScale2(a, 0 - q)
+        var f = Math.floor(sc)
+        var d = sc - f
+        if (d > 0.5) { f = f + 1 }
+        if (d === 0.5) { if (f - Math.floor(f / 2) * 2 !== 0) { f = f + 1 } }
+        var r = jScale2(f, q)
+        if (r > maxf) { return neg ? jNegF(jInf) : jInf }
+        if (r === 0) { return neg ? jNegZeroF() : 0 }
+        return neg ? jNegF(r) : r
+    }
+    function jNegZeroF() { return 0 / jNegOne }
     // Math.max/min pick an operand, but the DOUBLE overload is selected as soon as
     // one side is a double, so the answer is a double then (Math.max(1.5, 2) is 2.0).
     // jTakeL is the OPERAND CHOICE, and the two cases a plain `>` / `<` cannot
@@ -2244,7 +2323,7 @@ HasStatic   = :script(~~
     function jMinMax(a, b, takeA) {
         var v = anytype
         v = takeA ? a : b
-        if (jIsFlo(a) || jIsFlo(b)) { return jIsFlo(v) ? v : jFlo(jNumD(v)) }
+        if (jIsFlo(a) || jIsFlo(b)) { return jFloBox(jNumD(v), a, b) }
         return v
     }
     function jIsFlo(v) { return v !== null && v !== undefined && typeof v == "object" && v.__flo !== undefined }
@@ -2437,13 +2516,21 @@ HasStatic   = :script(~~
     // floating point (JLS 5.6.2, binary numeric promotion) and its result is a double.
     function jFloOp(op, l, r) {
         if (op == "+" && (typeof l == "string" || typeof r == "string")) { return jstr2(l) + jstr2(r) }
+        // BOTH OPERANDS CONVERT FIRST when the promoted type is float, and that
+        // is not the same answer as rounding only the result: `float f = 0.1f;
+        // f + 16777217` is 1.6777216E7 in java, because the int becomes a float
+        // BEFORE the addition. It decides the RELATIONS too - 16777217 ==
+        // 16777216f is true. Measured against java 24.0.2, 156 rows of a
+        // 1,231-value probe.
+        var f32 = jF32Res(l, r)
         var a = jNumD(l)
         var b = jNumD(r)
-        if (op == "+")  return jFlo(a + b)
-        if (op == "-")  return jFlo(a - b)
-        if (op == "*")  return jFlo(a * b)
-        if (op == "/")  return jFlo(a / b)
-        if (op == "%")  return jFlo(a % b)
+        if (f32) { a = jF32Round(a); b = jF32Round(b) }
+        if (op == "+")  return jFloRes(a + b, f32)
+        if (op == "-")  return jFloRes(a - b, f32)
+        if (op == "*")  return jFloRes(jZeroSign(a * b, a, b), f32)
+        if (op == "/")  return jFloRes(jZeroSign(a / b, a, b), f32)
+        if (op == "%")  return jFloRes(a % b, f32)
         if (op == "==") return a == b
         if (op == "!=") return a != b
         if (op == "<")  return a < b
@@ -2451,6 +2538,160 @@ HasStatic   = :script(~~
         if (op == "<=") return a <= b
         if (op == ">=") return a >= b
         return coreBinOp(op, a, b)
+    }
+    // ----- Float.toString -----
+    // The same rule as Double.toString read at 24 significant bits: the SHORTEST
+    // decimal that reads back as the same FLOAT, plain for 1e-3 <= |v| < 1e7,
+    // always a decimal point, never fewer than two significant digits in the
+    // scientific form. The twins are jvF32Str in languages/lib/java-rt.metajs and
+    // jvmFloStr32 in abnf/jsrtjvm.go.
+    //
+    // THE DIGITS COME FROM `"" + a` AND NOT FROM floPrec. floPrec's two
+    // implementations disagree - abnf/commonscript.go answers exactly n digits,
+    // languages/lib/runtime.c's answers max(n, shortest) - so floPrec(1/3, 1) is
+    // "3e-1" here and "3333333333333333e-1" natively, and a renderer written on
+    // it would be a halves divergence in every float shorter than its double.
+    // `"" + a` is the shortest round-tripping DOUBLE in every engine, and
+    // rounding that digit string down to n is exact for every n a float wants.
+
+    // The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP,
+    // EXP being the decimal exponent of the FIRST digit.
+    function jDecDigits(a) {
+        var s = "" + a
+        var mant = s
+        var exp = 0
+        var ei = 0 - 1
+        for (var i = 0; i < s.length; i++) {
+            var c = s.charAt(i)
+            if (c == "e" || c == "E") { ei = i }
+        }
+        if (ei >= 0) {
+            mant = s.substring(0, ei)
+            var et = s.substring(ei + 1)
+            if (et.charAt(0) == "+") { et = et.substring(1) }
+            exp = parseInt(et, 10)
+        }
+        var digits = ""
+        var pt = 0 - 1
+        for (var j = 0; j < mant.length; j++) {
+            var ch = mant.charAt(j)
+            if (ch == ".") { pt = digits.length } else { if (ch != "-") { digits = digits + ch } }
+        }
+        if (pt < 0) { pt = digits.length }
+        var lead = 0
+        while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead++ }
+        digits = digits.substring(lead)
+        pt = pt - lead
+        var endz = digits.length
+        while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
+        digits = digits.substring(0, endz)
+        return digits + "e" + (pt + exp - 1)
+    }
+    // A DIGITS "e" EXP form rounded to n significant digits, half to even.
+    function jRoundDig(s, n) {
+        var ei = s.indexOf("e")
+        var ds = s.substring(0, ei)
+        var ex = parseInt(s.substring(ei + 1), 10)
+        if (ds.length <= n) { return s }
+        var keep = ds.substring(0, n)
+        var nxt = ds.charCodeAt(n) - 48
+        var up = false
+        if (nxt > 5) { up = true }
+        if (nxt == 5) {
+            var rest = false
+            for (var i = n + 1; i < ds.length; i++) { if (ds.charCodeAt(i) != 48) { rest = true } }
+            if (rest) { up = true } else {
+                var last = ds.charCodeAt(n - 1) - 48
+                if (last - Math.floor(last / 2) * 2 == 1) { up = true }
+            }
+        }
+        if (up) {
+            var out = ""
+            var carry = 1
+            for (var k = n - 1; k >= 0; k--) {
+                var dg = ds.charCodeAt(k) - 48 + carry
+                carry = 0
+                if (dg == 10) { dg = 0; carry = 1 }
+                out = "" + dg + out
+            }
+            if (carry == 1) { out = ("1" + out).substring(0, n); ex = ex + 1 }
+            keep = out
+        }
+        var ez = keep.length
+        while (ez > 1 && keep.charAt(ez - 1) == "0") { ez-- }
+        return keep.substring(0, ez) + "e" + ex
+    }
+    // The value of a DIGITS "e" EXP form. At most nine digits, so the integer is
+    // exact; the power of ten goes in chunks of 10^15, the largest one a double
+    // holds exactly. The relative error stays under ~1e-15, five million times
+    // finer than a float's half-ulp, and the only consumer is the round-trip
+    // TEST below - an error that small cannot pick a wrong length.
+    function jDecVal(s) {
+        var ei = s.indexOf("e")
+        var ds = s.substring(0, ei)
+        var k = parseInt(s.substring(ei + 1), 10) - ds.length + 1
+        var m = 0
+        for (var i = 0; i < ds.length; i++) { m = m * 10 + (ds.charCodeAt(i) - 48) }
+        while (k >= 15) { m = m * 1000000000000000; k = k - 15 }
+        while (k <= 0 - 15) { m = m / 1000000000000000; k = k + 15 }
+        while (k > 0) { m = m * 10; k = k - 1 }
+        while (k < 0) { m = m / 10; k = k + 1 }
+        return m
+    }
+    // The shortest decimal that round-trips as a binary32. Nine always do.
+    function jF32Sig(a) {
+        var full = jDecDigits(a)
+        var n = 1
+        while (n < 9) {
+            var c = jRoundDig(full, n)
+            if (jF32Round(jDecVal(c)) === a) { return c }
+            n = n + 1
+        }
+        return jRoundDig(full, 9)
+    }
+    function jF32Str(d) {
+        if (d !== d) return "NaN"
+        if (d === jInf) return "Infinity"
+        if (d === jNegF(jInf)) return "-Infinity"
+        if (d === 0) return (1 / d < 0) ? "-0.0" : "0.0"
+        var neg = d < 0
+        var a = neg ? jNegF(d) : d
+        var sig = jF32Sig(a)
+        var ei = sig.indexOf("e")
+        var ds = sig.substring(0, ei)
+        var e10 = parseInt(sig.substring(ei + 1), 10)
+        var body = ""
+        if (a >= 0.001 && a < 10000000) {
+            body = jF32Plain(ds, e10)
+        } else {
+            // Never fewer than TWO significant digits, and where the shortest
+            // has one the second is the closest two digit decimal to the ACTUAL
+            // value rather than a zero: Float.MIN_VALUE is 1.401298464324817E-45,
+            // which java writes "1.4E-45". The same rule as Double's "4.9E-324".
+            if (ds.length == 1) {
+                var s2 = jRoundDig(jDecDigits(a), 2)
+                var e2 = s2.indexOf("e")
+                ds = s2.substring(0, e2)
+                e10 = parseInt(s2.substring(e2 + 1), 10)
+            }
+            var frac = ds.substring(1)
+            if (frac == "") { frac = "0" }
+            body = ds.charAt(0) + "." + frac + "E" + e10
+        }
+        return neg ? "-" + body : body
+    }
+    // The plain form. The forced ".0" is here; the two-digit minimum is not,
+    // because it is about the significand and only the scientific form shows one.
+    function jF32Plain(ds, e10) {
+        if (e10 >= 0) {
+            var ip = ""
+            for (var i = 0; i <= e10; i++) { ip = ip + (i < ds.length ? ds.charAt(i) : "0") }
+            var fp = ds.length > e10 + 1 ? ds.substring(e10 + 1) : "0"
+            return ip + "." + fp
+        }
+        var lead = "0."
+        for (var k = 0 - e10 - 1; k > 0; k--) { lead = lead + "0" }
+        return lead + ds
     }
     // Double.toString (JLS 5.1.11 / java.lang.Double): always a decimal point, the
     // shortest digit run that round-trips, plain decimal for 1e-3 <= |d| < 1e7 and
@@ -2680,7 +2921,7 @@ HasStatic   = :script(~~
         if (t == "string") return "[Ljava.lang.String;"
         if (t == "number") return "[I"
         if (t == "object") {
-            if (e.__flo !== undefined) return "[D"
+            if (e.__flo !== undefined) return e.__f32 === true ? "[F" : "[D"
             if (e.__char !== undefined) return "[C"
             // A sized integer carries its own width, so long[] / short[] / byte[]
             // are the one array kind whose element type is NOT a guess.
@@ -2710,7 +2951,7 @@ HasStatic   = :script(~~
         if (depth > 32) return "..."
         if (Array.isArray(v)) { return jArrayTag(v) + "@" + jIdHash(v) }
         if (typeof v == "object") {
-            if (v.__flo !== undefined) return jFloStr(v.__flo)
+            if (v.__flo !== undefined) return v.__f32 === true ? jF32Str(v.__flo) : jFloStr(v.__flo)
             // A sized integer prints its exact digits; "" + v would print
             // [object Object] and szNum would round above 2^53.
             if (v.__sz === true) return szStr(v)
@@ -2794,7 +3035,7 @@ HasStatic   = :script(~~
 
     function jadd(l, r) {
         if (typeof l == "string" || typeof r == "string") return jstr2(l) + jstr2(r)
-        if (jIsFlo(l) || jIsFlo(r)) { return jFlo(jNumD(l) + jNumD(r)) }
+        if (jIsFlo(l) || jIsFlo(r)) { return jFloBox(jNumD(l) + jNumD(r), l, r) }
         // Two integral operands: int + int wraps at 32 bits, anything with a long
         // in it at 64 (JLS 15.18.2 on top of the 5.6.2 promotion).
         return jArith("+", l, r)
@@ -2834,7 +3075,7 @@ HasStatic   = :script(~~
     // int32.
     function jStep(v, d) {
         if (jIsChar(v)) { return jChar((v.__char + d) & 65535) }
-        if (jIsFlo(v)) { return jFlo(v.__flo + d) }
+        if (jIsFlo(v)) { return jIsF32(v) ? jFlo32(v.__flo + d) : jFlo(v.__flo + d) }
         if (jIsSz(v)) { return jNarrow(jArith("+", v, d), v.w) }
         return (v + d) | 0
     }
@@ -2881,7 +3122,11 @@ HasStatic   = :script(~~
         // invalid there); decimal also takes the float suffixes.
         var isSfx = last == "L" || last == "l"
         var isFlt = false
-        if (base == 10 && (last == "F" || last == "f" || last == "D" || last == "d")) { isSfx = true; isFlt = true }
+        var isF32 = false
+        if (base == 10 && (last == "F" || last == "f" || last == "D" || last == "d")) {
+            isSfx = true; isFlt = true
+            if (last == "F" || last == "f") { isF32 = true }
+        }
         if (isSfx) {
             s = s.substring(0, s.length - 1)
         }
@@ -2891,7 +3136,11 @@ HasStatic   = :script(~~
                 if (fc == "." || fc == "e" || fc == "E") { isFlt = true }
             }
         }
-        if (isFlt) { return jFlo(parseFloat(s)) }
+        // An f/F suffix makes the literal a FLOAT - a binary32 - and jFlo32
+        // rounds it. (The decimal is read into a double first and rounded to a
+        // float second, where javac rounds once; no value in the corpus or the
+        // probe differs.)
+        if (isFlt) { return isF32 ? jFlo32(parseFloat(s)) : jFlo(parseFloat(s)) }
         // An L suffix makes the literal a LONG, and a long literal is exact to 64
         // bits - which parseInt is not: 9223372036854775807 comes back as
         // 9223372036854775808 there, and the two script engines even round it
@@ -2960,7 +3209,7 @@ HasStatic   = :script(~~
         return function() {
             var v = anytype
             v = t()
-            if (jIsFlo(v)) { return jFlo(jNegF(v.__flo)) }
+            if (jIsFlo(v)) { return jIsF32(v) ? {__flo: jNegF(v.__flo), __f32: true} : jFlo(jNegF(v.__flo)) }
             return jArith("-", jIsLong(v) ? jL(0) : 0, v)
         }
     }
@@ -3027,6 +3276,9 @@ HasStatic   = :script(~~
     // is 54, and `int i = 5; i += 1.5` is (int)(6.5), which is 6. The declared
     // width is on the value, so it is there to narrow back to.
     function jNarrowLike(a, v) {
+        // A compound assignment carries an implicit cast back to the LEFT
+        // operand's type (JLS 15.26.2), so `float f; f += 0.1` is (float)(f+0.1).
+        if (jIsF32(a)) { return jFlo32(jNumD(v)) }
         if (jIsFlo(a)) { return jIsFlo(v) ? v : jFlo(jNumD(v)) }
         if (jIsChar(a)) { return jChar(jNum(v) & 65535) }
         if (jIsSz(a)) { return jNarrow(v, a.w) }
@@ -3257,7 +3509,8 @@ HasStatic   = :script(~~
         if (ty == "long") { return function() { return jNarrow(inner(), 64) } }
         if (ty == "short") { return function() { return jNarrow(inner(), 16) } }
         if (ty == "byte") { return function() { return jNarrow(inner(), 8) } }
-        if (ty == "double" || ty == "float") { return function() { return jFlo(jNumD(inner())) } }
+        if (ty == "float") { return function() { return jFlo32(jNumD(inner())) } }
+        if (ty == "double") { return function() { return jFlo(jNumD(inner())) } }
         return inner
     }
     // A lambda is a real closure: evaluating the lambda expression captures the
@@ -3603,6 +3856,10 @@ HasStatic   = :script(~~
         // A declared primitive type CONVERTS its initializer (JLS 5.2, assignment
         // conversion): `double d = 1;` holds 1.0, `int i = 'a';` holds 97.
         if (ty == "double" || ty == "float") {
+            if (ty == "float") {
+                if (typeof v == "number" || jIsChar(v) || jIsSz(v) || jIsFlo(v)) { return jFlo32(jNumD(v)) }
+                return v
+            }
             if (typeof v == "number" || jIsChar(v) || jIsSz(v)) { return jFlo(jNumD(v)) }
             return v
         }

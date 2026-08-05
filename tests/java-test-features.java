@@ -607,6 +607,8 @@ public class Main {
         Main.check("lit-float-forms", 1e3 == 1000.0 && 2.5e-2 == 0.025 && .5 == 0.5 && 5. == 5.0);
         Main.check("lit-suffix", 1.5f + 1.5F == 3.0f && 2.5d * 2 == 5.0D);
         Main.check("lit-hex-float", 0x1p4 == 16.0);
+        // An f/F suffix is a binary32, not a double: 1.0f/3.0f is 0.33333334.
+        Main.check("lit-float-width", ("" + (1.0f / 3.0f)).equals("0.33333334") && 1.0f / 3.0f != 1.0 / 3.0);
 
         // ----- instanceof with pattern binding -----
         Object iofObj = "abcd";

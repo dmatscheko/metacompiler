@@ -739,6 +739,8 @@ class S22 {
 // Infinity / NaN / -0.0 did not exist at all.
 class S23 {
     static String s(double d) { return "" + d; }
+    static String f(float v) { return "" + v; }
+    static float third() { return 1.0f / 3.0f; }
     static double half() { return 0.5; }
     static void run() {
         // Division is REAL division as soon as one side is a double, and integer
@@ -819,9 +821,44 @@ class S23 {
         Main.check("flt26", S23.half() / 2 == 0.25);
         // Comparisons mix the two kinds freely.
         Main.check("flt27", 2.5 > 2 && 2 < 2.5 && 1.0 == 1 && 3.0 <= 3 && 3.0 >= 3);
-        // A float literal and an f/d suffix are doubles here too.
+        // A d/D suffix is a double; an f/F suffix is a FLOAT (see below).
         float f = 3;
         Main.check("flt28", f / 2 == 1.5 && 1.5f + 1.5F == 3.0f && 2.5d * 2 == 5.0D);
+        // ----- the float WIDTH (todo.md 1.2) -----
+        // `float` is a binary32, not a double spelled differently. Every value
+        // below was read off `java` 24.0.2 before it was written down; the whole
+        // block used to answer the DOUBLE result, so each line discriminates.
+        Main.check("flt29", 1.0f / 3.0f == 0.33333334f && 1.0f / 3.0f != 1.0 / 3.0);
+        Main.check("flt30", S23.f(1.0f / 3.0f).equals("0.33333334"));
+        Main.check("flt31", S23.f(0.1f + 0.2f).equals("0.3") && S23.s(0.1f + 0.2).equals("0.30000000149011613"));
+        // The narrowing is REAL: (double)0.1f is not 0.1, and 16777217 has no
+        // float, so it converts to 1.6777216E7 - including on the way INTO a
+        // comparison (JLS 5.6.2 promotes the int operand to float first).
+        Main.check("flt32", S23.s((double) 0.1f).equals("0.10000000149011612"));
+        Main.check("flt33", S23.f(16777217f).equals("1.6777216E7") && 16777216f == 16777217);
+        Main.check("flt34", S23.f((float) (1.0 / 3.0)).equals("0.33333334"));
+        // The print window and the forced point are Double.toString's, read at
+        // 24 bits: plain for 1e-3 <= |v| < 1e7 and d.dddEnn outside it.
+        Main.check("flt35", S23.f(100f).equals("100.0") && S23.f(0.001f).equals("0.001"));
+        Main.check("flt36", S23.f(9999999f).equals("9999999.0") && S23.f(1e7f).equals("1.0E7"));
+        Main.check("flt37", S23.f(1e20f).equals("1.0E20") && S23.f(1e-20f).equals("1.0E-20"));
+        // The two-significant-digit minimum, against the ACTUAL value: the
+        // smallest float is 1.401298464324817E-45 and java writes "1.4E-45".
+        Main.check("flt38", S23.f(1e-45f).equals("1.4E-45") && S23.f(3.4028235e38f).equals("3.4028235E38"));
+        // A float overflows and underflows at the FLOAT boundaries.
+        Main.check("flt39", S23.f(1e38f * 10f).equals("Infinity") && S23.f(1e-38f / 1e10f).equals("0.0"));
+        Main.check("flt40", S23.f(1f / 0f).equals("Infinity") && S23.f(0f / 0f).equals("NaN") && S23.f(-0.0f).equals("-0.0"));
+        // A compound assignment casts back to the LEFT operand's type, so a
+        // double on the right does not widen the variable (JLS 15.26.2).
+        float g = 1.1f; g += 0.1;
+        float h = 0.1f; h += 16777217;
+        Main.check("flt41", S23.f(g).equals("1.2") && S23.f(h).equals("1.6777216E7"));
+        // Unary minus, Math, an array element and an array's own rendering.
+        float[] fs = new float[]{0.5f, 1.5f};
+        Main.check("flt42", S23.f(-S23.third()).equals("-0.33333334") && S23.f(fs[0] * 3).equals("1.5"));
+        Main.check("flt43", S23.f(Math.abs(-2.5f)).equals("2.5") && S23.f(Math.max(1.5f, 2)).equals("2.0")
+                && S23.s(Math.max(1.5f, 2.0)).equals("2.0"));
+        Main.check("flt44", ("" + fs).indexOf("[F@") == 0 && (int) 2.9f == 2 && (long) -2.9f == -2L);
     }
 }
 

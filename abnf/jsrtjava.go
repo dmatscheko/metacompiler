@@ -464,6 +464,9 @@ func init() {
 			if jvIsIntegral(l) && jvIsIntegral(r) && !jvmIsFlo(l) && !jvmIsFlo(r) {
 				return boolH(rt.jvCmp(op, l, r))
 			}
+			// A float operand promotes the other side to float too (JLS 5.6.2),
+			// so 16777217 < 16777216f is FALSE - the int converts to 1.6777216E7.
+			l, r = jvmFloCmpPair(rt, l, r)
 			c := rt.jsCompare(l, r)
 			// jsCompare answers the SENTINEL 2 for a NaN operand, commented
 			// there as "every relation is false" - and that is exactly Java's
@@ -557,6 +560,11 @@ func init() {
 			case jsChar:
 				return w(jsChar{code: int32((int64(t.code) + d) & 65535)})
 			case jsJFlo:
+				// ++/-- keeps the operand's own type, WIDTH included: a float
+				// steps as a float (jvF32Round in lib/java-rt.metajs).
+				if t.sty == floJavaF {
+					return w(jsJFlo{f: jvmFround(t.f + float64(d)), sty: floJavaF})
+				}
 				return w(jsJFlo{f: t.f + float64(d), sty: t.sty})
 			case jsGInt:
 				return w(jvNarrow(rt, rt.jvArith("+", t, float64(d)), t.w))
@@ -571,6 +579,11 @@ func init() {
 			l, v := u(a[0]), u(a[1])
 			switch t := l.(type) {
 			case jsJFlo:
+				// A float left operand narrows the result back to a float:
+				// `float f = 1.1f; f += 0.1` is (float)(f + 0.1) and not a double.
+				if t.sty == floJavaF {
+					return w(jsJFlo{f: jvmFround(rt.toNumber(v)), sty: floJavaF})
+				}
 				if f, ok := v.(jsJFlo); ok {
 					return w(f)
 				}
@@ -632,7 +645,10 @@ func init() {
 				return rt.wrapStr(rt.jvpStr(l) + rt.jvpStr(r))
 			}
 			if jvmIsFlo(l) || jvmIsFlo(r) {
-				return rt.wrap(jsJFlo{f: rt.toNumber(l) + rt.toNumber(r), sty: jvmStyleOf(l, r)})
+				// jvmArith, not a hand-rolled add: the float WIDTH needs both
+				// operands converted first and the sum rounded after, and
+				// jvmStyleOf gets `float + double` backwards.
+				return w(rt.jvmArith('+', l, r))
 			}
 			// Two integral operands: int + int wraps at 32 bits, anything with a
 			// long in it at 64 (JLS 15.18.2 on top of the 5.6.2 promotion).
@@ -780,6 +796,9 @@ func jvpElemTag(v interface{}) string {
 		}
 		return "[B"
 	case jsJFlo:
+		if t.sty == floJavaF {
+			return "[F"
+		}
 		return "[D"
 	case jsChar:
 		return "[C"

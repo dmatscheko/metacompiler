@@ -446,11 +446,334 @@ function jvmTakeL(a, b, wantMax) {
 function jvmMinMax(l, r, takeL) {
     var v = takeL ? l : r
     if (floIs(l) || floIs(r)) {
-        if (floIs(v)) { return v }
-        return flo(rtjNum(v), 0)
+        var sty = jvFloStyle2(l, r)
+        if (floIs(v)) { if (floStyle(v) == sty) { return v } }
+        if (sty == 3) { return flo(jvF32Round(rtjNum(v)), 3) }
+        return flo(rtjNum(v), sty)
     }
     return v
 }
+
+// ===================================================== the float WIDTH ======
+//
+// A Java `float` is a binary32, not a print style: 1.0f/3.0f is 0.33333334 where
+// the double is 0.3333333333333333, and every arithmetic result has to be
+// rounded back to 24 significant bits. The VALUE still travels as a double
+// (every float is exactly one), so the only thing that has to go on the box is
+// the width - and the tag 14 box already has a byte for a per-language print
+// tag. STYLE 3 IS THE JAVA float. abnf/jsrtjvm.go's header is the specification;
+// languages/lib/runtime.c is deliberately unchanged, which is why every rendering
+// and every arithmetic result is intercepted HERE before the floor sees it:
+// runtime.c's jf_text has no arm for style 3 and would print a float with the
+// DOUBLE renderer.
+//
+// Three engines implement this one specification: the {__flo,__f32} box of
+// languages/java-interpreter.abnf, jsJFlo{sty: floJavaF} in abnf/jsrtjvm.go, and
+// this file. Nothing else builds a style 3 box, so kotlin, C# and Go are
+// untouched by every line below.
+
+// x * 2^k, EXACTLY - every factor is a power of two, so not one bit is lost.
+// The chunking by 2^30 keeps the loop short for the ~280 halvings a subnormal
+// float needs; a plain doubling loop would be just as exact and much slower.
+function jvScale2(x, k) {
+    var v = x
+    var n = k
+    while (n >= 30) { v = v * 1073741824; n = n - 30 }
+    while (n <= 0 - 30) { v = v / 1073741824; n = n + 30 }
+    while (n > 0) { v = v * 2; n = n - 1 }
+    while (n < 0) { v = v / 2; n = n + 1 }
+    return v
+}
+
+// jvF32Round is Math.fround: the double nearest x that a binary32 can hold,
+// round-half-to-EVEN, with the subnormals and both overflows. It is what the Go
+// twin spells `float64(float32(x))`.
+//
+// It is written on `*` and `/` by powers of two and a floor, because MetaJS has
+// no access to a double's BITS - see chapter 7.7 of docs/working-on-this-project.md,
+// which is the same argument that keeps d_pow and d_frexp in the C floor. The
+// significand is scaled until its unit in the last place is 1, rounded there,
+// and scaled back; both scalings are exact, so the single rounding is the only
+// one that happens.
+function jvF32Round(x) {
+    if (x !== x) { return x }
+    if (x === 0) { return x }
+    var zero = 0
+    var inf = 1 / zero
+    var neg = x < 0
+    var a = neg ? 0 - x : x
+    if (a === inf) { return x }
+    var maxf = jvScale2(16777215, 104)
+    // 2^128 is above every rounding boundary and 2^-150 is the half-way point
+    // below the smallest subnormal (which ties to even, i.e. to zero); both
+    // early exits also bound the exponent loop below to ~280 turns.
+    if (a >= jvScale2(1, 128)) { return neg ? 0 - inf : inf }
+    if (a <= jvScale2(1, 0 - 150)) { return neg ? jvNegZero() : 0 }
+    var e = 0
+    var t = a
+    while (t >= 2) { t = t / 2; e = e + 1 }
+    while (t < 1) { t = t * 2; e = e - 1 }
+    var q = e - 23
+    if (q < 0 - 149) { q = 0 - 149 }
+    var s = jvScale2(a, 0 - q)
+    var f = Math.floor(s)
+    var d = s - f
+    if (d > 0.5) { f = f + 1 }
+    if (d === 0.5) { if (f - Math.floor(f / 2) * 2 !== 0) { f = f + 1 } }
+    var r = jvScale2(f, q)
+    if (r > maxf) { return neg ? 0 - inf : inf }
+    if (r === 0) { return neg ? jvNegZero() : 0 }
+    return neg ? 0 - r : r
+}
+
+// -0.0. `0 - 0.0` is +0.0 and `x * 0` keeps an integral zero, so the working
+// spelling is a division - docs/working-on-this-project.md chapter 7.10.
+function jvNegZero() { return 0 / (0 - 1) }
+
+// The result style of a binary operation on two float-ish operands. JLS 5.6.2
+// promotes to the WIDER type, so `float op double` is a double; the floor's
+// jf_style_of takes the LEFT operand's style, which gets that pair backwards.
+function jvFloStyle2(l, r) {
+    if (floIs(l)) {
+        if (floStyle(l) == 3) {
+            if (floIs(r)) { return floStyle(r) }
+            return 3
+        }
+        return floStyle(l)
+    }
+    if (floIs(r)) { return floStyle(r) }
+    return 0
+}
+
+// The fix-up applied to the floor's own floOp answer. It runs ONLY when that
+// answer already claims style 3 - the one host call the double path pays - and
+// style 3 can only come from a Java float, because jf_style_of took it off an
+// operand. Two things are wrong with the floor's answer then, and both are
+// JLS 5.6.2:
+//
+//   float op DOUBLE is a double. jf_style_of takes the LEFT operand's style and
+//   gets that pair backwards; the VALUE is already right, since a float widens
+//   to a double exactly, so only the box is rebuilt.
+//
+//   float op INT converts the int to a FLOAT FIRST. Rounding only the result is
+//   a different answer: `float f = 0.1f; f + 16777217` is 1.6777216E7 in java
+//   and 1.6777218E7 if the int keeps its exact value into the addition -
+//   measured against java 24.0.2, 156 rows of a 1,231-value probe. So the
+//   operation is redone on two converted operands.
+function jvFloFix(op, rr, l, r) {
+    if (floIs(r)) { if (floStyle(r) != 3) { return flo(floNum(rr), floStyle(r)) } }
+    var a = flo(jvF32Round(rtjNum(l)), 3)
+    var b = flo(jvF32Round(rtjNum(r)), 3)
+    return flo(jvF32Round(floNum(rtjArith(op, a, b))), 3)
+}
+
+// JLS 5.6.2 for the RELATIONS as well: a float operand converts the other side
+// to a float, so `16777217 == 16777216f` is TRUE. It answers false unless the
+// promoted type really is float, so every double and every integral pair keeps
+// the path it had.
+function jvFloPromotes(l, r) {
+    if (!floIs(l) && !floIs(r)) { return false }
+    if (jvFloStyle2(l, r) != 3) { return false }
+    if (!floIs(l) && !rtjIsIntegral(l)) { return false }
+    if (!floIs(r) && !rtjIsIntegral(r)) { return false }
+    return true
+}
+
+// ----- Float.toString -------------------------------------------------------
+//
+// The rule is Double.toString's, read at 24 significant bits: the SHORTEST
+// decimal that reads back as the same float, plain for 1e-3 <= |v| < 1e7 and
+// d.dddEnn outside it, always with a decimal point, never fewer than two
+// significant digits in the scientific form.
+//
+// THE DIGITS COME FROM `"" + a`, NOT FROM floPrec, and that is not a style
+// choice. floPrec's two implementations DISAGREE: abnf/commonscript.go answers
+// exactly n digits and languages/lib/runtime.c's answers max(n, shortest), so
+// floPrec(1/3, 1) is "3e-1" under llvm.Run and "3333333333333333e-1" natively.
+// Using it here would have been a halves divergence in every float that needs
+// fewer digits than its double. `"" + a` is the shortest round-tripping DOUBLE
+// in every engine (it is what jvm_flo_str and jvmFloStr already agree on), and
+// rounding that digit string down to n is exact for every n a float can want.
+
+// The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP
+// with EXP the decimal exponent of the FIRST digit - the shape floPrec answers
+// in, so the two are interchangeable at the call sites.
+function jvDecDigits(a) {
+    var s = "" + a
+    var mant = s
+    var exp = 0
+    var ei = 0 - 1
+    var i = 0
+    while (i < s.length) {
+        var c = s.charAt(i)
+        if (c == "e") { ei = i }
+        if (c == "E") { ei = i }
+        i = i + 1
+    }
+    if (ei >= 0) {
+        mant = s.substring(0, ei)
+        var et = s.substring(ei + 1)
+        if (et.charAt(0) == "+") { et = et.substring(1) }
+        exp = parseInt(et, 10)
+    }
+    var digits = ""
+    var pt = 0 - 1
+    var j = 0
+    while (j < mant.length) {
+        var ch = mant.charAt(j)
+        if (ch == ".") { pt = digits.length } else { if (ch != "-") { digits = digits + ch } }
+        j = j + 1
+    }
+    if (pt < 0) { pt = digits.length }
+    var lead = 0
+    while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead = lead + 1 }
+    digits = digits.substring(lead)
+    pt = pt - lead
+    var endz = digits.length
+    while (endz > 1 && digits.charAt(endz - 1) == "0") { endz = endz - 1 }
+    digits = digits.substring(0, endz)
+    return digits + "e" + (pt + exp - 1)
+}
+
+// A DIGITS "e" EXP form rounded to n significant digits, half to even. The
+// source is already the shortest form of the value, so a genuine tie can only
+// be a decimal the double holds exactly.
+function jvRoundDig(s, n) {
+    var ei = s.indexOf("e")
+    var ds = s.substring(0, ei)
+    var ex = parseInt(s.substring(ei + 1), 10)
+    if (ds.length <= n) { return s }
+    var keep = ds.substring(0, n)
+    var nxt = ds.charCodeAt(n) - 48
+    var up = false
+    if (nxt > 5) { up = true }
+    if (nxt == 5) {
+        var rest = false
+        var i = n + 1
+        while (i < ds.length) { if (ds.charCodeAt(i) != 48) { rest = true } i = i + 1 }
+        if (rest) { up = true } else {
+            var last = ds.charCodeAt(n - 1) - 48
+            if (last - Math.floor(last / 2) * 2 == 1) { up = true }
+        }
+    }
+    if (up) {
+        var out = ""
+        var carry = 1
+        var k = n - 1
+        while (k >= 0) {
+            var d = ds.charCodeAt(k) - 48 + carry
+            carry = 0
+            if (d == 10) { d = 0; carry = 1 }
+            out = "" + d + out
+            k = k - 1
+        }
+        if (carry == 1) { out = ("1" + out).substring(0, n); ex = ex + 1 }
+        keep = out
+    }
+    var endz = keep.length
+    while (endz > 1 && keep.charAt(endz - 1) == "0") { endz = endz - 1 }
+    return keep.substring(0, endz) + "e" + ex
+}
+
+// The value of a DIGITS "e" EXP form. At most nine digits, so the integer part
+// is exact; the power of ten is applied in chunks of 10^15, the largest one a
+// double holds exactly. The relative error stays under ~1e-15, which is five
+// million times finer than the half-ulp of a float - and the only consumer is
+// the round-trip TEST below, so an error that small cannot pick a wrong length.
+function jvDecVal(s) {
+    var ei = s.indexOf("e")
+    var ds = s.substring(0, ei)
+    var k = parseInt(s.substring(ei + 1), 10) - ds.length + 1
+    var m = 0
+    var i = 0
+    while (i < ds.length) { m = m * 10 + (ds.charCodeAt(i) - 48); i = i + 1 }
+    while (k >= 15) { m = m * 1000000000000000; k = k - 15 }
+    while (k <= 0 - 15) { m = m / 1000000000000000; k = k + 15 }
+    while (k > 0) { m = m * 10; k = k - 1 }
+    while (k < 0) { m = m / 10; k = k + 1 }
+    return m
+}
+
+// The shortest decimal that round-trips as a binary32. Nine digits always do.
+function jvF32Sig(a) {
+    var full = jvDecDigits(a)
+    var n = 1
+    while (n < 9) {
+        var c = jvRoundDig(full, n)
+        if (jvF32Round(jvDecVal(c)) === a) { return c }
+        n = n + 1
+    }
+    return jvRoundDig(full, 9)
+}
+
+function jvF32Str(d) {
+    if (d !== d) { return "NaN" }
+    var zero = 0
+    var inf = 1 / zero
+    if (d === inf) { return "Infinity" }
+    if (d === 0 - inf) { return "-Infinity" }
+    if (d === 0) { if (1 / d < 0) { return "-0.0" } return "0.0" }
+    var neg = d < 0
+    var a = neg ? 0 - d : d
+    var sig = jvF32Sig(a)
+    var ei = sig.indexOf("e")
+    var ds = sig.substring(0, ei)
+    var e10 = parseInt(sig.substring(ei + 1), 10)
+    var body = ""
+    if (a >= 0.001 && a < 10000000) {
+        body = jvF32Plain(ds, e10)
+    } else {
+        // Never fewer than TWO significant digits, and where the shortest form
+        // has one the second is the closest two digit decimal to the ACTUAL
+        // value rather than a zero: Float.MIN_VALUE is 1.401298464324817E-45,
+        // which java writes "1.4E-45" and not "1.0E-45". The same rule, at the
+        // same site, as Double.toString's "4.9E-324".
+        if (ds.length == 1) {
+            var s2 = jvRoundDig(jvDecDigits(a), 2)
+            var e2 = s2.indexOf("e")
+            ds = s2.substring(0, e2)
+            e10 = parseInt(s2.substring(e2 + 1), 10)
+        }
+        var frac = ds.substring(1)
+        if (frac == "") { frac = "0" }
+        body = ds.charAt(0) + "." + frac + "E" + e10
+    }
+    if (neg) { return "-" + body }
+    return body
+}
+
+// The plain form, from the digits and the exponent of the first one. The forced
+// ".0" is here (100.0f is "100.0"); the two-digit minimum is NOT, because it is
+// about the significand and only the scientific form shows one.
+function jvF32Plain(ds, e10) {
+    if (e10 >= 0) {
+        var ip = ""
+        var i = 0
+        while (i <= e10) {
+            if (i < ds.length) { ip = ip + ds.charAt(i) } else { ip = ip + "0" }
+            i = i + 1
+        }
+        var fp = "0"
+        if (ds.length > e10 + 1) { fp = ds.substring(e10 + 1) }
+        return ip + "." + fp
+    }
+    var lead = "0."
+    var k = 0 - e10 - 1
+    while (k > 0) { lead = lead + "0"; k = k - 1 }
+    return lead + ds
+}
+
+// Every rendering of a tag 14 box goes through here, because the floor cannot
+// render style 3 (see the section header).
+function jvFloText(v) {
+    if (floStyle(v) == 3) { return jvF32Str(floNum(v)) }
+    return floStr(v)
+}
+
+// js_jflo32 is the only new extern the width needs: `(float) e`, a `1.0f`
+// literal and a `float x = e` declaration all lower to it. Its Go twin is
+// registered in abnf/jsrtjvm.go.
+function js_jflo32(v) { return flo(jvF32Round(rtjNum(v)), 3) }
 
 // ===================================================== rendering ============
 
@@ -463,7 +786,7 @@ function jpRender(v, depth) {
     if (v === null) { return "null" }
     if (typeof v == "string") { return v }
     if (typeof v == "boolean") { return v ? "true" : "false" }
-    if (floIs(v)) { return floStr(v) }
+    if (floIs(v)) { return jvFloText(v) }
     // sintStr is si_str, which prints a SIGNED cell with its minus sign - the
     // long arm this used to need (jlStr) is the floor's own now.
     if (sintIs(v)) { return sintStr(v) }
@@ -553,7 +876,7 @@ function jpElemTag(v) {
     if (jvIsChar(v)) { return "[C" }
     if (typeof v == "boolean") { return "[Z" }
     if (typeof v == "string") { return "[Ljava.lang.String;" }
-    if (floIs(v)) { return "[D" }
+    if (floIs(v)) { if (floStyle(v) == 3) { return "[F" } return "[D" }
     if (sintIs(v)) {
         var w = sintWidth(v)
         if (w == 64) { return "[J" }
@@ -927,7 +1250,10 @@ function js_jvexc(cls) {
 // One binary integral operator. A double operand keeps the FLOAT path, which is
 // where the two boxes meet.
 function js_jvarith(op, l, r) {
-    if (floIs(l) || floIs(r)) { return rtjArith(op, l, r) }
+    // The one host call the DOUBLE path pays for the float width: floStyle of a
+    // result that is not style 3 is the whole test, because style 3 can only
+    // have come off a Java float operand.
+    if (floIs(l) || floIs(r)) { var rf = rtjArith(op, l, r); if (floStyle(rf) == 3) { return jvFloFix(op, rf, l, r) } return rf }
     if (!rtjIsIntegral(l) || !rtjIsIntegral(r)) {
         // & | ^ on two booleans are Java's non-short-circuit boolean operators;
         // anything else is not a program javac accepts.
@@ -936,7 +1262,9 @@ function js_jvarith(op, l, r) {
             if (op == "|") { return l || r }
             if (op == "^") { return l !== r }
         }
-        return rtjArith(op, l, r)
+        var rg = rtjArith(op, l, r)
+        if (floStyle(rg) == 3) { return jvFloFix(op, rg, l, r) }
+        return rg
     }
     return jvArith(op, l, r)
 }
@@ -970,7 +1298,33 @@ function js_jvshift(op, l, r) { return jvShift(op, l, r) }
 // The body is rtjRel - SHARED with csharp's js_cscmp, lib/runtime-jvm.metajs, so
 // that the fix below cannot be made in one language and not the other a third
 // time.
-function js_jvcmp(op, l, r) { return rtjRel(op, l, r) }
+// A float operand promotes the other side to float too (JLS 5.6.2), so
+// `16777217 < 16777216f` is false - the int converts to 1.6777216E7 first.
+function js_jvcmp(op, l, r) {
+    // THE INTEGRAL FAST PATH IS SPELLED OUT HERE rather than reached through
+    // rtjRel, and that is a MEASUREMENT, not a preference. `i < 40000` is the
+    // whole of tests/bench/mod.java's loop condition, and asking the float
+    // question first cost java +5.32% against a 4.96% spread over 9 draws. The
+    // arm below is rtjRel's own first line with rtjkCmp expanded (it is jvCmp
+    // here), so it is the same answer by construction - and the integer path now
+    // does two rtjIsIntegral calls where it used to do two more floIs on top.
+    if (rtjIsIntegral(l) && rtjIsIntegral(r)) { return jvCmp(op, l, r) }
+    if (jvFloPromotes(l, r)) { return rtjRel(op, flo(jvF32Round(rtjNum(l)), 3), flo(jvF32Round(rtjNum(r)), 3)) }
+    return rtjRel(op, l, r)
+}
+
+// js_jchareq with the same promotion. The emitter calls THIS for `==` and `!=`;
+// js_jchareq itself stays as it is, because it is shared with kotlin (which has
+// no float width) and the record-component and switch-label sites still use it.
+function js_jvchareq(l, r) {
+    // Two host calls before the delegation, for the same reason js_jvcmp spells
+    // its integral arm out: everything that is not a float box must reach
+    // js_jchareq without paying for the promotion test.
+    if (floIs(l) || floIs(r)) {
+        if (jvFloPromotes(l, r)) { return jvF32Round(rtjNum(l)) == jvF32Round(rtjNum(r)) }
+    }
+    return js_jchareq(l, r)
+}
 
 // A cast or a declared integral type: (value, bits).
 function js_jvconv(v, bits) { return jvNarrow(v, rtjNum(bits)) }
@@ -1025,7 +1379,9 @@ function js_jvnot(v) {
 function js_jvstep(v, d) {
     var n = rtjNum(d)
     if (jvIsChar(v)) { return jvChar((v["__char"] + n) & 65535) }
-    if (floIs(v)) { return flo(floNum(v) + n, 0) }
+    // ++/-- keeps the operand's own type, WIDTH included: a float steps as a
+    // float, so `float f = 16777216f; f++` stays 1.6777216E7.
+    if (floIs(v)) { var st = floStyle(v); if (st == 3) { return flo(jvF32Round(floNum(v) + n), 3) } return flo(floNum(v) + n, st) }
     if (sintIs(v)) { return jvNarrow(jvArith("+", v, jvStepDelta(v, n)), sintWidth(v)) }
     return rtWrap32(jvI(v) + n)
 }
@@ -1042,8 +1398,12 @@ function jvStepDelta(v, n) {
 // (int)6.5 == 6. A String left operand keeps its concatenation.
 function js_jvnarrowlike(l, v) {
     if (floIs(l)) {
+        // A compound assignment carries an implicit cast back to the LEFT
+        // operand's type (JLS 15.26.2), so `float f = 1.1f; f += 0.1` is
+        // (float)(f + 0.1) and NOT a double.
+        if (floStyle(l) == 3) { return flo(jvF32Round(rtjNum(v)), 3) }
         if (floIs(v)) { return v }
-        return flo(rtjNum(v), 0)
+        return flo(rtjNum(v), floStyle(l))
     }
     if (jvIsChar(l)) { return jvChar(jvLow32(v) & 65535) }
     if (sintIs(l)) { return jvNarrow(v, sintWidth(l)) }
@@ -1107,7 +1467,7 @@ function js_jvstr(v) { return jpStr(v) }
 // falling through to JavaScript's ToString.
 function js_jvadd(l, r) {
     if (typeof l == "string" || typeof r == "string") { return jpStr(l) + jpStr(r) }
-    if (floIs(l) || floIs(r)) { return rtjArith("+", l, r) }
+    if (floIs(l) || floIs(r)) { var rp = rtjArith("+", l, r); if (floStyle(rp) == 3) { return jvFloFix("+", rp, l, r) } return rp }
     if (rtjIsIntegral(l) && rtjIsIntegral(r)) { return jvArith("+", l, r) }
     return jvGenericAdd(l, r)
 }

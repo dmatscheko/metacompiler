@@ -44,10 +44,30 @@ import (
 //	floJava  1.0 -> "1.0"   1e20 -> "1.0E20"    inf -> "Infinity"  (Java, Kotlin)
 //	floGo    1.0 -> "1"     1e20 -> "1e+20"     inf -> "+Inf"      (Go)
 //	floCS    1.0 -> "1"     1e20 -> "1E+20"     inf -> "Infinity"  (C#)
+//	floJavaF the JAVA `float` - a 32 BIT WIDTH, not a fourth print style
+//
+// THE STYLE BYTE CARRIES THE WIDTH, and that is a deliberate choice with one
+// consequence worth stating. `float` is not a print style: a Java float is a
+// binary32, so `1.0f/3.0f` is 0.33333334 where the double is 0.3333333333333333,
+// and every arithmetic result has to be ROUNDED to 24 significant bits. The value
+// itself still travels as a float64 (every float is exactly representable as a
+// double), so the only thing that has to go ON the box is the width - and the box
+// already has a byte for a per-language tag. Reusing it means ZERO change to
+// languages/lib/runtime.c, whose tag 14 cell stores cell.b as an opaque long and
+// hands it back through jf_style_of.
+//
+// The consequence: THE FLOOR CANNOT RENDER A style-3 BOX. runtime.c's jf_text
+// switches on the style and has no arm for 3, so it would print a float with the
+// DOUBLE renderer. languages/lib/java-rt.metajs therefore intercepts every
+// rendering and every arithmetic result of a style-3 box before the floor sees
+// it (jvFloText / jvFloFix), and llvm.Run's side of that contract is jvmFloText /
+// jvmArith here. If a fourth engine ever needs a float box, the floor is where
+// the width should move to - see docs/todo.md 1.2.
 const (
-	floJava = 0
-	floGo   = 1
-	floCS   = 2
+	floJava  = 0
+	floGo    = 1
+	floCS    = 2
+	floJavaF = 3
 )
 
 type jsJFlo struct {
@@ -66,9 +86,17 @@ func jvmFloText(v jsJFlo) string {
 		return goFloStr(v.f)
 	case floCS:
 		return csFloStr(v.f)
+	case floJavaF:
+		return jvmFloStr32(v.f)
 	}
 	return jvmFloStr(v.f)
 }
+
+// jvmFround is the binary32 rounding every `float`-typed value carries: a Java
+// float IS a double whose significand has been rounded to 24 bits, so the box
+// only has to apply this after each operation and every other reader (compare,
+// ==, min/max, the double widening) is correct without a second thought.
+func jvmFround(x float64) float64 { return float64(float32(x)) }
 
 // jvmStyleOf is the style an operation's result inherits: the one of whichever
 // operand is a float (the left one when both are).
@@ -85,7 +113,20 @@ func jvmStyleOf(l, r interface{}) uint8 {
 // jvmFloStr is java.lang.Double.toString: always a decimal point, the shortest
 // digit run that round-trips, plain decimal for 1e-3 <= |d| < 1e7 and computerized
 // scientific notation ("1.0E20") outside that range.
-func jvmFloStr(d float64) string {
+func jvmFloStr(d float64) string { return jvmFloStrN(d, 64) }
+
+// jvmFloStr32 is java.lang.Float.toString, which is the SAME rule read at 24
+// significant bits instead of 53: the shortest decimal that round-trips as a
+// binary32. 1.0f/3.0f is "0.33333334" where the double is "0.3333333333333333",
+// and Float.MIN_VALUE is "1.4E-45" - the two-significant-digit minimum again,
+// against the ACTUAL value (1.401298464324817E-45), not a padded "1.0E-45".
+// Measured against java 24.0.2.
+func jvmFloStr32(d float64) string { return jvmFloStrN(d, 32) }
+
+// bits is 64 for a double and 32 for a float; it is the ONLY difference between
+// Double.toString and Float.toString, because strconv.FormatFloat's bitSize is
+// what decides "shortest run of digits that round-trips".
+func jvmFloStrN(d float64, bits int) string {
 	if math.IsNaN(d) {
 		return "NaN"
 	}
@@ -105,12 +146,12 @@ func jvmFloStr(d float64) string {
 	a := math.Abs(d)
 	var s string
 	if a >= 1e-3 && a < 1e7 {
-		s = strconv.FormatFloat(a, 'f', -1, 64)
+		s = strconv.FormatFloat(a, 'f', -1, bits)
 		if !strings.ContainsRune(s, '.') {
 			s += ".0"
 		}
 	} else {
-		s = strconv.FormatFloat(a, 'E', -1, 64)
+		s = strconv.FormatFloat(a, 'E', -1, bits)
 		// Java's Double.toString takes the SHORTEST decimal that round-trips,
 		// except that it never uses fewer than TWO significant digits - and
 		// when the shortest has one, the second digit is not a zero but the
@@ -126,7 +167,7 @@ func jvmFloStr(d float64) string {
 		// carry included (9.99e-321 -> "1.0E-320"), so the one digit case is
 		// simply re-formatted rather than padded.
 		if i := strings.IndexByte(s, 'E'); i >= 0 && !strings.ContainsRune(s[:i], '.') {
-			s = strconv.FormatFloat(a, 'E', 1, 64)
+			s = strconv.FormatFloat(a, 'E', 1, bits)
 		}
 		// Go writes "1E+20" / "1.5E-08"; Java writes "1.0E20" / "1.5E-8".
 		mant, exp := s, ""
@@ -192,6 +233,101 @@ func jvmNumEq(f float64, other interface{}) bool {
 // int-width work is a separate concern, so this reproduces it exactly).
 func (rt *jsrt) jvmArith(op byte, l, r interface{}) interface{} {
 	a, b := rt.toNumber(l), rt.toNumber(r)
+	sty := jvmArithStyle(l, r)
+	// BOTH OPERANDS CONVERT FIRST, and rounding only the result is not the same
+	// answer: `float f = 0.1f; f + 16777217` is 1.6777216E7 in java, because the
+	// int becomes a float (JLS 5.6.2 binary numeric promotion) BEFORE the add.
+	// Rounding once at the end gives 1.6777218E7 - measured against java 24.0.2,
+	// 156 rows of a 1,231-value probe.
+	if sty == floJavaF {
+		a, b = jvmFround(a), jvmFround(b)
+	}
+	var x float64
+	switch op {
+	case '+':
+		x = a + b
+	case '-':
+		x = a - b
+	case '*':
+		x = a * b
+	case '/':
+		x = a / b
+	case '%':
+		x = math.Mod(a, b)
+	}
+	if jvmIsFlo(l) || jvmIsFlo(r) {
+		if sty == floJavaF {
+			x = jvmFround(x)
+		}
+		return jsJFlo{f: x, sty: sty}
+	}
+	return float64(rt.toInt32(x))
+}
+
+// jvmFloCmpPair converts a comparison's operands the same way: `16777217 ==
+// 16777216f` is TRUE in java, because the int is converted to a float first.
+// It answers the pair unchanged unless the promoted type is float.
+func jvmFloCmpPair(rt *jsrt, l, r interface{}) (interface{}, interface{}) {
+	if !jvmFloPromotes(l, r) {
+		return l, r
+	}
+	return jsJFlo{f: jvmFround(rt.toNumber(l)), sty: floJavaF},
+		jsJFlo{f: jvmFround(rt.toNumber(r)), sty: floJavaF}
+}
+
+// jvmFloPromotes is "these two operands promote to FLOAT" - one is a Java float
+// box, the other is numeric, and neither is a double. Both operands are numeric
+// by construction in a program javac accepts, but `==` also reaches this with a
+// reference on one side, and that pair must keep the identity comparison.
+func jvmFloPromotes(l, r interface{}) bool {
+	if !jvmIsFlo(l) && !jvmIsFlo(r) {
+		return false
+	}
+	if jvmArithStyle(l, r) != floJavaF {
+		return false
+	}
+	return jvmFloNumeric(l) && jvmFloNumeric(r)
+}
+
+func jvmFloNumeric(v interface{}) bool {
+	switch v.(type) {
+	case jsJFlo, float64, jsGInt, jsChar:
+		return true
+	}
+	return false
+}
+
+// jvmArithStyle is JLS 5.6.2 read for the WIDTH as well as the style: `float op
+// float` is a float, and `float op double` is a DOUBLE - the wider type wins,
+// which jvmStyleOf's left-operand rule gets backwards for `1.0f + 1.0`. Every
+// other pairing is unchanged, so kotlin, C# and Go (which never build a
+// floJavaF box) see exactly the old answer.
+func jvmArithStyle(l, r interface{}) uint8 {
+	lf, lok := l.(jsJFlo)
+	rf, rok := r.(jsJFlo)
+	if lok && rok {
+		if lf.sty == floJavaF {
+			return rf.sty // float+float -> float, float+double -> double
+		}
+		return lf.sty
+	}
+	if lok {
+		return lf.sty
+	}
+	if rok {
+		return rf.sty
+	}
+	return floJava
+}
+
+// jvmArithRaw is the floor's own tag-14 arithmetic - jf_arith in
+// languages/lib/runtime.c - which knows nothing about a float width: the style
+// is jf_style_of's left-preferring one and there is no rounding step. It is what
+// the `floOp` HOST GLOBAL has to answer, because that global's contract is "the
+// floor's own arm of this", and lib/java-rt.metajs applies the Java width rule
+// on top of it exactly as jvmArith does above.
+func (rt *jsrt) jvmArithRaw(op byte, l, r interface{}) interface{} {
+	a, b := rt.toNumber(l), rt.toNumber(r)
 	var x float64
 	switch op {
 	case '+':
@@ -256,12 +392,48 @@ func (rt *jsrt) jvmMinMax(l, r interface{}, takeL bool) interface{} {
 		v = l
 	}
 	if jvmIsFlo(l) || jvmIsFlo(r) {
-		if f, ok := v.(jsJFlo); ok {
+		// The overload is picked at the WIDER type, so Math.max(2.0f, 1.0) is the
+		// double 2.0 and only Math.max(2.0f, 1.0f) is a float. For every language
+		// but Java that is jvmStyleOf unchanged, because nothing else builds a
+		// floJavaF box and the two agree on all three remaining styles.
+		sty := jvmArithStyle(l, r)
+		if f, ok := v.(jsJFlo); ok && f.sty == sty {
 			return f
 		}
-		return jsJFlo{f: rt.toNumber(v), sty: jvmStyleOf(l, r)}
+		x := rt.toNumber(v)
+		if sty == floJavaF {
+			x = jvmFround(x)
+		}
+		return jsJFlo{f: x, sty: sty}
 	}
 	return v
+}
+
+// js_jflo32 is the ONE new extern the float width needs: `(float) e`, a
+// `1.0f` literal and a `float x = e` declaration all lower to it, and its layer-2
+// twin is js_jflo32 in languages/lib/java-rt.metajs. It is registered here rather
+// than in abnf/jsrt.go's table because the width belongs to this file; the
+// emitter wraps its operand in js_jvnum first, exactly as it does for js_jflo,
+// so a Java `long` (a tag-13 cell marked UNSIGNED) reads signed.
+func init() {
+	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
+		// js_jvchareq is js_jchareq (abnf/jsrt.go) with the float promotion of
+		// JLS 5.6.2 in front of it. It is a separate name because js_jchareq is
+		// shared with kotlin, which has no float width.
+		m["js_jvchareq"] = func(a []uint64) uint64 {
+			x, y := rt.unwrap(a[0]), rt.unwrap(a[1])
+			if jvmFloPromotes(x, y) {
+				if jvmFround(rt.toNumber(x)) == jvmFround(rt.toNumber(y)) {
+					return jsHTrue
+				}
+				return jsHFalse
+			}
+			return m["js_jchareq"](a)
+		}
+		m["js_jflo32"] = func(a []uint64) uint64 {
+			return rt.wrap(jsJFlo{f: jvmFround(rt.toNumber(rt.unwrap(a[0]))), sty: floJavaF})
+		}
+	})
 }
 
 // jvmMathObject is the `Math` a compiled Java program sees. The handle runtime's
@@ -352,7 +524,7 @@ func jfBindings(b map[string]interface{}) {
 		if c >= 0 && c < len(ops) {
 			op = ops[c]
 		}
-		return rt.jvmArith(op, argAt(args, 1), argAt(args, 2))
+		return rt.jvmArithRaw(op, argAt(args, 1), argAt(args, 2))
 	})
 	// floEq IS THE FLOOR'S jf_num_eq (languages/lib/runtime.c), and the two have
 	// to answer the same thing on every input or layer 2 and the twin diverge.

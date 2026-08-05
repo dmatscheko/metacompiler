@@ -2346,7 +2346,18 @@ HasStatic   = :script(~~
         // invalid there); decimal also takes the float suffixes.
         var isSfx = last == "L" || last == "l"
         var isFlt = false
-        if (base == 10 && (last == "F" || last == "f" || last == "D" || last == "d")) { isSfx = true; isFlt = true }
+        // An f/F suffix is a FLOAT literal - a binary32 - and not just a double
+        // spelled differently: 1.0f/3.0f is 0.33333334 where the double is
+        // 0.3333333333333333. The width travels on the constant as __f32 and
+        // makeNumConst emits js_jflo32, which rounds. (The decimal is read into a
+        // double first and rounded to a float second; javac rounds once, so a
+        // decimal that lands exactly on a float midpoint AFTER a double rounding
+        // can differ - no value in the corpus or the 20,000-row probe does.)
+        var isF32 = false
+        if (base == 10 && (last == "F" || last == "f" || last == "D" || last == "d")) {
+            isSfx = true; isFlt = true
+            if (last == "F" || last == "f") { isF32 = true }
+        }
         if (isSfx) {
             s = s.substring(0, s.length - 1)
         }
@@ -2356,7 +2367,7 @@ HasStatic   = :script(~~
                 if (fc == "." || fc == "e" || fc == "E") { isFlt = true }
             }
         }
-        if (isFlt) { return {__flo: parseFloat(s)} }
+        if (isFlt) { return {__flo: parseFloat(s), __f32: isF32} }
         // An L suffix makes the literal a LONG, and a long literal is exact to 64
         // bits - which neither parseInt nor emitNum is, both of them going through
         // a double that rounds 9223372036854775807 to 9223372036854776000 on the
@@ -2386,7 +2397,7 @@ HasStatic   = :script(~~
             if (k > 1100) { k = 1100 }
             var scale = 1
             while (k > 0) { scale = scale * 2; k = k - 1 }
-            return {__flo: exp < 0 ? mant / scale : mant * scale}
+            return {__flo: exp < 0 ? mant / scale : mant * scale, __f32: false}
         }
         if (base == 2) { return {__int: s.substring(2), __radix: 2, __long: isLong} }
         if (base == 8) { return {__int: s.substring(1), __radix: 8, __long: isLong} }
@@ -2406,6 +2417,9 @@ HasStatic   = :script(~~
                 }
             }
             var f = v.__flo
+            if (v.__f32 === true) {
+                return function(b) { return {b: b, v: callExt(b, "js_jflo32", [emitNum(b, f)])} }
+            }
             return function(b) { return {b: b, v: callExt(b, "js_jflo", [emitNum(b, f)])} }
         }
         return makeConst(v)
@@ -2630,8 +2644,14 @@ HasStatic   = :script(~~
         if (op == "%" || op == "%=") return callExt(b, "js_jvarith", [emitStr(b, "%"), l, r])
         // == / != go through the char-aware equality (js_jchareq is js_seq unless a
         // char meets the one-character String that charAt answers).
-        if (op == "==") return callExt(b, "js_jchareq", [l, r])
-        if (op == "!=") return callExt(b, "js_not", [callExt(b, "js_jchareq", [l, r])])
+        // js_jvchareq is js_jchareq plus JLS 5.6.2 for the FLOAT width: a float
+        // operand promotes the other side to a float too, so 16777217 ==
+        // 16777216f is TRUE. It is a java-only extern because js_jchareq itself
+        // lives in abnf/jsrt.go and is shared with kotlin, which has no float
+        // width; the record-component and switch-label sites below keep the
+        // shared one, neither of which can see a float against an int.
+        if (op == "==") return callExt(b, "js_jvchareq", [l, r])
+        if (op == "!=") return callExt(b, "js_not", [callExt(b, "js_jvchareq", [l, r])])
         return coreEmitBin(b, op, l, r)
     }
     // x instanceof Type [binding]: js_is_type decides; a pattern variable binds
@@ -2887,6 +2907,10 @@ HasStatic   = :script(~~
     // a char. A reference cast stays the identity.
     function makePrimCast(inner, ty) {
         if (ty == "double" || ty == "float") {
+            // (float) is the NARROWING one - JLS 5.1.3, double to float - and it
+            // is the site every float in a program ultimately comes from, so it
+            // gets its own extern rather than a flag on js_jflo.
+            var ext = ty == "float" ? "js_jflo32" : "js_jflo"
             return function(b) {
                 var rf = inner(b)
                 // js_jvnum FIRST. js_jflo is a FLOOR primitive and reads its
@@ -2898,7 +2922,7 @@ HasStatic   = :script(~~
                 // language's own "read this as a plain double" and answers the
                 // SIGNED value; in the Go twin it converts a jsGInt and passes
                 // everything else through, so llvm.Run is unchanged.
-                return {b: rf.b, v: callExt(rf.b, "js_jflo", [callExt(rf.b, "js_jvnum", [rf.v])])}
+                return {b: rf.b, v: callExt(rf.b, ext, [callExt(rf.b, "js_jvnum", [rf.v])])}
             }
         }
         if (ty == "char") {
@@ -3321,6 +3345,7 @@ HasStatic   = :script(~~
         // decides, not the base name: `double[] xs = {...}` declares an ARRAY and
         // must not box the array itself.
         var isDbl = (rawTy == "double" || rawTy == "float")
+        var floExt = rawTy == "float" ? "js_jflo32" : "js_jflo"
         // An INTEGRAL declared type puts its WIDTH on the value the same way, which
         // is what makes `long t = 1; t = t * 1000000 * 1000000` stay 64 bit and
         // `byte b = 100; b += 100` wrap to -56. js_jvadopt narrows only an integral
@@ -3331,7 +3356,7 @@ HasStatic   = :script(~~
             var r = init(b)
             b = r.b
             var v = r.v
-            if (isDbl) { v = callExt(b, "js_jflo", [callExt(b, "js_jvnum", [v])]) }  // js_jvnum first: see makePrimCast
+            if (isDbl) { v = callExt(b, floExt, [callExt(b, "js_jvnum", [v])]) }  // js_jvnum first: see makePrimCast
             if (declW > 0) { v = callExt(b, "js_jvadopt", [v, emitNum(b, declW)]) }
             if (sam != null) {
                 var sr = emitSam(b, v, tyName, sam)
