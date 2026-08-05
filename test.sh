@@ -189,9 +189,33 @@ full_probe() {
                     # warning under one engine only would otherwise pass unseen.
                     # Every ratchet file runs with an EMPTY stderr today, on both
                     # engines and both halves - measured, all 15 languages.
-                    RUN "$BIN" "$G" "$F" -q          > "$work.g" 2>"$work.ge"
-                    RUN "$BIN" "$G" "$F" -q -frozen  > "$work.f" 2>"$work.fe"
-                    if cmp -s "$work.g" "$work.f" && cmp -s "$work.ge" "$work.fe"; then
+                    RUN "$BIN" "$G" "$F" -q          > "$work.g" 2>"$work.ge"; grc=$?
+                    RUN "$BIN" "$G" "$F" -q -frozen  > "$work.f" 2>"$work.fe"; frc=$?
+                    # THE EXIT CODES MATTER, and not checking them produced a
+                    # FALSE FROZEN-DIFF that went unexplained for a week. If a RUN
+                    # is killed by the per-run timeout its output file is
+                    # TRUNCATED, and a truncated file is exactly what `cmp -s`
+                    # reports as "differs" - so a slow machine was indistinguishable
+                    # from a real goja-vs-frozen divergence, on the single most
+                    # expensive ratchet in the suite.
+                    #
+                    # Measured: the js compiler half takes ~19 s idle and **82 s at
+                    # load 16**, against a 120 s default. Above that load it is
+                    # killed, and the `-frozen` leg is the slow one (there the
+                    # MetaJS interpreter is itself a MetaJS program running on the
+                    # IR interpreter). Three consecutive runs under agent load gave
+                    # FROZEN-DIFF, `-`, FROZEN-DIFF; idle, the same tree is clean.
+                    #
+                    # So say which happened. A failed run is still a problem worth
+                    # reporting - it is just not the SAME problem, and calling it a
+                    # divergence sends the next person hunting a defect that is not
+                    # there. Raise --timeout on a loaded machine.
+                    if [ "$grc" -ne 0 ] || [ "$frc" -ne 0 ]; then
+                        printf '    RUN-FAILED - goja exit %s, -frozen exit %s (124 = killed by the %ss --timeout;\n' \
+                            "$grc" "$frc" "$TIMEOUT"
+                        printf '                 this is NOT a frozen divergence - re-run, or raise --timeout)\n'
+                        echo RUN-FAILED > "$R.checks"
+                    elif cmp -s "$work.g" "$work.f" && cmp -s "$work.ge" "$work.fe"; then
                         printf '    FULL - %s assertions, goja and -frozen byte-identical\n' "$(cat "$R.checks")"
                     else
                         printf '    FULL under goja, BUT -frozen fails or differs - inspect before celebrating\n'
@@ -321,7 +345,7 @@ if [ "$FULL" -eq 1 ]; then
             # half is FULL under goja but differs under -frozen. Flag it even when
             # BOTH halves carry it, because two halves failing the same way is not
             # agreement - it is two defects.
-            for (i = 0; i < n; i++) if (v[i] == "FROZEN-DIFF") bad = 1
+            for (i = 0; i < n; i++) if (v[i] == "FROZEN-DIFF" || v[i] == "RUN-FAILED") bad = 1
             if (n < 2)      printf "  %-12s %s (only one half ran - filtered?)\n", last, v[0]
             else if (bad)   { printf "  %-12s MISMATCH:", last
                               for (i = 0; i < n; i++) printf " %s", v[i]

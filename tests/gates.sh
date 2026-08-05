@@ -118,7 +118,7 @@ if grep -q '^all green' "$log/matrix"; then pass matrix "${m:-ok}"; else fail ma
 
 # 2. The ratchet. Informational by design - it ALWAYS exits 0 - so the summary
 #    line is not a verdict and the grep is the actual gate.
-bad=$(grep -E 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF' "$log/full")
+bad=$(grep -E 'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF|RUN-FAILED' "$log/full")
 n=$(grep -E 'assertions in total' "$log/full" | tail -1)
 if [ -z "$bad" ]; then pass --full "${n:-ran}"; else fail --full "${n:-ran} -- $(echo "$bad" | head -3)"; fi
 
