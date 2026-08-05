@@ -3455,7 +3455,20 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 		if y == 0 {
 			rt.fail("divided by 0")
 		}
-		return x - math.Floor(x/y)*y
+		// math.FMA AND NOT `x - math.Floor(x/y)*y`, which is the same value only by
+		// ACCIDENT on this machine. Go fuses that expression into a single arm64
+		// FMSUBD - verified in `go tool objdump` - so the product and the subtract
+		// round ONCE, and 9007199254740991 % -3 is -2. clang does not fuse the same
+		// source in the C floor, rounds twice, and answers -1. Real ruby 2.6.10
+		// says -2, so the FUSED answer is the correct one and layer 2 grew
+		// rbFmaSub (Dekker two-product / two-sum) to reproduce it exactly.
+		//
+		// That left the Go twin agreeing for a reason no source line states. An
+		// amd64 build, a GOARM64 without FMA, or a compiler that simply stopped
+		// fusing would silently move this half off rbFmaSub and re-open the
+		// divergence. math.FMA IS the fused operation, by definition rather than by
+		// codegen, and it lowers to the same single FMADDD here.
+		return math.FMA(-math.Floor(x/y), y, x)
 	case "**":
 		if y < 0 {
 			return jsFlo{f: math.Pow(x, y)}
@@ -3669,8 +3682,13 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 		}
 		return t, true
 	case "divmod":
+		// The remainder is the FUSED subtraction, spelled so it does not depend on
+		// the compiler choosing to fuse it - see the "%" arm of rubyNumBin, and
+		// rbFmaSub in languages/lib/ruby-rt.metajs, which is layer 2's emulation of
+		// exactly this operation.
 		y := rubyToF(argAt(args, 0))
-		return &jsArray{elems: []interface{}{math.Floor(x / y), x - math.Floor(x/y)*y}}, true
+		q := math.Floor(x / y)
+		return &jsArray{elems: []interface{}{q, math.FMA(-q, y, x)}}, true
 	case "fdiv":
 		return jsFlo{f: x / rubyToF(argAt(args, 0))}, true
 	case "pow", "**":
@@ -4282,8 +4300,15 @@ func rubyGenAlt(v float64, prec int) string {
 // of the digits, and NOTHING in front of a zero ("%#x" % 0 is "0"). It returns
 // the prefix only; the caller keeps its length so the 0 flag can pad BEHIND it
 // ("%#010x" % 255 is "0x000000ff", not "00000000xff").
-func rubyBasePrefix(conv byte, digits string) string {
-	if digits == "0" || digits == "" {
+//
+// The rule is NOT "the digits are not zero" - that was the first spelling and it
+// breaks the moment a precision pads them: "%#.5x" % 0 is "00000" in MRI, with no
+// prefix, and the digit string is neither "0" nor "". The test is on the VALUE.
+// Octal is a different rule again and is answered by rubyIntBody: "#" on %o means
+// "make sure a leading zero is there", so "%#.5o" % 255 is "00377" and not
+// "000377", and MRI omits it entirely from the ".." two's-complement form.
+func rubyBasePrefix(conv byte, v float64) string {
+	if v == 0 {
 		return ""
 	}
 	switch conv {
@@ -4291,12 +4316,150 @@ func rubyBasePrefix(conv byte, digits string) string {
 		return "0x"
 	case 'X':
 		return "0X"
-	case 'o':
-		return "0"
 	case 'b':
 		return "0b"
 	}
 	return ""
+}
+
+// ----- the three integer directives ----------------------------------------
+//
+// %d/%i/%x/%X/%o/%b took `strconv.FormatInt(int64(f), base)` and jsNumString,
+// which are wrong in two independent ways past 2^53: int64() SATURATES (1e30
+// came out "7fffffffffffffff") and jsNumString prints the double's SHORTEST
+// form ("1e+30"). MRI converts the Float with to_i - truncation toward zero -
+// and then prints the resulting Integer EXACTLY, all 31 digits of
+// 1e30.to_i == 1000000000000000019884624838656. Settled against ruby 2.6.10 over
+// a 29-format x 22-value table; Integer formatting is unchanged in 3.x.
+//
+// A double is an integer times a power of two, so `big.Float.Int` is exact and
+// `Int.Text(base)` is the answer for every base here. Layer 2 has no bignum
+// multiply, so rbMagDigits there takes the binary expansion and regroups it in
+// threes and fours; the two agree by construction and the probe checks it.
+const rubyDigitAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+func rubyDigitVal(c byte) int {
+	if c >= '0' && c <= '9' {
+		return int(c - '0')
+	}
+	if c >= 'a' && c <= 'z' {
+		return int(c-'a') + 10
+	}
+	return 0
+}
+
+// The exact base-`base` digits of a non-negative INTEGRAL double.
+func rubyMagDigits(mag float64, base int) string {
+	n, _ := new(big.Float).SetFloat64(mag).Int(nil)
+	return n.Text(base)
+}
+
+// `s` minus one, in base `base`. The operand is a magnitude of at least 1, so the
+// borrow always finds a digit to take from.
+func rubyDecOne(s string, base int) string {
+	b := []byte(s)
+	for i := len(b) - 1; i >= 0; i-- {
+		if d := rubyDigitVal(b[i]); d > 0 {
+			b[i] = rubyDigitAlphabet[d-1]
+			break
+		}
+		b[i] = rubyDigitAlphabet[base-1]
+	}
+	k := 0
+	for k < len(b)-1 && b[k] == '0' {
+		k++
+	}
+	return string(b[k:])
+}
+
+// MRI's INFINITE two's-complement digits for a negative value, without the ".."
+// that announces them: "%x" % -5 is "..fb", "%o" is "..73", "%b" is "..1011".
+//
+// ~n is n's magnitude minus one with every digit complemented, which is exact on
+// the digit string and needs no bignum subtract; the leading digit of the
+// infinite run of (base-1)s is then written once. MRI collapses that run to
+// exactly ONE digit, so -1 is "..f" and not "..ff".
+func rubyTwosDigits(mag float64, base int) string {
+	src := rubyDecOne(rubyMagDigits(mag, base), base)
+	b := make([]byte, len(src))
+	for i := 0; i < len(src); i++ {
+		b[i] = rubyDigitAlphabet[base-1-rubyDigitVal(src[i])]
+	}
+	mx := rubyDigitAlphabet[base-1]
+	if len(b) == 0 || b[0] != mx {
+		return string(mx) + string(b)
+	}
+	return string(b)
+}
+
+// rubyIntBody assembles ONE integer directive: the sign or the ".." marker, the #
+// base prefix, and the digits with any precision applied. It answers the fill
+// CHARACTER for the 0 flag as well, because the ".." form pads with the base's
+// largest digit and not with zeros ("%010x" % -5 is "..fffffb"), and `keep`, the
+// number of leading characters those fill characters must go behind.
+//
+// `sign` is the + or SPACE flag, which switches MRI back to sign-and-magnitude:
+// "%+x" % -5 is "-5", not "..fb".
+func rubyIntBody(f float64, base int, upper, alt, sign bool, prec int) (body, prefix string, fill byte, keep int) {
+	neg := f < 0
+	mag := f
+	if neg {
+		mag = -f
+	}
+	fill, keep = '0', 0
+	twos := false
+	var digits string
+	if base == 10 || !neg || sign {
+		digits = rubyMagDigits(mag, base)
+		if prec >= 0 {
+			if digits == "0" && prec == 0 {
+				digits = ""
+			}
+			for len(digits) < prec {
+				digits = "0" + digits
+			}
+		}
+	} else {
+		twos = true
+		mx := rubyDigitAlphabet[base-1]
+		digits = rubyTwosDigits(mag, base)
+		// A precision counts the ".." as two of its characters: "%.5x" % -1 is
+		// "..fff" and "%.3x" % -1 is "..f".
+		for len(digits) < prec-2 {
+			digits = string(mx) + digits
+		}
+		fill = mx
+	}
+	if alt {
+		if base == 8 {
+			if !twos && (len(digits) == 0 || digits[0] != '0') {
+				prefix = "0"
+			}
+		} else if base == 16 {
+			if upper {
+				prefix = rubyBasePrefix('X', f)
+			} else {
+				prefix = rubyBasePrefix('x', f)
+			}
+		} else if base == 2 {
+			prefix = rubyBasePrefix('b', f)
+		}
+	}
+	if twos {
+		digits = ".." + digits
+		keep = 2
+	}
+	if upper {
+		digits = strings.ToUpper(digits)
+		fill = byte(strings.ToUpper(string(fill))[0])
+	}
+	body = prefix + digits
+	keep += len(prefix)
+	if neg && !twos {
+		body = "-" + body
+		keep++
+	}
+	return
 }
 
 // rubyFormat is Kernel#format / String#% - the printf directives Ruby shares with C:
@@ -4375,9 +4538,41 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 		var body string
 		nonFinite := false
 		prefix := ""
+		// The 0 flag's fill character and the number of leading characters it must
+		// go behind. Only the integer directives move them off their defaults; keep
+		// < 0 means "work the sign and the prefix out below, as before".
+		fill, keep := byte('0'), -1
+		intPrec := false
 		switch spec[i] {
-		case 'd', 'i':
-			body = jsNumString(math.Trunc(rubyToF(next())))
+		case 'd', 'i', 'x', 'X', 'o', 'b':
+			base := 10
+			switch spec[i] {
+			case 'x', 'X':
+				base = 16
+			case 'o':
+				base = 8
+			case 'b':
+				base = 2
+			}
+			f := math.Trunc(rubyToF(next()))
+			if math.IsNaN(f) || math.IsInf(f, 0) {
+				// Unreachable from real Ruby - Float::INFINITY.to_i raises
+				// FloatDomainError - and left exactly as it was rather than
+				// invented: jsNumString's word, or int64's arm64 saturation.
+				if base == 10 {
+					body = jsNumString(f)
+				} else {
+					body = strconv.FormatInt(int64(f), base)
+					if spec[i] == 'X' {
+						body = strings.ToUpper(body)
+					}
+				}
+				break
+			}
+			body, prefix, fill, keep = rubyIntBody(f, base, spec[i] == 'X', alt, plus || space, prec)
+			// A precision turns the 0 flag OFF for an integer directive, as it does
+			// in C: "%08.3x" % 1 is "     001".
+			intPrec = prec >= 0
 		case 'f':
 			if prec < 0 {
 				prec = 6
@@ -4430,30 +4625,8 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 			if prec >= 0 && prec < len(body) {
 				body = body[:prec]
 			}
-		case 'x':
-			body = strconv.FormatInt(int64(rubyToF(next())), 16)
-			prefix = rubyBasePrefix('x', body)
-		case 'X':
-			body = strings.ToUpper(strconv.FormatInt(int64(rubyToF(next())), 16))
-			prefix = rubyBasePrefix('X', body)
-		case 'o':
-			body = strconv.FormatInt(int64(rubyToF(next())), 8)
-			prefix = rubyBasePrefix('o', body)
-		case 'b':
-			body = strconv.FormatInt(int64(rubyToF(next())), 2)
-			prefix = rubyBasePrefix('b', body)
 		default:
 			body = string(spec[i])
-		}
-		if !alt {
-			prefix = ""
-		}
-		if prefix != "" {
-			if len(body) > 0 && body[0] == '-' {
-				body = "-" + prefix + body[1:]
-			} else {
-				body = prefix + body
-			}
 		}
 		// The + and SPACE flags were parsed and thrown away, in every half, so
 		// "%+d" % 7 was "7" against MRI's "+7" - both halves agreeing and both
@@ -4471,27 +4644,36 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 			} else if space {
 				body = " " + body
 			}
+			if (plus || space) && keep >= 0 {
+				keep++
+			}
 		}
 		// The 0 flag is for NUMBERS: MRI's "%05s" % "ab" is "   ab", where this
-		// used to pad with zeros. A non-finite float is never zero-padded either.
-		pad := " "
-		if zero && !left && !nonFinite && numeric {
-			pad = "0"
+		// used to pad with zeros. A non-finite float is never zero-padded either,
+		// and neither is an integer directive that carried a precision.
+		pad := byte(' ')
+		if zero && !left && !nonFinite && !intPrec && numeric {
+			pad = fill
 		}
 		// The zeros of the 0 flag go BEHIND the sign and behind a # base prefix:
-		// "%05d" % -42 is "-0042" and "%#010x" % 255 is "0x000000ff".
-		skip := 0
-		if len(body) > 0 && (body[0] == '-' || body[0] == '+' || body[0] == ' ') {
-			skip = 1
+		// "%05d" % -42 is "-0042" and "%#010x" % 255 is "0x000000ff". For the ".."
+		// two's-complement form they go behind that too, and they are f/7/1 rather
+		// than 0: "%#010x" % -5 is "0x..fffffb".
+		skip := keep
+		if skip < 0 {
+			skip = 0
+			if len(body) > 0 && (body[0] == '-' || body[0] == '+' || body[0] == ' ') {
+				skip = 1
+			}
+			skip += len(prefix)
 		}
-		skip += len(prefix)
 		for len(body) < width {
 			if left {
 				body += " "
-			} else if pad == "0" {
-				body = body[:skip] + pad + body[skip:]
+			} else if pad != ' ' {
+				body = body[:skip] + string(pad) + body[skip:]
 			} else {
-				body = pad + body
+				body = string(pad) + body
 			}
 		}
 		out = append(out, body...)

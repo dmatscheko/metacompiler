@@ -747,16 +747,216 @@ function rbGenAlt(x, prec) {
     return rbAltPoint(rtFixed(x, prec - 1 - ex))
 }
 
-// "0x", "0X", "0" or "0b" for a NON-ZERO body; "" otherwise ("%#x" % 0 is "0").
+// "0x", "0X" or "0b" for a NON-ZERO value; "" otherwise ("%#x" % 0 is "0").
 // The caller keeps the length so the 0 flag can pad behind it: "%#010x" % 255 is
 // "0x000000ff".
-function rbBasePrefix(conv, digits) {
-    if (digits == "0" || digits == "") { return "" }
+//
+// The test is on the VALUE and not on the digit string, which is what the first
+// spelling got wrong: a precision pads the digits, and "%#.5x" % 0 is "00000" in
+// MRI with no prefix at all. Octal is a different rule again and lives in
+// rbIntBody - "#" on %o means "make sure there is a leading zero", so "%#.5o" % 255
+// is "00377" and MRI leaves it off the ".." two's-complement form entirely.
+function rbBasePrefix(conv, v) {
+    if (v == 0) { return "" }
     if (conv == "x") { return "0x" }
     if (conv == "X") { return "0X" }
-    if (conv == "o") { return "0" }
     if (conv == "b") { return "0b" }
     return ""
+}
+
+// ----- the three integer directives -----------------------------------------
+//
+// %d/%i/%x/%X/%o/%b ran through rtBaseStr and `"" + Math.trunc(v)`, which are
+// wrong in two independent ways past 2^53: rtBaseStr converts through int64 and
+// SATURATES (1e30 came out "7fffffffffffffff") and `"" + v` prints the double's
+// SHORTEST form ("1e+30"). MRI converts the Float with to_i - truncation toward
+// zero - and prints the resulting Integer EXACTLY, all 31 digits of
+// 1e30.to_i == 1000000000000000019884624838656. Settled against ruby 2.6.10 over
+// a 61-format x 38-value table; Integer formatting is unchanged in 3.x.
+//
+// abnf/jsrt.go's twin has math/big and asks it for Int.Text(base). There is no
+// bignum multiply here, so the exact digits come out of the double's own BINARY
+// expansion - a double IS m * 2^e with m an integer - regrouped in threes for
+// octal and fours for hex. Base ten is the bignum that already exists,
+// rtExactDec's.
+function rbDigitVal(c) {
+    var v = c.charCodeAt(0)
+    if (v >= 48 && v <= 57) { return v - 48 }
+    if (v >= 97 && v <= 122) { return v - 97 + 10 }
+    return 0
+}
+
+// The exact binary digits of a non-negative INTEGRAL double. Halving a double
+// above 2^53 is exact (it has no odd values left), so the mantissa comes down
+// whole and the discarded factors of two come back as trailing "0"s.
+function rbBinDigits(a) {
+    var m = a
+    var e = 0
+    while (m > 9007199254740992) {
+        m = m / 2
+        e = e + 1
+    }
+    var s = ""
+    var x = m
+    while (x > 0) {
+        var q = Math.floor(x / 2)
+        if (x - q * 2 == 1) { s = "1" + s } else { s = "0" + s }
+        x = q
+    }
+    if (s == "") { s = "0" }
+    var k = 0
+    while (k < e) {
+        s = s + "0"
+        k = k + 1
+    }
+    return s
+}
+
+// Binary digits regrouped `per` at a time, which is base 8 for per == 3 and base
+// 16 for per == 4.
+function rbGroupBits(bits, per) {
+    var s = bits
+    while (s.length - Math.floor(s.length / per) * per != 0) { s = "0" + s }
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+        var v = 0
+        var j = 0
+        while (j < per) {
+            v = v * 2
+            if (s.charAt(i + j) == "1") { v = v + 1 }
+            j = j + 1
+        }
+        out = out + RT_DIGITS.charAt(v)
+        i = i + per
+    }
+    var k = 0
+    while (k < out.length - 1 && out.charAt(k) == "0") { k = k + 1 }
+    return out.substring(k, out.length)
+}
+
+// The exact base-`base` digits of a non-negative integral double.
+function rbMagDigits(a, base) {
+    if (base == 10) { return rtExactDec(a)["i"] }
+    var bits = rbBinDigits(a)
+    if (base == 8) { return rbGroupBits(bits, 3) }
+    if (base == 16) { return rbGroupBits(bits, 4) }
+    return bits
+}
+
+// `s` minus one, in base `base`. The operand is a magnitude of at least 1, so the
+// borrow always finds a digit to take from.
+function rbDecOne(s, base) {
+    var arr = []
+    var i = 0
+    while (i < s.length) {
+        arr.push(rbDigitVal(s.charAt(i)))
+        i = i + 1
+    }
+    var at = arr.length - 1
+    while (at >= 0) {
+        if (arr[at] > 0) {
+            arr[at] = arr[at] - 1
+            break
+        }
+        arr[at] = base - 1
+        at = at - 1
+    }
+    var out = ""
+    var k = 0
+    while (k < arr.length) {
+        out = out + RT_DIGITS.charAt(arr[k])
+        k = k + 1
+    }
+    var z = 0
+    while (z < out.length - 1 && out.charAt(z) == "0") { z = z + 1 }
+    return out.substring(z, out.length)
+}
+
+// MRI's INFINITE two's-complement digits for a negative value, without the ".."
+// that announces them: "%x" % -5 is "..fb", "%o" is "..73", "%b" is "..1011".
+//
+// ~n is the magnitude minus one with every digit complemented, which is exact on
+// the digit string and needs no bignum subtract. The infinite run of (base-1)
+// digits in front is collapsed by MRI to exactly ONE, so -1 is "..f" and not
+// "..ff".
+function rbTwosDigits(a, base) {
+    var src = rbDecOne(rbMagDigits(a, base), base)
+    var out = ""
+    var i = 0
+    while (i < src.length) {
+        out = out + RT_DIGITS.charAt(base - 1 - rbDigitVal(src.charAt(i)))
+        i = i + 1
+    }
+    var mx = RT_DIGITS.charAt(base - 1)
+    if (out.length == 0 || out.charAt(0) != mx) { out = mx + out }
+    return out
+}
+
+// rbIntBody assembles ONE integer directive: the sign or the ".." marker, the #
+// base prefix, and the digits with any precision applied. It answers the fill
+// CHARACTER for the 0 flag too, because the ".." form pads with the base's
+// largest digit and not with zeros ("%010x" % -5 is "..fffffb"), and `k`, the
+// number of leading characters those fill characters must go behind.
+//
+// `sign` is the + or SPACE flag, which switches MRI back to sign-and-magnitude:
+// "%+x" % -5 is "-5", not "..fb".
+function rbIntBody(f, base, upper, alt, sign, prec) {
+    var neg = f < 0
+    var mag = neg ? -f : f
+    var fill = "0"
+    var twos = false
+    var digits = ""
+    if (base == 10 || !neg || sign) {
+        digits = rbMagDigits(mag, base)
+        if (prec >= 0) {
+            if (digits == "0" && prec == 0) { digits = "" }
+            while (digits.length < prec) { digits = "0" + digits }
+        }
+    } else {
+        twos = true
+        var mx = RT_DIGITS.charAt(base - 1)
+        digits = rbTwosDigits(mag, base)
+        // A precision counts the ".." as two of its characters: "%.5x" % -1 is
+        // "..fff" and "%.3x" % -1 is "..f".
+        while (digits.length < prec - 2) { digits = mx + digits }
+        fill = mx
+    }
+    var prefix = ""
+    if (alt) {
+        if (base == 8) {
+            if (!twos && (digits.length == 0 || digits.charAt(0) != "0")) { prefix = "0" }
+        } else if (base == 16) {
+            prefix = rbBasePrefix(upper ? "X" : "x", f)
+        } else if (base == 2) {
+            prefix = rbBasePrefix("b", f)
+        }
+    }
+    var keep = 0
+    if (twos) {
+        digits = ".." + digits
+        keep = 2
+    }
+    if (upper) {
+        digits = rbUpper(digits)
+        fill = rbUpper(fill)
+    }
+    var body = prefix + digits
+    keep = keep + prefix.length
+    if (neg && !twos) {
+        body = "-" + body
+        keep = keep + 1
+    }
+    return {b: body, f: fill, k: keep}
+}
+
+// The base of a conversion character, and 0 for the ones that are not integers.
+function rbIntBase(conv) {
+    if (conv == "d" || conv == "i") { return 10 }
+    if (conv == "x" || conv == "X") { return 16 }
+    if (conv == "o") { return 8 }
+    if (conv == "b") { return 2 }
+    return 0
 }
 
 // Ruby prints "Inf", "-Inf" and "NaN" for a non-finite float under EVERY float
@@ -871,10 +1071,31 @@ function rbFormat(spec, arg) {
         if (ai < args.length) { nx = args[ai] }
         var body = ""
         var nonFinite = false
-        var prefix = ""
-        if (conv == "d" || conv == "i") {
+        // The 0 flag's fill character and the number of leading characters it has
+        // to go behind. Only the integer directives move them off their defaults;
+        // keep < 0 means "work the sign out below, as before".
+        var fill = "0"
+        var keep = 0 - 1
+        var intPrec = false
+        var base = rbIntBase(conv)
+        if (base != 0) {
             ai = ai + 1
-            body = "" + Math.trunc(rbToF(nx))
+            var iv = Math.trunc(rbToF(nx))
+            if (iv !== iv || iv - iv !== 0) {
+                // Unreachable from real Ruby - Float::INFINITY.to_i raises
+                // FloatDomainError - and left exactly as it was rather than
+                // invented: the number's own word, or rtBaseStr's int64 saturation.
+                if (base == 10) { body = "" + iv } else { body = rtBaseStr(iv, base) }
+                if (conv == "X") { body = rbUpper(body) }
+            } else {
+                var ib = rbIntBody(iv, base, conv == "X", alt, plus || space, prec)
+                body = ib["b"]
+                fill = ib["f"]
+                keep = ib["k"]
+                // A precision turns the 0 flag OFF for an integer directive, as it
+                // does in C: "%08.3x" % 1 is "     001".
+                intPrec = prec >= 0
+            }
         } else if (conv == "f") {
             ai = ai + 1
             var ff = rbToF(nx)
@@ -916,31 +1137,8 @@ function rbFormat(spec, arg) {
             body = rbStr(nx)
             // body[:prec] in Go is a BYTE slice; the cut has to count bytes too.
             if (prec >= 0 && prec < byteLen(body)) { body = rbByteCut(body, prec) }
-        } else if (conv == "x") {
-            ai = ai + 1
-            body = rtBaseStr(rbToF(nx), 16)
-            if (alt) { prefix = rbBasePrefix("x", body) }
-        } else if (conv == "X") {
-            ai = ai + 1
-            body = rbUpper(rtBaseStr(rbToF(nx), 16))
-            if (alt) { prefix = rbBasePrefix("X", body) }
-        } else if (conv == "o") {
-            ai = ai + 1
-            body = rtBaseStr(rbToF(nx), 8)
-            if (alt) { prefix = rbBasePrefix("o", body) }
-        } else if (conv == "b") {
-            ai = ai + 1
-            body = rtBaseStr(rbToF(nx), 2)
-            if (alt) { prefix = rbBasePrefix("b", body) }
         } else {
             body = conv
-        }
-        if (prefix != "") {
-            if (body.charAt(0) == "-") {
-                body = "-" + prefix + body.substring(1, body.length)
-            } else {
-                body = prefix + body
-            }
         }
         // The + and SPACE flags were parsed and thrown away, in every half, so
         // "%+d" % 7 was "7" against MRI's "+7" - both halves agreeing and both
@@ -949,24 +1147,30 @@ function rbFormat(spec, arg) {
         var numeric = rbFmtNumeric(conv)
         if (numeric && body.charAt(0) != "-") {
             if (plus) { body = "+" + body } else if (space) { body = " " + body }
+            if ((plus || space) && keep >= 0) { keep = keep + 1 }
         }
         // The 0 flag is for NUMBERS: MRI's "%05s" % "ab" is "   ab", where this used
-        // to pad with zeros. A non-finite float is never zero-padded either.
+        // to pad with zeros. A non-finite float is never zero-padded either, and
+        // neither is an integer directive that carried a precision.
         var pad = " "
-        if (zero && !left && !nonFinite && numeric) { pad = "0" }
+        if (zero && !left && !nonFinite && !intPrec && numeric) { pad = fill }
         // Go pads to `len(body)`, which is the BYTE length of the UTF-8 string, not
         // the number of characters: "%10s" of "café" gets FIVE spaces, not six.
         // byteLen is the floor's own answer to that and it is what the emitters
         // already use (lib/compile-core.js emitStr).
         // The zeros of the 0 flag go BEHIND the sign and behind a # base prefix:
-        // "%05d" % -42 is "-0042" and "%#010x" % 255 is "0x000000ff".
-        var skip = 0
-        if (body.length > 0 && rbIsSignChar(body.charAt(0))) { skip = 1 }
-        skip = skip + prefix.length
+        // "%05d" % -42 is "-0042" and "%#010x" % 255 is "0x000000ff". For the ".."
+        // two's-complement form they go behind that too, and they are f/7/1 rather
+        // than 0: "%#010x" % -5 is "0x..fffffb". rbIntBody counted that as `k`.
+        var skip = keep
+        if (skip < 0) {
+            skip = 0
+            if (body.length > 0 && rbIsSignChar(body.charAt(0))) { skip = 1 }
+        }
         while (byteLen(body) < width) {
             if (left) {
                 body = body + " "
-            } else if (pad == "0") {
+            } else if (pad != " ") {
                 body = body.substring(0, skip) + pad + body.substring(skip, body.length)
             } else {
                 body = pad + body

@@ -2395,9 +2395,54 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function reOf(v) { if (isCpx(v)) { return v.re } return toF(v) }
     function imOf(v) { if (isCpx(v)) { return v.im } return 0 }
     function isUserObj(v) { return v !== null && v !== undefined && typeof v == "object" && v.__class != undefined }
+    // ----- the FUSED `x - q*y` ----------------------------------------------
+    //
+    // `a - Math.floor(a/b) * b` is not one expression with one answer. Go
+    // CONTRACTS it into a single arm64 FMSUBD, so abnf/jsrt.go's twin rounds once
+    // and 9007199254740991 % -3 is -2; this grammar's tag engine evaluates the
+    // multiply and the subtract separately, rounds twice, and answered -1. Real
+    // ruby 2.6.10 says -2, so the fused answer is the correct one - and this half
+    // was the last of the three still computing the other one. languages/lib/
+    // ruby-rt.metajs's rbFmaSub is the same body and the same reason; the twin now
+    // says math.FMA out loud rather than relying on the compiler.
+    //
+    // The emulation is the standard Dekker two-product / two-sum: split each
+    // operand at 26 bits so the partial products are exact, recover the product's
+    // error term, and correct the subtraction by it.
+    var FMA_SPLIT = 134217729               // 2^27 + 1, Dekker's splitting constant
+    var FMA_SAFE = Math.pow(2, 500)         // above this the split overflows, so the
+    var FMA_DOWN = Math.pow(2, 0 - 256)     // operand is SCALED first - by a power of
+    var FMA_UP = Math.pow(2, 256)           // two, which is exact both ways.
+    function fmaSplitHi(a) {
+        var c = FMA_SPLIT * a
+        return c - (c - a)
+    }
+    function fmaSub(x, q, y) {
+        var p = q * y
+        if (p !== p) { return x - p }
+        if (p - p !== 0) { return x - p }
+        var qq = q
+        var yy = y
+        var scale = 1
+        while (Math.abs(qq) > FMA_SAFE) { qq = qq * FMA_DOWN ; scale = scale * FMA_UP }
+        while (Math.abs(yy) > FMA_SAFE) { yy = yy * FMA_DOWN ; scale = scale * FMA_UP }
+        var p1 = qq * yy
+        var qh = fmaSplitHi(qq)
+        var ql = qq - qh
+        var yh = fmaSplitHi(yy)
+        var yl = yy - yh
+        var e1 = ((qh * yh - p1) + qh * yl + ql * yh) + ql * yl
+        var P = p1 * scale
+        var E = e1 * scale
+        // TwoSum of x and -P, then the correction by the product's own error term.
+        var sm = x - P
+        var bb = sm - x
+        var d = (x - (sm - bb)) + (-P - bb)
+        return sm + (d - E)
+    }
     // Integer division and modulo FLOOR in Ruby (-7 / 2 is -4, -7 % 3 is 2).
     function idiv(a, b) { if (b == 0) { fail("divided by 0") } return Math.floor(a / b) }
-    function imod(a, b) { if (b == 0) { fail("divided by 0") } return a - Math.floor(a / b) * b }
+    function imod(a, b) { if (b == 0) { fail("divided by 0") } return fmaSub(a, Math.floor(a / b), b) }
     // A zero carrying x's sign. `x * 0` is the obvious spelling AND IT IS WRONG
     // IN THIS DIALECT: the tag engine keeps an integral value as an integer, so
     // `-4 * 0` is the integer 0 and the sign is gone - measured, `1 / (x * 0)`
@@ -2818,7 +2863,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // to answer "00-42" - a LIVE HALVES DIVERGENCE, invisible to --cross because no
     // test formatted a negative to a width. It also has to go after a # base
     // prefix ("%#010x" % 255 is "0x000000ff"), which is what `keep` carries: the
-    // number of leading characters the zeros must not get in front of.
+    // number of leading characters the zeros must not get in front of - the sign
+    // and the prefix and, for MRI's infinite two's complement, the ".." as well
+    // ("%#010x" % -5 is "0x..fffffb", where the FILL is "f" and not "0").
     function padTo(s, width, left, padChar, keep) {
         var out = s
         if (!left) {
@@ -2826,12 +2873,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return out
         }
         var head = ""
-        if (padChar == "0" && out.length > 0 && isSignChar(out.charAt(0))) {
-            head = out.charAt(0)
-            out = out.slice(1)
-        }
-        if (padChar == "0" && keep > 0) {
-            head = head + out.slice(0, keep)
+        if (padChar != " " && keep > 0) {
+            head = out.slice(0, keep)
             out = out.slice(keep)
         }
         while (head.length + out.length < width) { out = padChar + out }
@@ -3047,14 +3090,163 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return altPoint(fixedStr(x, p - 1 - ex))
     }
     function altOrNot(t, alt) { return alt ? altPoint(t) : t }
-    // "0x", "0X", "0" or "0b", and nothing at all for a zero ("%#x" % 0 is "0").
-    function basePrefix(conv, digits) {
-        if (digits == "0" || digits == "") { return "" }
+    // "0x", "0X" or "0b", and nothing at all for a ZERO VALUE ("%#x" % 0 is "0").
+    // The test is on the value and not on the digit string: a precision pads the
+    // digits, and "%#.5x" % 0 is "00000" in MRI with no prefix. Octal is a
+    // different rule again and lives in intBody.
+    function basePrefix(conv, v) {
+        if (v == 0) { return "" }
         if (conv == "x") { return "0x" }
         if (conv == "X") { return "0X" }
-        if (conv == "o") { return "0" }
         if (conv == "b") { return "0b" }
         return ""
+    }
+    // ----- the three integer directives -------------------------------------
+    //
+    // %d/%i/%x/%X/%o/%b went through baseStr and `"" + Math.trunc(v)`, and were
+    // wrong three ways at once. Past 2^53 the digits are simply gone - "%d" % 1e30
+    // printed "1e+30" and "%x" % 1e30 looped over a double, where MRI prints
+    // 1e30.to_i EXACTLY, all 31 decimal digits of 1000000000000000019884624838656.
+    // A NEGATIVE under %x/%o/%b needs MRI's infinite two's complement ("%x" % -5 is
+    // "..fb"), not "-5". And a PRECISION on an integer directive is a minimum digit
+    // count that also cancels the 0 flag, with the special case that "%.0x" % 0 is
+    // the empty string. Settled against ruby 2.6.10 over a 61-format x 38-value
+    // table; Integer formatting is unchanged in 3.x.
+    //
+    // baseStr STAYS, for Integer#to_s(base), which is a different function with a
+    // different (int64-saturating) contract. This is only the format directives.
+    var FMT_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+    function digitVal(c) {
+        var v = c.charCodeAt(0)
+        if (v >= 48 && v <= 57) { return v - 48 }
+        if (v >= 97 && v <= 122) { return v - 97 + 10 }
+        return 0
+    }
+    // The exact binary digits of a non-negative INTEGRAL double. Halving a double
+    // above 2^53 is exact (it has no odd values left), so the mantissa comes down
+    // whole and the discarded factors of two come back as trailing "0"s.
+    function binDigits(a) {
+        var m = a
+        var e = 0
+        while (m > 9007199254740992) { m = m / 2 ; e = e + 1 }
+        var s = ""
+        var x = m
+        while (x > 0) {
+            var q = Math.floor(x / 2)
+            s = (x - q * 2 == 1 ? "1" : "0") + s
+            x = q
+        }
+        if (s == "") { s = "0" }
+        for (var k = 0; k < e; k++) { s = s + "0" }
+        return s
+    }
+    // Binary digits regrouped `per` at a time: base 8 for 3, base 16 for 4.
+    function groupBits(bits, per) {
+        var s = bits
+        while (s.length % per != 0) { s = "0" + s }
+        var out = ""
+        for (var i = 0; i < s.length; i = i + per) {
+            var v = 0
+            for (var j = 0; j < per; j++) { v = v * 2 + (s.charAt(i + j) == "1" ? 1 : 0) }
+            out = out + FMT_DIGITS.charAt(v)
+        }
+        var k = 0
+        while (k < out.length - 1 && out.charAt(k) == "0") { k = k + 1 }
+        return out.slice(k)
+    }
+    // The exact base-`base` digits of a non-negative integral double. Base ten is
+    // the bignum that already exists here, rbExactDec's.
+    function magDigits(a, base) {
+        if (base == 10) { return rbExactDec(a).i }
+        var bits = binDigits(a)
+        if (base == 8) { return groupBits(bits, 3) }
+        if (base == 16) { return groupBits(bits, 4) }
+        return bits
+    }
+    // `s` minus one, in base `base`. The operand is a magnitude of at least 1, so
+    // the borrow always finds a digit to take from.
+    function decOne(s, base) {
+        var arr = []
+        for (var i = 0; i < s.length; i++) { arr.push(digitVal(s.charAt(i))) }
+        var at = arr.length - 1
+        while (at >= 0) {
+            if (arr[at] > 0) { arr[at] = arr[at] - 1 ; break }
+            arr[at] = base - 1
+            at = at - 1
+        }
+        var out = ""
+        for (var k = 0; k < arr.length; k++) { out = out + FMT_DIGITS.charAt(arr[k]) }
+        var z = 0
+        while (z < out.length - 1 && out.charAt(z) == "0") { z = z + 1 }
+        return out.slice(z)
+    }
+    // MRI's INFINITE two's-complement digits for a negative value, without the ".."
+    // that announces them. ~n is the magnitude minus one with every digit
+    // complemented, which is exact on the digit string and needs no bignum
+    // subtract. MRI collapses the infinite run of (base-1) digits in front to
+    // exactly ONE, so -1 is "..f" and not "..ff".
+    function twosDigits(a, base) {
+        var src = decOne(magDigits(a, base), base)
+        var out = ""
+        for (var i = 0; i < src.length; i++) {
+            out = out + FMT_DIGITS.charAt(base - 1 - digitVal(src.charAt(i)))
+        }
+        var mx = FMT_DIGITS.charAt(base - 1)
+        if (out.length == 0 || out.charAt(0) != mx) { out = mx + out }
+        return out
+    }
+    // One integer directive: the sign or the ".." marker, the # base prefix, and
+    // the digits with any precision applied. `f` is the 0 flag's FILL character -
+    // the ".." form pads with the base's largest digit, not with zeros - and `k`
+    // the number of leading characters that fill has to go behind. `sign` is the +
+    // or SPACE flag, which switches MRI back to sign-and-magnitude ("%+x" % -5 is
+    // "-5", not "..fb").
+    function intBody(v, base, upper, alt, sign, prec) {
+        var neg = v < 0
+        var mag = neg ? -v : v
+        var fill = "0"
+        var twos = false
+        var digits = ""
+        if (base == 10 || !neg || sign) {
+            digits = magDigits(mag, base)
+            if (prec >= 0) {
+                if (digits == "0" && prec == 0) { digits = "" }
+                while (digits.length < prec) { digits = "0" + digits }
+            }
+        } else {
+            twos = true
+            var mx = FMT_DIGITS.charAt(base - 1)
+            digits = twosDigits(mag, base)
+            // A precision counts the ".." as two of its characters: "%.5x" % -1 is
+            // "..fff" and "%.3x" % -1 is "..f".
+            while (digits.length < prec - 2) { digits = mx + digits }
+            fill = mx
+        }
+        var prefix = ""
+        if (alt) {
+            if (base == 8) {
+                // "#" on %o means "make sure a leading zero is there", so
+                // "%#.5o" % 255 is "00377" and not "000377" - and MRI leaves it off
+                // the ".." form entirely.
+                if (!twos && (digits.length == 0 || digits.charAt(0) != "0")) { prefix = "0" }
+            } else if (base == 16) { prefix = basePrefix(upper ? "X" : "x", v) }
+            else if (base == 2) { prefix = basePrefix("b", v) }
+        }
+        var keep = 0
+        if (twos) { digits = ".." + digits ; keep = 2 }
+        if (upper) { digits = digits.toUpperCase() ; fill = fill.toUpperCase() }
+        var body = prefix + digits
+        keep = keep + prefix.length
+        if (neg && !twos) { body = "-" + body ; keep = keep + 1 }
+        return {b: body, f: fill, k: keep}
+    }
+    // The base of a conversion character, and 0 for the ones that are not integers.
+    function intBase(conv) {
+        if (conv == "d" || conv == "i" || conv == "u") { return 10 }
+        if (conv == "x" || conv == "X") { return 16 }
+        if (conv == "o") { return 8 }
+        if (conv == "b") { return 2 }
+        return 0
     }
     // MRI prints "Inf", "-Inf" and "NaN" for a non-finite float under every float
     // directive, in that directive's own case or not ("%G" % Float::INFINITY is
@@ -3111,13 +3303,38 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         var body = ""
         var nonFinite = false
-        var prefix = ""
+        // The 0 flag's fill character and the number of leading characters it has
+        // to go behind. Only the integer directives move them off their defaults;
+        // keep < 0 means "let padTo work the sign out", which is what the float
+        // and string directives want.
+        var fill = "0"
+        var keep = -1
+        var intPrec = false
+        var base = intBase(conv)
         // TRUNCATE, do not floor. This was Math.floor, and both compiled halves
         // use Math.trunc: "%d" % -1.5 was "-2" here and "-1" there, and MRI says
         // "-1" (its %d converts the float with to_i, which truncates). A live
         // halves divergence --cross never saw, because no test formatted a
-        // negative NON-INTEGER float with %d. Pinned by fmt19.
-        if (conv == "d" || conv == "i" || conv == "u") { body = "" + Math.trunc(toF(v)) }
+        // negative NON-INTEGER float with %d. Pinned by fmt19. baseStr was
+        // FLOORING for %x/%o/%b too, which was the same divergence one directive
+        // over, and it is gone with baseStr's use here.
+        if (base != 0) {
+            var iv = Math.trunc(toF(v))
+            if (iv !== iv || iv - iv !== 0) {
+                // Unreachable from real Ruby - Float::INFINITY.to_i raises
+                // FloatDomainError - and left as it was rather than invented.
+                body = base == 10 ? "" + iv : baseStr(iv, base)
+                if (conv == "X") { body = body.toUpperCase() }
+            } else {
+                var ib = intBody(iv, base, conv == "X", alt, plus || space, prec)
+                body = ib.b
+                fill = ib.f
+                keep = ib.k
+                // A precision turns the 0 flag OFF for an integer directive, as it
+                // does in C: "%08.3x" % 1 is "     001".
+                intPrec = prec >= 0
+            }
+        }
         else if (conv == "f" || conv == "e" || conv == "E" || conv == "g" || conv == "G") {
             var fv = toF(v)
             var word = floatWord(fv)
@@ -3130,24 +3347,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 body = alt ? genAltStr(fv, gp, conv == "G") : genStr(fv, gp, conv == "G")
             }
         }
-        else if (conv == "x") { body = baseStr(Math.floor(toF(v)), 16) }
-        else if (conv == "X") { body = baseStr(Math.floor(toF(v)), 16).toUpperCase() }
-        else if (conv == "o") { body = baseStr(Math.floor(toF(v)), 8) }
-        else if (conv == "b") { body = baseStr(Math.floor(toF(v)), 2) }
         else { body = rstr(v) }
-        if (alt) { prefix = basePrefix(conv, body) }
-        if (prefix != "") {
-            if (body.charAt(0) == "-") { body = "-" + prefix + body.slice(1) }
-            else { body = prefix + body }
-        }
         // The + and SPACE flags were parsed and THROWN AWAY here, and in both
         // compiled halves: "%+d" % 7 was "7" against MRI's "+7". Both halves
         // agreeing and both wrong, so --cross could never have seen it.
         var numeric = fmtNumeric(conv)
         if (numeric && body.charAt(0) != "-") {
             if (plus) { body = "+" + body } else if (space) { body = " " + body }
+            if ((plus || space) && keep >= 0) { keep = keep + 1 }
         }
-        return padTo(body, width, !left, (zero && !left && numeric && !nonFinite) ? "0" : " ", prefix.length)
+        if (keep < 0) { keep = (body.length > 0 && isSignChar(body.charAt(0))) ? 1 : 0 }
+        var padChar = (zero && !left && numeric && !nonFinite && !intPrec) ? fill : " "
+        return padTo(body, width, !left, padChar, keep)
     }
     function rformat(fmt, arg) {
         var args = Array.isArray(arg) ? arg : [arg]

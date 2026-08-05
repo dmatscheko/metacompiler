@@ -79,6 +79,15 @@ def s02
   check("num5", 3r == 3 && 1r / 2r == 0.5)
   check("num6", 2i * 2i == -4)
   check("num7", 10_000_000_000 * 10 == 100_000_000_000)
+  # The FUSED `x - floor(x/y)*y`. Read out of an array so nothing folds it, and
+  # written where fusion CAN bite: q*y leaves the exactly-representable range, so
+  # the two-rounding answer is one whole unit out. abnf/jsrt.go says math.FMA,
+  # ruby-rt.metajs says rbFmaSub and ruby-interpreter.abnf says fmaSub; all three
+  # answer what /usr/bin/ruby answers, which is the fused one.
+  fm = [9007199254740991, -3, -7, 9007199254740992, 18014398509481982]
+  check("num8", fm[0] % fm[1] == -2 && fm[0] % fm[2] == -4)
+  check("num9", fm[3] % fm[1] == -1 && fm[3] % fm[2] == -3 && fm[4] % fm[2] == -1)
+  check("num10", fm[0].divmod(fm[1]) == [-3002399751580331, -2] && fm[3].divmod(fm[2]) == [-1286742750677285, -3])
 end
 # ===== SECTION 03: string literals, escapes, percent forms =====
 def s03
@@ -146,6 +155,32 @@ def s06
   check("fmt18", "%#010x" % 255 == "0x000000ff" && "%#-10x" % 255 == "0xff      " && ("%#g %d" % [1.5, 7]) == "1.50000 7" && "%#.0f" % 1.0 == "1." && "%#.0e" % 1.0 == "1.e+00")
   # %d TRUNCATES a negative float, it does not floor it. The interpreter floored.
   check("fmt19", "%d" % -1.5 == "-1" && "%d" % -0.5 == "0" && "%i" % 2.9 == "2" && "%05d" % -1.5 == "-0001")
+  # ----- the three integer directives, all read out of an ARRAY ---------------
+  # An integer directive converts the Float with to_i and prints the resulting
+  # Integer EXACTLY. %d used to print the double's shortest form ("1e+30") and
+  # %x/%o/%b saturated at int64 ("7fffffffffffffff").
+  big = [1.0e20, 1.0e30, -1.0e20, 9007199254740992.0, 1.0e300]
+  check("fmt20", "%d" % big[0] == "100000000000000000000" && "%d" % big[1] == "1000000000000000019884624838656")
+  check("fmt21", "%x" % big[0] == "56bc75e2d63100000" && "%o" % big[3] == "400000000000000000" &&
+                 "%b" % big[3] == "100000000000000000000000000000000000000000000000000000")
+  check("fmt22", ("%d" % big[4]).length == 301 && ("%x" % big[4]).length == 250 && "%d" % -big[1] == "-1000000000000000019884624838656")
+  # A NEGATIVE under %x/%o/%b is MRI's INFINITE two's complement, and the leading
+  # run of f/7/1 collapses to exactly one digit.
+  neg = [-1, -5, -255, -256, -4096, -17]
+  check("fmt23", "%x" % neg[1] == "..fb" && "%o" % neg[1] == "..73" && "%b" % neg[1] == "..1011" && "%X" % neg[0] == "..F")
+  check("fmt24", "%x" % neg[2] == "..f01" && "%x" % neg[3] == "..f00" && "%x" % neg[4] == "..f000" && "%x" % neg[5] == "..fef")
+  # The 0 flag fills that form with the base's LARGEST digit, behind the ".." and
+  # behind any # prefix; + or SPACE switches back to sign-and-magnitude entirely.
+  check("fmt25", "%010x" % neg[1] == "..fffffffb" && "%#010x" % neg[1] == "0x..fffffb" && "%10x" % neg[1] == "      ..fb")
+  check("fmt26", "%+x" % neg[2] == "-ff" && "% x" % neg[1] == "-5" && "%#+x" % neg[1] == "-0x5" && "%#o" % neg[1] == "..73")
+  # A precision on an integer directive is a MINIMUM DIGIT COUNT that also cancels
+  # the 0 flag - and "%.0x" % 0 is the empty string. In the ".." form the two dots
+  # count as two of the precision's characters.
+  zed = [0, 255, 1, -0.0]
+  check("fmt27", "%.0x" % zed[0] == "" && "%.0d" % zed[0] == "" && "%.0d" % zed[3] == "" && "%#.0o" % zed[0] == "0")
+  check("fmt28", "%.3x" % zed[1] == "0ff" && "%.3d" % neg[0] == "-001" && "%08.3x" % zed[2] == "     001")
+  check("fmt29", "%.5x" % neg[0] == "..fff" && "%.5b" % neg[0] == "..111" && "%.3x" % neg[1] == "..fb" && "%#.5x" % zed[0] == "00000")
+  check("fmt30", "%#.5o" % zed[1] == "00377" && "%#.1o" % zed[1] == "0377" && "%#.5x" % zed[1] == "0x000ff")
 end
 # ===== SECTION 07: variables and scope =====
 S07_LIMIT = 40
