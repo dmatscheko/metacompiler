@@ -21,6 +21,32 @@ def check(name, got, want)
   end
 end
 
+# ----- Integer at arbitrary precision -----
+# Ruby's Integer has no width. Every value here is outside what a double counts
+# exactly (2^53 == 9007199254740992), which is the only width at which any of
+# these can bite; one bit lower they all pass against a plain double too.
+check("big-lit-dec", 9007199254740993.to_s, "9007199254740993")
+check("big-lit-hex", 0x20000000000001.to_s, "9007199254740993")
+check("big-lit-u64", 0xffffffffffffffff.to_s, "18446744073709551615")
+check("big-lit-long", 12345678901234567890.to_s, "12345678901234567890")
+check("big-lit-neg", (-9007199254740993).to_s, "-9007199254740993")
+check("big-pow2-53", 9007199254740992.to_s, "9007199254740992")   # exact, NOT boxed
+check("big-add", (9007199254740992 + 1).to_s, "9007199254740993")
+check("big-mul", (9007199254740992 * 9007199254740992).to_s, "81129638414606681695789005144064")
+check("big-pow", (2 ** 100).to_s, "1267650600228229401496703205376")
+check("big-div-floor", ((-12345678901234567890) / 1000).to_s, "-12345678901234568")
+check("big-mod-floor", ((-12345678901234567890) % 97).to_s, "94")
+check("big-cmp-exact", 9007199254740993 == 9007199254740992, false)
+check("big-cmp-float", 9007199254740993 == 9007199254740993.0, false)
+check("big-narrow", 12345678901234567890 - 12345678901234567889, 1)
+check("big-shl", (1 << 100).to_s, "1267650600228229401496703205376")
+check("big-not", (~9007199254740992).to_s, "-9007199254740993")
+check("big-to-s-16", 18446744073709551615.to_s(16), "ffffffffffffffff")
+check("big-fmt-d", "%d" % 12345678901234567890, "12345678901234567890")
+check("big-no-exponent", (2.0 ** 70).to_i.to_s, "1180591620717411303424")
+check("big-class", 12345678901234567890.class.to_s, "Integer")
+check("big-hash-key", {18446744073709551616 => "big"}[9223372036854775808 * 2], "big")
+
 # ----- numbers, arithmetic, precedence (integers only; / truncates toward zero) -----
 check("arith-precedence", 1 + 2 * 3, 7)
 check("arith-paren", (1 + 2) * 3, 9)

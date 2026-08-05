@@ -803,7 +803,7 @@ Primary     = "(" Expression ")" | ParenBody | LambdaLit | SingletonDecl
             | ReturnExpr | BreakExpr | NextExpr | RedoExpr | RetryExpr | RaiseExpr | YieldExpr | SuperExpr
             | CmdLit | HeredocLit | HeredocRef
             | StrLit | CharLit | PercentLit | RegexLit
-            | NumHex | NumBin | NumOct | Oct0Lit | RatLit | ImagLit | FloatLit | NumInt
+            | RbHexLit | RbBinLit | RbOctLit | Oct0Lit | RatLit | ImagLit | FloatLit | RbIntLit
             | SymLit
             | ArrayLit | HashLit
             | True | False | Nil | Self | FileLit | LineLit | DirLit
@@ -883,7 +883,21 @@ YieldExpr   <~~ push(makeYield(takeAll(), up.pos)) ~~>
 // it stays distinguishable from an integer - Ruby needs 7 / 2 == 3 AND 7.0 / 2 ==
 // 3.5, which one JS number cannot express. 3r is a Rational, 2i an imaginary
 // Complex; both are boxes too. The prefixed / suffixed forms come first (PEG).
-Oct0Lit     <~~ push(makeConst(parseInt(up.in.split("_").join("").substring(1), 8))) ~~>
+// The Integer literals are ruby's OWN productions rather than lib/numbers.abnf's
+// NumHex / NumBin / NumOct / NumInt, because those build the value with parseInt
+// and parseInt ROUNDS past 2^53: 0x20000000000001 arrived as 9007199254740992 and
+// 12345678901234567890 as ...567000. The syntax is unchanged (the digit
+// productions are still the shared ones); only the value builder differs, and it
+// hands makeConst a {rbig} marker for anything the double cannot count exactly.
+RbHexLit    <~~ push(makeConst(intLitRadix(up.in, 16, 2))) ~~>
+            = "0" ( "x" | "X" ) :whitespace() NumHexDig { NumHexDig | "_" } :whitespace(Whitespace) ;
+RbBinLit    <~~ push(makeConst(intLitRadix(up.in, 2, 2))) ~~>
+            = "0" ( "b" | "B" ) :whitespace() NumBinDig { NumBinDig | "_" } :whitespace(Whitespace) ;
+RbOctLit    <~~ push(makeConst(intLitRadix(up.in, 8, 2))) ~~>
+            = "0" ( "o" | "O" ) :whitespace() "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
+RbIntLit    <~~ push(makeConst(intLitDec(up.in))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } :whitespace(Whitespace) ;
+Oct0Lit     <~~ push(makeConst(intLitRadix(up.in, 8, 1))) ~~>
             = "0" :whitespace() "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
 RatLit      <~~ push(makeConst(mkRat(parseInt(up.in.split("_").join("")), 1))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } "r" :whitespace(Whitespace) ;
@@ -4301,6 +4315,91 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function mkFlo(x) { return {rknd: 1, ra: x, rb: 0} }
     function mkRat(n, d) { return {rknd: 2, ra: n, rb: d} }
     function mkCpx(re, im) { return {rknd: 3, ra: re, rb: im} }
+
+    // ----- Integer literals past 2^53 -----
+    // Ruby's Integer has no width, so a literal the double cannot count exactly
+    // becomes a real arbitrary precision value: js_bigint is *jsBigInt (Go's
+    // math/big) under llvm.Run and rbABigFromStr in languages/lib/ruby-rt.metajs
+    // natively. js_bigint reads DECIMAL text, so a 0x / 0o / 0b literal is
+    // converted to exact decimal first rather than handed to parseInt, which
+    // rounds: 0x20000000000001 used to arrive as 2^53.
+    function mkBig(dec) { return {rbig: dec} }
+    // The matched text carries the '_' separators and whatever the production's
+    // trailing whitespace skip picked up, and neither js_bigint nor radixToDec is
+    // as forgiving as parseInt - so the digits are cut out explicitly.
+    function litDigits(txt, radix, skip) {
+        var s = txt.split("_").join("").substring(skip)
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            var dv = 0 - 1
+            if (ch >= "0" && ch <= "9") { dv = ch.charCodeAt(0) - 48 }
+            if (ch >= "a" && ch <= "f") { dv = ch.charCodeAt(0) - 87 }
+            if (ch >= "A" && ch <= "F") { dv = ch.charCodeAt(0) - 55 }
+            if (dv < 0 || dv >= radix) { return out }
+            out += ch
+        }
+        return out
+    }
+    // 0x / 0o / 0b digits (prefix already stripped) as the EXACT decimal text of
+    // the same value: a schoolbook multiply-add over a little-endian array of
+    // decimal digits, d = d * radix + v. The twin of radixToDec in
+    // ruby-interpreter.abnf.
+    function radixToDec(digits, radix) {
+        var d = [0]
+        for (var i = 0; i < digits.length; i++) {
+            var ch = digits.charAt(i)
+            var dv = 0
+            if (ch >= "0" && ch <= "9") { dv = ch.charCodeAt(0) - 48 }
+            if (ch >= "a" && ch <= "f") { dv = ch.charCodeAt(0) - 87 }
+            if (ch >= "A" && ch <= "F") { dv = ch.charCodeAt(0) - 55 }
+            var carry = dv
+            for (var k = 0; k < d.length; k++) {
+                var t = d[k] * radix + carry
+                var lo = t % 10
+                d[k] = lo
+                carry = (t - lo) / 10
+            }
+            while (carry > 0) {
+                var c2 = carry % 10
+                d.push(c2)
+                carry = (carry - c2) / 10
+            }
+        }
+        var out = ""
+        for (var j = d.length - 1; j >= 0; j--) { out = out + String.fromCharCode(48 + d[j]) }
+        return out
+    }
+    // Is the decimal digit string txt worth MORE than 2^53? Decided on the TEXT:
+    // parseFloat rounds 9007199254740993 down to exactly 2^53, so the very first
+    // value that needs the box would answer "not big". 2^53 itself is exact and is
+    // deliberately NOT boxed. A literal never carries a sign here (makeNeg is
+    // applied to the value).
+    function decOver53(txt) {
+        var s = txt
+        var z = 0
+        while (z < s.length - 1 && s.charAt(z) == "0") { z = z + 1 }
+        if (z > 0) { s = s.substring(z) }
+        var lim = "9007199254740992"
+        if (s.length != lim.length) { return s.length > lim.length }
+        for (var k = 0; k < lim.length; k++) {
+            var a = s.charAt(k)
+            var b = lim.charAt(k)
+            if (a != b) { return a > b }
+        }
+        return false
+    }
+    function intLitDec(txt) {
+        var s = litDigits(txt, 10, 0)
+        if (decOver53(s)) { return mkBig(s) }
+        return parseInt(s, 10)
+    }
+    function intLitRadix(txt, radix, skip) {
+        var digits = litDigits(txt, radix, skip)
+        var dec = radixToDec(digits, radix)
+        if (decOver53(dec)) { return mkBig(dec) }
+        return parseInt(digits, radix)
+    }
     // A Symbol is its OWN type, not a string: `:hello == "hello"` is false and :size
     // and "size" are different Hash keys. The runtime models it as jsSym (abnf/jsrt.go,
     // built by the js_sym extern), which renders as the bare name but compares only
@@ -4440,6 +4539,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (v !== null && v !== undefined && typeof v == "object" && v.__rsym != undefined) {
             var nm = v.__rsym
             return function(b) { return {b: b, v: callExt(b, "js_sym", [emitStr(b, nm)])} }
+        }
+        // An Integer literal past 2^53: an arbitrary precision value, from its
+        // exact DECIMAL text (js_bigint reads no other radix).
+        if (v !== null && v !== undefined && typeof v == "object" && v.rbig != undefined) {
+            var bd = v.rbig
+            return function(b) { return {b: b, v: callExt(b, "js_bigint", [emitStr(b, bd)])} }
         }
         // A boxed literal of the numeric tower: 1.5 / 3r / 2i.
         if (v !== null && v !== undefined && typeof v == "object" && v.rknd != undefined) {

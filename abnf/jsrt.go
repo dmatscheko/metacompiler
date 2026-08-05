@@ -3326,6 +3326,12 @@ type jsCpx struct{ re, im float64 }
 
 // rubyNumRank orders the tower: int < rational < float < complex. Every arithmetic
 // step promotes both operands to the higher of the two ranks. -1 is "not a number".
+// A *jsBigInt is rank 0: it IS an Integer, not a fifth kind of number. Ruby's
+// Integer has no width, so a value the double cannot count exactly carries the
+// arbitrary precision shape and everything else stays the plain number it was -
+// which is what keeps the fast path two comparisons wide (see rubyOver53). A big
+// meeting a Rational, a Float or a Complex promotes to that rank THROUGH THE
+// DOUBLE, i.e. it stops being exact; that boundary is stated at rubyBigArith.
 func rubyNumRank(v interface{}) int {
 	switch v.(type) {
 	case float64:
@@ -3336,6 +3342,8 @@ func rubyNumRank(v interface{}) int {
 		return 2
 	case jsCpx:
 		return 3
+	case *jsBigInt:
+		return 0
 	}
 	return -1
 }
@@ -3352,8 +3360,236 @@ func rubyToF(v interface{}) float64 {
 		return t.f
 	case jsCpx:
 		return t.re
+	case *jsBigInt:
+		f, _ := new(big.Float).SetInt(t.v).Float64()
+		return f
 	}
 	return 0
+}
+
+// rubyBigMax is 2^53, the largest integer a double still counts exactly, as a
+// big.Int - the boundary between the plain and the arbitrary precision shape.
+var rubyBigMax = big.NewInt(9007199254740992)
+
+// rubyBigNarrow is the only exit from the boxed world, and the twin of bigOut in
+// ruby-interpreter.abnf and rbABigNarrow in languages/lib/ruby-rt.metajs: a value
+// that still fits the exactly representable range comes back as a plain number,
+// so only what GENUINELY needs arbitrary precision carries the shape.
+func (rt *jsrt) rubyBigNarrow(x *big.Int) interface{} {
+	if x.IsInt64() {
+		if n := x.Int64(); n <= 9007199254740992 && n >= -9007199254740992 {
+			return float64(n)
+		}
+	}
+	rt.hasBigInt = true
+	return &jsBigInt{v: x}
+}
+
+// rubyBigOf answers an EXACT big.Int for an Integer operand: a big as itself, and
+// an integral double inside the exactly representable range as itself. A Float
+// box, a Rational, a non-integral double and anything past 2^53 that is NOT
+// already a big answer false, so the caller falls back to the double path rather
+// than inventing precision the operand never had.
+func rubyBigOf(v interface{}) (*big.Int, bool) {
+	switch t := v.(type) {
+	case *jsBigInt:
+		return t.v, true
+	case bool:
+		if t {
+			return big.NewInt(1), true
+		}
+		return big.NewInt(0), true
+	case float64:
+		// A plain double past 2^53 lifts EXACTLY, which is where this differs
+		// from pyBigOperand below. A Python int that large is already boxed and a
+		// bare double IS a float; in Ruby a plain number is always an Integer and
+		// a large one can only have come from Float#to_i or float arithmetic,
+		// where MRI's answer is the exact integer value OF THAT DOUBLE. So
+		// `(1e30).to_i + 1` is 1000000000000000019884624838657, as in MRI. The
+		// finiteness test is not optional: big.Float of an infinity has no Int.
+		if t == math.Trunc(t) && !math.IsInf(t, 0) {
+			bf, _ := big.NewFloat(t).Int(nil)
+			return bf, true
+		}
+	}
+	return nil, false
+}
+
+// rubyBigPair answers both Integer operands exactly when at least one of them is
+// a big. Ruby has ONE Integer type and it is arbitrary precision, so a plain int
+// operand meeting a big PROMOTES - which is why this is not bigPair (the
+// ECMAScript rule shared with js_add and the rest, where a BigInt refuses to mix).
+func rubyBigPair(a, b interface{}) (*big.Int, *big.Int, bool) {
+	_, aBig := a.(*jsBigInt)
+	_, bBig := b.(*jsBigInt)
+	if !aBig && !bBig {
+		return nil, nil, false
+	}
+	x, xok := rubyBigOf(a)
+	if !xok {
+		return nil, nil, false
+	}
+	y, yok := rubyBigOf(b)
+	if !yok {
+		return nil, nil, false
+	}
+	return x, y, true
+}
+
+// rubyOver53 is the PROMOTION TRIGGER for two plain Integers, and it is sound
+// both ways. Every plain operand is exact and of magnitude <= 2^53 (anything
+// larger is already a big and was taken by rubyBigArith before this), so if the
+// TRUE result is >= 2^53 the rounded double is too - rounding to nearest of a
+// value at or above 2^53 cannot land below it - and if the true result is < 2^53
+// the double is exact and the guard does not fire.
+func rubyOver53(v float64) bool { return v >= 9007199254740992 || v <= -9007199254740992 }
+
+// rubyBigArith is one arithmetic step at arbitrary precision, and the twin of
+// bigOp in ruby-interpreter.abnf and rbABigArith in ruby-rt.metajs. It answers
+// ok=false for a pair it cannot take exactly, and the caller then keeps the
+// double path it always had. Ruby FLOORS: -7 / 2 is -4 and -7 % 3 is 2, which is
+// math/big's DivMod (Euclidean) corrected for a negative divisor, not Quo/Rem.
+func (rt *jsrt) rubyBigArith(op string, l, r interface{}) (interface{}, bool) {
+	x, y, ok := rubyBigPair(l, r)
+	if !ok {
+		return nil, false
+	}
+	switch op {
+	case "+":
+		return rt.rubyBigNarrow(new(big.Int).Add(x, y)), true
+	case "-":
+		return rt.rubyBigNarrow(new(big.Int).Sub(x, y)), true
+	case "*":
+		return rt.rubyBigNarrow(new(big.Int).Mul(x, y)), true
+	case "/", "%":
+		if y.Sign() == 0 {
+			rt.fail("divided by 0")
+		}
+		q, m := new(big.Int), new(big.Int)
+		q.QuoRem(x, y, m)
+		if m.Sign() != 0 && (m.Sign() < 0) != (y.Sign() < 0) {
+			q.Sub(q, big.NewInt(1))
+			m.Add(m, y)
+		}
+		if op == "/" {
+			return rt.rubyBigNarrow(q), true
+		}
+		return rt.rubyBigNarrow(m), true
+	case "**":
+		if y.Sign() < 0 {
+			return jsFlo{f: math.Pow(rubyToF(l), rubyToF(r))}, true
+		}
+		if !y.IsInt64() || y.Int64() > 4096 {
+			return math.Pow(rubyToF(l), rubyToF(r)), true
+		}
+		return rt.rubyBigNarrow(new(big.Int).Exp(x, y, nil)), true
+	case "&", "|", "^", "<<", ">>":
+		out, oky := rubyBigBits(op, x, y)
+		if !oky {
+			return nil, false
+		}
+		return rt.rubyBigNarrow(out), true
+	}
+	return nil, false
+}
+
+// rubyBigPromote redoes one Integer step at arbitrary precision after the double
+// answer was found to have left the exact range. Both operands are plain numbers
+// here, so rubyBigPair cannot fire on them - they are lifted explicitly. A pair
+// that has no exact integer form (a non-integral double, an absurd shift count)
+// keeps the double answer it always had.
+func (rt *jsrt) rubyBigPromote(op string, x, y float64) interface{} {
+	bx, okx := rubyBigOf(x)
+	by, oky := rubyBigOf(y)
+	if okx && oky {
+		if out, ok := rt.rubyBigArith(op, &jsBigInt{v: bx}, &jsBigInt{v: by}); ok {
+			return out
+		}
+	}
+	switch op {
+	case "+":
+		return x + y
+	case "-":
+		return x - y
+	case "*":
+		return x * y
+	case "**":
+		return math.Pow(x, y)
+	case "&":
+		return float64(int64(x) & int64(y))
+	case "|":
+		return float64(int64(x) | int64(y))
+	case "^":
+		return float64(int64(x) ^ int64(y))
+	case "<<":
+		return x * math.Pow(2, y)
+	}
+	return math.Floor(x / math.Pow(2, y))
+}
+
+// rubyBigBits is |, &, ^, << and >> at arbitrary precision. math/big's And/Or/Xor
+// ARE Ruby's infinite two's complement (they are defined on the signed value, not
+// on a fixed width), and a NEGATIVE shift count is the opposite shift in Ruby -
+// `1 << -2` is 0 and `4 >> -2` is 16 - rather than an error.
+func rubyBigBits(op string, x, y *big.Int) (*big.Int, bool) {
+	switch op {
+	case "&":
+		return new(big.Int).And(x, y), true
+	case "|":
+		return new(big.Int).Or(x, y), true
+	case "^":
+		return new(big.Int).Xor(x, y), true
+	}
+	if !y.IsInt64() {
+		return nil, false
+	}
+	k := y.Int64()
+	left := op == "<<"
+	if k < 0 {
+		k, left = -k, !left
+	}
+	if k > 1048576 {
+		return nil, false
+	}
+	if left {
+		return new(big.Int).Lsh(x, uint(k)), true
+	}
+	return new(big.Int).Rsh(x, uint(k)), true
+}
+
+// rubyBigCmp compares two Integers exactly when either is a big. Through
+// rubyToF they would both round to the same double and answer 0.
+func rubyBigCmp(l, r interface{}) (int, bool) {
+	if _, lb := l.(*jsBigInt); !lb {
+		if _, rb := r.(*jsBigInt); !rb {
+			return 0, false
+		}
+	}
+	x, xok := rubyBigCmpOf(l)
+	if !xok {
+		return 0, false
+	}
+	y, yok := rubyBigCmpOf(r)
+	if !yok {
+		return 0, false
+	}
+	return x.Cmp(y), true
+}
+
+// rubyIntStr renders an Integer. Ruby NEVER writes one in exponent form, which is
+// what strconv's shortest form does from 1e21 up, so a plain double that large
+// gets its own exact expansion - `(2.0 ** 70).to_i` printed 1.1805916207174113e+21
+// where MRI prints all 22 digits. The twins are intStr in ruby-interpreter.abnf
+// and rbIntStr in languages/lib/ruby-rt.metajs.
+func rubyIntStr(x float64) string {
+	if x != x || math.IsInf(x, 0) || x != math.Trunc(x) {
+		return jsNumString(x)
+	}
+	if x <= 9007199254740992 && x >= -9007199254740992 {
+		return jsNumString(x)
+	}
+	bf, _ := big.NewFloat(x).Int(nil)
+	return bf.String()
 }
 
 func rubyGcd(a, b float64) float64 {
@@ -3519,6 +3755,35 @@ func pyBigOperand(v interface{}) (*big.Int, bool) {
 		}
 	}
 	return nil, false
+}
+
+// rubyBigCmpOf is rubyBigOf for a COMPARISON, which may also take a Float:
+// `2**64 == 1.8446744073709552e19` is true in MRI and `(2**53+1) ==
+// (2**53+1).to_f` is false, and neither can be settled by rounding the Integer
+// to a double. An arithmetic operator must NOT use this - there the Float wins
+// the rank and the Integer converts, which is the tower's rule.
+func rubyBigCmpOf(v interface{}) (*big.Int, bool) {
+	if f, ok := v.(jsFlo); ok {
+		if math.IsNaN(f.f) || math.IsInf(f.f, 0) || f.f != math.Trunc(f.f) {
+			return nil, false
+		}
+		bf, _ := big.NewFloat(f.f).Int(nil)
+		return bf, true
+	}
+	return rubyBigOf(v)
+}
+
+// rubyIntFromF builds an Integer from a double: exact past 2^53, so that the ONE
+// shape invariant holds - an Integer of magnitude above 2^53 is always a big and
+// never a plain double. Float#to_i and the rest of the truncating family go
+// through this, which is also what keeps a big and a plain number from ever
+// being two spellings of one Hash key.
+func (rt *jsrt) rubyIntFromF(x float64) interface{} {
+	if math.IsNaN(x) || math.IsInf(x, 0) || math.Abs(x) <= 9007199254740992 {
+		return x
+	}
+	bf, _ := big.NewFloat(x).Int(nil)
+	return rt.rubyBigNarrow(bf)
 }
 
 // pyBigNarrow is the Go twin of the interpreter's bigOut: a big that still fits
@@ -3951,14 +4216,29 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 		}
 		rt.fail("Float does not support '%s'", op)
 	}
+	// Two Integers. One of them past 2^53 goes straight to the exact path;
+	// otherwise the double answer is computed first and only PROMOTED when it
+	// leaves the exact range, so a loop of small arithmetic pays one comparison.
+	if out, ok := rt.rubyBigArith(op, l, r); ok {
+		return out
+	}
 	x, y := rubyToF(l), rubyToF(r)
 	switch op {
 	case "+":
-		return x + y
+		if s := x + y; !rubyOver53(s) {
+			return s
+		}
+		return rt.rubyBigPromote(op, x, y)
 	case "-":
-		return x - y
+		if s := x - y; !rubyOver53(s) {
+			return s
+		}
+		return rt.rubyBigPromote(op, x, y)
 	case "*":
-		return x * y
+		if s := x * y; !rubyOver53(s) {
+			return s
+		}
+		return rt.rubyBigPromote(op, x, y)
 	case "/":
 		if y == 0 {
 			rt.fail("divided by 0")
@@ -3986,17 +4266,45 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 		if y < 0 {
 			return jsFlo{f: math.Pow(x, y)}
 		}
-		return math.Pow(x, y)
-	case "&":
-		return float64(int64(x) & int64(y))
-	case "|":
-		return float64(int64(x) | int64(y))
-	case "^":
-		return float64(int64(x) ^ int64(y))
+		if p := math.Pow(x, y); !rubyOver53(p) {
+			return p
+		}
+		return rt.rubyBigPromote(op, x, y)
+	// & | ^ << >> are INFINITE two's complement at ARBITRARY precision in Ruby:
+	// `1 << 100` is a 31-digit Integer and `-1 & 0xffffffffffffffff` is
+	// 18446744073709551615. int64 IS that answer for the range it holds, which is
+	// what a bit-twiddling loop pays; outside it the operands promote.
+	case "&", "|", "^":
+		if x == math.Trunc(x) && y == math.Trunc(y) && math.Abs(x) <= 9007199254740992 && math.Abs(y) <= 9007199254740992 {
+			var n int64
+			switch op {
+			case "&":
+				n = int64(x) & int64(y)
+			case "|":
+				n = int64(x) | int64(y)
+			default:
+				n = int64(x) ^ int64(y)
+			}
+			// The RESULT has to be checked too, not just the operands: `1 |
+			// 9007199254740992` is 2^53+1, which float64(n) rounds back down.
+			// Layer 2 cannot make this test at all - its int64 comes back through
+			// a double - so it takes the int32 fast path and the bignum, and the
+			// two engines meet on the ANSWER rather than on the path.
+			if n <= 9007199254740992 && n >= -9007199254740992 {
+				return float64(n)
+			}
+		}
+		return rt.rubyBigPromote(op, x, y)
 	case "<<":
-		return x * math.Pow(2, y)
+		if s := x * math.Pow(2, y); !rubyOver53(s) && y >= 0 && x == math.Trunc(x) {
+			return s
+		}
+		return rt.rubyBigPromote(op, x, y)
 	case ">>":
-		return math.Floor(x / math.Pow(2, y))
+		if y >= 0 && y <= 53 && x == math.Trunc(x) && math.Abs(x) <= 9007199254740992 {
+			return math.Floor(x / math.Pow(2, y))
+		}
+		return rt.rubyBigPromote(op, x, y)
 	}
 	rt.fail("Integer does not support '%s'", op)
 	return nil
@@ -4122,16 +4430,27 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 // js_rmcall. It answers ok=false for a name it does not know, so the caller can
 // carry on with the generic dispatch (and its error message).
 func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (interface{}, bool) {
+	if bi, isBig := t.(*jsBigInt); isBig {
+		if out, ok := rt.rubyBigMethod(bi, name, args); ok {
+			return out, true
+		}
+	}
 	x := rubyToF(t)
 	_, isInt := t.(float64)
 	switch name {
 	case "to_s", "inspect":
 		if isInt && len(args) > 0 {
+			// Past 2^53 the int64 is not the value, so the exact expansion does
+			// the base conversion instead - see rubyIntStr for the same reason.
+			if math.Abs(x) > 9007199254740992 && x == math.Trunc(x) {
+				bf, _ := big.NewFloat(x).Int(nil)
+				return bf.Text(int(rubyToF(args[0]))), true
+			}
 			return strconv.FormatInt(int64(x), int(rubyToF(args[0]))), true
 		}
 		return rt.rubyStr(t), true
 	case "to_i", "to_int", "truncate":
-		return math.Trunc(x), true
+		return rt.rubyIntFromF(math.Trunc(x)), true
 	case "to_f":
 		if f, ok := t.(jsFlo); ok {
 			return f, true
@@ -4145,18 +4464,18 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 		}
 		return math.Abs(x), true
 	case "floor":
-		return math.Floor(x), true
+		return rt.rubyIntFromF(math.Floor(x)), true
 	case "ceil":
-		return math.Ceil(x), true
+		return rt.rubyIntFromF(math.Ceil(x)), true
 	case "round":
 		if len(args) > 0 {
 			p := math.Pow(10, rubyToF(args[0]))
 			return jsFlo{f: math.Floor(x*p+0.5) / p}, true
 		}
 		if x < 0 {
-			return -math.Floor(-x + 0.5), true
+			return rt.rubyIntFromF(-math.Floor(-x + 0.5)), true
 		}
-		return math.Floor(x + 0.5), true
+		return rt.rubyIntFromF(math.Floor(x + 0.5)), true
 	case "zero?":
 		return x == 0, true
 	case "positive?":
@@ -4168,9 +4487,9 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 	case "odd?":
 		return math.Mod(x, 2) != 0, true
 	case "succ", "next":
-		return x + 1, true
+		return rt.rubyNumBin("+", t, float64(1)), true
 	case "pred":
-		return x - 1, true
+		return rt.rubyNumBin("-", t, float64(1)), true
 	case "chr":
 		return string(rune(int32(x))), true
 	case "integer?":
@@ -4237,6 +4556,50 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 	return nil, false
 }
 
+// rubyBigMethod is the Integer method set for a value past 2^53, and the twin of
+// bigMethod in ruby-interpreter.abnf and rbABigMethod in ruby-rt.metajs. Every
+// step is routed through the exact arithmetic instead of the double -
+// `(2**64).abs` answered 1.8446744073709552e+19 through rubyToF. ok=false hands
+// the name back to rubyNumMethod's own list, which answers it in double
+// precision (times / upto / to_r and the rest) or reports it unknown.
+func (rt *jsrt) rubyBigMethod(t *jsBigInt, name string, args []interface{}) (interface{}, bool) {
+	switch name {
+	case "to_s", "inspect":
+		if len(args) > 0 {
+			return t.v.Text(int(rubyToF(args[0]))), true
+		}
+		return t.v.String(), true
+	// An Integer is already floored, ceilinged, truncated and rounded, at any
+	// digit argument a Ruby program can write here.
+	case "to_i", "to_int", "truncate", "floor", "ceil", "round":
+		return t, true
+	case "abs", "magnitude":
+		return rt.rubyBigNarrow(new(big.Int).Abs(t.v)), true
+	case "zero?":
+		return t.v.Sign() == 0, true
+	case "positive?":
+		return t.v.Sign() > 0, true
+	case "negative?":
+		return t.v.Sign() < 0, true
+	case "even?":
+		return t.v.Bit(0) == 0, true
+	case "odd?":
+		return t.v.Bit(0) == 1, true
+	case "succ", "next":
+		return rt.rubyBigNarrow(new(big.Int).Add(t.v, big.NewInt(1))), true
+	case "pred":
+		return rt.rubyBigNarrow(new(big.Int).Sub(t.v, big.NewInt(1))), true
+	case "integer?":
+		return true, true
+	case "divmod":
+		if q, ok := rt.rubyBigArith("/", t, argAt(args, 0)); ok {
+			m, _ := rt.rubyBigArith("%", t, argAt(args, 0))
+			return &jsArray{elems: []interface{}{q, m}}, true
+		}
+	}
+	return nil, false
+}
+
 // rubyClassName is Ruby's #class for the values that are not user instances: the
 // name of the builtin class a runtime value belongs to ("" when there is none).
 func rubyClassName(v interface{}) string {
@@ -4248,6 +4611,8 @@ func rubyClassName(v interface{}) string {
 	}
 	switch t := v.(type) {
 	case float64:
+		return "Integer"
+	case *jsBigInt:
 		return "Integer"
 	case jsFlo:
 		return "Float"
@@ -4590,6 +4955,8 @@ func (rt *jsrt) rubyNeg(v interface{}) interface{} {
 		return jsRat{n: -t.n, d: t.d}
 	case jsCpx:
 		return jsCpx{re: -t.re, im: -t.im}
+	case *jsBigInt:
+		return rt.rubyBigNarrow(new(big.Int).Neg(t.v))
 	}
 	if rubyUserObj(v) {
 		return rt.rubyMethod(v, "-@", nil)
@@ -4618,6 +4985,10 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 	switch t := v.(type) {
 	case jsNullT, jsUndefT:
 		return ""
+	case float64:
+		return rubyIntStr(t)
+	case *jsBigInt:
+		return t.v.String()
 	case jsFlo:
 		return rubyFloStr(t.f)
 	case jsRat:
@@ -4690,6 +5061,9 @@ func (rt *jsrt) rubyEq(l, r interface{}) bool {
 		if _, rc := r.(jsCpx); rc {
 			return rubyReOf(l) == rubyReOf(r) && rubyImOf(l) == rubyImOf(r)
 		}
+		if c, ok := rubyBigCmp(l, r); ok {
+			return c == 0
+		}
 		return rubyToF(l) == rubyToF(r)
 	}
 	if rubyUserObj(l) {
@@ -4719,6 +5093,9 @@ func (rt *jsrt) rubySpaceship(l, r interface{}) (int, bool) {
 		return 0, false
 	}
 	if rubyIsNum(l) && rubyIsNum(r) {
+		if c, ok := rubyBigCmp(l, r); ok {
+			return c, true
+		}
 		x, y := rubyToF(l), rubyToF(r)
 		switch {
 		case x < y:
@@ -4820,8 +5197,8 @@ func rubyGenAlt(v float64, prec int) string {
 // Octal is a different rule again and is answered by rubyIntBody: "#" on %o means
 // "make sure a leading zero is there", so "%#.5o" % 255 is "00377" and not
 // "000377", and MRI omits it entirely from the ".." two's-complement form.
-func rubyBasePrefix(conv byte, v float64) string {
-	if v == 0 {
+func rubyBasePrefix(conv byte, v *big.Int) string {
+	if v.Sign() == 0 {
 		return ""
 	}
 	switch conv {
@@ -4861,10 +5238,9 @@ func rubyDigitVal(c byte) int {
 	return 0
 }
 
-// The exact base-`base` digits of a non-negative INTEGRAL double.
-func rubyMagDigits(mag float64, base int) string {
-	n, _ := new(big.Float).SetFloat64(mag).Int(nil)
-	return n.Text(base)
+// The exact base-`base` digits of a non-negative magnitude.
+func rubyMagDigits(mag *big.Int, base int) string {
+	return mag.Text(base)
 }
 
 // `s` minus one, in base `base`. The operand is a magnitude of at least 1, so the
@@ -4892,7 +5268,7 @@ func rubyDecOne(s string, base int) string {
 // the digit string and needs no bignum subtract; the leading digit of the
 // infinite run of (base-1)s is then written once. MRI collapses that run to
 // exactly ONE digit, so -1 is "..f" and not "..ff".
-func rubyTwosDigits(mag float64, base int) string {
+func rubyTwosDigits(mag *big.Int, base int) string {
 	src := rubyDecOne(rubyMagDigits(mag, base), base)
 	b := make([]byte, len(src))
 	for i := 0; i < len(src); i++ {
@@ -4913,12 +5289,9 @@ func rubyTwosDigits(mag float64, base int) string {
 //
 // `sign` is the + or SPACE flag, which switches MRI back to sign-and-magnitude:
 // "%+x" % -5 is "-5", not "..fb".
-func rubyIntBody(f float64, base int, upper, alt, sign bool, prec int) (body, prefix string, fill byte, keep int) {
-	neg := f < 0
-	mag := f
-	if neg {
-		mag = -f
-	}
+func rubyIntBody(f *big.Int, base int, upper, alt, sign bool, prec int) (body, prefix string, fill byte, keep int) {
+	neg := f.Sign() < 0
+	mag := new(big.Int).Abs(f)
 	fill, keep = '0', 0
 	twos := false
 	var digits string
@@ -5067,8 +5440,19 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 			case 'b':
 				base = 2
 			}
-			f := math.Trunc(rubyToF(next()))
-			if math.IsNaN(f) || math.IsInf(f, 0) {
+			// The argument's EXACT integer value: an Integer past 2^53 is a big
+			// and carries all of it, and a Float is truncated toward zero (MRI's
+			// %d converts with to_i) and then expanded exactly.
+			av := next()
+			var iv *big.Int
+			if bi, isBig := av.(*jsBigInt); isBig {
+				iv = bi.v
+			}
+			f := math.Trunc(rubyToF(av))
+			if iv == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
+				iv, _ = new(big.Float).SetFloat64(f).Int(nil)
+			}
+			if iv == nil {
 				// Unreachable from real Ruby - Float::INFINITY.to_i raises
 				// FloatDomainError - and left exactly as it was rather than
 				// invented: jsNumString's word, or int64's arm64 saturation.
@@ -5082,7 +5466,7 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 				}
 				break
 			}
-			body, prefix, fill, keep = rubyIntBody(f, base, spec[i] == 'X', alt, plus || space, prec)
+			body, prefix, fill, keep = rubyIntBody(iv, base, spec[i] == 'X', alt, plus || space, prec)
 			// A precision turns the 0 flag OFF for an integer directive, as it does
 			// in C: "%08.3x" % 1 is "     001".
 			intPrec = prec >= 0
@@ -6865,7 +7249,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_rshl":  func(a []uint64) uint64 { return w(rt.rubyBin("<<", u(a[0]), u(a[1]))) },
 		"js_rshr":  func(a []uint64) uint64 { return w(rt.rubyBin(">>", u(a[0]), u(a[1]))) },
 		"js_rneg":  func(a []uint64) uint64 { return w(rt.rubyNeg(u(a[0]))) },
-		"js_rbnot": func(a []uint64) uint64 { return w(-rubyToF(u(a[0])) - 1) },
+		// ~x is -(x+1) at any size, which math/big's Not is exactly.
+		"js_rbnot": func(a []uint64) uint64 {
+			// Past 2^53 the double cannot hold the +1, so ~9007199254740992 came
+			// back as -9007199254740992 instead of ...993.
+			if b, ok := rubyBigOf(u(a[0])); ok && b.CmpAbs(rubyBigMax) >= 0 {
+				return w(rt.rubyBigNarrow(new(big.Int).Not(b)))
+			}
+			return w(-rubyToF(u(a[0])) - 1)
+		},
 		"js_req":   func(a []uint64) uint64 { return boolH(rt.rubyEq(u(a[0]), u(a[1]))) },
 		"js_rne":   func(a []uint64) uint64 { return boolH(!rt.rubyEq(u(a[0]), u(a[1]))) },
 		"js_rlt":   func(a []uint64) uint64 { return boolH(rt.rubyCmp(u(a[0]), u(a[1])) < 0) },

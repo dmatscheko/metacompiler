@@ -993,6 +993,91 @@ def s32
   check("n17", true.to_s == "true")
   check("n18", :sym.to_s == "sym")
 end
+
+# ===== SECTION 33: Integer at arbitrary precision =====
+# Ruby's Integer has no width. Every value here is outside what a double counts
+# exactly (2^53 == 9007199254740992), which is the ONLY width at which these
+# rules can bite: written one bit lower, every assertion below passes against a
+# plain double too. The oracle is /usr/bin/ruby 2.6.10 - Integer values and
+# Integer formatting are unchanged in 3.x - and all four engines are diffed
+# against it by tests/probe.sh.
+def s33
+  # The literal, in all four radices plus the bare-zero octal and '_'.
+  check("b01", 9007199254740993.to_s == "9007199254740993")
+  check("b02", 0x20000000000001.to_s == "9007199254740993")
+  check("b03", 0xffffffffffffffff.to_s == "18446744073709551615")
+  check("b04", 12345678901234567890.to_s == "12345678901234567890")
+  check("b05", 0b1000000000000000000000000000000000000000000000000000001.to_s == "18014398509481985")
+  check("b06", 0o1000000000000000000000.to_s == "9223372036854775808")
+  check("b07", 1_2345_6789_0123_4567_890.to_s == "12345678901234567890")
+  check("b08", (-9007199254740993).to_s == "-9007199254740993")
+  # 2^53 itself is exact and must NOT change shape, and neither must anything
+  # below it - this is the guard on the promotion trigger.
+  check("b09", 9007199254740992.to_s == "9007199254740992")
+  check("b10", 9007199254740994.to_s == "9007199254740994")
+  check("b11", 0xff == 255 && 017 == 15 && 0b1011 == 11 && 1_000_000 == 1000000)
+  # Arithmetic. Every operand comes out of an array, so a constant folder cannot
+  # answer any of these at compile time.
+  v = [9007199254740992, 12345678901234567890, 1000, 97, 2, 70, -7]
+  check("b12", (v[0] + 1).to_s == "9007199254740993")
+  check("b13", (v[0] * v[0]).to_s == "81129638414606681695789005144064")
+  check("b14", (v[1] - 1).to_s == "12345678901234567889")
+  check("b15", (v[1] / v[2]).to_s == "12345678901234567")
+  check("b16", (v[1] % v[3]).to_s == "3")
+  # Integer / and % FLOOR at every width, as they do for a small Integer.
+  check("b17", ((-v[1]) / v[2]).to_s == "-12345678901234568")
+  check("b18", ((-v[1]) % v[3]).to_s == "94")
+  check("b19", (v[4] ** v[5]).to_s == "1180591620717411303424")
+  check("b20", v[1].divmod(v[6]) == [-1763668414462081128, -6])
+  # Comparison has to be EXACT: through a double both sides of b21 round to 2^53.
+  check("b21", 9007199254740993 != 9007199254740992)
+  check("b22", (v[1] <=> v[1] + 1) == -1 && ((v[1] + 1) <=> v[1]) == 1)
+  check("b23", v[1] > 9007199254740992 && v[1] >= v[1] && !(v[1] < v[1]))
+  # ... including against a Float, which no rounding of the Integer can settle.
+  check("b24", 9007199254740993 != 9007199254740993.0)
+  check("b25", 18446744073709551616 == 18446744073709551616.0)
+  # Rendering: an Integer is NEVER written in exponent form, at any magnitude.
+  check("b26", (2 ** 100).to_s == "1267650600228229401496703205376")
+  check("b27", "#{v[1] * v[1]}" == "152415787532388367501905199875019052100")
+  check("b28", [v[1]].to_s == "[12345678901234567890]")
+  check("b29", (1.0e21).to_i.to_s == "1000000000000000000000")
+  check("b30", (2.0 ** 70).to_i.to_s == "1180591620717411303424")
+  # to_s(base) and the integer format directives, all past 2^53.
+  check("b31", 18446744073709551615.to_s(16) == "ffffffffffffffff")
+  check("b32", 12345678901234567890.to_s(36) == "2lsohxawjui8i")
+  check("b33", (2 ** 70).to_s(2).length == 71)
+  check("b34", ("%d|%x|%o" % [v[1], v[1], v[1]]) == "12345678901234567890|ab54a98ceb1f0ad2|1255245230635307605322")
+  check("b35", ("%030d" % v[1]) == "000000000012345678901234567890")
+  check("b36", ("%x" % (-v[1])) == "..f54ab567314e0f52e")
+  # The bit operators are INFINITE two's complement at arbitrary precision.
+  check("b37", (1 << 100).to_s == "1267650600228229401496703205376")
+  check("b38", ((1 << 100) >> 90).to_s == "1024")
+  check("b39", (~18446744073709551615).to_s == "-18446744073709551616")
+  check("b40", (~9007199254740992).to_s == "-9007199254740993")
+  check("b41", (1 | 9007199254740992).to_s == "9007199254740993")
+  check("b42", (-1 & 0xffffffffffffffff).to_s == "18446744073709551615")
+  check("b43", (18446744073709551615 ^ 18446744073709551615) == 0)
+  # succ and pred cross the boundary the double cannot.
+  check("b44", 9007199254740992.succ.to_s == "9007199254740993")
+  check("b45", 9007199254740993.pred.to_s == "9007199254740992")
+  # The predicates and conversions, exact rather than through the double.
+  check("b46", (-12345678901234567890).abs.to_s == "12345678901234567890")
+  check("b47", 18446744073709551615.odd? && 18446744073709551616.even?)
+  check("b48", 12345678901234567890.class.to_s == "Integer")
+  check("b49", 12345678901234567890.is_a?(Integer) && 12345678901234567890.is_a?(Numeric))
+  check("b50", (-12345678901234567890).negative? && 12345678901234567890.positive?)
+  # A big narrows back to a plain Integer the moment it fits again, so the two
+  # shapes are one value: ==, <=> and Hash keying all have to agree.
+  check("b51", (12345678901234567890 - 12345678901234567889) == 1)
+  check("b52", ((2 ** 70) / (2 ** 70)) == 1)
+  bh = {18446744073709551616 => "big", 1 => "one"}
+  check("b53", bh[18446744073709551616] == "big")
+  check("b54", bh[9223372036854775808 * 2] == "big")
+  check("b55", bh.size == 2)
+  # A big meeting a Float promotes to Float, which is the tower's own rule.
+  check("b56", (18446744073709551616 + 0.5).class.to_s == "Float")
+  check("b57", 18446744073709551616.to_f.class.to_s == "Float")
+end
 # ===== END SECTIONS =====
 s01() # SECTION-CALL 01
 s02() # SECTION-CALL 02
@@ -1026,5 +1111,6 @@ s29() # SECTION-CALL 29
 s30() # SECTION-CALL 30
 s31() # SECTION-CALL 31
 s32() # SECTION-CALL 32
+s33() # SECTION-CALL 33
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

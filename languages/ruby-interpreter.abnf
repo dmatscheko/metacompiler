@@ -773,7 +773,7 @@ Primary     = "(" Expression ")" | ParenBody | LambdaLit | SingletonDecl
             | ReturnExpr | BreakExpr | NextExpr | RedoExpr | RetryExpr | RaiseExpr | YieldExpr | SuperExpr
             | CmdLit | HeredocLit | HeredocRef
             | StrLit | CharLit | PercentLit | RegexLit
-            | NumHex | NumBin | NumOct | Oct0Lit | RatLit | ImagLit | FloatLit | NumInt
+            | RbHexLit | RbBinLit | RbOctLit | Oct0Lit | RatLit | ImagLit | FloatLit | RbIntLit
             | SymLit
             | ArrayLit | HashLit
             | True | False | Nil | Self | FileLit | LineLit | DirLit
@@ -859,7 +859,21 @@ YieldExpr   <~~ push(makeYield(takeAll(), up.pos)) ~~>
 // it stays distinguishable from an integer - Ruby needs 7 / 2 == 3 AND 7.0 / 2 ==
 // 3.5, which one JS number cannot express. 3r is a Rational, 2i an imaginary
 // Complex; both are boxes too. The prefixed / suffixed forms come first (PEG).
-Oct0Lit     <~~ push(makeConst(parseInt(up.in.split("_").join("").substring(1), 8))) ~~>
+// The Integer literals are ruby's OWN productions rather than lib/numbers.abnf's
+// NumHex / NumBin / NumOct / NumInt, because those build the value with parseInt
+// and parseInt ROUNDS past 2^53: 0x20000000000001 arrived as 9007199254740992 and
+// 12345678901234567890 as ...567000. The syntax is unchanged (the digit
+// productions are still the shared ones); only the value builder differs, and it
+// is intLitDec / intLitRadix, which box anything the double cannot count exactly.
+RbHexLit    <~~ push(makeConst(intLitRadix(up.in, 16, 2))) ~~>
+            = "0" ( "x" | "X" ) :whitespace() NumHexDig { NumHexDig | "_" } :whitespace(Whitespace) ;
+RbBinLit    <~~ push(makeConst(intLitRadix(up.in, 2, 2))) ~~>
+            = "0" ( "b" | "B" ) :whitespace() NumBinDig { NumBinDig | "_" } :whitespace(Whitespace) ;
+RbOctLit    <~~ push(makeConst(intLitRadix(up.in, 8, 2))) ~~>
+            = "0" ( "o" | "O" ) :whitespace() "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
+RbIntLit    <~~ push(makeConst(intLitDec(up.in))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } :whitespace(Whitespace) ;
+Oct0Lit     <~~ push(makeConst(intLitRadix(up.in, 8, 1))) ~~>
             = "0" :whitespace() "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
 RatLit      <~~ push(makeConst(mkRat(parseInt(up.in.split("_").join("")), 1))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } "r" :whitespace(Whitespace) ;
@@ -2348,6 +2362,542 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function isSym(v) { return v !== null && v !== undefined && typeof v == "object" && v.__sym === true }
 
+    // ----- Integer at ARBITRARY PRECISION -----
+    //
+    // Ruby's Integer has no width at all: 2**100 is an exact 31-digit value and
+    // 0xffffffffffffffff is 18446744073709551615, not the double next to it. An
+    // Integer here is still a plain JS number while it fits one exactly, and
+    // becomes the BOX below the moment it cannot - so nothing under 2^53 changes
+    // shape, the fast path pays two comparisons (over53), and only the values that
+    // genuinely need arbitrary precision carry the object.
+    //
+    // Sign and magnitude, the magnitude a little endian array of base 1e7 DECIMAL
+    // limbs: a limb product stays below 1e14, well inside the exact range of a
+    // double, and printing is a plain zero padded join. 9007199254740992 is 2^53,
+    // the largest integer a double still counts exactly. This is the same shape
+    // python-interpreter.abnf uses, and deliberately so: the three other Ruby
+    // engines (abnf/jsrt.go's *jsBigInt, ruby-to-llvm-ir.abnf's js_bigint literal
+    // and languages/lib/ruby-rt.metajs's rbABig* family) must agree with it
+    // digit for digit, and ./test.sh --cross diffs two of them every run.
+    var bigBase = 10000000
+    var bigMaxNum = 9007199254740992
+    function isBig(v) { return v !== null && v !== undefined && typeof v == "object" && v.__bint === true }
+    // magTrim drops the leading zero limbs into a FRESH array (frozen MetaJS has no
+    // splice and no assignable .length).
+    function magTrim(a) {
+        var n = a.length
+        while (n > 0 && a[n - 1] === 0) { n = n - 1 }
+        var out = []
+        for (var i = 0; i < n; i++) { out.push(a[i]) }
+        return out
+    }
+    function bigOb(sign, limbs) {
+        var t = magTrim(limbs)
+        return {__bint: true, sign: (t.length == 0) ? 1 : sign, limbs: t}
+    }
+    function bigIsZero(a) { return a.limbs.length == 0 }
+    // The only exit: a value small enough for a double leaves the boxed world.
+    // The reconstruction can ROUND (2^53+1 accumulates to 2^53), so the candidate
+    // is checked by rebuilding the limbs from it - bigFromNum is exact, so a
+    // mismatch means the double is not the value.
+    function bigOut(a) {
+        var n = a.limbs.length
+        if (n == 0) { return 0 }
+        if (n <= 3) {
+            var v = 0
+            for (var i = n - 1; i >= 0; i = i - 1) { v = v * bigBase + a.limbs[i] }
+            if (v <= bigMaxNum && magCmp(bigFromNum(v).limbs, a.limbs) == 0) { return (a.sign < 0) ? (v / (0 - 1)) : v }
+        }
+        return a
+    }
+    function bigFromNum(x) {
+        var s = 1
+        var v = x
+        if (v < 0) { s = -1 ; v = 0 - v }
+        var ls = []
+        while (v > 0) { ls.push(v % bigBase) ; v = Math.floor(v / bigBase) }
+        return bigOb(s, ls)
+    }
+    // The literal path: a decimal digit string, already stripped of its separators.
+    function bigFromDec(txt) {
+        var s = txt
+        var sign = 1
+        if (s.charAt(0) == "-") { sign = -1 ; s = s.substring(1) }
+        var ls = []
+        var end = s.length
+        while (end > 0) {
+            var st = end - 7
+            if (st < 0) { st = 0 }
+            ls.push(parseInt(s.substring(st, end), 10))
+            end = st
+        }
+        return bigOb(sign, ls)
+    }
+    function bigStr(a) {
+        if (a.limbs.length == 0) { return "0" }
+        var out = ""
+        for (var i = a.limbs.length - 1; i >= 0; i = i - 1) {
+            var p = "" + a.limbs[i]
+            if (i < a.limbs.length - 1) { while (p.length < 7) { p = "0" + p } }
+            out += p
+        }
+        return (a.sign < 0) ? ("-" + out) : out
+    }
+    function bigToNum(v) { return isBig(v) ? parseFloat(bigStr(v)) : v }
+    // bigOf lifts an INTEGER operand into the boxed world, or answers null when it
+    // cannot (a Float box, a Rational, a String) - the caller then falls back to
+    // the tower.
+    //
+    // A plain double past 2^53 lifts EXACTLY, which is where this differs from
+    // python's bigOf. Python refuses it, because a Python int past 2^53 is
+    // already boxed and a bare double that large is a FLOAT. In Ruby a plain
+    // number is always an Integer and a large one can only have come from
+    // Float#to_i or from float arithmetic - and MRI's answer there is the exact
+    // integer value OF THAT DOUBLE, all of whose digits bigFromDouble recovers.
+    // So `(1e30).to_i + 1` is 1000000000000000019884624838657, as in MRI, and not
+    // the double back again. The finiteness test is not optional: bigFromDouble
+    // halves until it reaches the mantissa and an infinity never gets there.
+    function bigOf(v) {
+        if (isBig(v)) { return v }
+        if (typeof v == "number" && Math.floor(v) == v && v - v == 0) {
+            if (v <= bigMaxNum && v >= 0 - bigMaxNum) { return bigFromNum(v) }
+            return bigFromDouble(v)
+        }
+        if (v === true) { return bigFromNum(1) }
+        if (v === false) { return bigFromNum(0) }
+        return null
+    }
+    // bigCmpOf is bigOf for a COMPARISON, which may also take a Float: `2**64 ==
+    // 1.8446744073709552e19` is true in MRI and `(2**53+1) == (2**53+1).to_f` is
+    // false, and neither can be settled by rounding the Integer to a double. An
+    // arithmetic operator must NOT use this - there the Float wins the rank and
+    // the Integer converts, which is the tower's rule.
+    function bigCmpOf(v) {
+        if (isFlo(v)) {
+            var f = v.f
+            if (f - f != 0 || Math.floor(f) != f) { return null }
+            return bigOf(f)
+        }
+        return bigOf(v)
+    }
+    // An Integer built from a double: exact past 2^53, so that the ONE shape
+    // invariant holds - an Integer of magnitude above 2^53 is always a box, never
+    // a plain double. Float#to_i and the rest of the truncating family go through
+    // this, which is also what keeps a big and a plain number from ever being two
+    // spellings of one Hash key.
+    function intFromF(x) {
+        if (x - x != 0) { return x }
+        if (x <= bigMaxNum && x >= 0 - bigMaxNum) { return x }
+        return bigOut(bigFromDouble(x))
+    }
+    function magCmp(a, b) {
+        if (a.length != b.length) { return (a.length > b.length) ? 1 : -1 }
+        for (var i = a.length - 1; i >= 0; i = i - 1) {
+            if (a[i] != b[i]) { return (a[i] > b[i]) ? 1 : -1 }
+        }
+        return 0
+    }
+    function magAdd(a, b) {
+        var out = []
+        var carry = 0
+        var n = (a.length > b.length) ? a.length : b.length
+        for (var i = 0; i < n; i++) {
+            var s = carry + ((i < a.length) ? a[i] : 0) + ((i < b.length) ? b[i] : 0)
+            if (s >= bigBase) { s = s - bigBase ; carry = 1 } else { carry = 0 }
+            out.push(s)
+        }
+        if (carry > 0) { out.push(carry) }
+        return out
+    }
+    // magSub expects a >= b.
+    function magSub(a, b) {
+        var out = []
+        var borrow = 0
+        for (var i = 0; i < a.length; i++) {
+            var s = a[i] - borrow - ((i < b.length) ? b[i] : 0)
+            if (s < 0) { s = s + bigBase ; borrow = 1 } else { borrow = 0 }
+            out.push(s)
+        }
+        return out
+    }
+    function magMul(a, b) {
+        var out = []
+        var i
+        for (i = 0; i < a.length + b.length; i++) { out.push(0) }
+        for (i = 0; i < a.length; i++) {
+            var carry = 0
+            for (var j = 0; j < b.length; j++) {
+                var cur = out[i + j] + a[i] * b[j] + carry
+                out[i + j] = cur % bigBase
+                carry = Math.floor(cur / bigBase)
+            }
+            var k = i + b.length
+            while (carry > 0) {
+                var c2 = out[k] + carry
+                out[k] = c2 % bigBase
+                carry = Math.floor(c2 / bigBase)
+                k = k + 1
+            }
+        }
+        return magTrim(out)
+    }
+    function magMulSmall(a, m) {
+        var out = []
+        var carry = 0
+        for (var i = 0; i < a.length; i++) {
+            var cur = a[i] * m + carry
+            out.push(cur % bigBase)
+            carry = Math.floor(cur / bigBase)
+        }
+        while (carry > 0) { out.push(carry % bigBase) ; carry = Math.floor(carry / bigBase) }
+        return magTrim(out)
+    }
+    // Schoolbook long division, one quotient limb at a time; the limb itself is found
+    // by binary search over 0..base-1, which needs only magMulSmall and magCmp.
+    function magDivMod(a, b) {
+        var q = []
+        var i
+        for (i = 0; i < a.length; i++) { q.push(0) }
+        var rem = []
+        for (i = a.length - 1; i >= 0; i = i - 1) {
+            var nr = [a[i]]
+            for (var t = 0; t < rem.length; t++) { nr.push(rem[t]) }
+            rem = magTrim(nr)
+            var lo = 0
+            var hi = bigBase - 1
+            while (lo < hi) {
+                var mid = Math.floor((lo + hi + 1) / 2)
+                if (magCmp(magMulSmall(b, mid), rem) <= 0) { lo = mid } else { hi = mid - 1 }
+            }
+            q[i] = lo
+            if (lo > 0) { rem = magTrim(magSub(rem, magMulSmall(b, lo))) }
+        }
+        return {q: magTrim(q), r: rem}
+    }
+    function bigAdd(a, b) {
+        if (a.sign == b.sign) { return bigOb(a.sign, magAdd(a.limbs, b.limbs)) }
+        var c = magCmp(a.limbs, b.limbs)
+        if (c == 0) { return bigOb(1, []) }
+        if (c > 0) { return bigOb(a.sign, magSub(a.limbs, b.limbs)) }
+        return bigOb(b.sign, magSub(b.limbs, a.limbs))
+    }
+    function bigNeg(a) { return bigOb(0 - a.sign, a.limbs) }
+    function bigAbs(a) { return bigOb(1, a.limbs) }
+    function bigCmp(a, b) {
+        if (bigIsZero(a) && bigIsZero(b)) { return 0 }
+        if (a.sign != b.sign) { return (a.sign > b.sign) ? 1 : -1 }
+        var c = magCmp(a.limbs, b.limbs)
+        return (a.sign < 0) ? (0 - c) : c
+    }
+    // Ruby FLOORS: `-7 / 2` is -4 and `-7 % 3` is 2, so the truncating pair the
+    // magnitudes give is corrected by one whenever the remainder is non-zero and
+    // does not already carry the DIVISOR's sign. Same body as idiv/imod, exactly.
+    function bigDivMod(a, b) {
+        if (bigIsZero(b)) { fail("divided by 0") }
+        var dm = magDivMod(a.limbs, b.limbs)
+        var qs = (a.sign == b.sign) ? 1 : -1
+        var q = bigOb(qs, dm.q)
+        var r = bigOb(a.sign, dm.r)
+        if (!bigIsZero(r) && r.sign != b.sign) {
+            q = bigAdd(q, bigOb(-1, [1]))
+            r = bigAdd(r, b)
+        }
+        return {q: q, r: r}
+    }
+    function bigPow(a, n) {
+        var acc = bigOb(1, [1])
+        for (var i = 0; i < n; i++) { acc = bigOb(acc.sign * a.sign, magMul(acc.limbs, a.limbs)) }
+        return acc
+    }
+    // ----- the BITWISE operators, at arbitrary precision --------------------
+    //
+    // Ruby's |, &, ^, ~, << and >> are INFINITE TWO'S COMPLEMENT over an Integer
+    // of any size: `1 << 100` is a 31-digit value and `-1 & 0xffffffffffffffff`
+    // is 18446744073709551615. The int64 path below (bits64) stays for the range
+    // where it IS the answer and a loop can afford it; past that the operands go
+    // through the same magnitude identities python uses, a negative operand being
+    // ~(|x| - 1):
+    //
+    //   -a & b  == b &~ (a-1)             -a | b  == -(((a-1) &~ b) + 1)
+    //   -a & -b == -(((a-1) | (b-1)) + 1) -a | -b == -(((a-1) & (b-1)) + 1)
+    //   -a ^ b  == -(((a-1) ^ b) + 1)     -a ^ -b == (a-1) ^ (b-1)
+    var bitShiftMax = 1048576
+    // The magnitude as little-endian BITS, by repeated halving of a copy.
+    function bitsOfMag(limbs) {
+        var ls = []
+        for (var i = 0; i < limbs.length; i++) { ls.push(limbs[i]) }
+        var bits = []
+        while (ls.length > 0) {
+            var rem = 0
+            for (var j = ls.length - 1; j >= 0; j = j - 1) {
+                var cur = rem * bigBase + ls[j]
+                var q = Math.floor(cur / 2)
+                ls[j] = q
+                rem = cur - q * 2
+            }
+            ls = magTrim(ls)
+            bits.push(rem)
+        }
+        return bitsTrim(bits)
+    }
+    function bitsTrim(bits) {
+        var n = bits.length
+        while (n > 0 && bits[n - 1] === 0) { n = n - 1 }
+        var out = []
+        for (var i = 0; i < n; i++) { out.push(bits[i]) }
+        return out
+    }
+    // bits - 1; the caller only hands this a magnitude of at least 1.
+    function bitsDec(bits) {
+        var out = []
+        for (var i = 0; i < bits.length; i++) { out.push(bits[i]) }
+        var k = 0
+        while (k < out.length && out[k] == 0) { out[k] = 1 ; k = k + 1 }
+        if (k < out.length) { out[k] = 0 }
+        return bitsTrim(out)
+    }
+    function bitsInc(bits) {
+        var out = []
+        for (var i = 0; i < bits.length; i++) { out.push(bits[i]) }
+        var k = 0
+        while (k < out.length && out[k] == 1) { out[k] = 0 ; k = k + 1 }
+        if (k == out.length) { out.push(1) } else { out[k] = 1 }
+        return out
+    }
+    // kind: 0 AND, 1 OR, 2 XOR, 3 ANDNOT.
+    function bitsOp(kind, a, b) {
+        var n = a.length > b.length ? a.length : b.length
+        var out = []
+        for (var i = 0; i < n; i++) {
+            var x = i < a.length ? a[i] : 0
+            var y = i < b.length ? b[i] : 0
+            var r = 0
+            if (kind == 0) { if (x == 1 && y == 1) { r = 1 } }
+            else if (kind == 1) { if (x == 1 || y == 1) { r = 1 } }
+            else if (kind == 2) { if (x != y) { r = 1 } }
+            else { if (x == 1 && y == 0) { r = 1 } }
+            out.push(r)
+        }
+        return bitsTrim(out)
+    }
+    function bitsShl(bits, k) {
+        if (bits.length == 0) { return [] }
+        var out = []
+        for (var i = 0; i < k; i++) { out.push(0) }
+        for (var j = 0; j < bits.length; j++) { out.push(bits[j]) }
+        return out
+    }
+    function bitsShr(bits, k) {
+        var out = []
+        for (var i = k; i < bits.length; i++) { out.push(bits[i]) }
+        return bitsTrim(out)
+    }
+    // A bit array back to a big, by the schoolbook doubling magMulSmall already is.
+    function bigFromBits(sign, bits) {
+        var limbs = []
+        for (var j = bits.length - 1; j >= 0; j = j - 1) {
+            limbs = magMulSmall(limbs, 2)
+            if (bits[j] == 1) { limbs = magAdd(limbs, [1]) }
+        }
+        return bigOb(sign, limbs)
+    }
+    // A shift count as a plain number; anything absurd answers past the cap.
+    function bitsToNum(bits) {
+        if (bits.length > 40) { return bitShiftMax + 1 }
+        var acc = 0
+        var p = 1
+        for (var i = 0; i < bits.length; i++) {
+            if (bits[i] == 1) { acc = acc + p }
+            p = p * 2
+        }
+        return acc
+    }
+    // Ruby's |, &, ^, << and >> over two boxed Integers. A NEGATIVE shift count is
+    // the opposite shift in Ruby (`1 << -2` is 0, `4 >> -2` is 16), which is not
+    // Python's ValueError - hence the swap rather than a null.
+    function bigBitBin(op, x, y) {
+        var an = x.sign < 0 && !bigIsZero(x)
+        var bn = y.sign < 0 && !bigIsZero(y)
+        var a = bitsOfMag(x.limbs)
+        var b = bitsOfMag(y.limbs)
+        if (op == "<<" || op == ">>") {
+            var dir = op
+            if (bn) { dir = (op == "<<") ? ">>" : "<<" }
+            var k = bitsToNum(b)
+            if (k > bitShiftMax) { return null }
+            if (dir == "<<") { return bigFromBits(an ? -1 : 1, bitsShl(a, k)) }
+            if (!an) { return bigFromBits(1, bitsShr(a, k)) }
+            // floor(-a / 2^k) is -(((a-1) >> k) + 1): -5 >> 1 is -3.
+            return bigFromBits(-1, bitsInc(bitsShr(bitsDec(a), k)))
+        }
+        if (op == "&") {
+            if (!an && !bn) { return bigFromBits(1, bitsOp(0, a, b)) }
+            if (an && !bn) { return bigFromBits(1, bitsOp(3, b, bitsDec(a))) }
+            if (!an && bn) { return bigFromBits(1, bitsOp(3, a, bitsDec(b))) }
+            return bigFromBits(-1, bitsInc(bitsOp(1, bitsDec(a), bitsDec(b))))
+        }
+        if (op == "|") {
+            if (!an && !bn) { return bigFromBits(1, bitsOp(1, a, b)) }
+            if (an && !bn) { return bigFromBits(-1, bitsInc(bitsOp(3, bitsDec(a), b))) }
+            if (!an && bn) { return bigFromBits(-1, bitsInc(bitsOp(3, bitsDec(b), a))) }
+            return bigFromBits(-1, bitsInc(bitsOp(0, bitsDec(a), bitsDec(b))))
+        }
+        if (op == "^") {
+            if (!an && !bn) { return bigFromBits(1, bitsOp(2, a, b)) }
+            if (an && bn) { return bigFromBits(1, bitsOp(2, bitsDec(a), bitsDec(b))) }
+            if (an) { return bigFromBits(-1, bitsInc(bitsOp(2, bitsDec(a), b))) }
+            return bigFromBits(-1, bitsInc(bitsOp(2, a, bitsDec(b))))
+        }
+        return null
+    }
+    // The PROMOTION TRIGGER, and it is sound BOTH WAYS. Every plain Integer
+    // operand is exact and of magnitude <= 2^53 (anything larger is already
+    // boxed and was taken by the boxed gate before this), so if the TRUE result
+    // is >= 2^53 the rounded double is too - rounding to nearest of a value at
+    // or above 2^53 cannot land below it - and if the true result is < 2^53 the
+    // double is exact and the guard does not fire. Two comparisons on the fast
+    // path; the typeof (which keeps a numeric-looking STRING out of the box) is
+    // paid only when both pass.
+    function over53(v) {
+        if (v >= bigMaxNum || v <= 0 - bigMaxNum) { return typeof v == "number" }
+        return false
+    }
+    function bigExactInt(v) {
+        return typeof v == "number" && Math.floor(v) == v && v >= 0 - bigMaxNum && v <= bigMaxNum
+    }
+    // One arithmetic step with at least one operand past 2^53. It answers a
+    // WRAPPER so a caller can tell a real false apart from "not mine", and it
+    // never recurses: every fallback hands numBin plain doubles.
+    function bigOp(op, l, r) {
+        var a = bigOf(l)
+        var b = bigOf(r)
+        if (a == null || b == null) { return null }
+        if (op == "+") { return {v: bigOut(bigAdd(a, b))} }
+        if (op == "-") { return {v: bigOut(bigAdd(a, bigNeg(b)))} }
+        if (op == "*") { return {v: bigOut(bigOb(a.sign * b.sign, magMul(a.limbs, b.limbs)))} }
+        if (op == "/") { return {v: bigOut(bigDivMod(a, b).q)} }
+        if (op == "%") { return {v: bigOut(bigDivMod(a, b).r)} }
+        if (op == "**") {
+            if (b.sign < 0 && !bigIsZero(b)) { return {v: mkFlo(Math.pow(bigToNum(l), bigToNum(r)))} }
+            var e = bigToNum(r)
+            if (e > 4096) { return {v: Math.pow(bigToNum(l), e)} }
+            return {v: bigOut(bigPow(a, e))}
+        }
+        if (op == "|" || op == "&" || op == "^" || op == "<<" || op == ">>") {
+            var bb = bigBitBin(op, a, b)
+            if (bb === null) { return null }
+            return {v: bigOut(bb)}
+        }
+        var c = bigCmp(a, b)
+        if (op == "==") { return {v: c == 0} }
+        if (op == "!=") { return {v: c != 0} }
+        if (op == "<") { return {v: c < 0} }
+        if (op == ">") { return {v: c > 0} }
+        if (op == "<=") { return {v: c <= 0} }
+        if (op == ">=") { return {v: c >= 0} }
+        if (op == "<=>") { return {v: c} }
+        return null
+    }
+    // 0x / 0o / 0b digits (prefix already stripped) as the EXACT decimal text of
+    // the same value. parseInt rounds past 2^53 - 0x20000000000001 came back as
+    // 2^53 - and bigFromDec reads decimal only, so the conversion is a schoolbook
+    // multiply-add over a little-endian array of decimal digits: d = d * radix + v.
+    function radixToDec(digits, radix) {
+        var d = [0]
+        for (var i = 0; i < digits.length; i++) {
+            var ch = digits.charAt(i)
+            var dv = 0
+            if (ch >= "0" && ch <= "9") { dv = ch.charCodeAt(0) - 48 }
+            if (ch >= "a" && ch <= "f") { dv = ch.charCodeAt(0) - 87 }
+            if (ch >= "A" && ch <= "F") { dv = ch.charCodeAt(0) - 55 }
+            var carry = dv
+            for (var k = 0; k < d.length; k++) {
+                var t = d[k] * radix + carry
+                var lo = t % 10
+                d[k] = lo
+                carry = (t - lo) / 10
+            }
+            while (carry > 0) {
+                var c2 = carry % 10
+                d.push(c2)
+                carry = (carry - c2) / 10
+            }
+        }
+        var out = ""
+        for (var j = d.length - 1; j >= 0; j--) { out = out + String.fromCharCode(48 + d[j]) }
+        return out
+    }
+    // Is the decimal digit string txt worth MORE than 2^53? This has to be decided
+    // on the TEXT: parseFloat rounds 9007199254740993 down to exactly 2^53, so the
+    // very first value that needs the box would answer "not big". 2^53 itself is
+    // exact and is deliberately NOT boxed.
+    function decOver53(txt) {
+        var s = txt
+        var z = 0
+        while (z < s.length - 1 && s.charAt(z) == "0") { z = z + 1 }
+        if (z > 0) { s = s.substring(z) }
+        var lim = "9007199254740992"
+        if (s.length != lim.length) { return s.length > lim.length }
+        for (var k = 0; k < lim.length; k++) {
+            var a = s.charAt(k)
+            var b = lim.charAt(k)
+            if (a != b) { return a > b }
+        }
+        return false
+    }
+    // The EXACT value of an integral double as a big. Ruby never renders an
+    // Integer in exponent form, and `"" + x` does exactly that from 1e21 up, so
+    // `(2.0 ** 70).to_i` printed 1.1805916207174113e+21 where MRI prints all 22
+    // digits. x = m * 2^e with m < 2^53: halving a double is exact (it only
+    // decrements the exponent) and an integral x >= 2^53 stays integral all the
+    // way down to m, so the mantissa is recovered exactly and shifted back up.
+    function bigFromDouble(x) {
+        var neg = x < 0
+        var v = neg ? 0 - x : x
+        var e = 0
+        while (v > bigMaxNum) { v = v / 2 ; e = e + 1 }
+        var ls = bigFromNum(v).limbs
+        for (var i = 0; i < e; i++) { ls = magMulSmall(ls, 2) }
+        return bigOb(neg ? -1 : 1, ls)
+    }
+    // An Integer that is still a plain double, as text. Inside the exact range
+    // this is the tag engine's own rendering; past 1e21 that becomes exponent
+    // form, which is a Float's shape and never an Integer's.
+    function intStr(x) {
+        if (x >= 0 - bigMaxNum && x <= bigMaxNum) { return "" + x }
+        if (x - x != 0 || Math.floor(x) != x) { return "" + x }
+        return bigStr(bigFromDouble(x))
+    }
+    // The two literal builders the grammar's own Integer productions call. The
+    // matched text carries the '_' separators and whatever the production's
+    // trailing whitespace skip picked up, and neither bigFromDec nor radixToDec
+    // is as forgiving as parseInt - so the digits are cut out explicitly.
+    function litDigits(txt, radix, skip) {
+        var s = txt.split("_").join("").substring(skip)
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            var dv = -1
+            if (ch >= "0" && ch <= "9") { dv = ch.charCodeAt(0) - 48 }
+            if (ch >= "a" && ch <= "f") { dv = ch.charCodeAt(0) - 87 }
+            if (ch >= "A" && ch <= "F") { dv = ch.charCodeAt(0) - 55 }
+            if (dv < 0 || dv >= radix) { return out }
+            out += ch
+        }
+        return out
+    }
+    function intLitDec(txt) {
+        var s = litDigits(txt, 10, 0)
+        if (decOver53(s)) { return bigOut(bigFromDec(s)) }
+        return parseInt(s, 10)
+    }
+    function intLitRadix(txt, radix, skip) {
+        var digits = litDigits(txt, radix, skip)
+        var dec = radixToDec(digits, radix)
+        if (decOver53(dec)) { return bigOut(bigFromDec(dec)) }
+        return parseInt(digits, radix)
+    }
+
     // ----- The numeric tower -----
     // An Integer is a plain (exact, un-truncated) JS number; Float, Rational and
     // Complex are BOXES, because Ruby needs 7 / 2 == 3 and 7.0 / 2 == 3.5 at the same
@@ -2376,12 +2926,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (g > 1) { nn = nn / g; dd = dd / g }
         return {__rat: true, n: nn, d: dd}
     }
-    function isNumV(v) { return typeof v == "number" || isFlo(v) || isRat(v) || isCpx(v) }
+    function isNumV(v) { return typeof v == "number" || isBig(v) || isFlo(v) || isRat(v) || isCpx(v) }
+    // A big is rank 0: it IS an Integer, not a fourth kind of number. Meeting a
+    // Rational, a Float or a Complex it therefore promotes to that rank through
+    // toF, i.e. through the double it no longer fits - which is where this model
+    // stops being exact, and is stated at bigOp's site.
     function numRank(v) {
         if (typeof v == "number") { return 0 }
         if (isRat(v)) { return 1 }
         if (isFlo(v)) { return 2 }
         if (isCpx(v)) { return 3 }
+        if (isBig(v)) { return 0 }
         return -1
     }
     function toF(v) {
@@ -2389,6 +2944,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isFlo(v)) { return v.f }
         if (isRat(v)) { return v.n / v.d }
         if (isCpx(v)) { return v.re }
+        if (isBig(v)) { return bigToNum(v) }
         return 0
     }
     function asRat(v) { if (isRat(v)) { return v } return mkRat(toF(v), 1) }
@@ -2505,20 +3061,62 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (op == "**") { return mkFlo(Math.pow(x, y)) }
             fail("Float does not support '" + op + "'")
         }
-        if (op == "+") { return l + r }
-        if (op == "-") { return l - r }
-        if (op == "*") { return l * r }
+        // Two Integers. One of them past 2^53 goes straight to the exact path;
+        // otherwise the double answer is computed first and only PROMOTED when it
+        // leaves the exact range, so a loop of small arithmetic pays two
+        // comparisons and nothing else (see over53 for why that test is sound).
+        if (isBig(l) || isBig(r)) {
+            var bx = bigOp(op, l, r)
+            if (bx != null) { return bx.v }
+        }
+        if (op == "+") { var sa = l + r ; if (over53(sa)) { return bigOut(bigAdd(bigOf(l), bigOf(r))) } return sa }
+        if (op == "-") { var ss = l - r ; if (over53(ss)) { return bigOut(bigAdd(bigOf(l), bigNeg(bigOf(r)))) } return ss }
+        if (op == "*") {
+            var sm = l * r
+            if (over53(sm)) { var am = bigOf(l) ; var bm = bigOf(r) ; return bigOut(bigOb(am.sign * bm.sign, magMul(am.limbs, bm.limbs))) }
+            return sm
+        }
         if (op == "/") { return idiv(l, r) }
         if (op == "%") { return imod(l, r) }
-        if (op == "**") { if (r < 0) { return mkFlo(Math.pow(l, r)) } return Math.pow(l, r) }
-        if (op == "&") { return l & r }
-        if (op == "|") { return l | r }
-        if (op == "^") { return l ^ r }
-        if (op == "<<") { return l * Math.pow(2, r) }
-        if (op == ">>") { return Math.floor(l / Math.pow(2, r)) }
+        if (op == "**") {
+            if (r < 0) { return mkFlo(Math.pow(l, r)) }
+            var pw = Math.pow(l, r)
+            if (over53(pw) && r <= 4096) { return bigOut(bigPow(bigOf(l), r)) }
+            return pw
+        }
+        // & | ^ << >> are INFINITE two's complement at arbitrary precision. Inside
+        // int32 the tag engine's own operators ARE that answer (the sign bit stands
+        // for exactly the endless run of 1s above it), which is what a bit-twiddling
+        // loop pays; everything else goes through the magnitude identities.
+        if (op == "&" || op == "|" || op == "^") {
+            if ((l | 0) === l && (r | 0) === r) {
+                if (op == "&") { return l & r }
+                if (op == "|") { return l | r }
+                return l ^ r
+            }
+        }
+        if (op == "<<" || op == ">>") {
+            if (bigExactInt(l) && bigExactInt(r) && r >= 0 && r <= 53) {
+                var sh = Math.pow(2, r)
+                if (op == ">>") { return Math.floor(l / sh) }
+                var mg = l < 0 ? 0 - l : l
+                if (mg * sh <= bigMaxNum) { return l * sh }
+            }
+        }
+        if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") {
+            var bt = bigOp(op, l, r)
+            if (bt != null) { return bt.v }
+        }
         fail("Integer does not support '" + op + "'")
     }
     function numCmp(l, r) {
+        // A big on either side has to be compared EXACTLY: through toF both
+        // operands would round to the same double and answer 0.
+        if (isBig(l) || isBig(r)) {
+            var cl = bigCmpOf(l)
+            var cr = bigCmpOf(r)
+            if (cl != null && cr != null) { return bigCmp(cl, cr) }
+        }
         var a = toF(l)
         var b = toF(r)
         if (a < b) { return -1 }
@@ -2527,10 +3125,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function numEq(l, r) {
         if (isCpx(l) || isCpx(r)) { return reOf(l) == reOf(r) && imOf(l) == imOf(r) }
+        if (isBig(l) || isBig(r)) {
+            var el = bigCmpOf(l)
+            var er = bigCmpOf(r)
+            if (el != null && er != null) { return bigCmp(el, er) == 0 }
+        }
         return toF(l) == toF(r)
     }
     function rneg(v) {
         if (typeof v == "number") { return 0 - v }
+        if (isBig(v)) { return bigOut(bigNeg(v)) }
         // `x * (0 - 1)` and NOT `0 - x`: the two agree everywhere except on zero,
         // where `0 - 0.0` is +0.0 and Ruby's -0.0 keeps its sign ((-0.0).to_s is
         // "-0.0"). Both compiled halves already answered -0.0 here; only this one
@@ -2556,7 +3160,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Unary plus: the identity. `+"str"` asks Ruby for an unfrozen copy of a frozen
     // string literal, and every string value here is already an ordinary mutable one.
     function makePos(t) { return function() { return t() } }
-    function makeBitNot(t) { return function() { return 0 - toF(t()) - 1 } }
+    // ~x is -(x+1) at any size. Past 2^53 the double cannot hold the +1, so
+    // ~9007199254740992 came back as -9007199254740992 instead of ...993.
+    function bitNotOf(v) {
+        if (!isBig(v) && v > 0 - bigMaxNum && v < bigMaxNum) { return 0 - toF(v) - 1 }
+        var b = bigOf(v)
+        if (b == null) { return 0 - toF(v) - 1 }
+        return bigOut(bigAdd(bigNeg(b), bigOb(-1, [1])))
+    }
+    function makeBitNot(t) { return function() { return bitNotOf(t()) } }
     // One binary step for every operator that is not '+': a user object dispatches to
     // its own operator method (def +, def <=>, def []), everything else is numeric.
     function rbin(op, l, r) {
@@ -2801,6 +3413,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (v === false) { return "false" }
         if (typeof v == "string") { return v }
         if (isSym(v)) { return v.s }
+        if (isBig(v)) { return bigStr(v) }
+        if (typeof v == "number") { return intStr(v) }
         if (isFlo(v)) { return floStr(v.f) }
         if (isRat(v)) { return "" + v.n + "/" + v.d }
         if (isCpx(v)) { return "" + v.re + "+" + v.im + "i" }
@@ -3095,7 +3709,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // digits, and "%#.5x" % 0 is "00000" in MRI with no prefix. Octal is a
     // different rule again and lives in intBody.
     function basePrefix(conv, v) {
-        if (v == 0) { return "" }
+        if (isBig(v)) { if (bigIsZero(v)) { return "" } }
+        else if (v == 0) { return "" }
         if (conv == "x") { return "0x" }
         if (conv == "X") { return "0X" }
         if (conv == "b") { return "0b" }
@@ -3156,7 +3771,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // The exact base-`base` digits of a non-negative integral double. Base ten is
     // the bignum that already exists here, rbExactDec's.
+    // The bits of a big magnitude, most significant first, as a digit string.
+    function bigBinDigits(a) {
+        var bb = bitsOfMag(a.limbs)
+        var s = ""
+        for (var i = bb.length - 1; i >= 0; i = i - 1) { s = s + (bb[i] == 1 ? "1" : "0") }
+        if (s == "") { s = "0" }
+        return s
+    }
     function magDigits(a, base) {
+        if (isBig(a)) {
+            if (base == 10) { return bigStr(bigAbs(a)) }
+            var bgb = bigBinDigits(a)
+            if (base == 8) { return groupBits(bgb, 3) }
+            if (base == 16) { return groupBits(bgb, 4) }
+            return bgb
+        }
         if (base == 10) { return rbExactDec(a).i }
         var bits = binDigits(a)
         if (base == 8) { return groupBits(bits, 3) }
@@ -3202,8 +3832,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // or SPACE flag, which switches MRI back to sign-and-magnitude ("%+x" % -5 is
     // "-5", not "..fb").
     function intBody(v, base, upper, alt, sign, prec) {
-        var neg = v < 0
-        var mag = neg ? -v : v
+        var neg = isBig(v) ? (v.sign < 0 && !bigIsZero(v)) : v < 0
+        var mag = anytype
+        mag = isBig(v) ? bigAbs(v) : (neg ? -v : v)
         var fill = "0"
         var twos = false
         var digits = ""
@@ -3257,15 +3888,34 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (x - x !== 0) { return x > 0 ? "Inf" : "-Inf" }
         return ""
     }
+    var baseDigits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    // Integer#to_s(base) for a big, and for a plain double too large to divide
+    // exactly: one magnitude division per digit, which magDivMod already is.
+    function bigBaseStr(a, base) {
+        if (bigIsZero(a)) { return "0" }
+        var mag = a.limbs
+        var out = ""
+        while (mag.length > 0) {
+            var dm = magDivMod(mag, [base])
+            var d = 0
+            if (dm.r.length > 0) { d = dm.r[0] }
+            out = baseDigits.charAt(d) + out
+            mag = dm.q
+        }
+        return (a.sign < 0) ? ("-" + out) : out
+    }
     function baseStr(n, base) {
+        if (isBig(n)) { return bigBaseStr(n, base) }
         if (n == 0) { return "0" }
+        // Past 2^53 `v % base` and `Math.floor(v / base)` no longer step through
+        // the value's own digits, so the exact expansion does it instead.
+        if (n > bigMaxNum || n < 0 - bigMaxNum) { return bigBaseStr(bigFromDouble(n), base) }
         var neg = n < 0
         var v = neg ? 0 - n : n
-        var digits = "0123456789abcdef"
         var out = ""
         while (v > 0) {
             var d = v % base
-            out = digits.charAt(d) + out
+            out = baseDigits.charAt(d) + out
             v = Math.floor(v / base)
         }
         return neg ? "-" + out : out
@@ -3319,8 +3969,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // FLOORING for %x/%o/%b too, which was the same divergence one directive
         // over, and it is gone with baseStr's use here.
         if (base != 0) {
-            var iv = Math.trunc(toF(v))
-            if (iv !== iv || iv - iv !== 0) {
+            var iv = anytype
+            iv = isBig(v) ? v : Math.trunc(toF(v))
+            if (!isBig(iv) && (iv !== iv || iv - iv !== 0)) {
                 // Unreachable from real Ruby - Float::INFINITY.to_i raises
                 // FloatDomainError - and left as it was rather than invented.
                 body = base == 10 ? "" + iv : baseStr(iv, base)
@@ -3832,6 +4483,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (v === true) { return hostGlobals["TrueClass"] }
         if (v === false) { return hostGlobals["FalseClass"] }
         if (typeof v == "number") { return hostGlobals["Integer"] }
+        if (isBig(v)) { return hostGlobals["Integer"] }
         if (isFlo(v)) { return hostGlobals["Float"] }
         if (isRat(v)) { return hostGlobals["Rational"] }
         if (isCpx(v)) { return hostGlobals["Complex"] }
@@ -3853,17 +4505,47 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         while (b > a && (s.charCodeAt(b - 1) == 32 || s.charCodeAt(b - 1) == 9 || s.charCodeAt(b - 1) == 10 || s.charCodeAt(b - 1) == 13)) { b = b - 1 }
         return s.slice(a, b)
     }
+    // The Integer method set for a value past 2^53. It is the same list the plain
+    // number arm of mcall answers, with every step routed through the exact
+    // arithmetic instead of the double - `(2**64).abs` used to answer
+    // 1.8446744073709552e+19 through toF. What is NOT here (times / upto /
+    // downto / succ / pred and the Rational and Complex conversions) either
+    // cannot terminate at this size or has no exact form in this value model;
+    // they fall through to numberMethod's error, which names the method.
+    function bigMethod(t, name, args, blk) {
+        if (name == "to_s" || name == "inspect") { return args.length > 0 ? bigBaseStr(t, toF(args[0])) : bigStr(t) }
+        if (name == "to_i" || name == "to_int" || name == "truncate" || name == "floor" || name == "ceil" || name == "round") { return t }
+        if (name == "to_f") { return mkFlo(bigToNum(t)) }
+        if (name == "abs" || name == "magnitude") { return bigOut(bigAbs(t)) }
+        if (name == "zero?") { return bigIsZero(t) }
+        if (name == "positive?") { return !bigIsZero(t) && t.sign > 0 }
+        if (name == "negative?") { return t.sign < 0 }
+        if (name == "even?") { return bigIsZero(bigDivMod(t, bigFromNum(2)).r) }
+        if (name == "odd?") { return !bigIsZero(bigDivMod(t, bigFromNum(2)).r) }
+        if (name == "succ" || name == "next") { return numBin("+", t, 1) }
+        if (name == "pred") { return numBin("-", t, 1) }
+        if (name == "divmod") {
+            var db = bigOf(args[0])
+            if (db != null) {
+                var dm = bigDivMod(t, db)
+                return [bigOut(dm.q), bigOut(dm.r)]
+            }
+        }
+        if (name == "fdiv") { return mkFlo(bigToNum(t) / toF(args[0])) }
+        if (name == "pow") { return rbin("**", t, args[0]) }
+        return numberMethod(t, name, args, blk)
+    }
     // The methods of the boxed numerics (Float, Rational, Complex).
     function numberMethod(t, name, args, blk) {
         if (name == "to_s" || name == "inspect") { return rstr(t) }
         if (name == "to_f") { return isFlo(t) ? t : mkFlo(toF(t)) }
-        if (name == "to_i" || name == "to_int" || name == "truncate") { var x1 = toF(t); return x1 < 0 ? Math.ceil(x1) : Math.floor(x1) }
+        if (name == "to_i" || name == "to_int" || name == "truncate") { var x1 = toF(t); return intFromF(x1 < 0 ? Math.ceil(x1) : Math.floor(x1)) }
         if (name == "to_r") { return asRat(t) }
         if (name == "to_c") { return isCpx(t) ? t : mkCpx(toF(t), 0) }
         if (name == "abs") { var x2 = toF(t); return mkFlo(x2 < 0 ? 0 - x2 : x2) }
-        if (name == "floor") { return Math.floor(toF(t)) }
-        if (name == "ceil") { return Math.ceil(toF(t)) }
-        if (name == "round") { var x3 = toF(t); return Math.floor(x3 + 0.5) }
+        if (name == "floor") { return intFromF(Math.floor(toF(t))) }
+        if (name == "ceil") { return intFromF(Math.ceil(toF(t))) }
+        if (name == "round") { var x3 = toF(t); return intFromF(Math.floor(x3 + 0.5)) }
         if (name == "zero?") { return toF(t) == 0 }
         if (name == "positive?") { return toF(t) > 0 }
         if (name == "negative?") { return toF(t) < 0 }
@@ -3894,6 +4576,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "frozen?") { return typeof target == "string" || isSym(target) || isNumV(target) }
         if (name == "hash" || name == "object_id") { return 0 }
         if (name == "tap") { blockCall(blk, [target]); return target }
+        if (isBig(target)) { return bigMethod(target, name, args, blk) }
         if (isNumV(target) && typeof target != "number") { return numberMethod(target, name, args, blk) }
         if (isSym(target)) {
             if (name == "to_s" || name == "name" || name == "id2name") { return target.s }
@@ -3941,8 +4624,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             fail("unknown MatchData method: " + name)
         }
         if (typeof target == "number") {
-            if (name == "to_s" || name == "inspect") { return args.length > 0 ? baseStr(target, toF(args[0])) : "" + target }
-            if (name == "to_i" || name == "to_int" || name == "truncate" || name == "floor") { return Math.floor(target) }
+            if (name == "to_s" || name == "inspect") { return args.length > 0 ? baseStr(target, toF(args[0])) : intStr(target) }
+            if (name == "to_i" || name == "to_int" || name == "truncate" || name == "floor") { return intFromF(Math.floor(target)) }
             if (name == "to_f") { return mkFlo(target) }
             if (name == "to_r") { return mkRat(target, 1) }
             if (name == "to_c") { return mkCpx(target, 0) }
@@ -3952,8 +4635,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "negative?") { return target < 0 }
             if (name == "even?") { return imod(target, 2) == 0 }
             if (name == "odd?") { return imod(target, 2) != 0 }
-            if (name == "succ" || name == "next") { return target + 1 }
-            if (name == "pred") { return target - 1 }
+            if (name == "succ" || name == "next") { return numBin("+", target, 1) }
+            if (name == "pred") { return numBin("-", target, 1) }
             if (name == "divmod") { return [idiv(target, toF(args[0])), imod(target, toF(args[0]))] }
             if (name == "fdiv") { return mkFlo(target / toF(args[0])) }
             if (name == "pow") { return rbin("**", target, args[0]) }
@@ -4127,7 +4810,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "pop") { return t.length == 0 ? null : t.pop() }
         if (name == "first") { return t.length == 0 ? null : t[0] }
         if (name == "last") { return t.length == 0 ? null : t[t.length - 1] }
-        if (name == "include?" || name == "contains") { return t.indexOf(args[0]) >= 0 }
+        // Array#include? is `===` plus a big-aware FALLBACK SCAN: two Integers
+        // past 2^53 are different objects, so indexOf alone answered false where
+        // both compiled halves (which route this through their dict find, and
+        // therefore through a value comparison) answered true.
+        if (name == "include?" || name == "contains") {
+            if (t.indexOf(args[0]) >= 0) { return true }
+            if (!isBig(args[0])) { return false }
+            for (i = 0; i < t.length; i++) { if (isBig(t[i]) && bigCmp(t[i], args[0]) == 0) { return true } }
+            return false
+        }
         if (name == "to_a") { return t.slice(0) }
         if (name == "each") { for (i = 0; i < t.length; i++) { blockCall(blk, [t[i]]) } return t }
         if (name == "each_with_index") { for (i = 0; i < t.length; i++) { blockCall(blk, [t[i], i]) } return t }
@@ -5814,7 +6506,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (cls === null || cls === undefined || cls.__isclass !== true) { return false }
         if (cls.__builtin === true) {
             var n = cls.__name
-            if (n == "Integer") { return typeof v == "number" }
+            if (n == "Integer") { return typeof v == "number" || isBig(v) }
             if (n == "Float") { return isFlo(v) }
             if (n == "Rational") { return isRat(v) }
             if (n == "Complex") { return isCpx(v) }
@@ -6039,6 +6731,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     core.lang = "ruby"
     core.add = radd
     core.test = rtest
+    // A Hash key that is an Integer past 2^53 is a BOX, and two boxes of the same
+    // value are different objects - so `{2**64 => :big}[2**64]` missed on the
+    // scan's `===`. The key IDENTITY is its exact decimal text, which puts a big
+    // straight into dictIndex's map (no scan at all) and, because a plain Integer
+    // uses the same rendering, keeps the two shapes of one Integer on one key.
+    // The id namespace is "b", which no default id can collide with: a big is
+    // only ever the key equal of ANOTHER big, exactly as the Go twin's
+    // strictEq (a *jsBigInt arm demanding two *jsBigInts) and layer 2's
+    // rbDictFind fallback have it.
+    core.keyId = function(k) {
+        if (isBig(k)) { return "b" + bigStr(k) }
+        return null
+    }
+    core.keyEq = function(a, b) {
+        if (!isBig(a) || !isBig(b)) { return false }
+        return bigCmp(a, b) == 0
+    }
 
     // ----- Project-file imports (require / require_relative) -----
     // A handful of stdlib names whose require is a no-op (the runtime provides them or
