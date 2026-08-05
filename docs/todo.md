@@ -20,13 +20,19 @@ Two conventions, and they are the point of the file:
 > two commits **five** separate times, and twice this week someone was sent to fix
 > something that already worked.
 
-Baseline every item must preserve (`tests/gates.sh`, ~5 min):
+Baseline every item must preserve (`tests/gates.sh`, ~2.5 min — the gates run
+concurrently since `34814cd`; add `--serial` on a small machine):
 
 ```
-matrix 329/329 · --full 6,003 assertions, 0 halves disagree · --cross 119/0
+matrix 351/351 · --full 6,092 assertions, 0 halves disagree · --cross 119/0
 clang-check 16/16 none held · native-full 15/15 · go test ok
-gen-all 15/15 clean · -freeze a fixed point
+gen-all 15/15 clean · -freeze a fixed point · bench: no row outside its spread
 ```
+
+**Run `tests/gates.sh --bench` for anything that touches layer 2 or the floor.**
+The seven correctness gates cannot see a slowdown — a merge in `120ba0f` cost
+python **41%** and java **5.7%** for four commits with every gate green, because a
+41% slowdown is not a wrong answer.
 
 ---
 
@@ -34,44 +40,36 @@ gen-all 15/15 clean · -freeze a fixed point
 
 These change answers real programs give. Each has a toolchain here that settles it.
 
-### 1.1 Python integer arithmetic does not promote past 2^53 **[V]**
-`9007199254740992 + 1` is unchanged. Of 55 differing rows in a 626-literal probe
-against CPython 3.14.6, **54 are the `*` column** and 1 is `+`; literals, types,
-`&`, `>>` and `abs` are all exact. The site is the plain `l+r`/`l-r`/`l*r` arms in
-all three engines — **the hot path of every Python program**, where a naive guard
-measured **+9.5%** — and `*` needs the exact product, which is the expensive half.
-The integer *literal* half is done (`506000a`); this is the arithmetic half.
-
-### 1.2 Go untyped constants do not fold at arbitrary precision **[V]**
+### 1.1 Go untyped constants do not fold at arbitrary precision **[V]**
 `fmt.Println(0.1 + 0.2)` prints `0.30000000000000004`; real Go folds constants
 exactly and rounds once, printing `0.3`. Needs a constant folder in the front end,
 not a value tag. Oracle: `go`.
 
-### 1.3 `float` is modelled as a double in the four JVM-ish languages **[V]**
+### 1.2 `float` is modelled as a double in the four JVM-ish languages **[V]**
 Java's `1.0f/3.0f` gives `0.3333333333333333` where real Java gives `0.33333334`.
 Needs a second box *width*, not a bug fix. Oracle: `java` 24.0.2.
 
-### 1.4 Ruby's three integer directives **[V]**
-All three are shared by **both halves**, so `--cross` is blind to them by
-construction. Oracle: `/usr/bin/ruby` 2.6.10 — integer formatting is unchanged in
-3.x, so this old Ruby settles them.
-- `%d`/`%x`/`%o`/`%b` of a float past 2^53 print the double's shortest form or
-  saturate at int64; MRI prints the exact integer.
-- Negatives under `%x`/`%o`/`%b` need MRI's infinite two's-complement notation
-  (`"%x" % -5` is `..fb`, `%o` is `..73`, `%b` is `..1011`).
-- A precision on an integer directive is ignored (`"%.0x" % 0` is `""` in MRI).
+### 1.3 Ruby integer literals lose precision past 2^53 **[V]**
+`9007199254740993` reads as `…992`, `0x20000000000001` likewise, and
+`12345678901234567890` as `…567000`. Found while verifying `73f1087` — an
+80-row-wide MRI difference that turned out to be in the *value* column, not the
+formatting. Oracle: `/usr/bin/ruby`.
+**Python's is the model, and it is a small job because of that**: `506000a` did
+exactly this for python — decide on the TEXT (`pyDecOver53`: strip leading zeros,
+compare digit count against `"9007199254740992"`, then lexicographically; never
+`parseFloat`, which rounds at exactly the boundary the predicate exists to detect)
+and convert radix digits to exact decimal text first, because `js_bigint` reads
+decimal only. Ruby also needs arbitrary precision beyond 64 bits, which python got
+from `runtime-bignum.metajs`.
 
-The `#` flag and the base prefixes landed in `1eb31e2` and are the model to
-follow: `rbBasePrefix` / `basePrefix` / `rubyBasePrefix`, changed together in
-`abnf/jsrt.go`'s `rubyFormat`, `lib/ruby-rt.metajs`'s `rbFormat`, and
-`ruby-interpreter.abnf`'s `fmtOne`.
+### 1.4 Python `repr()` does not escape control characters or backslashes **[V]**
+`repr("a\tb")` prints a literal tab where CPython prints `'a\tb'`; the same for
+newline, and `repr("back\\slash")` loses the doubling. Found while verifying
+`e12ddc1`, confirmed present at `df9199a`, so it is independent of the `str`
+method work. Oracle: `python3`. This is what made a 306-row str probe show 36
+false differences, so it also costs probe time until it is fixed.
 
-### 1.5 Python has no `str` method library at all **[V]**
-`"abc".upper()` fails identically in both halves with `unknown String method:
-upper`. A missing *feature*, not a defect. Three files:
-`python-interpreter.abnf`, `python-to-llvm-ir.abnf`, `lib/python-rt.metajs`.
-
-### 1.6 `async`/`await` has no job queue (js, ts) **[V]**
+### 1.5 `async`/`await` has no job queue (js, ts) **[V]**
 An `async` function compiles to an ordinary function returning its value
 directly, so `f().then(...)` dies with *"method call 'then' on a number"*;
 `await e` is the identity, `for await` is a plain for-of, `async function*` is a
@@ -82,14 +80,19 @@ its own goroutine with an unbuffered channel handshake and a
 `thisStack`/`newTargetStack` switch around every resume — awaits as yields, driven
 by a microtask queue drained at the end of `runJSModule`.
 
-### 1.7 `for`-of drains eagerly in js, ts and python, so an infinite generator hangs **[V]**
-`js_iterable` materialises the sequence (`js-to-llvm-ir.abnf:3672` and `:4223`,
-whose own comment says "materializes"; python via `js_pyiter`).
-**C# is the counter-example and owes layer 2 zero lines** — its emitter already
-drives `js_get(g,"next")` lazily in IR. So **this is an EMITTER change (a
-`next()`-until-`done` loop), not a layer-2 one**, and the coroutine primitive it
-needs already exists. ~30 lines for js/ts, ~50 for python (`send(v)` = `next(v)`,
-`StopIteration` carrying the return value, `close()` = drop the reference).
+### 1.6 An iterator's `return()` is never called on early exit (js, ts, python) **[V]**
+Fallout from `fe9fa61`/`e12ddc1`, which made `for`-of lazy. `break`, `throw` or a
+`return` out of the loop body now leaves the generator suspended instead of closing
+it: after `for (x of g) { break }` a second loop over `g` **resumes** here where
+node closes it, and a `finally` around a `yield` does not run. Confirmed against
+`node`.
+**It cannot be done in the emitter alone**, which is why it was left: the floor's
+generator cell exposes `next` *only* (`runtime.c`, tag 15), so a guarded
+`it.return()` would work under `llvm.Run` and be a no-op natively — a halves
+divergence bought for no behaviour, since the Go twin's `finish()` does not run the
+body's `finally` either. Needs `runtime.c` + `abnf/jsrt.go` + layer 2 in ONE commit.
+Same family: **`g.close()` answers a `{value, done}` record** in the Go twin and
+layer 2 where the interpreter and CPython answer `None`, and nothing tests it.
 
 ---
 
@@ -98,58 +101,49 @@ needs already exists. ~30 lines for js/ts, ~50 for python (`send(v)` = `next(v)`
 Small, cheap, and each one is a divergence waiting for the first program that
 reaches it.
 
-### 2.1 `js_cscmp` does not special-case NaN **[U]**
-`lib/csharp-rt.metajs:1011` is a bare delegation to `rtjRel`. The recorded fix is
-one line — `if (c == 2) { return false }` on the compare result. Until it lands
-the two C# engines disagree on a NaN comparison and the ratchet assertion cannot
-be added. No C# toolchain here; cite ECMA-334.
+### 2.1 Java's `record` equality is wrong for three more component types **[V]**
+`emitRecordEquals` (`java-to-llvm-ir.abnf`), measured against `javac`/`java`
+24.0.2 while fixing the char case in `304a234`, and documented in a comment at the
+site. Each needs a NEW EXTERN, which is why none was half-fixed:
+- a `double`/`float` component uses `===` where a record uses
+  `Double.compare(a,b) == 0`, so **NaN records compare unequal in all three of our
+  engines** (oracle: equal) and **+0.0/−0.0 records compare equal in both compiler
+  engines** (oracle: unequal);
+- a **reference** component compares by identity where a record uses
+  `Objects.equals` — `record Line(Dot a, Dot b)`, a shape already in
+  `tests/java-test-full.java`, and any object with a user-declared `equals`,
+  compare unequal in both compiler engines. The interpreter's `jValEq` recurses and
+  gets nested records right, so this is an interp-vs-run divergence too;
+- the interpreter's `jValEq` returns **false** for two equal `double` components
+  (`RD(1.0).equals(RD(1.0))`).
 
-### 2.2 `floAbs` still carries the 32-bit wrap that `Math.abs` was fixed for **[U]**
-`abnf/jsrtjvm.go:391` — non-`jsJFlo` operands go through
-`float64(rt.toInt32(math.Abs(...)))`. Latent: it bites the day a long reaches
-layer 2's float primitive.
+`csharp-to-llvm-ir.abnf`'s `$valeq` — a recursive IR function emitted once per
+record-declaring program — is the shape that answers all three.
 
-### 2.3 Java's generated `record` equality compares components with `js_seq` **[U]**
-`java-to-llvm-ir.abnf:3923`. The Go twin's char is a comparable struct; layer 2's
-is a `{__char}` box, so `record R(char c)` compares by **identity** natively. No
-test declares a char record component, so it is unmeasured rather than
-known-wrong. One-line fix: `js_jchareq`, which both emitters already use
-elsewhere. A sibling in C# (a two-char list pattern with a rest,
-`csharp-to-llvm-ir.abnf` ~2470) was reported but the line has moved.
-
-### 2.4 The FMA divergence is closed in layer 2 and still open in the Go twin **[U]**
-Go fuses `x - math.Floor(x/y)*y` into an FMSUB on arm64; clang does not, so the
-halves diverged once `q*y` left the exactly-representable range
-(`9007199254740991 % -3`). Real ruby says the fused answer is correct, so it was
-layer 2's defect, and `rbFmaSub` (Dekker two-product/two-sum) now reproduces it.
-**The twin is exact only by accident of fusion** — on a non-FMA target the halves
-diverge again. The fix is three `math.FMA` lines at `abnf/jsrt.go:3458` and
-`:3673`.
-
-### 2.5 `-rdynamic` will break the first Linux native build that uses a generator **[V]**
+### 2.2 `-rdynamic` will break the first Linux native build that uses a generator **[V]**
 `gen_create` finds `coro_entry` via `dlsym` with no link flag, which works on
 darwin; linux needs `-rdynamic` on the clang line in `abnf/llvmlink.go`. Nothing
 here builds on linux to prove it, and there is no `rdynamic` anywhere in the repo.
 
-### 2.6 A Python `set` member that is unhashable **[U]**
+### 2.3 A Python `set` member that is unhashable **[U]**
 Compared with `==` in the compiled halves and `===` in the interpreter
 (`a=[1]; b=[1]; {a,b}` is 1 vs 2); CPython raises `TypeError`. Closing it means
 changing the shared `dictFind` contract, not Python.
 
-### 2.7 Python's dict does not unify `True` and `1` **[U]**
+### 2.4 Python's dict does not unify `True` and `1` **[U]**
 `d[True]="t"; d[1]="one"` is ONE entry in CPython and TWO here, because
 `strict_eq`/`rt.strictEq` make a bool and a number different types. Documented at
 `runtime.metajs:583`, `python-rt.metajs:213`, `abnf/jsrt.go:2428`. Both halves
 agree, so `--cross` is blind.
 
-### 2.8 `i in arr` after `delete arr[i]` **[V]**
+### 2.5 `i in arr` after `delete arr[i]` **[V]**
 `true` here, `false` in node. **Declined twice with the same finding**: a real
 hole cannot be expressed without changing the shared `*jsArray` in
 `abnf/jsrt.go`, which is the array type for *every* language in the tree, and a
 sentinel would need filtering at ~60 read sites where one miss leaks garbage into
 `join()`. Listed so the third person to find it stops here.
 
-### 2.9 JS constructs that still abort **[V]** for `super.x`, **[U]** for the rest
+### 2.6 JS constructs that still abort **[V]** for `super.x`, **[U]** for the rest
 `super.x` as a *value* now yields `undefined` rather than aborting. Still
 aborting: `super.b = 1` as an assignment target, `new a.b.C()`, nested `new`,
 `new C` with no argument list, `class X extends <expression>`, `for (a.b of xs)`,
@@ -157,18 +151,33 @@ aborting: `super.b = 1` as an assignment target, `new a.b.C()`, nested `new`,
 binding — blocked by `excCatch` in `interp-core.js` binding exactly one name,
 though the `DPattern`/`bindPattern` machinery already exists.
 
-### 2.10 JS interpreter generators replay instead of suspending **[U]**
+### 2.7 Interpreter generators replay instead of suspending — js AND python **[V]**
 Every `next()` re-runs the body from the top, replaying recorded sends and
 stopping at the next yield via a thrown signal. Side effects repeat, it is O(n²),
 `try`/`finally` interacts badly with the signal, and `.return()`, `.throw()` and
-`Symbol.iterator` are missing. **If genuine suspension is unreachable here** — the
+`Symbol.iterator` are missing.
+
+**Python's interpreter half has the same design** (`genStep`), confirmed while
+making `for`-of lazy in `e12ddc1`: a `print` after the first `yield` fires again on
+the third step, so the interpreter diverges from CPython *and* from our own two
+compiled halves on side-effect ORDER — a probe shows 17 lines where the compiled
+halves and CPython agree on 11. Nothing in the suite reaches it, which is why
+`--cross` is green.
+
+**If genuine suspension is unreachable here** — the
 `-frozen` engine exposes no goroutines and both engines must agree byte-for-byte —
 **then document the replay limitation in the grammar's `:description`** rather
 than leaving it implicit. That is a valid closure for this item.
 
-### 2.11 The BigInt mix `TypeError` is raised but not catchable **[V]**
+### 2.8 The BigInt mix `TypeError` is raised but not catchable **[V]**
 `1n + 1` correctly reports *"Cannot mix BigInt and other types"*, but it aborts
 rather than being caught by a JS `try`/`catch`. Same family as item 3.2.
+
+### 2.9 `ord` and `chr` are missing from the Python INTERPRETER **[V]**
+They exist in both compiled halves and are absent from
+`python-interpreter.abnf`'s `hostGlobals`, so any program that uses them is an
+interp-vs-run divergence. Found because a probe written in ordinary Python died on
+`ord`. Two entries in one table.
 
 ---
 
@@ -230,16 +239,7 @@ by having done B: the extern surface is identical.
 
 The suite's blind spots, in the order they are likely to hurt.
 
-### 4.1 No native (`-exe`) matrix rows for any of the thirteen handle-IR languages **[V]**
-`.vscode/launch.json`'s 32 `-exe` rows are metajs, lua and lisp only. Every
-migration wrote out the exact args it wanted (php 3, swift 2, java 3, csharp 3,
-dart 2, go 3, ruby 3, js 2, ts 2, python 3) and all passed at the time; none were
-added because the file belonged to the coordinator. Partly mitigated —
-`clang-check.sh`/`native-full.sh` already build the ratchets natively — so what is
-actually missing is native coverage of the **features** and **multifile**
-programs.
-
-### 4.2 The two MetaJS halves bind different host globals **[V]**
+### 4.1 The two MetaJS halves bind different host globals **[V]**
 `metajs-interpreter.abnf` binds eleven; the compiler half's `standardJSBindings`
 (and the C floor, which matches the *compiler*) also bind `Infinity NaN Array
 Object byteLen sprint rawSet`. `tests/metajs-test-full.js` asserts only the
@@ -247,14 +247,14 @@ intersection, so nothing can see it. Same family: `"ß".toUpperCase()` is `"SS"`
 the interpreter (real JS) and `"ß"` in the compiler and floor (Go's simple
 mapping).
 
-### 4.3 `--full` has a rare unreproduced false positive on `js` **[U]**
+### 4.2 `--full` has a rare unreproduced false positive on `js` **[U]**
 One run in four reported `js MISMATCH: 354 FROZEN-DIFF`; eight direct re-runs
 hashed identically (1,012,563 bytes, exit 0) and the `timeout 120` hypothesis was
 measured and rejected (19.0 s wall under 12-way load). Mechanism unidentified;
 most likely the process being killed, since a truncated work file is exactly what
 `cmp -s` reports. **Re-run before believing a lone `FROZEN-DIFF` on `js`.**
 
-### 4.4 Two `die("PROBE-C <<")` probes are wired into the shipping floor **[V]**
+### 4.3 Two `die("PROBE-C <<")` probes are wired into the shipping floor **[V]**
 `runtime.c:2410` and `:2417`. They are the fatal probes that measured the
 shift-result-type claim, which fired **zero** times. Document them at the site or
 remove them; they currently read as leftover scaffolding.
@@ -266,7 +266,25 @@ remove them; they currently read as leftover scaffolding.
 All small. All verified. The shape scan is the measure — `go run ./tools/shape-scan`.
 
 ### 5.1 The `-min 40` shape tier is untouched: 15 groups, 111 recoverable lines **[V]**
+
+> **⚠ READ THIS BEFORE MERGING ANYTHING HERE. A ZERO-KNOB DIFFERENCE LIST IS
+> NECESSARY AND NOT SUFFICIENT — SIZE THE CALL SITE, NOT THE BODY.** The fifth
+> pass (`120ba0f`) merged bodies on the strength of an empty difference list alone
+> and shipped a regression that stood for four commits: `pyIsObj` →
+> `rtIsObjNotArr` → `rtIsObj` cost **python +41%**, `rbIsObj` cost **ruby +11%**,
+> and `rtjIsIntegral` cost **java +5.7%** — because each is a predicate asked at
+> ~15–30 sites inside an arithmetic or attribute path, and in MetaJS **a call is a
+> scope frame**. All three were reverted to self-contained bodies in `a8e6aa2` /
+> `34814cd` with the measurements at the sites.
+> Sharing stayed free for kotlin's `ktIsInt` at the *same* body (−0.64%, inside a
+> 3.05% spread), which is exactly the point: identical bodies, different call
+> sites, and only the call sites decide. **Measure with `tests/gates.sh --bench`
+> before and after — the seven correctness gates cannot see a slowdown.**
+
 `-min 60` is finished at 2 groups, both deliberate declines (manual §7.12).
+Note that the 4-line `*Arg` bodies below are the *same shape* as the ones that
+regressed, so the intra-file merges are the safe half of this item and the
+cross-language ones need the measurement.
 **The most useful part is that much of this tier is INTRA-file duplication,
 mergeable with no import and no shared-module decision**: `k1Arg`/`k2Arg`/`k3Arg`
 (kotlin :1061, :2175, :2890), `jvArg`/`jxArg` (js :287, :3157),
@@ -294,7 +312,10 @@ at `:1356`, read at `:1339` and `:1505`.
 `runtime-dartswift` (50) were split off **only** to keep the per-declaration
 live-body tax off non-callers. The `scope_find` hash index removed that tax, so
 they can go back into `runtime.metajs` whenever that is the tidier shape — a pure
-tidy, no measurable cost either way.
+tidy, no measurable cost either way. **This one really is free, and 5.1's warning
+does not apply to it**: folding a module back moves DECLARATIONS, which the hash
+index made free, and adds no call depth. It is the *delegation* that costs, not the
+location.
 
 ### 5.5 `sw_kget`/`sw_kset`/`sw_safeget` are duplicated across three GRAMMARS **[V]**
 `swift-to-llvm-ir.abnf:2495,2531`, `dart:2437,2451`, `kotlin:2555` (which says
@@ -334,26 +355,9 @@ silently changes what the grammar accepts, so it needs its own validated pass.
 
 # 7. Tooling and developer experience
 
-Ordered by how much time each would save. The first two are measured and ready.
+Ordered by how much time each would save. The first one is measured and ready.
 
-### 7.1 Overlap the seven gates in `gates.sh` — measured at 291 s → 150 s **[V]**
-`tests/gates.sh` runs its gates strictly serially at 315% average CPU on a 16-core
-machine. Launched concurrently with a single wait: **150 s, every verdict
-byte-identical**. ~1.94× on the whole verification loop, in a file the harness
-already owns.
-**Not shipped, and the hazard must be discharged first**: the matrix entries in
-`.vscode/launch.json` write **fixed paths inside the repo** (`-exe
-tests/metajs-native-fail.out`, `…-undeclared.out`, `…-prims.out`,
-`tests/metajs-link.out`). Verify no gate other than `./test.sh` writes into
-`tests/`, and that no two concurrent gates can write the same path. `native-full`
-uses `./mec` at the repo root, which `gates.sh` builds — confirm nothing rewrites
-it mid-run. **`--freeze` writes `abnf/jsbootstrap.ll` and `jsagrammar.go`, which
-every other gate reads, and must stay strictly serial after the wait.** Consider a
-`--serial` escape hatch for low-core machines. **A false green here is
-catastrophic**, so the verdict logic must not change at all — only when each
-command runs.
-
-### 7.2 Should `test.sh` default to 2× ncpu jobs? **[V]**
+### 7.1 Should `test.sh` default to 2× ncpu jobs? **[V]**
 `test.sh` defaults `JOBS` to `sysctl -n hw.ncpu`, which does **not** saturate the
 machine: `./test.sh` 35.0 s at 768% CPU, `-j 32` **25.4 s at 1143%**, same
 329/329. The other two groups do not benefit and should keep the default
@@ -364,7 +368,7 @@ oversubscription introduces no flakiness or memory pressure — the entries are
 independent subprocesses, so the mechanism is the one already used at 16-way, but
 this was a single measurement.
 
-### 7.3 Re-measure lua's hash-index buy-backs with draws **[V]**
+### 7.2 Re-measure lua's hash-index buy-backs with draws **[V]**
 The `scope_find` hash index costs lua **~+4%** — real, re-measured twice (it
 exceeds both rows' spreads, `c` as a control moved +0.02%, and a 5× longer loop
 gives the same percentage, so it is steady-state loop cost). Its two proposed
@@ -376,29 +380,29 @@ median, range and overlap for lua **and** for kotlin/python. The open question i
 whether lua's ~4% can be bought back without giving up the −19.5%..−42.0% the
 other nine languages get.
 
-### 7.4 Per-language coverage of the floor **[U]**
+### 7.3 Per-language coverage of the floor **[U]**
 The instrumentation that found 24 unreached floor bodies was written once and
 thrown away. Keeping it as `tools/floor-coverage` would make "is this body dead or
 untested?" answerable at any time — **it is the question that gates Part B (3.3)**,
 because a body no test reaches is a body no move can be validated against.
 
-### 7.5 A `--why` flag for the emitters **[U]**
+### 7.4 A `--why` flag for the emitters **[U]**
 Understanding which extern an emitter chooses for an operator means reading
 thousands of lines of grammar, repeatedly. A flag that prints the extern chosen
 per AST node would make layer-2 work dramatically faster.
 
-### 7.6 Make MetaJS's dialect gaps loud **[U]**
+### 7.5 Make MetaJS's dialect gaps loud **[U]**
 No exponent literal, no `toPrecision`, typed locals, ASI differences: each is
 discovered by a confusing failure. A `-verify` pass over `lib/*.metajs` that names
 them would pay for itself immediately. (`docs/abnf-dialect-gotchas.md` lists them;
 nothing enforces them.)
 
-### 7.7 Make the frozen-snapshot rule mechanical **[U]**
+### 7.6 Make the frozen-snapshot rule mechanical **[U]**
 "Did you `-freeze` after touching the emitter?" is a question a script should ask.
 `tests/gates.sh --freeze` checks it on demand; a pre-commit hook would remove the
 class entirely.
 
-### 7.8 Wire the shape scan into CI with a ratchet **[V]**
+### 7.7 Wire the shape scan into CI with a ratchet **[V]**
 `go run ./tools/shape-scan -max 2` fails above two groups. Nothing runs it
 automatically.
 
@@ -506,3 +510,48 @@ regex memo** `jxGetProg`/`k5Get`/`pyERxGet`/`rbRxGet` (`120ba0f`).
 
 **The generator sweep** — 25.3 s → 3.3 s (`1a03d08`), and `-O2` was missing from
 `buildExecutable` for the project's entire life (2.2× on every native binary).
+
+## The ten closed on 2026-08-05
+
+Old numbering, since that is what other notes will cite. **Two of them were never
+defects**, which is the reason this file leads with "re-verify before you act".
+
+- **1.1 Python integer arithmetic past 2^53** — `e12ddc1`. 266 of 1,452 probe rows
+  differed from CPython; now 0. The guard is two comparisons and is sound in both
+  directions, so it costs nothing (−1.09% over 9 draws, inside the spread).
+- **1.4 Ruby's three integer directives** — `73f1087`. 1,363 wrong rows against MRI
+  → 0. **One of the three bullets was wrong**: MRI does *not* ignore a precision on
+  an integer directive. Two further defects surfaced with it, including a live
+  halves divergence (the interpreter floored where both compiled halves truncated).
+- **1.5 Python's `str` method library** — `e12ddc1`. 41 methods, 45,064 probe rows
+  against `python3`. Needed a FOURTH file (`abnf/pystrmethod.go`) because the item
+  said "three files" and the compiler half resolves `js_*` to the Go twin.
+- **1.7 `for`-of drains eagerly** — `fe9fa61` (js/ts) and `e12ddc1` (python).
+  An infinite generator was not a program you could write; side-effect order now
+  matches `node`/CPython byte for byte. Residue is item 1.6 above.
+- **2.1 `js_cscmp` NaN** — **already fixed** at `runtime-jvm.metajs:145` and in the
+  twin, with an ECMA-334 citation, and the site's own comment said so. Assertions
+  added in `304a234`; their discriminating power is **0 of 4**.
+- **2.2 `floAbs`'s 32-bit wrap** — `304a234`, and it was in **three** engines, not
+  the one recorded. The metajs interpreter was worse than latent: it answered **0**
+  for every sized-integer operand. Nothing reached the arm from any language, which
+  is why it survived; `flo51`–`flo53` reach it now and 3 of 3 fail at the parent.
+- **2.3 Java `record` char equality** — `304a234`. Compared by identity natively
+  where real java says equal. The C# sibling was already fixed. Three further
+  component-type defects are item 2.1 above.
+- **2.4 The FMA divergence in the Go twin** — `73f1087`. Two fusable expressions,
+  not three. No answer changes on arm64 and that is not claimed — the point is that
+  it no longer depends on codegen, pinned by `abnf/jsrtfma_test.go`. A live third
+  engine the item did not mention (`ruby-interpreter.abnf`'s `imod`) was 16 rows
+  adrift.
+- **4.1 Native `-exe` matrix rows** — `34814cd`. 22 rows, features and multifile
+  across 11 languages, each checked to build and exit 0 first. Matrix 329 → 351.
+- **7.1 Overlap the gates** — `34814cd`. 5:07 → 2:26 with every verdict identical;
+  the hazards the item listed were discharged one by one and written into the
+  script's header. `--serial` restores the old behaviour.
+
+**And a regression this round found and fixed, which was NOT on any list**: the
+fifth merge pass (`120ba0f`) cost python 41%, ruby 11% and java 5.7% by turning
+three hot predicates into one-line delegations. Reverted in `a8e6aa2` / `34814cd`.
+`tests/gates.sh --bench` exists now because nothing ran `tests/bench.sh` for four
+commits — see the warning on item 5.1.
