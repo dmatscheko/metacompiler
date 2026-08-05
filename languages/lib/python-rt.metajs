@@ -118,11 +118,36 @@ function rtkIsArr(v) { return pyIsArr(v) }
 
 // ===================================================== the value model ======
 
-// SHARED as rtIsObjNotArr - lib/runtime.metajs. ruby's rbIsObj was byte-identical.
-// It is NOT rtIsObj: that one deliberately leaves the array rejection out, because
-// its own callers walk __class/__super and an array carries neither. Python asks
-// the stricter question in ~30 places, so the name stays here.
-function pyIsObj(v) { return rtIsObjNotArr(v) }
+// DELIBERATELY NOT SHARED, and this is the one merge in this project that was
+// measured as a LOSS after it shipped. 120ba0f made this body
+// `return rtIsObjNotArr(v)`, which is a THREE-DEEP CALL CHAIN - pyIsObj ->
+// rtIsObjNotArr -> rtIsObj - on a predicate ~30 call sites ask, several of them
+// inside the arithmetic and attribute paths every Python statement walks.
+//
+//   tests/bench.sh --draws 5, python, against the recorded 4b594c1 baseline:
+//     4b594c1 (self-contained here)   31.065 G     -2.04%   spread 1.32%
+//     120ba0f (delegating)            43.914 G    +41.26%   spread 1.38%
+//     de-delegated again              31.845 G     +2.44%   spread 2.06%
+//
+//   ruby's rbIsObj is the same body and the same story: 6.223 G -> 6.921 G,
+//   +11.19% against a 3.73% spread.
+//
+// So the whole 41% was this one delegation, and the fix is to spell the body out
+// again in both languages. THE LESSON IS NOT "do not share": it is that a
+// zero-knob difference list is necessary and NOT SUFFICIENT. A shared body costs
+// a CALL, and in MetaJS a call is a scope frame - which is free for a body called
+// on a cold path and enormous for a hot predicate. Size the CALL SITE, not the
+// body. rtIsObjNotArr stays in runtime.metajs for cold callers; ~30 hot sites are
+// not one of them.
+//
+// It is NOT rtIsObj either: that one deliberately leaves the array rejection out,
+// because its own callers walk __class/__super and an array carries neither.
+function pyIsObj(v) {
+    if (v === null) { return false }
+    if (v === undefined) { return false }
+    if (typeof v != "object") { return false }
+    return !Array.isArray(v)
+}
 
 function pyIsArr(v) { return Array.isArray(v) }
 function pyIsStr(v) { return typeof v == "string" }

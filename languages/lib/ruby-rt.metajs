@@ -150,10 +150,21 @@ var rbCurExc = null      // what the innermost rescue caught, for a bare `raise`
 
 // ===================================================== the value model ======
 
-// SHARED as rtIsObjNotArr - lib/runtime.metajs. python's pyIsObj was
-// byte-identical. It is NOT rtIsObj: that one deliberately leaves the array
-// rejection out; ~30 sites here need it.
-function rbIsObj(v) { return rtIsObjNotArr(v) }
+// DELIBERATELY NOT SHARED - measured as a LOSS after it shipped. 120ba0f made
+// this `return rtIsObjNotArr(v)`, a three-deep chain (rbIsObj -> rtIsObjNotArr ->
+// rtIsObj) on a predicate ~30 sites ask, and it cost ruby +11.19% against a 3.73%
+// spread (6.223 G -> 6.921 G, tests/bench.sh --draws 5). python's pyIsObj is the
+// same body and cost +41.26%; the full write-up and the rule it produced - size
+// the CALL SITE, not the body, because a shared body costs a MetaJS call and a
+// MetaJS call is a scope frame - is at pyIsObj in lib/python-rt.metajs.
+//
+// It is NOT rtIsObj either: that one deliberately leaves the array rejection out.
+function rbIsObj(v) {
+    if (v === null) { return false }
+    if (v === undefined) { return false }
+    if (typeof v != "object") { return false }
+    return !Array.isArray(v)
+}
 
 function rbTag(v, name) {
     if (!rbIsObj(v)) { return false }
