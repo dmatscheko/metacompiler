@@ -15,6 +15,14 @@ the LENGTH OF ITS OUTPUT FILENAME, which invalidated every sub-2% single-build
 measurement in these documents, including several I had quoted back to people as
 facts. That is chapter 4's newest trap and it is the most expensive thing in here.
 
+**Revised 2026-08-07** after ten more todo items closed. Two of them were WRONG
+AS WRITTEN (`floExt` is live, not dead code - deleting it as the item implied
+would have introduced a defect; and the C# `is` residue was every integral and
+floating name, not one), and **seven of the ten turned up a further defect the
+item did not name** - five of those live halves divergences `--cross` had never
+reached. Chapter 4 gained five traps from that round, including one that no gate
+in this project can see.
+
 **Consolidated 2026-08-05.** There used to be four more documents beside this one -
 three plan/record files totalling ~14,000 lines plus three concept notes. They were
 read in full, their still-actionable content became [todo.md](todo.md) and the
@@ -240,6 +248,46 @@ wall clock that need draws — and the corollary nobody expects: **agreement is 
 confirmation either.** Two builds landing on the same number inside a
 percent-wide lottery is a coin landing heads, and several conclusions in the plan
 documents were drawn from exactly that.
+
+**An unprefixed helper in `lib/compile-core.js` can SILENTLY REPLACE a grammar's
+own.** `python-to-llvm-ir.abnf` defines `numText`; a change to the java float
+literal added a `numText` to the shared core, and python's module grew two
+big-integer literals and its goja and `-frozen` halves diverged by **13,087
+lines** — from a commit with nothing about numbers in it. **No gate caught it.**
+Only diffing the emitted module against a clean `git archive` of the base did.
+Prefix anything you add to a shared core (`coreNum*`), and after touching
+`compile-core.js` diff the emitted modules of every language, not just yours.
+
+**PEG ordered choice never comes back, so a two-name form can eat a multi-assign's
+first element.** `MapOk`, `TypeOk`/`AssertOk` and `RecvOk` are tried before
+`ShortDecl` in go's `SimpleStmt`; each matched the *first element* of
+`a, b := xs[i], ys[j]` and the statement was then rejected at the comma rather
+than re-read. The fix is a `!","` guard on the narrower rules. The general lesson
+is that **a rule which can match a PREFIX of a later alternative must exclude the
+continuation explicitly** — the grammar cannot discover it by backtracking.
+
+**goja's `Number→String` is not always the shortest round-tripping form.**
+Measured: **22 of 199,904 random doubles (~1 in 9,000)**, and at some
+subnormal boundaries it emits a non-digit character outright
+(`-;.627494252092118e-309`). The frozen host is exact, so **any grammar that
+takes a double's digits from `"" + n` has a live goja-vs-`-frozen` divergence**
+waiting for the first value that reaches it. Choose the digit count by
+round-trip (`floPrec(a, n)` for n = 1..17, stop when `parseFloat` agrees), never
+by counting the host's own printed digits. java is fixed; **lua, kotlin, csharp
+and go's interpreter halves still do this** (todo.md).
+
+**A RANDOM float probe has near-zero discriminating power; targeted values have
+all of it.** A 1,450-line random probe agreed with the oracle at base while 85
+hand-picked values gave 170 differing lines and an outright abort. Sample the
+boundaries — 17-significant-digit values, subnormals, `MIN_VALUE`, the exponent
+thresholds — not the space.
+
+**Only the NATIVE leg sees some IR errors.** Building a phi inline inside a
+`js_scope_set` argument list compiled, verified and ran correctly under
+`llvm.Run`, then failed `clang` with *PHI nodes not grouped at top of basic
+block* — because `emitStr` emits an instruction into the block before the phi is
+constructed. `llvm.Run` is more permissive than clang; a module that runs is not
+a module that links.
 
 **A fix spanning engines lands with its assertions in ONE commit.** I split a pair —
 the twin half went in without its layer-2 line — and HEAD's native binary failed two

@@ -84,10 +84,32 @@ trap 'rm -rf "$work"' EXIT
 # The draws are taken by building to output paths of DIFFERENT LENGTHS. That is
 # the cheapest available handle on layout: it changes no semantics, and the
 # spread it produces is the same spread a real module edit produces. The absolute
-# directory is fixed so that two CHECKOUTS draw from the same set of paths and
-# their medians are comparable.
+# directory is FIXED so that two CHECKOUTS draw from the same set of paths and
+# their medians are comparable - which is the whole reason it cannot be a mktemp
+# directory (see the baseline file's header).
 EXEDIR=/tmp/mec-bench
 mkdir -p "$EXEDIR"
+
+# ...and because it is fixed, TWO CONCURRENT RUNS WOULD OVERWRITE EACH OTHER'S
+# BINARIES. That is not hypothetical: with four agents each running gates.sh, one
+# reported `csharp BUILD FAILED` purely from the collision, which reads exactly
+# like a real regression. So take a lock for the whole run. `mkdir` is the atomic
+# primitive that exists everywhere; flock is not on darwin.
+LOCK="$EXEDIR/.lock"
+waited=0
+until mkdir "$LOCK" 2>/dev/null; do
+    if [ "$waited" = 0 ]; then
+        echo "bench.sh: another bench run holds $LOCK - waiting (the -exe path must be" >&2
+        echo "          identical across runs, so they cannot proceed in parallel)" >&2
+    fi
+    sleep 5
+    waited=$((waited + 5))
+    if [ "$waited" -ge 1800 ]; then
+        echo "bench.sh: gave up after 30 min. If no bench run is active, remove $LOCK" >&2
+        exit 2
+    fi
+done
+trap 'rm -rf "$work" "$LOCK"' EXIT
 
 # ext -> language, i.e. which grammar compiles it.
 lang_of() {
