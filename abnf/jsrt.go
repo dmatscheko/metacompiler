@@ -3684,7 +3684,17 @@ func rubyAsRat(v interface{}) jsRat {
 // in exponent form OUTSIDE ITS OWN WINDOW - which is not JavaScript's window and was
 // the defect this replaced. Ruby's rule is numeric.c flo_to_s: take the shortest
 // round-tripping digit run and its decimal point position `decpt`, and go
-// exponential when `decpt < -3 || decpt > DBL_DIG` (15). Read off ruby 2.6.10p210;
+// exponential when `decpt < -3 || (decpt > DBL_DIG (15) && decpt >= len(digits))`.
+//
+// THE SECOND HALF OF THE HIGH TEST IS NOT DECORATION, and leaving it out was the
+// defect docs/todo.md 1.6 recorded: `decpt > 15` alone sends every 16-digit-point
+// value to exponent form, but MRI only does so when the fixed form would have to
+// PAD WITH ZEROS - i.e. when there is no fraction left to write. So
+// 1234567890123456.0 (decpt 16, 16 digits) IS exponential and
+// 3002399751580330.5 (decpt 16, 17 digits) is NOT. Settled against
+// /usr/bin/ruby over 3,000 random doubles in [1e15, 1e19): the two-part rule
+// reproduces all 3,000, `decpt > 15` alone misses 297 and `decpt > 16` 433.
+// Read off ruby 2.6.10p210;
 // Float#to_s has not changed between 2.6 and 3.x, and needs no Ruby-3 syntax to
 // probe, so the local 2.6 interpreter settles this row:
 //
@@ -3731,7 +3741,7 @@ func rubyFloDigits(a float64) string {
 	e10, _ := strconv.Atoi(exp)
 	digits := strings.Replace(mant, ".", "", 1)
 	decpt := e10 + 1
-	if decpt < -3 || decpt > 15 {
+	if decpt < -3 || (decpt > 15 && decpt >= len(digits)) {
 		out := digits[:1]
 		if len(digits) > 1 {
 			out += "." + digits[1:]
@@ -4439,11 +4449,14 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 	case "-":
 		if la, ok := l.(*jsArray); ok {
 			if ra, ok2 := r.(*jsArray); ok2 {
+				// Array#- is eql?/hash, like uniq and unlike include?: MRI answers
+				// `[1, 2.0] - [2]` with [1, 2.0]. This was pyEqual, which converts
+				// across the numeric classes and dropped the 2.0.
 				out := &jsArray{}
 				for _, e := range la.elems {
 					drop := false
 					for _, x := range ra.elems {
-						if rt.pyEqual(e, x) {
+						if rt.rubyEql(e, x) {
 							drop = true
 							break
 						}
@@ -4573,17 +4586,9 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 		return rt.rubyBin("**", t, argAt(args, 0)), true
 	case "gcd":
 		return rubyGcd(x, rubyToF(argAt(args, 0))), true
-	case "between?":
-		return x >= rubyToF(argAt(args, 0)) && x <= rubyToF(argAt(args, 1)), true
-	case "clamp":
-		lo, hi := rubyToF(argAt(args, 0)), rubyToF(argAt(args, 1))
-		if x < lo {
-			return args[0], true
-		}
-		if x > hi {
-			return args[1], true
-		}
-		return t, true
+	// between? / clamp used to be here, on rubyToF. They are Comparable's, they
+	// are shared with String, and on a big Integer the double was not exact -
+	// rubyMethod answers both through rubySpaceship before this table is reached.
 	case "real":
 		return rubyReOf(t), true
 	case "imaginary", "imag":
@@ -5088,7 +5093,10 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 		if keys, vals, isDict := dictParts(t); isDict {
 			parts := make([]string, len(keys.elems))
 			for i := range keys.elems {
-				parts[i] = rt.rubyInspect(keys.elems[i]) + " => " + rt.rubyInspect(vals.elems[i])
+				// NO SPACES around the arrow: MRI's Hash#inspect writes
+				// `{1=>2, "a"=>[1, 2]}`, and the spaced form this used to write was
+				// 48 of the 58 residual rows in the bignum probe (docs/todo.md 2.11).
+				parts[i] = rt.rubyInspect(keys.elems[i]) + "=>" + rt.rubyInspect(vals.elems[i])
 			}
 			return "{" + strJoin(parts, ", ") + "}"
 		}
@@ -5126,7 +5134,115 @@ func (rt *jsrt) rubyEq(l, r interface{}) bool {
 	if s, isStr := l.(string); isStr && rubyExcObj(r) {
 		return rt.rubyStr(r) == s
 	}
+	return rt.rubyStructEq(l, r)
+}
+
+// rubyStructEq is Array#== and Hash#==: element by element and key by key, with
+// each element compared by RUBY'S ==. It cannot be pyEqual, which is where this
+// used to end: pyEqual recurses into an array with ITSELF, so an element pair
+// never reached rubyEq's numeric tower and `[1] == [1.0]` was false where MRI
+// says true. The Hash arm looks its keys up with rubyDictFind, so an Array key
+// is found the same way it is everywhere else.
+func (rt *jsrt) rubyStructEq(l, r interface{}) bool {
+	if la, isArr := l.(*jsArray); isArr {
+		ra, ok := r.(*jsArray)
+		if !ok || len(la.elems) != len(ra.elems) {
+			return false
+		}
+		for i := range la.elems {
+			if !rt.rubyEq(la.elems[i], ra.elems[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	if lk, lv, isDict := dictParts(l); isDict {
+		rk, rv, ok := dictParts(r)
+		if !ok || len(lk.elems) != len(rk.elems) {
+			return false
+		}
+		for i := range lk.elems {
+			at := rt.rubyDictFind(rk, lk.elems[i])
+			if at < 0 || !rt.rubyEq(lv.elems[i], rv.elems[at]) {
+				return false
+			}
+		}
+		return true
+	}
 	return rt.pyEqual(l, r)
+}
+
+// rubyDictFind is dictFind under RUBY's key rule, which is not JavaScript's: an
+// ARRAY is a VALUE key (Array#hash and Array#eql? are structural), so
+// `{[1] => 5}[[1]]` is 5 where the `===` scan answered nil - docs/todo.md 2.11.
+// A Hash keys the same way.
+//
+// It is a WRAPPER and not a change to dictFind, exactly as the big-Integer arm of
+// layer 2's rbDictFind is: an array key is not dictKeyable, so it never enters the
+// index and the shared find already ends in a scan - this arm runs only when that
+// scan MISSED, so a hit costs what it did and an unchanged program pays one type
+// test. dictFind and strictEq are shared by nine languages in which two arrays are
+// two objects (python's `{(1,): 5}` is a tuple, a JS `Map` keys by identity), and
+// that is why the rule lives here. The twins are core.keyEq in
+// languages/ruby-interpreter.abnf and rbDictFind in languages/lib/ruby-rt.metajs.
+//
+// One MRI corner is deliberately not modelled, in all three engines alike: MRI
+// hashes a key ONCE at insertion, so mutating a key array afterwards loses the
+// entry until Hash#rehash. This compares at lookup time and still finds it.
+func (rt *jsrt) rubyDictFind(keys *jsArray, k interface{}) int {
+	if i := rt.dictFind(keys, k); i >= 0 {
+		return i
+	}
+	if !rubyValueKey(k) {
+		return -1
+	}
+	for i, e := range keys.elems {
+		if rubyValueKey(e) && rt.rubyEq(e, k) {
+			return i
+		}
+	}
+	return -1
+}
+
+// rubyEql is Ruby's eql?: == that does NOT convert across classes, so
+// `1.eql?(1.0)` is false where `1 == 1.0` is true. It is what Array#uniq
+// compares with (and what Hash keying is defined on).
+func (rt *jsrt) rubyEql(a, b interface{}) bool {
+	return rubyClassName(a) == rubyClassName(b) && rt.rubyEq(a, b)
+}
+
+// rubyArrIndex is the first position at which an element is Ruby-== to v, or -1.
+// Array#include?, #index and #find_index are all defined on ==.
+func (rt *jsrt) rubyArrIndex(t *jsArray, v interface{}) int {
+	for i, e := range t.elems {
+		if rt.rubyEq(e, v) {
+			return i
+		}
+	}
+	return -1
+}
+
+// rubyIdxOrNil turns a find result into Array#index's answer: the position, or
+// nil (not -1) when there was no match.
+func rubyIdxOrNil(i int) interface{} {
+	if i < 0 {
+		return jsNull
+	}
+	return float64(i)
+}
+
+// rubyValueKey answers whether a key is one of the two STRUCTURALLY compared
+// shapes: an Array, or a Hash (a dict object).
+func rubyValueKey(v interface{}) bool {
+	if _, isArr := v.(*jsArray); isArr {
+		return true
+	}
+	if o, isObj := v.(*jsObject); isObj {
+		if _, _, isDict := dictParts(o); isDict {
+			return true
+		}
+	}
+	return false
 }
 
 // rubySpaceship is <=>: nil (a Go nil result reported as jsNull by the caller) for
@@ -5644,6 +5760,17 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		}
 	case "nil?":
 		return isUndefOrNull(target)
+	case "to_s", "inspect":
+		// TrueClass / FalseClass. Without this arm both compiled halves fell
+		// through to the shared memberCall and aborted with "method call
+		// 'inspect' on a boolean", where ruby-interpreter.abnf answered - so a `p`
+		// or an `.inspect` of a predicate result was a halves divergence.
+		if bv, isBool := target.(bool); isBool {
+			if bv {
+				return "true"
+			}
+			return "false"
+		}
 	case "message", "full_message":
 		// Exception#message: the raise argument, or the class name. Only for an
 		// INSTANCE that does not define a message method of its own, so a user
@@ -5672,6 +5799,32 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	case "to_proc":
 		if isCallable(target) {
 			return target
+		}
+	case "between?", "clamp":
+		// Comparable#between? and #clamp are defined by <=> ALONE, so Integer,
+		// Float, Rational, Symbol and String all answer them off ONE pair of arms.
+		// They used to sit in the numeric table only, which left `"m".between?
+		// ("a", "z")` aborting here and everywhere (docs/todo.md 2.9) - and that
+		// table compared through rubyToF, so a big Integer answered on the double
+		// rather than exactly. rubySpaceship is the whole rule and it is
+		// big-aware. A user class that defines either method itself still wins:
+		// its own dispatch is below.
+		if !rubyUserObj(target) {
+			lo, hi := argAt(args, 0), argAt(args, 1)
+			cl, okLo := rt.rubySpaceship(target, lo)
+			ch, okHi := rt.rubySpaceship(target, hi)
+			if okLo && okHi {
+				if name == "between?" {
+					return cl >= 0 && ch <= 0
+				}
+				if cl < 0 {
+					return lo
+				}
+				if ch > 0 {
+					return hi
+				}
+				return target
+			}
 		}
 	}
 	// NilClass's conversions. MRI answers "" / "nil" / [] / 0 / 0.0 for these, so
@@ -5720,6 +5873,11 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return float64(rt.strLen(o))
 		case "to_s":
 			return o
+		case "inspect":
+			// The QUOTED form. Missing from both compiled halves, where
+			// ruby-interpreter.abnf answered - so `p` of a string, or any
+			// .inspect reaching a String, was a halves divergence.
+			return rt.rubyInspect(o)
 		case "to_sym", "intern":
 			return jsSym{s: o}
 		case "upcase":
@@ -5753,6 +5911,8 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		}
 		if keys, vals, isDict := dictParts(o); isDict {
 			switch name {
+			case "inspect":
+				return rt.rubyInspect(o)
 			case "size", "length":
 				return float64(len(keys.elems))
 			case "keys":
@@ -5767,7 +5927,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				}
 				return out
 			case "include?", "has_key?", "key?":
-				return rt.dictFind(keys, argAt(args, 0)) >= 0
+				return rt.rubyDictFind(keys, argAt(args, 0)) >= 0
 			case "each":
 				for i := range keys.elems {
 					rt.call(argAt(args, 0), jsUndef, []interface{}{keys.elems[i], vals.elems[i]})
@@ -5858,7 +6018,41 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		}
 		return t.elems[len(t.elems)-1]
 	case "include?", "contains":
-		return rt.dictScan(t, argAt(args, 0)) >= 0 // A list, so a scan and no index.
+		// Array#include? is ==, not === and not eql?: `[[1]].include?([1])` and
+		// `[1].include?(1.0)` are both true in MRI. It was a `===` scan, which
+		// answered false to both. A plain scan and not the dict index, because an
+		// ordinary data array must not grow a key index just to be searched.
+		return rt.rubyArrIndex(t, argAt(args, 0)) >= 0
+	case "inspect":
+		return rt.rubyInspect(t)
+	case "index", "find_index":
+		// == as well, and the same scan: `[[1]].index([1])` is 0 in MRI.
+		return rubyIdxOrNil(rt.rubyArrIndex(t, argAt(args, 0)))
+	case "rindex":
+		for i := len(t.elems) - 1; i >= 0; i-- {
+			if rt.rubyEq(t.elems[i], argAt(args, 0)) {
+				return float64(i)
+			}
+		}
+		return jsNull
+	case "uniq":
+		// uniq is eql?/hash, NOT ==: `[1, 1.0].uniq` keeps BOTH in MRI, because
+		// 1.eql?(1.0) is false across classes. index and include? above are ==,
+		// which is why they do not share this test.
+		out := &jsArray{}
+		for _, e := range t.elems {
+			dup := false
+			for _, k := range out.elems {
+				if rt.rubyEql(k, e) {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				out.elems = append(out.elems, e)
+			}
+		}
+		return out
 	case "to_a":
 		return &jsArray{elems: append([]interface{}{}, t.elems...)}
 	case "each":
@@ -6725,7 +6919,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return w(rt.rubyMethod(u(a[0]), "[]", []interface{}{u(a[1])}))
 			}
 			if keys, vals, ok := dictParts(u(a[0])); ok {
-				i := rt.dictFind(keys, u(a[1]))
+				i := rt.rubyDictFind(keys, u(a[1]))
 				if i < 0 {
 					return w(jsNull)
 				}
@@ -6766,7 +6960,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return 0
 			}
 			if keys, vals, ok := dictParts(t); ok {
-				if i := rt.dictFind(keys, u(a[1])); i >= 0 {
+				if i := rt.rubyDictFind(keys, u(a[1])); i >= 0 {
 					vals.elems[i] = u(a[2])
 				} else {
 					dictAppend(keys, vals, u(a[1]), u(a[2]))
@@ -7611,6 +7805,24 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_rprint": func(a []uint64) uint64 {
 			fmt.Fprint(outWriter, wtf8Clean(rt.rubyStr(u(a[0]))))
 			return 0
+		},
+		// Kernel#p: INSPECT, one argument per line, answering the argument (the
+		// whole list when there is more than one, nil when there is none). It is
+		// one extern rather than an emitted loop because that is what makes the
+		// return value the same in both engines. `p` used to resolve as a bare
+		// NAME and abort with "variable not defined: p".
+		"js_rp": func(a []uint64) uint64 {
+			arr, ok := u(a[0]).(*jsArray)
+			if !ok || len(arr.elems) == 0 {
+				return w(jsNull)
+			}
+			for _, e := range arr.elems {
+				fmt.Fprintln(outWriter, wtf8Clean(rt.rubyInspect(e)))
+			}
+			if len(arr.elems) == 1 {
+				return w(arr.elems[0])
+			}
+			return w(&jsArray{elems: append([]interface{}{}, arr.elems...)})
 		},
 		// %W[..] / %I[..]: split an interpolated body on whitespace into an array of
 		// strings (or of symbols when the flag is set).

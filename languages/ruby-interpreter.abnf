@@ -3171,8 +3171,35 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function makeBitNot(t) { return function() { return bitNotOf(t()) } }
     // One binary step for every operator that is not '+': a user object dispatches to
     // its own operator method (def +, def <=>, def []), everything else is numeric.
+    // Array#- (set difference, by VALUE) and Array#* (repeat). Both are the
+    // compiler half's rubyBin / rbBin arms, and their absence here was a halves
+    // divergence in two different shapes (docs/todo.md 2.9): `a - b` ABORTED with
+    // "not a number in '-'", and `a * 2` answered the silent NaN that numBin makes
+    // of an array - the worse of the two, since nothing stops the program.
+    function arrDiff(l, r) {
+        var out = []
+        for (var i = 0; i < l.length; i++) {
+            // eql?, like uniq and unlike include?: `[1, 2.0] - [2]` is [1, 2.0].
+            var drop = false
+            for (var j = 0; j < r.length; j++) {
+                if (classOf(l[i]) === classOf(r[j]) && rubyEq(l[i], r[j])) { drop = true; break }
+            }
+            if (!drop) { out.push(l[i]) }
+        }
+        return out
+    }
+    function arrRepeat(l, times) {
+        var n = Math.trunc(toF(times))
+        var out = []
+        for (var t = 0; t < n; t++) { for (var j = 0; j < l.length; j++) { out.push(l[j]) } }
+        return out
+    }
     function rbin(op, l, r) {
         if (isUserObj(l)) { return mcall(l, op, [r], null) }
+        if (Array.isArray(l)) {
+            if (op == "-" && Array.isArray(r)) { return arrDiff(l, r) }
+            if (op == "*") { return arrRepeat(l, r) }
+        }
         return numBin(op, l, r)
     }
     function makePow(items) {
@@ -3338,7 +3365,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Ruby to_s / interpolation and inspect.
     // A Float prints with a decimal point even when its value is whole (1000.0), and
     // goes to exponent form outside RUBY'S window rather than JavaScript's:
-    // numeric.c flo_to_s is exponential when `decpt < -3 || decpt > DBL_DIG` (15),
+    // numeric.c flo_to_s is exponential when
+    // `decpt < -3 || (decpt > DBL_DIG (15) && decpt >= digits.length)` - the high
+    // test has TWO parts, because MRI goes exponential only when the fixed form
+    // would have to pad with zeros, so 1234567890123456.0 (decpt 16, 16 digits) is
+    // exponential and 3002399751580330.5 (decpt 16, 17 digits) is not,
     // with the mantissa always carrying a fraction digit ("1.0e+15") and the exponent
     // always signed and at least two digits ("e-05"). The before / after table and the
     // ground truth (ruby 2.6.10p210) are at rubyFloStr in abnf/jsrt.go, which this
@@ -3385,7 +3416,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var digits = p.d
         var e10 = p.e
         var decpt = e10 + 1
-        if (decpt < 0 - 3 || decpt > 15) {
+        if (decpt < 0 - 3 || (decpt > 15 && decpt >= digits.length)) {
             var out = digits.substring(0, 1)
             if (digits.length > 1) { out = out + "." + digits.substring(1) }
             else { out = out + ".0" }
@@ -3446,7 +3477,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var out2 = "{"
             for (var k = 0; k < v.keys.length; k++) {
                 if (k > 0) { out2 += ", " }
-                out2 += rinspect(v.keys[k]) + " => " + rinspect(v.vals[k])
+                // NO SPACES around the arrow, which is MRI: `{1=>2, "a"=>[1, 2]}`.
+                out2 += rinspect(v.keys[k]) + "=>" + rinspect(v.vals[k])
             }
             return out2 + "}"
         }
@@ -4576,6 +4608,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "frozen?") { return typeof target == "string" || isSym(target) || isNumV(target) }
         if (name == "hash" || name == "object_id") { return 0 }
         if (name == "tap") { blockCall(blk, [target]); return target }
+        // Comparable#between? and #clamp are defined by <=> ALONE, so Integer,
+        // Float, Rational and String all answer them off one pair of arms - which
+        // is why they sit here and not in three method tables. They were
+        // compiler-half-only (docs/todo.md 2.9); a user class that defines either
+        // itself still wins, because its own dispatch is below.
+        if ((name == "between?" || name == "clamp") && !isUserObj(target)) {
+            if (name == "between?") { return rcmp(target, args[0]) >= 0 && rcmp(target, args[1]) <= 0 }
+            if (rcmp(target, args[0]) < 0) { return args[0] }
+            if (rcmp(target, args[1]) > 0) { return args[1] }
+            return target
+        }
         if (isBig(target)) { return bigMethod(target, name, args, blk) }
         if (isNumV(target) && typeof target != "number") { return numberMethod(target, name, args, blk) }
         if (isSym(target)) {
@@ -4701,6 +4744,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             fail("unknown String method: " + name)
         }
         if (isDict(target)) {
+            if (name == "inspect") { return rinspect(target) }
             if (name == "size" || name == "length") { return target.keys.length }
             if (name == "keys") { return target.keys.slice(0) }
             if (name == "values") { return target.vals.slice(0) }
@@ -4814,11 +4858,40 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // past 2^53 are different objects, so indexOf alone answered false where
         // both compiled halves (which route this through their dict find, and
         // therefore through a value comparison) answered true.
+        // Array#include? / #index / #find_index are ==, not === and not eql?:
+        // `[[1]].include?([1])` and `[1].include?(1.0)` are both true in MRI. This
+        // was `indexOf` plus a big-only fallback scan, which answered false to
+        // both, and rubyEq subsumes the big arm it replaces.
         if (name == "include?" || name == "contains") {
-            if (t.indexOf(args[0]) >= 0) { return true }
-            if (!isBig(args[0])) { return false }
-            for (i = 0; i < t.length; i++) { if (isBig(t[i]) && bigCmp(t[i], args[0]) == 0) { return true } }
+            for (i = 0; i < t.length; i++) { if (rubyEq(t[i], args[0])) { return true } }
             return false
+        }
+        // inspect / index / find_index / rindex / uniq. All four were missing from
+        // EVERY engine (docs/todo.md 2.9 recorded them as an interpreter gap; they
+        // were not), and index and uniq compare BY VALUE - `[[1]].index([1])` is 0
+        // in MRI - which is what dictScan/rbDictFind/core.keyEq now say too.
+        if (name == "inspect") { return rinspect(t) }
+        if (name == "index" || name == "find_index") {
+            for (i = 0; i < t.length; i++) { if (rubyEq(t[i], args[0])) { return i } }
+            return null
+        }
+        if (name == "rindex") {
+            for (i = t.length - 1; i >= 0; i--) { if (rubyEq(t[i], args[0])) { return i } }
+            return null
+        }
+        // uniq is eql?/hash, NOT ==: `[1, 1.0].uniq` keeps BOTH in MRI, because
+        // 1.eql?(1.0) is false across classes. index and include? are ==, which is
+        // why they do not share this test.
+        if (name == "uniq") {
+            var uq = []
+            for (i = 0; i < t.length; i++) {
+                var seen = false
+                for (var uj = 0; uj < uq.length; uj++) {
+                    if (classOf(uq[uj]) === classOf(t[i]) && rubyEq(uq[uj], t[i])) { seen = true; break }
+                }
+                if (!seen) { uq.push(t[i]) }
+            }
+            return uq
         }
         if (name == "to_a") { return t.slice(0) }
         if (name == "each") { for (i = 0; i < t.length; i++) { blockCall(blk, [t[i]]) } return t }
@@ -6667,6 +6740,30 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var a = argsArray(arguments)
         return rformat(rstr(a[0]), a.slice(1))
     }
+    hostGlobals["sprintf"] = function() {
+        var sa = argsArray(arguments)
+        return rformat(rstr(sa[0]), sa.slice(1))
+    }
+    // Kernel#printf is print(format(...)). It was missing here, and the compiler
+    // half was resolving the bare name to the SHARED host printf instead of Ruby's
+    // - Go's fmt under llvm.Run ("%!f(string=1.)") and something else again
+    // natively (the directives came out verbatim). Three engines, three answers,
+    // none of them Ruby's; docs/todo.md 2.9 recorded only the missing half.
+    hostGlobals["printf"] = function() {
+        var pa = argsArray(arguments)
+        if (pa.length == 0) { return null }
+        print(rformat(rstr(pa[0]), pa.slice(1)))
+        return null
+    }
+    // Kernel#p writes INSPECT (not to_s) one argument per line, and answers the
+    // argument - or the argument list when there is more than one, nil when none.
+    hostGlobals["p"] = function() {
+        var ia = argsArray(arguments)
+        for (var pi = 0; pi < ia.length; pi++) { println(rinspect(ia[pi])) }
+        if (ia.length == 0) { return null }
+        if (ia.length == 1) { return ia[0] }
+        return ia
+    }
     hostGlobals["raise"] = function() { throw {__exc: true, v: mkExc(hostGlobals["RuntimeError"], rstr(arguments[0])) } }
     // Kernel#loop: an endless loop whose only exit is a break out of the block (which
     // arrives here as the non-local break makeCall catches, so `loop { break 42 }` is 42).
@@ -6744,7 +6841,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isBig(k)) { return "b" + bigStr(k) }
         return null
     }
+    // An ARRAY is a VALUE key in Ruby (Array#hash and Array#eql? are structural),
+    // so `{[1] => 5}[[1]]` is 5 where a `===` scan answered nil - docs/todo.md
+    // 2.11. It belongs HERE and not in interp-core's dictKeyEq, which nine
+    // languages share and in which two arrays are two objects: python's `{(1,):5}`
+    // is a tuple, JavaScript's `Map` keys by identity. A Hash keys the same way.
+    // dictKeyId leaves an object key unindexed, so this is reached on the FALLBACK
+    // SCAN only and an unchanged program pays nothing.
+    //
+    // One MRI corner is deliberately not modelled: MRI hashes the key ONCE at
+    // insertion, so mutating a key array afterwards loses the entry until
+    // Hash#rehash. This compares at lookup time and therefore still finds it -
+    // the same shape the compiled halves' fallback scans have.
     core.keyEq = function(a, b) {
+        if (Array.isArray(a) && Array.isArray(b)) { return rubyEq(a, b) }
+        if (isDict(a) && isDict(b)) { return rubyEq(a, b) }
         if (!isBig(a) || !isBig(b)) { return false }
         return bigCmp(a, b) == 0
     }

@@ -2439,7 +2439,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     }
                     var rv2 = items[i].kwT(b)
                     b = rv2.b
-                    callExt(b, "js_pyset", [dictV, keyV, rv2.v])
+                    callExt(b, "js_rset", [dictV, keyV, rv2.v])
                     continue
                 }
                 if (items[i].splat != undefined) {
@@ -2488,7 +2488,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 b = rk.b
                 var rv = items[i].hv(b)
                 b = rv.b
-                callExt(b, "js_pyset", [d, rk.v, rv.v])
+                callExt(b, "js_rset", [d, rk.v, rv.v])
             }
             return {b: b, v: d}
         }
@@ -2508,7 +2508,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
         var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
         var kV = callExt(bodyB, "js_pyget", [keysV, iV2])
-        callExt(bodyB, "js_pyset", [dstV, kV, callExt(bodyB, "js_pyget", [srcV, kV])])
+        callExt(bodyB, "js_rset", [dstV, kV, callExt(bodyB, "js_pyget", [srcV, kV])])
         callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
                                         intWrap(bodyB, callExt(bodyB, "js_jadd", [iV2, emitNum(bodyB, 1)]))])
         bodyB.NewBr(headB)
@@ -2877,13 +2877,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (kw[j].kwname != undefined) {
                     var rv = kw[j].kwT(b)
                     b = rv.b
-                    callExt(b, "js_pyset", [d, callExt(b, "js_sym", [emitStr(b, kw[j].kwname)]), rv.v])
+                    callExt(b, "js_rset", [d, callExt(b, "js_sym", [emitStr(b, kw[j].kwname)]), rv.v])
                 } else if (kw[j].kwkeyT != undefined) {
                     var rk = kw[j].kwkeyT(b)
                     b = rk.b
                     var rkv = kw[j].kwT(b)
                     b = rkv.b
-                    callExt(b, "js_pyset", [d, rk.v, rkv.v])
+                    callExt(b, "js_rset", [d, rk.v, rkv.v])
                 } else {
                     var rh = kw[j].splatT(b)
                     b = emitMergeDict(rh.b, d, rh.v)
@@ -4084,6 +4084,36 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return {b: b, v: callExt(b, "js_rformat", [ea.v])}
             }
         }
+        // Kernel#printf and Kernel#p, both of which a program may shadow with a def
+        // of its own - so unlike format/sprintf above, the test is made INSIDE the
+        // emitted closure, where rubyAllMethods is complete (a def anywhere in the
+        // file counts) and curClsName is the class being emitted. `p` in
+        // particular is an ordinary Ruby method name.
+        //
+        // printf is print(format(...)). Without this arm the bare name resolved to
+        // the SHARED host printf, which is not Ruby's and was not even one answer:
+        // `printf("%.2f", 1.5)` came out "%!f(string=1.)" under llvm.Run (Go's
+        // fmt) and "%.2f" verbatim from the native binary. docs/todo.md 2.9
+        // recorded only the missing interpreter half. p writes INSPECT one
+        // argument per line and answers the argument; the whole of it is js_rp, so
+        // both engines agree on that return value too.
+        if ((name == "printf" || name == "p") && args.length > 0 && !hasBlockArg(args)) {
+            var kargs = args
+            var kname = name
+            var kernelT = function(b) {
+                var eka = emitArgs(b, kargs)
+                b = eka.b
+                if (kname == "p") { return {b: b, v: callExt(b, "js_rp", [eka.v])} }
+                callExt(b, "js_rprint", [callExt(b, "js_rformat", [eka.v])])
+                return {b: b, v: hNull}
+            }
+            var fallbackT = makePlainCall(kname, kargs)
+            return function(b) {
+                if (rubyAllMethods["$" + kname] === true) { return fallbackT(b) }
+                if (selfMethod(curClsName, kname)) { return fallbackT(b) }
+                return kernelT(b)
+            }
+        }
         // Kernel#loop: an endless loop whose only exit is a `break' out of the block
         // (or a StopIteration, which this lowering does not model). Emitted here as a
         // real IR loop calling the block, so the break marker ends the `loop' call.
@@ -4129,6 +4159,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     var ia = emitArgs(bb, args)
                     return {b: ia.b, v: callExt(ia.b, "js_call", [fv, hUndef, ia.v])}
                 })
+            }
+            var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+            var ea = emitArgs(b, args)
+            b = ea.b
+            return {b: b, v: callExt(b, "js_call", [fV, hUndef, ea.v])}
+        }
+    }
+    // The no-block tail of makeCall, as a function: what a plain `name(args)` emits
+    // when nothing above claimed the name. It is what the printf / p arms fall back
+    // to when the program defines a method of that name itself.
+    function makePlainCall(name, args) {
+        return function(b) {
+            if (selfMethod(curClsName, name)) {
+                var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+                var eam = emitArgs(b, args)
+                b = eam.b
+                return {b: b, v: callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey(name)), eam.v])}
             }
             var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
             var ea = emitArgs(b, args)

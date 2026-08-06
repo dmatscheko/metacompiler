@@ -131,7 +131,9 @@ function rtkIsArr(v) { return rbIsArr(v) }
 function rtkCall(f, self, argv) { return f.apply(undefined, argv) }
 // js_pyset's two knobs.
 function rtkIsDict(v) { return rbIsDict(v) }
-function rtkDictFind(keys, k) { return rtDictFind(keys, k) }
+// RUBY'S find, not the bare `===` scan: a big Integer and an Array are both VALUE
+// keys here, so the shared js_pyset stores into the entry a Ruby program means.
+function rtkDictFind(keys, k) { return rbDictFind(keys, k) }
 
 // ===================================================== module state =========
 //
@@ -1329,7 +1331,9 @@ function rbNeg(v) {
 // rubyFloStr: a Float keeps its decimal point even when it is whole (1000.0), which
 // is what tells it apart from the Integer 1000, and goes to exponent form outside
 // RUBY'S window rather than JavaScript's. numeric.c flo_to_s: exponential when
-// `decpt < -3 || decpt > DBL_DIG` (15), the mantissa always carrying a fraction
+// `decpt < -3 || (decpt > DBL_DIG (15) && decpt >= digits.length)` - the high test
+// has TWO parts, because MRI goes exponential only when the fixed form would have
+// to pad with zeros, the mantissa always carrying a fraction
 // digit and the exponent always signed and at least two digits. The full before /
 // after table and the ground truth (ruby 2.6.10p210 - Float#to_s is unchanged in
 // 3.x and needs no Ruby-3 syntax to probe) are at rubyFloStr in abnf/jsrt.go.
@@ -1346,7 +1350,7 @@ function rbNeg(v) {
 function rtkFloDigits(a) {
     var p = rtSplit10(a)
     var decpt = p.e + 1
-    if (decpt < 0 - 3 || decpt > 15) { return rtSciText(p.d, p.e, true) }
+    if (decpt < 0 - 3 || (decpt > 15 && decpt >= p.d.length)) { return rtSciText(p.d, p.e, true) }
     return rtFixText(p.d, decpt)
 }
 
@@ -1407,7 +1411,8 @@ function rbInspect(v) {
         var j = 0
         while (j < keys.length) {
             if (j > 0) { s = s + ", " }
-            s = s + rbInspect(keys[j]) + " => " + rbInspect(vals[j])
+            // NO SPACES around the arrow, which is MRI: `{1=>2, "a"=>[1, 2]}`.
+            s = s + rbInspect(keys[j]) + "=>" + rbInspect(vals[j])
             j = j + 1
         }
         return s + "}"
@@ -2091,11 +2096,26 @@ function rbTruthy(v) {
 // A big is only ever the key equal of another big, which is what the Go twin's
 // strictEq (its *jsBigInt arm demands two of them) and the interpreter's
 // core.keyId namespace both say.
+// An ARRAY (and a Hash) is a VALUE key in Ruby - Array#hash and Array#eql? are
+// structural - so `{[1] => 5}[[1]]` is 5 where `===` answered nil
+// (docs/todo.md 2.11). That arm rides on the SAME fallback scan and for the same
+// reason, and it stays in RUBY's find rather than in rtDictFind, which nine
+// languages share and in which two arrays are two objects.
 function rbDictFind(keys, k) {
     var at = rtDictFind(keys, k)
     if (at >= 0) { return at }
     if (k === null) { return 0 - 1 }
     if (typeof k != "object") { return 0 - 1 }
+    if (rbIsArr(k) || rbIsDict(k)) {
+        var a = 0
+        while (a < keys.length) {
+            if (rbIsArr(keys[a]) || rbIsDict(keys[a])) {
+                if (rbEq(keys[a], k)) { return a }
+            }
+            a = a + 1
+        }
+        return 0 - 1
+    }
     if (k["__bint"] !== true) { return 0 - 1 }
     var i = 0
     while (i < keys.length) {
@@ -2135,6 +2155,14 @@ function rbPyEqual(x, y) {
         if (!rbTag(y, "__bint")) { return false }
         return rbABigCmp(x, y) == 0
     }
+    // A Float / Rational / Complex is a BOX for the same reason, and two boxes of
+    // one value are two objects - so `[1.0] == [1.0]` was FALSE in the NATIVE
+    // BINARY and true under llvm.Run, whose jsFlo is a Go VALUE struct that ==
+    // compares field by field, and true in MRI. A run-vs-native divergence that
+    // predates this round's Array work and that only a native probe could see:
+    // the matrix, --full and --cross all run llvm.Run. rbEq settles two numbers
+    // without reaching this function again.
+    if (rbIsNum(x) && rbIsNum(y)) { return rbEq(x, y) }
     if (rbIsArr(x)) {
         if (!rbIsArr(y)) { return false }
         if (x.length != y.length) { return false }
@@ -2199,6 +2227,24 @@ function rbEq(l, r) {
 }
 
 // rubySpaceship: null when the two cannot be compared, which is Ruby's answer.
+// The first position at which an element is Ruby-== to v, or -1. Array#include?,
+// #index and #find_index are all defined on ==.
+function rbArrIndex(t, v) {
+    var i = 0
+    while (i < t.length) {
+        if (rbEq(t[i], v)) { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// Ruby's eql?: == that does NOT convert across classes, so `1.eql?(1.0)` is
+// false where `1 == 1.0` is true. Array#uniq and Array#- compare with this.
+function rbEql(a, b) {
+    if (rbClassName(a) != rbClassName(b)) { return false }
+    return rbEq(a, b)
+}
+
 function rbSpaceship(l, r) {
     if (rbUserObj(l)) {
         var m = rbFindMethod(l, "<=>")
@@ -2569,6 +2615,9 @@ function rbBin(op, l, r) {
         }
     }
     if (op == "-") {
+        // Array#- is eql?/hash, like uniq and unlike include?: MRI answers
+        // `[1, 2.0] - [2]` with [1, 2.0]. This was rbPyEqual, which converts
+        // across the numeric classes and dropped the 2.0.
         if (rbIsArr(l) && rbIsArr(r)) {
             var diff = []
             var a = 0
@@ -2576,7 +2625,7 @@ function rbBin(op, l, r) {
                 var drop = false
                 var b = 0
                 while (b < r.length) {
-                    if (rbPyEqual(l[a], r[b])) {
+                    if (rbEql(l[a], r[b])) {
                         drop = true
                         break
                     }
@@ -2943,17 +2992,9 @@ function rbNumMethod(t, name, args) {
     if (name == "fdiv") { return rbMkFlo(x / rbToF(rbArgAt(args, 0))) }
     if (name == "pow" || name == "**") { return rbBin("**", t, rbArgAt(args, 0)) }
     if (name == "gcd") { return rbGcd(x, rbToF(rbArgAt(args, 0))) }
-    if (name == "between?") {
-        if (x < rbToF(rbArgAt(args, 0))) { return false }
-        return x <= rbToF(rbArgAt(args, 1))
-    }
-    if (name == "clamp") {
-        var clo = rbToF(rbArgAt(args, 0))
-        var chi = rbToF(rbArgAt(args, 1))
-        if (x < clo) { return args[0] }
-        if (x > chi) { return args[1] }
-        return t
-    }
+    // between? / clamp used to be here, on rbToF. They are Comparable's, they are
+    // shared with String, and on a big Integer the double was not exact -
+    // rbMethod answers both through rbSpaceship before this table is reached.
     if (name == "real") { return rbReOf(t) }
     if (name == "imaginary" || name == "imag") { return rbImOf(t) }
     if (name == "+" || name == "-" || name == "*" || name == "/" || name == "%") { return rbBin(name, t, rbArgAt(args, 0)) }
@@ -2991,7 +3032,47 @@ function rbArrayMethod(t, name, args) {
         if (t.length == 0) { return null }
         return t[t.length - 1]
     }
-    if (name == "include?" || name == "contains") { return rbDictFind(t, rbArgAt(args, 0)) >= 0 }
+    // Array#include? / #index / #find_index are ==, not === and not eql?:
+    // `[[1]].include?([1])` and `[1].include?(1.0)` are both true in MRI. This was
+    // a `===` find, which answered false to both. A plain scan and not the dict
+    // index: an ordinary data array must not grow a key index to be searched.
+    if (name == "include?" || name == "contains") { return rbArrIndex(t, rbArgAt(args, 0)) >= 0 }
+    // inspect / index / find_index / rindex / uniq, all missing from every engine
+    // (docs/todo.md 2.9 recorded them as an interpreter gap; they were not). index
+    // and uniq compare BY VALUE - `[[1]].index([1])` is 0 in MRI - which is what
+    // rbDictFind says.
+    if (name == "inspect") { return rbInspect(t) }
+    if (name == "index" || name == "find_index") {
+        var ix = rbArrIndex(t, rbArgAt(args, 0))
+        if (ix < 0) { return null }
+        return ix
+    }
+    if (name == "rindex") {
+        var ri = t.length - 1
+        while (ri >= 0) {
+            if (rbEq(t[ri], rbArgAt(args, 0))) { return ri }
+            ri = ri - 1
+        }
+        return null
+    }
+    // uniq is eql?/hash, NOT ==: `[1, 1.0].uniq` keeps BOTH in MRI, because
+    // 1.eql?(1.0) is false across classes. index and include? are ==, which is
+    // why they do not share this test.
+    if (name == "uniq") {
+        var uq = []
+        var ui = 0
+        while (ui < t.length) {
+            var dup = false
+            var uj = 0
+            while (uj < uq.length) {
+                if (rbEql(uq[uj], t[ui])) { dup = true; break }
+                uj = uj + 1
+            }
+            if (!dup) { uq.push(t[ui]) }
+            ui = ui + 1
+        }
+        return uq
+    }
     if (name == "to_a") { return rtCopyArr(t) }
     if (name == "each") {
         var e = 0
@@ -3099,6 +3180,13 @@ function rbMethod(target, name, args) {
         if (rbClassName(target) != "" && !rbUserObj(target)) { return rbIsA(target, rbArgAt(args, 0)) }
     }
     if (name == "nil?") { return rbIsNil(target) }
+    // TrueClass / FalseClass. Without this arm both compiled halves fell through
+    // to the shared member call and aborted with "method call 'inspect' on a
+    // boolean", where ruby-interpreter.abnf answered.
+    if (name == "to_s" || name == "inspect") {
+        if (target === true) { return "true" }
+        if (target === false) { return "false" }
+    }
     if (name == "message" || name == "full_message") {
         // Exception#message, only for an INSTANCE that defines no message method
         // of its own, so a user class named message stays in charge.
@@ -3121,6 +3209,28 @@ function rbMethod(target, name, args) {
     }
     if (name == "to_proc") {
         if (rbIsFn(target)) { return target }
+    }
+    // Comparable#between? and #clamp are defined by <=> ALONE, so Integer, Float,
+    // Rational and String all answer them off ONE pair of arms. They used to sit
+    // in the numeric table only, which left `"m".between?("a", "z")` aborting
+    // (docs/todo.md 2.9) - and that table compared through rbToF, so a big
+    // Integer answered on the double rather than exactly. rbSpaceship is the
+    // whole rule and it is big-aware. A user class that defines either method
+    // itself still wins: its own dispatch is below.
+    if (name == "between?" || name == "clamp") {
+        if (!rbUserObj(target)) {
+            var cmpLo = rbSpaceship(target, rbArgAt(args, 0))
+            var cmpHi = rbSpaceship(target, rbArgAt(args, 1))
+            if (cmpLo !== null && cmpHi !== null) {
+                if (name == "between?") {
+                    if (cmpLo < 0) { return false }
+                    return cmpHi <= 0
+                }
+                if (cmpLo < 0) { return rbArgAt(args, 0) }
+                if (cmpHi > 0) { return rbArgAt(args, 1) }
+                return target
+            }
+        }
     }
     // NilClass's conversions. MRI answers "" / "nil" / [] / 0 / 0.0, so they must
     // not reach the "method .x on nil" abort at the bottom.
@@ -3148,6 +3258,10 @@ function rbMethod(target, name, args) {
     if (typeof target == "string") {
         if (name == "length" || name == "size") { return target.length }
         if (name == "to_s") { return target }
+        // The QUOTED form. Missing from both compiled halves, where
+        // ruby-interpreter.abnf answered - so `p` of a string, or any .inspect
+        // reaching a String, was a halves divergence.
+        if (name == "inspect") { return rbInspect(target) }
         if (name == "to_sym" || name == "intern") { return rbSym(target) }
         if (name == "upcase") { return rbUpper(target) }
         if (name == "downcase") { return rbLower(target) }
@@ -3170,6 +3284,7 @@ function rbMethod(target, name, args) {
         if (rbIsDict(target)) {
             var keys = target["keys"]
             var vals = target["vals"]
+            if (name == "inspect") { return rbInspect(target) }
             if (name == "size" || name == "length") { return keys.length }
             if (name == "keys") { return rtCopyArr(keys) }
             if (name == "values") { return rtCopyArr(vals) }
@@ -3456,6 +3571,21 @@ function js_rputs(v) {
 function js_rprint(v) {
     print(rbStr(v))
     return undefined
+}
+
+// Kernel#p: INSPECT, one argument per line, answering the argument (the whole
+// list when there is more than one, nil when there is none). One extern rather
+// than an emitted loop, so the return value is the same in both engines.
+function js_rp(args) {
+    if (!rbIsArr(args)) { return null }
+    if (args.length == 0) { return null }
+    var i = 0
+    while (i < args.length) {
+        println(rbInspect(args[i]))
+        i = i + 1
+    }
+    if (args.length == 1) { return args[0] }
+    return rtCopyArr(args)
 }
 
 // Kernel#format / sprintf: the argument array is [format, args...].

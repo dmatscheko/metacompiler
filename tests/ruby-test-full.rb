@@ -1078,6 +1078,88 @@ def s33
   check("b56", (18446744073709551616 + 0.5).class.to_s == "Float")
   check("b57", 18446744073709551616.to_f.class.to_s == "Float")
 end
+
+# ===== SECTION 34: the value-key rule, Comparable and the Kernel writers =====
+# docs/todo.md 1.6, 2.9 and 2.11. Every right-hand side is ruby 2.6.10p210's own
+# answer, taken from tests/probe.sh's oracle leg; the four legs (interpreter,
+# llvm.Run, the native binary and MRI) agree on all of it.
+def s34
+  # Float#to_s: MRI's HIGH test has TWO parts. `decpt > 15` alone is not it -
+  # exponential also needs `decpt >= digits.length`, i.e. it is used only when the
+  # fixed form would have to pad with zeros. So a 16-digit-point value with 17
+  # digits stays fixed while one with 16 digits does not. Before the fix the first
+  # right-hand side read 3.0023997515803305e+15. Settled against /usr/bin/ruby
+  # over 3,000 random doubles in [1e15, 1e19).
+  check("v01", 9007199254740991.fdiv(3).to_s == "3002399751580330.5")
+  check("v02", 1234567890123456.5.to_s == "1234567890123456.5")
+  check("v03", 1234567890123456.0.to_s == "1.234567890123456e+15")
+  check("v04", 12345678901234567.0.to_s == "1.2345678901234568e+16")
+  check("v05", 9999999999999999.0.to_s == "1.0e+16" && 1e14.to_s == "100000000000000.0")
+  # Hash#inspect writes NO SPACES around the arrow.
+  check("v06", {1 => 2}.to_s == "{1=>2}")
+  check("v07", {1 => 2, "a" => [1, 2], :b => nil}.inspect == "{1=>2, \"a\"=>[1, 2], :b=>nil}")
+  check("v08", {1 => {2 => 3}}.to_s == "{1=>{2=>3}}")
+  # An ARRAY is a VALUE key: Array#hash and Array#eql? are structural. This was
+  # nil in all three engines, and it is the language's own dict path that decides
+  # it - not the strict_eq / rtDictFind that nine languages share.
+  vh = {[1] => 5, [1, 2] => 8}
+  check("v09", vh[[1]] == 5 && vh[[1, 2]] == 8)
+  check("v10", vh[[2]] == nil)
+  vh2 = {}
+  vh2[[3, 4]] = 9
+  vh2[[3, 4]] = 10
+  check("v11", vh2[[3, 4]] == 10 && vh2.size == 1)
+  check("v12", {{1 => 2} => 3}[{1 => 2}] == 3)
+  check("v13", [[1], [2]].include?([2]) && [[1]].index([1]) == 0)
+  # Array#- and Array#*: the interpreter had neither. `-` ABORTED and `*`
+  # answered a silent NaN, which is the worse of the two.
+  v14a = [1, 2, 3, 2]
+  check("v14", (v14a - [2]) == [1, 3])
+  check("v15", (v14a * 2) == [1, 2, 3, 2, 1, 2, 3, 2] && ([1] * 0) == [])
+  check("v16", (["x", "y", "x"] - ["x"]) == ["y"])
+  # Comparable#between? / #clamp are defined by <=> alone, so String answers them
+  # too - and a big Integer answers EXACTLY rather than through the double.
+  v17n = [5, 0, 20, 2.5]
+  check("v17", v17n[0].between?(1, 9) && !v17n[1].between?(1, 9))
+  check("v18", v17n[2].clamp(1, 9) == 9 && v17n[1].clamp(1, 9) == 1)
+  check("v19", v17n[3].between?(1, 9) && v17n[3].clamp(4, 9) == 4)
+  check("v20", "m".between?("a", "z") && "A".clamp("a", "z") == "a")
+  check("v21", (2 ** 64 + 1).between?(2 ** 64, 2 ** 64 + 2))
+  check("v22", (2 ** 64).clamp(2 ** 64 + 1, 2 ** 64 + 2) == 2 ** 64 + 1)
+  # Array#inspect / index / rindex / uniq, and Hash#inspect: missing from EVERY
+  # engine. index and uniq compare by value, like the Hash key rule above.
+  v23a = [1, 2, 3, 2, 4]
+  check("v23", v23a.inspect == "[1, 2, 3, 2, 4]" && [1, "a", nil, 2.5].inspect == "[1, \"a\", nil, 2.5]")
+  check("v24", v23a.index(2) == 1 && v23a.rindex(2) == 3 && v23a.index(99) == nil)
+  check("v25", v23a.uniq == [1, 2, 3, 4] && [[1], [2], [1]].uniq == [[1], [2]])
+  check("v26", {1 => 2}.inspect == "{1=>2}")
+  # TrueClass / FalseClass to_s and inspect: both compiled halves aborted with
+  # "method call 'inspect' on a boolean".
+  check("v27", true.inspect == "true" && false.inspect == "false" && (1 == 1).inspect == "true")
+  # Kernel#p answers its argument (the whole list for more than one) and writes
+  # INSPECT. Kernel#printf is print(format(...)): the compiler used to resolve the
+  # bare name to the SHARED host printf, which is not Ruby's and was not even one
+  # answer between llvm.Run and the native binary.
+  check("v28", (p "a") == "a")
+  check("v29", (p 1, 2) == [1, 2])
+  check("v30", sprintf("%05.2f", 1.5) == "01.50" && format("%d", 3) == "3")
+  # Ruby draws a line between == and eql?, and the Array methods do not all sit
+  # on the same side of it: include?/index are ==, so 1 and 1.0 match; uniq and
+  # Array#- are eql?/hash, so they do NOT. Every engine used to answer the `===`
+  # of the shared runtime for all four, which is neither.
+  check("v31", [1].include?(1.0) && [1].index(1.0) == 0)
+  check("v32", [1, 1.0, 1].uniq == [1, 1.0] && ([1, 2.0] - [2]) == [1, 2.0])
+  check("v33", ([2.0] - [2.0]) == [] && [2.0, 2.0].uniq == [2.0])
+  # String#inspect is the QUOTED form, and it was missing from both compiled
+  # halves - so `p "a"` and any .inspect reaching a String diverged.
+  check("v34", "a".inspect == "\"a\"" && nil.inspect == "nil" && :y.inspect == ":y")
+  # A Float is a BOX, and two boxes of one value are two objects: `[1.0] == [1.0]`
+  # was FALSE in the NATIVE BINARY and true under llvm.Run (whose Float is a Go
+  # value struct) and in MRI. A run-vs-native divergence in layer 2 that the
+  # matrix, --full and --cross are all blind to by construction.
+  check("v35", [1.0] == [1.0] && [1, 1.0] == [1, 1.0] && [1] == [1.0])
+  check("v36", ({1 => 1.0} == {1 => 1.0}) && [[1.5]] == [[1.5]])
+end
 # ===== END SECTIONS =====
 s01() # SECTION-CALL 01
 s02() # SECTION-CALL 02
@@ -1112,5 +1194,6 @@ s30() # SECTION-CALL 30
 s31() # SECTION-CALL 31
 s32() # SECTION-CALL 32
 s33() # SECTION-CALL 33
+s34() # SECTION-CALL 34
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
