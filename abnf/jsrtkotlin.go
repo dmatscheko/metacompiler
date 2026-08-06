@@ -568,7 +568,7 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 		return ok && math.IsNaN(f.f), true
 	case "hashCode":
 		if f, ok := target.(jsJFlo); ok {
-			return float64(ktDblHash(f.f)), true
+			return float64(ktFloHash(f)), true
 		}
 		if b, ok := target.(jsGInt); ok {
 			return float64(int32(b.v ^ (b.v >> 32))), true
@@ -584,11 +584,8 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 // 1.5.hashCode() answered 1 where java answers 1073217536. The twin is kDblHash in
 // kotlin-interpreter.abnf, which has to derive the bits arithmetically because
 // neither engine has typed arrays; here math.Float64bits is the whole job.
-// A FLOAT shares the jsJFlo box with a Double, and since the float WIDTH work the
-// style byte DOES say which of the two a value is - but 1.5f.hashCode() still
-// answers Double's hash and not Float's (floatToIntBits, 1069547520), because
-// that needs a binary32 bit EXTRACTION and only the rounding was written. Same
-// simplification in the interpreter half and in layer 2; recorded in docs/todo.md.
+// A FLOAT shares the jsJFlo box with a Double and is told apart by the style
+// byte, so it takes the OTHER hash - see ktFltHash and ktFloHash below.
 func ktDblHash(d float64) int32 {
 	// doubleToLongBits COLLAPSES every NaN to 0x7ff8000000000000, which
 	// math.Float64bits does not (Go's own math.NaN() is ...0001).
@@ -597,6 +594,34 @@ func ktDblHash(d float64) int32 {
 	}
 	bits := math.Float64bits(d)
 	return int32(bits ^ (bits >> 32))
+}
+
+// ktFltHash is java.lang.Float.hashCode, which is what Kotlin/JVM's
+// Float.hashCode() IS: floatToIntBits(f), read as a SIGNED Int - so it is the raw
+// binary32 bit pattern and not a fold of two halves, and the hash of a negative
+// float is a negative number (-1.5f is -1077936128). It is a different function
+// from ktDblHash at every value but a handful of coincidences: 1.5f hashes to
+// 1069547520 where the double 1.5 hashes to 1073217536, and -0.0f hashes to
+// -2147483648 where 0.0f hashes to 0, so the two zeros do NOT hash alike.
+// Measured against java 24.0.2 over 28 values, docs/todo.md 2.4.
+func ktFltHash(d float64) int32 {
+	// floatToIntBits COLLAPSES every NaN to 0x7fc00000, exactly as
+	// doubleToLongBits collapses a double's.
+	if math.IsNaN(d) {
+		return 2143289344
+	}
+	return int32(math.Float32bits(float32(d)))
+}
+
+// ktFloHash is the hash of a tag-14 box, which of the two depending on the style
+// byte. Every reader of a float's hash goes through it, so the width question is
+// asked in ONE place: the receiver method, ktElemHash, and through the latter
+// every collection fold and generated data-class hash.
+func ktFloHash(f jsJFlo) int32 {
+	if f.sty == floJavaF {
+		return ktFltHash(f.f)
+	}
+	return ktDblHash(f.f)
 }
 
 // ktBoxTypeName is the Kotlin type a box stands for, which is what `is` and the
@@ -1037,7 +1062,19 @@ func init() {
 				// value model makes a plain number an Int, so `10 is Long` is FALSE
 				// and `1.5 is Double` is TRUE - neither of which the shared probe can
 				// answer, since it has one number type and no float box.
-				return boolH(t == "Number" || t == "Double" || t == "Float")
+				// The style byte says WHICH of the two the box holds, so Double and
+				// Float are EXCLUSIVE: `1.5 is Float` and `1.5f is Double` are both
+				// false, where both were true while the width was invisible.
+				// `is Number` - and `is Any` / `is Comparable` above - stay true for
+				// either width, exactly as java.lang.Float and java.lang.Double both
+				// extend Number and implement Comparable.
+				if t == "Number" {
+					return boolH(true)
+				}
+				if b.sty == floJavaF {
+					return boolH(t == "Float")
+				}
+				return boolH(t == "Double")
 			}
 			return boolH(t == "Number" || t == "Int")
 		}
@@ -4295,8 +4332,9 @@ func ktElemHash(rt *jsrt, v interface{}) int64 {
 	case jsNullT:
 		return 0
 	case jsJFlo:
-		// java.lang.Double.hashCode, not the truncated value - see ktDblHash.
-		return int64(ktDblHash(t.f))
+		// java.lang.Double.hashCode of a Double and java.lang.Float.hashCode of a
+		// Float, not the truncated value - see ktFloHash.
+		return int64(ktFloHash(t))
 	}
 	if giIsNumeric(v) {
 		x := giVal(rt, v)
@@ -5898,6 +5936,11 @@ func ktSimpleName(v interface{}) interface{} {
 	case jsChar:
 		return "Char"
 	case jsJFlo:
+		// The style byte says which of the two the box holds, so `1.5f::class`
+		// is Float where it used to answer Double alongside every real double.
+		if t.sty == floJavaF {
+			return "Float"
+		}
 		return "Double"
 	case jsGInt:
 		return ktBoxTypeName(t)

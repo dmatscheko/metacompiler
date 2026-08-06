@@ -6437,7 +6437,7 @@ NotMemberKw = :script(~~
     function kHash(v) {
         if (v === null || v === undefined) { return 0 }
         if (kIsChar(v)) { return v.__char }
-        if (kIsFlo(v)) { return kDblHash(v.__flo) }
+        if (kIsFlo(v)) { return kIsF32(v) ? kFltHash(v.__flo) : kDblHash(v.__flo) }
         // Long.hashCode is (value xor (value ushr 32)) read as an Int; for every
         // narrower width that is the value itself.
         if (szIs(v)) { return szNum(szConv(szArith("^", v, szArith(">>", szConv(v, 64, true), 32)), 32, false)) | 0 }
@@ -6509,10 +6509,8 @@ NotMemberKw = :script(~~
     // exact power of two), and the 52-bit significand is split into its top 20 bits
     // and its bottom 32. Verified against java (JDK 24) for 1.5, 0.1, -1.5, 3.0,
     // +-0.0, NaN, +-Infinity, 1e300 and the smallest subnormal 4.9E-324.
-    // A FLOAT shares the {__flo} box with a Double in this value model, so
-    // 1.5f.hashCode() answers Double's hash (1073217536) and not Float's
-    // (1069547520) - see the box's own comment; nothing at runtime says which of the
-    // two a value is.
+    // A FLOAT shares the {__flo} box with a Double in this value model but carries
+    // __f32, so it takes the OTHER hash - kFltHash below.
     function kDblHash(d) {
         if (d !== d) { return 2146959360 }
         if (d === kInf) { return 2146435072 }
@@ -6540,6 +6538,48 @@ NotMemberKw = :script(~~
         var hi = (biased * 1048576) + hi20
         if (neg) { hi = hi - 2147483648 }
         return ((hi | 0) ^ ((m - (hi20 * 4294967296)) | 0)) | 0
+    }
+    // java.lang.Float.hashCode, which is what Kotlin/JVM's Float.hashCode() IS:
+    // floatToIntBits(f) read as a SIGNED Int - the raw binary32 pattern itself,
+    // NOT a fold of two halves the way the double's is, so a negative float has a
+    // negative hash (-1.5f is -1077936128). Same arithmetic derivation as kDblHash
+    // one width down: bias 127, 23 significand bits, the subnormal floor at 2^-126.
+    // It differs from kDblHash at all but a handful of coincidences - 1.5f is
+    // 1069547520 where the double 1.5 is 1073217536 - and the two ZEROS stay apart
+    // (-0.0f is -2147483648, 0.0f is 0), which is the case a value-based hash
+    // cannot see. Verified against java (JDK 24) over 28 values including the
+    // subnormals, both infinities, NaN, Float.MAX_VALUE and Float.MIN_VALUE.
+    function kFltHash(d) {
+        // floatToIntBits COLLAPSES every NaN to 0x7fc00000.
+        if (d !== d) { return 2143289344 }
+        if (d === kInf) { return 2139095040 }
+        if (d === kNegF(kInf)) { return 0 - 8388608 }
+        if (d === 0) { return (1 / d < 0) ? (0 - 2147483648) : 0 }
+        var neg = d < 0
+        var a = neg ? kNegF(d) : d
+        var e = 0
+        while (a >= 2) { a = a / 2; e = e + 1 }
+        while (a < 1) { a = a * 2; e = e - 1 }
+        // A value too big for a binary32 never reaches here from a Float box (every
+        // one is rounded on the way in), but the overflow answer is stated rather
+        // than left to wrap.
+        if (e > 127) { return neg ? (0 - 8388608) : 2139095040 }
+        var m = 0
+        var biased = 0
+        if (e < 0 - 126) {
+            // Subnormal: the biased exponent is 0 and there is no implicit leading 1,
+            // so the significand is scaled back down to the fixed exponent -126.
+            var k = (0 - 126) - e
+            var sub = a
+            while (k > 0) { sub = sub / 2; k = k - 1 }
+            m = sub * 8388608
+        } else {
+            m = (a - 1) * 8388608
+            biased = e + 127
+        }
+        var bits = (biased * 8388608) + m
+        if (neg) { bits = bits - 2147483648 }
+        return bits | 0
     }
     // The last resort for a method call the receiver's own type does not answer: a
     // VARIABLE of that name holding a function, called with the receiver as its first
@@ -9178,7 +9218,9 @@ NotMemberKw = :script(~~
     function kSimpleName(v) {
         if (v === null || v === undefined) { return null }
         if (kIsChar(v)) { return "Char" }
-        if (kIsFlo(v)) { return "Double" }
+        // The __f32 flag says which of the two the box holds, so `1.5f::class` is
+        // Float where it used to answer Double alongside every real double.
+        if (kIsFlo(v)) { return kIsF32(v) ? "Float" : "Double" }
         if (szIs(v)) { return kBoxTypeName(v) }
         if (typeof v == "number") { return "Int" }
         if (typeof v == "string") { return "String" }
@@ -9527,7 +9569,12 @@ NotMemberKw = :script(~~
         // number type and no float box.
         if (kIsFlo(v)) {
             if (t == "Any" || t == "Comparable" || t == "Number") { return true }
-            return t == "Double" || t == "Float"
+            // The box's __f32 flag says WHICH of the two it holds, so Double and
+            // Float are EXCLUSIVE: `1.5 is Float` and `1.5f is Double` are both
+            // false, where both were true while the width was invisible. `is Number`
+            // / `is Comparable` / `is Any` above stay true for either width, exactly
+            // as java.lang.Float and java.lang.Double both extend Number.
+            return kIsF32(v) ? t == "Float" : t == "Double"
         }
         if (typeof v == "number") {
             if (t == "Any" || t == "Comparable" || t == "Number") { return true }

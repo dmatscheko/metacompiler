@@ -681,12 +681,68 @@ fun sec24() {
     // 15af058 in six lines of kotlin.
     val ds24 = arrayOf(-14447655.0, 0.0)
     check("f32l", s24(ds24[0] * ds24[1]) == "-0.0" && s24(ds24[1] / ds24[0]) == "-0.0")
+    // ----- Float.hashCode() is floatToIntBits, a DIFFERENT function -----
+    // Kotlin/JVM's Float.hashCode() IS java.lang.Float.hashCode(), which is
+    // floatToIntBits(f) read as a SIGNED Int: the raw binary32 pattern, not the
+    // 64-bit XOR fold Double.hashCode() applies. While the width was invisible a
+    // Float answered the Double's hash at every value; both are measured on java
+    // 24.0.2 below, every operand read out of an array.
+    val fh = arrayOf(1.5f, -1.5f, -0.0f, 0.0f, 0.1f)
+    val dh = arrayOf(1.5, -1.5, -0.0, 0.1)
+    check("f32m", fh[0].hashCode() == 1069547520 && dh[0].hashCode() == 1073217536)
+    // A NEGATIVE float has a NEGATIVE hash (the sign bit is bit 31 of the answer),
+    // and the two zeros do NOT hash alike - the case a value-based hash cannot see.
+    check("f32n", fh[1].hashCode() == -1077936128 && dh[1].hashCode() == -1074266112)
+    check("f32o", fh[2].hashCode() == -2147483648 && fh[3].hashCode() == 0 &&
+                  dh[2].hashCode() == -2147483648)
+    // 0.1f is a different NUMBER from 0.1, so the two hashes are unrelated.
+    check("f32p", fh[4].hashCode() == 1036831949 && dh[3].hashCode() == -1507852285)
+    // The hard end of the bit extraction: NaN collapses to one pattern, the
+    // infinities, the smallest SUBNORMAL (Float.MIN_VALUE hashes to 1) and the
+    // largest finite magnitudes.
+    val fx = arrayOf(Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY,
+                     Float.MIN_VALUE, Float.MAX_VALUE, -Float.MAX_VALUE)
+    check("f32q", fx[0].hashCode() == 2143289344 && fx[1].hashCode() == 2139095040 &&
+                  fx[2].hashCode() == -8388608)
+    check("f32r", fx[3].hashCode() == 1 && fx[4].hashCode() == 2139095039 &&
+                  fx[5].hashCode() == -8388609)
+    // ...and the same hash reached through the collection fold, which is the other
+    // call site: java's Arrays.asList(1.5f).hashCode() is 31 + 1069547520.
+    check("f32s", listOf(fh[0]).hashCode() == 1069547551 &&
+                  listOf(dh[0]).hashCode() == 1073217567)
+    // ----- `is Float` and `is Double` are EXCLUSIVE -----
+    // Both were true for either width while nothing at runtime said which of the
+    // two a box held. On the JVM these are instanceof against java.lang.Float and
+    // java.lang.Double, which are unrelated classes.
+    check("f32t", isF24(fh[0]) && !isD24(fh[0]) && isD24(dh[0]) && !isF24(dh[0]))
+    // Neither answer moves for the SHARED supertypes: java.lang.Float and
+    // java.lang.Double both extend Number, implement Comparable and are Any.
+    check("f32u", isN24(fh[0]) && isN24(dh[0]) && isC24(fh[0]) && isC24(dh[0]) &&
+                  isA24(fh[0]) && isA24(dh[0]) && !isI24(fh[0]) && !isI24(dh[0]))
+    // A `when (x) { is Float -> }` over the same test, and the smart cast behind
+    // it: the narrowed value still carries its own width, so the addition below is
+    // a Float addition and prints at 24 bits.
+    check("f32v", kind24(fh[4]) == "F" && kind24(dh[3]) == "D" && kind24(3) == "I")
+    val sc24: Any = fh[4]
+    check("f32w", sc24 is Float && s24f(sc24 + 1.0f) == "1.1")
+    // ...and the class the value reports for itself agrees with `is`.
+    check("f32x", fh[0]::class.simpleName == "Float" && dh[0]::class.simpleName == "Double")
 }
 // The Float renderer, reached through a function boundary so the grammar's
 // constant folder cannot answer these rows at compile time. The parameter is Any
 // because two of the rows below hand it a Double on purpose (Float op Double is a
 // Double), and Kotlin has no implicit narrowing.
 fun s24f(f: Any): String = "" + f
+// The dynamic type tests, taken through an Any boundary: `x is Float` on a value
+// whose STATIC type is already Float is a Kotlin compile-time constant, so the
+// rows above would measure the front end rather than the runtime without these.
+fun isF24(x: Any): Boolean = x is Float
+fun isD24(x: Any): Boolean = x is Double
+fun isN24(x: Any): Boolean = x is Number
+fun isC24(x: Any): Boolean = x is Comparable<Any>
+fun isA24(x: Any): Boolean = x is Any
+fun isI24(x: Any): Boolean = x is Int
+fun kind24(x: Any): String = when (x) { is Float -> "F"; is Double -> "D"; is Int -> "I"; else -> "?" }
 
 // ===== SECTION 25: value rendering =====
 // What println / toString() / a string template make of a value. Every answer

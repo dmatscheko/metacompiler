@@ -410,6 +410,68 @@ function ktDblHash(d) {
     return (hi | 0) ^ ((m - hi20 * 4294967296) | 0)
 }
 
+// ktFltHash (jsrtkotlin.go ktFltHash) is java.lang.Float.hashCode, which is what
+// Kotlin/JVM's Float.hashCode() IS: floatToIntBits(f) read as a SIGNED Int - the
+// raw binary32 pattern, NOT a fold of two halves the way the double's is, so a
+// negative float has a negative hash. Same arithmetic derivation as ktDblHash one
+// width down: bias 127, 23 significand bits, the subnormal floor at 2^-126.
+// The twin is kFltHash in languages/kotlin-interpreter.abnf.
+function ktFltHash(d) {
+    // floatToIntBits COLLAPSES every NaN to 0x7fc00000.
+    if (d !== d) { return 2143289344 }
+    if (d === Infinity) { return 2139095040 }
+    if (d === -Infinity) { return -8388608 }
+    if (d === 0) {
+        if (1 / d < 0) { return -2147483648 }
+        return 0
+    }
+    var neg = d < 0
+    var a = neg ? -d : d
+    var e = 0
+    while (a >= 2) {
+        a = a / 2
+        e = e + 1
+    }
+    while (a < 1) {
+        a = a * 2
+        e = e - 1
+    }
+    // A value too big for a binary32 never reaches here from a Float box (every
+    // one is rounded on the way in), but the overflow answer is stated rather than
+    // left to wrap.
+    if (e > 127) {
+        if (neg) { return -8388608 }
+        return 2139095040
+    }
+    var m = 0
+    var biased = 0
+    if (e < -126) {
+        // Subnormal: the biased exponent is 0 and there is no implicit leading 1,
+        // so the significand is scaled back down to the fixed exponent -126.
+        var k = -126 - e
+        var sub = a
+        while (k > 0) {
+            sub = sub / 2
+            k = k - 1
+        }
+        m = sub * 8388608
+    } else {
+        m = (a - 1) * 8388608
+        biased = e + 127
+    }
+    var bits = biased * 8388608 + m
+    if (neg) { bits = bits - 2147483648 }
+    return bits | 0
+}
+
+// ktFloHash (jsrtkotlin.go ktFloHash) is the hash of a tag-14 box, which of the
+// two depending on the style byte: style 3 is the Float. Every reader of a
+// float's hash goes through it, so the width question is asked in ONE place.
+function ktFloHash(v) {
+    if (floStyle(v) == 3) { return ktFltHash(floNum(v)) }
+    return ktDblHash(floNum(v))
+}
+
 // ktStrHash (jsrtkotlin.go 2588): java.lang.String.hashCode over UTF-16 CODE
 // UNITS, which is what the script string type carries.
 function k0StrHash(s) {
@@ -910,8 +972,9 @@ function ktElemHash(v) {
     }
     if (ktIsNullish(v)) { return 0 }
     if (floIs(v)) {
-        // java.lang.Double.hashCode, not the truncated value - see ktDblHash.
-        return ktDblHash(floNum(v))
+        // java.lang.Double.hashCode of a Double and java.lang.Float.hashCode of a
+        // Float, not the truncated value - see ktFloHash.
+        return ktFloHash(v)
     }
     if (sintIs(v)) {
         if (sintWidth(v) == 64) { return sintLo(v) ^ sintHi(v) }
@@ -1608,46 +1671,14 @@ function k1NumLess(l, r) {
     return ktNum(l) < ktNum(r)
 }
 
-// jsrtkotlin.go ktDblHash (584): java.lang.Double.hashCode, which is what
-// Kotlin/JVM's Double.hashCode() IS - doubleToLongBits(d) xor (bits ushr 32),
-// read as an Int. The Go twin has math.Float64bits; neither MetaJS engine does,
-// so the bits are derived arithmetically exactly as kDblHash does it in
-// languages/kotlin-interpreter.abnf (6247), which is the twin the cross-check
-// diffs against.
-function k1DblHash(d) {
-    // doubleToLongBits COLLAPSES every NaN to 0x7ff8000000000000.
-    if (d !== d) { return 2146959360 }
-    if (d === Infinity) { return 2146435072 }
-    if (d === 0 - Infinity) { return 0 - 1048576 }
-    if (d === 0) {
-        if (1 / d < 0) { return 0 - 2147483648 }
-        return 0
-    }
-    var neg = d < 0
-    var a = d
-    if (neg) { a = -d }
-    var e = 0
-    while (a >= 2) { a = a / 2; e = e + 1 }
-    while (a < 1) { a = a * 2; e = e - 1 }
-    var m = 0
-    var biased = 0
-    if (e < 0 - 1022) {
-        // Subnormal: the biased exponent is 0 and there is no implicit leading
-        // 1, so the significand scales back down to the fixed exponent -1022.
-        var k = (0 - 1022) - e
-        var sub = a
-        while (k > 0) { sub = sub / 2; k = k - 1 }
-        m = sub * 4503599627370496
-    } else {
-        m = (a - 1) * 4503599627370496
-        biased = e + 1023
-    }
-    var hi20 = Math.floor(m / 4294967296)
-    var hi = (biased * 1048576) + hi20
-    if (neg) { hi = hi - 2147483648 }
-    return ((hi | 0) ^ ((m - (hi20 * 4294967296)) | 0)) | 0
-}
-
+// THE DOUBLE HASH LIVED HERE TWICE. k1DblHash was a second, byte-for-byte
+// reading of section 0's ktDblHash whose only caller was ktNumMethod's hashCode
+// arm below, and the float WIDTH would have made it a second reading of the
+// binary32 extraction as well - two ~40-line bit derivations kept in step by
+// hand, for no reachable gain. It is DELETED and the one call site now asks
+// section 0's ktFloHash, which is a ktXxx shared-contract name exactly as
+// ktElemHash (called from sections 3 and 4) already is. Same sweep, same reason,
+// as the five bodies this section's header records losing.
 // ----- ktNumMethod, OWNED by this section ----------------------------------
 
 // jsrtkotlin.go ktNumMethod (485): the member-function surface of Kotlin's
@@ -1718,7 +1749,8 @@ function ktNumMethod(recv, name, args) {
         return floNum(recv) !== floNum(recv)
     }
     if (name == "hashCode") {
-        if (floIs(recv)) { return k1DblHash(floNum(recv)) }
+        // Double.hashCode or Float.hashCode, by the box's style byte - ktFloHash.
+        if (floIs(recv)) { return ktFloHash(recv) }
         if (sintIs(recv)) {
             // Long.hashCode is (value xor (value ushr 32)) read as an Int; for
             // every narrower width that is the value itself.
@@ -5090,7 +5122,13 @@ function ktIsType(v, tname) {
         // A Double and a plain number carry a type just as definitely: the value
         // model makes a plain number an Int, so `10 is Long` is FALSE and
         // `1.5 is Double` is TRUE - neither of which the shared probe can answer.
-        return t == "Number" || t == "Double" || t == "Float"
+        // The style byte says WHICH of the two the box holds, so Double and Float
+        // are EXCLUSIVE: `1.5 is Float` and `1.5f is Double` are both false, where
+        // both were true while the width was invisible. `is Number` - and the
+        // `is Any` / `is Comparable` above - stay true for either width.
+        if (t == "Number") { return true }
+        if (floStyle(v) == 3) { return t == "Float" }
+        return t == "Double"
     }
     return t == "Number" || t == "Int"
 }
@@ -5292,7 +5330,12 @@ function k4bSimpleName(v) {
     if (ktIsNullish(v)) { return null }
     if (ktIsChar(v)) { return "Char" }
     if (typeof v == "number") {
-        if (floIs(v)) { return "Double" }
+        // The style byte says which of the two a tag-14 box holds, so `1.5f::class`
+        // is Float where it used to answer Double alongside every real double.
+        if (floIs(v)) {
+            if (floStyle(v) == 3) { return "Float" }
+            return "Double"
+        }
         if (sintIs(v)) { return ktBoxTypeName(v) }
         return "Int"
     }
@@ -6349,8 +6392,9 @@ function k4IsType(v, tname) {
         if (t == "Any") { return true }
         if (t == "Comparable") { return true }
         if (t == "Number") { return true }
-        if (t == "Double") { return true }
-        return t == "Float"
+        // Double and Float are EXCLUSIVE, by the box's style byte - see ktIsType.
+        if (floStyle(v) == 3) { return t == "Float" }
+        return t == "Double"
     }
     if (sintIs(v)) {
         if (t == "Any") { return true }
