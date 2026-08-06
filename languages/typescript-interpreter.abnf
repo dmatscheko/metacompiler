@@ -68,10 +68,11 @@ carries its yields and its awaits on the ONE suspension channel a generator has,
 apart by a marker record on each awaited operand (docs/todo.md 1.7). 'yield*' inside one
 AWAITS each step of the delegate and answers the delegate's return value, and ag.throw(e)
 RAISES AT THE SUSPENDED YIELD - the resume value is the throw-in channel, so a try around
-the yield catches. Two exact limits remain: a throw that arrives while the body is parked
-at a 'yield*' raises AT THE YIELD* rather than being forwarded to the delegate's throw()
-(node yields the delegate's caught value where all three engines here reject), and a
-plain generator has no .throw() at all. An unhandled rejection is deliberately not
+the yield catches. A throw that arrives while the body is parked at a 'yield*' is
+FORWARDED to the delegate's throw(); a delegate with no throw method is closed through
+its return() and the yield* raises node's TypeError. One exact limit remains: a plain
+generator has no .throw() at all (its cell is the C floor's tag 15), which is also why a
+SYNC generator delegated to from an async one takes the no-throw-method path. An unhandled rejection is deliberately not
 reported in any engine.
 
 Objects and classes: object literals with shorthand properties, computed keys, shorthand
@@ -3139,8 +3140,8 @@ NotFuncHead = :script(~~
     // sent value of the yield being resumed, so it is raised at that yield when the
     // replay reaches it. A throw before the body has ever run does NOT start it
     // (st["started"]), which is node's suspendedStart rule, and one that reaches a
-    // `yield*` raises at the yield* rather than being forwarded to the delegate's
-    // throw().
+    // `yield*` is FORWARDED to the delegate's throw() - the yield* loop takes its resume
+    // value RAW (doYieldRaw) and branches on the shape instead of unpacking it here.
     function jpMarkAwait(v) {
         var m = {}
         m["__awt"] = true
@@ -5406,11 +5407,46 @@ NotFuncHead = :script(~~
     // AWAITED, which is both what the specification's async delegation does and what
     // makes 'yield* someAsyncGen()' terminate at all: an async generator's next()
     // answers a PROMISE, whose `done` is undefined, so an unawaited drive spins.
-    function jpStepDelegate(run, dnx, v) {
+    function jpStepDelegate(run, dnx, v, args) {
         var r = anytype
-        r = callWithThis(dnx, v, [])
+        r = callWithThis(dnx, v, args)
         if (run.ag) { return jpDoAwait(r) }
         return r
+    }
+    // Is this resume value the {__athrow, v} record ag.throw(e) puts on the channel?
+    // The `yield*` loop asks before it hands the value on, because a throw-in is
+    // FORWARDED to the delegate rather than raised at the yield*.
+    function jpIsThrowIn(v) {
+        if (!jpIsObjV(v)) { return false }
+        return v["__athrow"] === true
+    }
+    // IteratorClose on a delegate that cannot take a throw: its return() runs, and only
+    // then does the TypeError go up. Both halves do this, and node does it too.
+    function jpCloseDelegate(v) {
+        if (typeof v != "object") { return undefined }
+        var rf = anytype
+        rf = getMember(v, "return")
+        if (typeof rf == "function") { callWithThis(rf, v, []) }
+        return undefined
+    }
+    function jpNoThrowMethod(v) {
+        jpCloseDelegate(v)
+        throw {__exc: true, v: "TypeError: The iterator does not provide a 'throw' method."}
+    }
+    // The value one plain `yield` answers, RAW - without the throw-in unpacking
+    // jpAwaitValue does at an ordinary yield. Only the `yield*` loop wants it raw: it
+    // has to branch on the SHAPE of what came back, and a record it raised here could
+    // never reach the delegate's throw(). The record travels ON the resume value and
+    // nothing is kept across a suspension, which is what makes this per-coroutine by
+    // construction rather than by care (docs/todo.md 2.1).
+    function doYieldRaw(run, v) {
+        if (run.k < run.target) {
+            var sent = run.sent[run.k + 1]
+            run.k = run.k + 1
+            return sent
+        }
+        run.k = run.k + 1
+        throw {__genYield: true, v: v}
     }
     function doYield(star, v) {
         var run = genRuns[genRuns.length - 1]
@@ -5430,31 +5466,45 @@ NotFuncHead = :script(~~
                 dnx = (typeof v == "object") ? getMember(v, "next") : undefined
                 if (typeof dnx == "function") {
                     var dst = anytype // One {value, done} record.
-                    dst = jpStepDelegate(run, dnx, v)
+                    dst = jpStepDelegate(run, dnx, v, [undefined])
                     while (!dst.done) {
-                        doYield(false, dst.value)
-                        dst = jpStepDelegate(run, dnx, v)
+                        // The RESUME DISPOSITION. A throw-in drives the delegate's
+                        // throw(), so a delegate that would catch it does; anything else
+                        // drives its next() WITH the sent value, which is how g.next(x)
+                        // reaches a delegated generator at all.
+                        var dsent = anytype
+                        dsent = doYieldRaw(run, dst.value)
+                        if (run.ag && jpIsThrowIn(dsent)) {
+                            var dtf = anytype
+                            dtf = getMember(v, "throw")
+                            if (typeof dtf != "function") { jpNoThrowMethod(v) }
+                            dst = jpStepDelegate(run, dtf, v, [dsent["v"]])
+                        } else {
+                            dst = jpStepDelegate(run, dnx, v, [dsent])
+                        }
                     }
                     // The value of 'yield* it' is the delegate's RETURN value - the
                     // `value` of the record whose `done` ended the loop. An array or a
                     // string has none, so that path stays undefined.
                     return dst.value
                 }
-                for (var i = 0; i < v.length; i++) { doYield(false, v[i]) }
+                // An array or a string delegate: it has no throw() to forward to, so a
+                // throw-in closes it and raises the TypeError, exactly as above.
+                for (var i = 0; i < v.length; i++) {
+                    var isent = anytype
+                    isent = doYieldRaw(run, v[i])
+                    if (run.ag && jpIsThrowIn(isent)) { jpNoThrowMethod(v) }
+                }
             }
             return last
         }
-        if (run.k < run.target) {
-            var sent = run.sent[run.k + 1]
-            run.k = run.k + 1
-            // Inside an ASYNC generator the sent value may be a THROW-IN record that
-            // ag.throw(e) put on the resume channel; jpAwaitValue raises it here, at
-            // the yield it was aimed at.
-            if (run.ag) { return jpAwaitValue(sent) }
-            return sent
-        }
-        run.k = run.k + 1
-        throw {__genYield: true, v: v}
+        var sent = anytype
+        // Inside an ASYNC generator the sent value may be a THROW-IN record that
+        // ag.throw(e) put on the resume channel; jpAwaitValue raises it here, at
+        // the yield it was aimed at.
+        sent = doYieldRaw(run, v)
+        if (run.ag) { return jpAwaitValue(sent) }
+        return sent
     }
     // items = [{ystar}?, operandThunk?].
     function makeYield(items) {

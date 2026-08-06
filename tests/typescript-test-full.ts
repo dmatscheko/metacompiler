@@ -1484,24 +1484,47 @@ function s35(): number {
         var r = await g.next()
         return s + "|" + rec38(r) + "|ran=" + agRan38
     }
-    // THE LIMIT THAT IS PINNED HERE RATHER THAN FIXED, and the reason is written out
-    // in all four grammar headers: a throw that arrives while the body is parked at a
-    // `yield*` raises AT THE YIELD*, not at the delegate. node forwards it to the
-    // delegate's throw(), so the delegate catches, the throw() request RESOLVES with
-    // "d:t" and node's field here reads 40/false|? - all four engines here reject
-    // instead, and 40/false|rej:t is what this pins. Forwarding needs the yield* loop
-    // to branch on the SHAPE of its resume value and drive the delegate's throw() -
-    // reachable, but a wrong throw target is a silently wrong answer, so the gap is
-    // asserted rather than guessed at. Every OTHER field of fa8 is byte-identical to
-    // node v24, checked by running this section under it.
+    // docs/todo.md 1.6: a throw that arrives while the body is parked at a `yield*` is
+    // FORWARDED to the delegate's throw(). The delegate catches, the throw() request
+    // RESOLVES with the value the delegate's catch yields, and the delegate is left
+    // where it can be resumed rather than suspended forever. Until this it raised AT
+    // the yield*, so delegOuter38's own (absent) handler saw it, the request rejected,
+    // and 40/false|rej:t was pinned here as the gap. All four fields below are node
+    // v24's, measured by running this section under it.
     async function* deleg38(): any { try { yield 40 } catch (e) { yield "d:" + e } }
     async function* delegOuter38(): any { yield* deleg38(); yield 41 }
     async function agThrowIntoDelegate(): any {
         var g = delegOuter38()
         var r1 = await g.next()
         var s = "?"
-        try { await g.throw("t") } catch (e) { s = "rej:" + e }
+        try { s = rec38(await g.throw("t")) } catch (e) { s = "rej:" + e }
+        var r3 = await g.next()
+        return rec38(r1) + "|" + s + "|" + rec38(r3)
+    }
+    // A delegate with NO throw method - an array here, and equally a string or a plain
+    // iterator object - is CLOSED through its return() and the yield* raises node's
+    // TypeError, which the outer body's own try then catches. The message is asserted
+    // verbatim because it is the whole observable difference from a forwarded throw.
+    async function* arrDeleg38(): any { try { yield* [50, 51] } catch (e) { yield "e:" + e } }
+    async function agThrowIntoArray(): any {
+        var g = arrDeleg38()
+        var r1 = await g.next()
+        var s = "?"
+        try { s = rec38(await g.throw("t2")) } catch (e) { s = "rej:" + e }
         return rec38(r1) + "|" + s
+    }
+    // The other half of the same loop: g.next(v) forwards v to the DELEGATE (the
+    // specification's `received.value`). Before 1.6 the delegate's next() was called
+    // with no argument at all, so `a` below read undefined in every engine.
+    async function* sendInner38(): any { var a = yield 60; yield "a=" + a; return "R" }
+    async function* sendOuter38(): any { var r = yield* sendInner38(); yield "r=" + r }
+    async function agSendThroughDelegate(): any {
+        var g = sendOuter38()
+        var r1 = await g.next()
+        var r2 = await g.next("s")
+        var r3 = await g.next()
+        var r4 = await g.next()
+        return rec38(r1) + "|" + rec38(r2) + "|" + rec38(r3) + "|" + rec38(r4)
     }
     async function all38b(): any {
         var parts = []
@@ -1511,11 +1534,16 @@ function s35(): number {
         parts.push(await agThrowUncaught())
         parts.push(await agThrowBeforeStart())
         parts.push(await agThrowIntoDelegate())
+        parts.push(await agThrowIntoArray())
+        parts.push(await agSendThroughDelegate())
         return parts.join("~")
     }
     all38b().then(function (r: any): any {
         var ok = r === "1|2|pre,ret=9~12345~10/false|y10,caught:boom/false|undefined/true~" +
-                       "20/false|rej:bang|undefined/true~rej:early|undefined/true|ran=0~40/false|rej:t"
+                       "20/false|rej:bang|undefined/true~rej:early|undefined/true|ran=0~" +
+                       "40/false|d:t/false|41/false~" +
+                       "50/false|e:TypeError: The iterator does not provide a 'throw' method./false~" +
+                       "60/false|a=s/false|r=R/false|undefined/true"
         check("fa8", ok)
         if (!ok) { exit(1) }
     }, function (e: any): any {
@@ -1523,13 +1551,20 @@ function s35(): number {
         exit(1)
     })
     // A PLAIN generator's yield* answers the delegate's return value too - the same
-    // one line in the emitter, and synchronous, so it is asserted directly.
+    // one line in the emitter, and synchronous, so it is asserted directly. next(v)
+    // reaches the delegate here as well: a plain generator has no throw-in channel and
+    // no .throw() at all, but the sent value goes through the identical loop. The sent
+    // value is YIELDED BACK rather than pushed to ysync: this half replays a generator
+    // body once per next(), so a write from inside the DELEGATE would repeat. ysync is
+    // written once, after the delegate is done - only one replay reaches it.
     var ysync = []
-    function* ysInner38(): any { yield 1; yield 2; return "r" }
+    function* ysInner38(): any { var a = yield 1; yield "a=" + a; return "r" }
     function* ysOuter38(): any { ysync.push("v=" + (yield* ysInner38())) }
     var yg38 = ysOuter38()
-    yg38.next(); yg38.next(); yg38.next()
-    check("fa9", ysync.join("") === "v=r")
+    var ys1 = yg38.next().value
+    var ys2 = yg38.next("S").value
+    yg38.next()
+    check("fa9", ys1 === 1 && ys2 === "a=S" && ysync.join(",") === "v=r")
     return 0
 }
 function* sg35(): any { yield 1; yield 2 }

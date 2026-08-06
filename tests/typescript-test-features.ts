@@ -233,6 +233,18 @@ function* lazyDeleg(): Generator<number, void, void> { yield* lazyCounter(); }
 let lazyDn: number[] = [];
 for (var dv of lazyDeleg()) { if (lazyDn.length === 2) { break; } lazyDn.push(dv); }
 check("yield-star-lazy", lazyDn.join(",") === "0,1" && lazyReached === 2);
+// docs/todo.md 1.6: g.next(v) forwards v to the DELEGATE of a `yield*` (the
+// specification's `received.value`), and the value of the yield* is the delegate's
+// return value. The sent value is yielded straight back rather than written to an
+// outer variable: the interpreter half REPLAYS a generator body once per next(), so
+// a write from inside the delegate would repeat and the two halves would disagree.
+function* sendInner(): any { var sa = yield 1; yield "a=" + sa; return "r"; }
+function* sendOuter(): any { yield "v=" + (yield* sendInner()); }
+let sg: any = sendOuter();
+let sr1: any = sg.next().value;
+let sr2: any = sg.next("S").value;
+let sr3: any = sg.next().value;
+check("yield-star-send", sr1 === 1 && sr2 === "a=S" && sr3 === "v=r");
 
 // ----- objects -----
 var obj = { a: 1, "b-key": 2 };

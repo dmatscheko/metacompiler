@@ -97,11 +97,12 @@ it). `for await` and `async function*` RUN: an async generator carries its yield
 awaits on the ONE suspension channel a generator has, told apart by a marker record on
 each awaited operand (docs/todo.md 1.7). `yield*` inside one AWAITS each step of the
 delegate and answers the delegate's return value, and ag.throw(e) RAISES AT THE SUSPENDED
-YIELD - the resume value is the throw-in channel, so a try around the yield catches. Two
-exact limits remain: a throw that arrives while the body is parked at a `yield*` raises
-AT THE YIELD* rather than being forwarded to the delegate's throw() (node yields the
-delegate's caught value where all three engines here reject), and a plain generator has
-no .throw() at all. `await` outside an
+YIELD - the resume value is the throw-in channel, so a try around the yield catches. A
+throw that arrives while the body is parked at a `yield*` is FORWARDED to the delegate's
+throw(); a delegate with no throw method is closed through its return() and the yield*
+raises node's TypeError. One exact limit remains: a plain generator has no .throw() at
+all (its cell is the C floor's tag 15), which is also why a SYNC generator delegated to
+from an async one takes the no-throw-method path. `await` outside an
 async body stays the identity it was; an unhandled rejection is deliberately not
 reported. See the same paragraph in languages/js-to-llvm-ir.abnf for the full account.
 JSX is out of scope, and so are the Annex B HTML-like comments ('<!--', '-->'), which
@@ -3344,8 +3345,26 @@ NotFuncHead = :script(~~
     // Inside an async generator each step of the delegate is AWAITED (emitAwait below),
     // which is what makes 'yield* otherAsyncGen()' terminate: an async generator's next()
     // answers a PROMISE, whose `done` is undefined, so driving it unawaited spins forever.
-    // A throw-in that arrives while the body is parked at the yield below raises HERE
-    // rather than being forwarded to the delegate's throw() - see the :description.
+    //
+    // THE RESUME DISPOSITION, and why it is not a stack. The loop keeps what the driver
+    // last sent in - RAW, in the scope slot 0ysent - and branches on its SHAPE at the top
+    // of every turn. A normal resume drives the delegate's next() WITH the sent value
+    // (the specification's `received.value`, which is how `g.next(v)` reaches a delegated
+    // generator at all). A {__athrow, v} record - the one ag.throw(e) puts on the resume
+    // channel - drives the delegate's THROW() instead, so a delegate that would catch the
+    // throw does, and the yield* carries on with whatever the delegate yields next. A
+    // delegate with no throw method is CLOSED through its return() and the yield* raises
+    // a TypeError, which is what node does for `yield* [1,2]`.
+    //
+    // Both arms are driven IN FRAME. The await of a delegate step is a SUSPENSION of this
+    // generator, so it cannot move into a helper function - that is the whole shape of
+    // this loop.
+    //
+    // The state is that one slot, and the slot lives in the scope js_scope_new makes when
+    // this expression is evaluated: one per yield* per generator INSTANCE, on that
+    // coroutine's own frame, nothing kept in any program-wide structure across a
+    // suspension. That is the constraint docs/todo.md 2.1's per-loop DEPTH STACK failed -
+    // it was per-program, and `for await` suspends inside its own for-of.
     function makeYieldStar(t) {
         return function(b) {
             var r = t(b)
@@ -3362,27 +3381,87 @@ NotFuncHead = :script(~~
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ysrc"), seqV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0yi"), callExt(b, "js_num_i", [handle(0)])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ylen"), hUndef])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ysent"), hUndef])
             var headB = curF.NewBlock("")
             var ystepB = curF.NewBlock("")
             var yidxB = curF.NewBlock("")
             var ylenB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
+            // The throw-in dispatch exists only inside an async generator, because that
+            // is the only driver here that can send a throw-in at all: a plain
+            // generator's next(v) hands its argument straight through and it has no
+            // throw(). splitB is where the iterator/index decision is made - headB itself
+            // when there is no dispatch in front of it.
+            var splitB = headB
+            if (inAsyncGen) { splitB = curF.NewBlock("") }
             var yisItC = truthy(b, yisItV)
             b.NewCondBr(yisItC, headB, ylenB)
             callExt(ylenB, "js_scope_set", [curScopeV, emitStr(ylenB, "0ylen"),
                     callExt(ylenB, "js_tonum", [callExt(ylenB, memGetExt(), [seqV, emitStr(ylenB, "length")])])])
             ylenB.NewBr(headB)
-            headB.NewCondBr(yisItC, ystepB, yidxB)
-            var ystRawV = callExt(jsThisSet(ystepB, seqV), "js_call",
-                                  [ynxV, seqV, callExt(ystepB, "js_arr_new", [])])
+            var ythrStV = hUndef // The record a forwarded throw() answered, for joinB's phi.
+            var ythrCallB = joinB
+            if (inAsyncGen) {
+                var hsentV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0ysent")])
+                var hchkB = curF.NewBlock("")
+                var ythrB = curF.NewBlock("")
+                ythrCallB = curF.NewBlock("")
+                var ythrNoB = curF.NewBlock("")
+                var yretB = curF.NewBlock("")
+                var ythrowB = curF.NewBlock("")
+                // The same shape test js_jsawaitv makes, in the emitter: a throw-in is
+                // the only object the resume channel ever carries with __athrow set. The
+                // typeof gate in front of it is not decoration - a member read of a
+                // non-object aborts ("member '__athrow' of undefined"), and the very
+                // first turn of this loop reads a sent value of undefined.
+                headB.NewCondBr(truthy(headB, callExt(headB, "js_seq",
+                                    [callExt(headB, "js_typeof", [hsentV]), emitStr(headB, "object")])),
+                                hchkB, splitB)
+                hchkB.NewCondBr(truthy(hchkB, callExt(hchkB, memGetExt(), [hsentV, emitStr(hchkB, "__athrow")])),
+                                ythrB, splitB)
+                var ytfV = callExt(ythrB, memGetExt(), [seqV, emitStr(ythrB, "throw")])
+                ythrB.NewCondBr(truthy(ythrB, callExt(ythrB, "js_seq",
+                                    [callExt(ythrB, "js_typeof", [ytfV]), emitStr(ythrB, "function")])),
+                                ythrCallB, ythrNoB)
+                var ythrArgsV = callExt(ythrCallB, "js_arr_new", [])
+                callExt(ythrCallB, "js_arr_push",
+                        [ythrArgsV, callExt(ythrCallB, memGetExt(), [hsentV, emitStr(ythrCallB, "v")])])
+                ythrStV = emitAwait(ythrCallB, callExt(jsThisSet(ythrCallB, seqV), "js_call",
+                                                       [ytfV, seqV, ythrArgsV]))
+                ythrCallB.NewBr(joinB)
+                // No throw method: close the delegate through return(), then raise the
+                // TypeError node raises, spelled as the string its message renders to.
+                var yrfV = callExt(ythrNoB, memGetExt(), [seqV, emitStr(ythrNoB, "return")])
+                ythrNoB.NewCondBr(truthy(ythrNoB, callExt(ythrNoB, "js_seq",
+                                      [callExt(ythrNoB, "js_typeof", [yrfV]), emitStr(ythrNoB, "function")])),
+                                  yretB, ythrowB)
+                callExt(jsThisSet(yretB, seqV), "js_call", [yrfV, seqV, callExt(yretB, "js_arr_new", [])])
+                yretB.NewBr(ythrowB)
+                callExt(ythrowB, "js_throw",
+                        [emitStr(ythrowB, "TypeError: The iterator does not provide a 'throw' method.")])
+                ythrowB.NewRet(hUndef) // Never reached: js_throw does not return.
+            }
+            splitB.NewCondBr(yisItC, ystepB, yidxB)
+            // next(received.value): the sent value is forwarded, which is what makes
+            // `g.next(v)` reach the delegate of a yield*.
+            var ynxArgsV = callExt(ystepB, "js_arr_new", [])
+            callExt(ystepB, "js_arr_push",
+                    [ynxArgsV, callExt(ystepB, "js_scope_get", [curScopeV, emitStr(ystepB, "0ysent")])])
+            var ystRawV = callExt(jsThisSet(ystepB, seqV), "js_call", [ynxV, seqV, ynxArgsV])
             // emitAwait is the identity outside an async body, so this is the same call
             // it always was for a plain generator - and one suspension per step inside an
             // async generator, exactly as the specification's async delegation does.
             var ystV = emitAwait(ystepB, ystRawV)
-            var ystepElemV = callExt(ystepB, memGetExt(), [ystV, emitStr(ystepB, "value")])
-            ystepB.NewCondBr(truthy(ystepB, callExt(ystepB, memGetExt(), [ystV, emitStr(ystepB, "done")])),
-                             exitB, bodyB)
+            ystepB.NewBr(joinB)
+            // One {value, done} record, from next() or from a forwarded throw().
+            var yincs = [llvm.ir.NewIncoming(ystV, ystepB)]
+            if (inAsyncGen) { yincs.push(llvm.ir.NewIncoming(ythrStV, ythrCallB)) }
+            var yrecV = joinB.NewPhi(yincs)
+            var ystepElemV = callExt(joinB, memGetExt(), [yrecV, emitStr(joinB, "value")])
+            joinB.NewCondBr(truthy(joinB, callExt(joinB, memGetExt(), [yrecV, emitStr(joinB, "done")])),
+                            exitB, bodyB)
             var iH = callExt(yidxB, "js_scope_get", [curScopeV, emitStr(yidxB, "0yi")])
             var lH = callExt(yidxB, "js_scope_get", [curScopeV, emitStr(yidxB, "0ylen")])
             var yelemB = curF.NewBlock("")
@@ -3393,14 +3472,20 @@ NotFuncHead = :script(~~
             callExt(yelemB, "js_scope_set", [curScopeV, emitStr(yelemB, "0yi"),
                                        callExt(yelemB, "js_add", [iB, callExt(yelemB, "js_num_i", [handle(1)])])])
             yelemB.NewBr(bodyB)
-            emitYieldSent(bodyB,
-                callExt(bodyB, "js_yield", [bodyB.NewPhi([llvm.ir.NewIncoming(yidxElemV, yelemB),
-                                                          llvm.ir.NewIncoming(ystepElemV, ystepB)])]))
+            // The element to hand out. The phi is built FIRST and on its own line: LLVM
+            // requires the phi nodes at the TOP of a block, and emitStr below emits an
+            // instruction of its own into this one.
+            var youtV = bodyB.NewPhi([llvm.ir.NewIncoming(yidxElemV, yelemB),
+                                      llvm.ir.NewIncoming(ystepElemV, joinB)])
+            // The resume value is stored RAW - the shape test at headB is what reads it,
+            // so a throw-in is forwarded rather than raised here.
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0ysent"),
+                                            callExt(bodyB, "js_yield", [youtV])])
             bodyB.NewBr(headB)
             curScopeV = saved
             // The delegate's return value on the iterator path (the `value` of the record
             // that reported done, which is ystepElemV), undefined on the index path.
-            return {b: exitB, v: exitB.NewPhi([llvm.ir.NewIncoming(ystepElemV, ystepB),
+            return {b: exitB, v: exitB.NewPhi([llvm.ir.NewIncoming(ystepElemV, joinB),
                                                llvm.ir.NewIncoming(hUndef, yidxB)])}
         }
     }
