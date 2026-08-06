@@ -19,6 +19,16 @@ import (
 var fails = 0
 var checks = 0
 
+// The named-constant fold and its two contrasts (see the checks in main).
+const fca = 0.1
+const fcb = 0.2
+const fcs = fca + fcb
+const fcr = 'A'
+const fcp float64 = 0.1
+const fcq float64 = 0.2
+
+func shadowed(fca int, fcb int) int { return fca * fcb }
+
 func check(id string, cond bool) {
 	checks++
 	if !cond {
@@ -526,6 +536,15 @@ func main() {
 	check("const-fold-conv-contrast", float64(0.1)+float64(0.2) != 0.3)
 	check("const-fold-wide-int", (1<<100)>>98 == 4)
 	check("const-fold-exact-compare", 2.0/3.0 != 0.6666666666666666)
+
+	// ----- and a NAMED constant folds the same way -----
+	// `const s = a + b` needs a scope the front end has to build for itself, so the
+	// two contrast rows matter more than the first: fcp is a TYPED const, which Go
+	// rounds at its declaration, and shadowed() binds the same names to parameters.
+	check("named-const-fold", fca+fcb == 0.3 && fcs == 0.3)
+	check("named-const-typed-contrast", fcp+fcq != 0.3)
+	check("named-const-shadow-contrast", shadowed(3, 4) == 12)
+	check("named-const-rune", 'z'-'a' == 25 && fcr+1 == 66)
 
 	// ----- combined pipeline -----
 	tag := func(n int) string { return "odd" }

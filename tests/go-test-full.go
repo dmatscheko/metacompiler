@@ -1484,6 +1484,107 @@ func s33() {
 	check("cst32", 3*0.1 != 0.30000000000000004)
 }
 
+
+// ===== SECTION 34: a NAMED constant folds too, and what deliberately does not =====
+// SECTION 33 folds constant LITERALS; a name needs a scope, and getting that scope
+// wrong is a silent wrong answer rather than a missing feature. So half of what is
+// below are the CONTROLS: every one of nc10-nc18 is a name the fold has to DECLINE,
+// because a type, an iota, a parameter, a local, a range variable, an inner block or
+// a switch case owns that name there and Go answers with the binding, not the const.
+const c34a = 0.1
+const c34b = 0.2
+const c34s = c34a + c34b
+const c34kb = 1024
+const c34mb = c34kb * c34kb
+const c34hi = (1 << 100) >> 98
+const c34rA = 'A'
+const c34rz = 'z'
+const c34gap = c34rz - c34rA
+const c34third = 1.0 / 3.0
+const c34ty float64 = 0.1
+const c34tz float64 = 0.2
+const c34z = 0.1 + 0.2i
+const c34w = 0.2 + 0.1i
+
+const (
+	c34i0 = iota
+	c34i1
+	c34i2
+)
+const (
+	c34k0 = 1 << (10 * iota)
+	c34k1
+	c34k2
+)
+
+func s34param(c34a int, c34b int) int { return c34a * c34b }
+
+func s34local() int {
+	c34a := 5
+	c34b := 7
+	return c34a * c34b
+}
+
+func s34rangeVar(xs []int) int {
+	t := 0
+	for c34a := range xs {
+		t += c34a
+	}
+	return t
+}
+
+func s34inner() bool {
+	ok := true
+	{
+		const c34a = 2
+		if c34a*c34b != 0.4 {
+			ok = false
+		}
+	}
+	return ok && c34a*c34b == 0.02
+}
+
+func s34switch(n int) float64 {
+	switch n {
+	case 1:
+		const c34a = 100.0
+		return c34a * c34b
+	}
+	return c34a * c34b
+}
+
+func s34() {
+	check("nc1", c34s == 0.3)
+	check("nc2", c34a+c34b == 0.3)
+	check("nc3", c34a*c34b == 0.02)
+	check("nc4", c34mb == 1048576)
+	check("nc5", c34hi == 4)
+	check("nc6", c34gap == 57 && c34rA+1 == 66)
+	check("nc7", c34third*3.0 == 1.0)
+	check("nc8", c34a+c34b+c34third != 0.6333333333333333)
+	check("nc9", c34kb*c34kb*c34kb == 1073741824)
+	// A TYPED const is converted - and so rounded - AT its declaration, so this pair
+	// really is float64 arithmetic and must keep the unfolded answer.
+	check("nc10", c34ty+c34tz != 0.3)
+	check("nc11", float64(c34a)+float64(c34b) != 0.3)
+	// iota: one source position carrying a different value per spec, which a table
+	// keyed by source position cannot express - declined, not half-folded.
+	check("nc12", c34i0 == 0 && c34i1 == 1 && c34i2 == 2)
+	check("nc13", c34k0 == 1 && c34k1 == 1024 && c34k2 == 1048576)
+	// Each of these binds c34a/c34b to something that is NOT the const above.
+	check("nc14", s34param(3, 4) == 12)
+	check("nc15", s34local() == 35)
+	check("nc16", s34rangeVar([]int{9, 9, 9}) == 3)
+	check("nc17", s34inner())
+	check("nc18", s34switch(1) == 20.0 && s34switch(2) == 0.02)
+	// A COMPLEX constant is a PAIR of the same exact rationals, so it folds too - the
+	// unfolded path multiplied four already-rounded doubles and drifted in both parts.
+	check("nc19", (0.1+0.2i)*(0.1+0.2i) == -0.03+0.04i)
+	check("nc20", c34z*c34z == -0.03+0.04i && c34z+c34w == 0.3+0.3i)
+	check("nc21", real(c34z*c34w) == 0 && imag(c34z*c34w) == 0.05 && 1+0i == 1)
+	check("nc22", c34z/c34w == 0.8+0.6i && -c34z+c34z == 0)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -1518,6 +1619,7 @@ func main() {
 	s31() // SECTION-CALL 31
 	s32() // SECTION-CALL 32
 	s33() // SECTION-CALL 33
+	s34() // SECTION-CALL 34
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
