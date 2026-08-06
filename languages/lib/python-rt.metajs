@@ -442,6 +442,10 @@ function pyStr(v) {
     }
     var ic = pyInstClassOf(v)
     if (ic !== null && ic !== undefined) { return pyUserRender(v, ic, false) }
+    // An iterator object. CPython prints <map object at 0x...>; the address is
+    // its own and cannot be matched, so it is left off rather than invented, and
+    // all three engines print this same short form.
+    if (pyIsIter(v)) { return "<" + pyToStr(v["__pyit"]) + " object>" }
     return pyToStr(v)
 }
 
@@ -2549,6 +2553,9 @@ function pyAMinMax(argsV, want) {
     if (!pyIsArr(argsV)) { pyFail("max/min needs an argument array") }
     var elems = argsV
     if (elems.length == 1 && pyIsArr(elems[0])) { elems = elems[0] }
+    else if (elems.length == 1 && (pyIsIter(elems[0]) || pyIsGen(elems[0]))) {
+        elems = pyElemsOf(elems[0]) // max(map(f, xs)), max(iter(xs)).
+    }
     if (elems.length == 0) { pyFail("max/min of an empty sequence") }
     var best = anytype
     best = elems[0]
@@ -2630,8 +2637,457 @@ function js_pychr(n) {
     return pyBCodePoint(v)
 }
 
+// ===== docs/todo.md 1.4: the builtins missing from ALL THREE engines ========
+//
+// Each is bound by declBuiltin in languages/python-to-llvm-ir.abnf, has a Go
+// twin of the same js_py* name in abnf/jsrt.go and a hostGlobals entry in
+// languages/python-interpreter.abnf. The variadic ones (next, round, pow, zip,
+// map, enumerate, getattr, setattr, sorted) are declared with argc 0, which
+// hands them the whole ARGUMENT ARRAY.
+//
+// NOT done, each for a reason stated at the binding site: input (reads stdin),
+// format, frozenset, hash, id.
+//
+// THE ITERATOR OBJECT. iter/enumerate/zip/map/filter/reversed answer an ITERATOR
+// in CPython and next() drives it, and this project had no such value: the only
+// steppable thing was a generator. So an iterator is built to LOOK like one - a
+// plain object carrying a callable "next" that answers {value, done} - which is
+// exactly what pyIsGen tests for and what the compiled for-loop tests for
+// (python-to-llvm-ir.abnf's makeForStmt reads js_get(v, "next")), so a for loop
+// over one is LAZY with no change to the emitter and `it.__next__()` raises
+// StopIteration through pyDMethodCall's generator arm.
+//
+// The SOURCE is materialized, and that is the line drawn: CPython's
+// map/filter/zip/enumerate are lazy in their input too, so `map(f, endless())`
+// works there and hangs here. iter(gen) answers the GENERATOR ITSELF - CPython's
+// rule as well - so the lazy case docs/todo.md 1.7 fixed is untouched.
+//
+// Go: rt.pyMkIter / rt.pyItStep (abnf/jsrt.go).
+function pyMkIter(name, arr) {
+    var it = {__pyit: name, __a: arr, __i: 0}
+    it["next"] = function() { return pyItStep(it) }
+    return it
+}
+
+function pyItStep(it) {
+    if (it["__i"] >= it["__a"].length) { return {value: undefined, done: true} }
+    var v = it["__a"][it["__i"]]
+    it["__i"] = it["__i"] + 1
+    return {value: v, done: false}
+}
+
+function pyIsIter(v) {
+    if (v === null || v === undefined) { return false }
+    if (typeof v != "object") { return false }
+    if (Array.isArray(v)) { return false }
+    return v["__pyit"] !== undefined
+}
+
+// What is LEFT of an iterator; the read EXHAUSTS it, so next(it) followed by
+// list(it) does not repeat an element.
+function pyIterRest(it) {
+    var out = []
+    var i = it["__i"]
+    while (i < it["__a"].length) {
+        out.push(it["__a"][i])
+        i = i + 1
+    }
+    it["__i"] = it["__a"].length
+    return out
+}
+
+// js_pyiter's element list, as a fresh array: a generator drains, an iterator
+// gives what is left, a set copies, a dict gives its keys, a string its
+// characters. Go: rt.pyElemsOf.
+function pyElemsOf(v) {
+    if (pyIsIter(v)) { return pyIterRest(v) }
+    if (pyIsGen(v)) { return pyADrainGen(v) }
+    var els = pySetElemsOf(v)
+    if (els !== null && els !== undefined) { return pyCCopyArr(els) }
+    if (pyIsArr(v)) { return v }
+    if (typeof v == "string") { return pyCStrChars(v) }
+    if (pyIsDict(v)) { return pyCCopyArr(v["keys"]) }
+    throw pyExcInstance("TypeError", "'" + pyTypeName(v) + "' object is not iterable")
+}
+
+function pyIterKind(v) {
+    if (typeof v == "string") { return "str_iterator" }
+    if (pyIsArr(v)) { return "list_iterator" }
+    return "iterator"
+}
+
+function js_pyiterfn(v) {
+    if (pyIsGen(v) || pyIsIter(v)) { return v }
+    return pyMkIter(pyIterKind(v), pyCCopyArr(pyElemsOf(v)))
+}
+
+// next(it[, default]). The COMPILER half had no `next` at all, which is
+// docs/todo.md 1.4's sharpest gap: next(g) is the ordinary way to drive a
+// generator.
+function js_pynext(args) {
+    var it = pyFArgAt(args, 0)
+    if (pyIsIter(it)) {
+        var s = pyItStep(it)
+        if (s["done"] === true) { return pyStopIter(args, undefined) }
+        return s["value"]
+    }
+    if (pyIsGen(it)) {
+        var st = it["next"].apply(it, [undefined])
+        if (st === undefined || st === null) { fail("generator step failed") }
+        if (st["done"] === true) { return pyStopIter(args, st["value"]) }
+        return st["value"]
+    }
+    throw pyExcInstance("TypeError", "'" + pyTypeName(it) + "' object is not an iterator")
+}
+
+// next()'s end: the default argument when there is one, else StopIteration.
+function pyStopIter(args, val) {
+    if (args.length > 1) { return args[1] }
+    var exc = pyExcInstance("StopIteration", "")
+    // Spelled null and not undefined for the reason pyDMethodCall's generator
+    // arm records: pyGetAttr treats an undefined-valued attribute as ABSENT.
+    var sv = anytype
+    sv = val
+    if (sv === undefined) { sv = null }
+    exc["value"] = sv
+    throw exc
+}
+
+function js_pyenumerate(args) {
+    var start = 0
+    if (args.length > 1) { start = pyNum(args[1]) }
+    var a = pyElemsOf(pyFArgAt(args, 0))
+    var out = []
+    var i = 0
+    while (i < a.length) {
+        out.push([start + i, a[i]])
+        i = i + 1
+    }
+    return pyMkIter("enumerate", out)
+}
+
+// The shortest source wins, and every source is materialized first.
+function pyZipRows(srcs) {
+    var n = 0 - 1
+    var i = 0
+    while (i < srcs.length) {
+        if (n < 0 || srcs[i].length < n) { n = srcs[i].length }
+        i = i + 1
+    }
+    if (n < 0) { n = 0 }
+    var out = []
+    i = 0
+    while (i < n) {
+        var row = []
+        var k = 0
+        while (k < srcs.length) {
+            row.push(srcs[k][i])
+            k = k + 1
+        }
+        out.push(row)
+        i = i + 1
+    }
+    return out
+}
+
+function js_pyzip(args) {
+    var srcs = []
+    var i = 0
+    while (i < args.length) {
+        srcs.push(pyElemsOf(args[i]))
+        i = i + 1
+    }
+    return pyMkIter("zip", pyZipRows(srcs))
+}
+
+function js_pymapfn(args) {
+    var f = pyFArgAt(args, 0)
+    var srcs = []
+    var i = 1
+    while (i < args.length) {
+        srcs.push(pyElemsOf(args[i]))
+        i = i + 1
+    }
+    var rows = pyZipRows(srcs)
+    var out = []
+    i = 0
+    while (i < rows.length) {
+        out.push(pyDCallPyValue(f, rows[i], undefined))
+        i = i + 1
+    }
+    return pyMkIter("map", out)
+}
+
+// filter(None, xs) keeps the TRUTHY elements - CPython's documented special
+// case for a None function.
+function js_pyfilterfn(f, src) {
+    var a = pyElemsOf(src)
+    var out = []
+    var i = 0
+    while (i < a.length) {
+        var keep = false
+        if (f === undefined || f === null) { keep = js_pybool(a[i]) }
+        else { keep = js_pybool(pyDCallPyValue(f, [a[i]], undefined)) }
+        if (keep) { out.push(a[i]) }
+        i = i + 1
+    }
+    return pyMkIter("filter", out)
+}
+
+function js_pyreversed(v) {
+    var a = pyElemsOf(v)
+    var out = []
+    var i = a.length - 1
+    while (i >= 0) {
+        out.push(a[i])
+        i = i - 1
+    }
+    return pyMkIter("reversed", out)
+}
+
+// sorted(x): a NEW list, ascending, by the same comparison `<` uses. CPython's
+// key= and reverse= are KEYWORD-ONLY and a signature-less builtin here is
+// reached positionally only, so they are refused loudly rather than ignored.
+// Insertion sort, which is STABLE - Python's sort is.
+function js_pysorted(args) {
+    if (args.length > 1) { fail("sorted(): key= and reverse= are not supported") }
+    var a = pyCCopyArr(pyElemsOf(pyFArgAt(args, 0)))
+    var i = 1
+    while (i < a.length) {
+        var x = anytype
+        x = a[i]
+        var j = i - 1
+        while (j >= 0 && pyACompare(x, a[j]) == -1) {
+            a[j + 1] = a[j]
+            j = j - 1
+        }
+        a[j + 1] = x
+        i = i + 1
+    }
+    return a
+}
+
+function js_pyall(v) {
+    var a = pyElemsOf(v)
+    var i = 0
+    while (i < a.length) {
+        if (!js_pybool(a[i])) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+function js_pyany2(v) {
+    var a = pyElemsOf(v)
+    var i = 0
+    while (i < a.length) {
+        if (js_pybool(a[i])) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// bin/hex/oct: CPython's 0b/0x/0o prefix with the sign OUTSIDE it, so bin(-5) is
+// '-0b101'. The digits come out through pyABin, so an ARBITRARY PRECISION int
+// converts exactly - the Go twin uses math/big for the same reason.
+function js_pybinstr(n) { return pyRadixOf(n, 2, "0b") }
+function js_pyhexstr(n) { return pyRadixOf(n, 16, "0x") }
+function js_pyoctstr(n) { return pyRadixOf(n, 8, "0o") }
+
+function pyRadixOf(n, base, prefix) {
+    if (typeof n == "boolean") {
+        if (n) { return prefix + "1" }
+        return prefix + "0"
+    }
+    if (typeof n != "number" && !pyIsBig(n)) {
+        throw pyExcInstance("TypeError",
+                            "'" + pyTypeName(n) + "' object cannot be interpreted as an integer")
+    }
+    var sign = ""
+    var v = anytype
+    v = pyABigOperand(n)                        // Promotes a plain int too.
+    if (pyABigCmp(v, pyABigFromNum(0)) < 0) {
+        sign = "-"
+        v = pyABigNeg(v)
+    }
+    var digits = "0123456789abcdef"
+    var out = ""
+    var bb = pyABigFromNum(base)
+    if (pyABigIsZero(v)) { out = "0" }
+    while (!pyABigIsZero(v)) {
+        out = digits.charAt(Math.trunc(pyNum(pyABigNarrow(pyABigRem(v, bb))))) + out
+        v = pyABigQuo(v, bb)
+    }
+    return sign + prefix + out
+}
+
+// INTEGER *, //, % over operands of either width, with a POSITIVE divisor - the
+// two callers are the radix loop (base 2/8/16) and modular pow (modulus > 0).
+// pyABigArith cannot be used directly: it requires BOTH sides to be big already,
+// where these mix a big with a small literal, and its % is the TRUNCATED
+// remainder while Python's is FLOORED. Both are handled here: the operands are
+// promoted with pyABigOperand and a negative remainder is corrected by adding
+// the divisor. Go: math/big does the same job in rt.pyRadix and js_pypow.
+function pyAIntOp(op, l, r) {
+    if (pyIsBig(l) || pyIsBig(r)) {
+        var bl = pyABigOperand(l)
+        var br = pyABigOperand(r)
+        if (bl !== null && br !== null && !pyABigIsZero(br)) {
+            if (op == "*") { return pyABigNarrow(pyABigMul(bl, br)) }
+            var q = pyABigQuo(bl, br)
+            var m = pyABigRem(bl, br)
+            if (pyABigCmp(m, pyABigFromNum(0)) < 0) {
+                m = pyABigAdd(m, br)          // The divisor is positive here.
+                q = pyABigSub(q, pyABigFromNum(1))
+            }
+            if (op == "//") { return pyABigNarrow(q) }
+            return pyABigNarrow(m)
+        }
+    }
+    if (op == "*") { return pyNum(l) * pyNum(r) }
+    if (op == "//") { return Math.floor(pyNum(l) / pyNum(r)) }
+    return pyAFloorMod(pyNum(l), pyNum(r))
+}
+
+// divmod(a, b) is the pair (a // b, a % b): FLOOR division and the floored
+// remainder, so divmod(-7, 2) is (-4, 1). A tuple is a list in this value model
+// (docs/working-on-this-project.md 7.9).
+function js_pydivmod(l, r) {
+    if (pyNum(r) == 0) {
+        throw pyExcInstance("ZeroDivisionError", "integer division or modulo by zero")
+    }
+    return [pyIntOrFlo(Math.floor(pyNum(l) / pyNum(r)), l, r),
+            pyIntOrFlo(pyAFloorMod(pyNum(l), pyNum(r)), l, r)]
+}
+
+// round(x[, n]) rounds HALF TO EVEN, so round(0.5) is 0, round(1.5) is 2 and
+// round(2.5) is 2 - which a Math.floor(x + 0.5) spelling gets wrong on every
+// other integer. rtFixed is the shared exact decimal formatter and rounds half
+// to even by construction (docs/working-on-this-project.md 7.7).
+function js_pyround(args) {
+    var v = pyFArgAt(args, 0)
+    var f = pyAToF(v)
+    if (args.length < 2 || args[1] === undefined || args[1] === null) {
+        return parseFloat(rtFixed(f, 0))
+    }
+    var nd = Math.trunc(pyNum(args[1]))
+    if (nd < 0) { nd = 0 }
+    var r = parseFloat(rtFixed(f, nd))
+    if (nd <= 0 && !pyIsFlo(v)) { return r }
+    return pyMkFlo(r)
+}
+
+// pow(a, b[, m]): the ** operator, plus CPython's three-argument MODULAR form,
+// computed by repeated squaring so an arbitrary-precision base stays exact.
+function js_pypow(args) {
+    var l = pyFArgAt(args, 0)
+    var r = pyFArgAt(args, 1)
+    if (args.length > 2 && args[2] !== undefined && args[2] !== null) {
+        var m = args[2]
+        var base = anytype
+        base = pyAIntOp("%", l, m)
+        var acc = anytype
+        acc = 1
+        var e = anytype
+        e = r
+        while (pyACompare(e, 0) == 1) {
+            if (pyAEqual(pyAIntOp("%", e, 2), 1)) { acc = pyAIntOp("%", pyAIntOp("*", acc, base), m) }
+            e = pyAIntOp("//", e, 2)
+            base = pyAIntOp("%", pyAIntOp("*", base, base), m)
+        }
+        return acc
+    }
+    var ex = pyNum(r)
+    if (ex < 0) { return pyMkFlo(Math.pow(pyNum(l), ex)) }
+    if (!pyIsFlo(l) && !pyIsFlo(r) && ex == Math.trunc(ex) && ex <= 4096) {
+        var bl = pyABigOperand(l)
+        if (bl !== null) { return pyABigNarrow(pyABigPow(bl, ex)) }
+    }
+    return pyIntOrFlo(Math.pow(pyNum(l), ex), l, r)
+}
+
+// callable(x): a function, a class object, or an instance whose class defines
+// __call__.
+function js_pycallable(v) {
+    if (typeof v == "function") { return true }
+    if (v === null || v === undefined) { return false }
+    if (typeof v != "object") { return false }
+    if (Array.isArray(v)) { return false }
+    if (v["__name"] !== undefined) { return true } // A class object, builtin or not.
+    var cls = pyInstClassOf(v)
+    if (cls !== null && cls !== undefined) { return pyLookupHas(cls, "__call__") }
+    return false
+}
+
+// ascii(x) is repr(x) with every non-ASCII code point escaped as well.
+function js_pyascii(v) {
+    var s = pyRepr(v)
+    var out = ""
+    var k = 0
+    while (k < s.length) {
+        var cc = s.charCodeAt(k)
+        var cp = cc
+        var w = 1
+        if (cc >= 55296 && cc <= 56319 && k + 1 < s.length) {
+            var lo = s.charCodeAt(k + 1)
+            if (lo >= 56320 && lo <= 57343) {
+                cp = 65536 + (cc - 55296) * 1024 + (lo - 56320)
+                w = 2
+            }
+        }
+        if (cp < 128) { out = out + s.charAt(k) }
+        else if (cp < 256) { out = out + "\\x" + pyHexPad(cp, 2) }
+        else if (cp < 65536) { out = out + "\\u" + pyHexPad(cp, 4) }
+        else { out = out + "\\U" + pyHexPad(cp, 8) }
+        k = k + w
+    }
+    return out
+}
+
+// getattr(o, n[, default]) / hasattr(o, n) / setattr(o, n, v), over the same
+// pyGetAttr / pySetAttr the `.` operator uses. hasattr MIRRORS the lookup rather
+// than calling pyGetAttr and catching, because fail() is not catchable here -
+// and the Go twin has the same structural form for the same reason.
+function js_pygetattr3(args) {
+    var o = pyFArgAt(args, 0)
+    var n = pyToStr(pyFArgAt(args, 1))
+    if (args.length > 2 && !pyDHasAttr(o, n)) { return args[2] }
+    return pyGetAttr(o, n)
+}
+
+function js_pyhasattr(o, n) { return pyDHasAttr(o, pyToStr(n)) }
+
+function js_pysetattr3(args) {
+    pySetAttr(pyFArgAt(args, 0), pyToStr(pyFArgAt(args, 1)), pyFArgAt(args, 2))
+    return undefined
+}
+
+function pyDHasAttr(obj, name) {
+    if (obj === null || obj === undefined) { return false }
+    if (pyIsClass(obj)) {
+        if (name == "__name__" || name == "__mro__") { return true }
+        return pyLookupHas(obj, name)
+    }
+    var cls = pyInstClassOf(obj)
+    if (cls !== null && cls !== undefined) {
+        if (name == "__class__" || name == "__dict__") { return true }
+        if (obj[name] !== undefined) { return true }
+        return pyLookupHas(cls, name)
+    }
+    if (typeof obj != "object") { return false }
+    if (Array.isArray(obj)) { return false }
+    return obj[name] !== undefined
+}
+
 // Go: js_pyeq (jsrt.go:7179). Python's == compares CONTAINERS BY VALUE, unlike
 // JavaScript's. 'is' keeps using js_seq, because that one really is identity.
+// The str-method chunk's hook for "materialize a generator or an iterator
+// object", null when the value is neither. See the join arm of pyStrMethod.
+function pySSeqOf(v) {
+    if (pyIsIter(v) || pyIsGen(v)) { return pyElemsOf(v) }
+    return null
+}
+
 function js_pyeq(x, y) { return pyAEqual(x, y) }
 
 // Go: js_jadd (jsrt.go:5151). Java/C# +: string concat, 32 bit add for two int
@@ -3538,6 +3994,8 @@ function js_pylen(v) {
 // ----- js_pylist (jsrt.go:6997) ---------------------------------------------
 // list(x): ALWAYS a fresh list. A generator is drained.
 function js_pylist(v) {
+    // An ITERATOR object gives what is LEFT of it, and the read exhausts it.
+    if (pyIsIter(v)) { return pyIterRest(v) }
     if (pyIsGen(v)) { return pyCDrain(v) }
     var els = pySetElemsOf(v)
     if (els !== null && els !== undefined) { return pyCCopyArr(els) }
@@ -3555,6 +4013,8 @@ function js_pylist(v) {
 // ITSELF - the Go twin returns the handle it was given, not a copy, so a loop
 // that mutates the list it walks sees the mutation.
 function js_pyiter(v) {
+    // An ITERATOR object gives what is LEFT of it, and the read exhausts it.
+    if (pyIsIter(v)) { return pyIterRest(v) }
     if (pyIsGen(v)) { return pyCDrain(v) }
     var els = pySetElemsOf(v)
     if (els !== null && els !== undefined) { return pyCCopyArr(els) }
@@ -3652,10 +4112,14 @@ function js_pykwspread(dst, src) {
 // with ===. A non-array argument yields the empty set.
 function js_pyset_new(src) {
     var out = []
-    if (pyIsArr(src)) {
+    // ANY iterable, not just a list: set("aab") was {'a','b'} in the interpreter
+    // and the EMPTY set in both compiled halves - a live halves divergence found
+    // by the docs/todo.md 1.4 sweep. set() with no argument is still empty.
+    if (src !== undefined && src !== null) {
+        var els = pyElemsOf(src)
         var i = 0
-        while (i < src.length) {
-            pySetAdd(out, src[i])
+        while (i < els.length) {
+            pySetAdd(out, els[i])
             i = i + 1
         }
     }
@@ -4458,6 +4922,16 @@ function pyDInstantiate(cls, args, kw) {
 // callPyValue (jsrt.go:9260) calls a value that may itself be a class or a
 // __call__ instance.
 function pyDCallPyValue(v, args, kw) {
+    // A BUILTIN TYPE OBJECT is callable and CONVERTS: the emitter binds int/str/
+    // float/... to js_pybuiltincls's stable class object with the conversion
+    // closure hung on it as __conv (declBind in python-to-llvm-ir.abnf).
+    // js_pycall had this arm and this function did not, so `map(str, xs)` - a
+    // builtin class passed as a function - died with "call of a non function
+    // value". Go: rt.callPyValue in abnf/jsrt.go.
+    if (v !== null && v !== undefined && typeof v == "object" && !Array.isArray(v)) {
+        var cv = v["__conv"]
+        if (typeof cv == "function") { return pyCall(cv, args) }
+    }
     var cls = pyClassOf(v)
     if (cls !== null) { return pyDInstantiate(cls, args, kw) }
     var icls = pyInstClassOf(v)
@@ -4569,23 +5043,101 @@ function pyDMethodCall(target, name, args, kw) {
             fail("'" + pyToStr(icls["__name"]) + "' object has no method '" + name + "'")
         }
     }
-    if (pyDForeign(name)) {
-        fail("AttributeError: '" + pyTypeName(target) + "' object has no attribute '" + name + "'")
+    // set.add(x) and dict.pop(k[, default]) - docs/todo.md 1.4, whose third
+    // bullet called them an interpreter-only gap; a probe at 4731755 answered
+    // "unknown method 'add'" and "unknown dict method 'pop'" HERE too, so all
+    // three engines were missing them. Go: the same two arms of pyMethodCall in
+    // abnf/jsrt.go.
+    var pdEls = pySetElemsOf(target)
+    if (pdEls !== null && pdEls !== undefined) {
+        if (name == "add") {
+            pySetAdd(pdEls, pyFArgAt(args, 0)) // Already a member: no-op, returns None.
+            return undefined
+        }
+    }
+    if (pyIsDict(target)) {
+        if (name == "pop") {
+            var pdI = pyDictFind(target["keys"], pyFArgAt(args, 0))
+            if (pdI >= 0) {
+                var pdV = target["vals"][pdI]
+                pyCRemoveAt(target["keys"], pdI)
+                pyCRemoveAt(target["vals"], pdI)
+                return pdV
+            }
+            if (args.length > 1) { return args[1] }
+            throw pyExcInstance("KeyError", pyRepr(pyFArgAt(args, 0)))
+        }
+    }
+    // list.count(x) - docs/todo.md 1.5. pyMemberCall's `count` arm was KOTLIN's
+    // `xs.count { pred }`, so `[1,2,2].count(2)` died with "call of a non
+    // function value: 2" in both compiled halves. Python counts EQUAL elements,
+    // so it is answered here and the shared arm is gone. Go: the *jsArray
+    // `count` arm of pyMethodCall in abnf/jsrt.go.
+    if (pyIsArr(target)) {
+        if (name == "count") {
+            if (args.length == 1) { return pyDListCount(target, args[0]) }
+        }
+    }
+    if (pyDForeign(target, name)) {
+        // A REAL, catchable AttributeError and not fail(): CPython's is
+        // catchable, and both other engines raise one (pyMethodCall in
+        // abnf/jsrt.go panics with a pyExcInstance, pyAttrErr in
+        // languages/python-interpreter.abnf calls pyRaise), so
+        // `try: xs.add(3) / except AttributeError` behaves the same in all three.
+        throw pyExcInstance("AttributeError",
+                            "'" + pyTypeName(target) + "' object has no attribute '" + name + "'")
     }
     return pyMemberCall(target, name, args)
 }
 
-// docs/todo.md 5.2. pyMemberCall is layer 2's copy of the SHARED member-call
-// table rt.memberCall (abnf/jsrt.go), which nine languages land in, and four of
-// its names are ones Python cannot utter: `xs.sumOf(f)` answered 6 in both
-// compiled halves where CPython raises AttributeError. The names are denied here
-// - AFTER the user-class arms above, so a Python class that DEFINES a method
-// called forEach is unaffected - and the arms themselves are gone from
-// pyFStrMethod / pyFListMethod below. The same four names are denied at the same
-// point in abnf/jsrt.go's pyMethodCall, so the two compiled halves keep
-// agreeing. isEmpty and removeLast stay in lib/swift-rt.metajs and
-// lib/dart-rt.metajs, where they are the language's real methods.
-function pyDForeign(name) {
+// list.count(x): how many elements are == to x. Python's equality, not identity,
+// so [1.0, 2].count(1) is 1 (a float box and a plain int compare by value).
+function pyDListCount(xs, v) {
+    var n = 0
+    var i = 0
+    while (i < xs.length) {
+        if (pyAEqual(xs[i], v)) { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+// docs/todo.md 5.2 and 2.4. pyMemberCall is layer 2's copy of the SHARED
+// member-call table rt.memberCall (abnf/jsrt.go), which nine languages land in,
+// and sixteen of its names are ones Python cannot utter: `xs.sumOf(f)` answered
+// 6 and `xs.size()` answered 2 in both compiled halves where CPython raises
+// AttributeError. The names are denied here - AFTER the user-class arms above,
+// so a Python class that DEFINES a method called forEach is unaffected - and the
+// arms themselves are gone from pyFStrMethod / pyFListMethod below. The same
+// table is pyForeignMethod in abnf/jsrt.go, called at the same point by
+// pyMethodCall, so the two compiled halves keep agreeing. isEmpty and removeLast
+// stay in lib/swift-rt.metajs and lib/dart-rt.metajs, where they are the
+// language's real methods.
+//
+// The denial is keyed by RECEIVER TYPE, not by name alone: `get` is a real dict
+// method (d.get(k, default)) and `add` is a real set method, so a flat name
+// switch - which is what the four-name version was - would have broken both.
+function pyDForeign(target, name) {
+    if (pyIsArr(target)) {
+        // Kotlin's, Java's, Dart's and Swift's list methods. `count` is NOT here:
+        // Python has list.count(x) and it is answered above.
+        if (name == "add") { return true }
+        if (name == "size") { return true }
+        if (name == "get") { return true }
+        if (name == "contains") { return true }
+        if (name == "map") { return true }
+        if (name == "filter") { return true }
+        if (name == "any") { return true }
+    }
+    if (pyIsStr(target)) {
+        // Java's and Kotlin's string methods. Python spells them len(s), s[i],
+        // s == t, s[a:b] and s.index(t).
+        if (name == "length") { return true }
+        if (name == "charAt") { return true }
+        if (name == "equals") { return true }
+        if (name == "substring") { return true }
+        if (name == "indexOf") { return true }
+    }
     if (name == "isEmpty") { return true }
     if (name == "removeLast") { return true }
     if (name == "sumOf") { return true }
@@ -4620,10 +5172,14 @@ function pyDIsInstance(v, target) {
         // that carries a __name but NO __mro.
         if (pyIsObj(target)) {
             if (target["__name"] !== undefined && target["__mro"] === undefined) {
-                return pyTypeName(v) == pyToStr(target["__name"])
+                return pyBuiltinSub(pyTypeName(v), pyToStr(target["__name"]))
             }
         }
         return false
+    }
+    // Every class derives from object, so isinstance(C(), object) is True.
+    if (pyIsObj(target)) {
+        if (target["__mro"] === undefined && pyToStr(target["__name"]) == "object") { return true }
     }
     var mro = pyMRO(cls)
     i = 0
@@ -4650,6 +5206,66 @@ function pyDIsInstance(v, target) {
 }
 
 function js_pyisinst(v, target) { return pyDIsInstance(v, target) }
+
+// pyBuiltinSub is the subclass relation over the BUILTIN type names, which is
+// the whole of Python's builtin hierarchy this subset models:
+//
+//     object is the base of everything      isinstance(1, object)  -> True
+//     bool derives from int                 isinstance(True, int)  -> True
+//
+// Both were wrong, in two different ways: isinstance(1, object) was True in the
+// interpreter and FALSE in both compiled halves (a live halves divergence the
+// docs/todo.md 1.4 sweep turned up and the item did not list), while
+// isinstance(True, int) and issubclass(bool, int) were False in EVERY engine -
+// the defect class byte-identity cannot see. Go: pyBuiltinSub in abnf/jsrt.go.
+function pyBuiltinSub(child, base) {
+    if (child == base) { return true }
+    if (base == "object") { return true }
+    return child == "bool" && base == "int"
+}
+
+// issubclass(C, B) - docs/todo.md 1.4, one of its two named compiler-half gaps
+// (`variable not defined: issubclass`). Go: rt.pyIsSubclass in abnf/jsrt.go;
+// interpreter: clsIsSub in languages/python-interpreter.abnf.
+function js_pyissubclass(c, target) { return pyDIsSubclass(c, target) }
+
+function pyDIsSubclass(c, target) {
+    var i = 0
+    if (pyIsArr(target)) {
+        while (i < target.length) {
+            if (pyDIsSubclass(c, target[i])) { return true }
+            i = i + 1
+        }
+        return false
+    }
+    if (!pyIsObj(c) || c["__name"] === undefined) {
+        throw pyExcInstance("TypeError", "issubclass() arg 1 must be a class")
+    }
+    if (!pyIsObj(target)) {
+        throw pyExcInstance("TypeError",
+                            "issubclass() arg 2 must be a class, a tuple of classes, or a union")
+    }
+    var tn = ""
+    if (target["__name"] !== undefined) { tn = pyToStr(target["__name"]) }
+    // A BUILTIN class object carries a __name but no __mro: between two of them
+    // the relation is pyBuiltinSub, and any class against `object` is True.
+    if (c["__mro"] === undefined && target["__mro"] === undefined) {
+        var cn = ""
+        if (c["__name"] !== undefined) { cn = pyToStr(c["__name"]) }
+        return pyBuiltinSub(cn, tn)
+    }
+    if (target["__mro"] === undefined && tn == "object") { return true }
+    var mro = pyMRO(c)
+    i = 0
+    while (i < mro.length) {
+        if (mro[i] === target) { return true }
+        if (mro[i]["__name"] !== undefined && tn != "") {
+            if (pyToStr(mro[i]["__name"]) == tn) { return true }
+        }
+        i = i + 1
+    }
+    return false
+}
 
 // The class object of a BUILTIN type name, so `case str():` can ask isinstance
 // about a value that is not an instance of a user class. One stable object per
@@ -5616,45 +6232,18 @@ function pyFWrap32(n) { return n | 0 }
 
 // ---------------------------------------------------------------- strings ---
 
-// The string arm of memberCall (jsrt.go:2763-2784) - the "Java style builtins".
+// The string arm of memberCall (jsrt.go:2763-2784) - the "Java style builtins",
+// and NONE of the six is ported. length / charAt / equals / substring /
+// indexOf / isEmpty are Java's and Kotlin's spellings; Python says len(s), s[i],
+// s == t, s[a:b] and s.index(t), and CPython raises AttributeError for every one
+// of them. pyDForeign denies all six before this table is reached, exactly as
+// abnf/jsrt.go's pyForeignMethod does for llvm.Run, so what is left is the
+// error arm. See docs/todo.md 2.4.
 //
-// Go's rt.strLen / rt.strAt / rt.strRange / rt.strIndexOf all index by UTF-16
-// CODE UNIT, and the floor's own .length / .charAt / .substring / .indexOf (the
-// js_str_mem extern) are precisely those, so they are used directly rather than
-// rebuilt. Note that the prelude's pyStrLen / pyStrAt count CODE POINTS - they
-// are Go's pyStrLen, a different function - and must not be substituted here.
-//
-// gojaCharAt (jsrt.go:4527), which repairs a lone surrogate that older goja
-// hands back from charAt, is likewise already inside the floor's charAt.
+// The function itself stays because pyMemberCall dispatches on the RECEIVER and
+// pyStrMethod (the real Python string library) dispatches by NAME: a name
+// neither knows has to land somewhere and say so.
 function pyFStrMethod(o, name, args) {
-    if (name == "length") { return o.length }
-    if (name == "charAt") {
-        var i = pyFToInt(pyNum(pyFArgAt(args, 0)))
-        var ch = o.charAt(i)
-        if (ch == "") { fail("charAt(" + i + ") out of range for " + pyToStr(o)) }
-        return ch
-    }
-    if (name == "equals") { return pyFStrictEq(o, pyFArgAt(args, 0)) }
-    if (name == "substring") {
-        // substringRange (jsrt.go:4661): both ends clamp, and begin > end SWAPS
-        // (unlike slice, which wraps a negative index from the end).
-        var n = o.length
-        var begin = pyFClampSub(pyNum(pyFArgAt(args, 0)), n)
-        var end = n
-        if (args.length > 1) {
-            if (args[1] !== undefined) { end = pyFClampSub(pyNum(args[1]), n) }
-        }
-        if (begin > end) {
-            var t = begin
-            begin = end
-            end = t
-        }
-        return o.substring(begin, end)
-    }
-    if (name == "indexOf") { return o.indexOf(pyToStr(pyFArgAt(args, 0))) }
-    // The Go twin's isEmpty arm (len(o) == 0) is NOT ported: it is Swift's and
-    // Dart's method, Python cannot utter it, and pyDForeign denies the name
-    // before this table is ever reached. See docs/todo.md 5.2.
     fail("unknown String method: " + name)
     return null
 }
@@ -5666,10 +6255,6 @@ function pyFStrMethod(o, name, args) {
 // index cache before a mutation; layer 2 has no such cache, so those calls have
 // no counterpart and are simply absent.
 function pyFListMethod(o, name, args) {
-    if (name == "add") {
-        o.push(pyFArgAt(args, 0))
-        return true
-    }
     if (name == "append") {
         // Python: returns None.
         o.push(pyFArgAt(args, 0))
@@ -5684,60 +6269,17 @@ function pyFListMethod(o, name, args) {
         if (o.length == 0) { fail("pop from empty list") }
         return o.pop()
     }
-    if (name == "size") { return o.length }
-    if (name == "get") {
-        var gi = Math.trunc(pyNum(pyFArgAt(args, 0)))
-        if (gi < 0 || gi >= o.length) { fail("list index " + gi + " out of range") }
-        return o[gi]
-    }
-    if (name == "contains") {
-        var ci = 0
-        while (ci < o.length) {
-            if (pyFStrictEq(o[ci], pyFArgAt(args, 0))) { return true }
-            ci = ci + 1
-        }
-        return false
-    }
-    // The Kotlin higher order methods; the argument is a lambda (closure handle).
-    if (name == "map") {
-        var mo = []
-        var mi = 0
-        while (mi < o.length) {
-            mo.push(pyFCall1(pyFArgAt(args, 0), o[mi]))
-            mi = mi + 1
-        }
-        return mo
-    }
-    if (name == "filter") {
-        var fo = []
-        var fi = 0
-        while (fi < o.length) {
-            if (pyFTruthy(pyFCall1(pyFArgAt(args, 0), o[fi]))) { fo.push(o[fi]) }
-            fi = fi + 1
-        }
-        return fo
-    }
-    // The Go twin's sumOf and forEach arms are KOTLIN's and Dart's methods, not
-    // Python's, and are not ported: pyDForeign denies both names before this
-    // table is reached (docs/todo.md 5.2).
-    if (name == "count") {
-        if (args.length == 0) { return o.length }
-        var n = 0
-        var ni = 0
-        while (ni < o.length) {
-            if (pyFTruthy(pyFCall1(pyFArgAt(args, 0), o[ni]))) { n = n + 1 }
-            ni = ni + 1
-        }
-        return n
-    }
-    if (name == "any") {
-        var ai = 0
-        while (ai < o.length) {
-            if (pyFTruthy(pyFCall1(pyFArgAt(args, 0), o[ai]))) { return true }
-            ai = ai + 1
-        }
-        return false
-    }
+    // add / size / get / contains / map / filter / any / sumOf / forEach are
+    // KOTLIN's, Java's, Dart's and Swift's list methods and are NOT ported:
+    // CPython raises AttributeError for every one of them and pyDForeign denies
+    // all nine before this table is reached (docs/todo.md 2.4 and 5.2). The Go
+    // twin still HAS them, because nine languages share that table - which is
+    // why the denial and these deletions are one change.
+    //
+    // `count` is not among them: Python HAS list.count(x), and it counts EQUAL
+    // elements where the Go twin's shared arm counts a Kotlin PREDICATE's
+    // successes. pyDMethodCall answers it before reaching here (pyDListCount),
+    // so this table never sees the name. docs/todo.md 1.5.
     fail("unknown list method '" + name + "'")
     return null
 }
@@ -6661,8 +7203,16 @@ function pyStrMethod(s, name, args, kw) {
         return pySSplitLines(s, ke)
     }
     if (name == "join") {
-        var seq = args[0]
+        var seq = anytype
+        seq = args[0]
         if (typeof seq == "string") { return pySJoin(s, pySChars(seq)) }
+        // A GENERATOR or an ITERATOR object (docs/todo.md 1.4's iter/map/filter/
+        // zip/enumerate) is materialized rather than refused - `", ".join(map(str,
+        // xs))` is ordinary Python. pySSeqOf answers null for anything else, and
+        // is the one hook this chunk needs for it. Keep in step with the join arm
+        // in abnf/pystrmethod.go and languages/python-interpreter.abnf.
+        var jseq = pySSeqOf(seq)
+        if (jseq !== null) { seq = jseq }
         if (!pySIsArr(seq)) { pySFail("TypeError: can only join an iterable") }
         return pySJoin(s, seq)
     }

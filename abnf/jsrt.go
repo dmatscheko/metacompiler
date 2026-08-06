@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"os"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf16"
@@ -3282,6 +3283,12 @@ func (rt *jsrt) pyString(v interface{}) string {
 		}
 		if o, cls, isInst := pyInstance(t); isInst {
 			return rt.pyUserRender(o, cls, false)
+		}
+		// An iterator object. CPython prints <map object at 0x...>; the address is
+		// its own and cannot be matched, so the address is left off rather than
+		// invented - and the same short form is printed by all three engines.
+		if n := pyIterName(rt, t); n != "" {
+			return "<" + n + " object>"
 		}
 		return rt.toString(v)
 	default:
@@ -9001,6 +9008,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if g, ok := u(a[0]).(*jsGenerator); ok {
 				return w(g.drain(rt))
 			}
+			// An ITERATOR object gives what is LEFT of it, and is exhausted by the
+			// read - CPython's rule, and what makes next(it) then list(it) work.
+			if pyIterName(rt, u(a[0])) != "" {
+				return w(&jsArray{elems: rt.pyElemsOf(u(a[0]))})
+			}
 			if els, ok := pySetElems(u(a[0])); ok {
 				return w(&jsArray{elems: append([]interface{}{}, els.elems...)})
 			}
@@ -9021,6 +9033,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return 0
 		},
 		"js_pyiter": func(a []uint64) uint64 { // The list a for loop runs over: dicts iterate
+			if pyIterName(rt, u(a[0])) != "" { // An iterator object, exhausted by the read.
+				return w(&jsArray{elems: rt.pyElemsOf(u(a[0]))})
+			}
 			if g, ok := u(a[0]).(*jsGenerator); ok { // A generator is drained first.
 				return w(g.drain(rt))
 			}
@@ -9366,6 +9381,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pyisinst": func(a []uint64) uint64 {
 			return boolH(rt.pyIsInstance(u(a[0]), u(a[1])))
 		},
+		// issubclass(C, B) - docs/todo.md 1.4. It was one of the item's two named
+		// compiler-half gaps: this engine answered `variable not defined:
+		// issubclass` where the interpreter had hostGlobals["issubclass"].
+		"js_pyissubclass": func(a []uint64) uint64 {
+			return boolH(rt.pyIsSubclass(u(a[0]), u(a[1])))
+		},
 		// A complex number: (real, imaginary) -> the {__cplx, real, imag} value the
 		// complex arithmetic in js_pybin / js_pyunary and the .real / .imag attribute
 		// reads understand. Only the Python compiler grammar builds this shape.
@@ -9398,8 +9419,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// literal or the comprehension collected, deduplicated with Python's ==.
 		"js_pyset_new": func(a []uint64) uint64 {
 			out := &jsArray{}
-			if src, isArr := u(a[0]).(*jsArray); isArr {
-				for _, e := range src.elems {
+			// ANY iterable, not just a list: set("aab") was {'a','b'} in the
+			// interpreter and the EMPTY set in both compiled halves - a live
+			// halves divergence, found by the docs/todo.md 1.4 sweep, that the
+			// item did not list. set() with no argument is still the empty set.
+			if !isUndefOrNull(u(a[0])) {
+				for _, e := range rt.pyElemsOf(u(a[0])) {
 					rt.pySetAdd(out, e)
 				}
 			}
@@ -10172,10 +10197,282 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return rt.wrapStr(string(rune(int64(n))))
 		},
+		// ---- docs/todo.md 1.4: the builtins missing from ALL THREE engines. ----
+		//
+		// Each is bound by declBuiltin in languages/python-to-llvm-ir.abnf, has a
+		// twin of the same js_py* name in languages/lib/python-rt.metajs, and a
+		// hostGlobals entry in languages/python-interpreter.abnf. The variadic
+		// ones (next, round, pow, zip, map, enumerate) are declared with argc 0,
+		// which hands the extern the whole ARGUMENT ARRAY.
+		//
+		// iter(x): a generator is ITSELF an iterator in CPython and is answered
+		// unchanged - which is what keeps `for x in iter(endless())` lazy;
+		// everything else is materialized into a cursor. See pyMkIter.
+		"js_pyiterfn": func(a []uint64) uint64 {
+			v := u(a[0])
+			if _, ok := v.(*jsGenerator); ok {
+				return a[0]
+			}
+			if pyIterName(rt, v) != "" {
+				return a[0]
+			}
+			return w(rt.pyMkIter(pyIterKind(v), rt.pyElemsOf(v)))
+		},
+		// next(it[, default]): the generator protocol, or one step of a cursor.
+		// Missing HERE only - the interpreter had hostGlobals["next"] - and it is
+		// the ordinary way to drive a generator, so it is docs/todo.md 1.4's
+		// sharpest halves gap.
+		"js_pynext": func(a []uint64) uint64 {
+			args := rt.argArray(u(a[0]))
+			it := argAt(args, 0)
+			if g, ok := it.(*jsGenerator); ok {
+				st, _ := g.step(rt, jsUndef).(*jsObject)
+				if st == nil {
+					rt.fail("generator step failed")
+				}
+				if done, _ := st.props["done"].(bool); done {
+					return rt.pyStopIter(args, st.props["value"])
+				}
+				return w(st.props["value"])
+			}
+			if o, ok := it.(*jsObject); ok && pyIterName(rt, o) != "" {
+				st := rt.pyItStep(o)
+				if done, _ := st.props["done"].(bool); done {
+					return rt.pyStopIter(args, jsUndef)
+				}
+				return w(st.props["value"])
+			}
+			panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+				"'"+pyTypeName(rt, it)+"' object is not an iterator")})
+		},
+		"js_pyenumerate": func(a []uint64) uint64 {
+			args := rt.argArray(u(a[0]))
+			start := 0.0
+			if len(args) > 1 {
+				start = rt.toNumber(args[1])
+			}
+			var out []interface{}
+			for i, e := range rt.pyElemsOf(argAt(args, 0)) {
+				out = append(out, &jsArray{elems: []interface{}{start + float64(i), e}})
+			}
+			return w(rt.pyMkIter("enumerate", out))
+		},
+		"js_pyzip": func(a []uint64) uint64 {
+			args := rt.argArray(u(a[0]))
+			var srcs [][]interface{}
+			n := -1
+			for _, s := range args {
+				es := rt.pyElemsOf(s)
+				srcs = append(srcs, es)
+				if n < 0 || len(es) < n {
+					n = len(es)
+				}
+			}
+			if n < 0 {
+				n = 0
+			}
+			var out []interface{}
+			for i := 0; i < n; i++ {
+				row := &jsArray{}
+				for _, s := range srcs {
+					row.elems = append(row.elems, s[i])
+				}
+				out = append(out, row)
+			}
+			return w(rt.pyMkIter("zip", out))
+		},
+		"js_pymapfn": func(a []uint64) uint64 {
+			args := rt.argArray(u(a[0]))
+			f := argAt(args, 0)
+			var srcs [][]interface{}
+			n := -1
+			for _, s := range pyTailArgs(args) {
+				es := rt.pyElemsOf(s)
+				srcs = append(srcs, es)
+				if n < 0 || len(es) < n {
+					n = len(es)
+				}
+			}
+			if n < 0 {
+				n = 0
+			}
+			var out []interface{}
+			for i := 0; i < n; i++ {
+				var row []interface{}
+				for _, s := range srcs {
+					row = append(row, s[i])
+				}
+				out = append(out, rt.callPyValue(f, row, jsUndef))
+			}
+			return w(rt.pyMkIter("map", out))
+		},
+		// filter(f, xs): a None (or missing) function keeps the TRUTHY elements,
+		// which is CPython's documented special case.
+		"js_pyfilterfn": func(a []uint64) uint64 {
+			f, src := u(a[0]), u(a[1])
+			var out []interface{}
+			for _, e := range rt.pyElemsOf(src) {
+				keep := false
+				if isUndefOrNull(f) {
+					keep = rt.pyTruthyOf(e)
+				} else {
+					keep = rt.pyTruthyOf(rt.callPyValue(f, []interface{}{e}, jsUndef))
+				}
+				if keep {
+					out = append(out, e)
+				}
+			}
+			return w(rt.pyMkIter("filter", out))
+		},
+		"js_pyreversed": func(a []uint64) uint64 {
+			src := rt.pyElemsOf(u(a[0]))
+			out := make([]interface{}, 0, len(src))
+			for i := len(src) - 1; i >= 0; i-- {
+				out = append(out, src[i])
+			}
+			return w(rt.pyMkIter("reversed", out))
+		},
+		// sorted(x): a NEW list, ascending, by the same comparison `<` uses.
+		// CPython's key= and reverse= are KEYWORD-ONLY and a signature-less
+		// builtin here receives positional arguments only, so they are refused
+		// loudly rather than silently ignored.
+		"js_pysorted": func(a []uint64) uint64 {
+			args := rt.argArray(u(a[0]))
+			if len(args) > 1 {
+				rt.fail("sorted(): key= and reverse= are not supported")
+			}
+			out := append([]interface{}{}, rt.pyElemsOf(argAt(args, 0))...)
+			sort.SliceStable(out, func(i, j int) bool { return rt.jsCompare(out[i], out[j]) == -1 })
+			return w(&jsArray{elems: out})
+		},
+		"js_pyall": func(a []uint64) uint64 {
+			for _, e := range rt.pyElemsOf(u(a[0])) {
+				if !rt.pyTruthyOf(e) {
+					return boolH(false)
+				}
+			}
+			return boolH(true)
+		},
+		"js_pyany2": func(a []uint64) uint64 {
+			for _, e := range rt.pyElemsOf(u(a[0])) {
+				if rt.pyTruthyOf(e) {
+					return boolH(true)
+				}
+			}
+			return boolH(false)
+		},
+		// bin/hex/oct: CPython's 0b/0x/0o prefix, the sign OUTSIDE the prefix
+		// (bin(-5) is '-0b101'), and arbitrary precision through math/big.
+		"js_pybinstr": func(a []uint64) uint64 { return rt.wrapStr(rt.pyRadix(u(a[0]), 2, "0b")) },
+		"js_pyhexstr": func(a []uint64) uint64 { return rt.wrapStr(rt.pyRadix(u(a[0]), 16, "0x")) },
+		"js_pyoctstr": func(a []uint64) uint64 { return rt.wrapStr(rt.pyRadix(u(a[0]), 8, "0o")) },
+		// divmod(a, b) is the PAIR (a // b, a % b) - floor division and the
+		// floored remainder, so divmod(-7, 2) is (-4, 1). A tuple is a list here
+		// (docs/working-on-this-project.md 7.9).
+		"js_pydivmod": func(a []uint64) uint64 {
+			l, r := u(a[0]), u(a[1])
+			if rt.toNumber(r) == 0 {
+				panic(&jsThrown{value: rt.pyExcInstance("ZeroDivisionError", "integer division or modulo by zero")})
+			}
+			q := pyIntOrFlo(math.Floor(rt.toNumber(l)/rt.toNumber(r)), l, r)
+			m := pyIntOrFlo(pyFloorMod(rt.toNumber(l), rt.toNumber(r)), l, r)
+			return w(&jsArray{elems: []interface{}{q, m}})
+		},
+		// round(x[, n]): CPython rounds HALF TO EVEN, so round(2.5) is 2 and
+		// round(0.5) is 0 - the one thing a Math.floor(x + 0.5) spelling gets
+		// wrong, and it is wrong on every other integer. With no n the answer is
+		// an INT; with an n it keeps the argument's type.
+		"js_pyround": func(a []uint64) uint64 {
+			args := rt.argArray(u(a[0]))
+			v := argAt(args, 0)
+			if len(args) < 2 || isUndefOrNull(args[1]) {
+				return w(pyRoundHalfEven(rt.pyToF(v), 0))
+			}
+			nd := int(rt.toNumber(args[1]))
+			r := pyRoundHalfEven(rt.pyToF(v), nd)
+			if nd <= 0 && !pyIsFlo(v) {
+				return w(r)
+			}
+			return w(&jsPyFlo{f: r})
+		},
+		// pow(a, b[, m]): the ** operator, plus CPython's three-argument MODULAR
+		// form, which is exact through math/big.
+		"js_pypow": func(a []uint64) uint64 {
+			args := rt.argArray(u(a[0]))
+			l, r := argAt(args, 0), argAt(args, 1)
+			if len(args) > 2 && !isUndefOrNull(args[2]) {
+				bl, ok1 := pyBigOperand(l)
+				br, ok2 := pyBigOperand(r)
+				bm, ok3 := pyBigOperand(args[2])
+				if !ok1 || !ok2 || !ok3 {
+					panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+						"pow() 3rd argument not allowed unless all arguments are integers")})
+				}
+				return w(rt.pyBigNarrow(new(big.Int).Exp(bl, br, bm)))
+			}
+			e := rt.toNumber(r)
+			if e < 0 {
+				return w(&jsPyFlo{f: math.Pow(rt.toNumber(l), e)})
+			}
+			if !pyIsFlo(l) && !pyIsFlo(r) && e == math.Trunc(e) && e <= 4096 {
+				if bl, ok := pyBigOperand(l); ok {
+					return w(rt.pyBigNarrow(new(big.Int).Exp(bl, big.NewInt(int64(e)), nil)))
+				}
+			}
+			return w(pyIntOrFlo(math.Pow(rt.toNumber(l), e), l, r))
+		},
+		// callable(x): a function, a class object, or an instance whose class
+		// defines __call__.
+		"js_pycallable": func(a []uint64) uint64 {
+			v := u(a[0])
+			if isCallable(v) {
+				return boolH(true)
+			}
+			if _, ok := pyClassObj(v); ok {
+				return boolH(true)
+			}
+			if tc, ok := v.(*jsObject); ok && hasKey(tc, "__name") && !hasKey(tc, "__mro") {
+				return boolH(true) // A builtin class object: int, str, ...
+			}
+			if _, cls, ok := pyInstance(v); ok {
+				if m, found := pyLookup(cls, "__call__"); found && isCallable(m) {
+					return boolH(true)
+				}
+			}
+			return boolH(false)
+		},
+		// ascii(x) is repr(x) with every non-ASCII code point escaped as well.
+		"js_pyascii": func(a []uint64) uint64 { return rt.wrapStr(pyAsciiOf(rt.pyRepr(u(a[0])))) },
+		// getattr(o, n[, default]) / hasattr(o, n) / setattr(o, n, v), over the
+		// same pyGetAttr / pySetAttr the `.` operator uses. A missing name
+		// without a default raises AttributeError, which is what pyGetAttr
+		// already does - so the default arm is the only new behaviour.
+		"js_pygetattr3": func(a []uint64) uint64 {
+			args := rt.argArray(u(a[0]))
+			if len(args) > 2 {
+				if !rt.pyHasAttr(argAt(args, 0), rt.toString(argAt(args, 1))) {
+					return w(args[2])
+				}
+			}
+			return w(rt.pyGetAttr(argAt(args, 0), rt.toString(argAt(args, 1))))
+		},
+		"js_pyhasattr": func(a []uint64) uint64 {
+			return boolH(rt.pyHasAttr(u(a[0]), rt.toString(u(a[1]))))
+		},
+		"js_pysetattr3": func(a []uint64) uint64 {
+			args := rt.argArray(u(a[0]))
+			rt.pySetAttr(argAt(args, 0), rt.toString(argAt(args, 1)), argAt(args, 2))
+			return jsHUndefined
+		},
 		"js_pysum": func(a []uint64) uint64 {
 			v := u(a[0])
 			if g, ok := v.(*jsGenerator); ok {
 				v = g.drain(rt)
+			}
+			// An ITERATOR object (docs/todo.md 1.4) is materialized too, so
+			// sum(map(f, xs)) works.
+			if pyIterName(rt, v) != "" {
+				v = &jsArray{elems: rt.pyElemsOf(v)}
 			}
 			if els, ok := pySetElems(v); ok {
 				v = els
@@ -11660,25 +11957,113 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 			rt.fail("'%s' object has no method '%s'", rt.toString(cls.props["__name"]), name)
 		}
 	}
-	// docs/todo.md 5.2. rt.memberCall is the SHARED member-call table that nine
-	// languages land in, and four of its names are ones Python cannot utter:
-	// `xs.sumOf(f)` answered 6 in both compiled halves where CPython raises
-	// AttributeError. They are denied HERE, in python's own dispatcher and after
-	// the user-class arms above (so a Python class that DEFINES a method called
-	// forEach is unaffected), rather than in the shared table - isEmpty and
-	// removeLast are real Swift and Dart methods and stay there and in
-	// languages/lib/{swift,dart}-rt.metajs. The same four names are denied at the
-	// same point by pyDForeign in languages/lib/python-rt.metajs, which is what
-	// keeps llvm.Run and the native binary agreeing.
-	switch name {
-	case "isEmpty", "removeLast", "sumOf", "forEach":
-		rt.fail("AttributeError: '%s' object has no attribute '%s'", pyTypeName(rt, target), name)
+	// list.count(x) - docs/todo.md 1.5. rt.memberCall's `count` arm is KOTLIN's
+	// `xs.count { pred }`, so `[1,2,2].count(2)` died with "call of a non
+	// function value: 2" in both compiled halves. Python's counts EQUAL elements
+	// (by ==, not by identity: [1.0].count(1) is 1), so it cannot share that arm
+	// and is answered here, before the shared table is reached. The same arm is
+	// pyDListCount in languages/lib/python-rt.metajs and the `count` arm of
+	// mcall in languages/python-interpreter.abnf. str.count already existed and
+	// was already CPython's non-overlapping substring count (pystrmethod.go).
+	// set.add(x) and dict.pop(k[, default]) - docs/todo.md 1.4, whose third
+	// bullet called them an interpreter-only gap; a probe at 4731755 answered
+	// "unknown method 'add'" and "unknown dict method 'pop'" under llvm.Run too,
+	// so all three engines were missing them. The twins are the same two arms of
+	// pyDMethodCall in languages/lib/python-rt.metajs and of mcall in
+	// languages/python-interpreter.abnf.
+	if els, isSet := pySetElems(target); isSet && name == "add" {
+		rt.pySetAdd(els, argAt(args, 0)) // Already-present member: no-op, returns None.
+		return jsUndef
+	}
+	if keys, vals, isDict := dictParts(target); isDict && name == "pop" {
+		if i := rt.pyDictFind(keys, argAt(args, 0)); i >= 0 {
+			v := vals.elems[i]
+			keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
+			vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
+			keys.dropIdx()
+			return v
+		}
+		if len(args) > 1 {
+			return args[1]
+		}
+		panic(&jsThrown{value: rt.pyExcInstance("KeyError", rt.pyRepr(argAt(args, 0)))})
+	}
+	if arr, isArr := target.(*jsArray); isArr && name == "count" && len(args) == 1 {
+		n := 0
+		for _, e := range arr.elems {
+			if rt.pyEqual(e, args[0]) {
+				n++
+			}
+		}
+		return float64(n)
+	}
+	// docs/todo.md 5.2 and 2.4. rt.memberCall is the SHARED member-call table
+	// that nine languages land in, and sixteen of its names are ones Python
+	// cannot utter: `xs.sumOf(f)` answered 6 and `xs.size()` answered 2 in both
+	// compiled halves where CPython raises AttributeError. They are denied HERE,
+	// in python's own dispatcher and after the user-class arms above (so a Python
+	// class that DEFINES a method called forEach is unaffected), rather than in
+	// the shared table - isEmpty and removeLast are real Swift and Dart methods
+	// and stay there and in languages/lib/{swift,dart}-rt.metajs.
+	//
+	// The denial is keyed by RECEIVER TYPE and not by name alone, which the
+	// four-name version did not have to be: `get` is a real dict method
+	// (d.get(k, default)) and `add` is a real set method, so a flat name switch
+	// would have broken both. The same table is pyDForeign in
+	// languages/lib/python-rt.metajs, which is what keeps llvm.Run and the
+	// native binary agreeing.
+	if pyForeignMethod(target, name) {
+		// A REAL, catchable AttributeError and not rt.fail: CPython's is catchable,
+		// the interpreter half raises one (pyAttrErr in
+		// languages/python-interpreter.abnf) and layer 2 throws one, so `try:
+		// xs.add(3) / except AttributeError` has to behave the same in all three.
+		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+			"'"+pyTypeName(rt, target)+"' object has no attribute '"+name+"'")})
 	}
 	return rt.memberCall(target, name, args)
 }
 
+// pyForeignMethod answers whether NAME is a member-table method that Python's
+// receiver type does not have. Keep in step with pyDForeign in
+// languages/lib/python-rt.metajs.
+func pyForeignMethod(target interface{}, name string) bool {
+	switch target.(type) {
+	case *jsArray:
+		// Kotlin's, Java's, Dart's and Swift's list methods. `count` is NOT here:
+		// Python has list.count(x) and it is answered above.
+		switch name {
+		case "isEmpty", "removeLast", "sumOf", "forEach",
+			"add", "size", "get", "contains", "map", "filter", "any":
+			return true
+		}
+	case string:
+		// Java's and Kotlin's string methods. Python spells them len(s), s[i],
+		// s == t, s[a:b] and s.index(t).
+		switch name {
+		case "isEmpty", "length", "charAt", "equals", "substring", "indexOf":
+			return true
+		}
+	default:
+		switch name {
+		case "isEmpty", "removeLast", "sumOf", "forEach":
+			return true
+		}
+	}
+	return false
+}
+
 // callPyValue calls a value that may itself be a class or a __call__ instance.
 func (rt *jsrt) callPyValue(v interface{}, args []interface{}, kw interface{}) interface{} {
+	// A BUILTIN TYPE OBJECT is callable and CONVERTS: the emitter binds int/str/
+	// float/... to js_pybuiltincls's stable class object with the conversion
+	// closure hung on it as __conv (declBind in python-to-llvm-ir.abnf). js_pycall
+	// had this arm and this function did not, so `map(str, xs)` - a builtin class
+	// passed as a function - died with "call of a non function value".
+	if o, isObj := v.(*jsObject); isObj {
+		if conv, has := o.props["__conv"]; has && isCallable(conv) {
+			return rt.call(conv, jsUndef, args)
+		}
+	}
 	if cls, ok := pyClassObj(v); ok {
 		inst := newJSObject()
 		inst.set("__class", cls)
@@ -11712,10 +12097,16 @@ func (rt *jsrt) pyIsInstance(v interface{}, target interface{}) bool {
 		// A builtin value against a builtin class object (int, str, ...).
 		if tc, isCls := target.(*jsObject); isCls {
 			if n, has := tc.props["__name"]; has && !hasKey(tc, "__mro") {
-				return pyTypeName(rt, v) == rt.toString(n)
+				return pyBuiltinSub(pyTypeName(rt, v), rt.toString(n))
 			}
 		}
 		return false
+	}
+	// Every class derives from object, so isinstance(C(), object) is True.
+	if tc, isCls := target.(*jsObject); isCls && !hasKey(tc, "__mro") {
+		if n, has := tc.props["__name"]; has && rt.toString(n) == "object" {
+			return true
+		}
 	}
 	for _, k := range pyMRO(cls) {
 		if k == target {
@@ -11739,6 +12130,344 @@ func (rt *jsrt) pyIsInstance(v interface{}, target interface{}) bool {
 func hasKey(o *jsObject, k string) bool {
 	_, ok := o.props[k]
 	return ok
+}
+
+// ----- the Python iterator object (docs/todo.md 1.4) ------------------------
+//
+// iter() / enumerate() / zip() / map() / filter() / reversed() all answer an
+// ITERATOR in CPython, and next() drives it. There is no such value in this
+// project: js_pyiter MATERIALIZES, and the only steppable thing is a generator.
+//
+// So an iterator is built to look EXACTLY like a generator to every engine: a
+// plain object carrying a callable "next" that answers {value, done}. That is
+// the structural test the compiled for-loop already emits (python-to-llvm-ir.abnf
+// makeForStmt reads js_get(v, "next") and compares its typeof to "function"),
+// the test layer 2's pyIsGen already makes, and the protocol pyMethodCall's
+// generator arm already speaks - so a for loop over one is LAZY and `it.__next__()`
+// raises StopIteration, with no change to any of that machinery.
+//
+// The SOURCE is materialized, though, and that is the line drawn here: CPython's
+// map/filter/zip/enumerate are lazy in their input as well, so
+// `map(f, endless())` works there and hangs here. iter(gen) answers the
+// GENERATOR ITSELF - CPython's rule too - so the lazy case that docs/todo.md 1.7
+// fixed (`for x in endless(): break`) is untouched. The same three functions are
+// pyMkIter / pyItStep in languages/lib/python-rt.metajs and in
+// languages/python-interpreter.abnf.
+//
+// __pyit is the type NAME, which is what type(it).__name__ and the printed form
+// read; __a is the materialized element array and __i the cursor.
+func (rt *jsrt) pyMkIter(name string, elems []interface{}) *jsObject {
+	it := newJSObject()
+	it.set("__pyit", name)
+	it.set("__a", &jsArray{elems: elems})
+	it.set("__i", float64(0))
+	it.set("next", jsHostFunc("pyiter.next", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return rt.pyItStep(it)
+	}))
+	return it
+}
+
+// One step of an iterator object: the {value, done} record JavaScript's iterator
+// protocol - and the floor's generator cell - answer.
+func (rt *jsrt) pyItStep(it *jsObject) *jsObject {
+	out := newJSObject()
+	a, _ := it.props["__a"].(*jsArray)
+	i := int(rt.toNumber(it.props["__i"]))
+	if a == nil || i >= len(a.elems) {
+		out.set("value", jsUndef)
+		out.set("done", true)
+		return out
+	}
+	it.set("__i", float64(i+1))
+	out.set("value", a.elems[i])
+	out.set("done", false)
+	return out
+}
+
+// pyIterName answers an iterator object's type name, or "" for anything else.
+func pyIterName(rt *jsrt, v interface{}) string {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return ""
+	}
+	n, has := o.props["__pyit"]
+	if !has {
+		return ""
+	}
+	return rt.toString(n)
+}
+
+// pyTailArgs is args[1:] for a variadic builtin, empty when there is no tail.
+func pyTailArgs(args []interface{}) []interface{} {
+	if len(args) < 2 {
+		return nil
+	}
+	return args[1:]
+}
+
+// pyTruthyOf is Python truthiness for the container types (an empty list, dict
+// or set is FALSE, where JavaScript calls every object truthy) - the js_pybool
+// arms, reused by all(), any() and filter().
+func (rt *jsrt) pyTruthyOf(v interface{}) bool {
+	if els, ok := pySetElems(v); ok {
+		return len(els.elems) > 0
+	}
+	if arr, ok := v.(*jsArray); ok {
+		return len(arr.elems) > 0
+	}
+	if keys, _, ok := dictParts(v); ok {
+		return len(keys.elems) > 0
+	}
+	return rt.truthy(v)
+}
+
+// argArray unwraps the argument array a signature-less builtin (declBuiltin with
+// argc 0) receives.
+func (rt *jsrt) argArray(v interface{}) []interface{} {
+	if arr, ok := v.(*jsArray); ok {
+		return arr.elems
+	}
+	return nil
+}
+
+// pyElemsOf is js_pyiter's element list, as a Go slice: a generator drains, a
+// cursor gives WHAT IS LEFT of it (so next(it) then list(it) does not repeat an
+// element), a set copies, a dict gives its keys and a string its characters.
+func (rt *jsrt) pyElemsOf(v interface{}) []interface{} {
+	if g, ok := v.(*jsGenerator); ok {
+		return g.drain(rt).elems
+	}
+	if o, ok := v.(*jsObject); ok && pyIterName(rt, o) != "" {
+		a, _ := o.props["__a"].(*jsArray)
+		i := int(rt.toNumber(o.props["__i"]))
+		if a == nil || i >= len(a.elems) {
+			o.set("__i", float64(0))
+			return nil
+		}
+		out := append([]interface{}{}, a.elems[i:]...)
+		o.set("__i", float64(len(a.elems))) // Reading an iterator EXHAUSTS it.
+		return out
+	}
+	if els, ok := pySetElems(v); ok {
+		return append([]interface{}{}, els.elems...)
+	}
+	switch o := v.(type) {
+	case *jsArray:
+		return o.elems
+	case string:
+		var out []interface{}
+		for i, n := 0, rt.strLen(o); i < n; i++ {
+			out = append(out, rt.strAt(o, i))
+		}
+		return out
+	}
+	if keys, _, ok := dictParts(v); ok {
+		return append([]interface{}{}, keys.elems...)
+	}
+	panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+		"'"+pyTypeName(rt, v)+"' object is not iterable")})
+}
+
+// pyIsGenerator is the generator test as a predicate, for the callers that only
+// need the yes/no.
+func pyIsGenerator(v interface{}) bool {
+	_, ok := v.(*jsGenerator)
+	return ok
+}
+
+// pyIterKind is the CPython name of the iterator iter() answers for a value.
+func pyIterKind(v interface{}) string {
+	switch v.(type) {
+	case string:
+		return "str_iterator"
+	case *jsArray:
+		return "list_iterator"
+	}
+	return "iterator"
+}
+
+// pyStopIter is next()'s end: the default argument when there is one, else the
+// StopIteration CPython raises.
+func (rt *jsrt) pyStopIter(args []interface{}, val interface{}) uint64 {
+	if len(args) > 1 {
+		return rt.wrap(args[1])
+	}
+	exc := rt.pyExcInstance("StopIteration", "")
+	if o, ok := exc.(*jsObject); ok {
+		if isUndefOrNull(val) {
+			o.set("value", jsNull)
+		} else {
+			o.set("value", val)
+		}
+	}
+	panic(&jsThrown{value: exc})
+}
+
+// pyHasAttr is hasattr(), and it MIRRORS pyGetAttr's lookup rather than calling
+// it and catching: pyGetAttr reports a miss with rt.fail, a Go panic carrying a
+// string, and recovering from that would swallow every unrelated runtime error
+// too. Layer 2's fail() is not catchable at all, so the structural form is also
+// the only one the two engines can both have. Keep in step with pyDHasAttr in
+// languages/lib/python-rt.metajs.
+func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
+	if cls, ok := pyClassObj(obj); ok {
+		if name == "__name__" || name == "__mro__" {
+			return true
+		}
+		_, found := pyLookup(cls, name)
+		return found
+	}
+	if inst, cls, ok := pyInstance(obj); ok {
+		if name == "__class__" || name == "__dict__" {
+			return true
+		}
+		if _, found := inst.props[name]; found {
+			return true
+		}
+		_, found := pyLookup(cls, name)
+		return found
+	}
+	if name == "__name__" {
+		if o, ok := obj.(*jsObject); ok {
+			if _, has := o.props["__name"]; has {
+				return true
+			}
+		}
+		if _, ok := rt.pyFuncNames[obj]; ok {
+			return true
+		}
+	}
+	if o, ok := obj.(*jsObject); ok {
+		_, has := o.props[name]
+		return has
+	}
+	return false
+}
+
+// pyRadix is bin/hex/oct: CPython puts the sign OUTSIDE the prefix (bin(-5) is
+// '-0b101') and its ints are arbitrary precision, so the digits come from
+// math/big rather than from a double.
+func (rt *jsrt) pyRadix(v interface{}, base int, prefix string) string {
+	b, ok := pyBigOperand(v)
+	if !ok {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+			"'"+pyTypeName(rt, v)+"' object cannot be interpreted as an integer")})
+	}
+	s := b.Text(base)
+	if len(s) > 0 && s[0] == '-' {
+		return "-" + prefix + s[1:]
+	}
+	return prefix + s
+}
+
+// pyRoundHalfEven is CPython's round(): HALF TO EVEN, so round(0.5) is 0,
+// round(1.5) is 2 and round(2.5) is 2. Written on the exact decimal expansion
+// through strconv so it is right past 2^53 as well, which the arithmetic
+// spelling x*10^n rounded and divided back is not.
+func pyRoundHalfEven(f float64, nd int) float64 {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return f
+	}
+	s := strconv.FormatFloat(f, 'f', nd, 64) // FormatFloat rounds half to EVEN.
+	out, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return f
+	}
+	return out
+}
+
+// pyAsciiOf turns repr()'s answer into ascii()'s: every code point past ASCII
+// becomes \xNN, \uNNNN or \UNNNNNNNN.
+func pyAsciiOf(s string) string {
+	out := ""
+	for _, r := range s {
+		switch {
+		case r < 0x80:
+			out += string(r)
+		case r < 0x100:
+			out += fmt.Sprintf("\\x%02x", r)
+		case r < 0x10000:
+			out += fmt.Sprintf("\\u%04x", r)
+		default:
+			out += fmt.Sprintf("\\U%08x", r)
+		}
+	}
+	return out
+}
+
+// pyBuiltinSub is the subclass relation over the BUILTIN type names, which is
+// the whole of Python's builtin hierarchy that this subset models:
+//
+//	object   is the base of everything          isinstance(1, object)  -> True
+//	bool     derives from int                   isinstance(True, int)  -> True
+//
+// Both were wrong here, and in two different ways: `isinstance(1, object)` was
+// True in the interpreter and FALSE under llvm.Run (a live halves divergence,
+// found by the docs/todo.md 1.4 sweep and not listed there), while
+// `isinstance(True, int)` and `issubclass(bool, int)` were False in EVERY
+// engine, which is the defect class byte-identity cannot see. bool subclassing
+// int is not a curiosity - it is why True + 1 is 2 and why {True: "t"}[1] hits.
+//
+// Keep in step with pyBuiltinSub in languages/lib/python-rt.metajs and in
+// languages/python-interpreter.abnf.
+func pyBuiltinSub(child, base string) bool {
+	if child == base || base == "object" {
+		return true
+	}
+	return child == "bool" && base == "int"
+}
+
+// pyIsSubclass is issubclass(C, B): a class object (or a tuple of them) against
+// a class object. It was missing from BOTH compiled engines - `variable not
+// defined: issubclass` - while the interpreter had it, so it was one of
+// docs/todo.md 1.4's two named halves gaps. Keep in step with pyDIsSubclass in
+// languages/lib/python-rt.metajs and clsIsSub in
+// languages/python-interpreter.abnf.
+func (rt *jsrt) pyIsSubclass(c, target interface{}) bool {
+	if arr, ok := target.(*jsArray); ok {
+		for _, e := range arr.elems {
+			if rt.pyIsSubclass(c, e) {
+				return true
+			}
+		}
+		return false
+	}
+	// A BUILTIN class object (int, str, object) carries a __name and NO __mro, so
+	// pyClassObj rejects it: both kinds have to be accepted here.
+	cls, ok := c.(*jsObject)
+	if !ok || !hasKey(cls, "__name") {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError", "issubclass() arg 1 must be a class")})
+	}
+	tc, isCls := target.(*jsObject)
+	if !isCls {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+			"issubclass() arg 2 must be a class, a tuple of classes, or a union")})
+	}
+	tn := ""
+	if n, has := tc.props["__name"]; has {
+		tn = rt.toString(n)
+	}
+	// A BUILTIN class object on either side has no __mro: the relation between
+	// two of them is pyBuiltinSub, and a user class against `object` is True.
+	if !hasKey(cls, "__mro") && !hasKey(tc, "__mro") {
+		cn := ""
+		if n, has := cls.props["__name"]; has {
+			cn = rt.toString(n)
+		}
+		return pyBuiltinSub(cn, tn)
+	}
+	if !hasKey(tc, "__mro") && tn == "object" {
+		return true
+	}
+	for _, k := range pyMRO(cls) {
+		if k == target {
+			return true
+		}
+		if n, has := k.props["__name"]; has && tn != "" && rt.toString(n) == tn {
+			return true
+		}
+	}
+	return false
 }
 
 // pyTypeName is the Python name of a builtin value's type.
@@ -12008,6 +12737,8 @@ func (rt *jsrt) pyMinMax(argsV interface{}, want int) uint64 {
 	if len(elems) == 1 {
 		if inner, ok := elems[0].(*jsArray); ok {
 			elems = inner.elems
+		} else if pyIterName(rt, elems[0]) != "" || pyIsGenerator(elems[0]) {
+			elems = rt.pyElemsOf(elems[0]) // max(map(f, xs)), max(iter(xs)).
 		}
 	}
 	if len(elems) == 0 {

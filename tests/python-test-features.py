@@ -882,5 +882,216 @@ check("foreign-name-forEach", fn.forEach(lambda v: v), None)
 check("foreign-name-after", str(fn.xs), "[1, 2]")
 check("list-pop-still-there", str([9, 8].pop()), "8")
 
+# ----- docs/todo.md 1.4: the builtins that were missing from all three engines --
+# Every operand is read out of an ARRAY so the grammars' constant folder cannot
+# evaluate the call at compile time.
+bs = [3, 1, 2]
+bt = ["a", "b"]
+bn = [10, 255, 8, -5, 7, 2, 0]
+bf = [2.5, 0.5, 1.5, -2.5, 2.675]
+
+check("all-true", all([bn[5], bn[5]]), True)
+check("all-false", all([bn[5], bn[6]]), False)
+check("all-empty", all([]), True)
+check("any-true", any([bn[6], bn[5]]), True)
+check("any-false", any([bn[6], bn[6]]), False)
+check("any-empty", any([]), False)
+check("sorted-list", str(sorted(bs)), "[1, 2, 3]")
+check("sorted-copy-untouched", str(bs), "[3, 1, 2]")
+check("sorted-str", str(sorted("cba")), "['a', 'b', 'c']")
+check("reversed-list", str(list(reversed(bs))), "[2, 1, 3]")
+check("reversed-str", str(list(reversed("abc"))), "['c', 'b', 'a']")
+check("enumerate", str(list(enumerate(bt))), "[[0, 'a'], [1, 'b']]")
+check("enumerate-start", str(list(enumerate(bt, bn[4]))), "[[7, 'a'], [8, 'b']]")
+check("zip-equal", str(list(zip(bs, bs))), "[[3, 3], [1, 1], [2, 2]]")
+check("zip-shortest", str(list(zip(bs, bt))), "[[3, 'a'], [1, 'b']]")
+check("map-builtin", str(list(map(abs, [-1, -2]))), "[1, 2]")
+check("map-class-as-fn", ", ".join(map(str, bs)), "3, 1, 2")
+check("map-two-sources", str(list(map(lambda a, b: a + b, bs, bs))), "[6, 2, 4]")
+check("filter-none", str(list(filter(None, [bn[6], bn[5], bn[4]]))), "[2, 7]")
+check("filter-fn", str(list(filter(lambda v: v > 1, bs))), "[3, 2]")
+check("sum-of-map", sum(map(abs, [-1, -2])), 3)
+check("max-of-iter", max(iter([bn[4], bn[5]])), 7)
+check("set-of-str", str(sorted(set("aab"))), "['a', 'b']")
+
+# The iterator object, and what makes it one: next() drives it, a partial read
+# leaves the rest, and a for loop that BREAKS leaves it partially consumed.
+it = iter(bs)
+check("next-first", next(it), 3)
+check("next-second", next(it), 1)
+check("next-rest-after-partial", str(list(it)), "[2]")
+check("next-default-exhausted", next(it, "END"), "END")
+it2 = iter(bs)
+for _v in it2:
+    break
+check("iter-break-leaves-rest", str(list(it2)), "[1, 2]")
+check("iter-of-iter-is-same", str(list(iter(iter(bt)))), "['a', 'b']")
+
+# next() on a GENERATOR: the compiler half had no `next` at all, so this is the
+# sharpest of the item's two halves gaps.
+def counter():
+    yield bn[5]
+    yield bn[4]
+
+g = counter()
+check("next-generator-1", next(g), 2)
+check("next-generator-2", next(g), 7)
+check("next-generator-default", next(g, "END"), "END")
+
+def counter2():
+    yield bn[5]
+
+g2 = counter2()
+check("next-generator-only", next(g2), 2)
+stopped = [False]
+try:
+    next(g2)
+except StopIteration:
+    stopped[0] = True
+check("next-generator-stopiteration", stopped[0], True)
+stopped2 = [False]
+try:
+    next(iter([]))
+except StopIteration:
+    stopped2[0] = True
+check("next-empty-stopiteration", stopped2[0], True)
+
+check("bin", bin(bn[0]), "0b1010")
+check("hex", hex(bn[1]), "0xff")
+check("oct", oct(bn[2]), "0o10")
+check("bin-negative-sign-outside", bin(bn[3]), "-0b101")
+check("hex-negative-sign-outside", hex(-bn[1]), "-0xff")
+check("bin-zero", bin(bn[6]), "0b0")
+# Arbitrary precision: past 2^53 a double has lost digits, so this is the whole
+# reason the digits come out through the big-integer path in all three engines.
+check("hex-bignum", hex(bn[5] ** 70), "0x400000000000000000")
+check("divmod-positive", str(divmod(bn[4], bn[5])), "[3, 1]")
+check("divmod-negative-floors", str(divmod(-bn[4], bn[5])), "[-4, 1]")
+
+# round() rounds HALF TO EVEN, which is wrong on every other integer if it is
+# written as floor(x + 0.5).
+check("round-half-even-2.5", round(bf[0]), 2)
+check("round-half-even-0.5", round(bf[1]), 0)
+check("round-half-even-1.5", round(bf[2]), 2)
+check("round-half-even--2.5", round(bf[3]), -2)
+check("round-ndigits", round(bf[4], bn[5]), 2.67)
+check("round-int-stays-int", round(bn[4]), 7)
+
+check("pow-two-args", pow(bn[5], bs[0]), 8)
+check("pow-negative-exponent", pow(bn[5], -bn[5]), 0.25)
+check("pow-modular", pow(bn[5], bn[0], 1000), 24)
+check("pow-modular-big", pow(bn[4], 100, 13), 9)
+
+check("callable-builtin", callable(len), True)
+check("callable-number", callable(bn[0]), False)
+check("callable-class", callable(int), True)
+check("callable-lambda", callable(lambda v: v), True)
+check("ascii-latin1", ascii("café"), "'caf\\xe9'")
+check("ascii-plain", ascii(bt[0]), "'a'")
+
+class AttrBag:
+    def __init__(self):
+        self.x = bn[5]
+
+ab = AttrBag()
+check("getattr-present", getattr(ab, "x"), 2)
+check("getattr-default", getattr(ab, "zz", bn[4]), 7)
+check("hasattr-present", hasattr(ab, "x"), True)
+check("hasattr-absent", hasattr(ab, "zz"), False)
+setattr(ab, "y", bn[0])
+check("setattr", ab.y, 10)
+check("hasattr-after-setattr", hasattr(ab, "y"), True)
+
+# issubclass(), and the builtin hierarchy under it. issubclass was missing from
+# the compiler half entirely; bool-derives-from-int and object-is-the-base were
+# wrong in EVERY engine (isinstance(1, object) was even a live halves split).
+class Base:
+    pass
+
+class Derived(Base):
+    pass
+
+check("issubclass-user", issubclass(Derived, Base), True)
+check("issubclass-user-reverse", issubclass(Base, Derived), False)
+check("issubclass-self", issubclass(Base, Base), True)
+check("issubclass-tuple", issubclass(Derived, (int, Base)), True)
+check("issubclass-user-object", issubclass(Derived, object), True)
+check("issubclass-bool-int", issubclass(bool, int), True)
+check("issubclass-int-bool", issubclass(int, bool), False)
+check("issubclass-int-object", issubclass(int, object), True)
+check("issubclass-str-int", issubclass(str, int), False)
+check("isinstance-true-is-int", isinstance(True, int), True)
+check("isinstance-int-object", isinstance(1, object), True)
+check("isinstance-instance-object", isinstance(Derived(), object), True)
+check("isinstance-str-not-int", isinstance(bt[0], int), False)
+
+# ----- docs/todo.md 1.5: list.count(x) -----
+# The interpreter had no arm; both compiled halves read the argument as a KOTLIN
+# predicate and died with "call of a non function value: 2".
+cs = [1, 2, 2, 3]
+check("list-count", cs.count(bn[5]), 2)
+check("list-count-absent", cs.count(bn[4]), 0)
+check("list-count-by-equality", [1.0, 2].count(bs[1]), 1)
+check("list-count-bool-is-int", [True, 1, 2].count(bs[1]), 2)
+# str.count was already CPython's non-overlapping substring count - a NULL
+# RESULT, asserted so it stays one.
+check("str-count-substring", "abcab".count("ab"), 2)
+check("str-count-non-overlapping", "aaaa".count("aa"), 2)
+
+# ----- docs/todo.md 1.4: set.add and dict.pop -----
+sa = {1, 2}
+sa.add(bs[0])
+sa.add(bn[5])
+check("set-add", str(sorted(sa)), "[1, 2, 3]")
+check("set-add-duplicate-is-noop", len(sa), 3)
+dp = {"a": 1, "b": 2}
+check("dict-pop", dp.pop("a"), 1)
+check("dict-pop-removed", str(dp), "{'b': 2}")
+check("dict-pop-default", dp.pop("zz", bn[4]), 7)
+popped = [False]
+try:
+    dp.pop("zz")
+except KeyError:
+    popped[0] = True
+check("dict-pop-keyerror", popped[0], True)
+
+# ----- docs/todo.md 2.4: twelve foreign method names on python receivers -----
+# add / size / get / contains / map / filter / any on a list and length / charAt
+# / equals / substring / indexOf on a str all SUCCEEDED under llvm.Run where
+# CPython raises AttributeError. All three engines now raise a CATCHABLE one, so
+# unlike the four names closed in 555af82 this is assertable in one file.
+def denied(thunk):
+    try:
+        thunk()
+    except AttributeError:
+        return True
+    return False
+
+fl = [1, 2]
+check("foreign-list-add", denied(lambda: fl.add(3)), True)
+check("foreign-list-size", denied(lambda: fl.size()), True)
+check("foreign-list-get", denied(lambda: fl.get(0)), True)
+check("foreign-list-contains", denied(lambda: fl.contains(1)), True)
+check("foreign-list-map", denied(lambda: fl.map(abs)), True)
+check("foreign-list-filter", denied(lambda: fl.filter(abs)), True)
+check("foreign-list-any", denied(lambda: fl.any(abs)), True)
+check("foreign-list-isEmpty", denied(lambda: fl.isEmpty()), True)
+check("foreign-list-removeLast", denied(lambda: fl.removeLast()), True)
+check("foreign-list-sumOf", denied(lambda: fl.sumOf(abs)), True)
+check("foreign-list-forEach", denied(lambda: fl.forEach(abs)), True)
+check("foreign-str-length", denied(lambda: bt[0].length()), True)
+check("foreign-str-charAt", denied(lambda: bt[0].charAt(0)), True)
+check("foreign-str-equals", denied(lambda: bt[0].equals("a")), True)
+check("foreign-str-substring", denied(lambda: bt[0].substring(0, 1)), True)
+check("foreign-str-indexOf", denied(lambda: bt[0].indexOf("a")), True)
+check("foreign-list-untouched", str(fl), "[1, 2]")
+# The denial is by RECEIVER TYPE, not by name: `get` is a real dict method and
+# `add` a real set method, and a flat name switch would have broken both.
+check("dict-get-still-works", {"a": 1}.get("a"), 1)
+check("dict-get-default-still-works", {"a": 1}.get("zz", bn[4]), 7)
+check("set-add-still-works", len(sa), 3)
+# A name Python HAS and this project does not (list.sort) is deliberately NOT
+# denied - it still aborts, so "unimplemented" cannot be silently swallowed.
+
 print(f"features: {checks[0]} checks, {fails[0]} failures")
 exit(fails[0])

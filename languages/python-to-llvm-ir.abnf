@@ -3803,6 +3803,45 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // js_pyord/js_pychr in lib/python-rt.metajs and in abnf/jsrt.go.
         b = declBuiltin(b, "ord", "js_pyord", 1)
         b = declBuiltin(b, "chr", "js_pychr", 1)
+        // issubclass(C, B) - docs/todo.md 1.4, one of its two named halves gaps:
+        // the interpreter had hostGlobals["issubclass"] and this half answered
+        // `variable not defined: issubclass`. rt.pyIsSubclass (abnf/jsrt.go) and
+        // pyDIsSubclass (lib/python-rt.metajs) are the two implementations.
+        b = declBuiltin(b, "issubclass", "js_pyissubclass", 2)
+        // docs/todo.md 1.4's "missing from BOTH halves" list. Every one of these
+        // is bound here, in hostGlobals (languages/python-interpreter.abnf) and
+        // in lib/python-rt.metajs, with a Go twin of the same js_py* name in
+        // abnf/jsrt.go. argc 0 hands the extern the whole ARGUMENT ARRAY, which
+        // is how the variadic ones (next, round, pow, zip, map, enumerate,
+        // getattr, setattr, sorted) reach their optional arguments.
+        //
+        // NOT done, and each for a reason recorded at the site: `input` reads
+        // stdin, `format` needs the format mini-language plumbed to a free
+        // function, `frozenset` needs a hashable set TYPE this value model does
+        // not have, and `hash`/`id` cannot be matched against CPython at all -
+        // str/bytes/tuple hashing is randomized per process (PYTHONHASHSEED) and
+        // an id is an address.
+        b = declBuiltin(b, "iter", "js_pyiterfn", 1)
+        b = declBuiltin(b, "next", "js_pynext", 0)
+        b = declBuiltin(b, "enumerate", "js_pyenumerate", 0)
+        b = declBuiltin(b, "zip", "js_pyzip", 0)
+        b = declBuiltin(b, "map", "js_pymapfn", 0)
+        b = declBuiltin(b, "filter", "js_pyfilterfn", 2)
+        b = declBuiltin(b, "reversed", "js_pyreversed", 1)
+        b = declBuiltin(b, "sorted", "js_pysorted", 0)
+        b = declBuiltin(b, "all", "js_pyall", 1)
+        b = declBuiltin(b, "any", "js_pyany2", 1)
+        b = declBuiltin(b, "bin", "js_pybinstr", 1)
+        b = declBuiltin(b, "hex", "js_pyhexstr", 1)
+        b = declBuiltin(b, "oct", "js_pyoctstr", 1)
+        b = declBuiltin(b, "divmod", "js_pydivmod", 2)
+        b = declBuiltin(b, "round", "js_pyround", 0)
+        b = declBuiltin(b, "pow", "js_pypow", 0)
+        b = declBuiltin(b, "callable", "js_pycallable", 1)
+        b = declBuiltin(b, "ascii", "js_pyascii", 1)
+        b = declBuiltin(b, "getattr", "js_pygetattr3", 0)
+        b = declBuiltin(b, "hasattr", "js_pyhasattr", 2)
+        b = declBuiltin(b, "setattr", "js_pysetattr3", 0)
         // The builtin TYPE names that carry no conversion function. The
         // interpreter's pyTypeNames has fourteen and declBuiltin/pyTypeBuiltin
         // only reaches the eight that convert, so `class C(object)`, `type(None)

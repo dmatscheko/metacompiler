@@ -947,6 +947,13 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 		case *jsArray:
 			return e.join(s, sq.elems)
 		}
+		// A GENERATOR or an ITERATOR object (docs/todo.md 1.4's iter/map/filter/
+		// zip/enumerate) is materialized rather than refused - `", ".join(map(str,
+		// xs))` is ordinary Python. Keep in step with the join arm of pyStrMethod
+		// in languages/lib/python-rt.metajs and languages/python-interpreter.abnf.
+		if a := pysArgAt(args, 0); pyIterName(e.rt, a) != "" || pyIsGenerator(a) {
+			return e.join(s, e.rt.pyElemsOf(a))
+		}
 		e.fail("TypeError: can only join an iterable")
 		return jsUndef
 

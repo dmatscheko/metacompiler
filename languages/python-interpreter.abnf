@@ -1238,13 +1238,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return best
     }
-    hostGlobals["next"] = function(g, d) {
-        if (isGen(g)) { return genSend(g, undefined) }
-        var a = iterToList(g)
-        return a.length > 0 ? a[0] : d
-    }
     hostGlobals["isinstance"] = function(v, cls) { return pyIsInstance(v, cls) }
-    hostGlobals["issubclass"] = function(c1, c2) { return clsIsSub(c1, c2) }
+    // issubclass(C, B): B may be a TUPLE of classes, exactly as isinstance's
+    // second argument may - which this half did not accept, so
+    // issubclass(bool, (str, int)) was False where CPython says True. (A tuple
+    // is a list in this value model; see docs/working-on-this-project.md 7.9.)
+    hostGlobals["issubclass"] = function(c1, c2) {
+        if (Array.isArray(c2)) {
+            for (var i = 0; i < c2.length; i++) { if (clsIsSub(c1, c2[i])) { return true } }
+            return false
+        }
+        return clsIsSub(c1, c2)
+    }
     hostGlobals["repr"] = function(v) { return prepr(v) }
     // sum() adds through binOp so a float in the sequence makes the total a
     // float (sum([1.0, 2]) is 3.0). The accumulator is `anytype` because MetaJS
@@ -1283,6 +1288,294 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the way every other builtin in this grammar reports one - see pySFail.
     hostGlobals["ord"] = function(s) { return pyOrdOf(s) }
     hostGlobals["chr"] = function(n) { return pyChrOf(n) }
+
+    // ----- docs/todo.md 1.4: the builtins missing from ALL THREE engines ------
+    //
+    // Each has a twin of the same behaviour bound by declBuiltin in
+    // languages/python-to-llvm-ir.abnf, an extern in abnf/jsrt.go and a
+    // js_py* function in languages/lib/python-rt.metajs.
+    //
+    // NOT done, each for a reason stated at the binding site in
+    // python-to-llvm-ir.abnf: input (reads stdin), format, frozenset, hash, id.
+    //
+    // THE ITERATOR OBJECT. iter/enumerate/zip/map/filter/reversed answer an
+    // ITERATOR in CPython and next() drives it, and this project had no such
+    // value: the only steppable thing was a generator. So an iterator is built
+    // to LOOK like one - a plain object carrying a callable "next" that answers
+    // {value, done} - which is exactly the structural test the compiled halves
+    // already make (python-to-llvm-ir.abnf's makeForStmt, pyIsGen in
+    // lib/python-rt.metajs), so a for loop over one is lazy there with no change
+    // to the emitter. This grammar's isGen is a __gen tag rather than a
+    // structural test, so it gets the two explicit arms below instead
+    // (makeForStmt and iterToList).
+    //
+    // The SOURCE is materialized, and that is the line drawn: CPython's
+    // map/filter/zip/enumerate are lazy in their input too, so
+    // `map(f, endless())` works there and hangs here. iter(gen) answers the
+    // GENERATOR ITSELF - CPython's rule as well - so the lazy case docs/todo.md
+    // 1.7 fixed is untouched.
+    function pyMkIter(name, arr) {
+        var it = {__pyit: name, __a: arr, __i: 0}
+        it.next = function() { return pyItStep(it) }
+        return it
+    }
+    function pyItStep(it) {
+        if (it.__i >= it.__a.length) { return {value: undefined, done: true} }
+        var v = it.__a[it.__i]
+        it.__i = it.__i + 1
+        return {value: v, done: false}
+    }
+    function isPyIt(v) {
+        return v !== null && v !== undefined && typeof v == "object" && v.__pyit !== undefined
+    }
+    // What is LEFT of an iterator, which the read then EXHAUSTS - so next(it)
+    // followed by list(it) does not repeat an element.
+    function pyItRest(it) {
+        var out = []
+        for (var i = it.__i; i < it.__a.length; i++) { out.push(it.__a[i]) }
+        it.__i = it.__a.length
+        return out
+    }
+    hostGlobals["iter"] = function(v) {
+        if (isGen(v) || isPyIt(v)) { return v }
+        return pyMkIter(typeof v == "string" ? "str_iterator" :
+                        (Array.isArray(v) ? "list_iterator" : "iterator"), iterToList(v).slice(0))
+    }
+    // next(it[, default]). The COMPILER half had no `next` at all (`variable not
+    // defined: next`), which is docs/todo.md 1.4's sharpest gap - next(g) is the
+    // ordinary way to drive a generator.
+    hostGlobals["next"] = function(g, d) {
+        if (isGen(g)) {
+            if (arguments.length > 1) {
+                var r = genStep(g, undefined)
+                if (!r.yielded) { return d }
+                return r.value
+            }
+            return genSend(g, undefined)
+        }
+        if (isPyIt(g)) {
+            var s = pyItStep(g)
+            if (s.done) {
+                if (arguments.length > 1) { return d }
+                var exc = pyMakeExc("StopIteration", [])
+                exc.value = null
+                pyRaise(exc)
+            }
+            return s.value
+        }
+        pyRaise(pyMakeExc("TypeError", ["'" + pyTypeOf(g).__name + "' object is not an iterator"]))
+    }
+    hostGlobals["enumerate"] = function(v, start) {
+        var s = (start === undefined) ? 0 : start
+        var a = iterToList(v)
+        var out = []
+        for (var i = 0; i < a.length; i++) { out.push([binOp("+", s, i), a[i]]) }
+        return pyMkIter("enumerate", out)
+    }
+    hostGlobals["zip"] = function() {
+        var srcs = []
+        var n = 0 - 1
+        var i
+        for (i = 0; i < arguments.length; i++) {
+            var es = iterToList(arguments[i])
+            srcs.push(es)
+            if (n < 0 || es.length < n) { n = es.length }
+        }
+        if (n < 0) { n = 0 }
+        var out = []
+        for (i = 0; i < n; i++) {
+            var row = []
+            for (var k = 0; k < srcs.length; k++) { row.push(srcs[k][i]) }
+            out.push(row)
+        }
+        return pyMkIter("zip", out)
+    }
+    hostGlobals["map"] = function() {
+        var f = arguments[0]
+        var srcs = []
+        var n = 0 - 1
+        var i
+        for (i = 1; i < arguments.length; i++) {
+            var es = iterToList(arguments[i])
+            srcs.push(es)
+            if (n < 0 || es.length < n) { n = es.length }
+        }
+        if (n < 0) { n = 0 }
+        var out = []
+        for (i = 0; i < n; i++) {
+            var row = []
+            for (var k = 0; k < srcs.length; k++) { row.push(srcs[k][i]) }
+            out.push(pyCall(f, row, null))
+        }
+        return pyMkIter("map", out)
+    }
+    // filter(None, xs) keeps the TRUTHY elements - CPython's documented special
+    // case for a None function.
+    hostGlobals["filter"] = function(f, v) {
+        var a = iterToList(v)
+        var out = []
+        for (var i = 0; i < a.length; i++) {
+            var keep = false
+            if (f === undefined || f === null) { keep = pytruthy(a[i]) }
+            else { keep = pytruthy(pyCall(f, [a[i]], null)) }
+            if (keep) { out.push(a[i]) }
+        }
+        return pyMkIter("filter", out)
+    }
+    hostGlobals["reversed"] = function(v) {
+        var a = iterToList(v)
+        var out = []
+        for (var i = a.length - 1; i >= 0; i--) { out.push(a[i]) }
+        return pyMkIter("reversed", out)
+    }
+    // sorted(x): a NEW list, ascending, by the same comparison `<` uses.
+    // CPython's key= and reverse= are KEYWORD-ONLY, and a host builtin here is
+    // reached positionally only, so they are refused loudly rather than ignored.
+    hostGlobals["sorted"] = function(v, extra) {
+        if (extra !== undefined) { fail("sorted(): key= and reverse= are not supported") }
+        var a = iterToList(v).slice(0)
+        // Insertion sort, which is STABLE - Python's sort is - and needs no
+        // comparator plumbing through the tag engine's own sort.
+        for (var i = 1; i < a.length; i++) {
+            var x = anytype
+            x = a[i]
+            var j = i - 1
+            while (j >= 0 && pytruthy(binOp("<", x, a[j]))) {
+                a[j + 1] = a[j]
+                j = j - 1
+            }
+            a[j + 1] = x
+        }
+        return a
+    }
+    hostGlobals["all"] = function(v) {
+        var a = iterToList(v)
+        for (var i = 0; i < a.length; i++) { if (!pytruthy(a[i])) { return false } }
+        return true
+    }
+    hostGlobals["any"] = function(v) {
+        var a = iterToList(v)
+        for (var i = 0; i < a.length; i++) { if (pytruthy(a[i])) { return true } }
+        return false
+    }
+    // bin/hex/oct: CPython's 0b/0x/0o prefix with the sign OUTSIDE it, so
+    // bin(-5) is '-0b101'. An arbitrary-precision int goes through bigStr's own
+    // radix conversion so the digits are exact past 2^53.
+    hostGlobals["bin"] = function(n) { return pyRadixOf(n, 2, "0b") }
+    hostGlobals["hex"] = function(n) { return pyRadixOf(n, 16, "0x") }
+    hostGlobals["oct"] = function(n) { return pyRadixOf(n, 8, "0o") }
+    // The digits come out through binOp, so an ARBITRARY PRECISION int converts
+    // exactly (hex(2**70) is right) with no second code path - the two compiled
+    // halves use math/big and pyABigArith for the same reason.
+    function pyRadixOf(n, base, prefix) {
+        if (typeof n == "boolean") { return prefix + (n ? "1" : "0") }
+        if (typeof n != "number" && !bigIsBig(n)) {
+            pyRaise(pyMakeExc("TypeError",
+                ["'" + pyTypeOf(n).__name + "' object cannot be interpreted as an integer"]))
+        }
+        var sign = ""
+        var v = anytype
+        v = n
+        if (pytruthy(binOp("<", v, 0))) { sign = "-"; v = binOp("-", 0, v) }
+        var digits = "0123456789abcdef"
+        var out = ""
+        if (pytruthy(binOp("==", v, 0))) { out = "0" }
+        while (pytruthy(binOp(">", v, 0))) {
+            out = digits.charAt(Math.trunc(bigToNum(binOp("%", v, base)))) + out
+            v = binOp("//", v, base)
+        }
+        return sign + prefix + out
+    }
+    // divmod(a, b) is the pair (a // b, a % b): FLOOR division and the floored
+    // remainder, so divmod(-7, 2) is (-4, 1). A tuple is a list in this value
+    // model (docs/working-on-this-project.md 7.9).
+    hostGlobals["divmod"] = function(a, b) { return [binOp("//", a, b), binOp("%", a, b)] }
+    // round(x[, n]) rounds HALF TO EVEN, so round(0.5) is 0, round(1.5) is 2 and
+    // round(2.5) is 2 - which a Math.floor(x + 0.5) spelling gets wrong on every
+    // other integer. pyFixed is this grammar's exact decimal formatter and rounds
+    // half to even by construction (docs/working-on-this-project.md 7.7).
+    hostGlobals["round"] = function(x, nd) {
+        var f = floVal(x)
+        if (nd === undefined || nd === null) { return parseFloat(pyFixed(f, 0)) }
+        var n = Math.trunc(floVal(nd))
+        if (n < 0) { n = 0 }
+        var r = parseFloat(pyFixed(f, n))
+        if (n <= 0 && !isFlo(x)) { return r }
+        return pyFlo(r)
+    }
+    // pow(a, b[, m]): the ** operator, plus CPython's three-argument MODULAR
+    // form. The modular one is computed by repeated squaring through binOp, so
+    // an arbitrary-precision base stays exact.
+    hostGlobals["pow"] = function(a, b, m) {
+        if (m === undefined || m === null) { return binOp("**", a, b) }
+        var base = anytype
+        base = binOp("%", a, m)
+        var acc = anytype
+        acc = 1
+        var e = anytype
+        e = b
+        while (pytruthy(binOp(">", e, 0))) {
+            if (pytruthy(binOp("==", binOp("%", e, 2), 1))) { acc = binOp("%", binOp("*", acc, base), m) }
+            e = binOp("//", e, 2)
+            base = binOp("%", binOp("*", base, base), m)
+        }
+        return acc
+    }
+    // callable(x): a function, a class object, or an instance whose class
+    // defines __call__.
+    hostGlobals["callable"] = function(v) {
+        if (typeof v == "function") { return true }
+        if (v !== null && v !== undefined && typeof v == "object") {
+            if (v.__isclass == true) { return true }
+            if (pyUser(v) && clsFind(v.__class, "__call__") != null) { return true }
+        }
+        return false
+    }
+    // ascii(x) is repr(x) with every non-ASCII code point escaped as well.
+    hostGlobals["ascii"] = function(v) {
+        var s = prepr(v)
+        var out = ""
+        var k = 0
+        while (k < s.length) {
+            var cc = s.charCodeAt(k)
+            var cp = cc
+            var w = 1
+            if (cc >= 55296 && cc <= 56319 && k + 1 < s.length) {
+                var lo = s.charCodeAt(k + 1)
+                if (lo >= 56320 && lo <= 57343) { cp = 65536 + (cc - 55296) * 1024 + (lo - 56320); w = 2 }
+            }
+            if (cp < 128) { out = out + s.charAt(k) }
+            else if (cp < 256) { out = out + "\\x" + pyHexPad(cp, 2) }
+            else if (cp < 65536) { out = out + "\\u" + pyHexPad(cp, 4) }
+            else { out = out + "\\U" + pyHexPad(cp, 8) }
+            k = k + w
+        }
+        return out
+    }
+    // getattr(o, n[, default]) / hasattr(o, n) / setattr(o, n, v), over the same
+    // pyattr / pySetAttr the `.` operator uses. hasattr MIRRORS the lookup rather
+    // than calling pyattr and catching: `fail` is not catchable, and the other
+    // two engines have the same structural form for the same reason.
+    hostGlobals["getattr"] = function(o, n, d) {
+        if (arguments.length > 2 && !pyHasAttrOf(o, n)) { return d }
+        return pyattr(o, n)
+    }
+    hostGlobals["hasattr"] = function(o, n) { return pyHasAttrOf(o, n) }
+    hostGlobals["setattr"] = function(o, n, v) { pySetAttr(o, n, v); return undefined }
+    function pyHasAttrOf(o, name) {
+        if (o === null || o === undefined) { return false }
+        if (typeof o == "object" && o.__isclass == true) {
+            if (name == "__name__") { return true }
+            return clsFind(o, name) != null
+        }
+        if (typeof o == "object" && hasOwn(o, name)) { return o[name] !== pyDeleted }
+        if (pyUser(o)) {
+            if (name == "__dict__" || name == "__class__") { return true }
+            return clsFind(o.__class, name) != null
+        }
+        if (typeof o == "function" && name == "__name__") { return true }
+        return false
+    }
     function pyOrdOf(s) {
         if (typeof s != "string") {
             fail("TypeError: ord() expected string of length 1, but " + pyTypeOf(s).__name + " found")
@@ -1612,6 +1905,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return out2 + "}"
         }
         if (pyUser(v)) { return pyUserRender(v, false) }
+        // An iterator object. CPython prints <map object at 0x...>; the address
+        // is its own and cannot be matched, so it is left off rather than
+        // invented - and all three engines print this same short form.
+        if (isPyIt(v)) { return "<" + v.__pyit + " object>" }
         return "" + v
     }
     // A user object renders through its dunders, else like Python's default
@@ -1712,6 +2009,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function iterToList(v) {
         if (Array.isArray(v)) return v
         if (isGen(v)) return genToList(v)
+        // An ITERATOR object gives WHAT IS LEFT of it, and the read exhausts it -
+        // CPython's rule, and what makes next(it) then list(it) not repeat an
+        // element. Both compiled halves do the same in js_pyiter / js_pylist.
+        if (isPyIt(v)) return pyItRest(v)
         if (isDict(v)) return v.keys.slice(0)
         if (typeof v == "string") {
             var out = []
@@ -2059,6 +2360,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pySGetAttr(v, nm) { return pyattr(v, nm) }
     function pySGetItem(v, k) { return pyget(v, k) }
     function pySIsArr(v) { return Array.isArray(v) }
+    // The str-method chunk's hook for "materialize a generator or an iterator
+    // object", null when the value is neither. See the join arm of pyStrMethod.
+    function pySSeqOf(v) {
+        if (isPyIt(v) || isGen(v)) { return iterToList(v) }
+        return null
+    }
     function pySTruthy(v) { return pytruthy(v) }
     function pySKwGet(kw, nm) {
         var r = anytype
@@ -2867,8 +3174,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return pySSplitLines(s, ke)
         }
         if (name == "join") {
-            var seq = args[0]
+            var seq = anytype
+            seq = args[0]
             if (typeof seq == "string") { return pySJoin(s, pySChars(seq)) }
+            // A GENERATOR or an ITERATOR object (docs/todo.md 1.4's iter/map/
+            // filter/zip/enumerate) is materialized rather than refused -
+            // `", ".join(map(str, xs))` is ordinary Python. Keep in step with the
+            // join arm in abnf/pystrmethod.go and languages/lib/python-rt.metajs.
+            var jseq = pySSeqOf(seq)
+            if (jseq !== null) { seq = jseq }
             if (!pySIsArr(seq)) { pySFail("TypeError: can only join an iterable") }
             return pySJoin(s, seq)
         }
@@ -2990,9 +3304,46 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (target.length == 0) fail("pop from empty list")
                 return target.pop()
             }
+            // list.count(x) - docs/todo.md 1.5. This grammar had no arm at all
+            // ("unknown list method: count") while BOTH compiled halves reached
+            // rt.memberCall's KOTLIN arm and read the argument as a predicate
+            // ("call of a non function value: 2"). Python counts EQUAL elements,
+            // by == and not by identity, so [1.0, 2].count(1) is 1. The compiled
+            // twins are the `count` arm of pyMethodCall (abnf/jsrt.go) and
+            // pyDListCount (languages/lib/python-rt.metajs).
+            if (name == "count" && args.length == 1) {
+                var cn = 0
+                for (var ci = 0; ci < target.length; ci++) {
+                    if (pytruthy(binOp("==", target[ci], args[0]))) { cn++ }
+                }
+                return cn
+            }
+            if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
             fail("unknown list method: " + name)
         }
         if (isDict(target)) {
+            // set.add(x) and dict.pop(k[, default]) - docs/todo.md 1.4, whose
+            // third bullet called them an interpreter-only gap; a probe at
+            // 4731755 found BOTH compiled halves missing them too. The twins are
+            // the same two arms of pyMethodCall (abnf/jsrt.go) and of
+            // pyDMethodCall (languages/lib/python-rt.metajs). A set is a dict
+            // whose keys are its members here, so both arms live in this branch.
+            if (isSet(target) && name == "add") {
+                setAdd(target, args[0]) // Already a member: no-op, returns None.
+                return undefined
+            }
+            if (!isSet(target) && name == "pop") {
+                var pi = dictFind(target, args[0])
+                if (pi >= 0) {
+                    var pv = target.vals[pi]
+                    listRemoveAt(target.keys, pi)
+                    listRemoveAt(target.vals, pi)
+                    target.__idx = null
+                    return pv
+                }
+                if (args.length > 1) { return args[1] }
+                pyRaise(pyMakeExc("KeyError", [prepr(args[0])]))
+            }
             if (name == "keys") return target.keys.slice(0)
             if (name == "values") return target.vals.slice(0)
             // .items(): a list of [key, value] pairs in insertion order (each pair a
@@ -3011,7 +3362,53 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             fail("unknown dict method: " + name)
         }
+        if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
         fail("method call ." + name + "() on " + pstr(target))
+    }
+
+    // docs/todo.md 2.4 and 5.2. The member-call names that the COMPILED halves
+    // reach through rt.memberCall - the table nine languages share - and that
+    // Python's receiver type does not have: `xs.size()` answered 2 and
+    // `"ab".charAt(0)` answered "a" under llvm.Run where CPython raises
+    // AttributeError. This grammar never had them, so its half of the fix is
+    // only the ERROR: it used to abort with "unknown list method: size", and now
+    // raises the same catchable AttributeError the other two do.
+    //
+    // Keyed by RECEIVER TYPE, not by name alone: `get` is a real dict method and
+    // `add` a real set method. Keep in step with pyForeignMethod in abnf/jsrt.go
+    // and pyDForeign in languages/lib/python-rt.metajs.
+    //
+    // A name Python DOES have and this project does not (list.sort, list.insert)
+    // is deliberately NOT here: it still aborts, because a hard stop says
+    // "unimplemented" where a catchable AttributeError would let a program
+    // silently take the wrong branch.
+    function pyForeignMethod(target, name) {
+        if (Array.isArray(target)) {
+            // Kotlin's, Java's, Dart's and Swift's list methods. `count` is not
+            // among them - Python has list.count(x), answered above.
+            if (name == "add" || name == "size" || name == "get") { return true }
+            if (name == "contains" || name == "map" || name == "filter") { return true }
+            if (name == "any") { return true }
+        }
+        if (typeof target == "string") {
+            // Java's and Kotlin's string methods. Python spells them len(s),
+            // s[i], s == t, s[a:b] and s.index(t).
+            if (name == "length" || name == "charAt" || name == "equals") { return true }
+            if (name == "substring" || name == "indexOf") { return true }
+        }
+        if (name == "isEmpty" || name == "removeLast") { return true }
+        if (name == "sumOf" || name == "forEach") { return true }
+        return false
+    }
+
+    // The AttributeError CPython raises for a method its type does not have,
+    // with CPython's exact text. Catchable in all three engines: abnf/jsrt.go's
+    // pyMethodCall panics with a pyExcInstance and layer 2's pyDMethodCall
+    // throws one.
+    function pyAttrErr(target, name) {
+        var tn = pyTypeOf(target).__name
+        pyRaise(pyMakeExc("AttributeError",
+            ["'" + tn + "' object has no attribute '" + name + "'"]))
     }
 
 
@@ -5285,6 +5682,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (!broke && elseT != null) { return elseT() }
                 return undefined
             }
+            // An ITERATOR object is stepped the same way, so `break` leaves it
+            // PARTIALLY CONSUMED exactly as it does in the compiled halves -
+            // there the emitted loop already takes the generator path, because
+            // an iterator object carries a callable "next" and the test is
+            // structural (python-to-llvm-ir.abnf makeForStmt).
+            if (isPyIt(src)) {
+                while (true) {
+                    var ir = pyItStep(src)
+                    if (ir.done) { break }
+                    writeTarget(tgt, ir.value)
+                    var ri = bodyT()
+                    if (ri != undefined) {
+                        if (ri === BRK) { broke = true; break }
+                        if (ri !== CONT) return ri
+                    }
+                }
+                if (!broke && elseT != null) { return elseT() }
+                return undefined
+            }
             var arr = iterToList(src)
             for (var i = 0; i < arr.length; i++) {
                 writeTarget(tgt, arr[i])
@@ -5498,11 +5914,29 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function clsIsSub(cls, base) {
         if (cls == undefined || cls == null) { return false }
         if (cls === base) { return true }
+        // BUILTIN class objects have no __bases here, so their hierarchy is
+        // pyBuiltinSub's: issubclass(bool, int) and issubclass(anything, object)
+        // are True. Both were False before - the first in every engine, and
+        // issubclass itself did not exist in the compiled halves at all
+        // (docs/todo.md 1.4).
+        if (base != undefined && base != null && base.__builtin == true) {
+            if (base.__name == "object") { return true }
+            if (cls.__builtin == true) { return pyBuiltinSub(cls.__name, base.__name) }
+        }
         var bs = cls.__bases
         if (bs != undefined && bs != null) {
             for (var i = 0; i < bs.length; i++) { if (clsIsSub(bs[i], base)) { return true } }
         }
         return false
+    }
+    // The subclass relation over the BUILTIN type names, which is the whole of
+    // Python's builtin hierarchy this subset models: object is the base of
+    // everything and bool derives from int. Keep in step with pyBuiltinSub in
+    // abnf/jsrt.go and in languages/lib/python-rt.metajs.
+    function pyBuiltinSub(child, base) {
+        if (child == base) { return true }
+        if (base == "object") { return true }
+        return child == "bool" && base == "int"
     }
     // items = [{star}?, {htype}?, {hname}?, suiteThunk]
     function makeExcept(items) {
@@ -6065,9 +6499,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return false
         }
         if (cls.__builtin == true) {
-            // A builtin type object matches the corresponding primitive.
-            if (cls.__name == "object") { return true }
-            return pyTypeOf(v) === cls
+            // A builtin type object matches the corresponding primitive - through
+            // pyBuiltinSub, so isinstance(True, int) is True (bool derives from
+            // int) and isinstance(anything, object) is True.
+            return pyBuiltinSub(pyTypeOf(v).__name, cls.__name)
         }
         if (!pyUser(v)) { return false }
         return clsIsSub(v.__class, cls)
