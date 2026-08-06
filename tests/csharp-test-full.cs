@@ -1261,6 +1261,125 @@ b";                                                   // verbatim keeps the newl
             Program.Check("pp4", s == "x");
         }
 
+
+        // ===== SECTION 28: a literal adopts its declared type, and `is` reads the
+        // run-time type =====
+        //
+        // docs/todo.md 1.1 and 1.9. ECMA-334 10.2.3 (implicit numeric conversions)
+        // makes an untyped integer literal written at a `double`, `float` or sized
+        // integral site take that type; the WIDTH IS ON THE VALUE, not on the
+        // annotation, so every one of these used to INTEGER-DIVIDE and answer 1
+        // where the spec says 1.5. ECMA-334 12.12.12 makes `E is T` a RUN-TIME type
+        // test with no implicit conversion, which is why `5L is int` is false.
+        //
+        // THERE IS NO C# TOOLCHAIN ON THIS MACHINE, so every value here is
+        // spec-cited rather than executed. Each operand is read out of an ARRAY so
+        // the grammars' constant folders cannot answer the question at compile time.
+        //
+        // STILL NOT CLOSED, each still a wrong answer and each deliberately NOT
+        // asserted here: an ASSIGNMENT AFTER DECLARATION (`sv.d = 3` on a `double`
+        // field is still 3, not 3.0 - only the INITIAL value adopts), a lambda's
+        // parameter and return types, a `Dictionary<string, double>` value type,
+        // a nested `double[][]`, a `List<double>` element and a
+        // `Dictionary<string, double>` value. All of them need the declared type remembered
+        // per variable and field at every WRITE site, which is a var-type table in
+        // both engines. And `decimal` is still a style-2 double box, so
+        // `1.5m is double` is true and `decimal[]` renders `System.Double[]`.
+        class S28Box
+        {
+            public double A = 3;
+            public float F = 3;
+            public byte B = 250;
+            public long L = 5;
+            public double[] Xs = {3, 4};
+            public double P { get; set; } = 3;
+            public double Computed => 3;
+        }
+        static double S28G(double x) { return x / 2; }
+        static float S28F(float x) { return x / 2; }
+        static byte S28W(byte b) { return b; }
+        static long S28L(long v) { return v; }
+        static double S28R() { return 3; }
+        static double S28Dflt(double x = 3) { return x / 2; }
+        static double S28Arrow(double x) => x / 2;
+        static double S28InTry(bool t) { try { if (t) return 3; } finally { } return 4; }
+        static object S28Obj(object o) { return o; }
+        static void S28()
+        {
+            int[] n = {3, 250, 5, 1};
+
+            // ----- a PARAMETER's declared type adopts its argument -----
+            Program.Check("ad1", S28G(n[0]) == 1.5);
+            Program.Check("ad2", S28F(n[0]) == 1.5);
+            Program.Check("ad3", (S28W(n[1]) is byte) && !(S28W(n[1]) is int));
+            Program.Check("ad4", (S28L(n[2]) is long) && !(S28L(n[2]) is int));
+            // a default value adopts too, and a non-numeric parameter is untouched
+            Program.Check("ad5", S28Dflt() == 1.5 && S28Dflt(n[0]) == 1.5);
+            Program.Check("ad6", S28Obj(null) == null && (string) S28Obj("s") == "s");
+
+            // ----- a RETURN TYPE adopts, at a block body, an arrow body and a
+            // `return` that leaves a try -----
+            Program.Check("ad7", S28R() / 2 == 1.5 && S28R() is double);
+            Program.Check("ad8", S28Arrow(n[0]) == 1.5);
+            Program.Check("ad9", S28InTry(true) / 2 == 1.5 && S28InTry(false) / 2 == 2);
+
+            // ----- a local function's parameter and return type adopt -----
+            double S28Loc(double z) { return z / 2; }
+            Program.Check("ad10", S28Loc(n[0]) == 1.5);
+
+            // ----- a FIELD and an auto-PROPERTY adopt their initializers -----
+            S28Box bx = new S28Box();
+            Program.Check("ad11", bx.A / 2 == 1.5 && bx.F / 2 == 1.5);
+            Program.Check("ad12", (bx.B is byte) && !(bx.B is int) && (bx.L is long) && !(bx.L is int));
+            Program.Check("ad13", bx.P / 2 == 1.5 && bx.Computed / 2 == 1.5);
+
+            // ----- an ARRAY declaration types its ELEMENTS -----
+            double[] d = {3, 4};
+            Program.Check("ad14", d[0] / 2 == 1.5 && d[1] / 2 == 2);
+            Program.Check("ad15", bx.Xs[0] / 2 == 1.5);
+            // ... and the element adoption is IN PLACE, so an array assignment
+            // still ALIASES rather than copying.
+            int[] x = {1};
+            int[] y = x;
+            y[0] = 5;
+            Program.Check("ad16", x[0] == 5);
+            // NEGATIVE CONTROL: an int[] must NOT float.
+            int[] ints = {3, 4};
+            Program.Check("ad17", ints[0] / 2 == 1);
+
+            // ----- `is` reads the RUN-TIME type (ECMA-334 12.12.12) -----
+            object[] o = {n[3], 5L, (byte) 3, (short) 3, 1.5, 1.5f, "s", 'c', true};
+            Program.Check("is1", (o[0] is int) && !(o[0] is long) && !(o[0] is char));
+            Program.Check("is2", (o[1] is long) && !(o[1] is int) && (o[1] is Int64));
+            Program.Check("is3", (o[2] is byte) && !(o[2] is sbyte) && !(o[2] is int));
+            Program.Check("is4", (o[3] is short) && !(o[3] is ushort) && !(o[3] is int));
+            Program.Check("is5", (o[4] is double) && !(o[4] is float));
+            Program.Check("is6", (o[5] is float) && !(o[5] is double));
+            Program.Check("is7", (o[6] is string) && (o[7] is char) && (o[8] is bool));
+            // NEGATIVE CONTROLS: `object` matches everything, null matches nothing
+            // that is not nullable, and a user class still walks its own chain.
+            Program.Check("is8", (o[0] is object) && (o[6] is object));
+            S28Box nb = null;
+            Program.Check("is9", !(nb is S28Box) && (bx is S28Box));
+
+            // ----- the same test behind a PATTERN and behind `as` -----
+            string got = "";
+            for (int i = 0; i < o.Length; i++)
+            {
+                switch (o[i])
+                {
+                    case int v: got += "i"; break;
+                    case long v: got += "l"; break;
+                    case float v: got += "f"; break;
+                    case double v: got += "d"; break;
+                    case char v: got += "c"; break;
+                    default: got += "."; break;
+                }
+            }
+            Program.Check("is10", got == "il..df.c.");
+            Program.Check("is11", (o[4] as string) == null && (string) (o[6] as string) == "s");
+        }
+
         // ===== END SECTIONS =====
 
         static int Main()
@@ -1292,6 +1411,7 @@ b";                                                   // verbatim keeps the newl
             Program.S25(); // SECTION-CALL 25
             Program.S26(); // SECTION-CALL 26
             Program.S27(); // SECTION-CALL 27
+            Program.S28(); // SECTION-CALL 28
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

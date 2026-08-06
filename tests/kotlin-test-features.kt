@@ -506,6 +506,10 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("ctor-setof", setOf(1, 2, 3).size == 3 && setOf("a", "b").contains("b"))
     check("ctor-arrayof", arrayOf(7, 8).size == 2 && arrayListOf(9).contains(9))
     check("ctor-empty", emptyList<Int>().size == 0 && emptySet<Int>().size == 0)
+    // A Set keys by equals, and java.lang.Float.equals demands a Float: 1.5f and
+    // 1.5 are TWO keys (java 24.0.2). Reachable only through Any, since kotlinc
+    // rejects `1.5f == 1.5`. See SECTION 24 of tests/kotlin-test-full.kt.
+    check("ctor-setof-float-key", setOf<Any>(1.5f, 1.5).size == 2 && setOf<Any>(1.5f, 1.5f).size == 1)
 
     // ----- list higher-order methods (trailing lambdas, `it`) -----
     val nums = listOf(3, 1, 4)

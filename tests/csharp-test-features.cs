@@ -236,6 +236,17 @@ namespace Demo
             return x => x + n;
         }
 
+        // ----- declared-type adoption (docs/todo.md 1.1) and the run-time type
+        // test behind `is` (docs/todo.md 1.9). ECMA-334 10.2.3 makes an untyped
+        // integer literal at a `double`/`float`/sized-integral site take that
+        // type - the WIDTH IS ON THE VALUE, not on the annotation - and 12.12.12
+        // makes `E is T` a run-time type test with no implicit conversion. Both
+        // halves used to agree on every wrong answer here, so --cross was blind.
+        static double AdoptG(double x) { return x / 2; }
+        static double AdoptR() { return 3; }
+        static byte AdoptW(byte b) { return b; }
+        class AdoptBox { public double A = 3; public double P { get; set; } = 3; }
+
         // ----- exceptions -----
         static int Risky(int n)
         {
@@ -678,6 +689,27 @@ namespace Demo
 
             // ----- everything combined -----
             Program.Check("combined-pipeline", Program.Transform(new List<int> { 1, 2, -3 }) == "o1e2x");
+
+            // ----- a literal adopts its declared type; `is` reads the run-time
+            // type. Every operand is read out of an ARRAY so the constant folders
+            // cannot answer at compile time. No C# toolchain on this machine: the
+            // values are ECMA-334 10.2.3 / 12.12.12 cited, not executed.
+            int[] adoptN = {3, 250};
+            Program.Check("adopt-parameter", Program.AdoptG(adoptN[0]) == 1.5);
+            Program.Check("adopt-return", Program.AdoptR() / 2 == 1.5);
+            Program.Check("adopt-param-width",
+                (Program.AdoptW(adoptN[1]) is byte) && !(Program.AdoptW(adoptN[1]) is int));
+            AdoptBox adoptBox = new AdoptBox();
+            Program.Check("adopt-field", adoptBox.A / 2 == 1.5 && adoptBox.P / 2 == 1.5);
+            double[] adoptArr = {3, 4};
+            int[] adoptInts = {3, 4};
+            Program.Check("adopt-array-elem", adoptArr[0] / 2 == 1.5 && adoptInts[0] / 2 == 1);
+            object[] adoptObj = {adoptN[0], 5L, 1.5, 1.5f};
+            Program.Check("is-runtime-type",
+                (adoptObj[0] is int) && !(adoptObj[0] is long)
+                && (adoptObj[1] is long) && !(adoptObj[1] is int)
+                && (adoptObj[2] is double) && !(adoptObj[2] is float)
+                && (adoptObj[3] is float) && !(adoptObj[3] is double));
 
             Console.WriteLine("features: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;

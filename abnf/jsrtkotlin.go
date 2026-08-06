@@ -818,6 +818,11 @@ func init() {
 			if giIsInt(l) || giIsInt(r) {
 				return boolH(rt.giEq(l, r))
 			}
+			// Two boxes: a Float is not equal to a Double even at the same value
+			// (java.lang.Float#equals demands a Float). See ktFloClsEq.
+			if v, decided := ktFloClsEq(l, r); decided {
+				return boolH(v)
+			}
 			// Two callable references / class literals. See ktRefEq; without it the
 			// comparison fell through to identity and `b::v == b::v` was false.
 			if v, decided := ktRefEq(l, r); decided {
@@ -845,6 +850,10 @@ func init() {
 			l, r := u(a[0]), u(a[1])
 			if giIsInt(l) || giIsInt(r) {
 				return boolH(!rt.giEq(l, r))
+			}
+			// Two boxes: a Float is not equal to a Double even at the same value.
+			if v, decided := ktFloClsEq(l, r); decided {
+				return boolH(!v)
 			}
 			// Two callable references / class literals. See ktRefEq; without it the
 			// comparison fell through to identity and `b::v == b::v` was false.
@@ -3130,6 +3139,41 @@ func (rt *jsrt) ktMapFind(keys *jsArray, k interface{}) int {
 	return -1
 }
 
+// ktFloClsEq is the COLLECTION-KEY contract between two jsJFlo boxes, and it is a
+// WIDTH question rather than a value one. Kotlin's `==` on Any is
+// java.lang.Float.equals / java.lang.Double.equals, and Float.equals(Double) is
+// FALSE by specification - java.lang.Float#equals answers true only "if the
+// argument is not null and is a Float object" - so `setOf(1.5f, 1.5)` has TWO
+// elements on the JVM. Confirmed against java 24.0.2, which is a real oracle here
+// because Kotlin/JVM's Float IS java.lang.Float (the argument e5e68b5 and 30cd9f6
+// settled the binary32 rounding and the hash with). 30cd9f6 already made the two
+// widths HASH apart; this is the half of the same contract equality owes the hash.
+//
+// It is deliberately NOT in rt.strictEq. That primitive is shared with java,
+// csharp, go and dart and its tag 13/14 arms are the numeric promotion `==` needs
+// (docs/working-on-this-project.md 7.9); `<`, `>` and a well-typed program's
+// primitive `==` reach jvmArith / ktCmp, which never come through here. The twin
+// is ktFloEq in languages/lib/kotlin-rt.metajs and kEq in kotlin-interpreter.abnf.
+//
+// decided=false when either side is not a box, so a box against a plain number or
+// a sized integer keeps the caller's own fallback. That pairing is a compile error
+// in Kotlin (`1.5f == 1.5` and `1.0 == 1` are both rejected by kotlinc), so
+// narrowing it would move only unreachable answers while risking reachable ones.
+func ktFloClsEq(l, r interface{}) (bool, bool) {
+	lf, lok := l.(jsJFlo)
+	if !lok {
+		return false, false
+	}
+	rf, rok := r.(jsJFlo)
+	if !rok {
+		return false, false
+	}
+	if jvmIs32(lf.sty) != jvmIs32(rf.sty) {
+		return false, true
+	}
+	return lf.f == rf.f, true
+}
+
 // ktEqVals is `==` for the collection operations: numeric across the box, and the
 // runtime's own strict equality for everything else (a data class still compares
 // through its generated equals, which memberCall reaches).
@@ -3142,10 +3186,9 @@ func (rt *jsrt) ktEqVals(a, b interface{}) bool {
 			return ca.code == cb.code
 		}
 	}
-	if fa, ok := a.(jsJFlo); ok {
-		if fb, ok2 := b.(jsJFlo); ok2 {
-			return fa.f == fb.f
-		}
+	// Two boxes: width-aware, so a Float is not a Double key. See ktFloClsEq.
+	if v, decided := ktFloClsEq(a, b); decided {
+		return v
 	}
 	if oa, ok := a.(*jsObject); ok {
 		if _, ok2 := b.(*jsObject); ok2 {

@@ -141,6 +141,37 @@ func csIsIntegral(v interface{}) bool {
 	return false
 }
 
+// csIsTyWidth resolves an INTEGRAL type name - C#'s keyword or its BCL alias
+// (ECMA-334 8.3.5: the keywords are aliases for the System types) - to the width
+// and signedness the value model stores. The third result is false for every name
+// that is not an integral type.
+func csIsTyWidth(t string) (uint8, bool, bool) {
+	alias := map[string]string{"SByte": "sbyte", "Byte": "byte", "Int16": "short",
+		"UInt16": "ushort", "Int32": "int", "UInt32": "uint", "Int64": "long", "UInt64": "ulong"}
+	if a, ok := alias[t]; ok {
+		t = a
+	}
+	bits, ok := csTypeW[t]
+	if !ok {
+		return 0, false, false
+	}
+	return bits, csTypeU[t], true
+}
+
+// csIsNumericV says whether a value can be CONVERTED to a double/float by an
+// implicit numeric conversion: a plain number (an `int` here), a sized integer,
+// or a float box. A char is deliberately NOT one - `double d = 'a'` is legal C#
+// but the interpreter's csImplicitConv declines it too, and the two halves have
+// to agree. Everything else (null, a string, a lambda, an instance) passes
+// through the adoption sites untouched.
+func csIsNumericV(v interface{}) bool {
+	switch v.(type) {
+	case jsGInt, float64, jsJFlo:
+		return true
+	}
+	return false
+}
+
 // csNorm applies the invariant: a signed 32 bit result is a PLAIN NUMBER,
 // everything else is a box. giNorm cannot be used - it unboxes at 64 bits, where
 // a plain number means `int` here.
@@ -516,6 +547,114 @@ func init() {
 				return a[0]
 			}
 			return w(csConvTo(rt, v, uint8(jsToInt(rt.toNumber(u(a[1])))), rt.truthy(u(a[2]))))
+		}
+		// js_csadoptty(v, ty) is ECMA-334 10.2.3's implicit numeric conversion at
+		// a DECLARED TYPE NAME - a parameter, a method's return type, a field or
+		// an auto-property - and it is the twin of csImplicitConv's numeric arms
+		// in languages/csharp-interpreter.abnf. It is what makes
+		//
+		//     static double G(double x) { return x / 2; }   G(3)
+		//
+		// answer 1.5 rather than the 1 an int division gave: THE WIDTH IS ON THE
+		// VALUE, NOT THE ANNOTATION, so nothing but a conversion at the binding
+		// site can put it there (docs/todo.md 1.1). Anything that is not a
+		// number, a sized integer or a float box is handed back UNCHANGED, so a
+		// null, a string or a lambda at such a site is untouched.
+		m["js_csadoptty"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			ty := rt.toString(u(a[1]))
+			if ty == "float" {
+				if !csIsNumericV(v) {
+					return a[0]
+				}
+				return w(jsJFlo{f: jvmFround(rt.toNumber(v)), sty: floCSF})
+			}
+			if ty == "double" || ty == "decimal" {
+				if !csIsNumericV(v) {
+					return a[0]
+				}
+				return w(jsJFlo{f: rt.toNumber(v), sty: floCS})
+			}
+			bits, ok := csTypeW[ty]
+			if !ok || !csIsIntegral(v) {
+				return a[0]
+			}
+			return w(csConvTo(rt, v, bits, csTypeU[ty]))
+		}
+		// js_csadoptarr(v, ty): `double[] a = {3, 4}` types the ELEMENTS, so
+		// a[0] / 2 is 1.5. IN PLACE, not into a copy - `int[] x = {1}; int[] y =
+		// x;` must still alias. One level only; `double[][]` adopts nothing.
+		m["js_csadoptarr"] = func(a []uint64) uint64 {
+			arr, ok := u(a[0]).(*jsArray)
+			if !ok {
+				return a[0]
+			}
+			ad := m["js_csadoptty"]
+			for i := range arr.elems {
+				arr.elems[i] = u(ad([]uint64{w(arr.elems[i]), a[1]}))
+			}
+			return a[0]
+		}
+		// js_csis(v, t) is `v is T` / `v as T` / a type pattern. ECMA-334 12.12.12
+		// asks for the RUN-TIME type of v - there is no implicit conversion in a
+		// type test, which is why `object o = 5; o is long` is false in C# - and
+		// the shared js_is_type cannot answer that for a number: it says "is it an
+		// integral number" for all eight integral names at once and "is it a
+		// number" for all three floating ones, so `1.5f is float`, `1.5 is
+		// double`, `5L is long` and `(byte)3 is byte` were all FALSE while
+		// `5 is long` was true (docs/todo.md 1.9).
+		//
+		// This value model does carry the answer: a plain number is an `int`, a
+		// jsGInt is every other integral type and carries its width and
+		// signedness, and a jsJFlo's style byte says double (2) or float (5).
+		// `is decimal` is answered by the `double` arm, because a decimal IS a
+		// style-2 double box here - the one residue this cannot fix without a
+		// decimal representation of its own. Every non-numeric name falls through
+		// to the shared probe unchanged, so a user class, a string, a char, an
+		// array and `object` behave exactly as before.
+		baseIs := m["js_is_type"]
+		m["js_csis"] = func(a []uint64) uint64 {
+			t := rt.toString(u(a[1]))
+			if i := strings.IndexByte(t, '<'); i >= 0 {
+				t = t[:i]
+			}
+			opt := strings.HasSuffix(t, "?")
+			t = strings.TrimSuffix(t, "?")
+			bits, uns, isInt := csIsTyWidth(t)
+			isFlo := t == "double" || t == "Double" || t == "decimal" || t == "Decimal"
+			isF32 := t == "float" || t == "Single"
+			// `char` is answered here too: the shared probe's "Char" arm answers
+			// for a PLAIN NUMBER (the Java/Go reading, where a char is one), so
+			// `1 is char` came back TRUE in this half and FALSE in the
+			// interpreter, which has a char box. A pre-existing halves
+			// divergence --cross never reached because no test program asks.
+			isChr := t == "char" || t == "Char"
+			if !isInt && !isFlo && !isF32 && !isChr {
+				return baseIs(a)
+			}
+			if isChr {
+				switch u(a[0]).(type) {
+				case nil, jsUndefT, jsNullT:
+					return boolH(opt)
+				case jsChar:
+					return boolH(true)
+				}
+				return boolH(false)
+			}
+			switch v := u(a[0]).(type) {
+			case nil, jsUndefT, jsNullT:
+				return boolH(opt)
+			case float64:
+				return boolH(isInt && bits == 32 && !uns && v == math.Trunc(v))
+			case jsGInt:
+				return boolH(isInt && v.w == bits && v.u == uns)
+			case jsJFlo:
+				if v.sty == floCSF {
+					return boolH(isF32)
+				}
+				return boolH(isFlo)
+			}
+			return boolH(false)
 		}
 		// An integer literal, passed as DIGITS because emitNum would already have
 		// rounded 9223372036854775807 to 9223372036854776000 on the way into the

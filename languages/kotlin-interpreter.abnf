@@ -6630,6 +6630,24 @@ NotMemberKw = :script(~~
     // model keeps as a primitive, plus the generated equals of a data/value class
     // (component-wise) - see kClassEq.
     function kEq(l, r) {
+        // TWO {__flo} BOXES ARE COMPARED BEFORE THE UNBOXING BELOW, because a Float
+        // and a Double are DIFFERENT KEYS: Kotlin's == on Any is java.lang.Float.equals
+        // / Double.equals, and Float#equals answers true only "if the argument is not
+        // null and is a Float object", so setOf(1.5f, 1.5) has TWO elements (java
+        // 24.0.2; Kotlin/JVM's Float IS java.lang.Float, the argument e5e68b5 and
+        // 30cd9f6 used). 30cd9f6 made the two widths HASH apart - this is the half of
+        // the same contract equality owes the hash. `<`, `>` and a well-typed program's
+        // primitive == still promote through kFloOp2 / kCmp, which do not come here,
+        // and a box against a plain number or a sized integer is left alone (that pair
+        // is a compile error in Kotlin: kotlinc rejects `1.5f == 1.5` and `1.0 == 1`).
+        // Twins: ktFloEq in languages/lib/kotlin-rt.metajs, ktFloClsEq in
+        // abnf/jsrtkotlin.go.
+        if (kIsFlo(l)) {
+            if (kIsFlo(r)) {
+                if (kIsF32(l) !== kIsF32(r)) { return false }
+                return l.__flo === r.__flo
+            }
+        }
         // A Char equals its code, so both sides are unboxed into fresh locals (a
         // parameter must keep its inferred type under the frozen engine).
         var a = anytype
@@ -6640,6 +6658,17 @@ NotMemberKw = :script(~~
         // all a well-typed program can observe: it could not have written the
         // comparison at all if the two types disagreed.
         if (szIs(a) || szIs(b)) {
+            // A {__flo} BOX ON THE OTHER SIDE COMPARES AS A DOUBLE. kSz below is
+            // i64Trunc of the value, so a non-integral double was TRUNCATED into the
+            // integer's width and `1L == 1.5` answered true here while the compiler
+            // half (k0GiEq / rt.giEq, which promote to a double) answered false - a
+            // halves divergence --cross never saw because nothing in the matrix put a
+            // sized integer against a fractional double. java 24.0.2 agrees with the
+            // compiler half in both readings: 1L == 1.5 is false as a primitive
+            // comparison (JLS 15.21.1 promotes the long TO double) and
+            // Long.valueOf(1).equals(1.5) is false as a boxed one.
+            if (kIsFlo(l)) { return kIsIntegral(b) && l.__flo === kNumD(b) }
+            if (kIsFlo(r)) { return kIsIntegral(a) && r.__flo === kNumD(a) }
             if (kIsIntegral(a) && kIsIntegral(b)) { return szEq(szIs(a) ? a : kSz(a, 64, kNoU), szIs(b) ? b : kSz(b, 64, kNoU)) }
             return false
         }

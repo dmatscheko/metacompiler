@@ -274,8 +274,10 @@ CtorArrow   <~~ push(exprToStmt(pop())) ~~> = "=>" Expression ";" ;
 // A method. The name may be qualified with the interface it explicitly implements
 // ('string ITag.Tag()'); only the last segment is kept, so the member is reachable under
 // its plain name (the interface view is not modelled separately).
+// FType (not a bare Type) so the RETURN TYPE reaches makeMethod: `double R()
+// { return 3; }` must answer 3.0, not the int 3 that then integer-divides.
 Method      <~~ push(makeMethod(takeAll())) ~~>
-            = Mods Type MethodName [ SkipAngle ] ParamList { WhereClause } MethodBody ;
+            = Mods FType MethodName [ SkipAngle ] ParamList { WhereClause } MethodBody ;
 // csSimpleName drops the type arguments of both the interface and the method itself
 // ('IEnumerable<Foo>.GetEnumerator', 'Echo<T>') and keeps the last segment.
 MethodName  <~~ push(csSimpleName(up.in)) ~~>
@@ -285,7 +287,7 @@ MethodBody  = Block | ArrowBody ;
 // no default implementation. It contributes no member, so a subclass' override is what
 // the dispatch finds.
 AbstractMethod <~~ push(makeAbstract(takeAll())) ~~>
-            = Mods Type MethodName [ SkipAngle ] ParamList { WhereClause } ";" ;
+            = Mods FType MethodName [ SkipAngle ] ParamList { WhereClause } ";" ;
 ArrowBody   <~~ push(makeArrowBody(pop())) ~~>
             = "=>" Expression ";" ;
 
@@ -357,8 +359,17 @@ ParamList   <~~ push(makeParams(takeAll())) ~~>
 // '__arglist' is the variadic parameter of C#'s native-interop calling convention.
 // There is no way to read the extra arguments in this model, so it is parsed and
 // dropped: it pushes no name, and the method simply has one parameter fewer.
-Param       = ArglistParam | { AttrSection } { ParamMod } Type [ "..." ] ParamName [ ParamDflt ] ;
+Param       = ArglistParam | { AttrSection } { ParamMod } PType [ "..." ] ParamName [ ParamDflt ] ;
 ArglistParam = "__arglist" KwEnd ;
+// The DECLARED TYPE of a parameter, kept so an untyped literal argument adopts it
+// (docs/todo.md 1.1): `void G(double x)` called `G(3)` must bind 3.0, or `x / 2`
+// integer-divides and answers 1 where the implicit numeric conversion of ECMA-334
+// 10.2.3 makes it 1.5. It is the same record DType pushes for a local
+// declaration, at the site that had none; makeParams
+// decides ONCE, at parse time, whether the name is adoptable, so emitParam emits an
+// adoption call only where one is owed.
+PType       <~~ push({ptype: stripWs(up.in)}) ~~>
+            = Type ;
 ParamName   <~~ push(up.in) ~~>
             = Id ;
 ParamDflt   <~~ push({pdflt: pop()}) ~~>
@@ -425,7 +436,7 @@ LabelName   <~~ push(up.in) ~~>
 // A local function: a named closure over the enclosing locals, declared like a method.
 // It is bound before its body can run, so it may call itself.
 LocalFunc   <~~ push(makeLocalFunc(takeAll())) ~~>
-            = Mods Type Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList MethodBody ;
+            = Mods FType Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList MethodBody ;
 
 // 'checked { ... }' / 'unchecked { ... }': the block runs (overflow checking is not
 // modelled); the keyword is dropped and the inner block thunk stands in for it.
@@ -1611,9 +1622,15 @@ KwLet       = "let" KwEnd ;
         for (var i = 1; i < items.length; i++) { t = csCoalesce2(t, items[i]) }
         return t
     }
-    // The C# type name a js_is_type probe understands: the runtime speaks the shared value
-    // model's names ("Int", "String", "Any", ...), so the primitives are mapped here, at
-    // compile time; a user type keeps its own simple name.
+    // The type name the `is` / `as` probe carries. The shared js_is_type speaks the
+    // shared value model's names ("Int", "String", "Any", ...), and those are mapped
+    // here at compile time - but the NUMERIC keywords are NOT mapped: they are handed
+    // to js_csis unchanged, because the shared probe answers "is it an integral
+    // number" for all eight integral names at once and "is it a number" for all three
+    // floating ones, which made `1.5f is float`, `1.5 is double`, `5L is long` and
+    // `(byte)3 is byte` all false while `5 is long` was true (docs/todo.md 1.9).
+    // ECMA-334 12.12.12 asks for the RUN-TIME type, and only C#'s own keyword names
+    // it; js_csis reads the width off the box. A user type keeps its own simple name.
     function csIrType(t0) {
         var t = csSimpleName(t0)
         var opt = ""
@@ -1621,12 +1638,22 @@ KwLet       = "let" KwEnd ;
         if (t == "object" || t == "dynamic" || t == "var") { return "Any" + opt }
         if (t == "string" || t == "String") { return "String" + opt }
         if (t == "bool") { return "Boolean" + opt }
-        if (t == "char") { return "Char" + opt }
-        if (t == "int" || t == "uint" || t == "long" || t == "ulong" || t == "short"
-            || t == "ushort" || t == "byte" || t == "sbyte") { return "Int" + opt }
-        if (t == "double" || t == "float" || t == "decimal") { return "Double" + opt }
+        if (csIsPrimTy(t)) { return t + opt }
         if (t == "IList" || t == "IEnumerable" || t == "ICollection") { return "List" + opt }
         return t + opt
+    }
+    // The names js_csis answers itself: C#'s numeric keywords and their BCL aliases,
+    // plus `char` - the shared probe's "Char" arm answers for a PLAIN NUMBER (it is
+    // the Java/Go reading, where a char is one), so `1 is char` came back TRUE in
+    // this half and FALSE in the interpreter, which has a char box. A pre-existing
+    // halves divergence that --cross never reached because no test program asks.
+    function csIsPrimTy(t) {
+        if (t == "char" || t == "Char") { return true }
+        if (t == "double" || t == "float" || t == "decimal") { return true }
+        if (t == "Double" || t == "Single" || t == "Decimal") { return true }
+        if (csTypeW["$" + t] != undefined) { return true }
+        return t == "Int32" || t == "Int64" || t == "UInt64" || t == "UInt32"
+            || t == "Int16" || t == "UInt16" || t == "Byte" || t == "SByte"
     }
     // ----- patterns -----
     // Every pattern production builds one record - the same shape the interpreter grammar
@@ -1733,8 +1760,10 @@ KwLet       = "let" KwEnd ;
     function csNotNullFn(v) {
         return function(b) { return {b: b, v: callExt(b, "js_not", [callExt(b, "js_eq", [v, hNull])])} }
     }
+    // js_csis, not js_is_type: the numeric keywords need the WIDTH off the box, and
+    // js_csis falls through to the shared probe for every other name (todo.md 1.9).
     function csTypeFn(ty, v) {
-        return function(b) { return {b: b, v: callExt(b, "js_is_type", [v, emitStr(b, ty)])} }
+        return function(b) { return {b: b, v: callExt(b, "js_csis", [v, emitStr(b, ty)])} }
     }
     function csBindFn(name, v) {
         return function(b) {
@@ -1854,7 +1883,7 @@ KwLet       = "let" KwEnd ;
         if (p.k == "type") {
             if (p.bind != "") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, p.bind), v]) }
             if (p.ty == "") { return {b: b, v: hTrue} }
-            return {b: b, v: callExt(b, "js_is_type", [v, emitStr(b, csIrType(p.ty))])}
+            return {b: b, v: callExt(b, "js_csis", [v, emitStr(b, csIrType(p.ty))])}
         }
         if (p.k == "prop") {
             var subs = p.subs
@@ -1892,7 +1921,7 @@ KwLet       = "let" KwEnd ;
                 var okB = curF.NewBlock("")
                 var noB = curF.NewBlock("")
                 var mergeB = curF.NewBlock("")
-                b.NewCondBr(truthy(b, callExt(b, "js_is_type", [r.v, emitStr(b, ty)])), okB, noB)
+                b.NewCondBr(truthy(b, callExt(b, "js_csis", [r.v, emitStr(b, ty)])), okB, noB)
                 okB.NewBr(mergeB)
                 noB.NewBr(mergeB)
                 return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(r.v, okB), llvm.ir.NewIncoming(hNull, noB)])}
@@ -3241,6 +3270,44 @@ KwLet       = "let" KwEnd ;
     var csTypeU = {"$sbyte": false, "$byte": true, "$short": false, "$ushort": true,
                    "$int": false, "$uint": true, "$long": false, "$ulong": true,
                    "$nint": false, "$nuint": true}
+
+    // ----- declared-type adoption at the sites that are NOT a local declaration -----
+    // docs/todo.md 1.1. A PARAMETER, a method's RETURN TYPE, a FIELD / auto-property
+    // and the ELEMENT type of an array declaration all name a type as definitely as a
+    // local declaration does, and an untyped literal written at one of them stayed an
+    // int - so it INTEGER-DIVIDED:
+    //
+    //     static double G(double x) { return x / 2; }  G(3)   answered 1, not 1.5
+    //     static double R() { return 3; }  R() / 2            answered 1, not 1.5
+    //     class T { public double a = 3; }  new T().a / 2     answered 1, not 1.5
+    //     double[] a = {3, 4};  a[0] / 2                      answered 1, not 1.5
+    //
+    // Whether a site adopts at all is decided at PARSE time by csAdoptable, so a
+    // program whose parameters and returns name no numeric type emits the IR it did
+    // before, unchanged. js_csadoptty is ECMA-334 10.2.3's implicit numeric
+    // conversion; its twins are csImplicitConv in csharp-interpreter.abnf and
+    // js_csadoptty in abnf/jsrtcsharp.go and languages/lib/csharp-rt.metajs.
+    function csAdoptable(ty) {
+        if (ty == "double" || ty == "float" || ty == "decimal") { return true }
+        return csTypeW["$" + ty] != undefined
+    }
+    // "double[]" -> "double" when the elements are adoptable, "" otherwise. One level
+    // only: `double[][]` and `Dictionary<string, double>` adopt nothing.
+    function csElemAdoptTy(ty) {
+        if (ty == undefined || ty == null || ty.length < 3) { return "" }
+        if (ty.substring(ty.length - 2, ty.length) != "[]") { return "" }
+        var e = ty.substring(0, ty.length - 2)
+        return csAdoptable(e) ? e : ""
+    }
+    function emitAdopt(b, ty, v) { return callExt(b, "js_csadoptty", [v, emitStr(b, ty)]) }
+    // The value a site of declared type `ty` holds: the scalar adoption, the
+    // ELEMENTWISE one for an array type, or the value untouched.
+    function emitAdoptAny(b, ty, v) {
+        var el = csElemAdoptTy(ty)
+        if (el != "") { return callExt(b, "js_csadoptarr", [v, emitStr(b, el)]) }
+        if (!csAdoptable(ty)) { return v }
+        return emitAdopt(b, ty, v)
+    }
     function makeCast(inner, ty) {
         if (ty == undefined || ty == null || ty.castty == undefined) { return inner }
         var t = ty.castty
@@ -3298,12 +3365,13 @@ KwLet       = "let" KwEnd ;
     // A local function: an own IR function closed over the current scope, bound by name.
     // The binding lives in the scope the closure captured, so the body sees it (recursion).
     function makeLocalFunc(items) {
-        var name = items[1]
-        var pinfo = items[2]
-        var bodyT = items[3]
+        var rty = stripWs(items[1].ty)
+        var name = items[2]
+        var pinfo = items[3]
+        var bodyT = items[4]
         csRegParams(name, pinfo)
         return function(b) {
-            var idx = emitFunc(pinfo.params, bodyT, false, null, undefined, false, pinfo)
+            var idx = emitFunc(pinfo.params, bodyT, false, null, undefined, false, pinfo, rty)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name),
                                          csGenWrap(b, callExt(b, "js_closure", [handle(idx), curScopeV]))])
             return b
@@ -3779,11 +3847,17 @@ KwLet       = "let" KwEnd ;
         // value, so `object o = "s"` and a lambda pass through untouched.
         var declW = csTypeW["$" + ty]
         var declU = csTypeU["$" + ty]
+        var elemTy = csElemAdoptTy(ty)
         return function(b) {
             var r = init(b)
             b = r.b
             var v = r.v
             if (isDbl) { v = callExt(b, dblExt, [v]) }
+            // `double[] a = {3, 4}`: the declared type names the ELEMENT type, so
+            // the untyped literals in the initializer adopt it and a[0] / 2 is 1.5
+            // (docs/todo.md 1.1). Elementwise and IN PLACE - `int[] x = {1};
+            // int[] y = x;` must still alias.
+            if (elemTy != "") { v = callExt(b, "js_csadoptarr", [v, emitStr(b, elemTy)]) }
             if (declW != undefined) {
                 v = callExt(b, "js_csadopt", [v, emitNum(b, declW), declU ? hTrue : hFalse])
             }
@@ -3811,7 +3885,10 @@ KwLet       = "let" KwEnd ;
     function makeArrowBody(t) {
         return function(b) {
             var r = t(b)
-            r.b.NewRet(r.v)
+            // The declared return type adopts, exactly as at an explicit `return`
+            // (docs/todo.md 1.1): `double H(double x) => 3;` answers 3.0.
+            var rv = curRetTy != "" ? emitAdoptAny(r.b, curRetTy, r.v) : r.v
+            r.b.NewRet(rv)
             return deadBlock()
         }
     }
@@ -4022,6 +4099,12 @@ KwLet       = "let" KwEnd ;
                 var r = t(b)
                 b = r.b
                 v = r.v
+                // The DECLARED RETURN TYPE adopts the returned value (docs/todo.md
+                // 1.1): `static double R() { return 3; }` answers 3.0, so `R() / 2`
+                // is 1.5. curRetTy is set by emitFunc and is "" for every function
+                // whose return type adopts nothing, which is almost all of them -
+                // the twin is csAdoptRet in csharp-interpreter.abnf.
+                if (curRetTy != "") { v = emitAdoptAny(b, curRetTy, v) }
             }
             return retStmt(b, v) // plain ret, or a control signal when leaving a try body
         }
@@ -4155,22 +4238,34 @@ KwLet       = "let" KwEnd ;
         var variadic = -1
         var pendingThis = false
         var pendingParams = false
+        // The declared type each parameter ADOPTS, "" for every parameter that adopts
+        // nothing - which is the overwhelming majority. It is decided HERE, at parse
+        // time, so emitParam emits an adoption call only where one is owed and a
+        // method whose parameters name no numeric type emits the IR it did before,
+        // unchanged (docs/todo.md 1.1).
+        var adopts = []
+        var pendingTy = ""
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "string") {
                 names.push(it)
                 dflts.push(null)
+                adopts.push(pendingTy)
                 if (pendingThis && names.length == 1) { isExt = true }
                 if (pendingParams) { variadic = names.length - 1 }
                 pendingThis = false
                 pendingParams = false
+                pendingTy = ""
                 continue
             }
             if (it.thisParam == true) { pendingThis = true; continue }
             if (it.paramsParam == true) { pendingParams = true; continue }
+            // A `params` tail binds an ARRAY rather than a value, so it adopts nothing.
+            if (it.ptype != undefined) { pendingTy = csAdoptable(it.ptype) ? it.ptype : ""; continue }
             if (it.pdflt != undefined && dflts.length > 0) { dflts[dflts.length - 1] = it.pdflt }
         }
-        return {params: names, dflts: dflts, ext: isExt, variadic: variadic}
+        if (variadic >= 0 && variadic < adopts.length) { adopts[variadic] = "" }
+        return {params: names, dflts: dflts, ext: isExt, variadic: variadic, adopts: adopts}
     }
 
     // ----- operator overloading and user conversions -----
@@ -4367,8 +4462,12 @@ KwLet       = "let" KwEnd ;
         if (auto) { return csAutoField(name, isStatic, init, ty) }
         if (getT != null || setT != null) { csPropAcc[name] = isStatic ? "static" : "instance" }
         if (addT != null || remT != null) { csEvtAcc[name] = isStatic ? "static" : "instance" }
+        // A computed property's GETTER carries a declared type too, so
+        // `public double Get => 3;` answers 3.0 and Get / 2 is 1.5 (docs/todo.md
+        // 1.1). Its SETTER's `value` parameter is not adopted - the value arrives
+        // from the assignment, which is the write-site problem the report names.
         return {kind: "prop", name: name, statik: isStatic, getT: getT, setT: setT,
-                addT: addT, remT: remT}
+                getTy: ty, addT: addT, remT: remT}
     }
     // An automatic property IS a field: same record, so every field path (the instance
     // initializers, the static slot, the member table) applies to it unchanged.
@@ -4380,7 +4479,9 @@ KwLet       = "let" KwEnd ;
         var dfltH = 1
         if (ty == "bool") { dfltH = 2 }
         if (isInt) { dfltH = 0 }
-        return {kind: "field", name: name, statik: isStatic, init: init, dfltH: dfltH, isInt: isInt}
+        // The declared type adopts the initializer (docs/todo.md 1.1).
+        return {kind: "field", name: name, statik: isStatic, init: csAdoptInit(ty, init),
+                dfltH: dfltH, isInt: isInt}
     }
     function makeIndexer(items) {
         var getT = null
@@ -4476,9 +4577,10 @@ KwLet       = "let" KwEnd ;
 
     function makeMethod(items) {
         var mods = items[0].mods
-        var name = items[1]
-        var params = items[2].params
-        var body = items[3]
+        var rty = stripWs(items[1].ty)
+        var name = items[2]
+        var params = items[3].params
+        var body = items[4]
         var isStatic = false
         var hides = false
         for (var i = 0; i < mods.length; i++) {
@@ -4488,9 +4590,10 @@ KwLet       = "let" KwEnd ;
         if (hides) { csHiddenNames[name] = true }
         // 'static T M(this X x, ...)' is also reachable as x.M(...): remember which class
         // carries it, so a call site can emit the static call directly.
-        if (isStatic && items[2].ext == true) { csExt[name] = curClassName }
-        csRegParams(name, items[2])
-        return {kind: "method", name: name, statik: isStatic, params: params, body: body, pinfo: items[2]}
+        if (isStatic && items[3].ext == true) { csExt[name] = curClassName }
+        csRegParams(name, items[3])
+        return {kind: "method", name: name, statik: isStatic, params: params,
+                body: body, retTy: rty, pinfo: items[3]}
     }
     // A member declared without a body (abstract, or an interface method with no default):
     // it contributes no callable member, but its NAME is a member of the class, so an
@@ -4499,7 +4602,7 @@ KwLet       = "let" KwEnd ;
         var mods = items[0].mods
         var isStatic = false
         for (var i = 0; i < mods.length; i++) { if (mods[i] == "static") { isStatic = true } }
-        return {kind: "abstract", name: items[1], statik: isStatic}
+        return {kind: "abstract", name: items[2], statik: isStatic}
     }
     function makeCtor(items) {
         csRegParams(items[0], items[1])
@@ -4553,7 +4656,22 @@ KwLet       = "let" KwEnd ;
         var dfltH = 1 // The handle constants: 2 false, 1 null.
         if (ty == "bool") dfltH = 2
         if (isInt) dfltH = 0
-        return {kind: "field", name: name, statik: isStatic, init: init, dfltH: dfltH, isInt: isInt}
+        // The declared type adopts the initializer (docs/todo.md 1.1): a
+        // `public double a = 3;` field holds 3.0, so `t.a / 2` is 1.5 and not the
+        // 1 an int division gave. `double[] xs = {3, 4}` adopts elementwise.
+        return {kind: "field", name: name, statik: isStatic, init: csAdoptInit(ty, init),
+                dfltH: dfltH, isInt: isInt}
+    }
+    // Wraps a field/auto-property initializer thunk so its value adopts `ty`. The
+    // thunk is returned UNCHANGED when the type adopts nothing, which is almost
+    // always, so no extra IR is emitted for it.
+    function csAdoptInit(ty, init) {
+        if (init == null || init == undefined) { return init }
+        if (csElemAdoptTy(ty) == "" && !csAdoptable(ty)) { return init }
+        return function(b) {
+            var r = init(b)
+            return {b: r.b, v: emitAdoptAny(r.b, ty, r.v)}
+        }
     }
     function fieldDefault(b, f) {
         if (f.isInt) return emitNum(b, 0)
@@ -4602,9 +4720,20 @@ KwLet       = "let" KwEnd ;
                                              callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, rn)])])
             return exitB
         }
+        // The parameter's DECLARED TYPE adopts its argument (docs/todo.md 1.1):
+        // `G(3)` on `static double G(double x)` binds 3.0, so `x / 2` is 1.5 and not
+        // the 1 an int division gave. "" for every parameter that adopts nothing.
+        var pty = (pinfo.adopts != undefined && pinfo.adopts[i] != undefined) ? pinfo.adopts[i] : ""
         var dflt = (pinfo.dflts != undefined) ? pinfo.dflts[i] : null
         if (dflt == null || dflt == undefined) {
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), callExt(b, "js_arg", [argsP, handle(i + off)])])
+            // emitStr FIRST, so a parameter that adopts nothing emits exactly the
+            // IR it emitted before - the operand order of the js_scope_decl call
+            // is otherwise reversed for every parameter in the language, which
+            // perturbs code layout for no semantic reason (chapter 4's trap).
+            var nmV = emitStr(b, name)
+            var av = callExt(b, "js_arg", [argsP, handle(i + off)])
+            if (pty != "") { av = emitAdopt(b, pty, av) }
+            callExt(b, "js_scope_decl", [curScopeV, nmV, av])
             return b
         }
         var inRangeB = curF.NewBlock("")
@@ -4620,11 +4749,16 @@ KwLet       = "let" KwEnd ;
         var dr = dflt(defB)
         dr.b.NewBr(mergeB)
         var pv = mergeB.NewPhi([llvm.ir.NewIncoming(haveV, haveB), llvm.ir.NewIncoming(dr.v, dr.b)])
+        if (pty != "") { pv = emitAdopt(mergeB, pty, pv) }
         callExt(mergeB, "js_scope_decl", [curScopeV, emitStr(mergeB, name), pv])
         return mergeB
     }
 
-    function emitFunc(params, body, isInstance, fields, superName, isCtl, pinfo) {
+    // The declared return type of the function whose body is being emitted, "" when
+    // it adopts nothing. Dynamically scoped: emitFunc saves and restores it, and
+    // makeReturn's thunk runs inside body(b) below (docs/todo.md 1.1).
+    var curRetTy = ""
+    function emitFunc(params, body, isInstance, fields, superName, isCtl, pinfo, retTy) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -4632,6 +4766,14 @@ KwLet       = "let" KwEnd ;
         var savedScope = curScopeV
         var savedLoops = loopStack
         var savedTag = curFTag
+        var savedRetTy = curRetTy
+        // An ITERATOR method returns the sequence, not an element, so its declared
+        // type (IEnumerable<double>) names nothing adoptable and this is "".
+        // A try/catch/finally BODY CLOSURE (isCtl) is not a function of the source
+        // language - a `return` inside it is the enclosing METHOD's return - so it
+        // INHERITS the enclosing return type rather than clearing it. The
+        // interpreter wraps the whole method body, and the two halves have to agree.
+        if (!isCtl) { curRetTy = (retTy != undefined && retTy != null && csAdoptable(retTy)) ? retTy : "" }
         curF = f
         curFTag = idx
         loopStack = []
@@ -4684,6 +4826,7 @@ KwLet       = "let" KwEnd ;
         curScopeV = savedScope
         loopStack = savedLoops
         curFTag = savedTag
+        curRetTy = savedRetTy
         return idx
     }
 
@@ -4770,7 +4913,7 @@ KwLet       = "let" KwEnd ;
             for (i = 0; i < members.length; i++) {
                 var m2 = members[i]
                 if (m2.kind == "method") {
-                    var idx = emitFunc(m2.params, m2.body, !m2.statik, null, undefined, false, m2.pinfo)
+                    var idx = emitFunc(m2.params, m2.body, !m2.statik, null, undefined, false, m2.pinfo, m2.retTy)
                     callExt(b, "js_set", [clsV, emitStr(b, m2.name),
                                           csGenWrap(b, callExt(b, "js_closure", [handle(idx), curScopeV]))])
                     // A custom Deconstruct also gets a '__deconstruct' member: the same body,
@@ -4792,7 +4935,7 @@ KwLet       = "let" KwEnd ;
                         callExt(b, "js_set", [clsV, emitStr(b, "__remove_" + m2.name), callExt(b, "js_closure", [handle(ri), curScopeV])])
                     }
                     if (m2.getT != null) {
-                        var gi = emitFunc([], m2.getT, !m2.statik, null, undefined, false, csGetPI)
+                        var gi = emitFunc([], m2.getT, !m2.statik, null, undefined, false, csGetPI, m2.getTy)
                         callExt(b, "js_set", [clsV, emitStr(b, "__get_" + m2.name),
                                               csGenWrap(b, callExt(b, "js_closure", [handle(gi), curScopeV]))])
                     }

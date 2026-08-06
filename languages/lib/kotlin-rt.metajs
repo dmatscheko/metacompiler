@@ -773,6 +773,40 @@ function ktIdent(a, b) {
     return a === b
 }
 
+// ktIsF32 is the WIDTH question asked of a tag 14 box: style 3 is Kotlin's Float
+// (jvmIs32's floJavaF in abnf/jsrtjvm.go), everything else is its Double. It is
+// the same reading ktFloHash and k1FloText already make, named once.
+function ktIsF32(v) { return floStyle(v) === 3 }
+
+// ktFloEq is the COLLECTION-KEY contract between two tag 14 boxes, and it is a
+// WIDTH question rather than a value one. `==` on Kotlin's Any is
+// java.lang.Float.equals / java.lang.Double.equals, and Float.equals(Double) is
+// FALSE by specification - java.lang.Float#equals answers true only "if the
+// argument is not null and is a Float object" - so `setOf(1.5f, 1.5)` has TWO
+// elements on the JVM (java 24.0.2 confirms it; Kotlin/JVM's Float IS
+// java.lang.Float, which is the same argument e5e68b5 and 30cd9f6 settled the
+// rounding and the hash with). 30cd9f6 already made the two widths HASH apart, so
+// this is the half of the same contract that equality owes the hash.
+//
+// It is deliberately NOT in the floor's strict_eq / rt.strictEq. That primitive
+// is shared with java, csharp, go and dart, its tag 13/14 arms are the numeric
+// promotion `==` needs (docs/working-on-this-project.md 7.9), and `<`, `>` and a
+// well-typed program's primitive `==` still reach k1JvmArith / ktCmp, which never
+// come through here. The fix is Kotlin's LANGUAGE layer, exactly as java's
+// rtjStrictEq promotes in lib/runtime-jvm.metajs and leaves floEq alone.
+//
+// KT_MISS when either side is not a box: the caller keeps its own fallback, so a
+// box against a plain number or a sized integer is untouched. That pairing is a
+// compile error in Kotlin (`1.5f == 1.5` and `1.0 == 1` are both rejected by
+// kotlinc), so narrowing it would move only unreachable answers while risking the
+// reachable ones.
+function ktFloEq(a, b) {
+    if (!floIs(a)) { return KT_MISS }
+    if (!floIs(b)) { return KT_MISS }
+    if (ktIsF32(a) !== ktIsF32(b)) { return false }
+    return floNum(a) === floNum(b)
+}
+
 // giEq (jsrtint.go 269): a box never equals a non-numeric value, and two numbers
 // compare by VALUE whatever their widths. sintCmp is giCmp, whose answer for
 // EQUALITY is the giVal comparison the Go twin makes (an identical bit pattern
@@ -797,9 +831,11 @@ function ktEqVals(a, b) {
     if (ktIsChar(a)) {
         if (ktIsChar(b)) { return a["__char"] === b["__char"] }
     }
-    if (floIs(a)) {
-        if (floIs(b)) { return floNum(a) === floNum(b) }
-    }
+    // Two tag 14 boxes: ktFloEq, which is width-aware - a Float is not a Double
+    // key. KT_MISS keeps the old fallback for a box against anything else.
+    var fe = anytype
+    fe = ktFloEq(a, b)
+    if (!ktMiss(fe)) { return fe }
     if (k0IsRec(a)) {
         if (k0IsRec(b)) {
             var mth = k0FindMember(a, "equals")
@@ -1916,6 +1952,11 @@ function k1JStr(v) {
 // equals answers for itself, and everything else keeps the runtime's identity.
 function js_kteq(l, r) {
     if (sintIs(l) || sintIs(r)) { return k1GiEq(l, r) }
+    // Two tag 14 boxes: a Float is not equal to a Double even at the same value
+    // (java.lang.Float#equals demands a Float). See ktFloEq in section 0.
+    var fe = anytype
+    fe = ktFloEq(l, r)
+    if (!ktMiss(fe)) { return fe }
     // Two callable references / class literals, ahead of ktStructEq exactly as in
     // the Go twin; without this arm the comparison falls through to identity and
     // `b::v == b::v` is false. KT_MISS is its handled=false.
@@ -1936,6 +1977,9 @@ function js_kteq(l, r) {
 // jsrtkotlin.go js_ktne (802).
 function js_ktne(l, r) {
     if (sintIs(l) || sintIs(r)) { return !k1GiEq(l, r) }
+    var fe = anytype
+    fe = ktFloEq(l, r)
+    if (!ktMiss(fe)) { return !fe }
     var re = ktRefEq(l, r)
     if (!ktMiss(re)) { return !re }
     var se = ktStructEq(l, r)

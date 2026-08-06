@@ -272,8 +272,10 @@ CtorArrow   <~~ push(exprToStmt(pop())) ~~> = "=>" Expression ";" ;
 // A method. The name may be qualified with the interface it explicitly implements
 // ('string ITag.Tag()'); only the last segment is kept, so the member is reachable under
 // its plain name (the interface view is not modelled separately).
+// FType (not a bare Type) so the RETURN TYPE reaches makeMethod: `double R()
+// { return 3; }` must answer 3.0, not the int 3 that then integer-divides.
 Method      <~~ push(makeMethod(takeAll())) ~~>
-            = Mods Type MethodName [ SkipAngle ] ParamList { WhereClause } MethodBody ;
+            = Mods FType MethodName [ SkipAngle ] ParamList { WhereClause } MethodBody ;
 // csSimpleName drops the type arguments of both the interface and the method itself
 // ('IEnumerable<Foo>.GetEnumerator', 'Echo<T>') and keeps the last segment.
 MethodName  <~~ push(csSimpleName(up.in)) ~~>
@@ -283,7 +285,7 @@ MethodBody  = Block | ArrowBody ;
 // no default implementation. It contributes no member, so a subclass' override is what
 // the dispatch finds.
 AbstractMethod <~~ push(makeAbstract(takeAll())) ~~>
-            = Mods Type MethodName [ SkipAngle ] ParamList { WhereClause } ";" ;
+            = Mods FType MethodName [ SkipAngle ] ParamList { WhereClause } ";" ;
 ArrowBody   <~~ push(makeArrowBody(pop())) ~~>
             = "=>" Expression ";" ;
 
@@ -355,8 +357,17 @@ ParamList   <~~ push(makeParams(takeAll())) ~~>
 // '__arglist' is the variadic parameter of C#'s native-interop calling convention.
 // There is no way to read the extra arguments in this model, so it is parsed and
 // dropped: it pushes no name, and the method simply has one parameter fewer.
-Param       = ArglistParam | { AttrSection } { ParamMod } Type [ "..." ] ParamName [ ParamDflt ] ;
+Param       = ArglistParam | { AttrSection } { ParamMod } PType [ "..." ] ParamName [ ParamDflt ] ;
 ArglistParam = "__arglist" KwEnd ;
+// The DECLARED TYPE of a parameter, kept so an untyped literal argument adopts it
+// (docs/todo.md 1.1): `void G(double x)` called `G(3)` must bind 3.0, or `x / 2`
+// integer-divides and answers 1 where the implicit numeric conversion of ECMA-334
+// 10.2.3 makes it 1.5. It is the same record DType pushes for a local
+// declaration, at the site that had none; makeParams
+// decides ONCE, at parse time, whether the name is adoptable, so a call pays nothing
+// for the overwhelming majority of parameters that are not.
+PType       <~~ push({ptype: stripWs(up.in)}) ~~>
+            = Type ;
 ParamName   <~~ push(up.in) ~~>
             = Id ;
 ParamDflt   <~~ push({pdflt: pop()}) ~~>
@@ -420,7 +431,7 @@ LabelName   <~~ push(up.in) ~~>
 // A local function: a named closure over the enclosing locals, declared like a method.
 // It is bound before its body can run, so it may call itself.
 LocalFunc   <~~ push(makeLocalFunc(takeAll())) ~~>
-            = Mods Type Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList MethodBody ;
+            = Mods FType Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList MethodBody ;
 
 // 'checked { ... }' / 'unchecked { ... }': the block runs (overflow checking is not
 // modelled); the keyword is dropped and the inner block thunk stands in for it.
@@ -2928,11 +2939,33 @@ KwLet       = "let" KwEnd ;
         if (t == "string" || t == "String") { return typeof v == "string" }
         if (t == "bool" || t == "Boolean") { return typeof v == "boolean" }
         if (t == "char" || t == "Char") { return csIsChar(v) }
-        if (t == "int" || t == "uint" || t == "long" || t == "ulong" || t == "short"
-            || t == "ushort" || t == "byte" || t == "sbyte") {
-            return typeof v == "number" && Math.floor(v) == v
+        // The PRIMITIVE arms. ECMA-334 12.12.12: `E is T` is true when the RUN-TIME
+        // type of E is T - there is no implicit conversion in a type test, which is
+        // why `object o = 5; o is long` is false in C# - so each name must match the
+        // one representation that carries it. This value model says exactly which
+        // (see the invariant at csIsSz): a PLAIN NUMBER is an `int`, an {__sz} box is
+        // every other integral type and carries its own width and signedness, an
+        // {__flo} box is a double / float / decimal and its __f32 flag says which.
+        //
+        // Before this, every integral name answered "is it an integral number" and
+        // every floating name "is it a number", so `1.5f is float`, `1.5 is double`,
+        // `5L is long` and `(byte)3 is byte` were ALL false while `5 is long` was
+        // true - the width the box already carried was simply not consulted
+        // (docs/todo.md 1.9). `1.5m is decimal` is answered by the `double` arm,
+        // because a decimal IS a style-2 double box here; that is the one residue
+        // this cannot fix without a decimal representation of its own, and it is
+        // recorded at csElemName and in the report.
+        if (t == "float" || t == "Single") { return csIsF32(v) }
+        if (t == "double" || t == "Double" || t == "decimal" || t == "Decimal") {
+            return csIsFlo(v) && !csIsF32(v)
         }
-        if (t == "double" || t == "float" || t == "decimal") { return typeof v == "number" }
+        if (t == "int" || t == "Int32") { return typeof v == "number" && Math.floor(v) == v }
+        if (hasOwn(csTypeW, t)) { return csIsSz(v) && v.w == csTypeW[t] && v.u === csTypeU[t] }
+        if (t == "Int64" || t == "UInt64" || t == "Int16" || t == "UInt16"
+            || t == "Byte" || t == "SByte" || t == "UInt32") {
+            var al = csTypeW[csIsTypeAlias(t)]
+            return csIsSz(v) && v.w == al && v.u === csTypeU[csIsTypeAlias(t)]
+        }
         if (t == "List" || t == "IList" || t == "Array" || t == "IEnumerable" || t == "ICollection") {
             return typeof v == "object" && v !== null && typeof v.length == "number"
         }
@@ -2941,6 +2974,17 @@ KwLet       = "let" KwEnd ;
             for (var c = v.__class; c != undefined; c = c.__super) { if (c.__name == t) { return true } }
         }
         return false
+    }
+    // The BCL name of each integral type keyword, so `o is Int64` answers what
+    // `o is long` answers (ECMA-334 8.3.5: the keywords are aliases).
+    function csIsTypeAlias(t) {
+        if (t == "Int64") { return "long" }
+        if (t == "UInt64") { return "ulong" }
+        if (t == "Int16") { return "short" }
+        if (t == "UInt16") { return "ushort" }
+        if (t == "Byte") { return "byte" }
+        if (t == "SByte") { return "sbyte" }
+        return "uint"
     }
     // ----- patterns -----
     // Every pattern production builds one record; csMatchPat walks it. A binding is
@@ -3515,15 +3559,21 @@ KwLet       = "let" KwEnd ;
     // parameter's default value, and a 'params' tail collects the rest into an array.
     function csBindArgs(sc, pinfo, args) {
         var names = pinfo.params
+        // The parameter's DECLARED TYPE adopts its argument (docs/todo.md 1.1):
+        // `G(3)` on `static double G(double x)` binds 3.0, so `x / 2` is 1.5 and not
+        // the 1 an int division gave. anyAdopt is decided at parse time, so a method
+        // whose parameters name no numeric type reads one boolean and nothing more.
+        var ad = (pinfo.anyAdopt === true) ? pinfo.adopts : null
         for (var j = 0; j < names.length; j++) {
             if (pinfo.variadic == j) {
                 var rest = []
                 for (var k = j; k < args.length; k++) { rest.push(args[k]) }
                 sc[names[j]] = rest
             } else if (j < args.length && args[j] !== undefined) {
-                sc[names[j]] = args[j]
+                sc[names[j]] = (ad != null && ad[j] != "") ? csImplicitConv(ad[j], args[j]) : args[j]
             } else if (pinfo.dflts != undefined && pinfo.dflts[j] != null) {
-                sc[names[j]] = pinfo.dflts[j]()
+                var dv = pinfo.dflts[j]()
+                sc[names[j]] = (ad != null && ad[j] != "") ? csImplicitConv(ad[j], dv) : dv
             } else {
                 sc[names[j]] = undefined
             }
@@ -3553,12 +3603,15 @@ KwLet       = "let" KwEnd ;
     // A local function: a closure over the CURRENT scope chain, bound by name. The chain
     // is captured by reference, so the binding is visible to the body (recursion works).
     function makeLocalFunc(items) {
-        var name = items[1]
-        var pinfo = items[2]
-        var bodyT = items[3]
+        var rty = stripWs(items[1].ty)
+        var name = items[2]
+        var pinfo = items[3]
+        var bodyT = items[4]
         csRegParams(name, pinfo)
         var isGen = csGenCheck(pinfo)
-        return function() { declVar(name, makeCsClosure(pinfo, bodyT, scopes.slice(0), isGen)) }
+        // The declared return type adopts, exactly as a method's does.
+        var bt = isGen ? bodyT : csAdoptRet(rty, bodyT)
+        return function() { declVar(name, makeCsClosure(pinfo, bt, scopes.slice(0), isGen)) }
     }
     function makeLinq(pos) { return notImplExpr("LINQ query", pos) }
 
@@ -3640,6 +3693,12 @@ KwLet       = "let" KwEnd ;
         var init = (info.dinit != null && !info.bare) ? info.dinit : makeDefaultOf(ty)
         // 'S v = w;' with a struct type copies: structs are value types.
         if (hasOwn(csStructs, ty)) { return function() { declVar(name, csStructCopy(csImplicitConv(ty, init()))) } }
+        // `double[] a = {3, 4}`: the declared type names the ELEMENT type, so the
+        // untyped literals in the initializer adopt it and a[0] / 2 is 1.5
+        // (docs/todo.md 1.1). csImplicitConv answers an array type with the array
+        // unchanged, so the two are complementary rather than alternatives.
+        var el = csElemAdoptTy(ty)
+        if (el != "") { return function() { declVar(name, csAdoptArr(el, init())) } }
         return function() { declVar(name, csImplicitConv(ty, init())) }
     }
     // An expression bodied method '=> e;' behaves like { return e; }.
@@ -4000,22 +4059,35 @@ KwLet       = "let" KwEnd ;
         var variadic = -1
         var pendingThis = false
         var pendingParams = false
+        // The declared type each parameter ADOPTS, "" for every parameter that adopts
+        // nothing - which is the overwhelming majority, and is what keeps csBindArgs
+        // at one string comparison per parameter per call (docs/todo.md 1.1).
+        var adopts = []
+        var pendingTy = ""
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "string") {
                 names.push(it)
                 dflts.push(null)
+                adopts.push(pendingTy)
                 if (pendingThis && names.length == 1) { isExt = true }
                 if (pendingParams) { variadic = names.length - 1 }
                 pendingThis = false
                 pendingParams = false
+                pendingTy = ""
                 continue
             }
             if (it.thisParam == true) { pendingThis = true; continue }
             if (it.paramsParam == true) { pendingParams = true; continue }
+            // A `params` tail binds an ARRAY rather than a value, so it adopts nothing.
+            if (it.ptype != undefined) { pendingTy = csAdoptable(it.ptype) ? it.ptype : ""; continue }
             if (it.pdflt != undefined && dflts.length > 0) { dflts[dflts.length - 1] = it.pdflt }
         }
-        return {params: names, dflts: dflts, ext: isExt, variadic: variadic, ygen: csYieldCount}
+        if (variadic >= 0 && variadic < adopts.length) { adopts[variadic] = "" }
+        var anyAdopt = false
+        for (var k = 0; k < adopts.length; k++) { if (adopts[k] != "") { anyAdopt = true } }
+        return {params: names, dflts: dflts, ext: isExt, variadic: variadic, ygen: csYieldCount,
+                adopts: adopts, anyAdopt: anyAdopt}
     }
 
     // A method call binds its arguments like a lambda does: a missing argument takes the
@@ -4036,9 +4108,10 @@ KwLet       = "let" KwEnd ;
 
     function makeMethod(items) {
         var mods = items[0].mods
-        var name = items[1]
-        var params = items[2].params
-        var body = items[3]
+        var rty = stripWs(items[1].ty)
+        var name = items[2]
+        var params = items[3].params
+        var body = items[4]
         var isStatic = false
         var hides = false
         for (var i = 0; i < mods.length; i++) {
@@ -4046,9 +4119,27 @@ KwLet       = "let" KwEnd ;
             if (mods[i] == "new") { hides = true }
         }
         if (hides) { csHiddenNames[name] = true; csHasHidden = true }
-        csRegParams(name, items[2])
-        return {kind: "method", name: name, statik: isStatic, params: params, body: body,
-                pinfo: items[2], ext: items[2].ext == true, isGen: csGenCheck(items[2])}
+        csRegParams(name, items[3])
+        var isGen = csGenCheck(items[3])
+        // The RETURN TYPE adopts the returned value (docs/todo.md 1.1): `static
+        // double R() { return 3; }` answers 3.0, so `R() / 2` is 1.5. An ITERATOR
+        // method returns the sequence, not an element, so its declared type
+        // (IEnumerable<double>) names nothing adoptable and csAdoptRet declines it.
+        return {kind: "method", name: name, statik: isStatic, params: params,
+                body: isGen ? body : csAdoptRet(rty, body),
+                pinfo: items[3], ext: items[3].ext == true, isGen: isGen}
+    }
+    // Wraps a method body so its {isRet, v} answer adopts the declared return type.
+    // Returns the body UNCHANGED when the type adopts nothing, which is almost always.
+    function csAdoptRet(ty, body) {
+        var el = csElemAdoptTy(ty)
+        if (el == "" && !csAdoptable(ty)) { return body }
+        return function() {
+            var r = body()
+            if (r == undefined || r === null || r.isRet !== true) { return r }
+            if (r.v === undefined || r.v === null) { return r }
+            return {isRet: true, v: el != "" ? csAdoptArr(el, r.v) : csImplicitConv(ty, r.v)}
+        }
     }
     // A member declared without a body (abstract, or an interface method with no default):
     // it contributes no callable member, but its NAME is a member of the class, so an
@@ -4057,7 +4148,7 @@ KwLet       = "let" KwEnd ;
         var mods = items[0].mods
         var isStatic = false
         for (var i = 0; i < mods.length; i++) { if (mods[i] == "static") { isStatic = true } }
-        return {kind: "abstract", name: items[1], statik: isStatic}
+        return {kind: "abstract", name: items[2], statik: isStatic}
     }
     function makeCtor(items) {
         csRegParams(items[0], items[1])
@@ -4111,7 +4202,11 @@ KwLet       = "let" KwEnd ;
         var dflt = null
         if (ty == "bool") dflt = false
         else if (isNum && ty.indexOf("[") < 0) dflt = 0
-        return {kind: "field", name: name, statik: isStatic, init: init, dflt: dflt}
+        // The declared type adopts the initializer (docs/todo.md 1.1): a
+        // `public double a = 3;` field holds 3.0, so `t.a / 2` is 1.5 and not the
+        // 1 an int division gave. `double[] xs = {3, 4}` adopts elementwise.
+        return {kind: "field", name: name, statik: isStatic,
+                init: init == null ? init : csAdoptThunk(ty, init), dflt: dflt}
     }
 
     // ----- operator overloading and user conversions -----
@@ -4201,7 +4296,12 @@ KwLet       = "let" KwEnd ;
         var isStatic = false
         for (var k = 0; k < mods.length; k++) { if (mods[k] == "static") { isStatic = true } }
         if (auto) { return csAutoField(name, isStatic, init, ty) }
-        return {kind: "prop", name: name, statik: isStatic, getT: getT, setT: setT,
+        // A computed property's GETTER carries a declared type too, so
+        // `public double Get => 3;` answers 3.0 and Get / 2 is 1.5 (docs/todo.md
+        // 1.1). Its SETTER's `value` parameter is not adopted - the value arrives
+        // from the assignment, which is the write-site problem the report names.
+        return {kind: "prop", name: name, statik: isStatic,
+                getT: getT == null ? getT : csAdoptRet(ty, getT), setT: setT,
                 addT: addT, remT: remT}
     }
     // An automatic property IS a field: same record, so every field path (the instance
@@ -4213,7 +4313,11 @@ KwLet       = "let" KwEnd ;
         var dflt = null
         if (ty == "bool") { dflt = false }
         else if (isNum && ty.indexOf("[") < 0) { dflt = 0 }
-        return {kind: "field", name: name, statik: isStatic, init: init, dflt: dflt}
+        // The declared type adopts the initializer, as it does at a local
+        // declaration (docs/todo.md 1.1): `public double A { get; set; } = 3;`
+        // holds 3.0.
+        return {kind: "field", name: name, statik: isStatic,
+                init: init == null ? init : csAdoptThunk(ty, init), dflt: dflt}
     }
     function makeIndexer(items) {
         var getT = null
@@ -4650,6 +4754,56 @@ KwLet       = "let" KwEnd ;
         var key = "__conv_" + ty
         if (!hasOwn(cls, key)) { return v }
         return cls[key](v)
+    }
+
+    // ----- declared-type adoption at the sites that are NOT a local declaration -----
+    // docs/todo.md 1.1. `csImplicitConv` above is ECMA-334 10.2.3's implicit numeric
+    // conversion, and it used to run at exactly ONE site: a local declaration. A
+    // PARAMETER, a method's RETURN TYPE, a FIELD / auto-property and the ELEMENT type
+    // of an array declaration all name a type just as definitely, and an untyped
+    // literal written at one of them stayed an int - so it INTEGER-DIVIDED:
+    //
+    //     static double G(double x) { return x / 2; }  G(3)   answered 1, not 1.5
+    //     static double R() { return 3; }  R() / 2            answered 1, not 1.5
+    //     class T { public double a = 3; }  new T().a / 2     answered 1, not 1.5
+    //     double[] a = {3, 4};  a[0] / 2                      answered 1, not 1.5
+    //
+    // The float half of the same rule is what makes `F(1)` exact where only
+    // `F(1.0f)` used to be, and the integral half is what makes `void W(byte b)`
+    // called `W(250)` hold a byte. THE WIDTH IS ON THE VALUE, NOT THE ANNOTATION, so
+    // nothing but a fresh conversion at the binding site can put it there.
+    //
+    // csAdoptable is asked ONCE, at parse time, so a call to a method whose
+    // parameters name no numeric type pays nothing at all.
+    function csAdoptable(ty) {
+        if (ty == "double" || ty == "float" || ty == "decimal") { return true }
+        return hasOwn(csTypeW, ty)
+    }
+    // "double[]" -> "double" when the elements are adoptable, "" otherwise. One level
+    // only: `double[][]` and `Dictionary<string, double>` adopt nothing (see the
+    // report at docs/todo.md 1.1).
+    function csElemAdoptTy(ty) {
+        if (ty == undefined || ty == null || ty.length < 3) { return "" }
+        if (ty.substring(ty.length - 2, ty.length) != "[]") { return "" }
+        var e = ty.substring(0, ty.length - 2)
+        return csAdoptable(e) ? e : ""
+    }
+    // The elements of an array adopt the declared element type IN PLACE. In place and
+    // not into a copy: `int[] x = {1}; int[] y = x;` must still alias, and a copy here
+    // would silently break every array assignment in the language.
+    function csAdoptArr(ty, v) {
+        if (v === null || v === undefined || typeof v != "object") { return v }
+        if (!Array.isArray(v)) { return v }
+        for (var i = 0; i < v.length; i++) { v[i] = csImplicitConv(ty, v[i]) }
+        return v
+    }
+    // A thunk wrapped so its value adopts `ty` - the shape a field initializer, an
+    // auto-property initializer and a method return all need.
+    function csAdoptThunk(ty, t) {
+        var el = csElemAdoptTy(ty)
+        if (el != "") { return function() { return csAdoptArr(el, t()) } }
+        if (!csAdoptable(ty)) { return t }
+        return function() { return csImplicitConv(ty, t()) }
     }
 
     // Import roots the runtime already provides (Console, collections, ...); importing

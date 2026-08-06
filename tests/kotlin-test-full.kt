@@ -727,7 +727,61 @@ fun sec24() {
     check("f32w", sc24 is Float && s24f(sc24 + 1.0f) == "1.1")
     // ...and the class the value reports for itself agrees with `is`.
     check("f32x", fh[0]::class.simpleName == "Float" && dh[0]::class.simpleName == "Double")
+    // ----- THE COLLECTION-KEY CONTRACT: a Float is not a Double KEY -----
+    // 30cd9f6 made the two widths HASH apart and left this behind. `==` on Kotlin's
+    // Any is java.lang.Float.equals / java.lang.Double.equals, and Float#equals
+    // answers true only "if the argument is not null and is a Float object", so
+    // 1.5f and 1.5 are TWO keys and every collection built on equals follows.
+    // Measured on java 24.0.2, which is a real oracle because Kotlin/JVM's Float IS
+    // java.lang.Float - the argument e5e68b5 and 30cd9f6 both used. UNREACHABLE
+    // from source Kotlin except through Any (kotlinc rejects `1.5f == 1.5`
+    // outright), so every row below goes through eq24 or a collection of Any.
+    check("f32y", !eq24(fh[0], dh[0]) && !eq24(dh[0], fh[0]))
+    // The same width still compares by VALUE, at both widths and both ways round.
+    check("f32z", eq24(fh[0], 1.5f) && eq24(dh[0], 1.5) && !eq24(fh[4], 0.2f))
+    // The three collection shapes the contract reaches: a Set dedups by equals, a
+    // List scan (contains / indexOf / distinct) tells the two apart, and a Map
+    // keeps two entries and answers each key with its OWN value.
+    val ka24 = listOf<Any>(fh[0], dh[0])
+    check("f33a", setOf<Any>(fh[0], dh[0]).size == 2 && ka24.distinct().size == 2)
+    check("f33b", !ka24.contains(2.5) && ka24.indexOf(dh[0]) == 1 && ka24.indexOf(fh[0]) == 0)
+    val km24 = mutableMapOf<Any, String>(fh[0] to "F", dh[0] to "D")
+    check("f33c", km24.size == 2 && km24[fh[0]] == "F" && km24[dh[0]] == "D")
+    // ...and the structural equality of the collections themselves follows it:
+    // java's List.of(1.5f).equals(List.of(1.5)) is false.
+    check("f33d", listOf<Any>(fh[0]) != listOf<Any>(dh[0]) &&
+                  (setOf<Any>(fh[0], dh[0]) - setOf<Any>(dh[0])).size == 1)
+    check("f33e", ka24.groupBy { it }.size == 2)
+    // THE ORDERED COMPARISONS STILL PROMOTE across the width, and so does `+`: the
+    // fix is the equals contract, not the arithmetic one, and the two share the
+    // boxes. Float.compareTo(Double) is declared in kotlin.Float, so these three
+    // ARE reachable from ordinary Kotlin - which is the half that had to not move.
+    check("f33f", fh[0] < 1.6 && fh[0] > 1.4 && fh[0] <= 1.5 && s24(fh[0] + dh[0]) == "3.0")
+    // A boxed Int, Long and Char key must NOT move. An Int and a small Long are
+    // still ONE key here (docs/todo.md 2.12 - this value model has one
+    // representation per kind, not per declared class), and that is unchanged.
+    check("f33g", listOf(1, 2, 3).indexOf(3) == 2 && listOf(1L, 2L).contains(2L) &&
+                  mapOf('a' to 1)['a'] == 1 && setOf(1, 2, 2).size == 2)
+    // The 2.12 RESIDUE, asserted as it IS rather than as java answers it, so the
+    // next change to this area has to look at it: java says false for all three of
+    // these (Integer#equals demands an Integer), and this model says true because
+    // the box carries the KIND and the promotion. It is left because the width is
+    // the only part of the declared class a box here can carry, and because none
+    // of the three is reachable from source Kotlin either.
+    check("f33h", eq24(1, 1L) && eq24(1.toByte(), 1) && eq24(1, 1.0) && !eq24('a', "a"))
+    // ...but a sized integer against a FRACTIONAL double is false in both halves,
+    // which it was not: kEq's kSz TRUNCATED the double into the integer's width and
+    // the interpreter answered `1L == 1.5` TRUE while the compiler half (giEq,
+    // which promotes to a double) answered false. --cross never saw it because
+    // nothing in the matrix put a sized integer against a fractional double. Both
+    // readings of java 24.0.2 say false: 1L == 1.5 as a primitive (JLS 15.21.1
+    // promotes the long to double) and Long.valueOf(1).equals(1.5) as a boxed one.
+    check("f33i", !eq24(1L, 1.5) && !eq24(1.5, 1L) && !eq24(2L, 2.5f) &&
+                  !eq24(1.toByte(), 1.5) && eq24(1L, 1.0) && eq24(100L, 100.0))
 }
+// `==` taken through an Any boundary, which is the ONLY way source Kotlin can put
+// a Float and a Double on the two sides of it.
+fun eq24(a: Any, b: Any): Boolean = a == b
 // The Float renderer, reached through a function boundary so the grammar's
 // constant folder cannot answer these rows at compile time. The parameter is Any
 // because two of the rows below hand it a Double on purpose (Float op Double is a
