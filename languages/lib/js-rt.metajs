@@ -3872,11 +3872,16 @@ function js_jsasyncfn(genFn) {
 // The twins are agRequest/agStep in abnf/jsrtjsprint.go and jpAg* in the two
 // *-interpreter.abnf start scripts.
 //
-// NOT IMPLEMENTED, in all three engines: ag.throw(e) does not raise AT the
-// suspended yield - neither generator engine has a throw-in channel there (the
-// floor's GEN_EXIT is a close, not a general throw). It closes the body and
-// rejects the request, which is the abrupt completion node reaches too when
-// nothing in the body catches.
+// ag.throw(e) RAISES AT THE SUSPENDED YIELD, and it needs no throw-in channel in
+// the generator engine: the resume value is the channel. The driver resumes the
+// body with a {__athrow, v} record and the emitter unpacks every yield's result
+// through js_jsawaitv, which raises when it sees one - the same record and the
+// same unpacker an await's rejected operand already used. Nothing is kept across
+// a suspension: the record travels ON the resume, so it is per-coroutine by
+// construction (the constraint docs/todo.md 2.1 was reverted for).
+// A throw before the body has ever run does NOT start it (st["started"]), which
+// is node's suspendedStart rule, and one that reaches a `yield*` raises at the
+// yield* rather than being forwarded to the delegate's throw().
 
 function js_jsawaitmark(v) {
     var mk = {}
@@ -3895,6 +3900,7 @@ function jpAgNew(g) {
     st["q"] = []       // Pending requests, in call order.
     st["run"] = false  // A request is being served.
     st["done"] = false
+    st["started"] = false // The body has been entered at least once.
     var ag = {}
     ag["__agen"] = true
     ag["next"] = jpAgMethod(st, 0)
@@ -3929,6 +3935,11 @@ function jpAgPump(st) {
         if (req["kind"] === 2) { return jpAgFail(st, req["arg"]) }
         return jpAgComplete(st, jpAgRetArg(req), true)
     }
+    // throw(e) on a body that is parked at a yield RESUMES it with a throw
+    // completion, so a try around that yield catches. On one that has never been
+    // entered there is no yield to raise at, and node does not start it either:
+    // it completes the generator and rejects.
+    if (req["kind"] === 2 && st["started"]) { jpAgStep(st, req["arg"], true); return undefined }
     if (req["kind"] === 1 || req["kind"] === 2) {
         st["done"] = true
         jpAgClose(st)
@@ -3961,6 +3972,7 @@ function jpAgStep(st, sent, isThrow) {
     var threw = false
     var thrown = anytype
     thrown = undefined
+    st["started"] = true
     try { res = st["g"].next(send) }
     catch (e) { threw = true; thrown = e }
     if (threw) { st["done"] = true; jpAgFail(st, thrown); return undefined }

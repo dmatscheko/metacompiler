@@ -1466,11 +1466,16 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 // *-interpreter.abnf start scripts. All three run the same algorithm over the
 // same value model, which is why languages/lib/runtime.c is not touched.
 //
-// NOT IMPLEMENTED, in all three engines: ag.throw(e) does not raise AT the
-// suspended yield - neither generator engine has a throw-in channel there (the
-// floor's GEN_EXIT is a close, not a general throw). It closes the body and
-// rejects the request, which is the abrupt completion node reaches too when
-// nothing in the body catches.
+// ag.throw(e) RAISES AT THE SUSPENDED YIELD, and it needs no throw-in channel in
+// the generator engine: the resume value is the channel. The driver resumes the
+// body with a {__athrow, v} record and the emitter unpacks every yield's result
+// through js_jsawaitv, which raises when it sees one - the same record and the
+// same unpacker an await's rejected operand already used. Nothing is kept across
+// a suspension: the record travels ON the resume, so it is per-coroutine by
+// construction (the constraint docs/todo.md 2.1 was reverted for).
+// A throw before the body has ever run does NOT start it (st.started), which is
+// node's suspendedStart rule, and one that reaches a `yield*` raises at the
+// yield* rather than being forwarded to the delegate's throw().
 
 type agRequest struct {
 	kind int // 0 next, 1 return, 2 throw
@@ -1483,6 +1488,9 @@ type jsAsyncGen struct {
 	q    []*agRequest
 	run  bool
 	done bool
+	// The body has been entered at least once. A throw() before that does not
+	// start it - node's suspendedStart rule.
+	started bool
 }
 
 func agIsAwaitMark(v interface{}) bool {
@@ -1545,6 +1553,12 @@ func (rt *jsrt) agPump(st *jsAsyncGen) {
 		rt.agComplete(st, arg, true)
 		return
 	}
+	// throw(e) on a body that is parked at a yield RESUMES it with a throw
+	// completion, so a try around that yield catches.
+	if req.kind == 2 && st.started {
+		rt.agStep(st, req.arg, true)
+		return
+	}
 	if req.kind == 1 || req.kind == 2 {
 		st.done = true
 		st.g.closeBody(rt)
@@ -1569,6 +1583,7 @@ func (rt *jsrt) agStep(st *jsAsyncGen, sent interface{}, isThrow bool) {
 	var res interface{}
 	threw := false
 	var thrown interface{}
+	st.started = true
 	func() {
 		defer func() {
 			if e := recover(); e != nil {

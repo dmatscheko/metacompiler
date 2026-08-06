@@ -1339,6 +1339,132 @@ function s38() {
         check("fa7", ordOk)
         if (!ordOk) { exit(1) }
     })
+    // ----- docs/todo.md 1.8: yield* inside an async generator, and ag.throw() -----
+    // Every value below is byte-identical to node v24, measured four ways (the
+    // interpreter half, llvm.Run, a native -exe binary, and node). Each trace is built
+    // in a LOCAL created per call, so replay repeats no observable write.
+    //
+    // At ae0c62b these were the two residues. `yield* someAsyncGen()` did not merely
+    // delegate synchronously: an async generator's next() answers a PROMISE, whose
+    // `done` is undefined, so the unawaited drive never terminated - the interpreter
+    // half HUNG and llvm.Run died on the step limit. And ag.throw(e) closed the body
+    // and rejected instead of raising at the yield.
+    function rec38(r) { return "" + r.value + "/" + r.done }
+    var agRan38 = 0 // Counts entries into never38's body; a suspendedStart throw must not.
+    // yield* over an ASYNC delegate: each step awaited, and the value of the
+    // expression is the delegate's RETURN value.
+    async function* inner38() { yield 1; await null; yield 2; return 9 }
+    async function* outer38() {
+        var t = []
+        t.push("pre")
+        var r = yield* inner38()
+        t.push("ret=" + r)
+        yield t.join(",")
+    }
+    async function ystarAsync() {
+        var out = []
+        for await (var v of outer38()) { out.push(v) }
+        return out.join("|")
+    }
+    // yield* over a SYNC generator, and over an ARRAY of promises, from inside an
+    // async generator: the elements arrive resolved and in order.
+    async function* ystarSyncGen38() { yield* sg38(); yield 3 }
+    async function* ystarArr38() { yield* [Promise.resolve(4), 5] }
+    async function ystarOther() {
+        var out = []
+        for await (var a of ystarSyncGen38()) { out.push(a) }
+        for await (var b of ystarArr38()) { out.push(b) }
+        return out.join("")
+    }
+    // ag.throw(e) RAISES AT THE SUSPENDED YIELD, so the try around it catches, the
+    // catch's own yield answers the throw() request, and the finally runs on the
+    // next resume.
+    async function* caught38() {
+        var t = []
+        try {
+            t.push("y10")
+            yield 10
+            t.push("unreached")
+        } catch (e) {
+            t.push("caught:" + e)
+            yield t.join(",")
+        } finally {
+            t.push("fin")
+        }
+    }
+    async function agThrowCaught() {
+        var g = caught38()
+        var r1 = await g.next()
+        var r2 = await g.throw("boom")
+        var r3 = await g.next()
+        return rec38(r1) + "|" + rec38(r2) + "|" + rec38(r3)
+    }
+    // Nothing catches: the request REJECTS with the thrown value and the generator is
+    // done - the abrupt completion node ends up with too.
+    async function* bare38() { yield 20 }
+    async function agThrowUncaught() {
+        var g = bare38()
+        var r1 = await g.next()
+        var s = "?"
+        try { await g.throw("bang") } catch (e) { s = "rej:" + e }
+        var r3 = await g.next()
+        return rec38(r1) + "|" + s + "|" + rec38(r3)
+    }
+    // A throw at suspendedStart does NOT enter the body (agStarted below asserts it).
+    async function* never38() { agRan38 = agRan38 + 1; yield 30 }
+    async function agThrowBeforeStart() {
+        var g = never38()
+        var s = "?"
+        try { await g.throw("early") } catch (e) { s = "rej:" + e }
+        var r = await g.next()
+        return s + "|" + rec38(r) + "|ran=" + agRan38
+    }
+    // THE LIMIT THAT IS PINNED HERE RATHER THAN FIXED, and the reason is written out
+    // in all four grammar headers: a throw that arrives while the body is parked at a
+    // `yield*` raises AT THE YIELD*, not at the delegate. node forwards it to the
+    // delegate's throw(), so the delegate catches, the throw() request RESOLVES with
+    // "d:t" and node's field here reads 40/false|? - all four engines here reject
+    // instead, and 40/false|rej:t is what this pins. Forwarding needs the yield* loop
+    // to branch on the SHAPE of its resume value and drive the delegate's throw() -
+    // reachable, but a wrong throw target is a silently wrong answer, so the gap is
+    // asserted rather than guessed at. Every OTHER field of fa8 is byte-identical to
+    // node v24, checked by running this section under it.
+    async function* deleg38() { try { yield 40 } catch (e) { yield "d:" + e } }
+    async function* delegOuter38() { yield* deleg38(); yield 41 }
+    async function agThrowIntoDelegate() {
+        var g = delegOuter38()
+        var r1 = await g.next()
+        var s = "?"
+        try { await g.throw("t") } catch (e) { s = "rej:" + e }
+        return rec38(r1) + "|" + s
+    }
+    async function all38b() {
+        var parts = []
+        parts.push(await ystarAsync())
+        parts.push(await ystarOther())
+        parts.push(await agThrowCaught())
+        parts.push(await agThrowUncaught())
+        parts.push(await agThrowBeforeStart())
+        parts.push(await agThrowIntoDelegate())
+        return parts.join("~")
+    }
+    all38b().then(function (r) {
+        var ok = r === "1|2|pre,ret=9~12345~10/false|y10,caught:boom/false|undefined/true~" +
+                       "20/false|rej:bang|undefined/true~rej:early|undefined/true|ran=0~40/false|rej:t"
+        check("fa8", ok)
+        if (!ok) { exit(1) }
+    }, function (e) {
+        check("fa8", false)
+        exit(1)
+    })
+    // A PLAIN generator's yield* answers the delegate's return value too - the same
+    // one line in the emitter, and synchronous, so it is asserted directly.
+    var ysync = []
+    function* ysInner38() { yield 1; yield 2; return "r" }
+    function* ysOuter38() { ysync.push("v=" + (yield* ysInner38())) }
+    var yg38 = ysOuter38()
+    yg38.next(); yg38.next(); yg38.next()
+    check("fa9", ysync.join("") === "v=r")
     return 0
 }
 function* sg38() { yield 1; yield 2 }

@@ -95,7 +95,13 @@ body and js_jsasyncfn drives it from the queue; the ordering is byte-identical t
 (the trace asserted in SECTION 19 of tests/typescript-test-full.ts was measured against
 it). `for await` and `async function*` RUN: an async generator carries its yields and its
 awaits on the ONE suspension channel a generator has, told apart by a marker record on
-each awaited operand (docs/todo.md 1.7). `await` outside an
+each awaited operand (docs/todo.md 1.7). `yield*` inside one AWAITS each step of the
+delegate and answers the delegate's return value, and ag.throw(e) RAISES AT THE SUSPENDED
+YIELD - the resume value is the throw-in channel, so a try around the yield catches. Two
+exact limits remain: a throw that arrives while the body is parked at a `yield*` raises
+AT THE YIELD* rather than being forwarded to the delegate's throw() (node yields the
+delegate's caught value where all three engines here reject), and a plain generator has
+no .throw() at all. `await` outside an
 async body stays the identity it was; an unhandled rejection is deliberately not
 reported. See the same paragraph in languages/js-to-llvm-ir.abnf for the full account.
 JSX is out of scope, and so are the Annex B HTML-like comments ('<!--', '-->'), which
@@ -3318,11 +3324,28 @@ NotFuncHead = :script(~~
                 b = r.b
                 v = r.v
             }
-            return {b: b, v: callExt(b, "js_yield", [v])}
+            return {b: b, v: emitYieldSent(b, callExt(b, "js_yield", [v]))}
         }
     }
+    // The value one `yield` answers - what the driver sent back in. Inside an async
+    // GENERATOR the driver may resume the body with a THROW-IN record ({__athrow, v})
+    // instead of a sent value: that is how ag.throw(e) raises AT the suspended yield,
+    // and it is the same record an `await`'s resumption carries, so js_jsawaitv unpacks
+    // both. It is emitted ONLY inside an async generator, where a driver exists that can
+    // send one - a plain generator's next(v) hands its argument through untouched.
+    function emitYieldSent(b, v) {
+        if (!inAsyncGen) { return v }
+        return callExt(b, "js_jsawaitv", [v])
+    }
     // 'yield* e': yield every element of e in turn. The value of the expression is the
-    // delegate's return value, which this subset does not model, so it is undefined.
+    // delegate's RETURN value - the `value` of the record whose `done` ended the loop -
+    // and undefined for an array or a string, which have no return value to give.
+    //
+    // Inside an async generator each step of the delegate is AWAITED (emitAwait below),
+    // which is what makes 'yield* otherAsyncGen()' terminate: an async generator's next()
+    // answers a PROMISE, whose `done` is undefined, so driving it unawaited spins forever.
+    // A throw-in that arrives while the body is parked at the yield below raises HERE
+    // rather than being forwarded to the delegate's throw() - see the :description.
     function makeYieldStar(t) {
         return function(b) {
             var r = t(b)
@@ -3351,8 +3374,12 @@ NotFuncHead = :script(~~
                     callExt(ylenB, "js_tonum", [callExt(ylenB, memGetExt(), [seqV, emitStr(ylenB, "length")])])])
             ylenB.NewBr(headB)
             headB.NewCondBr(yisItC, ystepB, yidxB)
-            var ystV = callExt(jsThisSet(ystepB, seqV), "js_call",
-                               [ynxV, seqV, callExt(ystepB, "js_arr_new", [])])
+            var ystRawV = callExt(jsThisSet(ystepB, seqV), "js_call",
+                                  [ynxV, seqV, callExt(ystepB, "js_arr_new", [])])
+            // emitAwait is the identity outside an async body, so this is the same call
+            // it always was for a plain generator - and one suspension per step inside an
+            // async generator, exactly as the specification's async delegation does.
+            var ystV = emitAwait(ystepB, ystRawV)
             var ystepElemV = callExt(ystepB, memGetExt(), [ystV, emitStr(ystepB, "value")])
             ystepB.NewCondBr(truthy(ystepB, callExt(ystepB, memGetExt(), [ystV, emitStr(ystepB, "done")])),
                              exitB, bodyB)
@@ -3366,11 +3393,15 @@ NotFuncHead = :script(~~
             callExt(yelemB, "js_scope_set", [curScopeV, emitStr(yelemB, "0yi"),
                                        callExt(yelemB, "js_add", [iB, callExt(yelemB, "js_num_i", [handle(1)])])])
             yelemB.NewBr(bodyB)
-            callExt(bodyB, "js_yield", [bodyB.NewPhi([llvm.ir.NewIncoming(yidxElemV, yelemB),
-                                                     llvm.ir.NewIncoming(ystepElemV, ystepB)])])
+            emitYieldSent(bodyB,
+                callExt(bodyB, "js_yield", [bodyB.NewPhi([llvm.ir.NewIncoming(yidxElemV, yelemB),
+                                                          llvm.ir.NewIncoming(ystepElemV, ystepB)])]))
             bodyB.NewBr(headB)
             curScopeV = saved
-            return {b: exitB, v: hUndef}
+            // The delegate's return value on the iterator path (the `value` of the record
+            // that reported done, which is ystepElemV), undefined on the index path.
+            return {b: exitB, v: exitB.NewPhi([llvm.ir.NewIncoming(ystepElemV, ystepB),
+                                               llvm.ir.NewIncoming(hUndef, yidxB)])}
         }
     }
 

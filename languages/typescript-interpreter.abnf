@@ -65,9 +65,14 @@ are its yields, so in this half it is driven by the same replay: an async body w
 effect BEFORE an await repeats that effect on every resume, which the compiler half (a
 real coroutine) does not. 'for await' and 'async function*' RUN: an async generator
 carries its yields and its awaits on the ONE suspension channel a generator has, told
-apart by a marker record on each awaited operand (docs/todo.md 1.7); ag.throw(e) closes
-the body and rejects rather than raising at the suspended yield, in every engine. An
-unhandled rejection is deliberately not reported in any engine.
+apart by a marker record on each awaited operand (docs/todo.md 1.7). 'yield*' inside one
+AWAITS each step of the delegate and answers the delegate's return value, and ag.throw(e)
+RAISES AT THE SUSPENDED YIELD - the resume value is the throw-in channel, so a try around
+the yield catches. Two exact limits remain: a throw that arrives while the body is parked
+at a 'yield*' raises AT THE YIELD* rather than being forwarded to the delegate's throw()
+(node yields the delegate's caught value where all three engines here reject), and a
+plain generator has no .throw() at all. An unhandled rejection is deliberately not
+reported in any engine.
 
 Objects and classes: object literals with shorthand properties, computed keys, shorthand
 methods, getters and setters and spread; 'this'; 'new' on both a class and a constructor
@@ -3122,11 +3127,20 @@ NotFuncHead = :script(~~
     // The twins are jpAg* in languages/lib/js-rt.metajs and agReq/agPump/agStep in
     // abnf/jsrtjsprint.go.
     //
-    // WHAT IS NOT IMPLEMENTED, in all three engines: ag.throw(e) does not raise AT
-    // the suspended yield, because neither generator engine has a throw-in channel
-    // there (the floor's GEN_EXIT is a close, not a general throw). It closes the
-    // body and rejects the request instead, which is the abrupt completion node also
-    // ends up with when nothing catches.
+    // ag.throw(e) RAISES AT THE SUSPENDED YIELD, and it needs no throw-in channel in
+    // the generator engine: the RESUME VALUE is the channel. The driver resumes the
+    // body with a {__athrow, v} record and every yield inside an async generator body
+    // unpacks its result through jpAwaitValue, which raises when it sees one - the same
+    // record and the same unpacker an await's rejected operand already used. Nothing is
+    // kept across a suspension: the record travels ON the resume, so it is
+    // per-coroutine by construction (the constraint docs/todo.md 2.1 was reverted for).
+    // This half REPLAYS rather than suspending (see the generator note below), and the
+    // replay reaches the same place for the same reason: the throw-in record is the
+    // sent value of the yield being resumed, so it is raised at that yield when the
+    // replay reaches it. A throw before the body has ever run does NOT start it
+    // (st["started"]), which is node's suspendedStart rule, and one that reaches a
+    // `yield*` raises at the yield* rather than being forwarded to the delegate's
+    // throw().
     function jpMarkAwait(v) {
         var m = {}
         m["__awt"] = true
@@ -3154,6 +3168,7 @@ NotFuncHead = :script(~~
         st["q"] = []       // Pending requests, in call order.
         st["run"] = false  // A request is being served.
         st["done"] = false
+        st["started"] = false // The body has been entered at least once.
         var ag = {}
         ag["__agen"] = true
         ag["__keys"] = []
@@ -3194,6 +3209,10 @@ NotFuncHead = :script(~~
             jpAgComplete(st, (req["kind"] === 1) ? req["arg"] : undefined, true)
             return
         }
+        // throw(e) on a body that is parked at a yield RESUMES it with a throw
+        // completion, so a try around that yield catches. On one that has never been
+        // entered there is no yield to raise at, and node does not start it either.
+        if (req["kind"] === 2 && st["started"]) { jpAgStep(st, req["arg"], true); return }
         if (req["kind"] === 1 || req["kind"] === 2) {
             st["done"] = true
             jpAgClose(st)
@@ -3223,6 +3242,7 @@ NotFuncHead = :script(~~
         res = undefined
         thrown = undefined
         var threw = false
+        st["started"] = true
         try { res = st["g"]["next"](send) }
         catch (e) {
             if (!excIsUser(e)) { throw e }
@@ -5382,11 +5402,21 @@ NotFuncHead = :script(~~
     // value the corresponding next(v) sent in and carries on; the one being produced now
     // throws out to genNext. 'yield* xs' delegates - every element of xs is a yield of
     // its own, and they replay individually.
+    // One step of a `yield* it` delegate. Inside an ASYNC generator body it is
+    // AWAITED, which is both what the specification's async delegation does and what
+    // makes 'yield* someAsyncGen()' terminate at all: an async generator's next()
+    // answers a PROMISE, whose `done` is undefined, so an unawaited drive spins.
+    function jpStepDelegate(run, dnx, v) {
+        var r = anytype
+        r = callWithThis(dnx, v, [])
+        if (run.ag) { return jpDoAwait(r) }
+        return r
+    }
     function doYield(star, v) {
         var run = genRuns[genRuns.length - 1]
         if (run == undefined) fail("yield outside a generator")
         if (star) {
-            var last = anytype // The delegated yields answer with whatever was sent.
+            var last = anytype // The delegate's return value, once it reports done.
             last = undefined
             if (v != undefined && v != null) {
                 // A delegate that is an ITERATOR is driven through next() - the same
@@ -5400,20 +5430,27 @@ NotFuncHead = :script(~~
                 dnx = (typeof v == "object") ? getMember(v, "next") : undefined
                 if (typeof dnx == "function") {
                     var dst = anytype // One {value, done} record.
-                    dst = callWithThis(dnx, v, [])
+                    dst = jpStepDelegate(run, dnx, v)
                     while (!dst.done) {
-                        last = doYield(false, dst.value)
-                        dst = callWithThis(dnx, v, [])
+                        doYield(false, dst.value)
+                        dst = jpStepDelegate(run, dnx, v)
                     }
-                    return last
+                    // The value of 'yield* it' is the delegate's RETURN value - the
+                    // `value` of the record whose `done` ended the loop. An array or a
+                    // string has none, so that path stays undefined.
+                    return dst.value
                 }
-                for (var i = 0; i < v.length; i++) { last = doYield(false, v[i]) }
+                for (var i = 0; i < v.length; i++) { doYield(false, v[i]) }
             }
             return last
         }
         if (run.k < run.target) {
             var sent = run.sent[run.k + 1]
             run.k = run.k + 1
+            // Inside an ASYNC generator the sent value may be a THROW-IN record that
+            // ag.throw(e) put on the resume channel; jpAwaitValue raises it here, at
+            // the yield it was aimed at.
+            if (run.ag) { return jpAwaitValue(sent) }
             return sent
         }
         run.k = run.k + 1
@@ -5438,7 +5475,7 @@ NotFuncHead = :script(~~
                 pendingNewTarget = undefined
                 var args = []
                 for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
-                return newGenObject(params, bodyT, env, self, args)
+                return newGenObject(params, bodyT, env, self, args, false)
             }
         }
     }
@@ -5454,7 +5491,7 @@ NotFuncHead = :script(~~
                 pendingNewTarget = undefined
                 var args = []
                 for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
-                var g = newGenObject(params, bodyT, env, self, args)
+                var g = newGenObject(params, bodyT, env, self, args, false)
                 var p = jpNew()
                 jpAsyncStep(g, p, undefined, false)
                 return p
@@ -5474,7 +5511,7 @@ NotFuncHead = :script(~~
                 pendingNewTarget = undefined
                 var args = []
                 for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
-                return jpAgNew(newGenObject(params, bodyT, env, self, args))
+                return jpAgNew(newGenObject(params, bodyT, env, self, args, true))
             }
         }
     }
@@ -5494,8 +5531,13 @@ NotFuncHead = :script(~~
         }
         return makeAsyncFn(items[items.length - 2], items[items.length - 1])
     }
-    function newGenObject(params, bodyT, env, self, args) {
-        var st = {sent: [], count: 0, done: false}
+    // isAg says the body is an ASYNC generator's. It only reaches doYield, which
+    // needs it for two things a plain generator has no driver for: unpacking a
+    // throw-in record at a yield (ag.throw), and AWAITING each step of a `yield*`
+    // delegate - an async generator's next() answers a promise, so driving one
+    // unawaited never sees a `done` and spins forever.
+    function newGenObject(params, bodyT, env, self, args, isAg) {
+        var st = {sent: [], count: 0, done: false, ag: isAg}
         var g = {}
         g["__gen"] = true
         g["__keys"] = []
@@ -5523,7 +5565,7 @@ NotFuncHead = :script(~~
     function genNext(st, params, bodyT, env, self, args, sendv) {
         if (st.done) { return {value: undefined, done: true, __keys: ["value", "done"]} }
         st.sent.push(sendv)
-        var run = {target: st.count, k: 0, sent: st.sent, out: undefined}
+        var run = {target: st.count, k: 0, sent: st.sent, out: undefined, ag: st.ag}
         genRuns.push(run)
         var saved = scopes
         var ret = anytype   // The generator's return value,
@@ -6017,7 +6059,7 @@ NotFuncHead = :script(~~
             var self = arguments[0]
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
-            return jpAgNew(newGenObject(params, bodyT, env, self, args))
+            return jpAgNew(newGenObject(params, bodyT, env, self, args, true))
         }
     }
 
@@ -6029,7 +6071,7 @@ NotFuncHead = :script(~~
             var self = arguments[0]
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
-            var g = newGenObject(params, bodyT, env, self, args)
+            var g = newGenObject(params, bodyT, env, self, args, false)
             var p = jpNew()
             jpAsyncStep(g, p, undefined, false)
             return p
@@ -6043,7 +6085,7 @@ NotFuncHead = :script(~~
             var self = arguments[0]
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
-            return newGenObject(params, bodyT, env, self, args)
+            return newGenObject(params, bodyT, env, self, args, false)
         }
     }
 
