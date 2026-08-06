@@ -249,7 +249,13 @@ FunDecl     <~~ push(makeFun(takeAll())) ~~>
 // expression without writing `return`, so the one-expression form is tried first;
 // anything else is an ordinary block. ExprBody is ordered first on purpose - a body
 // that starts with a declaration or a `return` fails it immediately.
-FnBody      = ExprBody | Block ;
+// RetBody is Block with a leading `return` REQUIRED, and it is ordered ahead of
+// ExprBody because `return` is not an expression but `return (1, 2)` parses as
+// one - the identifier `return` applied to a tuple - so
+// `func t() -> (n: Int, v: Int) { return (1, 2) }` was read as a one-expression
+// body and died with *unknown name: return*. Every other `return` form fails
+// ExprBody on its own and reached Block; this one did not.
+FnBody      = RetBody | ExprBody | Block ;
 ExprBody    <~~ push(makeExprBody(pop())) ~~>
             = "{" Expression "}" ;
 FnEffects   = { ( "throws" | "rethrows" | "async" ) KwEnd } ;
@@ -478,7 +484,13 @@ TupleTypeLabel = Id [ Id ] ":" ;
 // annotation is a tuple type whose first element is labelled it pushes the label
 // list, and the declaration (or the function return) copies those names onto the
 // value. NotArrow declines a function type, whose parameter labels name nothing.
-AnnType     = LabelledTupleType | Type ;
+//
+// AnnType also carries the second job DeclAnnType has: an `Int8`/`Double`/`Float`
+// annotation pushes its {itype} so the RETURN TYPE of a function and the declared
+// type of a STORED PROPERTY adopt it, exactly as a `let`/`var` annotation does.
+// Every consumer of AnnType (makeFun, makeProp, makeComputed, makeSubscript,
+// ProtoFunc) skips or reads the record; see swAdoptTy.
+AnnType     = LabelledTupleType | IntAnnType | Type ;
 LabelledTupleType <~~ push({tlabels: takeAll()}) ~~>
             = "(" LtNamed { "," LtElem } ")" NotArrow ;
 LtElem      = LtNamed | LtAnon ;
@@ -621,6 +633,8 @@ Wildcard    = "_" KwEnd ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { PoundIfStmt | Statement } "}" ;
+RetBody     <~~ push(makeBlockStmt(takeAll())) ~~>
+            = "{" Return { PoundIfStmt | Statement } "}" ;
 
 Decl        = DeclTuple | DeclPlain ;
 // One let/var may declare SEVERAL bindings: `let a = 1, b = 2`. Each binding builds
@@ -639,12 +653,17 @@ DeclBind    <~~ push(makeDecl(takeAll())) ~~>
 // spelled longest-first (PEG first-match: "Int" would otherwise match the front of
 // "Int8") and closed with a KwEnd so a user type called `Int8Box` is not read as
 // `Int8`.
-DeclAnnType = LabelledTupleType | IntAnnType | Type ;
-IntAnnType  <~~ push({itype: up.in}) ~~>
-            = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
+DeclAnnType = LabelledTupleType | IntAnnType | ArrAnnType | Type ;
+IntAnnType  <~~ push({itype: up.in}) ~~> = NumTypeName NotTypeSuffix ;
+NumTypeName = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
               | "UInt64" | "UInt32" | "UInt16" | "UInt8" | "UInt"
-              | "Double" | "Float" ) KwEnd
-              NotTypeSuffix ;
+              | "Double" | "Float" ) KwEnd ;
+// `let a: [Double] = [3, 4]`: the annotation types the array's ELEMENTS, so the
+// untyped literals in it adopt Double and a[0] / 2 is 1.5 rather than 1. Only a
+// one-level array of a numeric type is recognised - `[[Double]]` and
+// `[String: Double]` fall through to Type and adopt nothing.
+ArrAnnType  = "[" ArrElemTy "]" NotTypeSuffix ;
+ArrElemTy   <~~ push({atype: stripWs(up.in)}) ~~> = NumTypeName ;
 // `Int?`, `Int!`, `Int.Type`, `Int & P`: the annotation is a COMPOSED type, not the
 // bare integer type, so IntAnnType has to decline it and let the general Type read
 // it. Without this the optional forms consumed only the `Int` and left the `?`
@@ -2409,6 +2428,63 @@ KwContinue  = "continue" KwEnd ;
         if (name == "UInt8") { return {w: 8, u: true} }
         return null
     }
+    // ----- Declared-type adoption (docs/todo.md 1.1) -----
+    //
+    // An untyped literal takes the FLOATNESS and the WIDTH of the type it is
+    // written at. `let d: Double = 3` has always done this (makeDecl); these
+    // helpers are what the OTHER declared-type sites use - a parameter, a
+    // function's return type, a stored property, and the element type of an
+    // array annotation.
+    //
+    // This is not cosmetic and it is not a Float story: an Int literal that does
+    // not adopt stays an Int and INTEGER-DIVIDES, so
+    //     func g(_ x: Double) -> Double { return x / 2 };  g(3)
+    // answered 1 where swiftc 6.1.2 says 1.5, in both halves, at every one of
+    // those sites. The Float half of the same rule is what makes `f(1)` exact
+    // where only `f(Float(1))` used to be.
+    //
+    // A value that is not a bare number, a sized integer or a float box is
+    // returned UNCHANGED. At these sites the only value a type-correct Swift
+    // program can present is numeric, and passing everything else through keeps
+    // the pass from inventing conversions the annotation never asked for - a
+    // String is NOT parsed here, where the failable `let x: Int = "5"` site is a
+    // deliberate conversion.
+    //
+    // `ty` is "" when the site carries no adoptable annotation, which is the
+    // common case; every caller checks that first so this costs nothing.
+    function swAdoptable(ty) {
+        if (ty == "Double" || ty == "Float") { return true }
+        return swIntWidthOf(ty) != null
+    }
+    function swAdoptNum(v) { return typeof v == "number" || szIs(v) }
+    function swAdoptTy(v, ty) {
+        if (ty == undefined || ty == null || ty == "") { return v }
+        if (v === null || v === undefined) { return v }
+        if (ty == "Double") {
+            if (isFlo(v)) { return v }
+            return swAdoptNum(v) ? swFlo(swD(v) * 1) : v
+        }
+        if (ty == "Float") {
+            if (isF32(v)) { return v }
+            if (isFlo(v)) { return swF32(v.__flo) }
+            return swAdoptNum(v) ? swF32(swD(v) * 1) : v
+        }
+        var iw = swIntWidthOf(ty)
+        if (iw == null || isFlo(v)) { return v }
+        return swAdoptNum(v) ? szConv(v, iw.w, iw.u) : v
+    }
+    // `let a: [Double] = [3, 4]`: the annotation types the ELEMENTS, so a[0] / 2
+    // is 1.5. One level only - `[[Double]]` is not walked, and neither is a
+    // dictionary's value type (see the report at docs/todo.md 1.1).
+    function swAdoptArr(v, ty) {
+        if (ty == undefined || ty == null || ty == "") { return v }
+        if (v === null || v === undefined) { return v }
+        if (typeof v != "object") { return v }
+        if (!Array.isArray(v)) { return v }
+        var out = []
+        for (var i = 0; i < v.length; i++) { out.push(swAdoptTy(v[i], ty)) }
+        return out
+    }
     function swlen(v) {
         if (isDict(v)) { return v.keys.length }
         if (v === null || v === undefined) { fail("count of nil") }
@@ -3359,7 +3435,12 @@ KwContinue  = "continue" KwEnd ;
         var name = ids[ids.length - 1]
         var label = ids.length > 1 ? ids[0] : name
         if (label == "_") { label = "" }
-        return {name: name, label: label, type: type, variadic: isVar, auto: isAuto,
+        // `adopt` is the declared-type adoption this parameter performs on its
+        // argument, "" for the overwhelming majority that adopt nothing. It is
+        // decided once, here, so swBindArgs pays one string comparison per call.
+        // A VARIADIC parameter binds an array, not a value, so it adopts nothing.
+        var ad = (!isVar && swAdoptable(type)) ? type : ""
+        return {name: name, label: label, type: type, adopt: ad, variadic: isVar, auto: isAuto,
                 inout: isInout, hasDefault: hasDflt, dflt: dflt}
     }
     // An argument: {lbl, t} for a value, {lbl, ref} for &x, {lbl, dflt} for a
@@ -3447,7 +3528,12 @@ KwContinue  = "continue" KwEnd ;
                 boxes.push({name: prm.name, box: v})
                 v = v.v
             }
-            vals.push(v)
+            // The declared parameter type adopts the argument: `func g(_ x: Double)`
+            // called `g(3)` binds 3.0, so `x / 2` is 1.5 and not the 1 an Int
+            // division gave. The memberwise initializer runs through here too, which
+            // is how `T(a: 3)` fills a `var a: Double` field.
+            if (prm.adopt != undefined && prm.adopt != "") { vals.push(swAdoptTy(v, prm.adopt)) }
+            else { vals.push(v) }
         }
         return {vals: vals, boxes: boxes}
     }
@@ -3606,7 +3692,7 @@ KwContinue  = "continue" KwEnd ;
 
     // ----- Statement thunks -----
 
-    // items = [name, {tlabels}? | {itype}?, initThunk]
+    // items = [name, {tlabels}? | {itype}? | {atype}?, initThunk]
     function makeDecl(items) {
         var name = items[0]
         var labels = null
@@ -3617,13 +3703,21 @@ KwContinue  = "continue" KwEnd ;
         var iw = null
         var isDoubleTy = false
         var isFloatTy = false
+        var elemTy = ""
         if (items[k] != undefined && items[k].itype != undefined) {
             iw = swIntWidthOf(items[k].itype)
             isFloatTy = items[k].itype == "Float"
             isDoubleTy = items[k].itype == "Double" || isFloatTy
             k++
         }
+        else if (items[k] != undefined && items[k].atype != undefined) { elemTy = items[k].atype; k++ }
         var init = items[k]
+        // `let a: [Double] = [3, 4]`: the ELEMENTS adopt, so a[0] / 2 is 1.5.
+        if (elemTy != "") {
+            if (init == undefined) { return function() { declVar(name, null) } }
+            var eT = elemTy
+            return function() { declVar(name, swAdoptArr(swCopy(init()), eT)) }
+        }
         // `let d: Double = 3` holds 3.0, so d / 2 is 1.5 and print(d) writes "3.0".
         // The annotation is the only thing that says so: the initializer is an
         // untyped integer literal. `let f: Float = 3` is the same rule at the
@@ -3851,17 +3945,26 @@ KwContinue  = "continue" KwEnd ;
 
     // ----- Functions, methods and classes -----
 
-    // A declared tuple return type names the elements of the returned value.
+    // A declared tuple return type names the elements of the returned value, and a
+    // declared NUMERIC return type adopts it: `func r() -> Double { return 3 }`
+    // answers 3.0, so r() / 2 is 1.5. Split in two because MetaJS is typed and a
+    // reassigned local keeps its first type.
     function relabelRet(f, v) {
+        if (f.rtype == undefined || f.rtype == null || f.rtype == "") { return relabelRetT(f, v) }
+        return relabelRetT(f, swAdoptTy(v, f.rtype))
+    }
+    function relabelRetT(f, v) {
         if (f.rlabels == undefined || f.rlabels == null) { return v }
         return relabelTuple(v, f.rlabels)
     }
-    // items = [name, {params}, {tlabels}?, bodyThunk]
+    // items = [name, {params}, {tlabels}? | {itype}?, bodyThunk]
     function makeFun(items) {
         var k = 2
         var labels = null
+        var rty = ""
         if (items[k] != undefined && items[k].tlabels != undefined) { labels = items[k].tlabels; k++ }
-        return {name: items[0], params: items[1].params, body: items[k], rlabels: labels}
+        else if (items[k] != undefined && items[k].itype != undefined) { rty = items[k].itype; k++ }
+        return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty}
     }
     function makeInit(items) {
         return {name: "init", params: items[0].params, body: items[1]}
@@ -4083,14 +4186,22 @@ KwContinue  = "continue" KwEnd ;
         return out
     }
 
+    // items = [name, {tlabels}? | {itype}?, initThunk?]
+    // A numeric declared type adopts, exactly as it does on a local: `struct T { var
+    // a: Double = 3 }` stores 3.0, and `T(a: 3)` binds 3.0 through the memberwise
+    // initializer's parameter (memberwiseParams copies `ty` into its `adopt`).
     function makeProp(items) {
-        if (items.length > 1) { return {prop: items[0], hasInit: true, init: items[1]} }
-        return {prop: items[0], hasInit: false, init: null}
+        var k = 1
+        var ty = ""
+        if (items[k] != undefined && items[k].tlabels != undefined) { k++ }
+        else if (items[k] != undefined && items[k].itype != undefined) { ty = items[k].itype; k++ }
+        if (items[k] != undefined) { return {prop: items[0], ty: ty, hasInit: true, init: items[k]} }
+        return {prop: items[0], ty: ty, hasInit: false, init: null}
     }
     // A parameter record with no label, type, default or inout - what a generated
     // accessor (a setter's newValue, an observer's oldValue) needs.
     function plainParam(n) {
-        return {name: n, label: n, type: "", variadic: false, auto: false,
+        return {name: n, label: n, type: "", adopt: "", variadic: false, auto: false,
                 inout: false, hasDefault: false, dflt: null}
     }
 
@@ -4228,14 +4339,14 @@ KwContinue  = "continue" KwEnd ;
             if (it.eraw != undefined) { mem.raw = it.eraw; continue }
             if (it.ecase != undefined) { mem.cases.push(it.ecase); continue }
             if (it.prop != undefined) {
-                var f = {name: it.prop, store: it.prop, hasInit: it.hasInit, init: it.init}
+                var f = {name: it.prop, store: it.prop, ty: it.ty, hasInit: it.hasInit, init: it.init}
                 if (isStatic) { mem.statProps.push(f) }
                 else if (isLazy) { mem.lazies.push({name: it.prop, init: it.init}) }
                 else if (attr != null && isWrapperName(attr)) {
                     // @Wrapper var x = e: the storage is the WRAPPER instance, and x
                     // reads and writes its wrappedValue while $x reads projectedValue.
                     mem.wrapped.push({name: it.prop, wrapper: attr})
-                    mem.fields.push({name: it.prop, store: "_" + it.prop, hasInit: true,
+                    mem.fields.push({name: it.prop, store: "_" + it.prop, ty: "", hasInit: true,
                                      init: makeWrapperInit(attr, it.init)})
                     mem.initProps.push(mem.fields[mem.fields.length - 1])
                 } else {
@@ -4247,7 +4358,7 @@ KwContinue  = "continue" KwEnd ;
                 if (isStatic) { mem.statComps.push(cp) } else {
                     mem.comps.push(cp)
                     if (cp.observed) {
-                        var of = {name: cp.name, store: "__v_" + cp.name, hasInit: cp.dflt != null, init: cp.dflt}
+                        var of = {name: cp.name, store: "__v_" + cp.name, ty: "", hasInit: cp.dflt != null, init: cp.dflt}
                         mem.fields.push(of)
                         if (of.hasInit) { mem.initProps.push(of) }
                     }
@@ -4290,7 +4401,7 @@ KwContinue  = "continue" KwEnd ;
         var mparams = []
         for (var s = 0; s < fields.length; s++) {
             mparams.push({name: fields[s].store, label: fields[s].name, type: "",
-                          variadic: false, auto: false, inout: false,
+                          adopt: fields[s].ty, variadic: false, auto: false, inout: false,
                           hasDefault: fields[s].hasInit, dflt: fields[s].init})
         }
         return mparams
@@ -4386,7 +4497,8 @@ KwContinue  = "continue" KwEnd ;
                     if (!hasOwn(self, mem.fields[f0].store)) { scopePut(self, mem.fields[f0].store, null) }
                 }
                 for (var p = 0; p < mem.initProps.length; p++) {
-                    scopePut(self, mem.initProps[p].store, mem.initProps[p].init())
+                    scopePut(self, mem.initProps[p].store,
+                             swAdoptTy(mem.initProps[p].init(), mem.initProps[p].ty))
                 }
                 scopes = saved
             }

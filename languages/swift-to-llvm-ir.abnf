@@ -256,7 +256,13 @@ FunDecl     <~~ push(makeFun(takeAll())) ~~>
 // expression without writing `return`, so the one-expression form is tried first;
 // anything else is an ordinary block. ExprBody is ordered first on purpose - a body
 // that starts with a declaration or a `return` fails it immediately.
-FnBody      = ExprBody | Block ;
+// RetBody is Block with a leading `return` REQUIRED, and it is ordered ahead of
+// ExprBody because `return` is not an expression but `return (1, 2)` parses as
+// one - the identifier `return` applied to a tuple - so
+// `func t() -> (n: Int, v: Int) { return (1, 2) }` was read as a one-expression
+// body and died with *unknown name: return*. Every other `return` form fails
+// ExprBody on its own and reached Block; this one did not.
+FnBody      = RetBody | ExprBody | Block ;
 ExprBody    <~~ push(makeExprBody(pop())) ~~>
             = "{" Expression "}" ;
 FnEffects   = { ( "throws" | "rethrows" | "async" ) KwEnd } ;
@@ -479,7 +485,13 @@ TupleTypeLabel = Id [ Id ] ":" ;
 // annotation is a tuple type whose first element is labelled it pushes the label
 // list, and the declaration (or the function return) copies those names onto the
 // value. NotArrow declines a function type, whose parameter labels name nothing.
-AnnType     = LabelledTupleType | Type ;
+//
+// AnnType also carries the second job DeclAnnType has: an `Int8`/`Double`/`Float`
+// annotation pushes its {itype} so the RETURN TYPE of a function and the declared
+// type of a STORED PROPERTY adopt it, exactly as a `let`/`var` annotation does.
+// Every consumer of AnnType (makeFun, makeProp, makeComputed, makeSubscript,
+// ProtoFunc) skips or reads the record; see js_swadopt.
+AnnType     = LabelledTupleType | IntAnnType | Type ;
 LabelledTupleType <~~ push({tlabels: takeAll()}) ~~>
             = "(" LtNamed { "," LtElem } ")" NotArrow ;
 LtElem      = LtNamed | LtAnon ;
@@ -621,6 +633,8 @@ Wildcard    = "_" KwEnd ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { PoundIfStmt | Statement } "}" ;
+RetBody     <~~ push(makeBlockStmt(takeAll())) ~~>
+            = "{" Return { PoundIfStmt | Statement } "}" ;
 
 Decl        = DeclTuple | DeclPlain ;
 // One let/var may declare SEVERAL bindings: `let a = 1, b = 2`. Each binding builds
@@ -637,12 +651,17 @@ DeclBind    <~~ push(makeDecl(takeAll())) ~~>
 // general Type; the names are spelled longest-first (PEG first-match: "Int" would
 // otherwise match the front of "Int8") and closed with a KwEnd so a user type called
 // `Int8Box` is not read as `Int8`.
-DeclAnnType = LabelledTupleType | IntAnnType | Type ;
-IntAnnType  <~~ push({itype: up.in}) ~~>
-            = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
+DeclAnnType = LabelledTupleType | IntAnnType | ArrAnnType | Type ;
+IntAnnType  <~~ push({itype: up.in}) ~~> = NumTypeName NotTypeSuffix ;
+NumTypeName = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
               | "UInt64" | "UInt32" | "UInt16" | "UInt8" | "UInt"
-              | "Double" | "Float" ) KwEnd
-              NotTypeSuffix ;
+              | "Double" | "Float" ) KwEnd ;
+// `let a: [Double] = [3, 4]`: the annotation types the array's ELEMENTS, so the
+// untyped literals in it adopt Double and a[0] / 2 is 1.5 rather than 1. Only a
+// one-level array of a numeric type is recognised - `[[Double]]` and
+// `[String: Double]` fall through to Type and adopt nothing.
+ArrAnnType  = "[" ArrElemTy "]" NotTypeSuffix ;
+ArrElemTy   <~~ push({atype: stripWs(up.in)}) ~~> = NumTypeName ;
 // `Int?`, `Int!`, `Int.Type`, `Int & P`: the annotation is a COMPOSED type, not the
 // bare integer type, so IntAnnType has to decline it and let the general Type read
 // it. Without this the optional forms consumed only the `Int` and left the `?`
@@ -1701,6 +1720,24 @@ KwContinue  = "continue" KwEnd ;
         if (name == "UInt16") { return {w: 16, u: true} }
         if (name == "UInt8") { return {w: 8, u: true} }
         return null
+    }
+    // ----- Declared-type adoption (docs/todo.md 1.1) -----
+    // An untyped literal takes the FLOATNESS and the WIDTH of the type it is
+    // written at. `let d: Double = 3` has always done this (makeDecl); these two
+    // are what the OTHER declared-type sites emit - a parameter, a return type, a
+    // stored property, and the element type of an array annotation. It is not a
+    // Float story: an Int literal that does not adopt stays an Int and
+    // INTEGER-DIVIDES, so `func g(_ x: Double) -> Double { x / 2 }` called g(3)
+    // answered 1 where swiftc 6.1.2 says 1.5. The semantics live in one place per
+    // engine: js_swadopt in abnf/jsrtswift.go and languages/lib/swift-rt.metajs,
+    // swAdoptTy in languages/swift-interpreter.abnf.
+    function swAdoptable(ty) {
+        if (ty == "Double" || ty == "Float") { return true }
+        return swIntWidthOf(ty) != null
+    }
+    function swEmitAdopt(b, v, ty) {
+        if (ty == undefined || ty == null || ty == "") { return v }
+        return callExt(b, "js_swadopt", [v, emitStr(b, ty)])
     }
     // The bounds, spelled as DIGITS: Int64.max and UInt64.max cannot travel through
     // emitNum, which would round them to 9223372036854776000 and
@@ -3459,7 +3496,13 @@ KwContinue  = "continue" KwEnd ;
         var name = ids[ids.length - 1]
         var label = ids.length > 1 ? ids[0] : name
         if (label == "_") { label = "" }
-        return {name: name, label: label, type: type, variadic: isVar, auto: isAuto,
+        // `adopt` is the declared-type adoption this parameter performs on its
+        // argument, "" for the overwhelming majority that adopt nothing. It is
+        // decided once, here, so the prologue emits a js_swadopt call only where
+        // one is owed. A VARIADIC parameter binds an array, not a value, so it
+        // adopts nothing.
+        var ad = (!isVar && swAdoptable(type)) ? type : ""
+        return {name: name, label: label, type: type, adopt: ad, variadic: isVar, auto: isAuto,
                 inout: isInout, hasDefault: hasDflt, dflt: dflt}
     }
     function pName(p) { return (typeof p == "string") ? p : p.name }
@@ -3803,7 +3846,7 @@ KwContinue  = "continue" KwEnd ;
 
     // ----- Statement thunks: function(block) -> block -----
 
-    // items = [name, {tlabels}? | {itype}?, initThunk]
+    // items = [name, {tlabels}? | {itype}? | {atype}?, initThunk]
     function makeDecl(items) {
         var name = items[0]
         var labels = null
@@ -3814,13 +3857,27 @@ KwContinue  = "continue" KwEnd ;
         var iw = null
         var isDoubleTy = false
         var isFloatTy = false
+        var elemTy = ""
         if (items[k] != undefined && items[k].itype != undefined) {
             iw = swIntWidthOf(items[k].itype)
             isFloatTy = items[k].itype == "Float"
             isDoubleTy = items[k].itype == "Double" || isFloatTy
             k++
         }
+        else if (items[k] != undefined && items[k].atype != undefined) { elemTy = items[k].atype; k++ }
         var init = items[k]
+        // `let a: [Double] = [3, 4]`: the ELEMENTS adopt, so a[0] / 2 is 1.5.
+        if (elemTy != "" && init != undefined) {
+            var eT = elemTy
+            return function(b) {
+                var ra = init(b)
+                b = ra.b
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name),
+                                             callExt(b, "js_swadoptarr",
+                                                     [emitCopy(b, ra.v), emitStr(b, eT)])])
+                return b
+            }
+        }
         // `let d: Double = 3` holds 3.0, so d / 2 is 1.5 and print(d) writes "3.0".
         // The annotation is the only thing that says so: the initializer is an
         // untyped integer literal. `let f: Float = 3` is the same rule at the
@@ -4174,7 +4231,7 @@ KwContinue  = "continue" KwEnd ;
     // functions bind arg 0 to both this and self so implicit property access works.
     // isCtl marks a try/catch body closure: a return/break/continue leaving it emits a
     // control signal instead of a ret/br (see compile-core inCtlBody / excDispatch).
-    function emitFunc(params, body, isInstance, isCtl, rlabels) {
+    function emitFunc(params, body, isInstance, isCtl, rlabels, rtype) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -4187,6 +4244,7 @@ KwContinue  = "continue" KwEnd ;
         loopStack = []
         if (isCtl) { ctlEnter(idx) }
         retLabelStack.push(rlabels == undefined ? null : rlabels)
+        retTypeStack.push(rtype == undefined || rtype == null ? "" : rtype)
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         var off = 0
@@ -4247,7 +4305,11 @@ KwContinue  = "continue" KwEnd ;
                 av = callExt(b, "js_get", [av, emitStr(b, "v")])
                 inouts.push(prm.name)
             }
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm.name), av])
+            // The declared parameter type adopts the argument: `func g(_ x: Double)`
+            // called g(3) binds 3.0, so `x / 2` is 1.5 and not the 1 an Int division
+            // gave. The memberwise initializer is emitted through here too, which is
+            // how `T(a: 3)` fills a `var a: Double` field.
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm.name), swEmitAdopt(b, av, prm.adopt)])
         }
         inoutStack.push(inouts)
         var endB = body(b)
@@ -4255,6 +4317,7 @@ KwContinue  = "continue" KwEnd ;
         endB.NewRet(hUndef)
         inoutStack.pop()
         retLabelStack.pop()
+        retTypeStack.pop()
         if (isCtl) { ctlLeave() }
         curF = savedF
         curScopeV = savedScope
@@ -4293,7 +4356,8 @@ KwContinue  = "continue" KwEnd ;
         for (var p = 0; p < props.length; p++) {
             var r = props[p].init(b)
             b = r.b
-            callExt(b, "js_set", [thisV, emitStr(b, props[p].store), r.v])
+            callExt(b, "js_set", [thisV, emitStr(b, props[p].store),
+                                  swEmitAdopt(b, r.v, props[p].ty)])
         }
         b.NewRet(hUndef)
         curF = savedF
@@ -4303,12 +4367,15 @@ KwContinue  = "continue" KwEnd ;
         return idx
     }
     // items = [name, {params}, {tlabels}?, bodyThunk]
+    // items = [name, {params}, {tlabels}? | {itype}?, bodyThunk]
     function makeFun(items) {
         noteOperatorName(items[0])
         var k = 2
         var labels = null
+        var rty = ""
         if (items[k] != undefined && items[k].tlabels != undefined) { labels = items[k].tlabels; k++ }
-        return {name: items[0], params: items[1].params, body: items[k], rlabels: labels}
+        else if (items[k] != undefined && items[k].itype != undefined) { rty = items[k].itype; k++ }
+        return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty}
     }
     // The inout parameters of the function whose body is currently being emitted:
     // their final values are copied back into their caller's boxes before every ret.
@@ -4321,9 +4388,19 @@ KwContinue  = "continue" KwEnd ;
                                   emitStr(b, "v"), b.NewCall(rtKGet(), [curScopeV, emitStr(b, names[i])])])
         }
     }
-    // The tuple-return labels of the function whose body is currently being emitted.
+    // The tuple-return labels of the function whose body is currently being emitted,
+    // and its declared NUMERIC return type: `func r() -> Double { return 3 }` answers
+    // 3.0, so r() / 2 is 1.5.
     var retLabelStack = []
+    var retTypeStack = []
     function retLabelled(b, v) {
+        return retTupleLabelled(b, retTyped(b, v))
+    }
+    function retTyped(b, v) {
+        if (retTypeStack.length == 0) { return v }
+        return swEmitAdopt(b, v, retTypeStack[retTypeStack.length - 1])
+    }
+    function retTupleLabelled(b, v) {
         if (retLabelStack.length == 0) { return v }
         var labels = retLabelStack[retLabelStack.length - 1]
         if (labels == null) { return v }
@@ -4365,7 +4442,7 @@ KwContinue  = "continue" KwEnd ;
         lst.push({f: f})
         var slot = f.name + "$" + lst.length
         return function(b) {
-            var idx = emitFunc(f.params, f.body, false, false, f.rlabels)
+            var idx = emitFunc(f.params, f.body, false, false, f.rlabels, f.rtype)
             var cloV = callExt(b, "js_closure", [handle(idx), curScopeV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, slot), cloV])
             if (lst.length == 1) {
@@ -4440,12 +4517,20 @@ KwContinue  = "continue" KwEnd ;
         curFTag = savedTag
         return idx
     }
+    // items = [name, {tlabels}? | {itype}?, initThunk?]
+    // A numeric declared type adopts, exactly as it does on a local: `struct T { var
+    // a: Double = 3 }` stores 3.0, and `T(a: 3)` binds 3.0 through the memberwise
+    // initializer's parameter (memberwiseParams copies `ty` into its `adopt`).
     function makeProp(items) {
-        if (items.length > 1) { return {prop: items[0], hasInit: true, init: items[1]} }
-        return {prop: items[0], hasInit: false, init: null}
+        var k = 1
+        var ty = ""
+        if (items[k] != undefined && items[k].tlabels != undefined) { k++ }
+        else if (items[k] != undefined && items[k].itype != undefined) { ty = items[k].itype; k++ }
+        if (items[k] != undefined) { return {prop: items[0], ty: ty, hasInit: true, init: items[k]} }
+        return {prop: items[0], ty: ty, hasInit: false, init: null}
     }
     function plainParam(n) {
-        return {name: n, label: n, type: "", variadic: false, auto: false,
+        return {name: n, label: n, type: "", adopt: "", variadic: false, auto: false,
                 inout: false, hasDefault: false, dflt: null}
     }
     // A multi-parameter subscript index (`g[r, c]`) travels as one {__idxs} value, so
@@ -4582,7 +4667,7 @@ KwContinue  = "continue" KwEnd ;
             if (it.eraw != undefined) { mem.raw = it.eraw; continue }
             if (it.ecase != undefined) { mem.cases.push(it.ecase); continue }
             if (it.prop != undefined) {
-                var f = {name: it.prop, store: it.prop, hasInit: it.hasInit, init: it.init}
+                var f = {name: it.prop, store: it.prop, ty: it.ty, hasInit: it.hasInit, init: it.init}
                 if (isStatic) { mem.statProps.push(f) }
                 else if (isLazy) {
                     mem.lazies.push({name: it.prop, init: it.init})
@@ -4596,7 +4681,7 @@ KwContinue  = "continue" KwEnd ;
                     computedNames["$" + it.prop] = 1
                     computedNames["$$" + it.prop] = 1
                     setterNames["$" + it.prop] = 1
-                    var wf = {name: it.prop, store: "_" + it.prop, hasInit: true,
+                    var wf = {name: it.prop, store: "_" + it.prop, ty: "", hasInit: true,
                               init: makeWrapperInit(attr, it.init)}
                     mem.fields.push(wf)
                     mem.initProps.push(wf)
@@ -4609,7 +4694,7 @@ KwContinue  = "continue" KwEnd ;
                 if (isStatic) { mem.statComps.push(cp) } else {
                     mem.comps.push(cp)
                     if (cp.observed) {
-                        var of = {name: cp.name, store: "__v_" + cp.name, hasInit: cp.dflt != null, init: cp.dflt}
+                        var of = {name: cp.name, store: "__v_" + cp.name, ty: "", hasInit: cp.dflt != null, init: cp.dflt}
                         mem.fields.push(of)
                         if (of.hasInit) { mem.initProps.push(of) }
                     }
@@ -4649,7 +4734,7 @@ KwContinue  = "continue" KwEnd ;
         var mparams = []
         for (var s = 0; s < fields.length; s++) {
             mparams.push({name: fields[s].store, label: fields[s].name, type: "",
-                          variadic: false, auto: false, inout: false,
+                          adopt: fields[s].ty, variadic: false, auto: false, inout: false,
                           hasDefault: fields[s].hasInit, dflt: fields[s].init})
         }
         return mparams
@@ -4701,7 +4786,7 @@ KwContinue  = "continue" KwEnd ;
             var mth = mem.methods[i]
             var n = hasOwn(seen, "$" + mth.name) ? seen["$" + mth.name] : 0
             seen["$" + mth.name] = n + 1
-            var idx = emitFunc(mth.params, mth.body, true, false, mth.rlabels)
+            var idx = emitFunc(mth.params, mth.body, true, false, mth.rlabels, mth.rtype)
             callExt(b, "js_set", [tblV, emitStr(b, memberKey(mth.name, n)),
                                   callExt(b, "js_closure", [handle(idx), curScopeV])])
         }
@@ -4713,7 +4798,7 @@ KwContinue  = "continue" KwEnd ;
             // A static subscript is reached through the same [i] path as an instance
             // one, which passes the receiver first, so it is emitted as an instance
             // function whose `this` is the type descriptor.
-            var sidx = emitFunc(st.params, st.body, st.name.slice(0, 6) == "__sub_", false, st.rlabels)
+            var sidx = emitFunc(st.params, st.body, st.name.slice(0, 6) == "__sub_", false, st.rlabels, st.rtype)
             var skey = st.name.slice(0, 6) == "__sub_" ? "__static_" + st.name : st.name
             if (isOperatorName(st.name)) { skey = st.name }
             callExt(b, "js_set", [statV, emitStr(b, skey),
@@ -5097,7 +5182,7 @@ KwContinue  = "continue" KwEnd ;
             var n
             if (mth.name == "init") { n = initIdxs[nInit]; nInit++ }
             else { n = hasOwn(seen, "$" + mth.name) ? seen["$" + mth.name] : 0; seen["$" + mth.name] = n + 1 }
-            var idx = emitFunc(mth.params, mth.body, true, false, mth.rlabels)
+            var idx = emitFunc(mth.params, mth.body, true, false, mth.rlabels, mth.rtype)
             callExt(b, "js_set", [tblV, emitStr(b, memberKey(mth.name, n)),
                                   callExt(b, "js_closure", [handle(idx), curScopeV])])
         }

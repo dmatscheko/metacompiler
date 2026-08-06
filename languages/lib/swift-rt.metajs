@@ -1282,6 +1282,67 @@ function js_swadoptf32(v) {
     return js_swflo32(v)
 }
 
+// ----- Declared-type adoption (docs/todo.md 1.1) -----
+//
+// An untyped literal takes the FLOATNESS and the WIDTH of the type it is written
+// at. `let d: Double = 3` has always done this (js_swflo / js_swadoptf32 /
+// js_swintconv, which is what makeDecl emits); js_swadopt is what the OTHER
+// declared-type sites emit - a parameter, a return type, a stored property, and
+// the element type of an array annotation.
+//
+// It is not a Float story: an Int literal that does not adopt stays an Int and
+// INTEGER-DIVIDES, so `func g(_ x: Double) -> Double { x / 2 }` called g(3)
+// answered 1 where swiftc 6.1.2 says 1.5.
+//
+// A value that is neither a bare number nor a sized integer nor a float box is
+// returned UNCHANGED: at these sites the only value a type-correct Swift program
+// can present is numeric, and passing everything else through keeps the adoption
+// from inventing conversions (a String is NOT parsed here, where the failable
+// `let x: Int = "5"` site is a deliberate conversion). The Go twin is js_swadopt
+// in abnf/jsrtswift.go; the interpreter's is swAdoptTy.
+function swAdoptNum(v) { return typeof v == "number" || sintIs(v) }
+function swAdoptWidth(ty) {
+    if (ty == "Int" || ty == "Int64") { return 64 }
+    if (ty == "Int32") { return 32 }
+    if (ty == "Int16") { return 16 }
+    if (ty == "Int8") { return 8 }
+    if (ty == "UInt" || ty == "UInt64") { return 64 }
+    if (ty == "UInt32") { return 32 }
+    if (ty == "UInt16") { return 16 }
+    if (ty == "UInt8") { return 8 }
+    return 0
+}
+function swAdoptUns(ty) { return ty.length > 0 && ty.charAt(0) == "U" }
+function js_swadopt(v, ty) {
+    if (v === undefined || v === null) { return v }
+    if (ty == "Double") {
+        if (floIs(v)) { return v }
+        return swAdoptNum(v) ? swMkFlo(swNum(v)) : v
+    }
+    if (ty == "Float") {
+        if (swIsF32(v)) { return v }
+        if (floIs(v)) { return swMkF32(floNum(v)) }
+        return swAdoptNum(v) ? swMkF32(swNum(v)) : v
+    }
+    var bits = swAdoptWidth(ty)
+    if (bits == 0 || floIs(v)) { return v }
+    return swAdoptNum(v) ? sintConv(v, bits, swAdoptUns(ty)) : v
+}
+
+// `let a: [Double] = [3, 4]`: the annotation types the ELEMENTS, so a[0] / 2 is
+// 1.5. One level only.
+function js_swadoptarr(v, ty) {
+    if (ty == "") { return v }
+    if (!rtIsArr(v)) { return v }
+    var out = []
+    var i = 0
+    while (i < v.length) {
+        out.push(js_swadopt(v[i], ty))
+        i = i + 1
+    }
+    return out
+}
+
 // abs/max/min, Double-aware: a boxed operand keeps its box (abs(-1.5) is 1.5, not
 // the 1 an integer truncation gives) and compares by VALUE.
 function js_swabs(v) {

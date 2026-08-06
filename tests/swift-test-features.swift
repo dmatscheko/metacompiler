@@ -24,6 +24,13 @@ func check(_ id: String, _ cond: Bool) {
     }
 }
 
+// Declared-type adoption (docs/todo.md 1.1): the four sites, smallest form each.
+func halfOf(_ x: Double) -> Double { return x / 2 }
+func threeD() -> Double { return 3 }
+struct Boxed { var v: Double; var w: UInt8 }
+let dbls: [Double] = [3, 4]
+let ints: [Int] = [3, 4]
+
 // ----- functions: labelled parameters, early return, recursion -----
 
 func power(base b: Int, times n: Int) -> Int {
@@ -625,6 +632,17 @@ func main() {
     // extra positional arguments. Real Swift writes "1-2-3\nt!\n" here.
     print(1, 2, 3, separator: "-")
     print("t", terminator: "!\n")
+
+    // ----- a literal ADOPTS its declared type (docs/todo.md 1.1) -----
+    // A parameter, a return type, a stored property and an array annotation's
+    // element type all retype an untyped literal, exactly as a `let`/`var`
+    // annotation does. Not a Float story: an Int literal that does not adopt
+    // stays an Int and INTEGER-DIVIDES, so every row here answered 1 in both
+    // halves where swiftc 6.1.2 says 1.5.
+    check("adopt-param", halfOf(3) == 1.5)
+    check("adopt-return", threeD() / 2 == 1.5)
+    check("adopt-field", Boxed(v: 3, w: 250).v / 2 == 1.5 && Boxed(v: 3, w: 250).w &+ 10 == 4)
+    check("adopt-array", dbls[0] / 2 == 1.5 && ints[0] / 2 == 1)
 
     // ----- combined pipeline -----
     check("combined-pipeline", transform([1, 2, -3]) == "o1e2x")

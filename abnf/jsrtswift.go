@@ -252,6 +252,80 @@ func init() {
 			}
 			return m["js_swflo32"](a)
 		}
+		// ----- Declared-type adoption (docs/todo.md 1.1) -----
+		//
+		// An untyped literal takes the FLOATNESS and the WIDTH of the type it
+		// is written at. `let d: Double = 3` has always done this (the
+		// js_swflo/js_swadoptf32/js_swintconv calls makeDecl emits); js_swadopt
+		// is what the OTHER declared-type sites emit - a parameter, a return
+		// type, a stored property, and the element type of an array annotation.
+		//
+		// It is not a Float story: an Int literal that does not adopt stays an
+		// Int and INTEGER-DIVIDES, so `func g(_ x: Double) -> Double { x / 2 }`
+		// called g(3) answered 1 where swiftc 6.1.2 says 1.5.
+		//
+		// A value that is neither a bare number nor a sized integer nor a float
+		// box is returned UNCHANGED: at these sites the only value a
+		// type-correct Swift program can present is numeric, and passing
+		// everything else through keeps the adoption from inventing conversions
+		// (a String is NOT parsed here, where the failable `let x: Int = "5"`
+		// site is a deliberate conversion). The twin of swAdoptTy in
+		// languages/swift-interpreter.abnf and of js_swadopt in
+		// languages/lib/swift-rt.metajs.
+		swAdopt := func(v interface{}, ty string) interface{} {
+			if isNullish(v) {
+				return v
+			}
+			_, isNum := v.(float64)
+			if !isNum {
+				_, isNum = v.(jsGInt)
+			}
+			switch ty {
+			case "Double":
+				if swIsFlo(v) {
+					return v
+				}
+				if isNum {
+					return swMkFlo(swNum(rt, v))
+				}
+				return v
+			case "Float":
+				if swIsF32(v) {
+					return v
+				}
+				if f, ok := v.(jsJFlo); ok {
+					return swMkF32(f.f)
+				}
+				if isNum {
+					return swMkF32(swNum(rt, v))
+				}
+				return v
+			}
+			bits, uns, ok := swAdoptWidth(ty)
+			if !ok || swIsFlo(v) || !isNum {
+				return v
+			}
+			return rt.giConv(v, bits, uns)
+		}
+		m["js_swadopt"] = func(a []uint64) uint64 {
+			ty, _ := u(a[1]).(string)
+			return w(swAdopt(u(a[0]), ty))
+		}
+		// `let a: [Double] = [3, 4]`: the annotation types the ELEMENTS, so
+		// a[0] / 2 is 1.5. One level only.
+		m["js_swadoptarr"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			ty, _ := u(a[1]).(string)
+			arr, ok := v.(*jsArray)
+			if !ok || ty == "" {
+				return a[0]
+			}
+			out := make([]interface{}, len(arr.elems))
+			for i, e := range arr.elems {
+				out[i] = swAdopt(e, ty)
+			}
+			return w(&jsArray{elems: out})
+		}
 		// String(x) / String(describing: x): the text print would have written.
 		m["js_swstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.swDesc(u(a[0]))) }
 		// abs/max/min, Double-aware: a boxed operand keeps its box (abs(-1.5) is
@@ -544,6 +618,30 @@ func init() {
 // an untyped literal may take the other side's type). This front end has no type
 // checker, so a mixed operation evaluates in floating point - which is the right
 // answer for the literal case, `1 + 2.0 == 3.0` - instead of being rejected.
+
+// swAdoptWidth is swIntWidthOf: the (bits, unsigned) an integer type name
+// declares, for the declared-type adoption above.
+func swAdoptWidth(ty string) (uint8, bool, bool) {
+	switch ty {
+	case "Int", "Int64":
+		return 64, false, true
+	case "Int32":
+		return 32, false, true
+	case "Int16":
+		return 16, false, true
+	case "Int8":
+		return 8, false, true
+	case "UInt", "UInt64":
+		return 64, true, true
+	case "UInt32":
+		return 32, true, true
+	case "UInt16":
+		return 16, true, true
+	case "UInt8":
+		return 8, true, true
+	}
+	return 0, false, false
+}
 
 func swMkFlo(f float64) jsJFlo { return jsJFlo{f: f} }
 

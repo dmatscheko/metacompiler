@@ -873,9 +873,10 @@ struct Flo25 { var x: Double; var y: Int }
 // the grammar's constant folder cannot answer the rows below at compile time.
 func s25f(_ v: Float) -> String { return "\(v)" }
 func s25d(_ v: Double) -> String { return "\(v)" }
-// Read out of arrays for the same reason. Built with Float(...) rather than a
-// `[Float]` annotation because an array literal's ELEMENT type is not adopted
-// here - see the note at f32o.
+// Read out of arrays for the same reason. Written with Float(...) rather than a
+// `[Float]` annotation because that is what it had to be before SECTION 29 gave
+// an array annotation's ELEMENT type its adoption; it is left as it was, and
+// SECTION 29 asserts the annotated spelling separately.
 let f25 = [Float(1.0), Float(3.0), Float(0.1), Float(16777216.0), Float(16777217.0), Float(2.0)]
 let z25 = [-14447655.0, 0.0]
 func s25() {
@@ -1112,6 +1113,87 @@ func s28() {
     check("lam2", counted() == 9)
 }
 
+// ===== SECTION 29: a literal ADOPTS its declared type (docs/todo.md 1.1) =====
+// An untyped literal takes the FLOATNESS and the WIDTH of the type it is written
+// at. Only ONE site did that before this section existed - a `let`/`var`
+// annotation - and the four here did not: a PARAMETER, a RETURN type, a STORED
+// PROPERTY, and the ELEMENT type of an array annotation.
+//
+// It reads like a Float story and it is not. The same missing adoption gave
+// DOUBLE the wrong answer, because an Int literal that stays an Int
+// INTEGER-DIVIDES: every `29d*` row below answered 1 where swiftc 6.1.2 says 1.5,
+// in BOTH halves, which is why --cross was blind to it for three float rounds.
+// Every value here is swift 6.1.2's own output.
+//
+// STILL NOT ADOPTED, deliberately, and each is a wrong answer this file does not
+// yet assert: a CLOSURE parameter type (`let f: (Double) -> Double`), a
+// dictionary annotation's value type (`[String: Double]`), a tuple type's element
+// types (`(Double, Double)`), an assignment to an already-declared `var d: Double`
+// or to a typed stored property (only the INITIAL value adopts), and the element
+// type of a nested `[[Double]]`. They need the declared type at a site that does
+// not carry one today; see the report on docs/todo.md 1.1.
+func a29d(_ x: Double) -> Double { return x / 2 }
+func a29f(_ x: Float) -> Float { return x / 2 }
+func a29u(_ x: UInt8) -> UInt8 { return x &+ 10 }
+func a29i(_ x: Int32) -> Int32 { return x &* x }
+func a29lab(a x: Double, b y: Double = 3) -> Double { return x / 2 + y / 2 }
+func a29io(_ x: inout Double) { x = x + 1 }
+func r29d() -> Double { return 3 }
+func r29f() -> Float { return 16777217 }
+func r29u() -> UInt8 { return 250 }
+func e29d() -> Double { 3 }
+func t29() -> (n: Int, v: Int) { return (1, 2) }
+struct A29 { var a: Double; var b: Float; var c: UInt8; var s: String }
+struct B29 { var a: Double = 3; var n: Int = 7 }
+class C29 { var a: Double = 3
+            func m(_ x: Double) -> Double { return x / 2 + a / 2 } }
+// Read out of arrays so the grammar's constant folder cannot answer these rows.
+let n29 = [3, 250, 65536, 16777217]
+func s29() {
+    // ----- the parameter -----
+    check("29d1", a29d(3) == 1.5 && s25d(a29d(3)) == "1.5")
+    check("29d2", a29lab(a: 3) == 3.0 && a29lab(a: 3, b: 5) == 4.0)
+    // A value that is ALREADY a Double travels as it always did.
+    check("29d3", a29d(Double(n29[0])) == 1.5)
+    // The width half of the same rule, at three widths.
+    check("29w1", a29u(250) == 4 && a29u(UInt8(n29[1])) == 4)
+    check("29w2", a29i(65536) == 0 && a29i(Int32(n29[2])) == 0)
+    check("29w3", s25f(a29f(3)) == "1.5" && s25f(a29f(16777217)) == "8388608.0")
+    // inout keeps its write-back, and the declared type still adopts.
+    var v29: Double = 3
+    a29io(&v29)
+    check("29d4", v29 / 2 == 2.0)
+
+    // ----- the return type -----
+    check("29r1", r29d() / 2 == 1.5 && s25d(r29d()) == "3.0")
+    check("29r2", s25f(r29f()) == "16777216.0" && r29u() &+ 10 == 4)
+    // A single-expression body returns through the same site.
+    check("29r3", e29d() / 2 == 1.5)
+    // A LABELLED tuple return type still names its elements - and `return (1, 2)`
+    // used to parse as the identifier `return` applied to a tuple, so this whole
+    // shape died with *unknown name: return* before FnBody grew RetBody.
+    check("29r4", t29().n == 1 && t29().v == 2)
+
+    // ----- the stored property -----
+    let a = A29(a: 3, b: 16777217, c: 250, s: "x")
+    check("29p1", a.a / 2 == 1.5 && s25f(a.b) == "16777216.0" && a.c &+ 10 == 4 && a.s == "x")
+    // A default value adopts too, and an un-annotated one is untouched.
+    check("29p2", B29().a / 2 == 1.5 && B29().n / 2 == 3 && B29(a: 5).a / 2 == 2.5)
+    check("29p3", C29().a / 2 == 1.5 && C29().m(3) == 3.0)
+
+    // ----- the array annotation's element type -----
+    let ad: [Double] = [3, 4]
+    let af: [Float] = [16777217, 1]
+    let au: [UInt8] = [250, 1]
+    check("29a1", ad[0] / 2 == 1.5 && ad[1] / 2 == 2.0 && s25d(ad[0]) == "3.0")
+    check("29a2", s25f(af[0]) == "16777216.0" && au[0] &+ 10 == 4)
+    // An UNANNOTATED array literal is still [Int], and an [Int] annotation is
+    // still an integer division - the adoption must not float everything.
+    let plain = [3, 4]
+    let ai: [Int] = [7, 4]
+    check("29a3", plain[0] / 2 == 1 && ai[0] / 2 == 3)
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -1143,6 +1225,7 @@ func main() {
     s26() // SECTION-CALL 26
     s27() // SECTION-CALL 27
     s28() // SECTION-CALL 28
+    s29() // SECTION-CALL 29
     print("full: \(checks) checks, \(fails) failures")
 }
 
