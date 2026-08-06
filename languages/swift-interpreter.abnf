@@ -1839,7 +1839,7 @@ KwContinue  = "continue" KwEnd ;
         if (szIs(v)) { return szStr(v) }
         // A Double is boxed too, and prints through Swift's own float rendering:
         // 1.0 is "1.0", not the "1" a JS number would give.
-        if (isFlo(v)) { return swFloStr(v.__flo) }
+        if (isFlo(v)) { return swFloDesc(v) }
         if (typeof v != "object") { return "" + v }
         if (Array.isArray(v)) {
             var out = "["
@@ -1938,6 +1938,76 @@ KwContinue  = "continue" KwEnd ;
     // rejected. The divergence is confined to programs swift would not have built.
     function swFlo(f) { return {__flo: f} }
     function isFlo(v) { return v != undefined && v != null && typeof v == "object" && v.__flo !== undefined }
+
+    // ----- Float: the 32 bit WIDTH -----
+    //
+    // A Swift `Float` is an IEEE-754 binary32, not a Double spelled differently:
+    // `Float(1) / Float(3)` is 0.33333334 where the Double is 0.3333333333333333,
+    // and every arithmetic result has to be rounded back to 24 significant bits.
+    // The VALUE still travels as a double (every float is exactly one), so the
+    // only thing that goes on the box is the WIDTH - a second, hidden slot beside
+    // __flo. The compiled halves put the same flag on the tag 14 box's style
+    // byte (style 3, abnf/jsrtjvm.go's floJavaF); see the float WIDTH block in
+    // languages/lib/swift-rt.metajs for the whole specification.
+    //
+    // THE SIMPLIFICATION: swift FORBIDS mixed arithmetic outright - `x + y` with
+    // `let x: Float` and `let y: Double` is *error: binary operator '+' cannot be
+    // applied to operands of type 'Float' and 'Double'*, and so is `x + i` for
+    // `let i: Int`, both read off swiftc 6.1.2. Only an untyped LITERAL may take
+    // the other side's type. So "if either operand is a Float, both are" is
+    // correct for every program swiftc accepts, and none of java's and kotlin's
+    // JLS-5.6.2 wider-type machinery is needed.
+    function swF32(f) { return {__flo: swF32Round(f), __f32: true} }
+    function isF32(v) { return isFlo(v) && v.__f32 === true }
+    // One result, rebuilt at the width its operands had.
+    function swReFlo(f, f32) { return f32 ? swF32(f) : swFlo(f) }
+    // x * 2^k, EXACTLY - every factor is a power of two, so not one bit is lost.
+    // The chunking by 2^30 keeps the loop short for the ~280 halvings a subnormal
+    // float needs.
+    function swScale2(x, k) {
+        var v = x
+        var n = k
+        while (n >= 30) { v = v * 1073741824; n = n - 30 }
+        while (n <= 0 - 30) { v = v / 1073741824; n = n + 30 }
+        while (n > 0) { v = v * 2; n = n - 1 }
+        while (n < 0) { v = v / 2; n = n + 1 }
+        return v
+    }
+    // Math.fround: the double nearest x that a binary32 can hold, round-half-to-
+    // EVEN, with the subnormals and both overflows. The compiled halves spell it
+    // `float64(float32(x))` and swF32Round in languages/lib/swift-rt.metajs; it is
+    // written on `*` and `/` by powers of two here because this dialect has no
+    // access to a double's bits. The significand is scaled until its unit in the
+    // last place is 1, rounded there, and scaled back; both scalings are exact,
+    // so the single rounding is the only one that happens.
+    function swF32Round(x) {
+        if (x !== x) { return x }
+        if (x === 0) { return x }
+        var neg = x < 0
+        var a = neg ? 0 - x : x
+        if (a === swInfF) { return x }
+        var maxf = swScale2(16777215, 104)
+        // 2^128 is above every rounding boundary and 2^-150 is the half-way point
+        // below the smallest subnormal (which ties to even, i.e. to zero); both
+        // early exits also bound the exponent loop below to ~280 turns.
+        if (a >= swScale2(1, 128)) { return neg ? swInfF * swNegOne : swInfF }
+        if (a <= swScale2(1, 0 - 150)) { return neg ? 0 / swNegOne : 0 }
+        var e = 0
+        var t = a
+        while (t >= 2) { t = t / 2; e = e + 1 }
+        while (t < 1) { t = t * 2; e = e - 1 }
+        var q = e - 23
+        if (q < 0 - 149) { q = 0 - 149 }
+        var sc = swScale2(a, 0 - q)
+        var f = Math.floor(sc)
+        var d = sc - f
+        if (d > 0.5) { f = f + 1 }
+        if (d === 0.5) { if (f - Math.floor(f / 2) * 2 !== 0) { f = f + 1 } }
+        var r = swScale2(f, q)
+        if (r > maxf) { return neg ? swInfF * swNegOne : swInfF }
+        if (r === 0) { return neg ? 0 / swNegOne : 0 }
+        return neg ? 0 - r : r
+    }
     // The infinities and the NaN, spelled without a literal (the frozen bootstrap
     // has no Infinity binding, and a division is the portable way to reach them).
     var swZeroF = 0
@@ -2014,9 +2084,196 @@ KwContinue  = "continue" KwEnd ;
         }
         return digits.substring(0, pt) + "." + digits.substring(pt)
     }
+    // ----- Float.description -----
+    //
+    // SwiftDtoa's rule read at 24 significant bits: the SHORTEST decimal that
+    // reads back as the same FLOAT, plain when the scientific exponent is >= -4
+    // and the value is <= 2^24, and d.ddde+nn outside it. Read off swift 6.1.2:
+    // 16777216.0 is the last plain value and 16777218.0 prints 1.6777218e+07,
+    // exactly as 9007199254740992.0 / 9.007199254740994e+15 do for a Double.
+    // There is no two-significant-digit minimum (Float.leastNonzeroMagnitude
+    // prints "1e-45", where java's Float.MIN_VALUE prints "1.4E-45") and no
+    // forced ".0" on a one-digit mantissa. The twins are swFloStr32 in
+    // abnf/jsrtswift.go and swF32Str in languages/lib/swift-rt.metajs.
+
+    // The host's own shortest rendering of a > 0, split into the significant
+    // digits and the SCIENTIFIC exponent of the first one.
+    function swSplitDE(a) {
+        var s = "" + a
+        var mant = s
+        var exp = 0
+        var ei = 0 - 1
+        for (var i = 0; i < s.length; i++) { if (s.charAt(i) == "e" || s.charAt(i) == "E") { ei = i } }
+        if (ei >= 0) {
+            mant = s.substring(0, ei)
+            var et = s.substring(ei + 1)
+            if (et.charAt(0) == "+") { et = et.substring(1) }
+            exp = parseInt(et, 10)
+        }
+        var digits = ""
+        var pt = 0 - 1
+        for (var j = 0; j < mant.length; j++) {
+            var ch = mant.charAt(j)
+            if (ch == ".") { pt = digits.length } else { digits = digits + ch }
+        }
+        if (pt < 0) { pt = digits.length }
+        var lead = 0
+        while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead++ }
+        digits = digits.substring(lead)
+        pt = pt - lead + exp
+        var endz = digits.length
+        while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
+        return {d: digits.substring(0, endz), e: pt - 1}
+    }
+    // A {d, e} pair rounded to n significant digits, half to even. The source is
+    // already the shortest form of the value, so a genuine tie can only be a
+    // decimal the double holds exactly.
+    function swRoundSig(p, n) {
+        var ds = p.d
+        var ex = p.e
+        if (ds.length <= n) { return p }
+        var keep = ds.substring(0, n)
+        var nxt = ds.charCodeAt(n) - 48
+        var up = false
+        if (nxt > 5) { up = true }
+        if (nxt == 5) {
+            var rest = false
+            for (var i = n + 1; i < ds.length; i++) { if (ds.charCodeAt(i) != 48) { rest = true } }
+            if (rest) { up = true }
+            else {
+                var last = ds.charCodeAt(n - 1) - 48
+                if (last - Math.floor(last / 2) * 2 == 1) { up = true }
+            }
+        }
+        if (up) {
+            var out = ""
+            var carry = 1
+            for (var k = n - 1; k >= 0; k--) {
+                var dg = ds.charCodeAt(k) - 48 + carry
+                carry = 0
+                if (dg == 10) { dg = 0; carry = 1 }
+                out = "" + dg + out
+            }
+            if (carry == 1) { out = ("1" + out).substring(0, n); ex = ex + 1 }
+            keep = out
+        }
+        var ez = keep.length
+        while (ez > 1 && keep.charAt(ez - 1) == "0") { ez-- }
+        return {d: keep.substring(0, ez), e: ex}
+    }
+    // The value of a {d, e} pair. At most nine digits, so the integer part is
+    // exact; the power of ten is applied in chunks of 10^15, the largest one a
+    // double holds exactly. The relative error stays under ~1e-15, five million
+    // times finer than a float's half-ulp - and the only consumer is the
+    // round-trip TEST below, so an error that small cannot pick a wrong length.
+    function swSigVal(p) {
+        var ds = p.d
+        var k = p.e - ds.length + 1
+        var m = 0
+        for (var i = 0; i < ds.length; i++) { m = m * 10 + (ds.charCodeAt(i) - 48) }
+        while (k >= 15) { m = m * 1000000000000000; k = k - 15 }
+        while (k <= 0 - 15) { m = m / 1000000000000000; k = k + 15 }
+        while (k > 0) { m = m * 10; k = k - 1 }
+        while (k < 0) { m = m / 10; k = k + 1 }
+        return m
+    }
+    // The shortest decimal that round-trips as a binary32. Nine digits always do.
+    function swF32Sig(a) {
+        var full = swSplitDE(a)
+        for (var n = 1; n < 9; n++) {
+            var c = swRoundSig(full, n)
+            if (swF32Round(swSigVal(c)) === a) { return c }
+        }
+        return swRoundSig(full, 9)
+    }
+    function swF32Digits(a) {
+        var p = swF32Sig(a)
+        var ds = p.d
+        var e10 = p.e
+        if (e10 < 0 - 4 || a > 16777216) {
+            var frac = ds.substring(1)
+            var es = e10 < 0 ? (0 - e10) : e10
+            var etx = "" + es
+            if (es < 10) { etx = "0" + etx }
+            return ds.charAt(0) + (frac == "" ? "" : "." + frac) + "e" + (e10 < 0 ? "-" : "+") + etx
+        }
+        var pt = e10 + 1
+        if (pt <= 0) {
+            var z = ""
+            for (var q = 0; q < 0 - pt; q++) { z = z + "0" }
+            return "0." + z + ds
+        }
+        if (pt >= ds.length) {
+            var z2 = ""
+            for (var q2 = 0; q2 < pt - ds.length; q2++) { z2 = z2 + "0" }
+            return ds + z2 + ".0"
+        }
+        return ds.substring(0, pt) + "." + ds.substring(pt)
+    }
+    function swF32Str(x) {
+        if (x !== x) { return "nan" }
+        if (x === swInfF) { return "inf" }
+        if (x === swInfF * swNegOne) { return "-inf" }
+        if (x === 0) { return 1 / x < 0 ? "-0.0" : "0.0" }
+        var neg = x < 0
+        var a = neg ? x * swNegOne : x
+        return neg ? "-" + swF32Digits(a) : swF32Digits(a)
+    }
+    // Every rendering of a float box goes through here, so that a Float shows its
+    // own 24 bit digits and a Double its 53.
+    function swFloDesc(v) {
+        if (isF32(v)) { return swF32Str(v.__flo) }
+        return swFloStr(v.__flo)
+    }
+    // The float arm of + - * / %. A Float operand makes BOTH operands Floats and
+    // rounds the result: swift forbids every mixed pair, so the only other side an
+    // untyped literal can be is a Float too. Computing in double and rounding once
+    // is exactly binary32 arithmetic - a double carries more than 2*24+2
+    // significand bits, so the second rounding cannot move the result.
+    function swFloArith(op, l, r) {
+        var f32 = isF32(l) || isF32(r)
+        var x = swD(l)
+        var y = swD(r)
+        if (f32) { x = swF32Round(x); y = swF32Round(y) }
+        if (op == "+") { return swReFlo(x + y, f32) }
+        if (op == "-") { return swReFlo(x - y, f32) }
+        if (op == "*") { return swReFlo(swZeroSign(x * y, x, y), f32) }
+        if (op == "/") { return swReFlo(swZeroSign(x / y, x, y), f32) }
+        return swReFlo(x % y, f32)
+    }
+    // A ZERO product or quotient keeps the XOR of its operands' signs, which is
+    // IEEE-754's rule - and which THIS DIALECT LOSES when both operands are
+    // integral-valued, because the tag engine then multiplies them as INTEGERS
+    // and `-7 * 0` is +0 (the `x * 0` trap of docs/working-on-this-project.md
+    // chapter 4). `0.0 * -7.0` therefore printed 0.0 where swiftc 6.1.2 and BOTH
+    // compiled halves say -0.0: a PRE-EXISTING interpreter-vs-compiler divergence
+    // for plain Double, reproducible at 4f2e6e4 in two lines of swift, which
+    // --cross never reached. The float work only made it show up 336 times in a
+    // 6,442-line probe. The NINTH appearance of this shape; the same fix as
+    // kZeroSign in kotlin-interpreter.abnf and jZeroSign in java-interpreter.abnf.
+    function swZeroSign(p, a, b) {
+        if (p !== 0) { return p }
+        if (a !== a) { return p }
+        if (b !== b) { return p }
+        var an = a < 0 || (a == 0 && 1 / a < 0)
+        var bn = b < 0 || (b == 0 && 1 / b < 0)
+        return an !== bn ? 0 / swNegOne : 0
+    }
     // Double.rounded() is .toNearestOrAwayFromZero, where JS's Math.round rounds a
     // half toward +infinity: (-2.5).rounded() is -3 in swift and -2 through Math.round.
-    function swRoundHalfAway(f) { return f < 0 ? 0 - Math.round(0 - f) : Math.round(f) }
+    // A NEGATIVE value rounding to zero keeps its sign: (-0.1).rounded() is -0.0
+    // in swiftc 6.1.2 and in both compiled halves, where `0 - Math.round(0.1)` is
+    // `0 - 0` and this dialect answers +0.0 for that (docs/working-on-this-project.md
+    // chapter 7.10 - the working spelling of a negative zero is a DIVISION).
+    // Pre-existing for a plain Double, reproducible at 4f2e6e4.
+    function swRoundHalfAway(f) {
+        if (f < 0) {
+            var r = Math.round(0 - f)
+            if (r === 0) { return 0 / swNegOne }
+            return 0 - r
+        }
+        return Math.round(f)
+    }
     // Int arithmetic is 64 bit at the operand's width; Double arithmetic is not. The
     // two are told apart by the BOX (see swFlo above): an operation whose operands
     // are both integral answers like Int, and one with a boxed operand answers a
@@ -2039,7 +2296,8 @@ KwContinue  = "continue" KwEnd ;
         // Array + Array is CONCATENATION in Swift, not the JS "1,23" that the
         // untyped + produced.
         if (Array.isArray(l) && Array.isArray(r)) { return concat2impl(l, r) }
-        return swIntish(l, r) ? szArith("+", l, r) : swFlo(swD(l) + swD(r))
+        if (swIntish(l, r)) { return szArith("+", l, r) }
+        return swFloArith("+", l, r)
     }
     // Swift's SMART SHIFT: an over-shift answers 0 (or the sign, for a signed >>),
     // and a NEGATIVE count shifts the other way - `256 >> -2` is 1024, verified
@@ -2172,8 +2430,13 @@ KwContinue  = "continue" KwEnd ;
             if (name == "isInfinite") { return fv === swInfF || fv === swInfF * swNegOne }
             if (name == "isFinite") { return fv === fv && fv !== swInfF && fv !== swInfF * swNegOne }
             if (name == "isZero") { return fv === 0 }
-            if (name == "description") { return swFloStr(fv) }
-            if (name == "magnitude") { return swFlo(fv < 0 ? 0 - fv : fv) }
+            if (name == "description") { return swFloDesc(o) }
+            // `< 0` is FALSE for -0.0, so (-0.0).magnitude answered -0.0 where
+            // swiftc 6.1.2 and BOTH compiled halves (which go through Math.abs)
+            // answer 0.0. The sign of a zero only shows through 1/v - the same
+            // guard the `abs` host global already carries. Pre-existing for a
+            // plain Double, reproducible at 4f2e6e4.
+            if (name == "magnitude") { return swReFlo(fv < 0 || (fv == 0 && 1 / fv < 0) ? 0 - fv : fv, isF32(o)) }
             var ft = builtinTable("Double", false)
             if (ft != null && hasOwn(ft, name)) { return ft[name] }
             return undefined
@@ -2298,7 +2561,7 @@ KwContinue  = "continue" KwEnd ;
         // `< 0` is FALSE for -0.0, so abs(-0.0) answered -0.0 where swift 6.1.2
         // (and both compiled halves, which go through Math.abs) answer 0.0. The
         // sign of a zero only shows through 1/v.
-        if (isFlo(v)) { var f = v.__flo; return swFlo(f < 0 || (f == 0 && 1 / f < 0) ? 0 - f : f) }
+        if (isFlo(v)) { var f = v.__flo; return swReFlo(f < 0 || (f == 0 && 1 / f < 0) ? 0 - f : f, isF32(v)) }
         return v < 0 ? -v | 0 : v | 0
     }
     // Swift's own min/max are `y < x ? y : x` and `y >= x ? y : x`, so a TIE
@@ -2339,11 +2602,14 @@ KwContinue  = "continue" KwEnd ;
         // 7.0.truncatingRemainder(dividingBy: 2.0) is 1.0.
         if (isFlo(target)) {
             var tf = target.__flo
-            if (name == "rounded") { return swFlo(swRoundHalfAway(tf)) }
-            if (name == "squareRoot") { return swFlo(Math.sqrt(tf)) }
-            if (name == "truncatingRemainder") { return swFlo(tf % swD(args[0])) }
+            // Every one of these keeps the RECEIVER'S width: a Float method
+            // answers a Float.
+            var tf32 = isF32(target)
+            if (name == "rounded") { return swReFlo(swRoundHalfAway(tf), tf32) }
+            if (name == "squareRoot") { return swReFlo(Math.sqrt(tf), tf32) }
+            if (name == "truncatingRemainder") { return swReFlo(tf % swD(args[0]), tf32) }
             if (name == "isMultiple") { return tf % swD(args[0]) === 0 }
-            if (name == "description") { return swFloStr(tf) }
+            if (name == "description") { return swFloDesc(target) }
             fail("unknown Double method: " + name)
         }
         if (isDict(target)) {
@@ -3350,20 +3616,24 @@ KwContinue  = "continue" KwEnd ;
         // arithmetic that follows wraps at 8 bits rather than at 64.
         var iw = null
         var isDoubleTy = false
+        var isFloatTy = false
         if (items[k] != undefined && items[k].itype != undefined) {
             iw = swIntWidthOf(items[k].itype)
-            isDoubleTy = items[k].itype == "Double" || items[k].itype == "Float"
+            isFloatTy = items[k].itype == "Float"
+            isDoubleTy = items[k].itype == "Double" || isFloatTy
             k++
         }
         var init = items[k]
         // `let d: Double = 3` holds 3.0, so d / 2 is 1.5 and print(d) writes "3.0".
         // The annotation is the only thing that says so: the initializer is an
-        // untyped integer literal.
+        // untyped integer literal. `let f: Float = 3` is the same rule at the
+        // 32 bit WIDTH, and every later operation on that value rounds to 24 bits.
         if (isDoubleTy) {
             if (init == undefined) { return function() { declVar(name, null) } }
+            var adopt = isFloatTy ? swF32Conv : swFloConv
             return function() {
                 var dv = init()
-                declVar(name, dv === null || dv === undefined ? dv : swFloConv(dv))
+                declVar(name, dv === null || dv === undefined ? dv : adopt(dv))
             }
         }
         if (iw != null) {
@@ -4489,15 +4759,19 @@ KwContinue  = "continue" KwEnd ;
     // The arithmetic operators, Double-aware (see swIntish above). == and != are
     // installed further down, over enum cases and canonical string equality.
     swOverloadable("+", function(l, r) { return swadd(l, r) })
-    swOverloadable("-", function(l, r) { return swIntish(l, r) ? szArith("-", l, r) : swFlo(swD(l) - swD(r)) })
-    swOverloadable("*", function(l, r) { return swIntish(l, r) ? szArith("*", l, r) : swFlo(swD(l) * swD(r)) })
-    swOverloadable("/", function(l, r) { return swIntish(l, r) ? szArith("/", l, r) : swFlo(swD(l) / swD(r)) })
-    swOverloadable("%", function(l, r) { return swIntish(l, r) ? szArith("%", l, r) : swFlo(swD(l) % swD(r)) })
+    swOverloadable("-", function(l, r) { return swIntish(l, r) ? szArith("-", l, r) : swFloArith("-", l, r) })
+    swOverloadable("*", function(l, r) { return swIntish(l, r) ? szArith("*", l, r) : swFloArith("*", l, r) })
+    swOverloadable("/", function(l, r) { return swIntish(l, r) ? szArith("/", l, r) : swFloArith("/", l, r) })
+    swOverloadable("%", function(l, r) { return swIntish(l, r) ? szArith("%", l, r) : swFloArith("%", l, r) })
     // A box has to be compared through szCmp rather than by <: a UInt64 above 2^63
     // reads as a NEGATIVE value in the pair, so UInt64.max < 0 would hold. A FLOAT
     // box is an object, so it has to be unboxed instead - `1.5 < 2.0` between two
     // objects is false in JS.
     function swOrd(l, r, want) {
+        // A Float operand makes the other side a Float too, so `16777217 < f`
+        // compares two binary32 values - swift will only ever have put an untyped
+        // literal on the other side.
+        if (isF32(l) || isF32(r)) { return want(swF32Round(swD(l)), swF32Round(swD(r))) }
         if (isFlo(l) || isFlo(r)) { return want(swD(l), swD(r)) }
         if (szIs(l) || szIs(r)) { return want(szCmp(l, r), 0) }
         return want(l, r)
@@ -4522,7 +4796,8 @@ KwContinue  = "continue" KwEnd ;
             if (f != null) { return f(undefined, v) }
             // A float negates by MULTIPLYING by -1: `0 - 0.0` is +0.0 in JS, so
             // -0.0 would have lost its sign (and print "0.0" where swift says "-0.0").
-            return swWhole(v) ? szNeg(v) : swFlo(swD(v) * swNegOne)
+            // Negation is exact, so the width is only carried, never re-rounded.
+            return swWhole(v) ? szNeg(v) : swReFlo(swD(v) * swNegOne, isF32(v))
         }
     }
     // Double(x) / Float(x): the conversion that BOXES, and the type's own statics.
@@ -4554,6 +4829,12 @@ KwContinue  = "continue" KwEnd ;
         return i == s.length
     }
     function swFloConv(x) {
+        // Double(f) WIDENS a Float: the double is the same number, but the value
+        // stops being a Float and prints its 53 bit digits again -
+        // Double(Float(0.1)) is 0.10000000149011612. Both compiled halves get
+        // this from js_swflo rebuilding the box at style 0; here the early
+        // return has to drop the __f32 flag explicitly.
+        if (isF32(x)) { return swFlo(x.__flo) }
         if (isFlo(x)) { return x }
         if (typeof x == "string") {
             if (!swFloText(x)) { return null }
@@ -4564,14 +4845,44 @@ KwContinue  = "continue" KwEnd ;
         if (x === null || x === undefined) { fail("Double conversion of nil") }
         return swFlo(swD(x) * 1)
     }
+    // Float(x): the same conversion at the 32 bit width. This and a declared
+    // `Float` annotation are the only two places a Float is created; from then on
+    // the box carries its own width through every operator.
+    //
+    // (A string is read at 64 bits and rounded to 32, where swiftc rounds once. A
+    // decimal that lands exactly on a float midpoint AFTER a double rounding
+    // would differ; no value in the corpus or the probe does.)
+    function swF32Conv(x) {
+        if (isF32(x)) { return x }
+        if (isFlo(x)) { return swF32(x.__flo) }
+        if (typeof x == "string") {
+            if (!swFloText(x)) { return null }
+            return swF32(parseFloat(x))
+        }
+        if (x === true) { return swF32(1) }
+        if (x === false) { return swF32(0) }
+        if (x === null || x === undefined) { fail("Float conversion of nil") }
+        return swF32(swD(x) * 1)
+    }
     function swFloType() {
         return {infinity: swFlo(swInfF), nan: swFlo(swNanF), pi: swFlo(3.141592653589793),
                 zero: swFlo(0), __conv: swFloConv}
     }
+    // Float's own statics are FLOATS, so Float.pi prints 3.1415925 and not the
+    // double's 3.141592653589793.
+    //
+    // AND IT IS NOT Float(Double.pi) EITHER, which is 3.1415927: FloatingPoint.pi
+    // is specified as pi rounded TOWARD ZERO, so that x/pi never overflows and
+    // sin(pi) keeps its sign. 3.1415925025939941 is that float (0x40490FDA) as
+    // the double it widens to exactly - read off swiftc 6.1.2, which prints
+    // Float.pi and Float(3.1415925025939941) identically and Float(Double.pi) as
+    // 3.1415927.
+    function swF32Type() {
+        return {infinity: swF32(swInfF), nan: swF32(swNanF), pi: swF32(3.1415925025939941),
+                zero: swF32(0), __conv: swF32Conv}
+    }
     hostGlobals["Double"] = swFloType()
-    // Float is an ALIAS of Double here - see the note at swFlo above for the
-    // precision this deliberately does not model.
-    hostGlobals["Float"] = swFloType()
+    hostGlobals["Float"] = swF32Type()
     // String(x) / String(describing: x): the text print would have written.
     hostGlobals["String"] = {__conv: function(x) { return swstr(x) }}
     hostGlobals["Int"] = swIntType(64, false)

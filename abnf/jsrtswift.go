@@ -159,17 +159,27 @@ func init() {
 				}
 			}
 			x, y := swNum(rt, l), swNum(rt, r)
+			// A Float operand makes BOTH operands Floats and rounds the
+			// result: swift forbids every mixed pair, so the only other
+			// side an untyped literal can be is a Float too. Computing in
+			// double and rounding once is exactly binary32 + - * / % -
+			// double has more than 2*24+2 significand bits, so the second
+			// rounding cannot move the result (Figueroa's theorem).
+			f32 := swIsF32(l) || swIsF32(r)
+			if f32 {
+				x, y = jvmFround(x), jvmFround(y)
+			}
 			switch op {
 			case "+":
-				return w(swMkFlo(x + y))
+				return w(swReFlo(x+y, f32))
 			case "-":
-				return w(swMkFlo(x - y))
+				return w(swReFlo(x-y, f32))
 			case "*":
-				return w(swMkFlo(x * y))
+				return w(swReFlo(x*y, f32))
 			case "/":
-				return w(swMkFlo(x / y))
+				return w(swReFlo(x/y, f32))
 			case "%":
-				return w(swMkFlo(math.Mod(x, y)))
+				return w(swReFlo(math.Mod(x, y), f32))
 			}
 			return w(rt.giArith(op, l, r))
 		}
@@ -199,6 +209,49 @@ func init() {
 			}
 			return w(swMkFlo(swNum(rt, v)))
 		}
+		// Float(x): the same conversion at the 32 bit width, and the one new
+		// extern the width needs. Every Float in a program comes from here or
+		// from js_swadoptf32 (a `let x: Float` annotation); a Float that is
+		// already one keeps its width through every operator above. The layer-2
+		// twin is js_swflo32 in languages/lib/swift-rt.metajs.
+		m["js_swflo32"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if s, ok := v.(string); ok {
+				if !swFloText(s) {
+					return jsHNull
+				}
+				// Read at 64 and rounded to 32, where swiftc rounds once. A
+				// decimal that lands exactly on a float midpoint AFTER a double
+				// rounding would differ; no value in the corpus or the probe
+				// does. It is spelled this way because layer 2 and the
+				// interpreter have only a double parser, and the three engines
+				// must answer the same string.
+				f, err := strconv.ParseFloat(s, 64)
+				if err != nil {
+					return jsHNull
+				}
+				return w(swMkF32(f))
+			}
+			if isNullish(v) {
+				rt.fail("Float conversion of nil")
+			}
+			if b, ok := v.(bool); ok {
+				if b {
+					return w(swMkF32(1))
+				}
+				return w(swMkF32(0))
+			}
+			return w(swMkF32(swNum(rt, v)))
+		}
+		// `let x: Float = 1` and `var x: Float` - the declared-type adoption, the
+		// float half of the rule that makes `let d: Double = 3` hold 3.0. It has
+		// to pass nil through, which js_swflo32 would abort on.
+		m["js_swadoptf32"] = func(a []uint64) uint64 {
+			if isNullish(u(a[0])) {
+				return a[0]
+			}
+			return m["js_swflo32"](a)
+		}
 		// String(x) / String(describing: x): the text print would have written.
 		m["js_swstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.swDesc(u(a[0]))) }
 		// abs/max/min, Double-aware: a boxed operand keeps its box (abs(-1.5) is
@@ -206,7 +259,8 @@ func init() {
 		m["js_swabs"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			if f, ok := v.(jsJFlo); ok {
-				return w(swMkFlo(math.Abs(f.f)))
+				// abs keeps the operand's WIDTH: abs of a Float is a Float.
+				return w(swReFlo(math.Abs(f.f), f.sty == floJavaF))
 			}
 			if giIsInt(v) {
 				n := giVal(rt, v)
@@ -276,17 +330,22 @@ func init() {
 				}
 				return swNum(rt, args.elems[0])
 			}
+			// Every one of these keeps the receiver's WIDTH: a Float
+			// method answers a Float. squareRoot is correctly rounded at
+			// 32 bits by the same double-then-round argument as the
+			// operators (sqrt is in Figueroa's list).
+			f32 := f.sty == floJavaF
 			switch name {
 			case "rounded":
-				return w(swMkFlo(swRoundHalfAway(f.f)))
+				return w(swReFlo(swRoundHalfAway(f.f), f32))
 			case "squareRoot":
-				return w(swMkFlo(math.Sqrt(f.f)))
+				return w(swReFlo(math.Sqrt(f.f), f32))
 			case "truncatingRemainder":
-				return w(swMkFlo(math.Mod(f.f, arg0())))
+				return w(swReFlo(math.Mod(f.f, arg0()), f32))
 			case "isMultiple":
 				return boolH(math.Mod(f.f, arg0()) == 0)
 			case "description":
-				return rt.wrapStr(swFloStr(f.f))
+				return rt.wrapStr(swFloDesc(f))
 			}
 			rt.fail("unknown Double method: %s", name)
 			return 0
@@ -314,8 +373,9 @@ func init() {
 			v := u(a[0])
 			if !swIsWhole(v) {
 				// A float negates as a float, so -0.0 keeps its sign and
-				// -1.0/0.0 is -inf.
-				return w(swMkFlo(-swNum(rt, v)))
+				// -1.0/0.0 is -inf. Negation is exact, so the width only
+				// has to be carried, never re-rounded.
+				return w(swReFlo(-swNum(rt, v), swIsF32(v)))
 			}
 			wd, un := giWidthOf(v, v)
 			return w(giNorm(-giVal(rt, v), wd, un))
@@ -355,6 +415,12 @@ func init() {
 				// numeric comparison at all.
 				if swIsFlo(l) || swIsFlo(r) {
 					x, y := swNum(rt, l), swNum(rt, r)
+					// A Float operand makes the other side a Float too,
+					// so `16777217 < f` compares two binary32 values -
+					// swift will only ever have put a literal there.
+					if swIsF32(l) || swIsF32(r) {
+						x, y = jvmFround(x), jvmFround(y)
+					}
 					c := 0
 					if x < y {
 						c = -1
@@ -391,9 +457,9 @@ func init() {
 				case "isZero":
 					return boolH(f.f == 0)
 				case "description":
-					return rt.wrapStr(swFloStr(f.f))
+					return rt.wrapStr(swFloDesc(f))
 				case "magnitude":
-					return w(swMkFlo(math.Abs(f.f)))
+					return w(swReFlo(math.Abs(f.f), f.sty == floJavaF))
 				}
 			}
 			if b, ok := u(a[0]).(jsGInt); ok {
@@ -483,6 +549,57 @@ func swMkFlo(f float64) jsJFlo { return jsJFlo{f: f} }
 
 func swIsFlo(v interface{}) bool { _, ok := v.(jsJFlo); return ok }
 
+// ----------------------------------------------------------------------------
+// Float: the 32 bit width
+//
+// A Swift `Float` is an IEEE-754 binary32 (swift.org's "Float represents a
+// 32-bit floating-point number"), not a Double spelled differently:
+// `Float(1) / Float(3)` is 0.33333334 where the Double is 0.3333333333333333.
+// The VALUE still travels as a float64 - every float is exactly one - so the
+// only thing that goes on the box is the WIDTH, and the tag 14 box already has a
+// byte for a per-language print tag. STYLE 3 IS THE FLOAT, the same style byte
+// java and kotlin use (floJavaF in jsrtjvm.go), because it means the same thing
+// there: a 24 bit significand. Only the RENDERING differs, and swift's never
+// goes through jvmFloText - every swift print path is swRender, whose float arm
+// is swFloStr/swFloStr32 below.
+//
+// THE SIMPLIFICATION SWIFT GETS AND THE JVM LANGUAGES DO NOT: swift FORBIDS
+// mixed Float/Double (and Float/Int) arithmetic outright - `x + y` with
+// `let x: Float` and `let y: Double` is *error: binary operator '+' cannot be
+// applied to operands of type 'Float' and 'Double'*, verified against swiftc
+// 6.1.2, and so is `x + i` for `let i: Int`. Only an untyped LITERAL may take
+// the other side's type. So "if either operand is a Float, both are" is correct
+// for every program swiftc accepts, and no JLS-5.6.2 wider-type rule is needed:
+// there is no Float-op-Double pair to get backwards.
+//
+// The width lives here and in layer 2, NOT in the C floor: languages/lib/runtime.c
+// is compiled by our own c-to-llvm-ir.abnf, which computes every float at DOUBLE
+// precision (ctF("flt") is 8, arithmetic is emitted as integer soft-float), so
+// the floor cannot spell `(float)x` at all. Measured and recorded in e5e68b5.
+//
+// Three engines implement this one specification for swift: the {__flo, __f32}
+// box of languages/swift-interpreter.abnf, jsJFlo{sty: floJavaF} here, and
+// languages/lib/swift-rt.metajs.
+
+// swMkF32 builds a Float box, rounding to binary32 first. jvmFround is
+// `float64(float32(x))`, which is the whole of the width in Go.
+func swMkF32(f float64) jsJFlo { return jsJFlo{f: jvmFround(f), sty: floJavaF} }
+
+// swIsF32 reports whether a value is a Float rather than a Double.
+func swIsF32(v interface{}) bool {
+	f, ok := v.(jsJFlo)
+	return ok && f.sty == floJavaF
+}
+
+// swReFlo rebuilds a box at the width of the operand(s) it came from: a Float
+// result rounds, a Double result does not.
+func swReFlo(f float64, f32 bool) jsJFlo {
+	if f32 {
+		return swMkF32(f)
+	}
+	return swMkFlo(f)
+}
+
 // swIsNumeric reports whether a value takes part in numeric equality at all, so
 // that 1.0 == "x" is false rather than 1.0 == 0.
 func swIsNumeric(v interface{}) bool {
@@ -507,7 +624,18 @@ func swRoundHalfAway(f float64) float64 { return math.Round(f) }
 // "inf"/"-inf" and the NaN is "nan". Every boundary here was read off swift 6.1.2
 // rather than remembered. The JS twin is swFloStr in swift-interpreter.abnf and
 // the two MUST stay in step, because ./test.sh --cross diffs them.
-func swFloStr(d float64) string {
+func swFloStr(d float64) string { return swFloStrW(d, false) }
+
+// swFloStr32 is Float.description: the SAME SwiftDtoa rule read at 24 significant
+// bits instead of 53, with the plain/scientific boundary moved from 2^53 down to
+// 2^24. Read off swift 6.1.2: 16777216.0 is the last plain value and 16777218.0
+// prints 1.6777218e+07, exactly as 9007199254740992.0 / 9.007199254740994e+15 do
+// for a Double. There is no two-significant-digit minimum (Float.leastNonzero-
+// Magnitude prints "1e-45", not java's "1.4E-45") and no forced ".0" on a
+// one-digit mantissa ("1e+20").
+func swFloStr32(d float64) string { return swFloStrW(d, true) }
+
+func swFloStrW(d float64, f32 bool) string {
 	if math.IsNaN(d) {
 		return "nan"
 	}
@@ -519,21 +647,39 @@ func swFloStr(d float64) string {
 	}
 	neg := math.Signbit(d)
 	a := math.Abs(d)
-	s := swFloDigits(a)
+	s := swFloDigitsW(a, f32)
 	if neg {
 		return "-" + s
 	}
 	return s
 }
 
+// swFloDesc renders a box in ITS OWN width. Every swift rendering path goes
+// through here or through swRender's float arm, which calls it.
+func swFloDesc(v jsJFlo) string {
+	if v.sty == floJavaF {
+		return swFloStr32(v.f)
+	}
+	return swFloStr(v.f)
+}
+
 // swFloDigits renders a >= 0. strconv's 'e' form gives the shortest round-tripping
 // digit run and the scientific exponent directly, which is exactly the pair
 // SwiftDtoa formats from.
-func swFloDigits(a float64) string {
+func swFloDigits(a float64) string { return swFloDigitsW(a, false) }
+
+// swFloDigitsW is swFloDigits at either width. `bitSize` is what decides
+// "shortest run of digits that round-trips", and the plain/scientific boundary
+// moves with it - 2^53 for a Double, 2^24 for a Float.
+func swFloDigitsW(a float64, f32 bool) string {
 	if a == 0 {
 		return "0.0"
 	}
-	s := strconv.FormatFloat(a, 'e', -1, 64)
+	bits, bound := 64, 9007199254740992.0
+	if f32 {
+		bits, bound = 32, 16777216.0
+	}
+	s := strconv.FormatFloat(a, 'e', -1, bits)
 	i := strings.IndexByte(s, 'e')
 	mant, exp := s[:i], s[i+1:]
 	e10, _ := strconv.Atoi(exp)
@@ -546,7 +692,7 @@ func swFloDigits(a float64) string {
 	//   9999999999999000.0        -> 9.999999999999e+15
 	//   1234567890123456.0        -> 1234567890123456.0
 	// `e10 >= 16` is subsumed: any |v| with e10 >= 16 is >= 1e16 > 2^53.
-	if e10 < -4 || a > 9007199254740992 {
+	if e10 < -4 || a > bound {
 		out := digits[:1]
 		if len(digits) > 1 {
 			out += "." + digits[1:]
@@ -717,8 +863,8 @@ func (rt *jsrt) swRender(v interface{}, nested bool, depth int) string {
 	case jsJFlo:
 		// A Double prints through SWIFT's float rendering: 1.0 is "1.0" and the
 		// infinity is "inf", where the shared toString would answer the style of
-		// whichever language owns the box's tag.
-		return swFloStr(t.f)
+		// whichever language owns the box's tag. A Float prints at 24 bits.
+		return swFloDesc(t)
 	case string:
 		if nested {
 			return swQuote(t)

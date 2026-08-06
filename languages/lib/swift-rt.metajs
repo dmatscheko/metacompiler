@@ -235,6 +235,252 @@ function rtkFloDigits(a) {
     return rtFixText(p.d, p.e + 1)
 }
 
+// ===================================================== the float WIDTH ======
+//
+// A Swift `Float` is an IEEE-754 binary32, not a print style and not a Double
+// spelled differently: `Float(1) / Float(3)` is 0.33333334 where the Double is
+// 0.3333333333333333, and every arithmetic result has to be rounded back to 24
+// significant bits. The VALUE still travels as a double (every float is exactly
+// one), so the only thing that goes ON the box is the WIDTH - and the tag 14 box
+// already has a byte for a per-language print tag. STYLE 3 IS THE FLOAT, the
+// same style byte java and kotlin use (floJavaF in abnf/jsrtjvm.go), because it
+// means the same thing there: a 24 bit significand. Only the RENDERING differs,
+// and swift's never reaches the floor's jf_text - every swift print path is
+// swRender, whose float arm is swFloDesc below.
+//
+// THE SIMPLIFICATION SWIFT GETS AND THE JVM LANGUAGES DO NOT. Swift FORBIDS
+// mixed arithmetic outright: `x + y` with `let x: Float` and `let y: Double` is
+// *error: binary operator '+' cannot be applied to operands of type 'Float' and
+// 'Double'*, and so is `x + i` for `let i: Int` - both read off swiftc 6.1.2.
+// Only an untyped LITERAL may take the other side's type. So "if either operand
+// is a Float, both are" is correct for every program swiftc accepts, and none of
+// kotlin's JLS-5.6.2 wider-type machinery (k1FloStyle2 / k1FloFix) is needed
+// here: there is no Float-op-Double pair to get backwards.
+//
+// WHY THE WIDTH DOES NOT MOVE INTO THE FLOOR, measured in e5e68b5 rather than
+// preferred: languages/lib/runtime.c is compiled by our own c-to-llvm-ir.abnf,
+// and THAT DIALECT COMPUTES EVERY `float` AT DOUBLE PRECISION - its header says
+// so, ctF("flt") returns 8, and floating arithmetic is emitted as soft-float
+// integer code. The floor cannot spell `(float)x` at all, so a floor-side
+// rounder would be this same power-of-two loop written a second time in C plus a
+// shortest-round-trip-at-24-bits renderer in C, in the one file all sixteen
+// languages link. The cost of keeping it here is that runtime.c's jf_text has NO
+// ARM for style 3, so every rendering of a style 3 box is intercepted here.
+//
+// Three engines implement this one specification for swift: the {__flo, __f32}
+// box of languages/swift-interpreter.abnf, jsJFlo{sty: floJavaF} in
+// abnf/jsrtswift.go, and this file.
+
+// swIsF32: a Float rather than a Double.
+function swIsF32(v) {
+    if (!floIs(v)) { return false }
+    return floStyle(v) == 3
+}
+
+// swMkF32 is the Float box: jsJFlo{f: jvmFround(x), sty: floJavaF}.
+function swMkF32(x) { return flo(swF32Round(x), 3) }
+
+// One result, rebuilt at the width its operands had.
+function swReFlo(x, f32) {
+    if (f32) { return swMkF32(x) }
+    return swMkFlo(x)
+}
+
+// x * 2^k, EXACTLY - every factor is a power of two, so not one bit is lost. The
+// chunking by 2^30 keeps the loop short for the ~280 halvings a subnormal float
+// needs.
+function swScale2(x, k) {
+    var v = x
+    var n = k
+    while (n >= 30) { v = v * 1073741824; n = n - 30 }
+    while (n <= 0 - 30) { v = v / 1073741824; n = n + 30 }
+    while (n > 0) { v = v * 2; n = n - 1 }
+    while (n < 0) { v = v / 2; n = n + 1 }
+    return v
+}
+
+// swF32Round is Math.fround: the double nearest x that a binary32 can hold,
+// round-half-to-EVEN, with the subnormals and both overflows. It is what the Go
+// twin spells `float64(float32(x))` (jvmFround in abnf/jsrtjvm.go).
+//
+// It is written on `*` and `/` by powers of two and a floor, because MetaJS has
+// no access to a double's BITS - chapter 7.7 of docs/working-on-this-project.md,
+// the same argument that keeps d_pow and d_frexp in the C floor. The significand
+// is scaled until its unit in the last place is 1, rounded there, and scaled
+// back; both scalings are exact, so the single rounding is the only one that
+// happens. The twin is k1F32Round in languages/lib/kotlin-rt.metajs.
+function swF32Round(x) {
+    if (x !== x) { return x }
+    if (x === 0) { return x }
+    var neg = x < 0
+    var a = x
+    if (neg) { a = 0 - x }
+    if (a === Infinity) { return x }
+    var maxf = swScale2(16777215, 104)
+    // 2^128 is above every rounding boundary and 2^-150 is the half-way point
+    // below the smallest subnormal (which ties to even, i.e. to zero); both early
+    // exits also bound the exponent loop below to ~280 turns.
+    if (a >= swScale2(1, 128)) { return swF32Big(neg) }
+    if (a <= swScale2(1, 0 - 150)) { return swF32Tiny(neg) }
+    var e = 0
+    var t = a
+    while (t >= 2) { t = t / 2; e = e + 1 }
+    while (t < 1) { t = t * 2; e = e - 1 }
+    var q = e - 23
+    if (q < 0 - 149) { q = 0 - 149 }
+    var sc = swScale2(a, 0 - q)
+    var f = Math.floor(sc)
+    var d = sc - f
+    if (d > 0.5) { f = f + 1 }
+    if (d === 0.5) { if (f - Math.floor(f / 2) * 2 !== 0) { f = f + 1 } }
+    var r = swScale2(f, q)
+    if (r > maxf) { return swF32Big(neg) }
+    if (r === 0) { return swF32Tiny(neg) }
+    if (neg) { return 0 - r }
+    return r
+}
+
+// An overflow and an underflow, each keeping the sign. -0.0 is spelled as a
+// DIVISION: `0 - 0.0` is +0.0 and `x * 0` keeps an integral zero
+// (docs/working-on-this-project.md chapter 7.10).
+function swF32Big(neg) {
+    if (neg) { return 0 - Infinity }
+    return Infinity
+}
+
+function swF32Tiny(neg) {
+    if (neg) { return 0 / (0 - 1) }
+    return 0
+}
+
+// ----- Float.description ----------------------------------------------------
+//
+// SwiftDtoa's rule read at 24 significant bits: the SHORTEST decimal that reads
+// back as the same FLOAT, plain when the scientific exponent is >= -4 and the
+// value is <= 2^24, and d.ddde+nn outside it. Read off swift 6.1.2: 16777216.0
+// is the last plain value and 16777218.0 prints 1.6777218e+07, exactly as
+// 9007199254740992.0 / 9.007199254740994e+15 do for a Double. There is no
+// two-significant-digit minimum (Float.leastNonzeroMagnitude prints "1e-45",
+// where java's Float.MIN_VALUE prints "1.4E-45") and no forced ".0" on a
+// one-digit mantissa, which is rtSciText's `dot` argument again.
+//
+// THE DIGITS COME FROM rtSplit10, i.e. from `"" + a`, NOT from floPrec, and that
+// is not a style choice: floPrec's two implementations DISAGREE
+// (abnf/commonscript.go answers exactly n digits, languages/lib/runtime.c
+// answers max(n, shortest)), so using it would be a halves divergence in every
+// float that needs fewer digits than its double.
+
+// The shortest decimal that round-trips as a binary32, as rtSplit10's {d, e}.
+// Nine digits always do.
+function swF32Sig(a) {
+    var full = rtSplit10(a)
+    var n = 1
+    while (n < 9) {
+        var c = swRoundSig(full, n)
+        if (swF32Round(swSigVal(c)) === a) { return c }
+        n = n + 1
+    }
+    return swRoundSig(full, 9)
+}
+
+// A {d, e} pair rounded to n significant digits, half to even. The source is
+// already the shortest form of the value, so a genuine tie can only be a decimal
+// the double holds exactly. The twin is k1RoundDig in kotlin-rt.metajs, which
+// carries the same body over a "digits e exp" string.
+function swRoundSig(p, n) {
+    var ds = p.d
+    var ex = p.e
+    if (ds.length <= n) { return p }
+    var keep = ds.substring(0, n)
+    var nxt = ds.charCodeAt(n) - 48
+    var up = false
+    if (nxt > 5) { up = true }
+    if (nxt == 5) {
+        var rest = false
+        var i = n + 1
+        while (i < ds.length) {
+            if (ds.charCodeAt(i) != 48) { rest = true }
+            i = i + 1
+        }
+        if (rest) { up = true }
+        else {
+            var last = ds.charCodeAt(n - 1) - 48
+            if (last - Math.floor(last / 2) * 2 == 1) { up = true }
+        }
+    }
+    if (up) {
+        var out = ""
+        var carry = 1
+        var k = n - 1
+        while (k >= 0) {
+            var dg = ds.charCodeAt(k) - 48 + carry
+            carry = 0
+            if (dg == 10) { dg = 0; carry = 1 }
+            out = "" + dg + out
+            k = k - 1
+        }
+        if (carry == 1) {
+            out = ("1" + out).substring(0, n)
+            ex = ex + 1
+        }
+        keep = out
+    }
+    var ez = keep.length
+    while (ez > 1 && keep.charAt(ez - 1) == "0") { ez = ez - 1 }
+    return {d: keep.substring(0, ez), e: ex}
+}
+
+// The value of a {d, e} pair. At most nine digits, so the integer part is exact;
+// the power of ten is applied in chunks of 10^15, the largest one a double holds
+// exactly. The relative error stays under ~1e-15, five million times finer than a
+// float's half-ulp - and the only consumer is the round-trip TEST above, so an
+// error that small cannot pick a wrong length.
+function swSigVal(p) {
+    var ds = p.d
+    var k = p.e - ds.length + 1
+    var m = 0
+    var i = 0
+    while (i < ds.length) {
+        m = m * 10 + (ds.charCodeAt(i) - 48)
+        i = i + 1
+    }
+    while (k >= 15) { m = m * 1000000000000000; k = k - 15 }
+    while (k <= 0 - 15) { m = m / 1000000000000000; k = k + 15 }
+    while (k > 0) { m = m * 10; k = k - 1 }
+    while (k < 0) { m = m / 10; k = k + 1 }
+    return m
+}
+
+// rtkFloDigits at the 32 bit width: the shortest float digits, and the boundary
+// moved from 2^53 down to 2^24.
+function swF32Digits(a) {
+    var p = swF32Sig(a)
+    if (p.e < 0 - 4 || a > 16777216) { return rtSciText(p.d, p.e, false) }
+    return rtFixText(p.d, p.e + 1)
+}
+
+// rtFloStr's body with swF32Digits underneath it. rtFloStr itself cannot be
+// reused: it is hard-wired to the rtkFloDigits hook, and this file already
+// spends that hook on the Double.
+function swF32Str(d) {
+    if (d !== d) { return "nan" }
+    if (d === Infinity) { return "inf" }
+    if (0 - d === Infinity) { return "-inf" }
+    if (d == 0) {
+        if (1 / d < 0) { return "-0.0" }
+        return "0.0"
+    }
+    if (d < 0) { return "-" + swF32Digits(0 - d) }
+    return swF32Digits(d)
+}
+
+// Every rendering of a tag 14 box goes through here, because the floor cannot
+// render style 3 (see the section header).
+function swFloDesc(v) {
+    if (floStyle(v) == 3) { return swF32Str(floNum(v)) }
+    return swFloStr(floNum(v))
+}
+
 // swFloText reports whether the WHOLE string is a decimal float, for the failable
 // Double("3.5"): swift answers nil for "3.5x", where a lenient parse would stop
 // at the first bad character and answer 3.5.
@@ -394,7 +640,7 @@ function swRender(v, nested, depth) {
     if (v === undefined) { return "nil" }
     if (v === null) { return "nil" }
     if (sintIs(v)) { return sintStr(v) }
-    if (floIs(v)) { return swFloStr(floNum(v)) }
+    if (floIs(v)) { return swFloDesc(v) }
     if (typeof v == "string") {
         if (nested) { return swQuote(v) }
         return v
@@ -977,11 +1223,18 @@ function js_swarith(op, l, r) {
     }
     var x = swNum(l)
     var y = swNum(r)
-    if (op === "+") { return swMkFlo(x + y) }
-    if (op === "-") { return swMkFlo(x - y) }
-    if (op === "*") { return swMkFlo(x * y) }
-    if (op === "/") { return swMkFlo(x / y) }
-    if (op === "%") { return swMkFlo(x % y) }
+    // A Float operand makes BOTH operands Floats and rounds the result: swift
+    // forbids every mixed pair, so the only other side an untyped literal can be
+    // is a Float too. Computing in double and rounding once is exactly binary32
+    // + - * / % - a double carries more than 2*24+2 significand bits, so the
+    // second rounding cannot move the result.
+    var f32 = swIsF32(l) || swIsF32(r)
+    if (f32) { x = swF32Round(x); y = swF32Round(y) }
+    if (op === "+") { return swReFlo(x + y, f32) }
+    if (op === "-") { return swReFlo(x - y, f32) }
+    if (op === "*") { return swReFlo(x * y, f32) }
+    if (op === "/") { return swReFlo(x / y, f32) }
+    if (op === "%") { return swReFlo(x % y, f32) }
     return swGiArith(op, l, r)
 }
 
@@ -1000,10 +1253,40 @@ function js_swflo(v) {
     return swMkFlo(swNum(v))
 }
 
+// Float(x): the same conversion at the 32 bit width, and the one new extern the
+// width needs. Every Float in a program comes from here or from js_swadoptf32 (a
+// `let x: Float` annotation); a Float that is already one keeps its width
+// through every operator above. The Go twin is js_swflo32 in abnf/jsrtswift.go.
+//
+// (A string is read at 64 bits and rounded to 32, where swiftc rounds once. A
+// decimal that lands exactly on a float midpoint AFTER a double rounding would
+// differ; no value in the corpus or the probe does.)
+function js_swflo32(v) {
+    if (typeof v == "string") {
+        if (!swFloText(v)) { return null }
+        var f = parseFloat(v)
+        if (f !== f && v.indexOf("nan") < 0 && v.indexOf("NaN") < 0) { return null }
+        return swMkF32(f)
+    }
+    if (v === undefined || v === null) { fail("Float conversion of nil") }
+    if (v === true) { return swMkF32(1) }
+    if (v === false) { return swMkF32(0) }
+    return swMkF32(swNum(v))
+}
+
+// `let x: Float = 1` and every other declared-Float binding site - the float half
+// of the rule that makes `let d: Double = 3` hold 3.0. It passes nil through,
+// which js_swflo32 aborts on.
+function js_swadoptf32(v) {
+    if (v === undefined || v === null) { return v }
+    return js_swflo32(v)
+}
+
 // abs/max/min, Double-aware: a boxed operand keeps its box (abs(-1.5) is 1.5, not
 // the 1 an integer truncation gives) and compares by VALUE.
 function js_swabs(v) {
-    if (floIs(v)) { return swMkFlo(floAbsRaw(floNum(v))) }
+    // abs keeps the operand's WIDTH: abs of a Float is a Float.
+    if (floIs(v)) { return swReFlo(floAbsRaw(floNum(v)), swIsF32(v)) }
     if (sintIs(v)) {
         var n = sintOp(1, 0, v)
         if (sintCmp(v, 0) < 0) { return sintConv(n, sintWidth(v), sintUns(v)) }
@@ -1070,11 +1353,15 @@ function js_swmcall(recv, name, args) {
     var f = floNum(recv)
     var a0 = 0
     if (args.length > 0) { a0 = swNum(args[0]) }
-    if (name === "rounded") { return swMkFlo(swRound(f)) }
-    if (name === "squareRoot") { return swMkFlo(Math.sqrt(f)) }
-    if (name === "truncatingRemainder") { return swMkFlo(f % a0) }
+    // Every one of these keeps the RECEIVER'S width: a Float method answers a
+    // Float. squareRoot is correctly rounded at 32 bits by the same
+    // double-then-round argument as the operators.
+    var f32 = swIsF32(recv)
+    if (name === "rounded") { return swReFlo(swRound(f), f32) }
+    if (name === "squareRoot") { return swReFlo(Math.sqrt(f), f32) }
+    if (name === "truncatingRemainder") { return swReFlo(f % a0, f32) }
     if (name === "isMultiple") { return (f % a0) === 0 }
-    if (name === "description") { return swFloStr(f) }
+    if (name === "description") { return swFloDesc(recv) }
     fail("unknown Double method: " + name)
     return undefined
 }
@@ -1099,7 +1386,8 @@ function js_swshift(op, l, r) {
 function js_swneg(v) {
     // UNARY minus: `0 - x` would answer +0.0 for -0.0 and lose the sign Swift
     // prints. The floor's d_neg flips the sign bit; see swFloStr.
-    if (!swWhole(v)) { return swMkFlo(-swNum(v)) }
+    // Negation is exact, so the width is only carried, never re-rounded.
+    if (!swWhole(v)) { return swReFlo(-swNum(v), swIsF32(v)) }
     return sintConv(sintOp(1, 0, v), sintWidth(v), sintUns(v))
 }
 
@@ -1130,6 +1418,10 @@ function swRel(l, r) {
     if (floIs(l) || floIs(r)) {
         var x = swNum(l)
         var y = swNum(r)
+        // A Float operand makes the other side a Float too, so `16777217 < f`
+        // compares two binary32 values - swift will only ever have put an
+        // untyped literal on the other side.
+        if (swIsF32(l) || swIsF32(r)) { x = swF32Round(x); y = swF32Round(y) }
         if (x < y) { return 0 - 1 }
         if (x > y) { return 1 }
         if (x !== y) { return 0 - 2 }
@@ -1182,8 +1474,8 @@ function js_swget(v, k) {
         if (k === "isInfinite") { return f === Infinity || 0 - f === Infinity }
         if (k === "isFinite") { return f === f && f !== Infinity && 0 - f !== Infinity }
         if (k === "isZero") { return f === 0 }
-        if (k === "description") { return swFloStr(f) }
-        if (k === "magnitude") { return swMkFlo(Math.abs(f)) }
+        if (k === "description") { return swFloDesc(v) }
+        if (k === "magnitude") { return swReFlo(Math.abs(f), swIsF32(v)) }
     }
     if (sintIs(v)) {
         if (k === "description") { return sintStr(v) }

@@ -3601,9 +3601,15 @@ KwContinue  = "continue" KwEnd ;
         // Double(x) / Float(x) / String(x): the same walk-time resolution the
         // integer types get. Double(3) is 3.0 and Double(3) / 2 is 1.5 - the whole
         // point of the box - and String(x) is the text print would have written.
+        // Float(x) is the same resolution at the 32 bit WIDTH: a Swift Float is
+        // an IEEE-754 binary32, so Float(1) / Float(3) is 0.33333334 where the
+        // Double is 0.3333333333333333. The whole specification, and why the
+        // width cannot live in the C floor, is the float WIDTH block of
+        // languages/lib/swift-rt.metajs.
         if ((name == "Double" || name == "Float" || name == "String")
             && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
             var convExt = name == "String" ? "js_swstr" : "js_swflo"
+            if (name == "Float") { convExt = "js_swflo32" }
             return function(b) {
                 var ec2 = emitArgRecs(b, args)
                 b = ec2.b
@@ -3807,20 +3813,24 @@ KwContinue  = "continue" KwEnd ;
         // arithmetic that follows wraps at 8 bits rather than at 64.
         var iw = null
         var isDoubleTy = false
+        var isFloatTy = false
         if (items[k] != undefined && items[k].itype != undefined) {
             iw = swIntWidthOf(items[k].itype)
-            isDoubleTy = items[k].itype == "Double" || items[k].itype == "Float"
+            isFloatTy = items[k].itype == "Float"
+            isDoubleTy = items[k].itype == "Double" || isFloatTy
             k++
         }
         var init = items[k]
         // `let d: Double = 3` holds 3.0, so d / 2 is 1.5 and print(d) writes "3.0".
         // The annotation is the only thing that says so: the initializer is an
-        // untyped integer literal.
+        // untyped integer literal. `let f: Float = 3` is the same rule at the
+        // 32 bit WIDTH, and every later operation on that value rounds to 24 bits.
         if (isDoubleTy && init != undefined) {
+            var adoptExt = isFloatTy ? "js_swadoptf32" : "js_swflo"
             return function(b) {
                 var rd = init(b)
                 b = rd.b
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), callExt(b, "js_swflo", [rd.v])])
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), callExt(b, adoptExt, [rd.v])])
                 return b
             }
         }
@@ -5304,18 +5314,27 @@ KwContinue  = "continue" KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tn), intV])
         }
         // The FLOAT types, the same shape: Double.infinity / .nan / .pi / .zero,
-        // with the call form Double(x) resolved in makeCall. Float is an alias -
-        // see the precision note in abnf/jsrtswift.go.
+        // with the call form Double(x) resolved in makeCall. FLOAT'S STATICS ARE
+        // FLOATS - Float.pi prints 3.1415925, not the double's
+        // 3.141592653589793 - so the whole block is built through the type's own
+        // constructor extern.
+        //
+        // Float.pi is NOT Float(Double.pi) either, which is 3.1415927:
+        // FloatingPoint.pi is specified as pi rounded TOWARD ZERO, so that x/pi
+        // never overflows. 3.1415925025939941 is that float (0x40490FDA) as the
+        // double it widens to exactly - read off swiftc 6.1.2.
         var floTypeNames = ["Double", "Float"]
         for (var fi = 0; fi < floTypeNames.length; fi++) {
+            var floExt = floTypeNames[fi] == "Float" ? "js_swflo32" : "js_swflo"
+            var floPi = floTypeNames[fi] == "Float" ? 3.1415925025939941 : 3.141592653589793
             var floV = callExt(b, "js_obj_new", [])
-            var oneV = callExt(b, "js_swflo", [emitNum(b, 1)])
-            var zeroV = callExt(b, "js_swflo", [emitNum(b, 0)])
+            var oneV = callExt(b, floExt, [emitNum(b, 1)])
+            var zeroV = callExt(b, floExt, [emitNum(b, 0)])
             var infV = callExt(b, "js_swarith", [emitStr(b, "/"), oneV, zeroV])
             callExt(b, "js_set", [floV, emitStr(b, "infinity"), infV])
             callExt(b, "js_set", [floV, emitStr(b, "nan"),
                                   callExt(b, "js_swarith", [emitStr(b, "/"), zeroV, zeroV])])
-            callExt(b, "js_set", [floV, emitStr(b, "pi"), callExt(b, "js_swflo", [emitNum(b, 3.141592653589793)])])
+            callExt(b, "js_set", [floV, emitStr(b, "pi"), callExt(b, floExt, [emitNum(b, floPi)])])
             callExt(b, "js_set", [floV, emitStr(b, "zero"), zeroV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, floTypeNames[fi]), floV])
         }

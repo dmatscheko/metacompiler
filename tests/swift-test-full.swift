@@ -857,12 +857,27 @@ func s24() {
 // first and matches its output; the file as a whole is a valid Swift program, so
 // it can be re-checked with `swift tests/swift-test-full.swift` at any time.
 //
-// NOT asserted, and deliberately: Float is an ALIAS of Double here, so only
-// values both widths hold exactly are used (Float(1) / Float(3) is 0.33333334 in
-// real swift and 0.3333333333333333 here). And real Swift REJECTS a mixed
-// Int/Double expression unless a literal is involved, so only the literal forms
-// appear - both notes are spelled out in abnf/jsrtswift.go.
+// Float is a REAL binary32 as of the float-width work, so its own rows are
+// asserted below (f32a...f32o) against swiftc 6.1.2. Real Swift REJECTS a mixed
+// Int/Double or Float/Double expression unless a literal is involved, so only
+// the literal forms appear - the note is spelled out in abnf/jsrtswift.go.
+//
+// STILL NOT ASSERTED, and the one Float row swiftc and this front end disagree
+// on: `n / m == 1.0 / 3.0` with n, m declared Float is TRUE in swiftc, because
+// the untyped literals take the Float type from the comparison itself. Recovering
+// that needs a type checker, which this front end does not have; it is the same
+// wall as Optional(3). One line of an 8,042-line probe.
 struct Flo25 { var x: Double; var y: Int }
+
+// The Float renderer and the Double one, reached through a function boundary so
+// the grammar's constant folder cannot answer the rows below at compile time.
+func s25f(_ v: Float) -> String { return "\(v)" }
+func s25d(_ v: Double) -> String { return "\(v)" }
+// Read out of arrays for the same reason. Built with Float(...) rather than a
+// `[Float]` annotation because an array literal's ELEMENT type is not adopted
+// here - see the note at f32o.
+let f25 = [Float(1.0), Float(3.0), Float(0.1), Float(16777216.0), Float(16777217.0), Float(2.0)]
+let z25 = [-14447655.0, 0.0]
 func s25() {
     // A float literal is a Double, so / is real division.
     check("flo1", 7.0 / 2.0 == 3.5 && 1.0 / 4.0 == 0.25)
@@ -921,7 +936,7 @@ func s25() {
     check("flo26", acc == 4.5 && "\(acc)" == "4.5")
     // A struct field declared Double.
     check("flo27", "\(Flo25(x: 1.5, y: 2))" == "Flo25(x: 1.5, y: 2)")
-    // Float is an alias of Double here; only values both widths hold exactly.
+    // Values both widths hold exactly agree whichever type they have.
     check("flo28", Float(1.5) + 1.5 == 3.0 && "\(Float(2.5))" == "2.5")
     let f: Float = 3
     check("flo29", f / 2 == 1.5 && "\(f)" == "3.0")
@@ -935,6 +950,63 @@ func s25() {
     // 1.0 and 1 are the SAME key: equal values hash equal.
     let one = [1.0: "a"]
     check("flo32", one[1] == "a" && one[1.0] == "a")
+
+    // ----- Float is a BINARY32, not a Double spelled differently -----
+    // A Swift Float is an IEEE-754 single, so Float(1) / Float(3) is 0.33333334
+    // and NOT the Double's 0.3333333333333333, and Float.description is
+    // SwiftDtoa's rule read at 24 significant bits. swiftc 6.1.2 settles every
+    // row below, and an 8,042-line probe over 40 float values - every operand
+    // read out of an array - is byte-identical to it in all three engines.
+    //
+    // Swift FORBIDS mixed Float/Double and Float/Int arithmetic outright, so
+    // "if either operand is a Float, both are" is the whole promotion rule and
+    // none of java's JLS-5.6.2 wider-type machinery is needed.
+
+    // The headline: eight significant digits, not sixteen.
+    check("f32a", s25f(f25[0] / f25[1]) == "0.33333334")
+    // ...and it is a DIFFERENT NUMBER. Double(f) widens a Float back out.
+    check("f32b", Double(f25[0] / f25[1]) != 1.0 / 3.0)
+    // 16777217 is the first integer a binary32 cannot hold; the value itself
+    // rounds down to 16777216.
+    check("f32c", s25f(f25[4]) == "16777216.0" && f25[4] == f25[3])
+    // 0.1 as a Float is a different number from 0.1, and prints as the shortest
+    // decimal that round-trips at 24 bits rather than at 53.
+    check("f32d", s25f(f25[2]) == "0.1" && Double(f25[2]) == 0.10000000149011612)
+    // An untyped literal on the other side becomes a Float too, so adding 1 at
+    // the precision boundary does not move the value.
+    check("f32e", s25f(f25[3] + 1) == "16777216.0")
+    // ...and the same promotion decides the RELATIONS. (swiftc warns that the
+    // literal is not exactly representable, which is exactly the point.)
+    check("f32f", !(16777217 < f25[3]) && 16777217 <= f25[3])
+    // THE PLAIN/SCIENTIFIC BOUNDARY MOVES WITH THE WIDTH: SwiftDtoa goes
+    // scientific above 2^24 for a Float where it goes above 2^53 for a Double,
+    // so 16777216.0 is the last plain Float and 33554432.0 is not.
+    check("f32g", s25f(f25[3]) == "16777216.0" && s25f(f25[3] * 2) == "3.3554432e+07")
+    // Float.pi is pi rounded TOWARD ZERO (FloatingPoint.pi), so it is neither
+    // Double.pi nor Float(Double.pi), which would be 3.1415927.
+    check("f32h", s25f(Float.pi) == "3.1415925" && Double(Float.pi) != Double.pi)
+    // A declared Float type retypes an integer literal, at the 32 bit width.
+    let g25: Float = 1
+    check("f32i", s25f(g25 / 3) == "0.33333334")
+    // The extremes. No two-significant-digit minimum: 1e-45, not java's 1.4E-45.
+    check("f32j", s25f(Float(1e20)) == "1e+20" && s25f(Float(1e-45)) == "1e-45"
+                  && s25f(Float(3.4028235e38)) == "3.4028235e+38")
+    // Unary minus and both signed zeros survive the width.
+    check("f32k", s25f(-f25[2]) == "-0.1" && s25f(f25[0] * Float(0.0)) == "0.0"
+                  && s25f(Float(0.0) / Float(-1.0)) == "-0.0")
+    // THE PRE-EXISTING SIGNED-ZERO DEFECT this work turned up 336 times, in the
+    // INTERPRETER half only and for a plain Double: an integral-valued operand
+    // times a zero lost its sign (0.0 where swiftc, IEEE-754 and both compiled
+    // halves say -0.0). Reproduced at 4f2e6e4 in two lines of swift.
+    check("f32l", s25d(z25[1] * z25[0]) == "-0.0" && s25d(z25[1] / z25[0]) == "-0.0")
+    // A Float method answers a Float; .rounded() and .magnitude keep a signed
+    // zero, which the interpreter half also lost for a plain Double.
+    check("f32m", s25f(f25[5].squareRoot()) == "1.4142135"
+                  && s25f(Float(-0.1).rounded()) == "-0.0"
+                  && s25f(Float(-0.0).magnitude) == "0.0")
+    // Float's own statics are Floats, and the failable initializer is Double's.
+    check("f32n", s25f(Float.infinity) == "inf" && Float.nan.isNaN && s25f(Float.zero) == "0.0")
+    check("f32o", Float("0.25") == Float(0.25) && Float("x") == nil)
 }
 
 // ===== SECTION 26: parameter packs =====
