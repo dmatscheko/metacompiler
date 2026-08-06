@@ -41,9 +41,11 @@ package abnf
 //     mixed -> [Ljava.lang.Object;. So `Object[] o = {1, 2}` renders as `[I@...`
 //     where real java says `[Ljava.lang.Object;@...`, and a nested `int[][]` renders
 //     as `[Ljava.lang.Object;@...` where real java says `[[I@...`.
-//   - `Object#toString` is not a callable MEMBER: `b.toString()` on a class that
-//     declares none still fails to dispatch. Only the implicit rendering (println,
-//     `+`, String.valueOf) goes through here.
+//   - `Object#toString` IS a callable member now: `b.toString()` on a class that
+//     declares none routes to js_jvstr, the same rendering println / `+` /
+//     String.valueOf use, and `b.equals(o)` routes to js_jvaleq. Both dispatch to a
+//     declared or inherited method first, so an override is unaffected - the shape
+//     js_jhash established for hashCode.
 
 import (
 	"fmt"
@@ -666,6 +668,23 @@ func init() {
 		// js_jvaleq in languages/lib/java-rt.metajs and it matches arm for arm.
 		m["js_jvaleq"] = func(a []uint64) uint64 {
 			x, y := u(a[0]), u(a[1])
+			// TWO PRIMITIVES OF DIFFERENT KINDS ARE NEVER EQUAL. Integer#equals
+			// asks `instanceof Integer` before it compares, so
+			// `((Object) 1).equals(1L)` is FALSE in java - while the floor's
+			// strict_eq deliberately compares a sized integer and a plain number
+			// BY VALUE (chapter 7.9 of the manual), and js_jchareq below falls
+			// through to it. That gap was invisible while this extern only ever
+			// saw two components of the SAME declared type; routing Object#equals
+			// here made it a live halves divergence against the interpreter, which
+			// has always been exact. The guard is right for a record component
+			// too: an Object-typed component holding 1 does not equal one holding
+			// 1L. Only PRIMITIVES are screened - kind 0 (an instance, an array,
+			// null) must still reach the dispatch below, because a declared
+			// equals(Object) legitimately compares against a String.
+			kx, ky := jvEqKind(x), jvEqKind(y)
+			if kx != 0 && ky != 0 && kx != ky {
+				return jsHFalse
+			}
 			if fx, ok := x.(jsJFlo); ok {
 				if fy, ok2 := y.(jsJFlo); ok2 {
 					return boolH(jvDoubleCompareEq(fx.f, fy.f))
@@ -704,6 +723,71 @@ func init() {
 		// specified and what is a decision). The layer-2 twin is js_jhash in
 		// languages/lib/java-rt.metajs.
 		m["js_jhash"] = func(a []uint64) uint64 { return rt.wrapNum(rt.jvHash(u(a[0]))) }
+		// Is this value a CLASS DESCRIPTOR? The one thing an emitted probe needs to
+		// know to apply JLS 6.4.2 - a variable name obscures a type name - because
+		// a class descriptor is declared in the same scope chain a bare name reads
+		// (see makeVarRef in java-to-llvm-ir.abnf, docs/todo.md 2.9). The layer-2
+		// twin is js_jisclass in languages/lib/java-rt.metajs.
+		m["js_jisclass"] = func(a []uint64) uint64 {
+			o, ok := u(a[0]).(*jsObject)
+			if !ok {
+				return jsHFalse
+			}
+			return boolH(o.props["__isclass"] == true)
+		}
+		// THE OUTER HOP (docs/todo.md 1.6). An inner or anonymous class body names a
+		// field of its ENCLOSING instance unqualified, and javac resolves it there
+		// (JLS 6.5.6.1: the innermost enclosing class that declares the name wins).
+		// The instance carries that enclosing instance as __outer - every creation
+		// site of a nested or anonymous class records one - so the search is `this`,
+		// the statics of this' class chain, then __outer, and out.
+		//
+		// Answers the OWNER object, which the caller then reads or writes the name
+		// on, so one extern serves both directions. The twins are jOuterOwner in
+		// languages/java-interpreter.abnf (which needs no extern: it holds the
+		// objects) and js_jouter in languages/lib/java-rt.metajs.
+		m["js_jouter"] = func(a []uint64) uint64 {
+			name := rt.toString(u(a[1]))
+			v := u(a[0])
+			for guard := 0; guard < 64; guard++ {
+				o, ok := v.(*jsObject)
+				if !ok {
+					break
+				}
+				// "not undefined" rather than an own-key test, because the
+				// layer-2 twin has no own-key primitive and the two must agree.
+				// A declared field is never undefined (the emitted constructor
+				// gives every one of them 0, false or null before the body runs).
+				if pv, has := o.props[name]; has && pv != interface{}(jsUndef) {
+					return w(o)
+				}
+				if own := jvStaticOwner(o.props["__class"], name); own != nil {
+					return w(own)
+				}
+				v = o.props["__outer"]
+			}
+			rt.fail("unknown name: " + name)
+			return jsHUndefined
+		}
+		// Outer.this: out along __outer until an instance whose class chain carries
+		// that name. One unconditional __outer hop is wrong at two levels of
+		// nesting; the twin is makeOuterThis in java-interpreter.abnf.
+		m["js_jouterthis"] = func(a []uint64) uint64 {
+			name := rt.toString(u(a[1]))
+			v := u(a[0])
+			for guard := 0; guard < 64; guard++ {
+				o, ok := v.(*jsObject)
+				if !ok {
+					break
+				}
+				if jvClassIs(o.props["__class"], name) {
+					return w(o)
+				}
+				v = o.props["__outer"]
+			}
+			rt.fail("no enclosing instance of " + name)
+			return jsHUndefined
+		}
 		// String.valueOf(x) and the string form used by `+`.
 		m["js_jvstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.jvpStr(u(a[0]))) }
 		// Java's `+`. Identical to js_jadd (string concat / 32 bit int add / float
@@ -731,6 +815,66 @@ func init() {
 			return w(rt.jsAdd(l, r))
 		}
 	})
+}
+
+// jvEqKind is the java TYPE of a primitive value, for Object#equals: 0 means "not
+// a primitive" (an instance, an array, null, undefined) and every other number is
+// one boxed type. The split between 1 and 2 is Float vs Double, which
+// Float.equals(Double) rejects.
+func jvEqKind(v interface{}) int {
+	switch t := v.(type) {
+	case jsJFlo:
+		if t.sty == floJavaF {
+			return 1
+		}
+		return 2
+	case jsGInt:
+		return 3
+	case jsChar:
+		return 4
+	case bool:
+		return 5
+	case string:
+		return 6
+	case float64:
+		return 7
+	}
+	return 0
+}
+
+// jvStaticOwner finds the class descriptor in cls' __super chain that carries
+// `name` as an own property. In the COMPILED world a static field is an ordinary
+// property of the descriptor (the emitter js_set's it there), so the walk is the
+// same __super walk method dispatch does, with the guard < 64 cap chapter 7.9 of
+// the manual keeps on every one of them.
+func jvStaticOwner(cls interface{}, name string) *jsObject {
+	for guard := 0; guard < 64; guard++ {
+		clsObj, ok := cls.(*jsObject)
+		if !ok {
+			return nil
+		}
+		if pv, has := clsObj.props[name]; has && pv != interface{}(jsUndef) {
+			return clsObj
+		}
+		cls = clsObj.props["__super"]
+	}
+	return nil
+}
+
+// jvClassIs answers whether cls, or anything it extends, is named nm - what
+// Outer.this walks out until it finds.
+func jvClassIs(cls interface{}, nm string) bool {
+	for guard := 0; guard < 64; guard++ {
+		clsObj, ok := cls.(*jsObject)
+		if !ok {
+			return false
+		}
+		if n, _ := clsObj.props["__name"].(string); n == nm {
+			return true
+		}
+		cls = clsObj.props["__super"]
+	}
+	return false
 }
 
 // jvpFirst renders the first element of a print call's argument array. An empty

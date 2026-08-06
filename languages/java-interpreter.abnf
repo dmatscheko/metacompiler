@@ -62,11 +62,20 @@ Main, whose `main` may be an instance method (the launcher constructs it).
 Not genuinely modelled: generic type CHECKING (erased), sealed-hierarchy and
 switch EXHAUSTIVENESS checking, method overloading by parameter type (constructors
 are picked by arity), the flow scoping of pattern variables (a binding outlives the
-test that introduced it), implicit FIELD access (a field is reached via this.x or
-ClassName.x, the explicit style many code bases enforce - only calls resolve
-unqualified), threads and reflection. A JPMS module declaration (module-info.java,
-with requires / exports / opens / uses / provides, and 'import module M;') is PARSED
-and dropped - nothing here has a module system for it to describe.
+test that introduced it), threads and reflection. An ANONYMOUS class body cannot
+read a local or parameter of the ENCLOSING METHOD here, where the compiler half
+can - its methods are built into a fresh frame rather than over the defining scope;
+an outer FIELD, an outer static and Outer.this all work. A JPMS module declaration
+(module-info.java, with requires / exports / opens / uses / provides, and 'import
+module M;') is PARSED and dropped - nothing here has a module system for it to
+describe.
+
+Unqualified FIELD access is genuine: a bare name resolves to a local or parameter
+first, then to a field of the enclosing class, then out through the enclosing
+INSTANCES of an inner or anonymous class (JLS 6.5.6.1) - reads, writes, compound
+assignments and ++/-- alike - and a field OBSCURES a type name of the same spelling
+(JLS 6.4.2). Object#toString, Object#equals and Object#hashCode answer on a class
+that declares none, dispatching to a declared or inherited override first.
 
 Fields live directly on the instance object, methods on the class descriptor.
 main(String[] args) of class Main is the entry point; its return is void, so self
@@ -3007,6 +3016,11 @@ HasStatic   = :script(~~
             if (name == "charCodeAt") return target.charCodeAt(args[0])
             if (name == "charAt") return jChar(target.charCodeAt(jNum(args[0])))
             if (name == "equals") return target === args[0]
+            // Object#toString on a String is the String (java.lang.String
+            // overrides it with `return this`). The compiler half gets this from
+            // js_jvstr, which renders every value; here the String arm comes
+            // BEFORE the Object fallback further down, so it has to say so.
+            if (name == "toString") return target
             if (name == "substring") return args.length > 1 ? target.slice(args[0], args[1]) : target.slice(args[0])
             if (name == "indexOf") return target.indexOf(args[0])
             if (name == "isEmpty") return target.length == 0
@@ -3034,12 +3048,32 @@ HasStatic   = :script(~~
                 // A lambda that adopted a functional interface answers that
                 // interface's single abstract method with the closure itself.
                 if (target.__sam != undefined) { return target.__sam.apply(undefined, args) }
+                // Object#toString and Object#equals, the two members of the
+                // java.lang.Object contract a class inherits without declaring -
+                // the same gap hashCode had until 77eb804, and reached the same
+                // way: the DECLARED method wins (the walk above just failed to
+                // find one), so what is left is the record form and then the
+                // Object default. jstr already renders both (a record's canonical
+                // R[a=1, b=x], otherwise getName() + "@" + hex(hashCode())) and
+                // jValEq is already Objects.equals arm for arm, including a
+                // record's component-wise comparison. The compiler half routes the
+                // same two names to js_jvstr / js_jvaleq from foldCallMember.
+                if (name == "toString" && args.length == 0) { return jstr(target) }
+                if (name == "equals" && args.length == 1) { return jValEq(target, args[0]) }
                 fail("unknown method '" + name + "' on " + target.__class.__name)
             }
             return m.apply(undefined, concat2impl([target], args))
         }
         var f = hasOwn(target, name) ? target[name] : undefined
-        if (typeof f != "function") fail("unknown method '" + name + "'")
+        if (typeof f != "function") {
+            // Object#toString / Object#equals on a value that is not an instance
+            // at all - a boxed long or double, a plain int, an array. The
+            // compiler half reaches the same two through js_jvstr / js_jvaleq,
+            // which render and compare every value this model has.
+            if (name == "toString" && args.length == 0) { return jstr(target) }
+            if (name == "equals" && args.length == 1) { return jValEq(target, args[0]) }
+            fail("unknown method '" + name + "'")
+        }
         return f.apply(undefined, args)
     }
 
@@ -3072,8 +3106,8 @@ HasStatic   = :script(~~
             var v = anytype // The assigned value may be a number, a string, a double box, ...
             v = valT()
             if (ref.path.length == 0) {
-                if (op != "=") v = applyOp(op, getVar(ref.name), v)
-                setVar(ref.name, v)
+                if (op != "=") v = applyOp(op, jGetVar(ref.name), v)
+                jSetVar(ref.name, v)
             } else {
                 var p = resolveRef(ref)
                 if (op != "=") v = applyOp(op, hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined, v)
@@ -3097,8 +3131,8 @@ HasStatic   = :script(~~
         var d = (items[1] == "++") ? 1 : -1
         return function() {
             if (ref.path.length == 0) {
-                var n = getVar(ref.name)
-                setVar(ref.name, jStep(n, d))
+                var n = jGetVar(ref.name)
+                jSetVar(ref.name, jStep(n, d))
                 return n
             }
             var p = resolveRef(ref)
@@ -3112,8 +3146,8 @@ HasStatic   = :script(~~
         var d = (op == "++") ? 1 : -1
         return function() {
             if (ref.path.length == 0) {
-                var n = jStep(getVar(ref.name), d)
-                setVar(ref.name, n)
+                var n = jStep(jGetVar(ref.name), d)
+                jSetVar(ref.name, n)
                 return n
             }
             var p = resolveRef(ref)
@@ -3428,13 +3462,29 @@ HasStatic   = :script(~~
     }
 
     // new C(args): the constructor closure always exists and does the field inits.
+    // The enclosing instance a `new Cls(...)` records, or undefined. Only a NESTED
+    // type gets one - the binary name carries the nesting ("Outer$Inner") and a
+    // top-level one has no "$" in it.
+    function jNestOuter(cls) {
+        var b = anytype // __bname is a string on every built descriptor, absent on a synthesized one.
+        b = cls.__bname
+        if (b == undefined || b == null || typeof b != "string") { return undefined }
+        if (b.indexOf("$") < 0) { return undefined }
+        return jEnclSelf()
+    }
     function makeNew(items) {
         var clsName = items[0]
         var args = items.slice(1)
         return function() {
             var cls = jResolveClass(clsName)
             if (cls == undefined || cls == null || !cls.__isclass) fail("unknown class: " + clsName)
-            var obj = {__class: cls}
+            // A NESTED type created without a qualifier (`new Inner()` inside an
+            // instance method of Outer) captures the enclosing instance exactly as
+            // `o.new Inner()` does - javac passes it implicitly. Only a nested
+            // type: __outer on a top-level instance would let jOuterOwner reach an
+            // unrelated object's fields. A static nested type gets one too and
+            // never uses it (its body cannot legally name an outer instance field).
+            var obj = {__class: cls, __outer: jNestOuter(cls)}
             var argv = [obj]
             for (var i = 0; i < args.length; i++) argv.push(args[i]())
             cls.__ctor.apply(undefined, argv)
@@ -3505,7 +3555,10 @@ HasStatic   = :script(~~
                 built = buildClassFrom("$anon" + jAnonSeq + "$" + superName, ms, undefined)
                 built.__name = superName
             }
-            var obj = {__class: built}
+            // An anonymous class body names the enclosing instance's fields
+            // unqualified and reads `Outer.this`, so the instance records it -
+            // unconditionally, because an anonymous class is ALWAYS enclosed.
+            var obj = {__class: built, __outer: jEnclSelf()}
             var argv = []
             for (var a = 0; a < args.length; a++) { argv.push(args[a]()) }
             jCallCtor(built, obj, argv)
@@ -4372,6 +4425,17 @@ HasStatic   = :script(~~
     //     that used to walk __record here) and a class with a user-declared
     //     equals now uses it, which no engine did.
     function jValEq(a, b) {
+        // TWO PRIMITIVES OF DIFFERENT KINDS ARE NEVER EQUAL. Integer#equals asks
+        // `instanceof Integer` before it compares, so ((Object) 1).equals(1L) is
+        // false. This half got every cross-kind pair right by accident EXCEPT
+        // Float vs Double, which the arm below compared as two doubles; the twins
+        // are jvEqKind in abnf/jsrtjava.go and languages/lib/java-rt.metajs, where
+        // the guard is load-bearing for more pairs. Only PRIMITIVES are screened -
+        // kind 0 (an instance, an array, null) must still reach the dispatch, so a
+        // declared equals(Object) can compare against a String.
+        var ka = jEqKind(a)
+        var kb = jEqKind(b)
+        if (ka != 0 && kb != 0 && ka != kb) { return false }
         if (jIsFlo(a) && jIsFlo(b)) { return jDblCmpEq(a.__flo, b.__flo) }
         if (a === b) { return true }
         if (a === null || a === undefined || b === null || b === undefined) { return false }
@@ -4381,6 +4445,19 @@ HasStatic   = :script(~~
         var m = jFindMember(a.__class, "equals")
         if (typeof m == "function") { return m(a, b) === true }
         return false
+    }
+    // The java TYPE of a primitive value: 0 means "not a primitive" (an instance,
+    // an array, null) and every other number is one boxed type. 1 vs 2 is Float vs
+    // Double, which Float.equals(Double) rejects.
+    function jEqKind(v) {
+        if (v === undefined || v === null) { return 0 }
+        if (v === true || v === false) { return 5 }
+        if (typeof v == "string") { return 6 }
+        if (jIsChar(v)) { return 4 }
+        if (jIsFlo(v)) { return jIsF32(v) ? 1 : 2 }
+        if (jIsSz(v)) { return 3 }
+        if (typeof v == "number") { return 7 }
+        return 0
     }
     // Double.compare(x, y) == 0: one NaN, and the sign of a zero is part of the
     // value. A comparison cannot see that sign, so 1/x is what reads it.
@@ -5009,6 +5086,39 @@ HasStatic   = :script(~~
         }
         return null
     }
+    // The enclosing `this`, or undefined in a static context. The scope walk is the
+    // same one jSelfWith does; it is separate because `new` needs the instance
+    // itself (to record as __outer) rather than an owner of some name.
+    function jEnclSelf() {
+        var sc = scopes
+        for (var i = sc.length - 1; i >= 0; i--) {
+            if (hasOwn(sc[i], "this")) { return sc[i]["this"] }
+        }
+        return undefined
+    }
+    // The OUTER hop. An inner or anonymous class body names a field of its
+    // ENCLOSING instance unqualified, and javac resolves it there (JLS 6.5.6.1:
+    // the innermost enclosing class that declares the name wins). The instance
+    // carries that enclosing instance as __outer - set by every creation site that
+    // has one, see makeNew / makeNewAnon / jNewInner - so the search is `this`, the
+    // statics of this' class chain, then __outer, and out. The < 64 cap is the one
+    // chapter 7.9 of the manual keeps on every such walk here.
+    //
+    // The twins are jOuterOwner in languages/lib/java-rt.metajs and rt.jvOuterOwner
+    // in abnf/jsrtjava.go, both reached through the js_jouter extern; this half
+    // needs no extern because it holds the objects directly.
+    function jOuterOwner(self, name) {
+        var v = anytype // Walks from an instance to its enclosing instance, and off the end.
+        v = self
+        for (var g = 0; g < 64; g++) {
+            if (v === undefined || v === null || typeof v != "object") { return null }
+            if (hasOwn(v, name)) { return v }
+            var st = jStaticOwner(v.__class, name)
+            if (st != null) { return st }
+            v = v.__outer
+        }
+        return null
+    }
     // The object an unqualified `name` reads/writes through, or null when the name
     // is not a field of the enclosing type at all (getVar then goes on to
     // hostGlobals and its own error, exactly as before).
@@ -5018,12 +5128,62 @@ HasStatic   = :script(~~
             if (hasOwn(sc[i], "this")) {
                 var self = sc[i]["this"]
                 if (self === undefined || self === null || typeof self != "object") { return null }
-                if (hasOwn(self, name)) { return self }
-                return jStaticOwner(self.__class, name)
+                return jOuterOwner(self, name)
             }
             if (hasOwn(sc[i], "__jcls")) { return jStaticOwner(sc[i]["__jcls"], name) }
         }
         return null
+    }
+    // ----- a field whose name equals a TYPE's (docs/todo.md 2.9) -----
+    //
+    // `class Ctr { int Ctr = 7; int f() { return Ctr; } }` answered `class Ctr` in
+    // every engine here: the class descriptor is declared in the same scope chain
+    // the bare name reads, and it is found there before varMiss is ever consulted.
+    // JLS 6.4.2 says the opposite - a variable name OBSCURES a type name - so the
+    // field wins wherever it is in scope.
+    //
+    // The test costs one typeof per variable read and nothing else: the field is
+    // only looked for once the scope walk has ALREADY answered a class descriptor,
+    // which no ordinary read does. It is deliberately not "is this name a field",
+    // which would need a walk per read.
+    //
+    // What must NOT break, and is asserted: a bare type name used as a qualifier
+    // (`Ctr.staticField`) or in `new Ctr()`. `new` resolves the name through
+    // jResolveClass and never reaches here; a qualifier does reach here, and it is
+    // obscured for exactly the same region javac obscures it in - inside the class'
+    // own instance methods, where javac rejects the program outright.
+    function jIsClassVal(v) {
+        if (v === undefined || v === null || typeof v != "object") { return false }
+        return v.__isclass === true
+    }
+    function jGetVar(name) {
+        var v = anytype // Any value a variable can hold.
+        v = getVar(name)
+        if (jIsClassVal(v)) {
+            var o = jSelfWith(name)
+            if (o != null) { return o[name] }
+        }
+        return v
+    }
+    // The write half. Here the shadowing has to be decided BEFORE the write, so it
+    // is the scope binding that is inspected rather than a read's result; setVar
+    // would otherwise overwrite the class descriptor itself.
+    function jClassBound(name) {
+        var sc = scopes
+        for (var i = sc.length - 1; i >= 0; i--) {
+            if (hasOwn(sc[i], name)) { return jIsClassVal(sc[i][name]) }
+        }
+        return false
+    }
+    function jSetVar(name, value) {
+        if (jClassBound(name)) {
+            var o = jSelfWith(name)
+            if (o != null) { o[name] = value; return }
+        }
+        setVar(name, value)
+    }
+    makeVarRef = function(name) {
+        return function() { return jGetVar(name) }
     }
     core.varMiss = function(name) {
         var o = jSelfWith(name)

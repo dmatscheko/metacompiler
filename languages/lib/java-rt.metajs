@@ -1346,6 +1346,12 @@ function js_jvchareq(l, r) {
 // A class that declares no equals, and an array (which does not override it),
 // keep identity, because Object.equals is identity.
 function js_jvaleq(a, b) {
+    // TWO PRIMITIVES OF DIFFERENT KINDS ARE NEVER EQUAL - see the twin in
+    // abnf/jsrtjava.go for why this guard exists and why only kind 0 (an
+    // instance, an array, null) is exempt from it.
+    var ka = jvEqKind(a)
+    var kb = jvEqKind(b)
+    if (ka != 0 && kb != 0 && ka != kb) { return false }
     if (floIs(a) && floIs(b)) { return jvDblCmpEq(floNum(a), floNum(b)) }
     if (js_jchareq(a, b) === true) { return true }
     if (a === undefined || a === null) { return false }
@@ -1354,6 +1360,23 @@ function js_jvaleq(a, b) {
     var mm = rtFindMethod(a["__class"], "equals")
     if (typeof mm != "function") { return false }
     return mm.apply(undefined, rtPrepend(a, [b])) === true
+}
+
+// The java TYPE of a primitive value, for Object#equals: 0 means "not a primitive"
+// (an instance, an array, null, undefined) and every other number is one boxed
+// type. 1 vs 2 is Float vs Double, which Float.equals(Double) rejects. The twin is
+// jvEqKind in abnf/jsrtjava.go; the box tests come before the plain-number one for
+// the reason js_jhash records - a tag-13 sized integer and a tag-14 float box are
+// both `typeof "number"` to the floor.
+function jvEqKind(v) {
+    if (v === undefined || v === null) { return 0 }
+    if (v === true || v === false) { return 5 }
+    if (typeof v == "string") { return 6 }
+    if (jvIsChar(v)) { return 4 }
+    if (floIs(v)) { return (floStyle(v) == 3) ? 1 : 2 }
+    if (sintIs(v)) { return 3 }
+    if (typeof v == "number") { return 7 }
+    return 0
 }
 
 // Double.compare(x, y) == 0, i.e. doubleToLongBits equality: one NaN, and the
@@ -1437,6 +1460,91 @@ function js_jhash(v) {
         }
     }
     return jpIdNum(v)
+}
+
+// ----- the enclosing instance, and the type name a field obscures -----
+//
+// js_jisclass: is this value a CLASS DESCRIPTOR? The one thing the emitted probe
+// in makeVarRef needs in order to apply JLS 6.4.2 - a variable name OBSCURES a
+// type name - because the descriptor is declared in the same scope chain a bare
+// name reads (docs/todo.md 2.9). The twin is m["js_jisclass"] in
+// abnf/jsrtjava.go.
+function js_jisclass(v) {
+    if (!rtIsObj(v)) { return false }
+    return v["__isclass"] === true
+}
+
+// js_jouter: THE OUTER HOP (docs/todo.md 1.6). An inner or anonymous class body
+// names a field of its ENCLOSING instance unqualified and javac resolves it there
+// (JLS 6.5.6.1: the innermost enclosing class that declares the name wins). Every
+// creation site of a nested or anonymous class records that enclosing instance as
+// __outer, so the search is `this`, the statics of this' class chain, then
+// __outer, and out. It answers the OWNER object, which the caller reads or writes
+// the name on - one extern for both directions.
+//
+// The twins are m["js_jouter"] in abnf/jsrtjava.go and jOuterOwner in
+// languages/java-interpreter.abnf. Presence is "not undefined" rather than an own-
+// key test, which the floor has no primitive for; a declared field is never
+// undefined here (pushFields gives every one of them 0, false or null).
+function js_jouter(self, name) {
+    var v = anytype // Walks from an instance to its enclosing instance.
+    v = self
+    var guard = 0
+    while (guard < 64 && rtIsObj(v)) {
+        guard = guard + 1
+        if (v[name] !== undefined) { return v }
+        var st = jvStaticOwner(v["__class"], name)
+        if (st !== null) { return st }
+        v = v["__outer"]
+    }
+    fail("unknown name: " + name)
+    return undefined
+}
+
+// In the COMPILED world a static field is an ordinary property of the class
+// descriptor (the emitter js_set's it there), so the search is the same
+// __class/__super walk method dispatch does, with the < 64 cap every walk here
+// carries.
+function jvStaticOwner(cls, name) {
+    var c = anytype // Walks a __super chain of descriptors.
+    c = cls
+    var guard = 0
+    while (guard < 64 && rtIsObj(c)) {
+        guard = guard + 1
+        if (c[name] !== undefined) { return c }
+        c = c["__super"]
+    }
+    return null
+}
+
+// js_jouterthis: `Outer.this` - out along __outer until an instance whose class
+// chain is named Outer. One unconditional __outer hop is wrong at two levels of
+// nesting, and inside an anonymous body there used to be no __outer at all. The
+// twins are m["js_jouterthis"] in abnf/jsrtjava.go and makeOuterThis in
+// languages/java-interpreter.abnf.
+function js_jouterthis(self, name) {
+    var v = anytype // Walks from an instance to its enclosing instance.
+    v = self
+    var guard = 0
+    while (guard < 64 && rtIsObj(v)) {
+        guard = guard + 1
+        if (jvClassIs(v["__class"], name)) { return v }
+        v = v["__outer"]
+    }
+    fail("no enclosing instance of " + name)
+    return undefined
+}
+
+function jvClassIs(cls, name) {
+    var c = anytype // Walks a __super chain of descriptors.
+    c = cls
+    var guard = 0
+    while (guard < 64 && rtIsObj(c)) {
+        guard = guard + 1
+        if (c["__name"] === name) { return true }
+        c = c["__super"]
+    }
+    return false
 }
 
 function jvRecordHash(v, comps) {

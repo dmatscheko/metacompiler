@@ -74,6 +74,9 @@ class Main {
         S28.run(); // SECTION-CALL 28
         S29.run(); // SECTION-CALL 29
         S30.run(); // SECTION-CALL 30
+        S31.run(); // SECTION-CALL 31
+        S32.run(); // SECTION-CALL 32
+        S33.run(); // SECTION-CALL 33
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -1662,5 +1665,253 @@ class S28 {
         Main.check("uu13", S28.classify(3) == 134 && S28.classify(4) == 134);
         Main.check("uu14", S28.classify(5) == 100 && S28.classify(9) == -1);
         Main.check("uu15", S28.pick(2).equals("lo") && S28.pick(4).equals("hi") && S28.pick(8).equals("?"));
+    }
+}
+
+// ===== SECTION 31: Object#toString and Object#equals =====
+// The other two members of the java.lang.Object contract a class inherits
+// WITHOUT declaring - the same gap hashCode had until 77eb804. A declared or
+// inherited method wins; then a record's canonical form (JLS 8.10.3, which DOES
+// specify both of these exactly, unlike the hashCode combination); then Object's
+// own: identity for equals, and getClass().getName() + "@" +
+// Integer.toHexString(hashCode()) for toString.
+//
+// THE DIGITS AFTER THE @ ARE NOT ASSERTABLE. Real java prints
+// System.identityHashCode, an address-derived value that differs between two runs
+// of the same program, so what is asserted is the CONTRACT that ties the two
+// together - o.toString() is the class' binary name, an '@', and the same digits
+// o.hashCode() renders in hex - plus self-consistency across two calls. That
+// holds in real java and here, and it is exactly what a wrong implementation
+// breaks.
+
+class Pl31 { int x = 1; }
+class Ts31 { public String toString() { return "TS!"; } }
+class SubTs31 extends Ts31 { }
+class Eq31 {
+    int w;
+    Eq31(int w) { this.w = w; }
+    public boolean equals(Object o) { return o instanceof Eq31 && ((Eq31) o).w == this.w; }
+}
+class SubEq31 extends Eq31 { SubEq31(int w) { super(w); } }
+record R31(int a, String b) { }
+record Rd31(double d) { }
+record Rn31(R31 r) { }
+enum E31 { RED, BLUE }
+
+class S31 {
+    static String hex(int n) {
+        String d = "0123456789abcdef";
+        String out = "";
+        int x = n;
+        if (x == 0) { return "0"; }
+        while (x != 0) { out = d.charAt(x & 15) + out; x = x >>> 4; }
+        return out;
+    }
+
+    static void run() {
+        Object[] plains = { new Pl31(), new Pl31() };
+        Object[] tss = { new Ts31(), new SubTs31() };
+        Object[] recs = { new R31(1, "x"), new R31(1, "x"), new R31(2, "x") };
+
+        // ----- toString: a declared one, and an inherited one -----
+        Main.check("ts1", tss[0].toString().equals("TS!"));
+        Main.check("ts2", tss[1].toString().equals("TS!"));
+        Main.check("ts3", ("" + tss[0]).equals("TS!"));
+
+        // ----- toString: a record's canonical form (JLS 8.10.3 specifies it) -----
+        Main.check("ts4", recs[0].toString().equals("R31[a=1, b=x]"));
+        Main.check("ts5", new Rd31(2.5).toString().equals("Rd31[d=2.5]"));
+        Main.check("ts6", new Rn31(new R31(3, "y")).toString().equals("Rn31[r=R31[a=3, b=y]]"));
+
+        // ----- toString: an enum constant's is its name -----
+        Main.check("ts7", E31.RED.toString().equals("RED"));
+
+        // ----- toString: Object's own, on a class that declares none -----
+        String s0 = plains[0].toString();
+        Main.check("ts8", s0.equals("Pl31@" + hex(plains[0].hashCode())));
+        Main.check("ts9", s0.equals(plains[0].toString()));
+        Main.check("ts10", !s0.equals(plains[1].toString()));
+        Main.check("ts11", s0.equals("" + plains[0]));
+        Main.check("ts12", s0.indexOf("@") == 4);
+
+        // ----- toString on the values that are not instances at all -----
+        Main.check("ts13", "abc".toString().equals("abc"));
+        Main.check("ts14", Integer.valueOf(7).toString().equals("7"));
+
+        // ----- equals: Object's own is IDENTITY -----
+        Main.check("eq1", plains[0].equals(plains[0]));
+        Main.check("eq2", !plains[0].equals(plains[1]));
+        Main.check("eq3", !plains[0].equals(null));
+        Main.check("eq4", !plains[0].equals("Pl31"));
+
+        // ----- equals: a declared one wins, and an inherited one is used -----
+        Main.check("eq5", new Eq31(1).equals(new Eq31(1)));
+        Main.check("eq6", !new Eq31(1).equals(new Eq31(2)));
+        Main.check("eq7", new SubEq31(3).equals(new SubEq31(3)));
+
+        // ----- equals: a record's is component-wise -----
+        Main.check("eq8", recs[0].equals(recs[1]));
+        Main.check("eq9", !recs[0].equals(recs[2]));
+        Main.check("eq10", !recs[0].equals(null));
+        Main.check("eq11", new Rn31(new R31(3, "y")).equals(new Rn31(new R31(3, "y"))));
+
+        // A double component compares with Double.compare, so NaN EQUALS NaN and
+        // +0.0 does NOT equal -0.0 - both the opposite of ==.
+        double[] ds = { 0.0, -0.0, 0.0 / 0.0 };
+        Main.check("eq12", !new Rd31(ds[0]).equals(new Rd31(ds[1])));
+        Main.check("eq13", new Rd31(ds[2]).equals(new Rd31(ds[2])));
+
+        // ----- equals: strings, boxes and enum constants -----
+        String[] strs = { "ab", "ab", "ba" };
+        Main.check("eq14", strs[0].equals(strs[1]) && !strs[0].equals(strs[2]));
+        Main.check("eq15", E31.RED.equals(E31.RED) && !E31.RED.equals(E31.BLUE));
+
+        // ----- two PRIMITIVES OF DIFFERENT KINDS are never equal -----
+        // Integer#equals asks `instanceof Integer` before it compares, so
+        // ((Object) 1).equals(1L) is false - where a by-value comparison would
+        // say true. This was a live halves divergence the moment Object#equals
+        // started routing through the record-component comparison.
+        Object[] prims = { (Object) 1, (Object) 1L, (Object) 1.0, (Object) 1.0f,
+                           (Object) 'a', (Object) true, "1" };
+        Main.check("eq18", prims[0].equals(prims[0]) && !prims[0].equals(prims[1]));
+        Main.check("eq19", !prims[0].equals(prims[2]) && !prims[1].equals(prims[2]));
+        Main.check("eq20", !prims[2].equals(prims[3]) && !prims[3].equals(prims[2]));
+        Main.check("eq21", !prims[4].equals(prims[6]) && !prims[6].equals(prims[4]));
+        Main.check("eq22", !prims[5].equals(prims[0]) && !prims[0].equals(prims[6]));
+        Main.check("eq23", prims[1].equals(prims[1]) && prims[2].equals(prims[2])
+                           && prims[3].equals(prims[3]) && prims[4].equals(prims[4])
+                           && prims[5].equals(prims[5]) && prims[6].equals(prims[6]));
+        // A DECLARED equals(Object) still gets to see a String argument - the
+        // guard screens primitives only, never an instance.
+        Main.check("eq24", !new Eq31(1).equals(prims[6]));
+
+        // ----- the equals / hashCode contract, over the pair 77eb804 opened -----
+        Main.check("eq16", recs[0].equals(recs[1]) && recs[0].hashCode() == recs[1].hashCode());
+        Main.check("eq17", plains[0].equals(plains[0]) && plains[0].hashCode() == plains[0].hashCode());
+    }
+}
+
+// ===== SECTION 32: an inner or anonymous class naming an OUTER field =====
+// javac resolves an unqualified name in an inner or anonymous class body against
+// the innermost ENCLOSING class that declares it (JLS 6.5.6.1), which needs the
+// enclosing instance at run time. Every creation site of a nested or anonymous
+// class now records it, and `Outer.this` walks the same chain - correctly at more
+// than one level, which one unconditional hop was not.
+
+interface Sup32 { int get(); }
+
+class Out32 {
+    int w = 41;
+    String nm = "out";
+    static int sw = 7;
+
+    class In32 {
+        int q = 100;
+        int viaOuter() { return w + 1; }
+        String viaOuterStr() { return nm + "!"; }
+        int viaOuterThis() { return Out32.this.w + 2; }
+        int viaStatic() { return sw + 3; }
+        int ownWins() { return q; }
+        int localWins() { int w = 5; return w; }
+        int paramWins(int w) { return w; }
+        int writeOuter() { w = w + 10; return w; }
+        class Deep32 { int twoLevels() { return w + 4; } int deepOuterThis() { return Out32.this.w + 5; } }
+    }
+
+    Sup32 anon() { return new Sup32() { public int get() { return w + 6; } }; }
+    Sup32 anonStr() { return new Sup32() { public int get() { return nm.length() + 7; } }; }
+    Sup32 anonOuterThis() { return new Sup32() { public int get() { return Out32.this.w + 8; } }; }
+    Sup32 anonStatic() { return new Sup32() { public int get() { return sw + 9; } }; }
+    Sup32 anonOwn() { return new Sup32() { int f = 60; public int get() { return f; } }; }
+    Sup32 anonLocalWins() { return new Sup32() { public int get() { int w = 3; return w; } }; }
+    Sup32 lam() { return () -> w + 11; }
+
+    int viaBareNew() { In32 i = new In32(); return i.viaOuter(); }
+}
+
+class S32 {
+    static void run() {
+        Out32 o = new Out32();
+        Out32.In32[] ins = { o.new In32() };
+
+        // ----- a NAMED inner class -----
+        Main.check("oc1", ins[0].viaOuter() == 42);
+        Main.check("oc2", ins[0].viaOuterStr().equals("out!"));
+        Main.check("oc3", ins[0].viaOuterThis() == 43);
+        Main.check("oc4", ins[0].viaStatic() == 10);
+        Main.check("oc5", ins[0].ownWins() == 100);
+        Main.check("oc6", ins[0].localWins() == 5);
+        Main.check("oc7", ins[0].paramWins(9) == 9);
+
+        // `new In32()` inside an instance method captures the enclosing instance
+        // implicitly, exactly as `o.new In32()` does.
+        Main.check("oc8", o.viaBareNew() == 42);
+
+        // TWO levels out - the case one unconditional __outer hop got wrong.
+        Out32.In32.Deep32[] deeps = { ins[0].new Deep32() };
+        Main.check("oc9", deeps[0].twoLevels() == 45);
+        Main.check("oc10", deeps[0].deepOuterThis() == 46);
+
+        // ----- an ANONYMOUS class -----
+        Sup32[] anons = { o.anon(), o.anonStr(), o.anonOuterThis(), o.anonStatic(),
+                          o.anonOwn(), o.anonLocalWins(), o.lam() };
+        Main.check("oc11", anons[0].get() == 47);
+        Main.check("oc12", anons[1].get() == 10);
+        Main.check("oc13", anons[2].get() == 49);
+        Main.check("oc14", anons[3].get() == 16);
+        Main.check("oc15", anons[4].get() == 60);
+        Main.check("oc16", anons[5].get() == 3);
+        Main.check("oc17", anons[6].get() == 52);
+
+        // ----- an unqualified WRITE through the outer hop -----
+        Out32 o2 = new Out32();
+        Out32.In32[] ins2 = { o2.new In32() };
+        Main.check("oc18", ins2[0].writeOuter() == 51);
+        Main.check("oc19", o2.w == 51);
+    }
+}
+
+// ===== SECTION 33: a field whose name equals a type's =====
+// JLS 6.4.2: a variable name OBSCURES a type name. Every engine here answered the
+// CLASS DESCRIPTOR for `Ctr33` inside Ctr33's own methods, because the descriptor
+// is declared in the same scope chain the bare name reads. The controls below are
+// what a wrong fix breaks: a bare type name used where NO field of that name is in
+// scope must still be the type.
+
+class Ctr33 {
+    int Ctr33 = 7;
+    static int sf = 9;
+    int read() { return Ctr33; }
+    int write() { Ctr33 = 8; return Ctr33; }
+    int step() { Ctr33 = 20; Ctr33++; ++Ctr33; return Ctr33; }
+    int compound() { Ctr33 = 4; Ctr33 += 6; return Ctr33; }
+    int shadowedByLocal() { int Ctr33 = 3; return Ctr33; }
+    int shadowedByParam(int Ctr33) { return Ctr33; }
+}
+
+class Box33 { static int Box33 = 11; static int read() { return Box33; } }
+
+class S33 {
+    static void run() {
+        Ctr33[] cs = { new Ctr33(), new Ctr33(), new Ctr33(), new Ctr33(), new Ctr33() };
+        Main.check("ob1", cs[0].read() == 7);
+        Main.check("ob2", cs[1].write() == 8);
+        Main.check("ob3", cs[2].step() == 22);
+        Main.check("ob4", cs[3].compound() == 10);
+        Main.check("ob5", cs[4].shadowedByLocal() == 3);
+        Main.check("ob6", cs[4].shadowedByParam(5) == 5);
+        Main.check("ob7", cs[0].Ctr33 == 7);
+
+        // A STATIC field with the class' own name, read from a static method.
+        Main.check("ob8", Box33.read() == 11);
+
+        // ----- the controls: a bare type name with no field of that name in
+        // scope is still the type, in every spelling that reads one -----
+        Main.check("ob9", Ctr33.sf == 9);
+        Main.check("ob10", new Ctr33() != null);
+        Main.check("ob11", new Ctr33().read() == 7);
+        Object x = new Ctr33();
+        Main.check("ob12", x instanceof Ctr33);
+        Main.check("ob13", ((Ctr33) x).read() == 7);
     }
 }

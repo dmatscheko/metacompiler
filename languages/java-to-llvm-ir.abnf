@@ -67,11 +67,19 @@ comment - is the character it denotes. An IMPLICITLY DECLARED class (JEP 512) is
 accepted: a file that declares members but no class becomes a synthetic class
 Main, whose `main` may be an instance method (the launcher constructs it).
 
+Unqualified FIELD access is genuine: a bare name resolves to a local or parameter
+first, then to a field of the enclosing class, then out through the enclosing
+INSTANCES of an inner or anonymous class (JLS 6.5.6.1) - reads, writes, compound
+assignments and ++/-- alike - and a field OBSCURES a type name of the same spelling
+(JLS 6.4.2). Object#toString, Object#equals and Object#hashCode answer on a class
+that declares none, dispatching to a declared or inherited override first.
+
 Not genuinely modelled: overload resolution by argument TYPE (only the count
 discriminates), generic type checking (type arguments are erased at parse time),
-implicit FIELD access (a field is reached via this.x or ClassName.x - like the
-explicit style many code bases enforce; only calls resolve unqualified), checked
-exception analysis, modules, threads and reflection.
+checked exception analysis, modules, threads and reflection. Object#equals on two
+PRIMITIVES is type-exact (1 does not equal 1L), but two boxed values of the same
+kind and different declared classes cannot be told apart - this value model has one
+representation per kind, not per box.
 
 Fields live directly on the instance object (js_get/js_set), methods become own IR
 functions jsf_N(env, args) with the instance prepended to the arguments, stored on the
@@ -1045,7 +1053,7 @@ PrimClassLit <~~ push(makeConst(null)) ~~>
 // `Outer.this`: the enclosing instance of an inner-class instance, stored as
 // __outer when it is created. Tried before VarRef, which would otherwise read
 // `Outer` as a plain name and `.this` as a member.
-OuterThis   <~~ push(makeOuterThis()) ~~>
+OuterThis   <~~ push(makeOuterThis(up.in)) ~~>
             = Id "." KwThis ;
 
 // An UNQUALIFIED method call - `check(x)` rather than `this.check(x)` or
@@ -2249,17 +2257,23 @@ HasStatic   = :script(~~
     // expression answer the value from BEFORE the write, which is what a postfix
     // x++ yields.
     function jUnqualWrite(b, name, fi, v, mkNew, retOld) {
+        var probeB = curF.NewBlock("")
         var localB = curF.NewBlock("")
         var fieldB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
         var tyV = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
-        b.NewCondBr(truthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "undefined")])), fieldB, localB)
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "undefined")])), fieldB, probeB)
+        // A bound name that holds a CLASS DESCRIPTOR is a type name obscured by a
+        // field of the same name (JLS 6.4.2, see makeVarRef) - the write has to go
+        // to the field, not over the descriptor.
+        var probeV = callExt(probeB, "js_scope_get", [curScopeV, emitStr(probeB, name)])
+        probeB.NewCondBr(truthy(probeB, callExt(probeB, "js_jisclass", [probeV])), fieldB, localB)
         var nameL = emitStr(localB, name)
         var oldL = (mkNew == null) ? v : callExt(localB, "js_scope_get", [curScopeV, nameL])
         var newL = (mkNew == null) ? v : mkNew(localB, oldL)
         callExt(localB, "js_scope_set", [curScopeV, nameL, newL])
         localB.NewBr(mergeB)
-        var ownV = jFieldOwner(fieldB, fi)
+        var ownV = jFieldOwner(fieldB, fi, name)
         var keyF = emitStr(fieldB, name)
         var oldF = (mkNew == null) ? v : callExt(fieldB, "js_get", [ownV, keyF])
         var newF = (mkNew == null) ? v : mkNew(fieldB, oldF)
@@ -2273,7 +2287,7 @@ HasStatic   = :script(~~
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
-        var defClass = jDefClass()
+        var chain = jEnclChain()
         return function(b) {
             var r = valT(b)
             b = r.b
@@ -2284,7 +2298,7 @@ HasStatic   = :script(~~
             // js_jvnarrowlike reads the width off the old value and applies it; a
             // String left operand keeps its concatenation untouched.
             if (ref.path.length == 0) {
-                var fi = lookupFieldKind(defClass, ref.name)
+                var fi = jLookupField(chain, ref.name)
                 if (fi != null) {
                     var mk = (op == "=") ? null : function(bx, oldX) {
                         return callExt(bx, "js_jvnarrowlike", [oldX, emitBin(bx, op, oldX, v)])
@@ -2316,11 +2330,11 @@ HasStatic   = :script(~~
     function makeIncDec(items) {
         var ref = items[0]
         var step = (items[1] == "++") ? 1 : 0 - 1
-        var defClass = jDefClass()
+        var chain = jEnclChain()
         return function(b) {
             var oneV = emitNum(b, step)
             if (ref.path.length == 0) {
-                var fi = lookupFieldKind(defClass, ref.name)
+                var fi = jLookupField(chain, ref.name)
                 if (fi != null) {
                     return jUnqualWrite(b, ref.name, fi, hUndef, function(bx, oldX) {
                         return callExt(bx, "js_jvstep", [oldX, oneV])
@@ -2341,11 +2355,11 @@ HasStatic   = :script(~~
     // Prefix ++/-- : like makeIncDec but yields the NEW value (genuine, same extern).
     function makePreIncDec(ref, op) {
         var step = (op == "++") ? 1 : 0 - 1
-        var defClass = jDefClass()
+        var chain = jEnclChain()
         return function(b) {
             var oneV = emitNum(b, step)
             if (ref.path.length == 0) {
-                var fi = lookupFieldKind(defClass, ref.name)
+                var fi = jLookupField(chain, ref.name)
                 if (fi != null) {
                     return jUnqualWrite(b, ref.name, fi, hUndef, function(bx, oldX) {
                         return callExt(bx, "js_jvstep", [oldX, oneV])
@@ -2837,6 +2851,9 @@ HasStatic   = :script(~~
     // when the ACCESS is emitted, by which time every class body has been seen
     // (a field may legally be named before its own declaration).
     var fieldKind = {}
+    // Every name any class declares as a field, regardless of which class - the
+    // only lookup an anonymous body can do for its OWN fields (see jAnyFieldNamed).
+    var fieldNames = {}
     // AN ANONYMOUS CLASS BODY IS THE ONE PLACE curClassName LIES. Every named type
     // declaration enters the class stack from a tag on its Id, but `new Sup() {
     // ... }` has no name until makeNewAnon invents one - long after its members
@@ -2844,14 +2861,51 @@ HasStatic   = :script(~~
     // body. Without this counter `int w` of the outer class made a bare `w` in the
     // anon body emit `this.w`, and `this` there is the anon instance: the compiler
     // answered null where the interpreter aborted, which is a halves divergence.
-    // Inside an anon body the lookup is therefore skipped entirely and the bare
-    // name goes back to being an ordinary scope read - the behaviour both halves
-    // had before, i.e. an abort. (javac resolves it to the OUTER instance's field;
-    // reaching that needs an __outer hop the anon descriptor does not carry. A
-    // LAMBDA body is a different case and now works: a lambda has no `this` of its
-    // own, so the captured scope's `this` IS the outer instance.)
+    // The counter is still what keeps `this` out of the answer inside an anon body -
+    // but the lookup is no longer SKIPPED there. jEnclChain below carries the flag,
+    // and every field it finds through it is marked `hop` and read through
+    // js_jouter, which walks __outer from `this` at run time. A LAMBDA body is a
+    // different case and needs none of it: a lambda has no `this` of its own, so
+    // the captured scope's `this` IS the outer instance.
     var jAnonDepth = 0
-    function jDefClass() { return (jAnonDepth > 0) ? "" : curClassName }
+    // THE ENCLOSING CHAIN, snapshotted at WALK time (docs/todo.md 1.6). An inner or
+    // anonymous class body names a field of its ENCLOSING instance unqualified and
+    // javac resolves it there - JLS 6.5.6.1, the innermost enclosing class that
+    // declares the name wins. Reaching it needs two things the descriptor did not
+    // carry: the enclosing NAMES here (jClassStack is exactly that nesting, so the
+    // chain is free) and, at run time, an __outer hop, which every creation site of
+    // a nested or anonymous class now records (see makeNew / makeNewAnon).
+    //
+    // Innermost first. Inside an anonymous body curClassName is still the ENCLOSING
+    // class - the trap the jAnonDepth counter was introduced for - so the whole
+    // chain is one hop out from `this` there, which `anon` records.
+    function jEnclChain() {
+        var names = []
+        if (curClassName != "") { names.push(curClassName) }
+        for (var i = jClassStack.length - 1; i >= 0; i--) {
+            if (jClassStack[i] != "") { names.push(jClassStack[i]) }
+        }
+        return {names: names, anon: jAnonDepth > 0}
+    }
+    // Does ANY declared class have a field of this name? Only consulted inside an
+    // anonymous body, and only after the enclosing chain has missed: the anonymous
+    // class' OWN fields are registered under the name makeNewAnon invents long
+    // after this walk, so they cannot be looked up by class here. Being loose costs
+    // nothing that was working - every name it lets through was an abort before,
+    // and js_jouter aborts on the same names with a message of its own.
+    function jAnyFieldNamed(name) { return fieldNames["$" + name] == true }
+    // The field an unqualified `name` refers to from `chain`, or null. `hop` marks
+    // the ones that are NOT declared by the innermost named class - those need the
+    // runtime __outer walk rather than a plain read off `this`, so an ordinary
+    // field access keeps the IR it had, byte for byte.
+    function jLookupField(chain, name) {
+        for (var i = 0; i < chain.names.length; i++) {
+            var fi = lookupFieldKind(chain.names[i], name)
+            if (fi != null) { return {kind: fi.kind, cls: fi.cls, hop: (i > 0) || chain.anon} }
+        }
+        if (chain.anon && jAnyFieldNamed(name)) { return {kind: "instance", cls: "", hop: true} }
+        return null
+    }
     // The class in cls' own chain that declares `name` as a field, with its kind,
     // or null. A DEPTH count rather than a seen-set: this runs once per emitted
     // access and allocating a set per call costs more than the walk (the < 64 cap
@@ -2870,9 +2924,14 @@ HasStatic   = :script(~~
     // for an instance field, the DECLARING class' descriptor for a static one (a
     // static inherited from a superclass lives on that superclass' descriptor,
     // and js_get does not walk __super).
-    function jFieldOwner(b, fi) {
+    // A field of an ENCLOSING class (fi.hop) is reached through js_jouter, which
+    // walks `this`, the statics of its class chain, then __outer, and out - the
+    // twin of jOuterOwner in java-interpreter.abnf. Only a hop pays for it.
+    function jFieldOwner(b, fi, name) {
         if (fi.kind == "static") { return callExt(b, "js_scope_get", [curScopeV, emitStr(b, fi.cls)]) }
-        return callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+        var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+        if (fi.hop) { return callExt(b, "js_jouter", [thisV, emitStr(b, name)]) }
+        return thisV
     }
     // A LOCAL OR PARAMETER OF THE SAME NAME SHADOWS THE FIELD, and which one a
     // given execution sees is not knowable here (a name is a field only for the
@@ -2882,21 +2941,34 @@ HasStatic   = :script(~~
     // field gets the branch, so the IR of every other variable access is
     // unchanged, byte for byte. This is csharp-to-llvm-ir.abnf's makeVarRef, which
     // solves the identical problem for C#.
+    //
+    // THE SECOND SHADOW is a TYPE name (docs/todo.md 2.9). `class Ctr { int Ctr =
+    // 7; int f() { return Ctr; } }` answered `class Ctr` in every engine here,
+    // because the class descriptor is js_scope_decl'd into the same chain the bare
+    // name reads and so is never "undefined". JLS 6.4.2 says a variable name
+    // OBSCURES a type name, so the field wins - and only there: the probe is
+    // js_jisclass on what the scope actually holds, which no local, parameter or
+    // loop variable ever answers true for. `new Ctr()` never reaches here (makeNew
+    // resolves the name itself) and a qualifier like `Ctr.staticField` is obscured
+    // in exactly the region javac obscures it in, i.e. inside Ctr's own instance
+    // methods, where javac rejects the program.
     makeVarRef = function(name) {
-        var defClass = jDefClass()
+        var chain = jEnclChain()
         return function(b) {
-            var fi = lookupFieldKind(defClass, name)
+            var fi = jLookupField(chain, name)
             if (fi == null) {
                 return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])}
             }
+            var probeB = curF.NewBlock("")
             var localB = curF.NewBlock("")
             var fieldB = curF.NewBlock("")
             var mergeB = curF.NewBlock("")
             var tyV = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
-            b.NewCondBr(truthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "undefined")])), fieldB, localB)
-            var lv = callExt(localB, "js_scope_get", [curScopeV, emitStr(localB, name)])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "undefined")])), fieldB, probeB)
+            var lv = callExt(probeB, "js_scope_get", [curScopeV, emitStr(probeB, name)])
+            probeB.NewCondBr(truthy(probeB, callExt(probeB, "js_jisclass", [lv])), fieldB, localB)
             localB.NewBr(mergeB)
-            var ownV = jFieldOwner(fieldB, fi)
+            var ownV = jFieldOwner(fieldB, fi, name)
             var fv = callExt(fieldB, "js_get", [ownV, emitStr(fieldB, name)])
             fieldB.NewBr(mergeB)
             return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(fv, fieldB)])}
@@ -2927,11 +2999,17 @@ HasStatic   = :script(~~
         }
     }
 
-    // Outer.this -> this.__outer
-    function makeOuterThis() {
+    // Outer.this - the enclosing instance of the named class. It used to be one
+    // unconditional __outer hop, which is wrong twice: two levels of nesting need
+    // two, and inside an ANONYMOUS class body `Outer.this` failed outright because
+    // the instance carried no __outer at all (makeNewAnon now records one). The walk
+    // is js_jouterthis, the twin of makeOuterThis in java-interpreter.abnf: out
+    // along __outer until an instance whose class chain is named Outer.
+    function makeOuterThis(text) {
+        var nm = stripWs(text).split(".")[0]
         return function(b) {
             var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
-            return {b: b, v: callExt(b, "js_get", [thisV, emitStr(b, "__outer")])}
+            return {b: b, v: callExt(b, "js_jouterthis", [thisV, emitStr(b, nm)])}
         }
     }
     function makeNew(items) {
@@ -2947,6 +3025,17 @@ HasStatic   = :script(~~
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
             var objV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+            // A NESTED type created without a qualifier (`new Inner()` inside an
+            // instance method of Outer) captures the enclosing instance exactly as
+            // `o.new Inner()` does - javac passes it implicitly, and an unqualified
+            // read of an outer field inside Inner needs it. Only a nested type -
+            // __outer on a top-level instance would let js_jouter reach an
+            // unrelated object's fields - and only where there is a `this` to
+            // capture, so a static context emits nothing extra.
+            if (curHasThis && jIsNestedName(clsName)) {
+                callExt(b, "js_set", [objV, emitStr(b, "__outer"),
+                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])])
+            }
             var argsV = callExt(b, "js_arr_new", [])
             callExt(b, "js_arr_push", [argsV, objV])
             for (var i = 0; i < args.length; i++) {
@@ -3261,11 +3350,27 @@ HasStatic   = :script(~~
                     // unaffected. Same shape as the charAt arm above; only the
                     // no-argument form is Object#hashCode, so an overload with
                     // parameters still goes to js_mcall.
+                    // x.toString() and x.equals(y) are the other two members of
+                    // the java.lang.Object contract a class inherits without
+                    // declaring, and until now they aborted with "unknown method"
+                    // wherever a class declared neither - the same gap hashCode
+                    // had until 77eb804. js_jvstr is String.valueOf, which
+                    // already DISPATCHES to a declared or inherited toString
+                    // before falling back to the record form and then to
+                    // getName() + "@" + hex(hashCode()); js_jvaleq is
+                    // Objects.equals arm for arm, which dispatches to a declared
+                    // equals and otherwise keeps Object's identity. So an
+                    // override is unaffected in both cases and no class needs a
+                    // generated method. Only the exact arities are Object's.
                     var mv = (s.name == "charAt")
                              ? callExt(mcallB, "js_jcharat", [cur, ea.v])
                              : ((s.name == "hashCode" && s.args.length == 0)
                                 ? callExt(mcallB, "js_jhash", [cur])
-                                : callExt(mcallB, "js_mcall", [cur, emitStr(mcallB, s.name), ea.v]))
+                                : ((s.name == "toString" && s.args.length == 0)
+                                   ? callExt(mcallB, "js_jvstr", [cur])
+                                   : ((s.name == "equals" && s.args.length == 1)
+                                      ? callExt(mcallB, "js_jvaleq", [cur, callExt(mcallB, "js_arg", [ea.v, handle(0)])])
+                                      : callExt(mcallB, "js_mcall", [cur, emitStr(mcallB, s.name), ea.v]))))
                     mcallB.NewBr(mergeB)
                     cur = mergeB.NewPhi([llvm.ir.NewIncoming(cv, callB), llvm.ir.NewIncoming(mv, mcallB)])
                     b = mergeB
@@ -3952,6 +4057,12 @@ HasStatic   = :script(~~
         var b = jBinName["$" + n]
         return (b == undefined) ? n : b
     }
+    // Is this a NESTED type - i.e. does an instance of it capture an enclosing
+    // instance as __outer? The binary name carries the nesting ("Outer$Inner") and
+    // a top-level type has no "$" in it. An anonymous class' invented name
+    // (Anon$N) carries one too, which is right rather than lucky: an anonymous
+    // class is ALWAYS enclosed.
+    function jIsNestedName(n) { return jBinOf(n).indexOf("$") >= 0 }
     // "Outer", "Nested" -> "Nested": nested types are hoisted under their simple name.
     function jLastSeg(parts) { return parts[parts.length - 1] }
 
@@ -4183,6 +4294,7 @@ HasStatic   = :script(~~
             // already right.
             if (members[u].kind == "field") {
                 fieldKind["$" + name + "#" + members[u].name] = members[u].statik ? "static" : "instance"
+                fieldNames["$" + members[u].name] = true
             }
         }
         if (recordParams != undefined) {
@@ -4193,6 +4305,7 @@ HasStatic   = :script(~~
                 // A record component is an instance field as well as an accessor,
                 // and the compact constructor's body names it unqualified.
                 fieldKind["$" + name + "#" + recordParams[rc]] = "instance"
+                fieldNames["$" + recordParams[rc]] = true
             }
         }
         return function(b) {
