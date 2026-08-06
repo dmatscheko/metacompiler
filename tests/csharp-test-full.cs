@@ -684,6 +684,14 @@ b";                                                   // verbatim keeps the newl
         // in 32 bit integers: 1.0 / 3.0 was 0 and 2.5 * 1.5 was 3.
         static string S23S(double d) { return "" + d; }
 
+        // The `float` half of the section. A C# float is System.Single, "an
+        // IEEE-754 binary32 value" (ECMA-334 8.3.7), and used to be an alias of
+        // the double box here - so 1.0f/3.0f answered the double's
+        // 0.3333333333333333.
+        static string S23F(float v) { return "" + v; }
+
+        static float S23Third() { return 1.0f / 3.0f; }
+
         static double S23Half() { return 0.5; }
 
         static void S23()
@@ -770,6 +778,71 @@ b";                                                   // verbatim keeps the newl
             string nul = null;
             Program.Check("flt24", "x" + nul == "x" && "x" + null == "x");
             Program.Check("flt25", "ab".Length == 2 && "\u00e9".Length == 1 && "😀".Length == 2);
+
+            // ----- the float WIDTH (todo.md 1.1) -----
+            // Everything above treated `float` as a double. It is a binary32,
+            // and the two halves of that fact have DIFFERENT confidence, which
+            // is why they are separated here:
+            //
+            //   THE ARITHMETIC IS SETTLED. A binary32 add/sub/mul/div/rem and a
+            //   binary32 comparison are the same IEEE-754 operation in C# and in
+            //   Java, so `java` 24.0.2 is a real oracle for every VALUE below -
+            //   an 11,424-row probe over 32 float values (every operand read out
+            //   of an array, every result printed as a (double) so the renderer
+            //   is out of the way) is byte-identical to java on all three legs.
+            //
+            //   THE RENDERING IS SPEC-CITED ONLY. There is no C# toolchain on
+            //   this machine, and ECMA-334 8.3.7 fixes the TYPE while leaving
+            //   ToString()'s text to the library. The digits are the shortest
+            //   round-tripping decimal at 24 bits (.NET Core 3.0+), the exponent
+            //   form is E+nn with a two-digit minimum and there is no forced
+            //   ".0" - all as csFloStr32 in abnf/jsrtjvm.go argues line by line.
+            //   NOTHING IS ASSERTED AT THE LOW END OF THE PRINT WINDOW (the
+            //   1e-5 / 1e-4 boundary), because that bound is inherited unchanged
+            //   from the double renderer and could not be settled here.
+            //
+            // Value rows, java-settled:
+            Program.Check("flt26", 1.0f / 3.0f == 0.33333334f && 1.0f / 3.0f != 1.0 / 3.0);
+            // The narrowing is REAL: (double)0.1f is not 0.1, and 16777217 has no
+            // float, so it converts to 16777216 - including on the way INTO a
+            // comparison (ECMA-334 12.4.7.3 promotes the int operand to float).
+            Program.Check("flt27", Program.S23S((double) 0.1f) == "0.10000000149011612");
+            Program.Check("flt28", 16777216f == 16777217 && !(16777216f < 16777217));
+            // A mixed float/double pair promotes to the WIDER type, so a float
+            // assigned to a double keeps the float's VALUE and loses the width.
+            double wide = 1.0f / 3.0f;
+            Program.Check("flt29", wide == 0.3333333432674408 && 1.0f / 3.0f + 0.0 == 0.3333333432674408);
+            // A float overflows and underflows at the FLOAT boundaries.
+            Program.Check("flt30", 1e38f * 10f == 1f / 0f && 1e-38f / 1e10f == 0f);
+            // A compound assignment casts back to the LEFT operand's type
+            // (ECMA-334 12.21.4), so a double on the right does not widen it,
+            // and ++ steps at the float width.
+            float g = 1.1f; g += 0.1;
+            float h = 0.1f; h += 16777217;
+            float k = 16777216f; k++;
+            Program.Check("flt31", g == 1.2f && h == 16777216f && k == 16777216f);
+            // Rendering rows, SPEC-CITED (see the note above).
+            Program.Check("flt32", Program.S23F(1.0f / 3.0f) == "0.33333334");
+            Program.Check("flt33", Program.S23F(0.1f + 0.2f) == "0.3"
+                    && Program.S23S(0.1f + 0.2) == "0.30000000149011613");
+            Program.Check("flt34", Program.S23F((float)(1.0 / 3.0)) == "0.33333334");
+            // No forced ".0", and the plain window ends at 1e7 for a Single
+            // where it ends at 1e15 for a Double - the G-precision of the type.
+            Program.Check("flt35", Program.S23F(100f) == "100" && Program.S23F(0.001f) == "0.001"
+                    && Program.S23F(9999999f) == "9999999");
+            Program.Check("flt36", Program.S23F(1e7f) == "1E+07" && Program.S23S(1e7) == "10000000");
+            Program.Check("flt37", Program.S23F(1e20f) == "1E+20" && Program.S23F(1e-20f) == "1E-20"
+                    && Program.S23F(3.4028235e38f) == "3.4028235E+38");
+            Program.Check("flt38", Program.S23F(16777217f) == "1.6777216E+07");
+            Program.Check("flt39", Program.S23F(1f / 0f) == "Infinity" && Program.S23F(0f / 0f) == "NaN"
+                    && Program.S23F(-0.0f) == "-0");
+            Program.Check("flt40", Program.S23F(g) == "1.2" && Program.S23F(h) == "1.6777216E+07");
+            // Unary minus, an array element, and the array's own type name:
+            // System.Single[], where a double[] answers System.Double[].
+            float[] fs = new float[]{0.5f, 1.5f};
+            Program.Check("flt41", Program.S23F(-Program.S23Third()) == "-0.33333334"
+                    && Program.S23F(fs[0] * 3) == "1.5");
+            Program.Check("flt42", ("" + fs) == "System.Single[]" && (int) 2.9f == 2 && (long) -2.9f == -2L);
         }
 
         // ===== SECTION 24: object.ToString and the string conversion =====

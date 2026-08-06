@@ -457,6 +457,16 @@ func init() {
 			}
 			return w(rt.csArith(op, l, r))
 		}
+		// js_csflo32 is the ONE new extern the float width needs, and it is the
+		// twin of js_csflo (a FLOOR primitive, languages/lib/runtime.c) at 24
+		// significant bits: a `1.0f` literal, a `(float)e` cast and a `float x =
+		// e` declaration all lower to it. It is registered here rather than in
+		// abnf/jsrt.go's table because the floor cannot hold a 32-bit box - see
+		// the header of abnf/jsrtjvm.go. Its layer-2 twin is js_csflo32 in
+		// languages/lib/csharp-rt.metajs.
+		m["js_csflo32"] = func(a []uint64) uint64 {
+			return w(jsJFlo{f: jvmFround(rt.toNumber(u(a[0]))), sty: floCSF})
+		}
 		m["js_csshift"] = func(a []uint64) uint64 {
 			return w(rt.csShift(opOf(a[0]), u(a[1]), u(a[2])))
 		}
@@ -465,6 +475,13 @@ func init() {
 			if csIsIntegral(l) && csIsIntegral(r) && !jvmIsFlo(l) && !jvmIsFlo(r) {
 				return boolH(rt.csCmp(op, l, r))
 			}
+			// A `float` operand converts the OTHER side to a float before the
+			// comparison (ECMA-334 12.4.7.3 binary numeric promotion, the same
+			// rule as JLS 5.6.2), so `16777216f < 16777217` is FALSE - the int
+			// becomes 1.6777216E7 on the way in. The test sits BEHIND the
+			// integral fast path above, which is where 8f43e84 measured java at
+			// +5.32% for putting it in front.
+			l, r = jvmFloCmpPair(rt, l, r)
 			c := rt.jsCompare(l, r)
 			// jsCompare answers the SENTINEL 2 for a NaN operand, commented
 			// there as "every relation is false" - and that is exactly C#'s
@@ -585,6 +602,12 @@ func init() {
 			case jsChar:
 				return w(jsChar{code: int32((int64(t.code) + d) & 65535)})
 			case jsJFlo:
+				// ++/-- keeps the operand's own type, WIDTH included: a float
+				// steps as a float, so `float f = 16777216f; f++` stays
+				// 1.6777216E7.
+				if jvmIs32(t.sty) {
+					return w(jsJFlo{f: jvmFround(t.f + float64(d)), sty: t.sty})
+				}
 				return w(jsJFlo{f: t.f + float64(d), sty: t.sty})
 			case jsGInt:
 				return w(csConvTo(rt, rt.csArith("+", t, float64(d)), t.w, t.u))
@@ -598,6 +621,12 @@ func init() {
 			l, v := u(a[0]), u(a[1])
 			switch t := l.(type) {
 			case jsJFlo:
+				// A compound assignment carries an implicit cast back to the
+				// LEFT operand's type (ECMA-334 12.21.4), so `float f = 1.1f;
+				// f += 0.1` is (float)(f + 0.1) and NOT a double.
+				if jvmIs32(t.sty) {
+					return w(jsJFlo{f: jvmFround(rt.toNumber(v)), sty: t.sty})
+				}
 				if f, ok := v.(jsJFlo); ok {
 					return w(f)
 				}
@@ -677,7 +706,17 @@ func init() {
 				return rt.wrapStr(strConcat(rt.csString(l), rt.csString(r)))
 			}
 			if jvmIsFlo(l) || jvmIsFlo(r) {
-				return w(jsJFlo{f: rt.toNumber(l) + rt.toNumber(r), sty: jvmStyleOf(l, r)})
+				// jvmArithStyle, not jvmStyleOf: the two differ only when a
+				// 32-bit box is involved, and there the WIDER type wins
+				// (ECMA-334 12.4.7.3), which jvmStyleOf's left-operand rule gets
+				// backwards for `1.0f + 1.0`. Both operands convert to float
+				// FIRST when the promoted type is float - rounding only the sum
+				// is a different answer for `0.1f + 16777217`.
+				sty := jvmArithStyle(l, r)
+				if jvmIs32(sty) {
+					return w(jsJFlo{f: jvmFround(jvmFround(rt.toNumber(l)) + jvmFround(rt.toNumber(r))), sty: sty})
+				}
+				return w(jsJFlo{f: rt.toNumber(l) + rt.toNumber(r), sty: sty})
 			}
 			if csIsIntegral(l) && csIsIntegral(r) {
 				return w(rt.csArith("+", l, r))
@@ -689,6 +728,16 @@ func init() {
 		// number are equal and two boxes holding 5 are not two distinct objects.
 		m["js_cseq"] = func(a []uint64) uint64 {
 			l, r := u(a[0]), u(a[1])
+			// THE FLOAT WIDTH RIDES HERE rather than on a new js_csvchareq
+			// extern the way java's does, because C#'s emitter already wraps
+			// every `==` / `!=` in js_cseq and hands it the js_jchareq answer to
+			// override. ECMA-334 12.4.7.3 converts the INT operand to a float
+			// first, so `16777216f == 16777217` is true where a bare value
+			// comparison says false. A float against a DOUBLE is not this case -
+			// the pair promotes to double, jvmFloPromotes answers false, and the
+			// caller's answer stands.
+			// The INTEGRAL fast path stays FIRST and pays nothing for the
+			// width, which is the lesson 8f43e84 bought at +5.32% in java.
 			if csIsIntegral(l) && csIsIntegral(r) && !jvmIsFlo(l) && !jvmIsFlo(r) {
 				if _, lb := l.(jsGInt); lb {
 					return boolH(rt.csCmp("==", l, r))
@@ -696,6 +745,10 @@ func init() {
 				if _, rb := r.(jsGInt); rb {
 					return boolH(rt.csCmp("==", l, r))
 				}
+				return a[2]
+			}
+			if jvmFloPromotes(l, r) {
+				return boolH(jvmFround(rt.toNumber(l)) == jvmFround(rt.toNumber(r)))
 			}
 			return a[2] // the js_jchareq / $valeq result the caller computed
 		}
@@ -853,6 +906,13 @@ func cspElemName(e interface{}) string {
 		}
 		return "System.SByte"
 	case jsJFlo:
+		// A `float` is System.Single and a `double` System.Double, which the
+		// style byte now tells apart (ECMA-334 8.3.7). `decimal` is still a
+		// double box here, so a decimal[] answers System.Double[] - a
+		// pre-existing approximation, unchanged.
+		if jvmIs32(t.sty) {
+			return "System.Single"
+		}
 		return "System.Double"
 	case string:
 		return "System.String"

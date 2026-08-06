@@ -1957,7 +1957,15 @@ KwLet       = "let" KwEnd ;
             var isReal = t.indexOf(".") >= 0 || t.indexOf("e") >= 0 || t.indexOf("E") >= 0
                          || lastc == "f" || lastc == "F" || lastc == "d" || lastc == "D"
                          || lastc == "m" || lastc == "M"
-            if (isReal) { return {__flo: parseFloat(t)} }
+            // An f/F suffix is a `float` - ECMA-334 8.3.7's binary32 - and not a
+            // double spelled differently: 1.0f/3.0f is 0.33333334 where the
+            // double is 0.3333333333333333. The width travels on the constant as
+            // __f32 and makeNumConst emits js_csflo32, which rounds. (The decimal
+            // is read into a double first and rounded to a float second; a real
+            // C# compiler rounds once, so a decimal landing exactly on a float
+            // midpoint AFTER a double rounding could differ - no value in the
+            // corpus or the probe does.) A d/D or m/M suffix stays a double box.
+            if (isReal) { return {__flo: parseFloat(t), __f32: (lastc == "f" || lastc == "F")} }
         }
         // An INTEGER literal travels as its DIGITS, because emitNum would already
         // have rounded 9223372036854775807 to 9223372036854776000 on the way into
@@ -1989,6 +1997,9 @@ KwLet       = "let" KwEnd ;
                 }
             }
             var f = v.__flo
+            if (v.__f32 === true) {
+                return function(b) { return {b: b, v: callExt(b, "js_csflo32", [emitNum(b, f)])} }
+            }
             return function(b) { return {b: b, v: callExt(b, "js_csflo", [emitNum(b, f)])} }
         }
         return makeConst(v)
@@ -3258,9 +3269,14 @@ KwLet       = "let" KwEnd ;
         // (double)/(float)/(decimal) BOX: the result is a double whatever the operand
         // was, which is what makes (double)7 / 2 == 3.5.
         if (t == "double" || t == "float" || t == "decimal") {
+            // (float) is the NARROWING conversion of ECMA-334 10.3.2 - double to
+            // float - and it is the site every float in a program ultimately
+            // comes from, so it gets its own extern rather than a flag on
+            // js_csflo (which is a FLOOR primitive and cannot carry one).
+            var fext = t == "float" ? "js_csflo32" : "js_csflo"
             return function(b) {
                 var r = inner(b)
-                return emitConvTo(r.b, t, r.v, function(bb, v) { return callExt(bb, "js_csflo", [callExt(bb, "js_char_code", [v])]) })
+                return emitConvTo(r.b, t, r.v, function(bb, v) { return callExt(bb, fext, [callExt(bb, "js_char_code", [v])]) })
             }
         }
         return inner
@@ -3753,6 +3769,9 @@ KwLet       = "let" KwEnd ;
         // A double/float/decimal declaration CONVERTS its initializer (ECMA-334 10.2.3,
         // implicit numeric conversion): `double d = 1;` holds 1.0.
         var isDbl = (ty == "double" || ty == "float" || ty == "decimal")
+        // ... and a `float` declaration converts at the FLOAT width, so
+        // `float f = 3;` holds 3.0f and `float g = 1.0f/3.0f` stays binary32.
+        var dblExt = ty == "float" ? "js_csflo32" : "js_csflo"
         // An INTEGRAL declared type puts its WIDTH AND SIGNEDNESS on the value the
         // same way, which is what makes `long t = 1; t = t * 1000000 * 1000000`
         // stay 64 bit, `byte b = 250; b += 10` wrap to 4 and `uint u = 5` behave
@@ -3764,7 +3783,7 @@ KwLet       = "let" KwEnd ;
             var r = init(b)
             b = r.b
             var v = r.v
-            if (isDbl) { v = callExt(b, "js_csflo", [v]) }
+            if (isDbl) { v = callExt(b, dblExt, [v]) }
             if (declW != undefined) {
                 v = callExt(b, "js_csadopt", [v, emitNum(b, declW), declU ? hTrue : hFalse])
             }

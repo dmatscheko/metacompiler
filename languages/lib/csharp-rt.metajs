@@ -411,6 +411,330 @@ function csFloOperand(v) {
     return v
 }
 
+// ===================================================== the float WIDTH ======
+//
+// A C# `float` is System.Single, "an IEEE-754 binary32 value" (ECMA-334 8.3.7),
+// and not a print style: 1.0f/3.0f is 0.33333334 where the double is
+// 0.3333333333333333, and every arithmetic result rounds back to 24 significant
+// bits. The VALUE still travels as a double (every float is exactly one), so the
+// only thing that goes on the box is the WIDTH - and the tag 14 box already has a
+// byte for a per-language print tag. STYLE 5 IS THE C# float. abnf/jsrtjvm.go's
+// header is the specification; languages/lib/runtime.c is deliberately unchanged,
+// which is why every rendering and every arithmetic result is intercepted HERE
+// before the floor sees it: runtime.c's jf_text has no arm for style 5 and would
+// print a float with the DOUBLE renderer. (That the floor is the wrong home is
+// MEASURED, not preferred: c-to-llvm-ir.abnf computes every float at double
+// precision, so the floor cannot spell (float)x at all - see docs/todo.md 1.1.)
+//
+// Three engines implement this one specification: the {__flo,__f32} box of
+// languages/csharp-interpreter.abnf, jsJFlo{sty: floCSF} in abnf/jsrtjvm.go and
+// abnf/jsrtcsharp.go, and this file. Nothing else builds a style 5 box, so java,
+// kotlin and go are untouched by every line below.
+//
+// CONFIDENCE, stated because there is NO C# TOOLCHAIN ON THIS MACHINE. The
+// ARITHMETIC and the ROUNDING are settled: a binary32 operation is the same
+// operation in C# and in Java, and java 24.0.2 was the oracle for every value.
+// The RENDERING is spec-cited only - ECMA-334 8.3.7 fixes the type but leaves
+// ToString()'s text to the library - and csFloStr32 in abnf/jsrtjvm.go carries
+// the full argument for each digit-placement decision.
+
+// x * 2^k, EXACTLY - every factor is a power of two, so not one bit is lost. The
+// chunking by 2^30 keeps the loop short for the ~280 halvings a subnormal float
+// needs; a plain doubling loop would be just as exact and much slower.
+function csScale2(x, k) {
+    var v = x
+    var n = k
+    while (n >= 30) { v = v * 1073741824; n = n - 30 }
+    while (n <= 0 - 30) { v = v / 1073741824; n = n + 30 }
+    while (n > 0) { v = v * 2; n = n - 1 }
+    while (n < 0) { v = v / 2; n = n + 1 }
+    return v
+}
+
+// csF32Round is Math.fround: the double nearest x that a binary32 can hold,
+// round-half-to-EVEN, with the subnormals and both overflows. It is what the Go
+// twin spells `float64(float32(x))`.
+//
+// It is written on `*` and `/` by powers of two and a floor, because MetaJS has
+// no access to a double's BITS - chapter 7.7 of docs/working-on-this-project.md,
+// the same argument that keeps d_pow and d_frexp in the C floor. The significand
+// is scaled until its unit in the last place is 1, rounded there, and scaled
+// back; both scalings are exact, so the single rounding is the only one.
+function csF32Round(x) {
+    if (x !== x) { return x }
+    if (x === 0) { return x }
+    var zero = 0
+    var inf = 1 / zero
+    var neg = x < 0
+    var a = neg ? 0 - x : x
+    if (a === inf) { return x }
+    var maxf = csScale2(16777215, 104)
+    // 2^128 is above every rounding boundary and 2^-150 is the half-way point
+    // below the smallest subnormal (which ties to even, i.e. to zero); both early
+    // exits also bound the exponent loop below to ~280 turns.
+    if (a >= csScale2(1, 128)) { return neg ? 0 - inf : inf }
+    if (a <= csScale2(1, 0 - 150)) { return neg ? csNegZeroF() : 0 }
+    var e = 0
+    var t = a
+    while (t >= 2) { t = t / 2; e = e + 1 }
+    while (t < 1) { t = t * 2; e = e - 1 }
+    var q = e - 23
+    if (q < 0 - 149) { q = 0 - 149 }
+    var s = csScale2(a, 0 - q)
+    var f = Math.floor(s)
+    var d = s - f
+    if (d > 0.5) { f = f + 1 }
+    if (d === 0.5) { if (f - Math.floor(f / 2) * 2 !== 0) { f = f + 1 } }
+    var r = csScale2(f, q)
+    if (r > maxf) { return neg ? 0 - inf : inf }
+    if (r === 0) { return neg ? csNegZeroF() : 0 }
+    return neg ? 0 - r : r
+}
+
+// -0.0. `0 - 0.0` is +0.0 and `x * 0` keeps an integral zero, so the working
+// spelling is a division - docs/working-on-this-project.md chapter 7.10.
+function csNegZeroF() { return 0 / (0 - 1) }
+
+// The result style of a binary operation on two float-ish operands. ECMA-334
+// 12.4.7.3 promotes to the WIDER type - "otherwise, if either operand is of type
+// double, the other operand is converted to type double" comes BEFORE the float
+// clause - so `float op double` is a double; the floor's jf_style_of takes the
+// LEFT operand's style, which gets that pair backwards.
+function csFloStyle2(l, r) {
+    if (floIs(l)) {
+        if (floStyle(l) == 5) {
+            if (floIs(r)) { return floStyle(r) }
+            return 5
+        }
+        return floStyle(l)
+    }
+    if (floIs(r)) { return floStyle(r) }
+    return 2
+}
+
+// The fix-up applied to the floor's own floOp answer. It runs ONLY when that
+// answer already claims style 5 - the one host call the double path pays - and
+// style 5 can only come from a C# float, because jf_style_of took it off an
+// operand. Two things are wrong with the floor's answer then, and both are
+// ECMA-334 12.4.7.3:
+//
+//   float op DOUBLE is a double. jf_style_of takes the LEFT operand's style and
+//   gets that pair backwards; the VALUE is already right, since a float widens to
+//   a double exactly, so only the box is rebuilt.
+//
+//   float op INT converts the int to a FLOAT FIRST. Rounding only the result is a
+//   different answer: `0.1f + 16777217` is 1.6777216E7, and 1.6777218E7 if the
+//   int keeps its exact value into the addition. So the operation is redone on
+//   two converted operands. (Settled with java 24.0.2, whose JLS 5.6.2 rule is
+//   the same one.)
+function csFloFix(op, rr, l, r) {
+    if (floIs(r)) { if (floStyle(r) != 5) { return flo(floNum(rr), floStyle(r)) } }
+    var a = flo(csF32Round(rtjNum(l)), 5)
+    var b = flo(csF32Round(rtjNum(r)), 5)
+    return flo(csF32Round(floNum(rtjArith(op, a, b))), 5)
+}
+
+// The same promotion for the RELATIONS and for `==`: a float operand converts the
+// other side to a float, so `16777216f == 16777217` is TRUE. It answers false
+// unless the promoted type really is float, so every double and every integral
+// pair keeps the path it had.
+function csFloPromotes(l, r) {
+    if (!floIs(l) && !floIs(r)) { return false }
+    if (csFloStyle2(l, r) != 5) { return false }
+    if (!floIs(l) && !rtjIsIntegral(l)) { return false }
+    if (!floIs(r) && !rtjIsIntegral(r)) { return false }
+    return true
+}
+
+// ----- Single.ToString() ----------------------------------------------------
+//
+// The C# double renderer read at 24 significant bits: the SHORTEST decimal that
+// reads back as the same float, plain inside the window and d.dddE+nn outside it,
+// NO forced ".0" and no two-significant-digit minimum (both of those are Java's).
+// abnf/jsrtjvm.go's csFloStr32 states what is settled and what is derived.
+//
+// THE DIGITS COME FROM `"" + a`, NOT FROM floPrec, and that is not a style
+// choice. floPrec's two implementations DISAGREE: abnf/commonscript.go answers
+// exactly n digits and languages/lib/runtime.c's answers max(n, shortest), so
+// floPrec(1/3, 1) is "3e-1" under llvm.Run and "3333333333333333e-1" natively.
+// Using it here would be a halves divergence in every float that needs fewer
+// digits than its double. `"" + a` is the shortest round-tripping DOUBLE in every
+// engine, and rounding that digit string down to n is exact for every n a float
+// can want.
+
+// The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP with
+// EXP the decimal exponent of the FIRST digit.
+function csDecDigits(a) {
+    var s = "" + a
+    var mant = s
+    var exp = 0
+    var ei = 0 - 1
+    var i = 0
+    while (i < s.length) {
+        var c = s.charAt(i)
+        if (c == "e") { ei = i }
+        if (c == "E") { ei = i }
+        i = i + 1
+    }
+    if (ei >= 0) {
+        mant = s.substring(0, ei)
+        var et = s.substring(ei + 1)
+        if (et.charAt(0) == "+") { et = et.substring(1) }
+        exp = parseInt(et, 10)
+    }
+    var digits = ""
+    var pt = 0 - 1
+    var j = 0
+    while (j < mant.length) {
+        var ch = mant.charAt(j)
+        if (ch == ".") { pt = digits.length } else { if (ch != "-") { digits = digits + ch } }
+        j = j + 1
+    }
+    if (pt < 0) { pt = digits.length }
+    var lead = 0
+    while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead = lead + 1 }
+    digits = digits.substring(lead)
+    pt = pt - lead
+    var endz = digits.length
+    while (endz > 1 && digits.charAt(endz - 1) == "0") { endz = endz - 1 }
+    digits = digits.substring(0, endz)
+    return digits + "e" + (pt + exp - 1)
+}
+
+// A DIGITS "e" EXP form rounded to n significant digits, half to even. The source
+// is already the shortest form of the value, so a genuine tie can only be a
+// decimal the double holds exactly.
+function csRoundDig(s, n) {
+    var ei = s.indexOf("e")
+    var ds = s.substring(0, ei)
+    var ex = parseInt(s.substring(ei + 1), 10)
+    if (ds.length <= n) { return s }
+    var keep = ds.substring(0, n)
+    var nxt = ds.charCodeAt(n) - 48
+    var up = false
+    if (nxt > 5) { up = true }
+    if (nxt == 5) {
+        var rest = false
+        var i = n + 1
+        while (i < ds.length) { if (ds.charCodeAt(i) != 48) { rest = true } i = i + 1 }
+        if (rest) { up = true } else {
+            var last = ds.charCodeAt(n - 1) - 48
+            if (last - Math.floor(last / 2) * 2 == 1) { up = true }
+        }
+    }
+    if (up) {
+        var out = ""
+        var carry = 1
+        var k = n - 1
+        while (k >= 0) {
+            var d = ds.charCodeAt(k) - 48 + carry
+            carry = 0
+            if (d == 10) { d = 0; carry = 1 }
+            out = "" + d + out
+            k = k - 1
+        }
+        if (carry == 1) { out = ("1" + out).substring(0, n); ex = ex + 1 }
+        keep = out
+    }
+    var endz = keep.length
+    while (endz > 1 && keep.charAt(endz - 1) == "0") { endz = endz - 1 }
+    return keep.substring(0, endz) + "e" + ex
+}
+
+// The value of a DIGITS "e" EXP form. At most nine digits, so the integer part is
+// exact; the power of ten is applied in chunks of 10^15, the largest one a double
+// holds exactly. The relative error stays under ~1e-15, five million times finer
+// than a float's half-ulp - and the only consumer is the round-trip TEST below,
+// so an error that small cannot pick a wrong length.
+function csDecVal(s) {
+    var ei = s.indexOf("e")
+    var ds = s.substring(0, ei)
+    var k = parseInt(s.substring(ei + 1), 10) - ds.length + 1
+    var m = 0
+    var i = 0
+    while (i < ds.length) { m = m * 10 + (ds.charCodeAt(i) - 48); i = i + 1 }
+    while (k >= 15) { m = m * 1000000000000000; k = k - 15 }
+    while (k <= 0 - 15) { m = m / 1000000000000000; k = k + 15 }
+    while (k > 0) { m = m * 10; k = k - 1 }
+    while (k < 0) { m = m / 10; k = k + 1 }
+    return m
+}
+
+// The shortest decimal that round-trips as a binary32. Nine digits always do.
+function csF32Sig(a) {
+    var full = csDecDigits(a)
+    var n = 1
+    while (n < 9) {
+        var c = csRoundDig(full, n)
+        if (csF32Round(csDecVal(c)) === a) { return c }
+        n = n + 1
+    }
+    return csRoundDig(full, 9)
+}
+
+function csF32Str(d) {
+    if (d !== d) { return "NaN" }
+    var zero = 0
+    var inf = 1 / zero
+    if (d === inf) { return "Infinity" }
+    if (d === 0 - inf) { return "-Infinity" }
+    if (d === 0) { if (1 / d < 0) { return "-0" } return "0" }
+    var neg = d < 0
+    var a = neg ? 0 - d : d
+    var sig = csF32Sig(a)
+    var ei = sig.indexOf("e")
+    var ds = sig.substring(0, ei)
+    var e10 = parseInt(sig.substring(ei + 1), 10)
+    var body = ""
+    // The window: plain inside [1e-5, 1e7). The UPPER bound is the float one (a
+    // Single's general-format precision is 7 where a Double's is 15, so 1e7f
+    // prints "1E+07" and the double 1e7 prints "10000000"); the LOWER bound is
+    // csFloStr's own, unchanged, so the two renderers cannot disagree.
+    if (a >= 0.00001 && a < 10000000) {
+        body = csF32Plain(ds, e10)
+    } else {
+        var frac = ds.substring(1)
+        var es = e10 < 0 ? (0 - e10) : e10
+        var etx = "" + es
+        if (es < 10) { etx = "0" + etx }
+        body = ds.charAt(0) + (frac == "" ? "" : "." + frac) + "E" + (e10 < 0 ? "-" : "+") + etx
+    }
+    if (neg) { return "-" + body }
+    return body
+}
+
+// The plain form, from the digits and the exponent of the first one. There is NO
+// forced ".0" - C# writes 100f as "100" - which is the one place this differs in
+// shape from java-rt.metajs's jvF32Plain.
+function csF32Plain(ds, e10) {
+    if (e10 >= 0) {
+        var ip = ""
+        var i = 0
+        while (i <= e10) {
+            if (i < ds.length) { ip = ip + ds.charAt(i) } else { ip = ip + "0" }
+            i = i + 1
+        }
+        if (ds.length > e10 + 1) { return ip + "." + ds.substring(e10 + 1) }
+        return ip
+    }
+    var lead = "0."
+    var k = 0 - e10 - 1
+    while (k > 0) { lead = lead + "0"; k = k - 1 }
+    return lead + ds
+}
+
+// Every rendering of a tag 14 box goes through here, because the floor cannot
+// render style 5 (see the section header).
+function csFloText(v) {
+    if (floStyle(v) == 5) { return csF32Str(floNum(v)) }
+    return floStr(v)
+}
+
+// js_csflo32 is the only new extern the width needs: a `1.0f` literal, a
+// `(float)e` cast and a `float x = e` declaration all lower to it. Its Go twin is
+// registered in abnf/jsrtcsharp.go.
+function js_csflo32(v) { return flo(csF32Round(rtjNum(v)), 5) }
+
 // ===================================================== rendering ============
 
 // cspBoolStr is System.Boolean.ToString(): Boolean.TrueString / Boolean.FalseString,
@@ -433,7 +757,7 @@ function cpRender(v, depth) {
     if (typeof v == "boolean") { return cpBoolStr(v) }
     if (typeof v == "string") { return v }
     if (csIsChar(v)) { return String.fromCharCode(v["__char"]) }
-    if (floIs(v)) { return floStr(v) }
+    if (floIs(v)) { return csFloText(v) }
     if (sintIs(v)) { return sintStr(v) }
     if (typeof v == "number") { return "" + v }
     if (typeof v == "function") { return "" + v }
@@ -500,7 +824,9 @@ function cpElemName(e) {
     if (csIsChar(e)) { return "System.Char" }
     if (typeof e == "boolean") { return "System.Boolean" }
     if (typeof e == "string") { return "System.String" }
-    if (floIs(e)) { return "System.Double" }
+    // ECMA-334 8.3.7: a `float` is System.Single. A `decimal` is still a double
+    // box in this runtime, so decimal[] answers System.Double[] - unchanged.
+    if (floIs(e)) { if (floStyle(e) == 5) { return "System.Single" } return "System.Double" }
     if (sintIs(e)) {
         // A sized integer carries its own type, so long[] / uint[] / byte[] are the
         // one array kind whose element type is not a guess.
@@ -531,7 +857,7 @@ function cpToString(v) {
     if (typeof v == "string") { return v }
     if (typeof v == "boolean") { return v ? "true" : "false" }
     if (csIsChar(v)) { return String.fromCharCode(v["__char"]) }
-    if (floIs(v)) { return floStr(v) }
+    if (floIs(v)) { return csFloText(v) }
     if (sintIs(v)) { return sintStr(v) }
     if (typeof v == "number") { return "" + v }
     if (Array.isArray(v)) { return cpJoin(v) }
@@ -988,7 +1314,10 @@ function js_csslice(v, lo0, hi0) {
 // path of abnf/jsrtjvm.go, which is where the two number tags meet; two bools take
 // C#'s non-short-circuit & | ^.
 function js_csarith(op, l, r) {
-    if (floIs(l) || floIs(r)) { return rtjArith(op, l, r) }
+    // The one host call the DOUBLE path pays for the float width: floStyle of a
+    // result that is not style 5 is the whole test, because style 5 can only have
+    // come off a C# float operand.
+    if (floIs(l) || floIs(r)) { var rf = rtjArith(op, l, r); if (floStyle(rf) == 5) { return csFloFix(op, rf, l, r) } return rf }
     if (typeof l == "boolean") {
         if (typeof r == "boolean") {
             if (op == "&") { return l && r }
@@ -996,7 +1325,7 @@ function js_csarith(op, l, r) {
             if (op == "^") { return l !== r }
         }
     }
-    if (!rtjIsIntegral(l) || !rtjIsIntegral(r)) { return rtjArith(op, l, r) }
+    if (!rtjIsIntegral(l) || !rtjIsIntegral(r)) { var rg = rtjArith(op, l, r); if (floStyle(rg) == 5) { return csFloFix(op, rg, l, r) } return rg }
     return csArith(op, l, r)
 }
 
@@ -1008,7 +1337,17 @@ function js_csshift(op, l, r) { return csShift(op, l, r) }
 // copy months later, in both engines, in two different directions. That is why
 // the two are one body now. abnf/jsrtcsharp.go:477 is the same three lines; the
 // two halves have to move together or --cross reports it.
-function js_cscmp(op, l, r) { return rtjRel(op, l, r) }
+function js_cscmp(op, l, r) {
+    // THE INTEGRAL FAST PATH IS SPELLED OUT rather than reached through rtjRel,
+    // and that is a MEASUREMENT: 8f43e84 put the float question in FRONT of the
+    // same body in java and paid +5.32% against a 4.96% spread, because a loop
+    // condition `i < n` is the hot case. rtjRel's own first line is this arm
+    // (rtjIsIntegral already excludes a float box), so it is the same answer by
+    // construction.
+    if (rtjIsIntegral(l) && rtjIsIntegral(r)) { return rtjkCmp(op, l, r) }
+    if (csFloPromotes(l, r)) { return rtjRel(op, flo(csF32Round(rtjNum(l)), 5), flo(csF32Round(rtjNum(r)), 5)) }
+    return rtjRel(op, l, r)
+}
 
 // A cast or a declared integral type: (value, bits, unsigned).
 function js_csconv(v, bits, uns) { return csConvTo(v, rtjNum(bits), uns === true) }
@@ -1095,7 +1434,8 @@ function csComplement(v, w, u) {
 function js_csstep(v, d) {
     var n = rtjNum(d)
     if (csIsChar(v)) { return csChar((v["__char"] + n) & 65535) }
-    if (floIs(v)) { return flo(floNum(v) + n, floStyle(v)) }
+    // ++/-- keeps the operand's own type, WIDTH included (ECMA-334 12.8.15).
+    if (floIs(v)) { var st = floStyle(v); if (st == 5) { return flo(csF32Round(floNum(v) + n), 5) } return flo(floNum(v) + n, st) }
     if (sintIs(v)) { return csConvTo(csArith("+", v, n), sintWidth(v), sintUns(v)) }
     return rtWrap32(csNorm(v, 32, false) + n)
 }
@@ -1105,6 +1445,9 @@ function js_csstep(v, d) {
 // `byte b = 250; b += 10` is (byte)260 == 4.
 function js_csnarrowlike(l, v) {
     if (floIs(l)) {
+        // The implicit cast back to the LEFT operand's type keeps the WIDTH too, so
+        // `float f = 1.1f; f += 0.1` is (float)(f + 0.1) and NOT a double.
+        if (floStyle(l) == 5) { return flo(csF32Round(rtjNum(v)), 5) }
         if (floIs(v)) { return v }
         return flo(rtjNum(v), floStyle(l))
     }
@@ -1128,7 +1471,15 @@ function js_cschar(v) {
 // 2^53.
 function js_csadd2(l, r) {
     if (typeof l == "string" || typeof r == "string") { return cpAddStr(l) + cpAddStr(r) }
-    if (floIs(l) || floIs(r)) { return flo(rtjNum(l) + rtjNum(r), csFloStyle(l, r)) }
+    // csFloStyle2, not csFloStyle: the two differ only when a 32-bit box is in
+    // play, and there the WIDER type wins (ECMA-334 12.4.7.3). BOTH operands
+    // convert first when the promoted type is float - rounding only the sum is a
+    // different answer for `0.1f + 16777217`.
+    if (floIs(l) || floIs(r)) {
+        var st = csFloStyle2(l, r)
+        if (st == 5) { return flo(csF32Round(csF32Round(rtjNum(l)) + csF32Round(rtjNum(r))), 5) }
+        return flo(rtjNum(l) + rtjNum(r), st)
+    }
     if (rtjIsIntegral(l) && rtjIsIntegral(r)) { return csArith("+", l, r) }
     return rtjNum(l) + rtjNum(r)
 }
@@ -1156,10 +1507,20 @@ function js_csadd(l, r) {
 // two boxes holding 5 are not two distinct objects. The third argument is the
 // js_jchareq / $valeq answer the caller already computed.
 function js_cseq(l, r, pre) {
-    if (rtjIsIntegral(l) && rtjIsIntegral(r) && !floIs(l) && !floIs(r)) {
+    // THE FLOAT WIDTH RIDES HERE rather than on a new extern the way java's does,
+    // because C#'s emitter already wraps every == / != in js_cseq and hands it
+    // the js_jchareq answer to override. ECMA-334 12.4.7.3 converts the INT
+    // operand to a float first, so `16777216f == 16777217` is true where a bare
+    // value comparison says false. A float against a DOUBLE is not this case: the
+    // pair promotes to double and csFloPromotes answers false.
+    // The INTEGRAL fast path stays FIRST and pays nothing for the width, which is
+    // the lesson 8f43e84 bought at +5.32% in java.
+    if (rtjIsIntegral(l) && rtjIsIntegral(r)) {
         if (sintIs(l)) { return csCmp("==", l, r) }
         if (sintIs(r)) { return csCmp("==", l, r) }
+        return pre
     }
+    if (csFloPromotes(l, r)) { return csF32Round(rtjNum(l)) == csF32Round(rtjNum(r)) }
     return pre
 }
 

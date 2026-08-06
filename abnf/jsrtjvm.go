@@ -46,6 +46,7 @@ import (
 //	floCS    1.0 -> "1"     1e20 -> "1E+20"     inf -> "Infinity"  (C#)
 //	floJavaF the JAVA `float`    - java's print style at a 32 BIT WIDTH
 //	floGoF   the GO `float32`    - go's print style at a 32 BIT WIDTH
+//	floCSF   the C# `float`      - C#'s print style at a 32 BIT WIDTH
 //
 // THE STYLE BYTE CARRIES THE WIDTH, and that is a deliberate choice with one
 // consequence worth stating. `float` is not a print style: a Java float is a
@@ -63,16 +64,21 @@ import (
 // (`1.0E20`, `Infinity`, a forced ".0"), so the two cannot share a byte; but they
 // round identically, promote identically and compare identically, so everything
 // about the WIDTH is asked through jvmIs32 below rather than through an equality
-// against one constant. A third 32-bit language (C# `float` - docs/todo.md 1.1)
-// adds ONE byte, ONE arm of jvmIs32, ONE arm of jvmWidens32 and ONE renderer arm
-// in jvmFloText, and needs no other edit in this file. Nothing else here tests a
-// style for its width, which was checked by deleting the one helper that had no
-// caller rather than leaving it for the next agent to reason about.
+// against one constant. THE THIRD 32-BIT LANGUAGE (C# `float`) COST EXACTLY WHAT
+// THAT PARAGRAPH PREDICTED: one byte, one arm of jvmIs32, one arm of jvmWidens32
+// and one renderer arm in jvmFloText, and no other edit in this file. Nothing
+// else here tests a style for its width, which was checked by deleting the one
+// helper that had no caller rather than leaving it for the next agent to reason
+// about.
 //
 // The other half of the mechanism is per-language and deliberately so: WHAT A
 // MIXED 32/64 PAIR PROMOTES TO. Java widens (JLS 5.6.2: `1.0f + 1.0` is a
-// double), while Go has no implicit conversion between float32 and float64 at all
-// - "the operand types must be identical", so a mixed pair is a compile error and
+// double), and so does C# - ECMA-334 12.4.7.3 binary numeric promotion reads
+// "otherwise, if either operand is of type double, the other operand is
+// converted to type double; otherwise, if either operand is of type float, the
+// other operand is converted to type float", i.e. exactly JLS 5.6.2's wider-type
+// rule. Go has no implicit conversion between float32 and float64 at all -
+// "the operand types must be identical", so a mixed pair is a compile error and
 // the only pair that reaches the runtime is a float32 against an UNTYPED
 // CONSTANT, which Go converts TO float32. The two answers are opposite and
 // jvmWidens32 is the one-line switch that says which.
@@ -80,30 +86,37 @@ import (
 // The consequence of putting the width on the style: THE FLOOR CANNOT RENDER A
 // 32-BIT BOX. runtime.c's jf_text switches on the style and has arms for 0, 1 and
 // 2 only, so it would print a float with the DOUBLE renderer.
-// languages/lib/java-rt.metajs and languages/lib/go-rt.metajs therefore intercept
-// every rendering and every arithmetic result of a 32-bit box before the floor
-// sees it (jvFloText / jvFloFix, goFloText / js_gf32fix), and llvm.Run's side of
-// that contract is jvmFloText / jvmArith here. If a THIRD engine ever needs a
-// float box, the floor is where the width should move to - see docs/todo.md 1.1.
+// languages/lib/java-rt.metajs, go-rt.metajs and csharp-rt.metajs therefore
+// intercept every rendering and every arithmetic result of a 32-bit box before
+// the floor sees it (jvFloText / jvFloFix, goFloText / js_gf32fix, csFloText /
+// csFloFix), and llvm.Run's side of that contract is jvmFloText / jvmArith here.
+//
+// THE FLOOR IS NOT THE ANSWER AND THAT IS MEASURED, not a preference:
+// languages/lib/runtime.c is compiled by our own c-to-llvm-ir.abnf, which
+// computes EVERY float at double precision (ctF("flt") is 8 and floating
+// arithmetic is emitted as integer soft-float), so it cannot spell `(float)x` at
+// all. See e5e68b5 and docs/todo.md 1.1.
 const (
 	floJava  = 0
 	floGo    = 1
 	floCS    = 2
 	floJavaF = 3
 	floGoF   = 4
+	floCSF   = 5
 )
 
 // jvmIs32 is the WIDTH question, asked of a style byte: does a box carrying this
 // style hold a binary32? Every width-sensitive site in this file goes through it,
 // so a new 32-bit language adds one arm here and nowhere else.
-func jvmIs32(sty uint8) bool { return sty == floJavaF || sty == floGoF }
+func jvmIs32(sty uint8) bool { return sty == floJavaF || sty == floGoF || sty == floCSF }
 
 // jvmWidens32 is "this language promotes a mixed 32/64 pair to the WIDER type",
-// which is JLS 5.6.2 and holds for Java and Kotlin. It is FALSE for Go, whose
-// spec forbids the mixed pair outright: the only pair that reaches the runtime is
-// a float32 against an untyped constant, and Go converts the constant to float32,
-// so the 32-bit side wins. Swift has Go's rule if it ever gets a box here.
-func jvmWidens32(sty uint8) bool { return sty == floJavaF }
+// which is JLS 5.6.2 and holds for Java and Kotlin, and is ECMA-334 12.4.7.3
+// word for word for C#. It is FALSE for Go, whose spec forbids the mixed pair
+// outright: the only pair that reaches the runtime is a float32 against an
+// untyped constant, and Go converts the constant to float32, so the 32-bit side
+// wins. Swift has Go's rule if it ever gets a box here.
+func jvmWidens32(sty uint8) bool { return sty == floJavaF || sty == floCSF }
 
 type jsJFlo struct {
 	f   float64
@@ -125,6 +138,8 @@ func jvmFloText(v jsJFlo) string {
 		return jvmFloStr32(v.f)
 	case floGoF:
 		return goFloStr32(v.f)
+	case floCSF:
+		return csFloStr32(v.f)
 	}
 	return jvmFloStr(v.f)
 }
@@ -688,4 +703,58 @@ func csFloStr(f float64) string {
 	// Go writes "1E+20"/"1.5E-08"; .NET writes "1E+20"/"1.5E-08" too (two-digit
 	// minimum exponent), so the Go spelling already matches.
 	return s
+}
+
+// csFloStr32 is System.Single.ToString() - the C# `float`, ECMA-334 8.3.7's
+// binary32 - and it is THE LEAST CONFIDENT FUNCTION IN THIS FILE, because there
+// is no C# toolchain on this machine (docs/working-on-this-project.md chapter 5)
+// and because ECMA-334 does not specify ToString()'s TEXT at all: 8.3.7 fixes the
+// type as IEEE-754 binary32 and refers the string conversion to the library,
+// which is ECMA-335 / the .NET BCL. So the ARITHMETIC below it is settled - a
+// binary32 add is the same operation in Java, and `java` 24.0.2 is a real oracle
+// for every value - while the DIGIT PLACEMENT here is derived, and stated as
+// derived rather than measured.
+//
+// What is derived, and from what:
+//
+//   - The digits are the SHORTEST round-tripping decimal read at 24 significant
+//     bits, which .NET Core 3.0 made the default for Single.ToString() (before
+//     it, "G7"). That is the same change of bitSize that separates
+//     Float.toString from Double.toString, so 1.0f/3.0f is "0.33333334".
+//   - NO forced ".0" and no two-significant-digit minimum: those are Java's, and
+//     C#'s double renderer above already omits both (1.0 prints "1").
+//   - The plain/scientific window. .NET's general format goes scientific when the
+//     decimal point sits past the type's G-precision, which is 7 for Single and
+//     15 for Double - hence 1e7f prints "1E+07" where the double 1e7 prints
+//     "10000000". THE UPPER BOUND IS THE ONLY PART OF THE WINDOW THIS FUNCTION
+//     CHANGES: the lower bound is taken from csFloStr above UNCHANGED, so the two
+//     renderers cannot disagree with each other. That lower bound is itself
+//     unverified - 1e-5 renders here as "0.00001" and .NET is reported to answer
+//     "1E-05" - and it is left exactly as csFloStr has always had it rather than
+//     changed on a reading of the BCL source that nothing here can run. Nothing
+//     is asserted at that boundary in tests/csharp-test-full.cs for the same
+//     reason.
+//   - "NaN" / "Infinity" / "-Infinity" are NumberFormatInfo.InvariantInfo's
+//     symbols, and "-0" for a negative zero, both exactly as csFloStr has them.
+func csFloStr32(f float64) string {
+	if math.IsNaN(f) {
+		return "NaN"
+	}
+	if math.IsInf(f, 1) {
+		return "Infinity"
+	}
+	if math.IsInf(f, -1) {
+		return "-Infinity"
+	}
+	if f == 0 {
+		if math.Signbit(f) {
+			return "-0"
+		}
+		return "0"
+	}
+	a := math.Abs(f)
+	if a >= 1e-5 && a < 1e7 {
+		return strconv.FormatFloat(f, 'f', -1, 32)
+	}
+	return strconv.FormatFloat(f, 'E', -1, 32)
 }
