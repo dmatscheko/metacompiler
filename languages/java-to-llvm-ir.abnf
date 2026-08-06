@@ -890,7 +890,8 @@ NewObject   <~~ push(makeNew(takeAll())) ~~>
 NewAnon     <~~ push(makeNewAnon(takeAll(), up.pos)) ~~>
             = KwNew [ SkipAngle ] { Annotation } Id <~~ push(up.in) ~~> [ SkipAngle ]
               { "." { Annotation } Id <~~ push(up.in) ~~> [ SkipAngle ] }
-              "(" [ Expression { "," Expression } ] ")" "{" { Member } "}" ;
+              "(" [ Expression { "," Expression } ] ")"
+              "{" <~~ jAnonDepth = jAnonDepth + 1 ~~> { Member } "}" <~~ jAnonDepth = jAnonDepth - 1 ~~> ;
 NewArrLit   <~~ push(makeArray(takeAll())) ~~>
             = KwNew Type "{" [ Expression { "," Expression } ] [ "," ] "}" ;
 // new T[a][b]...[] : every SIZED dimension is built (the innermost one filled with
@@ -2240,10 +2241,39 @@ HasStatic   = :script(~~
         var kr = last.idx(b)
         return {b: kr.b, obj: o, key: kr.v}
     }
+    // The WRITE half of the unqualified-field branch (see makeVarRef and
+    // lookupFieldKind further down). A place cannot be phi'd - only a value can -
+    // so both arms carry their own read-modify-write and the phi joins the RESULT.
+    // mkNew(block, oldValue) -> newValue is what a compound assignment or a ++
+    // computes; a plain `=` passes null and stores v unchanged. retOld makes the
+    // expression answer the value from BEFORE the write, which is what a postfix
+    // x++ yields.
+    function jUnqualWrite(b, name, fi, v, mkNew, retOld) {
+        var localB = curF.NewBlock("")
+        var fieldB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        var tyV = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "undefined")])), fieldB, localB)
+        var nameL = emitStr(localB, name)
+        var oldL = (mkNew == null) ? v : callExt(localB, "js_scope_get", [curScopeV, nameL])
+        var newL = (mkNew == null) ? v : mkNew(localB, oldL)
+        callExt(localB, "js_scope_set", [curScopeV, nameL, newL])
+        localB.NewBr(mergeB)
+        var ownV = jFieldOwner(fieldB, fi)
+        var keyF = emitStr(fieldB, name)
+        var oldF = (mkNew == null) ? v : callExt(fieldB, "js_get", [ownV, keyF])
+        var newF = (mkNew == null) ? v : mkNew(fieldB, oldF)
+        callExt(fieldB, "js_set", [ownV, keyF, newF])
+        fieldB.NewBr(mergeB)
+        var rl = retOld ? oldL : newL
+        var rf = retOld ? oldF : newF
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(rl, localB), llvm.ir.NewIncoming(rf, fieldB)])}
+    }
     function makeAssign(items) {
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
+        var defClass = jDefClass()
         return function(b) {
             var r = valT(b)
             b = r.b
@@ -2254,6 +2284,13 @@ HasStatic   = :script(~~
             // js_jvnarrowlike reads the width off the old value and applies it; a
             // String left operand keeps its concatenation untouched.
             if (ref.path.length == 0) {
+                var fi = lookupFieldKind(defClass, ref.name)
+                if (fi != null) {
+                    var mk = (op == "=") ? null : function(bx, oldX) {
+                        return callExt(bx, "js_jvnarrowlike", [oldX, emitBin(bx, op, oldX, v)])
+                    }
+                    return jUnqualWrite(b, ref.name, fi, v, mk, false)
+                }
                 var nameV = emitStr(b, ref.name)
                 if (op != "=") {
                     var old = callExt(b, "js_scope_get", [curScopeV, nameV])
@@ -2279,9 +2316,16 @@ HasStatic   = :script(~~
     function makeIncDec(items) {
         var ref = items[0]
         var step = (items[1] == "++") ? 1 : 0 - 1
+        var defClass = jDefClass()
         return function(b) {
             var oneV = emitNum(b, step)
             if (ref.path.length == 0) {
+                var fi = lookupFieldKind(defClass, ref.name)
+                if (fi != null) {
+                    return jUnqualWrite(b, ref.name, fi, hUndef, function(bx, oldX) {
+                        return callExt(bx, "js_jvstep", [oldX, oneV])
+                    }, true)
+                }
                 var nameV = emitStr(b, ref.name)
                 var oldV = callExt(b, "js_scope_get", [curScopeV, nameV])
                 callExt(b, "js_scope_set", [curScopeV, nameV, callExt(b, "js_jvstep", [oldV, oneV])])
@@ -2297,9 +2341,16 @@ HasStatic   = :script(~~
     // Prefix ++/-- : like makeIncDec but yields the NEW value (genuine, same extern).
     function makePreIncDec(ref, op) {
         var step = (op == "++") ? 1 : 0 - 1
+        var defClass = jDefClass()
         return function(b) {
             var oneV = emitNum(b, step)
             if (ref.path.length == 0) {
+                var fi = lookupFieldKind(defClass, ref.name)
+                if (fi != null) {
+                    return jUnqualWrite(b, ref.name, fi, hUndef, function(bx, oldX) {
+                        return callExt(bx, "js_jvstep", [oldX, oneV])
+                    }, false)
+                }
                 var nameV = emitStr(b, ref.name)
                 var oldV = callExt(b, "js_scope_get", [curScopeV, nameV])
                 var nv = callExt(b, "js_jvstep", [oldV, oneV])
@@ -2773,6 +2824,84 @@ HasStatic   = :script(~~
         }
         return null
     }
+    // ----- unqualified instance / static field access -----
+    //
+    // `class P { int w = 3; int get() { return w; } }` is ordinary Java and every
+    // engine here used to abort on it ("variable not defined: w" in both compiler
+    // engines, "unknown name: w" in the interpreter) - only `this.w` worked, and
+    // every class in tests/java-test-*.java writes `this.w`, which is why 6,258
+    // assertions never reached it.
+    //
+    // fieldKind is the twin of methodKind above: class name -> member name ->
+    // "instance" | "static", filled while the declarations are walked and read
+    // when the ACCESS is emitted, by which time every class body has been seen
+    // (a field may legally be named before its own declaration).
+    var fieldKind = {}
+    // AN ANONYMOUS CLASS BODY IS THE ONE PLACE curClassName LIES. Every named type
+    // declaration enters the class stack from a tag on its Id, but `new Sup() {
+    // ... }` has no name until makeNewAnon invents one - long after its members
+    // have been walked - so curClassName is still the ENCLOSING class inside the
+    // body. Without this counter `int w` of the outer class made a bare `w` in the
+    // anon body emit `this.w`, and `this` there is the anon instance: the compiler
+    // answered null where the interpreter aborted, which is a halves divergence.
+    // Inside an anon body the lookup is therefore skipped entirely and the bare
+    // name goes back to being an ordinary scope read - the behaviour both halves
+    // had before, i.e. an abort. (javac resolves it to the OUTER instance's field;
+    // reaching that needs an __outer hop the anon descriptor does not carry. A
+    // LAMBDA body is a different case and now works: a lambda has no `this` of its
+    // own, so the captured scope's `this` IS the outer instance.)
+    var jAnonDepth = 0
+    function jDefClass() { return (jAnonDepth > 0) ? "" : curClassName }
+    // The class in cls' own chain that declares `name` as a field, with its kind,
+    // or null. A DEPTH count rather than a seen-set: this runs once per emitted
+    // access and allocating a set per call costs more than the walk (the < 64 cap
+    // is the one chapter 7.9 of the manual keeps on every __super walk here - a
+    // cyclic chain hangs the oracle, not us).
+    function lookupFieldKind(cls, name) {
+        var c2 = cls
+        for (var n = 0; n < 64 && c2 != undefined && c2 != ""; n++) {
+            var k = fieldKind["$" + c2 + "#" + name]
+            if (k != undefined) { return {kind: k, cls: c2} }
+            c2 = classSuper["$" + c2]
+        }
+        return null
+    }
+    // The object an unqualified field access reads/writes through: the instance
+    // for an instance field, the DECLARING class' descriptor for a static one (a
+    // static inherited from a superclass lives on that superclass' descriptor,
+    // and js_get does not walk __super).
+    function jFieldOwner(b, fi) {
+        if (fi.kind == "static") { return callExt(b, "js_scope_get", [curScopeV, emitStr(b, fi.cls)]) }
+        return callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+    }
+    // A LOCAL OR PARAMETER OF THE SAME NAME SHADOWS THE FIELD, and which one a
+    // given execution sees is not knowable here (a name is a field only for the
+    // duration of a block that does not redeclare it). So the choice is a runtime
+    // branch on js_scope_typeof, which - unlike js_scope_get - does not abort on
+    // an unbound name. Only a name the enclosing class actually declares as a
+    // field gets the branch, so the IR of every other variable access is
+    // unchanged, byte for byte. This is csharp-to-llvm-ir.abnf's makeVarRef, which
+    // solves the identical problem for C#.
+    makeVarRef = function(name) {
+        var defClass = jDefClass()
+        return function(b) {
+            var fi = lookupFieldKind(defClass, name)
+            if (fi == null) {
+                return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])}
+            }
+            var localB = curF.NewBlock("")
+            var fieldB = curF.NewBlock("")
+            var mergeB = curF.NewBlock("")
+            var tyV = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "undefined")])), fieldB, localB)
+            var lv = callExt(localB, "js_scope_get", [curScopeV, emitStr(localB, name)])
+            localB.NewBr(mergeB)
+            var ownV = jFieldOwner(fieldB, fi)
+            var fv = callExt(fieldB, "js_get", [ownV, emitStr(fieldB, name)])
+            fieldB.NewBr(mergeB)
+            return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(fv, fieldB)])}
+        }
+    }
     function makeBareCall(items) {
         var name = items[0]
         var args = items.slice(1)
@@ -3123,9 +3252,20 @@ HasStatic   = :script(~~
                     // String.charAt answers a CHAR (js_jcharat), not a one-character
                     // String: Java's char is an integral type, so s.charAt(1) + 0
                     // is 101. A user class with its own charAt still dispatches.
+                    // x.hashCode() is Object#hashCode and its overrides, and it
+                    // reaches values js_mcall cannot dispatch on at all - a
+                    // String, a boxed long, a double, a plain int, an array, an
+                    // instance of a class that declares no method by that name.
+                    // js_jhash answers all of them AND still dispatches to a
+                    // user-declared hashCode, so a class that overrides it is
+                    // unaffected. Same shape as the charAt arm above; only the
+                    // no-argument form is Object#hashCode, so an overload with
+                    // parameters still goes to js_mcall.
                     var mv = (s.name == "charAt")
                              ? callExt(mcallB, "js_jcharat", [cur, ea.v])
-                             : callExt(mcallB, "js_mcall", [cur, emitStr(mcallB, s.name), ea.v])
+                             : ((s.name == "hashCode" && s.args.length == 0)
+                                ? callExt(mcallB, "js_jhash", [cur])
+                                : callExt(mcallB, "js_mcall", [cur, emitStr(mcallB, s.name), ea.v]))
                     mcallB.NewBr(mergeB)
                     cur = mergeB.NewPhi([llvm.ir.NewIncoming(cv, callB), llvm.ir.NewIncoming(mv, mcallB)])
                     b = mergeB
@@ -4037,12 +4177,22 @@ HasStatic   = :script(~~
             if (members[u].kind == "abstract") {
                 methodKind["$" + name + "#" + members[u].name] = "instance"
             }
+            // The table an UNQUALIFIED field access resolves against (see
+            // lookupFieldKind). An interface field is implicitly static final, and
+            // buildInterfaceStmt routes through here, so the flag it carries is
+            // already right.
+            if (members[u].kind == "field") {
+                fieldKind["$" + name + "#" + members[u].name] = members[u].statik ? "static" : "instance"
+            }
         }
         if (recordParams != undefined) {
             for (var rc = 0; rc < recordParams.length; rc++) {
                 if (methodKind["$" + name + "#" + recordParams[rc]] == undefined) {
                     methodKind["$" + name + "#" + recordParams[rc]] = "instance"
                 }
+                // A record component is an instance field as well as an accessor,
+                // and the compact constructor's body names it unqualified.
+                fieldKind["$" + name + "#" + recordParams[rc]] = "instance"
             }
         }
         return function(b) {

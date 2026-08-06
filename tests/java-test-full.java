@@ -72,6 +72,8 @@ class Main {
         S26.run(); // SECTION-CALL 26
         S27.run(); // SECTION-CALL 27
         S28.run(); // SECTION-CALL 28
+        S29.run(); // SECTION-CALL 29
+        S30.run(); // SECTION-CALL 30
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -1255,6 +1257,245 @@ class S26 {
             default -> "d";
         };
         Main.check("ta14", w.equals("s2") && k instanceof final String fs && fs.length() == 2);
+    }
+}
+
+// ===== SECTION 29: unqualified instance and static field access =====
+// A member body may name a field WITHOUT `this.` / `Cls.`, and a local or a
+// parameter of the same name shadows it (JLS 6.5.6.1, 15.11). Every class in
+// this file's other sections spells `this.w`, which is exactly why nothing here
+// reached the bare form - both java halves aborted on it, with `unknown name: w`
+// and `variable not defined: w`, while javac printed the field.
+
+interface K29 { int LIM = 42; default int lim() { return LIM; } }
+
+class A29 {
+    int a = 1;
+    static int sa = 11;
+    int ga() { return a; }
+    static int gsa() { return sa; }
+}
+
+class B29 extends A29 {
+    int b = 2;
+    static int sb = 22;
+    String s = "hi";
+    long lf = 5L;
+    double df = 1.5;
+    char cf = 'a';
+    boolean flag = false;
+    int[] arr = {1, 2, 3};
+
+    int own() { return b; }
+    int inherited() { return a; }
+    int sum() { return a + b; }
+    int statFromInst() { return sa + sb; }
+    static int statFromStat() { return sa + sb; }
+    void setB(int v) { b = v; }
+    void addB(int v) { b += v; }
+    int postB() { return b++; }
+    int preB() { return ++b; }
+    int decB() { return --b; }
+    String cat(String x) { return s + x; }
+    long addL(long v) { lf += v; return lf; }
+    double dbl() { df *= 2; return df; }
+    char nextC() { cf++; return cf; }
+    boolean flip() { flag = !flag; return flag; }
+    int arrSum() { int t = 0; for (int i = 0; i < arr.length; i++) { t += arr[i]; } return t; }
+    void bumpArr() { arr[1] = arr[1] + 10; }
+    int later() { return post; }
+    int post = 77;                                   // named above its declaration
+    int paramWins(int b) { return b; }
+    int paramAndField(int b) { return b * 100 + this.b; }
+    int localWins() { int b = 9; return b; }
+    int blockScoped() { int r = b; { int b = 100; r += b; } return r + b; }
+    int loopVar() { int t = 0; for (int b = 0; b < 3; b++) { t += b; } return t * 10 + this.b; }
+}
+
+class C29 implements K29 { int useConst() { return LIM + lim(); } }
+
+class D29 {
+    static int counter = 0;
+    static int step() { counter++; return counter; }
+    static void reset() { counter = 0; }
+}
+
+class S29Init {
+    static int one = 3;
+    static int two = one + 1;                        // a static naming a static
+    static int three;
+    static { three = two * 2; }                      // and so does the block
+}
+
+record R29(int x, int y) {
+    R29 { x = x + 1; }                               // the compact body names components
+    int total() { return x + y; }
+}
+
+class S29 {
+    static void run() {
+        int[] ops = {5, 2};
+        B29 o = new B29();
+        Main.check("uf1", o.own() == 2 && o.inherited() == 1 && o.sum() == 3);
+        Main.check("uf2", o.ga() == 1 && A29.gsa() == 11);
+        Main.check("uf3", o.statFromInst() == 33 && B29.statFromStat() == 33);
+        Main.check("uf4", o.later() == 77);
+        o.setB(ops[0]);
+        Main.check("uf5", o.b == 5);
+        o.addB(ops[1]);
+        Main.check("uf6", o.b == 7);
+        Main.check("uf7", o.postB() == 7 && o.b == 8);
+        Main.check("uf8", o.preB() == 9 && o.b == 9);
+        Main.check("uf9", o.decB() == 8 && o.b == 8);
+        Main.check("uf10", o.cat("!").equals("hi!"));
+        Main.check("uf11", o.addL(ops[1]) == 7L && o.lf == 7L);
+        Main.check("uf12", o.dbl() == 3.0 && o.df == 3.0);
+        Main.check("uf13", o.nextC() == 'b');
+        Main.check("uf14", o.flip() && !o.flip());
+        Main.check("uf15", o.arrSum() == 6);
+        o.bumpArr();
+        Main.check("uf16", o.arrSum() == 16);
+        Main.check("uf17", o.paramWins(ops[0]) == 5);
+        Main.check("uf18", o.paramAndField(ops[0]) == 508);
+        Main.check("uf19", o.localWins() == 9);
+        Main.check("uf20", o.blockScoped() == 116);
+        Main.check("uf21", o.loopVar() == 38);
+        Main.check("uf22", new C29().useConst() == 84);
+        D29.reset();
+        Main.check("uf23", D29.step() == 1 && D29.step() == 2 && D29.counter == 2);
+        Main.check("uf24", S29Init.one == 3 && S29Init.two == 4 && S29Init.three == 8);
+        R29 r = new R29(ops[0], ops[1]);
+        Main.check("uf25", r.x() == 6 && r.total() == 8);
+    }
+}
+
+// ===== SECTION 30: hashCode =====
+// Object#hashCode, the overrides of it the JLS pins to an exact value, and the
+// generated one a record gets. THE RECORD COMBINATION IS NOT SPECIFIED: JLS
+// 8.10.3 requires only that it derive from the components' hashCodes and that
+// equal records hash equally, so this project PINS OpenJDK's - h = 0, then
+// h = h*31 + hash(component) per component at int width - and the exact values
+// below are what java 24.0.2 answers. The digits ARE assertable because every
+// component type's own hashCode is exact: Integer.hashCode is the value,
+// Long's is v ^ (v >>> 32), Double's is doubleToLongBits ^ its own high half,
+// Float's is floatToIntBits, String's is s[0]*31^(n-1)+..., Boolean's is
+// 1231/1237, and Objects.hashCode(null) is 0. A one-component record's hash IS
+// its component's, because 0*31 + h == h.
+
+record Di30(double v) { }
+record Fl30(float v) { }
+record Lo30(long v) { }
+record St30(String v) { }
+record In30(int v) { }
+record Ch30(char v) { }
+record Bl30(boolean v) { }
+record Ob30(Object v) { }
+record Trip30(int a, String b, double c) { }
+record Nest30(Trip30 t, int k) { }
+
+class Plain30 { int x = 1; }
+class Over30 { public int hashCode() { return 4242; } }
+class Sub30 extends Over30 { }
+
+class S30 {
+    static String hex(int n) {
+        String d = "0123456789abcdef";
+        String out = "";
+        int x = n;
+        if (x == 0) { return "0"; }
+        while (x != 0) { out = d.charAt(x & 15) + out; x = x >>> 4; }
+        return out;
+    }
+
+    static void run() {
+        int[] ints = {0, 1, -1, 2147483647, -2147483648, 65536};
+        long[] longs = {0L, 1L, -1L, 9223372036854775807L, -9223372036854775808L, 4294967296L};
+        String[] strs = {"", "a", "hello", "Hello, World!"};
+        boolean[] bools = {true, false};
+        char[] chars = {'a', 'Z'};
+
+        // Integer.hashCode is the value itself.
+        Main.check("hc1", new In30(ints[0]).hashCode() == 0 && new In30(ints[1]).hashCode() == 1);
+        Main.check("hc2", new In30(ints[2]).hashCode() == -1 && new In30(ints[5]).hashCode() == 65536);
+        Main.check("hc3", new In30(ints[3]).hashCode() == 2147483647 && new In30(ints[4]).hashCode() == -2147483648);
+
+        // Long.hashCode is (int)(v ^ (v >>> 32)) - a 64-bit value the low half
+        // alone cannot answer.
+        Main.check("hc4", new Lo30(longs[0]).hashCode() == 0 && new Lo30(longs[1]).hashCode() == 1);
+        Main.check("hc5", new Lo30(longs[2]).hashCode() == 0);
+        Main.check("hc6", new Lo30(longs[3]).hashCode() == -2147483648);
+        Main.check("hc7", new Lo30(longs[4]).hashCode() == -2147483648);
+        Main.check("hc8", new Lo30(longs[5]).hashCode() == 1);
+
+        // Double.hashCode reads doubleToLongBits, so +0.0 and -0.0 differ, NaN
+        // has one pattern, and a subnormal is exact.
+        double dz = 0.0;
+        double dnan = dz / dz;
+        double dinf = 1.0 / dz;
+        Main.check("hc9", new Di30(0.0).hashCode() == 0);
+        Main.check("hc10", new Di30(-0.0).hashCode() == -2147483648);
+        Main.check("hc11", new Di30(1.0).hashCode() == 1072693248);
+        Main.check("hc12", new Di30(-1.0).hashCode() == -1074790400);
+        Main.check("hc13", new Di30(2.5).hashCode() == 1074003968);
+        Main.check("hc14", new Di30(0.1).hashCode() == -1507852285);
+        Main.check("hc15", new Di30(dnan).hashCode() == 2146959360);
+        Main.check("hc16", new Di30(dinf).hashCode() == 2146435072 && new Di30(-dinf).hashCode() == -1048576);
+        Main.check("hc17", new Di30(4.9E-324).hashCode() == 1);
+        Main.check("hc18", new Di30(1.0E-320).hashCode() == 2024);
+        Main.check("hc19", new Di30(1.7976931348623157E308).hashCode() == -2146435072);
+
+        // Float.hashCode is floatToIntBits - a DIFFERENT function on the same
+        // number, which is what the binary32 width is for.
+        Main.check("hc20", new Fl30(0.0f).hashCode() == 0 && new Fl30(-0.0f).hashCode() == -2147483648);
+        Main.check("hc21", new Fl30(1.0f).hashCode() == 1065353216);
+        Main.check("hc22", new Fl30(-1.5f).hashCode() == -1077936128);
+        Main.check("hc23", new Fl30(0.1f).hashCode() == 1036831949);
+        Main.check("hc24", new Fl30(1.4E-45f).hashCode() == 1);
+        Main.check("hc25", new Fl30(3.4028235E38f).hashCode() == 2139095039);
+        Main.check("hc26", new Di30(1.0).hashCode() != new Fl30(1.0f).hashCode());
+
+        // String.hashCode over UTF-16 code units.
+        Main.check("hc27", new St30(strs[0]).hashCode() == 0 && strs[0].hashCode() == 0);
+        Main.check("hc28", new St30(strs[1]).hashCode() == 97 && strs[1].hashCode() == 97);
+        Main.check("hc29", strs[2].hashCode() == 99162322);
+        Main.check("hc30", strs[3].hashCode() == 1498789909);
+
+        Main.check("hc31", new Bl30(bools[0]).hashCode() == 1231 && new Bl30(bools[1]).hashCode() == 1237);
+        Main.check("hc32", new Ch30(chars[0]).hashCode() == 97 && new Ch30(chars[1]).hashCode() == 90);
+        Main.check("hc33", new Ob30(null).hashCode() == 0);
+
+        // The multi-component combination, and a nested record - which recurses
+        // through the component's OWN hashCode, not through this file.
+        Main.check("hc34", new Trip30(ints[1], strs[1], 2.5).hashCode() == 1074007936);
+        Main.check("hc35", new Nest30(new Trip30(ints[1], strs[1], 2.5), ints[1]).hashCode() == -1065492351);
+
+        // A declared hashCode wins, and an inherited one is found.
+        Main.check("hc36", new Over30().hashCode() == 4242 && new Sub30().hashCode() == 4242);
+
+        // THE ONE INVARIANT JLS 8.10.3 ACTUALLY REQUIRES: equal records hash
+        // equally. Asserted over every component type above, including the two
+        // where equals is NOT === (NaN equals NaN, +0.0 does not equal -0.0).
+        Main.check("hc37", eqPair(new Di30(dnan), new Di30(dnan)));
+        Main.check("hc38", eqPair(new Di30(-0.0), new Di30(-0.0)));
+        Main.check("hc39", !new Di30(0.0).equals(new Di30(-0.0))
+                           && new Di30(0.0).hashCode() != new Di30(-0.0).hashCode());
+        Main.check("hc40", eqPair(new Lo30(longs[3]), new Lo30(longs[3])));
+        Main.check("hc41", eqPair(new St30(strs[3]), new St30(strs[3])));
+        Main.check("hc42", eqPair(new Trip30(ints[2], strs[2], 0.1), new Trip30(ints[2], strs[2], 0.1)));
+        Main.check("hc43", eqPair(new Nest30(new Trip30(ints[2], strs[2], 0.1), ints[3]),
+                                  new Nest30(new Trip30(ints[2], strs[2], 0.1), ints[3])));
+
+        // Object#hashCode: stable within a run, and the digits after the `@` in
+        // toString ARE it (Object.toString is getName()+"@"+toHexString(hashCode())).
+        Plain30 p = new Plain30();
+        int ph = p.hashCode();
+        Main.check("hc44", ph == p.hashCode());
+        String rendered = "" + p;
+        Main.check("hc45", rendered.substring(rendered.indexOf("@") + 1).equals(S30.hex(ph)));
+    }
+
+    static boolean eqPair(Object a, Object b) {
+        return a.equals(b) && a.hashCode() == b.hashCode();
     }
 }
 

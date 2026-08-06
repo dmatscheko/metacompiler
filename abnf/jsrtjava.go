@@ -699,6 +699,11 @@ func init() {
 			}
 			return jsHFalse
 		}
+		// Object#hashCode and every override of it the JLS pins exactly, plus
+		// the record combination this project pins (see jvHash for what is
+		// specified and what is a decision). The layer-2 twin is js_jhash in
+		// languages/lib/java-rt.metajs.
+		m["js_jhash"] = func(a []uint64) uint64 { return rt.wrapNum(rt.jvHash(u(a[0]))) }
 		// String.valueOf(x) and the string form used by `+`.
 		m["js_jvstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.jvpStr(u(a[0]))) }
 		// Java's `+`. Identical to js_jadd (string concat / 32 bit int add / float
@@ -893,12 +898,132 @@ func jvpElemTag(v interface{}) string {
 var jvpIdent = map[interface{}]int{}
 var jvpIdentN int
 
-func jvpHash(v interface{}) string {
+// The NUMBER behind that rendering, which is exactly what Object.hashCode
+// answers in real java: `o.toString()` is getName() + "@" +
+// Integer.toHexString(hashCode()), so the two must agree, and here they do by
+// construction. jvpHash below is this value printed with %x.
+func jvpIdentNum(v interface{}) float64 {
 	n, ok := jvpIdent[v]
 	if !ok {
 		jvpIdentN++
 		n = jvpIdentN
 		jvpIdent[v] = n
 	}
-	return fmt.Sprintf("%x", 0x1a2b3c00+n)
+	return float64(0x1a2b3c00 + n)
+}
+
+func jvpHash(v interface{}) string {
+	return fmt.Sprintf("%x", int(jvpIdentNum(v)))
+}
+
+// ----------------------------------------------------------------------------
+// hashCode
+//
+// java.lang.Object#hashCode and the overrides of it that the JLS pins to an
+// exact value. THE COMBINATION A RECORD USES IS NOT ONE OF THEM: JLS 8.10.3
+// requires only that a record's hashCode be derived from the components'
+// hashCodes and that equal records hash equally - the exact function "is
+// unspecified". What IS specified exactly, and reproduced here bit for bit:
+//
+//	Boolean    true -> 1231, false -> 1237                       (JDK javadoc)
+//	Integer    the value itself; Byte/Short/Character widen to it
+//	Long       (int)(value ^ (value >>> 32))
+//	Double     bits = doubleToLongBits(v); (int)(bits ^ (bits >>> 32))
+//	Float      floatToIntBits(v)
+//	String     s[0]*31^(n-1) + s[1]*31^(n-2) + ... , over UTF-16 units
+//	null       0, via Objects.hashCode
+//
+// For the record COMBINATION we pin OpenJDK's, which is what
+// java.lang.runtime.ObjectMethods generates: `h = 0; for each component h =
+// h*31 + hash(component)`, at int width. Measured against java 24.0.2 on this
+// machine rather than assumed - `record R(int a, String b, double c)` with
+// (1, "x", 2.5) answers 1074008649 there and 1074008649 here. It is pinned
+// because the invariant that MUST hold (equal records hash equally) does not
+// choose a value, and two engines have to agree on one.
+//
+// The twin is js_jhash in languages/lib/java-rt.metajs, arm for arm; that one
+// cannot call math.Float64bits and takes the bit pattern apart with exact
+// arithmetic instead.
+func jvHashDouble(f float64) float64 {
+	bits := math.Float64bits(f)
+	return float64(int32(uint32(bits>>32) ^ uint32(bits)))
+}
+
+func (rt *jsrt) jvHashString(s string) float64 {
+	h := int32(0)
+	n := rt.strLen(s)
+	for i := 0; i < n; i++ {
+		h = h*31 + int32(rt.strCodeAt(s, i))
+	}
+	return float64(h)
+}
+
+func (rt *jsrt) jvHash(v interface{}) float64 {
+	switch x := v.(type) {
+	case nil, jsUndefT, jsNullT:
+		return 0
+	case bool:
+		if x {
+			return 1231
+		}
+		return 1237
+	case string:
+		return rt.jvHashString(x)
+	case float64:
+		// A plain number is an INT in this value model (java never unboxes a
+		// long - see chapter 7.5 of the manual), and Integer.hashCode is the
+		// value itself.
+		return float64(int32(jsToInt(x)))
+	case jsChar:
+		return float64(x.code)
+	case jsGInt:
+		// Long.hashCode. A byte/short/int box narrows to the same answer,
+		// because its high half is the sign extension the value already has.
+		u := uint64(x.v)
+		return float64(int32(uint32(u>>32) ^ uint32(u)))
+	case jsJFlo:
+		if x.sty == floJavaF {
+			return float64(int32(math.Float32bits(float32(x.f))))
+		}
+		return jvHashDouble(x.f)
+	}
+	if o, ok := v.(*jsObject); ok {
+		if cls, has := o.props["__class"]; has {
+			// A user-declared (or inherited) hashCode wins, exactly as an
+			// override does. The __class/__super walk is js_jvaleq's, cap and
+			// all.
+			for guard := 0; guard < 64; guard++ {
+				clsObj, isObj := cls.(*jsObject)
+				if !isObj {
+					break
+				}
+				if h, hit := clsObj.props["hashCode"]; hit && isCallable(h) {
+					return rt.toNumber(rt.call(h, jsUndef, []interface{}{v}))
+				}
+				if comps, isRec := clsObj.props["__record"]; isRec {
+					return rt.jvRecordHash(v, comps)
+				}
+				cls = clsObj.props["__super"]
+			}
+		}
+	}
+	return jvpIdentNum(v)
+}
+
+// h = 0; h = h*31 + Objects.hashCode(component), at int width - OpenJDK's.
+func (rt *jsrt) jvRecordHash(v interface{}, comps interface{}) float64 {
+	arr, ok := comps.(*jsArray)
+	if !ok {
+		return jvpIdentNum(v)
+	}
+	o, ok := v.(*jsObject)
+	if !ok {
+		return jvpIdentNum(v)
+	}
+	h := int32(0)
+	for _, c := range arr.elems {
+		name, _ := c.(string)
+		h = h*31 + int32(rt.jvHash(o.props[name]))
+	}
+	return float64(h)
 }

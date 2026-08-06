@@ -82,6 +82,34 @@ class Bird extends Animal {
 
 record Pair(int first, int second) { }
 
+// The unqualified-field-access fixtures: NOT ONE `this.` in the bodies below,
+// which is the whole point of them (see the unq-* checks).
+class UnqBase {
+    int a = 1;
+    static int sa = 11;
+}
+
+class Unq extends UnqBase {
+    int b = 2;
+    static int sb = 22;
+    static int counter = 0;
+    int own() { return b; }
+    int inherited() { return a; }
+    void setOwn(int v) { b = v; }
+    void addOwn(int v) { b += v; }
+    int post() { return b++; }
+    int pre() { return ++b; }
+    int paramWins(int b) { return b; }
+    int localWins() { int b = 9; return b; }
+    int paramAndField(int b) { return b * 100 + this.b; }
+    int statFromInst() { return sa + sb; }
+    static int statFromStat() { return sa + sb; }
+    static int step() { counter++; return counter; }
+    static void reset() { counter = 0; }
+    int later() { return post; }
+    int post = 77;
+}
+
 // A record's generated equals compares a floating-point component with
 // Double.compare (NaN equals NaN, +0.0 does not equal -0.0) and a reference
 // component with Objects.equals (which dispatches - a nested record compares
@@ -145,6 +173,15 @@ public class Main {
     static int checks = 0;
     static int calls = 0;
     static int finRuns = 0;
+
+    static String hex(int n) {
+        String d = "0123456789abcdef";
+        String out = "";
+        int x = n;
+        if (x == 0) { return "0"; }
+        while (x != 0) { out = d.charAt(x & 15) + out; x = x >>> 4; }
+        return out;
+    }
 
     static void check(String id, boolean cond) {
         Main.checks++;
@@ -491,6 +528,32 @@ public class Main {
                 && !new Holder(rp[0], re[0]).equals(new Holder(rp[2], re[1]))
                 && !new Holder(rp[0], re[0]).equals(new Holder(rp[1], re[2]))
                 && !new Holder(rp[0], re[0]).equals(null));
+        // hashCode: the paired half of the same contract. The record combination
+        // is NOT specified by JLS 8.10.3 - only "derived from the components" and
+        // "equal records hash equally" are - so what is PINNED here is OpenJDK's
+        // h = h*31 + hash(component), and what is ASSERTED as an invariant is that
+        // equal records hash equally. Every component type's OWN hashCode is
+        // exact, though: Integer's is the value, Long's is v ^ (v >>> 32),
+        // Double's reads doubleToLongBits (so a NaN pair matches and a signed-zero
+        // pair does not), String's is s[0]*31^(n-1)+..., and null's is 0.
+        Main.check("record-hash-agrees",
+                   new Boxed(rn[0], rl[0]).hashCode() == new Boxed(rn[1], rl[1]).hashCode()
+                && new Boxed(rz[2], rl[0]).hashCode() == new Boxed(rz[2], rl[1]).hashCode()
+                && new Holder(rp[0], re[0]).hashCode() == new Holder(rp[1], re[1]).hashCode());
+        Main.check("record-hash-signed-zero",
+                   new Boxed(rz[0], rl[0]).hashCode() != new Boxed(rz[1], rl[1]).hashCode());
+        Main.check("record-hash-value", pr.hashCode() == 193);
+        Main.check("hash-string", "hello".hashCode() == 99162322 && "".hashCode() == 0);
+        Main.check("hash-boxed-long-double",
+                   new Boxed(rz[2], rl[0]).hashCode() == -401214975
+                && new Boxed(rz[0], rl[0]).hashCode() == 705032705);
+        Main.check("hash-user-declared", new Eq(7).hashCode() == 7);
+        // Object#hashCode: stable, and it IS the digits after the @ in toString.
+        Counter hcObj = new Counter(1);
+        Main.check("hash-identity-stable", hcObj.hashCode() == hcObj.hashCode());
+        String hcStr = "" + hcObj;
+        Main.check("hash-identity-renders",
+                   hcStr.substring(hcStr.indexOf("@") + 1).equals(Main.hex(hcObj.hashCode())));
 
         // ----- statics and recursion -----
         Main.check("fn-early-return", Main.sign(-9) == -1 && Main.sign(9) == 1);
@@ -663,6 +726,26 @@ public class Main {
             Main.check("iof-binding", false);
         }
         Main.check("iof-int", 7 instanceof Integer);
+
+        // ----- unqualified instance / static field access -----
+        // A member body may name a field without `this.` / `Cls.`, and a local or
+        // a parameter of the same name shadows it (JLS 6.5.6.1). Every OTHER class
+        // in this file writes `this.w`, which is exactly why nothing here reached
+        // the bare form: both halves aborted on it while javac printed the field.
+        int[] ufOps = {5, 2};
+        Unq u = new Unq();
+        Main.check("unq-read", u.own() == 2 && u.inherited() == 1);
+        u.setOwn(ufOps[0]);
+        Main.check("unq-write", u.b == 5);
+        u.addOwn(ufOps[1]);
+        Main.check("unq-compound", u.b == 7);
+        Main.check("unq-incdec", u.post() == 7 && u.pre() == 9 && u.b == 9);
+        Main.check("unq-shadow", u.paramWins(ufOps[0]) == 5 && u.localWins() == 9
+                                 && u.paramAndField(ufOps[0]) == 509);
+        Main.check("unq-static", u.statFromInst() == 33 && Unq.statFromStat() == 33);
+        Main.check("unq-forward", u.later() == 77);
+        Unq.reset();
+        Main.check("unq-static-write", Unq.step() == 1 && Unq.step() == 2 && Unq.counter == 2);
 
         // ----- everything combined -----
         Main.check("combined-pipeline", Main.transform(new int[]{1, 2, -3}).equals("o1e2x"));

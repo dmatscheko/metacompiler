@@ -900,17 +900,22 @@ function jpElemTag(v) {
 var jpIdObjs = []
 var jpIdNums = []
 
-function jpHash(v) {
+// The NUMBER behind that rendering, which is what Object#hashCode answers: real
+// java's Object.toString is getName() + "@" + Integer.toHexString(hashCode()), so
+// the two have to agree, and here they do by construction.
+function jpIdNum(v) {
     var i = 0
     while (i < jpIdObjs.length) {
-        if (jpIdObjs[i] === v) { return jpHex(439041024 + jpIdNums[i]) }
+        if (jpIdObjs[i] === v) { return 439041024 + jpIdNums[i] }
         i = i + 1
     }
     var n = jpIdObjs.length + 1
     jpIdObjs.push(v)
     jpIdNums.push(n)
-    return jpHex(439041024 + n)
+    return 439041024 + n
 }
+
+function jpHash(v) { return jpHex(jpIdNum(v)) }
 
 // %x of a non-negative integer. 439041024 is 0x1a2b3c00, the Go twin's base.
 function jpHex(n) {
@@ -1366,6 +1371,149 @@ function jvSignBit(d) {
     if (d < 0) { return true }
     if (d === 0) { return 1 / d < 0 }
     return false
+}
+
+// ===================================================== hashCode ============
+//
+// java.lang.Object#hashCode and the overrides of it the JLS pins to an exact
+// value. THE COMBINATION A RECORD USES IS NOT ONE OF THEM - JLS 8.10.3 requires
+// only that a record's hashCode derive from the components' and that equal
+// records hash equally; the function itself "is unspecified". Exactly specified,
+// and reproduced here bit for bit:
+//
+//   Boolean   true -> 1231, false -> 1237
+//   Integer   the value; Byte / Short / Character widen to it
+//   Long      (int)(v ^ (v >>> 32))
+//   Double    bits = doubleToLongBits(v); (int)(bits ^ (bits >>> 32))
+//   Float     floatToIntBits(v)
+//   String    s[0]*31^(n-1) + ... , over UTF-16 code units
+//   null      0, via Objects.hashCode
+//
+// The record COMBINATION pinned here is OpenJDK's, the one
+// java.lang.runtime.ObjectMethods generates: h = 0; per component
+// h = h*31 + hash(component), at int width. It was MEASURED against java 24.0.2
+// rather than assumed - record R(int,String,double) of (1,"x",2.5) answers
+// 1074008649 there and here. Something has to be pinned, because two engines
+// must agree and the invariant that must hold (equal records hash equally) does
+// not choose a value.
+//
+// The twin is m["js_jhash"] / rt.jvHash in abnf/jsrtjava.go, arm for arm. That
+// one reads the IEEE-754 pattern with math.Float64bits; MetaJS cannot see a
+// double's bits at all (chapter 7.7 of the manual), so jvDblBits below takes it
+// apart with exact arithmetic - every step is a multiply or divide by two, so
+// no digit is invented and a subnormal is exact as well.
+function js_jhash(v) {
+    if (v === undefined || v === null) { return 0 }
+    if (v === true) { return 1231 }
+    if (v === false) { return 1237 }
+    if (typeof v == "string") { return jvStrHash(v) }
+    // THE BOX TESTS COME FIRST, and that ordering is a defect this file already
+    // paid for once: a tag-13 sized integer and a tag-14 float box are both
+    // `typeof "number"` to the floor, so a plain-number arm above these would
+    // answer 1 for the double 1.0 where java answers 1072693248. The interpreter
+    // twin is ordered the same way even though ITS boxes are objects.
+    if (jvIsChar(v)) { return v["__char"] }
+    if (floIs(v)) {
+        if (floStyle(v) == 3) { return jvFloatBits(floNum(v)) }
+        var db = jvDblBits(floNum(v))
+        return db["hi"] ^ db["lo"]
+    }
+    if (sintIs(v)) { return sintHi(v) ^ sintLo(v) }
+    if (typeof v == "number") { return jvI(v) }
+    if (Array.isArray(v)) { return jpIdNum(v) }
+    if (typeof v == "object") {
+        // A user-declared (or inherited) hashCode wins, exactly as an override
+        // does; a record with none gets the generated combination. The
+        // __class/__super walk carries the < 64 cap every walk here carries.
+        var c = v["__class"]
+        var guard = 0
+        while (guard < 64 && rtIsObj(c)) {
+            guard = guard + 1
+            var m = c["hashCode"]
+            if (typeof m == "function") { return rtjNum(m.apply(undefined, rtPrepend(v, []))) }
+            var comps = c["__record"]
+            if (Array.isArray(comps)) { return jvRecordHash(v, comps) }
+            c = c["__super"]
+        }
+    }
+    return jpIdNum(v)
+}
+
+function jvRecordHash(v, comps) {
+    var h = 0
+    var i = 0
+    while (i < comps.length) {
+        h = rtWrap32(Math.imul(h, 31) + js_jhash(v[comps[i]]))
+        i = i + 1
+    }
+    return h
+}
+
+// String.hashCode over UTF-16 code units, which is what charCodeAt answers here.
+function jvStrHash(s) {
+    var h = 0
+    var i = 0
+    while (i < s.length) {
+        h = rtWrap32(Math.imul(h, 31) + s.charCodeAt(i))
+        i = i + 1
+    }
+    return h
+}
+
+// doubleToLongBits, as the two 32-bit halves, each an UNSIGNED number.
+function jvDblBits(d) {
+    if (d !== d) { return {hi: 2146959360, lo: 0} }      // one canonical NaN
+    var sign = jvSignBit(d) ? 2147483648 : 0
+    var a = d < 0 ? 0 - d : d
+    if (a === 0) { return {hi: sign, lo: 0} }
+    // Infinity, spelled without an exponent literal (MetaJS has none: 1e308
+    // parses as the identifier e308). Only an infinity halves to itself here -
+    // zero was answered above.
+    if (a / 2 === a) { return {hi: sign + 2146435072, lo: 0} }
+    var e = 0
+    while (a >= 2) { a = a / 2; e = e + 1 }
+    while (a < 1) { a = a * 2; e = e - 1 }
+    var biased = e + 1023
+    var mant = 0
+    if (biased <= 0) {
+        // Subnormal: the exponent field is 0 and the mantissa is the value on
+        // the fixed 2^-1074 grid. a * 2^(e+1074) is that integer.
+        biased = 0
+        mant = a * jvPow2(e + 1074)
+    } else {
+        mant = (a - 1) * 4503599627370496
+    }
+    var hi32 = Math.floor(mant / 4294967296)
+    return {hi: sign + biased * 1048576 + hi32, lo: mant - hi32 * 4294967296}
+}
+
+// floatToIntBits of a value that is ALREADY binary32 (a float box holds the
+// rounded value, since 8f43e84), as one unsigned 32-bit number turned signed.
+function jvFloatBits(d) {
+    if (d !== d) { return 2143289344 - 4294967296 }      // 0x7fc00000, signed
+    var sign = jvSignBit(d) ? 2147483648 : 0
+    var a = d < 0 ? 0 - d : d
+    var bits = 0
+    if (a === 0) {
+        bits = sign
+    } else if (a / 2 === a) {
+        bits = sign + 2139095040
+    } else {
+        var e = 0
+        while (a >= 2) { a = a / 2; e = e + 1 }
+        while (a < 1) { a = a * 2; e = e - 1 }
+        var biased = e + 127
+        if (biased <= 0) { bits = sign + a * jvPow2(e + 149) }
+        else { bits = sign + biased * 8388608 + (a - 1) * 8388608 }
+    }
+    return bits >= 2147483648 ? bits - 4294967296 : bits
+}
+
+function jvPow2(k) {
+    var p = 1
+    var i = 0
+    while (i < k) { p = p * 2; i = i + 1 }
+    return p
 }
 
 // A cast or a declared integral type: (value, bits).

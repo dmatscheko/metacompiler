@@ -2897,15 +2897,20 @@ HasStatic   = :script(~~
         if (out == "") { out = "0" }
         return out
     }
-    function jIdHash(v) {
+    function jIdHash(v) { return jHex(jIdNum(v)) }
+    // The NUMBER behind that rendering, which is what Object#hashCode answers:
+    // real java's Object.toString is getName() + "@" +
+    // Integer.toHexString(hashCode()), so the two must agree - here they do by
+    // construction, and the twins are jvpIdentNum (abnf/jsrtjava.go) and jpIdNum
+    // (languages/lib/java-rt.metajs).
+    function jIdNum(v) {
         for (var i = 0; i < jHashObjs.length; i++) {
             if (jHashObjs[i] === v) { return jHashIds[i] }
         }
         jHashN = jHashN + 1
-        var h = jHex(0x1a2b3c00 + jHashN)
         jHashObjs.push(v)
-        jHashIds.push(h)
-        return h
+        jHashIds.push(0x1a2b3c00 + jHashN)
+        return 0x1a2b3c00 + jHashN
     }
     // An array renders as its CLASS NAME - "[I@1a2b3c01" - and the element type is
     // part of that name. This value model does not carry the declared type, so it is
@@ -2989,6 +2994,14 @@ HasStatic   = :script(~~
         // A functional-interface call: a lambda / method-reference value (a closure)
         // is invoked directly, whatever the single abstract method is named.
         if (typeof target == "function") { return target.apply(undefined, args) }
+        // x.hashCode() is Object#hashCode and its overrides, and it reaches values
+        // no arm below can dispatch on - a String, a boxed long or double, a plain
+        // int, an array, an instance of a class that declares no method by that
+        // name. jHash answers all of them AND still dispatches to a user-declared
+        // hashCode, so an override is unaffected. The compiler half has the same
+        // interception in foldCallMember, routed to the js_jhash extern. Only the
+        // no-argument form is Object#hashCode.
+        if (name == "hashCode" && args.length == 0) { return jHash(target) }
         if (typeof target == "string") {
             if (name == "length") return target.length
             if (name == "charCodeAt") return target.charCodeAt(args[0])
@@ -4161,7 +4174,15 @@ HasStatic   = :script(~~
         var isStatic = false
         var i
         for (i = 0; i < mods.length; i++) { if (mods[i] == "static") { isStatic = true } }
-        var dflt = 0
+        // `var dflt = anytype` and NOT `var dflt = 0`, because MetaJS is TYPED and
+        // a local keeps the type of its first value: the plain spelling aborted the
+        // whole program on `boolean f = true;` with "variable 'dflt' has type
+        // number and cannot hold a boolean" - UNDER -frozen ONLY, so goja was
+        // green and every gate agreed with it. It was reachable at 15af058 and
+        // reproduced there; nothing under tests/ declared a boolean FIELD, which
+        // is the only reason it was never seen.
+        var dflt = anytype
+        dflt = 0
         if (ty == "boolean") dflt = false
         if (ty != "int" && ty != "boolean") dflt = null
         if (ty.indexOf("[") >= 0) dflt = null
@@ -4221,6 +4242,13 @@ HasStatic   = :script(~~
             }
             if (mm.kind == "iinit") { fields.push(mm) }
             if (mm.kind == "sinit") { statics.push(mm) }
+            // The set an UNQUALIFIED static-field reference resolves against (see
+            // jStaticOwner). Recorded here rather than probed with hasOwn, because
+            // the descriptor also holds every method closure and every hidden slot.
+            if (mm.kind == "field" && mm.statik) {
+                if (cls.__sfld == undefined) { cls.__sfld = {} }
+                cls.__sfld[mm.name] = true
+            }
             if (mm.kind == "compact") { compact = mm }
             if (mm.kind == "ctor") {
                 if (mm.name != name) fail("constructor name " + mm.name + " does not match class " + name)
@@ -4262,7 +4290,7 @@ HasStatic   = :script(~~
         for (i = 0; i < members.length; i++) {
             var m2 = members[i]
             if (m2.kind == "method") {
-                cls[m2.name] = m2.statik ? makeStaticClosure(m2) : makeInstanceClosure(m2)
+                cls[m2.name] = m2.statik ? makeStaticClosure(m2, cls) : makeInstanceClosure(m2)
                 jNoteKind(name, m2.name, m2.statik)
             }
             if (m2.kind == "amethod") { jNoteKind(name, m2.name, false) }
@@ -4270,12 +4298,17 @@ HasStatic   = :script(~~
         if (recordParams != undefined) {
             for (i = 0; i < recordParams.length; i++) { jNoteKind(name, recordParams[i], false) }
         }
-        // Static fields and static initializer blocks, again in textual order.
+        // Static fields and static initializer blocks, again in textual order. They
+        // run in a scope carrying __jcls, so `static int a = 1; static int b = a+1;`
+        // and a `static { c = a; }` block can name the class' own statics
+        // unqualified - the same reading jSelfWith gives a static method body.
+        scopes.push({__jcls: cls})
         for (i = 0; i < statics.length; i++) {
             var st = statics[i]
-            if (st.kind == "sinit") { invokeBody([], st.body, undefined, "this", []); continue }
+            if (st.kind == "sinit") { invokeBody([], st.body, cls, "__jcls", []); continue }
             cls[st.name] = (st.init != null) ? st.init() : st.dflt
         }
+        scopes.pop()
         globalScope[name] = cls
         return cls
     }
@@ -4362,6 +4395,120 @@ HasStatic   = :script(~~
         if (d === 0) { return 1 / d < 0 }
         return false
     }
+    // ----- hashCode -----
+    //
+    // java.lang.Object#hashCode and the overrides of it the JLS pins to an exact
+    // value. THE COMBINATION A RECORD USES IS NOT ONE OF THEM - JLS 8.10.3 asks
+    // only that a record's hashCode derive from the components' and that equal
+    // records hash equally; the function itself "is unspecified". Exactly
+    // specified, and reproduced here bit for bit: Boolean 1231/1237, Integer the
+    // value, Long (int)(v ^ v>>>32), Double (int)(bits ^ bits>>>32) over
+    // doubleToLongBits, Float floatToIntBits, String s[0]*31^(n-1)+..., and 0 for
+    // null (Objects.hashCode).
+    //
+    // The record COMBINATION pinned here is OpenJDK's - the one
+    // java.lang.runtime.ObjectMethods generates - h = 0, then h = h*31 +
+    // hash(component) per component at int width. MEASURED against java 24.0.2
+    // rather than assumed. Something has to be pinned, because three engines must
+    // agree and the invariant that must hold does not choose a value. The twins
+    // are rt.jvHash (abnf/jsrtjava.go) and js_jhash (languages/lib/java-rt.metajs),
+    // arm for arm.
+    function jHash(v) {
+        if (v === undefined || v === null) { return 0 }
+        if (v === true) { return 1231 }
+        if (v === false) { return 1237 }
+        if (typeof v == "string") { return jStrHash(v) }
+        // The box tests come before the plain-number arm, matching js_jhash in
+        // languages/lib/java-rt.metajs arm for arm. There the order is load
+        // bearing (a tag-13/14 box is `typeof "number"` to the floor, so a
+        // plain-number arm above them answers 1 for the double 1.0); here the
+        // boxes are objects and it is only the twins staying legible.
+        if (jIsChar(v)) { return v.__char }
+        if (jIsFlo(v)) {
+            if (v.__f32 === true) { return jFloatBits(v.__flo) }
+            var db = jDblBits(v.__flo)
+            return db.hi ^ db.lo
+        }
+        if (jIsSz(v)) { var p = szPair(v); return p.h ^ p.l }
+        if (typeof v == "number") { return v | 0 }
+        if (Array.isArray(v)) { return jIdNum(v) }
+        if (typeof v == "object" && v.__class != undefined) {
+            // A user-declared (or inherited) hashCode wins, exactly as an override
+            // does; a record with none gets the generated combination.
+            for (var c = v.__class, g = 0; g < 64 && c != undefined && c != null; g++) {
+                if (typeof c.hashCode == "function") { return jNum(c.hashCode(v)) }
+                if (c.__record != undefined) { return jRecordHash(v, c.__record) }
+                c = c.__super
+            }
+        }
+        return jIdNum(v)
+    }
+    function jRecordHash(v, comps) {
+        var h = 0
+        for (var i = 0; i < comps.length; i++) { h = jWrap32(Math.imul(h, 31) + jHash(v[comps[i]])) }
+        return h
+    }
+    // String.hashCode over UTF-16 code units, which is what charCodeAt answers.
+    function jStrHash(s) {
+        var h = 0
+        for (var i = 0; i < s.length; i++) { h = jWrap32(Math.imul(h, 31) + s.charCodeAt(i)) }
+        return h
+    }
+    function jWrap32(x) {
+        var m = x - Math.floor(x / 4294967296) * 4294967296
+        return (m >= 2147483648) ? m - 4294967296 : m
+    }
+    // doubleToLongBits, as the two 32-bit halves, each an UNSIGNED number. The tag
+    // script cannot see a double's bits any more than layer 2 can, so the pattern
+    // is taken apart by exact arithmetic - every step multiplies or divides by two,
+    // so nothing is invented and a subnormal comes out exact too.
+    function jDblBits(d) {
+        if (d !== d) { return {hi: 2146959360, lo: 0} }   // one canonical NaN
+        var sign = jZeroNeg(d) ? 2147483648 : 0
+        var a = d < 0 ? 0 - d : d
+        if (a === 0) { return {hi: sign, lo: 0} }
+        if (a / 2 === a) { return {hi: sign + 2146435072, lo: 0} }  // an infinity
+        var e = 0
+        while (a >= 2) { a = a / 2; e = e + 1 }
+        while (a < 1) { a = a * 2; e = e - 1 }
+        var biased = e + 1023
+        var mant = 0
+        if (biased <= 0) {
+            // Subnormal: exponent field 0, mantissa the value on the 2^-1074 grid.
+            biased = 0
+            mant = a * jPow2(e + 1074)
+        } else {
+            mant = (a - 1) * 4503599627370496
+        }
+        var hi32 = Math.floor(mant / 4294967296)
+        return {hi: sign + biased * 1048576 + hi32, lo: mant - hi32 * 4294967296}
+    }
+    // floatToIntBits of a value that is ALREADY binary32 (a float box holds the
+    // rounded value, since 8f43e84), as a signed 32-bit number.
+    function jFloatBits(d) {
+        if (d !== d) { return 2143289344 - 4294967296 }   // 0x7fc00000, signed
+        var sign = jZeroNeg(d) ? 2147483648 : 0
+        var a = d < 0 ? 0 - d : d
+        var bits = 0
+        if (a === 0) {
+            bits = sign
+        } else if (a / 2 === a) {
+            bits = sign + 2139095040
+        } else {
+            var e = 0
+            while (a >= 2) { a = a / 2; e = e + 1 }
+            while (a < 1) { a = a * 2; e = e - 1 }
+            var biased = e + 127
+            if (biased <= 0) { bits = sign + a * jPow2(e + 149) }
+            else { bits = sign + biased * 8388608 + (a - 1) * 8388608 }
+        }
+        return (bits >= 2147483648) ? bits - 4294967296 : bits
+    }
+    function jPow2(k) {
+        var p = 1
+        for (var i = 0; i < k; i++) { p = p * 2 }
+        return p
+    }
     function makeRecordEquals(params) {
         return function() {
             var self = arguments[0]
@@ -4430,11 +4577,15 @@ HasStatic   = :script(~~
             return invokeBody(m.params, m.body, self, "this", jFixVarargs(m.vararg, m.params.length, args))
         }
     }
-    function makeStaticClosure(m) {
+    // A static method has no receiver, so the frame carries the CLASS instead,
+    // under the hidden name __jcls: it is what an unqualified reference to a static
+    // field resolves against (jSelfWith). An instance method needs nothing extra -
+    // its `this` already leads to the descriptor through __class.
+    function makeStaticClosure(m, cls) {
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBody(m.params, m.body, undefined, "this", jFixVarargs(m.vararg, m.params.length, args))
+            return invokeBody(m.params, m.body, cls, "__jcls", jFixVarargs(m.vararg, m.params.length, args))
         }
     }
 
@@ -4464,13 +4615,19 @@ HasStatic   = :script(~~
             var m = members[i3]
             if (m.kind == "amethod") { cls.__abstract.push(m.name); jNoteKind(name, m.name, false); continue }
             if (m.kind == "method") {
-                cls[m.name] = m.statik ? makeStaticClosure(m) : makeInstanceClosure(m)
+                cls[m.name] = m.statik ? makeStaticClosure(m, cls) : makeInstanceClosure(m)
                 jNoteKind(name, m.name, m.statik)
                 continue
             }
-            // An interface field is implicitly public static final.
-            if (m.kind == "field") { cls[m.name] = (m.init != null) ? m.init() : m.dflt }
-            if (m.kind == "sinit") { invokeBody([], m.body, undefined, "this", []) }
+            // An interface field is implicitly public static final - so it joins
+            // __sfld whether or not the source spelled `static`, and a default
+            // method may name it unqualified.
+            if (m.kind == "field") {
+                cls[m.name] = (m.init != null) ? m.init() : m.dflt
+                if (cls.__sfld == undefined) { cls.__sfld = {} }
+                cls.__sfld[m.name] = true
+            }
+            if (m.kind == "sinit") { invokeBody([], m.body, cls, "__jcls", []) }
         }
         jExitClass(name, cls)
         // No return value: see buildEnum on cyclic completion values.
@@ -4812,6 +4969,71 @@ HasStatic   = :script(~~
         if (name == "length" && Array.isArray(o)) { return o.length }
         if (hasOwn(o, name)) { return o[name] }
         return undefined
+    }
+
+    // ----- unqualified instance / static field access -----
+    //
+    // `class P { int w = 3; int get() { return w; } }` is ordinary Java, and this
+    // half used to abort on it with "unknown name: w" (the compiler half said
+    // "variable not defined: w"). Only `this.w` worked, and every class in
+    // tests/java-test-*.java writes `this.w`, which is why 6,258 assertions never
+    // reached it.
+    //
+    // A LOCAL OR PARAMETER OF THE SAME NAME SHADOWS THE FIELD. That falls out for
+    // free here: interp-core's getVar/setVar walk the whole scope chain first and
+    // only then consult these hooks, so the extra work is zero for every name that
+    // does resolve - which is every name in a program that qualifies its fields.
+    //
+    // An INSTANCE field is an own property of the receiver (a field inherited from
+    // a superclass too - the super constructor's ownInit writes it onto the same
+    // object), so `this` answers it with no class walk. A STATIC field lives on the
+    // class DESCRIPTOR, which an instance reaches through __class and a static
+    // method reaches through __jcls (see makeStaticClosure: `this` is simply not
+    // bound in a static context, so the class has to be carried).
+    //
+    // The static walk is restricted to names the class actually DECLARED as static
+    // fields, recorded in __sfld by buildClassFrom / buildInterface. A bare
+    // hasOwn(cls, name) would also find every METHOD closure - and, worse, it would
+    // shadow a host global, because getVar consults varMiss BEFORE hostGlobals.
+    function jStaticOwner(cls, name) {
+        for (var c = cls; c != undefined && c != null; c = c.__super) {
+            var t = c.__sfld
+            if (t != undefined && t != null && t[name] === true) { return c }
+            var ifs = c.__ifaces
+            if (ifs != undefined && ifs != null) {
+                for (var i = 0; i < ifs.length; i++) {
+                    var w = jStaticOwner(ifs[i], name)
+                    if (w != null) { return w }
+                }
+            }
+        }
+        return null
+    }
+    // The object an unqualified `name` reads/writes through, or null when the name
+    // is not a field of the enclosing type at all (getVar then goes on to
+    // hostGlobals and its own error, exactly as before).
+    function jSelfWith(name) {
+        var sc = scopes
+        for (var i = sc.length - 1; i >= 0; i--) {
+            if (hasOwn(sc[i], "this")) {
+                var self = sc[i]["this"]
+                if (self === undefined || self === null || typeof self != "object") { return null }
+                if (hasOwn(self, name)) { return self }
+                return jStaticOwner(self.__class, name)
+            }
+            if (hasOwn(sc[i], "__jcls")) { return jStaticOwner(sc[i]["__jcls"], name) }
+        }
+        return null
+    }
+    core.varMiss = function(name) {
+        var o = jSelfWith(name)
+        return (o == null) ? null : {v: o[name]}
+    }
+    core.setMiss = function(name, value) {
+        var o = jSelfWith(name)
+        if (o == null) { return false }
+        o[name] = value
+        return true
     }
 
     // Import roots the runtime already provides (their symbols are builtins:
