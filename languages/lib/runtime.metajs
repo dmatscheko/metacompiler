@@ -579,13 +579,18 @@ function rtDictFind(keys, k) {
 //  6. NOT A DIFFERENCE - ruby's dict arm delegating to rbDictSet, which is this
 //     body's find-else-append inlined behind a name.
 //
-// A PYTHON FINDING SURFACED BY THE PROBE, not fixed and not this function's:
-// `d[True] = "t"; d[1] = "one"` is ONE entry in CPython 3.13 (True == 1 and the
-// hashes agree) and TWO in BOTH metacompiler halves, because strict_eq - and
-// rt.strictEq with it - make a bool and a number different types. The two halves
-// AGREE, so --cross is blind to it; it is an unimplemented Python semantic in the
-// value model, not a merge defect, and it sits under abnf/jsrt.go rather than
-// here.
+// A PYTHON FINDING SURFACED BY THE PROBE, and SINCE FIXED - it is recorded here
+// because this comment used to say "not fixed" and sent someone back to it:
+// `d[True] = "t"; d[1] = "one"` is ONE entry in CPython (True == 1 and the hashes
+// agree) and used to be TWO in both metacompiler halves, because strict_eq - and
+// rt.strictEq with it - make a bool and a number different types. The fix is NOT
+// in this shared body and not in strict_eq, which nine languages share: it is a
+// KEY ALIAS on python's dict path alone, tried twice (a float box aliases the
+// plain number and the number aliases the bool, so {True:"t"}[1.0] is two hops),
+// in all three engines - pyKeyAlias in languages/lib/python-rt.metajs, in
+// abnf/jsrt.go and in languages/python-interpreter.abnf's core.keyEq. Asserted at
+// tests/python-test-full.py bki3-bki16, and all four probe legs - including
+// python3 - agree.
 function js_pyset(c, k, v) {
     if (rtkIsDict(c)) {
         var keys = c["keys"]
