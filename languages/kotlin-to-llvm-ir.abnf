@@ -2041,7 +2041,7 @@ NoSpacedAt  = :script(~~
 // A floating-point literal (1.5, 2.0f, 1e9, 3.14E-2, digit-group underscores):
 // a genuine double value (parseFloat stops before the f/F suffix). Comparisons
 // are exact; see the arithmetic note at the core config for the int-wrap caveat.
-FloatLit    <~~ push(makeFloConst(parseFloat(up.in.split("_").join("")))) ~~>
+FloatLit    <~~ push(makeFloConst(parseFloat(up.in.split("_").join("")), ktIsF32Lit(up.in))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
               ( "." "0"..."9" { "0"..."9" | "_" } [ FloatExp ] [ FloatSfx ]
               | FloatExp [ FloatSfx ]
@@ -2049,7 +2049,7 @@ FloatLit    <~~ push(makeFloConst(parseFloat(up.in.split("_").join("")))) ~~>
 FloatExp    = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" | "_" } ;
 // A float literal written without its integer part (.5, .1_1). Only reachable at the
 // start of an operand, where a lone `.` cannot mean anything else. (psi/FloatingPointLiteral.kt)
-DotFloatLit <~~ push(makeFloConst(parseFloat("0" + up.in.split("_").join("")))) ~~>
+DotFloatLit <~~ push(makeFloConst(parseFloat("0" + up.in.split("_").join("")), ktIsF32Lit(up.in))) ~~>
             = "." :whitespace() "0"..."9" { "0"..."9" | "_" } [ FloatExp ] [ FloatSfx ] :whitespace(Whitespace) ;
 FloatSfx    = "f" | "F" ;
 
@@ -3360,8 +3360,30 @@ KwContract  = "contract" KwEnd ;
     // Infinity / NaN / -0.0 did not exist. A floating-point literal now emits the
     // js_jflo box and the js_jf* operators answer a Double whenever one operand is
     // one, which is what kotlin-interpreter.abnf's {__flo} box does.
-    function makeFloConst(f) {
-        return function(b) { return {b: b, v: callExt(b, "js_jflo", [emitNum(b, f)])} }
+    //
+    // AN f/F SUFFIX IS A `Float`, i.e. a BINARY32, and not a Double spelled
+    // differently: 1.0f/3.0f is 0.33333334 where the double is
+    // 0.3333333333333333. The width rides on the tag 14 box's style byte
+    // (floJavaF = 3 in abnf/jsrtjvm.go) and js_ktflo32 is what rounds; the
+    // specification and the reason the floor is NOT the place for it are in the
+    // float WIDTH block of languages/lib/kotlin-rt.metajs.
+    //
+    // (The decimal is read into a double first and rounded to a float second,
+    // where kotlinc rounds once. A decimal that lands exactly on a float midpoint
+    // AFTER a double rounding would differ; no value in the corpus or the probe
+    // does.)
+    function makeFloConst(f, isF32) {
+        var ext = isF32 == true ? "js_ktflo32" : "js_jflo"
+        return function(b) { return {b: b, v: callExt(b, ext, [emitNum(b, f)])} }
+    }
+    // The literal TEXT ends in f or F. The suffix is the only thing that makes a
+    // Kotlin floating-point literal a Float - there is no Float-typed unsuffixed
+    // literal - so this is the whole test. The twin is kIsF32Lit in
+    // kotlin-interpreter.abnf.
+    function ktIsF32Lit(raw) {
+        if (raw.length == 0) { return false }
+        var c = raw.charAt(raw.length - 1)
+        return c == "f" || c == "F"
     }
     // ----- An integer literal's TEXT -----
     // Kotlin types an integer literal by its suffix AND its value: unsuffixed it is an
@@ -3721,6 +3743,7 @@ KwContract  = "contract" KwEnd ;
     // One value, retyped by a declared type's width record.
     function emitAdoptV(b, v, dw) {
         if (dw.w > 0) { return callExt(b, "js_ktadopt", [v, emitNum(b, dw.w), dw.u ? hTrue : hFalse]) }
+        if (dw.f32 == true) { return callExt(b, "js_ktadoptf32", [v]) }
         if (dw.flo == true) { return callExt(b, "js_ktadoptf", [v]) }
         return v
     }
@@ -5447,7 +5470,10 @@ KwContract  = "contract" KwEnd ;
         if (t.length > 0 && t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1) }
         // Double / Float are the float half of the same rule: `val d: Double = 1` holds
         // 1.0, because an integer literal takes the type it is expected to have.
-        if (t == "Double" || t == "Float") { return {w: 0, u: false, flo: true} }
+        // Float is the same rule at the FLOAT WIDTH: `val f: Float = 1` holds the
+        // binary32 1.0f, and every later operation on the slot rounds to 24 bits.
+        if (t == "Float") { return {w: 0, u: false, flo: true, f32: true} }
+        if (t == "Double") { return {w: 0, u: false, flo: true, f32: false} }
         var w = ktDeclWidth["$" + t]
         if (w == undefined) { return {w: 0, u: false, flo: false} }
         return {w: w, u: ktDeclUns["$" + t] == true, flo: false}

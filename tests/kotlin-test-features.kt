@@ -306,6 +306,9 @@ fun main() {
     check("lit-underscore", 1_000_000 == 1000000)
     check("lit-long", 3_000_000_000L > 2_999_999_999L)
     check("lit-double", 1.5 > 1.4 && 2.5e-2 < 0.03 && 1.5f < 1.6f)
+    // An f/F suffix is a Float, i.e. a BINARY32, not a Double: 1.0f/3.0f is
+    // 0.33333334 and it is NOT the same value as the Double 1.0/3.0.
+    check("lit-float-width", ("" + (1.0f / 3.0f)) == "0.33333334" && 1.0f / 3.0f != 1.0 / 3.0)
     check("lit-char", 'A' + 1 == 'B' && 'z' > 'a' && '\n' < 'a')
     check("is-check", (5 is Int) && (5 !is String) && ("x" is String))
     check("as-safe", ("t" as? Int) == null && (7 as? Int) == 7)

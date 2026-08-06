@@ -416,14 +416,17 @@ func ktTypeObj(name string) *jsObject {
 		// way java.lang.Double does.
 		mx, mn := math.MaxFloat64, 4.9e-324
 		bits := float64(64)
+		// Float's five constants are FLOAT boxes (style floJavaF), so
+		// Float.MAX_VALUE prints "3.4028235E38" and not the double's 17 digits.
+		sty := uint8(floJava)
 		if name == "Float" {
-			mx, mn, bits = math.MaxFloat32, 1.4e-45, 32
+			mx, mn, bits, sty = math.MaxFloat32, math.SmallestNonzeroFloat32, 32, floJavaF
 		}
-		o.set("MAX_VALUE", jsJFlo{f: mx})
-		o.set("MIN_VALUE", jsJFlo{f: mn})
-		o.set("NaN", jsJFlo{f: math.NaN()})
-		o.set("POSITIVE_INFINITY", jsJFlo{f: math.Inf(1)})
-		o.set("NEGATIVE_INFINITY", jsJFlo{f: math.Inf(-1)})
+		o.set("MAX_VALUE", jsJFlo{f: mx, sty: sty})
+		o.set("MIN_VALUE", jsJFlo{f: mn, sty: sty})
+		o.set("NaN", jsJFlo{f: math.NaN(), sty: sty})
+		o.set("POSITIVE_INFINITY", jsJFlo{f: math.Inf(1), sty: sty})
+		o.set("NEGATIVE_INFINITY", jsJFlo{f: math.Inf(-1), sty: sty})
 		o.set("SIZE_BITS", bits)
 		o.set("SIZE_BYTES", bits/8)
 	}
@@ -503,8 +506,12 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 		return rt.ktConv(target, 32, true), true
 	case "toULong":
 		return rt.ktConv(target, 64, true), true
-	case "toDouble", "toFloat":
+	case "toDouble":
 		return jsJFlo{f: giFloat(rt, target)}, true
+	case "toFloat":
+		// toFloat() NARROWS to a binary32: 0.1.toFloat() is 0.1f, which prints
+		// "0.1" and is a different value from the double 0.1.
+		return jsJFlo{f: jvmFround(giFloat(rt, target)), sty: floJavaF}, true
 	case "toChar":
 		return jsChar{code: int32(giVal(rt, target) & 65535)}, true
 	case "inv":
@@ -577,9 +584,11 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 // 1.5.hashCode() answered 1 where java answers 1073217536. The twin is kDblHash in
 // kotlin-interpreter.abnf, which has to derive the bits arithmetically because
 // neither engine has typed arrays; here math.Float64bits is the whole job.
-// A FLOAT shares the jsJFlo box with a Double in this value model, so
-// 1.5f.hashCode() answers Double's hash and not Float's - nothing at runtime says
-// which of the two a value is. Same simplification in the interpreter half.
+// A FLOAT shares the jsJFlo box with a Double, and since the float WIDTH work the
+// style byte DOES say which of the two a value is - but 1.5f.hashCode() still
+// answers Double's hash and not Float's (floatToIntBits, 1069547520), because
+// that needs a binary32 bit EXTRACTION and only the rounding was written. Same
+// simplification in the interpreter half and in layer 2; recorded in docs/todo.md.
 func ktDblHash(d float64) int32 {
 	// doubleToLongBits COLLAPSES every NaN to 0x7ff8000000000000, which
 	// math.Float64bits does not (Go's own math.NaN() is ...0001).
@@ -719,6 +728,11 @@ func init() {
 				}
 				return boolH(c >= 0)
 			}
+			// A Float operand promotes the other side to Float too, so
+			// `16777217 < 16777216f` is FALSE - the Int converts to 1.6777216E7.
+			// (Kotlin's Int.compareTo(Float) compiles to a JVM float comparison,
+			// i.e. exactly JLS 5.6.2.)
+			l, r = jvmFloCmpPair(rt, l, r)
 			c := rt.jsCompare(l, r)
 			switch op {
 			case "<":
@@ -735,7 +749,10 @@ func init() {
 		m["js_ktadd"] = func(a []uint64) uint64 {
 			l, r := u(a[0]), u(a[1])
 			if jvmIsFlo(l) || jvmIsFlo(r) {
-				return w(jsJFlo{f: giFloat(rt, l) + giFloat(rt, r), sty: jvmStyleOf(l, r)})
+				// jvmArith, not a hand-rolled add: the float WIDTH needs both
+				// operands converted first and the sum rounded after, and
+				// jvmStyleOf gets `Float + Double` backwards (it is a Double).
+				return w(rt.jvmArith('+', l, r))
 			}
 			if ktIsIntegral(l) && ktIsIntegral(r) {
 				return w(rt.ktArith("+", l, r))
@@ -845,6 +862,22 @@ func init() {
 			}
 			return w(jsJFlo{f: giFloat(rt, v)})
 		}
+		// The FLOAT half of js_ktadoptf: `val f: Float = 1` and every other
+		// declared-Float binding site. The twin is js_ktadoptf32 in
+		// languages/lib/kotlin-rt.metajs.
+		m["js_ktadoptf32"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if !ktIsIntegral(v) {
+				return a[0]
+			}
+			return w(jsJFlo{f: jvmFround(giFloat(rt, v)), sty: floJavaF})
+		}
+		// js_ktflo32 is the ONE new extern the width needs: a `1.0f` literal and
+		// a `.toFloat()` both lower to it. Its layer-2 twin is js_ktflo32 in
+		// languages/lib/kotlin-rt.metajs.
+		m["js_ktflo32"] = func(a []uint64) uint64 {
+			return w(jsJFlo{f: jvmFround(rt.toNumber(u(a[0]))), sty: floJavaF})
+		}
 		// An integer literal, passed as DIGITS: (text, radix, suffix code).
 		m["js_ktlit"] = func(a []uint64) uint64 {
 			s := rt.toString(u(a[0]))
@@ -883,6 +916,11 @@ func init() {
 			case jsChar:
 				return w(jsChar{code: int32((int64(t.code) + d) & 65535)})
 			case jsJFlo:
+				// ++/-- keeps the operand's own type, WIDTH included: a Float
+				// steps as a Float, so `var f = 16777216f; f++` stays 1.6777216E7.
+				if t.sty == floJavaF {
+					return w(jsJFlo{f: jvmFround(t.f + float64(d)), sty: floJavaF})
+				}
 				return w(jsJFlo{f: t.f + float64(d), sty: t.sty})
 			case jsGInt:
 				return w(ktNorm(t.v+d, t.w, t.u))
@@ -4972,8 +5010,13 @@ func (rt *jsrt) ktAdoptTy(v interface{}, ty string) interface{} {
 		return nil
 	}
 	switch t {
-	case "Double", "Float":
+	case "Double":
 		return jsJFlo{f: giFloat(rt, v)}
+	case "Float":
+		// A `Float` declared type is a BINARY32, not a print style - see the
+		// float WIDTH block in languages/lib/kotlin-rt.metajs. Kotlin/JVM's
+		// Float IS Java's, so the machinery is jsrtjvm.go's floJavaF.
+		return jsJFlo{f: jvmFround(giFloat(rt, v)), sty: floJavaF}
 	case "Int":
 		return rt.ktConv(v, 32, false)
 	case "Long":

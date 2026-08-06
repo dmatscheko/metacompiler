@@ -2058,7 +2058,7 @@ NoSpacedAt  = :script(~~
 // A floating-point literal (1.5, 2.0f, 1e9, 3.14E-2, digit-group underscores):
 // a genuine double value (parseFloat stops before the f/F suffix). Comparisons
 // are exact; see the arithmetic note at the core config for the int-wrap caveat.
-FloatLit    <~~ push(makeConst(kFlo(parseFloat(up.in.split("_").join(""))))) ~~>
+FloatLit    <~~ push(makeConst(kFloLit(up.in))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
               ( "." "0"..."9" { "0"..."9" | "_" } [ FloatExp ] [ FloatSfx ]
               | FloatExp [ FloatSfx ]
@@ -2066,7 +2066,7 @@ FloatLit    <~~ push(makeConst(kFlo(parseFloat(up.in.split("_").join(""))))) ~~>
 FloatExp    = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" | "_" } ;
 // A float literal written without its integer part (.5, .1_1). Only reachable at the
 // start of an operand, where a lone `.` cannot mean anything else.
-DotFloatLit <~~ push(makeConst(kFlo(parseFloat("0" + up.in.split("_").join(""))))) ~~>
+DotFloatLit <~~ push(makeConst(kFloLit("0" + up.in))) ~~>
             = "." :whitespace() "0"..."9" { "0"..."9" | "_" } [ FloatExp ] [ FloatSfx ] :whitespace(Whitespace) ;
 FloatSfx    = "f" | "F" ;
 
@@ -2637,6 +2637,101 @@ NotMemberKw = :script(~~
     var kInf = 1 / kZeroF
     function kFlo(f) { return {__flo: f} }
     function kIsFlo(v) { return v !== null && v !== undefined && typeof v == "object" && v.__flo !== undefined }
+    // ----- the float WIDTH -----
+    // A Kotlin `Float` is a binary32, not a Double spelled differently: 1.0f/3.0f
+    // is 0.33333334 where the Double is 0.3333333333333333, so every arithmetic
+    // result rounds back to 24 significant bits and the printer uses the shortest
+    // decimal that round-trips AS A FLOAT. The value still travels as a double
+    // (every float is exactly one) and only the WIDTH goes on the box.
+    //
+    // Kotlin/JVM's Float IS java's - the spec declares it an IEEE-754 binary32,
+    // its arithmetic is the JVM's fadd/fmul/fdiv and Float.toString() delegates to
+    // java.lang.Float.toString - so java 24.0.2 is the oracle for every row here
+    // (there is no kotlinc on this machine). The compiled world's twin is style 3
+    // of the tag 14 box: floJavaF in abnf/jsrtjvm.go and the float WIDTH block of
+    // languages/lib/kotlin-rt.metajs, which also records why the width does NOT
+    // move into the C floor.
+    function kFlo32(f) { return {__flo: kF32Round(f), __f32: true} }
+    function kIsF32(v) { return v !== null && v !== undefined && typeof v == "object" && v.__f32 === true }
+    // A floating-point LITERAL. An f/F suffix is the only thing that makes one a
+    // Float - Kotlin has no Float-typed unsuffixed literal - so the last character
+    // is the whole test. The twin is ktIsF32Lit in kotlin-to-llvm-ir.abnf.
+    // (The decimal is read into a double first and rounded to a float second,
+    // where kotlinc rounds once; no value in the corpus or the probe differs.)
+    function kFloLit(raw) {
+        var t = raw.split("_").join("")
+        var c = t.charAt(t.length - 1)
+        if (c == "f" || c == "F") { return kFlo32(parseFloat(t)) }
+        return kFlo(parseFloat(t))
+    }
+    // The box a binary operation on two float-ish operands answers: Kotlin
+    // promotes to the WIDER type (Float.plus(Double) is a Double, Float.plus(Int)
+    // a Float), which is JLS 5.6.2 and NOT the floor's left-operand rule.
+    function kF32Res(l, r) {
+        if (kIsFlo(l) && !kIsF32(l)) { return false }
+        if (kIsFlo(r) && !kIsF32(r)) { return false }
+        return kIsF32(l) || kIsF32(r)
+    }
+    function kFloRes(f, f32) { return f32 ? kFlo32(f) : kFlo(f) }
+    // x * 2^k, EXACTLY - every factor is a power of two. The chunking by 2^30
+    // keeps the loop short for the ~280 halvings a subnormal float needs.
+    function kScale2(x, k) {
+        var v = x
+        var n = k
+        while (n >= 30) { v = v * 1073741824; n = n - 30 }
+        while (n <= 0 - 30) { v = v / 1073741824; n = n + 30 }
+        while (n > 0) { v = v * 2; n = n - 1 }
+        while (n < 0) { v = v / 2; n = n + 1 }
+        return v
+    }
+    // Math.fround: the double nearest x that a binary32 holds, round half to EVEN,
+    // subnormals and both overflows included. Written on `*` and `/` by powers of
+    // two because the dialect has no access to a double's bits (the same argument
+    // that keeps d_frexp in the C floor). The twins are k1F32Round in
+    // lib/kotlin-rt.metajs and float64(float32(x)) in the Go twin.
+    function kF32Round(x) {
+        if (x !== x) { return x }
+        if (x === 0) { return x }
+        var neg = x < 0
+        var a = neg ? kNegF(x) : x
+        if (a === kInf) { return x }
+        var maxf = kScale2(16777215, 104)
+        if (a >= kScale2(1, 128)) { return neg ? kNegF(kInf) : kInf }
+        if (a <= kScale2(1, 0 - 150)) { return neg ? kNegZeroF() : 0 }
+        var e = 0
+        var t = a
+        while (t >= 2) { t = t / 2; e = e + 1 }
+        while (t < 1) { t = t * 2; e = e - 1 }
+        var q = e - 23
+        if (q < 0 - 149) { q = 0 - 149 }
+        var sc = kScale2(a, 0 - q)
+        var f = Math.floor(sc)
+        var d = sc - f
+        if (d > 0.5) { f = f + 1 }
+        if (d === 0.5) { if (f - Math.floor(f / 2) * 2 !== 0) { f = f + 1 } }
+        var r = kScale2(f, q)
+        if (r > maxf) { return neg ? kNegF(kInf) : kInf }
+        if (r === 0) { return neg ? kNegZeroF() : 0 }
+        return neg ? kNegF(r) : r
+    }
+    function kNegZeroF() { return 0 / kNegOne }
+    // THE SIGN OF A ZERO PRODUCT OR QUOTIENT, put back by hand. The tag engine
+    // keeps an integral value as an INTEGER, so `-14447655.0 * 0.0` comes back +0
+    // where IEEE-754, both compiled halves and java 24.0.2 all say -0.0 (the
+    // `x * 0` trap of docs/working-on-this-project.md chapter 4). It is a
+    // PRE-EXISTING interpreter-vs-run divergence for `Double`, reproducible at
+    // 15af058 in six lines of kotlin; the float work only made it show up 96 times
+    // in an 11,343-line probe. The rule is IEEE-754's: the sign of a zero product
+    // or quotient is the XOR of the operand signs. (The same defect and the same
+    // fix as jZeroSign in languages/java-interpreter.abnf.)
+    function kZeroSign(p, a, b) {
+        if (p !== 0) { return p }
+        if (a !== a) { return p }
+        if (b !== b) { return p }
+        var an = a < 0 || (a == 0 && 1 / a < 0)
+        var bn = b < 0 || (b == 0 && 1 / b < 0)
+        return an !== bn ? kNegZeroF() : 0
+    }
     // The numeric value of any numeric operand: a plain number, a Char, a Double or a
     // sized integer (which reads as the nearest double above 2^53, the way a
     // Long -> Double conversion does).
@@ -2697,6 +2792,159 @@ NotMemberKw = :script(~~
         var frac = digits.substring(1)
         if (frac == "") { frac = "0" }
         return digits.charAt(0) + "." + frac + "E" + (pt + exp - 1)
+    }
+    // ----- Float.toString -----
+    // Double.toString's rule read at 24 significant bits: the SHORTEST decimal that
+    // reads back as the same FLOAT, plain for 1e-3 <= |v| < 1e7, always a decimal
+    // point, never fewer than two significant digits in the scientific form. The
+    // twins are k1F32Str in languages/lib/kotlin-rt.metajs and jvmFloStr32 in
+    // abnf/jsrtjvm.go.
+    //
+    // THE DIGITS COME FROM `"" + a` AND NOT FROM floPrec. floPrec's two
+    // implementations disagree - abnf/commonscript.go answers exactly n digits,
+    // languages/lib/runtime.c's answers max(n, shortest) - so a renderer written on
+    // it would be a halves divergence in every float shorter than its double.
+    // `"" + a` is the shortest round-tripping DOUBLE in every engine, and rounding
+    // that digit string down to n is exact for every n a float wants.
+
+    // The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP,
+    // EXP being the decimal exponent of the FIRST digit.
+    function kDecDigits(a) {
+        var s = "" + a
+        var mant = s
+        var exp = 0
+        var ei = 0 - 1
+        for (var i = 0; i < s.length; i++) {
+            var c = s.charAt(i)
+            if (c == "e" || c == "E") { ei = i }
+        }
+        if (ei >= 0) {
+            mant = s.substring(0, ei)
+            var et = s.substring(ei + 1)
+            if (et.charAt(0) == "+") { et = et.substring(1) }
+            exp = parseInt(et, 10)
+        }
+        var digits = ""
+        var pt = 0 - 1
+        for (var j = 0; j < mant.length; j++) {
+            var ch = mant.charAt(j)
+            if (ch == ".") { pt = digits.length } else { if (ch != "-") { digits = digits + ch } }
+        }
+        if (pt < 0) { pt = digits.length }
+        var lead = 0
+        while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead++ }
+        digits = digits.substring(lead)
+        pt = pt - lead
+        var endz = digits.length
+        while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
+        digits = digits.substring(0, endz)
+        return digits + "e" + (pt + exp - 1)
+    }
+    // A DIGITS "e" EXP form rounded to n significant digits, half to even.
+    function kRoundDig(s, n) {
+        var ei = s.indexOf("e")
+        var ds = s.substring(0, ei)
+        var ex = parseInt(s.substring(ei + 1), 10)
+        if (ds.length <= n) { return s }
+        var keep = ds.substring(0, n)
+        var nxt = ds.charCodeAt(n) - 48
+        var up = false
+        if (nxt > 5) { up = true }
+        if (nxt == 5) {
+            var rest = false
+            for (var i = n + 1; i < ds.length; i++) { if (ds.charCodeAt(i) != 48) { rest = true } }
+            if (rest) { up = true } else {
+                var last = ds.charCodeAt(n - 1) - 48
+                if (last - Math.floor(last / 2) * 2 == 1) { up = true }
+            }
+        }
+        if (up) {
+            var out = ""
+            var carry = 1
+            for (var k = n - 1; k >= 0; k--) {
+                var dg = ds.charCodeAt(k) - 48 + carry
+                carry = 0
+                if (dg == 10) { dg = 0; carry = 1 }
+                out = "" + dg + out
+            }
+            if (carry == 1) { out = ("1" + out).substring(0, n); ex = ex + 1 }
+            keep = out
+        }
+        var ez = keep.length
+        while (ez > 1 && keep.charAt(ez - 1) == "0") { ez-- }
+        return keep.substring(0, ez) + "e" + ex
+    }
+    // The value of a DIGITS "e" EXP form. At most nine digits, so the integer is
+    // exact; the power of ten goes in chunks of 10^15, the largest one a double
+    // holds exactly. The relative error stays under ~1e-15, five million times
+    // finer than a float's half-ulp, and the only consumer is the round-trip TEST
+    // below - an error that small cannot pick a wrong length.
+    function kDecVal(s) {
+        var ei = s.indexOf("e")
+        var ds = s.substring(0, ei)
+        var k = parseInt(s.substring(ei + 1), 10) - ds.length + 1
+        var m = 0
+        for (var i = 0; i < ds.length; i++) { m = m * 10 + (ds.charCodeAt(i) - 48) }
+        while (k >= 15) { m = m * 1000000000000000; k = k - 15 }
+        while (k <= 0 - 15) { m = m / 1000000000000000; k = k + 15 }
+        while (k > 0) { m = m * 10; k = k - 1 }
+        while (k < 0) { m = m / 10; k = k + 1 }
+        return m
+    }
+    // The shortest decimal that round-trips as a binary32. Nine always do.
+    function kF32Sig(a) {
+        var full = kDecDigits(a)
+        var n = 1
+        while (n < 9) {
+            var c = kRoundDig(full, n)
+            if (kF32Round(kDecVal(c)) === a) { return c }
+            n = n + 1
+        }
+        return kRoundDig(full, 9)
+    }
+    function kF32Str(d) {
+        if (d !== d) return "NaN"
+        if (d === kInf) return "Infinity"
+        if (d === kNegF(kInf)) return "-Infinity"
+        if (d === 0) return (1 / d < 0) ? "-0.0" : "0.0"
+        var neg = d < 0
+        var a = neg ? kNegF(d) : d
+        var sig = kF32Sig(a)
+        var ei = sig.indexOf("e")
+        var ds = sig.substring(0, ei)
+        var e10 = parseInt(sig.substring(ei + 1), 10)
+        var body = ""
+        if (a >= 0.001 && a < 10000000) {
+            body = kF32Plain(ds, e10)
+        } else {
+            // Never fewer than TWO significant digits, and where the shortest has
+            // one the second is the closest two digit decimal to the ACTUAL value
+            // rather than a zero: Float.MIN_VALUE is 1.401298464324817E-45, which
+            // prints "1.4E-45". The same rule as Double's "4.9E-324".
+            if (ds.length == 1) {
+                var s2 = kRoundDig(kDecDigits(a), 2)
+                var e2 = s2.indexOf("e")
+                ds = s2.substring(0, e2)
+                e10 = parseInt(s2.substring(e2 + 1), 10)
+            }
+            var frac = ds.substring(1)
+            if (frac == "") { frac = "0" }
+            body = ds.charAt(0) + "." + frac + "E" + e10
+        }
+        return neg ? "-" + body : body
+    }
+    // The plain form. The forced ".0" is here; the two-digit minimum is not,
+    // because it is about the significand and only the scientific form shows one.
+    function kF32Plain(ds, e10) {
+        if (e10 >= 0) {
+            var ip = ""
+            for (var i = 0; i <= e10; i++) { ip = ip + (i < ds.length ? ds.charAt(i) : "0") }
+            var fp = ds.length > e10 + 1 ? ds.substring(e10 + 1) : "0"
+            return ip + "." + fp
+        }
+        var lead = "0."
+        for (var k = 0 - e10 - 1; k > 0; k--) { lead = lead + "0" }
+        return lead + ds
     }
     function kChStr(v) { return String.fromCharCode(v.__char) }
 
@@ -2889,6 +3137,12 @@ NotMemberKw = :script(~~
         if (t.length > 0 && t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1) }
         return t == "Double" || t == "Float"
     }
+    // ...and Float is that rule at the FLOAT WIDTH.
+    function kTypeF32(dt) {
+        var t = dt
+        if (t.length > 0 && t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1) }
+        return t == "Float"
+    }
     function kTypeUns(dt) {
         var t = dt
         if (t.length > 0 && t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1) }
@@ -2908,6 +3162,7 @@ NotMemberKw = :script(~~
         if (kIsIntegral(v)) {
             var w = kTypeWidth(dt)
             if (w > 0) { return kConv(v, w, kTypeUns(dt)) }
+            if (kTypeF32(dt)) { return kFlo32(kNumD(v)) }
             if (kTypeFlo(dt)) { return kFlo(kNumD(v)) }
         }
         return v
@@ -3041,7 +3296,7 @@ NotMemberKw = :script(~~
             // its result a Double; two integral operands go through the SIZED
             // arithmetic, which applies the width rules (Byte + Byte is an Int,
             // Int + Long is a Long) and wraps at the result type's width.
-            if (kIsFlo(l) || kIsFlo(r)) { return kFloOp2(op, kNumD(l), kNumD(r)) }
+            if (kIsFlo(l) || kIsFlo(r)) { return kFloOp2(op, kNumD(l), kNumD(r), kF32Res(l, r)) }
             if (kIsIntegral(l) && kIsIntegral(r)) {
                 if (isCmp) { return kCmpI(op, l, r) }
                 return kArith(op, l, r)
@@ -3051,11 +3306,19 @@ NotMemberKw = :script(~~
     }
     // The floating-point twin of the kNumOp2 table: the arithmetic operators answer
     // a Double, the comparisons a Boolean.
-    function kFloOp2(op, a, b) {
-        if (op == "-") return kFlo(a - b)
-        if (op == "*") return kFlo(a * b)
-        if (op == "/") return kFlo(a / b)
-        if (op == "%") return kFlo(a % b)
+    // BOTH OPERANDS CONVERT FIRST when the promoted type is Float, and that is not
+    // the same answer as rounding only the result: `0.1f + 16777217` is 1.6777216E7,
+    // because the Int becomes a float BEFORE the addition. It decides the RELATIONS
+    // too - `16777217 < 16777216f` is false, since Int.compareTo(Float) compiles to
+    // a JVM float comparison.
+    function kFloOp2(op, a0, b0, f32) {
+        var a = f32 ? kF32Round(a0) : a0
+        var b = f32 ? kF32Round(b0) : b0
+        if (op == "+") return kFloRes(a + b, f32)
+        if (op == "-") return kFloRes(a - b, f32)
+        if (op == "*") return kFloRes(kZeroSign(a * b, a, b), f32)
+        if (op == "/") return kFloRes(kZeroSign(a / b, a, b), f32)
+        if (op == "%") return kFloRes(a % b, f32)
         if (op == "<") return a < b
         if (op == ">") return a > b
         if (op == "<=") return a <= b
@@ -3096,7 +3359,8 @@ NotMemberKw = :script(~~
             // a Char promote to Int first - which is what Kotlin's unaryMinus
             // returns for them. UInt has no unaryMinus at all, so an unsigned box
             // negating at its own width is a spelling kotlinc would refuse.
-            if (kIsFlo(v)) { return kFlo(kNegF(v.__flo)) }
+            // Negation is EXACT at every width, so the Float keeps its own box.
+            if (kIsFlo(v)) { return kIsF32(v) ? {__flo: kNegF(v.__flo), __f32: true} : kFlo(kNegF(v.__flo)) }
             if (szIs(v)) {
                 if (v.w == 64 || v.u) { return kNorm(szPair(szNeg(v)), v.w, v.u) }
                 return (0 - szNum(v)) | 0
@@ -3420,10 +3684,12 @@ NotMemberKw = :script(~~
                              MIN_VALUE: kFlo(parseFloat("4.9e-324")),
                              NaN: kFlo(kZeroF / kZeroF), POSITIVE_INFINITY: kFlo(kInf),
                              NEGATIVE_INFINITY: kFlo(kNegF(kInf)), SIZE_BITS: 64, SIZE_BYTES: 8}
-    hostGlobals["Float"] = {MAX_VALUE: kFlo(parseFloat("3.4028234663852886e38")),
-                            MIN_VALUE: kFlo(parseFloat("1.4e-45")),
-                            NaN: kFlo(kZeroF / kZeroF), POSITIVE_INFINITY: kFlo(kInf),
-                            NEGATIVE_INFINITY: kFlo(kNegF(kInf)), SIZE_BITS: 32, SIZE_BYTES: 4}
+    // Float's five constants are FLOAT boxes, so Float.MAX_VALUE prints
+    // "3.4028235E38" and not the double's 17 digits.
+    hostGlobals["Float"] = {MAX_VALUE: kFlo32(parseFloat("3.4028234663852886e38")),
+                            MIN_VALUE: kFlo32(parseFloat("1.401298464324817e-45")),
+                            NaN: kFlo32(kZeroF / kZeroF), POSITIVE_INFINITY: kFlo32(kInf),
+                            NEGATIVE_INFINITY: kFlo32(kNegF(kInf)), SIZE_BITS: 32, SIZE_BYTES: 4}
     hostGlobals["listOf"] = function() {
         var out = []
         for (var i = 0; i < arguments.length; i++) out.push(arguments[i])
@@ -4152,7 +4418,7 @@ NotMemberKw = :script(~~
         if (v === undefined) return "kotlin.Unit"
         if (v === null) return "null"
         if (kIsChar(v)) return kChStr(v)
-        if (kIsFlo(v)) return kFloStr(v.__flo)
+        if (kIsFlo(v)) return kIsF32(v) ? kF32Str(v.__flo) : kFloStr(v.__flo)
         // A sized integer prints its exact digits, and an UNSIGNED one its unsigned
         // reading: ULong.MAX_VALUE is 18446744073709551615, not -1. "" + v would
         // print [object Object] and szNum rounds above 2^53.
@@ -5805,7 +6071,10 @@ NotMemberKw = :script(~~
             var cn = kConvName(name)
             var cw = kDeclWidth[cn]
             if (cw != undefined) { return kConv(target, cw, kDeclUns[cn] == true) }
-            if (name == "toDouble" || name == "toFloat") { return kIsFlo(target) ? target : kFlo(kNumD(target)) }
+            if (name == "toDouble") { return kIsFlo(target) && !kIsF32(target) ? target : kFlo(kNumD(target)) }
+            // toFloat() NARROWS to a binary32: 0.1.toFloat() prints "0.1" and is a
+            // different value from the Double 0.1.
+            if (name == "toFloat") { return kFlo32(kNumD(target)) }
             if (name == "toChar") { return kChar(szNum(kConv(target, 16, true)) & 65535) }
         }
         // coerceIn(min, max) / coerceIn(range): the third member of the coerce family,
@@ -5821,7 +6090,7 @@ NotMemberKw = :script(~~
         }
         if (kIsFlo(target)) {
             var tf = target.__flo
-            if (name == "toString") return kFloStr(tf)
+            if (name == "toString") return kIsF32(target) ? kF32Str(tf) : kFloStr(tf)
             if (name == "compareTo") return tf < kNumD(args[0]) ? -1 : (tf > kNumD(args[0]) ? 1 : 0)
             if (name == "equals") return tf === kNumD(args[0])
             if (name == "coerceAtLeast") return tf < kNumD(args[0]) ? args[0] : target
@@ -6304,7 +6573,7 @@ NotMemberKw = :script(~~
         // A SET gains elements as a Set, not as a List (kotlin.collections.plus is
         // declared on Set separately from Iterable and keeps the receiver's shape).
         if (kIsSet(l)) { return kSetMethod(l, "plus", [r]).v }
-        if (kIsFlo(l) || kIsFlo(r)) { return kFlo(kNumD(l) + kNumD(r)) }
+        if (kIsFlo(l) || kIsFlo(r)) { return kFloOp2("+", kNumD(l), kNumD(r), kF32Res(l, r)) }
         // Two integral operands: Int + Int wraps at 32 bits, anything with a Long in
         // it at 64, and an unsigned pair at its own width.
         if (kIsIntegral(l) && kIsIntegral(r)) { return kArith("+", l, r) }
@@ -7047,11 +7316,12 @@ NotMemberKw = :script(~~
         var dw = 0
         var du = false
         var df = false
+        var df32 = false
         var i = 1
         var mark = items[1]
         if (mark != undefined && mark != null && typeof mark != "function") {
             if (mark.recvFn != undefined) { recvFn = true }
-            else if (mark.dty != undefined) { dw = kTypeWidth(mark.dty); du = kTypeUns(mark.dty); df = kTypeFlo(mark.dty) }
+            else if (mark.dty != undefined) { dw = kTypeWidth(mark.dty); du = kTypeUns(mark.dty); df = kTypeFlo(mark.dty); df32 = kTypeF32(mark.dty) }
             i = 2
         }
         var init = items[i]
@@ -7063,7 +7333,7 @@ NotMemberKw = :script(~~
             var s = blockSignalOf(v)
             if (s != undefined) return s
             if (dw > 0 && kIsIntegral(v)) { v = kConv(v, dw, du) }
-            else if (df && kIsIntegral(v)) { v = kFlo(kNumD(v)) }
+            else if (df && kIsIntegral(v)) { v = df32 ? kFlo32(kNumD(v)) : kFlo(kNumD(v)) }
             declVar(name, recvFn ? kRecvLambda(v) : v)
         }
     }
@@ -9398,7 +9668,9 @@ NotMemberKw = :script(~~
     // integer steps at its OWN width (so `var b: Byte = 127; b++` is -128), and
     // everything else steps as an Int32 (a Char as its code, like before).
     function kStep(v, d) {
-        if (kIsFlo(v)) { return kFlo(v.__flo + d) }
+        // ++/-- keeps the operand's own type, WIDTH included: a Float steps as a
+        // Float, so `var f = 16777216f; f++` stays 1.6777216E7.
+        if (kIsFlo(v)) { return kIsF32(v) ? kFlo32(v.__flo + d) : kFlo(v.__flo + d) }
         if (szIs(v)) { return kNorm(szPair(szArith("+", v, kSz(d, v.w, v.u))), v.w, v.u) }
         return (kNum(v) + d) | 0
     }

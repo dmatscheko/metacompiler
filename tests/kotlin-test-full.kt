@@ -639,7 +639,54 @@ fun sec24() {
     check("flt24", m.half() == 2.5 && s24(m.amount) == "5.0")
     val xs = listOf(0.5, 1.5)
     check("flt25", xs[0] + xs[1] == 2.0 && s24(xs[0] * 2) == "1.0")
+    // ----- Float is a BINARY32, not a Double spelled differently -----
+    // Kotlin's Float is an IEEE-754 single (kotlin.Float), its arithmetic is the
+    // JVM's fadd/fmul/fdiv and Float.toString() delegates to
+    // java.lang.Float.toString, so `java` (JDK 24) settles every row below - and
+    // an 11,343-line probe over 210 float values, every operand read out of an
+    // array, is byte-identical to it in all three engines.
+    val fs = arrayOf(1.0f, 3.0f, 0.1f, 16777217.0f, 16777216.0f)
+    // The headline: eight significant digits, not sixteen.
+    check("f32a", s24f(fs[0] / fs[1]) == "0.33333334")
+    check("f32b", fs[0] / fs[1] != 1.0 / 3.0)
+    // 16777217 is the first integer a binary32 cannot hold; the literal itself
+    // rounds down to 16777216.
+    check("f32c", s24f(fs[3]) == "1.6777216E7" && fs[3] == fs[4])
+    // 0.1f is a DIFFERENT number from 0.1, and it prints as the shortest decimal
+    // that round-trips at 24 bits rather than at 53.
+    check("f32d", s24f(fs[2]) == "0.1" && fs[2].toDouble() == 0.10000000149011612)
+    // Both operands convert to Float FIRST (the wider-type promotion of the JVM):
+    // rounding only the result would give 1.6777218E7 here.
+    check("f32e", s24f(fs[2] + 16777217) == "1.6777216E7")
+    // ...and the same promotion decides the RELATIONS.
+    check("f32f", !(16777217 < fs[4]) && 16777217 <= fs[4])
+    // Float op Double is a DOUBLE - the wider type wins, which the floor's
+    // left-operand style rule gets backwards.
+    check("f32g", s24f(fs[2] + 1.0) == "1.1000000014901161")
+    // ++ keeps the operand's own width, so a Float at the precision boundary
+    // does not move.
+    var f32h = 16777216.0f
+    f32h++
+    check("f32h", s24f(f32h) == "1.6777216E7")
+    // toFloat() NARROWS, and a declared Float type retypes an integer literal.
+    val f32i: Float = 1
+    check("f32i", s24f(f32i) == "1.0" && s24f((1.0 / 3.0).toFloat()) == "0.33333334")
+    // The companion constants are Floats, so they print at 24 bits too.
+    check("f32j", s24f(Float.MAX_VALUE) == "3.4028235E38" && s24f(Float.MIN_VALUE) == "1.4E-45")
+    // Unary minus and a signed zero survive the width.
+    check("f32k", s24f(-fs[2]) == "-0.1" && s24f(fs[0] * 0.0f) == "0.0")
+    // THE PRE-EXISTING SIGNED-ZERO DEFECT this work turned up 96 times: an
+    // integral-valued operand times a zero lost its sign in the interpreter half
+    // only (0.0 where java, and both compiled halves, say -0.0). Reproduced at
+    // 15af058 in six lines of kotlin.
+    val ds24 = arrayOf(-14447655.0, 0.0)
+    check("f32l", s24(ds24[0] * ds24[1]) == "-0.0" && s24(ds24[1] / ds24[0]) == "-0.0")
 }
+// The Float renderer, reached through a function boundary so the grammar's
+// constant folder cannot answer these rows at compile time. The parameter is Any
+// because two of the rows below hand it a Double on purpose (Float op Double is a
+// Double), and Kotlin has no implicit narrowing.
+fun s24f(f: Any): String = "" + f
 
 // ===== SECTION 25: value rendering =====
 // What println / toString() / a string template make of a value. Every answer
