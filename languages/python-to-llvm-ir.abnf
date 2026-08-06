@@ -2017,21 +2017,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     b = ea.b
                     cur = callExt(b, "js_pycall", [cur, ea.pos, ea.kw])
                 } else if (s.kind == "mcall") {
-                    // .items(): the runtime's js_mcall has no dict "items", so lower it
-                    // here to a loop over js_keys building [key, value] pairs.
-                    if (s.name == "items" && s.args.length == 0) {
-                        var ri = emitItems(b, cur)
-                        b = ri.b
-                        cur = ri.v
-                    } else {
-                        var ea2 = emitCallArgs(b, s.args)
-                        b = ea2.b
-                        // js_pyrxmcall is js_pymcall plus the `re` module, a compiled
-                        // pattern and a match (abnf/jsrtregexpy.go); every other
-                        // receiver is handed straight on to js_pymcall, so this is
-                        // behaviour-preserving.
-                        cur = callExt(b, "js_pyrxmcall", [cur, emitStr(b, s.name), ea2.pos, ea2.kw])
-                    }
+                    // .items() USED TO BE LOWERED HERE, to a ~40-instruction loop over
+                    // js_keys building [key, value] pairs, because js_mcall had no dict
+                    // "items" arm. docs/todo.md 1.3 gave both compiled engines one
+                    // (pyDictMethod in abnf/jsrt.go and in lib/python-rt.metajs), so the
+                    // lowering is gone and the name goes through the extern like every
+                    // other method. It was also WRONG on a receiver that is not a dict:
+                    // `set().items()` emitted the loop anyway and answered
+                    // [['elems', <the element list>]] where the interpreter half raised
+                    // AttributeError - a halves divergence removing it also fixes.
+                    var ea2 = emitCallArgs(b, s.args)
+                    b = ea2.b
+                    // js_pyrxmcall is js_pymcall plus the `re` module, a compiled
+                    // pattern and a match (abnf/jsrtregexpy.go); every other
+                    // receiver is handed straight on to js_pymcall, so this is
+                    // behaviour-preserving.
+                    cur = callExt(b, "js_pyrxmcall", [cur, emitStr(b, s.name), ea2.pos, ea2.kw])
                 } else if (s.kind == "attr") {
                     cur = callExt(b, "js_pygetattr", [cur, emitStr(b, s.name)])
                 } else if (s.kind == "slice") {
@@ -2312,47 +2313,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: fexit, v: dV}
         }
     }
-    // dict.items(): loop over js_keys(d) building a list of [key, value] 2 element lists
-    // (the subset has no tuples), reading each value with js_pyget. Deterministic across
-    // engines because js_keys returns the keys in insertion order.
-    function emitItems(b, dictV) {
-        hidCount++
-        var iName = "$iti" + hidCount
-        var kName = "$itk" + hidCount
-        var dName = "$itd" + hidCount
-        var oName = "$ito" + hidCount
-        var saved = curScopeV
-        curScopeV = callExt(b, "js_scope_new", [curScopeV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, dName), dictV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, kName), callExt(b, "js_keys", [dictV])])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, oName), callExt(b, "js_arr_new", [])])
-        var headB = curF.NewBlock("")
-        var bodyB = curF.NewBlock("")
-        var exitB = curF.NewBlock("")
-        b.NewBr(headB)
-        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
-        var kV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, kName)])
-        var lenV = callExt(headB, "js_get", [kV, emitStr(headB, "length")])
-        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
-        var bb = bodyB
-        var iV2 = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, iName)])
-        var kV2 = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, kName)])
-        var dV2 = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, dName)])
-        var keyV = callExt(bb, "js_get", [kV2, iV2])
-        var valV = callExt(bb, "js_pyget", [dV2, keyV])
-        var pair = callExt(bb, "js_arr_new", [])
-        callExt(bb, "js_arr_push", [pair, keyV])
-        callExt(bb, "js_arr_push", [pair, valV])
-        var oV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, oName)])
-        callExt(bb, "js_arr_push", [oV, pair])
-        callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, iName), callExt(bb, "js_add", [iV2, emitNum(bb, 1)])])
-        bb.NewBr(headB)
-        var outV = callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, oName)])
-        curScopeV = saved
-        return {b: exitB, v: outV}
-    }
-
     // One step along a target path: an index ([i], js_pyget) or an attribute
     // (.name, js_get - matching the pyattr read of the interpreter).
     // One step along a target path. Everything BUT the last step of a target is an

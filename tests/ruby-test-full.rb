@@ -1278,6 +1278,81 @@ def s35
   k = Hash.new
   k[:a] = 1
   check("w65", k == {:a => 1})
+  # docs/todo.md 1.4, the rest of it. Hash.new(v) / Hash.new { |h, k| } keep their
+  # default in a hidden slot honoured at EVERY read, including the op-assign and the
+  # append reads, which used to go straight to dictFind and answer nil.
+  hd = Hash.new(7)
+  check("w66", hd["nope"] == 7 && hd.size == 0 && hd.keys == [] && hd.inspect == "{}")
+  hd[:a] = 1
+  check("w67", hd[:a] == 1 && hd[:b] == 7 && hd.default == 7 && Hash.new.default == nil)
+  hc = Hash.new(0)
+  ["a", "b", "a"].each { |w| hc[w] += 1 }
+  check("w68", hc == {"a" => 2, "b" => 1})
+  hb = Hash.new { |h, k| h[k] = [] }
+  hb[:x] << 1
+  hb[:x] << 2
+  check("w69", hb == {:x => [1, 2]} && hb.default == nil)
+  # fetch DELIBERATELY ignores the default, which is MRI.
+  hfb = hd.fetch(:zz) { |q| 9 }
+  check("w70", hd.fetch(:a) == 1 && hd.fetch(:zz, 5) == 5 && hfb == 9)
+  # A blockless each / each_slice / each_with_index / combination / permutation is an
+  # Enumerator, not the array of elements it would produce. This one is EAGER - there
+  # is no coroutine in the compiler half to park a lazy one in.
+  ea = [1, 2, 3, 4, 5]
+  en = ea.each
+  check("w71", en.class.to_s == "Enumerator" && en.is_a?(Enumerator) && en.size == 5)
+  check("w72", en.to_a == [1, 2, 3, 4, 5] && en.next == 1 && en.next == 2 && en.peek == 3)
+  en.rewind
+  check("w73", en.next == 1 && ea.each_slice(2).class.to_s == "Enumerator")
+  check("w74", ea.each_slice(2).to_a == [[1, 2], [3, 4], [5]])
+  check("w75", ea.each_with_index.to_a[0] == [1, 0] && ea.each.map { |v| v * 2 } == [2, 4, 6, 8, 10])
+  check("w76", ea.each.with_index(1).to_a[0] == [1, 1])
+  # sample and shuffle are asserted on INVARIANTS ONLY - length, membership and
+  # permutation-ness. There is no random source here (Kernel#rand is
+  # deterministically zero of the right class), so the draw is deterministic and its
+  # particular ordering is not a contract.
+  check("w77", ea.include?(ea.sample) && ea.sample(3).length == 3 && ea.sample(99).length == 5)
+  check("w78", [].sample == nil && (ea.sample(3) - ea) == [])
+  sf = ea.shuffle
+  check("w79", sf.length == 5 && sf.sort == ea && (sf - ea) == [] && (ea - sf) == [])
+  cy = []
+  ea.cycle(2) { |v| cy << v }
+  check("w80", cy.length == 10 && cy.sort == [1, 1, 2, 2, 3, 3, 4, 4, 5, 5])
+  check("w81", ea.combination(2).to_a.length == 10 && ea.permutation(2).to_a.length == 20)
+  check("w82", ["a", "b", "c"].combination(2).to_a == [["a", "b"], ["a", "c"], ["b", "c"]])
+  check("w83", ["a", "b", "c"].permutation(2).to_a.length == 6 && ea.combination(0).to_a == [[]])
+  check("w84", ea.combination(9).to_a == [] && ea.cycle(2).to_a.length == 10)
+  # A BARE rand: it used to resolve to the host function value here and abort the
+  # compiler with "variable not defined: rand", while rand() worked everywhere.
+  check("w85", rand.class.to_s == "Float" && rand >= 0 && rand < 1 && rand().class.to_s == "Float")
+  # yield inside a begin/rescue ABORTED the compiler half while this one answered.
+  y1 = s35y("a") { 1 }
+  y2 = s35y2 { |m| m.upcase }
+  check("w86", y1 == "a1" && y2 == "BOOM")
+  bg2 = s35bg { 1 }
+  check("w87", s35bg == [false, false] && bg2 == [true, true] && !block_given?)
+end
+def s35y(l)
+  begin
+    return l + (yield).to_s
+  rescue Exception => e
+    return "E"
+  end
+end
+def s35y2
+  begin
+    raise "boom"
+  rescue => e
+    return yield(e.message)
+  end
+end
+def s35bg
+  r = block_given?
+  begin
+    return [r, block_given?]
+  rescue
+    return nil
+  end
 end
 
 # ===== SECTION 36: Array is Comparable, and the two errors sort and sum raise =====

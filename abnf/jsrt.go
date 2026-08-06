@@ -4724,6 +4724,9 @@ func rubyClassName(v interface{}) string {
 		if _, _, isDict := dictParts(t); isDict {
 			return "Hash"
 		}
+		if rubyIsEnum(t) {
+			return "Enumerator"
+		}
 	}
 	return ""
 }
@@ -6003,6 +6006,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	case *jsArray:
 		return rt.rubyArrayMethod(o, name, args)
 	case *jsObject:
+		if rubyIsEnum(o) {
+			return rt.rubyEnumMethod(o, name, args)
+		}
 		if _, isRng := o.props["__rrange"]; isRng {
 			// A range with an open end: only the membership questions make sense.
 			switch name {
@@ -6041,6 +6047,29 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 					rt.call(argAt(args, 0), jsUndef, []interface{}{keys.elems[i], vals.elems[i]})
 				}
 				return o
+			case "default":
+				// Hash#default is the value Hash.new(v) recorded; a hash built
+				// with a BLOCK answers nil here, exactly as MRI does (the block
+				// is #default_proc).
+				if d, has := o.props["__hdef"]; has {
+					return d
+				}
+				return jsNull
+			case "fetch":
+				// Hash#fetch DELIBERATELY ignores the default: MRI raises
+				// KeyError for a missing key unless a second argument or a
+				// block supplies the answer.
+				pos, blk := rubyBlockArgs(args)
+				if i := rt.rubyDictFind(keys, argAt(pos, 0)); i >= 0 {
+					return vals.elems[i]
+				}
+				if len(pos) > 1 {
+					return pos[1]
+				}
+				if blk != nil {
+					return rt.call(blk, jsUndef, []interface{}{argAt(pos, 0)})
+				}
+				rt.fail("key not found: %s", rt.rubyInspect(argAt(pos, 0)))
 			}
 			rt.fail("unknown Hash method: %s", name)
 		}
@@ -6326,6 +6355,39 @@ func rubyNewDict() *jsObject {
 	return d
 }
 
+// rubyNewHash is Hash.new / Hash.new(v) / Hash.new { |h, k| }. The default value
+// or default block lives in a hidden __-prefixed slot, which keysOf skips, so it
+// reaches neither keys nor inspect nor ==.
+func rubyNewHash(args []interface{}) *jsObject {
+	d := rubyNewDict()
+	pos, blk := rubyBlockArgs(args)
+	if blk != nil {
+		d.set("__hdefp", blk)
+		return d
+	}
+	if len(pos) > 0 {
+		d.set("__hdef", pos[0])
+	}
+	return d
+}
+
+// rubyHashDefault is the value a Hash answers for a key it does not hold: the
+// default block called with (hash, key) - which may WRITE the hash, the
+// memoisation idiom - else the default value, else nil.
+func (rt *jsrt) rubyHashDefault(o, k interface{}) interface{} {
+	obj, ok := o.(*jsObject)
+	if !ok {
+		return jsNull
+	}
+	if p, has := obj.props["__hdefp"]; has && isCallable(p) {
+		return rt.call(p, jsUndef, []interface{}{o, k})
+	}
+	if d, has := obj.props["__hdef"]; has {
+		return d
+	}
+	return jsNull
+}
+
 // rubyArrNew is Array.new(n) / Array.new(n, v) / Array.new(n) { |i| }.
 func (rt *jsrt) rubyArrNew(args []interface{}) *jsArray {
 	pos, blk := rubyBlockArgs(args)
@@ -6355,6 +6417,155 @@ func (rt *jsrt) rubyArrNew(args []interface{}) *jsArray {
 // rubyArrayMethod mirrors the arrayMethod of ruby-interpreter.abnf. select and
 // reject use rubyTruthy (Ruby semantics), and pop/first/last return nil (not an
 // error) on an empty array.
+// rubyCombIdx / rubyPermIdx are combination / permutation as INDEX lists, so one
+// pair of helpers serves both the Array methods and (through them) an Enumerator.
+// MRI's orders: combination is index-ascending, permutation is the depth-first walk
+// that takes each unused index in turn. Mirrors combIdx / permIdx of
+// ruby-interpreter.abnf and rbCombIdx / rbPermIdx of lib/ruby-rt.metajs.
+func rubyCombIdx(n, k int) [][]int {
+	out := [][]int{}
+	if k < 0 || k > n {
+		return out
+	}
+	var rec func(start int, cur []int)
+	rec = func(start int, cur []int) {
+		if len(cur) == k {
+			out = append(out, append([]int{}, cur...))
+			return
+		}
+		for i := start; i < n; i++ {
+			rec(i+1, append(cur, i))
+		}
+	}
+	rec(0, []int{})
+	return out
+}
+
+func rubyPermIdx(n, k int) [][]int {
+	out := [][]int{}
+	if k < 0 || k > n {
+		return out
+	}
+	used := make([]bool, n)
+	var rec func(cur []int)
+	rec = func(cur []int) {
+		if len(cur) == k {
+			out = append(out, append([]int{}, cur...))
+			return
+		}
+		for i := 0; i < n; i++ {
+			if used[i] {
+				continue
+			}
+			used[i] = true
+			rec(append(cur, i))
+			used[i] = false
+		}
+	}
+	rec([]int{})
+	return out
+}
+
+// rubyPick turns an index list into the element rows it selects.
+func rubyPick(t *jsArray, picks [][]int) *jsArray {
+	out := &jsArray{}
+	for _, p := range picks {
+		row := &jsArray{}
+		for _, i := range p {
+			row.elems = append(row.elems, t.elems[i])
+		}
+		out.elems = append(out.elems, row)
+	}
+	return out
+}
+
+// rubyMkEnum builds an EAGER Enumerator: the materialized element list, a cursor
+// for #next, and the whole Enumerable surface by delegation to Array. A lazy one
+// needs a suspendable body and ruby-to-llvm-ir.abnf lowers every block by hand
+// (grep js_genfn: zero hits), so there is no coroutine to park in. Mirrors mkEnum /
+// enumMethod of ruby-interpreter.abnf and rbMkEnum / rbEnumMethod of
+// lib/ruby-rt.metajs.
+func rubyMkEnum(items *jsArray) *jsObject {
+	e := newJSObject()
+	e.set("__renum", true)
+	e.set("items", items)
+	e.set("pos", float64(0))
+	return e
+}
+
+func rubyIsEnum(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	b, has := o.props["__renum"]
+	return has && b == true
+}
+
+func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) interface{} {
+	items, _ := t.props["items"].(*jsArray)
+	if items == nil {
+		items = &jsArray{}
+	}
+	pos, blk := rubyBlockArgs(args)
+	switch name {
+	case "to_a", "entries", "force":
+		return &jsArray{elems: append([]interface{}{}, items.elems...)}
+	case "size", "length", "count":
+		if len(pos) == 0 && blk == nil {
+			return float64(len(items.elems))
+		}
+	case "next", "peek":
+		cur := int(rubyToF(t.props["pos"]))
+		if cur >= len(items.elems) {
+			rt.fail("iteration reached an end")
+		}
+		if name == "next" {
+			t.set("pos", float64(cur+1))
+		}
+		return items.elems[cur]
+	case "rewind":
+		t.set("pos", float64(0))
+		return t
+	case "class":
+		return rt.rubyBuiltinClass("Enumerator")
+	case "inspect", "to_s":
+		return "#<Enumerator: " + rt.rubyInspect(items) + ">"
+	case "each":
+		if blk == nil {
+			return t
+		}
+		for _, e := range items.elems {
+			rt.call(blk, jsUndef, []interface{}{e})
+		}
+		return t
+	case "with_index", "each_with_index":
+		off := 0
+		if name == "with_index" && len(pos) > 0 {
+			off = int(math.Trunc(rubyToF(pos[0])))
+		}
+		if blk == nil {
+			pairs := &jsArray{}
+			for i, e := range items.elems {
+				pairs.elems = append(pairs.elems, &jsArray{elems: []interface{}{e, float64(i + off)}})
+			}
+			return rubyMkEnum(pairs)
+		}
+		for i, e := range items.elems {
+			rt.call(blk, jsUndef, []interface{}{e, float64(i + off)})
+		}
+		return t
+	case "with_object", "each_with_object":
+		memo := argAt(pos, 0)
+		for _, e := range items.elems {
+			rt.call(blk, jsUndef, []interface{}{e, memo})
+		}
+		return memo
+	}
+	// Everything else is Enumerable, and an eager Enumerator IS its element list.
+	return rt.rubyArrayMethod(items, name, args)
+}
+
 func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) interface{} {
 	pos, blk := rubyBlockArgs(args)
 	switch name {
@@ -6473,11 +6684,22 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	case "to_a":
 		return &jsArray{elems: append([]interface{}{}, t.elems...)}
 	case "each":
+		// A blockless each is an Enumerator in MRI, not the array.
+		if blk == nil {
+			return rubyMkEnum(&jsArray{elems: append([]interface{}{}, t.elems...)})
+		}
 		for _, e := range t.elems {
 			rt.call(blk, jsUndef, []interface{}{e})
 		}
 		return t
 	case "each_with_index":
+		if blk == nil {
+			pairs := &jsArray{}
+			for i, e := range t.elems {
+				pairs.elems = append(pairs.elems, &jsArray{elems: []interface{}{e, float64(i)}})
+			}
+			return rubyMkEnum(pairs)
+		}
 		for i, e := range t.elems {
 			rt.call(blk, jsUndef, []interface{}{e, float64(i)})
 		}
@@ -6707,10 +6929,87 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			}
 		}
 		if blk == nil {
-			return groups
+			return rubyMkEnum(groups)
 		}
 		for _, g := range groups.elems {
 			rt.call(blk, jsUndef, []interface{}{g})
+		}
+		return t
+	// sample / shuffle. There is no random source in this project and there cannot
+	// be one the engines agree on byte-for-byte (see rubyRand, which is
+	// deterministically zero), so these are the DETERMINISTIC draw: sample takes
+	// from the front and shuffle is the identity permutation. Every invariant a
+	// program can test - the length, membership, and that a shuffle is a
+	// permutation of its receiver - holds; the particular ordering does not, and
+	// MRI's would not be reproducible either.
+	case "sample":
+		if len(pos) == 0 {
+			if len(t.elems) == 0 {
+				return jsNull
+			}
+			return t.elems[0]
+		}
+		n := int(math.Trunc(rubyToF(pos[0])))
+		if n > len(t.elems) {
+			n = len(t.elems)
+		}
+		return rubyArrSub(t, 0, n)
+	case "shuffle":
+		return &jsArray{elems: append([]interface{}{}, t.elems...)}
+	case "shuffle!":
+		return t
+	// cycle(n) { } runs the block over the whole array n times; cycle { } with no
+	// count repeats FOREVER, and the way out is the block's own `break'.
+	case "cycle":
+		n := 0
+		if len(pos) > 0 {
+			n = int(math.Trunc(rubyToF(pos[0])))
+		}
+		if blk == nil {
+			if len(pos) == 0 {
+				rt.fail("cycle without a count needs a block")
+			}
+			cyc := &jsArray{}
+			for i := 0; i < n; i++ {
+				cyc.elems = append(cyc.elems, t.elems...)
+			}
+			return rubyMkEnum(cyc)
+		}
+		if len(pos) == 0 {
+			if len(t.elems) == 0 {
+				return jsNull
+			}
+			for {
+				for _, e := range t.elems {
+					rt.call(blk, jsUndef, []interface{}{e})
+				}
+			}
+		}
+		for i := 0; i < n; i++ {
+			for _, e := range t.elems {
+				rt.call(blk, jsUndef, []interface{}{e})
+			}
+		}
+		return jsNull
+	// combination(n) / permutation(n): the subsets and the ordered arrangements, in
+	// MRI's own order. With a block they yield each one and answer SELF.
+	case "combination", "permutation":
+		k := len(t.elems)
+		if len(pos) > 0 {
+			k = int(math.Trunc(rubyToF(pos[0])))
+		}
+		var picks [][]int
+		if name == "combination" {
+			picks = rubyCombIdx(len(t.elems), k)
+		} else {
+			picks = rubyPermIdx(len(t.elems), k)
+		}
+		res := rubyPick(t, picks)
+		if blk == nil {
+			return rubyMkEnum(res)
+		}
+		for _, r := range res.elems {
+			rt.call(blk, jsUndef, []interface{}{r})
 		}
 		return t
 	case "take":
@@ -7821,7 +8120,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if keys, vals, ok := dictParts(u(a[0])); ok {
 				i := rt.rubyDictFind(keys, u(a[1]))
 				if i < 0 {
-					return w(jsNull)
+					return w(rt.rubyHashDefault(u(a[0]), u(a[1])))
 				}
 				return w(vals.elems[i])
 			}
@@ -8569,11 +8868,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					if bn == "Array" {
 						return w(rt.rubyArrNew(argv))
 					}
-					// A bare Hash.new is an empty Hash. Hash.new(v) / Hash.new { }
-					// carry a DEFAULT, which nothing here models, so those forms
-					// are left on the old path rather than silently losing it.
-					if bn == "Hash" && len(argv) == 0 {
-						return w(rubyNewDict())
+					// Hash.new / Hash.new(v) / Hash.new { |h, k| }. The default
+					// lives in the hidden __hdef / __hdefp slot and
+					// rubyHashDefault honours it at every read; before that the
+					// two argument forms fell through to rubyExc below and
+					// answered an exception object.
+					if bn == "Hash" {
+						return w(rubyNewHash(argv))
 					}
 					return w(rt.rubyExc(cls, argv))
 				}
@@ -9929,6 +10230,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			if keys, _, ok := dictParts(u(a[0])); ok {
 				return rt.wrapNum(float64(len(keys.elems)))
+			}
+			// A ruby Enumerator's length is its element count: ruby-to-llvm-ir.abnf
+			// lowers a bare `.size' / `.length' to js_pylen rather than to a method
+			// call, so it never reaches rubyEnumMethod. Only ruby builds a __renum
+			// object, so no other language can reach this arm.
+			if rubyIsEnum(u(a[0])) {
+				if items, isArr := u(a[0]).(*jsObject).props["items"].(*jsArray); isArr {
+					return rt.wrapNum(float64(len(items.elems)))
+				}
 			}
 			rt.fail("len() of a %s", rt.typeOf(u(a[0])))
 			return 0
@@ -12904,28 +13214,35 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 	// pyDListCount in languages/lib/python-rt.metajs and the `count` arm of
 	// mcall in languages/python-interpreter.abnf. str.count already existed and
 	// was already CPython's non-overlapping substring count (pystrmethod.go).
-	// set.add(x) and dict.pop(k[, default]) - docs/todo.md 1.4, whose third
-	// bullet called them an interpreter-only gap; a probe at 4731755 answered
-	// "unknown method 'add'" and "unknown dict method 'pop'" under llvm.Run too,
-	// so all three engines were missing them. The twins are the same two arms of
-	// pyDMethodCall in languages/lib/python-rt.metajs and of mcall in
-	// languages/python-interpreter.abnf.
-	if els, isSet := pySetElems(target); isSet && name == "add" {
-		rt.pySetAdd(els, argAt(args, 0)) // Already-present member: no-op, returns None.
-		return jsUndef
+	// THE WHOLE DICT AND SET METHOD SURFACE - docs/todo.md 1.3, the residue of
+	// 51436f9 (which did the list surface). Only set.add and dict.pop were here,
+	// and keys/values/get reached rt.memberCall's shared dict arm;
+	// clear/copy/setdefault/update and pop/clear/copy/remove/discard/union all
+	// aborted in every engine. The twins are pySetMethod/pyDictMethod in
+	// languages/lib/python-rt.metajs and in languages/python-interpreter.abnf.
+	//
+	// A name the OTHER type owns raises AttributeError, which is what CPython
+	// does - and the two "only" lists are narrower than the two method sets,
+	// because pop/clear/copy/update are on BOTH types. `set().keys()` used to
+	// answer the member LIST in the interpreter half and abort with "unknown
+	// method 'keys'" here - a live halves divergence the 1.3 sweep found.
+	if els, isSet := pySetElems(target); isSet {
+		if pyIsSetMethod(name) {
+			return rt.pySetMethod(els, name, args)
+		}
+		if pyIsDictOnly(name) {
+			panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+				"'"+pyTypeName(rt, target)+"' object has no attribute '"+name+"'")})
+		}
 	}
-	if keys, vals, isDict := dictParts(target); isDict && name == "pop" {
-		if i := rt.pyDictFind(keys, argAt(args, 0)); i >= 0 {
-			v := vals.elems[i]
-			keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
-			vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
-			keys.dropIdx()
-			return v
+	if keys, vals, isDict := dictParts(target); isDict {
+		if pyIsDictMethod(name) {
+			return rt.pyDictMethod(keys, vals, name, args, kw)
 		}
-		if len(args) > 1 {
-			return args[1]
+		if pyIsSetOnly(name) {
+			panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+				"'"+pyTypeName(rt, target)+"' object has no attribute '"+name+"'")})
 		}
-		panic(&jsThrown{value: rt.pyExcInstance("KeyError", rt.pyRepr(argAt(args, 0)))})
 	}
 	// THE WHOLE LIST METHOD SURFACE - docs/todo.md 1.3. `count` was the only one
 	// 6eec533 added; sort/insert/remove/extend/index/reverse/clear/copy all
@@ -13142,6 +13459,271 @@ func (rt *jsrt) pyKwArg(kw interface{}, name string) interface{} {
 	return jsUndef
 }
 
+// ----- Python dict and set methods - docs/todo.md 1.3 -----
+//
+// The NAME SETS first, so hasattr()/getattr() can ask exactly what the
+// dispatcher answers. Keep in step with pyIsDictMethod/pyIsSetMethod in
+// languages/lib/python-rt.metajs and in languages/python-interpreter.abnf.
+//
+// NOT the whole of CPython's: dict.popitem/fromkeys and set.intersection/
+// difference/symmetric_difference/isdisjoint/issubset/issuperset and their
+// *_update forms are absent, hasattr() therefore says False for them, and a
+// written call still ABORTS rather than raising - the 51436f9 rule. The set
+// ALGEBRA is spelled with the operators & - ^ <= >= instead, and those are
+// complete.
+func pyIsDictMethod(name string) bool {
+	switch name {
+	case "keys", "values", "items", "get", "pop", "clear", "copy", "setdefault", "update":
+		return true
+	}
+	return false
+}
+
+func pyIsSetMethod(name string) bool {
+	switch name {
+	case "add", "pop", "clear", "copy", "remove", "discard", "union", "update":
+		return true
+	}
+	return false
+}
+
+// pyIsDictOnly and pyIsSetOnly are the names one of the two types owns and the
+// other does NOT, which is exactly what CPython raises AttributeError for. They
+// are narrower than the two sets above: pop, clear, copy and update are on BOTH.
+func pyIsDictOnly(name string) bool {
+	switch name {
+	case "keys", "values", "items", "get", "setdefault":
+		return true
+	}
+	return false
+}
+
+func pyIsSetOnly(name string) bool {
+	switch name {
+	case "add", "remove", "discard", "union":
+		return true
+	}
+	return false
+}
+
+// pyDictMethod runs one of the dict methods. Every error is a CATCHABLE Python
+// exception with CPython 3.14's exact text, not rt.fail, for the same reason the
+// list surface is: `try: d.pop(k) / except KeyError` has to behave the same in
+// all three engines.
+func (rt *jsrt) pyDictMethod(keys, vals *jsArray, name string, args []interface{}, kw interface{}) interface{} {
+	switch name {
+	case "keys":
+		return &jsArray{elems: append([]interface{}{}, keys.elems...)}
+	case "values":
+		return &jsArray{elems: append([]interface{}{}, vals.elems...)}
+	case "items":
+		// A list of [key, value] pairs in insertion order (each pair a 2-element
+		// list, since the subset has no tuples; CPython answers a dict_items VIEW
+		// of TUPLES, which is docs/todo.md 3.1 and not this item). The compiler
+		// grammar USED to lower a written d.items() into a loop of its own and
+		// never reach here, so getattr(d, "items")() aborted; that lowering is
+		// gone and every form arrives here.
+		pairs := &jsArray{}
+		for i, k := range keys.elems {
+			pairs.elems = append(pairs.elems, &jsArray{elems: []interface{}{k, vals.elems[i]}})
+		}
+		return pairs
+	case "get":
+		if i := rt.pyDictFind(keys, argAt(args, 0)); i >= 0 {
+			return vals.elems[i]
+		}
+		if len(args) > 1 {
+			return args[1]
+		}
+		return jsUndef
+	case "pop":
+		if i := rt.pyDictFind(keys, argAt(args, 0)); i >= 0 {
+			v := vals.elems[i]
+			keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
+			vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
+			keys.dropIdx()
+			return v
+		}
+		if len(args) > 1 {
+			return args[1]
+		}
+		panic(&jsThrown{value: rt.pyExcInstance("KeyError", rt.pyRepr(argAt(args, 0)))})
+	case "clear":
+		keys.elems = keys.elems[:0]
+		vals.elems = vals.elems[:0]
+		keys.dropIdx()
+		return jsUndef
+	case "copy":
+		// SHALLOW, like CPython's: the values are shared, only the two spine
+		// arrays are new. d.copy() is not d, and d.copy() == d.
+		return &jsObject{props: map[string]interface{}{
+			"__dict": true,
+			"keys":   &jsArray{elems: append([]interface{}{}, keys.elems...)},
+			"vals":   &jsArray{elems: append([]interface{}{}, vals.elems...)},
+		}}
+	case "setdefault":
+		// INSERTS and returns; the default defaults to None, and it is inserted
+		// too - d.setdefault("b") leaves {"b": None}.
+		if len(args) < 1 {
+			panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+				"setdefault expected at least 1 argument, got 0")})
+		}
+		if i := rt.pyDictFind(keys, args[0]); i >= 0 {
+			return vals.elems[i]
+		}
+		var v interface{} = jsUndef
+		if len(args) > 1 {
+			v = args[1]
+		}
+		dictAppend(keys, vals, args[0], v)
+		return v
+	case "update":
+		// update([mapping | iterable of pairs], **kwargs). All three forms, and
+		// the KEYWORD one works only on a WRITTEN call: a bound builtin from
+		// getattr() cannot carry keyword arguments (a signature-less builtin
+		// receives its kw dict as a trailing positional and the wrapper cannot
+		// tell that from a real argument - docs/todo.md 2.13), so
+		// getattr(d, "update")(a=1) is not d.update(a=1); the written call is.
+		if len(args) > 1 {
+			panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+				fmt.Sprintf("update expected at most 1 argument, got %d", len(args)))})
+		}
+		if len(args) == 1 {
+			rt.pyDictUpdateFrom(keys, vals, args[0])
+		}
+		if kkeys, kvals, ok := dictParts(kw); ok {
+			for i, k := range kkeys.elems {
+				rt.pyDictStore(keys, vals, k, kvals.elems[i])
+			}
+		}
+		return jsUndef
+	}
+	rt.fail("unknown dict method '%s'", name)
+	return nil
+}
+
+// pyDictStore is d[k] = v on the two spine arrays.
+func (rt *jsrt) pyDictStore(keys, vals *jsArray, k, v interface{}) {
+	if i := rt.pyDictFind(keys, k); i >= 0 {
+		vals.elems[i] = v
+		return
+	}
+	dictAppend(keys, vals, k, v)
+}
+
+// pyDictUpdateFrom is update()'s positional argument: a MAPPING copies key by
+// key, anything else is read as an iterable of 2-element pairs. CPython's two
+// error texts differ and are reproduced - the argument itself names its type,
+// an ELEMENT does not.
+func (rt *jsrt) pyDictUpdateFrom(keys, vals *jsArray, src interface{}) {
+	if _, isSet := pySetElems(src); !isSet {
+		if skeys, svals, ok := dictParts(src); ok {
+			for i, k := range skeys.elems {
+				rt.pyDictStore(keys, vals, k, svals.elems[i])
+			}
+			return
+		}
+	}
+	for i, el := range rt.pyElemsOf(src) {
+		k, v := rt.pyPairOf(el, i)
+		rt.pyDictStore(keys, vals, k, v)
+	}
+}
+
+func (rt *jsrt) pyPairOf(el interface{}, i int) (interface{}, interface{}) {
+	if !rt.pyIsIterable(el) {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError", "object is not iterable")})
+	}
+	pair := rt.pyElemsOf(el)
+	if len(pair) != 2 {
+		panic(&jsThrown{value: rt.pyExcInstance("ValueError",
+			fmt.Sprintf("dictionary update sequence element #%d has length %d; 2 is required", i, len(pair)))})
+	}
+	return pair[0], pair[1]
+}
+
+// pyIsIterable is pyElemsOf's own accept test, asked without raising: an
+// update() ELEMENT that is not iterable gets CPython's typeless "object is not
+// iterable" rather than pyElemsOf's "'int' object is not iterable".
+func (rt *jsrt) pyIsIterable(v interface{}) bool {
+	switch v.(type) {
+	case *jsGenerator, *jsArray, string:
+		return true
+	}
+	if _, ok := pySetElems(v); ok {
+		return true
+	}
+	if _, _, ok := dictParts(v); ok {
+		return true
+	}
+	if o, ok := v.(*jsObject); ok && pyIterName(rt, o) != "" {
+		return true
+	}
+	return false
+}
+
+// pySetMethod runs one of the set methods.
+func (rt *jsrt) pySetMethod(els *jsArray, name string, args []interface{}) interface{} {
+	switch name {
+	case "add":
+		rt.pySetAdd(els, argAt(args, 0)) // Already-present member: no-op, returns None.
+		return jsUndef
+	case "clear":
+		els.elems = els.elems[:0]
+		els.dropIdx()
+		return jsUndef
+	case "copy":
+		return newPySet(&jsArray{elems: append([]interface{}{}, els.elems...)}) // SHALLOW.
+	case "pop":
+		// pop() removes and returns an ARBITRARY element - CPython promises no
+		// order at all. This project's sets keep insertion order (it is what
+		// makes a set render deterministically, which the byte-identical
+		// goja/frozen invariant needs), so the first element is the one taken.
+		// Assert on membership and size, never on which element.
+		if len(els.elems) == 0 {
+			panic(&jsThrown{value: rt.pyExcInstance("KeyError", rt.pyRepr("pop from an empty set"))})
+		}
+		v := els.elems[0]
+		els.elems = append(els.elems[:0], els.elems[1:]...)
+		els.dropIdx()
+		return v
+	case "remove", "discard":
+		// remove() raises KeyError when the member is absent and discard() does
+		// not. That difference is the whole reason both exist.
+		for i, e := range els.elems {
+			if rt.pyEqual(e, argAt(args, 0)) {
+				els.elems = append(els.elems[:i], els.elems[i+1:]...)
+				els.dropIdx()
+				return jsUndef
+			}
+		}
+		if name == "remove" {
+			panic(&jsThrown{value: rt.pyExcInstance("KeyError", rt.pyRepr(argAt(args, 0)))})
+		}
+		return jsUndef
+	case "union", "update":
+		// union(*others) takes ANY iterable, any number of them, and does not
+		// mutate the receiver: s | t insists both sides be sets, s.union(t) does
+		// not, so {1}.union([2], "a") is a set of three. update() is the same
+		// walk IN PLACE, returning None.
+		out := els
+		if name == "union" {
+			out = &jsArray{elems: append([]interface{}{}, els.elems...)}
+		}
+		for _, a := range args {
+			for _, e := range rt.pyElemsOf(a) {
+				rt.pySetAdd(out, e)
+			}
+		}
+		if name == "union" {
+			return newPySet(out)
+		}
+		return jsUndef
+	}
+	rt.fail("unknown set method '%s'", name)
+	return nil
+}
+
 // pyBuiltinAttr - docs/todo.md 1.2. hasattr()/getattr() walked only the
 // user-class MRO and an object's own property map, so hasattr([3,1,2], "count")
 // was False and hasattr("s", "upper") was False where CPython answers True in
@@ -13161,15 +13743,13 @@ func (rt *jsrt) pyBuiltinAttr(target interface{}, name string) bool {
 	if _, isArr := target.(*jsArray); isArr {
 		return pyIsListMethod(name)
 	}
-	// A set is a dict whose keys are its members, so it is asked FIRST.
+	// A set is a dict whose keys are its members in the interpreter half, so it
+	// is asked FIRST here too and the two name sets stay disjoint.
 	if _, isSet := pySetElems(target); isSet {
-		return name == "add"
+		return pyIsSetMethod(name)
 	}
 	if _, _, isDict := dictParts(target); isDict {
-		switch name {
-		case "keys", "values", "items", "get", "pop":
-			return true
-		}
+		return pyIsDictMethod(name)
 	}
 	return false
 }

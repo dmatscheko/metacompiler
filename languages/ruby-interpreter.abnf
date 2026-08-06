@@ -4353,8 +4353,27 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // ----- Length / indexing that understand arrays, strings and hashes -----
     function rlen(v) {
         if (isDict(v)) { return v.keys.length }
+        // An Enumerator's length is its element count. A bare `.size' / `.length'
+        // is lowered to this shortcut in BOTH halves rather than to a method call,
+        // so without this arm `e.size' answered nil here and aborted the compiler.
+        if (isEnum(v)) { return v.items.length }
         if (v === null || v === undefined) { fail("length of nil") }
         return v.length
+    }
+    // The value a Hash answers for a key it does NOT hold. Hash.new(v) stores v in
+    // the hidden __hdef slot and Hash.new { |h, k| } stores the block in __hdefp;
+    // the block is called with the hash and the key (and MAY write the hash, which
+    // is the `Hash.new { |h, k| h[k] = ... }' memoisation idiom). A plain Hash has
+    // neither slot and answers nil. keysOf hides __-prefixed slots, so neither
+    // reaches keys / inspect / ==.
+    function hashDefault(o, k) {
+        var p = anytype
+        p = o.__hdefp
+        if (typeof p == "function") { return blockCall(p, [o, k]) }
+        var d = anytype
+        d = o.__hdef
+        if (d == undefined) { return null }
+        return d
     }
     function rindex(o, i) {
         // p[x] calls a Proc, obj[i] a user-defined def [].
@@ -4365,7 +4384,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isUserObj(o)) { return mcall(o, "[]", [i], null) }
         if (isDict(o)) {
             var di = dictFind(o, i)
-            return di < 0 ? null : o.vals[di]
+            if (di < 0) { return hashDefault(o, i) }
+            return o.vals[di]
         }
         if (typeof o == "string") {
             if (i < 0) { i += o.length }
@@ -4579,6 +4599,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (typeof v == "function") { return hostGlobals["Proc"] }
         if (Array.isArray(v)) { return hostGlobals["Array"] }
         if (isDict(v)) { return hostGlobals["Hash"] }
+        if (isEnum(v)) { return hostGlobals["Enumerator"] }
         if (isUserObj(v)) { return v.__class }
         return hostGlobals["Object"]
     }
@@ -4811,6 +4832,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 for (var di = 0; di < target.keys.length; di++) { blockCall(blk, [target.keys[di], target.vals[di]]) }
                 return target
             }
+            // Hash#default is the value Hash.new(v) recorded; a hash built with a
+            // BLOCK answers nil here, exactly as MRI does (the block is #default_proc).
+            if (name == "default") {
+                var hdv = anytype
+                hdv = target.__hdef
+                return hdv == undefined ? null : hdv
+            }
+            // Hash#fetch DELIBERATELY ignores the default: MRI raises KeyError for a
+            // missing key unless a second argument or a block supplies the answer.
+            if (name == "fetch") {
+                var fi = dictFind(target, args[0])
+                if (fi >= 0) { return target.vals[fi] }
+                if (args.length > 1) { return args[1] }
+                if (blk != null) { return blockCall(blk, [args[0]]) }
+                fail("key not found: " + rinspect(args[0]))
+            }
             fail("unknown Hash method: " + name)
         }
         if (target === null || target === undefined) {
@@ -4823,6 +4860,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             fail("method ." + name + " on nil")
         }
         if (Array.isArray(target)) { return arrayMethod(target, name, args, blk) }
+        if (isEnum(target)) { return enumMethod(target, name, args, blk) }
         if (target.__class != undefined) {
             if (name == "class") { return target.__class }
             // The lookup walks prepends, the class, its mixins and then the
@@ -4866,12 +4904,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // it fell into the generic instance construction below and answered a bare
             // object - a silent wrong answer, and a different one in each engine.
             if (name == "new" && target === hostGlobals["Array"]) { return arrNew(args, blk) }
-            // A bare Hash.new is an empty Hash - it answered a bare object here and a
-            // Hash in the compiler half. Hash.new(v) / Hash.new { } carry a DEFAULT,
-            // which nothing in this project models, so those forms are left on the
-            // old path rather than silently losing it.
-            if (name == "new" && target === hostGlobals["Hash"] && args.length == 0 && blk == null) {
-                return {__dict: true, keys: [], vals: []}
+            // Hash.new / Hash.new(v) / Hash.new { |h, k| }. The default is kept in
+            // the hidden __hdef / __hdefp slots and honoured by hashDefault at every
+            // read; before that the two argument forms fell through to the generic
+            // instance construction and answered a bare object.
+            if (name == "new" && target === hostGlobals["Hash"]) {
+                var nd = {__dict: true, keys: [], vals: []}
+                if (blk != null) { nd.__hdefp = blk }
+                else if (args.length > 0) { nd.__hdef = args[0] }
+                return nd
             }
             if (name == "new") {
                 var obj = {__class: target}
@@ -5040,6 +5081,100 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var j = 0; j < r.length; j++) { if (!arrHas(out, r[j])) { out.push(r[j]) } }
         return out
     }
+    // combination / permutation, as INDEX lists so one pair of helpers serves both the
+    // Array methods and (through them) an Enumerator. MRI's orders: combination is
+    // index-ascending, permutation is the depth-first walk that takes each unused
+    // index in turn. Mirrored by rbCombIdx / rbPermIdx in lib/ruby-rt.metajs and
+    // rubyCombIdx / rubyPermIdx in abnf/jsrt.go.
+    function combRec(n, k, start, cur, out) {
+        if (cur.length == k) { out.push(cur.slice(0)); return }
+        for (var i = start; i < n; i++) {
+            cur.push(i)
+            combRec(n, k, i + 1, cur, out)
+            cur.pop()
+        }
+    }
+    function combIdx(n, k) {
+        var out = []
+        if (k < 0 || k > n) { return out }
+        combRec(n, k, 0, [], out)
+        return out
+    }
+    function permRec(n, k, used, cur, out) {
+        if (cur.length == k) { out.push(cur.slice(0)); return }
+        for (var i = 0; i < n; i++) {
+            if (used[i]) { continue }
+            used[i] = true
+            cur.push(i)
+            permRec(n, k, used, cur, out)
+            cur.pop()
+            used[i] = false
+        }
+    }
+    function permIdx(n, k) {
+        var out = []
+        if (k < 0 || k > n) { return out }
+        var used = []
+        for (var i = 0; i < n; i++) { used.push(false) }
+        permRec(n, k, used, [], out)
+        return out
+    }
+    // ----- Enumerator -----
+    // A blockless each / each_slice / each_cons / each_with_index / combination /
+    // permutation answers an Enumerator in MRI; before this they answered the array of
+    // elements the enumerator would have produced, so `.to_a` was right and `.class`
+    // said Array and `.next` did not exist at all.
+    //
+    // This Enumerator is EAGER: it holds the materialized element list. A lazy one
+    // needs a suspendable body, and ruby-to-llvm-ir.abnf lowers every block by hand
+    // (grep js_genfn: zero hits), so the compiler half has no coroutine to park in.
+    // Everything an eager one can answer - to_a, next/peek/rewind, size, with_index
+    // and the whole Enumerable surface by delegation to Array - is answered, and
+    // Enumerator.new / an infinite enumerator is not expressible. Mirrored by
+    // rbMkEnum / rbEnumMethod in lib/ruby-rt.metajs and rubyMkEnum /
+    // rubyEnumMethod in abnf/jsrt.go.
+    function mkEnum(items) { return {__renum: true, items: items, pos: 0} }
+    function isEnum(v) {
+        return v !== null && v !== undefined && typeof v == "object" && v.__renum === true
+    }
+    function enumMethod(t, name, args, blk) {
+        var items = t.items
+        if (name == "to_a" || name == "entries" || name == "force") { return items.slice(0) }
+        if (name == "size" || name == "length" || name == "count") {
+            if (args.length == 0 && blk == null) { return items.length }
+        }
+        if (name == "next" || name == "peek") {
+            if (t.pos >= items.length) { fail("iteration reached an end") }
+            var nv = items[t.pos]
+            if (name == "next") { t.pos = t.pos + 1 }
+            return nv
+        }
+        if (name == "rewind") { t.pos = 0; return t }
+        if (name == "class") { return hostGlobals["Enumerator"] }
+        if (name == "inspect" || name == "to_s") { return "#<Enumerator: " + rinspect(items) + ">" }
+        if (name == "each") {
+            if (blk == null) { return t }
+            for (var i = 0; i < items.length; i++) { blockCall(blk, [items[i]]) }
+            return t
+        }
+        // with_index(offset = 0) is each_with_index with a starting number.
+        if (name == "with_index" || name == "each_with_index") {
+            var off = 0
+            if (name == "with_index" && args.length > 0) { off = Math.trunc(toF(args[0])) }
+            var pairs = []
+            for (var j = 0; j < items.length; j++) { pairs.push([items[j], j + off]) }
+            if (blk == null) { return mkEnum(pairs) }
+            for (var k = 0; k < items.length; k++) { blockCall(blk, [items[k], k + off]) }
+            return t
+        }
+        if (name == "with_object" || name == "each_with_object") {
+            var memo = args[0]
+            for (var w = 0; w < items.length; w++) { blockCall(blk, [items[w], memo]) }
+            return memo
+        }
+        // Everything else is Enumerable, and an eager Enumerator IS its element list.
+        return arrayMethod(items, name, args, blk)
+    }
     function arrayMethod(t, name, args, blk) {
         var i
         if (name == "size" || name == "length") { return t.length }
@@ -5138,8 +5273,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return uq
         }
         if (name == "to_a") { return t.slice(0) }
-        if (name == "each") { for (i = 0; i < t.length; i++) { blockCall(blk, [t[i]]) } return t }
-        if (name == "each_with_index") { for (i = 0; i < t.length; i++) { blockCall(blk, [t[i], i]) } return t }
+        // A blockless each / each_with_index is an Enumerator in MRI, not the array.
+        if (name == "each") {
+            if (blk == null) { return mkEnum(t.slice(0)) }
+            for (i = 0; i < t.length; i++) { blockCall(blk, [t[i]]) }
+            return t
+        }
+        if (name == "each_with_index") {
+            if (blk == null) {
+                var wpairs = []
+                for (i = 0; i < t.length; i++) { wpairs.push([t[i], i]) }
+                return mkEnum(wpairs)
+            }
+            for (i = 0; i < t.length; i++) { blockCall(blk, [t[i], i]) }
+            return t
+        }
         var out
         if (name == "map" || name == "collect") {
             out = []
@@ -5293,8 +5441,57 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             } else {
                 for (i = 0; i + gn <= t.length; i++) { groups.push(arrSub(t, i, gn)) }
             }
-            if (blk == null) { return groups }
+            if (blk == null) { return mkEnum(groups) }
             for (i = 0; i < groups.length; i++) { blockCall(blk, [groups[i]]) }
+            return t
+        }
+        // sample / shuffle. There is no random source in this project and there cannot
+        // be one the engines agree on byte-for-byte (see Kernel#rand, which is
+        // deterministically zero), so these are the DETERMINISTIC draw: sample takes
+        // from the front and shuffle is the identity permutation. Every invariant a
+        // program can test - the length, membership, and that a shuffle is a
+        // permutation of its receiver - holds; the particular ordering does not, and
+        // MRI's would not be reproducible either.
+        if (name == "sample") {
+            if (args.length == 0) { return t.length == 0 ? null : t[0] }
+            var sn = Math.trunc(toF(args[0]))
+            if (sn > t.length) { sn = t.length }
+            return arrSub(t, 0, sn)
+        }
+        if (name == "shuffle") { return t.slice(0) }
+        if (name == "shuffle!") { return t }
+        // cycle(n) { } runs the block over the whole array n times; cycle { } with no
+        // count repeats FOREVER, and the way out is the block's own `break'.
+        if (name == "cycle") {
+            if (blk == null) {
+                if (args.length == 0) { fail("cycle without a count needs a block") }
+                var cyc = []
+                var cn = Math.trunc(toF(args[0]))
+                for (i = 0; i < cn; i++) { for (var cj = 0; cj < t.length; cj++) { cyc.push(t[cj]) } }
+                return mkEnum(cyc)
+            }
+            if (args.length == 0) {
+                if (t.length == 0) { return null }
+                while (true) { for (i = 0; i < t.length; i++) { blockCall(blk, [t[i]]) } }
+            }
+            var cy = Math.trunc(toF(args[0]))
+            for (i = 0; i < cy; i++) { for (var ck = 0; ck < t.length; ck++) { blockCall(blk, [t[ck]]) } }
+            return null
+        }
+        // combination(n) / permutation(n): the subsets and the ordered arrangements, in
+        // MRI's own order (combination is index-ascending, permutation is
+        // lexicographic by index). With a block they yield each one and answer SELF.
+        if (name == "combination" || name == "permutation") {
+            var pk = args.length > 0 ? Math.trunc(toF(args[0])) : t.length
+            var picks = name == "combination" ? combIdx(t.length, pk) : permIdx(t.length, pk)
+            var res = []
+            for (i = 0; i < picks.length; i++) {
+                var row2 = []
+                for (var pj = 0; pj < picks[i].length; pj++) { row2.push(t[picks[i][pj]]) }
+                res.push(row2)
+            }
+            if (blk == null) { return mkEnum(res) }
+            for (i = 0; i < res.length; i++) { blockCall(blk, [res[i]]) }
             return t
         }
         if (name == "take") { return arrSub(t, 0, Math.trunc(toF(args[0]))) }
@@ -5861,7 +6058,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var p = resolveRefRuby(ref)
                 if (op != "=") {
                     var old = anytype
-                    if (isDict(p.obj)) { var di = dictFind(p.obj, p.key); old = di < 0 ? null : p.obj.vals[di] }
+                    // A MISS answers the hash's default, exactly as Hash#[] does -
+                    // `cnt[w] += 1' on a Hash.new(0) is the counter idiom, and this
+                    // read used to answer nil unconditionally.
+                    if (isDict(p.obj)) { var di = dictFind(p.obj, p.key); old = di < 0 ? hashDefault(p.obj, p.key) : p.obj.vals[di] }
                     else if (isUserObj(p.obj)) { old = rindex(p.obj, p.key) }
                     else { old = hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined }
                     v = applyRuby(op, old, v)
@@ -5893,6 +6093,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (blockStack.length == 0) { return null }
         return blockStack[blockStack.length - 1]
     }
+    // The implicit block of the METHOD the running code is inside, or null when there
+    // is no enclosing method at all. invokeRuby declares "$blk" in every method scope,
+    // so a plain getVar would do - except at the TOP LEVEL, where no scope declares it
+    // and getVar fails the whole program with `unknown name: $blk'. MRI answers false
+    // for a top-level block_given?, so the lookup has to tolerate a miss.
+    function methodBlock() {
+        var v = anytype
+        for (var si = scopes.length - 1; si >= 0; si--) {
+            if (hasOwn(scopes[si], "$blk")) {
+                v = scopes[si]["$blk"]
+                if (v == undefined) { return null }
+                return v
+            }
+        }
+        return null
+    }
     function makeCall(items) {
         var name = items[0]
         var sp = splitBlock(items.slice(1))
@@ -5900,7 +6116,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var blkT = sp.blk
         return function() {
             // block_given? asks whether the ENCLOSING method received a block.
-            if (name == "block_given?") { return getVar("$blk") != null }
+            if (name == "block_given?") { return methodBlock() != null }
             var argv = evalArgList(args)
             var bf = null
             if (blkT != null) { bf = blkT() }
@@ -5931,7 +6147,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function makeYield(items, pos) {
         return function() {
             var blk = anytype
-            blk = getVar("$blk")
+            blk = methodBlock()
             if (blk == null || blk == undefined) { fail("no block given (yield)") }
             var argv = []
             for (var i = 0; i < items.length; i++) { argv.push(items[i]()) }
@@ -6289,6 +6505,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "private" || name == "protected" || name == "public" || name == "module_function") {
                 return hostGlobals[name]()
             }
+            // A BARE `rand` is Kernel#rand called with no arguments, not a reference to
+            // the host function - which is what it used to answer, so `rand.class` said
+            // Proc where MRI says Float (and the compiler half said "variable not
+            // defined: rand"). A program that defines a rand of its own still wins: the
+            // scope walk and selfMethod above run first.
+            if (name == "rand" && rubyMethods["$rand"] !== true) { return hostGlobals["rand"](null) }
             var sm2 = anytype
             sm2 = selfMethod(name)
             if (typeof sm2 == "function") { return mcall(findSelf(), name, [], null) }
@@ -6891,9 +7113,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function readTargetFull(ref) {
         if (ref.path.length == 0) { return readTarget(ref) }
         var p = resolveRefRuby(ref)
+        // A MISS answers the hash's default, exactly as Hash#[] does - so
+        // `nest[k] << v' on a Hash.new { |h, k| h[k] = [] } appends to the array the
+        // default block just installed, where this read used to answer nil.
         if (isDict(p.obj)) {
             var di = dictFind(p.obj, p.key)
-            return di < 0 ? null : p.obj.vals[di]
+            return di < 0 ? hashDefault(p.obj, p.key) : p.obj.vals[di]
         }
         return rindex(p.obj, p.key)
     }
@@ -7178,6 +7403,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (n == "Symbol") { return isSym(v) }
             if (n == "Array") { return Array.isArray(v) }
             if (n == "Hash") { return isDict(v) }
+            if (n == "Enumerator") { return isEnum(v) }
             if (n == "Range") { return isRange(v) }
             if (n == "Regexp") { return isRegex(v) }
             if (n == "MatchData") { return isMatchD(v) }
@@ -7207,7 +7433,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var builtinClassNames = ["Integer", "Float", "Rational", "Complex", "Numeric", "String",
                              "Symbol", "Array", "Hash", "Range", "Regexp", "MatchData", "Proc", "NilClass",
                              "TrueClass", "FalseClass", "Object", "BasicObject", "Kernel",
-                             "Comparable", "Enumerable", "Math"]
+                             "Comparable", "Enumerable", "Enumerator", "Math"]
     for (var bci = 0; bci < builtinClassNames.length; bci++) {
         hostGlobals[builtinClassNames[bci]] = mkBuiltinClass(builtinClassNames[bci], null)
     }

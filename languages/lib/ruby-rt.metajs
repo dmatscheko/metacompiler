@@ -2140,6 +2140,26 @@ function rbDictSet(d, k, v) {
 }
 
 function rbNewDict() { return js_dict_new() }
+// Hash.new's three forms. The default value / default block is kept in a hidden
+// __-prefixed slot, which keysOf skips, so it reaches neither keys nor inspect
+// nor ==. rbHashDefault is what every miss goes through.
+function rbNewHash(argv) {
+    var d = js_dict_new()
+    var blk = rbBlockOf(argv)
+    if (blk !== null) { d["__hdefp"] = blk; return d }
+    if (rbNPos(argv) > 0) { d["__hdef"] = argv[0] }
+    return d
+}
+// The value a Hash answers for a key it does not hold: the default block called
+// with (hash, key) - which may WRITE the hash, the memoisation idiom - else the
+// default value, else nil.
+function rbHashDefault(o, k) {
+    var p = o["__hdefp"]
+    if (rbIsFn(p)) { return rbCall2(p, o, k) }
+    var d = o["__hdef"]
+    if (d === undefined) { return null }
+    return d
+}
 // rbCopyArr is SHARED as rtCopyArr - lib/runtime.metajs (seven copies, six
 // languages, ZERO differences).
 
@@ -2333,6 +2353,7 @@ function rbClassName(v) {
     if (rbIsSym(v)) { return "Symbol" }
     if (rbIsArr(v)) { return "Array" }
     if (rbIsDict(v)) { return "Hash" }
+    if (rbIsEnum(v)) { return "Enumerator" }
     return ""
 }
 
@@ -3267,6 +3288,106 @@ function rbRand(v) {
     return 0
 }
 
+// combination / permutation, as INDEX lists so one pair of helpers serves both the
+// Array methods and (through them) an Enumerator. MRI's orders: combination is
+// index-ascending, permutation is the depth-first walk that takes each unused index
+// in turn. Mirrors combIdx / permIdx of ruby-interpreter.abnf.
+function rbCombRec(n, k, start, cur, out) {
+    if (cur.length == k) { out.push(rtCopyArr(cur)); return undefined }
+    var i = start
+    while (i < n) {
+        cur.push(i)
+        rbCombRec(n, k, i + 1, cur, out)
+        cur.pop()
+        i = i + 1
+    }
+    return undefined
+}
+function rbCombIdx(n, k) {
+    var out = []
+    if (k < 0 || k > n) { return out }
+    rbCombRec(n, k, 0, [], out)
+    return out
+}
+function rbPermRec(n, k, used, cur, out) {
+    if (cur.length == k) { out.push(rtCopyArr(cur)); return undefined }
+    var i = 0
+    while (i < n) {
+        if (!used[i]) {
+            used[i] = true
+            cur.push(i)
+            rbPermRec(n, k, used, cur, out)
+            cur.pop()
+            used[i] = false
+        }
+        i = i + 1
+    }
+    return undefined
+}
+function rbPermIdx(n, k) {
+    var out = []
+    if (k < 0 || k > n) { return out }
+    var used = []
+    var i = 0
+    while (i < n) { used.push(false); i = i + 1 }
+    rbPermRec(n, k, used, [], out)
+    return out
+}
+// An EAGER Enumerator: the materialized element list, a cursor for #next, and the
+// whole Enumerable surface by delegation to Array. A lazy one needs a suspendable
+// body and ruby-to-llvm-ir.abnf lowers every block by hand (grep js_genfn: zero
+// hits), so there is no coroutine to park in. Mirrors mkEnum / enumMethod of
+// ruby-interpreter.abnf and rubyMkEnum / rubyEnumMethod of abnf/jsrt.go.
+function rbMkEnum(items) { return {__renum: true, items: items, pos: 0} }
+function rbIsEnum(v) {
+    if (!rbIsObj(v)) { return false }
+    return v["__renum"] === true
+}
+function rbEnumMethod(t, name, args) {
+    var items = t["items"]
+    var blk = rbBlockOf(args)
+    var nPos = rbNPos(args)
+    if (name == "to_a" || name == "entries" || name == "force") { return rtCopyArr(items) }
+    if (name == "size" || name == "length" || name == "count") {
+        if (nPos == 0 && blk === null) { return items.length }
+    }
+    if (name == "next" || name == "peek") {
+        var pos = Math.trunc(rbToF(t["pos"]))
+        if (pos >= items.length) { fail("iteration reached an end") }
+        if (name == "next") { t["pos"] = pos + 1 }
+        return items[pos]
+    }
+    if (name == "rewind") { t["pos"] = 0; return t }
+    if (name == "class") { return rbBuiltinClass("Enumerator") }
+    if (name == "inspect" || name == "to_s") { return "#<Enumerator: " + rbInspect(items) + ">" }
+    if (name == "each") {
+        if (blk === null) { return t }
+        var e = 0
+        while (e < items.length) { rbCall1(blk, items[e]); e = e + 1 }
+        return t
+    }
+    if (name == "with_index" || name == "each_with_index") {
+        var off = 0
+        if (name == "with_index" && nPos > 0) { off = Math.trunc(rbToF(rbPosAt(args, nPos, 0))) }
+        if (blk === null) {
+            var pairs = []
+            var j = 0
+            while (j < items.length) { pairs.push([items[j], j + off]); j = j + 1 }
+            return rbMkEnum(pairs)
+        }
+        var k2 = 0
+        while (k2 < items.length) { rbCall2(blk, items[k2], k2 + off); k2 = k2 + 1 }
+        return t
+    }
+    if (name == "with_object" || name == "each_with_object") {
+        var memo = rbPosAt(args, nPos, 0)
+        var w = 0
+        while (w < items.length) { rbCall2(blk, items[w], memo); w = w + 1 }
+        return memo
+    }
+    // Everything else is Enumerable, and an eager Enumerator IS its element list.
+    return rbArrayMethod(items, name, args)
+}
 // rubyArrayMethod. select and reject use RUBY truthiness, and pop/first/last
 // answer nil (not an error) on an empty array.
 function rbArrayMethod(t, name, args) {
@@ -3391,7 +3512,9 @@ function rbArrayMethod(t, name, args) {
         return uq
     }
     if (name == "to_a") { return rtCopyArr(t) }
+    // A blockless each / each_with_index is an Enumerator in MRI, not the array.
     if (name == "each") {
+        if (blk === null) { return rbMkEnum(rtCopyArr(t)) }
         var e = 0
         while (e < t.length) {
             rbCall1(blk, t[e])
@@ -3400,6 +3523,12 @@ function rbArrayMethod(t, name, args) {
         return t
     }
     if (name == "each_with_index") {
+        if (blk === null) {
+            var wpairs = []
+            var wp = 0
+            while (wp < t.length) { wpairs.push([t[wp], wp]); wp = wp + 1 }
+            return rbMkEnum(wpairs)
+        }
         var w = 0
         while (w < t.length) {
             rbCall2(blk, t[w], w)
@@ -3616,12 +3745,80 @@ function rbArrayMethod(t, name, args) {
                 gi = gi + 1
             }
         }
-        if (blk === null) { return groups }
+        if (blk === null) { return rbMkEnum(groups) }
         var gk = 0
         while (gk < groups.length) {
             rbCall1(blk, groups[gk])
             gk = gk + 1
         }
+        return t
+    }
+    // sample / shuffle. There is no random source in this project and there cannot be
+    // one the engines agree on byte-for-byte (see rbRand, which is deterministically
+    // zero), so these are the DETERMINISTIC draw: sample takes from the front and
+    // shuffle is the identity permutation. Every invariant a program can test - the
+    // length, membership, and that a shuffle is a permutation of its receiver - holds;
+    // the particular ordering does not, and MRI's would not be reproducible either.
+    if (name == "sample") {
+        if (nPos == 0) {
+            if (t.length == 0) { return null }
+            return t[0]
+        }
+        var sn = Math.trunc(rbToF(rbPosAt(args, nPos, 0)))
+        if (sn > t.length) { sn = t.length }
+        return rbArrSub(t, 0, sn)
+    }
+    if (name == "shuffle") { return rtCopyArr(t) }
+    if (name == "shuffle!") { return t }
+    // cycle(n) { } runs the block over the whole array n times; cycle { } with no
+    // count repeats FOREVER, and the way out is the block's own `break'.
+    if (name == "cycle") {
+        var cn = 0
+        if (nPos > 0) { cn = Math.trunc(rbToF(rbPosAt(args, nPos, 0))) }
+        if (blk === null) {
+            if (nPos == 0) { fail("cycle without a count needs a block") }
+            var cyc = []
+            var ci = 0
+            while (ci < cn) {
+                var cj = 0
+                while (cj < t.length) { cyc.push(t[cj]); cj = cj + 1 }
+                ci = ci + 1
+            }
+            return rbMkEnum(cyc)
+        }
+        if (nPos == 0) {
+            if (t.length == 0) { return null }
+            while (true) {
+                var cq = 0
+                while (cq < t.length) { rbCall1(blk, t[cq]); cq = cq + 1 }
+            }
+        }
+        var cy = 0
+        while (cy < cn) {
+            var ck = 0
+            while (ck < t.length) { rbCall1(blk, t[ck]); ck = ck + 1 }
+            cy = cy + 1
+        }
+        return null
+    }
+    // combination(n) / permutation(n): the subsets and the ordered arrangements, in
+    // MRI's own order. With a block they yield each one and answer SELF.
+    if (name == "combination" || name == "permutation") {
+        var pk = t.length
+        if (nPos > 0) { pk = Math.trunc(rbToF(rbPosAt(args, nPos, 0))) }
+        var picks = name == "combination" ? rbCombIdx(t.length, pk) : rbPermIdx(t.length, pk)
+        var res = []
+        var pi = 0
+        while (pi < picks.length) {
+            var row2 = []
+            var pj = 0
+            while (pj < picks[pi].length) { row2.push(t[picks[pi][pj]]); pj = pj + 1 }
+            res.push(row2)
+            pi = pi + 1
+        }
+        if (blk === null) { return rbMkEnum(res) }
+        var pm = 0
+        while (pm < res.length) { rbCall1(blk, res[pm]); pm = pm + 1 }
         return t
     }
     if (name == "take") { return rbArrSub(t, 0, Math.trunc(rbToF(rbPosAt(args, nPos, 0)))) }
@@ -4082,6 +4279,7 @@ function rbMethod(target, name, args) {
         fail("unknown String method: " + name)
     }
     if (rbIsArr(target)) { return rbArrayMethod(target, name, args) }
+    if (rbIsEnum(target)) { return rbEnumMethod(target, name, args) }
     if (rbIsObj(target)) {
         if (rbIsRange(target)) {
             if (name == "cover?" || name == "include?" || name == "member?" || name == "===") {
@@ -4116,6 +4314,23 @@ function rbMethod(target, name, args) {
                     e = e + 1
                 }
                 return target
+            }
+            // Hash#default is the value Hash.new(v) recorded; a hash built with a
+            // BLOCK answers nil here, exactly as MRI does (the block is #default_proc).
+            if (name == "default") {
+                var hdv = target["__hdef"]
+                if (hdv === undefined) { return null }
+                return hdv
+            }
+            // Hash#fetch DELIBERATELY ignores the default: MRI raises KeyError for a
+            // missing key unless a second argument or a block supplies the answer.
+            if (name == "fetch") {
+                var fi = rbDictFind(keys, rbArgAt(args, 0))
+                if (fi >= 0) { return vals[fi] }
+                if (rbNPos(args) > 1) { return rbArgAt(args, 1) }
+                var fblk = rbBlockOf(args)
+                if (fblk !== null) { return rbCall1(fblk, rbArgAt(args, 0)) }
+                fail("key not found: " + rbInspect(rbArgAt(args, 0)))
             }
             fail("unknown Hash method: " + name)
         }
@@ -4258,6 +4473,10 @@ function js_pylen(v) {
     if (typeof v == "string") { return v.length }
     if (rbIsArr(v)) { return v.length }
     if (rbIsDict(v)) { return v["keys"].length }
+    // An Enumerator's length is its element count: a bare `.size' / `.length' is
+    // lowered to js_pylen rather than to a method call (ruby-to-llvm-ir.abnf's
+    // smcall / field arms), so it never reaches rbEnumMethod.
+    if (rbIsEnum(v)) { return v["items"].length }
     fail("len() of a " + typeof v)
     return 0
 }
@@ -4465,7 +4684,7 @@ function js_rget(o, k) {
     if (rbUserObj(o)) { return rbMethod(o, "[]", [k]) }
     if (rbIsDict(o)) {
         var i = rbDictFind(o["keys"], k)
-        if (i < 0) { return null }
+        if (i < 0) { return rbHashDefault(o, k) }
         return o["vals"][i]
     }
     var idx = Math.trunc(rbToF(k))
@@ -4518,10 +4737,11 @@ function js_rnew(cls, args) {
             // first argument - a silent wrong answer, and a different one in each
             // engine.
             if (bn == "Array") { return rbArrNew(argv) }
-            // A bare Hash.new is an empty Hash. Hash.new(v) / Hash.new { } carry a
-            // DEFAULT, which nothing here models, so those forms are left on the
-            // old path rather than silently losing it.
-            if (bn == "Hash" && argv.length == 0) { return rbNewDict() }
+            // Hash.new / Hash.new(v) / Hash.new { |h, k| }. The default lives in the
+            // hidden __hdef / __hdefp slot and rbHashDefault honours it at every read;
+            // before that the two argument forms fell through to rbExc below and
+            // answered an exception object.
+            if (bn == "Hash") { return rbNewHash(argv) }
             return rbExc(cls, argv)
         }
     }

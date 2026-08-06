@@ -1093,5 +1093,76 @@ check("set-add-still-works", len(sa), 3)
 # A name Python HAS and this project does not (list.sort) is deliberately NOT
 # denied - it still aborts, so "unimplemented" cannot be silently swallowed.
 
+# ----- docs/todo.md 1.3: the rest of the dict and set method surface -----
+# clear / copy / setdefault / update on a dict and pop / clear / copy / remove /
+# discard / union / update on a set all ABORTED in every engine at f4ff228.
+ks = ["a", "b", "c"]
+vs = [1, 2, 3]
+dm = {}
+dm[ks[0]] = vs[0]
+dm[ks[1]] = vs[1]
+dmc = dm.copy()
+dmc[ks[2]] = vs[2]
+check("dict-copy-shallow", str(dm) + "|" + str(dmc), "{'a': 1, 'b': 2}|{'a': 1, 'b': 2, 'c': 3}")
+check("dict-setdefault-hit", dm.setdefault(ks[0], vs[2]), 1)
+check("dict-setdefault-new", dm.setdefault(ks[2], vs[2]), 3)
+check("dict-setdefault-none-default", str(dm.setdefault("zz")), "None")
+dmu = {}
+dmu.update({ks[0]: vs[0]})
+dmu.update([[ks[1], vs[1]]])
+dmu.update(c=vs[2])
+check("dict-update-map-pairs-kw", str(dmu), "{'a': 1, 'b': 2, 'c': 3}")
+dmu.clear()
+check("dict-clear", str(dmu) + "|" + str(len(dmu)), "{}|0")
+sm = set()
+sm.add(vs[0])
+sm.add(vs[1])
+smc = sm.copy()
+smc.add(vs[2])
+check("set-copy-shallow", str(len(sm)) + "|" + str(len(smc)), "2|3")
+# pop() takes an ARBITRARY element: only the invariants are assertable.
+smp = sm.copy()
+pv = smp.pop()
+check_true("set-pop-invariants", len(smp) == 1 and pv not in smp and pv in sm)
+check("set-discard-absent-is-quiet", str(sm.discard(vs[2])), "None")
+check("set-remove-present", str(sm.remove(vs[1])) + "|" + str(len(sm)), "None|1")
+removed = [False]
+try:
+    sm.remove(vs[2])
+except KeyError:
+    removed[0] = True
+check("set-remove-keyerror", removed[0], True)
+emptied = [False]
+try:
+    set().pop()
+except KeyError:
+    emptied[0] = True
+check("set-pop-empty-keyerror", emptied[0], True)
+smu = sm.union([vs[1]], "x")
+check("set-union-any-iterable", str(sorted([str(x) for x in smu])), "['1', '2', 'x']")
+check("set-union-does-not-mutate", len(sm), 1)
+sm.update([vs[1], vs[2]])
+check("set-update-in-place", len(sm), 3)
+# hasattr tracks the surface exactly, and denies the OTHER type's names.
+check_true("hasattr-dict-surface",
+           hasattr(dm, "clear") and hasattr(dm, "copy") and
+           hasattr(dm, "setdefault") and hasattr(dm, "update"))
+check_true("hasattr-set-surface",
+           hasattr(sm, "pop") and hasattr(sm, "clear") and hasattr(sm, "copy") and
+           hasattr(sm, "remove") and hasattr(sm, "discard") and
+           hasattr(sm, "union") and hasattr(sm, "update"))
+check_true("hasattr-cross-type-false",
+           not hasattr(sm, "keys") and not hasattr(dm, "discard"))
+check("set-keys-is-attributeerror", denied(lambda: sm.keys()), True)
+check("dict-union-is-attributeerror", denied(lambda: dm.union([1])), True)
+# The set ORDERINGS: <= and >= answered True for ANY pair of sets in the
+# interpreter half at f4ff228, because two objects fell into the host's own
+# relational operator.
+so1 = set()
+so1.add(vs[0])
+so2 = sm
+check_true("set-subset-ordering", so1 <= so2 and so2 >= so1 and so1 < so2)
+check_true("set-not-subset", not (so2 <= so1) and not (so1 > so2) and so1 <= so1)
+
 print(f"features: {checks[0]} checks, {fails[0]} failures")
 exit(fails[0])

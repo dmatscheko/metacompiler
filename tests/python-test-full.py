@@ -1766,6 +1766,217 @@ def s35():
     check("lm48", L().sort() == "mine" and hasattr(L(), "sort"))
 
 
+# ===== SECTION 36: dict and set methods =====
+# docs/todo.md 1.3, the residue of SECTION 35's round. dict.clear/copy/
+# setdefault/update and set.pop/clear/copy/remove/discard/union/update all
+# ABORTED in every engine; hasattr answered False for each, deliberately, and
+# that is what tracked them. Every value is read out of a list so the constant
+# folder cannot pre-compute a row, and every error is CAUGHT, which is the whole
+# point of raising a real Python exception instead of aborting.
+def s36():
+    src = [["a", 1], ["b", 2], ["c", 3]]
+
+    def mkd():
+        d = {}
+        for kv in src:
+            d[kv[0]] = kv[1]
+        return d
+
+    # --- dict.copy is SHALLOW -------------------------------------------
+    d = mkd()
+    c = d.copy()
+    c["d"] = 4
+    check("dm01", d == mkd() and len(c) == 4 and c is not d)
+    inner = [1, 2]
+    nd = {"k": inner}
+    nc = nd.copy()
+    nc["k"].append(3)
+    check("dm02", nd["k"] is nc["k"] and len(inner) == 3)
+    # --- dict.clear -----------------------------------------------------
+    e = mkd()
+    check("dm03", e.clear() is None and e == {} and len(e) == 0)
+    check("dm04", list(e.keys()) == [] and ("a" in e) == False)
+    # --- dict.setdefault INSERTS and returns -----------------------------
+    sd = mkd()
+    check("dm05", sd.setdefault("a", 99) == 1 and len(sd) == 3)
+    check("dm06", sd.setdefault("z", 9) == 9 and sd["z"] == 9 and len(sd) == 4)
+    # The default DEFAULTS TO None, and None is inserted too.
+    check("dm07", sd.setdefault("n") is None and "n" in sd and sd["n"] is None)
+    # --- dict.update: mapping, pairs, keywords, and all of them ----------
+    u = mkd()
+    check("dm08", u.update({"a": 9, "d": 4}) is None)
+    check("dm09", u["a"] == 9 and u["d"] == 4 and len(u) == 4)
+    u2 = mkd()
+    u2.update([["a", 9], ["d", 4]])
+    check("dm10", u2["a"] == 9 and u2["d"] == 4 and len(u2) == 4)
+    # A two-CHARACTER string is a valid pair, as it is in CPython.
+    u3 = {}
+    u3.update(["ab"])
+    check("dm11", u3 == {"a": "b"})
+    # KEYWORD arguments, which only a WRITTEN call can carry.
+    u4 = mkd()
+    u4.update(a=9, d=4)
+    check("dm12", u4["a"] == 9 and u4["d"] == 4 and len(u4) == 4)
+    u5 = mkd()
+    u5.update([["d", 4]], b=8)
+    check("dm13", u5["b"] == 8 and u5["d"] == 4 and len(u5) == 4)
+    u6 = mkd()
+    check("dm14", u6.update() is None and u6 == mkd())
+    # Insertion ORDER: an updated key keeps its place, a new one goes last.
+    u7 = mkd()
+    u7.update([["a", 9], ["d", 4]])
+    check("dm15", list(u7.keys()) == ["a", "b", "c", "d"])
+
+    # --- set.copy is SHALLOW, set.clear ---------------------------------
+    els = [1, 2, 3]
+
+    def mks():
+        s = set()
+        for x in els:
+            s.add(x)
+        return s
+
+    s = mks()
+    sc = s.copy()
+    sc.add(9)
+    check("dm16", len(s) == 3 and len(sc) == 4 and (9 in s) == False)
+    sl = mks()
+    check("dm17", sl.clear() is None and len(sl) == 0 and (1 in sl) == False)
+    # --- set.pop removes an ARBITRARY element ---------------------------
+    # CPython promises NO order, so only the invariants are assertable:
+    # the size drops by one, the value was a member and no longer is.
+    sp = mks()
+    v = sp.pop()
+    check("dm18", len(sp) == 2 and v in s and (v in sp) == False)
+    # --- remove RAISES on a missing member and discard does NOT ----------
+    sr = mks()
+    check("dm19", sr.remove(2) is None and len(sr) == 2 and (2 in sr) == False)
+    sd2 = mks()
+    check("dm20", sd2.discard(2) is None and len(sd2) == 2)
+    check("dm21", sd2.discard(99) is None and len(sd2) == 2)
+    # --- set.union takes ANY iterable, several of them, and does not mutate
+    su = mks()
+    un = su.union([4], "x", {5})
+    check("dm22", len(su) == 3 and len(un) == 6)
+    check("dm23", 4 in un and "x" in un and 5 in un and 1 in un)
+    check("dm24", len(mks().union()) == 3)
+    # --- set.update is the same walk IN PLACE, returning None ------------
+    sup = mks()
+    check("dm25", sup.update([4], "x") is None and len(sup) == 5)
+    check("dm26", 4 in sup and "x" in sup)
+
+    # --- every error is a CATCHABLE exception with CPython's own text -----
+    log = []
+
+    def note(tag, f):
+        try:
+            f()
+            log.append(tag + "-none")
+        except Exception as ex:
+            log.append(tag + type(ex).__name__ + ":" + str(ex))
+
+    note("A", lambda: set().pop())
+    note("B", lambda: mks().remove(99))
+    note("C", lambda: mkd().pop("zz"))
+    note("D", lambda: mkd().update([[1]]))
+    note("E", lambda: mkd().update([1]))
+    note("F", lambda: mkd().update(1))
+    note("G", lambda: mkd().update({}, {}))
+    note("H", lambda: mkd().setdefault())
+    note("I", lambda: mks().union(1))
+    check("dm27", log[0] == "AKeyError:'pop from an empty set'")
+    check("dm28", log[1] == "BKeyError:99")
+    check("dm29", log[2] == "CKeyError:'zz'")
+    check("dm30", log[3] == "DValueError:dictionary update sequence element #0 has length 1; 2 is required")
+    check("dm31", log[4] == "ETypeError:object is not iterable")
+    check("dm32", log[5] == "FTypeError:'int' object is not iterable")
+    check("dm33", log[6] == "GTypeError:update expected at most 1 argument, got 2")
+    check("dm34", log[7] == "HTypeError:setdefault expected at least 1 argument, got 0")
+    check("dm35", log[8] == "ITypeError:'int' object is not iterable")
+
+    # --- a name the OTHER type owns raises AttributeError -----------------
+    note("J", lambda: mks().keys())
+    note("K", lambda: mks().items())
+    note("L", lambda: mks().setdefault(1))
+    note("M", lambda: mkd().discard("a"))
+    note("N", lambda: mkd().union([1]))
+    check("dm36", log[9] == "JAttributeError:'set' object has no attribute 'keys'")
+    check("dm37", log[10] == "KAttributeError:'set' object has no attribute 'items'")
+    check("dm38", log[11] == "LAttributeError:'set' object has no attribute 'setdefault'")
+    check("dm39", log[12] == "MAttributeError:'dict' object has no attribute 'discard'")
+    check("dm40", log[13] == "NAttributeError:'dict' object has no attribute 'union'")
+
+    # --- hasattr answers exactly what the dispatcher can run --------------
+    dnames = ["keys", "values", "items", "get", "pop", "clear", "copy",
+              "setdefault", "update"]
+    snames = ["add", "pop", "clear", "copy", "remove", "discard", "union",
+              "update"]
+    dseen = 0
+    for nm in dnames:
+        if hasattr(mkd(), nm):
+            dseen += 1
+    sseen = 0
+    for nm in snames:
+        if hasattr(mks(), nm):
+            sseen += 1
+    check("dm41", dseen == 9 and sseen == 8)
+    # And False for the OTHER type's names, and for what this project lacks.
+    check("dm42", not hasattr(mks(), "keys") and not hasattr(mkd(), "discard"))
+    check("dm43", not hasattr(mkd(), "popitem") and not hasattr(mks(), "issubset"))
+    # getattr hands back a BOUND method that runs. It cannot carry KEYWORD
+    # arguments, so update()'s keyword form is only available on a written call.
+    gd = mkd()
+    check("dm44", getattr(gd, "setdefault")("z", 9) == 9 and gd["z"] == 9)
+    gs = mks()
+    check("dm45", getattr(gs, "discard")(1) is None and len(gs) == 2)
+    check("dm46", len(getattr(mks(), "copy")()) == 3)
+    # items() is no longer lowered by the emitter, so the bound form works too -
+    # it used to abort in both compiled halves. keys()/values()/items() answer
+    # LISTS here where CPython answers dict_keys/dict_values/dict_items views of
+    # TUPLES, which is the tuple gap of docs/todo.md 3.1 and not this item -
+    # these two rows and dm43 are the only ones in the section that CPython
+    # would fail.
+    check("dm47", getattr(mkd(), "items")() == [["a", 1], ["b", 2], ["c", 3]])
+    check("dm48", getattr(mkd(), "keys")() == ["a", "b", "c"])
+
+    # --- the shapes NEXT DOOR --------------------------------------------
+    # Key ALIASING survives copy/setdefault/update: a bool, an int and a float
+    # of the same value are ONE key (docs/working-on-this-project.md 7.6).
+    ka = {True: "t"}
+    check("dm49", ka.get(1) == "t" and ka.get(1.0) == "t")
+    kb = ka.copy()
+    kb[1.0] = "f"
+    check("dm50", len(kb) == 1 and kb.get(True) == "f")
+    kc = {1: "a"}
+    kc.setdefault(1.0, "b")
+    check("dm51", len(kc) == 1 and kc[1] == "a")
+    kd = {}
+    kd.update([[1.0, "a"], [1, "b"]])
+    check("dm52", len(kd) == 1)
+    ks = set()
+    ks.add(1)
+    ks.discard(1.0)
+    check("dm53", len(ks) == 0)
+    # Iteration and membership after the new mutators have run.
+    it = mkd()
+    it.pop("a")
+    it.setdefault("d", 4)
+    order = ""
+    for k in it:
+        order += k
+    check("dm54", order == "bcd" and len(it) == 3 and ("a" in it) == False)
+    check("dm55", [kv[1] for kv in it.items()] == [2, 3, 4])
+    # The set OPERATORS are untouched - and <= / >= were WRONG in the
+    # interpreter half at f4ff228 (True for any pair of sets, because the host
+    # relational operator rendered both objects as the same string).
+    o1 = mks()
+    o2 = set()
+    o2.add(els[0])
+    check("dm56", o2 <= o1 and o1 >= o2 and o2 < o1 and (o1 < o1) == False)
+    check("dm57", (o1 <= o2) == False and (o1 > o1) == False and o1 <= o1)
+    check("dm58", len(o1 | o2) == 3 and len(o1 & o2) == 1 and len(o1 - o2) == 2)
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -1802,5 +2013,6 @@ def main():
     s33() # SECTION-CALL 33
     s34() # SECTION-CALL 34
     s35() # SECTION-CALL 35
+    s36() # SECTION-CALL 36
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

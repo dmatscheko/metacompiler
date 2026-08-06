@@ -2119,8 +2119,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
 
     var hidCount = 0
     // The argument array of the function being emitted (js_rblock reads the block out
-    // of it for block_given? and for a &blk parameter).
+    // of it for a &blk parameter).
     var curArgsV = null
+    // The scope slot every method publishes its implicit block into; see curBlockV.
+    var blkSlot = "$blk"
     // ----- non-local control flow OUT of a block -----
     // A block is its own IR function, called from the Go runtime (Array#each, ...), so
     // a `break' inside it cannot branch to anything in the frame that wrote the block.
@@ -2909,11 +2911,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // yield ARGS: call the block the running method was given. The block is the
     // trailing argument of the call (see emitArgs / emitParams), which js_rblock
-    // reads out of the method's own argument array.
+    // reads out of the method's own argument array - but NOT out of curArgsV, which
+    // is the argument array of the IR function CURRENTLY being emitted. Inside a
+    // begin/rescue (or a literal block, or a `x rescue y') that is a ctl closure with
+    // an argument array of its own, and js_rblock answered null there: `yield' inside
+    // a begin/rescue aborted the compiler half while the interpreter answered. So the
+    // block is published ONCE per method, into that method's scope under `$blk'
+    // (exactly what the interpreter's invokeRuby does), and every yield site reads it
+    // through the scope CHAIN - which is what makes it survive a nested closure.
+    function curBlockV(b) {
+        return callExt(b, "js_scope_get", [curScopeV, emitStr(b, blkSlot)])
+    }
     function makeYield(items, pos) {
         var args = unwrapArgs(items)
         return function(b) {
-            var blkV = callExt(b, "js_rblock", [curArgsV])
+            var blkV = curBlockV(b)
             var ea = emitArgs(b, args)
             b = ea.b
             return {b: b, v: callExt(b, "js_call", [blkV, hUndef, ea.v])}
@@ -4064,7 +4076,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // block_given?: did the running method receive a block?
         if (name == "block_given?" || name == "iterator?") {
             return function(b) {
-                var blkV = callExt(b, "js_rblock", [curArgsV])
+                var blkV = curBlockV(b)
                 return {b: b, v: callExt(b, "js_rne", [blkV, hNull])}
             }
         }
@@ -4299,7 +4311,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         rd.b.NewBr(contB)
         return contB
     }
-    function emitFunc(params, bodyStmt, isMethod, isCtl, isBlock) {
+    // declBlk marks a function that is a Ruby METHOD BODY (a def, or a method in a
+    // class body): only those receive an implicit block, and only they publish it into
+    // their own scope as `$blk'. A ctl closure (begin/rescue/ensure, `x rescue y', the
+    // block-break wrapper), a literal block and a lambda deliberately do NOT - so a
+    // `yield' inside any of them chains out to the enclosing method, which is Ruby.
+    function emitFunc(params, bodyStmt, isMethod, isCtl, isBlock, declBlk) {
         funcCount++
         var idx = funcCount
         var savedTag = curFTag
@@ -4325,6 +4342,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isMethod) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "self"), callExt(b, "js_arg", [f.Params[1], handle(0)])])
             off = 1
+        }
+        if (declBlk === true) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, blkSlot),
+                                         callExt(b, "js_rblock", [f.Params[1]])])
         }
         b = emitParams(b, f.Params[1], params, off, isBlock)
         // A block body starts its own basic block, so `redo' has somewhere to branch
@@ -5056,6 +5077,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
         }
         return function(b) {
+            // A BARE `rand` is Kernel#rand called with no arguments, not a name: without
+            // this arm the scope lookup below failed with "variable not defined: rand"
+            // while `rand()` worked, and the interpreter answered the host function
+            // itself. Guarded exactly like the `rand(...)' call arm above, so a program
+            // that defines a rand of its own still wins.
+            if (name == "rand" && rubyAllMethods["$rand"] !== true && !selfMethod(curClsName, "rand")) {
+                return {b: b, v: callExt(b, "js_rrand", [callExt(b, "js_arr_new", [])])}
+            }
             // Inside a method body a bare name that is a method of the SAME class (or
             // of one above it) is a call on the implicit self - `def intro; speak; end'.
             if (selfMethod(curClsName, name) || classHasSMethod(curClsName, name)) {
@@ -5128,7 +5157,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var savedMP = curMethParams
             curMethName = fn.name
             curMethParams = paramNames(fn.params)
-            var idx = emitFunc(fn.params, fn.body, false)
+            var idx = emitFunc(fn.params, fn.body, false, false, false, true)
             curMethName = savedMN
             curMethParams = savedMP
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, fn.name),
@@ -5343,7 +5372,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (rk != "" && prefix == "") { key = "$q$" + m.name }
             curMethName = m.name
             curMethParams = paramNames(m.params)
-            var idx = emitFunc(m.params, m.body, true)
+            var idx = emitFunc(m.params, m.body, true, false, false, true)
             var fnV = callExt(b, "js_closure", [handle(idx), curScopeV])
             callExt(b, "js_set", [dstV, emitStr(b, key), fnV])
             if (rk != "" && prefix == "") {
@@ -5684,6 +5713,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var rubyBuiltinClasses = ["Integer", "Float", "Rational", "Complex", "Numeric",
         "String", "Symbol", "Array", "Hash", "Range", "Proc", "NilClass", "TrueClass",
         "FalseClass", "Object", "BasicObject", "Kernel", "Comparable", "Enumerable",
+        "Enumerator",
         "Exception", "StandardError", "RuntimeError", "ArgumentError", "TypeError",
         "NameError", "NoMethodError", "IndexError", "KeyError", "RangeError",
         "ZeroDivisionError", "StopIteration", "FrozenError", "NotImplementedError"]
@@ -5700,6 +5730,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
+        // The root binding of the implicit-block slot, so `block_given?' at the top
+        // level resolves to false instead of failing the scope lookup (see curBlockV).
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, blkSlot), hNull])
         // The builtin class constants, so `case v when Integer`, `v.is_a?(String)`
         // and `rescue ArgumentError` name a real class object (js_rclass hands out
         // one object per name, so the identity comparisons hold).

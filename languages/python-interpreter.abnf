@@ -50,11 +50,13 @@ Known deviations, all deliberate:
     loop.
   - The BUILT-IN method surface is a subset, and hasattr() answers exactly what
     the dispatcher can run: list has all eleven of its methods, str has the
-    library in abnf/pystrmethod.go, dict has keys/values/items/get/pop, and set
-    has add - so hasattr of an int and bit_length, or of a set and discard, is
-    False here and True in CPython. A bound method from getattr() does NOT carry
-    keyword arguments: getattr(xs, sort)(reverse=True) is not
-    xs.sort(reverse=True); the written call is.
+    library in abnf/pystrmethod.go, dict has keys/values/items/get/pop/clear/
+    copy/setdefault/update, and set has add/pop/clear/copy/remove/discard/union/
+    update - so hasattr of an int and bit_length is False here and True in CPython, and
+    a set's intersection/difference/issubset are still only the OPERATORS & - <=.
+    A bound method from getattr() does NOT carry keyword arguments:
+    getattr(xs, sort)(reverse=True) is not xs.sort(reverse=True), and
+    getattr(d, update)(a=1) is not d.update(a=1); the written calls are.
 
 There is no main() requirement: the file runs top to bottom, and a main() is called
 afterwards when one is defined. Self checking programs end with exit(fails[0]) or
@@ -1611,11 +1613,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof o == "string") { return pySIsStrMethod(name) }
         if (Array.isArray(o)) { return pyIsListMethod(name) }
         // A set is a dict whose keys are its members, so it is asked FIRST.
-        if (isSet(o)) { return name == "add" }
-        if (isDict(o)) {
-            if (name == "keys" || name == "values" || name == "items") { return true }
-            if (name == "get" || name == "pop") { return true }
-        }
+        if (isSet(o)) { return pyIsSetMethod(name) }
+        if (isDict(o)) { return pyIsDictMethod(name) }
         return false
     }
     // What getattr() hands back for one of those names: CPython's `<built-in
@@ -3365,44 +3364,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             fail("unknown list method: " + name)
         }
         if (isDict(target)) {
-            // set.add(x) and dict.pop(k[, default]) - docs/todo.md 1.4, whose
-            // third bullet called them an interpreter-only gap; a probe at
-            // 4731755 found BOTH compiled halves missing them too. The twins are
-            // the same two arms of pyMethodCall (abnf/jsrt.go) and of
-            // pyDMethodCall (languages/lib/python-rt.metajs). A set is a dict
-            // whose keys are its members here, so both arms live in this branch.
-            if (isSet(target) && name == "add") {
-                setAdd(target, args[0]) // Already a member: no-op, returns None.
-                return undefined
+            // THE WHOLE DICT AND SET METHOD SURFACE - docs/todo.md 1.3, the
+            // residue of 51436f9 (which did the list surface). A set is a dict
+            // whose keys ARE its members here, so both live in this branch and
+            // the SET is asked first. The twins are pySetMethod/pyDictMethod in
+            // abnf/jsrt.go and in languages/lib/python-rt.metajs.
+            //
+            // A name the OTHER type owns raises AttributeError, which is what
+            // CPython does - and the two "only" lists are narrower than the two
+            // method sets, because pop/clear/copy/update are on BOTH types.
+            // Asking one type for the other's name used to answer: `set().keys()`
+            // was the member list in this half and aborted with "unknown method
+            // 'keys'" in both compiled halves - a live halves divergence, found
+            // by the 1.3 sweep and fixed here.
+            if (isSet(target)) {
+                if (pyIsSetMethod(name)) { return pySetMethod(target, name, args) }
+                if (pyIsDictOnly(name)) { pyAttrErr(target, name) }
+                if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
+                fail("unknown dict method: " + name)
             }
-            if (!isSet(target) && name == "pop") {
-                var pi = dictFind(target, args[0])
-                if (pi >= 0) {
-                    var pv = target.vals[pi]
-                    listRemoveAt(target.keys, pi)
-                    listRemoveAt(target.vals, pi)
-                    target.__idx = null
-                    return pv
-                }
-                if (args.length > 1) { return args[1] }
-                pyRaise(pyMakeExc("KeyError", [prepr(args[0])]))
-            }
-            if (name == "keys") return target.keys.slice(0)
-            if (name == "values") return target.vals.slice(0)
-            // .items(): a list of [key, value] pairs in insertion order (each pair a
-            // 2 element list, since the subset has no tuples). pair[0]/pair[1] read them.
-            if (name == "items") {
-                var pairs = []
-                for (var ii = 0; ii < target.keys.length; ii++) {
-                    pairs.push([target.keys[ii], target.vals[ii]])
-                }
-                return pairs
-            }
-            if (name == "get") {
-                var i = dictFind(target, args[0])
-                if (i >= 0) return target.vals[i]
-                return args.length > 1 ? args[1] : undefined
-            }
+            if (pyIsDictMethod(name)) { return pyDictMethod(target, name, args, kw) }
+            if (pyIsSetOnly(name)) { pyAttrErr(target, name) }
+            if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
             fail("unknown dict method: " + name)
         }
         if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
@@ -3581,6 +3564,220 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return kw.vals[i]
     }
 
+    // ---------------------------------------------------------- dict / set ---
+    //
+    // docs/todo.md 1.3, the residue of 51436f9. The NAME SETS first, so that
+    // hasattr()/getattr() ask exactly what the dispatcher answers. Keep in step
+    // with pyIsDictMethod/pyIsSetMethod in abnf/jsrt.go and in
+    // languages/lib/python-rt.metajs.
+    //
+    // NOT the whole of CPython's: dict.popitem/fromkeys and set.intersection/
+    // difference/symmetric_difference/isdisjoint/issubset/issuperset and their
+    // *_update forms are absent, hasattr() therefore says False for them, and a
+    // written call still ABORTS rather than raising - the 51436f9 rule, because
+    // a hard stop says "this project does not have it" where an AttributeError
+    // would say "Python does not have it". The set ALGEBRA is spelled with the
+    // operators & - ^ <= >= instead, and those are complete.
+    function pyIsDictMethod(name) {
+        if (name == "keys" || name == "values" || name == "items") { return true }
+        if (name == "get" || name == "pop" || name == "clear") { return true }
+        if (name == "copy" || name == "setdefault" || name == "update") { return true }
+        return false
+    }
+    function pyIsSetMethod(name) {
+        if (name == "add" || name == "pop" || name == "clear") { return true }
+        if (name == "copy" || name == "remove" || name == "discard") { return true }
+        if (name == "union" || name == "update") { return true }
+        return false
+    }
+    // The names one of the two types owns and the other does NOT, which is
+    // exactly what CPython raises AttributeError for. They are narrower than the
+    // sets above: pop, clear, copy and update are on BOTH a dict and a set.
+    function pyIsDictOnly(name) {
+        if (name == "keys" || name == "values" || name == "items") { return true }
+        if (name == "get" || name == "setdefault") { return true }
+        return false
+    }
+    function pyIsSetOnly(name) {
+        if (name == "add" || name == "remove") { return true }
+        if (name == "discard" || name == "union") { return true }
+        return false
+    }
+    // Every error below is a CATCHABLE Python exception with CPython 3.14's
+    // exact text, not fail(), for the same reason the list surface is:
+    // `try: s.remove(9) / except KeyError` has to behave the same in all three
+    // engines, and that is what makes it assertable in one ratchet file.
+    function pyDictMethod(d, name, args, kw) {
+        if (name == "keys") { return d.keys.slice(0) }
+        if (name == "values") { return d.vals.slice(0) }
+        // .items(): a list of [key, value] pairs in insertion order (each pair a
+        // 2 element list, since the subset has no tuples). pair[0]/pair[1] read
+        // them. CPython answers a dict_items VIEW of TUPLES; the list is the
+        // tuple gap of docs/todo.md 3.1, not this item.
+        if (name == "items") {
+            var pairs = []
+            for (var ii = 0; ii < d.keys.length; ii++) {
+                pairs.push([d.keys[ii], d.vals[ii]])
+            }
+            return pairs
+        }
+        if (name == "get") {
+            var gi = dictFind(d, pyArgAt(args, 0))
+            if (gi >= 0) { return d.vals[gi] }
+            return args.length > 1 ? args[1] : undefined
+        }
+        if (name == "pop") {
+            var pi = dictFind(d, pyArgAt(args, 0))
+            if (pi >= 0) {
+                var pv = anytype
+                pv = d.vals[pi]
+                listRemoveAt(d.keys, pi)
+                listRemoveAt(d.vals, pi)
+                d.__idx = null
+                return pv
+            }
+            if (args.length > 1) { return args[1] }
+            pyRaise(pyMakeExc("KeyError", [prepr(pyArgAt(args, 0))]))
+        }
+        if (name == "clear") { pyDictClear(d); return undefined }
+        // SHALLOW, like CPython's: the values are shared, only the two spine
+        // arrays are new. d.copy() is not d, and d.copy() == d.
+        if (name == "copy") {
+            var c = newDict()
+            for (var ci = 0; ci < d.keys.length; ci++) { dictSet(c, d.keys[ci], d.vals[ci]) }
+            return c
+        }
+        // setdefault(k[, default]) INSERTS and returns; the default defaults to
+        // None, and it is inserted too - d.setdefault("b") leaves {"b": None}.
+        if (name == "setdefault") {
+            if (args.length < 1) {
+                pyListErr("TypeError", "setdefault expected at least 1 argument, got 0")
+            }
+            var si = dictFind(d, args[0])
+            if (si >= 0) { return d.vals[si] }
+            var sv = anytype
+            sv = args.length > 1 ? args[1] : undefined
+            dictSet(d, args[0], sv)
+            return sv
+        }
+        // update([mapping | iterable of pairs], **kwargs). All three forms, and
+        // the KEYWORD one works only on a WRITTEN call: a bound builtin from
+        // getattr() cannot carry keyword arguments (a signature-less builtin
+        // receives its kw dict as a trailing positional and the wrapper cannot
+        // tell that from a real argument - docs/todo.md 2.13), so
+        // getattr(d, "update")(a=1) is not d.update(a=1); the written call is.
+        if (name == "update") {
+            if (args.length > 1) {
+                pyListErr("TypeError", "update expected at most 1 argument, got " + args.length)
+            }
+            if (args.length == 1) { pyDictUpdateFrom(d, args[0]) }
+            if (kw !== null && kw !== undefined) {
+                for (var ki = 0; ki < kw.keys.length; ki++) { dictSet(d, kw.keys[ki], kw.vals[ki]) }
+            }
+            return undefined
+        }
+        fail("unknown dict method: " + name)
+        return undefined
+    }
+    // update()'s positional argument: a MAPPING copies key by key, anything else
+    // is read as an iterable of 2-element pairs. CPython's two error texts differ
+    // and are reproduced: the argument itself names its type, an ELEMENT does not.
+    function pyDictUpdateFrom(d, src) {
+        if (isDict(src) && !isSet(src)) {
+            for (var mi = 0; mi < src.keys.length; mi++) { dictSet(d, src.keys[mi], src.vals[mi]) }
+            return
+        }
+        var items = pyIterOrTypeErr(src)
+        for (var i = 0; i < items.length; i++) {
+            var pair = pyPairOrErr(items[i], i)
+            dictSet(d, pair[0], pair[1])
+        }
+    }
+    function pyPairOrErr(el, i) {
+        var pel = []
+        if (Array.isArray(el)) { pel = el.slice(0) }
+        else if (isGen(el) || isPyIt(el) || isDict(el) || typeof el == "string") { pel = iterToList(el) }
+        else { pyListErr("TypeError", "object is not iterable") }
+        if (pel.length != 2) {
+            pyListErr("ValueError", "dictionary update sequence element #" + i +
+                " has length " + pel.length + "; 2 is required")
+        }
+        return pel
+    }
+    function pyDictClear(d) {
+        listTruncate(d.keys, 0)
+        listTruncate(d.vals, 0)
+        d.__idx = null
+    }
+    // A set here is a dict whose keys are its members, so every arm below moves
+    // d.keys and d.vals together.
+    function pySetMethod(s, name, args) {
+        if (name == "add") {
+            setAdd(s, pyArgAt(args, 0)) // Already a member: no-op, returns None.
+            return undefined
+        }
+        if (name == "clear") { pyDictClear(s); return undefined }
+        if (name == "copy") { return pySetOf(s.keys) } // SHALLOW.
+        // pop() removes and returns an ARBITRARY element - CPython promises no
+        // order at all. This project's sets keep insertion order (it is what
+        // makes a set render deterministically, which the byte-identical
+        // goja/frozen invariant needs), so the first element is the one taken.
+        // Assert on membership and size, never on which element.
+        if (name == "pop") {
+            if (s.keys.length == 0) {
+                pyRaise(pyMakeExc("KeyError", [prepr("pop from an empty set")]))
+            }
+            var pv = anytype
+            pv = s.keys[0]
+            listRemoveAt(s.keys, 0)
+            listRemoveAt(s.vals, 0)
+            s.__idx = null
+            return pv
+        }
+        // remove() raises KeyError when the member is absent and discard() does
+        // not. That difference is the whole reason both exist.
+        if (name == "remove" || name == "discard") {
+            var ri = dictFind(s, pyArgAt(args, 0))
+            if (ri >= 0) {
+                listRemoveAt(s.keys, ri)
+                listRemoveAt(s.vals, ri)
+                s.__idx = null
+                return undefined
+            }
+            if (name == "remove") {
+                pyRaise(pyMakeExc("KeyError", [prepr(pyArgAt(args, 0))]))
+            }
+            return undefined
+        }
+        // union(*others) takes ANY iterable, any number of them, and does not
+        // mutate the receiver: s | t insists both sides be sets, s.union(t) does
+        // not, so `{1}.union([2], "a")` is a set of three. update() is the same
+        // walk IN PLACE, returning None - so the two share one loop.
+        if (name == "union") {
+            var out = pySetOf(s.keys)
+            pySetAddAll(out, args)
+            return out
+        }
+        if (name == "update") {
+            pySetAddAll(s, args)
+            return undefined
+        }
+        fail("unknown dict method: " + name)
+        return undefined
+    }
+    function pySetOf(els) {
+        var out = newSet()
+        for (var i = 0; i < els.length; i++) { setAdd(out, els[i]) }
+        return out
+    }
+    // Every member of every argument, each read as ANY iterable.
+    function pySetAddAll(s, args) {
+        for (var ui = 0; ui < args.length; ui++) {
+            var els = pyIterOrTypeErr(args[ui])
+            for (var ei = 0; ei < els.length; ei++) { setAdd(s, els[ei]) }
+        }
+    }
+
     // docs/todo.md 2.4 and 5.2. The member-call names that the COMPILED halves
     // reach through rt.memberCall - the table nine languages share - and that
     // Python's receiver type does not have: `xs.size()` answered 2 and
@@ -3686,6 +3883,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (i = 0; i < r.keys.length; i++) { if (dictFind(l, r.keys[i]) < 0) { setAdd(out, r.keys[i]) } }
         }
         return out
+    }
+    // s <= t is "every member of s is a member of t"; s < t adds "and t is
+    // bigger". > and >= are the same test with the operands swapped.
+    function setOrder(op, l, r) {
+        var sub = l
+        var sup = r
+        if (op == ">" || op == ">=") { sub = r; sup = l }
+        for (var i = 0; i < sub.keys.length; i++) {
+            if (dictFind(sup, sub.keys[i]) < 0) { return false }
+        }
+        if (op == "<" || op == ">") { return sub.keys.length < sup.keys.length }
+        return true
     }
     // The operator-overloading dunder for each operator, so a user class joins in.
     var pyDunder = {}
@@ -4579,6 +4788,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "!=") return !pyEq(l, r)
         if (op == "is") return l === r
         if (op == "is not") return l !== r
+        // Two sets compare as SUBSET / SUPERSET, not by the host's relational
+        // operator - which on two objects renders both as "[object Object]" and
+        // answers True for <= and >= whatever the members are. Found by the
+        // docs/todo.md 1.3 probe as a live halves divergence PRE-EXISTING at
+        // f4ff228: `{1,2} <= {2,3}` was True here and False in both compiled
+        // halves, which is CPython's answer. The compiled twin is the
+        // "<=", "<", ">=", ">" arm of pySetBin in abnf/jsrt.go; the same arm in
+        // layer 2 is pySetBin in languages/lib/python-rt.metajs.
+        if (isSet(l) && isSet(r)) {
+            if (op == "<" || op == ">" || op == "<=" || op == ">=") {
+                return setOrder(op, l, r)
+            }
+        }
         if (op == "<")  return l < r
         if (op == ">")  return l > r
         if (op == "<=") return l <= r

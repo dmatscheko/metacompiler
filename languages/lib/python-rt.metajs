@@ -5055,29 +5055,29 @@ function pyDMethodCall(target, name, args, kw) {
             fail("'" + pyToStr(icls["__name"]) + "' object has no method '" + name + "'")
         }
     }
-    // set.add(x) and dict.pop(k[, default]) - docs/todo.md 1.4, whose third
-    // bullet called them an interpreter-only gap; a probe at 4731755 answered
-    // "unknown method 'add'" and "unknown dict method 'pop'" HERE too, so all
-    // three engines were missing them. Go: the same two arms of pyMethodCall in
-    // abnf/jsrt.go.
+    // THE WHOLE DICT AND SET METHOD SURFACE - docs/todo.md 1.3, the residue of
+    // 51436f9 (which did the list surface). Only set.add and dict.pop were here,
+    // and keys/values/get reached pyMemberCall's shared dict arm (pyFDictMethod);
+    // clear/copy/setdefault/update and pop/clear/copy/remove/discard/union all
+    // aborted in every engine. Go: pySetMethod/pyDictMethod in abnf/jsrt.go; the
+    // interpreter: the same two in languages/python-interpreter.abnf.
+    //
+    // A name the OTHER type owns raises AttributeError, which is what CPython
+    // does - and the two "only" lists are narrower than the two method sets,
+    // because pop/clear/copy/update are on BOTH types.
     var pdEls = pySetElemsOf(target)
     if (pdEls !== null && pdEls !== undefined) {
-        if (name == "add") {
-            pySetAdd(pdEls, pyFArgAt(args, 0)) // Already a member: no-op, returns None.
-            return undefined
+        if (pyIsSetMethod(name)) { return pySetMethod(pdEls, name, args) }
+        if (pyIsDictOnly(name)) {
+            throw pyExcInstance("AttributeError",
+                                "'" + pyTypeName(target) + "' object has no attribute '" + name + "'")
         }
     }
     if (pyIsDict(target)) {
-        if (name == "pop") {
-            var pdI = pyDictFind(target["keys"], pyFArgAt(args, 0))
-            if (pdI >= 0) {
-                var pdV = target["vals"][pdI]
-                pyCRemoveAt(target["keys"], pdI)
-                pyCRemoveAt(target["vals"], pdI)
-                return pdV
-            }
-            if (args.length > 1) { return args[1] }
-            throw pyExcInstance("KeyError", pyRepr(pyFArgAt(args, 0)))
+        if (pyIsDictMethod(name)) { return pyDictMethod(target, name, args, kw) }
+        if (pyIsSetOnly(name)) {
+            throw pyExcInstance("AttributeError",
+                                "'" + pyTypeName(target) + "' object has no attribute '" + name + "'")
         }
     }
     // THE WHOLE LIST METHOD SURFACE - docs/todo.md 1.3. `count` was the only one
@@ -5317,6 +5317,271 @@ function pyKwArg(kw, name) {
     return kw["vals"][i]
 }
 
+// ------------------------------------------------------------ dict / set ---
+//
+// docs/todo.md 1.3, the residue of 51436f9. The NAME SETS first, so that
+// hasattr()/getattr() ask exactly what the dispatcher answers. Keep in step
+// with pyIsDictMethod/pyIsSetMethod in abnf/jsrt.go and in
+// languages/python-interpreter.abnf.
+//
+// NOT the whole of CPython's: dict.popitem/fromkeys and set.intersection/
+// difference/symmetric_difference/isdisjoint/issubset/issuperset and their
+// *_update forms are absent, hasattr() therefore says False for them, and a
+// written call still ABORTS rather than raising - the 51436f9 rule. The set
+// ALGEBRA is spelled with the operators & - ^ <= >= instead, and those are
+// complete.
+function pyIsDictMethod(name) {
+    if (name == "keys" || name == "values" || name == "items") { return true }
+    if (name == "get" || name == "pop" || name == "clear") { return true }
+    if (name == "copy" || name == "setdefault" || name == "update") { return true }
+    return false
+}
+
+function pyIsSetMethod(name) {
+    if (name == "add" || name == "pop" || name == "clear") { return true }
+    if (name == "copy" || name == "remove" || name == "discard") { return true }
+    if (name == "union" || name == "update") { return true }
+    return false
+}
+
+// The names one of the two types owns and the other does NOT, which is exactly
+// what CPython raises AttributeError for. They are narrower than the two sets
+// above: pop, clear, copy and update are on BOTH a dict and a set.
+function pyIsDictOnly(name) {
+    if (name == "keys" || name == "values" || name == "items") { return true }
+    if (name == "get" || name == "setdefault") { return true }
+    return false
+}
+
+function pyIsSetOnly(name) {
+    if (name == "add" || name == "remove") { return true }
+    if (name == "discard" || name == "union") { return true }
+    return false
+}
+
+// Every error below is a CATCHABLE Python exception with CPython 3.14's exact
+// text, not fail(), for the same reason the list surface is.
+function pyDictMethod(d, name, args, kw) {
+    var keys = d["keys"]
+    var vals = d["vals"]
+    if (name == "keys") { return pyCCopyArr(keys) }
+    if (name == "values") { return pyCCopyArr(vals) }
+    // .items(): a list of [key, value] pairs in insertion order (each pair a
+    // 2 element list, since the subset has no tuples; CPython answers a
+    // dict_items VIEW of TUPLES, which is docs/todo.md 3.1 and not this item).
+    // The compiler grammar USED to lower a written d.items() into a loop of its
+    // own and never reach here, so getattr(d, "items")() aborted; that lowering
+    // is gone and every form arrives here.
+    if (name == "items") {
+        var pairs = []
+        var pi2 = 0
+        while (pi2 < keys.length) {
+            pairs.push([keys[pi2], vals[pi2]])
+            pi2 = pi2 + 1
+        }
+        return pairs
+    }
+    if (name == "get") {
+        var gi = pyDictFind(keys, pyFArgAt(args, 0))
+        if (gi >= 0) { return vals[gi] }
+        if (args.length > 1) { return args[1] }
+        return undefined
+    }
+    if (name == "pop") {
+        var pdI = pyDictFind(keys, pyFArgAt(args, 0))
+        if (pdI >= 0) {
+            var pdV = anytype
+            pdV = vals[pdI]
+            pyCRemoveAt(keys, pdI)
+            pyCRemoveAt(vals, pdI)
+            return pdV
+        }
+        if (args.length > 1) { return args[1] }
+        throw pyExcInstance("KeyError", pyRepr(pyFArgAt(args, 0)))
+    }
+    if (name == "clear") {
+        pyCTruncate(keys)
+        pyCTruncate(vals)
+        return undefined
+    }
+    // SHALLOW, like CPython's: the values are shared, only the two spine arrays
+    // are new. d.copy() is not d, and d.copy() == d.
+    if (name == "copy") {
+        var c = pyNewDict()
+        var ci = 0
+        while (ci < keys.length) {
+            pyDictSet(c, keys[ci], vals[ci])
+            ci = ci + 1
+        }
+        return c
+    }
+    // setdefault(k[, default]) INSERTS and returns; the default defaults to
+    // None, and it is inserted too - d.setdefault("b") leaves {"b": None}.
+    if (name == "setdefault") {
+        if (args.length < 1) {
+            throw pyExcInstance("TypeError", "setdefault expected at least 1 argument, got 0")
+        }
+        var si = pyDictFind(keys, args[0])
+        if (si >= 0) { return vals[si] }
+        var sv = anytype
+        sv = undefined
+        if (args.length > 1) { sv = args[1] }
+        pyDictSet(d, args[0], sv)
+        return sv
+    }
+    // update([mapping | iterable of pairs], **kwargs). All three forms, and the
+    // KEYWORD one works only on a WRITTEN call: a bound builtin from getattr()
+    // cannot carry keyword arguments (a signature-less builtin receives its kw
+    // dict as a trailing positional and the wrapper cannot tell that from a real
+    // argument - docs/todo.md 2.13), so getattr(d, "update")(a=1) is not
+    // d.update(a=1); the written call is.
+    if (name == "update") {
+        if (args.length > 1) {
+            throw pyExcInstance("TypeError",
+                                "update expected at most 1 argument, got " + pyIntStr(args.length))
+        }
+        if (args.length == 1) { pyDictUpdateFrom(d, args[0]) }
+        if (kw !== null && kw !== undefined) {
+            if (pyIsDict(kw)) {
+                var ki = 0
+                while (ki < kw["keys"].length) {
+                    pyDictSet(d, kw["keys"][ki], kw["vals"][ki])
+                    ki = ki + 1
+                }
+            }
+        }
+        return undefined
+    }
+    fail("unknown dict method: " + name)
+    return undefined
+}
+
+// update()'s positional argument: a MAPPING copies key by key, anything else is
+// read as an iterable of 2-element pairs. CPython's two error texts differ and
+// are reproduced: the argument itself names its type, an ELEMENT does not.
+function pyDictUpdateFrom(d, src) {
+    var sEls = pySetElemsOf(src)
+    if (sEls === null || sEls === undefined) {
+        if (pyIsDict(src)) {
+            var mi = 0
+            while (mi < src["keys"].length) {
+                pyDictSet(d, src["keys"][mi], src["vals"][mi])
+                mi = mi + 1
+            }
+            return undefined
+        }
+    }
+    var items = pyElemsOf(src)
+    var i = 0
+    while (i < items.length) {
+        var pair = pyPairOrErr(items[i], i)
+        pyDictSet(d, pair[0], pair[1])
+        i = i + 1
+    }
+    return undefined
+}
+
+function pyPairOrErr(el, i) {
+    if (!pyIsIterable(el)) {
+        throw pyExcInstance("TypeError", "object is not iterable")
+    }
+    var pel = pyElemsOf(el)
+    if (pel.length != 2) {
+        throw pyExcInstance("ValueError", "dictionary update sequence element #" + pyIntStr(i) +
+                            " has length " + pyIntStr(pel.length) + "; 2 is required")
+    }
+    return pel
+}
+
+// pyElemsOf's own accept test, asked without raising: an update() ELEMENT that
+// is not iterable gets CPython's typeless "object is not iterable" rather than
+// pyElemsOf's "'int' object is not iterable".
+function pyIsIterable(v) {
+    if (pyIsIter(v) || pyIsGen(v) || pyIsArr(v) || pyIsDict(v)) { return true }
+    if (typeof v == "string") { return true }
+    var els = pySetElemsOf(v)
+    if (els !== null && els !== undefined) { return true }
+    return false
+}
+
+// Every member of every argument, each read as ANY iterable.
+function pySetAddAll(els, args) {
+    var ui = 0
+    while (ui < args.length) {
+        var src = pyElemsOf(args[ui])
+        var ei = 0
+        while (ei < src.length) {
+            pySetAdd(els, src[ei])
+            ei = ei + 1
+        }
+        ui = ui + 1
+    }
+    return undefined
+}
+
+function pyCTruncate(xs) {
+    while (xs.length > 0) { xs.pop() }
+    return undefined
+}
+
+// A count in an error message. MetaJS is typed and the concatenation wants a
+// string, so the conversion is out of line rather than `"" + n`.
+function pyIntStr(n) { return pyToStr(n) }
+
+function pySetMethod(els, name, args) {
+    if (name == "add") {
+        pySetAdd(els, pyFArgAt(args, 0)) // Already a member: no-op, returns None.
+        return undefined
+    }
+    if (name == "clear") { pyCTruncate(els); return undefined }
+    if (name == "copy") { return pyNewSet(pyCCopyArr(els)) } // SHALLOW.
+    // pop() removes and returns an ARBITRARY element - CPython promises no order
+    // at all. This project's sets keep insertion order (it is what makes a set
+    // render deterministically, which the byte-identical goja/frozen invariant
+    // needs), so the first element is the one taken. Assert on membership and
+    // size, never on which element.
+    if (name == "pop") {
+        if (els.length == 0) {
+            throw pyExcInstance("KeyError", pyRepr("pop from an empty set"))
+        }
+        var pv = anytype
+        pv = els[0]
+        pyCRemoveAt(els, 0)
+        return pv
+    }
+    // remove() raises KeyError when the member is absent and discard() does not.
+    // That difference is the whole reason both exist.
+    if (name == "remove" || name == "discard") {
+        var ri = 0
+        while (ri < els.length) {
+            if (pyEqual(els[ri], pyFArgAt(args, 0))) {
+                pyCRemoveAt(els, ri)
+                return undefined
+            }
+            ri = ri + 1
+        }
+        if (name == "remove") {
+            throw pyExcInstance("KeyError", pyRepr(pyFArgAt(args, 0)))
+        }
+        return undefined
+    }
+    // union(*others) takes ANY iterable, any number of them, and does not mutate
+    // the receiver: s | t insists both sides be sets, s.union(t) does not, so
+    // {1}.union([2], "a") is a set of three. update() is the same walk IN PLACE,
+    // returning None - so the two share one helper.
+    if (name == "union") {
+        var out = pyCCopyArr(els)
+        pySetAddAll(out, args)
+        return pyNewSet(out)
+    }
+    if (name == "update") {
+        pySetAddAll(els, args)
+        return undefined
+    }
+    fail("unknown set method: " + name)
+    return undefined
+}
+
 // docs/todo.md 1.2. hasattr()/getattr() walked only the user-class MRO and an
 // object's own property map, so hasattr([3,1,2], "count") was False and
 // hasattr("s", "upper") was False where CPython answers True in both. This is
@@ -5333,11 +5598,8 @@ function pyDBuiltinAttr(obj, name) {
     if (pyIsArr(obj)) { return pyIsListMethod(name) }
     // A set is a dict whose keys are its members, so it is asked FIRST.
     var els = pySetElemsOf(obj)
-    if (els !== null && els !== undefined) { return name == "add" }
-    if (pyIsDict(obj)) {
-        if (name == "keys" || name == "values" || name == "items") { return true }
-        if (name == "get" || name == "pop") { return true }
-    }
+    if (els !== null && els !== undefined) { return pyIsSetMethod(name) }
+    if (pyIsDict(obj)) { return pyIsDictMethod(name) }
     return false
 }
 
@@ -6546,9 +6808,12 @@ function pyFListMethod(o, name, args) {
 // __dict === true AND both keys and vals to be arrays; the prelude's pyIsDict
 // is that test.
 //
-// `items` is NOT here because it is not in the Go twin: the compiler lowers
-// `d.items()` to a loop before emitting anything (python-to-llvm-ir.abnf), and
-// the interpreter answers it in its own mcall.
+// UNREACHABLE FROM PYTHON since docs/todo.md 1.3: pyDMethodCall answers the
+// whole dict surface (pyDictMethod) before pyMemberCall is ever reached, and
+// `items` - which was never here, because the compiler used to lower
+// `d.items()` into a loop of its own - is answered there too. The function
+// stays for the reason pyFStrMethod does: pyMemberCall dispatches on the
+// RECEIVER, so a name nothing knows has to land somewhere and say so.
 function pyFDictMethod(o, name, args) {
     if (name == "keys") { return rtCopyArr(o["keys"]) }
     if (name == "values") { return rtCopyArr(o["vals"]) }

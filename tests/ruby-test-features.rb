@@ -770,6 +770,161 @@ def rethrow
 end
 check("rethrow", rethrow(), "deeper")
 
+# ----- yield across a begin/rescue, and block_given? without a method -----
+# `yield' inside a begin/rescue used to ABORT the compiler half ("call of a non
+# function value: null") while the interpreter answered: js_rblock read the block
+# out of the argument array of the IR function being emitted, and inside a
+# begin/rescue that is the ctl closure, not the method. The block is published into
+# the method's scope now and every yield site reads it through the scope chain, so a
+# yield nested in a rescue / ensure / block still finds the method's block.
+def yr(l)
+  begin
+    return l + (yield).to_s
+  rescue Exception => e
+    return "E"
+  end
+end
+check("yield-in-begin", yr("a") { 1 }, "a1")
+def yr2
+  begin
+    raise "boom"
+  rescue => e
+    return yield(e.message)
+  end
+end
+check("yield-in-rescue", yr2 { |m| m.upcase }, "BOOM")
+def yr3
+  begin
+    return yield(2)
+  ensure
+    $ens = "f"
+  end
+end
+check("yield-in-ensure-body", yr3 { |v| v * 3 }, 6)
+def yr4
+  out = []
+  [1, 2].each { |v| out << (yield v) }
+  out
+end
+check("yield-inside-block", yr4 { |v| v * 10 }.inspect, "[10, 20]")
+def bg1
+  r = block_given?
+  begin
+    return [r, block_given?]
+  rescue
+    return nil
+  end
+end
+check("blockgiven-no-block", bg1.inspect, "[false, false]")
+check("blockgiven-with-block", (bg1 { 1 }).inspect, "[true, true]")
+# block_given? at the TOP LEVEL is false in MRI; it used to fail the interpreter's
+# scope lookup outright ("unknown name: $blk").
+check("blockgiven-toplevel", block_given?, false)
+
+# ----- Hash defaults -----
+# Hash.new(v) and Hash.new { |h, k| } keep the default in a hidden slot honoured at
+# EVERY read - including the op-assign and the append reads, which bypassed Hash#[].
+hd = Hash.new(7)
+check("hash-default-value", hd["nope"], 7)
+check("hash-default-no-insert", hd.size, 0)
+check("hash-default-keys", hd.keys.inspect, "[]")
+check("hash-default-inspect", hd.inspect, "{}")
+hd["a"] = 1
+check("hash-default-hit", hd["a"], 1)
+check("hash-default-miss", hd["b"], 7)
+check("hash-default-reader", hd.default, 7)
+check("hash-plain-default", Hash.new.default.inspect, "nil")
+check("hash-plain-miss", ({})["x"].inspect, "nil")
+hc = Hash.new(0)
+["a", "b", "a"].each { |w| hc[w] += 1 }
+check("hash-default-opassign", hc.inspect, "{\"a\"=>2, \"b\"=>1}")
+hb = Hash.new { |h, k| h[k] = k * 2 }
+check("hash-default-block", hb["ab"], "abab")
+check("hash-default-block-wrote", hb.inspect, "{\"ab\"=>\"abab\"}")
+check("hash-default-block-reader", hb.default.inspect, "nil")
+hn = Hash.new { |h, k| h[k] = [] }
+hn["x"] << 1
+hn["x"] << 2
+check("hash-default-append", hn.inspect, "{\"x\"=>[1, 2]}")
+# fetch DELIBERATELY ignores the default, which is MRI.
+check("hash-fetch-hit", hd.fetch("a"), 1)
+check("hash-fetch-default-arg", hd.fetch("zz", 5), 5)
+check("hash-fetch-block", hd.fetch("zz") { |k| k + "!" }, "zz!")
+
+# ----- Enumerator -----
+# A blockless each / each_slice / each_cons / each_with_index / combination /
+# permutation is an Enumerator, not the array of elements it would produce. This one
+# is EAGER (see the note at mkEnum): there is no coroutine in the compiler half to
+# park a lazy one in.
+ea = [1, 2, 3, 4, 5]
+en = ea.each
+check("enum-class", en.class.to_s, "Enumerator")
+check("enum-is-a", en.is_a?(Enumerator), true)
+check("enum-to-a", en.to_a.inspect, "[1, 2, 3, 4, 5]")
+check("enum-size", en.size, 5)
+check("enum-next-1", en.next, 1)
+check("enum-next-2", en.next, 2)
+check("enum-peek", en.peek, 3)
+check("enum-next-after-peek", en.next, 3)
+en.rewind
+check("enum-rewind", en.next, 1)
+check("enum-slice-class", ea.each_slice(2).class.to_s, "Enumerator")
+check("enum-slice-to-a", ea.each_slice(2).to_a.inspect, "[[1, 2], [3, 4], [5]]")
+check("enum-cons-to-a", ea.each_cons(2).to_a.length, 4)
+check("enum-with-index", ea.each_with_index.to_a.first.inspect, "[1, 0]")
+check("enum-delegates-map", ea.each.map { |v| v * 2 }.inspect, "[2, 4, 6, 8, 10]")
+check("enum-with-index-offset", ea.each.with_index(1).to_a.first.inspect, "[1, 1]")
+eacc = []
+ea.each.with_index(1) { |v, i| eacc << (v * i) }
+check("enum-with-index-block", eacc.inspect, "[1, 4, 9, 16, 25]")
+check("enum-block-still-yields", ea.each_slice(2) { |g| }.inspect, "[1, 2, 3, 4, 5]")
+
+# ----- sample / shuffle / cycle / combination / permutation -----
+# sample and shuffle are asserted on INVARIANTS ONLY - the length, membership, and
+# that a shuffle is a permutation of its receiver. There is no random source in this
+# project (Kernel#rand is deterministically zero of the right class), so the draw is
+# deterministic and its particular ordering is not a contract.
+sa = [1, 2, 3, 4, 5]
+check("sample-member", sa.include?(sa.sample), true)
+check("sample-n-length", sa.sample(3).length, 3)
+check("sample-n-clamped", sa.sample(99).length, 5)
+check("sample-empty", [].sample.inspect, "nil")
+check("sample-n-subset", (sa.sample(3) - sa).inspect, "[]")
+sf = sa.shuffle
+check("shuffle-length", sf.length, 5)
+check("shuffle-permutation", sf.sort.inspect, sa.inspect)
+check("shuffle-no-strangers", (sf - sa).inspect, "[]")
+check("shuffle-loses-nothing", (sa - sf).inspect, "[]")
+check("shuffle-not-in-place", sa.inspect, "[1, 2, 3, 4, 5]")
+cyc = []
+sa.cycle(2) { |v| cyc << v }
+check("cycle-count", cyc.length, 10)
+check("cycle-content", cyc.sort.inspect, "[1, 1, 2, 2, 3, 3, 4, 4, 5, 5]")
+check("cycle-enum", sa.cycle(2).to_a.length, 10)
+check("comb-count", sa.combination(2).to_a.length, 10)
+check("comb-class", sa.combination(2).class.to_s, "Enumerator")
+check("comb-order", ["a", "b", "c"].combination(2).to_a.inspect,
+      "[[\"a\", \"b\"], [\"a\", \"c\"], [\"b\", \"c\"]]")
+check("comb-zero", sa.combination(0).to_a.inspect, "[[]]")
+check("comb-too-big", sa.combination(9).to_a.inspect, "[]")
+check("perm-count", sa.permutation(2).to_a.length, 20)
+check("perm-order", ["a", "b", "c"].permutation(2).to_a.inspect,
+      "[[\"a\", \"b\"], [\"a\", \"c\"], [\"b\", \"a\"], [\"b\", \"c\"], [\"c\", \"a\"], [\"c\", \"b\"]]")
+check("perm-full", ["a", "b", "c"].permutation.to_a.length, 6)
+cb = []
+["a", "b", "c"].combination(2) { |c| cb << c.join }
+check("comb-block", cb.inspect, "[\"ab\", \"ac\", \"bc\"]")
+
+# ----- a BARE rand -----
+# `rand` without parentheses used to resolve to the host function value in the
+# interpreter (so rand.class said Proc) and to abort the compiler with "variable not
+# defined: rand", while `rand()` worked everywhere.
+check("bare-rand-class", rand.class.to_s, "Float")
+check("bare-rand-range", rand >= 0 && rand < 1, true)
+check("paren-rand-class", rand().class.to_s, "Float")
+check("rand-n-class", rand(10).class.to_s, "Integer")
+check("rand-n-range", rand(10) < 10, true)
+
 # ----- everything combined in one small pipeline (3-element data flow) -----
 def transform(items)
   tout = []
