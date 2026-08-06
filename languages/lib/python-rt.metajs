@@ -835,6 +835,14 @@ function pyGetAttr(obj, name) {
         var fn = rtPairGet(pyBFnObjs, pyBFnNames, obj)
         if (fn !== undefined) { return fn }
     }
+    // docs/todo.md 1.2: a BOUND built-in method, so getattr(xs, "count")(1) is
+    // the 1 CPython answers rather than whatever pyGetMember made of the name.
+    // Ahead of pyGetMember because a dict literally has a "keys" property
+    // holding its key ARRAY, and CPython's d.keys is the method.
+    if (pyDBuiltinAttr(obj, name)) { return pyDBoundBuiltin(obj, name) }
+    // x.__class__ for a value that is not a user instance - the same synthetic
+    // class object type(x) hands out, so `[].__class__ is list` holds.
+    if (name == "__class__") { return js_pytype(obj) }
     return pyGetMember(obj, name)
 }
 
@@ -3063,7 +3071,7 @@ function js_pysetattr3(args) {
 }
 
 function pyDHasAttr(obj, name) {
-    if (obj === null || obj === undefined) { return false }
+    if (obj === null || obj === undefined) { return name == "__class__" }
     if (pyIsClass(obj)) {
         if (name == "__name__" || name == "__mro__") { return true }
         return pyLookupHas(obj, name)
@@ -3074,6 +3082,10 @@ function pyDHasAttr(obj, name) {
         if (obj[name] !== undefined) { return true }
         return pyLookupHas(cls, name)
     }
+    // docs/todo.md 1.2: the BUILT-IN methods of str / list / dict / set, and
+    // __class__, which EVERY value has (None.__class__ is NoneType).
+    if (name == "__class__") { return true }
+    if (pyDBuiltinAttr(obj, name)) { return true }
     if (typeof obj != "object") { return false }
     if (Array.isArray(obj)) { return false }
     return obj[name] !== undefined
@@ -5068,15 +5080,15 @@ function pyDMethodCall(target, name, args, kw) {
             throw pyExcInstance("KeyError", pyRepr(pyFArgAt(args, 0)))
         }
     }
-    // list.count(x) - docs/todo.md 1.5. pyMemberCall's `count` arm was KOTLIN's
-    // `xs.count { pred }`, so `[1,2,2].count(2)` died with "call of a non
-    // function value: 2" in both compiled halves. Python counts EQUAL elements,
-    // so it is answered here and the shared arm is gone. Go: the *jsArray
-    // `count` arm of pyMethodCall in abnf/jsrt.go.
+    // THE WHOLE LIST METHOD SURFACE - docs/todo.md 1.3. `count` was the only one
+    // 6eec533 added (pyMemberCall's `count` arm is KOTLIN's `xs.count { pred }`);
+    // sort/insert/remove/extend/index/reverse/clear/copy all aborted with
+    // "unknown list method" in every engine, and pop IGNORED its index argument
+    // in all three ([3,1,2].pop(0) answered 2 where CPython answers 3). Go:
+    // pyListMethod in abnf/jsrt.go; the interpreter: pyListMethod in
+    // languages/python-interpreter.abnf.
     if (pyIsArr(target)) {
-        if (name == "count") {
-            if (args.length == 1) { return pyDListCount(target, args[0]) }
-        }
+        if (pyIsListMethod(name)) { return pyListMethod(target, name, args, kw) }
     }
     if (pyDForeign(target, name)) {
         // A REAL, catchable AttributeError and not fail(): CPython's is
@@ -5100,6 +5112,250 @@ function pyDListCount(xs, v) {
         i = i + 1
     }
     return n
+}
+
+// docs/todo.md 1.3 - Python's list methods, the NAME SET first so that
+// hasattr()/getattr() can ask exactly what the dispatcher answers. Keep in step
+// with pyIsListMethod in abnf/jsrt.go and in languages/python-interpreter.abnf.
+function pyIsListMethod(name) {
+    if (name == "append" || name == "pop" || name == "clear") { return true }
+    if (name == "copy" || name == "count" || name == "sort") { return true }
+    if (name == "insert" || name == "remove" || name == "extend") { return true }
+    if (name == "index" || name == "reverse") { return true }
+    return false
+}
+
+// Every error below is a CATCHABLE Python exception with CPython 3.14's exact
+// text, not fail(): `try: xs.remove(9) / except ValueError` has to behave the
+// same in all three engines, which is the only thing that makes any of this
+// assertable in one ratchet file.
+function pyListMethod(xs, name, args, kw) {
+    var n = xs.length
+    if (name == "append") { xs.push(pyFArgAt(args, 0)); return undefined }
+    if (name == "clear") {
+        while (xs.length > 0) { xs.pop() }
+        return undefined
+    }
+    if (name == "copy") { return pyCCopyArr(xs) }
+    if (name == "reverse") {
+        var lo = 0
+        var hi = n - 1
+        while (lo < hi) {
+            var tmp = anytype
+            tmp = xs[lo]
+            xs[lo] = xs[hi]
+            xs[hi] = tmp
+            lo = lo + 1
+            hi = hi - 1
+        }
+        return undefined
+    }
+    if (name == "count") {
+        if (args.length != 1) {
+            throw pyExcInstance("TypeError", "list.count() takes exactly one argument")
+        }
+        return pyDListCount(xs, args[0])
+    }
+    if (name == "pop") {
+        if (n == 0) { throw pyExcInstance("IndexError", "pop from empty list") }
+        var pi = n - 1
+        if (args.length > 0) {
+            if (args[0] !== undefined && args[0] !== null) {
+                pi = pyListIdx(args[0])
+                if (pi < 0) { pi = pi + n }
+            }
+        }
+        if (pi < 0 || pi >= n) { throw pyExcInstance("IndexError", "pop index out of range") }
+        var pv = anytype
+        pv = xs[pi]
+        pyCRemoveAt(xs, pi)
+        return pv
+    }
+    if (name == "insert") {
+        // CPython CLAMPS rather than raising: insert(-5, x) on a 2-list prepends
+        // and insert(99, x) appends.
+        var ii = pyListIdx(pyFArgAt(args, 0))
+        if (ii < 0) {
+            ii = ii + n
+            if (ii < 0) { ii = 0 }
+        }
+        if (ii > n) { ii = n }
+        xs.push(undefined)
+        var im = xs.length - 1
+        while (im > ii) {
+            xs[im] = xs[im - 1]
+            im = im - 1
+        }
+        xs[ii] = pyFArgAt(args, 1)
+        return undefined
+    }
+    if (name == "remove") {
+        var ri = 0
+        while (ri < n) {
+            if (pyAEqual(xs[ri], pyFArgAt(args, 0))) {
+                pyCRemoveAt(xs, ri)
+                return undefined
+            }
+            ri = ri + 1
+        }
+        throw pyExcInstance("ValueError", "list.remove(x): x not in list")
+    }
+    if (name == "extend") {
+        // A copy first, so xs.extend(xs) DOUBLES the list as it does in CPython
+        // rather than looping forever. pyElemsOf raises CPython's own "'int'
+        // object is not iterable" for a non-iterable.
+        var src = pyCCopyArr(pyElemsOf(pyFArgAt(args, 0)))
+        var ei = 0
+        while (ei < src.length) {
+            xs.push(src[ei])
+            ei = ei + 1
+        }
+        return undefined
+    }
+    if (name == "index") {
+        // start/stop clamp exactly like a slice, so index(x, -1) searches the
+        // last element only; the ValueError carries no repr in 3.14.
+        var from = pyListClamp(pyFArgAt(args, 1), 0, n)
+        var to = pyListClamp(pyFArgAt(args, 2), n, n)
+        if (to < from) { to = from }
+        var xi = from
+        while (xi < to) {
+            if (pyAEqual(xs[xi], pyFArgAt(args, 0))) { return xi }
+            xi = xi + 1
+        }
+        throw pyExcInstance("ValueError", "list.index(x): x not in list")
+    }
+    if (name == "sort") {
+        pySortList(xs, args, kw)
+        return undefined
+    }
+    fail("unknown list method: " + name)
+    return undefined
+}
+
+// An index argument as a plain number. A bool IS an int in Python, a float box
+// is not an index at all - and the TypeError is CPython's own text.
+function pyListIdx(v) {
+    if (typeof v == "number") { return v }
+    if (typeof v == "boolean") {
+        if (v) { return 1 }
+        return 0
+    }
+    throw pyExcInstance("TypeError",
+                        "'" + pyTypeName(v) + "' object cannot be interpreted as an integer")
+}
+
+// One end of an index() window: absent means the default, negative wraps, and
+// both ends clamp into [0, n] - pySliceRange in abnf/jsrt.go.
+function pyListClamp(v, dflt, n) {
+    if (v === undefined || v === null) { return dflt }
+    var i = pyListIdx(v)
+    if (i < 0) { i = i + n }
+    if (i < 0) { i = 0 }
+    if (i > n) { i = n }
+    return i
+}
+
+// list.sort(*, key=None, reverse=False), in place. CPython's is STABLE and both
+// parameters are KEYWORD-ONLY - a positional argument is a TypeError there, so
+// it is one here rather than being read as the key. reverse= is done by
+// reversing, sorting ascending and reversing again, which is how CPython keeps
+// equal elements in their original order under it; an inverted comparison would
+// not. The comparison is pyACompare, the same one js_pysorted uses, so sort()
+// and sorted() can never disagree.
+function pySortList(xs, args, kw) {
+    if (args.length > 0) {
+        throw pyExcInstance("TypeError", "sort() takes no positional arguments")
+    }
+    var key = pyKwArg(kw, "key")
+    var rev = pyDTruthy(pyKwArg(kw, "reverse"))
+    var vals = []
+    var keys = []
+    var i = 0
+    while (i < xs.length) {
+        var j = i
+        if (rev) { j = xs.length - 1 - i }
+        var e = anytype
+        e = xs[j]
+        vals.push(e)
+        if (pyIsCallable(key)) { keys.push(pyCall(key, [e])) } else { keys.push(e) }
+        i = i + 1
+    }
+    // Insertion sort, which is STABLE, exactly as js_pysorted does it.
+    var s = 1
+    while (s < vals.length) {
+        var kx = anytype
+        kx = keys[s]
+        var vx = anytype
+        vx = vals[s]
+        var p = s - 1
+        while (p >= 0 && pyACompare(kx, keys[p]) == -1) {
+            keys[p + 1] = keys[p]
+            vals[p + 1] = vals[p]
+            p = p - 1
+        }
+        keys[p + 1] = kx
+        vals[p + 1] = vx
+        s = s + 1
+    }
+    var w = 0
+    while (w < vals.length) {
+        var t = w
+        if (rev) { t = vals.length - 1 - w }
+        xs[t] = vals[w]
+        w = w + 1
+    }
+    return undefined
+}
+
+// One keyword argument of a method call, or undefined when it was not passed.
+function pyKwArg(kw, name) {
+    if (kw === null || kw === undefined) { return undefined }
+    if (!pyIsDict(kw)) { return undefined }
+    var i = pyDictFind(kw["keys"], name)
+    if (i < 0) { return undefined }
+    return kw["vals"][i]
+}
+
+// docs/todo.md 1.2. hasattr()/getattr() walked only the user-class MRO and an
+// object's own property map, so hasattr([3,1,2], "count") was False and
+// hasattr("s", "upper") was False where CPython answers True in both. This is
+// the same question the DISPATCHER answers, asked by name: the str table
+// (pySIsStrMethod), the list table (pyIsListMethod), and the dict/set arms of
+// pyDMethodCall. Keep in step with pyBuiltinAttr in abnf/jsrt.go and in
+// languages/python-interpreter.abnf.
+//
+// A builtin this project does not HAVE stays False on purpose - hasattr(3,
+// "bit_length") is False here and True in CPython - because the alternative is
+// hasattr answering True for a call that then aborts.
+function pyDBuiltinAttr(obj, name) {
+    if (typeof obj == "string") { return pySIsStrMethod(name) }
+    if (pyIsArr(obj)) { return pyIsListMethod(name) }
+    // A set is a dict whose keys are its members, so it is asked FIRST.
+    var els = pySetElemsOf(obj)
+    if (els !== null && els !== undefined) { return name == "add" }
+    if (pyIsDict(obj)) {
+        if (name == "keys" || name == "values" || name == "items") { return true }
+        if (name == "get" || name == "pop") { return true }
+    }
+    return false
+}
+
+// What getattr() hands back for one of those names: CPython's `<built-in method
+// count of list object ...>`, spelled here as a closure that re-enters the
+// dispatcher with the receiver captured. Keyword arguments are NOT carried
+// through it, so getattr(xs, "sort")(reverse=True) is not the same as
+// xs.sort(reverse=True); the direct call is.
+function pyDBoundBuiltin(target, name) {
+    return function() {
+        var args = []
+        var i = 0
+        while (i < arguments.length) {
+            args.push(arguments[i])
+            i = i + 1
+        }
+        return pyDMethodCall(target, name, args, undefined)
+    }
 }
 
 // docs/todo.md 5.2 and 2.4. pyMemberCall is layer 2's copy of the SHARED

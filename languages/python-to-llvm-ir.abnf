@@ -111,6 +111,17 @@ case guards. A capture binds an ordinary variable.
 Still missing: nothing the full-syntax ratchet (tests/python-test-full.py) covers -
 it parses and passes in full.
 
+The BUILT-IN method surface is a subset, and hasattr() answers exactly what the
+dispatcher can run: list has all eleven of its methods (append pop clear copy count
+sort insert remove extend index reverse - sort is stable and takes key= and
+reverse=, and index/remove/pop raise a CATCHABLE ValueError or IndexError with
+CPython's text), str has the library in abnf/pystrmethod.go, dict has
+keys/values/items/get/pop, and set has add. So hasattr of an int and bit_length, or
+of a set and discard, is False here and True in CPython - deliberately, because the
+alternative is hasattr saying True for a call that then aborts. A bound method from
+getattr() does NOT carry keyword arguments: getattr(xs, sort)(reverse=True) is not
+xs.sort(reverse=True); the written call is.
+
 Functions become IR functions jsf_N(env, args); Python scoping is LOWERED IN THIS
 EMITTER - py_setvar, py_getvar, py_delvar, py_global, and the pyfn/pyup/pymod/pydel
 marks pyOpenBoundary declares - rather than carried on the scope

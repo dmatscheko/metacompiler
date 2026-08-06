@@ -1606,6 +1606,166 @@ def s34():
     check("gcl13", q == [1, 2])
 
 
+# ===== SECTION 35: list methods, hasattr and getattr =====
+# docs/todo.md 1.3 and 1.2. Every value is read out of a list so the grammar's
+# constant folder cannot pre-compute a row, and every error is CAUGHT - the
+# point of raising a real Python exception rather than aborting is that the
+# behaviour becomes assertable in one file, in all three engines.
+def s35():
+    # --- the mutators ---------------------------------------------------
+    xs = [3, 1, 2]
+    check("lm01", xs.append(4) is None and xs == [3, 1, 2, 4])
+    check("lm02", xs.pop() == 4 and xs == [3, 1, 2])
+    # pop(i) used to IGNORE its index in all three engines and remove the last.
+    ys = [3, 1, 2]
+    check("lm03", ys.pop(0) == 3 and ys == [1, 2])
+    zs = [3, 1, 2]
+    check("lm04", zs.pop(-2) == 1 and zs == [3, 2])
+    cs = [3, 1, 2]
+    check("lm05", cs.clear() is None and cs == [] and len(cs) == 0)
+    ds = [3, 1, 2]
+    es = ds.copy()
+    es.append(9)
+    check("lm06", ds == [3, 1, 2] and es == [3, 1, 2, 9])
+    rs = [3, 1, 2]
+    check("lm07", rs.reverse() is None and rs == [2, 1, 3])
+    ins = [3, 1, 2]
+    ins.insert(1, 9)
+    check("lm08", ins == [3, 9, 1, 2])
+    # insert CLAMPS out of range at both ends rather than raising.
+    lo = [3, 1, 2]
+    lo.insert(-99, 9)
+    hi = [3, 1, 2]
+    hi.insert(99, 9)
+    check("lm09", lo == [9, 3, 1, 2] and hi == [3, 1, 2, 9])
+    rm = [3, 1, 2, 1]
+    check("lm10", rm.remove(1) is None and rm == [3, 2, 1])
+    ex = [3, 1]
+    check("lm11", ex.extend([7, 8]) is None and ex == [3, 1, 7, 8])
+    exs = [3]
+    exs.extend("ab")
+    check("lm12", exs == [3, "a", "b"])
+    # extend(self) DOUBLES the list; it must not loop forever.
+    dbl = [1, 2]
+    dbl.extend(dbl)
+    check("lm13", dbl == [1, 2, 1, 2])
+    # --- index/count ----------------------------------------------------
+    ix = [3, 1, 2, 1]
+    check("lm14", ix.index(1) == 1 and ix.index(1, 2) == 3)
+    check("lm15", ix.index(2, -2) == 2 and ix.index(1, 0, 2) == 1)
+    check("lm16", ix.count(1) == 2 and ix.count(9) == 0)
+    # Equality, not identity: a bool IS an int and 1.0 == 1.
+    mixed = [1.0, True, 2]
+    check("lm17", mixed.count(1) == 2 and mixed.index(1) == 0)
+    # --- sort: stable, key=, reverse= -----------------------------------
+    st = [5, 3, 1, 4]
+    check("lm18", st.sort() is None and st == [1, 3, 4, 5])
+    sr = [5, 3, 1, 4]
+    sr.sort(reverse=True)
+    check("lm19", sr == [5, 4, 3, 1])
+    sk = ["ccc", "a", "bb"]
+    sk.sort(key=len)
+    check("lm20", sk == ["a", "bb", "ccc"])
+    # STABILITY, and that reverse= keeps equal elements in their original order
+    # (CPython reverses, sorts ascending and reverses again - an inverted
+    # comparison would swap the pairs below).
+    pairs = [[1, "b"], [1, "a"], [0, "c"], [1, "d"]]
+    fwd = pairs.copy()
+    fwd.sort(key=lambda p: p[0])
+    rev = pairs.copy()
+    rev.sort(key=lambda p: p[0], reverse=True)
+    check("lm21", fwd == [[0, "c"], [1, "b"], [1, "a"], [1, "d"]])
+    check("lm22", rev == [[1, "b"], [1, "a"], [1, "d"], [0, "c"]])
+    strs = ["b", "a", "c"]
+    strs.sort()
+    check("lm23", strs == ["a", "b", "c"])
+    # sort() agrees with sorted() on the same input.
+    src = [4, 1, 3]
+    cp = src.copy()
+    cp.sort()
+    check("lm24", cp == sorted(src))
+    # --- the errors, all CATCHABLE --------------------------------------
+    log = []
+    try:
+        [].pop()
+    except IndexError as e:
+        log.append("A" + str(e))
+    try:
+        [1].pop(5)
+    except IndexError as e:
+        log.append("B" + str(e))
+    try:
+        [1, 2].remove(9)
+    except ValueError as e:
+        log.append("C" + str(e))
+    try:
+        [1, 2].index(9)
+    except ValueError as e:
+        log.append("D" + str(e))
+    try:
+        [1, 2].extend(5)
+    except TypeError as e:
+        log.append("E" + str(e))
+    try:
+        [1, 2].sort(len)
+    except TypeError as e:
+        log.append("F" + str(e))
+    check("lm25", log[0] == "Apop from empty list")
+    check("lm26", log[1] == "Bpop index out of range")
+    check("lm27", log[2] == "Clist.remove(x): x not in list")
+    check("lm28", log[3] == "Dlist.index(x): x not in list")
+    check("lm29", log[4] == "E'int' object is not iterable")
+    check("lm30", log[5] == "Fsort() takes no positional arguments")
+    check("lm31", len(log) == 6)
+    # A ValueError from index() is a subclass of Exception and unwinds normally.
+    def find(seq, v):
+        try:
+            return seq.index(v)
+        except ValueError:
+            return -1
+    check("lm32", find([1, 2], 2) == 1 and find([1, 2], 9) == -1)
+    # --- hasattr / getattr over BUILT-IN methods (docs/todo.md 1.2) -------
+    names = ["append", "pop", "clear", "copy", "count", "sort", "insert",
+             "remove", "extend", "index", "reverse"]
+    seen = 0
+    for nm in names:
+        if hasattr([3, 1, 2], nm):
+            seen += 1
+    check("lm33", seen == 11)
+    check("lm34", hasattr([3, 1, 2], "count") and hasattr("s", "upper"))
+    check("lm35", hasattr({"a": 1}, "get") and hasattr({1, 2}, "add"))
+    # A name no type has stays False, and so does a foreign one.
+    check("lm36", not hasattr([3, 1, 2], "nope") and not hasattr("s", "charAt"))
+    check("lm37", not hasattr([3, 1, 2], "length") and not hasattr(5, "upper"))
+    # getattr hands back a BOUND method that actually runs.
+    check("lm38", getattr([3, 1, 2], "count")(1) == 1)
+    check("lm39", getattr("ab", "upper")() == "AB")
+    gl = [5, 2, 9]
+    getattr(gl, "sort")()
+    check("lm40", gl == [2, 5, 9])
+    check("lm41", getattr({"a": 7}, "get")("a") == 7)
+    check("lm42", getattr([3, 1, 2], "nope", "dflt") == "dflt")
+    # __class__ is on every value, and it is the object type() hands out.
+    check("lm43", [].__class__ is list and "s".__class__ is str)
+    check("lm44", (3).__class__ is int and None.__class__ is type(None))
+    check("lm45", hasattr(3, "__class__") and hasattr(None, "__class__"))
+    # A user class is unaffected by any of it.
+    class C:
+        def __init__(self):
+            self.v = 1
+
+        def m(self):
+            return 2
+    c = C()
+    check("lm46", hasattr(c, "v") and hasattr(c, "m") and not hasattr(c, "z"))
+    check("lm47", getattr(c, "v") == 1 and getattr(c, "m")() == 2)
+    # A Python class that DEFINES one of these names keeps its own.
+    class L:
+        def sort(self):
+            return "mine"
+    check("lm48", L().sort() == "mine" and hasattr(L(), "sort"))
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -1641,5 +1801,6 @@ def main():
     s32() # SECTION-CALL 32
     s33() # SECTION-CALL 33
     s34() # SECTION-CALL 34
+    s35() # SECTION-CALL 35
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

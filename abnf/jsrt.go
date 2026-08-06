@@ -11836,6 +11836,16 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 			return fn
 		}
 	}
+	// docs/todo.md 1.2: a BOUND built-in method, so getattr(xs, "count")(1) is
+	// the 1 CPython answers rather than whatever getMember made of the name.
+	if rt.pyBuiltinAttr(obj, name) {
+		return rt.pyBoundBuiltin(obj, name)
+	}
+	// x.__class__ for a value that is not a user instance - the same synthetic
+	// class object type(x) hands out, so `[].__class__ is list` holds.
+	if name == "__class__" {
+		return rt.pyBuiltinClass(pyTypeName(rt, obj))
+	}
 	return rt.getMember(obj, name)
 }
 
@@ -11988,14 +11998,17 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 		}
 		panic(&jsThrown{value: rt.pyExcInstance("KeyError", rt.pyRepr(argAt(args, 0)))})
 	}
-	if arr, isArr := target.(*jsArray); isArr && name == "count" && len(args) == 1 {
-		n := 0
-		for _, e := range arr.elems {
-			if rt.pyEqual(e, args[0]) {
-				n++
-			}
-		}
-		return float64(n)
+	// THE WHOLE LIST METHOD SURFACE - docs/todo.md 1.3. `count` was the only one
+	// 6eec533 added; sort/insert/remove/extend/index/reverse/clear/copy all
+	// aborted with "unknown list method" in every engine, and `pop(i)` reached
+	// rt.memberCall's shared arm, which IGNORES the index and always removed the
+	// LAST element ([3,1,2].pop(0) answered 2 where CPython answers 3). Answered
+	// here, before the shared table, because rt.memberCall is nine languages'
+	// and its `count`/`add`/`get` arms are Kotlin's. The twins are pyListMethod
+	// in languages/lib/python-rt.metajs and pyListMethod in
+	// languages/python-interpreter.abnf.
+	if arr, isArr := target.(*jsArray); isArr && pyIsListMethod(name) {
+		return rt.pyListMethod(arr, name, args, kw)
 	}
 	// docs/todo.md 5.2 and 2.4. rt.memberCall is the SHARED member-call table
 	// that nine languages land in, and sixteen of its names are ones Python
@@ -12021,6 +12034,254 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 			"'"+pyTypeName(rt, target)+"' object has no attribute '"+name+"'")})
 	}
 	return rt.memberCall(target, name, args)
+}
+
+// pyIsListMethod is the NAME SET of Python's list methods - docs/todo.md 1.3.
+// It is a name test only, so hasattr()/getattr() can ask the same question the
+// dispatcher answers. Keep in step with pyIsListMethod in
+// languages/lib/python-rt.metajs and in languages/python-interpreter.abnf.
+func pyIsListMethod(name string) bool {
+	switch name {
+	case "append", "pop", "clear", "copy", "count",
+		"sort", "insert", "remove", "extend", "index", "reverse":
+		return true
+	}
+	return false
+}
+
+// pyListMethod runs one of them. Every error it raises is a CATCHABLE Python
+// exception with CPython 3.14's exact text, not rt.fail: `try: xs.remove(9) /
+// except ValueError` has to behave the same in all three engines, which is the
+// only way any of this is assertable in one file (the reason 6eec533 gives for
+// AttributeError).
+func (rt *jsrt) pyListMethod(arr *jsArray, name string, args []interface{}, kw interface{}) interface{} {
+	n := len(arr.elems)
+	switch name {
+	case "append":
+		arr.dropIdx()
+		arr.elems = append(arr.elems, argAt(args, 0))
+		return jsUndef
+	case "clear":
+		arr.dropIdx()
+		arr.elems = arr.elems[:0]
+		return jsUndef
+	case "copy":
+		return &jsArray{elems: append([]interface{}{}, arr.elems...)}
+	case "reverse":
+		arr.dropIdx()
+		for i, j := 0, n-1; i < j; i, j = i+1, j-1 {
+			arr.elems[i], arr.elems[j] = arr.elems[j], arr.elems[i]
+		}
+		return jsUndef
+	case "count":
+		// By ==, not by identity: [1.0, 2].count(1) is 1.
+		if len(args) != 1 {
+			panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+				"list.count() takes exactly one argument")})
+		}
+		c := 0
+		for _, e := range arr.elems {
+			if rt.pyEqual(e, args[0]) {
+				c++
+			}
+		}
+		return float64(c)
+	case "pop":
+		if n == 0 {
+			panic(&jsThrown{value: rt.pyExcInstance("IndexError", "pop from empty list")})
+		}
+		i := n - 1
+		if len(args) > 0 && !isUndefOrNull(args[0]) {
+			i = int(rt.toNumber(args[0]))
+			if i < 0 {
+				i += n
+			}
+		}
+		if i < 0 || i >= n {
+			panic(&jsThrown{value: rt.pyExcInstance("IndexError", "pop index out of range")})
+		}
+		v := arr.elems[i]
+		arr.dropIdx()
+		arr.elems = append(arr.elems[:i], arr.elems[i+1:]...)
+		return v
+	case "insert":
+		// CPython CLAMPS rather than raising: insert(-5, x) on a 2-list prepends
+		// and insert(99, x) appends.
+		i := int(rt.toNumber(argAt(args, 0)))
+		if i < 0 {
+			i += n
+			if i < 0 {
+				i = 0
+			}
+		}
+		if i > n {
+			i = n
+		}
+		arr.dropIdx()
+		arr.elems = append(arr.elems, nil)
+		copy(arr.elems[i+1:], arr.elems[i:])
+		arr.elems[i] = argAt(args, 1)
+		return jsUndef
+	case "remove":
+		for i, e := range arr.elems {
+			if rt.pyEqual(e, argAt(args, 0)) {
+				arr.dropIdx()
+				arr.elems = append(arr.elems[:i], arr.elems[i+1:]...)
+				return jsUndef
+			}
+		}
+		panic(&jsThrown{value: rt.pyExcInstance("ValueError", "list.remove(x): x not in list")})
+	case "extend":
+		// pyElemsOf raises CPython's own "'int' object is not iterable" for a
+		// non-iterable, and `xs.extend(xs)` doubles the list, as it does there.
+		src := rt.pyElemsOf(argAt(args, 0))
+		arr.dropIdx()
+		arr.elems = append(arr.elems, src...)
+		return jsUndef
+	case "index":
+		// start/stop clamp exactly like a slice, so index(x, -1) searches the
+		// last element only; the ValueError carries no repr in 3.14.
+		from, to := rt.pySliceRange(argAt(args, 1), argAt(args, 2), n)
+		for i := from; i < to; i++ {
+			if rt.pyEqual(arr.elems[i], argAt(args, 0)) {
+				return float64(i)
+			}
+		}
+		panic(&jsThrown{value: rt.pyExcInstance("ValueError", "list.index(x): x not in list")})
+	case "sort":
+		rt.pySortList(arr, args, kw)
+		return jsUndef
+	}
+	rt.fail("unknown list method '%s'", name)
+	return nil
+}
+
+// pySortList is list.sort(*, key=None, reverse=False), in place. CPython's is
+// STABLE and its two parameters are KEYWORD-ONLY - a positional argument is a
+// TypeError there, so it is one here too rather than being read as the key.
+// reverse= is done by reversing, sorting ascending and reversing again, which is
+// how CPython keeps equal elements in their original order under it; sorting
+// with an inverted comparison would not.
+func (rt *jsrt) pySortList(arr *jsArray, args []interface{}, kw interface{}) {
+	if len(args) > 0 {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+			"sort() takes no positional arguments")})
+	}
+	key := rt.pyKwArg(kw, "key")
+	rev := rt.pyTruthyOf(rt.pyKwArg(kw, "reverse"))
+	type pySortPair struct{ k, v interface{} }
+	pairs := make([]pySortPair, len(arr.elems))
+	for i, e := range arr.elems {
+		j := i
+		if rev {
+			j = len(arr.elems) - 1 - i
+		}
+		e = arr.elems[j]
+		k := e
+		if isCallable(key) {
+			k = rt.call(key, jsUndef, []interface{}{e})
+		}
+		pairs[i] = pySortPair{k: k, v: e}
+	}
+	// The same comparison js_pysorted uses, so sort() and sorted() can never
+	// disagree inside one engine.
+	sort.SliceStable(pairs, func(i, j int) bool { return rt.jsCompare(pairs[i].k, pairs[j].k) == -1 })
+	out := make([]interface{}, len(pairs))
+	for i, p := range pairs {
+		j := i
+		if rev {
+			j = len(pairs) - 1 - i
+		}
+		out[j] = p.v
+	}
+	arr.dropIdx()
+	arr.elems = out
+}
+
+// pyKwArg reads one keyword argument out of the keyword dict a method call
+// carries, or undefined when it was not passed.
+func (rt *jsrt) pyKwArg(kw interface{}, name string) interface{} {
+	keys, vals, ok := dictParts(kw)
+	if !ok {
+		return jsUndef
+	}
+	for i, k := range keys.elems {
+		if rt.toString(k) == name && i < len(vals.elems) {
+			return vals.elems[i]
+		}
+	}
+	return jsUndef
+}
+
+// pyBuiltinAttr - docs/todo.md 1.2. hasattr()/getattr() walked only the
+// user-class MRO and an object's own property map, so hasattr([3,1,2], "count")
+// was False and hasattr("s", "upper") was False where CPython answers True in
+// both. This is the same question the DISPATCHER answers, asked by name: the
+// str table (pysIsStrMethod, abnf/pystrmethod.go), the list table
+// (pyIsListMethod above), and the two dict/set arms of pyMethodCall. Keep in
+// step with pyDBuiltinAttr in languages/lib/python-rt.metajs and
+// pyBuiltinAttr in languages/python-interpreter.abnf.
+//
+// A builtin that this project does not HAVE stays False on purpose - hasattr(3,
+// "bit_length") is False here and True in CPython - because the alternative is
+// hasattr answering True for a call that then aborts.
+func (rt *jsrt) pyBuiltinAttr(target interface{}, name string) bool {
+	if _, isStr := target.(string); isStr {
+		return pysIsStrMethod(name)
+	}
+	if _, isArr := target.(*jsArray); isArr {
+		return pyIsListMethod(name)
+	}
+	// A set is a dict whose keys are its members, so it is asked FIRST.
+	if _, isSet := pySetElems(target); isSet {
+		return name == "add"
+	}
+	if _, _, isDict := dictParts(target); isDict {
+		switch name {
+		case "keys", "values", "items", "get", "pop":
+			return true
+		}
+	}
+	return false
+}
+
+// pyBoundBuiltin is what getattr() hands back for one of those names: CPython's
+// `<built-in method count of list object ...>`, spelled here as a host function
+// that re-enters the dispatcher with the receiver captured. Keyword arguments
+// are NOT carried through it (a signature-less builtin receives its keyword dict
+// as a trailing positional, which this cannot tell from a real argument), so
+// getattr(xs, "sort")(reverse=True) is not the same as xs.sort(reverse=True);
+// the direct call is.
+func (rt *jsrt) pyBoundBuiltin(target interface{}, name string) interface{} {
+	return jsHostFunc("pybound."+name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		// A STRING's methods are NOT in pyMethodCall: abnf/pystrmethod.go's
+		// registrar installs them by WRAPPING the js_pymcall extern, so
+		// re-entering pyMethodCall directly reaches the shared member table and
+		// dies with "unknown String method: upper". Re-enter through the extern
+		// instead, which is the same path a written `s.upper()` takes.
+		if _, isStr := target.(string); isStr {
+			if m := pyExternMaps[rt]; m != nil {
+				if f := m["js_pymcall"]; f != nil {
+					return rt.unwrap(f([]uint64{rt.wrap(target), rt.wrap(name),
+						rt.wrap(&jsArray{elems: args}), rt.wrap(jsUndef)}))
+				}
+			}
+		}
+		return rt.pyMethodCall(target, name, args, jsUndef)
+	})
+}
+
+// pyExternMaps remembers the extern table each run installed. The table is
+// filled by rxInstallExterns and then WRAPPED by the per-language registrars
+// (rxExtraExterns), so a lookup made at CALL time - which is the only time
+// pyBoundBuiltin looks - sees the fully wrapped entry no matter what order the
+// registrars ran in. Only python's getattr()-produced bound methods read it.
+var pyExternMaps = map[*jsrt]map[string]func(args []uint64) uint64{}
+
+func init() {
+	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
+		pyExternMaps[rt] = m
+	})
 }
 
 // pyForeignMethod answers whether NAME is a member-table method that Python's
@@ -12326,6 +12587,11 @@ func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
 		}
 		_, found := pyLookup(cls, name)
 		return found
+	}
+	// docs/todo.md 1.2: the BUILT-IN methods of str / list / dict / set, and
+	// __class__, which EVERY value has (None.__class__ is NoneType).
+	if name == "__class__" || rt.pyBuiltinAttr(obj, name) {
+		return true
 	}
 	if name == "__name__" {
 		if o, ok := obj.(*jsObject); ok {

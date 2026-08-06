@@ -48,6 +48,13 @@ Known deviations, all deliberate:
     from-import style is the one that works.
   - async functions are defined and inspected, never awaited: there is no event
     loop.
+  - The BUILT-IN method surface is a subset, and hasattr() answers exactly what
+    the dispatcher can run: list has all eleven of its methods, str has the
+    library in abnf/pystrmethod.go, dict has keys/values/items/get/pop, and set
+    has add - so hasattr of an int and bit_length, or of a set and discard, is
+    False here and True in CPython. A bound method from getattr() does NOT carry
+    keyword arguments: getattr(xs, sort)(reverse=True) is not
+    xs.sort(reverse=True); the written call is.
 
 There is no main() requirement: the file runs top to bottom, and a main() is called
 afterwards when one is defined. Self checking programs end with exit(fails[0]) or
@@ -1563,11 +1570,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     hostGlobals["hasattr"] = function(o, n) { return pyHasAttrOf(o, n) }
     hostGlobals["setattr"] = function(o, n, v) { pySetAttr(o, n, v); return undefined }
     function pyHasAttrOf(o, name) {
-        if (o === null || o === undefined) { return false }
+        if (o === null || o === undefined) { return name == "__class__" }
         if (typeof o == "object" && o.__isclass == true) {
             if (name == "__name__") { return true }
             return clsFind(o, name) != null
         }
+        // docs/todo.md 1.2: the BUILT-IN methods of str / list / dict / set, and
+        // __class__, which EVERY value has (None.__class__ is NoneType).
+        if (name == "__class__") { return true }
+        if (pyBuiltinAttr(o, name)) { return true }
+        // A SET's internal keys/vals arrays are not attributes. Go's set object
+        // carries them under different names, so hasattr(s, "keys") answered
+        // True here and False under llvm.Run - a live halves divergence the
+        // 1.2 sweep turned up.
+        if (isSet(o)) { return false }
+        // Likewise a LIST: hasattr([3,1,2], "length") was True here (the host
+        // array's own JS property) and False under llvm.Run, where an array is
+        // not the object type pyHasAttr scans. CPython says False.
+        if (Array.isArray(o)) { return false }
         if (typeof o == "object" && hasOwn(o, name)) { return o[name] !== pyDeleted }
         if (pyUser(o)) {
             if (name == "__dict__" || name == "__class__") { return true }
@@ -1575,6 +1595,41 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (typeof o == "function" && name == "__name__") { return true }
         return false
+    }
+    // docs/todo.md 1.2. hasattr()/getattr() walked only the user-class MRO and an
+    // object's own property map, so hasattr([3,1,2], "count") was False and
+    // hasattr("s", "upper") was False where CPython answers True in both. This is
+    // the same question the DISPATCHER answers, asked by name: the str table
+    // (pySIsStrMethod), the list table (pyIsListMethod), and the dict/set arms of
+    // mcall. Keep in step with pyBuiltinAttr in abnf/jsrt.go and pyDBuiltinAttr
+    // in languages/lib/python-rt.metajs.
+    //
+    // A builtin this project does not HAVE stays False on purpose - hasattr(3,
+    // "bit_length") is False here and True in CPython - because the alternative
+    // is hasattr answering True for a call that then aborts.
+    function pyBuiltinAttr(o, name) {
+        if (typeof o == "string") { return pySIsStrMethod(name) }
+        if (Array.isArray(o)) { return pyIsListMethod(name) }
+        // A set is a dict whose keys are its members, so it is asked FIRST.
+        if (isSet(o)) { return name == "add" }
+        if (isDict(o)) {
+            if (name == "keys" || name == "values" || name == "items") { return true }
+            if (name == "get" || name == "pop") { return true }
+        }
+        return false
+    }
+    // What getattr() hands back for one of those names: CPython's `<built-in
+    // method count of list object ...>`, spelled here as a closure that re-enters
+    // the dispatcher with the receiver captured - the same shape bindMethod uses
+    // for a user method. Keyword arguments are NOT carried through it, so
+    // getattr(xs, "sort")(reverse=True) is not the same as xs.sort(reverse=True);
+    // the direct call is.
+    function pyBoundBuiltin(target, name) {
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            return mcall(target, name, args, undefined)
+        }
     }
     function pyOrdOf(s) {
         if (typeof s != "string") {
@@ -3299,25 +3354,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             fail("unknown generator method: " + name)
         }
         if (Array.isArray(target)) {
-            if (name == "append") { target.push(args[0]); return undefined }
-            if (name == "pop") {
-                if (target.length == 0) fail("pop from empty list")
-                return target.pop()
-            }
-            // list.count(x) - docs/todo.md 1.5. This grammar had no arm at all
-            // ("unknown list method: count") while BOTH compiled halves reached
-            // rt.memberCall's KOTLIN arm and read the argument as a predicate
-            // ("call of a non function value: 2"). Python counts EQUAL elements,
-            // by == and not by identity, so [1.0, 2].count(1) is 1. The compiled
-            // twins are the `count` arm of pyMethodCall (abnf/jsrt.go) and
-            // pyDListCount (languages/lib/python-rt.metajs).
-            if (name == "count" && args.length == 1) {
-                var cn = 0
-                for (var ci = 0; ci < target.length; ci++) {
-                    if (pytruthy(binOp("==", target[ci], args[0]))) { cn++ }
-                }
-                return cn
-            }
+            // THE WHOLE LIST METHOD SURFACE - docs/todo.md 1.3. Only append, pop
+            // and count were here; sort/insert/remove/extend/index/reverse/clear/
+            // copy aborted with "unknown list method" in every engine, and pop
+            // IGNORED its index argument in all three ([3,1,2].pop(0) answered 2
+            // where CPython answers 3). The twins are pyListMethod in
+            // abnf/jsrt.go and pyListMethod in languages/lib/python-rt.metajs.
+            if (pyIsListMethod(name)) { return pyListMethod(target, name, args, kw) }
             if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
             fail("unknown list method: " + name)
         }
@@ -3366,6 +3409,178 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         fail("method call ." + name + "() on " + pstr(target))
     }
 
+    // docs/todo.md 1.3 - Python's list methods, the NAME SET first so that
+    // hasattr()/getattr() can ask exactly what the dispatcher answers. Keep in
+    // step with pyIsListMethod in abnf/jsrt.go and in
+    // languages/lib/python-rt.metajs.
+    function pyIsListMethod(name) {
+        if (name == "append" || name == "pop" || name == "clear") { return true }
+        if (name == "copy" || name == "count" || name == "sort") { return true }
+        if (name == "insert" || name == "remove" || name == "extend") { return true }
+        if (name == "index" || name == "reverse") { return true }
+        return false
+    }
+    // Every error below is a CATCHABLE Python exception with CPython 3.14's
+    // exact text, not fail(): `try: xs.remove(9) / except ValueError` has to
+    // behave the same in all three engines, which is the only thing that makes
+    // any of this assertable in one ratchet file.
+    function pyListMethod(xs, name, args, kw) {
+        var n = xs.length
+        if (name == "append") { xs.push(pyArgAt(args, 0)); return undefined }
+        if (name == "clear") { listTruncate(xs, 0); return undefined }
+        if (name == "copy") { return xs.slice(0) }
+        if (name == "reverse") {
+            var lo = 0
+            var hi = n - 1
+            while (lo < hi) {
+                var tmp = anytype
+                tmp = xs[lo]
+                xs[lo] = xs[hi]
+                xs[hi] = tmp
+                lo = lo + 1
+                hi = hi - 1
+            }
+            return undefined
+        }
+        if (name == "count") {
+            // By ==, not by identity: [1.0, 2].count(1) is 1.
+            if (args.length != 1) { pyListErr("TypeError", "list.count() takes exactly one argument") }
+            var cn = 0
+            for (var ci = 0; ci < n; ci++) {
+                if (pytruthy(binOp("==", xs[ci], args[0]))) { cn++ }
+            }
+            return cn
+        }
+        if (name == "pop") {
+            if (n == 0) { pyListErr("IndexError", "pop from empty list") }
+            var pi = n - 1
+            if (args.length > 0 && args[0] !== undefined && args[0] !== null) {
+                pi = pyNumOf(args[0])
+                if (pi < 0) { pi = pi + n }
+            }
+            if (pi < 0 || pi >= n) { pyListErr("IndexError", "pop index out of range") }
+            var pv = anytype
+            pv = xs[pi]
+            listRemoveAt(xs, pi)
+            return pv
+        }
+        if (name == "insert") {
+            // CPython CLAMPS rather than raising: insert(-5, x) on a 2-list
+            // prepends and insert(99, x) appends.
+            var ii = pyNumOf(pyArgAt(args, 0))
+            if (ii < 0) {
+                ii = ii + n
+                if (ii < 0) { ii = 0 }
+            }
+            if (ii > n) { ii = n }
+            xs.push(undefined)
+            for (var im = xs.length - 1; im > ii; im--) { xs[im] = xs[im - 1] }
+            xs[ii] = pyArgAt(args, 1)
+            return undefined
+        }
+        if (name == "remove") {
+            for (var ri = 0; ri < n; ri++) {
+                if (pytruthy(binOp("==", xs[ri], pyArgAt(args, 0)))) {
+                    listRemoveAt(xs, ri)
+                    return undefined
+                }
+            }
+            pyListErr("ValueError", "list.remove(x): x not in list")
+        }
+        if (name == "extend") {
+            // A copy first, so xs.extend(xs) DOUBLES the list as it does in
+            // CPython rather than looping forever.
+            var src = pyIterOrTypeErr(pyArgAt(args, 0)).slice(0)
+            for (var ei = 0; ei < src.length; ei++) { xs.push(src[ei]) }
+            return undefined
+        }
+        if (name == "index") {
+            // start/stop clamp exactly like a slice, so index(x, -1) searches the
+            // last element only; the ValueError carries no repr in 3.14.
+            var from = pyListClamp(pyArgAt(args, 1), 0, n)
+            var to = pyListClamp(pyArgAt(args, 2), n, n)
+            if (to < from) { to = from }
+            for (var xi = from; xi < to; xi++) {
+                if (pytruthy(binOp("==", xs[xi], pyArgAt(args, 0)))) { return xi }
+            }
+            pyListErr("ValueError", "list.index(x): x not in list")
+        }
+        if (name == "sort") { pySortList(xs, args, kw); return undefined }
+        fail("unknown list method: " + name)
+        return undefined
+    }
+    function pyArgAt(args, i) { return i < args.length ? args[i] : undefined }
+    function pyListErr(kind, msg) { pyRaise(pyMakeExc(kind, [msg])) }
+    // An index argument as a plain number. A bool IS an int in Python, a float
+    // box is not an index at all - and the TypeError is CPython's own text.
+    function pyNumOf(v) {
+        if (typeof v == "number") { return v }
+        if (typeof v == "boolean") { return v ? 1 : 0 }
+        pyListErr("TypeError", "'" + pyTypeOf(v).__name + "' object cannot be interpreted as an integer")
+        return 0
+    }
+    // One end of an index() window: absent means the default, negative wraps,
+    // and both ends clamp into [0, n] - pySliceRange in abnf/jsrt.go.
+    function pyListClamp(v, dflt, n) {
+        if (v === undefined || v === null) { return dflt }
+        var i = pyNumOf(v)
+        if (i < 0) { i = i + n }
+        if (i < 0) { i = 0 }
+        if (i > n) { i = n }
+        return i
+    }
+    // extend()'s argument, with CPython's TypeError instead of a hard abort.
+    function pyIterOrTypeErr(v) {
+        if (Array.isArray(v)) { return v }
+        if (isGen(v) || isPyIt(v) || isDict(v) || typeof v == "string") { return iterToList(v) }
+        pyListErr("TypeError", "'" + pyTypeOf(v).__name + "' object is not iterable")
+        return []
+    }
+    // list.sort(*, key=None, reverse=False), in place. CPython's is STABLE and
+    // both parameters are KEYWORD-ONLY - a positional argument is a TypeError
+    // there, so it is one here rather than being read as the key. reverse= is
+    // done by reversing, sorting ascending and reversing again, which is how
+    // CPython keeps equal elements in their original order under it; an inverted
+    // comparison would not. The comparison is binOp("<"), the same one sorted()
+    // uses, so the two can never disagree.
+    function pySortList(xs, args, kw) {
+        if (args.length > 0) { pyListErr("TypeError", "sort() takes no positional arguments") }
+        var key = pyKwArg(kw, "key")
+        var rev = pytruthy(pyKwArg(kw, "reverse"))
+        var vals = []
+        var keys = []
+        for (var i = 0; i < xs.length; i++) {
+            var j = rev ? xs.length - 1 - i : i
+            vals.push(xs[j])
+            keys.push(typeof key == "function" ? key(xs[j]) : xs[j])
+        }
+        // Insertion sort, which is STABLE, exactly as sorted() does it.
+        for (var s = 1; s < vals.length; s++) {
+            var kx = anytype
+            kx = keys[s]
+            var vx = anytype
+            vx = vals[s]
+            var p = s - 1
+            while (p >= 0 && pytruthy(binOp("<", kx, keys[p]))) {
+                keys[p + 1] = keys[p]
+                vals[p + 1] = vals[p]
+                p = p - 1
+            }
+            keys[p + 1] = kx
+            vals[p + 1] = vx
+        }
+        for (var w = 0; w < vals.length; w++) {
+            xs[rev ? vals.length - 1 - w : w] = vals[w]
+        }
+    }
+    // One keyword argument of a method call, or undefined when it was not passed.
+    function pyKwArg(kw, name) {
+        if (kw === null || kw === undefined) { return undefined }
+        var i = dictFind(kw, name)
+        if (i < 0) { return undefined }
+        return kw.vals[i]
+    }
+
     // docs/todo.md 2.4 and 5.2. The member-call names that the COMPILED halves
     // reach through rt.memberCall - the table nine languages share - and that
     // Python's receiver type does not have: `xs.size()` answered 2 and
@@ -3378,10 +3593,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `add` a real set method. Keep in step with pyForeignMethod in abnf/jsrt.go
     // and pyDForeign in languages/lib/python-rt.metajs.
     //
-    // A name Python DOES have and this project does not (list.sort, list.insert)
-    // is deliberately NOT here: it still aborts, because a hard stop says
-    // "unimplemented" where a catchable AttributeError would let a program
-    // silently take the wrong branch.
+    // A name Python DOES have and this project does not is deliberately NOT
+    // here: it still aborts, because a hard stop says "unimplemented" where a
+    // catchable AttributeError would let a program silently take the wrong
+    // branch. list.sort and list.insert used to be the example; they are real
+    // methods now (pyListMethod above), so the rule stands with no member.
     function pyForeignMethod(target, name) {
         if (Array.isArray(target)) {
             // Kotlin's, Java's, Dart's and Swift's list methods. `count` is not
@@ -6175,7 +6391,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         scopePut(o, name, v)
     }
     function pyattr(o, name) {
-        if (o === null || o === undefined) { fail("AttributeError: '" + name + "' of None") }
+        if (o === null || o === undefined) {
+            if (name == "__class__") { return pyTypeOf(o) } // None.__class__ is NoneType.
+            fail("AttributeError: '" + name + "' of None")
+        }
         // Every Python number carries .real / .imag; a complex answers them from its
         // own fields further down, an ordinary number is its own real part.
         if (typeof o == "number") {
@@ -6198,6 +6417,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             fail("AttributeError: type object '" + o.__name + "' has no attribute '" + name + "'")
         }
+        // docs/todo.md 1.2: a BOUND built-in method, so getattr(xs, "count")(1)
+        // is the 1 CPython answers. Ahead of the own-property arm because a dict
+        // literally has a "keys" property holding its key ARRAY, and CPython's
+        // d.keys is the method. x.__class__ is the same class object type(x)
+        // hands out, so `[].__class__ is list` holds.
+        if (pyBuiltinAttr(o, name)) { return pyBoundBuiltin(o, name) }
+        if (name == "__class__") { return pyTypeOf(o) }
+        if (isSet(o)) { pyRaise(pyMakeExc("AttributeError", ["'set' object has no attribute '" + name + "'"])) }
         if (typeof o == "object" && hasOwn(o, name)) {
             if (o[name] === pyDeleted) { fail("AttributeError: '" + name + "'") }
             return o[name]
