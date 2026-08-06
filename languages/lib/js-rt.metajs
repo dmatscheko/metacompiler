@@ -747,7 +747,8 @@ function js_has(o, key) {
 // The sequence a for-of loop iterates. Arrays, strings and objects are their own;
 // a GENERATOR is materialized, because the subset iterates by index. Layer 2 has
 // no tag test, so "is this a generator" is structural: not an array, and its
-// `next` member is callable (the floor's tag-15 cell exposes exactly that one).
+// `next` member is callable (the floor's tag-15 cell exposes that one and
+// `return`, the closing half of the protocol - see runtime.c gen_close).
 function js_iterable(v) {
     if (jvIsObj(v)) {
         var nx = v["next"]

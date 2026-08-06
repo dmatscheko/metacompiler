@@ -1131,6 +1131,116 @@ function keyStr33(o: any): string {
     return s;
 }
 
+// ===== SECTION 34: an iterator is CLOSED on an early exit =====
+// Making for-of lazy (SECTION 33's python twin, docs/todo.md 1.6) left a
+// generator SUSPENDED when the loop left early: a second loop over it RESUMED
+// where node closes it, and a `finally` around the yield never ran. It could not
+// be fixed in the emitter alone - the floor's generator cell answered `next`
+// alone - so runtime.c grew gen_close (a GEN_EXIT sentinel thrown INTO the
+// suspended body, so its finally clauses unwind normally), abnf/jsrt.go grew the
+// matching closeBody, and makeForOf now calls the iterator's `return()` on break.
+//
+// WHAT THE TWO HALVES AGREE ON, and what they cannot: this half's generators
+// REPLAY, so the body's finally has already run once per next() and .return()
+// only sets the done flag. Every assertion below is therefore about the CLOSED
+// STATE (a second loop yields nothing, next() answers done) and about a count
+// taken after exactly ONE step, where replay's one finally and the compiler's
+// one close-time finally give the same number by different routes. The ORDER of
+// the print is a halves divergence, stated in typescript-interpreter.abnf's :description
+// and deliberately not asserted.
+function s34(): void {
+    var fins = 0
+    function* g34() {
+        try { yield 1; yield 2; yield 3 } finally { fins = fins + 1 }
+    }
+    // break: the loop closes the generator, so a second loop over it is empty.
+    var a = g34()
+    var seen = []
+    for (var x of a) { seen.push(x); break }
+    var again = []
+    for (var y of a) { again.push(y) }
+    check("itc1", seen.length === 1 && seen[0] === 1)
+    check("itc2", again.length === 0)
+    check("itc3", a.next().done === true && a.next().value === undefined)
+    check("itc4", fins === 1)
+    // Exhausting the loop normally leaves it done as well. No finally count here:
+    // replay runs one per next(), so the two halves reach four and one.
+    var b = g34()
+    var total = 0
+    for (var z of b) { total = total + z }
+    check("itc5", total === 6 && b.next().done === true)
+    // continue does NOT close; the break after it does.
+    var c = g34()
+    var got = []
+    for (var w of c) { if (w === 1) { continue } got.push(w); break }
+    check("itc6", got.length === 1 && got[0] === 2)
+    var c2 = []
+    for (var w2 of c) { c2.push(w2) }
+    check("itc7", c2.length === 0)
+    // A break out of a TRY inside the loop body: the break becomes a control
+    // signal that excDispatch re-issues, and it lands on the closing block too.
+    var d = g34()
+    var dfin = 0
+    for (var v of d) { try { break } finally { dfin = dfin + 1 } }
+    check("itc8", dfin === 1 && d.next().done === true)
+    // A LABELED break to THIS loop closes it (bindLabelBrk); the label's exit is
+    // reached through the loop's own closing block.
+    var e = g34()
+    lbl34: for (var u of e) { break lbl34 }
+    check("itc9", e.next().done === true)
+    // g.return(v) is the same close, spelled by hand, and answers {value, done}.
+    var f = g34()
+    f.next()
+    var r = f.return(9)
+    check("itc10", r.value === 9 && r.done === true)
+    check("itc11", f.next().done === true)
+    // ... on a generator that never started (nothing to unwind) ...
+    var h = g34()
+    var rh = h.return(5)
+    check("itc12", rh.value === 5 && rh.done === true && h.next().done === true)
+    // ... and on one that already finished.
+    var i2 = g34()
+    for (var q of i2) { }
+    var ri = i2.return(7)
+    check("itc13", ri.value === 7 && ri.done === true)
+    // A hand-written iterator gets its own return() called, receiver and all.
+    var closed = 0
+    var iter = {
+        n: 0,
+        next: function () { this.n = this.n + 1; return { value: this.n, done: this.n > 5 } },
+        return: function () { closed = closed + 1; return { value: undefined, done: true } }
+    }
+    for (var p of iter) { break }
+    check("itc14", closed === 1)
+    // An iterator WITHOUT a return member is left alone rather than aborting,
+    // and an array (the index arm) never looks for one.
+    var bare = { n: 0, next: function () { this.n = this.n + 1; return { value: this.n, done: this.n > 3 } } }
+    var bn = 0
+    for (var s of bare) { bn = s; break }
+    check("itc15", bn === 1)
+    var asum = 0
+    for (var t of [1, 2, 3]) { asum = asum + t; break }
+    check("itc16", asum === 1)
+    // Destructuring from a generator, then breaking out of it.
+    var g2 = g34()
+    var pairs = []
+    function* pg34() { yield [1, 2]; yield [3, 4] }
+    for (var [pa, pb] of pg34()) { pairs.push(pa + pb); break }
+    check("itc17", pairs.length === 1 && pairs[0] === 3)
+    // WHAT IS NOT CLOSED, in BOTH halves and unlike node: a `return` out of the
+    // loop body and a `throw` through it. Neither reaches a block makeForOf owns
+    // (one rets the frame, the other longjmps), and the interpreter half declines
+    // them too rather than letting the halves disagree. Asserted so that a later
+    // change to either engine alone is visible here.
+    var rg = g34()
+    check("itc18", takeOne34(rg) === 1)
+    check("itc19", rg.next().done === false)
+    var tg = g34()
+    try { for (var tv of tg) { throw "x" } } catch (te) { }
+    check("itc20", tg.next().done === false)
+}
+function takeOne34(g: any): number { for (var x of g) { return x } return 0 }
+
 function main(): number {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
@@ -1165,6 +1275,7 @@ function main(): number {
     s31(); // SECTION-CALL 31
     s32(); // SECTION-CALL 32
     s33(); // SECTION-CALL 33
+    s34(); // SECTION-CALL 34
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

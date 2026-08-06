@@ -3504,12 +3504,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(fb, "js_scope_decl", [curScopeV, emitStr(fb, rest),
                                           callExt(fb, "js_pyrest", [f.Params[1], handle(params.length)])])
         }
+        // A try/except/finally/with BODY closure (isCtl) is not a function of the
+        // program: a `yield` inside it belongs to the def around it, so sawYield
+        // has to travel OUT of it. Resetting it here made `def g(): try: yield 1
+        // finally: ...` compile g as an ordinary function, and both compiler
+        // halves died with "yield outside of a generator" while the interpreter
+        // ran it - a generator with a `finally` around its yield was unreachable
+        // in this half at all.
         var savedYield = sawYield
-        sawYield = false
+        if (!isCtl) { sawYield = false }
         var endB = bodyT(fb)
         endB.NewRet(hUndef)
         genClosure = sawYield
-        sawYield = savedYield
+        if (!isCtl) { sawYield = savedYield }
         pyBindSink = savedSink
         pyAnnotHere = savedAnnot
         pyInnerNames = savedInner

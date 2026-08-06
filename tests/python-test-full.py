@@ -1503,6 +1503,109 @@ def s33():
         break
     check("lazy09", seen == 2)
 
+# ===== SECTION 34: generator.close(), and a `finally` around a yield =====
+# Two defects of the lazy-for-of work (docs/todo.md 1.6), both fixed here:
+#
+#   * g.close() answered a {value, done} RECORD where CPython answers None, and
+#     natively it did not close at all - it wrote an entry in a layer-2 side table
+#     that only send()/next() consulted, so `for v in g` after g.close() still
+#     yielded the rest. The floor closes the cell itself now (runtime.c's
+#     gen_close, reached through the tag-15 `return` member).
+#   * a `yield` inside a `try` made both COMPILER halves die with "yield outside
+#     of a generator": emitClosure reset sawYield for the try-body closure, so the
+#     def around it was not compiled as a generator function at all. A generator
+#     with a finally around its yield was unreachable in that half.
+#
+# CPython does NOT close a generator when a `for` over it breaks - that is
+# JavaScript's rule, not Python's - so nothing here asserts that it does.
+# The finally COUNT is taken after exactly one step, where the interpreter's
+# replay (one finally per next()) and the compiler's one close-time finally agree;
+# their ORDER differs and is the documented replay limitation, not asserted.
+def s34():
+    state = [0]
+    def g34():
+        try:
+            yield 1
+            yield 2
+            yield 3
+        finally:
+            state[0] = state[0] + 1
+    # A `finally` around a yield: the values are unaffected and the clause runs.
+    got = []
+    for v in g34():
+        got.append(v)
+    check("gcl1", got == [1, 2, 3])
+    # No finally COUNT here: replay runs one per next(), so exhausting three
+    # yields reaches four in the interpreter half and one in the compiler's.
+    # close() answers None, and closes: the loop that follows it yields nothing.
+    state[0] = 0
+    h = g34()
+    first = []
+    for v in h:
+        first.append(v)
+        break
+    check("gcl3", first == [1])
+    check("gcl4", h.close() is None)
+    check("gcl5", state[0] == 1)
+    rest = []
+    for v in h:
+        rest.append(v)
+    check("gcl6", rest == [])
+    # close() is idempotent, and answers None on a generator that never started
+    # and on one that ran to the end.
+    check("gcl7", h.close() is None)
+    k = g34()
+    check("gcl8", k.close() is None)
+    empty = []
+    for v in k:
+        empty.append(v)
+    check("gcl9", empty == [])
+    m = g34()
+    for v in m:
+        pass
+    check("gcl10", m.close() is None)
+    # CPython's own rule: a `for` that BREAKS leaves the generator open, so the
+    # next loop over it RESUMES. (node closes it; python does not.)
+    n = g34()
+    a = []
+    for v in n:
+        a.append(v)
+        break
+    b = []
+    for v in n:
+        b.append(v)
+    check("gcl11", a == [1] and b == [2, 3])
+    # Nested finally clauses unwind outward, and send() still works through a try.
+    def g34b():
+        try:
+            try:
+                yield 1
+                yield 2
+            finally:
+                state[0] = state[0] + 10
+        finally:
+            state[0] = state[0] + 100
+    state[0] = 0
+    p = g34b()
+    one = []
+    for v in p:
+        one.append(v)
+        break
+    p.close()
+    check("gcl12", one == [1] and state[0] == 110)
+    # A generator whose try has an EXCEPT arm still yields through it.
+    def g34c():
+        try:
+            yield 1
+            raise ValueError("boom")
+        except ValueError:
+            yield 2
+    q = []
+    for v in g34c():
+        q.append(v)
+    check("gcl13", q == [1, 2])
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -1537,5 +1640,6 @@ def main():
     s31() # SECTION-CALL 31
     s32() # SECTION-CALL 32
     s33() # SECTION-CALL 33
+    s34() # SECTION-CALL 34
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

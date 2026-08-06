@@ -4473,40 +4473,6 @@ function pyDCallPyValue(v, args, kw) {
     return pyCall(v, pyBindCall(v, args, kw))
 }
 
-// ----- the generator side table --------------------------------------------
-
-// A generator is a floor CELL: nothing can be stored on it, so `close()` - which
-// in Go is g.finish(), setting g.done on the generator itself - is recorded in
-// an identity-keyed side table instead (two parallel arrays and a `===` scan,
-// as rbLambdas does in ruby-rt.metajs). Exhaustion needs no entry: the floor's
-// own generator answers {value: undefined, done: true} for every step after the
-// body returned, exactly as (*jsGenerator).step does (jsrt.go:483).
-var pyDGenCell = []
-var pyDGenClosed = []
-
-function pyDGenIsClosed(g) {
-    var i = 0
-    while (i < pyDGenCell.length) {
-        if (pyDGenCell[i] === g) { return pyDGenClosed[i] }
-        i = i + 1
-    }
-    return false
-}
-
-function pyDGenClose(g) {
-    var i = 0
-    while (i < pyDGenCell.length) {
-        if (pyDGenCell[i] === g) {
-            pyDGenClosed[i] = true
-            return undefined
-        }
-        i = i + 1
-    }
-    pyDGenCell.push(g)
-    pyDGenClosed.push(true)
-    return undefined
-}
-
 // pyMethodCall (jsrt.go:9207) is obj.name(args) with Python's binding rule: an
 // instance prepends itself, a class object does not (so Base.m(self) works).
 //
@@ -4531,16 +4497,13 @@ function pyDMethodCall(target, name, args, kw) {
             sent = undefined
             if (args.length > 0) { sent = args[0] }
             var st = anytype
-            if (pyDGenIsClosed(target)) {
-                // Go's step returns {undefined, true} for a generator whose done
-                // flag is set, and close() set it. The floor cell has no such
-                // flag reachable from here, so the side table stands in.
-                st = {}
-                st["value"] = undefined
-                st["done"] = true
-            } else {
-                st = target["next"].apply(target, [sent])
-            }
+            // A CLOSED generator needs no special case here: close() below is a
+            // real close in the floor (runtime.c's gen_close sets the cell's done
+            // flag), so gen_next answers {undefined, true} for it exactly as
+            // (*jsGenerator).step does. It used to need an identity-keyed side
+            // table, which the for-loop's own iteration never consulted - so
+            // `for v in g` after g.close() still yielded the rest, natively only.
+            st = target["next"].apply(target, [sent])
             if (st === undefined || st === null) { fail("generator step failed") }
             if (st["done"] === true) {
                 var exc = pyExcInstance("StopIteration", "")
@@ -4560,13 +4523,13 @@ function pyDMethodCall(target, name, args, kw) {
             return st["value"]
         }
         if (name == "close") {
-            // g.finish(undefined): abandon the body without resuming it and
-            // answer the {value, done} record it builds.
-            pyDGenClose(target)
-            var res = {}
-            res["value"] = undefined
-            res["done"] = true
-            return res
+            // CPython's generator.close() answers None, not a {value, done}
+            // record - the record is JavaScript's g.return(v), which is what the
+            // floor's tag-15 `return` member builds and what this discards. The
+            // close itself runs the body's `finally` clauses (runtime.c's
+            // gen_close, abnf/jsrt.go's closeBody).
+            target["return"].apply(target, [undefined])
+            return undefined
         }
     }
     var cls = pyClassOf(target)

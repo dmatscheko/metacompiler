@@ -488,6 +488,19 @@ type jsGenerator struct {
 	autoKey   float64
 }
 
+// genExit is the sentinel finish() sends INTO a suspended body so that the
+// `finally` clauses wrapping its yield run before the generator is abandoned -
+// JavaScript's return completion and CPython's GeneratorExit. js_yield turns it
+// into a panic on the BODY's goroutine, so the unwinding is the ordinary one and
+// every js_try between the yield and the body's entry runs its finally clause.
+//
+// It is deliberately not a *jsThrown: js_try's catch arm tests for one, so a
+// `catch` clause cannot swallow a close. The C floor gets the same answer with
+// an explicit `pending != GEN_EXIT` guard (runtime.c's js_try).
+type genExitSignal struct{ _ byte }
+
+var genExit interface{} = &genExitSignal{}
+
 // genStep is one handshake result: a yielded value, the return value (done), or a
 // panic (a throw or a runtime error) that has to be re-raised in the resumer.
 type genStep struct {
@@ -569,12 +582,45 @@ func (g *jsGenerator) prime(rt *jsrt) {
 	}
 }
 
-// finish abandons the body without resuming it (generator.return(v)).
-func (g *jsGenerator) finish(v interface{}) interface{} {
+// closeBody abandons the body, RUNNING the finally clauses that wrap its
+// suspended yield (see genExit). A body that never started has none to run, so
+// it is only marked done - which is what node and CPython do too.
+func (g *jsGenerator) closeBody(rt *jsrt) {
+	if g.done {
+		return
+	}
+	if !g.started {
+		g.done = true
+		g.lastValue = jsUndef
+		g.lastKey = jsUndef
+		return
+	}
+	savedThis, savedNT := rt.thisStack, rt.newTargetStack
+	rt.thisStack, rt.newTargetStack = g.savedThis, g.savedNT
+	prevGen := rt.curGen
+	rt.curGen = g
+	g.resume <- genExit
+	st := <-g.yields
+	rt.curGen = prevGen
+	g.savedThis, g.savedNT = rt.thisStack, rt.newTargetStack
+	rt.thisStack, rt.newTargetStack = savedThis, savedNT
+	// A body that swallowed the sentinel and yielded again is abandoned where it
+	// stands (its goroutine stays parked), the same answer the C floor gives:
+	// node's TypeError and CPython's RuntimeError for that shape are not
+	// expressible in either engine.
 	g.done = true
-	g.retValue = v
 	g.lastValue = jsUndef
 	g.lastKey = jsUndef
+	if st.panicVal != nil && st.panicVal != genExit {
+		panic(st.panicVal)
+	}
+}
+
+// finish is generator.return(v): close the body and answer the record the
+// iterator protocol wants.
+func (g *jsGenerator) finish(rt *jsrt, v interface{}) interface{} {
+	g.closeBody(rt)
+	g.retValue = v
 	res := newJSObject()
 	res.set("value", v)
 	res.set("done", true)
@@ -2322,7 +2368,7 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 			})
 		case "return":
 			return jsHostFunc("return", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-				return o.finish(argAt(args, 0))
+				return o.finish(rt, argAt(args, 0))
 			})
 		// The INSPECTION half of the iterator protocol, which JavaScript's
 		// {value, done} record folds into next() but most other languages expose as
@@ -7077,7 +7123,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				rt.fail("yield outside of a generator")
 			}
 			g.yields <- &genStep{value: u(a[0]), done: false}
-			return w(<-g.resume)
+			sent := <-g.resume
+			// finish() resumes with genExit to CLOSE the body: this yield does
+			// not answer, it panics, so the body unwinds through its own
+			// finally clauses.
+			if sent == genExit {
+				panic(genExit)
+			}
+			return w(sent)
 		},
 		// The sequence a for-of loop iterates: arrays, strings and objects are their own,
 		// a generator is materialized (the subset iterates by index, so a lazy source has
@@ -11350,7 +11403,10 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 			}
 			return st.props["value"]
 		case "close":
-			return g.finish(jsUndef)
+			// CPython's generator.close() answers None, not a {value, done}
+			// record - the record is JavaScript's g.return(v).
+			g.closeBody(rt)
+			return jsUndef
 		}
 	}
 	if cls, ok := pyClassObj(target); ok {

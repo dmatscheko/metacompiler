@@ -420,6 +420,17 @@ long RES_CAP;
 long CUR_GEN;        /* the generator whose body is running, for js_yield */
 long CORO_ENTRY;     /* &coro_entry, from dlsym; 0 until the first generator */
 
+/* GEN_EXIT is the sentinel gen_close() throws INTO a suspended body so that the
+ * `finally` clauses wrapping its yield run before the generator is abandoned -
+ * JavaScript's return completion and CPython's GeneratorExit. It is one object,
+ * created on the first close and never freed (gc_roots traces it), and no
+ * program can name it: nothing in any of the sixteen languages hands out a
+ * reference to it, so `pending != GEN_EXIT` in js_try is an exact test. The
+ * twin is abnf/jsrt.go's genExit. 0 until the first close, which is why every
+ * comparison against it is guarded by GEN_EXIT != 0 - handle 0 is undefined,
+ * and `throw undefined` is legal. */
+long GEN_EXIT;
+
 long GC_REGS;        /* a jmp_buf used only to spill the callee-saved registers */
 long GC_MSTACK;
 long GC_MTOP;
@@ -3055,6 +3066,11 @@ long get_member(long obj, long key) {
 	 * key / valid / send / getReturn are layer 2 over it (see the cost table in
 	 * docs/runtime-next-plan.md). */
 	if (t == 15 && tag_of(key) == 4 && str_eq_c(key, "next")) { return mk_bound(obj, 60); }
+	/* g.return(v): the CLOSING half of the iterator protocol. It is answered
+	 * here and not left to layer 2 because a generator is a floor cell - nothing
+	 * can be stored on one - so python-rt.metajs used to keep a closed-ness side
+	 * table that the native for-loop never consulted. See gen_close. */
+	if (t == 15 && tag_of(key) == 4 && str_eq_c(key, "return")) { return mk_bound(obj, 61); }
 	if (t == 5) {
 		if (tag_of(key) == 4) {
 			long mid;
@@ -3534,7 +3550,7 @@ void *coro_entry(void *arg) {
 /* Resume a generator until its next yield or its return. Answers nothing: the
  * result is in the cell (d = yielded, e = done, f = returned or thrown), and a
  * body that threw has its value RE-RAISED here, on the resumer's stack. */
-void gen_resume(long g, long sent) {
+void gen_resume(long g, long sent, int closing) {
 	long *cb;
 	long anchor = 0;
 	long save_gen;
@@ -3602,8 +3618,49 @@ void gen_resume(long g, long sent) {
 	threw = cb[11];
 	if (threw != 0) {
 		cb[11] = 0;
-		js_throw(ff(g));
+		/* A body being CLOSED leaves by the GEN_EXIT sentinel js_yield threw
+		 * into it; that is the close completing, not an exception, so it stops
+		 * here. Anything else a closing body throws - from its own finally, say
+		 * - propagates exactly as a normal resume's would. */
+		if (closing != 0 && GEN_EXIT != 0 && ff(g) == GEN_EXIT) {
+			sf(g, H_UNDEF);
+		} else {
+			js_throw(ff(g));
+		}
 	}
+}
+
+/* gen_close(g): abandon a generator, running the `finally` clauses that wrap its
+ * suspended yield. The twin of abnf/jsrt.go's (*jsGenerator).finish.
+ *
+ * A generator that never started, or that already finished, is marked done and
+ * nothing runs - a body that has not begun has no finally to run, which is what
+ * both node and CPython do. A SUSPENDED body is resumed with cb[13] set, and
+ * js_yield turns that into a js_throw of GEN_EXIT on the coroutine's own stack,
+ * so the unwinding is the ordinary one: every js_try barrier between the yield
+ * and the body's entry runs its finally clause, and coro_entry's barrier catches
+ * what is left. */
+void gen_close(long g) {
+	long *cb;
+	if (fe(g) != 0) { return; }
+	if (fc(g) == 0) {
+		se(g, 1);
+		sd(g, H_UNDEF);
+		sf(g, H_UNDEF);
+		return;
+	}
+	if (GEN_EXIT == 0) {
+		GEN_EXIT = mk_obj();
+		obj_put(GEN_EXIT, mk_cstr("__genexit"), H_TRUE);
+	}
+	cb = (long *)fc(g);
+	cb[13] = 1;
+	gen_resume(g, H_UNDEF, 1);
+	/* A body that swallowed the sentinel and yielded again is abandoned where
+	 * it stands rather than driven in a loop: node answers a TypeError there
+	 * and CPython a RuntimeError, and neither is expressible in the floor. */
+	se(g, 1);
+	sd(g, H_UNDEF);
 }
 
 /* js_yield: suspend the body, hand v to the pending next() and answer the value
@@ -3630,6 +3687,13 @@ long js_yield(long v) {
 	JB_CAP = cb[12];
 	JB_DEPTH = cb[10];
 	CUR_GEN = g;
+	/* gen_close set cb[13] before resuming: this yield does not answer, it
+	 * THROWS, so the body unwinds through its own finally clauses on its own
+	 * stack and its own barrier pool. */
+	if (cb[13] != 0) {
+		cb[13] = 0;
+		js_throw(GEN_EXIT);
+	}
 	return ff(g);
 }
 
@@ -3642,12 +3706,25 @@ long gen_next(long g, long args) {
 		val = H_UNDEF;
 		done = 1;
 	} else {
-		gen_resume(g, arg_at(args, 0));
+		gen_resume(g, arg_at(args, 0), 0);
 		if (fe(g) != 0) { val = ff(g); done = 1; } else { val = fd(g); done = 0; }
 	}
 	res = mk_obj();
 	obj_put(res, mk_cstr("value"), val);
 	obj_put(res, mk_cstr("done"), done != 0 ? H_TRUE : H_FALSE);
+	return res;
+}
+
+/* g.return(v) -> {value: v, done: true}, having closed the body. The twin of
+ * abnf/jsrt.go's (*jsGenerator).finish, and the same record it builds. */
+long gen_return(long g, long args) {
+	long v = arg_at(args, 0);
+	long res;
+	gen_close(g);
+	sf(g, v);
+	res = mk_obj();
+	obj_put(res, mk_cstr("value"), v);
+	obj_put(res, mk_cstr("done"), H_TRUE);
 	return res;
 }
 
@@ -3709,6 +3786,7 @@ long str_index_of(long h, long sub) {
 long builtin_method(long recv, long mid, long args) {
 	long t = tag_of(recv);
 	if (mid == 60) { return gen_next(recv, args); }   /* generator.next(v) */
+	if (mid == 61) { return gen_return(recv, args); } /* generator.return(v) */
 	if (mid == 40) {          /* fn.apply(this, argsArray) */
 		long a = arg_at(args, 1);
 		if (tag_of(a) != 5) { a = mk_arr(); }
@@ -4681,7 +4759,15 @@ long js_try(long tryC, long catchC, long finC) {
 		pending = THROWN;
 		havePending = 1;
 	}
-	if (havePending && hasCatch) {
+	/* A catch clause does NOT see the generator-close sentinel: GEN_EXIT is a
+	 * RETURN COMPLETION, which JavaScript routes past every catch and through
+	 * every finally, and abnf/jsrt.go gets the same answer for free (its catch
+	 * arm tests for *jsThrown and the close panic is not one). The cost of the
+	 * divergence it buys against CPython - where a bare `except:` DOES catch
+	 * GeneratorExit - is one unusual program shape, against a floor that would
+	 * otherwise let a `catch` swallow a close and leave the body suspended
+	 * inside its own catch clause. */
+	if (havePending && hasCatch && (GEN_EXIT == 0 || pending != GEN_EXIT)) {
 		long a = mk_arr();
 		arr_push(a, pending);
 		havePending = 0;
@@ -4735,6 +4821,7 @@ void gc_roots(void) {
 	gc_try(G_ROOT, 1);
 	gc_try(THROWN, 1);
 	gc_try(RETSLOT, 1);
+	gc_try(GEN_EXIT, 1);
 	while (i < 1281) { gc_try(NIC[i], 1); i = i + 1; }
 	i = 0;
 	while (i < 8192) { gc_try(SMC_VAL[i], 1); i = i + 1; }

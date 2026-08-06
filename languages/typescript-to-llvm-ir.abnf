@@ -3887,11 +3887,20 @@ NotFuncHead = :script(~~
             // for "drive this lazily" is STRUCTURAL - a callable `next` member. There are
             // no symbols in this subset, so Symbol.iterator cannot be consulted; and an
             // array, a string and a plain object answer no `next`, so they keep the index
-            // arm below, unchanged. What this deliberately does NOT do is call the
-            // iterator's `return()` on an early exit: the floor's generator cell exposes
-            // `next` ALONE (runtime.c's get_member, tag 15) and the Go twin's finish()
-            // does not run the body's `finally` either, so emitting the call would buy a
-            // divergence between the two engines and no behaviour in either.
+            // arm below, unchanged.
+            //
+            // A BREAK out of the lazy arm CLOSES the iterator, as node does: the loop's
+            // brk target is closeB below, which calls the iterator's `return()` when it
+            // has a callable one. The floor's tag-15 cell answers `return` since
+            // runtime.c's gen_close, and both it and abnf/jsrt.go's closeBody run the
+            // body's `finally` clauses, so the two engines agree - which is exactly what
+            // this used to be unable to buy. A LABELED break to THIS loop closes it too
+            // (bindLabelBrk re-points the label at closeB). What is still NOT closed: a
+            // `return` or a `throw` leaving the loop body, and a labeled break to an
+            // OUTER statement - none of the three reaches a block this emitter owns, one
+            // rets the frame, one longjmps and one branches to the outer label's exit.
+            // node closes the iterator in all three; the interpreter half deliberately
+            // does not either, so the two halves agree (js-interpreter.abnf makeForOf).
             var lazy = !isIn
             var isItV = anytype // A handle: the probe's result, or the constant false.
             var nxV = anytype   // A handle: the `next` member, or undefined.
@@ -3957,8 +3966,22 @@ NotFuncHead = :script(~~
             // declarations in the loop scope); a plain name reuses its single slot.
             if (isPat) { bodyB = bindPattern(bodyB, name, elemV, patExt) }
             else { callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), elemV]) }
-            loopStack.push({cont: postB, brk: exitB})
+            var brkB = exitB   // where `break` goes: exitB, or the closing block below.
+            if (lazy) {
+                var closeB = curF.NewBlock("")
+                var doCloseB = curF.NewBlock("")
+                brkB = closeB
+                var retV = callExt(closeB, memGetExt(), [seqV, emitStr(closeB, "return")])
+                closeB.NewCondBr(truthy(closeB, callExt(closeB, "js_seq",
+                                        [callExt(closeB, "js_typeof", [retV]), emitStr(closeB, "function")])),
+                                 doCloseB, exitB)
+                callExt(jsThisSet(doCloseB, seqV), "js_call",
+                        [retV, seqV, callExt(doCloseB, "js_arr_new", [])])
+                doCloseB.NewBr(exitB)
+            }
+            loopStack.push({cont: postB, brk: brkB})
             if (lbl != "") { bindLabelCont(lbl, postB) }
+            if (lbl != "" && lazy) { bindLabelBrk(lbl, brkB) }
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
             var iP = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, "0i")])
@@ -5059,6 +5082,16 @@ NotFuncHead = :script(~~
     function bindLabelCont(name, contB) {
         for (var i = labelStack.length - 1; i >= 0; i--) {
             if (labelStack[i].name == name) { labelStack[i].cont = contB; return }
+        }
+    }
+    // bindLabelBrk re-points 'break L' at a block INSIDE the labeled loop instead of
+    // at the block after it. Only for-of uses it, so that 'L: for (x of g) break L'
+    // closes the iterator on its way out, exactly as an unlabeled break does; the
+    // block it names branches on to the loop's own exit, which the labeled statement
+    // then branches past, so the control flow is otherwise unchanged.
+    function bindLabelBrk(name, brkB) {
+        for (var i = labelStack.length - 1; i >= 0; i--) {
+            if (labelStack[i].name == name) { labelStack[i].brk = brkB; return }
         }
     }
     function findLabel(name) {

@@ -68,7 +68,12 @@ next() re-runs the body from the top, answers the yields that already happened w
 values their next(v) sent, and stops at the new one by throwing a signal the driver
 catches. A pure generator behaves exactly right. One with side effects REPEATS them on
 every step, driving n values costs O(n squared), a 'finally' around a yield runs once per
-step, and .return() / .throw() / [Symbol.iterator] are missing outright.
+step, and .throw() / [Symbol.iterator] are missing outright. .return(v) IS present and
+answers {value: v, done: true}, but it only sets the done flag: the compiler half's
+gen_close runs the body's finally clauses at that point, where replay has already run
+them - the same ordering price as above, and the reason a for-of that BREAKS closes its
+iterator in both halves (a second loop over the generator answers nothing in both) while
+only the compiler half prints the finally at the break.
 
 ASYNC IS AWAITS-AS-YIELDS, AND IT INHERITS EXACTLY THAT PRICE. There IS a job queue
 now: an async function answers a real Promise, 'await' suspends, and the microtask queue
@@ -5416,6 +5421,16 @@ NotFuncHead = :script(~~
 
     // for-of / for-in. items = [name, "of"|"in", iterThunk, bodyThunk].
     // for-of genuinely iterates array elements / string characters by index.
+    // closeIterator(it): the closing half of the iterator protocol - call it.return()
+    // when it has a callable one. The compiler half emits the same two steps
+    // (js-to-llvm-ir.abnf's makeForOf, its closeB block).
+    function closeIterator(it) {
+        var rt = anytype
+        rt = (it != undefined && it != null && typeof it == "object") ? getMember(it, "return") : undefined
+        if (typeof rt == "function") { callWithThis(rt, it, []) }
+        return undefined
+    }
+
     function makeForOf(items, pos) {
         var label = items[0].label
         var target = items[1]
@@ -5462,7 +5477,19 @@ NotFuncHead = :script(~~
                     bindLoopTarget(target, step.value)
                     var gr = bodyT()
                     var ga = loopAction(gr, label)
-                    if (ga == "break") break
+                    // A BREAK closes the iterator, as node does: its return() is
+                    // called if it has one. This half's generator replays, so the
+                    // body's `finally` has already run once per step (see the
+                    // GENERATORS REPLAY note in the :description) and return() only
+                    // marks it done - which is what makes a second loop over a
+                    // partially consumed generator answer nothing, in BOTH halves.
+                    // "propagate" - a return out of the loop, or a labeled break to
+                    // an outer statement - deliberately does NOT close, because the
+                    // compiler half cannot: a return rets the frame and a labeled
+                    // break branches straight to the label's exit, neither of them
+                    // through a block makeForOf owns. node closes in both cases; the
+                    // two halves here agree with each other instead.
+                    if (ga == "break") { closeIterator(it); break }
                     if (ga == "propagate") { res = gr; break }
                     step = callWithThis(nx, it, [])
                 }
@@ -5639,6 +5666,19 @@ NotFuncHead = :script(~~
             var sendv = anytype // next(v) may send any value in.
             sendv = (arguments.length > 0) ? arguments[0] : undefined
             return genNext(st, params, bodyT, env, self, args, sendv)
+        }
+        // g.return(v): abandon the generator. REPLAY cannot run the body's finally
+        // clauses here - it has already run them, once per next() - so this only
+        // sets the done flag, which is the part the compiler half agrees with:
+        // every later next() answers {undefined, true} and a second for-of over it
+        // iterates nothing. (runtime.c's gen_close / abnf/jsrt.go's closeBody do
+        // run them; that ordering difference is the replay limitation the
+        // :description states, not a new one.)
+        g["return"] = function() {
+            var rv = anytype
+            rv = (arguments.length > 0) ? arguments[0] : undefined
+            st.done = true
+            return {value: rv, done: true, __keys: ["value", "done"]}
         }
         return g
     }
