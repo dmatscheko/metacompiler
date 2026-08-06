@@ -4,8 +4,8 @@
 is the manual** — architecture, how to build and test, the traps, and the engine
 mechanics. Read the manual first; nothing here explains how anything works.
 
-Rebuilt 2026-08-05 at `e284185`; **eleven items closed on 2026-08-06** (below), and
-what those agents found on the way is folded in.
+Rebuilt 2026-08-05 at `e284185`; **eleven items closed on 2026-08-06** and **ten
+more on 2026-08-07** (below), with what those agents found on the way folded in.
 
 Two conventions, and they are the point of the file:
 
@@ -14,15 +14,18 @@ Two conventions, and they are the point of the file:
 >
 > **Re-verify before you act.** Of the ten items worked on 2026-08-06, **three were
 > already fixed**, one was mis-scoped by an order of magnitude, one named the wrong
-> engine, and one had a framing that would have caused a regression if followed.
-> That is six of ten wrong. The lists in this project have gone stale within two
-> commits **six** separate times.
+> engine, and one had a framing that would have caused a regression if followed —
+> six of ten wrong. On 2026-08-07 the rate held: one item's "genuinely blocked"
+> verdict was **false** (async generators landed the same day), one named the
+> interpreter where all three engines were affected, one understated a defect that
+> was in every box type, and four of five bullets in another were wrong. **Assume
+> the text below is a lead, not a fact, and probe first.**
 
 Baseline every item must preserve (`tests/gates.sh`, ~2.5 min — add `--serial` on a
 small machine):
 
 ```
-matrix 351/351 · --full 6,258 assertions, 0 halves disagree · --cross 119/0
+matrix 351/351 · --full 6,422 assertions, 0 halves disagree · --cross 119/0
 clang-check 16/16 none held · native-full 15/15 · go test ok
 gen-all 15/15 clean · -freeze a fixed point · bench: no row outside its spread
 ```
@@ -33,86 +36,92 @@ python **41%** and java **5.7%** for four commits with every gate green, and on
 2026-08-06 a first draft of the ruby bignum was **+38.79%** before it was caught
 and turned into **−11.8%**.
 
+**On a loaded machine pass `--timeout 600` to `./test.sh --full`.** The js
+compiler half is ~19 s idle and **82 s at load 16** against a 120 s default; a
+killed run now says `RUN-FAILED … NOT a frozen divergence` (`53caf6d`) instead of
+reporting a phantom `FROZEN-DIFF`, but the slowness is real.
+
 ---
 
 # 1. Correctness, with an oracle on this machine
 
 These change answers real programs give. Each has a toolchain here that settles it.
 
-### 1.1 Unqualified instance-field access is broken in BOTH java halves **[V]**
-`class P { int w = 3; int get() { return w; } }` → `variable not defined: w`
-(llvm.Run and native) and `unknown name: w` (interpreter); `javac` prints 3.
-`this.w` works, and **every class in `tests/java-test-*.java` writes `this.w`**,
-which is why 6,258 assertions never reach it. Found while fixing record equality
-(`70b3b46`) and confirmed independently. This looks like the largest open java gap.
-Oracle: `java` 24.0.2.
+### 1.1 `float` is still a double in csharp, swift and go **[V]**
+java got a real binary32 in `8f43e84` and kotlin in `e5e68b5`. Three remain, and
+**each needs its own renderer**, which is why they were not done together:
+- **csharp** needs a NEW style byte (`floCSF = 4`): `float.ToString()` is not
+  java's — shortest-round-trippable with `E+nn`, no forced `.0`. **There is no C#
+  toolchain here**, so its print window would be the least-confident thing in the
+  repo. Cite ECMA-334 §8.3.7 and say so.
+- **swift** is sized at one language and `swiftc` 6.1.2 settles it exactly, but it
+  has one extra wall: **declared-type adoption exists at exactly ONE site**
+  (`swift-interpreter.abnf:3353`, a `let`/`var` annotation). Parameters, returns,
+  struct fields and array-literal element types carry no `itype`, so
+  `func f(_ x: Float)` would silently lose the width. The simplification nobody
+  had written down: **Swift forbids mixed Float/Double arithmetic entirely**, so
+  "if either operand is Float, both are" is correct for every program `swiftc`
+  accepts — no JLS-5.6.2 wider-type rule needed.
+- **go** is blocked on three files one agent could not own: a width on the style
+  byte in `abnf/jsrtjvm.go` (java's `floJavaF` is a PRINT style go cannot reuse —
+  go wants `1e+20` and `+Inf`), an extern in `abnf/jsrt.go`, and a print arm. A
+  go-only layer-2 fix would split `llvm.Run` from the native binary.
 
-### 1.2 `float` is still a double in kotlin, csharp, go and swift **[V]**
-Java got a real binary32 in `8f43e84`; the other four still alias the double box
-(kotlin/csharp/go share tag-14 `jsJFlo`, swift has its own). **The original item
-said "four JVM-ish languages" and undercounted — it is five, and java was one.**
-`8f43e84` is the worked model: the width rides on the existing style byte
-(`floJavaF = 3`), `Float.toString` is `Double.toString` at bitSize 32, and JLS
-5.6.2 promotes to the *wider* type. `runtime.c` was not touched and need not be —
-but if a fifth language needs it, move the width into the floor instead of
-repeating the layer-2 interception four more times. Oracle: `java` only; cite the
-specs for the rest (no `kotlinc`, no C# toolchain, `swiftc` 6.1.2 is present).
+**The floor is NOT the answer, and this is measured** (`e5e68b5`): `runtime.c` is
+compiled by our own `c-to-llvm-ir.abnf`, which **computes every float at double
+precision** — its header says so, `ctF("flt")` returns 8, arithmetic is emitted as
+integer soft-float. A floor-side rounder would be the same power-of-two loop
+rewritten in C plus a 24-bit renderer, in the file all sixteen languages link.
 
-### 1.3 Go does not fold NAMED constants **[V]**
-`c240f92` folds untyped constant *literals* and expressions over them at arbitrary
-precision. `const s = a + b` still uses the old path, because resolving a name at
-parse time needs a build-time scope the front end does not have — and a name also
-declared as a variable elsewhere would then fold *wrongly*. Stated in a comment at
-the site. Also unfolded and falling back to previous behaviour: rune literals,
-complex constants, bitwise ops with a negative operand, shift counts over 4096.
-Oracle: `go`.
+### 1.2 python `hasattr`/`getattr` do not see built-in methods **[V]**
+`hasattr([3,1,2], "count")` is `False` where CPython says `True`; the same for
+`"s".upper`. User-class attributes resolve correctly. All three engines agree, so
+it is not a divergence — and not a regression, since neither builtin existed
+before `6eec533`. Oracle: `python3`.
 
-### 1.4 Python's compiler half is missing 25+ builtins; two are halves gaps **[V]**
-Missing from **both** halves (a spec gap, not a divergence): `all any ascii bin
-callable divmod enumerate filter format frozenset getattr hasattr hash hex id
-input iter map oct pow reversed round setattr sorted zip`.
-Missing from the **compiler half only**, so each is an interp-vs-run divergence:
-`issubclass` and **`next`** — and `next(g)` is the ordinary way to drive a
-generator, so this one bites immediately. There is no `pyIsSubclass`/`clsIsSub` in
-either compiled engine to reuse.
-Missing from the **interpreter half only**: `dict.pop`, `set.add`.
-Found by the sweep that closed `ord`/`chr` (`555af82`), where the item claimed an
-interpreter-only gap and the truth was all three engines. Oracle: `python3`.
+### 1.3 python `list` has almost no methods **[V]**
+`sort insert remove extend index reverse` all abort in every engine. Bigger than
+the `count` item that found it, and `list.sort` deliberately still aborts rather
+than being denied, because Python HAS it. Oracle: `python3`.
 
-### 1.5 `list.count(x)` is broken in all three python engines **[V]**
-The interpreter has no `count` arm at all (`unknown list method: count`); **both
-compiled halves treat the argument as a Kotlin predicate** — `xs.count(2)` gives
-`call of a non function value: 2`. A real Python method, wrong everywhere.
-Oracle: `python3`.
+### 1.4 ruby's Array surface is nearly empty **[V]**
+`sort join reverse min max count flatten compact sort_by zip shift each_slice`
+abort in both halves; `Array#&` and `Array#|` abort in all engines. Also
+compiler-half-only gaps: `String#to_f` and `Kernel#rand` work in the interpreter
+and abort in the compiler; `Kernel.format` aborts in both. Oracle: `/usr/bin/ruby`.
 
-### 1.6 Ruby's `Float#to_s` picks the exponent window wrongly **[V]**
-`9007199254740991.fdiv(3)` prints `3.0023997515803305e+15`; MRI prints
-`3002399751580330.5`. MRI's rule is not `decpt > 15` alone — it is
-`decpt < -3 || (decpt > 15 && decpt >= digits.length)`, so `1234567890123456.0`
-(decpt 16, 16 digits) *is* exponential and `3002399751580330.5` (decpt 16, 17
-digits) is not. Verified on 6 values against `/usr/bin/ruby`. Three one-line
-changes: `floDigits` in `ruby-interpreter.abnf`, `rubyFloDigits` in `abnf/jsrt.go`,
-`rtFloStr`'s ruby caller. Left out of `a3164ff` because it is a Float row under a
-heavily-tested formatter.
+### 1.5 java: `toString()` and `equals()` on a class that declares neither **[V]**
+Both abort with `unknown method` in all three engines where java answers. **This
+is the same gap `hashCode` had until `77eb804`, and `js_jhash` is the worked
+model** — dispatch to a user-declared or inherited method first, then a record's
+`__record`, then identity. `equals`/`hashCode` is a pair, so this is now the
+missing half of a contract. Oracle: `java` 24.0.2.
 
-### 1.7 `for await` and `async function*` abort (js, ts) **[V]**
-`2339678` gave async/await a real job queue with node-identical ordering, and made
-these two **abort loudly** where they were previously silently wrong. `for await`
-is easy once an async iterator protocol exists; `async function*` needs its yields
-and its awaits on ONE suspension channel and is genuinely blocked on the generator
-model. **Ratchet coverage was lost with them** — neither construct is written in
-`js-test-full.js`/`typescript-test-full.ts` any more, so their accepted-syntax
-coverage is gone. Oracle: `node`.
+### 1.6 java: an inner or anonymous class cannot name an OUTER field **[V]**
+Still aborts in both halves after `77eb804`; `javac` resolves it to the outer
+instance. Reaching it needs an `__outer` hop the anonymous descriptor does not
+carry. **A first shape of this made the compiler answer `null` where the
+interpreter aborted — a halves divergence — which is what `jAnonDepth` exists to
+prevent.** A LAMBDA body is a different case and already works (a lambda has no
+`this` of its own). `Outer.this.field` also fails inside an anonymous class and
+works inside a named inner one. Oracle: `java`.
 
-### 1.8 js/ts do not close an iterator on `return`, `throw`, or an outer labeled break **[V]**
-`d7ef11a` closes on `break` (and a labeled break to *this* loop). node also closes
-on a `return` out of the loop body, a `throw` through it, and a labeled break to an
-**outer** statement. None reaches a block `makeForOf` owns — one rets the frame,
-one longjmps, one branches to the outer label's exit — so covering them needs
-either a per-loop iterator stack in `retStmt` (shared by fifteen languages) or a
-closure around every loop body. **The interpreter half could do the `return` case
-and deliberately does not**, because doing so made it disagree with both compiler
-halves. Pinned by `itc18`–`itc20` in both engines. Oracle: `node`.
+### 1.7 go: `-z` on a complex value is a halves divergence **[V]**
+`-(0.1+0.2i)` is `(-0.1-0.2i)` in the interpreter and **`0`** in `llvm.Run` and
+native — `js_gineg` reads a `{re,im}` object as NaN. The fix is `makeNeg` in
+`go-to-llvm-ir.abnf`, gated on the existing `usesComplex` so non-complex programs
+emit exactly what they do now — but it needs its own signed-zero decision (`0 - x`
+loses `-0.0`, the project's most-repeated trap, now seen **eight** times) and its
+own bench. Related, all **[V]**: runtime complex arithmetic is not Go's (Go uses
+Smith's algorithm for `/`), and `complex(0.1, 0.2)` is a constant expression in Go
+that is not a fold site here. Oracle: `go`.
+
+### 1.8 js: `yield*` in an async generator, and `ag.throw()` **[V]**
+`ae0c62b` made async generators run. Two residues: **`yield*` inside one delegates
+SYNCHRONOUSLY** rather than awaiting each step, and **`ag.throw(e)` does not raise
+at the suspended yield** in any engine — `GEN_EXIT` is a close, not a general
+throw, so it closes the body and rejects instead. Documented in all four grammar
+headers. Oracle: `node`.
 
 ---
 
@@ -121,11 +130,21 @@ halves. Pinned by `itc18`–`itc20` in both engines. Oracle: `node`.
 Small, cheap, and each one is a divergence waiting for the first program that
 reaches it.
 
-### 2.1 `record.hashCode()` is not generated, and there is no `Object.hashCode` **[V]**
-`r.hashCode()` aborts with `unknown method 'hashCode'` in both java halves where
-java answers. Directly relevant since `70b3b46`: `equals` is now value-based for
-double/float/reference components, and equals/hashCode is exactly the contract a
-`HashMap` key needs. Oracle: `java` 24.0.2.
+### 2.1 Closing an iterator on `throw` is BLOCKED, and the reason is worth reading **[V]**
+`ae0c62b` closes on `break`, `return`, `continue L` and a labeled break to an outer
+statement. **`throw` was built, passed every probe, and was reverted** — and the
+mechanism that killed it rules out the obvious retry.
+
+A per-loop iterator depth stack (js-only, so the fifteen-language `retStmt` risk
+never applied) with save/unwind around every `js_try` was byte-identical to node on
+nine throw shapes. Then the ratchet failed: **a depth-based stack cannot survive
+coroutines, because `for await` suspends INSIDE its own for-of.** A
+`try { await Promise.reject(...) } catch` recorded depth 0, suspended, and its catch
+later unwound past a different suspended `for await`, whose loop then answered `1`
+instead of `123`. Reduced to a two-function repro. A wrong close is a silently wrong
+answer, so the whole mechanism came out; `itc20`/`itc24` pin the gap with the reason
+beside them. **Any future attempt needs a per-coroutine stack, not a per-program
+one.**
 
 ### 2.2 `-rdynamic` will break the first Linux native build that uses a generator **[V]**
 `gen_create` finds `coro_entry` via `dlsym` with no link flag, which works on
@@ -137,96 +156,94 @@ Compared with `==` in the compiled halves and `===` in the interpreter
 (`a=[1]; b=[1]; {a,b}` is 1 vs 2); CPython raises `TypeError`. Closing it means
 changing the shared `dictFind` contract, not Python.
 
-### 2.4 Twelve more foreign method names are reachable on python receivers **[V]**
-Same class as the four closed in `555af82`: `add size get contains map filter any
-length charAt equals substring indexOf` succeed on a python receiver where CPython
-raises `AttributeError`. **The paired edit is the point** — the arms live in layer
-2's port of `rt.memberCall`, the table NINE LANGUAGES SHARE, so deleting them
-alone would split the native binary from `llvm.Run`. It is a deny in
-`pyMethodCall` plus the layer-2 deletions, in one commit. Oracle: `python3`.
+### 2.4 kotlin: `1.5f.hashCode()` and `1.5 is Float` **[V]**
+Newly fixable and deliberately left by `e5e68b5`: the style byte now DOES say which
+of Float/Double a value is, so `1.5f.hashCode()` answering `Double`'s hash and
+`1.5 is Float` / `1.5f is Double` both being true are now distinguishable. The hash
+needs a binary32 **bit extraction**; only the rounding was written. The three stale
+comments claiming "nothing at runtime says which of the two a value is" are already
+corrected.
 
 ### 2.5 `i in arr` after `delete arr[i]` **[V]**
-`true` here, `false` in node. **Declined twice with the same finding**: a real
-hole cannot be expressed without changing the shared `*jsArray` in
-`abnf/jsrt.go`, which is the array type for *every* language in the tree, and a
-sentinel would need filtering at ~60 read sites where one miss leaks garbage into
-`join()`. Listed so the third person to find it stops here.
+`true` here, `false` in node. **Declined twice with the same finding**: a real hole
+cannot be expressed without changing the shared `*jsArray` in `abnf/jsrt.go`, which
+is the array type for *every* language, and a sentinel would need filtering at ~60
+read sites where one miss leaks garbage into `join()`. Listed so the third person to
+find it stops here.
 
 ### 2.6 JS constructs that still abort **[V]** for `super.x`, **[U]** for the rest
-`super.x` as a *value* now yields `undefined` rather than aborting. Still
-aborting: `super.b = 1` as an assignment target, `new a.b.C()`, nested `new`,
-`new C` with no argument list, `class X extends <expression>`, `for (a.b of xs)`,
-`export`, `with`. The interpreter additionally lacks a destructuring `catch`
-binding — blocked by `excCatch` in `interp-core.js` binding exactly one name,
-though the `DPattern`/`bindPattern` machinery already exists.
+`super.x` as a *value* now yields `undefined` rather than aborting. Still aborting:
+`super.b = 1` as an assignment target, `new a.b.C()`, nested `new`, `new C` with no
+argument list, `class X extends <expression>`, `for (a.b of xs)`, `export`, `with`.
+Also `Object.prototype.toString.call(p)` in the compiler halves, and
+`typeof instance.method` is `undefined` in both halves (methods live on the
+`__class` descriptor, not as own properties). The interpreter additionally lacks a
+destructuring `catch` binding — blocked by `excCatch` binding exactly one name.
 
 ### 2.7 Interpreter generators replay instead of suspending — js AND python **[V]**
-Every `next()` re-runs the body from the top, replaying recorded sends and
-stopping at the next yield via a thrown signal. Side effects repeat, it is O(n²),
-`try`/`finally` interacts badly with the signal, and `.return()`, `.throw()` and
-`Symbol.iterator` are missing.
+Every `next()` re-runs the body from the top, replaying recorded sends and stopping
+at the next yield via a thrown signal. Side effects repeat, it is O(n²), and
+`.throw()` and `Symbol.iterator` are missing.
 
-**Python's interpreter half has the same design** (`genStep`). It is also why the
+**Python's interpreter half has the same design** (`genStep`), and it is why the
 interpreter prints a generator's `finally` on replay's schedule rather than
-CPython's — measured identical before and after `d7ef11a`, so it is this item and
-not that change. **`2339678` made it structural for async too**: an async body with
-a side effect *before* an await repeats that effect on every resume, documented in
-all four grammar headers. Ordering is right in every engine; only repetition
-differs.
+CPython's — measured identical before and after `d7ef11a`, so it is this item.
+`2339678` made it structural for async too: an async body with a side effect
+*before* an await repeats it on every resume, documented in all four grammar
+headers. **Ordering is right in every engine; only repetition differs.**
 
-**If genuine suspension is unreachable here** — the `-frozen` engine exposes no
-goroutines and both engines must agree byte-for-byte — **then document the replay
-limitation in the grammar's `:description`** rather than leaving it implicit. That
-is a valid closure for this item, and `d7ef11a`/`2339678` have already done it for
-their own corners.
+**If genuine suspension is unreachable** — the `-frozen` engine exposes no
+goroutines and both engines must agree byte-for-byte — **documenting the limitation
+in each grammar's `:description` is a valid closure**, and `d7ef11a`/`2339678`/
+`ae0c62b` have already done it for their own corners.
 
 ### 2.8 The BigInt mix `TypeError` is raised but not catchable **[V]**
 `1n + 1` correctly reports *"Cannot mix BigInt and other types"*, but it aborts
 rather than being caught by a JS `try`/`catch`. Same family as item 3.2.
 
-### 2.9 Small cross-half gaps found while probing, each cheap **[V]**
-Each is an interp-vs-run divergence that no test reaches:
-- **ruby `Array#-` aborts in the interpreter half** (`not a number in '-'`) while
-  the compiler half answers correctly.
-- **ruby `between?` / `clamp` are compiler-half-only**; the interpreter aborts with
-  *unknown Integer method*.
-- **ruby `printf`, `p`, `Array#inspect`, `Array#index`, `Array#uniq`** are missing
-  from the interpreter half.
-- **`String(promise)` is `"[object Object]"`**; node says `"[object Promise]"`.
-  One arm in `jvStr`, `jsvString` and the interpreter's `jsStr`.
-- **`p.then` read as a VALUE is `undefined`** (node: a function), because promise
-  method dispatch is table-based — so `const t = p.then; t.call(p, f)` fails.
+### 2.9 java: a field whose name equals its class's **[V]**
+`class Ctr { int Ctr = 7; int f() { return Ctr; } }` answers **`class Ctr`** in all
+three engines where `javac` answers 7 — the class descriptor is bound in the same
+scope the bare name reads. Both halves agree. Fixing it means giving fields
+priority over type names.
 
 ### 2.10 Java float/double printing, three defects under one formatter **[V]**
-All reproduced at `114fbd5`, all outside the record/float work that found them:
 - **`floPrec` disagrees between engines**: `abnf/commonscript.go` answers exactly
   *n* digits, `languages/lib/runtime.c` answers *max(n, shortest)*, so
   `floPrec(1/3, 1)` is `"3e-1"` under goja/`-frozen`/llvm.Run and
   `"3333333333333333e-1"` natively. A latent halves divergence for any layer-2
-  caller; lua's `%g` renderer is the live one.
-- **the java interpreter drops the 17th significant digit** of some doubles:
-  `-0.0013060363926342689` prints as `-0.001306036392634269`. The *value* is right,
-  so it is the tag-script host's number→string.
-- **a 17-significant-digit double literal does not round-trip** through the
-  emitter: `a*b == -0.0013060363926342689` is false under `llvm.Run` and natively,
-  true in the interpreter and in `java`.
+  caller; lua's `%g` renderer is the live one, and it is why two float renderers
+  are built on `"" + a` instead.
+- **the java interpreter drops the 17th significant digit** of some doubles
+  (`-0.0013060363926342689` → `-0.001306036392634269`); the value is right, so it
+  is the tag-script host's number→string.
+- **a 17-significant-digit double literal does not round-trip** through the emitter.
 
-### 2.11 Ruby value-model residue **[V]**
-- **An Array cannot be a Hash key**: `{[1] => 5}[[1]]` is `nil` in every engine
-  (MRI: 5). Independent of the bignum work.
-- **`Hash#to_s` writes `{1 => 2}`** where MRI writes `{1=>2}` — all engines agree,
-  and it was 48 of the 58 residual rows in the bignum probe.
-- **`Integer#fdiv` on a bignum**, and a big meeting a **Rational or Complex**,
+### 2.11 go: imported packages share the main file's globals **[V]**
+With `mconst.A = 0.1` and a main-file `const A = 5`, `mconst.Sum()` returned 11 at
+base. `08e8d3f` fixed it for CONSTANTS (each file gets its own scope stack) but the
+underlying runtime global-namespace sharing is still there for vars and funcs. Also:
+an imported package's exported CONSTS are not put on the package object (`mconst.S`
+is `<nil>`); `var a [size]int` with a named const size gives `len(a) == 1` in the
+interpreter; and the compiler half cannot parse `const a, b = 0.1, 0.2`.
+
+### 2.12 Ruby and python residue **[V]**
+- **A bare `except:` will not catch python's `GeneratorExit`** — `d7ef11a` routes
+  the close sentinel past every catch arm so the two engines agree; CPython lets
+  `except:` catch it. Documented at the `js_try` site.
+- **An abandoned python generator never runs its `finally`** — CPython finalizes at
+  collection; we have no finalizer hook and the GC deliberately has none.
+- **`d.items()` renders pairs as lists**, the same tuple root cause as 3.1.
+- **`.send()` works on an iterator object** where CPython raises `AttributeError`.
+- **ruby `Integer#fdiv` on a bignum, and a big meeting a Rational or Complex**,
   promote through the double where MRI is exact. That needs a Rational whose parts
-  are bigs — a second value model. Stated at the head of each engine's section.
+  are bigs — a second value model, deliberately not started.
 
-### 2.12 A bare `except:` will not catch python's `GeneratorExit` **[V]**
-`d7ef11a` routes the close sentinel past every catch arm so the two engines agree;
-CPython lets `except:` catch it. Documented at the `js_try` site.
-
-### 2.13 An abandoned python generator never runs its `finally` **[V]**
-CPython finalizes at collection and prints it at exit; we print nothing. Needs a
-finalizer hook in a GC that deliberately has none.
+### 2.13 Six dead helpers in `python-rt.metajs` **[V]**
+`pyFStrictEq pyFTruthy pyFClampSub pyFToInt pyFCall1 pyFWrap32`, plus `pyFBigEq`/
+`pyFBigIsZero`: ports of the arms `6eec533` deleted, with one comment describing
+callers that no longer exist. Left rather than risk a late unverified edit;
+deleting them shrinks layer 2 and is a clean follow-up.
 
 ---
 
@@ -501,6 +518,58 @@ ranges.
 ---
 
 # 9. Closed — do not re-open
+
+## The ten closed on 2026-08-07
+
+- **1.1 java unqualified field access** — `77eb804`. The item UNDERSTATED it:
+  unqualified STATIC access and unqualified WRITES were broken too. The compiler
+  half branches at runtime on `js_scope_typeof` so a local still wins; the
+  interpreter hangs it on `core.varMiss`, consulted only after the whole scope
+  chain misses, so the hit path costs nothing. **70 of 70 new assertions fail at
+  the parent**, in both halves.
+- **1.2 `float` as binary32, kotlin** — `e5e68b5`. Kotlin/JVM's `Float` IS java's
+  by specification, so `java` is a real oracle for every row; 11,343 probe lines
+  went 4,111/4,030/4,030 wrong → 0/0/0. **The floor was measured to be the wrong
+  home for the width** and the reason is recorded at the site.
+- **1.3 go named constants** — `08e8d3f`. A parse-time scope stack whose asymmetry
+  is the design: *poison leaking outward is a decline; a const leaking outward is a
+  wrong answer.* Also folded rune and complex constants. **The `convByPos`
+  cross-file collision turned out to be real, not theoretical** — brute-forcing pad
+  lengths made a division answer 3.5 in both halves at base.
+- **1.4 python builtins** — `6eec533`. 24 added exact against CPython, plus
+  `dict.pop`/`set.add` — which were missing from all THREE engines, not the
+  interpreter as the item said. `input`/`format`/`frozenset`/`hash`/`id` declined
+  with the reason at each binding site. Two live halves divergences found by the
+  sweep and fixed (`isinstance(1, object)`, `set("aab")`).
+- **1.5 `list.count`** — `6eec533`. Both compiled halves treated the argument as a
+  KOTLIN PREDICATE. `str.count` was already correct including the non-overlapping
+  rule — a null result, now a control.
+- **1.6 ruby `Float#to_s`** — `4731755`. The rule was settled empirically on 3,000
+  random doubles: `decpt < -3 || (decpt > 15 && decpt >= digits.length)` reproduces
+  all 3,000; `decpt > 15` alone misses 297. **`rtFloStr` needed no change**, so the
+  nine languages importing it were untouched.
+- **1.7 `for await` and `async function*`** — `ae0c62b`. **The "genuinely blocked"
+  verdict was false.** `js_yield` already is one suspension channel; it needed a
+  tag saying what is travelling on it. Ordering byte-identical to node in three
+  engines. Also fixed a halves divergence nobody had listed: `await` in an async
+  CLASS METHOD was the identity in the compiler halves.
+- **1.8 iterator close on `return` / outer labeled break** — `ae0c62b`, with no
+  runtime stack (the emitter keeps the enclosing loops' SSA handles). Emitted
+  modules for programs without those shapes are byte-identical to base. The `throw`
+  case is item 2.1.
+- **2.1 `record.hashCode()`** — `77eb804`. JLS 8.10.3 leaves the combination
+  unspecified, so OpenJDK's `h*31` is pinned MEASURED against java 24.0.2, while
+  every component type's own hash is exact and reproduced bit for bit.
+- **2.4 twelve foreign method names on python receivers** — `6eec533`. Denial keyed
+  by RECEIVER TYPE, not name — a flat name switch would have broken `d.get(k, d)`
+  and `s.add(x)`, which are real Python. All three engines now raise a CATCHABLE
+  `AttributeError`, which is what makes it assertable at all.
+- **2.9 / 2.11 ruby half-gaps and value model** — `4731755`. Three of five bullets
+  were wrong as written; `printf` was not one wrong answer but three, including a
+  live run-vs-native divergence. **And `[1.0] == [1.0]` was FALSE IN THE NATIVE
+  BINARY ONLY** — `rbPyEqual` ended in `===` and a Float box is an object in layer
+  2 where the twin's `jsFlo` is a value struct. Invisible to the matrix, `--full`
+  and `--cross` by construction. MRI's `==` vs `eql?` distinction now exists.
 
 ## The eleven closed on 2026-08-06
 
