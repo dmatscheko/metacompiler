@@ -899,7 +899,7 @@ NewAnon     <~~ push(makeNewAnon(takeAll(), up.pos)) ~~>
             = KwNew [ SkipAngle ] { Annotation } Id <~~ push(up.in) ~~> [ SkipAngle ]
               { "." { Annotation } Id <~~ push(up.in) ~~> [ SkipAngle ] }
               "(" [ Expression { "," Expression } ] ")"
-              "{" <~~ jAnonDepth = jAnonDepth + 1 ~~> { Member } "}" <~~ jAnonDepth = jAnonDepth - 1 ~~> ;
+              "{" <~~ jAnonEnter() ~~> { Member } "}" <~~ jAnonLeave() ~~> ;
 NewArrLit   <~~ push(makeArray(takeAll())) ~~>
             = KwNew Type "{" [ Expression { "," Expression } ] [ "," ] "}" ;
 // new T[a][b]...[] : every SIZED dimension is built (the innermost one filled with
@@ -2257,6 +2257,15 @@ HasStatic   = :script(~~
     // expression answer the value from BEFORE the write, which is what a postfix
     // x++ yields.
     function jUnqualWrite(b, name, fi, v, mkNew, retOld) {
+        // See makeVarRef: an anonymous class' own field needs no probe.
+        if (fi.own == true) {
+            var ownD = jFieldOwner(b, fi, name)
+            var keyD = emitStr(b, name)
+            var oldD = (mkNew == null) ? v : callExt(b, "js_get", [ownD, keyD])
+            var newD = (mkNew == null) ? v : mkNew(b, oldD)
+            callExt(b, "js_set", [ownD, keyD, newD])
+            return {b: b, v: retOld ? oldD : newD}
+        }
         var probeB = curF.NewBlock("")
         var localB = curF.NewBlock("")
         var fieldB = curF.NewBlock("")
@@ -2783,6 +2792,7 @@ HasStatic   = :script(~~
         if (qmembers.length == 0) {
             return {kind: "qnew", cname: items[0].qname, args: qargs, cls: qnewNoClass}
         }
+        jRegAnonFields(qmembers)
         anonCount++
         var aname = "Anon$" + anonCount
         var mem = [{ext: items[0].qname}]
@@ -2868,6 +2878,48 @@ HasStatic   = :script(~~
     // different case and needs none of it: a lambda has no `this` of its own, so
     // the captured scope's `this` IS the outer instance.
     var jAnonDepth = 0
+    // The anonymous bodies currently OPEN, innermost last, each under an id of its
+    // own, plus the id of the one most recently closed. makeNewAnon's tag fires
+    // after its own `}` and so after jAnonLeave, which is why the closed id has to
+    // be kept: it is how the body's own field declarations get registered against
+    // the body they belong to (jAnonOwnFields).
+    //
+    // WHY AN ID AND NOT THE DEPTH (docs/todo.md 1.5). Inside an anonymous body an
+    // unqualified name can be three things, and javac's order is: the anonymous
+    // class' OWN field, then the enclosing METHOD's local, then the enclosing
+    // class' field. The runtime probe in makeVarRef / jUnqualWrite implements the
+    // last two - scope first, field second - and gets the FIRST one backwards, so
+    // `new Sup(){ int v = 900; ... v ... }` inside `f(int v)` answered the
+    // parameter where javac answers 900. The anonymous class has no name at walk
+    // time (makeNewAnon invents Anon$N long afterwards), so `is this MY field` is
+    // exactly the question fieldKind cannot answer and this table can.
+    var jAnonIdSeq = 0
+    var jAnonStack = []
+    var jAnonClosed = ""
+    var jAnonOwnFields = {}
+    function jAnonEnter() {
+        jAnonDepth = jAnonDepth + 1
+        jAnonIdSeq = jAnonIdSeq + 1
+        jAnonStack.push("a" + jAnonIdSeq)
+    }
+    function jAnonLeave() {
+        jAnonDepth = jAnonDepth - 1
+        jAnonClosed = jAnonStack.pop()
+    }
+    function jAnonOwns(aid, name) { return jAnonOwnFields["$" + aid + "#" + name] == true }
+    // Registers an anonymous body's OWN instance fields against the id jAnonEnter
+    // gave it. jAnonClosed is that id: makeNewAnon / makeQNewSfx fire after their
+    // own `}` tag, so the body has already been left. A reference that PRECEDES
+    // the declaration resolves too - these thunks all run at emit time, long after
+    // the whole walk.
+    function jRegAnonFields(members) {
+        var aid = jAnonClosed
+        for (var fm = 0; fm < members.length; fm++) {
+            if (members[fm].kind == "field" && members[fm].statik != true) {
+                jAnonOwnFields["$" + aid + "#" + members[fm].name] = true
+            }
+        }
+    }
     // THE ENCLOSING CHAIN, snapshotted at WALK time (docs/todo.md 1.6). An inner or
     // anonymous class body names a field of its ENCLOSING instance unqualified and
     // javac resolves it there - JLS 6.5.6.1, the innermost enclosing class that
@@ -2885,7 +2937,8 @@ HasStatic   = :script(~~
         for (var i = jClassStack.length - 1; i >= 0; i--) {
             if (jClassStack[i] != "") { names.push(jClassStack[i]) }
         }
-        return {names: names, anon: jAnonDepth > 0}
+        var aid = (jAnonStack.length > 0) ? jAnonStack[jAnonStack.length - 1] : ""
+        return {names: names, anon: jAnonDepth > 0, aid: aid}
     }
     // Does ANY declared class have a field of this name? Only consulted inside an
     // anonymous body, and only after the enclosing chain has missed: the anonymous
@@ -2899,11 +2952,17 @@ HasStatic   = :script(~~
     // runtime __outer walk rather than a plain read off `this`, so an ordinary
     // field access keeps the IR it had, byte for byte.
     function jLookupField(chain, name) {
+        // The anonymous class' OWN field wins over everything lexically outside it,
+        // including the enclosing method's locals - so it is read straight off
+        // `this`, with no runtime scope probe at all (`own`).
+        if (chain.aid != "" && jAnonOwns(chain.aid, name)) {
+            return {kind: "instance", cls: "", hop: false, own: true}
+        }
         for (var i = 0; i < chain.names.length; i++) {
             var fi = lookupFieldKind(chain.names[i], name)
-            if (fi != null) { return {kind: fi.kind, cls: fi.cls, hop: (i > 0) || chain.anon} }
+            if (fi != null) { return {kind: fi.kind, cls: fi.cls, hop: (i > 0) || chain.anon, own: false} }
         }
-        if (chain.anon && jAnyFieldNamed(name)) { return {kind: "instance", cls: "", hop: true} }
+        if (chain.anon && jAnyFieldNamed(name)) { return {kind: "instance", cls: "", hop: true, own: false} }
         return null
     }
     // The class in cls' own chain that declares `name` as a field, with its kind,
@@ -2958,6 +3017,13 @@ HasStatic   = :script(~~
             var fi = jLookupField(chain, name)
             if (fi == null) {
                 return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])}
+            }
+            // An anonymous class' own field is not shadowed by anything outside the
+            // body, so there is nothing to probe for - and this is the arm that
+            // makes it beat an enclosing local of the same name.
+            if (fi.own == true) {
+                var ownB = jFieldOwner(b, fi, name)
+                return {b: b, v: callExt(b, "js_get", [ownB, emitStr(b, name)])}
             }
             var probeB = curF.NewBlock("")
             var localB = curF.NewBlock("")
@@ -4845,6 +4911,7 @@ HasStatic   = :script(~~
             else if (typeof items[i] == "function") { args.push(items[i]) }
             else { members.push(items[i]) }
         }
+        jRegAnonFields(members)
         anonCount++
         var aname = "Anon$" + anonCount
         var mem = [{ext: baseName}]

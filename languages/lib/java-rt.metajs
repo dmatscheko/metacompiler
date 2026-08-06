@@ -586,14 +586,23 @@ function jvFloPromotes(l, r) {
 // d.dddEnn outside it, always with a decimal point, never fewer than two
 // significant digits in the scientific form.
 //
-// THE DIGITS COME FROM `"" + a`, NOT FROM floPrec, and that is not a style
-// choice. floPrec's two implementations DISAGREE: abnf/commonscript.go answers
-// exactly n digits and languages/lib/runtime.c's answers max(n, shortest), so
-// floPrec(1/3, 1) is "3e-1" under llvm.Run and "3333333333333333e-1" natively.
-// Using it here would have been a halves divergence in every float that needs
-// fewer digits than its double. `"" + a` is the shortest round-tripping DOUBLE
-// in every engine (it is what jvm_flo_str and jvmFloStr already agree on), and
-// rounding that digit string down to n is exact for every n a float can want.
+// THE DIGITS COME FROM `"" + a`, NOT FROM floPrec, and the reason has CHANGED
+// (docs/todo.md 2.8). It used to be that floPrec's two implementations disagreed
+// - abnf/commonscript.go answered exactly n digits, languages/lib/runtime.c's
+// answered max(n, shortest) - so a renderer built on it would have been a halves
+// divergence in every float needing fewer digits than its double. That is fixed:
+// both answer exactly n now (runtime.c's g_fixdig).
+//
+// `"" + a` stays because HERE it is already exact and floPrec would only cost.
+// This file runs in two places and both give the shortest round-tripping double:
+// natively it is the C floor's to_string over shortest_digits, and under llvm.Run
+// it is strconv.FormatFloat(-1) in the Go twin. Rounding that digit string down
+// to n is exact for every n a float can want.
+//
+// The TAG SCRIPT halves are the ones that could not use it - goja's printer is
+// not always the shortest round-tripping form - so java-interpreter.abnf's
+// jDecDigits and compile-core.js's numText DO go through floPrec. Neither of
+// those is this file.
 
 // The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP
 // with EXP the decimal exponent of the FIRST digit - the shape floPrec answers

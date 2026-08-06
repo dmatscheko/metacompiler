@@ -1595,6 +1595,31 @@ long g_ndig;
  * exact value rounded to k digits, nearest with ties to even. See jvm_flo_str. */
 long g_mindig = 1;
 
+/* g_fixdig, when > 0, turns the search off entirely: the answer is the EXACT
+ * value rounded to that many significant digits, nearest with ties to even,
+ * whether or not it reads back. That is a different question from the one the
+ * rest of this function asks, and floPrec (host id 70) is the caller that wants
+ * it - see docs/todo.md 2.8.
+ *
+ * WHY THE DIFFERENCE MATTERED. g_mindig = n only starts the SEARCH at k = n, so
+ * a value whose shortest round-tripping form is longer than n came back with the
+ * shortest form instead: floPrec(1/3, 1) answered "3333333333333333e-1" here and
+ * "3e-1" in floPrecStr (abnf/commonscript.go), the Go/goja/frozen twin - a
+ * latent halves divergence for every layer-2 caller, invisible only because the
+ * one live caller (lua's %g, luaGStr) always asks for an n at least as large as
+ * the shortest form, where the two answers coincide. Exactly-n is the contract
+ * that is kept, because it is the one a %e / %g formatter needs and the one a
+ * script CANNOT build for itself: "at least n" is derivable from exactly-n plus
+ * the host's shortest form ("" + v), and exactly-n is not derivable from "at
+ * least n" at all. python's pyPctSig / pyBPctSig exist only because of this, and
+ * languages/python-interpreter.abnf records the symptom it cost: %e of
+ * 1234.5678 printed 1.234567e+03 natively, a TRUNCATION of the shortest eight
+ * digit form rather than the correctly rounded seven digit one.
+ *
+ * k is clamped to the exact expansion's own length: asking for more digits than
+ * the value has can only add trailing zeros, and every caller strips those. */
+long g_fixdig = 0;
+
 long shortest_digits(long bits, char *digs) {
 	long E;
 	long F;
@@ -1653,6 +1678,24 @@ long shortest_digits(long bits, char *digs) {
 	nLO = nP;
 	if (m != 4503599627370496L || E <= 1) { nLO = dec_mul(G_DLO, nP, 2); }
 	lim = L < 17 ? L : 17;
+	/* The fixed-precision answer: one candidate, no round-trip test. This is the
+	 * body of the search's inner round == 0 pass, lifted out. */
+	if (g_fixdig > 0) {
+		k = g_fixdig;
+		if (k > lim) { k = lim; }
+		if (k < 1) { k = 1; }
+		M = 0;
+		i = 0;
+		while (i < k) { M = M * 10 + (long)G_DN[L - 1 - i]; i = i + 1; }
+		cut = L > k ? (long)G_DN[L - 1 - k] : 0;
+		any = 0;
+		i = L - k - 2;
+		while (i >= 0) { if (G_DN[i] != 0) { any = 1; i = 0; } i = i - 1; }
+		if (cut > 5 || (cut == 5 && (any != 0 || (M & 1) != 0))) { M = M + 1; }
+		best = 1;
+		bestM = M;
+		bestK = k;
+	}
 	k = g_mindig < 1 ? 1 : g_mindig;
 	if (k > lim) { k = lim; }
 	while (k <= lim && best == 0) {
@@ -4687,11 +4730,11 @@ long host_call(long id, long self, long args) {
 	 *
 	 * shortest_digits already IS the algorithm: its candidate for k digits is
 	 * the exact value rounded to k, nearest with ties to even, which is what
-	 * "%.ke" writes. g_mindig = n starts the search at k = n, and every caller
-	 * asks for an n at least as large as the shortest form, where the k = n
-	 * candidate always reads back - so the search stops there and the answer IS
-	 * the n digit rounding. The trailing zeros it keeps (g_mindig floors its own
-	 * strip) come off here, because the CALLER decides how many digits to show.
+	 * "%.ke" writes. g_fixdig = n takes THAT candidate and nothing else - see
+	 * its comment for why g_mindig = n, which only started the search there, was
+	 * a different function and disagreed with the Go twin (docs/todo.md 2.8).
+	 * The trailing zeros come off here, because the CALLER decides how many
+	 * digits to show.
 	 *
 	 * The twins are floPrecStr in abnf/commonscript.go (goja and the frozen
 	 * grammar host) and the floPrec binding of languages/metajs-interpreter.abnf. */
@@ -4709,11 +4752,11 @@ long host_call(long id, long self, long args) {
 		nd = d_is_nan(nd) ? 1 : d_to_long(d_trunc(nd));
 		if (nd < 1) { nd = 1; }
 		if (nd > 17) { nd = 17; }
-		saved = g_mindig;
-		g_mindig = nd;
+		saved = g_fixdig;
+		g_fixdig = nd;
 		e10 = shortest_digits(v, digs);
 		nn = g_ndig;
-		g_mindig = saved;
+		g_fixdig = saved;
 		while (nn > 1 && digs[nn - 1] == 48) { nn = nn - 1; }
 		while (i < nn) { out[o] = digs[i]; o = o + 1; i = i + 1; }
 		out[o] = 101; o = o + 1;                         /* 'e' */

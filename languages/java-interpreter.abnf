@@ -2555,46 +2555,49 @@ HasStatic   = :script(~~
     // scientific form. The twins are jvF32Str in languages/lib/java-rt.metajs and
     // jvmFloStr32 in abnf/jsrtjvm.go.
     //
-    // THE DIGITS COME FROM `"" + a` AND NOT FROM floPrec. floPrec's two
-    // implementations disagree - abnf/commonscript.go answers exactly n digits,
-    // languages/lib/runtime.c's answers max(n, shortest) - so floPrec(1/3, 1) is
-    // "3e-1" here and "3333333333333333e-1" natively, and a renderer written on
-    // it would be a halves divergence in every float shorter than its double.
-    // `"" + a` is the shortest round-tripping DOUBLE in every engine, and
-    // rounding that digit string down to n is exact for every n a float wants.
+    // THE DIGITS COME FROM floPrec AND NOT FROM `"" + a`, and that is the
+    // opposite of what this comment used to say (docs/todo.md 2.8).
+    //
+    // `"" + a` IS NOT THE SHORTEST ROUND-TRIPPING FORM IN EVERY ENGINE. goja
+    // renders the double 359000550 * 2^-38 as "0.001306036392634269", sixteen
+    // digits that read back as the NEXT double up; the frozen engine renders the
+    // same value "0.0013060363926342689", which is correct. So `"" + a` was
+    // three things at once: wrong against `java` 24.0.2, a live goja-vs-frozen
+    // divergence that no matrix entry happened to reach, and unfixable from
+    // inside the dialect, since a script cannot ask the host for more digits
+    // than its printer chose to give.
+    //
+    // floPrec CAN be asked, and since docs/todo.md 2.8 its two implementations
+    // agree: abnf/commonscript.go (goja and the frozen host, over strconv) and
+    // languages/lib/runtime.c host id 70 (over shortest_digits with g_fixdig)
+    // both answer EXACTLY n significant digits. The shortest round-tripping form
+    // is then a search rather than a host question - ask for n digits, parse the
+    // result back, stop at the first n that reproduces the value - and the
+    // answer is the same in every engine by construction. parseFloat is exact in
+    // both hosts (jsParseFloat in abnf/jsrt.go is strconv.ParseFloat; goja's is
+    // too), which is what makes the test decide rather than approximate.
 
+    // The value of a floPrec-shaped DIGITS "e" EXP form, exactly. EXP is the
+    // decimal exponent of the FIRST digit, so the text to parse carries the point
+    // after that digit.
+    function jSigVal(s) {
+        var ei = s.indexOf("e")
+        var ds = s.substring(0, ei)
+        var frac = ds.substring(1)
+        if (frac == "") { frac = "0" }
+        return parseFloat(ds.charAt(0) + "." + frac + "e" + s.substring(ei + 1))
+    }
     // The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP,
-    // EXP being the decimal exponent of the FIRST digit.
+    // EXP being the decimal exponent of the FIRST digit. Seventeen digits always
+    // round-trip a binary64, so the loop always terminates with an exact answer.
     function jDecDigits(a) {
-        var s = "" + a
-        var mant = s
-        var exp = 0
-        var ei = 0 - 1
-        for (var i = 0; i < s.length; i++) {
-            var c = s.charAt(i)
-            if (c == "e" || c == "E") { ei = i }
+        var n = 1
+        while (n < 17) {
+            var c = floPrec(a, n)
+            if (jSigVal(c) === a) { return c }
+            n = n + 1
         }
-        if (ei >= 0) {
-            mant = s.substring(0, ei)
-            var et = s.substring(ei + 1)
-            if (et.charAt(0) == "+") { et = et.substring(1) }
-            exp = parseInt(et, 10)
-        }
-        var digits = ""
-        var pt = 0 - 1
-        for (var j = 0; j < mant.length; j++) {
-            var ch = mant.charAt(j)
-            if (ch == ".") { pt = digits.length } else { if (ch != "-") { digits = digits + ch } }
-        }
-        if (pt < 0) { pt = digits.length }
-        var lead = 0
-        while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead++ }
-        digits = digits.substring(lead)
-        pt = pt - lead
-        var endz = digits.length
-        while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
-        digits = digits.substring(0, endz)
-        return digits + "e" + (pt + exp - 1)
+        return floPrec(a, 17)
     }
     // A DIGITS "e" EXP form rounded to n significant digits, half to even.
     function jRoundDig(s, n) {
@@ -2671,7 +2674,7 @@ HasStatic   = :script(~~
         var e10 = parseInt(sig.substring(ei + 1), 10)
         var body = ""
         if (a >= 0.001 && a < 10000000) {
-            body = jF32Plain(ds, e10)
+            body = jPlainDec(ds, e10)
         } else {
             // Never fewer than TWO significant digits, and where the shortest
             // has one the second is the closest two digit decimal to the ACTUAL
@@ -2691,7 +2694,9 @@ HasStatic   = :script(~~
     }
     // The plain form. The forced ".0" is here; the two-digit minimum is not,
     // because it is about the significand and only the scientific form shows one.
-    function jF32Plain(ds, e10) {
+    // Shared by Float.toString and Double.toString - the plain form is the same
+    // rule at both widths, only the digit run differs.
+    function jPlainDec(ds, e10) {
         if (e10 >= 0) {
             var ip = ""
             for (var i = 0; i <= e10; i++) { ip = ip + (i < ds.length ? ds.charAt(i) : "0") }
@@ -2712,44 +2717,18 @@ HasStatic   = :script(~~
         if (d === 0) return (1 / d < 0) ? "-0.0" : "0.0"
         var neg = d < 0
         var a = neg ? jNegF(d) : d
-        var s = (a >= 0.001 && a < 10000000) ? jFloPlain(a) : jFloSci(a)
+        var sig = jDecDigits(a)
+        var si = sig.indexOf("e")
+        var sd = sig.substring(0, si)
+        var se = parseInt(sig.substring(si + 1), 10)
+        var s = (a >= 0.001 && a < 10000000) ? jPlainDec(sd, se) : jFloSci(a, sd, se)
         return neg ? "-" + s : s
     }
-    function jFloPlain(a) {
-        var s = "" + a
-        if (s.indexOf(".") < 0) { s = s + ".0" }
-        return s
-    }
-    // Re-renders the host's shortest decimal for a as Java's d.dddEnn. The host
-    // switches to exponent form at different magnitudes than Java does, so the
-    // digits are recovered first and the form is rebuilt.
-    function jFloSci(a) {
-        var s = "" + a
-        var mant = s
-        var exp = 0
-        var ei = 0 - 1
-        for (var i = 0; i < s.length; i++) { if (s.charAt(i) == "e" || s.charAt(i) == "E") { ei = i } }
-        if (ei >= 0) {
-            mant = s.substring(0, ei)
-            var et = s.substring(ei + 1)
-            if (et.charAt(0) == "+") { et = et.substring(1) }
-            exp = parseInt(et, 10)
-        }
-        var digits = ""
-        var pt = 0 - 1
-        for (var j = 0; j < mant.length; j++) {
-            var ch = mant.charAt(j)
-            if (ch == ".") { pt = digits.length } else { digits = digits + ch }
-        }
-        if (pt < 0) { pt = digits.length }
-        var lead = 0
-        while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead++ }
-        digits = digits.substring(lead)
-        pt = pt - lead
-        var endz = digits.length
-        while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
-        digits = digits.substring(0, endz)
-        var e10 = pt + exp - 1
+    // Java's d.dddEnn from the shortest digit run. The digits arrive already
+    // recovered (jDecDigits): the host's own exponent threshold is not Java's and
+    // is no longer consulted at all - see the jDecDigits comment for why `"" + a`
+    // could not be the source.
+    function jFloSci(a, digits, e10) {
         // Double.toString never uses fewer than TWO significant digits, and
         // where the shortest form has ONE the second is not a zero but the
         // closest two digit decimal to the ACTUAL value. For every normal
@@ -3558,7 +3537,11 @@ HasStatic   = :script(~~
             // An anonymous class body names the enclosing instance's fields
             // unqualified and reads `Outer.this`, so the instance records it -
             // unconditionally, because an anonymous class is ALWAYS enclosed.
-            var obj = {__class: built, __outer: jEnclSelf()}
+            // __cscope is the DEFINING scope chain (docs/todo.md 1.5): the body
+            // may also name a local or parameter of the ENCLOSING METHOD, which
+            // no field walk can reach. jOuterOwner reads it, and its comment has
+            // the precedence rule.
+            var obj = {__class: built, __outer: jEnclSelf(), __cscope: scopes.slice(0)}
             var argv = []
             for (var a = 0; a < args.length; a++) { argv.push(args[a]()) }
             jCallCtor(built, obj, argv)
@@ -4976,7 +4959,7 @@ HasStatic   = :script(~~
         for (var k = 0; k < members.length; k++) { ms.push(members[k]) }
         var built = buildClassFrom("$anon" + jAnonSeq + "$" + cname, ms, undefined)
         built.__name = cname
-        var obj = {__class: built, __outer: outer}
+        var obj = {__class: built, __outer: outer, __cscope: scopes.slice(0)}
         jCallCtor(built, obj, argv)
         return obj
     }
@@ -5115,6 +5098,21 @@ HasStatic   = :script(~~
             if (hasOwn(v, name)) { return v }
             var st = jStaticOwner(v.__class, name)
             if (st != null) { return st }
+            // docs/todo.md 1.5. Between an instance's own members and its ENCLOSING
+            // instance's members sits the enclosing METHOD's scope: an anonymous
+            // class body is lexically INSIDE that method, so a local or parameter
+            // there shadows a field of the enclosing class. Measured against java
+            // 24.0.2 - `Sup f(int fld) { return new Sup(){ ... fld ... }; }` inside a
+            // class that also declares `int fld` answers the PARAMETER, while
+            // `Outer.this.fld` still answers the field. Only an anonymous instance
+            // carries __cscope (makeNewAnon / jNewInnerAnon); for every other object
+            // this test is one undefined read per hop.
+            var ch = v.__cscope
+            if (ch != undefined && ch != null) {
+                for (var ci = ch.length - 1; ci >= 0; ci--) {
+                    if (hasOwn(ch[ci], name)) { return ch[ci] }
+                }
+            }
             v = v.__outer
         }
         return null

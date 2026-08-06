@@ -227,10 +227,121 @@ function emitStr(b, s) {
 //
 // -256..1024 stays a direct js_num_i: the floor already answers those from its cache
 // without allocating, so a call and a load would be pure loss.
+// THE TEXT A NON-INTEGRAL CONSTANT TRAVELS AS, and why it is not just `"" + n`
+// (docs/todo.md 2.8). A fractional literal is emitted as a STRING for js_num_str to
+// parse back, so that text has to round-trip - and the host printer does not always
+// give a form that does. goja renders the double 359000550 * 2^-38 as
+// "0.001306036392634269", sixteen digits that read back as the NEXT double up, where
+// the frozen host renders the correct "0.0013060363926342689". So a java source
+// holding a 17 significant digit literal compiled to a DIFFERENT MODULE under the two
+// script hosts (a FROZEN-DIFF in the compiler half's own output, which is its stdout)
+// and to the wrong value under goja - `javac` and our interpreter half agreed with
+// each other and not with us.
+//
+// The repair keeps `"" + n` whenever it reads back, so every module this project has
+// ever emitted is unchanged byte for byte, and falls back to the digits of floPrec -
+// the one host global that answers a FIXED number of significant digits, and whose
+// implementations were made to agree in the same change - only for the values the
+// host printer gets wrong. Seventeen digits always round-trip a binary64.
+//
+// parseFloat is exact in both script hosts (goja's and jsParseFloat in abnf/jsrt.go
+// are both strconv.ParseFloat), which is what makes the test decide rather than guess.
+//
+// The KEY matters as much as the text: a printer that is not injective maps two
+// distinct doubles to one key, and the second literal would then silently reuse the
+// first one's getter.
+//
+// THE FALLBACK MUST REPRODUCE WHAT A CORRECT HOST WOULD HAVE PRINTED, not merely
+// some text of the same value. The frozen host's `"" + n` is right, so it never
+// takes the fallback; goja's is wrong, so it does. Emitting a different SHAPE there
+// - a bare "2.156...e186" where the host writes "2.156...e+186" - therefore makes
+// the two script hosts emit different MODULE BYTES, and for a compiler grammar the
+// module IS stdout, which is what the matrix compares. The first version of this
+// did exactly that and was caught by diffing the goja and -frozen modules of an
+// 85 literal probe, not by any gate.
+//
+// So coreNumEcma is jsNumStr (abnf/jsrt.go) rebuilt from digits: plain positional
+// form for 1e-6 <= |v| < 1e21 (equivalently -6 < np <= 21) and d.dddde±X outside
+// it, with the exponent NOT zero padded and its sign always written.
+//
+// THE NAMES ARE PREFIXED, and that is load bearing. Everything in this file lands
+// in each grammar's own global scope, and python-to-llvm-ir.abnf already has a
+// `numText` of its own (it strips underscores out of a literal's text). An
+// unprefixed helper here silently REPLACED it - python's module grew two big
+// integer literals and its goja and -frozen halves stopped agreeing, with no
+// mention of numbers anywhere in the change. Nothing new in this file may take a
+// name a grammar might plausibly use.
+function coreNumSigVal(s) {
+    var ei = s.indexOf("e")
+    var ds = s.substring(0, ei)
+    var frac = ds.substring(1)
+    if (frac == "") { frac = "0" }
+    return parseFloat(ds.charAt(0) + "." + frac + "e" + s.substring(ei + 1))
+}
+// The shortest round-tripping decimal of a > 0, as DIGITS "e" EXP. Seventeen
+// digits always round-trip a binary64, so this always terminates exactly.
+function coreNumShortest(a) {
+    var n = 1
+    while (n < 17) {
+        var c = floPrec(a, n)
+        if (coreNumSigVal(c) === a) { return c }
+        n = n + 1
+    }
+    return floPrec(a, 17)
+}
+function coreNumEcma(ds, e10) {
+    var np = e10 + 1
+    var out = ""
+    if (np > -6 && np <= 21) {
+        if (np >= ds.length) {
+            out = ds
+            var i = ds.length
+            while (i < np) { out = out + "0"; i = i + 1 }
+            return out
+        }
+        if (np > 0) { return ds.substring(0, np) + "." + ds.substring(np) }
+        out = "0."
+        var j = 0
+        while (j < 0 - np) { out = out + "0"; j = j + 1 }
+        return out + ds
+    }
+    var sign = "+"
+    var ea = e10
+    if (ea < 0) { sign = "-"; ea = 0 - ea }
+    if (ds.length == 1) { return ds + "e" + sign + ea }
+    return ds.charAt(0) + "." + ds.substring(1) + "e" + sign + ea
+}
+function coreNumText(n) {
+    var s = "" + n
+    if (parseFloat(s) === n) { return s }
+    // NaN fails the round-trip test for the one reason that is not a printer
+    // defect - NaN !== NaN - and floPrec answers "0e0" for it, so without this
+    // guard every NaN constant in every language became the string "0". Caught by
+    // diffing the emitted modules against the base commit: python and php grew an
+    // @str "0" that the base did not have. Infinity and zero are safe (they do
+    // round-trip) and are excluded anyway, since floPrec collapses them too.
+    if (n !== n) { return s }
+    if (n - n !== 0) { return s }
+    if (n === 0) { return s }
+    if (typeof n != "number") { return s }
+    var a = n < 0 ? 0 - n : n
+    var t = coreNumShortest(a)
+    var ei = t.indexOf("e")
+    return (n < 0 ? "-" : "") + coreNumEcma(t.substring(0, ei), parseInt(t.substring(ei + 1), 10))
+}
 var numGetters = {}
 var numCount = 0
 function numGetter(n) {
-    var key = "$" + n
+    // The INTEGRAL arm keeps `"" + n` as its key: it never emits a string, and it
+    // is also where a grammar's own boxed constant can arrive (python hands this
+    // function bignum objects, whose `"" + n` is exact and whose coreNumText is not
+    // meaningful). Only the string arm needs the round-trip-safe text, and it
+    // needs it for the KEY as well as the payload - a printer that is not
+    // injective maps two distinct doubles onto one key, and the second literal
+    // would then silently reuse the first one's getter and its VALUE.
+    var small = (n % 1 == 0 && n < 9007199254740992 && n > -9007199254740992)
+    var text = small ? "" + n : coreNumText(n)
+    var key = "$" + text
     var f = numGetters[key]
     if (f != undefined) { return f }
     numCount++
@@ -242,10 +353,10 @@ function numGetter(n) {
     var had = eb.NewLoad(i64, g)
     eb.NewCondBr(eb.NewICmp(llvm.enum.IPredEQ, had, llvm.constant.NewInt(i64, 0)), mkB, okB)
     var made = anytype
-    if (n % 1 == 0 && n < 9007199254740992 && n > -9007199254740992) {
+    if (small) {
         made = callExt(mkB, "js_num_i", [handle(n)])
     } else {
-        made = callExt(mkB, "js_num_str", [emitStr(mkB, "" + n)])
+        made = callExt(mkB, "js_num_str", [emitStr(mkB, text)])
     }
     // The global below outlives every collection and lib/runtime.c cannot see it (a
     // module global is not on the C stack and not in the floor's own root set), so the

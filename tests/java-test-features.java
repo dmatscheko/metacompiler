@@ -168,6 +168,61 @@ class Box {
     }
 }
 
+/* ----- anonymous classes over the enclosing METHOD's scope (docs/todo.md 1.5) -----
+ *
+ * An anonymous body could already read the enclosing instance's fields, its statics
+ * and Outer.this; a LOCAL or PARAMETER of the enclosing method was the case left, and
+ * the interpreter half aborted with `unknown name: k` where the compiler half and
+ * javac both answered. The three rows below are the precedence, measured against
+ * java 24.0.2 - and the middle one went the other way in the COMPILER half, which
+ * probed the scope before the field and so let an enclosing local beat the anonymous
+ * class' own declaration.
+ *
+ *   1. the anonymous class' OWN field wins over everything outside the body
+ *   2. the enclosing METHOD's local/parameter wins over the enclosing class' field,
+ *      because the body is lexically inside that method
+ *   3. Outer.this.f still reaches the field that a local is shadowing
+ */
+interface Sup { String get(); }
+
+class Encl {
+    int fld = 42;
+    static int sfld = 33;
+
+    static Sup fromStatic(String s, int n) {          // no enclosing instance at all
+        int local = n * 2;
+        return new Sup() {
+            public String get() { return s + ":" + local + ":" + n + ":" + Encl.sfld; }
+        };
+    }
+
+    Sup ownFieldWins(int v) {                          // 1
+        return new Sup() {
+            int v = 900;
+            public String get() { return "" + v; }
+        };
+    }
+
+    Sup localBeatsField(int fld) {                     // 2 and 3
+        return new Sup() {
+            public String get() { return fld + "/" + Encl.this.fld; }
+        };
+    }
+
+    Sup nested(int a) {                                // a body inside a body
+        int b = a + 1;
+        return new Sup() {
+            public String get() {
+                int c = b + 1;
+                Sup inner = new Sup() {
+                    public String get() { return "" + (a + b + c) + ":" + fld; }
+                };
+                return inner.get();
+            }
+        };
+    }
+}
+
 public class Main {
     static int fails = 0;
     static int checks = 0;
@@ -746,6 +801,51 @@ public class Main {
         Main.check("unq-forward", u.later() == 77);
         Unq.reset();
         Main.check("unq-static-write", Unq.step() == 1 && Unq.step() == 2 && Unq.counter == 2);
+
+        // ----- anonymous classes over the enclosing method's scope (docs/todo.md 1.5) -----
+        // Every operand comes out of an array so the constant folder cannot answer
+        // these at compile time.
+        int[] anOps = {3, 7};
+        String[] anNames = {"a"};
+        Encl enc = new Encl();
+        Main.check("anon-static-local", Encl.fromStatic(anNames[0], anOps[0]).get().equals("a:6:3:33"));
+        Main.check("anon-own-field-wins", enc.ownFieldWins(anOps[0]).get().equals("900"));
+        Main.check("anon-local-beats-field", enc.localBeatsField(anOps[1]).get().equals("7/42"));
+        Main.check("anon-nested-locals", enc.nested(anOps[0]).get().equals("12:42"));
+
+        // ----- 17 significant digit doubles (docs/todo.md 2.8) -----
+        // 359000550 * 2^-38 is 0.0013060363926342689, seventeen significant digits.
+        // THREE separate things printed 0.001306036392634269 for it, a SIXTEEN digit
+        // decimal that reads back as the next double up:
+        //   - the interpreter's Double.toString, which took its digits from the tag
+        //     host's `"" + a` (goja's printer is not always the shortest round
+        //     tripping form; the frozen host's is, so this was also a live
+        //     goja-vs--frozen divergence that no matrix entry reached),
+        //   - the EMITTER, which shipped the same text for js_num_str to parse back,
+        //     so the compiled program held a DIFFERENT DOUBLE from the source's,
+        //   - and therefore both halves at once, agreeing and both wrong.
+        // The literal and the arithmetic must agree, and both must render all
+        // seventeen digits. Read out of arrays; the literal row is deliberately a
+        // LITERAL, because the emitter's own parse is one of the three defects.
+        double[] dLit = {0.0013060363926342689, 1.2345678901234567, 8.829779733692889E-31};
+        double[] dOps = {359000550.0, 274877906944.0};    // 274877906944 == 2^38
+        double dBuilt = dOps[0] / dOps[1];
+        Main.check("dbl-lit-roundtrip", dBuilt == dLit[0]);
+        Main.check("dbl-17-digits", ("" + dLit[0]).equals("0.0013060363926342689")
+                                    && ("" + dBuilt).equals("0.0013060363926342689"));
+        Main.check("dbl-17-more", ("" + dLit[1]).equals("1.2345678901234567")
+                                  && ("" + dLit[2]).equals("8.829779733692889E-31"));
+        // The shapes NEAR the change: the two digit minimum of the scientific form,
+        // the plain/scientific window, the forced ".0", and Float's 24 bit width.
+        double[] dEdge = {4.9E-324, 1.0E20, 0.001, 9999999.0, 1.0E7, 100.0, 0.1};
+        Main.check("dbl-subnormal", ("" + dEdge[0]).equals("4.9E-324"));
+        Main.check("dbl-sci-forced-zero", ("" + dEdge[1]).equals("1.0E20"));
+        Main.check("dbl-window", ("" + dEdge[2]).equals("0.001") && ("" + dEdge[3]).equals("9999999.0")
+                                 && ("" + dEdge[4]).equals("1.0E7"));
+        Main.check("dbl-plain", ("" + dEdge[5]).equals("100.0") && ("" + dEdge[6]).equals("0.1"));
+        float[] fEdge = {1.4E-45f, 1.0E20f, 0.1f};
+        Main.check("flt-edges", ("" + fEdge[0]).equals("1.4E-45") && ("" + fEdge[1]).equals("1.0E20")
+                                && ("" + fEdge[2]).equals("0.1"));
 
         // ----- everything combined -----
         Main.check("combined-pipeline", Main.transform(new int[]{1, 2, -3}).equals("o1e2x"));
