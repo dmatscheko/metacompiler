@@ -4084,6 +4084,26 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return {b: b, v: callExt(b, "js_rformat", [ea.v])}
             }
         }
+        // Kernel#rand. It resolved to a scope lookup and aborted with `variable not
+        // defined: rand` in both compiler halves, where ruby-interpreter.abnf has had
+        // it as a host global all along - a halves divergence. There is no random
+        // source here, so js_rrand is deterministically zero OF THE RIGHT CLASS; see
+        // rubyRand in abnf/jsrt.go. Like printf/p below it steps aside for a program
+        // that defines a `rand` of its own.
+        if (name == "rand" && !hasBlockArg(args)) {
+            var randArgs = args
+            var randT = function(b) {
+                var era = emitArgs(b, randArgs)
+                b = era.b
+                return {b: b, v: callExt(b, "js_rrand", [era.v])}
+            }
+            var randFallback = makePlainCall(name, randArgs)
+            return function(b) {
+                if (rubyAllMethods["$rand"] === true) { return randFallback(b) }
+                if (selfMethod(curClsName, "rand")) { return randFallback(b) }
+                return randT(b)
+            }
+        }
         // Kernel#printf and Kernel#p, both of which a program may shadow with a def
         // of its own - so unlike format/sprintf above, the test is made INSIDE the
         // emitted closure, where rubyAllMethods is complete (a def anywhere in the

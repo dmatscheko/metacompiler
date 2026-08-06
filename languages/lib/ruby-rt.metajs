@@ -2257,22 +2257,50 @@ function rbSpaceship(l, r) {
         if (r < l) { return 1 }
         return 0
     }
+    // ONE incomparable element pair makes the WHOLE comparison nil - skipping it
+    // and carrying on made `[1, "a"] <=> [1, 2]` answer 0 where MRI answers nil -
+    // and the answer is NORMALISED to -1/0/1, so `[1,2,3] <=> [1]` is 1, not 2.
+    // Both measured against ruby 2.6.10p210.
     if (rbIsArr(l) && rbIsArr(r)) {
         var i = 0
         while (i < l.length && i < r.length) {
             var c = rbSpaceship(l[i], r[i])
-            if (c !== null && c != 0) { return c }
+            if (c === null) { return null }
+            if (c != 0) { return rbCmpSign(c) }
             i = i + 1
         }
-        return l.length - r.length
+        return rbCmpSign(l.length - r.length)
     }
     return null
+}
+
+function rbCmpSign(n) {
+    if (n < 0) { return 0 - 1 }
+    if (n > 0) { return 1 }
+    return 0
+}
+
+// MRI's rb_cmperr message, which sort / min / max / < all raise on an incomparable
+// pair: the FIRST operand is named by its class, the second by its class UNLESS it
+// is a special constant or a Float, which are inspected - hence "comparison of
+// NilClass with 1 failed" for `[1, nil].max`.
+function rbCmpName(v) {
+    if (rbIsNil(v) || v === true || v === false) { return rbInspect(v) }
+    if (typeof v == "number" || rbIsFlo(v) || rbIsSym(v)) { return rbInspect(v) }
+    var n = rbClassName(v)
+    return n == "" ? "Object" : n
 }
 
 // < > <= >= raise in Ruby when the values cannot be compared.
 function rbCmp(l, r) {
     var c = rbSpaceship(l, r)
-    if (c === null) { fail("comparison of incompatible values") }
+    if (c === null) {
+        // A CATCHABLE ArgumentError, not a host abort: MRI's sort raises one and a
+        // program may rescue it.
+        var ln = rbClassName(l)
+        js_rraise(rbBuiltinClass("ArgumentError"),
+                  "comparison of " + (ln == "" ? "Object" : ln) + " with " + rbCmpName(r) + " failed")
+    }
     return c
 }
 
@@ -2599,6 +2627,8 @@ function rbBin(op, l, r) {
             if (n < 0) { n = 0 }
             return rbRepeat(l, n)
         }
+        // Array#* is repetition with an Integer and JOIN with a String.
+        if (rbIsArr(l) && typeof r == "string") { return rbArrJoin(l, r) }
         if (rbIsArr(l)) {
             var rep = []
             var t = 0
@@ -2636,6 +2666,15 @@ function rbBin(op, l, r) {
             }
             return diff
         }
+    }
+    // Array#& (intersection) and Array#| (union). Both keep the LEFT-hand order,
+    // both dedupe, and both compare with eql? like Array#- above. Without these
+    // arms they reached rbNumBin and ABORTED with "not a number in '&'".
+    if (op == "&") {
+        if (rbIsArr(l) && rbIsArr(r)) { return rbArrAnd(l, r) }
+    }
+    if (op == "|") {
+        if (rbIsArr(l) && rbIsArr(r)) { return rbArrOr(l, r) }
     }
     if (op == "%") {
         if (typeof l == "string") { return rbFormat(l, r) }
@@ -3008,9 +3047,234 @@ function rbNumMethod(t, name, args) {
     return undefined
 }
 
+// ----- Array helpers: the sort / min / max / flatten / join family -------------
+// A block reaches this half as the LAST positional argument (see unwrapArgs in
+// ruby-to-llvm-ir.abnf), where ruby-interpreter.abnf keeps it in a parameter of
+// its own. rbBlockOf / rbPosArgs split the two apart; rubyBlockArgs is the Go
+// twin's spelling.
+function rbBlockOf(args) {
+    if (args.length > 0 && rbIsFn(args[args.length - 1])) { return args[args.length - 1] }
+    return null
+}
+function rbPosArgs(args) {
+    var out = []
+    var n = rbNPos(args)
+    var i = 0
+    while (i < n) {
+        out.push(args[i])
+        i = i + 1
+    }
+    return out
+}
+// The COUNT of positional arguments, which is what the hot paths want: building
+// the array would allocate on every array-method call, and push/each/map are hot.
+function rbNPos(args) {
+    if (args.length > 0 && rbIsFn(args[args.length - 1])) { return args.length - 1 }
+    return args.length
+}
+function rbPosAt(args, n, i) {
+    if (i < n) { return args[i] }
+    return undefined
+}
+// The comparator a sort / min / max uses: the block when one was given (whose
+// value is an Integer, like <=>), rbCmp otherwise - which raises on values that
+// cannot be compared, as MRI does. byKey compares the [key, value] pairs that
+// sort_by / min_by / max_by decorate with. Layer 2 has no function EXPRESSIONS, so
+// the choice is a parameter rather than a closure.
+function rbMSortCmp(a, b, blk, byKey) {
+    if (byKey) { return rbCmp(a[0], b[0]) }
+    if (blk === null) { return rbCmp(a, b) }
+    return Math.trunc(rbToF(rbCall2(blk, a, b)))
+}
+// A STABLE merge sort. MRI's Array#sort is not stable and its #sort_by is, so one
+// stable sort satisfies both contracts.
+function rbMSort(a, blk, byKey) {
+    if (a.length < 2) { return rtCopyArr(a) }
+    var mid = Math.floor(a.length / 2)
+    var lh = []
+    var rh = []
+    var i = 0
+    while (i < a.length) {
+        if (i < mid) { lh.push(a[i]) } else { rh.push(a[i]) }
+        i = i + 1
+    }
+    var lhs = rbMSort(lh, blk, byKey)
+    var rhs = rbMSort(rh, blk, byKey)
+    var out = []
+    var li = 0
+    var ri = 0
+    while (li < lhs.length && ri < rhs.length) {
+        // Left-first on a tie keeps equal elements in their original order. The
+        // operands are passed in THIS order (left, right) so that the ArgumentError
+        // an incomparable pair raises names them the way MRI's own sort does.
+        if (rbMSortCmp(lhs[li], rhs[ri], blk, byKey) <= 0) {
+            out.push(lhs[li])
+            li = li + 1
+        } else {
+            out.push(rhs[ri])
+            ri = ri + 1
+        }
+    }
+    while (li < lhs.length) {
+        out.push(lhs[li])
+        li = li + 1
+    }
+    while (ri < rhs.length) {
+        out.push(rhs[ri])
+        ri = ri + 1
+    }
+    return out
+}
+// The decorate-sort step of sort_by / min_by / max_by: each element paired with
+// its block value, stably sorted on that key.
+function rbArrKeyed(t, blk) {
+    var pairs = []
+    var i = 0
+    while (i < t.length) {
+        pairs.push([rbCall1(blk, t[i]), t[i]])
+        i = i + 1
+    }
+    return rbMSort(pairs, null, true)
+}
+function rbUndecorate(pairs) {
+    var out = []
+    var i = 0
+    while (i < pairs.length) {
+        out.push(pairs[i][1])
+        i = i + 1
+    }
+    return out
+}
+// Array#join RECURSES into a nested array with the same separator, and sends every
+// other element through to_s (so nil contributes "").
+function rbArrJoin(t, sep) {
+    var out = ""
+    var i = 0
+    while (i < t.length) {
+        if (i > 0) { out = out + sep }
+        if (rbIsArr(t[i])) { out = out + rbArrJoin(t[i], sep) }
+        else { out = out + rbStr(t[i]) }
+        i = i + 1
+    }
+    return out
+}
+// Array#flatten splices nested arrays to a DEPTH: flatten(1) one level, -1 all the
+// way down (which is what a missing argument means).
+function rbArrFlat(t, depth, out) {
+    var i = 0
+    while (i < t.length) {
+        if (rbIsArr(t[i]) && depth != 0) { rbArrFlat(t[i], depth - 1, out) }
+        else { out.push(t[i]) }
+        i = i + 1
+    }
+    return out
+}
+// How the bang methods mutate in place: copy first, because the source is usually
+// the receiver itself.
+function rbArrReplace(t, src) {
+    var keep = rtCopyArr(src)
+    while (t.length > 0) { t.pop() }
+    var i = 0
+    while (i < keep.length) {
+        t.push(keep[i])
+        i = i + 1
+    }
+    return t
+}
+// A negative index counts from the end, exactly as Array#[] does.
+function rbArrNorm(t, v) {
+    var n = Math.trunc(rbToF(v))
+    if (n < 0) { return t.length + n }
+    return n
+}
+function rbArrSub(t, from, len) {
+    var out = []
+    var i = from
+    while (i < t.length && out.length < len) {
+        if (i >= 0) { out.push(t[i]) }
+        i = i + 1
+    }
+    return out
+}
+// Array#& and Array#| both keep the LEFT-hand order, both dedupe, and both compare
+// with eql? (the hash-key comparison), not ==.
+function rbArrHas(a, v) {
+    var i = 0
+    while (i < a.length) {
+        if (rbEql(a[i], v)) { return true }
+        i = i + 1
+    }
+    return false
+}
+function rbArrAnd(l, r) {
+    var out = []
+    var i = 0
+    while (i < l.length) {
+        if (rbArrHas(r, l[i]) && !rbArrHas(out, l[i])) { out.push(l[i]) }
+        i = i + 1
+    }
+    return out
+}
+function rbArrOr(l, r) {
+    var out = []
+    var i = 0
+    while (i < l.length) {
+        if (!rbArrHas(out, l[i])) { out.push(l[i]) }
+        i = i + 1
+    }
+    var j = 0
+    while (j < r.length) {
+        if (!rbArrHas(out, r[j])) { out.push(r[j]) }
+        j = j + 1
+    }
+    return out
+}
+// The `pattern === value` test all?/any?/none?/one? apply to a non-block argument:
+// a class object matches by is_a?, everything else by == - the rule rbWhen applies
+// to a `when V` label.
+function rbPatternHit(pat, v) { return rbWhen(pat, v) }
+// Array.new(n) / Array.new(n, v) / Array.new(n) { |i| }.
+function rbArrNew(args) {
+    var blk = rbBlockOf(args)
+    var pos = rbPosArgs(args)
+    var out = []
+    if (pos.length > 0 && rbIsArr(pos[0])) { return rtCopyArr(pos[0]) }
+    var n = 0
+    if (pos.length > 0) { n = Math.trunc(rbToF(pos[0])) }
+    var i = 0
+    while (i < n) {
+        if (blk !== null) { out.push(rbCall1(blk, i)) }
+        else if (pos.length > 1) { out.push(pos[1]) }
+        else { out.push(null) }
+        i = i + 1
+    }
+    return out
+}
+// Kernel#rand. There is no random source in this project and there cannot be one
+// the engines agree on byte-for-byte, so rand is DETERMINISTICALLY ZERO - but zero
+// of the right class, which is the part a program can test: `rand` and `rand(0)`
+// are Floats in [0,1), `rand(n)` an Integer in [0,n), and `rand(a..b)` the range's
+// own low end (a closed range reaches this half already materialized as an array).
+function rbRand(v) {
+    if (rbIsNil(v)) { return rbMkFlo(0) }
+    if (rbIsArr(v)) {
+        if (v.length == 0) { return null }
+        return v[0]
+    }
+    if (rbIsObj(v) && v["__rrange"] === true) { return v["begin"] }
+    if (rbIsFlo(v)) { return rbMkFlo(0) }
+    if (rbToF(v) == 0) { return rbMkFlo(0) }
+    return 0
+}
+
 // rubyArrayMethod. select and reject use RUBY truthiness, and pop/first/last
 // answer nil (not an error) on an empty array.
 function rbArrayMethod(t, name, args) {
+    var blk = rbBlockOf(args)
+    // The POSITIONAL COUNT, not a positional ARRAY: rbPosArgs would allocate on
+    // every array-method call and push/each/map are hot, so the arms index args
+    // directly and stop at nPos.
+    var nPos = rbNPos(args)
     if (name == "size" || name == "length") { return t.length }
     if (name == "push" || name == "append" || name == "add") {
         var i = 0
@@ -3020,37 +3284,90 @@ function rbArrayMethod(t, name, args) {
         }
         return t
     }
+    // first / last / pop / shift all take an optional COUNT, and then answer an
+    // ARRAY. Without it they answered the single element whatever was passed, so
+    // `[1,2,3].first(2)` was a silent 1 in every engine.
     if (name == "pop") {
+        if (nPos > 0) {
+            var pn = Math.trunc(rbToF(args[0]))
+            if (pn > t.length) { pn = t.length }
+            var ptail = rbArrSub(t, t.length - pn, pn)
+            rbArrReplace(t, rbArrSub(t, 0, t.length - pn))
+            return ptail
+        }
         if (t.length == 0) { return null }
         return t.pop()
     }
     if (name == "first") {
+        if (nPos > 0) { return rbArrSub(t, 0, Math.trunc(rbToF(args[0]))) }
         if (t.length == 0) { return null }
         return t[0]
     }
     if (name == "last") {
+        if (nPos > 0) {
+            var ln = Math.trunc(rbToF(args[0]))
+            if (ln > t.length) { ln = t.length }
+            return rbArrSub(t, t.length - ln, ln)
+        }
         if (t.length == 0) { return null }
         return t[t.length - 1]
+    }
+    // shift removes from the FRONT; unshift/prepend adds there, variadically.
+    if (name == "shift") {
+        if (nPos > 0) {
+            var sn = Math.trunc(rbToF(args[0]))
+            if (sn > t.length) { sn = t.length }
+            var shead = rbArrSub(t, 0, sn)
+            rbArrReplace(t, rbArrSub(t, sn, t.length - sn))
+            return shead
+        }
+        if (t.length == 0) { return null }
+        var s1 = anytype
+        s1 = t[0]
+        rbArrReplace(t, rbArrSub(t, 1, t.length - 1))
+        return s1
+    }
+    if (name == "unshift" || name == "prepend") {
+        var pre = []
+        var pv = 0
+        while (pv < nPos) {
+            pre.push(args[pv])
+            pv = pv + 1
+        }
+        var pu = 0
+        while (pu < t.length) {
+            pre.push(t[pu])
+            pu = pu + 1
+        }
+        return rbArrReplace(t, pre)
     }
     // Array#include? / #index / #find_index are ==, not === and not eql?:
     // `[[1]].include?([1])` and `[1].include?(1.0)` are both true in MRI. This was
     // a `===` find, which answered false to both. A plain scan and not the dict
     // index: an ordinary data array must not grow a key index to be searched.
-    if (name == "include?" || name == "contains") { return rbArrIndex(t, rbArgAt(args, 0)) >= 0 }
+    if (name == "include?" || name == "contains") { return rbArrIndex(t, rbPosAt(args, nPos, 0)) >= 0 }
     // inspect / index / find_index / rindex / uniq, all missing from every engine
     // (docs/todo.md 2.9 recorded them as an interpreter gap; they were not). index
     // and uniq compare BY VALUE - `[[1]].index([1])` is 0 in MRI - which is what
     // rbDictFind says.
     if (name == "inspect") { return rbInspect(t) }
     if (name == "index" || name == "find_index") {
-        var ix = rbArrIndex(t, rbArgAt(args, 0))
+        if (blk !== null && nPos == 0) {
+            var bi = 0
+            while (bi < t.length) {
+                if (rbTruthy(rbCall1(blk, t[bi]))) { return bi }
+                bi = bi + 1
+            }
+            return null
+        }
+        var ix = rbArrIndex(t, rbPosAt(args, nPos, 0))
         if (ix < 0) { return null }
         return ix
     }
     if (name == "rindex") {
         var ri = t.length - 1
         while (ri >= 0) {
-            if (rbEq(t[ri], rbArgAt(args, 0))) { return ri }
+            if (rbEq(t[ri], rbPosAt(args, nPos, 0))) { return ri }
             ri = ri - 1
         }
         return null
@@ -3077,7 +3394,7 @@ function rbArrayMethod(t, name, args) {
     if (name == "each") {
         var e = 0
         while (e < t.length) {
-            rbCall1(rbArgAt(args, 0), t[e])
+            rbCall1(blk, t[e])
             e = e + 1
         }
         return t
@@ -3085,8 +3402,16 @@ function rbArrayMethod(t, name, args) {
     if (name == "each_with_index") {
         var w = 0
         while (w < t.length) {
-            rbCall2(rbArgAt(args, 0), t[w], w)
+            rbCall2(blk, t[w], w)
             w = w + 1
+        }
+        return t
+    }
+    if (name == "each_index") {
+        var ei = 0
+        while (ei < t.length) {
+            rbCall1(blk, ei)
+            ei = ei + 1
         }
         return t
     }
@@ -3094,7 +3419,7 @@ function rbArrayMethod(t, name, args) {
         var out = []
         var m = 0
         while (m < t.length) {
-            out.push(rbCall1(rbArgAt(args, 0), t[m]))
+            out.push(rbCall1(blk, t[m]))
             m = m + 1
         }
         return out
@@ -3103,7 +3428,7 @@ function rbArrayMethod(t, name, args) {
         var sel = []
         var s = 0
         while (s < t.length) {
-            if (rbTruthy(rbCall1(rbArgAt(args, 0), t[s]))) { sel.push(t[s]) }
+            if (rbTruthy(rbCall1(blk, t[s]))) { sel.push(t[s]) }
             s = s + 1
         }
         return sel
@@ -3112,23 +3437,498 @@ function rbArrayMethod(t, name, args) {
         var rej = []
         var r = 0
         while (r < t.length) {
-            if (!rbTruthy(rbCall1(rbArgAt(args, 0), t[r]))) { rej.push(t[r]) }
+            if (!rbTruthy(rbCall1(blk, t[r]))) { rej.push(t[r]) }
             r = r + 1
         }
         return rej
     }
+    // sum accumulated through toInt32 at every step, so it WRAPPED at 32 bits and
+    // truncated every Float: `[1.5, 2.5].sum` answered 3 in all three engines.
+    // Ruby's sum is ordinary + from an Integer 0 (or from the given initial value),
+    // with the block applied to each element first.
+    // MRI's sum starts from an Integer 0 and REFUSES a non-numeric element:
+    // `["b","a"].sum` is a TypeError, not "0ba". The refusal is only against a
+    // NUMERIC accumulator - `["a","b"].sum("")` is "ab" and `[[1],[2]].sum([])` is
+    // [1,2]. A catchable TypeError, since MRI's is rescuable.
     if (name == "sum") {
-        // The Go twin accumulates through toInt32 at every step, so the sum WRAPS
-        // at 32 bits. Reproduced rather than corrected: both halves have to agree
-        // and the ratchet pins it.
-        var acc = 0
+        var acc = anytype
+        acc = nPos > 0 ? args[0] : 0
         var k = 0
         while (k < t.length) {
-            acc = rbToInt32(acc + rbToF(t[k]))
+            var sv = anytype
+            sv = blk === null ? t[k] : rbCall1(blk, t[k])
+            if (rbIsNum(acc) && !rbIsNum(sv)) {
+                js_rraise(rbBuiltinClass("TypeError"),
+                          rbCmpName(sv) + " can't be coerced into " + rbClassName(acc))
+            }
+            acc = rbBin("+", acc, sv)
             k = k + 1
         }
         return acc
     }
+    // ----- the rest of the Array / Enumerable surface -----
+    if (name == "empty?") { return t.length == 0 }
+    if (name == "clear") { return rbArrReplace(t, []) }
+    if (name == "sort") { return rbMSort(t, blk, false) }
+    if (name == "sort!") { return rbArrReplace(t, rbMSort(t, blk, false)) }
+    if (name == "sort_by") { return rbUndecorate(rbArrKeyed(t, blk)) }
+    if (name == "sort_by!") { return rbArrReplace(t, rbUndecorate(rbArrKeyed(t, blk))) }
+    if (name == "reverse" || name == "reverse!") {
+        var rev = []
+        var vi = t.length - 1
+        while (vi >= 0) {
+            rev.push(t[vi])
+            vi = vi - 1
+        }
+        if (name == "reverse") { return rev }
+        return rbArrReplace(t, rev)
+    }
+    if (name == "join") { return rbArrJoin(t, nPos == 0 ? "" : rbStr(args[0])) }
+    // min / max take an optional COUNT and an optional block, and with the count
+    // they answer an array - ascending for min, DESCENDING for max.
+    if (name == "min" || name == "max") {
+        var wantMax = name == "max"
+        if (nPos > 0) {
+            var mn = Math.trunc(rbToF(args[0]))
+            var masc = rbMSort(t, blk, false)
+            if (!wantMax) { return rbArrSub(masc, 0, mn) }
+            var mdesc = []
+            var mi = masc.length - 1
+            while (mi >= 0) {
+                mdesc.push(masc[mi])
+                mi = mi - 1
+            }
+            return rbArrSub(mdesc, 0, mn)
+        }
+        if (t.length == 0) { return null }
+        var best = anytype
+        best = t[0]
+        var bi = 1
+        while (bi < t.length) {
+            var bc = rbMSortCmp(t[bi], best, blk, false)
+            if (wantMax ? bc > 0 : bc < 0) { best = t[bi] }
+            bi = bi + 1
+        }
+        return best
+    }
+    if (name == "min_by" || name == "max_by") {
+        if (t.length == 0) { return null }
+        var kp = rbArrKeyed(t, blk)
+        if (name == "min_by") { return kp[0][1] }
+        return kp[kp.length - 1][1]
+    }
+    if (name == "minmax") {
+        if (t.length == 0) { return [null, null] }
+        var mms = rbMSort(t, blk, false)
+        return [mms[0], mms[mms.length - 1]]
+    }
+    // count: no argument is the length, an argument counts == matches, a block
+    // counts the elements it accepts.
+    if (name == "count") {
+        if (blk !== null && nPos == 0) {
+            var cb = 0
+            var ci = 0
+            while (ci < t.length) {
+                if (rbTruthy(rbCall1(blk, t[ci]))) { cb = cb + 1 }
+                ci = ci + 1
+            }
+            return cb
+        }
+        if (nPos == 0) { return t.length }
+        var cn = 0
+        var cj = 0
+        while (cj < t.length) {
+            if (rbEq(t[cj], args[0])) { cn = cn + 1 }
+            cj = cj + 1
+        }
+        return cn
+    }
+    if (name == "tally") {
+        var td = rbNewDict()
+        var ti = 0
+        while (ti < t.length) {
+            var tix = rbDictFind(td["keys"], t[ti])
+            if (tix < 0) { rbDictSet(td, t[ti], 1) }
+            else { td["vals"][tix] = td["vals"][tix] + 1 }
+            ti = ti + 1
+        }
+        return td
+    }
+    if (name == "flatten" || name == "flatten!") {
+        var fdepth = nPos == 0 ? 0 - 1 : Math.trunc(rbToF(args[0]))
+        var flat = rbArrFlat(t, fdepth, [])
+        if (name == "flatten") { return flat }
+        return rbArrReplace(t, flat)
+    }
+    if (name == "compact" || name == "compact!") {
+        var cmp2 = []
+        var pi = 0
+        while (pi < t.length) {
+            if (!rbIsNil(t[pi])) { cmp2.push(t[pi]) }
+            pi = pi + 1
+        }
+        if (name == "compact") { return cmp2 }
+        // The bang form answers nil when nothing was removed, which is how MRI
+        // reports "no change" for every ! method that can make none.
+        if (cmp2.length == t.length) { return null }
+        return rbArrReplace(t, cmp2)
+    }
+    if (name == "uniq!") {
+        var uq2 = rbArrayMethod(t, "uniq", [])
+        if (uq2.length == t.length) { return null }
+        return rbArrReplace(t, uq2)
+    }
+    // zip is element-wise across the receiver AND every argument array, padding a
+    // short one with nil; the result is always as long as the RECEIVER.
+    if (name == "zip") {
+        var zout = []
+        var zi = 0
+        while (zi < t.length) {
+            var row = [t[zi]]
+            var zj = 0
+            while (zj < nPos) {
+                var za = args[zj]
+                if (rbIsArr(za) && zi < za.length) { row.push(za[zi]) } else { row.push(null) }
+                zj = zj + 1
+            }
+            zout.push(row)
+            zi = zi + 1
+        }
+        return zout
+    }
+    // each_slice / each_cons: with a block they yield each group and answer SELF
+    // (Ruby 3.1 changed this from nil, and this project's corpus is Ruby 3); with
+    // no block MRI answers an Enumerator, which has no value here, so they answer
+    // the array of groups - what .to_a on that Enumerator would give.
+    if (name == "each_slice" || name == "each_cons") {
+        var gn = Math.trunc(rbToF(rbPosAt(args, nPos, 0)))
+        if (gn < 1) { fail("invalid size") }
+        var groups = []
+        var gi = 0
+        if (name == "each_slice") {
+            while (gi < t.length) {
+                groups.push(rbArrSub(t, gi, gn))
+                gi = gi + gn
+            }
+        } else {
+            while (gi + gn <= t.length) {
+                groups.push(rbArrSub(t, gi, gn))
+                gi = gi + 1
+            }
+        }
+        if (blk === null) { return groups }
+        var gk = 0
+        while (gk < groups.length) {
+            rbCall1(blk, groups[gk])
+            gk = gk + 1
+        }
+        return t
+    }
+    if (name == "take") { return rbArrSub(t, 0, Math.trunc(rbToF(rbPosAt(args, nPos, 0)))) }
+    if (name == "drop") {
+        var dn = Math.trunc(rbToF(rbPosAt(args, nPos, 0)))
+        return rbArrSub(t, dn, t.length - dn)
+    }
+    if (name == "take_while" || name == "drop_while") {
+        var cut = t.length
+        var wi = 0
+        while (wi < t.length) {
+            if (!rbTruthy(rbCall1(blk, t[wi]))) {
+                cut = wi
+                break
+            }
+            wi = wi + 1
+        }
+        if (name == "take_while") { return rbArrSub(t, 0, cut) }
+        return rbArrSub(t, cut, t.length - cut)
+    }
+    if (name == "find" || name == "detect") {
+        var fi = 0
+        while (fi < t.length) {
+            if (rbTruthy(rbCall1(blk, t[fi]))) { return t[fi] }
+            fi = fi + 1
+        }
+        return null
+    }
+    // inject / reduce: four forms - a block, a block with an initial value, a
+    // Symbol naming a binary operator, and an initial value with that Symbol.
+    if (name == "inject" || name == "reduce") {
+        var sym = ""
+        var iacc = anytype
+        iacc = null
+        var haveInit = false
+        var ii = 0
+        while (ii < nPos) {
+            if (rbIsSym(args[ii])) { sym = args[ii]["s"] }
+            else {
+                iacc = args[ii]
+                haveInit = true
+            }
+            ii = ii + 1
+        }
+        var from = 0
+        if (!haveInit) {
+            if (t.length == 0) { return null }
+            iacc = t[0]
+            from = 1
+        }
+        var ij = from
+        while (ij < t.length) {
+            if (sym != "") { iacc = rbBin(sym, iacc, t[ij]) }
+            else { iacc = rbCall2(blk, iacc, t[ij]) }
+            ij = ij + 1
+        }
+        return iacc
+    }
+    if (name == "each_with_object") {
+        var memo = anytype
+        memo = rbPosAt(args, nPos, 0)
+        var oi = 0
+        while (oi < t.length) {
+            rbCall2(blk, t[oi], memo)
+            oi = oi + 1
+        }
+        return memo
+    }
+    if (name == "all?" || name == "any?" || name == "none?" || name == "one?") {
+        var hits = 0
+        var qi = 0
+        while (qi < t.length) {
+            var hit = false
+            // With no block the element's own truthiness is the test; with an
+            // argument the test is `arg === element`, which for a class object is
+            // is_a? and == for everything else.
+            if (blk !== null) { hit = rbTruthy(rbCall1(blk, t[qi])) }
+            else if (nPos > 0) { hit = rbTruthy(rbPatternHit(args[0], t[qi])) }
+            else { hit = rbTruthy(t[qi]) }
+            if (hit) { hits = hits + 1 }
+            qi = qi + 1
+        }
+        if (name == "all?") { return hits == t.length }
+        if (name == "any?") { return hits > 0 }
+        if (name == "none?") { return hits == 0 }
+        return hits == 1
+    }
+    if (name == "flat_map" || name == "collect_concat") {
+        var fm = []
+        var mi = 0
+        while (mi < t.length) {
+            var fv = anytype
+            fv = rbCall1(blk, t[mi])
+            if (rbIsArr(fv)) {
+                var fj = 0
+                while (fj < fv.length) {
+                    fm.push(fv[fj])
+                    fj = fj + 1
+                }
+            } else { fm.push(fv) }
+            mi = mi + 1
+        }
+        return fm
+    }
+    if (name == "group_by") {
+        var gd = rbNewDict()
+        var yi = 0
+        while (yi < t.length) {
+            var gkey = anytype
+            gkey = rbCall1(blk, t[yi])
+            var gix = rbDictFind(gd["keys"], gkey)
+            if (gix < 0) { rbDictSet(gd, gkey, [t[yi]]) }
+            else { gd["vals"][gix].push(t[yi]) }
+            yi = yi + 1
+        }
+        return gd
+    }
+    if (name == "partition") {
+        var yes = []
+        var no = []
+        var ni = 0
+        while (ni < t.length) {
+            if (rbTruthy(rbCall1(blk, t[ni]))) { yes.push(t[ni]) } else { no.push(t[ni]) }
+            ni = ni + 1
+        }
+        return [yes, no]
+    }
+    if (name == "rotate") {
+        if (t.length == 0) { return [] }
+        var rn = nPos == 0 ? 1 : Math.trunc(rbToF(args[0]))
+        rn = ((rn % t.length) + t.length) % t.length
+        var rot = []
+        var ri2 = 0
+        while (ri2 < t.length) {
+            rot.push(t[(ri2 + rn) % t.length])
+            ri2 = ri2 + 1
+        }
+        return rot
+    }
+    if (name == "values_at") {
+        var va = []
+        var vj = 0
+        while (vj < nPos) {
+            var vix = rbArrNorm(t, args[vj])
+            if (vix >= 0 && vix < t.length) { va.push(t[vix]) } else { va.push(null) }
+            vj = vj + 1
+        }
+        return va
+    }
+    if (name == "slice") {
+        // A closed range reaches this half ALREADY MATERIALIZED as an array (that
+        // is what ruby-to-llvm-ir.abnf emits for 1..2), so an array first argument
+        // here IS the range: its first element is the low bound, its length the
+        // count.
+        if (rbIsArr(rbPosAt(args, nPos, 0))) {
+            var rr = args[0]
+            if (rr.length == 0) { return [] }
+            return rbArrSub(t, rbArrNorm(t, rr[0]), rr.length)
+        }
+        var six = rbArrNorm(t, rbPosAt(args, nPos, 0))
+        if (nPos > 1) { return rbArrSub(t, six, Math.trunc(rbToF(args[1]))) }
+        if (six >= 0 && six < t.length) { return t[six] }
+        return null
+    }
+    if (name == "insert") {
+        var iix = rbArrNorm(t, rbPosAt(args, nPos, 0))
+        var ins = rbArrSub(t, 0, iix)
+        var ik = 1
+        while (ik < nPos) {
+            ins.push(args[ik])
+            ik = ik + 1
+        }
+        var im = iix
+        while (im < t.length) {
+            ins.push(t[im])
+            im = im + 1
+        }
+        return rbArrReplace(t, ins)
+    }
+    // delete answers the value it removed (nil when it removed nothing), while
+    // delete_at answers the element that was at that index.
+    // delete answers the LAST element it removed - which is not always the argument,
+    // since `[1, 1.0].delete(1)` removes both and MRI answers 1.0.
+    if (name == "delete") {
+        var kept = []
+        var hit = anytype
+        hit = null
+        var di = 0
+        while (di < t.length) {
+            if (rbEq(t[di], rbPosAt(args, nPos, 0))) { hit = t[di] } else { kept.push(t[di]) }
+            di = di + 1
+        }
+        rbArrReplace(t, kept)
+        return hit
+    }
+    if (name == "delete_at") {
+        var aix = rbArrNorm(t, rbPosAt(args, nPos, 0))
+        if (aix < 0 || aix >= t.length) { return null }
+        var dv = anytype
+        dv = t[aix]
+        var dkept = rbArrSub(t, 0, aix)
+        var dj = aix + 1
+        while (dj < t.length) {
+            dkept.push(t[dj])
+            dj = dj + 1
+        }
+        rbArrReplace(t, dkept)
+        return dv
+    }
+    // delete_if / keep_if always answer self; select! / reject! answer NIL when they
+    // removed nothing, which is MRI's "no change" report for a ! method.
+    if (name == "delete_if" || name == "reject!") {
+        var xkeep = []
+        var xi = 0
+        while (xi < t.length) {
+            if (!rbTruthy(rbCall1(blk, t[xi]))) { xkeep.push(t[xi]) }
+            xi = xi + 1
+        }
+        var xsame = xkeep.length == t.length
+        rbArrReplace(t, xkeep)
+        if (name == "reject!" && xsame) { return null }
+        return t
+    }
+    if (name == "keep_if" || name == "select!" || name == "filter!") {
+        var ykeep = []
+        var yj = 0
+        while (yj < t.length) {
+            if (rbTruthy(rbCall1(blk, t[yj]))) { ykeep.push(t[yj]) }
+            yj = yj + 1
+        }
+        var ysame = ykeep.length == t.length
+        rbArrReplace(t, ykeep)
+        if (name != "keep_if" && ysame) { return null }
+        return t
+    }
+    if (name == "map!" || name == "collect!") {
+        var mout = []
+        var mj = 0
+        while (mj < t.length) {
+            mout.push(rbCall1(blk, t[mj]))
+            mj = mj + 1
+        }
+        return rbArrReplace(t, mout)
+    }
+    if (name == "concat") {
+        var ci2 = 0
+        while (ci2 < nPos) {
+            var ca = args[ci2]
+            if (rbIsArr(ca)) {
+                var cj2 = 0
+                while (cj2 < ca.length) {
+                    t.push(ca[cj2])
+                    cj2 = cj2 + 1
+                }
+            }
+            ci2 = ci2 + 1
+        }
+        return t
+    }
+    if (name == "fill") {
+        var fl = []
+        var fk = 0
+        while (fk < t.length) {
+            if (blk === null) { fl.push(rbPosAt(args, nPos, 0)) } else { fl.push(rbCall1(blk, fk)) }
+            fk = fk + 1
+        }
+        return rbArrReplace(t, fl)
+    }
+    if (name == "assoc") {
+        var si2 = 0
+        while (si2 < t.length) {
+            if (rbIsArr(t[si2]) && t[si2].length > 0 && rbEq(t[si2][0], rbPosAt(args, nPos, 0))) { return t[si2] }
+            si2 = si2 + 1
+        }
+        return null
+    }
+    if (name == "product") {
+        var prod = []
+        var qj = 0
+        while (qj < t.length) {
+            prod.push([t[qj]])
+            qj = qj + 1
+        }
+        var pk = 0
+        while (pk < nPos) {
+            var pa = args[pk]
+            if (rbIsArr(pa)) {
+                var nprod = []
+                var pi2 = 0
+                while (pi2 < prod.length) {
+                    var pj2 = 0
+                    while (pj2 < pa.length) {
+                        var prow = rtCopyArr(prod[pi2])
+                        prow.push(pa[pj2])
+                        nprod.push(prow)
+                        pj2 = pj2 + 1
+                    }
+                    pi2 = pi2 + 1
+                }
+                prod = nprod
+            }
+            pk = pk + 1
+        }
+        return prod
+    }
+    if (name == "dup" || name == "clone" || name == "entries") { return rtCopyArr(t) }
+    if (name == "freeze" || name == "itself") { return t }
     fail("unknown Array method: " + name)
     return null
 }
@@ -3263,6 +4063,17 @@ function rbMethod(target, name, args) {
         // reaching a String, was a halves divergence.
         if (name == "inspect") { return rbInspect(target) }
         if (name == "to_sym" || name == "intern") { return rbSym(target) }
+        // String#to_i / #to_f parse a LEADING number and answer 0 when there is
+        // none. Both worked in ruby-interpreter.abnf and aborted here, so any
+        // program reading a number out of text was a halves divergence.
+        if (name == "to_i") {
+            var pi = parseInt(target, 10)
+            return pi != pi ? 0 : pi
+        }
+        if (name == "to_f") {
+            var pf = parseFloat(target)
+            return rbMkFlo(pf != pf ? 0 : pf)
+        }
         if (name == "upcase") { return rbUpper(target) }
         if (name == "downcase") { return rbLower(target) }
         if (name == "include?") { return target.indexOf(rbStr(rbArgAt(args, 0))) >= 0 }
@@ -3343,6 +4154,21 @@ function rbMethod(target, name, args) {
                 }
                 sc = sc["__super"]
             }
+        }
+        // Kernel.format / Kernel.sprintf / Kernel.rand: the Kernel module's methods
+        // are ordinarily called without a receiver, but naming Kernel explicitly is
+        // legal Ruby and aborted in every engine.
+        if (target["__rbuiltin"] === "Kernel") {
+            if (name == "format" || name == "sprintf") {
+                var kf = []
+                var ki = 0
+                while (ki < args.length) {
+                    kf.push(args[ki])
+                    ki = ki + 1
+                }
+                return js_rformat(kf)
+            }
+            if (name == "rand") { return rbRand(rbArgAt(args, 0)) }
         }
         return rbMemberCall(target, name, args)
     }
@@ -3600,6 +4426,12 @@ function js_rformat(args) {
     return rbFormat(rbStr(args[0]), rest)
 }
 
+// Kernel#rand, as a call the emitter makes for the bare name. See rbRand.
+function js_rrand(args) {
+    if (!rbIsArr(args) || args.length == 0) { return rbRand(null) }
+    return rbRand(args[0])
+}
+
 // %W[..] / %I[..]: split an interpolated body on whitespace into an array of
 // strings (or of symbols when the flag is set). strings.Fields drops empties.
 function js_rsplitw(v, asSym) {
@@ -3681,6 +4513,15 @@ function js_rnew(cls, args) {
                 if (argv.length > 0 && rbIsFn(argv[argv.length - 1])) { return argv[argv.length - 1] }
                 return null
             }
+            // Array.new(n) / Array.new(n, v) / Array.new(n) { |i| }. Without this
+            // arm it fell into the exception construction below and answered the
+            // first argument - a silent wrong answer, and a different one in each
+            // engine.
+            if (bn == "Array") { return rbArrNew(argv) }
+            // A bare Hash.new is an empty Hash. Hash.new(v) / Hash.new { } carry a
+            // DEFAULT, which nothing here models, so those forms are left on the
+            // old path rather than silently losing it.
+            if (bn == "Hash" && argv.length == 0) { return rbNewDict() }
             return rbExc(cls, argv)
         }
     }

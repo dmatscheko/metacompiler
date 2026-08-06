@@ -3198,7 +3198,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isUserObj(l)) { return mcall(l, op, [r], null) }
         if (Array.isArray(l)) {
             if (op == "-" && Array.isArray(r)) { return arrDiff(l, r) }
+            // Array#* is repetition with an Integer and JOIN with a String.
+            if (op == "*" && typeof r == "string") { return arrJoin(l, r) }
             if (op == "*") { return arrRepeat(l, r) }
+            // Array#& (intersection) and Array#| (union). Both keep the LEFT-hand
+            // order, both dedupe, and both compare with eql? like Array#- above.
+            // Without these arms they reached numBin and ABORTED with "not a number
+            // in '&'" in all three engines.
+            if (op == "&" && Array.isArray(r)) { return arrAnd(l, r) }
+            if (op == "|" && Array.isArray(r)) { return arrOr(l, r) }
         }
         return numBin(op, l, r)
     }
@@ -3209,15 +3217,59 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function() { return rbin("**", lt(), rt()) }
     }
     // <=> yields nil for values that cannot be compared (1 <=> "x").
+    //
+    // ARRAY IS COMPARABLE. Array#<=> is element-wise, recursing into nested arrays,
+    // and a shorter array that is a PREFIX of the longer one sorts first. Two rules
+    // are easy to get wrong and both were measured against ruby 2.6.10p210:
+    //   - ONE incomparable element pair makes the WHOLE comparison nil. Skipping it
+    //     and carrying on (which is what the compiled halves used to do) makes
+    //     `[1, "a"] <=> [1, 2]` answer 0 where MRI answers nil.
+    //   - the answer is NORMALISED to -1/0/1, so `[1,2,3] <=> [1]` is 1, not 2.
+    // This arm was MISSING here while both compiled halves had it, so
+    // `[[2],[1]].sort` aborted in the interpreter and worked everywhere else - a
+    // halves divergence that ./test.sh --cross could not see, because no test
+    // program sorts an array of arrays.
+    function cmpSign(n) {
+        if (n < 0) { return -1 }
+        if (n > 0) { return 1 }
+        return 0
+    }
     function spaceship(l, r) {
         if (isUserObj(l)) { return mcall(l, "<=>", [r], null) }
         if (isNumV(l) && isNumV(r)) { return numCmp(l, r) }
         if (typeof l == "string" && typeof r == "string") { return l < r ? -1 : (l > r ? 1 : 0) }
+        if (Array.isArray(l) && Array.isArray(r)) {
+            for (var si = 0; si < l.length && si < r.length; si++) {
+                var sc = spaceship(l[si], r[si])
+                if (sc === null || sc === undefined) { return null }
+                if (sc != 0) { return cmpSign(sc) }
+            }
+            return cmpSign(l.length - r.length)
+        }
         return null
+    }
+    // MRI's rb_cmperr message, which `sort`, `min`, `max` and `<` all raise on an
+    // incomparable pair: the FIRST operand is named by its class, and the second by
+    // its class UNLESS it is a special constant or a Float, which are inspected -
+    // hence "comparison of NilClass with 1 failed" for `[1, nil].max`.
+    function cmpName(v) {
+        if (v === null || v === undefined || v === true || v === false) { return rinspect(v) }
+        if (typeof v == "number" || isFlo(v) || isSym(v)) { return rinspect(v) }
+        var c = classOf(v)
+        return c !== null && c !== undefined && c.__name != undefined ? c.__name : "Object"
+    }
+    function cmpFail(l, r) {
+        var cl = classOf(l)
+        var ln = cl !== null && cl !== undefined && cl.__name != undefined ? cl.__name : "Object"
+        // A CATCHABLE ArgumentError, not a host abort: MRI's sort raises one and a
+        // program may rescue it. Both compiled halves raise the same class and the
+        // same message.
+        throw {__exc: true, v: mkExc(hostGlobals["ArgumentError"],
+                                     "comparison of " + ln + " with " + cmpName(r) + " failed")}
     }
     function rcmp(l, r) {
         var s = spaceship(l, r)
-        if (s === null || s === undefined) { fail("comparison of incompatible values") }
+        if (s === null || s === undefined) { cmpFail(l, r) }
         return s
     }
 
@@ -4810,6 +4862,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (target.__isclass === true) {
             if (name == "new" && target === hostGlobals["Proc"]) { return markLambda(blk) != null ? blk : blk }
+            // Array.new(n) / Array.new(n, v) / Array.new(n) { |i| }. Without this arm
+            // it fell into the generic instance construction below and answered a bare
+            // object - a silent wrong answer, and a different one in each engine.
+            if (name == "new" && target === hostGlobals["Array"]) { return arrNew(args, blk) }
+            // A bare Hash.new is an empty Hash - it answered a bare object here and a
+            // Hash in the compiler half. Hash.new(v) / Hash.new { } carry a DEFAULT,
+            // which nothing in this project models, so those forms are left on the
+            // old path rather than silently losing it.
+            if (name == "new" && target === hostGlobals["Hash"] && args.length == 0 && blk == null) {
+                return {__dict: true, keys: [], vals: []}
+            }
             if (name == "new") {
                 var obj = {__class: target}
                 var ini = anytype
@@ -4839,9 +4902,143 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 blockStack.pop()
                 return sr
             }
+            // Kernel.format / Kernel.sprintf / Kernel.rand: the Kernel module's methods
+            // are ordinarily called without a receiver, but naming Kernel explicitly is
+            // legal Ruby and aborted here. They are the same host functions the bare
+            // names resolve to.
+            if (target === hostGlobals["Kernel"]
+                && (name == "format" || name == "sprintf" || name == "rand" || name == "srand")) {
+                return hostGlobals[name].apply(undefined, args)
+            }
             fail("unknown class method '" + name + "'")
         }
         fail("unknown method '" + name + "'")
+    }
+    // ----- Array helpers: the sort / min / max / flatten / join family -----
+    // Ruby's eql?: == that does NOT convert across classes, so `1.eql?(1.0)` is false
+    // where `1 == 1.0` is true. Array#-, #uniq, #& and #| all compare with this;
+    // #include?, #index and #count(v) are ==. The compiler half spells it rbEql /
+    // rt.rubyEql.
+    function arrEql(a, b) { return classOf(a) === classOf(b) && rubyEq(a, b) }
+    // A STABLE merge sort. MRI's Array#sort is not stable and its #sort_by is, so one
+    // stable sort satisfies both contracts - and the extra guarantee is not something
+    // a Ruby program is entitled to see the absence of.
+    function arrSortWith(a, cmpf) {
+        if (a.length < 2) { return a.slice(0) }
+        var mid = Math.floor(a.length / 2)
+        var lhs = arrSortWith(a.slice(0, mid), cmpf)
+        var rhs = arrSortWith(a.slice(mid), cmpf)
+        var out = []
+        var li = 0
+        var ri = 0
+        while (li < lhs.length && ri < rhs.length) {
+            // Left-first on a tie keeps equal elements in their original order. The
+            // operands are passed in THIS order (left, right) so that the
+            // ArgumentError an incomparable pair raises names them the way MRI's
+            // own sort does.
+            if (cmpf(lhs[li], rhs[ri]) <= 0) { out.push(lhs[li]); li = li + 1 }
+            else { out.push(rhs[ri]); ri = ri + 1 }
+        }
+        while (li < lhs.length) { out.push(lhs[li]); li = li + 1 }
+        while (ri < rhs.length) { out.push(rhs[ri]); ri = ri + 1 }
+        return out
+    }
+    // The comparator a sort / min / max uses: the block when one was given (whose
+    // value is an Integer, like <=>), and rcmp otherwise - which raises on values
+    // that cannot be compared, as MRI does.
+    function arrCmpFn(blk) {
+        if (blk == null) { return function(x, y) { return rcmp(x, y) } }
+        return function(x, y) { return Math.trunc(toF(blockCall(blk, [x, y]))) }
+    }
+    // sort_by / min_by / max_by: decorate, sort on the key, undecorate. The sort is
+    // the stable one above, which is what MRI's sort_by promises.
+    function arrKeyed(t, blk) {
+        var pairs = []
+        for (var i = 0; i < t.length; i++) { pairs.push([blockCall(blk, [t[i]]), t[i]]) }
+        return arrSortWith(pairs, function(x, y) { return rcmp(x[0], y[0]) })
+    }
+    function arrUndecorate(pairs) {
+        var out = []
+        for (var i = 0; i < pairs.length; i++) { out.push(pairs[i][1]) }
+        return out
+    }
+    // Array#join RECURSES into a nested array with the same separator, and every
+    // other element goes through to_s (so nil contributes "").
+    function arrJoin(t, sep) {
+        var out = ""
+        for (var i = 0; i < t.length; i++) {
+            if (i > 0) { out = out + sep }
+            if (Array.isArray(t[i])) { out = out + arrJoin(t[i], sep) }
+            else { out = out + rstr(t[i]) }
+        }
+        return out
+    }
+    // Array#flatten takes a DEPTH: flatten(1) splices one level only. -1 is "all the
+    // way down", which is what a missing argument means.
+    function arrFlatInto(t, depth, out) {
+        for (var i = 0; i < t.length; i++) {
+            if (Array.isArray(t[i]) && depth != 0) { arrFlatInto(t[i], depth - 1, out) }
+            else { out.push(t[i]) }
+        }
+        return out
+    }
+    // The bang methods mutate the receiver in place: copy first, because the source
+    // is usually the receiver itself.
+    function arrReplace(t, src) {
+        var keep = []
+        for (var i = 0; i < src.length; i++) { keep.push(src[i]) }
+        while (t.length > 0) { t.pop() }
+        for (var j = 0; j < keep.length; j++) { t.push(keep[j]) }
+        return t
+    }
+    // A negative index counts from the end, exactly as Array#[] does.
+    function arrNorm(t, ix) {
+        var n = Math.trunc(toF(ix))
+        if (n < 0) { return t.length + n }
+        return n
+    }
+    function arrSub(t, from, len) {
+        var out = []
+        var i = from
+        while (i < t.length && out.length < len) {
+            if (i >= 0) { out.push(t[i]) }
+            i = i + 1
+        }
+        return out
+    }
+    // Array.new(n) fills with nil, Array.new(n, v) with v, and Array.new(n) { |i| }
+    // calls the block once per index. Both compiled halves answered something else
+    // entirely (`3` under llvm.Run, an object in the interpreter), so this was a
+    // silent wrong answer in every engine rather than an abort.
+    function arrNew(args, blk) {
+        var out = []
+        if (args.length > 0 && Array.isArray(args[0])) { return arrReplace(out, args[0]) }
+        var n = args.length == 0 ? 0 : Math.trunc(toF(args[0]))
+        for (var i = 0; i < n; i++) {
+            if (blk != null) { out.push(blockCall(blk, [i])) }
+            else if (args.length > 1) { out.push(args[1]) }
+            else { out.push(null) }
+        }
+        return out
+    }
+    // Array#& and Array#|: both keep the LEFT-hand order and both dedupe, and both
+    // compare with eql? (the hash-key comparison), not ==.
+    function arrHas(a, v) {
+        for (var i = 0; i < a.length; i++) { if (arrEql(a[i], v)) { return true } }
+        return false
+    }
+    function arrAnd(l, r) {
+        var out = []
+        for (var i = 0; i < l.length; i++) {
+            if (arrHas(r, l[i]) && !arrHas(out, l[i])) { out.push(l[i]) }
+        }
+        return out
+    }
+    function arrOr(l, r) {
+        var out = []
+        for (var i = 0; i < l.length; i++) { if (!arrHas(out, l[i])) { out.push(l[i]) } }
+        for (var j = 0; j < r.length; j++) { if (!arrHas(out, r[j])) { out.push(r[j]) } }
+        return out
     }
     function arrayMethod(t, name, args, blk) {
         var i
@@ -4851,9 +5048,51 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (i = 0; i < args.length; i++) { t.push(args[i]) }
             return t
         }
-        if (name == "pop") { return t.length == 0 ? null : t.pop() }
-        if (name == "first") { return t.length == 0 ? null : t[0] }
-        if (name == "last") { return t.length == 0 ? null : t[t.length - 1] }
+        // first / last / pop / shift all take an optional COUNT, and then answer an
+        // ARRAY. Without it they answered the single element whatever was passed, so
+        // `[1,2,3].first(2)` was a silent 1 in every engine.
+        if (name == "pop") {
+            if (args.length > 0) {
+                var pn = Math.trunc(toF(args[0]))
+                if (pn > t.length) { pn = t.length }
+                var ptail = arrSub(t, t.length - pn, pn)
+                arrReplace(t, arrSub(t, 0, t.length - pn))
+                return ptail
+            }
+            return t.length == 0 ? null : t.pop()
+        }
+        if (name == "first") {
+            if (args.length > 0) { return arrSub(t, 0, Math.trunc(toF(args[0]))) }
+            return t.length == 0 ? null : t[0]
+        }
+        if (name == "last") {
+            if (args.length > 0) {
+                var ln = Math.trunc(toF(args[0]))
+                if (ln > t.length) { ln = t.length }
+                return arrSub(t, t.length - ln, ln)
+            }
+            return t.length == 0 ? null : t[t.length - 1]
+        }
+        // shift removes from the FRONT; unshift/prepend adds there, variadically.
+        if (name == "shift") {
+            if (args.length > 0) {
+                var sn = Math.trunc(toF(args[0]))
+                if (sn > t.length) { sn = t.length }
+                var shead = arrSub(t, 0, sn)
+                arrReplace(t, arrSub(t, sn, t.length - sn))
+                return shead
+            }
+            if (t.length == 0) { return null }
+            var s1 = t[0]
+            arrReplace(t, arrSub(t, 1, t.length - 1))
+            return s1
+        }
+        if (name == "unshift" || name == "prepend") {
+            var pre = []
+            for (i = 0; i < args.length; i++) { pre.push(args[i]) }
+            for (i = 0; i < t.length; i++) { pre.push(t[i]) }
+            return arrReplace(t, pre)
+        }
         // Array#include? is `===` plus a big-aware FALLBACK SCAN: two Integers
         // past 2^53 are different objects, so indexOf alone answered false where
         // both compiled halves (which route this through their dict find, and
@@ -4872,6 +5111,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // in MRI - which is what dictScan/rbDictFind/core.keyEq now say too.
         if (name == "inspect") { return rinspect(t) }
         if (name == "index" || name == "find_index") {
+            // The block form answers the first index the block accepts.
+            if (blk != null && args.length == 0) {
+                for (i = 0; i < t.length; i++) { if (rtest(blockCall(blk, [t[i]]))) { return i } }
+                return null
+            }
             for (i = 0; i < t.length; i++) { if (rubyEq(t[i], args[0])) { return i } }
             return null
         }
@@ -4912,10 +5156,356 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (i = 0; i < t.length; i++) { if (!rtest(blockCall(blk, [t[i]]))) { out.push(t[i]) } }
             return out
         }
+        // sum was `(s + t[i]) | 0`, which truncated every Float and every value past
+        // 2^31 to a 32-bit integer: `[1.5, 2.5].sum` answered 3. Ruby's sum is
+        // ordinary + from an Integer 0 (or from the given initial value), with the
+        // block applied to each element first.
+        // MRI's sum starts from an Integer 0 and REFUSES a non-numeric element:
+        // `["b","a"].sum` is a TypeError, not "0ba". The refusal is only against a
+        // NUMERIC accumulator - `["a","b"].sum("")` is "ab" and `[[1],[2]].sum([])`
+        // is [1,2], because those start from a String and an Array. A catchable
+        // TypeError, like the AttributeError of 6eec533: MRI's is rescuable and a
+        // hard abort would not be.
         if (name == "sum") {
-            var s = 0
-            for (i = 0; i < t.length; i++) { s = (s + t[i]) | 0 }
+            var s = anytype
+            s = args.length > 0 ? args[0] : 0
+            for (i = 0; i < t.length; i++) {
+                var sv = anytype
+                sv = blk == null ? t[i] : blockCall(blk, [t[i]])
+                if (isNumV(s) && !isNumV(sv)) {
+                    throw {__exc: true, v: mkExc(hostGlobals["TypeError"],
+                                                 cmpName(sv) + " can't be coerced into " + classOf(s).__name)}
+                }
+                s = radd(s, sv)
+            }
             return s
+        }
+        // ----- the rest of the Array / Enumerable surface -----
+        if (name == "empty?") { return t.length == 0 }
+        if (name == "clear") { return arrReplace(t, []) }
+        if (name == "sort") { return arrSortWith(t, arrCmpFn(blk)) }
+        if (name == "sort!") { return arrReplace(t, arrSortWith(t, arrCmpFn(blk))) }
+        if (name == "sort_by") { return arrUndecorate(arrKeyed(t, blk)) }
+        if (name == "sort_by!") { return arrReplace(t, arrUndecorate(arrKeyed(t, blk))) }
+        if (name == "reverse" || name == "reverse!") {
+            var rev = []
+            for (i = t.length - 1; i >= 0; i--) { rev.push(t[i]) }
+            return name == "reverse" ? rev : arrReplace(t, rev)
+        }
+        if (name == "join") { return arrJoin(t, args.length == 0 ? "" : rstr(args[0])) }
+        // min / max take an optional COUNT and an optional block, and with the count
+        // they answer an array - ascending for min, DESCENDING for max.
+        if (name == "min" || name == "max") {
+            var wantMax = name == "max"
+            var mcmp = arrCmpFn(blk)
+            if (args.length > 0) {
+                var mn = Math.trunc(toF(args[0]))
+                var masc = arrSortWith(t, mcmp)
+                if (!wantMax) { return arrSub(masc, 0, mn) }
+                // max(n) answers the n largest in DESCENDING order.
+                var mdesc = []
+                for (i = masc.length - 1; i >= 0; i--) { mdesc.push(masc[i]) }
+                return arrSub(mdesc, 0, mn)
+            }
+            if (t.length == 0) { return null }
+            var best = anytype
+            best = t[0]
+            for (i = 1; i < t.length; i++) {
+                var mc = mcmp(t[i], best)
+                if (wantMax ? mc > 0 : mc < 0) { best = t[i] }
+            }
+            return best
+        }
+        if (name == "min_by" || name == "max_by") {
+            if (t.length == 0) { return null }
+            var kpairs = arrKeyed(t, blk)
+            return name == "min_by" ? kpairs[0][1] : kpairs[kpairs.length - 1][1]
+        }
+        if (name == "minmax") {
+            if (t.length == 0) { return [null, null] }
+            var mmsorted = arrSortWith(t, arrCmpFn(blk))
+            return [mmsorted[0], mmsorted[mmsorted.length - 1]]
+        }
+        // count: no argument is the length, an argument counts == matches, a block
+        // counts the elements it accepts.
+        if (name == "count") {
+            if (blk != null) {
+                var cb = 0
+                for (i = 0; i < t.length; i++) { if (rtest(blockCall(blk, [t[i]]))) { cb = cb + 1 } }
+                return cb
+            }
+            if (args.length == 0) { return t.length }
+            var cn = 0
+            for (i = 0; i < t.length; i++) { if (rubyEq(t[i], args[0])) { cn = cn + 1 } }
+            return cn
+        }
+        if (name == "tally") {
+            var td = {__dict: true, keys: [], vals: []}
+            for (i = 0; i < t.length; i++) {
+                var tix = dictFind(td, t[i])
+                if (tix < 0) { dictSet(td, t[i], 1) } else { td.vals[tix] = td.vals[tix] + 1 }
+            }
+            return td
+        }
+        if (name == "flatten" || name == "flatten!") {
+            var fdepth = args.length == 0 ? -1 : Math.trunc(toF(args[0]))
+            var flat = arrFlatInto(t, fdepth, [])
+            return name == "flatten" ? flat : arrReplace(t, flat)
+        }
+        if (name == "compact" || name == "compact!") {
+            var cmp2 = []
+            for (i = 0; i < t.length; i++) { if (t[i] !== null && t[i] !== undefined) { cmp2.push(t[i]) } }
+            // The bang form answers nil when nothing was removed, which is how MRI
+            // reports "no change" for every ! method that can make none.
+            if (name == "compact") { return cmp2 }
+            if (cmp2.length == t.length) { return null }
+            return arrReplace(t, cmp2)
+        }
+        if (name == "uniq!") {
+            var uq2 = arrayMethod(t, "uniq", [], null)
+            if (uq2.length == t.length) { return null }
+            return arrReplace(t, uq2)
+        }
+        // zip is element-wise across the receiver AND every argument array, padding a
+        // short one with nil; the result is always as long as the RECEIVER.
+        if (name == "zip") {
+            var zout = []
+            for (i = 0; i < t.length; i++) {
+                var row = [t[i]]
+                for (var zj = 0; zj < args.length; zj++) {
+                    var za = args[zj]
+                    row.push(Array.isArray(za) && i < za.length ? za[i] : null)
+                }
+                zout.push(row)
+            }
+            return zout
+        }
+        // each_slice / each_cons: with a block they yield each group and answer SELF
+        // (Ruby 3.1 changed this from nil, and this project's corpus is Ruby 3);
+        // with no block MRI answers an Enumerator, which has no value here, so they
+        // answer the array of groups - what .to_a on that Enumerator would give.
+        if (name == "each_slice" || name == "each_cons") {
+            var gn = Math.trunc(toF(args[0]))
+            if (gn < 1) { fail("invalid size") }
+            var groups = []
+            if (name == "each_slice") {
+                for (i = 0; i < t.length; i = i + gn) { groups.push(arrSub(t, i, gn)) }
+            } else {
+                for (i = 0; i + gn <= t.length; i++) { groups.push(arrSub(t, i, gn)) }
+            }
+            if (blk == null) { return groups }
+            for (i = 0; i < groups.length; i++) { blockCall(blk, [groups[i]]) }
+            return t
+        }
+        if (name == "take") { return arrSub(t, 0, Math.trunc(toF(args[0]))) }
+        if (name == "drop") {
+            var dn = Math.trunc(toF(args[0]))
+            return arrSub(t, dn, t.length - dn)
+        }
+        if (name == "take_while" || name == "drop_while") {
+            var cut = t.length
+            for (i = 0; i < t.length; i++) {
+                if (!rtest(blockCall(blk, [t[i]]))) { cut = i; break }
+            }
+            if (name == "take_while") { return arrSub(t, 0, cut) }
+            return arrSub(t, cut, t.length - cut)
+        }
+        if (name == "find" || name == "detect") {
+            for (i = 0; i < t.length; i++) { if (rtest(blockCall(blk, [t[i]]))) { return t[i] } }
+            return null
+        }
+        // inject / reduce: four forms - a block, a block with an initial value, a
+        // Symbol naming a binary operator, and an initial value with that Symbol.
+        if (name == "inject" || name == "reduce") {
+            var sym = null
+            var haveInit = false
+            var acc = anytype
+            acc = null
+            for (i = 0; i < args.length; i++) {
+                if (isSym(args[i])) { sym = args[i].s }
+                else { acc = args[i]; haveInit = true }
+            }
+            var from = 0
+            if (!haveInit) {
+                if (t.length == 0) { return null }
+                acc = t[0]
+                from = 1
+            }
+            for (i = from; i < t.length; i++) {
+                if (sym != null) { acc = sym == "+" ? radd(acc, t[i]) : rbin(sym, acc, t[i]) }
+                else { acc = blockCall(blk, [acc, t[i]]) }
+            }
+            return acc
+        }
+        if (name == "each_with_object") {
+            var memo = anytype
+            memo = args[0]
+            for (i = 0; i < t.length; i++) { blockCall(blk, [t[i], memo]) }
+            return memo
+        }
+        if (name == "all?" || name == "any?" || name == "none?" || name == "one?") {
+            var hits = 0
+            for (i = 0; i < t.length; i++) {
+                var pv = false
+                // With no block the element's own truthiness is the test; with an
+                // argument the test is `arg === element`, which for a class object
+                // is is_a? - modelled here as == plus the class test rcase makes.
+                if (blk != null) { pv = rtest(blockCall(blk, [t[i]])) }
+                else if (args.length > 0) { pv = rtest(caseEq(args[0], t[i])) }
+                else { pv = rtest(t[i]) }
+                if (pv) { hits = hits + 1 }
+            }
+            if (name == "all?") { return hits == t.length }
+            if (name == "any?") { return hits > 0 }
+            if (name == "none?") { return hits == 0 }
+            return hits == 1
+        }
+        if (name == "flat_map" || name == "collect_concat") {
+            var fm = []
+            for (i = 0; i < t.length; i++) {
+                var fv = blockCall(blk, [t[i]])
+                if (Array.isArray(fv)) { for (var fj = 0; fj < fv.length; fj++) { fm.push(fv[fj]) } }
+                else { fm.push(fv) }
+            }
+            return fm
+        }
+        if (name == "group_by") {
+            var gd = {__dict: true, keys: [], vals: []}
+            for (i = 0; i < t.length; i++) {
+                var gk = blockCall(blk, [t[i]])
+                var gix = dictFind(gd, gk)
+                if (gix < 0) { dictSet(gd, gk, [t[i]]) } else { gd.vals[gix].push(t[i]) }
+            }
+            return gd
+        }
+        if (name == "partition") {
+            var yes = []
+            var no = []
+            for (i = 0; i < t.length; i++) {
+                if (rtest(blockCall(blk, [t[i]]))) { yes.push(t[i]) } else { no.push(t[i]) }
+            }
+            return [yes, no]
+        }
+        if (name == "rotate") {
+            if (t.length == 0) { return [] }
+            var rn = args.length == 0 ? 1 : Math.trunc(toF(args[0]))
+            rn = ((rn % t.length) + t.length) % t.length
+            var rot = []
+            for (i = 0; i < t.length; i++) { rot.push(t[(i + rn) % t.length]) }
+            return rot
+        }
+        if (name == "values_at") {
+            var va = []
+            for (i = 0; i < args.length; i++) {
+                var vi = arrNorm(t, args[i])
+                va.push(vi >= 0 && vi < t.length ? t[vi] : null)
+            }
+            return va
+        }
+        if (name == "slice") {
+            if (isRange(args[0])) {
+                var rlo = arrNorm(t, args[0].lo)
+                var rhi = args[0].hi === null || args[0].hi === undefined ? t.length - 1 : arrNorm(t, args[0].hi)
+                if (args[0].excl) { rhi = rhi - 1 }
+                return arrSub(t, rlo, rhi - rlo + 1)
+            }
+            var si = arrNorm(t, args[0])
+            if (args.length > 1) { return arrSub(t, si, Math.trunc(toF(args[1]))) }
+            return si >= 0 && si < t.length ? t[si] : null
+        }
+        if (name == "insert") {
+            var ii = arrNorm(t, args[0])
+            var ins = arrSub(t, 0, ii)
+            for (i = 1; i < args.length; i++) { ins.push(args[i]) }
+            for (i = ii; i < t.length; i++) { ins.push(t[i]) }
+            return arrReplace(t, ins)
+        }
+        // delete answers the value it removed (nil when it removed nothing), while
+        // delete_at answers the element that was at that index.
+        // delete answers the LAST element it removed - which is not always the
+        // argument, since `[1, 1.0].delete(1)` removes both and MRI answers 1.0.
+        if (name == "delete") {
+            var kept = []
+            var hit = anytype
+            hit = null
+            for (i = 0; i < t.length; i++) {
+                if (rubyEq(t[i], args[0])) { hit = t[i] } else { kept.push(t[i]) }
+            }
+            arrReplace(t, kept)
+            return hit
+        }
+        if (name == "delete_at") {
+            var di = arrNorm(t, args[0])
+            if (di < 0 || di >= t.length) { return null }
+            var dv = t[di]
+            var dkept = arrSub(t, 0, di)
+            for (i = di + 1; i < t.length; i++) { dkept.push(t[i]) }
+            arrReplace(t, dkept)
+            return dv
+        }
+        // delete_if / keep_if always answer self; select! / reject! answer NIL when
+        // they removed nothing, which is MRI's "no change" report for a ! method.
+        if (name == "delete_if" || name == "reject!") {
+            var dkeep = []
+            for (i = 0; i < t.length; i++) { if (!rtest(blockCall(blk, [t[i]]))) { dkeep.push(t[i]) } }
+            var dsame = dkeep.length == t.length
+            arrReplace(t, dkeep)
+            return name == "reject!" && dsame ? null : t
+        }
+        if (name == "keep_if" || name == "select!" || name == "filter!") {
+            var skeep = []
+            for (i = 0; i < t.length; i++) { if (rtest(blockCall(blk, [t[i]]))) { skeep.push(t[i]) } }
+            var ssame = skeep.length == t.length
+            arrReplace(t, skeep)
+            return name != "keep_if" && ssame ? null : t
+        }
+        if (name == "map!" || name == "collect!") {
+            var mm = []
+            for (i = 0; i < t.length; i++) { mm.push(blockCall(blk, [t[i]])) }
+            return arrReplace(t, mm)
+        }
+        if (name == "concat") {
+            for (i = 0; i < args.length; i++) {
+                var ca = args[i]
+                if (Array.isArray(ca)) { for (var cj = 0; cj < ca.length; cj++) { t.push(ca[cj]) } }
+            }
+            return t
+        }
+        if (name == "fill") {
+            var fl = []
+            for (i = 0; i < t.length; i++) { fl.push(blk == null ? args[0] : blockCall(blk, [i])) }
+            return arrReplace(t, fl)
+        }
+        if (name == "assoc") {
+            for (i = 0; i < t.length; i++) {
+                if (Array.isArray(t[i]) && t[i].length > 0 && rubyEq(t[i][0], args[0])) { return t[i] }
+            }
+            return null
+        }
+        if (name == "product") {
+            var prod = []
+            for (i = 0; i < t.length; i++) { prod.push([t[i]]) }
+            for (i = 0; i < args.length; i++) {
+                var pa = args[i]
+                var nprod = []
+                for (var pi = 0; pi < prod.length; pi++) {
+                    for (var pj = 0; pj < pa.length; pj++) {
+                        var prow = []
+                        for (var pk = 0; pk < prod[pi].length; pk++) { prow.push(prod[pi][pk]) }
+                        prow.push(pa[pj])
+                        nprod.push(prow)
+                    }
+                }
+                prod = nprod
+            }
+            return prod
+        }
+        if (name == "each_index") {
+            for (i = 0; i < t.length; i++) { blockCall(blk, [i]) }
+            return t
+        }
+        if (name == "dup" || name == "clone" || name == "freeze" || name == "itself" || name == "entries") {
+            return name == "freeze" || name == "itself" ? t : t.slice(0)
         }
         fail("unknown Array method: " + name)
     }
@@ -6731,7 +7321,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     hostGlobals["puts"] = function() {}   // never reached: puts is a statement form
     hostGlobals["exit"] = function(code) { exit(code === undefined ? 0 : code | 0) }
     hostGlobals["abs"] = function(v) { return v < 0 ? -v | 0 : v | 0 }
-    hostGlobals["rand"] = function() { return 0 }
+    // Kernel#rand. There is no random source in this project and there cannot be one
+    // that both engines agree on byte-for-byte, so rand is DETERMINISTICALLY ZERO -
+    // but it is zero of the right class, which is the part a program can test:
+    // `rand` and `rand(0)` are Floats in [0,1), `rand(n)` an Integer in [0,n), and
+    // `rand(a..b)` the range's own low end.
+    hostGlobals["rand"] = function(v) {
+        if (v === undefined || v === null) { return mkFlo(0) }
+        if (isRange(v)) { return v.lo }
+        if (isFlo(v)) { return mkFlo(0) }
+        return toF(v) == 0 ? mkFlo(0) : 0
+    }
+    hostGlobals["srand"] = function() { return 0 }
     // Kernel#lambda and Kernel#proc: the block itself is the value; only lambda marks
     // it, so Proc#lambda? can tell the two apart.
     hostGlobals["lambda"] = function(blk) { return markLambda(blk) }

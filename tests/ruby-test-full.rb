@@ -1160,6 +1160,216 @@ def s34
   check("v35", [1.0] == [1.0] && [1, 1.0] == [1, 1.0] && [1] == [1.0])
   check("v36", ({1 => 1.0} == {1 => 1.0}) && [[1.5]] == [[1.5]])
 end
+
+# ===== SECTION 35: the Array / Enumerable surface =====
+# docs/todo.md 1.4. Every right-hand side is ruby 2.6.10p210's own answer, taken
+# from a 5,729-line four-leg probe (interpreter, llvm.Run, the native binary and
+# MRI) on which all four legs are byte-identical. Each operand is read out of an
+# array, so no constant folder can answer these at compile time.
+def s35
+  a = [3, 1, 2]
+  b = [1, [2, [3, [4]]]]
+  c = [1, nil, 2, nil]
+  d = ["bb", "a", "ccc"]
+  # The twelve that aborted in BOTH halves.
+  check("w01", a.sort == [1, 2, 3] && a.sort { |x, y| y <=> x } == [3, 2, 1])
+  # join RECURSES into a nested array with the same separator and uses to_s, so
+  # nil contributes "".
+  check("w02", [1, 2, 3].join("-") == "1-2-3" && [1, [2, [3]]].join(",") == "1,2,3")
+  check("w03", c.join("|") == "1||2|" && [1, 2].join == "12")
+  check("w04", a.reverse == [2, 1, 3] && a.min == 1 && a.max == 3)
+  # min/max take a COUNT (max's answer is DESCENDING) and a block.
+  check("w05", a.min(2) == [1, 2] && a.max(2) == [3, 2] && a.min { |x, y| y <=> x } == 3)
+  check("w06", [1, 2, 2, 3].count == 4 && [1, 2, 2, 3].count(2) == 2)
+  check("w07", [1, 2, 2, 3].count { |x| x > 1 } == 3)
+  # flatten takes a DEPTH argument; without one it goes all the way down.
+  check("w08", b.flatten == [1, 2, 3, 4] && b.flatten(1) == [1, 2, [3, [4]]])
+  check("w09", c.compact == [1, 2] && c.length == 4)
+  # sort_by is the stable decorate-sort; sort is not stable in MRI, and one
+  # stable sort satisfies both contracts.
+  check("w10", d.sort_by { |s| s.length } == ["a", "bb", "ccc"])
+  # zip pads a short argument with nil and is always as long as the RECEIVER.
+  check("w11", [1, 2].zip([3, 4], [5, 6]) == [[1, 3, 5], [2, 4, 6]])
+  check("w12", [1, 2].zip([9]) == [[1, 9], [2, nil]])
+  e = [1, 2, 3]
+  check("w13", e.shift == 1 && e == [2, 3])
+  f = [1, 2, 3, 4, 5]
+  sl = []
+  f.each_slice(2) { |g| sl << g }
+  check("w14", sl == [[1, 2], [3, 4], [5]])
+  check("w15", f.each_cons(2).to_a == [[1, 2], [2, 3], [3, 4], [4, 5]])
+  # Array#& and Array#| aborted in ALL THREE engines with "not a number in '&'".
+  # Both keep the LEFT-hand order, both dedupe, and both compare with eql?.
+  check("w16", ([1, 2, 3] & [3, 2, 9]) == [2, 3] && ([2, 1] | [1, 3]) == [2, 1, 3])
+  check("w17", ([1, 1, 2] & [1, 2]) == [1, 2] && ([1, 1] | []) == [1])
+  check("w18", ([1] & [1.0]) == [] && ([1] | [1.0]) == [1, 1.0])
+  # first/last/pop/shift take a COUNT and then answer an ARRAY. Without it they
+  # answered the single element in every engine - a SILENT wrong answer.
+  check("w19", [1, 2, 3].first(2) == [1, 2] && [1, 2, 3].last(2) == [2, 3])
+  g = [1, 2, 3]
+  check("w20", g.pop(2) == [2, 3] && g == [1])
+  h = [1, 2, 3]
+  check("w21", h.shift(2) == [1, 2] && h == [3])
+  # Array.new answered a bare object in the interpreter and the argument itself
+  # under llvm.Run - wrong, and differently wrong, in every engine.
+  check("w22", Array.new(3, 0) == [0, 0, 0] && Array.new == [] && Array.new(2) == [nil, nil])
+  check("w23", Array.new(3) { |i| i * i } == [0, 1, 4])
+  # sum accumulated through ToInt32, so it truncated Floats and wrapped at 2^31.
+  check("w24", [1.5, 2.5].sum == 4.0 && [1, 2, 3].sum == 6 && [1, 2].sum(10) == 13)
+  check("w25", [1, 2, 3].sum { |x| x * 2 } == 12)
+  # inject/reduce in all four forms, including the Symbol one.
+  check("w26", [1, 2, 3].inject(:+) == 6 && [1, 2, 3].inject(:*) == 6)
+  check("w27", [1, 2, 3].inject(10) { |s, x| s + x } == 16 && [].inject(:+) == nil)
+  check("w28", [1, 2, 3].find { |x| x > 1 } == 2 && [1, 2, 3].detect { |x| x > 9 } == nil)
+  check("w29", [1, 2, 3].partition { |x| x > 1 } == [[2, 3], [1]])
+  check("w30", [1, 2, 3].group_by { |x| x % 2 } == {1 => [1, 3], 0 => [2]})
+  check("w31", [1, 2, 3].flat_map { |x| [x, x] } == [1, 1, 2, 2, 3, 3])
+  check("w32", [1, 2, 3].each_with_object([]) { |x, m| m << x * 2 } == [2, 4, 6])
+  check("w33", [1, 2, 3].take(2) == [1, 2] && [1, 2, 3].drop(2) == [3])
+  check("w34", [1, 2, 3].take_while { |x| x < 3 } == [1, 2] && [1, 2, 3].drop_while { |x| x < 3 } == [3])
+  check("w35", [1, 2, 3].all? { |x| x > 0 } && [1, 2, 3].any? { |x| x > 2 })
+  check("w36", [1, 2, 3].none? { |x| x > 9 } && [1, 2, 3].one? { |x| x == 2 })
+  # A non-block argument is tested with ===, so a class matches by is_a?.
+  check("w37", [1, "a"].any?(String) && ![1, "a"].all?(Integer))
+  check("w38", [3, 1].min_by { |x| -x } == 3 && [3, 1].max_by { |x| -x } == 1)
+  check("w39", [3, 1, 2].minmax == [1, 3] && [].minmax == [nil, nil])
+  check("w40", [1, 2, 3].rotate == [2, 3, 1] && [1, 2, 3].rotate(-1) == [3, 1, 2])
+  check("w41", [1, 2, 3].values_at(0, 2, 9) == [1, 3, nil])
+  check("w42", [1, 2, 3].slice(1, 2) == [2, 3] && [1, 2, 3].slice(1..2) == [2, 3])
+  check("w43", [1, 2, 3].slice(1) == 2 && [1, 2, 3].slice(-1) == 3)
+  check("w44", [1, 2, 3].insert(1, 9) == [1, 9, 2, 3])
+  # delete answers the LAST element it removed, which is not always the argument:
+  # `[1, 1.0].delete(1)` removes both (== , not eql?) and MRI answers 1.0.
+  check("w45", [1, 1.0].delete(1) == 1.0 && [1, 2].delete(9) == nil)
+  check("w46", [1, 2, 3].delete_at(1) == 2 && [1, 2, 3].delete_at(9) == nil)
+  # select!/reject! answer NIL when they removed nothing; keep_if/delete_if
+  # always answer self.
+  check("w47", [1, 2].select! { |x| x > 0 } == nil && [1, 2].reject! { |x| x > 9 } == nil)
+  check("w48", [1, 2].select! { |x| x > 1 } == [2] && [1, 2].keep_if { |x| x > 0 } == [1, 2])
+  check("w49", [1, 2].uniq! == nil && [1, 1].uniq! == [1])
+  check("w50", [1, 2].compact! == nil && [1, nil].compact! == [1])
+  check("w51", [1, 2, 3].product([4, 5]).length == 6 && [1].product([2]) == [[1, 2]])
+  check("w52", [[1, 2], [3, 4]].assoc(3) == [3, 4] && [[1, 2]].assoc(9) == nil)
+  check("w53", [1, 2].empty? == false && [].empty? == true && [1, 2].clear == [])
+  check("w54", [1, 2].unshift(0) == [0, 1, 2] && [1].concat([2, 3]) == [1, 2, 3])
+  check("w55", [1, 2].fill(7) == [7, 7] && [1, 2, 3].index { |x| x > 1 } == 1)
+  i = [1, 2, 3]
+  check("w56", i.map! { |x| x * 2 } == [2, 4, 6] && i == [2, 4, 6])
+  j = [3, 1]
+  check("w57", j.sort! == [1, 3] && j == [1, 3] && [1, 2].reverse! == [2, 1])
+  # Array#* is repetition with an Integer and JOIN with a String. The String form
+  # answered an EMPTY ARRAY in both compiled halves - a silent wrong answer.
+  check("w58", ([1, 2] * ",") == "1,2" && ([1, 2] * 2) == [1, 2, 1, 2])
+  # The three halves divergences: String#to_f, String#to_i and Kernel#rand all
+  # worked in the interpreter and aborted in the compiler.
+  check("w59", "3.5".to_f == 3.5 && "-2.75".to_f == -2.75 && "abc".to_f == 0.0)
+  check("w60", "12abc".to_i == 12 && "abc".to_i == 0 && "3".to_i == 3)
+  # rand is deterministically zero here (no random source can be byte-identical
+  # across the engines), but zero OF THE RIGHT CLASS, which is what is testable.
+  check("w61", rand(5).is_a?(Integer) && rand().is_a?(Float) && rand(0).is_a?(Float))
+  check("w62", rand(5) >= 0 && rand(5) < 5 && rand() < 1.0)
+  # Kernel.format with an explicit receiver aborted in both halves, where the
+  # bare name has always worked.
+  check("w63", Kernel.format("%05.2f", 3.14159) == "03.14" && Kernel.format("%d", 5) == "5")
+  # true/false are their own classes: `false == 0` is FALSE. The shared pyEqual
+  # said true, so `[true, false].include?(0)` was a run-vs-everything divergence.
+  check("w64", ![true, false, nil].include?(0) && [false].include?(false))
+  # A bare Hash.new is an empty Hash - it answered a bare object here.
+  k = Hash.new
+  k[:a] = 1
+  check("w65", k == {:a => 1})
+end
+
+# ===== SECTION 36: Array is Comparable, and the two errors sort and sum raise =====
+# The interpreter half had NO Array#<=> while both compiled halves did, so
+# `[[2],[1]].sort` aborted there and worked everywhere else - a halves divergence
+# ./test.sh --cross could not see, because no test program sorts an array of
+# arrays. Every right-hand side below is ruby 2.6.10p210's own answer.
+def s36
+  # Element-wise, recursing into nested arrays, and a shorter array that is a
+  # PREFIX of the longer one sorts first.
+  check("x01", [[2], [1]].sort == [[1], [2]])
+  check("x02", [[1, 2], [1]].sort == [[1], [1, 2]])
+  check("x03", [["b"], ["a"]].sort == [["a"], ["b"]])
+  check("x04", [[1, 1], [1], [2], []].sort == [[], [1], [1, 1], [2]])
+  check("x05", [[[2]], [[1]]].sort == [[[1]], [[2]]])
+  check("x06", [[1, [2]], [1, [3]]].sort == [[1, [2]], [1, [3]]])
+  # The answer is NORMALISED to -1/0/1: `[1,2,3] <=> [1]` is 1, not the length
+  # difference 2, which is what a first shape of this answered.
+  check("x07", ([1, 2] <=> [1, 3]) == -1 && ([1, 2, 3] <=> [1]) == 1)
+  check("x08", ([1] <=> [1, 2, 3]) == -1 && ([] <=> []) == 0 && ([1, 2, 3] <=> [1, 2, 3]) == 0)
+  check("x09", ([["b"]] <=> [["a"]]) == 1 && ([[1, 2]] <=> [[1, 3]]) == -1)
+  # ONE incomparable element pair makes the WHOLE comparison nil - carrying on to
+  # the next element made `[1,"a"] <=> [1,2]` answer 0.
+  check("x10", ([1, "a"] <=> [1, 2]) == nil && ([1, 2] <=> [1, "a"]) == nil)
+  check("x11", ([1, 2] <=> "x") == nil && (1 <=> "a") == nil)
+  # min / max / sort_by go through the same comparator.
+  check("x12", [[1], [2]].min == [1] && [[3], [1], [2]].max == [3])
+  check("x13", [[1, 2], [1]].max == [1, 2] && [[1, 9], [1, 2]].min == [1, 2])
+  check("x14", [[1], [2], [1]].sort_by { |x| x } == [[1], [1], [2]])
+  check("x15", [1, 2].sort_by { |x| [x, x] } == [1, 2])
+  # sort is STABLE here, which MRI does not promise but cannot contradict.
+  check("x16", [[1], [1]].sort == [[1], [1]])
+  # An incomparable pair raises a CATCHABLE ArgumentError, and rb_cmperr's message
+  # names the first operand by its CLASS and the second by its class unless it is a
+  # special constant or a Float, which are inspected.
+  caught = nil
+  begin
+    [1, "a"].sort
+  rescue ArgumentError => e
+    caught = e.message
+  end
+  check("x17", caught == "comparison of Integer with String failed")
+  caught2 = nil
+  begin
+    [[1], ["a"]].sort
+  rescue StandardError => e2
+    caught2 = e2.message
+  end
+  check("x18", caught2 == "comparison of Array with Array failed")
+  caught3 = nil
+  begin
+    [1, nil].max
+  rescue ArgumentError => e3
+    caught3 = e3.message
+  end
+  check("x19", caught3 == "comparison of NilClass with 1 failed")
+  caught4 = nil
+  begin
+    1 < "a"
+  rescue ArgumentError => e4
+    caught4 = e4.message
+  end
+  check("x20", caught4 == "comparison of Integer with String failed")
+  # sum REFUSES a non-numeric element against a numeric accumulator with a
+  # catchable TypeError. It used to answer 0 (the ToInt32 accumulator swallowed
+  # everything) and then "0bac" once the accumulator became a real +.
+  caught5 = nil
+  begin
+    ["b", "a", "c"].sum
+  rescue TypeError => e5
+    caught5 = e5.message
+  end
+  check("x21", caught5 == "String can't be coerced into Integer")
+  caught6 = nil
+  begin
+    [1.0, "a"].sum
+  rescue TypeError => e6
+    caught6 = e6.message
+  end
+  check("x22", caught6 == "String can't be coerced into Float")
+  caught7 = nil
+  begin
+    [nil].sum
+  rescue StandardError => e7
+    caught7 = e7.message
+  end
+  check("x23", caught7 == "nil can't be coerced into Integer")
+  # The refusal is only against a NUMERIC accumulator: a String or an Array start
+  # value is exactly how MRI concatenates.
+  check("x24", ["a", "b"].sum("") == "ab" && [[1], [2]].sum([]) == [1, 2])
+  check("x25", [1, 2].sum == 3 && [1.5, 2.5].sum == 4.0)
+end
 # ===== END SECTIONS =====
 s01() # SECTION-CALL 01
 s02() # SECTION-CALL 02
@@ -1195,5 +1405,7 @@ s31() # SECTION-CALL 31
 s32() # SECTION-CALL 32
 s33() # SECTION-CALL 33
 s34() # SECTION-CALL 34
+s35() # SECTION-CALL 35
+s36() # SECTION-CALL 36
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

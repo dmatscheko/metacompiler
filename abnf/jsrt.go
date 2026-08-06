@@ -4462,11 +4462,30 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 			return strings.Repeat(ls, n)
 		}
 		if la, ok := l.(*jsArray); ok {
+			// Array#* is repetition with an Integer and JOIN with a String.
+			if sep, isStr := r.(string); isStr {
+				return rt.rubyArrJoin(la, sep)
+			}
 			out := &jsArray{}
 			for i := 0; i < int(rubyToF(r)); i++ {
 				out.elems = append(out.elems, la.elems...)
 			}
 			return out
+		}
+	// Array#& (intersection) and Array#| (union). Both keep the LEFT-hand order,
+	// both dedupe, and both compare with eql? like Array#- below. Without these
+	// arms they reached rubyNumBin and ABORTED with "not a number in '&'".
+	case "&":
+		if la, ok := l.(*jsArray); ok {
+			if ra, ok2 := r.(*jsArray); ok2 {
+				return rt.rubyArrAnd(la, ra)
+			}
+		}
+	case "|":
+		if la, ok := l.(*jsArray); ok {
+			if ra, ok2 := r.(*jsArray); ok2 {
+				return rt.rubyArrOr(la, ra)
+			}
 		}
 	case "-":
 		if la, ok := l.(*jsArray); ok {
@@ -5156,6 +5175,18 @@ func (rt *jsrt) rubyEq(l, r interface{}) bool {
 	if s, isStr := l.(string); isStr && rubyExcObj(r) {
 		return rt.rubyStr(r) == s
 	}
+	// true / false are their own classes in Ruby, so `false == 0` is FALSE - where
+	// the shared pyEqual rubyStructEq ends in applies Python's rule and says true.
+	// Found by the Array probe: `[true,false,nil].include?(0)` answered true under
+	// llvm.Run and false in the interpreter AND in the native binary, whose layer-2
+	// rbPyEqual never had the coercion.
+	if lb, isB := l.(bool); isB {
+		rb, ok := r.(bool)
+		return ok && rb == lb
+	}
+	if _, isB := r.(bool); isB {
+		return false
+	}
 	return rt.rubyStructEq(l, r)
 }
 
@@ -5302,22 +5333,64 @@ func (rt *jsrt) rubySpaceship(l, r interface{}) (int, bool) {
 	}
 	if la, ok := l.(*jsArray); ok {
 		if ra, ok2 := r.(*jsArray); ok2 {
+			// ONE incomparable element pair makes the WHOLE comparison nil -
+			// skipping it and carrying on made `[1, "a"] <=> [1, 2]` answer 0
+			// where MRI answers nil - and the answer is NORMALISED to -1/0/1, so
+			// `[1,2,3] <=> [1]` is 1, not 2. Both measured against ruby 2.6.10p210.
 			for i := 0; i < len(la.elems) && i < len(ra.elems); i++ {
-				if c, ok3 := rt.rubySpaceship(la.elems[i], ra.elems[i]); ok3 && c != 0 {
-					return c, true
+				c, ok3 := rt.rubySpaceship(la.elems[i], ra.elems[i])
+				if !ok3 {
+					return 0, false
+				}
+				if c != 0 {
+					return rubyCmpSign(c), true
 				}
 			}
-			return len(la.elems) - len(ra.elems), true
+			return rubyCmpSign(len(la.elems) - len(ra.elems)), true
 		}
 	}
 	return 0, false
+}
+
+func rubyCmpSign(n int) int {
+	switch {
+	case n < 0:
+		return -1
+	case n > 0:
+		return 1
+	}
+	return 0
+}
+
+// rubyCmpName is MRI's rb_cmperr rendering: the FIRST operand is named by its
+// class, the second by its class UNLESS it is a special constant or a Float, which
+// are inspected - hence "comparison of NilClass with 1 failed" for `[1, nil].max`.
+func (rt *jsrt) rubyCmpName(v interface{}) string {
+	if isUndefOrNull(v) {
+		return "nil"
+	}
+	switch v.(type) {
+	case bool, float64, jsFlo, jsSym:
+		return rt.rubyInspect(v)
+	}
+	if n := rubyClassName(v); n != "" {
+		return n
+	}
+	return "Object"
 }
 
 // rubyCmp backs < > <= >=, which raise in Ruby when the values cannot be compared.
 func (rt *jsrt) rubyCmp(l, r interface{}) int {
 	c, ok := rt.rubySpaceship(l, r)
 	if !ok {
-		rt.fail("comparison of incompatible values")
+		// A CATCHABLE ArgumentError, not a host abort: MRI's sort raises one and
+		// a program may rescue it. The message is rb_cmperr's.
+		ln := rubyClassName(l)
+		if ln == "" {
+			ln = "Object"
+		}
+		panic(&jsThrown{value: rt.rubyExc(rt.rubyBuiltinClass("ArgumentError"),
+			[]interface{}{"comparison of " + ln + " with " + rt.rubyCmpName(r) + " failed"})})
 	}
 	return c
 }
@@ -5902,6 +5975,19 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return rt.rubyInspect(o)
 		case "to_sym", "intern":
 			return jsSym{s: o}
+		// String#to_i / #to_f parse a LEADING number and answer 0 when there is
+		// none. Both worked in ruby-interpreter.abnf and aborted here, so any
+		// program reading a number out of text was a halves divergence.
+		case "to_i":
+			if v := jsParseInt(o, 10); v == v {
+				return v
+			}
+			return float64(0)
+		case "to_f":
+			if v := jsParseFloat(o); v == v {
+				return jsFlo{f: v}
+			}
+			return jsFlo{f: 0}
 		case "upcase":
 			return strings.ToUpper(o)
 		case "downcase":
@@ -5998,6 +6084,17 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				cls = clsObj.props["__super"]
 			}
 		}
+		// Kernel.format / Kernel.sprintf / Kernel.rand: the Kernel module's methods
+		// are ordinarily called without a receiver, but naming Kernel explicitly is
+		// legal Ruby and aborted in every engine.
+		if bn, isBuiltin := o.props["__rbuiltin"].(string); isBuiltin && bn == "Kernel" {
+			switch name {
+			case "format", "sprintf":
+				return rt.rubyFormatArgs(args)
+			case "rand":
+				return rubyRand(argAt(args, 0))
+			}
+		}
 		// A class instance or class object: the generic dispatch handles it.
 		return rt.memberCall(target, name, args)
 	}
@@ -6007,10 +6104,259 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	return rt.memberCall(target, name, args)
 }
 
+// rubyRand is Kernel#rand. There is no random source in this project and there
+// cannot be one the two engines agree on byte-for-byte, so rand is
+// DETERMINISTICALLY ZERO - but zero of the right class, which is the part a
+// program can test: `rand` and `rand(0)` are Floats in [0,1), `rand(n)` an Integer
+// in [0,n), and `rand(a..b)` the range's own low end. It aborted with `variable
+// not defined: rand` in both compiler halves.
+func rubyRand(v interface{}) interface{} {
+	if isUndefOrNull(v) {
+		return jsFlo{f: 0}
+	}
+	// A closed range reaches the compiler halves already materialized as an array.
+	if a, isArr := v.(*jsArray); isArr {
+		if len(a.elems) == 0 {
+			return jsNull
+		}
+		return a.elems[0]
+	}
+	if o, isObj := v.(*jsObject); isObj {
+		if _, isRng := o.props["__rrange"]; isRng {
+			return o.props["begin"]
+		}
+	}
+	if _, isFlo := v.(jsFlo); isFlo || rubyToF(v) == 0 {
+		return jsFlo{f: 0}
+	}
+	return float64(0)
+}
+
+// rubyBlockArgs splits a Ruby argument list into its positional part and the
+// trailing block. The two compiler halves pass a block as the LAST positional
+// argument (see unwrapArgs in ruby-to-llvm-ir.abnf), where ruby-interpreter.abnf
+// keeps it in a parameter of its own - which is why arrayMethod there takes a
+// fourth argument and this does not.
+func rubyBlockArgs(args []interface{}) ([]interface{}, interface{}) {
+	if n := len(args); n > 0 && isCallable(args[n-1]) {
+		return args[:n-1], args[n-1]
+	}
+	return args, nil
+}
+
+// rubyArrSort is a STABLE merge sort. MRI's Array#sort is not stable and its
+// #sort_by is, so one stable sort satisfies both contracts. Mirrors arrSortWith of
+// ruby-interpreter.abnf and rbArrSortWith of lib/ruby-rt.metajs.
+func rubyArrSort(a []interface{}, cmp func(x, y interface{}) int) []interface{} {
+	if len(a) < 2 {
+		return append([]interface{}{}, a...)
+	}
+	mid := len(a) / 2
+	lhs := rubyArrSort(a[:mid], cmp)
+	rhs := rubyArrSort(a[mid:], cmp)
+	out := make([]interface{}, 0, len(a))
+	li, ri := 0, 0
+	for li < len(lhs) && ri < len(rhs) {
+		// Left-first on a tie keeps equal elements in their original order. The
+		// operands are passed in THIS order (left, right) so that the
+		// ArgumentError an incomparable pair raises names them the way MRI's own
+		// sort does.
+		if cmp(lhs[li], rhs[ri]) <= 0 {
+			out = append(out, lhs[li])
+			li++
+		} else {
+			out = append(out, rhs[ri])
+			ri++
+		}
+	}
+	out = append(out, lhs[li:]...)
+	return append(out, rhs[ri:]...)
+}
+
+// rubyArrCmpFn is the comparator a sort / min / max uses: the block when one was
+// given (whose value is an Integer, like <=>), rcmp otherwise - which raises on
+// values that cannot be compared, as MRI does.
+func (rt *jsrt) rubyArrCmpFn(blk interface{}) func(x, y interface{}) int {
+	if blk == nil {
+		return func(x, y interface{}) int { return rt.rubyCmp(x, y) }
+	}
+	return func(x, y interface{}) int {
+		return int(math.Trunc(rubyToF(rt.call(blk, jsUndef, []interface{}{x, y}))))
+	}
+}
+
+// rubyArrKeyed is the decorate-sort step of sort_by / min_by / max_by: each
+// element paired with its block value, stably sorted on that key.
+func (rt *jsrt) rubyArrKeyed(t *jsArray, blk interface{}) []interface{} {
+	pairs := make([]interface{}, 0, len(t.elems))
+	for _, e := range t.elems {
+		pairs = append(pairs, &jsArray{elems: []interface{}{rt.call(blk, jsUndef, []interface{}{e}), e}})
+	}
+	return rubyArrSort(pairs, func(x, y interface{}) int {
+		return rt.rubyCmp(x.(*jsArray).elems[0], y.(*jsArray).elems[0])
+	})
+}
+
+func rubyUndecorate(pairs []interface{}) *jsArray {
+	out := &jsArray{}
+	for _, p := range pairs {
+		out.elems = append(out.elems, p.(*jsArray).elems[1])
+	}
+	return out
+}
+
+// rubyArrJoin RECURSES into a nested array with the same separator, and sends
+// every other element through to_s (so nil contributes "").
+func (rt *jsrt) rubyArrJoin(t *jsArray, sep string) string {
+	out := ""
+	for i, e := range t.elems {
+		if i > 0 {
+			out += sep
+		}
+		if sub, isArr := e.(*jsArray); isArr {
+			out += rt.rubyArrJoin(sub, sep)
+		} else {
+			out += rt.rubyStr(e)
+		}
+	}
+	return out
+}
+
+// rubyArrFlat splices nested arrays to a DEPTH: flatten(1) one level, -1 all the
+// way down (which is what a missing argument means).
+func rubyArrFlat(t *jsArray, depth int, out *jsArray) *jsArray {
+	for _, e := range t.elems {
+		if sub, isArr := e.(*jsArray); isArr && depth != 0 {
+			rubyArrFlat(sub, depth-1, out)
+		} else {
+			out.elems = append(out.elems, e)
+		}
+	}
+	return out
+}
+
+// rubyArrReplace is how the bang methods mutate in place. It copies first, because
+// the source is usually the receiver itself.
+func rubyArrReplace(t *jsArray, src []interface{}) *jsArray {
+	keep := append([]interface{}{}, src...)
+	t.dropIdx()
+	t.elems = keep
+	return t
+}
+
+// rubyArrNorm resolves a possibly negative index, exactly as Array#[] does.
+func rubyArrNorm(t *jsArray, v interface{}) int {
+	n := int(math.Trunc(rubyToF(v)))
+	if n < 0 {
+		return len(t.elems) + n
+	}
+	return n
+}
+
+func rubyArrSub(t *jsArray, from, length int) *jsArray {
+	out := &jsArray{}
+	for i := from; i < len(t.elems) && len(out.elems) < length; i++ {
+		if i >= 0 {
+			out.elems = append(out.elems, t.elems[i])
+		}
+	}
+	return out
+}
+
+// rubyArrHas / rubyArrAnd / rubyArrOr back Array#& and Array#|. Both keep the
+// LEFT-hand order, both dedupe, and both compare with eql? (the hash-key
+// comparison), not == - like Array#- and Array#uniq and unlike #include?.
+func (rt *jsrt) rubyArrHas(a []interface{}, v interface{}) bool {
+	for _, e := range a {
+		if rt.rubyEql(e, v) {
+			return true
+		}
+	}
+	return false
+}
+
+func (rt *jsrt) rubyArrAnd(l, r *jsArray) *jsArray {
+	out := &jsArray{}
+	for _, e := range l.elems {
+		if rt.rubyArrHas(r.elems, e) && !rt.rubyArrHas(out.elems, e) {
+			out.elems = append(out.elems, e)
+		}
+	}
+	return out
+}
+
+func (rt *jsrt) rubyArrOr(l, r *jsArray) *jsArray {
+	out := &jsArray{}
+	for _, e := range append(append([]interface{}{}, l.elems...), r.elems...) {
+		if !rt.rubyArrHas(out.elems, e) {
+			out.elems = append(out.elems, e)
+		}
+	}
+	return out
+}
+
+// rubyFormatArgs is Kernel#format / #sprintf on a whole argument list
+// [format, args...] - shared by the js_rformat extern and the Kernel.format form.
+func (rt *jsrt) rubyFormatArgs(args []interface{}) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return rt.rubyFormat(rt.rubyStr(args[0]), &jsArray{elems: args[1:]})
+}
+
+// rubyPatternHit is the `pattern === value` test that all?/any?/none?/one? apply
+// to a non-block argument: a class object matches by is_a?, everything else by ==.
+// It is the rule js_rwhen applies to a `when V` label.
+func (rt *jsrt) rubyPatternHit(pat, v interface{}) bool {
+	if o, isObj := pat.(*jsObject); isObj {
+		if _, isCls := o.props["__isclass"]; isCls {
+			return rt.rubyIsA(v, pat)
+		}
+	}
+	return rt.rubyEq(pat, v)
+}
+
+// rubyNewDict builds an empty Hash in the shared {__dict, keys, vals} shape that
+// group_by and tally answer with.
+func rubyNewDict() *jsObject {
+	d := newJSObject()
+	d.set("__dict", true)
+	d.set("keys", &jsArray{})
+	d.set("vals", &jsArray{})
+	return d
+}
+
+// rubyArrNew is Array.new(n) / Array.new(n, v) / Array.new(n) { |i| }.
+func (rt *jsrt) rubyArrNew(args []interface{}) *jsArray {
+	pos, blk := rubyBlockArgs(args)
+	out := &jsArray{}
+	if len(pos) > 0 {
+		if src, isArr := pos[0].(*jsArray); isArr {
+			return &jsArray{elems: append([]interface{}{}, src.elems...)}
+		}
+	}
+	n := 0
+	if len(pos) > 0 {
+		n = int(math.Trunc(rubyToF(pos[0])))
+	}
+	for i := 0; i < n; i++ {
+		switch {
+		case blk != nil:
+			out.elems = append(out.elems, rt.call(blk, jsUndef, []interface{}{float64(i)}))
+		case len(pos) > 1:
+			out.elems = append(out.elems, pos[1])
+		default:
+			out.elems = append(out.elems, jsNull)
+		}
+	}
+	return out
+}
+
 // rubyArrayMethod mirrors the arrayMethod of ruby-interpreter.abnf. select and
 // reject use rubyTruthy (Ruby semantics), and pop/first/last return nil (not an
 // error) on an empty array.
 func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) interface{} {
+	pos, blk := rubyBlockArgs(args)
 	switch name {
 	case "size", "length":
 		return float64(len(t.elems))
@@ -6021,7 +6367,19 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		t.dropIdx()
 		t.elems = append(t.elems, args...)
 		return t
+	// first / last / pop / shift all take an optional COUNT, and then answer an
+	// ARRAY. Without it they answered the single element whatever was passed, so
+	// `[1,2,3].first(2)` was a silent 1 in every engine.
 	case "pop":
+		if len(pos) > 0 {
+			n := int(math.Trunc(rubyToF(pos[0])))
+			if n > len(t.elems) {
+				n = len(t.elems)
+			}
+			tail := rubyArrSub(t, len(t.elems)-n, n)
+			rubyArrReplace(t, rubyArrSub(t, 0, len(t.elems)-n).elems)
+			return tail
+		}
 		if len(t.elems) == 0 {
 			return jsNull
 		}
@@ -6030,29 +6388,66 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		t.elems = t.elems[:len(t.elems)-1]
 		return v
 	case "first":
+		if len(pos) > 0 {
+			return rubyArrSub(t, 0, int(math.Trunc(rubyToF(pos[0]))))
+		}
 		if len(t.elems) == 0 {
 			return jsNull
 		}
 		return t.elems[0]
 	case "last":
+		if len(pos) > 0 {
+			n := int(math.Trunc(rubyToF(pos[0])))
+			if n > len(t.elems) {
+				n = len(t.elems)
+			}
+			return rubyArrSub(t, len(t.elems)-n, n)
+		}
 		if len(t.elems) == 0 {
 			return jsNull
 		}
 		return t.elems[len(t.elems)-1]
+	// shift removes from the FRONT; unshift/prepend adds there, variadically.
+	case "shift":
+		if len(pos) > 0 {
+			n := int(math.Trunc(rubyToF(pos[0])))
+			if n > len(t.elems) {
+				n = len(t.elems)
+			}
+			head := rubyArrSub(t, 0, n)
+			rubyArrReplace(t, rubyArrSub(t, n, len(t.elems)-n).elems)
+			return head
+		}
+		if len(t.elems) == 0 {
+			return jsNull
+		}
+		v := t.elems[0]
+		rubyArrReplace(t, rubyArrSub(t, 1, len(t.elems)-1).elems)
+		return v
+	case "unshift", "prepend":
+		return rubyArrReplace(t, append(append([]interface{}{}, pos...), t.elems...))
 	case "include?", "contains":
 		// Array#include? is ==, not === and not eql?: `[[1]].include?([1])` and
 		// `[1].include?(1.0)` are both true in MRI. It was a `===` scan, which
 		// answered false to both. A plain scan and not the dict index, because an
 		// ordinary data array must not grow a key index just to be searched.
-		return rt.rubyArrIndex(t, argAt(args, 0)) >= 0
+		return rt.rubyArrIndex(t, argAt(pos, 0)) >= 0
 	case "inspect":
 		return rt.rubyInspect(t)
 	case "index", "find_index":
 		// == as well, and the same scan: `[[1]].index([1])` is 0 in MRI.
-		return rubyIdxOrNil(rt.rubyArrIndex(t, argAt(args, 0)))
+		if blk != nil && len(pos) == 0 {
+			for i, e := range t.elems {
+				if rubyTruthy(rt.call(blk, jsUndef, []interface{}{e})) {
+					return float64(i)
+				}
+			}
+			return jsNull
+		}
+		return rubyIdxOrNil(rt.rubyArrIndex(t, argAt(pos, 0)))
 	case "rindex":
 		for i := len(t.elems) - 1; i >= 0; i-- {
-			if rt.rubyEq(t.elems[i], argAt(args, 0)) {
+			if rt.rubyEq(t.elems[i], argAt(pos, 0)) {
 				return float64(i)
 			}
 		}
@@ -6079,24 +6474,29 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		return &jsArray{elems: append([]interface{}{}, t.elems...)}
 	case "each":
 		for _, e := range t.elems {
-			rt.call(argAt(args, 0), jsUndef, []interface{}{e})
+			rt.call(blk, jsUndef, []interface{}{e})
 		}
 		return t
 	case "each_with_index":
 		for i, e := range t.elems {
-			rt.call(argAt(args, 0), jsUndef, []interface{}{e, float64(i)})
+			rt.call(blk, jsUndef, []interface{}{e, float64(i)})
+		}
+		return t
+	case "each_index":
+		for i := range t.elems {
+			rt.call(blk, jsUndef, []interface{}{float64(i)})
 		}
 		return t
 	case "map", "collect":
 		out := &jsArray{}
 		for _, e := range t.elems {
-			out.elems = append(out.elems, rt.call(argAt(args, 0), jsUndef, []interface{}{e}))
+			out.elems = append(out.elems, rt.call(blk, jsUndef, []interface{}{e}))
 		}
 		return out
 	case "select", "filter":
 		out := &jsArray{}
 		for _, e := range t.elems {
-			if rubyTruthy(rt.call(argAt(args, 0), jsUndef, []interface{}{e})) {
+			if rubyTruthy(rt.call(blk, jsUndef, []interface{}{e})) {
 				out.elems = append(out.elems, e)
 			}
 		}
@@ -6104,17 +6504,495 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	case "reject":
 		out := &jsArray{}
 		for _, e := range t.elems {
-			if !rubyTruthy(rt.call(argAt(args, 0), jsUndef, []interface{}{e})) {
+			if !rubyTruthy(rt.call(blk, jsUndef, []interface{}{e})) {
 				out.elems = append(out.elems, e)
 			}
 		}
 		return out
+	// sum was an int32 accumulator, which truncated every Float and every value
+	// past 2^31: `[1.5, 2.5].sum` answered 3. Ruby's sum is ordinary + from an
+	// Integer 0 (or from the given initial value), the block applied first.
+	// MRI's sum starts from an Integer 0 and REFUSES a non-numeric element:
+	// `["b","a"].sum` is a TypeError, not "0ba". The refusal is only against a
+	// NUMERIC accumulator - `["a","b"].sum("")` is "ab" and `[[1],[2]].sum([])` is
+	// [1,2]. A catchable TypeError, since MRI's is rescuable.
 	case "sum":
-		var s int32 = 0
-		for _, e := range t.elems {
-			s = rt.toInt32(float64(s) + rt.toNumber(e))
+		var s interface{} = float64(0)
+		if len(pos) > 0 {
+			s = pos[0]
 		}
-		return float64(s)
+		for _, e := range t.elems {
+			v := e
+			if blk != nil {
+				v = rt.call(blk, jsUndef, []interface{}{e})
+			}
+			if rubyIsNum(s) && !rubyIsNum(v) {
+				panic(&jsThrown{value: rt.rubyExc(rt.rubyBuiltinClass("TypeError"),
+					[]interface{}{rt.rubyCmpName(v) + " can't be coerced into " + rubyClassName(s)})})
+			}
+			s = rt.rubyBin("+", s, v)
+		}
+		return s
+	// ----- the rest of the Array / Enumerable surface -----
+	case "empty?":
+		return len(t.elems) == 0
+	case "clear":
+		return rubyArrReplace(t, nil)
+	case "sort":
+		return &jsArray{elems: rubyArrSort(t.elems, rt.rubyArrCmpFn(blk))}
+	case "sort!":
+		return rubyArrReplace(t, rubyArrSort(t.elems, rt.rubyArrCmpFn(blk)))
+	case "sort_by":
+		return rubyUndecorate(rt.rubyArrKeyed(t, blk))
+	case "sort_by!":
+		return rubyArrReplace(t, rubyUndecorate(rt.rubyArrKeyed(t, blk)).elems)
+	case "reverse", "reverse!":
+		rev := make([]interface{}, 0, len(t.elems))
+		for i := len(t.elems) - 1; i >= 0; i-- {
+			rev = append(rev, t.elems[i])
+		}
+		if name == "reverse" {
+			return &jsArray{elems: rev}
+		}
+		return rubyArrReplace(t, rev)
+	case "join":
+		sep := ""
+		if len(pos) > 0 {
+			sep = rt.rubyStr(pos[0])
+		}
+		return rt.rubyArrJoin(t, sep)
+	// min / max take an optional COUNT and an optional block, and with the count
+	// they answer an array - ascending for min, DESCENDING for max.
+	case "min", "max":
+		cmp := rt.rubyArrCmpFn(blk)
+		wantMax := name == "max"
+		if len(pos) > 0 {
+			n := int(math.Trunc(rubyToF(pos[0])))
+			asc := &jsArray{elems: rubyArrSort(t.elems, cmp)}
+			if !wantMax {
+				return rubyArrSub(asc, 0, n)
+			}
+			desc := &jsArray{}
+			for i := len(asc.elems) - 1; i >= 0; i-- {
+				desc.elems = append(desc.elems, asc.elems[i])
+			}
+			return rubyArrSub(desc, 0, n)
+		}
+		if len(t.elems) == 0 {
+			return jsNull
+		}
+		best := t.elems[0]
+		for _, e := range t.elems[1:] {
+			c := cmp(e, best)
+			if (wantMax && c > 0) || (!wantMax && c < 0) {
+				best = e
+			}
+		}
+		return best
+	case "min_by", "max_by":
+		if len(t.elems) == 0 {
+			return jsNull
+		}
+		pairs := rt.rubyArrKeyed(t, blk)
+		if name == "min_by" {
+			return pairs[0].(*jsArray).elems[1]
+		}
+		return pairs[len(pairs)-1].(*jsArray).elems[1]
+	case "minmax":
+		if len(t.elems) == 0 {
+			return &jsArray{elems: []interface{}{jsNull, jsNull}}
+		}
+		s := rubyArrSort(t.elems, rt.rubyArrCmpFn(blk))
+		return &jsArray{elems: []interface{}{s[0], s[len(s)-1]}}
+	// count: no argument is the length, an argument counts == matches, a block
+	// counts the elements it accepts.
+	case "count":
+		if blk != nil && len(pos) == 0 {
+			n := 0
+			for _, e := range t.elems {
+				if rubyTruthy(rt.call(blk, jsUndef, []interface{}{e})) {
+					n++
+				}
+			}
+			return float64(n)
+		}
+		if len(pos) == 0 {
+			return float64(len(t.elems))
+		}
+		n := 0
+		for _, e := range t.elems {
+			if rt.rubyEq(e, pos[0]) {
+				n++
+			}
+		}
+		return float64(n)
+	case "tally":
+		d := rubyNewDict()
+		keys := d.props["keys"].(*jsArray)
+		vals := d.props["vals"].(*jsArray)
+		for _, e := range t.elems {
+			if ix := rt.rubyDictFind(keys, e); ix >= 0 {
+				vals.elems[ix] = rubyToF(vals.elems[ix]) + 1
+			} else {
+				keys.elems = append(keys.elems, e)
+				vals.elems = append(vals.elems, float64(1))
+			}
+		}
+		return d
+	case "flatten", "flatten!":
+		depth := -1
+		if len(pos) > 0 {
+			depth = int(math.Trunc(rubyToF(pos[0])))
+		}
+		flat := rubyArrFlat(t, depth, &jsArray{})
+		if name == "flatten" {
+			return flat
+		}
+		return rubyArrReplace(t, flat.elems)
+	case "compact", "compact!":
+		out := &jsArray{}
+		for _, e := range t.elems {
+			if !isUndefOrNull(e) {
+				out.elems = append(out.elems, e)
+			}
+		}
+		if name == "compact" {
+			return out
+		}
+		// The bang form answers nil when nothing was removed, which is how MRI
+		// reports "no change" for every ! method that can make none.
+		if len(out.elems) == len(t.elems) {
+			return jsNull
+		}
+		return rubyArrReplace(t, out.elems)
+	case "uniq!":
+		uq := rt.rubyArrayMethod(t, "uniq", nil).(*jsArray)
+		if len(uq.elems) == len(t.elems) {
+			return jsNull
+		}
+		return rubyArrReplace(t, uq.elems)
+	// zip is element-wise across the receiver AND every argument array, padding a
+	// short one with nil; the result is always as long as the RECEIVER.
+	case "zip":
+		out := &jsArray{}
+		for i, e := range t.elems {
+			row := &jsArray{elems: []interface{}{e}}
+			for _, a := range pos {
+				if za, isArr := a.(*jsArray); isArr && i < len(za.elems) {
+					row.elems = append(row.elems, za.elems[i])
+				} else {
+					row.elems = append(row.elems, jsNull)
+				}
+			}
+			out.elems = append(out.elems, row)
+		}
+		return out
+	// each_slice / each_cons: with a block they yield each group and answer SELF
+	// (Ruby 3.1 changed this from nil, and this project's corpus is Ruby 3); with
+	// no block MRI answers an Enumerator, which has no value here, so they answer
+	// the array of groups - what .to_a on that Enumerator would give.
+	case "each_slice", "each_cons":
+		n := int(math.Trunc(rubyToF(argAt(pos, 0))))
+		if n < 1 {
+			rt.fail("invalid size")
+		}
+		groups := &jsArray{}
+		if name == "each_slice" {
+			for i := 0; i < len(t.elems); i += n {
+				groups.elems = append(groups.elems, rubyArrSub(t, i, n))
+			}
+		} else {
+			for i := 0; i+n <= len(t.elems); i++ {
+				groups.elems = append(groups.elems, rubyArrSub(t, i, n))
+			}
+		}
+		if blk == nil {
+			return groups
+		}
+		for _, g := range groups.elems {
+			rt.call(blk, jsUndef, []interface{}{g})
+		}
+		return t
+	case "take":
+		return rubyArrSub(t, 0, int(math.Trunc(rubyToF(argAt(pos, 0)))))
+	case "drop":
+		n := int(math.Trunc(rubyToF(argAt(pos, 0))))
+		return rubyArrSub(t, n, len(t.elems)-n)
+	case "take_while", "drop_while":
+		cut := len(t.elems)
+		for i, e := range t.elems {
+			if !rubyTruthy(rt.call(blk, jsUndef, []interface{}{e})) {
+				cut = i
+				break
+			}
+		}
+		if name == "take_while" {
+			return rubyArrSub(t, 0, cut)
+		}
+		return rubyArrSub(t, cut, len(t.elems)-cut)
+	case "find", "detect":
+		for _, e := range t.elems {
+			if rubyTruthy(rt.call(blk, jsUndef, []interface{}{e})) {
+				return e
+			}
+		}
+		return jsNull
+	// inject / reduce: four forms - a block, a block with an initial value, a
+	// Symbol naming a binary operator, and an initial value with that Symbol.
+	case "inject", "reduce":
+		var sym string
+		var acc interface{} = jsNull
+		haveInit := false
+		for _, a := range pos {
+			if s, isSym := a.(jsSym); isSym {
+				sym = s.s
+			} else {
+				acc = a
+				haveInit = true
+			}
+		}
+		from := 0
+		if !haveInit {
+			if len(t.elems) == 0 {
+				return jsNull
+			}
+			acc = t.elems[0]
+			from = 1
+		}
+		for _, e := range t.elems[from:] {
+			if sym != "" {
+				acc = rt.rubyBin(sym, acc, e)
+			} else {
+				acc = rt.call(blk, jsUndef, []interface{}{acc, e})
+			}
+		}
+		return acc
+	case "each_with_object":
+		memo := argAt(pos, 0)
+		for _, e := range t.elems {
+			rt.call(blk, jsUndef, []interface{}{e, memo})
+		}
+		return memo
+	case "all?", "any?", "none?", "one?":
+		hits := 0
+		for _, e := range t.elems {
+			hit := false
+			switch {
+			case blk != nil:
+				hit = rubyTruthy(rt.call(blk, jsUndef, []interface{}{e}))
+			case len(pos) > 0:
+				// With an argument the test is `arg === element`, which for a
+				// class object is is_a? and == for everything else - the rule
+				// js_rwhen applies.
+				hit = rt.rubyPatternHit(pos[0], e)
+			default:
+				hit = rubyTruthy(e)
+			}
+			if hit {
+				hits++
+			}
+		}
+		switch name {
+		case "all?":
+			return hits == len(t.elems)
+		case "any?":
+			return hits > 0
+		case "none?":
+			return hits == 0
+		}
+		return hits == 1
+	case "flat_map", "collect_concat":
+		out := &jsArray{}
+		for _, e := range t.elems {
+			v := rt.call(blk, jsUndef, []interface{}{e})
+			if sub, isArr := v.(*jsArray); isArr {
+				out.elems = append(out.elems, sub.elems...)
+			} else {
+				out.elems = append(out.elems, v)
+			}
+		}
+		return out
+	case "group_by":
+		d := rubyNewDict()
+		keys := d.props["keys"].(*jsArray)
+		vals := d.props["vals"].(*jsArray)
+		for _, e := range t.elems {
+			k := rt.call(blk, jsUndef, []interface{}{e})
+			if ix := rt.rubyDictFind(keys, k); ix >= 0 {
+				bucket := vals.elems[ix].(*jsArray)
+				bucket.elems = append(bucket.elems, e)
+			} else {
+				keys.elems = append(keys.elems, k)
+				vals.elems = append(vals.elems, &jsArray{elems: []interface{}{e}})
+			}
+		}
+		return d
+	case "partition":
+		yes, no := &jsArray{}, &jsArray{}
+		for _, e := range t.elems {
+			if rubyTruthy(rt.call(blk, jsUndef, []interface{}{e})) {
+				yes.elems = append(yes.elems, e)
+			} else {
+				no.elems = append(no.elems, e)
+			}
+		}
+		return &jsArray{elems: []interface{}{yes, no}}
+	case "rotate":
+		if len(t.elems) == 0 {
+			return &jsArray{}
+		}
+		n := 1
+		if len(pos) > 0 {
+			n = int(math.Trunc(rubyToF(pos[0])))
+		}
+		n = ((n % len(t.elems)) + len(t.elems)) % len(t.elems)
+		out := &jsArray{}
+		for i := range t.elems {
+			out.elems = append(out.elems, t.elems[(i+n)%len(t.elems)])
+		}
+		return out
+	case "values_at":
+		out := &jsArray{}
+		for _, a := range pos {
+			ix := rubyArrNorm(t, a)
+			if ix >= 0 && ix < len(t.elems) {
+				out.elems = append(out.elems, t.elems[ix])
+			} else {
+				out.elems = append(out.elems, jsNull)
+			}
+		}
+		return out
+	case "slice":
+		// A closed range reaches the compiler halves ALREADY MATERIALIZED as an
+		// array (that is what ruby-to-llvm-ir.abnf emits for 1..2), so an array
+		// first argument here IS the range: its first element is the low bound and
+		// its length is the count.
+		if r, isArr := argAt(pos, 0).(*jsArray); isArr {
+			if len(r.elems) == 0 {
+				return &jsArray{}
+			}
+			return rubyArrSub(t, rubyArrNorm(t, r.elems[0]), len(r.elems))
+		}
+		ix := rubyArrNorm(t, argAt(pos, 0))
+		if len(pos) > 1 {
+			return rubyArrSub(t, ix, int(math.Trunc(rubyToF(pos[1]))))
+		}
+		if ix >= 0 && ix < len(t.elems) {
+			return t.elems[ix]
+		}
+		return jsNull
+	case "insert":
+		ix := rubyArrNorm(t, argAt(pos, 0))
+		out := append([]interface{}{}, t.elems[:ix]...)
+		out = append(out, pos[1:]...)
+		return rubyArrReplace(t, append(out, t.elems[ix:]...))
+	// delete answers the value it removed (nil when it removed nothing), while
+	// delete_at answers the element that was at that index.
+	// delete answers the LAST element it removed - which is not always the
+	// argument, since `[1, 1.0].delete(1)` removes both and MRI answers 1.0.
+	case "delete":
+		kept := []interface{}{}
+		var hit interface{} = jsNull
+		for _, e := range t.elems {
+			if rt.rubyEq(e, argAt(pos, 0)) {
+				hit = e
+			} else {
+				kept = append(kept, e)
+			}
+		}
+		rubyArrReplace(t, kept)
+		return hit
+	case "delete_at":
+		ix := rubyArrNorm(t, argAt(pos, 0))
+		if ix < 0 || ix >= len(t.elems) {
+			return jsNull
+		}
+		v := t.elems[ix]
+		rubyArrReplace(t, append(append([]interface{}{}, t.elems[:ix]...), t.elems[ix+1:]...))
+		return v
+	// delete_if / keep_if always answer self; select! / reject! answer NIL when
+	// they removed nothing, which is MRI's "no change" report for a ! method.
+	case "delete_if", "reject!":
+		kept := []interface{}{}
+		for _, e := range t.elems {
+			if !rubyTruthy(rt.call(blk, jsUndef, []interface{}{e})) {
+				kept = append(kept, e)
+			}
+		}
+		same := len(kept) == len(t.elems)
+		rubyArrReplace(t, kept)
+		if name == "reject!" && same {
+			return jsNull
+		}
+		return t
+	case "keep_if", "select!", "filter!":
+		kept := []interface{}{}
+		for _, e := range t.elems {
+			if rubyTruthy(rt.call(blk, jsUndef, []interface{}{e})) {
+				kept = append(kept, e)
+			}
+		}
+		same := len(kept) == len(t.elems)
+		rubyArrReplace(t, kept)
+		if name != "keep_if" && same {
+			return jsNull
+		}
+		return t
+	case "map!", "collect!":
+		out := []interface{}{}
+		for _, e := range t.elems {
+			out = append(out, rt.call(blk, jsUndef, []interface{}{e}))
+		}
+		return rubyArrReplace(t, out)
+	case "concat":
+		for _, a := range pos {
+			if src, isArr := a.(*jsArray); isArr {
+				t.dropIdx()
+				t.elems = append(t.elems, src.elems...)
+			}
+		}
+		return t
+	case "fill":
+		out := []interface{}{}
+		for i := range t.elems {
+			if blk != nil {
+				out = append(out, rt.call(blk, jsUndef, []interface{}{float64(i)}))
+			} else {
+				out = append(out, argAt(pos, 0))
+			}
+		}
+		return rubyArrReplace(t, out)
+	case "assoc":
+		for _, e := range t.elems {
+			if row, isArr := e.(*jsArray); isArr && len(row.elems) > 0 && rt.rubyEq(row.elems[0], argAt(pos, 0)) {
+				return row
+			}
+		}
+		return jsNull
+	case "product":
+		prod := &jsArray{}
+		for _, e := range t.elems {
+			prod.elems = append(prod.elems, &jsArray{elems: []interface{}{e}})
+		}
+		for _, a := range pos {
+			src, isArr := a.(*jsArray)
+			if !isArr {
+				continue
+			}
+			next := &jsArray{}
+			for _, row := range prod.elems {
+				for _, v := range src.elems {
+					r := append([]interface{}{}, row.(*jsArray).elems...)
+					next.elems = append(next.elems, &jsArray{elems: append(r, v)})
+				}
+			}
+			prod = next
+		}
+		return prod
+	case "dup", "clone", "entries":
+		return &jsArray{elems: append([]interface{}{}, t.elems...)}
+	case "freeze", "itself":
+		return t
 	}
 	rt.fail("unknown Array method: %s", name)
 	return nil
@@ -7684,6 +8562,19 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 						}
 						return w(jsNull)
 					}
+					// Array.new(n) / Array.new(n, v) / Array.new(n) { |i| }.
+					// Without this arm it fell into the exception construction
+					// below and answered the first argument - a silent wrong
+					// answer, and a different one in each engine.
+					if bn == "Array" {
+						return w(rt.rubyArrNew(argv))
+					}
+					// A bare Hash.new is an empty Hash. Hash.new(v) / Hash.new { }
+					// carry a DEFAULT, which nothing here models, so those forms
+					// are left on the old path rather than silently losing it.
+					if bn == "Hash" && len(argv) == 0 {
+						return w(rubyNewDict())
+					}
 					return w(rt.rubyExc(cls, argv))
 				}
 			}
@@ -7695,10 +8586,18 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// Kernel#format / sprintf: the argument array is [format, args...].
 		"js_rformat": func(a []uint64) uint64 {
 			arr, ok := u(a[0]).(*jsArray)
-			if !ok || len(arr.elems) == 0 {
+			if !ok {
 				return rt.wrapStr("")
 			}
-			return rt.wrapStr(rt.rubyFormat(rt.rubyStr(arr.elems[0]), &jsArray{elems: arr.elems[1:]}))
+			return rt.wrapStr(rt.rubyFormatArgs(arr.elems))
+		},
+		// Kernel#rand, as a call the emitter makes for the bare name.
+		"js_rrand": func(a []uint64) uint64 {
+			arr, ok := u(a[0]).(*jsArray)
+			if !ok || len(arr.elems) == 0 {
+				return w(rubyRand(nil))
+			}
+			return w(rubyRand(arr.elems[0]))
 		},
 		// &:sym as a block argument: the "call this method on each element" proc
 		// (`[1, 2].map(&:to_s)`). A Proc is passed straight through.
