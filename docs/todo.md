@@ -5,159 +5,159 @@ is the manual** — architecture, how to build and test, the traps, and the engi
 mechanics. Read the manual first; nothing here explains how anything works.
 
 Rebuilt 2026-08-05 at `e284185`; **eleven items closed on 2026-08-06**, **ten on
-2026-08-07**, and **ten on 2026-08-08** (below), with what those agents found on
-the way folded in. **Chapter 1 is now entirely new**: the old one is closed.
+2026-08-07**, **ten on 2026-08-08**, and **ten more in the round `483a7a5`
+through `af16f71`**, with what those agents found on the way folded in.
+**Chapter 1 is entirely new again**: the old one is closed.
 
 Two conventions, and they are the point of the file:
 
 > **[V]** — a probe or grep was run for this list, on this commit.
 > **[U]** — inherited from an older note and NOT re-checked. A lead, not a fact.
 >
-> **Re-verify before you act.** Of the ten items worked on 2026-08-06, **three were
-> already fixed**, one was mis-scoped by an order of magnitude, one named the wrong
-> engine, and one had a framing that would have caused a regression if followed —
-> six of ten wrong. On 2026-08-07 the rate held: one item's "genuinely blocked"
-> verdict was **false** (async generators landed the same day), one named the
-> interpreter where all three engines were affected, one understated a defect that
-> was in every box type, and four of five bullets in another were wrong. **Assume
-> the text below is a lead, not a fact, and probe first.**
+> **Re-verify before you act.** Of the ten items worked on 2026-08-06, **six of
+> ten were wrong**. On 2026-08-07 the rate held. On 2026-08-08 the items were
+> finally accurate and the failure mode moved to the WORK instead — two of ten
+> agents shipped a NEW halves divergence that their own probes and all seven gates
+> called green.
 >
-> On 2026-08-08 the items were finally accurate — and the failure mode moved to the
-> WORK instead. **Two of ten agents shipped a NEW halves divergence** that their own
-> probes and all seven gates called green, and both were caught only by the
-> coordinator re-probing against the real toolchain. Sending them back found *more*:
-> ruby's fix uncovered two bugs **both compiled halves agreed on** (`[1,"a"] <=> [1,2]`
-> answering `0`, and `<=>` returning `l.length - r.length`), which byte-identity
-> cannot see by construction. **An agent's own green gate run is not verification.**
+> **On the latest round the items were mostly right and STILL not sufficient.**
+> Two were wrong as written — **5.2 said `floExt` was dead code when it is live,
+> and deleting it as written would have introduced a defect**; and 1.9 named one
+> `is` residue where every integral and floating name was broken. And **seven of
+> the ten turned up a further defect the item did not name**, five of them live
+> halves divergences `--cross` had never reached: csharp's `1 is char`, kotlin's
+> `1L == 1.5`, go's silent `<nil> <nil>` comma-ok, java's anon-class field
+> shadowing in the *compiler* half, and js's `next(v)` not reaching a delegate.
+> **Treat an item as a place to start probing, never as a specification.**
+>
+> **Item NUMBERS are re-assigned every time this file is rebuilt.** Code comments
+> of the form `docs/todo.md 1.4` are historical provenance pointing at the
+> numbering of the day they were written — do not "fix" them, and do not trust
+> them to name today's item.
 
 Baseline every item must preserve (`tests/gates.sh`, ~2.5 min — add `--serial` on a
 small machine):
 
 ```
-matrix 351/351 · --full 6,717 assertions, 0 halves disagree · --cross 119/0
+matrix 351/351 · --full 6,873 assertions, 0 halves disagree · --cross 119/0
 clang-check 16/16 none held · native-full 15/15 · go test ok
 gen-all 15/15 clean · -freeze a fixed point · bench: no row outside its spread
 ```
 
-**The bench baselines were re-recorded at `e6eea98`** and the gate is green again.
-It had been red for a whole round, and the measurement that settled it is the one
-nobody took for two rounds: run the flagged row **at the parent commit**. python's
-+4.5% predates the round that found it. `--record` also DELETES the baseline file's
-header, which holds the layout-lottery evidence both this file and the manual cite —
-restore it by hand.
-
 **Run `tests/gates.sh --bench` for anything that touches layer 2 or the floor.**
 The seven correctness gates cannot see a slowdown — a merge in `120ba0f` cost
-python **41%** and java **5.7%** for four commits with every gate green, and on
-2026-08-06 a first draft of the ruby bignum was **+38.79%** before it was caught
-and turned into **−11.8%**.
+python **41%** and java **5.7%** for four commits with every gate green.
+`tests/bench.sh` now takes a LOCK (`ed7086f`): its `-exe` directory is fixed so two
+checkouts draw from the same paths, which means two concurrent runs used to
+overwrite each other's binaries and report a phantom `BUILD FAILED`.
 
 **On a loaded machine pass `--timeout 600` to `./test.sh --full`.** The js
-compiler half is ~19 s idle and **82 s at load 16** against a 120 s default; a
-killed run now says `RUN-FAILED … NOT a frozen divergence` (`53caf6d`) instead of
-reporting a phantom `FROZEN-DIFF`, but the slowness is real.
+compiler half is ~19 s idle and **82 s at load 16** against a 120 s default. This
+fired repeatedly with four agents running; a `RUN-FAILED … exit 124` in a language
+your change does not touch is this, not a divergence — re-run before believing it.
 
 ---
 
 # 1. Correctness, with an oracle on this machine
 
 These change answers real programs give. Each has a toolchain here that settles it.
-**Section 1 was emptied on 2026-08-08** — every item it held is in chapter 9. What
-follows is what closing them turned up, so all of it is **[V]** on `418ab6f`.
+**Section 1 was emptied again on 2026-08-07** — all nine items it held are in
+chapter 9. What follows is what closing them turned up, so all of it is **[V]** on
+`af16f71`.
 
-### 1.1 A literal does not adopt a declared type — swift and csharp **[V]**
-The wall `e5e68b5` and the three binary32 rounds all stopped at, now measured. In
-swift, declared-type adoption exists at exactly **one** site (a `let`/`var`
-annotation); parameters, returns, struct fields and array-literal element types
-carry no `itype`. C# is the same, local-variable-only (`csImplicitConv`/`makeDecl`).
+### 1.1 swift/csharp: only the INITIAL value adopts a declared type **[V]**
+`483a7a5` and `1b54644` closed parameters, returns, fields/properties and `[T]`
+element types in both languages. **A write after the declaration still does not
+adopt**: `var d: Double = 0; d = 3` and `c.D = 3` answer `1`. So do closure
+parameter and return types, dictionary/`List<T>`/`Dictionary<K,V>` value types,
+tuple element types, and nested `[[Double]]`. This is the one genuinely larger
+piece — it needs the declared type remembered per variable and field at every
+write site, i.e. a var-type table in both engines of both languages. Both ratchets
+carry a block comment listing the open sites so the item is not read as finished.
+Oracles: `swiftc`; ECMA-334 10.2.3 for C# (no toolchain).
 
-**The width is on the VALUE, not the annotation**, so anything that already *is* a
-Float travels correctly — `f(Float(1))` is exact where `f(1)` is not. That makes it
-look cosmetic. It is not, and this is the part nobody had written down: **the same
-missing mechanism already gives DOUBLE wrong answers**, because an Int literal at
-those sites stays an Int and integer-divides.
-
+### 1.2 csharp: an unqualified write to an instance field ABORTS the compiler half **[V]**
+```csharp
+class B { public double D; public void Set(double d) { D = d; } }
+   interpreter 3      compiler/native  ABORT: assignment to undeclared variable: D
 ```
-func g(_ x: Double) -> Double { return x / 2 };  g(3)   -> 1     swiftc says 1.5
-let a: [Double] = [3, 4];  a[0] / 2                     -> 1     swiftc says 1.5
-struct T { var a: Double };  T(a: 3).a / 2              -> 1     swiftc says 1.5
+`this.D = d` works. Pre-existing at `08e8fcb`, a live halves divergence, and
+`--cross` has never reached it. This is the highest-value item in the chapter: an
+abort on ordinary C#.
+
+### 1.3 swift: a subclass with no `init` gets an empty synthesised memberwise init **[V]**
+```swift
+class Base { var n: Double; init(_ x: Double) {…}; func f() -> Double { n*2 } }
+class Derived: Base {}
+Derived(3.0).n  -> nil (swiftc 3.0)      Derived(3.0).f() -> 0.0 (swiftc 6.0)
 ```
+The synthesised init shadows the inherited one. All three engines, pre-existing.
+Oracle: `swiftc`.
 
-Both halves agree, so `--cross` cannot see it. Closing it is a four-site adoption
-pass that changes **Double** behaviour in every Swift program, which is why it was
-deliberately left out of a Float round. Oracle: `swiftc`.
+### 1.4 ruby: a block is bound as a POSITIONAL argument by two parameter shapes **[V]**
+`def deflt(x = 5); yield x; end; deflt { |v| v*2 }` → MRI `10`, our interpreter
+`NaN`, our compiler **aborts** (`not a number in '*'`). Same for `(*xs)`. The
+literal block is bound to the optional/splat parameter instead of staying the
+block. Needs parameter binding fixed in `bindParams`/`emitParams` across four
+engines. Oracle: `/usr/bin/ruby`.
 
-### 1.2 ruby: `yield` inside a `begin`/`rescue` aborts the compiler half **[V]**
-```
-def t(l); begin; puts l + (yield).to_s; rescue Exception => e; puts "E"; end; end
-t("a") { 1 }
-   MRI 2.6.10   a1        interpreter  a1        compiler/native   ABORT
-   js runtime error: call of a non function value: null (last member lookups: abs)
-```
-A halves divergence, **pre-existing** (identical at `4f2e6e4`), and `--cross` has
-never reached it because no test program does it. Found only because a probe
-harness used the idiom. Oracle: `/usr/bin/ruby`.
+### 1.5 ruby: `return` inside a block does not return from the enclosing method **[V]**
+`def u; A.each { |v| return v*100 if v == 2 }; nil; end` → MRI and our interpreter
+`200`, **both compiled halves `nil`**. A live halves divergence, pre-existing, and
+`--cross` has never reached it.
 
-### 1.3 python: `dict` and `set` have almost no methods **[V]**
-`dict.clear/copy/setdefault/update` and `set.pop/clear/copy/remove/discard/union`
-are all absent in every engine — the exact residue of `51436f9`, which did the
-`list` surface. Today `hasattr` deliberately answers `False` for them rather than
-promising a call that would abort, so **`hasattr` is the live tracker**: the 7
-residual rows of that round's 3,513-line probe are precisely this list.
-Oracle: `python3`.
+### 1.6 ruby: `Hash` has almost no Enumerable surface **[V]**
+`map merge dup select sort_by delete any? each_with_object` are all
+"unknown Hash method" in every engine. Note for whoever takes it: MRI's
+`merge`/`dup` **carry the receiver's default over**, which `f64f86f` just gave
+`Hash` — so this item and Hash defaults interact. Blockless `map`/`select` still
+crash where MRI answers an Enumerator; that needs the arity model from 1.4, so do
+1.4 first.
 
-### 1.4 ruby: `Hash` defaults, `Enumerator`, and the sampling methods **[V]**
-`Hash.new(v)` and `Hash.new { }` defaults need a `__default` slot honoured at every
-read, so `3267449` left them on the old path rather than dropping them silently.
-`sample shuffle cycle combination permutation` are absent. `each_slice` with **no
-block** answers the array of groups instead of an Enumerator. And bare `rand`
-without parentheses still resolves to the host function value in the interpreter
-and aborts in the compiler — `rand()` works everywhere. Oracle: `/usr/bin/ruby`.
+### 1.7 python: `d[missing]` raises an UNCATCHABLE error in the interpreter **[V]**
+`try: d[3] / except KeyError` works in CPython and in both compiled halves; the
+interpreter aborts the process. A live halves divergence. Related and separate:
+`repr(KeyError)` is wrong in all three engines (`KeyError('3')` where CPython says
+`KeyError(3)`) because the exception carries the already-`repr`'d string, which
+makes `str(e)` right and `repr(e)` doubly quoted.
 
-### 1.5 java: an anonymous class cannot read the ENCLOSING METHOD's local **[V]**
-`44dbd04` gave anonymous and inner classes outer *fields*, outer *statics* and
-`Outer.this`. A local or parameter of the enclosing method is the remaining case:
-the interpreter says `unknown name: k` where the compiler half and `javac` both
-answer. Its anon-class methods are built into a fresh frame rather than over the
-defining scope. **Interpreter-only, so this one IS a halves divergence.**
-Oracle: `java`.
+### 1.8 goja's shortest-form printing is still trusted by four interpreters **[V]**
+`08e8fcb` fixed java and recorded the mechanism: goja's `Number→String` is not
+always the shortest round-tripping form (22 of 199,904 doubles; some subnormals
+emit a non-digit character), so **any grammar taking digits from `"" + n` has a
+live goja-vs-`-frozen` divergence**. Still doing it: **lua** (`luaGStr` picks P
+from `luaSigCount("" + n)` — 1 row of 676 wrong against `lua` 5.5.0 *and* a
+frozen divergence), **kotlin**, **csharp**, **go**. Their `*-rt.metajs` copies are
+safe; it is the interpreter halves. The fix shape is java's: choose P by
+round-trip, not by counting the host's digits. Their comments also now assert
+something false about `floPrec`'s two implementations, which `08e8fcb` unified.
 
-### 1.6 js: a throw into a `yield*` is not forwarded to the delegate **[V]**
-`fb71770` fixed `yield*` in async generators and `ag.throw()` at a suspended yield.
-One shape remains: a throw arriving while the body is parked **at a `yield\*`**
-raises at the `yield*` instead of being forwarded to the delegate's `throw()`, so a
-delegate that would have caught it does not, and is left suspended rather than
-closed. All three engines reject where node yields the delegate's caught value.
-Forwarding needs the `yield*` loop to branch on the shape of its resume value and
-drive the delegate in-frame — the `await` cannot move into a helper. A plain
-(non-async) generator still has no `.throw()` at all. Oracle: `node`.
+### 1.9 go: four residues found by the multi-assign probe **[V]**
+All confirmed against `go` at `4f77621`:
+- **out-of-range index** `xs[7]` prints `<nil>` and exits 0 in the interpreter,
+  errors in the compiler, panics in `go`. A halves divergence.
+- **a missing map key does not yield a nil map**: `nst["absent"]["k"]` is rejected
+  by both halves where Go gives the zero value.
+- **`for v, ok := m["a"]; ok; …`** in a for-init: the interpreter says
+  `unknown name: v`, the compiler is correct. A halves divergence.
+- **nested composite literals** `map[string]map[string]int{"o": {…}}` — the
+  interpreter accepts, the compiler says `composite literal element of
+  unsupported type`. A halves divergence.
 
-### 1.7 go: `a, b := xs[i], ys[j]` does not parse **[V]**
-A multi-assign whose right-hand side is two INDEX expressions is rejected by both
-halves at the same position, so it is not a divergence — but it is ordinary Go, it
-killed a probe mid-round, and `tests/bench/mod.go` does not exist to have caught
-it. Oracle: `go`.
+### 1.10 js: `g.return()` at a `yield*` does not close the delegate **[V]**
+`af16f71` closed throw-forwarding and `next(v)` forwarding. `return()` remains:
+node runs the delegate's `finally`, we do not. It needs the emitted `yield*` loop
+to survive the `GEN_EXIT` sentinel `gen_close` throws in — a `finally`-shaped
+region in the emitter — and the interpreter's `return()` only sets a done flag and
+cannot run a delegate's finalisers at all. A different mechanism from 1.6 and
+materially bigger. Oracle: `node`.
 
-### 1.8 kotlin: `setOf(1.5f, 1.5)` has size 1 where java says 2 **[V]**
-`30cd9f6` made the two widths hash and answer `is` correctly; this is the
-**collection-key contract**, not the width. Java's
-`Float.valueOf(1.5f).equals(Double.valueOf(1.5))` is false, while our value model
-compares tag-14 boxes numerically so the two collapse. Closing it means making a
-mixed-width pair unequal *as boxed values* while `<`, `>` and primitive `==` keep
-promoting. Unreachable from source Kotlin except through `Any` — `kotlinc` rejects
-`1.5f == 1.5` outright. Oracle: `java`.
-
-### 1.9 csharp: `1.5f is float`, `decimal`, and the print window's lower bound **[V]**
-Three residues of `418ab6f`, and the first two are newly *fixable* rather than new:
-- `1.5f is float` is still false, now that the style byte can answer it.
-- `decimal` is still a style-2 double box, so `decimal[]` renders
-  `System.Double[]`.
-- **A found-not-fixed lead for the DOUBLE renderer**: `csFloStr` renders `1e-5` as
-  `"0.00001"` where .NET is reported to answer `"1E-05"`. `418ab6f` inherited that
-  bound unchanged rather than move existing `double` output on a reading of BCL
-  source nothing here can run, and asserts nothing at that boundary.
-**There is no C# toolchain on this machine**; cite ECMA-334 and say so. Note 8.3.7
-fixes the type but the rendering text is in the library spec, not ECMA-334 at all.
+Also open and stated in all four grammars' `:description`: **a plain (sync)
+generator has no `.throw()`**, so a sync generator delegated to from an async one
+takes the no-throw-method path where node forwards. The blocker is that the
+compiled generator is the C floor's tag 15 with a host-id dispatched member table,
+and `*jsGenerator` in `abnf/jsrt.go` is shared by every language exposing a
+generator.
 
 ---
 
@@ -229,19 +229,7 @@ in each grammar's `:description` is a valid closure**, and `d7ef11a`/`2339678`/
 `1n + 1` correctly reports *"Cannot mix BigInt and other types"*, but it aborts
 rather than being caught by a JS `try`/`catch`. Same family as item 3.2.
 
-### 2.8 Java float/double printing, three defects under one formatter **[V]**
-- **`floPrec` disagrees between engines**: `abnf/commonscript.go` answers exactly
-  *n* digits, `languages/lib/runtime.c` answers *max(n, shortest)*, so
-  `floPrec(1/3, 1)` is `"3e-1"` under goja/`-frozen`/llvm.Run and
-  `"3333333333333333e-1"` natively. A latent halves divergence for any layer-2
-  caller; lua's `%g` renderer is the live one, and it is why two float renderers
-  are built on `"" + a` instead.
-- **the java interpreter drops the 17th significant digit** of some doubles
-  (`-0.0013060363926342689` → `-0.001306036392634269`); the value is right, so it
-  is the tag-script host's number→string.
-- **a 17-significant-digit double literal does not round-trip** through the emitter.
-
-### 2.9 go: imported packages share the main file's globals **[V]**
+### 2.8 go: imported packages share the main file's globals **[V]**
 With `mconst.A = 0.1` and a main-file `const A = 5`, `mconst.Sum()` returned 11 at
 base. `08e8d3f` fixed it for CONSTANTS (each file gets its own scope stack) but the
 underlying runtime global-namespace sharing is still there for vars and funcs. Also:
@@ -249,7 +237,7 @@ an imported package's exported CONSTS are not put on the package object (`mconst
 is `<nil>`); `var a [size]int` with a named const size gives `len(a) == 1` in the
 interpreter; and the compiler half cannot parse `const a, b = 0.1, 0.2`.
 
-### 2.10 Ruby and python residue **[V]**
+### 2.9 Ruby and python residue **[V]**
 - **A bare `except:` will not catch python's `GeneratorExit`** — `d7ef11a` routes
   the close sentinel past every catch arm so the two engines agree; CPython lets
   `except:` catch it. Documented at the `js_try` site.
@@ -261,7 +249,7 @@ interpreter; and the compiler half cannot parse `const a, b = 0.1, 0.2`.
   promote through the double where MRI is exact. That needs a Rational whose parts
   are bigs — a second value model, deliberately not started.
 
-### 2.11 Six dead helpers in `python-rt.metajs` **[V]**
+### 2.10 Six dead helpers in `python-rt.metajs` **[V]**
 `pyFStrictEq pyFTruthy pyFClampSub pyFToInt pyFCall1 pyFWrap32`, plus `pyFBigEq`/
 `pyFBigIsZero`: ports of the arms `6eec533` deleted, with one comment describing
 callers that no longer exist. Left rather than risk a late unverified edit;
@@ -269,14 +257,14 @@ deleting them shrinks layer 2 and is a clean follow-up.
 
 ---
 
-### 2.12 A boxed value knows its KIND but not its declared class **[V]**
+### 2.11 A boxed value knows its KIND but not its declared class **[V]**
 Two boxed values of the same primitive kind and different declared classes cannot
 be told apart — this value model has one representation per kind, not per box.
 Surfaced by `44dbd04` while routing java's `equals`, and stated in both
 `:description` blocks rather than guessed at. Same family as 1.8 (kotlin's mixed
 Float/Double set key), and the two would likely be closed by one mechanism.
 
-### 2.13 A `getattr()`-bound python builtin cannot carry keyword arguments **[V]**
+### 2.12 A `getattr()`-bound python builtin cannot carry keyword arguments **[V]**
 `getattr(xs,"sort")(reverse=True)` differs from `xs.sort(reverse=True)`: a
 signature-less builtin receives its keyword dict as a trailing POSITIONAL, and the
 bound wrapper cannot tell that from a real argument. Documented at all three sites
@@ -285,7 +273,7 @@ refuses `key=`/`reverse=` loudly, because they are keyword-only in CPython and a
 signature-less builtin here is positional-only — `list.sort` takes both only
 because a METHOD call carries its `kw` dict.
 
-### 2.14 Small unbound builtins met in passing **[V]**
+### 2.13 Small unbound builtins met in passing **[V]**
 java: `Integer.toHexString`, `Double.NaN`, `Boolean.valueOf`. swift:
 `Float.greatestFiniteMagnitude` / `.leastNonzeroMagnitude` (neither does `Double`).
 Each is a one-line binding; they are grouped because none is worth its own item.
@@ -398,10 +386,15 @@ Cross-language ones whose home is **already imported**, so they are free today:
 Not free, and why, is manual §7.13: anything involving `js-rt.metajs` (imports
 `regex.js` only) or `lua-rt.metajs` (imports nothing).
 
-### 5.2 `floExt` in `go-to-llvm-ir.abnf` is unreachable **[V]**
-`emitBinNum` consults `giBase` first and `giBase` holds every key `floExt` has, so
-`js_jfsub/js_jfmul/js_jfdiv/js_jfmod` always leave through `js_giarith`. Defined
-at `:1356`, read at `:1339` and `:1505`.
+### 5.2 ~~`floExt` is unreachable~~ — **THE ITEM WAS WRONG. CLOSED `4f77621`.**
+`floExt` is **live**: `emitTypedBin` reaches it whenever a STATIC float type is
+known, so `float64(9) / x` emits `js_jfdiv` while `a[0]-a[1]` does not. Only the
+`emitBinNum` **read** was dead, because `giBase` holds every key `floExt` has and
+is consulted first. **Deleting the table, as this item implied, would have
+introduced a defect.** Proved by construction and by fatal probe at both sites
+(the dead one fired 0 times over the whole corpus, the live one fired); the two
+dead lines are gone and both proofs are recorded at the site. Kept here as the
+standing example of why this file says re-verify before you act.
 
 ### 5.3 The four `runtime-*.metajs` splits can be folded back **[V]**
 `runtime-decimal` (188 lines), `runtime-bignum` (263), `runtime-jvm` (159),
@@ -561,6 +554,51 @@ ranges.
 ---
 
 # 9. Closed — do not re-open
+
+## The ten closed in `483a7a5`..`af16f71` — ALL of chapter 1, plus 2.8 and 5.2
+
+`+156 assertions` (6,717 → 6,873), six commits, `483a7a5`..`af16f71`.
+
+- **1.1 swift + csharp, declared-type adoption** — `483a7a5`, `1b54644`. The item
+  read as a Float nicety; it was giving **Double** wrong answers (`g(3)` → `1`)
+  and sized-integer ones (`w(250)` → `260`). Four sites each, decided at PARSE
+  time. swift also fixed an abort found on the way: `return (1, 2)` parses as the
+  identifier `return` applied to a tuple.
+- **1.2 + 1.4 ruby** — `f64f86f`. `yield` inside `begin`/`rescue` aborted the
+  compiler half; the block is now published per method into its own scope and read
+  through the scope chain. Hash defaults are honoured at the op-assign and append
+  reads, which both bypassed `Hash#[]`.
+- **1.3 python dict/set surface** — `f64f86f`. Eleven methods, not ten. Found:
+  `{1,2} <= {2,3}` was **true** (two set objects fell into the host's relational
+  operator, which renders both as `[object Object]`), and `getattr(d,"items")()`
+  aborted in both compiled halves because `items` existed only as an emitter
+  lowering.
+- **1.5 + 2.8 java** — `08e8fcb`. The anon-class local, plus the mirror-image
+  defect in the *compiler* half. `floPrec` now means exactly-*n* in both engines.
+  The two printing defects had one root cause: **goja's `Number→String` is not
+  always the shortest round-tripping form**, which was also a live
+  goja-vs-`-frozen` divergence no matrix entry reached.
+- **1.6 js/ts `yield*` throw-forwarding** — `af16f71`, in all four grammars, with
+  `next(v)` forwarding fixed on the same line. The new state is per-generator-
+  instance by construction, which is what 2.1's reverted mechanism lacked.
+- **1.7 + 5.2 go** — `4f77621`. A PEG ordering hazard, not a go quirk: three
+  two-name comma-ok rules are tried before `ShortDecl` and each matched the first
+  element of a multi-assign. The probe found three more, including
+  `v, ok := box.mp["k"]` answering **`<nil> <nil>` silently in both halves**.
+- **1.8 kotlin mixed-width collection keys** — `1b54644`, fixed in the LANGUAGE
+  layer so `strict_eq` stays byte-identical to the floor's. Found `1L == 1.5`
+  true in the interpreter, which truncated the double into the integer's width.
+- **1.9 csharp `is`** — `1b54644`. Every integral and floating name, not one.
+  `decimal` was **declined on merit** (binary64 arithmetic under a
+  `System.Decimal` label is more misleading than an honest double box) and
+  `csFloStr`'s `1e-5` bound left as **not established** — ECMA-334 does not
+  specify `ToString()` text at all.
+
+**The near-miss worth more than any of the fixes**: an unprefixed `numText` added
+to `lib/compile-core.js` silently replaced python's own, diverging python's halves
+by 13,087 lines from a change about java floats. **No gate caught it** — only a
+base-module diff did. Now in the manual, chapter 4.
+
 
 ## The ten closed on 2026-08-08 — ALL of chapter 1, plus 2.4 and 2.9
 
