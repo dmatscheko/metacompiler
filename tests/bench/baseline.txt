@@ -3,19 +3,37 @@
 # tests/bench.sh --record when you land an intended change, and say in the commit
 # message which rows moved and why.
 #
-# recorded at commit a3164ff, in a clean `git archive` tree, at 9 DRAWS per row.
+# NOTE: `--record` REWRITES ONLY THE NUMBERS AND WILL DELETE THIS HEADER. It
+# emits a four-line stub saying "min of 3 runs", which is not what the harness
+# does. Restore this text by hand after recording - everything below was paid for
+# and is not re-derivable from the numbers.
 #
-# ONE ROW MOVED AND IT MOVED ON PURPOSE: ruby 6,382,412,819 -> 5,629,804,567,
-# -11.8% against its own 3.9% spread, from a3164ff. Ruby gained arbitrary-
-# precision Integers and got FASTER, because the two `typeof`s that decide
-# whether an operand is a bignum also answer rbToF and rbNumRank without calling
-# them - removing four MetaJS calls per arithmetic step that the OLD code was
-# already paying. (The first draft of that work was +38.79%; see the commit.)
+# recorded at commit 418ab6f, in a clean `git archive` tree, at 9 DRAWS per row.
 #
-# Every other row is inside its own spread. Note lua at +2.04% against a 2.05%
-# spread with NO lua change in the round: that is the layout lottery sitting
-# exactly on the line, and it is recorded rather than smoothed so the next
-# person knows this row is the noisiest relative to its own size.
+# TWO ROWS MOVED AND NEITHER IS THIS ROUND'S CODE:
+#
+# python 31,669,186,373 -> 33,112,483,065, +4.56% against a 0.23% spread. This
+# looks damning and is NOT the layout lottery - 19x its own spread - but it also
+# is not the round that recorded it. MEASURED AT THE ROUND'S BASE 4f2e6e4, with
+# none of this round's work present, python already read 33,071,649,405. So the
+# drift happened somewhere between a3164ff and 4f2e6e4 and went unrecorded, and
+# this round adds ~0.1%. The mechanism is module SIZE, not the hot path: a tree
+# with base semantics plus 2,917 lines of DEAD, never-called layer-2 padding
+# benches +4.53%. tests/bench/mod.py is a bare while loop over % and + that calls
+# none of the changed code.
+#
+# csharp 21,626,941,007 -> 20,880,506,206, -3.45%. C# gained a real binary32 in
+# 418ab6f and got slightly FASTER, because js_cscmp now calls csCmp directly on
+# the integral fast path instead of going through rtjRel. Against the parent
+# measured in the same window it is -0.72%, inside a ~3% spread - so read this
+# row as "no cost", not as a win.
+#
+# ruby +2.81% against a 3.23% spread: inside it, and 4f2e6e4 already read
+# 5,754,341,840. Same unrecorded drift as python, smaller.
+#
+# THE LESSON THIS ROUND ADDED: re-measure a flagged row AT THE PARENT before
+# believing it. Three separate agents flagged python and each concluded something
+# different about whose fault it was; only the measurement at 4f2e6e4 settled it.
 #
 # WHY A MEDIAN OVER DRAWS AND NOT A NUMBER. A binary's instruction count depends on
 # its CODE LAYOUT, and layout is perturbed by things that change no semantics. One
@@ -40,10 +58,10 @@
 # wrong answer. This file existed and nothing ran it. `tests/gates.sh --bench` now
 # does. csharp is here because it shares rtjIsIntegral with java and only java's
 # side was measured; a shared hot body needs ALL its callers in this file.
-c          11083370
-csharp     21626941007
-java       8717491563
-kotlin     18011873931
-lua        1530086103
-python     31669186373
-ruby       5629804567
+c          11090135
+csharp     20880506206
+java       8628032753
+kotlin     17943908475
+lua        1529985281
+python     33112483065
+ruby       5787997751
