@@ -2287,6 +2287,21 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 			return float64(c.code)
 		}
 	}
+	// ADDITIVE, JavaScript/TypeScript only: then/catch/finally READ AS A VALUE.
+	// Promise method dispatch is table-based (promMethod, reached from js_jsmcall),
+	// so a promise carries no own slot of those names and `const t = p.then`
+	// answered undefined where node answers a function. promIs is true only for an
+	// object the js promise machinery built (a '__prom' slot), so no other language
+	// can reach this. The native build's twin arm is in abnf/jsrtjsprint.go's
+	// js_jsmget, layer 2's in languages/lib/js-rt.metajs's js_jsmget, and the
+	// interpreters' in their own getMember.
+	if ks, isStr := key.(string); isStr && (ks == "then" || ks == "catch" || ks == "finally") && promIs(obj) {
+		po := obj.(*jsObject)
+		return jsHostFunc(ks, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			v, _ := rt.promMethod(po, ks, args)
+			return v
+		})
+	}
 	switch o := obj.(type) {
 	case *jsObject:
 		name := rt.toString(key)

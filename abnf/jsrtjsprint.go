@@ -87,6 +87,13 @@ func (rt *jsrt) jsvString(v interface{}) string {
 		if r, ok := rt.jsvCallMethod(t, "toString"); ok {
 			return rt.toString(r)
 		}
+		// A promise carries hidden slots only, so the generic object arm below
+		// would spell it "[object Object]" where node says "[object Promise]" -
+		// Promise.prototype has a @@toStringTag. The same arm exists in
+		// languages/lib/js-rt.metajs's jvStr and in the interpreter's jsStr.
+		if promIs(t) {
+			return "[object Promise]"
+		}
 		return "[object Object]"
 	case *jsArray:
 		parts := make([]string, len(t.elems))
@@ -1298,10 +1305,75 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// js_jsmget hides the String/Array method names from js_get, so that the CALL
 	// site falls into js_jsmcall below instead of the shared boundMethod path, whose
 	// semantics differ for several of them.
+	// ----- CLOSING AN ITERATOR ON AN EARLY EXIT (docs/todo.md 1.8) -----
+	//
+	// node closes a for-of's iterator on every abrupt exit from the loop body, not
+	// just on `break`: a `return` out of the body and a labeled break to an OUTER
+	// statement run the iterator's return() too, and neither reaches a block
+	// makeForOf owns - one rets the frame, the other branches to the outer label's
+	// exit. The emitter closes them BY VALUE instead: a for-of's entry block
+	// dominates its body, so the loop's iterable handle is a legal operand at every
+	// jump inside it, and one of these is emitted per loop being left.
+	//
+	// There is deliberately NO runtime open-iterator stack here, and that is a
+	// finding rather than an omission - see the forOfIters note in
+	// languages/js-to-llvm-ir.abnf. A stack unwound by DEPTH is what a `throw`
+	// would need, and `for await` suspends INSIDE its own for-of, so a suspended
+	// body leaves an entry on such a stack while unrelated frames run; measured, it
+	// closed the wrong loop.
+	//
+	// The twins are js_jsiterclose in languages/lib/js-rt.metajs and closeIterator
+	// in the two *-interpreter.abnf start scripts.
+	m["js_jsiterclose"] = func(a []uint64) uint64 {
+		it := u(a[0])
+		if !isUndefOrNull(it) {
+			if r := rt.getMember(it, "return"); isCallable(r) {
+				rt.call(r, it, nil)
+			}
+		}
+		return w(jsUndef)
+	}
+
+	// ----- Async generators (docs/todo.md 1.7) -----
+	// js_jsawaitmark marks an awaited operand so that the one suspension channel an
+	// async generator body has can carry both its yields and its awaits; js_jsasyncgen
+	// wraps the generator FUNCTION the body compiled to into one that answers an
+	// async-generator object. See the agRequest block at the end of this file.
+	m["js_jsawaitmark"] = func(a []uint64) uint64 {
+		mk := newJSObject()
+		mk.set("__awt", true)
+		mk.set("v", u(a[0]))
+		return w(mk)
+	}
+	m["js_jsasyncgen"] = func(a []uint64) uint64 {
+		genFn := u(a[0])
+		return w(jsHostFunc("asyncgen", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			g, ok := rt.call(genFn, jsUndef, args).(*jsGenerator)
+			if !ok {
+				rt.fail("js_jsasyncgen needs a generator function")
+			}
+			return rt.agObject(g)
+		}))
+	}
 	baseGet := m["js_get"]
 	m["js_jsmget"] = func(a []uint64) uint64 {
 		if jsvHidesMember(u(a[0]), rt.toString(u(a[1]))) {
 			return jsHUndefined
+		}
+		// then/catch/finally READ AS A VALUE. Promise method dispatch is
+		// table-based (jsvMethod -> promMethod), so a promise has no own slot of
+		// that name and `const t = p.then` answered undefined where node answers a
+		// function. Answer a receiver-BOUND host function, which is what makes
+		// `t.call(p, f)` and `p.then.bind(p)` work; the same arm exists in
+		// languages/lib/js-rt.metajs's js_jsmget and in the interpreters' getMember.
+		if recv := u(a[0]); promIs(recv) {
+			if name := rt.toString(u(a[1])); name == "then" || name == "catch" || name == "finally" {
+				po := recv.(*jsObject)
+				return w(jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+					v, _ := rt.promMethod(po, name, args)
+					return v
+				}))
+			}
 		}
 		return baseGet(a)
 	}
@@ -1372,4 +1444,200 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// BigInt last: its wrappers sit in FRONT of the js_js* names registered above
 	// (js_jsadd, js_jseq, js_jslt, ...), so they have to exist first.
 	rt.addJSBigIntExterns(m)
+}
+
+// ============================================================================
+// Async generators (docs/todo.md 1.7)
+//
+// An async generator body yields TWO kinds of thing on ONE suspension channel:
+// its awaits and its yields. They are told apart by a MARKER RECORD on the
+// yielded value - {__awt, v}, built by js_jsawaitmark, which the emitter wraps
+// every awaited operand of an async generator body in - and that marker is the
+// whole mechanism. The generator model needed nothing added to it: the body is
+// an ordinary generator body, exactly as an async function's is, and only the
+// driver is new.
+//
+// The driver is asyncStep with a REQUEST QUEUE in front of it. next(v),
+// return(v) and throw(e) each answer a promise and append a request; one
+// request is served at a time, an await resumes the body WITHOUT answering the
+// pending next(), and a yield answers it and parks.
+//
+// The twins are jpAg* in languages/lib/js-rt.metajs and in the two
+// *-interpreter.abnf start scripts. All three run the same algorithm over the
+// same value model, which is why languages/lib/runtime.c is not touched.
+//
+// NOT IMPLEMENTED, in all three engines: ag.throw(e) does not raise AT the
+// suspended yield - neither generator engine has a throw-in channel there (the
+// floor's GEN_EXIT is a close, not a general throw). It closes the body and
+// rejects the request, which is the abrupt completion node reaches too when
+// nothing in the body catches.
+
+type agRequest struct {
+	kind int // 0 next, 1 return, 2 throw
+	arg  interface{}
+	p    *jsObject
+}
+
+type jsAsyncGen struct {
+	g    *jsGenerator
+	q    []*agRequest
+	run  bool
+	done bool
+}
+
+func agIsAwaitMark(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	t, has := o.props["__awt"]
+	return has && t == true
+}
+
+func agUnmark(v interface{}) interface{} {
+	if agIsAwaitMark(v) {
+		return v.(*jsObject).props["v"]
+	}
+	return v
+}
+
+// agObject is the value an async generator function answers: a plain object
+// with hidden marker '__agen' and three bound methods, and NO own keys (the
+// keys slice is cleared, exactly as a promise carries none).
+func (rt *jsrt) agObject(g *jsGenerator) *jsObject {
+	st := &jsAsyncGen{g: g}
+	ag := newJSObject()
+	ag.set("__agen", true)
+	mk := func(name string, kind int) {
+		ag.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.agReq(st, kind, argAt(args, 0))
+		}))
+	}
+	mk("next", 0)
+	mk("return", 1)
+	mk("throw", 2)
+	ag.keys = nil
+	return ag
+}
+
+func (rt *jsrt) agReq(st *jsAsyncGen, kind int, arg interface{}) *jsObject {
+	p := promNew()
+	st.q = append(st.q, &agRequest{kind: kind, arg: arg, p: p})
+	rt.agPump(st)
+	return p
+}
+
+func (rt *jsrt) agPump(st *jsAsyncGen) {
+	if st.run || len(st.q) == 0 {
+		return
+	}
+	st.run = true
+	req := st.q[0]
+	if st.done {
+		if req.kind == 2 {
+			rt.agFail(st, req.arg)
+			return
+		}
+		arg := interface{}(jsUndef)
+		if req.kind == 1 {
+			arg = req.arg
+		}
+		rt.agComplete(st, arg, true)
+		return
+	}
+	if req.kind == 1 || req.kind == 2 {
+		st.done = true
+		st.g.closeBody(rt)
+		if req.kind == 2 {
+			rt.agFail(st, req.arg)
+			return
+		}
+		rt.agComplete(st, req.arg, true)
+		return
+	}
+	rt.agStep(st, req.arg, false)
+}
+
+func (rt *jsrt) agStep(st *jsAsyncGen, sent interface{}, isThrow bool) {
+	send := sent
+	if isThrow {
+		m := newJSObject()
+		m.set("__athrow", true)
+		m.set("v", sent)
+		send = m
+	}
+	var res interface{}
+	threw := false
+	var thrown interface{}
+	func() {
+		defer func() {
+			if e := recover(); e != nil {
+				if t, ok := e.(*jsThrown); ok {
+					threw, thrown = true, t.value
+					return
+				}
+				panic(e)
+			}
+		}()
+		res = st.g.step(rt, send)
+	}()
+	if threw {
+		st.done = true
+		rt.agFail(st, thrown)
+		return
+	}
+	rec, _ := res.(*jsObject)
+	if d, _ := rec.props["done"].(bool); d {
+		st.done = true
+		rt.agComplete(st, rec.props["value"], true)
+		return
+	}
+	y := rec.props["value"]
+	if agIsAwaitMark(y) {
+		// An AWAIT: resume the body once the operand settles, and leave the
+		// pending next() unanswered.
+		rt.promThen(rt.promResolveValue(agUnmark(y)),
+			jsHostFunc("await", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				rt.agStep(st, argAt(args, 0), false)
+				return jsUndef
+			}),
+			jsHostFunc("await", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				rt.agStep(st, argAt(args, 0), true)
+				return jsUndef
+			}), nil)
+		return
+	}
+	// A YIELD. The specification awaits the operand before handing it over.
+	rt.promThen(rt.promResolveValue(y),
+		jsHostFunc("yield", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			rt.agComplete(st, argAt(args, 0), false)
+			return jsUndef
+		}),
+		jsHostFunc("yield", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			st.done = true
+			rt.agFail(st, argAt(args, 0))
+			return jsUndef
+		}), nil)
+}
+
+func (rt *jsrt) agShift(st *jsAsyncGen) *agRequest {
+	req := st.q[0]
+	st.q = st.q[1:]
+	st.run = false
+	return req
+}
+
+func (rt *jsrt) agComplete(st *jsAsyncGen, v interface{}, done bool) {
+	req := rt.agShift(st)
+	r := newJSObject()
+	r.set("value", v)
+	r.set("done", done)
+	rt.promSettle(req.p, 1, r)
+	rt.agPump(st)
+}
+
+func (rt *jsrt) agFail(st *jsAsyncGen, e interface{}) {
+	req := rt.agShift(st)
+	rt.promSettle(req.p, 2, e)
+	rt.agPump(st)
 }

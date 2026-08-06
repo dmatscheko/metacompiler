@@ -1162,19 +1162,186 @@ function s37() {
     function* pg37() { yield [1, 2]; yield [3, 4] }
     for (var [pa, pb] of pg37()) { pairs.push(pa + pb); break }
     check("itc17", pairs.length === 1 && pairs[0] === 3)
-    // WHAT IS NOT CLOSED, in BOTH halves and unlike node: a `return` out of the
-    // loop body and a `throw` through it. Neither reaches a block makeForOf owns
-    // (one rets the frame, the other longjmps), and the interpreter half declines
-    // them too rather than letting the halves disagree. Asserted so that a later
-    // change to either engine alone is visible here.
+    // A RETURN out of the loop body and a LABELED BREAK to an OUTER statement now
+    // close it, exactly as node does. Neither reaches a block makeForOf owns - one
+    // rets the frame, the other branches to the outer label's exit - so the compiler
+    // halves emit js_jsiterclose on the loop's own iterable handle, which the loop's
+    // entry block dominates, while the interpreter half reads the body's completion
+    // record. docs/todo.md 1.8.
     var rg = g37()
     check("itc18", takeOne37(rg) === 1)
-    check("itc19", rg.next().done === false)
+    check("itc19", rg.next().done === true)
     var tg = g37()
     try { for (var tv of tg) { throw "x" } } catch (te) { }
+    // A THROW through the loop body still does NOT close it, in both halves. The
+    // only route an emitter has is a runtime open-iterator stack unwound at each
+    // try, and `for await` suspends INSIDE its own for-of - so a suspended body
+    // leaves an entry on that stack while unrelated frames run, and the unwind
+    // closes the wrong loop. That was BUILT AND MEASURED: it made SECTION 38's
+    // `for await` see one element instead of three, because SECTION 16's
+    // `try { await Promise.reject(r) } catch` unwound past it. Pinned here.
     check("itc20", tg.next().done === false)
+    // A labeled break to an OUTER statement, which leaves the loop without ever
+    // reaching its own closing block.
+    var lg = g37()
+    out37j: for (var oi = 0; oi < 1; oi++) {
+        for (var lv of lg) { break out37j }
+    }
+    check("itc21", lg.next().done === true)
+    // A return out of NESTED for-of loops closes both, innermost first.
+    var n1 = g37()
+    var n2 = g37()
+    check("itc22", nested37j(n1, n2) === 2)
+    check("itc23", n1.next().done === true && n2.next().done === true)
+    // The same gap when the throw leaves the loop by leaving the FUNCTION - the
+    // try that catches it has no for-of of its own. Pinned with itc20.
+    var fg = g37()
+    try { throwOut37j(fg) } catch (fe) { }
+    check("itc24", fg.next().done === false)
+    // A return out of a try INSIDE the loop body: the return becomes a control
+    // signal, so the close happens where excDispatch re-issues it.
+    var sg = g37()
+    check("itc25", retThroughTry37j(sg) === 1)
+    check("itc26", sg.next().done === true)
+    // ... and a plain loop with a try in it that does NOT leave still runs to the
+    // end, so the unwind bookkeeping cannot close an iterator that is still live.
+    var qg = g37()
+    var qsum = 0
+    for (var qv of qg) { try { qsum = qsum + qv } finally { qsum = qsum + 0 } }
+    check("itc27", qsum === 6 && qg.next().done === true)
 }
+function nested37j(p, q) { for (var a of p) { for (var b of q) { return a + b } } return -1 }
+function throwOut37j(g) { for (var x of g) { throw "z" } return 0 }
+function retThroughTry37j(g) { for (var x of g) { try { return x } finally { } } return 0 }
 function takeOne37(g) { for (var x of g) { return x } return 0 }
+
+// ===== SECTION 38: for await, and async generators =====
+// docs/todo.md 1.7. An async generator body carries its yields AND its awaits on
+// ONE suspension channel; they are told apart by a marker record the emitter puts
+// on every awaited operand (js_jsawaitmark), which is why the generator model
+// needed nothing added to it and the C floor is not touched. `for await` drives an
+// async iterator by awaiting each next(), and an array or a string by awaiting each
+// ELEMENT - which is what the specification's async-from-sync iterator does.
+//
+// Every trace below is built in LOCALS. This half drives an async body by REPLAY
+// (see the generator note at the top of the file), so a body that writes to shared
+// state before its last suspension repeats that write; state recreated per replay
+// is safe, and only that is used. Every value asserted here is byte-identical to
+// node v24, including the interleaving in "ord".
+function s38() {
+    async function* nums() { yield 1; yield 2; yield 3 }
+    async function* mixed() {
+        var a = await Promise.resolve(10)
+        yield a
+        yield a + 1
+        var b = await Promise.resolve(20)
+        yield b
+        return "r"
+    }
+    var agExpr = async function* () { yield "e" }
+    var agObj = { async *m() { yield "o" } }
+    class AGC { async *m() { yield "c" } }
+    check("fa1", typeof nums === "function")
+    check("fa2", typeof agExpr === "function")
+    check("fa3", typeof agObj.m === "function")
+    // A class method is not an own property of the instance in this value model
+    // (it lives on the __class descriptor), so `typeof inst.m` is undefined in both
+    // halves - a documented limitation, unrelated to this section. The async
+    // generator OBJECT the call answers is what this asserts.
+    check("fa4", typeof new AGC().m().next === "function")
+    check("fa5", typeof nums().next === "function")
+    // for await over an async generator.
+    async function collect() {
+        var out = []
+        for await (var n of nums()) { out.push(n) }
+        return out.join("")
+    }
+    // ... one whose body AWAITS between its yields, which is the case the marker
+    // record exists for.
+    async function awaitInGen() {
+        var out = []
+        for await (var v of mixed()) { out.push(v) }
+        return out.join("")
+    }
+    // next() by hand: each call answers a PROMISE for a {value, done} record.
+    async function manual() {
+        var g = nums()
+        var r1 = await g.next()
+        var r2 = await g.next()
+        var r3 = await g.next()
+        var r4 = await g.next()
+        return "" + r1.value + r2.value + r3.value + r4.done + r4.value
+    }
+    // A break out of a for await CLOSES the async generator.
+    async function closeEarly() {
+        var g = nums()
+        for await (var x of g) { break }
+        var a = await g.next()
+        return "" + a.done + a.value
+    }
+    // for await over an ARRAY awaits each element, so a promise element arrives
+    // resolved; over a SYNC generator it drives next() as an ordinary for-of does.
+    async function overArray() {
+        var out = []
+        for await (var p of [Promise.resolve("a"), "b"]) { out.push(p) }
+        return out.join("")
+    }
+    async function overSyncGen() {
+        var out = []
+        for await (var s of sg38()) { out.push(s) }
+        return out.join("")
+    }
+    // ag.return(v) closes it and answers {value: v, done: true}.
+    async function agReturn() {
+        var g = nums()
+        await g.next()
+        var r = await g.return(9)
+        var after = await g.next()
+        return "" + r.value + r.done + after.done
+    }
+    // The expression, object-literal-method and class-method spellings all run.
+    async function methodGen() {
+        var out = []
+        for await (var m of agObj.m()) { out.push(m) }
+        for await (var c of new AGC().m()) { out.push(c) }
+        for await (var e of agExpr()) { out.push(e) }
+        return out.join("")
+    }
+    async function all() {
+        var parts = []
+        parts.push(await collect())
+        parts.push(await awaitInGen())
+        parts.push(await manual())
+        parts.push(await closeEarly())
+        parts.push(await overArray())
+        parts.push(await overSyncGen())
+        parts.push(await agReturn())
+        parts.push(await methodGen())
+        return parts.join("|")
+    }
+    all().then(function (r) {
+        var ok = r === "123|101120|123trueundefined|trueundefined|ab|12|9truetrue|oce"
+        check("fa6", ok)
+        // main() has already returned by the time a job runs, so a failure here
+        // cannot reach the count it reported - exit() is the only way it reaches the
+        // EXIT CODE, which is what clang-check and native-full read.
+        if (!ok) { exit(1) }
+    })
+    // ORDERING is the evidence, and it is pushed from .then callbacks only - never
+    // from inside a replayed body. An async generator's first next() costs exactly
+    // one more tick than a bare Promise.resolve().then, so the two chains interleave
+    // p1, n1, p2, n2, p3 - node's own answer.
+    var olog = []
+    function tick(tag) { return function (v) { olog.push(tag); return v } }
+    nums().next().then(tick("n1")).then(tick("n2"))
+    Promise.resolve().then(tick("p1")).then(tick("p2")).then(tick("p3")).then(function () {
+        var ordOk = olog.join(",") === "p1,n1,p2,n2,p3"
+        check("fa7", ordOk)
+        if (!ordOk) { exit(1) }
+    })
+    return 0
+}
+function* sg38() { yield 1; yield 2 }
 
 function main() {
     s01() // SECTION-CALL 01
@@ -1214,6 +1381,7 @@ function main() {
     s35() // SECTION-CALL 35
     s36() // SECTION-CALL 36
     s37() // SECTION-CALL 37
+    s38() // SECTION-CALL 38
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

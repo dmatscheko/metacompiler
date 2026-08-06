@@ -63,8 +63,11 @@ which answer a Promise and suspend at every 'await', driven by a microtask queue
 after the entry point returns. An async body is compiled as a GENERATOR body whose awaits
 are its yields, so in this half it is driven by the same replay: an async body with a side
 effect BEFORE an await repeats that effect on every resume, which the compiler half (a
-real coroutine) does not. 'for await' and 'async function*' are NOT implemented and
-ABORT, and an unhandled rejection is deliberately not reported in any engine.
+real coroutine) does not. 'for await' and 'async function*' RUN: an async generator
+carries its yields and its awaits on the ONE suspension channel a generator has, told
+apart by a marker record on each awaited operand (docs/todo.md 1.7); ag.throw(e) closes
+the body and rejects rather than raising at the suspended yield, in every engine. An
+unhandled rejection is deliberately not reported in any engine.
 
 Objects and classes: object literals with shorthand properties, computed keys, shorthand
 methods, getters and setters and spread; 'this'; 'new' on both a class and a constructor
@@ -962,18 +965,19 @@ TplDollar   <~~ push({str: "$", raw: "$"}) ~~>
 // with a name or a declaration keyword, so the alternatives cannot shadow each other.
 // It pushes the same four items ForOfName does - target, operator, iterable, body - with
 // a pattern node in the place of the name (makeForOf binds either).
-// 'for await (x of xs)' is the async iteration form. Without an event loop each element
-// is already settled, so awaiting it is the identity and the loop is the ordinary for-of
-// (see makeAwait); the keyword is therefore simply allowed in the header.
+// 'for await (x of xs)' is the async iteration form. The keyword pushes a {fawait}
+// marker that makeForOf strips: the loop then AWAITS each next() over an iterator and
+// each ELEMENT over an array or a string, which is what the specification's
+// async-from-sync iterator does (see forOfStep / forOfElem).
 ForOf       = ForOfPattern | ForOfAPattern | ForOfName | ForOfMember | ForOfPath ;
 ForOfPattern <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ notImpl("for await", up.pos) ~~> ] "(" [ KwVar ] DPattern ForOfOp Expression ")" NestedStatement ;
+            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ push({fawait: true}) ~~> ] "(" [ KwVar ] DPattern ForOfOp Expression ")" NestedStatement ;
 // The ASSIGNMENT-pattern form: 'for ([o.a] of xs)' writes through places that already
 // exist, so its leaves may be member targets, which a binding DPattern may not have.
 ForOfAPattern <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ notImpl("for await", up.pos) ~~> ] "(" APattern ForOfOp Expression ")" NestedStatement ;
+            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ push({fawait: true}) ~~> ] "(" APattern ForOfOp Expression ")" NestedStatement ;
 ForOfName   <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ notImpl("for await", up.pos) ~~> ] "(" ForOfHead Expression ")" NestedStatement ;
+            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ push({fawait: true}) ~~> ] "(" ForOfHead Expression ")" NestedStatement ;
 // The head pushes the loop name and then the operator. A target that starts with 'let'
 // is reachable only through the for-IN alternative: 'for (let x of y)' declares, and
 // 'for (let of y)' / 'for (let.a of 0)' are the syntax errors the spec makes them, while
@@ -1004,7 +1008,7 @@ ForInOp     = KwIn <~~ push(up.in) ~~> ;
 // takes the same write path. LhsSuffixes is what makes the path end in a member, so
 // 'for (f() of xs)' stays the syntax error it is and falls through to ForOfPath.
 ForOfMember <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ notImpl("for await", up.pos) ~~> ] "(" ForOfMemberHead Expression ")" NestedStatement ;
+            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ push({fawait: true}) ~~> ] "(" ForOfMemberHead Expression ")" NestedStatement ;
 ForOfMemberHead = NotLet ForOfTarget ForOfOp | ForOfTarget ForInOp ;
 ForOfTarget <~~ push({dtype: "ref", ref: makeTargetRef(takeAll())}) ~~>
             = NotReserved Id <~~ push(up.in) ~~> LhsSuffixes ;
@@ -1013,7 +1017,7 @@ ForOfTarget <~~ push({dtype: "ref", ref: makeTargetRef(takeAll())}) ~~>
 // PARSE and only then fail static semantics. There is no place to write, so the loop is
 // accepted and not lowered. Tried after every form that lowers.
 ForOfPath   <~~ takeAll(); push(notImplStmt("for-in/of over an expression target", up.pos)) ~~>
-            = KwFor [ KwAwait <~~ notImpl("for await", up.pos) ~~> ] "(" ForOfPathHead Expression ")" NestedStatement ;
+            = KwFor [ KwAwait <~~ push({fawait: true}) ~~> ] "(" ForOfPathHead Expression ")" NestedStatement ;
 ForOfPathHead = NotLet CallMember ( KwOf | KwIn ) | CallMember KwIn ;
 
 // A destructuring binding: var [a, b] = xs, var {x, y: alias} = o, and every nested
@@ -2570,6 +2574,11 @@ NotFuncHead = :script(~~
         if (typeof v == "object") {
             var r = jsCallMethod(v, "toString")
             if (r != null) { return "" + r.v }
+            // A promise carries hidden slots only, so the generic arm would spell it
+            // "[object Object]" where node says "[object Promise]" (Promise.prototype
+            // has a @@toStringTag). Same arm in abnf/jsrtjsprint.go's jsvString and in
+            // languages/lib/js-rt.metajs's jvStr.
+            if (jpIs(v)) { return "[object Promise]" }
             return "[object Object]"
         }
         return "" + v
@@ -2983,6 +2992,17 @@ NotFuncHead = :script(~~
         }
         return jpMiss
     }
+    // The value `p.then` READ AS A VALUE is: jpMethod bound to its receiver. node's is
+    // Promise.prototype.then, unbound; there is no prototype chain here, so binding the
+    // receiver is what makes the shape a program actually writes - `const t = p.then;
+    // t.call(p, f)` - work.
+    function jpBound(p, name) {
+        return function() {
+            var a = []
+            for (var i = 0; i < arguments.length; i++) { a.push(arguments[i]) }
+            return jpMethod(p, name, a)
+        }
+    }
     function jpFinallyPass(fn) {
         return function(v) {
             if (typeof fn == "function") { callWithThis(fn, undefined, []) }
@@ -3082,8 +3102,170 @@ NotFuncHead = :script(~~
         }
         if (threw) { jpSettle(p, 2, thrown); return }
         if (res["done"] === true) { jpResolve(p, res["value"]); return }
-        var awaited = jpResolveValue(res["value"])
+        // Every yield out of an async body IS an await, but this half cannot tell an
+        // await from a yield lexically (it builds its thunks as it parses, and the
+        // async-generator flag is not in scope at the await site), so makeAwait marks
+        // EVERY await and the two drivers unmark. The compiler halves mark only inside
+        // an async GENERATOR, where the distinction is load-bearing; unmarking here
+        // costs one test and keeps all three drivers accepting either spelling.
+        var awaited = jpResolveValue(jpUnmark(res["value"]))
         jpThen(awaited, jpResumeFn(g, p, false), jpResumeFn(g, p, true), undefined)
+    }
+    // ----- Async generators -----
+    // An async generator body yields TWO kinds of thing on ONE suspension channel:
+    // its awaits and its yields. They are told apart by a marker record on the
+    // yielded value - {__awt, v} - which is the whole mechanism, and which is why
+    // this needs no second channel and no change to the generator model. The driver
+    // below is jpAsyncStep with a REQUEST QUEUE in front of it: an await resumes the
+    // body without answering the pending next(), a yield answers it and parks.
+    //
+    // The twins are jpAg* in languages/lib/js-rt.metajs and agReq/agPump/agStep in
+    // abnf/jsrtjsprint.go.
+    //
+    // WHAT IS NOT IMPLEMENTED, in all three engines: ag.throw(e) does not raise AT
+    // the suspended yield, because neither generator engine has a throw-in channel
+    // there (the floor's GEN_EXIT is a close, not a general throw). It closes the
+    // body and rejects the request instead, which is the abrupt completion node also
+    // ends up with when nothing catches.
+    function jpMarkAwait(v) {
+        var m = {}
+        m["__awt"] = true
+        m["v"] = v
+        return m
+    }
+    function jpUnmark(v) {
+        if (jpIsObjV(v) && v["__awt"] === true) { return v["v"] }
+        return v
+    }
+    function jpIsAwaitMark(v) {
+        if (!jpIsObjV(v)) { return false }
+        return v["__awt"] === true
+    }
+    // The value an `await` answers wherever one is written: inside a suspendable body
+    // it yields the marked operand out to whichever driver is running it; outside one
+    // there is nothing to suspend and it is the identity (see makeAwait).
+    function jpDoAwait(v) {
+        if (genRuns.length == 0) { return v }
+        return jpAwaitValue(doYield(false, jpMarkAwait(v)))
+    }
+    function jpAgNew(g) {
+        var st = {}
+        st["g"] = g
+        st["q"] = []       // Pending requests, in call order.
+        st["run"] = false  // A request is being served.
+        st["done"] = false
+        var ag = {}
+        ag["__agen"] = true
+        ag["__keys"] = []
+        ag["next"] = function() {
+            var a1 = anytype
+            a1 = (arguments.length > 0) ? arguments[0] : undefined
+            return jpAgReq(st, 0, a1)
+        }
+        ag["return"] = function() {
+            var a2 = anytype
+            a2 = (arguments.length > 0) ? arguments[0] : undefined
+            return jpAgReq(st, 1, a2)
+        }
+        ag["throw"] = function() {
+            var a3 = anytype
+            a3 = (arguments.length > 0) ? arguments[0] : undefined
+            return jpAgReq(st, 2, a3)
+        }
+        return ag
+    }
+    function jpAgReq(st, kind, arg) {
+        var p = jpNew()
+        var req = {}
+        req["kind"] = kind
+        req["arg"] = arg
+        req["p"] = p
+        st["q"].push(req)
+        jpAgPump(st)
+        return p
+    }
+    function jpAgPump(st) {
+        if (st["run"]) { return }
+        if (st["q"].length === 0) { return }
+        st["run"] = true
+        var req = st["q"][0]
+        if (st["done"]) {
+            if (req["kind"] === 2) { jpAgFail(st, req["arg"]); return }
+            jpAgComplete(st, (req["kind"] === 1) ? req["arg"] : undefined, true)
+            return
+        }
+        if (req["kind"] === 1 || req["kind"] === 2) {
+            st["done"] = true
+            jpAgClose(st)
+            if (req["kind"] === 2) { jpAgFail(st, req["arg"]); return }
+            jpAgComplete(st, req["arg"], true)
+            return
+        }
+        jpAgStep(st, req["arg"], false)
+    }
+    function jpAgClose(st) {
+        var rf = anytype
+        rf = getMember(st["g"], "return")
+        if (typeof rf == "function") { callWithThis(rf, st["g"], []) }
+        return undefined
+    }
+    function jpAgStep(st, sent, isThrow) {
+        var send = anytype
+        send = sent
+        if (isThrow) {
+            var m = {}
+            m["__athrow"] = true
+            m["v"] = sent
+            send = m
+        }
+        var res = anytype
+        var thrown = anytype
+        res = undefined
+        thrown = undefined
+        var threw = false
+        try { res = st["g"]["next"](send) }
+        catch (e) {
+            if (!excIsUser(e)) { throw e }
+            threw = true
+            thrown = e.v
+        }
+        if (threw) { st["done"] = true; jpAgFail(st, thrown); return }
+        if (res["done"] === true) { st["done"] = true; jpAgComplete(st, res["value"], true); return }
+        var y = anytype
+        y = res["value"]
+        if (jpIsAwaitMark(y)) {
+            // An AWAIT: resume the body once the operand settles, without answering
+            // the pending next().
+            var aw = jpResolveValue(y["v"])
+            jpThen(aw, jpAgResumeFn(st, false), jpAgResumeFn(st, true), undefined)
+            return
+        }
+        // A YIELD. The specification awaits the operand before handing it over, which
+        // is where the tick between `yield p` and the consumer's next() comes from.
+        jpThen(jpResolveValue(y), jpAgYieldFn(st), jpAgRaiseFn(st), undefined)
+    }
+    function jpAgResumeFn(st, isThrow) { return function(v) { jpAgStep(st, v, isThrow) } }
+    function jpAgYieldFn(st) { return function(v) { jpAgComplete(st, v, false) } }
+    function jpAgRaiseFn(st) { return function(e) { st["done"] = true; jpAgFail(st, e) } }
+    function jpAgShift(st) {
+        var req = st["q"][0]
+        st["q"] = st["q"].slice(1)
+        st["run"] = false
+        return req
+    }
+    function jpAgComplete(st, v, done) {
+        var req = jpAgShift(st)
+        var r = {}
+        r["value"] = v
+        r["done"] = done
+        r["__keys"] = ["value", "done"]
+        jpSettle(req["p"], 1, r)
+        jpAgPump(st)
+    }
+    function jpAgFail(st, e) {
+        var req = jpAgShift(st)
+        jpSettle(req["p"], 2, e)
+        jpAgPump(st)
     }
     function jpResumeFn(g, p, isThrow) {
         return function(v) { jpAsyncStep(g, p, v, isThrow) }
@@ -3644,6 +3826,13 @@ NotFuncHead = :script(~~
 
     function getMember(o, k) {
         if (o == undefined) fail("member '" + k + "' of " + o) // Catches null and undefined.
+        // then/catch/finally READ AS A VALUE. Promise method dispatch is table-based
+        // (jsBuiltin -> jpMethod), so a promise has no own slot of that name and
+        // `const t = p.then` answered undefined where node answers a function. Same
+        // arm in abnf/jsrtjsprint.go's js_jsmget and languages/lib/js-rt.metajs's.
+        if (k == "then" || k == "catch" || k == "finally") {
+            if (jpIs(o)) { return jpBound(o, k) }
+        }
         // 'f.call(self, ...)' / 'f.apply(self, args)' on a FUNCTION value. The host's own
         // call/apply would hand the receiver over through the host's 'this', which the
         // closures built here never read - they take it from the one-shot pendingThis slot
@@ -4825,8 +5014,7 @@ NotFuncHead = :script(~~
         return function() {
             var v = anytype // The awaited operand: any value.
             v = t()
-            if (genRuns.length == 0) { return v }
-            return jpAwaitValue(doYield(false, v))
+            return jpDoAwait(v)
         }
     }
     // 'delete o.k'. There is no host delete in the value model, so the property is
@@ -4934,9 +5122,8 @@ NotFuncHead = :script(~~
         var key = items[at]
         var params = items[at + 1]
         var body = items[at + 2]
-        if (isGen && isAsync) { notImpl("async generator method", 0) }
         var fn = isGen ? makeGenerator(params, body) : makeFunctionExpr(body, params)
-        if (isAsync) { fn = makeAsyncFn(params, body) }
+        if (isAsync) { fn = isGen ? makeAsyncGen(params, body) : makeAsyncFn(params, body) }
         if (typeof key == "string") { return {k: key, t: fn} }
         return {kt: key, t: fn}
     }
@@ -5020,7 +5207,32 @@ NotFuncHead = :script(~~
         return undefined
     }
 
+    // One step of a for-of: the iterator's next(), AWAITED when the loop is a
+    // 'for await'. Out of line because a MetaJS local keeps the type of its first
+    // assignment, and an awaited step is not the same type as a plain one.
+    function forOfStep(nx, it, isAwait) {
+        var s = anytype
+        s = callWithThis(nx, it, [])
+        if (isAwait) { s = jpDoAwait(s) }
+        return s
+    }
+    // One ELEMENT of an indexed 'for await' (an array, a string): the spec's
+    // async-from-sync iterator awaits the VALUE, which is what makes
+    // 'for await (x of [p1, p2])' see the resolved values.
+    function forOfElem(v, isAwait) {
+        if (isAwait) { return jpDoAwait(v) }
+        return v
+    }
     function makeForOf(items, pos) {
+        // 'for await (x of xs)' pushes a {fawait} marker from its header; strip it so
+        // every index below is the one the plain form has.
+        var isAwait = false
+        var kept = []
+        for (var fi = 0; fi < items.length; fi++) {
+            if (items[fi] != undefined && typeof items[fi] == "object" && items[fi].fawait != undefined) { isAwait = true }
+            else { kept.push(items[fi]) }
+        }
+        items = kept
         var label = items[0].label
         var target = items[1]
         var iterT = items[3]
@@ -5061,32 +5273,43 @@ NotFuncHead = :script(~~
             var nx = anytype // The `next` member, of any type at all.
             nx = (it != undefined && it != null && typeof it == "object") ? getMember(it, "next") : undefined
             if (typeof nx == "function") {
-                var step = callWithThis(nx, it, [])
+                var step = forOfStep(nx, it, isAwait)
+                var gr = anytype // The body's completion record, of any shape.
+                gr = undefined
                 while (!step.done) {
                     bindLoopTarget(target, step.value)
-                    var gr = bodyT()
+                    // A BREAK, a RETURN out of the loop and a LABELED BREAK to an
+                    // outer statement all close the iterator, as node does: its
+                    // return() is called if it has one. This half's generator
+                    // replays, so the body's `finally` has already run once per step
+                    // (see the GENERATORS REPLAY note in the :description) and
+                    // return() only marks it done - which is what makes a second loop
+                    // over a partially consumed generator answer nothing, in BOTH
+                    // halves.
+                    //
+                    // A THROW through the body still does NOT close it, and this half
+                    // could see that exit for free. It declines because the compiler
+                    // half cannot reach it soundly: the only route an emitter has is
+                    // a runtime open-iterator stack unwound at each try, and `for
+                    // await` suspends INSIDE its own for-of, so a suspended body
+                    // leaves an entry on that stack while unrelated frames run.
+                    // Measured, not assumed - see the note in js-to-llvm-ir.abnf's
+                    // forOfIters. Pinned at itc20.
+                    gr = bodyT()
                     var ga = loopAction(gr, label)
-                    // A BREAK closes the iterator, as node does: its return() is
-                    // called if it has one. This half's generator replays, so the
-                    // body's `finally` has already run once per step (see the
-                    // GENERATORS REPLAY note in the :description) and return() only
-                    // marks it done - which is what makes a second loop over a
-                    // partially consumed generator answer nothing, in BOTH halves.
-                    // "propagate" - a return out of the loop, or a labeled break to
-                    // an outer statement - deliberately does NOT close, because the
-                    // compiler half cannot: a return rets the frame and a labeled
-                    // break branches straight to the label's exit, neither of them
-                    // through a block makeForOf owns. node closes in both cases; the
-                    // two halves here agree with each other instead.
                     if (ga == "break") { closeIterator(it); break }
-                    if (ga == "propagate") { res = gr; break }
-                    step = callWithThis(nx, it, [])
+                    // "propagate" is a return out of the loop or a labeled break to an
+                    // OUTER statement; the compiler half closes the same two by
+                    // emitting js_jsiterclose on the loop's own iterable handle
+                    // (docs/todo.md 1.8).
+                    if (ga == "propagate") { closeIterator(it); res = gr; break }
+                    step = forOfStep(nx, it, isAwait)
                 }
                 scopes.pop()
                 return res
             }
             for (var i = 0; i < it.length; i++) {
-                bindLoopTarget(target, it[i])
+                bindLoopTarget(target, forOfElem(it[i], isAwait))
                 var r = bodyT()
                 var a = loopAction(r, label)
                 if (a == "break") break
@@ -5238,19 +5461,37 @@ NotFuncHead = :script(~~
             }
         }
     }
-    // items = [{isgen}?, name, params, bodyThunk] - the '*' form is an async GENERATOR,
-    // which would need its yields and its awaits to share one suspension channel and has
-    // no representation here, so it aborts rather than answering a plain generator.
+    // The value an ASYNC GENERATOR function is: the same replay generator, handed to
+    // the request-queue driver instead of the one-shot async driver. Its yields and
+    // its awaits share ONE suspension channel and are told apart by the {__awt} marker
+    // makeAwait puts on every awaited operand (see jpAgStep).
+    function makeAsyncGen(params, bodyT) {
+        return function() {
+            var env = scopes.slice()
+            return function() {
+                var self = pendingThis
+                pendingThis = undefined
+                pendingNewTarget = undefined
+                var args = []
+                for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
+                return jpAgNew(newGenObject(params, bodyT, env, self, args))
+            }
+        }
+    }
+    // items = [{isgen}?, name, params, bodyThunk] - the '*' form is an async GENERATOR.
     function makeAsyncFuncDecl(items) {
-        if (items[0] != undefined && items[0].isgen != undefined) { notImpl("async generator function", 0) }
+        var isGen = items[0] != undefined && items[0].isgen != undefined
         var name = items[items.length - 3]
-        var mk = makeAsyncFn(items[items.length - 2], items[items.length - 1])
+        var mk = isGen ? makeAsyncGen(items[items.length - 2], items[items.length - 1])
+                       : makeAsyncFn(items[items.length - 2], items[items.length - 1])
         return function() { declVar(name, mk()) }
     }
     // The expression form: the optional name is accepted and, like a plain function
     // expression's, not bound.
     function makeAsyncFuncExpr(items) {
-        if (items[0] != undefined && items[0].isgen != undefined) { notImpl("async generator function", 0) }
+        if (items[0] != undefined && items[0].isgen != undefined) {
+            return makeAsyncGen(items[items.length - 2], items[items.length - 1])
+        }
         return makeAsyncFn(items[items.length - 2], items[items.length - 1])
     }
     function newGenObject(params, bodyT, env, self, args) {
@@ -5606,7 +5847,6 @@ NotFuncHead = :script(~~
             if (items[i].isasync != undefined) { isAsync = true }
             i = i + 1
         }
-        if (isGen && isAsync) { notImpl("async generator method", 0) }
         var key = items[i]
         return {kind: "method", name: key.mk, keyT: key.mkT, statik: statik, isGen: isGen,
                 isAsync: isAsync, decs: decs, params: items[i + 1], body: items[i + 2]}
@@ -5761,12 +6001,26 @@ NotFuncHead = :script(~~
             sfn = makeClosure(m.params, m.body, mscopes)
             if (m.isGen) { sfn = makeGenerator(m.params, m.body)() }
             if (m.isAsync) { sfn = makeAsyncFn(m.params, m.body)() }
+            if (m.isGen && m.isAsync) { sfn = makeAsyncGen(m.params, m.body)() }
             return applyDecorators(decs, sfn, "method", m.name, true)
         }
+        if (m.isGen && m.isAsync) { return makeInstanceAsyncGen(m.params, m.body, mscopes) }
         if (m.isGen) { return makeInstanceGenerator(m.params, m.body, mscopes) }
         if (m.isAsync) { return makeInstanceAsync(m.params, m.body, mscopes) }
         return makeInstanceClosure(m.params, m.body, mscopes)
     }
+    // An ASYNC GENERATOR method: same receiver convention, driven by the async
+    // generator's request queue.
+    function makeInstanceAsyncGen(params, bodyT, defScopes) {
+        var env = defScopes.slice()
+        return function() {
+            var self = arguments[0]
+            var args = []
+            for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
+            return jpAgNew(newGenObject(params, bodyT, env, self, args))
+        }
+    }
+
     // An ASYNC method: the receiver arrives as arguments[0] like every other instance
     // method, and the body is driven exactly as a free async function's is.
     function makeInstanceAsync(params, bodyT, defScopes) {

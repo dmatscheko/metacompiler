@@ -327,6 +327,11 @@ function jvStr(v) {
             if (typeof r == "string") { return r }
             return jvStr(r)
         }
+        // A promise carries hidden slots only, so the generic arm would spell it
+        // "[object Object]" where node says "[object Promise]" (Promise.prototype
+        // has a @@toStringTag). Same arm in abnf/jsrtjsprint.go's jsvString and in
+        // the interpreter halves' jsStr.
+        if (jpIs(v)) { return "[object Promise]" }
         return "[object Object]"
     }
     if (Array.isArray(v)) {
@@ -662,6 +667,15 @@ function jvApplyShim(f) {
 
 function js_jsmget(o, key) {
     if (typeof key == "string") {
+        // then/catch/finally READ AS A VALUE. Promise method dispatch is table-based
+        // (js_jsmcall -> jpMethod), so a promise has no own slot of that name and
+        // `const t = p.then` answered undefined where node answers a function. The
+        // answer is a receiver-BOUND function, which is what makes `t.call(p, f)`
+        // work. Same arm in abnf/jsrtjsprint.go's js_jsmget and the interpreters'
+        // getMember.
+        if (key == "then" || key == "catch" || key == "finally") {
+            if (jpIs(o)) { return jpBound(o, key) }
+        }
         if (key == "call" || key == "apply") {
             if (jvIsCallable(o)) {
                 if (key == "call") { return jvCallShim(o) }
@@ -3695,6 +3709,22 @@ function jpMethod(p, name, args) {
     return jvMiss
 }
 
+// The value `p.then` READ AS A VALUE is: jpMethod bound to its receiver. node's is
+// Promise.prototype.then, unbound; there is no prototype chain here, so binding the
+// receiver is what makes the shape a program actually writes - `const t = p.then;
+// t.call(p, f)` - work.
+function jpBound(p, name) {
+    return function () {
+        var a = []
+        var i = 0
+        while (i < arguments.length) {
+            a.push(arguments[i])
+            i = i + 1
+        }
+        return jpMethod(p, name, a)
+    }
+}
+
 function jpFinallyPass(fn) {
     return function (v) {
         if (jvIsCallable(fn)) { jvCallT(fn, undefined, []) }
@@ -3823,6 +3853,176 @@ function js_jsasyncfn(genFn) {
     }
 }
 
+// ============================================================================
+// Async generators (docs/todo.md 1.7)
+//
+// An async generator body yields TWO kinds of thing on ONE suspension channel:
+// its awaits and its yields. They are told apart by a MARKER RECORD on the
+// yielded value - {__awt, v}, built by js_jsawaitmark, which the emitter wraps
+// every awaited operand of an async generator body in - and that marker is the
+// whole mechanism. The generator model needed nothing added to it: the body is an
+// ordinary generator body, exactly as an async function's is, and only the driver
+// is new.
+//
+// The driver is jpAsyncStep with a REQUEST QUEUE in front of it. next(v),
+// return(v) and throw(e) each answer a promise and append a request; one request
+// is served at a time, an await resumes the body WITHOUT answering the pending
+// next(), and a yield answers it and parks.
+//
+// The twins are agRequest/agStep in abnf/jsrtjsprint.go and jpAg* in the two
+// *-interpreter.abnf start scripts.
+//
+// NOT IMPLEMENTED, in all three engines: ag.throw(e) does not raise AT the
+// suspended yield - neither generator engine has a throw-in channel there (the
+// floor's GEN_EXIT is a close, not a general throw). It closes the body and
+// rejects the request, which is the abrupt completion node reaches too when
+// nothing in the body catches.
+
+function js_jsawaitmark(v) {
+    var mk = {}
+    mk["__awt"] = true
+    mk["v"] = v
+    return mk
+}
+function jpIsAwaitMark(v) {
+    if (!jvIsObj(v)) { return false }
+    return v["__awt"] === true
+}
+
+function jpAgNew(g) {
+    var st = {}
+    st["g"] = g
+    st["q"] = []       // Pending requests, in call order.
+    st["run"] = false  // A request is being served.
+    st["done"] = false
+    var ag = {}
+    ag["__agen"] = true
+    ag["next"] = jpAgMethod(st, 0)
+    ag["return"] = jpAgMethod(st, 1)
+    ag["throw"] = jpAgMethod(st, 2)
+    return ag
+}
+function jpAgMethod(st, kind) {
+    return function () {
+        var a = anytype
+        a = undefined
+        if (arguments.length > 0) { a = arguments[0] }
+        return jpAgReq(st, kind, a)
+    }
+}
+function jpAgReq(st, kind, arg) {
+    var p = jpNew()
+    var req = {}
+    req["kind"] = kind
+    req["arg"] = arg
+    req["p"] = p
+    st["q"].push(req)
+    jpAgPump(st)
+    return p
+}
+function jpAgPump(st) {
+    if (st["run"]) { return undefined }
+    if (st["q"].length === 0) { return undefined }
+    st["run"] = true
+    var req = st["q"][0]
+    if (st["done"]) {
+        if (req["kind"] === 2) { return jpAgFail(st, req["arg"]) }
+        return jpAgComplete(st, jpAgRetArg(req), true)
+    }
+    if (req["kind"] === 1 || req["kind"] === 2) {
+        st["done"] = true
+        jpAgClose(st)
+        if (req["kind"] === 2) { return jpAgFail(st, req["arg"]) }
+        return jpAgComplete(st, req["arg"], true)
+    }
+    jpAgStep(st, req["arg"], false)
+    return undefined
+}
+function jpAgRetArg(req) {
+    if (req["kind"] === 1) { return req["arg"] }
+    return undefined
+}
+function jpAgClose(st) {
+    var rf = js_jsmget(st["g"], "return")
+    if (jvIsCallable(rf)) { jvCallT(rf, st["g"], []) }
+    return undefined
+}
+function jpAgStep(st, sent, isThrow) {
+    var send = anytype
+    send = sent
+    if (isThrow) {
+        var m = {}
+        m["__athrow"] = true
+        m["v"] = sent
+        send = m
+    }
+    var res = anytype
+    res = undefined
+    var threw = false
+    var thrown = anytype
+    thrown = undefined
+    try { res = st["g"].next(send) }
+    catch (e) { threw = true; thrown = e }
+    if (threw) { st["done"] = true; jpAgFail(st, thrown); return undefined }
+    if (res["done"] === true) { st["done"] = true; jpAgComplete(st, res["value"], true); return undefined }
+    var y = anytype
+    y = res["value"]
+    if (jpIsAwaitMark(y)) {
+        // An AWAIT: resume the body once the operand settles, and leave the pending
+        // next() unanswered.
+        jpThen(jpResolveValue(y["v"]), jpAgResumeFn(st, false), jpAgResumeFn(st, true), undefined)
+        return undefined
+    }
+    // A YIELD. The specification awaits the operand before handing it over.
+    jpThen(jpResolveValue(y), jpAgYieldFn(st), jpAgRaiseFn(st), undefined)
+    return undefined
+}
+function jpAgResumeFn(st, isThrow) {
+    return function (v) { jpAgStep(st, v, isThrow) }
+}
+function jpAgYieldFn(st) {
+    return function (v) { jpAgComplete(st, v, false) }
+}
+function jpAgRaiseFn(st) {
+    return function (e) { st["done"] = true; jpAgFail(st, e) }
+}
+function jpAgShift(st) {
+    var req = st["q"][0]
+    st["q"] = st["q"].slice(1)
+    st["run"] = false
+    return req
+}
+function jpAgComplete(st, v, done) {
+    var req = jpAgShift(st)
+    var r = {}
+    r["value"] = v
+    r["done"] = done
+    jpSettle(req["p"], 1, r)
+    jpAgPump(st)
+    return undefined
+}
+function jpAgFail(st, e) {
+    var req = jpAgShift(st)
+    jpSettle(req["p"], 2, e)
+    jpAgPump(st)
+    return undefined
+}
+
+// js_jsasyncgen(genFn): the emitter hands over the GENERATOR FUNCTION the async
+// generator body compiled to, exactly as it does for js_jsasyncfn. Calling the
+// result creates the generator and answers the async-generator OBJECT.
+function js_jsasyncgen(genFn) {
+    return function () {
+        var args = []
+        var i = 0
+        while (i < arguments.length) {
+            args.push(arguments[i])
+            i = i + 1
+        }
+        return jpAgNew(genFn.apply(undefined, args))
+    }
+}
+
 // The value an `await` answers, given what the driver sent back in.
 function js_jsawaitv(v) {
     if (jvIsObj(v)) {
@@ -3858,5 +4058,32 @@ function js_jsdrain() {
     }
     jpQ = []
     jpQi = 0
+    return undefined
+}
+
+// ============================================================================
+// CLOSING AN ITERATOR ON AN EARLY EXIT (docs/todo.md 1.8)
+//
+// node closes a for-of's iterator on every abrupt exit from the loop body, not
+// just on `break`: a `return` out of the body and a labeled break to an OUTER
+// statement run the iterator's return() too, and neither reaches a block
+// makeForOf owns - one rets the frame, the other branches to the outer label's
+// exit. The emitter closes them BY VALUE instead: a for-of's entry block dominates
+// its body, so the loop's iterable handle is a legal operand at every jump inside
+// it, and one of these calls is emitted per loop being left.
+//
+// There is deliberately NO runtime open-iterator stack, and that is a finding
+// rather than an omission - see the forOfIters note in
+// languages/js-to-llvm-ir.abnf. A stack unwound by DEPTH is what a `throw` would
+// need, and `for await` suspends INSIDE its own for-of, so a suspended body leaves
+// an entry on such a stack while unrelated frames run; measured, it closed the
+// wrong loop.
+//
+// The twins are js_jsiterclose in abnf/jsrtjsprint.go and closeIterator in the two
+// *-interpreter.abnf start scripts.
+function js_jsiterclose(it) {
+    if (jvUndefOrNull(it)) { return undefined }
+    var r = js_jsmget(it, "return")
+    if (jvIsCallable(r)) { jvCallT(r, it, []) }
     return undefined
 }
