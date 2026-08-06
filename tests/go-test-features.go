@@ -247,6 +247,33 @@ func main() {
 	check("grouped-var", base+factor == 13)
 	check("const", limit == 7)
 
+	// A two-name multi-assign whose first element is an INDEX, a map index or a
+	// type assertion. Each of those also starts a comma-ok form, and the
+	// comma-ok rules used to match just that first element and leave the
+	// statement stranded at the comma. Operands come out of containers so the
+	// constant folder cannot answer for them.
+	zxs := []int{10, 20, 30}
+	zmp := map[string]int{"k": 7}
+	var ziv interface{} = 11
+	zi := 1
+	p1, p2 := zxs[zi], zxs[2]
+	check("multi-index", p1 == 20 && p2 == 30)
+	p3, p4 := zmp["k"], zxs[0]
+	check("multi-mapindex", p3 == 7 && p4 == 10)
+	p5, p6 := ziv.(int), zxs[zi]
+	check("multi-assert", p5 == 11 && p6 == 20)
+	p7, p8 := zxs[zi], 5
+	check("multi-index-lit", p7 == 20 && p8 == 5)
+	var q1, q2 int
+	q1, q2 = zxs[0], zmp["k"]
+	check("multi-index-eq", q1 == 10 && q2 == 7)
+	q3, q4, q5 := zxs[0], zmp["k"], zxs[2]
+	check("multi-index-three", q3 == 10 && q4 == 7 && q5 == 30)
+	cv, cok := zmp["k"]
+	check("comma-ok-map", cv == 7 && cok)
+	tv, tok := ziv.(int)
+	check("comma-ok-assert", tv == 11 && tok)
+
 	// ----- strings -----
 	s := "go"
 	s += "lang"

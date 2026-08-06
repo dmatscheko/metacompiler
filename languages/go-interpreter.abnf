@@ -466,16 +466,25 @@ SimpleStmt  = ( AssertOk | RecvOk | MapOk | ShortDecl | IncDecStmt | Assign | Ch
 // must be tried before ShortDecl, which would destructure the value itself.
 RecvOk      <~~ push(makeRecvOk(takeAll())) ~~>
             = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~>
-              ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> ) "<-" Expression ;
+              ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> ) "<-" Expression NotComma ;
 ChanSend    <~~ push(makeChanSend(takeAll(), up.pos)) ~~>
             = PostfixExpr "<-" Expression ;
+
+// Every two-name comma-ok form ends here: NOTHING may follow but the end of the
+// statement. Without it each of them matches the FIRST element of an ordinary
+// two-name multi-assign - 'a, b := xs[i], ys[j]' is MapOk plus a stray ', ys[j]' -
+// and an ordered choice does not come back once its alternative has succeeded, so
+// the whole statement was rejected at the comma rather than re-read as a ShortDecl.
+// Three names never reached this, which is why only the 2-element spellings broke.
+NotComma    = !"," ;
 
 // The two-result type assertion: v, ok := x.(T) yields the zero value and false
 // instead of panicking. Its base must NOT take the .(T) suffix itself, so the chain
 // here is the ordinary one minus TypeAssertSfx.
 AssertOk    <~~ push(makeAssertOk(takeAll())) ~~>
-            = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~> ( ":=" | "=" )
-              AssertBase "." "(" AssertType ")" ;
+            = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~>
+              ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> )
+              AssertBase "." "(" AssertType ")" NotComma ;
 AssertBase  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { MethodSfx | FieldSfx | SliceSfx | IndexSfx | CallSfx } ;
 AssertType  <~~ push({at: firstType(up.in)}) ~~>
@@ -483,7 +492,28 @@ AssertType  <~~ push({at: firstType(up.in)}) ~~>
 
 // The comma ok idiom: the value (or the zero value) plus the key presence flag.
 MapOk       <~~ push(makeMapOk(takeAll())) ~~>
-            = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~> ":=" Primary "[" Expression "]" ;
+            = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~>
+              ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> )
+              MapBase "[" Expression "]" NotComma ;
+// The map being indexed is a whole postfix expression MINUS its final index. As a
+// bare Primary (what it was) any base carrying a suffix fell through to ShortDecl,
+// which destructures the ONE value it finds: 'v, ok := st.mp["a"]' answered
+// '<nil> <nil>' in both halves, silently, and 'v, ok := outer[a][b]' did not parse
+// at all. An IndexSfx is taken here only when ANOTHER suffix is glued to it, so the
+// last '[k]' is always left for MapOk itself.
+MapBase     <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { MethodSfx | FieldSfx | SameLine SliceSfx | SameLine TypeArgsSfx
+                      | SameLine IndexSfx SfxGlued | SameLine CallSfx | TypeAssertSfx } ;
+// Anchored to the very NEXT byte, so it is a script and not a lookahead: a '.', '['
+// or '(' that a space separates from the ']' is a suffix Go accepts and nobody
+// writes, and reading it here would take the index MapOk needs.
+SfxGlued    = :script(~~
+    (function () {
+        var cc = c.peek(0)
+        if (cc === 46 || cc === 91 || cc === 40) { return undefined }
+        return abnf.newToken("\x01comma-ok-base-ends-at-its-last-index", 0)
+    })()
+~~) ;
 ExprOnly    <~~ push(exprToStmt(pop())) ~~>
             = Expression ;
 
@@ -3910,32 +3940,41 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         regConv(pos, to)
         return function() { return goConvert(to, t()) }
     }
-    // items = [valueName, okName, baseThunk, {at}]: v, ok := x.(T).
+    // items = [valueName, okName, {decl}, baseThunk, {at}]: v, ok := x.(T).
+    // The '=' spelling ASSIGNS to variables that already exist; only ':=' declares.
+    // Both used to declare, so 'v, ok = iv.(int)' wrote a fresh binding in the
+    // current scope and the outer v kept its old value.
+    function cokBind(isDecl, name, value) {
+        if (isDecl) { declVar(name, value); return }
+        setVar(name, value)
+    }
     function makeAssertOk(items) {
         var vName = items[0]
         var okName = items[1]
-        var baseT = items[2]
-        var ty = items[3].at
+        var isDecl = items[2].decl
+        var baseT = items[3]
+        var ty = items[4].at
         return function() {
             var v = baseT()
-            if (typeMatches(ty, v)) { declVar(vName, v); declVar(okName, true); return }
-            declVar(vName, zeroOfType2(ty))
-            declVar(okName, false)
+            if (typeMatches(ty, v)) { cokBind(isDecl, vName, v); cokBind(isDecl, okName, true); return }
+            cokBind(isDecl, vName, zeroOfType2(ty))
+            cokBind(isDecl, okName, false)
         }
     }
-    // items = [valueName, okName, baseThunk, keyThunk]: v, ok := m[k].
+    // items = [valueName, okName, {decl}, baseThunk, keyThunk]: v, ok := m[k].
     function makeMapOk(items) {
         var vName = items[0]
         var okName = items[1]
-        var baseT = items[2]
-        var keyT = items[3]
+        var isDecl = items[2].decl
+        var baseT = items[3]
+        var keyT = items[4]
         return function() {
             var m = baseT()
             if (!isMap(m)) fail("the comma ok form needs a map")
             var k = keyT()
             var i = mapFind(m, k)
-            declVar(vName, i >= 0 ? m.vals[i] : m.zero)
-            declVar(okName, i >= 0)
+            cokBind(isDecl, vName, i >= 0 ? m.vals[i] : m.zero)
+            cokBind(isDecl, okName, i >= 0)
         }
     }
     // items = [{params}, bodyT] (an ignored RetTypes leaves no stack entry).

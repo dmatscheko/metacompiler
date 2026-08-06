@@ -58,8 +58,17 @@
 # wrong answer. This file existed and nothing ran it. `tests/gates.sh --bench` now
 # does. csharp is here because it shares rtjIsIntegral with java and only java's
 # side was measured; a shared hot body needs ALL its callers in this file.
+#
+# go was ADDED BY HAND (not by --record, which would have deleted everything
+# above): 844,097,409, the median over 9 draws, spread 2.36%. Measured with the
+# go grammars of the commit that added it, whose emitted module for
+# tests/bench/mod.go is byte-identical to 08e8fcb's - so the row is comparable to
+# the ones recorded at 418ab6f. go had no row at all until then, and docs/todo.md
+# 1.7 notes what that cost: `a, b := xs[i], ys[j]` did not parse in either half
+# and no bench program existed to meet it.
 c          11090135
 csharp     20880506206
+go         844097409
 java       8628032753
 kotlin     17943908475
 lua        1529985281

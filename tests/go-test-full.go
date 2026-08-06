@@ -147,6 +147,89 @@ func s05() {
 	m := 3
 	m, more := 4, 5 // := needs only one new variable on the left
 	check("dec6", keep == 2 && m == 4 && more == 5)
+	// A TWO-name multi-assign whose first element is an index, a map index, a
+	// type assertion or a channel receive: each of those is also the prefix of a
+	// comma-ok form, and the comma-ok rules used to swallow it and reject the
+	// statement at the comma. Every operand comes out of a container so nothing
+	// folds. Three names never hit it, and neither did a first element that
+	// could not start a comma-ok form.
+	xs05 := []int{10, 20, 30}
+	ys05 := []int{40, 50, 60}
+	mp05 := map[string]int{"k": 7}
+	var iv05 interface{} = 11
+	ch05 := make(chan int, 2)
+	ch05 <- 13
+	i05 := 1
+	p1, p2 := xs05[i05], ys05[i05]
+	check("dec7", p1 == 20 && p2 == 50)
+	p3, p4 := mp05["k"], xs05[0]
+	check("dec8", p3 == 7 && p4 == 10)
+	p5, p6 := iv05.(int), ys05[2]
+	check("dec9", p5 == 11 && p6 == 60)
+	p7, p8 := <-ch05, xs05[2]
+	check("dec10", p7 == 13 && p8 == 30)
+	p9, p10 := xs05[i05], 5 // index first, literal second
+	check("dec11", p9 == 20 && p10 == 5)
+	var q1, q2 int
+	q1, q2 = xs05[0], mp05["k"] // the '=' spelling of the same shape
+	check("dec12", q1 == 10 && q2 == 7)
+	q3, q4, q5 := xs05[0], mp05["k"], ys05[i05] // three names, unaffected
+	check("dec13", q3 == 10 && q4 == 7 && q5 == 50)
+	// and the comma-ok forms themselves still read as comma-ok
+	cv, cok := mp05["k"]
+	check("dec14", cv == 7 && cok)
+	tv, tok := iv05.(int)
+	check("dec15", tv == 11 && tok)
+	ch05 <- 15
+	rv, rok := <-ch05
+	check("dec16", rv == 15 && rok)
+	// The comma-ok base is a whole postfix expression, not a bare name. A base
+	// carrying a suffix used to fall through to a two-name destructure of the
+	// single value, which is a SILENT wrong answer (<nil> <nil>), or not to parse.
+	nst05 := map[string]map[string]int{}
+	nst05["o"] = mp05
+	n1, n2 := nst05["o"]["k"]
+	check("dec17", n1 == 7 && n2)
+	ms05 := []map[string]int{}
+	ms05 = append(ms05, mp05)
+	n3, n4 := ms05[0]["k"]
+	check("dec18", n3 == 7 && n4)
+	box05 := struct {
+		mp map[string]int
+		iv interface{}
+	}{mp05, 21}
+	n5, n6 := box05.mp["k"]
+	check("dec19", n5 == 7 && n6)
+	n7, n8 := box05.iv.(int)
+	check("dec20", n7 == 21 && n8)
+	ivs05 := []interface{}{31, "s"}
+	n9, n10 := ivs05[0].(int)
+	check("dec21", n9 == 31 && n10)
+	n11, n12 := ivs05[1].(int) // a failed assertion is the zero value, not a panic
+	check("dec22", n11 == 0 && !n12)
+	// The '=' spelling of comma-ok assigns to variables that already exist. The map
+	// form did not parse in either half (it fell through to a two-name destructure
+	// of one value, i.e. <nil> <nil>), and the assertion form declared a SHADOW
+	// instead of assigning - both silent.
+	var e1 int
+	var e2 bool
+	e1, e2 = mp05["k"]
+	check("dec23", e1 == 7 && e2)
+	e1, e2 = mp05["absent"]
+	check("dec24", e1 == 0 && !e2)
+	var e3 int
+	var e4 bool
+	e3, e4 = iv05.(int)
+	check("dec25", e3 == 11 && e4)
+	{ // the assignment must reach the OUTER variable, not declare a new one here
+		e1, e2 = mp05["k"]
+		e3, e4 = ivs05[1].(int)
+	}
+	check("dec26", e1 == 7 && e2 && e3 == 0 && !e4)
+	// NOT asserted: nst05["absent"]["k"], where the missing outer key must yield a
+	// NIL map that indexes to the zero value. Both halves reject it instead ("the
+	// comma ok form needs a map" / "indexing a object") - a separate, pre-existing
+	// gap in the zero value of a map type, not in the comma-ok base.
 }
 
 // ===== SECTION 06: arrays =====

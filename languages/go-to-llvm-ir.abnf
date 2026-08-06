@@ -482,19 +482,54 @@ SimpleStmt  = ( MapOk | TypeOk | RecvOk | ShortDecl | IncDecStmt | Assign | Chan
 // be tried before ShortDecl, which would destructure the value itself.
 RecvOk      <~~ push(makeRecvOk(takeAll())) ~~>
             = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~>
-              ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> ) "<-" Expression ;
+              ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> ) "<-" Expression NotComma ;
 ChanSend    <~~ push(makeChanSend(takeAll(), up.pos)) ~~>
             = PostfixExpr "<-" Expression ;
 
+// Every two-name comma-ok form ends here: NOTHING may follow but the end of the
+// statement. Without it each of them matches the FIRST element of an ordinary
+// two-name multi-assign - 'a, b := xs[i], ys[j]' is MapOk plus a stray ', ys[j]' -
+// and an ordered choice does not come back once its alternative has succeeded, so
+// the whole statement was rejected at the comma rather than re-read as a ShortDecl.
+// Three names never reached this, which is why only the 2-element spellings broke.
+NotComma    = !"," ;
+
 // The comma ok idiom: the value (or the zero value) plus the key presence flag.
 MapOk       <~~ push(makeMapOk(takeAll())) ~~>
-            = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~> ":=" Primary "[" Expression "]" ;
+            = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~>
+              ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> )
+              MapBase "[" Expression "]" NotComma ;
+// The map being indexed is a whole postfix expression MINUS its final index. As a
+// bare Primary (what it was) any base carrying a suffix fell through to ShortDecl,
+// which destructures the ONE value it finds: 'v, ok := st.mp["a"]' answered
+// '<nil> <nil>' in both halves, silently, and 'v, ok := outer[a][b]' did not parse
+// at all. An IndexSfx is taken here only when ANOTHER suffix is glued to it, so the
+// last '[k]' is always left for MapOk itself.
+MapBase     <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { MethodSfx | FieldSfx | SameLine SliceSfx | SameLine TypeArgsSfx
+                      | SameLine IndexSfx SfxGlued | SameLine CallSfx | TypeAssertSfx } ;
+// Anchored to the very NEXT byte, so it is a script and not a lookahead: a '.', '['
+// or '(' that a space separates from the ']' is a suffix Go accepts and nobody
+// writes, and reading it here would take the index MapOk needs.
+SfxGlued    = :script(~~
+    (function () {
+        var cc = c.peek(0)
+        if (cc === 46 || cc === 91 || cc === 40) { return undefined }
+        return abnf.newToken("\x01comma-ok-base-ends-at-its-last-index", 0)
+    })()
+~~) ;
 // The comma ok TYPE ASSERTION: v, ok := x.(T). Without it the pair reads as a plain
 // two-name ShortDecl of one value, which destructures the value itself (a string
-// assertion then bound its first character). Only the Primary base is covered, the
-// same restriction MapOk has.
+// assertion then bound its first character). Its base is the ordinary postfix chain
+// MINUS TypeAssertSfx, so the '.(T)' is left for this rule - the interpreter half's
+// AssertBase, which the Primary here did not match: 'v, ok := xs[i].(int)' failed to
+// parse and 'v, ok := st.iv.(int)' answered '<nil> <nil>'.
 TypeOk      <~~ push(makeTypeOk(takeAll())) ~~>
-            = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~> ":=" Primary "." "(" AssertType ")" ;
+            = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~>
+              ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> )
+              AssertBase "." "(" AssertType ")" NotComma ;
+AssertBase  <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { MethodSfx | FieldSfx | SliceSfx | IndexSfx | CallSfx } ;
 AssertType  <~~ push({at: firstType(up.in)}) ~~> = Type ;
 ExprOnly    <~~ push(exprToStmt(pop())) ~~>
             = Expression ;
@@ -1405,8 +1440,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (usesF32 && typeof gfRel[op] == "string") {
             return emitF32Fix(b, gfRel[op], coreEmitBin(b, op, l, r), l, r)
         }
-        var fe = floExt[op]
-        if (typeof fe == "string") { return callExt(b, fe, [l, r]) }
+        // There is deliberately no floExt arm here. Every key floExt has ('-' '*'
+        // '/' '%' and their four compound forms) is also a key of giBase, and giBase
+        // is consulted at the top of this function and returns - so a floExt lookup
+        // at THIS point could never answer. Proved twice: by construction from the
+        // two tables, and by replacing the arm with a call to an undefined function
+        // and compiling the whole go corpus plus the ratchet, which never reached
+        // it. floExt itself is live: emitTypedBin uses it on the STATICALLY TYPED
+        // float path (`float64(9) / x`), and the same probe fires there.
         return coreEmitBin(b, op, l, r)
     }
     var cxOps = {"+": 1, "-": 1, "*": 1, "/": 1, "+=": 1, "-=": 1, "*=": 1, "/=": 1}
@@ -2902,20 +2943,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function makeMapOk(items) {
         var vName = items[0]
         var okName = items[1]
-        var baseT = items[2]
-        var keyT = items[3]
+        var isDecl = items[2].decl
+        var baseT = items[3]
+        var keyT = items[4]
         return function(b) {
             var rm = baseT(b)
             b = rm.b
             var rk = keyT(b)
             b = rk.b
             if (vName != "_") {
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, vName),
-                                             callExt(b, "js_map_get", [rm.v, rk.v])])
+                cokDecl(b, isDecl, vName, callExt(b, "js_map_get", [rm.v, rk.v]))
             }
             if (okName != "_") {
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, okName),
-                                             callExt(b, "js_pyin", [rk.v, rm.v])])
+                cokDecl(b, isDecl, okName, callExt(b, "js_pyin", [rk.v, rm.v]))
             }
             return b
         }
@@ -3907,19 +3947,41 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         lastDeclNames = []
         return n
     }
-    // items = [vName, okName, baseThunk, {at}]: v gets the value (the assertion is the
-    // identity on it, as for the single-result form), ok gets the dynamic type test.
+    // items = [vName, okName, {decl}, baseThunk, {at}]: ok gets the dynamic type
+    // test, and v the value when it holds or the ZERO of the asserted type when it
+    // does not (the single-result form stays the identity, see TypeAssertSfx).
+    // The '=' spelling ASSIGNS to variables that already exist; only ':=' declares.
+    // Both used to declare, so 'v, ok = m[k]' wrote a fresh binding in the current
+    // scope and the outer v kept its old value - and the compiler half did not
+    // accept the '=' spelling at all, which is how it reached ShortDecl and
+    // answered '<nil> <nil>'.
+    function cokDecl(b, isDecl, name, v) {
+        if (name == "_") { return }
+        callExt(b, isDecl ? "js_scope_decl" : "js_scope_set", [curScopeV, emitStr(b, name), v])
+    }
     function makeTypeOk(items) {
         var vName = items[0]
         var okName = items[1]
-        var baseT = items[2]
-        var ty = items[3].at
+        var isDecl = items[2].decl
+        var baseT = items[3]
+        var ty = items[4].at
         return function(b) {
             var r = baseT(b)
             b = r.b
             var okV = emitHelper(b, "$istype", [r.v, emitStr(b, ty)])
-            if (vName != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, vName), r.v]) }
-            if (okName != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, okName), okV]) }
+            // A FAILED assertion binds the ZERO VALUE of the asserted type, not the
+            // value that did not match: `v, ok := q.(int)` with q = "s" is 0, false
+            // in Go and was "s", false here. go-interpreter.abnf's makeAssertOk has
+            // always used zeroOfType2 - this half is the one that was wrong, and
+            // --cross never saw it because nothing asserted a MISMATCH.
+            if (vName != "_") {
+                var vr = emitSelect(b, okV,
+                    function(tb) { return {b: tb, v: r.v} },
+                    function(eb) { return {b: eb, v: emitZeroTy(eb, ty)} })
+                b = vr.b
+                cokDecl(b, isDecl, vName, vr.v)
+            }
+            cokDecl(b, isDecl, okName, okV)
             return b
         }
     }
