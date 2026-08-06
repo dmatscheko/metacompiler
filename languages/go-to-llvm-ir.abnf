@@ -459,7 +459,7 @@ CCaseOn     <~~ cSwCase() ~~> = [ "\x00" ] ;
 // var x int = 5 / var s string -- the zero value depends on the type.
 VarDecl     <~~ push(makeVarDecl(takeAll())) ~~>
             = "var" KwEnd Id <~~ push(cPoisonName(up.in)) ~~> { "," Id <~~ push(cPoisonName(up.in)) ~~> } [ SameLine VType ] [ "=" ExprList ] [ ";" ] ;
-VType       <~~ push({ty: up.in}) ~~>
+VType       <~~ push({ty: noteTy(up.in)}) ~~>
             = Type ;
 
 // var ( a int = 1; b = 2 ): each spec (one name) becomes its own var-decl thunk and
@@ -1370,15 +1370,41 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // BOTH halves. The twin fix is in go-interpreter.abnf, which wraps the count
     // in szNum for the same reason; keep the two in step.
     var giShift = {"<<": 1, ">>": 1, "<<=": 1, ">>=": 1}
+    // The eleven operators a float32 changes. A shift or a bitwise operator on a
+    // float is not a program the front end accepts, so neither is here.
+    var gfRel = {"==": "==", "!=": "!="}
+    var gfFix = {"+": 1, "-": 1, "*": 1, "/": 1, "%": 1,
+                 "<": 1, "<=": 1, ">": 1, ">=": 1, "==": 1, "!=": 1}
+    // js_gf32fix(op, result, l, r): the binary32 WIDTH applied to an operator's
+    // result. It is a POST-FIX over the floor's own answer rather than a
+    // replacement for it, because a layer-2 file cannot call a floor extern by
+    // name (see languages/lib/go-rt.metajs). Emitted only when the source
+    // mentions float32 at all, so every other program's module is unchanged.
+    function emitF32Fix(b, op, v, l, r) {
+        if (!usesF32 || gfFix[op] != 1) { return v }
+        return callExt(b, "js_gf32fix", [emitStr(b, op), v, l, r])
+    }
     function emitBinNum(b, op, l, r) {
         var base = giBase[op]
         if (typeof base == "string") {
-            if (base == "+") { return callExt(b, "js_giadd", [l, r]) }
+            if (base == "+") { return emitF32Fix(b, "+", callExt(b, "js_giadd", [l, r]), l, r) }
             if (giShift[op] == 1) { r = callExt(b, "js_gival", [r]) }
-            return callExt(b, "js_giarith", [emitStr(b, base), l, r])
+            return emitF32Fix(b, base, callExt(b, "js_giarith", [emitStr(b, base), l, r]), l, r)
         }
         var rel = giRel[op]
-        if (typeof rel == "string") { return callExt(b, rel, [l, r]) }
+        if (typeof rel == "string") {
+            // A float32 against an UNTYPED CONSTANT has to round both sides
+            // before comparing (Go converts the constant), so `f > 0.1` takes
+            // the same post-fix.
+            return emitF32Fix(b, op, callExt(b, rel, [l, r]), l, r)
+        }
+        // == and != reach the shared core through binExt (js_goeq / js_gone),
+        // not through giRel, so their post-fix is applied here. js_gf32fix hands
+        // js_goeq's own answer straight back unless an operand is a float32, so
+        // a struct and an array still compare by VALUE.
+        if (usesF32 && typeof gfRel[op] == "string") {
+            return emitF32Fix(b, gfRel[op], coreEmitBin(b, op, l, r), l, r)
+        }
         var fe = floExt[op]
         if (typeof fe == "string") { return callExt(b, fe, [l, r]) }
         return coreEmitBin(b, op, l, r)
@@ -1407,6 +1433,20 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     makeNeg = function(t) {
         return function(b) {
             var r = t(b)
+            // A COMPLEX operand negates COMPONENT-WISE, and js_gineg cannot do it:
+            // it reads a {re, im} object numerically, gets NaN and answered 0 for
+            // `-(0.1+0.2i)` in llvm.Run and in the native binary while the
+            // interpreter answered (-0.1-0.2i) - docs/todo.md 1.7, a halves
+            // divergence --cross never reached because nothing in the matrix
+            // negates a complex. The dispatch goes through a GENERATED function
+            // for the same reason every other complex operator does: emitBin
+            // returns a value and cannot move the caller's basic block, so the
+            // branch has to happen behind a js_call.
+            //
+            // Gated on usesComplex, so a program with no complex value emits
+            // exactly the IR it emitted before - verified by diffing the emitted
+            // module against a clean archive of the base commit.
+            if (usesComplex) { return {b: r.b, v: emitHelper(r.b, "$cxneg", [r.v])} }
             return {b: r.b, v: callExt(r.b, "js_gineg", [r.v])}
         }
     }
@@ -1450,6 +1490,36 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return typeof t == "string" ? t : null
     }
     function isFloatTy(ty) { return ty == "float64" || ty == "float32" }
+    // ----- float32: a 32 BIT box, and the gate that keeps it free -----
+    // Go's float32 is a binary32, not a float64 spelled differently:
+    // float32(1)/float32(3) is 0.33333334 where the float64 is 0.3333333333333333,
+    // and float32(1e20)*float32(1e20) is +Inf where the float64 is 1e+40. The value
+    // still travels as a double (every float32 is exactly one) and only the WIDTH
+    // goes on the box, as style floGoF of abnf/jsrtjvm.go's tag-14 box - the same
+    // mechanism java's `float` uses, with Go's print style instead of java's.
+    //
+    // usesF32 IS THE GATE, and it is the reason this costs nothing anywhere else.
+    // The floor cannot round to 24 bits (c-to-llvm-ir.abnf computes every float at
+    // double precision - measured in e5e68b5), so the width has to be applied by
+    // js_gf32fix, an extern of layer 2's own. Emitting that extern for every Go
+    // program would put a call in front of every arithmetic operator in the
+    // language; emitting it only where the source says `float32` means a program
+    // without one emits BYTE-IDENTICAL IR to before. The flag is set while the tags
+    // WALK - noteTy sees every type text this grammar captures, and the walk is
+    // finished long before buildMain runs the emit thunks - which is exactly how
+    // usesComplex is decided.
+    var usesF32 = false
+    // Every captured type text passes through here (firstType, which is what the
+    // eight type-capturing tag rules push, and VType for a var/param
+    // declaration), so no float32 spelling can reach a runtime type text without
+    // setting the flag. A substring test rather than an equality: the text may be
+    // "[]float32", "map[string]float32", "float32 // a comment" or a whole struct
+    // body. Over-triggering only costs the slower operator path.
+    function noteTy(s) {
+        if (typeof s == "string" && s.indexOf("float32") >= 0) { usesF32 = true }
+        return s
+    }
+    function isF32Ty(ty) { return goTyWord(ty) == "float32" }
     // goIntTy answers {w, u} for a sized integer type name and null for anything
     // else. `int`, `int64` and `rune` are the plain path: only a type that is not a
     // signed 64 bit integer needs a box, which is what keeps the box rare (see the
@@ -1481,6 +1551,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // its initializer, and a sized integer slot converts to its width - which is
     // what puts the width on the value and makes the i8++ that follows wrap.
     function emitAdoptTy(b, ty, v) {
+        // A float32 SLOT rounds what is put in it - `var f float32 = 0.1` holds
+        // 0.1 read at 24 bits - so it takes the 32-bit extern, not js_gflo.
+        if (isF32Ty(ty)) { return callExt(b, "js_gflo32", [v]) }
         if (isFloatTy(ty)) { return callExt(b, "js_gflo", [v]) }
         var it = goIntTy(goTyWord(ty))
         if (it != null) { return emitGiConv(b, v, it) }
@@ -1546,9 +1619,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // Both operands are float64 by construction here, so one side is boxed
             // and the js_jf* externs answer a float; '+' goes through js_jadd, which
             // has the same rule.
+            var boxExt = isF32Ty(ty) ? "js_gflo32" : "js_gflo"
             var fe2 = floExt[op]
-            if (typeof fe2 == "string") { return callExt(b, fe2, [callExt(b, "js_gflo", [l]), r]) }
-            if (typeof binExt[op] == "string") { return callExt(b, binExt[op], [callExt(b, "js_gflo", [l]), r]) }
+            if (typeof fe2 == "string") { return callExt(b, fe2, [callExt(b, boxExt, [l]), r]) }
+            if (typeof binExt[op] == "string") { return callExt(b, binExt[op], [callExt(b, boxExt, [l]), r]) }
         }
         var v = emitBin(b, op, l, r)
         var w = uintBits(ty)
@@ -2240,7 +2314,27 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // and the group's ')' respectively), so both simply re-register at their own key.
     function goNegC(t, pos) {
         var c = constAt(pos)
-        if (c != null) { regConst(pos, cNeg(c)) }
+        if (c == null) { return makeNeg(t) }
+        var nc = cNeg(c)
+        regConst(pos, nc)
+        // UNARY MINUS IS A FOLD SITE, and the reason is a value rather than a
+        // tidy-up: a Go CONSTANT HAS NO SIGNED ZERO, so `-0.0` is exactly the
+        // constant 0 and `complex(-0.0, 0.0)` is (0+0i) before the program runs.
+        // cNeg already says so (it hands a zero back unchanged); what was missing
+        // is that nothing CONSUMED the folded value - cMaterialize is reached only
+        // from goFoldConst, i.e. only from a BINARY run - so the runtime thunk ran
+        // instead and answered -0.0. `x := -0.0`, `var y float64 = -0.0`,
+        // `const c = -0.0` and the bare literal all printed -0 where go prints 0,
+        // and every one of the eight remaining lines of a 346-value complex probe
+        // was downstream of that single -0.
+        //
+        // Only a ZERO materialises here. Folding every unary minus would be the
+        // principled form, but it would also re-route `-9223372036854775808` and
+        // every other magnitude through cMaterialize's own wrap rules, which is a
+        // change with no defect behind it; the zero is the whole observable
+        // difference and it is the one Go's "constants have no signed zero" rule
+        // actually forces.
+        if (nc.s === 0) { return cMaterialize(nc) }
         return makeNeg(t)
     }
     // items = [thunk, {at}] - PGInner tags the inner expression's end position.
@@ -3037,13 +3131,23 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // The complex form of one operator, emitted into its own block. The parts are
     // plain numbers, so the arithmetic goes to the externs DIRECTLY: emitBin would
     // truncate '- * /' to an integer and 0.5 is a legal real part.
+    //
+    // THE ADDS ARE js_add AND NOT js_jadd, and that is a signed-zero fix rather
+    // than a tidy-up. js_jadd carries an int32 FAST PATH - two operands a 32 bit
+    // integer holds exactly are added as int32s - and -0.0 is one of them, so
+    // `-0.0 + -0.0` came back +0.0. That is the imaginary part of
+    // `(1-1i) * (0-0i)`, which go prints `(0-0i)` and both compiled halves printed
+    // `(0+0i)`: a halves divergence against the interpreter, invisible until the
+    // renderer above started spelling a negative zero. js_add is the generic add,
+    // which is IEEE for a pair of numbers. The project's most-repeated defect
+    // shape (see docs/working-on-this-project.md chapter 4) in its ninth form.
     function emitCxOp(b, op, l, r) {
         var lp = emitCxParts(b, l)
         b = lp.b
         var rp = emitCxParts(b, r)
         b = rp.b
-        if (op == "+") { return {b: b, v: emitNewCx(b, callExt(b, "js_jadd", [lp.re, rp.re]),
-                                                      callExt(b, "js_jadd", [lp.im, rp.im]))} }
+        if (op == "+") { return {b: b, v: emitNewCx(b, callExt(b, "js_add", [lp.re, rp.re]),
+                                                      callExt(b, "js_add", [lp.im, rp.im]))} }
         if (op == "-") { return {b: b, v: emitNewCx(b, callExt(b, "js_sub", [lp.re, rp.re]),
                                                       callExt(b, "js_sub", [lp.im, rp.im]))} }
         if (op == "*") {
@@ -3051,15 +3155,22 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var bd = callExt(b, "js_mul", [lp.im, rp.im])
             var ad = callExt(b, "js_mul", [lp.re, rp.im])
             var bc = callExt(b, "js_mul", [lp.im, rp.re])
-            return {b: b, v: emitNewCx(b, callExt(b, "js_sub", [ac, bd]), callExt(b, "js_jadd", [ad, bc]))}
+            return {b: b, v: emitNewCx(b, callExt(b, "js_sub", [ac, bd]), callExt(b, "js_add", [ad, bc]))}
         }
-        var den = callExt(b, "js_jadd", [callExt(b, "js_mul", [rp.re, rp.re]),
-                                         callExt(b, "js_mul", [rp.im, rp.im])])
-        var nr = callExt(b, "js_jadd", [callExt(b, "js_mul", [lp.re, rp.re]),
-                                        callExt(b, "js_mul", [lp.im, rp.im])])
-        var ni = callExt(b, "js_sub", [callExt(b, "js_mul", [lp.im, rp.re]),
-                                       callExt(b, "js_mul", [lp.re, rp.im])])
-        return {b: b, v: emitNewCx(b, callExt(b, "js_div", [nr, den]), callExt(b, "js_div", [ni, den]))}
+        // DIVISION IS NOT THE TEXTBOOK FORMULA, because Go's is not. The gc
+        // runtime's complex128div is SMITH'S ALGORITHM (CACM 5(8):435, 1962) plus
+        // the C99 G.5.1 infinity fixups, and the difference is visible on
+        // ordinary values, not only on overflow: (0.1+0.2i)/(3+4i) is
+        // (0.044000000000000004+0.008i) in go and (...+0.008000000000000002i)
+        // from the textbook formula, and (0.1+0.2i)/(-0.0+0i) is (+Inf+Infi) in
+        // go where the textbook formula answers (NaN+NaNi). 55 of 100 rows of a
+        // 600-line complex probe. It goes to an extern rather than into emitted
+        // IR because it is five branches deep; js_gocxdiv answers a plain
+        // {re, im} object and the $cx is built here, so the class descriptor
+        // stays in the emitter where it lives.
+        var q = callExt(b, "js_gocxdiv", [lp.re, lp.im, rp.re, rp.im])
+        return {b: b, v: emitNewCx(b, callExt(b, "js_get", [q, emitStr(b, "re")]),
+                                      callExt(b, "js_get", [q, emitStr(b, "im")]))}
     }
     // '+ - * /' with a complex operand on either side. The dispatch lives in a
     // GENERATED function rather than at the operator site: emitBin returns a value and
@@ -3091,6 +3202,30 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
         return b
     }
+    // -v on a value that may or may not be complex: component-wise for a complex,
+    // js_gineg (which keeps a float64 a float64 and negates an integer at its own
+    // width) for everything else.
+    //
+    // THE COMPONENTS NEGATE WITH js_neg AND NOT WITH `0 - x`, and that is this
+    // project's most-repeated trap rather than a style choice: `0 - 0.0` is +0.0,
+    // so subtracting from zero LOSES the sign of a negative zero, which go keeps -
+    // `-(0+0i)` over variables prints `(-0-0i)`. js_neg is `mk_num(d_neg(...))` in
+    // the floor, and d_neg writes the SIGN BIT; js_gineg is not usable on a
+    // component because it would wrap a fractional part to an integer width.
+    // Eight previous occurrences of the same shape are listed in
+    // docs/working-on-this-project.md chapter 4.
+    function declCxNeg(b) {
+        return declFn(b, "$cxneg", 1, function(fb, as, f) {
+            var v = as[0]
+            return emitSelect(fb, callExt(fb, "js_is_type", [v, emitStr(fb, "$cx")]),
+                function(tb) {
+                    return {b: tb, v: emitNewCx(tb,
+                        callExt(tb, "js_neg", [callExt(tb, "js_get", [v, emitStr(tb, "re")])]),
+                        callExt(tb, "js_neg", [callExt(tb, "js_get", [v, emitStr(tb, "im")])]))}
+                },
+                function(eb) { return {b: eb, v: callExt(eb, "js_gineg", [v])} })
+        })
+    }
     // real(v) / imag(v) / complex(re, im), each a generated function of its own for
     // the same reason: the complex probe needs blocks.
     function declCxPart(b, name, prop, dflt) {
@@ -3105,9 +3240,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var v = callExt(fb, "js_arg", [f.Params[1], handle(0)])
         var pr = prop
         var dv = dflt
+        // real(z) and imag(z) are float64 VALUES in Go, so the answer BOXES:
+        // real(a) of 1234567.125 prints 1.234567125e+06 and not 1234567.125,
+        // and real(z)/2 is a float division. js_gflo is the identity on a value
+        // that is already a box, so a component that arrived boxed is unharmed.
         var res = emitSelect(fb, callExt(fb, "js_is_type", [v, emitStr(fb, "$cx")]),
-                             function(tb) { return {b: tb, v: callExt(tb, "js_get", [v, emitStr(tb, pr)])} },
-                             function(eb) { return {b: eb, v: (dv == 0 ? emitNum(eb, 0) : v)} })
+                             function(tb) { return {b: tb, v: callExt(tb, "js_gflo", [callExt(tb, "js_get", [v, emitStr(tb, pr)])])} },
+                             function(eb) { return {b: eb, v: callExt(eb, "js_gflo", [dv == 0 ? emitNum(eb, 0) : v])} })
         res.b.NewRet(res.v)
         curF = savedF
         curScopeV = savedScope
@@ -3144,6 +3283,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = declCxOp(b, "$cxsub", "-")
         b = declCxOp(b, "$cxmul", "*")
         b = declCxOp(b, "$cxdiv", "/")
+        b = declCxNeg(b)
         b = declCxPart(b, "real", "re", 1)
         b = declCxPart(b, "imag", "im", 0)
         b = declCxMake(b)
@@ -3950,6 +4090,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var wd = goTyWord(t)
         var it = goIntTy(wd)
         if (it != null) { return emitGiConv(b, emitNum(b, 0), it) }
+        if (isF32Ty(wd)) { return callExt(b, "js_gflo32", [emitNum(b, 0)]) }
         if (isFloatTy(wd)) { return callExt(b, "js_gflo", [emitNum(b, 0)]) }
         if (wd == "string") { return emitStr(b, "") }
         if (wd == "bool") { return hFalse }
@@ -4620,7 +4761,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (cc == 32 || cc == 9 || cc == 10 || cc == 13) { if (depth == 0 && out.length > 0) { break } continue }
             out += ch
         }
-        return out
+        return noteTy(out)
     }
     // var ( ... ) / a single var spec per name: run each spec's var-decl thunk in order.
     function makeVarGroup(items) { return makeSeq(items) }

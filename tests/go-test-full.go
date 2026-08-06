@@ -1484,7 +1484,6 @@ func s33() {
 	check("cst32", 3*0.1 != 0.30000000000000004)
 }
 
-
 // ===== SECTION 34: a NAMED constant folds too, and what deliberately does not =====
 // SECTION 33 folds constant LITERALS; a name needs a scope, and getting that scope
 // wrong is a silent wrong answer rather than a missing feature. So half of what is
@@ -1585,6 +1584,146 @@ func s34() {
 	check("nc22", c34z/c34w == 0.8+0.6i && -c34z+c34z == 0)
 }
 
+// ===== SECTION 35: float32 is a real binary32 =====
+// A Go float32 is an IEEE-754 binary32, not a float64 spelled differently, and
+// every expected value below was read off `go run` before it was written down.
+// It used to be an alias of the float64 box, so float32(1)/float32(3) answered
+// 0.3333333333333333 and float32(1e20)*float32(1e20) answered 1e+40 - both
+// halves agreeing, and both wrong, which is the defect class byte-identity
+// cannot see. The operands come out of a SLICE on purpose: a probe of literals
+// tests the grammar's constant folder rather than the runtime.
+func fs35(f float32) string { return fmt.Sprint(f) }
+
+func s35() {
+	fs := []float32{1, 3, 0.1, 0.2, 1e20, 16777217}
+	// The headline: 24 significant bits, not 53.
+	check("f32a", fs35(fs[0]/fs[1]) == "0.33333334")
+	check("f32b", fs35(fs[2]+fs[3]) == "0.3")
+	// A float64 with the same source text keeps all 53.
+	ds := []float64{1, 3, 0.1, 0.2}
+	check("f32c", fs23(ds[0]/ds[1]) == "0.3333333333333333" && fs23(ds[2]+ds[3]) == "0.30000000000000004")
+	// binary32 OVERFLOWS where a double does not, and it says so Go's way.
+	check("f32d", fs35(fs[4]*fs[4]) == "+Inf" && fs23(1e20*1e20) == "1e+40")
+	// 16777217 is the first integer a binary32 cannot hold: it rounds to
+	// 16777216, which is also what makes the +1 below vanish.
+	check("f32e", fs35(fs[5]) == "1.6777216e+07" && fs35(fs[5]+1) == "1.6777216e+07")
+	// A conversion ROUNDS, and the rounding is observable through float64().
+	check("f32f", float64(float32(0.1)) == 0.10000000149011612)
+	// A DECLARED float32 slot rounds its initializer, so it equals the
+	// converted constant and not the double.
+	var f float32 = 0.1
+	check("f32g", f == float32(0.1) && float64(f) == 0.10000000149011612)
+	// An untyped constant next to a float32 is converted TO float32 (Go has no
+	// implicit float32/float64 conversion at all), so this comparison holds.
+	check("f32h", f == 0.1 && !(f < 0.1) && !(f > 0.1))
+	// The width survives a parameter, a struct field, a slice element and a
+	// zero value - every place a declared type is adopted.
+	check("f32i", fs35(add35(fs[2], fs[3])) == "0.3")
+	pt := pt35{fs[2], 0.1}
+	check("f32j", fs35(pt.a+pt.a) == "0.2" && fs23(pt.b+pt.b) == "0.2")
+	check("f32k", fs35(fs[2]*fs[3]) == "0.020000001")
+	var zero float32
+	check("f32l", fs35(zero) == "0" && fs35(-f) == "-0.1")
+	// fmt's %v for a float32 is the same 'g' window as a float64, read at 24
+	// bits: scientific below 1e-4 and from 1e6.
+	check("f32m", fs35(fs[4]) == "1e+20" && fs35(fs[2]/1000000) == "1e-07")
+}
+
+type pt35 struct {
+	a float32
+	b float64
+}
+
+func add35(x float32, y float32) float32 { return x + y }
+
+const cnz36 = -0.0
+
+// ===== SECTION 36: complex128 the way Go computes and prints it =====
+// Every expected string was read off `go run` before it was written down. Three
+// separate defects live here: unary minus on a complex answered 0 in both
+// compiled halves (js_gineg read the {re,im} box as NaN); both PARTS are
+// float64 and were printed with the integer rendering, so 1234567.125 came out
+// verbatim where go writes 1.234567125e+06 and an infinity came out
+// "Infinity"; and division used the textbook formula where Go's runtime uses
+// Smith's algorithm plus the C99 G.5.1 fixups.
+func s36() {
+	big36 := []float64{1e300}
+	res := []float64{0.1, 4, 1234567.125, 0}
+	ims := []float64{0.2, 3, -0.5, 0}
+	a := complex(res[0], ims[0])
+	b := complex(res[1], ims[1])
+	// UNARY MINUS. This was `0` in llvm.Run and in the native binary.
+	check("cx1", fmt.Sprint(-a) == "(-0.1-0.2i)")
+	check("cx2", -a == complex(-res[0], -ims[0]) && -(-a) == a)
+	// A NEGATIVE ZERO survives the negation, which `0 - x` would lose.
+	z := complex(res[3], ims[3])
+	check("cx3", fmt.Sprint(-z) == "(-0-0i)")
+	// Both parts print with the float64 'g' rule.
+	check("cx4", fmt.Sprint(complex(res[2], ims[2])) == "(1.234567125e+06-0.5i)")
+	check("cx5", fmt.Sprint(a/complex(res[3], ims[3])) == "(+Inf+Infi)")
+	// SMITH'S ALGORITHM, at the magnitude that shows it: the textbook
+	// formula squares each denominator component, so 1e300+1e300i gives an
+	// infinite denominator and a (0+0i) quotient. Scaling by the larger
+	// component keeps the ratio at 1 and the answer finite. The neighbouring
+	// case a/(3+4i) is deliberately NOT asserted: go fuses its
+	// `imag(n)*ratio - real(n)` into an FMA on arm64 and answers 0.008 where
+	// every engine without a fused multiply-add answers 0.008000000000000002
+	// - see the note in abnf/jsrtgolang.go's goCxDiv.
+	check("cx6", fmt.Sprint(a/complex(big36[0], big36[0])) == "(1.5000000000000002e-301+5e-302i)")
+	check("cx11", fmt.Sprint(a/b) == "(0.04+0.02i)")
+	// real() and imag() are float64 VALUES, so they render as one.
+	check("cx7", fmt.Sprint(real(complex(res[2], ims[2]))) == "1.234567125e+06")
+	check("cx8", real(a) == 0.1 && imag(a) == 0.2 && real(a)/2 == 0.05)
+	// The operators that already worked, kept as a regression fence.
+	check("cx9", a+b == complex(res[0]+res[1], ims[0]+ims[1]))
+	check("cx10", fmt.Sprint(b*b) == "(7+24i)")
+
+	// ----- THE SIGN OF A ZERO, at all six sites a complex product has -----
+	// (a+bi)(c+di) is (ac-bd) + (ad+bc)i: four products and two sums, each
+	// carrying its own zero sign. The ABNF tag dialect keeps an integral value
+	// as an INTEGER, so a bare `-0.0 * 3` answers +0 in the interpreter where
+	// both compiled halves answer -0.0 - a halves divergence, not a cosmetic
+	// one. The zeros are built at RUNTIME (`-pz36`), because a Go CONSTANT has
+	// no signed zero and `-0.0` written out is exactly 0.
+	pz36 := res[3]
+	nz36 := -pz36
+	check("cx12", fmt.Sprint(nz36) == "-0" && fmt.Sprint(pz36) == "0")
+	// The product. Its imaginary part is (-0.0)*3 + 0.0*(-2), i.e. -0 + -0,
+	// which is the ONE addition in the whole set that answers a negative zero.
+	check("cx13", fmt.Sprint(complex(pz36, pz36)*complex(-2, 3)) == "(-0+0i)")
+	check("cx14", fmt.Sprint(complex(nz36, pz36)*complex(-2, 3)) == "(0-0i)")
+	check("cx15", fmt.Sprint(complex(nz36, nz36)*complex(2, 2)) == "(0-0i)")
+	// The SUM and the DIFFERENCE: -0 + -0 is the only negative sum, and
+	// -0 - +0 the only negative difference.
+	check("cx16", fmt.Sprint(complex(nz36, nz36)+complex(nz36, pz36)) == "(-0+0i)")
+	check("cx17", fmt.Sprint(complex(nz36, pz36)-complex(pz36, pz36)) == "(-0+0i)")
+	check("cx18", fmt.Sprint(complex(pz36, pz36)-complex(pz36, nz36)) == "(0+0i)")
+	// The QUOTIENT, through Smith's algorithm and its ratio.
+	check("cx19", fmt.Sprint(complex(pz36, pz36)/complex(-2, 3)) == "(0-0i)")
+	check("cx20", fmt.Sprint(complex(nz36, pz36)/complex(2, 3)) == "(0+0i)")
+	// UNARY MINUS on each part, which `0 - x` would get wrong.
+	check("cx21", fmt.Sprint(-complex(pz36, nz36)) == "(-0+0i)")
+	check("cx22", fmt.Sprint(-complex(nz36, pz36)) == "(0-0i)")
+	// real() and imag() hand the part back with its sign intact.
+	check("cx23", fmt.Sprint(real(complex(nz36, pz36))) == "-0" && fmt.Sprint(imag(complex(pz36, nz36))) == "-0")
+	// A SCALAR float64 product loses the sign at the same place, so it is
+	// pinned here too: this is what made the complex product diverge.
+	check("cx24", fmt.Sprint(pz36*-2) == "-0" && fmt.Sprint(nz36*3) == "-0" && fmt.Sprint(nz36*-3) == "0")
+	check("cx25", fmt.Sprint(pz36/-2) == "-0" && fmt.Sprint(nz36+nz36) == "-0" && fmt.Sprint(nz36-pz36) == "-0")
+
+	// ----- A Go CONSTANT HAS NO SIGNED ZERO -----
+	// `-0.0` is an untyped constant expression and Go evaluates it exactly, so
+	// it is 0 and not -0.0 - `complex(-0.0, 0.0)` is (0+0i) before the program
+	// ever runs. Every engine here answered -0 until unary minus became a fold
+	// site; it was the root of every remaining difference in a 346-value
+	// complex probe. A RUNTIME negation is unaffected, which cx12 pins.
+	k36 := -0.0
+	var v36 float64 = -0.0
+	check("cx26", fmt.Sprint(k36) == "0" && fmt.Sprint(v36) == "0" && fmt.Sprint(-0.0) == "0")
+	check("cx27", fmt.Sprint(complex(-0.0, 0.0)) == "(0+0i)")
+	check("cx28", fmt.Sprint(cnz36) == "0" && fmt.Sprint(-0.0*1) == "0")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -1620,6 +1759,8 @@ func main() {
 	s32() // SECTION-CALL 32
 	s33() // SECTION-CALL 33
 	s34() // SECTION-CALL 34
+	s35() // SECTION-CALL 35
+	s36() // SECTION-CALL 36
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

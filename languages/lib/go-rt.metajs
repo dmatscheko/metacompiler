@@ -357,7 +357,7 @@ function gopRender(v, depth) {
     if (v === true) { return "true" }
     if (v === false) { return "false" }
     if (typeof v == "number") {
-        if (floIs(v)) { return floStr(v) }
+        if (floIs(v)) { return goFloText(v) }
         if (sintIs(v)) { return sintStr(v) }
         return gopNumStr(v)
     }
@@ -446,16 +446,16 @@ function gopObj(o, depth) {
         return so + "]"
     }
 
-    // A complex: Go spells it (re+imi), with the sign always written out. The
-    // twin is cxStr in go-interpreter.abnf, which concatenates the two JS
-    // numbers, so the generic number text is what has to be used here rather
-    // than a float rendering.
+    // A complex: Go spells it (re+imi), with the sign always written out. BOTH
+    // PARTS ARE float64 AND RENDER AS ONE - a complex128 has no other component
+    // type - so the FLOAT rendering is what has to be used and the generic
+    // number text is not: it printed `(1234567.125-0.5i)` where go prints
+    // `(1.234567125e+06-0.5i)`, `Infinity` where go prints `+Inf`, and lost the
+    // sign of a -0.0 part entirely. 27 of 100 rows of a 600-line complex probe,
+    // in all three engines. The twins are cxStr in go-interpreter.abnf and the
+    // $cx arm of gopObj in abnf/jsrtgolang.go.
     if (name == "$cx") {
-        var re = goStrOf(gopRender(o.re, depth + 1))
-        var im = goNum(o.im)
-        var sign = "+"
-        if (im < 0) { sign = "-"; im = -im }        // UNARY minus, never 0 - im
-        return "(" + re + sign + gopNumStr(im) + "i)"
+        return "(" + floStr(flo(goNum(o.re), 1)) + goCxSign(floStr(flo(goNum(o.im), 1))) + "i)"
     }
 
     // A pointer CELL (&n, new(int), &p): printed as & followed by the pointee.
@@ -554,6 +554,374 @@ function gopKeyLess(numeric, num, txt, a, b) {
 // %e/%f switch, 1e6/1e7, 1e20, 5e-324, MaxFloat64, 1.0/3.0) run under real go
 // 1.26.5, the go interpreter and the go compiler: the two halves agree with each
 // other and with real go on every value both before and after.
+
+// ================================= float32: the 32 BIT WIDTH ================
+//
+// Go's float32 is an IEEE-754 binary32, not a float64 spelled differently:
+// float32(1)/float32(3) is 0.33333334 where the float64 is 0.3333333333333333,
+// float32(0.1)+float32(0.2) is 0.3, and float32(1e20)*float32(1e20) is +Inf. The
+// value still travels as a double (every float32 is exactly one) and only the
+// WIDTH goes on the box, as style 4 (floGoF in abnf/jsrtjvm.go).
+//
+// THE WIDTH CANNOT LIVE IN THE FLOOR AND THAT IS MEASURED, not preferred
+// (e5e68b5, for kotlin's Float): languages/lib/runtime.c is compiled by our own
+// c-to-llvm-ir.abnf, which COMPUTES EVERY FLOAT AT DOUBLE PRECISION - its header
+// says so, ctF("flt") returns 8 and floating arithmetic is emitted as integer
+// soft-float. So the floor cannot spell `(float)x` at all: a floor-side rounder
+// would be this same power-of-two loop written a second time in C, plus a
+// shortest-round-trip-at-24-bits renderer in C, in the one file all sixteen
+// languages link and every bench row measures.
+//
+// The consequence is the one java's `float` already lives with: THE FLOOR CANNOT
+// RENDER A style-4 BOX either - jf_text has arms for 0, 1 and 2 - so goFloText
+// intercepts every rendering before floStr sees it, and js_gf32fix intercepts
+// every arithmetic result before the floor's own js_giarith answers one.
+
+// The style byte that says "this box is a binary32". floStyle is a host global
+// seeded by the floor (host ids 51..60); the twin readings are v.__f32 in
+// languages/go-interpreter.abnf and jvmIs32(sty) in abnf/jsrtjvm.go.
+function goIsF32(v) { return floIs(v) && floStyle(v) == 4 }
+
+// x * 2^k, EXACTLY - every factor is a power of two. The chunking by 2^30 keeps
+// the loop short for the ~280 halvings a subnormal float needs.
+function g1Scale2(x, k) {
+    var v = x
+    var n = k
+    while (n >= 30) { v = v * 1073741824; n = n - 30 }
+    while (n <= 0 - 30) { v = v / 1073741824; n = n + 30 }
+    while (n > 0) { v = v * 2; n = n - 1 }
+    while (n < 0) { v = v / 2; n = n + 1 }
+    return v
+}
+function g1NegZero() { return 0 / (0 - 1) }
+// Math.fround: the double nearest x that a binary32 holds, round half to EVEN,
+// subnormals and both overflows included. Written on `*` and `/` by powers of two
+// because MetaJS has no access to a double's bits (the same argument that keeps
+// d_frexp in the C floor). The twins are gF32Round in go-interpreter.abnf and
+// float64(float32(x)) in abnf/jsrtjvm.go's jvmFround.
+function g1F32Round(x) {
+    if (x !== x) { return x }
+    if (x === 0) { return x }
+    var inf = 1 / 0
+    var neg = x < 0
+    var a = neg ? 0 - x : x
+    if (a === inf) { return x }
+    var maxf = g1Scale2(16777215, 104)
+    if (a >= g1Scale2(1, 128)) { return neg ? 0 - inf : inf }
+    if (a <= g1Scale2(1, 0 - 150)) { return neg ? g1NegZero() : 0 }
+    var e = 0
+    var t = a
+    while (t >= 2) { t = t / 2; e = e + 1 }
+    while (t < 1) { t = t * 2; e = e - 1 }
+    var q = e - 23
+    if (q < 0 - 149) { q = 0 - 149 }
+    var sc = g1Scale2(a, 0 - q)
+    var f = Math.floor(sc)
+    var d = sc - f
+    if (d > 0.5) { f = f + 1 }
+    if (d === 0.5) { if (f - Math.floor(f / 2) * 2 !== 0) { f = f + 1 } }
+    var r = g1Scale2(f, q)
+    if (r > maxf) { return neg ? 0 - inf : inf }
+    if (r === 0) { return neg ? g1NegZero() : 0 }
+    return neg ? 0 - r : r
+}
+
+// ----- the 24-bit renderer --------------------------------------------------
+// THE DIGITS COME FROM THE FLOOR'S OWN float64 RENDERING and not from floPrec,
+// whose two implementations disagree (abnf/commonscript.go answers exactly n
+// digits, runtime.c answers max(n, shortest)) - a renderer written on it would be
+// a halves divergence in every float32 shorter than its double. floStr of a
+// style-1 box is the shortest round-tripping DOUBLE in every engine, and rounding
+// that digit string down to n is exact for every n a float32 wants.
+
+// The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP,
+// EXP being the decimal exponent of the first digit. The input text is go's own
+// 'g' form, so it may already carry an exponent.
+function g1DigOf(a) {
+    var s = floStr(flo(a, 1))
+    var mant = s
+    var exp = 0
+    var ei = 0 - 1
+    var i = 0
+    while (i < s.length) {
+        var c = s.charAt(i)
+        if (c == "e" || c == "E") { ei = i }
+        i = i + 1
+    }
+    if (ei >= 0) {
+        mant = s.substring(0, ei)
+        var et = s.substring(ei + 1)
+        if (et.charAt(0) == "+") { et = et.substring(1) }
+        exp = g1ParseInt(et)
+    }
+    var digits = ""
+    var pt = 0 - 1
+    var j = 0
+    while (j < mant.length) {
+        var ch = mant.charAt(j)
+        if (ch == ".") { pt = digits.length } else { if (ch != "-") { digits = digits + ch } }
+        j = j + 1
+    }
+    if (pt < 0) { pt = digits.length }
+    var lead = 0
+    while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead = lead + 1 }
+    digits = digits.substring(lead)
+    pt = pt - lead + exp
+    var endz = digits.length
+    while (endz > 1 && digits.charAt(endz - 1) == "0") { endz = endz - 1 }
+    digits = digits.substring(0, endz)
+    return digits + "e" + (pt - 1)
+}
+// A signed decimal integer. parseInt is not in this dialect's host set.
+function g1ParseInt(t) {
+    var neg = false
+    var k = 0
+    if (t.charAt(0) == "-") { neg = true; k = 1 }
+    var n = 0
+    while (k < t.length) { n = n * 10 + (t.charCodeAt(k) - 48); k = k + 1 }
+    return neg ? 0 - n : n
+}
+// A DIGITS "e" EXP form rounded to n significant digits, half to even.
+function g1RoundDig(s, n) {
+    var ei = s.indexOf("e")
+    var ds = s.substring(0, ei)
+    var ex = g1ParseInt(s.substring(ei + 1))
+    if (ds.length <= n) { return s }
+    var keep = ds.substring(0, n)
+    var nxt = ds.charCodeAt(n) - 48
+    var up = false
+    if (nxt > 5) { up = true }
+    if (nxt == 5) {
+        var rest = false
+        var i = n + 1
+        while (i < ds.length) { if (ds.charCodeAt(i) != 48) { rest = true } i = i + 1 }
+        if (rest) { up = true } else {
+            var last = ds.charCodeAt(n - 1) - 48
+            if (last - Math.floor(last / 2) * 2 == 1) { up = true }
+        }
+    }
+    if (up) {
+        var out = ""
+        var carry = 1
+        var k = n - 1
+        while (k >= 0) {
+            var dg = ds.charCodeAt(k) - 48 + carry
+            carry = 0
+            if (dg == 10) { dg = 0; carry = 1 }
+            out = "" + dg + out
+            k = k - 1
+        }
+        if (carry == 1) { out = ("1" + out).substring(0, n); ex = ex + 1 }
+        keep = out
+    }
+    var ez = keep.length
+    while (ez > 1 && keep.charAt(ez - 1) == "0") { ez = ez - 1 }
+    return keep.substring(0, ez) + "e" + ex
+}
+// The value of a DIGITS "e" EXP form. At most nine digits, so the integer is
+// exact; the power of ten goes in chunks of 10^15, the largest a double holds
+// exactly. The relative error stays under ~1e-15, five million times finer than a
+// float32's half-ulp, and the only consumer is the round-trip TEST below.
+function g1DecVal(s) {
+    var ei = s.indexOf("e")
+    var ds = s.substring(0, ei)
+    var k = g1ParseInt(s.substring(ei + 1)) - ds.length + 1
+    var m = 0
+    var i = 0
+    while (i < ds.length) { m = m * 10 + (ds.charCodeAt(i) - 48); i = i + 1 }
+    while (k >= 15) { m = m * 1000000000000000; k = k - 15 }
+    while (k <= 0 - 15) { m = m / 1000000000000000; k = k + 15 }
+    while (k > 0) { m = m * 10; k = k - 1 }
+    while (k < 0) { m = m / 10; k = k + 1 }
+    return m
+}
+// The shortest decimal that round-trips as a binary32. Nine always do.
+function g1F32Sig(a) {
+    var full = g1DigOf(a)
+    var n = 1
+    while (n < 9) {
+        var c = g1RoundDig(full, n)
+        if (g1F32Round(g1DecVal(c)) === a) { return c }
+        n = n + 1
+    }
+    return g1RoundDig(full, 9)
+}
+// Go's 'g' form of a DIGITS "e" EXP pair: scientific when the decimal exponent is
+// below -4 or at least 6, plain otherwise. strconv.FormatFloat fixes that
+// threshold at 6 for the shortest form WHATEVER the digit count.
+function g1GForm(sig) {
+    var si = sig.indexOf("e")
+    var digits = sig.substring(0, si)
+    var e10 = g1ParseInt(sig.substring(si + 1))
+    var pt = e10 + 1
+    if (e10 < 0 - 4 || e10 >= 6) {
+        var frac = digits.substring(1)
+        var es = e10 < 0 ? (0 - e10) : e10
+        var etx = "" + es
+        if (es < 10) { etx = "0" + etx }
+        return digits.charAt(0) + (frac == "" ? "" : "." + frac) + "e" + (e10 < 0 ? "-" : "+") + etx
+    }
+    if (pt <= 0) {
+        var z = ""
+        var n0 = 0 - pt
+        var q = 0
+        while (q < n0) { z = z + "0"; q = q + 1 }
+        return "0." + z + digits
+    }
+    if (pt >= digits.length) {
+        var z2 = ""
+        var q2 = 0
+        while (q2 < pt - digits.length) { z2 = z2 + "0"; q2 = q2 + 1 }
+        return digits + z2
+    }
+    return digits.substring(0, pt) + "." + digits.substring(pt)
+}
+// fmt's %v for a float32.
+function g1F32Str(x) {
+    if (x !== x) { return "NaN" }
+    var inf = 1 / 0
+    if (x === inf) { return "+Inf" }
+    if (x === 0 - inf) { return "-Inf" }
+    var neg = x < 0 || (x === 0 && 1 / x < 0)
+    var a = neg ? 0 - x : x
+    var s = a === 0 ? "0" : g1GForm(g1F32Sig(a))
+    return neg ? "-" + s : s
+}
+// Every rendering of a boxed float goes through here, because the floor's own
+// floStr has no arm for style 4 and would print a float32 with the DOUBLE digits.
+function goFloText(v) {
+    if (goIsF32(v)) { return g1F32Str(floNum(v)) }
+    return floStr(v)
+}
+
+// ----- the two externs ------------------------------------------------------
+
+// js_gflo32: `float32(e)`, a `var f float32` slot and a float32 struct field all
+// lower to it. The Go twin is js_gflo32 in abnf/jsrt.go.
+function js_gflo32(v) { return flo(g1F32Round(goNum(v)), 4) }
+
+// js_gf32fix: the WIDTH, applied to a binary operator's result. go-to-llvm-ir.abnf
+// wraps every arithmetic and every comparison in it - but ONLY in a program whose
+// source text mentions `float32` at all (usesF32 there, the gate usesComplex
+// established), so every other Go program emits exactly the IR it emitted before.
+//
+// IT IS A POST-FIX AND NOT A REPLACEMENT, and that shape is forced rather than
+// chosen: the operators it corrects are FLOOR externs (js_giarith, js_giadd,
+// js_gilt, js_goeq), and a layer-2 file cannot call a floor extern by name - a
+// name that is not a top-level function of this module or an imported one is a
+// scope lookup, and the native binary answers `variable not defined: js_gilt`.
+// So the floor's own answer is computed first and handed here as `rr`, exactly
+// as java's jvFloFix takes rtjArith's. When no operand is a float32 the answer
+// is returned untouched, which is what makes the non-f32 path in an f32 program
+// cost one call and nothing else.
+//
+// BOTH OPERANDS CONVERT FIRST and rounding only the result is not the same
+// answer - the finding 8f43e84 measured for java's float, and the reason the
+// operands are rounded before the operator rather than after it.
+//
+// GO PROMOTES THE OTHER WAY FROM JAVA. Java widens a mixed float/double pair
+// (JLS 5.6.2); Go has no implicit conversion between float32 and float64 at all,
+// so a mixed pair is a compile error and the only pair that reaches here is a
+// float32 against an UNTYPED CONSTANT, which Go converts TO float32. Hence "if
+// either side is a float32, both are".
+function js_gf32fix(op, rr, l, r) {
+    if (!goIsF32(l) && !goIsF32(r)) { return rr }
+    var a = g1F32Round(goNum(l))
+    var b = g1F32Round(goNum(r))
+    if (op == "+") { return flo(g1F32Round(a + b), 4) }
+    if (op == "-") { return flo(g1F32Round(a - b), 4) }
+    if (op == "*") { return flo(g1F32Round(a * b), 4) }
+    if (op == "/") { return flo(g1F32Round(a / b), 4) }
+    if (op == "%") { return flo(g1F32Round(a % b), 4) }
+    if (op == "==") { return a === b }
+    if (op == "!=") { return a !== b }
+    if (op == "<") { return a < b }
+    if (op == "<=") { return a <= b }
+    if (op == ">") { return a > b }
+    return a >= b
+}
+
+// js_gocxdiv is Go's OWN complex division and not the textbook formula. The gc
+// runtime's complex128div (runtime/complex.go) is SMITH'S ALGORITHM - R. L.
+// Smith, "Algorithm 116: Complex division", CACM 5(8):435, 1962 - followed by the
+// C99 G.5.1 fixups that recover the infinities a NaN pair hides. The difference
+// shows on ORDINARY values and not only on overflow: (0.1+0.2i)/(3+4i) is
+// (0.044000000000000004+0.008i) in go where the textbook formula gives
+// (...+0.008000000000000002i), and (0.1+0.2i)/(-0.0+0i) is (+Inf+Infi) where the
+// textbook formula gives (NaN+NaNi). 55 of 100 rows of a 600-line probe.
+//
+// It answers a plain {re, im} object rather than a $cx: the class descriptor
+// lives in the emitted module's scope, so the emitter builds the complex. The
+// twins are cxDiv in languages/go-interpreter.abnf and goCxDiv in
+// abnf/jsrtgolang.go; keep the three in step.
+function js_gocxdiv(av, bv, cv, dv) {
+    var a = goNum(av)
+    var b = goNum(bv)
+    var c = goNum(cv)
+    var d = goNum(dv)
+    var inf = 1 / 0
+    var e = 0
+    var f = 0
+    // Scaling by the LARGER component keeps the ratio at most 1, which is what
+    // stops 1e300/1e300 overflowing the denominator.
+    if (goAbsF(c) >= goAbsF(d)) {
+        var ra = d / c
+        var de = c + ra * d
+        e = (a + b * ra) / de
+        f = (b - a * ra) / de
+    } else {
+        var rb = c / d
+        var de2 = d + rb * c
+        e = (a * rb + b) / de2
+        f = (b * rb - a) / de2
+    }
+    if (e !== e && f !== f) {
+        if (c === 0 && d === 0 && (a === a || b === b)) {
+            var si = goCopyInf(c)
+            return {re: si * a, im: si * b}
+        }
+        if ((goIsInfF(a) || goIsInfF(b)) && goIsFinF(c) && goIsFinF(d)) {
+            var a1 = goInf2One(a)
+            var b1 = goInf2One(b)
+            return {re: inf * (a1 * c + b1 * d), im: inf * (b1 * c - a1 * d)}
+        }
+        if ((goIsInfF(c) || goIsInfF(d)) && goIsFinF(a) && goIsFinF(b)) {
+            var c1 = goInf2One(c)
+            var d1 = goInf2One(d)
+            return {re: 0 * (a * c1 + b * d1), im: 0 * (b * c1 - a * d1)}
+        }
+    }
+    return {re: e, im: f}
+}
+function goAbsF(x) { return x < 0 ? 0 - x : x }
+function goIsInfF(x) { var i = 1 / 0; return x === i || x === 0 - i }
+function goIsFinF(x) { return x === x && !goIsInfF(x) }
+// math.Copysign(Inf, x): the infinity with x's SIGN BIT, so a -0.0 denominator
+// sends the quotient to -Inf. `1/x` reads the sign bit of a zero, which a
+// comparison cannot.
+function goCopyInf(x) {
+    var i = 1 / 0
+    return (x < 0 || (x === 0 && 1 / x < 0)) ? 0 - i : i
+}
+// Go's inf2one: 1 with the argument's SIGN for an infinity, and the argument
+// itself - a zero, keeping its sign - otherwise.
+function goInf2One(x) {
+    if (!goIsInfF(x)) { return x * 0 }
+    return x === (1 / 0) ? 1 : 0 - 1
+}
+
+// goCxSign puts the ALWAYS-WRITTEN sign in front of an already rendered imaginary
+// part. It works on the TEXT rather than on the number because go's float
+// rendering writes a sign of its own for two of its four special cases: -0.0
+// renders "-0" (go prints `(-0-0i)` for a negated complex zero) and an infinity
+// renders "+Inf"/"-Inf", where go's complex form is `(0+Infi)` / `(0-Infi)` - one
+// plus, not two. A NaN carries no sign and takes the "+". The twins are goCxImag
+// in abnf/jsrtgolang.go and cxSign in languages/go-interpreter.abnf.
+function goCxSign(s) {
+    var c = s.charAt(0)
+    if (c == "-" || c == "+") { return s }
+    return "+" + s
+}
 
 // ===================================================== fmt's verbs ==========
 
@@ -1143,11 +1511,13 @@ function js_goconv(to, v) {
         return arr
     }
     if (to == "bool") { return goTruthy(v) }
-    if (to == "float32" || to == "float64") {
+    if (to == "float64") {
         // float64(x) BOXES: the result is a float64 whatever x was, which is what
         // makes float64(7)/2 == 3.5.
         return flo(goNum(v), 1)
     }
+    // float32(x) boxes AT THE 32 BIT WIDTH and therefore ROUNDS.
+    if (to == "float32") { return js_gflo32(v) }
     var n = Math.trunc(goNum(v))
     if (to == "byte" || to == "uint8") { return goMask(n, 256) }
     if (to == "uint16") { return goMask(n, 65536) }
@@ -1567,7 +1937,10 @@ function goTyWord(ty) {
 function goAdoptText(ty, v) {
     if (!goNumeric(v)) { return v }
     var word = goTyWord(ty)
-    if (word == "float64" || word == "float32") { return flo(goNum(v), 1) }
+    if (word == "float64") { return flo(goNum(v), 1) }
+    // A float32 SLOT rounds what is put in it - a struct field, a []float32
+    // element, a float32 parameter.
+    if (word == "float32") { return js_gflo32(v) }
     var b = goTyBits(word)
     if (b === undefined) { return v }
     return sintConv(v, b.w, b.u)

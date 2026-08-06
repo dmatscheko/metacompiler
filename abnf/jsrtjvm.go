@@ -44,7 +44,8 @@ import (
 //	floJava  1.0 -> "1.0"   1e20 -> "1.0E20"    inf -> "Infinity"  (Java, Kotlin)
 //	floGo    1.0 -> "1"     1e20 -> "1e+20"     inf -> "+Inf"      (Go)
 //	floCS    1.0 -> "1"     1e20 -> "1E+20"     inf -> "Infinity"  (C#)
-//	floJavaF the JAVA `float` - a 32 BIT WIDTH, not a fourth print style
+//	floJavaF the JAVA `float`    - java's print style at a 32 BIT WIDTH
+//	floGoF   the GO `float32`    - go's print style at a 32 BIT WIDTH
 //
 // THE STYLE BYTE CARRIES THE WIDTH, and that is a deliberate choice with one
 // consequence worth stating. `float` is not a print style: a Java float is a
@@ -56,19 +57,53 @@ import (
 // languages/lib/runtime.c, whose tag 14 cell stores cell.b as an opaque long and
 // hands it back through jf_style_of.
 //
-// The consequence: THE FLOOR CANNOT RENDER A style-3 BOX. runtime.c's jf_text
-// switches on the style and has no arm for 3, so it would print a float with the
-// DOUBLE renderer. languages/lib/java-rt.metajs therefore intercepts every
-// rendering and every arithmetic result of a style-3 box before the floor sees
-// it (jvFloText / jvFloFix), and llvm.Run's side of that contract is jvmFloText /
-// jvmArith here. If a fourth engine ever needs a float box, the floor is where
-// the width should move to - see docs/todo.md 1.2.
+// THE WIDTH IS GENERAL AND THE PRINT STYLE IS NOT, which is why the second
+// 32-bit style is a NEW byte rather than a reuse of floJavaF. A Go float32 prints
+// with Go's rules (`1e+20`, `+Inf`, no forced ".0") and a Java float with Java's
+// (`1.0E20`, `Infinity`, a forced ".0"), so the two cannot share a byte; but they
+// round identically, promote identically and compare identically, so everything
+// about the WIDTH is asked through jvmIs32 below rather than through an equality
+// against one constant. A third 32-bit language (C# `float` - docs/todo.md 1.1)
+// adds ONE byte, ONE arm of jvmIs32, ONE arm of jvmWidens32 and ONE renderer arm
+// in jvmFloText, and needs no other edit in this file. Nothing else here tests a
+// style for its width, which was checked by deleting the one helper that had no
+// caller rather than leaving it for the next agent to reason about.
+//
+// The other half of the mechanism is per-language and deliberately so: WHAT A
+// MIXED 32/64 PAIR PROMOTES TO. Java widens (JLS 5.6.2: `1.0f + 1.0` is a
+// double), while Go has no implicit conversion between float32 and float64 at all
+// - "the operand types must be identical", so a mixed pair is a compile error and
+// the only pair that reaches the runtime is a float32 against an UNTYPED
+// CONSTANT, which Go converts TO float32. The two answers are opposite and
+// jvmWidens32 is the one-line switch that says which.
+//
+// The consequence of putting the width on the style: THE FLOOR CANNOT RENDER A
+// 32-BIT BOX. runtime.c's jf_text switches on the style and has arms for 0, 1 and
+// 2 only, so it would print a float with the DOUBLE renderer.
+// languages/lib/java-rt.metajs and languages/lib/go-rt.metajs therefore intercept
+// every rendering and every arithmetic result of a 32-bit box before the floor
+// sees it (jvFloText / jvFloFix, goFloText / js_gf32fix), and llvm.Run's side of
+// that contract is jvmFloText / jvmArith here. If a THIRD engine ever needs a
+// float box, the floor is where the width should move to - see docs/todo.md 1.1.
 const (
 	floJava  = 0
 	floGo    = 1
 	floCS    = 2
 	floJavaF = 3
+	floGoF   = 4
 )
+
+// jvmIs32 is the WIDTH question, asked of a style byte: does a box carrying this
+// style hold a binary32? Every width-sensitive site in this file goes through it,
+// so a new 32-bit language adds one arm here and nowhere else.
+func jvmIs32(sty uint8) bool { return sty == floJavaF || sty == floGoF }
+
+// jvmWidens32 is "this language promotes a mixed 32/64 pair to the WIDER type",
+// which is JLS 5.6.2 and holds for Java and Kotlin. It is FALSE for Go, whose
+// spec forbids the mixed pair outright: the only pair that reaches the runtime is
+// a float32 against an untyped constant, and Go converts the constant to float32,
+// so the 32-bit side wins. Swift has Go's rule if it ever gets a box here.
+func jvmWidens32(sty uint8) bool { return sty == floJavaF }
 
 type jsJFlo struct {
 	f   float64
@@ -88,6 +123,8 @@ func jvmFloText(v jsJFlo) string {
 		return csFloStr(v.f)
 	case floJavaF:
 		return jvmFloStr32(v.f)
+	case floGoF:
+		return goFloStr32(v.f)
 	}
 	return jvmFloStr(v.f)
 }
@@ -239,7 +276,7 @@ func (rt *jsrt) jvmArith(op byte, l, r interface{}) interface{} {
 	// int becomes a float (JLS 5.6.2 binary numeric promotion) BEFORE the add.
 	// Rounding once at the end gives 1.6777218E7 - measured against java 24.0.2,
 	// 156 rows of a 1,231-value probe.
-	if sty == floJavaF {
+	if jvmIs32(sty) {
 		a, b = jvmFround(a), jvmFround(b)
 	}
 	var x float64
@@ -256,7 +293,7 @@ func (rt *jsrt) jvmArith(op byte, l, r interface{}) interface{} {
 		x = math.Mod(a, b)
 	}
 	if jvmIsFlo(l) || jvmIsFlo(r) {
-		if sty == floJavaF {
+		if jvmIs32(sty) {
 			x = jvmFround(x)
 		}
 		return jsJFlo{f: x, sty: sty}
@@ -271,8 +308,9 @@ func jvmFloCmpPair(rt *jsrt, l, r interface{}) (interface{}, interface{}) {
 	if !jvmFloPromotes(l, r) {
 		return l, r
 	}
-	return jsJFlo{f: jvmFround(rt.toNumber(l)), sty: floJavaF},
-		jsJFlo{f: jvmFround(rt.toNumber(r)), sty: floJavaF}
+	sty := jvmArithStyle(l, r)
+	return jsJFlo{f: jvmFround(rt.toNumber(l)), sty: sty},
+		jsJFlo{f: jvmFround(rt.toNumber(r)), sty: sty}
 }
 
 // jvmFloPromotes is "these two operands promote to FLOAT" - one is a Java float
@@ -283,7 +321,7 @@ func jvmFloPromotes(l, r interface{}) bool {
 	if !jvmIsFlo(l) && !jvmIsFlo(r) {
 		return false
 	}
-	if jvmArithStyle(l, r) != floJavaF {
+	if !jvmIs32(jvmArithStyle(l, r)) {
 		return false
 	}
 	return jvmFloNumeric(l) && jvmFloNumeric(r)
@@ -297,17 +335,23 @@ func jvmFloNumeric(v interface{}) bool {
 	return false
 }
 
-// jvmArithStyle is JLS 5.6.2 read for the WIDTH as well as the style: `float op
-// float` is a float, and `float op double` is a DOUBLE - the wider type wins,
-// which jvmStyleOf's left-operand rule gets backwards for `1.0f + 1.0`. Every
-// other pairing is unchanged, so kotlin, C# and Go (which never build a
-// floJavaF box) see exactly the old answer.
+// jvmArithStyle is the promotion rule read for the WIDTH as well as the style.
+// For a WIDENING language (java, kotlin) it is JLS 5.6.2: `float op float` is a
+// float and `float op double` is a DOUBLE - the wider type wins, which
+// jvmStyleOf's left-operand rule gets backwards for `1.0f + 1.0`. For a
+// NON-widening one (go) the 32-bit side wins instead, because the only mixed pair
+// Go accepts is a float32 against an untyped constant and Go converts the
+// constant - see jvmWidens32. A pairing with no 32-bit operand at all is
+// unchanged, so C# (which never builds one) sees exactly the old answer.
 func jvmArithStyle(l, r interface{}) uint8 {
 	lf, lok := l.(jsJFlo)
 	rf, rok := r.(jsJFlo)
 	if lok && rok {
-		if lf.sty == floJavaF {
+		if jvmIs32(lf.sty) && jvmWidens32(lf.sty) {
 			return rf.sty // float+float -> float, float+double -> double
+		}
+		if jvmIs32(rf.sty) && !jvmWidens32(rf.sty) {
+			return rf.sty // a float64-styled constant + float32 -> float32
 		}
 		return lf.sty
 	}
@@ -401,7 +445,7 @@ func (rt *jsrt) jvmMinMax(l, r interface{}, takeL bool) interface{} {
 			return f
 		}
 		x := rt.toNumber(v)
-		if sty == floJavaF {
+		if jvmIs32(sty) {
 			x = jvmFround(x)
 		}
 		return jsJFlo{f: x, sty: sty}
@@ -595,6 +639,26 @@ func goFloStr(f float64) string {
 		return "-Inf"
 	}
 	return strconv.FormatFloat(f, 'g', -1, 64)
+}
+
+// goFloStr32 is Go's fmt %v for a float32: the SAME 'g' rule read at 24
+// significant bits instead of 53, which is all bitSize does - the shortest run of
+// digits that reads back as the same binary32. float32(1)/float32(3) prints
+// "0.33333334" where the float64 prints "0.3333333333333333", and the
+// scientific-notation window (a decimal exponent below -4 or at least 6) is the
+// same one, because for the shortest form Go fixes that threshold at 6 whatever
+// the digit count. Measured against `go run`.
+func goFloStr32(f float64) string {
+	if math.IsNaN(f) {
+		return "NaN"
+	}
+	if math.IsInf(f, 1) {
+		return "+Inf"
+	}
+	if math.IsInf(f, -1) {
+		return "-Inf"
+	}
+	return strconv.FormatFloat(f, 'g', -1, 32)
 }
 
 // csFloStr is C#'s double.ToString() under the invariant culture: the shortest

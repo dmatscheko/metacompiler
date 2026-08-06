@@ -1463,7 +1463,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // is printed behind an '&' (which is what fmt does for a pointer to a struct).
         if (isPtr(v)) { return "&" + gstr(ptrGet(v)) }
         if (isCx(v)) { return cxStr(v) }
-        if (isFlo(v)) { return gFloStr(v.__flo) }
+        if (isFlo(v)) { return isF32(v) ? gF32Str(v.__flo) : gFloStr(v.__flo) }
         // A sized integer prints its digits, unsigned where it is unsigned - so a
         // uint64 above 2^63 is 18446744073709551615 and not -1.
         if (szIs(v)) { return szStr(v) }
@@ -1925,7 +1925,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         // float64(x) BOXES: the result is a float64 whatever x was, which is what
         // makes float64(7)/2 == 3.5.
-        if (to == "float64" || to == "float32") { return gFlo(szNum(gNumF(v)) * 1) }
+        // float32(x) boxes AT THE 32 BIT WIDTH and therefore ROUNDS, which is
+        // what makes float32(0.1)+float32(0.2) print 0.3 rather than
+        // 0.30000000000000004.
+        if (to == "float32") { return gFlo32(szNum(gNumF(v)) * 1) }
+        if (to == "float64") { return gFlo(szNum(gNumF(v)) * 1) }
         if (isFlo(v)) { return goConvert(to, gtrunc(v.__flo)) }
         var it = goIntTy(to)
         if (it != null) { return szConv(v, it.w, it.u) }
@@ -2049,13 +2053,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // fraction, everything else is the untyped path (where the box now decides).
     function goTypedOp(ty, op, l, r) {
         if (isFloatTy(ty)) {
-            var a = gNumF(l)
-            var b = gNumF(r)
-            if (op == "+") { return gFlo(a + b) }
-            if (op == "-") { return gFlo(a - b) }
-            if (op == "*") { return gFlo(a * b) }
-            if (op == "/") { return gFlo(a / b) }
-            if (op == "%") { return gFlo(a % b) }
+            var f32 = ty == "float32" || isF32(l) || isF32(r)
+            if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
+                return gFloOp2(op, gNumF(l), gNumF(r), f32)
+            }
             return binOp(op, l, r)
         }
         return binOp(op, l, r)
@@ -2739,7 +2740,27 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // and the group's ')' respectively), so both simply re-register at their own key.
     function goNegC(t, pos) {
         var c = constAt(pos)
-        if (c != null) { regConst(pos, cNeg(c)) }
+        if (c == null) { return makeNeg(t) }
+        var nc = cNeg(c)
+        regConst(pos, nc)
+        // UNARY MINUS IS A FOLD SITE, and the reason is a value rather than a
+        // tidy-up: a Go CONSTANT HAS NO SIGNED ZERO, so `-0.0` is exactly the
+        // constant 0 and `complex(-0.0, 0.0)` is (0+0i) before the program runs.
+        // cNeg already says so (it hands a zero back unchanged); what was missing
+        // is that nothing CONSUMED the folded value - cMaterialize is reached only
+        // from goFoldConst, i.e. only from a BINARY run - so the runtime thunk ran
+        // instead and answered -0.0. `x := -0.0`, `var y float64 = -0.0`,
+        // `const c = -0.0` and the bare literal all printed -0 where go prints 0,
+        // and every one of the eight remaining lines of a 346-value complex probe
+        // was downstream of that single -0.
+        //
+        // Only a ZERO materialises here. Folding every unary minus would be the
+        // principled form, but it would also re-route `-9223372036854775808` and
+        // every other magnitude through cMaterialize's own wrap rules, which is a
+        // change with no defect behind it; the zero is the whole observable
+        // difference and it is the one Go's "constants have no signed zero" rule
+        // actually forces.
+        if (nc.s === 0) { return cMaterialize(nc) }
         return makeNeg(t)
     }
     // items = [thunk, {at}] - PGInner tags the inner expression's end position.
@@ -3041,6 +3062,181 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function isFlo(v) { return v != undefined && v != null && typeof v == "object" && v.__flo !== undefined }
     function gNumF(v) { return isFlo(v) ? v.__flo : v }
     function gNegF(f) { return f * gNegOne }
+    // ----- float32: the same box at a 32 BIT WIDTH -----
+    // Go's float32 is an IEEE-754 binary32, not a float64 spelled differently:
+    // float32(1)/float32(3) is 0.33333334 where the float64 is 0.3333333333333333,
+    // float32(0.1)+float32(0.2) is 0.3 and not 0.30000000000000004, and
+    // float32(1e20)*float32(1e20) is +Inf where the float64 is 1e+40. So every
+    // arithmetic result rounds back to 24 significant bits and the printer takes
+    // the shortest decimal that round-trips AS A FLOAT. The value still travels as
+    // a double (every float32 is exactly one) and only the WIDTH goes on the box.
+    // The compiled twin is style floGoF of abnf/jsrtjvm.go's tag-14 box, with
+    // js_gflo32 / js_gf32fix in languages/lib/go-rt.metajs; the oracle for every
+    // row is the installed `go`. Kotlin's kFlo32 block is the worked model.
+    // ----- THE SIGN OF A ZERO, put back by hand -----
+    // The ABNF tag dialect keeps an INTEGRAL value as an integer, so `-0.0 * 3`
+    // comes back +0 where IEEE-754, go and both compiled halves say -0.0. That is
+    // this project's most-repeated defect shape and it is a HALVES DIVERGENCE
+    // here rather than a cosmetic one, because the compiled halves reach the same
+    // arithmetic through js_mul / js_add, which are real double operations.
+    // Measured: `complex(-0.0, 0.0) * complex(-2, 3)` was (0+0i) in this half and
+    // (0-0i) in the other two.
+    //
+    // The four helpers below are IEEE BY CONSTRUCTION rather than by luck, which
+    // matters because goja and the frozen engine are two different implementations
+    // and only the multiply happened to differ today. In round-to-nearest a zero
+    // result is negative in exactly these cases and no others:
+    //     a * b, a / b   the two operands' sign bits DIFFER
+    //     a + b          BOTH operands are -0.0 (+0 + -0 is +0)
+    //     a - b          a is -0.0 and b is +0.0
+    function gSignBitF(x) { return x < 0 || (x === 0 && 1 / x < 0) }
+    function gZeroSign(r, neg) {
+        if (r === 0) { return neg ? gNegZeroF() : 0 }
+        return r
+    }
+    function gMulF(a, b) { return gZeroSign(a * b, gSignBitF(a) !== gSignBitF(b)) }
+    function gDivF(a, b) { return gZeroSign(a / b, gSignBitF(a) !== gSignBitF(b)) }
+    function gAddF(a, b) { return gZeroSign(a + b, gSignBitF(a) && gSignBitF(b)) }
+    function gSubF(a, b) { return gZeroSign(a - b, gSignBitF(a) && !gSignBitF(b)) }
+    function gFlo32(f) { return {__flo: gF32Round(f), __f32: true} }
+    function isF32(v) { return v !== null && v !== undefined && typeof v == "object" && v.__f32 === true }
+    // WHICH BOX A BINARY OPERATION ANSWERS. Go has no implicit conversion between
+    // float32 and float64 at all - "the operand types must be identical" - so a
+    // mixed pair is a COMPILE ERROR and the only pair that reaches here is a
+    // float32 against an untyped constant, which Go converts TO float32. That is
+    // the opposite of Java's JLS 5.6.2 rule (where the wider type wins), and it is
+    // why abnf/jsrtjvm.go asks jvmWidens32 rather than testing one constant.
+    function gF32Res(l, r) { return isF32(l) || isF32(r) }
+    function gFloRes(f, f32) { return f32 ? gFlo32(f) : gFlo(f) }
+    function gFloOp2(op, a0, b0, f32) {
+        // BOTH OPERANDS CONVERT FIRST and rounding only the result is not the same
+        // answer - the same finding 8f43e84 measured for java's float.
+        var a = f32 ? gF32Round(a0) : a0
+        var b = f32 ? gF32Round(b0) : b0
+        if (op == "+") { return gFloRes(gAddF(a, b), f32) }
+        if (op == "-") { return gFloRes(gSubF(a, b), f32) }
+        if (op == "*") { return gFloRes(gMulF(a, b), f32) }
+        if (op == "/") { return gFloRes(gDivF(a, b), f32) }
+        return gFloRes(a % b, f32)
+    }
+    // A comparison rounds the same way, so `var f float32 = 0.1; f == 0.1` holds:
+    // Go converts the untyped constant to float32 at compile time and the two are
+    // then the same value.
+    function gCmpNum(v, f32) { return f32 ? gF32Round(gNumF(v)) : gNumF(v) }
+    // x * 2^k, EXACTLY - every factor is a power of two. The chunking by 2^30 keeps
+    // the loop short for the ~280 halvings a subnormal float needs.
+    function gScale2(x, k) {
+        var v = x
+        var n = k
+        while (n >= 30) { v = v * 1073741824; n = n - 30 }
+        while (n <= 0 - 30) { v = v / 1073741824; n = n + 30 }
+        while (n > 0) { v = v * 2; n = n - 1 }
+        while (n < 0) { v = v / 2; n = n + 1 }
+        return v
+    }
+    function gNegZeroF() { return 0 / gNegOne }
+    // Math.fround: the double nearest x that a binary32 holds, round half to EVEN,
+    // subnormals and both overflows included. Written on `*` and `/` by powers of
+    // two because the dialect has no access to a double's bits (the argument that
+    // keeps d_frexp in the C floor). The twins are g1F32Round in
+    // languages/lib/go-rt.metajs and float64(float32(x)) in the Go twin.
+    function gF32Round(x) {
+        if (x !== x) { return x }
+        if (x === 0) { return x }
+        var neg = x < 0
+        var a = neg ? gNegF(x) : x
+        if (a === gInf) { return x }
+        var maxf = gScale2(16777215, 104)
+        if (a >= gScale2(1, 128)) { return neg ? gNegF(gInf) : gInf }
+        if (a <= gScale2(1, 0 - 150)) { return neg ? gNegZeroF() : 0 }
+        var e = 0
+        var t = a
+        while (t >= 2) { t = t / 2; e = e + 1 }
+        while (t < 1) { t = t * 2; e = e - 1 }
+        var q = e - 23
+        if (q < 0 - 149) { q = 0 - 149 }
+        var sc = gScale2(a, 0 - q)
+        var f = Math.floor(sc)
+        var d = sc - f
+        if (d > 0.5) { f = f + 1 }
+        if (d === 0.5) { if (f - Math.floor(f / 2) * 2 !== 0) { f = f + 1 } }
+        var r = gScale2(f, q)
+        if (r > maxf) { return neg ? gNegF(gInf) : gInf }
+        if (r === 0) { return neg ? gNegZeroF() : 0 }
+        return neg ? gNegF(r) : r
+    }
+    // A DIGITS "e" EXP form rounded to n significant digits, half to even. Lifted
+    // from kotlin-interpreter.abnf's kRoundDig, which java's float renderer built.
+    function gRoundDig(s, n) {
+        var ei = s.indexOf("e")
+        var ds = s.substring(0, ei)
+        var ex = parseInt(s.substring(ei + 1), 10)
+        if (ds.length <= n) { return s }
+        var keep = ds.substring(0, n)
+        var nxt = ds.charCodeAt(n) - 48
+        var up = false
+        if (nxt > 5) { up = true }
+        if (nxt == 5) {
+            var rest = false
+            for (var i = n + 1; i < ds.length; i++) { if (ds.charCodeAt(i) != 48) { rest = true } }
+            if (rest) { up = true } else {
+                var last = ds.charCodeAt(n - 1) - 48
+                if (last - Math.floor(last / 2) * 2 == 1) { up = true }
+            }
+        }
+        if (up) {
+            var out = ""
+            var carry = 1
+            for (var k = n - 1; k >= 0; k--) {
+                var dg = ds.charCodeAt(k) - 48 + carry
+                carry = 0
+                if (dg == 10) { dg = 0; carry = 1 }
+                out = "" + dg + out
+            }
+            if (carry == 1) { out = ("1" + out).substring(0, n); ex = ex + 1 }
+            keep = out
+        }
+        var ez = keep.length
+        while (ez > 1 && keep.charAt(ez - 1) == "0") { ez-- }
+        return keep.substring(0, ez) + "e" + ex
+    }
+    // The value of a DIGITS "e" EXP form. At most nine digits, so the integer is
+    // exact; the power of ten goes in chunks of 10^15, the largest a double holds
+    // exactly. The relative error stays under ~1e-15, five million times finer than
+    // a float's half-ulp, and the only consumer is the round-trip TEST below.
+    function gDecVal(s) {
+        var ei = s.indexOf("e")
+        var ds = s.substring(0, ei)
+        var k = parseInt(s.substring(ei + 1), 10) - ds.length + 1
+        var m = 0
+        for (var i = 0; i < ds.length; i++) { m = m * 10 + (ds.charCodeAt(i) - 48) }
+        while (k >= 15) { m = m * 1000000000000000; k = k - 15 }
+        while (k <= 0 - 15) { m = m / 1000000000000000; k = k + 15 }
+        while (k > 0) { m = m * 10; k = k - 1 }
+        while (k < 0) { m = m / 10; k = k + 1 }
+        return m
+    }
+    // The shortest decimal that round-trips as a binary32. Nine always do.
+    function gF32Sig(a) {
+        var full = gDigOf(a)
+        var n = 1
+        while (n < 9) {
+            var c = gRoundDig(full, n)
+            if (gF32Round(gDecVal(c)) === a) { return c }
+            n = n + 1
+        }
+        return gRoundDig(full, 9)
+    }
+    // fmt's %v for a float32: the SAME 'g' rule as a float64, read at 24 bits.
+    function gF32Str(x) {
+        if (x !== x) return "NaN"
+        if (x === gInf) return "+Inf"
+        if (x === gNegF(gInf)) return "-Inf"
+        var neg = x < 0 || (x === 0 && 1 / x < 0)
+        var a = neg ? gNegF(x) : x
+        var s = a === 0 ? "0" : gGForm(gF32Sig(a))
+        return neg ? "-" + s : s
+    }
     // fmt's %v for a float64: strconv.FormatFloat(f, 'g', -1, 64), which uses
     // scientific notation when the decimal exponent is below -4 or at least 6, and
     // spells the infinities "+Inf" / "-Inf".
@@ -3057,6 +3253,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // decimal point position, then renders Go's 'g' form.
     function gFloDigits(a) {
         if (a === 0) { return "0" }
+        return gGForm(gDigOf(a))
+    }
+    // The shortest round-tripping decimal of the DOUBLE a > 0, as DIGITS "e" EXP,
+    // EXP being the decimal exponent of the first digit. `"" + a` is the shortest
+    // round-tripping form in every engine; floPrec is deliberately not used, since
+    // its two implementations disagree (see kotlin-interpreter.abnf's note).
+    function gDigOf(a) {
         var s = "" + a
         var mant = s
         var exp = 0
@@ -3082,7 +3285,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var endz = digits.length
         while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
         digits = digits.substring(0, endz)
-        var e10 = pt - 1
+        return digits + "e" + (pt - 1)
+    }
+    // Go's 'g' form of a DIGITS "e" EXP pair: scientific when the decimal exponent
+    // is below -4 or at least 6, plain otherwise. strconv.FormatFloat fixes that
+    // threshold at 6 for the shortest form WHATEVER the digit count, so the same
+    // renderer serves the float64 and the float32 (only the digits differ).
+    function gGForm(sig) {
+        var si = sig.indexOf("e")
+        var digits = sig.substring(0, si)
+        var e10 = parseInt(sig.substring(si + 1), 10)
+        var pt = e10 + 1
         if (e10 < 0 - 4 || e10 >= 6) {
             var frac = digits.substring(1)
             var es = e10 < 0 ? (0 - e10) : e10
@@ -3108,23 +3321,100 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function cxIm(v) { return isCx(v) ? v.im : 0 }
     // A complex whose imaginary part vanished is still a complex in Go (imag(2i*2i) is
     // 0, not an error), so the box is kept.
-    function cxAdd(l, r) { return newCx(cxRe(l) + cxRe(r), cxIm(l) + cxIm(r)) }
-    function cxSub(l, r) { return newCx(cxRe(l) - cxRe(r), cxIm(l) - cxIm(r)) }
+    // EVERY COMPONENT OPERATION IS SIGN-EXACT. A complex product has four products
+    // and two sums in it and each of the six carries its own zero sign, so all six
+    // go through the gMulF / gAddF / gSubF helpers rather than through a bare
+    // operator - `complex(-0.0, 0.0) * complex(-2, 3)` is (-0+0i) in go, and the
+    // imaginary part is `(-0.0)*3 + 0.0*(-2)`, i.e. -0 + -0, which is the ONE
+    // addition in the whole set that answers a negative zero.
+    function cxAdd(l, r) { return newCx(gAddF(cxRe(l), cxRe(r)), gAddF(cxIm(l), cxIm(r))) }
+    function cxSub(l, r) { return newCx(gSubF(cxRe(l), cxRe(r)), gSubF(cxIm(l), cxIm(r))) }
     function cxMul(l, r) {
         var a = cxRe(l), b = cxIm(l), c2 = cxRe(r), d = cxIm(r)
-        return newCx(a * c2 - b * d, a * d + b * c2)
+        return newCx(gSubF(gMulF(a, c2), gMulF(b, d)), gAddF(gMulF(a, d), gMulF(b, c2)))
     }
+    // DIVISION IS NOT THE TEXTBOOK FORMULA, because Go's is not. The gc runtime's
+    // complex128div is SMITH'S ALGORITHM (R. L. Smith, CACM 5(8):435, 1962) plus
+    // the C99 G.5.1 infinity fixups, and the difference shows on ORDINARY values
+    // and not only on overflow: (0.1+0.2i)/(3+4i) is (0.044000000000000004+0.008i)
+    // in go where the textbook formula gives (...+0.008000000000000002i), and
+    // (0.1+0.2i)/(-0.0+0i) is (+Inf+Infi) in go where the textbook formula gives
+    // (NaN+NaNi). 55 of 100 rows of a 600-line probe. The twins are js_gocxdiv in
+    // languages/lib/go-rt.metajs and in abnf/jsrtgolang.go; keep the three in step.
     function cxDiv(l, r) {
         var a = cxRe(l), b = cxIm(l), c2 = cxRe(r), d = cxIm(r)
-        var den = c2 * c2 + d * d
-        return newCx((a * c2 + b * d) / den, (b * c2 - a * d) / den)
+        var e = 0
+        var f = 0
+        // Scaling by the LARGER component keeps the ratio at most 1, which is what
+        // stops 1e300/1e300 overflowing the denominator.
+        if (gAbsF(c2) >= gAbsF(d)) {
+            var ra = gDivF(d, c2)
+            var de = gAddF(c2, gMulF(ra, d))
+            e = gDivF(gAddF(a, gMulF(b, ra)), de)
+            f = gDivF(gSubF(b, gMulF(a, ra)), de)
+        } else {
+            var rb = gDivF(c2, d)
+            var de2 = gAddF(d, gMulF(rb, c2))
+            e = gDivF(gAddF(gMulF(a, rb), b), de2)
+            f = gDivF(gSubF(gMulF(b, rb), a), de2)
+        }
+        if (e !== e && f !== f) {
+            // C99 G.5.1: recover the infinities and zeros a NaN pair hides.
+            if (c2 === 0 && d === 0 && (a === a || b === b)) {
+                var si = gCopyInf(c2)
+                return newCx(gMulF(si, a), gMulF(si, b))
+            }
+            if ((gIsInfF(a) || gIsInfF(b)) && gIsFinF(c2) && gIsFinF(d)) {
+                var a1 = gInf2One(a)
+                var b1 = gInf2One(b)
+                return newCx(gMulF(gInf, gAddF(gMulF(a1, c2), gMulF(b1, d))),
+                             gMulF(gInf, gSubF(gMulF(b1, c2), gMulF(a1, d))))
+            }
+            if ((gIsInfF(c2) || gIsInfF(d)) && gIsFinF(a) && gIsFinF(b)) {
+                var c1 = gInf2One(c2)
+                var d1 = gInf2One(d)
+                return newCx(gMulF(0, gAddF(gMulF(a, c1), gMulF(b, d1))),
+                             gMulF(0, gSubF(gMulF(b, c1), gMulF(a, d1))))
+            }
+        }
+        return newCx(e, f)
+    }
+    function gAbsF(x) { return x < 0 ? gNegF(x) : x }
+    function gIsInfF(x) { return x === gInf || x === gNegF(gInf) }
+    function gIsFinF(x) { return x === x && !gIsInfF(x) }
+    // math.Copysign(Inf, x): the infinity with x's SIGN BIT, so a -0.0 denominator
+    // sends the quotient to -Inf. `1/x` reads the sign bit of a zero, which a
+    // comparison cannot.
+    function gCopyInf(x) { return (x < 0 || (x === 0 && 1 / x < 0)) ? gNegF(gInf) : gInf }
+    // Go's inf2one: 1 with the argument's sign for an infinity, and the argument
+    // itself (a zero, keeping its sign) otherwise.
+    function gInf2One(x) {
+        if (!gIsInfF(x)) { return x * 0 }
+        return x === gInf ? 1 : gNegF(1)
     }
     // 2i is a decimal literal with the trailing 'i' cut off.
     function parseImag(s) { return parseFloat(s.substring(0, s.length - 1)) }
-    // Go prints a complex as (re+imi), with the sign always spelled out.
+    // Go prints a complex as (re+imi), with the sign always spelled out. BOTH
+    // PARTS ARE float64 AND RENDER AS ONE - a complex128 has no other component
+    // type - so gFloStr is what has to be used and the generic number text is
+    // not: it printed `(1234567.125-0.5i)` where go prints
+    // `(1.234567125e+06-0.5i)`, `Infinity` where go prints `+Inf`, and lost the
+    // sign of a -0.0 part entirely. 27 of 100 rows of a 600-line complex probe,
+    // in all three engines. The twins are the $cx arm of gopObj in
+    // abnf/jsrtgolang.go and of go-rt.metajs's gopObj.
     function cxStr(v) {
-        var im = v.im
-        return "(" + v.re + (im < 0 ? "-" : "+") + (im < 0 ? 0 - im : im) + "i)"
+        return "(" + gFloStr(gNumF(v.re)) + cxSign(gFloStr(gNumF(v.im))) + "i)"
+    }
+    // The ALWAYS-WRITTEN sign, put in front of an already rendered imaginary
+    // part. It works on the TEXT because gFloStr writes a sign of its own for two
+    // of its four special cases: -0.0 renders "-0" (go prints `(-0-0i)` for a
+    // negated complex zero) and an infinity renders "+Inf"/"-Inf", where go's
+    // complex form is `(0+Infi)` / `(0-Infi)` - one plus, not two. A NaN carries
+    // no sign and takes the "+".
+    function cxSign(t) {
+        var c = t.charAt(0)
+        if (c == "-" || c == "+") { return t }
+        return "+" + t
     }
     // -x keeps the operand's type: a float64 negates as a float64 (so -0.0 and
     // -1.0/0.0 are real), a complex component-wise, everything else as an integer.
@@ -3132,15 +3422,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return function() {
             var v = anytype
             v = t()
-            if (isFlo(v)) { return gFlo(gNegF(v.__flo)) }
+            if (isFlo(v)) { return isF32(v) ? {__flo: gNegF(v.__flo), __f32: true} : gFlo(gNegF(v.__flo)) }
             if (isCx(v)) { return newCx(gNegF(v.re), gNegF(v.im)) }
             // An integer negates at its OWN width, so -int8(-128) is -128 again
             // (the wrap the hardware does) rather than 128.
             return szNeg(v)
         }
     }
-    hostGlobals["real"] = function(v) { return cxRe(v) }
-    hostGlobals["imag"] = function(v) { return cxIm(v) }
+    // real(z) and imag(z) are float64 VALUES in Go, so they box: `real(a)` of
+    // 1234567.125 prints 1.234567125e+06 and not 1234567.125, and `real(z)/2` is
+    // a float division. 10 of 100 rows of the complex probe.
+    hostGlobals["real"] = function(v) { return gFlo(gNumF(cxRe(v))) }
+    hostGlobals["imag"] = function(v) { return gFlo(gNumF(cxIm(v))) }
     hostGlobals["complex"] = function(re, im) { return newCx(cxRe(re), cxRe(im)) }
     // The four operators complex changes. Overridden by ASSIGNMENT over whatever the
     // shared core installed, and each keeps the old function to delegate to.
@@ -3154,14 +3447,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // since Go concatenates with it.
     binOps["+"] = function(l, r) {
         if (isCx(l) || isCx(r)) { return cxAdd(l, r) }
-        if (isFlo(l) || isFlo(r)) { return gFlo(gNumF(l) + gNumF(r)) }
+        if (isFlo(l) || isFlo(r)) { return gFloOp2("+", gNumF(l), gNumF(r), gF32Res(l, r)) }
         if (typeof l == "string" || typeof r == "string") { return coreAddOp(l, r) }
         return szArith("+", l, r)
     }
-    binOps["-"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxSub(l, r) : ((isFlo(l) || isFlo(r)) ? gFlo(gNumF(l) - gNumF(r)) : szArith("-", l, r)) }
-    binOps["*"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxMul(l, r) : ((isFlo(l) || isFlo(r)) ? gFlo(gNumF(l) * gNumF(r)) : szArith("*", l, r)) }
-    binOps["/"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxDiv(l, r) : ((isFlo(l) || isFlo(r)) ? gFlo(gNumF(l) / gNumF(r)) : szArith("/", l, r)) }
-    binOps["%"] = function(l, r) { return (isFlo(l) || isFlo(r)) ? gFlo(gNumF(l) % gNumF(r)) : szArith("%", l, r) }
+    binOps["-"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxSub(l, r) : ((isFlo(l) || isFlo(r)) ? gFloOp2("-", gNumF(l), gNumF(r), gF32Res(l, r)) : szArith("-", l, r)) }
+    binOps["*"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxMul(l, r) : ((isFlo(l) || isFlo(r)) ? gFloOp2("*", gNumF(l), gNumF(r), gF32Res(l, r)) : szArith("*", l, r)) }
+    binOps["/"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxDiv(l, r) : ((isFlo(l) || isFlo(r)) ? gFloOp2("/", gNumF(l), gNumF(r), gF32Res(l, r)) : szArith("/", l, r)) }
+    binOps["%"] = function(l, r) { return (isFlo(l) || isFlo(r)) ? gFloOp2("%", gNumF(l), gNumF(r), gF32Res(l, r)) : szArith("%", l, r) }
     // The four comparisons unbox a float64 so it can be compared against an untyped
     // constant (x > 2 with x a float64), and go through szCmp when either side is a
     // sized integer - an unsigned one has to compare UNSIGNED, so uint64max > 0.
@@ -3169,10 +3462,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     var coreGtOp = binOps[">"]
     var coreLeOp = binOps["<="]
     var coreGeOp = binOps[">="]
-    binOps["<"]  = function(l, r) { if (isFlo(l) || isFlo(r)) { return gNumF(l) < gNumF(r) };  if (szIs(l) || szIs(r)) { return szCmp(l, r) < 0 };  return coreLtOp(l, r) }
-    binOps[">"]  = function(l, r) { if (isFlo(l) || isFlo(r)) { return gNumF(l) > gNumF(r) };  if (szIs(l) || szIs(r)) { return szCmp(l, r) > 0 };  return coreGtOp(l, r) }
-    binOps["<="] = function(l, r) { if (isFlo(l) || isFlo(r)) { return gNumF(l) <= gNumF(r) }; if (szIs(l) || szIs(r)) { return szCmp(l, r) <= 0 }; return coreLeOp(l, r) }
-    binOps[">="] = function(l, r) { if (isFlo(l) || isFlo(r)) { return gNumF(l) >= gNumF(r) }; if (szIs(l) || szIs(r)) { return szCmp(l, r) >= 0 }; return coreGeOp(l, r) }
+    binOps["<"]  = function(l, r) { if (isFlo(l) || isFlo(r)) { var f = gF32Res(l, r); return gCmpNum(l, f) < gCmpNum(r, f) };  if (szIs(l) || szIs(r)) { return szCmp(l, r) < 0 };  return coreLtOp(l, r) }
+    binOps[">"]  = function(l, r) { if (isFlo(l) || isFlo(r)) { var f = gF32Res(l, r); return gCmpNum(l, f) > gCmpNum(r, f) };  if (szIs(l) || szIs(r)) { return szCmp(l, r) > 0 };  return coreGtOp(l, r) }
+    binOps["<="] = function(l, r) { if (isFlo(l) || isFlo(r)) { var f = gF32Res(l, r); return gCmpNum(l, f) <= gCmpNum(r, f) }; if (szIs(l) || szIs(r)) { return szCmp(l, r) <= 0 }; return coreLeOp(l, r) }
+    binOps[">="] = function(l, r) { if (isFlo(l) || isFlo(r)) { var f = gF32Res(l, r); return gCmpNum(l, f) >= gCmpNum(r, f) }; if (szIs(l) || szIs(r)) { return szCmp(l, r) >= 0 }; return coreGeOp(l, r) }
     // The compound assignments are the same operators (x *= 2 is x = x * 2), so they
     // ALL resolve through binOps now instead of the shared 32 bit applyOps table -
     // which is what makes `n *= n` exact and `u8 += 1` wrap at 8 bits.
@@ -3188,7 +3481,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function goEq(l, r) {
         // A float64 box compares by VALUE, against another box or against an
         // untyped constant (x == 1 with x a float64).
-        if (isFlo(l) || isFlo(r)) { return gNumF(l) === gNumF(r) }
+        if (isFlo(l) || isFlo(r)) { var ef = gF32Res(l, r); return gCmpNum(l, ef) === gCmpNum(r, ef) }
         // A sized integer compares by VALUE too, against another box or against an
         // untyped constant (i8 == -128), never by object identity.
         if (szIs(l) || szIs(r)) { return szEq(l, r) }
@@ -3845,6 +4138,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // source position of a written-out conversion, which a variable's slot never
     // reaches.
     function gAdoptTy(ty, v) {
+        // A float32 SLOT rounds what is put in it, and it also has to re-round a
+        // value that is ALREADY a box: `var g float32 = f` with f a float64 is not
+        // a program go accepts, but `var g float32 = 0.1` arrives here as the
+        // untyped constant's float64 box.
+        if (goTyWord(ty) == "float32" && (typeof v == "number" || isFlo(v))) { return gFlo32(gNumF(v)) }
         if (isFloatTy(ty) && typeof v == "number") { return gFlo(v) }
         var it = goIntTy(goTyWord(ty))
         if (it != null && (typeof v == "number" || szIs(v))) { return szConv(v, it.w, it.u) }

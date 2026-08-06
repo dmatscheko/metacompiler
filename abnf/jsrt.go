@@ -9080,6 +9080,31 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		// The same box in Go's / C#'s print style (see jsrtjvm.go).
 		"js_gflo": func(a []uint64) uint64 { return w(jsJFlo{f: rt.toNumber(u(a[0])), sty: floGo}) },
+		// Go's float32: the same box at the 32 BIT WIDTH, so `float32(x)`, a
+		// `var f float32` slot and a float32 struct field all round to 24
+		// significant bits here and stay rounded through every operator
+		// (jvmIs32 in jsrtjvm.go). Its layer-2 twin is js_gflo32 in
+		// languages/lib/go-rt.metajs and its interpreter twin gFlo32 in
+		// languages/go-interpreter.abnf.
+		"js_gflo32": func(a []uint64) uint64 {
+			return w(jsJFlo{f: jvmFround(rt.toNumber(u(a[0]))), sty: floGoF})
+		},
+		// The WIDTH applied to a binary operator's RESULT: (op, result, l, r).
+		// See goF32Fix in abnf/jsrtgolang.go for why it is a post-fix and not a
+		// replacement, and languages/lib/go-rt.metajs for its native twin.
+		"js_gf32fix": func(a []uint64) uint64 { return rt.goF32Fix(u(a[0]), u(a[1]), u(a[2]), u(a[3])) },
+		// Go's own complex division - Smith's algorithm plus the C99 G.5.1 fixups,
+		// which is what the gc runtime does and not the textbook formula. See
+		// goCxDiv in abnf/jsrtgolang.go. It answers a plain {re, im} object because
+		// the $cx class descriptor lives in the emitted module's scope.
+		"js_gocxdiv": func(a []uint64) uint64 {
+			re, im := goCxDiv(rt.toNumber(u(a[0])), rt.toNumber(u(a[1])),
+				rt.toNumber(u(a[2])), rt.toNumber(u(a[3])))
+			o := newJSObject()
+			o.set("re", re)
+			o.set("im", im)
+			return w(o)
+		},
 		"js_csflo": func(a []uint64) uint64 { return w(jsJFlo{f: rt.toNumber(u(a[0])), sty: floCS}) },
 		// The integral casts ((int), (long), (short), (byte)): truncate towards
 		// zero and wrap to 32 bits, which is what the compiler emitted before.
@@ -9611,10 +9636,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return w(out)
 			case "bool":
 				return boolH(rt.truthy(v))
-			case "float32", "float64":
+			case "float64":
 				// float64(x) BOXES: the result is a float64 whatever x was, which
 				// is what makes float64(7)/2 == 3.5 (see jsrtjvm.go).
 				return w(jsJFlo{f: rt.toNumber(v), sty: floGo})
+			case "float32":
+				// float32(x) boxes AT THE 32 BIT WIDTH and therefore ROUNDS:
+				// float32(0.1) is 0.1 read at 24 significant bits, which is why
+				// float32(0.1)+float32(0.2) is 0.3 and not 0.30000000000000004.
+				return w(jsJFlo{f: jvmFround(rt.toNumber(v)), sty: floGoF})
 			}
 			n := math.Trunc(rt.toNumber(v))
 			switch to {

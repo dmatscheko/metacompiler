@@ -65,6 +65,7 @@ package abnf
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -173,7 +174,10 @@ func (rt *jsrt) gopRender(v interface{}, depth int) string {
 		}
 		return "false"
 	case jsJFlo:
-		return goFloStr(t.f)
+		// jvmFloText and not goFloStr: a float32 is the SAME box at style
+		// floGoF, and its shortest round-tripping form is read at 24 bits
+		// (see abnf/jsrtjvm.go).
+		return jvmFloText(t)
 	case *jsArray:
 		// A Go ARRAY is a plain host array; a Go SLICE is the {a,o,n,c} header
 		// handled in gopObj. Both print `[e e e]`, space separated.
@@ -242,18 +246,19 @@ func (rt *jsrt) gopObj(o *jsObject, depth int) (string, bool) {
 		return "[" + strings.Join(parts, " ") + "]", true
 	}
 
-	// A complex: Go spells it (re+imi), with the sign always written out. The twin
-	// is cxStr in go-interpreter.abnf, which concatenates the two JS numbers, so
-	// toString is what has to be used here rather than a float rendering.
+	// A complex: Go spells it (re+imi), with the sign always written out. BOTH
+	// PARTS ARE float64 AND RENDER AS ONE - a complex128 has no other component
+	// type - so goFloStr is what has to be used and rt.toString is not: it
+	// printed `(1234567.125-0.5i)` where go prints `(1.234567125e+06-0.5i)`,
+	// `Infinity` where go prints `+Inf`, and lost the sign of a -0.0 part
+	// entirely. 27 of 100 rows of a 600-line complex probe, in all three
+	// engines. The sign of the imaginary part is written out by hand, so the
+	// MAGNITUDE is what is rendered - and a -0.0 imaginary part prints as
+	// `-0i`, which go agrees with because it takes the same route. The twins are
+	// cxStr in go-interpreter.abnf and goCxStr in languages/lib/go-rt.metajs.
 	if name == "$cx" {
-		re := rt.toString(o.props["re"])
-		im := rt.toNumber(o.props["im"])
-		sign := "+"
-		if im < 0 {
-			sign = "-"
-			im = -im
-		}
-		return "(" + re + sign + rt.toString(im) + "i)", true
+		return "(" + goFloStr(rt.toNumber(o.props["re"])) +
+			goCxImag(goFloStr(rt.toNumber(o.props["im"]))) + "i)", true
 	}
 
 	// A pointer CELL (&n, new(int), &p): the scope that holds the variable plus
@@ -468,6 +473,163 @@ func giNumeric(v interface{}) bool {
 	return false
 }
 
+// ----- float32: the one operator extern the width needs ---------------------
+//
+// goF32Fix is js_gf32fix (registered in abnf/jsrt.go next to js_gflo32). It is
+// the WIDTH applied to a binary operator's RESULT, and go-to-llvm-ir.abnf wraps
+// every arithmetic operator and every comparison in it - but ONLY in a program
+// whose source text mentions `float32` at all (usesF32 there, the gate
+// usesComplex already established). Every other Go program emits exactly the IR
+// it did before, which is a diff against a clean archive of the base commit and
+// not an argument.
+//
+// The extern exists because the C floor cannot carry the width. runtime.c is
+// compiled by our own c-to-llvm-ir.abnf, which computes every float at DOUBLE
+// precision (measured in e5e68b5: ctF("flt") is 8 and float arithmetic is emitted
+// as integer soft-float), so si_apply / jf_arith can never round to 24 bits.
+//
+// IT IS A POST-FIX AND NOT A REPLACEMENT, and that shape is forced by layer 2
+// rather than chosen here: the operators it corrects are FLOOR externs, and a
+// layer-2 file cannot call a floor extern by name (the native binary answers
+// `variable not defined: js_gilt`). So the floor's own answer is computed first
+// and handed in as `rr`, exactly as java's jvFloFix takes rtjArith's, and this
+// half implements the identical rule so the two engines cannot drift.
+//
+// Two of the arms only exist because of the untyped constant. `f == 0.1` and
+// `f < 0.1` put a float32 next to a style-1 box, and Go converts the constant to
+// float32 at compile time, so both sides have to be rounded before the compare
+// or every such test is false.
+func (rt *jsrt) goF32Fix(opv, rr, l, r interface{}) uint64 {
+	if !goIsF32(l) && !goIsF32(r) {
+		return rt.wrap(rr)
+	}
+	a, b := jvmFround(rt.toNumber(l)), jvmFround(rt.toNumber(r))
+	boolH := func(v bool) uint64 {
+		if v {
+			return jsHTrue
+		}
+		return jsHFalse
+	}
+	switch rt.toString(opv) {
+	case "+":
+		return rt.wrap(jsJFlo{f: jvmFround(a + b), sty: floGoF})
+	case "-":
+		return rt.wrap(jsJFlo{f: jvmFround(a - b), sty: floGoF})
+	case "*":
+		return rt.wrap(jsJFlo{f: jvmFround(a * b), sty: floGoF})
+	case "/":
+		return rt.wrap(jsJFlo{f: jvmFround(a / b), sty: floGoF})
+	case "%":
+		return rt.wrap(jsJFlo{f: jvmFround(math.Mod(a, b)), sty: floGoF})
+	case "==":
+		return boolH(a == b)
+	case "!=":
+		return boolH(a != b)
+	case "<":
+		return boolH(a < b)
+	case "<=":
+		return boolH(a <= b)
+	case ">":
+		return boolH(a > b)
+	}
+	return boolH(a >= b)
+}
+
+// goIsF32 is the WIDTH question asked of a runtime value: a tag-14 box carrying
+// Go's 32-bit style. The twins are goIsF32 in languages/lib/go-rt.metajs (which
+// reads floStyle(v) == 4) and v.__f32 in languages/go-interpreter.abnf.
+func goIsF32(v interface{}) bool {
+	f, ok := v.(jsJFlo)
+	return ok && f.sty == floGoF
+}
+
+// goCxDiv is Go's OWN complex division and not the textbook formula. The gc
+// runtime's complex128div (runtime/complex.go) is SMITH'S ALGORITHM - R. L.
+// Smith, "Algorithm 116: Complex division", CACM 5(8):435, 1962 - followed by the
+// C99 G.5.1 fixups that recover the infinities a NaN pair hides. The difference
+// shows on ORDINARY values and not only on overflow: (0.1+0.2i)/(3+4i) is
+// (0.044000000000000004+0.008i) in go where the textbook formula gives
+// (...+0.008000000000000002i), and (0.1+0.2i)/(-0.0+0i) is (+Inf+Infi) where the
+// textbook formula gives (NaN+NaNi). 55 of 100 rows of a 600-line probe.
+//
+// It answers a plain {re, im} object rather than a $cx, because the class
+// descriptor lives in the emitted module's scope and an extern cannot reach it.
+// The twins are cxDiv in languages/go-interpreter.abnf and js_gocxdiv in
+// languages/lib/go-rt.metajs; keep the three in step.
+func goCxDiv(a, b, c, d float64) (float64, float64) {
+	var e, f float64
+	// Scaling by the LARGER component keeps the ratio at most 1, which is what
+	// stops 1e300/1e300 overflowing the denominator.
+	//
+	// EVERY PRODUCT IS WRAPPED IN float64(), AND THAT IS LOAD-BEARING RATHER THAN
+	// NOISE. Go's spec lets an implementation fuse `x*y + z` into a single FMA,
+	// and on arm64 gc does - so this function, written the obvious way, agreed
+	// with `go run` on six probe rows where the OTHER TWO ENGINES CANNOT: neither
+	// MetaJS nor the emitted IR has a fused multiply-add, so layer 2 and the
+	// interpreter round the product first. An explicit conversion is exactly what
+	// the spec says forces the rounding, so this keeps the three engines
+	// byte-identical. The residual disagreement with real go - 6 division rows
+	// and 11 multiplication rows of a 600-line probe - is the FMA and is recorded
+	// rather than chased; see docs/working-on-this-project.md 7.4.
+	if math.Abs(c) >= math.Abs(d) {
+		ratio := d / c
+		denom := c + float64(ratio*d)
+		e = (a + float64(b*ratio)) / denom
+		f = (b - float64(a*ratio)) / denom
+	} else {
+		ratio := c / d
+		denom := d + float64(ratio*c)
+		e = (float64(a*ratio) + b) / denom
+		f = (float64(b*ratio) - a) / denom
+	}
+	if e != e && f != f {
+		switch {
+		case c == 0 && d == 0 && (a == a || b == b):
+			si := math.Copysign(math.Inf(1), c)
+			e, f = si*a, si*b
+		case (math.IsInf(a, 0) || math.IsInf(b, 0)) && goIsFinite(c) && goIsFinite(d):
+			a, b = goInf2One(a), goInf2One(b)
+			e = math.Inf(1) * (float64(a*c) + float64(b*d))
+			f = math.Inf(1) * (float64(b*c) - float64(a*d))
+		case (math.IsInf(c, 0) || math.IsInf(d, 0)) && goIsFinite(a) && goIsFinite(b):
+			c, d = goInf2One(c), goInf2One(d)
+			e = 0 * (float64(a*c) + float64(b*d))
+			f = 0 * (float64(b*c) - float64(a*d))
+		}
+	}
+	return e, f
+}
+
+func goIsFinite(x float64) bool { return x == x && !math.IsInf(x, 0) }
+
+// Go's inf2one: 1 with the argument's SIGN for an infinity, and the argument
+// itself - a zero, keeping its sign - otherwise.
+func goInf2One(x float64) float64 {
+	g := 0.0
+	if math.IsInf(x, 0) {
+		g = 1.0
+	}
+	return math.Copysign(g, x)
+}
+
+// goCxImag puts the ALWAYS-WRITTEN sign in front of an already rendered
+// imaginary part. It works on the TEXT rather than on the number because
+// goFloStr writes a sign of its own for two of its four special cases: -0.0
+// renders "-0" (go prints `(-0-0i)` for a negated complex zero) and an infinity
+// renders "+Inf"/"-Inf", where go's complex form is `(0+Infi)` / `(0-Infi)` -
+// one plus, not two. A NaN carries no sign in either engine and takes the "+".
+// The twins are goCxSign in languages/lib/go-rt.metajs and cxSign in
+// languages/go-interpreter.abnf.
+func goCxImag(s string) string {
+	if strings.HasPrefix(s, "-") {
+		return "-" + s[1:]
+	}
+	if strings.HasPrefix(s, "+") {
+		return "+" + s[1:]
+	}
+	return "+" + s
+}
+
 // giAdoptText applies a declared type TEXT to a value. A float64 / float32 slot
 // BOXES (jsJFlo), exactly as a `var d float64 = 1` declaration does - without it
 // a float64 struct field assigned a plain 1 divides as an integer.
@@ -475,8 +637,14 @@ func giAdoptText(rt *jsrt, ty string, v interface{}) interface{} {
 	if !giNumeric(v) {
 		return v
 	}
-	if w := giTyWord(ty); w == "float64" || w == "float32" {
+	switch giTyWord(ty) {
+	case "float64":
 		return jsJFlo{f: giFloat(rt, v), sty: floGo}
+	case "float32":
+		// A float32 SLOT rounds what is put in it, which is what makes
+		// `var f float32 = 0.1; f == float32(0.1)` hold and what a struct
+		// field, a []float32 element and a float32 parameter all need.
+		return jsJFlo{f: jvmFround(giFloat(rt, v)), sty: floGoF}
 	}
 	wd, un, ok := giTyBits(ty)
 	if !ok {
