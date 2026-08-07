@@ -215,6 +215,14 @@ Building an old commit's binary and running it from the repo root silently uses 
 agent its correct 172-line fix was a no-op. To compare versions:
 `git archive <rev> | tar x -C /tmp/x`, `go build` **inside** `/tmp/x`, run it there.
 
+**A DIFF OF TWO RUNS IS NOT A MEASUREMENT UNLESS BOTH RAN TO COMPLETION.** I
+probed 60,000 doubles for a goja-vs-`-frozen` divergence and got ~61,000 differing
+rows in *both* the base and the fixed tree. The `-frozen` leg had **truncated at
+1,446 lines** against the default `-max-steps`; the diff was faithfully reporting
+the truncation. Record the exit code AND the line count of every leg and check
+them against the number of probe values before diffing. This is the same failure
+that once made the suite report a phantom `FROZEN-DIFF` for a whole round.
+
 **A crashing binary looks fast.** `/usr/bin/time` reports happily on a process that
 died. I quoted bash at "0.44 s / 5.75 MB" as an argument against an architecture
 change; it was segfaulting on every run and printing nothing. **Check the exit code
@@ -775,6 +783,55 @@ the engine `-frozen` itself runs on**, and `jsrtint.go` (682) holds floor host i
   **and** overstates (of 24 `js_*` names defined in more than one file, only two
   have bodies that group at any threshold; `js_mcall`'s six copies are 45, 1, 73,
   4, 15 and 51 lines). `tools/shape-scan` is the measure.
+
+## 7.14 A suspension signal is a host THROW, and every host `try` it passes runs
+
+The interpreter halves implement generators by **replay**: `next()` re-runs the
+body from the top, replays recorded sends, and stops at the next yield by
+**throwing** a marker (`{__genYield}` in python, the same shape in js). That
+marker travels through the *host* engine's exception machinery — so **every
+`try`/`finally` and every `with` in the interpreted program's own machinery ran
+on the way past.**
+
+The visible consequence, identical in python and js and found in both only by
+probing rather than by reading:
+
+```
+CPython/node   n1 a      n2 b       close fin
+base           n1 a fin  n2 a b fin close        <- finally at the FIRST next()
+```
+
+A generator's `finally` fired at the first `next()` — *before* the real toolchain
+runs it at all — and again at every step, and never at the close. Both items
+claimed "ordering is right in every engine; only repetition differs". **That was
+false in both.** The fix is to let the suspension marker through untouched
+(`isGenSuspend` / `jsExcTry`) and to close deliberately, by putting an **exit
+record on the resume value** of the yield the generator is parked at — the same
+"the record travels on the resume value" pattern that makes throw-forwarding
+per-coroutine.
+
+Two things follow that are worth knowing before touching this area:
+
+- **`interp-core.js`'s `excTry` is shared with six languages.** Overriding it by
+  name is §7.12's include trap; js/ts took a language-LOCAL copy instead.
+- **`.throw()` on a plain generator is blocked in every language**, and the
+  blocker is one table: the floor's tag-15 member table offers `next` (host id
+  60) and `return` (61) and nothing else (`runtime.c:3111/3116`), and
+  `*jsGenerator` in `abnf/jsrt.go` is shared by every language that exposes a
+  generator. The interpreter machinery exists in python and js; shipping it there
+  alone would be a new halves divergence, which is why it is not shipped.
+
+## 7.15 The value model already carries the type — you rarely need a type table
+
+Swift's write-site adoption looked like it needed a per-variable declared-type
+table in both engines. It did not: floatness (`{__flo}` / `__f32`) and integer
+width (`{__sz}`) live **on the value**, and the language is statically typed, so a
+write can adopt *the type of what the slot already holds*. One extern
+(`js_swadoptlike`) in three engines closed every write site the item listed.
+csharp reached the same conclusion from the other direction — its unqualified-write
+branch has to identify the member and its declaring class anyway, so adoption came
+free inside it. **Ask what the existing value already knows before designing a
+side table.**
 
 ## 7.13 Who imports what
 
