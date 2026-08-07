@@ -2346,24 +2346,26 @@ function k2FindMember(o, name) {
 // MetaJS HAS NO `arguments` object (the finding recorded at js_rsymproc in
 // languages/lib/ruby-rt.metajs), so the returned host function is written with
 // the ONE parameter Kotlin's println ever takes and an absent argument is
-// `undefined`. That makes `println()` and `println(Unit)` indistinguishable
-// here, where the Go twin prints "" and "kotlin.Unit" respectively; the blank
-// line is the reading chosen, because Kotlin has no `println(Unit)` overload -
-// Unit only arrives as `println(f())` for a Unit-returning f, which no test in
-// tests/kotlin-test*.kt writes.
+// `undefined`. That made `println()` and `println(f())` for a Unit-returning f
+// indistinguishable here, and answering "" for both was a LIVE run-vs-native
+// divergence: llvm.Run and the interpreter print "kotlin.Unit" and the native
+// binary printed a blank line (measured 2026-08-07 sweeping todo.md 1.8, closed
+// as part of todo.md 1.10).
 //
-// MEASURED 2026-08-07, sweeping todo.md 1.8: `println(f())` for a Unit-returning
-// f DOES reach it, and it is a LIVE run-vs-native divergence - llvm.Run prints
-// "kotlin.Unit" and the native binary a blank line. It is left because closing it
-// costs more than it buys: the argument COUNT is only knowable at the call site,
-// so the emitter would have to special-case a zero-argument call to the global
-// name `println`/`print` and route it through a new no-argument extern, in the
-// emitter, the Go twin and here - and `::println` bound to a value and called
-// with no arguments would still take this path in both engines. Everything else
-// about Unit agrees: "$v" interpolation, string concatenation and
+// CLOSED FROM THE OTHER SIDE, because the argument COUNT is knowable at the CALL
+// SITE and nowhere else: under -exe the emitter passes the EMPTY STRING for a
+// no-argument `println()` / `print()` (makeCall in kotlin-to-llvm-ir.abnf), which
+// Kotlin renders identically to no argument at all - `println()` writes just the
+// line terminator, `print()` writes nothing. So `undefined` reaching here is now
+// unambiguously kotlin.Unit, and k2Render already renders it as its name. No new
+// extern, no Go twin change, and the non-native module is untouched.
+//
+// RESIDUE: `::println` bound to a value and called with no arguments is a
+// reference rather than a call of the name, so no emitter can count ITS arguments
+// either; it now prints "kotlin.Unit" natively where llvm.Run prints "".
+// Everything else about Unit agrees: "$v" interpolation, string concatenation and
 // Unit.toString() all render "kotlin.Unit" in all three engines.
 function k2Line(a) {
-    if (a === undefined) { return "" }
     return k2Render(a, 0)
 }
 
@@ -6089,6 +6091,14 @@ function ktScopeMethod(target, name, args) {
 // ktRecvProp (jsrtkotlin.go:4815): the names Kotlin declares as PROPERTIES on a
 // builtin receiver; everything else resolves to a bound method, so a lookup never
 // turns a property into a callable.
+// The last four are the properties of the receivers that are neither collections
+// nor class instances - kotlin.Lazy's value / isInitialized and kotlin.Result's
+// isSuccess / isFailure, plus MatchResult.value, and Char.code. All five are `val`s in the
+// stdlib, and no builtin receiver here has a zero-argument METHOD of any of those
+// names, which is what makes adding them safe: this table's whole job is to say
+// which unqualified names are a FIELD READ rather than a bound call. Keep it in
+// step with ktRecvProp (abnf/jsrtkotlin.go), kRecvProps
+// (languages/kotlin-interpreter.abnf) and kt_recvprop (kotlin-to-llvm-ir.abnf).
 function k4RecvProp(name) {
     if (name == "size") { return true }
     if (name == "length") { return true }
@@ -6096,7 +6106,12 @@ function k4RecvProp(name) {
     if (name == "values") { return true }
     if (name == "entries") { return true }
     if (name == "indices") { return true }
-    return name == "lastIndex"
+    if (name == "lastIndex") { return true }
+    if (name == "value") { return true }
+    if (name == "isInitialized") { return true }
+    if (name == "isSuccess") { return true }
+    if (name == "isFailure") { return true }
+    return name == "code"
 }
 
 // ktIsBuiltinRecv (jsrtkotlin.go:4825): a receiver whose members come from the
@@ -6157,7 +6172,31 @@ function ktRecvMember(recv, name) {
             return KT_MISS
         }
     }
-    if (!k4IsBuiltinRecv(recv)) { return KT_MISS }
+    if (!k4IsBuiltinRecv(recv)) {
+        // A PLAIN OBJECT receiver that is neither a class instance nor one of the
+        // collection kinds: a Pair, a Triple, a Map.Entry, a lazy, a Result, a
+        // MatchResult. Kotlin's `with` binds any receiver at all, and every one of
+        // those carries real PROPERTIES - first / second / third, key / value,
+        // value / isInitialized, isSuccess / isFailure. Reaching none of them is
+        // what made `with(Pair(1, "x")) { first }` abort in the NATIVE binary while
+        // the interpreter and llvm.Run both answered 1: under llvm.Run the receiver
+        // is also bound as a scope `this`, so the emitter's own probe answers it and
+        // this walk is never reached. Own properties answer the first group and
+        // js_ktfget the second, which is exactly kt_ktget's order in
+        // kotlin-to-llvm-ir.abnf. Nothing is bound as a METHOD here: a plain object
+        // has no runtime method table to dispatch into, and binding one would
+        // swallow every global name.
+        if (ktIsObj(recv) && recv["__isclass"] === undefined) {
+            if (k4Own(recv, name)) { return recv[name] }
+            // The two receiver shapes js_ktfget ABORTS on rather than missing
+            // (kt_fprobe in kotlin-to-llvm-ir.abnf carries the same guard).
+            if (k4RecvProp(name) && !ktIsClassLit(recv) && !ktIsPkg(recv)) {
+                var pv = js_ktfget(recv, name)
+                if (!k4Nullish(pv)) { return pv }
+            }
+        }
+        return KT_MISS
+    }
     // A PROPERTY of the receiver is a FIELD READ, not a zero-argument method call.
     // This used to route through ktSmcall, and the two are not the same set:
     // `with(list) { size }` worked because the list method table happens to carry a

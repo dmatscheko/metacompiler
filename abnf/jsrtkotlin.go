@@ -5024,9 +5024,18 @@ var ktIsType func(v interface{}, tname string) bool
 // ktRecvProps are the names Kotlin declares as PROPERTIES on a builtin receiver;
 // everything else resolves to a bound method, so a lookup never turns a property
 // into a callable. The twin is kRecvProps in kotlin-interpreter.abnf.
+// The last four are the properties of the receivers that are neither collections
+// nor class instances - kotlin.Lazy's value / isInitialized and kotlin.Result's
+// isSuccess / isFailure, plus MatchResult.value, and Char.code. All five are `val`s in the
+// stdlib, and no builtin receiver here has a zero-argument METHOD of any of those
+// names, which is what makes adding them to this table safe: the table's whole job
+// is to say which unqualified names are a field read rather than a bound call.
+// Keep it in step with k4RecvProp (languages/lib/kotlin-rt.metajs), kRecvProps
+// (languages/kotlin-interpreter.abnf) and kt_recvprop (kotlin-to-llvm-ir.abnf).
 func ktRecvProp(name string) bool {
 	switch name {
-	case "size", "length", "keys", "values", "entries", "indices", "lastIndex":
+	case "size", "length", "keys", "values", "entries", "indices", "lastIndex",
+		"value", "isInitialized", "isSuccess", "isFailure", "code":
 		return true
 	}
 	return false
@@ -5111,6 +5120,33 @@ func (rt *jsrt) ktRecvMember(recv interface{}, name string) (interface{}, bool) 
 		}
 	}
 	if !ktIsBuiltinRecv(recv) || ktMemberCall == nil {
+		// A PLAIN OBJECT receiver that is neither a class instance nor one of the
+		// collection kinds: a Pair, a Triple, a Map.Entry, a lazy, a Result, a
+		// MatchResult. Kotlin's `with` binds any receiver at all, and every one of
+		// those carries real PROPERTIES - first / second / third, key / value,
+		// value / isInitialized, isSuccess / isFailure. Its own properties answer
+		// the first group and js_ktfget the second, which is exactly what the
+		// emitter's `this` probe does for the same receiver in
+		// kotlin-to-llvm-ir.abnf's kt_ktget (own read, then the recv-property gate),
+		// so the three engines agree by construction rather than by coincidence.
+		// Nothing is bound as a METHOD here: a plain object has no runtime method
+		// table to dispatch into, and binding one would swallow every global name.
+		if o, isObj := recv.(*jsObject); isObj && ktMemberCall != nil {
+			if _, isClsDesc := o.props["__isclass"]; !isClsDesc {
+				if v, ok := o.props[name]; ok {
+					return v, true
+				}
+				// The two receiver shapes js_ktfget ABORTS on rather than missing
+				// (kt_fprobe in kotlin-to-llvm-ir.abnf carries the same guard).
+				_, isClsLit := ktIsClassLit(o)
+				_, isPkg := ktIsPkg(o)
+				if ktRecvProp(name) && ktRefRead != nil && !isClsLit && !isPkg {
+					if v := ktRefRead(recv, name); !isUndefOrNull(v) {
+						return v, true
+					}
+				}
+			}
+		}
 		return nil, false
 	}
 	// A PROPERTY of the receiver is a FIELD READ, not a zero-argument method call.

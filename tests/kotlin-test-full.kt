@@ -3447,6 +3447,110 @@ fun sec75() {
 
 // ===== END SECTIONS =====
 
+// ===== SECTION 76: the IMPLICIT RECEIVER, and WHICH read answers it =====
+// todo.md 1.10. The compiler half resolves an unqualified name through kt_ktget
+// (kotlin-to-llvm-ir.abnf), whose `this` probe asked js_typeof == "object" and then
+// read the receiver with the SHARED js_get. That is the right read for a class
+// instance and the wrong one for every OBJECT-SHAPED BUILTIN - a Map, a List, a Set,
+// a StringBuilder, a Result, a lazy - which are all "object" too. Two live
+// divergences came out of the one line:
+//   * `with(m) { entries }` answered js_get's dict arm, a raw Pair list printing
+//     `[(a, 1), (b, 2)]`, where `m.entries` written out, the interpreter and the
+//     native binary all say `[a=1, b=2]`.
+//   * `val List<Int>.mid get() = this[size / 2]` aborted with *unknown name: size*:
+//     js_get misses `size` on an array, and the accessor probe behind it finds no
+//     {__acc} on a receiver that carries no class descriptor at all.
+// The test is now `__class`, and a builtin receiver then splits AGAIN on the
+// ktRecvProp table - the SAME table the interpreter's kRecvProps and layer 2's
+// k4RecvProp use - because js_ktfget answers `first`/`last`/`step` off a
+// MATERIALIZED range and an ungated route made `with(listOf(4, 5)) { first() }` call
+// the number 4. kr9 is that guard.
+// The sweep around it found four more, all of them run-vs-native or
+// interpreter-vs-run splits that no gate here can see:
+//   * a PLAIN OBJECT receiver (Pair, Triple, Map.Entry) aborted NATIVELY, because
+//     `with` binds a scope `this` under llvm.Run and only pushes ktRecvStack
+//     natively, and ktRecvMember had no arm for an object that is neither a class
+//     instance nor a collection (kr12-kr14);
+//   * kotlin.Lazy's value / isInitialized, kotlin.Result's isSuccess / isFailure,
+//     MatchResult.value and Char.code are `val`s the runtime SYNTHESISES, so they
+//     are neither own properties nor collection properties and reached nothing
+//     (kr15-kr17);
+//   * a Unit-valued LOCAL is a slot holding `undefined`, which js_scope_typeof
+//     cannot tell from an absent name, so the native binary aborted on `println(x)`
+//     where llvm.Run printed kotlin.Unit. js_scope_has is the own-scope test that
+//     separates the two, and this is its first use from an emitter (kr20);
+//   * `println(f())` for a Unit-returning f printed a BLANK LINE natively and
+//     kotlin.Unit everywhere else, because MetaJS has no `arguments` and layer 2
+//     could not tell it from `println()`. The emitter now passes the empty string
+//     for a no-argument println under -exe, which Kotlin renders identically. The
+//     two bare prints at the end of this section are that pair; they are OUTPUT, not
+//     assertions, and only --cross and a native probe can see them.
+// STILL OPEN and deliberately not chased: `with(1..7 step 2) { first }` answers a
+// bound method in both compiled halves and aborts in the interpreter. A range is
+// materialized as a plain list here, `first`/`last` are member FUNCTIONS on List and
+// PROPERTIES on IntProgression, and the name alone cannot decide which - so any
+// answer breaks the other shape. `with(Regex("a")) { pattern }` misses in all three.
+// UNVERIFIED against kotlinc (none on this machine). Expected values are the
+// interpreter half's, which is this project's reference for Kotlin semantics, cross-
+// read against the kotlin.collections / kotlin.text / kotlin.Lazy / kotlin.Result
+// API documentation for the member kinds (`val` versus `fun`).
+val List<Int>.mid76: Int get() = this[size / 2]
+val String.midc76: Char get() = this[length / 2]
+fun List<Int>.li76() = lastIndex
+fun String.idx76() = indices.toString()
+class Hold76(val raw: Int) {
+    val trebled: Int get() = raw * 3
+    fun size() = 10
+    fun show() = trebled
+    fun both() = raw + size()
+}
+fun u76(): Unit { }
+
+fun sec76() {
+    val m = mutableMapOf("a" to 1, "b" to 2)
+    check("kr1", with(m) { entries.toString() } == m.entries.toString())
+    check("kr2", with(m) { entries.toString() } == "[a=1, b=2]")
+    check("kr3", with(m) { keys.toString() } == "[a, b]" && with(m) { values.toString() } == "[1, 2]")
+    check("kr4", with(m) { size } == 2 && with(m) { get("b") } == 2)
+    val xs = listOf(1, 2, 3)
+    check("kr5", xs.mid76 == 2)
+    check("kr6", "abc".midc76 == 'b')
+    check("kr7", xs.li76() == 2 && "abcd".idx76() == "[0, 1, 2, 3]")
+    check("kr8", with(xs) { size } == 3 && with(xs) { lastIndex } == 2 &&
+                 with(xs) { indices.toString() } == "[0, 1, 2]")
+    // A builtin receiver's METHODS stay methods. Reading `first` as a property here
+    // would answer the number 1 and the call would then abort.
+    check("kr9", with(xs) { first() } == 1 && with(xs) { last() } == 3 && with(xs) { sum() } == 6)
+    check("kr10", mutableListOf(1).apply { add(3) }.toString() == "[1, 3]")
+    // An INSTANCE keeps the ordinary member read, so a class member named like a
+    // collection property still wins, and an accessor read unqualified still resolves.
+    check("kr11", Hold76(4).show() == 12 && Hold76(4).both() == 14)
+    // A plain object receiver: its OWN properties first.
+    val p = Pair(1, "x")
+    check("kr12", with(p) { first } == 1 && with(p) { second } == "x")
+    val t = Triple(1, 2, 3)
+    check("kr13", with(t) { first + second + third } == 6)
+    val e = mapOf("a" to 1).entries.first()
+    check("kr14", with(e) { key } == "a" && with(e) { value } == 1)
+    // Then the ones the runtime synthesises.
+    val lz = lazy { 42 }
+    check("kr15", with(lz) { value } == 42 && with(lz) { isInitialized })
+    val rs = runCatching { 7 }
+    check("kr16", with(rs) { isSuccess } && !with(rs) { isFailure })
+    check("kr17", with('q') { code } == 113)
+    val mr = Regex("a(b)c").find("zabc")!!
+    check("kr18", with(mr) { value } == "abc")
+    val sb = StringBuilder("ab")
+    check("kr19", with(sb) { append("c"); length } == 3 && with(sb) { lastIndex } == 2)
+    val st = mutableSetOf(1, 2, 3)
+    check("kr20", with(st) { size } == 3 && with(st) { contains(2) })
+    // A Unit-valued LOCAL is a slot holding undefined - present, not absent.
+    val ux: Unit = u76()
+    check("kr21", ux.toString() == "kotlin.Unit")
+    println(u76())
+    println()
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3523,6 +3627,7 @@ fun main() {
     sec73() // SECTION-CALL 73
     sec74() // SECTION-CALL 74
     sec75() // SECTION-CALL 75
+    sec76() // SECTION-CALL 76
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

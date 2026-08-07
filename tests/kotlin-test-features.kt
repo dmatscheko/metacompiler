@@ -299,6 +299,8 @@ fun transform(list: List<Int>): String {
     return out
 }
 
+val List<Int>.midRecv: Int get() = this[size / 2]
+
 fun main() {
     // ----- numbers, arithmetic, precedence -----
     check("arith-precedence", 2 + 3 * 4 == 14)
@@ -876,6 +878,22 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     // The same digits at binary32 width, where the shortest run is a FLOAT's.
     check("fltstr-from-double", kflo[0].toFloat().toString() == "5.1799756E21" &&
         kflo[5].toFloat().toString() == "9.33973E-4" && kflo[8].toFloat().toString() == "0.33333334")
+
+    // ----- the IMPLICIT RECEIVER: which read answers an unqualified name -----
+    // todo.md 1.10. The compiler half's `this` probe chose its read with
+    // js_typeof == "object", which is true of a Map and a List as much as of a
+    // class instance, so every object-shaped BUILTIN was read with the shared
+    // js_get: `with(m) { entries }` answered a raw Pair list where `m.entries`
+    // written out, the interpreter and the native binary all say `[a=1, b=2]`,
+    // and an unqualified `size` on an extension receiver aborted outright. The
+    // test is `__class` now, gated by the ktRecvProp table so a builtin's
+    // METHODS stay methods. Section 76 of tests/kotlin-test-full.kt carries the
+    // whole sweep; these four are the ones worth having in the matrix.
+    val recvM = mutableMapOf("a" to 1, "b" to 2)
+    check("recv-entries", with(recvM) { entries.toString() } == "[a=1, b=2]")
+    check("recv-ext-size", listOf(1, 2, 3).midRecv == 2)
+    check("recv-method-stays-method", with(listOf(4, 5, 6)) { first() } == 4)
+    check("recv-plain-object", with(Pair(1, "x")) { first } == 1 && with(lazy { 42 }) { value } == 42)
 
     // ----- everything combined -----
     check("combined-pipeline", transform(listOf(1, 2, -3)) == "o1e2x")

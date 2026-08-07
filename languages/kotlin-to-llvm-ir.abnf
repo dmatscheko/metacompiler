@@ -2580,6 +2580,67 @@ KwContract  = "contract" KwEnd ;
             noB.NewRet(hUndef)
         })
     }
+    // kt_recvprop(name) is ktRecvProp (jsrtkotlin.go:5027) / k4RecvProp
+    // (languages/lib/kotlin-rt.metajs) / kRecvProps (kotlin-interpreter.abnf): the
+    // names that are a PROPERTY of a builtin receiver rather than a zero-argument
+    // METHOD of it. The distinction is the whole of it - `with(list) { size }` is a
+    // field read and `with(list) { first() }` is a call, and the SAME table decides
+    // both in all three engines, so this lowering has to consult it too or the two
+    // arms swap: a bare js_ktfget answers `first` off a materialized range and
+    // `first()` then calls a number. Keep the four lists in step.
+    function rtRecvProp() {
+        return rtFunc("kt_recvprop", 1, function(b, ps) {
+            var names = ["size", "length", "keys", "values", "entries", "indices", "lastIndex",
+                         "value", "isInitialized", "isSuccess", "isFailure", "code"]
+            var yesB = curF.NewBlock("")
+            var noB = curF.NewBlock("")
+            var cur = b
+            for (var i = 0; i < names.length; i++) {
+                var nextB = curF.NewBlock("")
+                cur.NewCondBr(truthy(cur, callExt(cur, "js_seq", [ps[0], emitStr(cur, names[i])])), yesB, nextB)
+                cur = nextB
+            }
+            cur.NewBr(noB)
+            yesB.NewRet(hTrue)
+            noB.NewRet(hFalse)
+        })
+    }
+    // kt_fprobe(o, name) is js_ktfget made SPECULATIVE: Kotlin's field read for any
+    // receiver on which asking a question cannot become an answer of its own. It is
+    // what lets an unqualified name be TRIED against an implicit receiver, which a
+    // bare js_ktfget cannot be, because three of its receiver shapes abort rather
+    // than miss (jsrtkotlin.go's js_ktfget and its layer-2 twin, in the same order):
+    //
+    //   * null / undefined - the shared js_get FAILS on nil rather than answering
+    //     undefined, which is the whole reason kt_safeget exists;
+    //   * a CLASS LITERAL ({__kclass}) - `fail("member .X of a class literal")` for
+    //     anything outside simpleName/qualifiedName/name/java/javaClass/
+    //     javaObjectType, so `with(C::class) { anythingElse }` would abort where the
+    //     dispatch / implicit-receiver-stack arms below still have the answer;
+    //   * a PACKAGE object ({__pkg}) - ktPkgMember resolves a sub-package or a
+    //     global and has no miss either.
+    //
+    // An UNBOUND callable reference is the fourth and is deliberately NOT guarded:
+    // it is a host FUNCTION, no property distinguishes it from an ordinary closure
+    // from inside emitted IR, and it already reached the bare js_ktfget on the
+    // non-object arm before this helper existed.
+    function rtKtFProbe() {
+        return rtFunc("kt_fprobe", 2, function(b, ps) {
+            var v = ps[0]
+            var noB = curF.NewBlock("")
+            var c1 = curF.NewBlock("")
+            var c2 = curF.NewBlock("")
+            var c3 = curF.NewBlock("")
+            var okB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [v, hNull])), noB, c1)
+            c1.NewCondBr(truthy(c1, callExt(c1, "js_seq", [v, hUndef])), noB, c2)
+            c2.NewCondBr(truthy(c2, c2.NewCall(rtSafeGet(), [v, emitStr(c2, "__kclass")])), noB, c3)
+            c3.NewCondBr(truthy(c3, callExt(c3, "js_sne",
+                [c3.NewCall(rtSafeGet(), [v, emitStr(c3, "__pkg")]), hUndef])), noB, okB)
+            okB.NewRet(callExt(okB, "js_ktfget", [v, ps[1]]))
+            noB.NewRet(hUndef)
+        })
+    }
     // A LOCAL or top-level DELEGATED property binds a BOX, not a value, so every read
     // goes through the delegate's getValue - jsrtkotlin.go's js_ktget does it inline
     // with ktPDeleg. The box is an ordinary object ({__pdeleg, d, owner, pname}), so
@@ -2606,9 +2667,18 @@ KwContract  = "contract" KwEnd ;
     //   * the Go twin walks the WHOLE chain looking for a `this` and for a
     //     `__dispatch`; this sees the innermost of each.
     //   * js_scope_typeof answers "undefined" for a slot that HOLDS undefined and
-    //     for an absent name alike, so such a name takes the `this` fallback and
-    //     then the final js_scope_get. That is swift's recorded inexactness, met
-    //     again.
+    //     for an absent name alike, so such a name took the `this` fallback and then
+    //     the final js_scope_get - swift's recorded inexactness, met again. HALF
+    //     CLOSED: js_scope_has is the OWN-SCOPE twin of the scopeHas builtin and it
+    //     does distinguish the two, so a name bound in the INNERMOST scope holding
+    //     undefined is now read as the local it is. `val x: Unit = f(); println(x)`
+    //     aborted the native binary with *js_ktget(x) needs to WALK a scope chain*
+    //     while llvm.Run printed kotlin.Unit, because a Unit-valued local IS a slot
+    //     holding undefined. What stays open is the same name bound in an ENCLOSING
+    //     scope: js_scope_has does not walk and there is no js_scope_parent EXTERN
+    //     (host 65 is a MetaJS BUILTIN, reachable from layer 2 and not from emitted
+    //     IR), so that case still falls out to js_ktget. This is the first emitter
+    //     use of the scope API todo.md 6.1 records as unused.
     // js_ktfget is the probe rather than js_get because it is Kotlin's field read -
     // a StringBuilder's properties, a Map miss as null, the Regex/MatchResult
     // properties - and because it is the one an accessor pair (js_defprop on the
@@ -2618,15 +2688,70 @@ KwContract  = "contract" KwEnd ;
         return rtFunc("kt_ktget", 2, function(b, ps) {
             var localB = curF.NewBlock("")
             var thisB = curF.NewBlock("")
+            var undefB = curF.NewBlock("")
             var t = callExt(b, "js_scope_typeof", [ps[0], ps[1]])
-            b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), thisB, localB)
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), undefB, localB)
+            // "undefined" is two answers, and js_scope_has separates them - see the
+            // header. The test is on the MISS path only, so a name that resolves pays
+            // nothing for it.
+            undefB.NewCondBr(truthy(undefB, callExt(undefB, "js_scope_has", [ps[0], ps[1]])), localB, thisB)
             localB.NewRet(localB.NewCall(rtDelegRead(), [callExt(localB, "js_scope_get", [ps[0], ps[1]])]))
             var probeB = curF.NewBlock("")
             var dispB = curF.NewBlock("")
             var tt = callExt(thisB, "js_scope_typeof", [ps[0], emitStr(thisB, "this")])
             thisB.NewCondBr(truthy(thisB, callExt(thisB, "js_seq", [tt, emitStr(thisB, "undefined")])), dispB, probeB)
             var thV = callExt(probeB, "js_scope_get", [ps[0], emitStr(probeB, "this")])
-            var mV = probeB.NewCall(rtSafeGet(), [thV, ps[1]])
+            // AN OBJECT-SHAPED BUILTIN RECEIVER IS NOT AN INSTANCE, AND js_get IS THE
+            // WRONG READ FOR IT. The test used to be js_typeof == "object", which is
+            // true of a Map, a List, a Set, a StringBuilder, a Result and a lazy just
+            // as much as of a class instance, so every one of them took the instance
+            // arm and was read with the shared js_get:
+            //   * `with(m) { entries }` answered js_get's dict arm - the raw Pair
+            //     list, printing `[(a, 1), (b, 2)]` - where `m.entries` written out,
+            //     the interpreter and the native binary all say `[a=1, b=2]`. A live
+            //     llvm.Run-vs-everything-else divergence (todo.md 1.10).
+            //   * `val List<Int>.mid get() = this[size / 2]` said *unknown name:
+            //     size*: js_get misses `size` on an array and the accessor probe
+            //     below finds no {__acc} on a receiver with no descriptor at all, so
+            //     the read fell out to the extern. The interpreter answered 2.
+            // The test is now `__class`, which is what actually distinguishes the two
+            // - a class instance is read with js_get, because on an instance a bare
+            // js_ktfget would ALSO answer a method off the descriptor where the Go
+            // twin's obj.props[name] does not (`add` inside `apply { add(3) }`
+            // answered the enclosing class's member instead of the list's, the
+            // measurement that first shaped this helper).
+            //
+            // A builtin receiver then splits AGAIN, on kt_recvprop, and that gate is
+            // not optional: ktRecvMember in every engine reads a recv PROPERTY with
+            // js_ktfget and binds anything else as a zero-argument METHOD, and
+            // js_ktfget answers `first`/`last`/`step` off a materialized range, so an
+            // ungated route made `with(listOf(4, 5)) { first() }` call the number 4.
+            // Measured: it aborts under llvm.Run without the gate.
+            //
+            // COST, measured rather than assumed, because this helper is the compiler
+            // half's hottest name resolution: the `__class` read is one kt_safeget
+            // more on the HIT path, and it buys back the two the accessor and
+            // lateinit probes used to make for themselves. A 300,000-iteration loop
+            // of unqualified instance-field reads (`s = s + a + b` inside a method),
+            // 9 layout draws each, native: base median 196,769,166,268 instructions
+            // (spread 1.68%), this shape 195,806,263,424 (spread 2.93%) - -0.49%,
+            // inside both spreads. tests/bench/mod.kt reads only LOCALS and never
+            // reaches this block, so --bench cannot see either direction here.
+            var clsV = probeB.NewCall(rtSafeGet(), [thV, emitStr(probeB, "__class")])
+            var instB = curF.NewBlock("")
+            var bltB = curF.NewBlock("")
+            var fgB = curF.NewBlock("")
+            probeB.NewCondBr(truthy(probeB, clsV), instB, bltB)
+            // A receiver that is not an object at all - a String, a Long, a Char - has
+            // no member js_get can answer, so it takes Kotlin's field read for EVERY
+            // name, which is what `fun String.f() = length` has always needed. Only
+            // the object-shaped builtins are gated, because only they have properties
+            // js_get can plausibly answer.
+            var rpB = curF.NewBlock("")
+            bltB.NewCondBr(truthy(bltB, callExt(bltB, "js_seq",
+                [callExt(bltB, "js_typeof", [thV]), emitStr(bltB, "object")])), rpB, fgB)
+            rpB.NewCondBr(truthy(rpB, rpB.NewCall(rtRecvProp(), [ps[1]])), fgB, instB)
+            var mV = instB.NewCall(rtSafeGet(), [thV, ps[1]])
             var hitB = curF.NewBlock("")
             var p2B = curF.NewBlock("")
             // NULL and undefined both fall THROUGH rather than hit, which is not an
@@ -2635,8 +2760,8 @@ KwContract  = "contract" KwEnd ;
             // var` is exactly the null/undefined case, so it must reach the extern
             // to raise UninitializedPropertyAccessException. Measured: assertion
             // lat3 of tests/kotlin-test-full.kt fails without this arm.
-            var nonObjB = curF.NewBlock("")
-            probeB.NewCondBr(truthy(probeB, callExt(probeB, "js_sne", [mV, hUndef])), p2B, nonObjB)
+            var accB = curF.NewBlock("")
+            instB.NewCondBr(truthy(instB, callExt(instB, "js_sne", [mV, hUndef])), p2B, accB)
             // A NULL is not a miss: js_get answers undefined for an ABSENT property
             // and null for one that HOLDS null, so the two are distinguishable here -
             // and the difference is exactly ktLateinitCheck's case. jsrtkotlin.go
@@ -2645,8 +2770,7 @@ KwContract  = "contract" KwEnd ;
             // Measured: assertion lat3 of tests/kotlin-test-full.kt.
             var latB = curF.NewBlock("")
             p2B.NewCondBr(truthy(p2B, callExt(p2B, "js_sne", [mV, hNull])), hitB, latB)
-            var liV = latB.NewCall(rtClsFind(), [latB.NewCall(rtSafeGet(), [thV, emitStr(latB, "__class")]),
-                emitStr(latB, "__lateinit")])
+            var liV = latB.NewCall(rtClsFind(), [clsV, emitStr(latB, "__lateinit")])
             var raiseB = curF.NewBlock("")
             var okB = curF.NewBlock("")
             latB.NewCondBr(truthy(latB, latB.NewCall(rtSafeGet(), [liV, ps[1]])), raiseB, okB)
@@ -2658,37 +2782,28 @@ KwContract  = "contract" KwEnd ;
             raiseB.NewRet(hNull)
             okB.NewRet(mV)
             hitB.NewRet(mV)
-            // A receiver that is NOT a plain object still has members: a String has
-            // length, a List has size and its indexes. Inside an extension function
-            // (`fun String.f() = length`) the unqualified name has to reach them,
-            // which is the `else if !isUndefOrNull(t)` / rt.getMember arm of
-            // jsrt.go's js_kget and of jsrtkotlin.go's js_ktget. js_ktfget IS that
-            // read. It is applied ONLY to a non-object receiver, because on an
-            // INSTANCE it would also answer a method off the descriptor, where the
-            // Go twin's obj.props[name] does not - the difference the first
-            // measurement of this helper found (`add` inside `apply { add(3) }`
-            // answered the enclosing class's member instead of the list's).
-            //
-            // An INSTANCE takes the accessor-only probe below instead: `val trebled
-            // get() = raw * 3` read UNQUALIFIED from inside a member of the same
-            // class. The pair lives on the DESCRIPTOR (js_defprop), so js_get above
-            // missed it. rt.getMember answers such a read through findClassAccessor,
-            // so under llvm.Run js_get already hit and this arm is unreachable;
-            // natively the C floor's member read knows nothing of an accessor pair,
-            // so the chain has to be walked here. The probe fires ONLY when
-            // kt_clsfind finds an actual {__acc} record, which is why it cannot
+            // An INSTANCE whose js_get missed takes the accessor-only probe: `val
+            // trebled get() = raw * 3` read UNQUALIFIED from inside a member of the
+            // same class. The pair lives on the DESCRIPTOR (js_defprop), so js_get
+            // above missed it. rt.getMember answers such a read through
+            // findClassAccessor, so under llvm.Run js_get already hit and this arm is
+            // unreachable; natively the C floor's member read knows nothing of an
+            // accessor pair, so the chain has to be walked here. The probe fires ONLY
+            // when kt_clsfind finds an actual {__acc} record, which is why it cannot
             // answer a METHOD off the descriptor the way a bare js_ktfget would.
-            var fgB = curF.NewBlock("")
-            var accB = curF.NewBlock("")
-            nonObjB.NewCondBr(truthy(nonObjB, callExt(nonObjB, "js_seq",
-                [callExt(nonObjB, "js_typeof", [thV]), emitStr(nonObjB, "object")])), accB, fgB)
-            var accV = accB.NewCall(rtClsFind(), [accB.NewCall(rtSafeGet(),
-                [thV, emitStr(accB, "__class")]), ps[1]])
+            var accV = accB.NewCall(rtClsFind(), [clsV, ps[1]])
             var accHitB = curF.NewBlock("")
             accB.NewCondBr(truthy(accB, accB.NewCall(rtSafeGet(), [accV, emitStr(accB, "__acc")])),
                 accHitB, dispB)
             accHitB.NewRet(callExt(accHitB, "js_ktfget", [thV, ps[1]]))
-            var fV = callExt(fgB, "js_ktfget", [thV, ps[1]])
+            // A BUILTIN receiver: a String has length, a List has size, its indexes
+            // and lastIndex, a Map has entries/keys/values, a StringBuilder has both.
+            // Inside an extension function (`fun String.f() = length`) and inside
+            // every `with`/`apply`/`run` block the unqualified name has to reach
+            // them, which is the `else if !isUndefOrNull(t)` / rt.getMember arm of
+            // jsrt.go's js_kget and of jsrtkotlin.go's js_ktget. js_ktfget IS that
+            // read, and kt_fprobe is its speculative form.
+            var fV = fgB.NewCall(rtKtFProbe(), [thV, ps[1]])
             var f2B = curF.NewBlock("")
             var fhitB = curF.NewBlock("")
             fgB.NewCondBr(truthy(fgB, callExt(fgB, "js_sne", [fV, hUndef])), f2B, dispB)
@@ -3129,6 +3244,11 @@ KwContract  = "contract" KwEnd ;
         })
     }
 
+    // Is this a NATIVE build? The one thing layer 2 cannot recover for itself is an
+    // argument COUNT, so the emitter supplies it - see the println() branch in
+    // makeCall. Under llvm.Run the Go twin gets a real []interface{} and needs no
+    // help, and gating on -exe keeps the non-native module byte-identical.
+    var ktNativeBuild = (c.exePath != undefined && c.exePath != "")
     var hidCount = 0     // Names hidden loop counters.
     var classNames = {}  // Known class names (constructor calls).
     var interfaceNames = {}   // Known interface names ("$" prefixed): descriptors without a __ctor.
@@ -5108,6 +5228,31 @@ KwContract  = "contract" KwEnd ;
             // so this constructor call IS the literal syntax; the pattern is compiled
             // (and reported on) by js_rxktnew - see abnf/jsrtregexkt.go. A program
             // that declares its own Regex class or function keeps it.
+            // `println()` / `print()` WITH NO ARGUMENTS, natively only. MetaJS has no
+            // `arguments` object, so layer 2's k2Line is written with the one
+            // parameter Kotlin's println ever takes and cannot tell `println()` from
+            // `println(f())` for a Unit-returning f - both arrive as `undefined`.
+            // It answered "" for both, so `println(f())` printed a BLANK LINE
+            // natively where llvm.Run and the interpreter print "kotlin.Unit"
+            // (todo.md 1.10, measured at k2Line 2026-08-07). The count is knowable
+            // exactly HERE, and it is the only place it is knowable, so the emitter
+            // supplies it: a no-argument call passes the empty string, which Kotlin's
+            // println renders identically to no argument at all (`println()` writes
+            // just the line terminator, `print()` writes nothing), and k2Line is then
+            // free to read `undefined` as kotlin.Unit. No new extern, no Go twin
+            // change, and the non-native module is untouched.
+            //
+            // RESIDUE, deliberately not chased: `::println` bound to a value and
+            // called with no arguments still arrives as `undefined` and now prints
+            // "kotlin.Unit" natively. That is a reference, not a call of the name, so
+            // no emitter can count its arguments either.
+            if (ktNativeBuild && args.length == 0 && (name == "println" || name == "print")
+                && classNames[name] == undefined && funNames["$" + name] != true) {
+                var pfV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, name)])
+                var pfA = callExt(b, "js_arr_new", [])
+                callExt(b, "js_arr_push", [pfA, emitStr(b, "")])
+                return {b: b, v: callExt(b, "js_call", [pfV, hUndef, pfA])}
+            }
             if (name == "Regex" && classNames[name] == undefined && funNames["$" + name] != true) {
                 var rp = args[0].at(b)
                 b = rp.b

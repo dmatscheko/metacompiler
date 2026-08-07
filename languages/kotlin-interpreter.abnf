@@ -10034,12 +10034,36 @@ NotMemberKw = :script(~~
                 if (hasOwn(hostGlobals, name)) { return null }
                 return {v: kBoundBuiltin(cur, name)}
             }
+            // A PLAIN OBJECT receiver that is neither a class instance nor one of the
+            // collection kinds: a lazy, a Result, a MatchResult. Its OWN properties
+            // were already answered at the top of the loop, which is what makes
+            // `with(Pair(1, "x")) { first }` work; what was missing is the group the
+            // runtime SYNTHESISES - kotlin.Lazy's value / isInitialized,
+            // kotlin.Result's isSuccess / isFailure, MatchResult.value - all of which
+            // kGetField answers and none of which is an own property. `with(lazy {
+            // 42 }) { value }` aborted with "unknown name: value" here while the
+            // compiler half answered 42. Nothing is bound as a METHOD: a plain object
+            // has no builtin method table to dispatch into.
+            if (cls == undefined && cur.__isclass == undefined &&
+                kRecvProps["$" + name] === true) {
+                var pv = kGetField(cur, name)
+                if (pv != undefined && pv != null) { return {v: pv} }
+            }
             cur = hasOwn(cur, "__outer") ? cur.__outer : null
         }
         return null
     }
     var kRecvProps = {}
-    var krpn = ["size", "length", "keys", "values", "entries", "indices", "lastIndex"]
+    // The last four are the properties of the receivers that are neither collections
+    // nor class instances - kotlin.Lazy's value / isInitialized and kotlin.Result's
+    // isSuccess / isFailure, plus MatchResult.value, and Char.code. All five are `val`s in the
+    // stdlib and no builtin receiver here has a zero-argument METHOD of any of those
+    // names, which is what makes adding them safe: this table's whole job is to say
+    // which unqualified names are a FIELD READ rather than a bound call. Keep it in
+    // step with ktRecvProp (abnf/jsrtkotlin.go), k4RecvProp
+    // (languages/lib/kotlin-rt.metajs) and kt_recvprop (kotlin-to-llvm-ir.abnf).
+    var krpn = ["size", "length", "keys", "values", "entries", "indices", "lastIndex",
+                "value", "isInitialized", "isSuccess", "isFailure", "code"]
     for (var krpi = 0; krpi < krpn.length; krpi++) { kRecvProps["$" + krpn[krpi]] = true }
     function kBoundBuiltin(self, name) {
         return function() {
