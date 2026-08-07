@@ -1738,6 +1738,105 @@ function firsts39(xs) {
     return out
 }
 
+// ===== SECTION 37: methods as values, Object.prototype, bind, and a catchable BigInt =====
+// docs/todo.md 2.5 and 2.6. Everything here ABORTED or answered "undefined" before,
+// and the split across the engines is the interesting part - three of the six
+// entries below were LIVE HALVES DIVERGENCES that --cross could not see, because no
+// test reached them.
+//
+// A METHOD IS NOT AN OWN PROPERTY. An instance keeps its methods on its __class
+// descriptor, so `typeof p.m` read "undefined" in all four engines where node says
+// "function", and `"m" in p` was false. getMember / js_jsvget / js_jshas now walk
+// the descriptor chain for a VALUE read (the call site still reads raw, so an
+// ordinary p.m() allocates nothing).
+//
+// typeof [].push WAS ENGINE-DEPENDENT: "function" under llvm.Run, which reads a
+// plain member through the shared js_get, and "undefined" natively, where the read
+// went through js_jsmget's method-name hiding. One extern for the value read fixes
+// both directions at once.
+//
+// Object.prototype.toString.call(v) is the classic type probe and it aborted BOTH
+// compiled halves ("member 'call' of undefined" under llvm.Run, "member 'toString'
+// of undefined" natively): the `Object` global carried no usable prototype. All
+// three engines now build their own, with toString / valueOf / hasOwnProperty.
+//
+// Function.prototype.bind existed in NO engine, and f.call(o) in the js interpreter
+// half silently ignored its receiver while the typescript half had had the shim
+// since it was written.
+//
+// A BIGINT TypeError WAS NOT CATCHABLE. `1n + 1` is a TypeError in node and a
+// program may catch it; here it aborted the process. Every BigInt-family raise -
+// the mixed-operand TypeError, ToBigInt's SyntaxError, the RangeErrors - is now a
+// real throw in all four engines. The operands come out of an ARRAY so the
+// constant folder cannot evaluate any of it at compile time.
+function s37(): number {
+    class S37A { am() { return "a" + this.v } }
+    class S37B extends S37A { constructor() { super(); this.v = 1 } bm() { return "b" } }
+    var p = new S37B()
+    var arr = [1, 2]
+
+    // A method read as a VALUE, and called through that value.
+    check("mv1", typeof p.bm === "function")
+    check("mv2", typeof p.am === "function")        // inherited, one __super hop
+    check("mv3", typeof p.zz === "undefined")
+    var bm = p.bm
+    var am = p.am
+    check("mv4", bm() === "b" && am() === "a1")     // the shim stays bound to p
+    check("mv5", typeof arr.push === "function")    // was engine-dependent
+    check("mv6", typeof "s".slice === "function")
+
+    // `in` sees a method, and does NOT see the engine's own __ slots.
+    check("in1", "bm" in p)
+    check("in2", "am" in p)
+    check("in3", ("zz" in p) === false)
+    check("in4", "v" in p)
+    check("in5", ("__class" in p) === false)
+    check("in6", (0 in arr) && (("5" in arr) === false))
+
+    // Object.prototype, reached the way real code reaches it.
+    var vals = [[1], {}, 3, "s", true, null, undefined]
+    var tags = []
+    for (var i = 0; i < vals.length; i++) { tags.push(Object.prototype.toString.call(vals[i])) }
+    check("op1", tags.join("|") === "[object Array]|[object Object]|[object Number]|" +
+                                    "[object String]|[object Boolean]|[object Null]|[object Undefined]")
+    check("op2", typeof Object.prototype === "object")
+    var own = { k: 1 }
+    check("op3", Object.prototype.hasOwnProperty.call(own, "k") === true)
+    check("op4", Object.prototype.hasOwnProperty.call(own, "j") === false)
+    check("op5", Object.prototype.valueOf.call(own) === own)
+
+    // call / apply / bind, with the receiver actually arriving.
+    var recv = { x: 10 }
+    var f = function(a, b) { return this.x + a + b }
+    check("fn1", f.call(recv, 2, 3) === 15)
+    check("fn2", f.apply(recv, [2, 3]) === 15)
+    check("fn3", f.bind(recv)(2, 3) === 15)
+    check("fn4", f.bind(recv, 2)(3) === 15)
+    check("fn5", f.bind(recv, 2, 3)() === 15)
+
+    // new through a constructor that RETURNS a function, and `new` with no argument
+    // list: [[Construct]] keeps an explicitly returned object and a function is one.
+    // The interpreter half dropped it and then said "unknown class: expression".
+    function S37Meta() { return function() { this.q = 8 } }
+    check("nw1", (new (new S37Meta())()).q === 8)
+    function S37Plain() { this.q = 9 }
+    check("nw2", (new S37Plain).q === 9)
+
+    // The BigInt raises are CATCHABLE.
+    var ops = [1n, 1, 0n, -1n, "zz", 1.5]
+    var log = []
+    try { log.push("v" + (ops[0] + ops[1])) } catch (e) { log.push("mix:" + (("" + e).indexOf("Cannot mix BigInt") >= 0)) }
+    try { log.push("v" + (ops[0] / ops[2])) } catch (e) { log.push("div:" + (("" + e).indexOf("Division by zero") >= 0)) }
+    try { log.push("v" + (ops[0] ** ops[3])) } catch (e) { log.push("pow:" + (("" + e).indexOf("Exponent") >= 0)) }
+    try { log.push("v" + BigInt(ops[4])) } catch (e) { log.push("str:" + (("" + e).indexOf("SyntaxError") >= 0)) }
+    try { log.push("v" + BigInt(ops[5])) } catch (e) { log.push("flo:" + (("" + e).indexOf("not an integer") >= 0)) }
+    try { log.push("v" + (ops[0].toString(99))) } catch (e) { log.push("rdx:" + (("" + e).indexOf("radix") >= 0)) }
+    check("bi1", log.join(",") === "mix:true,div:true,pow:true,str:true,flo:true,rdx:true")
+    // The program keeps running after a caught one, which is the whole point.
+    check("bi2", ops[0] + ops[0] === 2n)
+    return 0
+}
+
 function main(): number {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
@@ -1775,6 +1874,7 @@ function main(): number {
     s34(); // SECTION-CALL 34
     s35(); // SECTION-CALL 35
     s36(); // SECTION-CALL 36
+    s37(); // SECTION-CALL 37
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

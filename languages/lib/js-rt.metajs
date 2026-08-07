@@ -152,6 +152,17 @@ function js_jstypeof(v) {
     return typeof v
 }
 
+// A BigInt operation's TypeError / SyntaxError / RangeError is a JAVASCRIPT
+// exception, not an engine abort: node runs the catch clause of
+// `try { xs[0] + xs[1] } catch (e) { ... }` when xs holds a BigInt and a number,
+// where this runtime used to stop the program dead. `fail` is the floor's abort
+// and a js_try deliberately does not recover it; MetaJS's own `throw` compiles to
+// the floor's js_throw, which is exactly what the emitted try/catch recovers. The
+// thrown VALUE is the message string - the spelling the interpreter halves and
+// both emitters already use for the iterator-throw TypeError. The Go twin's half
+// of this is abnf/jsrtjsbig.go's bigRaise. docs/todo.md 2.6.
+function jbRaise(msg) { throw msg }
+
 // ================================ the floor externs a BigInt is taken from ===
 //
 // Under -exe the emitter routes `===`, `!==`, unary `-`, `!`, `typeof` and
@@ -665,8 +676,61 @@ function jvApplyShim(f) {
     }
 }
 
+// Function.prototype.bind. `call` and `apply` are answered by the floor and by the
+// shims above; `bind` is in neither, so `f.bind(o)` aborted natively with "unknown
+// method 'bind' on function" while a decorator written with call() worked. The bound
+// arguments are PREPENDED to the eventual call's, which is the one way bind differs
+// from call beyond remembering the receiver. Twins: jsvMethod's arm in
+// abnf/jsrtjsprint.go and fnBindShim in both *-interpreter.abnf start scripts.
+function jvBoundFn(f, self, pre) {
+    return function () {
+        var a = []
+        var j = 0
+        while (j < pre.length) {
+            a.push(pre[j])
+            j = j + 1
+        }
+        var k = 0
+        while (k < arguments.length) {
+            a.push(arguments[k])
+            k = k + 1
+        }
+        return jvCallT(f, self, a)
+    }
+}
+
+function jvBindShim(f) {
+    return function () {
+        var self = anytype
+        self = arguments[0]
+        var pre = []
+        var i = 1
+        while (i < arguments.length) {
+            pre.push(arguments[i])
+            i = i + 1
+        }
+        return jvBoundFn(f, self, pre)
+    }
+}
+
 function js_jsmget(o, key) {
     if (typeof key == "string") {
+        // EVERY LINE IN THIS FUNCTION RUNS ON EVERY MEMBER READ AND INDEX READ IN
+        // THE PROGRAM, and three separate attempts to make it cleverer all made it
+        // slower, measured on an 11-draw member-read loop against a base of 11.15G
+        // instructions:
+        //
+        //   ask jpIs(o) before the three key compares      15.97G  (+43%)
+        //   ask jvIsCallable(o) before its two             13.55G  (+21%)
+        //   wrap it in a second function for the value read 15.82G  (+42%)
+        //
+        // jpIs reads o["__prom"] - a hash lookup in the object - and jvIsCallable is
+        // an out-of-line call; a string comparison against an interned literal is
+        // cheaper than either. So the key comparisons stay first, and NOTHING is
+        // added here: `bind` lives in js_jsvget (the value read) and in js_jsmcall
+        // (the call), because a call site that finds no own `bind` slot falls
+        // through to js_jsmcall anyway.
+        //
         // then/catch/finally READ AS A VALUE. Promise method dispatch is table-based
         // (js_jsmcall -> jpMethod), so a promise has no own slot of that name and
         // `const t = p.then` answered undefined where node answers a function. The
@@ -696,6 +760,151 @@ function js_jsmget(o, key) {
         if (jvHides(o, key)) { return undefined }
     }
     return o[key]
+}
+
+// jvFindClassMethod walks the __class/__super chain for a callable member. An
+// instance keeps its methods on its class descriptor, not as own properties, so a
+// plain property read never finds one.
+function jvFindClassMethod(o, name) {
+    var cls = o["__class"]
+    var guard = 0
+    while (jvIsObj(cls) && guard < 64) {
+        var v = cls[name]
+        if (jvIsCallable(v)) { return v }
+        cls = cls["__super"]
+        guard = guard + 1
+    }
+    return undefined
+}
+
+// A __class method, bound to its receiver. The convention a class method is called
+// with here PREPENDS the receiver to the arguments (js_jsmcall's own arm does the
+// same), so the shim rebuilds that argument list.
+function jvBoundMethod(fn, self) {
+    return function () {
+        var a = [self]
+        var i = 0
+        while (i < arguments.length) {
+            a.push(arguments[i])
+            i = i + 1
+        }
+        return jvCallT(fn, undefined, a)
+    }
+}
+
+// A String/Array builtin, bound to its receiver: `const p = xs.push` then `p(1)`.
+// js_jsmcall is the whole method surface, so the shim just re-enters it.
+function jvBoundBuiltin(recv, name) {
+    return function () {
+        var a = []
+        var i = 0
+        while (i < arguments.length) {
+            a.push(arguments[i])
+            i = i + 1
+        }
+        return js_jsmcall(recv, name, a)
+    }
+}
+
+// js_jsvget is the VALUE read of a member - `const f = p.m`, `typeof p.m` - as
+// opposed to js_jsmget, which the emitter uses at a member-followed-by-a-call site
+// and which deliberately HIDES the String/Array method names so that the call falls
+// into js_jsmcall. Two things differ, and both were measured wrong:
+//
+//   typeof p.m      answered "undefined" in all four engines (node: "function"),
+//                   because an instance's methods live on the __class descriptor
+//   typeof [].push  answered "function" under llvm.Run and "undefined" NATIVELY -
+//                   a live halves divergence, because llvm.Run reads a plain
+//                   member through the shared js_get (which answers a boundMethod)
+//                   while the native build read it through js_jsmget's hiding
+//
+// IT IS A COPY OF js_jsmget's BODY AND NOT A WRAPPER AROUND IT, and every line of
+// it was settled by MEASUREMENT rather than taste, because this function runs on
+// every member read in the program. The harness is a 200,000-iteration loop over
+// `p.v + o.a + o.b`, native -exe, median instructions over 11 LAYOUT DRAWS (the
+// row's own spread is 4.8-6.0%, so read nothing smaller than that):
+//
+//   base d473319, no js_jsvget at all                       11.15G   -
+//   js_jsvget as a WRAPPER around js_jsmget                 15.82G  +42%
+//   ... asking jpIs(o) before the three promise-name compares 15.97G  +43%
+//   ... asking jvIsCallable(o) before its own compares      13.55G  +21%
+//   this version: a copy, promise names moved to the miss    11.81G  +5.9%
+//
+// The three failed attempts share one cause: in this runtime a comparison against
+// an interned string literal is CHEAPER than either an out-of-line call
+// (jvIsCallable) or an object hash lookup (jpIs reads o["__prom"]). The +5.9% that
+// remains is a `=== undefined` on a value already in hand plus ~2,100 lines of new
+// layer 2 in the module, which the baseline file records as costing a few percent
+// on its own. tests/bench/mod.js, the row that is actually gated, moved +0.25%.
+//
+// The Go twin is m["js_jsvget"] in abnf/jsrtjsprint.go; the interpreters' half is
+// getMember's class-method arm. docs/todo.md 2.5.
+function js_jsvget(o, key) {
+    if (typeof key == "string") {
+        // call/apply/bind are asked BEFORE the read because reading a member of a
+        // function value is not something the floor promises to answer; the promise
+        // names are NOT, because a promise is an ordinary object with no own slot of
+        // that name, so the read below answers undefined and jvValueMiss picks them
+        // up. That keeps three string comparisons off every member read.
+        if (key == "call" || key == "apply" || key == "bind") {
+            if (jvIsCallable(o)) {
+                if (key == "call") { return jvCallShim(o) }
+                if (key == "bind") { return jvBindShim(o) }
+                return jvApplyShim(o)
+            }
+        }
+        if (jvAccN > 0) {
+            if (jvIsObj(o)) {
+                var cur = o[key]
+                if (jvIsAcc(cur)) { return jvAccGet(cur, o) }
+                if (cur === undefined) {
+                    var acc = jvFindClassAcc(o, key)
+                    if (acc !== undefined) { return jvAccGet(acc, o) }
+                    return jvValueMiss(o, key)
+                }
+                return cur
+            }
+        }
+        if (jvHides(o, key)) { return jvBoundBuiltin(o, key) }
+        var v = anytype
+        v = o[key]
+        if (v === undefined) { return jvValueMiss(o, key) }
+        return v
+    }
+    return o[key]
+}
+
+// The SLOW path of a value read, entered only when the object has no such own slot:
+// a method read as a value. Kept out of line so the common read pays one `===`.
+function jvValueMiss(o, key) {
+    if (jvIsObj(o)) {
+        if (key == "then" || key == "catch" || key == "finally") {
+            if (jpIs(o)) { return jpBound(o, key) }
+        }
+        if (key.length < 2 || key.substring(0, 2) != "__") {
+            var fn = jvFindClassMethod(o, key)
+            if (fn !== undefined) { return jvBoundMethod(fn, o) }
+        }
+    }
+    return undefined
+}
+
+// js_has plus the __class methods: an instance keeps its methods on its class
+// descriptor rather than as own properties, so `"m" in instance` answered false
+// where node answers true. Twin: m["js_jshas"] in abnf/jsrtjsprint.go.
+// docs/todo.md 2.5.
+function js_jshas(o, key) {
+    if (jvIsObj(o)) {
+        var k = jvStr(key)
+        // The __-prefixed engine slots are not properties of the program's object:
+        // `"__class" in p` answered TRUE in both compiled halves and false in the
+        // interpreters and in node.
+        if (k.length >= 2 && k.substring(0, 2) == "__") { return false }
+        if (js_has(o, key)) { return true }
+        if (jvFindClassMethod(o, k) !== undefined) { return true }
+        return false
+    }
+    return js_has(o, key)
 }
 
 // js_jsmset has NO Go twin: it is emitted only under -exe, because the C floor's
@@ -940,7 +1149,36 @@ function js_jsstr(v) { return jvStr(v) }
 function js_jsobject() {
     var o = {}
     o["__jsobject"] = true
+    // Object.prototype.toString.call(v) is the classic type probe, and it used to
+    // abort here with "member 'toString' of undefined": this object had no prototype
+    // slot at all. The three members are the ones a program in this subset can reach;
+    // each takes its receiver from js_this(), which jvCallShim arms - and that is why
+    // they can be ordinary MetaJS closures. Twins: js_jsobject in
+    // abnf/jsrtjsprint.go and jsObjectProto in both *-interpreter.abnf start scripts.
+    // docs/todo.md 2.5.
+    var proto = {}
+    proto["toString"] = function () { return jvProtoTag(js_this()) }
+    proto["valueOf"] = function () { return js_this() }
+    proto["hasOwnProperty"] = function (k) {
+        var self = anytype
+        self = js_this()
+        if (!jvIsObj(self)) { return false }
+        return self[jvStr(k)] !== undefined
+    }
+    o["prototype"] = proto
     return o
+}
+
+// Object.prototype.toString's answer for a value.
+function jvProtoTag(v) {
+    if (v === undefined) { return "[object Undefined]" }
+    if (v === null) { return "[object Null]" }
+    if (Array.isArray(v)) { return "[object Array]" }
+    if (typeof v == "number") { return "[object Number]" }
+    if (typeof v == "string") { return "[object String]" }
+    if (typeof v == "boolean") { return "[object Boolean]" }
+    if (jvIsCallable(v)) { return "[object Function]" }
+    return "[object Object]"
 }
 
 // The `String` global. The runtime root binds an OBJECT (it carries fromCharCode),
@@ -1999,6 +2237,22 @@ function jvFallbackCall(recv, name, args) {
 // dispatch. A receiver none of them claims lands in jvFallbackCall.
 function js_jsmcall(recv, key, args) {
     var name = jvStr(key)
+    // f.bind(self, ...) as a CALL. js_jsmget above answers the same name when it is
+    // read as a value; this arm is what a direct `f.bind(o)(x)` reaches, since the
+    // emitter lowers a call on a member to js_jsmcall and never through js_jsmget.
+    if (name == "bind") {
+        if (jvIsCallable(recv)) {
+            var bself = anytype
+            bself = jvArg(args, 0)
+            var bpre = []
+            var bi = 1
+            while (bi < args.length) {
+                bpre.push(args[bi])
+                bi = bi + 1
+            }
+            return jvBoundFn(recv, bself, bpre)
+        }
+    }
     // Promise.prototype.then / catch / finally, and the Promise statics on the
     // `Promise` global (a function value, so js_get finds no member of that name).
     // Asked BEFORE jxMcall: a promise is a plain object and nothing else claims it.
@@ -2021,7 +2275,7 @@ function js_jsmcall(recv, key, args) {
             // MEASURED missing: (255n).toString(40) answered "6f" natively where node
             // and llvm.Run both raise. An unknown method name deliberately falls
             // THROUGH rather than failing, because the Go twin answers (nil, false).
-            if (radix < 2 || radix > 36) { fail("RangeError: toString() radix must be between 2 and 36") }
+            if (radix < 2 || radix > 36) { jbRaise("RangeError: toString() radix must be between 2 and 36") }
             if (radix === 10) { return jbStr(recv) }
             return jvBigRadix(jbStr(recv), radix)
         }
@@ -2378,12 +2632,12 @@ function jbMulB(a, b) {
 // BigInt division TRUNCATES toward zero and the remainder takes the sign of the
 // dividend, so -7n / 2n is -3n and -7n % 3n is -1n (node agrees).
 function jbDivB(a, b) {
-    if (b.s === 0) { fail("RangeError: Division by zero") }
+    if (b.s === 0) { jbRaise("RangeError: Division by zero") }
     return jbMake(a.s * b.s, jbDivModD(a.d, b.d).q)
 }
 
 function jbRemB(a, b) {
-    if (b.s === 0) { fail("RangeError: Division by zero") }
+    if (b.s === 0) { jbRaise("RangeError: Division by zero") }
     return jbMake(a.s, jbDivModD(a.d, b.d).r)
 }
 
@@ -2400,11 +2654,11 @@ function jbCmpB(a, b) {
 }
 
 function jbPowB(a, e) {
-    if (e.s < 0) { fail("RangeError: Exponent must be non-negative") }
+    if (e.s < 0) { jbRaise("RangeError: Exponent must be non-negative") }
     var r = jbFromNum(1)
     var base = a
     var nbits = jbBitsD(e.d)
-    if (nbits > 32) { fail("RangeError: BigInt exponent is too large") }
+    if (nbits > 32) { jbRaise("RangeError: BigInt exponent is too large") }
     var k = 0
     while (k < nbits) {
         if (jbBitD(e.d, k) === 1) { r = jbMulB(r, base) }
@@ -2417,7 +2671,7 @@ function jbPowB(a, e) {
 function jbShlB(a, k) {
     if (a.s === 0 || k === 0) { return a }
     if (k < 0) { return jbShrB(a, -k) }
-    if (k > 1048576) { fail("RangeError: BigInt shift count is too large") }
+    if (k > 1048576) { jbRaise("RangeError: BigInt shift count is too large") }
     var d = jbCopy(a.d)
     var limbs = Math.floor(k / 24)
     var bits = k - limbs * 24
@@ -2435,7 +2689,7 @@ function jbShlB(a, k) {
 function jbShrB(a, k) {
     if (a.s === 0 || k === 0) { return a }
     if (k < 0) { return jbShlB(a, -k) }
-    if (k > 1048576) { fail("RangeError: BigInt shift count is too large") }
+    if (k > 1048576) { jbRaise("RangeError: BigInt shift count is too large") }
     var limbs = Math.floor(k / 24)
     var bits = k - limbs * 24
     var lost = false
@@ -2525,9 +2779,9 @@ function jbNotB(a) { return jbSubB(jbNeg(a), jbFromNum(1)) }
 // ---------------------------------------------------------- conversions ----
 
 function jbFromNum(n) {
-    if (n !== n) { fail("RangeError: cannot convert NaN to a BigInt") }
-    if (n === Infinity || n === -Infinity) { fail("RangeError: cannot convert Infinity to a BigInt") }
-    if (Math.floor(n) !== n) { fail("RangeError: The number " + n + " cannot be converted to a BigInt because it is not an integer") }
+    if (n !== n) { jbRaise("RangeError: cannot convert NaN to a BigInt") }
+    if (n === Infinity || n === -Infinity) { jbRaise("RangeError: cannot convert Infinity to a BigInt") }
+    if (Math.floor(n) !== n) { jbRaise("RangeError: The number " + n + " cannot be converted to a BigInt because it is not an integer") }
     if (n === 0) { return jbZero() }
     var neg = n < 0
     var a = n
@@ -2710,18 +2964,18 @@ function jbOf(v) {
     }
     if (typeof v == "string") {
         var r = jbFromStrStrict(v)
-        if (r === null) { fail("SyntaxError: Cannot convert " + v + " to a BigInt") }
+        if (r === null) { jbRaise("SyntaxError: Cannot convert " + v + " to a BigInt") }
         return r
     }
     if (typeof v == "number") { return jbFromNum(v) }
-    fail("TypeError: Cannot convert " + jvStr(v) + " to a BigInt")
+    jbRaise("TypeError: Cannot convert " + jvStr(v) + " to a BigInt")
     return jbZero()
 }
 
 // ------------------------------------------------- the mixed-operand rule ---
 
 function jbMixFail(op) {
-    fail("TypeError: Cannot mix BigInt and other types, use explicit conversions (operator '" + op + "')")
+    jbRaise("TypeError: Cannot mix BigInt and other types, use explicit conversions (operator '" + op + "')")
     return undefined
 }
 
@@ -2743,7 +2997,7 @@ function jbBinary(op, l, r) {
     if (op === "^") { return jbBitOp("^", l, r) }
     if (op === "<<") { return jbShlB(l, jbToNum(r)) }
     if (op === ">>") { return jbShrB(l, jbToNum(r)) }
-    if (op === ">>>") { fail("TypeError: BigInts have no unsigned right shift, use >> instead") }
+    if (op === ">>>") { jbRaise("TypeError: BigInts have no unsigned right shift, use >> instead") }
     return jbMiss
 }
 
@@ -2866,7 +3120,7 @@ function js_jsbigint(src) {
 // String / Object / println already are.
 function js_jsbigintfn() {
     return function(v) {
-        if (v === undefined) { fail("TypeError: Cannot convert undefined to a BigInt") }
+        if (v === undefined) { jbRaise("TypeError: Cannot convert undefined to a BigInt") }
         jbStrict = true
         return jbOf(v)
     }
@@ -2884,7 +3138,7 @@ function js_jsnumberfn() {
 // Unary '+' is the ONE operator a BigInt refuses outright: there is no number
 // to coerce it to without losing precision.
 function js_jstonumber(v) {
-    if (jbStrict && jbIsBig(v)) { fail("TypeError: Cannot convert a BigInt value to a number") }
+    if (jbStrict && jbIsBig(v)) { jbRaise("TypeError: Cannot convert a BigInt value to a number") }
     return v - 0
 }
 

@@ -34,6 +34,7 @@ package abnf
 // settled against node v24.
 
 import (
+	"fmt"
 	"math"
 	"math/big"
 	"strconv"
@@ -61,10 +62,10 @@ func bigToFloat(v *big.Int) float64 {
 // bigFromFloat is ToBigInt for a number: only an integral, finite value has one.
 func (rt *jsrt) bigFromFloat(f float64) *big.Int {
 	if math.IsNaN(f) || math.IsInf(f, 0) {
-		rt.fail("RangeError: cannot convert %v to a BigInt", f)
+		rt.bigRaise("RangeError: cannot convert %v to a BigInt", f)
 	}
 	if f != math.Trunc(f) {
-		rt.fail("RangeError: The number %v cannot be converted to a BigInt because it is not an integer", f)
+		rt.bigRaise("RangeError: The number %v cannot be converted to a BigInt because it is not an integer", f)
 	}
 	out, _ := new(big.Float).SetFloat64(f).Int(nil)
 	return out
@@ -85,11 +86,11 @@ func (rt *jsrt) bigOfValue(v interface{}) *big.Int {
 	case string:
 		n, ok := bigFromLiteral(t)
 		if !ok {
-			rt.fail("SyntaxError: Cannot convert %s to a BigInt", t)
+			rt.bigRaise("SyntaxError: Cannot convert %s to a BigInt", t)
 		}
 		return n
 	}
-	rt.fail("TypeError: Cannot convert %s to a BigInt", rt.toString(v))
+	rt.bigRaise("TypeError: Cannot convert %s to a BigInt", rt.toString(v))
 	return nil
 }
 
@@ -122,10 +123,23 @@ func bigFromLiteral(s string) (*big.Int, bool) {
 	return n, true
 }
 
+// bigRaise raises a BigInt operation's error as a JAVASCRIPT exception rather than
+// an engine abort, which is what node does with every one of them: `1n + 1` inside a
+// try/catch runs the catch clause. rt.fail panics a plain string that js_try
+// deliberately re-panics (it is a runtime error, not a throw), so the raise has to be
+// the same *jsThrown panic js_throw builds - and the thrown VALUE is the message
+// string, the spelling both interpreter halves and the emitters already use for the
+// iterator-throw TypeError. Every rt.fail in this file goes through here except the
+// "invalid BigInt literal" one, which is a malformed-input abort and not reachable
+// from a program that parsed. docs/todo.md 2.6.
+func (rt *jsrt) bigRaise(format string, args ...interface{}) {
+	panic(&jsThrown{value: fmt.Sprintf(format, args...)})
+}
+
 // bigMixFail is the spec's TypeError for an operator that got one BigInt and one
 // value of another type. It is raised only in strict mode (see the file comment).
 func (rt *jsrt) bigMixFail(op string) {
-	rt.fail("TypeError: Cannot mix BigInt and other types, use explicit conversions (operator '%s')", op)
+	rt.bigRaise("TypeError: Cannot mix BigInt and other types, use explicit conversions (operator '%s')", op)
 }
 
 // bigBinary is the BigInt arm of a binary arithmetic or bitwise operator. handled is
@@ -150,20 +164,20 @@ func (rt *jsrt) bigBinary(op string, l, r interface{}) (interface{}, bool) {
 		out.Mul(x, y)
 	case "/":
 		if y.Sign() == 0 {
-			rt.fail("RangeError: Division by zero")
+			rt.bigRaise("RangeError: Division by zero")
 		}
 		out.Quo(x, y) // BigInt division truncates toward zero.
 	case "%":
 		if y.Sign() == 0 {
-			rt.fail("RangeError: Division by zero")
+			rt.bigRaise("RangeError: Division by zero")
 		}
 		out.Rem(x, y) // The remainder takes the sign of the dividend.
 	case "**":
 		if y.Sign() < 0 {
-			rt.fail("RangeError: Exponent must be non-negative")
+			rt.bigRaise("RangeError: Exponent must be non-negative")
 		}
 		if !y.IsInt64() {
-			rt.fail("RangeError: BigInt exponent is too large")
+			rt.bigRaise("RangeError: BigInt exponent is too large")
 		}
 		out.Exp(x, y, nil)
 	case "&":
@@ -174,7 +188,7 @@ func (rt *jsrt) bigBinary(op string, l, r interface{}) (interface{}, bool) {
 		out.Xor(x, y)
 	case "<<", ">>":
 		if !y.IsInt64() {
-			rt.fail("RangeError: BigInt shift count is too large")
+			rt.bigRaise("RangeError: BigInt shift count is too large")
 		}
 		n := y.Int64()
 		neg := n < 0
@@ -182,7 +196,7 @@ func (rt *jsrt) bigBinary(op string, l, r interface{}) (interface{}, bool) {
 			n = -n
 		}
 		if n > 1<<20 {
-			rt.fail("RangeError: BigInt shift count is too large")
+			rt.bigRaise("RangeError: BigInt shift count is too large")
 		}
 		// big.Int's Rsh is already the ARITHMETIC shift BigInt's >> is, so
 		// -1n >> 1n is -1n rather than 0n.
@@ -192,7 +206,7 @@ func (rt *jsrt) bigBinary(op string, l, r interface{}) (interface{}, bool) {
 			out.Rsh(x, uint(n))
 		}
 	case ">>>":
-		rt.fail("TypeError: BigInts have no unsigned right shift, use >> instead")
+		rt.bigRaise("TypeError: BigInts have no unsigned right shift, use >> instead")
 	default:
 		return nil, false
 	}
@@ -396,7 +410,7 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 	m["js_jstonumber"] = func(a []uint64) uint64 {
 		if strict {
 			if _, ok := bigOf(u(a[0])); ok {
-				rt.fail("TypeError: Cannot convert a BigInt value to a number")
+				rt.bigRaise("TypeError: Cannot convert a BigInt value to a number")
 			}
 		}
 		return baseToNum(a)
@@ -463,7 +477,7 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 	m["js_jsbigintfn"] = func(a []uint64) uint64 {
 		return w(jsHostFunc("BigInt", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			if len(args) == 0 {
-				rt.fail("TypeError: Cannot convert undefined to a BigInt")
+				rt.bigRaise("TypeError: Cannot convert undefined to a BigInt")
 			}
 			rt.hasBigInt = true
 			strict = true
@@ -495,7 +509,7 @@ func (rt *jsrt) jsvBigIntMethod(x *big.Int, name string, args []interface{}) (in
 			}
 		}
 		if radix < 2 || radix > 36 {
-			rt.fail("RangeError: toString() radix must be between 2 and 36")
+			rt.bigRaise("RangeError: toString() radix must be between 2 and 36")
 		}
 		return x.Text(radix), true
 	case "valueOf":

@@ -3295,7 +3295,40 @@ NotFuncHead = :script(~~
     // slot), so Object.keys leaked the hidden __keys bookkeeping slot and
     // Object.entries leaked ["__keys", [...]]. This one filters the __-prefixed
     // internals, and answers the same key ORDER the compiler's js_jsmcall does.
-    var jsObjectGlobal = {"__jsobject": true, "prototype": Object.prototype}
+    // Object.prototype.toString.call(v) is the classic type probe, and it has to be
+    // THIS engine's own object rather than the script host's: under goja the host's
+    // Object.prototype carries the real methods, under -frozen it carries nothing, and
+    // both compiled halves had no prototype at all ("member 'toString' of undefined").
+    // The three members are the ones a program in this subset can reach; each takes its
+    // receiver from the one-shot pendingThis slot the shims in getMember arm, which is
+    // why they are declared as ordinary closures reading jsThisArg(). Twins:
+    // js_jsobject in languages/lib/js-rt.metajs and in abnf/jsrtjsprint.go.
+    // docs/todo.md 2.5.
+    function jsProtoTag(v) {
+        if (v === undefined) { return "[object Undefined]" }
+        if (v === null) { return "[object Null]" }
+        if (Array.isArray(v)) { return "[object Array]" }
+        if (typeof v == "number") { return "[object Number]" }
+        if (typeof v == "string") { return "[object String]" }
+        if (typeof v == "boolean") { return "[object Boolean]" }
+        if (typeof v == "function") { return "[object Function]" }
+        return "[object Object]"
+    }
+    var jsObjectProto = {
+        "toString": function() { return jsProtoTag(jsThisArg()) },
+        "valueOf": function() { return jsThisArg() },
+        "hasOwnProperty": function(k) {
+            var self = anytype // The receiver may be any value.
+            self = jsThisArg()
+            if (self == undefined || self == null) { return false }
+            if (typeof self != "object") { return false }
+            return hasOwn(self, "" + k)
+        }
+    }
+    // The receiver a Function.prototype shim armed for the call now running. The shims
+    // set pendingThis and callWithThis clears it again, so it is read once at entry.
+    function jsThisArg() { return pendingThis }
+    var jsObjectGlobal = {"__jsobject": true, "prototype": jsObjectProto}
     function jsOwnKeys(v) {
         var out = []
         var ks = ownKeys(v)
@@ -4150,8 +4183,17 @@ NotFuncHead = :script(~~
         if (arguments.length == 0) { return "" }
         return jsStr(v)
     }
+    // A BigInt operation's TypeError / SyntaxError / RangeError is a JAVASCRIPT
+    // exception, not an engine abort. node catches every one of them:
+    // `try { xs[0] + xs[1] } catch (e) { ... }` with a BigInt and a number in xs
+    // runs the catch clause, where this engine used to stop the program dead.
+    // The raised record is excThrow's ({__exc, v}) so jsExcTry offers it to the
+    // catch clause, and the VALUE is the message string - the spelling the
+    // iterator-throw TypeError in this same file already uses, and the same one
+    // the two compiled halves raise through js_throw. docs/todo.md 2.6.
+    function biRaise(msg) { throw {__exc: true, v: msg} }
     function jsBigIntFn(v) {
-        if (arguments.length == 0) { fail("TypeError: Cannot convert undefined to a BigInt") }
+        if (arguments.length == 0) { biRaise("TypeError: Cannot convert undefined to a BigInt") }
         return biOf(v)
     }
     function jsNumberFn(v) {
@@ -4306,7 +4348,7 @@ NotFuncHead = :script(~~
         return r
     }
 
-    function getMember(o, k) {
+    function getMemberRaw(o, k) {
         if (o == undefined) fail("member '" + k + "' of " + o) // Catches null and undefined.
         // then/catch/finally READ AS A VALUE. Promise method dispatch is table-based
         // (jsBuiltin -> jpMethod), so a promise has no own slot of that name and
@@ -4314,6 +4356,19 @@ NotFuncHead = :script(~~
         // arm in abnf/jsrtjsprint.go's js_jsmget and languages/lib/js-rt.metajs's.
         if (k == "then" || k == "catch" || k == "finally") {
             if (jpIs(o)) { return jpBound(o, k) }
+        }
+        // 'f.call(self, ...)' / 'f.apply(self, args)' / 'f.bind(self, ...)' on a FUNCTION
+        // value. The host's own call/apply would hand the receiver over through the host's
+        // 'this', which the closures built here never read - they take it from the one-shot
+        // pendingThis slot - so the three are re-implemented on top of callWithThis. A
+        // decorator that wraps a method ('return original.call(this, n) * 2') needs exactly
+        // this, and typescript-interpreter.abnf has had the call/apply pair since it was
+        // written while THIS half answered the host's own, which silently ignored the
+        // receiver and made 'f.call(o)' read undefined out of an empty 'this'.
+        if (typeof o == "function") {
+            if (k == "call") { return fnCallShim(o) }
+            if (k == "apply") { return fnApplyShim(o) }
+            if (k == "bind") { return fnBindShim(o) }
         }
         // Plain objects (instances, literals) read own properties only: a bare o[k]
         // resolved inherited Object.prototype members (toString, valueOf, ...) under a
@@ -4331,6 +4386,41 @@ NotFuncHead = :script(~~
         }
         return o[k]
     }
+    // getMember is getMemberRaw plus the METHODS. An instance keeps its methods on its
+    // __class descriptor rather than as own properties, so a plain read found nothing
+    // and `typeof p.m` answered "undefined" where node says "function" - in all four
+    // engines. The answer is a receiver-bound shim that re-enters mcall, so a method
+    // read as a value and then called behaves exactly as `p.m(...)` does, __super walk
+    // and all; the call SITE keeps using getMemberRaw (see foldCallMember), which is
+    // what stops an ordinary method call allocating a closure it would throw away.
+    // Twins: js_jsvget in abnf/jsrtjsprint.go and in languages/lib/js-rt.metajs.
+    // docs/todo.md 2.5.
+    function getMember(o, k) {
+        var v = anytype // A member is of any type.
+        v = getMemberRaw(o, k)
+        if (v != undefined) { return v }
+        if (typeof o == "object" && !Array.isArray(o) && typeof k == "string" && !isInternalKey(k)) {
+            if (findClassMethod(o, k) != undefined) { return boundMethodShim(o, k) }
+        }
+        return v
+    }
+    // The __class/__super walk for a callable member. The `guard` cap is the same 64
+    // the rest of this project puts on a descriptor walk.
+    function findClassMethod(o, k) {
+        var guard = 0
+        for (var cl = o.__class; cl != undefined && cl != null && guard < 64; cl = cl.__super) {
+            if (hasOwn(cl, k) && typeof cl[k] == "function") { return cl[k] }
+            guard = guard + 1
+        }
+        return undefined
+    }
+    function boundMethodShim(o, k) {
+        return function() {
+            var a = []
+            for (var i = 0; i < arguments.length; i++) { a.push(arguments[i]) }
+            return mcall(o, k, a)
+        }
+    }
     // Writing a member goes through the SETTER when there is one, which is what makes
     // 'o.v = 2' run the accessor instead of shadowing it with a plain slot.
     function setMember(o, k, v) {
@@ -4340,6 +4430,43 @@ NotFuncHead = :script(~~
         }
         scopePut(o, k, v)
         trackKey(o, k) // Keep the object's for-in key list up to date.
+    }
+    // The three Function.prototype shims getMember hands out (see there). Each of them is a
+    // fresh closure over the target function, so 'f.call === f.call' is false - which no
+    // program in this subset can observe, and which keeps the shim free of any table.
+    function fnCallShim(fn) {
+        return function() {
+            var self = anytype // The explicit receiver may be any value.
+            self = (arguments.length > 0) ? arguments[0] : undefined
+            var a = []
+            for (var i = 1; i < arguments.length; i++) { a.push(arguments[i]) }
+            return callWithThis(fn, self, a)
+        }
+    }
+    function fnApplyShim(fn) {
+        return function() {
+            var self = anytype // The explicit receiver may be any value.
+            self = (arguments.length > 0) ? arguments[0] : undefined
+            var a = (arguments.length > 1 && arguments[1] != undefined) ? arguments[1] : []
+            return callWithThis(fn, self, a)
+        }
+    }
+    // bind() differs from call() in one way that matters here: the bound arguments are
+    // PREPENDED to whatever the eventual call passes, and the receiver is remembered
+    // rather than taken at the call site.
+    function fnBindShim(fn) {
+        return function() {
+            var self = anytype // The explicit receiver may be any value.
+            self = (arguments.length > 0) ? arguments[0] : undefined
+            var pre = []
+            for (var i = 1; i < arguments.length; i++) { pre.push(arguments[i]) }
+            return function() {
+                var a = []
+                for (var j = 0; j < pre.length; j++) { a.push(pre[j]) }
+                for (var k2 = 0; k2 < arguments.length; k2++) { a.push(arguments[k2]) }
+                return callWithThis(fn, self, a)
+            }
+        }
     }
     // The get/set accessor for a key, or undefined. An object literal keeps its accessors
     // in its own hidden table; an INSTANCE has none of its own and inherits them from its
@@ -4418,7 +4545,7 @@ NotFuncHead = :script(~~
         return function() {
             var v = anytype
             v = t()
-            if (isBigInt(v)) { fail("TypeError: Cannot convert a BigInt value to a number") }
+            if (isBigInt(v)) { biRaise("TypeError: Cannot convert a BigInt value to a number") }
             return v - 0
         }
     }
@@ -4674,11 +4801,11 @@ NotFuncHead = :script(~~
     // BigInt division TRUNCATES toward zero and the remainder takes the sign of the
     // dividend, so -7n / 2n is -3n and -7n % 3n is -1n (node agrees).
     function biDiv(a, b) {
-        if (b.s === 0) { fail("RangeError: Division by zero") }
+        if (b.s === 0) { biRaise("RangeError: Division by zero") }
         return biMake(a.s * b.s, biDivModD(a.d, b.d).q)
     }
     function biRem(a, b) {
-        if (b.s === 0) { fail("RangeError: Division by zero") }
+        if (b.s === 0) { biRaise("RangeError: Division by zero") }
         return biMake(a.s, biDivModD(a.d, b.d).r)
     }
     function biCmp(a, b) {
@@ -4688,7 +4815,7 @@ NotFuncHead = :script(~~
         return a.s > 0 ? c : -c
     }
     function biPow(a, e) {
-        if (e.s < 0) { fail("RangeError: Exponent must be non-negative") }
+        if (e.s < 0) { biRaise("RangeError: Exponent must be non-negative") }
         var r = biFromNum(1)
         var base = a
         var nbits = biBitsD(e.d)
@@ -4778,8 +4905,8 @@ NotFuncHead = :script(~~
     function biNot(a) { return biSub(biNeg(a), biFromNum(1)) }
     // ----- conversions -----
     function biFromNum(n) {
-        if (n !== n || n === 1 / 0 || n === -1 / 0) { fail("RangeError: cannot convert " + n + " to a BigInt") }
-        if (Math.floor(n) !== n) { fail("RangeError: The number " + n + " cannot be converted to a BigInt because it is not an integer") }
+        if (n !== n || n === 1 / 0 || n === -1 / 0) { biRaise("RangeError: cannot convert " + n + " to a BigInt") }
+        if (Math.floor(n) !== n) { biRaise("RangeError: The number " + n + " cannot be converted to a BigInt because it is not an integer") }
         if (n === 0) { return biZero() }
         var neg = n < 0
         var a = neg ? -n : n
@@ -4906,17 +5033,17 @@ NotFuncHead = :script(~~
         if (typeof v == "boolean") { return biFromNum(v ? 1 : 0) }
         if (typeof v == "string") {
             var r = biFromStrStrict(v)
-            if (r === null) { fail("SyntaxError: Cannot convert " + v + " to a BigInt") }
+            if (r === null) { biRaise("SyntaxError: Cannot convert " + v + " to a BigInt") }
             return r
         }
         if (typeof v == "number") { return biFromNum(v) }
-        fail("TypeError: Cannot convert " + jsStr(v) + " to a BigInt")
+        biRaise("TypeError: Cannot convert " + jsStr(v) + " to a BigInt")
     }
     // The mixed-operand rule: an arithmetic or bitwise operator wants BOTH operands
     // to be BigInts or NEITHER. Comparison (< == etc.) and string concatenation are
     // the exceptions and never reach here.
     function biMixFail(op) {
-        fail("TypeError: Cannot mix BigInt and other types, use explicit conversions (operator '" + op + "')")
+        biRaise("TypeError: Cannot mix BigInt and other types, use explicit conversions (operator '" + op + "')")
     }
     // The BigInt arm of a binary operator, or null when neither operand is one.
     function biBinOp(op, l, r) {
@@ -4935,7 +5062,7 @@ NotFuncHead = :script(~~
         if (op == "^") { return {v: biBitOp("^", l, r)} }
         if (op == "<<") { return {v: biShl(l, biToNum(r))} }
         if (op == ">>") { return {v: biShr(l, biToNum(r))} }
-        if (op == ">>>") { fail("TypeError: BigInts have no unsigned right shift, use >> instead") }
+        if (op == ">>>") { biRaise("TypeError: BigInts have no unsigned right shift, use >> instead") }
         return null
     }
     // The relational operators compare a BigInt against a number MATHEMATICALLY, so
@@ -5435,8 +5562,16 @@ NotFuncHead = :script(~~
     function propIn(k, o) {
         if (o == undefined || o == null) fail("'in' on " + o)
         if (Array.isArray(o)) { var n = k - 0; return n >= 0 && n < o.length }
-        if (hasOwn(o, "__keys")) { return o["__keys"].indexOf("" + k) >= 0 }
-        return hasOwn(o, "" + k)
+        if (hasOwn(o, "__keys")) { if (o["__keys"].indexOf("" + k) >= 0) { return true } }
+        else if (hasOwn(o, "" + k)) { return true }
+        // A METHOD is not an own property here - it lives on the __class descriptor -
+        // so `"m" in instance` answered false where node answers true. Same walk
+        // getMember's method arm makes; js_jshas is the compiled halves' twin.
+        // docs/todo.md 2.5.
+        if (typeof o == "object") {
+            if (findClassMethod(o, "" + k) != undefined) { return true }
+        }
+        return false
     }
     function instanceOf(v, cls) {
         if (v == undefined || v == null) { return false }
@@ -6499,7 +6634,7 @@ NotFuncHead = :script(~~
             if (name == "toString") {
                 var radix = 10
                 if (args.length > 0 && args[0] !== undefined) { radix = args[0] - 0 }
-                if (radix < 2 || radix > 36) { fail("RangeError: toString() radix must be between 2 and 36") }
+                if (radix < 2 || radix > 36) { biRaise("RangeError: toString() radix must be between 2 and 36") }
                 return biToStr(target, radix)
             }
             if (name == "valueOf") { return target }
@@ -6731,7 +6866,14 @@ NotFuncHead = :script(~~
                 pendingNewTarget = cls
                 var r = anytype // The function may return a replacement object.
                 r = callWithThis(cls, self, argv)
-                if (r != undefined && r != null && typeof r == "object") { return r }
+                // [[Construct]] keeps an explicitly returned OBJECT, and a function
+                // IS an object - `function Meta() { return function () {} }` makes
+                // `new Meta()` answer that inner function, which is what lets
+                // `new (new Meta())()` construct through it. Testing only for
+                // typeof "object" dropped the function on the floor and returned the
+                // empty `self`, so the outer `new` then said "unknown class:
+                // expression" - in this half only; both compiled halves were right.
+                if (r != undefined && r != null && (typeof r == "object" || typeof r == "function")) { return r }
                 return self
             }
             if (cls == undefined || !cls.__isclass) fail("unknown class: " + clsName)
@@ -6988,7 +7130,15 @@ NotFuncHead = :script(~~
                 if (s.kind == "member") {
                     curThis = cur
                     lastKey = s.key()
-                    cur = getMember(cur, lastKey)
+                    // A member IMMEDIATELY followed by a call is a method call, and the
+                    // arms below already route a __class method through mcall - so the
+                    // read stays RAW there and no bound shim is built for a value that
+                    // would be discarded on the next line. Everywhere else the read is
+                    // the value read, which does answer a method (see getMember).
+                    var nxt = anytype
+                    nxt = (i + 1 < suffixes.length) ? suffixes[i + 1] : undefined
+                    if (nxt != undefined && nxt.kind == "call") { cur = getMemberRaw(cur, lastKey) }
+                    else { cur = getMember(cur, lastKey) }
                 } else if (s.kind == "tagcall") {
                     // A tagged template: the tag gets the literal chunks first, then one
                     // argument per substitution.

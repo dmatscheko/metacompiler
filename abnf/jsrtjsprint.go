@@ -79,6 +79,48 @@ func (rt *jsrt) jsvCallMethod(o *jsObject, name string) (interface{}, bool) {
 	return nil, false
 }
 
+// jsvFindClassMethod walks the __class/__super chain for a callable member. It is
+// the read-side half of jsvCallMethod: an instance keeps its methods on the class
+// descriptor, so a plain property read never finds one. The `guard` cap is the same
+// 64 the rest of this project puts on a descriptor walk - a cyclic __super hangs the
+// oracle too, and no program here can express a 65-deep hierarchy.
+func jsvFindClassMethod(o *jsObject, name string) (interface{}, bool) {
+	guard := 0
+	for cls := o.props["__class"]; cls != nil && guard < 64; guard++ {
+		clsObj, ok := cls.(*jsObject)
+		if !ok {
+			break
+		}
+		if m, has := clsObj.props[name]; has && isCallable(m) {
+			return m, true
+		}
+		cls = clsObj.props["__super"]
+	}
+	return nil, false
+}
+
+// jsvProtoTag is Object.prototype.toString's answer for a value.
+func jsvProtoTag(v interface{}) string {
+	switch v.(type) {
+	case nil, jsNullT:
+		return "[object Null]"
+	case jsUndefT:
+		return "[object Undefined]"
+	case *jsArray:
+		return "[object Array]"
+	case float64:
+		return "[object Number]"
+	case string:
+		return "[object String]"
+	case bool:
+		return "[object Boolean]"
+	}
+	if isCallable(v) {
+		return "[object Function]"
+	}
+	return "[object Object]"
+}
+
 // jsvString is String(v). An object with a toString of its own answers with it (the
 // method convention prepends the receiver, exactly as rt.memberCall does).
 func (rt *jsrt) jsvString(v interface{}) string {
@@ -409,6 +451,26 @@ func (rt *jsrt) jsvFlatten(out *[]interface{}, elems []interface{}, depth int) {
 
 // jsvMethod is the Go twin of `jsBuiltin` in languages/js-interpreter.abnf.
 func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (interface{}, bool) {
+	// Function.prototype.bind. jsrt.go's getMember/builtinMethod already answer
+	// `call` and `apply` for every language, but `bind` is not in that pair and
+	// `f.bind(o)` aborted both compiled halves with "unknown method 'bind' on
+	// function" while a decorator written with call() worked. It is answered HERE,
+	// js/ts-locally, rather than beside call/apply in the shared runtime: the other
+	// fifteen languages have no Function.prototype and must not grow one. The bound
+	// arguments are PREPENDED to the eventual call's, which is the one way bind
+	// differs from call beyond remembering the receiver. The twins are fnBindShim in
+	// both *-interpreter.abnf start scripts and jvBindShim in lib/js-rt.metajs.
+	if name == "bind" && isCallable(target) {
+		self := argAt(args, 0)
+		var pre []interface{}
+		if len(args) > 1 {
+			pre = append([]interface{}{}, args[1:]...)
+		}
+		fn := target
+		return jsHostFunc("bound", func(rt *jsrt, this uint64, later []interface{}) interface{} {
+			return rt.call(fn, self, append(append([]interface{}{}, pre...), later...))
+		}), true
+	}
 	// BigInt.prototype (abnf/jsrtjsbig.go): (255n).toString(16), (1n).valueOf().
 	if bi, ok := target.(*jsBigInt); ok {
 		if v, handled := rt.jsvBigIntMethod(bi.v, name, args); handled {
@@ -1292,13 +1354,31 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	m["js_jsobject"] = func(a []uint64) uint64 {
 		o := newJSObject()
 		o.set("__jsobject", true)
-		if root, ok := rt.root.get("Object"); ok {
-			if ro, isObj := root.(*jsObject); isObj {
-				if p, has := ro.props["prototype"]; has {
-					o.set("prototype", p)
-				}
+		// Object.prototype.toString.call(v) is the classic type probe, and it used to
+		// abort BOTH compiled halves: the root binding's `prototype` carries no
+		// methods, so llvm.Run said "member 'call' of undefined" and the native build,
+		// whose layer-2 js_jsobject had no prototype slot at all, said "member
+		// 'toString' of undefined". The three members are the ones a program in this
+		// subset can reach; each reads its receiver from the call's `this`, which is
+		// what Function.prototype.call passes. Twins: js_jsobject in
+		// languages/lib/js-rt.metajs and jsObjectProto in both *-interpreter.abnf
+		// start scripts. docs/todo.md 2.5.
+		proto := newJSObject()
+		proto.set("toString", jsHostFunc("toString", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return jsvProtoTag(u(this))
+		}))
+		proto.set("valueOf", jsHostFunc("valueOf", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return u(this)
+		}))
+		proto.set("hasOwnProperty", jsHostFunc("hasOwnProperty", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			self, isObj := u(this).(*jsObject)
+			if !isObj {
+				return false
 			}
-		}
+			_, has := self.props[rt.toString(argAt(args, 0))]
+			return has
+		}))
+		o.set("prototype", proto)
 		return w(o)
 	}
 
@@ -1356,6 +1436,65 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}))
 	}
 	baseGet := m["js_get"]
+	// js_jsvget is the VALUE read of a member - `const f = p.m`, `typeof p.m` - as
+	// opposed to js_jsmget, which the emitter uses at a member-followed-by-a-call site
+	// and which deliberately HIDES the String/Array method names so the call falls into
+	// js_jsmcall. The difference this extern exists for: an instance's methods live on
+	// its __class descriptor, not as own properties, so `typeof p.m` answered
+	// "undefined" in all four engines where node says "function". The answer is a
+	// receiver-BOUND host function that re-enters the method with the receiver
+	// PREPENDED, which is the calling convention a __class method has here (see
+	// jsvCallMethod). The layer-2 twin is js_jsvget in languages/lib/js-rt.metajs and
+	// the interpreters' is getMember's class-method arm. docs/todo.md 2.5.
+	m["js_jsvget"] = func(a []uint64) uint64 {
+		// The FAST PATH must not re-wrap: the handle baseGet answered is returned
+		// as it stands, and the fallback below runs only when the read found
+		// nothing. The layer-2 twin pays the same attention and for a measured
+		// reason - see js_jsvget in languages/lib/js-rt.metajs.
+		r := baseGet(a)
+		if !isUndefOrNull(u(r)) {
+			return r
+		}
+		recv, isObj := u(a[0]).(*jsObject)
+		if !isObj {
+			return r
+		}
+		name := rt.toString(u(a[1]))
+		if jsvInternalKey(name) {
+			return r
+		}
+		if fn, found := jsvFindClassMethod(recv, name); found {
+			bound := fn
+			return w(jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				return rt.call(bound, jsUndef, append([]interface{}{recv}, args...))
+			}))
+		}
+		return r
+	}
+	// js_has plus the __class methods: an instance keeps its methods on its class
+	// descriptor rather than as own properties, so `"m" in instance` answered false
+	// where node answers true. The layer-2 twin is js_jshas in
+	// languages/lib/js-rt.metajs; the interpreters' is propIn. docs/todo.md 2.5.
+	baseHas := m["js_has"]
+	m["js_jshas"] = func(a []uint64) uint64 {
+		recv, isObj := u(a[0]).(*jsObject)
+		name := rt.toString(u(a[1]))
+		// The __-prefixed engine slots are not properties of the program's object:
+		// `"__class" in p` answered TRUE in both compiled halves and false in the
+		// interpreters and in node. Measured on the way past, not part of the item.
+		if isObj && jsvInternalKey(name) {
+			return w(false)
+		}
+		if r := baseHas(a); u(r) == true {
+			return r
+		}
+		if isObj {
+			if _, found := jsvFindClassMethod(recv, name); found {
+				return w(true)
+			}
+		}
+		return w(false)
+	}
 	m["js_jsmget"] = func(a []uint64) uint64 {
 		if jsvHidesMember(u(a[0]), rt.toString(u(a[1]))) {
 			return jsHUndefined

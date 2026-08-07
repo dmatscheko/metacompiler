@@ -3468,7 +3468,11 @@ NotFuncHead = :script(~~
             for (var i = 1; i < items.length; i = i + 2) {
                 var rr = items[i + 1](b)
                 b = rr.b
-                if (items[i] == "in") { v = callExt(b, "js_has", [rr.v, v]) }
+                // js_jshas is js_has plus the __class methods: an instance keeps its
+                // methods on its class descriptor, not as own properties, so
+                // `"m" in instance` answered false where node answers true.
+                // docs/todo.md 2.5.
+                if (items[i] == "in") { v = callExt(b, "js_jshas", [rr.v, v]) }
                 // js_jsinstanceof also answers a plain constructor FUNCTION on the
                 // right ('function F() {}; new F() instanceof F'), which the shared
                 // extern reported false for because it only knows class descriptors,
@@ -4160,8 +4164,14 @@ NotFuncHead = :script(~~
                         curThis = hUndef
                         i = i + 2
                     } else {
+                        // A member read that is NOT followed by a call. js_jsvget is
+                        // memGetExt() plus the two things a plain read has to answer
+                        // and the call site must not: a __class method (so `typeof p.m`
+                        // is "function", not "undefined") and a String/Array builtin
+                        // (so `typeof [].push` stops depending on which engine runs).
+                        // See languages/lib/js-rt.metajs. docs/todo.md 2.5.
                         curThis = cur
-                        cur = callExt(b, memGetExt(), [cur, kr.v])
+                        cur = callExt(b, "js_jsvget", [cur, kr.v])
                         i = i + 1
                     }
                 } else if (s.kind == "tag") {

@@ -478,6 +478,36 @@ Promise.resolve().then(qnop).then(qnop).then(qnop).then(qnop).then(function() {
     if (!ok) { exit(1); }
 });
 
+
+// ----- methods as values, Object.prototype, bind, and a catchable BigInt -----
+// docs/todo.md 2.5 / 2.6. An instance's methods live on its __class descriptor, so a
+// VALUE read of one answered undefined in all four engines; Object.prototype carried
+// nothing in the two compiled halves; bind existed nowhere; and a BigInt TypeError
+// aborted the process instead of reaching a catch. The BigInt operands come out of an
+// ARRAY so the constant folder cannot evaluate them at compile time.
+class FMv { m() { return "m" + this.k } }
+var fmv = new FMv(); fmv.k = 1;
+check("method-as-value-typeof", typeof fmv.m === "function");
+check("method-as-value-call", (function() { var g = fmv.m; return g(); })() === "m1");
+check("method-in-operator", ("m" in fmv) && !("__class" in fmv));
+check("builtin-as-value", typeof [].push === "function" && typeof "s".slice === "function");
+check("objproto-tostring", Object.prototype.toString.call([1]) === "[object Array]" &&
+                           Object.prototype.toString.call({}) === "[object Object]" &&
+                           Object.prototype.toString.call(1) === "[object Number]");
+check("objproto-hasown", Object.prototype.hasOwnProperty.call({a: 1}, "a") &&
+                         !Object.prototype.hasOwnProperty.call({a: 1}, "b"));
+check("fn-call-receiver", (function(a) { return this.x + a; }).call({x: 1}, 2) === 3);
+check("fn-bind", (function(a, b) { return this.x + a + b; }).bind({x: 1}, 2)(3) === 6);
+check("new-returning-function", (function() {
+    function Meta() { return function() { this.q = 8 }; }
+    return (new (new Meta())()).q === 8;
+})());
+check("bigint-mix-catchable", (function() {
+    var ops = [1n, 1];
+    try { return "no:" + (ops[0] + ops[1]); } catch (e) { return ("" + e).indexOf("Cannot mix BigInt") >= 0; }
+})() === true);
+check("bigint-after-catch", 1n + 1n === 2n);
+
 function main() {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;
