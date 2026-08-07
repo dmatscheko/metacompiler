@@ -553,14 +553,16 @@ function csFloPromotes(l, r) {
 // NO forced ".0" and no two-significant-digit minimum (both of those are Java's).
 // abnf/jsrtjvm.go's csFloStr32 states what is settled and what is derived.
 //
-// THE DIGITS COME FROM `"" + a`, NOT FROM floPrec, and that is not a style
-// choice. floPrec's two implementations DISAGREE: abnf/commonscript.go answers
-// exactly n digits and languages/lib/runtime.c's answers max(n, shortest), so
-// floPrec(1/3, 1) is "3e-1" under llvm.Run and "3333333333333333e-1" natively.
-// Using it here would be a halves divergence in every float that needs fewer
-// digits than its double. `"" + a` is the shortest round-tripping DOUBLE in every
-// engine, and rounding that digit string down to n is exact for every n a float
-// can want.
+// THE DIGITS COME FROM `"" + a`, NOT FROM floPrec, and here that is SOUND -
+// which is not the same reason this comment used to give. It used to say
+// floPrec's two implementations DISAGREE (exactly n digits in
+// abnf/commonscript.go against max(n, shortest) in languages/lib/runtime.c);
+// `08e8fcb` unified them and both now answer exactly n, so either question could
+// be asked here. What keeps `"" + a` is that LAYER 2's hosts are exact: natively
+// it is the C floor's number-to-string and under llvm.Run it is the Go twin's,
+// both strconv-grade shortest round-tripping forms. The INTERPRETER half is the
+// one that could not use it, because its host is goja - see the csDecDigits
+// comment in languages/csharp-interpreter.abnf and docs/todo.md 1.8.
 
 // The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP with
 // EXP the decimal exponent of the FIRST digit.

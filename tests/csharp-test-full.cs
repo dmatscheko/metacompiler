@@ -706,6 +706,20 @@ b";                                                   // verbatim keeps the newl
             Program.Check("flt6", Program.S23S(1.0) == "1" && Program.S23S(2.5) == "2.5");
             Program.Check("flt7", Program.S23S(0.1 + 0.2) == "0.30000000000000004");
             Program.Check("flt8", Program.S23S(1.0 / 3.0) == "0.3333333333333333");
+            // docs/todo.md 1.8. The digits are the SHORTEST decimal that reads back
+            // as the same double, and the interpreter half used to take them from
+            // the host's own `"" + a`. goja's is not always the shortest form - it
+            // renders 359000550 * 2^-38 with sixteen digits that read back as the
+            // NEXT double up - so the row below answered "0.001306036392634269"
+            // under goja and "0.0013060363926342689" under -frozen: a live
+            // divergence between the two script hosts that no matrix entry reached.
+            // Both engines now ask floPrec for n = 1..17 and stop at the first n
+            // that parses back, which is host-independent by construction. The
+            // operand is read out of an ARRAY so the constant folder cannot answer
+            // it, and the second value is the same double reached by arithmetic.
+            double[] sd = {0.0013060363926342689, 359000550.0};
+            Program.Check("flt8a", Program.S23S(sd[0]) == "0.0013060363926342689");
+            Program.Check("flt8b", Program.S23S(sd[1] / 274877906944.0) == "0.0013060363926342689");
             double inf = 1.0 / 0.0;
             double nan = 0.0 / 0.0;
             Program.Check("flt9", Program.S23S(inf) == "Infinity" && Program.S23S(-1.0 / 0.0) == "-Infinity");
@@ -1276,15 +1290,23 @@ b";                                                   // verbatim keeps the newl
         // spec-cited rather than executed. Each operand is read out of an ARRAY so
         // the grammars' constant folders cannot answer the question at compile time.
         //
+        // PART OF THE WRITE SITE IS NOW CLOSED, in SECTION 29: an UNQUALIFIED write
+        // to a member of the enclosing type adopts that member's declared type
+        // (`double D; ... D = 3` holds 3.0), and a numeric field with no
+        // initializer starts at its declared type's zero rather than the int 0.
+        // Both are exact, because the declaring class is known at walk time.
+        //
         // STILL NOT CLOSED, each still a wrong answer and each deliberately NOT
-        // asserted here: an ASSIGNMENT AFTER DECLARATION (`sv.d = 3` on a `double`
-        // field is still 3, not 3.0 - only the INITIAL value adopts), a lambda's
-        // parameter and return types, a `Dictionary<string, double>` value type,
-        // a nested `double[][]`, a `List<double>` element and a
-        // `Dictionary<string, double>` value. All of them need the declared type remembered
-        // per variable and field at every WRITE site, which is a var-type table in
-        // both engines. And `decimal` is still a style-2 double box, so
-        // `1.5m is double` is true and `decimal[]` renders `System.Double[]`.
+        // asserted here: a QUALIFIED write (`bx.A = 3` is still 3, not 3.0 - the
+        // receiver's type is not known at the write site, so it needs either a
+        // static receiver-type table or a run-time lookup of the member's declared
+        // type off the receiver's class), a write to a LOCAL after its declaration
+        // (`double d = 0; d = 3`, which needs a per-method var-type table in both
+        // engines), an array ELEMENT write, a lambda's parameter and return types, a
+        // nested `double[][]`, a `List<double>` element and a
+        // `Dictionary<string, double>` value. And `decimal` is still a style-2
+        // double box, so `1.5m is double` is true and `decimal[]` renders
+        // `System.Double[]`.
         class S28Box
         {
             public double A = 3;
@@ -1380,6 +1402,158 @@ b";                                                   // verbatim keeps the newl
             Program.Check("is11", (o[4] as string) == null && (string) (o[6] as string) == "s");
         }
 
+
+        // ===== SECTION 29: an unqualified name resolves to a member of the
+        // enclosing type =====
+        //
+        // docs/todo.md 1.2 and 1.1. ECMA-334 12.8.4 resolves a simple name that is
+        // not a local, a parameter or a type against the members of the enclosing
+        // type; 12.8.7 inserts the implicit `this` for an instance member; 12.7.3
+        // forbids `this` in a static member, so a static member is reached through
+        // the DECLARING type instead; and 7.3 makes a local or parameter of the same
+        // name shadow it. ECMA-334 10.2.3 at 12.21.2's simple assignment is what
+        // makes the WRITTEN VALUE adopt the member's declared type.
+        //
+        // THERE IS NO C# TOOLCHAIN ON THIS MACHINE, so every value here is
+        // spec-cited rather than executed. Every operand is read out of an ARRAY so
+        // the grammars' constant folders cannot answer the question at compile time.
+        //
+        // FIVE SHAPES WERE BROKEN and only the instance-field READ worked. An
+        // unqualified WRITE to an instance field ABORTED the compiler half where the
+        // interpreter answered; a STATIC field aborted in both directions in both
+        // halves; an auto-property write aborted; a property with ACCESSOR BODIES
+        // read unqualified emitted a js_get of a slot that does not exist and
+        // SILENTLY ANSWERED NOTHING in the compiler while the interpreter aborted;
+        // and an inherited field was missing from the instance entirely in the
+        // interpreter whenever the subclass declared a method (s29in5).
+        class S29A
+        {
+            public double D = 1;
+            public double U;
+            public int I = 10;
+            public static double S = 2;
+            public static int SI = 20;
+            public double P { get; set; } = 1;
+            public static int SP { get; set; } = 40;
+            public int W { get { return I * 2; } set { I = value; } }
+
+            public double RdD() { return this.D; }
+            public void WrD(int v) { D = v; }
+            public void CompI(int v) { I += v; }
+            public void IncI() { I++; }
+            public int PostI() { return I++; }
+            public void WrU(int v) { U = v; }
+            public void WrP(int v) { P = v; }
+            public void WrW(int v) { W = v; }
+            public int RdW() { return W; }
+            public double RdS() { return S; }
+            public void WrS(int v) { S = v; }
+            public static double SRdS() { return S; }
+            public static void SWrS(int v) { S = v; }
+            public static void SIncSI() { SI++; }
+            public static int SRdSP() { return SP; }
+            public static void SWrSP(int v) { SP = v; }
+
+            // The CONTROLS. A parameter, a local, and a local declared with the same
+            // name as a field must all keep resolving to the local - which is the
+            // one thing a wrong implementation of the branch would break.
+            public double ShadowParam(double D) { return D; }
+            public double ShadowLocal() { double D = 99; return D; }
+            public double ShadowWrite(double D) { D = 5; return D + this.D; }
+        }
+        // A STATIC FIELD INITIALIZER naming another static of the same class,
+        // unqualified: the initializers run in declaration order (ECMA-334
+        // 15.5.6.1), so S29I.B is 6. The interpreter said "unknown name: A" where
+        // the compiler half answered - a halves divergence of its own.
+        class S29I { public static double A = 2; public static double B = S29I.A * 3;
+                     public static double C = A * 3; public static double Rd() { return C; } }
+        class S29Base { public double BD = 1; public static double BS = 2; }
+        class S29Sub : S29Base
+        {
+            public void WrBD(int v) { BD = v; }
+            public double RdBD() { return BD; }
+            public void WrBS(int v) { BS = v; }
+            public double RdBS() { return BS; }
+        }
+        static void S29()
+        {
+            int[] n = {3, 4, 5};
+
+            // ----- an unqualified INSTANCE field, read and written -----
+            S29A a = new S29A();
+            Program.Check("s29in1", a.RdD() == 1);
+            a.WrD(n[0]);
+            Program.Check("s29in2", a.D == 3);
+            a.CompI(n[0]);
+            Program.Check("s29in3", a.I == 13);
+            S29A b = new S29A();
+            b.IncI();
+            Program.Check("s29in4", b.I == 11 && b.PostI() == 11 && b.I == 12);
+            // an INHERITED field is reached the same way, and the subclass declaring
+            // a method must not cost it its base constructor
+            S29Sub sb = new S29Sub();
+            Program.Check("s29in5", sb.BD == 1 && sb.RdBD() == 1);
+            sb.WrBD(n[0]);
+            Program.Check("s29in6", sb.BD == 3 && sb.RdBD() == 3);
+
+            // ----- an unqualified STATIC field, from an instance member and from a
+            // static one, of this class and of a base -----
+            S29A.S = 2;
+            Program.Check("s29st1", new S29A().RdS() == 2 && S29A.SRdS() == 2);
+            new S29A().WrS(n[2]);
+            Program.Check("s29st2", S29A.S == 5);
+            S29A.SWrS(n[1]);
+            Program.Check("s29st3", S29A.S == 4);
+            S29A.SI = 20;
+            S29A.SIncSI();
+            Program.Check("s29st4", S29A.SI == 21);
+            S29Base.BS = 2;
+            Program.Check("s29st5", new S29Sub().RdBS() == 2);
+            new S29Sub().WrBS(n[0]);
+            Program.Check("s29st6", S29Base.BS == 3);
+
+            Program.Check("s29st7", S29I.B == 6 && S29I.C == 6 && S29I.Rd() == 6);
+
+            // ----- an unqualified auto-PROPERTY and a property with ACCESSOR
+            // BODIES, read and written -----
+            S29A p = new S29A();
+            p.WrP(n[0]);
+            Program.Check("s29pr1", p.P == 3);
+            Program.Check("s29pr2", p.RdW() == 20);
+            p.WrW(n[2]);
+            Program.Check("s29pr3", p.I == 5 && p.RdW() == 10);
+            S29A.SP = 40;
+            Program.Check("s29pr4", S29A.SRdSP() == 40);
+            S29A.SWrSP(n[0]);
+            Program.Check("s29pr5", S29A.SP == 3);
+
+            // ----- THE CONTROLS: a local or parameter of the same name SHADOWS the
+            // member, and a write through the shadowed name must not touch it.
+            S29A c = new S29A();
+            Program.Check("s29sh1", c.ShadowParam(n[2]) == 5);
+            Program.Check("s29sh2", c.ShadowLocal() == 99);
+            Program.Check("s29sh3", c.ShadowWrite(n[0]) == 6 && c.D == 1);
+
+            // ----- docs/todo.md 1.1: the member's DECLARED TYPE adopts an
+            // unqualified write, so an untyped integer written at a `double` member
+            // does not integer-divide afterwards.
+            S29A t = new S29A();
+            t.WrD(n[0]);
+            Program.Check("s29ad1", t.D / 2 == 1.5 && (t.D is double) && !(t.D is int));
+            t.WrU(n[0]);
+            Program.Check("s29ad2", t.U / 2 == 1.5 && (t.U is double));
+            t.WrP(n[0]);
+            Program.Check("s29ad3", t.P / 2 == 1.5 && (t.P is double));
+            S29A.SWrS(n[0]);
+            Program.Check("s29ad4", S29A.S / 2 == 1.5 && (S29A.S is double));
+            // a field with NO initializer starts at its declared type's zero
+            Program.Check("s29ad5", (new S29A().U is double) && !(new S29A().U is int));
+            // NEGATIVE CONTROL: an `int` member must NOT float.
+            S29A u = new S29A();
+            u.CompI(n[0]);
+            Program.Check("s29ad6", u.I / 2 == 6 && (u.I is int) && !(u.I is double));
+        }
+
         // ===== END SECTIONS =====
 
         static int Main()
@@ -1412,6 +1586,7 @@ b";                                                   // verbatim keeps the newl
             Program.S26(); // SECTION-CALL 26
             Program.S27(); // SECTION-CALL 27
             Program.S28(); // SECTION-CALL 28
+            Program.S29(); // SECTION-CALL 29
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

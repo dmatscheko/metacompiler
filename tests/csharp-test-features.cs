@@ -247,6 +247,29 @@ namespace Demo
         static byte AdoptW(byte b) { return b; }
         class AdoptBox { public double A = 3; public double P { get; set; } = 3; }
 
+        // ----- an unqualified name resolving to a member of the enclosing type
+        // (ECMA-334 12.8.4 / 12.8.7 / 12.7.3, docs/todo.md 1.2 and 1.1) -----
+        class UnqBox
+        {
+            public double D = 1;
+            public double U;
+            public static double S = 2;
+            // NOTE the name: csPropAcc / csEvtAcc are keyed by member name ALONE,
+            // across the whole file, so a property with accessor bodies must not
+            // reuse a name some other class declares as a plain field (`Box.W`
+            // above) - every access to that field would become an accessor CALL.
+            public int Acc { get { return 20; } set { this.D = value; } }
+            public void WrD(int v) { D = v; }          // instance field, unqualified
+            public void WrU(int v) { U = v; }          // ... with no initializer
+            public double RdS() { return S; }          // static, from an instance member
+            public static void SWrS(int v) { S = v; }  // static, from a static member
+            public int RdAcc() { return Acc; }         // property with accessor bodies
+            public void WrAcc(int v) { Acc = v; }
+            public double Shadow(double D) { return D; }   // CONTROL: the parameter wins
+        }
+        class UnqBase { public double BD = 1; }
+        class UnqSub : UnqBase { public double RdBD() { return BD; } }
+
         // ----- exceptions -----
         static int Risky(int n)
         {
@@ -710,6 +733,26 @@ namespace Demo
                 && (adoptObj[1] is long) && !(adoptObj[1] is int)
                 && (adoptObj[2] is double) && !(adoptObj[2] is float)
                 && (adoptObj[3] is float) && !(adoptObj[3] is double));
+
+            // ----- an unqualified member of the enclosing type: read and written,
+            // instance and static, field and property; and the member's declared
+            // type adopts the written value. The last row is the CONTROL - a
+            // parameter of the same name must still win.
+            int[] unqN = {3, 5};
+            UnqBox unq = new UnqBox();
+            unq.WrD(unqN[0]);
+            Program.Check("unqualified-field", unq.D == 3 && unq.D / 2 == 1.5);
+            unq.WrU(unqN[0]);
+            Program.Check("unqualified-field-noinit", unq.U / 2 == 1.5 && (unq.U is double));
+            Program.Check("unqualified-static", unq.RdS() == 2);
+            UnqBox.SWrS(unqN[0]);
+            Program.Check("unqualified-static-write", UnqBox.S == 3 && UnqBox.S / 2 == 1.5);
+            Program.Check("unqualified-property", unq.RdAcc() == 20);
+            UnqBox unq2 = new UnqBox();
+            unq2.WrAcc(unqN[1]);
+            Program.Check("unqualified-property-write", unq2.D == 5);
+            Program.Check("unqualified-inherited", new UnqSub().RdBD() == 1 && new UnqSub().BD == 1);
+            Program.Check("unqualified-shadowed", unq.Shadow(unqN[1]) == 5 && unq.D == 3);
 
             Console.WriteLine("features: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;

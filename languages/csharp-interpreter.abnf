@@ -1841,39 +1841,23 @@ KwLet       = "let" KwEnd ;
         var s = (a >= 0.00001 && a < 1000000000000000) ? csFloPlain(a) : csFloSci(a)
         return neg ? "-" + s : s
     }
+    // Both forms are built from csDecDigits below, which asks floPrec rather than
+    // the host's own printer (docs/todo.md 1.8): `"" + a` is not the shortest
+    // round-tripping form in goja, so reading the digits off it was a live
+    // goja-vs-`-frozen` divergence. csF32Plain is the shared plain-form writer -
+    // it forces no ".0", which is C#'s rule for a double just as much as for a
+    // float, so the two renderers cannot disagree about the shape.
     function csFloPlain(a) {
-        var s = "" + a
-        // The host switches to exponent form at 1e21; inside this range it does not.
-        return s
+        var sig = csDecDigits(a)
+        var ei = sig.indexOf("e")
+        return csF32Plain(sig.substring(0, ei), parseInt(sig.substring(ei + 1), 10))
     }
     function csFloSci(a) {
-        var s = "" + a
-        var mant = s
-        var exp = 0
-        var ei = 0 - 1
-        for (var i = 0; i < s.length; i++) { if (s.charAt(i) == "e" || s.charAt(i) == "E") { ei = i } }
-        if (ei >= 0) {
-            mant = s.substring(0, ei)
-            var et = s.substring(ei + 1)
-            if (et.charAt(0) == "+") { et = et.substring(1) }
-            exp = parseInt(et, 10)
-        }
-        var digits = ""
-        var pt = 0 - 1
-        for (var j = 0; j < mant.length; j++) {
-            var ch = mant.charAt(j)
-            if (ch == ".") { pt = digits.length } else { digits = digits + ch }
-        }
-        if (pt < 0) { pt = digits.length }
-        var lead = 0
-        while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead++ }
-        digits = digits.substring(lead)
-        pt = pt - lead
-        var endz = digits.length
-        while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
-        digits = digits.substring(0, endz)
+        var sig = csDecDigits(a)
+        var ei = sig.indexOf("e")
+        var digits = sig.substring(0, ei)
+        var e10 = parseInt(sig.substring(ei + 1), 10)
         var frac = digits.substring(1)
-        var e10 = pt + exp - 1
         var es = e10 < 0 ? (0 - e10) : e10
         var etx = "" + es
         if (es < 10) { etx = "0" + etx }
@@ -1892,43 +1876,45 @@ KwLet       = "let" KwEnd ;
     // "1E+07" and the double 1e7 prints "10000000"). The LOWER bound is
     // csFloStr's own, unchanged, so the two renderers cannot disagree.
     //
-    // THE DIGITS COME FROM `"" + a` AND NOT FROM floPrec: floPrec's two
-    // implementations disagree (abnf/commonscript.go answers exactly n digits,
-    // languages/lib/runtime.c's answers max(n, shortest)), so a renderer written
-    // on it would be a halves divergence in every float shorter than its double.
+    // THE DIGITS COME FROM floPrec AND NOT FROM `"" + a`, and that is the opposite
+    // of what this comment used to say (docs/todo.md 1.8). The old text claimed
+    // floPrec's two implementations disagree; `08e8fcb` UNIFIED them - both
+    // abnf/commonscript.go (goja and the frozen host, over strconv) and
+    // languages/lib/runtime.c host id 70 now answer EXACTLY n significant digits,
+    // so a renderer written on floPrec is host-independent by construction.
+    //
+    // `"" + a` IS NOT THE SHORTEST ROUND-TRIPPING FORM IN EVERY ENGINE. goja gets
+    // 22 of 199,904 random doubles wrong, and at some subnormal boundaries it
+    // emits a non-digit character outright. So reading the digits off it made this
+    // renderer wrong AND a live goja-vs-`-frozen` divergence waiting for the first
+    // value that reached it - and it is unfixable from inside the dialect, since a
+    // script cannot ask the host for more digits than its printer chose to give.
+    // Asking floPrec for n = 1..17 and stopping at the first n that parses back is
+    // the same question asked in a way every engine answers identically; parseFloat
+    // is strconv.ParseFloat in both hosts, so the test decides rather than
+    // approximates. This is jDecDigits in languages/java-interpreter.abnf.
 
+    // The value of a floPrec-shaped DIGITS "e" EXP form, exactly. EXP is the
+    // decimal exponent of the FIRST digit, so the text to parse carries the point
+    // after that digit.
+    function csSigVal(s) {
+        var ei = s.indexOf("e")
+        var ds = s.substring(0, ei)
+        var frac = ds.substring(1)
+        if (frac == "") { frac = "0" }
+        return parseFloat(ds.charAt(0) + "." + frac + "e" + s.substring(ei + 1))
+    }
     // The shortest round-tripping decimal of the double a > 0, as DIGITS "e" EXP,
-    // EXP being the decimal exponent of the FIRST digit.
+    // EXP being the decimal exponent of the FIRST digit. Seventeen digits always
+    // round-trip a binary64, so the loop always terminates with an exact answer.
     function csDecDigits(a) {
-        var s = "" + a
-        var mant = s
-        var exp = 0
-        var ei = 0 - 1
-        for (var i = 0; i < s.length; i++) {
-            var c = s.charAt(i)
-            if (c == "e" || c == "E") { ei = i }
+        var n = 1
+        while (n < 17) {
+            var c = floPrec(a, n)
+            if (csSigVal(c) === a) { return c }
+            n = n + 1
         }
-        if (ei >= 0) {
-            mant = s.substring(0, ei)
-            var et = s.substring(ei + 1)
-            if (et.charAt(0) == "+") { et = et.substring(1) }
-            exp = parseInt(et, 10)
-        }
-        var digits = ""
-        var pt = 0 - 1
-        for (var j = 0; j < mant.length; j++) {
-            var ch = mant.charAt(j)
-            if (ch == ".") { pt = digits.length } else { if (ch != "-") { digits = digits + ch } }
-        }
-        if (pt < 0) { pt = digits.length }
-        var lead = 0
-        while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead++ }
-        digits = digits.substring(lead)
-        pt = pt - lead
-        var endz = digits.length
-        while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
-        digits = digits.substring(0, endz)
-        return digits + "e" + (pt + exp - 1)
+        return floPrec(a, 17)
     }
     // A DIGITS "e" EXP form rounded to n significant digits, half to even.
     function csRoundDig(s, n) {
@@ -2327,11 +2313,11 @@ KwLet       = "let" KwEnd ;
         return true
     }
     // Calling an iterator method: the body is not run, only captured.
-    function csRunIter(pinfo, body, self, args) {
-        return csNewGen(csIterThunk(pinfo, body, self, args))
+    function csRunIter(pinfo, body, self, args, cls) {
+        return csNewGen(csIterThunk(pinfo, body, self, args, cls))
     }
-    function csIterThunk(pinfo, body, self, args) {
-        return function() { csInvoke(pinfo, body, self, args) }
+    function csIterThunk(pinfo, body, self, args, cls) {
+        return function() { csInvoke(pinfo, body, self, args, cls) }
     }
     // An array enumerated explicitly becomes a generator over its elements, so the cursor
     // below has exactly one kind of source to drive.
@@ -4092,10 +4078,13 @@ KwLet       = "let" KwEnd ;
 
     // A method call binds its arguments like a lambda does: a missing argument takes the
     // parameter's default value, and a 'params' tail collects the rest into an array.
-    function csInvoke(pinfo, body, self, args) {
+    function csInvoke(pinfo, body, self, args, cls) {
         var saved = scopes
         scopes = [globalScope, {}]
         if (self != undefined) { declVar("this", self) }
+        // The enclosing class of a STATIC member body, so an unqualified static
+        // member resolves where there is no `this` to hang it on (csSelfWith).
+        if (self == undefined && cls != undefined && cls != null) { declVar("__cscls", cls) }
         var sc = {}
         csBindArgs(sc, pinfo, args)
         for (var i = 0; i < pinfo.params.length; i++) { declVar(pinfo.params[i], sc[pinfo.params[i]]) }
@@ -4206,7 +4195,8 @@ KwLet       = "let" KwEnd ;
         // `public double a = 3;` field holds 3.0, so `t.a / 2` is 1.5 and not the
         // 1 an int division gave. `double[] xs = {3, 4}` adopts elementwise.
         return {kind: "field", name: name, statik: isStatic,
-                init: init == null ? init : csAdoptThunk(ty, init), dflt: dflt}
+                init: init == null ? init : csAdoptThunk(ty, init), dflt: dflt,
+                adoptTy: csWriteTy(ty)}
     }
 
     // ----- operator overloading and user conversions -----
@@ -4302,7 +4292,7 @@ KwLet       = "let" KwEnd ;
         // from the assignment, which is the write-site problem the report names.
         return {kind: "prop", name: name, statik: isStatic,
                 getT: getT == null ? getT : csAdoptRet(ty, getT), setT: setT,
-                addT: addT, remT: remT}
+                addT: addT, remT: remT, adoptTy: csWriteTy(ty)}
     }
     // An automatic property IS a field: same record, so every field path (the instance
     // initializers, the static slot, the member table) applies to it unchanged.
@@ -4317,7 +4307,8 @@ KwLet       = "let" KwEnd ;
         // declaration (docs/todo.md 1.1): `public double A { get; set; } = 3;`
         // holds 3.0.
         return {kind: "field", name: name, statik: isStatic,
-                init: init == null ? init : csAdoptThunk(ty, init), dflt: dflt}
+                init: init == null ? init : csAdoptThunk(ty, init), dflt: dflt,
+                adoptTy: csWriteTy(ty)}
     }
     function makeIndexer(items) {
         var getT = null
@@ -4375,30 +4366,81 @@ KwLet       = "let" KwEnd ;
         var ctorInfo = null
         var sup = null
         var i
+        // TWO KINDS OF MEMBER RECORD CARRY AN `ext` SLOT and only one of them is a
+        // base class: BaseSpec pushes the base TYPE NAME as a string, while
+        // makeMethod pushes a BOOLEAN saying whether the method is an extension
+        // method. `ext != undefined` matched both, so a subclass that declared any
+        // ordinary method re-ran this with ext == false, looked up globalScope[false],
+        // found nothing and left `sup` NULL - and initFields below then skipped the
+        // BASE CONSTRUCTOR entirely, so every inherited field was missing from the
+        // instance. `cls.__super` was already set by the real base record, which is
+        // why `s is Base` and inherited METHODS kept working and only the FIELDS
+        // vanished; the compiler half was accidentally safe (csKnownClasses[false] is
+        // undefined) and answered correctly, so this was a live halves divergence.
         for (i = 0; i < members.length; i++) {
-            if (members[i].ext != undefined) {
+            if (typeof members[i].ext == "string") {
                 // Lenient: a base that is not a known class (an interface) is ignored.
                 sup = globalScope[members[i].ext]
                 if (sup != undefined) cls.__super = sup
             }
         }
+        // The names this class declares as STATIC data members - static fields,
+        // static auto-properties and static properties with accessor bodies. It is
+        // what an unqualified read/write of a static may walk (csStaticOwner), and
+        // it is a declared SET rather than a plain hasOwn(cls, name) for the reason
+        // java-interpreter.abnf's __sfld records: hasOwn would also answer every
+        // method closure, and - because getVar consults varMiss BEFORE hostGlobals -
+        // a static method would then shadow a host global of the same name.
+        var sfld = {}
+        cls.__sfld = sfld
+        // The declared type a WRITE to each member adopts (docs/todo.md 1.1).
+        var mty = {}
+        cls.__mty = mty
+        // A STATIC FIELD INITIALIZER may name another static of the same class
+        // unqualified, and the initializers run in declaration order (ECMA-334
+        // 15.5.6.1). There is no `this` here and no method frame, so the class is
+        // pushed as __cscls for the duration - the same binding a static method
+        // body gets - and csSelfWith then resolves the name off the descriptor.
+        // The compiler half already answered these, so this was a halves divergence.
+        // The descriptor is registered BEFORE its own static initializers run, so a
+        // `static double B = C.A * 3;` that names its own class QUALIFIED resolves
+        // too. The compiler half js_scope_decl's the descriptor at the top of
+        // buildClassStmt and always did; the interpreter used to publish it only at
+        // the end, so the two halves disagreed. Re-published at the end as well,
+        // which is idempotent.
+        globalScope[name] = cls
+        scopes.push({__cscls: cls})
         for (i = 0; i < members.length; i++) {
             var mm = members[i]
             if (mm.kind == "field") {
+                if (mm.statik) { sfld[mm.name] = true }
                 // An INTERFACE declares no storage: its automatic properties are a
                 // contract, not fields, so they must not be inherited as zeroed members
                 // that then shadow an implementor's own get accessor.
-                if (mm.statik) { cls[mm.name] = (mm.init != null) ? mm.init() : mm.dflt }
+                if (mm.statik) {
+                    cls[mm.name] = (mm.init != null) ? mm.init()
+                        : ((mm.adoptTy != undefined && mm.adoptTy != "" && mm.dflt !== null)
+                           ? csAdoptVal(mm.adoptTy, mm.dflt) : mm.dflt)
+                }
                 else if (kind != "interface") { fields.push(mm) }
             }
+            if (mm.kind == "prop" && mm.statik) { sfld[mm.name] = true }
+            if (mm.adoptTy != undefined && mm.adoptTy != "") { mty[mm.name] = mm.adoptTy }
             if (mm.kind == "ctor") ctorInfo = mm
         }
+        scopes.pop()
         // The constructor: the implicit base() first (the whole parent constructor,
         // without arguments), then this class' field defaults and initializers.
         function initFields(self) {
             if (sup != null) sup.__ctor(self)
             for (var k = 0; k < fields.length; k++) {
-                self[fields[k].name] = (fields[k].init != null && fields[k].init != undefined) ? fields[k].init() : fields[k].dflt
+                var fk = fields[k]
+                if (fk.init != null && fk.init != undefined) { self[fk.name] = fk.init(); continue }
+                // A field with no initializer starts at its declared type's zero,
+                // and THE WIDTH IS ON THE VALUE: `public double U;` holds 0.0, not
+                // the int 0 (docs/todo.md 1.1).
+                self[fk.name] = (fk.adoptTy != undefined && fk.adoptTy != "" && fk.dflt !== null)
+                    ? csAdoptVal(fk.adoptTy, fk.dflt) : fk.dflt
             }
         }
         if (ctorInfo != null) {
@@ -4430,7 +4472,7 @@ KwLet       = "let" KwEnd ;
         for (i = 0; i < members.length; i++) {
             var m2 = members[i]
             if (m2.kind == "method") {
-                cls[m2.name] = m2.statik ? makeStaticClosure(m2) : makeInstanceClosure(m2)
+                cls[m2.name] = m2.statik ? makeStaticClosure(m2, cls) : makeInstanceClosure(m2)
                 // 'static T M(this X x, ...)' is also reachable as x.M(...).
                 if (m2.statik && m2.ext) { csExt[m2.name] = cls[m2.name] }
                 // A custom Deconstruct: kept in its raw form so a deconstruction can read
@@ -4439,17 +4481,17 @@ KwLet       = "let" KwEnd ;
             }
             // A property with accessor bodies: '__get_X' / '__set_X' members.
             if (m2.kind == "prop") {
-                if (m2.getT != null) { cls["__get_" + m2.name] = csAccClosure(m2.statik, csGetPI, m2.getT) }
-                if (m2.setT != null) { cls["__set_" + m2.name] = csAccClosure(m2.statik, csSetPI, m2.setT) }
+                if (m2.getT != null) { cls["__get_" + m2.name] = csAccClosure(m2.statik, csGetPI, m2.getT, cls) }
+                if (m2.setT != null) { cls["__set_" + m2.name] = csAccClosure(m2.statik, csSetPI, m2.setT, cls) }
                 // An event's own subscription accessors: 'E += h' calls add(h).
-                if (m2.addT != null) { cls["__add_" + m2.name] = csAccClosure(m2.statik, csSetPI, m2.addT) }
-                if (m2.remT != null) { cls["__remove_" + m2.name] = csAccClosure(m2.statik, csSetPI, m2.remT) }
+                if (m2.addT != null) { cls["__add_" + m2.name] = csAccClosure(m2.statik, csSetPI, m2.addT, cls) }
+                if (m2.remT != null) { cls["__remove_" + m2.name] = csAccClosure(m2.statik, csSetPI, m2.remT, cls) }
             }
             // An overloaded operator or a user conversion: a static member of the class.
-            if (m2.kind == "op") { cls[m2.name] = makeStaticClosure(m2) }
+            if (m2.kind == "op") { cls[m2.name] = makeStaticClosure(m2, cls) }
             if (m2.kind == "indexer") {
-                if (m2.getT != null) { cls.__index = csAccClosure(false, m2.pinfo, m2.getT) }
-                if (m2.setT != null) { cls.__setindex = csAccClosure(false, csIdxSetPI(m2.pinfo), m2.setT) }
+                if (m2.getT != null) { cls.__index = csAccClosure(false, m2.pinfo, m2.getT, cls) }
+                if (m2.setT != null) { cls.__setindex = csAccClosure(false, csIdxSetPI(m2.pinfo), m2.setT, cls) }
             }
             // A nested type is a top level class of its own; the outer descriptor only
             // carries a reference so 'Outer.Inner' resolves.
@@ -4491,9 +4533,9 @@ KwLet       = "let" KwEnd ;
         }
     }
     // An accessor closure: the same shape as a method, so it is called like one.
-    function csAccClosure(isStatic, pinfo, body) {
+    function csAccClosure(isStatic, pinfo, body, cls) {
         var m = {pinfo: pinfo, body: body}
-        return isStatic ? makeStaticClosure(m) : makeInstanceClosure(m)
+        return isStatic ? makeStaticClosure(m, cls) : makeInstanceClosure(m)
     }
     // The set accessor of an indexer takes the index parameters plus 'value'.
     function csIdxSetPI(pinfo) {
@@ -4513,12 +4555,15 @@ KwLet       = "let" KwEnd ;
             return csInvoke(m.pinfo, m.body, self, args)
         }
     }
-    function makeStaticClosure(m) {
+    // A static member body has no `this` (ECMA-334 12.7.3), so the class it belongs
+    // to is carried instead: csInvoke binds it as __cscls, and csSelfWith reads it
+    // there to resolve an unqualified STATIC member (docs/todo.md 1.2).
+    function makeStaticClosure(m, cls) {
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
-            if (m.isGen === true) { return csRunIter(m.pinfo, m.body, undefined, args) }
-            return csInvoke(m.pinfo, m.body, undefined, args)
+            if (m.isGen === true) { return csRunIter(m.pinfo, m.body, undefined, args, cls) }
+            return csInvoke(m.pinfo, m.body, undefined, args, cls)
         }
     }
 
@@ -4593,29 +4638,91 @@ KwLet       = "let" KwEnd ;
     }
     core.getIndex = csGetIndex
 
-    // Unqualified access to an instance member. C# lets a member body name a field or a
-    // primary-constructor parameter without 'this.', and a local of the same name shadows
-    // it - so this hook only fires once the scope chain has NO binding for the name, and
-    // then reads it off the innermost 'this'.
+    // ----- unqualified access to a member of the enclosing type (docs/todo.md 1.2) -----
+    //
+    // C# resolves a simple name that is not a local, a parameter or a type against
+    // the members of the enclosing type (ECMA-334 12.8.4, simple names): an
+    // instance member through `this` (12.8.7 - `this` is inserted implicitly, and
+    // 12.7.3 makes it an error inside a static member), a static member through
+    // the DECLARING type. A local or parameter of the same name shadows it, and
+    // that falls out free here: interp-core's getVar/setVar walk the whole scope
+    // chain first and only then consult these hooks, so every name that does
+    // resolve pays nothing at all.
+    //
+    // WHAT WAS BROKEN. Only the first of five shapes worked. Reading an instance
+    // FIELD unqualified was fine; a STATIC field read or written unqualified, from
+    // either an instance or a static member, said "unknown name"/"assignment to
+    // unknown variable", and so did a property with ACCESSOR BODIES in either
+    // direction. Every class under tests/ wrote `this.x` or `Cls.S`, which is why
+    // 6,873 assertions never reached any of it.
+    //
+    // A STATIC member lives on the class DESCRIPTOR, which an instance reaches
+    // through __class and a static member body reaches through __cscls (bound by
+    // makeStaticClosure, since `this` is simply not bound in a static context).
+    // The walk is restricted to __sfld - the names the class DECLARED as static
+    // data - because a bare hasOwn(cls, name) would also answer every method
+    // closure and, since getVar consults varMiss BEFORE hostGlobals, would shadow
+    // a host global of the same name.
+    function csStaticOwner(cls, name) {
+        for (var c = cls; c != undefined && c != null; c = c.__super) {
+            var t = c.__sfld
+            if (t != undefined && t != null && t[name] === true) { return c }
+        }
+        return null
+    }
+    // The INSTANCE class in self's chain that declares `name` as a property with
+    // accessor bodies, or null. A static one is not this case - it is found by
+    // csStaticOwner and called without a receiver - so __sfld decides which.
+    function csAccOwner(self, name) {
+        for (var c = self.__class; c != undefined && c != null; c = c.__super) {
+            var t = c.__sfld
+            if (t != undefined && t != null && t[name] === true) { return null }
+            if (hasOwn(c, "__get_" + name) || hasOwn(c, "__set_" + name)) { return c }
+        }
+        return null
+    }
+    // The object an unqualified `name` is read/written through, or null when the
+    // name is not a member of the enclosing type at all (getVar then goes on to
+    // hostGlobals and its own error, exactly as before). A class descriptor comes
+    // back for a static, an instance for an instance member.
     function csSelfWith(name) {
         var sc = scopes
         for (var i = sc.length - 1; i >= 0; i--) {
             if (hasOwn(sc[i], "this")) {
                 var self = sc[i]["this"]
-                if (self !== undefined && self !== null && typeof self == "object" && hasOwn(self, name)) { return self }
-                return null
+                if (self === undefined || self === null || typeof self != "object") { return null }
+                if (hasOwn(self, name)) { return self }
+                if (csAccOwner(self, name) != null) { return self }
+                return csStaticOwner(self.__class, name)
             }
+            if (hasOwn(sc[i], "__cscls")) { return csStaticOwner(sc[i]["__cscls"], name) }
         }
         return null
     }
     core.varMiss = function(name) {
-        var self = csSelfWith(name)
-        return (self == null) ? null : {v: self[name]}
+        var o = csSelfWith(name)
+        if (o == null) { return null }
+        if (hasOwn(o, name)) { return {v: o[name]} }
+        var g = csFindAcc(o, "__get_" + name)
+        if (g == undefined) { return {v: o[name]} }
+        return {v: (o.__isclass === true) ? g() : g(o)}
     }
     core.setMiss = function(name, value) {
-        var self = csSelfWith(name)
-        if (self == null) { return false }
-        self[name] = value
+        var o = csSelfWith(name)
+        if (o == null) { return false }
+        // THE MEMBER'S DECLARED TYPE ADOPTS THE WRITTEN VALUE (ECMA-334 10.2.3 at
+        // 12.21.2's simple assignment), so `double D; ... D = 3` holds 3.0 and
+        // `D / 2` is 1.5 (docs/todo.md 1.1).
+        var ty = csMemberTyOf((o.__isclass === true) ? o : o.__class, name)
+        var v = (ty == "") ? value : csAdoptVal(ty, value)
+        if (!hasOwn(o, name)) {
+            var st = csFindAcc(o, "__set_" + name)
+            if (st != undefined) {
+                if (o.__isclass === true) { st(v) } else { st(o, v) }
+                return true
+            }
+        }
+        o[name] = v
         return true
     }
 
@@ -4778,6 +4885,30 @@ KwLet       = "let" KwEnd ;
     function csAdoptable(ty) {
         if (ty == "double" || ty == "float" || ty == "decimal") { return true }
         return hasOwn(csTypeW, ty)
+    }
+    // The type a WRITE to a member of this declared type adopts, "" for a member
+    // whose type names nothing numeric - the overwhelming majority. Asked ONCE, at
+    // parse time (docs/todo.md 1.1). The twin is csWriteTy in
+    // languages/csharp-to-llvm-ir.abnf.
+    function csWriteTy(ty) {
+        if (ty == undefined || ty == null) { return "" }
+        if (csElemAdoptTy(ty) != "") { return ty }
+        return csAdoptable(ty) ? ty : ""
+    }
+    // The declared type of a member reached unqualified, walking the __super chain
+    // from a class descriptor. The twin is csMemberInfo's `ty` in the compiler half.
+    function csMemberTyOf(cls, name) {
+        for (var c = cls; c != undefined && c != null; c = c.__super) {
+            var t = c.__mty
+            if (t != undefined && t != null && hasOwn(t, name)) { return t[name] }
+        }
+        return ""
+    }
+    // The value a declared type adopts, element-wise for an array type.
+    function csAdoptVal(ty, v) {
+        var el = csElemAdoptTy(ty)
+        if (el != "") { return csAdoptArr(el, v) }
+        return csImplicitConv(ty, v)
     }
     // "double[]" -> "double" when the elements are adoptable, "" otherwise. One level
     // only: `double[][]` and `Dictionary<string, double>` adopt nothing (see the

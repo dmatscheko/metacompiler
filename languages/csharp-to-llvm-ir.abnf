@@ -2937,9 +2937,10 @@ KwLet       = "let" KwEnd ;
     // Reads the current value of an assignment target (for '??=', which must not assign
     // when the place already holds a value).
     function makeRefRead(ref) {
+        var defClass = curClassName
         return function(b) {
             if (ref.path.length == 0) {
-                return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])}
+                return csEmitVarRead(b, defClass, ref.name)
             }
             var p = emitRefPath(b, ref)
             b = p.b
@@ -2951,6 +2952,9 @@ KwLet       = "let" KwEnd ;
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
+        // The enclosing class, snapshotted at WALK time: an unqualified target may
+        // be a member of it rather than a variable (see csUnqualWrite).
+        var defClass = curClassName
         // 'a ??= b' assigns only when a is null, and yields a's value either way.
         if (op == "??=") {
             var readT = makeRefRead(ref)
@@ -2973,6 +2977,11 @@ KwLet       = "let" KwEnd ;
             b = r.b
             var v = r.v
             if (ref.path.length == 0) {
+                var mi = csMemberInfo(defClass, ref.name)
+                if (mi != null && mi.dat) {
+                    var mk = (op == "=") ? null : function(bx, oldX) { return emitCompound(bx, op, oldX, v) }
+                    return csUnqualWrite(b, ref.name, mi, v, mk, false)
+                }
                 var nameV = emitStr(b, ref.name)
                 if (op != "=") {
                     var old = callExt(b, "js_scope_get", [curScopeV, nameV])
@@ -3029,9 +3038,16 @@ KwLet       = "let" KwEnd ;
     function makeIncDec(items, pre) {
         var ref = items[0]
         var step = (items[1] == "++") ? 1 : 0 - 1
+        var defClass = curClassName
         return function(b) {
             var oneV = emitNum(b, step)
             if (ref.path.length == 0) {
+                var mi = csMemberInfo(defClass, ref.name)
+                if (mi != null && mi.dat) {
+                    return csUnqualWrite(b, ref.name, mi, hUndef, function(bx, oldX) {
+                        return {b: bx, v: callExt(bx, "js_csstep", [oldX, oneV])}
+                    }, !pre)
+                }
                 var nameV = emitStr(b, ref.name)
                 var oldV = callExt(b, "js_scope_get", [curScopeV, nameV])
                 var newV = callExt(b, "js_csstep", [oldV, oneV])
@@ -3057,6 +3073,19 @@ KwLet       = "let" KwEnd ;
     // plus the base class chain. Filled while the file is walked, so both are complete by
     // the time a thunk emits code.
     var csClassMembers = {}
+    // class name -> member name -> the declared type a WRITE to it adopts. Only
+    // members whose type names something numeric appear (docs/todo.md 1.1).
+    var csMemberTys = {}
+    // class name -> member name -> true for the DATA members only: fields,
+    // auto-properties, properties with accessor bodies and primary-constructor
+    // parameters. A METHOD is deliberately not one. It is what separates the two
+    // halves of the unqualified branch: an INSTANCE member of any kind is read off
+    // `this` (which is what a bare method name used as a delegate has always done
+    // here), but a STATIC member is only reached through its descriptor when it is
+    // DATA - a bare STATIC METHOD name aborts in both halves, as it always has, and
+    // answering it in the compiler alone would be a halves divergence of exactly the
+    // kind this change exists to remove. A WRITE reaches data only, in both cases.
+    var csDataMembers = {}
     var csSupers = {}
     // ----- method hiding ('public new string Tag()') -----
     // The names some class hides, and the declared type of every local a class-typed
@@ -3082,13 +3111,26 @@ KwLet       = "let" KwEnd ;
         return ""
     }
     function csMemberKind(cls, name) {
+        var mi = csMemberInfo(cls, name)
+        return (mi == null) ? "" : mi.kind
+    }
+    // The same walk, answering WHICH class in the chain declares the name as well
+    // as how. The declaring class is what an unqualified STATIC access needs: a
+    // static inherited from a base lives on that base's descriptor and js_get does
+    // not walk __super.
+    function csMemberInfo(cls, name) {
         var c = cls
         for (var n = 0; n < 32 && c != "" && c != undefined; n++) {
             var t = csClassMembers[c]
-            if (t != undefined && t[name] != undefined) { return t[name] }
+            if (t != undefined && t[name] != undefined) {
+                var ty = csMemberTys[c]
+                var at = (ty != undefined && ty[name] != undefined) ? ty[name] : ""
+                var dt = csDataMembers[c]
+                return {kind: t[name], cls: c, ty: at, dat: (dt != undefined && dt[name] == true)}
+            }
             c = csSupers[c] != undefined ? csSupers[c] : ""
         }
-        return ""
+        return null
     }
     // A bare 'M(args)' call. Inside a class that declares M it is this.M(args) (or the
     // class' own static M); otherwise the name holds a callable value (a lambda, a
@@ -3300,6 +3342,15 @@ KwLet       = "let" KwEnd ;
         return csAdoptable(e) ? e : ""
     }
     function emitAdopt(b, ty, v) { return callExt(b, "js_csadoptty", [v, emitStr(b, ty)]) }
+    // The type a WRITE to a member of this declared type adopts, "" for a member
+    // whose type names nothing numeric - which is the overwhelming majority, and
+    // is what keeps the emitted IR of every other assignment unchanged. Asked
+    // ONCE, at parse time (docs/todo.md 1.1).
+    function csWriteTy(ty) {
+        if (ty == undefined || ty == null) { return "" }
+        if (csElemAdoptTy(ty) != "") { return ty }
+        return csAdoptable(ty) ? ty : ""
+    }
     // The value a site of declared type `ty` holds: the scalar adoption, the
     // ELEMENTWISE one for an array type, or the value untouched.
     function emitAdoptAny(b, ty, v) {
@@ -4199,29 +4250,112 @@ KwLet       = "let" KwEnd ;
     for (var iBcl = 0; iBcl < csBclExcNames.length; iBcl++) { csBclExc[csBclExcNames[iBcl]] = true }
 
     var csClassTParams = {}
-    // Unqualified access to an instance member. C# lets a member body name a field or a
-    // primary-constructor parameter without 'this.', and a local of the same name shadows
-    // it. Only a name the enclosing class actually declares as an instance member gets the
-    // extra branch, so the IR of every other variable read is unchanged; the branch itself
-    // asks js_scope_typeof (which does not abort on an unbound name) so the local still wins.
+    // ----- unqualified access to a member of the enclosing type (docs/todo.md 1.2) -----
+    //
+    // C# resolves a simple name that is not a local, a parameter or a type against
+    // the members of the enclosing type (ECMA-334 12.8.4): an instance member
+    // through an implicit `this` (12.8.7), a static member through the DECLARING
+    // type. A LOCAL OR PARAMETER OF THE SAME NAME SHADOWS IT, and which one a given
+    // execution sees is not knowable here - a name is a member only for the
+    // duration of a block that does not redeclare it - so the choice is a runtime
+    // branch on js_scope_typeof, which, unlike js_scope_get, does not abort on an
+    // unbound name. Only a name the enclosing class actually declares gets the
+    // branch, so the IR of every other variable access is unchanged, byte for byte.
+    // This is java-to-llvm-ir.abnf's makeVarRef / jUnqualWrite, which solves the
+    // identical problem for Java.
+    //
+    // FOUR OF THE FIVE SHAPES WERE BROKEN and only the instance-field READ worked.
+    // An unqualified WRITE to an instance field aborted the compiler half outright
+    // ("assignment to undeclared variable: D") where the interpreter answered - a
+    // live halves divergence --cross had never reached; a STATIC field aborted in
+    // both directions; an auto-property write aborted; and a property with ACCESSOR
+    // BODIES read unqualified emitted a plain js_get of a slot that does not exist
+    // and SILENTLY ANSWERED NOTHING, which is worse than the abort.
+
+    // The object an unqualified member is reached through: `this` for an instance
+    // member, the DECLARING class' descriptor for a static one (a static inherited
+    // from a base lives on that base's descriptor, and js_get does not walk
+    // __super).
+    function csUnqualOwner(b, mi) {
+        if (mi.kind == "static") { return callExt(b, "js_scope_get", [curScopeV, emitStr(b, mi.cls)]) }
+        return callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+    }
+    // Reading one. A property with accessor bodies is a CALL, not a slot; a field, an
+    // auto-property and a primary-constructor parameter are all plain slots.
+    function csUnqualRead(b, mi, name) {
+        var ownV = csUnqualOwner(b, mi)
+        if (csPropAcc[name] != undefined) { return emitPropGet(b, ownV, name) }
+        return callExt(b, "js_get", [ownV, emitStr(b, name)])
+    }
+    // Writing one. A PLACE cannot be phi'd - only a value can - so both arms carry
+    // their own read-modify-write and the phi joins the RESULT. mkNew(block, old) ->
+    // {b, v} is what a compound assignment or a ++ computes and may split blocks of
+    // its own (emitCompound does, for the delegate arm of '+='); a plain `=` passes
+    // null and stores v unchanged. retOld makes the expression answer the value from
+    // BEFORE the write, which is what a postfix x++ yields.
+    function csUnqualWrite(b, name, mi, v, mkNew, retOld) {
+        var localB = curF.NewBlock("")
+        var fieldB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        var tyV = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "undefined")])), fieldB, localB)
+        var lb = localB
+        var oldL = (mkNew == null) ? v : callExt(lb, "js_scope_get", [curScopeV, emitStr(lb, name)])
+        var newL = v
+        if (mkNew != null) {
+            var rl = mkNew(lb, oldL)
+            lb = rl.b
+            newL = rl.v
+        }
+        callExt(lb, "js_scope_set", [curScopeV, emitStr(lb, name), newL])
+        lb.NewBr(mergeB)
+        var fb = fieldB
+        var isAcc = csPropAcc[name] != undefined
+        var ownV = csUnqualOwner(fb, mi)
+        var oldF = v
+        if (mkNew != null) {
+            oldF = isAcc ? emitPropGet(fb, ownV, name) : callExt(fb, "js_get", [ownV, emitStr(fb, name)])
+        }
+        var newF = v
+        if (mkNew != null) {
+            var rf = mkNew(fb, oldF)
+            fb = rf.b
+            newF = rf.v
+        }
+        // THE MEMBER'S DECLARED TYPE ADOPTS THE WRITTEN VALUE (ECMA-334 10.2.3 at
+        // 12.21.2's simple assignment), so `double D; ... D = 3` holds 3.0 and
+        // `D / 2` is 1.5. Only the FIELD arm converts - the local arm is writing a
+        // variable that has nothing to do with this member (docs/todo.md 1.1).
+        if (mi.ty != "") { newF = emitAdoptAny(fb, mi.ty, newF) }
+        if (isAcc) { fb = emitPropSet(fb, ownV, name, newF) }
+        else { callExt(fb, "js_set", [ownV, emitStr(fb, name), newF]) }
+        fb.NewBr(mergeB)
+        var rlv = retOld ? oldL : newL
+        var rfv = retOld ? oldF : newF
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(rlv, lb), llvm.ir.NewIncoming(rfv, fb)])}
+    }
+    // The read, with the enclosing class passed in rather than read from
+    // curClassName: every caller snapshots it at WALK time, because by the time
+    // these thunks run the walk has long since left the class body.
+    function csEmitVarRead(b, defClass, name) {
+        var mi = csMemberInfo(defClass, name)
+        if (mi == null || (mi.kind != "instance" && !mi.dat)) {
+            return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])}
+        }
+        var localB = curF.NewBlock("")
+        var fieldB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        var tyV = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "undefined")])), fieldB, localB)
+        var lv = callExt(localB, "js_scope_get", [curScopeV, emitStr(localB, name)])
+        localB.NewBr(mergeB)
+        var fv = csUnqualRead(fieldB, mi, name)
+        fieldB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(fv, fieldB)])}
+    }
     makeVarRef = function(name) {
         var defClass = curClassName
-        return function(b) {
-            if (csMemberKind(defClass, name) != "instance") {
-                return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])}
-            }
-            var localB = curF.NewBlock("")
-            var fieldB = curF.NewBlock("")
-            var mergeB = curF.NewBlock("")
-            var tyV = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
-            b.NewCondBr(truthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "undefined")])), fieldB, localB)
-            var lv = callExt(localB, "js_scope_get", [curScopeV, emitStr(localB, name)])
-            localB.NewBr(mergeB)
-            var selfV = callExt(fieldB, "js_scope_get", [curScopeV, emitStr(fieldB, "this")])
-            var fv = callExt(fieldB, "js_get", [selfV, emitStr(fieldB, name)])
-            fieldB.NewBr(mergeB)
-            return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(fv, fieldB)])}
-        }
+        return function(b) { return csEmitVarRead(b, defClass, name) }
     }
     function csIsTParam(cls, n) {
         var tps = csClassTParams[cls]
@@ -4467,7 +4601,7 @@ KwLet       = "let" KwEnd ;
         // 1.1). Its SETTER's `value` parameter is not adopted - the value arrives
         // from the assignment, which is the write-site problem the report names.
         return {kind: "prop", name: name, statik: isStatic, getT: getT, setT: setT,
-                getTy: ty, addT: addT, remT: remT}
+                getTy: ty, addT: addT, remT: remT, adoptTy: csWriteTy(ty)}
     }
     // An automatic property IS a field: same record, so every field path (the instance
     // initializers, the static slot, the member table) applies to it unchanged.
@@ -4481,7 +4615,7 @@ KwLet       = "let" KwEnd ;
         if (isInt) { dfltH = 0 }
         // The declared type adopts the initializer (docs/todo.md 1.1).
         return {kind: "field", name: name, statik: isStatic, init: csAdoptInit(ty, init),
-                dfltH: dfltH, isInt: isInt}
+                dfltH: dfltH, isInt: isInt, adoptTy: csWriteTy(ty)}
     }
     function makeIndexer(items) {
         var getT = null
@@ -4660,7 +4794,7 @@ KwLet       = "let" KwEnd ;
         // `public double a = 3;` field holds 3.0, so `t.a / 2` is 1.5 and not the
         // 1 an int division gave. `double[] xs = {3, 4}` adopts elementwise.
         return {kind: "field", name: name, statik: isStatic, init: csAdoptInit(ty, init),
-                dfltH: dfltH, isInt: isInt}
+                dfltH: dfltH, isInt: isInt, adoptTy: csWriteTy(ty)}
     }
     // Wraps a field/auto-property initializer thunk so its value adopts `ty`. The
     // thunk is returned UNCHANGED when the type adopts nothing, which is almost
@@ -4673,8 +4807,15 @@ KwLet       = "let" KwEnd ;
             return {b: r.b, v: emitAdoptAny(r.b, ty, r.v)}
         }
     }
+    // A field with no initializer starts at its declared type's zero, and THE
+    // WIDTH IS ON THE VALUE: `public double U;` holds 0.0, not the int 0, so a
+    // later `U = 3` (which adopts, see csUnqualWrite) and `U / 2` both behave
+    // (docs/todo.md 1.1).
     function fieldDefault(b, f) {
-        if (f.isInt) return emitNum(b, 0)
+        if (f.isInt) {
+            if (f.adoptTy != undefined && f.adoptTy != "") { return emitAdopt(b, f.adoptTy, emitNum(b, 0)) }
+            return emitNum(b, 0)
+        }
         return handle(f.dfltH)
     }
 
@@ -5059,20 +5200,31 @@ KwLet       = "let" KwEnd ;
         }
         // The member table an unqualified 'M(args)' call consults (see makeSelfCall).
         var tbl = {}
+        var tys = {}
+        var dat = {}
         var bodies = {}
         for (var k = 0; k < members.length; k++) {
             var mm = members[k]
             if (mm.kind == "method" || mm.kind == "abstract" || mm.kind == "field" || mm.kind == "prop") {
                 tbl[mm.name] = mm.statik ? "static" : "instance"
             }
+            // The declared type an unqualified WRITE to this member adopts
+            // (docs/todo.md 1.1).
+            if (mm.kind == "field" || mm.kind == "prop") { dat[mm.name] = true }
+            if (mm.adoptTy != undefined && mm.adoptTy != "") { tys[mm.name] = mm.adoptTy }
             if (mm.kind == "method") { bodies[mm.name] = true }
             if (mm.ext != undefined) { csSupers[name] = mm.ext }
         }
         csBodyMembers[name] = bodies
         if (primary != null) {
-            for (var pp = 0; pp < primary.params.length; pp++) { tbl[primary.params[pp]] = "instance" }
+            for (var pp = 0; pp < primary.params.length; pp++) {
+                tbl[primary.params[pp]] = "instance"
+                dat[primary.params[pp]] = true
+            }
         }
         csClassMembers[name] = tbl
+        csMemberTys[name] = tys
+        csDataMembers[name] = dat
         // A record is built exactly like the class / struct it names; what it adds is value
         // equality (registered as its 'operator ==' / '!=', so the ordinary operator
         // dispatch reaches it) and deconstruction.
