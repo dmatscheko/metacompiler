@@ -1418,7 +1418,19 @@ UserInfix   = SameLine NotKeyword KId <~~ push({iop: up.in, user: true}) ~~> ;
 // already there. Deviation: Kotlin's progression is lazy, so an enormous range that
 // Kotlin would iterate cheaply is built element by element here. Without a range
 // operator RangeExpr is a pure pass-through (its single AddExpr thunk is returned
-// unchanged), so ordinary expressions stay byte-identical. The for-loop and the
+// unchanged), so ordinary expressions stay byte-identical.
+//
+// The progression's OWN properties are recovered from the elements: `first` is the
+// first, `last` the last (which is what IntProgression.last means - the last ELEMENT,
+// so (1..10 step 4).last is 9) and `step` the distance between the first two. That is
+// the *jsArray arm of js_ktfget in abnf/jsrtkotlin.go and its layer-2 twin, and it is
+// exact for every non-empty range. THE RESIDUE, measured and left: an EMPTY range
+// materializes to an empty list, which carries no bounds at all, so `(3..2).first`
+// answers kotlin.Unit here where the interpreter half - which keeps a real {__range}
+// object - answers 3. A one-element range assumes step 1. Both are unreachable by any
+// program that does something with the range rather than reading a bound off an empty
+// one, and closing them needs a range VALUE in this half, which is the thing this
+// materialization deliberately does not build. The for-loop and the
 // when(x){ in a..b } forms bind their bounds at AddExpr, below this level, so they keep
 // splitting on their own range token and never materialize anything.
 RangeExpr   <~~ push(makeRange(takeAll(), up.pos)) ~~>

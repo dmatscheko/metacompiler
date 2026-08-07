@@ -410,6 +410,39 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     var fds = 0
     for (i in 9 downTo 1 step 3) { fds = fds * 10 + i }
     check("for-downto-step", fds == 963)
+
+    // ----- the INDEX properties, and a progression read as a value -----
+    // `for (i in vs.indices)` ran in the interpreter and died in the compiler with
+    // "member 'length' of undefined", because js_ktfget answered undefined for every
+    // one of Kotlin's index properties (todo.md 1.8). Every receiver the stdlib
+    // declares them for is asserted, and the elements are read out of a list so the
+    // grammar's folder cannot answer any of this at compile time.
+    val idxSrc = listOf(10, 20, 30)
+    var idxSum = 0
+    for (i in idxSrc.indices) { idxSum = idxSum * 10 + i }
+    check("indices-list", idxSum == 12)
+    check("indices-list-value", idxSrc.indices.toString() == "[0, 1, 2]")
+    check("indices-lastIndex", idxSrc.lastIndex == 2 && idxSrc.indices.size == 3)
+    check("indices-empty", listOf<Int>().indices.toString() == "[]" &&
+        listOf<Int>().lastIndex == -1)
+    val idxStr = listOf("abcd")[0]
+    var idxChars = ""
+    for (i in idxStr.indices) { idxChars += idxStr[i] }
+    check("indices-string", idxChars == "abcd" && idxStr.lastIndex == 3)
+    val idxArr = arrayOf(7, 8, 9)
+    var idxArrSum = 0
+    for (i in idxArr.indices) { idxArrSum += idxArr[i] }
+    check("indices-array", idxArrSum == 24 && idxArr.lastIndex == 2)
+    // A progression's own properties. IntProgression.last is the last ELEMENT, not
+    // the bound it was built from - (1..10 step 4) runs 1, 5, 9 - and downTo carries
+    // the DIRECTION in its step, which the kotlin.ranges.downTo documentation gives
+    // as -1. Both were wrong in this half and unanswerable in the other.
+    val progs = listOf(1..5, 1..10 step 4, 5 downTo 1, 5 downTo 2 step 2, 0 until 3)
+    var progTxt = ""
+    for (p in progs) { progTxt += "" + p.first + "/" + p.last + "/" + p.step + " " }
+    check("progression-props", progTxt == "1/5/1 1/9/4 5/1/-1 5/3/-2 0/2/1 ")
+    check("indices-reversed", idxSrc.indices.reversed().toString() == "[2, 1, 0]" &&
+        2 in idxSrc.indices && 9 !in idxSrc.indices)
     var brk = ""
     for (i in 0..5) {
         if (i == 2) { break }

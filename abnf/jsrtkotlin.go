@@ -2185,6 +2185,99 @@ func init() {
 					return lr
 				}
 			}
+			// KOTLIN'S INDEX PROPERTIES, on the receivers the stdlib declares them for,
+			// and read ONLY WHEN THE ORDINARY MEMBER READ MISSED - the same
+			// fast-path-versus-dispatcher shape as the `.size` rewrite above it, and for
+			// two reasons: a receiver that declares its own `first` keeps it, and every
+			// field read that HITS pays nothing for these arms at all (js_ktfget is the
+			// hot path of the compiler half's member reads).
+			//
+			//   val Collection<*>.indices: IntRange      (kotlin.collections)
+			//   val CharSequence.indices: IntRange       (kotlin.text)
+			//   val <T> List<T>.lastIndex: Int           = size - 1
+			//   val CharSequence.lastIndex: Int          = length - 1
+			//
+			// Both read UNDEFINED here, so `for (i in vs.indices)` handed
+			// js_ktiter an undefined and the loop died with "member 'length' of
+			// undefined" while the interpreter half ran it - todo.md 1.8. `.size` was
+			// never affected because of the `.length` rewrite below it.
+			//
+			// A range is MATERIALIZED as a list in this half (kotlin-to-llvm-ir.abnf's
+			// makeRange records the deviation in full), so `indices` answers the
+			// materialized IntRange - an ordinary list of the index values - which is
+			// what makes the for-loop, `i in vs.indices` and `vs.indices.reversed()`
+			// all work with the machinery that is already here.
+			//
+			// first / last / step are that materialized progression's OWN properties,
+			// recovered from its elements. Kotlin declares them on IntProgression
+			// only; on a List `first`/`last` are member FUNCTIONS and need
+			// parentheses, so a valid program reaches this arm with a range and
+			// nothing else. RESIDUE, and it is not recoverable from a materialized
+			// list: an EMPTY range answers none of the three and a ONE-element range
+			// cannot answer `step` (1 is assumed). The interpreter half keeps a real
+			// {__range} object and answers all of them exactly.
+			if arr, isArr := o.(*jsArray); isArr && isUndefOrNull(u(r)) {
+				n := len(arr.elems)
+				switch name {
+				case "indices":
+					idx := make([]interface{}, n)
+					for i := 0; i < n; i++ {
+						idx[i] = float64(i)
+					}
+					return w(&jsArray{elems: idx})
+				case "lastIndex":
+					return w(float64(n - 1))
+				case "first":
+					if n > 0 {
+						return w(arr.elems[0])
+					}
+				case "last":
+					if n > 0 {
+						return w(arr.elems[n-1])
+					}
+				case "step":
+					if n >= 2 {
+						x0, ok0 := ktProgNum(arr.elems[0])
+						x1, ok1 := ktProgNum(arr.elems[1])
+						if ok0 && ok1 {
+							return w(x1 - x0)
+						}
+					}
+					if n == 1 {
+						return w(float64(1))
+					}
+				}
+			}
+			// A StringBuilder IS a CharSequence, so the same two properties apply to
+			// it. Only `length` was answered, in both halves alike.
+			if sb, isObj := o.(*jsObject); isObj && ktIsSb(sb) && isUndefOrNull(u(r)) {
+				if txt, isStr := sb.props["s"].(string); isStr {
+					switch name {
+					case "indices":
+						n := rt.strLen(txt)
+						idx := make([]interface{}, n)
+						for i := 0; i < n; i++ {
+							idx[i] = float64(i)
+						}
+						return w(&jsArray{elems: idx})
+					case "lastIndex":
+						return w(float64(rt.strLen(txt) - 1))
+					}
+				}
+			}
+			if s, isStr := o.(string); isStr && isUndefOrNull(u(r)) {
+				switch name {
+				case "indices":
+					n := rt.strLen(s)
+					idx := make([]interface{}, n)
+					for i := 0; i < n; i++ {
+						idx[i] = float64(i)
+					}
+					return w(&jsArray{elems: idx})
+				case "lastIndex":
+					return w(float64(rt.strLen(s) - 1))
+				}
+			}
 			// A `lateinit var` that is still null has NOT been assigned, and Kotlin
 			// throws rather than answering null - see ktLateinitCheck.
 			if mo, isObj := o.(*jsObject); isObj {
@@ -4939,8 +5032,32 @@ func ktRecvProp(name string) bool {
 	return false
 }
 
+// ktProgNum reads the numeric value of a materialized progression's element, so
+// js_ktfget can recover a range's `step` from the distance between its first two.
+// A Char range steps in code points ('a'..'e' step 2), which is what makes the
+// Char arm necessary; anything else is not a progression and answers no step.
+// The twin is k4ProgNum in languages/lib/kotlin-rt.metajs.
+func ktProgNum(v interface{}) (float64, bool) {
+	switch t := v.(type) {
+	case float64:
+		return t, true
+	case jsChar:
+		return float64(t.code), true
+	case jsGInt:
+		if t.u && t.w == 64 {
+			return float64(uint64(t.v)), true
+		}
+		return float64(t.v), true
+	}
+	return 0, false
+}
+
 // ktIsBuiltinRecv reports a receiver whose members come from the runtime rather
-// than from a class descriptor: a list, a map, a StringBuilder box or a String.
+// than from a class descriptor: a list, a map, a SET, a StringBuilder box or a
+// String. The set was missing in every engine, so `with(setOf(1, 2)) { size }` and
+// `{ contains(1) }` aborted with "unknown name" in both halves alike - agreement
+// is not correctness, and only an oracle can see this class. Kotlin's `with` binds
+// any receiver and Set.size is Collection.size.
 func ktIsBuiltinRecv(v interface{}) bool {
 	switch t := v.(type) {
 	case *jsArray, string:
@@ -4953,6 +5070,9 @@ func ktIsBuiltinRecv(v interface{}) bool {
 			return false
 		}
 		if _, _, isDict := dictParts(t); isDict {
+			return true
+		}
+		if ktIsSet(t) {
 			return true
 		}
 		return ktIsSb(t)
@@ -4993,8 +5113,15 @@ func (rt *jsrt) ktRecvMember(recv interface{}, name string) (interface{}, bool) 
 	if !ktIsBuiltinRecv(recv) || ktMemberCall == nil {
 		return nil, false
 	}
-	if ktRecvProp(name) {
-		return ktMemberCall(recv, name, nil), true
+	// A PROPERTY of the receiver is a FIELD READ, not a zero-argument method call.
+	// This used to route through ktMemberCall, and the two are not the same set:
+	// `with(list) { size }` worked because the list method table happens to carry a
+	// `size` method, while `with(list) { lastIndex }` died with "unknown list method
+	// 'lastIndex'" - and `indices` would have, once it existed. The twin has always
+	// read kGetField here (kRecvProps in kotlin-interpreter.abnf), so this is the Go
+	// side catching up rather than a new rule.
+	if ktRecvProp(name) && ktRefRead != nil {
+		return ktRefRead(recv, name), true
 	}
 	self := recv
 	return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {

@@ -3481,6 +3481,39 @@ NotMemberKw = :script(~~
         var n = kNum(x)
         return rg.down ? (n <= rg.from && n >= rg.to) : (n >= rg.from && n <= rg.to)
     }
+    // The LAST ELEMENT of a progression, which is what IntProgression.last answers -
+    // getProgressionLastElement in kotlin.internal.ProgressionUtil. For a step of 1 it
+    // is the bound; for `1..10 step 4` the elements are 1, 5, 9 and the answer is 9,
+    // not 10. An EMPTY progression answers the bound, exactly as
+    // getProgressionLastElement does when first and last are already crossed.
+    function rangeLastEl(rg) {
+        if (rg.down) {
+            if (rg.from <= rg.to) { return rg.to }
+            return rg.to + ((rg.from - rg.to) % rg.st)
+        }
+        if (rg.from >= rg.to) { return rg.to }
+        return rg.to - ((rg.to - rg.from) % rg.st)
+    }
+    // The step of a MATERIALIZED progression, recovered from the distance between its
+    // first two elements - the compiler half has nothing else to read it from, and this
+    // half answers the same so the two agree. undefined when there is nothing to
+    // measure (an empty list) or the elements are not a progression's; a one-element
+    // progression assumes 1, which is the residue a materialized range cannot recover.
+    // The twin is ktProgNum / the "step" arm of js_ktfget in abnf/jsrtkotlin.go.
+    function kProgNumOr(v) {
+        if (typeof v == "number") { return v }
+        if (kIsChar(v)) { return v.__char }
+        if (kIsSz(v)) { return kNum(v) }
+        return undefined
+    }
+    function kProgStep(a) {
+        if (a.length == 1) { return 1 }
+        if (a.length < 2) { return undefined }
+        var p0 = kProgNumOr(a[0])
+        var p1 = kProgNumOr(a[1])
+        if (p0 === undefined || p1 === undefined) { return undefined }
+        return p1 - p0
+    }
     // The elements of a range, boxed back into Chars when the bounds were Chars.
     function rangeList(rg) {
         var out = []
@@ -6164,7 +6197,12 @@ NotMemberKw = :script(~~
         // both halves aborted the run.
         if (target === undefined || target === null) {
             if (name == "hashCode") return 0
-            if (name == "toString") return "null"
+            // Unit is a VALUE and Unit.toString() is "kotlin.Unit"; only a Kotlin null
+            // renders "null". Both answered "null" here, so `f().toString()` for a
+            // Unit-returning f read "null" in this half and "kotlin.Unit" in the other
+            // (ktpRender's jsUndefT arm, and kstr's own undefined arm right here in
+            // this file). A live halves divergence, found sweeping todo.md 1.8.
+            if (name == "toString") return target === undefined ? "kotlin.Unit" : "null"
             fail("method call ." + name + "() on null")
         }
         // super.m(): start the lookup at the recorded parent, keep `this`.
@@ -9420,7 +9458,15 @@ NotMemberKw = :script(~~
         if (krxf != null) { return krxf.v }
         if (typeof o == "string") {
             if (name == "length") { return o.length }
+            var sx = anytype
+            sx = kIdxExt(o, name)
+            if (sx !== undefined) { return sx }
             if (name == "lastIndex") { return o.length - 1 }
+            // kotlin.text declares `val CharSequence.indices: IntRange` beside
+            // lastIndex, and it was missing here: `for (i in s.indices)` aborted with
+            // "iteration over kotlin.Unit" in BOTH halves. Found sweeping todo.md 1.8's
+            // neighbourhood, which named only the List case.
+            if (name == "indices") { return kRange(0, o.length - 1, false) }
             return extPropGet(o, name)
         }
         if (typeof o == "number" || typeof o == "boolean") { return extPropGet(o, name) }
@@ -9440,7 +9486,17 @@ NotMemberKw = :script(~~
             if (name == "size") { return o.keys.length }
             return extPropGet(o, name)
         }
-        if (typeof o == "object" && o.__sb === true && name == "length") { return o.s.length }
+        // A StringBuilder IS a CharSequence, so kotlin.text's `indices` and `lastIndex`
+        // apply to it exactly as they do to a String. Only `length` was answered, in
+        // BOTH halves - agreement, and both wrong. Found sweeping todo.md 1.8.
+        if (typeof o == "object" && o.__sb === true) {
+            if (name == "length") { return o.s.length }
+            var bx = anytype
+            bx = kIdxExt(o, name)
+            if (bx !== undefined) { return bx }
+            if (name == "lastIndex") { return o.s.length - 1 }
+            if (name == "indices") { return kRange(0, o.s.length - 1, false) }
+        }
         // kotlin.Result's isSuccess / isFailure and lazy's value are PROPERTIES, so
         // they are read here rather than through mcall.
         if (kIsResult(o)) {
@@ -9457,14 +9513,43 @@ NotMemberKw = :script(~~
         }
         if (Array.isArray(o)) {
             if (name == "size") { return o.length }
+            var ax = anytype
+            ax = kIdxExt(o, name)
+            if (ax !== undefined) { return ax }
             if (name == "lastIndex") { return o.length - 1 }
             if (name == "indices") { return kRange(0, o.length - 1, false) }
+            // first / last / step on a LIST are the compiler half's answer, and they
+            // are here so the two halves agree. That half MATERIALIZES a range as a
+            // list of its elements (kotlin-to-llvm-ir.abnf's makeRange), so the only
+            // way `(1..10 step 3).first` can work there is to recover the progression
+            // from the elements - and then a plain list answers the same reads. Kotlin
+            // itself declares first/last/step on IntProgression only; on a List
+            // first/last are member FUNCTIONS and need parentheses, so no valid
+            // program can tell the difference. The twin is the *jsArray arm of
+            // js_ktfget in abnf/jsrtkotlin.go.
+            if (name == "first" && o.length > 0) { return o[0] }
+            if (name == "last" && o.length > 0) { return o[o.length - 1] }
+            if (name == "step" && kProgStep(o) !== undefined) { return kProgStep(o) }
             return extPropGet(o, name)
         }
         if (isRange(o)) {
+            var rx = anytype
+            rx = kIdxExt(o, name)
+            if (rx !== undefined) { return rx }
             if (name == "first") { return o.ch ? kChar(o.from) : o.from }
-            if (name == "last") { return o.ch ? kChar(o.to) : o.to }
-            if (name == "step") { return o.st }
+            // IntProgression.last is "the last element in the progression", NOT the
+            // bound it was built from: (1..10 step 4).last is 9, and this answered 10.
+            // IntProgression.step carries the DIRECTION - kotlin.ranges.downTo is
+            // documented as "a progression ... with the step -1" - and this answered
+            // +1 for every downTo. Both were wrong against the stdlib in this half and
+            // unanswerable (kotlin.Unit) in the other; found sweeping todo.md 1.8.
+            if (name == "last") { return o.ch ? kChar(rangeLastEl(o)) : rangeLastEl(o) }
+            if (name == "step") { return o.down ? -o.st : o.st }
+            // `.size` on a progression is not Kotlin (IntRange is an Iterable, not a
+            // Collection), but the compiler half MATERIALIZES a range as a list, where
+            // it answers the element count - so this half answers the same rather than
+            // kotlin.Unit. A pre-existing halves divergence, found asserting `indices`.
+            if (name == "size") { return rangeList(o).length }
             return extPropGet(o, name)
         }
         // super.prop: read the OVERRIDDEN property - the accessor declared by the
@@ -9528,6 +9613,24 @@ NotMemberKw = :script(~~
             if (st != null) { return st.v }
         }
         if (hasOwn(o, name)) { return o[name] }
+        return extPropGet(o, name)
+    }
+    // kIdxExt is the guard the index properties below need. `indices`, `lastIndex`,
+    // `first`, `last` and `step` are RUNTIME answers on a list / a CharSequence, but a
+    // program may declare an EXTENSION property of the same name - and the compiler
+    // half resolves `extp$name` in the EMITTER, before js_ktfget is ever reached, so
+    // the extension wins there unconditionally. Consulting it first here is what keeps
+    // the two halves agreeing: without this `val List<Int>.first get() = 99` read 99 in
+    // the compiler and the list's own first element here.
+    function kIdxProp(name) {
+        if (name == "indices") { return true }
+        if (name == "lastIndex") { return true }
+        if (name == "first") { return true }
+        if (name == "last") { return true }
+        return name == "step"
+    }
+    function kIdxExt(o, name) {
+        if (!kIdxProp(name)) { return undefined }
         return extPropGet(o, name)
     }
     function extPropGet(o, name) {
@@ -9844,6 +9947,20 @@ NotMemberKw = :script(~~
         if (h != null) { return h }
         // A property registered as a top-level computed property.
         if (hasOwn(topProps, "$" + name)) { return {v: kGetField(topProps["$" + name], name)} }
+        // A STRING implicit receiver's METHODS, answered LAST. `with("abcd")
+        // { substring(1) }` and `{ uppercase() }` aborted with "unknown name" in this
+        // half while the compiler ran them (ktIsBuiltinRecv covers a string there), and
+        // the LATENESS is the whole point: a member extension on String -
+        // `fun String.emit()` declared inside a class - binds the string as `this`, so
+        // answering here early swallows every name of the DECLARING class and broke
+        // three ratchet assertions when it was tried. The compiler half has exactly
+        // this ordering: kt_ktget probes the dispatch receiver before it ever reaches
+        // ktRecvStack. The hostGlobals guard is recvLookup's, for its reason.
+        if (!hasOwn(hostGlobals, name)) {
+            for (var cj = 0; cj < chain.length; cj++) {
+                if (typeof chain[cj] == "string") { return {v: kBoundBuiltin(chain[cj], name)} }
+            }
+        }
         return null
     }
     // Walk one implicit-receiver chain (a receiver and its enclosing __outer instances)
@@ -9854,7 +9971,17 @@ NotMemberKw = :script(~~
         var cur = start
         while (cur != undefined && cur != null) {
             if (typeof cur != "object") {
-                if (typeof cur == "string" && name == "length") { return {v: cur.length} }
+                // A STRING receiver is a BUILTIN receiver like any other, and only
+                // `length` resolved here: `with("abcd") { substring(1) }`,
+                // `{ uppercase() }`, `{ lastIndex }` and `{ indices }` all aborted with
+                // "unknown name" while the compiler half answered every one of them
+                // (ktIsBuiltinRecv in abnf/jsrtkotlin.go covers a string). A live
+                // halves divergence, found sweeping todo.md 1.8's neighbourhood. The
+                // two guards below are the ones the object arm further down uses, for
+                // the same reasons.
+                if (typeof cur == "string") {
+                    if (kRecvProps["$" + name] === true) { return {v: kGetField(cur, name)} }
+                }
                 return null
             }
             if (hasOwn(cur, name)) { return {v: kLateinitCheck(cur, name, cur[name])} }
@@ -9887,8 +10014,14 @@ NotMemberKw = :script(~~
             // receiver as `this` and an unqualified `append("a")` is a member call on
             // it. The few PROPERTIES come from kGetField; everything else is a bound
             // method, so the lookup never turns a property into a callable.
+            // A SET was missing from this list in BOTH halves (ktIsBuiltinRecv in
+            // abnf/jsrtkotlin.go names "a list, a map, a StringBuilder box or a
+            // String" and its code agrees), so `with(setOf(1, 2)) { size }` and
+            // `{ contains(1) }` aborted with "unknown name" everywhere - both halves
+            // agreeing and both wrong, which byte-identity cannot see. Kotlin's `with`
+            // binds any receiver, and Set.size is Collection.size.
             if (cls == undefined && cur.__isclass == undefined &&
-                (Array.isArray(cur) || kIsMap(cur) || cur.__sb === true)) {
+                (Array.isArray(cur) || kIsMap(cur) || kIsSet(cur) || cur.__sb === true)) {
                 if (kRecvProps["$" + name] === true) { return {v: kGetField(cur, name)} }
                 // A name the RUNTIME provides as a global is not a member of the
                 // receiver: `buildList { addAll(listOf(2, 3)) }` bound `listOf` as a

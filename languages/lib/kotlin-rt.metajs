@@ -2351,6 +2351,17 @@ function k2FindMember(o, name) {
 // line is the reading chosen, because Kotlin has no `println(Unit)` overload -
 // Unit only arrives as `println(f())` for a Unit-returning f, which no test in
 // tests/kotlin-test*.kt writes.
+//
+// MEASURED 2026-08-07, sweeping todo.md 1.8: `println(f())` for a Unit-returning
+// f DOES reach it, and it is a LIVE run-vs-native divergence - llvm.Run prints
+// "kotlin.Unit" and the native binary a blank line. It is left because closing it
+// costs more than it buys: the argument COUNT is only knowable at the call site,
+// so the emitter would have to special-case a zero-argument call to the global
+// name `println`/`print` and route it through a new no-argument extern, in the
+// emitter, the Go twin and here - and `::println` bound to a value and called
+// with no arguments would still take this path in both engines. Everything else
+// about Unit agrees: "$v" interpolation, string concatenation and
+// Unit.toString() all render "kotlin.Unit" in all three engines.
 function k2Line(a) {
     if (a === undefined) { return "" }
     return k2Render(a, 0)
@@ -6098,6 +6109,9 @@ function k4IsBuiltinRecv(v) {
     if (v["__class"] !== undefined) { return false }
     if (v["__isclass"] !== undefined) { return false }
     if (rtIsDictObj(v)) { return true }
+    // A SET was missing here and in the Go twin, so `with(setOf(1, 2)) { size }`
+    // aborted with "unknown name" in both halves alike.
+    if (ktIsSet(v)) { return true }
     return ktIsSb(v)
 }
 
@@ -6144,7 +6158,12 @@ function ktRecvMember(recv, name) {
         }
     }
     if (!k4IsBuiltinRecv(recv)) { return KT_MISS }
-    if (k4RecvProp(name)) { return ktSmcall(recv, name, []) }
+    // A PROPERTY of the receiver is a FIELD READ, not a zero-argument method call.
+    // This used to route through ktSmcall, and the two are not the same set:
+    // `with(list) { size }` worked because the list method table happens to carry a
+    // `size` method, while `with(list) { lastIndex }` died with "unknown list method
+    // 'lastIndex'". kRecvProps in kotlin-interpreter.abnf has always read kGetField.
+    if (k4RecvProp(name)) { return js_ktfget(recv, name) }
     return k4Bound(recv, name)
 }
 
@@ -7344,6 +7363,43 @@ function k4LateinitCheck(o, name, v) {
     return v
 }
 
+// k4Indices is the materialized IntRange 0..n-1 that `.indices` answers, and
+// k4ProgNum / k4ProgStep are ktProgNum and the "step" arm of js_ktfget
+// (jsrtkotlin.go): the step of a materialized progression, read as the distance
+// between its first two elements. A Char progression steps in code points, so the
+// Char box unwraps; a Double is not a progression element and answers nothing.
+function k4Indices(n) {
+    var out = []
+    var i = 0
+    while (i < n) {
+        out.push(i)
+        i = i + 1
+    }
+    return out
+}
+
+function k4ProgNum(v) {
+    if (ktIsChar(v)) { return ktCharCode(v) }
+    if (typeof v == "number") {
+        if (floIs(v)) { return undefined }
+        if (sintIs(v)) { return sintNum(v) }
+        return v
+    }
+    return undefined
+}
+
+function k4ProgStep(a) {
+    if (a["length"] == 1) { return 1 }
+    if (a["length"] < 2) { return undefined }
+    var p0 = anytype
+    var p1 = anytype
+    p0 = k4ProgNum(a[0])
+    p1 = k4ProgNum(a[1])
+    if (p0 === undefined) { return undefined }
+    if (p1 === undefined) { return undefined }
+    return p1 - p0
+}
+
 // js_ktfget (jsrtkotlin.go:1980) is Kotlin's dotted READ.
 function js_ktfget(o, name) {
     if (ktIsPkg(o)) { return ktPkgMember(o["__pkg"], name) }
@@ -7459,6 +7515,47 @@ function js_ktfget(o, name) {
             var lr = o["length"]
             if (!k4Nullish(lr)) { return lr }
         }
+    }
+    // KOTLIN'S INDEX PROPERTIES - the *jsArray and string arms of js_ktfget
+    // (jsrtkotlin.go). `val Collection<*>.indices: IntRange`,
+    // `val CharSequence.indices: IntRange`, `val List<T>.lastIndex: Int` and
+    // `val CharSequence.lastIndex: Int` all read UNDEFINED, so
+    // `for (i in vs.indices)` handed js_ktiter an undefined and the loop died with
+    // "member 'length' of undefined" - todo.md 1.8. They are read ONLY WHEN THE
+    // ORDINARY MEMBER READ MISSED, the same fast-path-versus-dispatcher shape as the
+    // `.size` rewrite above: a receiver that declares its own `first` keeps it, and a
+    // field read that HITS pays nothing for these arms.
+    //
+    // A range is MATERIALIZED as a list in this half, so `indices` answers the
+    // materialized IntRange and first/last/step are recovered from the elements.
+    // Kotlin declares those three on IntProgression only (on a List first/last are
+    // member FUNCTIONS needing parentheses), so a valid program reaches them with a
+    // range and nothing else. Residue: an EMPTY range answers none of them and a
+    // one-element range assumes step 1.
+    if (ktIsArr(o) && k4Nullish(r)) {
+        if (name == "indices") { return k4Indices(o["length"]) }
+        if (name == "lastIndex") { return o["length"] - 1 }
+        if (name == "first") {
+            if (o["length"] > 0) { return o[0] }
+        }
+        if (name == "last") {
+            if (o["length"] > 0) { return o[o["length"] - 1] }
+        }
+        if (name == "step") {
+            var stv = anytype
+            stv = k4ProgStep(o)
+            if (stv !== undefined) { return stv }
+        }
+    }
+    if (typeof o == "string" && k4Nullish(r)) {
+        if (name == "indices") { return k4Indices(o.length) }
+        if (name == "lastIndex") { return o.length - 1 }
+    }
+    // A StringBuilder IS a CharSequence, so the same two properties apply to it.
+    // Only `length` was answered, in both halves alike.
+    if (ktIsSb(o) && k4Nullish(r)) {
+        if (name == "indices") { return k4Indices(ktSbText(o).length) }
+        if (name == "lastIndex") { return ktSbText(o).length - 1 }
     }
     // A `lateinit var` that is still null has NOT been assigned.
     if (ktIsObj(o)) { return k4LateinitCheck(o, name, r) }

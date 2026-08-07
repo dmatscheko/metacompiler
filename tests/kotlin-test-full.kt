@@ -101,6 +101,41 @@ fun s04() {
     check("rng5", 3 in 1..5 && 9 !in 1..5)
     var g = ""; for (ch in 'a'..'c') { g += ch }
     check("rng6", g == "abc")
+    // The INDEX properties: `val Collection<*>.indices`, `val CharSequence.indices`
+    // and the two lastIndex. `for (i in vs.indices)` ran in the interpreter and died
+    // in the compiler with "member 'length' of undefined" (todo.md 1.8); the string
+    // form was missing in BOTH halves. These live in the ratchet as well as in
+    // kotlin-test-features.kt because ONLY the ratchet is built natively, and the
+    // fix has a layer-2 arm (languages/lib/kotlin-rt.metajs) the matrix cannot see.
+    val rl = listOf(10, 20, 30)
+    var h = 0; for (i in rl.indices) { h = h * 10 + i }
+    check("rng7", h == 12 && rl.lastIndex == 2 && rl.indices.toString() == "[0, 1, 2]")
+    val rs = "abcd"
+    var k = ""; for (i in rs.indices) { k += rs[i] }
+    check("rng8", k == "abcd" && rs.lastIndex == 3)
+    val ra = arrayOf(4, 5, 6)
+    var m = 0; for (i in ra.indices) { m += ra[i] }
+    check("rng9", m == 15 && ra.lastIndex == 2 && listOf<Int>().lastIndex == -1)
+    // A progression read as a VALUE. IntProgression.last is the last ELEMENT (1..10
+    // step 4 runs 1, 5, 9), and downTo's step carries the direction - "a progression
+    // ... with the step -1" in kotlin.ranges.downTo. This half had both wrong and the
+    // other could answer none of the three.
+    val rp = listOf(1..5, 1..10 step 4, 5 downTo 1, 5 downTo 2 step 2, 0 until 3)
+    var q = ""; for (p in rp) { q += "" + p.first + "/" + p.last + "/" + p.step + " " }
+    check("rng10", q == "1/5/1 1/9/4 5/1/-1 5/3/-2 0/2/1 ")
+    // A StringBuilder IS a CharSequence, so kotlin.text's two properties apply to it
+    // as well. Only `length` was answered, in BOTH halves - agreement, and both wrong.
+    val rb = StringBuilder("abcd")
+    var t = 0; for (i in rb.indices) { t += i }
+    check("rng11", t == 6 && rb.lastIndex == 3 && rb.indices.toString() == "[0, 1, 2, 3]")
+    // NOT ASSERTED HERE, and the reason is worth knowing: an EXTENSION PROPERTY of one
+    // of those names WINS over the runtime's answer (the compiler resolves `extp$name`
+    // in the EMITTER, before js_ktfget is called at all, so the interpreter had to be
+    // taught to consult it first - kIdxExt in kotlin-interpreter.abnf - or
+    // `val List<Int>.first get() = 99` read 99 in one half and 1 in the other). It
+    // cannot be pinned in THIS file: an extension property is keyed by NAME alone and
+    // declared at top level, so `val String.indices` poisons rng8's own `s.indices`
+    // and every other section that reads one. Verified by probe instead.
 }
 
 // ===== SECTION 05: when forms =====
@@ -857,7 +892,16 @@ fun sec25() {
     // The primitives keep the rendering they already had.
     check("ren19", true.toString() == "true" && 42.toString() == "42" && 1.5.toString() == "1.5")
     check("ren20", 'c'.toString() == "c" && "s".toString() == "s")
+    // Unit is a VALUE and renders as its name. Only toString() is asserted: the
+    // interpreter answered "null" for it where the compiler said "kotlin.Unit"
+    // (found sweeping todo.md 1.8). `println(unit25())` itself is NOT asserted -
+    // llvm.Run writes "kotlin.Unit" and the native binary a blank line, because
+    // MetaJS has no `arguments` object and layer 2's println cannot tell
+    // `println()` from `println(Unit)`; the reason and the cost of closing it are
+    // recorded at k2Line in languages/lib/kotlin-rt.metajs.
+    check("ren21", unit25().toString() == "kotlin.Unit" && "" + unit25() == "kotlin.Unit")
 }
+fun unit25(): Unit {}
 
 // ===== SECTION 26: the String member surface =====
 // The members java.lang.String / kotlin.text define on a String. The section
@@ -1900,6 +1944,22 @@ fun sec48() {
     check("rcv2", Q48("O").make().who() == "O/7")
     check("rcv3", Q48("O").make().bare() == "O")
     check("rcv4", Q48("Z").In48(1).who() == "Z/1")
+    // A BUILTIN receiver: which shapes count as one, and whether an unqualified
+    // PROPERTY is read as a field or called as a method. Three defects met here, all
+    // found sweeping todo.md 1.8's neighbourhood:
+    //   * a SET was not a builtin receiver in EITHER half, so `with(setOf(1, 2)) { size }`
+    //     aborted with "unknown name" in both - agreement, and both wrong;
+    //   * a STRING receiver answered only `length` in the interpreter, so substring /
+    //     uppercase / lastIndex / indices all aborted there while the compiler ran them;
+    //   * the compiler's ktRecvMember CALLED the property name as a method, so `size`
+    //     worked (the list method table has one) and `lastIndex` died with "unknown list
+    //     method". The interpreter has always read it as a field.
+    check("rcv5", with(setOf(1, 2, 2)) { size } == 2 && with(setOf(1, 2)) { contains(1) })
+    check("rcv6", with("abcd") { substring(1) } == "bcd" && with("abcd") { uppercase() } == "ABCD")
+    check("rcv7", with("abcd") { lastIndex } == 3 && with("abcd") { "" + indices } == "[0, 1, 2, 3]")
+    check("rcv8", with(listOf(1, 2, 3)) { lastIndex } == 2 &&
+        with(listOf(1, 2, 3)) { "" + indices } == "[0, 1, 2]" &&
+        with(listOf(1, 2, 3)) { size } == 3)
 }
 
 // ===== SECTION 49: the stdlib members the subset was missing =====
