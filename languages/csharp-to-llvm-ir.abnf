@@ -263,11 +263,24 @@ NestedType  <~~ push(makeNested(pop())) ~~>
             = TypeDecl ;
 
 // A constructor: name matches the class; an optional ': base(...)' / ': this(...)'
-// header is parsed and skipped (the implicit base constructor already ran). The body is
-// a block or an expression bodied '=> e;' form.
+// constructor-initializer selects which constructor runs first. The body is a block
+// or an expression bodied '=> e;' form.
+//
+// THE INITIALIZER USED TO BE PARSED AND THROWN AWAY (SkipParen), and the class then
+// always ran the base class' PARAMETERLESS constructor - so `class C : P { public
+// C(double d) : base(d) { } }` left every field P's constructor sets unassigned, and
+// both halves agreed on the wrong answer (docs/todo.md 1.1). ECMA-334 15.11.2: the
+// initializer names the constructor that runs before this one's body, and a
+// `this(...)` initializer means the instance variable initializers do NOT run again.
+// The arguments are ordinary expressions evaluated in the constructor's own parameter
+// scope, which is why they are parsed as an ArgList rather than skipped.
 Ctor        <~~ push(makeCtor(takeAll())) ~~>
             = [ LeadMods ] Id <~~ push(up.in) ~~> ParamList [ CtorInit ] CtorBody ;
-CtorInit    = ":" ( KwBase | KwThis ) SkipParen ;
+CtorInit    <~~ push(csCtorInit(takeAll())) ~~>
+            = ":" CtorInitKw "(" ArgList ")" ;
+CtorInitKw  = CtorInitBase | CtorInitThis ;
+CtorInitBase <~~ push({ckind: "base"}) ~~> = KwBase ;
+CtorInitThis <~~ push({ckind: "this"}) ~~> = KwThis ;
 CtorBody    = Block | CtorArrow ;
 CtorArrow   <~~ push(exprToStmt(pop())) ~~> = "=>" Expression ";" ;
 
@@ -1335,10 +1348,19 @@ KwAs        = "as" KwEnd ;
 
 // 'new' is the method-hiding modifier ('public new string Tag()'). It only reaches here
 // in member position, so the 'new' of an object creation is never taken for a modifier.
-ModKw       = ( "public" | "private" | "protected" | "internal" | "static" | "abstract"
+ModKw       = EvtMod | ( "public" | "private" | "protected" | "internal" | "static" | "abstract"
               | "sealed" | "virtual" | "override" | "readonly" | "const" | "partial"
-              | "unsafe" | "async" | "extern" | "volatile" | "new" | "required" | "event"
+              | "unsafe" | "async" | "extern" | "volatile" | "new" | "required"
               | "file" | "fixed" | "ref" | "scoped" ) KwEnd ;
+// 'event' is a modifier like the others, but an event FIELD is a delegate field:
+// `public event Action E;` then `E += h` must COMBINE invocation lists rather than
+// add numbers. csHasDeleg used to be switched on only by a `delegate` type
+// DECLARATION, so a program whose events all name a built-in delegate type
+// (Action / EventHandler / Func<...>) took the arithmetic path and `E += h`
+// silently produced NaN in the interpreter and aborted in the compiler
+// (docs/todo.md 1.10). ECMA-334 15.8.1: an event's `+=` is Delegate.Combine.
+EvtMod      <~~ csNoteDeleg() ~~>
+            = "event" KwEnd ;
 LeadMods    = { ModKw | AttrSection } ;
 
 // Type declarations accepted structurally, then reported as not implemented (so a whole
@@ -1777,7 +1799,7 @@ KwLet       = "let" KwEnd ;
         return function(b) {
             var fv = anytype
             if (name == "Count" || name == "Length") { fv = callExt(b, "js_cslen", [v]) }
-            else if (csPropAcc[name] != undefined) { fv = emitPropGet(b, v, name) }
+            else if (csPropAcc[name] != undefined) { var pgr = emitPropGet(b, v, name); b = pgr.b; fv = pgr.v }
             else { fv = callExt(b, "js_get", [v, emitStr(b, name)]) }
             return emitPat(b, sub, fv)
         }
@@ -2898,6 +2920,22 @@ KwLet       = "let" KwEnd ;
     // The target of an assignment whose root is an arbitrary primary. It is an
     // ordinary target record with a `base` thunk in place of a variable name;
     // emitRefPath below is what lowers that thunk.
+    // The declared ELEMENT type of the chain an index write ends on: the last field
+    // name in the head, or - when the head is a bare variable - that variable's
+    // declared type. "" when neither names an array of an adopting element type.
+    function csTargetElemTy(head) {
+        if (head.length == 0) { return "" }
+        for (var i = head.length - 1; i >= 1; i--) {
+            if (head[i] != null && head[i] != undefined && head[i].kind == "field") {
+                return csElemAdoptTy(csAdoptMems[head[i].name])
+            }
+        }
+        var h0 = head[0]
+        if (h0 != null && h0 != undefined && typeof h0 != "function" && h0.seedvar != undefined) {
+            return csElemAdoptTy(csLocalTypes[h0.seedvar])
+        }
+        return ""
+    }
     function makeChainTarget(items) {
         var head = []
         for (var i = 0; i < items.length - 1; i++) { head.push(items[i]) }
@@ -2905,7 +2943,13 @@ KwLet       = "let" KwEnd ;
         // Three separate returns rather than one reassigned local: under the
         // frozen engine a variable keeps the shape it was first given.
         if (last.kind == "field") { return {name: "", path: [{key: last.name}], base: foldCallMember(head)} }
-        if (last.kind == "index") { return {name: "", path: [{idx: last.idx}], base: foldCallMember(head)} }
+        // The ELEMENT type an index write adopts (docs/todo.md 1.3). It is decided
+        // here, at parse time, from the head of the chain - a local of a declared
+        // array type, or a member of one - so an index write into anything else
+        // costs nothing at all at run time.
+        if (last.kind == "index") {
+            return {name: "", path: [{idx: last.idx}], ety: csTargetElemTy(head), base: foldCallMember(head)}
+        }
         // A run that ends in a call is not an assignable place; the parse still
         // succeeds and the enclosing Assignment fails on the missing operator.
         return {name: "", path: [{key: "\x01not-a-place"}], base: foldCallMember(head)}
@@ -2955,6 +2999,20 @@ KwLet       = "let" KwEnd ;
         // The enclosing class, snapshotted at WALK time: an unqualified target may
         // be a member of it rather than a variable (see csUnqualWrite).
         var defClass = curClassName
+        // THE DECLARATION SITES THAT STILL DID NOT ADOPT (docs/todo.md 1.3). The
+        // twin of the same block in languages/csharp-interpreter.abnf: a LOCAL
+        // write after the declaration and an ARRAY ELEMENT of a declared array type
+        // are decided here, at parse time, off csLocalTypes and the chain target's
+        // own `ety`; a QUALIFIED member write cannot be, because the receiver's
+        // class is only known at run time, so it goes through js_csadoptmem, which
+        // reads the declared type off the '__mty' table on the class descriptor.
+        var lty = ""
+        var elty = ""
+        if (ref.path.length == 0 && ref.name != undefined && csLocalTypes[ref.name] != undefined) {
+            lty = csLocalWriteTy(csLocalTypes[ref.name])
+        } else if (ref.ety != undefined) {
+            elty = ref.ety
+        }
         // 'a ??= b' assigns only when a is null, and yields a's value either way.
         if (op == "??=") {
             var readT = makeRefRead(ref)
@@ -2989,6 +3047,7 @@ KwLet       = "let" KwEnd ;
                     b = rc0.b
                     v = rc0.v
                 }
+                if (lty != "") { v = emitAdoptAny(b, lty, v) }
                 callExt(b, "js_scope_set", [curScopeV, nameV, v])
             } else {
                 var p = emitRefPath(b, ref)
@@ -3000,7 +3059,9 @@ KwLet       = "let" KwEnd ;
                 } else if (p.isField && csPropAcc[p.keyName] != undefined) {
                     // A property with a set accessor body ('b.W = 5').
                     if (op != "=") {
-                        var oldp = emitPropGet(b, p.obj, p.keyName)
+                        var opr = emitPropGet(b, p.obj, p.keyName)
+                        b = opr.b
+                        var oldp = opr.v
                         v = emitNarrowLike(b, oldp, emitBin(b, op, oldp, v))
                     }
                     b = emitPropSet(b, p.obj, p.keyName, v)
@@ -3011,6 +3072,11 @@ KwLet       = "let" KwEnd ;
                         b = rc1.b
                         v = rc1.v
                     }
+                    // The member's DECLARED type adopts the written value: `c.D = 3`
+                    // on a `public double D;` stores 3.0, so `c.D / 2` is 1.5.
+                    if (csAdoptMems[p.keyName] != undefined) {
+                        v = callExt(b, "js_csadoptmem", [p.obj, p.key, v])
+                    }
                     callExt(b, "js_set", [p.obj, p.key, v])
                 } else if (csHasIndexer) {
                     if (op != "=") {
@@ -3018,12 +3084,14 @@ KwLet       = "let" KwEnd ;
                         b = oldx.b
                         v = emitNarrowLike(b, oldx.v, emitBin(b, op, oldx.v, v))
                     }
+                    if (elty != "") { v = emitAdopt(b, elty, v) }
                     b = emitIndexSet(b, p.obj, p.key, v)
                 } else {
                     if (op != "=") {
                         var oldm = callExt(b, "js_pyget", [p.obj, p.key])
                         v = emitNarrowLike(b, oldm, emitBin(b, op, oldm, v))
                     }
+                    if (elty != "") { v = emitAdopt(b, elty, v) }
                     callExt(b, "js_pyset", [p.obj, p.key, v])
                 }
             }
@@ -3076,6 +3144,14 @@ KwLet       = "let" KwEnd ;
     // class name -> member name -> the declared type a WRITE to it adopts. Only
     // members whose type names something numeric appear (docs/todo.md 1.1).
     var csMemberTys = {}
+    // The member names some class declares with a type that ADOPTS, by name, filled at
+    // parse time. A qualified write to any other name emits exactly the IR it emitted
+    // before (docs/todo.md 1.3).
+    var csAdoptMems = {}
+    function csNoteAdoptMem(name, ty) {
+        if (ty != undefined && ty != "") { csAdoptMems[name] = ty }
+        return ty
+    }
     // class name -> member name -> true for the DATA members only: fields,
     // auto-properties, properties with accessor bodies and primary-constructor
     // parameters. A METHOD is deliberately not one. It is what separates the two
@@ -3341,11 +3417,51 @@ KwLet       = "let" KwEnd ;
         var e = ty.substring(0, ty.length - 2)
         return csAdoptable(e) ? e : ""
     }
-    function emitAdopt(b, ty, v) { return callExt(b, "js_csadoptty", [v, emitStr(b, ty)]) }
+    // THE INTEGRAL NAMES GO THROUGH js_csadopt, WHICH TAKES THE WIDTH AS A NUMBER.
+    // js_csadoptty has to compare the type NAME against about twenty strings on
+    // every call, and once the local-write site started adopting (docs/todo.md 1.3)
+    // that ran twice per iteration of `long i; while (...) { i = i + 1; }` and cost
+    // 5.3% of tests/bench/mod.cs on its own, measured. The width and signedness are
+    // known HERE, at compile time, and js_csadopt is the same conversion with the
+    // name already resolved - so the emitted IR carries two numbers instead of a
+    // string. Identical semantics: both guard on "is this integral" and both end in
+    // csConvTo.
+    function emitAdopt(b, ty, v) {
+        var bits = csTypeW["$" + ty]
+        if (bits != undefined) {
+            return callExt(b, "js_csadopt", [v, emitNum(b, bits), csTypeU["$" + ty] ? hTrue : hFalse])
+        }
+        return callExt(b, "js_csadoptty", [v, emitStr(b, ty)])
+    }
     // The type a WRITE to a member of this declared type adopts, "" for a member
     // whose type names nothing numeric - which is the overwhelming majority, and
     // is what keeps the emitted IR of every other assignment unchanged. Asked
     // ONCE, at parse time (docs/todo.md 1.1).
+    // The declared type a write to a LOCAL adopts, which is NOT csWriteTy: only the
+    // FLOATING names are here, and the reason is a measurement rather than a
+    // preference (docs/todo.md 1.3).
+    //
+    // Every adoption is a layer-2 call, and a layer-2 call in a hot loop is
+    // expensive out of proportion to what it does: adopting every local write cost
+    // tests/bench/mod.cs +5.3% (21.72e9 -> 22.88e9 instructions retired, against a
+    // 1.9% layout spread) for the two writes in `long s, i; while (i < 40000) { s =
+    // s + i % 7; i = i + 1; }` - and it stayed +5.3% after the conversion itself was
+    // made allocation-free and its ~20 string comparisons removed, so the cost is
+    // the CALL, not the work. Restricting the site to double/float/decimal takes
+    // that to zero on this row.
+    //
+    // The line is not arbitrary. A plain number IS the `int` of this value model, so
+    // `long x; x = 3;` stores a value C# would implicitly convert and the loss shows
+    // up only past 32 bits; but a `double` slot holding a plain int INTEGER-DIVIDES
+    // immediately - `double L; L = 3;` then `L / 2` answered 1 instead of 1.5, which
+    // is the defect the item names. THE INTEGRAL HALF IS STILL OPEN: `long x; x = 3;
+    // x * 1000000 * 1000000` is a 32-bit multiply. Closing it needs the extern to be
+    // called only when it can change something - a plain-number test the emitter can
+    // lower without a call - and that does not exist today.
+    function csLocalWriteTy(ty) {
+        if (ty == "double" || ty == "float" || ty == "decimal") { return ty }
+        return ""
+    }
     function csWriteTy(ty) {
         if (ty == undefined || ty == null) { return "" }
         if (csElemAdoptTy(ty) != "") { return ty }
@@ -3711,7 +3827,9 @@ KwLet       = "let" KwEnd ;
                     } else if (s.name == "Values") {
                         cur = callExt(b, "js_mcall", [cur, emitStr(b, "values"), callExt(b, "js_arr_new", [])])
                     } else if (csPropAcc[s.name] != undefined) {
-                        cur = emitPropGet(b, cur, s.name)
+                        var cpr = emitPropGet(b, cur, s.name)
+                        b = cpr.b
+                        cur = cpr.v
                     } else {
                         cur = callExt(b, "js_get", [cur, emitStr(b, s.name)])
                     }
@@ -4285,7 +4403,7 @@ KwLet       = "let" KwEnd ;
     function csUnqualRead(b, mi, name) {
         var ownV = csUnqualOwner(b, mi)
         if (csPropAcc[name] != undefined) { return emitPropGet(b, ownV, name) }
-        return callExt(b, "js_get", [ownV, emitStr(b, name)])
+        return {b: b, v: callExt(b, "js_get", [ownV, emitStr(b, name)])}
     }
     // Writing one. A PLACE cannot be phi'd - only a value can - so both arms carry
     // their own read-modify-write and the phi joins the RESULT. mkNew(block, old) ->
@@ -4314,7 +4432,13 @@ KwLet       = "let" KwEnd ;
         var ownV = csUnqualOwner(fb, mi)
         var oldF = v
         if (mkNew != null) {
-            oldF = isAcc ? emitPropGet(fb, ownV, name) : callExt(fb, "js_get", [ownV, emitStr(fb, name)])
+            if (isAcc) {
+                var ofr = emitPropGet(fb, ownV, name)
+                fb = ofr.b
+                oldF = ofr.v
+            } else {
+                oldF = callExt(fb, "js_get", [ownV, emitStr(fb, name)])
+            }
         }
         var newF = v
         if (mkNew != null) {
@@ -4349,9 +4473,9 @@ KwLet       = "let" KwEnd ;
         b.NewCondBr(truthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "undefined")])), fieldB, localB)
         var lv = callExt(localB, "js_scope_get", [curScopeV, emitStr(localB, name)])
         localB.NewBr(mergeB)
-        var fv = csUnqualRead(fieldB, mi, name)
-        fieldB.NewBr(mergeB)
-        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(fv, fieldB)])}
+        var fr = csUnqualRead(fieldB, mi, name)
+        fr.b.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(fr.v, fr.b)])}
     }
     makeVarRef = function(name) {
         var defClass = curClassName
@@ -4378,6 +4502,12 @@ KwLet       = "let" KwEnd ;
         // method whose parameters name no numeric type emits the IR it did before,
         // unchanged (docs/todo.md 1.1).
         var adopts = []
+        // The RAW declared type of each parameter, "" when it names none. Unlike
+        // `adopts` (which keeps only the numeric names a binding CONVERTS to) this
+        // keeps every name, because constructor overload resolution has to ask
+        // `is` about a string, a bool and a user class too (docs/todo.md 1.10).
+        var ptypes = []
+        var pendingRaw = ""
         var pendingTy = ""
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
@@ -4385,6 +4515,8 @@ KwLet       = "let" KwEnd ;
                 names.push(it)
                 dflts.push(null)
                 adopts.push(pendingTy)
+                ptypes.push(pendingRaw)
+                pendingRaw = ""
                 if (pendingThis && names.length == 1) { isExt = true }
                 if (pendingParams) { variadic = names.length - 1 }
                 pendingThis = false
@@ -4395,11 +4527,16 @@ KwLet       = "let" KwEnd ;
             if (it.thisParam == true) { pendingThis = true; continue }
             if (it.paramsParam == true) { pendingParams = true; continue }
             // A `params` tail binds an ARRAY rather than a value, so it adopts nothing.
-            if (it.ptype != undefined) { pendingTy = csAdoptable(it.ptype) ? it.ptype : ""; continue }
+            if (it.ptype != undefined) {
+                pendingRaw = stripWs(it.ptype)
+                pendingTy = csAdoptable(it.ptype) ? it.ptype : ""
+                continue
+            }
             if (it.pdflt != undefined && dflts.length > 0) { dflts[dflts.length - 1] = it.pdflt }
         }
         if (variadic >= 0 && variadic < adopts.length) { adopts[variadic] = "" }
-        return {params: names, dflts: dflts, ext: isExt, variadic: variadic, adopts: adopts}
+        return {params: names, dflts: dflts, ext: isExt, variadic: variadic, adopts: adopts,
+                ptypes: ptypes}
     }
 
     // ----- operator overloading and user conversions -----
@@ -4561,6 +4698,38 @@ KwLet       = "let" KwEnd ;
     // 'E += h' / 'E -= h' on such a name emit the accessor call with the handler itself
     // instead of a delegate combination.
     var csEvtAcc = {}
+    // ----- the name-collision guard (docs/todo.md 1.10) -----
+    // csPropAcc / csEvtAcc are keyed by MEMBER NAME ALONE, across the whole file, and
+    // there is no static type here to tell one class' X from another's. So a single
+    // `int X { get { ... } }` anywhere turned every plain field named X in EVERY other
+    // class into an accessor call, and the program died with "unknown method '__get_X'"
+    // - in the compiler half only, so it was a live halves divergence as well as a
+    // wrong answer.
+    //
+    // The names that are declared BOTH ways are the only ones that can be wrong, and
+    // for those the emitters below fall back to a RUN-TIME probe: a plain field is an
+    // own slot on the receiver and a property with accessor bodies is not, which is
+    // exactly the rule core.getField and makeAssign use in the interpreter half. Every
+    // other name keeps the direct call, so a program with no collision emits the IR it
+    // emitted before, unchanged.
+    var csAccNames = {}
+    var csPlainNames = {}
+    function csNoteAccName(name) { csAccNames[name] = true }
+    function csNotePlainName(name) { csPlainNames[name] = true }
+    function csAccAmbig(name) { return csAccNames[name] === true && csPlainNames[name] === true }
+    // Emits `receiver has an own slot called name ? plain : accessor`. accT and plainT
+    // are (block) -> {b, v}; either may split blocks of its own.
+    function csAccSplit(b, cur, name, plainT, accT) {
+        var plainB = curF.NewBlock("")
+        var accB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_has", [cur, emitStr(b, name)])), plainB, accB)
+        var pr = plainT(plainB)
+        pr.b.NewBr(mergeB)
+        var ar = accT(accB)
+        ar.b.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(pr.v, pr.b), llvm.ir.NewIncoming(ar.v, ar.b)])}
+    }
     // True as soon as the program declares an indexer, so an index step of a program that
     // declares none emits exactly the IR it did before.
     var csHasIndexer = false
@@ -4596,12 +4765,13 @@ KwLet       = "let" KwEnd ;
         if (auto) { return csAutoField(name, isStatic, init, ty) }
         if (getT != null || setT != null) { csPropAcc[name] = isStatic ? "static" : "instance" }
         if (addT != null || remT != null) { csEvtAcc[name] = isStatic ? "static" : "instance" }
+        csNoteAccName(name)
         // A computed property's GETTER carries a declared type too, so
         // `public double Get => 3;` answers 3.0 and Get / 2 is 1.5 (docs/todo.md
         // 1.1). Its SETTER's `value` parameter is not adopted - the value arrives
         // from the assignment, which is the write-site problem the report names.
         return {kind: "prop", name: name, statik: isStatic, getT: getT, setT: setT,
-                getTy: ty, addT: addT, remT: remT, adoptTy: csWriteTy(ty)}
+                getTy: ty, addT: addT, remT: remT, adoptTy: csNoteAdoptMem(name, csWriteTy(ty))}
     }
     // An automatic property IS a field: same record, so every field path (the instance
     // initializers, the static slot, the member table) applies to it unchanged.
@@ -4610,12 +4780,13 @@ KwLet       = "let" KwEnd ;
                   || ty == "ushort" || ty == "byte" || ty == "sbyte" || ty == "double"
                   || ty == "float" || ty == "decimal")
         var isInt = isNum && ty.indexOf("[") < 0
+        csNotePlainName(name)
         var dfltH = 1
         if (ty == "bool") { dfltH = 2 }
         if (isInt) { dfltH = 0 }
         // The declared type adopts the initializer (docs/todo.md 1.1).
         return {kind: "field", name: name, statik: isStatic, init: csAdoptInit(ty, init),
-                dfltH: dfltH, isInt: isInt, adoptTy: csWriteTy(ty)}
+                dfltH: dfltH, isInt: isInt, adoptTy: csNoteAdoptMem(name, csWriteTy(ty))}
     }
     function makeIndexer(items) {
         var getT = null
@@ -4648,7 +4819,20 @@ KwLet       = "let" KwEnd ;
     // Reading a property that has a get accessor body. An instance one is a method call
     // (js_mcall hands the receiver in as its first argument, like every other method); a
     // static one is a plain call of the member on the class descriptor.
+    // Answers {b, v}: an ambiguous name (one that some OTHER class declares as a plain
+    // field) splits the block into a run-time probe, so this may not end where it began.
     function emitPropGet(b, cur, name) {
+        if (!csAccAmbig(name)) { return {b: b, v: emitPropGet1(b, cur, name)} }
+        return csAccSplit(b, cur, name,
+                          csPlainGetT(cur, name), csAccGetT(cur, name))
+    }
+    function csPlainGetT(cur, name) {
+        return function(pb) { return {b: pb, v: callExt(pb, "js_get", [cur, emitStr(pb, name)])} }
+    }
+    function csAccGetT(cur, name) {
+        return function(ab) { return {b: ab, v: emitPropGet1(ab, cur, name)} }
+    }
+    function emitPropGet1(b, cur, name) {
         if (csPropAcc[name] == "static") {
             return callExt(b, "js_call", [callExt(b, "js_get", [cur, emitStr(b, "__get_" + name)]),
                                           hUndef, callExt(b, "js_arr_new", [])])
@@ -4688,6 +4872,25 @@ KwLet       = "let" KwEnd ;
         return mergeB
     }
     function emitEvtCall(b, cur, name, op, v) {
+        if (csAccAmbig(name)) {
+            var r = csAccSplit(b, cur, name, csPlainEvtT(cur, name, op, v), csAccEvtT(cur, name, op, v))
+            return r.b
+        }
+        return emitEvtCall1(b, cur, name, op, v)
+    }
+    // The plain-field arm of an ambiguous event name: an ordinary delegate combination.
+    function csPlainEvtT(cur, name, op, v) {
+        return function(pb) {
+            var oldV = callExt(pb, "js_get", [cur, emitStr(pb, name)])
+            var rc = emitCompound(pb, op, oldV, v)
+            callExt(rc.b, "js_set", [cur, emitStr(rc.b, name), rc.v])
+            return {b: rc.b, v: rc.v}
+        }
+    }
+    function csAccEvtT(cur, name, op, v) {
+        return function(ab) { return {b: emitEvtCall1(ab, cur, name, op, v), v: v} }
+    }
+    function emitEvtCall1(b, cur, name, op, v) {
         var key = (op == "+=") ? "__add_" : "__remove_"
         var argsV = callExt(b, "js_arr_new", [])
         callExt(b, "js_arr_push", [argsV, v])
@@ -4699,6 +4902,17 @@ KwLet       = "let" KwEnd ;
         return b
     }
     function emitPropSet(b, cur, name, v) {
+        if (!csAccAmbig(name)) { return emitPropSet1(b, cur, name, v) }
+        var r = csAccSplit(b, cur, name, csPlainSetT(cur, name, v), csAccSetT(cur, name, v))
+        return r.b
+    }
+    function csPlainSetT(cur, name, v) {
+        return function(pb) { callExt(pb, "js_set", [cur, emitStr(pb, name), v]); return {b: pb, v: v} }
+    }
+    function csAccSetT(cur, name, v) {
+        return function(ab) { return {b: emitPropSet1(ab, cur, name, v), v: v} }
+    }
+    function emitPropSet1(b, cur, name, v) {
         var argsV = callExt(b, "js_arr_new", [])
         callExt(b, "js_arr_push", [argsV, v])
         if (csPropAcc[name] == "static") {
@@ -4738,9 +4952,29 @@ KwLet       = "let" KwEnd ;
         for (var i = 0; i < mods.length; i++) { if (mods[i] == "static") { isStatic = true } }
         return {kind: "abstract", name: items[2], statik: isStatic}
     }
+    // items: name, pinfo, [the ': base(...)' / ': this(...)' record], body. The
+    // initializer record is optional, so the body is found by scanning rather than by
+    // index (docs/todo.md 1.1).
     function makeCtor(items) {
         csRegParams(items[0], items[1])
-        return {kind: "ctor", name: items[0], params: items[1].params, pinfo: items[1], body: items[2]}
+        var cinit = ""
+        var cargs = []
+        var body = items[items.length - 1]
+        for (var i = 2; i < items.length - 1; i++) {
+            if (items[i] != null && items[i] != undefined && items[i].cinit != undefined) {
+                cinit = items[i].cinit
+                cargs = items[i].cargs
+            }
+        }
+        return {kind: "ctor", name: items[0], params: items[1].params, pinfo: items[1],
+                body: body, cinit: cinit, cargs: cargs}
+    }
+    // ': base(a, b)' / ': this(a)' - the kind and the argument thunks.
+    function csCtorInit(items) {
+        var kind = items[0].ckind
+        var args = []
+        for (var i = 1; i < items.length; i++) { args.push(items[i]) }
+        return {cinit: kind, cargs: csFixArgs(args, "")}
     }
     // 'public int X, Y;': one modifier/type prefix, several declarators. The group is
     // flattened into ordinary field records by csFlatten before a class body is read.
@@ -4787,6 +5021,7 @@ KwLet       = "let" KwEnd ;
                   || ty == "ushort" || ty == "byte" || ty == "sbyte" || ty == "double"
                   || ty == "float" || ty == "decimal")
         var isInt = isNum && ty.indexOf("[") < 0
+        csNotePlainName(name)
         var dfltH = 1 // The handle constants: 2 false, 1 null.
         if (ty == "bool") dfltH = 2
         if (isInt) dfltH = 0
@@ -4794,7 +5029,7 @@ KwLet       = "let" KwEnd ;
         // `public double a = 3;` field holds 3.0, so `t.a / 2` is 1.5 and not the
         // 1 an int division gave. `double[] xs = {3, 4}` adopts elementwise.
         return {kind: "field", name: name, statik: isStatic, init: csAdoptInit(ty, init),
-                dfltH: dfltH, isInt: isInt, adoptTy: csWriteTy(ty)}
+                dfltH: dfltH, isInt: isInt, adoptTy: csNoteAdoptMem(name, csWriteTy(ty))}
     }
     // Wraps a field/auto-property initializer thunk so its value adopts `ty`. The
     // thunk is returned UNCHANGED when the type adopts nothing, which is almost
@@ -4899,7 +5134,7 @@ KwLet       = "let" KwEnd ;
     // it adopts nothing. Dynamically scoped: emitFunc saves and restores it, and
     // makeReturn's thunk runs inside body(b) below (docs/todo.md 1.1).
     var curRetTy = ""
-    function emitFunc(params, body, isInstance, fields, superName, isCtl, pinfo, retTy) {
+    function emitFunc(params, body, isInstance, fields, superName, isCtl, pinfo, retTy, cinit) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -4934,15 +5169,39 @@ KwLet       = "let" KwEnd ;
                                              callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
             }
         }
-        if (superName != undefined && superName != null) {
-            // The implicit base(): run the whole parent constructor without arguments.
+        // The constructor-initializer (docs/todo.md 1.1). ': this(...)' runs a SIBLING
+        // constructor, which runs the base constructor and the field initializers
+        // itself - running them here as well would apply every initializer twice
+        // (ECMA-334 15.11.2). Anything else runs the base constructor with the
+        // arguments ': base(...)' gives it, empty for the implicit initializer.
+        var isThisInit = (cinit != undefined && cinit != null && cinit.cinit == "this")
+        if (isThisInit) {
+            var ownClsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, cinit.cls)])
+            var ownCtorV = callExt(b, "js_get", [ownClsV, emitStr(b, "__ctor")])
+            var targsV = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [targsV, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])])
+            for (var ti = 0; ti < cinit.cargs.length; ti++) {
+                var tr = cinit.cargs[ti](b)
+                b = tr.b
+                callExt(b, "js_arr_push", [targsV, tr.v])
+            }
+            callExt(b, "js_call", [ownCtorV, hUndef, targsV])
+        }
+        if (superName != undefined && superName != null && !isThisInit) {
             var supClsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])
             var supCtorV = callExt(b, "js_get", [supClsV, emitStr(b, "__ctor")])
             var sargsV = callExt(b, "js_arr_new", [])
             callExt(b, "js_arr_push", [sargsV, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])])
+            if (cinit != undefined && cinit != null) {
+                for (var si = 0; si < cinit.cargs.length; si++) {
+                    var sr = cinit.cargs[si](b)
+                    b = sr.b
+                    callExt(b, "js_arr_push", [sargsV, sr.v])
+                }
+            }
             callExt(b, "js_call", [supCtorV, hUndef, sargsV])
         }
-        if (fields != null) {
+        if (fields != null && !isThisInit) {
             var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
             for (var k = 0; k < fields.length; k++) {
                 var fv
@@ -4990,6 +5249,108 @@ KwLet       = "let" KwEnd ;
             return b
         }
     }
+    // The constructor-initializer record emitFunc wants, with the class the ': this(...)'
+    // form delegates within (docs/todo.md 1.1). null when the constructor has none, so a
+    // constructor without an initializer emits exactly the IR it emitted before.
+    function csCinitOf(info, clsName) {
+        if (info.cinit == undefined || info.cinit == "") { return null }
+        return {cinit: info.cinit, cargs: info.cargs, cls: clsName}
+    }
+    // ----- constructor overload resolution (docs/todo.md 1.10) -----
+    // The twin of csCtorSigs / csPickCtor in languages/csharp-interpreter.abnf, and it
+    // has to stay the twin: ECMA-334 12.6.4 is resolved from the ARGUMENT VALUES here
+    // (there is no static type model), in two passes and in declaration order -
+    //
+    //   1. a candidate whose arity matches EXACTLY (no defaults, no `params` tail) and
+    //      every one of whose declared parameter types the argument satisfies as `is`
+    //      does (ECMA-334 12.12.12) - which is what makes `new Ctr(4)` pick Ctr(int)
+    //      over Ctr(double);
+    //   2. otherwise the first candidate whose arity accepts the count at all.
+    //
+    // js_csis is the SAME extern the `is` operator lowers to, so this owes nothing to
+    // the Go twin, to layer 2 or to the C floor.
+    function csCtorSigs(infos) {
+        var sigs = []
+        for (var i = 0; i < infos.length; i++) {
+            var pi = infos[i].pinfo
+            var req = 0
+            var k
+            for (k = 0; k < pi.params.length; k++) {
+                if (pi.dflts == undefined || pi.dflts[k] == null) { req = k + 1 }
+            }
+            var tys = []
+            var typed = (pi.variadic < 0 && req == pi.params.length)
+            for (k = 0; k < pi.params.length; k++) {
+                var t = (pi.ptypes != undefined && pi.ptypes[k] != undefined) ? pi.ptypes[k] : ""
+                tys.push(t)
+                if (t == "") { typed = false }
+            }
+            sigs.push({n: pi.params.length, req: req, va: pi.variadic, tys: tys, typed: typed})
+        }
+        return sigs
+    }
+    // The dispatcher body: args[0] is `this`, so an argument count of N reaches this
+    // function as a js_pylen of N+1. Each candidate gets a chain of blocks that falls
+    // through to the next one the moment a test fails; the last fallback is candidate 0,
+    // which is what a program whose constructors none of the tests accept gets.
+    function csCtorDispatchBody(clsName, sigs) {
+        return function(b) {
+            var argsP = curF.Params[1]
+            var nV = callExt(b, "js_pylen", [argsP])
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
+            var ctorsV = callExt(b, "js_get", [clsV, emitStr(b, "__ctors")])
+            var endB = curF.NewBlock("")
+            var callBs = []
+            var i
+            var k
+            for (i = 0; i < sigs.length; i++) {
+                var cb = curF.NewBlock("")
+                callExt(cb, "js_call", [callExt(cb, "js_pyget", [ctorsV, emitNum(cb, i)]), hUndef, argsP])
+                cb.NewBr(endB)
+                callBs.push(cb)
+            }
+            // Pass 1: an exact arity and every declared parameter type satisfied.
+            var cur = b
+            for (i = 0; i < sigs.length; i++) {
+                var s = sigs[i]
+                if (!s.typed) { continue }
+                var nextB = curF.NewBlock("")
+                var okB = curF.NewBlock("")
+                var hiB = curF.NewBlock("")
+                // n == s.n + 1, spelled as two js_lt tests so this uses exactly the
+                // comparison emitParam already uses and owes no new extern.
+                cur.NewCondBr(truthy(cur, callExt(cur, "js_lt", [nV, emitNum(cur, s.n + 1)])), nextB, hiB)
+                hiB.NewCondBr(truthy(hiB, callExt(hiB, "js_lt", [emitNum(hiB, s.n + 1), nV])), nextB, okB)
+                var tb = okB
+                for (k = 0; k < s.n; k++) {
+                    var tnext = curF.NewBlock("")
+                    tb.NewCondBr(truthy(tb, callExt(tb, "js_csis", [callExt(tb, "js_arg", [argsP, handle(k + 1)]),
+                                                                    emitStr(tb, csIrType(s.tys[k]))])),
+                                 tnext, nextB)
+                    tb = tnext
+                }
+                tb.NewBr(callBs[i])
+                cur = nextB
+            }
+            // Pass 2: the first candidate whose arity accepts the count at all.
+            for (i = 0; i < sigs.length; i++) {
+                var s2 = sigs[i]
+                var next2 = curF.NewBlock("")
+                var lo = (s2.va >= 0) ? s2.va : s2.req
+                var loOkB = curF.NewBlock("")
+                cur.NewCondBr(truthy(cur, callExt(cur, "js_lt", [nV, emitNum(cur, lo + 1)])), next2, loOkB)
+                if (s2.va >= 0) {
+                    loOkB.NewBr(callBs[i])
+                } else {
+                    loOkB.NewCondBr(truthy(loOkB, callExt(loOkB, "js_lt", [emitNum(loOkB, s2.n + 1), nV])),
+                                    next2, callBs[i])
+                }
+                cur = next2
+            }
+            cur.NewBr(callBs[0])
+            return endB
+        }
+    }
     function buildClassStmt(name, members, kind, primary, isRecord) {
         return function(b) {
             csKnownClasses[name] = true
@@ -5001,6 +5362,7 @@ KwLet       = "let" KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             var fields = []
             var ctorInfo = null
+            var ctorInfos = []
             var superName = null
             var i
             // A nested type is a class of its own: its declaration runs here, in the same
@@ -5038,11 +5400,39 @@ KwLet       = "let" KwEnd ;
                         fields.push(mm)
                     }
                 }
-                if (mm.kind == "ctor") ctorInfo = mm
+                // EVERY constructor is kept, not just the last one (docs/todo.md 1.10).
+                if (mm.kind == "ctor") { ctorInfo = mm; ctorInfos.push(mm) }
             }
+            // The declared type a WRITE to each member adopts, on the descriptor, for
+            // js_csadoptmem to read at a qualified write (docs/todo.md 1.3). Emitted
+            // only for a class that declares at least one such member.
+            var mtyV = anytype
+            var anyMty = false
+            for (i = 0; i < members.length; i++) {
+                var mt = members[i]
+                if (mt.adoptTy == undefined || mt.adoptTy == "" || mt.name == undefined) { continue }
+                if (!anyMty) { mtyV = callExt(b, "js_obj_new", []); anyMty = true }
+                callExt(b, "js_set", [mtyV, emitStr(b, mt.name), emitStr(b, mt.adoptTy)])
+            }
+            if (anyMty) { callExt(b, "js_set", [clsV, emitStr(b, "__mty"), mtyV]) }
             var ctorIdx
-            if (ctorInfo != null) {
-                ctorIdx = emitFunc(ctorInfo.params, ctorInfo.body, true, fields, superName, false, ctorInfo.pinfo)
+            if (ctorInfos.length > 1) {
+                // Overloaded constructors: each is emitted on its own and stored in a
+                // '__ctors' array, and '__ctor' becomes a dispatcher that picks one
+                // from the argument list. A class with exactly one constructor emits
+                // the IR it emitted before, unchanged.
+                var ctorsV = callExt(b, "js_arr_new", [])
+                for (i = 0; i < ctorInfos.length; i++) {
+                    var ci = ctorInfos[i]
+                    var oneIdx = emitFunc(ci.params, ci.body, true, fields, superName, false, ci.pinfo,
+                                          undefined, csCinitOf(ci, name))
+                    callExt(b, "js_arr_push", [ctorsV, callExt(b, "js_closure", [handle(oneIdx), curScopeV])])
+                }
+                callExt(b, "js_set", [clsV, emitStr(b, "__ctors"), ctorsV])
+                ctorIdx = emitFunc([], csCtorDispatchBody(name, csCtorSigs(ctorInfos)), true, null, undefined, false, null)
+            } else if (ctorInfo != null) {
+                ctorIdx = emitFunc(ctorInfo.params, ctorInfo.body, true, fields, superName, false, ctorInfo.pinfo,
+                                   undefined, csCinitOf(ctorInfo, name))
             } else if (primary != null && primary != undefined) {
                 // A primary constructor: its parameters are bound like any other, and the
                 // synthesized body copies them onto the instance as members.

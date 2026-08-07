@@ -1554,6 +1554,137 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s29ad6", u.I / 2 == 6 && (u.I is int) && !(u.I is double));
         }
 
+        // ===== SECTION 30: constructor initializers, constructor overloads, and
+        // the last three declaration sites that adopt =====
+        //
+        // docs/todo.md 1.1, 1.3 and 1.10. ECMA-334 15.11.2 (constructor
+        // initializers): ': base(...)' names the base constructor that runs before
+        // this one's body, ': this(...)' names a sibling of the same class, and the
+        // instance variable initializers run ONLY when the initializer is not a
+        // this(...) one. ECMA-334 12.6.4 (overload resolution) picks the applicable
+        // constructor whose parameter types best fit the arguments; 12.12.12 defines
+        // the run-time type test the fit is decided by here. ECMA-334 10.2.3 at
+        // 12.21.2 is what makes a written value adopt the target's declared type.
+        // ECMA-334 15.8.1 makes an event's '+=' a Delegate.Combine.
+        //
+        // THERE IS NO C# TOOLCHAIN ON THIS MACHINE, so every value is spec-cited
+        // rather than executed. Every operand is read out of an ARRAY so the
+        // grammars' constant folders cannot answer at compile time.
+        //
+        // WHAT WAS BROKEN. The ': base(d)' initializer was PARSED AND DISCARDED and
+        // the base class' parameterless constructor ran instead, so `new S30C(3).D`
+        // was empty where C# says 3 - in all three engines, with both halves
+        // agreeing, which is why --cross was blind to it. A class kept only its LAST
+        // constructor, so `new S30Ctr(4)` ran S30Ctr(double). A property with
+        // accessor bodies was recorded by member NAME across the whole file, so a
+        // plain field of the same name in ANY other class emitted an accessor call
+        // and the compiler half died with "unknown method '__get_X'". An `event`
+        // field of a built-in delegate type did not switch multicast combination on,
+        // so 'E += h' did arithmetic. And a write to a local after its declaration,
+        // an array element and a qualified member all stored the raw int.
+        class S30P
+        {
+            public double D;
+            public double T = 1;
+            public S30P(double d) { D = d; }
+            public S30P() { D = -1; }
+        }
+        class S30C : S30P
+        {
+            public double Own = 5;
+            public S30C(double d) : base(d) { }
+            public S30C() : this(7) { T = T + 100; }
+        }
+        class S30Ctr
+        {
+            public double D;
+            public string W = "";
+            public S30Ctr() { D = 0; }
+            public S30Ctr(int a) { D = 9; }
+            public S30Ctr(double a) { D = a; }
+            public S30Ctr(string a) { D = 5; W = a; }
+            public S30Ctr(int a, int b) { D = a + b; }
+        }
+        // The property/field name collision: X is a property with accessor bodies
+        // in one class and a plain field in another, and neither may take the
+        // other's meaning.
+        class S30Acc { private double v = 7; public double X { get { return v; } set { v = value; } } }
+        class S30Fld { public double X = 5; }
+        class S30Ev
+        {
+            public event Action E;
+            public void Fire() { Action h = E; if (h != null) { h(); } }
+            public bool Empty() { return E == null; }
+        }
+        class S30Mem { public double D; public double[] A = new double[2]; public int I; }
+        static string S30Log = "";
+        static void S30()
+        {
+            int[] n = {3, 4, 5};
+            double[] q = {4.5};
+            string[] w = {"x"};
+
+            // ----- ': base(...)' runs the base constructor with its arguments -----
+            Program.Check("s30ci1", new S30C(n[0]).D == 3);
+            Program.Check("s30ci2", new S30C(n[0]).Own == 5);
+            // ': this(...)' runs the sibling, and the field initializers run ONCE
+            Program.Check("s30ci3", new S30C().D == 7);
+            Program.Check("s30ci4", new S30C().T == 101);
+            // the implicit initializer still runs the parameterless base
+            Program.Check("s30ci5", new S30P().D == -1);
+
+            // ----- constructor overload resolution -----
+            Program.Check("s30ov1", new S30Ctr(n[1]).D == 9);
+            Program.Check("s30ov2", new S30Ctr(q[0]).D == 4.5);
+            Program.Check("s30ov3", new S30Ctr(w[0]).D == 5 && new S30Ctr(w[0]).W == "x");
+            Program.Check("s30ov4", new S30Ctr().D == 0);
+            Program.Check("s30ov5", new S30Ctr(n[0], n[1]).D == 7);
+
+            // ----- a property with accessor bodies must not capture a plain field
+            // of the same name in another class -----
+            Program.Check("s30pa1", new S30Acc().X == 7);
+            S30Fld f = new S30Fld();
+            Program.Check("s30pa2", f.X == 5);
+            f.X = n[0];
+            Program.Check("s30pa3", f.X == 3);
+            S30Acc ac = new S30Acc();
+            ac.X = n[2];
+            Program.Check("s30pa4", ac.X == 5);
+
+            // ----- an event's '+=' combines invocation lists -----
+            S30Ev ev = new S30Ev();
+            Program.Check("s30ev1", ev.Empty());
+            Action ea = () => { Program.S30Log = Program.S30Log + "a"; };
+            Action eb = () => { Program.S30Log = Program.S30Log + "b"; };
+            ev.E += ea;
+            ev.E += eb;
+            ev.Fire();
+            Program.Check("s30ev2", Program.S30Log == "ab");
+            ev.E -= ea;
+            ev.Fire();
+            Program.Check("s30ev3", Program.S30Log == "abb");
+
+            // ----- docs/todo.md 1.3: the three declaration sites that still stored
+            // the raw int -----
+            double L;
+            L = n[0];
+            Program.Check("s30ad1", L / 2 == 1.5 && (L is double));
+            double[] ar = new double[2];
+            ar[0] = n[0];
+            Program.Check("s30ad2", ar[0] / 2 == 1.5 && (ar[0] is double));
+            S30Mem mm = new S30Mem();
+            mm.D = n[0];
+            Program.Check("s30ad3", mm.D / 2 == 1.5 && (mm.D is double));
+            mm.A[1] = n[0];
+            Program.Check("s30ad4", mm.A[1] / 2 == 1.5 && (mm.A[1] is double));
+            // NEGATIVE CONTROL: an `int` member and an `int` local must NOT float.
+            mm.I = n[0];
+            Program.Check("s30ad5", mm.I / 2 == 1 && (mm.I is int) && !(mm.I is double));
+            int li;
+            li = n[0];
+            Program.Check("s30ad6", li / 2 == 1 && (li is int));
+        }
+
         // ===== END SECTIONS =====
 
         static int Main()
@@ -1587,6 +1718,7 @@ b";                                                   // verbatim keeps the newl
             Program.S27(); // SECTION-CALL 27
             Program.S28(); // SECTION-CALL 28
             Program.S29(); // SECTION-CALL 29
+            Program.S30(); // SECTION-CALL 30
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

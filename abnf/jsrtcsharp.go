@@ -164,6 +164,22 @@ func csIsTyWidth(t string) (uint8, bool, bool) {
 // but the interpreter's csImplicitConv declines it too, and the two halves have
 // to agree. Everything else (null, a string, a lambda, an instance) passes
 // through the adoption sites untouched.
+// "double[]" -> "double" when the elements adopt, "" otherwise. One level only, the
+// same rule csElemAdoptTy applies in both grammars.
+func csElemAdoptName(ty string) string {
+	if len(ty) < 3 || !strings.HasSuffix(ty, "[]") {
+		return ""
+	}
+	e := ty[:len(ty)-2]
+	if e == "double" || e == "float" || e == "decimal" {
+		return e
+	}
+	if _, ok := csTypeW[e]; ok {
+		return e
+	}
+	return ""
+}
+
 func csIsNumericV(v interface{}) bool {
 	switch v.(type) {
 	case jsGInt, float64, jsJFlo:
@@ -546,7 +562,18 @@ func init() {
 			if !csIsIntegral(v) {
 				return a[0]
 			}
-			return w(csConvTo(rt, v, uint8(jsToInt(rt.toNumber(u(a[1])))), rt.truthy(u(a[2]))))
+			bits := uint8(jsToInt(rt.toNumber(u(a[1]))))
+			uns := rt.truthy(u(a[2]))
+			// Adopting a value that ALREADY carries the width and signedness is the
+			// identity (see js_csadoptty for the measurement that made this matter).
+			if g, isG := v.(jsGInt); isG {
+				if g.w == bits && g.u == uns {
+					return a[0]
+				}
+			} else if f, isF := v.(float64); isF && bits == 32 && !uns && f == math.Trunc(f) {
+				return a[0]
+			}
+			return w(csConvTo(rt, v, bits, uns))
 		}
 		// js_csadoptty(v, ty) is ECMA-334 10.2.3's implicit numeric conversion at
 		// a DECLARED TYPE NAME - a parameter, a method's return type, a field or
@@ -563,13 +590,28 @@ func init() {
 		m["js_csadoptty"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			ty := rt.toString(u(a[1]))
+			// ADOPTING A VALUE THAT ALREADY CARRIES THE TYPE IS THE IDENTITY, and
+			// saying so here is not a micro-optimisation: without it every write to
+			// a declared-type slot re-boxed, and `long i; while (...) { i = i + 1; }`
+			// allocated a fresh 64-bit cell per iteration - measured at +15.8% on
+			// tests/bench/mod.cs against a 1.94% spread when the local-write site
+			// started adopting (docs/todo.md 1.3). A sized integer and a float box
+			// are compared BY VALUE by strict_eq, so handing back the same value
+			// rather than a copy is not observable. The twin is js_csadoptty in
+			// languages/lib/csharp-rt.metajs.
 			if ty == "float" {
+				if f, isFlo := v.(jsJFlo); isFlo && f.sty == floCSF {
+					return a[0]
+				}
 				if !csIsNumericV(v) {
 					return a[0]
 				}
 				return w(jsJFlo{f: jvmFround(rt.toNumber(v)), sty: floCSF})
 			}
 			if ty == "double" || ty == "decimal" {
+				if f, isFlo := v.(jsJFlo); isFlo && f.sty == floCS {
+					return a[0]
+				}
 				if !csIsNumericV(v) {
 					return a[0]
 				}
@@ -579,7 +621,57 @@ func init() {
 			if !ok || !csIsIntegral(v) {
 				return a[0]
 			}
-			return w(csConvTo(rt, v, bits, csTypeU[ty]))
+			uns := csTypeU[ty]
+			if g, isG := v.(jsGInt); isG {
+				if g.w == bits && g.u == uns {
+					return a[0]
+				}
+			} else if f, isF := v.(float64); isF && bits == 32 && !uns && f == math.Trunc(f) {
+				return a[0]
+			}
+			return w(csConvTo(rt, v, bits, uns))
+		}
+		// js_csadoptmem(obj, name, v): the declared type a WRITE to a member adopts
+		// (ECMA-334 10.2.3 at 12.21.2's simple assignment), read off the '__mty'
+		// table the class descriptor carries. A qualified write - `c.D = 3` on a
+		// `public double D;` - has no static receiver type here, so the type has to
+		// come off the object at run time; this is the only site that needs it, and
+		// the emitter calls it only for member NAMES some class declares with an
+		// adopting type (docs/todo.md 1.3). The twin is csAdoptMemW in
+		// languages/csharp-interpreter.abnf and js_csadoptmem in
+		// languages/lib/csharp-rt.metajs.
+		m["js_csadoptmem"] = func(a []uint64) uint64 {
+			o, ok := u(a[0]).(*jsObject)
+			if !ok {
+				return a[2]
+			}
+			name := rt.toString(u(a[1]))
+			// A qualified STATIC write ('C.S = 3') has the class DESCRIPTOR as its
+			// receiver, and the descriptor is where __mty lives - so the walk starts
+			// at the object itself there, and at its class for an instance.
+			cls, _ := o.props["__class"]
+			if isCls, ok2 := o.props["__isclass"]; ok2 && isCls == true {
+				cls = o
+			}
+			ad := m["js_csadoptty"]
+			for n := 0; n < 64 && cls != nil; n++ {
+				clsObj, isObj := cls.(*jsObject)
+				if !isObj {
+					return a[2]
+				}
+				if mty, found := clsObj.props["__mty"]; found {
+					if mtyObj, isO := mty.(*jsObject); isO {
+						if ty, has := mtyObj.props[name]; has {
+							if el := csElemAdoptName(rt.toString(ty)); el != "" {
+								return m["js_csadoptarr"]([]uint64{a[2], w(el)})
+							}
+							return ad([]uint64{a[2], w(rt.toString(ty))})
+						}
+					}
+				}
+				cls = clsObj.props["__super"]
+			}
+			return a[2]
 		}
 		// js_csadoptarr(v, ty): `double[] a = {3, 4}` types the ELEMENTS, so
 		// a[0] / 2 is 1.5. IN PLACE, not into a copy - `int[] x = {1}; int[] y =

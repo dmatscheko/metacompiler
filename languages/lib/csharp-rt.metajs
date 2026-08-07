@@ -1086,26 +1086,19 @@ function js_has(o, key) {
     }
     if (o === undefined || o === null) { return false }
     if (typeof o != "object") { return false }
-    if (o[k] !== undefined) { return true }
-    return csFindAccessor(o, k)
+    return o[k] !== undefined
 }
 
-// findClassAccessor: a getter/setter lives on the __class descriptor chain, not on
-// the instance, so `key in instance` has to walk it.
-function csFindAccessor(o, k) {
-    var cls = o["__class"]
-    var guard = 0
-    while (guard < 64) {
-        guard = guard + 1
-        if (cls === undefined) { return false }
-        if (cls === null) { return false }
-        if (typeof cls != "object") { return false }
-        if (cls["__get_" + k] !== undefined) { return true }
-        if (cls["__set_" + k] !== undefined) { return true }
-        cls = cls["__super"]
-    }
-    return false
-}
+// THIS USED TO WALK THE __class CHAIN FOR A '__get_<k>' / '__set_<k>' MEMBER, and
+// that was a silent halves divergence: abnf/jsrt.go's js_has walks the chain too,
+// but through findClassAccessor, which answers only for a *jsAccessor - the
+// defineProperty accessor of the JS value model. A C# property with accessor bodies
+// is NOT one of those; it is a plain '__get_X' CLOSURE on the descriptor, so the Go
+// twin answered false where this answered true. Nothing reached it while the only
+// probe csharp-to-llvm-ir emitted was `js_has(x, "__class")`; the property/field
+// name-collision guard (docs/todo.md 1.10) asks about a member name, and needs the
+// twin's answer - "does the receiver carry an own slot of this name", which is
+// exactly what tells a plain field apart from a property with accessor bodies.
 
 // The dynamic type test behind `is` / a type pattern. abnf/jsrt.go's isTypeName is
 // the spec, including the part that surprises: the Int/Long/Short/Byte arm tests for
@@ -1422,7 +1415,15 @@ function js_csconv(v, bits, uns) { return csConvTo(v, rtjNum(bits), uns === true
 // `object o = "s"` and a lambda pass through untouched.
 function js_csadopt(v, bits, uns) {
     if (!rtjIsIntegral(v)) { return v }
-    return csConvTo(v, rtjNum(bits), uns === true)
+    var w = rtjNum(bits)
+    var u = (uns === true)
+    // Adopting a value that ALREADY carries the width and signedness is the
+    // identity, and saying so keeps a declared-type write allocation-free (see
+    // js_csadoptty for the measurement). Sized integers are compared BY VALUE by
+    // the floor's strict_eq, so handing back the same cell is not observable.
+    if (sintIs(v)) { if (sintWidth(v) == w && sintUns(v) === u) { return v } }
+    else if (w == 32 && !u && typeof v == "number") { return v }
+    return csConvTo(v, w, u)
 }
 
 // csIsNumericV: can this value be CONVERTED to a double / float by an implicit
@@ -1444,18 +1445,31 @@ function csIsNumericV(v) { return typeof v == "number" }
 // NOT THE ANNOTATION, so nothing but a conversion at the binding site can put it
 // there (docs/todo.md 1.1). Anything that is not numeric is handed back unchanged.
 function js_csadoptty(v, ty) {
+    // ADOPTING A VALUE THAT ALREADY CARRIES THE TYPE IS THE IDENTITY, and saying so
+    // here is not a micro-optimisation: without it every write to a declared-type
+    // slot re-boxed, and `long i; while (...) { i = i + 1; }` allocated a fresh
+    // 64-bit cell per iteration - measured at +15.8% on tests/bench/mod.cs against
+    // a 1.94% spread when the local-write site started adopting (docs/todo.md 1.3).
+    // A sized-integer box and a float box are compared BY VALUE by the floor's
+    // strict_eq (manual 7.9), so returning the same object rather than a copy is
+    // not observable. The twin is js_csadoptty in abnf/jsrtcsharp.go.
     if (ty == "float") {
+        if (floIs(v) && floStyle(v) == 5) { return v }
         if (!csIsNumericV(v)) { return v }
         return flo(csF32Round(rtjNum(v)), 5)
     }
     if (ty == "double" || ty == "decimal") {
+        if (floIs(v) && floStyle(v) == 2) { return v }
         if (!csIsNumericV(v)) { return v }
         return flo(rtjNum(v), 2)
     }
     var bits = csTypeW(ty)
     if (bits == 0) { return v }
     if (!rtjIsIntegral(v)) { return v }
-    return csConvTo(v, bits, csTypeU(ty))
+    var uns = csTypeU(ty)
+    if (sintIs(v)) { if (sintWidth(v) == bits && sintUns(v) === uns) { return v } }
+    else if (bits == 32 && !uns && typeof v == "number") { return v }
+    return csConvTo(v, bits, uns)
 }
 
 // js_csadoptarr(v, ty): `double[] a = {3, 4}` types the ELEMENTS, so a[0] / 2 is
@@ -1469,6 +1483,51 @@ function js_csadoptarr(v, ty) {
         i = i + 1
     }
     return v
+}
+
+// js_csadoptmem(obj, name, v): the declared type a WRITE to a member adopts (ECMA-334
+// 10.2.3 at 12.21.2's simple assignment), read off the '__mty' table the class
+// descriptor carries. A qualified write - `c.D = 3` on a `public double D;` - has no
+// static receiver type here, so the type has to come off the object at run time; the
+// emitter calls this only for member NAMES some class declares with an adopting type,
+// so every other write emits the IR it emitted before (docs/todo.md 1.3). The twins
+// are js_csadoptmem in abnf/jsrtcsharp.go and csAdoptMemW in
+// languages/csharp-interpreter.abnf.
+function js_csadoptmem(o, name, v) {
+    if (o === undefined || o === null) { return v }
+    if (typeof o != "object") { return v }
+    // A qualified STATIC write ('C.S = 3') has the class DESCRIPTOR as its receiver,
+    // and the descriptor is where __mty lives - so the walk starts at the object
+    // itself there, and at its class for an instance.
+    var cls = (o["__isclass"] === true) ? o : o["__class"]
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (cls === undefined || cls === null) { return v }
+        if (typeof cls != "object") { return v }
+        var mty = cls["__mty"]
+        if (mty !== undefined && mty !== null && typeof mty == "object") {
+            var ty = mty[name]
+            if (ty !== undefined && ty !== null) {
+                var el = csElemAdoptName(ty)
+                if (el != "") { return js_csadoptarr(v, el) }
+                return js_csadoptty(v, ty)
+            }
+        }
+        cls = cls["__super"]
+    }
+    return v
+}
+
+// "double[]" -> "double" when the elements adopt, "" otherwise. One level only, the
+// same rule csElemAdoptTy applies in both grammars.
+function csElemAdoptName(ty) {
+    if (ty.length < 3) { return "" }
+    if (ty.substring(ty.length - 2, ty.length) != "[]") { return "" }
+    var e = ty.substring(0, ty.length - 2)
+    if (e == "double" || e == "float" || e == "decimal") { return e }
+    if (csTypeW(e) != 0) { return e }
+    return ""
 }
 
 // An integer literal, passed as DIGITS because emitNum would already have rounded

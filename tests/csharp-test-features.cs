@@ -247,6 +247,36 @@ namespace Demo
         static byte AdoptW(byte b) { return b; }
         class AdoptBox { public double A = 3; public double P { get; set; } = 3; }
 
+        // ----- constructor initializers and constructor overloads (ECMA-334
+        // 15.11.2 / 12.6.4, docs/todo.md 1.1 and 1.10). The ': base(d)' header used
+        // to be parsed and DISCARDED - the base class' parameterless constructor ran
+        // instead - and a class kept only its LAST constructor. Both halves agreed
+        // on both wrong answers, so --cross was blind to them.
+        class CtP { public double D; public double T = 1; public CtP(double d) { D = d; } public CtP() { D = -1; } }
+        class CtC : CtP { public CtC(double d) : base(d) { } public CtC() : this(7) { T = T + 100; } }
+        class CtOv
+        {
+            public double D;
+            public CtOv() { D = 0; }
+            public CtOv(int a) { D = 9; }
+            public CtOv(double a) { D = a; }
+            public CtOv(string a) { D = 5; }
+        }
+        // A property with accessor bodies and a plain field of the SAME NAME in
+        // another class: neither may take the other's meaning.
+        class CollAcc { private double v = 7; public double Coll { get { return v; } set { v = value; } } }
+        class CollFld { public double Coll = 5; }
+        // An event whose type is a BUILT-IN delegate (Action), with no `delegate`
+        // declaration anywhere in this file: 'E += h' must combine invocation lists
+        // (ECMA-334 15.8.1) and not do arithmetic (docs/todo.md 1.10).
+        class EvBox
+        {
+            public event Action E;
+            public void Fire() { Action h = E; if (h != null) { h(); } }
+            public bool Empty() { return E == null; }
+        }
+        static string EvLog = "";
+
         // ----- an unqualified name resolving to a member of the enclosing type
         // (ECMA-334 12.8.4 / 12.8.7 / 12.7.3, docs/todo.md 1.2 and 1.1) -----
         class UnqBox
@@ -254,10 +284,10 @@ namespace Demo
             public double D = 1;
             public double U;
             public static double S = 2;
-            // NOTE the name: csPropAcc / csEvtAcc are keyed by member name ALONE,
-            // across the whole file, so a property with accessor bodies must not
-            // reuse a name some other class declares as a plain field (`Box.W`
-            // above) - every access to that field would become an accessor CALL.
+            // csPropAcc / csEvtAcc are keyed by member name ALONE in the compiler
+            // half, so a property with accessor bodies used to CAPTURE every plain
+            // field of the same name in every other class. `CollFld.Coll` below is
+            // the assertion that it no longer does (docs/todo.md 1.10).
             public int Acc { get { return 20; } set { this.D = value; } }
             public void WrD(int v) { D = v; }          // instance field, unqualified
             public void WrU(int v) { U = v; }          // ... with no initializer
@@ -753,6 +783,43 @@ namespace Demo
             Program.Check("unqualified-property-write", unq2.D == 5);
             Program.Check("unqualified-inherited", new UnqSub().RdBD() == 1 && new UnqSub().BD == 1);
             Program.Check("unqualified-shadowed", unq.Shadow(unqN[1]) == 5 && unq.D == 3);
+
+            // ----- constructor initializers, constructor overloads, the
+            // property/field name collision, and an event's '+=' -----
+            int[] ctN = {3, 4, 5};
+            double[] ctQ = {4.5};
+            string[] ctW = {"x"};
+            Program.Check("ctor-base-init", new CtC(ctN[0]).D == 3);
+            Program.Check("ctor-this-init", new CtC().D == 7 && new CtC().T == 101);
+            Program.Check("ctor-overload-int", new CtOv(ctN[1]).D == 9);
+            Program.Check("ctor-overload-double", new CtOv(ctQ[0]).D == 4.5);
+            Program.Check("ctor-overload-string", new CtOv(ctW[0]).D == 5);
+            Program.Check("ctor-overload-none", new CtOv().D == 0);
+            CollFld coll = new CollFld();
+            coll.Coll = ctN[0];
+            Program.Check("prop-field-collision", new CollAcc().Coll == 7 && coll.Coll == 3);
+            EvBox ev = new EvBox();
+            Action evA = () => { Program.EvLog = Program.EvLog + "a"; };
+            Action evB = () => { Program.EvLog = Program.EvLog + "b"; };
+            Program.Check("event-empty", ev.Empty());
+            ev.E += evA;
+            ev.E += evB;
+            ev.Fire();
+            ev.E -= evA;
+            ev.Fire();
+            Program.Check("event-combine", Program.EvLog == "abb");
+            // The three declaration sites that still stored the raw int
+            // (docs/todo.md 1.3): a local written after its declaration, an array
+            // element, and a qualified member write.
+            double adL;
+            adL = ctN[0];
+            Program.Check("adopt-local-write", adL / 2 == 1.5 && (adL is double));
+            double[] adAr = new double[2];
+            adAr[0] = ctN[0];
+            Program.Check("adopt-array-elem", adAr[0] / 2 == 1.5 && (adAr[0] is double));
+            AdoptBox adB = new AdoptBox();
+            adB.A = ctN[0];
+            Program.Check("adopt-qualified-write", adB.A / 2 == 1.5 && (adB.A is double));
 
             Console.WriteLine("features: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;

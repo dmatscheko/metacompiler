@@ -261,11 +261,24 @@ NestedType  <~~ push(makeNested()) ~~>
             = TypeDecl ;
 
 // A constructor: name matches the class; an optional ': base(...)' / ': this(...)'
-// header is parsed and skipped (the implicit base constructor already ran). The body is
-// a block or an expression bodied '=> e;' form.
+// constructor-initializer selects which constructor runs first. The body is a block
+// or an expression bodied '=> e;' form.
+//
+// THE INITIALIZER USED TO BE PARSED AND THROWN AWAY (SkipParen), and the class then
+// always ran the base class' PARAMETERLESS constructor - so `class C : P { public
+// C(double d) : base(d) { } }` left every field P's constructor sets unassigned, and
+// both halves agreed on the wrong answer (docs/todo.md 1.1). ECMA-334 15.11.2: the
+// initializer names the constructor that runs before this one's body, and a
+// `this(...)` initializer means the instance variable initializers do NOT run again.
+// The arguments are ordinary expressions evaluated in the constructor's own parameter
+// scope, which is why they are parsed as an ArgList rather than skipped.
 Ctor        <~~ push(makeCtor(takeAll())) ~~>
             = [ LeadMods ] Id <~~ push(up.in) ~~> ParamList [ CtorInit ] CtorBody ;
-CtorInit    = ":" ( KwBase | KwThis ) SkipParen ;
+CtorInit    <~~ push(csCtorInit(takeAll())) ~~>
+            = ":" CtorInitKw "(" ArgList ")" ;
+CtorInitKw  = CtorInitBase | CtorInitThis ;
+CtorInitBase <~~ push({ckind: "base"}) ~~> = KwBase ;
+CtorInitThis <~~ push({ckind: "this"}) ~~> = KwThis ;
 CtorBody    = Block | CtorArrow ;
 CtorArrow   <~~ push(exprToStmt(pop())) ~~> = "=>" Expression ";" ;
 
@@ -1323,10 +1336,19 @@ KwAs        = "as" KwEnd ;
 
 // 'new' is the method-hiding modifier ('public new string Tag()'). It only reaches here
 // in member position, so the 'new' of an object creation is never taken for a modifier.
-ModKw       = ( "public" | "private" | "protected" | "internal" | "static" | "abstract"
+ModKw       = EvtMod | ( "public" | "private" | "protected" | "internal" | "static" | "abstract"
               | "sealed" | "virtual" | "override" | "readonly" | "const" | "partial"
-              | "unsafe" | "async" | "extern" | "volatile" | "new" | "required" | "event"
+              | "unsafe" | "async" | "extern" | "volatile" | "new" | "required"
               | "file" | "fixed" | "ref" | "scoped" ) KwEnd ;
+// 'event' is a modifier like the others, but an event FIELD is a delegate field:
+// `public event Action E;` then `E += h` must COMBINE invocation lists rather than
+// add numbers. csHasDeleg used to be switched on only by a `delegate` type
+// DECLARATION, so a program whose events all name a built-in delegate type
+// (Action / EventHandler / Func<...>) took the arithmetic path and `E += h`
+// silently produced NaN in the interpreter and aborted in the compiler
+// (docs/todo.md 1.10). ECMA-334 15.8.1: an event's `+=` is Delegate.Combine.
+EvtMod      <~~ csNoteDeleg() ~~>
+            = "event" KwEnd ;
 LeadMods    = { ModKw | AttrSection } ;
 
 // Type declarations accepted structurally, then reported as not implemented (so a whole
@@ -2598,6 +2620,23 @@ KwLet       = "let" KwEnd ;
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
+        // THE DECLARATION SITES THAT STILL DID NOT ADOPT (docs/todo.md 1.3). A
+        // declared type adopts what is written to it (ECMA-334 10.2.3), and three
+        // write sites were still storing the raw int: a write to a LOCAL after its
+        // declaration (`double L; L = 3;` then `L / 2` answered 1), an ARRAY ELEMENT
+        // of a declared array type (`double[] a = new double[2]; a[0] = 3;`), and a
+        // QUALIFIED member write (`c.D = 3`). The first two are settled here, at
+        // parse time, off csLocalTypes - the same table the hidden-method rule
+        // already reads - so a name that adopts nothing costs one lookup at PARSE
+        // time and nothing at run time. The third cannot be: the receiver's class is
+        // only known at run time, and csAdoptMemW reads the declared type off it.
+        var lty = ""
+        var elty = ""
+        if (ref.path.length == 0 && ref.name != undefined && hasOwn(csLocalTypes, ref.name)) {
+            lty = csLocalWriteTy(csLocalTypes[ref.name])
+        } else if (ref.ety != undefined) {
+            elty = ref.ety
+        }
         // 'a ??= b' assigns only when a is null, and yields a's value either way.
         if (op == "??=") {
             var readT = makeRefRead(ref)
@@ -2613,6 +2652,7 @@ KwLet       = "let" KwEnd ;
             v = valT()
             if (ref.path.length == 0) {
                 if (op != "=") v = applyOp(op, getVar(ref.name), v)
+                if (lty != "") { v = csAdoptVal(lty, v) }
                 setVar(ref.name, v)
             } else {
                 var p = csResolveRef(ref)
@@ -2634,6 +2674,8 @@ KwLet       = "let" KwEnd ;
                     if (p.obj.__isclass === true) { st(v) } else { st(p.obj, v) }
                 } else {
                     if (op != "=") v = applyOp(op, hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined, v)
+                    if (elty != "") { v = csImplicitConv(elty, v) }
+                    else if (p.isIndex != true && csAdoptMems[p.key] != undefined) { v = csAdoptMemW(p.obj, p.key, v) }
                     p.obj[p.key] = v
                 }
             }
@@ -2823,6 +2865,22 @@ KwLet       = "let" KwEnd ;
     // The target of an assignment whose root is an arbitrary primary. It is an
     // ordinary target record with a `base` thunk in place of a variable name; the
     // resolveRef override below is what reads that thunk.
+    // The declared ELEMENT type of the chain an index write ends on: the last field
+    // name in the head, or - when the head is a bare variable - that variable's
+    // declared type. "" when neither names an array of an adopting element type.
+    function csTargetElemTy(head) {
+        if (head.length == 0) { return "" }
+        for (var i = head.length - 1; i >= 1; i--) {
+            if (head[i] != null && head[i] != undefined && head[i].kind == "field") {
+                return csElemAdoptTy(csAdoptMems[head[i].name])
+            }
+        }
+        var h0 = head[0]
+        if (h0 != null && h0 != undefined && typeof h0 != "function" && h0.seedvar != undefined) {
+            return csElemAdoptTy(csLocalTypes[h0.seedvar])
+        }
+        return ""
+    }
     function makeChainTarget(items) {
         var head = []
         for (var i = 0; i < items.length - 1; i++) { head.push(items[i]) }
@@ -2830,7 +2888,13 @@ KwLet       = "let" KwEnd ;
         // Three separate returns rather than one reassigned local: under the
         // frozen engine a variable keeps the shape it was first given.
         if (last.kind == "field") { return {name: "", path: [{key: last.name}], base: foldCallMember(head)} }
-        if (last.kind == "index") { return {name: "", path: [{idx: last.idx}], base: foldCallMember(head)} }
+        // The ELEMENT type an index write adopts (docs/todo.md 1.3). It is decided
+        // here, at parse time, from the head of the chain - a local of a declared
+        // array type, or a member of one - so an index write into anything else
+        // costs nothing at all at run time.
+        if (last.kind == "index") {
+            return {name: "", path: [{idx: last.idx}], ety: csTargetElemTy(head), base: foldCallMember(head)}
+        }
         // A run that ends in a call is not an assignable place; the parse still
         // succeeds and the enclosing Assignment fails on the missing operator.
         return {name: "", path: [{key: "\x01not-a-place"}], base: foldCallMember(head)}
@@ -4049,6 +4113,12 @@ KwLet       = "let" KwEnd ;
         // nothing - which is the overwhelming majority, and is what keeps csBindArgs
         // at one string comparison per parameter per call (docs/todo.md 1.1).
         var adopts = []
+        // The RAW declared type of each parameter, "" when it names none. Unlike
+        // `adopts` (which keeps only the numeric names a binding CONVERTS to) this
+        // keeps every name, because constructor overload resolution has to ask
+        // `is` about a string, a bool and a user class too (docs/todo.md 1.10).
+        var ptypes = []
+        var pendingRaw = ""
         var pendingTy = ""
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
@@ -4056,6 +4126,8 @@ KwLet       = "let" KwEnd ;
                 names.push(it)
                 dflts.push(null)
                 adopts.push(pendingTy)
+                ptypes.push(pendingRaw)
+                pendingRaw = ""
                 if (pendingThis && names.length == 1) { isExt = true }
                 if (pendingParams) { variadic = names.length - 1 }
                 pendingThis = false
@@ -4066,14 +4138,18 @@ KwLet       = "let" KwEnd ;
             if (it.thisParam == true) { pendingThis = true; continue }
             if (it.paramsParam == true) { pendingParams = true; continue }
             // A `params` tail binds an ARRAY rather than a value, so it adopts nothing.
-            if (it.ptype != undefined) { pendingTy = csAdoptable(it.ptype) ? it.ptype : ""; continue }
+            if (it.ptype != undefined) {
+                pendingRaw = stripWs(it.ptype)
+                pendingTy = csAdoptable(it.ptype) ? it.ptype : ""
+                continue
+            }
             if (it.pdflt != undefined && dflts.length > 0) { dflts[dflts.length - 1] = it.pdflt }
         }
         if (variadic >= 0 && variadic < adopts.length) { adopts[variadic] = "" }
         var anyAdopt = false
         for (var k = 0; k < adopts.length; k++) { if (adopts[k] != "") { anyAdopt = true } }
         return {params: names, dflts: dflts, ext: isExt, variadic: variadic, ygen: csYieldCount,
-                adopts: adopts, anyAdopt: anyAdopt}
+                adopts: adopts, anyAdopt: anyAdopt, ptypes: ptypes}
     }
 
     // A method call binds its arguments like a lambda does: a missing argument takes the
@@ -4139,10 +4215,30 @@ KwLet       = "let" KwEnd ;
         for (var i = 0; i < mods.length; i++) { if (mods[i] == "static") { isStatic = true } }
         return {kind: "abstract", name: items[2], statik: isStatic}
     }
+    // items: name, pinfo, [the ': base(...)' / ': this(...)' record], body. The
+    // initializer record is optional, so the body is found by scanning rather than by
+    // index (docs/todo.md 1.1).
     function makeCtor(items) {
         csRegParams(items[0], items[1])
         csGenCheck(items[1])
-        return {kind: "ctor", name: items[0], params: items[1].params, pinfo: items[1], body: items[2]}
+        var cinit = ""
+        var cargs = []
+        var body = items[items.length - 1]
+        for (var i = 2; i < items.length - 1; i++) {
+            if (items[i] != null && items[i] != undefined && items[i].cinit != undefined) {
+                cinit = items[i].cinit
+                cargs = items[i].cargs
+            }
+        }
+        return {kind: "ctor", name: items[0], params: items[1].params, pinfo: items[1],
+                body: body, cinit: cinit, cargs: cargs}
+    }
+    // ': base(a, b)' / ': this(a)' - the kind and the argument thunks.
+    function csCtorInit(items) {
+        var kind = items[0].ckind
+        var args = []
+        for (var i = 1; i < items.length; i++) { args.push(items[i]) }
+        return {cinit: kind, cargs: csFixArgs(args, "")}
     }
     // 'public int X, Y;': one modifier/type prefix, several declarators. The group is
     // flattened into ordinary field records by csFlatten before a class body is read.
@@ -4196,7 +4292,7 @@ KwLet       = "let" KwEnd ;
         // 1 an int division gave. `double[] xs = {3, 4}` adopts elementwise.
         return {kind: "field", name: name, statik: isStatic,
                 init: init == null ? init : csAdoptThunk(ty, init), dflt: dflt,
-                adoptTy: csWriteTy(ty)}
+                adoptTy: csNoteAdoptMem(name, csWriteTy(ty))}
     }
 
     // ----- operator overloading and user conversions -----
@@ -4292,7 +4388,7 @@ KwLet       = "let" KwEnd ;
         // from the assignment, which is the write-site problem the report names.
         return {kind: "prop", name: name, statik: isStatic,
                 getT: getT == null ? getT : csAdoptRet(ty, getT), setT: setT,
-                addT: addT, remT: remT, adoptTy: csWriteTy(ty)}
+                addT: addT, remT: remT, adoptTy: csNoteAdoptMem(name, csWriteTy(ty))}
     }
     // An automatic property IS a field: same record, so every field path (the instance
     // initializers, the static slot, the member table) applies to it unchanged.
@@ -4308,7 +4404,7 @@ KwLet       = "let" KwEnd ;
         // holds 3.0.
         return {kind: "field", name: name, statik: isStatic,
                 init: init == null ? init : csAdoptThunk(ty, init), dflt: dflt,
-                adoptTy: csWriteTy(ty)}
+                adoptTy: csNoteAdoptMem(name, csWriteTy(ty))}
     }
     function makeIndexer(items) {
         var getT = null
@@ -4364,6 +4460,7 @@ KwLet       = "let" KwEnd ;
         if (tparams != undefined && tparams != null && tparams.length > 0) { csClassTParams[name] = tparams }
         var fields = []
         var ctorInfo = null
+        var ctorInfos = []
         var sup = null
         var i
         // TWO KINDS OF MEMBER RECORD CARRY AN `ext` SLOT and only one of them is a
@@ -4426,13 +4523,26 @@ KwLet       = "let" KwEnd ;
             }
             if (mm.kind == "prop" && mm.statik) { sfld[mm.name] = true }
             if (mm.adoptTy != undefined && mm.adoptTy != "") { mty[mm.name] = mm.adoptTy }
-            if (mm.kind == "ctor") ctorInfo = mm
+            // EVERY constructor is kept, not just the last one. A class used to keep
+            // one `ctorInfo` and the later declaration simply overwrote the earlier,
+            // so `new Ctr(4)` on a class with `Ctr(int)` and `Ctr(double)` ran
+            // whichever was written last in BOTH halves (docs/todo.md 1.10).
+            if (mm.kind == "ctor") { ctorInfo = mm; ctorInfos.push(mm) }
         }
         scopes.pop()
-        // The constructor: the implicit base() first (the whole parent constructor,
-        // without arguments), then this class' field defaults and initializers.
-        function initFields(self) {
-            if (sup != null) sup.__ctor(self)
+        // The base constructor, with the arguments a ': base(...)' initializer gives
+        // it (ECMA-334 15.11.2) - an empty list means the parameterless one, which is
+        // the implicit initializer every constructor without one has.
+        function initBase(self, bargs) {
+            if (sup == null) { return }
+            var argv = [self]
+            for (var q = 0; q < bargs.length; q++) { argv.push(bargs[q]) }
+            sup.__ctor.apply(undefined, argv)
+        }
+        // This class' own field defaults and initializers. They do NOT run for a
+        // constructor with a ': this(...)' initializer - the constructor it delegates
+        // to runs them (ECMA-334 15.11.2).
+        function initOwn(self) {
             for (var k = 0; k < fields.length; k++) {
                 var fk = fields[k]
                 if (fk.init != null && fk.init != undefined) { self[fk.name] = fk.init(); continue }
@@ -4443,8 +4553,18 @@ KwLet       = "let" KwEnd ;
                     ? csAdoptVal(fk.adoptTy, fk.dflt) : fk.dflt
             }
         }
-        if (ctorInfo != null) {
-            cls.__ctor = makeCtorClosure(ctorInfo, initFields)
+        function initFields(self) { initBase(self, []); initOwn(self) }
+        if (ctorInfos.length > 1) {
+            // Overloaded constructors: one dispatcher picks by the argument list.
+            var ctorFns = []
+            for (i = 0; i < ctorInfos.length; i++) {
+                ctorFns.push(makeCtorClosure(ctorInfos[i], initBase, initOwn, cls))
+            }
+            cls.__ctorSigs = csCtorSigs(ctorInfos)
+            cls.__ctorFns = ctorFns
+            cls.__ctor = csCtorDispatch(cls)
+        } else if (ctorInfo != null) {
+            cls.__ctor = makeCtorClosure(ctorInfo, initBase, initOwn, cls)
         } else if (primary != null && primary != undefined) {
             // A primary constructor: its parameters become instance members, bound by the
             // same argument binder every other call uses (defaults, 'params' tail).
@@ -4523,13 +4643,96 @@ KwLet       = "let" KwEnd ;
             for (var j = 0; j < pinfo.params.length; j++) { self[pinfo.params[j]] = sc[pinfo.params[j]] }
         }
     }
-    function makeCtorClosure(info, initFields) {
+    // A constructor closure. The constructor-initializer's arguments are ordinary
+    // expressions of the constructor's OWN parameter scope (`: base(d)` names the
+    // parameter d), so they cannot be evaluated before csInvoke has bound the
+    // parameters - which is why the whole prologue is wrapped INSIDE the body thunk
+    // rather than run ahead of it (docs/todo.md 1.1).
+    function makeCtorClosure(info, initBase, initOwn, cls) {
         return function() {
             var self = arguments[0]
-            initFields(self)
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
-            csInvoke(info.pinfo, info.body, self, args)
+            csInvoke(info.pinfo, csCtorBodyT(info, initBase, initOwn, cls, self), self, args)
+        }
+    }
+    function csCtorBodyT(info, initBase, initOwn, cls, self) {
+        return function() {
+            var argv = []
+            var i
+            if (info.cinit == "this") {
+                // ': this(...)' runs a sibling constructor, which runs the base
+                // constructor and the field initializers itself. Running them here as
+                // well would apply every initializer twice (ECMA-334 15.11.2).
+                argv.push(self)
+                for (i = 0; i < info.cargs.length; i++) { argv.push(info.cargs[i]()) }
+                cls.__ctor.apply(undefined, argv)
+            } else {
+                for (i = 0; i < info.cargs.length; i++) { argv.push(info.cargs[i]()) }
+                initBase(self, argv)
+                initOwn(self)
+            }
+            return info.body()
+        }
+    }
+    // ----- constructor overload resolution (docs/todo.md 1.10) -----
+    // ECMA-334 12.6.4 picks the applicable member whose parameter types best match the
+    // argument types. There is no static type here, so the choice is made from the
+    // ARGUMENT VALUES, in two passes and in declaration order:
+    //
+    //   1. a candidate whose arity matches EXACTLY (no defaults, no `params` tail)
+    //      and every one of whose declared parameter types the argument satisfies as
+    //      `is` does - which is the run-time type test ECMA-334 12.12.12 defines, and
+    //      is precisely what makes `new Ctr(4)` pick Ctr(int) over Ctr(double);
+    //   2. otherwise the first candidate whose arity accepts the count at all.
+    //
+    // The compiler half lowers exactly this, block for block, over js_csis - the same
+    // test its `is` operator uses - so no new extern and no layer-2 change is owed.
+    function csCtorSigs(infos) {
+        var sigs = []
+        for (var i = 0; i < infos.length; i++) {
+            var pi = infos[i].pinfo
+            var req = 0
+            var k
+            for (k = 0; k < pi.params.length; k++) {
+                if (pi.dflts == undefined || pi.dflts[k] == null) { req = k + 1 }
+            }
+            var tys = []
+            var typed = (pi.variadic < 0 && req == pi.params.length)
+            for (k = 0; k < pi.params.length; k++) {
+                var t = (pi.ptypes != undefined && pi.ptypes[k] != undefined) ? pi.ptypes[k] : ""
+                tys.push(t)
+                if (t == "") { typed = false }
+            }
+            sigs.push({n: pi.params.length, req: req, va: pi.variadic, tys: tys, typed: typed})
+        }
+        return sigs
+    }
+    function csPickCtor(sigs, args) {
+        var i
+        var k
+        for (i = 0; i < sigs.length; i++) {
+            var s = sigs[i]
+            if (!s.typed || s.n != args.length) { continue }
+            var ok = true
+            for (k = 0; k < s.n; k++) { if (!csIsType(args[k], s.tys[k])) { ok = false } }
+            if (ok) { return i }
+        }
+        for (i = 0; i < sigs.length; i++) {
+            var s2 = sigs[i]
+            if (s2.va >= 0) { if (args.length >= s2.va) { return i } continue }
+            if (args.length >= s2.req && args.length <= s2.n) { return i }
+        }
+        return 0
+    }
+    function csCtorDispatch(cls) {
+        return function() {
+            var argv = []
+            var args = []
+            var i
+            for (i = 0; i < arguments.length; i++) { argv.push(arguments[i]) }
+            for (i = 1; i < argv.length; i++) { args.push(argv[i]) }
+            cls.__ctorFns[csPickCtor(cls.__ctorSigs, args)].apply(undefined, argv)
         }
     }
     // An accessor closure: the same shape as a method, so it is called like one.
@@ -4890,10 +5093,55 @@ KwLet       = "let" KwEnd ;
     // whose type names nothing numeric - the overwhelming majority. Asked ONCE, at
     // parse time (docs/todo.md 1.1). The twin is csWriteTy in
     // languages/csharp-to-llvm-ir.abnf.
+    // The declared type a write to a LOCAL adopts, which is NOT csWriteTy: only the
+    // FLOATING names are here, and the reason is a measurement rather than a
+    // preference (docs/todo.md 1.3).
+    //
+    // Every adoption is a layer-2 call, and a layer-2 call in a hot loop is
+    // expensive out of proportion to what it does: adopting every local write cost
+    // tests/bench/mod.cs +5.3% (21.72e9 -> 22.88e9 instructions retired, against a
+    // 1.9% layout spread) for the two writes in `long s, i; while (i < 40000) { s =
+    // s + i % 7; i = i + 1; }` - and it stayed +5.3% after the conversion itself was
+    // made allocation-free and its ~20 string comparisons removed, so the cost is
+    // the CALL, not the work. Restricting the site to double/float/decimal takes
+    // that to zero on this row.
+    //
+    // The line is not arbitrary. A plain number IS the `int` of this value model, so
+    // `long x; x = 3;` stores a value C# would implicitly convert and the loss shows
+    // up only past 32 bits; but a `double` slot holding a plain int INTEGER-DIVIDES
+    // immediately - `double L; L = 3;` then `L / 2` answered 1 instead of 1.5, which
+    // is the defect the item names. THE INTEGRAL HALF IS STILL OPEN: `long x; x = 3;
+    // x * 1000000 * 1000000` is a 32-bit multiply. Closing it needs the extern to be
+    // called only when it can change something - a plain-number test the emitter can
+    // lower without a call - and that does not exist today.
+    function csLocalWriteTy(ty) {
+        if (ty == "double" || ty == "float" || ty == "decimal") { return ty }
+        return ""
+    }
     function csWriteTy(ty) {
         if (ty == undefined || ty == null) { return "" }
         if (csElemAdoptTy(ty) != "") { return ty }
         return csAdoptable(ty) ? ty : ""
+    }
+    // The member names some class declares with a type that ADOPTS, filled at parse
+    // time. A qualified write to any other name costs nothing at all (docs/todo.md 1.3).
+    var csAdoptMems = {}
+    function csNoteAdoptMem(name, ty) {
+        if (ty != undefined && ty != "") { csAdoptMems[name] = ty }
+        return ty
+    }
+    // A qualified write ('c.D = 3'): the declared type comes off the RECEIVER's class,
+    // which is only known here, at run time. The twin is js_csadoptmem.
+    function csAdoptMemW(obj, key, v) {
+        if (obj === null || obj === undefined || typeof obj != "object") { return v }
+        // A qualified STATIC write ('C.S = 3') has the class DESCRIPTOR as its
+        // receiver, and the descriptor is where __mty lives - so the walk starts at
+        // the object itself there, and at its class for an instance.
+        var cls = (obj.__isclass === true) ? obj : obj.__class
+        if (cls == undefined || cls === null) { return v }
+        var ty = csMemberTyOf(cls, key)
+        if (ty == "") { return v }
+        return csAdoptVal(ty, v)
     }
     // The declared type of a member reached unqualified, walking the __super chain
     // from a class descriptor. The twin is csMemberInfo's `ty` in the compiler half.
