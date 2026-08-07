@@ -1569,6 +1569,105 @@ function s35(): number {
 }
 function* sg35(): any { yield 1; yield 2 }
 
+// ===== SECTION 36: WHEN a generator's finally runs, and closing a yield* delegate =====
+// docs/todo.md 1.10 and the js half of 2.6. Two defects, both about the MOMENT a
+// finally runs, and neither visible to SECTION 34 - every assertion there is about
+// the closed STATE or about a count, which both halves reached by different routes.
+//
+// THE INTERPRETER RAN THE FINALLY AT THE FIRST next(). A generator suspends there by
+// throwing a host-level signal, and interp-core's excTry ran the program's `finally`
+// for any unwinding - so `try { yield } finally { f() }` printed f before the first
+// next() had even returned, and again at every step after. That is not replay
+// repetition, it is the wrong ORDER, and it was a live halves divergence: the two
+// compiled halves have real coroutines and were right. typescript-interpreter.abnf now has
+// its own jsExcTry that lets the suspension through untouched.
+//
+// THE COMPILER HALVES DID NOT CLOSE A yield* DELEGATE. g.return() is gen_close, which
+// throws the GEN_EXIT sentinel at the suspended yield; the outer body's finally ran
+// and the DELEGATE was left suspended, where node runs its finally first. The emitted
+// yield* loop now yields inside a js_try whose finally runs IteratorClose on the
+// delegate (typescript-to-llvm-ir.abnf's emitYieldStarClose), and the interpreter half raises
+// the same close at the same yield (jpYieldDeleg).
+//
+// Every log below is written only in a `finally` or from the DRIVER, never before the
+// yield the body parks at - a write before that yield repeats once per replay in the
+// interpreter half and the two halves would disagree about the count, not the order.
+// Measured byte-for-byte against node v24.
+function s36(): number {
+    var lg = []
+    function* g36(): any { try { yield 1; yield 2 } finally { lg.push("fin") } }
+    var a36 = g36()
+    lg.push("n1=" + a36.next().value)
+    lg.push("n2=" + a36.next().value)
+    lg.push("ret")
+    var r36 = a36.return(0)
+    lg.push("end")
+    check("gcl1", lg.join(",") === "n1=1,n2=2,ret,fin,end")
+    check("gcl2", r36.value === 0 && r36.done === true && a36.next().done === true)
+    // The delegate is closed BEFORE the delegating body's own finally.
+    var l2 = []
+    function* in36(): any { try { yield 1; yield 2 } finally { l2.push("inner") } }
+    function* out36(): any { try { yield* in36() } finally { l2.push("outer") } }
+    var b36 = out36()
+    l2.push("n=" + b36.next().value)
+    b36.return(0)
+    check("gcl3", l2.join(",") === "n=1,inner,outer")
+    // Nested yield*: innermost first, one close per level.
+    var l3 = []
+    function* i3_36(): any { try { yield 1 } finally { l3.push("i") } }
+    function* m3_36(): any { try { yield* i3_36() } finally { l3.push("m") } }
+    function* o3_36(): any { try { yield* m3_36() } finally { l3.push("o") } }
+    var c36 = o3_36()
+    c36.next()
+    c36.return(0)
+    check("gcl4", l3.join(",") === "i,m,o")
+    // A for-of that BREAKS out of a delegating generator closes the delegate too -
+    // the loop calls return(), which is the same close.
+    var l4 = []
+    function* i4_36(): any { try { yield 1; yield 2 } finally { l4.push("i4") } }
+    function* o4_36(): any { yield* i4_36() }
+    for (var v36 of o4_36()) { l4.push("v" + v36); break }
+    check("gcl5", l4.join(",") === "v1,i4")
+    // An ARRAY delegate has no return member: nothing is called and nothing aborts.
+    var l5 = []
+    function* o5_36(): any { try { yield* [7, 8] } finally { l5.push("o5") } }
+    var e36 = o5_36()
+    check("gcl6", e36.next().value === 7)
+    e36.return(0)
+    check("gcl7", l5.join(",") === "o5")
+    // A close is a RETURN completion: `catch` is not offered it, in any of the three
+    // engines (runtime.c's GEN_EXIT guard, abnf/jsrt.go's genExit, jsExcTry here).
+    var l6 = []
+    function* g6_36(): any { try { yield 1 } catch (e6) { l6.push("caught") } finally { l6.push("f6") } }
+    var f36 = g6_36()
+    f36.next()
+    f36.return(0)
+    check("gcl8", l6.join(",") === "f6")
+    // A generator that never started has no suspension point, so nothing unwinds.
+    var l7 = []
+    function* g7_36(): any { try { yield 1 } finally { l7.push("f7") } }
+    var h36 = g7_36()
+    h36.return(3)
+    check("gcl9", l7.length === 0 && h36.next().done === true)
+    // A body that runs to its own end runs the finally once, at the end.
+    var l8 = []
+    function* g8_36(): any { try { yield 1 } finally { l8.push("f8") } }
+    var i36 = g8_36()
+    l8.push("a" + i36.next().value)
+    l8.push("d" + i36.next().done)
+    check("gcl10", l8.join(",") === "a1,f8,dtrue")
+    // Nested try/finally around ONE yield unwinds inside out.
+    var l9 = []
+    function* g9_36(): any {
+        try { try { yield 1 } finally { l9.push("in") } } finally { l9.push("out") }
+    }
+    var j36 = g9_36()
+    j36.next()
+    j36.return(0)
+    check("gcl11", l9.join(",") === "in,out")
+    return 0
+}
+
 function main(): number {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
@@ -1605,6 +1704,7 @@ function main(): number {
     s33(); // SECTION-CALL 33
     s34(); // SECTION-CALL 34
     s35(); // SECTION-CALL 35
+    s36(); // SECTION-CALL 36
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

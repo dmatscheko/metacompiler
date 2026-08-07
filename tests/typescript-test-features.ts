@@ -245,6 +245,26 @@ let sr1: any = sg.next().value;
 let sr2: any = sg.next("S").value;
 let sr3: any = sg.next().value;
 check("yield-star-send", sr1 === 1 && sr2 === "a=S" && sr3 === "v=r");
+// docs/todo.md 2.6 and 1.10: WHEN the finally runs. A generator's finally belongs to
+// the close, not to the suspension - the interpreter half used to run it at the first
+// next(), because a suspension is a host throw and interp-core's excTry ran the
+// program's finally for any unwinding. And g.return() at a `yield*` closes the
+// DELEGATE first, which no compiled half did. Every push is in a finally or in the
+// driver: a write before the parked yield repeats once per replay in this half.
+var clLog = [];
+function* clG(): any { try { yield 1; yield 2; } finally { clLog.push("fin"); } }
+var clA = clG();
+clLog.push("n" + clA.next().value);
+clLog.push("r");
+clA.return(0);
+check("gen-close-finally-order", clLog.join(",") === "n1,r,fin");
+var clL2 = [];
+function* clInner(): any { try { yield 1; yield 2; } finally { clL2.push("in"); } }
+function* clOuter(): any { try { yield* clInner(); } finally { clL2.push("out"); } }
+var clB = clOuter();
+clL2.push("n" + clB.next().value);
+clB.return(0);
+check("yield-star-close-delegate", clL2.join(",") === "n1,in,out");
 
 // ----- objects -----
 var obj = { a: 1, "b-key": 2 };

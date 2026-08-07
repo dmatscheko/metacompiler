@@ -83,7 +83,11 @@ frame. The sent value of a plain next(v) reaches the delegate the same way. ONE 
 LIMIT REMAINS: a plain (non-async) generator has no .throw() at all - the generator cell
 is the C floor's tag 15 and its member table is host-dispatched, so giving it one is a
 floor change - and that is also why a SYNC generator delegated to from an async one takes
-the no-throw-method path. g.return() at a yield* likewise does not close the delegate.
+the no-throw-method path. g.return() while the body is parked at a yield* DOES close the
+delegate now: gen_close throws the GEN_EXIT sentinel at that yield, and the yield sits
+inside a js_try whose FINALLY runs IteratorClose on the delegate, so the delegate's
+finally clauses run before the delegating body's own, innermost first, exactly as node
+orders them (docs/todo.md 1.10).
 `await` OUTSIDE an async function body - which is not valid
 JavaScript, and which both grammars accept as a widening - stays the identity it was.
 An UNHANDLED REJECTION is deliberately not reported: the interpreter half drives an
@@ -3838,6 +3842,43 @@ NotFuncHead = :script(~~
     // coroutine's own frame, nothing kept in any program-wide structure across a
     // suspension. That is the constraint docs/todo.md 2.1's per-loop DEPTH STACK failed -
     // it was per-program, and `for await` suspends inside its own for-of.
+    // The TRY body of the yield* barrier: hand out slot 0yout, and clear 0yopen once the
+    // driver has resumed us. Reaching the clear is exactly "this yield answered
+    // normally", so the finally below can tell a resume from a close with no second
+    // signal. It is a ctl closure like every other js_try body (emitFunction's isCtl):
+    // that carries inAsyncGen through and leaves `this` lexical, which an implementation
+    // closure must - it is not a JavaScript function.
+    function emitYieldStarYield() {
+        return emitFunction([], function(bb) {
+            var yv = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "0yout")])
+            var sv = callExt(bb, "js_yield", [yv])
+            callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, "0yopen"), hFalse])
+            bb.NewRet(sv)
+            return deadBlock()
+        }, true)
+    }
+    // The FINALLY body: if the body left the yield abnormally - which for a generator
+    // means gen_close threw GEN_EXIT in - run IteratorClose on the delegate, the same two
+    // steps makeForOf's closeB emits (a callable `return` member, called on the delegate
+    // as receiver). An array or a string delegate has none, and node closes neither.
+    // 0yopen is cleared first so a delegate whose own return() unwinds cannot re-enter.
+    function emitYieldStarClose() {
+        return emitFunction([], function(bb) {
+            var opV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "0yopen")])
+            var cB = curF.NewBlock("")
+            var callB = curF.NewBlock("")
+            var skB = curF.NewBlock("")
+            bb.NewCondBr(truthy(bb, opV), cB, skB)
+            callExt(cB, "js_scope_set", [curScopeV, emitStr(cB, "0yopen"), hFalse])
+            var srcV = callExt(cB, "js_scope_get", [curScopeV, emitStr(cB, "0ysrc")])
+            var rfV = callExt(cB, memGetExt(), [srcV, emitStr(cB, "return")])
+            cB.NewCondBr(truthy(cB, callExt(cB, "js_seq",
+                                 [callExt(cB, "js_typeof", [rfV]), emitStr(cB, "function")])), callB, skB)
+            callExt(jsThisSet(callB, srcV), "js_call", [rfV, srcV, callExt(callB, "js_arr_new", [])])
+            callB.NewBr(skB)
+            return skB
+        }, true)
+    }
     function makeYieldStar(t) {
         return function(b) {
             var r = t(b)
@@ -3855,6 +3896,15 @@ NotFuncHead = :script(~~
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0yi"), callExt(b, "js_num_i", [handle(0)])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ylen"), hUndef])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ysent"), hUndef])
+            // The two slots the CLOSE region below runs on: the value this turn hands
+            // out, and whether the body is currently parked at that yield.
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0yout"), hUndef])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0yopen"), hFalse])
+            // The two barrier closures are built ONCE, here, over the yield*'s own
+            // scope: this block dominates the loop, so hoisting them out of it saves two
+            // js_closure allocations per delegated element.
+            var yYieldCloV = callExt(b, "js_closure", [handle(emitYieldStarYield()), curScopeV])
+            var yCloseCloV = callExt(b, "js_closure", [handle(emitYieldStarClose()), curScopeV])
             var headB = curF.NewBlock("")
             var ystepB = curF.NewBlock("")
             var yidxB = curF.NewBlock("")
@@ -3952,8 +4002,19 @@ NotFuncHead = :script(~~
                                       llvm.ir.NewIncoming(ystepElemV, joinB)])
             // The resume value is stored RAW - the shape test at headB is what reads it,
             // so a throw-in is forwarded rather than raised here.
+            //
+            // The yield itself sits inside a js_try whose FINALLY closes the delegate,
+            // which is what makes g.return() at a yield* run the delegate's finally
+            // clauses (docs/todo.md 1.10). g.return() is gen_close, and gen_close throws
+            // the GEN_EXIT sentinel AT this yield; every js_try between the yield and the
+            // body's entry then runs its finally on the way out, so a barrier here is the
+            // one place the delegate handle is still reachable. It is a finally and not a
+            // catch on purpose: GEN_EXIT is a RETURN completion and no catch clause is
+            // offered it, in either engine (runtime.c's js_try, abnf/jsrt.go's genExit).
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0yout"), youtV])
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0yopen"), hTrue])
             callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0ysent"),
-                                            callExt(bodyB, "js_yield", [youtV])])
+                    callExt(bodyB, "js_try", [yYieldCloV, hUndef, yCloseCloV])])
             bodyB.NewBr(headB)
             curScopeV = saved
             // The delegate's return value on the iterator path (the `value` of the record

@@ -66,14 +66,39 @@ TWO LIMITATIONS THAT ARE OBSERVABLE, not cosmetic:
 GENERATORS REPLAY instead of suspending. A thunk cannot be frozen half way, so every
 next() re-runs the body from the top, answers the yields that already happened with the
 values their next(v) sent, and stops at the new one by throwing a signal the driver
-catches. A pure generator behaves exactly right. One with side effects REPEATS them on
-every step, driving n values costs O(n squared), a 'finally' around a yield runs once per
-step, and .throw() / [Symbol.iterator] are missing outright. .return(v) IS present and
-answers {value: v, done: true}, but it only sets the done flag: the compiler half's
-gen_close runs the body's finally clauses at that point, where replay has already run
-them - the same ordering price as above, and the reason a for-of that BREAKS closes its
-iterator in both halves (a second loop over the generator answers nothing in both) while
-only the compiler half prints the finally at the break.
+catches. A pure generator behaves exactly right.
+
+EXACTLY WHAT DIFFERS, and it is only this: every side effect BEFORE the yield the
+generator is parked at happens once per resume instead of once, so the n-th step re-runs
+the first n-1 segments of the body and driving a generator to exhaustion costs O(n
+squared) in the body rather than O(n). An effect on shared state therefore lands more
+than once - an array a generator pushes to before its first yield ends up [1, 1, 2]
+where node leaves [1, 2].
+
+ORDER IS NOT AFFECTED, and that is a measurement rather than a claim: with every event
+written from the driver or from a `finally` - the two places replay does not re-run -
+the interleaving of a generator's finally clauses, its closes and its driver's own
+prints is byte-identical to node v24 in all three engines, for a plain generator, for
+one closed mid-run, for nested try/finally around one yield, for a delegating yield*
+and for a for-of that breaks out of one. That was NOT true before docs/todo.md 2.6 was
+worked: the suspension signal is a host-level throw, interp-core's excTry ran the
+program's `finally` for any unwinding, and so a generator's finally fired at the FIRST
+next() - before node runs it at all - and again at every step after. jsExcTry (this
+file) now lets that signal pass through untouched.
+
+.return(v) answers {value: v, done: true} and RUNS the body's finally clauses at the
+moment node runs them, including a delegate's: the close needs no frozen stack, so it
+replays to the yield the generator is parked at and raises an exit record there
+(genClose). A for-of that BREAKS is the same close, and both halves then answer nothing
+from a second loop over the generator.
+
+STILL MISSING, and neither is reachable from here: .throw() on a plain (non-async)
+generator, and [Symbol.iterator]. The throw record would travel on the resume value
+exactly as the exit record does, but the COMPILED halves cannot follow - a generator
+there is the C floor's tag-15 cell whose member table is host-dispatched and offers next
+and return only - so giving one a .throw() the halves agree on is a runtime.c change.
+There are no symbols in this subset at all (the for-of and yield* tests are structural:
+a callable `next` member), so Symbol.iterator is a value-model change, not a method.
 
 ASYNC IS AWAITS-AS-YIELDS, AND IT INHERITS EXACTLY THAT PRICE. There IS a job queue
 now: an async function answers a real Promise, 'await' suspends, and the microtask queue
@@ -105,7 +130,9 @@ value of a plain next(v) reaches the delegate the same way. ONE EXACT LIMIT REMA
 plain (non-async) generator has no .throw() at all - the generator cell is the C floor's
 tag 15 and its member table is host-dispatched, so giving it one is a floor change - and
 that is also why a SYNC generator delegated to from an async one takes the no-throw-method
-path. g.return() at a yield* likewise does not close the delegate.
+path. g.return() while the body is parked at a yield* DOES close the delegate now: the
+close raises at that yield and the delegate's return() runs on the way out, innermost
+first, so the finally clauses fire in node's order (docs/todo.md 1.10).
 An UNHANDLED REJECTION is deliberately not reported in any of
 the three engines - replay creates a rejected promise more than once, so the bookkeeping
 would raise spurious aborts here and reporting it only in the compiler half would make
@@ -950,11 +977,12 @@ ATargetSuper <~~ push(makeSuperTarget(takeAll())) ~~>
 // inside a generator.
 DExpr       = Assignment | LogicalAssign | AssignExtended | SuperAssign | CondExpr ;
 
-// try/catch/finally and throw are implemented (excThrow/excTry, languages/lib): throw
-// raises the value, catch binds it (the binding is optional - ES2019 catch {}), finally
-// always runs. return/break/continue inside a try still propagate. Each part is marked
-// so excTry can tell them apart on the stack.
-TryStmt     <~~ push(excTry(takeAll())) ~~>
+// try/catch/finally and throw are implemented (excThrow/jsExcTry): throw raises the
+// value, catch binds it (the binding is optional - ES2019 catch {}), finally always
+// runs. return/break/continue inside a try still propagate. Each part is marked so
+// jsExcTry can tell them apart on the stack. jsExcTry is interp-core's excTry with one
+// difference this grammar needs and no other language does - see its comment.
+TryStmt     <~~ push(jsExcTry(takeAll())) ~~>
             = KwTry TryBody ( CatchClause [ FinallyClause ] | FinallyClause ) ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
@@ -5722,12 +5750,12 @@ NotFuncHead = :script(~~
                     bindLoopTarget(target, step.value)
                     // A BREAK, a RETURN out of the loop and a LABELED BREAK to an
                     // outer statement all close the iterator, as node does: its
-                    // return() is called if it has one. This half's generator
-                    // replays, so the body's `finally` has already run once per step
-                    // (see the GENERATORS REPLAY note in the :description) and
-                    // return() only marks it done - which is what makes a second loop
-                    // over a partially consumed generator answer nothing, in BOTH
-                    // halves.
+                    // return() is called if it has one. On a generator that return()
+                    // is genClose, which replays to the parked yield and raises an
+                    // exit record there, so the body's `finally` runs HERE, at the
+                    // break, in the same order both compiled halves run it - and a
+                    // second loop over a partially consumed generator answers nothing
+                    // in all three.
                     //
                     // A THROW through the body still does NOT close it, and this half
                     // could see that exit for free. It declines because the compiler
@@ -5811,6 +5839,12 @@ NotFuncHead = :script(~~
     // right; one with side effects repeats them, which is the honest price of not having
     // a stack to freeze. genRuns is the stack of active replays, innermost last, so a
     // generator driven from inside another generator still finds its own run.
+    //
+    // What it costs is REPETITION, not ORDER. The suspension signal is engine plumbing
+    // and jsExcTry keeps it out of the program's own try/catch/finally, and .return(v)
+    // replays to the parked yield and raises there (genClose) rather than setting a
+    // flag - so every finally clause fires at the moment node fires it, and a delegate
+    // of a `yield*` is closed first (jpYieldDeleg). docs/todo.md 1.10 and 2.6.
     var genRuns = []
 
     // The value of one 'yield': a replay of an already-produced yield answers with the
@@ -5857,10 +5891,110 @@ NotFuncHead = :script(~~
         if (run.k < run.target) {
             var sent = run.sent[run.k + 1]
             run.k = run.k + 1
+            // g.return() puts an EXIT RECORD on the resume channel of the yield the
+            // generator is parked at, and only that yield ever sees it - by
+            // construction, since it is the last one the replay re-runs. Raising here
+            // is what runs the body's `finally` clauses at the moment node runs them
+            // (genClose; the same shape languages/python-interpreter.abnf uses).
+            if (jpIsExitIn(sent)) { throw {__genExit: true} }
             return sent
         }
         run.k = run.k + 1
         throw {__genYield: true, v: v}
+    }
+    // Is this resume value the exit record genClose puts on the channel?
+    function jpIsExitIn(v) {
+        if (!jpIsObjV(v)) { return false }
+        return v["__genExitIn"] === true
+    }
+    // Is this in-flight host throw a generator SUSPENSION rather than a JavaScript
+    // exception? Only jsExcTry asks: the suspension unwinds the host stack the same way
+    // a throw does and must not be seen by the program's own try/catch/finally.
+    function jsIsGenSuspend(e) {
+        return e != undefined && e != null && e.__genYield == true
+    }
+    // interp-core's excTry, copied here for ONE difference, and copied rather than
+    // overridden because a same-name override is the include trap
+    // (docs/working-on-this-project.md 7.12): under goja the host hoists, under the
+    // frozen engine textual position decides, and the two would pick opposite winners.
+    //
+    // THE DIFFERENCE: a generator suspends by THROWING (doYieldRaw), and a host
+    // `finally` runs for any unwinding - so `yield` inside a try/finally used to run the
+    // program's `finally` at every suspension, which is not a repeated side effect but a
+    // WRONG ORDER: node runs it when the generator finishes or is closed, and this half
+    // printed it before the first next() had even returned. Both compiled halves, whose
+    // generators are real coroutines, had it right, so it was a live halves divergence.
+    // The suspension signal is engine plumbing and not a JavaScript exception, so it
+    // reaches genNext without touching the catch clause or the finally clause. An
+    // `await` is a yield in this half, so this is the same fix for an async body's
+    // try/finally. docs/todo.md 2.6.
+    //
+    // The exit record's raise (__genExit) is deliberately NOT let through: closing a
+    // generator MUST run the finally clauses wrapping its yield. It is not offered to
+    // `catch` either - excIsUser is false for it - which is what both compiled halves do
+    // with the floor's GEN_EXIT sentinel.
+    // items = [{trybody}, {catchbody,catchname}*, {finbody}?].
+    function jsExcTry(items) {
+        var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
+        var catchBind = anytype
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].trybody != undefined) { tryT = items[i].trybody }
+            else if (items[i].catchbody != undefined) {
+                if (catchT == undefined) {
+                    catchT = items[i].catchbody
+                    catchName = items[i].catchname
+                    if (hasOwn(items[i], "catchbind")) { catchBind = items[i].catchbind }
+                }
+            }
+            else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
+        }
+        return function() {
+            var savedChain = scopes.slice()
+            var box = {sig: undefined}
+            var suspended = false
+            try {
+                box.sig = tryT()
+            } catch (e) {
+                if (jsIsGenSuspend(e)) { suspended = true; throw e }
+                scopes = savedChain.slice()
+                if (excIsUser(e) && catchT != undefined) {
+                    scopes.push({})
+                    if (catchBind != undefined) { catchBind(e.v) }
+                    else if (catchName != undefined) { declVar(catchName, e.v) }
+                    box.sig = catchT()
+                    scopes.pop()
+                } else {
+                    throw e
+                }
+            } finally {
+                if (!suspended) {
+                    scopes = savedChain.slice()
+                    if (finallyT != undefined) {
+                        var fr = finallyT()
+                        // Returning from the host finally overrides the try/catch
+                        // completion AND cancels a rethrown exception, like in JS.
+                        if (fr != undefined) { return fr }
+                    }
+                }
+            }
+            return box.sig
+        }
+    }
+    // Hand ONE delegated element out. If the generator is CLOSED while parked here the
+    // exit record raises inside doYieldRaw, and node runs IteratorClose on the delegate
+    // at exactly that point - so its return() is called on the way out, before the
+    // signal reaches the yield*'s own enclosing finally clauses. The compiler halves
+    // emit the identical two steps as the FINALLY of a js_try around the same yield
+    // (js-to-llvm-ir.abnf's emitYieldStarClose). docs/todo.md 1.10.
+    function jpYieldDeleg(run, val, dv) {
+        var s = anytype
+        try {
+            s = doYieldRaw(run, val)
+        } catch (e) {
+            if (e != undefined && e != null && e.__genExit == true) { jpCloseDelegate(dv) }
+            throw e
+        }
+        return s
     }
     function doYield(star, v) {
         var run = genRuns[genRuns.length - 1]
@@ -5887,7 +6021,7 @@ NotFuncHead = :script(~~
                         // drives its next() WITH the sent value, which is how g.next(x)
                         // reaches a delegated generator at all.
                         var dsent = anytype
-                        dsent = doYieldRaw(run, dst.value)
+                        dsent = jpYieldDeleg(run, dst.value, v)
                         if (run.ag && jpIsThrowIn(dsent)) {
                             var dtf = anytype
                             dtf = getMember(v, "throw")
@@ -5906,7 +6040,7 @@ NotFuncHead = :script(~~
                 // throw-in closes it and raises the TypeError, exactly as above.
                 for (var i = 0; i < v.length; i++) {
                     var isent = anytype
-                    isent = doYieldRaw(run, v[i])
+                    isent = jpYieldDeleg(run, v[i], v)
                     if (run.ag && jpIsThrowIn(isent)) { jpNoThrowMethod(v) }
                 }
             }
@@ -6010,20 +6144,37 @@ NotFuncHead = :script(~~
             sendv = (arguments.length > 0) ? arguments[0] : undefined
             return genNext(st, params, bodyT, env, self, args, sendv)
         }
-        // g.return(v): abandon the generator. REPLAY cannot run the body's finally
-        // clauses here - it has already run them, once per next() - so this only
-        // sets the done flag, which is the part the compiler half agrees with:
-        // every later next() answers {undefined, true} and a second for-of over it
-        // iterates nothing. (runtime.c's gen_close / abnf/jsrt.go's closeBody do
-        // run them; that ordering difference is the replay limitation the
-        // :description states, not a new one.)
+        // g.return(v): abandon the generator, RUNNING the finally clauses that wrap its
+        // suspended yield, which is what runtime.c's gen_close and abnf/jsrt.go's
+        // closeBody do for the compiled halves. It is reachable in the replay model
+        // because a close needs no frozen stack: replay to the yield the generator is
+        // parked at and raise there instead of resuming (genClose). Every later next()
+        // still answers {undefined, true} and a second for-of over it iterates nothing.
         g["return"] = function() {
             var rv = anytype
             rv = (arguments.length > 0) ? arguments[0] : undefined
-            st.done = true
+            genClose(st, params, bodyT, env, self, args)
             return {value: rv, done: true, __keys: ["value", "done"]}
         }
         return g
+    }
+    // The close itself. A generator that has never been resumed has no suspension point
+    // and no body state, so it is only marked done - node's rule too. A body that yields
+    // THROUGH the exit is abandoned where it stands, which is the answer both compiled
+    // halves give (abnf/jsrt.go's closeBody says so in as many words); node's
+    // "generator.return: yielded" shape is not expressible in any of the three.
+    function genClose(st, params, bodyT, env, self, args) {
+        if (st.done) { return undefined }
+        if (st.count == 0) { st.done = true; return undefined }
+        try {
+            genNext(st, params, bodyT, env, self, args, {__genExitIn: true})
+        } catch (e) {
+            st.done = true
+            if (e != undefined && e != null && e.__genExit == true) { return undefined }
+            throw e
+        }
+        st.done = true
+        return undefined
     }
     // One step: replay the body up to yield number st.count, and report what happened.
     function genNext(st, params, bodyT, env, self, args, sendv) {
