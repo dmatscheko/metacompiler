@@ -8,9 +8,25 @@
 # does. Restore this text by hand after recording - everything below was paid for
 # and is not re-derivable from the numbers.
 #
-# recorded at commit 418ab6f, in a clean `git archive` tree, at 9 DRAWS per row.
+# recorded at commit b086d07, in a clean `git archive` tree, at 9 DRAWS per row.
+# (Header restored by hand afterwards, exactly as the NOTE above says to.)
 #
-# TWO ROWS MOVED AND NEITHER IS THIS ROUND'S CODE:
+# THE 2026-08-09 RE-RECORD, and the one row that needed settling. At 5 draws
+# csharp read +3.93% against a 2.59% spread and failed the gate. At 9 draws it
+# reads +1.98% - and the CLEAN BASE TREE of the same round reads +2.02% at 9
+# draws against the same old baseline. So the change is -0.04% against its own
+# parent and it was the BASELINE that had drifted ~2%, not the code. Two lessons,
+# both already in this file and both re-earned: measure the flagged row AT THE
+# PARENT before believing it, and 5 draws is not always enough to separate a row
+# from its own spread. Every other row was inside its spread at both draw counts.
+#
+# All eight rows here are the ten-item round b086d07..c4e1942 (csharp
+# constructors, swift `is`, kotlin index properties, generator .throw(), ruby
+# splat binding, python super(), go's five gaps). kotlin +2.09% against a 4.55%
+# spread is the largest single move and is inside it; mod.kt has no member access
+# at all, so none of kotlin's new code is on its path.
+#
+# THE PREVIOUS RE-RECORD (418ab6f) - TWO ROWS MOVED AND NEITHER WAS THAT ROUND'S CODE:
 #
 # python 31,669,186,373 -> 33,112,483,065, +4.56% against a 0.23% spread. This
 # looks damning and is NOT the layout lottery - 19x its own spread - but it also
@@ -66,11 +82,11 @@
 # the ones recorded at 418ab6f. go had no row at all until then, and docs/todo.md
 # 1.7 notes what that cost: `a, b := xs[i], ys[j]` did not parse in either half
 # and no bench program existed to meet it.
-c          11090135
-csharp     20880506206
-go         844097409
-java       8628032753
-kotlin     17943908475
-lua        1529985281
-python     33112483065
-ruby       5787997751
+c          11087591
+csharp     21293689255
+go         844921947
+java       8625680206
+kotlin     18318579476
+lua        1529985212
+python     33229483369
+ruby       5708270489
