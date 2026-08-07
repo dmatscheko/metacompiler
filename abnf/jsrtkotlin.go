@@ -1961,6 +1961,10 @@ func init() {
 		m["js_ktget"] = func(a []uint64) uint64 {
 			sc := rt.scopeOf(a[0])
 			name := rt.toString(u(a[1]))
+			// a[2] is the SYNTACTIC POSITION the emitter recorded - true for
+			// `name(...)`, false for a bare `name`. See ktRecvMember. Older callers
+			// (and the tracer) pass two arguments and mean a value read.
+			iscall := len(a) > 2 && rt.truthy(u(a[2]))
 			for s := sc; s != nil; s = s.parent {
 				if v, ok := s.get(name); ok {
 					// A LOCAL or top-level delegated property binds a box, not a
@@ -2029,7 +2033,7 @@ func init() {
 			// The twin is core.varMiss consulting findDispatch in the other half.
 			for s := sc; s != nil; s = s.parent {
 				if d, ok := s.get("__dispatch"); ok {
-					if v, hit := rt.ktRecvMember(d, name); hit {
+					if v, hit := rt.ktRecvMember(d, name, iscall); hit {
 						if rt.traced {
 							rt.trVar("read", name, v)
 						}
@@ -2039,7 +2043,7 @@ func init() {
 				}
 			}
 			for i := len(ktRecvStack) - 1; i >= 0; i-- {
-				if v, ok := rt.ktRecvMember(ktRecvStack[i], name); ok {
+				if v, ok := rt.ktRecvMember(ktRecvStack[i], name, iscall); ok {
 					if rt.traced {
 						rt.trVar("read", name, v)
 					}
@@ -2232,6 +2236,19 @@ func init() {
 						return w(arr.elems[0])
 					}
 				case "last":
+					if n > 0 {
+						return w(arr.elems[n-1])
+					}
+				// IntRange.start / IntRange.endInclusive - the ClosedRange members.
+				// Both answered kotlin.Unit in ALL THREE engines. On the materialized
+				// list they are the first and the last element, which for a plain
+				// `a..b` is the pair it was built from; a stepped progression has no
+				// such members in Kotlin, so no valid program sees the difference.
+				case "start":
+					if n > 0 {
+						return w(arr.elems[0])
+					}
+				case "endInclusive":
 					if n > 0 {
 						return w(arr.elems[n-1])
 					}
@@ -5067,9 +5084,19 @@ func ktProgNum(v interface{}) (float64, bool) {
 // `{ contains(1) }` aborted with "unknown name" in both halves alike - agreement
 // is not correctness, and only an oracle can see this class. Kotlin's `with` binds
 // any receiver and Set.size is Collection.size.
+//
+// A REGEX, a MATCHRESULT, a RESULT and a CHAR were missing, in all three engines,
+// so `with(Regex("a")) { pattern }`, an unqualified `find()`, `with(runCatching
+// { 7 }) { getOrNull() }` and `with('q') { isLetter() }` reached nothing anywhere -
+// todo.md 1.6's second bullet and the sweep around it. Each of the four has a real
+// method surface in js_ktsmcall and a real property surface in js_ktfget, which is
+// exactly what this predicate is asking about; the plain-object arm below reads own
+// properties only and binds no method at all, which is why they could not stay
+// there. The twins are k4IsBuiltinRecv (languages/lib/kotlin-rt.metajs) and
+// recvLookup's shape list (languages/kotlin-interpreter.abnf).
 func ktIsBuiltinRecv(v interface{}) bool {
 	switch t := v.(type) {
-	case *jsArray, string:
+	case *jsArray, string, jsChar:
 		return true
 	case *jsObject:
 		if _, isCls := t.props["__class"]; isCls {
@@ -5084,13 +5111,33 @@ func ktIsBuiltinRecv(v interface{}) bool {
 		if ktIsSet(t) {
 			return true
 		}
+		if ktRxIsRegex(t) || ktRxIsMatch(t) {
+			return true
+		}
+		if _, isRes := ktIsResult(t); isRes {
+			return true
+		}
 		return ktIsSb(t)
 	}
 	return false
 }
 
 // ktRecvMember answers an unqualified name against an implicit receiver.
-func (rt *jsrt) ktRecvMember(recv interface{}, name string) (interface{}, bool) {
+//
+// `iscall` is the SYNTACTIC POSITION of the name: true for `first()`, false for a
+// bare `first`. todo.md 1.6 concluded that `first`/`last` - a PROPERTY of
+// IntProgression and a member FUNCTION of List, over a range this project
+// materializes as a plain list - needed the receiver's ORIGIN carried on the value.
+// It needs the SITE instead: Kotlin has no unqualified name in value position that
+// means a bound method (that spelling is `::name`), so a builtin receiver's field
+// read is tried first in value position and not at all in call position. That
+// answers `with(1..7 step 2) { first }` as 1 and leaves `with(listOf(4, 5))
+// { first() }` binding the method, which assertion kr9 pins. Carrying the origin
+// was also not available: a jsArray holds no properties at all (setMember rejects
+// every non-numeric key but `length`) and the C floor's array is the same shape.
+// The twins are ktRecvMember in languages/lib/kotlin-rt.metajs and recvLookup in
+// languages/kotlin-interpreter.abnf.
+func (rt *jsrt) ktRecvMember(recv interface{}, name string, iscall bool) (interface{}, bool) {
 	// A USER-CLASS instance reached through with / run / apply. Its FIELDS are its own
 	// properties; its METHODS live on the descriptor chain and come back as a bound
 	// callable, so an unqualified `method()` inside the lambda dispatches on the
@@ -5140,7 +5187,7 @@ func (rt *jsrt) ktRecvMember(recv interface{}, name string) (interface{}, bool) 
 				// (kt_fprobe in kotlin-to-llvm-ir.abnf carries the same guard).
 				_, isClsLit := ktIsClassLit(o)
 				_, isPkg := ktIsPkg(o)
-				if ktRecvProp(name) && ktRefRead != nil && !isClsLit && !isPkg {
+				if (ktRecvProp(name) || !iscall) && ktRefRead != nil && !isClsLit && !isPkg {
 					if v := ktRefRead(recv, name); !isUndefOrNull(v) {
 						return v, true
 					}
@@ -5158,6 +5205,15 @@ func (rt *jsrt) ktRecvMember(recv interface{}, name string) (interface{}, bool) 
 	// side catching up rather than a new rule.
 	if ktRecvProp(name) && ktRefRead != nil {
 		return ktRefRead(recv, name), true
+	}
+	// VALUE POSITION on a builtin receiver: the field read is TRIED, and only a miss
+	// falls through to the bound method below - which is where every name that is not
+	// a property of this receiver still lands, so nothing that resolved stops
+	// resolving. This is the arm that answers `with(1..7 step 2) { first }`.
+	if !iscall && ktRefRead != nil {
+		if v := ktRefRead(recv, name); !isUndefOrNull(v) {
+			return v, true
+		}
 	}
 	self := recv
 	return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {

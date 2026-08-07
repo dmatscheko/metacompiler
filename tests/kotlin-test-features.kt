@@ -894,6 +894,19 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("recv-ext-size", listOf(1, 2, 3).midRecv == 2)
     check("recv-method-stays-method", with(listOf(4, 5, 6)) { first() } == 4)
     check("recv-plain-object", with(Pair(1, "x")) { first } == 1 && with(lazy { 42 }) { value } == 42)
+    // todo.md 1.6, the round after. `first` is a PROPERTY of IntProgression and a
+    // member FUNCTION of List, and a range materializes here as a plain list - so the
+    // NAME cannot decide, but the SITE can, and it is the site the resolution now
+    // carries. Section 77 of tests/kotlin-test-full.kt carries the sweep; these three
+    // are the ones worth having in the matrix.
+    val recvProg = listOf(1, 7, 2)[0]..listOf(1, 7, 2)[1] step listOf(1, 7, 2)[2]
+    check("recv-progression-prop", with(recvProg) { first } == 1 && with(recvProg) { last } == 7 &&
+        with(recvProg) { step } == 2 && with(recvProg) { first() } == 1)
+    val recvRe = Regex(listOf("a(b)c", "zabc")[0])
+    check("recv-regex", with(recvRe) { pattern } == "a(b)c" &&
+        with(recvRe) { find(listOf("a(b)c", "zabc")[1])?.value } == "abc")
+    check("recv-char-result", with('q') { code } == 113 && with('q') { isLetter() } &&
+        with(runCatching { 7 }) { getOrNull() } == 7)
 
     // ----- everything combined -----
     check("combined-pipeline", transform(listOf(1, 2, -3)) == "o1e2x")

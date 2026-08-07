@@ -4427,6 +4427,12 @@ NotMemberKw = :script(~~
             if (name == "replaceFirst") { return {v: rxReplace(target.prog, kstr2(args[0]), krxTemplate(kstr2(args[1])), false)} }
             if (name == "split") { return {v: krxSplit(target.prog, kstr2(args[0]), krxArgInt(args, 1, 0))} }
             if (name == "toString") { return {v: target.src} }
+            // let / run / apply / also / takeIf / takeUnless are extensions on ANY
+            // receiver, and mcall tries kScopeMethod only AFTER this dispatcher - so
+            // `re.run { pattern }` and `re.let { it.pattern }` aborted here with
+            // *unknown Regex method: run* while both compiled halves ran them (their
+            // js_ktsmcall reaches ktScopeMethod first). Declining is the whole fix.
+            if (kIsScopeFnName(name)) { return null }
             fail("unknown Regex method: " + name)
         }
         if (isKMatch(target)) {
@@ -4437,6 +4443,7 @@ NotMemberKw = :script(~~
                 return {v: nm == null ? null : krxMk(target.rx, target.rx.prog, target.text, nm)}
             }
             if (name == "toString") { return {v: rxGroup(target.prog, target.text, target.m, 0)} }
+            if (kIsScopeFnName(name)) { return null }
             fail("unknown MatchResult method: " + name)
         }
         return null
@@ -4716,9 +4723,12 @@ NotMemberKw = :script(~~
     // let / run / apply / also / takeIf / takeUnless: extensions on ANY receiver, so no
     // receiver branch owns them. A class MEMBER of the same name wins, exactly as it
     // does in Kotlin, which is what the lookupMethod probe is for.
+    function kIsScopeFnName(name) {
+        return name == "let" || name == "run" || name == "apply" || name == "also" ||
+               name == "takeIf" || name == "takeUnless"
+    }
     function kScopeMethod(target, name, rawArgs) {
-        if (name != "let" && name != "run" && name != "apply" && name != "also" &&
-            name != "takeIf" && name != "takeUnless") { return null }
+        if (!kIsScopeFnName(name)) { return null }
         // b.let(::println) - a callable reference is a lambda here too.
         var args = kNormArgs(rawArgs)
         if (args.length != 1 || typeof args[0] != "function") { return null }
@@ -9529,6 +9539,10 @@ NotMemberKw = :script(~~
             // js_ktfget in abnf/jsrtkotlin.go.
             if (name == "first" && o.length > 0) { return o[0] }
             if (name == "last" && o.length > 0) { return o[o.length - 1] }
+            // IntRange.start / IntRange.endInclusive, the ClosedRange members, for the
+            // same reason and answered kotlin.Unit in all three engines before.
+            if (name == "start" && o.length > 0) { return o[0] }
+            if (name == "endInclusive" && o.length > 0) { return o[o.length - 1] }
             if (name == "step" && kProgStep(o) !== undefined) { return kProgStep(o) }
             return extPropGet(o, name)
         }
@@ -9544,6 +9558,12 @@ NotMemberKw = :script(~~
             // +1 for every downTo. Both were wrong against the stdlib in this half and
             // unanswerable (kotlin.Unit) in the other; found sweeping todo.md 1.8.
             if (name == "last") { return o.ch ? kChar(rangeLastEl(o)) : rangeLastEl(o) }
+            // ClosedRange.start / ClosedRange.endInclusive are the BOUNDS the range was
+            // built from, not the last ELEMENT - the two coincide for every plain
+            // `a..b`, and a stepped progression declares neither in Kotlin. Answered
+            // kotlin.Unit in this half and in both compiled ones.
+            if (name == "start") { return o.ch ? kChar(o.from) : o.from }
+            if (name == "endInclusive") { return o.ch ? kChar(o.to) : o.to }
             if (name == "step") { return o.down ? -o.st : o.st }
             // `.size` on a progression is not Kotlin (IntRange is an Iterable, not a
             // Collection), but the compiler half MATERIALIZES a range as a list, where
@@ -9627,6 +9647,8 @@ NotMemberKw = :script(~~
         if (name == "lastIndex") { return true }
         if (name == "first") { return true }
         if (name == "last") { return true }
+        if (name == "start") { return true }
+        if (name == "endInclusive") { return true }
         return name == "step"
     }
     function kIdxExt(o, name) {
@@ -9794,6 +9816,13 @@ NotMemberKw = :script(~~
     }
     installThrowables()
 
+    // Set by makeCall around its callee resolution and cleared by core.varMiss - see
+    // both. A name the scope walk answers never reaches varMiss, so makeCall clears it
+    // too rather than leaving it for the next miss to read. Declared HERE, textually
+    // before both of its readers: the frozen host resolves a var by position where goja
+    // hoists (docs/working-on-this-project.md 7.12).
+    var kCallPos = false
+
     // f(args): a global function, a builtin, a class constructor, or an object with an
     // `operator fun invoke`.
     function makeCall(items) {
@@ -9807,7 +9836,18 @@ NotMemberKw = :script(~~
         var args = items.slice(start)
         return function() {
             var spec = kevalArgs(args)
+            // THE SYNTACTIC POSITION, and the whole of todo.md 1.6's first bullet in
+            // this half. `first` is a PROPERTY of IntProgression and a member FUNCTION
+            // of List, so the NAME cannot decide which read an unqualified `first`
+            // wants - but the SITE can, and `name(...)` is the only production that
+            // spells a name and means a call. kCallPos is a ONE-SHOT: core.varMiss
+            // clears it before it does anything that could re-enter (a getter body is
+            // ordinary user code and resolves names of its own), and it is cleared
+            // here too, because a name the SCOPE walk answers never reaches varMiss at
+            // all and the flag would otherwise survive into the next miss.
+            kCallPos = true
             var f = getVar(name)
+            kCallPos = false
             if (f != undefined && f !== null && f.__isclass) { return kNew(f, spec) }
             if (typeof f != "function") {
                 // A local holding a callable reference - `val g = b::twice; g()`.
@@ -9931,6 +9971,8 @@ NotMemberKw = :script(~~
     // METHOD (so `hidden()` works without `this.`), or a static of its class - a
     // companion member or, inside an enum, one of the enum's own entries (N -> S).
     core.varMiss = function(name) {
+        var iscall = kCallPos
+        kCallPos = false
         // Kotlin's implicit receivers form a STACK and lookup walks OUTWARD: a name the
         // innermost receiver does not answer falls through to the next one out. Only
         // findThis() - the innermost - used to be consulted, so `with(P(1)) { tag }`
@@ -9938,12 +9980,12 @@ NotMemberKw = :script(~~
         // name: tag" in BOTH halves instead of reading this@Q.tag.
         var chain = findThisChain()
         for (var ci = 0; ci < chain.length; ci++) {
-            var hc = recvLookup(chain[ci], name)
+            var hc = recvLookup(chain[ci], name, iscall)
             if (hc != null) { return hc }
         }
         // Inside a member extension the DISPATCH receiver is a second implicit
         // receiver: the declaring class's own members stay reachable unqualified.
-        var h = recvLookup(findDispatch(), name)
+        var h = recvLookup(findDispatch(), name, iscall)
         if (h != null) { return h }
         // A property registered as a top-level computed property.
         if (hasOwn(topProps, "$" + name)) { return {v: kGetField(topProps["$" + name], name)} }
@@ -9967,7 +10009,9 @@ NotMemberKw = :script(~~
     // for `name` as a field, a property with a getter, a METHOD (so an unqualified
     // member call works) or a static of its class - a companion member or, inside an
     // enum, one of the enum's own entries.
-    function recvLookup(start, name) {
+    // `iscall` is the syntactic position - see core.varMiss above and the twins
+    // ktRecvMember in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function recvLookup(start, name, iscall) {
         var cur = start
         while (cur != undefined && cur != null) {
             if (typeof cur != "object") {
@@ -9981,6 +10025,11 @@ NotMemberKw = :script(~~
                 // the same reasons.
                 if (typeof cur == "string") {
                     if (kRecvProps["$" + name] === true) { return {v: kGetField(cur, name)} }
+                    if (!iscall) {
+                        var sv = anytype
+                        sv = kGetField(cur, name)
+                        if (sv !== undefined) { return {v: sv} }
+                    }
                 }
                 return null
             }
@@ -10020,9 +10069,28 @@ NotMemberKw = :script(~~
             // `{ contains(1) }` aborted with "unknown name" everywhere - both halves
             // agreeing and both wrong, which byte-identity cannot see. Kotlin's `with`
             // binds any receiver, and Set.size is Collection.size.
+            // The RECEIVER SHAPES whose members come from the runtime rather than
+            // from a class descriptor. A RANGE, a REGEX, a MATCHRESULT, a RESULT and a
+            // CHAR were all missing, in this half and in both compiled ones, so
+            // `with(1..7 step 2) { first }`, `with(Regex("a")) { pattern }`, an
+            // unqualified `find()`, `with(runCatching { 7 }) { getOrNull() }` and
+            // `with('q') { isLetter() }` reached nothing anywhere - todo.md 1.6 and its
+            // neighbourhood. Every one of them has a real method surface in mcall and
+            // a real property surface in kGetField, which is what makes them belong
+            // here rather than in the plain-object arm below.
             if (cls == undefined && cur.__isclass == undefined &&
-                (Array.isArray(cur) || kIsMap(cur) || kIsSet(cur) || cur.__sb === true)) {
+                (Array.isArray(cur) || kIsMap(cur) || kIsSet(cur) || cur.__sb === true ||
+                 isRange(cur) || isKRegex(cur) || isKMatch(cur) || kIsResult(cur) ||
+                 kIsChar(cur))) {
                 if (kRecvProps["$" + name] === true) { return {v: kGetField(cur, name)} }
+                // VALUE POSITION: the field read is TRIED for any name, and only a miss
+                // falls through to the bound method below - so nothing that resolved
+                // stops resolving. `first`/`last`/`step` on a progression land here.
+                if (!iscall) {
+                    var bv = anytype
+                    bv = kGetField(cur, name)
+                    if (bv !== undefined) { return {v: bv} }
+                }
                 // A name the RUNTIME provides as a global is not a member of the
                 // receiver: `buildList { addAll(listOf(2, 3)) }` bound `listOf` as a
                 // method of the list under construction and aborted with "unknown list
@@ -10045,8 +10113,9 @@ NotMemberKw = :script(~~
             // compiler half answered 42. Nothing is bound as a METHOD: a plain object
             // has no builtin method table to dispatch into.
             if (cls == undefined && cur.__isclass == undefined &&
-                kRecvProps["$" + name] === true) {
-                var pv = kGetField(cur, name)
+                (kRecvProps["$" + name] === true || !iscall)) {
+                var pv = anytype
+                pv = kGetField(cur, name)
                 if (pv != undefined && pv != null) { return {v: pv} }
             }
             cur = hasOwn(cur, "__outer") ? cur.__outer : null

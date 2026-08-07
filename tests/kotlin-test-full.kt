@@ -3551,6 +3551,128 @@ fun sec76() {
     println()
 }
 
+
+// ===== SECTION 77: THE SYNTACTIC POSITION, and the two receiver shapes a NAME cannot decide =====
+// todo.md 1.6. The item named two defects and concluded that the first needed "the
+// receiver's ORIGIN carried on the value, not a bigger table". It needs neither. What
+// the NAME cannot decide, the SITE can:
+//
+//   `first` is `val IntProgression.first` (kotlin.ranges) and `fun <T> List<T>.first()`
+//   (kotlin.collections) - a property on one shape and a member function on the other -
+//   and this project MATERIALIZES a range as a plain list, so the two shapes arrive as
+//   the same value. But `first` and `first()` are DIFFERENT PRODUCTIONS, in all three
+//   engines, and Kotlin has no unqualified name in VALUE position that means a bound
+//   method: that spelling is `::first`. So the field read is tried first in value
+//   position and not at all in call position, and both shapes answer correctly at once.
+//   kr9 - `with(listOf(4, 5)) { first() }` must not call the number 4 - is the guard
+//   the previous round left for exactly this attempt, and rg7 restates it at the new
+//   gate.
+//
+// The flag travels as a third parameter of kt_ktgetp (kotlin-to-llvm-ir.abnf), a
+// second of js_ktglobal, a third of js_ktget, an argument of ktRecvMember in both
+// runtimes, and the one-shot kCallPos in kotlin-interpreter.abnf's makeCall. It has to
+// reach layer 2 because NATIVELY `with` binds no scope `this` at all - layer 2 cannot
+// make a scope - so js_ktglobal's walk of ktRecvStack is the only place the receiver
+// is ever seen there.
+//
+// CARRYING THE ORIGIN WAS ALSO NOT AVAILABLE: a floor array holds no properties.
+// jsrt.go's setMember rejects every non-numeric key but `length`, and the C floor's
+// array is the same shape - so marking the materialized progression would have meant
+// changing languages/lib/runtime.c, or a side registry keyed by array identity that
+// nothing frees.
+//
+// THE SECOND BULLET was a missing RECEIVER SHAPE rather than a missing rule: a Regex, a
+// MatchResult, a kotlin.Result and a Char were in no engine's builtin-receiver set, so
+// they took the plain-object arm, which reads own properties and binds no method at
+// all. `with(Regex("a")) { pattern }` and an unqualified `find()` reached nothing in all
+// three engines, consistently - and so did `with(runCatching { 7 }) { getOrNull() }` and
+// `with('q') { isLetter() }`, which the item did not name. Each of the four has a real
+// method surface in js_ktsmcall / mcall and a real property surface in js_ktfget /
+// kGetField, which is what the predicate is asking about.
+//
+// FOUND ON THE SWEEP AND FIXED HERE TOO:
+//   * `val IntRange.start` / `val IntRange.endInclusive` (the ClosedRange members)
+//     answered kotlin.Unit in ALL THREE engines - agreement, and all three wrong.
+//   * `re.run { ... }` and `re.let { ... }` aborted in the INTERPRETER with *unknown
+//     Regex method: run*, because mcall reaches krxMethod - which fails on an unknown
+//     name - before kScopeMethod, while both compiled halves ran them.
+//
+// FOUND AND NOT FIXED, deliberately:
+//   * an EMPTY range. `(5..1).first` is 5 and `.last` is 1 in Kotlin (they are the
+//     constructor arguments, and only `first()` throws), and the interpreter's real
+//     {__range} answers both - but the compiled halves materialize an EMPTY LIST, from
+//     which no bound is recoverable. A live halves divergence, unreachable without
+//     changing the materialized representation, and NOT asserted here because no single
+//     expected value can hold for both halves.
+//   * `with(Pair(1, "x")) { toString() }` and the same on a Map.Entry: unqualified
+//     toString on a receiver that is neither a class instance nor a builtin. Consistent
+//     across all three engines, so it is a gap and not a divergence.
+//   * `mr.range.toString()` and `mr.groups.toString()` render "[object Object]" in all
+//     three, where Kotlin says "1..3". That is the range MATERIALIZATION deviation
+//     (`(1..3).toString()` is "[1, 2, 3]" here), recorded at makeRange.
+//   * an EXTENSION PROPERTY that shadows one of the seven runtime index properties,
+//     read UNQUALIFIED against an implicit receiver. `val List<Int>.lastIndex get() =
+//     99` makes `with(xs) { lastIndex }` answer 99 in the interpreter (kIdxExt) and 2
+//     in both compiled halves - measured on d473319 and UNCHANGED by this round, so it
+//     is a pre-existing divergence and not one the new value-position read introduced.
+//     It cannot be closed in the emitter alone: natively `with` binds no scope `this`,
+//     the read is answered by layer 2's walk of ktRecvStack, and layer 2 cannot read
+//     the `extp$name` binding out of a scope - so an emitter-only probe would trade a
+//     halves divergence for a run-versus-native one.
+//
+// UNVERIFIED against kotlinc - there is none on this machine. The expected values are
+// read from the kotlin.ranges (IntProgression.first/last/step, ClosedRange.start/
+// endInclusive), kotlin.collections (first()/last()/sum()), kotlin.text (Regex.pattern/
+// options/find/matches/containsMatchIn/replace/split, MatchResult.value/groupValues/
+// next) and kotlin.Result API documentation, cross-read against the interpreter half,
+// which is this project's reference for Kotlin semantics.
+fun helper77() = 5
+fun sec77() {
+    // Every operand comes out of an array so the constant folder cannot answer any of
+    // this at compile time.
+    val bd = arrayOf(1, 7, 2, 10, 5, 3)
+    val prog = bd[0]..bd[1] step bd[2]
+    check("rg1", with(prog) { first } == 1 && with(prog) { last } == 7 && with(prog) { step } == 2)
+    // ... and the CALL form of the same three names, on the same receiver.
+    check("rg2", with(prog) { first() } == 1 && with(prog) { last() } == 7 && with(prog) { sum() } == 16)
+    val plain = bd[0]..bd[1]
+    check("rg3", with(plain) { first } == 1 && with(plain) { last } == 7 && with(plain) { step } == 1)
+    check("rg4", with(plain) { start } == 1 && with(plain) { endInclusive } == 7 &&
+                 plain.start == 1 && plain.endInclusive == 7)
+    // downTo carries the DIRECTION in the step, and `last` is the last ELEMENT (7),
+    // not the bound the progression was built from.
+    val down = bd[3] downTo bd[4] step bd[5]
+    check("rg5", with(down) { first } == 10 && with(down) { last } == 7 && with(down) { step } == -3)
+    val cs = arrayOf('a', 'e')
+    val chr = cs[0]..cs[1]
+    check("rg6", with(chr) { first } == 'a' && with(chr) { last } == 'e' && with(chr) { step } == 1)
+    // kr9's guard at the new gate: on a LIST first/last stay METHODS.
+    val xs = listOf(bd[0], bd[1], bd[2])
+    check("rg7", with(xs) { first() } == 1 && with(xs) { last() } == 2 && with(xs) { sum() } == 10)
+    check("rg8", with(xs) { size } == 3 && with(xs) { lastIndex } == 2 && !with(xs) { isEmpty() })
+    // A REGEX receiver: its property, then its methods, unqualified.
+    val pats = arrayOf("a(b)c", "zabcabc")
+    val re = Regex(pats[0])
+    check("rg9", with(re) { pattern } == "a(b)c" && with(re) { options.toString() } == "[]")
+    check("rg10", with(re) { find(pats[1])?.value } == "abc" && with(re) { split(pats[1]).size } == 3)
+    check("rg11", with(re) { containsMatchIn(pats[1]) } && !with(re) { matches(pats[1]) })
+    check("rg12", with(re) { replace(pats[1], "X") } == "zXX" && with(re) { toString() } == "a(b)c")
+    check("rg13", re.run { pattern } == "a(b)c" && re.let { it.pattern } == "a(b)c")
+    // A MATCHRESULT receiver.
+    val mr = re.find(pats[1])!!
+    check("rg14", with(mr) { value } == "abc" && with(mr) { groupValues.toString() } == "[abc, b]")
+    check("rg15", with(mr) { next()?.value } == "abc")
+    // A CHAR and a kotlin.Result receiver: a property and a method of each.
+    val ch = cs[0]
+    check("rg16", with(ch) { code } == 97 && with(ch) { isLetter() } && with(ch) { uppercaseChar() } == 'A')
+    val rs = runCatching { bd[1] }
+    check("rg17", with(rs) { isSuccess } && with(rs) { getOrNull() } == 7)
+    // A GLOBAL still wins over a receiver member it does not have, in call position, on
+    // every one of the new shapes - the receiver walk must not swallow ordinary names.
+    check("rg18", with(xs) { helper77() } == 5 && with(re) { helper77() } == 5 &&
+                  with(prog) { helper77() } == 5 && with(ch) { helper77() } == 5)
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3628,6 +3750,7 @@ fun main() {
     sec74() // SECTION-CALL 74
     sec75() // SECTION-CALL 75
     sec76() // SECTION-CALL 76
+    sec77() // SECTION-CALL 77
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

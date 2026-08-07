@@ -2684,8 +2684,30 @@ KwContract  = "contract" KwEnd ;
     // properties - and because it is the one an accessor pair (js_defprop on the
     // DESCRIPTOR, i.e. every `val c get() = ...` and every delegated property)
     // resolves through.
+    //
+    // THE THIRD PARAMETER IS THE SYNTACTIC POSITION, and it is what todo.md 1.6
+    // needed. `first` is a PROPERTY of IntProgression and a member FUNCTION of List
+    // (kotlin.ranges.IntProgression.first / kotlin.collections.first()), a range is
+    // MATERIALIZED as a plain list here, and the item concluded that the receiver's
+    // ORIGIN therefore had to be carried on the value. It does not: what the name
+    // alone cannot decide, the SITE can. `first` and `first()` are different
+    // productions in all three engines, and Kotlin has no form in which an
+    // unqualified name in VALUE position means a bound method - a method used as a
+    // value needs `::`. So a builtin receiver's field read is tried FIRST in value
+    // position and not at all in call position, `with(1..7 step 2) { first }`
+    // answers 1, and `with(listOf(4, 5)) { first() }` still binds the method (kr9).
+    // Carrying the origin was also not AVAILABLE: a floor array holds no properties
+    // (jsrt.go's setMember rejects every non-numeric key but `length`), and
+    // languages/lib/runtime.c is the one file that could change that.
+    // kt_ktget(env, name) stays the two-parameter spelling every other call site
+    // uses; it is a wrapper on kt_ktgetp(env, name, iscall) with iscall false.
     function rtKtGet() {
         return rtFunc("kt_ktget", 2, function(b, ps) {
+            b.NewRet(b.NewCall(rtKtGetP(), [ps[0], ps[1], hFalse]))
+        })
+    }
+    function rtKtGetP() {
+        return rtFunc("kt_ktgetp", 3, function(b, ps) {
             var localB = curF.NewBlock("")
             var thisB = curF.NewBlock("")
             var undefB = curF.NewBlock("")
@@ -2750,7 +2772,14 @@ KwContract  = "contract" KwEnd ;
             var rpB = curF.NewBlock("")
             bltB.NewCondBr(truthy(bltB, callExt(bltB, "js_seq",
                 [callExt(bltB, "js_typeof", [thV]), emitStr(bltB, "object")])), rpB, fgB)
-            rpB.NewCondBr(truthy(rpB, rpB.NewCall(rtRecvProp(), [ps[1]])), fgB, instB)
+            // kt_recvprop decides for a CALL - `first()` must stay a bound method.
+            // In VALUE position there is nothing to decide: Kotlin has no unqualified
+            // name that means a method, so the field read is simply tried, and a MISS
+            // falls to exactly the block instB would have fallen to (dispB). That one
+            // extra arm is the whole of todo.md 1.6's first bullet.
+            var rp2B = curF.NewBlock("")
+            rpB.NewCondBr(truthy(rpB, rpB.NewCall(rtRecvProp(), [ps[1]])), fgB, rp2B)
+            rp2B.NewCondBr(truthy(rp2B, ps[2]), instB, fgB)
             var mV = instB.NewCall(rtSafeGet(), [thV, ps[1]])
             var hitB = curF.NewBlock("")
             var p2B = curF.NewBlock("")
@@ -2839,10 +2868,15 @@ KwContract  = "contract" KwEnd ;
             // ratchet stays at 979 with the probe in place.
             var gB = curF.NewBlock("")
             var lastB = curF.NewBlock("")
-            var gV = callExt(missB, "js_ktglobal", [ps[1]])
+            // BOTH externs carry the syntactic position too. Natively `with` binds no
+            // scope `this` at all (layer 2 cannot make a scope), so the probes above
+            // all miss and js_ktglobal's walk of ktRecvStack is the ONLY place the
+            // receiver is seen - which is why the flag has to travel this far or the
+            // fix would hold under llvm.Run and not in the native binary.
+            var gV = callExt(missB, "js_ktglobal", [ps[1], ps[2]])
             missB.NewCondBr(truthy(missB, callExt(missB, "js_sne", [gV, hUndef])), gB, lastB)
             gB.NewRet(gV)
-            lastB.NewRet(callExt(lastB, "js_ktget", [ps[0], ps[1]]))
+            lastB.NewRet(callExt(lastB, "js_ktget", [ps[0], ps[1], ps[2]]))
         })
     }
     // kt_clsfind(cls, name) is jsrtkotlin.go's ktClsFind: the member of that name on a
@@ -5248,7 +5282,7 @@ KwContract  = "contract" KwEnd ;
             // no emitter can count its arguments either.
             if (ktNativeBuild && args.length == 0 && (name == "println" || name == "print")
                 && classNames[name] == undefined && funNames["$" + name] != true) {
-                var pfV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, name)])
+                var pfV = b.NewCall(rtKtGetP(), [curScopeV, emitStr(b, name), hTrue])
                 var pfA = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [pfA, emitStr(b, "")])
                 return {b: b, v: callExt(b, "js_call", [pfV, hUndef, pfA])}
@@ -5335,7 +5369,13 @@ KwContract  = "contract" KwEnd ;
                 callExt(b, "js_call", [ctorV, hUndef, argsV])
                 return {b: b, v: objV}
             }
-            var fV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, name)])
+            // THE ONE CALL-POSITION RESOLUTION. `name(...)` is the only production
+            // that spells a name and means a CALL, so it is the only site that passes
+            // true - every other rtKtGet in this grammar is a value read (or a
+            // synthetic ext$/extp$/this name that never reaches a receiver at all).
+            // See rtKtGetP's header for why the position, and not the receiver's
+            // origin, is what todo.md 1.6 needed.
+            var fV = b.NewCall(rtKtGetP(), [curScopeV, emitStr(b, name), hTrue])
             var ea = emitArgs(b, orderArgs(args, funParams["$" + name]))
             b = ea.b
             // `v(args)` where v holds an instance of a class declaring the invoke
@@ -8048,7 +8088,7 @@ KwContract  = "contract" KwEnd ;
                           "Job", "CoroutineScope", "awaitAll", "Dispatchers"]
         for (var kb = 0; kb < ktBuilders.length; kb++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ktBuilders[kb]),
-                                         callExt(b, "js_ktglobal", [emitStr(b, ktBuilders[kb])])])
+                                         callExt(b, "js_ktglobal", [emitStr(b, ktBuilders[kb]), hFalse])])
         }
         // kotlin.math's abs/max/min, and exitProcess from exit. NOT JavaScript's Math:
         // that one answers a plain number, so `max(1.5, 2.0)` printed `2` here and
@@ -8056,7 +8096,7 @@ KwContract  = "contract" KwEnd ;
         var ktMath = ["abs", "max", "min"]
         for (var km = 0; km < ktMath.length; km++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ktMath[km]),
-                                         callExt(b, "js_ktglobal", [emitStr(b, ktMath[km])])])
+                                         callExt(b, "js_ktglobal", [emitStr(b, ktMath[km]), hFalse])])
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "exitProcess"),
                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])

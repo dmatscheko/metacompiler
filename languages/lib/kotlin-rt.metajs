@@ -5376,7 +5376,7 @@ function ktRefApply(info, args) {
 // that function.
 function ktRefRead(recv, name) {
     var v = anytype
-    v = ktRecvMember(recv, name)
+    v = ktRecvMember(recv, name, false)
     if (ktMiss(v)) { return undefined }
     return v
 }
@@ -6120,6 +6120,13 @@ function k4RecvProp(name) {
 function k4IsBuiltinRecv(v) {
     if (typeof v == "string") { return true }
     if (ktIsArr(v)) { return true }
+    // A REGEX, a MATCHRESULT, a RESULT and a CHAR were missing in all three engines -
+    // todo.md 1.6's second bullet and the sweep around it. Each has a real method
+    // surface in ktSmcall and a real property surface in js_ktfget, which is what
+    // this predicate asks about; the plain-object arm of ktRecvMember reads own
+    // properties only and binds no method, so they could not stay there. A Char is a
+    // box object, so it is tested before the ktIsObj gate says nothing about it.
+    if (ktIsChar(v)) { return true }
     if (!ktIsObj(v)) { return false }
     if (v["__class"] !== undefined) { return false }
     if (v["__isclass"] !== undefined) { return false }
@@ -6127,6 +6134,9 @@ function k4IsBuiltinRecv(v) {
     // A SET was missing here and in the Go twin, so `with(setOf(1, 2)) { size }`
     // aborted with "unknown name" in both halves alike.
     if (ktIsSet(v)) { return true }
+    if (ktRxIsRegex(v)) { return true }
+    if (ktRxIsMatch(v)) { return true }
+    if (ktIsResult(v)) { return true }
     return ktIsSb(v)
 }
 
@@ -6148,7 +6158,15 @@ function k4Bound(recv, name) {
 
 // ktRecvMember (jsrtkotlin.go:4845) answers an unqualified name against an
 // implicit receiver, and KT_MISS when it owns none.
-function ktRecvMember(recv, name) {
+// `iscall` is the SYNTACTIC POSITION of the name: true for `first()`, false for a
+// bare `first`. todo.md 1.6 asked for the receiver's ORIGIN to be carried on the
+// value, because `first` is a PROPERTY of IntProgression and a member FUNCTION of
+// List and a range materializes here as a plain list. The SITE decides it instead -
+// Kotlin has no unqualified name in value position that means a bound method, that
+// spelling is `::name` - and the origin was not carryable anyway: a floor array
+// holds no properties. Keep in step with jsrtkotlin.go's ktRecvMember and
+// recvLookup in languages/kotlin-interpreter.abnf.
+function ktRecvMember(recv, name, iscall) {
     // A USER-CLASS instance reached through with / run / apply. Its FIELDS are its
     // own properties; its METHODS live on the descriptor chain and come back as a
     // bound callable, so an unqualified `method()` inside the lambda dispatches on
@@ -6190,7 +6208,7 @@ function ktRecvMember(recv, name) {
             if (k4Own(recv, name)) { return recv[name] }
             // The two receiver shapes js_ktfget ABORTS on rather than missing
             // (kt_fprobe in kotlin-to-llvm-ir.abnf carries the same guard).
-            if (k4RecvProp(name) && !ktIsClassLit(recv) && !ktIsPkg(recv)) {
+            if ((k4RecvProp(name) || !iscall) && !ktIsClassLit(recv) && !ktIsPkg(recv)) {
                 var pv = js_ktfget(recv, name)
                 if (!k4Nullish(pv)) { return pv }
             }
@@ -6203,6 +6221,14 @@ function ktRecvMember(recv, name) {
     // `size` method, while `with(list) { lastIndex }` died with "unknown list method
     // 'lastIndex'". kRecvProps in kotlin-interpreter.abnf has always read kGetField.
     if (k4RecvProp(name)) { return js_ktfget(recv, name) }
+    // VALUE POSITION on a builtin receiver: the field read is TRIED, and only a miss
+    // falls through to the bound method - so nothing that resolved stops resolving.
+    // This is the arm that answers `with(1..7 step 2) { first }`.
+    if (!iscall) {
+        var fv = anytype
+        fv = js_ktfget(recv, name)
+        if (!k4Nullish(fv)) { return fv }
+    }
     return k4Bound(recv, name)
 }
 
@@ -7580,6 +7606,18 @@ function js_ktfget(o, name) {
         if (name == "last") {
             if (o["length"] > 0) { return o[o["length"] - 1] }
         }
+        // IntRange.start / IntRange.endInclusive (kotlin.ranges, the ClosedRange
+        // members). Both answered kotlin.Unit in ALL THREE engines - agreement, and
+        // all three wrong. On the materialized list they are the first and the last
+        // element, which for a plain `a..b` IS the pair the range was built from; a
+        // STEPPED progression has no such members in Kotlin, so no valid program can
+        // see the difference.
+        if (name == "start") {
+            if (o["length"] > 0) { return o[0] }
+        }
+        if (name == "endInclusive") {
+            if (o["length"] > 0) { return o[o["length"] - 1] }
+        }
         if (name == "step") {
             var stv = anytype
             stv = k4ProgStep(o)
@@ -7644,7 +7682,7 @@ function js_ktindex(o, k) {
 // `mutableListOf(1, 2).apply { add(3) }` work at all. The receiver stack is
 // consulted FIRST because that is js_ktget's order: an unqualified name the
 // innermost receiver answers is that receiver's, not the stdlib's.
-function js_ktglobal(name) {
+function js_ktglobal(name, iscall) {
     // `this` inside with / run / apply. The Go twin's ktWithRecv binds it in a
     // fresh SCOPE, which layer 2 cannot make, so the receiver stack is where it
     // lives here and an unqualified `this` has to read it off the top.
@@ -7654,7 +7692,7 @@ function js_ktglobal(name) {
     }
     var i = ktRecvStack.length - 1
     while (i >= 0) {
-        var v = ktRecvMember(ktRecvStack[i], name)
+        var v = ktRecvMember(ktRecvStack[i], name, iscall)
         if (!ktMiss(v)) { return v }
         i = i - 1
     }
@@ -8392,7 +8430,7 @@ function k6NoScope(name) {
          "- see the KOTLIN section of docs/runtime-next-plan.md part 3.")
 }
 
-function js_ktget(env, name) { k6NoScope("js_ktget(" + name + ")") }
+function js_ktget(env, name, iscall) { k6NoScope("js_ktget(" + name + ")") }
 // The WRITE twin of the js_ktglobal arm above. By the time the emitted kt_kset /
 // kt_varset helpers give up, the name is neither a local nor a property of the
 // innermost `this` nor of the innermost `__dispatch`, and the Go twin's remaining
