@@ -2323,6 +2323,206 @@ func s38() {
 	check("sl9", len(ns38[:]) == 0 && cap(ns38[:]) == 0)
 }
 
+// ===== SECTION 39: the error interface, deep promotion, interface{}() and nil asserts =====
+// The six residues of docs/todo.md 1.3. Every expected value was read off
+// `go run` before it was written down, and FIVE OF THE SIX WERE THE SAME SHAPE:
+// all three engines agreed and all three were wrong, which is the one class
+// ./test.sh --cross cannot see by construction.
+//
+// WHAT EACH GROUP PINS:
+//   - fmt CONSULTS Error() BEFORE String(), which is fmt's own handleMethods
+//     order. Error() was not consulted at all, so a value with `Error() string`
+//     printed the memberwise `{missing b}` where go prints `missing b`. The
+//     Stringer rows beside it pin that adding error did not displace String(),
+//     and the both-methods row pins the PRECEDENCE rather than just presence.
+//   - FIELD PROMOTION IS BREADTH FIRST and more than one level deep. Only the
+//     directly embedded structs were searched, so a two-level `C{B{A{7}}}`
+//     answered <nil> for c.v; the shadowing row pins that a shallower field
+//     still wins over a deeper one of the same name.
+//   - interface{}(x) AS A CONVERSION EXPRESSION. `var x interface{} = v` always
+//     worked; the conversion aborted - the interpreter with `unknown name:
+//     interface`, the compiler with `composite literal not implemented`. The
+//     float and uint8 rows pin that it is the IDENTITY: routing it through the
+//     ordinary conversion path truncated a float64 and dropped a sized box.
+//   - A COMPOSITE LITERAL OF A DEFINED MAP TYPE. `type M map[string]int; M{...}`
+//     ran in the interpreter and was `composite literal not implemented` in the
+//     compiler, because a keyed element's key had to be an identifier and a
+//     string key did not parse. The struct rows are what pin that giving the key
+//     an expression form did not break `P{X: 1}`, whose key is a FIELD NAME and
+//     not a variable.
+//   - AN ELIDED ELEMENT OF POINTER TYPE. `[]*P{nil, {7}}` was `unknown name: *P`
+//     / `composite literal element of unsupported type *P`; a pointer to a struct
+//     IS the struct in this value model, so the star is dropped.
+//   - A NIL INTERFACE ASSERTED TO AN INTERFACE PANICS, and with a different text
+//     from the missing-method one - it names no method, because there is no
+//     dynamic type to name. The comma-ok row pins that the two-result form still
+//     answers false instead of panicking.
+type E39 struct{ msg string }
+
+func (e E39) Error() string { return e.msg }
+
+type S39 struct{ n int }
+
+func (s S39) String() string { return "S<" + fmt.Sprint(s.n) + ">" }
+
+type ES39 struct{ n int }
+
+func (e ES39) Error() string  { return "E" }
+func (e ES39) String() string { return "S" }
+
+type A39 struct{ v int }
+type B39 struct{ A39 }
+type C39 struct{ B39 }
+type Sh39 struct {
+	B39
+	v int
+}
+
+type Exp39 struct{ Err error }
+type Unexp39 struct{ err error }
+type ExpS39 struct{ V S39 }
+type UnexpS39 struct{ v S39 }
+type Deep39 struct{ inner Exp39 }
+
+type M39 map[string]int
+type MS39 map[string][]int
+type P39 struct{ n int }
+type Pt39 struct{ X, Y int }
+type I39 interface{ M() int }
+type D39 struct{ k int }
+
+func (d D39) M() int { return d.k }
+
+func f39assert(v interface{}) (s string) {
+	defer func() {
+		if e := recover(); e != nil {
+			s = "PANIC"
+		}
+	}()
+	_ = v.(I39)
+	return "ok"
+}
+
+func s39() {
+	// -- fmt honours the error interface, and it wins over Stringer.
+	msgs := []string{"missing b", "boom"}
+	var err error = E39{msgs[0]}
+	check("er1", fmt.Sprint(err) == "missing b")
+	check("er2", fmt.Sprint(E39{msgs[1]}) == "boom")
+	check("er3", fmt.Sprint("x", err, "y") == "xmissing by")
+	check("er4", fmt.Sprint(S39{3}) == "S<3>")
+	check("er5", fmt.Sprint(ES39{1}) == "E")
+	check("er6", fmt.Sprint([]error{E39{msgs[0]}}) == "[missing b]")
+	// AN UNEXPORTED FIELD IS NOT INTERFACEABLE, so fmt cannot reach its Error()
+	// or String() - and transitively so for everything under it. This was already
+	// wrong for Stringer before Error() was added, in all three engines.
+	check("er7", fmt.Sprint(Exp39{E39{msgs[0]}}) == "{missing b}")
+	check("er8", fmt.Sprint(Unexp39{E39{msgs[0]}}) == "{{missing b}}")
+	check("er9", fmt.Sprint(ExpS39{S39{3}}) == "{S<3>}")
+	check("er10", fmt.Sprint(UnexpS39{S39{3}}) == "{{3}}")
+	check("er11", fmt.Sprint(Deep39{Exp39{E39{msgs[0]}}}) == "{{{missing b}}}")
+	check("er12", fmt.Sprint(map[string]error{"k": E39{msgs[0]}}) == "map[k:missing b]")
+
+	// -- promoted fields, two levels down and breadth first.
+	ns := []int{7}
+	c := C39{B39{A39{ns[0]}}}
+	check("pf1", c.v == 7)
+	check("pf2", c.B39.A39.v == 7)
+	sh := Sh39{B39{A39{1}}, 2}
+	check("pf3", sh.v == 2)
+	check("pf4", sh.B39.v == 1)
+
+	// -- interface{}(x) as a conversion EXPRESSION is the identity.
+	iv := interface{}(ns[0])
+	check("ic1", iv == 7)
+	fs := []float64{2.5}
+	check("ic2", fmt.Sprint(interface{}(fs[0])) == "2.5")
+	bs := []uint8{200}
+	check("ic3", fmt.Sprint(interface{}(bs[0])) == "200")
+	check("ic4", fmt.Sprint((interface{})(ns[0])) == "7")
+
+	// -- a composite literal of a DEFINED map type, keyed by an expression.
+	k := "b"
+	m := M39{"a": ns[0], k: 9}
+	check("dm1", m["a"] == 7)
+	check("dm2", m["b"] == 9)
+	check("dm3", len(m) == 2)
+	check("dm4", m["zz"] == 0)
+	check("dm5", len(M39{}) == 0)
+	ms := MS39{"a": {1, 2}}
+	check("dm6", ms["a"][1] == 2)
+	// The keyed STRUCT literal, whose key is a field name and not a variable.
+	p := Pt39{Y: 4, X: ns[0]}
+	check("dm7", p.X == 7 && p.Y == 4)
+	check("dm8", fmt.Sprint(Pt39{1, 2}) == "{1 2}")
+
+	// -- an elided element of POINTER type.
+	ps := []*P39{nil, {ns[0]}}
+	check("ep1", ps[0] == nil)
+	check("ep2", ps[1].n == 7)
+	qs := []P39{{ns[0]}, {2}}
+	check("ep3", qs[0].n == 7 && qs[1].n == 2)
+
+	// -- x.(I) on a NIL interface panics; the comma-ok form does not.
+	vals := []interface{}{nil, D39{ns[0]}}
+	check("na1", f39assert(vals[0]) == "PANIC")
+	check("na2", f39assert(vals[1]) == "ok")
+	_, ok0 := vals[0].(I39)
+	_, ok1 := vals[1].(I39)
+	check("na3", !ok0)
+	check("na4", ok1)
+}
+
+// ===== SECTION 40: a named constant as an array length, and multi-name const specs =====
+// Two residues of docs/todo.md 2.7, both of which all three engines got wrong
+// together.
+//   - `const size = 4; var a [size]int` was an EMPTY array in every engine, because
+//     every reader of a type text understands digits only - so len(a) was 0 where go
+//     says 4 and a[2] was an out-of-range panic. The literal-length rows beside it
+//     pin that nothing about `[4]int` changed, and the map row pins that `[string]`
+//     of a map type is not read as a length at all.
+//   - `const a, b = 0.1, 0.2` did not PARSE in the compiler half - its ungrouped
+//     const rule took one name and one expression where the grouped one and the
+//     interpreter half both took lists.
+const sz40 = 4
+const szt40 int = 3
+
+const c40a, c40b = 0.1, 0.2
+const c40c, c40d int = 6, 7
+
+type Board40 struct{ cells [sz40]int }
+
+func s40() {
+	var a [sz40]int
+	a[2] = 9
+	check("al1", len(a) == 4)
+	check("al2", a[2] == 9 && a[0] == 0)
+	var b [szt40]int
+	check("al3", len(b) == 3)
+	var lit [4]int
+	check("al4", len(lit) == 4)
+	const local = 2
+	var d [local]string
+	check("al5", len(d) == 2)
+	e := [sz40]int{1, 2}
+	check("al6", len(e) == 4 && e[3] == 0)
+	var bd Board40
+	check("al7", len(bd.cells) == 4)
+	mm := map[string]int{"k": 1}
+	check("al8", mm["k"] == 1)
+	var nested [sz40][2]int
+	check("al9", len(nested) == 4 && len(nested[0]) == 2)
+	var sl []int
+	check("al10", len(sl) == 0)
+
+	check("cm1", c40a == 0.1 && c40b == 0.2)
+	check("cm2", c40c == 6 && c40d == 7)
+	const p40, q40 = "x", 2
+	check("cm3", p40 == "x" && q40 == 2)
+	xs := []float64{10}
+	check("cm4", c40a*xs[0] == 1)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -2362,6 +2562,8 @@ func main() {
 	s36() // SECTION-CALL 36
 	s37() // SECTION-CALL 37
 	s38() // SECTION-CALL 38
+	s39() // SECTION-CALL 39
+	s40() // SECTION-CALL 40
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

@@ -388,8 +388,14 @@ function goCopyVal(v) {
 
 function gopStr(v) { return gopRender(v, 0) }
 
+// A depth at or above 64 means "this subtree came through an UNEXPORTED FIELD":
+// fmt cannot call Error() or String() there, because reflect's CanInterface is
+// false for it and transitively below it. It rides on the depth because the method
+// arms are already gated on `depth < 32`, so only the recursion cap has to know.
 function gopRender(v, depth) {
-    if (depth > 32) { return "..." }
+    var d = depth
+    if (d >= 64) { d = d - 64 }
+    if (d > 32) { return "..." }
     if (v === undefined || v === null) { return "<nil>" }
     if (typeof v == "string") { return v }
     if (v === true) { return "true" }
@@ -431,14 +437,29 @@ function gopNumStr(n) {
     return floStr(flo(n, 1))
 }
 
+// Go's visibility rule: an identifier is exported exactly when it starts with an
+// upper-case letter. The twins are isExported in both grammars and goNameExported
+// in abnf/jsrtgolang.go.
+function goNameExported(name) {
+    if (name.length == 0) { return false }
+    var c0 = name.charCodeAt(0)
+    return c0 >= 65 && c0 <= 90
+}
+
 // gopObj renders the object shapes the Go grammars build. It answers undefined
 // for a shape it does not know, which falls back to the generic ToString.
 function gopObj(o, depth) {
     var cls = goClassOf(o)
 
-    // fmt.Stringer wins over every built-in rendering, exactly as it does in Go.
-    // Guarded by depth so a String() that prints its own receiver terminates.
+    // THE error INTERFACE WINS OVER fmt.Stringer, which wins over every built-in
+    // rendering - exactly the order fmt's handleMethods uses. Error() was not
+    // consulted at all, so a value with `Error() string` printed `{missing b}` where
+    // go prints `missing b`, in all three engines. docs/todo.md 1.3.
     if (cls !== undefined && depth < 32) {
+        if (goHas(cls, "Error")) {
+            var emth = cls.Error
+            if (goIsFn(emth)) { return gopRender(emth(o), depth + 1) }
+        }
         if (goHas(cls, "String")) {
             var mth = cls.String
             if (goIsFn(mth)) { return gopRender(mth(o), depth + 1) }
@@ -526,7 +547,13 @@ function gopObj(o, depth) {
         while (fi < flds.length) {
             if (fi > 0) { fo = fo + " " }
             var fn = goStrOf(flds[fi])
-            fo = fo + gopRender(goProp(o, fn), depth + 1)
+            // AN UNEXPORTED FIELD IS NOT INTERFACEABLE, so fmt never reaches its
+            // Error() or String(): reflect's CanInterface is false for anything read
+            // through a lower-case field, transitively. Raising the depth to the
+            // method guard's own limit says exactly that. docs/todo.md 1.3.
+            var fd = depth + 1
+            if (fd < 64 && !goNameExported(fn)) { fd = fd + 64 }
+            fo = fo + gopRender(goProp(o, fn), fd)
             fi = fi + 1
         }
         return fo + "}"
@@ -1650,20 +1677,8 @@ function js_gofield(o, kv) {
     var key = goStrOf(kv)
     if (goIsObj(o)) {
         if (goHas(o, key)) { return o[key] }
-        var cls = goClassOf(o)
-        if (cls !== undefined) {
-            var fs = cls.__fields
-            if (Array.isArray(fs)) {
-                var i = 0
-                while (i < fs.length) {
-                    var inner = o[goStrOf(fs[i])]
-                    if (goIsObj(inner) && inner.__class !== undefined) {
-                        if (goHas(inner, key)) { return inner[key] }
-                    }
-                    i = i + 1
-                }
-            }
-        }
+        var pf = goPromField(o, key, 16)
+        if (pf !== undefined) { return pf.v }
         // A METHOD VALUE: the receiver is bound now (and a value receiver is
         // COPIED now), so later writes to the variable do not reach it.
         var mv = goMethod(o, key)
@@ -1674,6 +1689,67 @@ function js_gofield(o, kv) {
         if (o.__isclass === true && goHas(o, key)) { return o[key] }
     }
     return goGetMember(o, key)
+}
+
+// The field `name` PROMOTED from an embedded struct of o, searched BREADTH FIRST,
+// which is Go's own rule: the shallowest depth wins. Only ONE level was searched, in
+// all three engines, so a two-level promotion (`type B struct{A}; type C struct{B}`)
+// answered <nil> where go answers the field. The depth cap matches the __class walks
+// (manual 7.9): a pointer cycle here would otherwise not terminate. Answers undefined
+// when nothing is found. docs/todo.md 1.3.
+function goPromField(o, key, maxd) {
+    // LEVEL ONE WITHOUT ALLOCATING, which is what the one-level loop this replaced
+    // did: js_gofield reaches here on every miss of an own property (a method value,
+    // a builtin), so the common answer must cost no array and no frontier. The
+    // breadth-first walk below only starts when there IS an embedded struct and the
+    // first level did not have the name.
+    var cls1 = goClassOf(o)
+    if (cls1 === undefined) { return undefined }
+    var fs1 = cls1.__fields
+    if (!Array.isArray(fs1)) { return undefined }
+    var hasEmb = false
+    var i1 = 0
+    while (i1 < fs1.length) {
+        var in1 = o[goStrOf(fs1[i1])]
+        i1 = i1 + 1
+        if (!goIsObj(in1)) { continue }
+        if (in1.__class === undefined) { continue }
+        if (goHas(in1, key)) { return {v: in1[key]} }
+        hasEmb = true
+    }
+    if (!hasEmb) { return undefined }
+    return goPromDeep(o, key, maxd)
+}
+
+// The breadth-first part of goPromField, from level two down. Split out so the
+// common case above allocates nothing.
+function goPromDeep(o, key, maxd) {
+    var level = [o]
+    var d = 0
+    while (d < maxd && level.length > 0) {
+        var next = []
+        var i = 0
+        while (i < level.length) {
+            var cur = level[i]
+            i = i + 1
+            var cls = goClassOf(cur)
+            if (cls === undefined) { continue }
+            var fs = cls.__fields
+            if (!Array.isArray(fs)) { continue }
+            var k = 0
+            while (k < fs.length) {
+                var inner = cur[goStrOf(fs[k])]
+                k = k + 1
+                if (!goIsObj(inner)) { continue }
+                if (inner.__class === undefined) { continue }
+                if (goHas(inner, key)) { return {v: inner[key]} }
+                next.push(inner)
+            }
+        }
+        level = next
+        d = d + 1
+    }
+    return undefined
 }
 
 // rt.goMethod: the method named `name` on v's descriptor, with Go's receiver
@@ -1892,6 +1968,13 @@ function js_goifis(v, csv) {
 // Go's own text is `interface conversion: main.Dog is not main.Sp: missing method
 // Fly`; there is no package concept in this value model, so the names are bare.
 function js_goifas(v, namev, csv) {
+    // A NIL INTERFACE ASSERTED TO ANYTHING PANICS, and with a DIFFERENT text: go says
+    // `interface conversion: interface is nil, not main.I`, naming no method because
+    // there is no dynamic type. goMissingMethod answers "" for a non-instance, so nil
+    // used to pass straight through in all three engines. docs/todo.md 1.3.
+    if (v === undefined || v === null) {
+        goRTPanic("interface conversion: interface is nil, not " + goStrOf(namev))
+    }
     var miss = goMissingMethod(v, csv)
     if (miss == "") { return v }
     goRTPanic("interface conversion: " + goTypeNameOf(v) + " is not " + goStrOf(namev) + ": missing method " + miss)

@@ -17,6 +17,13 @@ import (
 
 var fails = 0
 
+// The same three names mathbox declares, on purpose: see the 2.7 checks in main().
+const Scale = 1
+
+var Base = 1
+
+func helper() int { return 999 }
+
 func check(name string, got int, want int) {
 	if got != want {
 		fmt.Println("FAIL", name, "got", got, "want", want)
@@ -42,6 +49,19 @@ func main() {
 	// An exported struct built by a constructor, its method called across files.
 	v := mathbox.NewVec(3, 4)
 	check("imported struct method", v.Len2(), 25)
+
+	// docs/todo.md 2.7: THE PACKAGE HAS ITS OWN GLOBAL NAMESPACE. Scale, Base and
+	// helper are declared BOTH here and in mathbox, so mathbox.Total() answers 117
+	// only if the package resolves its own names; with one shared namespace it read
+	// this file's and answered 1 + 1 + 999.
+	check("package globals are not shared", mathbox.Total(), 117)
+	check("main file keeps its own", Scale+Base+helper(), 1001)
+
+	// An exported CONST and VAR reach the package object too, not just functions.
+	check("imported exported const", mathbox.Scale, 10)
+	check("imported exported const pair", mathbox.Lo*mathbox.Hi, 10)
+	check("imported exported var", mathbox.Base, 100)
+	checkS("imported exported string const", mathbox.Label, "mathbox")
 
 	if fails == 0 {
 		fmt.Println("go multifile test passed")

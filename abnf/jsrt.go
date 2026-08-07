@@ -1992,6 +1992,82 @@ func (rt *jsrt) goCopyVal(v interface{}) interface{} {
 // from an embedded struct field. It answers the method, the receiver to call it
 // with (a COPY for a value receiver, the struct itself for a pointer receiver) and
 // whether anything was found at all.
+// goPromField finds the field `key` PROMOTED from an embedded struct of o, BREADTH
+// FIRST, which is Go's own rule: the shallowest depth wins and only a tie at that
+// depth is ambiguous. Only ONE level was searched at the js_gofield site (and in the
+// other two engines), so `type A struct{v int}; type B struct{A}; type C struct{B}`
+// made c.v answer <nil> where go says 7 - with all three engines agreeing, so
+// --cross was blind to it. The depth cap is the one the __class walks use (manual
+// 7.9); a pointer cycle in this value model would otherwise not terminate. The twins
+// are goPromField in languages/lib/go-rt.metajs and goPromField in
+// languages/go-interpreter.abnf. docs/todo.md 1.3.
+func (rt *jsrt) goPromField(o *jsObject, key string, maxd int) (interface{}, bool) {
+	// LEVEL ONE WITHOUT ALLOCATING, which is what the one-level loop this replaced
+	// did: js_gofield reaches here on every own-property miss, so the common answer
+	// must cost no slice. The breadth-first walk only starts when there IS an
+	// embedded struct and the first level did not have the name.
+	cls1, isCls1 := o.props["__class"].(*jsObject)
+	if !isCls1 {
+		return nil, false
+	}
+	fs1, okf1 := cls1.props["__fields"].(*jsArray)
+	if !okf1 {
+		return nil, false
+	}
+	hasEmb := false
+	for _, f := range fs1.elems {
+		inner, isObj := o.props[rt.toString(f)].(*jsObject)
+		if !isObj {
+			continue
+		}
+		if _, embedded := inner.props["__class"]; !embedded {
+			continue
+		}
+		if v, has := inner.props[key]; has {
+			return v, true
+		}
+		hasEmb = true
+	}
+	if !hasEmb {
+		return nil, false
+	}
+	return rt.goPromDeep(o, key, maxd)
+}
+
+// goPromDeep is the breadth-first part of goPromField, from level two down. Split
+// out so the common case above allocates nothing.
+func (rt *jsrt) goPromDeep(o *jsObject, key string, maxd int) (interface{}, bool) {
+	level := []*jsObject{o}
+	for d := 0; d < maxd && len(level) > 0; d++ {
+		next := make([]*jsObject, 0, len(level))
+		for _, cur := range level {
+			cls, isCls := cur.props["__class"].(*jsObject)
+			if !isCls {
+				continue
+			}
+			fs, okf := cls.props["__fields"].(*jsArray)
+			if !okf {
+				continue
+			}
+			for _, f := range fs.elems {
+				inner, isObj := cur.props[rt.toString(f)].(*jsObject)
+				if !isObj {
+					continue
+				}
+				if _, embedded := inner.props["__class"]; !embedded {
+					continue
+				}
+				if v, has := inner.props[key]; has {
+					return v, true
+				}
+				next = append(next, inner)
+			}
+		}
+		level = next
+	}
+	return nil, false
+}
+
 func (rt *jsrt) goMethod(v interface{}, name string) (interface{}, interface{}, bool) {
 	cls := goClassOf(v)
 	if cls == nil {
@@ -10887,21 +10963,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				if v, has := o.props[key]; has {
 					return w(v)
 				}
-				if cls, isCls := o.props["__class"].(*jsObject); isCls {
-					if fs, okf := cls.props["__fields"].(*jsArray); okf {
-						for _, f := range fs.elems {
-							inner, isObj := o.props[rt.toString(f)].(*jsObject)
-							if !isObj {
-								continue
-							}
-							if _, embedded := inner.props["__class"]; !embedded {
-								continue
-							}
-							if v, has := inner.props[key]; has {
-								return w(v)
-							}
-						}
-					}
+				if v, has := rt.goPromField(o, key, 16); has {
+					return w(v)
 				}
 				// A METHOD VALUE: the receiver is bound now (and a value receiver is
 				// COPIED now), so later writes to the variable do not reach it.

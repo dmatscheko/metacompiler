@@ -164,8 +164,19 @@ func (rt *jsrt) gopCompose(argsV interface{}, mode int) (string, bool) {
 // gopStr is fmt's %v for one value.
 func (rt *jsrt) gopStr(v interface{}) string { return rt.gopRender(v, 0) }
 
+// A depth at or above gopNoMeth means "this subtree came through an UNEXPORTED
+// FIELD": fmt cannot call Error() or String() on it, because reflect's
+// CanInterface is false there and transitively below it. It rides on the depth
+// because the method arms are already gated on `depth < 32`, so nothing but the
+// recursion cap below has to know about it. See the memberwise arm in gopObj.
+const gopNoMeth = 64
+
 func (rt *jsrt) gopRender(v interface{}, depth int) string {
-	if depth > 32 {
+	d := depth
+	if d >= gopNoMeth {
+		d -= gopNoMeth
+	}
+	if d > 32 {
 		return "..."
 	}
 	switch t := v.(type) {
@@ -199,14 +210,29 @@ func (rt *jsrt) gopRender(v interface{}, depth int) string {
 	return rt.toString(v)
 }
 
+// goNameExported is Go's visibility rule: an identifier is exported exactly when
+// it starts with an upper-case letter.
+func goNameExported(name string) bool {
+	return len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z'
+}
+
 // gopObj renders the object shapes the Go grammars build. It reports false for a
 // shape it does not know, which falls back to the generic ToString.
 func (rt *jsrt) gopObj(o *jsObject, depth int) (string, bool) {
 	cls, _ := o.props["__class"].(*jsObject)
 
-	// fmt.Stringer wins over every built-in rendering, exactly as it does in Go.
-	// Guarded by depth so a String() that prints its own receiver terminates.
+	// THE error INTERFACE WINS OVER fmt.Stringer, WHICH WINS OVER EVERY BUILT-IN
+	// RENDERING - exactly the order fmt's handleMethods uses (error first, then
+	// Stringer). Error() was not consulted at all, so a value with `Error() string`
+	// printed the memberwise `{missing b}` where go prints `missing b`, in ALL THREE
+	// ENGINES - so --cross was blind to it by construction. Guarded by depth so a
+	// method that prints its own receiver terminates. The twins are gstr in
+	// languages/go-interpreter.abnf and gopObj in languages/lib/go-rt.metajs.
+	// docs/todo.md 1.3.
 	if cls != nil && depth < 32 {
+		if mth, ok := cls.props["Error"]; ok && isCallable(mth) {
+			return rt.gopRender(rt.call(mth, jsUndef, []interface{}{o}), depth+1), true
+		}
 		if mth, ok := cls.props["String"]; ok && isCallable(mth) {
 			return rt.gopRender(rt.call(mth, jsUndef, []interface{}{o}), depth+1), true
 		}
@@ -293,7 +319,21 @@ func (rt *jsrt) gopObj(o *jsObject, depth int) (string, bool) {
 			if fv, ok := o.props[fn]; ok {
 				val = fv
 			}
-			parts = append(parts, rt.gopRender(val, depth+1))
+			// AN UNEXPORTED FIELD IS NOT INTERFACEABLE, so fmt never reaches
+			// its Error() or String(): printValue calls handleMethods only
+			// when reflect says CanInterface, which is false for anything
+			// read through a lower-case field - and transitively so for
+			// everything below it. `Unexp{err: E{"bad"}}` prints `{{bad}}`
+			// in go while the exported `Exp{Err: E{"bad"}}` prints `{bad}`.
+			// Raising the depth to the method guard's own limit says exactly
+			// that, transitivity included: depth only grows on the way down.
+			// This was already wrong for String() before Error() was added.
+			// docs/todo.md 1.3.
+			fd := depth + 1
+			if fd < gopNoMeth && !goNameExported(fn) {
+				fd += gopNoMeth
+			}
+			parts = append(parts, rt.gopRender(val, fd))
 		}
 		return "{" + strings.Join(parts, " ") + "}", true
 	}
@@ -923,6 +963,15 @@ func init() {
 		}
 		m["js_goifas"] = func(a []uint64) uint64 {
 			v := u(a[0])
+			// A NIL INTERFACE ASSERTED TO ANYTHING PANICS, with a DIFFERENT text:
+			// go says `interface conversion: interface is nil, not main.I` and
+			// names no method, because there is no dynamic type to name.
+			// goMissingMethod answers "" for a value that is not an instance, so
+			// nil used to pass straight through in all three engines.
+			// docs/todo.md 1.3.
+			if v == nil || v == jsNull || v == jsUndef {
+				rt.fail("interface conversion: interface is nil, not %s", rt.toString(u(a[1])))
+			}
 			miss := goMissingMethod(rt, v, rt.toString(u(a[2])))
 			if miss == "" {
 				return a[0]
