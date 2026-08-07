@@ -311,20 +311,80 @@ func init() {
 			ty, _ := u(a[1]).(string)
 			return w(swAdopt(u(a[0]), ty))
 		}
+		// The WRITE half of the same rule (docs/todo.md 1.1). `var d: Double = 0;
+		// d = 3` answered 1, because only the INITIAL value ever adopted: the
+		// declaration knows the annotation and the assignment three lines later
+		// does not.
+		//
+		// No var-type table is needed, because this value model already carries
+		// the two things an annotation decides - FLOATNESS (the jsJFlo box, at
+		// its own width) and integer WIDTH (jsGInt) - on the value itself, and
+		// Swift is statically typed, so the slot's type is exactly the type of
+		// what it already holds. So a write adopts the type of the OLD value.
+		// The one shape it cannot see is a slot that holds nil, which is a
+		// `var d: Double` never yet assigned; there the write is untouched
+		// unless `ty` names the annotation - the LAST RESORT, "" almost
+		// everywhere, from a walk-time register in the emitter.
+		// Twins: swAdoptLike in languages/swift-interpreter.abnf and
+		// js_swadoptlike in languages/lib/swift-rt.metajs.
+		swAdoptLike := func(old, v interface{}, ty string) interface{} {
+			if isNullish(old) {
+				return swAdopt(v, ty)
+			}
+			if isNullish(v) {
+				return v
+			}
+			if swIsF32(old) {
+				return swAdopt(v, "Float")
+			}
+			if swIsFlo(old) {
+				return swAdopt(v, "Double")
+			}
+			if gi, ok := old.(jsGInt); ok {
+				if swIsFlo(v) {
+					return v
+				}
+				_, isNum := v.(float64)
+				if !isNum {
+					_, isNum = v.(jsGInt)
+				}
+				if !isNum {
+					return v
+				}
+				return rt.giConv(v, gi.w, gi.u)
+			}
+			return v
+		}
+		m["js_swadoptlike"] = func(a []uint64) uint64 {
+			ty, _ := u(a[2]).(string)
+			return w(swAdoptLike(u(a[0]), u(a[1]), ty))
+		}
 		// `let a: [Double] = [3, 4]`: the annotation types the ELEMENTS, so
-		// a[0] / 2 is 1.5. One level only.
-		m["js_swadoptarr"] = func(a []uint64) uint64 {
-			v := u(a[0])
-			ty, _ := u(a[1]).(string)
+		// a[0] / 2 is 1.5. `[[Double]]` nests - a bracketed element type walks
+		// one level deeper.
+		var swAdoptArr func(v interface{}, ty string) interface{}
+		swAdoptArr = func(v interface{}, ty string) interface{} {
 			arr, ok := v.(*jsArray)
 			if !ok || ty == "" {
-				return a[0]
+				return v
+			}
+			inner := ""
+			if ty[0] == '[' && ty[len(ty)-1] == ']' {
+				inner = ty[1 : len(ty)-1]
 			}
 			out := make([]interface{}, len(arr.elems))
 			for i, e := range arr.elems {
-				out[i] = swAdopt(e, ty)
+				if inner == "" {
+					out[i] = swAdopt(e, ty)
+				} else {
+					out[i] = swAdoptArr(e, inner)
+				}
 			}
-			return w(&jsArray{elems: out})
+			return &jsArray{elems: out}
+		}
+		m["js_swadoptarr"] = func(a []uint64) uint64 {
+			ty, _ := u(a[1]).(string)
+			return w(swAdoptArr(u(a[0]), ty))
 		}
 		// String(x) / String(describing: x): the text print would have written.
 		m["js_swstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.swDesc(u(a[0]))) }

@@ -659,11 +659,14 @@ NumTypeName = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
               | "UInt64" | "UInt32" | "UInt16" | "UInt8" | "UInt"
               | "Double" | "Float" ) KwEnd ;
 // `let a: [Double] = [3, 4]`: the annotation types the array's ELEMENTS, so the
-// untyped literals in it adopt Double and a[0] / 2 is 1.5 rather than 1. Only a
-// one-level array of a numeric type is recognised - `[[Double]]` and
-// `[String: Double]` fall through to Type and adopt nothing.
+// untyped literals in it adopt Double and a[0] / 2 is 1.5 rather than 1. NESTING
+// is recognised too - `[[Double]]` types the elements of the inner arrays, and the
+// captured text is what says how deep to walk. A DICTIONARY value type
+// (`[String: Double]`) still falls through to Type and adopts nothing; see the
+// report at docs/todo.md 1.1.
 ArrAnnType  = "[" ArrElemTy "]" NotTypeSuffix ;
-ArrElemTy   <~~ push({atype: stripWs(up.in)}) ~~> = NumTypeName ;
+ArrElemTy   <~~ push({atype: stripWs(up.in)}) ~~> = NestedElemTy ;
+NestedElemTy = NumTypeName | "[" NestedElemTy "]" ;
 // `Int?`, `Int!`, `Int.Type`, `Int & P`: the annotation is a COMPOSED type, not the
 // bare integer type, so IntAnnType has to decline it and let the general Type read
 // it. Without this the optional forms consumed only the `Int` and left the `?`
@@ -2473,16 +2476,56 @@ KwContinue  = "continue" KwEnd ;
         if (iw == null || isFlo(v)) { return v }
         return swAdoptNum(v) ? szConv(v, iw.w, iw.u) : v
     }
+    // The WRITE half of the same rule (docs/todo.md 1.1). `var d: Double = 0;
+    // d = 3` answered 1, because only the INITIAL value ever adopted: the
+    // declaration knows the annotation and the assignment three lines later does
+    // not.
+    //
+    // No var-type table is needed, because this value model already carries the
+    // two things an annotation decides - FLOATNESS (the {__flo} box, at its own
+    // width) and integer WIDTH (the {__sz} box) - on the value itself, and Swift
+    // is statically typed, so a slot's declared type is exactly the type of what
+    // it already holds. So a write adopts the type of the OLD value. The one
+    // shape it cannot see is a slot holding nil, i.e. a `var d: Double` never yet
+    // assigned; there the write is untouched. Twins: js_swadoptlike in
+    // abnf/jsrtswift.go and in languages/lib/swift-rt.metajs.
+    //
+    // `ty` is the LAST RESORT and is "" almost everywhere: the declared type of a
+    // name whose slot still holds nil, which carries no type to adopt. It comes
+    // from a walk-time register of annotated declarations, so `var d: Double` with
+    // no initializer still floats its first write. It is consulted only when the
+    // old value is nil, so an inner `var d = 3` that shadows an outer `var d:
+    // Double` is untouched - its slot holds an Int, and an Int is what it stays.
+    function swAdoptLike(old, v, ty) {
+        if (old === null || old === undefined) { return swAdoptTy(v, ty) }
+        if (v === null || v === undefined) { return v }
+        if (isF32(old)) { return swAdoptTy(v, "Float") }
+        if (isFlo(old)) { return swAdoptTy(v, "Double") }
+        if (szIs(old)) {
+            if (isFlo(v)) { return v }
+            return swAdoptNum(v) ? szConv(v, old.w, old.u) : v
+        }
+        return v
+    }
     // `let a: [Double] = [3, 4]`: the annotation types the ELEMENTS, so a[0] / 2
-    // is 1.5. One level only - `[[Double]]` is not walked, and neither is a
-    // dictionary's value type (see the report at docs/todo.md 1.1).
+    // is 1.5. `[[Double]]` nests - the element type is itself bracketed, and the
+    // walk goes one level deeper for each pair. A dictionary's value type
+    // (`[String: Double]`) is still not walked (see the report at
+    // docs/todo.md 1.1).
     function swAdoptArr(v, ty) {
         if (ty == undefined || ty == null || ty == "") { return v }
         if (v === null || v === undefined) { return v }
         if (typeof v != "object") { return v }
         if (!Array.isArray(v)) { return v }
+        var inner = ""
+        if (ty.charAt(0) == "[" && ty.charAt(ty.length - 1) == "]") {
+            inner = ty.substring(1, ty.length - 1)
+        }
         var out = []
-        for (var i = 0; i < v.length; i++) { out.push(swAdoptTy(v[i], ty)) }
+        for (var i = 0; i < v.length; i++) {
+            if (inner == "") { out.push(swAdoptTy(v[i], ty)) }
+            else { out.push(swAdoptArr(v[i], inner)) }
+        }
         return out
     }
     function swlen(v) {
@@ -3644,23 +3687,55 @@ KwContinue  = "continue" KwEnd ;
         }
     }
 
+    // The value an element write is about to overwrite, read WITHOUT the ordinary
+    // element machinery: a subscript GETTER must not run for a write, and a
+    // Dictionary read that MISSES must not throw - `ages["carol"] = 40` adds a key.
+    // So an existing dictionary entry adopts and a new one does not, which is
+    // exactly what the compiler half's sw_safeget answers.
+    function swSafeElem(o, k) {
+        if (o === null || o === undefined) { return undefined }
+        if (typeof o != "object") { return undefined }
+        if (isDict(o)) { var di = dictFind(o, k); return di < 0 ? undefined : o.vals[di] }
+        return hasOwn(o, k) ? o[k] : undefined
+    }
+    // The same read for an UNQUALIFIED name that is not a local: an implicit
+    // `self.x = v` inside a member body. sw_kget makes the compiler half look here
+    // too, so the interpreter has to, or the two adopt at different places.
+    function swSelfSlot(name) {
+        var slf = findThis()
+        if (slf == undefined || slf === null) { return undefined }
+        if (typeof slf != "object") { return undefined }
+        return hasOwn(slf, name) ? slf[name] : undefined
+    }
     // Assignment understands plain names, object properties (self.x), array
     // elements and dictionary entries.
     function makeAssign(items) {
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
+        // The declared type of this name, if a numeric annotation declared it
+        // earlier in the walk. Only reached when the slot holds nil; see swAdoptLike.
+        var declTy = ref.path.length == 0 ? declTyOf(ref.name) : ""
         return function() {
-            var v = swCopy(valT())
+            // `var v = anytype` first: MetaJS is typed, a local keeps the type of
+            // its first assignment, and the adoption below turns a number into a box.
+            var v = anytype
+            v = swCopy(valT())
             if (ref.path.length == 0) {
+                var oldL = ref.name == "self" ? null : lookupOrNull(ref.name)
                 if (op != "=") { v = applyOp(op, getVar(ref.name), v) }
                 // `self = X` inside a mutating method rewrites the value in place, so
                 // the caller's variable (which holds the same struct value) changes too.
                 if (ref.name == "self" && isStructVal(v)) { assignSelf(v); return v }
+                // A write adopts the slot's declared type, which the value it already
+                // holds carries - docs/todo.md 1.1.
+                if (oldL != null) { v = swAdoptLike(oldL.v, v, declTy) }
+                else { v = swAdoptLike(swSelfSlot(ref.name), v, declTy) }
                 setVar(ref.name, v)
             } else {
                 var p = resolveRef(ref)
                 if (op != "=") { v = applyOp(op, getElemP(p.obj, p.key), v) }
+                v = swAdoptLike(swSafeElem(p.obj, p.key), v, "")
                 setElem(p.obj, p.key, v)
             }
             return v
@@ -3692,6 +3767,11 @@ KwContinue  = "continue" KwEnd ;
 
     // ----- Statement thunks -----
 
+    // The numeric type each name was DECLARED at, filled as the walk passes the
+    // declaration. It is the last resort of the write-site adoption and is read only
+    // when the slot holds nil - see swAdoptLike.
+    var declTyReg = {}
+    function declTyOf(n) { return hasOwn(declTyReg, "$" + n) ? declTyReg["$" + n] : "" }
     // items = [name, {tlabels}? | {itype}? | {atype}?, initThunk]
     function makeDecl(items) {
         var name = items[0]
@@ -3708,6 +3788,7 @@ KwContinue  = "continue" KwEnd ;
             iw = swIntWidthOf(items[k].itype)
             isFloatTy = items[k].itype == "Float"
             isDoubleTy = items[k].itype == "Double" || isFloatTy
+            scopePut(declTyReg, "$" + name, items[k].itype)
             k++
         }
         else if (items[k] != undefined && items[k].atype != undefined) { elemTy = items[k].atype; k++ }
@@ -4007,6 +4088,30 @@ KwContinue  = "continue" KwEnd ;
         if (lst.length == 1) { globalScope[f.name] = lst[0].fn }
         else { globalScope[f.name] = makeOverloadClosure(lst) }
     }
+    // `Crate<Int>?` -> `Crate`: the bare name a declared type spells.
+    function swBaseTy(t0) {
+        var t = t0
+        for (var i = 0; i < t.length; i++) {
+            if (t.charAt(i) == "<") { t = t.substring(0, i); i = t.length }
+        }
+        while (t.length > 0 && (t.charAt(t.length - 1) == "?" || t.charAt(t.length - 1) == "!")) {
+            t = t.substring(0, t.length - 1)
+        }
+        return t
+    }
+    // Whether an argument can be passed to a parameter of declared type t, for
+    // OVERLOAD SELECTION only. It is not the dynamic type test: overload selection
+    // sees the argument BEFORE the declared type adopts it, so an untyped integer
+    // literal is still a plain number at a `Double` parameter and Swift converts it.
+    // The shared rtIsType gets both halves of that wrong since swift's Double became
+    // a {__flo} BOX - it answers false for the box a real Double is, so EVERY
+    // `Double` overload was rejected and the dispatcher fell back to the first entry.
+    // That is how `MB(a: 3, b: 4)` ran `init(_ x: Double)` and answered 3.
+    function swArgFits(v, t0) {
+        var t = swBaseTy(t0)
+        if (t == "Double" || t == "Float") { return isFlo(v) || typeof v == "number" }
+        return rtIsType(v, t0)
+    }
     function overloadFits(params, args) {
         var req = 0
         var varia = false
@@ -4018,7 +4123,7 @@ KwContinue  = "continue" KwEnd ;
         if (!varia && args.length > params.length) { return false }
         for (var j = 0; j < args.length && j < params.length; j++) {
             if (params[j].type == "" || params[j].variadic) { continue }
-            if (!rtIsType(args[j], params[j].type)) { return false }
+            if (!swArgFits(args[j], params[j].type)) { return false }
         }
         return true
     }
@@ -4451,6 +4556,11 @@ KwContinue  = "continue" KwEnd ;
     // type is local to its body).
     function makeStructStmt(items) { return makeTypeStmt(items, true) }
     function makeClassStmt(items) { return makeTypeStmt(items, false) }
+    // Every CLASS name declared so far in the walk. The superclass in an inheritance
+    // clause is decided here, at walk time, rather than from the runtime __super, so
+    // that both halves make the same decision from the same information - the
+    // compiler half has no choice but to decide it at walk time.
+    var declaredClasses = {}
     function makeTypeStmt(items, isStruct) {
         var name = items[0]
         var mem = splitMembers(items, 1)
@@ -4461,8 +4571,34 @@ KwContinue  = "continue" KwEnd ;
         for (var i = 0; i < mem.methods.length; i++) {
             if (mem.methods[i].name == "init") { regSig(name, mem.methods[i].params) }
         }
+        // SWIFT'S CLASS RULE IS NOT THE STRUCT RULE. A class never gets a memberwise
+        // initializer at all - that is structs. A class gets a DEFAULT `init()` only
+        // when it declares none and every stored property has a value, and a SUBCLASS
+        // that declares no designated initializer of its own INHERITS its
+        // superclass's, which is why `class Derived: Base {}` still answers
+        // `Derived(3.0).n == 3.0` under swiftc 6.1.2. Synthesising an empty
+        // memberwise init for such a subclass SHADOWED the inherited one and left
+        // every inherited property nil.
+        // Only a class with no superclass synthesises here, and it synthesises the
+        // struct memberwise list: that is wider than swiftc's `init()`, but the extra
+        // calls it accepts are programs swiftc rejects outright, so no answer moves.
+        var superName = null
+        if (!isStruct) {
+            for (var hh = 0; hh < mem.inherits.length; hh++) {
+                var bn0 = baseTypeName(mem.inherits[hh])
+                if (hasOwn(declaredClasses, "$" + bn0)) { superName = bn0 }
+            }
+            scopePut(declaredClasses, "$" + name, 1)
+        }
+        var inheritInit = !mem.hasInit && superName != null
         var mparams = []
-        if (!mem.hasInit) { mparams = memberwiseParams(mem.fields); regSig(name, mparams) }
+        if (!mem.hasInit && !inheritInit) { mparams = memberwiseParams(mem.fields); regSig(name, mparams) }
+        // The inherited initializer's argument LABELS are the superclass's, so the
+        // call site plans its arguments against that signature.
+        if (inheritInit) {
+            var ssig = lookupSig(superName)
+            if (ssig != null) { regSig(name, ssig) }
+        }
         var fieldNames = []
         for (var fi = 0; fi < mem.fields.length; fi++) { fieldNames.push(mem.fields[fi].store) }
         return function() {
@@ -4503,7 +4639,26 @@ KwContinue  = "continue" KwEnd ;
                 scopes = saved
             }
             installMembers(cls, mem)
-            if (!mem.hasInit) {
+            // The inherited initializers are COPIED onto this descriptor rather than
+            // left to classFind's __super walk, because an `extension Derived { init
+            // ... }` further down installs an init on THIS descriptor and would
+            // otherwise shadow the whole inherited set - which turned a convenience
+            // init delegating with `self.init(x)` into unbounded recursion. Copying
+            // makes the extension's addMethod merge into the inherited overload list,
+            // which is also exactly what the compiler half does with its init slots.
+            if (inheritInit && cls.__super != undefined && cls.__super !== null) {
+                var sinit = classFind(cls.__super, "init")
+                if (typeof sinit == "function") {
+                    tput(cls, "init", sinit)
+                    var sov = classFind(cls.__super, "__ov_init")
+                    if (sov != undefined && sov !== null) {
+                        var ovc = []
+                        for (var oi = 0; oi < sov.length; oi++) { ovc.push(sov[oi]) }
+                        tput(cls, "__ov_init", ovc)
+                    }
+                }
+            }
+            if (!mem.hasInit && !inheritInit) {
                 scopePut(cls, "init", function() {
                     var self = arguments[0]
                     var args = []

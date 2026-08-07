@@ -1329,15 +1329,46 @@ function js_swadopt(v, ty) {
     return swAdoptNum(v) ? sintConv(v, bits, swAdoptUns(ty)) : v
 }
 
+// The WRITE half of the same rule (docs/todo.md 1.1). `var d: Double = 0; d = 3`
+// answered 1, because only the INITIAL value ever adopted: the declaration knows
+// the annotation and the assignment three lines later does not.
+//
+// No var-type table is needed, because this value model already carries the two
+// things an annotation decides - FLOATNESS (the float box, at its own width) and
+// integer WIDTH (the sized-integer box) - on the value itself, and Swift is
+// statically typed, so a slot's declared type is exactly the type of what it
+// already holds. So a write adopts the type of the OLD value. The one shape it
+// cannot see is a slot holding nil, i.e. a `var d: Double` never yet assigned;
+// there the write is untouched - unless `ty` names one, which is the LAST RESORT
+// and is "" almost everywhere: the annotation of a `var d: Double` with no
+// initializer, taken from a walk-time register in the emitter. Twins: swAdoptLike
+// in languages/swift-interpreter.abnf and js_swadoptlike in abnf/jsrtswift.go.
+function js_swadoptlike(old, v, ty) {
+    if (old === undefined || old === null) { return js_swadopt(v, ty) }
+    if (v === undefined || v === null) { return v }
+    if (swIsF32(old)) { return js_swadopt(v, "Float") }
+    if (floIs(old)) { return js_swadopt(v, "Double") }
+    if (sintIs(old)) {
+        if (floIs(v)) { return v }
+        return swAdoptNum(v) ? sintConv(v, sintWidth(old), sintUns(old)) : v
+    }
+    return v
+}
+
 // `let a: [Double] = [3, 4]`: the annotation types the ELEMENTS, so a[0] / 2 is
-// 1.5. One level only.
+// 1.5. `[[Double]]` nests - a bracketed element type walks one level deeper.
 function js_swadoptarr(v, ty) {
     if (ty == "") { return v }
     if (!rtIsArr(v)) { return v }
+    var inner = ""
+    if (ty.charAt(0) == "[" && ty.charAt(ty.length - 1) == "]") {
+        inner = ty.substring(1, ty.length - 1)
+    }
     var out = []
     var i = 0
     while (i < v.length) {
-        out.push(js_swadopt(v[i], ty))
+        if (inner == "") { out.push(js_swadopt(v[i], ty)) }
+        else { out.push(js_swadoptarr(v[i], inner)) }
         i = i + 1
     }
     return out

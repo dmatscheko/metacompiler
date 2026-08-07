@@ -388,7 +388,39 @@ func s13() {
     check("inh4", (pets[0] as? Dog13)?.fetch() == "ball" && (pets[1] as? Dog13) == nil)
     let up = Dog13() as Beast13 // guaranteed upcast
     check("inh5", (pets[0] as! Dog13).legs == 4 && up.family == "canine+beast")
+    // INITIALIZER INHERITANCE (docs/todo.md 1.3). A class does NOT get a memberwise
+    // initializer - that is structs - and a subclass declaring no initializer of its
+    // own inherits its superclass's. `Cub13(legs: 3)` used to run an EMPTY
+    // synthesised init and answer nil for every inherited property; every value here
+    // is swiftc 6.1.2's own.
+    check("inh6", Cub13(legs: 3).legs == 3 && Cub13(legs: 3).intro() == "beast/mew/3")
+    // The subclass's OWN defaulted property is still laid down, and the two-level
+    // chain inherits through the middle class.
+    check("inh7", Kit13(legs: 2).spots == 5 && Kit13(legs: 2).legs == 2)
+    // The superclass's OVERLOADS all arrive, under their own argument labels - and
+    // an inherited init is picked BY DECLARED TYPE, which the shared rtIsType could
+    // not do once a Double became a box, so every Double overload was rejected and
+    // the dispatcher fell back to the first entry.
+    check("inh8", Pup13().tag == "z" && Pup13(pair: 1.5, plus: 3.5).tag == "p")
+    // An extension's convenience initializer MERGES with the inherited set instead
+    // of shadowing it - self.init(legs:) here used to reach itself and recurse.
+    check("inh9", Cub13(triple: 4).legs == 12 && Cub13(legs: 7).legs == 7)
+    // The CONTROLS, which pass either way and are not counted as coverage: a
+    // subclass that declares its own designated init keeps it and super.init runs;
+    // a struct's real memberwise initializer still exists.
+    check("inh10", Dog13().legs == 4 && Snake13().legs == 0)
+    check("inh11", Den13(w: 5, h: 6).w == 5 && Den13().h == 3)
 }
+struct Den13 { var w = 2, h = 3 }
+class Cub13: Beast13 { override func noise() -> String { "mew" } }
+class Kit13: Cub13 { var spots: Int = 5 }
+extension Cub13 { convenience init(triple t: Int) { self.init(legs: t * 3) } }
+class Paw13 {
+    var tag: String
+    init() { self.tag = "z" }
+    init(pair a: Double, plus b: Double) { self.tag = a + b == 5.0 ? "p" : "?" }
+}
+class Pup13: Paw13 {}
 
 // ===== SECTION 14: protocols =====
 protocol Named14 {
@@ -1125,13 +1157,19 @@ func s28() {
 // in BOTH halves, which is why --cross was blind to it for three float rounds.
 // Every value here is swift 6.1.2's own output.
 //
+// THE WRITE SITES ARE CLOSED TOO, and their rows are the `29s*` block at the end:
+// `var d: Double = 0; d = 3`, `t.a = 3` on a stored property, and `ar[0] = 3` on an
+// element all used to answer 1, because only the INITIAL value ever adopted. No
+// var-type table was needed: this value model carries floatness and integer width
+// ON THE VALUE, and Swift is statically typed, so a write adopts the type of what
+// the slot already holds. The one shape that cannot see is a slot still holding
+// nil - a `var d: Double` with no initializer - and 29s7 pins that as the gap.
+//
 // STILL NOT ADOPTED, deliberately, and each is a wrong answer this file does not
 // yet assert: a CLOSURE parameter type (`let f: (Double) -> Double`), a
-// dictionary annotation's value type (`[String: Double]`), a tuple type's element
-// types (`(Double, Double)`), an assignment to an already-declared `var d: Double`
-// or to a typed stored property (only the INITIAL value adopts), and the element
-// type of a nested `[[Double]]`. They need the declared type at a site that does
-// not carry one today; see the report on docs/todo.md 1.1.
+// dictionary annotation's value type (`[String: Double]`), and a tuple type's
+// element types (`(Double, Double)`). They need the declared type at a site that
+// does not carry one today; see the report on docs/todo.md 1.1.
 func a29d(_ x: Double) -> Double { return x / 2 }
 func a29f(_ x: Float) -> Float { return x / 2 }
 func a29u(_ x: UInt8) -> UInt8 { return x &+ 10 }
@@ -1143,6 +1181,9 @@ func r29f() -> Float { return 16777217 }
 func r29u() -> UInt8 { return 250 }
 func e29d() -> Double { 3 }
 func t29() -> (n: Int, v: Int) { return (1, 2) }
+// A local named like an annotated global, unannotated: it is an Int and stays one.
+var sh29g: Double = 1
+func sh29() -> Int { var sh29g = 3; sh29g = 4; return sh29g / 2 }
 struct A29 { var a: Double; var b: Float; var c: UInt8; var s: String }
 struct B29 { var a: Double = 3; var n: Int = 7 }
 class C29 { var a: Double = 3
@@ -1192,6 +1233,45 @@ func s29() {
     let plain = [3, 4]
     let ai: [Int] = [7, 4]
     check("29a3", plain[0] / 2 == 1 && ai[0] / 2 == 3)
+    // A NESTED array annotation walks one level per bracket pair.
+    let nd: [[Double]] = [[3, 4]]
+    check("29a4", nd[0][0] / 2 == 1.5 && nd[0][1] / 2 == 2.0)
+
+    // ----- the WRITE sites (docs/todo.md 1.1) -----
+    // Only the INITIAL value used to adopt: every row below answered 1.
+    var wd: Double = 0
+    wd = 3
+    check("29s1", wd / 2 == 1.5 && s25d(wd) == "3.0")
+    var wu: UInt8 = 0
+    wu = 250
+    var wf: Float = 0
+    wf = 16777217
+    check("29s2", wu &+ 10 == 4 && s25f(wf) == "16777216.0")
+    // A stored property of a struct value and of a class instance.
+    var wa = A29(a: 0, b: 0, c: 0, s: "")
+    wa.a = 3
+    wa.c = 250
+    check("29s3", wa.a / 2 == 1.5 && wa.c &+ 10 == 4)
+    let wc = C29()
+    wc.a = 5
+    check("29s4", wc.a / 2 == 2.5 && wc.m(3) == 4.0)
+    // An array ELEMENT, written plainly and compounded.
+    var war: [Double] = [0, 0]
+    war[0] = 3
+    war[1] += 1
+    check("29s5", war[0] / 2 == 1.5 && war[1] / 2 == 0.5)
+    // A CONTROL: an unannotated Int must not float, or the adoption is too wide.
+    var wi = n29[0]
+    wi = 7
+    check("29s6", wi / 2 == 3)
+    // A slot that still holds NIL carries no type of its own, so the annotation of
+    // a `var d: Double` with no initializer is the last resort - and it is read only
+    // when the old value is nil, which is what keeps the inner unannotated `sh`
+    // below an Int even though an outer `sh` is a Double.
+    var wn: Double
+    wn = 3
+    check("29s7", wn / 2 == 1.5 && s25d(wn) == "3.0")
+    check("29s8", sh29() == 2 && sh29g / 2 == 0.5)
 }
 
 // ===== END SECTIONS =====

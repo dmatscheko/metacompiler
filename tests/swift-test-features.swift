@@ -30,6 +30,7 @@ func threeD() -> Double { return 3 }
 struct Boxed { var v: Double; var w: UInt8 }
 let dbls: [Double] = [3, 4]
 let ints: [Int] = [3, 4]
+let nestedD: [[Double]] = [[3, 4]]
 
 // ----- functions: labelled parameters, early return, recursion -----
 
@@ -192,6 +193,9 @@ class Rect {
         return Rect(w: w * k, h: h * k)
     }
 }
+
+// A subclass that declares no initializer of its own (docs/todo.md 1.3).
+class Square: Rect { var sides = 4 }
 
 enum Direction {
     case north, south
@@ -643,6 +647,23 @@ func main() {
     check("adopt-return", threeD() / 2 == 1.5)
     check("adopt-field", Boxed(v: 3, w: 250).v / 2 == 1.5 && Boxed(v: 3, w: 250).w &+ 10 == 4)
     check("adopt-array", dbls[0] / 2 == 1.5 && ints[0] / 2 == 1)
+    // The WRITE half of the same rule: only the INITIAL value used to adopt, so
+    // `var d: Double = 0; d = 3` and `b.v = 3` both answered 1.
+    var wv: Double = 0
+    wv = 3
+    var wb = Boxed(v: 0, w: 0)
+    wb.v = 3
+    wb.w = 250
+    var wr: [Double] = [0]
+    wr[0] = 3
+    check("adopt-write", wv / 2 == 1.5 && wb.v / 2 == 1.5 && wb.w &+ 10 == 4 && wr[0] / 2 == 1.5)
+    check("adopt-nested", nestedD[0][0] / 2 == 1.5)
+
+    // ----- a subclass with no init of its own INHERITS one (docs/todo.md 1.3) -----
+    // A class never gets a memberwise initializer - that is structs - and the empty
+    // one that used to be synthesised here shadowed the inherited init, so every
+    // inherited property came back nil.
+    check("inherit-init", Square(w: 2, h: 3).area() == 6 && Square(w: 2, h: 3).sides == 4)
 
     // ----- combined pipeline -----
     check("combined-pipeline", transform([1, 2, -3]) == "o1e2x")

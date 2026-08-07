@@ -657,11 +657,14 @@ NumTypeName = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
               | "UInt64" | "UInt32" | "UInt16" | "UInt8" | "UInt"
               | "Double" | "Float" ) KwEnd ;
 // `let a: [Double] = [3, 4]`: the annotation types the array's ELEMENTS, so the
-// untyped literals in it adopt Double and a[0] / 2 is 1.5 rather than 1. Only a
-// one-level array of a numeric type is recognised - `[[Double]]` and
-// `[String: Double]` fall through to Type and adopt nothing.
+// untyped literals in it adopt Double and a[0] / 2 is 1.5 rather than 1. NESTING
+// is recognised too - `[[Double]]` types the elements of the inner arrays, and the
+// captured text is what says how deep to walk. A DICTIONARY value type
+// (`[String: Double]`) still falls through to Type and adopts nothing; see the
+// report at docs/todo.md 1.1.
 ArrAnnType  = "[" ArrElemTy "]" NotTypeSuffix ;
-ArrElemTy   <~~ push({atype: stripWs(up.in)}) ~~> = NumTypeName ;
+ArrElemTy   <~~ push({atype: stripWs(up.in)}) ~~> = NestedElemTy ;
+NestedElemTy = NumTypeName | "[" NestedElemTy "]" ;
 // `Int?`, `Int!`, `Int.Type`, `Int & P`: the annotation is a COMPOSED type, not the
 // bare integer type, so IntAnnType has to decline it and let the general Type read
 // it. Without this the optional forms consumed only the `Int` and left the `?`
@@ -3720,10 +3723,22 @@ KwContinue  = "continue" KwEnd ;
         var kr = last.idx(b)
         return {b: kr.b, obj: o, key: kr.v, keyName: "", isField: false}
     }
+    // The value an element write is about to overwrite, read WITHOUT the ordinary
+    // subscript machinery: `ages["carol"] = 40` adds a key, and a Swift dictionary
+    // read that misses THROWS, so the read the adoption needs must not be that read.
+    // sw_safeget answers an own property and undefined for anything absent, so an
+    // array element and an EXISTING dictionary key adopt while a new key does not.
+    // The interpreter's swSafeElem answers exactly the same, deliberately - the two
+    // halves have to adopt at exactly the same places.
+    function swSafeElem(b, p) { return b.NewCall(rtSafeGet(), [p.obj, p.key]) }
     function makeAssign(items) {
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
+        // The declared type of this name, if a numeric annotation declared it
+        // earlier in the walk. Only reached when the slot holds nil; see
+        // js_swadoptlike.
+        var declTy = ref.path.length == 0 ? declTyOf(ref.name) : ""
         return function(b) {
             var r = valT(b)
             b = r.b
@@ -3732,9 +3747,12 @@ KwContinue  = "continue" KwEnd ;
                 // `_ = expr` evaluates and throws the value away.
                 if (ref.name == "_") { return {b: b, v: v} }
                 var nameV = emitStr(b, ref.name)
+                // Read once: a compound operator needs the old value anyway, and the
+                // adoption below wants the same one.
+                var oldL = null
                 if (op != "=") {
-                    var old = b.NewCall(rtKGet(), [curScopeV, nameV])
-                    v = emitBin(b, op, old, v)
+                    oldL = b.NewCall(rtKGet(), [curScopeV, nameV])
+                    v = emitBin(b, op, oldL, v)
                 }
                 // An unqualified write inside a member body may target a computed,
                 // observed or wrapped property, which lives behind __set_x rather
@@ -3755,15 +3773,22 @@ KwContinue  = "continue" KwEnd ;
                     b.NewCall(rtAssignSelf(), [b.NewCall(rtKGet(), [curScopeV, emitStr(b, "this")]), v])
                     return {b: b, v: v}
                 }
+                // A write adopts the slot's declared type, which the value it already
+                // holds carries - docs/todo.md 1.1. It sits BELOW the two early exits
+                // above on purpose: sw_kget aborts on a name that is neither a local
+                // nor a property of `this`, and an unqualified write to an OBSERVED
+                // property (`level = raw / 10` inside `set(raw)`) is exactly that
+                // shape - the interpreter's lookupOrNull declines it in the same way.
+                if (oldL == null) { oldL = b.NewCall(rtKGet(), [curScopeV, nameV]) }
+                v = callExt(b, "js_swadoptlike", [oldL, v, emitStr(b, declTy)])
                 b.NewCall(rtKSet(), [curScopeV, nameV, v])
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
                 if (p.isField) {
-                    if (op != "=") {
-                        var oldf = emitFieldRead(b, p.obj, p.keyName)
-                        v = emitBin(b, op, oldf, v)
-                    }
+                    var oldf = emitFieldRead(b, p.obj, p.keyName)
+                    if (op != "=") { v = emitBin(b, op, oldf, v) }
+                    v = callExt(b, "js_swadoptlike", [oldf, v, emitStr(b, "")])
                     if (isSetterName(p.keyName)) {
                         b.NewCall(rtSetProp(), [p.obj, p.key, v])
                     } else {
@@ -3774,12 +3799,14 @@ KwContinue  = "continue" KwEnd ;
                         var olds = b.NewCall(rtSubGet(), [p.obj, p.key])
                         v = emitBin(b, op, olds, v)
                     }
+                    v = callExt(b, "js_swadoptlike", [swSafeElem(b, p), v, emitStr(b, "")])
                     b.NewCall(rtSubSet(), [p.obj, p.key, v])
                 } else {
                     if (op != "=") {
                         var oldm = callExt(b, "js_pyget", [p.obj, p.key])
                         v = emitBin(b, op, oldm, v)
                     }
+                    v = callExt(b, "js_swadoptlike", [swSafeElem(b, p), v, emitStr(b, "")])
                     callExt(b, "js_pyset", [p.obj, p.key, v])
                 }
             }
@@ -3846,6 +3873,11 @@ KwContinue  = "continue" KwEnd ;
 
     // ----- Statement thunks: function(block) -> block -----
 
+    // The numeric type each name was DECLARED at, filled as the walk passes the
+    // declaration. It is the last resort of the write-site adoption and is read only
+    // when the slot holds nil - see js_swadoptlike.
+    var declTyReg = {}
+    function declTyOf(n) { return hasOwn(declTyReg, "$" + n) ? declTyReg["$" + n] : "" }
     // items = [name, {tlabels}? | {itype}? | {atype}?, initThunk]
     function makeDecl(items) {
         var name = items[0]
@@ -3862,6 +3894,7 @@ KwContinue  = "continue" KwEnd ;
             iw = swIntWidthOf(items[k].itype)
             isFloatTy = items[k].itype == "Float"
             isDoubleTy = items[k].itype == "Double" || isFloatTy
+            declTyReg["$" + name] = items[k].itype
             k++
         }
         else if (items[k] != undefined && items[k].atype != undefined) { elemTy = items[k].atype; k++ }
@@ -4971,9 +5004,29 @@ KwContinue  = "continue" KwEnd ;
         rec.superName = superName
         var mparams = []
         var mwIndex = -1
+        // SWIFT'S CLASS RULE IS NOT THE STRUCT RULE. A class never gets a memberwise
+        // initializer - that is structs - and a SUBCLASS that declares no designated
+        // initializer of its own INHERITS its superclass's. Synthesising an empty
+        // memberwise init for `class Derived: Base {}` shadowed the inherited one and
+        // left every inherited property nil. Only a class with no superclass
+        // synthesises here (with the struct memberwise list, which is wider than
+        // swiftc's `init()` but only accepts programs swiftc rejects outright).
+        var inhCount = 0
+        var inheritInit = !mem.hasInit && !isStruct && superName != null && hasOwn(typeInfo, "$" + superName)
+        if (inheritInit) {
+            // The superclass's overload SLOTS are copied wholesale, so `init$1` on
+            // this descriptor is the same initializer `init$1` names on the super and
+            // pickOverload needs no special case. A two-level chain works because the
+            // middle class carries the copies by the time this runs.
+            var srec = typeInfo["$" + superName]
+            inhCount = srec.inits.length
+            for (var si = 0; si < inhCount; si++) { rec.inits.push(srec.inits[si]) }
+            var ssig = lookupSig(superName)
+            if (ssig != null) { regSig(name, ssig) }
+        }
         // The memberwise initializer's overload slot is fixed HERE, at walk time: an
         // extension declared further down appends to the same list.
-        if (!mem.hasInit) {
+        if (!mem.hasInit && !inheritInit) {
             mparams = memberwiseParams(mem.fields)
             regSig(name, mparams)
             mwIndex = rec.inits.length
@@ -5016,7 +5069,18 @@ KwContinue  = "continue" KwEnd ;
             var ctorIdx = emitCtor(mem.initProps, superName, mem.fields)
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
             b = emitInstallMembers(b, clsV, clsV, mem, name)
-            if (!mem.hasInit) {
+            if (inheritInit) {
+                // js_get does NOT walk __super for a plain property - only accessors
+                // and method calls do - so the inherited initializers are COPIED onto
+                // this descriptor rather than left to be found by a chain walk.
+                var supV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, superName)])
+                for (var ci = 0; ci < inhCount; ci++) {
+                    var ik = memberKey("init", ci)
+                    callExt(b, "js_set", [clsV, emitStr(b, ik),
+                                          callExt(b, "js_get", [supV, emitStr(b, ik)])])
+                }
+            }
+            if (mwIndex >= 0) {
                 var mwBody = function(bb) {
                     var thisV = bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "this")])
                     for (var q = 0; q < mparams.length; q++) {
