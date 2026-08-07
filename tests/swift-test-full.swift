@@ -1327,6 +1327,12 @@ func k30(_ v: Any) -> String {
 let g30: (Double) -> Double = { x in x / 2 }
 let g30b: (Double, Double) -> Double = { a, b in a / b }
 func mk30() -> (Double) -> Double { return { x in x / 2 } }
+// A PARAMETER whose declared type is structural adopts its argument too - the head
+// of docs/todo.md 1.2. ap30's is a function type (the wrapper is built by the
+// emitter), aq30's has no adoptable leaf anywhere in it, so it must still emit no
+// adoption call at all and answer its argument untouched.
+func ap30(_ f: (Double) -> Double) -> Double { return f(3) }
+func aq30(_ xs: [String]) -> String { return xs[0] }
 
 func s30() {
     // Every operand is read out of an array, so nothing here is constant-folded.
@@ -1346,13 +1352,23 @@ func s30() {
     check("30g", g30(3) == 1.5 && g30b(3, 2) == 1.5)
     check("30h", F30(fn: { x in x / 2 }).fn(3) == 1.5)
     check("30i", mk30()(3) == 1.5)
-    // NOT closed, and asserted at the value we give: a function type NESTED in a
-    // container annotation. The compiler half hands a structural annotation to
-    // js_swadoptdeep in layer 2, which builds no closures, so wrapping the
-    // elements here and not there would trade one wrong answer for a halves
-    // divergence. swiftc says 1.5.
+    // A function type NESTED in a container annotation - an array, a dictionary
+    // value and a tuple element (docs/todo.md 1.2). It used to answer 1 and was
+    // asserted at that value, because the compiler half hands a structural
+    // annotation to js_swadoptdeep in LAYER 2 and layer 2 builds no closures. It
+    // does not have to: the emitter knows every function-type leaf of the
+    // annotation text at compile time, so it builds one MAKER closure per distinct
+    // leaf and passes js_swadoptdeep a map from the leaf's canonical text to its
+    // maker. swiftc 6.1.2 says 1.5 for all three.
     let arr30: [(Double) -> Double] = [{ x in x / 2 }]
-    check("30j", arr30[0](3) == 1)
+    check("30j", arr30[0](3) == 1.5)
+    let dic30: [String: (Double) -> Double] = ["h": { x in x / 2 }]
+    check("30j2", dic30["h"]!(3) == 1.5)
+    let tup30: ((Double) -> Double, Int) = ({ x in x / 2 }, 1)
+    check("30j3", tup30.0(3) == 1.5 && tup30.1 == 1)
+    // A parameter whose annotation is itself a function type adopts the same way,
+    // and one with no adoptable leaf in it is left alone.
+    check("30j4", ap30({ x in x / 2 }) == 1.5 && aq30(["x"]) == "x")
 
     // A NEW dictionary key adopts the declared element type.
     var d1: [String: Double] = [:]
@@ -1377,6 +1393,117 @@ func s30() {
     // spelled `(3 as Int8) is Int` and only warns.
     let a8: [Any] = [3 as Int8, 3 as Double]
     check("30p", (a8[0] is Int8) && !(a8[0] is Int) && (a8[1] is Double))
+}
+
+// ===== SECTION 31: structural PARAMETERS, collection method adoption, =====
+// =====             inout overloads, inherited overload groups, statics =====
+//
+// docs/todo.md 1.2, all five reproduced against swiftc 6.1.2 and all five wrong
+// in ALL THREE engines before this section, so --cross was blind to every one.
+//
+//  * A STRUCTURALLY TYPED PARAMETER did not adopt. `func f(_ xs: [Double])`
+//    called `f([3])` bound a plain Int array and `xs[0] / 2` answered 1 where
+//    swiftc says 1.5. makeParam's gate was swAdoptable, i.e. a plain type NAME,
+//    and the comment above the ParamType rule claimed the opposite. The gate is
+//    now swAdoptNeeded, which asks whether any identifier token in the annotation
+//    text names an adopting type - so `[String]` still emits no call at all, and
+//    js_swadoptdeep does not go on the per-call path of every annotated program
+//    (the +10.3% charAt trap of a68e16d).
+//  * ELEMENT ADOPTION THROUGH A METHOD CALL. `arr.append(3)` into a
+//    `var arr: [Double]` stored an Int, while the index write `arr[1] = 3` had
+//    adopted since the write-site work - makeAssign knows its target's NAME and a
+//    method chain did not. The value model cannot answer it either (manual 7.15):
+//    appending to an EMPTY [Double] has no sibling to take a type from.
+//  * AN INOUT OVERLOAD was not selectable by type: the argument arrives as the
+//    one-slot {__ref, v} write-back box, so js_swfits was asking whether a BOX is
+//    an Int and both `ov(inout Int)` and `ov(inout String)` ran the first entry.
+//  * A SUBCLASS OVERRIDING ONE OF SEVERAL inherited overloads shadowed the whole
+//    group: the derived table's plain `m` slot is what the __class walk finds, so
+//    the un-overridden siblings were unreachable.
+//  * STATIC METHOD OVERLOADS were stored under a bare name and the last one won.
+//
+// Every value below is swiftc 6.1.2's own output.
+func p31a(_ xs: [Double]) -> Double { return xs[0] / 2 }
+func p31b(_ m: [String: Double]) -> Double { return m["k"]! / 2 }
+func p31c(_ t: (Double, Int)) -> Double { return t.0 / 2 }
+func p31d(_ x: Double?) -> Double { return x! / 2 }
+func p31e(_ xs: [[Double]]) -> Double { return xs[0][0] / 2 }
+func p31f(_ xs: [Int8]) -> Int8 { return xs[0] }
+
+func ov31(_ x: inout Int) { x = x + 100 }
+func ov31(_ x: inout String) { x = x + "!" }
+
+class B31 {
+    func m(_ a: Int) -> String { return "bI" }
+    func m(_ a: String) -> String { return "bS" }
+    func m(_ a: Double) -> String { return "bD" }
+}
+class D31: B31 {
+    override func m(_ a: Int) -> String { return "dI" }
+}
+class E31: D31 {
+    override func m(_ a: String) -> String { return "eS" }
+}
+class K31 {
+    static func g(_ a: Int) -> String { return "kI" }
+    static func g(_ a: String) -> String { return "kS" }
+}
+struct S31 {
+    static func h(_ a: Int) -> String { return "sI" }
+    static func h(_ a: String) -> String { return "sS" }
+}
+
+func s31() {
+    // Every operand that is not the subject of a literal's adoption is read out of
+    // an array, so the constant folder cannot answer these rows.
+    let ii: [Int] = [3, 5]
+    let ss: [String] = ["x"]
+    check("31a", p31a([3]) == 1.5 && p31a([5]) == 2.5)
+    check("31b", p31b(["k": 3]) == 1.5)
+    check("31c", p31c((3, 1)) == 1.5)
+    check("31d", p31d(3) == 1.5)
+    check("31e", p31e([[3]]) == 1.5)
+    check("31f", p31f([3]) == 3)
+
+    var a31: [Double] = [1.0]
+    a31.append(3)
+    check("31g", a31[1] / 2 == 1.5)
+    var b31: [Double] = []
+    b31.append(5)
+    check("31h", b31[0] / 2 == 2.5)
+    var c31: [Int8] = []
+    c31.append(100)
+    check("31i", c31[0] == 100)
+    // A collection with no adoptable element type is untouched.
+    var d31: [String] = []
+    d31.append(ss[0])
+    check("31j", d31[0] == "x")
+    // insert(_:at:) existed in NO engine and aborted with *unknown Array method*;
+    // it is the same element-adoption site as append.
+    var e31: [Double] = []
+    e31.insert(7, at: 0)
+    e31.insert(9, at: 0)
+    e31.insert(11, at: 1)
+    check("31q", e31[0] / 2 == 4.5 && e31[1] / 2 == 5.5 && e31[2] / 2 == 3.5 && e31.count == 3)
+    var f31: [String] = ["x", "z"]
+    f31.insert(ss[0], at: 1)
+    check("31r", f31[0] == "x" && f31[1] == "x" && f31[2] == "z")
+
+    var vi = ii[0]
+    var vs = ss[0]
+    ov31(&vi)
+    ov31(&vs)
+    check("31k", vi == 103 && vs == "x!")
+
+    let d = D31()
+    check("31l", d.m(ii[0]) == "dI")
+    check("31m", d.m(ss[0]) == "bS" && d.m(1.5) == "bD")
+    // Two levels: E31 overrides the String one, D31 the Int one, B31 keeps Double.
+    let e = E31()
+    check("31n", e.m(ii[0]) == "dI" && e.m(ss[0]) == "eS" && e.m(1.5) == "bD")
+
+    check("31o", K31.g(ii[0]) == "kI" && K31.g(ss[0]) == "kS")
+    check("31p", S31.h(ii[0]) == "sI" && S31.h(ss[0]) == "sS")
 }
 
 // ===== END SECTIONS =====
@@ -1412,6 +1539,7 @@ func main() {
     s28() // SECTION-CALL 28
     s29() // SECTION-CALL 29
     s30() // SECTION-CALL 30
+    s31() // SECTION-CALL 31
     print("full: \(checks) checks, \(fails) failures")
 }
 

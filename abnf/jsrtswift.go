@@ -371,8 +371,16 @@ func init() {
 		//
 		// Twins: swAdoptDeep in languages/swift-interpreter.abnf and
 		// js_swadoptdeep in languages/lib/swift-rt.metajs.
-		var swAdoptDeep func(v interface{}, ty string) interface{}
-		swAdoptDeep = func(v interface{}, ty0 string) interface{} {
+		//
+		// fmap is the emitter's map from a function-type LEAF's canonical text
+		// to a maker closure that answers the adopting wrapper for a value of
+		// that type. Layer 2 builds no closures and neither does this walk, so a
+		// nested `[(Double) -> Double]` had no way to adopt at all; the emitter
+		// knows every such leaf at compile time and hands the makers down. It is
+		// nil for every annotation with no function-type leaf, which is nearly
+		// all of them.
+		var swAdoptDeep func(v interface{}, ty string, fmap *jsObject) interface{}
+		swAdoptDeep = func(v interface{}, ty0 string, fmap *jsObject) interface{} {
 			if ty0 == "" || isNullish(v) {
 				return v
 			}
@@ -387,6 +395,11 @@ func init() {
 			ty := strings.TrimRight(strings.TrimSpace(ty0), "?!")
 			if ty == "" {
 				return v
+			}
+			if fmap != nil {
+				if mk, ok := fmap.props[ty]; ok && isCallable(mk) {
+					return rt.call(mk, jsUndef, []interface{}{v})
+				}
 			}
 			if len(ty) >= 2 && ty[0] == '[' && ty[len(ty)-1] == ']' {
 				inner := ty[1 : len(ty)-1]
@@ -407,7 +420,7 @@ func init() {
 					}
 					vt := strings.TrimSpace(kv[1])
 					for i, e := range vals.elems {
-						vals.elems[i] = swAdoptDeep(e, vt)
+						vals.elems[i] = swAdoptDeep(e, vt, fmap)
 					}
 					return v
 				}
@@ -417,7 +430,7 @@ func init() {
 				}
 				out := make([]interface{}, len(arr.elems))
 				for i, e := range arr.elems {
-					out[i] = swAdoptDeep(e, inner)
+					out[i] = swAdoptDeep(e, inner, fmap)
 				}
 				return &jsArray{elems: out}
 			}
@@ -435,7 +448,7 @@ func init() {
 				// index, and both copies have to adopt or t.lo and t.0 disagree.
 				lbls := swStrArray(o.props["__tlabels"])
 				for i := 0; i < n && i < len(tys); i++ {
-					nv := swAdoptDeep(o.props[itoa(i)], swTyElem(tys[i]))
+					nv := swAdoptDeep(o.props[itoa(i)], swTyElem(tys[i]), fmap)
 					o.set(itoa(i), nv)
 					if i < len(lbls) && lbls[i] != "" {
 						o.set(lbls[i], nv)
@@ -496,7 +509,21 @@ func init() {
 				t = t[:i]
 			}
 			t = strings.TrimRight(t, "?!")
+			// An `inout` argument arrives as the one-slot {__ref, v}
+			// write-back box the call site built, so selection was asking
+			// whether a BOX is an Int and every answer was no - two
+			// `inout` overloads both ran the first entry, in all three
+			// engines (docs/todo.md 1.2). The declared type belongs to
+			// what the box HOLDS. Twins: swUnref in
+			// languages/lib/swift-rt.metajs and swArgFits in
+			// languages/swift-interpreter.abnf.
 			v := u(a[0])
+			if o, ok := v.(*jsObject); ok {
+				if _, isRef := o.props["__ref"]; isRef {
+					v = o.props["v"]
+					a = []uint64{w(v), a[1]}
+				}
+			}
 			if t == "Double" || t == "Float" {
 				if swIsFlo(v) {
 					return boolH(true)
@@ -522,7 +549,11 @@ func init() {
 		}
 		m["js_swadoptdeep"] = func(a []uint64) uint64 {
 			ty, _ := u(a[1]).(string)
-			return w(swAdoptDeep(u(a[0]), ty))
+			var fmap *jsObject
+			if len(a) > 2 {
+				fmap, _ = u(a[2]).(*jsObject)
+			}
+			return w(swAdoptDeep(u(a[0]), ty, fmap))
 		}
 		// js_swis(v, T) is `v is T` / `v as? T` / `v as! T` (docs/todo.md 1.2).
 		//
@@ -664,6 +695,26 @@ func init() {
 		m["js_swmcall"] = func(a []uint64) uint64 {
 			f, isFlo := u(a[0]).(jsJFlo)
 			if !isFlo {
+				// insert(_:at:) existed in no engine and aborted
+				// with *unknown Array method*, found while closing
+				// docs/todo.md 1.2's append bullet. Twins:
+				// js_swmcall in languages/lib/swift-rt.metajs and
+				// arrayMethod in languages/swift-interpreter.abnf.
+				if arr, isArr := u(a[0]).(*jsArray); isArr && rt.toString(u(a[1])) == "insert" {
+					if ia, _ := u(a[2]).(*jsArray); ia != nil && len(ia.elems) > 1 {
+						at := jsToInt(rt.toNumber(ia.elems[1]))
+						if at < 0 {
+							at = 0
+						}
+						if at > len(arr.elems) {
+							at = len(arr.elems)
+						}
+						arr.elems = append(arr.elems, nil)
+						copy(arr.elems[at+1:], arr.elems[at:])
+						arr.elems[at] = ia.elems[0]
+						return jsHUndefined
+					}
+				}
 				// A STORED PROPERTY holding a closure is callable as
 				// `q.fn(3)`, and no such name is in the member table -
 				// so memberCall aborted with "unknown method 'fn' on

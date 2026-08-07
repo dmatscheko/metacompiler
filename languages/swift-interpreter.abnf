@@ -492,8 +492,10 @@ TupleTypeLabel = Id [ Id ] ":" ;
 // ProtoFunc) skips or reads the record; see swAdoptTy.
 // FnAnnType is here for the same reason it is in DeclAnnType: a STORED PROPERTY
 // and a RETURN TYPE put the function type on the slot, not on the value. It costs
-// nothing at a PARAMETER, which reads its own ParamType and whose `adopt` is
-// swAdoptable-gated, so no per-call wrapper is created by this line.
+// nothing at a PARAMETER, which reads its own ParamType rather than AnnType.
+// A PARAMETER adopts through the same annotation text, structural forms included -
+// `(xs: [Double])` and `(g: (Double) -> Double)` both adopt - but the gate is
+// swAdoptNeeded, so an annotation with no adoptable leaf in it still emits nothing.
 AnnType     = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | Type ;
 // The captured TEXT rides along beside the labels: a labelled tuple type declares
 // its element types too, and `let t: (x: Double, y: Int) = (3, 4)` has to hold 3.0
@@ -950,7 +952,7 @@ Await       <~~ pop(); push(notImplExpr("await expression", up.pos)) ~~>
             = KwAwait UnaryExpr ;
 
 // obj.m(args), obj.field, arr[i] - and a trailing closure becomes the last arg.
-CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+CallMember  <~~ push(foldCallMember(takeAll(), up.in)) ~~>
             = Primary { OptSfx | ForceSfx | MethodSfx | ProjSfx | FieldSfx | TupleSfx | IndexSfx | CallSfx } ;
 // p.$score: the PROJECTED value of a property wrapper. The $ is adjacent to the
 // name, so whitespace is off between them; the member is read under the name "$x",
@@ -2517,6 +2519,50 @@ KwContinue  = "continue" KwEnd ;
         if (ty == "Double" || ty == "Float") { return true }
         return swIntWidthOf(ty) != null
     }
+    // Does this annotation TEXT carry an adoptable leaf anywhere inside it? A
+    // parameter's adoption used to be gated on swAdoptable, i.e. on a plain type
+    // NAME, so `func f(_ xs: [Double])` called `f([3])` bound a plain Int array and
+    // `xs[0] / 2` integer-divided to 1 where swiftc 6.1.2 says 1.5 (docs/todo.md
+    // 1.2) - and the comment above ParamType claimed the opposite.
+    //
+    // The gate is not simply "is it structural": the compiler half would then put
+    // js_swadoptdeep on the per-call path of every structurally annotated parameter
+    // in every program, which is the +10.3% charAt trap its swTyIsDeep comment
+    // records. Both halves therefore ask the narrower question, at WALK time - does
+    // any identifier token in the text name a type that adopts - so a `[String]`, a
+    // `[T]` or a `(String, Bool)` parameter costs nothing at all.
+    //
+    // The separators are listed rather than the identifier characters because a type
+    // text is punctuation plus names, and MetaJS has no character class.
+    function swTyIsSep(ch) {
+        return ch == "[" || ch == "]" || ch == "(" || ch == ")" || ch == "<" || ch == ">"
+            || ch == "," || ch == ":" || ch == "?" || ch == "!" || ch == "-" || ch == " "
+            || ch == "\t" || ch == "&" || ch == "." || ch == "{" || ch == "}" || ch == "="
+    }
+    function swTyHasAdoptLeaf(ty) {
+        var i = 0
+        while (i < ty.length) {
+            if (swTyIsSep(ty.charAt(i))) { i = i + 1 }
+            else {
+                var s = i
+                while (i < ty.length && !swTyIsSep(ty.charAt(i))) { i = i + 1 }
+                if (swAdoptable(ty.substring(s, i))) { return true }
+            }
+        }
+        return false
+    }
+    function swTyIsDeepText(ty) {
+        var c0 = ty.charAt(0)
+        if (c0 == "[" || c0 == "(") { return true }
+        var cN = ty.charAt(ty.length - 1)
+        return cN == "?" || cN == "!"
+    }
+    function swAdoptNeeded(ty) {
+        if (ty == undefined || ty == null || ty == "") { return false }
+        if (swAdoptable(ty)) { return true }
+        if (!swTyIsDeepText(ty)) { return false }
+        return swTyHasAdoptLeaf(ty)
+    }
     function swAdoptNum(v) { return typeof v == "number" || szIs(v) }
     function swAdoptTy(v, ty) {
         if (ty == undefined || ty == null || ty == "") { return v }
@@ -2684,21 +2730,18 @@ KwContinue  = "continue" KwEnd ;
         var e = swTyTrim(kv[kv.length - 1])
         return swAdoptable(e) ? e : ""
     }
-    // A declared type as WRITTEN, which is where a function type is recognised. It
-    // is deliberately NOT part of swAdoptDeep's recursion: the compiler's twin path
-    // for a nested annotation is layer 2's js_swadoptdeep, which builds no closures,
-    // so wrapping the elements of `[(Double) -> Double]` here and not there would
-    // trade one wrong answer for a halves divergence. Top level in both, or neither.
-    function swAdoptAnn(v, ty) {
-        if (ty == undefined || ty == null || ty == "") { return v }
-        if (ty.charAt(0) == "(") {
-            var ar = swTyArrow(ty)
-            if (ar > 0) {
-                return swAdoptFn(v, swTyParamTys(ty, ar), swTyTrim(ty.substring(ar + 2, ty.length)))
-            }
-        }
-        return swAdoptDeep(v, ty)
-    }
+    // A declared type as WRITTEN, which is where a function type is recognised.
+    // It used to be deliberately OUTSIDE swAdoptDeep's recursion, because the
+    // compiler's twin for a nested annotation is layer 2's js_swadoptdeep and layer
+    // 2 builds no closures - so wrapping the elements of `[(Double) -> Double]` here
+    // and not there would have traded one wrong answer for a halves divergence.
+    // The compiler half now reaches those leaves too (the emitter builds one MAKER
+    // closure per distinct function-type text and hands js_swadoptdeep a map of
+    // them), so the recursion is INSIDE the walk in both halves and the function
+    // type is recognised wherever the walk reaches it. Twins: swFnMakerOf /
+    // js_swadoptdeep in languages/lib/swift-rt.metajs, swAdoptDeep in
+    // abnf/jsrtswift.go, swCollectFnTys / swFnMaker in swift-to-llvm-ir.abnf.
+    function swAdoptAnn(v, ty) { return swAdoptDeep(v, ty) }
     function swAdoptDeep(v, ty0) {
         if (ty0 == undefined || ty0 == null || ty0 == "") { return v }
         if (v === null || v === undefined) { return v }
@@ -2710,6 +2753,10 @@ KwContinue  = "continue" KwEnd ;
         if (c0 != "[" && c0 != "(" && cN != "?" && cN != "!") { return swAdoptTy(v, ty0) }
         var ty = swTyStripOpt(swTyTrim(ty0))
         if (ty.length < 2) { return swAdoptTy(v, ty) }
+        var arF = swTyArrow(ty)
+        if (arF > 0 && ty.charAt(0) == "(") {
+            return swAdoptFn(v, swTyParamTys(ty, arF), swTyTrim(ty.substring(arF + 2, ty.length)))
+        }
         var last = ty.charAt(ty.length - 1)
         var inner = ty.substring(1, ty.length - 1)
         if (ty.charAt(0) == "[" && last == "]") {
@@ -3003,6 +3050,20 @@ KwContinue  = "continue" KwEnd ;
         var out
         if (name == "count") { return t.length }
         if (name == "append") { t.push(args[0]); return undefined }
+        // insert(_:at:) existed in no engine and aborted with *unknown Array
+        // method*, found while closing docs/todo.md 1.2's append bullet. There is
+        // no splice in this dialect, so the tail is shifted up by one. Twins:
+        // js_swmcall in languages/lib/swift-rt.metajs and abnf/jsrtswift.go.
+        if (name == "insert") {
+            var at = args[1] | 0
+            if (at < 0) { at = 0 }
+            if (at > t.length) { at = t.length }
+            t.push(args[0])
+            var jj = t.length - 1
+            while (jj > at) { t[jj] = t[jj - 1]; jj = jj - 1 }
+            t[at] = args[0]
+            return undefined
+        }
         if (name == "contains") { return t.indexOf(args[0]) >= 0 }
         if (name == "first") { return t.length == 0 ? null : t[0] }
         if (name == "last") { return t.length == 0 ? null : t[t.length - 1] }
@@ -3786,7 +3847,13 @@ KwContinue  = "continue" KwEnd ;
         // argument, "" for the overwhelming majority that adopt nothing. It is
         // decided once, here, so swBindArgs pays one string comparison per call.
         // A VARIADIC parameter binds an array, not a value, so it adopts nothing.
-        var ad = (!isVar && swAdoptable(type)) ? type : ""
+        //
+        // swAdoptNeeded, not swAdoptable: a STRUCTURAL annotation adopts too
+        // (`[Double]`, `[String: Double]`, `(Double, Int)`, `Double?`,
+        // `(Double) -> Double`), which is what the comment above the ParamType rule
+        // always claimed and the code did not do (docs/todo.md 1.2). The compiler
+        // half's twin is the same one-word change in its own makeParam.
+        var ad = (!isVar && swAdoptNeeded(type)) ? type : ""
         return {name: name, label: label, type: type, adopt: ad, variadic: isVar, auto: isAuto,
                 inout: isInout, hasDefault: hasDflt, dflt: dflt}
     }
@@ -3955,10 +4022,38 @@ KwContinue  = "continue" KwEnd ;
         }
     }
     // The member-chain fold, with argument records instead of bare thunks.
-    foldCallMember = function(items) {
+    // The name a chain STARTS with, when it starts with a bare one: the matched text
+    // up to the first `.`, and "" for every other shape (`f(x).m()`, `a[0].m()`,
+    // a literal). It exists for one reason - `arr.append(3)` into a `var arr:
+    // [Double]` stored a plain Int, so `arr[1] / 2` answered 1 where swiftc 6.1.2
+    // says 1.5 (docs/todo.md 1.2), while the INDEX write `arr[1] = 3` had adopted
+    // since the write-site work because makeAssign knows the target's name.
+    //
+    // The value model cannot answer this one (manual 7.15): an element added by a
+    // method call to an EMPTY `[Double]` has no sibling to take a type from. So the
+    // receiver's declared type is read from the same walk-time declTyReg makeAssign
+    // reads, and the name has to come from the matched TEXT because a Primary is
+    // already a thunk by the time this runs.
+    function swRecvName(txt) {
+        if (txt == undefined || txt == null || txt.length == 0) { return "" }
+        var i = 0
+        while (i < txt.length && !swTyIsSep(txt.charAt(i))) { i = i + 1 }
+        if (i == 0 || i >= txt.length) { return "" }
+        if (txt.charAt(i) != ".") { return "" }
+        return txt.substring(0, i)
+    }
+    // The methods that add an ELEMENT to a collection, i.e. the ones whose first
+    // argument the receiver's element type adopts.
+    function swAddsElem(n) { return n == "append" || n == "insert" }
+    foldCallMember = function(items, txt) {
         if (items.length == 1) { return items[0] }
         var primary = items[0]
         var suffixes = items.slice(1)
+        var recvETy = ""
+        if (suffixes[0].kind == "mcall" && swAddsElem(suffixes[0].name)) {
+            recvETy = swElemTyOf(declTyOf(swRecvName(txt)))
+        }
+        var eTy0 = recvETy
         return function() {
             var cur = anytype
             cur = primary()
@@ -3971,6 +4066,9 @@ KwContinue  = "continue" KwEnd ;
                     // Force unwrap: the value is already the unwrapped one here.
                 } else if (s.kind == "mcall") {
                     var ea = evalArgs(s.args)
+                    if (i == 0 && eTy0 != "" && ea.argv.length > 0) {
+                        ea.argv[0] = swAdoptAnn(ea.argv[0], eTy0)
+                    }
                     pendingLabels = recLabels(s.args)
                     cur = mcall(cur, s.name, ea.argv)
                     pendingLabels = null
@@ -4465,7 +4563,21 @@ KwContinue  = "continue" KwEnd ;
     // `Bool` is here for the opposite reason: the shared probe spells the name
     // `Boolean`, so a `Bool` overload was never selectable at all and the
     // dispatcher fell back to its first entry.
-    function swArgFits(v, t0) {
+    // An `inout` argument arrives as the one-slot `{__ref, v}` write-back box the
+    // call site built, so overload selection was asking whether a BOX is an Int and
+    // every answer was no - `func ov(_ x: inout Int)` / `ov(_ x: inout String)` both
+    // ran the first entry, in all three engines (docs/todo.md 1.2). The declared
+    // type belongs to what the box HOLDS, so the box is opened here rather than at
+    // every caller. Twins: swUnref in languages/lib/swift-rt.metajs and js_swfits in
+    // abnf/jsrtswift.go.
+    function swUnref(v) {
+        if (v === null || v === undefined) { return v }
+        if (typeof v != "object") { return v }
+        if (v.__ref == undefined || v.__ref === null) { return v }
+        return v.v
+    }
+    function swArgFits(v0, t0) {
+        var v = swUnref(v0)
         var t = swBaseTy(t0)
         if (t == "Double" || t == "Float") { return isFlo(v) || typeof v == "number" }
         if (t == "Bool") { return typeof v == "boolean" }
@@ -4568,7 +4680,10 @@ KwContinue  = "continue" KwEnd ;
         var lst = hasOwn(cls, key) ? cls[key] : [{fn: cls[name], params: []}]
         lst.push({fn: fn, params: params})
         tput(cls, key, lst)
-        tput(cls, name, function() {
+        tput(cls, name, ovDispatcher(lst))
+    }
+    function ovDispatcher(lst) {
+        return function() {
             var labels = pendingLabels
             pendingLabels = null
             var args = []
@@ -4578,7 +4693,43 @@ KwContinue  = "continue" KwEnd ;
                 if (overloadFits(lst[k].params, args) && labelsFit(lst[k].params, labels)) { pick = lst[k].fn; break }
             }
             return pick.apply(undefined, arguments)
-        })
+        }
+    }
+    // A SUBCLASS that overrides ONE of several inherited overloads used to shadow the
+    // whole group: the derived table's plain `m` slot is found before the base's
+    // dispatcher is ever reached, so `Sub.m(String)` ran the overriding `m(Int)` in
+    // all three engines where swiftc 6.1.2 runs the inherited one (docs/todo.md 1.2).
+    // The base's candidates are therefore MERGED into the derived group, minus the
+    // ones the derived overrides - which is decided by the declared signature, the
+    // same information `override` carries. Derived candidates come first, so an
+    // ambiguous call still prefers the override.
+    function ovSigKey(params) {
+        var s = ""
+        for (var i = 0; i < params.length; i++) {
+            s = s + params[i].label + "|" + params[i].type + ";"
+        }
+        return s
+    }
+    function inheritOverloads(cls, name) {
+        if (name == "init") { return }
+        var sup = cls.__super
+        if (sup == undefined || sup === null) { return }
+        var sov = classFind(sup, "__ov_" + name)
+        if (sov == undefined || sov === null) { return }
+        var key = "__ov_" + name
+        if (!hasOwn(cls, key)) { return }
+        var lst = cls[key]
+        var have = {}
+        for (var i = 0; i < lst.length; i++) { scopePut(have, "$" + ovSigKey(lst[i].params), 1) }
+        var added = false
+        for (var k = 0; k < sov.length; k++) {
+            var sk = "$" + ovSigKey(sov[k].params)
+            if (hasOwn(have, sk)) { continue }
+            scopePut(have, sk, 1)
+            lst.push(sov[k])
+            added = true
+        }
+        if (added) { tput(cls, name, ovDispatcher(lst)) }
     }
     // The argument LABELS of the call currently being made, handed to an overload
     // dispatcher so `Meter15(feet: 2)` picks the extension initializer rather than the
@@ -4899,11 +5050,23 @@ KwContinue  = "continue" KwEnd ;
         for (var m = 0; m < mem.methods.length; m++) {
             addMethod(cls, mem.methods[m].name, makeMethodClosure(mem.methods[m], cls), mem.methods[m].params)
         }
+        // Every name declared here re-opens the group its SUPERCLASS declared under
+        // the same name, so overriding one overload does not hide the others.
+        for (var m2 = 0; m2 < mem.methods.length; m2++) { inheritOverloads(cls, mem.methods[m2].name) }
         for (var c2 = 0; c2 < mem.comps.length; c2++) { installComputed(mem.comps[c2], cls) }
         for (var lz = 0; lz < mem.lazies.length; lz++) { installLazy(mem.lazies[lz], cls) }
         for (var wp = 0; wp < mem.wrapped.length; wp++) { installWrapped(mem.wrapped[wp], cls) }
+        // addMethod, not tput: two `static func g` of the same name are an OVERLOAD
+        // exactly as two instance methods are, and a bare-name slot kept only the
+        // LAST of them, so `K.g(3)` ran `g(_ a: String)` in all three engines where
+        // swiftc 6.1.2 runs the Int one (docs/todo.md 1.2). A static is reached with
+        // the type descriptor at argv[0], the same shape addMethod's dispatcher
+        // already skips, so the whole mechanism transfers unchanged - including to a
+        // `static func +`, whose two operands now pick by TYPE rather than by
+        // declaration order.
         for (var sm = 0; sm < mem.statMethods.length; sm++) {
-            tput(cls, "__static_" + mem.statMethods[sm].name, makeMethodClosure(mem.statMethods[sm], cls))
+            addMethod(cls, "__static_" + mem.statMethods[sm].name,
+                      makeMethodClosure(mem.statMethods[sm], cls), mem.statMethods[sm].params)
         }
         for (var sc = 0; sc < mem.statComps.length; sc++) {
             var sp = mem.statComps[sc]

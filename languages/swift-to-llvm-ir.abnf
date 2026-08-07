@@ -493,8 +493,10 @@ TupleTypeLabel = Id [ Id ] ":" ;
 // ProtoFunc) skips or reads the record; see js_swadopt.
 // FnAnnType is here for the same reason it is in DeclAnnType: a STORED PROPERTY
 // and a RETURN TYPE put the function type on the slot, not on the value. It costs
-// nothing at a PARAMETER, which reads its own ParamType and whose `adopt` is
-// swAdoptable-gated, so no per-call wrapper is created by this line.
+// nothing at a PARAMETER, which reads its own ParamType rather than AnnType.
+// A PARAMETER adopts through the same annotation text, structural forms included -
+// `(xs: [Double])` and `(g: (Double) -> Double)` both adopt - but the gate is
+// swAdoptNeeded, so an annotation with no adoptable leaf in it still emits nothing.
 AnnType     = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | Type ;
 // The captured TEXT rides along beside the labels: a labelled tuple type declares
 // its element types too, and `let t: (x: Double, y: Int) = (3, 4)` has to hold 3.0
@@ -940,7 +942,7 @@ TryPlain    = KwTry [ "!" ] UnaryExpr ;
 Await       <~~ pop(); push(notImplExpr("await expression", up.pos)) ~~>
             = KwAwait UnaryExpr ;
 
-CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+CallMember  <~~ push(foldCallMember(takeAll(), up.in)) ~~>
             = Primary { OptSfx | ForceSfx | MethodSfx | ProjSfx | FieldSfx | TupleSfx | IndexSfx | CallSfx } ;
 // p.$score: the PROJECTED value of a property wrapper. The $ is adjacent to the
 // name, so whitespace is off between them; the member is read under the name "$x",
@@ -1796,6 +1798,45 @@ KwContinue  = "continue" KwEnd ;
         if (ty == "Double" || ty == "Float") { return true }
         return swIntWidthOf(ty) != null
     }
+    // Does this annotation TEXT carry an adoptable leaf anywhere inside it? A
+    // parameter's adoption used to be gated on swAdoptable, i.e. on a plain type
+    // NAME, so `func f(_ xs: [Double])` called `f([3])` bound a plain Int array and
+    // `xs[0] / 2` integer-divided to 1 where swiftc 6.1.2 says 1.5 (docs/todo.md
+    // 1.2) - and the comment above ParamType claimed the opposite.
+    //
+    // The gate cannot simply become swTyIsDeep: that would put js_swadoptdeep on the
+    // per-call path of EVERY structurally annotated parameter in every program,
+    // which is the +10.3% charAt trap swTyIsDeep's own comment below records. So the
+    // question asked here is the narrower one the emitter can actually answer at
+    // compile time - does any identifier token in the text name a type that adopts -
+    // and a `[String]`, a `[T]` or a `(String, Bool)` parameter emits exactly the IR
+    // it did before, no call at all.
+    //
+    // The separators are listed rather than the identifier characters because a type
+    // text is punctuation plus names, and MetaJS has no character class.
+    function swTyIsSep(ch) {
+        return ch == "[" || ch == "]" || ch == "(" || ch == ")" || ch == "<" || ch == ">"
+            || ch == "," || ch == ":" || ch == "?" || ch == "!" || ch == "-" || ch == " "
+            || ch == "\t" || ch == "&" || ch == "." || ch == "{" || ch == "}" || ch == "="
+    }
+    function swTyHasAdoptLeaf(ty) {
+        var i = 0
+        while (i < ty.length) {
+            if (swTyIsSep(ty.charAt(i))) { i = i + 1 }
+            else {
+                var s = i
+                while (i < ty.length && !swTyIsSep(ty.charAt(i))) { i = i + 1 }
+                if (swAdoptable(ty.substring(s, i))) { return true }
+            }
+        }
+        return false
+    }
+    function swAdoptNeeded(ty) {
+        if (ty == undefined || ty == null || ty == "") { return false }
+        if (swAdoptable(ty)) { return true }
+        if (!swTyIsDeep(ty)) { return false }
+        return swTyHasAdoptLeaf(ty)
+    }
     // The declared-type adoption, at every site that has a declared type: a
     // parameter, a function's return type, a stored property.
     //
@@ -1924,6 +1965,89 @@ KwContinue  = "continue" KwEnd ;
         // came back wrapped would stop comparing equal to nil.
         return b.NewSelect(truthy(b, callExt(b, "js_seq", [v, hNull])), v, wrapped)
     }
+    // ----- A function type NESTED inside a container annotation -----
+    //
+    // `let fs: [(Double) -> Double] = [{ x in x/2 }]` had fs[0](3) integer-divide
+    // and answer 1 where swiftc 6.1.2 says 1.5 (docs/todo.md 1.2), and the reason
+    // the top-level fix did not reach it is real: the walk that visits a container's
+    // leaves is js_swadoptdeep, which runs in LAYER 2, and layer 2 builds no
+    // closures. It does not have to. The emitter knows every function-type leaf of
+    // the annotation TEXT at compile time, so it builds one MAKER closure per
+    // distinct leaf - a function of one argument returning swEmitAdoptFn's wrapper
+    // for it - and hands the walker a map from the leaf's canonical text to its
+    // maker. The walk stays in layer 2 and the closure building stays here.
+    //
+    // The map is undefined for every annotation with no function-type leaf, which is
+    // all but a handful, so nothing is built or passed for them.
+    function swTyStripOptText(t0) {
+        var t = t0
+        while (t.length > 0 && (t.charAt(t.length - 1) == "?" || t.charAt(t.length - 1) == "!")) {
+            t = t.substring(0, t.length - 1)
+        }
+        return t
+    }
+    // The function-type leaves of an annotation, keyed exactly as js_swadoptdeep
+    // will key them: trimmed and with any Optional suffix stripped. The recursion is
+    // the walker's own three arms, so a leaf this collects is a leaf that walk
+    // reaches, and one it does not collect is never looked up.
+    function swCollectFnTys(ty0, out) {
+        if (ty0 == undefined || ty0 == null || ty0 == "") { return }
+        var ty = swTyStripOptText(swTyTrim(ty0))
+        if (ty.length < 2) { return }
+        var ar = swTyArrow(ty)
+        if (ar > 0 && ty.charAt(0) == "(") { out.push(ty); return }
+        var last = ty.charAt(ty.length - 1)
+        var inner = ty.substring(1, ty.length - 1)
+        if (ty.charAt(0) == "[" && last == "]") {
+            var kv = swTySplit(inner, ":")
+            if (kv.length == 2) { swCollectFnTys(swTyTrim(kv[1]), out) }
+            else { swCollectFnTys(swTyTrim(inner), out) }
+            return
+        }
+        if (ty.charAt(0) == "(" && last == ")") {
+            var ps = swTySplit(inner, ",")
+            for (var i = 0; i < ps.length; i++) { swCollectFnTys(swTyElem(ps[i]), out) }
+        }
+    }
+    // One maker function per distinct function-type TEXT: given a value, answer the
+    // adopting wrapper for it (or the value untouched when it is nil).
+    var fnMakerIdx = {}
+    function swFnMaker(fty) {
+        if (hasOwn(fnMakerIdx, "$" + fty)) { return fnMakerIdx["$" + fty] }
+        funcCount++
+        var idx = funcCount
+        fnMakerIdx["$" + fty] = idx
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        var savedScope = curScopeV
+        var savedLoops = loopStack
+        var savedTag = curFTag
+        curF = f
+        curFTag = idx
+        loopStack = []
+        var b = f.NewBlock("entry")
+        curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        var v = callExt(b, "js_arg", [f.Params[1], handle(0)])
+        var ar = swTyArrow(fty)
+        b.NewRet(swEmitAdoptFn(b, v, swTyParamTys(fty, ar),
+                               swTyTrim(fty.substring(ar + 2, fty.length)), fty))
+        curF = savedF
+        curScopeV = savedScope
+        loopStack = savedLoops
+        curFTag = savedTag
+        return idx
+    }
+    function swFnMapOf(b, ty) {
+        var tys = []
+        swCollectFnTys(ty, tys)
+        if (tys.length == 0) { return hUndef }
+        var o = callExt(b, "js_obj_new", [])
+        for (var i = 0; i < tys.length; i++) {
+            callExt(b, "js_set", [o, emitStr(b, tys[i]),
+                                  callExt(b, "js_closure", [handle(swFnMaker(tys[i])), curScopeV])])
+        }
+        return o
+    }
     // The ELEMENT type of an array or dictionary annotation, when it is a plain
     // adoptable leaf: `[Double]` -> Double, `[String: Double]` -> Double,
     // `[String: [Double]]` -> "" (see makeAssign for why the nested case declines).
@@ -1941,7 +2065,7 @@ KwContinue  = "continue" KwEnd ;
         if (ar > 0 && ty.charAt(0) == "(") {
             return swEmitAdoptFn(b, v, swTyParamTys(ty, ar), swTyTrim(ty.substring(ar + 2, ty.length)), ty)
         }
-        return callExt(b, "js_swadoptdeep", [v, emitStr(b, ty)])
+        return callExt(b, "js_swadoptdeep", [v, emitStr(b, ty), swFnMapOf(b, ty)])
     }
     // The bounds, spelled as DIGITS: Int64.max and UInt64.max cannot travel through
     // emitNum, which would round them to 9223372036854776000 and
@@ -3504,7 +3628,31 @@ KwContinue  = "continue" KwEnd ;
         if (!hasSubscript) { return callExt(b, core.indexExt, [cur, idxV]) }
         return b.NewCall(rtSubGet(), [cur, idxV])
     }
-    foldCallMember = function(items) {
+    // The name a chain STARTS with, when it starts with a bare one: the matched text
+    // up to the first `.`, and "" for every other shape (`f(x).m()`, `a[0].m()`,
+    // a literal). It exists for one reason - `arr.append(3)` into a `var arr:
+    // [Double]` stored a plain Int, so `arr[1] / 2` answered 1 where swiftc 6.1.2
+    // says 1.5 (docs/todo.md 1.2), while the INDEX write `arr[1] = 3` had adopted
+    // since the write-site work because makeAssign knows the target's name.
+    //
+    // The value model cannot answer this one (manual 7.15): an element added by a
+    // method call to an EMPTY `[Double]` has no sibling to take a type from. So the
+    // receiver's declared type is read from the same walk-time declTyReg makeAssign
+    // reads, and the name has to come from the matched TEXT because a Primary is
+    // already a thunk by the time this runs. The interpreter's twin is the same
+    // pair of helpers on its own foldCallMember.
+    function swRecvName(txt) {
+        if (txt == undefined || txt == null || txt.length == 0) { return "" }
+        var i = 0
+        while (i < txt.length && !swTyIsSep(txt.charAt(i))) { i = i + 1 }
+        if (i == 0 || i >= txt.length) { return "" }
+        if (txt.charAt(i) != ".") { return "" }
+        return txt.substring(0, i)
+    }
+    // The methods that add an ELEMENT to a collection, i.e. the ones whose first
+    // argument the receiver's element type adopts.
+    function swAddsElem(n) { return n == "append" || n == "insert" }
+    foldCallMember = function(items, txt) {
         if (items.length == 1) {
             if (typeof items[0] != "function") { return function(b) { return {b: b, v: hUndef} } }
             return items[0]
@@ -3559,6 +3707,11 @@ KwContinue  = "continue" KwEnd ;
                 return {b: b, v: cur}
             }
         }
+        var recvETy = ""
+        if (suffixes[0].kind == "mcall" && swAddsElem(suffixes[0].name)) {
+            recvETy = swElemTyOf(declTyOf(swRecvName(txt)))
+        }
+        var eTy0 = recvETy
         return function(b) {
             var r = primary(b)
             b = r.b
@@ -3592,7 +3745,7 @@ KwContinue  = "continue" KwEnd ;
                     b = rc.b
                     cur = rc.v
                 } else if (s.kind == "mcall") {
-                    var ea = emitArgRecs(b, s.args)
+                    var ea = emitArgRecsInto(b, s.args, null, i == 0 ? eTy0 : "")
                     b = ea.b
                     var mnameV = emitStr(b, s.name)
                     // self.init(...) picks the initializer overload by its labels and
@@ -3764,7 +3917,14 @@ KwContinue  = "continue" KwEnd ;
         // decided once, here, so the prologue emits a js_swadopt call only where
         // one is owed. A VARIADIC parameter binds an array, not a value, so it
         // adopts nothing.
-        var ad = (!isVar && swAdoptable(type)) ? type : ""
+        //
+        // swAdoptNeeded, not swAdoptable: a STRUCTURAL annotation adopts too
+        // (`[Double]`, `[String: Double]`, `(Double, Int)`, `Double?`,
+        // `(Double) -> Double`), which is what the comment above the ParamType rule
+        // always claimed and the code did not do (docs/todo.md 1.2). The gate still
+        // declines every annotation with no adoptable leaf in it, so a `[String]`
+        // parameter emits no call.
+        var ad = (!isVar && swAdoptNeeded(type)) ? type : ""
         return {name: name, label: label, type: type, adopt: ad, variadic: isVar, auto: isAuto,
                 inout: isInout, hasDefault: hasDflt, dflt: dflt}
     }
@@ -3811,7 +3971,7 @@ KwContinue  = "continue" KwEnd ;
     // Emits the argument array. An &x argument becomes a one-slot box the callee
     // writes back into; emitWriteBacks copies the boxes home after the call.
     function emitArgRecs(b, recs) { return emitArgRecsInto(b, recs, null) }
-    function emitArgRecsInto(b, recs, into) {
+    function emitArgRecsInto(b, recs, into, ety0) {
         var arr = (into == null) ? callExt(b, "js_arr_new", []) : into
         var boxes = []
         for (var i = 0; i < recs.length; i++) {
@@ -3832,6 +3992,10 @@ KwContinue  = "continue" KwEnd ;
                 b = r.b
                 v = r.v
             }
+            // ety0 is the ELEMENT type a collection method's first argument adopts
+            // (`arr.append(3)` into a `[Double]`); it is "" everywhere else, so no
+            // call is emitted for any other argument list.
+            if (i == 0 && ety0 != undefined && ety0 != null && ety0 != "") { v = swEmitAdopt(b, v, ety0) }
             callExt(b, "js_arr_push", [arr, v])
         }
         return {b: b, v: arr, boxes: boxes}
@@ -5113,7 +5277,7 @@ KwContinue  = "continue" KwEnd ;
     // labels and count are known statically.
     var typeInfo = {}
     function typeRec(name) {
-        if (!hasOwn(typeInfo, "$" + name)) { typeInfo["$" + name] = {inits: [], superName: null} }
+        if (!hasOwn(typeInfo, "$" + name)) { typeInfo["$" + name] = {inits: [], superName: null, meths: {}} }
         return typeInfo["$" + name]
     }
     function memberKey(name, n) { return n == 0 ? name : name + "$" + n }
@@ -5210,13 +5374,90 @@ KwContinue  = "continue" KwEnd ;
         if (!hasOwn(cands, ck)) { names.push(name); cands[ck] = [] }
         cands[ck].push({key: n == 0 ? name + "$0" : memberKey(name, n), params: params})
     }
-    function emitOverloadSlots(b, tblV, names, cands) {
+    // ----- Inheriting an overload GROUP (docs/todo.md 1.2) -----
+    //
+    // A SUBCLASS that overrides ONE of several inherited overloads used to shadow the
+    // whole group: the derived table's plain `m` slot is what js_mcall's __class walk
+    // finds first, so `Sub.m(String)` ran the overriding `m(Int)` in all three engines
+    // where swiftc 6.1.2 runs the inherited one. The base's candidates are therefore
+    // MERGED into the derived group - minus the ones the derived overrides, decided by
+    // the declared signature, which is the same information `override` carries.
+    //
+    // The slots have to be COPIED onto the derived descriptor, for the reason the
+    // inherited initializers are: js_get does NOT walk __super, and the dispatcher
+    // reads its siblings out of the table in its own scope. `$b` cannot collide with
+    // memberKey's numbering. rec.meths therefore records, per type, the FINAL key of
+    // every candidate on THAT type's own table, which is what makes a three-level
+    // chain work - the middle class carries copies by the time the third is emitted.
+    function ovSigKey(params) {
+        var s = ""
+        for (var i = 0; i < params.length; i++) { s = s + params[i].label + "" + params[i].type + "" }
+        return s
+    }
+    function superMethGroup(sn0, nm) {
+        var sn = sn0
+        var guard = 0
+        while (sn != null && guard < 64) {
+            guard++
+            if (!hasOwn(typeInfo, "$" + sn)) { return null }
+            var r = typeInfo["$" + sn]
+            if (r.meths != undefined && r.meths != null && hasOwn(r.meths, "$" + nm)) { return r.meths["$" + nm] }
+            sn = r.superName
+        }
+        return null
+    }
+    function emitInheritOverloads(b, tblV, names, cands, tname) {
+        if (tname == undefined || tname == null || tname == "") { return b }
+        if (!hasOwn(typeInfo, "$" + tname)) { return b }
+        var sn0 = typeInfo["$" + tname].superName
+        if (sn0 == null) { return b }
+        for (var i = 0; i < names.length; i++) {
+            var nm = names[i]
+            var slist = superMethGroup(sn0, nm)
+            if (slist == null) { continue }
+            var lst = cands["$" + nm]
+            var have = {}
+            for (var q = 0; q < lst.length; q++) { have["$" + ovSigKey(lst[q].params)] = 1 }
+            for (var k = 0; k < slist.length; k++) {
+                var sk = "$" + ovSigKey(slist[k].params)
+                if (hasOwn(have, sk)) { continue }
+                have[sk] = 1
+                var ownV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, slist[k].owner)])
+                var nk = nm + "$b" + k
+                callExt(b, "js_set", [tblV, emitStr(b, nk),
+                                      callExt(b, "js_get", [ownV, emitStr(b, slist[k].key)])])
+                lst.push({key: nk, params: slist[k].params})
+            }
+        }
+        return b
+    }
+    // The FINAL storage key of every candidate, after emitOverloadSlots has decided
+    // whether a dispatcher displaced the plain name: with a dispatcher, candidate 0
+    // lives at `name$0`; without one, at `name` itself.
+    function recordMeths(tname, names, cands) {
+        if (tname == undefined || tname == null || tname == "") { return }
+        var rec = typeRec(tname)
+        if (rec.meths == undefined || rec.meths == null) { rec.meths = {} }
+        for (var i = 0; i < names.length; i++) {
+            var nm = names[i]
+            var lst = cands["$" + nm]
+            var out = hasOwn(rec.meths, "$" + nm) ? rec.meths["$" + nm] : []
+            for (var k = 0; k < lst.length; k++) {
+                var key = lst[k].key
+                if (lst.length < 2 && key == nm + "$0") { key = nm }
+                out.push({key: key, params: lst[k].params, owner: tname})
+            }
+            rec.meths["$" + nm] = out
+        }
+    }
+    function emitOverloadSlots(b, tblV, names, cands, off) {
+        var aoff = (off == undefined || off == null) ? 1 : off
         for (var i = 0; i < names.length; i++) {
             var lst = cands["$" + names[i]]
             if (lst.length < 2) { continue }
             callExt(b, "js_set", [tblV, emitStr(b, names[i] + "$0"),
                                   callExt(b, "js_get", [tblV, emitStr(b, names[i])])])
-            var didx = emitMemberDispatch(names[i], lst)
+            var didx = emitMemberDispatch(names[i], lst, aoff)
             var dsc = callExt(b, "js_scope_new", [curScopeV])
             callExt(b, "js_scope_decl", [dsc, emitStr(b, "__ovtbl"), tblV])
             callExt(b, "js_set", [tblV, emitStr(b, names[i]),
@@ -5232,7 +5473,10 @@ KwContinue  = "continue" KwEnd ;
     // every arity test is against one more than the declared count and argument j
     // lives at j + 1; the whole array is forwarded untouched, which is what keeps a
     // `mutating` method and an inout write-back working through the indirection.
-    function emitMemberDispatch(name, lst) {
+    // `off` is how many leading arguments belong to the receiver: 1 for an instance
+    // member (memberCall prepends it), 0 for a STATIC, which a type descriptor is
+    // called with no receiver at all.
+    function emitMemberDispatch(name, lst, off) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -5258,19 +5502,19 @@ KwContinue  = "continue" KwEnd ;
                 else if (!P[q].hasDefault) { req++ }
             }
             var okB = curF.NewBlock("")
-            b.NewCondBr(truthy(b, callExt(b, "js_ge", [nargs, emitNum(b, req + 1)])), okB, nextB)
+            b.NewCondBr(truthy(b, callExt(b, "js_ge", [nargs, emitNum(b, req + off)])), okB, nextB)
             b = okB
             if (!varia) {
                 var okB2 = curF.NewBlock("")
-                b.NewCondBr(truthy(b, callExt(b, "js_le", [nargs, emitNum(b, P.length + 1)])), okB2, nextB)
+                b.NewCondBr(truthy(b, callExt(b, "js_le", [nargs, emitNum(b, P.length + off)])), okB2, nextB)
                 b = okB2
             }
             for (var j = 0; j < P.length; j++) {
                 if (P[j].variadic || P[j].type == "") { continue }
                 var haveB = curF.NewBlock("")
                 var contB = curF.NewBlock("")
-                b.NewCondBr(truthy(b, callExt(b, "js_le", [nargs, emitNum(b, j + 1)])), contB, haveB)
-                var tv = callExt(haveB, "js_swfits", [callExt(haveB, "js_arg", [argsV, handle(j + 1)]),
+                b.NewCondBr(truthy(b, callExt(b, "js_le", [nargs, emitNum(b, j + off)])), contB, haveB)
+                var tv = callExt(haveB, "js_swfits", [callExt(haveB, "js_arg", [argsV, handle(j + off)]),
                                                       emitStr(haveB, P[j].type)])
                 haveB.NewCondBr(truthy(haveB, tv), contB, nextB)
                 b = contB
@@ -5290,6 +5534,9 @@ KwContinue  = "continue" KwEnd ;
         var seen = {}
         var ovNames = []
         var ovCands = {}
+        var statSeen = {}
+        var statNames = []
+        var statCands = {}
         for (var i = 0; i < mem.methods.length; i++) {
             var mth = mem.methods[i]
             var n = hasOwn(seen, "$" + mth.name) ? seen["$" + mth.name] : 0
@@ -5299,7 +5546,9 @@ KwContinue  = "continue" KwEnd ;
                                   callExt(b, "js_closure", [handle(idx), curScopeV])])
             noteOverload(ovNames, ovCands, mth.name, n, mth.params)
         }
+        b = emitInheritOverloads(b, tblV, ovNames, ovCands, tname)
         b = emitOverloadSlots(b, tblV, ovNames, ovCands)
+        recordMeths(tname, ovNames, ovCands)
         for (var c = 0; c < mem.comps.length; c++) { b = emitComputed(b, tblV, mem.comps[c]) }
         for (var lz = 0; lz < mem.lazies.length; lz++) { b = emitLazy(b, tblV, mem.lazies[lz]) }
         for (var wp = 0; wp < mem.wrapped.length; wp++) { b = emitWrapped(b, tblV, mem.wrapped[wp]) }
@@ -5311,9 +5560,19 @@ KwContinue  = "continue" KwEnd ;
             var sidx = emitFunc(st.params, st.body, st.name.slice(0, 6) == "__sub_", false, st.rlabels, st.rtype)
             var skey = st.name.slice(0, 6) == "__sub_" ? "__static_" + st.name : st.name
             if (isOperatorName(st.name)) { skey = st.name }
-            callExt(b, "js_set", [statV, emitStr(b, skey),
+            // Two `static func g` of the same name are an OVERLOAD exactly as two
+            // instance methods are, and a bare-name slot kept only the LAST of them:
+            // `K.g(3)` ran `g(_ a: String)` in all three engines where swiftc 6.1.2
+            // runs the Int one (docs/todo.md 1.2). The instance machinery transfers
+            // whole, at ARGUMENT OFFSET 0: memberCall passes a receiver only when the
+            // target has a __class, and a type descriptor has none.
+            var sn = hasOwn(statSeen, "$" + skey) ? statSeen["$" + skey] : 0
+            statSeen["$" + skey] = sn + 1
+            callExt(b, "js_set", [statV, emitStr(b, memberKey(skey, sn)),
                                   callExt(b, "js_closure", [handle(sidx), curScopeV])])
+            noteOverload(statNames, statCands, skey, sn, st.params)
         }
+        b = emitOverloadSlots(b, statV, statNames, statCands, 0)
         for (var sc = 0; sc < mem.statComps.length; sc++) {
             var sp = mem.statComps[sc]
             if (sp.get != null) {
@@ -5731,6 +5990,7 @@ KwContinue  = "continue" KwEnd ;
             noteOverload(ovNames, ovCands, mth.name, n, mth.params)
         }
         b = emitOverloadSlots(b, tblV, ovNames, ovCands)
+        recordMeths(tname, ovNames, ovCands)
         for (var c = 0; c < mem.comps.length; c++) { b = emitComputed(b, tblV, mem.comps[c]) }
         var only = {raw: "", inherits: [], cases: [], nested: mem.nested, fields: [], initProps: [],
                     methods: [], comps: [], statProps: mem.statProps, statMethods: mem.statMethods,

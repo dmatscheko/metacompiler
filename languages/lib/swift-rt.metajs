@@ -1503,7 +1503,19 @@ function js_swsafeget(o, k) {
     return o[k]
 }
 
-function js_swfits(v, ty) {
+// An `inout` argument arrives as the one-slot `{__ref, v}` write-back box the call
+// site built, so overload selection was asking whether a BOX is an Int and every
+// answer was no - `func ov(_ x: inout Int)` / `ov(_ x: inout String)` both ran the
+// first entry, in all three engines (docs/todo.md 1.2). The declared type belongs to
+// what the box HOLDS, so the box is opened here rather than at every caller.
+function swUnref(v) {
+    if (v === undefined || v === null) { return v }
+    if (typeof v != "object") { return v }
+    if (v["__ref"] === undefined || v["__ref"] === null) { return v }
+    return v["v"]
+}
+function js_swfits(v0, ty) {
+    var v = swUnref(v0)
     var t = swStripTyOpt(swStripAngleTy(ty))
     if (t == "Double" || t == "Float") { return floIs(v) || typeof v == "number" }
     if (t == "Bool") { return typeof v == "boolean" }
@@ -1514,7 +1526,18 @@ function js_swfits(v, ty) {
     return js_is_type(v, ty)
 }
 
-function js_swadoptdeep(v, ty0) {
+// fmap is the emitter's map from a function-type LEAF's canonical text to a maker
+// closure answering the adopting wrapper for a value of that type. This walk builds
+// no closures - MetaJS has no `arguments`, so it cannot - which is why a nested
+// `[(Double) -> Double]` annotation had no way to adopt at all (docs/todo.md 1.2).
+// The emitter knows every such leaf at compile time and hands the makers down; fmap
+// is undefined for every annotation with no function-type leaf, which is nearly all.
+function swFnMakerOf(fmap, ty) {
+    if (fmap === undefined || fmap === null) { return undefined }
+    if (typeof fmap != "object") { return undefined }
+    return fmap[ty]
+}
+function js_swadoptdeep(v, ty0, fmap) {
     if (ty0 == "") { return v }
     if (v === undefined || v === null) { return v }
     // The fast path: a plain type NAME is the overwhelming majority of the sites
@@ -1525,35 +1548,37 @@ function js_swadoptdeep(v, ty0) {
     if (c0 != "[" && c0 != "(" && cN != "?" && cN != "!") { return js_swadopt(v, ty0) }
     var ty = swStripTyOpt(swTyTrim(ty0))
     if (ty.length < 2) { return js_swadopt(v, ty) }
+    var mk = swFnMakerOf(fmap, ty)
+    if (mk !== undefined && mk !== null) { return mk(v) }
     var last = ty.charAt(ty.length - 1)
     var inner = ty.substring(1, ty.length - 1)
     if (ty.charAt(0) == "[" && last == "]") {
         var kv = swTySplit(inner, ":")
-        if (kv.length == 2) { return swAdoptDictVals(v, swTyTrim(kv[1])) }
-        return swAdoptElems(v, inner)
+        if (kv.length == 2) { return swAdoptDictVals(v, swTyTrim(kv[1]), fmap) }
+        return swAdoptElems(v, inner, fmap)
     }
-    if (ty.charAt(0) == "(" && last == ")") { return swAdoptTupEls(v, swTySplit(inner, ",")) }
+    if (ty.charAt(0) == "(" && last == ")") { return swAdoptTupEls(v, swTySplit(inner, ","), fmap) }
     return js_swadopt(v, ty)
 }
-function swAdoptElems(v, ety) {
+function swAdoptElems(v, ety, fmap) {
     if (!rtIsArr(v)) { return v }
     var out = []
     var i = 0
-    while (i < v.length) { out.push(js_swadoptdeep(v[i], ety)); i = i + 1 }
+    while (i < v.length) { out.push(js_swadoptdeep(v[i], ety, fmap)); i = i + 1 }
     return out
 }
 // A dictionary is keys/vals parallel arrays in all three engines, so only the
 // vals array is rewritten - the keys keep their own types and their order.
-function swAdoptDictVals(v, vty) {
+function swAdoptDictVals(v, vty, fmap) {
     if (!rtIsDictObj(v)) { return v }
     var vs = v["vals"]
     var i = 0
-    while (i < vs.length) { vs[i] = js_swadoptdeep(vs[i], vty); i = i + 1 }
+    while (i < vs.length) { vs[i] = js_swadoptdeep(vs[i], vty, fmap); i = i + 1 }
     return v
 }
 // A tuple's slots are "0".."n-1", and a LABELLED element additionally lives under
 // its label - both copies have to adopt, or `t.lo` and `t.0` disagree.
-function swAdoptTupEls(v, tys) {
+function swAdoptTupEls(v, tys, fmap) {
     if (v === undefined || v === null) { return v }
     if (typeof v != "object") { return v }
     var n = v["__tuple"]
@@ -1561,7 +1586,7 @@ function swAdoptTupEls(v, tys) {
     var lbls = v["__tlabels"]
     var i = 0
     while (i < n && i < tys.length) {
-        var nv = js_swadoptdeep(v["" + i], swTyElem(tys[i]))
+        var nv = js_swadoptdeep(v["" + i], swTyElem(tys[i]), fmap)
         v["" + i] = nv
         if (lbls !== undefined && lbls !== null && i < lbls.length && lbls[i] != "") { v[lbls[i]] = nv }
         i = i + 1
@@ -1636,7 +1661,25 @@ function js_swmin(l, r) { return swPick(l, r, false) }
 // 2.0.rounded() is 2.0, 2.5.squareRoot() is 1.5811388300841898 and
 // 7.0.truncatingRemainder(dividingBy: 2.0) is 1.0.
 function js_swmcall(recv, name, args) {
-    if (!floIs(recv)) { return js_mcall(recv, name, args) }
+    if (!floIs(recv)) {
+        // insert(_:at:) existed in no engine and aborted with *unknown Array
+        // method*, found while closing docs/todo.md 1.2's append bullet. There is
+        // no splice in this dialect, so the tail is shifted up by one. It sits
+        // INSIDE the non-float arm so a Double method call pays nothing for it.
+        // Twins: arrayMethod in languages/swift-interpreter.abnf and js_swmcall in
+        // abnf/jsrtswift.go.
+        if (name === "insert" && rtIsArr(recv) && args.length > 1) {
+            var at = swNum(args[1]) | 0
+            if (at < 0) { at = 0 }
+            if (at > recv.length) { at = recv.length }
+            recv.push(args[0])
+            var jj = recv.length - 1
+            while (jj > at) { recv[jj] = recv[jj - 1]; jj = jj - 1 }
+            recv[at] = args[0]
+            return undefined
+        }
+        return js_mcall(recv, name, args)
+    }
     var f = floNum(recv)
     var a0 = 0
     if (args.length > 0) { a0 = swNum(args[0]) }

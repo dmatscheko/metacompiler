@@ -377,6 +377,28 @@ func transform(_ list: [Int]) -> String {
     return out
 }
 
+// ----- docs/todo.md 1.2: a STRUCTURALLY typed parameter, collection method
+// ----- adoption, inout overloads, inherited overload groups, static overloads.
+// Every value here is swiftc 6.1.2's own; all five were wrong in all three
+// engines, so --cross could not see any of them.
+func adoptArrParam(_ xs: [Double]) -> Double { return xs[0] / 2 }
+func adoptDictParam(_ m: [String: Double]) -> Double { return m["k"]! / 2 }
+func adoptFnParam(_ f: (Double) -> Double) -> Double { return f(3) }
+func adoptNoLeafParam(_ xs: [String]) -> String { return xs[0] }
+func inoutOv(_ x: inout Int) { x = x + 100 }
+func inoutOv(_ x: inout String) { x = x + "!" }
+class OvBase {
+    func pick(_ a: Int) -> String { return "bI" }
+    func pick(_ a: String) -> String { return "bS" }
+}
+class OvSub: OvBase {
+    override func pick(_ a: Int) -> String { return "sI" }
+}
+class StatOv {
+    static func g(_ a: Int) -> String { return "I" }
+    static func g(_ a: String) -> String { return "S" }
+}
+
 func main() {
     // ----- numbers, arithmetic, precedence -----
     check("arith-precedence", 2 + 3 * 4 == 14)
@@ -834,6 +856,28 @@ func main() {
 
     // ----- combined pipeline -----
     check("combined-pipeline", transform([1, 2, -3]) == "o1e2x")
+
+    // ----- docs/todo.md 1.2 -----
+    let ovInts: [Int] = [3]
+    let ovStrs: [String] = ["x"]
+    check("param-struct-adopts", adoptArrParam([3]) == 1.5 && adoptDictParam(["k": 3]) == 1.5)
+    check("param-fn-adopts", adoptFnParam({ x in x / 2 }) == 1.5
+                             && adoptNoLeafParam(["x"]) == "x")
+    var appD: [Double] = []
+    appD.append(3)
+    var appD2: [Double] = [1.0]
+    appD2.append(5)
+    check("append-adopts", appD[0] / 2 == 1.5 && appD2[1] / 2 == 2.5)
+    let nestedFns: [(Double) -> Double] = [{ x in x / 2 }]
+    check("nested-fn-type-adopts", nestedFns[0](3) == 1.5)
+    var iv = ovInts[0]
+    var sv = ovStrs[0]
+    inoutOv(&iv)
+    inoutOv(&sv)
+    check("inout-overload-by-type", iv == 103 && sv == "x!")
+    let ovs = OvSub()
+    check("inherited-overload-group", ovs.pick(ovInts[0]) == "sI" && ovs.pick(ovStrs[0]) == "bS")
+    check("static-overloads", StatOv.g(ovInts[0]) == "I" && StatOv.g(ovStrs[0]) == "S")
 
     print("features: \(checks) checks, \(fails) failures")
 }
