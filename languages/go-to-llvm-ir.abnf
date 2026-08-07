@@ -170,8 +170,18 @@ FType       <~~ push({fty: firstType(up.in)}) ~~> = Type ;
 // An embedded field's NAME is its type name (w.base09, plus the promoted w.id).
 EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in); push({fty: ""}) ~~> [ FieldTag ] [ ";" ] ;
 FieldTag    = RawString <~~ pop() ~~> ;
-IfaceBody   <~~ push({iface: true}) ~~>
-            = "interface" KwEnd SkipBlock ;
+// THE METHOD SET IS PARSED WHEN THE BODY IS AN ORDINARY METHOD LIST, and the
+// SkipBlock alternative behind it keeps every other interface body parsing exactly as
+// it did: a constraint interface (~int | ~string), an embedded interface name, a
+// commented body all fail IfaceMethods and fall through with NO method names, which
+// means "satisfied by anything" - the same answer this grammar gave before. up.in is
+// not usable for this: a captured type text arrives with its WHITESPACE ALREADY
+// STRIPPED, so `Speak() string Fly()` reads as one identifier `stringFly`.
+// docs/todo.md 1.5.
+IfaceBody   <~~ push({iface: true, imeth: cIfaceMeths(takeAll())}) ~~>
+            = "interface" KwEnd ( IfaceMethods | SkipBlock ) ;
+IfaceMethods = "{" { IfaceMeth } "}" ;
+IfaceMeth   = Id <~~ push({imname: up.in}) ~~> FTParams [ SameLine FTRets ] [ ";" ] ;
 
 // A grouped type declaration (type ( A struct {...}; B int )). The whole body is
 // balanced-skipped and reported not implemented: unlike a single struct decl, its
@@ -872,11 +882,15 @@ MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll())) ~~>
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
-// x.(T): a type assertion, GENUINELY handled as the identity on the value (a
-// successful assertion yields the same underlying value; the target type is parsed
-// and ignored). It pushes no suffix, so foldCallMember passes the value through.
-// Only the single-result form is supported (not the comma-ok v, ok := x.(T)).
-TypeAssertSfx = "." "(" Type ")" ;
+// x.(T): a type assertion. The value is unchanged - a successful assertion yields
+// the same underlying value - but a target that is a DECLARED INTERFACE is now
+// CHECKED, and a value that does not have its methods panics the way Go does. Every
+// other target type is still the identity: js_gotypeis is deliberately approximate
+// for the numeric boxes, and a panic on a wrong answer is worse than the
+// pass-through that was here. The twin is TypeAssertSfx in go-interpreter.abnf.
+// docs/todo.md 1.5.
+TypeAssertSfx = "." "(" AssertSfxTy ")" ;
+AssertSfxTy <~~ push({kind: "assert", at: firstType(up.in)}) ~~> = Type ;
 
 Primary     = ParenConv | ParenGroup | ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit
             | BinLit | LegOctLit | DecULit | DqString | RawString | RuneLit
@@ -1600,6 +1614,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // and read by emitDivZ - the one emitted check whose only observable effect is on
     // a panic somebody catches. Over-triggering costs one call per integer division.
     var usesRecover = false
+    // Set at PARSE time by cRtyList / cNamedRets when any function declares 2+
+    // results, and read at EMIT time - which runs after the whole file is parsed, the
+    // same order usesRecover and usesComplex already rely on. It gates every
+    // multi-value instruction (see emitMvWrap). docs/todo.md 1.5.
+    var usesMultiRet = false
     var usesF32 = false
     // Every captured type text passes through here (firstType, which is what the
     // eight type-capturing tag rules push, and VType for a var/param
@@ -2520,6 +2539,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function cRtyList(items) {
         var out = []
         for (var i = 0; i < items.length; i++) { out.push(items[i].rty) }
+        if (out.length > 1) { usesMultiRet = true }
         return out
     }
     function cNamedRets(items) {
@@ -2532,6 +2552,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             pend = []
         }
         for (var p = 0; p < pend.length; p++) { names.push(pend[p]); tys.push("") }
+        if (names.length > 1) { usesMultiRet = true }
         return {rets: names, rtys: tys}
     }
     function cScopeEnter() {
@@ -2756,6 +2777,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // restores it around every nested function), read by return and by the fallthrough
     // end of a body.
     var curRets = []
+    // The RESULT TYPE TEXTS that go with curRets, saved and restored the same way.
+    // emitRetNil needs them to decide, statically, whether a nil result adopts a map
+    // or slice zero value (docs/todo.md 1.5).
+    var curRtys = []
 
     // ----- Project-file import state (see core.importFile near the core config) -----
     var importedFiles = {} // "$" + absolute file path -> already imported (once only)
@@ -2791,8 +2816,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var last = callExt(eb, "js_sub", [callExt(eb, "js_golen", [ea.v]), emitNum(eb, 1)])
             callExt(eb, "js_pyset", [ea.v, last, emitHelper(eb, "$sels", [callExt(eb, "js_map_get", [ea.v, last])])])
             callExt(eb, "js_gospread", [ea.v])
+            return ea
         }
-        return ea
+        // Go EXPANDS a multi-value call that is the SOLE argument of a call, so
+        // `add(two(x))` passes two arguments. Gated on usesMultiRet: a program with
+        // no 2-result function emits nothing here. docs/todo.md 1.5.
+        return {b: ea.b, v: emitMvArgs(ea.b, ea.v, args.length)}
     }
     // items = [name..., {vararg}?]: the parameter names, and whether the last one
     // collects the remaining arguments.
@@ -2841,6 +2870,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     var mxv = hUndef
                     if (s.mx != null) { var rm = s.mx(b); b = rm.b; mxv = rm.v }
                     cur = emitHelper(b, "$sslice", [cur, lov, hiv, mxv])
+                } else if (s.kind == "assert") {
+                    if (isIface(s.at)) {
+                        cur = callExt(b, "js_goifas", [cur, emitStr(b, s.at), emitStr(b, ifaceMethodCsv(s.at))])
+                    }
                 } else if (s.kind == "call") {
                     var ec = emitArgs2(b, s.args, s.spread)
                     b = ec.b
@@ -3682,6 +3715,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                                          callExt(b3, "js_sub", [rhi.v, rlo.v]),
                                          callExt(b3, "js_sub", [rmx.v, rlo.v]))
                     callExt(b3, "js_set", [outH, emitStr(b3, "et"), callExt(b3, "js_get", [x, emitStr(b3, "et")])])
+                    // SLICING A NIL SLICE KEEPS ITS NILNESS - see goSlice in
+                    // languages/go-interpreter.abnf for why this is the one slice
+                    // expression that propagates the mark. Copied unconditionally
+                    // (js_get of an absent property is undefined, which neither
+                    // goIsNilZero nor giIsNilZero reads as the mark) rather than
+                    // behind a branch, so a slice expression costs one get and one
+                    // set more and no basic block. docs/todo.md 1.5.
+                    callExt(b3, "js_set", [outH, emitStr(b3, "__nil"), callExt(b3, "js_get", [x, emitStr(b3, "__nil")])])
                     return {b: b3, v: outH}
                 })
         })
@@ -3732,14 +3773,33 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 })
                 var etZ = emitSelect(eb2, isSlV, function(tb) { return {b: tb, v: slF(tb, s0, "et")} },
                                                  function(eb) { return {b: eb, v: hUndef} })
-                var eb3 = emitCountLoop(etZ.b, add, function(lb, iV) {
+                // A GROWING append OVER-ALLOCATES: the new capacity is
+                // max(2 * old cap, need, 4), which is the rule
+                // hostGlobals["append"] in languages/go-interpreter.abnf has always
+                // used. This half grew to EXACTLY the new length, so cap(s) was
+                // len(s) after every append - `cap` disagreed with the interpreter
+                // half and with `go` on the first append - AND, because a slice with
+                // cap == len must reallocate every time, two appends onto one base
+                // never shared a backing array here while they do in the other half
+                // and in Go. A live halves divergence --cross never reached; it also
+                // makes an append loop amortised O(1) instead of copying the whole
+                // backing array on every element. docs/todo.md 1.5.
+                var dbl = callExt(etZ.b, "js_jadd", [hc.v, hc.v])
+                var c1 = emitSelect(etZ.b, callExt(etZ.b, "js_lt", [dbl, need]),
+                                    function(tb) { return {b: tb, v: need} },
+                                    function(fb2) { return {b: fb2, v: dbl} })
+                var c2 = emitSelect(c1.b, callExt(c1.b, "js_lt", [c1.v, emitNum(c1.b, 4)]),
+                                    function(tb) { return {b: tb, v: emitNum(tb, 4)} },
+                                    function(fb2) { return {b: fb2, v: c1.v} })
+                var fill = callExt(c2.b, "js_sub", [c2.v, hn.v])
+                var eb3 = emitCountLoop(c2.b, fill, function(lb, iV) {
                     callExt(lb, "js_arr_push", [na, callExt(lb, "js_giadopt", [etZ.v, emitNum(lb, 0)])])
                     return lb
                 })
                 var trip = callExt(eb3, "js_arr_new", [])
                 callExt(eb3, "js_arr_push", [trip, na])
                 callExt(eb3, "js_arr_push", [trip, emitNum(eb3, 0)])
-                callExt(eb3, "js_arr_push", [trip, need])
+                callExt(eb3, "js_arr_push", [trip, c2.v])
                 return {b: eb3, v: trip}
             }, function(eb) {
                 var trip = callExt(eb, "js_arr_new", [])
@@ -3766,7 +3826,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             })
             var outH = emitSlHdr(b5, ra, ro, need, rc)
             callExt(b5, "js_set", [outH, emitStr(b5, "et"), etV.v])
-            return {b: b5, v: outH}
+            // append(s) WITH NOTHING TO ADD IS s ITSELF in Go - same pointer, length
+            // and capacity - so `var a []int; append(a) == nil` is true. The fresh
+            // header lost the __nil mark. Guarded on add == 0 rather than copied
+            // unconditionally: a nil slice that HAS grown is not nil any more.
+            // The twin is hostGlobals["append"] in languages/go-interpreter.abnf.
+            // docs/todo.md 1.5.
+            var nilR = emitSelect(b5, callExt(b5, "js_seq", [add, emitNum(b5, 0)]),
+                                  function(tb) { return {b: tb, v: callExt(tb, "js_get", [s0, emitStr(tb, "__nil")])} },
+                                  function(eb) { return {b: eb, v: hUndef} })
+            callExt(nilR.b, "js_set", [outH, emitStr(nilR.b, "__nil"), nilR.v])
+            return {b: nilR.b, v: outH}
         })
         // copy(dst, src): as many elements as the shorter one holds.
         b = declFn(b, "copy", 2, function(fb, a) {
@@ -3913,6 +3983,27 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var mergeB = curF.NewBlock("")
         b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, kind, llvm.constant.NewInt(i64, 1)), thenB, elseB)
         var tv = callExt(thenB, "js_ctl_value", [v])
+        // An UNNAMED result adopts its declared type when it is nil, exactly as a
+        // named one does in readRets - `func f() map[string]int { return nil }`
+        // printed `<nil>` where go prints `map[]`. Static: emitRetNil is the identity
+        // for every type but a map or a slice. docs/todo.md 1.5.
+        if (rtl.length == 1) {
+            var r1 = emitRetNil(thenB, rtl[0], tv)
+            thenB = r1.b
+            tv = r1.v
+        } else if (rtl.length > 1) {
+            // `return f()` FORWARDS a multi-value result, so what arrives here is
+            // already marked; emitMvArr normalises it back to the plain array the
+            // element adoption and the re-wrap both want (see emitMvWrap).
+            tv = emitMvArr(thenB, tv)
+            for (var q = 0; q < rtl.length; q++) {
+                if (goNilAdoptTy(rtl[q]) == "") { continue }
+                var rq = emitRetNil(thenB, rtl[q], callExt(thenB, "js_get", [tv, emitNum(thenB, q)]))
+                thenB = rq.b
+                callExt(thenB, "js_pyset", [tv, emitNum(thenB, q), rq.v])
+            }
+            tv = emitMvWrap(thenB, tv)
+        }
         thenB.NewBr(mergeB)
         var ev = hUndef
         if (rtl.length == 1) { ev = emitZeroTy(elseB, rtl[0]) }
@@ -3921,6 +4012,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var z = 0; z < rtl.length; z++) {
                 callExt(elseB, "js_arr_push", [ev, emitZeroTy(elseB, rtl[z])])
             }
+            ev = emitMvWrap(elseB, ev)
         }
         elseB.NewBr(mergeB)
         var phi = mergeB.NewPhi([llvm.ir.NewIncoming(tv, thenB), llvm.ir.NewIncoming(ev, elseB)])
@@ -4094,8 +4186,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 vals.push(r.v)
             }
             if (refs.length > 1 && exprs.length == 1) {
+                var mvA = emitMvArr(b, vals[0])
                 for (var t = 0; t < refs.length; t++) {
-                    b = emitRefWrite(b, refs[t], callExt(b, "js_get", [vals[0], emitNum(b, t)]))
+                    b = emitRefWrite(b, refs[t], callExt(b, "js_get", [mvA, emitNum(b, t)]))
                 }
                 return b
             }
@@ -4151,7 +4244,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return function(b) {
             var r = baseT(b)
             b = r.b
-            var okV = emitHelper(b, "$istype", [r.v, emitStr(b, ty)])
+            var okV = emitTypeIs(b, r.v, ty)
             // A FAILED assertion binds the ZERO VALUE of the asserted type, not the
             // value that did not match: `v, ok := q.(int)` with q = "s" is 0, false
             // in Go and was "s", false here. go-interpreter.abnf's makeAssertOk has
@@ -4185,10 +4278,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 vals.push(r.v)
             }
             if (names.length > 1 && exprs.length == 1) {
+                var mvB = emitMvArr(b, vals[0])
                 for (var n = 0; n < names.length; n++) {
                     if (names[n] != "_") {
                         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n]),
-                                                     callExt(b, "js_get", [vals[0], emitNum(b, n)])])
+                                                     callExt(b, "js_get", [mvB, emitNum(b, n)])])
                     }
                 }
                 return b
@@ -4286,7 +4380,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     vals.push(r.v)
                 }
                 if (names.length > 1 && inits.length == 1) {
-                    var multi = vals[0]
+                    var multi = emitMvArr(b, vals[0])
                     vals = []
                     for (var u = 0; u < names.length; u++) {
                         vals.push(callExt(b, "js_map_get", [multi, emitNum(b, u)]))
@@ -4698,7 +4792,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var k2 = 0; k2 < cases.length; k2++) {
                 if (cases[k2].isDefault) { continue }
                 for (var t = 0; t < cases[k2].types.length; t++) {
-                    var condV = emitHelper(b, "$istype", [subjV, emitStr(b, cases[k2].types[t])])
+                    var condV = emitTypeIs(b, subjV, cases[k2].types[t])
                     var nextB = curF.NewBlock("")
                     b.NewCondBr(truthy(b, condV), bodyBs[k2], nextB)
                     b = nextB
@@ -4794,13 +4888,75 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // The value of a return in a function with NAMED results: the results are read
     // back AFTER the defers ran, so a deferred function that assigns one is seen.
     function readRets(b) {
-        if (curRets.length == 0) { return hUndef }
-        if (curRets.length == 1) { return callExt(b, "js_scope_get", [curScopeV, emitStr(b, curRets[0])]) }
+        if (curRets.length == 0) { return {b: b, v: hUndef} }
+        if (curRets.length == 1) {
+            return emitRetNil(b, curRtys.length > 0 ? curRtys[0] : "",
+                              callExt(b, "js_scope_get", [curScopeV, emitStr(b, curRets[0])]))
+        }
         var arr = callExt(b, "js_arr_new", [])
         for (var i = 0; i < curRets.length; i++) {
-            callExt(b, "js_arr_push", [arr, callExt(b, "js_scope_get", [curScopeV, emitStr(b, curRets[i])])])
+            var r = emitRetNil(b, i < curRtys.length ? curRtys[i] : "",
+                               callExt(b, "js_scope_get", [curScopeV, emitStr(b, curRets[i])]))
+            b = r.b
+            callExt(b, "js_arr_push", [arr, r.v])
         }
-        return arr
+        return {b: b, v: emitMvWrap(b, arr)}
+    }
+    // A RESULT VALUE ADOPTS ITS DECLARED TYPE when it is an untyped nil - `return nil`
+    // from a `map[string]int` result printed `<nil>` where go prints `map[]`. Only MAP
+    // and SLICE types adopt (their zero value is a MARKED EMPTY container here, so nil
+    // is not representable; a nil pointer, chan, func or interface IS the null and must
+    // stay `<nil>`), and the test is STATIC, so a function returning anything else
+    // emits not one extra instruction. js_not is exactly "null or undefined" for a slot
+    // that can only hold one of those or a container. The twin is goRetNil in
+    // languages/go-interpreter.abnf. docs/todo.md 1.5.
+    function goNilAdoptTy(t) {
+        if (t == undefined || t == null || t.length == 0) { return "" }
+        if (t.charCodeAt(0) == 91) { return (t.length > 1 && t.charCodeAt(1) == 93) ? t : "" }
+        var wd = goTyWord(t)
+        if (wd == "map") { return t }
+        var rn = resolveDefined(wd)
+        if (rn != wd) { return goNilAdoptTy(rn) }
+        return ""
+    }
+    // A MULTI-VALUE RESULT IS MARKED, and the mark is what makes `fmt.Println(f())`
+    // print `3 3 3` rather than `[3 3 3]` and `add(two(x))` answer 7 rather than 0:
+    // Go EXPANDS a multi-value call that is the sole argument of a call, and a bare
+    // array could not be told from a Go ARRAY value ([3]int is a plain array here, by
+    // design). A tag-6 object can be. Every emitted site is gated on usesMultiRet - a
+    // program with no 2-result function emits not one of these instructions, which is
+    // what keeps the go bench row (tests/bench/mod.go, one function) at zero cost.
+    // The twins are goMv / goMvArr / goMvArgs in languages/go-interpreter.abnf.
+    // docs/todo.md 1.5.
+    function emitMvWrap(b, arr) {
+        var o = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [o, emitStr(b, "__gomv"), arr])
+        return o
+    }
+    function emitMvArr(b, v) {
+        if (!usesMultiRet) { return v }
+        return callExt(b, "js_gomv", [v])
+    }
+    // Go's rule for a call: `g(f())` with f multi-valued and f() the ONLY argument
+    // passes every result of f as a separate argument.
+    //
+    // THE COST, STATED RATHER THAN HIDDEN: in a program that DOES declare a
+    // multi-result function this is one extern call per single-argument call site,
+    // and nothing static can narrow it further - which argument expression yields a
+    // multi-value result is not knowable from the call's own items (the argument has
+    // already been folded into a thunk by the time makeCall sees it). The go bench
+    // row (tests/bench/mod.go) declares no such function, so it measures zero; a
+    // program that does pays for it. docs/todo.md 1.5.
+    function emitMvArgs(b, argsV, n) {
+        if (!usesMultiRet || n != 1) { return argsV }
+        return callExt(b, "js_gomvargs", [argsV])
+    }
+    function emitRetNil(b, ty, v) {
+        var at = goNilAdoptTy(ty)
+        if (at == "") { return {b: b, v: v} }
+        return emitSelect(b, callExt(b, "js_not", [v]),
+                          function(tb) { return {b: tb, v: emitZeroTy(tb, at)} },
+                          function(eb) { return {b: eb, v: v} })
     }
     function makeReturn(items) {
         return function(b) {
@@ -4824,9 +4980,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 if (curRets.length == 1) {
                     callExt(b, "js_scope_set", [curScopeV, emitStr(b, curRets[0]), v])
                 } else {
+                    var mvR = emitMvArr(b, v)
                     for (var k = 0; k < curRets.length; k++) {
                         callExt(b, "js_scope_set", [curScopeV, emitStr(b, curRets[k]),
-                                                    callExt(b, "js_get", [v, emitNum(b, k)])])
+                                                    callExt(b, "js_get", [mvR, emitNum(b, k)])])
                     }
                 }
             }
@@ -5230,6 +5387,40 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // accepted (marked with {iface}) and reported not implemented.
     // Every type NAME the program declares, so `type A = B` can tell a user type (which
     // the alias re-binds to) from a builtin like int (which it converts to).
+    // The method names of an interface body, off the {imname} markers IfaceMeth
+    // pushed. An interface whose body is not a plain method list left none, and no
+    // names means "satisfied by anything" - see the IfaceBody comment.
+    function cIfaceMeths(items) {
+        var out = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i] != null && items[i].imname != undefined) { out.push(items[i].imname) }
+        }
+        return out
+    }
+    // Declared interface name -> its method names. Filled at parse time by the
+    // IfaceBody tag, read long after by the type test and the type assertion.
+    var ifaceMeths = {}
+    // A DECLARED INTERFACE is matched STRUCTURALLY - a value satisfies it exactly when
+    // it has every method - so its arm of a type switch and its comma-ok assertion go
+    // to js_goifis and not to js_gotypeis, which can only compare NAMES. Static: a
+    // program with no interface declaration emits exactly what it emitted before.
+    // The twin is typeMatches in languages/go-interpreter.abnf. docs/todo.md 1.5.
+    function emitTypeIs(b, v, ty) {
+        if (isIface(ty)) { return callExt(b, "js_goifis", [v, emitStr(b, ifaceMethodCsv(ty))]) }
+        return emitHelper(b, "$istype", [v, emitStr(b, ty)])
+    }
+    // The comma-joined method set of a declared interface, or "" for anything else.
+    function isIface(name) {
+        if (name == undefined || name == null) { return false }
+        return ifaceMeths["$" + name] != undefined
+    }
+    function ifaceMethodCsv(name) {
+        if (!isIface(name)) { return "" }
+        var ms = ifaceMeths["$" + name]
+        var out = ""
+        for (var i = 0; i < ms.length; i++) { out = (i == 0) ? ms[i] : (out + "," + ms[i]) }
+        return out
+    }
     var declaredTypes = {}
     function makeTypeDecl(items, pos) {
         var last = items[items.length - 1]
@@ -5263,6 +5454,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // ordinary method call on whatever struct is in it. A constraint interface
         // (a type set, as in Go 1.18 generics) is erased for the same reason.
         if (typeof last == "object" && last != null && last.iface == true) {
+            // THE METHOD SET IS RECORDED - see the twin in go-interpreter.abnf.
+            // Satisfaction is still structural; what was missing was anything to
+            // check it against. docs/todo.md 1.5.
+            ifaceMeths["$" + items[0]] = last.imeth
             return function(b) { return b }
         }
         // type Celsius float64 / type myInt int: the value model has no distinct type
@@ -5329,8 +5524,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // where go prints the empty string - and a `[]int` result printed `0` rather
         // than `[]`. The type texts now arrive from RetTypes (rtys) beside the names.
         var savedRets = curRets
+        var savedRtys = curRtys
         curRets = (rets == undefined || rets == null) ? [] : rets
         var rtl = (rtys == undefined || rtys == null) ? [] : rtys
+        curRtys = rtl
         for (var nr = 0; nr < curRets.length; nr++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, curRets[nr]),
                                          emitZeroTy(b, nr < rtl.length ? rtl[nr] : "")])
@@ -5350,7 +5547,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         callExt(b, "js_gorepanic", [])
         // Named results are read back AFTER the defers ran, so a deferred function that
         // assigns one is seen; without them the body's return signal carries the value.
-        if (curRets.length > 0) { b.NewRet(readRets(b)) }
+        if (curRets.length > 0) { var rr = readRets(b); rr.b.NewRet(rr.v) }
         else { var ur = emitUnctlRets(b, ctlV, rtl); ur.b.NewRet(ur.v) }
         // Now the body itself, inside the closure. A return in it LEAVES the closure, so
         // it goes out as a control signal (retStmt) that js_gounctl unwraps again.
@@ -5364,6 +5561,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         ctlLeave()
         curFTag = savedFTag
         curRets = savedRets
+        curRtys = savedRtys
         curF = savedF
         curScopeV = savedScope
         loopStack = savedLoops

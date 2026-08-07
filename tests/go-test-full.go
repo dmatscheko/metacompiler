@@ -2093,6 +2093,236 @@ func divText37(a []int, i int, j int) (out string) {
 	return "no panic"
 }
 
+// ===== SECTION 38: nil dereference, interfaces, multi-value calls, typed nil =====
+// The six residues of docs/todo.md 1.5, plus the two the probe for it turned up
+// (`append(s)` with nothing to add, and a func-typed field reached through a
+// pointer). Every expected value was read off `go run` before it was written down.
+//
+// WHAT EACH GROUP IS PINNING, because a passing assertion says nothing about why:
+//   - a NIL POINTER DEREFERENCE is a recoverable panic, and it was a THREE-WAY
+//     split: llvm.Run recovered it, the interpreter aborted in its own field/store
+//     paths and in the shared resolveRef, and a native binary died in the C floor's
+//     get_member/set_member. The read, the WRITE, a write one level down a path and
+//     a METHOD CALL are four different routes into it and each aborted somewhere.
+//   - a DECLARED INTERFACE is satisfied STRUCTURALLY. Nothing recorded an
+//     interface's method set, so `x.(Sp)` was false for a value that satisfies Sp,
+//     `case Sp:` never fired, and the single-result `x.(Sp)` never panicked. The
+//     concrete-type arms are here to pin that the change did NOT make every
+//     assertion a check - only an interface target is checked.
+//   - a MULTI-VALUE call that is the sole argument of a call EXPANDS. It could not,
+//     because the results travelled as a bare array that is indistinguishable from
+//     a Go ARRAY value; they now carry a mark, and the array cases below are what
+//     tells the mark from "any array spreads".
+//   - a RESULT VALUE adopts a map or slice declared type when it is nil, so
+//     `return nil` from a map result prints `map[]` and not `<nil>`. A nil POINTER
+//     result must still print `<nil>`, which is what separates this from "nil
+//     always becomes a container".
+//   - a FUNC-TYPED STRUCT FIELD is callable. Only the descriptor was consulted, so
+//     the interpreter and llvm.Run both said "unknown method 'f'" while the native
+//     binary answered - a live run-vs-native divergence.
+//   - SLICING A NIL SLICE keeps its nilness (Go carries the nil backing pointer
+//     over), while slicing an empty LITERAL does not.
+type P38 struct{ X int }
+type R38 struct{ In *P38 }
+type H38 struct {
+	f func(int) int
+	g func() string
+	n int
+}
+
+type Sp38 interface {
+	Speak() string
+	Fly() string
+}
+type Bird38 struct{ N string }
+
+func (b Bird38) Speak() string { return "tweet" }
+func (b Bird38) Fly() string   { return "flap" }
+
+type Dog38 struct{ N string }
+
+func (d Dog38) Speak() string { return "woof" }
+
+type Emb38 struct{ Bird38 }
+
+func f38read(p *P38) (r int) {
+	defer func() {
+		if e := recover(); e != nil {
+			r = -1
+		}
+	}()
+	return p.X
+}
+func f38write(p *P38) (r int) {
+	defer func() {
+		if e := recover(); e != nil {
+			r = -2
+		}
+	}()
+	p.X = 5
+	return p.X
+}
+func f38path(q *R38) (r int) {
+	defer func() {
+		if e := recover(); e != nil {
+			r = -3
+		}
+	}()
+	q.In.X = 5
+	return 9
+}
+func (p *P38) Get() int { return p.X }
+func f38mcall(p *P38) (r int) {
+	defer func() {
+		if e := recover(); e != nil {
+			r = -4
+		}
+	}()
+	return p.Get()
+}
+func f38assert(v interface{}) (s string) {
+	defer func() {
+		if e := recover(); e != nil {
+			s = "PANIC"
+		}
+	}()
+	return v.(Sp38).Speak()
+}
+
+func f38three(n int) (int, int, int) { return n, n + 1, n + 2 }
+func f38two(n int) (int, string)     { return n, "s" }
+func f38twoi(n int) (int, int)       { return n, n + 1 }
+func f38add(a int, b int) int        { return a + b }
+func f38arr(n int) [3]int            { return [3]int{n, n, n} }
+
+func f38map(b bool) map[string]int {
+	if b {
+		return map[string]int{"a": 1}
+	}
+	return nil
+}
+func f38slice(b bool) []int {
+	if b {
+		return []int{1}
+	}
+	return nil
+}
+func f38ptr(b bool) *P38 { return nil }
+func f38named(b bool) (m map[string]int) {
+	if b {
+		m = map[string]int{"q": 2}
+	}
+	return
+}
+func f38pair(b bool) (map[string]int, []int) {
+	if b {
+		return map[string]int{"a": 1}, []int{2}
+	}
+	return nil, nil
+}
+
+func s38() {
+	// ----- a nil pointer dereference is a RECOVERABLE panic, four routes -----
+	ps38 := []*P38{nil, &P38{7}}
+	check("nd1", f38read(ps38[0]) == -1)
+	check("nd2", f38read(ps38[1]) == 7)
+	check("nd3", f38write(ps38[0]) == -2)
+	check("nd4", f38write(ps38[1]) == 5)
+	check("nd5", f38mcall(ps38[0]) == -4)
+	check("nd6", f38mcall(ps38[1]) == 5)
+	rs38 := []*R38{&R38{nil}, &R38{&P38{2}}}
+	check("nd7", f38path(rs38[0]) == -3)
+	check("nd8", f38path(rs38[1]) == 9)
+
+	// ----- a declared interface is satisfied STRUCTURALLY -----
+	vs38 := []interface{}{Bird38{"b"}, Dog38{"d"}, 3, Emb38{Bird38{"e"}}}
+	_, ok38a := vs38[0].(Sp38)
+	check("if1", ok38a)
+	_, ok38b := vs38[1].(Sp38)
+	check("if2", !ok38b)
+	_, ok38c := vs38[2].(Sp38)
+	check("if3", !ok38c)
+	// A PROMOTED method of an embedded struct counts towards the method set.
+	_, ok38d := vs38[3].(Sp38)
+	check("if4", ok38d)
+	check("if5", f38assert(vs38[0]) == "tweet")
+	check("if6", f38assert(vs38[1]) == "PANIC")
+	check("if7", f38assert(vs38[3]) == "tweet")
+	// The concrete-type arms are unchanged: only an INTERFACE target is checked.
+	bd38, ok38e := vs38[0].(Bird38)
+	check("if8", ok38e && bd38.N == "b")
+	_, ok38f := vs38[1].(Bird38)
+	check("if9", !ok38f)
+	sw38 := ""
+	for i := 0; i < 4; i++ {
+		switch vs38[i].(type) {
+		case Sp38:
+			sw38 += "S"
+		case int:
+			sw38 += "i"
+		default:
+			sw38 += "."
+		}
+	}
+	check("if10", sw38 == "S.iS")
+
+	// ----- a multi-value call that is the SOLE argument expands -----
+	xs38 := []int{3, 4}
+	check("mv1", fmt.Sprint(f38three(xs38[0])) == "3 4 5")
+	check("mv2", fmt.Sprint(f38two(xs38[1])) == "4s")
+	check("mv3", f38add(f38twoi(xs38[0])) == 7)
+	check("mv4", fmt.Sprintf("%v %v %v", 1, 2, 3) == "1 2 3")
+	// ... and a Go ARRAY value, which is the shape the mark had to be told from,
+	// does NOT expand.
+	check("mv5", fmt.Sprint(f38arr(xs38[0])) == "[3 3 3]")
+	arr38 := [3]int{1, 2, 3}
+	check("mv6", fmt.Sprint(arr38) == "[1 2 3]")
+	// Unpacking into names still works, and so does forwarding.
+	a38, b38, c38 := f38three(xs38[1])
+	check("mv7", a38 == 4 && b38 == 5 && c38 == 6)
+	var d38, e38, g38 = f38three(xs38[0])
+	check("mv8", d38 == 3 && e38 == 4 && g38 == 5)
+
+	// ----- a nil result adopts a MAP or SLICE declared type -----
+	bs38 := []bool{false, true}
+	check("tn1", fmt.Sprint(f38map(bs38[0])) == "map[]")
+	check("tn2", fmt.Sprint(f38map(bs38[1])) == "map[a:1]")
+	check("tn3", f38map(bs38[0]) == nil && len(f38map(bs38[0])) == 0)
+	check("tn4", fmt.Sprint(f38slice(bs38[0])) == "[]")
+	check("tn5", f38slice(bs38[0]) == nil)
+	check("tn6", fmt.Sprint(f38named(bs38[0])) == "map[]")
+	// A nil POINTER result is still <nil>: only containers adopt.
+	check("tn7", fmt.Sprint(f38ptr(bs38[0])) == "<nil>")
+	m38, l38 := f38pair(bs38[0])
+	check("tn8", fmt.Sprint(m38) == "map[]" && fmt.Sprint(l38) == "[]")
+	check("tn9", m38 == nil && l38 == nil)
+
+	// ----- a func-typed struct field is callable -----
+	h38 := H38{f: func(a int) int { return a * 2 }, g: func() string { return "hi" }, n: 1}
+	check("fn1", h38.f(xs38[0]) == 6)
+	check("fn2", h38.g() == "hi")
+	hp38 := &h38
+	check("fn3", hp38.f(xs38[1]) == 8)
+	hs38 := []H38{h38}
+	check("fn4", hs38[0].f(xs38[0]) == 6)
+	check("fn5", h38.n == 1)
+
+	// ----- slicing a nil slice keeps its nilness -----
+	var ns38 []int
+	check("sl1", ns38 == nil)
+	check("sl2", ns38[:] == nil)
+	check("sl3", ns38[0:0] == nil)
+	check("sl4", ns38[:][:] == nil)
+	check("sl5", append(ns38) == nil)
+	// ... and every other producer stays non-nil, which is what tells a propagated
+	// mark from "an empty slice is nil".
+	es38 := []int{}
+	check("sl6", es38 != nil && es38[:] != nil)
+	check("sl7", make([]int, 0) != nil)
+	check("sl8", append(ns38, 1) != nil)
+	check("sl9", len(ns38[:]) == 0 && cap(ns38[:]) == 0)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -2131,6 +2361,7 @@ func main() {
 	s35() // SECTION-CALL 35
 	s36() // SECTION-CALL 36
 	s37() // SECTION-CALL 37
+	s38() // SECTION-CALL 38
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

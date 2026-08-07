@@ -151,8 +151,18 @@ FType       <~~ push({fty: firstType(up.in)}) ~~> = Type ;
 // An embedded field's NAME is its type name (w.base09 as well as the promoted w.id).
 EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in); push({fty: ""}) ~~> [ FieldTag ] [ ";" ] ;
 FieldTag    = RawString <~~ pop() ~~> ;
-IfaceBody   <~~ push({iface: true}) ~~>
-            = "interface" KwEnd SkipBlock ;
+// THE METHOD SET IS PARSED WHEN THE BODY IS AN ORDINARY METHOD LIST, and the
+// SkipBlock alternative behind it keeps every other interface body parsing exactly as
+// it did: a constraint interface (~int | ~string), an embedded interface name, a
+// commented body all fail IfaceMethods and fall through with NO method names, which
+// means "satisfied by anything" - the same answer this grammar gave before. up.in is
+// not usable for this: a captured type text arrives with its WHITESPACE ALREADY
+// STRIPPED, so `Speak() string Fly()` reads as one identifier `stringFly`.
+// docs/todo.md 1.5.
+IfaceBody   <~~ push({iface: true, imeth: cIfaceMeths(takeAll())}) ~~>
+            = "interface" KwEnd ( IfaceMethods | SkipBlock ) ;
+IfaceMethods = "{" { IfaceMeth } "}" ;
+IfaceMeth   = Id <~~ push({imname: up.in}) ~~> FTParams [ SameLine FTRets ] [ ";" ] ;
 
 // A grouped type declaration (type ( A struct {...}; B int )): the balanced body is
 // skipped and reported not implemented (its members are not built). Tried after
@@ -845,11 +855,12 @@ IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
 CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
             = "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" ;
 Spread      <~~ push({spread: true}) ~~> = "..." ;
-// x.(T): a type assertion, GENUINELY handled as the identity on the value (a
-// successful assertion yields the same underlying value; the target type is parsed
-// and ignored). It pushes no suffix, so foldCallMember passes the value through.
-// Only the single-result form is supported (not the comma-ok v, ok := x.(T)).
-TypeAssertSfx = "." "(" Type ")" ;
+// x.(T): a type assertion. The value is unchanged - a successful assertion yields
+// the same underlying value - but a target that is a DECLARED INTERFACE is now
+// CHECKED, and a value that does not have its methods panics the way Go does. Every
+// other target type is still the identity (see goAssertIface for why).
+TypeAssertSfx = "." "(" AssertSfxTy ")" ;
+AssertSfxTy <~~ push({kind: "assert", at: firstType(up.in)}) ~~> = Type ;
 
 Primary     = ParenConv | ParenGroup | ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit
             | BinLit | LegOctLit | DecULit | DqString | RawString | RuneLit
@@ -1431,6 +1442,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     hostGlobals["append"] = function() {
         var s = arguments[0]
         var add = arguments.length - 1
+        // append(s) WITH NOTHING TO ADD IS s ITSELF in Go - same pointer, same length,
+        // same capacity - so `var a []int; append(a) == nil` is true. Building a fresh
+        // header lost the __nil mark. The twin is the append arm in
+        // languages/go-to-llvm-ir.abnf. docs/todo.md 1.5.
+        if (add == 0 && isSl(s)) { return s }
         if (!isSl(s)) {
             if (s === undefined || s === null) { s = newSl([], 0, 0, 0) }
             else if (Array.isArray(s)) { s = slOf(s) }
@@ -1692,7 +1708,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var n = goLen(last)
             for (var k = 0; k < n; k++) { argv.push(goIndex(last, k)) }
         }
-        return argv
+        return goMvArgs(argv)
     }
     // Go's suffix chain: the shared core knows .m(), .field and [i]; the plain call
     // and the slice expression are added here.
@@ -1707,13 +1723,20 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var s = suffixes[i]
                 if (s.kind == "mcall") { cur = mcall(cur, s.name, callArgs(s)) }
                 else if (s.kind == "field") {
-                    if (cur === undefined || cur === null) { fail("field ." + s.name + " of " + core.nullWord) }
+                    // A NIL POINTER DEREFERENCE IS A RECOVERABLE RUNTIME PANIC, not an
+                    // abort. `fail` here made `defer func(){ recover() }()` around
+                    // `p.X` on a nil p kill the process in this half while llvm.Run
+                    // recovered it - a three-way split with the native binary, which
+                    // died in the C floor's set_member/get_member. All three engines
+                    // now raise goNilDeref's one wording. docs/todo.md 1.5.
+                    if (cur === undefined || cur === null) { goNilDeref() }
                     cur = goField(cur, s.name)
                 }
                 else if (s.kind == "call") {
                     if (typeof cur != "function") { fail("call of a non function value") }
                     cur = cur.apply(undefined, callArgs(s))
                 }
+                else if (s.kind == "assert") { cur = goAssertIface(cur, s.at) }
                 else if (s.kind == "slice") { cur = goSlice(cur, s) }
                 else if (typeof cur == "function") { cur = cur } // f[int]: erased instantiation
                 else { cur = goIndex(cur, s.idx()) }
@@ -1754,7 +1777,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (lo < 0 || hi < lo || mx < hi || h.c < mx) {
             goRTPanic("slice bounds [" + lo + ":" + hi + "] out of range")
         }
-        return slT(newSl(h.a, h.o + lo, hi - lo, cap), h.et)
+        var out = slT(newSl(h.a, h.o + lo, hi - lo, cap), h.et)
+        // SLICING A NIL SLICE KEEPS ITS NILNESS. A nil slice's backing-array pointer
+        // is nil, and a slice expression carries that pointer over, so `var a []int;
+        // a[:] == nil` is TRUE in Go while `[]int{}[:] == nil` is false - the empty
+        // literal has a real pointer to a zero-length array. Every other producer
+        // (make, append, a literal) builds a FRESH header and stays non-nil, so this
+        // is the one expression the __nil mark has to propagate. The twin is $sslice
+        // in languages/go-to-llvm-ir.abnf. docs/todo.md 1.5.
+        if (isSl(base) && base.__nil == true) { out.__nil = true }
+        return out
     }
     // Field read: struct fields, and the promoted fields of an embedded struct.
     function goField(o, name) {
@@ -1835,6 +1867,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // "runtime error: integer divide by zero" with our "js runtime error: integer
     // divide by zero"). docs/todo.md 1.9.
     function goRTPanic(msg) { throw {__gopanic: true, v: "js runtime error: " + msg} }
+    // THE ONE WORDING FOR A NIL POINTER DEREFERENCE, in all three engines. Go's own
+    // text is `runtime error: invalid memory address or nil pointer dereference`; the
+    // `js ` prefix is the project-wide divergence every runtime error already carries
+    // (see goRTPanic). The twins are goNilDeref in languages/lib/go-rt.metajs and
+    // goNilDeref in abnf/jsrtgolang.go. docs/todo.md 1.5.
+    function goNilDeref() { goRTPanic("invalid memory address or nil pointer dereference") }
     // s[i] IS BOUNDED BY THE LENGTH, NOT BY THE BACKING ARRAY. `base[0:2]` of a
     // five element slice has len 2 and cap 5, and `sub[4]` is a panic in Go even
     // though the storage is there - both halves used to answer the element.
@@ -1909,10 +1947,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (isMap(o)) { mapSet(o, i, goAdoptLike(o.zero, v)); return }
         var ix = szIs(i) ? szNum(i) : i
         if (isSl(o)) { slSet(o, ix, slAdopt(o, ix, v)); return }
-        // A nil target is a type whose zero value this grammar cannot build (an
-        // inline `struct { ... }`, see goZeroTy); report it the way the compiler
-        // half's js_set does rather than as a host TypeError.
-        if (o == undefined || o == null) { fail("member assignment '" + ix + "' on null") }
+        // A nil target is a nil POINTER being written through (`p.X = 1` on a nil p),
+        // or a type whose zero value this grammar cannot build (an inline
+        // `struct { ... }`, see goZeroTy). Both are recoverable runtime panics in Go
+        // and both used to abort here while llvm.Run recovered them. docs/todo.md 1.5.
+        if (o == undefined || o == null) { goNilDeref() }
         if (typeof o == "object" && o.__class != undefined) {
             o[ix] = gAdoptTy(fieldTypeOf(o.__class, ix), v)
             return
@@ -2065,13 +2104,55 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return String.fromCharCode(0xd800 + gtrunc(x / 1024)) + String.fromCharCode(0xdc00 + (x % 1024))
     }
 
+    // The method `name` promoted from an embedded struct field of v, with its
+    // receiver, or null. The twin is goMethod in languages/lib/go-rt.metajs.
+    function goPromoted(v, name) {
+        if (v === undefined || v === null || typeof v != "object") { return null }
+        var cls = v.__class
+        if (cls == undefined || cls == null) { return null }
+        var fs = cls.__fields
+        if (!Array.isArray(fs)) { return null }
+        for (var i = 0; i < fs.length; i++) {
+            var inner = v[fs[i]]
+            if (inner == undefined || inner == null || typeof inner != "object") { continue }
+            var icls = inner.__class
+            if (icls == undefined || icls == null) { continue }
+            if (hasOwn(icls, name) && typeof icls[name] == "function") {
+                return {fn: icls[name], recv: (icls["__ptr$" + name] == true) ? inner : goCopy(inner)}
+            }
+            var deeper = goPromoted(inner, name)
+            if (deeper != null) { return deeper }
+        }
+        return null
+    }
     function mcall(target, name, args) {
-        if (target === undefined || target === null) fail("method call ." + name + "() on nil")
+        if (target === undefined || target === null) { goNilDeref() }   // recoverable; see goNilDeref
         if (typeof target == "object" && target.__class != undefined) {
             // Own-property read: a bare [name] resolved inherited Object.prototype
             // members (toString, valueOf, ...) under a host JS engine.
             var m = hasOwn(target.__class, name) ? target.__class[name] : undefined
-            if (typeof m != "function") fail("unknown method '" + name + "' on " + target.__class.__name)
+            if (typeof m != "function") {
+                // A FUNC-TYPED FIELD IS CALLABLE: `type H struct { f func(int) int }`
+                // makes h.f(4) a call of the field's value, with NO receiver - it is a
+                // field, not a method. Only the descriptor was consulted here, so this
+                // half and the Go twin both died with "unknown method 'f'" while the
+                // NATIVE binary answered (layer 2's goMemberCall reads the own slot).
+                // A run-vs-native divergence, not the "no engine" the item claimed.
+                // docs/todo.md 1.5.
+                var ff = hasOwn(target, name) ? target[name] : undefined
+                if (typeof ff == "function") { return ff.apply(undefined, args) }
+                // A METHOD PROMOTED FROM AN EMBEDDED STRUCT is a method of the outer
+                // one. Only the outer descriptor was consulted here, so
+                // `type E struct { B }; e.SpeakOfB()` died - while BOTH compiled
+                // halves promote (goMethod in languages/lib/go-rt.metajs and
+                // rt.goMethod in abnf/jsrt.go). A pre-existing halves divergence,
+                // found while asserting that a promoted method counts towards an
+                // interface's method set. The receiver is the INNER struct, copied
+                // for a value receiver exactly as goMethod copies it.
+                var pm = goPromoted(target, name)
+                if (pm != null) { return pm.fn.apply(undefined, concat2impl([pm.recv], args)) }
+                fail("unknown method '" + name + "' on " + target.__class.__name)
+            }
             return m.apply(undefined, concat2impl([target], args))
         }
         var f = hasOwn(target, name) ? target[name] : undefined
@@ -3862,6 +3943,22 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // The zero value of a type text, used for the untouched slots of [5]int{0: 1}.
     function zeroOfType2(t) { return goZeroTy(t) }
+    // A RESULT VALUE ADOPTS ITS DECLARED TYPE when it is an untyped nil. `return nil`
+    // from a `map[string]int` result printed `<nil>` where go prints `map[]`, and from
+    // a `[]int` result `<nil>` where go prints `[]` - the value carried no type and
+    // nothing at the return site gave it one. Only MAP and SLICE types adopt: their
+    // zero value is a MARKED EMPTY container here (newNilMap / newNilSl) and nil is
+    // therefore not representable, while a nil pointer, channel, func or interface IS
+    // the null and must stay `<nil>`. Asking goZeroTy rather than reading the text
+    // makes a DEFINED type (`type M map[string]K`) adopt too. The twin is emitRetNil
+    // in languages/go-to-llvm-ir.abnf. docs/todo.md 1.5.
+    function goRetNil(ty, v) {
+        if (v !== undefined && v !== null) { return v }
+        if (ty == undefined || ty == null || ty.length == 0) { return v }
+        var z = goZeroTy(ty)
+        if (isMap(z) || isSl(z)) { return z }
+        return v
+    }
     // goZeroTy is THE zero value of a type text, and the one place all three callers
     // (a var declaration, a map's value type, an unwritten composite-literal slot)
     // now agree. Two things it does that the three separate versions did not:
@@ -4288,7 +4385,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return function() {
             var vals = []
             for (var k = 0; k < exprs.length; k++) vals.push(exprs[k]())
-            if (refs.length > 1 && exprs.length == 1) vals = vals[0] // Unpack multi returns.
+            if (refs.length > 1 && exprs.length == 1) vals = goMvArr(vals[0]) // Unpack multi returns.
             if (op != "=") {
                 assignRef(refs[0], applyOp(op, readRef(refs[0]), vals[0]))
                 return
@@ -4318,7 +4415,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return function() {
             var vals = []
             for (var k = 0; k < exprs.length; k++) vals.push(exprs[k]())
-            if (names.length > 1 && exprs.length == 1) vals = vals[0]
+            if (names.length > 1 && exprs.length == 1) vals = goMvArr(vals[0])
             for (var n = 0; n < names.length; n++) declVar(names[n], goVal(vals[n]))
         }
     }
@@ -4390,7 +4487,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
             var vals = []
             for (var k = 0; k < inits.length; k++) { vals.push(inits[k]()) }
-            if (names.length > 1 && inits.length == 1) { vals = vals[0] }
+            if (names.length > 1 && inits.length == 1) { vals = goMvArr(vals[0]) }
             // A float64/float32 declaration CONVERTS its initializer, so
             // `var d float64 = 1` holds a float64 and d/2 is 0.5, not 0.
             for (var n = 0; n < names.length; n++) { declVar(names[n], gAdoptTy(ty, goVal(vals[n]))) }
@@ -4423,7 +4520,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 iotaVal = i
                 var vals = []
                 for (var k = 0; k < last.length; k++) { vals.push(last[k]()) }
-                if (sp.cnames.length > 1 && vals.length == 1) { vals = vals[0] }
+                if (sp.cnames.length > 1 && vals.length == 1) { vals = goMvArr(vals[0]) }
                 for (var n = 0; n < sp.cnames.length; n++) { declVar(sp.cnames[n], vals[n]) }
             }
             iotaVal = savedIota
@@ -4673,12 +4770,86 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (typeof v == "object" && v.__class != undefined) { return v.__class.__name }
         return "any"
     }
+    // The method names of an interface body, off the {imname} markers IfaceMeth
+    // pushed. An interface whose body is not a plain method list left none, and no
+    // names means "satisfied by anything" - see the IfaceBody comment.
+    function cIfaceMeths(items) {
+        var out = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i] != null && items[i].imname != undefined) { out.push(items[i].imname) }
+        }
+        return out
+    }
+    // Declared interface name -> its method names. Filled at parse time by the
+    // IfaceBody tag, read long after by the type test and the type assertion.
+    var ifaceMeths = {}
+    // The comma-joined method set of a declared interface, or "" for anything else.
+    function ifaceMethodCsv(name) {
+        if (name == undefined || name == null || !hasOwn(ifaceMeths, name)) { return "" }
+        var ms = ifaceMeths[name]
+        var out = ""
+        for (var i = 0; i < ms.length; i++) { out = (i == 0) ? ms[i] : (out + "," + ms[i]) }
+        return out
+    }
     function typeMatches(want, v) {
         if (want == "any" || want == "interface{}") { return v !== undefined && v !== null }
+        // A DECLARED INTERFACE matches STRUCTURALLY - a value satisfies it exactly
+        // when it has every method. Only a struct INSTANCE is considered: a method on
+        // a defined non-struct type (`type MyInt int`) is not reachable from the value
+        // in this model, and answering false there is what this half already did.
+        if (hasOwn(ifaceMeths, want)) { return goIsInstance(v) && goSatisfies(v, ifaceMeths[want]) == "" }
         var got = goTypeName(v)
         if (want == got) { return true }
         if (want == "float64" && got == "int") { return false }
         return false
+    }
+    function goIsInstance(v) {
+        if (v === undefined || v === null || typeof v != "object") { return false }
+        return v.__class != undefined && v.__class != null
+    }
+    // "" when v has every method in ms, otherwise the name of the FIRST one missing
+    // (which is what Go's `missing method X` panic text names). A value that is not a
+    // struct INSTANCE answers "" - a method on a defined non-struct type is not
+    // reachable from the value in this model, so refusing there would panic programs
+    // real go accepts. typeMatches asks goIsInstance separately, because "no methods
+    // findable" must read as NO MATCH for a type switch and as NO PANIC for x.(I).
+    function goSatisfies(v, ms) {
+        if (!goIsInstance(v)) { return "" }
+        for (var i = 0; i < ms.length; i++) {
+            if (!goHasMethod(v, ms[i])) { return ms[i] }
+        }
+        return ""
+    }
+    // A method of v's own descriptor, or one PROMOTED from an embedded struct.
+    function goHasMethod(v, name) {
+        if (v === undefined || v === null || typeof v != "object") { return false }
+        var cls = v.__class
+        if (cls == undefined || cls == null) { return false }
+        if (hasOwn(cls, name)) { return typeof cls[name] == "function" }
+        var fs = cls.__fields
+        if (!Array.isArray(fs)) { return false }
+        for (var i = 0; i < fs.length; i++) {
+            var inner = v[fs[i]]
+            if (inner != undefined && inner != null && typeof inner == "object" && inner.__class != undefined) {
+                if (goHasMethod(inner, name)) { return true }
+            }
+        }
+        return false
+    }
+    // x.(I) FOR A DECLARED INTERFACE PANICS when the value does not satisfy it, which
+    // is the single-result assertion's whole point and which no engine did. Only an
+    // interface target is checked: every other type text keeps the identity, because
+    // typeMatches is deliberately approximate for the boxes (see js_gotypeis in
+    // languages/lib/go-rt.metajs) and a panic on a wrong answer is worse than the
+    // pass-through that was there. Go's own text is
+    // `interface conversion: main.Dog is not main.Sp: missing method Fly`; the
+    // package qualifier has no meaning here, so the names are bare. docs/todo.md 1.5.
+    function goAssertIface(v, want) {
+        if (!hasOwn(ifaceMeths, want)) { return v }
+        var miss = goSatisfies(v, ifaceMeths[want])
+        if (miss == "") { return v }
+        goRTPanic("interface conversion: " + goTypeName(v) + " is not " + want + ": missing method " + miss)
+        return v
     }
     function makeTypeSwitch(items) {
         var init = null
@@ -5102,6 +5273,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // The name is bound to a descriptor so it can be used in type positions.
         if (typeof last == "object" && last != null && last.iface == true) {
             globalScope[items[0]] = {__isiface: true, __name: items[0]}
+            // THE METHOD SET IS RECORDED, which it was not: with no method names an
+            // interface could only be matched by NAME, so `v.(Sp)` answered false for
+            // a value that satisfies Sp, `case Sp:` never fired, and the single-result
+            // form never panicked for one that does not. docs/todo.md 1.5.
+            ifaceMeths[items[0]] = last.imeth
             return
         }
         if (typeof last == "object" && last != null && last.under != undefined) {
@@ -5298,7 +5474,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var out = (res != undefined && res != null && res.isRet) ? res.v : goZeroRets(rtl)
         if (rl.length > 0 && res != undefined && res != null && res.isRet && res.v !== undefined) {
             if (rl.length == 1) { setVar(rl[0], res.v) }
-            else { for (var k = 0; k < rl.length; k++) { setVar(rl[k], res.v[k]) } }
+            else { var rvs = goMvArr(res.v); for (var k = 0; k < rl.length; k++) { setVar(rl[k], rvs[k]) } }
         }
         runDefers(frame)
         if (panicking) {
@@ -5317,7 +5493,38 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
         }
         scopes = saved
-        return out
+        return goRetAdopt(rtl, out)
+    }
+    // Applies goRetNil across a function's whole result list, and MARKS a multi-value
+    // result - see goMv.
+    function goRetAdopt(rtl, out) {
+        if (rtl.length == 1) { return goRetNil(rtl[0], out) }
+        if (rtl.length < 2) { return out }
+        if (!Array.isArray(out)) { return out }   // `return f()` already handed one on
+        var vs = []
+        for (var i = 0; i < out.length; i++) { vs.push(goRetNil(i < rtl.length ? rtl[i] : "", out[i])) }
+        return goMv(vs)
+    }
+    // A MULTI-VALUE RESULT IS MARKED, and the mark is what makes `fmt.Println(f())`
+    // print `3 3 3` rather than `[3 3 3]` and `add(two(x))` answer 7 rather than 0:
+    // Go EXPANDS a multi-value call that is the sole argument of a call, and a bare
+    // array could not be told from a Go ARRAY value ([3]int is a plain array here, by
+    // design - see newSl). A tag-6 object can be, and it is representable in all three
+    // engines, where a property on an array is not (runtime.c's set_member refuses a
+    // named key on tag 5 - docs/todo.md 3.1). goMvArr is the identity on the plain
+    // arrays the comma-ok forms still hand to an unpacking assignment. The twins are
+    // js_gomv / js_gomvargs in languages/lib/go-rt.metajs. docs/todo.md 1.5.
+    function goMv(vs) { return {__gomv: vs} }
+    function isMv(v) {
+        if (v === undefined || v === null || typeof v != "object") { return false }
+        return Array.isArray(v.__gomv)
+    }
+    function goMvArr(v) { return isMv(v) ? v.__gomv : v }
+    // Go's rule for a call: `g(f())` with f multi-valued and f() the ONLY argument
+    // passes every result of f as a separate argument.
+    function goMvArgs(argv) {
+        if (argv.length == 1 && isMv(argv[0])) { return argv[0].__gomv }
+        return argv
     }
 
     // ----- Core library config (see lib/interp-core.js) -----
@@ -5327,6 +5534,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
     core.stdlibImports = ["fmt", "os", "strings", "strconv", "math", "sort", "errors", "bufio", "io", "time", "sync", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
     core.nullWord = "nil"
+    // `p.In.X = 1` with a nil p.In walks resolveRef's path and used to abort there;
+    // in Go it is a recoverable panic. The hook is additive in lib/interp-core.js -
+    // every language that leaves core.nilPath null keeps resolveRef's old `fail`.
+    core.nilPath = function(name) { goNilDeref() }
     core.getIndex = function(o, i) { return goIndex(o, i) }
     core.framePush = function() { deferFrames.push([]) }
     core.framePop = function() { runDefers(deferFrames.pop()) }

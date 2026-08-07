@@ -39,7 +39,13 @@ var core = {
     // 1 == 1.0 so they must key alike) sets these two; every other language leaves
     // them null and gets exactly the code path it had before.
     keyId: null,        // (k) -> a string id, or null to fall through to dictKeyId.
-    keyEq: null         // (a, b) -> whether two keys are the same key, when a !== b.
+    keyEq: null,        // (a, b) -> whether two keys are the same key, when a !== b.
+    // A null/undefined CONTAINER met while walking an assignment path (resolveRef).
+    // The default is null and resolveRef then fails exactly as it always did, so the
+    // five languages that do not set it are untouched. Go sets it because a nil
+    // pointer dereference is a RECOVERABLE runtime panic there and an abort here was
+    // a three-way split against llvm.Run and the native binary - docs/todo.md 1.5.
+    nilPath: null       // (name) -> raise the language's own runtime error, or null.
 }
 
 // ----- Shared interpreter state -----
@@ -549,7 +555,10 @@ function resolveRef(ref) {
         var s = ref.path[i]
         if (s.key != undefined) { o = hasOwn(o, s.key) ? o[s.key] : undefined }
         else { o = core.getIndex(o, s.idx()) }
-        if (o === undefined || o === null) fail(core.nullWord + " in assignment path of " + ref.name)
+        if (o === undefined || o === null) {
+            if (core.nilPath != null) { core.nilPath(ref.name) }
+            fail(core.nullWord + " in assignment path of " + ref.name)
+        }
     }
     var last = ref.path[ref.path.length - 1]
     return {obj: o, key: (last.key != undefined) ? last.key : last.idx()}

@@ -1357,6 +1357,16 @@ function js_range_val(v, i) {
 // panic itself, applying runEntry's rule. No ratchet can assert that (a ratchet has
 // to exit 0); tests/probe.sh over the three legs is what settles it.
 function goRTPanic(msg) { throw "js runtime error: " + msg }
+// THE ONE WORDING FOR A NIL POINTER DEREFERENCE, in all three engines. Go's own
+// text is `runtime error: invalid memory address or nil pointer dereference`; the
+// `js ` prefix is the divergence every runtime error in this project already
+// carries. Reading a member of nil, WRITING one and CALLING a method on one all
+// used to reach `fail` here or the C floor's die() in get_member/set_member - a
+// hard abort, while llvm.Run's twin recovered the same condition. All three now
+// raise this one recoverable panic. The twins are goNilDeref in
+// languages/go-interpreter.abnf and goNilDeref in abnf/jsrtgolang.go.
+// docs/todo.md 1.5.
+function goNilDeref() { goRTPanic("invalid memory address or nil pointer dereference") }
 
 // Go indexing: maps read their ZERO VALUE for a missing key, slices their
 // element, a string its i-th BYTE, and a generic instantiation f[int] is the
@@ -1636,6 +1646,7 @@ function js_gone(a, b) { return !goValueEq(a, b) }
 // embedded struct, then a method VALUE, then a method EXPRESSION off the
 // descriptor itself, then the ordinary member lookup.
 function js_gofield(o, kv) {
+    if (o === undefined || o === null) { goNilDeref() }   // see goNilDeref
     var key = goStrOf(kv)
     if (goIsObj(o)) {
         if (goHas(o, key)) { return o[key] }
@@ -1710,6 +1721,7 @@ function goPrepend(v, args) {
 // slice builtin - falls through to the ordinary member call.
 function js_gomcall(recv, namev, args) {
     if (!Array.isArray(args)) { fail("js_gomcall args must be an array") }
+    if (recv === undefined || recv === null) { goNilDeref() }   // see goNilDeref
     var name = goStrOf(namev)
     var mv = goMethod(recv, name)
     if (mv !== undefined) { return mv.fn.apply(undefined, goPrepend(mv.recv, args)) }
@@ -1721,7 +1733,7 @@ function js_gomcall(recv, namev, args) {
 // two lengths. Everything Go spells as a method on a builtin type is a package
 // FUNCTION (strings.ToUpper, not "abc".ToUpper), so this surface is small.
 function goGetMember(o, key) {
-    if (o === undefined || o === null) { fail("nil dereference reading ." + key) }
+    if (o === undefined || o === null) { goNilDeref() }
     if (typeof o == "string") {
         if (key == "length") { return o.length }
         return undefined
@@ -1808,6 +1820,135 @@ function js_gorepanic() {
     goPanicSet.pop()
     if (had) { throw p }
     return undefined
+}
+
+// ----- interface satisfaction -------------------------------------------------
+//
+// A DECLARED INTERFACE IS MATCHED STRUCTURALLY: a value satisfies it exactly when
+// it has every method. js_gotypeis can only compare type NAMES, so `v.(Sp)` was
+// false for a value that DOES satisfy Sp, `case Sp:` never fired, and the
+// single-result `v.(Sp)` never panicked for one that does not. The method set
+// arrives as a comma-joined string the emitter built at parse time from the
+// interface declaration (ifaceMethodCsv in languages/go-to-llvm-ir.abnf); an
+// interface whose body is not a plain method list contributes NO names, which
+// reads as "satisfied by anything" - exactly what this engine did before. The
+// twins are typeMatches / goSatisfies in languages/go-interpreter.abnf.
+// docs/todo.md 1.5.
+
+// A method of v's own descriptor, or one PROMOTED from an embedded struct.
+function goHasMethod(v, name) {
+    var cls = goClassOf(v)
+    if (cls === undefined) { return false }
+    if (goIsFn(cls[name])) { return true }
+    var fs = cls.__fields
+    if (!Array.isArray(fs)) { return false }
+    var i = 0
+    while (i < fs.length) {
+        var inner = v[goStrOf(fs[i])]
+        if (goClassOf(inner) !== undefined) {
+            if (goHasMethod(inner, name)) { return true }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// The comma-joined method set, split without String.split (not in this dialect).
+function goCsvSplit(s) {
+    var out = []
+    var cur = ""
+    var i = 0
+    while (i < s.length) {
+        var ch = s.charAt(i)
+        if (ch == ",") { out.push(cur); cur = "" } else { cur = cur + ch }
+        i = i + 1
+    }
+    if (cur.length > 0) { out.push(cur) }
+    return out
+}
+
+// "" when v has every method, otherwise the FIRST one missing - which is what Go's
+// `missing method X` panic text names. A value that is not a struct INSTANCE
+// answers "": a method on a defined non-struct type is not reachable from the
+// value in this model, so refusing there would panic programs go accepts.
+function goMissingMethod(v, csv) {
+    if (goClassOf(v) === undefined) { return "" }
+    var ms = goCsvSplit(goStrOf(csv))
+    var i = 0
+    while (i < ms.length) {
+        if (!goHasMethod(v, ms[i])) { return ms[i] }
+        i = i + 1
+    }
+    return ""
+}
+
+// One arm of a type switch or the ok of `v, ok := x.(I)`: does v satisfy I?
+function js_goifis(v, csv) {
+    if (goClassOf(v) === undefined) { return false }
+    return goMissingMethod(v, csv) == ""
+}
+
+// The single-result `x.(I)`: the value, or a panic naming the first missing method.
+// Go's own text is `interface conversion: main.Dog is not main.Sp: missing method
+// Fly`; there is no package concept in this value model, so the names are bare.
+function js_goifas(v, namev, csv) {
+    var miss = goMissingMethod(v, csv)
+    if (miss == "") { return v }
+    goRTPanic("interface conversion: " + goTypeNameOf(v) + " is not " + goStrOf(namev) + ": missing method " + miss)
+    return v
+}
+
+// The dynamic type NAME of a value, for the panic text above. js_gotypeis answers
+// the same spellings; this is the value-side half of it.
+function goTypeNameOf(v) {
+    if (v === undefined || v === null) { return "nil" }
+    if (v === true || v === false) { return "bool" }
+    if (typeof v == "string") { return "string" }
+    var cls = goClassOf(v)
+    if (cls !== undefined) { return goStrOf(cls.__name) }
+    if (Array.isArray(v)) { return "slice" }
+    if (goIsDict(v)) { return "map" }
+    if (typeof v == "number") {
+        if (floIs(v) || sintIs(v)) { return "any" }
+        if (v === Math.trunc(v)) { return "int" }
+        return "float64"
+    }
+    return "any"
+}
+
+// ----- multi-value results ---------------------------------------------------
+//
+// A MULTI-VALUE RESULT IS MARKED with a __gomv slot, because Go EXPANDS a
+// multi-value call that is the sole argument of a call - `fmt.Println(f())`
+// prints `3 3 3`, not `[3 3 3]` - and an unmarked array could not be told from a
+// Go ARRAY value ([3]int is a plain array in this value model, by design). A
+// tag-6 object CAN be marked where an array cannot: runtime.c's set_member
+// refuses a named key on tag 5 (docs/todo.md 3.1). The emitter gates every call
+// to these on usesMultiRet, so a program with no 2-result function never reaches
+// them. The twins are goMvArr / goMvArgs in languages/go-interpreter.abnf.
+// docs/todo.md 1.5.
+
+// The plain array behind a marked result; the identity on everything else,
+// including the plain arrays the comma-ok forms hand to an unpacking assignment.
+function js_gomv(v) {
+    if (v === undefined || v === null) { return v }
+    if (typeof v != "object") { return v }
+    if (Array.isArray(v)) { return v }
+    var a = v.__gomv
+    if (Array.isArray(a)) { return a }
+    return v
+}
+
+// The argument array of a call whose ONLY argument is a multi-value call: its
+// results become the arguments. Any other shape passes through untouched.
+function js_gomvargs(args) {
+    if (!Array.isArray(args) || args.length != 1) { return args }
+    var only = args[0]
+    if (only === undefined || only === null || typeof only != "object") { return args }
+    if (Array.isArray(only)) { return args }
+    var a = only.__gomv
+    if (Array.isArray(a)) { return a }
+    return args
 }
 
 // panic(v): the argument array is the callee's.
@@ -2057,6 +2198,7 @@ function js_giadopt(ty, v) {
 
 // obj.name = v, at the field's declared width. Delegates the store itself.
 function js_gosetfield(o, namev, v) {
+    if (o === undefined || o === null) { goNilDeref() }   // see goNilDeref: was the floor's die()
     var name = goStrOf(namev)
     var ty = goFieldTy(o, name)
     if (ty == "") {

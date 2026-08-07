@@ -905,5 +905,179 @@ func init() {
 			}
 			return basePyset([]uint64{a[0], a[1], w(giAdoptLike(rt, cur, u(a[2])))})
 		}
+
+		// A DECLARED INTERFACE IS MATCHED STRUCTURALLY: a value satisfies it
+		// exactly when it has every method. js_gotypeis can only compare type
+		// NAMES, so `v.(Sp)` was false for a value that DOES satisfy Sp,
+		// `case Sp:` never fired, and the single-result `v.(Sp)` never panicked
+		// for one that does not - in all three engines. The method set arrives as
+		// a comma-joined string the emitter built at parse time. The twins are
+		// js_goifis / js_goifas in languages/lib/go-rt.metajs and typeMatches /
+		// goAssertIface in languages/go-interpreter.abnf. docs/todo.md 1.5.
+		m["js_goifis"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if goClassOf(v) == nil || goMissingMethod(rt, v, rt.toString(u(a[1]))) != "" {
+				return jsHFalse
+			}
+			return jsHTrue
+		}
+		m["js_goifas"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			miss := goMissingMethod(rt, v, rt.toString(u(a[2])))
+			if miss == "" {
+				return a[0]
+			}
+			// Go's own text is `interface conversion: main.Dog is not main.Sp:
+			// missing method Fly`; there is no package concept in this value
+			// model, so the names are bare.
+			rt.fail("interface conversion: %s is not %s: missing method %s",
+				goTypeNameOf(rt, v), rt.toString(u(a[1])), miss)
+			return a[0]
+		}
+
+		// A MULTI-VALUE RESULT IS MARKED with a __gomv slot, because Go EXPANDS a
+		// multi-value call that is the sole argument of a call -
+		// `fmt.Println(f())` prints `3 3 3`, not `[3 3 3]` - and an unmarked
+		// array could not be told from a Go ARRAY value ([3]int is a plain array
+		// in this value model, by design). The twins are js_gomv / js_gomvargs in
+		// languages/lib/go-rt.metajs and goMvArr / goMvArgs in
+		// languages/go-interpreter.abnf. docs/todo.md 1.5.
+		m["js_gomv"] = func(a []uint64) uint64 {
+			if arr, ok := goMvArr(u(a[0])); ok {
+				return w(arr)
+			}
+			return a[0]
+		}
+		m["js_gomvargs"] = func(a []uint64) uint64 {
+			args, ok := u(a[0]).(*jsArray)
+			if !ok || len(args.elems) != 1 {
+				return a[0]
+			}
+			if arr, isMv := goMvArr(args.elems[0]); isMv {
+				return w(arr)
+			}
+			return a[0]
+		}
+
+		// A NIL POINTER DEREFERENCE IS A RECOVERABLE RUNTIME PANIC, and reading a
+		// member of nil, writing one and calling a method on one each reached a
+		// DIFFERENT message here: rt.getMember said "member 'X' of null",
+		// rt.setMember "member assignment 'X' on null", rt.memberCall "method call
+		// 'Get' on a object". The other two engines aborted outright on the same
+		// programs, so `defer func(){ recover() }()` around `p.X` was a THREE-WAY
+		// split. All three now raise goNilDeref's single wording; the twins are
+		// goNilDeref in languages/go-interpreter.abnf and in
+		// languages/lib/go-rt.metajs. Wrapping rather than editing js_gofield /
+		// js_gomcall in abnf/jsrt.go keeps this go-local: both names are emitted
+		// only by go's grammar. docs/todo.md 1.5.
+		baseField := m["js_gofield"]
+		baseMcall := m["js_gomcall"]
+		baseSetField := m["js_gosetfield"]
+		m["js_gofield"] = func(a []uint64) uint64 {
+			goNilDeref(rt, u(a[0]))
+			return baseField(a)
+		}
+		m["js_gomcall"] = func(a []uint64) uint64 {
+			goNilDeref(rt, u(a[0]))
+			// A FUNC-TYPED FIELD IS CALLABLE: `type H struct { f func(int) int }`
+			// makes h.f(4) a call of the field's value, with NO receiver - it is a
+			// field, not a method. rt.memberCall walks the __class chain for an
+			// instance and never looks at the own slot, so this half died with
+			// "unknown method 'f' on an instance" while the NATIVE binary answered
+			// (layer 2's goMemberCall reads the slot through goGetMember). Checked
+			// only AFTER rt.goMethod missed, so a real method still wins - which is
+			// what layer 2's js_gomcall does too. docs/todo.md 1.5.
+			if o, ok := u(a[0]).(*jsObject); ok {
+				name := rt.toString(u(a[1]))
+				if _, _, found := rt.goMethod(u(a[0]), name); !found {
+					if fn, has := o.props[name]; has && isCallable(fn) {
+						args, isArr := u(a[2]).(*jsArray)
+						if isArr {
+							return w(rt.call(fn, jsUndef, args.elems))
+						}
+					}
+				}
+			}
+			return baseMcall(a)
+		}
+		m["js_gosetfield"] = func(a []uint64) uint64 {
+			goNilDeref(rt, u(a[0]))
+			return baseSetField(a)
+		}
 	})
+}
+
+// goHasMethod: a method of v's own descriptor, or one PROMOTED from an embedded
+// struct. rt.goMethod already answers exactly that, receiver semantics included.
+func goHasMethod(rt *jsrt, v interface{}, name string) bool {
+	_, _, found := rt.goMethod(v, name)
+	return found
+}
+
+// goMissingMethod answers "" when v has every method in the comma-joined set, and
+// otherwise the FIRST one missing - which is what Go's `missing method X` panic
+// text names. A value that is not a struct INSTANCE answers "": a method on a
+// defined non-struct type is not reachable from the value in this model, so
+// refusing there would panic programs go accepts. See the registrations above.
+func goMissingMethod(rt *jsrt, v interface{}, csv string) string {
+	if goClassOf(v) == nil {
+		return ""
+	}
+	for _, name := range strings.Split(csv, ",") {
+		if name == "" {
+			continue
+		}
+		if !goHasMethod(rt, v, name) {
+			return name
+		}
+	}
+	return ""
+}
+
+// goTypeNameOf is the value side of js_gotypeis: the dynamic type name, for the
+// interface-conversion panic text.
+func goTypeNameOf(rt *jsrt, v interface{}) string {
+	switch t := v.(type) {
+	case jsUndefT, jsNullT:
+		return "nil"
+	case bool:
+		return "bool"
+	case string:
+		return "string"
+	case float64:
+		if t == math.Trunc(t) {
+			return "int"
+		}
+		return "float64"
+	case *jsArray:
+		return "slice"
+	}
+	if cls := goClassOf(v); cls != nil {
+		return rt.toString(cls.props["__name"])
+	}
+	if _, _, isDict := dictParts(v); isDict {
+		return "map"
+	}
+	return "any"
+}
+
+// goMvArr answers the plain array behind a marked multi-value result, and
+// whether v was one. See the js_gomv registration above.
+func goMvArr(v interface{}) (*jsArray, bool) {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil, false
+	}
+	arr, isArr := o.props["__gomv"].(*jsArray)
+	return arr, isArr
+}
+
+// goNilDeref raises Go's nil-pointer-dereference panic when v is nil. rt.fail
+// panics with the string "js runtime error: <msg>", which is exactly what
+// goRTPanic produces in the other two engines, so a recovered value is
+// byte-identical across them. See the wrappers above.
+func goNilDeref(rt *jsrt, v interface{}) {
+	if isUndefOrNull(v) {
+		rt.fail("invalid memory address or nil pointer dereference")
+	}
 }
