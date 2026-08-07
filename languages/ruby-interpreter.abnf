@@ -3529,6 +3529,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isUserObj(v) && typeof lookupMethod(v.__class, "to_s") == "function") { return rstr(mcall(v, "to_s", [], null)) }
         // A CLASS object stringifies as its name, not as "[object Object]".
         if (typeof v == "object" && v.__isclass === true) { return v.__name }
+        // A PROC. MRI prints `#<Proc:0x0000...@f.rb:4 (lambda)>`; the address is its
+        // own and cannot be matched, and neither can the source location, so both are
+        // left off rather than invented - the same rule python's <function fn> follows
+        // (docs/todo.md 1.8, closed in da43fee). Without this line THIS half printed
+        // the closure's METAJS SOURCE TEXT - the whole body, comments included -
+        // while both compiled halves printed the C floor's `[function]`: a live halves
+        // divergence no gate could see, because neither half was ever asserted.
+        // Mirrors rbFuncRender of lib/ruby-rt.metajs and rubyFuncRender of
+        // abnf/jsrt.go. docs/todo.md 1.5.
+        if (typeof v == "function") { return isLambda(v) ? "#<Proc (lambda)>" : "#<Proc>" }
         return "" + v
     }
     // String#inspect is the DOUBLE-QUOTED SOURCE form, and it is the escaping that
@@ -6222,8 +6232,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isLambda(f) && arityOpt[i] > 0) { return 0 - (arityReq[i] + 1) }
         return arityReq[i]
     }
-    // Record the shape of `params' against the closure f, and hand f back.
+    // Record the shape of `params' against the closure f, and hand f back. A method
+    // descriptor synthesized rather than parsed (define_method) may carry no
+    // parameter list at all, and an unrecorded closure is what an arity of 0 already
+    // means - so a missing list is a no-op rather than an abort.
     function markParamArity(f, params) {
+        if (params == undefined || params == null) { return f }
         var req = 0
         var opt = 0
         var star = false
@@ -6751,6 +6765,25 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // (*rest), keyword (name:), double-splat (**rest) and block (&blk) parameters, in
     // Ruby's own order. When the method declares keyword parameters, a trailing Hash
     // argument is the keyword hash rather than a positional value.
+    // MRI's own wording, and the three shapes it writes the expectation in:
+    // `expected 1` for a fixed list, `expected 1..2` when optionals follow, and
+    // `expected 1+` when a *splat does. Mirrors rbArgCountErr of lib/ruby-rt.metajs
+    // and rubyArgCountErr of abnf/jsrt.go. docs/todo.md 1.5.
+    function argCountErr(given, posParams) {
+        var req = 0
+        var opt = 0
+        var star = false
+        for (var i = 0; i < posParams.length; i++) {
+            if (posParams[i].splat === true) { star = true }
+            else if (posParams[i].defT != undefined) { opt = opt + 1 }
+            else { req = req + 1 }
+        }
+        var want = "" + req
+        if (star) { want = want + "+" }
+        else if (opt > 0) { want = want + ".." + (req + opt) }
+        throw {__exc: true, v: mkExc(hostGlobals["ArgumentError"],
+                                     "wrong number of arguments (given " + given + ", expected " + want + ")")}
+    }
     function bindParams(params, args) {
         var i
         var kw = null
@@ -6788,6 +6821,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // the same line, in js_rposbind.
         var npos = pos.length
         if (npos > 0 && isBlkArg(pos[npos - 1])) { npos = npos - 1 }
+        // TOO FEW POSITIONAL ARGUMENTS IS AN ERROR, and this is the only place that
+        // can see it: bindParams is reached from invokeRuby (a method call) and from
+        // a LAMBDA's body, which are exactly the two forms MRI arity-checks - a block
+        // binds loosely and must not be checked. Before this, `def one(a); end; one'
+        // bound a to nil and ran, where MRI raises ArgumentError; the bare-name form
+        // is the one docs/todo.md 1.5 names, but the same hole swallowed `one()' and
+        // `f = ->(x) { }; f.call' just as quietly. A CATCHABLE ArgumentError, not a
+        // host abort - the class and the message are MRI's, and both compiled halves
+        // raise the same ones (js_rposbind in lib/ruby-rt.metajs / abnf/jsrt.go).
+        if (npos < required) { argCountErr(npos, posParams) }
         var spare = npos - required
         var ai = 0
         for (i = 0; i < posParams.length; i++) {
@@ -6900,20 +6943,26 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isSig(r)) { return r.v }
         return r
     }
+    // A `def` closure enters the arity registry exactly as a block or a lambda does,
+    // so `method(:double).arity` answers 1 rather than the 0 an UNRECORDED closure
+    // answers. markParamArity is the gate as well as the write: it records nothing
+    // unless the program names `arity` (noteMName), which is what keeps b086d07's
+    // measured 181 KB -> 5.1 MB live-heap cost off every program that does not ask.
+    // docs/todo.md 1.5.
     function makeFunClosure(fn) {
-        return function() {
+        return markParamArity(function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
             return invokeRuby(fn, null, args)
-        }
+        }, fn.params)
     }
     function makeMethodClosure(fn) {
-        return function() {
+        return markParamArity(function() {
             var self = arguments[0]
             var args = []
             for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
             return invokeRuby(fn, self, args)
-        }
+        }, fn.params)
     }
     // Method lookup walks the class, its included modules (last include wins, and a
     // prepended module comes BEFORE the class itself) and then the superclass chain.
@@ -8104,9 +8153,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // itself, so #call, #arity and #to_proc all work on it; its #class is Proc rather
     // than Method, because this value model has no Method class. It resolves through
     // the SCOPE CHAIN, which is every def the compiler half can reach too (there it
-    // is js_scope_get of the symbol's own text) - an instance method of the running
-    // self is out of reach in both halves, because binding one needs a variadic
-    // closure and layer 2's MetaJS has no `arguments`.
+    // is js_scope_get of the symbol's own text), and then - since this round - the
+    // INSTANCE METHODS OF THE RUNNING SELF, bound to it.
+    //
+    // THE OLD NOTE HERE ("binding one needs a variadic closure and layer 2's MetaJS
+    // has no `arguments`") WAS WRONG ON ITS SECOND HALF, and it is what kept this
+    // shut. MetaJS does have `arguments`: metajs-to-llvm-ir.abnf binds it in every
+    // compiled function, lib/go-rt.metajs already builds a bound receiver with it,
+    // and a two-line probe compiled and ran the construct in both engines. The
+    // compiler half's twin is js_rmethodval; the wrapper it and this one build is
+    // the same shape, and it carries the underlying method's arity over so
+    // `method(:inst).arity` answers the parameter count rather than 0.
+    // docs/todo.md 1.5.
     hostGlobals["method"] = function(nm) {
         var n = rstr(nm)
         var res = anytype
@@ -8114,10 +8172,30 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var mi = scopes.length - 1; mi >= 0 && res == undefined; mi--) {
             if (hasOwn(scopes[mi], n)) { res = scopes[mi][n] }
         }
+        if (typeof res == "function") { return res }
+        var sm = anytype
+        sm = selfMethod(n)
+        if (typeof sm == "function") { return bindSelfMethod(findSelf(), n, sm) }
         // NOT hostGlobals: a Kernel method is not in the emitted module's scope, so
-        // answering one here would abort the compiler half and not this one.
-        if (typeof res != "function") { fail("undefined method '" + n + "' for class 'Object'") }
-        return res
+        // answering one here would abort the compiler half and not this one. A
+        // CATCHABLE NameError, which is what MRI raises and what a program may
+        // rescue; a host abort here printed a line on stdout that the compiled
+        // halves printed on stderr, so the miss itself was a halves divergence.
+        throw {__exc: true, v: mkExc(hostGlobals["NameError"],
+                                     "undefined method '" + n + "' for class 'Object'")}
+    }
+    // A method of the running `self` as a callable VALUE: an ordinary variadic
+    // closure that re-dispatches on the receiver, which is what makes #call, #arity
+    // and #to_proc all work on the answer. mcall rather than the stored closure so
+    // that a singleton method (`def self.x`) and a prepended module resolve the way
+    // an ordinary call does.
+    function bindSelfMethod(self, name, m) {
+        var w = function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            return mcall(self, name, args, null)
+        }
+        return copyArity(w, m)
     }
     hostGlobals["format"] = function() {
         var a = argsArray(arguments)

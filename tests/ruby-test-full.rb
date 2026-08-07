@@ -1648,11 +1648,12 @@ def s38
   # A method AS A VALUE is `method(:name)` - Ruby has no bare method reference.
   check("z08", s38_apply(method(:s38_double), v[1]) == 8)
   fs = [method(:s38_double), method(:s38_negate)]
-  # NOT #arity: the shape registry is armed only for a closure BUILT by a block or
-  # lambda literal, never for a def, so a Method answers 0 where MRI answers 1.
-  # Arming it for every def would put every method closure in a registry keyed by
-  # identity, which is the retention the gate exists to avoid (docs/todo.md 1.9).
-  check("z09", fs[1].call(v[1]) == -4 && fs[0].call(v[1]) == 8)
+  # #arity too, since docs/todo.md 1.5: a def closure now enters the shape registry
+  # like a block and a lambda already did, so this answers MRI's 1 rather than the 0
+  # an UNRECORDED closure answers. The retention gate the note here used to describe
+  # is UNCHANGED - nothing is recorded unless the program names `arity`, which this
+  # file does (section 12).
+  check("z09", fs[1].call(v[1]) == -4 && fs[0].call(v[1]) == 8 && fs[0].arity == 1)
   # Object#send / #__send__ / #public_send, including an OPERATOR by name, which
   # is the one shape a type's method table cannot answer.
   check("z10", v[2].send(:upcase) == "B" && S38C.new.send(:sm, v[1]) == "Integer")
@@ -1679,6 +1680,90 @@ def s38_apply(f, n); f.call(n); end
 class S38C
   def sm(a = 1); a.class.to_s; end
   def +(o); "plus#{o}"; end
+end
+# ===== SECTION 39: Method objects, Proc#to_s and the argument count =====
+# docs/todo.md 1.5. Every right-hand side is ruby 2.6.10p210's own answer, and none
+# of these forms changed between 2.6 and 3.x. THIS SECTION IS THE ONE THAT RUNS
+# NATIVELY (docs/todo.md 4.3): the printing arm and the count check both live in
+# layer 2 as well as in the twin, and a feature-matrix assertion is only ever
+# BUILT. Every operand is read out of an array so no constant folder can answer
+# these at compile time.
+def s39
+  v = [3, 5, "x"]
+  # A def closure's PARAMETER SHAPE reaches Proc#arity, including through a Method
+  # value bound to the running self. It answered 0 for every def.
+  check("aa01", method(:s39_double).arity == 1 && method(:s39_none).arity == 0)
+  check("aa02", method(:s39_double).call(v[0]) == 6)
+  # method(:name) reaches an INSTANCE METHOD OF THE RUNNING SELF, bound to it -
+  # `undefined method 'inst' for class 'Object'` in every engine before, and the
+  # note that said so called a variadic bound closure impossible in layer 2.
+  check("aa03", S39C.new.bound_call(v[1]) == 15 && S39C.new.bound_arity == 1)
+  check("aa04", S39C.new.bound_zero == "S39C" && S39D.new.inherited_call(v[0]) == 13)
+  # A PROC PRINTS AS A PROC. MRI writes `#<Proc:0x...@file:line (lambda)>`; the
+  # address and the source location are its own and are left off here rather than
+  # invented (python's `<function fn>` rule), so what is asserted is the part that
+  # is MRI's: it names Proc, it is one line, and it is not the host's function text.
+  # The interpreter half used to print the closure's whole MetaJS SOURCE and both
+  # compiled halves the C floor's `[function]` - a live halves divergence. A Method
+  # VALUE is a Proc here and `#<Method: Object#s39_double>` in MRI, so only the
+  # inspect-shaped envelope is asserted of that one; the Proc naming is asserted of
+  # a lambda, where MRI says Proc too.
+  s = method(:s39_double).to_s
+  check("aa05", s[0] == "#" && !s.include?("function") && !s.include?("\n"))
+  t = "#{s39_lam}"
+  check("aa06", t.include?("Proc") && !t.include?("function") && !t.include?("\n"))
+  # TOO FEW POSITIONAL ARGUMENTS IS AN ArgumentError, with MRI's own message and
+  # its three shapes for the expectation. A bare name for a method with a required
+  # parameter is the form docs/todo.md 1.5 names, but `s39_double()` and a lambda
+  # called short were swallowed just as quietly - all of them bound nil and ran.
+  check("aa07", s39_argerr { s39_double } == "wrong number of arguments (given 0, expected 1)")
+  check("aa08", s39_argerr { s39_double() } == "wrong number of arguments (given 0, expected 1)")
+  check("aa09", s39_argerr { s39_opt2 } == "wrong number of arguments (given 0, expected 1..2)")
+  check("aa10", s39_argerr { s39_star } == "wrong number of arguments (given 0, expected 1+)")
+  check("aa11", s39_argerr { S39C.new.self_short } == "wrong number of arguments (given 0, expected 1)")
+  check("aa12", s39_argerr { s39_lam.call } == "wrong number of arguments (given 0, expected 1)")
+  # ... and everything that WAS legal still is: an all-optional method reached by a
+  # bare name, a block called short (blocks are not arity-checked in Ruby), and a
+  # call that does supply the arguments.
+  check("aa13", s39_alloptional == 1 && s39_double(v[0]) == 6 && s39_star(v[0]) == 1)
+  check("aa14", s39_blockshort == "nil" && s39_opt2(v[0]) == 5)
+  # method(:missing) raises a CATCHABLE NameError. It was a host abort, which the
+  # interpreter half wrote on stdout and the compiled halves on stderr.
+  check("aa15", s39_nameerr == "NameError")
+end
+def s39_double(n); n * 2; end
+def s39_none; 7; end
+def s39_opt2(a, b = 2); a + b; end
+def s39_star(a, *r); r.size + 1; end
+def s39_alloptional(a = 1); a; end
+def s39_lam; ->(x) { x }; end
+def s39_blockshort; [1].map { |a, b| b.inspect }[0]; end
+def s39_argerr
+  begin
+    yield
+    "no error"
+  rescue ArgumentError => e
+    e.message
+  end
+end
+def s39_nameerr
+  begin
+    method(:s39_definitely_not_defined)
+    "no error"
+  rescue NameError => e
+    e.class.to_s
+  end
+end
+class S39C
+  def inst(a); a + 10; end
+  def zero_arg; "S39C"; end
+  def self_short(a); a; end
+  def bound_call(n); method(:inst).call(n); end
+  def bound_arity; method(:inst).arity; end
+  def bound_zero; method(:zero_arg).call; end
+end
+class S39D < S39C
+  def inherited_call(n); method(:inst).call(n); end
 end
 # ===== END SECTIONS =====
 s01() # SECTION-CALL 01
@@ -1719,5 +1804,6 @@ s35() # SECTION-CALL 35
 s36() # SECTION-CALL 36
 s37() # SECTION-CALL 37
 s38() # SECTION-CALL 38
+s39() # SECTION-CALL 39
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

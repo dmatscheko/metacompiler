@@ -1396,7 +1396,21 @@ function rbStr(v) {
             if (msg !== undefined) { return "" + msg }
         }
     }
+    if (typeof v == "function") { return rbFuncRender(v) }
     return "" + v
+}
+
+// How a PROC prints. MRI says `#<Proc:0x0000...@f.rb:4 (lambda)>`; the address is
+// its own and cannot be matched, and neither can the source location, so both are
+// left off rather than invented - the same rule python's <function fn> follows
+// (da43fee). Without it the native binary and llvm.Run printed the C floor's
+// `[function]` while the interpreter half printed the closure's whole METAJS
+// SOURCE TEXT, a live halves divergence that no gate could see because neither
+// half was ever asserted. Mirrors rstr of ruby-interpreter.abnf and
+// rubyFuncRender of abnf/jsrt.go. docs/todo.md 1.5.
+function rbFuncRender(v) {
+    if (rtHas(rbLambdas, v)) { return "#<Proc (lambda)>" }
+    return "#<Proc>"
 }
 
 // Ruby's #inspect: nil, quoted strings, :symbols, and the bracketed collections.
@@ -5160,6 +5174,110 @@ function js_rraise(v, msg) {
 // passed). Ruby's nil is a VALUE and must not trigger a default.
 function js_rundef(v) { return v === undefined }
 
+// The ArgumentError MRI raises when a method or a lambda is called with too few
+// positional arguments, with MRI's own wording and its three shapes for the
+// expectation: `expected 1` for a fixed list, `expected 1..2` when optionals
+// follow, `expected 1+` when a *splat does. `kinds` is js_rposbind's
+// per-parameter code string ("0" required, "1" optional, "2" splat). Mirrors
+// argCountErr of ruby-interpreter.abnf and rubyArgCountErr of abnf/jsrt.go.
+// docs/todo.md 1.5.
+function rbArgCountErr(given, kinds) {
+    var req = 0
+    var opt = 0
+    var star = false
+    var i = 0
+    while (i < kinds.length) {
+        var c = kinds.charAt(i)
+        if (c == "2") { star = true }
+        else if (c == "1") { opt = opt + 1 }
+        else { req = req + 1 }
+        i = i + 1
+    }
+    var want = "" + req
+    if (star) { want = want + "+" }
+    else if (opt > 0) { want = want + ".." + (req + opt) }
+    js_rraise(rbBuiltinClass("ArgumentError"),
+              "wrong number of arguments (given " + given + ", expected " + want + ")")
+}
+
+// The count check of the FAST PATH. emitParams binds an all-required parameter
+// list with js_arg rather than js_rposbind, so that the common case allocates no
+// binding array - and that path therefore has to ask the question separately.
+// Answers nothing; it either raises or returns. off and req are RAW parameters:
+// the emitter writes them with handle(). docs/todo.md 1.5.
+function js_rargchk(args, off_raw, req_raw) {
+    if (!rbIsArr(args)) { return null }
+    var off = off_raw
+    var req = req_raw
+    var npos = args.length - off
+    if (npos < 0) { npos = 0 }
+    if (npos > 0 && rbIsBlk(args[args.length - 1])) { npos = npos - 1 }
+    if (npos >= req) { return null }
+    var kinds = ""
+    var i = 0
+    while (i < req) { kinds = kinds + "0"; i = i + 1 }
+    rbArgCountErr(npos, kinds)
+    return null
+}
+
+// Kernel#method(:name): the scope chain first - every def of the file is declared
+// there - and then an INSTANCE METHOD of the running `self`, bound to it. The
+// whole of it is one extern because js_scope_get ABORTS on a miss and so cannot be
+// used to ask a question, while scopeHas / scopeParent / scopeGet (host 65-67 of
+// runtime.c) can.
+//
+// The note this replaced called the bound case impossible ("binding one needs a
+// variadic closure, and layer 2's MetaJS has no `arguments`"). THE SECOND HALF WAS
+// FALSE: metajs-to-llvm-ir.abnf binds `arguments` in every compiled function,
+// lib/go-rt.metajs already builds a bound receiver with it, and a two-line probe
+// compiled and ran the construct in both engines. Mirrors hostGlobals["method"] of
+// ruby-interpreter.abnf and js_rmethodval of abnf/jsrt.go. docs/todo.md 1.5.
+function js_rmethodval(scope, name) {
+    var n = rbStr(name)
+    // A slot that holds a scope handle, a Ruby value and undefined in turn: MetaJS
+    // is typed and a local keeps the type of its first assignment.
+    var self = anytype
+    var s = anytype
+    var v = anytype
+    self = undefined
+    s = scope
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, n)) {
+            v = scopeGet(s, n)
+            if (typeof v == "function") { return v }
+        }
+        if (self === undefined && scopeHas(s, "self")) { self = scopeGet(s, "self") }
+        s = scopeParent(s)
+    }
+    if (self !== null && self !== undefined) {
+        var m = rbFindMethod(self, n)
+        if (m !== undefined) { return rbBindMethod(self, n, m) }
+    }
+    // A CATCHABLE NameError, which is what MRI raises; a host abort here printed on
+    // stderr where the interpreter half printed on stdout, so the miss itself was a
+    // halves divergence.
+    js_rraise(rbBuiltinClass("NameError"), "undefined method '" + n + "' for class 'Object'")
+    return null
+}
+
+// A method of the running `self` as a callable VALUE: an ordinary variadic closure
+// that re-dispatches on the receiver, which is what makes #call, #arity and
+// #to_proc all work on the answer. rbMethod rather than the stored closure, so a
+// singleton method and a prepended module resolve as an ordinary call. The
+// underlying method's arity record is carried over, or `method(:m).arity` would
+// answer the 0 an unrecorded closure answers.
+function rbBindMethod(self, name, m) {
+    var w = function() {
+        var args = []
+        var i = 0
+        while (i < arguments.length) { args.push(arguments[i]); i = i + 1 }
+        return rbMethod(self, name, args)
+    }
+    var rec = rtPairGet(rbArityFns, rbArityRec, m)
+    if (rec !== undefined) { js_rarity(w, rec[0], rec[1], rec[2]) }
+    return w
+}
+
 // *rest: the arguments from index i on, as an array (a trailing block closure is
 // not one of them). i is a RAW parameter: the emitter writes it with handle(pos).
 function js_rargrest(args, i_raw) {
@@ -5226,6 +5344,13 @@ function js_rposbind(args, off_raw, kinds, wantsKw) {
         if (kinds.charAt(i) == "0") { required = required + 1 }
         i = i + 1
     }
+    // Too few positional arguments is an ArgumentError in MRI, and this is the
+    // general shape of the check; the all-required fast path skips js_rposbind
+    // entirely and asks it separately, through js_rargchk. A BLOCK never reaches
+    // here - the
+    // emitter binds one with js_rblockarg, and Ruby arity-checks methods and
+    // lambdas only. docs/todo.md 1.5.
+    if (npos < required) { rbArgCountErr(npos, kinds) }
     var spare = npos - required
     var ai = 0
     var k = 0

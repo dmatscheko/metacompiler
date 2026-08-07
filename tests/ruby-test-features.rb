@@ -1039,5 +1039,74 @@ check("escape-space-octal", "\s" + "\101\102" + "\1010" + "\u{41}", " ABA0A")
 check("arity-proc", "#{proc { }.arity}|#{proc { |x| }.arity}|#{proc { |*x| }.arity}|#{proc { |x, y = 1| }.arity}", "0|1|-1|1")
 check("arity-lambda", "#{lambda { |x| }.arity}|#{lambda { |x = 1| }.arity}|#{->(a, b = 10) { }.arity}", "1|-1|-2")
 
+# ----- Method objects, Proc#to_s and the argument count (docs/todo.md 1.5) -----
+#
+# The behaviour is asserted natively by SECTION 39 of tests/ruby-test-full.rb -
+# a matrix row is only BUILT, never run (docs/todo.md 4.3), and half of this
+# lives in layer 2. What is here is the EXACT rendering and the exact messages,
+# which the ratchet deliberately does not pin because two of them are recorded
+# divergences from MRI rather than MRI itself.
+def arity_def(a, b = 1); a + b; end
+def arity_none; 0; end
+# A def closure's parameter shape reaches Proc#arity now, gated exactly as before:
+# markParamArity / emitArity record nothing unless the program names `arity`.
+check("arity-def", "#{method(:arity_def).arity}|#{method(:arity_none).arity}", "1|0")
+# HOW A PROC PRINTS. MRI writes `#<Proc:0x0000...@f.rb:12 (lambda)>` and, for a
+# Method, `#<Method: Object#arity_none>`. The address and the source location are
+# the process's own and cannot be matched, so they are LEFT OFF rather than
+# invented - the same rule python's `<function fn>` follows (da43fee). This value
+# model has no Method class either, so `method(:x)` answers a Proc. Before this,
+# the interpreter half printed the closure's whole MetaJS SOURCE TEXT and both
+# compiled halves printed the C floor's `[function]`.
+check("proc-to-s", "#{proc { }}|#{->(x) { x }}|#{lambda { |x| x }}", "#<Proc>|#<Proc (lambda)>|#<Proc (lambda)>")
+check("method-to-s", "#{method(:arity_none)}|#{method(:arity_none).class}", "#<Proc>|Proc")
+# method(:name) reaches an INSTANCE METHOD of the running self, bound to it. It
+# aborted with "undefined method 'inst' for class 'Object'" in every engine, and
+# the note that said so called a variadic bound closure impossible in layer 2 -
+# MetaJS does have `arguments`.
+class MethodValC
+  def inst(a); a + 10; end
+  def probe; "#{method(:inst).call(5)}|#{method(:inst).arity}|#{method(:inst).class}"; end
+end
+check("method-bound-self", MethodValC.new.probe, "15|1|Proc")
+# A missing name is a CATCHABLE NameError, not a host abort.
+def method_miss
+  begin
+    method(:no_such_method_anywhere)
+  rescue NameError => e
+    "#{e.class}"
+  end
+end
+check("method-nameerror", method_miss, "NameError")
+# TOO FEW POSITIONAL ARGUMENTS is an ArgumentError, in MRI's own wording. Ruby
+# checks methods and lambdas, never blocks.
+def argc_one(a); a; end
+def argc_opt(a, b = 2); a; end
+def argc_star(a, *r); a; end
+def argc_msg
+  begin
+    argc_one
+  rescue ArgumentError => e
+    e.message
+  end
+end
+def argc_msg2
+  begin
+    argc_opt
+  rescue ArgumentError => e
+    e.message
+  end
+end
+def argc_msg3
+  begin
+    argc_star
+  rescue ArgumentError => e
+    e.message
+  end
+end
+check("argc-required", argc_msg, "wrong number of arguments (given 0, expected 1)")
+check("argc-optional", argc_msg2, "wrong number of arguments (given 0, expected 1..2)")
+check("argc-splat", argc_msg3, "wrong number of arguments (given 0, expected 1+)")
+
 puts "features: #{checks} checks, #{fails} failures"
 exit(fails)

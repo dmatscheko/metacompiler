@@ -5314,7 +5314,25 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 			}
 		}
 	}
+	if isCallable(v) {
+		return rt.rubyFuncRender(v)
+	}
 	return rt.toString(v)
+}
+
+// rubyFuncRender is how a PROC prints. MRI says `#<Proc:0x0000...@f.rb:4
+// (lambda)>`; the address is its own and cannot be matched, and neither can the
+// source location, so both are left off rather than invented - the same rule
+// python's <function fn> follows (da43fee). Without it THIS half and the native
+// binary printed the C floor's `[function]` while the interpreter half printed the
+// closure's whole METAJS SOURCE TEXT, a live halves divergence that no gate could
+// see because neither half was ever asserted. Mirrors rstr of
+// ruby-interpreter.abnf and rbFuncRender of lib/ruby-rt.metajs. docs/todo.md 1.5.
+func (rt *jsrt) rubyFuncRender(v interface{}) string {
+	if rt.rubyLambdas[v] {
+		return "#<Proc (lambda)>"
+	}
+	return "#<Proc>"
 }
 
 // rubyStrInspect is String#inspect: the DOUBLE-QUOTED SOURCE form, and it is the
@@ -6490,6 +6508,36 @@ type rubyArity struct {
 	req  int
 	opt  int
 	star bool
+}
+
+// rubyArgCountErr is the ArgumentError MRI raises when a method or a lambda is
+// called with too few positional arguments, with MRI's own wording and its three
+// shapes for the expectation: `expected 1` for a fixed list, `expected 1..2` when
+// optionals follow, `expected 1+` when a *splat does. `kinds` is js_rposbind's
+// per-parameter code string ("0" required, "1" optional, "2" splat). Mirrors
+// argCountErr of ruby-interpreter.abnf and rbArgCountErr of lib/ruby-rt.metajs.
+// docs/todo.md 1.5.
+func (rt *jsrt) rubyArgCountErr(given int, kinds string) {
+	req, opt, star := 0, 0, false
+	for i := 0; i < len(kinds); i++ {
+		switch kinds[i] {
+		case '2':
+			star = true
+		case '1':
+			opt++
+		default:
+			req++
+		}
+	}
+	want := strconv.Itoa(req)
+	if star {
+		want += "+"
+	} else if opt > 0 {
+		want += ".." + strconv.Itoa(req+opt)
+	}
+	panic(&jsThrown{value: rt.rubyExc(rt.rubyBuiltinClass("ArgumentError"),
+		[]interface{}{"wrong number of arguments (given " + strconv.Itoa(given) +
+			", expected " + want + ")"})})
 }
 
 // rubyArityOf is Proc#arity. The SHAPE is stored rather than the answer because
@@ -9543,6 +9591,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					required++
 				}
 			}
+			// Too few positional arguments is an ArgumentError in MRI, and this
+			// is the general shape of the check; the all-required fast path skips
+			// js_rposbind entirely and asks it separately, through js_rargchk. A
+			// BLOCK never
+			// reaches here - the emitter binds one with js_rblockarg, and Ruby
+			// arity-checks methods and lambdas only. docs/todo.md 1.5.
+			if npos < required {
+				rt.rubyArgCountErr(npos, kinds)
+			}
 			spare := npos - required
 			ai := 0
 			for k := 0; k < len(kinds); k++ {
@@ -9760,6 +9817,77 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				star: rubyTruthy(u(a[3])),
 			}
 			return a[0]
+		},
+		// The count check of the FAST PATH. emitParams binds an all-required
+		// parameter list with js_arg rather than js_rposbind, so that the common
+		// case allocates no binding array - and that path therefore has to ask the
+		// question separately. Answers nothing; it either raises or returns.
+		// docs/todo.md 1.5.
+		"js_rargchk": func(a []uint64) uint64 {
+			arr, ok := u(a[0]).(*jsArray)
+			if !ok {
+				return jsHUndefined
+			}
+			off, req := int(a[1]), int(a[2])
+			npos := len(arr.elems) - off
+			if npos < 0 {
+				npos = 0
+			}
+			if npos > 0 && rubyIsBlkArg(arr.elems[len(arr.elems)-1]) {
+				npos--
+			}
+			if npos < req {
+				rt.rubyArgCountErr(npos, strings.Repeat("0", req))
+			}
+			return jsHUndefined
+		},
+		// Kernel#method(:name): the scope chain first - every def of the file is
+		// declared there - and then an INSTANCE METHOD of the running `self`, bound
+		// to it. The whole of it is one extern because js_scope_get ABORTS on a
+		// miss and so cannot be used to ask a question; the scope is right here in
+		// the twin, and layer 2 has scopeHas/scopeParent/scopeGet.
+		//
+		// The note this replaced called the bound case impossible ("binding one
+		// needs a variadic closure, and layer 2's MetaJS has no `arguments`"). The
+		// second half was FALSE - metajs-to-llvm-ir.abnf binds `arguments` in every
+		// compiled function and lib/go-rt.metajs already builds a bound receiver
+		// with it. Mirrors hostGlobals["method"] of ruby-interpreter.abnf and
+		// js_rmethodval of lib/ruby-rt.metajs. docs/todo.md 1.5.
+		"js_rmethodval": func(a []uint64) uint64 {
+			name := rt.toString(u(a[1]))
+			var self interface{} = jsNull
+			for sc := rt.scopeOf(a[0]); sc != nil; sc = sc.parent {
+				if v, ok := sc.get(name); ok && isCallable(v) {
+					return w(v)
+				}
+				if v, ok := sc.get("self"); ok && isUndefOrNull(self) {
+					self = v
+				}
+			}
+			if !isUndefOrNull(self) {
+				if m, found := rubyFindMethod(self, name); found {
+					recv, mname := self, name
+					// A variadic wrapper that re-dispatches on the receiver, so
+					// that #call, #arity and #to_proc all work on the answer.
+					// rubyMethod rather than the stored closure, so a singleton
+					// method and a prepended module resolve as an ordinary call.
+					f := &hostFunc{name: "method:" + name, fn: func(rt *jsrt, this uint64, args []interface{}) interface{} {
+						return rt.rubyMethod(recv, mname, args)
+					}}
+					if ar, ok := rt.rubyArities[m]; ok {
+						if rt.rubyArities == nil {
+							rt.rubyArities = map[interface{}]rubyArity{}
+						}
+						rt.rubyArities[f] = ar
+					}
+					return w(f)
+				}
+			}
+			// A CATCHABLE NameError, which is what MRI raises; a host abort here
+			// printed on stderr where the interpreter half printed on stdout, so
+			// the miss itself was a halves divergence.
+			panic(&jsThrown{value: rt.rubyExc(rt.rubyBuiltinClass("NameError"),
+				[]interface{}{"undefined method '" + name + "' for class 'Object'"})})
 		},
 		"js_rgget": func(a []uint64) uint64 {
 			if v, ok := rt.rubyGlobals[rt.toString(u(a[0]))]; ok {

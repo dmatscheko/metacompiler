@@ -46,7 +46,13 @@ def build_url(host, port = 80, *segments, scheme: "http", **query, &callback)
 end
 
 # ----- keyword, splat and block arguments at the call site -----
-def render(name)
+# *name, not a required `name`: this section is about the CALL-SITE syntax, and
+# with one required parameter two of the three calls below are programs MRI
+# itself rejects - `render(*parts)` passes three arguments and `render(&:upcase)`
+# passes none, both ArgumentError. That was invisible until docs/todo.md 1.5 made
+# too few arguments raise here as well, and it then showed up as a halves
+# divergence in ./test.sh --cross rather than as anything about this file.
+def render(*name)
   name
 end
 
