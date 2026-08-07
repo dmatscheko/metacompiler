@@ -29,10 +29,15 @@ REQUIRED = [
     ("per-coroutine jmp_buf pool", "\t\t\tgc_scan_jb(cb[9], cb[10]);"),
     ("is_callable tag 16", "t == 9 || t == 16; }"),
     ("get_member generator.next", 'str_eq_c(key, "next")) { return mk_bound(obj, 60); }'),
+    ("get_member generator.throw", 'str_eq_c(key, "throw")) { return mk_bound(obj, 62); }'),
     ("js_call tag 16", "\tif (t == 16) { return gen_create(callee, args); }"),
     ("the throw barrier", "\tbarrier = jb_at(0);"),
-    ("the re-raise on the resumer", "\t\tjs_throw(ff(g));"),
+    # Three tabs, not two: gen_throw's raise inside js_yield is the same call at
+    # two, and count() != 1 read that as the re-raise having DISAPPEARED.
+    ("the re-raise on the resumer", "\t\t\tjs_throw(ff(g));"),
+    ("gen_throw's raise at the parked yield", "\t\tcb[14] = 0;\n\t\tjs_throw(ff(g));"),
     ("builtin_method mid 60", "\tif (mid == 60) { return gen_next(recv, args); }"),
+    ("builtin_method mid 62", "\tif (mid == 62) { return gen_throw(recv, args); }"),
 ]
 
 

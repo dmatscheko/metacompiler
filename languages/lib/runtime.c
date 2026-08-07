@@ -3114,6 +3114,13 @@ long get_member(long obj, long key) {
 	 * can be stored on one - so python-rt.metajs used to keep a closed-ness side
 	 * table that the native for-loop never consulted. See gen_close. */
 	if (t == 15 && tag_of(key) == 4 && str_eq_c(key, "return")) { return mk_bound(obj, 61); }
+	/* g.throw(v): raise v AT the yield the body is parked at, so the body's own
+	 * try/catch and finally clauses see it. Like `return` it belongs on the floor
+	 * and not in layer 2, because the record travels on the RESUME VALUE - the
+	 * cell's f slot, which only the yield this generator is parked at ever reads.
+	 * That is what makes it per-coroutine by construction rather than by care
+	 * (docs/todo.md 2.1 died on a per-PROGRAM depth stack). See gen_throw. */
+	if (t == 15 && tag_of(key) == 4 && str_eq_c(key, "throw")) { return mk_bound(obj, 62); }
 	if (t == 5) {
 		if (tag_of(key) == 4) {
 			long mid;
@@ -3480,6 +3487,10 @@ long js_call(long callee, long self, long args) {
  *   cb[9] its OWN jmp_buf pool (a setjmp is only valid on the stack that took
  *         it), cb[10] the depth it parked at, cb[12] the pool's length
  *   cb[11] 1 if the body left by a THROW rather than a return
+ *   cb[13] 1 if this resume is a CLOSE: js_yield raises GEN_EXIT (gen_close)
+ *   cb[14] 1 if this resume is a THROW-IN: js_yield raises the cell's f slot
+ *          (gen_throw). Both live in the CONTROL BLOCK, one per generator, which
+ *          is what makes them per-coroutine rather than per-program.
  *
  * THE GENERATOR CELL (tag 15):
  *   a  the closure of the body        b  the argument array
@@ -3737,6 +3748,13 @@ long js_yield(long v) {
 		cb[13] = 0;
 		js_throw(GEN_EXIT);
 	}
+	/* gen_throw set cb[14] before resuming: this yield does not answer either,
+	 * it raises the value the resumer put in the cell's f slot - an ORDINARY
+	 * throw, so the body's own catch arms may take it, unlike GEN_EXIT. */
+	if (cb[14] != 0) {
+		cb[14] = 0;
+		js_throw(ff(g));
+	}
 	return ff(g);
 }
 
@@ -3768,6 +3786,43 @@ long gen_return(long g, long args) {
 	res = mk_obj();
 	obj_put(res, mk_cstr("value"), v);
 	obj_put(res, mk_cstr("done"), H_TRUE);
+	return res;
+}
+
+/* g.throw(v): raise v at the yield the body is parked at. The twin of
+ * abnf/jsrt.go's (*jsGenerator).throwInto.
+ *
+ * Three shapes, and both node and CPython 3.14 agree on all three (probed, not
+ * reasoned about):
+ *   - SUSPENDED: the value is raised inside the body. A body that catches it and
+ *     yields again answers {value, false}; one that catches and returns answers
+ *     {value: ret, true}; one that does not catch propagates out of throw()
+ *     itself, which gen_resume already does for any body that leaves by a throw.
+ *   - NOT STARTED: nothing runs - there is no suspension point and therefore no
+ *     `finally` to unwind - the generator is marked done and v propagates.
+ *   - ALREADY DONE: v propagates and nothing else changes; the return value the
+ *     cell still holds is left alone, since getReturn reads it. */
+long gen_throw(long g, long args) {
+	long v = arg_at(args, 0);
+	long *cb;
+	long val;
+	long done;
+	long res;
+	if (fe(g) != 0) { js_throw(v); return H_UNDEF; }
+	if (fc(g) == 0) {
+		se(g, 1);
+		sd(g, H_UNDEF);
+		sf(g, H_UNDEF);
+		js_throw(v);
+		return H_UNDEF;
+	}
+	cb = (long *)fc(g);
+	cb[14] = 1;
+	gen_resume(g, v, 0);
+	if (fe(g) != 0) { val = ff(g); done = 1; } else { val = fd(g); done = 0; }
+	res = mk_obj();
+	obj_put(res, mk_cstr("value"), val);
+	obj_put(res, mk_cstr("done"), done != 0 ? H_TRUE : H_FALSE);
 	return res;
 }
 
@@ -3830,6 +3885,7 @@ long builtin_method(long recv, long mid, long args) {
 	long t = tag_of(recv);
 	if (mid == 60) { return gen_next(recv, args); }   /* generator.next(v) */
 	if (mid == 61) { return gen_return(recv, args); } /* generator.return(v) */
+	if (mid == 62) { return gen_throw(recv, args); }  /* generator.throw(v) */
 	if (mid == 40) {          /* fn.apply(this, argsArray) */
 		long a = arg_at(args, 1);
 		if (tag_of(a) != 5) { a = mk_arr(); }

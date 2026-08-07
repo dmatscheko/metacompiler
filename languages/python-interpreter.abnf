@@ -64,15 +64,26 @@ Known deviations, all deliberate:
     close() replays to the parked yield and raises there, which is how the
     `finally` runs at the moment CPython runs it.
 
-    STILL MISSING, and it is not reachable from here: gen.throw(). The record
-    would travel on the resume value exactly as close()'s exit record does, but
-    the COMPILED halves cannot follow - a generator there is the C floor's tag-15
-    cell whose member table is host-dispatched and offers next and return only, so
-    giving python a .throw() the two halves agree on is a runtime.c change.
-    languages/js-interpreter.abnf records the same wall for the same reason. For
-    the same reason a close() is not offered to `except`: the floor's GEN_EXIT
+    gen.throw(exc) RAISES AT THE PARKED YIELD, so the body's own except and
+    finally clauses see it, and the record travels on the resume value exactly as
+    close()'s exit record does - which is what makes it per-coroutine by
+    construction. It used to be missing everywhere, because the COMPILED halves
+    could not follow: a generator there is the C floor's tag-15 cell whose member
+    table is host-dispatched and offered next and return only. runtime.c's
+    gen_throw is that table's third member, and abnf/jsrt.go's throwInto the Go
+    twin's. A generator that has not started, or that is done, runs NOTHING - no
+    `finally` - and the exception propagates out of throw() itself; all three
+    shapes were probed against CPython 3.14.6.
+
+    STILL MISSING: a close() is not offered to `except`. The floor's GEN_EXIT
     sentinel unwinds `finally` clauses without being catchable, so neither engine
-    lets a generator catch its own GeneratorExit, where CPython does.
+    lets a generator catch its own GeneratorExit, where CPython does. That one is
+    NOT the same shape as throw() - GEN_EXIT is a floor object with no Python
+    class, and js_try's guard that routes it past every catch arm is shared with
+    the fifteen other languages, where a close IS a return completion and must not
+    be catchable. Also: `yield from` MATERIALIZES its delegate in both halves, so a
+    throw is raised at the `yield from` and never reaches the delegate's own
+    except arms, where CPython forwards it.
   - A tuple is a list, so it is mutable and compares equal to a list.
   - A complex whose imaginary part is zero is an ordinary number, and int / float
     are one numeric type, so type() cannot tell 1 from 1.0 or from 1+0j.
@@ -1605,8 +1616,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     hostGlobals["setattr"] = function(o, n, v) { pySetAttr(o, n, v); return undefined }
     function pyHasAttrOf(o, name) {
         if (o === null || o === undefined) { return name == "__class__" }
+        if (typeof o == "object" && o.__pysup == true) {
+            pySuperCheck(o)
+            return pySuperFind(o, name) != null
+        }
         if (typeof o == "object" && o.__isclass == true) {
-            if (name == "__name__") { return true }
+            if (name == "__name__" || name == "__mro__" || name == "__bases__") { return true }
             return clsFind(o, name) != null
         }
         // docs/todo.md 1.2: the BUILT-IN methods of str / list / dict / set, and
@@ -2055,10 +2070,99 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return false
     }
-    // Walk a class and its bases (left to right, depth first - the MRO this model
-    // needs) for a member.
+    // The resolution order of a class, itself first. Every class this half builds
+    // carries a "__mro" (the C3 linearization, computed once by clsLinearize when
+    // the class object is made) exactly like the compiled halves' class objects do;
+    // the BUILTIN type objects (int, str, ...) carry none and are their own order.
+    function clsMRO(cls) {
+        if (cls == undefined || cls == null) { return [] }
+        if (hasOwn(cls, "__mro")) { return cls.__mro }
+        return [cls]
+    }
+    // The C3 linearization of a base list - the order CPython computes, minus the
+    // class itself (the caller prepends it). This body is pyLinearize in
+    // abnf/jsrt.go and pyDLinearize in languages/lib/python-rt.metajs; a hierarchy
+    // C3 cannot resolve consistently falls back to first-seen order there, and here,
+    // rather than aborting the program.
+    //
+    // WHY IT IS HERE AT ALL: clsFind used to be a left-to-right DEPTH-FIRST walk of
+    // __bases, which is not Python's order and is not what the two compiled halves
+    // do. With `class B(A): pass`, `class C(A): f`, `class D(B, C)`, depth-first
+    // finds A.f where CPython and both compiled halves find C.f - a live halves
+    // divergence --cross never reached, found by the docs/todo.md 1.9 sweep.
+    function clsLinearize(bases) {
+        if (bases.length == 0) { return [] }
+        var seqs = []
+        for (var i = 0; i < bases.length; i++) { seqs.push(clsMRO(bases[i]).slice(0)) }
+        seqs.push(bases.slice(0))
+        var out = []
+        var guard = 0
+        while (guard < 4096) {
+            guard = guard + 1
+            var empty = true
+            for (var s = 0; s < seqs.length; s++) { if (seqs[s].length > 0) { empty = false } }
+            if (empty) { return out }
+            var pick = anytype
+            pick = null
+            for (var s2 = 0; s2 < seqs.length; s2++) {
+                if (pick != null) { continue }
+                if (seqs[s2].length == 0) { continue }
+                var head = seqs[s2][0]
+                var inTail = false
+                for (var t = 0; t < seqs.length; t++) {
+                    for (var k = 1; k < seqs[t].length; k++) { if (seqs[t][k] === head) { inTail = true } }
+                }
+                if (!inTail) { pick = head }
+            }
+            if (pick == null) {
+                for (var s3 = 0; s3 < seqs.length; s3++) {
+                    if (pick == null && seqs[s3].length > 0) { pick = seqs[s3][0] }
+                }
+            }
+            if (pick == null) { return out }
+            out.push(pick)
+            for (var s4 = 0; s4 < seqs.length; s4++) {
+                if (seqs[s4].length > 0 && seqs[s4][0] === pick) { seqs[s4] = seqs[s4].slice(1) }
+            }
+        }
+        return out
+    }
+    // __slots__ over the WHOLE resolution order, which is CPython's rule and not
+    // the nearest-declaration one all three engines used to apply: a name is
+    // writable if ANY class on the MRO declares it in its own __slots__, and any
+    // name at all is writable as soon as one class on the MRO declares no
+    // __slots__ (that class gives its instances a __dict__). With
+    // `class A: __slots__ = ["s"]` and `class B(A): __slots__ = ["t"]`, writing
+    // B().s raised AttributeError in every engine where CPython allows it.
+    function pySlotsAllow(cls, name) {
+        var mro = clsMRO(cls)
+        var all = true
+        for (var i = 0; i < mro.length; i++) {
+            if (!hasOwn(mro[i], "__slots__")) { all = false; continue }
+            var sl = iterToList(mro[i].__slots__)
+            for (var j = 0; j < sl.length; j++) { if (sl[j] === name) { return true } }
+        }
+        return !all
+    }
+    // Give a class object its MRO. Called once, where the class is built.
+    function clsSetMRO(cls, bases) {
+        var mro = [cls]
+        var lin = clsLinearize(bases)
+        for (var i = 0; i < lin.length; i++) { mro.push(lin[i]) }
+        cls.__mro = mro
+    }
+    // Walk a class's resolution order for a member. A class with an MRO is a flat
+    // scan of it; anything else (a builtin type object, the synthetic {__name} class
+    // descriptor pyTypeOf hands out) keeps the old depth-first __bases walk.
     function clsFind(cls, name) {
         if (cls == undefined || cls == null) { return null }
+        if (hasOwn(cls, "__mro")) {
+            var mro = cls.__mro
+            for (var mi = 0; mi < mro.length; mi++) {
+                if (hasOwn(mro[mi], name)) { return mro[mi][name] }
+            }
+            return null
+        }
         if (hasOwn(cls, name)) { return cls[name] }
         var bs = cls.__bases
         if (bs != undefined && bs != null) {
@@ -3409,6 +3513,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // are excluded first: the frozen runtime refuses a non-index property read
         // on one (docs/abnf-dialect-gotchas.md).
         if (target !== null && target !== undefined && typeof target == "object" && !Array.isArray(target)) {
+            if (target.__pysup == true) { return pySuperMCall(target, name, args, kw) }
             if (target.__pymod == "re") { return pyReModCall(name, args) }
             if (target.__pyre === true) { return pyReMethod(target, name, args) }
             if (target.__pymatch === true) { return pyMatchMethod(target, name, args) }
@@ -3417,6 +3522,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (name == "send") { return genSend(target, args.length > 0 ? args[0] : undefined) }
             if (name == "__next__") { return genSend(target, undefined) }
             if (name == "close") { return genClose(target) }
+            if (name == "throw") { return genThrow(target, args.length > 0 ? args[0] : undefined) }
             fail("unknown generator method: " + name)
         }
         if (Array.isArray(target)) {
@@ -3638,10 +3744,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // with pyIsDictMethod/pyIsSetMethod in abnf/jsrt.go and in
     // languages/lib/python-rt.metajs.
     //
-    // NOT the whole of CPython's: dict.popitem/fromkeys and set.intersection/
-    // difference/symmetric_difference/isdisjoint/issubset/issuperset and their
-    // *_update forms are absent, hasattr() therefore says False for them, and a
+    // NOT the whole of CPython's: dict.fromkeys and set.intersection/difference/
+    // symmetric_difference/isdisjoint/issubset/issuperset and their *_update
+    // forms are absent, hasattr() therefore says False for them, and a
     // written call still ABORTS rather than raising - the 51436f9 rule, because
+    // (popitem joined the set at docs/todo.md 1.9; fromkeys did NOT, because it
+    // is a CLASSMETHOD on the `dict` type object and that receiver reaches a
+    // different dispatcher in each of the three engines - see the report)
     // a hard stop says "this project does not have it" where an AttributeError
     // would say "Python does not have it". The set ALGEBRA is spelled with the
     // operators & - ^ <= >= instead, and those are complete.
@@ -3649,6 +3758,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "keys" || name == "values" || name == "items") { return true }
         if (name == "get" || name == "pop" || name == "clear") { return true }
         if (name == "copy" || name == "setdefault" || name == "update") { return true }
+        if (name == "popitem") { return true }
         return false
     }
     function pyIsSetMethod(name) {
@@ -3662,7 +3772,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // sets above: pop, clear, copy and update are on BOTH a dict and a set.
     function pyIsDictOnly(name) {
         if (name == "keys" || name == "values" || name == "items") { return true }
-        if (name == "get" || name == "setdefault") { return true }
+        if (name == "get" || name == "setdefault" || name == "popitem") { return true }
         return false
     }
     function pyIsSetOnly(name) {
@@ -3705,6 +3815,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (args.length > 1) { return args[1] }
             pyRaise(pyMakeExc("KeyError", [pyArgAt(args, 0)]))
+        }
+        // popitem(): the LAST inserted pair, removed - CPython's is LIFO since 3.7.
+        // The pair is a 2-element list, like items()' pairs, because this subset has
+        // no tuple (docs/todo.md 3.1). Empty raises the KeyError whose argument is a
+        // sentence rather than a key, which c2b4071's arg-carrying KeyError renders.
+        if (name == "popitem") {
+            if (d.keys.length == 0) {
+                pyRaise(pyMakeExc("KeyError", ["popitem(): dictionary is empty"]))
+            }
+            var pl = d.keys.length - 1
+            var pk = d.keys[pl]
+            var pvv = anytype
+            pvv = d.vals[pl]
+            listRemoveAt(d.keys, pl)
+            listRemoveAt(d.vals, pl)
+            d.__idx = null
+            return [pk, pvv]
         }
         if (name == "clear") { pyDictClear(d); return undefined }
         // SHALLOW, like CPython's: the values are shared, only the two spine
@@ -3918,6 +4045,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return v
     }
     makeVarRef = function(name) {
+        // `super` is resolved HERE, not through the scopes, because the zero
+        // argument form needs the defining class and the current frame's first
+        // argument - neither of which a value can carry. See pySuperHere.
+        // languages/python-to-llvm-ir.abnf's makeVarRef does the same thing.
+        if (name == "super") { return function() { return pySuperHere() } }
         return function() {
             var v = anytype
             v = getVar(name)
@@ -5579,6 +5711,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (sent != undefined && sent != null && sent.__genExitIn == true) {
                 throw {__genExit: true}
             }
+            // g.throw(exc) travels the same way, but raises an ORDINARY Python
+            // exception, so the body's own except arms may take it.
+            if (sent != undefined && sent != null && sent.__genThrowIn == true) {
+                pyRaise(sent.v)
+            }
             return sent
         }
         run.k = run.k + 1
@@ -5637,12 +5774,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // value once the body has finished - exactly Python's protocol.
     function genSend(g, sendv) {
         var r = genStep(g, sendv)
-        if (!r.yielded) {
-            var exc = pyMakeExc("StopIteration", [r.value])
-            exc.value = r.value
-            pyRaise(exc)
-        }
+        if (!r.yielded) { pyRaise(pyStopIter(r.value)) }
         return r.value
+    }
+    // The StopIteration a finished generator raises. Its ARGS are EMPTY when the
+    // body returned None and (v,) when it returned a value - CPython's rule, which
+    // repr() shows as StopIteration() against StopIteration(7). Both engines used
+    // to pass one argument unconditionally and disagreed on what it was: this half
+    // said StopIteration(None) and the compiled halves StopIteration(''), against
+    // CPython's StopIteration(). `value` is set either way, and it is what
+    // `except StopIteration as e: e.value` reads.
+    function pyStopIter(v) {
+        var a = []
+        if (v != undefined && v != null) { a.push(v) }
+        var exc = pyMakeExc("StopIteration", a)
+        exc.value = v
+        return exc
     }
     function isGen(v) { return v !== null && v !== undefined && typeof v == "object" && v.__gen === true }
     // g.close(): abandon a suspended generator, RUNNING the `finally` clauses that
@@ -5678,6 +5825,38 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyRaise(pyMakeExc("RuntimeError", ["generator ignored GeneratorExit"]))
         }
         return undefined
+    }
+    // g.throw(exc): raise exc AT the yield the generator is parked at, so the body's
+    // own try/except and finally clauses see it - the difference from close(), whose
+    // exit record is deliberately not offered to `except`. The record travels on the
+    // resume value exactly as close()'s does, which is what makes it per-coroutine by
+    // construction rather than by care (docs/todo.md 2.1). runtime.c's gen_throw and
+    // abnf/jsrt.go's throwInto do the same for the compiled halves.
+    //
+    // A generator that is DONE, or that has never been resumed, runs NOTHING - a body
+    // that has not begun has no suspension point and so no `finally` to unwind - and
+    // the exception propagates out of throw() itself. Both are CPython 3.14's rule,
+    // probed. A body that catches it and yields again answers that value; one that
+    // catches and returns raises StopIteration carrying the return value, which is
+    // genSend's ordinary job.
+    function genThrow(g, exc) {
+        var v = anytype
+        v = exc
+        // `g.throw(SomeClass)` instantiates it, exactly as `raise SomeClass` does.
+        if (v != null && v != undefined && v.__isclass == true) { v = pyNew(v, [], null) }
+        var st = g.st
+        if (st.done || st.count == 0) {
+            st.done = true
+            pyRaise(v)
+        }
+        var r = anytype
+        try { r = genStep(g, {__genThrowIn: true, v: v}) }
+        catch (e) { st.done = true; throw e }
+        if (!r.yielded) {
+            st.done = true
+            pyRaise(pyStopIter(r.value))
+        }
+        return r.value
     }
     // Drive a generator to exhaustion, which is what a for-loop or list() needs.
     function genToList(g) {
@@ -6440,6 +6619,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var m = pyExcNames[k]
             if (hasOwn(pyExcParent, m)) { hostGlobals[m].__bases = [hostGlobals[pyExcParent[m]]] }
         }
+        // pyExcNames lists every parent before its children, so one forward pass
+        // gives each builtin exception class the same __mro a user class gets -
+        // which is what lets super().__init__() inside `class E(Exception)` find
+        // BaseException's initializer.
+        for (var q = 0; q < pyExcNames.length; q++) {
+            var e2 = hostGlobals[pyExcNames[q]]
+            clsSetMRO(e2, e2.__bases)
+        }
     }
     installExceptions()
     // Build an exception instance of a builtin type.
@@ -6541,7 +6728,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 scopes = savedChain.slice()
                 if (!excIsUser(e)) { throw e }
                 threw = true
-                box.sig = runHandlers(clauses, e)
+                // A `yield` inside an EXCEPT ARM suspends from in here, where the
+                // catch clause above can no longer see it - so the finally below
+                // used to run at that suspension too, printing `fin` before the
+                // value the yield produced. Same wrong order, one arm further in,
+                // and both compiled halves had it right.
+                try { box.sig = runHandlers(clauses, e) }
+                catch (e2) { if (isGenSuspend(e2)) { suspended = true } throw e2 }
             } finally {
                 if (!suspended) {
                     scopes = savedChain.slice()
@@ -6689,6 +6882,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             bodyT()
             scopes.pop()
             var cls = {__isclass: true, __name: name, __bases: bases}
+            clsSetMRO(cls, bases)
+            // The __class__ cell, exactly as CPython builds one: the class body's
+            // namespace is what every method in it closes over (makeDef captures
+            // scopes.slice()), so writing the finished class object into that same
+            // object gives a zero-argument super() the DEFINING class lexically,
+            // which is the only sound way to have one. It is written AFTER the body
+            // ran, so it is not one of ns.__nskeys and never becomes a class member.
+            ns.__pycls = cls
             for (var k = 0; k < ns.__nskeys.length; k++) {
                 scopePut(cls, ns.__nskeys[k], ns[ns.__nskeys[k]])
             }
@@ -6732,12 +6933,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var st = clsFind(d.__class, "__set__")
                 if (st != null) { st(d, o, v); return }
             }
-            var slots = clsFind(cls, "__slots__")
-            if (slots != null && !hasOwn(o, name)) {
-                var ok = false
-                var sl = iterToList(slots)
-                for (var i = 0; i < sl.length; i++) { if (sl[i] === name) { ok = true } }
-                if (!ok) { pyRaise(pyMakeExc("AttributeError", ["'" + cls.__name + "' object has no attribute '" + name + "'"])) }
+            if (!hasOwn(o, name) && !pySlotsAllow(cls, name)) {
+                pyRaise(pyMakeExc("AttributeError", ["'" + cls.__name + "' object has no attribute '" + name + "'"]))
             }
         }
         if (!hasOwn(o, name)) {
@@ -6757,20 +6954,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (name == "real") { return o }
             if (name == "imag") { return 0 }
         }
+        // A super() proxy: the lookup starts AFTER its class in the instance's MRO,
+        // and a function found there comes back bound to the instance.
+        if (typeof o == "object" && o.__pysup == true) { return pySuperAttr(o, name) }
         if (typeof o == "object" && o.__isclass == true) {
             if (name == "__name__") { return o.__name }
+            // The resolution order, as the two compiled halves already answered it
+            // (pyGetAttr in abnf/jsrt.go and in languages/lib/python-rt.metajs).
+            // It was missing HERE only - AttributeError in the interpreter half
+            // where both compiled halves answered the list. A tuple prints as a
+            // list in this subset (docs/todo.md 3.1) and `object` is not a member
+            // of the model's hierarchy, so CPython's trailing <class 'object'> is
+            // absent in all three engines.
+            if (name == "__mro__") { return clsMRO(o).slice(0) }
+            if (name == "__bases__") { return hasOwn(o, "__bases") ? o.__bases.slice(0) : [] }
             var cv = clsFind(o, name)
             if (cv != null) { return cv }
             // The builtin exception constructor, reachable as Base.__init__(self, ...).
-            if (name == "__init__" && clsIsSub(o, hostGlobals["BaseException"])) {
-                return function() {
-                    var self = arguments[0]
-                    var rest = []
-                    for (var i = 1; i < arguments.length; i++) { rest.push(arguments[i]) }
-                    self.args = rest
-                    if (rest.length > 1 && Array.isArray(rest[1])) { self.exceptions = rest[1] }
-                }
-            }
+            if (name == "__init__" && clsIsSub(o, hostGlobals["BaseException"])) { return pyExcInitFn() }
             fail("AttributeError: type object '" + o.__name + "' has no attribute '" + name + "'")
         }
         // docs/todo.md 1.2: a BOUND built-in method, so getattr(xs, "count")(1)
@@ -6814,6 +7015,129 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
             return f.apply(undefined, concat2impl([self], args))
         }
+    }
+    // BaseException.__init__ as a callable, for `Base.__init__(self, ...)` and for
+    // `super().__init__(...)` inside a class deriving from a builtin exception -
+    // the builtin exception classes hold no __init__ of their own.
+    function pyExcInitFn() {
+        return function() {
+            var self = arguments[0]
+            var rest = []
+            for (var i = 1; i < arguments.length; i++) { rest.push(arguments[i]) }
+            self.args = rest
+            if (rest.length > 1 && Array.isArray(rest[1])) { self.exceptions = rest[1] }
+        }
+    }
+
+    // ----- super() -----
+    //
+    // WHAT IS SUPPORTED, and what is not. CPython has two forms and they are two
+    // different mechanisms:
+    //
+    //   super()            compiler magic. The class body is a closure cell named
+    //                      __class__, and the instance is the current frame's FIRST
+    //                      positional argument. Both are reproduced exactly:
+    //                      makeClass writes the finished class into the class body's
+    //                      namespace object (which every method closes over), and
+    //                      callScopes records the first bound slot as __py1st.
+    //   super(C, obj)      explicit. Both operands are ordinary values.
+    //
+    //   super(C)           an UNBOUND super - a descriptor, useful only when it is
+    //                      then fetched off an instance. DECLINED: the value model
+    //                      has no descriptor protocol for it and a silently-bound
+    //                      answer would be wrong. It raises TypeError.
+    //
+    // The lookup itself is exact rather than approximate: it is a scan of the
+    // INSTANCE's MRO (not the defining class's) starting one past the defining
+    // class, which is what makes a diamond resolve the way CPython resolves it.
+    // clsLinearize gives that MRO C3, so `class D(B, C)` reaches C's method from
+    // B's super() call, and it is the same order both compiled halves use.
+    //
+    // The name `super` is resolved as the builtin at the READ site (makeVarRef), in
+    // both this half and languages/python-to-llvm-ir.abnf, so a program that binds
+    // its own name `super` does not shadow it. That is the one deliberate departure
+    // from CPython here, and it is the same in all three engines.
+    function pySuperObj(cls, obj) { return {__pysup: true, __scls: cls, __sobj: obj} }
+    function pySuperHere() {
+        var cls = anytype
+        cls = undefined
+        var slf = anytype
+        slf = undefined
+        var gotSelf = false
+        var i = scopes.length - 1
+        while (i >= 0) {
+            var sc = scopes[i]
+            if (!gotSelf && sc.__pyfn === true && !hasOwn(sc, "__pycls")) {
+                gotSelf = true
+                if (hasOwn(sc, "__py1st")) { slf = sc.__py1st }
+            }
+            if (hasOwn(sc, "__pycls")) { cls = sc.__pycls; i = 0 }
+            i = i - 1
+        }
+        return pySuperObj(cls, slf)
+    }
+    // The MRO the proxy searches: the instance's own class, or the class itself when
+    // super(C, D) was written with a subclass (the classmethod form).
+    function pySuperMRO(s) {
+        var obj = s.__sobj
+        if (obj != undefined && obj != null && typeof obj == "object") {
+            if (obj.__isclass == true) { return clsMRO(obj) }
+            if (pyUser(obj)) { return clsMRO(obj.__class) }
+        }
+        return []
+    }
+    function pySuperFind(s, name) {
+        var start = s.__scls
+        var mro = pySuperMRO(s)
+        var at = -1
+        for (var i = 0; i < mro.length; i++) { if (mro[i] === start && at < 0) { at = i } }
+        if (at < 0) {
+            pyRaise(pyMakeExc("TypeError", ["super(type, obj): obj must be an instance or subtype of type"]))
+        }
+        for (var j = at + 1; j < mro.length; j++) {
+            if (hasOwn(mro[j], name)) { return {v: mro[j][name]} }
+        }
+        // Every builtin exception class derives from BaseException, whose __init__
+        // is synthesized rather than stored - see pyExcInitFn.
+        if (name == "__init__" && mro.length > 0 && clsIsSub(mro[0], hostGlobals["BaseException"])) {
+            return {v: pyExcInitFn()}
+        }
+        return null
+    }
+    function pySuperAttr(s, name) {
+        pySuperCheck(s)
+        var r = pySuperFind(s, name)
+        if (r == null) {
+            pyRaise(pyMakeExc("AttributeError", ["'super' object has no attribute '" + name + "'"]))
+        }
+        if (typeof r.v == "function") { return bindMethod(s.__sobj, r.v) }
+        return r.v
+    }
+    function pySuperMCall(s, name, args, kw) {
+        pySuperCheck(s)
+        var r = pySuperFind(s, name)
+        if (r == null) {
+            pyRaise(pyMakeExc("AttributeError", ["'super' object has no attribute '" + name + "'"]))
+        }
+        if (typeof r.v != "function") { return pyCall(r.v, args, kw) }
+        kSetNamed(kw)
+        return r.v.apply(undefined, concat2impl([s.__sobj], args))
+    }
+    // CPython's own two messages for a zero-argument super() that has neither.
+    function pySuperCheck(s) {
+        if (s.__scls == undefined || s.__scls == null) {
+            pyRaise(pyMakeExc("RuntimeError", ["super(): __class__ cell not found"]))
+        }
+        if (s.__sobj == undefined) {
+            pyRaise(pyMakeExc("RuntimeError", ["super(): no arguments"]))
+        }
+    }
+    // Calling the value the name `super` reads as. Zero arguments hand back the
+    // already-bound proxy; two build an explicit one.
+    function pySuperCall(s, args) {
+        if (args.length == 0) { pySuperCheck(s); return s }
+        if (args.length == 2) { return pySuperObj(args[0], args[1]) }
+        pyRaise(pyMakeExc("TypeError", ["super(): one-argument (unbound) form is not supported"]))
     }
     // Function objects have no expando slot under the frozen engine, so a def records
     // its name in a side table keyed by an identity scan of the known functions.
@@ -6885,6 +7209,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function kSetNamed(n) { kNamedArgs = n }
     function kTakeNamed() { var n = kNamedArgs; kNamedArgs = null; return n }
     function pyCall(f, args, named) {
+        if (f != null && f != undefined && typeof f == "object" && f.__pysup == true) { return pySuperCall(f, args) }
         if (f != null && f != undefined && f.__isclass == true) {
             if (f.__builtin == true) { return pyConvert(f.__name, args) }
             return pyNew(f, args, named)
@@ -7177,6 +7502,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 v = dflts[p]
             }
             scopePut(fscope, sl.name, v)
+            // The frame's first positional slot, which is what a zero-argument
+            // super() reads as its instance - CPython reads f_localsplus[0] for
+            // exactly the same reason. Recorded rather than looked up by name
+            // because super() does not know the parameter list.
+            if (p == 0) { fscope.__py1st = v }
         }
         if (plist.rest != null) {
             var extra = []

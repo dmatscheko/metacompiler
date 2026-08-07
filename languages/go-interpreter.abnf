@@ -271,10 +271,19 @@ Variadic    <~~ push({vararg: true}) ~~> = "..." ;
 // (func f(a int) (q, r int)). Named results become zero-valued locals that a bare
 // 'return' yields. NamedAhead decides which shape it is BEFORE any name is pushed,
 // so the unnamed list never leaks half a name list onto the tag stack.
-RetTypes    = NamedRets | Type | "(" [ Type { "," Type } ] ")" ;
-NamedRets   <~~ push({rets: takeAll()}) ~~>
+// THE RESULT TYPE TEXTS ARE CAPTURED, which they were not before, and two answers
+// depended on it: a named result was declared holding the plain number 0 whatever its
+// type (`func f() (r int, s string)` left s at 0, printing `0` where go prints the
+// empty string), and a function whose panic was RECOVERED returned undefined - `<nil>`
+// - where go returns the zero values of the declared result types. Both need the type
+// text at the declaration, exactly as a PARAMETER already carries one through PType.
+RetTypes    = NamedRets | RetOne | RetList ;
+RetOne      <~~ push({rtys: cRty1(up.in)}) ~~> = Type ;
+RetList     <~~ push({rtys: cRtyList(takeAll())}) ~~> = "(" [ RType { "," RType } ] ")" ;
+RType       <~~ push({rty: firstType(up.in)}) ~~> = Type ;
+NamedRets   <~~ push(cNamedRets(takeAll())) ~~>
             = NamedAhead "(" NamedRetGrp { "," NamedRetGrp } ")" ;
-NamedRetGrp = Id <~~ push(cPendName(up.in)) ~~> { "," Id <~~ push(cPendName(up.in)) ~~> } Type ;
+NamedRetGrp = Id <~~ push(cPendName(up.in)) ~~> { "," Id <~~ push(cPendName(up.in)) ~~> } RType ;
 // A parenthesized list is NAMED exactly when some element at depth 1 is two words
 // separated by whitespace ('q, r int' has 'r int'; '(int, string)' has no such pair).
 NamedAhead = :script(~~
@@ -573,7 +582,7 @@ ForEver     <~~ push(makeForEver(takeAll())) ~~>
 // for i, v := range s / for _, v := range s / for i := range s / for range s
 ForRange    <~~ push(makeForRange(takeAll())) ~~>
             = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~>
-              [ Id <~~ push({rv: cPoisonName(up.in)}) ~~> [ "," Id <~~ push({rv: cPoisonName(up.in)}) ~~> ] ( ":=" | "=" ) ]
+              [ Id <~~ push({rv: cPoisonName(up.in)}) ~~> [ "," Id <~~ push({rv: cPoisonName(up.in)}) ~~> ] ( ":=" | "=" <~~ push({rset: true}) ~~> ) ]
               "range" KwEnd CondOn Expression CondOff Block ;
 ForClassic  <~~ push(makeForClassic(takeAll())) ~~>
             = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~>
@@ -1302,12 +1311,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // panics. As null it could do none of that: `m["k"]` died with `indexing a
     // object` in the compiler half and a host TypeError in this one, and
     // `nst["absent"]["k"]` - where the zero value of the OUTER map's value type is
-    // itself a nil map - was unreachable (docs/todo.md 1.9). This is the same trade
-    // goZeroTy already makes for `[]T`, which zeroes to an empty slice HEADER; the
-    // difference is __nil, which keeps `m == nil` true (goEq) and keeps the write a
-    // panic (mapSet), so no row gets worse. The compiler half builds the same
-    // object in emitZeroTy, and the mark is read by goIsNilMap in
-    // languages/lib/go-rt.metajs and giIsNilMap in abnf/jsrt.go.
+    // itself a nil map - was unreachable (docs/todo.md 1.9). __nil is what keeps
+    // `m == nil` true (goEq) and keeps the write a panic (mapSet), so no row gets
+    // worse. The compiler half builds the same object in emitZeroTy, and the mark is
+    // read by goIsNilMap in languages/lib/go-rt.metajs and giIsNilMap in
+    // abnf/jsrt.go. `[]T` zeroes to an empty slice HEADER for the same reason and,
+    // since docs/todo.md 1.7, carries the same mark - see newNilSl.
     function newNilMap(zero) { return {__dict: true, keys: [], vals: [], zero: zero, __nil: true} }
     function isNilMap(v) { return isMap(v) && v.__nil == true }
     // indexOf compares with ===, like the scan it replaces. A SIZED INTEGER key is
@@ -1796,6 +1805,20 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return goAdoptLike(slGet(s, ix), v)
     }
     function isSl(v) { return v != undefined && v != null && typeof v == "object" && v.__sl == true }
+    // THE ZERO VALUE OF A SLICE TYPE IS A MARKED EMPTY HEADER, and the mark is what
+    // this used to lack. `var s []int` has to READ like an empty slice - len 0, ranges
+    // over nothing, prints `[]`, and `append(s, x)` works - which is why the zero value
+    // is a header and not null (a null died in len/range/append and in the nested case
+    // where the zero value of a map's slice-typed value is itself one). But Go also
+    // says `s == nil` is TRUE for it, and with no mark on the header goEq had nothing
+    // to test and answered false in all three engines - a divergence from `go` measured
+    // at 0b0f417. __nil is exactly the trade newNilMap already made for maps and it
+    // makes no row worse: nothing else reads the flag, append/slice/make all build
+    // FRESH headers (so the mark cannot leak onto a non-nil slice), and the compiler
+    // half sets the same property in emitZeroTy. The twins are goIsNilZero in
+    // languages/lib/go-rt.metajs and giIsNilZero in abnf/jsrt.go.
+    function newNilSl() { return {__sl: true, a: [], o: 0, n: 0, c: 0, et: undefined, __nil: true} }
+    function isNilSl(v) { return isSl(v) && v.__nil == true }
     // Wraps a FRESH backing array as a slice over the whole of it.
     function slOf(arr) { return newSl(arr, 0, arr.length, arr.length) }
     // A Go RUNTIME PANIC - `panic: runtime error: index out of range [7] with
@@ -2941,6 +2964,31 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // which is the function body: poisoning it where the tag fires would poison it in
     // the PACKAGE frame instead and kill `const n` for the whole file.
     function cPendName(name) { cPend.push(name); return name }
+    // ----- Result types (RetOne / RetList / NamedRets) -----
+    // A result type text is captured through firstType exactly as a parameter's is, so
+    // a named result can be declared at the ZERO of its own type and a recovered panic
+    // can answer the zero of an unnamed one. cRty1 wraps the single-type form; cRtyList
+    // unwraps a parenthesized list's {rty} markers; cNamedRets splits a named list into
+    // parallel name and type arrays the way makeStructStmt splits a field group - the
+    // names of one group share the type that follows them.
+    function cRty1(s) { return [firstType(s)] }
+    function cRtyList(items) {
+        var out = []
+        for (var i = 0; i < items.length; i++) { out.push(items[i].rty) }
+        return out
+    }
+    function cNamedRets(items) {
+        var names = []
+        var tys = []
+        var pend = []
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "string") { pend.push(items[i]); continue }
+            for (var k = 0; k < pend.length; k++) { names.push(pend[k]); tys.push(items[i].rty) }
+            pend = []
+        }
+        for (var p = 0; p < pend.length; p++) { names.push(pend[p]); tys.push("") }
+        return {rets: names, rtys: tys}
+    }
     function cScopeEnter() {
         var f = {n: [], v: []}
         var i = 0
@@ -3561,8 +3609,23 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     binOps["-"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxSub(l, r) : ((isFlo(l) || isFlo(r)) ? gFloOp2("-", gNumF(l), gNumF(r), gF32Res(l, r)) : szArith("-", l, r)) }
     binOps["*"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxMul(l, r) : ((isFlo(l) || isFlo(r)) ? gFloOp2("*", gNumF(l), gNumF(r), gF32Res(l, r)) : szArith("*", l, r)) }
-    binOps["/"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxDiv(l, r) : ((isFlo(l) || isFlo(r)) ? gFloOp2("/", gNumF(l), gNumF(r), gF32Res(l, r)) : szArith("/", l, r)) }
-    binOps["%"] = function(l, r) { return (isFlo(l) || isFlo(r)) ? gFloOp2("%", gNumF(l), gNumF(r), gF32Res(l, r)) : szArith("%", l, r) }
+    // INTEGER DIVISION BY ZERO IS A RECOVERABLE PANIC IN GO, and this half used to abort
+    // instead. szArith in lib/interp-core.js raises it with `fail`, which prints and
+    // exits - so a deferred recover() caught a divide by zero in the compiler half and
+    // could not in this one (docs/todo.md 1.7). The fix is deliberately GO-LOCAL rather
+    // than a change to the shared `fail`: `fail` is six languages' hard abort and is
+    // also how this file reports things that are NOT runtime conditions ("unknown name",
+    // an unresolved import), which Go must not turn into recoverable panics. Only the
+    // two operators Go says panic are intercepted, and only on the INTEGER path - a
+    // float64 divided by zero is an infinity in Go, not a panic, so the float arm above
+    // is untouched. goRTPanic produces the same value the Go twin's rt.fail does, which
+    // is what keeps a recovered `e` byte-identical across the three engines.
+    function gIntDivZ(op, l, r) {
+        if (szNum(r) === 0) { goRTPanic("integer divide by zero") }
+        return szArith(op, l, r)
+    }
+    binOps["/"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxDiv(l, r) : ((isFlo(l) || isFlo(r)) ? gFloOp2("/", gNumF(l), gNumF(r), gF32Res(l, r)) : gIntDivZ("/", l, r)) }
+    binOps["%"] = function(l, r) { return (isFlo(l) || isFlo(r)) ? gFloOp2("%", gNumF(l), gNumF(r), gF32Res(l, r)) : gIntDivZ("%", l, r) }
     // The four comparisons unbox a float64 so it can be compared against an untyped
     // constant (x > 2 with x a float64), and go through szCmp when either side is a
     // sized integer - an unsigned one has to compare UNSIGNED, so uint64max > 0.
@@ -3584,6 +3647,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return coreApplyOpG(op, a, b)
     }
 
+    // "this value is the ZERO VALUE of a map or slice type", i.e. what `== nil` has to
+    // answer true for even though the representation is a usable empty container.
+    function isNilZero(v) { return isNilMap(v) || isNilSl(v) }
     // Go's == is VALUE equality for structs and arrays (both are value types) and
     // identity for everything else. nil compares equal to an unset slice/map/pointer.
     function goEq(l, r) {
@@ -3594,12 +3660,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // untyped constant (i8 == -128), never by object identity.
         if (szIs(l) || szIs(r)) { return szEq(l, r) }
         if (l === r) { return true }
-        if (l === undefined) { return r === null || r === undefined || isNilMap(r) }
-        if (r === undefined) { return l === null || isNilMap(l) }
-        // `m == nil` on the zero value of a map type. A nil map is a marked empty
-        // map here (see newNilMap), so nil-ness is the mark and not the null.
-        if (l === null) { return isNilMap(r) }
-        if (r === null) { return isNilMap(l) }
+        if (l === undefined) { return r === null || r === undefined || isNilZero(r) }
+        if (r === undefined) { return l === null || isNilZero(l) }
+        // `m == nil` on the zero value of a map type, and `s == nil` on the zero value
+        // of a slice type. Both are MARKED EMPTY containers here (newNilMap, newNilSl),
+        // so nil-ness is the mark and not the null.
+        if (l === null) { return isNilZero(r) }
+        if (r === null) { return isNilZero(l) }
         if (typeof l != "object" || typeof r != "object") { return false }
         if (isSl(l) || isSl(r)) { return l === r }
         if (Array.isArray(l) && Array.isArray(r)) {
@@ -3816,7 +3883,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var close = t.indexOf("]")
             if (close < 1) { return null }
             var el = t.substring(close + 1)
-            if (close == 1) { return slT(newSl([], 0, 0, 0), el) }
+            if (close == 1) { return slT(newNilSl(), el) }
             var n = 0
             for (var d = 1; d < close; d++) {
                 var cc = t.charCodeAt(d)
@@ -4094,14 +4161,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var ptypes = items[0].ptypes
         var i = 1
         var rets = []
-        if (items[i] != undefined && items[i].rets != undefined) { rets = items[i].rets; i++ }
+        // A RetTypes now always leaves one entry: {rets, rtys} for a named list,
+        // {rtys} alone for an unnamed one.
+        var rtys = []
+        if (items[i] != undefined && items[i].rtys != undefined) {
+            if (items[i].rets != undefined) { rets = items[i].rets }
+            rtys = items[i].rtys
+            i++
+        }
         var bodyT = items[i]
         return function() {
             var env = scopes.slice(0)
             return function() {
                 var args = []
                 for (var a = 0; a < arguments.length; a++) { args.push(arguments[a]) }
-                return invokeBodyG(params, bodyT, undefined, "", args, rets, env, variadic, ptypes)
+                return invokeBodyG(params, bodyT, undefined, "", args, rets, rtys, env, variadic, ptypes)
             }
         }
     }
@@ -4487,9 +4561,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var listT = items.pop()
         var lbl = items[0].lbl
         var names = []
-        for (var i = 1; i < items.length; i++) { names.push(items[i].rv) }
+        // `for i, v = range xs` ASSIGNS to names the enclosing block already declared;
+        // only `:=` declares its own. Both halves used to declare in either case, so
+        // the outer i and v still held their old values after the loop - both halves
+        // agreeing on the wrong answer, which no gate can see. The {rset} marker is
+        // pushed by the "=" arm of ForRange.
+        var rset = false
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].rset == true) { rset = true; continue }
+            names.push(items[i].rv)
+        }
         var iName = names.length > 0 ? names[0] : null
         var vName = names.length > 1 ? names[1] : null
+        function rBind(nm, v) { if (rset) { setVar(nm, v) } else { declVar(nm, v) } }
         return function() {
             var arr = listT()
             // Ranging a CHANNEL yields one received value per iteration (bound to the
@@ -4504,7 +4588,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     var rc = chanRecvOrDone(arr)
                     if (!rc.ok) { break }
                     scopes[ctop] = {}
-                    if (iName != null) { declVar(iName, rc.v) }
+                    if (iName != null) { rBind(iName, rc.v) }
                     var rr = bodyT()
                     var sc2 = loopSig(rr, lbl)
                     if (sc2 == 1) { break }
@@ -4539,8 +4623,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var top = scopes.length - 1
             for (var i = 0; i < n; i++) {
                 scopes[top] = {}
-                if (iName != null) { declVar(iName, keys != null ? keys[i] : i) }
-                if (vName != null) { declVar(vName, vals != null ? vals[i] : goIndex(arr, i)) }
+                if (iName != null) { rBind(iName, keys != null ? keys[i] : i) }
+                if (vName != null) { rBind(vName, vals != null ? vals[i] : goIndex(arr, i)) }
                 var r = bodyT()
                 var s = loopSig(r, lbl)
                 if (s == 1) { break }
@@ -5097,24 +5181,31 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var ptypes = plist.ptypes
         i += 2
         var rets = []
-        if (items[i] != undefined && items[i].rets != undefined) { rets = items[i].rets; i++ }
+        // A RetTypes now always leaves one entry: {rets, rtys} for a named list,
+        // {rtys} alone for an unnamed one.
+        var rtys = []
+        if (items[i] != undefined && items[i].rtys != undefined) {
+            if (items[i].rets != undefined) { rets = items[i].rets }
+            rtys = items[i].rtys
+            i++
+        }
         var body = items[i]
         if (recv != null) {
             // A method: attached to its struct descriptor after the whole compile.
-            methodTodo.push({recvName: recv, name: name, params: params, body: body, rets: rets, variadic: variadic, ptypes: ptypes})
+            methodTodo.push({recvName: recv, name: name, params: params, body: body, rets: rets, rtys: rtys, variadic: variadic, ptypes: ptypes})
         } else {
-            globalScope[name] = makeFunClosure(params, body, rets, variadic, ptypes)
+            globalScope[name] = makeFunClosure(params, body, rets, rtys, variadic, ptypes)
             // In an imported package, an exported (capitalized) function is ALSO reached
             // through the package object (pkg.Fn), the way fmt.Println is (see importFile).
             if (curPkgName != null && isExported(name)) { pkgExports["$" + curPkgName].push(name) }
         }
     }
     var methodTodo = []
-    function makeFunClosure(params, body, rets, variadic, ptypes) {
+    function makeFunClosure(params, body, rets, rtys, variadic, ptypes) {
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBodyG(params, body, undefined, "", args, rets, null, variadic, ptypes)
+            return invokeBodyG(params, body, undefined, "", args, rets, rtys, null, variadic, ptypes)
         }
     }
     // A shallow copy of a struct value, for a value receiver and for array/struct
@@ -5134,7 +5225,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var self = mm.byPtr ? arguments[0] : goCopy(arguments[0])
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBodyG(mm.params, mm.body, self, mm.recvName, args, mm.rets, null, mm.variadic, mm.ptypes)
+            return invokeBodyG(mm.params, mm.body, self, mm.recvName, args, mm.rets, mm.rtys, null, mm.variadic, mm.ptypes)
         }
     }
 
@@ -5154,9 +5245,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         panicVal = null
         return v
     }
+    // The value an UNNAMED-result function answers when its body produced no return
+    // signal: one zero, or an array of them, or undefined when it declares no result.
+    function goZeroRets(rtl) {
+        if (rtl.length == 0) { return undefined }
+        if (rtl.length == 1) { return goZeroTy(rtl[0]) }
+        var vs = []
+        for (var i = 0; i < rtl.length; i++) { vs.push(goZeroTy(rtl[i])) }
+        return vs
+    }
     // env == null: a top-level function (a fresh chain); otherwise a closure's chain.
-    function invokeBodyG(params, body, self, recvName, args, rets, env, variadic, ptypes) {
+    function invokeBodyG(params, body, self, recvName, args, rets, rtys, env, variadic, ptypes) {
         var rl = (rets == undefined || rets == null) ? [] : rets
+        var rtl = (rtys == undefined || rtys == null) ? [] : rtys
         var saved = scopes
         scopes = (env == null) ? [globalScope, {}] : env.slice(0)
         if (env != null) { scopes.push({}) }
@@ -5169,7 +5270,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (variadic && i == np - 1) { declVar(params[i], slT(slOf(args.slice(i)), pt)) }
             else { declVar(params[i], gAdoptTy(pt, goVal(i < args.length ? args[i] : undefined))) }
         }
-        for (var r = 0; r < rl.length; r++) { declVar(rl[r], 0) }
+        // A named result is a local at the ZERO OF ITS DECLARED TYPE, not the number
+        // 0: `func f() (r int, s string)` returning without assigning s printed `0`
+        // where go prints the empty string, and a `[]int` result printed `0` rather
+        // than `[]`. The type texts arrive from RetTypes beside the names.
+        for (var r = 0; r < rl.length; r++) { declVar(rl[r], goZeroTy(r < rtl.length ? rtl[r] : "")) }
         var frame = []
         deferFrames.push(frame)
         var myChain = scopes
@@ -5186,7 +5291,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         deferFrames.pop()
         if (caught != null) { panicking = true; panicVal = caught.v }
-        var out = (res != undefined && res != null && res.isRet) ? res.v : undefined
+        // NO RETURN SIGNAL in a function that declares results means its panic was
+        // RECOVERED, and Go's answer there is the zero value of each declared result
+        // type. This used to answer undefined - `<nil>` - for every type. (A function
+        // with NAMED results reads them back below, so only the unnamed case is here.)
+        var out = (res != undefined && res != null && res.isRet) ? res.v : goZeroRets(rtl)
         if (rl.length > 0 && res != undefined && res != null && res.isRet && res.v !== undefined) {
             if (rl.length == 1) { setVar(rl[0], res.v) }
             else { for (var k = 0; k < rl.length; k++) { setVar(rl[k], res.v[k]) } }
@@ -5323,7 +5432,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (cls == undefined) fail("method receiver type not found: " + recvType)
         cls["__ptr$" + mm.name] = byPtr
         cls[mm.name] = makeMethodClosure({recvName: recvVar, name: mm.name, params: mm.params,
-                                          body: mm.body, rets: mm.rets, variadic: mm.variadic, byPtr: byPtr,
+                                          body: mm.body, rets: mm.rets, rtys: mm.rtys, variadic: mm.variadic, byPtr: byPtr,
                                           ptypes: mm.ptypes})
     }
 

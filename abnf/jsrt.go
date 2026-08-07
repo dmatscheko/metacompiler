@@ -369,6 +369,12 @@ type jsrt struct {
 	// Kernel#lambda, which is all that Proc#lambda? needs. Filled by js_rlambda.
 	rubyLambdas map[interface{}]bool
 
+	// rubyArities remembers a closure's PARAMETER SHAPE, which is the only thing
+	// Proc#arity can be computed from and which no function value carries. Filled
+	// by js_rarity where the closure is built; see rubyArityOf for why the three
+	// counts are stored rather than the answer.
+	rubyArities map[interface{}]rubyArity
+
 	// rubyCurExc is the exception the innermost js_try handed to a catch clause,
 	// which is what a BARE `raise' inside a rescue re-raises (Ruby's $!). It is
 	// only ever read by js_rraise.
@@ -502,6 +508,17 @@ type genExitSignal struct{ _ byte }
 
 var genExit interface{} = &genExitSignal{}
 
+// genThrowSignal is what throwInto puts ON THE RESUME VALUE so that g.throw(v)
+// raises v at the yield the body is parked at. It rides the resume channel rather
+// than a field of the generator for the reason docs/todo.md 2.1 records: a
+// per-PROGRAM record cannot survive coroutines, while a value handed to one
+// suspension is per-coroutine by construction - only the yield it was aimed at
+// ever reads it.
+//
+// Unlike genExit it becomes an ORDINARY *jsThrown, so the body's own catch arms
+// may take it; that is the whole point of throw() against return().
+type genThrowSignal struct{ v interface{} }
+
 // genStep is one handshake result: a yielded value, the return value (done), or a
 // panic (a throw or a runtime error) that has to be re-raised in the resumer.
 type genStep struct {
@@ -626,6 +643,27 @@ func (g *jsGenerator) finish(rt *jsrt, v interface{}) interface{} {
 	res.set("value", v)
 	res.set("done", true)
 	return res
+}
+
+// throwInto is generator.throw(v): raise v AT the yield the body is parked at,
+// so the body's own try/catch/finally see it. The twin of runtime.c's gen_throw,
+// and the three shapes are node's and CPython 3.14's, probed rather than reasoned
+// about: suspended raises inside the body (a catch that yields again answers
+// {value, false}, one that returns answers {value: ret, true}, and an uncaught one
+// propagates out of throw() as step()'s re-panic already does); NOT STARTED runs
+// nothing at all - there is no suspension point and so no `finally` - and marks
+// the generator done; ALREADY DONE just propagates.
+func (g *jsGenerator) throwInto(rt *jsrt, v interface{}) interface{} {
+	if g.done {
+		panic(&jsThrown{value: v})
+	}
+	if !g.started {
+		g.done = true
+		g.lastValue = jsUndef
+		g.lastKey = jsUndef
+		panic(&jsThrown{value: v})
+	}
+	return g.step(rt, &genThrowSignal{v: v})
 }
 
 // drain materializes the remaining values of a generator, which is how a for-of
@@ -1754,19 +1792,47 @@ func giIsNilMap(v interface{}) bool {
 	return has && n
 }
 
+// giIsNilZero answers "this is the zero value of a map OR a slice type", i.e. what
+// Go's `== nil` has to answer true for. A slice zeroes to a marked empty HEADER for
+// the same reason a map zeroes to a marked empty dict - it has to READ like an empty
+// one (len, range, append, print all work on a nil slice in Go) - so nil-ness is the
+// __nil mark rather than the null in both cases. Set by emitNilSl in
+// languages/go-to-llvm-ir.abnf; the twins are isNilZero in go-interpreter.abnf and
+// goIsNilZero in languages/lib/go-rt.metajs. Go-specific: reached only from
+// goValueEq, which only the go grammar calls.
+func giIsNilZero(v interface{}) bool {
+	if giIsNilMap(v) {
+		return true
+	}
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	if n, has := o.props["__nil"].(bool); !has || !n {
+		return false
+	}
+	cls, ok := o.props["__class"].(*jsObject)
+	if !ok {
+		return false
+	}
+	name, _ := cls.props["__name"].(string)
+	return name == "$sl"
+}
+
 // goValueEq is Go's ==: structs and arrays are VALUE types and compare element by
 // element, nil equals an unset slice/map/pointer, everything else is strictEq.
 // Used only by the go-to-llvm-ir grammar (js_goeq / js_gone).
 func (rt *jsrt) goValueEq(a, b interface{}) bool {
-	// `m == nil` on the zero value of a map type. The zero value of a map is a
-	// MARKED EMPTY MAP and not nil (emitZeroTy in languages/go-to-llvm-ir.abnf has
-	// the argument: a nil map has to READ like an empty one), so nil-ness is the
-	// __nil mark rather than the null. docs/todo.md 1.9.
+	// `m == nil` on the zero value of a map type, `s == nil` on the zero value of a
+	// slice type. Both zero to a MARKED EMPTY container and not to nil (emitZeroTy /
+	// emitNilSl in languages/go-to-llvm-ir.abnf have the argument: a nil map and a nil
+	// slice both have to READ like empty ones), so nil-ness is the __nil mark rather
+	// than the null. docs/todo.md 1.9, 1.7.
 	if isUndefOrNull(a) {
-		return isUndefOrNull(b) || giIsNilMap(b)
+		return isUndefOrNull(b) || giIsNilZero(b)
 	}
 	if isUndefOrNull(b) {
-		return giIsNilMap(a)
+		return giIsNilZero(a)
 	}
 	if aa, ok := a.(*jsArray); ok {
 		if ba, ok2 := b.(*jsArray); ok2 {
@@ -2404,6 +2470,10 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 		case "return":
 			return jsHostFunc("return", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 				return o.finish(rt, argAt(args, 0))
+			})
+		case "throw":
+			return jsHostFunc("throw", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				return o.throwInto(rt, argAt(args, 0))
 			})
 		// The INSPECTION half of the iterator protocol, which JavaScript's
 		// {value, done} record folds into next() but most other languages expose as
@@ -4755,6 +4825,12 @@ func rubyClassName(v interface{}) string {
 			return "Enumerator"
 		}
 	}
+	// A Proc / lambda / block closure. Without this arm `blk.class` and
+	// `blk.is_a?(Proc)` aborted both compiled halves with "method call 'class' on a
+	// function", where ruby-interpreter.abnf answered off classOf.
+	if isCallable(v) {
+		return "Proc"
+	}
 	return ""
 }
 
@@ -5144,6 +5220,57 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 	return rt.toString(v)
 }
 
+// rubyStrInspect is String#inspect: the DOUBLE-QUOTED SOURCE form, and it is the
+// escaping that makes it one. MRI escapes the quote, the backslash, the eight
+// named control characters, a `#` that would start an interpolation (`#{`, `#$`,
+// `#@` - a bare `#` is left alone), and every other control character as \uXXXX
+// with UPPERCASE hex. Printable non-ASCII is left alone under a UTF-8 locale, so
+// this walks BYTES and copies anything >= 0x80 through untouched. Mirrors
+// strInspect of ruby-interpreter.abnf and rbStrInspect of lib/ruby-rt.metajs.
+func rubyStrInspect(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '"':
+			b.WriteString("\\\"")
+		case '\\':
+			b.WriteString("\\\\")
+		case '\n':
+			b.WriteString("\\n")
+		case '\t':
+			b.WriteString("\\t")
+		case '\r':
+			b.WriteString("\\r")
+		case '\f':
+			b.WriteString("\\f")
+		case '\v':
+			b.WriteString("\\v")
+		case '\b':
+			b.WriteString("\\b")
+		case 7:
+			b.WriteString("\\a")
+		case 27:
+			b.WriteString("\\e")
+		case '#':
+			if i+1 < len(s) && (s[i+1] == '{' || s[i+1] == '$' || s[i+1] == '@') {
+				b.WriteString("\\#")
+			} else {
+				b.WriteByte('#')
+			}
+		default:
+			if c < 0x20 || c == 0x7f {
+				fmt.Fprintf(&b, "\\u%04X", c)
+			} else {
+				b.WriteByte(c)
+			}
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
 // rubyInspect is Ruby's #inspect: nil, quoted strings, :symbols, and the bracketed
 // forms of Array and Hash.
 func (rt *jsrt) rubyInspect(v interface{}) string {
@@ -5151,7 +5278,7 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 	case jsNullT, jsUndefT:
 		return "nil"
 	case string:
-		return "\"" + t + "\""
+		return rubyStrInspect(t)
 	case jsSym:
 		return ":" + t.s
 	case *jsArray:
@@ -5928,6 +6055,10 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		if isCallable(target) {
 			return rt.rubyLambdas[target]
 		}
+	case "arity":
+		if isCallable(target) {
+			return rt.rubyArityOf(target)
+		}
 	case "to_proc":
 		if isCallable(target) {
 			return target
@@ -6012,6 +6143,14 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return rt.rubyInspect(o)
 		case "to_sym", "intern":
 			return jsSym{s: o}
+		// String#ord: the code point of the FIRST character. It worked in
+		// ruby-interpreter.abnf and aborted here, so `"\\e".ord` - the ordinary way
+		// to name a control character - was a halves divergence.
+		case "ord":
+			if r := []rune(o); len(r) > 0 {
+				return float64(r[0])
+			}
+			return float64(0)
 		// String#to_i / #to_f parse a LEADING number and answer 0 when there is
 		// none. Both worked in ruby-interpreter.abnf and aborted here, so any
 		// program reading a number out of text was a halves divergence.
@@ -6210,6 +6349,32 @@ func rubyRand(v interface{}) interface{} {
 // argument (see unwrapArgs in ruby-to-llvm-ir.abnf), where ruby-interpreter.abnf
 // keeps it in a parameter of its own - which is why arrayMethod there takes a
 // fourth argument and this does not.
+// rubyArity is the parameter shape Proc#arity is computed from: how many
+// parameters are required, how many have defaults, and whether there is a *splat.
+// Keyword and block parameters are not counted at all.
+type rubyArity struct {
+	req  int
+	opt  int
+	star bool
+}
+
+// rubyArityOf is Proc#arity. The SHAPE is stored rather than the answer because
+// Kernel#lambda turns an already-built proc into a lambda, and the two count
+// optional parameters differently: a proc ignores them (`proc { |x = 0| }.arity`
+// is 0), a lambda does not (`lambda { |x = 0| }.arity` is -1). A *splat makes it
+// -(required + 1) either way. Mirrors procArity of ruby-interpreter.abnf and
+// rbProcArity of lib/ruby-rt.metajs.
+func (rt *jsrt) rubyArityOf(f interface{}) float64 {
+	a, ok := rt.rubyArities[f]
+	if !ok {
+		return 0
+	}
+	if a.star || (rt.rubyLambdas[f] && a.opt > 0) {
+		return float64(-(a.req + 1))
+	}
+	return float64(a.req)
+}
+
 func rubyBlockArgs(args []interface{}) ([]interface{}, interface{}) {
 	if n := len(args); n > 0 && isCallable(args[n-1]) {
 		return args[:n-1], args[n-1]
@@ -8869,6 +9034,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if sent == genExit {
 				panic(genExit)
 			}
+			// throwInto() resumes with a throw-in record: this yield does not
+			// answer either, it raises - as an ORDINARY throw, so the body's own
+			// catch arms may take it. The record travels on the resume value and
+			// nothing is kept across the suspension, which is what makes it
+			// per-coroutine by construction (docs/todo.md 2.1).
+			if t, ok := sent.(*genThrowSignal); ok {
+				panic(&jsThrown{value: t.v})
+			}
 			return w(sent)
 		},
 		// The sequence a for-of loop iterates: arrays, strings and objects are their own,
@@ -9135,22 +9308,99 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(out)
 		},
-		// One POSITIONAL argument for a parameter that has a default: the trailing
-		// block slot of the argument list is not a positional value, so
-		// `def d(x = 5); yield x; end; d { }` leaves x at its default instead of
-		// binding it to the block. A REQUIRED parameter reads js_arg instead and
-		// still sees a trailing callable, so `def m(f); end; m(some_proc)` keeps
-		// binding f to the proc.
-		"js_rposarg": func(a []uint64) uint64 {
-			arr, ok := u(a[0]).(*jsArray)
-			if !ok {
-				return jsHUndefined
+		// ALL of one method's POSITIONAL parameters, bound in one step. Ruby does not
+		// bind them left to right at fixed indices: everything AFTER a *splat is
+		// counted from the END (`def d(a, b=2, *r, c); d(1,2,3,1)` binds c to 1, not
+		// to args[3]), and an OPTIONAL parameter only takes an argument when there
+		// are SPARE ones beyond what the required parameters need. Both facts need
+		// the whole shape at once, which is why this is one call rather than a
+		// per-parameter accessor.
+		//
+		//   off   - the index positional arguments start at (1 for a method, whose
+		//           args[0] is self).
+		//   kinds - one character per positional parameter: "0" required, "1"
+		//           optional, "2" splat.
+		//   wantsKw - the method declares keyword parameters, so a trailing Hash is
+		//           the keyword hash and NOT a positional value.
+		//
+		// The answer is one value per character: undefined for an optional that was
+		// not given (so the emitter's js_rundef default branch still fires), an
+		// Array for the splat, nil for a required one that was not passed. Mirrors
+		// bindParams of ruby-interpreter.abnf.
+		"js_rposbind": func(a []uint64) uint64 {
+			out := &jsArray{}
+			var pos []interface{}
+			if arr, ok := u(a[0]).(*jsArray); ok {
+				if off := int(a[1]); off < len(arr.elems) {
+					pos = append(pos, arr.elems[off:]...)
+				}
 			}
-			pos, _ := rubyBlockArgs(arr.elems)
-			if int(a[1]) < len(pos) {
-				return w(pos[a[1]])
+			kinds := rt.toString(u(a[2]))
+			// The keyword Hash is the last argument BEFORE the trailing block slot,
+			// not the last argument outright.
+			if rubyTruthy(u(a[3])) {
+				kwAt := len(pos) - 1
+				if kwAt >= 0 && isCallable(pos[kwAt]) {
+					kwAt--
+				}
+				if kwAt >= 0 {
+					if _, _, isDict := dictParts(pos[kwAt]); isDict {
+						pos = append(pos[:kwAt], pos[kwAt+1:]...)
+					}
+				}
 			}
-			return jsHUndefined
+			// A literal block travels as the last positional argument and is not a
+			// value an optional or *splat parameter may take. A REQUIRED parameter
+			// still reads it, so `def m(f); end; m(some_proc)` keeps binding f.
+			npos := len(pos)
+			if npos > 0 && isCallable(pos[npos-1]) {
+				npos--
+			}
+			required := 0
+			for i := 0; i < len(kinds); i++ {
+				if kinds[i] == '0' {
+					required++
+				}
+			}
+			spare := npos - required
+			ai := 0
+			for k := 0; k < len(kinds); k++ {
+				switch kinds[k] {
+				case '2':
+					after := 0
+					for q := k + 1; q < len(kinds); q++ {
+						if kinds[q] != '2' {
+							after++
+						}
+					}
+					take := npos - ai - after
+					if take < 0 {
+						take = 0
+					}
+					rest := &jsArray{}
+					for r := 0; r < take; r++ {
+						rest.elems = append(rest.elems, pos[ai])
+						ai++
+					}
+					out.elems = append(out.elems, rest)
+				case '1':
+					if spare > 0 && ai < npos {
+						out.elems = append(out.elems, pos[ai])
+						ai++
+						spare--
+					} else {
+						out.elems = append(out.elems, jsUndef)
+					}
+				default:
+					if ai < len(pos) {
+						out.elems = append(out.elems, pos[ai])
+					} else {
+						out.elems = append(out.elems, jsNull)
+					}
+					ai++
+				}
+			}
+			return w(out)
 		},
 		// The keyword arguments a call passed: the trailing Hash of the argument
 		// list (a block closure may sit behind it), or an empty Hash.
@@ -9307,6 +9557,19 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				rt.rubyLambdas = map[interface{}]bool{}
 			}
 			rt.rubyLambdas[u(a[0])] = true
+			return a[0]
+		},
+		// The parameter shape of the closure just built, for Proc#arity - the
+		// closure itself is handed straight back, exactly as js_rlambda does.
+		"js_rarity": func(a []uint64) uint64 {
+			if rt.rubyArities == nil {
+				rt.rubyArities = map[interface{}]rubyArity{}
+			}
+			rt.rubyArities[u(a[0])] = rubyArity{
+				req:  int(rt.toNumber(u(a[1]))),
+				opt:  int(rt.toNumber(u(a[2]))),
+				star: rubyTruthy(u(a[3])),
+			}
 			return a[0]
 		},
 		"js_rgget": func(a []uint64) uint64 {
@@ -10834,12 +11097,27 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if len(baseObjs) > 0 {
 				cls.set("__super", baseObjs[0])
 			}
+			// The declared bases, for __bases__. Kept beside __mro because the
+			// linearization cannot be un-merged back into the base list.
+			bl := &jsArray{}
+			for _, bo := range baseObjs {
+				bl.elems = append(bl.elems, bo)
+			}
+			cls.set("__basesl", bl)
 			mro := &jsArray{elems: []interface{}{cls}}
 			for _, c := range pyLinearize(baseObjs) {
 				mro.elems = append(mro.elems, c)
 			}
 			cls.set("__mro", mro)
 			return w(cls)
+		},
+		// super(): what a READ of the name `super` lowers to - see makeVarRef in
+		// languages/python-to-llvm-ir.abnf for why the magic is in the emitter and
+		// what the two operands are. The result is both the callable (super() with
+		// no arguments answers itself, super(C, o) builds a new one) and the proxy
+		// an attribute read or a method call goes through.
+		"js_pysuper": func(a []uint64) uint64 { // (defining class|undef, instance|undef)
+			return w(pySuperNew(u(a[0]), u(a[1])))
 		},
 		// The class body is a suite: it runs in a scope of its own and every name
 		// it bound (methods, class attributes, __slots__) becomes a class member.
@@ -10885,6 +11163,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				rt.fail("js_pycall args must be an array")
 			}
 			callee, kw := u(a[0]), u(a[2])
+			if sup, isSup := pySuperObj(callee); isSup {
+				return w(rt.pySuperCall(sup, args.elems))
+			}
 			// A BUILTIN TYPE OBJECT is callable: `int` is the class, and calling it
 			// converts. The emitter binds int/str/float/bool/list/dict/set/tuple to
 			// js_pybuiltincls's stable class object with the conversion closure
@@ -13399,6 +13680,127 @@ func pyLookup(c *jsObject, name string) (interface{}, bool) {
 	return nil, false
 }
 
+// ----------------------------------------------------------------- super ---
+//
+// A super() proxy carries the class the call was written in ("__scls") and the
+// instance ("__sobj"); a member lookup through it scans the INSTANCE's MRO
+// starting one past that class, which is what makes a diamond resolve as CPython
+// resolves it. The one-argument (unbound) form is declined - it is a descriptor
+// and this value model has no protocol for one.
+//
+// The twins are pySuper* in languages/lib/python-rt.metajs and pySuper* in
+// languages/python-interpreter.abnf.
+func pySuperNew(cls, self interface{}) *jsObject {
+	s := newJSObject()
+	s.set("__pysup", true)
+	if cls != nil && !isUndefOrNull(cls) {
+		s.set("__scls", cls)
+	}
+	if self != nil && self != jsUndef {
+		s.set("__sobj", self)
+	}
+	return s
+}
+
+func pySuperObj(v interface{}) (*jsObject, bool) {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil, false
+	}
+	if b, has := o.props["__pysup"].(bool); !has || !b {
+		return nil, false
+	}
+	return o, true
+}
+
+// CPython's own two messages for a zero-argument super() with nothing to bind.
+func (rt *jsrt) pySuperCheck(s *jsObject) {
+	if _, has := s.props["__scls"]; !has {
+		panic(&jsThrown{value: rt.pyExcInstance("RuntimeError", "super(): __class__ cell not found")})
+	}
+	if _, has := s.props["__sobj"]; !has {
+		panic(&jsThrown{value: rt.pyExcInstance("RuntimeError", "super(): no arguments")})
+	}
+}
+
+func (rt *jsrt) pySuperCall(s *jsObject, args []interface{}) interface{} {
+	switch len(args) {
+	case 0:
+		rt.pySuperCheck(s)
+		return s
+	case 2:
+		return pySuperNew(args[0], args[1])
+	}
+	panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+		"super(): one-argument (unbound) form is not supported")})
+}
+
+func (rt *jsrt) pySuperFind(s *jsObject, name string) (interface{}, bool) {
+	var mro []*jsObject
+	obj := s.props["__sobj"]
+	if c, isCls := pyClassObj(obj); isCls {
+		mro = pyMRO(c)
+	} else if _, cls, isInst := pyInstance(obj); isInst {
+		mro = pyMRO(cls)
+	}
+	start, _ := s.props["__scls"].(*jsObject)
+	at := -1
+	for i, k := range mro {
+		if k == start && at < 0 {
+			at = i
+		}
+	}
+	if at < 0 {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+			"super(type, obj): obj must be an instance or subtype of type")})
+	}
+	for _, k := range mro[at+1:] {
+		if v, ok := k.props[name]; ok {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+func (rt *jsrt) pySuperAttr(s *jsObject, name string) interface{} {
+	rt.pySuperCheck(s)
+	m, found := rt.pySuperFind(s, name)
+	if !found {
+		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+			"'super' object has no attribute '"+name+"'")})
+	}
+	if isCallable(m) {
+		return rt.pyBindMethod(s.props["__sobj"], m)
+	}
+	return m
+}
+
+func (rt *jsrt) pySuperMCall(s *jsObject, name string, args []interface{}, kw interface{}) interface{} {
+	rt.pySuperCheck(s)
+	m, found := rt.pySuperFind(s, name)
+	if !found {
+		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+			"'super' object has no attribute '"+name+"'")})
+	}
+	if !isCallable(m) {
+		return rt.callPyValue(m, args, kw)
+	}
+	self := append([]interface{}{s.props["__sobj"]}, args...)
+	return rt.call(m, jsUndef, rt.pyBindCall(m, self, kw))
+}
+
+// pyBindMethod is the bound method a METHOD read off an instance answers, so
+// `f = a.m; f()` passes the instance as self. Both compiled halves used to hand
+// back the raw function and died with "member 'v' of undefined" where the
+// interpreter half (pyattr's bindMethod) answered - a live halves divergence,
+// found by the docs/todo.md 1.9 sweep. Layer 2: pyDBindMethod.
+func (rt *jsrt) pyBindMethod(self, m interface{}) interface{} {
+	return jsHostFunc("pymethod", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		full := append([]interface{}{self}, args...)
+		return rt.call(m, jsUndef, rt.pyBindCall(m, full, jsUndef))
+	})
+}
+
 // pyIsDescriptor reports whether v is an instance whose class defines the given
 // descriptor hook (__get__ / __set__).
 func pyIsDescriptor(v interface{}, hook string) (interface{}, bool) {
@@ -13415,12 +13817,20 @@ func pyIsDescriptor(v interface{}, hook string) (interface{}, bool) {
 
 // pyGetAttr reads obj.name with Python's lookup order.
 func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
+	if sup, isSup := pySuperObj(obj); isSup {
+		return rt.pySuperAttr(sup, name)
+	}
 	if cls, ok := pyClassObj(obj); ok {
 		switch name {
 		case "__name__":
 			return cls.props["__name"]
 		case "__mro__":
 			return cls.props["__mro"]
+		case "__bases__":
+			if bl, has := cls.props["__basesl"]; has {
+				return bl
+			}
+			return &jsArray{}
 		}
 		if v, found := pyLookup(cls, name); found {
 			return v
@@ -13440,6 +13850,10 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 		if v, found := pyLookup(cls, name); found {
 			if get, isDesc := pyIsDescriptor(v, "__get__"); isDesc {
 				return rt.call(get, jsUndef, []interface{}{v, obj, cls})
+			}
+			// A METHOD read off an instance comes back BOUND - see pyBindMethod.
+			if isCallable(v) {
+				return rt.pyBindMethod(obj, v)
 			}
 			return v
 		}
@@ -13496,10 +13910,8 @@ func (rt *jsrt) pySetAttr(obj interface{}, name string, v interface{}) {
 				return
 			}
 		}
-		if slots, found := pyLookup(cls, "__slots__"); found {
-			if !pySlotAllows(rt, slots, name) {
-				panic(&jsThrown{value: rt.pyAttrError(cls, name)})
-			}
+		if !rt.pySlotsAllow(cls, name) {
+			panic(&jsThrown{value: rt.pyAttrError(cls, name)})
 		}
 		inst.set(name, v)
 		return
@@ -13511,8 +13923,30 @@ func (rt *jsrt) pySetAttr(obj interface{}, name string, v interface{}) {
 	rt.setMember(obj, name, v)
 }
 
-// pySlotAllows answers whether __slots__ (a list, a tuple-as-list or a single
-// string) permits an attribute name.
+// pySlotsAllow applies __slots__ over the WHOLE resolution order, which is
+// CPython's rule and not the nearest-declaration one all three engines used to
+// apply: a name is writable if ANY class on the MRO declares it in its own
+// __slots__, and any name at all is writable as soon as one class on the MRO
+// declares no __slots__ (that class gives its instances a __dict__). With
+// `class A: __slots__ = ["s"]` and `class B(A): __slots__ = ["t"]`, writing
+// B().s raised AttributeError in every engine where CPython allows it.
+func (rt *jsrt) pySlotsAllow(cls *jsObject, name string) bool {
+	all := true
+	for _, k := range pyMRO(cls) {
+		slots, has := k.props["__slots__"]
+		if !has {
+			all = false
+			continue
+		}
+		if pySlotAllows(rt, slots, name) {
+			return true
+		}
+	}
+	return !all
+}
+
+// pySlotAllows answers whether ONE __slots__ declaration (a list, a
+// tuple-as-list or a single string) names an attribute.
 func pySlotAllows(rt *jsrt, slots interface{}, name string) bool {
 	switch s := slots.(type) {
 	case *jsArray:
@@ -13525,7 +13959,7 @@ func pySlotAllows(rt *jsrt, slots interface{}, name string) bool {
 	case string:
 		return s == name
 	}
-	return true
+	return false
 }
 
 // pyAttrError builds the AttributeError instance a rejected __slots__ write
@@ -13535,9 +13969,46 @@ func (rt *jsrt) pyAttrError(cls *jsObject, name string) interface{} {
 		"'"+rt.toString(cls.props["__name"])+"' object has no attribute '"+name+"'")
 }
 
+// pyGenValue is one {value, done} record from a generator step, in PYTHON's
+// protocol: the yielded value, or a StopIteration carrying the body's return
+// value. Shared by send()/next()/__next__() and by throw(), which answers the
+// same way. The twin of python-rt.metajs's pyGenValue.
+func (rt *jsrt) pyGenValue(res interface{}) interface{} {
+	st, _ := res.(*jsObject)
+	if st == nil {
+		rt.fail("generator step failed")
+	}
+	if done, _ := st.props["done"].(bool); done {
+		exc := rt.pyExcInstance("StopIteration", "").(*jsObject)
+		// CPython's StopIteration carries NO argument when the body returned None
+		// and exactly one when it returned a value: repr() says StopIteration()
+		// against StopIteration(7). pyExcInstance's one-string args is every other
+		// runtime exception's shape, so this one is rewritten here. Both engines
+		// used to disagree with CPython AND with each other - this one said
+		// StopIteration('') and the interpreter half StopIteration(None).
+		v := st.props["value"]
+		if v == nil || v == jsUndef {
+			v = jsNull
+		}
+		exc.set("value", v)
+		args := &jsArray{}
+		if v != jsNull {
+			args.elems = append(args.elems, v)
+		}
+		exc.set("args", args)
+		panic(&jsThrown{value: exc})
+	}
+	return st.props["value"]
+}
+
 // pyMethodCall is obj.name(args) with Python's binding rule: an instance
 // prepends itself, a class object does not (so Base.m(self) works).
 func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}, kw interface{}) interface{} {
+	// super().m(...): the lookup starts one past the defining class in the
+	// instance's MRO, and the instance is prepended as self.
+	if sup, isSup := pySuperObj(target); isSup {
+		return rt.pySuperMCall(sup, name, args, kw)
+	}
 	// A generator's own protocol. Python's send()/next() answer the YIELDED value
 	// and raise StopIteration - carrying the body's return value - at the end,
 	// where JavaScript's next() answers a {value, done} record.
@@ -13548,16 +14019,18 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 			if len(args) > 0 {
 				sent = args[0]
 			}
-			st, _ := g.step(rt, sent).(*jsObject)
-			if st == nil {
-				rt.fail("generator step failed")
+			return rt.pyGenValue(g.step(rt, sent))
+		case "throw":
+			// g.throw(exc): raise exc AT the yield the body is parked at
+			// (throwInto). The record it answers is JavaScript's, so it is
+			// unwrapped into Python's protocol exactly as send()'s is - a body
+			// that catches it and returns ends with a StopIteration carrying
+			// that return value.
+			var tv interface{} = jsUndef
+			if len(args) > 0 {
+				tv = args[0]
 			}
-			if done, _ := st.props["done"].(bool); done {
-				exc := rt.pyExcInstance("StopIteration", "")
-				exc.(*jsObject).set("value", st.props["value"])
-				panic(&jsThrown{value: exc})
-			}
-			return st.props["value"]
+			return rt.pyGenValue(g.throwInto(rt, tv))
 		case "close":
 			// CPython's generator.close() answers None, not a {value, done}
 			// record - the record is JavaScript's g.return(v).
@@ -13855,6 +14328,9 @@ func (rt *jsrt) pyKwArg(kw interface{}, name string) interface{} {
 // ALGEBRA is spelled with the operators & - ^ <= >= instead, and those are
 // complete.
 func pyIsDictMethod(name string) bool {
+	if name == "popitem" {
+		return true
+	}
 	switch name {
 	case "keys", "values", "items", "get", "pop", "clear", "copy", "setdefault", "update":
 		return true
@@ -13874,6 +14350,9 @@ func pyIsSetMethod(name string) bool {
 // other does NOT, which is exactly what CPython raises AttributeError for. They
 // are narrower than the two sets above: pop, clear, copy and update are on BOTH.
 func pyIsDictOnly(name string) bool {
+	if name == "popitem" {
+		return true
+	}
 	switch name {
 	case "keys", "values", "items", "get", "setdefault":
 		return true
@@ -13931,6 +14410,21 @@ func (rt *jsrt) pyDictMethod(keys, vals *jsArray, name string, args []interface{
 			return args[1]
 		}
 		panic(&jsThrown{value: rt.pyExcInstanceV("KeyError", argAt(args, 0))})
+	case "popitem":
+		// The LAST inserted pair, removed - CPython's popitem is LIFO since 3.7.
+		// The pair is a 2-element list, like items()' pairs, because this subset
+		// has no tuple (docs/todo.md 3.1). Empty raises the KeyError whose
+		// argument is a sentence rather than a key, which c2b4071's arg-carrying
+		// KeyError renders as CPython renders it.
+		if len(keys.elems) == 0 {
+			panic(&jsThrown{value: rt.pyExcInstanceV("KeyError", "popitem(): dictionary is empty")})
+		}
+		i := len(keys.elems) - 1
+		k, v := keys.elems[i], vals.elems[i]
+		keys.elems = keys.elems[:i]
+		vals.elems = vals.elems[:i]
+		keys.dropIdx()
+		return &jsArray{elems: []interface{}{k, v}}
 	case "clear":
 		keys.elems = keys.elems[:0]
 		vals.elems = vals.elems[:0]
@@ -14207,6 +14701,9 @@ func pyForeignMethod(target interface{}, name string) bool {
 
 // callPyValue calls a value that may itself be a class or a __call__ instance.
 func (rt *jsrt) callPyValue(v interface{}, args []interface{}, kw interface{}) interface{} {
+	if sup, isSup := pySuperObj(v); isSup {
+		return rt.pySuperCall(sup, args)
+	}
 	// A BUILTIN TYPE OBJECT is callable and CONVERTS: the emitter binds int/str/
 	// float/... to js_pybuiltincls's stable class object with the conversion
 	// closure hung on it as __conv (declBind in python-to-llvm-ir.abnf). js_pycall
@@ -14447,11 +14944,16 @@ func (rt *jsrt) pyStopIter(args []interface{}, val interface{}) uint64 {
 	}
 	exc := rt.pyExcInstance("StopIteration", "")
 	if o, ok := exc.(*jsObject); ok {
+		// CPython's StopIteration carries no argument at all unless the generator
+		// returned a value; see pyGenValue.
+		args := &jsArray{}
 		if isUndefOrNull(val) {
 			o.set("value", jsNull)
 		} else {
 			o.set("value", val)
+			args.elems = append(args.elems, val)
 		}
+		o.set("args", args)
 	}
 	panic(&jsThrown{value: exc})
 }
@@ -14463,8 +14965,13 @@ func (rt *jsrt) pyStopIter(args []interface{}, val interface{}) uint64 {
 // the only one the two engines can both have. Keep in step with pyDHasAttr in
 // languages/lib/python-rt.metajs.
 func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
+	if sup, isSup := pySuperObj(obj); isSup {
+		rt.pySuperCheck(sup)
+		_, found := rt.pySuperFind(sup, name)
+		return found
+	}
 	if cls, ok := pyClassObj(obj); ok {
-		if name == "__name__" || name == "__mro__" {
+		if name == "__name__" || name == "__mro__" || name == "__bases__" {
 			return true
 		}
 		_, found := pyLookup(cls, name)

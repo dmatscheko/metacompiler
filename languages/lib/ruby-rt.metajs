@@ -148,6 +148,8 @@ var rbClassTable = {}    // "$Name" -> the ONE builtin class object of that name
 var rbGlobals = {}       // "$name" -> the value of Ruby's $name
 var rbGlobalNames = {}   // "$name" -> true once assigned (defined? needs presence)
 var rbLambdas = []       // the closures a lambda literal produced (identity scan)
+var rbArityFns = []      // the closures js_rarity has recorded a shape for
+var rbArityRec = []      // [required, optional, hasSplat] for rbArityFns[i]
 var rbCurExc = null      // what the innermost rescue caught, for a bare `raise`
 
 // ===================================================== the value model ======
@@ -1390,9 +1392,50 @@ function rbStr(v) {
 }
 
 // Ruby's #inspect: nil, quoted strings, :symbols, and the bracketed collections.
+// String#inspect is the DOUBLE-QUOTED SOURCE form, and it is the escaping that
+// makes it one. MRI escapes the quote, the backslash, the eight named control
+// characters, a `#' that would start an interpolation (`#{', `#$', `#@' - a bare
+// `#' is left alone), and every other control character as \uXXXX with UPPERCASE
+// hex. Printable non-ASCII is left alone under a UTF-8 locale, so every unit >=
+// 0x20 that is not one of those passes through untouched - which also leaves a
+// surrogate PAIR intact, since neither half is special here. Mirrors strInspect
+// of ruby-interpreter.abnf and rubyStrInspect of abnf/jsrt.go.
+function rbStrInspect(s) {
+    var out = "\""
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        if (c == 34) { out = out + "\\\"" }
+        else if (c == 92) { out = out + "\\\\" }
+        else if (c == 10) { out = out + "\\n" }
+        else if (c == 9) { out = out + "\\t" }
+        else if (c == 13) { out = out + "\\r" }
+        else if (c == 12) { out = out + "\\f" }
+        else if (c == 11) { out = out + "\\v" }
+        else if (c == 8) { out = out + "\\b" }
+        else if (c == 7) { out = out + "\\a" }
+        else if (c == 27) { out = out + "\\e" }
+        else if (c == 35) {
+            var n = 0
+            if (i + 1 < s.length) { n = s.charCodeAt(i + 1) }
+            if (n == 123 || n == 36 || n == 64) { out = out + "\\#" } else { out = out + "#" }
+        }
+        else if (c < 32 || c == 127) {
+            // Every code unit that reaches here is ASCII, so two hex digits and a
+            // literal "00" are the whole \uXXXX form. (255).toString(16) aborts
+            // under the frozen engine, hence the digit table.
+            var hi = Math.trunc(c / 16)
+            out = out + "\\u00" + "0123456789ABCDEF".charAt(hi) + "0123456789ABCDEF".charAt(c - hi * 16)
+        }
+        else { out = out + s.charAt(i) }
+        i = i + 1
+    }
+    return out + "\""
+}
+
 function rbInspect(v) {
     if (rbIsNil(v)) { return "nil" }
-    if (typeof v == "string") { return "\"" + v + "\"" }
+    if (typeof v == "string") { return rbStrInspect(v) }
     if (rbIsSym(v)) { return ":" + v["s"] }
     if (rbIsArr(v)) {
         var out = "["
@@ -2371,6 +2414,10 @@ function rbClassName(v) {
     if (rbIsArr(v)) { return "Array" }
     if (rbIsDict(v)) { return "Hash" }
     if (rbIsEnum(v)) { return "Enumerator" }
+    // A Proc / lambda / block closure. Without this arm `blk.class' and
+    // `blk.is_a?(Proc)' aborted both compiled halves with "method call 'class' on a
+    // function", where ruby-interpreter.abnf answered off classOf.
+    if (rbIsFn(v)) { return "Proc" }
     return ""
 }
 
@@ -4482,6 +4529,9 @@ function rbMethod(target, name, args) {
     if (name == "lambda?") {
         if (rbIsFn(target)) { return rtHas(rbLambdas, target) }
     }
+    if (name == "arity") {
+        if (rbIsFn(target)) { return rbProcArity(target) }
+    }
     if (name == "to_proc") {
         if (rbIsFn(target)) { return target }
     }
@@ -4538,6 +4588,13 @@ function rbMethod(target, name, args) {
         // reaching a String, was a halves divergence.
         if (name == "inspect") { return rbInspect(target) }
         if (name == "to_sym" || name == "intern") { return rbSym(target) }
+        // String#ord: the code point of the FIRST character. It worked in
+        // ruby-interpreter.abnf and aborted here, so `"\e".ord' - the ordinary way to
+        // name a control character - was a halves divergence.
+        if (name == "ord") {
+            if (target.length == 0) { return 0 }
+            return target.charCodeAt(0)
+        }
         // String#to_i / #to_f parse a LEADING number and answer 0 when there is
         // none. Both worked in ruby-interpreter.abnf and aborted here, so any
         // program reading a number out of text was a halves divergence.
@@ -5059,17 +5116,85 @@ function js_rargrest(args, i_raw) {
     return out
 }
 
-// One POSITIONAL argument for a parameter that has a default: the trailing block
-// slot of the argument list is not a positional value, so `def d(x = 5); yield x;
-// end; d { }' leaves x at its default instead of binding it to the block. A
-// REQUIRED parameter reads js_arg instead and still sees a trailing callable, so
-// `def m(f); end; m(some_proc)' keeps binding f to the proc. i is a RAW parameter:
-// the emitter writes it with handle(pos).
-function js_rposarg(args, i_raw) {
-    if (!rbIsArr(args)) { return undefined }
-    var i = i_raw
-    if (i < rbNPos(args)) { return args[i] }
-    return undefined
+// ALL of one method's POSITIONAL parameters, bound in one step. Ruby does not bind
+// them left to right at fixed indices: everything AFTER a *splat is counted from
+// the END (`def d(a, b=2, *r, c); d(1,2,3,1)' binds c to 1, not to args[3]), and an
+// OPTIONAL parameter only takes an argument when there are SPARE ones beyond what
+// the required parameters need. Both facts need the whole shape at once, which is
+// why this is one call rather than a per-parameter accessor.
+//
+//   off_raw - the index positional arguments start at (1 for a method, whose
+//             args[0] is self); a RAW parameter, written with handle(off).
+//   kinds   - one character per positional parameter: "0" required, "1" optional,
+//             "2" splat.
+//   wantsKw - the method declares keyword parameters, so a trailing Hash is the
+//             keyword hash and NOT a positional value.
+//
+// The answer is one value per character: undefined for an optional that was not
+// given (so the emitter's js_rundef default branch still fires), an Array for the
+// splat, nil for a required one that was not passed. Mirrors bindParams of
+// ruby-interpreter.abnf.
+function js_rposbind(args, off_raw, kinds, wantsKw) {
+    var out = []
+    var pos = []
+    if (rbIsArr(args)) {
+        var a0 = off_raw
+        while (a0 < args.length) { pos.push(args[a0]); a0 = a0 + 1 }
+    }
+    // The keyword Hash is the last argument BEFORE the trailing block slot, not the
+    // last argument outright.
+    if (rbTruthy(wantsKw)) {
+        var kwAt = pos.length - 1
+        if (kwAt >= 0 && rbIsFn(pos[kwAt])) { kwAt = kwAt - 1 }
+        if (kwAt >= 0 && rbIsDict(pos[kwAt])) {
+            var kept = []
+            var j = 0
+            while (j < pos.length) {
+                if (j != kwAt) { kept.push(pos[j]) }
+                j = j + 1
+            }
+            pos = kept
+        }
+    }
+    // A literal block travels as the last positional argument and is not a value an
+    // optional or *splat parameter may take. A REQUIRED parameter still reads it, so
+    // `def m(f); end; m(some_proc)' keeps binding f to the proc.
+    var npos = pos.length
+    if (npos > 0 && rbIsFn(pos[npos - 1])) { npos = npos - 1 }
+    var required = 0
+    var i = 0
+    while (i < kinds.length) {
+        if (kinds.charAt(i) == "0") { required = required + 1 }
+        i = i + 1
+    }
+    var spare = npos - required
+    var ai = 0
+    var k = 0
+    while (k < kinds.length) {
+        var c = kinds.charAt(k)
+        if (c == "2") {
+            var after = 0
+            var q = k + 1
+            while (q < kinds.length) {
+                if (kinds.charAt(q) != "2") { after = after + 1 }
+                q = q + 1
+            }
+            var take = npos - ai - after
+            if (take < 0) { take = 0 }
+            var rest = []
+            var r = 0
+            while (r < take) { rest.push(pos[ai]); ai = ai + 1; r = r + 1 }
+            out.push(rest)
+        } else if (c == "1") {
+            if (spare > 0 && ai < npos) { out.push(pos[ai]); ai = ai + 1; spare = spare - 1 }
+            else { out.push(undefined) }
+        } else {
+            if (ai < pos.length) { out.push(pos[ai]) } else { out.push(null) }
+            ai = ai + 1
+        }
+        k = k + 1
+    }
+    return out
 }
 
 // The keyword arguments a call passed: the trailing Hash of the argument list (a
@@ -5140,6 +5265,29 @@ function js_rblockarg(args, i_raw, n_raw) {
 function js_rlambda(f) {
     rbLambdas.push(f)
     return f
+}
+
+// The parameter shape of the closure just built, for Proc#arity - the closure
+// itself is handed straight back, exactly as js_rlambda does. See rbProcArity for
+// why the three counts are stored rather than the answer.
+function js_rarity(f, req, opt, star) {
+    rbArityFns.push(f)
+    rbArityRec.push([rbToF(req), rbToF(opt), rbTruthy(star)])
+    return f
+}
+
+// Proc#arity. The SHAPE is stored rather than the answer because Kernel#lambda
+// turns an already-built proc into a lambda, and the two count optional parameters
+// differently: a proc ignores them (`proc { |x = 0| }.arity' is 0), a lambda does
+// not (`lambda { |x = 0| }.arity' is -1). A *splat makes it -(required + 1) either
+// way, and keyword and block parameters are not counted at all. Mirrors procArity
+// of ruby-interpreter.abnf and rubyArityOf of abnf/jsrt.go.
+function rbProcArity(f) {
+    var rec = rtPairGet(rbArityFns, rbArityRec, f)
+    if (rec === undefined) { return 0 }
+    if (rec[2] === true) { return 0 - (rec[0] + 1) }
+    if (rtHas(rbLambdas, f) && rec[1] > 0) { return 0 - (rec[0] + 1) }
+    return rec[0]
 }
 
 // &:sym as a block argument: the "call this method on each element" proc. A Proc

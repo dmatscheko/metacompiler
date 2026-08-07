@@ -812,9 +812,15 @@ function pyInstanceDict(inst) {
 }
 
 function pyGetAttr(obj, name) {
+    if (pyIsSuper(obj)) { return pySuperAttr(obj, name) }
     if (pyIsClass(obj)) {
         if (name == "__name__") { return obj["__name"] }
         if (name == "__mro__") { return obj["__mro"] }
+        if (name == "__bases__") {
+            var bl = obj["__basesl"]
+            if (pyIsArr(bl)) { return bl }
+            return []
+        }
         if (pyLookupHas(obj, name)) { return pyLookupVal(obj, name) }
         fail("type object '" + pyToStr(obj["__name"]) + "' has no attribute '" + name + "'")
     }
@@ -827,6 +833,12 @@ function pyGetAttr(obj, name) {
             var v = pyLookupVal(cls, name)
             var get = pyDescriptor(v, "__get__")
             if (get !== undefined) { return get.apply(undefined, [v, obj, cls]) }
+            // A METHOD read off an instance comes back BOUND, so `f = a.m; f()`
+            // passes the instance as self. Both compiled halves used to hand back
+            // the raw function and died with "member 'v' of undefined" where the
+            // interpreter half (pyattr's bindMethod) answered - a live halves
+            // divergence, found by the docs/todo.md 1.9 sweep.
+            if (pyIsCallable(v)) { return pyDBindMethod(obj, v) }
             return v
         }
         fail("'" + pyToStr(cls["__name"]) + "' object has no attribute '" + name + "'")
@@ -869,6 +881,8 @@ function pyGetMember(obj, name) {
     return obj[name]
 }
 
+// pySlotAllows answers whether ONE __slots__ declaration (a list, a
+// tuple-as-list or a single string) names an attribute.
 function pySlotAllows(slots, name) {
     if (Array.isArray(slots)) {
         for (var i = 0; i < slots.length; i++) {
@@ -877,7 +891,29 @@ function pySlotAllows(slots, name) {
         return false
     }
     if (typeof slots == "string") { return slots == name }
-    return true
+    return false
+}
+
+// pySlotsAllow applies __slots__ over the WHOLE resolution order, which is
+// CPython's rule and not the nearest-declaration one all three engines used to
+// apply: a name is writable if ANY class on the MRO declares it in its own
+// __slots__, and any name at all is writable as soon as one class on the MRO
+// declares no __slots__ (that class gives its instances a __dict__). With
+// `class A: __slots__ = ["s"]` and `class B(A): __slots__ = ["t"]`, writing
+// B().s raised AttributeError in every engine where CPython allows it. Go:
+// rt.pySlotsAllow.
+function pySlotsAllow(cls, name) {
+    var mro = pyMRO(cls)
+    var all = true
+    var i = 0
+    while (i < mro.length) {
+        var sl = mro[i]["__slots__"]
+        if (sl === undefined) { all = false } else {
+            if (pySlotAllows(sl, name)) { return true }
+        }
+        i = i + 1
+    }
+    return !all
 }
 
 function pySetAttr(obj, name, v) {
@@ -891,11 +927,9 @@ function pySetAttr(obj, name, v) {
                 return v
             }
         }
-        if (pyLookupHas(cls, "__slots__")) {
-            if (!pySlotAllows(pyLookupVal(cls, "__slots__"), name)) {
-                throw pyExcInstance("AttributeError",
-                                    "'" + pyToStr(cls["__name"]) + "' object has no attribute '" + name + "'")
-            }
+        if (!pySlotsAllow(cls, name)) {
+            throw pyExcInstance("AttributeError",
+                                "'" + pyToStr(cls["__name"]) + "' object has no attribute '" + name + "'")
         }
         obj[name] = v
         return v
@@ -2812,6 +2846,11 @@ function pyStopIter(args, val) {
     sv = val
     if (sv === undefined) { sv = null }
     exc["value"] = sv
+    // CPython's StopIteration carries no argument at all unless the generator
+    // returned a value; see pyGenValue.
+    var sargs = []
+    if (sv !== null) { sargs.push(sv) }
+    exc["args"] = sargs
     throw exc
 }
 
@@ -3126,8 +3165,12 @@ function js_pysetattr3(args) {
 
 function pyDHasAttr(obj, name) {
     if (obj === null || obj === undefined) { return name == "__class__" }
+    if (pyIsSuper(obj)) {
+        pySuperCheck(obj)
+        return pySuperFind(obj, name) !== undefined
+    }
     if (pyIsClass(obj)) {
-        if (name == "__name__" || name == "__mro__") { return true }
+        if (name == "__name__" || name == "__mro__" || name == "__bases__") { return true }
         return pyLookupHas(obj, name)
     }
     var cls = pyInstClassOf(obj)
@@ -4601,6 +4644,104 @@ function pyDTruthy(v) {
     return true
 }
 
+// ----------------------------------------------------------------- super ---
+//
+// js_pysuper(cls, self) is what the READ of the name `super` lowers to - see
+// makeVarRef in languages/python-to-llvm-ir.abnf for why the magic is in the
+// emitter and what the two operands are. The value it hands back is both the
+// callable (super() with no arguments answers itself, super(C, o) builds a new
+// one) and the proxy an attribute read or a method call goes through.
+//
+// The lookup is a scan of the INSTANCE's MRO starting one past the class the
+// call was written in, which is what makes a diamond resolve as CPython
+// resolves it. The one-argument (unbound) form is declined - it is a descriptor
+// and there is no protocol for one here. Go: js_pysuper / rt.pySuper* in
+// abnf/jsrt.go; interpreter: pySuper* in languages/python-interpreter.abnf.
+function js_pysuper(cls, self) {
+    var s = {}
+    s["__pysup"] = true
+    if (cls !== undefined && cls !== null) { s["__scls"] = cls }
+    if (self !== undefined) { s["__sobj"] = self }
+    return s
+}
+function pyIsSuper(v) { return pyTag(v, "__pysup") }
+// CPython's own two messages for a zero-argument super() with nothing to bind.
+function pySuperCheck(s) {
+    if (s["__scls"] === undefined) { pyRaiseExc("RuntimeError", "super(): __class__ cell not found") }
+    if (s["__sobj"] === undefined) { pyRaiseExc("RuntimeError", "super(): no arguments") }
+}
+function pySuperCall(s, args) {
+    if (args.length == 0) {
+        pySuperCheck(s)
+        return s
+    }
+    if (args.length == 2) { return js_pysuper(args[0], args[1]) }
+    pyRaiseExc("TypeError", "super(): one-argument (unbound) form is not supported")
+    return null
+}
+function pySuperMRO(s) {
+    var o = s["__sobj"]
+    if (pyIsClass(o)) { return pyMRO(o) }
+    var c = pyInstClassOf(o)
+    if (c !== null) { return pyMRO(c) }
+    return []
+}
+// The member, or undefined. A class deriving from a builtin exception needs no
+// special case: languages/python-to-llvm-ir.abnf builds the whole builtin
+// exception hierarchy out of real js_pyclass_new objects with a real __init__ on
+// Exception, so it is already on the MRO this scans.
+function pySuperFind(s, name) {
+    var mro = pySuperMRO(s)
+    var start = s["__scls"]
+    var at = -1
+    var i = 0
+    while (i < mro.length) {
+        if (mro[i] === start && at < 0) { at = i }
+        i = i + 1
+    }
+    if (at < 0) {
+        pyRaiseExc("TypeError", "super(type, obj): obj must be an instance or subtype of type")
+    }
+    i = at + 1
+    while (i < mro.length) {
+        if (mro[i][name] !== undefined) { return mro[i][name] }
+        i = i + 1
+    }
+    return undefined
+}
+function pySuperAttr(s, name) {
+    pySuperCheck(s)
+    var m = pySuperFind(s, name)
+    if (m === undefined) {
+        pyRaiseExc("AttributeError", "'super' object has no attribute '" + name + "'")
+    }
+    if (pyIsCallable(m)) { return pyDBindMethod(s["__sobj"], m) }
+    return m
+}
+// A method read off an instance (or off a super() proxy) is BOUND to it, which
+// is what makes `f = a.m; f()` the call CPython makes. Go: rt.pyBindMethod.
+function pyDBindMethod(self, m) {
+    return function() {
+        var args = []
+        var i = 0
+        while (i < arguments.length) {
+            args.push(arguments[i])
+            i = i + 1
+        }
+        return pyCall(m, pyBindCall(m, rtPrepend(self, args), undefined))
+    }
+}
+function pySuperMCall(s, name, args, kw) {
+    pySuperCheck(s)
+    var m = pySuperFind(s, name)
+    if (m === undefined) {
+        pyRaiseExc("AttributeError", "'super' object has no attribute '" + name + "'")
+    }
+    if (!pyIsCallable(m)) { return pyDCallPyValue(m, args, kw) }
+    var self = rtPrepend(s["__sobj"], args)
+    return pyCall(m, pyBindCall(m, self, kw))
+}
+
 // ----- class objects (Go: js_pyclass_new / pyLinearize / js_pyclass_fill) ---
 
 // pyLinearize (jsrt.go:9010) is the C3 merge of the bases' MROs with the base
@@ -4708,6 +4849,9 @@ function js_pyclass_new(name, bases) {
         }
     }
     if (baseObjs.length > 0) { cls["__super"] = baseObjs[0] }
+    // The declared bases, for __bases__. Kept beside __mro because the
+    // linearization cannot be un-merged back into the base list.
+    cls["__basesl"] = baseObjs
     var mro = [cls]
     var lin = pyDLinearize(baseObjs)
     var j = 0
@@ -4939,6 +5083,7 @@ function pyDUsed(used, name) {
 // is mapped onto the callee's parameters by pyBindCall.
 function js_pycall(callee, pos, kw) {
     if (!pyIsArr(pos)) { fail("js_pycall args must be an array") }
+    if (pyIsSuper(callee)) { return pySuperCall(callee, pos) }
     // A BUILTIN TYPE OBJECT is callable: `int` is the class, and calling it
     // converts. languages/python-to-llvm-ir.abnf binds int/str/float/bool/list/
     // dict/set/tuple to js_pybuiltincls's stable class object with the conversion
@@ -4995,6 +5140,7 @@ function pyDInstantiate(cls, args, kw) {
 // callPyValue (jsrt.go:9260) calls a value that may itself be a class or a
 // __call__ instance.
 function pyDCallPyValue(v, args, kw) {
+    if (pyIsSuper(v)) { return pySuperCall(v, args) }
     // A BUILTIN TYPE OBJECT is callable and CONVERTS: the emitter binds int/str/
     // float/... to js_pybuiltincls's stable class object with the conversion
     // closure hung on it as __conv (declBind in python-to-llvm-ir.abnf).
@@ -5027,7 +5173,42 @@ function pyDCallPyValue(v, args, kw) {
 // pyDMethodCall(target, name, args, kw). Its final fall-through is Go's
 // rt.memberCall - the builtin method table for strings / lists / dicts - which
 // this chunk does not own; it is spelled pyMemberCall(target, name, args) here.
+// One {value, done} record from a floor generator step, in PYTHON's protocol: the
+// yielded value, or a StopIteration carrying the body's return value. Shared by
+// send()/next()/__next__() and by throw(), which answers the same way.
+function pyGenValue(st) {
+    if (st === undefined || st === null) { fail("generator step failed") }
+    if (st["done"] === true) {
+        var exc = pyExcInstance("StopIteration", "")
+        // CPython's StopIteration carries NO argument when the body returned None
+        // and exactly one when it returned a value: repr() says StopIteration()
+        // against StopIteration(7). pyExcInstance's one-string args is every other
+        // runtime exception's shape, so this one is rewritten here. Both engines
+        // used to disagree with CPython AND with each other - this half said
+        // StopIteration('') and the interpreter StopIteration(None).
+        // StopIteration carries the body's RETURN value, and a generator that
+        // returned nothing (or that close() abandoned) carries None. It has to be
+        // spelled null and not undefined: pyGetAttr's own test is
+        // `obj[name] !== undefined`, so an undefined-valued attribute reads as
+        // ABSENT and `e.value` died natively with "'StopIteration' object has no
+        // attribute 'value'" while llvm.Run answered None - a layer-2-only
+        // divergence, which only a native probe can see.
+        var sv = anytype
+        sv = st["value"]
+        if (sv === undefined) { sv = null }
+        exc["value"] = sv
+        var sargs = []
+        if (sv !== null) { sargs.push(sv) }
+        exc["args"] = sargs
+        throw exc
+    }
+    return st["value"]
+}
+
 function pyDMethodCall(target, name, args, kw) {
+    // super().m(...): the lookup starts one past the defining class in the
+    // instance's MRO, and the instance is prepended as self.
+    if (pyIsSuper(target)) { return pySuperMCall(target, name, args, kw) }
     // str's own method library (the str-methods chapter at the end of this file).
     // Checked FIRST and by NAME, so a name it does not know still reaches
     // pyFStrMethod's Java-style builtins exactly as it did before.
@@ -5051,23 +5232,20 @@ function pyDMethodCall(target, name, args, kw) {
             // table, which the for-loop's own iteration never consulted - so
             // `for v in g` after g.close() still yielded the rest, natively only.
             st = target["next"].apply(target, [sent])
-            if (st === undefined || st === null) { fail("generator step failed") }
-            if (st["done"] === true) {
-                var exc = pyExcInstance("StopIteration", "")
-                // StopIteration carries the body's RETURN value, and a generator
-                // that returned nothing (or that close() abandoned) carries None.
-                // It has to be spelled null and not undefined: pyGetAttr's own test
-                // is `obj[name] !== undefined`, so an undefined-valued attribute
-                // reads as ABSENT and `e.value` died natively with "'StopIteration'
-                // object has no attribute 'value'" while llvm.Run answered None -
-                // a layer-2-only divergence, which only a native probe can see.
-                var sv = anytype
-                sv = st["value"]
-                if (sv === undefined) { sv = null }
-                exc["value"] = sv
-                throw exc
-            }
-            return st["value"]
+            return pyGenValue(st)
+        }
+        // g.throw(exc): raise exc AT the yield the body is parked at. The floor's
+        // tag-15 member table answers it (runtime.c's gen_throw) and the record it
+        // builds is JavaScript's, so it is unwrapped into Python's protocol here
+        // exactly as send()'s is - the body catching it and returning ends the
+        // generator with a StopIteration carrying that return value.
+        if (name == "throw") {
+            var tv = anytype
+            tv = undefined
+            if (args.length > 0) { tv = args[0] }
+            var tst = anytype
+            tst = target["throw"].apply(target, [tv])
+            return pyGenValue(tst)
         }
         if (name == "close") {
             // CPython's generator.close() answers None, not a {value, done}
@@ -5385,16 +5563,17 @@ function pyKwArg(kw, name) {
 // with pyIsDictMethod/pyIsSetMethod in abnf/jsrt.go and in
 // languages/python-interpreter.abnf.
 //
-// NOT the whole of CPython's: dict.popitem/fromkeys and set.intersection/
-// difference/symmetric_difference/isdisjoint/issubset/issuperset and their
-// *_update forms are absent, hasattr() therefore says False for them, and a
-// written call still ABORTS rather than raising - the 51436f9 rule. The set
-// ALGEBRA is spelled with the operators & - ^ <= >= instead, and those are
-// complete.
+// NOT the whole of CPython's: dict.fromkeys and set.intersection/difference/
+// symmetric_difference/isdisjoint/issubset/issuperset and their *_update forms
+// are absent, hasattr() therefore says False for them, and a written call still
+// ABORTS rather than raising - the 51436f9 rule. The set ALGEBRA is spelled with
+// the operators & - ^ <= >= instead, and those are complete. popitem joined the
+// set at docs/todo.md 1.9.
 function pyIsDictMethod(name) {
     if (name == "keys" || name == "values" || name == "items") { return true }
     if (name == "get" || name == "pop" || name == "clear") { return true }
     if (name == "copy" || name == "setdefault" || name == "update") { return true }
+    if (name == "popitem") { return true }
     return false
 }
 
@@ -5410,7 +5589,7 @@ function pyIsSetMethod(name) {
 // above: pop, clear, copy and update are on BOTH a dict and a set.
 function pyIsDictOnly(name) {
     if (name == "keys" || name == "values" || name == "items") { return true }
-    if (name == "get" || name == "setdefault") { return true }
+    if (name == "get" || name == "setdefault" || name == "popitem") { return true }
     return false
 }
 
@@ -5459,6 +5638,23 @@ function pyDictMethod(d, name, args, kw) {
         }
         if (args.length > 1) { return args[1] }
         throw pyExcInstanceV("KeyError", pyFArgAt(args, 0))
+    }
+    // popitem(): the LAST inserted pair, removed - CPython's is LIFO since 3.7.
+    // The pair is a 2-element list, like items()' pairs, because this subset has
+    // no tuple (docs/todo.md 3.1). Empty raises the KeyError whose argument is a
+    // sentence rather than a key.
+    if (name == "popitem") {
+        if (keys.length == 0) {
+            throw pyExcInstanceV("KeyError", "popitem(): dictionary is empty")
+        }
+        var ppI = keys.length - 1
+        var ppK = anytype
+        ppK = keys[ppI]
+        var ppV = anytype
+        ppV = vals[ppI]
+        pyCRemoveAt(keys, ppI)
+        pyCRemoveAt(vals, ppI)
+        return [ppK, ppV]
     }
     if (name == "clear") {
         pyCTruncate(keys)

@@ -1214,5 +1214,160 @@ for k in kg:
         korder.append(k)
 check("generator-finally-order", str(korder), "['d0', 'body', 'd1', 'fin', 'd2']")
 
+# ----- g.throw(exc): raise AT the parked yield (docs/todo.md 1.4) -----
+# Blocked in every language until the floor's tag-15 member table learned a third
+# member: the record travels on the RESUME VALUE, exactly as close()'s exit record
+# does, which is what makes it per-coroutine by construction (docs/todo.md 2.1's
+# per-PROGRAM depth stack is the design that failed). runtime.c's gen_throw and
+# abnf/jsrt.go's throwInto answer the compiled halves; genThrow answers this one.
+# Every append is in the DRIVER or in a `finally`: a write before the parked yield
+# repeats once per replay in the interpreter half, so the two halves would disagree.
+tg = []
+
+
+def tgen():
+    try:
+        yield ky[0]
+        yield ky[1]
+    except ValueError as e:
+        yield "c:" + str(e)
+    finally:
+        tg.append("fin")
+
+
+tit = tgen()
+tg.append("n" + str(next(tit)))
+tg.append("t" + str(tit.throw(ValueError("X"))))
+try:
+    next(tit)
+except StopIteration:
+    tg.append("stop")
+torder = []
+for t in tg:
+    if t not in torder:
+        torder.append(t)
+check("gen-throw-caught", str(torder), "['n3', 'tc:X', 'fin', 'stop']")
+
+
+def tgen2():
+    yield ky[0]
+    yield ky[1]
+
+
+tit2 = tgen2()
+next(tit2)
+check("gen-throw-propagates", why(lambda: tit2.throw(KeyError(ky[0]))), "KeyError|3|KeyError(3)")
+check("gen-throw-leaves-it-done", why(lambda: next(tit2)), "StopIteration||StopIteration()")
+# A generator that never ran has no suspension point and therefore no `finally` to
+# unwind: CPython runs nothing at all and the value propagates. Same for a done one.
+tg3 = []
+
+
+def tgen3():
+    try:
+        yield ky[0]
+    finally:
+        tg3.append("fin3")
+
+
+tit3 = tgen3()
+check("gen-throw-not-started", why(lambda: tit3.throw(ValueError("Z"))), "ValueError|Z|ValueError('Z')")
+check("gen-throw-not-started-no-finally", str(tg3), "[]")
+# A body that CATCHES the throw and returns ends the generator, and the
+# StopIteration carries that return value - send()'s protocol, not JavaScript's
+# {value, done} record, which is what layer 2's pyGenValue unwraps.
+
+
+def tgen4():
+    try:
+        yield ky[0]
+    except ValueError:
+        return
+
+
+tit4 = tgen4()
+next(tit4)
+check("gen-throw-catch-and-return", why(lambda: tit4.throw(ValueError("Q"))),
+      "StopIteration||StopIteration()")
+
+# StopIteration's ARGS: empty when the body returned None and (v,) when it returned
+# a value, which repr() shows. All three engines were wrong AND disagreed with each
+# other - this half said StopIteration(None), the compiled halves StopIteration('')
+# for BOTH shapes (losing the return value outright) - and `--cross` never reached
+# it because both halves answer through their own protocol.
+
+
+def tgen5():
+    yield ky[1]
+    return ky[0]
+
+
+tit5 = tgen5()
+next(tit5)
+check("stopiter-args-value", why(lambda: next(tit5)), "StopIteration|3|StopIteration(3)")
+
+
+def tgen6():
+    yield ky[0]
+
+
+tit6 = tgen6()
+next(tit6)
+check("stopiter-args-none", why(lambda: next(tit6)), "StopIteration||StopIteration()")
+
+# ----- super(), the MRO, and dict.popitem (docs/todo.md 1.9) -----
+# The diamond is the point: depth-first over the bases finds A.who, C3 finds
+# C.who, and CPython says C. The interpreter half used to be depth first while
+# both compiled halves used the C3 __mro - a live halves divergence.
+snm = ["A", "B", "C", "D"]
+
+
+class SA:
+    def who(self):
+        return snm[0]
+
+
+class SB(SA):
+    pass
+
+
+class SC(SA):
+    def who(self):
+        return snm[2]
+
+
+class SD(SB, SC):
+    def who(self):
+        return snm[3] + super().who()
+
+
+check("super-diamond-c3", SD().who(), "DC")
+check("super-mro", str([k.__name__ for k in type(SD()).__mro__]),
+      "['SD', 'SB', 'SC', 'SA']")
+check("super-bases", str([k.__name__ for k in SD.__bases__]), "['SB', 'SC']")
+check("super-explicit", super(SD, SD()).who(), "C")
+check_true("super-bound-value", SD().who() == SD().who())
+
+
+class SE(SA):
+    def __init__(self, v):
+        self.v = v * 2
+
+    def who(self):
+        return "E" + super().who()
+
+
+check("super-init-chain", SE(3).v, 6)
+check("super-through-value", SE(1).who(), "EA")
+sbm = SE(2).who
+check("bound-method-off-instance", sbm(), "EA")
+spd = {}
+for spk in ["a", "b"]:
+    spd[spk] = len(spd)
+check("dict-popitem-lifo", str(spd.popitem()), "['b', 1]")
+check("dict-popitem-rest", str(spd), "{'a': 0}")
+check("dict-popitem-empty", why(lambda: {}.popitem()),
+      "KeyError|'popitem(): dictionary is empty'|KeyError('popitem(): dictionary is empty')")
+
 print(f"features: {checks[0]} checks, {fails[0]} failures")
 exit(fails[0])

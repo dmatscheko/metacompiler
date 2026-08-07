@@ -1523,6 +1523,101 @@ def s37():
     li.append("d4")
     check("ky28", firsts(li) == ["d0", "a1", "d1", "b1", "d2", "a2", "d3", "b2", "d4"])
 
+    # --- g.throw(exc) raises AT the parked yield (docs/todo.md 1.4) ---------
+    # Here and not only in the features file because the features file is NEVER
+    # BUILT NATIVELY: layer 2's pyGenValue is only reachable through
+    # tests/native-full.sh and tests/clang-check.sh.
+    lt = []
+
+    def g37c():
+        try:
+            lt.append("t1")
+            yield K[0]
+            lt.append("t2")
+            yield K[1]
+        except ValueError as e:
+            lt.append("caught:" + str(e))
+            yield K[2]
+        finally:
+            lt.append("t-fin")
+
+    tk = g37c()
+    lt.append("d0")
+    next(tk)
+    lt.append("d1")
+    check("ky29", tk.throw(ValueError("V")) == K[2])
+    lt.append("d2")
+    try:
+        next(tk)
+    except StopIteration:
+        lt.append("d-stop")
+    check("ky30", firsts(lt) ==
+          ["d0", "t1", "d1", "caught:V", "d2", "t-fin", "d-stop"])
+    # Uncaught: the value propagates out of throw() and the generator is done.
+    lu = []
+
+    def g37d():
+        try:
+            yield K[0]
+            yield K[1]
+        finally:
+            lu.append("u-fin")
+
+    uk = g37d()
+    next(uk)
+    up = ""
+    try:
+        uk.throw(KeyError(K[0]))
+    except KeyError as e:
+        up = repr(e)
+    check("ky31", up == "KeyError(3)" and lu == ["u-fin"])
+    ud = ""
+    try:
+        next(uk)
+    except StopIteration:
+        ud = "StopIteration"
+    check("ky32", ud == "StopIteration")
+    # A generator that never ran has no suspension point and so no `finally`.
+    lv = []
+
+    def g37e():
+        try:
+            yield K[0]
+        finally:
+            lv.append("v-fin")
+
+    vk = g37e()
+    vp = ""
+    try:
+        vk.throw(ValueError("W"))
+    except ValueError as e:
+        vp = str(e)
+    check("ky33", vp == "W" and lv == [])
+    # StopIteration's ARGS: empty for a body that returned None, (v,) otherwise.
+    # All three engines were wrong here AND disagreed with each other.
+
+    def g37f():
+        yield K[0]
+        return K[2]
+
+    fk = g37f()
+    next(fk)
+    fr = ""
+    try:
+        next(fk)
+    except StopIteration as e:
+        fr = repr(e) + "|" + str(e.value)
+    check("ky34", fr == "StopIteration(7)|7")
+    nk = g37d()
+    next(nk)
+    next(nk)
+    nr = ""
+    try:
+        next(nk)
+    except StopIteration as e:
+        nr = repr(e) + "|" + str(e.value)
+    check("ky35", nr == "StopIteration()|None")
+
 
 class MyKeyErr(KeyError):
     pass
@@ -2099,7 +2194,7 @@ def s36():
 
     # --- hasattr answers exactly what the dispatcher can run --------------
     dnames = ["keys", "values", "items", "get", "pop", "clear", "copy",
-              "setdefault", "update"]
+              "setdefault", "update", "popitem"]
     snames = ["add", "pop", "clear", "copy", "remove", "discard", "union",
               "update"]
     dseen = 0
@@ -2110,10 +2205,13 @@ def s36():
     for nm in snames:
         if hasattr(mks(), nm):
             sseen += 1
-    check("dm41", dseen == 9 and sseen == 8)
+    check("dm41", dseen == 10 and sseen == 8)
     # And False for the OTHER type's names, and for what this project lacks.
     check("dm42", not hasattr(mks(), "keys") and not hasattr(mkd(), "discard"))
-    check("dm43", not hasattr(mkd(), "popitem") and not hasattr(mks(), "issubset"))
+    # popitem arrived with docs/todo.md 1.9 and is a DICT name only, so a set
+    # still answers False for it - as CPython does.
+    check("dm43", hasattr(mkd(), "popitem") and not hasattr(mks(), "popitem"))
+    check("dm43b", not hasattr(mkd(), "fromkeys") and not hasattr(mks(), "issubset"))
     # getattr hands back a BOUND method that runs. It cannot carry KEYWORD
     # arguments, so update()'s keyword form is only available on a written call.
     gd = mkd()
@@ -2125,7 +2223,7 @@ def s36():
     # it used to abort in both compiled halves. keys()/values()/items() answer
     # LISTS here where CPython answers dict_keys/dict_values/dict_items views of
     # TUPLES, which is the tuple gap of docs/todo.md 3.1 and not this item -
-    # these two rows and dm43 are the only ones in the section that CPython
+    # these two rows and dm43b are the only ones in the section that CPython
     # would fail.
     check("dm47", getattr(mkd(), "items")() == [["a", 1], ["b", 2], ["c", 3]])
     check("dm48", getattr(mkd(), "keys")() == ["a", "b", "c"])
@@ -2167,6 +2265,151 @@ def s36():
     check("dm57", (o1 <= o2) == False and (o1 > o1) == False and o1 <= o1)
     check("dm58", len(o1 | o2) == 3 and len(o1 & o2) == 1 and len(o1 - o2) == 2)
 
+# ===== SECTION 38: super(), the MRO, dict.popitem and bound methods =====
+# docs/todo.md 1.9. Before this round `super()` was `name 'super' is not
+# defined` in all three engines, dict.popitem was `unknown dict method`, and the
+# INTERPRETER half resolved a class member depth-first over __bases where both
+# compiled halves used the C3 __mro - so `class D(B, C)` found the wrong method
+# in a diamond, a live halves divergence --cross had never reached. A method
+# read off an instance was also unbound in both COMPILED halves, so
+# `f = a.m; f()` died there and worked here. Every operand comes out of a list
+# so the constant folder cannot pre-compute a row.
+def s38():
+    names = ["A", "B", "C", "D"]
+    vals = [1, 2, 3]
+
+    class A:
+        def __init__(self, v):
+            self.v = v
+        def who(self):
+            return names[0]
+        def tag(self):
+            return "t" + self.who()
+
+    class B(A):
+        def __init__(self, v):
+            super().__init__(v * 2)
+        def who(self):
+            return names[1] + super().who()
+
+    class C(A):
+        def who(self):
+            return names[2]
+
+    class D(B, C):
+        def who(self):
+            return names[3] + super().who()
+
+    # --- zero-argument super() finds the DEFINING class, not type(self) ---
+    b = B(vals[0])
+    check("su01", b.v == 2 and b.who() == "BA")
+    # An inherited method still dispatches virtually through self.
+    check("su02", b.tag() == "tBA")
+    # --- the diamond: D -> B -> C -> A, which is C3 and NOT depth first ---
+    d = D(vals[1])
+    check("su03", d.who() == "DBC" and d.v == 4)
+    check("su04", [k.__name__ for k in type(d).__mro__] == ["D", "B", "C", "A"])
+    check("su05", [k.__name__ for k in D.__bases__] == ["B", "C"])
+    # B's own super() lands on C when the instance is a D, and on A when it is a
+    # B - the whole point of a linearization rather than a parent pointer.
+    check("su06", B(vals[0]).who() == "BA" and D(vals[0]).who() == "DBC")
+    # A class that DOES NOT override still resolves through the linearization.
+    class E(B, C):
+        pass
+    check("su07", E(vals[0]).who() == "BC")
+    # --- the explicit two-argument form ---------------------------------
+    check("su08", super(D, d).who() == "BC")
+    check("su09", super(B, d).who() == "C")
+    # --- super() on a class deriving from a builtin exception -----------
+    class Err(Exception):
+        def __init__(self, m):
+            super().__init__("E:" + m)
+    caught = []
+    try:
+        raise Err(names[0])
+    except Err as ex:
+        caught.append(str(ex))
+    check("su10", caught == ["E:A"])
+    # --- super() as a VALUE: the member comes back bound -----------------
+    class F(A):
+        def who(self):
+            f = super().who
+            return "F" + f()
+    check("su11", F(vals[0]).who() == "FA")
+    # --- and a plain method read off an instance is bound too ------------
+    m = A(vals[2]).tag
+    check("su12", m() == "tA")
+    check("su13", A(vals[2]).who() == "A")
+    # --- a name super() has nowhere to find is an AttributeError ---------
+    class G(A):
+        def bad(self):
+            return super().nope
+    hit = 0
+    try:
+        G(vals[0]).bad()
+    except AttributeError:
+        hit = 1
+    check("su14", hit == 1)
+
+    # --- dict.popitem: LIFO, and a KeyError on an empty dict -------------
+    pairs = [["a", 1], ["b", 2], ["c", 3]]
+
+    def mkd():
+        out = {}
+        for kv in pairs:
+            out[kv[0]] = kv[1]
+        return out
+
+    p = mkd()
+    check("su15", p.popitem() == ["c", 3] and len(p) == 2)
+    check("su16", p.popitem() == ["b", 2] and list(p.keys()) == ["a"])
+    check("su17", p.popitem() == ["a", 1] and p == {})
+    msg = ""
+    try:
+        p.popitem()
+    except KeyError as ke:
+        msg = str(ke)
+    check("su18", msg == "'popitem(): dictionary is empty'")
+    # It is a DICT method, not a set one, so a set answers AttributeError.
+    sh = 0
+    try:
+        st = set()
+        st.add(pairs[0][0])
+        st.popitem()
+    except AttributeError:
+        sh = 1
+    check("su19", sh == 1)
+    check("su20", hasattr(mkd(), "popitem") and hasattr(D, "__mro__"))
+
+    # --- __slots__ applies over the WHOLE MRO, not the nearest declaration ---
+    # `class SB(SA)` where BOTH declare __slots__: writing SA's own slot name
+    # through an SB raised AttributeError in all three engines where CPython
+    # allows it, because the lookup stopped at SB's declaration.
+    class SA:
+        __slots__ = ["s"]
+
+    class SB(SA):
+        __slots__ = ["t"]
+
+    sb = SB()
+    sb.s = vals[0]
+    sb.t = vals[1]
+    check("su21", sb.s == 1 and sb.t == 2)
+    blocked = 0
+    try:
+        sb.zz = vals[0]
+    except AttributeError:
+        blocked = 1
+    check("su22", blocked == 1)
+    # A class on the MRO with NO __slots__ gives its instances a __dict__, so
+    # anything may be written from there down.
+    class SC(SA):
+        pass
+
+    sc = SC()
+    sc.anything = vals[0]
+    check("su23", sc.anything == 1)
+
 
 def main():
     s01() # SECTION-CALL 01
@@ -2206,5 +2449,6 @@ def main():
     s35() # SECTION-CALL 35
     s36() # SECTION-CALL 36
     s37() # SECTION-CALL 37
+    s38() # SECTION-CALL 38
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

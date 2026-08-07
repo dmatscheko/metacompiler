@@ -1918,6 +1918,181 @@ func s36() {
 	check("cx28", fmt.Sprint(cnz36) == "0" && fmt.Sprint(-0.0*1) == "0")
 }
 
+// ===== SECTION 37: nil slices, recovered results, `for range x`, panic text =====
+// The five gaps of docs/todo.md 1.7, plus the three the probe for it turned up.
+// Every expected value was read off `go run` before it was written down.
+//
+// WHAT EACH GROUP IS PINNING, because a passing assertion says nothing about why:
+//   - the zero value of a SLICE type compares equal to nil. It is still a usable
+//     empty HEADER (len/cap/range/append all work on it, as they do in Go), so
+//     nil-ness is a __nil MARK on the header - exactly the trade a nil MAP already
+//     makes. `[]int{}`, make() and an appended header must NOT be nil, which is
+//     what tells a mark from a blanket "an empty slice is nil".
+//   - a function whose panic was RECOVERED answers the ZERO of its declared result
+//     types, not `<nil>`; and a NAMED result starts at the zero of its own type,
+//     not at the number 0. Both needed the result type texts, which RetTypes did
+//     not capture at all before.
+//   - integer divide by zero is a RECOVERABLE panic in every engine. It used to
+//     abort the interpreter (interp-core's `fail`) and abort a native binary (the
+//     floor's si_arith calls die(), which no js_gotry can catch) while llvm.Run
+//     recovered it - a three-way split.
+//   - `for range x` with no variables at all parses in both halves.
+//
+// A sixth gap, the DOUBLED PREFIX of an unrecovered panic in a native binary, is
+// deliberately not asserted here: a ratchet has to exit 0, so it cannot let a
+// panic escape. tests/probe.sh with the three legs is what settles that one.
+type P37 struct{ N int }
+type Z37 struct {
+	xs []int
+	n  int
+}
+
+func f37slice(a []int, i int) []int { defer func() { recover() }(); _ = a[i]; return a }
+func f37str(a []int, i int) string  { defer func() { recover() }(); _ = a[i]; return "set" }
+func f37two(a []int, i int) (int, string) {
+	defer func() { recover() }()
+	_ = a[i]
+	return 7, "set"
+}
+func f37struct(a []int, i int) P37 { defer func() { recover() }(); _ = a[i]; return P37{9} }
+func f37u8(a []int, i int) uint8   { defer func() { recover() }(); _ = a[i]; return 200 }
+func f37named(a []int, i int) (n int, s string, xs []int) {
+	defer func() { recover() }()
+	_ = a[i]
+	n, s, xs = 1, "set", []int{4}
+	return
+}
+func f37div(a []int, i int, j int) (out string) {
+	defer func() {
+		if e := recover(); e != nil {
+			out = "recovered"
+		}
+	}()
+	_ = a[i] / a[j]
+	return "no panic"
+}
+
+type V37 struct {
+	xs []int
+	s  string
+}
+
+func (v V37) count() int             { return len(v.xs) }
+func (v V37) first() int             { return v.xs[0] }
+func (v V37) tag() string            { return v.s }
+func (v V37) mapped() map[string]int { return map[string]int{"k": 7} }
+func (v V37) nilxs() bool            { return v.xs == nil }
+
+func s37() {
+	// ----- the zero value of a slice type IS nil -----
+	var z37 []int
+	check("nl1", z37 == nil && nil == z37)
+	check("nl2", len(z37) == 0 && cap(z37) == 0)
+	check("nl3", fmt.Sprint(z37) == "[]")
+	// ... and everything that is NOT the zero value is not nil.
+	check("nl4", []int{} != nil)
+	check("nl5", make([]int, 0) != nil)
+	check("nl6", append(z37, 1) != nil && z37 == nil)
+	check("nl7", []int{1, 2}[0:0] != nil)
+	// The mark reaches every site that builds a zero value: a struct field, a
+	// map's value type, an array element and a defined type over a slice.
+	var st37 Z37
+	check("nl8", st37.xs == nil && st37.n == 0)
+	m37 := map[string][]int{}
+	check("nl9", m37["absent"] == nil && len(m37["absent"]) == 0)
+	var arr37 [2][]byte
+	check("nl10", arr37[0] == nil && arr37[1] == nil)
+	// A nil map still compares equal to nil, and an empty one written into does not.
+	var nm37 map[string]int
+	check("nl11", nm37 == nil && len(nm37) == 0)
+	check("nl12", map[string]int{} != nil)
+
+	// ----- a recovered call answers the ZERO of its result types -----
+	live37 := []int{5}
+	check("rz1", f37slice(live37, 9) == nil)
+	check("rz2", f37slice(live37, 0) != nil)
+	check("rz3", f37str(live37, 9) == "" && f37str(live37, 0) == "set")
+	n37, s37s := f37two(live37, 9)
+	check("rz4", n37 == 0 && s37s == "")
+	check("rz5", f37struct(live37, 9) == P37{0} && f37struct(live37, 0) == P37{9})
+	check("rz6", f37u8(live37, 9) == 0)
+	// A NAMED result starts at the zero of its OWN type, not at the number 0.
+	a37, b37, c37 := f37named(live37, 9)
+	check("rz7", a37 == 0 && b37 == "" && c37 == nil)
+	a38, b38, c38 := f37named(live37, 0)
+	check("rz8", a38 == 1 && b38 == "set" && len(c38) == 1)
+
+	// ----- integer divide by zero is RECOVERABLE -----
+	d37 := []int{6, 3, 0}
+	check("dz1", f37div(d37, 0, 1) == "no panic")
+	check("dz2", f37div(d37, 0, 2) == "recovered")
+	// ... and a FLOAT divided by zero is an infinity, not a panic.
+	fz37 := []float64{6, 0}
+	check("dz3", fz37[0]/fz37[1] > 1e307 && fz37[1]/fz37[1] != fz37[1]/fz37[1])
+	// The same on a SIZED integer, whose operator is a different floor arm.
+	u37 := []uint8{200, 0, 3}
+	check("dz4", u37[0]/u37[2] == 66 && u37[0]%u37[2] == 2)
+	// The recovered VALUE is a runtime-error MESSAGE and the same text in all three
+	// engines. Only its TAIL is asserted: this project prefixes every runtime error
+	// with "js runtime error: " where go writes "runtime error: ", a divergence
+	// recorded at goRTPanic, and the file has to stay green under real `go run` too.
+	t37 := divText37(d37, 0, 2)
+	check("dz5", len(t37) >= 22 && t37[len(t37)-22:] == "integer divide by zero")
+
+	// ----- a VALUE receiver gets a COPY that keeps its hidden slots -----
+	// goCopyVal makes the copy Go's value semantics require, and layer 2 built it
+	// through keysOf, which HIDES every __-prefixed slot - so the copy lost its
+	// __class and `func (v V37) ...` reading a slice field answered
+	// "len() of a object" in a NATIVE binary while llvm.Run printed the length. Only
+	// clang-check / native-full / a native -exe probe can see this row at all.
+	v37 := V37{xs: []int{1, 2, 3}, s: "v"}
+	check("vr1", v37.count() == 3 && v37.first() == 1)
+	check("vr2", v37.tag() == "v" && v37.mapped()["k"] == 7)
+	// ... including the __nil mark, so a copied zero slice still compares to nil.
+	check("vr3", V37{}.nilxs())
+
+	// ----- `for range x` with no variables at all -----
+	c37a := 0
+	for range m37 {
+		c37a++
+	}
+	check("fr1", c37a == 0)
+	m37["k"] = []int{1}
+	m37["j"] = []int{2}
+	c37a = 0
+	for range m37 {
+		c37a++
+	}
+	check("fr2", c37a == 2)
+	c37b := 0
+	for range d37 {
+		c37b++
+	}
+	check("fr3", c37b == 3)
+	c37c := 0
+	for range "héllo" {
+		c37c++
+	}
+	check("fr4", c37c == 5)
+	// The two-name form still binds, and `=` over already-declared names works too.
+	sum37 := 0
+	ki, kv := 0, 0
+	for ki, kv = range d37 {
+		sum37 += ki * kv
+	}
+	check("fr5", sum37 == 3 && ki == 2 && kv == 0)
+}
+
+func divText37(a []int, i int, j int) (out string) {
+	defer func() {
+		if e := recover(); e != nil {
+			out = fmt.Sprint(e)
+		}
+	}()
+	_ = a[i] / a[j]
+	return "no panic"
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -1955,6 +2130,7 @@ func main() {
 	s34() // SECTION-CALL 34
 	s35() // SECTION-CALL 35
 	s36() // SECTION-CALL 36
+	s37() // SECTION-CALL 37
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

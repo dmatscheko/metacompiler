@@ -1292,6 +1292,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var pyBindSink = null
     var pyAnnotHere = false
 
+    // The two operands of a zero-argument super(), tracked while the module is
+    // emitted. pySuperCls says a class body is lexically open (so __pycls__ is
+    // reachable from here through the scope chain) and pySuperSelf names the
+    // enclosing function's first parameter. Both are exactly CPython's rule, and
+    // both nest the way CPython's do: a def inside a method keeps the class cell
+    // and takes its OWN first argument. See makeVarRef.
+    var pySuperCls = false
+    var pySuperSelf = null
+
     // Names the emitter DECLARED in a scope of the current function that is not a
     // binding boundary - a comprehension's own scope, an `except ... as e` handler,
     // a `with ... as w` target. abnf/jsrt.go's js_pyset_var finds such a binding on
@@ -3450,6 +3459,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var savedSink = pyBindSink
         var savedAnnot = pyAnnotHere
         var savedInner = pyInnerNames
+        // A real function takes its own first parameter as super()'s instance; a
+        // try/except/with body closure (isCtl) is not a frame of the program and
+        // keeps the one around it. See makeVarRef.
+        var savedSelf = pySuperSelf
+        if (!isCtl) { pySuperSelf = params.length > 0 ? params[0] : null }
         pyBindSink = null
         pyAnnotHere = false
         if (!isCtl) { pyInnerNames = {} }
@@ -3497,6 +3511,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pyBindSink = savedSink
         pyAnnotHere = savedAnnot
         pyInnerNames = savedInner
+        pySuperSelf = savedSelf
         if (isCtl) { ctlLeave() }
         curF = savedF
         curScopeV = savedScope
@@ -3561,6 +3576,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 callExt(b, "js_arr_push", [basesV, rb.v])
             }
             var cls = callExt(b, "js_pyclass_new", [emitStr(b, name), basesV])
+            var savedSuperCls = pySuperCls
             var saved = curScopeV
             // A class body is a namespace of its own: what it binds becomes a
             // class member and never leaks into the scope around it.
@@ -3572,7 +3588,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyBindSink = []
             pyAnnotHere = false
             pyInnerNames = {}
+            // The __class__ cell. js_scope_decl and NOT pySetVar, so the name never
+            // reaches pyBindSink and never becomes a member of the class.
+            callExt(b, "js_scope_decl", [bodyScope, emitStr(b, "__pycls__"), cls])
+            pySuperCls = true
             b = bodyT(b)
+            pySuperCls = savedSuperCls
             b = pyClassFill(b, cls, bodyScope, pyBindSink)
             // SETUP_ANNOTATIONS: the body HELD an annotation, so the class has an
             // __annotations__ dict whether or not the annotated statement ran.
@@ -3926,6 +3947,35 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // is an emitted IR function, so makeVarRef (lib/compile-core.js) is overridden
     // here instead - the same move swift and dart made for js_kget.
     makeVarRef = function(name) {
+        // ----- super() -----
+        //
+        // CPython's zero-argument super() is compiler magic and this is the same
+        // magic, done in the emitter: the DEFINING class comes from a __pycls__
+        // binding makeClass declares in the class body's scope (the scope every
+        // method in that body closes over - CPython's __class__ cell), and the
+        // INSTANCE is the enclosing function's FIRST parameter (CPython reads
+        // f_localsplus[0]). Both are known statically here, so the read of the
+        // name `super` lowers to js_pysuper(class, self) - already bound, and
+        // calling it with no arguments hands the same object back.
+        //
+        // super(C, obj) works because js_pysuper's result is callable with two
+        // arguments. super(C) - the UNBOUND form - raises TypeError; it is a
+        // descriptor and the value model has no protocol for one.
+        //
+        // Outside a class (or in a function with no parameters) the two operands
+        // are undefined and the zero-argument call raises the RuntimeError
+        // CPython raises. languages/python-interpreter.abnf's makeVarRef is this
+        // same special case, and both halves therefore resolve `super` as the
+        // builtin even if the program binds the name itself.
+        if (name == "super") {
+            return function(b) {
+                var clsV = hUndef
+                if (pySuperCls) { clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__pycls__")]) }
+                var selfV = hUndef
+                if (pySuperSelf != null) { selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, pySuperSelf)]) }
+                return {b: b, v: callExt(b, "js_pysuper", [clsV, selfV])}
+            }
+        }
         return function(b) {
             return {b: b, v: pyGetVar(b, curScopeV, emitStr(b, name))}
         }

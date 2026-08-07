@@ -308,7 +308,7 @@ Require     <~~ resolveImport(pop(), up.pos) ~~>
 KwRequire   = ( "require_relative" | "require" ) KwEnd ;
 ReqPath     = SqPath | DqPath ;
 SqPath      = "'" :whitespace() { SqEsc | SqPlain } <~~ push(unescapeSq(up.in)) ~~> "'" :whitespace(Whitespace) ;
-DqPath      = '"' :whitespace() { DqEsc | DqPathChar } <~~ push(unescapeJs(up.in)) ~~> '"' :whitespace(Whitespace) ;
+DqPath      = '"' :whitespace() { DqEsc | DqPathChar } <~~ push(unescapeRb(up.in)) ~~> '"' :whitespace(Whitespace) ;
 DqEsc       = "\\" "\x20"..b"\x7e" ;
 DqPathChar  = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" ;
 
@@ -579,18 +579,18 @@ PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
 // mistaken for argument lists; it comes BEFORE MethodSfx so the parenthesised form
 // still wins whenever there is a `(`.
 CmdMethodSfx <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
-            = "." MethodName <~~ push({mname: up.in}) ~~> SameLine CmdArgAhead Arg { "," Arg } [ Block ] ;
+            = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> SameLine CmdArgAhead Arg { "," Arg } [ Block ] ;
 MethodSfx   <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
-            = "." MethodName <~~ push({mname: up.in}) ~~> MArgs ;
+            = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> MArgs ;
 // p.(x): the parenthesis-only call shorthand for a Proc (Proc#call).
 CallSfx     <~~ push({kind: "mcall", name: "call", args: takeAll()}) ~~>
             = "." "(" [ Arg { "," Arg } ] ")" ;
-FieldSfx    = "." MethodName <~~ push({kind: "field", name: up.in}) ~~> ;
+FieldSfx    = "." MethodName <~~ push({kind: "field", name: noteMName(up.in)}) ~~> ;
 // Safe navigation obj&.m / obj&.m(args): yields nil (and skips the call, not even
 // evaluating the arguments) when the receiver is nil, else a normal method/field.
 SafeMethodSfx <~~ push({kind: "smcall", name: popName(), args: takeAll()}) ~~>
-            = "&." MethodName <~~ push({mname: up.in}) ~~> MArgs ;
-SafeFieldSfx = "&." MethodName <~~ push({kind: "sfield", name: up.in}) ~~> ;
+            = "&." MethodName <~~ push({mname: noteMName(up.in)}) ~~> MArgs ;
+SafeFieldSfx = "&." MethodName <~~ push({kind: "sfield", name: noteMName(up.in)}) ~~> ;
 // The LineCont guard keeps a line that OPENS with an array literal from being read
 // as an index of the previous expression (`txt = ""' then `[[1, 2]].each ...').
 // A subscript reaches a user-defined #[] with a full argument list; only the first
@@ -1329,23 +1329,23 @@ PctTplBody  = "(" { TplExpr | PctParChunk } ")"
             | "|" { TplExpr | PctPipChunk } "|" ;
 // Ruby lets ANY non-alphanumeric character delimit a % literal; the bracket pairs
 // above and these two are the ones that turn up in practice.
-PctBngChunk <~~ push({s: unescapeJs(up.in)}) ~~> = PctBngTC { PctBngTC } ;
+PctBngChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctBngTC { PctBngTC } ;
 PctBngTC    = TplEsc | HashChar | PctBngPlain ;
 PctBngPlain = "\x00"..."\x20" | "\x22" | "\x24"..."\x5b" | "\x5d"..."\U0010ffff" ;
-PctPipChunk <~~ push({s: unescapeJs(up.in)}) ~~> = PctPipTC { PctPipTC } ;
+PctPipChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctPipTC { PctPipTC } ;
 PctPipTC    = TplEsc | HashChar | PctPipPlain ;
 PctPipPlain = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7b" | "\x7d"..."\U0010ffff" ;
 // The angle-bracket delimiter (%<a #{b}>), the fourth of Ruby's bracket pairs.
-PctAngChunk <~~ push({s: unescapeJs(up.in)}) ~~> = PctAngTC { PctAngTC } ;
+PctAngChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctAngTC { PctAngTC } ;
 PctAngTC    = TplEsc | HashChar | PctAngPlain ;
 PctAngPlain = "\x00"..."\x22" | "\x24"..."\x3d" | "\x3f"..."\x5b" | "\x5d"..."\U0010ffff" ;
-PctParChunk <~~ push({s: unescapeJs(up.in)}) ~~> = PctParTC { PctParTC } ;
+PctParChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctParTC { PctParTC } ;
 PctParTC    = TplEsc | HashChar | PctParPlain ;
 PctParPlain = "\x00"..."\x22" | "\x24"..."\x27" | "\x2a"..."\x5b" | "\x5d"..."\U0010ffff" ;
-PctBrkChunk <~~ push({s: unescapeJs(up.in)}) ~~> = PctBrkTC { PctBrkTC } ;
+PctBrkChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctBrkTC { PctBrkTC } ;
 PctBrkTC    = TplEsc | HashChar | PctBrkPlain ;
 PctBrkPlain = "\x00"..."\x22" | "\x24"..."\x5a" | "\x5e"..."\U0010ffff" ;
-PctBrcChunk <~~ push({s: unescapeJs(up.in)}) ~~> = PctBrcTC { PctBrcTC } ;
+PctBrcChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctBrcTC { PctBrcTC } ;
 PctBrcTC    = TplEsc | HashChar | PctBrcPlain ;
 PctBrcPlain = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 
@@ -1366,7 +1366,7 @@ PctBrcPlain = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x
 CmdLit      <~~ push(makeCommand(makeTemplate(takeAll()), up.pos)) ~~>
             = "`" :whitespace() { TplExpr | BtChunk } "`" :whitespace(Whitespace)
             | "%x" :whitespace() PctTplBody :whitespace(Whitespace) ;
-BtChunk     <~~ push({s: unescapeJs(up.in)}) ~~> = BtTC { BtTC } ;
+BtChunk     <~~ push({s: unescapeRb(up.in)}) ~~> = BtTC { BtTC } ;
 BtTC        = TplEsc | HashChar | BtPlain ;
 BtPlain     = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x5f" | "\x61"..."\U0010ffff" ;
 
@@ -1763,7 +1763,7 @@ TplExpr     <~~ push({e: pop()}) ~~>
 // An EMPTY interpolation is legal and contributes nothing: `"#{}" == ""`.
 TplEmpty    <~~ push({s: ""}) ~~>
             = "#{" :whitespace(Whitespace) "}" :whitespace() ;
-TplChunk    <~~ push({s: unescapeJs(up.in)}) ~~>
+TplChunk    <~~ push({s: unescapeRb(up.in)}) ~~>
             = TplChar { TplChar } ;
 TplChar     = TplEsc | HashChar | TplPlain ;
 TplEsc      = "\\" "\x20"..b"\x7e" ;
@@ -3514,11 +3514,49 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (typeof v == "object" && v.__isclass === true) { return v.__name }
         return "" + v
     }
+    // String#inspect is the DOUBLE-QUOTED SOURCE form, and it is the escaping that
+    // makes it one. MRI escapes the quote, the backslash, the eight named control
+    // characters, a `#' that would start an interpolation (`#{', `#$', `#@' - a bare
+    // `#' is left alone), and every other control character as \uXXXX with UPPERCASE
+    // hex. Printable non-ASCII is left alone under a UTF-8 locale, so every unit
+    // >= 0x20 that is not one of those passes through untouched - which also leaves
+    // a surrogate PAIR intact, since neither half is special here. Mirrors
+    // rubyStrInspect of abnf/jsrt.go and rbStrInspect of lib/ruby-rt.metajs.
+    function strInspect(s) {
+        var out = "\""
+        for (var i = 0; i < s.length; i++) {
+            var c = s.charCodeAt(i)
+            if (c == 34) { out += "\\\"" }
+            else if (c == 92) { out += "\\\\" }
+            else if (c == 10) { out += "\\n" }
+            else if (c == 9) { out += "\\t" }
+            else if (c == 13) { out += "\\r" }
+            else if (c == 12) { out += "\\f" }
+            else if (c == 11) { out += "\\v" }
+            else if (c == 8) { out += "\\b" }
+            else if (c == 7) { out += "\\a" }
+            else if (c == 27) { out += "\\e" }
+            else if (c == 35) {
+                var n = 0
+                if (i + 1 < s.length) { n = s.charCodeAt(i + 1) }
+                if (n == 123 || n == 36 || n == 64) { out += "\\#" } else { out += "#" }
+            }
+            else if (c < 32 || c == 127) {
+                // Every code unit that reaches here is ASCII, so two hex digits and
+                // a literal "00" are the whole \uXXXX form. (255).toString(16)
+                // aborts under the frozen engine, hence the digit table.
+                var hi = Math.trunc(c / 16)
+                out += "\\u00" + "0123456789ABCDEF".charAt(hi) + "0123456789ABCDEF".charAt(c - hi * 16)
+            }
+            else { out += s.charAt(i) }
+        }
+        return out + "\""
+    }
     function rinspect(v) {
         if (v === null || v === undefined) { return "nil" }
         if (isRegex(v)) { return "/" + v.src + "/" + v.rflags }
         if (isMatchD(v)) { return "#<MatchData " + rinspect(rxGroup(v.rev.prog, v.text, v.m, 0)) + ">" }
-        if (typeof v == "string") { return "\"" + v + "\"" }
+        if (typeof v == "string") { return strInspect(v) }
         if (isSym(v)) { return ":" + v.s }
         if (Array.isArray(v)) {
             var out = "["
@@ -4249,7 +4287,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     j++
                 }
                 if (depth != 0) { lit += ch; i++; continue }
-                if (lit.length > 0) { parts.push({s: raw ? lit : unescapeJs(lit)}) ; lit = "" }
+                if (lit.length > 0) { parts.push({s: raw ? lit : unescapeRb(lit)}) ; lit = "" }
                 var frag = body.slice(i + 2, j)
                 if (stripWs(frag) == "") { parts.push({s: ""}) } else { parts.push({e: parseFragment(frag)}) }
                 i = j + 1
@@ -4258,7 +4296,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             lit += ch
             i++
         }
-        if (lit.length > 0) { parts.push({s: raw ? lit : unescapeJs(lit)}) }
+        if (lit.length > 0) { parts.push({s: raw ? lit : unescapeRb(lit)}) }
         return parts
     }
     function parseFragment(src) {
@@ -4291,7 +4329,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         var rest = b.slice(i)
         var code = 0
-        if (rest.charAt(0) == "\\") { code = unescapeJs(rest).charCodeAt(0) } else { code = rest.charCodeAt(0) }
+        if (rest.charAt(0) == "\\") { code = unescapeRb(rest).charCodeAt(0) } else { code = rest.charCodeAt(0) }
         if (ctrl) { code = code % 32 }
         if (meta) { code = code + 128 }
         return String.fromCharCode(code)
@@ -4301,7 +4339,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (body.charAt(0) == "\\" && (body.charAt(1) == "M" || body.charAt(1) == "C" || body.charAt(1) == "c")) {
             if (body.charAt(1) == "c" || body.charAt(2) == "-") { return ctlCharVal(body) }
         }
-        if (body.charCodeAt(0) == 92) { return unescapeJs(body) }
+        if (body.charCodeAt(0) == 92) { return unescapeRb(body) }
         return body
     }
     // pctRawOf digs the {raw: text} the delimiter production pushed out of the items.
@@ -4334,6 +4372,125 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // %W / %I: the body interpolates first, so the split has to happen at run time.
     function makeWordsThunk(t, asSym) {
         return function() { return pctWords(rstr(t()), asSym) }
+    }
+    // `arity' is the only method whose answer needs a closure's PARAMETER SHAPE, and
+    // that shape can only be kept in a registry keyed by function identity - which
+    // RETAINS every closure it records, together with its whole scope chain, and a
+    // block literal builds one closure per call. So the registry is armed only for a
+    // program that NAMES the method. Measured on a 20,000-iteration loop containing
+    // one block: always-on took the native live set from 181 KB to 5.1 MB and the
+    // heap from 11.6 MB to 22.1 MB. A program that reaches the method some other way
+    // (send(:arity)) answers 0, which is what an unrecorded closure answers anyway.
+    var usesArity = false
+    function noteMName(n) { if (n == "arity") { usesArity = true } return n }
+    // A DOUBLE-QUOTED Ruby string's escapes. unescapeJs of the shared core is
+    // JavaScript's set - it is right about \n \t \r \xNN \uNNNN and copies anything
+    // else through as the bare letter - and Ruby's set is wider in four ways that all
+    // reached a program's OUTPUT silently, because both halves called the same shared
+    // helper and therefore agreed:
+    //   \a \b \f \v \e   the four control spellings JS does not have (\e is ESC);
+    //   \s               a space;
+    //   \nnn             an OCTAL byte, one to three digits ("\101" is "A"); the
+    //                    shared helper read "\101" as NUL followed by "01";
+    //   \u{...}          the braced form, which may be ASTRAL - encoded here as the
+    //                    surrogate PAIR the floor's UTF-16 strings are made of.
+    // Everything else keeps the shared helper's rule: the character itself, so \" \\
+    // \# and \/ stay right. \C-x / \M-x are NOT decoded here and were not before
+    // either - ctlCharVal handles them for ?x character literals only.
+    function unescapeRb(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c != 92 || i + 1 >= s.length) { out += String.fromCharCode(c); i = i + 1; continue }
+            var e = s.charCodeAt(i + 1)
+            if (e == 110) { out += String.fromCharCode(10); i = i + 2; continue }
+            if (e == 116) { out += String.fromCharCode(9); i = i + 2; continue }
+            if (e == 114) { out += String.fromCharCode(13); i = i + 2; continue }
+            if (e == 97) { out += String.fromCharCode(7); i = i + 2; continue }
+            if (e == 98) { out += String.fromCharCode(8); i = i + 2; continue }
+            if (e == 102) { out += String.fromCharCode(12); i = i + 2; continue }
+            if (e == 118) { out += String.fromCharCode(11); i = i + 2; continue }
+            if (e == 101) { out += String.fromCharCode(27); i = i + 2; continue }
+            if (e == 115) { out += " "; i = i + 2; continue }
+            if (e >= 48 && e <= 55) {
+                var ov = 0
+                var on = 0
+                while (on < 3 && i + 1 + on < s.length) {
+                    var od = s.charCodeAt(i + 1 + on)
+                    if (od < 48 || od > 55) { break }
+                    ov = ov * 8 + (od - 48)
+                    on = on + 1
+                }
+                out += String.fromCharCode(ov % 256)
+                i = i + 1 + on
+                continue
+            }
+            if (e == 120) {
+                var xv = 0
+                var xn = 0
+                while (xn < 2 && rbHexDigAt(s, i + 2 + xn) >= 0) {
+                    xv = xv * 16 + rbHexDigAt(s, i + 2 + xn)
+                    xn = xn + 1
+                }
+                if (xn == 0) { out += "x"; i = i + 2; continue }
+                out += String.fromCharCode(xv)
+                i = i + 2 + xn
+                continue
+            }
+            if (e == 117) {
+                if (i + 2 < s.length && s.charCodeAt(i + 2) == 123) {
+                    var bv = 0
+                    var bn = 0
+                    while (rbHexDigAt(s, i + 3 + bn) >= 0) {
+                        bv = bv * 16 + rbHexDigAt(s, i + 3 + bn)
+                        bn = bn + 1
+                    }
+                    var skip = i + 3 + bn
+                    if (skip < s.length && s.charCodeAt(skip) == 125) { skip = skip + 1 }
+                    if (bn == 0) { out += "u"; i = i + 2; continue }
+                    if (bv > 65535) {
+                        var pv = bv - 65536
+                        // An ASTRAL \u{...} becomes the surrogate PAIR, one unit at a
+                        // time. Handing both to String.fromCharCode in one call makes
+                        // the COMPILER half print the character and leaves the other
+                        // two at U+FFFD - a halves divergence - so the two-call form
+                        // is kept, and astral text is U+FFFD everywhere, which is what
+                        // it already is in swift and in Go's byte slicing.
+                        out += String.fromCharCode(55296 + Math.trunc(pv / 1024))
+                        out += String.fromCharCode(56320 + (pv - Math.trunc(pv / 1024) * 1024))
+                    } else {
+                        out += String.fromCharCode(bv)
+                    }
+                    i = skip
+                    continue
+                }
+                var uv = 0
+                var un = 0
+                while (un < 4 && rbHexDigAt(s, i + 2 + un) >= 0) {
+                    uv = uv * 16 + rbHexDigAt(s, i + 2 + un)
+                    un = un + 1
+                }
+                if (un == 0) { out += "u"; i = i + 2; continue }
+                out += String.fromCharCode(uv)
+                i = i + 2 + un
+                continue
+            }
+            out += String.fromCharCode(e)
+            i = i + 2
+        }
+        return out
+    }
+    // One hex digit's value, or -1 - including past the end of the string, which is
+    // checked explicitly rather than left to charCodeAt's NaN: the two script hosts
+    // do not agree on what an out-of-range read answers.
+    function rbHexDigAt(s, k) {
+        if (k >= s.length) { return -1 }
+        var c = s.charCodeAt(k)
+        if (c >= 48 && c <= 57) { return c - 48 }
+        if (c >= 97 && c <= 102) { return c - 87 }
+        if (c >= 65 && c <= 70) { return c - 55 }
+        return -1
     }
     function unescapeSq(s) {
         var out = ""
@@ -4668,7 +4825,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (name == "to_proc") { return target }
             if (name == "lambda?") { return isLambda(target) }
-            if (name == "arity") { return 0 }
+            if (name == "arity") { return procArity(target) }
+            // `def m(&blk); blk.nil?; end' - the ordinary way to ask whether a method
+            // was given a block - ABORTED this half, where the compiled halves
+            // answered off the generic nil? arm.
+            if (name == "nil?") { return false }
+            if (name == "class") { return classOf(target) }
             fail("unknown Proc method: " + name)
         }
         // The methods every value answers.
@@ -4797,8 +4959,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "end_with?") { return target.slice(target.length - rstr(args[0]).length) == rstr(args[0]) }
             if (name == "index") { var ix = target.indexOf(rstr(args[0])); return ix < 0 ? null : ix }
             if (name == "empty?") { return target.length == 0 }
-            if (name == "inspect") { return "\"" + target + "\"" }
-            if (name == "ord") { return target.charCodeAt(0) }
+            if (name == "inspect") { return strInspect(target) }
+            // 0 for an empty string, not NaN: MRI raises ArgumentError, and the two
+            // compiled halves answer 0, so this is the half that had to move.
+            if (name == "ord") { return target.length == 0 ? 0 : target.charCodeAt(0) }
             if (name == "succ" || name == "next") { return strSucc(target) }
             if (name == "replace") { return rstr(args[0]) }
             if (name == "each_char") { for (var sc = 0; sc < target.length; sc++) { blockCall(blk, [target.charAt(sc)]) } return target }
@@ -5976,6 +6140,63 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < lambdaSet.length; i++) { if (lambdaSet[i] === f) { return true } }
         return false
     }
+    // Proc#arity needs a closure's PARAMETER SHAPE, and no function value carries one
+    // in either engine, so both halves keep a registry keyed by function identity and
+    // fill it where the closure is BUILT. The three counts are stored rather than the
+    // answer because Kernel#lambda turns an already-built proc into a lambda, and the
+    // two count OPTIONAL parameters differently: a proc ignores them
+    // (`proc { |x = 0| }.arity' is 0), a lambda does not (`lambda { |x = 0| }.arity'
+    // is -1). A *splat makes it -(required + 1) either way, and keyword and block
+    // parameters are not counted at all. The compiler half does the same through
+    // js_rarity; rubyArityOf of abnf/jsrt.go and rbProcArity of lib/ruby-rt.metajs.
+    var arityFns = []
+    var arityReq = []
+    var arityOpt = []
+    var arityStar = []
+    function markArity(f, req, opt, star) {
+        arityFns.push(f)
+        arityReq.push(req)
+        arityOpt.push(opt)
+        arityStar.push(star)
+        return f
+    }
+    function arityIndex(f) {
+        for (var i = arityFns.length - 1; i >= 0; i--) { if (arityFns[i] === f) { return i } }
+        return -1
+    }
+    // Carry a wrapped closure's shape over from the one it wraps (Kernel#lambda
+    // rebuilds the function value, so identity alone would lose the record).
+    function copyArity(dst, src) {
+        var i = arityIndex(src)
+        if (i >= 0) { markArity(dst, arityReq[i], arityOpt[i], arityStar[i]) }
+        return dst
+    }
+    function procArity(f) {
+        var i = arityIndex(f)
+        if (i < 0) { return 0 }
+        if (arityStar[i] === true) { return 0 - (arityReq[i] + 1) }
+        if (isLambda(f) && arityOpt[i] > 0) { return 0 - (arityReq[i] + 1) }
+        return arityReq[i]
+    }
+    // Record the shape of `params' against the closure f, and hand f back.
+    function markParamArity(f, params) {
+        var req = 0
+        var opt = 0
+        var star = false
+        for (var i = 0; i < params.length; i++) {
+            var p = params[i]
+            if (p.kw === true || p.kwrest === true || p.blockp === true) { continue }
+            if (p.splat === true) { star = true }
+            else if (p.defT != undefined) { opt = opt + 1 }
+            else { req = req + 1 }
+        }
+        // Nothing is recorded unless the program names `arity' (noteMName above), and
+        // a closure with NO parameters is never recorded: 0 is what an unrecorded one
+        // answers anyway, and `n.times { }' / `begin' bodies are the common shape.
+        if (!usesArity) { return f }
+        if (req == 0 && opt == 0 && !star) { return f }
+        return markArity(f, req, opt, star)
+    }
     // Kernel#lambda's block, made local-returning: the block itself still throws the
     // __blkret signal makeBlock builds, and this is the frame that stops it.
     function lambdaWrap(blk) {
@@ -6024,7 +6245,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (isSig(r)) { return r.v }
                 return r
             }
-            return markLambda(f)
+            return markLambda(markParamArity(f, params))
         }
     }
     // The highest _N mentioned as a whole identifier in a block body, 0 for none. The
@@ -6085,7 +6306,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 return r
             }
-            return f
+            return markParamArity(f, params)
         }}
     }
     // One call's argument list: *arr splices, name: v and **h collect into the single
@@ -7801,7 +8022,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Kernel#lambda wraps the block in a closure that swallows the block's own
     // __blkret signal - without it `lambda { |x| return x }.call(1)' escaped every
     // enclosing method and, at the top level, aborted this half outright.
-    hostGlobals["lambda"] = function(blk) { return markLambda(lambdaWrap(blk)) }
+    hostGlobals["lambda"] = function(blk) { return markLambda(copyArity(lambdaWrap(blk), blk)) }
     hostGlobals["proc"] = function(blk) { return blk }
     hostGlobals["format"] = function() {
         var a = argsArray(arguments)

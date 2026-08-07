@@ -51,9 +51,9 @@ package abnf
 //     of a map type is a MARKED EMPTY MAP (__nil) and no longer the null value, so
 //     that it can also be READ like an empty one, which is what go does and what
 //     this model could not express while it was null. (A nil SLICE prints `[]` and
-//     a nil pointer / nil interface `<nil>`, both as go does. A nil slice still
-//     compares UNEQUAL to nil, which go says is true - the empty header carries no
-//     mark; a nil map now compares equal.)
+//     a nil pointer / nil interface `<nil>`, both as go does. Since docs/todo.md 1.7
+//     the zero value of a SLICE type carries the same __nil mark for the same reason,
+//     so `var s []int; s == nil` is true as well - see giIsNilZero in abnf/jsrt.go.)
 //   - Only a String() method declared on the type ITSELF is a Stringer; a String()
 //     promoted from an embedded struct is not found. Go's method set rules are not
 //     modelled either, so a String() with a POINTER receiver is used for the value
@@ -70,6 +70,7 @@ package abnf
 import (
 	"fmt"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -829,6 +830,57 @@ func init() {
 				rt.fail("index %d out of range", ui)
 			}
 			return w(arr.elems[int(rt.toNumber(h.props["o"]))+ui])
+		}
+		// THE OUTERMOST js_gotry FRAME, popped by jsmain after the entry function
+		// returns. An unrecovered panic is reported HERE rather than being let out
+		// of the module, and that is what stopped the prefix appearing TWICE in a
+		// native binary: a runtime panic's VALUE already reads
+		// "js runtime error: <msg>" (rt.fail builds it that way, and goRTPanic in
+		// both other engines copies it so a recovered `e` is byte-identical), and
+		// the floor's uncaught-throw handler then prefixed it a second time with
+		// "js runtime error: uncaught exception: ". This is the twin of runEntry in
+		// languages/go-interpreter.abnf and js_gotop in languages/lib/go-rt.metajs -
+		// same test, same two wordings, same stream, same exit code, so the three
+		// engines print an unrecovered panic identically. docs/todo.md 1.7.
+		m["js_gotop"] = func(a []uint64) uint64 {
+			n := len(rt.goPanics) - 1
+			if n < 0 {
+				return 0
+			}
+			p := rt.goPanics[n]
+			rt.goPanics = rt.goPanics[:n]
+			if p == nil {
+				return 0
+			}
+			text := ""
+			if exc, ok := p.(*jsThrown); ok {
+				text = "js runtime error: uncaught exception: " + rt.gopStr(exc.value)
+			} else if s, ok := p.(string); ok && strings.HasPrefix(s, "js runtime error: ") {
+				text = s
+			} else {
+				text = "js runtime error: uncaught exception: " + fmt.Sprint(p)
+			}
+			fmt.Fprint(outWriter, wtf8Clean(text+"\n"))
+			os.Exit(1)
+			return 0
+		}
+		// The DIVISOR of an integer '/' or '%', checked before the operator runs.
+		// Go's integer divide by zero is a recoverable run-time panic; the floor's
+		// si_arith raises it with die(), which no js_gotry can catch, so the native
+		// binary aborted where llvm.Run recovered. A layer-2 file cannot call a
+		// floor extern by name, so the emitter (emitDivZ in
+		// languages/go-to-llvm-ir.abnf) emits this as a PRE-CHECK instead. A float
+		// divisor is passed over: a float64 divided by zero is an infinity in Go,
+		// not a panic. The twin is js_gidivz in languages/lib/go-rt.metajs.
+		m["js_gidivz"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if jvmIsFlo(v) {
+				return 0
+			}
+			if rt.toNumber(v) == 0 {
+				rt.fail("integer divide by zero")
+			}
+			return 0
 		}
 		// x[i] = v, at the width the slot already carries. Delegates the store.
 		m["js_gisetat"] = func(a []uint64) uint64 {

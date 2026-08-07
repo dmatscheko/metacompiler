@@ -266,6 +266,75 @@ clL2.push("n" + clB.next().value);
 clB.return(0);
 check("yield-star-close-delegate", clL2.join(",") === "n1,in,out");
 
+// docs/todo.md 1.4: g.throw(v) raises v AT the yield the body is parked at, so the
+// body's own catch takes it - and at a `yield*` node FORWARDS it to the delegate's
+// throw() instead, which is what emitYieldStarCatch turns the raised value back
+// into a throw-in record for. It was blocked in every language by the floor's
+// tag-15 member table, which offered next and return and nothing else. Every push
+// is in the driver or in a finally: a write before the parked yield repeats once
+// per replay in the interpreter half.
+function* thG() { try { yield 1; yield 2; } catch (e) { yield "c:" + e; } finally { thL.push("fin"); } }
+var thL = [];
+var thA = thG();
+thL.push("n" + thA.next().value);
+thL.push("t" + thA.throw("X").value);
+thL.push("d" + thA.next().done);
+var thSeen = [];
+for (var thI = 0; thI < thL.length; thI++) { if (thSeen.indexOf(thL[thI]) < 0) { thSeen.push(thL[thI]); } }
+check("gen-throw-caught", thSeen.join(",") === "n1,tc:X,fin,dtrue");
+// A body that does not catch it: the value propagates out of throw() itself and
+// the generator is left done.
+function* thU() { yield 1; yield 2; }
+var thB = thU();
+thB.next();
+var thCaught = "";
+try { thB.throw("Y"); } catch (e) { thCaught = e; }
+check("gen-throw-propagates", thCaught === "Y" && thB.next().done === true);
+// A generator that never ran has no suspension point and therefore no finally to
+// unwind, so node runs NOTHING and the value propagates. Same for a done one.
+var thNL = [];
+function* thNS() { try { yield 1; } finally { thNL.push("fin"); } }
+var thC = thNS();
+var thC2 = "";
+try { thC.throw("Z"); } catch (e) { thC2 = e; }
+check("gen-throw-not-started", thC2 === "Z" && thNL.length === 0 && thC.next().done === true);
+// A body that catches and RETURNS ends the generator with that value.
+function* thR() { try { yield 1; } catch (e) { return 7; } }
+var thD = thR();
+thD.next();
+var thDr = thD.throw("Q");
+check("gen-throw-catch-and-return", thDr.value === 7 && thDr.done === true);
+// The forwarding: the DELEGATE of a yield* gets the throw, and a delegate with no
+// throw method (an array) is closed and a TypeError raised, exactly as node does.
+var thFL = [];
+function* thIn() { try { yield 1; } catch (e) { yield "in:" + e; } finally { thFL.push("infin"); } }
+function* thOut() { try { yield* thIn(); } finally { thFL.push("outfin"); } }
+var thE = thOut();
+thFL.push("n" + thE.next().value);
+thFL.push("t" + thE.throw("W").value);
+thFL.push("d" + thE.next().done);
+var thFS = [];
+for (var thJ = 0; thJ < thFL.length; thJ++) { if (thFS.indexOf(thFL[thJ]) < 0) { thFS.push(thFL[thJ]); } }
+check("yield-star-throw-delegate", thFS.join(",") === "n1,tin:W,infin,outfin,dtrue");
+function* thArr() { try { yield* [1, 2, 3]; } catch (e) { yield "a:" + e; } }
+var thF = thArr();
+thF.next();
+check("yield-star-throw-no-method", thF.throw("V").value ===
+      "a:TypeError: The iterator does not provide a 'throw' method.");
+// A `yield` inside a CATCH ARM is a suspension like any other: the enclosing
+// finally belongs to the close, not to it. The interpreter half used to run the
+// program's finally at that suspension - the same wrong order docs/todo.md 2.6
+// fixed for a yield inside the TRY, one arm further in, and reachable with no
+// throw() at all.
+var thCL = [];
+function* thCA() { try { throw 1; } catch (e) { yield 99; } finally { thCL.push("fin"); } }
+var thG2 = thCA();
+thCL.push("n" + thG2.next().value);
+thCL.push("d" + thG2.next().done);
+var thCS = [];
+for (var thK = 0; thK < thCL.length; thK++) { if (thCS.indexOf(thCL[thK]) < 0) { thCS.push(thCL[thK]); } }
+check("gen-yield-in-catch-finally-order", thCS.join(",") === "n99,fin,dtrue");
+
 // ----- objects -----
 var obj = { a: 1, "b-key": 2 };
 check("obj-literal", obj.a === 1 && obj["b-key"] === 2);

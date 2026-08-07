@@ -271,15 +271,30 @@ function goIsNilMap(v) {
     return v.__nil === true
 }
 
+// goIsNilZero: "this is the zero value of a map OR a slice type", i.e. what `== nil`
+// has to answer true for. A slice zeroes to a marked empty HEADER for the same reason
+// a map zeroes to a marked empty dict - it has to READ like an empty one (len, range,
+// append, print) - and the mark is what makes `var s []int; s == nil` true. Set by
+// emitNilSl in languages/go-to-llvm-ir.abnf; the twins are giIsNilZero in abnf/jsrt.go
+// and isNilZero in languages/go-interpreter.abnf.
+function goIsNilZero(v) {
+    if (goIsNilMap(v)) { return true }
+    if (!goIsObj(v)) { return false }
+    if (v.__nil !== true) { return false }
+    var c = goClassOf(v)
+    if (c === undefined || c === null) { return false }
+    return goStrOf(c.__name) == "$sl"
+}
+
 // Go's ==: VALUE equality for structs and arrays (both are value types) and
 // identity for everything else; nil compares equal to an unset slice/map/pointer.
 // abnf/jsrt.go's goValueEq, function for function.
 function goValueEq(a, b) {
     if (a === undefined || a === null) {
         if (b === undefined || b === null) { return true }
-        return goIsNilMap(b)
+        return goIsNilZero(b)
     }
-    if (b === undefined || b === null) { return goIsNilMap(a) }
+    if (b === undefined || b === null) { return goIsNilZero(a) }
     if (Array.isArray(a)) {
         if (!Array.isArray(b)) { return false }
         if (a.length != b.length) { return false }
@@ -342,8 +357,20 @@ function goCopyVal(v) {
         while (i < v.length) { out.push(v[i]); i = i + 1 }
         return out
     }
-    if (goClassOf(v) === undefined) { return v }
+    var cls = goClassOf(v)
+    if (cls === undefined) { return v }
     var o = {}
+    // THE HIDDEN SLOTS HAVE TO BE CARRIED OVER BY HAND, and this is the manual's
+    // keysOf trap (chapter 7.9) live in Go: keysOf answers only the own keys whose
+    // names do NOT start with "__", while the Go twin's goCopyVal walks the object's
+    // raw key list and therefore keeps __class. Without these two lines a VALUE
+    // receiver - which is exactly what goCopyVal exists for - got a copy with no
+    // descriptor, so `func (c C) m()` on a struct holding a slice answered
+    // "len() of a object" natively while llvm.Run printed the length. __nil goes with
+    // it: the zero value of a slice or map type is a MARKED empty container, and a
+    // copy that dropped the mark would stop comparing equal to nil.
+    o.__class = cls
+    if (v.__nil === true) { o.__nil = true }
     var ks = keysOf(v)
     var j = 0
     while (j < ks.length) {
@@ -1323,13 +1350,12 @@ function js_range_val(v, i) {
 // "runtime error: index out of range [7] with length 3", which is this project's
 // wording for every runtime error. docs/todo.md 1.9.
 //
-// One residue, and it is the diagnostic rather than the value: an UNRECOVERED one
-// reaches the floor's uncaught-throw handler, which prefixes "js runtime error:
-// uncaught exception: " - so a native binary that dies on an out of range index
-// prints the prefix twice where llvm.Run (whose rt.fail panics outside the throw
-// machinery) prints it once. The recovered VALUE is what a program can read, and
-// that is identical in all three engines; no ratchet can assert the other, since a
-// ratchet has to exit 0.
+// The residue this used to carry - an UNRECOVERED one reaching the floor's
+// uncaught-throw handler, which prefixed "js runtime error: uncaught exception: "
+// and so printed the wording TWICE natively - is closed since docs/todo.md 1.7:
+// jsmain wraps the entry call in one more js_gotry frame and js_gotop reports the
+// panic itself, applying runEntry's rule. No ratchet can assert that (a ratchet has
+// to exit 0); tests/probe.sh over the three legs is what settles it.
 function goRTPanic(msg) { throw "js runtime error: " + msg }
 
 // Go indexing: maps read their ZERO VALUE for a missing key, slices their
@@ -1748,6 +1774,32 @@ function js_gotry(fn) {
     return res
 }
 
+// THE OUTERMOST js_gotry FRAME, popped by jsmain after the entry function returns.
+// An unrecovered panic is reported HERE rather than being let out of the module,
+// and that is what stopped the prefix appearing TWICE natively: a runtime panic's
+// value already reads "js runtime error: <msg>" (goRTPanic builds it that way so a
+// recovered `e` is byte-identical to the Go twin's rt.fail value), and the floor's
+// uncaught-throw handler then prefixed it a second time with "js runtime error:
+// uncaught exception: ". This is the twin of runEntry in languages/go-interpreter.abnf
+// - same test, same two wordings, same stream and same exit code - so the three
+// engines now print an unrecovered panic identically. docs/todo.md 1.7.
+function js_gotop() {
+    var n = goPanics.length - 1
+    if (n < 0) { return undefined }
+    var p = goPanics[n]
+    var had = goPanicSet[n]
+    goPanics.pop()
+    goPanicSet.pop()
+    if (!had) { return undefined }
+    var t = gopStr(p)
+    if (typeof p == "string" && goHasRTPrefix(p)) { println(t) }
+    else { println("js runtime error: uncaught exception: " + t) }
+    exit(1)
+    return undefined
+}
+// Does this panic value already carry the engine's runtime-error wording?
+function goHasRTPrefix(s) { return s.indexOf("js runtime error: ") == 0 }
+
 function js_gorepanic() {
     var n = goPanics.length - 1
     var p = goPanics[n]
@@ -2054,6 +2106,21 @@ function js_gisetsl(h, iv, v) {
     // non-zero offset the old message named the OFFSET index. docs/todo.md 1.9.
     if (ui < 0 || ui >= goIdx(h.n)) { goRTPanic("index " + ui + " out of range") }
     arr[idx] = nv
+    return undefined
+}
+
+// The DIVISOR of an integer '/' or '%', checked before the operator runs. Go's
+// integer divide by zero is a RECOVERABLE run-time panic, and the floor's si_arith
+// raises it with die() - a hard abort no js_gotry can catch - so a native binary
+// aborted where llvm.Run (whose twin uses rt.fail, which panics) recovered. This file
+// cannot call the floor's js_giarith by name to wrap it, so the emitter emits this as
+// a PRE-CHECK instead (emitDivZ in languages/go-to-llvm-ir.abnf), the mirror image of
+// js_gf32fix's post-fix. A FLOAT divisor is passed over: a float64 divided by zero is
+// an infinity in Go, not a panic. The twin is js_gidivz in abnf/jsrtgolang.go and the
+// interpreter's own check is gIntDivZ in languages/go-interpreter.abnf.
+function js_gidivz(r) {
+    if (floIs(r)) { return undefined }
+    if (goNum(r) === 0) { goRTPanic("integer divide by zero") }
     return undefined
 }
 

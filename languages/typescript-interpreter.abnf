@@ -62,10 +62,10 @@ driven by replay - see the generator section of the start script; the price is
 REPETITION and not ORDER - every side effect before the yield the body is parked at
 happens once per resume and driving n values costs O(n squared), while every finally
 clause and every close fires at the moment node fires it, measured against node v24 in
-SECTION 36 of tests/typescript-test-full.ts. .throw() on a plain generator and
-[Symbol.iterator] are missing outright: the first needs the C floor's tag-15 member
-table, which the compiled halves share with every other language, and the second needs
-symbols in the value model, which this subset has not got), and async functions,
+SECTION 36 of tests/typescript-test-full.ts. .throw() RAISES AT THE PARKED YIELD and at a
+yield* is forwarded to the delegate, which needed the C floor's tag-15 member table to
+learn a third member (runtime.c's gen_throw); [Symbol.iterator] is still missing
+outright, since it needs symbols in the value model, which this subset has not got), and async functions,
 which answer a Promise and suspend at every 'await', driven by a microtask queue drained
 after the entry point returns. An async body is compiled as a GENERATOR body whose awaits
 are its yields, so in this half it is driven by the same replay: an async body with a side
@@ -77,9 +77,9 @@ AWAITS each step of the delegate and answers the delegate's return value, and ag
 RAISES AT THE SUSPENDED YIELD - the resume value is the throw-in channel, so a try around
 the yield catches. A throw that arrives while the body is parked at a 'yield*' is
 FORWARDED to the delegate's throw(); a delegate with no throw method is closed through
-its return() and the yield* raises node's TypeError. One exact limit remains: a plain
-generator has no .throw() at all (its cell is the C floor's tag 15), which is also why a
-SYNC generator delegated to from an async one takes the no-throw-method path. g.return() while the body is
+its return() and the yield* raises node's TypeError. A PLAIN generator has a .throw() of its
+own now, so a sync generator delegated to from an async one is handed the throw rather
+than taking the no-throw-method path. g.return() while the body is
 parked at a 'yield*' DOES close the delegate: the close raises at that yield and the
 delegate's return() runs on the way out, innermost first (docs/todo.md 1.10). An unhandled rejection is deliberately not
 reported in any engine.
@@ -5526,7 +5526,15 @@ NotFuncHead = :script(~~
                     scopes.push({})
                     if (catchBind != undefined) { catchBind(e.v) }
                     else if (catchName != undefined) { declVar(catchName, e.v) }
-                    box.sig = catchT()
+                    // A `yield` inside the CATCH ARM suspends from in here, where
+                    // the catch clause above can no longer see it - so the finally
+                    // below used to run at that suspension too, printing `fin`
+                    // before the value the yield produced. Same wrong order as
+                    // above, one arm further in, and both compiled halves had it
+                    // right. It is reachable without .throw() at all:
+                    // `try { throw 1 } catch (e) { yield 99 } finally { ... }`.
+                    try { box.sig = catchT() }
+                    catch (e2) { if (jsIsGenSuspend(e2)) { suspended = true } throw e2 }
                     scopes.pop()
                 } else {
                     throw e
@@ -5587,7 +5595,7 @@ NotFuncHead = :script(~~
                         // reaches a delegated generator at all.
                         var dsent = anytype
                         dsent = jpYieldDeleg(run, dst.value, v)
-                        if (run.ag && jpIsThrowIn(dsent)) {
+                        if (jpIsThrowIn(dsent)) {
                             var dtf = anytype
                             dtf = getMember(v, "throw")
                             if (typeof dtf != "function") { jpNoThrowMethod(v) }
@@ -5606,17 +5614,20 @@ NotFuncHead = :script(~~
                 for (var i = 0; i < v.length; i++) {
                     var isent = anytype
                     isent = jpYieldDeleg(run, v[i], v)
-                    if (run.ag && jpIsThrowIn(isent)) { jpNoThrowMethod(v) }
+                    if (jpIsThrowIn(isent)) { jpNoThrowMethod(v) }
                 }
             }
             return last
         }
         var sent = anytype
-        // Inside an ASYNC generator the sent value may be a THROW-IN record that
-        // ag.throw(e) put on the resume channel; jpAwaitValue raises it here, at
-        // the yield it was aimed at.
+        // The sent value may be a THROW-IN record that g.throw(e) - or, inside an
+        // async generator, ag.throw(e) - put on the resume channel; it is raised
+        // here, at the yield it was aimed at, so the body's own try/catch sees it.
+        // A PLAIN generator wants exactly what jpAwaitValue does to it, which is
+        // why the two paths differ only in the awaiting.
         sent = doYieldRaw(run, v)
         if (run.ag) { return jpAwaitValue(sent) }
+        if (jpIsThrowIn(sent)) { throw {__exc: true, v: sent["v"]} }
         return sent
     }
     // items = [{ystar}?, operandThunk?].
@@ -5721,7 +5732,38 @@ NotFuncHead = :script(~~
             genClose(st, params, bodyT, env, self, args)
             return {value: rv, done: true, __keys: ["value", "done"]}
         }
+        // g.throw(v): raise v AT the yield the body is parked at, so the body's
+        // own catch and finally clauses see it - the difference from return(),
+        // whose exit record is deliberately not offered to `catch`. The record
+        // travels ON the resume value, which is what makes it per-coroutine by
+        // construction (docs/todo.md 2.1); runtime.c's gen_throw and
+        // abnf/jsrt.go's throwInto do the same thing for the compiled halves,
+        // and the three shapes below are node's, probed.
+        g["throw"] = function() {
+            var tv = anytype
+            tv = (arguments.length > 0) ? arguments[0] : undefined
+            return genThrow(st, params, bodyT, env, self, args, tv)
+        }
         return g
+    }
+    // A generator that is DONE, or that has never been resumed, runs nothing at
+    // all - a body that has not begun has no suspension point and therefore no
+    // `finally` to unwind - and the value propagates out of throw() itself. Both
+    // are node's rule and CPython's.
+    function genThrow(st, params, bodyT, env, self, args, tv) {
+        if (st.done || st.count == 0) {
+            st.done = true
+            throw {__exc: true, v: tv}
+        }
+        var m = {}
+        m["__athrow"] = true
+        m["v"] = tv
+        var r = anytype
+        // A body that does not catch it is DONE, even though the throw leaves
+        // through genNext rather than through its return.
+        try { r = genNext(st, params, bodyT, env, self, args, m) }
+        catch (e) { st.done = true; throw e }
+        return r
     }
     // The close itself. A generator that has never been resumed has no suspension point
     // and no body state, so it is only marked done - node's rule too. A body that yields

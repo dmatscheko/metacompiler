@@ -943,5 +943,40 @@ end
 tres = transform([1, 2, -3])
 check("combined-pipeline", tres[0] + tres[1] + tres[2], "o1e2x")
 
+# ----- parameter binding, String#inspect and Proc#arity -----
+# Ruby does not bind positional parameters left to right at fixed indices:
+# everything after a *splat is counted from the END of the argument list, an
+# OPTIONAL one only takes an argument when there are SPARE ones beyond what the
+# required parameters need, and a trailing keyword Hash is not positional at all.
+# The compiler half read each parameter from the front by index and answered
+# "1|2|[3, 1]|3" for the first row - a live halves divergence --cross never reached
+# because no program here had a parameter after a splat (docs/todo.md 1.5).
+def pb_post(a, b = 2, *r, c); "#{a}|#{b}|#{r.inspect}|#{c}"; end
+def pb_tail(a, *r, c, d); "#{a}|#{r.inspect}|#{c}|#{d}"; end
+def pb_kwsplat(*a, **k); "#{a.inspect}|#{k.size}"; end
+def pb_optz(x = 1, y = 2, z); "#{x}|#{y}|#{z}"; end
+def pb_blk(&b); "#{b.nil?}|#{b.class}|#{b.arity}"; end
+check("param-postsplat", pb_post(1, 2, 3, 1), "1|2|[3]|1")
+check("param-postsplat-short", pb_post(1, 2), "1|2|[]|2")
+check("param-two-after-splat", pb_tail(1, 2, 3, 4), "1|[2]|3|4")
+check("param-splat-kwrest", pb_kwsplat(1, 2, z: 3), "[1, 2]|1")
+check("param-opt-spare", pb_optz(1) + " " + pb_optz(1, 2), "1|2|1 1|2|2")
+check("param-block-object", pb_blk { |q, r| q }, "false|Proc|2")
+# String#inspect is the quoted SOURCE form, so it ESCAPES - all three engines
+# printed the characters raw, and no gate here can see that because they agreed.
+# The four control spellings Ruby has and JavaScript does not (\a \b \f \v \e),
+# \s, octal and the braced \u{...} were wrong in the LEXER for the same reason
+# (docs/todo.md 1.6).
+check("inspect-escapes", ["a\nb", 1].inspect, '["a\nb", 1]')
+check("inspect-quote-backslash", "g\"h\\i".inspect, '"g\"h\\\\i"')
+check("inspect-control", "\0".inspect + "\x7f".inspect, '"\\u0000""\\u007F"')
+check("inspect-interp-hash", "p#{1}#q".inspect + "r\#{s".inspect, '"p1#q""r\#{s"')
+check("escape-named", "\a".ord + "\b".ord + "\f".ord + "\v".ord + "\e".ord, 65)
+check("escape-space-octal", "\s" + "\101\102" + "\1010" + "\u{41}", " ABA0A")
+# Proc#arity needs the closure's parameter shape, which no function value carries:
+# the interpreter answered 0 for everything and the compiler half aborted.
+check("arity-proc", "#{proc { }.arity}|#{proc { |x| }.arity}|#{proc { |*x| }.arity}|#{proc { |x, y = 1| }.arity}", "0|1|-1|1")
+check("arity-lambda", "#{lambda { |x| }.arity}|#{lambda { |x = 1| }.arity}|#{->(a, b = 10) { }.arity}", "1|-1|-2")
+
 puts "features: #{checks} checks, #{fails} failures"
 exit(fails)

@@ -814,12 +814,28 @@ Two things follow that are worth knowing before touching this area:
 
 - **`interp-core.js`'s `excTry` is shared with six languages.** Overriding it by
   name is §7.12's include trap; js/ts took a language-LOCAL copy instead.
-- **`.throw()` on a plain generator is blocked in every language**, and the
-  blocker is one table: the floor's tag-15 member table offers `next` (host id
-  60) and `return` (61) and nothing else (`runtime.c:3111/3116`), and
-  `*jsGenerator` in `abnf/jsrt.go` is shared by every language that exposes a
-  generator. The interpreter machinery exists in python and js; shipping it there
-  alone would be a new halves divergence, which is why it is not shipped.
+- **`.throw()` on a plain generator was blocked in every language by one table**,
+  and the fix is the same pattern: the floor's tag-15 member table now offers a
+  third member (`throw`, host id 62 -> `gen_throw`), the flag lives in the
+  generator's own CONTROL BLOCK (`cb[14]`, beside `cb[13]`'s close) and the value
+  in the cell's `f` slot, so it is per-coroutine by construction. The Go twin's
+  half is `throwInto` plus a `*genThrowSignal` on the resume channel. At a
+  `yield*` the value is FORWARDED to the delegate's `throw()` in all four engines,
+  which in the emitters meant giving the yield* barrier a CATCH that turns the
+  raised value back into the `{__athrow, v}` record the loop head already
+  dispatched on for `ag.throw()` - the async machinery was 90% of the work
+  already. **`tests/coro-poc/coro-floor.py` is the gate that catches this**, and
+  not only through an undefined symbol: its `--check` needles are matched with
+  `count() != 1`, so a NEW occurrence of one reads as the piece having
+  DISAPPEARED. `gen_throw`'s `js_throw(ff(g))` at two tabs made `gen_resume`'s at
+  three stop being unique.
+- **A `yield` inside a `catch`/`except` ARM ran the enclosing `finally` at the
+  suspension**, in the js, typescript and python interpreter halves, and it is
+  reachable with no `.throw()` at all: `try { throw 1 } catch (e) { yield 99 }
+  finally { … }`. `jsExcTry`/`makeTry` only tested for the suspension signal in
+  the catch clause of the *try* body, so one thrown from inside the *handler* was
+  invisible to it. This is the same defect §7.14 fixed one arm further out, it
+  survived that round, and it was a live halves divergence: 2 of 4 legs.
 
 ## 7.15 The value model already carries the type — you rarely need a type table
 

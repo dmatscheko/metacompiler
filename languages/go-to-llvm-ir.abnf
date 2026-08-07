@@ -296,10 +296,19 @@ Spread      <~~ push({spread: true}) ~~> = "..." ;
 // 'return' yields and that a deferred function can still change. NamedAhead decides
 // which shape it is BEFORE any name is pushed, so the unnamed list never leaks half a
 // name list onto the tag stack.
-RetTypes    = NamedRets | Type | "(" [ Type { "," Type } ] ")" ;
-NamedRets   <~~ push({rets: takeAll()}) ~~>
+// THE RESULT TYPE TEXTS ARE CAPTURED, which they were not before, and two answers
+// depended on it: a named result was declared holding the plain number 0 whatever its
+// type (`func f() (r int, s string)` left s at 0, printing `0` where go prints the
+// empty string), and a function whose panic was RECOVERED returned undefined - `<nil>`
+// - where go returns the zero values of the declared result types. Both need the type
+// text at the declaration, exactly as a PARAMETER already carries one through PType.
+RetTypes    = NamedRets | RetOne | RetList ;
+RetOne      <~~ push({rtys: cRty1(up.in)}) ~~> = Type ;
+RetList     <~~ push({rtys: cRtyList(takeAll())}) ~~> = "(" [ RType { "," RType } ] ")" ;
+RType       <~~ push({rty: firstType(up.in)}) ~~> = Type ;
+NamedRets   <~~ push(cNamedRets(takeAll())) ~~>
             = NamedAhead "(" NamedRetGrp { "," NamedRetGrp } ")" ;
-NamedRetGrp = Id <~~ push(cPendName(up.in)) ~~> { "," Id <~~ push(cPendName(up.in)) ~~> } Type ;
+NamedRetGrp = Id <~~ push(cPendName(up.in)) ~~> { "," Id <~~ push(cPendName(up.in)) ~~> } RType ;
 // A parenthesized list is NAMED exactly when some element at depth 1 is two words
 // separated by whitespace ('q, r int' has 'r int'; '(int, string)' has no such pair).
 NamedAhead = :script(~~
@@ -586,9 +595,16 @@ For         = ForEver | ForRange | ForCond | ForClassic ;
 // loop cannot steal the outer loop's label.
 ForEver     <~~ push(makeForEver(takeAll())) ~~>
             = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~> Block ;
-// for i, v := range s / for _, v := range s / for i := range s
+// for i, v := range s / for _, v := range s / for i := range s / for range s
+// THE BINDER GROUP IS OPTIONAL and the assignment operator is ':=' OR '=', which is
+// the interpreter half's shape ported over: `for range m` (no variables at all, legal
+// since Go 1.4 and the only spelling for `for range 4`) did not parse here, and
+// `for i, v = range s` over already-declared names did not either. Each name is
+// wrapped as {rv: ...} rather than pushed bare, because with the group optional
+// makeForRange can no longer tell "no names" from "one name" by item count alone.
 ForRange    <~~ push(makeForRange(takeAll())) ~~>
-            = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~> Id <~~ push(cPoisonName(up.in)) ~~> [ "," Id <~~ push(cPoisonName(up.in)) ~~> ] ":="
+            = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~>
+              [ Id <~~ push({rv: cPoisonName(up.in)}) ~~> [ "," Id <~~ push({rv: cPoisonName(up.in)}) ~~> ] ( ":=" | "=" <~~ push({rset: true}) ~~> ) ]
               "range" KwEnd CondOn Expression CondOff Block ;
 ForClassic  <~~ push(makeForClassic(takeAll())) ~~>
             = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~> CondOn [ FInit ] ";" [ FCond ] ";" [ FPost ] CondOff Block ;
@@ -1422,11 +1438,39 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (!usesF32 || gfFix[op] != 1) { return v }
         return callExt(b, "js_gf32fix", [emitStr(b, op), v, l, r])
     }
+    // INTEGER DIVISION BY ZERO IS A RECOVERABLE PANIC IN GO, and natively it was not.
+    // js_giarith is a FLOOR extern and the floor raises this with die(), which no
+    // js_gotry can catch - so `recover()` took a divide by zero under llvm.Run (the Go
+    // twin uses rt.fail, which panics) and the native binary aborted instead. A layer-2
+    // file cannot call a floor extern by name, so the check cannot wrap js_giarith; it
+    // is emitted as a PRE-CHECK, the mirror image of emitF32Fix's post-fix. js_gidivz
+    // panics on a zero integer divisor and is the identity otherwise, and a FLOAT
+    // divisor is passed over (a float64 divided by zero is an infinity in Go).
+    //
+    // IT IS GATED ON usesRecover, AND THAT GATE IS NOT A NICETY - IT IS MEASURED.
+    // js_gidivz is a LAYER-2 function where js_giarith is a C floor one, so the check
+    // is not one more call of the same kind: emitting it unconditionally cost the go
+    // bench row (tests/bench/mod.go, an `i % 7` loop) 844,097,409 -> 1,102,256,641
+    // instructions, +30.58% against that row's own 2.65% spread. A program that never
+    // writes `recover` cannot tell the difference: an unrecovered divide by zero dies
+    // either way, with the same text and the same exit code - the floor's die() writes
+    // "js runtime error: integer divide by zero" to stderr, which is exactly what
+    // js_gotop would have printed. So the check is emitted only where a recover()
+    // exists to catch it, and the gate is the same shape usesF32 and usesComplex use:
+    // set while the tags WALK (makeCall), long before any emit thunk runs.
+    //
+    // Emitted for '/' '%' '/=' '%=' only, so no other operator pays anything either.
+    function emitDivZ(b, base, r) {
+        if (!usesRecover) { return }
+        if (base != "/" && base != "%") { return }
+        callExt(b, "js_gidivz", [r])
+    }
     function emitBinNum(b, op, l, r) {
         var base = giBase[op]
         if (typeof base == "string") {
             if (base == "+") { return emitF32Fix(b, "+", callExt(b, "js_giadd", [l, r]), l, r) }
             if (giShift[op] == 1) { r = callExt(b, "js_gival", [r]) }
+            emitDivZ(b, base, r)
             return emitF32Fix(b, base, callExt(b, "js_giarith", [emitStr(b, base), l, r]), l, r)
         }
         var rel = giRel[op]
@@ -1552,6 +1596,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // WALK - noteTy sees every type text this grammar captures, and the walk is
     // finished long before buildMain runs the emit thunks - which is exactly how
     // usesComplex is decided.
+    // Does the program call recover() anywhere? Set by makeCall while the tags walk,
+    // and read by emitDivZ - the one emitted check whose only observable effect is on
+    // a panic somebody catches. Over-triggering costs one call per integer division.
+    var usesRecover = false
     var usesF32 = false
     // Every captured type text passes through here (firstType, which is what the
     // eight type-capturing tag rules push, and VType for a var/param
@@ -2461,6 +2509,31 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // which is the function body: poisoning it where the tag fires would poison it in
     // the PACKAGE frame instead and kill `const n` for the whole file.
     function cPendName(name) { cPend.push(name); return name }
+    // ----- Result types (RetOne / RetList / NamedRets) -----
+    // A result type text is captured through firstType exactly as a parameter's is, so
+    // a named result can be declared at the ZERO of its own type and a recovered panic
+    // can answer the zero of an unnamed one. cRty1 wraps the single-type form; cRtyList
+    // unwraps a parenthesized list's {rty} markers; cNamedRets splits a named list into
+    // parallel name and type arrays the way makeStructStmt splits a field group - the
+    // names of one group share the type that follows them.
+    function cRty1(s) { return [firstType(s)] }
+    function cRtyList(items) {
+        var out = []
+        for (var i = 0; i < items.length; i++) { out.push(items[i].rty) }
+        return out
+    }
+    function cNamedRets(items) {
+        var names = []
+        var tys = []
+        var pend = []
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "string") { pend.push(items[i]); continue }
+            for (var k = 0; k < pend.length; k++) { names.push(pend[k]); tys.push(items[i].rty) }
+            pend = []
+        }
+        for (var p = 0; p < pend.length; p++) { names.push(pend[p]); tys.push("") }
+        return {rets: names, rtys: tys}
+    }
     function cScopeEnter() {
         var f = {n: [], v: []}
         var i = 0
@@ -2789,6 +2862,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // (see usesComplex), and a program may reach complex() without ever writing
         // an imaginary literal.
         if (name == "complex" || name == "real" || name == "imag") { usesComplex = true }
+        // The divide-by-zero pre-check is only emitted in a program that can CATCH one
+        // (see emitDivZ, which measured +30.58% on the go bench row without this gate).
+        if (name == "recover") { usesRecover = true }
         return function(b) {
             var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
             var ea = emitArgs2(b, args, spread)
@@ -3000,17 +3076,23 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return b
         }
     }
-    // items = [{params}, bodyT] (an ignored RetTypes leaves no stack entry). The
-    // literal becomes an own IR function closed over the current scope (js_closure).
-    // items = [{params}, {rets}?, bodyT]: an unnamed RetTypes leaves no stack entry.
+    // items = [{params}, {rets?, rtys}?, bodyT]. The literal becomes an own IR
+    // function closed over the current scope (js_closure).
     function makeFuncLit(items) {
         var params = items[0]
         var i = 1
         var rets = []
-        if (items[i] != undefined && items[i].rets != undefined) { rets = items[i].rets; i++ }
+        // A RetTypes now always leaves one entry: {rets, rtys} for a named list,
+        // {rtys} alone for an unnamed one.
+        var rtys = []
+        if (items[i] != undefined && items[i].rtys != undefined) {
+            if (items[i].rets != undefined) { rets = items[i].rets }
+            rtys = items[i].rtys
+            i++
+        }
         var bodyT = items[i]
         return function(b) {
-            var idx = emitFunc(params, bodyT, null, rets)
+            var idx = emitFunc(params, bodyT, null, rets, rtys)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }
     }
@@ -3450,6 +3532,20 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         callExt(b, "js_set", [h, emitStr(b, "et"), emitStr(b, et)])
         return h
     }
+    // THE ZERO VALUE OF A SLICE TYPE IS A MARKED EMPTY HEADER. It has to READ like an
+    // empty slice (len 0, ranges over nothing, prints `[]`, append works), which is why
+    // it is a header and not nil - but Go also says `s == nil` is TRUE for it, and with
+    // no mark on the header js_goeq had nothing to test and answered false in all three
+    // engines. __nil is the same trade emitZeroTy already makes for a map, and it makes
+    // no row worse: append, make and every slice expression build FRESH headers, so the
+    // mark cannot leak onto a non-nil slice. The twins are newNilSl in
+    // go-interpreter.abnf, goIsNilZero in languages/lib/go-rt.metajs and giIsNilZero in
+    // abnf/jsrt.go.
+    function emitNilSl(b, et) {
+        var h = emitSlT(b, emitSlOf(b, callExt(b, "js_arr_new", [])), et)
+        callExt(b, "js_set", [h, emitStr(b, "__nil"), hTrue])
+        return h
+    }
     // A fresh backing array wrapped as a slice over the whole of it.
     function emitSlOf(b, arr) {
         var n = callExt(b, "js_golen", [arr])
@@ -3798,7 +3894,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // and an EMITTER may call them. js_ctl_kind answers a RAW INTEGER (mk_ctl's fa
     // field; 0 for anything that is not a signal), so the test is an icmp against 1
     // and not truthy(), which would also take kinds 2 and 3.
-    function emitUnctl(b, v) {
+    function emitUnctl(b, v) { return emitUnctlRets(b, v, []) }
+    // The NO-SIGNAL arm answers the zero values of the declared result types, and
+    // that arm is reachable exactly one way in a function that declares results: its
+    // panic was RECOVERED, so the body never produced a return signal. Go says such a
+    // call answers the zero values; this used to answer undefined, i.e. `<nil>`, for
+    // every result type (docs/todo.md 1.7). rtl empty keeps the old hUndef, which is
+    // what a function with no results wants.
+    //
+    // The zeros are built INSIDE the else block, not before the branch: emitZeroTy
+    // emits instructions, and a value materialised before the phi's own block would
+    // put an instruction ahead of the phi - which llvm.Run accepts and clang rejects
+    // with "PHI nodes not grouped at top of basic block" (manual chapter 4).
+    function emitUnctlRets(b, v, rtl) {
         var kind = callExt(b, "js_ctl_kind", [v])
         var thenB = curF.NewBlock("")
         var elseB = curF.NewBlock("")
@@ -3806,8 +3914,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, kind, llvm.constant.NewInt(i64, 1)), thenB, elseB)
         var tv = callExt(thenB, "js_ctl_value", [v])
         thenB.NewBr(mergeB)
+        var ev = hUndef
+        if (rtl.length == 1) { ev = emitZeroTy(elseB, rtl[0]) }
+        else if (rtl.length > 1) {
+            ev = callExt(elseB, "js_arr_new", [])
+            for (var z = 0; z < rtl.length; z++) {
+                callExt(elseB, "js_arr_push", [ev, emitZeroTy(elseB, rtl[z])])
+            }
+        }
         elseB.NewBr(mergeB)
-        var phi = mergeB.NewPhi([llvm.ir.NewIncoming(tv, thenB), llvm.ir.NewIncoming(hUndef, elseB)])
+        var phi = mergeB.NewPhi([llvm.ir.NewIncoming(tv, thenB), llvm.ir.NewIncoming(ev, elseB)])
         return {b: mergeB, v: phi}
     }
     function emitCellGet(b, p) {
@@ -4210,9 +4326,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // "[]T" is a SLICE and starts empty; arrLen answers 0 for it (no digits
             // between the brackets), which is why the length has to be told apart
             // from the kind here rather than from arrLen's count alone.
-            if (t.charCodeAt(1) == 93) { return emitSlT(b, emitSlOf(b, callExt(b, "js_arr_new", [])), el) }
+            if (t.charCodeAt(1) == 93) { return emitNilSl(b, el) }
             var n = arrLen(t)
-            if (n < 0) { return emitSlT(b, emitSlOf(b, callExt(b, "js_arr_new", [])), el) }
+            if (n < 0) { return emitNilSl(b, el) }
             var arr = callExt(b, "js_arr_new", [])
             for (var i = 0; i < n; i++) { callExt(b, "js_arr_push", [arr, emitZeroTy(b, el)]) }
             return arr
@@ -4607,15 +4723,27 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return exitB
         }
     }
-    // items = [iName, vName?, listThunk, bodyThunk]. A hidden counter drives the
+    // items = [{lbl}, {rv}?, {rv}?, listThunk, bodyThunk]. A hidden counter drives the
     // loop; js_range_len/key/val make one emission cover ints (the bound is the
     // value), slices (index and element) and maps (key and entry, insertion order).
     function makeForRange(items) {
         var bodyT = items.pop()
         var listT = items.pop()
         var lbl = items[0].lbl
-        var iName = items[1]
-        var vName = items.length > 2 ? items[2] : null
+        // The binder group is optional, so the names arrive as {rv} markers and
+        // `for range xs` leaves none at all (the twin loop in go-interpreter.abnf
+        // reads them the same way). `for i, v = range xs` ASSIGNS to names the
+        // enclosing block already declared - only `:=` declares its own - which both
+        // halves used to get wrong in the same direction, leaving the outer i and v at
+        // their old values after the loop. The {rset} marker is the "=" arm.
+        var rnames = []
+        var rset = false
+        for (var ri = 1; ri < items.length; ri++) {
+            if (items[ri].rset == true) { rset = true; continue }
+            rnames.push(items[ri].rv)
+        }
+        var iName = rnames.length > 0 ? rnames[0] : null
+        var vName = rnames.length > 1 ? rnames[1] : null
         return function(b) {
             hidCount++
             var cName = "$c" + hidCount
@@ -4630,8 +4758,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var subjV = callExt(b, "js_gorange", [emitHelper(b, "$sels", [r.v])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), subjV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cName), emitNum(b, 0)])
-            if (iName != "_") callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), hUndef])
-            if (vName != null && vName != "_") callExt(b, "js_scope_decl", [curScopeV, emitStr(b, vName), hUndef])
+            if (!rset && iName != null && iName != "_") callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), hUndef])
+            if (!rset && vName != null && vName != "_") callExt(b, "js_scope_decl", [curScopeV, emitStr(b, vName), hUndef])
             var lenV = callExt(b, "js_range_len", [subjV])
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
@@ -4642,7 +4770,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [cV, lenV])), bodyB, exitB)
             var cV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, cName)])
             var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
-            if (iName != "_") {
+            if (iName != null && iName != "_") {
                 callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
                                                 callExt(bodyB, "js_range_key", [aV2, cV2])])
             }
@@ -5156,7 +5284,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // ----- Functions, methods and structs -----
 
-    function emitFunc(plist, body, recvName, rets) {
+    function emitFunc(plist, body, recvName, rets, rtys) {
         var params = plist.params
         var variadic = plist.variadic == true
         var ptypes = plist.ptypes
@@ -5194,10 +5322,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$defers"), callExt(b, "js_arr_new", [])])
         // Named results are zero-valued locals of the function; a bare return yields
         // them, and a deferred function still sees (and may change) them.
+        //
+        // THE ZERO IS THE ZERO OF THE DECLARED TYPE, not the number 0. This used to
+        // declare every named result holding 0 whatever its type, so
+        // `func f() (r int, s string)` that returns without assigning s printed `0`
+        // where go prints the empty string - and a `[]int` result printed `0` rather
+        // than `[]`. The type texts now arrive from RetTypes (rtys) beside the names.
         var savedRets = curRets
         curRets = (rets == undefined || rets == null) ? [] : rets
+        var rtl = (rtys == undefined || rtys == null) ? [] : rtys
         for (var nr = 0; nr < curRets.length; nr++) {
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, curRets[nr]), emitNum(b, 0)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, curRets[nr]),
+                                         emitZeroTy(b, nr < rtl.length ? rtl[nr] : "")])
         }
         // The BODY is emitted as a closure of its own and called through js_gotry, which
         // is what makes Go's panic/defer/recover work: a panic unwinding through this
@@ -5215,7 +5351,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Named results are read back AFTER the defers ran, so a deferred function that
         // assigns one is seen; without them the body's return signal carries the value.
         if (curRets.length > 0) { b.NewRet(readRets(b)) }
-        else { var ur = emitUnctl(b, ctlV); ur.b.NewRet(ur.v) }
+        else { var ur = emitUnctlRets(b, ctlV, rtl); ur.b.NewRet(ur.v) }
         // Now the body itself, inside the closure. A return in it LEAVES the closure, so
         // it goes out as a control signal (retStmt) that js_gounctl unwraps again.
         var savedFTag = curFTag
@@ -5303,7 +5439,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var params = items[i + 1]
         i = i + 2
         var rets = []
-        if (items[i] != undefined && items[i].rets != undefined) { rets = items[i].rets; i++ }
+        // A RetTypes now always leaves one entry: {rets, rtys} for a named list,
+        // {rtys} alone for an unnamed one.
+        var rtys = []
+        if (items[i] != undefined && items[i].rtys != undefined) {
+            if (items[i].rets != undefined) { rets = items[i].rets }
+            rtys = items[i].rtys
+            i++
+        }
         var body = items[i]
         if (recv != null) {
             // recv = [name, {byptr}?, typeName]
@@ -5311,7 +5454,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var rName = recv[0]
             var rType = recv[recv.length - 1]
             return function(b) {
-                var idx = emitFunc(params, body, rName, rets)
+                var idx = emitFunc(params, body, rName, rets, rtys)
                 var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, rType)])
                 callExt(b, "js_set", [clsV, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
                 if (byPtr) { callExt(b, "js_set", [clsV, emitStr(b, "__ptr$" + name), hTrue]) }
@@ -5322,7 +5465,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // the package object (pkg.Fn); record it for buildPackages (see core.importFile).
         if (curPkgName != null && isExported(name)) { pkgExports["$" + curPkgName].push(name) }
         return function(b) {
-            var idx = emitFunc(params, body, null, rets)
+            var idx = emitFunc(params, body, null, rets, rtys)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name),
                                          callExt(b, "js_closure", [handle(idx), curScopeV])])
             return b
@@ -5451,9 +5594,28 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             b = emitMainSnippet(b, entry, "Statement")
             b.NewRet(emitNum(b, 0))
         } else {
-            var mainV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, entry)])
-            var argsV = callExt(b, "js_arr_new", [])
-            b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
+            // AN UNRECOVERED PANIC IS REPORTED BY THE PROGRAM, not by the engine, and
+            // that is what fixed the doubled prefix. A runtime panic's VALUE already
+            // reads "js runtime error: <msg>" - goRTPanic builds it that way so that a
+            // recovered `e` is byte-identical to the Go twin's rt.fail value - and
+            // letting it out of the module handed it to the floor's uncaught-throw
+            // handler, which prefixed it a SECOND time
+            // ("js runtime error: uncaught exception: js runtime error: index 5 out of
+            // range"). The entry call is therefore wrapped in one more js_gotry frame
+            // and js_gotop pops it, applying exactly runEntry's rule in
+            // go-interpreter.abnf: a value that already carries the wording is printed
+            // as it stands, anything else gets "uncaught exception: ". All three
+            // engines now print an unrecovered panic identically. docs/todo.md 1.7.
+            funcCount++
+            var eidx = funcCount
+            var ef = m.NewFunc("jsf_" + eidx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+            var topV = callExt(b, "js_gotry", [callExt(b, "js_closure", [handle(eidx), curScopeV])])
+            callExt(b, "js_gotop", [])
+            b.NewRet(topV)
+            var eb = ef.NewBlock("entry")
+            var mainV = callExt(eb, "js_scope_get", [ef.Params[0], emitStr(eb, entry)])
+            var argsV = callExt(eb, "js_arr_new", [])
+            eb.NewRet(callExt(eb, "js_call", [mainV, hUndef, argsV]))
         }
     }
     // Assemble each imported package object from its exported functions (now declared flat

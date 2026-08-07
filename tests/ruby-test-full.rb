@@ -101,6 +101,16 @@ def s03
   check("pct3", %w[one two three] == ["one", "two", "three"])
   check("pct4", %W[a#{1} b#{2}] == ["a1", "b2"])
   check("pct5", %i[x y] == [:x, :y] && %I[k#{9}] == [:k9])
+  # The escapes Ruby has and JavaScript does not: unescapeJs of the shared core
+  # copied \a \b \f \v \e through as the bare letter, read "\101" as NUL followed
+  # by "01" and did not know \s or the braced \u{...} at all (docs/todo.md 1.6).
+  check("str6", "\a".ord == 7 && "\b".ord == 8 && "\f".ord == 12 && "\v".ord == 11 && "\e".ord == 27 && "\s" == " ")
+  check("str7", "\101\102" == "AB" && "\1010" == "A0" && "\u{41}" == "A" && "\x4".ord == 4)
+  # String#inspect is the quoted SOURCE form, so it ESCAPES. All three engines
+  # printed the characters raw, which no gate here can see because they agreed.
+  check("str8", "a\nb".inspect == '"a\nb"' && "g\"h".inspect == '"g\"h"' && "e\\f".inspect == '"e\\\\f"')
+  check("str9", ["a\nb", 1].inspect == '["a\nb", 1]' && "\0".inspect == '"\\u0000"' && "\x7f".inspect == '"\\u007F"')
+  check("str10", "p#{1}#q".inspect == '"p1#q"' && "r\#{s".inspect == '"r\#{s"')
 end
 # ===== SECTION 04: heredocs =====
 def s04
@@ -279,6 +289,12 @@ def s12
   check("prc4", add.lambda? == true && pr.lambda? == false)
   check("prc5", Proc.new { |x| x + 1 }.call(41) == 42)
   check("prc6", -> { return 7 }.call == 7)
+  # Proc#arity needs the closure's parameter shape, which no function value carries:
+  # both halves used to answer 0 (the compiler half aborted outright), and a proc
+  # and a lambda count OPTIONAL parameters differently (docs/todo.md 1.6).
+  check("prc7", pr.arity == 2 && sq.arity == 1 && proc { |*a| }.arity == -1 && proc { }.arity == 0)
+  check("prc8", add.arity == -2 && lambda { |x = 1| }.arity == -1 && proc { |x = 1| }.arity == 0)
+  check("prc9", sq.class.to_s == "Proc" && sq.nil? == false)
 end
 # ===== SECTION 13: method parameter forms =====
 def s13_def(a, b = 2, c = a + b); a + b + c; end
@@ -289,6 +305,11 @@ def s13_blk(x, &blk); blk.call(x) + blk.call(x + 1); end
 def s13_big?(n); n > 9; end
 def s13_shout!(s); s.upcase; end
 def s13_me; __method__; end
+def s13_post(a, b = 2, *r, c); "#{a}|#{b}|#{r.inspect}|#{c}"; end
+def s13_tail(a, *r, c, d); "#{a}|#{r.inspect}|#{c}|#{d}"; end
+def s13_kwsplat(*a, **k); "#{a.inspect}|#{k.size}"; end
+def s13_optz(x = 1, y = 2, z); "#{x}|#{y}|#{z}"; end
+def s13_blkq(&b); "#{b.nil?}|#{b.class}|#{b.arity}"; end
 def s13
   check("mth1", s13_def(1) == 6 && s13_def(1, 5) == 12 && s13_def(1, 2, 3) == 6)
   check("mth2", s13_rest(9) == "9|0|" && s13_rest(1, 2, 3) == "1|2|2")
@@ -297,6 +318,16 @@ def s13
   check("mth5", s13_blk(5) { |v| v * 2 } == 22)
   check("mth6", s13_big?(10) == true && s13_big?(3) == false && s13_shout!("ok") == "OK")
   check("mth7", s13_me == :s13_me)
+  # Ruby does not bind positional parameters left to right at fixed indices:
+  # everything after a *splat is counted from the END, an optional one only takes an
+  # argument when there are SPARE ones, and a trailing keyword Hash is not
+  # positional at all. The compiler half read each by index and answered
+  # "1|2|[3, 1]|3" for the first row - a live halves divergence --cross never
+  # reached (docs/todo.md 1.5).
+  check("mth8", s13_post(1, 2, 3, 1) == "1|2|[3]|1" && s13_post(1, 2) == "1|2|[]|2")
+  check("mth9", s13_tail(1, 2, 3, 4) == "1|[2]|3|4" && s13_tail(1, 2, 3) == "1|[]|2|3")
+  check("mth10", s13_kwsplat(1, 2, z: 3) == "[1, 2]|1" && s13_optz(1) == "1|2|1" && s13_optz(1, 2) == "1|2|2")
+  check("mth11", s13_blkq { |q, r| q } == "false|Proc|2")
 end
 # ===== SECTION 14: operator method definitions =====
 class S14Vec

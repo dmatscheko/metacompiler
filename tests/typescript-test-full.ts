@@ -1665,7 +1665,77 @@ function s36(): number {
     j36.next()
     j36.return(0)
     check("gcl11", l9.join(",") === "in,out")
+    // g.throw(v) on a PLAIN generator (docs/todo.md 1.4). Here as well as in the
+    // features file because the features file is never BUILT NATIVELY, and the
+    // yield*-forwarding arm is emitter code that clang-check and native-full are the
+    // only gates that reach. Every push is in the driver or in a finally: a write
+    // before the parked yield repeats once per replay in the interpreter half.
+    var t1 = []
+    function* gt1_39() {
+        try { yield 1; yield 2 } catch (e) { yield "c:" + e } finally { t1.push("ft1") }
+    }
+    var a39 = gt1_39()
+    t1.push("n" + a39.next().value)
+    t1.push("t" + a39.throw("X").value)
+    t1.push("d" + a39.next().done)
+    check("gth1", firsts39(t1).join(",") === "n1,tc:X,ft1,dtrue")
+    // Uncaught: the value propagates out of throw() and the generator is left done.
+    var t2 = []
+    function* gt2_39() { try { yield 1; yield 2 } finally { t2.push("ft2") } }
+    var b39 = gt2_39()
+    b39.next()
+    var t2c = ""
+    try { b39.throw("Y") } catch (e) { t2c = e }
+    check("gth2", t2c === "Y" && b39.next().done === true && firsts39(t2).join(",") === "ft2")
+    // Never started: no suspension point, so NO finally runs at all.
+    var t3 = []
+    function* gt3_39() { try { yield 1 } finally { t3.push("ft3") } }
+    var c39 = gt3_39()
+    var t3c = ""
+    try { c39.throw("Z") } catch (e) { t3c = e }
+    check("gth3", t3c === "Z" && t3.length === 0 && c39.next().done === true)
+    // Caught, then RETURN: the record carries the return value and done.
+    function* gt4_39() { try { yield 1 } catch (e) { return 7 } }
+    var d39 = gt4_39()
+    d39.next()
+    var d39r = d39.throw("Q")
+    check("gth4", d39r.value === 7 && d39r.done === true && d39.next().done === true)
+    // At a yield* the throw is FORWARDED to the delegate, so a delegate that would
+    // catch it does - and the outer body carries on with what it yields next.
+    var t5 = []
+    function* it5_39() { try { yield 1 } catch (e) { yield "in:" + e } finally { t5.push("i5") } }
+    function* ot5_39() { try { yield* it5_39() } finally { t5.push("o5") } }
+    var e5_39 = ot5_39()
+    t5.push("n" + e5_39.next().value)
+    t5.push("t" + e5_39.throw("W").value)
+    t5.push("d" + e5_39.next().done)
+    check("gth5", firsts39(t5).join(",") === "n1,tin:W,i5,o5,dtrue")
+    // A delegate with NO throw method - an array - is closed through its return()
+    // and the yield* raises node's TypeError, which the outer body may catch.
+    function* ot6_39() { try { yield* [1, 2, 3] } catch (e) { yield "a:" + e } }
+    var f6_39 = ot6_39()
+    f6_39.next()
+    check("gth6", f6_39.throw("V").value ===
+          "a:TypeError: The iterator does not provide a 'throw' method.")
+    // A `yield` inside a CATCH ARM is a suspension like any other: the enclosing
+    // finally belongs to the close, not to it. Reachable with no throw() at all,
+    // and the interpreter halves used to run the finally at the suspension.
+    var t7 = []
+    function* gt7_39() { try { throw 1 } catch (e) { yield 99 } finally { t7.push("f7c") } }
+    var g7c39 = gt7_39()
+    t7.push("n" + g7c39.next().value)
+    t7.push("d" + g7c39.next().done)
+    check("gth7", firsts39(t7).join(",") === "n99,f7c,dtrue")
     return 0
+}
+
+// The first occurrence of each entry, in order: the interpreter half REPLAYS a
+// generator body once per next(), so a log collapses to node's sequence rather than
+// matching it row for row (the price is repetition, not order).
+function firsts39(xs) {
+    var out = []
+    for (var i = 0; i < xs.length; i++) { if (out.indexOf(xs[i]) < 0) { out.push(xs[i]) } }
+    return out
 }
 
 function main(): number {
