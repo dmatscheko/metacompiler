@@ -232,6 +232,50 @@ enum Direction {
     case west
 }
 
+// ----- MEMBER overload selection, run-time, by argument TYPE (docs/todo.md 1.2) -----
+// The compiler half picked an initializer at WALK time by labels and arity alone,
+// so MB(3.0) ran `init(_ x: Int)` where the interpreter and swiftc both say
+// Double; ordinary METHODS and SUBSCRIPTS had no dispatcher at all in that half,
+// so s.m(1.5), s.m("a") and even s.m(1, 2) all ran `m(_ x: Int)`. A live halves
+// divergence --cross never reached, because both files agreed on the wrong answer
+// only in the compiler.
+struct MB {
+    var s: String
+    init(_ x: Int) { s = "I" }
+    init(_ x: Double) { s = "D" }
+    init(_ x: String) { s = "S" }
+    init(_ x: Bool) { s = "B" }
+    init(a: Int) { s = "lI" }
+    init(a: Double) { s = "lD" }
+}
+struct OvM {
+    func m(_ x: Int) -> String { return "I" }
+    func m(_ x: Double) -> String { return "D" }
+    func m(_ x: String) -> String { return "S" }
+    func m(_ a: Int, _ b: Int) -> String { return "II" }
+    subscript(i: Int) -> String { return "sI" }
+    subscript(t: String) -> String { return "sS" }
+}
+// A function-typed SLOT (docs/todo.md 1.4): the type is on the slot and the
+// closure carries nothing, so f(3) integer-divided and answered 1.
+let fslot: (Double) -> Double = { x in x / 2 }
+let fslot2: (Double, Double) -> Double = { a, b in a / b }
+// A stored property holding a closure is CALLABLE - it is not in the member
+// table, and calling it aborted with "unknown method 'fn'" in all three engines.
+struct FnField { var fn: (Double) -> Double }
+// `case is T:` did not parse in either half and took the whole switch down.
+enum IsE { case a, b }
+func isKind(_ v: Any) -> String {
+    switch v {
+    case is Double: return "D"
+    case is String: return "S"
+    case is Bool: return "B"
+    case is IsE: return "E"
+    case is Int: return "I"
+    default: return "?"
+    }
+}
+
 // ----- exceptions: do / catch / throw (Swift has NO finally) -----
 
 class BoomError {
@@ -739,6 +783,48 @@ func main() {
     check("as-int", (anys[1] as? Int) != nil && (anys[0] as? Int) == nil)
     check("overload-by-type", ovl(3) == "int" && ovl(3.0) == "dbl"
                               && ovl("s") == "str" && ovl(true) == "bool")
+
+    // ----- member overloads picked by argument TYPE (docs/todo.md 1.2) -----
+    let ovInts: [Int] = [1, 2]
+    let ovDbls: [Double] = [1.5]
+    let ovStrs: [String] = ["a"]
+    let ovBools: [Bool] = [true]
+    check("init-overload-type", MB(ovInts[0]).s == "I" && MB(ovDbls[0]).s == "D"
+                                && MB(ovStrs[0]).s == "S" && MB(ovBools[0]).s == "B")
+    check("init-overload-label", MB(a: ovInts[0]).s == "lI" && MB(a: ovDbls[0]).s == "lD")
+    let ovm = OvM()
+    check("method-overload-type", ovm.m(ovInts[0]) == "I" && ovm.m(ovDbls[0]) == "D"
+                                  && ovm.m(ovStrs[0]) == "S")
+    check("method-overload-arity", ovm.m(ovInts[0], ovInts[1]) == "II")
+    check("subscript-overload-type", ovm[ovInts[0]] == "sI" && ovm[ovStrs[0]] == "sS")
+
+    // ----- a function-typed SLOT adopts its arguments (docs/todo.md 1.4) -----
+    check("fn-slot-arg", fslot(3) == 1.5 && fslot2(3, 2) == 1.5)
+    check("fn-field-call", FnField(fn: { x in x / 2 }).fn(3) == 1.5)
+
+    // ----- a NEW dictionary key adopts the declared element type (todo 1.4) -----
+    var newk: [String: Double] = [:]
+    newk["b"] = 5
+    var newk2: [String: Double] = ["a": 1]
+    newk2["b"] = 5
+    var newki: [Int: Double] = [:]
+    newki[1] = 5
+    var newkw: [String: Int8] = [:]
+    newkw["q"] = 100
+    check("dict-newkey-double", newk["b"]! / 2 == 2.5 && newk2["b"]! / 2 == 2.5
+                                && newki[1]! / 2 == 2.5)
+    check("dict-newkey-width", newkw["q"]! &+ 100 == -56)
+
+    // ----- `case is T:` - a TYPE pattern (docs/todo.md 1.4) -----
+    let isAnys: [Any] = [3.0, "s", true, IsE.a, 3]
+    check("case-is", isKind(isAnys[0]) == "D" && isKind(isAnys[1]) == "S"
+                     && isKind(isAnys[2]) == "B" && isKind(isAnys[3]) == "E"
+                     && isKind(isAnys[4]) == "I")
+
+    // ----- `3 as Int8` is a COERCION, not a no-op -----
+    let asAny: [Any] = [3 as Int8, 3 as Double]
+    check("as-coerces", (3 as Double) / 2 == 1.5 && (250 as UInt8) &+ 10 == 4
+                        && (asAny[0] is Int8) && !(asAny[0] is Int) && (asAny[1] is Double))
 
     // ----- a subclass with no init of its own INHERITS one (docs/todo.md 1.3) -----
     // A class never gets a memberwise initializer - that is structs - and the empty

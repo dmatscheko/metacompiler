@@ -664,6 +664,24 @@ func init() {
 		m["js_swmcall"] = func(a []uint64) uint64 {
 			f, isFlo := u(a[0]).(jsJFlo)
 			if !isFlo {
+				// A STORED PROPERTY holding a closure is callable as
+				// `q.fn(3)`, and no such name is in the member table -
+				// so memberCall aborted with "unknown method 'fn' on
+				// an instance". It is consulted only after the
+				// __class/__super walk has declined, so a real method
+				// of the same name still wins, and it is called
+				// WITHOUT a receiver: a function-typed field is a
+				// plain value, not a method. Twins: js_mcall in
+				// languages/lib/swift-rt.metajs, swMethodCall in
+				// languages/swift-interpreter.abnf.
+				if fn := swFieldFn(rt, u(a[0]), rt.toString(u(a[1]))); fn != nil {
+					args, _ := u(a[2]).(*jsArray)
+					var elems []interface{}
+					if args != nil {
+						elems = args.elems
+					}
+					return w(rt.call(fn, jsUndef, elems))
+				}
 				return baseMcall(a)
 			}
 			name := rt.toString(u(a[1]))
@@ -1384,6 +1402,27 @@ func swFindMember(v interface{}, name string) (interface{}, bool) {
 		cls = clsObj.props["__super"]
 	}
 	return nil, false
+}
+
+// swFieldFn answers the OWN stored property `name` when it holds a callable and
+// the member table does not answer that name at all - a function-typed field,
+// called as `q.fn(3)`. nil means "not this case, take the ordinary path".
+func swFieldFn(rt *jsrt, v interface{}, name string) interface{} {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil
+	}
+	if _, hasCls := o.props["__class"]; !hasCls {
+		return nil
+	}
+	p, ok := o.props[name]
+	if !ok || !isCallable(p) {
+		return nil
+	}
+	if _, found := swFindMember(v, name); found {
+		return nil
+	}
+	return p
 }
 
 func swNumProp(o *jsObject, key string) (int, bool) {

@@ -1165,11 +1165,11 @@ func s28() {
 // the slot already holds. The one shape that cannot see is a slot still holding
 // nil - a `var d: Double` with no initializer - and 29s7 pins that as the gap.
 //
-// STILL NOT ADOPTED, deliberately, and each is a wrong answer this file does not
-// yet assert: a CLOSURE parameter type (`let f: (Double) -> Double`), a
-// dictionary annotation's value type (`[String: Double]`), and a tuple type's
-// element types (`(Double, Double)`). They need the declared type at a site that
-// does not carry one today; see the report on docs/todo.md 1.1.
+// The three sites this paragraph used to list as STILL NOT ADOPTED are closed:
+// the dictionary annotation's value type and the tuple type's element types went
+// in with the structural annotation, and the function-typed slot
+// (`let f: (Double) -> Double`) is SECTION 30. What is left is one nested case,
+// asserted there with its own reason.
 func a29d(_ x: Double) -> Double { return x / 2 }
 func a29f(_ x: Float) -> Float { return x / 2 }
 func a29u(_ x: UInt8) -> UInt8 { return x &+ 10 }
@@ -1274,6 +1274,111 @@ func s29() {
     check("29s8", sh29() == 2 && sh29g / 2 == 0.5)
 }
 
+// ===== SECTION 30: member overloads, function-typed slots, `case is` =====
+// Four defects that share one root - the front end knowing a type it then threw
+// away - and one that is the opposite, a type it never recorded.
+//
+//  * MEMBER OVERLOADS were picked at WALK time in the compiler half, by argument
+//    LABELS and ARITY only. `MB(3.0)` ran `init(_ x: Int)` where the interpreter
+//    and swiftc say Double; ordinary METHODS and SUBSCRIPTS had no dispatcher in
+//    that half at all, so `m(1.5)`, `m("a")` and even `m(1, 2)` all ran
+//    `m(_ x: Int)`. A live halves divergence --cross never reached.
+//  * A FUNCTION-TYPED SLOT puts the type on the slot and the closure carries
+//    nothing, so `let f: (Double) -> Double = { x in x/2 }; f(3)` integer-divided
+//    and answered 1. A stored property holding a closure could not even be CALLED
+//    ("unknown method 'fn'", all three engines).
+//  * A NEW DICTIONARY KEY has no old value to adopt from, so `var d: [String:
+//    Double] = [:]; d["b"] = 5` left an Int and `d["b"]! / 2` was 2.
+//  * `case is T:` did not parse in EITHER half and took the whole switch down.
+//  * `3 as Int8` was a no-op rather than a coercion: `(3 as Double) / 2` was 1,
+//    `(250 as UInt8) &+ 10` was 260, and `(3 as Int8) is Int8` was false while
+//    `is Int` was true - the reverse of swiftc 6.1.2 on every row.
+//
+// Every value below is swiftc 6.1.2's own output.
+struct M30 {
+    var s: String
+    init(_ x: Int) { s = "I" }
+    init(_ x: Double) { s = "D" }
+    init(_ x: String) { s = "S" }
+    init(_ x: Bool) { s = "B" }
+    init(a: Int) { s = "lI" }
+    init(a: Double) { s = "lD" }
+}
+struct O30 {
+    func m(_ x: Int) -> String { return "I" }
+    func m(_ x: Double) -> String { return "D" }
+    func m(_ x: String) -> String { return "S" }
+    func m(_ a: Int, _ b: Int) -> String { return "II" }
+    subscript(i: Int) -> String { return "sI" }
+    subscript(t: String) -> String { return "sS" }
+}
+struct F30 { var fn: (Double) -> Double }
+enum E30 { case a, b }
+func k30(_ v: Any) -> String {
+    switch v {
+    case is Double: return "D"
+    case is String: return "S"
+    case is Bool: return "B"
+    case is E30: return "E"
+    case is Int: return "I"
+    default: return "?"
+    }
+}
+let g30: (Double) -> Double = { x in x / 2 }
+let g30b: (Double, Double) -> Double = { a, b in a / b }
+func mk30() -> (Double) -> Double { return { x in x / 2 } }
+
+func s30() {
+    // Every operand is read out of an array, so nothing here is constant-folded.
+    let ii: [Int] = [1, 2]
+    let dd: [Double] = [1.5]
+    let ss: [String] = ["a"]
+    let bb: [Bool] = [true]
+    check("30a", M30(ii[0]).s == "I" && M30(dd[0]).s == "D")
+    check("30b", M30(ss[0]).s == "S" && M30(bb[0]).s == "B")
+    check("30c", M30(a: ii[0]).s == "lI" && M30(a: dd[0]).s == "lD")
+    let o = O30()
+    check("30d", o.m(ii[0]) == "I" && o.m(dd[0]) == "D" && o.m(ss[0]) == "S")
+    check("30e", o.m(ii[0], ii[1]) == "II")
+    check("30f", o[ii[0]] == "sI" && o[ss[0]] == "sS")
+
+    // A function-typed slot: a let, a stored property and a RETURN type.
+    check("30g", g30(3) == 1.5 && g30b(3, 2) == 1.5)
+    check("30h", F30(fn: { x in x / 2 }).fn(3) == 1.5)
+    check("30i", mk30()(3) == 1.5)
+    // NOT closed, and asserted at the value we give: a function type NESTED in a
+    // container annotation. The compiler half hands a structural annotation to
+    // js_swadoptdeep in layer 2, which builds no closures, so wrapping the
+    // elements here and not there would trade one wrong answer for a halves
+    // divergence. swiftc says 1.5.
+    let arr30: [(Double) -> Double] = [{ x in x / 2 }]
+    check("30j", arr30[0](3) == 1)
+
+    // A NEW dictionary key adopts the declared element type.
+    var d1: [String: Double] = [:]
+    d1["b"] = 5
+    var d2: [String: Double] = ["a": 1]
+    d2["b"] = 5
+    var d3: [Int: Double] = [:]
+    d3[1] = 5
+    var d4: [String: Int8] = [:]
+    d4["q"] = 100
+    check("30k", d1["b"]! / 2 == 2.5 && d2["b"]! / 2 == 2.5 && d2["a"]! / 2 == 0.5)
+    check("30l", d3[1]! / 2 == 2.5 && d4["q"]! &+ 100 == -56)
+
+    // `case is T:` - a type pattern, including an enum case value.
+    let anys: [Any] = [3.0, "s", true, E30.a, 3]
+    check("30m", k30(anys[0]) == "D" && k30(anys[1]) == "S" && k30(anys[2]) == "B")
+    check("30n", k30(anys[3]) == "E" && k30(anys[4]) == "I")
+
+    // `as` is a coercion.
+    check("30o", (3 as Double) / 2 == 1.5 && (250 as UInt8) &+ 10 == 4)
+    // Through Any, so the test is the RUNTIME one: swiftc folds a directly
+    // spelled `(3 as Int8) is Int` and only warns.
+    let a8: [Any] = [3 as Int8, 3 as Double]
+    check("30p", (a8[0] is Int8) && !(a8[0] is Int) && (a8[1] is Double))
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -1306,6 +1411,7 @@ func main() {
     s27() // SECTION-CALL 27
     s28() // SECTION-CALL 28
     s29() // SECTION-CALL 29
+    s30() // SECTION-CALL 30
     print("full: \(checks) checks, \(fails) failures")
 }
 

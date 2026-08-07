@@ -1090,6 +1090,15 @@ function js_mcall(recv, name, args) {
             // and so is the receiver prepend this used to spell inline.
             var mm = rtFindMethod(cls, name)
             if (typeof mm == "function") { return mm.apply(undefined, rtPrepend(recv, args)) }
+            // A STORED PROPERTY holding a closure is callable as `q.fn(3)`, and no
+            // such name is in the member table - so this used to abort in all three
+            // engines. It is consulted only after the table has declined, so a real
+            // method of the same name still wins, and it is called WITHOUT a
+            // receiver: a function-typed field is a plain value, not a method.
+            // Twins: js_swmcall in abnf/jsrtswift.go, swMethodCall in
+            // languages/swift-interpreter.abnf.
+            var fld = recv[name]
+            if (typeof fld == "function") { return fld.apply(undefined, args) }
             fail("unknown method '" + name + "' on an instance")
         }
         var f = recv[name]
