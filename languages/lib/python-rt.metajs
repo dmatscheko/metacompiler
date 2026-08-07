@@ -446,7 +446,21 @@ function pyStr(v) {
     // its own and cannot be matched, so it is left off rather than invented, and
     // all three engines print this same short form.
     if (pyIsIter(v)) { return "<" + pyToStr(v["__pyit"]) + " object>" }
+    // A FUNCTION, on the same rule as the iterator line above: CPython prints
+    // <function fn at 0x...> and the address cannot be matched, so it is left off
+    // rather than invented. Without it this half and the native binary printed the
+    // C floor's [function] while the interpreter half printed the function's
+    // METAJS SOURCE TEXT - a live halves divergence. The name comes from the
+    // js_pyfnname side table; CPython calls an unnamed one <lambda>, and so does
+    // every engine here. docs/todo.md 1.8.
+    if (typeof v == "function") { return pyFuncRender(v) }
     return pyToStr(v)
+}
+
+function pyFuncRender(v) {
+    var n = rtPairGet(pyBFnObjs, pyBFnNames, v)
+    if (n === undefined) { return "<function <lambda>>" }
+    return "<function " + pyToStr(n) + ">"
 }
 
 // ----- repr() of a str: CPython's unicode_repr -------------------------------
@@ -843,6 +857,9 @@ function pyGetAttr(obj, name) {
         }
         fail("'" + pyToStr(cls["__name"]) + "' object has no attribute '" + name + "'")
     }
+    // A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
+    var bcm = pyBuiltinClsMethod(obj, name)
+    if (bcm !== undefined) { return bcm }
     if (name == "__name__") {
         // A synthetic class object for a BUILTIN type (what type(3) hands out)
         // carries only its name, and a function carries none of its own - the name
@@ -975,6 +992,46 @@ function pyBuiltinClass(name) {
     pyTypeTable[k] = c
     return c
 }
+
+// The name of a BUILTIN type object (what pyBuiltinClass hands out: a __name and
+// nothing else), and "" for anything else - a user class object included, since
+// those carry a __mro and go through pyLookup.
+function pyBuiltinClsName(v) {
+    if (!pyIsObj(v)) { return "" }
+    if (v["__mro"] !== undefined) { return "" }
+    if (v["__name"] === undefined) { return "" }
+    return pyToStr(v["__name"])
+}
+
+// The method surface a builtin TYPE OBJECT itself carries - only dict.fromkeys so
+// far, and it is the reason this exists at all. Its RECEIVER is the type rather
+// than an instance, so it reaches neither the dict dispatcher nor a class MRO, and
+// each of the three engines resolves such a receiver in an arm of its own. Both
+// the mcall path (pyDMethodCall) and the value path (pyGetAttr) need it, or it is
+// reachable one way and not the other. Keep in step with pyBuiltinClsMethod in
+// abnf/jsrt.go and in languages/python-interpreter.abnf. docs/todo.md 1.8.
+function pyBuiltinClsMethod(target, name) {
+    if (pyBuiltinClsName(target) != "dict") { return undefined }
+    if (name != "fromkeys") { return undefined }
+    return function(ks, dv) { return pyDictFromKeys(ks, dv) }
+}
+
+// dict.fromkeys(iterable[, value]): a fresh dict mapping every element of the
+// iterable to the same value, None by default.
+function pyDictFromKeys(ks, dv) {
+    var d = pyNewDict()
+    var a = pyElemsOf(ks)
+    var i = 0
+    while (i < a.length) {
+        pyDictSet(d, a[i], dv)
+        i = i + 1
+    }
+    return d
+}
+
+// vars(o) IS o.__dict__ - CPython's own definition. It was bound in NO engine
+// while the attribute worked in all three. docs/todo.md 1.8.
+function js_pyvars(o) { return pyGetAttr(o, "__dict__") }
 
 // abnf/jsrt.go's pyExcInstance: the class is a stable per-name object deriving from
 // one called Exception, so the name walk of pyIsInstance answers `except Exception`
@@ -5137,6 +5194,17 @@ function pyDInstantiate(cls, args, kw) {
     return inst
 }
 
+// The value a `raise` actually raises. `raise SomeClass` names a CLASS, and
+// CPython instantiates it with no arguments; anything else is raised as it
+// stands. Without this both compiled halves threw the class OBJECT, which no
+// except clause matches, so `raise ValueError` aborted the process while the
+// interpreter half - whose makeRaise has the same line - caught it.
+// docs/todo.md 1.7. Go: js_pyraiseval in abnf/jsrt.go.
+function js_pyraiseval(v) {
+    if (pyClassOf(v) === null) { return v }
+    return pyDInstantiate(pyClassOf(v), [], undefined)
+}
+
 // callPyValue (jsrt.go:9260) calls a value that may itself be a class or a
 // __call__ instance.
 function pyDCallPyValue(v, args, kw) {
@@ -5243,6 +5311,9 @@ function pyDMethodCall(target, name, args, kw) {
             var tv = anytype
             tv = undefined
             if (args.length > 0) { tv = args[0] }
+            // g.throw(SomeClass) instantiates it, exactly as `raise SomeClass`
+            // does (js_pyraiseval, docs/todo.md 1.7).
+            tv = js_pyraiseval(tv)
             var tst = anytype
             tst = target["throw"].apply(target, [tv])
             return pyGenValue(tst)
@@ -5257,6 +5328,9 @@ function pyDMethodCall(target, name, args, kw) {
             return undefined
         }
     }
+    // A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
+    var bcm = pyBuiltinClsMethod(target, name)
+    if (bcm !== undefined) { return bcm.apply(undefined, args) }
     var cls = pyClassOf(target)
     if (cls !== null) {
         if (pyLookupHas(cls, name)) {

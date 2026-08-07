@@ -2932,9 +2932,67 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return exitB
         }
     }
+    // The three barrier closures of a `yield from`, one per role, over the
+    // expression's own scope. They are the shape js-to-llvm-ir.abnf's
+    // emitYieldStarYield / emitYieldStarCatch / emitYieldStarClose have, and for
+    // the same reason: the yield SUSPENDS, so it cannot move out of the loop, and
+    // the only state is three slots on this coroutine's own frame - nothing kept in
+    // any program-wide structure across a suspension.
+    //
+    // The TRY body: hand out the slot PFXout, and clear PFXopen once the driver has
+    // resumed us. Reaching the clear is exactly "this yield answered normally", so
+    // the finally below can tell a resume from a close with no second signal.
+    function emitYFYield(pfx) {
+        return emitClosure([], function(bb) {
+            var yv = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, pfx + "out")])
+            var sv = callExt(bb, "js_yield", [yv])
+            callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, pfx + "open"), hFalse])
+            bb.NewRet(sv)
+            return deadBlock()
+        }, true)
+    }
+    // The CATCH body. g.throw(exc) RAISES exc at the yield the body is parked at
+    // (runtime.c's gen_throw, abnf/jsrt.go's throwInto) - but at a `yield from`
+    // CPython FORWARDS it to the delegate's own throw() instead, so a delegate that
+    // would catch it does. This turns the raised value back into a {__athrow, v}
+    // record that the loop head dispatches on. PFXopen is cleared first so the
+    // FINALLY does not also close the delegate - a forward is not an abandonment.
+    function emitYFCatch(pfx) {
+        return emitClosure([pfx + "thr"], function(bb) {
+            callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, pfx + "open"), hFalse])
+            var ev = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, pfx + "thr")])
+            var recV = callExt(bb, "js_obj_new", [])
+            callExt(bb, "js_set", [recV, emitStr(bb, "__athrow"), hTrue])
+            callExt(bb, "js_set", [recV, emitStr(bb, "v"), ev])
+            bb.NewRet(recV)
+            return deadBlock()
+        }, true)
+    }
+    // The FINALLY body: if the body left the yield abnormally - which for a
+    // generator means gen_close threw the GEN_EXIT sentinel in - close the delegate
+    // through its own close protocol, so ITS finally clauses run before the signal
+    // reaches the yield from's own. A cursor has no `return` member and is left
+    // alone, which is what CPython does with a list_iterator.
+    function emitYFClose(pfx) {
+        return emitClosure([], function(bb) {
+            var opV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, pfx + "open")])
+            var cB = curF.NewBlock("")
+            var callB = curF.NewBlock("")
+            var skB = curF.NewBlock("")
+            bb.NewCondBr(truthy(bb, opV), cB, skB)
+            callExt(cB, "js_scope_set", [curScopeV, emitStr(cB, pfx + "open"), hFalse])
+            var srcV = callExt(cB, "js_scope_get", [curScopeV, emitStr(cB, pfx + "src")])
+            var rfV = callExt(cB, "js_get", [srcV, emitStr(cB, "return")])
+            cB.NewCondBr(truthy(cB, callExt(cB, "js_seq",
+                                 [callExt(cB, "js_typeof", [rfV]), emitStr(cB, "function")])), callB, skB)
+            callExt(callB, "js_call", [rfV, srcV, callExt(callB, "js_arr_new", [])])
+            callB.NewBr(skB)
+            return skB
+        }, true)
+    }
     // yield [from] EXPR. Plain yield suspends the body and answers what the next
-    // send() passes in. 'yield from ITER' yields every element of ITER in turn;
-    // its own value (a sub-generator's return) is not propagated.
+    // send() passes in. 'yield from ITER' yields every value ITER produces in turn,
+    // and its own value is the delegate's RETURN value.
     function makeYield(items) {
         var isFrom = false
         var valT = null
@@ -2951,27 +3009,102 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 v = r.v
             }
             if (!isFrom) { return {b: b, v: callExt(b, "js_yield", [v])} }
-            // yield from: a plain index loop over the normalized iterable.
+            // yield from: the delegate is driven LAZILY, one value at a time,
+            // through the {value, done} protocol that a generator cell and a cursor
+            // both answer. It used to be an index loop over js_pyiter, which
+            // MATERIALIZES: `yield from endless()` hit -max-steps, a .throw() was
+            // raised at the `yield from` rather than forwarded to the delegate's own
+            // except arms, a close never reached the delegate, a send() never
+            // reached it either, and the value of the expression was always None.
+            // docs/todo.md 1.6; the shape is js-to-llvm-ir.abnf's makeYieldStar.
+            //
+            // js_pyiterfn is iter(): a generator and a cursor are their own, and
+            // everything else is materialized into a cursor - a list is finite, so
+            // only the GENERATOR case needed laziness.
             hidCount++
-            var iName = "$yi" + hidCount
-            var aName = "$ya" + hidCount
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), callExt(b, "js_pyiter", [v])])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+            var pfx = "$yf" + hidCount
+            var dV = callExt(b, "js_pyiterfn", [v])
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [saved])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pfx + "src"), dV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pfx + "sent"), hUndef])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pfx + "out"), hUndef])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pfx + "open"), hFalse])
+            // Built ONCE, here: this block dominates the loop, so hoisting them out
+            // saves three js_closure allocations per delegated value.
+            var yYieldCloV = callExt(b, "js_closure", [handle(emitYFYield(pfx)), curScopeV])
+            var yCatchCloV = callExt(b, "js_closure", [handle(emitYFCatch(pfx)), curScopeV])
+            var yCloseCloV = callExt(b, "js_closure", [handle(emitYFClose(pfx)), curScopeV])
             var headB = curF.NewBlock("")
+            var hchkB = curF.NewBlock("")
+            var thrB = curF.NewBlock("")
+            var thrCallB = curF.NewBlock("")
+            var noThrB = curF.NewBlock("")
+            var retB = curF.NewBlock("")
+            var raiseB = curF.NewBlock("")
+            var stepB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
             b.NewBr(headB)
-            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
-            var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
-            var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
-            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
-            var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
-            var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
-            callExt(bodyB, "js_yield", [callExt(bodyB, "js_get", [aV2, iV2])])
-            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
-                                            callExt(bodyB, "js_add", [iV2, emitNum(bodyB, 1)])])
+            // THE RESUME DISPOSITION. The loop keeps what the driver last sent in -
+            // RAW, in PFXsent - and branches on its SHAPE at the top of every turn.
+            // The typeof gate in front of the member read is not decoration: reading
+            // a member of a non-object aborts, and the very first turn reads a sent
+            // value of undefined.
+            var sentV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, pfx + "sent")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_seq",
+                                [callExt(headB, "js_typeof", [sentV]), emitStr(headB, "object")])),
+                            hchkB, stepB)
+            hchkB.NewCondBr(truthy(hchkB, callExt(hchkB, "js_get", [sentV, emitStr(hchkB, "__athrow")])),
+                            thrB, stepB)
+            var tfV = callExt(thrB, "js_get", [dV, emitStr(thrB, "throw")])
+            thrB.NewCondBr(truthy(thrB, callExt(thrB, "js_seq",
+                                [callExt(thrB, "js_typeof", [tfV]), emitStr(thrB, "function")])),
+                           thrCallB, noThrB)
+            var thrArgsV = callExt(thrCallB, "js_arr_new", [])
+            callExt(thrCallB, "js_arr_push",
+                    [thrArgsV, callExt(thrCallB, "js_get", [sentV, emitStr(thrCallB, "v")])])
+            var thrRecV = callExt(thrCallB, "js_call", [tfV, dV, thrArgsV])
+            thrCallB.NewBr(joinB)
+            // No throw method - a cursor. CPython closes such a delegate if it can
+            // and then raises AT the `yield from`, where the outer body's own except
+            // arms see it.
+            var rfV = callExt(noThrB, "js_get", [dV, emitStr(noThrB, "return")])
+            noThrB.NewCondBr(truthy(noThrB, callExt(noThrB, "js_seq",
+                                 [callExt(noThrB, "js_typeof", [rfV]), emitStr(noThrB, "function")])),
+                             retB, raiseB)
+            callExt(retB, "js_call", [rfV, dV, callExt(retB, "js_arr_new", [])])
+            retB.NewBr(raiseB)
+            callExt(raiseB, "js_throw", [callExt(raiseB, "js_get", [sentV, emitStr(raiseB, "v")])])
+            raiseB.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
+            // next(sent): the sent value is FORWARDED, which is what makes
+            // g.send(x) reach the delegate of a `yield from` at all.
+            var nxV = callExt(stepB, "js_get", [dV, emitStr(stepB, "next")])
+            var nxArgsV = callExt(stepB, "js_arr_new", [])
+            callExt(stepB, "js_arr_push", [nxArgsV, sentV])
+            var stepRecV = callExt(stepB, "js_call", [nxV, dV, nxArgsV])
+            stepB.NewBr(joinB)
+            var recV = joinB.NewPhi([llvm.ir.NewIncoming(stepRecV, stepB),
+                                     llvm.ir.NewIncoming(thrRecV, thrCallB)])
+            var elemV = callExt(joinB, "js_get", [recV, emitStr(joinB, "value")])
+            joinB.NewCondBr(truthy(joinB, callExt(joinB, "js_get", [recV, emitStr(joinB, "done")])),
+                            exitB, bodyB)
+            // The yield itself sits inside a js_try, and the two arms answer the two
+            // ways the driver can interrupt a parked `yield from`: the CATCH is
+            // g.throw(v), turned back into a record so the head forwards it, and the
+            // FINALLY is g.close(), whose GEN_EXIT sentinel reaches a finally and
+            // never a catch in either engine.
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, pfx + "out"), elemV])
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, pfx + "open"), hTrue])
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, pfx + "sent"),
+                    callExt(bodyB, "js_try", [yYieldCloV, yCatchCloV, yCloseCloV])])
             bodyB.NewBr(headB)
-            return {b: exitB, v: hUndef}
+            curScopeV = saved
+            // The value of `yield from` is the delegate's RETURN value: the `value`
+            // of the record whose `done` ended the loop. A cursor has none and its
+            // done record carries undefined, which is None - CPython's answer too.
+            return {b: exitB, v: elemV}
         }
     }
     // '...' - one Ellipsis object per run, so 'x is ...' holds.
@@ -3299,7 +3432,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             } else if (handlerDepth > 0) {
                 v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__caught")])
             }
-            callExt(b, "js_throw", [v])
+            // `raise SomeClass` names a CLASS, and CPython raises an INSTANCE of
+            // it: js_pyraiseval instantiates one. Throwing the class object itself
+            // matched no except clause and aborted the process, where the
+            // interpreter half - whose makeRaise has the same line - caught it.
+            // docs/todo.md 1.7.
+            callExt(b, "js_throw", [callExt(b, "js_pyraiseval", [v])])
             b.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
             return deadBlock()
         }
@@ -3661,6 +3799,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var er = emitDefaultsEnv(b, plist)
             var lb = er.b
             var clo = callExt(lb, "js_closure", [handle(idx), er.env])
+            // CPython names a lambda <lambda>, and it is what f.__name__ answers.
+            // Only a `def` used to record a name here, so a lambda's __name__ was
+            // None in both compiled halves where the interpreter half - whose
+            // fnName defaults to <lambda> - answered it. Found beside
+            // docs/todo.md 1.8's function rendering, which reads the same table.
+            clo = callExt(lb, "js_pyfnname", [clo, emitStr(lb, "<lambda>")])
             return {b: lb, v: emitSig(lb, clo, plist)}
         }
     }
@@ -3840,6 +3984,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBuiltin(b, "getattr", "js_pygetattr3", 0)
         b = declBuiltin(b, "hasattr", "js_pyhasattr", 2)
         b = declBuiltin(b, "setattr", "js_pysetattr3", 0)
+        // vars(o) IS o.__dict__ - CPython's own definition. It was bound in NO
+        // engine while the attribute worked in all three. docs/todo.md 1.8.
+        b = declBuiltin(b, "vars", "js_pyvars", 1)
         // The builtin TYPE names that carry no conversion function. The
         // interpreter's pyTypeNames has fourteen and declBuiltin/pyTypeBuiltin
         // only reaches the eight that convert, so `class C(object)`, `type(None)

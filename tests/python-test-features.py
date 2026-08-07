@@ -1369,5 +1369,206 @@ check("dict-popitem-rest", str(spd), "{'a': 0}")
 check("dict-popitem-empty", why(lambda: {}.popitem()),
       "KeyError|'popitem(): dictionary is empty'|KeyError('popitem(): dictionary is empty')")
 
+# ----- `yield from` DELEGATES LAZILY (docs/todo.md 1.6) -----
+# Both halves used to MATERIALIZE the delegate - iterToList here, js_pyiter in the
+# emitter - and every consequence below was invisible to `--cross` because the two
+# agreed. js/ts forward lazily and match node, which is the precedent this follows
+# (js-interpreter.abnf's doYield(star) / js-to-llvm-ir.abnf's makeYieldStar).
+yf = [0, 1, 2, 3]
+
+
+def yf_endless():
+    i = yf[0]
+    while True:
+        yield i
+        i = i + 1
+
+
+def yf_take():
+    yield from yf_endless()
+
+
+# LAZY: an endless delegate is only stepped as far as it is asked. A drain hung
+# the interpreter half and hit -max-steps in the compiled ones.
+yt = yf_take()
+check("yieldfrom-lazy", str([next(yt), next(yt), next(yt)]), "[0, 1, 2]")
+
+
+def yf_ret():
+    yield yf[1]
+    return yf[3]
+
+
+def yf_outer_ret():
+    v = yield from yf_ret()
+    yield v
+
+
+# The value of `yield from` is the delegate's RETURN value; it used to be None.
+yr = yf_outer_ret()
+check("yieldfrom-value-is-return", str([next(yr), next(yr)]), "[1, 3]")
+
+
+def yf_echo():
+    while True:
+        got = yield yf[0]
+        if got is not None:
+            yield got
+
+
+def yf_send():
+    yield from yf_echo()
+
+
+# send(v) reaches a DELEGATED generator: the sent value is forwarded to its next().
+ys = yf_send()
+next(ys)
+check("yieldfrom-send-reaches-delegate", ys.send(yf[2]), 2)
+
+
+def yf_inner_catch():
+    try:
+        yield yf[1]
+    except ValueError:
+        yield yf[2]
+
+
+def yf_outer_catch():
+    yield from yf_inner_catch()
+
+
+# g.throw(e) at a `yield from` is FORWARDED to the delegate's own throw(), so the
+# DELEGATE's except arm takes it. It used to be raised at the `yield from` itself.
+yc = yf_outer_catch()
+next(yc)
+check("yieldfrom-throw-reaches-delegate", yc.throw(ValueError("y")), 2)
+
+
+def yf_list_outer():
+    try:
+        yield from [yf[1], yf[2]]
+    except ValueError as e:
+        yield "outer:" + str(e)
+
+
+# A cursor has no throw() to forward to, so the value is raised AT the yield from
+# and the OUTER body's except arm takes it - CPython's rule for a list_iterator.
+yl = yf_list_outer()
+next(yl)
+check("yieldfrom-throw-no-delegate-method", yl.throw(ValueError("z")), "outer:z")
+yfo = []
+
+
+def yf_fin_inner():
+    try:
+        yield yf[1]
+    finally:
+        yfo.append("inner-fin")
+
+
+def yf_fin_outer():
+    try:
+        yield from yf_fin_inner()
+    finally:
+        yfo.append("outer-fin")
+
+
+# close() at a `yield from` closes the DELEGATE first, so its finally runs before
+# the outer's. Neither compiled half reached the delegate at all before.
+yfi = yf_fin_outer()
+yfo.append("d0")
+next(yfi)
+# The marker between the next() and the close() is what makes this discriminate:
+# a MATERIALIZED delegate ran its finally during the first next(), i.e. BEFORE
+# this line, which is exactly the wrong order docs/working-on-this-project.md 7.14
+# records for a generator's own finally.
+yfo.append("mid")
+yfi.close()
+yfo.append("d1")
+yforder = []
+for yfk in yfo:
+    if yfk not in yforder:
+        yforder.append(yfk)
+check("yieldfrom-close-closes-delegate", str(yforder),
+      "['d0', 'mid', 'inner-fin', 'outer-fin', 'd1']")
+
+
+def yf_plain_list():
+    yield from [yf[1], yf[2]]
+
+
+check("yieldfrom-list", str(list(yf_plain_list())), "[1, 2]")
+
+# ----- `raise SomeClass` raises an INSTANCE (docs/todo.md 1.7) -----
+# A bare class rather than an instance worked in the interpreter half and ABORTED
+# the compiler half - the class object was thrown as it stood and matched no
+# except clause. A live halves divergence, and js_pyraiseval is the one line.
+
+
+class RErr(Exception):
+    pass
+
+
+def rc_bare():
+    raise RErr
+
+
+check("raise-bare-class", why(rc_bare), "RErr||RErr()")
+
+
+def rc_bare_builtin():
+    raise ValueError
+
+
+check("raise-bare-value-error", why(rc_bare_builtin), "ValueError||ValueError()")
+
+
+def rt_gen():
+    try:
+        yield yf[1]
+    except RErr:
+        yield yf[2]
+
+
+# g.throw(SomeClass) instantiates it the same way `raise SomeClass` does.
+rtg = rt_gen()
+next(rtg)
+check("gen-throw-bare-class", rtg.throw(RErr), 2)
+
+# ----- dict.fromkeys and vars() (docs/todo.md 1.8) -----
+# The receiver of fromkeys is the `dict` TYPE OBJECT, which reaches neither the
+# dict dispatcher nor a class MRO - a different arm in each of the three engines,
+# and both the mcall path and the VALUE path need it.
+fk = ["a", "b", "a"]
+check("dict-fromkeys-default", str(dict.fromkeys(fk)), "{'a': None, 'b': None}")
+check("dict-fromkeys-value", str(dict.fromkeys(fk, yf[0])), "{'a': 0, 'b': 0}")
+fkf = dict.fromkeys
+check("dict-fromkeys-as-value", str(fkf(fk, yf[1])), "{'a': 1, 'b': 1}")
+check("dict-fromkeys-from-str", str(dict.fromkeys("ab")), "{'a': None, 'b': None}")
+
+
+class VC:
+    def __init__(self, n):
+        self.n = n
+
+
+vco = VC(yf[2])
+# vars(o) IS o.__dict__ - bound in NO engine while the attribute worked in all three.
+check("vars-instance", str(vars(vco)), "{'n': 2}")
+check("vars-is-dunder-dict", str(vars(vco)), str(vco.__dict__))
+
+
+def vfn(a):
+    return a
+
+
+# A function PRINTED as its MetaJS SOURCE TEXT in the interpreter half and as the
+# C floor's [function] in both compiled halves. CPython's address cannot be
+# matched, so it is left off - the same rule <map object> already follows.
+check("function-str", str(vfn), "<function vfn>")
+check("function-lambda-str", str(lambda vz: vz), "<function <lambda>>")
+check("function-name", vfn.__name__, "vfn")
+check("lambda-name", (lambda vz: vz).__name__, "<lambda>")
+
 print(f"features: {checks[0]} checks, {fails[0]} failures")
 exit(fails[0])

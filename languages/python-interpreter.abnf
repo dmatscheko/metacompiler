@@ -1614,6 +1614,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     hostGlobals["hasattr"] = function(o, n) { return pyHasAttrOf(o, n) }
     hostGlobals["setattr"] = function(o, n, v) { pySetAttr(o, n, v); return undefined }
+    // vars(o) IS o.__dict__ - CPython's own definition. It was bound in NO engine
+    // while the attribute worked in all three (docs/todo.md 1.8), so this is that
+    // one line, over the same pyattr the `.` operator uses.
+    hostGlobals["vars"] = function(o) { return pyattr(o, "__dict__") }
     function pyHasAttrOf(o, name) {
         if (o === null || o === undefined) { return name == "__class__" }
         if (typeof o == "object" && o.__pysup == true) {
@@ -1723,6 +1727,29 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function newSet() { return {__dict: true, __set: true, keys: [], vals: []} }
     function isSet(v) { return v !== null && v !== undefined && typeof v == "object" && v.__set === true }
     function setAdd(s2, v) { if (dictFind(s2, v) < 0) { s2.keys.push(v); s2.vals.push(true); s2.__idx = null } }
+    // dict.fromkeys(iterable[, value]): a fresh dict mapping every element of the
+    // iterable to the same value, None by default. The RECEIVER is the `dict` type
+    // OBJECT, which is why this is not in the dict method dispatcher - see
+    // pyBuiltinClsMethod. Go: rt.pyDictFromKeys; layer 2: pyDictFromKeys.
+    function pyDictFromKeys(ks, dv) {
+        var d = newDict()
+        var a = iterToList(ks)
+        for (var i = 0; i < a.length; i++) { dictSet(d, a[i], dv) }
+        return d
+    }
+    // The methods a builtin TYPE OBJECT itself carries, as a callable value. Only
+    // dict.fromkeys so far, and it is the reason this exists at all: its receiver
+    // is the type rather than an instance, so it reaches neither the dict
+    // dispatcher nor a class MRO, and each of the three engines resolves a class
+    // attribute in an arm of its own. Keep in step with pyBuiltinClsMethod in
+    // abnf/jsrt.go and in languages/lib/python-rt.metajs. docs/todo.md 1.8.
+    function pyBuiltinClsMethod(cls, name) {
+        if (cls == null || cls == undefined) { return null }
+        if (cls.__name == "dict" && name == "fromkeys") {
+            return function(ks, dv) { return pyDictFromKeys(ks, dv) }
+        }
+        return null
+    }
 
     // ----- Python's key rule: a bool IS an int -------------------------------
     //
@@ -2010,6 +2037,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // is its own and cannot be matched, so it is left off rather than
         // invented - and all three engines print this same short form.
         if (isPyIt(v)) { return "<" + v.__pyit + " object>" }
+        // A FUNCTION. CPython prints <function fn at 0x...>; the address is its own
+        // and cannot be matched, so it is left off rather than invented - the same
+        // rule the iterator line above follows, and all three engines print this
+        // same short form. Without it this half printed the function's METAJS
+        // SOURCE TEXT (the host's own Function#toString) and both compiled halves
+        // the C floor's [function] - a live halves divergence. docs/todo.md 1.8.
+        if (typeof v == "function") { return "<function " + fnName(v) + ">" }
         return "" + v
     }
     // A user object renders through its dunders, else like Python's default
@@ -3560,6 +3594,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (pyIsSetOnly(name)) { pyAttrErr(target, name) }
             if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
             fail("unknown dict method: " + name)
+        }
+        // A method on a builtin TYPE OBJECT - dict.fromkeys(ks). The mcall path AND
+        // the value path (pyattr) both need it, or it is reachable one way and not
+        // the other: `dict.fromkeys(ks)` takes one and `f = dict.fromkeys; f(ks)`
+        // the other. docs/todo.md 1.8.
+        if (target !== null && target !== undefined && typeof target == "object" && target.__isclass == true) {
+            var bcm = pyBuiltinClsMethod(target, name)
+            if (bcm != null) { return bcm.apply(undefined, args) }
         }
         if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
         fail("method call ." + name + "() on " + pstr(target))
@@ -5685,41 +5727,109 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function genPush() { genFlags.push(false) }
     function genPop() { return genFlags.pop() }
     function genMark() { if (genFlags.length > 0) { genFlags[genFlags.length - 1] = true } }
-    // The value of one `yield`: a replay of an already-produced yield answers with the
-    // value the corresponding send(v) passed in and carries on; the one being produced
-    // now throws out to genSend. `yield from xs` DELEGATES - every element of xs is a
-    // yield of its own, and they replay individually.
-    function doYield(isFrom, v) {
-        var run = genRuns[genRuns.length - 1]
-        if (run == undefined) { fail("yield outside a generator") }
-        if (isFrom) {
-            var last = anytype
-            last = undefined
-            var arr = iterToList(v)
-            for (var i = 0; i < arr.length; i++) { last = doYield(false, arr[i]) }
-            return last
-        }
+    // The value of one `yield`, RAW - without the exit/throw-in unpacking doYield
+    // does below. A replay of an already-produced yield answers with the value the
+    // corresponding send(v) passed in and carries on; the one being produced now
+    // throws out to genSend.
+    //
+    // The RECORD TRAVELS ON THE RESUME VALUE, which is the one thing a replay can
+    // carry into a suspended body (the pattern languages/js-interpreter.abnf uses
+    // for its async .throw()). A close() or a throw() puts its record on the resume
+    // channel of the yield the generator is parked at, and only that yield ever sees
+    // it - by construction, since it is the last one the replay re-runs.
+    //
+    // Only the `yield from` loop wants the value raw: it has to branch on the SHAPE
+    // of what came back, because a record RAISED here could never reach the
+    // delegate's own throw(). Same split as js-interpreter.abnf's doYieldRaw.
+    function doYieldRaw(run, v) {
         if (run.k < run.target) {
             var sent = run.sent[run.k + 1]
             run.k = run.k + 1
-            // The RECORD TRAVELS ON THE RESUME VALUE, which is the one thing a
-            // replay can carry into a suspended body (the pattern
-            // languages/js-interpreter.abnf uses for its async .throw()). A
-            // close() puts an exit record on the resume channel of the yield the
-            // generator is parked at, and only that yield ever sees it - by
-            // construction, since it is the last one the replay re-runs.
-            if (sent != undefined && sent != null && sent.__genExitIn == true) {
-                throw {__genExit: true}
-            }
-            // g.throw(exc) travels the same way, but raises an ORDINARY Python
-            // exception, so the body's own except arms may take it.
-            if (sent != undefined && sent != null && sent.__genThrowIn == true) {
-                pyRaise(sent.v)
-            }
             return sent
         }
         run.k = run.k + 1
         throw {__genYield: true, v: v}
+    }
+    // Is this resume value the exit record genClose puts on the channel?
+    function isExitIn(s) { return s != undefined && s != null && s.__genExitIn == true }
+    // ... or the throw-in record genThrow puts there?
+    function isThrowIn(s) { return s != undefined && s != null && s.__genThrowIn == true }
+    // The delegate of a `yield from`, as something steppable. A generator and an
+    // iterator object are their own - which is what keeps `yield from endless()`
+    // lazy - and everything else is materialized into a cursor, exactly as iter()
+    // does it.
+    function pyDelegOf(v) {
+        if (isGen(v) || isPyIt(v)) { return v }
+        return pyMkIter(typeof v == "string" ? "str_iterator" :
+                        (Array.isArray(v) ? "list_iterator" : "iterator"), iterToList(v).slice(0))
+    }
+    // One step of a delegate, in the {done, value} shape. When it reports done the
+    // value is the delegate's RETURN value, which is what `yield from` evaluates to.
+    function pyDelegStep(d, sent) {
+        if (isGen(d)) {
+            var r = genStep(d, sent)
+            return {done: !r.yielded, value: r.value}
+        }
+        var s = pyItStep(d)
+        return {done: s.done, value: s.value}
+    }
+    // g.throw(e) at a `yield from` is FORWARDED to the delegate's own throw(), so a
+    // delegate that would catch it does - PEP 380's rule, and what CPython does. A
+    // cursor has no throw() to forward to, so the exception is raised AT the yield
+    // from instead, where the outer body's own except arms see it.
+    function pyDelegThrow(d, exc) {
+        if (!isGen(d)) { pyRaise(exc) }
+        var st = d.st
+        if (st.done || st.count == 0) { st.done = true; pyRaise(exc) }
+        var r = anytype
+        try { r = genStep(d, {__genThrowIn: true, v: exc}) }
+        catch (e) { st.done = true; throw e }
+        return {done: !r.yielded, value: r.value}
+    }
+    function pyDelegClose(d) { if (isGen(d)) { genClose(d) } }
+    // `yield from xs` DELEGATES: every value xs produces is a yield of this
+    // generator, driven ONE AT A TIME. The old body called iterToList first, which
+    // materialized the delegate - so `yield from endless()` hung, the delegate's
+    // return value was lost, a send() never reached it, and a .throw() was raised at
+    // the `yield from` itself instead of inside the delegate, where CPython offers
+    // it to the delegate's own except arms. docs/todo.md 1.6; the shape is
+    // js-interpreter.abnf's doYield(star) one for one.
+    function doYieldFrom(run, v) {
+        var d = pyDelegOf(v)
+        var st = anytype
+        st = pyDelegStep(d, undefined)
+        while (!st.done) {
+            var sent = anytype
+            sent = pyYieldDeleg(run, st.value, d)
+            // The RESUME DISPOSITION: a throw-in drives the delegate's throw(),
+            // anything else its next() WITH the sent value, which is how
+            // g.send(x) reaches a delegated generator at all.
+            if (isThrowIn(sent)) { st = pyDelegThrow(d, sent.v) }
+            else { st = pyDelegStep(d, sent) }
+        }
+        return st.value
+    }
+    // Hand ONE delegated value out. If the generator is CLOSED while parked here the
+    // exit record arrives on the resume value, and CPython closes the delegate at
+    // exactly that point - so the delegate's finally clauses run BEFORE the signal
+    // reaches the yield from's own.
+    function pyYieldDeleg(run, val, d) {
+        var s = anytype
+        s = doYieldRaw(run, val)
+        if (isExitIn(s)) { pyDelegClose(d); throw {__genExit: true} }
+        return s
+    }
+    function doYield(isFrom, v) {
+        var run = genRuns[genRuns.length - 1]
+        if (run == undefined) { fail("yield outside a generator") }
+        if (isFrom) { return doYieldFrom(run, v) }
+        var sent = anytype
+        sent = doYieldRaw(run, v)
+        if (isExitIn(sent)) { throw {__genExit: true} }
+        // g.throw(exc) raises an ORDINARY Python exception here, so the body's own
+        // except arms may take it.
+        if (isThrowIn(sent)) { pyRaise(sent.v) }
+        return sent
     }
     // Is this in-flight throw a generator SUSPENSION rather than a Python
     // exception? Every host-level try in this file has to ask, because the
@@ -6970,6 +7080,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (name == "__bases__") { return hasOwn(o, "__bases") ? o.__bases.slice(0) : [] }
             var cv = clsFind(o, name)
             if (cv != null) { return cv }
+            // A method the TYPE OBJECT itself carries - dict.fromkeys.
+            var bcm = pyBuiltinClsMethod(o, name)
+            if (bcm != null) { return bcm }
             // The builtin exception constructor, reachable as Base.__init__(self, ...).
             if (name == "__init__" && clsIsSub(o, hostGlobals["BaseException"])) { return pyExcInitFn() }
             fail("AttributeError: type object '" + o.__name + "' has no attribute '" + name + "'")

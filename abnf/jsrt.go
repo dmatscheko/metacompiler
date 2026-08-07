@@ -3389,8 +3389,26 @@ func (rt *jsrt) pyString(v interface{}) string {
 		}
 		return rt.toString(v)
 	default:
+		if isCallable(v) {
+			return rt.pyFuncRender(v)
+		}
 		return rt.toString(v)
 	}
+}
+
+// pyFuncRender is how a FUNCTION prints. CPython says <function fn at 0x...>; the
+// address is its own and cannot be matched, so it is left off rather than
+// invented - the same rule pyIterName's <map object> line above follows. Without
+// it this half and the native binary printed the C floor's [function] while the
+// interpreter half printed the function's METAJS SOURCE TEXT, a live halves
+// divergence. The name comes from rt.pyFuncNames, the side table js_pyfnname
+// fills; CPython calls an unnamed one <lambda>, and so does every engine here.
+// docs/todo.md 1.8.
+func (rt *jsrt) pyFuncRender(v interface{}) string {
+	if n, ok := rt.pyFuncNames[v]; ok {
+		return "<function " + n + ">"
+	}
+	return "<function <lambda>>"
 }
 
 // csString renders a value for C# style string concatenation: a null operand
@@ -11421,6 +11439,19 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			arr.elems = out
 			return 0
 		},
+		// The value a `raise` actually raises. `raise SomeClass` names a CLASS, and
+		// CPython instantiates it with no arguments; anything else is raised as it
+		// stands. Without this the compiled halves threw the class OBJECT, which no
+		// except clause matches, so `raise ValueError` aborted the process with
+		// "uncaught exception" while the interpreter half - which has the same line
+		// inside makeRaise - caught it. docs/todo.md 1.7. g.throw(SomeClass)
+		// instantiates the same way (pyMethodCall's throw arm).
+		"js_pyraiseval": func(a []uint64) uint64 {
+			if _, ok := pyClassObj(u(a[0])); ok {
+				return w(rt.callPyValue(u(a[0]), nil, jsUndef))
+			}
+			return a[0]
+		},
 		// The type test of an except clause. It is isinstance, PLUS the one thing an
 		// except clause has to answer that isinstance must not: this subset lets a
 		// program raise a value that is no class instance at all (raise "boom"), and
@@ -12347,6 +12378,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		"js_pyhasattr": func(a []uint64) uint64 {
 			return boolH(rt.pyHasAttr(u(a[0]), rt.toString(u(a[1]))))
+		},
+		// vars(o) IS o.__dict__ - CPython's own definition. It was bound in NO
+		// engine while the attribute worked in all three. docs/todo.md 1.8.
+		"js_pyvars": func(a []uint64) uint64 {
+			return w(rt.pyGetAttr(u(a[0]), "__dict__"))
 		},
 		"js_pysetattr3": func(a []uint64) uint64 {
 			args := rt.argArray(u(a[0]))
@@ -13859,6 +13895,10 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 		}
 		rt.fail("'%s' object has no attribute '%s'", rt.toString(cls.props["__name"]), name)
 	}
+	// A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
+	if m, ok := rt.pyBuiltinClsMethod(obj, name); ok {
+		return m
+	}
 	if name == "__name__" {
 		// A synthetic class object for a BUILTIN type (what type(3) hands out)
 		// carries only its name, and a closure carries none of its own - the name
@@ -14030,6 +14070,11 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 			if len(args) > 0 {
 				tv = args[0]
 			}
+			// g.throw(SomeClass) instantiates it, exactly as `raise SomeClass`
+			// does (js_pyraiseval, docs/todo.md 1.7).
+			if _, isCls := pyClassObj(tv); isCls {
+				tv = rt.callPyValue(tv, nil, jsUndef)
+			}
 			return rt.pyGenValue(g.throwInto(rt, tv))
 		case "close":
 			// CPython's generator.close() answers None, not a {value, done}
@@ -14037,6 +14082,10 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 			g.closeBody(rt)
 			return jsUndef
 		}
+	}
+	// A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
+	if m, ok := rt.pyBuiltinClsMethod(target, name); ok {
+		return rt.call(m, jsUndef, args)
 	}
 	if cls, ok := pyClassObj(target); ok {
 		if m, found := pyLookup(cls, name); found {
@@ -14313,6 +14362,55 @@ func (rt *jsrt) pyKwArg(kw interface{}, name string) interface{} {
 		}
 	}
 	return jsUndef
+}
+
+// pyBuiltinClsName answers the name of a BUILTIN type object (what
+// js_pybuiltincls hands out: a __name and nothing else) and "" for anything
+// else, a user class object included - those carry a __mro and go through
+// pyLookup.
+func pyBuiltinClsName(v interface{}) string {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return ""
+	}
+	if _, isCls := o.props["__mro"]; isCls {
+		return ""
+	}
+	n, _ := o.props["__name"].(string)
+	return n
+}
+
+// pyBuiltinClsMethod is the method surface a builtin TYPE OBJECT itself carries -
+// only dict.fromkeys so far, and it is the reason this exists at all. Its
+// RECEIVER is the type rather than an instance, so it reaches neither the dict
+// dispatcher nor a class MRO, and each of the three engines resolves such a
+// receiver in an arm of its own. Both the mcall path (pyMethodCall) and the value
+// path (pyGetAttr) need it, or it is reachable one way and not the other. Keep in
+// step with pyBuiltinClsMethod in languages/lib/python-rt.metajs and in
+// languages/python-interpreter.abnf. docs/todo.md 1.8.
+func (rt *jsrt) pyBuiltinClsMethod(target interface{}, name string) (interface{}, bool) {
+	if pyBuiltinClsName(target) != "dict" || name != "fromkeys" {
+		return nil, false
+	}
+	return jsHostFunc("dict.fromkeys", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return rt.pyDictFromKeys(argAt(args, 0), argAt(args, 1))
+	}), true
+}
+
+// dict.fromkeys(iterable[, value]): a fresh dict mapping every element of the
+// iterable to the same value, None by default.
+func (rt *jsrt) pyDictFromKeys(ks, dv interface{}) interface{} {
+	keys, vals := &jsArray{}, &jsArray{}
+	for _, k := range rt.pyElemsOf(ks) {
+		if i := rt.pyDictFind(keys, k); i >= 0 {
+			vals.elems[i] = dv
+			continue
+		}
+		dictAppend(keys, vals, k, dv)
+	}
+	return &jsObject{props: map[string]interface{}{
+		"__dict": true, "keys": keys, "vals": vals,
+	}}
 }
 
 // ----- Python dict and set methods - docs/todo.md 1.3 -----
