@@ -970,6 +970,65 @@ function js_pylen(v) {
 // Double is NOT a "Double". Swift's emitter handles its own enum and class names
 // through the descriptor walk at the bottom, which is where `x is MyType` lands.
 // js_is_type is SHARED - lib/runtime.metajs, via the rtkIsChar/rtkIsArr hooks.
+//
+// js_swis is what the emitter actually calls for `is` / `as?` / `as!`
+// (docs/todo.md 1.2): the two facts above are not a Swift specification, they are
+// the shared probe predating the float box. swiftc 6.1.2 says `3.0 is Double` and
+// `3 is Int`, and this half answered the reverse of both; `true is Bool` was false
+// as well, because the shared probe's boolean arm spells the Java/Kotlin name
+// `Boolean`. The value model carries the answer already - a float box is a Double,
+// the same box at style 3 is a Float, a plain integral number or a sized box is an
+// integer of the width the box names - so it is answered here and every other name
+// falls through to js_is_type unchanged.
+//
+// ONE RESIDUE, and it is the value model rather than this test: `Int` and `Int64`
+// are the same width and signedness here and normalise to the same
+// representation, so `8 as Int64 is Int` answers true where swiftc says false.
+// Twins: swIsNamed in languages/swift-interpreter.abnf, js_swis in
+// abnf/jsrtswift.go.
+function swIsTyOpt(t) {
+    if (t.length == 0) { return false }
+    var c = t.charAt(t.length - 1)
+    return c == "?" || c == "!"
+}
+function swStripTyOpt(t) {
+    var s = t
+    while (swIsTyOpt(s)) { s = s.substring(0, s.length - 1) }
+    return s
+}
+function swStripAngleTy(s) {
+    var i = 0
+    while (i < s.length) {
+        if (s.charAt(i) == "<") { return s.substring(0, i) }
+        i = i + 1
+    }
+    return s
+}
+function js_swis(v, tname) {
+    var t0 = swStripAngleTy(tname)
+    var opt = swIsTyOpt(t0)
+    var t = swStripTyOpt(t0)
+    var bits = swAdoptWidth(t)
+    var isD = t == "Double"
+    var isF = t == "Float"
+    var isB = t == "Bool"
+    if (bits == 0 && !isD && !isF && !isB) { return js_is_type(v, tname) }
+    if (v === undefined || v === null) { return opt }
+    if (isB) { return typeof v == "boolean" }
+    // BOTH BOXES ANSWER `typeof v == "number"` in this half - they are floor tags
+    // 13 and 14, not objects the way the interpreter's are - so the box tests have
+    // to come FIRST. Written the other way round, a sized box past 2^53 answered
+    // `is Double` true here and false under llvm.Run: a halves divergence that
+    // only the native leg of a probe can see.
+    if (floIs(v)) { return swIsF32(v) ? isF : isD }
+    if (sintIs(v)) { return sintWidth(v) == bits && sintUns(v) === swAdoptUns(t) }
+    if (typeof v != "number") { return false }
+    if (isD) { return Math.floor(v) != v }
+    if (isF) { return false }
+    // A plain number is a signed 64 bit Int, and only an integral one is an Int at
+    // all - a fraction that reached here unboxed is a Double.
+    return Math.floor(v) == v && bits == 64 && !swAdoptUns(t)
+}
 
 // Java/C# +: string concat, 32 bit add for two int values, float add otherwise.
 // swift-to-llvm-ir.abnf emits it for &+ (Swift's wrapping add) AND for its own
@@ -1355,23 +1414,150 @@ function js_swadoptlike(old, v, ty) {
     return v
 }
 
-// `let a: [Double] = [3, 4]`: the annotation types the ELEMENTS, so a[0] / 2 is
-// 1.5. `[[Double]]` nests - a bracketed element type walks one level deeper.
-function js_swadoptarr(v, ty) {
-    if (ty == "") { return v }
-    if (!rtIsArr(v)) { return v }
-    var inner = ""
-    if (ty.charAt(0) == "[" && ty.charAt(ty.length - 1) == "]") {
-        inner = ty.substring(1, ty.length - 1)
-    }
+// The STRUCTURAL declared type (docs/todo.md 1.3). `let a: [Double] = [3, 4]`
+// types the array's ELEMENTS, so a[0] / 2 is 1.5; so does a dictionary's VALUE
+// type (`[String: Double]`), a tuple's element types (`(Double, Int)`) and an
+// Optional annotation (`Double?`), each of which answered 1 before because only
+// the array form was walked. The walk is over the annotation TEXT, brackets and
+// all, and recurses on the three containers, so `[String: [Double]]` falls out of
+// the same arms. A leaf this does not recognise adopts nothing, so a user type, a
+// generic and a function type all pass through untouched.
+//
+// Twins: swAdoptDeep in languages/swift-interpreter.abnf and js_swadoptdeep in
+// abnf/jsrtswift.go.
+
+// The top-level occurrences of one separator, ignoring anything nested inside
+// brackets, parentheses or angle brackets: `[String: Double]` splits on its own
+// colon and `[String: [Int: Double]]` still splits on the outer one.
+function swTySplit(s, sep) {
     var out = []
+    var depth = 0
+    var start = 0
     var i = 0
-    while (i < v.length) {
-        if (inner == "") { out.push(js_swadopt(v[i], ty)) }
-        else { out.push(js_swadoptarr(v[i], inner)) }
+    while (i < s.length) {
+        var ch = s.charAt(i)
+        if (ch == "[" || ch == "(" || ch == "<") { depth = depth + 1 }
+        else if (ch == "]" || ch == ")" || ch == ">") { depth = depth - 1 }
+        else if (ch == sep && depth == 0) { out.push(s.substring(start, i)); start = i + 1 }
         i = i + 1
     }
+    out.push(s.substring(start, s.length))
     return out
+}
+// One tuple element's TYPE, with a `label:` prefix dropped: the element of
+// `(x: Double, y: Int)` is written `x:Double` and the type is what follows the
+// top-level colon. An element that is itself a dictionary keeps its own colon,
+// which is nested and therefore invisible to swTySplit.
+function swTyElem(s) {
+    var parts = swTySplit(s, ":")
+    return swTyTrim(parts[parts.length - 1])
+}
+function swTyTrim(s) {
+    var a = 0
+    var b = s.length
+    while (a < b && (s.charAt(a) == " " || s.charAt(a) == "\t")) { a = a + 1 }
+    while (b > a && (s.charAt(b - 1) == " " || s.charAt(b - 1) == "\t")) { b = b - 1 }
+    return s.substring(a, b)
+}
+// Whether an argument can be passed to a parameter of declared type t, for
+// OVERLOAD SELECTION only. It is NOT the dynamic type test: selection sees the
+// argument BEFORE the declared type adopts it, so an untyped integer literal is
+// still a plain number at a `Double` parameter and Swift converts it. The shared
+// js_is_type gets that wrong in both directions since Swift's Double became a box
+// - it answered "an integral number" for `Double`, so `f(3.0)` chose the `Int`
+// overload, and it has no arm for the name `Bool` at all, so a `Bool` overload was
+// never selectable and the dispatcher fell back to its first entry. The
+// interpreter's swArgFits has said this since 8ff0999; this half had not, which is
+// a live halves divergence --cross never reached. Twin: swArgFits in
+// languages/swift-interpreter.abnf.
+// A property/element read that cannot abort, for the write-site ADOPTION only:
+// the value a write is about to overwrite, or undefined when there is none.
+//
+// The emitter used to lower this as sw_safeget, `js_get` behind a nil/typeof
+// guard, and that had a run-vs-native divergence NO GATE CAN SEE: abnf/jsrt.go's
+// getMember has an ADDITIVE arm that answers a {__dict, keys, vals} handle's own
+// entries by key, and the C floor's js_get does not - it reads the object's
+// properties, where a dictionary keeps nothing. So `var d: [String: Double];
+// d["a"] = 3` adopted under llvm.Run and NOT in the native binary, and the same
+// program printed 1.5 one way and 1 the other. Answering the dict arm here, in
+// layer 2 and in the Go twin, makes the two agree by construction.
+//
+// An ARRAY still falls to the ordinary indexed read, which is what the array
+// element write adopts through. Twin: js_swsafeget in abnf/jsrtswift.go.
+function js_swsafeget(o, k) {
+    if (o === undefined || o === null) { return undefined }
+    if (typeof o != "object") { return undefined }
+    if (rtIsDictObj(o)) {
+        var i = rtDictFind(o["keys"], k)
+        return i < 0 ? undefined : o["vals"][i]
+    }
+    return o[k]
+}
+
+function js_swfits(v, ty) {
+    var t = swStripTyOpt(swStripAngleTy(ty))
+    if (t == "Double" || t == "Float") { return floIs(v) || typeof v == "number" }
+    if (t == "Bool") { return typeof v == "boolean" }
+    if (swAdoptWidth(t) != 0) {
+        if (floIs(v)) { return false }
+        return sintIs(v) || (typeof v == "number" && Math.floor(v) == v)
+    }
+    return js_is_type(v, ty)
+}
+
+function js_swadoptdeep(v, ty0) {
+    if (ty0 == "") { return v }
+    if (v === undefined || v === null) { return v }
+    // The fast path: a plain type NAME is the overwhelming majority of the sites
+    // this serves (every declared parameter, return type and stored property), and
+    // it must not pay for the container walk's string work.
+    var c0 = ty0.charAt(0)
+    var cN = ty0.charAt(ty0.length - 1)
+    if (c0 != "[" && c0 != "(" && cN != "?" && cN != "!") { return js_swadopt(v, ty0) }
+    var ty = swStripTyOpt(swTyTrim(ty0))
+    if (ty.length < 2) { return js_swadopt(v, ty) }
+    var last = ty.charAt(ty.length - 1)
+    var inner = ty.substring(1, ty.length - 1)
+    if (ty.charAt(0) == "[" && last == "]") {
+        var kv = swTySplit(inner, ":")
+        if (kv.length == 2) { return swAdoptDictVals(v, swTyTrim(kv[1])) }
+        return swAdoptElems(v, inner)
+    }
+    if (ty.charAt(0) == "(" && last == ")") { return swAdoptTupEls(v, swTySplit(inner, ",")) }
+    return js_swadopt(v, ty)
+}
+function swAdoptElems(v, ety) {
+    if (!rtIsArr(v)) { return v }
+    var out = []
+    var i = 0
+    while (i < v.length) { out.push(js_swadoptdeep(v[i], ety)); i = i + 1 }
+    return out
+}
+// A dictionary is keys/vals parallel arrays in all three engines, so only the
+// vals array is rewritten - the keys keep their own types and their order.
+function swAdoptDictVals(v, vty) {
+    if (!rtIsDictObj(v)) { return v }
+    var vs = v["vals"]
+    var i = 0
+    while (i < vs.length) { vs[i] = js_swadoptdeep(vs[i], vty); i = i + 1 }
+    return v
+}
+// A tuple's slots are "0".."n-1", and a LABELLED element additionally lives under
+// its label - both copies have to adopt, or `t.lo` and `t.0` disagree.
+function swAdoptTupEls(v, tys) {
+    if (v === undefined || v === null) { return v }
+    if (typeof v != "object") { return v }
+    var n = v["__tuple"]
+    if (n === undefined || n === null) { return v }
+    var lbls = v["__tlabels"]
+    var i = 0
+    while (i < n && i < tys.length) {
+        var nv = js_swadoptdeep(v["" + i], swTyElem(tys[i]))
+        v["" + i] = nv
+        if (lbls !== undefined && lbls !== null && i < lbls.length && lbls[i] != "") { v[lbls[i]] = nv }
+        i = i + 1
+    }
+    return v
 }
 
 // abs/max/min, Double-aware: a boxed operand keeps its box (abs(-1.5) is 1.5, not

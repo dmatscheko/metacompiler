@@ -490,8 +490,12 @@ TupleTypeLabel = Id [ Id ] ":" ;
 // type of a STORED PROPERTY adopt it, exactly as a `let`/`var` annotation does.
 // Every consumer of AnnType (makeFun, makeProp, makeComputed, makeSubscript,
 // ProtoFunc) skips or reads the record; see swAdoptTy.
-AnnType     = LabelledTupleType | IntAnnType | Type ;
-LabelledTupleType <~~ push({tlabels: takeAll()}) ~~>
+AnnType     = LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | Type ;
+// The captured TEXT rides along beside the labels: a labelled tuple type declares
+// its element types too, and `let t: (x: Double, y: Int) = (3, 4)` has to hold 3.0
+// exactly as the anonymous `(Double, Int)` form does. swAdoptDeep strips each
+// element's `label:` prefix.
+LabelledTupleType <~~ push({tlabels: takeAll(), atype: stripWs(up.in)}) ~~>
             = "(" LtNamed { "," LtElem } ")" NotArrow ;
 LtElem      = LtNamed | LtAnon ;
 LtNamed     = Id <~~ push(up.in) ~~> ":" Type ;
@@ -653,20 +657,32 @@ DeclBind    <~~ push(makeDecl(takeAll())) ~~>
 // spelled longest-first (PEG first-match: "Int" would otherwise match the front of
 // "Int8") and closed with a KwEnd so a user type called `Int8Box` is not read as
 // `Int8`.
-DeclAnnType = LabelledTupleType | IntAnnType | ArrAnnType | Type ;
+DeclAnnType = LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | Type ;
 IntAnnType  <~~ push({itype: up.in}) ~~> = NumTypeName NotTypeSuffix ;
 NumTypeName = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
               | "UInt64" | "UInt32" | "UInt16" | "UInt8" | "UInt"
               | "Double" | "Float" ) KwEnd ;
-// `let a: [Double] = [3, 4]`: the annotation types the array's ELEMENTS, so the
-// untyped literals in it adopt Double and a[0] / 2 is 1.5 rather than 1. NESTING
-// is recognised too - `[[Double]]` types the elements of the inner arrays, and the
-// captured text is what says how deep to walk. A DICTIONARY value type
-// (`[String: Double]`) still falls through to Type and adopts nothing; see the
-// report at docs/todo.md 1.1.
-ArrAnnType  = "[" ArrElemTy "]" NotTypeSuffix ;
-ArrElemTy   <~~ push({atype: stripWs(up.in)}) ~~> = NestedElemTy ;
-NestedElemTy = NumTypeName | "[" NestedElemTy "]" ;
+// The STRUCTURAL annotation forms, whose captured TEXT is walked by swAdoptDeep:
+// an array `[Double]`, a dictionary `[String: Double]`, a tuple `(Double, Int)`
+// and any of them nested, each carrying its numeric leaf down to the untyped
+// literals inside the initializer. Only the array form adopted before, so
+// `let m: [String: Double] = ["a": 3]` gave m["a"]! / 2 == 1 where swiftc 6.1.2
+// says 1.5 (docs/todo.md 1.3).
+//
+// OptNumAnnType is the same rule for `var op: Double? = 1`: an Optional IS its
+// value in this model, so the annotation adopts exactly as the bare name does.
+// It is a rule of its own because IntAnnType must keep declining a composed type
+// (NotTypeSuffix) - that guard is what stops `Int?` consuming only the `Int` and
+// leaving the `?` to break the NEXT statement.
+//
+// The inner types are the general Type: only the top level has to be a container
+// here, and swAdoptDeep ignores every leaf it does not recognise.
+OptNumAnnType <~~ push({atype: stripWs(up.in)}) ~~>
+            = NumTypeName NoSpace ( "?" | "!" ) NotTypeSuffix ;
+DeepAnnType <~~ push({atype: stripWs(up.in)}) ~~>
+            = DeepTyCore { NoSpace ( "?" | "!" ) } NotTypeSuffix ;
+DeepTyCore  = "[" Type [ ":" Type ] "]"
+            | "(" TupleTypeElem { "," TupleTypeElem } ")" NotArrow ;
 // `Int?`, `Int!`, `Int.Type`, `Int & P`: the annotation is a COMPOSED type, not the
 // bare integer type, so IntAnnType has to decline it and let the general Type read
 // it. Without this the optional forms consumed only the `Int` and left the `?`
@@ -774,8 +790,21 @@ PackRepeat  <~~ push(makePackRepeat(pop())) ~~> = KwRepeat Expression ;
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
 
+// An assignment TARGET is a name followed by field reads, tuple-element reads,
+// force-unwraps and subscripts, in any order: `n.next!.v = 4` and `tp.0 = 3` are
+// both ordinary Swift and neither parsed before (docs/todo.md 1.3) - the whole
+// statement was rejected, in both halves.
+//
+// TForce is spelled with the same NoSpace/NotChar61 guard ForceSfx uses, and the
+// guard is what makes the rule safe: Assignment is tried before Ternary, so
+// without the "no = next" test `a != b` would read as the target `a!` followed by
+// `= b` and silently become an assignment. A `!` here is otherwise a no-op - an
+// Optional IS its value in this model - so it pushes nothing.
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
+            = Id <~~ push(up.in) ~~>
+              { "." Id <~~ push({key: up.in}) ~~> | "." TTupIdx | TForce | TIndex } ;
+TTupIdx     <~~ push({key: up.in}) ~~> = "0"..."9" { "0"..."9" } ;
+TForce      = NoSpace "!" NotChar61 ;
 TIndex      <~~ push({idx: makeIndexKey(takeAll())}) ~~>
             = "[" Expression { "," Expression } "]" ;
 
@@ -1113,11 +1142,18 @@ ShortIdx    <~~ push(makeVarRef("$" + up.in)) ~~>
 // over the defining scope.
 Closure     <~~ push(makeClosure(takeAll())) ~~>
             = "{" [ ClosureSig ] { PoundIfLam | LamStmt } "}" ;
+// A closure's own signature declares types just as a func does, and they adopt the
+// same way: `{ (x: Double) -> Double in x / 2 }` called with 3 has to divide 3.0,
+// and answered 1 while the signature's types were discarded (docs/todo.md 1.3).
+// Both the parameter types and the return type are captured; each is the full
+// annotation text, walked by swAdoptDeep, so `(xs: [Double])` adopts too.
 ClosureSig  <~~ push(makeClosureSig(takeAll())) ~~>
-            = [ CaptureList ] "(" [ ClParam { "," ClParam } ] ")" [ FnEffects ] [ "->" Type ] KwIn
+            = [ CaptureList ] "(" [ ClParam { "," ClParam } ] ")" [ FnEffects ] [ "->" ClRetTy ] KwIn
             | [ CaptureList ] ClParam { "," ClParam } KwIn
             | CaptureList KwIn ;
-ClParam     = Id <~~ push(up.in) ~~> [ ":" Type ] ;
+ClParam     = Id <~~ push(up.in) ~~> [ ":" ClParamTy ] ;
+ClParamTy   <~~ push({ptype: stripWs(up.in)}) ~~> = Type ;
+ClRetTy     <~~ push({rtype: stripWs(up.in)}) ~~> = Type ;
 // { [x, weak y] in ... }: a capture list snapshots the named variables at the
 // moment the closure is created.
 CaptureList <~~ push({caps: takeAll()}) ~~>
@@ -2507,26 +2543,108 @@ KwContinue  = "continue" KwEnd ;
         }
         return v
     }
-    // `let a: [Double] = [3, 4]`: the annotation types the ELEMENTS, so a[0] / 2
-    // is 1.5. `[[Double]]` nests - the element type is itself bracketed, and the
-    // walk goes one level deeper for each pair. A dictionary's value type
-    // (`[String: Double]`) is still not walked (see the report at
-    // docs/todo.md 1.1).
-    function swAdoptArr(v, ty) {
-        if (ty == undefined || ty == null || ty == "") { return v }
+    // ----- The STRUCTURAL declared type (docs/todo.md 1.3) -----
+    //
+    // `let a: [Double] = [3, 4]` types the array's ELEMENTS, so a[0] / 2 is 1.5;
+    // the same is true of a dictionary's VALUES (`[String: Double]`), of a tuple's
+    // elements (`(Double, Int)`) and through an Optional (`Double?`), each of
+    // which answered 1 before because only the array form was walked. So the walk
+    // is written once, over the annotation TEXT, and recurses on the containers -
+    // `[String: [Double]]` and `([Double], Int)` fall out of the same three arms.
+    //
+    // The text is the whole annotation, brackets and all, which is what makes the
+    // recursion uniform (the old contract passed the array's ELEMENT type and had
+    // to re-add a level for nesting). An Optional annotation is stripped rather
+    // than modelled: an Optional IS its value in this model, so `Double?` adopts
+    // exactly as `Double` does. A name this does not recognise adopts nothing,
+    // so a user type, a generic and a function type all pass through untouched.
+    //
+    // Twins: js_swadoptdeep in abnf/jsrtswift.go and in lib/swift-rt.metajs.
+    function swTyStripOpt(t0) {
+        var t = t0
+        while (t.length > 0 && (t.charAt(t.length - 1) == "?" || t.charAt(t.length - 1) == "!")) {
+            t = t.substring(0, t.length - 1)
+        }
+        return t
+    }
+    // The top-level occurrences of one separator, ignoring anything nested inside
+    // brackets, parentheses or angle brackets: `[String: Double]` splits on its
+    // own colon and `[String: [Int: Double]]` still splits on the outer one.
+    function swTySplit(s, sep) {
+        var out = []
+        var depth = 0
+        var start = 0
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch == "[" || ch == "(" || ch == "<") { depth = depth + 1 }
+            else if (ch == "]" || ch == ")" || ch == ">") { depth = depth - 1 }
+            else if (ch == sep && depth == 0) { out.push(s.substring(start, i)); start = i + 1 }
+        }
+        out.push(s.substring(start, s.length))
+        return out
+    }
+    // One tuple element's TYPE, with a `label:` prefix dropped: the element of
+    // `(x: Double, y: Int)` is written `x:Double` and the type is what follows the
+    // top-level colon. An element that is itself a dictionary keeps its own colon,
+    // which is nested and therefore invisible to swTySplit.
+    function swTyElem(s) {
+        var parts = swTySplit(s, ":")
+        return swTyTrim(parts[parts.length - 1])
+    }
+    function swTyTrim(s) {
+        var a = 0
+        var b = s.length
+        while (a < b && (s.charAt(a) == " " || s.charAt(a) == "\t")) { a = a + 1 }
+        while (b > a && (s.charAt(b - 1) == " " || s.charAt(b - 1) == "\t")) { b = b - 1 }
+        return s.substring(a, b)
+    }
+    function swAdoptDeep(v, ty0) {
+        if (ty0 == undefined || ty0 == null || ty0 == "") { return v }
         if (v === null || v === undefined) { return v }
+        // The fast path: a plain type NAME is the overwhelming majority of the
+        // sites this serves (every declared parameter, return type and stored
+        // property), and it must not pay for the container walk's string work.
+        var c0 = ty0.charAt(0)
+        var cN = ty0.charAt(ty0.length - 1)
+        if (c0 != "[" && c0 != "(" && cN != "?" && cN != "!") { return swAdoptTy(v, ty0) }
+        var ty = swTyStripOpt(swTyTrim(ty0))
+        if (ty.length < 2) { return swAdoptTy(v, ty) }
+        var last = ty.charAt(ty.length - 1)
+        var inner = ty.substring(1, ty.length - 1)
+        if (ty.charAt(0) == "[" && last == "]") {
+            var kv = swTySplit(inner, ":")
+            if (kv.length == 2) { return swAdoptDictVals(v, swTyTrim(kv[1])) }
+            return swAdoptElems(v, inner)
+        }
+        if (ty.charAt(0) == "(" && last == ")") { return swAdoptTupEls(v, swTySplit(inner, ",")) }
+        return swAdoptTy(v, ty)
+    }
+    function swAdoptElems(v, ety) {
         if (typeof v != "object") { return v }
         if (!Array.isArray(v)) { return v }
-        var inner = ""
-        if (ty.charAt(0) == "[" && ty.charAt(ty.length - 1) == "]") {
-            inner = ty.substring(1, ty.length - 1)
-        }
         var out = []
-        for (var i = 0; i < v.length; i++) {
-            if (inner == "") { out.push(swAdoptTy(v[i], ty)) }
-            else { out.push(swAdoptArr(v[i], inner)) }
-        }
+        for (var i = 0; i < v.length; i++) { out.push(swAdoptDeep(v[i], ety)) }
         return out
+    }
+    // A dictionary is keys/vals parallel arrays in all three engines, so only the
+    // vals array is rewritten - the keys keep their own types and their order.
+    function swAdoptDictVals(v, vty) {
+        if (!isDict(v)) { return v }
+        var vs = v.vals
+        for (var i = 0; i < vs.length; i++) { vs[i] = swAdoptDeep(vs[i], vty) }
+        return v
+    }
+    // A tuple's slots are "0".."n-1", and a LABELLED element additionally lives
+    // under its label - both copies have to adopt, or `t.lo` and `t.0` disagree.
+    function swAdoptTupEls(v, tys) {
+        if (!isTupleVal(v)) { return v }
+        var lbls = hasOwn(v, "__tlabels") ? v.__tlabels : null
+        for (var i = 0; i < v.__tuple && i < tys.length; i++) {
+            var nv = swAdoptDeep(v["" + i], swTyElem(tys[i]))
+            scopePut(v, "" + i, nv)
+            if (lbls != null && i < lbls.length && lbls[i] != "") { scopePut(v, lbls[i], nv) }
+        }
+        return v
     }
     function swlen(v) {
         if (isDict(v)) { return v.keys.length }
@@ -2806,7 +2924,58 @@ KwContinue  = "continue" KwEnd ;
             if (t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1) }
             return t == "Any" || t == "Error" || v.__etype === t
         }
-        return rtIsType(v, tname)
+        return swIsNamed(v, tname)
+    }
+    // The DYNAMIC type test, for the names this value model answers itself.
+    //
+    // The shared rtIsType predates the {__flo} box and gets every numeric name in
+    // Swift wrong, in both directions: it says "an integral number" for Int AND for
+    // Double, so `3 is Double` was TRUE and `3.0 is Double` was FALSE - swiftc 6.1.2
+    // says exactly the reverse - and `3 is Float` was true as well. It also has no
+    // arm for the name `Bool` at all (its boolean arm spells the Java/Kotlin name
+    // `Boolean`), so `true is Bool` was false. Since swIsType also drives `as?` and
+    // `as!`, every one of those was a wrong VALUE, not just a wrong flag.
+    //
+    // The value model carries the answer already (docs/working-on-this-project.md
+    // 7.15): a {__flo} box is a Double, the same box with __f32 is a Float, a plain
+    // integral number or a {__sz} box is an integer of the width the box names.
+    //
+    // ONE RESIDUE, and it is the value model rather than this test: `Int` and
+    // `Int64` are the same width and signedness here (swIntWidthOf maps both to
+    // 64/signed) and normalise to the same representation, so `8 as Int64 is Int`
+    // answers true where swiftc says false, and `42 is Int64` likewise. Telling
+    // them apart needs a nominal type on the value, which nothing else in this
+    // front end would use. Every other row settled against swiftc 6.1.2.
+    //
+    // Non-numeric names fall through to the shared probe unchanged, so a String, an
+    // Array, a user class and `Any` behave exactly as before. Twins: js_swis in
+    // abnf/jsrtswift.go and in languages/lib/swift-rt.metajs.
+    function swIsNamed(v, tname) {
+        var t = swBaseTy(tname)
+        var opt = tname.length > 0 &&
+                  (tname.charAt(tname.length - 1) == "?" || tname.charAt(tname.length - 1) == "!")
+        var iw = swIntWidthOf(t)
+        var isD = t == "Double"
+        var isF = t == "Float"
+        var isB = t == "Bool"
+        if (iw == null && !isD && !isF && !isB) { return rtIsType(v, tname) }
+        // The width as two plain values, so the sized-box arm below is reachable
+        // for a Double name too (where it must answer false, not read a null).
+        var bits = iw == null ? 0 : iw.w
+        var uns = iw == null ? false : iw.u
+        if (v === null || v === undefined) { return opt }
+        if (isB) { return typeof v == "boolean" }
+        // The box tests come first in all three engines: in the COMPILED halves a
+        // float box and a sized box are floor tags, and `typeof` answers "number"
+        // for both, so an isD arm placed above them claimed a big sized integer.
+        if (isFlo(v)) { return isF32(v) ? isF : isD }
+        if (szIs(v)) { return szWidth(v, v) == bits && szUns(v, v) === uns }
+        if (typeof v != "number") { return false }
+        if (isD) { return Math.floor(v) != v }
+        if (isF) { return false }
+        // A plain number is a signed 64 bit Int, and only an integral one is an Int
+        // at all - a fraction that reached here unboxed is a Double.
+        return Math.floor(v) == v && bits == 64 && !uns
     }
     function makeCastOne(t, op, tname) {
         if (op == "is") { return function() { return swIsType(t(), tname) } }
@@ -3365,14 +3534,21 @@ KwContinue  = "continue" KwEnd ;
     }
 
     // The closure signature: an optional capture list and the parameter names.
+    // The signature's declared types ride alongside its names: ptypes[i] is the
+    // annotation of names[i] (or "" when it has none) and rtype is the closure's
+    // return type. Both adopt at call time - see makeClosure.
     function makeClosureSig(items) {
         var caps = []
         var names = []
+        var ptypes = []
+        var rtype = ""
         for (var i = 0; i < items.length; i++) {
-            if (typeof items[i] == "string") { names.push(items[i]) }
+            if (typeof items[i] == "string") { names.push(items[i]); ptypes.push("") }
             else if (items[i].caps != undefined) { caps = items[i].caps }
+            else if (items[i].ptype != undefined && ptypes.length > 0) { ptypes[ptypes.length - 1] = items[i].ptype }
+            else if (items[i].rtype != undefined) { rtype = items[i].rtype }
         }
-        return {csig: true, caps: caps, cparams: names}
+        return {csig: true, caps: caps, cparams: names, cptypes: ptypes, crtype: rtype}
     }
     // An @autoclosure argument is passed as a zero-argument closure over the caller's
     // scope, so the expression only runs if the callee actually calls it.
@@ -3394,10 +3570,14 @@ KwContinue  = "continue" KwEnd ;
     // arguments under the shorthand names $0..$3.
     function makeClosure(items) {
         var params = []
+        var ptypes = []
+        var rtype = ""
         var caps = []
         var start = 0
         if (items.length > 0 && items[0] != undefined && items[0].csig != undefined) {
             params = items[0].cparams
+            ptypes = items[0].cptypes
+            rtype = items[0].crtype
             caps = items[0].caps
             start = 1
         }
@@ -3416,7 +3596,8 @@ KwContinue  = "continue" KwEnd ;
                 scopes = captured.slice(0)
                 scopes.push({})
                 for (var i = 0; i < params.length; i++) {
-                    declVar(params[i], i < args.length ? args[i] : undefined)
+                    var av = i < args.length ? args[i] : undefined
+                    declVar(params[i], swAdoptDeep(av, i < ptypes.length ? ptypes[i] : ""))
                 }
                 if (noSig) {
                     for (var sh = 0; sh < 4; sh++) { declVar("$" + sh, sh < args.length ? args[sh] : undefined) }
@@ -3437,7 +3618,9 @@ KwContinue  = "continue" KwEnd ;
                     }
                 }
                 scopes = saved
-                return last
+                // The declared RETURN type adopts, exactly as a func's does:
+                // `{ (x: Int) -> Double in 3 }` answers 3.0, not 3.
+                return swAdoptDeep(last, rtype)
             }
         }
     }
@@ -3575,7 +3758,7 @@ KwContinue  = "continue" KwEnd ;
             // called `g(3)` binds 3.0, so `x / 2` is 1.5 and not the 1 an Int
             // division gave. The memberwise initializer runs through here too, which
             // is how `T(a: 3)` fills a `var a: Double` field.
-            if (prm.adopt != undefined && prm.adopt != "") { vals.push(swAdoptTy(v, prm.adopt)) }
+            if (prm.adopt != undefined && prm.adopt != "") { vals.push(swAdoptDeep(v, prm.adopt)) }
             else { vals.push(v) }
         }
         return {vals: vals, boxes: boxes}
@@ -3696,7 +3879,19 @@ KwContinue  = "continue" KwEnd ;
         if (o === null || o === undefined) { return undefined }
         if (typeof o != "object") { return undefined }
         if (isDict(o)) { var di = dictFind(o, k); return di < 0 ? undefined : o.vals[di] }
-        return hasOwn(o, k) ? o[k] : undefined
+        if (hasOwn(o, k)) { return o[k] }
+        return swObsSlot(o, k)
+    }
+    // An OBSERVED stored property (`var p: Double = 0 { didSet {} }`) does not live
+    // under its own name - observedAccessors keeps it under `__v_<name>` and puts a
+    // generated getter/setter in front. So the write-site adoption looked the slot
+    // up, found nothing, and left `o.p = 3` an Int where swiftc says 3.0
+    // (docs/todo.md 1.3). The BACKING STORE is read rather than the getter,
+    // deliberately: a real computed `get` may have side effects, and adoption must
+    // not run one to decide a type.
+    function swObsSlot(o, k) {
+        var st = "__v_" + k
+        return hasOwn(o, st) ? o[st] : undefined
     }
     // The same read for an UNQUALIFIED name that is not a local: an implicit
     // `self.x = v` inside a member body. sw_kget makes the compiler half look here
@@ -3705,7 +3900,8 @@ KwContinue  = "continue" KwEnd ;
         var slf = findThis()
         if (slf == undefined || slf === null) { return undefined }
         if (typeof slf != "object") { return undefined }
-        return hasOwn(slf, name) ? slf[name] : undefined
+        if (hasOwn(slf, name)) { return slf[name] }
+        return swObsSlot(slf, name)
     }
     // Assignment understands plain names, object properties (self.x), array
     // elements and dictionary entries.
@@ -3777,13 +3973,17 @@ KwContinue  = "continue" KwEnd ;
         var name = items[0]
         var labels = null
         var k = 1
-        if (items[k] != undefined && items[k].tlabels != undefined) { labels = items[k].tlabels; k++ }
+        var elemTy = ""
+        if (items[k] != undefined && items[k].tlabels != undefined) {
+            labels = items[k].tlabels
+            if (items[k].atype != undefined) { elemTy = items[k].atype }
+            k++
+        }
         // `var u: UInt8 = 250`: the DECLARED width goes on the value, so the
         // arithmetic that follows wraps at 8 bits rather than at 64.
         var iw = null
         var isDoubleTy = false
         var isFloatTy = false
-        var elemTy = ""
         if (items[k] != undefined && items[k].itype != undefined) {
             iw = swIntWidthOf(items[k].itype)
             isFloatTy = items[k].itype == "Float"
@@ -3793,11 +3993,16 @@ KwContinue  = "continue" KwEnd ;
         }
         else if (items[k] != undefined && items[k].atype != undefined) { elemTy = items[k].atype; k++ }
         var init = items[k]
-        // `let a: [Double] = [3, 4]`: the ELEMENTS adopt, so a[0] / 2 is 1.5.
+        // `let a: [Double] = [3, 4]`, `["a": 3]`, `(3, 4)`: the structural
+        // annotation carries its numeric leaves down, so a[0] / 2 is 1.5.
         if (elemTy != "") {
             if (init == undefined) { return function() { declVar(name, null) } }
             var eT = elemTy
-            return function() { declVar(name, swAdoptArr(swCopy(init()), eT)) }
+            var lb = labels
+            return function() {
+                var dv = swAdoptDeep(swCopy(init()), eT)
+                declVar(name, lb == null ? dv : relabelTuple(dv, lb))
+            }
         }
         // `let d: Double = 3` holds 3.0, so d / 2 is 1.5 and print(d) writes "3.0".
         // The annotation is the only thing that says so: the initializer is an
@@ -4032,7 +4237,7 @@ KwContinue  = "continue" KwEnd ;
     // reassigned local keeps its first type.
     function relabelRet(f, v) {
         if (f.rtype == undefined || f.rtype == null || f.rtype == "") { return relabelRetT(f, v) }
-        return relabelRetT(f, swAdoptTy(v, f.rtype))
+        return relabelRetT(f, swAdoptDeep(v, f.rtype))
     }
     function relabelRetT(f, v) {
         if (f.rlabels == undefined || f.rlabels == null) { return v }
@@ -4043,8 +4248,15 @@ KwContinue  = "continue" KwEnd ;
         var k = 2
         var labels = null
         var rty = ""
-        if (items[k] != undefined && items[k].tlabels != undefined) { labels = items[k].tlabels; k++ }
+        if (items[k] != undefined && items[k].tlabels != undefined) {
+            labels = items[k].tlabels
+            if (items[k].atype != undefined) { rty = items[k].atype }
+            k++
+        }
         else if (items[k] != undefined && items[k].itype != undefined) { rty = items[k].itype; k++ }
+        // A STRUCTURAL return type - `-> [Double]`, `-> (x: Double, y: Int)`,
+        // `-> Double?` - adopts its numeric leaves exactly as the scalar name does.
+        else if (items[k] != undefined && items[k].atype != undefined) { rty = items[k].atype; k++ }
         return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty}
     }
     function makeInit(items) {
@@ -4107,9 +4319,17 @@ KwContinue  = "continue" KwEnd ;
     // a {__flo} BOX - it answers false for the box a real Double is, so EVERY
     // `Double` overload was rejected and the dispatcher fell back to the first entry.
     // That is how `MB(a: 3, b: 4)` ran `init(_ x: Double)` and answered 3.
+    // An untyped integer literal is also an acceptable argument at EVERY sized
+    // integer parameter (`f(3)` picks `func f(_ x: UInt8)`), and the shared probe
+    // cannot say so - it answers by the box, which the literal does not carry yet.
+    // `Bool` is here for the opposite reason: the shared probe spells the name
+    // `Boolean`, so a `Bool` overload was never selectable at all and the
+    // dispatcher fell back to its first entry.
     function swArgFits(v, t0) {
         var t = swBaseTy(t0)
         if (t == "Double" || t == "Float") { return isFlo(v) || typeof v == "number" }
+        if (t == "Bool") { return typeof v == "boolean" }
+        if (swIntWidthOf(t) != null) { return szIs(v) || (typeof v == "number" && Math.floor(v) == v) }
         return rtIsType(v, t0)
     }
     function overloadFits(params, args) {
@@ -4298,8 +4518,12 @@ KwContinue  = "continue" KwEnd ;
     function makeProp(items) {
         var k = 1
         var ty = ""
-        if (items[k] != undefined && items[k].tlabels != undefined) { k++ }
+        if (items[k] != undefined && items[k].tlabels != undefined) {
+            if (items[k].atype != undefined) { ty = items[k].atype }
+            k++
+        }
         else if (items[k] != undefined && items[k].itype != undefined) { ty = items[k].itype; k++ }
+        else if (items[k] != undefined && items[k].atype != undefined) { ty = items[k].atype; k++ }
         if (items[k] != undefined) { return {prop: items[0], ty: ty, hasInit: true, init: items[k]} }
         return {prop: items[0], ty: ty, hasInit: false, init: null}
     }
@@ -4340,10 +4564,17 @@ KwContinue  = "continue" KwEnd ;
         var willP = "newValue"
         var did = null
         var didP = "oldValue"
+        // The declared numeric type of an OBSERVED stored property. It was dropped
+        // here, so `var p: Double = 0 { didSet {} }` held the Int 0 and `o.p = 3`
+        // stayed an Int: the storage lives under __v_p, so neither the default nor
+        // the later write had anything to adopt from (docs/todo.md 1.3).
+        var pty = ""
         for (var i = 1; i < items.length; i++) {
             var it = items[i]
             if (it == undefined) { continue }
             if (it.pdefault != undefined) { dflt = it.pdefault; continue }
+            if (it.itype != undefined) { pty = it.itype; continue }
+            if (it.atype != undefined) { pty = it.atype; continue }
             if (it.acc == undefined) { continue }
             var a = it.acc
             if (a.kind == "get" || a.kind == "_read") { get = a.body }
@@ -4352,7 +4583,8 @@ KwContinue  = "continue" KwEnd ;
             else if (a.kind == "didSet") { did = a.body; if (a.param != null) { didP = a.param } }
         }
         return {cprop: {name: name, get: get, set: set, setP: setP, will: will, willP: willP,
-                        did: did, didP: didP, observed: (will != null || did != null), dflt: dflt}}
+                        did: did, didP: didP, observed: (will != null || did != null),
+                        dflt: dflt, ty: pty}}
     }
     // The generated getter/setter of an observed stored property: the value lives
     // under __v_<name>, willSet sees the incoming value and didSet the previous one.
@@ -4463,7 +4695,7 @@ KwContinue  = "continue" KwEnd ;
                 if (isStatic) { mem.statComps.push(cp) } else {
                     mem.comps.push(cp)
                     if (cp.observed) {
-                        var of = {name: cp.name, store: "__v_" + cp.name, ty: "", hasInit: cp.dflt != null, init: cp.dflt}
+                        var of = {name: cp.name, store: "__v_" + cp.name, ty: cp.ty, hasInit: cp.dflt != null, init: cp.dflt}
                         mem.fields.push(of)
                         if (of.hasInit) { mem.initProps.push(of) }
                     }
@@ -4634,7 +4866,7 @@ KwContinue  = "continue" KwEnd ;
                 }
                 for (var p = 0; p < mem.initProps.length; p++) {
                     scopePut(self, mem.initProps[p].store,
-                             swAdoptTy(mem.initProps[p].init(), mem.initProps[p].ty))
+                             swAdoptDeep(mem.initProps[p].init(), mem.initProps[p].ty))
                 }
                 scopes = saved
             }

@@ -31,6 +31,35 @@ struct Boxed { var v: Double; var w: UInt8 }
 let dbls: [Double] = [3, 4]
 let ints: [Int] = [3, 4]
 let nestedD: [[Double]] = [[3, 4]]
+// The STRUCTURAL declared type (docs/todo.md 1.3): a dictionary's VALUE type, a
+// tuple's element types and an Optional annotation each carry the numeric leaf
+// down to the untyped literal, exactly as `[Double]` does. All three answered 1
+// in every engine where swiftc 6.1.2 says 1.5.
+let dmap: [String: Double] = ["a": 3]
+let dtup: (Double, Int) = (3, 4)
+let dltup: (x: Double, y: Int) = (3, 4)
+var dopt: Double? = 3
+// An OBSERVED stored property keeps its value under a hidden name, so neither its
+// default nor a later write had a declared type to adopt from.
+struct Obs {
+    var p: Double = 3 { didSet { } }
+    mutating func bump() { p = 3 }
+}
+class ObsC {
+    var p: Double = 3 { didSet { } }
+    func bump() { p = 3 }
+}
+// A LINKED write through a force-unwrap, and a write to a tuple ELEMENT: neither
+// parsed at all before - the whole statement was rejected in both halves.
+class Node { var v: Double = 0; var next: Node? = nil }
+// OVERLOAD SELECTION by declared parameter type. The compiler half tested the
+// argument with the shared js_is_type, which says "an integral number" for
+// `Double` and has no arm for `Bool`, so ovl(3.0) ran the Int body and ovl(true)
+// fell back to the first candidate - wrong in that half only.
+func ovl(_ x: Int) -> String { return "int" }
+func ovl(_ x: Double) -> String { return "dbl" }
+func ovl(_ x: String) -> String { return "str" }
+func ovl(_ x: Bool) -> String { return "bool" }
 
 // ----- functions: labelled parameters, early return, recursion -----
 
@@ -658,6 +687,58 @@ func main() {
     wr[0] = 3
     check("adopt-write", wv / 2 == 1.5 && wb.v / 2 == 1.5 && wb.w &+ 10 == 4 && wr[0] / 2 == 1.5)
     check("adopt-nested", nestedD[0][0] / 2 == 1.5)
+    // The STRUCTURAL declared type and the two write sites it did not reach.
+    check("adopt-dict", dmap["a"]! / 2 == 1.5)
+    check("adopt-tuple", dtup.0 / 2 == 1.5 && dtup.1 / 2 == 2)
+    // A LABELLED tuple type declares element types too, and both copies of a
+    // labelled element (the index and the label) have to hold the adopted value.
+    check("adopt-tuple-labelled", dltup.x / 2 == 1.5 && dltup.0 / 2 == 1.5 && dltup.y / 2 == 2)
+    check("adopt-optional", dopt! / 2 == 1.5)
+    check("adopt-closure-param", { (x: Double) -> Double in x / 2 }(3) == 1.5)
+    check("adopt-closure-ret", { (x: Int) -> Double in 3 }(1) / 2 == 1.5)
+    var ob = Obs()
+    let obInit = ob.p / 2
+    ob.p = 3
+    let obOut = ob.p / 2
+    ob.bump()
+    let obIn = ob.p / 2
+    check("adopt-observed", obInit == 1.5 && obOut == 1.5 && obIn == 1.5)
+    let obc = ObsC()
+    obc.p = 3
+    let obcOut = obc.p / 2
+    obc.bump()
+    check("adopt-observed-class", obcOut == 1.5 && obc.p / 2 == 1.5)
+    // `n.next!.v = 4` and `tp.0 = 3` did not PARSE in either half.
+    let nd = Node()
+    nd.next = Node()
+    nd.next!.v = 4
+    var wtup: (Double, Int) = (1, 2)
+    wtup.0 = 3
+    check("write-chain-and-tuple", nd.next!.v / 2 == 2.0 && wtup.0 / 2 == 1.5)
+    // The `!` in a target must not turn `a != b` into an assignment: the force-unwrap
+    // is guarded by a "no = next" test, exactly as the expression-level one is.
+    let ne1 = 1
+    check("target-bang-not-noteq", ne1 != 2)
+
+    // ----- `is` / `as?` answer by the VALUE, not by "is it a number"
+    // (docs/todo.md 1.2) -----
+    // The shared probe predates the float box: it said "an integral number" for Int
+    // AND for Double, so `3 is Double` was TRUE and `3.0 is Double` FALSE - the
+    // reverse of swiftc 6.1.2 - and had no arm for the name `Bool` at all. The `?`
+    // rows go through the same test, so each was a wrong VALUE and not just a flag.
+    let f32v: Float = 2.5
+    let u8v: UInt8 = 7
+    let anys: [Any] = [3.0, 3, "s", true, f32v, u8v]
+    check("is-double", (anys[0] is Double) && !(anys[0] is Int) && !(anys[0] is Float))
+    check("is-int", (anys[1] is Int) && !(anys[1] is Double) && !(anys[1] is Float))
+    check("is-string", (anys[2] is String) && !(anys[2] is Int))
+    check("is-bool", (anys[3] is Bool) && !(anys[3] is Int) && !(anys[3] is Double))
+    check("is-float", (anys[4] is Float) && !(anys[4] is Double) && !(anys[4] is Int))
+    check("is-sized", (anys[5] is UInt8) && !(anys[5] is Int) && !(anys[5] is Int8))
+    check("as-double", (anys[0] as? Double) != nil && (anys[1] as? Double) == nil)
+    check("as-int", (anys[1] as? Int) != nil && (anys[0] as? Int) == nil)
+    check("overload-by-type", ovl(3) == "int" && ovl(3.0) == "dbl"
+                              && ovl("s") == "str" && ovl(true) == "bool")
 
     // ----- a subclass with no init of its own INHERITS one (docs/todo.md 1.3) -----
     // A class never gets a memberwise initializer - that is structs - and the empty

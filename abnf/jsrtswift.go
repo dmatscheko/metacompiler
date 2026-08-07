@@ -359,32 +359,242 @@ func init() {
 			ty, _ := u(a[2]).(string)
 			return w(swAdoptLike(u(a[0]), u(a[1]), ty))
 		}
-		// `let a: [Double] = [3, 4]`: the annotation types the ELEMENTS, so
-		// a[0] / 2 is 1.5. `[[Double]]` nests - a bracketed element type walks
-		// one level deeper.
-		var swAdoptArr func(v interface{}, ty string) interface{}
-		swAdoptArr = func(v interface{}, ty string) interface{} {
-			arr, ok := v.(*jsArray)
-			if !ok || ty == "" {
+		// The STRUCTURAL declared type (docs/todo.md 1.3). `let a: [Double] =
+		// [3, 4]` types the array's ELEMENTS, so a[0] / 2 is 1.5; so does a
+		// dictionary's VALUE type (`[String: Double]`), a tuple's element types
+		// (`(Double, Int)`) and an Optional annotation (`Double?`), each of which
+		// answered 1 before because only the array form was walked. The walk is
+		// over the annotation TEXT, brackets and all, and recurses on the three
+		// containers, so `[String: [Double]]` falls out of the same arms. A leaf
+		// this does not recognise adopts nothing, so a user type, a generic and a
+		// function type all pass through untouched.
+		//
+		// Twins: swAdoptDeep in languages/swift-interpreter.abnf and
+		// js_swadoptdeep in languages/lib/swift-rt.metajs.
+		var swAdoptDeep func(v interface{}, ty string) interface{}
+		swAdoptDeep = func(v interface{}, ty0 string) interface{} {
+			if ty0 == "" || isNullish(v) {
 				return v
 			}
-			inner := ""
-			if ty[0] == '[' && ty[len(ty)-1] == ']' {
-				inner = ty[1 : len(ty)-1]
-			}
-			out := make([]interface{}, len(arr.elems))
-			for i, e := range arr.elems {
-				if inner == "" {
-					out[i] = swAdopt(e, ty)
-				} else {
-					out[i] = swAdoptArr(e, inner)
+			// The fast path: a plain type NAME is the overwhelming majority of
+			// the sites this serves (every declared parameter, return type and
+			// stored property), and it must not pay for the container walk.
+			if c := ty0[0]; c != '[' && c != '(' {
+				if e := ty0[len(ty0)-1]; e != '?' && e != '!' {
+					return swAdopt(v, ty0)
 				}
 			}
-			return &jsArray{elems: out}
+			ty := strings.TrimRight(strings.TrimSpace(ty0), "?!")
+			if ty == "" {
+				return v
+			}
+			if len(ty) >= 2 && ty[0] == '[' && ty[len(ty)-1] == ']' {
+				inner := ty[1 : len(ty)-1]
+				if kv := swTySplit(inner, ':'); len(kv) == 2 {
+					// A dictionary is {__dict, keys, vals} here too: only the
+					// vals array is rewritten, in place - the keys keep their
+					// own types and their insertion order.
+					o, ok := v.(*jsObject)
+					if !ok {
+						return v
+					}
+					if tag, has := o.props["__dict"].(bool); !has || !tag {
+						return v
+					}
+					vals, ok := o.props["vals"].(*jsArray)
+					if !ok {
+						return v
+					}
+					vt := strings.TrimSpace(kv[1])
+					for i, e := range vals.elems {
+						vals.elems[i] = swAdoptDeep(e, vt)
+					}
+					return v
+				}
+				arr, ok := v.(*jsArray)
+				if !ok {
+					return v
+				}
+				out := make([]interface{}, len(arr.elems))
+				for i, e := range arr.elems {
+					out[i] = swAdoptDeep(e, inner)
+				}
+				return &jsArray{elems: out}
+			}
+			if len(ty) >= 2 && ty[0] == '(' && ty[len(ty)-1] == ')' {
+				o, ok := v.(*jsObject)
+				if !ok {
+					return v
+				}
+				n, ok := swNumProp(o, "__tuple")
+				if !ok {
+					return v
+				}
+				tys := swTySplit(ty[1:len(ty)-1], ',')
+				// A LABELLED element lives under its label as well as under its
+				// index, and both copies have to adopt or t.lo and t.0 disagree.
+				lbls := swStrArray(o.props["__tlabels"])
+				for i := 0; i < n && i < len(tys); i++ {
+					nv := swAdoptDeep(o.props[itoa(i)], swTyElem(tys[i]))
+					o.set(itoa(i), nv)
+					if i < len(lbls) && lbls[i] != "" {
+						o.set(lbls[i], nv)
+					}
+				}
+				return v
+			}
+			return swAdopt(v, ty)
 		}
-		m["js_swadoptarr"] = func(a []uint64) uint64 {
+		// A property/element read that cannot abort, for the write-site ADOPTION
+		// only: the value a write is about to overwrite, or undefined when there
+		// is none.
+		//
+		// The emitter used to lower this as sw_safeget, `js_get` behind a
+		// nil/typeof guard, and that had a run-vs-native divergence NO GATE CAN
+		// SEE: getMember above has an ADDITIVE arm that answers a {__dict, keys,
+		// vals} handle's own entries by key, and the C floor's js_get does not -
+		// it reads the object's properties, where a dictionary keeps nothing. So
+		// `var d: [String: Double]; d["a"] = 3` adopted under llvm.Run and NOT in
+		// the native binary. Answering the dict arm here and in layer 2 makes the
+		// two agree by construction. An ARRAY still falls to the ordinary indexed
+		// read. Twin: js_swsafeget in languages/lib/swift-rt.metajs.
+		getM := m["js_get"]
+		m["js_swsafeget"] = func(a []uint64) uint64 {
+			o := u(a[0])
+			if isNullish(o) {
+				return jsHUndefined
+			}
+			if keys, vals, isDict := dictParts(o); isDict {
+				if i := rt.dictMemberIdx(keys, u(a[1])); i >= 0 {
+					return w(vals.elems[i])
+				}
+				return jsHUndefined
+			}
+			if rt.typeOf(o) != "object" {
+				return jsHUndefined
+			}
+			return getM(a)
+		}
+		baseIs := m["js_is_type"]
+		// js_swfits(v, T) is whether an argument can be passed to a parameter of
+		// declared type T, for OVERLOAD SELECTION only. It is NOT the dynamic type
+		// test: selection sees the argument BEFORE the declared type adopts it, so
+		// an untyped integer literal is still a plain number at a `Double`
+		// parameter and Swift converts it. The shared js_is_type gets that wrong in
+		// both directions since Swift's Double became a box - it answered "an
+		// integral number" for `Double`, so `f(3.0)` chose the `Int` overload, and
+		// it has no arm for the name `Bool` at all, so a `Bool` overload was never
+		// selectable and the dispatcher fell back to its first entry. The
+		// interpreter's swArgFits has said this since 8ff0999; this half had not,
+		// which is a live halves divergence --cross never reached. Twins:
+		// swArgFits in languages/swift-interpreter.abnf and js_swfits in
+		// languages/lib/swift-rt.metajs.
+		m["js_swfits"] = func(a []uint64) uint64 {
+			ty := rt.toString(u(a[1]))
+			t := ty
+			if i := strings.IndexByte(t, '<'); i >= 0 {
+				t = t[:i]
+			}
+			t = strings.TrimRight(t, "?!")
+			v := u(a[0])
+			if t == "Double" || t == "Float" {
+				if swIsFlo(v) {
+					return boolH(true)
+				}
+				_, isNum := v.(float64)
+				return boolH(isNum)
+			}
+			if t == "Bool" {
+				_, ok := v.(bool)
+				return boolH(ok)
+			}
+			if _, _, isInt := swAdoptWidth(t); isInt {
+				if swIsFlo(v) {
+					return boolH(false)
+				}
+				if giIsInt(v) {
+					return boolH(true)
+				}
+				n, ok := v.(float64)
+				return boolH(ok && math.Floor(n) == n)
+			}
+			return baseIs(a)
+		}
+		m["js_swadoptdeep"] = func(a []uint64) uint64 {
 			ty, _ := u(a[1]).(string)
-			return w(swAdoptArr(u(a[0]), ty))
+			return w(swAdoptDeep(u(a[0]), ty))
+		}
+		// js_swis(v, T) is `v is T` / `v as? T` / `v as! T` (docs/todo.md 1.2).
+		//
+		// The shared js_is_type predates the float box and gets every numeric name
+		// in Swift wrong in BOTH directions: it answers "an integral number" for
+		// Int and for Double alike, so `3 is Double` was TRUE and `3.0 is Double`
+		// was FALSE - swiftc 6.1.2 says exactly the reverse - and `3 is Float` was
+		// true too. It also has no arm for the name `Bool` (its boolean arm spells
+		// the Java/Kotlin name `Boolean`), so `true is Bool` was false. Since the
+		// same probe drives `as?`, each of those was a wrong VALUE and not merely a
+		// wrong flag.
+		//
+		// The value model already carries the answer: a jsJFlo is a Double, the
+		// same box at style floJavaF is a Float, a plain integral float64 or a
+		// jsGInt is an integer of the width the box names. Every non-numeric,
+		// non-Bool name falls through to the shared probe unchanged.
+		//
+		// ONE RESIDUE, and it is the value model rather than this test: `Int` and
+		// `Int64` are the same width and signedness here and normalise to the same
+		// representation, so `8 as Int64 is Int` answers true where swiftc says
+		// false. Telling them apart needs a nominal type on the value that nothing
+		// else in this front end would use. Twins: swIsNamed in
+		// languages/swift-interpreter.abnf and js_swis in lib/swift-rt.metajs.
+		m["js_swis"] = func(a []uint64) uint64 {
+			tname := rt.toString(u(a[1]))
+			t := tname
+			if i := strings.IndexByte(t, '<'); i >= 0 {
+				t = t[:i]
+			}
+			opt := strings.HasSuffix(t, "?") || strings.HasSuffix(t, "!")
+			t = strings.TrimRight(t, "?!")
+			bits, uns, isInt := swAdoptWidth(t)
+			isD := t == "Double"
+			isF := t == "Float"
+			isB := t == "Bool"
+			if !isInt && !isD && !isF && !isB {
+				return baseIs(a)
+			}
+			v := u(a[0])
+			if isNullish(v) {
+				return boolH(opt)
+			}
+			if isB {
+				_, ok := v.(bool)
+				return boolH(ok)
+			}
+			// The box tests come FIRST in all three engines: in the compiled
+			// halves a float box and a sized box are floor tags and `typeof`
+			// answers "number" for both, so an isD arm above them claimed a big
+			// sized integer.
+			if swIsFlo(v) {
+				if swIsF32(v) {
+					return boolH(isF)
+				}
+				return boolH(isD)
+			}
+			if gi, ok := v.(jsGInt); ok {
+				return boolH(gi.w == bits && gi.u == uns)
+			}
+			n, ok := v.(float64)
+			if !ok {
+				return boolH(false)
+			}
+			if isD {
+				return boolH(math.Floor(n) != n)
+			}
+			if isF {
+				return boolH(false)
+			}
+			// A plain number is a signed 64 bit Int, and only an integral one is
+			// an Int at all - a fraction that reached here unboxed is a Double.
+			return boolH(math.Floor(n) == n && bits == 64 && !uns)
 		}
 		// String(x) / String(describing: x): the text print would have written.
 		m["js_swstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.swDesc(u(a[0]))) }
@@ -1182,6 +1392,38 @@ func swNumProp(o *jsObject, key string) (int, bool) {
 		return 0, false
 	}
 	return int(f), true
+}
+
+// swTySplit splits an annotation's text on the TOP-LEVEL occurrences of one
+// separator, ignoring anything nested inside brackets, parentheses or angle
+// brackets: `[String: Double]` splits on its own colon and `[String: [Int:
+// Double]]` still splits on the outer one. Twins: swTySplit in
+// languages/swift-interpreter.abnf, swTySplit in languages/lib/swift-rt.metajs.
+func swTySplit(s string, sep byte) []string {
+	out := []string{}
+	depth := 0
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '[' || c == '(' || c == '<':
+			depth++
+		case c == ']' || c == ')' || c == '>':
+			depth--
+		case c == sep && depth == 0:
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	return append(out, s[start:])
+}
+
+// swTyElem is one tuple element's TYPE, with a `label:` prefix dropped: the
+// element of `(x: Double, y: Int)` is written `x:Double` and the type is what
+// follows the top-level colon. An element that is itself a dictionary keeps its
+// own colon, which is nested and therefore invisible to swTySplit.
+func swTyElem(s string) string {
+	parts := swTySplit(s, ':')
+	return strings.TrimSpace(parts[len(parts)-1])
 }
 
 func swStrArray(v interface{}) []string {
