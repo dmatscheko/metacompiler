@@ -1988,10 +1988,6 @@ func (rt *jsrt) goCopyVal(v interface{}) interface{} {
 	return out
 }
 
-// goMethod finds `name` on a Go struct value: on its own descriptor, or promoted
-// from an embedded struct field. It answers the method, the receiver to call it
-// with (a COPY for a value receiver, the struct itself for a pointer receiver) and
-// whether anything was found at all.
 // goPromField finds the field `key` PROMOTED from an embedded struct of o, BREADTH
 // FIRST, which is Go's own rule: the shallowest depth wins and only a tie at that
 // depth is ambiguous. Only ONE level was searched at the js_gofield site (and in the
@@ -2068,6 +2064,10 @@ func (rt *jsrt) goPromDeep(o *jsObject, key string, maxd int) (interface{}, bool
 	return nil, false
 }
 
+// goMethod finds `name` on a Go struct value: on its own descriptor, or promoted
+// from an embedded struct field. It answers the method, the receiver to call it
+// with (a COPY for a value receiver, the struct itself for a pointer receiver) and
+// whether anything was found at all.
 func (rt *jsrt) goMethod(v interface{}, name string) (interface{}, interface{}, bool) {
 	cls := goClassOf(v)
 	if cls == nil {
